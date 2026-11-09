@@ -2,9 +2,10 @@
 
 - id: REQ-01M4NF3QG2V6RKM3ZFDDNTZVJK
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M3TD4N309J3Y6YMWWR2GTQAA
 - order: 130
+- dropped_reason: K2 是知识台账的校验线（锚点重挂 EA + 重跑幸存守卫）；台账 / spec 知识层已不是当前交付物的前置（lift 不消费台账）。需要时从 git 恢复。
 
 ## 现状（可复算）
 `pnpm tools ledger report` 的"摘要欠账"那一行 = **276 条在场 `reference` `bin` 锚缺 `len`+`sha256`**

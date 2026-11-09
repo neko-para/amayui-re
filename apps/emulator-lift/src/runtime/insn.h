@@ -58,8 +58,15 @@ enum class Op : std::uint16_t {
     //  ↑ x87 到此为止（`exec.cpp` 的 `opIsX87` 用这段连续区间判定；新 x87 形态必须加在这条线以上）
 
     // ---- MMX / SSE（整数打包；子语义见 `PkOp`）----
-    // ★ 语料里只有 MMX 形态（≈0.94k 条）；SSE 浮点形态语料没有 ⇒ 不解码 ⇒ `Op::Other` 响亮失败。
+    // ★ 语料里只有 MMX 形态（≈0.94k 条），所以这里登记的是"整数 lane"语义，不是浮点。
     Packed,
+
+    // ---- SSE 标量单精度 + 128 位搬移 / 位运算（子语义见 `SseOp`）----
+    // ★ 与 `Packed` **分开一族**：浮点形态带 NaN / 舍入 / (MXCSR 的) invalid 语义，
+    //   塞进 `PkOp` 的整数语义里必然把"按 lane 的按位 / 整数"与"标量浮点"混成一套。
+    // ★ 语料里这 14 条形态都是 0 条（`.lst` 里 `xmm<数字>` 操作数 = 0），但 A2 的别名表登记了它们；
+    //   真撞到时按 Intel SDM 执行（不是 `Op::Other` 响亮失败）。
+    Sse,
 
     Other,  // 解出来了但没实现 —— 执行必须响亮失败
 };
@@ -82,6 +89,20 @@ enum class PkOp : std::uint8_t {
     Pmullw, Pmulhw, Pmulhuw, Pmuludq, Pmaddwd,
     Psllw, Pslld, Psllq, Psrlw, Psrld, Psrlq, Psraw, Psrad,
     Ems,
+};
+
+// `Op::Sse` 的子语义（Intel SDM Vol.2 的家族名；只登记 A2 别名表里那 14 条形态）。
+// ★ 语义边界（逐条在 `exec_fpu.cpp` 的 `execSse()` 旁写清 SDM 依据）：
+//   · 标量形态（movss / cvtsi2ss / addss · subss · mulss · divss）只改低 32 位，
+//     **高 96 位原样保留**；唯一例外是 `movss xmm, m32` —— 高 96 位**清 0**。
+//   · `comiss` / `ucomiss` 写 EFLAGS（不是 x87 的 C0..C3）。
+enum class SseOp : std::uint8_t {
+    None = 0,
+    Movaps, Movups, Movss, Movdqa, Movdqu,  // 搬移（对齐要求见 execSse）
+    Xorps,                                  // 128 位**按位**异或（不是浮点运算）
+    Cvtsi2ss, Cvttss2si,                    // 转换（cvttss2si 是**截断**）
+    Addss, Subss, Mulss, Divss,             // 标量四则
+    Comiss, Ucomiss,                        // 标量比较 → EFLAGS
 };
 
 // 条件码（Jcc / Setcc / Cmovcc）。别名（jz/je、jnb/jae/jnc …）**在解码时**归一到这里。
@@ -139,6 +160,7 @@ struct Insn {
     bool operand16 = false;    // 0x66 前缀
     Op op = Op::Invalid;
     PkOp pk = PkOp::None;      // `Op::Packed` 的子语义
+    SseOp sse = SseOp::None;   // `Op::Sse` 的子语义
     Cond cc = Cond::None;      // Jcc / Setcc / Cmovcc 用
     Operand ops[3];
     const char* mnemonic = ""; // 规范助记符（静态字符串，与 .lst 对照用）

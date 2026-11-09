@@ -2,8 +2,9 @@
 
 - id: REQ-01M5SZ3M7GCR0M23RSYBD7GEA5
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M3TC7BK0J9TBQKGGWQ35A3NR
+- dropped_reason: apps/emulator-cxx 自 2026-11 起是冻结的对照实现（AGENTS §11：新功能不落那里）。本单剩余项都是「按 spec 补 cxx 实现 / 对齐」，前提已不存在；当前实现线 = apps/emulator-lift（执行原机器码 + 自写平台夹具）。需要时从 git 恢复重开。
 
 ## 判据
 

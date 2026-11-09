@@ -2,8 +2,9 @@
 
 - id: REQ-01M4N44X62K02PJYKD5NRACK75
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M48DJ3PK48CXQXAV1M3EEQNR
+- dropped_reason: 引擎逆向 / shape 普查这条线的产物是知识台账与 spec 的机器本体，消费者是「按 spec 重写」的实现线；该实现线已冻结，lift 的真源是拆壳件字节 + .lst（apps/emulator-lift/README.md §1/§2.1），不消费这两层。lift 需要的取证按 M1/M2/M4 的具体单做，不再走常态化普查。需要时从 git 恢复。
 - tags: [engine emulator]
 
 ## 为什么有这张单

@@ -125,6 +125,10 @@ node -e "import('./tools/lift.mjs').then(m=>{const r=m.corpusReport();for(const 
 
 ### 2.3 SSE（`.lst` 里 0 个形态 / 0 条）
 
+★ **2026-11-09 后续**：下表是**审计当时**的状态快照。这 14 条现已按 Intel SDM 实现（`Op::Sse` +
+`execSse()`：标量高位语义 / `comiss`-`ucomiss` 的 EFLAGS / NaN 与 MXCSR.IE），守卫 = `conformance`
+的 24 条 `sse-*`（`ctest -R conformance`）。"未实现（响亮失败）"一列**不再成立**；本表保留为历史。
+
 `.lst` **没有任何 SSE 浮点形态**（判据：全文件 `xmm<数字>` 操作数 = 0）。但别名表
 （`src/runtime/mnemonics.cpp`）为了 A2 的可读性登记了下面这些拼写；它们在解码器里**没有** `Op`
 ⇒ 执行到就是 `unimplemented()`（**响亮失败**，打印 EA + 助记符 + 字节 + 寄存器 + guest 返回栈后停机），

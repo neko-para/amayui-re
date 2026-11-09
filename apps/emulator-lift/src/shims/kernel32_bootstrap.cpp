@@ -396,9 +396,19 @@ void shimWideCharToMultiByte(X86& cpu, ShimCall& call) {
 //   `(void)type` 丢弃 ⇒ 任何 info type 都按 CT_CTYPE1 **假装成功**。现在：
 //     · 位值按 MSDN 的 C1_* 表（见下）；
 //     · `dwInfoType != CT_CTYPE1` ⇒ 0 + ERROR_INVALID_PARAMETER(87) + 一行日志（⛔ 不静默）。
-// ⛔ 本单的边界（后续单 REQ-01M6KH7EPPNWJDHPDQ6REV2RRM）：**只保证 ASCII**。非 ASCII 的
-//   CT_CTYPE1 需要一张字符类表（CP932 假名 / 全角 / CJK），这里**不拿 `w < 0x80` 猜**：
-//   非 ASCII 位给 0 + 一次日志，真正的分类等那张表进来再做。
+// ★ 2026-11-09 收口 REQ-01M6KH7EPPNWJDHPDQ6REV2RRM（单 1）：非 ASCII 的 CT_CTYPE1 用
+//   **文档化的区间规则**（不生成表、不新增依赖；ASCII 仍走 `ctype1Ascii()` 逐位不变）：
+//     · U+3000                        ⇒ SPACE|BLANK；
+//     · U+3001–U+303F（日文标点）      ⇒ PUNCT（整段按标点；U+303F 是区间上界）；
+//     · U+3040–U+309F（平假名）· U+30A0–U+30FF（片假名）· U+4E00–U+9FFF（CJK）⇒ ALPHA
+//       （这些是 Lo 类字母；按本单口径**不**区分 UPPER/LOWER）；
+//     · U+FF01–U+FF5E（全角 ASCII 变体）⇒ 按 `w - 0xFEE0` 映回 ASCII 后套 `ctype1Ascii()`
+//       （全角 Ａ 与 ASCII 'A' 同一位、全角 ０ 得 DIGIT|XDIGIT、全角 ！ 得 PUNCT）；
+//     · U+FF61–U+FF65（半角 ｡｢｣､･，Unicode 类别 Po）⇒ PUNCT；
+//       U+FF66–U+FF9F（半角假名字母 / 浊音点）⇒ ALPHA。
+//   区间外码位 ⇒ 该字符 0 位 + 一次日志（显式缺口；⛔ 不拿属性现算冒充 Windows 分类）。
+//   `dwInfoType != CT_CTYPE1`（CT_CTYPE2/3）仍是 0 + 87 + 日志：没有可复现 / 可再校验的
+//   Bidi_Class / C3 来源，且引擎 / CRT 不消费 ⇒ **明确不做**（合同见 contracts-win32.md）。
 // ---------------------------------------------------------------------------------------
 // CT_CTYPE1 位（MSDN「GetStringTypeW」的 C1_* 表）
 constexpr std::uint16_t kC1Upper = 0x0001;
@@ -412,11 +422,11 @@ constexpr std::uint16_t kC1Xdigit = 0x0080;
 constexpr std::uint16_t kC1Alpha = 0x0100;
 
 constexpr std::uint32_t kCtCtype1 = 1;  // CT_CTYPE1
-constexpr std::uint32_t kCtCtype2 = 2;  // CT_CTYPE2（未实现）
-constexpr std::uint32_t kCtCtype3 = 4;  // CT_CTYPE3（未实现）
+constexpr std::uint32_t kCtCtype2 = 2;  // CT_CTYPE2（明确不做：见上）
+constexpr std::uint32_t kCtCtype3 = 4;  // CT_CTYPE3（明确不做：见上）
 
 // ASCII 的 CT_CTYPE1 位（0x00–0x7F）。文档给的定点：'A'=0x0181、'a'=0x0182、'G'=0x0101、
-// '0'=0x0084、' '=0x0048、'!'=0x0010。
+// '0'=0x0084、' '=0x0048、'!'=0x0010。★ 本函数是 ASCII 的唯一真源；全角 ASCII 变体也回落到它。
 std::uint16_t ctype1Ascii(std::uint16_t w) {
     if (w < 0x20 || w == 0x7F) {
         // 控制字符（含 NUL / CR / LF / DEL）。TAB 同时是 blank（C99 / Unicode 的 blank = 空格 + TAB）
@@ -429,6 +439,32 @@ std::uint16_t ctype1Ascii(std::uint16_t w) {
     if (w >= 'a' && w <= 'f') return static_cast<std::uint16_t>(kC1Lower | kC1Alpha | kC1Xdigit);
     if (w >= 'g' && w <= 'z') return static_cast<std::uint16_t>(kC1Lower | kC1Alpha);
     return kC1Punct;  // 0x21–0x2F / 0x3A–0x40 / 0x5B–0x60 / 0x7B–0x7E
+}
+
+// 非 ASCII 的 CT_CTYPE1：只做上面点名的区间；返回 false ⇒ 该字符不在覆盖范围内（0 位 + 日志）。
+bool ctype1NonAscii(std::uint16_t w, std::uint16_t* bits) {
+    if (w == 0x3000) {  // 全角空格
+        *bits = static_cast<std::uint16_t>(kC1Space | kC1Blank);
+        return true;
+    }
+    if (w >= 0x3001 && w <= 0x303F) {  // 日文标点（U+303F 是区间上界）
+        *bits = kC1Punct;
+        return true;
+    }
+    if ((w >= 0x3040 && w <= 0x309F) || (w >= 0x30A0 && w <= 0x30FF) ||
+        (w >= 0x4E00 && w <= 0x9FFF)) {  // 平假名 / 片假名 / CJK：Lo 类字母
+        *bits = kC1Alpha;
+        return true;
+    }
+    if (w >= 0xFF01 && w <= 0xFF5E) {  // 全角 ASCII 变体：映回 ASCII 后套 ASCII 的位
+        *bits = ctype1Ascii(static_cast<std::uint16_t>(w - 0xFEE0));
+        return true;
+    }
+    if (w >= 0xFF61 && w <= 0xFF9F) {  // 半角片假名：U+FF61–FF65 是 Po 标点，其余是假名字母
+        *bits = (w <= 0xFF65) ? kC1Punct : kC1Alpha;
+        return true;
+    }
+    return false;
 }
 
 void shimGetStringTypeW(X86& cpu, ShimCall& call) {
@@ -462,13 +498,19 @@ void shimGetStringTypeW(X86& cpu, ShimCall& call) {
         count = static_cast<std::uint32_t>(n);
     }
     std::uint32_t unclassified = 0;
+    std::uint16_t first_unclassified = 0;
     for (std::uint32_t i = 0; i < count; ++i) {
         const std::uint16_t w = cpu.mem->rd16(src + i * 2u);
         std::uint16_t flags = 0;
+        bool classified = true;
         if (w < 0x80) {
             flags = ctype1Ascii(w);
         } else {
-            ++unclassified;  // 非 ASCII：见上面的边界（⛔ 不猜）
+            classified = ctype1NonAscii(w, &flags);  // ⛔ 区间外不猜：0 位 + 下面的日志
+        }
+        if (!classified) {
+            if (unclassified == 0) first_unclassified = w;
+            ++unclassified;
         }
         cpu.mem->wr16(dst + i * 2u, flags);
     }
@@ -477,8 +519,8 @@ void shimGetStringTypeW(X86& cpu, ShimCall& call) {
         if (!warned) {
             warned = true;
             shimLog("kernel32", "GetStringTypeW",
-                    "非 ASCII 的 CT_CTYPE1 分类未实现（需要一张字符类表；本次 %u 个字符按 0 位返回）",
-                    unclassified);
+                    "CT_CTYPE1 的区间规则没有覆盖 U+%04X（本次 %u 个字符按 0 位返回）",
+                    static_cast<unsigned>(first_unclassified), unclassified);
         }
     }
     call.result = 1;
@@ -492,15 +534,165 @@ void shimGetStringTypeW(X86& cpu, ShimCall& call) {
 //     · `cchSrc=-1` 扫到 NUL，**含**结尾 0 计数（文档：cchSrc<0 时返回值含结尾 0）；
 //     · `cchDest==0` 是"问大小"（返回同一数值）；缓冲不足 ⇒ 0 + 122；cchDest<0 / lpDestStr=0
 //       而 cchDest>0 ⇒ 0 + 87；
-//     · 未实现的 `dwMapFlags`（SORTKEY / BYTEREV / HIRAGANA / KATAKANA / HALFWIDTH / FULLWIDTH …）
-//       ⇒ 0 + ERROR_INVALID_FLAGS(1008)（⛔ 旧实现静默按"无映射"成功）；LOWERCASE 与 UPPERCASE
-//       同时给是非法组合 ⇒ 同样是 1008。
-// ⛔ 本单的边界（后续单 REQ-01M6KH7HC3ZP3M5RS8EJ3813WC）：只做 ASCII 的大小写；
-//   CP932 假名 / 全角的映射要另一张表。
+//     · 未实现的 `dwMapFlags`（SORTKEY / LINGUISTIC_CASING …）⇒ 0 + ERROR_INVALID_FLAGS(1008)
+//       （⛔ 旧实现静默按"无映射"成功）。
+// ★ 2026-11-09 收口 REQ-01M6KH7HC3ZP3M5RS8EJ3813WC（单 2）：
+//   · HIRAGANA / KATAKANA：假名 1:1 区间（U+3041–U+3096 ⇄ U+30A1–U+30F6，±0x60；
+//     另外 ゝゞゟ ⇄ ヽヾヿ，U+309D–U+309F ⇄ U+30FD–U+30FF，同一偏移）。
+//     ー(U+30FC) / ゛゜(U+3099–309C、U+FF9E/FF9F) 是平假名/片假名**共享**的记号 ⇒ 不动；
+//     ヷヸヹヺ(U+30F7–30FA) 没有预组合平假名 ⇒ 不动；ゔ/ゕ/ゖ(U+3094–3096) 在偏移区间内，自测见 CTest。
+//   · HALFWIDTH / FULLWIDTH：ASCII 部分纯算术（0x20 ⇄ U+3000、0x21–0x7E ⇄ U+FF01–FF5E，±0xFEE0）；
+//     半角片假名 U+FF61–U+FF9F ⇄ 全角用下面那张 **63 项 Unicode 标准 1:1 映射**
+//     （来源：Unicode「Halfwidth and Fullwidth Forms」的兼容映射；逐项列在 kKanaWidth）。
+//     不做 NFC 合成（文档只说 "may"；「は + U+3099」不合成「ば」）。
+//   · 宽度先于假名：文档明说 HIRAGANA 只有配上 FULLWIDTH 才能把**半角**片假名映到平假名；
+//   · BYTEREV 逐 16 位码元反转字节（MSDN 例：0x3450 0x4822 ⇒ 0x5034 0x2248）；
+//   · 文档点名的互斥对（LOWERCASE|UPPERCASE / HIRAGANA|KATAKANA / HALFWIDTH|FULLWIDTH）
+//     ⇒ 0 + 1008；
+//   · SORTKEY 仍**明确不做**：没有可复现 / 可再校验的 NLS 排序权重来源 ⇒ 0 + 1008 + 日志（合同登记）。
 // ---------------------------------------------------------------------------------------
 constexpr std::uint32_t kLcmapLowercase = 0x00000100;
 constexpr std::uint32_t kLcmapUppercase = 0x00000200;
-constexpr std::uint32_t kLcmapDoable = kLcmapLowercase | kLcmapUppercase;
+constexpr std::uint32_t kLcmapSortkey = 0x00000400;  // 明确不做：见上
+constexpr std::uint32_t kLcmapByterev = 0x00000800;
+constexpr std::uint32_t kLcmapHiragana = 0x00100000;
+constexpr std::uint32_t kLcmapKatakana = 0x00200000;
+constexpr std::uint32_t kLcmapHalfwidth = 0x00400000;
+constexpr std::uint32_t kLcmapFullwidth = 0x00800000;
+static_assert(kLcmapSortkey == 0x00000400, "LCMAP_SORTKEY 的 Win32 数值");
+constexpr std::uint32_t kLcmapCaseMask = kLcmapLowercase | kLcmapUppercase;
+constexpr std::uint32_t kLcmapKanaMask = kLcmapHiragana | kLcmapKatakana;
+constexpr std::uint32_t kLcmapWidthMask = kLcmapHalfwidth | kLcmapFullwidth;
+constexpr std::uint32_t kLcmapDoable =
+    kLcmapCaseMask | kLcmapByterev | kLcmapKanaMask | kLcmapWidthMask;
+
+// ---- 假名 / 全半角映射（§2026-11-09 单 2；全部是文档化区间 / 标准 1:1 映射，⛔ 不引入依赖） ----
+
+// 假名区间：U+3041–U+3096 ⇄ U+30A1–U+30F6（±0x60）；ゝゞゟ(U+309D–U+309F) ⇄ ヽヾヿ(U+30FD–U+30FF)。
+// ー(U+30FC) 与组合/独立浊音点（U+3099–U+309C）是**共享**记号 ⇒ 原样；ヷヸヹヺ(U+30F7–30FA) 无平假名形式。
+constexpr std::uint16_t kKanaOffset = 0x60;
+
+std::uint16_t mapKatakanaToHiragana(std::uint16_t w) {
+    if (w >= 0x30A1 && w <= 0x30F6) return static_cast<std::uint16_t>(w - kKanaOffset);
+    if (w >= 0x30FD && w <= 0x30FF) return static_cast<std::uint16_t>(w - kKanaOffset);
+    return w;
+}
+
+std::uint16_t mapHiraganaToKatakana(std::uint16_t w) {
+    if (w >= 0x3041 && w <= 0x3096) return static_cast<std::uint16_t>(w + kKanaOffset);
+    if (w >= 0x309D && w <= 0x309F) return static_cast<std::uint16_t>(w + kKanaOffset);
+    return w;
+}
+
+// 半角片假名 → 全角：Unicode「Halfwidth and Fullwidth Forms」的 63 项 1:1 兼容映射
+// （U+FF61–U+FF9F 全部在内；U+FF9E/FF9F 映到组合浊音点 U+3099/309A）。
+struct KanaWidthPair {
+    std::uint16_t half;
+    std::uint16_t full;
+};
+
+constexpr KanaWidthPair kKanaWidth[] = {
+    {0xFF61, 0x3002},  // ｡ → 。
+    {0xFF62, 0x300C},  // ｢ → 「
+    {0xFF63, 0x300D},  // ｣ → 」
+    {0xFF64, 0x3001},  // ､ → 、
+    {0xFF65, 0x30FB},  // ･ → ・
+    {0xFF66, 0x30F2},  // ｦ → ヲ
+    {0xFF67, 0x30A1},  // ｧ → ァ
+    {0xFF68, 0x30A3},  // ｨ → ィ
+    {0xFF69, 0x30A5},  // ｩ → ゥ
+    {0xFF6A, 0x30A7},  // ｪ → ェ
+    {0xFF6B, 0x30A9},  // ｫ → ォ
+    {0xFF6C, 0x30E3},  // ｬ → ャ
+    {0xFF6D, 0x30E5},  // ｭ → ュ
+    {0xFF6E, 0x30E7},  // ｮ → ョ
+    {0xFF6F, 0x30C3},  // ｯ → ッ
+    {0xFF70, 0x30FC},  // ｰ → ー
+    {0xFF71, 0x30A2},  // ｱ → ア
+    {0xFF72, 0x30A4},  // ｲ → イ
+    {0xFF73, 0x30A6},  // ｳ → ウ
+    {0xFF74, 0x30A8},  // ｴ → エ
+    {0xFF75, 0x30AA},  // ｵ → オ
+    {0xFF76, 0x30AB},  // ｶ → カ
+    {0xFF77, 0x30AD},  // ｷ → キ
+    {0xFF78, 0x30AF},  // ｸ → ク
+    {0xFF79, 0x30B1},  // ｹ → ケ
+    {0xFF7A, 0x30B3},  // ｺ → コ
+    {0xFF7B, 0x30B5},  // ｻ → サ
+    {0xFF7C, 0x30B7},  // ｼ → シ
+    {0xFF7D, 0x30B9},  // ｽ → ス
+    {0xFF7E, 0x30BB},  // ｾ → セ
+    {0xFF7F, 0x30BD},  // ｿ → ソ
+    {0xFF80, 0x30BF},  // ﾀ → タ
+    {0xFF81, 0x30C1},  // ﾁ → チ
+    {0xFF82, 0x30C4},  // ﾂ → ツ
+    {0xFF83, 0x30C6},  // ﾃ → テ
+    {0xFF84, 0x30C8},  // ﾄ → ト
+    {0xFF85, 0x30CA},  // ﾅ → ナ
+    {0xFF86, 0x30CB},  // ﾆ → ニ
+    {0xFF87, 0x30CC},  // ﾇ → ヌ
+    {0xFF88, 0x30CD},  // ﾈ → ネ
+    {0xFF89, 0x30CE},  // ﾉ → ノ
+    {0xFF8A, 0x30CF},  // ﾊ → ハ
+    {0xFF8B, 0x30D2},  // ﾋ → ヒ
+    {0xFF8C, 0x30D5},  // ﾌ → フ
+    {0xFF8D, 0x30D8},  // ﾍ → ヘ
+    {0xFF8E, 0x30DB},  // ﾎ → ホ
+    {0xFF8F, 0x30DE},  // ﾏ → マ
+    {0xFF90, 0x30DF},  // ﾐ → ミ
+    {0xFF91, 0x30E0},  // ﾑ → ム
+    {0xFF92, 0x30E1},  // ﾒ → メ
+    {0xFF93, 0x30E2},  // ﾓ → モ
+    {0xFF94, 0x30E4},  // ﾔ → ヤ
+    {0xFF95, 0x30E6},  // ﾕ → ユ
+    {0xFF96, 0x30E8},  // ﾖ → ヨ
+    {0xFF97, 0x30E9},  // ﾗ → ラ
+    {0xFF98, 0x30EA},  // ﾘ → リ
+    {0xFF99, 0x30EB},  // ﾙ → ル
+    {0xFF9A, 0x30EC},  // ﾚ → レ
+    {0xFF9B, 0x30ED},  // ﾛ → ロ
+    {0xFF9C, 0x30EF},  // ﾜ → ワ
+    {0xFF9D, 0x30F3},  // ﾝ → ン
+    {0xFF9E, 0x3099},  // ﾞ → ゛（组合浊音点）
+    {0xFF9F, 0x309A},  // ﾟ → ゜（组合半浊音点）
+};
+static_assert(sizeof(kKanaWidth) / sizeof(kKanaWidth[0]) == 63, "半角片假名 1:1 映射必须是 63 项");
+
+bool kanaWidthToFull(std::uint16_t w, std::uint16_t* full) {
+    for (const KanaWidthPair& p : kKanaWidth) {
+        if (p.half == w) {
+            *full = p.full;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool kanaWidthToHalf(std::uint16_t w, std::uint16_t* half) {
+    for (const KanaWidthPair& p : kKanaWidth) {
+        if (p.full == w) {
+            *half = p.half;
+            return true;
+        }
+    }
+    return false;
+}
+
+// FULLWIDTH：ASCII 空格 → U+3000；0x21–0x7E → ＋0xFEE0；半角片假名 → 上面的标准全角。
+std::uint16_t mapFullwidth(std::uint16_t w) {
+    if (w == 0x20) return 0x3000;
+    if (w >= 0x21 && w <= 0x7E) return static_cast<std::uint16_t>(w + 0xFEE0);
+    std::uint16_t full = 0;
+    return kanaWidthToFull(w, &full) ? full : w;
+}
+
+// HALFWIDTH：U+3000 → ASCII 空格；U+FF01–FF5E → －0xFEE0；标准全角的片假名 → 半角。
+std::uint16_t mapHalfwidth(std::uint16_t w) {
+    if (w == 0x3000) return 0x20;
+    if (w >= 0xFF01 && w <= 0xFF5E) return static_cast<std::uint16_t>(w - 0xFEE0);
+    std::uint16_t half = 0;
+    return kanaWidthToHalf(w, &half) ? half : w;
+}
 
 void shimLCMapStringW(X86& cpu, ShimCall& call) {
     // lcid：本模拟器只有 en-US 一个 locale（GetUserDefaultLCID），不参与映射
@@ -521,12 +713,14 @@ void shimLCMapStringW(X86& cpu, ShimCall& call) {
         return;
     }
     const std::uint32_t unsupported = flags & ~kLcmapDoable;
-    if (unsupported != 0 ||
-        (flags & kLcmapDoable) == kLcmapDoable) {
+    if (unsupported != 0 || (flags & kLcmapCaseMask) == kLcmapCaseMask ||
+        (flags & kLcmapKanaMask) == kLcmapKanaMask ||
+        (flags & kLcmapWidthMask) == kLcmapWidthMask) {
         cpu.shim.last_error = kErrInvalidFlags;  // ERROR_INVALID_FLAGS
         shimLog("kernel32", "LCMapStringW",
-                "dwMapFlags=0x%08X 里有未实现的位（0x%08X）或 LOWERCASE|UPPERCASE 同时给 ⇒ 返回 0"
-                "（ERROR_INVALID_FLAGS）",
+                "dwMapFlags=0x%08X 里有未实现的位（0x%08X）或互斥组合"
+                "（LOWERCASE|UPPERCASE / HIRAGANA|KATAKANA / HALFWIDTH|FULLWIDTH）"
+                " ⇒ 返回 0（ERROR_INVALID_FLAGS）",
                 flags, unsupported);
         call.result = 0;
         return;
@@ -567,10 +761,18 @@ void shimLCMapStringW(X86& cpu, ShimCall& call) {
     }
     const bool lower = (flags & kLcmapLowercase) != 0;
     const bool upper = (flags & kLcmapUppercase) != 0;
+    const bool byterev = (flags & kLcmapByterev) != 0;
     for (std::uint32_t i = 0; i < count; ++i) {
         std::uint16_t w = cpu.mem->rd16(src + i * 2u);
         if (lower && w >= 'A' && w <= 'Z') w = static_cast<std::uint16_t>(w - 'A' + 'a');
         else if (upper && w >= 'a' && w <= 'z') w = static_cast<std::uint16_t>(w - 'a' + 'A');
+        // ★ 宽度先于假名：文档明说 HIRAGANA 不配 FULLWIDTH 时**半角**片假名原样留在目标串里。
+        if ((flags & kLcmapHalfwidth) != 0) w = mapHalfwidth(w);
+        if ((flags & kLcmapFullwidth) != 0) w = mapFullwidth(w);
+        if ((flags & kLcmapHiragana) != 0) w = mapKatakanaToHiragana(w);
+        if ((flags & kLcmapKatakana) != 0) w = mapHiraganaToKatakana(w);
+        // BYTEREV：逐 16 位码元反转字节（不是反转字符顺序；NUL 仍映射到自身）
+        if (byterev) w = static_cast<std::uint16_t>((w >> 8) | (w << 8));
         cpu.mem->wr16(dst + i * 2u, w);
     }
     // 文档：返回值 = 映射后字符串的字符数（cchSrc<0 时含结尾 0）

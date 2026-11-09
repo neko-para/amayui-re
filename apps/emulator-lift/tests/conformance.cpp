@@ -52,7 +52,15 @@ bool parseHex(const char* hex, std::vector<std::uint8_t>* out) {
 }  // namespace
 
 bool Fixture::Snapshot::operator==(const Snapshot& o) const {
-    if (eip != o.eip || eflags != o.eflags || memHash != o.memHash || x87Hash != o.x87Hash) return false;
+    // ★ `eip` **不**参与比较：`run()` 的终点是哨兵 `kSentinelEa`，而快照是在 setup 之后、
+    //   run 之前拍的（那时 eip = 第一条指令的 EA）⇒ 前后 eip **必然**不同。
+    //   把它算进"恒等"只会让这条判据多一个恒假的输入（`harness.h` 列的"全状态"也不含 eip）。
+    // ⚠ 已知残留：夹具末尾的 `ret` 会把哨兵弹掉 ⇒ **esp 也必然 +4**，所以"恒等夹具"这条判据
+    //   实际上仍然**几乎**恒假（实测：把 `xmmHash` 从比较里去掉，236 条用例一条都不红）。
+    //   ⇒ 要真守住"夹具什么都没做"，得让 runner 把哨兵 `ret` 的栈效果排除掉 —— 那是另一条单；
+    //   本单的 14 条 SSE 形态**不依赖**它：每条都在 `verify` 里显式断言 XMM / MXCSR。
+    if (eflags != o.eflags || memHash != o.memHash || x87Hash != o.x87Hash) return false;
+    if (mxcsr != o.mxcsr || xmmHash != o.xmmHash) return false;
     for (int i = 0; i < 8; ++i)
         if (r[i] != o.r[i]) return false;
     return true;
@@ -134,6 +142,8 @@ Fixture::Snapshot Fixture::snapshot() const {
     s.x87Hash = fnv1a(&c.fpu.status, sizeof(c.fpu.status), s.x87Hash);
     s.x87Hash = fnv1a(&c.fpu.top, 1, s.x87Hash);
     s.x87Hash = fnv1a(c.fpu.regs, sizeof(c.fpu.regs), s.x87Hash);
+    s.mxcsr = c.mxcsr;
+    s.xmmHash = fnv1a(c.xmm, sizeof(c.xmm));
 
     std::uint64_t h = 0xCBF29CE484222325ull;
     const lift::GuestMemory& mem = machine_->mem();

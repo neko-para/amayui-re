@@ -2,8 +2,9 @@
 
 - id: REQ-01M6WWA1K218GV57TB0N3PXTTP
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M3TC9660ZG1YMB7KAKE4W94B
+- done_reason: 口径已统一到唯一真源：SKILL 两处与 data/requirements/README 已指向 pnpm tools requirements describe（BUDGET / 不变量 5），工作台的两处代码注释（RequirementsOverview.vue / server.ts）也已改成指向 describe、不再复述数字。判据 rg '≤\s*40' 全仓只剩本单与 git 历史。
 - tags: [requirements docs]
 
 ## 现状

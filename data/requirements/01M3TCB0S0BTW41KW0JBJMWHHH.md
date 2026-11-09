@@ -2,9 +2,10 @@
 
 - id: REQ-01M3TCB0S0BTW41KW0JBJMWHHH
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M3TC7BK0J9TBQKGGWQ35A3NR
 - order: 20
+- dropped_reason: emulator-new 已废弃（AGENTS §11：只读遗产，不新增功能 / 不补守卫 / 不为它改 spec）。本节点子项已全部 done，本身不再有可判定交付物；文件保留为历史。
 - tags: [emulator]
 
 ## 范围

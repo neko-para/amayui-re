@@ -2,8 +2,9 @@
 
 - id: REQ-01M6KH7EPPNWJDHPDQ6REV2RRM
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6H6FW5JGQGHACXHPWZD4Y3E
+- verify: apps/emulator-lift/tests/locale_ext.cpp#get-string-type-w-ctype1
 - tags: [emulator-lift, m2, locale]
 
 ## 一句话

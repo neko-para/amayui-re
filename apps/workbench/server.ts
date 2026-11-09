@@ -225,8 +225,8 @@ function load(dir: string) {
 /**
  * The whole ledger, read fresh on every request.
  *
- * 重读而不是缓存：预算是 ≤40 节点、≤80 行/节点（不变量 5），整棵树连正文也就几十 KB，
- * 一次 `readFileSync` × 40 的开销远小于"缓存该什么时候失效"这件事的复杂度。
+ * 重读而不是缓存：活节点与单节点行数预算见 `pnpm tools requirements describe` 的 BUDGET（不变量 5），
+ * 整棵树连正文也就几十 KB —— 一次 `readFileSync` 的开销远小于"缓存该什么时候失效"这件事的复杂度。
  */
 function buildTreePayload(dir: string) {
   const { nodes, tree } = load(dir);

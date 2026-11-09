@@ -2,8 +2,9 @@
 
 - id: REQ-01M6KH7HC3ZP3M5RS8EJ3813WC
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6H6FW5JGQGHACXHPWZD4Y3E
+- verify: apps/emulator-lift/tests/locale_ext.cpp#lcmap-string-kana-width
 - tags: [emulator-lift, m2, locale]
 
 ## 一句话

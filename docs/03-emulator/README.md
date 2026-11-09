@@ -17,6 +17,7 @@
 | **仓库自己的机械装置还成立吗**（素材清单 / 语料定位 / 台账 / shape / spec / 写路径 / 插件闭接口） | `repo-guards.md` |
 | **一条 opcode / 一个 EA 的取证** | 技能 `amayui-re-engine`（知识层，不在这里） |
 | **交互模型**（任务 = 节点图；`when` → `action` → `next`；三种失败全部响亮；两种识别源） | `interaction-model.md` |
+| **CP932 编码后端能不能换成系统接口**（评估：解码等价 9790/9795、编码 373 个重复映射的字节选择分歧；结论与待补的 Windows 实测） | `encoding-backend.md` |
 
 ### 0.1 判据：什么进 test，什么进文档
 

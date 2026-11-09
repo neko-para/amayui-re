@@ -12,6 +12,10 @@
 //   ③ `GetStringTypeW`（CT_CTYPE1 的位值 + dwInfoType 不被丢弃）与 `LCMapStringW`
 //      （cchSrc=-1 映射整串 / cchDest=0 问大小 / 未实现的 dwMapFlags ⇒ ERROR_INVALID_FLAGS）：
 //      REQ-01M6K69JNGE7EP8ZNRDAXNSYZZ / REQ-01M6K69K28AT5VNKZAJXT6PZJ4。
+//   ③' 非 ASCII 的 CT_CTYPE1 走**文档化区间规则**（假名 / 全角 / CJK；ASCII 仍走 `ctype1Ascii()`）；
+//      CT_CTYPE2/3 仍响亮失败（0 + 87）且**不写**输出缓冲：REQ-01M6KH7EPPNWJDHPDQ6REV2RRM。
+//   ③'' LCMapStringW 的 HIRAGANA / KATAKANA / HALFWIDTH / FULLWIDTH / BYTEREV；
+//      SORTKEY 仍明确不做（0 + 1008）：REQ-01M6KH7HC3ZP3M5RS8EJ3813WC。
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -35,8 +39,16 @@ constexpr std::uint32_t kErrInvalidFlags = 1008u;
 
 // GetStringTypeW 的 dwInfoType + LCMapStringW 的 dwMapFlags（Win32 数值）
 constexpr std::uint32_t kCtCtype1 = 1u;      // CT_CTYPE1
+constexpr std::uint32_t kCtCtype2 = 2u;      // CT_CTYPE2（双向类）
+constexpr std::uint32_t kCtCtype3 = 4u;      // CT_CTYPE3（语言学类别）
 constexpr std::uint32_t kLcmapLowercase = 0x00000100u;
 constexpr std::uint32_t kLcmapUppercase = 0x00000200u;
+constexpr std::uint32_t kLcmapSortkey = 0x00000400u;
+constexpr std::uint32_t kLcmapByterev = 0x00000800u;
+constexpr std::uint32_t kLcmapHiragana = 0x00100000u;
+constexpr std::uint32_t kLcmapKatakana = 0x00200000u;
+constexpr std::uint32_t kLcmapHalfwidth = 0x00400000u;
+constexpr std::uint32_t kLcmapFullwidth = 0x00800000u;
 
 // LCType（与 kernel32_string.cpp 的常量同一组 Win32 数值）
 constexpr std::uint32_t kLocaleSISO639LangName = 0x00000059u;
@@ -343,12 +355,43 @@ int main() {
         LIFT_CHECK_EQ_U32(f.m.mem().rd16(dst + 0u), 0x0181u);  // 'A' = UPPER|ALPHA|XDIGIT
         LIFT_CHECK_EQ_U32(f.m.mem().rd16(dst + 2u), 0x0102u);  // 'z' = LOWER|ALPHA（z 不是十六进制位）
 
-        // 非 ASCII：**本单的显式缺口**（另开单做字符类表；⛔ 不拿 w<0x80 猜分类）⇒ 位全 0。
-        // ★ 将来那张表进来时这条要跟着改成真实位值 —— 这是有意的"缺口警示"，不是判据。
-        const std::u16string kana = u"\u3042";
-        const std::uint32_t kana_ea = f.data(kana.data(), 2u);
-        LIFT_CHECK_EQ_U32(f.call(gst, {kCtCtype1, kana_ea, 1u, dst}), 1u);
-        LIFT_CHECK_EQ_U32(f.m.mem().rd16(dst), 0x0000u);
+        // 非 ASCII：走 `kernel32_bootstrap.cpp` 的**文档化区间规则**（`ctype1NonAscii`）。
+        // ★ 判据是 MSDN 的 C1_* 表 + 它明写「hiragana / katakana / kanji all have C1_ALPHA」；
+        //   ⛔ 不拿属性现算 / 不查外部大表。
+        struct Ctype1Case {
+            char16_t ch;
+            std::uint16_t bits;
+        };
+        const Ctype1Case non_ascii[] = {
+            {static_cast<char16_t>(0x3000), 0x0048},  // 全角空格 = SPACE|BLANK
+            {static_cast<char16_t>(0x3001), 0x0010},  // 日文标点 、= PUNCT
+            {static_cast<char16_t>(0x303F), 0x0010},  // 区间上界 = PUNCT
+            {static_cast<char16_t>(0x3042), 0x0100},  // 平假名 あ = ALPHA
+            {static_cast<char16_t>(0x30A2), 0x0100},  // 片假名 ア = ALPHA
+            {static_cast<char16_t>(0x4E00), 0x0100},  // 汉字 一 = ALPHA
+            {static_cast<char16_t>(0xFF01), 0x0010},  // 全角 ！= PUNCT（映回 '!'）
+            {static_cast<char16_t>(0xFF21), 0x0181},  // 全角 Ａ = 与 ASCII 'A' 同一位（含 XDIGIT）
+            {static_cast<char16_t>(0xFF41), 0x0182},  // 全角 ａ = 与 ASCII 'a' 同一位
+            {static_cast<char16_t>(0xFF10), 0x0084},  // 全角 ０ = DIGIT|XDIGIT
+            {static_cast<char16_t>(0xFF5E), 0x0010},  // 全角 ～ = PUNCT（映回 '~'）
+            {static_cast<char16_t>(0xFF61), 0x0010},  // 半角 ｡ = PUNCT（Unicode Po）
+            {static_cast<char16_t>(0xFF64), 0x0010},  // 半角 ､ = PUNCT（Unicode Po）
+            {static_cast<char16_t>(0xFF65), 0x0010},  // 半角 ･ = PUNCT（Unicode Po）
+            {static_cast<char16_t>(0xFF66), 0x0100},  // 半角 ｦ = ALPHA
+            {static_cast<char16_t>(0xFF71), 0x0100},  // 半角 ｱ = ALPHA
+            {static_cast<char16_t>(0xFF9E), 0x0100},  // 半角 ﾞ = ALPHA
+        };
+        std::u16string non_ascii_text;
+        for (const Ctype1Case& c : non_ascii) non_ascii_text.push_back(c.ch);
+        const std::uint32_t non_ascii_ea =
+            f.data(non_ascii_text.data(), non_ascii_text.size() * 2u);
+        LIFT_CHECK_EQ_U32(f.call(gst, {kCtCtype1, non_ascii_ea,
+                                       static_cast<std::uint32_t>(non_ascii_text.size()), dst}),
+                          1u);
+        for (std::size_t i = 0; i < non_ascii_text.size(); ++i) {
+            LIFT_CHECK_EQ_U32(f.m.mem().rd16(dst + static_cast<std::uint32_t>(i) * 2u),
+                              non_ascii[i].bits);
+        }
         LIFT_CHECK(f.ok);
     }
 
@@ -365,10 +408,16 @@ int main() {
         const std::uint32_t src = f.data(s.data(), 2u);
 
         // CT_CTYPE2(2) / CT_CTYPE3(4) / CT_CTYPE1|CT_CTYPE2(3) / 0：都不是本模拟器做的
-        for (std::uint32_t type : {0u, 2u, 4u, 3u}) {
+        // ⇒ 0 + ERROR_INVALID_PARAMETER，而且**不写** lpCharType（⛔ 不拿 CT_CTYPE1 的位冒充）。
+        // ★ 这是"CT_CTYPE2/3 明确不做"的响亮失败钉子，合同见 docs/03-emulator/contracts-win32.md。
+        for (std::uint32_t type : {0u, kCtCtype2, kCtCtype3, kCtCtype1 | kCtCtype2}) {
             f.m.cpu().shim.last_error = 0;
+            f.m.mem().wr32(dst, 0xDEADBEEFu);
+            f.m.mem().wr32(dst + 4u, 0xDEADBEEFu);
             LIFT_CHECK_EQ_U32(f.call(gst, {type, src, 1u, dst}), 0u);
             LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidParameter);
+            LIFT_CHECK_MEM_U32(f.m.mem(), dst, 0xDEADBEEFu);
+            LIFT_CHECK_MEM_U32(f.m.mem(), dst + 4u, 0xDEADBEEFu);
         }
         // 参数非法：lpSrcStr = 0 / lpCharType = 0 / cchSrc = 0 / cchSrc = -2
         f.m.cpu().shim.last_error = 0;
@@ -440,22 +489,97 @@ int main() {
         const std::u16string abc = u"AbC";
         const std::uint32_t src = f.data(abc.data(), (abc.size() + 1) * 2u);
 
-        // LCMAP_SORTKEY(0x400) / LCMAP_BYTEREV(0x800) / LCMAP_HIRAGANA(0x100000)
-        for (std::uint32_t flags : {0x400u, 0x800u, 0x100000u}) {
+        // 仍明确不做的位：LCMAP_SORTKEY(0x400) / LCMAP_LINGUISTIC_CASING(0x1000000)
+        for (std::uint32_t flags : {kLcmapSortkey, 0x01000000u}) {
             f.m.cpu().shim.last_error = 0;
             LIFT_CHECK_EQ_U32(f.call(lcm, {kLocaleUserDefault, flags, src, 0xFFFFFFFFu, dst, 64u}), 0u);
             LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidFlags);
         }
-        // LOWERCASE | UPPERCASE 同时给 = 非法组合
-        f.m.cpu().shim.last_error = 0;
-        LIFT_CHECK_EQ_U32(f.call(lcm, {kLocaleUserDefault, kLcmapLowercase | kLcmapUppercase, src,
-                                       0xFFFFFFFFu, dst, 64u}),
-                          0u);
-        LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidFlags);
+        // 文档点名的互斥对：LOWERCASE|UPPERCASE / HIRAGANA|KATAKANA / HALFWIDTH|FULLWIDTH ⇒ 1008
+        for (std::uint32_t flags : {kLcmapLowercase | kLcmapUppercase,
+                                    kLcmapHiragana | kLcmapKatakana,
+                                    kLcmapHalfwidth | kLcmapFullwidth}) {
+            f.m.cpu().shim.last_error = 0;
+            LIFT_CHECK_EQ_U32(f.call(lcm, {kLocaleUserDefault, flags, src, 0xFFFFFFFFu, dst, 64u}), 0u);
+            LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrInvalidFlags);
+        }
 
         // dwMapFlags = 0 是合法的"不映射"（原样复制 + 同一个返回值）
         LIFT_CHECK_EQ_U32(f.call(lcm, {kLocaleUserDefault, 0u, src, 0xFFFFFFFFu, dst, 64u}), 4u);
         LIFT_CHECK(guestWstr(f.m, dst) == u"AbC");
+        LIFT_CHECK(f.ok);
+    }
+
+    // ⑥'' LCMapStringW 的假名 / 全半角 / BYTEREV（REQ-01M6KH7HC3ZP3M5RS8EJ3813WC，单 2）
+    //
+    // 判据：HIRAGANA 把 ア→あ、KATAKANA 把 あ→ア；FULLWIDTH 把 A→Ａ、HALFWIDTH 把 Ａ→A
+    // （各一条往返）；半角片假名 U+FF61–U+FF9F 共 63 项全部 FULLWIDTH→HALFWIDTH 往返；
+    // BYTEREV 用 MSDN 的定点 0x3450 0x4822 ⇒ 0x5034 0x2248（逐 16 位码元反转字节，不是反转
+    // 字符顺序）；文档明说 HIRAGANA 不配 FULLWIDTH 时半角片假名不映射。
+    // ★ 映射规则在 `kernel32_bootstrap.cpp`（假名 ±0x60 区间 + 63 项 Unicode 标准 1:1 表）；
+    //   这里只钉调用方看得见的结果。
+    {
+        g_current_case = "lcmap-string-kana-width";
+        Fixture f;
+        lift::registerStringShims(f.m.shims());
+        lift::registerBootstrapShims(f.m.shims());
+        LIFT_CHECK(f.ok);
+        const std::uint32_t lcm = f.use("LCMapStringW");
+        const std::uint32_t dst = f.zeroData(64);
+
+        // ★ 按 **cap 个字符**读回（不是读到 NUL）：显式 cchSrc 的映射不写结尾 0，
+        //   复用同一个 dst 时旧尾巴会留在那里。
+        auto map = [&](const std::u16string& in, std::uint32_t flags) -> std::u16string {
+            const std::uint32_t src = f.data(in.data(), in.size() * 2u);
+            const std::uint32_t cap = static_cast<std::uint32_t>(in.size());
+            LIFT_CHECK_EQ_U32(f.call(lcm, {kLocaleUserDefault, flags, src, cap, dst, 64u}), cap);
+            std::u16string out;
+            for (std::uint32_t i = 0; i < cap; ++i)
+                out.push_back(static_cast<char16_t>(f.m.mem().rd16(dst + i * 2u)));
+            return out;
+        };
+
+        // 假名：各一条往返（あ⇄ア）
+        LIFT_CHECK(map(u"\u3042", kLcmapKatakana) == u"\u30A2");
+        LIFT_CHECK(map(u"\u30A2", kLcmapHiragana) == u"\u3042");
+        LIFT_CHECK(map(map(u"\u3042", kLcmapKatakana), kLcmapHiragana) == u"\u3042");
+        // 偏移区间内的特殊假名（ゔ / ゕ / ゖ）也按 ±0x60 走
+        LIFT_CHECK(map(u"\u3094", kLcmapKatakana) == u"\u30F4");  // ゔ ⇄ ヴ
+        LIFT_CHECK(map(u"\u30F4", kLcmapHiragana) == u"\u3094");
+        LIFT_CHECK(map(u"\u3095", kLcmapKatakana) == u"\u30F5");  // ゕ ⇄ ヵ
+        LIFT_CHECK(map(u"\u30F5", kLcmapHiragana) == u"\u3095");
+        LIFT_CHECK(map(u"\u3096", kLcmapKatakana) == u"\u30F6");  // ゖ ⇄ ヶ
+        LIFT_CHECK(map(u"\u30F6", kLcmapHiragana) == u"\u3096");
+        // 共享/特殊形态：ー 与组合浊音点不动；ゝゞゟ ⇄ ヽヾヿ（同一 ±0x60）
+        LIFT_CHECK(map(u"\u30FC", kLcmapHiragana) == u"\u30FC");  // ー 是平/片假名共享
+        LIFT_CHECK(map(u"\u3099", kLcmapKatakana) == u"\u3099");  // 组合浊音点共享
+        LIFT_CHECK(map(u"\u309D", kLcmapKatakana) == u"\u30FD");  // ゝ → ヽ
+        LIFT_CHECK(map(u"\u30FD", kLcmapHiragana) == u"\u309D");
+        // 全半角：各一条往返（A⇄Ａ）
+        LIFT_CHECK(map(u"A", kLcmapFullwidth) == u"\uFF21");
+        LIFT_CHECK(map(u"\uFF21", kLcmapHalfwidth) == u"A");
+        LIFT_CHECK(map(map(u"A", kLcmapFullwidth), kLcmapHalfwidth) == u"A");
+        // 同一张宽度表也管半角片假名：ｱ⇄ア
+        LIFT_CHECK(map(u"\uFF71", kLcmapFullwidth) == u"\u30A2");
+        LIFT_CHECK(map(u"\u30A2", kLcmapHalfwidth) == u"\uFF71");
+        // ★ 63 项全部往返：U+FF61–U+FF9F 逐项 FULLWIDTH → HALFWIDTH 回到原字符，且全角 ≠ 半角
+        std::uint32_t width_cases = 0;
+        for (std::uint32_t cp = 0xFF61; cp <= 0xFF9F; ++cp) {
+            const std::u16string half(1, static_cast<char16_t>(cp));
+            const std::u16string full = map(half, kLcmapFullwidth);
+            LIFT_CHECK_EQ_U32(full.size(), 1u);
+            LIFT_CHECK(full[0] != static_cast<char16_t>(cp));
+            LIFT_CHECK(map(full, kLcmapHalfwidth) == half);
+            ++width_cases;
+        }
+        LIFT_CHECK_EQ_U32(width_cases, 63u);
+        // 文档：HIRAGANA 不配 FULLWIDTH 时，半角片假名原样留在目标串里；配 FULLWIDTH 才映到平假名
+        LIFT_CHECK(map(u"\uFF71", kLcmapHiragana) == u"\uFF71");
+        LIFT_CHECK(map(u"\uFF71", kLcmapHiragana | kLcmapFullwidth) == u"\u3042");
+        // BYTEREV：MSDN 的定点（逐 16 位码元反转字节）
+        LIFT_CHECK(map(u"\u3450\u4822", kLcmapByterev) == u"\u5034\u2248");
+        // BYTEREV 与映射可组合（先映射再反转字节）：'A' ⇒ 'a' ⇒ 0x6100
+        LIFT_CHECK(map(u"A", kLcmapLowercase | kLcmapByterev) == u"\u6100");
         LIFT_CHECK(f.ok);
     }
 

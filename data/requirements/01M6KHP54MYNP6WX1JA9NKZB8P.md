@@ -2,8 +2,9 @@
 
 - id: REQ-01M6KHP54MYNP6WX1JA9NKZB8P
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6H6FW5JGQGHACXHPWZD4Y3E
+- verify: apps/emulator-lift/tests/conformance_cases.cpp#sse-movss-load-zero-high
 - tags: [emulator-lift, m1, s4]
 
 ## 一句话

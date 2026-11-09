@@ -2,8 +2,9 @@
 
 - id: REQ-01M6H6FW5JGQGHACXHPWZD4Y3E
 - type: req
-- status: doing
+- status: done
 - parent: REQ-01M3TC7BK0J9TBQKGGWQ35A3NR
+- done_reason: M1 判据 A1–A5 全绿（2026-11-09 macOS arm64 / RelWithDebInfo）：ctest 65/65；conformance 260 cases / 571 checks / 0 failures（含 24 条 sse-*）；locale-ext 548 checks / 0 failures；A2 未映射 0、A3 decode/len/mnem 不一致 0；A4 eip=0x004BA890、两次 trace 逐字节相同。三个遗留子单已收口，判据挂各自 CTest。
 - tags: [emulator-lift m1]
 
 ## 一句话
@@ -47,14 +48,13 @@
   reason 里的"S6 后续 / M1b 之后"等错误批次词已统一（归属见 `REQ-01M6K68YRBG3GB9ETF2P478VS1`）。
 - `pnpm test` 1159 pass / 0 fail；`pnpm tools lift check` 绿。
 
-## 剩余（M1 收口前，2026-11-04 审计后重算）
-- **open**：PE 载入静默跳过（`REQ-01M6JFZFCQ956CBFMKKQ37PCYK`）· Virtual* 三处
-  （`REQ-01M6JJ6ZYNT6FP5ESHRTFG9HA4`）· 码页族三条质量缺陷
-  （`REQ-01M6K69JNGE7EP8ZNRDAXNSYZZ` / `REQ-01M6K69K28AT5VNKZAJXT6PZJ4` / `REQ-01M6K69K9HM3ETCDNMJWPHGXJC`）。
-- **blocked**：平台 / VEH 证据（`REQ-01M6JFZFN15MBPG7Y89WNZACFW`，需 Windows 机器）。
-- **S4 剩余逐项复核**（x87 / MMX / SSE 的实际缺口）—— 见 `REQ-01M6K7PQK23EGJDJBQ6XKKE4HR`。
-- **已收口**：S6 三族夹具（`REQ-01M6JFZ73GTZE9F6967RRSH6CE`）· 码页 A/W（`REQ-01M6K4VCMVGT95RRBRRK9Q22PA`）
-  · 文档漂移（`REQ-01M6JFZG5RY4GMZQCAA7HKNP1T`）· S0 覆盖清单 / S6 后四族 / S8 / A4 输入归一化。
+## 收口（2026-11-09）
+- 早期已收口：S6 三族夹具 · 码页 A/W · 文档漂移 · S0 覆盖清单 / S6 后四族 / S8 / A4 输入归一化。
+- 2026-11 最后四条：PE 载入静默跳过 · Virtual* 三处 · 码页族三条质量缺陷 · 平台 / VEH 证据（Windows 侧）。
+- 本轮三条遗留（判据都在 lift 自己的 CTest 上）：
+  CT_CTYPE1 非 ASCII 区间规则 + CT_CTYPE2/3 明确失败（`locale-ext#get-string-type-w-ctype1`）·
+  LCMapStringW 假名/全角/BYTEREV + SORTKEY 明确失败（`locale-ext#lcmap-string-kana-width`）·
+  S4-SSE 14 形态按 SDM 实现（`conformance#sse-movss-load-zero-high`，24 条 `sse-*`）。
 
 ## 已知边界（不阻塞收口，要点名）
 - `--until` 之外曾停在 `USER32!wsprintfA`（`LoadLibraryA("AGERC.DLL")` 的失败分支）⇒ 由 AGERC stub + `wsprintfA` 解决。

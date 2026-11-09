@@ -2,8 +2,9 @@
 
 - id: REQ-01M6WS9975PXRSXHEHCMZPWXB9
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
+- dropped_reason: 父级已裁「暂不统一」（lift 的 at frame + Win32 VK 与 cxx/new 的毫秒 + 引擎键号两套并存）；本单是将来可能做的跟踪项，不是当前交付物。需要时重开。
 - tags: [emulator-lift input script]
 
 ## 现状：两套语法，互不可读

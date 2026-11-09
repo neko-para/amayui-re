@@ -173,6 +173,7 @@ const char* opName(Op op) {
         LIFT_OP_CASE(Fsin) LIFT_OP_CASE(Fcos) LIFT_OP_CASE(Fsincos) LIFT_OP_CASE(Fptan) LIFT_OP_CASE(Fpatan)
         LIFT_OP_CASE(Fyl2x) LIFT_OP_CASE(Fyl2xp1) LIFT_OP_CASE(F2xm1)
         LIFT_OP_CASE(Packed)
+        LIFT_OP_CASE(Sse)
         LIFT_OP_CASE(Other)
 #undef LIFT_OP_CASE
         default: return "?";
@@ -218,6 +219,8 @@ bool execInsn(X86& cpu, const Insn& in) {
     }
     if (opIsX87(in.op)) return execFpu(cpu, in);
     if (in.op == Op::Packed) return execPacked(cpu, in);
+    // ★ SSE 浮点 / 128 位搬移是**独立一族**（`Op::Sse`），⛔ 不塞进 `Op::Packed` 的整数 lane 语义。
+    if (in.op == Op::Sse) return execSse(cpu, in);
     return execInteger(cpu, in);
 }
 

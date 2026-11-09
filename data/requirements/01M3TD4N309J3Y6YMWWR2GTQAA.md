@@ -2,9 +2,10 @@
 
 - id: REQ-01M3TD4N309J3Y6YMWWR2GTQAA
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M3TC9660ZG1YMB7KAKE4W94B
 - order: 120
+- dropped_reason: K2 是知识台账的校验线（锚点重挂 EA + 重跑幸存守卫）；台账 / spec 知识层已不是当前交付物的前置（lift 不消费台账）。需要时从 git 恢复。
 
 ## 前置
 **无**（原前置 K1 / M4-1 都已 drop：知识线按 `AGENTS.md` §6 常态化，旧无头核心计划由 `apps/emulator-new` 取代）。本单只剩台账锚补证两件。

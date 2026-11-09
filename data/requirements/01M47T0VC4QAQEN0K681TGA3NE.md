@@ -2,9 +2,10 @@
 
 - id: REQ-01M47T0VC4QAQEN0K681TGA3NE
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M3TCZ5A0D5ZYZQS47DZW2S3X
 - order: 93
+- dropped_reason: 真机探针的用途是给知识台账 / spec 提供真机观察；知识线停摆后它没有消费者，且从未开工。需要时从 git 恢复。
 - tags: [inspector dotnet]
 
 ## 范围

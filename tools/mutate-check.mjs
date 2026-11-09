@@ -128,10 +128,21 @@ function guardMissing(m) {
   const buildDir = m.buildDir ?? CTEST_BUILD_DIR;
   const file = path.join(ROOT, buildDir, 'CTestTestfile.cmake');
   if (!fs.existsSync(file)) return null; // 没 configure 过 ⇒ 判不了，不是"被删了"
+  // ★ 名字的引号形态由 CMake 版本决定：4.x 写 `add_test("name" …)`，部分版本写
+  //   `add_test([=[name]=] …)`（还有裸名）。只认一种会在换 CMake 后把"已注册"读成"未注册"
+  //   ⇒ 整份清单 34/49 条假红。三种形态都认，名字按整串比较（⛔ 不做子串匹配）。
   const declared = fs
     .readFileSync(file, 'utf8')
     .split(/\r?\n/)
-    .some((line) => line.startsWith('add_test(') && line.includes(`[=[${name}]=]`));
+    .some((line) => {
+      if (!line.startsWith('add_test(')) return false;
+      const bracket = line.match(/^add_test\(\[=\[(.*?)\]=\]/);
+      if (bracket && bracket[1] === name) return true;
+      const quoted = line.match(/^add_test\("([^"]*)"/);
+      if (quoted && quoted[1] === name) return true;
+      const bare = line.match(/^add_test\(([^\s")]+)/);
+      return !!bare && bare[1] === name;
+    });
   return declared ? null : `CTest 未注册：${buildDir}/CTestTestfile.cmake 里没有 add_test([=[${name}]=])`;
 }
 

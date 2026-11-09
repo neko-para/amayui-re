@@ -42,12 +42,15 @@ public:
     // 执行到岗哨（`ret` 回到 kSentinelEa）或 max_insns；返回是否正常停下
     bool run(std::uint64_t max_insns = 200000);
 
-    // 全状态快照（寄存器 + 标志 + x87 元信息 + 代码区/栈区内存摘要）
+    // 全状态快照（寄存器 + 标志 + x87 元信息 + XMM / MXCSR + 代码区/栈区内存摘要）
+    // ★ `eip` 虽然被记下来，但**不参与**恒等比较（run() 的终点永远是哨兵，见 conformance.cpp）。
     struct Snapshot {
         std::uint32_t r[8] = {};
         std::uint32_t eip = 0, eflags = 0;
+        std::uint32_t mxcsr = 0;   // ★ SSE 的 IE 位（`comiss` 与 `ucomiss` 的 QNaN 差别落在这里）
         std::uint64_t memHash = 0;
         std::uint64_t x87Hash = 0;
+        std::uint64_t xmmHash = 0;  // ★ 只改 XMM 的用例必须能被看见（否则恒等夹具会误判成"通过"）
         bool operator==(const Snapshot& o) const;
         bool operator!=(const Snapshot& o) const { return !(*this == o); }
     };

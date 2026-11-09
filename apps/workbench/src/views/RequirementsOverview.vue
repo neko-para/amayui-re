@@ -39,7 +39,7 @@ const MARKS: Record<string, string> = {
 const query = ref('');
 /** 默认开（与旧版一致）：只看看没到位的，需要时一键放全 */
 const liveOnly = ref(true);
-/** 分支默认展开：预算是 ≤40 节点，本来就该一屏读完 */
+/** 分支默认展开：活节点预算见 `pnpm tools requirements describe` 的 BUDGET（不变量 5），本来就该一屏读完 */
 const overrides = ref<Record<string, boolean>>({});
 
 const isOpen = (id: string) => overrides.value[id] ?? true;

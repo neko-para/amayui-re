@@ -1,4 +1,5 @@
 # build / vcpkg
 out/
+out-*/
 vcpkg_installed/
 CMakeUserPresets.json

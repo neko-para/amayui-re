@@ -2,8 +2,9 @@
 
 - id: REQ-01M5J9ACPK62YSKK5AF8ETDCF4
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M59B6Y8VGCZJN79XVQGHB390
+- dropped_reason: 本轮口径：需求树只留能推进当前交付物（lift / 翻译 / 基建）的活节点。spec 内容批次 / 残差收口 / 证据重锚这一支服务的是「按 spec 重写」的实现线；2026-11 起实现线改为 emulator-lift（执行原机器码），spec 对 lift 只作调试对照、不是真源（apps/emulator-lift/README.md §1）。本支自 2026-10-19 起无推进。需要时从 git 恢复。
 - tags: [spec ops]
 
 # 未成篇 opcode 分诊与合并（0x000–0x3FF，除 audio / text-system / input）

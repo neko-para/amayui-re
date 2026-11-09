@@ -11,6 +11,9 @@
 //   三操作数 imul / mul·div 位宽 / setcc·jcc·cmovcc 多条件 / bt·bts·btr·btc / bsf·bsr /
 //   xchg 内存 / movzx·movsx 16→32 / lea index*scale / 串操作 / x87 的 fsub·fdiv·fmul·
 //   fcompp·fucompp·fldcw·fild·fistp·fchs·fabs·fsqrt·frndint·ffree。
+// ★ SSE 浮点 / 128 位搬移（`Op::Sse`，14 条形态）在文件下部单列一节：每条标量形态都同时断言
+//   "低 32 位的值"与"高 96 位按 SDM 保留 / 清 0"，`comiss`/`ucomiss` 还断言 MXCSR.IE 的
+//   QNaN / SNaN 差别（用例名 `sse-*`）。
 #include "harness.h"
 
 namespace lift_test {
@@ -1943,6 +1946,326 @@ void setup_sse_psrad_32(Fixture& f) {
 void verify_sse_psrad_32(Fixture& f) { LIFT_CHECK_EQ_U32(f.cpu().eax(), 0xFFFFFFFFu); }
 
 // =====================================================================================
+// SSE 浮点 / 128 位搬移（`Op::Sse`；语料 0 条，按 Intel SDM 实现）
+//
+// ★ 每条**标量**形态都同时断言两件事：① 低 32 位的值对不对；② 高 96 位按 SDM **保留**还是**清 0**。
+//   只对算术结果会让"整份 128 位覆盖 / 只写了低位就清高"这类错误静默通过。
+// ★ 高 96 位的哨兵值各不相同（0x11111111 / 0x22222222 / …）：三个 dword 里任何一个被改都能看见。
+// ★ `comiss` / `ucomiss` 的 QNaN 与 SNaN 差别落在 `X86::mxcsr` 的 IE 位（SDM：COMISS 对 QNaN
+//   也置 #I，UCOMISS 只对 SNaN 置）—— 这是这两个形态**唯一**可观测的差别。
+// =====================================================================================
+void sseXmmSet(Fixture& f, int idx, std::uint32_t d0, std::uint32_t d1, std::uint32_t d2, std::uint32_t d3) {
+    f.cpu().xmm[idx][0] = d0;
+    f.cpu().xmm[idx][1] = d1;
+    f.cpu().xmm[idx][2] = d2;
+    f.cpu().xmm[idx][3] = d3;
+}
+
+void setup_sse_movaps(Fixture& f) {
+    f.dataHex(kDataEa, "11223344 55667788 99AABBCC DDEEFF00");
+    f.dataHex(kDataEa + 0x20u, "00000000 00000000 00000000 00000000");
+    sseXmmSet(f, 0, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu);
+    f.codeHex(kCodeEa,
+              "0F 28 05 00 00 48 00"   // movaps xmm0, [0x480000]（16 字节对齐）
+              "0F 29 05 20 00 48 00"   // movaps [0x480020], xmm0
+              "C3");
+}
+void verify_sse_movaps(Fixture& f) {
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x20u, 0x44332211u);
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x24u, 0x88776655u);
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x28u, 0xCCBBAA99u);
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x2Cu, 0x00FFEEDDu);
+    // 整份 128 位覆盖（高位不是"保留旧值 0xFFFFFFFF"）
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][3], 0x00FFEEDDu);
+}
+
+void setup_sse_movups(Fixture& f) {
+    f.dataHex(kDataEa + 3u, "11223344 55667788 99AABBCC DDEEFF00");  // 故意**未对齐**
+    f.dataHex(kDataEa + 0x23u, "00000000 00000000 00000000 00000000");
+    sseXmmSet(f, 0, 0u, 0u, 0u, 0u);
+    f.codeHex(kCodeEa,
+              "0F 10 05 03 00 48 00"   // movups xmm0, [0x480003]（未对齐）
+              "0F 11 05 23 00 48 00"   // movups [0x480023], xmm0
+              "C3");
+}
+void verify_sse_movups(Fixture& f) {
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x23u, 0x44332211u);
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x27u, 0x88776655u);
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x2Bu, 0xCCBBAA99u);
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x2Fu, 0x00FFEEDDu);
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][3], 0x00FFEEDDu);
+}
+
+void setup_sse_movdqa(Fixture& f) {
+    f.dataHex(kDataEa, "0F0E0D0C 1B1A1918 27262524 33323130");
+    f.dataHex(kDataEa + 0x20u, "00000000 00000000 00000000 00000000");
+    sseXmmSet(f, 0, 0u, 0u, 0u, 0u);
+    f.codeHex(kCodeEa,
+              "66 0F 6F 05 00 00 48 00"   // movdqa xmm0, [0x480000]
+              "66 0F 7F 05 20 00 48 00"   // movdqa [0x480020], xmm0
+              "C3");
+}
+void verify_sse_movdqa(Fixture& f) {
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x20u, 0x0C0D0E0Fu);
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x24u, 0x18191A1Bu);
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x28u, 0x24252627u);
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x2Cu, 0x30313233u);
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][2], 0x24252627u);
+}
+
+void setup_sse_movdqu(Fixture& f) {
+    f.dataHex(kDataEa + 5u, "0F0E0D0C 1B1A1918 27262524 33323130");  // 未对齐
+    f.dataHex(kDataEa + 0x25u, "00000000 00000000 00000000 00000000");
+    sseXmmSet(f, 0, 0u, 0u, 0u, 0u);
+    f.codeHex(kCodeEa,
+              "F3 0F 6F 05 05 00 48 00"   // movdqu xmm0, [0x480005]
+              "F3 0F 7F 05 25 00 48 00"   // movdqu [0x480025], xmm0
+              "C3");
+}
+void verify_sse_movdqu(Fixture& f) {
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x25u, 0x0C0D0E0Fu);
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x29u, 0x18191A1Bu);
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x2Du, 0x24252627u);
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x31u, 0x30313233u);
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][2], 0x24252627u);
+}
+
+// ★ `movss xmm, m32`：低 32 位搬过来，**高 96 位清 0**（SDM：DEST[127:32] := 0）。
+void setup_sse_movss_load_zero_high(Fixture& f) {
+    f.dataHex(kDataEa, "0000803F");  // 1.0f
+    sseXmmSet(f, 0, 0xFFFFFFFFu, 0xAAAAAAAAu, 0xBBBBBBBBu, 0xCCCCCCCCu);
+    f.codeHex(kCodeEa, "F3 0F 10 05 00 00 48 00" "C3");  // movss xmm0, [0x480000]
+}
+void verify_sse_movss_load_zero_high(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][0], 0x3F800000u);
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][1], 0u);  // 高 96 位清 0 —— 不是"保留"
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][2], 0u);
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][3], 0u);
+}
+
+// ★ `movss xmm, xmm`（legacy）：高 96 位**不修改**（与内存源形态是两条不同的规则）。
+void setup_sse_movss_reg_keep_high(Fixture& f) {
+    sseXmmSet(f, 0, 0x3F800000u, 0x11111111u, 0x22222222u, 0x33333333u);
+    sseXmmSet(f, 1, 0x40490FDBu, 0x44444444u, 0x55555555u, 0x66666666u);  // π
+    f.codeHex(kCodeEa, "F3 0F 10 C1" "C3");  // movss xmm0, xmm1
+}
+void verify_sse_movss_reg_keep_high(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][0], 0x40490FDBu);
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][1], 0x11111111u);  // 高 96 位原样
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][2], 0x22222222u);
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][3], 0x33333333u);
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[1][0], 0x40490FDBu);  // 源不被动
+}
+
+// ★ `movss m32, xmm`：只写 **4 字节**（邻居 dword 一个都不许动）。
+void setup_sse_movss_store_4bytes(Fixture& f) {
+    f.dataHex(kDataEa, "AAAAAAAA BBBBBBBB CCCCCCCC");
+    sseXmmSet(f, 0, 0x3F800000u, 0x11111111u, 0x22222222u, 0x33333333u);
+    f.codeHex(kCodeEa, "F3 0F 11 05 04 00 48 00" "C3");  // movss [0x480004], xmm0
+}
+void verify_sse_movss_store_4bytes(Fixture& f) {
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x04u, 0x3F800000u);
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x00u, 0xAAAAAAAAu);  // 前一个 dword 没被写
+    LIFT_CHECK_MEM_U32(f.mem(), kDataEa + 0x08u, 0xCCCCCCCCu);  // 后一个 dword 没被写
+}
+
+// ★ `xorps` 是**整份 128 位按位**异或：高位也必须参与（不是只算低 32 位）。
+void setup_sse_xorps(Fixture& f) {
+    sseXmmSet(f, 0, 0x00000000u, 0xFFFFFFFFu, 0xAAAAAAAAu, 0x55555555u);
+    sseXmmSet(f, 1, 0xFFFFFFFFu, 0xFFFFFFFFu, 0x0F0F0F0Fu, 0x33333333u);
+    f.codeHex(kCodeEa, "0F 57 C1" "C3");  // xorps xmm0, xmm1
+}
+void verify_sse_xorps(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][0], 0xFFFFFFFFu);
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][1], 0x00000000u);
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][2], 0xA5A5A5A5u);
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][3], 0x66666666u);
+}
+
+// ★ `cvtsi2ss xmm, r/m32`（legacy）：只写低 32 位，高 96 位**不修改**（SDM：MAXVL-1:32 Unmodified）。
+void setup_sse_cvtsi2ss_keep_high(Fixture& f) {
+    f.cpu().eax() = 3;
+    sseXmmSet(f, 0, 0x11111111u, 0x22222222u, 0x33333333u, 0x44444444u);
+    f.codeHex(kCodeEa, "F3 0F 2A C0" "C3");  // cvtsi2ss xmm0, eax
+}
+void verify_sse_cvtsi2ss_keep_high(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][0], 0x40400000u);  // 3.0f
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][1], 0x22222222u);  // 高 96 位原样
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][2], 0x33333333u);
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][3], 0x44444444u);
+}
+
+void setup_sse_cvtsi2ss_round(Fixture& f) {
+    // 0x01000001 = 2^24+1：binary32 下恰在 2^24 与 2^24+2 的中点 ⇒ 就近偶数 ⇒ 2^24
+    f.cpu().eax() = 0x01000001u;
+    f.codeHex(kCodeEa, "F3 0F 2A C0" "C3");
+}
+void verify_sse_cvtsi2ss_round(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][0], 0x4B800000u);  // 16777216.0f
+}
+
+// ★ `cvttss2si` 是**朝零截断**：-2.75 → -2（floor 会得 -3，是两种能分开的实现）。
+void setup_sse_cvttss2si_trunc(Fixture& f) {
+    sseXmmSet(f, 0, 0xC0300000u, 0x11111111u, 0x22222222u, 0x33333333u);  // -2.75f
+    f.codeHex(kCodeEa, "F3 0F 2C C0" "C3");  // cvttss2si eax, xmm0
+}
+void verify_sse_cvttss2si_trunc(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().eax(), 0xFFFFFFFEu);  // -2
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][0], 0xC0300000u);  // 源不被动
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][3], 0x33333333u);  // 高 96 位不被动
+    LIFT_CHECK_EQ_U32(f.cpu().mxcsr & 1u, 0u);           // 没越界 ⇒ 不置 invalid
+}
+
+// ★ NaN ⇒ 0x80000000（整数不定值）+ invalid（SDM）；⛔ 不是"随便一个数"。
+void setup_sse_cvttss2si_nan(Fixture& f) {
+    sseXmmSet(f, 0, 0x7FC00000u, 0u, 0u, 0u);  // QNaN
+    f.codeHex(kCodeEa, "F3 0F 2C C0" "C3");
+}
+void verify_sse_cvttss2si_nan(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().eax(), 0x80000000u);
+    LIFT_CHECK_EQ_U32(f.cpu().mxcsr & 1u, 1u);
+}
+
+// ★ 越界（2^31 本身已超出 int32 正范围）⇒ 0x80000000 + invalid。
+void setup_sse_cvttss2si_range(Fixture& f) {
+    sseXmmSet(f, 0, 0x4F000000u, 0u, 0u, 0u);  // 2147483648.0f
+    f.codeHex(kCodeEa, "F3 0F 2C C0" "C3");
+}
+void verify_sse_cvttss2si_range(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().eax(), 0x80000000u);
+    LIFT_CHECK_EQ_U32(f.cpu().mxcsr & 1u, 1u);
+}
+
+// ★ addss / subss / mulss / divss：只改低 32 位，**高 96 位原样保留**。
+//   操作数取 1.5 与 2.25（都能精确表示）⇒ expected 与舍入方式无关，红了就是语义错。
+void sseArithSetup(Fixture& f, const char* op_hex) {
+    sseXmmSet(f, 0, 0x3FC00000u, 0x11111111u, 0x22222222u, 0x33333333u);  // 1.5f + 高位哨兵
+    sseXmmSet(f, 1, 0x40100000u, 0x77777777u, 0x88888888u, 0x99999999u);  // 2.25f
+    std::string code = std::string("F3 0F ") + op_hex + " C1 C3";          // <op> xmm0, xmm1
+    f.codeHex(kCodeEa, code.c_str());
+}
+void sseArithCheck(Fixture& f, std::uint32_t expected_low) {
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][0], expected_low);
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][1], 0x11111111u);  // 高 96 位原样
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][2], 0x22222222u);
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][3], 0x33333333u);
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[1][0], 0x40100000u);  // 源不被动
+}
+
+void setup_sse_addss(Fixture& f) { sseArithSetup(f, "58"); }
+void verify_sse_addss(Fixture& f) { sseArithCheck(f, 0x40700000u); }  // 3.75f
+void setup_sse_subss(Fixture& f) { sseArithSetup(f, "5C"); }
+void verify_sse_subss(Fixture& f) { sseArithCheck(f, 0xBF400000u); }  // -0.75f
+void setup_sse_mulss(Fixture& f) { sseArithSetup(f, "59"); }
+void verify_sse_mulss(Fixture& f) { sseArithCheck(f, 0x40580000u); }  // 3.375f
+void setup_sse_divss(Fixture& f) { sseArithSetup(f, "5E"); }
+void verify_sse_divss(Fixture& f) { sseArithCheck(f, 0x3F2AAAABu); }  // 2/3（就近舍入）
+
+// ★ comiss / ucomiss 写 **EFLAGS**（不是 x87 的 C0..C3）：EQUAL ⇒ ZF=1、PF=0、CF=0；
+//   OF / SF / AF 一律清 0（setup 里先把它们置 1，"没清"会当场红）。
+void setup_sse_comiss_equal(Fixture& f) {
+    sseXmmSet(f, 0, 0x3F800000u, 0u, 0u, 0u);
+    sseXmmSet(f, 1, 0x3F800000u, 0u, 0u, 0u);
+    f.cpu().setCf(true);
+    f.cpu().setPf(true);
+    f.cpu().setOf(true);
+    f.cpu().setSf(true);
+    f.cpu().setAf(true);
+    f.codeHex(kCodeEa, "0F 2F C1" "C3");  // comiss xmm0, xmm1
+}
+void verify_sse_comiss_equal(Fixture& f) {
+    LIFT_CHECK(f.cpu().zf());
+    LIFT_CHECK(!f.cpu().pf());
+    LIFT_CHECK(!f.cpu().cf());
+    LIFT_CHECK(!f.cpu().of());  // OF/SF/AF 清 0（不是保留）
+    LIFT_CHECK(!f.cpu().sf());
+    LIFT_CHECK(!f.cpu().af());
+    LIFT_CHECK_EQ_U32(f.cpu().mxcsr & 1u, 0u);  // 有序列比较不置 invalid
+}
+
+void setup_sse_comiss_less(Fixture& f) {
+    sseXmmSet(f, 0, 0x3F800000u, 0u, 0u, 0u);  // 1.0
+    sseXmmSet(f, 1, 0x40000000u, 0u, 0u, 0u);  // 2.0
+    f.codeHex(kCodeEa, "0F 2F C1" "C3");
+}
+void verify_sse_comiss_less(Fixture& f) {
+    LIFT_CHECK(f.cpu().cf());   // LESS_THAN ⇒ CF=1
+    LIFT_CHECK(!f.cpu().zf());
+    LIFT_CHECK(!f.cpu().pf());
+}
+
+// ★ COMISS 对 **QNaN** 也置 #I（SDM Description）；默认 MXCSR 全屏蔽 ⇒ 只置 IE、不 trap。
+void setup_sse_comiss_qnan(Fixture& f) {
+    sseXmmSet(f, 0, 0x7FC00000u, 0u, 0u, 0u);  // QNaN
+    sseXmmSet(f, 1, 0x3F800000u, 0u, 0u, 0u);  // 1.0
+    f.codeHex(kCodeEa, "0F 2F C1" "C3");
+}
+void verify_sse_comiss_qnan(Fixture& f) {
+    LIFT_CHECK(f.cpu().zf());  // UNORDERED ⇒ ZF,PF,CF = 111
+    LIFT_CHECK(f.cpu().pf());
+    LIFT_CHECK(f.cpu().cf());
+    LIFT_CHECK(!f.cpu().of());
+    LIFT_CHECK(!f.cpu().sf());
+    LIFT_CHECK(!f.cpu().af());
+    LIFT_CHECK_EQ_U32(f.cpu().mxcsr & 1u, 1u);  // ← 与 ucomiss 的差别就在这一位
+}
+
+// ★ UCOMISS 对 **QNaN** **不**置 #I（只对 SNaN 置）—— 与上一条成对：这条红 = 两条被写成一样了。
+void setup_sse_ucomiss_qnan(Fixture& f) {
+    sseXmmSet(f, 0, 0x7FC00000u, 0u, 0u, 0u);  // QNaN
+    sseXmmSet(f, 1, 0x3F800000u, 0u, 0u, 0u);
+    f.codeHex(kCodeEa, "0F 2E C1" "C3");  // ucomiss xmm0, xmm1
+}
+void verify_sse_ucomiss_qnan(Fixture& f) {
+    LIFT_CHECK(f.cpu().zf());  // EFLAGS 与 comiss 的 QNaN 情形**一样**
+    LIFT_CHECK(f.cpu().pf());
+    LIFT_CHECK(f.cpu().cf());
+    LIFT_CHECK_EQ_U32(f.cpu().mxcsr & 1u, 0u);  // 但**不**置 invalid
+}
+
+// ★ UCOMISS 对 SNaN 置 #I（这条与上一条一起把 QNaN/SNaN 的判据钉成三态）。
+void setup_sse_ucomiss_snan(Fixture& f) {
+    sseXmmSet(f, 0, 0x7F800001u, 0u, 0u, 0u);  // SNaN（quiet 位 = 0）
+    sseXmmSet(f, 1, 0x3F800000u, 0u, 0u, 0u);
+    f.codeHex(kCodeEa, "0F 2E C1" "C3");
+}
+void verify_sse_ucomiss_snan(Fixture& f) {
+    LIFT_CHECK(f.cpu().zf());
+    LIFT_CHECK(f.cpu().pf());
+    LIFT_CHECK(f.cpu().cf());
+    LIFT_CHECK_EQ_U32(f.cpu().mxcsr & 1u, 1u);
+}
+
+// ★ 交互：SSE 指令**不碰** x87 的 TOP / tag word / 状态字（`fld1` 之后跑 `addss`）。
+void setup_sse_xmm_keeps_x87(Fixture& f) {
+    sseXmmSet(f, 0, 0x3F800000u, 0x11111111u, 0x22222222u, 0x33333333u);  // 1.0
+    sseXmmSet(f, 1, 0x40000000u, 0u, 0u, 0u);                            // 2.0
+    f.codeHex(kCodeEa, "D9 E8" "F3 0F 58 C1" "C3");  // fld1; addss xmm0, xmm1
+}
+void verify_sse_xmm_keeps_x87(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][0], 0x40400000u);  // 1.0 + 2.0 = 3.0
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][1], 0x11111111u);  // 高 96 位原样
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][3], 0x33333333u);
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 7u);          // x87 的 TOP 没被 SSE 指令推动
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.tag, 0x3FFFu);     // 只有 R7 valid —— tag word 没被改
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.status, 0x3800u);  // 状态字只剩 TOP=7（异常位一位都没被 SSE 置）
+}
+
+// ★ 反向：`emms` 清 x87 的 tag word，但**不碰** XMM。
+void setup_sse_emms_keeps_xmm(Fixture& f) {
+    sseXmmSet(f, 0, 0x11111111u, 0x22222222u, 0x33333333u, 0x44444444u);
+    f.codeHex(kCodeEa, "D9 E8" "0F 77" "C3");  // fld1; emms
+}
+void verify_sse_emms_keeps_xmm(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.tag, 0xFFFFu);  // EMMS 把 tag 置全 empty
+    LIFT_CHECK_EQ_U32(f.cpu().fpu.top, 7u);
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][0], 0x11111111u);  // XMM 一个 lane 都没变
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][1], 0x22222222u);
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][2], 0x33333333u);
+    LIFT_CHECK_EQ_U32(f.cpu().xmm[0][3], 0x44444444u);
+}
+
+// =====================================================================================
 // ⑨ S4 复核补齐：语料里**有**、实现里**有**、但当时**没有夹具**的 x87 形态
 //
 // ★ 为什么补这些：`docs/s4-fpu-audit.md` 的"形态 → 状态"表要求每条"已实现"都挂一条
@@ -2430,6 +2753,31 @@ const Case* conformanceCases(std::size_t* count) {
         {"sse-movd-xmm", setup_sse_movd_xmm, verify_sse_movd_xmm},
         {"sse-paddd", setup_sse_paddd, verify_sse_paddd},
         {"sse-psrad-count-32", setup_sse_psrad_32, verify_sse_psrad_32},
+        // ---- SSE 浮点 / 128 位搬移（`Op::Sse`；14 条形态一一对应）----
+        {"sse-movaps", setup_sse_movaps, verify_sse_movaps},
+        {"sse-movups", setup_sse_movups, verify_sse_movups},
+        {"sse-movss-load-zero-high", setup_sse_movss_load_zero_high, verify_sse_movss_load_zero_high},
+        {"sse-movss-reg-keep-high", setup_sse_movss_reg_keep_high, verify_sse_movss_reg_keep_high},
+        {"sse-movss-store-4bytes", setup_sse_movss_store_4bytes, verify_sse_movss_store_4bytes},
+        {"sse-movdqa", setup_sse_movdqa, verify_sse_movdqa},
+        {"sse-movdqu", setup_sse_movdqu, verify_sse_movdqu},
+        {"sse-xorps", setup_sse_xorps, verify_sse_xorps},
+        {"sse-cvtsi2ss-keep-high", setup_sse_cvtsi2ss_keep_high, verify_sse_cvtsi2ss_keep_high},
+        {"sse-cvtsi2ss-round", setup_sse_cvtsi2ss_round, verify_sse_cvtsi2ss_round},
+        {"sse-cvttss2si-trunc", setup_sse_cvttss2si_trunc, verify_sse_cvttss2si_trunc},
+        {"sse-cvttss2si-nan", setup_sse_cvttss2si_nan, verify_sse_cvttss2si_nan},
+        {"sse-cvttss2si-range", setup_sse_cvttss2si_range, verify_sse_cvttss2si_range},
+        {"sse-addss", setup_sse_addss, verify_sse_addss},
+        {"sse-subss", setup_sse_subss, verify_sse_subss},
+        {"sse-mulss", setup_sse_mulss, verify_sse_mulss},
+        {"sse-divss", setup_sse_divss, verify_sse_divss},
+        {"sse-comiss-equal", setup_sse_comiss_equal, verify_sse_comiss_equal},
+        {"sse-comiss-less", setup_sse_comiss_less, verify_sse_comiss_less},
+        {"sse-comiss-qnan", setup_sse_comiss_qnan, verify_sse_comiss_qnan},
+        {"sse-ucomiss-qnan", setup_sse_ucomiss_qnan, verify_sse_ucomiss_qnan},
+        {"sse-ucomiss-snan", setup_sse_ucomiss_snan, verify_sse_ucomiss_snan},
+        {"sse-xmm-keeps-x87", setup_sse_xmm_keeps_x87, verify_sse_xmm_keeps_x87},
+        {"sse-emms-keeps-xmm", setup_sse_emms_keeps_xmm, verify_sse_emms_keeps_xmm},
         // ---- S4 复核补齐：语料里有、实现里有、但此前没有夹具的 x87 形态 ----
         {"x87-fst", setup_x87_fst, verify_x87_fst},
         {"x87-fstp-st-i", setup_x87_fstp_st_i, verify_x87_fstp_st_i},

@@ -21,6 +21,7 @@ bool execControl(X86& cpu, const Insn& in);   // jcc / jmp / call / ret / setcc 
 bool execString(X86& cpu, const Insn& in);    // movs / stos / lods / scas / cmps + rep
 bool execFpu(X86& cpu, const Insn& in);       // x87（S4：语料里 47 个形态）
 bool execPacked(X86& cpu, const Insn& in);    // MMX / SSE 整数打包（`Op::Packed`，实现落在 exec_fpu.cpp）
+bool execSse(X86& cpu, const Insn& in);       // SSE 标量单精度 + 128 位搬移（`Op::Sse`，实现落在 exec_fpu.cpp）
 
 // 控制流指令（块在这里收尾）
 bool opIsControl(Op op);

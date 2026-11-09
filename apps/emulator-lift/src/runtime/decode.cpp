@@ -181,8 +181,8 @@ const OpRow kOpMap[] = {
 };
 
 // ---- MMX / SSE 的整数打包（`Op::Packed` + `PkOp` 子码）----
-// ★ 只登记**语料里真的出现过**的 MMX 形态 + 同族的整数 SSE2 形态；浮点 SSE（addps / movaps …）
-//   语料里没有 ⇒ 不登记 ⇒ 落 `Op::Other` ⇒ 执行时**响亮失败**（plan §6 S4 的口径）。
+// ★ 只登记**语料里真的出现过**的 MMX 形态 + 同族的整数 SSE2 形态；浮点 SSE 是**另一族**
+//   （`Op::Sse` + `kSseMap`，见下），⛔ 不要把两者塞进同一个子码表。
 struct PkRow {
     const char* name;
     PkOp pk;
@@ -213,6 +213,32 @@ PkOp pkFromMnemonic(const char* name) {
     for (const PkRow& r : kPkMap)
         if (std::strcmp(name, r.name) == 0) return r.pk;
     return PkOp::None;
+}
+
+// ---- SSE 标量单精度 + 128 位搬移 / 位运算（`Op::Sse` + `SseOp` 子码）----
+// ★ 这 14 条在 `.lst` 里都是 0 条（判据：全文件 `xmm<数字>` 操作数 = 0），但 A2 的别名表登记了
+//   它们；真撞到时按 Intel SDM 执行，而不是落到 `Op::Other` 响亮失败。
+// ★ `movsd`（F2 0F 10，标量 double）**没有**登记：它和串操作 `movsd`（A5）共用同一个 Zydis 助记符，
+//   归一化后会落到 `Op::Movs` —— 那是既有口径，本单不碰（见 S4 审计 §1：语料里 `movsd` 全是串操作）。
+struct SseRow {
+    const char* name;
+    SseOp sse;
+};
+const SseRow kSseMap[] = {
+    {"movaps", SseOp::Movaps},   {"movups", SseOp::Movups},   {"movss", SseOp::Movss},
+    {"movdqa", SseOp::Movdqa},   {"movdqu", SseOp::Movdqu},
+    {"xorps", SseOp::Xorps},
+    {"cvtsi2ss", SseOp::Cvtsi2ss}, {"cvttss2si", SseOp::Cvttss2si},
+    {"addss", SseOp::Addss},     {"subss", SseOp::Subss},     {"mulss", SseOp::Mulss},
+    {"divss", SseOp::Divss},
+    {"comiss", SseOp::Comiss},   {"ucomiss", SseOp::Ucomiss},
+};
+
+SseOp sseFromMnemonic(const char* name) {
+    if (!name) return SseOp::None;
+    for (const SseRow& r : kSseMap)
+        if (std::strcmp(name, r.name) == 0) return r.sse;
+    return SseOp::None;
 }
 
 // `rep` / `lock` 前缀后的规范名（A3 要跟 `.lst` 的 `rep movsd` / `lock xadd` 对上）
@@ -335,7 +361,13 @@ bool Decoder::decode(const GuestMemory& mem, std::uint32_t ea, Insn* out, std::s
         ins.op = Op::Packed;
         ins.pk = pk;
     } else {
-        ins.op = opFromCanonical(key);
+        const SseOp sse = sseFromMnemonic(key);
+        if (sse != SseOp::None) {
+            ins.op = Op::Sse;
+            ins.sse = sse;
+        } else {
+            ins.op = opFromCanonical(key);
+        }
     }
     // `F3 C3`（rep ret）：Zydis 把 F3 当"对 RET 无意义的前缀"吃掉、不置 REP 属性，
     // 所以按**字节**补一次（IDA 写 `rep retn`）。

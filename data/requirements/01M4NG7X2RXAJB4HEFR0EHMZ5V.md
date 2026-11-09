@@ -2,8 +2,9 @@
 
 - id: REQ-01M4NG7X2RXAJB4HEFR0EHMZ5V
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M3TD4N309J3Y6YMWWR2GTQAA
+- dropped_reason: K2 是知识台账的校验线（锚点重挂 EA + 重跑幸存守卫）；台账 / spec 知识层已不是当前交付物的前置（lift 不消费台账）。需要时从 git 恢复。
 
 ## 问题
 **6 个** `bin` 锚（`repo=reference`）的 `path` 是 `dist/install/SYS4INI.BIN` —— 那是**游戏安装树**的相对路径，

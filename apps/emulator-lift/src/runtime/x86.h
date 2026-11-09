@@ -182,6 +182,13 @@ struct X86 {
     std::uint32_t xmm[8][4] = {};
     std::uint8_t* xmmBytes(int i) { return reinterpret_cast<std::uint8_t*>(xmm[i & 7]); }
     const std::uint8_t* xmmBytes(int i) const { return reinterpret_cast<const std::uint8_t*>(xmm[i & 7]); }
+    // ★ SSE 的 MXCSR（Intel Vol.1 §10.2.3）：本仓**只建模 IE（bit0 = invalid）**。
+    //   为什么只建模这一位：`comiss` 与 `ucomiss` 对 **QNaN** 的差别（前者置 #I、后者不置）
+    //   是 SDM 明确分开的语义，而它是**唯一**能观测这条差别的地方。其余位（DE/ZE/OE/UE/PE、
+    //   掩码位、舍入控制）没有消费者（本仓没有 `ldmxcsr` / `stmxcsr` / `fxsave`，也不投递 #XM）⇒
+    //   ⛔ 不假装建模：只保留复位值 0x1F80（= 全部异常屏蔽 + 就近舍入）并只置 IE。
+    // ★ 与 x87 的关系：MXCSR 是**独立**寄存器，`finit` / `fldcw` / `emms` 都不碰它。
+    std::uint32_t mxcsr = 0x1F80u;
     ShimState shim;
 
     // ---- 服务（由 Machine 装配；shim 直接从这里取）----

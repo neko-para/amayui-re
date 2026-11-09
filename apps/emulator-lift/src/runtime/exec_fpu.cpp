@@ -17,7 +17,10 @@
 //
 // ★ MMX 复用 x87 寄存器槽的**低 64 位**（Intel：MMX 与 x87 共用物理寄存器）；SSE 的 XMM
 //   在 `X86::xmm[8][4]`。`emms` 把 tag word 置全 empty（Intel 语义）。
-// ⛔ 未实现形态（例如语料里没有的 SSE 浮点）仍然走 `unimplemented()` 响亮失败。
+// ★ SSE 浮点 / 128 位搬移是独立一族（`Op::Sse` + `execSse()`，见文件下半部）；语料 0 条，
+//   但按 Intel SDM 实现（不再是"未实现 ⇒ 响亮失败"）。
+// ⛔ 未实现形态（例如 SSE 的 packed 浮点 addps / mulps 等不在 14 条闭集合里的）仍然走
+//   `unimplemented()` 响亮失败（`addps` 仍落 `Op::Other`，守卫见 tests/dispatch.cpp）。
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -915,6 +918,303 @@ bool execPacked(X86& cpu, const Insn& in) {
     pkBinary(in.pk, a.b, b.b, bytes);
     if (!pkStore(cpu, in.op0(), a, bytes)) return unimplemented(cpu, in, "MMX/SSE 的目标写失败");
     return true;
+}
+
+// =====================================================================================
+// SSE 标量单精度 + 128 位搬移 / 位运算（`Op::Sse`）
+//
+// ★ 为什么单独一族：这 14 条形态里，`xorps` 是**按位**的、`movaps` 是**整份 128 位**的，
+//   而 `movss` / `cvtsi2ss` / `addss` 一族是**标量**的（只动低 32 位）。它们的共同点只是
+//   "操作数是 XMM"；塞进 `PkOp` 的整数 lane 语义会把这几类混成一套（NaN / 舍入 / invalid
+//   与整数溢出 / 饱和根本不是一回事）。
+//
+// ★ 128 位语义**逐条**钉住（出处 = Intel SDM Vol.2 各条目的 Operation 伪码）：
+//   · `MOVSS xmm1, xmm2`（legacy，寄存器源）：DEST[31:0] := SRC[31:0]；DEST[MAXVL-1:32] **Unmodified**。
+//   · `MOVSS xmm1, m32`（legacy，内存源）：DEST[31:0] := SRC[31:0]；**DEST[127:32] := 0**。
+//   · `MOVSS m32, xmm1`：只写 4 字节（DEST[31:0] := SRC[31:0]）。
+//   · `CVTSI2SS xmm1, r/m32`（legacy）：DEST[31:0] := Convert；**DEST[MAXVL-1:32] Unmodified**
+//     —— 这正是"现行 SDM 文本"的口径（VEX 形态才复制 SRC1 的高位并清 MAXVL:128；本仓只解 legacy）。
+//   · `ADDSS` / `SUBSS` / `MULSS` / `DIVSS xmm1, xmm2/m32`：只改 DEST[31:0]，高 96 位不动。
+//   · `XORPS`：整份 128 位的按位异或，**不写任何 flag**（SDM：Flags Affected = None）。
+//   · `COMISS` / `UCOMISS`：写 EFLAGS 的 ZF/PF/CF，**OF/SF/AF 清 0**；不碰 x87 的 C0..C3。
+//   · `MOVAPS` / `MOVDQA` 要求 m128 **16 字节对齐**（否则 #GP）；`MOVUPS` / `MOVDQU` 不要求。
+//
+// ★ 对齐违例的取舍（本仓没有 guest 异常投递）：**响亮失败**（`unimplemented()` 打印 EA + 助记符 +
+//   字节 + 寄存器后停机），⛔ 不静默按 MOVUPS 处理 —— 那会把"程序有 bug"变成静默的数据搬运。
+//
+// ★ 与 x87 / MMX 的交互：XMM 是**独立**寄存器文件，这里的指令**不碰** tag word / TOP / 状态字；
+//   反方向 `emms` 也不碰 XMM（由 `execPacked` 的 `PkOp::Ems` 保证）。
+//   浮点异常也不投递宿主异常：宿主 IEEE 默认环境（就近舍入、异常全屏蔽）下 NaN / ∞ 只是值。
+// =====================================================================================
+namespace {
+
+bool sseIsNaN(std::uint32_t bits) {
+    return (bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0u;
+}
+// SNaN = NaN 且 quiet 位（尾数最高位 bit22）为 0（Intel Vol.1 §4.8.3.5）
+bool sseIsSnan(std::uint32_t bits) { return sseIsNaN(bits) && (bits & 0x00400000u) == 0u; }
+
+float sseAsF32(std::uint32_t bits) {
+    float f = 0.0f;
+    std::memcpy(&f, &bits, 4);
+    return f;
+}
+std::uint32_t sseBits32(float f) {
+    std::uint32_t u = 0;
+    std::memcpy(&u, &f, 4);
+    return u;
+}
+
+// invalid（#I）在**本模型**里的落点：MXCSR.IE。默认 MXCSR 异常全屏蔽 ⇒ 真机也只置位、不 trap，
+//   且 EFLAGS 仍然更新（未屏蔽时 EFLAGS 不更新 —— 本仓没有投递路径，见 `X86::mxcsr` 的注释）。
+void sseRaiseInvalid(X86& cpu) { cpu.mxcsr |= 0x00000001u; }
+
+// 标量源：xmm 的低 32 位 / m32
+bool sseScalarSrc(X86& cpu, const Operand& op, std::uint32_t* out) {
+    if (op.kind == OpKind::Xmm) {
+        if (op.vec >= 8) return false;
+        *out = cpu.xmm[op.vec][0];
+        return true;
+    }
+    if (op.kind == OpKind::Mem && op.mem.size == 4) {
+        *out = cpu.mem->rd32(cpu.eaOf(op.mem));
+        return true;
+    }
+    return false;
+}
+
+// 128 位源：xmm 整份 / m128
+bool sseLoad128(X86& cpu, const Operand& op, std::uint8_t out[16]) {
+    if (op.kind == OpKind::Xmm) {
+        if (op.vec >= 8) return false;
+        std::memcpy(out, cpu.xmmBytes(op.vec), 16);
+        return true;
+    }
+    if (op.kind == OpKind::Mem && op.mem.size == 16) {
+        const std::uint32_t ea = cpu.eaOf(op.mem);
+        for (int i = 0; i < 16; ++i) out[i] = cpu.mem->rd8(ea + static_cast<std::uint32_t>(i));
+        return true;
+    }
+    return false;
+}
+
+bool sseStore128(X86& cpu, const Operand& op, const std::uint8_t src[16]) {
+    if (op.kind != OpKind::Mem || op.mem.size != 16) return false;
+    const std::uint32_t ea = cpu.eaOf(op.mem);
+    for (int i = 0; i < 16; ++i) cpu.mem->wr8(ea + static_cast<std::uint32_t>(i), src[i]);
+    return true;
+}
+
+// MOVAPS / MOVDQA 的 m128 对齐检查（SDM：未对齐 ⇒ #GP）。非内存操作数一律通过。
+// ⛔ 传**字符串字面量**给 `unimplemented()`：它把指针存进 `cpu.stop_why`（栈缓冲会悬空）。
+bool sseRequireAligned(X86& cpu, const Operand& op, const Insn& in) {
+    if (op.kind != OpKind::Mem) return true;
+    if ((cpu.eaOf(op.mem) & 15u) == 0u) return true;
+    return unimplemented(cpu, in, "MOVAPS/MOVDQA 的 m128 操作数未按 16 字节对齐（SDM：对齐违例 #GP）");
+}
+
+}  // namespace
+
+bool execSse(X86& cpu, const Insn& in) {
+    switch (in.sse) {
+        case SseOp::None:
+            return unimplemented(cpu, in, "SSE 指令没有子语义（解码器漏了映射）");
+
+        // ---- 128 位搬移（整份覆盖）----
+        case SseOp::Movaps:
+        case SseOp::Movups:
+        case SseOp::Movdqa:
+        case SseOp::Movdqu: {
+            const bool aligned = (in.sse == SseOp::Movaps || in.sse == SseOp::Movdqa);
+            const Operand& dst = in.op0();
+            const Operand& src = in.op1();
+            if (dst.kind == OpKind::Xmm) {
+                if (aligned && !sseRequireAligned(cpu, src, in)) return false;
+                std::uint8_t buf[16] = {};
+                if (!sseLoad128(cpu, src, buf)) return unimplemented(cpu, in, "SSE 搬移的源必须是 xmm / m128");
+                if (dst.vec >= 8) return unimplemented(cpu, in, "SSE 搬移的目标 xmm 下标越界");
+                std::memcpy(cpu.xmmBytes(dst.vec), buf, 16);  // 整份 128 位覆盖
+                return true;
+            }
+            if (dst.kind == OpKind::Mem) {
+                if (src.kind != OpKind::Xmm || src.vec >= 8) {
+                    return unimplemented(cpu, in, "SSE 搬移到内存时源必须是 xmm");
+                }
+                if (aligned && !sseRequireAligned(cpu, dst, in)) return false;
+                if (!sseStore128(cpu, dst, cpu.xmmBytes(src.vec))) {
+                    return unimplemented(cpu, in, "SSE 搬移的内存目标必须是 m128");
+                }
+                return true;
+            }
+            return unimplemented(cpu, in, "SSE 搬移的操作数形态不支持");
+        }
+
+        // ---- movss：标量 + 高 96 位语义（见文件头）----
+        case SseOp::Movss: {
+            const Operand& dst = in.op0();
+            const Operand& src = in.op1();
+            if (dst.kind == OpKind::Xmm) {
+                if (dst.vec >= 8) return unimplemented(cpu, in, "movss 的目标 xmm 下标越界");
+                if (src.kind == OpKind::Xmm) {
+                    if (src.vec >= 8) return unimplemented(cpu, in, "movss 的源 xmm 下标越界");
+                    // legacy reg-reg：DEST[MAXVL-1:32] 不修改
+                    cpu.xmm[dst.vec][0] = cpu.xmm[src.vec][0];
+                    return true;
+                }
+                if (src.kind == OpKind::Mem) {
+                    if (src.mem.size != 4) return unimplemented(cpu, in, "movss 的源必须是 m32");
+                    cpu.xmm[dst.vec][0] = cpu.mem->rd32(cpu.eaOf(src.mem));
+                    // legacy mem 源：DEST[127:32] 清 0
+                    cpu.xmm[dst.vec][1] = 0;
+                    cpu.xmm[dst.vec][2] = 0;
+                    cpu.xmm[dst.vec][3] = 0;
+                    return true;
+                }
+                return unimplemented(cpu, in, "movss 的源操作数形态不支持");
+            }
+            if (dst.kind == OpKind::Mem) {
+                if (src.kind != OpKind::Xmm || src.vec >= 8) {
+                    return unimplemented(cpu, in, "movss 存内存时源必须是 xmm");
+                }
+                if (dst.mem.size != 4) return unimplemented(cpu, in, "movss 的内存目标必须是 m32");
+                cpu.mem->wr32(cpu.eaOf(dst.mem), cpu.xmm[src.vec][0]);  // 只写 4 字节
+                return true;
+            }
+            return unimplemented(cpu, in, "movss 的目标操作数形态不支持");
+        }
+
+        // ---- xorps：整份 128 位按位异或（不写 flag）----
+        case SseOp::Xorps: {
+            if (in.op0().kind != OpKind::Xmm || in.op0().vec >= 8) {
+                return unimplemented(cpu, in, "xorps 的目标必须是 xmm");
+            }
+            std::uint8_t b[16] = {};
+            if (!sseLoad128(cpu, in.op1(), b)) return unimplemented(cpu, in, "xorps 的源必须是 xmm / m128");
+            std::uint8_t* d = cpu.xmmBytes(in.op0().vec);
+            for (int i = 0; i < 16; ++i) d[i] = static_cast<std::uint8_t>(d[i] ^ b[i]);
+            return true;
+        }
+
+        // ---- cvtsi2ss：有符号 32 位整数 → 标量单精度 ----
+        case SseOp::Cvtsi2ss: {
+            if (in.op0().kind != OpKind::Xmm || in.op0().vec >= 8) {
+                return unimplemented(cpu, in, "cvtsi2ss 的目标必须是 xmm");
+            }
+            std::int32_t v = 0;
+            if (in.op1().kind == OpKind::Reg) {
+                v = static_cast<std::int32_t>(cpu.readReg(in.op1().reg));
+            } else if (in.op1().kind == OpKind::Mem && in.op1().mem.size == 4) {
+                v = static_cast<std::int32_t>(cpu.mem->rd32(cpu.eaOf(in.op1().mem)));
+            } else {
+                return unimplemented(cpu, in, "cvtsi2ss 的源必须是 r/m32");
+            }
+            // 用 float 而不是 double：舍入到 binary32（= 就近偶数，MXCSR.RC 的复位值）。
+            // SDM：legacy 形态 DEST[MAXVL-1:32] **Unmodified** ⇒ 高 96 位原样保留。
+            cpu.xmm[in.op0().vec][0] = sseBits32(static_cast<float>(v));
+            return true;
+        }
+
+        // ---- cvttss2si：标量单精度 → 有符号 32 位整数（**朝零截断**）----
+        case SseOp::Cvttss2si: {
+            if (in.op0().kind != OpKind::Reg) return unimplemented(cpu, in, "cvttss2si 的目标必须是 r32");
+            std::uint32_t bits = 0;
+            if (!sseScalarSrc(cpu, in.op1(), &bits)) {
+                return unimplemented(cpu, in, "cvttss2si 的源必须是 xmm / m32");
+            }
+            // SDM：NaN / ±∞ / 越界 ⇒ **invalid** + 整数不定值 0x80000000；否则朝零截断
+            //   （⛔ 不是四舍五入 —— `cvtt` 的 t 就是 truncate）。
+            std::uint32_t result = 0x80000000u;
+            bool invalid = false;
+            const float f = sseAsF32(bits);
+            if (std::isnan(f) || std::isinf(f)) {
+                invalid = true;
+            } else {
+                // float → double 是精确的；trunc 后是整数 ⇒ 区间判断足够
+                const double t = std::trunc(static_cast<double>(f));
+                // ±2^31 是边界：|x| ≥ 2^31 越界（-2^31 本身**在**范围内）
+                if (t >= 2147483648.0 || t < -2147483648.0) {
+                    invalid = true;
+                } else {
+                    result = static_cast<std::uint32_t>(static_cast<std::int32_t>(t));
+                }
+            }
+            if (invalid) sseRaiseInvalid(cpu);
+            cpu.writeReg(in.op0().reg, result);
+            return true;
+        }
+
+        // ---- addss / subss / mulss / divss：只改低 32 位 ----
+        case SseOp::Addss:
+        case SseOp::Subss:
+        case SseOp::Mulss:
+        case SseOp::Divss: {
+            if (in.op0().kind != OpKind::Xmm || in.op0().vec >= 8) {
+                return unimplemented(cpu, in, "SSE 标量算术的目标必须是 xmm");
+            }
+            std::uint32_t b = 0;
+            if (!sseScalarSrc(cpu, in.op1(), &b)) {
+                return unimplemented(cpu, in, "SSE 标量算术的源必须是 xmm / m32");
+            }
+            const float x = sseAsF32(cpu.xmm[in.op0().vec][0]);
+            const float y = sseAsF32(b);
+            float r = 0.0f;
+            switch (in.sse) {
+                case SseOp::Addss: r = x + y; break;
+                case SseOp::Subss: r = x - y; break;
+                case SseOp::Mulss: r = x * y; break;
+                default: r = x / y; break;  // Divss（0/0 ⇒ NaN、x/0 ⇒ ±∞，宿主默认不 trap）
+            }
+            // ★ 宿主 IEEE binary32 与 SDM 的标量单精度在**值**上一致（NaN 传播 / 就近舍入都对得上）；
+            //   但 MXCSR 的 DE/ZE/OE/UE/PE 与 invalid 的 quiet/signaling 区分**未建模**（没有消费者）。
+            cpu.xmm[in.op0().vec][0] = sseBits32(r);
+            return true;  // 高 96 位原样保留
+        }
+
+        // ---- comiss / ucomiss：EFLAGS（不是 x87 的 C0..C3）----
+        case SseOp::Comiss:
+        case SseOp::Ucomiss: {
+            if (in.op0().kind != OpKind::Xmm || in.op0().vec >= 8) {
+                return unimplemented(cpu, in, "comiss/ucomiss 的目标必须是 xmm");
+            }
+            std::uint32_t b = 0;
+            if (!sseScalarSrc(cpu, in.op1(), &b)) {
+                return unimplemented(cpu, in, "comiss/ucomiss 的源必须是 xmm / m32");
+            }
+            const std::uint32_t a = cpu.xmm[in.op0().vec][0];
+            const bool a_nan = sseIsNaN(a);
+            const bool b_nan = sseIsNaN(b);
+            // SDM 的 Operation 伪码：UNORDERED ⇒ ZF,PF,CF := 111；GREATER ⇒ 000；LESS ⇒ 001；
+            // EQUAL ⇒ 100；**OF, AF, SF := 0**。
+            bool cf = false;
+            bool pf = false;
+            bool zf = false;
+            if (a_nan || b_nan) {
+                cf = true;
+                pf = true;
+                zf = true;
+            } else {
+                const float x = sseAsF32(a);
+                const float y = sseAsF32(b);
+                if (x < y) cf = true;
+                else if (x == y) zf = true;
+            }
+            cpu.setCf(cf);
+            cpu.setPf(pf);
+            cpu.setZf(zf);
+            cpu.setOf(false);
+            cpu.setSf(false);
+            cpu.setAf(false);
+            // ★ QNaN 与 SNaN 的差别（SDM 的 Description）：**COMISS 对 QNaN 也置 #I**，
+            //   UCOMISS 只对 SNaN 置 #I。默认 MXCSR 全屏蔽 ⇒ 只置 IE 位、不 trap、EFLAGS 照写。
+            const bool snan = (a_nan && sseIsSnan(a)) || (b_nan && sseIsSnan(b));
+            const bool qnan = (a_nan && !sseIsSnan(a)) || (b_nan && !sseIsSnan(b));
+            if (snan || (qnan && in.sse == SseOp::Comiss)) sseRaiseInvalid(cpu);
+            return true;
+        }
+
+        default:
+            return unimplemented(cpu, in, "SSE 族没有这条语义（闭集合里没登记）");
+    }
 }
 
 // =====================================================================================

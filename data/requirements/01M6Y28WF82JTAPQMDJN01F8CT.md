@@ -2,8 +2,9 @@
 
 - id: REQ-01M6Y28WF82JTAPQMDJN01F8CT
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M6XZ444RH3YWHAZYWFS8VGA5
+- dropped_reason: apps/emulator-cxx 冻结 ⇒ 它的证据锚变异覆盖问题随整支一起关闭；spec 侧不需要再为冻结实现补机械证明。
 
 ## 为什么有这张单（现状，实测）
 
