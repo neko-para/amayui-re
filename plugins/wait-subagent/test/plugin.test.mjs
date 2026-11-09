@@ -1,4 +1,4 @@
-/** @env pure @kind contract @why wait_subagent 插件接线/模型可见结果坏了 */
+/** @env pure @kind contract @suite toolchain @why wait_subagent 插件接线/模型可见结果坏了 */
 /**
  * plugins/wait-subagent/test/plugin.test.mjs —— 插件加载与工具契约
  *

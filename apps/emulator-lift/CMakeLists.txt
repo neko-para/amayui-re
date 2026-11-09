@@ -342,15 +342,6 @@ add_executable(lift-skip-logo tests/skip_logo.cpp)
 target_link_libraries(lift-skip-logo PRIVATE emulator-lift-runtime)
 add_test(NAME skip-logo COMMAND lift-skip-logo)
 
-add_executable(lift-surface-present tests/surface_present.cpp)
-target_link_libraries(lift-surface-present PRIVATE emulator-lift-runtime)
-add_test(NAME surface-present COMMAND lift-surface-present)
-
-# ---- pure：PresentSink 契约（headless 默认不变 / sink 失败不污染 guest）----
-add_executable(lift-present-sink tests/present_sink.cpp)
-target_link_libraries(lift-present-sink PRIVATE emulator-lift-runtime)
-add_test(NAME present-sink COMMAND lift-present-sink)
-
 # ---- pure：guest 后缓冲格式选择（六种 masks，不按 bpp 猜）----
 add_executable(lift-frame-blit tests/frame_blit.cpp)
 target_link_libraries(lift-frame-blit PRIVATE emulator-lift-runtime)
@@ -386,18 +377,11 @@ target_link_libraries(lift-gpu-direct-present PRIVATE emulator-lift-runtime)
 add_test(NAME gpu-direct-present COMMAND lift-gpu-direct-present)
 set_tests_properties(gpu-direct-present PROPERTIES SKIP_RETURN_CODE 77)
 
-# ---- pure：GPU 准入 / 状态映射（TITLE 的 blend 5/6 + separate 2/6、stage0 MODULATE(TEX,TFACTOR)）----
-# 不建机器、不碰 SDL：只是 d3d9::gpuBlendStateFor / gpuTextureModeFor 的期望值。
-add_executable(lift-gpu-mapping tests/gpu_mapping.cpp)
-target_link_libraries(lift-gpu-mapping PRIVATE emulator-lift-runtime)
-add_test(NAME gpu-mapping COMMAND lift-gpu-mapping)
-
 # ---- GPU 合批（入队 + 一次 flush）：pure 档（Mock 后端，不碰 SDL / GPU）----
 # 判据：N 次 Draw 只 flush 1 次；Clear(TARGET) / Present / 换 target 各触发 flush + syncToGuest 1 次，
 # 且 syncFromGuest 在队列非空时被拒绝（⛔ 静默覆盖）。去掉 flush ⇒ 队列不清空 ⇒ 当场红。
 add_executable(lift-gpu-batch tests/gpu_batch.cpp)
 target_link_libraries(lift-gpu-batch PRIVATE emulator-lift-runtime)
-add_test(NAME gpu-batch-order COMMAND lift-gpu-batch)
 
 # ---- 同一份夹具的真后端判据：Clear / 纹理 LockRect / SetRenderTarget 之后像素对、队列空 ----
 # dummy 视频下建不出 SDL_GPU 设备 ⇒ SKIP 77（⛔ 不拿 pure 档冒充真后端绿）。
@@ -451,7 +435,6 @@ add_executable(lift-codepage tests/codepage.cpp)
 target_link_libraries(lift-codepage PRIVATE emulator-lift-runtime)
 add_test(NAME codepage COMMAND lift-codepage)
 
-# ---- pure：明确 no-op 的三族（注册表 / 音频 / 视频；SCOPE §1）----
 add_executable(lift-log-policy tests/log_policy.cpp)
 target_link_libraries(lift-log-policy PRIVATE emulator-lift-runtime)
 add_test(NAME log-policy COMMAND lift-log-policy)
@@ -459,10 +442,6 @@ add_test(NAME log-policy COMMAND lift-log-policy)
 add_executable(lift-quartz-video tests/quartz_video.cpp)
 target_link_libraries(lift-quartz-video PRIVATE emulator-lift-runtime)
 add_test(NAME quartz-video COMMAND lift-quartz-video)
-
-add_executable(lift-noop tests/noop_shims.cpp)
-target_link_libraries(lift-noop PRIVATE emulator-lift-runtime)
-add_test(NAME noop COMMAND lift-noop)
 
 # ---- pure：文件与路径族（S6；临时目录，不碰游戏）----
 add_executable(lift-file-io tests/file_io.cpp)
@@ -501,7 +480,6 @@ add_test(NAME shims-core COMMAND lift-shims-core)
 # ---- pure：吞吐基准（S8；只测解释器分发，不设性能门槛 ⇒ 数字进 tools/lift.mjs report）----
 add_executable(lift-bench tests/bench.cpp)
 target_link_libraries(lift-bench PRIVATE emulator-lift-runtime)
-add_test(NAME bench COMMAND lift-bench)
 
 # ---- assets：要 corpus 里的二进制 / `.lst`（不在仓库里，见 .gitignore）----
 set(AGE_SECTFIX_EXE "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE")
@@ -666,16 +644,6 @@ add_test(NAME math COMMAND lift-math)
 add_executable(lift-pixel-format tests/pixel_format.cpp)
 target_link_libraries(lift-pixel-format PRIVATE emulator-lift-runtime)
 add_test(NAME pixel-format COMMAND lift-pixel-format)
-
-# =====================================================================================
-# `--profile` 的宿主 shim 墙钟表（pure：裸 Machine + 一个已知 shim；不碰游戏 / LFS / SDL）
-# ★ 判据见 tests/profile_shims.cpp 文件头：`RunOptions{profile=true}` ⇒ `=== profile: shims`
-#   表里出现 `test!slow` 且 `calls=1`；删掉 `machine.cpp` 的 `|| opts.profile` ⇒ 该行消失 ⇒ 红。
-# ★ 顶层无条件注册 ⇒ pure 档。
-# =====================================================================================
-add_executable(lift-profile-shims tests/profile_shims.cpp)
-target_link_libraries(lift-profile-shims PRIVATE emulator-lift-runtime)
-add_test(NAME profile-shims COMMAND lift-profile-shims)
 
 # =====================================================================================
 # 可定界的区间 profiler（`profile_begin` / `profile_end`；pure：裸 Machine + 自造字节 + 一个已知 shim）

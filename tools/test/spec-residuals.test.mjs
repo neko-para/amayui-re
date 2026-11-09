@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 残差地图的两轴被改坏（新章没登记通道 / 弃权不看正文 / 矩阵与明细不同源） */
+/** @env pure @kind gate @suite toolchain @why 残差地图的两轴被改坏（新章没登记通道 / 弃权不看正文 / 矩阵与明细不同源） */
 /**
  * tools/test/spec-residuals.test.mjs —— `spec residuals`（残差地图）的契约与判别力
  *

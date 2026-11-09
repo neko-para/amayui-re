@@ -23,15 +23,25 @@
  *     - `contract` 领域能力的行为
  *     - `safety` 写路径不写坏数据（dry-run / 回读复验 / 回滚 / 幂等）
  *     - `product` 产出物满足不变量
+ *   * `@suite` —— 决定"它属于哪一档门禁"（**与 `@env` 正交**：一个说"这台机器上有没有意义"，
+ *     一个说"它是合同还是本仓自己的机械装置"）：
+ *     - `contract`（**缺省**，可省略）对外边界合同 / 基建契约 —— `pnpm test` 只跑这档（快、常跑）
+ *     - `toolchain` 工具链 / 台账 / 知识层 —— `pnpm verify` 只跑这档（按需跑）
+ *     ★ 只有 `toolchain` 要**显式写**；不写 = `contract`（所以只有工具链档的文件带这个字段，其余 pragma 一字不动）。
  *   * `@why` —— 一句话，给下一个人看"这条红了要不要慌"（**不许写"测试用"这种废话**）
  *
  * ## 用法
  * ```bash
- * node tools/test-run.mjs                 # = pure（默认门禁）
- * node tools/test-run.mjs --env assets    # 只跑 assets
+ * node tools/test-run.mjs                 # = pure（不按 suite 过滤 ⇒ 向后兼容，两档都跑）
+ * node tools/test-run.mjs --suite contract   # = `pnpm test`（合同档）
+ * node tools/test-run.mjs --suite toolchain  # = `pnpm verify`（工具链档）
+ * node tools/test-run.mjs --env assets    # 只跑 assets（不按 suite 过滤）
  * node tools/test-run.mjs --all           # 全部
- * node tools/test-run.mjs --list          # 只列集合与声明，不跑（★ 先看这个）
+ * node tools/test-run.mjs --list          # 只列集合与声明，不跑（★ 先看这个；会显示两档）
  * ```
+ * ★ **两档之和 = 改动前的默认档**：`test` 与 `verify` 都只跑 `@env pure`，只是 `@suite` 互补
+ *   ⇒ 没有任何用例从默认门禁里消失（`assets` / `external` 那两档的判据照旧，仍由
+ *   `test:assets` / `test:all` 承担）。
  * ★ **不捕获子进程输出**：`node --test` 直接 `stdio: 'inherit'`（受限沙箱里管道会 EPERM）。
  */
 import fs from 'node:fs';
@@ -46,15 +56,28 @@ export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url
 export const ENVS = ['pure', 'assets', 'external'];
 /** 断言类别 */
 export const KINDS = ['gate', 'contract', 'safety', 'product'];
+/**
+ * 门禁档（**与 `@env` 正交**）：`contract` = 对外边界合同 / 基建契约（`pnpm test`）；
+ * `toolchain` = 工具链 / 台账 / 知识层（`pnpm verify`）。
+ */
+export const SUITES = ['contract', 'toolchain'];
 /** 默认档：只跑 pure —— 见文件头"为什么要它" */
 export const DEFAULT_ENVS = ['pure'];
+/**
+ * `--suite` 的缺省 = **两档都选** ⇒ 裸 `node tools/test-run.mjs` 的行为与加 `@suite` 之前**完全一样**。
+ * 两档的划分写在 `package.json`（`test` / `verify` 各给一个 `--suite`），不写在这里。
+ */
+export const DEFAULT_SUITES = [...SUITES];
 
 /** 测试文件住在哪（与 `package.json` 的 test glob 必须一致） */
 const SEARCH_DIRS = ['tools/test', 'packages', 'plugins', 'apps'];
 const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', '.tmp', '.staging', '.cache']);
 
-/** pragma 行：`/** @env <env> @kind <kind> @why <一句话> *\/` */
-const PRAGMA_RE = /^\/\*\*\s*@env\s+(\S+)\s+@kind\s+(\S+)\s+@why\s+(.+?)\s*\*\/\s*$/;
+/**
+ * pragma 行：`/** @env <env> @kind <kind> [@suite <suite>] @why <一句话> *\/`
+ * ★ `@suite` **可省略**（省略 = `contract`）⇒ 只有工具链档的文件带它，其余 pragma 一字不动。
+ */
+const PRAGMA_RE = /^\/\*\*\s*@env\s+(\S+)\s+@kind\s+(\S+)(?:\s+@suite\s+(\S+))?\s+@why\s+(.+?)\s*\*\/\s*$/;
 
 /** 找全部测试文件（排序固定 ⇒ 报错与输出稳定） */
 export function findTestFiles(root = REPO_ROOT) {
@@ -78,25 +101,28 @@ export function findTestFiles(root = REPO_ROOT) {
 
 /**
  * 读一个文件的 pragma 声明（**只读头 40 行** ⇒ 选集合不必加载任何模块，几十毫秒）。
- * @returns {{file:string, rel:string, env?:string, kind?:string, why?:string, problems:string[]}}
+ * @returns {{file:string, rel:string, env?:string, kind?:string, suite?:string, why?:string, problems:string[]}}
  */
 export function readPragma(file, root = REPO_ROOT) {
   const rel = path.relative(root, file).split(path.sep).join('/');
   const head = fs.readFileSync(file, 'utf8').split('\n', 40);
   const line = head.find((l) => l.includes('@env') || l.includes('@kind') || l.includes('@why'));
   if (!line) {
-    return { file, rel, problems: [`${rel}: 首行缺 pragma 声明（需要 \`/** @env <${ENVS.join('|')}> @kind <${KINDS.join('|')}> @why <一句话> */\`）`] };
+    return { file, rel, problems: [`${rel}: 首行缺 pragma 声明（需要 \`/** @env <${ENVS.join('|')}> @kind <${KINDS.join('|')}> [@suite <${SUITES.join('|')}>] @why <一句话> */\`）`] };
   }
   const m = PRAGMA_RE.exec(line.trim());
   if (!m) {
-    return { file, rel, problems: [`${rel}: pragma 形态非法 → \`${line.trim()}\`（应为 \`/** @env <${ENVS.join('|')}> @kind <${KINDS.join('|')}> @why <一句话> */\`）`] };
+    return { file, rel, problems: [`${rel}: pragma 形态非法 → \`${line.trim()}\`（应为 \`/** @env <${ENVS.join('|')}> @kind <${KINDS.join('|')}> [@suite <${SUITES.join('|')}>] @why <一句话> */\`）`] };
   }
-  const [, env, kind, why] = m;
+  const [, env, kind, suite, why] = m;
   const problems = [];
   if (!ENVS.includes(env)) problems.push(`${rel}: @env 非法 ${JSON.stringify(env)}（应为 ${ENVS.join('/')}）`);
   if (!KINDS.includes(kind)) problems.push(`${rel}: @kind 非法 ${JSON.stringify(kind)}（应为 ${KINDS.join('/')}）`);
+  // ★ 省略 `@suite` = contract（缺省档）；写了就必须是闭集里的值
+  const suiteValue = suite ?? 'contract';
+  if (!SUITES.includes(suiteValue)) problems.push(`${rel}: @suite 非法 ${JSON.stringify(suiteValue)}（应为 ${SUITES.join('/')}，或整个省略 = contract）`);
   if (why.trim().length < 8) problems.push(`${rel}: @why 太短（要一句话说清"红了意味着什么"，别写"测试用"）`);
-  return { file, rel, env, kind, why, problems };
+  return { file, rel, env, kind, suite: suiteValue, why, problems };
 }
 
 /** 全部文件的声明 + 问题清单 */
@@ -106,12 +132,13 @@ export function survey(root = REPO_ROOT) {
 }
 
 function parseArgs(argv) {
-  const out = { envs: [...DEFAULT_ENVS], all: false, list: false, only: null };
+  const out = { envs: [...DEFAULT_ENVS], suites: [...DEFAULT_SUITES], all: false, list: false, only: null };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--all') out.all = true;
     else if (a === '--list') out.list = true;
     else if (a === '--env') out.envs = String(argv[++i] ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    else if (a === '--suite') out.suites = String(argv[++i] ?? '').split(',').map((s) => s.trim()).filter(Boolean);
     else if (a === '--kind') out.only = String(argv[++i] ?? '');
     else if (a === '--help' || a === '-h') out.help = true;
     else throw new Error(`不认识的选项：${a}`);
@@ -121,14 +148,19 @@ function parseArgs(argv) {
 
 const HELP = `tools/test-run.mjs —— 测试分级选择器（默认只跑 @env pure）
 
-  node tools/test-run.mjs                  # pure（日常门禁）
-  node tools/test-run.mjs --list           # ★ 先看集合与各文件声明，不跑
-  node tools/test-run.mjs --env assets     # 只跑 assets（要 LFS/游戏安装）
+  node tools/test-run.mjs                     # pure（两档都跑：与加 @suite 之前一样）
+  node tools/test-run.mjs --suite contract    # = pnpm test（对外边界合同 · 快）
+  node tools/test-run.mjs --suite toolchain   # = pnpm verify（工具链/台账/知识层 · 按需）
+  node tools/test-run.mjs --list              # ★ 先看集合与各文件声明，不跑（含两档分布）
+  node tools/test-run.mjs --env assets        # 只跑 assets（要 LFS/游戏安装；不按 suite 过滤）
   node tools/test-run.mjs --env pure,assets
-  node tools/test-run.mjs --all            # 全部（含 external：旧仓/真机）
-  node tools/test-run.mjs --kind gate      # 只看某一类（与 --env 可叠）
+  node tools/test-run.mjs --all               # 全部（含 external：旧仓/真机）
+  node tools/test-run.mjs --kind gate         # 只看某一类（与 --env / --suite 可叠）
+  node tools/test-run.mjs --suite toolchain --all   # 工具链档的 assets/external 部分
 
-★ 分级写在每个 *.test.mjs 的首行 pragma 里；判据与"为什么"见本文件头注释。
+★ 分级写在每个 *.test.mjs 的首行 pragma 里：
+  /** @env <pure|assets|external> @kind <gate|contract|safety|product> [@suite <contract|toolchain>] @why <一句话> *\/
+  @env 缺省 pure 档判据不变；@suite 省略 = contract。判据与"为什么"见本文件头注释。
 ★ 不捕获子进程输出（受限沙箱里管道会 EPERM）—— node --test 直接继承 stdio。
 `;
 
@@ -148,8 +180,10 @@ export function main(argv = process.argv.slice(2)) {
 
   const envs = args.all ? ENVS : args.envs;
   for (const e of envs) if (!ENVS.includes(e)) throw new Error(`--env 非法：${e}（应为 ${ENVS.join('/')}）`);
+  const suites = args.suites;
+  for (const s of suites) if (!SUITES.includes(s)) throw new Error(`--suite 非法：${s}（应为 ${SUITES.join('/')}）`);
 
-  let picked = decls.filter((d) => envs.includes(d.env));
+  let picked = decls.filter((d) => envs.includes(d.env) && suites.includes(d.suite));
   if (args.only) picked = picked.filter((d) => d.kind === args.only);
   const skipped = decls.filter((d) => !picked.includes(d));
 
@@ -159,17 +193,29 @@ export function main(argv = process.argv.slice(2)) {
       const xs = decls.filter((d) => d.env === e);
       if (!xs.length) continue;
       L.push(`${e}（${xs.length}）${envs.includes(e) ? '' : '  ← 本次不跑'}`);
-      for (const d of xs) L.push(`  [${d.kind}] ${d.rel}　—　${d.why}`);
+      // `@suite` 省略 = contract ⇒ 只在 toolchain 上打标，免得 176 行里塞满噪音
+      for (const d of xs) L.push(`  [${d.kind}${d.suite === 'toolchain' ? '·toolchain' : ''}] ${d.rel}　—　${d.why}`);
       L.push('');
     }
+    // ★ 两档：`pnpm test` / `pnpm verify` 各自选哪些（都只跑默认 env —— 与 package.json 一致）
+    const tiers = SUITES.map((s) => ({ s, xs: decls.filter((d) => d.env === 'pure' && d.suite === s) }));
+    const offDefaultEnv = SUITES.map((s) => ({ s, n: decls.filter((d) => d.env !== 'pure' && d.suite === s).length }));
+    L.push('两档（都只跑 @env pure —— 与 package.json 的 test / verify 一致）');
+    for (const { s, xs } of tiers) {
+      const cmd = s === 'contract' ? 'pnpm test  ' : 'pnpm verify';
+      L.push(`  ${cmd}  @suite ${s.padEnd(9)} ${xs.length} 个文件（pure）`);
+    }
+    L.push(`  其余 @env assets/external：${offDefaultEnv.map(({ s, n }) => `${s} ${n}`).join(' · ')} 个文件（\`pnpm test:assets\` / \`pnpm test:all\`，或 \`--suite <档> --all\`）`);
+    L.push('');
     process.stdout.write(`${L.join('\n')}\n`);
     return 0;
   }
 
   const L = [
     `档位        ${envs.join(' + ')}${args.only ? `　·　仅 kind=${args.only}` : ''}`,
+    `门禁档      ${suites.join(' + ')}${suites.length === SUITES.length ? '（两档都跑）' : ''}`,
     `本次跑      ${picked.length} 个文件`,
-    `本次不跑    ${skipped.length} 个${skipped.length ? `　（${[...new Set(skipped.map((d) => d.env))].join(' / ')} ⇒ \`pnpm test:all\` 跑全量）` : ''}`,
+    `本次不跑    ${skipped.length} 个${skipped.length ? `　（${[...new Set(skipped.map((d) => d.env))].join(' / ')} · ${[...new Set(skipped.map((d) => d.suite))].join(' / ')} ⇒ \`pnpm test:all\` 跑全量）` : ''}`,
     '',
   ];
   process.stdout.write(`${L.join('\n')}\n`);

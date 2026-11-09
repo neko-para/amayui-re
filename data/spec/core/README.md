@@ -76,7 +76,11 @@
 但"元素类型 / 生命周期 / 失败路径"还没成篇 ⇒ 保留 planned，不冒成 `CORE-CONTAINERS` 的独立章。
 ★ 机制表是组织真源，`planned[]` 只是 `audit` 数据的一个视图；**改一边必须改另一边**。
 ★ **机器形态**：每条 `planned[]` 带 `mechanism` 字段（上表的右列；`core-out` = core 外），
-`tools/test/spec-mechanisms.test.mjs` 守三件事 —— 闭集、每项都有归属、每个机制至少有一个需求单在跟踪。
+`tools/test/spec-mechanisms.test.mjs` 守两件事 —— 闭集、每项都有归属。
+★ **机制 ↔ 需求单的映射不由守卫强制**（2026-11 裁决：spec 的机制与需求台账是两套独立的东西 ——
+机制表回答"core 切成哪些机制"，需求树回答"还要做什么"，两者没有强制对应关系）。
+⇒ 机制表加行**不要求**在需求树里补一张单；反过来需求单也不必逐条挂到某个机制上。
+⛔ 不要为了让门禁变绿去"补一张单来喂守卫"。
 ⛔ 不要只改表不加字段（那样守卫会红，而不是"表更新了"）。
 
 ### 2.2 `CORE-VM` 的子机制（先扫后拆的结果）
@@ -193,6 +197,6 @@ pnpm tools opcodes handlers   # opcode → handler EA（闭集与映射的入口
 pnpm tools requirements plan  # 还要做什么、到哪一步
 ```
 
-* 改机制表 ⇒ 改本文件 + 在需求树开 / 关对应单；
+* 改机制表 ⇒ 改本文件（与 `audit.planned[]` 的映射见 §2.1）；**不必**在需求树里开 / 关单（§2.1 末）；
 * 改条目 ⇒ 改它所在的 `data/spec/chapters/<章>.md`（正文）+ `bindings.json` / `audit.json`（映射）；
 * 改判定口径 ⇒ 先改技能 `amayui-spec`，再回改这里（技能是口径真源，本文件是落点）。

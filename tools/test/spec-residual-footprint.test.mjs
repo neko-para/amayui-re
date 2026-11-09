@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 足迹三桶判定被写反（静态命中也算路径外 / 写者闭包空集不判路径外 / 有残差落不进桶） */
+/** @env pure @kind gate @suite toolchain @why 足迹三桶判定被写反（静态命中也算路径外 / 写者闭包空集不判路径外 / 有残差落不进桶） */
 /**
  * tools/test/spec-residual-footprint.test.mjs —— `spec residuals --footprint` 的**判别力**守卫
  *

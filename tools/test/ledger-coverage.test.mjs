@@ -1,4 +1,4 @@
-/** @env pure @kind contract @why 覆盖度查询把"锚属于哪个函数/收没收口"算错了：会把没分析过的说成收口、或把前沿指错人 —— 而这是"下一步该做什么"的唯一机械依据 */
+/** @env pure @kind contract @suite toolchain @why 覆盖度查询把"锚属于哪个函数/收没收口"算错了：会把没分析过的说成收口、或把前沿指错人 —— 而这是"下一步该做什么"的唯一机械依据 */
 /**
  * tools/test/ledger-coverage.test.mjs —— **函数覆盖度**（`pnpm tools ledger coverage`）的守卫
  *

@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 盘点生成器静默产出错数字（不许"读不到就当空"） */
+/** @env pure @kind gate @suite toolchain @why 盘点生成器静默产出错数字（不许"读不到就当空"） */
 /**
  * tools/test/inventory.test.mjs — 旧仓盘点生成器的两条**基建契约**（都不需要旧仓在场）
  *

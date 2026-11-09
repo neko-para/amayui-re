@@ -1,4 +1,4 @@
-/** @env assets @kind gate @why 入库的拆壳件与反汇编语料不是同一份（sha256 对不上），执行源与"用来看的语料"就会分家 */
+/** @env assets @kind gate @suite toolchain @why 入库的拆壳件与反汇编语料不是同一份（sha256 对不上），执行源与"用来看的语料"就会分家 */
 /**
  * tools/test/age-sectfix-artifact.test.mjs —— **执行源（拆壳件）的身份守卫**
  *

@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 折叠层把 `lea reg,[一跳基址-K]` 的负位移当成"二级偏移"⇒ 判定器会把它记成"某类型缺 0x-4 这个成员"（假缺口），必须在 access 层就置 null */
+/** @env pure @kind gate @suite toolchain @why 折叠层把 `lea reg,[一跳基址-K]` 的负位移当成"二级偏移"⇒ 判定器会把它记成"某类型缺 0x-4 这个成员"（假缺口），必须在 access 层就置 null */
 /**
  * tools/test/shape-access.test.mjs —— **access 层**（`analyzeLines`）的最小守卫。
  *

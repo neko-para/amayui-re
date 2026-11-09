@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 指令表派生链断了或混进知识层字段 */
+/** @env pure @kind gate @suite toolchain @why 指令表派生链断了或混进知识层字段 */
 /**
  * tools/test/opcodes.test.mjs — 指令表**派生**的守卫
  *

@@ -1,4 +1,4 @@
-/** @env assets @kind gate @why claims 校验器的义务被改坏（覆盖/步长/边界/下钻/两道守卫），或语料与声明不再自洽 */
+/** @env assets @kind gate @suite toolchain @why claims 校验器的义务被改坏（覆盖/步长/边界/下钻/两道守卫），或语料与声明不再自洽 */
 /**
  * tools/test/shape-claims.assets.test.mjs —— **校验器功能②** 在真语料上的守卫
  *

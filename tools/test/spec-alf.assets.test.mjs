@@ -1,4 +1,4 @@
-/** @env assets @kind contract @why `20-alf` 的协议断言与真实索引/归档脱节（头 268 / AC 的 12 字节块与 280 起点 / TOC 记录宽度与字段 / LZSS 参数），读者会按错的字节结构写解析器 */
+/** @env assets @kind contract @suite toolchain @why `20-alf` 的协议断言与真实索引/归档脱节（头 268 / AC 的 12 字节块与 280 起点 / TOC 记录宽度与字段 / LZSS 参数），读者会按错的字节结构写解析器 */
 /**
  * tools/test/spec-alf.assets.test.mjs —— **ALF 归档的语料侧守卫**
  *

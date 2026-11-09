@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why spec 层的不变量被改松（未知被洗成省略/舍弃、未登记义务仍绿、正文内联布局） */
+/** @env pure @kind gate @suite toolchain @why spec 层的不变量被改松（未知被洗成省略/舍弃、未登记义务仍绿、正文内联布局） */
 /**
  * tools/test/spec.test.mjs —— spec 层（`lib/spec.mjs`）的**契约与判别力**
  *

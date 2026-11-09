@@ -1,4 +1,4 @@
-/** @env assets @kind gate @why effect 枚举 / 覆盖与语料脱节（报告会绿而错：effect 未登记或块集合漂了） */
+/** @env assets @kind gate @suite toolchain @why effect 枚举 / 覆盖与语料脱节（报告会绿而错：effect 未登记或块集合漂了） */
 /**
  * tools/test/spec-corpus.test.mjs —— spec 层与**语料**的对账（assets 档）
  *

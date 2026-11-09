@@ -1,5 +1,7 @@
 # 复现：从 OPTION / GAMESTART 退回 TITLE 时，按钮先于其余内容渲染出来
 
+> ⚠ 本文引用的需求单 `REQ-01M66CV5W8FWNY7B165CXSM8HB` 等已随废弃交接单（`REQ-01M5BK8QMQYK7XQG707YVMQ202`）于 2026-11 删除；本文保留为当时的证据记录，引用的单号不可再解析。
+
 对应缺陷：`REQ-01M66CV5W8FWNY7B165CXSM8HB`（open）。
 
 ## 观测点（窗口模式）

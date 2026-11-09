@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 三处 pl_mpeg 副本漂了 ⇒ 同一部影片在 Electron / C++ 对照实现 / emulator-lift 上会解出不同像素，而三边的其它测试都仍然绿 */
+/** @env pure @kind gate @suite toolchain @why 三处 pl_mpeg 副本漂了 ⇒ 同一部影片在 Electron / C++ 对照实现 / emulator-lift 上会解出不同像素，而三边的其它测试都仍然绿 */
 /**
  * tools/test/emulator-cxx-pl-mpeg-sync.test.mjs —— 第三方解码器的**同一份字节**
  *

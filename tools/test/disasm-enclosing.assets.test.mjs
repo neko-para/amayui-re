@@ -1,4 +1,4 @@
-/** @env assets @kind contract @why "EA → 所属函数"这条定位链断了：EA 在函数体内时算成**后一个**函数，或带 `@` 的修饰名不被认作函数头 ⇒ 静默给前一个函数 */
+/** @env assets @kind contract @suite toolchain @why "EA → 所属函数"这条定位链断了：EA 在函数体内时算成**后一个**函数，或带 `@` 的修饰名不被认作函数头 ⇒ 静默给前一个函数 */
 /**
  * tools/test/disasm-enclosing.assets.test.mjs —— `.lst` 侧**定位**的两条老判据（从 `disasm-pseudo` 里留下）
  *

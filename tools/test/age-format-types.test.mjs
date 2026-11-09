@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 声明与实现脱钩了：`.d.mts` 声明了实现里没有的名字，或该声明的模块没有声明文件 */
+/** @env pure @kind gate @suite toolchain @why 声明与实现脱钩了：`.d.mts` 声明了实现里没有的名字，或该声明的模块没有声明文件 */
 /**
  * ★ **`.d.mts` ↔ `.mjs` 的对账**。
  *

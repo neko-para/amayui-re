@@ -1,4 +1,4 @@
-/** @env pure @kind safety @why journal 自愈的判据被破坏 —— 第三种内容被静默覆盖、非法 journal 被删掉、CTest 条目只还原源文件不重建构建目录、或 CLI 不拒绝运行 —— 于是被中断的工作树留在变异态，下一次「跑绿」可能是假绿 */
+/** @env pure @kind safety @suite toolchain @why journal 自愈的判据被破坏 —— 第三种内容被静默覆盖、非法 journal 被删掉、CTest 条目只还原源文件不重建构建目录、或 CLI 不拒绝运行 —— 于是被中断的工作树留在变异态，下一次「跑绿」可能是假绿 */
 /**
  * tools/test/mutate-journal.test.mjs —— `pnpm test:mutation` 的**崩溃安全**守卫
  *
@@ -20,6 +20,7 @@
  */
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -281,4 +282,102 @@ test('g) journal 落点必须在 `.tmp/`（gitignored），且分类函数能区
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('h) 清单里指向**不存在守卫**的条目 ⇒ `--list` 响亮非 0、打 `⛔ 守卫不存在`，且 check 不许记成「✅ 守卫红了」', () => {
+  // ★ 这条守的是 `guardMissing()` 的**永久自检**（2026-11-09 加回）：没有它，"清单指向已删守卫"会变成假绿。
+  //   为什么必须常驻而不是临时探针：`node --test <不存在的文件>` 的退出码**也是 1**，
+  //   而 mutate-check 把"退出码非 0"记成 `✅ 守卫红了` —— 一条指向已删守卫的变异会被读成
+  //   "这条守卫会红"，它其实**什么也没证明**。CTest 侧对称（`ctest -R ^无此名$` = 退出码 0）。
+  //   这类"变了就是 bug 且变了是静默的"必须有守卫，否则下次删守卫时清单会悄悄开始说谎。
+  //
+  // 做法：备份清单字节 → 在 `const MUTATIONS = [` 后插一条探针（守卫指向一个必然不存在的文件）→
+  //   跑 `--list --match <探针>` 与 check（`--match <探针>`）→ 断言 → **finally 里按字节还原并复验 sha256**。
+  //   ★ 探针的 `from` / `to` 故意是**永远匹配不到**的串：check 会在 `guardMissing()` 处短路、一个字节也不写；
+  //     就算将来 short-circuit 被挪走，它也只会记"清单过期"而不是把别的文件改坏。
+  const MANIFEST = path.join(REPO_ROOT, 'tools', 'mutate-check.mjs');
+  const backup = fs.readFileSync(MANIFEST);
+  const digest = (buf) => createHash('sha256').update(buf).digest('hex');
+  const before = digest(backup);
+  // 异常退出时留下的备份（`.tmp/` 是 gitignored；正常路径下随 `after()` 一起删）
+  const backupPath = path.join(SCRATCH, 'mutate-check.backup.mjs');
+  fs.mkdirSync(SCRATCH, { recursive: true });
+  fs.writeFileSync(backupPath, backup);
+
+  const token = `PROBE-SELFCHECK-${process.pid}`;
+  const anchor = 'const MUTATIONS = [\n';
+  let spawnCount = 0;
+  /** 跑一次真 CLI（两个流分开重定向到文件 —— 受限沙箱里 `stdio: 'pipe'` 会 EPERM） */
+  const run = (args) => {
+    const base = path.join(SCRATCH, `probe-${process.pid}-${spawnCount++}`);
+    const of = fs.openSync(`${base}.out`, 'w');
+    const ef = fs.openSync(`${base}.err`, 'w');
+    let res;
+    try {
+      res = spawnSync(process.execPath, [CLI, ...args], {
+        cwd: REPO_ROOT,
+        env: { ...process.env, AMAYUI_MUTATE_JOURNAL: path.join(SCRATCH, 'probe-journal.json') },
+        stdio: ['ignore', of, ef],
+      });
+    } finally {
+      fs.closeSync(of);
+      fs.closeSync(ef);
+    }
+    const stdout = fs.readFileSync(`${base}.out`, 'utf8');
+    const stderr = fs.readFileSync(`${base}.err`, 'utf8');
+    fs.rmSync(`${base}.out`, { force: true });
+    fs.rmSync(`${base}.err`, { force: true });
+    return { status: res.status, stdout, stderr, all: `${stdout}\n${stderr}` };
+  };
+
+  try {
+    // ① 插探针：锚点必须在（挪了位置这条守卫会红 —— 那是"它没在验"的信号，不是"可以跳过"）
+    const at = backup.toString('utf8').indexOf(anchor);
+    assert.ok(at >= 0, `清单锚点 \`${anchor.trim()}\` 必须还在（否则本用例没验到任何东西）`);
+    const probe =
+      '\n  {\n' +
+      "    file: 'tools/lib/paths.mjs',\n" +
+      `    from: '${token}_from_never_matches',\n` +
+      `    to: '${token}_to_never_applied',\n` +
+      `    guard: 'tools/test/${token}.test.mjs',\n` +
+      `    what: '${token}' + '：指向不存在守卫的探针条目（自检用，跑完按字节还原）',\n` +
+      '  },';
+    const text = backup.toString('utf8');
+    const probed = text.slice(0, at + anchor.length) + probe + text.slice(at + anchor.length);
+    fs.writeFileSync(MANIFEST, probed);
+
+    // ② `--list`：必须**响亮**（退出码非 0 + 统一标记），不许混进"守红 / 没红 / 无法判定"
+    const list = run(['--list', '--match', token]);
+    assert.notEqual(list.status, 0, `指向不存在守卫的条目必须让 --list 非 0 退出：${list.all}`);
+    assert.ok(
+      list.all.includes('⛔ 守卫不存在'),
+      `--list 必须打统一标记「⛔ 守卫不存在」（实际：${JSON.stringify(list.all)}）`,
+    );
+    assert.ok(list.all.includes(token), '报的必须正是这条探针（而不是清单里别的条目碰巧坏了）');
+    assert.ok(!list.all.includes('✅ 守卫红了'), '--list 不该出现「守卫红了」——那正是假绿的来源');
+
+    // ③ check（`--match` 只跑探针）：同样非 0，且**不许**记成「✅ 守卫红了」
+    //    ★ 这一步是本用例的实质：`✅ 守卫红了` 只在守卫真跑起来且非 0 时才允许出现。
+    const check = run(['--match', token]);
+    assert.notEqual(check.status, 0, `守卫不存在必须让 check 非 0 退出：${check.all}`);
+    assert.match(check.all, /守卫不存在/, '必须点名"守卫不存在"');
+    assert.ok(
+      !check.all.includes('✅ 守卫红了'),
+      `⛔ 守卫不存在**不许**被记成「✅ 守卫红了」（那就是假绿）：${JSON.stringify(check.all)}`,
+    );
+    assert.ok(check.all.includes('什么也没证明') || check.all.includes('守卫不存在'), '要说明这次变异没证明任何东西');
+  } finally {
+    // ★ 按字节还原（不是"删掉刚插的那段"）：探针前后任何意外改动的痕迹都不许留下
+    fs.writeFileSync(MANIFEST, backup);
+    const restored = fs.readFileSync(MANIFEST);
+    assert.equal(digest(restored), before, 'finally 里必须把清单按字节还原（sha256 一致）');
+    assert.equal(restored.equals(backup), true, '逐字节一致（不许只看长度）');
+    fs.rmSync(backupPath, { force: true });
+  }
+
+  // ④ 还原后必须**绿**：探针不在输出里，且 `--list` 退出 0（清单自身健康）
+  const healed = run(['--list']);
+  assert.ok(!healed.all.includes(token), `还原后不许残留探针：${JSON.stringify(healed.all)}`);
+  assert.equal(healed.status, 0, `还原后 --list 必须绿（红 = 清单里有别的条目指向不存在的守卫 —— 那正是本守卫要报的）：${healed.all}`);
+  assert.equal(digest(fs.readFileSync(MANIFEST)), before, '跑完清单仍是原文（逐字节）');
 });

@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 语料文法（`.lst` 行 / `.c` 定义判定）或两侧配对被改坏：会静默给出"看起来对"的行区间与参数偏移 */
+/** @env pure @kind gate @suite toolchain @why 语料文法（`.lst` 行 / `.c` 定义判定）或两侧配对被改坏：会静默给出"看起来对"的行区间与参数偏移 */
 /**
  * tools/test/disasm-fn-format.test.mjs —— **文法与配对**的机械判据（**合成样本**，不需要语料）
  *

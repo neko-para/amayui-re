@@ -1,4 +1,4 @@
-/** @env pure @kind safety @why 提权插件的**闭接口**破了：越界仓库根被放行、写类 op 不再默认 dry-run、`package` 收下了路径/shell 形态，或 `run` 变成了"能跑任意命令" */
+/** @env pure @kind safety @suite toolchain @why 提权插件的**闭接口**破了：越界仓库根被放行、写类 op 不再默认 dry-run、`package` 收下了路径/shell 形态，或 `run` 变成了"能跑任意命令" */
 /**
  * plugins/pnpm-priv/test/ops.test.mjs —— 纯逻辑与探针的判据
  *

@@ -1,4 +1,4 @@
-/** @env pure @kind safety @why fixtures 写/只读路径不写坏数据、或 Windows 上吐了 CR */
+/** @env pure @kind safety @suite toolchain @why fixtures 写/只读路径不写坏数据、或 Windows 上吐了 CR */
 /**
  * tools/test/fixtures-cli-write.test.mjs — **fixtures 命令的写路径与只读路径**（不需要游戏/旧仓）
  *

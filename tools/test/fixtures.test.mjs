@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 样本台账与判据脱节 */
+/** @env pure @kind gate @suite toolchain @why 样本台账与判据脱节 */
 /**
  * tools/test/fixtures.test.mjs — 真存档样本（`corpus/fixtures/`）的守卫
  *

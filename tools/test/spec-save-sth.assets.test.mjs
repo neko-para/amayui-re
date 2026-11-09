@@ -1,4 +1,4 @@
-/** @env assets @kind contract @why `.STH` 的格式合同（BMP 头字段 / 声明长度差 14 / 行宽对齐）与真机产物脱节 ⇒ 读者按错的字节结构写解码器，缩略图读不回来 */
+/** @env assets @kind contract @suite toolchain @why `.STH` 的格式合同（BMP 头字段 / 声明长度差 14 / 行宽对齐）与真机产物脱节 ⇒ 读者按错的字节结构写解码器，缩略图读不回来 */
 /**
  * tools/test/spec-save-sth.assets.test.mjs —— `FMT-SAVE-STH` 的**真实样本**守卫
  *

@@ -1,4 +1,4 @@
-/** @env pure @kind contract @why wait_subagent 的等待/插话/竞态语义被破坏 */
+/** @env pure @kind contract @suite toolchain @why wait_subagent 的等待/插话/竞态语义被破坏 */
 /**
  * plugins/wait-subagent/test/wait.test.mjs —— 等待逻辑的契约
  *

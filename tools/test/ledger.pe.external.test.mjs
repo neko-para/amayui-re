@@ -1,4 +1,4 @@
-/** @env external @kind gate @why EA→文件偏移 的 VA/RVA 口径又错了（对真实镜像会恒返回 null，锚点全落不了） */
+/** @env external @kind gate @suite toolchain @why EA→文件偏移 的 VA/RVA 口径又错了（对真实镜像会恒返回 null，锚点全落不了） */
 /**
  * tools/test/ledger.pe.external.test.mjs —— **`peOffsetOf` 的真实镜像回归**（要旧仓里的 PE）
  *

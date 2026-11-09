@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 本机私有覆盖（平台路径）失效 —— 换一台机器就红、或本机覆盖悄悄改写了仓库事实 */
+/** @env pure @kind gate @suite toolchain @why 本机私有覆盖（平台路径）失效 —— 换一台机器就红、或本机覆盖悄悄改写了仓库事实 */
 /**
  * tools/test/manifest-local.test.mjs — **本机私有清单覆盖**（`corpus/assets.local.json`）的守卫
  *

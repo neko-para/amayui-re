@@ -151,3 +151,74 @@ test('★ 测试卫生：不许用 `t.diagnostic` + 裸 `return` 冒充跳过（
   assert.deepEqual(bad, [], `静默 pass 冒充跳过：\n  - ${bad.join('\n  - ')}`);
 });
 
+/**
+ * ★ **元守卫：两档之和 = 全量**（`AGENTS.md` §5 的判据；上一轮只是 `.tmp/` 里的手跑脚本，**不是门禁**）。
+ *
+ * 为什么它必须进合同档：`@suite` 写坏（非法值 / pragma 形态坏掉）时，该文件会**同时掉出两档** ——
+ * `pnpm test`（contract）与 `pnpm verify`（toolchain）都不选它，而两条命令都绿
+ * ⇒ "这个守卫在跑"只剩声称。这正是把这条判据从脚本升级成门禁的理由。
+ *
+ * 四条断言：
+ *   ① 每个 `*.test.mjs` 的 pragma 都**解析得出** `@env` / `@suite`（解析不出来 ⇒ 两者都是 undefined ⇒ 两档都不进）；
+ *   ② `@suite` 只能 ∈ {contract, toolchain}（省略 = contract，`readPragma` 已归一）；
+ *   ③ ★ 核心：**两条门禁命令实际选中的并集 = 全部 `@env pure` 文件**（`pnpm test` ∪ `pnpm verify`，不重不漏）。
+ *      这里不另写选择逻辑：读 `package.json` 里 `test` / `verify` 两条脚本的 `--env` / `--suite`，
+ *      缺省档取 `test-run.mjs` 的 `DEFAULT_ENVS` / `SUITES`，再用**同一份** `decls` 求并集
+ *      ⇒ 脚本接线改了、或默认档改了，都会在这里红；
+ *   ④ 反向：两档是**全部** `*.test.mjs` 的划分（交集空、并集全），且档名与 `@env` 名**不许写串位置**（两者正交）。
+ *
+ * ★ 它自己没有 `@suite` ⇒ 落在**合同档**（`pnpm test` 会跑到它）。
+ * ★ 口径边界（别把这条断言读宽）：`@env pure` **之外**的文件**也**带 `@suite`（今天实测：assets 45 contract + 17 toolchain、
+ *   external 3 + 3）⇒ 只要求"分档对**全量**文件是一个划分"，**不**要求"只有 pure 才有档位"。
+ *   把某个 pure 文件改成 `@env assets` 是**合法**的重分类（它离开默认门禁这件事不是静默的 —— 声明就写在首行），
+ *   所以那种改动**不该**红；会红的只有"声明解析不出来 / 档位值超出闭集 / 值写串了位置"。
+ */
+test('★ 元守卫：两档之和 = 全量（@env pure = contract ∪ toolchain，不重不漏；分档与 @env 正交）', async () => {
+  const { survey, ENVS, SUITES, DEFAULT_ENVS } = await import('../test-run.mjs');
+  const { decls } = survey(REPO_ROOT);
+  assert.ok(decls.length > 0, '至少要扫到一个测试文件');
+
+  // ① pragma 必须解析得出 env / suite（缺 pragma / 形态非法 ⇒ 两者都是 undefined）
+  const unparsed = decls.filter((d) => typeof d.env !== 'string' || typeof d.suite !== 'string').map((d) => d.rel);
+  assert.deepEqual(unparsed, [], `这些文件的 pragma 解析不出 @env/@suite ⇒ 两档都不进（没有任何门禁会执行它）：\n  - ${unparsed.join('\n  - ')}`);
+
+  // ② @suite 只能是闭集里的值（省略 = contract；非法值同样会让该文件两档都不进）
+  const badSuite = decls.filter((d) => !SUITES.includes(d.suite)).map((d) => `${d.rel}: @suite=${JSON.stringify(d.suite)}`);
+  assert.deepEqual(badSuite, [], `@suite 非法（合法值只有 ${SUITES.join(' / ')}；省略 = contract）：\n  - ${badSuite.join('\n  - ')}`);
+
+  // ③ ★ 核心：`pnpm test` ∪ `pnpm verify` = 全部 @env pure 文件，**不重不漏**
+  const pure = decls.filter((d) => d.env === 'pure');
+  const pureRels = pure.map((d) => d.rel);
+  const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
+  const gatePick = (script) => {
+    const cmd = pkg.scripts?.[script] ?? '';
+    const envs = (/--env\s+([A-Za-z,]+)/.exec(cmd)?.[1] ?? DEFAULT_ENVS.join(',')).split(',');
+    const suites = (/--suite\s+([A-Za-z,]+)/.exec(cmd)?.[1] ?? SUITES.join(',')).split(',');
+    return decls.filter((d) => envs.includes(d.env) && suites.includes(d.suite)).map((d) => d.rel);
+  };
+  const isTest = gatePick('test');
+  const isVerify = gatePick('verify');
+  const inBothGates = isTest.filter((r) => isVerify.includes(r));
+  assert.deepEqual(inBothGates, [], `同一个文件被 \`pnpm test\` 与 \`pnpm verify\` 同时选中（"两档之和"会重复计数）：\n  - ${inBothGates.join('\n  - ')}`);
+  const gateUnion = new Set([...isTest, ...isVerify]);
+  const missed = pureRels.filter((r) => !gateUnion.has(r));
+  assert.deepEqual(missed, [], `这些 @env pure 文件 \`pnpm test\` 与 \`pnpm verify\` **都不选** ⇒ 默认门禁不会执行它，而两条命令都绿：\n  - ${missed.join('\n  - ')}`);
+  const stray = [...gateUnion].filter((r) => !pureRels.includes(r));
+  assert.deepEqual(stray, [], `两档选进了非 @env pure 的文件（默认档被改了？）：\n  - ${stray.join('\n  - ')}`);
+
+  // ④ 反向：两档是**全量**文件的划分；档名与 @env 名不许写串位置（两者正交，只是叠在同一个 pragma 上）
+  const allContract = decls.filter((d) => d.suite === 'contract').map((d) => d.rel);
+  const allToolchain = decls.filter((d) => d.suite === 'toolchain').map((d) => d.rel);
+  const inBoth = allContract.filter((r) => allToolchain.includes(r));
+  assert.deepEqual(inBoth, [], `同一文件同时属于合同档与工具链档：\n  - ${inBoth.join('\n  - ')}`);
+  const union = new Set([...allContract, ...allToolchain]);
+  const uncovered = decls.map((d) => d.rel).filter((r) => !union.has(r));
+  assert.deepEqual(uncovered, [], `分档没有覆盖这些 *.test.mjs（两档都不进 ⇒ 不会被任何门禁执行）：\n  - ${uncovered.join('\n  - ')}`);
+  const swapped = [];
+  for (const d of decls) {
+    if (ENVS.includes(d.suite)) swapped.push(`${d.rel}: @suite 写成了 @env 的值 ${JSON.stringify(d.suite)}`);
+    if (!ENVS.includes(d.env)) swapped.push(`${d.rel}: @env 非法 ${JSON.stringify(d.env)}（档名与 @env 名不许互换）`);
+  }
+  assert.deepEqual(swapped, [], `@env 与 @suite 的值写串了位置 / 超出闭集（两者正交，不许互换）：\n  - ${swapped.join('\n  - ')}`);
+});
+

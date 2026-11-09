@@ -1,0 +1,94 @@
+# 观察账（observations）
+
+> 记 **我们测到过什么**。一条 = 一句话 + 一条能重跑的命令 + 一个读数 + 一个口径 + 一个日期。
+> ⛔ 不写"所以要优化 X"（那是需求单的事）；⛔ 读数不是断言（断言在 `contracts-win32.md` 的守卫里）。
+> 编号 `OBS-<yyyymmdd>-NN`；**过期不删**，同一条再测出不同读数时新开编号并写"取代 OBS-…"。
+>
+> **口径A** = RelWithDebInfo（`cmake --preset windows-x64`）/ Win10 x64 / `--present window --present-hidden --raster gpu`
+> （启动行 `present : driver=gpu-direct`、`raster : sdl-gpu/direct3d12/DXBC`）/ 有安装树
+> （`--game-dir ../../links/install --appdata ../../.tmp/appdata`）/ `--native-overrides all --skip-logo` /
+> 输入脚本驱动 / **无** `--profile`、**无** `LIFT_FRAME_TRACE`。命令骨架（`apps/emulator-lift` 下）：
+> `./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-dir ../../links/install --present window --present-hidden --raster gpu --native-overrides all --skip-logo --input-script <脚本>`
+> 读数属于哪个工作树：`git log -1 --format=%h`（本文取自 2026-11-08 `2bd8eaf` 附近）；换构建后不要混表（`measurement.md` M-01）。
+
+## 过渡（进出 EU-ROOM）
+
+### OBS-20261108-01 · 进 EU-ROOM 的整段墙钟被**一帧**吃掉
+- **读数**：过渡帧 `wall=5421.4 ms / 75,900,857 条`，另两次 `5589.7 ms / 75,901,179`、`5171.7 ms / 75,901,984` ⇒ **75.9M 条 / 4.89–5.59 s**。
+- **复现**：`pwsh .tmp/roomopt/run.ps1 -Mode enter -Label heapmeas`（脚本 `.tmp/roomopt/enter-clean.txt`）· 口径A + `LIFT_FRAME_TRACE=1` · 2026-11-08 · `[.tmp/roomopt/heapmeas2-enter.log:592]`、`[heapmeas3.log:592]`、`[heapmeas4.log:580]`
+
+### OBS-20261108-02 · 过渡帧两侧的稳态帧只有 ~28.5k 条
+- **读数**：`insns=28472 / 28476 / 28485`、wall 20–60 ms；过渡帧 75.9M ⇒ **比值 ≈2.7×10³**（"进房间慢"是单帧内的活，不是整体变慢）。
+- **复现**：同 OBS-01 的日志 `[frame] n=102..107` · 口径A + `LIFT_FRAME_TRACE=1` · 2026-11-08 · `[.tmp/room/enter-frames.log:550-575]`（同文件 `:545` 是过渡帧 `n=101 wall=6162.2ms / 75,901,355 条`，那一次开了 frame trace）
+
+### OBS-20261108-03 · 退出 EU-ROOM：点击→TITLE 中位 9.17 s，其中一帧 151M 条
+- **读数**：3 次 `9,210.8 / 8,874.9 / 9,171.3 ms`（中位 **9.17 s**，极差 0.34 s）；TITLE 重载帧 `151.05M/8,691.0 ms`、`151.02M/8,356.5`、`151.01M/8,706.0` = **55.3–57.7 ms/M**。逐帧：`109=21.43M/1675 ms` → `110=1.78M/153` → `111–123≈29.5k/17–31` → `124=151.01M/8706` → `125+≈28 万/帧`。
+- **复现**：`--input-script .tmp/exitstall/exit-fix.txt`（按下保持 ≥150 ms）· 口径A · 2026-11-08 · `[.tmp/exitstall/report.md:4,45,51-59]`
+
+### OBS-20261108-04 · 同一个 151M 帧在两个留档构建上差 1.1–1.4 s
+- **读数**：`.tmp/exitstall` 记 `151.05M / 8,691 ms`（55.3–57.7 ms/M）；`.tmp/clickfix` 记 `151,040,106 / 7325.7 ms`（另两次 7,246.4 / 7,448.5）⇒ 48.1–49.3 ms/M。
+- **复现**：两处都用 `LIFT_FRAME_TRACE=1`；结论**只用在这里** —— 跨构建/跨留档不可比，引用 TITLE 重载耗时必须连构建一起引用 · 2026-11-08 · `[.tmp/clickfix/report.md:31-33]`、`[.tmp/exitstall/report.md:55-57]`
+
+## 吞吐与空转
+
+### OBS-20261108-05 · 空转吞吐基线 = 64.7 ms/百万条（≈15.5M insn/s）
+- **读数**：`1.5e9 条 / 97 s` = **64.7 ms/M**（无 profiler 的真实速率）。对照 TITLE 重载帧 55.3–57.7 ms/M ⇒ 空转不比"真在装载"更省。
+- **复现**：`.tmp/exitstall/exit-y-longpress.txt`（原短按、不落地那一档跑 155 s）· 口径A · 2026-11-08 · `[.tmp/exitstall/report.md:29]`
+
+### OBS-20261108-06 · 房间稳定后不再 Present（帧号不推进）
+- **读数**：相邻两窗 `w2=[400M,800M]`、`w3=[800M,1.5e9]` 都是 `Present=0` ⇒ **≥1.1e9 条 0 Present**；逐帧 BMP `frame 100–108` sha256 逐字节相同（`4697b037…`），`frame 109` 才变（差异 bbox = 只剩「戻る」按钮矩形，3022 像素）。
+- **复现**：`.tmp/exitstall/exit-shot.txt` + `--dump-frame` · 口径A · 2026-11-08 · `[.tmp/exitstall/report.md:10,19-27]`
+
+### OBS-20261108-07 · 房间的输入采样是**电平**式、约 20 Hz
+- **读数**：`GetCursorPos` **880 次 / 43.96 s = 20.02 Hz**；`Sleep` 301,790 次只花 **19.6 ms**（65 ns/次 ⇒ 立即返回）⇒ 按下必须跨过 ~50 ms 采样周期才被看见。
+- **复现**：`.tmp/exitstall/logs/prof-stall.log` 的 shim 表 · 口径A + `--profile` · 2026-11-08 · `[.tmp/exitstall/report.md:14,26-27]`
+
+### OBS-20261108-08 · 空转段在做什么（三个热点 EA）
+- **读数**（`w3` = 700M 条 / 78.9 s）：`0x412290`（WinMain 主循环）self **9.8%** / incl 27.5%；`0x4BBAB0`（DirectSound 流槽管理）**2,766,573 次 / 78.9 s（35k/秒）**、self 7.1% / incl 18.9%；`0x41BF50`（VM 取操作数）**4,612,006 次**、self 6.5% / incl 14.9%。shim 侧几乎无开销（每 700M 条 `HeapAlloc` 606 次 / `EnterCriticalSection` 308 次）。
+- **复现**：`.tmp/exitstall/exit-3win.txt`（`--time-limit 175`，窗口 `[800M,1.5e9]`）· 口径A + `--profile` 窗口表 · 2026-11-08 · `[.tmp/exitstall/report.md:33-38,48-49]`
+
+## 测量自身的开销与结构
+
+### OBS-20261108-09 · profiler 的膨胀量级
+- **读数**：同工程内实测 **+33~40%**；空转段有一次自报为真速的 **1.7×**（归因给"每块 `steady_clock` + 每块边界的脚本 tick"）。
+- **复现**：同一脚本删掉 `profile_begin/profile_end` 两行做 A/B（`enter-prof.txt` ↔ `enter-noprof.txt`，都在 `.tmp/room/`）· 2026-11-08 · `[.tmp/req-bodies/E.md:6]`、`[.tmp/exitstall/report.md:29]`
+
+### OBS-20261108-10 · profile 窗口表的闭式成立，残差 2.1–3.3 ms（一次 22.1 ms）
+- **读数**：`buckets : wall=9180.4ms guest=2962.4ms shim=1135.0ms native=22.8ms interp=3041.9ms host=2016.3ms sum=9178.3ms unattributed=2.1ms`；enter 窗 2.2 / 3.3 ms；diag 窗 22.1 ms（该次 `shim` 只 602.7 ms）。
+- **复现**：`.tmp/room/exit-prof2b.log`、`.tmp/room/enter-prof.log`、`.tmp/roomopt/diag-enter-diag.log`（脚本 `exit-prof2.txt` / `enter-prof.txt`）· 读法见 `measurement.md` M-03 · 2026-11-08
+
+### OBS-20261108-11 · 过渡帧的 `HeapAlloc` 墙钟 **≈85%（实测 73–98%）不在分配器里**
+- **读数**：同一过渡帧 `heap : allocs=17804 … alloc_ms=45.0 free_ms=6.0` 对 `shim : HeapAlloc=1115.1ms×1854 / HeapFree=1267.3ms×1425` ⇒ 分配器自报 51.0 ms、shim 侧 2382.4 ms ⇒ **≈98% 在等**；另一次 `alloc_ms=416.8` 对 `HeapAlloc=1543.5ms×1854` ⇒ ≈73%。平均 **0.6–0.83 ms/次**，比"扫一遍块表"高两个量级。
+- **复现**：`.tmp/roomopt/heapmeas4.log:580-582`、`heapmeas3.log:592-594`；`pwsh .tmp/roomopt/run.ps1 -Mode enter -Label heapmeas` · 口径A + 逐帧 `heap/shim` 表 · 2026-11-08
+
+### OBS-20261108-12 · token 等待是**单独一栏**，不在 `shim` 桶里
+- **读数**：`heap : … token_wait_ms=1422.4×33234860`（过渡帧）、`1670.2×33208368`（另一次）⇒ 整帧 token 等待 1.4–1.7 s，同帧 `shim` 只 654.9–678.0 ms ⇒ **不可相加**。⚠ 另一次构建 `token_wait_ms=0.0×0`（没开这个计数器）⇒ 只差一栏就足以让两次读数不可比。
+- **复现**：`.tmp/roomopt/heapmeas-exit.log:580-582`、`heapmeas2-enter.log:592-594`、`heapmeas3.log:593` · 读法见 `measurement.md` M-04 · 2026-11-08
+
+### OBS-20261108-13 · 堆首次适配 / 收口合并的优化前后（同一过渡帧）
+- **读数**：块比较 **47,572,524 → 516,482**（≈92×）；收口合并 **45,812,143 → 2,773**（≈16.5k×）；而 `allocs`（17,808→17,804）、`blocks`（7131→7130）、`zero`（36,519,320 B）**几乎没变** ⇒ 结果面没动，只是扫的量少了。
+- **复现**：`.tmp/roomopt/heapmeas3.log:593`（前）对 `heapmeas4.log:581`（后）· 实现 `src/runtime/heap.h:76-82` · 取舍见 L3-heap-01 · 2026-11-08
+
+## 音频与输入
+
+### OBS-20261108-14 · 音频 feeder 单次 fill 的墙钟 310–450 ms
+- **读数**：`[audio] feeder fill slot=11 quarter=0..3` 逐条 **309.7–448.9 ms**（slot=11 = BGM 环；slot=1/2 的 SE 0.03–34 ms）⇒ mixer 每 5 ms 一次 ⇒ 两线程几乎全程同时在执行 guest 代码。
+- **复现**：`LIFT_AUDIO_TRACE=1` · 口径A（窗口模式 ⇒ 真线程）· 2026-11-08 · `.tmp/audiord/measure-shimtoken-c1.log.err:4-12`、`measure-wholefill-c1.log.err:4-12`
+
+### OBS-20261108-15 · 令牌三形态的整轮墙钟 A/B（同脚本、同机器；baseline 11 次 / 另两臂各 12 次）
+- **读数**：无令牌 **61.3–67.1 s**（**会崩**，BUG-03）/ 整次 fill 持令牌 **146.9–287.3 s**（≈2.4–2.6× 中位、最坏 4.6×）/ shim 边界令牌 **62.2–66.5 s**（回到无令牌水平）。
+- **复现**：`.tmp/audiord/{baseline,after2,shimtoken}-summary.txt`（每份 12 条 `elapsed=`）· 口径A · 2026-11-08 · 取舍见 L3-token-01
+
+### OBS-20261108-16 · click 短于采样周期会被**静默吞掉**
+- **读数**：`down→up` 隔 20k 条指令（**≈0.7 ms**）⇒ 帧号停 108、不回 TITLE；长按 2M 条（**≈220 ms**）⇒ **3/3 回 TITLE**（frame 125/121/124），hover 非必要。修好后 `release : total=2 auto=2 explicit=0 deferred-ups=0 bounded-no-sample=0`。
+- **复现**：`.tmp/exitstall/exit-y-longpress.txt` / `exit-fix.txt`（对照 `.tmp/room/exit-prof2.txt` 的 20k 条间隔）· 口径A · 2026-11-08 · `[.tmp/exitstall/report.md:10-17]`、`[.tmp/clickfix/report.md:27-36]`
+
+## 时间锚与未取证的读数
+
+### OBS-20261108-17 · `at frame` 跨运行会漂（同一 `at insn` 落点差 7 帧以上）
+- **读数**：同一脚本的 `at insn 500000000` 一次落 `frame=107`、另一次 `frame=114`；`enter-clean.txt` 把漂移量记成"帧号跨运行会漂 **85–90**"⇒ 跨运行复现必须用 `at insn`（或 `at guest_ms`），`at frame` 只做同一次运行内的相对窗口。
+- **复现**：`enter-noprof.log` 尾 `frame=114 … insns=500000006 quit` 对 `enter-prof2.log` 的 `frame=107 … insns=500000013` · 读法见 `measurement.md` M-05 · 2026-11-08 · `[.tmp/roomopt/enter-clean.txt:2-6]`
+
+### OBS-20261108-18 · `input-script` 每 tick 逐条比较量（**未取证**）
+- **声称**：`975.9M → 1.6M`（快路径：没有任何条件到期时一次也不扫）。**仓内没找到留档读数** —— 只有计数接口 `src/runtime/input_script.h:229-232`（`tickCount()` / `actionScans()`）与一条守卫 `tests/input_tick.cpp:43`（`actionScans() <= 16`）。⇒ 标**未取证**；要落这条：把 `actionScans()` 打进运行摘要（现在没打）。
+- **2026-11-08**（记录的是"找不到落点"，不是读数）。

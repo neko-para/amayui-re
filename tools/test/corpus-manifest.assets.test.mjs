@@ -1,4 +1,4 @@
-/** @env assets @kind gate @why 真实 corpus/assets.json 过不了全部断言（含 git 检查/哈希复核/recipe） */
+/** @env assets @kind gate @suite toolchain @why 真实 corpus/assets.json 过不了全部断言（含 git 检查/哈希复核/recipe） */
 /**
  * tools/test/corpus-manifest.assets.test.mjs — **端到端**：真实清单必须全绿
  *

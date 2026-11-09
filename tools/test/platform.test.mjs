@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 平台面普查的三张表是靠这几条文法抽出来的；任何一条退化都会让"平台面有多大"悄悄错 */
+/** @env pure @kind gate @suite toolchain @why 平台面普查的三张表是靠这几条文法抽出来的；任何一条退化都会让"平台面有多大"悄悄错 */
 /**
  * tools/test/platform.test.mjs — `pnpm tools platform census` 的**纯函数**守卫
  *

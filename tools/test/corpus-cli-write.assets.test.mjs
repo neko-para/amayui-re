@@ -1,4 +1,4 @@
-/** @env assets @kind safety @why corpus --scan/--normalize 写路径坏了，或 Windows 上吐了 CR */
+/** @env assets @kind safety @suite toolchain @why corpus --scan/--normalize 写路径坏了，或 Windows 上吐了 CR */
 /**
  * tools/test/corpus-cli-write.assets.test.mjs — **corpus 写命令**的冒烟（要真清单的 origin 都在盘上）
  *

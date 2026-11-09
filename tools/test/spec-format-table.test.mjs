@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 规范指令表形态坏掉 / 待核验状态被抹掉（读者会把未核验协议当已证实） */
+/** @env pure @kind gate @suite toolchain @why 规范指令表形态坏掉 / 待核验状态被抹掉（读者会把未核验协议当已证实） */
 /**
  * tools/test/spec-format-table.test.mjs —— **规范指令表**与协议核验状态的守卫
  *

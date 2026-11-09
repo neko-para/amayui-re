@@ -1,4 +1,4 @@
-/** @env assets @kind contract @why 全表普查的口径被改坏（分桶不闭合 / 偏移聚类丢站点 / 过滤器失效 / 不可检查的载体不再点名） */
+/** @env assets @kind contract @suite toolchain @why 全表普查的口径被改坏（分桶不闭合 / 偏移聚类丢站点 / 过滤器失效 / 不可检查的载体不再点名） */
 /**
  * tools/test/shape-census.assets.test.mjs —— `pnpm tools shape census` 的**结构不变量**守卫
  *

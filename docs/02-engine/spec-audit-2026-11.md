@@ -1,5 +1,7 @@
 # spec 审计 2026-11（OPTION 足迹批）
 
+> ⚠ 本文引用的需求单 `REQ-01M5BK8QMQYK7XQG707YVMQ202` 等已随废弃交接单（`REQ-01M5BK8QMQYK7XQG707YVMQ202`）于 2026-11 删除；本文保留为当时的证据记录，引用的单号不可再解析。
+
 > 这不是进度表，是**审计记录**：错误类型 · 判据 · 本次处置 · 下次 review 要问什么。
 > 批次口径见 `data/requirements/01M674XHSX2HSFWSKDWZV2C63D.md`（残差分批收敛）；本文件只记**这一轮复审暴露的模式**。
 

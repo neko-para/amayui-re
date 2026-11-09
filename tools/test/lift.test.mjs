@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 覆盖清单与 C++ 注册表漂了（stub 没有理由 / 两处不一致 / 派生文件没接上） */
+/** @env pure @kind gate @suite toolchain @why 覆盖清单与 C++ 注册表漂了（stub 没有理由 / 两处不一致 / 派生文件没接上） */
 /**
  * tools/test/lift.test.mjs — 覆盖清单的**纯档**守卫（不需要 LFS 资产）
  *

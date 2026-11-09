@@ -70,7 +70,12 @@ pnpm tools disasm restore     # 由 zip 反解回投递原件（.staging/ 可随
 | 旧仓实测盘点（给迁移轮按图索骥） | `docs/00-origin/old-repo-inventory.md` |
 | 只读素材从哪来、怎么消费、走哪种存储 | `corpus/assets.json` + `corpus/README.md` |
 | 反汇编语料（4 文件 zip）的来源 / 哈希 / 转码口径 | `corpus/disasm/README.md` |
+| **模拟器（Win32/D3D 适配层）的知识落点** | **`docs/03-emulator/README.md`** —— 地图：L1 合同 `contracts-win32.md` · 我们依赖的微软文档 `external-docs.md` · 仓自身工具链合同 `repo-guards.md` |
 | 环境与权限须知（硬纪律 / 跨平台 / 怎么注册 agent 基建） | `AGENTS.md` |
+
+> ★ 模拟器那一域**有真正的文档**（微软的 Win32 / GDI / D3D9 / DDraw / DirectShow），所以知识住在
+> `docs/03-emulator/` 里：观察 / 缺陷史 / 实现取舍都进文档，**只有"变了就是 bug、而且变了是静默的"**才配一条守卫
+> （判据见 `docs/03-emulator/README.md` §0.1）。
 
 > ★ **本仓的知识层目前是空的，这是有意为之**：旧仓的全部知识资产（`analysis/` `tickets/` `docs-new/` …）
 > 都待清理 / 校验 / 重分类，本轮**一个文件都不复制、一个字都不摘抄**，只在 `corpus/assets.json` 里登记指向。

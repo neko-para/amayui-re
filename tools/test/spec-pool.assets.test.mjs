@@ -1,4 +1,4 @@
-/** @env assets @kind gate @why 立即数标签（0/1/2）的"只读不写"结构或读原语的 case 集与语料不符（读者会把立即数当池下标，或给写原语编一个语义） */
+/** @env assets @kind gate @suite toolchain @why 立即数标签（0/1/2）的"只读不写"结构或读原语的 case 集与语料不符（读者会把立即数当池下标，或给写原语编一个语义） */
 /**
  * tools/test/spec-pool.assets.test.mjs —— **CORE-POOL 立即数标签**的语料侧守卫
  *

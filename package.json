@@ -12,7 +12,9 @@
     "plugins/*"
   ],
   "scripts": {
-    "test": "node tools/test-run.mjs",
+    "test": "node tools/test-run.mjs --suite contract",
+    "verify": "node tools/test-run.mjs --suite toolchain",
+    "verify:all": "node tools/test-run.mjs --suite toolchain --all",
     "test:assets": "node tools/test-run.mjs --env assets",
     "test:all": "node tools/test-run.mjs --all",
     "test:list": "node tools/test-run.mjs --list",

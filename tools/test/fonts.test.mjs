@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 字体链的落点/版本判据被破坏 */
+/** @env pure @kind gate @suite toolchain @why 字体链的落点/版本判据被破坏 */
 /**
  * tools/test/fonts.test.mjs —— cnjp 字体构建链的守卫。
  *

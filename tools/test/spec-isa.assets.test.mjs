@@ -1,4 +1,4 @@
-/** @env assets @kind gate @why 协议章的结构性断言与真实语料脱节（头布局 / opcode 域 / 表区越界 / 指令切分），读者会按错的字节结构写解码器 */
+/** @env assets @kind gate @suite toolchain @why 协议章的结构性断言与真实语料脱节（头布局 / opcode 域 / 表区越界 / 指令切分），读者会按错的字节结构写解码器 */
 /**
  * tools/test/spec-isa.assets.test.mjs —— **CORE-ISA 的语料侧守卫**
  *

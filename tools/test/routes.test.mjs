@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 界面路径表坏了、或入库的播放器输入脚本没跟着数据重生 */
+/** @env pure @kind gate @suite toolchain @why 界面路径表坏了、或入库的播放器输入脚本没跟着数据重生 */
 /**
  * tools/test/routes.test.mjs — 界面路径登记表（`data/routes/screens.json`）的守卫
  *

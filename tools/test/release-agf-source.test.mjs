@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 发布链默认又去重烧 AGF（要 headless Chrome）⇒ "没有浏览器就发不出包"，且进包字节变成"这次烧出来的"而不是固化下来的那一版 */
+/** @env pure @kind gate @suite toolchain @why 发布链默认又去重烧 AGF（要 headless Chrome）⇒ "没有浏览器就发不出包"，且进包字节变成"这次烧出来的"而不是固化下来的那一版 */
 /**
  * tools/test/release-agf-source.test.mjs —— **AGF 进包来源**的守卫
  *

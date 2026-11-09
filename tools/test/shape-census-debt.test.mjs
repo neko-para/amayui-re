@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 欠账三档（已声明 / `count:null` 窗口内 / 未声明）算错时，"覆盖率"会把"判不了"读成"已覆盖"、或把已声明的成员当欠账 —— 于是下一轮补的是**不存在的成员** */
+/** @env pure @kind gate @suite toolchain @why 欠账三档（已声明 / `count:null` 窗口内 / 未声明）算错时，"覆盖率"会把"判不了"读成"已覆盖"、或把已声明的成员当欠账 —— 于是下一轮补的是**不存在的成员** */
 /**
  * tools/test/shape-census-debt.test.mjs —— `obj0Debt()` 的算术守卫（纯函数，不读语料）。
  *

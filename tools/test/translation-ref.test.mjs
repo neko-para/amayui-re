@@ -1,4 +1,4 @@
-/** @env external @kind gate @why 翻译参考快照不再与旧仓逐字节相同 */
+/** @env external @kind gate @suite toolchain @why 翻译参考快照不再与旧仓逐字节相同 */
 /**
  * tools/test/translation-ref.test.mjs —— **翻译参考快照的保真守卫**
  *

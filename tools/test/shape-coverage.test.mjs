@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 归档（"下一层能用的函数清单"）的算术一旦算错，就会把未闭合的函数算进"能用"，或把同一处缺口记两遍 —— 下一层据此判断"有没有未点名的副作用"会得出反向结论 */
+/** @env pure @kind gate @suite toolchain @why 归档（"下一层能用的函数清单"）的算术一旦算错，就会把未闭合的函数算进"能用"，或把同一处缺口记两遍 —— 下一层据此判断"有没有未点名的副作用"会得出反向结论 */
 /**
  * tools/test/shape-coverage-archive.test.mjs —— `coverageArchive()` 的口径守卫（纯函数）。
  *

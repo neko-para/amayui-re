@@ -1,4 +1,4 @@
-/** @env assets @kind contract @why handler 体骨架普查的口径被改坏（分组不穷尽 / 守恒不闭合 / 立即数解不出 / 过滤器失效） */
+/** @env assets @kind contract @suite toolchain @why handler 体骨架普查的口径被改坏（分组不穷尽 / 守恒不闭合 / 立即数解不出 / 过滤器失效） */
 /**
  * tools/test/shape-bodies.assets.test.mjs —— `pnpm tools shape bodies` 的**结构不变量**守卫
  *

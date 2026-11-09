@@ -1,4 +1,4 @@
-/** @env pure @kind contract @why 按需补齐的提案把"已声明窗口里的偏移"又写进草稿（会与 G1/G2 打架、且看起来像补过了）· 把没观察宽度的偏移编成成员（假声明）· 或漏掉传播候选（白补一轮） */
+/** @env pure @kind contract @suite toolchain @why 按需补齐的提案把"已声明窗口里的偏移"又写进草稿（会与 G1/G2 打架、且看起来像补过了）· 把没观察宽度的偏移编成成员（假声明）· 或漏掉传播候选（白补一轮） */
 /**
  * tools/test/shape-need.test.mjs —— `shape need` 的**纯逻辑**守卫（合成 types/carriers/inferred/sites）
  *

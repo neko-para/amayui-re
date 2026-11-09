@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 清单不变量被破坏（合成清单路径：#1–#9 的守卫不再会红） */
+/** @env pure @kind gate @suite toolchain @why 清单不变量被破坏（合成清单路径：#1–#9 的守卫不再会红） */
 /**
  * tools/test/corpus-manifest.test.mjs — 素材清单守卫的**单元**层
  *

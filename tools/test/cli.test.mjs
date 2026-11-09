@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 有工具从域地图上消失、或动作转发坏了 */
+/** @env pure @kind gate @suite toolchain @why 有工具从域地图上消失、或动作转发坏了 */
 /**
  * tools/test/cli.test.mjs — **工具层入口**（`tools/cli.mjs`）的两条契约
  *

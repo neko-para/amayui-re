@@ -1,4 +1,4 @@
-/** @env external @kind contract @why the provider must own one private temp per live session/workspace pair, reuse it across commands, isolate sessions, and remove it on dispose */
+/** @env external @kind contract @suite toolchain @why the provider must own one private temp per live session/workspace pair, reuse it across commands, isolate sessions, and remove it on dispose */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'

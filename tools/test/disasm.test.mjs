@@ -1,4 +1,4 @@
-/** @env assets @kind gate @why 语料的 EA→行号 映射/索引坏了，或 opcode 分派表的机械提取对不上 */
+/** @env assets @kind gate @suite toolchain @why 语料的 EA→行号 映射/索引坏了，或 opcode 分派表的机械提取对不上 */
 /**
  * tools/test/disasm.test.mjs —— **机械提取器的守卫**（语料在场时才有意义 ⇒ `@env assets`）
  *

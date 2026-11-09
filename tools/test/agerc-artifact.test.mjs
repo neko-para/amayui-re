@@ -1,4 +1,4 @@
-/** @env assets @kind product @why AGERC 可信产物的身份（sha256 与清单基准不符） */
+/** @env assets @kind product @suite toolchain @why AGERC 可信产物的身份（sha256 与清单基准不符） */
 /**
  * tools/test/agerc-artifact.test.mjs —— **AGERC.DLL 可信产物的身份守卫**
  *

@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 技能（`.agents/skills/<名字>/SKILL.md`）的体例破了，或它引用的 `pnpm tools <域> <动作>` 已经不存在（真源指针指空） */
+/** @env pure @kind gate @suite toolchain @why 技能（`.agents/skills/<名字>/SKILL.md`）的体例破了，或它引用的 `pnpm tools <域> <动作>` 已经不存在（真源指针指空） */
 /**
  * tools/test/skills.test.mjs —— **技能的机械契约**
  *

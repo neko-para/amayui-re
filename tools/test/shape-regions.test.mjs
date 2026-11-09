@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 段落划分的判据被改坏（init 不再开段 / 类别切换不再切 / caller-saved 不再标"被调用打断"），或两道守卫被拆掉 */
+/** @env pure @kind gate @suite toolchain @why 段落划分的判据被改坏（init 不再开段 / 类别切换不再切 / caller-saved 不再标"被调用打断"），或两道守卫被拆掉 */
 /**
  * tools/test/shape-regions.test.mjs —— 段落导出（校验器功能①）与两道守卫的**纯函数**守卫
  *

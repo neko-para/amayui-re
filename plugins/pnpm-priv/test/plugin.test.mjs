@@ -1,4 +1,4 @@
-/** @env pure @kind safety @why `run` 的"缺 write:true 只出计划 / 任务名闭集合 / 部署方总闸"在**接线层**坏了：宿主会替调用方真的跑构建或起窗口 */
+/** @env pure @kind safety @suite toolchain @why `run` 的"缺 write:true 只出计划 / 任务名闭集合 / 部署方总闸"在**接线层**坏了：宿主会替调用方真的跑构建或起窗口 */
 /**
  * plugins/pnpm-priv/test/plugin.test.mjs —— `run` 那一路的**接线**判据
  *

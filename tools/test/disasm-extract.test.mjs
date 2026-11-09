@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 语料索引/跳转表提取在**合成语料**上的判据坏了（段名/表体位置/连续性） */
+/** @env pure @kind gate @suite toolchain @why 语料索引/跳转表提取在**合成语料**上的判据坏了（段名/表体位置/连续性） */
 /**
  * tools/test/disasm-extract.test.mjs —— 提取器的**纯函数守卫**（合成语料，不需要真语料）
  *

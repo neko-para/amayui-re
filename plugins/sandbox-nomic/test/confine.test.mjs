@@ -1,4 +1,4 @@
-/** @env pure @kind contract @why the no-MIC provider must wrap the exact argv, keep one failure-signature literal, report partial enforcement, and refuse unconfined modes */
+/** @env pure @kind contract @suite toolchain @why the no-MIC provider must wrap the exact argv, keep one failure-signature literal, report partial enforcement, and refuse unconfined modes */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'

@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 代码注释里引用的规范条目 id 在 spec 里不存在时，读者会把"注释说有这条规范"当成证据 —— 本仓已经因此把一条**不存在**的规范当成了判据（`CORE-OPS-AUDIO-SE-STOP`），并据此写下了与取证相反的行为断言 */
+/** @env pure @kind gate @suite toolchain @why 代码注释里引用的规范条目 id 在 spec 里不存在时，读者会把"注释说有这条规范"当成证据 —— 本仓已经因此把一条**不存在**的规范当成了判据（`CORE-OPS-AUDIO-SE-STOP`），并据此写下了与取证相反的行为断言 */
 /**
  * `tools/test/spec-rule-refs.test.mjs` —— 代码里引用的**规范条目 id** 必须真的存在
  *

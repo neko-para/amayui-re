@@ -1,5 +1,7 @@
 # 《天結いキャッスルマイスター》spec 审稿问题清单
 
+> ⚠ 本文引用的需求单 `REQ-01M5ED1Z9W1V190WYF6T6M4FX1` 等已随废弃交接单（`REQ-01M5BK8QMQYK7XQG707YVMQ202`）于 2026-11 删除；本文保留为当时的证据记录，引用的单号不可再解析。
+
 只读范围：`data/spec/`（`spec.json`、`chapters/*.md`、`bindings.json`、`audit.json`、`format/*`、`core/README.md`）。未读 `apps/emulator*`、`.tmp` 既有内容、`corpus/`、`data/ledger/`、`data/shape/`；未改任何 spec 文件。
 
 按严重度排列。每条只给“需要什么证据才能修”，不给结论。

@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why 未成篇 opcode 没有被 audit.gaps[] 精确覆盖（漏报 / 重复 / 形态坏），未成篇义务重新变成"缺口 0"的假象 */
+/** @env pure @kind gate @suite toolchain @why 未成篇 opcode 没有被 audit.gaps[] 精确覆盖（漏报 / 重复 / 形态坏），未成篇义务重新变成"缺口 0"的假象 */
 /**
  * tools/test/spec-gaps.test.mjs —— 「未成篇 opcode 的义务落点」守卫（纯文本）
  *

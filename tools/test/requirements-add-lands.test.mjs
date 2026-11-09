@@ -1,4 +1,4 @@
-/** @env pure @kind safety @why `add --write` 报的落盘必须是真的（说落盘就得查得到、没落盘就不许打印落点） */
+/** @env pure @kind safety @suite toolchain @why `add --write` 报的落盘必须是真的（说落盘就得查得到、没落盘就不许打印落点） */
 /**
  * tools/test/requirements-add-lands.test.mjs — **"建单成功了"这句话必须与磁盘一致**
  *

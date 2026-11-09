@@ -1,4 +1,4 @@
-/** @env assets @kind contract @why `30-agf` 的协议断言与真实 AGF 脱节（24 字节头 / meta·body 12 字节块 / v2 的 ACIF 紧接 body / 像素字段与行宽），读者会按错的字节结构写解码器 */
+/** @env assets @kind contract @suite toolchain @why `30-agf` 的协议断言与真实 AGF 脱节（24 字节头 / meta·body 12 字节块 / v2 的 ACIF 紧接 body / 像素字段与行宽），读者会按错的字节结构写解码器 */
 /**
  * tools/test/spec-agf.assets.test.mjs —— **AGF 图像的语料侧守卫**
  *

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** @env assets @kind gate @why 台账的 `bin` 锚可以落在**指令中间** / 不在 `.lst` 行首而没有任何判据发现 ⇒ "锚 EA 与 claim 引用的地址错位（0x1000 级 / 指令中间）"整类绿而错 */
+/** @env assets @kind gate @suite toolchain @why 台账的 `bin` 锚可以落在**指令中间** / 不在 `.lst` 行首而没有任何判据发现 ⇒ "锚 EA 与 claim 引用的地址错位（0x1000 级 / 指令中间）"整类绿而错 */
 /**
  * tools/test/ledger.anchor-lst.assets.test.mjs —— ★ **站点口径的永久守卫**（本单的核心收口物）
  *

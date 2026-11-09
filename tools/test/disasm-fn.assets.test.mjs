@@ -1,4 +1,4 @@
-/** @env assets @kind contract @why 真语料上的 item 目录契约被破坏：两侧关联错位（原型被当成定义 / 修饰名对不上）、覆盖率跌破前提、缺 C 被静默吞掉 */
+/** @env assets @kind contract @suite toolchain @why 真语料上的 item 目录契约被破坏：两侧关联错位（原型被当成定义 / 修饰名对不上）、覆盖率跌破前提、缺 C 被静默吞掉 */
 /**
  * tools/test/disasm-fn.assets.test.mjs —— **item 目录**在**真语料**上的契约
  *

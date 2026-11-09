@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** @env pure @kind gate @why `repo=reference` 的 bin 锚可以不带 len/sha256 进台账 ⇒ "这条观察没被换掉"只剩一句声称 */
+/** @env pure @kind gate @suite toolchain @why `repo=reference` 的 bin 锚可以不带 len/sha256 进台账 ⇒ "这条观察没被换掉"只剩一句声称 */
 /**
  * tools/test/ledger-reference-bin-digest.test.mjs —— **摘要**（"这条观察没被换掉"的唯一证据）的守卫
  *

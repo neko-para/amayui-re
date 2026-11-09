@@ -168,7 +168,8 @@ pnpm tools spec report          # ★ 审计账：effect 覆盖 / 内部省略 /
 pnpm tools spec residuals       # ★ 残差地图：**子系统通道 × 类别**（A=正文弃权 / B=消费者缺失 / C=知识缺口；`discarded` 明确舍弃**不计入**）；`--channel` / `--class` / `--json`
 pnpm tools spec effects --pilot # ★ 从语料机械枚举 effect（覆盖判定输入；不是“整条指令”）
 pnpm tools old-repo inventory   # 重新实测旧仓 → docs/00-origin/old-repo-inventory.md
-pnpm test                       # ★ 测试（默认只跑 @env pure；分级见下）
+pnpm test                       # ★ 测试（合同档 `@suite contract`，默认只跑 @env pure；分级见下）
+pnpm verify                     # ★ 工具链档 `@suite toolchain`（台账 / 写路径 / 知识层）；**也必须绿**
 pnpm test:list                  # 看分级集合与每个文件的声明（先看这个）
 pnpm test:assets                # 只跑要 LFS/游戏安装的那档
 pnpm test:all                   # 全部（含 @env external：旧仓/真机）
@@ -196,7 +197,8 @@ skip-logo > 30 s，音频 fill 会必然 underrun。⛔ 不要用 Debug 的墙�
 每个 `*.test.mjs` 首行必须是：
 
 ```js
-/** @env pure @kind gate @why 一句话说清"红了意味着什么" */
+/** @env pure @kind gate @why 一句话说清"红了意味着什么" */                  // 省略 @suite = contract
+/** @env pure @kind gate @suite toolchain @why 一句话说清"红了意味着什么" */   // 工具链档
 ```
 
 | `@env` | 这台机器上它有没有意义 | 默认跑？ |
@@ -206,6 +208,14 @@ skip-logo > 30 s，音频 fill 会必然 underrun。⛔ 不要用 Debug 的墙�
 | `external` | 要**旧仓**或真机 | `pnpm test:all` |
 
 `@kind` ∈ `gate`（不变量/清单/约定）· `contract`（领域能力行为）· `safety`（写路径不写坏数据）· `product`（产出物不变量）。
+
+★ **`@suite` 与 `@env` 正交**（一个说"这台机器上有没有意义"，一个说"它是合同还是本仓自己的机械装置"）：
+`@suite` ∈ `contract`（**缺省**，可整个省略）/ `toolchain`。
+`pnpm test` 只跑**合同档**（对外边界合同 / 基建契约 —— 快、必跑）；
+`pnpm verify` 跑**工具链档**（工具链 / 台账 / 写路径 / 知识层 —— **也必须绿**，不是"可选的"）。
+**两档之和 = 全量**，⛔ **不许有文件两档都不进**（判据：所有 `@env pure` 文件 = contract ∪ toolchain，一个不漏）。
+`pnpm verify:all` = 工具链档的 `--all`（连 `@env assets` / `external` 那部分一起跑）。
+两档都由 `tools/test-run.mjs` 的 `--suite` 选；分档**不建清单文件**，判据就在 pragma 里。
 
 ★ **CTest 那一档不写 pragma，判据是「注册位置」**：`apps/emulator-cxx` / `apps/emulator-lift` 的守卫是 CTest（`add_test`），
 它的档位 = **是否顶层无条件注册** —— 顶层 ⇒ 默认 `ctest` 就会跑（免安装）⇒ `pure`；
@@ -287,6 +297,18 @@ skip-logo > 30 s，音频 fill 会必然 underrun。⛔ 不要用 Debug 的墙�
 ## 10. 文档纪律：README **不写状态**
 
 * ✅ 只写**不变的东西**：口径 / 禁令 / 不变量 / 落点地图 / 怎么跑。
+* ★ **守卫的门槛（现行口径）**：只有"**变了就是 bug、而且变了是静默的**"才配一条守卫。
+  **观察**（"我们测到过 X"）· **缺陷史**（"曾经有 bug Y"）· **实现取舍**（"我们为什么这么写"）
+  一律进 `docs/03-emulator/`，**不进 test**。三问全答"是"才写守卫：
+  ① 失败是否意味着**用户可见的错或数据损坏** · ② **会不会有人发现**（崩 / 黑屏 / 构建红 / `git diff` 看得见 ⇒ 不用守）·
+  ③ **删掉它，会不会让某个错误静默通过**。判据全文见 `docs/03-emulator/README.md` §0.1。
+  ⇒ "没有守卫的清单等于一份 Markdown"那句话**只对机器可校验的清单成立**（清单要有人替它红）；
+  它**不**推出"每个观察都该配一条用例"，也不推出"内部实现细节要锁住"。
+* ★ **文档必须带命令与读数**：一条观察要写清"哪条命令 + 看到多少 + 什么口径（build 类型 / 平台 / 有无安装）+ 哪天"；
+  只写结论不写读数的"文档"，**不比没有强**。读数本身**不是**断言 —— 它进文档，不进 test。
+* ❌ **不要用 test 记住发生过的事**（那是 `observations.md` / `defects.md`）；
+  ❌ **不要用 test 断言当前取值 / 当前数字**（`total === 544`、`hits === 1`、`calls === 10` 这类：
+  会红，但红只说明"仓库变了"）；❌ **不要给每个常量配一条 mutation 条目**（每类挑一条代表）。
 * ❌ **状态、进度、计数、体积、哈希、快照数字一律不手写**。自检一句话：
   **"这句话会不会因为下次干活而变错？"** 会 ⇒ 不要写进 README，改成**"怎么查"**。
 * **怎么查**（真源）：**进度与"还要做什么" = `pnpm tools requirements plan`（需求树 `data/requirements/`）**·
@@ -308,9 +330,11 @@ skip-logo > 30 s，音频 fill 会必然 underrun。⛔ 不要用 Debug 的墙�
   且必须含 `## 怎么查` / `## 怎么改` 两节并**指向 `--describe`** —— 看到一个 JSON 就知道去哪看怎么处理它。
   生态文件（`package.json` 等）不在范围内。由 `tools/test/json-docs.test.mjs` 守。
   范例：`corpus/assets.md`、`corpus/fixtures/samples.md`。
-* **测试只测基建契约**：这里搭的是基建不是业务，所以测试的对象是
-  **守卫能不能红 · 写路径会不会写坏 · 发布物是否满足不变量 · 约定是否齐全**；
-  ❌ 不测业务结论，❌ 不复述代码逻辑，❌ 不断言数据的当前取值（那是 `pnpm tools corpus validate` 当哨兵的事）。
+* **测试只测两类东西**：① **基建契约** —— 守卫能不能红 · 写路径会不会写坏 · 发布物是否满足不变量 · 约定是否齐全；
+  ② **对外边界合同**（L1：调用方看得见的结果，真源是**微软文档** + `docs/03-emulator/contracts-win32.md`）。
+  ❌ 不测业务结论，❌ 不复述代码逻辑，❌ 不锁**内部实现取舍**（堆策略 / 缓存键 / 批合并数 ⇒ `design-notes.md`），
+  ❌ 不断言数据的当前取值（那是 `pnpm tools corpus validate` 当哨兵的事）。
+  ⇒ 判断一句话：**这条断言在换一份实现之后还需不需要成立？** 不需要 ⇒ 它不该是 test。
 * 确实需要两处都写的东西 ⇒ **先问"能不能只留一处"**；真需要就**钉住**（测试断言两处一致）。
   ❌ 不加"不许出现某字符串"这类脆弱守卫 —— 守卫要**红得有意义**。详见 `docs/00-origin/decisions.md` §6。
 
