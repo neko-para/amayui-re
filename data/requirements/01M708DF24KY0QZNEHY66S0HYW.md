@@ -65,6 +65,11 @@
 ⇒ 本单的验收拆成两层：**机制级留在本单**（上面那条真机 trace + 夹具）；**终态级移到子单"room-exit 的终态判据"**
 （要么走「戻る」`REQ-01M6ZDSPVYS3R78TK8TFKVBC8N`，要么改图的终态口径）。⛔ 不许为了凑 `exit 0` 改 `room-exit.graph` 或业务逻辑。
 
+★★ **归属待核（用户 2026-11-10 提出，父级承认这个怀疑站得住）**：那次真机的 throw **可能根本不属于"EU-ROOM 退出"**，
+而是我们注入的 ESC / 坐标点击落到了后面的 `Quit`（abort）—— `GetMessageA` 返回 0 正是"退出消息循环"，回上一屏没有理由抛异常。
+⇒ 见 spike 单 `REQ-01M71P87BMTZK4MHT8468BMC3G`。**本单的"机制成立"不受影响**（`RaiseException`/`RtlUnwind` 原本确是桩、实现后确实跑通），
+但"**它是 EU-ROOM 退出的前置**"这句话**待核**；在 spike 出结论前，⛔ 不要把本单当成"出房间"的前置引用。
+
 ## 明确不做
 
 - `__finally` / 嵌套异常（已有派发时 `beginRaise` 响亮停）/ VEH 优先级 / handler 里再抛 / 宿主 fault 变 guest SEH（`catch(SE_Exception)` 仍不可达）。
