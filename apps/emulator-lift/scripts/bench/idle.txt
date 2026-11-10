@@ -1,0 +1,25 @@
+# idle.txt —— 工况：**进 TITLE 之后空转**（指令吞吐基线；REQ-01M6XVZC086PFXJRWE5AASRJ8G 第一步）
+#
+# 怎么量（口径）：`--present window` 是 **real-time** 时钟 ⇒ 两个打点之间 `guest_ms` 的差 = **宿主毫秒**。
+#   打点 = `at insn N` + `wait 0 insn`：`wait` 自带一个 no-op 动作，到期那一刻
+#   `runtime/input_script.cpp` 会打 `[input-script] frame=… guest_ms=… insns=… wait 0 insn` —— 那一行就是时间戳。
+#   ⇒ 窗口吞吐 = Δinsns / Δguest_ms（ms/百万条 + MIPS），并且同一份运行摘要还**免费**给出
+#   块命中率（`blocks :` 的 hits/(hits+misses)）与平均块长（insns/(hits+misses)）。
+#   ⛔ 不需要 profiler（它的膨胀量级见 OBS-20261108-09）。
+#
+# 为什么窗口是 [250M, 450M]：
+#   · boot 到第一帧 Present 在 ~150–200M 条之间（2026-11-10 校准：insns=50M 时 frame=0、200M 时 frame=87）。
+#     窗口从 250M 起 ⇒ 不把 boot 混进来（boot 期 input-script 的 tick 不按块推进，50M 那个点实测飘到 70.5M）。
+#   · 200M 条 ≈ 21 s（≈105 ms/百万条）⇒ 长到不被单帧噪声主导，又短到 N=5 只要 ~3 分钟。
+#   · **只用 `at insn`**（⛔ 不用 `at frame`）：帧号跨运行会漂（OBS-20261108-17）。
+#
+# 一条命令（工况名 = 文件名；口径A 由工具写死，见 tools/lift.mjs 的 BENCH_BASE_ARGS）：
+#   pnpm tools lift bench idle --n 5
+#
+# ⚠ 本文件只描述**窗口**，不描述机器。build 类型 / 二进制 sha256 / 工作树指纹由 bench 落进 JSON。
+
+at insn 250000000      # 窗口起点（TITLE 稳态）
+wait 0 insn            # ← 打点 1
+after 200000000 insn   # 窗口长度 = 200M 条
+wait 0 insn            # ← 打点 2
+quit                   # 收口；与打点 2 同一 tick ⇒ 解析器会把这条同值重复点去掉（不算第三个点）

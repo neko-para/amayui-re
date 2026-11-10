@@ -12,6 +12,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <string>
 
 #include "runtime/com.h"
@@ -74,6 +75,34 @@ void spriteLog(const char* what, const char* fmt, ...) {
     va_start(ap, fmt);
     logV(LogLevel::Info, LogD3dx9, prefix, fmt, ap);
     va_end(ap);
+}
+
+// ★ **默认级别可见**的告警（默认日志级别是 `warn`；`Info` 默认看不见）。
+//   用途：批次里缓存的纹理身份对不上 ⇒ 这个精灵**被跳过** —— 那正是"本会静默采错像素"的事件，
+//   ⛔ 不许降成 Info。限流同 `d3d9_pipeline.cpp` 的 `pipeWarn`：前几次打全量，之后只计数
+//   （`--log-level debug` 仍能看到每一次）。
+constexpr std::uint32_t kSpriteWarnBudget = 4u;
+void spriteWarn(const char* what, const char* fmt, ...) {
+    const char* key = what ? what : "?";
+    char msg[512];
+    msg[0] = '\0';
+    va_list ap;
+    va_start(ap, fmt);
+    std::vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+    static std::map<std::string, std::uint32_t>* counts = new std::map<std::string, std::uint32_t>();
+    const std::uint32_t n = ++(*counts)[key];
+    char prefix[256];
+    std::snprintf(prefix, sizeof(prefix), "[d3dx9] %s: ", key);
+    if (n <= kSpriteWarnBudget) {
+        logAt(LogLevel::Warn, LogD3dx9, prefix, "%s", msg);
+        return;
+    }
+    if (n == kSpriteWarnBudget + 1u) {
+        logAt(LogLevel::Warn, LogD3dx9, prefix,
+              "同类告警已打满 %u 次 ⇒ 之后只计数（每一次仍以 debug 级别留一条）", kSpriteWarnBudget);
+    }
+    logAt(LogLevel::Debug, LogD3dx9, prefix, "%s", msg);
 }
 
 bool requireMachine(X86& cpu, Machine** out, std::string* why) {
@@ -181,6 +210,10 @@ bool readState(X86& cpu, std::uint32_t state, State* out, std::string* why) {
 }
 
 // 批次里由 Draw AddRef 过的纹理：销毁 / 设备丢失时对称 Release（⛔ 不留 leak）
+// ★ **身份判据与合成路径同一份**（段 3 的 ④）：条目里只缓存对象 EA，而 guest 堆会复用 EA
+//   ⇒ 纹理在批次还活着时被（越界）Release、EA 被**另一张**纹理拿走时，裸 `release(EA)` 减的是
+//   **新占有者**。所以按 Draw 时记下的 serial（进程级单调、永不复用）校验：不符 ⇒ 只清"我们持引用"
+//   的标记 + 默认级别可见的告警，⛔ 一个引用都不减。
 void releaseQueuedTextures(X86& cpu, const State& s) {
     if (s.count == 0 || s.batch == 0 || !cpu.com) return;
     if (!cpu.mem || !cpu.mem->committed(s.batch, s.count * kBatchEntryBytes)) return;
@@ -188,9 +221,47 @@ void releaseQueuedTextures(X86& cpu, const State& s) {
         const std::uint32_t ea = s.batch + i * kBatchEntryBytes;
         if ((cpu.mem->rd32(ea + kBeReserved) & 1u) == 0) continue;
         const std::uint32_t tex = cpu.mem->rd32(ea + kBeTexture);
+        const std::uint32_t serial = cpu.mem->rd32(ea + kBeTextureSerial);
         cpu.mem->wr32(ea + kBeReserved, 0u);
-        if (tex != 0) cpu.com->release(cpu, tex);
+        if (tex == 0) continue;
+        // 重解析身份（与 `compositeBatch` 的判据同一条）：serial 不符 / 已不是纹理对象 ⇒ 不释放。
+        d3d9::TextureInfo ti;
+        if (!d3d9::textureInfo(cpu, tex, &ti, nullptr)) {
+            spriteWarn("Release", "第 %u 条 Draw 的纹理 0x%08X 已不是本模块的纹理对象 ⇒ ⛔ 不释放它", i, tex);
+            continue;
+        }
+        if (ti.serial != serial) {
+            spriteWarn("Release",
+                       "第 %u 条 Draw 的纹理 0x%08X 已被释放 / 被另一张纹理复用（Draw 时 serial=%u，现在=%u）"
+                       "⇒ ⛔ 不释放它（新占有者不受影响）",
+                       i, tex, serial, ti.serial);
+            continue;
+        }
+        cpu.com->release(cpu, tex);
     }
+}
+
+// 批次条目里由 Draw AddRef 过的纹理：**所有出口共用这一条身份判据**。
+// ★ 条目里只缓存对象 EA，而 guest 堆会复用 EA ⇒ 纹理在批次还活着时被（越界）Release、EA 被
+//   **另一张**纹理拿走之后，裸 `release(EA)` 减的是**新占有者**。`compositeBatch` 有 4 个
+//   **早退**出口（无 src rect / 空矩形 / 四边形退化 / 完全屏外）在合成主路径的身份校验之前 ——
+//   它们以前走裸 `releaseEntry` ⇒ 同 EA 的新纹理被减到 0（`REQ-01M70SHFT6RZA7RRY1R051Z2PB` #1）。
+//   ⇒ 把校验放进 releaseEntry 本身：serial 不符 / 已不是纹理对象 ⇒ 只清"我们持引用"的标记 +
+//   默认级别可见的告警，⛔ 一个引用都不减。与 `releaseQueuedTextures` 同一条判据。
+bool entryTextureIsCurrent(X86& cpu, std::uint32_t tex, std::uint32_t serial, std::uint32_t index) {
+    d3d9::TextureInfo ti;
+    if (!d3d9::textureInfo(cpu, tex, &ti, nullptr)) {
+        spriteWarn("End", "第 %u 条 Draw 的纹理 0x%08X 已不是本模块的纹理对象 ⇒ ⛔ 不释放它", index, tex);
+        return false;
+    }
+    if (ti.serial != serial) {
+        spriteWarn("End",
+                   "第 %u 条 Draw 的纹理 0x%08X 已被释放 / 被另一张纹理复用（Draw 时 serial=%u，现在=%u）"
+                   "⇒ ⛔ 不释放它（新占有者不受影响）",
+                   index, tex, serial, ti.serial);
+        return false;
+    }
+    return true;
 }
 
 // 批次容量增长（guest 堆 realloc；新条目由调用方整条写入，所以不清零）
@@ -407,6 +478,7 @@ std::uint32_t draw(X86& cpu, std::uint32_t state, std::uint32_t texture, std::ui
     in.color = color;
     std::uint32_t tex_w = 0;
     std::uint32_t tex_h = 0;
+    std::uint32_t tex_serial = 0;  // 纹理身份（合成时用来判"EA 还是不是那张纹理"）
     bool take_ref = false;
     if (texture != 0) {
         // 真纹理：必须是我们建的 IDirect3DTexture9，且必须与 Sprite 同一台设备（D3DX 语义）。
@@ -421,6 +493,13 @@ std::uint32_t draw(X86& cpu, std::uint32_t state, std::uint32_t texture, std::ui
         }
         tex_w = ti.width;
         tex_h = ti.height;
+        // ★ **身份戳**（`REQ-01M701NYF2B3YV1YFSZBMPQZ41` 的 #3）：批次里只存对象 EA 是不够的 ——
+        //   `D3DXSPRITE_DO_NOT_ADDREF_TEXTURE` 下我们**故意**不加引用（那是微软文档写的语义：
+        //   "Disables calling AddRef() on every draw, and Release() on Flush()"），所以纹理可以在
+        //   批次还活着时被 guest 释放、它的对象 EA 被**另一张纹理**拿走。EA 一模一样 ⇒ 合成时
+        //   只按 EA + `'TEX1'` magic 重解析会**静默采错像素**。serial 是进程级单调、永不复用的身份
+        //   （`d3d9::TextureInfo::serial`）⇒ 把它随批次记下来，合成时对不上就拒绝。
+        tex_serial = ti.serial;
         // ★ 与 D3DX 一致：Draw 会 **AddRef 纹理**（除非 Begin 给了 D3DXSPRITE_DO_NOT_ADDREF_TEXTURE），
         //   这样批次合成前纹理不会被提前 Release 掉。End/Flush 时对称 Release。
         if ((s.flags & kSpriteDoNotAddRefTexture) == 0) {
@@ -523,6 +602,7 @@ std::uint32_t draw(X86& cpu, std::uint32_t state, std::uint32_t texture, std::ui
         wrFloat(cpu, ea + kBeQuad + static_cast<std::uint32_t>(i) * 4u, static_cast<float>(quad[i]));
     cpu.mem->wr32(ea + kBeColor, in.color);
     cpu.mem->wr32(ea + kBeReserved, take_ref ? 1u : 0u);  // bit0 = 这条纹理是我们 AddRef 的
+    cpu.mem->wr32(ea + kBeTextureSerial, tex_serial);      // 纹理身份（合成时的判据）
     cpu.mem->wr32(state + kSpCount, s.count + 1u);
     cpu.mem->wr32(state + kSpDraws, s.draws + 1u);
     return kOk;
@@ -582,13 +662,18 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
     GpuRaster* gpu_backend = m->gpuRaster();
     const bool sprite_gpu_active =
         gpu_backend != nullptr && gpu_backend->rasterActive() && gpu_backend->rasterSpritesEnabled();
-    // 条目级收尾：Draw 时 AddRef 过的纹理必须**每条路径**都还回去（含 continue 的早退分支）
-    auto releaseEntry = [&](std::uint32_t ea) {
+    // 条目级收尾：Draw 时 AddRef 过的纹理必须**每条路径**都还回去（含 continue 的早退分支）。
+    // ★ 身份校验在这里（**所有出口之前**，不是只在合成主路径）：4 个早退分支（无 src rect /
+    //   空矩形 / 退化 / 屏外）也走同一条 releaseEntry ⇒ 同 EA 的新纹理一个引用都不减。
+    auto releaseEntry = [&](std::uint32_t ea, std::uint32_t index) {
         if (!cpu.com) return;
         if ((cpu.mem->rd32(ea + kBeReserved) & 1u) == 0) return;
         const std::uint32_t t = cpu.mem->rd32(ea + kBeTexture);
+        const std::uint32_t serial = cpu.mem->rd32(ea + kBeTextureSerial);
         cpu.mem->wr32(ea + kBeReserved, 0u);
-        if (t != 0) cpu.com->release(cpu, t);
+        if (t == 0) return;
+        if (!entryTextureIsCurrent(cpu, t, serial, index)) return;
+        cpu.com->release(cpu, t);
     };
     for (std::uint32_t i = 0; i < s.count; ++i) {
         const std::uint32_t ea = s.batch + i * kBatchEntryBytes;
@@ -596,7 +681,7 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
         const std::uint32_t eflags = cpu.mem->rd32(ea + kBeFlags);
         if ((eflags & kBeHasSrcRect) == 0) {  // 排不进来的条目（防御）
             if (sprite_gpu_active) d3d9::gpuNoteSpriteSkipped();
-            releaseEntry(ea);
+            releaseEntry(ea, i);
             continue;
         }
         const std::int32_t left = static_cast<std::int32_t>(cpu.mem->rd32(ea + kBeSrc + 0));
@@ -607,7 +692,7 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
         const double h = static_cast<double>(bottom - top);
         if (w <= 0 || h <= 0) {  // 空矩形（Draw 已经记过；这里只是防御）
             if (sprite_gpu_active) d3d9::gpuNoteSpriteSkipped();
-            releaseEntry(ea);
+            releaseEntry(ea, i);
             continue;
         }
         double q[8];
@@ -621,7 +706,7 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
         if (std::fabs(det) < 1e-12) {
             spriteLog("End", "第 %u 条 Draw 的四边形退化（det≈0）⇒ 跳过", i);
             if (sprite_gpu_active) d3d9::gpuNoteSpriteSkipped();
-            releaseEntry(ea);
+            releaseEntry(ea, i);
             continue;
         }
         // 目标包围盒（四角 min/max；裁剪到后缓冲）
@@ -644,7 +729,7 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
             // 完全在屏幕外：真机也不会画（不是错误，也不是回退）
             ++entries_done;
             if (sprite_gpu_active) d3d9::gpuNoteSpriteSkipped();
-            releaseEntry(ea);
+            releaseEntry(ea, i);
             continue;
         }
         // 调制色（D3D 的 MODULATE：源 × 漫反射色）。D3DCOLOR 的位序只在 pixel_format 里有一份。
@@ -665,10 +750,30 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
         std::uint32_t tprev_write_version = 0;
         std::int32_t twrite_rect[4] = {0, 0, 0, 0};
         if (texture != 0) {
+            const std::uint32_t entry_serial = cpu.mem->rd32(ea + kBeTextureSerial);
             d3d9::TextureInfo ti;
             if (!d3d9::textureInfo(cpu, texture, &ti, why)) {
                 if (why) *why = std::string("D3DX9：合成时纹理无效（被提前 Release？）：") + *why;
                 return false;
+            }
+            // ★ **身份校验**（`REQ-01M701NYF2B3YV1YFSZBMPQZ41` 的 #3）：批次里只缓存了对象 EA，
+            //   而 EA 会被 guest 堆复用。`D3DXSPRITE_DO_NOT_ADDREF_TEXTURE` 的文档语义就是
+            //   "Draw 不 AddRef / Flush 不 Release"（本线**有意**照做）⇒ 纹理可以在批次还活着时
+            //   被释放、EA 被**另一张**纹理拿走。这时只按 EA + `'TEX1'` magic 重解析会**成功**并
+            //   采到别人的像素 —— serial 不符就说明"这已经不是画那一刻那张纹理了"。
+            //   ⇒ 跳过**这一个精灵**（不是整批失败：其余精灵的纹理身份各自独立）并打默认级别可见
+            //     的告警。⛔ 不读一个"看起来合法"的像素。
+            if (ti.serial != entry_serial) {
+                spriteWarn("End",
+                           "第 %u 条 Draw 的纹理 0x%08X 已被释放 / 被另一张纹理复用（Draw 时 serial=%u，"
+                           "现在=%u）⇒ 跳过这个精灵（⛔ 不采别人的像素）",
+                           i, texture, entry_serial, ti.serial);
+                if (sprite_gpu_active) d3d9::gpuNoteSpriteSkipped();
+                // ★ 这里**不**走 `releaseEntry`：serial 不符意味着画那一刻那张纹理已经死了（EA 才会
+                //   被复用）⇒ 我们替它 AddRef 的那一份早被越界 Release 抵掉了；此时再 `release(texture)`
+                //   减的是**新占有者**（同一 EA 的 T2）。清掉"我们持引用"的标记就够。
+                cpu.mem->wr32(ea + kBeReserved, 0u);
+                continue;
             }
             tversion = ti.version;
             tserial = ti.serial;
@@ -701,7 +806,7 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
             if (u1 <= u0 || v1 <= v0) {
                 spriteLog("End", "第 %u 条 Draw 的源矩形完全在纹理外 ⇒ 跳过", i);
                 if (sprite_gpu_active) d3d9::gpuNoteSpriteSkipped();
-                releaseEntry(ea);
+                releaseEntry(ea, i);
                 ++entries_done;
                 continue;
             }
@@ -826,7 +931,7 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
             std::string sync_err;
             if (!gpu_backend->rasterSyncToGuest(base, gs->pitch, gs->width, gs->height, &sync_err)) {
                 if (why) *why = std::string("D3DX9：CPU 回退前 GPU 像素读回失败：") + sync_err;
-                releaseEntry(ea);
+                releaseEntry(ea, i);
                 return false;
             }
         }
@@ -891,7 +996,7 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
             d3d9::gpuNoteSpriteResult(gpu_done, written - written_before, sprite_fallback_reason);
         }
         // Draw 时 AddRef 的纹理在这里对称 Release（与 D3DX 的批次生命周期一致）
-        releaseEntry(ea);
+        releaseEntry(ea, i);
         ++entries_done;
     }
     cpu.mem->wr32(state + kSpCount, 0u);

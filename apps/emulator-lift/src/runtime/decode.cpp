@@ -147,6 +147,9 @@ const OpRow kOpMap[] = {
     {"jmp", Op::Jmp},     {"call", Op::Call},     {"ret", Op::Ret},       {"leave", Op::Leave},
     {"nop", Op::Nop},     {"hlt", Op::Hlt},       {"int", Op::Int},       {"int3", Op::Int3},
     {"pause", Op::Pause}, {"cpuid", Op::Cpuid},   {"sahf", Op::Sahf},     {"lahf", Op::Lahf},
+    // ★ `cld`(FC) / `std`(FD)：`___CxxFrameHandler3`(0x4E7094) 的序言 0x4E709D 是 `cld`
+    //   （折叠段里的助记符，`.lst` 的引擎代码里没有 ⇒ 以前落 `Op::Other`；见 insn.h 的 Op::Cld 注）。
+    {"cld", Op::Cld},     {"std", Op::Std},
     {"movsb", Op::Movs},  {"movsw", Op::Movs},    {"movsd", Op::Movs},    {"stosb", Op::Stos},
     {"stosw", Op::Stos},  {"stosd", Op::Stos},    {"lodsb", Op::Lods},    {"lodsw", Op::Lods},
     {"lodsd", Op::Lods},  {"scasb", Op::Scas},    {"scasw", Op::Scas},    {"scasd", Op::Scas},

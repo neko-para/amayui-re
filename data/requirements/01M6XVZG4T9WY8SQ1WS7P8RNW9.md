@@ -2,18 +2,11 @@
 
 - id: REQ-01M6XVZG4T9WY8SQ1WS7P8RNW9
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
 - order: 7
-- tags: [emulator-lift, performance, token]
-
-# emulator-lift · 令牌等待：过渡帧 HeapAlloc 的 shim 墙钟 ~85% 在等 guest 令牌（单令牌是上一轮修堆损坏引入的）
-
-- id: REQ-01M6XVZG4T9WY8SQ1WS7P8RNW9
-- type: req
-- status: open
-- parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
-- order: 7
+- verify: apps/emulator-lift/tests/guest_token.cpp#guest-token/wait-split
+- done_reason: M1 计量落地（tokenwait 栏、ns 口径变真、SurfaceArena 检查点、3 条守卫）+ 31 遍实测给出新基线：默认 --audio off 下三工况 waits=0（结构性：音频关掉就没有 feeder 竞争）⇒ 单里「过渡帧 shim 墙钟 ~85% 在等令牌」不成立；过渡帧分桶 guest 50.4% + interp 31.1% vs shim 1.06%，HeapAlloc 整轮 6.1ms/1586 次 ⇒ M2 在默认口径收益为 0，裁决不做；开音频时 wait/wall = 5.1%（空转）/16.6–19.8%（进房间）/11.5–12.1%（出房间）⇒ 另开单跟踪。
 - tags: [emulator-lift, performance, token]
 
 ## 观测
@@ -55,3 +48,25 @@
 - 设计三段（均不改并发契约）：M1 计量前置（wait 单开一栏、`ns` 暂不变，口径变更留给 E 单）→
   M2 让出阻塞型宿主等待（Present / 音频 mutex / 文件 IO 各一刀）→ M3 只在 M1 显示"饥饿"时做公平 handoff。
 - 分析全文 `.tmp/reveq/01M6XVZG4T9WY8SQ1WS7P8RNW9/analysis.md`（**不入库**；入库的是本节要点）。
+
+## 进展（2026-11-10）：**M1 计量已落地**，M2/M3 未动
+
+- **口径变真**：shim 的计时起点从 `GuestToken::Guard` **之前**挪到**之后** ⇒ `ns` 真的只含 `local.fn`（`machine.cpp` 那条注释
+  终于与事实一致）。⚠ **旧 `ns` 读数会变小**，差额 ≈ 等令牌（夹具实测：`wait 300.3 ms` vs `shim.ns 0.011 ms`；旧口径下 `ns≈313 ms`）。
+- **新栏位**：摘要 `tokenwait : waits N wait X ms avg Y us`（每轮 `arm()` 清零）+ `--profile` 的 `=== guest token wait ===` 块。
+  `waits` 只算**真被挡住**的取令牌（`try_lock` 成功不计、重入不计 ⇒ 未竞争热路径**零额外时钟**）。
+- **守卫缺口补上**：`SurfaceArena` 的 create / destroy / find×2 / lock / unlock 全部接 `check("arena.*")`，首违在 stderr
+  **响亮喊一行**（CAS 只喊一次）并进 `violations` ⇒ `--assert-guest-token` 判红。新增三条能红用例：
+  `guest-token/wait-split`（真竞争，wait 与 ns 不重叠）· `guest-token/arena-outside`（负控 0 违规 + 正控点名 `arena.find`）·
+  `guest-token/yield-revalidate`（Yield 期间另一线程真改容器 ⇒ 取回后必须重新校验）。变异一条（起点挪回 Guard 之前）实测红。
+- **M2/M3 裁决（2026-11-10，基于新基线，不做了）**：31 遍实测（三种工况 × `--audio off`/`sdl` × 各 2 遍 + 整轮窗口）
+  - **默认口径（`--audio off`）三工况 `waits = 0`、`wait = 0.0 ms`（21/21 遍）** ⇒ 令牌只有"主线程块边界 + 音频 feeder"两条取用路径，
+    音频关掉就**没有竞争**（未竞争连时钟都不读）⇒ **单里那条"过渡帧 shim 墙钟 ~85% 在等令牌"今天不成立**，M2 在该口径下收益 **= 0**。
+  - **过渡帧自身分桶**（`fr110-111` 窗口罩住载荷帧）：`guest 50.4% + interp 31.1%`（解释执行 **81.5%**）vs `shim` 仅 **1.06%（53.0 ms/5022.3 ms）**；
+    旧结论点名的 `kernel32!HeapAlloc` 整轮 **6.1 ms / 1586 次** ⇒ 分子本身就不存在。
+  - **只有开音频 feeder 才有等待**：空转 `wait/wall = 5.06/5.15%` · 进房间 **16.6/17.5/19.8%** · 出房间 **11.5/12.1%**（`max-concurrent` 全程 1、
+    `violations` 全程 0）⇒ 这是 M2 的**收益上限**；要排序还得 N≥8（`avg` 在 324–2017 µs 之间跳）。⇒ 另开单跟踪（音频开启场景）。
+  - `--assert-guest-token` **零开销**（只被读一次、运行结束后）：A/B 差 ≤±4%（噪声）⇒ 以后可默认带。
+  - ⚠ `host` 桶里 **`input-script` 自己占 wall 的 9–16%**（脚手架每块边界扫动作），`host.audio` 只 2.6–4.4% ⇒ ⛔ 别把它当引擎成本。
+- ⚠ **assets 档 CTest 本身没跑**（需 `LIFT_ASSETS=1` 重新 configure）；`option-roundtrip` 那条以后要补跑。
+- 另：`README.md` / `main.cpp` 里 `--assert-guest-token` 的说明还没提 arena 检查点（本单未动那两个文件）。

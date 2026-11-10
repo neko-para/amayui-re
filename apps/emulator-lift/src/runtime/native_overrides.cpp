@@ -118,7 +118,12 @@ bool NativeOverrideTable::invoke(NativeOverride& ov, X86& cpu, GuestMemory& mem,
     const std::uint32_t ret = mem.rd32(esp);
     std::uint32_t result = 0;
     g_nested_started = false;
-    if (!ov.fn(cpu, mem, &result)) {
+    // ★ 条件式 override 的台账通道：fn 在运行期间能拿到"自己那一项"（见 x86.h）。
+    //   fn 只有一个返回出口 ⇒ 这里紧接着复位，不会留下悬垂指向。
+    cpu.current_override = &ov;
+    const bool ran = ov.fn(cpu, mem, &result);
+    cpu.current_override = nullptr;
+    if (!ran) {
         if (g_nested_started) {
             // native 已经铺好 guest 回调帧；EIP/ESP 由 GuestCallStack 设置，不要回退。
             if (suspended) *suspended = true;
@@ -229,6 +234,11 @@ const KnownNative kKnown[] = {
     //   纯像素核 = `blendGlyph46D9F0`（G1 直接跑）；帧级 A/B 见需求单
     //   REQ-01M6V1KDFTE933AD3YB5P6XJK2（`all` vs `all,-sub_46D9F0` 逐帧逐字节相同）。
     {"sub_46D9F0", GuestConv::Thiscall, 32, nativeBlend46D9F0},
+    // ★ 2026-11-10：每帧固定税 `sub_4BBAB0` = `Voice::Tick(now)`（thiscall `retn 4`；ECX = T_Engine+0x148A0）。
+    //   只接管**三槽全惰性**的纯查询支（零写、零可变调用）⇒ 返回 0；其余（内层扫描 / 已启动 /
+    //   首 tick / 到期 / 无设备）一律回退解释器。时钟补偿 k = `kVoiceTickPureInsns`（见头文件）。
+    //   ⛔ 不与 F2（令牌等待）混：这一项只治"查得太勤"。
+    {"sub_4BBAB0", GuestConv::Thiscall, 4, nativeVoiceTick4BBAB0},
     // ★ 2026-11-08：Live2D `BDAffine` 逐顶点仿射（stdcall `retn 1Ch` = 28 B；虚表第 6 项 @0x52F0C0）。
     //   `.lst` 0x4CCC60..0x4CCD34；x87 逐位（SoftFloat 四则 + transcendental 同路径）。
     //   ★ 首版 `debug = true`（⛔ 不进 `all`）：真字节差分见 tests/native_override_assets.cpp

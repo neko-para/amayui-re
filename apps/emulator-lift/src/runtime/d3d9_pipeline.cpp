@@ -85,9 +85,14 @@ constexpr std::uint32_t kPlSamplerCount = kMaxSamplers * 16u;
 constexpr std::uint32_t kPlTexStages = kPlSamplers + kPlSamplerCount * 4u;          // 8 * 40
 constexpr std::uint32_t kPlTexStageTypes = 40;
 constexpr std::uint32_t kPlTextures = kPlTexStages + kMaxTextureStages * kPlTexStageTypes * 4u;  // 16 槽
-constexpr std::uint32_t kPlStreams = kPlTextures + kMaxSamplers * 4u;  // 16 流 × (vb, offset, stride, freq)
+// ★ 流槽 = **(顶点缓冲对象 EA, offset, stride, 绑定时代际)**，⛔ 不是状态块 EA。
+//   为什么必须存对象 EA + 代际（缺陷单 `REQ-01M701NYF2B3YV1YFSZBMPQZ41` 的 #4）：guest 堆会
+//   **复用 EA** —— 同长度的下一个顶点缓冲会拿到同一个对象 EA **与**同一个 `'VB09'` 状态块 EA
+//   ⇒ 只验状态块 magic 的旧口径在那一格**通过**，Draw 静默改用别人的顶点。
+constexpr std::uint32_t kPlStreams = kPlTextures + kMaxSamplers * 4u;  // 16 流 × (vb, offset, stride, gen)
 constexpr std::uint32_t kPlIndices = kPlStreams + kMaxStreams * 16u;
-constexpr std::uint32_t kPlMaterial = kPlIndices + 4u;    // D3DMATERIAL9 = 68 B
+constexpr std::uint32_t kPlIndicesGen = kPlIndices + 4u;  // 索引缓冲绑定时的代际（配对 `kPlIndices`）
+constexpr std::uint32_t kPlMaterial = kPlIndicesGen + 4u;    // D3DMATERIAL9 = 68 B
 constexpr std::uint32_t kPlLights = kPlMaterial + 68u;    // 8 × D3DLIGHT9 = 104 B
 constexpr std::uint32_t kPlLightEnabled = kPlLights + kMaxLights * 104u;
 constexpr std::uint32_t kPlDraws = kPlLightEnabled + kMaxLights * 4u;
@@ -102,7 +107,16 @@ constexpr std::uint32_t kPlColorArena = kPlDepthArena + 4u;    // 0 = 设备后�
 constexpr std::uint32_t kPlColorSurface = kPlColorArena + 4u;  // IDirect3DSurface9 对象 EA（0 = 后缓冲）
 constexpr std::uint32_t kPlStageSnapshots = kPlColorSurface + 4u;  // 纹理级/采样器状态快照次数（诊断）
 constexpr std::uint32_t kPlUnsupported = kPlStageSnapshots + 4u;  // 未支持状态的位图（诊断）
-constexpr std::uint32_t kPlBytes = kPlUnsupported + 32u;
+// ★ 顶点声明绑定时的代际（配对 `kPlVertexDecl`；追加在末尾 ⇒ 不挪任何既有偏移）。
+//   用途：`SetVertexDeclaration` / `SetFVF` 换绑 / 设备销毁时对**旧声明**做 `releaseIf(EA, 代际)`，
+//   代际不符（EA 已被复用）⇒ 只出声、⛔ 不减到当前占有者身上。
+constexpr std::uint32_t kPlVertexDeclGen = kPlUnsupported + 32u;
+// ★ 纹理绑定时的代际（与 `kPlTextures` 的 16 个槽**一一对应**；追加在末尾 ⇒ 不挪任何既有偏移）。
+//   与 `kPlVertexDeclGen` 同口径：`SetTexture` 把对象代际记下来，`GetTexture` / 设备销毁 /
+//   换绑时用它判"槽里这个 EA 还是不是那一刻那张纹理"。为什么必须有：guest 堆复用 EA ⇒
+//   "同 EA 的另一张纹理"只按 iface 判是**通过**的，会把**新纹理** +1 交回 guest。
+constexpr std::uint32_t kPlTextureGens = kPlVertexDeclGen + 4u;  // 16 槽
+constexpr std::uint32_t kPlBytes = kPlTextureGens + kMaxSamplers * 4u;
 constexpr std::uint32_t kPlMagicValue = 0x31304C44u;  // 'DL01'（写成可读：'D','L','0','1'）
 
 // 顶点缓冲 / 索引缓冲状态块（都在 guest 堆；数据紧跟头部）
@@ -133,6 +147,55 @@ void pipeLog(const char* what, const char* fmt, ...) {
     va_start(ap, fmt);
     logV(LogLevel::Info, LogD3d9, prefix, fmt, ap);
     va_end(ap);
+}
+
+// ★ **默认级别可见**的告警（`warn` 是默认日志级别；`LogLevel::Info` 默认看不见 ⇒ ⛔ 不能拿
+//   `pipeLog` 报"身份不符"这类"本会静默采错数据"的事件）。
+// ★ 限流：同一 **(调用点, 类别)** 在游戏路径里可能**每帧**都命中（陈旧绑定 + 每帧 Draw）⇒
+//   前 `kPipeWarnBudget` 次打全量（Warn），之后只打一行汇总 + 每次留 Debug（`--log-level debug`
+//   仍能看见每一次）。⛔ 不是"静默"：默认级别下第一次就一定看得见，且次数在汇总行里给出。
+// ★ 为什么 key 不能只有调用点名（`REQ-01M70SHFT6RZA7RRY1R051Z2PB` #2）：同一个 `DrawPrimitive`
+//   会同时报"顶点流陈旧"和"纹理陈旧" —— 共用一个桶时，前者每帧刷屏会把后者的配额吃光，
+//   于是纹理那条**默认级别看不见**。类别见 `PipeWarnCategory`（顶点流 / 索引 / 纹理 / 其它）。
+constexpr std::uint32_t kPipeWarnBudget = 4u;
+
+const char* pipeWarnCategoryKey(PipeWarnCategory cat) {
+    switch (cat) {
+        case PipeWarnCategory::VertexStream: return "vertex-stream";
+        case PipeWarnCategory::Index: return "index";
+        case PipeWarnCategory::Texture: return "texture";
+        case PipeWarnCategory::Other: return "other";
+    }
+    return "other";
+}
+
+// 每类拒绝次数（与限流桶同一份：进程级；`dumpRunSummary` 的 `pipe-warn` 行读它）。
+PipeWarnCounts g_pipe_warn_counts;
+
+void pipeWarn(PipeWarnCategory cat, const char* what, const char* fmt, ...) {
+    const char* key_call = what ? what : "?";
+    char msg[512];
+    msg[0] = '\0';
+    va_list ap;
+    va_start(ap, fmt);
+    std::vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+    // ★ 配额 key = (调用点, 类别)：类别是桶的一部分，⛔ 不共用。
+    const std::string key = std::string(key_call) + "#" + pipeWarnCategoryKey(cat);
+    static std::map<std::string, std::uint32_t>* counts = new std::map<std::string, std::uint32_t>();
+    const std::uint32_t n = ++(*counts)[key];
+    ++g_pipe_warn_counts.by_category[static_cast<unsigned>(cat)];
+    char prefix[256];
+    std::snprintf(prefix, sizeof(prefix), "[d3d9] %s: ", key_call);
+    if (n <= kPipeWarnBudget) {
+        logAt(LogLevel::Warn, LogD3d9, prefix, "%s", msg);
+        return;
+    }
+    if (n == kPipeWarnBudget + 1u) {
+        logAt(LogLevel::Warn, LogD3d9, prefix,
+              "同类告警已打满 %u 次 ⇒ 之后只计数（每一次仍以 debug 级别留一条）", kPipeWarnBudget);
+    }
+    logAt(LogLevel::Debug, LogD3d9, prefix, "%s", msg);
 }
 
 bool requireMachine(X86& cpu, Machine** out, std::string* why) {
@@ -195,6 +258,18 @@ std::uint32_t pipeEaOf(X86& cpu, std::uint32_t dev_state) {
 
 std::uint32_t plGet(X86& cpu, std::uint32_t pe, std::uint32_t off) { return cpu.mem->rd32(pe + off); }
 void plSet(X86& cpu, std::uint32_t pe, std::uint32_t off, std::uint32_t v) { cpu.mem->wr32(pe + off, v); }
+
+// 换绑 / 解绑时把**旧绑定**的那份引用还回去；带代际 ⇒ EA 已被复用就只出声、⛔ 不减别人。
+// （定义放前面：`setFVF` / `setVertexDeclaration` 早于流绑定那一节用到它。）
+// `cat` 决定配额桶的**类别**（同一个调用点上的"顶点流 / 索引 / 纹理"不共用可见配额）。
+void releaseBound(X86& cpu, std::uint32_t obj, std::uint32_t gen, const char* what, PipeWarnCategory cat) {
+    if (obj == 0 || !cpu.com) return;
+    if (!cpu.com->releaseIf(cpu, obj, gen)) {
+        pipeWarn(cat, "绑定释放",
+                 "%s：旧绑定 0x%08X（绑定时代际 %u）已不是那个对象 ⇒ ⛔ 不释放它（新占有者不受影响）", what, obj,
+                 gen);
+    }
+}
 
 bool pipelineOf(X86& cpu, std::uint32_t dev_state, std::uint32_t* pe, std::string* why) {
     if (dev_state == 0) {
@@ -1588,11 +1663,11 @@ namespace {
 //   先放旧 owner 也不会把它降到 0）；owner 先到 0 会回收像素块，那时 surface 的 `user` 已经是
 //   悬空 EA，但 release(surface) 不读 `user`，所以顺序安全。
 // ★ **owner 为什么要走 `releaseIf`（带代际）**（REQ-01M6X4NFHCW1Y6YDJ4DYFA92PS）：
-//   `Object::owner` 是宿主表里**唯一一个不持引用**的 EA 缓存 —— surface 不拥有父纹理
-//   （`GetSurfaceLevel` 不替纹理持引用是**有意**的，见 `com.h` 的 `owner` 说明），所以
-//   "guest 合法地放掉纹理、surface 还活着"这条时序里，owner 的 EA 会被**下一个对象**拿走
-//   （guest 堆首次适配，确定性）。绑定期那份 addRef 让它平时减不到别人身上；但引用记账
-//   只是"数值上钉住"，不是"身份校验" ⇒ 一旦谁少放一次、或将来出现别的非钉住缓存，
+//   `Object::owner` 是"我代表谁"的 EA 缓存。04C 之后 surface **自己也替父纹理持一份引用**
+//   （`owns_owner`，见 `com.h`：`GetSurfaceLevel` 建 surface 时就 addRef）⇒ **合法时序**里
+//   owner 死不了、EA 也不会被复用。但 guest **越界 Release**（把 surface 与设备那几份引用也放掉）
+//   之后 owner 会死，它的 EA 被**下一个对象**拿走（guest 堆首次适配，确定性）。绑定期那份 addRef
+//   让它平时减不到别人身上；但引用记账只是"数值上钉住"，不是"身份校验" ⇒ 一旦谁少放一次，
 //   按 EA 的 `release` 就会减到**当前占有者**身上。代际在**建 surface 时**固化，与 EA 一起
 //   过 release→reuse 都还有效 ⇒ `releaseIf` 不符时只出声、不减引用。
 //   ⚠ 边界：`kPlColorSurface` 自己（下面那一行 `release(surface)`）**不带代际** —— 它由绑定期的
@@ -1630,10 +1705,33 @@ void destroyForDevice(X86& cpu, std::uint32_t device_state) {
     //   回收机会；owner 来自装配（`machineOf`），不是"最近 init 的那台"。
     Machine* m = machineOf(cpu);
     // 绑定的纹理在 SetTexture 时 AddRef 过 ⇒ 这里对称释放；渲染目标同理（surface 对象 + 像素块 owner）。
+    // ★ 顺序（`REQ-01M701NYF2B3YV1YFSZBMPQZ41` 段 2）：**先**声明 / 流 / 索引，**再**纹理，**最后** RT。
+    //   前一组是"设备替 guest 持的绑定引用"（段 2 新增），与后两组不相交；全部走 `releaseBound`
+    //   （= `releaseIf` 带代际）⇒ 期间 guest 越界 Release 造成的 EA 复用只会出声、⛔ 不减到新占有者。
+    //   ★ 此时设备对象**已从对象表删掉**（`com.cpp` 先 erase 再跑 on_zero）⇒ 这条路径不许再 `find(device)`。
     if (cpu.com) {
+        releaseBound(cpu, plGet(cpu, pe, kPlVertexDecl), plGet(cpu, pe, kPlVertexDeclGen),
+                     "设备销毁/顶点声明", PipeWarnCategory::Other);
+        plSet(cpu, pe, kPlVertexDecl, 0u);
+        plSet(cpu, pe, kPlVertexDeclGen, 0u);
+        for (std::uint32_t s = 0; s < kMaxStreams; ++s) {
+            const std::uint32_t slot = kPlStreams + s * 16u;
+            releaseBound(cpu, plGet(cpu, pe, slot + 0u), plGet(cpu, pe, slot + 12u), "设备销毁/流绑定",
+                         PipeWarnCategory::VertexStream);
+            plSet(cpu, pe, slot + 0u, 0u);
+            plSet(cpu, pe, slot + 12u, 0u);
+        }
+        releaseBound(cpu, plGet(cpu, pe, kPlIndices), plGet(cpu, pe, kPlIndicesGen), "设备销毁/索引绑定",
+                     PipeWarnCategory::Index);
+        plSet(cpu, pe, kPlIndices, 0u);
+        plSet(cpu, pe, kPlIndicesGen, 0u);
         for (std::uint32_t s = 0; s < kMaxSamplers; ++s) {
-            const std::uint32_t t = plGet(cpu, pe, kPlTextures + s * 4u);
-            if (t != 0) cpu.com->release(cpu, t);
+            // ★ 纹理也走 `releaseBound`（= `releaseIf` 带代际）：绑定期 guest 越界 Release 之后
+            //   槽里的 EA 可能已经被**另一张**纹理拿走 ⇒ 裸 `release` 会减到新占有者身上。
+            releaseBound(cpu, plGet(cpu, pe, kPlTextures + s * 4u), plGet(cpu, pe, kPlTextureGens + s * 4u),
+                         "设备销毁/纹理绑定", PipeWarnCategory::Texture);
+            plSet(cpu, pe, kPlTextures + s * 4u, 0u);
+            plSet(cpu, pe, kPlTextureGens + s * 4u, 0u);
         }
         releaseRenderTarget(cpu, pe);
     }
@@ -1765,12 +1863,13 @@ std::uint32_t setRenderTarget(X86& cpu, std::uint32_t dev, std::uint32_t target,
             return kInvalidCall;
         }
         // ★ 语义 addRef 的第二份：**像素块的 owner**（父纹理对象，建 surface 时固化；
-        //   `d3dx9.cpp` 的 GetSurfaceLevel 传的是 `self`）。只保住 surface 对象不够 —— 见
-        //   `releaseRenderTarget` 的注释（REQ-01M6X4N7C0PAF6XT7EAC172V85）。
+        //   `d3dx9.cpp` 的 GetSurfaceLevel 传的是 `self`）。★ 04C 之后 surface 自己**也**替父纹理
+        //   持一份（`owns_owner`，见 `com.h`）—— 两份都要：surface 那份管"surface 活着 ⇒ 纹理活着"，
+        //   设备这份管"绑定期间像素块不被回收"（见 `releaseRenderTarget` 的注释 /
+        //   REQ-01M6X4N7C0PAF6XT7EAC172V85）。
         // ★ guest 可见差异（有意）：绑定期间对这张纹理 `Release` 会返回 +1（设备的 RT 引用算在纹理
-        //   的公开 refcount 上），对象活到解绑 / 换绑。真机是 surface 内部替纹理持一份资源引用、
-        //   公开 refcount 仍可能到 0；本线的 surface **不持有**父纹理（`com.h` 文件头），所以只能用
-        //   纹理 refcount 表达"设备绑着它"。不绑定就观察不到差异。
+        //   的公开 refcount 上），对象活到解绑 / 换绑；叠上 surface 自己那份 ⇒ 绑定期公开 refcount
+        //   是 guest + surface + 设备**三份**（`d3d9-pipeline` 的 ⑪② 把这三个数钉住）。
         const std::uint32_t owner = cpu.com->ownerOf(target);
         const std::uint32_t owner_generation = cpu.com->ownerGenerationOf(target);
         // ★ 陈旧 owner 的判据 = **代际**，⛔ 不是"owner 的状态块 EA 对不对得上"
@@ -2123,6 +2222,7 @@ std::uint32_t setTexture(X86& cpu, std::uint32_t dev, std::uint32_t stage, std::
         pipeLog("SetTexture", "Stage=%u 越界（上限 %u）⇒ D3DERR_INVALIDCALL", stage, kMaxSamplers);
         return kInvalidCall;
     }
+    std::uint32_t tex_gen = 0;
     if (texture != 0) {
         TextureInfo ti;
         if (!textureInfo(cpu, texture, &ti, why)) {
@@ -2130,14 +2230,29 @@ std::uint32_t setTexture(X86& cpu, std::uint32_t dev, std::uint32_t stage, std::
             if (why) *why = "D3D9 流水线：SetTexture 的纹理不是本模块建的";
             return kInvalidCall;
         }
-        if (!cpu.com || !cpu.com->addRef(cpu, texture)) {
-            pipeLog("SetTexture", "纹理 0x%08X 的 AddRef 失败（COM 状态坏了）", texture);
+        // ★ 身份的一半：绑定时记下对象代际（与顶点声明 / 流 / 索引同口径）。没有代际 ⇒ 绑定
+        //   就不可校验（`GetTexture` / 换绑 / 设备销毁都会退化成"按 EA 减引用"）⇒ 响亮拒绝。
+        tex_gen = cpu.com ? cpu.com->generationOf(texture) : 0u;
+        if (tex_gen == 0) {
+            pipeWarn(PipeWarnCategory::Texture, "SetTexture",
+                     "纹理 0x%08X 没有代际（对象表不一致）⇒ D3DERR_INVALIDCALL", texture);
+            if (why) *why = "D3D9 流水线：SetTexture 的对象没有代际";
             return kInvalidCall;
         }
     }
     const std::uint32_t old = plGet(cpu, pe, kPlTextures + stage * 4u);
+    const std::uint32_t old_gen = plGet(cpu, pe, kPlTextureGens + stage * 4u);
+    // ★ "同一份绑定" = **(EA, 代际) 都相同**。同 EA 不同代际 = guest 堆复用出来的**另一张纹理**
+    //   ⇒ 必须按新对象 addRef、旧绑定按 (EA, 旧代际) 判还（`releaseBound` 会响亮拒绝、⛔ 不减到
+    //   新占有者身上）。重复 Set 同一张则两边都不动 ⇒ 引用计数不漂。
+    const bool same_binding = (texture == old && tex_gen == old_gen);
+    if (texture != 0 && !same_binding && (!cpu.com || !cpu.com->addRef(cpu, texture))) {
+        pipeLog("SetTexture", "纹理 0x%08X 的 AddRef 失败（COM 状态坏了）", texture);
+        return kInvalidCall;
+    }
     plSet(cpu, pe, kPlTextures + stage * 4u, texture);
-    if (old != 0 && cpu.com) cpu.com->release(cpu, old);
+    plSet(cpu, pe, kPlTextureGens + stage * 4u, tex_gen);
+    if (old != 0 && !same_binding) releaseBound(cpu, old, old_gen, "SetTexture", PipeWarnCategory::Texture);
     if ((stage == 0 || texture != 0) && old != texture) {
         char buf[160];
         std::snprintf(buf, sizeof(buf), "Stage=%u ⇒ 纹理 0x%08X（原 0x%08X）", stage, texture, old);
@@ -2152,17 +2267,64 @@ std::uint32_t getTexture(X86& cpu, std::uint32_t dev, std::uint32_t stage, std::
     if (!pipelineOf(cpu, dev, &pe, why)) return kInvalidCall;
     if (stage >= kMaxSamplers) return kInvalidCall;
     if (!committed(cpu, out_ea, 4u, "GetTexture 的 ppTexture", why)) return kInvalidCall;
-    wrU32(cpu, out_ea, plGet(cpu, pe, kPlTextures + stage * 4u));
+    const std::uint32_t texture = plGet(cpu, pe, kPlTextures + stage * 4u);
+    // ★ `IDirect3DDevice9::GetTexture` 文档明确："Calling this method will increase the internal
+    //   reference count on the IDirect3DTexture9 interface. Failure to call IUnknown::Release ...
+    //   results in a memory leak." ⇒ **借出的是新的一份引用**（与同族的 Resource9::GetDevice /
+    //   GetStreamSource / GetIndices / GetRenderTarget 一致）。
+    //   · guest **不** Release ⇒ 每次 GetTexture 多留一份引用，纹理永远到不了 0（heap / arena 都不回收）；
+    //   · guest **多** Release 一次 ⇒ 减掉的是 `setTexture` 替设备持的那份绑定引用，之后换绑 /
+    //     设备销毁会对一个「已经不属于自己的 EA」release（`ComRegistry` 会亮声拒绝，不是静默）。
+    //   ★ 绑定期间流水线自己持一份 ⇒ 这里的 AddRef **不是**在补"绑定"，而是"再借一份给出参"。
+    //   ★ **身份校验**（段 3 的 ②）：槽里只缓存 EA，guest 堆会复用 ⇒ 必须同时证明
+    //     ① iface 还是 `IDirect3DTexture9` ② 代际与绑定时一致。否则把**新纹理** +1 交回 guest，
+    //     而 guest Release 时减的是自己的那份 / 换绑时又去 releaseIf 一个不存在的身份。
+    //     ⛔ 不降级成"只验 iface"：同 EA 的另一张纹理 iface 也是对的（这正是缺陷形态）。
+    if (texture != 0) {
+        const char* iface = cpu.com ? cpu.com->ifaceOf(texture) : nullptr;
+        const std::uint32_t gen = plGet(cpu, pe, kPlTextureGens + stage * 4u);
+        const bool same_object =
+            cpu.com != nullptr && iface != nullptr && std::strcmp(iface, "IDirect3DTexture9") == 0 &&
+            gen != 0 && cpu.com->generationOf(texture) == gen;
+        if (!same_object) {
+            pipeWarn(PipeWarnCategory::Texture, "GetTexture",
+                     "Stage=%u 的槽里 0x%08X 已不是绑定时那张纹理（%s；绑定时代际 %u，当前 %u）⇒ "
+                     "D3DERR_INVALIDCALL（⛔ 不把新占有者交回 guest）",
+                     stage, texture, iface ? iface : "不在对象表里", gen,
+                     cpu.com ? cpu.com->generationOf(texture) : 0u);
+            if (why) *why = "D3D9 流水线：GetTexture 的槽已不指向绑定时那张纹理";
+            return kInvalidCall;
+        }
+        if (!cpu.com->addRef(cpu, texture)) {
+            pipeWarn(PipeWarnCategory::Texture, "GetTexture",
+                     "Stage=%u 的纹理 0x%08X 借不出引用（COM 状态坏了）", stage, texture);
+            if (why) *why = "D3D9 流水线：GetTexture 借出的纹理引用不成立";
+            return kInvalidCall;
+        }
+    }
+    wrU32(cpu, out_ea, texture);
     return kOk;
 }
 
 std::uint32_t setFVF(X86& cpu, std::uint32_t dev, std::uint32_t fvf, std::string* why) {
     std::uint32_t pe = 0;
     if (!pipelineOf(cpu, dev, &pe, why)) return kInvalidCall;
+    // FVF 与顶点声明是**二选一**（D3D 语义）⇒ 两个清掉声明的分支都必须把绑定引用还回去。
+    //   ★ 漏掉任一支 = 设备永远替一句已经用不上的声明持引用 ⇒ 声明到不了 0、`'VDCL'` 留在堆上。
+    //   ★ 守卫不是 `d3d9/vertex-declaration` 的堆基线（那条只走 `SetVertexDeclaration(0)` 的路径）：
+    //     两条分支各由 `d3d9/setfvf-releases-decl` 的对应子块盯（声明 refcount 归 0 + 对象消失 +
+    //     堆回基线）—— 复审实测过"把 fvf==0 那一支改成只清槽不还引用"时，旧用例全绿。
+    auto dropDeclaration = [&]() {
+        const std::uint32_t decl = plGet(cpu, pe, kPlVertexDecl);
+        const std::uint32_t gen = plGet(cpu, pe, kPlVertexDeclGen);
+        plSet(cpu, pe, kPlVertexDecl, 0u);
+        plSet(cpu, pe, kPlVertexDeclGen, 0u);
+        releaseBound(cpu, decl, gen, "SetFVF", PipeWarnCategory::Other);
+    };
     if (fvf == 0u) {
         // 真机：SetFVF(0) 合法（= 当前没有 FVF）；之后 Draw 会因缺少顶点格式失败。
         plSet(cpu, pe, kPlFvf, 0u);
-        plSet(cpu, pe, kPlVertexDecl, 0u);
+        dropDeclaration();
         pipeLog("SetFVF", "FVF=0 ⇒ 当前没有 FVF（合法的清除；之后 Draw 会 INVALIDCALL）");
         return kOk;
     }
@@ -2174,7 +2336,7 @@ std::uint32_t setFVF(X86& cpu, std::uint32_t dev, std::uint32_t fvf, std::string
         return kInvalidCall;
     }
     plSet(cpu, pe, kPlFvf, fvf);
-    plSet(cpu, pe, kPlVertexDecl, 0u);  // 用 FVF 就清掉顶点声明（D3D 也是二选一）
+    dropDeclaration();  // 用 FVF 就清掉顶点声明（D3D 也是二选一）
     return kOk;
 }
 
@@ -2189,6 +2351,8 @@ std::uint32_t getFVF(X86& cpu, std::uint32_t dev, std::uint32_t out_ea, std::str
 std::uint32_t setVertexDeclaration(X86& cpu, std::uint32_t dev, std::uint32_t decl, std::string* why) {
     std::uint32_t pe = 0;
     if (!pipelineOf(cpu, dev, &pe, why)) return kInvalidCall;
+    const std::uint32_t old = plGet(cpu, pe, kPlVertexDecl);
+    const std::uint32_t old_gen = plGet(cpu, pe, kPlVertexDeclGen);
     if (decl != 0) {
         // 只接受**本模块建的** IDirect3DVertexDeclaration9。用声明代替 FVF 是合法路径；本线的
         // Draw 仍只认 FVF（`drawPrecheck` 会 D3DERR_INVALIDCALL），但 Set 本身不该拦。
@@ -2200,11 +2364,37 @@ std::uint32_t setVertexDeclaration(X86& cpu, std::uint32_t dev, std::uint32_t de
             if (why) *why = "D3D9 流水线：SetVertexDeclaration 收到非顶点声明对象";
             return kInvalidCall;
         }
+        const std::uint32_t gen = cpu.com->generationOf(decl);
+        if (gen == 0) {
+            pipeWarn(PipeWarnCategory::Other, "SetVertexDeclaration",
+                     "pDecl=0x%08X 没有代际（对象表不一致）⇒ D3DERR_INVALIDCALL", decl);
+            if (why) *why = "D3D9 流水线：SetVertexDeclaration 的对象没有代际";
+            return kInvalidCall;
+        }
+        // ★ 设备替 guest 持一份**绑定引用**（与 `SetTexture` 的既有口径一致）：这样
+        //   "`SetVertexDeclaration` 之后 guest 放掉自己那份、再 `GetVertexDeclaration` / Draw"
+        //   这条**合法**时序不会把声明提前释放掉（绑定引用在换绑 / 解绑 / 设备销毁时对称还回）。
+        //   顺序 = 先 addRef 新的、再写槽、最后放旧的 ⇒ 同一对象重复 Set 不会瞬时归零。
+        // ★ 判"同一个"必须比 **(EA, 代际)**：guest 堆会复用 EA ⇒ 同 EA 不同代际是**新对象**，
+        //   漏掉 addRef 会让"绑定期只有 guest 自己那份"，guest 一放就归 0（对象 + `'VDCL'` 当场没）。
+        const bool same_binding = (decl == old && gen == old_gen);
+        if (!same_binding && !cpu.com->addRef(cpu, decl)) {
+            pipeWarn(PipeWarnCategory::Other, "SetVertexDeclaration",
+                     "pDecl=0x%08X 的 AddRef 失败（COM 状态坏了）⇒ D3DERR_INVALIDCALL", decl);
+            if (why) *why = "D3D9 流水线：SetVertexDeclaration 持有绑定引用失败";
+            return kInvalidCall;
+        }
         plSet(cpu, pe, kPlVertexDecl, decl);
+        plSet(cpu, pe, kPlVertexDeclGen, gen);
         plSet(cpu, pe, kPlFvf, 0u);  // 用声明就清掉 FVF（D3D 二选一）
+        // 旧绑定的 (EA, 代际) 不符 ⇒ `releaseBound` 只出声、⛔ 不减到新占有者身上。
+        if (old != 0 && !same_binding)
+            releaseBound(cpu, old, old_gen, "SetVertexDeclaration", PipeWarnCategory::Other);
         return kOk;
     }
     plSet(cpu, pe, kPlVertexDecl, 0u);
+    plSet(cpu, pe, kPlVertexDeclGen, 0u);
+    releaseBound(cpu, old, old_gen, "SetVertexDeclaration(0)", PipeWarnCategory::Other);
     return kOk;
 }
 
@@ -2212,7 +2402,37 @@ std::uint32_t getVertexDeclaration(X86& cpu, std::uint32_t dev, std::uint32_t ou
     std::uint32_t pe = 0;
     if (!pipelineOf(cpu, dev, &pe, why)) return kInvalidCall;
     if (!committed(cpu, out_ea, 4u, "GetVertexDeclaration 的 ppDecl", why)) return kInvalidCall;
-    wrU32(cpu, out_ea, plGet(cpu, pe, kPlVertexDecl));
+    const std::uint32_t decl = plGet(cpu, pe, kPlVertexDecl);
+    // ★ 借出的是**新的一份引用**（裁决：按 D3D9 `Get*` 家族一致性办 —— `GetTexture` /
+    //   `GetStreamSource` / `GetIndices` / `GetRenderTarget` / `Resource9::GetDevice` 的文档都写
+    //   AddRef + 调用方必须 Release；`GetVertexDeclaration` 的页面**没写**，本仓按家族一致办）。
+    //   · guest **不** Release ⇒ 声明永远到不了 0：`'VDCL'` 状态块 + 对象头都留在 guest 堆；
+    //   · guest **多** Release 一次 ⇒ 减到当前占用该 EA 的**别人**身上（本对象已归 0 时表里没它，
+    //     `release` 只会亮声返回 false；但"多一次"的那份记账错会一路传到下一次复用）。
+    //   ★ `setVertexDeclaration` **也替设备持一份绑定引用**（段 2 的口径，与 `SetTexture` /
+    //     `SetStreamSource` / `SetIndices` 同形）⇒ 绑定期有两份（设备那份 + guest 自己那份）；
+    //     换绑 / 解绑 / 设备销毁时设备那份由 `releaseBound` 还回。
+    //   ★ 但**点名身份**仍然必须做：槽里存的只是 EA，guest 堆会复用 ⇒ 同 EA 的新对象 iface
+    //     对得上、绑定期那份引用也早被 guest 越界 Release 抵掉时，按 EA 借出就会把**别人的**对象
+    //     交给 guest。所以借出前先证明"槽里这个 EA 现在还是那个代际的顶点声明对象"。
+    if (decl != 0) {
+        const char* iface = cpu.com ? cpu.com->ifaceOf(decl) : nullptr;
+        const std::uint32_t gen = plGet(cpu, pe, kPlVertexDeclGen);
+        const bool same_object = cpu.com != nullptr && iface != nullptr &&
+                                 std::strcmp(iface, "IDirect3DVertexDeclaration9") == 0 && gen != 0 &&
+                                 cpu.com->generationOf(decl) == gen;
+        if (!same_object || !cpu.com->addRef(cpu, decl)) {
+            // ★ 默认级别可见：这条是"本会静默交出别人的对象"的事件（Info 默认看不见）。
+            pipeWarn(PipeWarnCategory::Other, "GetVertexDeclaration",
+                     "槽里的 0x%08X 已不是绑定时那个顶点声明对象（%s；绑定时代际 %u，当前 %u）⇒ "
+                     "D3DERR_INVALIDCALL（⛔ 不把新占有者交回 guest）",
+                     decl, iface ? iface : "不在对象表里", gen,
+                     cpu.com ? cpu.com->generationOf(decl) : 0u);
+            if (why) *why = "D3D9 流水线：GetVertexDeclaration 的槽已不指向绑定时那个顶点声明对象";
+            return kInvalidCall;
+        }
+    }
+    wrU32(cpu, out_ea, decl);
     return kOk;
 }
 
@@ -2497,6 +2717,90 @@ std::uint32_t indexBufferUnlock(X86& cpu, std::uint32_t state, std::string* why)
     return kOk;
 }
 
+// =====================================================================================
+// 绑定槽的**身份校验**（对象 EA + 绑定时代际 → 状态块）
+//
+// ★ 为什么不能只验状态块 magic（缺陷单 `REQ-01M701NYF2B3YV1YFSZBMPQZ41` 的 #4）：
+//   guest 堆是首次适配 ⇒ 旧缓冲释放后，**同长度**的新缓冲会拿到同一个对象 EA **与**同一个
+//   `'VB09'` / `'IB09'` 状态块 EA。magic 是常量，所以旧句柄在这一格**看起来完全合法** ——
+//   于是 Draw 静默改用别人的顶点数据。身份（代际）**只在宿主表里**（`ComRegistry::generationOf`，
+//   ⛔ 不写进对象 / Win32 结构体），代际单调自增、永不复用 ⇒ 复用一定判得出来。
+// ★ 不符就**响亮失败**：⛔ 不读"看起来合法"的值，也 ⛔ 不静默跳过 —— 用 `pipeWarn`（默认级别可见）。
+// =====================================================================================
+bool boundVertexBufferOfState(X86& cpu, std::uint32_t obj, std::uint32_t gen, const char* what,
+                              std::uint32_t* state, std::uint32_t* length, std::uint32_t* data_ea,
+                              std::string* why) {
+    const char* slot = "顶点缓冲";
+    if (obj == 0 || !cpu.com || !cpu.com->find(obj)) {
+        pipeWarn(PipeWarnCategory::VertexStream, what,
+                 "绑定身份不符：槽里的%s 0x%08X 已不在对象表里（绑定时代际 %u）⇒ D3DERR_INVALIDCALL",
+                 slot, obj, gen);
+        if (why) *why = "D3D9 流水线：绑定的顶点缓冲已不是本模块的对象";
+        return false;
+    }
+    if (cpu.com->generationOf(obj) != gen || gen == 0) {
+        pipeWarn(PipeWarnCategory::VertexStream, what,
+                 "绑定身份不符：槽里的%s 0x%08X 已被**另一个对象**复用（绑定时代际 %u，当前 %u）⇒ D3DERR_INVALIDCALL"
+                 "（⛔ 不改用新占有者的顶点数据）",
+                 slot, obj, gen, cpu.com->generationOf(obj));
+        if (why) *why = "D3D9 流水线：绑定的顶点缓冲已被复用（身份不符）";
+        return false;
+    }
+    const char* iface = cpu.com->ifaceOf(obj);
+    if (iface == nullptr || std::strcmp(iface, "IDirect3DVertexBuffer9") != 0) {
+        pipeWarn(PipeWarnCategory::VertexStream, what,
+                 "绑定身份不符：槽里的 0x%08X 现在不是顶点缓冲（%s）⇒ D3DERR_INVALIDCALL", obj,
+                 iface ? iface : "?");
+        if (why) *why = "D3D9 流水线：绑定的顶点缓冲已被别的类型复用";
+        return false;
+    }
+    const std::uint32_t st = cpu.com->userOf(obj);
+    if (!vertexBufferInfoOfState(cpu, st, length, data_ea, nullptr, why)) {
+        pipeWarn(PipeWarnCategory::VertexStream, what,
+                 "绑定身份不符：顶点缓冲 0x%08X 的状态块 0x%08X 不是 'VB09' ⇒ D3DERR_INVALIDCALL", obj, st);
+        return false;
+    }
+    if (state) *state = st;
+    return true;
+}
+
+bool boundIndexBufferOfState(X86& cpu, std::uint32_t obj, std::uint32_t gen, const char* what,
+                             std::uint32_t* state, std::uint32_t* length, std::uint32_t* data_ea,
+                             std::uint32_t* format, std::string* why) {
+    const char* slot = "索引缓冲";
+    if (obj == 0 || !cpu.com || !cpu.com->find(obj)) {
+        pipeWarn(PipeWarnCategory::Index, what,
+                 "绑定身份不符：槽里的%s 0x%08X 已不在对象表里（绑定时代际 %u）⇒ D3DERR_INVALIDCALL",
+                 slot, obj, gen);
+        if (why) *why = "D3D9 流水线：绑定的索引缓冲已不是本模块的对象";
+        return false;
+    }
+    if (cpu.com->generationOf(obj) != gen || gen == 0) {
+        pipeWarn(PipeWarnCategory::Index, what,
+                 "绑定身份不符：槽里的%s 0x%08X 已被**另一个对象**复用（绑定时代际 %u，当前 %u）⇒ D3DERR_INVALIDCALL"
+                 "（⛔ 不改用新占有者的索引数据）",
+                 slot, obj, gen, cpu.com->generationOf(obj));
+        if (why) *why = "D3D9 流水线：绑定的索引缓冲已被复用（身份不符）";
+        return false;
+    }
+    const char* iface = cpu.com->ifaceOf(obj);
+    if (iface == nullptr || std::strcmp(iface, "IDirect3DIndexBuffer9") != 0) {
+        pipeWarn(PipeWarnCategory::Index, what,
+                 "绑定身份不符：槽里的 0x%08X 现在不是索引缓冲（%s）⇒ D3DERR_INVALIDCALL", obj,
+                 iface ? iface : "?");
+        if (why) *why = "D3D9 流水线：绑定的索引缓冲已被别的类型复用";
+        return false;
+    }
+    const std::uint32_t st = cpu.com->userOf(obj);
+    if (!indexBufferInfoOfState(cpu, st, length, data_ea, format, why)) {
+        pipeWarn(PipeWarnCategory::Index, what,
+                 "绑定身份不符：索引缓冲 0x%08X 的状态块 0x%08X 不是 'IB09' ⇒ D3DERR_INVALIDCALL", obj, st);
+        return false;
+    }
+    if (state) *state = st;
+    return true;
+}
+
 std::uint32_t setStreamSource(X86& cpu, std::uint32_t dev, std::uint32_t stream, std::uint32_t vb,
                               std::uint32_t offset, std::uint32_t stride, std::string* why) {
     std::uint32_t pe = 0;
@@ -2505,10 +2809,18 @@ std::uint32_t setStreamSource(X86& cpu, std::uint32_t dev, std::uint32_t stream,
         pipeLog("SetStreamSource", "Stream=%u 越界（上限 %u）⇒ D3DERR_INVALIDCALL", stream, kMaxStreams);
         return kInvalidCall;
     }
+    const std::uint32_t slot = kPlStreams + stream * 16u;
+    const std::uint32_t old_obj = plGet(cpu, pe, slot + 0u);
+    const std::uint32_t old_gen = plGet(cpu, pe, slot + 12u);
+    std::uint32_t obj = 0;
+    std::uint32_t obj_gen = 0;
+    // 槽里的 (EA, 代际) 与这次要绑的是不是**同一份绑定**（决定 addRef / releaseIf 要不要动）。
+    // 解绑（vb == 0）⇒ obj = obj_gen = 0：只有"本来就是空的"才算同一份。
+    bool same_binding = (old_obj == 0 && old_gen == 0);
     if (vb != 0) {
-        // ★ 入参是 guest 可见的 **IDirect3DVertexBuffer9 对象**；流水线内部存的是它的状态块。
-        //   旧实现把对象 EA 直接交给 `vertexBufferInfoOfState` ⇒ 每个真实 SetStreamSource 都失败，
-        //   Draw 于是永远报“没有 SetStreamSource(0)”（boot 日志可见）。这里只做一次对象 → 状态换算。
+        // ★ 入参是 guest 可见的 **IDirect3DVertexBuffer9 对象**；槽里存对象 EA + **绑定时代际**
+        //   （状态块在 Draw 时按 `userOf` 再算 —— 见 `boundVertexBufferOfState`）。
+        //   旧实现把**状态块** EA 存进槽里、Draw 只验 magic ⇒ 同 EA 新缓冲会"假匹配"。
         if (!cpu.com) {
             if (why) *why = "D3D9 流水线：SetStreamSource 需要 cpu.com 来解析顶点缓冲对象";
             return kInvalidCall;
@@ -2524,19 +2836,48 @@ std::uint32_t setStreamSource(X86& cpu, std::uint32_t dev, std::uint32_t stream,
             pipeLog("SetStreamSource", "OffsetInBytes=%u 超过缓冲长度 %u ⇒ D3DERR_INVALIDCALL", offset, length);
             return kInvalidCall;
         }
-        vb = vb_state;  // 后续只存状态块（Draw 用同一个口径）
+        obj = vb;
+        obj_gen = cpu.com->generationOf(vb);
+        if (obj_gen == 0) {
+            pipeWarn(PipeWarnCategory::VertexStream, "SetStreamSource",
+                     "顶点缓冲 0x%08X 没有代际（对象表不一致）⇒ D3DERR_INVALIDCALL", vb);
+            if (why) *why = "D3D9 流水线：SetStreamSource 的对象没有代际";
+            return kInvalidCall;
+        }
+        // ★ 设备替 guest 持一份**绑定引用**（与 `SetTexture` 的既有口径一致）：这样
+        //   "SetStreamSource 之后 guest 放掉自己那份、再 Draw" 这条**合法**时序不会把对象释放掉。
+        //   顺序 = 先 addRef 新的、再写槽、最后放旧的 ⇒ 同一对象重复 Set 不会瞬时归零。
+        // ★ 判"同一个"必须比 **(EA, 代际)**：同 EA 不同代际 = 复用 EA 的**新缓冲**（另一个对象）。
+        if (obj != old_obj || obj_gen != old_gen) {
+            if (!cpu.com->addRef(cpu, obj)) {
+                pipeWarn(PipeWarnCategory::VertexStream, "SetStreamSource",
+                         "顶点缓冲 0x%08X 的 AddRef 失败（COM 状态坏了）⇒ D3DERR_INVALIDCALL", vb);
+                if (why) *why = "D3D9 流水线：SetStreamSource 持有绑定引用失败";
+                return kInvalidCall;
+            }
+        }
+        same_binding = (obj == old_obj && obj_gen == old_gen);
     }
-    plSet(cpu, pe, kPlStreams + stream * 16u + 0u, vb);
-    plSet(cpu, pe, kPlStreams + stream * 16u + 4u, offset);
-    plSet(cpu, pe, kPlStreams + stream * 16u + 8u, stride);
+    plSet(cpu, pe, slot + 0u, obj);
+    plSet(cpu, pe, slot + 4u, offset);
+    plSet(cpu, pe, slot + 8u, stride);
+    plSet(cpu, pe, slot + 12u, obj_gen);
+    if (old_obj != 0 && !same_binding)
+        releaseBound(cpu, old_obj, old_gen, "SetStreamSource", PipeWarnCategory::VertexStream);
     return kOk;
 }
 
 std::uint32_t setIndices(X86& cpu, std::uint32_t dev, std::uint32_t ib, std::string* why) {
     std::uint32_t pe = 0;
     if (!pipelineOf(cpu, dev, &pe, why)) return kInvalidCall;
+    const std::uint32_t old_obj = plGet(cpu, pe, kPlIndices);
+    const std::uint32_t old_gen = plGet(cpu, pe, kPlIndicesGen);
+    std::uint32_t obj = 0;
+    std::uint32_t obj_gen = 0;
+    // 同 SetStreamSource：(EA, 代际) 都相同才算"同一份绑定"。
+    bool same_binding = (old_obj == 0 && old_gen == 0);
     if (ib != 0) {
-        // 同 SetStreamSource：入参是对象 EA，流水线内部存状态块 EA。
+        // 同 SetStreamSource：入参是对象 EA，槽里存**对象 EA + 绑定时代际**。
         if (!cpu.com) {
             if (why) *why = "D3D9 流水线：SetIndices 需要 cpu.com 来解析索引缓冲对象";
             return kInvalidCall;
@@ -2548,9 +2889,30 @@ std::uint32_t setIndices(X86& cpu, std::uint32_t dev, std::uint32_t ib, std::str
             pipeLog("SetIndices", "0x%08X 不是本模块建的索引缓冲 ⇒ D3DERR_INVALIDCALL", ib);
             return kInvalidCall;
         }
-        ib = ib_state;
+        obj = ib;
+        obj_gen = cpu.com->generationOf(ib);
+        if (obj_gen == 0) {
+            pipeWarn(PipeWarnCategory::Index, "SetIndices",
+                     "索引缓冲 0x%08X 没有代际（对象表不一致）⇒ D3DERR_INVALIDCALL", ib);
+            if (why) *why = "D3D9 流水线：SetIndices 的对象没有代际";
+            return kInvalidCall;
+        }
+        // ★ 同 EA 不同代际 = 复用 EA 的**新索引缓冲**（另一个对象）⇒ 必须 addRef 它、
+        //   ⛔ 不能因为 EA 相同就当成"重复 Set 同一个"（那样绑定没有引用，guest 一放就归 0）。
+        if (obj != old_obj || obj_gen != old_gen) {
+            if (!cpu.com->addRef(cpu, obj)) {
+                pipeWarn(PipeWarnCategory::Index, "SetIndices",
+                         "索引缓冲 0x%08X 的 AddRef 失败（COM 状态坏了）⇒ D3DERR_INVALIDCALL", ib);
+                if (why) *why = "D3D9 流水线：SetIndices 持有绑定引用失败";
+                return kInvalidCall;
+            }
+        }
+        same_binding = (obj == old_obj && obj_gen == old_gen);
     }
-    plSet(cpu, pe, kPlIndices, ib);
+    plSet(cpu, pe, kPlIndices, obj);
+    plSet(cpu, pe, kPlIndicesGen, obj_gen);
+    if (old_obj != 0 && !same_binding)
+        releaseBound(cpu, old_obj, old_gen, "SetIndices", PipeWarnCategory::Index);
     return kOk;
 }
 
@@ -2563,7 +2925,8 @@ namespace {
 bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std::vector<CVertex>& verts,
                       std::uint32_t prim_count, DrawContext& ctx, std::uint32_t* triangles_out,
                       std::uint32_t* rasterized_out, std::string* why);
-bool prepareContext(X86& cpu, std::uint32_t dev, std::uint32_t pe, DrawContext* ctx, std::string* why) {
+bool prepareContext(X86& cpu, const char* what, std::uint32_t dev, std::uint32_t pe, DrawContext* ctx,
+                    std::string* why) {
     Machine* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return false;
     DeviceInfo dev_info;
@@ -2645,6 +3008,30 @@ bool prepareContext(X86& cpu, std::uint32_t dev, std::uint32_t pe, DrawContext* 
     for (std::uint32_t s = 0; s < kMaxTextureStages; ++s) {
         std::string terr;
         const std::uint32_t tex = plGet(cpu, pe, kPlTextures + s * 4u);
+        // ★ 纹理槽的**身份** = **(对象 EA, `SetTexture` 时的代际)**，⛔ 不是"按 EA 解一次 `'TEX1'`"：
+        //   guest 堆是首次适配 ⇒ 纹理释放后，同尺寸的下一张纹理拿到**同一个对象 EA** 与同一个
+        //   `'TEX1'` 状态块 EA ⇒ 只验 magic 的旧口径在这一格**通过**，Draw 会**静默采样新纹理的像素**
+        //   （缺陷单 `REQ-01M701NYF2B3YV1YFSZBMPQZ41` 段 4）。代际只在宿主表（`ComRegistry::generationOf`），
+        //   ⛔ 不写进 guest 可见结构。不符 ⇒ **一次 Draw 整个跳过**（调用方回 `D3DERR_INVALIDCALL`）
+        //   + 默认级别可见的告警，⛔ 不拿新占有者的像素顶替（与 `boundVertexBufferOfState` 同形态）。
+        const std::uint32_t tex_gen = plGet(cpu, pe, kPlTextureGens + s * 4u);
+        if (tex != 0) {
+            const char* iface = cpu.com ? cpu.com->ifaceOf(tex) : nullptr;
+            const bool same_object = cpu.com != nullptr && iface != nullptr &&
+                                     std::strcmp(iface, "IDirect3DTexture9") == 0 && tex_gen != 0 &&
+                                     cpu.com->generationOf(tex) == tex_gen;
+            if (!same_object) {
+                pipeWarn(PipeWarnCategory::Texture, what,
+                         "纹理级 %u 的槽里 0x%08X 已不是绑定时那张纹理（%s；绑定时代际 %u，当前 %u）⇒ "
+                         "D3DERR_INVALIDCALL（⛔ 不用新占有者的像素）",
+                         s, tex, iface ? iface : "不在对象表里", tex_gen,
+                         cpu.com ? cpu.com->generationOf(tex) : 0u);
+                char buf[192];
+                std::snprintf(buf, sizeof(buf), "D3D9 流水线：纹理级 %u 的绑定已被另一个对象复用（身份不符）", s);
+                if (why) *why = buf;
+                return false;
+            }
+        }
         if (!resolveTexture(cpu, m, tex, &ctx->textures[s], &terr)) {
             char buf[256];
             std::snprintf(buf, sizeof(buf), "D3D9 流水线：纹理级 %u 的纹理无效：%s", s, terr.c_str());
@@ -3339,14 +3726,19 @@ std::uint32_t drawPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t prim, std
         // 真机：0 个图元 ⇒ S_OK 且什么都不画
         return kOk;
     }
+    // ★ 槽里是 **(对象 EA, 绑定时代际)**，⛔ 不是状态块 EA —— 只能经身份校验换算成状态块
+    //   （缺陷单 `REQ-01M701NYF2B3YV1YFSZBMPQZ41` 的 #4：只验 `'VB09'` magic 会让"同 EA 新缓冲"
+    //   静默顶替旧缓冲的顶点）。不符 ⇒ `kInvalidCall` + 默认级别可见的告警，⛔ 不画别人的数据。
     const std::uint32_t vb = plGet(cpu, pe, kPlStreams);
+    const std::uint32_t vb_gen = plGet(cpu, pe, kPlStreams + 12u);
     if (vb == 0) {
         pipeLog("DrawPrimitive", "没有 SetStreamSource(0) ⇒ D3DERR_INVALIDCALL");
         return kInvalidCall;
     }
     std::uint32_t length = 0;
     std::uint32_t data = 0;
-    if (!vertexBufferInfoOfState(cpu, vb, &length, &data, nullptr, why)) return kInvalidCall;
+    if (!boundVertexBufferOfState(cpu, vb, vb_gen, "DrawPrimitive", nullptr, &length, &data, why))
+        return kInvalidCall;
     const std::uint32_t offset = plGet(cpu, pe, kPlStreams + 4u);
     std::uint32_t stride = plGet(cpu, pe, kPlStreams + 8u);
     if (stride == 0) stride = fvf.stride;
@@ -3373,7 +3765,7 @@ std::uint32_t drawPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t prim, std
     Machine* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return kInvalidCall;
     DrawContext ctx;
-    if (!prepareContext(cpu, dev, pe, &ctx, why)) return kInvalidCall;
+    if (!prepareContext(cpu, "DrawPrimitive", dev, pe, &ctx, why)) return kInvalidCall;
     const std::uint8_t* base = nullptr;
     {
         // guest 内存里的顶点数据（不走 arena ⇒ 直接指针）
@@ -3412,7 +3804,9 @@ std::uint32_t drawIndexedPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t pr
     if (prim < kPtPointList || prim > kPtTriangleFan) return kInvalidCall;
     if (prim_count == 0) return kOk;
     const std::uint32_t vb = plGet(cpu, pe, kPlStreams);
+    const std::uint32_t vb_gen = plGet(cpu, pe, kPlStreams + 12u);
     const std::uint32_t ib = plGet(cpu, pe, kPlIndices);
+    const std::uint32_t ib_gen = plGet(cpu, pe, kPlIndicesGen);
     if (vb == 0 || ib == 0) {
         pipeLog("DrawIndexedPrimitive", "缺少 SetStreamSource(0) 或 SetIndices ⇒ D3DERR_INVALIDCALL");
         return kInvalidCall;
@@ -3422,8 +3816,11 @@ std::uint32_t drawIndexedPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t pr
     std::uint32_t ilength = 0;
     std::uint32_t idata = 0;
     std::uint32_t iformat = 0;
-    if (!vertexBufferInfoOfState(cpu, vb, &vlength, &vdata, nullptr, why)) return kInvalidCall;
-    if (!indexBufferInfoOfState(cpu, ib, &ilength, &idata, &iformat, why)) return kInvalidCall;
+    // 顶点 / 索引两个绑定槽都做身份校验（同上：只验 magic 会被"同 EA 新缓冲"骗过）。
+    if (!boundVertexBufferOfState(cpu, vb, vb_gen, "DrawIndexedPrimitive", nullptr, &vlength, &vdata, why))
+        return kInvalidCall;
+    if (!boundIndexBufferOfState(cpu, ib, ib_gen, "DrawIndexedPrimitive", nullptr, &ilength, &idata, &iformat, why))
+        return kInvalidCall;
     std::uint32_t stride = plGet(cpu, pe, kPlStreams + 8u);
     if (stride == 0) stride = fvf.stride;
     const std::uint32_t index_size = iformat == 101u ? 2u : 4u;
@@ -3444,7 +3841,7 @@ std::uint32_t drawIndexedPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t pr
     Machine* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return kInvalidCall;
     DrawContext ctx;
-    if (!prepareContext(cpu, dev, pe, &ctx, why)) return kInvalidCall;
+    if (!prepareContext(cpu, "DrawIndexedPrimitive", dev, pe, &ctx, why)) return kInvalidCall;
     const std::uint8_t* vbase = reinterpret_cast<const std::uint8_t*>(cpu.mem->host(vdata));
     const std::uint8_t* ibase = reinterpret_cast<const std::uint8_t*>(cpu.mem->host(idata));
     if (!vbase || !ibase) {
@@ -3528,7 +3925,7 @@ std::uint32_t drawPrimitiveUP(X86& cpu, std::uint32_t dev, std::uint32_t prim, s
     Machine* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return kInvalidCall;
     DrawContext ctx;
-    if (!prepareContext(cpu, dev, pe, &ctx, why)) return kInvalidCall;
+    if (!prepareContext(cpu, "DrawPrimitiveUP", dev, pe, &ctx, why)) return kInvalidCall;
     const std::uint8_t* base = reinterpret_cast<const std::uint8_t*>(cpu.mem->host(data_ea));
     if (!base) {
         if (why) *why = "D3D9 流水线：UP 顶点数据的宿主映射为空";
@@ -3591,7 +3988,7 @@ std::uint32_t drawIndexedPrimitiveUP(X86& cpu, std::uint32_t dev, std::uint32_t 
     Machine* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return kInvalidCall;
     DrawContext ctx;
-    if (!prepareContext(cpu, dev, pe, &ctx, why)) return kInvalidCall;
+    if (!prepareContext(cpu, "DrawIndexedPrimitiveUP", dev, pe, &ctx, why)) return kInvalidCall;
     const std::uint8_t* ibase = reinterpret_cast<const std::uint8_t*>(cpu.mem->host(index_ea));
     const std::uint8_t* vbase = reinterpret_cast<const std::uint8_t*>(cpu.mem->host(data_ea));
     if (!ibase || !vbase) {
@@ -3725,6 +4122,9 @@ void gpuNoteSpriteResult(bool gpu, std::uint64_t pixels, const std::string& reas
 }
 
 void gpuNoteSpriteSkipped() { ++g_gpu_coverage.sprite_skipped; }
+
+// 默认级别告警的**拒绝计数**（与限流桶同一份：进程级；`dumpRunSummary` 的 `pipe-warn` 行读它）。
+const PipeWarnCounts& pipeWarnCounts() { return g_pipe_warn_counts; }
 
 // =====================================================================================
 // GPU 准入 / 状态映射（纯函数）

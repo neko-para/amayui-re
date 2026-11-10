@@ -68,6 +68,8 @@ const char* stopReasonName(StopReason r) {
         //   那一串。`resource-exhausted` = 我方容量问题；`unimplemented-slot` = 已注册的槽/形态没实现。
         case StopReason::ResourceExhausted: return "resource-exhausted";
         case StopReason::Trap: return "unimplemented-slot";
+        // ★ guest 的 SEH / C++ EH 走不完（未处理异常 / 派发做不下去）。⛔ 不是正常结局。
+        case StopReason::UnhandledException: return "unhandled-exception";
     }
     return "?";
 }
@@ -701,6 +703,28 @@ void Machine::pumpScript(InputScript& script, X86& cpu, std::uint64_t wall_ms) {
     //   （⇒ 同一脚本重复跑得到同一个边界；⛔ 不在动作应用点上就地开关）。
     std::string label;
     if (script.takeProfileBegin(&label)) {
+        // ★ **运行期追加**的 `profile_begin` 必须在这里重新 arm（缺陷 `REQ-01M701PEB38VDQJD4QR2JEBA74`）：
+        //   `run()` 只在 **prepare 期**按 `input_script_.hasProfileActions()` arm 一次；而
+        //   `--interaction-graph` 的 `profile_begin/end` 是**运行中**才经 `InputScript::appendText`
+        //   追加进来的（`InteractionGraph::issueAction`）⇒ prepare 期那个判据看到的是 false，
+        //   `armed_` 会停在 false：窗口照开照收，可 `iterations` / 函数表的 self / shim 墙钟
+        //   全是 0，而且不报错、不告警（= 静默残表）。
+        //   为什么选这一点：它就是"脚本**消费** ProfileBegin 的那一刻"（`InputScript` 把请求交出来，
+        //   下一个块边界才真正开窗）⇒ arm 一定早于 `WindowProfiler::begin`。一次性的，
+        //   ⛔ 不在每个 tick 检查 armed —— 那会给块边界上的热路径加无谓分支。
+        if (!window_prof_.armed()) {
+            window_prof_.setArmed(true);
+            // shim 墙钟 = `--profile` / `LIFT_FRAME_TRACE` / armed 三者的**并集**：运行期 arm
+            // 必须把它一起打开，否则窗口里的 shim 行只有 `calls`、`ns` 恒 0.0ms（还是残表）。
+            shims_.setTiming(true);
+            // 运行摘要的 `window-prof` 位读的是 `instrument_.window_prof`（`dumpRunSummary`）——
+            // 按**真实** armed 状态改，⛔ 不让摘要继续报 off。
+            instrument_.window_prof = true;
+            std::fprintf(stderr,
+                         "[profile-window] ⓘ 运行期追加的 profile_begin(\"%s\") ⇒ 重新 arm 区间 profiler"
+                         "（同时打开 shim 计时）\n",
+                         label.c_str());
+        }
         if (profile_begin_pending_) {
             std::fprintf(stderr,
                          "[profile-window] ⚠ 同一 tick 里有两个 profile_begin（%s / %s）⇒ 后者会顶掉前者\n",
@@ -762,12 +786,15 @@ bool Machine::sampleMarker() {
     if (ident.valid && last_marker_sample_.valid && ident.cur == last_marker_sample_.cur &&
         ident.id == last_marker_sample_.id &&
         last_marker_sample_.name_table_sig == marker_sampler_.nameTableSignature(mem_, ident.id)) {
-        return input_script_.noteMarker(*cpu_.windows, last_marker_sample_, presenter_.frameCount(), clock_.nowMs());
+        // ★ 四个单位都喂：0 点要按 frame / insn / guest_ms / wall_ms 四个单位重定基。
+        return input_script_.noteMarker(*cpu_.windows, last_marker_sample_, presenter_.frameCount(), clock_.nowMs(),
+                                        cpu_.insns, wallMs());
     }
     MarkerSample s = ident;
     if (s.valid) marker_sampler_.resolveName(mem_, &s);
     last_marker_sample_ = std::move(s);
-    return input_script_.noteMarker(*cpu_.windows, last_marker_sample_, presenter_.frameCount(), clock_.nowMs());
+    return input_script_.noteMarker(*cpu_.windows, last_marker_sample_, presenter_.frameCount(), clock_.nowMs(),
+                                    cpu_.insns, wallMs());
 }
 
 void Machine::tickInteraction(X86& cpu) {
@@ -813,6 +840,9 @@ RunResult Machine::run(const RunOptions& opts) {
     //   记的是**这一轮真正生效**的位，⛔ 不是 CLI 回显 —— `window-prof` 读 `WindowProfiler::armed()`
     //   的真值（脚本里写了 `profile_begin` 但没 arm 的缺陷会在这里如实暴露，见 §2.5 单）。
     instrument_ = InstrumentationState{};
+    // ★ SEH 派发状态机：**跨块迭代**存活（一次 raise 可能要在多个块边界上调多个 handler）⇒
+    //   只在这里清一次。⛔ 不许在块边界清（那会把"等 handler 返回"丢成静默 no-op）。
+    seh_.reset();
     instrument_.profile = opts.profile;
     instrument_.frame_trace = frame_trace_;
     instrument_.window_prof = window_prof_.armed();
@@ -873,6 +903,23 @@ RunResult Machine::run(const RunOptions& opts) {
             std::fprintf(stderr, "[audio] begin 失败：%s\n", audio_err.c_str());
         }
     }
+    // ★ 诊断开关（**默认关**，见 guest_token.h 的文件头）：`LIFT_TOKEN_DIAG_SKIP_LOCK=1` 让
+    //   `GuestToken` 跳过 mutex —— 只为"派发层每块交多少固定税"的 A/B 存在。
+    //   这里用**默认级别**（stderr，不经 LogLevel 门）喊一声：⛔ 不许让它悄悄改掉性能读数。
+    //   ⛔ 只允许单线程工况；若音频 feeder 真线程已经在跑，必须喊得更大声（那已经不是"少一把锁"，
+    //   而是"容器互斥被静默关掉"）。放在 audio_.begin() **之后** ⇒ `threadMode()` 才是真值。
+    if (guestToken().diagSkipLock()) {
+        std::fprintf(stderr,
+                     "[guest-token] ⚠ 诊断开关 LIFT_TOKEN_DIAG_SKIP_LOCK=1：GuestToken 跳过 mutex"
+                     "（acquire/release 只做原子记账）—— 只允许 --audio off 这类**单线程**工况；"
+                     "本臂是诊断读数，⛔ 不是产品行为。\n");
+        if (audio_.threadMode()) {
+            std::fprintf(stderr,
+                         "[guest-token] ⛔ 音频 feeder **真线程已启动**（mode=%s）⇒ 两条执行流会同时改宿主容器："
+                         "本臂读数**无效**，且可能损坏 guest 堆。先用 --audio off 重跑。\n",
+                         audioModeName(audio_.mode()));
+        }
+    }
     // 诊断开关：LIFT_TRACE_FULL=1 ⇒ `--trace-blocks` 每条带操作数文本 + 寄存器快照（缺省关）
     const bool traceFull = std::getenv("LIFT_TRACE_FULL") != nullptr;
     cpu_.running = true;
@@ -928,7 +975,8 @@ RunResult Machine::run(const RunOptions& opts) {
         //   真实光标：它只写 `cpu_.windows` 的那一份状态并发同组 WM_*（见 runtime/input.h）。
         //   ⛔ 嵌套 guest 调用（WndProc / 音频 fill）与定时器回调进行中不注入：那些帧的 eip 不是
         //   主循环的块边界，插进去会把"一帧内 down+up"这类节流语义搅乱。
-        if (input_script_.active() && !guest_calls_.active() && !cpu_.shim.timer_firing) {
+        //   ⛔ SEH 派发期间更不许（handler 是 guest 代码，插进去会改坏它仍活着的栈/寄存器）。
+        if (input_script_.active() && !guest_calls_.active() && !cpu_.shim.timer_firing && !seh_.busy()) {
             const auto t_input = window_prof_.active() ? std::chrono::steady_clock::now()
                                                        : std::chrono::steady_clock::time_point{};
             // ★ marker 采样点 = VM 循环头的**块入口**（`0x4123F0`）与消息泵回来的块入口
@@ -936,7 +984,10 @@ RunResult Machine::run(const RunOptions& opts) {
             //   ⛔ 不是任意块边界：帧装载器（`sub_40ED40` 的 `0x6` 路径）会把目标槽号临时写进
             //   `cur` 再还原 ⇒ 在装载器内部的块边界采样会读到**错的 cur**。
             //   没有 Marker 动作时这一段一次也不进（零成本）。
-            if (input_script_.hasMarkerActions() &&
+            // ★ 门控必须问 `needsIdentitySamples()`（= marker 动作 **或** 0 点配置）：
+            //   ⛔ 只问 `hasMarkerActions()` 的话，"只有 `--anchor-script`、没有 marker 动作"的脚本
+            //     **一次也不采样** ⇒ 0 点永不闩锁 ⇒ 收尾假报 `origin-missed:`（本单最容易漏的一条）。
+            if (input_script_.needsIdentitySamples() &&
                 (cpu_.eip == kMarkerLoopHeadEa || cpu_.eip == kMarkerPumpReturnEa)) {
                 sampleMarker();
             }
@@ -981,7 +1032,7 @@ RunResult Machine::run(const RunOptions& opts) {
         //   进行中不推进）。三种失败 = **非 0 退出**（StopReason::InteractionFailed 不进 `ok()`）；
         //   任务走完（`next` 空）与时间线的 `quit` 一样收口成 `Stopped`（那是**成功**结束，
         //   判据是 trace 最后的 `task done`，不是退出码）。
-        if (interaction_.active() && !guest_calls_.active() && !cpu_.shim.timer_firing) {
+        if (interaction_.active() && !guest_calls_.active() && !cpu_.shim.timer_firing && !seh_.busy()) {
             const auto t_graph = window_prof_.active() ? std::chrono::steady_clock::now()
                                                        : std::chrono::steady_clock::time_point{};
             tickInteraction(cpu_);
@@ -1009,7 +1060,7 @@ RunResult Machine::run(const RunOptions& opts) {
         // ★ 显示后端：块边界也要 pump（否则两次 Present 之间窗口假死）。无 sink ⇒ 零成本。
         //   ⛔ 嵌套 guest 调用进行中不 pump：音频 fill（或任何 native 嵌套调用）正在跑 guest
         //   代码，这时再铺一个 WndProc 帧会改坏它仍活着的 x87/XMM 上下文（真机上它们是两个线程）。
-        const bool nested_guest_active = guest_calls_.active();
+        const bool nested_guest_active = guest_calls_.active() || seh_.busy();
         if (!nested_guest_active && presenter_.hasSink() && cpu_.insns >= next_present_check) {
             const auto t_pump = window_prof_.active() ? std::chrono::steady_clock::now()
                                                       : std::chrono::steady_clock::time_point{};
@@ -1073,6 +1124,16 @@ RunResult Machine::run(const RunOptions& opts) {
             cpu_.shim.timer_firing = false;
             continue;
         }
+        // ★ SEH / C++ EH 的派发（`RaiseException` / `RtlUnwind`）：**只在块边界推进**。
+        //   shim 只搬参数 + 把 eip 交给 `kSehDispatchEa`；handler 帧在这里铺（同 `fireDueTimer` 的
+        //   形状：铺 guest 栈 → 调 guest 函数 → 回来收 disposition）。⛔ 不在 shim 里同步跑 guest。
+        //   顺序在 `until_ea` **之前**：handler 的合成返回点（`kSehHandlerReturnEa`）不是可解码地址，
+        //   晚于它就会被当成 `decode-error`（那会把"异常没人接"误报成"解码失败"）。
+        if (seh_.busy()) {
+            const bool seeded = pumpSeh(r);
+            if (r.reason != StopReason::None) break;
+            if (seeded) continue;
+        }
         if (opts.until_ea && cpu_.eip == opts.until_ea) {
             r.reason = StopReason::UntilEa;
             break;
@@ -1111,7 +1172,7 @@ RunResult Machine::run(const RunOptions& opts) {
         //   ⛔ 嵌套 guest 调用（音频 fill / native 回调）进行中也不触发：定时器只保 GPR，
         //      在 fill 的 x87 活值中间插入回调会静默改坏 ST0..ST7。
         if (!guest_calls_.active() && !cpu_.shim.timer_firing && !cpu_.shim.timers.empty() &&
-            !cpu_.shim.callback.active) {
+            !cpu_.shim.callback.active && !seh_.busy()) {
             const auto t_timer = window_prof_.active() ? std::chrono::steady_clock::now()
                                                        : std::chrono::steady_clock::time_point{};
             const bool fired = fireDueTimer(r);
@@ -1139,6 +1200,9 @@ RunResult Machine::run(const RunOptions& opts) {
             if (NativeOverride* ov = overrides_.find(cpu_.eip)) {
                 const char* why = nullptr;
                 const std::uint64_t before = ov->fallbacks;
+                // ★ 指令数基线：override 自己可能补 `cpu_.insns`（例如 native_voice 的时钟补偿）
+                //   ⇒ 只按**实际增量**记，⛔ 不硬编码 "+1"（那会把补偿漏成闭合差）。
+                const std::uint64_t insns_before_override = cpu_.insns;
                 bool suspended = false;
                 const auto t_native = window_prof_.active() ? std::chrono::steady_clock::now()
                                                             : std::chrono::steady_clock::time_point{};
@@ -1151,16 +1215,24 @@ RunResult Machine::run(const RunOptions& opts) {
                 if (took) {
                     // override 替代了整个函数体（没有 ret 指令）⇒ 这里显式弹帧。
                     if (window_prof_.active()) window_prof_.popNoReturn(fnKeyOf(ov->ea));
-                    if (suspended) continue;
+                    if (suspended) {
+                        window_prof_.addOverrideInsns(cpu_.insns - insns_before_override);
+                        continue;
+                    }
                     if (opts.trace_blocks) std::fprintf(stdout, "[native] %08X %s\n", ov->ea, ov->name.c_str());
                     cpu_.noteInsn(ov->ea, "[native]");
                     ++cpu_.insns;
                     clock_.tick();
+                    // ★ 补账：这条 `++cpu_.insns`（+ override 自己的补偿）**不在任何块里**。
+                    window_prof_.addOverrideInsns(cpu_.insns - insns_before_override);
                     continue;
                 }
                 if (ov->fallbacks != before && ov->fallbacks == 1 && why) {
                     std::fprintf(stderr, "[native] %s @ %08X 回退解释器：%s\n", ov->name.c_str(), ov->ea, why);
                 }
+                // ★ 回退路径也按**实际增量**补账：fn 可能已经改过 `cpu_.insns` 才回退
+                //   （块随后从新基线开始 ⇒ 不补就会在闭合式里少一截）。
+                window_prof_.addOverrideInsns(cpu_.insns - insns_before_override);
             }
         }
 
@@ -1188,6 +1260,8 @@ RunResult Machine::run(const RunOptions& opts) {
                     const std::uint64_t n = replaced != 0 ? replaced : 1ull;
                     cpu_.insns += n;
                     clock_.tick(n);
+                    // ★ 补账：段级 override 替代的指令数**不在任何块里**（闭合式里单独一类）。
+                    window_prof_.addOverrideInsns(n);
                     continue;
                 }
                 if (outcome == BlockOverrideOutcome::Declined) {
@@ -1213,7 +1287,7 @@ RunResult Machine::run(const RunOptions& opts) {
         //   之后 guest 自己跑到续延点，`afterGuestCall()` 再还 [esp]。⛔ 不建线程 / 不建第二栈。
         //   ⛔ 放在函数级/段级 override **之后**：否则会吞掉 `call_target`，让本次 native override
         //      被跳过（性能退化，不是语义错，但没必要）。
-        if (audio_.enabled() && !guest_calls_.active() && !cpu_.shim.timer_firing) {
+        if (audio_.enabled() && !guest_calls_.active() && !cpu_.shim.timer_firing && !seh_.busy()) {
             const auto t_audio = window_prof_.active() ? std::chrono::steady_clock::now()
                                                        : std::chrono::steady_clock::time_point{};
             const AudioPump ap = audio_.pump();
@@ -1360,6 +1434,10 @@ RunResult Machine::run(const RunOptions& opts) {
 
         bool left_block = false;
         const auto block_start = std::chrono::steady_clock::now();
+        // ★ 块级**指令数**的基线（REQ-01M6XVZ8AXJNG492WA2QAMTA35）：块内每执行成功一条就
+        //   `++cpu_.insns` ⇒ "这一块执行了几条" = 前后差值（⛔ 不在热循环里再加一个自增；
+        //   中途 break 掉的剩余指令本来就没进 `cpu_.insns`，差值天然只数执行过的）。
+        const std::uint64_t insns_before_block = cpu_.insns;
         for (const Insn& in : b->insns) {
             if (opts.until_ea && in.ea == opts.until_ea) {
                 r.reason = StopReason::UntilEa;
@@ -1420,6 +1498,9 @@ RunResult Machine::run(const RunOptions& opts) {
                     .count());
             if (opts.profile || window_prof_.armed()) b->ns += block_ns;
             window_prof_.addGuest(block_ns);
+            // ★ 块级指令数（同一窗口口径；窗口外 no-op）。差值的另一类来源 —— native override
+            //   直接补进 `cpu_.insns` 的条数 —— 在下面两个 override 分支里单独记（`addOverrideInsns`）。
+            window_prof_.addBlockInsns(b->ea, cpu_.insns - insns_before_block);
         }
         if (left_block) continue;
     }
@@ -1489,6 +1570,17 @@ RunResult Machine::run(const RunOptions& opts) {
             r.detail = expect_failure_;
         }
     }
+    // ★ 时间线 0 点（`--anchor-script`）：跑完仍未闩锁 ⇒ **收尾时响亮失败**（裁决 7/8）。
+    //   ① **只**在 `r.ok()` 时改判：run 已经以 Unimplemented / Trap / DecodeError 结束时，
+    //      那个停因更具体，⛔ 不许被 0 点吞掉（与上面 expect / marker 同一条纪律）。
+    //   ② **"进了但 id 是别的"不算失败**：判据只有"整个 run 结束都没**观察到** X"。
+    //   ③ ⛔ 不新增 `StopReason`：复用 `InteractionFailed` + `origin_missed` 分流（main ⇒ 5）。
+    if (input_script_.originRequested() && !input_script_.originSet() && r.ok()) {
+        r.reason = StopReason::InteractionFailed;
+        r.detail = input_script_.originMissedDetail(presenter_.frameCount(), wallMs());
+        r.origin_missed = true;
+        std::fprintf(stderr, "[anchor] FAIL %s\n", r.detail.c_str());
+    }
     instrument_.expect_windows = expect_stats_.windows_opened;
     wall_start_valid_ = false;
     r.ea = cpu_.eip;
@@ -1541,6 +1633,17 @@ void Machine::applyPendingProfileWindow() {
 
 void Machine::closeProfileWindow(const char* why) {
     (void)why;
+    // ★ 窗口收尾时 profiler 还没 arm ⇒ 下面这张表是**残表**：`iterations` / 函数表 self /
+    //   shim 墙钟全是 0，但那**不**代表"这段没有开销"。⛔ 不许让它静默通过（工具面告警即可，
+    //   不改退出码）。正常路径永远不会走到这里：`profile_begin` 被消费时会重新 arm
+    //   （见 `pumpScript`）⇒ 走到这里说明"开窗"与"arm"之间又漏了一条路。
+    if (!window_prof_.armed()) {
+        std::fprintf(stderr,
+                     "[profile-window] ⚠ 窗口 \"%s\" 收尾时区间 profiler **未 arm** ⇒ 这张表是残表"
+                     "（iterations / 函数表 self / shim 墙钟全 0，⛔ 不代表这段没有开销）；"
+                     "运行期追加的 profile_begin 必须重新 arm（见 Machine::pumpScript）\n",
+                     window_prof_.label().c_str());
+    }
     window_prof_.end(presenter_.frameCount(), cpu_.insns, clock_.nowMs());
     window_prof_.finishBlocks(cache_);
     window_prof_.finishShims(shims_);
@@ -1566,6 +1669,21 @@ std::uint32_t Machine::fnKeyOf(std::uint32_t ea) const {
     }
     return ea;
 }
+
+// ★ 窗口表的打印上界（`REQ-01M6XVZ8AXJNG492WA2QAMTA35`）：巨帧上一个窗口能有上万条块行、
+//   上万条边对 ⇒ **只打窗口内 top-N + 汇总**（否则一条窗口跑测就能把日志撑到几十万行）。
+//   N 在**打印期**由环境变量读（⛔ 不进 option 解析面、⛔ 不碰执行路径）：缺省够看清一个段。
+static std::size_t windowPrintTop(const char* env_name, std::size_t fallback, std::size_t cap) {
+    const char* text = std::getenv(env_name);
+    if (text == nullptr || *text == '\0') return fallback;
+    char* end = nullptr;
+    const unsigned long v = std::strtoul(text, &end, 10);
+    if (end == text) return fallback;
+    return v > cap ? cap : static_cast<std::size_t>(v);
+}
+
+// 边表里**每个父**最多列几条子边（一个父可能有上千个子边；截断要在页内看得见）。
+static constexpr std::size_t kEdgeChildrenShown = 8;
 
 void Machine::printWindowReport(const WindowReport& r) const {
     const double wall_ms = static_cast<double>(r.wall_ns) / 1e6;
@@ -1621,6 +1739,111 @@ void Machine::printWindowReport(const WindowReport& r) const {
                      "            （inclusive 影子栈：unbalanced=%llu 次 ret 对不上 / 收口时仍开着 %llu 帧 ⇒ "
                      "非 0 就说明那几段 inclusive 不可全信，self 仍准）\n",
                      (unsigned long long)r.unbalanced, (unsigned long long)r.open_at_end);
+    }
+    // ★ 块级 EA 表 + 父子边表（`REQ-01M6XVZ8AXJNG492WA2QAMTA35`）：上面那张 `guest fns` 表按
+    //   **函数入口**聚合，看不出"这段 inclusive 里是哪一块在跑"。⛔ 不动上面那张表的格式
+    //   （既有断言按行匹配），只在这里**追加**两段；两段都有自己的汇总行（top-N 截断不许静默）。
+    //   ★ 段名用 `blockEA` 而不是 `blocks`：`--profile` 的运行摘要里已有一行 `blocks    : …`，
+    //     同名会让"按前缀 grep 段"同时抓到两处（实测踩过）。
+    {
+        auto fnName = [this](std::uint32_t key) -> std::string {
+            const LstFunction* fn = lst_.loaded() ? lst_.functionAt(key) : nullptr;
+            if (fn != nullptr && fn->ea == key) return fn->name;
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "sub_%08X", key);
+            return std::string(buf);
+        };
+        const std::size_t blk_top = windowPrintTop("LIFT_WINDOW_BLOCK_TOP", 24, 512);
+        if (!r.blocks.empty()) {
+            std::fprintf(stdout,
+                         "blockEA   :（块级 EA；self 互斥 ⇒ 求和 = guest 的块耗时；insns = 该块窗口内**执行过的指令数**"
+                         "（不是时间，口径 = cpu_.insns 在块内的差值）；incl/calls/depth 取自"
+                         "**包含该块的函数**（`[]` 里是函数名；影子栈只到函数粒度 ⇒ 块没有自己的 incl）；"
+                         "列 self 前 %zu / 共 %llu 条；`!BLIND` = 窗口内**没有进入计数**"
+                         "（尾调用 jmp 进入 / 窗口起点已在它内部）⇒ 不是「0 次」，是「不可见」）\n",
+                         blk_top, (unsigned long long)r.block_rows);
+            std::size_t shown = 0;
+            double shown_self_ms = 0.0;
+            for (const WindowBlockRow& b : r.blocks) {
+                if (shown >= blk_top) break;
+                ++shown;
+                shown_self_ms += ms(b.self_ns);
+                const char* blind = (b.calls == 0) ? " !BLIND" : "";
+                const std::string name = "[" + fnName(b.fn_key) + "]";
+                if (b.depth == 0) {
+                    std::fprintf(stdout, "  %2zu. %08X %-26s self=%9.3fms incl=%9.3fms calls=%llu depth=- insns=%llu%s\n",
+                                 shown, b.ea, name.c_str(), ms(b.self_ns), ms(b.incl_ns),
+                                 (unsigned long long)b.calls, (unsigned long long)b.insns, blind);
+                } else {
+                    std::fprintf(stdout,
+                                 "  %2zu. %08X %-26s self=%9.3fms incl=%9.3fms calls=%llu depth=%u insns=%llu%s\n",
+                                 shown, b.ea, name.c_str(), ms(b.self_ns), ms(b.incl_ns),
+                                 (unsigned long long)b.calls, static_cast<unsigned>(b.depth),
+                                 (unsigned long long)b.insns, blind);
+                }
+            }
+            const double total_self_ms = ms(r.block_self_ns);
+            const double guest_ms = ms(r.guest_ns);
+            std::fprintf(stdout,
+                         "            （块级汇总：%llu 条块行 / self 合计 = %.3fms（guest 桶 = %.3fms，差 = %.3fms）；"
+                         "上表只到前 %zu 条 ⇒ 覆盖 self 的 %.1f%%）\n",
+                         (unsigned long long)r.block_rows, total_self_ms, guest_ms, total_self_ms - guest_ms, shown,
+                         total_self_ms == 0.0 ? 0.0 : shown_self_ms * 100.0 / total_self_ms);
+        }
+        // ★ **块级 insns 的闭合行**（本单的硬判据）：块级之和 vs 窗口 insns，差多少就报多少。
+        //   `window` 是窗口两端的 `cpu_.insns` 差；`override` 是**显式计数的另一类来源**
+        //   （函数级 / 段级 native override 直接补进 cpu_.insns 的条数，不在任何块里）；
+        //   `unattributed` = diff − override ⇒ ⛔ 非 0 必须能指出是哪一类，不许"约等于"。
+        std::fprintf(stdout,
+                     "insnsBlk  : block=%llu window=%llu diff=%lld override=%llu unattributed=%lld\n"
+                     "            （块级 insns 合计 = 上表每行 `insns` 之和（含未列出的行）；window = 窗口 "
+                     "`insns` 的 end−begin；diff = window − block；override = 函数级/段级 native override "
+                     "补进 cpu_.insns 的条数；unattributed = diff − override）\n",
+                     (unsigned long long)r.block_insns, (unsigned long long)r.window_insns,
+                     (long long)r.insns_diff, (unsigned long long)r.override_insns,
+                     (long long)r.insns_unattributed);
+        const std::size_t edge_top = windowPrintTop("LIFT_WINDOW_EDGE_TOP", 12, 256);
+        // ★ 一条边都没有时也**必须**打汇总行（否则"边表空"与"这一段没打开"在日志里长得一样）。
+        if (!r.edges.empty() || r.edge_no_parent > 0 || r.edge_overflow > 0) {
+            std::fprintf(stdout,
+                         "edges     :（父子边：parent → child（函数级）；incl = 该边下 child 帧的墙钟合计"
+                         "（递归边按帧累计）；按**父的 inclusive** 降序取前 %zu 个父，每个父最多列 %zu 条子边；"
+                         "共 %llu 条边对 / %llu 个父）\n",
+                         edge_top, kEdgeChildrenShown, (unsigned long long)r.edge_rows,
+                         (unsigned long long)r.edge_parents);
+            std::vector<std::pair<std::uint32_t, std::uint32_t>> shown_parents;  // (parent, 子边总数)
+            for (const WindowEdgeRow& e : r.edges) {
+                if (shown_parents.empty() || shown_parents.back().first != e.parent) {
+                    if (shown_parents.size() >= edge_top) break;
+                    shown_parents.emplace_back(e.parent, 0);
+                }
+                ++shown_parents.back().second;
+            }
+            std::size_t row_no = 0;
+            for (std::size_t p = 0; p < shown_parents.size(); ++p) {
+                std::size_t n = 0;
+                for (const WindowEdgeRow& e : r.edges) {
+                    if (e.parent != shown_parents[p].first) continue;
+                    if (n >= kEdgeChildrenShown) break;
+                    ++n;
+                    ++row_no;
+                    std::fprintf(stdout, "  %2zu. %s -> %s  incl=%9.3fms calls=%llu\n", row_no,
+                                 fnName(e.parent).c_str(), fnName(e.child).c_str(), ms(e.incl_ns),
+                                 (unsigned long long)e.calls);
+                }
+                if (shown_parents[p].second > kEdgeChildrenShown) {
+                    std::fprintf(stdout, "      （该父另有 %llu 条子边未列，父 = %s）\n",
+                                 (unsigned long long)(shown_parents[p].second - kEdgeChildrenShown),
+                                 fnName(shown_parents[p].first).c_str());
+                }
+            }
+            std::fprintf(stdout,
+                         "            （边表汇总：已列 %zu 个父 / 共 %llu 个父；"
+                         "**没有父帧**的进入 %llu 次（顶层进入 / 窗口起点已在函数内部）⇒ 这些进入不在边表里；"
+                         "超过上界未记 %llu 条边对）\n",
+                         shown_parents.size(), (unsigned long long)r.edge_parents,
+                         (unsigned long long)r.edge_no_parent, (unsigned long long)r.edge_overflow);
+        }
     }
     if (!r.shims.empty()) {
         std::fprintf(stdout, "shims     :（⊂ shim 桶；前 %zu）\n",
@@ -1700,6 +1923,85 @@ bool Machine::fireDueTimer(RunResult& r) {
     mem_.wr32(base - 4u, 0u);   // dw2（保留）
     cpu_.eip = t.callback;
     return true;
+}
+
+// ★ SEH / C++ EH 派发（**块边界**；`RaiseException` / `RtlUnwind` 的宿主侧）。
+//   shim 只搬参数 + 把 eip 交给 `kSehDispatchEa`（`take_control`），真正的"铺 handler 帧 →
+//   跑 guest → 回来收 disposition"在这里 —— 与 `fireDueTimer` 同一个形状。
+//   两条**响亮失败**在这里落地，⛔ 都不许静默：
+//     ① 展开要跨过宿主 guest 回调帧（WndProc / 音频 fill / winmm 定时器）：真机上异常会穿过宿主
+//        C++ 栈（未定义行为）⇒ 检出即停（`UnhandledException`，detail 点名是哪一种）。
+//     ② 状态机自己报的停（`fs:[0]` 链走到底 / 结构铺不下 / 嵌套异常 / handler 链打转）。
+bool Machine::pumpSeh(RunResult& r) {
+    if (cpu_.eip == kSehDispatchEa) {
+        seh_.setDispatchPending(false);
+        // ★ 记录"宿主 guest 回调帧的返回槽"（0 = 不在任何回调里）。判据见 machine.h 的
+        //   `seh_guest_boundary_`：展开**在回调里面** catch 是允许的（room-exit 就是），
+        //   穿出回调帧则必须响亮失败。
+        seh_guest_boundary_ = 0;
+        const std::uint32_t stack_top = setup_.stack_top != 0 ? setup_.stack_top : layout_.stack_top;
+        if (guest_calls_.active()) {
+            // 从当前 esp 往上找最内层回调帧：`start()` 在那一格写的就是 `kContinuationEa`。
+            for (std::uint32_t ea = cpu_.esp(); ea + 4u <= stack_top; ea += 4u) {
+                if (mem_.rd32(ea) == GuestCallStack::kContinuationEa) {
+                    seh_guest_boundary_ = ea;
+                    break;
+                }
+            }
+            if (seh_guest_boundary_ == 0) {
+                r.reason = StopReason::UnhandledException;
+                r.detail = std::string("guest 异常发生在 GuestCallStack 回调里，但栈上找不到回调帧的返回槽（") +
+                           (guest_calls_.currentApi() ? guest_calls_.currentApi() : "?") +
+                           "）⇒ 无法证明展开不跨宿主帧 ⇒ 本线不支持";
+                seh_.reset();
+                cpu_.running = false;
+                return false;
+            }
+        } else if (cpu_.shim.timer_firing) {
+            // `fireDueTimer` 的帧：`[timer_saved_esp-24] = kTimerCallbackReturnEa`，共 5 参 + 返回地址。
+            seh_guest_boundary_ = cpu_.shim.timer_saved_esp - 24u;
+        }
+    }
+    std::string why;
+    const SehStep s = seh_.step(cpu_, mem_, &why);
+    switch (s.kind) {
+        case SehStep::Kind::None:
+            return false;
+        case SehStep::Kind::CallHandler:
+            // 合成 handler 调用也算一帧（它的 `ret N` 会正常弹 ⇒ 不会留下"未返回帧"）。
+            // 帧底 = 铺帧时的 esp（= 被调方入口的栈顶）；展开落地时靠它判断"谁被跳过"。
+            window_prof_.pushCall(fnKeyOf(s.handler_ea), kSehHandlerReturnEa, s.frame_esp);
+            cpu_.noteInsn(s.handler_ea, "[seh]");
+            return true;
+        case SehStep::Kind::Transfer:
+            // ★ 跨宿主 guest 回调帧 ⇒ 响亮停（真机上异常会穿过宿主 C++ 栈 = UB）。
+            if (seh_guest_boundary_ != 0 && s.esp >= seh_guest_boundary_) {
+                char buf[256];
+                std::snprintf(buf, sizeof(buf),
+                              "guest 异常要展开跨过宿主 guest 回调帧（落地 esp=0x%08X >= 回调帧返回槽 "
+                              "0x%08X；%s）⇒ 本线不支持（⛔ 不静默清栈继续跑）",
+                              s.esp, seh_guest_boundary_,
+                              guest_calls_.active() ? "GuestCallStack" : "winmm 定时器回调");
+                r.reason = StopReason::UnhandledException;
+                r.detail = buf;
+                seh_.reset();
+                seh_guest_boundary_ = 0;
+                cpu_.running = false;
+                return false;
+            }
+            // ★ 展开是"不经 `ret` 的跳转" ⇒ 影子栈按落地 esp 丢掉被跳过的帧
+            //   （⛔ 不许让 inclusive 静默偏大；`dropFramesBelowEsp` 自己的判据在里面）。
+            (void)window_prof_.dropFramesBelowEsp(s.esp);
+            cpu_.noteInsn(s.eip, "[seh]");
+            return true;
+        case SehStep::Kind::Stop:
+            r.reason = StopReason::UnhandledException;
+            r.detail = why.empty() ? std::string("SEH 派发失败（无 detail）") : why;
+            seh_guest_boundary_ = 0;
+            cpu_.running = false;
+            return false;
+    }
+    return false;
 }
 
 TraceInputs Machine::traceInputs() const {    TraceInputs t;
@@ -1872,6 +2174,21 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                      token.violations() == 0 ? "" : " first=",
                      token.violations() == 0 ? "" : (token.firstViolationSite() ? token.firstViolationSite() : "?"));
     }
+    // ★ 诊断开关的**口径标签**（`guest_token.h` 文件头）：始终打一行，缺省 `skip-lock=0`。
+    //   为什么无条件打：A/B 两臂的日志必须能**一眼分开**，而"没打这行"与"关着"在文本上一样。
+    std::fprintf(out, "token-diag : skip-lock=%d\n", guestToken().diagSkipLock() ? 1 : 0);
+    // ★ M1（REQ-01M6XVZG4T9WY8SQ1WS7P8RNW9）：**等令牌**的独立一栏（⛔ 不是 `ns` 的一部分）。
+    //   口径：`waits` = 真的被挡住的取令牌次数；`wait` = 这些等待的累计墙钟（steady_clock）。
+    //   重入 / 未竞争不计（未竞争路径不读时钟）⇒ 全 0 意味着"没有真的排队"，不是"没测"。
+    //   ⛔ 不要拿具体数值当判据（它随机器与调度变）；判据是"它 > 0 且 `ns` 里不再含它"。
+    {
+        const GuestToken& token = guestToken();
+        const std::uint64_t waits = token.waits();
+        const double wait_ms = static_cast<double>(token.waitNs()) / 1e6;
+        const double avg_us = waits ? static_cast<double>(token.waitNs()) / static_cast<double>(waits) / 1e3 : 0.0;
+        std::fprintf(out, "tokenwait : waits %llu wait %.1f ms avg %.1f us\n", (unsigned long long)waits, wait_ms,
+                     avg_us);
+    }
     std::fprintf(out, "committed : %llu KiB\n", (unsigned long long)(mem_.committedBytes() / 1024));
     std::fprintf(out, "shims     : imported %zu / called-unimplemented %zu\n", shims_.importedCount(),
                  shims_.calledUnimplemented().size());
@@ -1926,6 +2243,19 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                          input_script_.lastMarkerId(), input_script_.lastMarkerName().c_str(),
                          input_script_.lastMarkerNameDegraded() ? "（降级）" : "");
         }
+    }
+    // ★ 时间线 **0 点**（`--anchor-script <id>`）的可观测面：闩锁了就**一定**打一行（四单位齐全）。
+    //   为什么不能只靠闩锁那一刻的 `[input-script] origin` 行：那行在 stderr/stdout 的滚动日志里，
+    //   而"纯 anchor 运行"**没有** `marker :` 行（它只按 `hasMarkerActions()` 打）⇒ 跑完的输出里
+    //   "0 点定在哪"不可读。这一行是摘要的一部分，与 `marker :` 的 last 同处可比。
+    //   ★ 未闩锁 ⇒ **不打**（与 `marker :` 的"没有数就不打"同口径；失败走 `origin-missed:` detail）。
+    //   ★ 格式与需求单一致：`origin    : script=<id> frame=… insns=… guest_ms=… wall_ms=…`。
+    if (input_script_.originRequested() && input_script_.originSet()) {
+        const TimelineOrigin& o = input_script_.origin();
+        std::fprintf(out, "origin    : script=0x%08X frame=%llu insns=%llu guest_ms=%llu wall_ms=%llu\n",
+                     o.id, static_cast<unsigned long long>(o.frame),
+                     static_cast<unsigned long long>(o.insns), static_cast<unsigned long long>(o.guest_ms),
+                     static_cast<unsigned long long>(o.wall_ms));
     }
     // ★ 交互图（`--interaction-graph`）：状态 / 迁移次数 / 发出的动作数 / 采样量 / 失败类别。
     //   失败类别单独一行（`FAIL`），因为它必须与"跑完了"（done）在读输出时一眼分开。
@@ -1992,6 +2322,19 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                          (unsigned long long)cov.gpu_failures);
         }
     }
+    // ★ 默认级别告警（`pipeWarn`）的**拒绝计数**：按 (调用点, 类别) 分桶后按类合计
+    //   （`REQ-01M70SHFT6RZA7RRY1R051Z2PB` #2）。与限流桶**同一份**（进程级）⇒ 第 5 次之后
+    //   只留 debug 的事件也在这里数得到；`other` = 顶点声明 / 设备销毁时的绑定释放等。
+    {
+        const d3d9::PipeWarnCounts& wc = d3d9::pipeWarnCounts();
+        if (wc.total() != 0) {
+            std::fprintf(out, "pipe-warn : vertex-stream=%llu index=%llu texture=%llu other=%llu\n",
+                         (unsigned long long)wc.of(d3d9::PipeWarnCategory::VertexStream),
+                         (unsigned long long)wc.of(d3d9::PipeWarnCategory::Index),
+                         (unsigned long long)wc.of(d3d9::PipeWarnCategory::Texture),
+                         (unsigned long long)wc.of(d3d9::PipeWarnCategory::Other));
+        }
+    }
     if (!overrides_.empty() || !block_overrides_.empty()) {
         std::uint64_t hits = 0;
         std::uint64_t fallbacks = 0;
@@ -2012,6 +2355,21 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
             std::fprintf(out, "  %-12s @ %08X %s(%uB) hits=%llu fallbacks=%llu\n", e->name.c_str(), e->ea,
                          guestConvName(e->conv), e->arg_bytes, (unsigned long long)e->hits,
                          (unsigned long long)e->fallbacks);
+            // ★ 条件式 override 的台账（`fast_hits` / `declines[]`，见 native_overrides.h）：
+            //   桶下标 → 原因名由该 override 自己的域解释（例如 `sub_4BBAB0` 的 `VoicePollWhy`）。
+            //   只在有数时多打一行：无条件项的这两项恒 0，不给日志加噪声。
+            bool any = e->fast_hits != 0;
+            for (std::size_t k = 0; k < NativeOverride::kDeclineSlots; ++k) any = any || e->declines[k] != 0;
+            if (any) {
+                std::fprintf(out, "    fast_hits=%llu declines=[", (unsigned long long)e->fast_hits);
+                bool first = true;
+                for (std::size_t k = 0; k < NativeOverride::kDeclineSlots; ++k) {
+                    if (e->declines[k] == 0) continue;
+                    std::fprintf(out, "%s#%zu=%llu", first ? "" : " ", k, (unsigned long long)e->declines[k]);
+                    first = false;
+                }
+                std::fprintf(out, "]\n");
+            }
         }
         for (std::size_t i = 0; i < block_overrides_.size(); ++i) {
             const NativeBlockOverride* e = block_overrides_.at(i);
@@ -2122,9 +2480,11 @@ void Machine::dumpProfile(std::FILE* out, std::size_t top) const {
                      f.fn ? f.fn->name.c_str() : "(no .lst)");
     }
     // ★ 宿主 shim 表（`--profile` 现在也会打开 shim 计时，见 run() 的 setTiming）。
-    //   口径：只统计 **shim 实现自身**（`ShimRegistry::invoke` 只包 `local.fn`，见 shims.cpp），
-    //   不含 dispatcher 弹参、native override、事件泵；与 guest 块表**不可相加**（两段墙钟不重叠，
-    //   但也不覆盖同一段时间）。只列 `ns > 0` 的项：没被调用过的 shim 恒 0，没有解释价值。
+    //   口径：只统计 **shim 实现自身**（`ShimRegistry::invoke` 只包 `local.fn`；★ 计时起点在
+    //   `GuestToken::Guard` **之后**，见 shims.cpp 与 REQ-01M6XVZG4T9WY8SQ1WS7P8RNW9），
+    //   不含 dispatcher 弹参、native override、事件泵、**也不含等令牌**（后者单开一栏，见下）；
+    //   与 guest 块表**不可相加**（两段墙钟不重叠，但也不覆盖同一段时间）。只列 `ns > 0` 的项：
+    //   没被调用过的 shim 恒 0，没有解释价值。
     {
         struct ShimRow {
             const ShimDef* def = nullptr;
@@ -2160,6 +2520,20 @@ void Machine::dumpProfile(std::FILE* out, std::size_t top) const {
                          label.c_str(), static_cast<double>(r.ns) / 1e6, pct,
                          (unsigned long long)r.calls, avg_us);
         }
+    }
+    // ★ M1（REQ-01M6XVZG4T9WY8SQ1WS7P8RNW9）：**等令牌**的独立一栏。
+    //   为什么必须单开：上面的 shim 表只含「实现自身」（起点在 Guard 之后）⇒ 拿它排序"谁在持令牌
+    //   做阻塞型宿主等待"会把等待时间读成"这个 shim 很慢"。这里的账回答的是另一个问题：
+    //   **为了进临界区，我等了多久**。累计 = `GuestToken`（每轮 `arm()` 清零），恒记；
+    //   代价只在真的被挡时两次 steady_clock ⇒ 不开 `--profile` 也照样有数（见运行摘要）。
+    {
+        const GuestToken& token = guestToken();
+        const std::uint64_t waits = token.waits();
+        const std::uint64_t wait_ns = token.waitNs();
+        const double avg_us = waits ? static_cast<double>(wait_ns) / static_cast<double>(waits) / 1e3 : 0.0;
+        std::fprintf(out, "\n=== profile: guest token wait（等令牌；⛔ 不在上面的 shim 墙钟里）===\n");
+        std::fprintf(out, "  waits=%llu wait=%.1f ms avg=%.1f us（这段墙钟落在临界区**之外**；与 shim 表不相加）\n",
+                     (unsigned long long)waits, static_cast<double>(wait_ns) / 1e6, avg_us);
     }
     // ★ 字体度量缓存（`FontEngine::metrics`）的**命中率**：`gdi32!GetTextMetricsA` 的墙钟只是现象，
     //   这一行才是"缓存到底有没有用"的判据。**不是墙钟、不与上面两张表相加**，所以单起一格标题

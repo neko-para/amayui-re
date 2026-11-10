@@ -183,6 +183,9 @@ bool displayMode(X86& cpu, int* width, int* height, unsigned* bpp, SurfaceFormat
 bool setDisplayMode(X86& cpu, int width, int height, unsigned bpp, std::string* why);
 void setCooperativeLevel(X86& cpu, std::uint32_t hwnd, std::uint32_t flags);
 std::uint32_t primarySurface(X86& cpu);  // 0 = 还没有 primary
+// 设备 surface 链表的头（状态块 EA；0 = 空）。Release 掉最后一个 surface 之后必须回到 0
+//   —— 守卫靠它断言"链表摘除照旧发生"（⛔ 测试不要自己抄 kDevSurfaceHead 的偏移）。
+std::uint32_t surfaceChainHead(X86& cpu);
 
 // ---- surface 状态块 ----
 // 分配像素 + 状态块；返回状态块 EA（0 = 失败）。primary 会登记进设备状态。

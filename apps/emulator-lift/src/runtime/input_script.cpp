@@ -149,6 +149,32 @@ const char* triggerKindName(TriggerKind k) {
 
 const char* triggerUnitName(TriggerKind k) { return triggerKindName(k); }
 
+// ---- ★ `--anchor-script` 的启动期校验（⛔ 不跑一半就退化成"0 点从 run 起算"）----
+//   两条判据的**唯一实现**：`main` 用它 exit 2，pure CTest 用它断言"互斥 ⇒ 解析期报错"。
+std::string validateOriginCli(bool anchor_requested, bool input_script_given, bool interaction_graph_given) {
+    if (!anchor_requested) return std::string();
+    // ① 与交互图**互斥**：图有自己的 actuator 与**绝对触发**（`at frame <F+1>`），
+    //    再叠一个 0 点会把它的绝对触发整体抬 `origin.frame` 帧（语义直接对不上）。
+    if (interaction_graph_given) {
+        return "--anchor-script 与 --interaction-graph 互斥：图有自己的 actuator 与**绝对触发**"
+               "（0 点重定基会把它们整体抬起）⇒ 二选一";
+    }
+    // ② 只有时间线认 0 点 ⇒ 没给 `--input-script` 时它是无意义的配置（⛔ 不静默接受）。
+    if (!input_script_given) {
+        return "--anchor-script 需要同时给 --input-script（它给的是那条时间线的 0 点）";
+    }
+    return std::string();
+}
+
+std::string validateOriginScript(bool anchor_requested, std::size_t action_count) {
+    if (!anchor_requested) return std::string();
+    // ③ 一个动作都没有 ⇒ 0 点没有可重定基的东西（解析器本身也会拒绝空脚本；这里是那道判据）
+    if (action_count == 0) {
+        return "--anchor-script 给了，但脚本里没有任何动作（0 点没有可重定基的触发 ⇒ 配置无意义）";
+    }
+    return std::string();
+}
+
 bool Trigger::due(std::uint64_t frame, std::uint64_t guest_ms, std::uint64_t insns,
                   std::uint64_t wall_ms) const {
     switch (kind) {
@@ -220,6 +246,14 @@ bool InputScript::loadText(const std::string& text, const std::string& origin, s
     source_ = origin;
     Trigger trigger;
     bool have_trigger = false;
+    // ★ 段标记（`REQ-01M710E6PV4PPHECPPCCTRF5RA`）：`before-anchor` 之后的触发是**绝对**的
+    //   （不参与 `+= origin`、闩锁前不被抑制），`after-anchor` 之后恢复**相对**（= 今天的语义）。
+    //   ⛔ 两者**必须成对**（父级裁决）：缺 `after-anchor` ⇒ 解析期错误 —— "绝对到文件尾"与
+    //     "绝对止于闩锁"两种隐式边界都自圆其说，而脚本字面看不出来 ⇒ 不猜（静默歧义）。
+    //   ⛔ 没有 `--anchor-script` 时两者都是解析期错误（否则它们静默无害 ⇒ 用户以为自己在用 0 点）。
+    bool in_before_anchor = false;
+    bool saw_before_anchor = false;
+    int before_anchor_line = 0;
     int line_no = 0;
 
     auto fail = [&](int ln, const std::string& why) {
@@ -251,6 +285,33 @@ bool InputScript::loadText(const std::string& text, const std::string& origin, s
             std::string w;
             while (words >> w) tok.push_back(w);
             const std::string head = lowerCopy(tok[0]);
+
+            // ---- 段标记（`before-anchor` / `after-anchor`；各自**独占一行**）----
+            //   ★ 判据（四条解析期错误，全部带行号）：
+            //     ① 没开 `--anchor-script` 却写了段标记；② 重复 `before-anchor`；
+            //     ③ `after-anchor` 出现在 `before-anchor` 之前；④ `before-anchor` 段里出现 profiler 动作。
+            if (head == "before-anchor" || head == "after-anchor") {
+                if (tok.size() != 1) {
+                    return fail(line_no, body + " ⇒ 段标记必须**独占一行**（不带参数 / 不跟在别的词后面）");
+                }
+                if (!origin_requested_) {
+                    return fail(line_no, "`" + head + "` 需要 `--anchor-script <id>`（段标记只在 0 点存在时才有意义）");
+                }
+                if (head == "before-anchor") {
+                    if (saw_before_anchor) {
+                        return fail(line_no, "重复的 `before-anchor`（一条脚本只能有一个绝对段开头）");
+                    }
+                    saw_before_anchor = true;
+                    before_anchor_line = line_no;
+                    in_before_anchor = true;
+                } else {
+                    if (!saw_before_anchor) {
+                        return fail(line_no, "`after-anchor` 出现在 `before-anchor` 之前（没有绝对段可以先结束）");
+                    }
+                    in_before_anchor = false;
+                }
+                continue;
+            }
 
             // ---- 时间线触发条件 / 相对推进 ----
             if (head == "at" || head == "after" || head == "wait") {
@@ -341,6 +402,7 @@ bool InputScript::loadText(const std::string& text, const std::string& origin, s
                     w.kind = Kind::Wait;
                     w.trigger = trigger;
                     w.text = body;
+                    w.absolute = in_before_anchor;  // 段标记决定它属于绝对段还是相对段
                     actions_.push_back(w);
                 }
                 // ⚠ `wait` 与 `after` 的锚点语义**相同**：两者都推进锚点并把它作为下一条动作的
@@ -357,6 +419,7 @@ bool InputScript::loadText(const std::string& text, const std::string& origin, s
             Action a;
             a.trigger = trigger;
             a.text = body;
+            a.absolute = in_before_anchor;  // 段标记：`before-anchor` 之后 = 绝对（不重定基 / 闩锁前不抑制）
 
             if (head == "mouse_move") {
                 if (tok.size() != 3) return fail(line_no, "mouse_move 需要 X Y");
@@ -427,6 +490,13 @@ bool InputScript::loadText(const std::string& text, const std::string& origin, s
             } else if (head == "profile_begin" || head == "profile_end") {
                 // ★ 窗口边界 = **本动作的触发条件**（帧 / 指令数 / guest_ms / 将来的具名标记）。
                 //   label 是单个词（用于配对与报错；⛔ 不参与语义）。
+                //   ⛔ 绝对段里禁止 profiler：它的窗口边界读的是"从 run 起算"的时刻，而在 0 点
+                //     之前那些时刻**不是同一把尺子**（0 点之后才与 guest 时间对齐）⇒ 会产出一张
+                //     跨着两把尺子的表。解析期就拒绝（⛔ 不静默产出一张不可读的表）。
+                if (in_before_anchor) {
+                    return fail(line_no, "`" + head + "` 不能出现在 `before-anchor` 段里（0 点之前的时刻与"
+                                             " 0 点之后不是同一把尺子 ⇒ 窗口边界没有意义）");
+                }
                 if (tok.size() != 2) return fail(line_no, head + " 需要一个 label（单个词）");
                 a.kind = head == "profile_begin" ? Kind::ProfileBegin : Kind::ProfileEnd;
                 a.label = tok[1];
@@ -442,6 +512,14 @@ bool InputScript::loadText(const std::string& text, const std::string& origin, s
         }
     }
 
+    // ★ 段标记**必须成对**（父级裁决）：`before-anchor` 到文件尾都没有 `after-anchor` ⇒ 解析期错误。
+    //   ⛔ 两种"隐式边界"（绝对到文件尾 / 绝对止于闩锁）都自圆其说，而脚本字面看不出来
+    //      ⇒ 不猜（本仓反复吃过的"静默歧义"）。报错指回 `before-anchor` 那一行。
+    if (in_before_anchor) {
+        return fail(before_anchor_line,
+                    "`before-anchor` 必须配 `after-anchor`（到文件尾都没有配对）—— "
+                    "绝对段在哪结束必须显式写出来");
+    }
     if (actions_.empty()) return fail(line_no, "脚本里没有任何动作（只有注释 / 锚点）");
     pending_dirty_ = true;  // 动作集变了 ⇒ 聚合缓存作废
     return true;
@@ -477,6 +555,10 @@ bool InputScript::appendText(const std::string& text, const std::string& origin,
     }
     // ---- 解析到临时脚本：复用 loadText 的全部语法与报错（⛔ 不复制一份解析器）----
     InputScript tmp;
+    // ★ 段标记的解析期判据依赖"有没有 0 点配置"（`before-anchor` / `after-anchor` 需要它）⇒
+    //   把本实例的配置交给临时解析器（⛔ 否则追加一段合法文本会因为"临时实例没配置"而报错）。
+    tmp.origin_requested_ = origin_requested_;
+    tmp.origin_id_ = origin_id_;
     if (!tmp.loadText(text, origin, err)) return false;
     // ---- 前置 ③：同单位单调（新动作的触发值不许早于现有最后一条同单位动作）----
     //   ★ Marker **跳过**这条检查：名字之间没有大小关系（`last_value` 对它没有意义）。
@@ -811,6 +893,102 @@ void InputScript::apply(WindowManager& wm, Action& a, std::uint64_t frame, std::
     }
 }
 
+// ---- ★ 时间线的 0 点（`--anchor-script <id>`）----
+//   语义：**首次观察到进入**脚本 `id` 的那一个有效样本 ⇒ 定基一次（闩锁），把未应用的数值触发
+//   整体 `+= origin`。⛔ 不是 marker 的边沿：首样本也要判（"一开局就在 X 里"是合法的 0 点），
+//   重进**不**重新定基（0 点只定一次）。
+bool InputScript::noteIdentity(const MarkerSample& s, std::uint64_t frame, std::uint64_t guest_ms,
+                               std::uint64_t insns, std::uint64_t wall_ms) {
+    if (!origin_requested_) return false;
+    if (!s.valid) return false;  // 无效样本（boot / cur 越界）不定义 0 点 —— ⛔ 不猜
+    if (!origin_set_) {
+        // 电平条件 + 首次：当前样本的 id 就是目标 ⇒ 立刻闩锁（⛔ 不要求"上一个值不同"）。
+        if (s.id != origin_id_) {
+            origin_reentry_seen_ = false;  // 离开目标段 ⇒ 下次再进要能再记一行 info
+            return false;
+        }
+        origin_set_ = true;
+        origin_.id = s.id;
+        origin_.frame = frame;
+        origin_.guest_ms = guest_ms;
+        origin_.insns = insns;
+        origin_.wall_ms = wall_ms;
+        ++origin_latches_;
+        origin_reentry_seen_ = true;
+        // ★ 重定基**与抑制必须同时存在**（只重定基 ⇒ 闩锁前的 `at frame 1` 早跑了；
+        //   只抑制 ⇒ 闩锁后触发值仍是"从 run 起算"）。抑制在 `tick()` 里按 `originSet()` 关掉。
+        rebasePendingTriggers();
+        // ★ 必须打这一行：重定基之后日志里 `at frame 120` 可能"在第 380 帧应用"（设计 §B'）。
+        // ★ `sample=` = 这一闩锁发生在**第几个有效样本**上（`marker_samples_` 已在 `noteMarker`
+        //   入口自增）⇒ 换档 / 换机器后，"0 点是不是同一个采样序"有得对；四单位只对数值没有序号。
+        std::printf("[input-script] origin script=0x%08X cur=%u sample=%llu frame=%llu guest_ms=%llu "
+                    "insns=%llu wall_ms=%llu ⇒ 0 点已定（未应用的数值触发整体 +origin；只定一次）\n",
+                    s.id, s.cur, static_cast<unsigned long long>(marker_samples_),
+                    static_cast<unsigned long long>(frame), static_cast<unsigned long long>(guest_ms),
+                    static_cast<unsigned long long>(insns), static_cast<unsigned long long>(wall_ms));
+        return true;
+    }
+    // 已闩锁：**重进不定基**（0 点只定一次）。只在"再次进入目标 id"的**这一条边沿**上记 info。
+    if (s.id == origin_.id) {
+        if (!origin_reentry_seen_) {
+            origin_reentry_seen_ = true;
+            ++origin_reentries_;
+            std::printf("[input-script] origin 重进 script=0x%08X cur=%u frame=%llu（⛔ 不重新定基："
+                        "0 点仍是 frame=%llu insns=%llu）\n",
+                        s.id, s.cur, static_cast<unsigned long long>(frame),
+                        static_cast<unsigned long long>(origin_.frame),
+                        static_cast<unsigned long long>(origin_.insns));
+        }
+    } else {
+        origin_reentry_seen_ = false;
+    }
+    return false;
+}
+
+void InputScript::rebasePendingTriggers() {
+    for (Action& a : actions_) {
+        if (a.applied) continue;  // ⛔ 不撤已发生的事（已应用的账 / 注入消息都不动）
+        // ★ **绝对段豁免**（`before-anchor`）：那些触发按声明的 frame / insn / guest_ms / wall_ms
+        //   原样执行 —— 它们本来就是"0 点之前的输入"，`+= origin` 会把它们推到 0 点之后。
+        if (a.absolute) continue;
+        switch (a.trigger.kind) {
+            case TriggerKind::Frame: a.trigger.value += origin_.frame; break;
+            case TriggerKind::GuestMs: a.trigger.value += origin_.guest_ms; break;
+            case TriggerKind::Insn: a.trigger.value += origin_.insns; break;
+            case TriggerKind::WallMs: a.trigger.value += origin_.wall_ms; break;
+            // ★ Marker 是**名字**条件（没有数值可平移）；它的边沿语义与 0 点无关（裁决 M3）。
+            case TriggerKind::Marker: break;
+        }
+    }
+    // ⚠ 显式 hold 的 `Release::due_value` **不动**：它是"apply 那一刻 + N"算出来的绝对量，
+    //   而 apply 已经发生在重定基之后（`convertFrameTriggersToWall` 的先例同理）。
+    pending_dirty_ = true;  // 触发值改了 ⇒ 聚合缓存作废
+}
+
+std::string InputScript::originMissedDetail(std::uint64_t frame, std::uint64_t wall_ms) const {
+    // ★ 三个数必须打：等的是哪个 id、实际看到的是什么、跑了多久（与 `marker-timeout:` 同形）。
+    //   措辞只能是"没**观察到**进入"：0 点定义在首个可观察样本上，宿主可能漏掉"进又出"。
+    char buf[384];
+    const char* last = marker_seeded_ ? marker_last_name_.c_str() : "none";
+    std::snprintf(buf, sizeof(buf),
+                  "origin-missed: script=0x%08X（没**观察到**进入脚本 0x%08X） last=%s frames=%llu "
+                  "wall_ms=%llu samples=%llu invalid=%llu",
+                  origin_id_, origin_id_, last, static_cast<unsigned long long>(frame),
+                  static_cast<unsigned long long>(wall_ms), static_cast<unsigned long long>(marker_samples_),
+                  static_cast<unsigned long long>(marker_invalid_));
+    return std::string(buf);
+}
+
+void InputScript::resetOriginState() {
+    // ★ **状态**（每轮 run 清）：闩锁位 / 四个单位 / 计数 / 重进去重。
+    //   ⛔ 配置（`origin_requested_` / `origin_id_`）不在这里清 —— 它跨 clear() / 跨 run 存活。
+    origin_set_ = false;
+    origin_ = TimelineOrigin{};
+    origin_latches_ = 0;
+    origin_reentries_ = 0;
+    origin_reentry_seen_ = false;
+}
+
 // ★ 缓存"未应用动作"的聚合量。动作集只在三处变：动作被 apply、frame 条件被折算成 wall、
 //   脚本重载/清空 ⇒ 那三处置 dirty，tick 里至多重算一次。等价性判据：`due()` 就是 `now >= value`
 //   ⇒ "该单位至少有一条到期" ⇔ `min(value) <= now`。
@@ -818,12 +996,16 @@ void InputScript::apply(WindowManager& wm, Action& a, std::uint64_t frame, std::
 //   ★ 动作的应用走 `applyAction()`（与 tick 的到期路径**同一条**）—— 否则 applied / 账 /
 //     缓存作废全漏，表现为"同一名字每边沿重复发 + 动作永远 pending + 超时误报"。
 bool InputScript::noteMarker(WindowManager& wm, const MarkerSample& s, std::uint64_t frame,
-                             std::uint64_t guest_ms) {
+                             std::uint64_t guest_ms, std::uint64_t insns, std::uint64_t wall_ms) {
     if (!s.valid) {
         ++marker_invalid_;
         return false;
     }
     ++marker_samples_;
+    // ★ 0 点的闩锁判定**先于** marker 的播种 / 边沿逻辑（设计 L2）：
+    //   播种那一支在首个样本就 `return false`（见下），把闩锁放在它之后会让
+    //   "一开局就在目标脚本里"（`--skip-logo` 的形状）**永远等不到** 0 点。
+    noteIdentity(s, frame, guest_ms, insns, wall_ms);
     // 同身份重复采样：名字一定没变 ⇒ ⛔ 不做一次 std::string 拷贝（采样点 = 每条主循环指令）。
     //   ⚠ 唯一例外：降级状态变了（TOC 从"未装载"变成"已装载"）⇒ 名字要刷新（否则 timeout 的 `last=` 会停在 `id:…`）。
     if (s.cur != marker_last_cur_ || s.id != marker_last_id_ || !marker_seeded_ ||
@@ -919,6 +1101,9 @@ void InputScript::resetMarkerState() {
     marker_wait_action_ = static_cast<std::size_t>(-1);
     marker_wait_ms_ = 0;
     marker_wait_name_.clear();
+    // ★ 0 点的**状态**跟着每轮 run 重置（配置保留）。放在这里是因为 `resetMarkerState()` 同时是
+    //   "每轮 run 开头"与 `clear()` 的唯一重置点 —— 两处都要清状态、都不许清配置（K8）。
+    resetOriginState();
 }
 
 void InputScript::rebuildPending() {
@@ -926,18 +1111,29 @@ void InputScript::rebuildPending() {
     for (int k = 0; k < kTriggerKindCount; ++k) {
         pend_min_[k] = 0;
         pend_count_[k] = 0;
+        pend_min_abs_[k] = 0;
+        pend_count_abs_[k] = 0;
     }
     pend_frame_limit_ = 0;
     for (const Action& a : actions_) {
         if (a.applied) continue;
         ++action_scans_;  // 可观测：这里是**真正的逐条比较**（每次动作集变化才发生）
         const int k = static_cast<int>(a.trigger.kind);
+        ++pend_count_[k];  // 存在性判据（帧停滞兜底 / marker 超时）按**全部**未应用动作算
         // ★ Marker 没有数值到期：只累条数，**不参与** `pend_min_` / `any_due`。
         //   ⛔ 别写成 `pend_min_[Marker] = 0` —— 那会让它每一 tick 都"到期"。
         if (a.trigger.kind != TriggerKind::Marker) {
-            if (pend_count_[k] == 0 || a.trigger.value < pend_min_[k]) pend_min_[k] = a.trigger.value;
+            if (a.absolute) {
+                // 绝对段：独立的最小值（闩锁 pending 期间它**不被抑制**）。
+                if (pend_count_abs_[k] == 0 || a.trigger.value < pend_min_abs_[k]) pend_min_abs_[k] = a.trigger.value;
+                ++pend_count_abs_[k];
+            } else {
+                // 相对段：`pend_count_[k] - 1` = 本条之前的总条数；它等于绝对条数 ⇒ 还没有相对条数。
+                if (pend_count_[k] - 1 == pend_count_abs_[k] || a.trigger.value < pend_min_[k]) {
+                    pend_min_[k] = a.trigger.value;
+                }
+            }
         }
-        ++pend_count_[k];
         if (a.trigger.kind == TriggerKind::Frame) {
             const std::uint64_t lim = a.trigger.stall_ms != 0 ? a.trigger.stall_ms : default_stall_ms_;
             if (lim != 0 && (pend_frame_limit_ == 0 || lim < pend_frame_limit_)) pend_frame_limit_ = lim;
@@ -958,11 +1154,19 @@ bool InputScript::tick(WindowManager& wm, std::uint64_t frame, std::uint64_t gue
     //   ★ 基线用**宿主墙钟**：guest 阻塞在 `GetMessageA` 时 `guest_ms` 不推进。
     updateMarkerTimeout(wall_ms);
 
+    // ★ 0 点**还没闩锁** ⇒ 抑制**相对段**的全部数值触发（裁决 10：不是"改小"，是整段不判）：
+    //   闩锁前时钟还是"从 run 起算"，任何 `at frame 1` 都会在第 1 帧就到期 ⇒ 0 点假。
+    //   ★ **绝对段**（`before-anchor`）不参与抑制：它的值本来就是"从 run 起算"的绝对量。
+    //   ⛔ 只抑制数值 kind：marker 动作不等 0 点（裁决 M3）；已排队的抬起与收口也不受影响。
+    const bool origin_pending = origin_requested_ && !origin_set_;
+
     // ★ 帧停滞兜底：只在"还有 frame 条件在等"且"帧号真的停住"时触发一次。
     //   ⛔ 帧正常推进时这一段**一次也不触发**（CTest 的 `stall-not-fired` 用例钉着）。
     //   ★ `limit` 走缓存（与"逐条扫描取最小非 0 阈值"等价）：没有 pending Frame 动作时 limit 恒 0
     //     ⇒ 整个分支可以整段跳过。
-    if (!stall_fired_ && pend_count_[static_cast<int>(TriggerKind::Frame)] != 0) {
+    //   ★ 0 点 pending 期间**禁用**（裁决 11）：折算一次就把 `at frame N` 永久折成墙钟条件 ——
+    //     0 点还没定就折算，等于把"第 N 帧"换成"0 点前 N 帧的墙钟"，0 点从此是假的。
+    if (!origin_pending && !stall_fired_ && pend_count_[static_cast<int>(TriggerKind::Frame)] != 0) {
         const std::uint64_t limit = pend_frame_limit_;
         if (limit != 0 && have_frame_sample_) {
             // ★ 还没出现**第一帧**（boot）不算"停滞"：那一段本来就没有 Present。
@@ -989,15 +1193,28 @@ bool InputScript::tick(WindowManager& wm, std::uint64_t frame, std::uint64_t gue
     if (pending_dirty_) rebuildPending();
     // ★ 快路径（O(1)）：四个单位各查一条"最小到期值" ⇒ 没有一条到期就直接返回。
     //   ⛔ 只跳过**扫描**，不跳过任何触发：到期的那一条走下面原来的逐条 `due()` 路径。
-    const bool any_due =
-        (pend_count_[static_cast<int>(TriggerKind::Frame)] != 0 &&
+    //   ★ 0 点 pending ⇒ **相对段**一条数值触发都不算到期（整段短路）；**绝对段**（`before-anchor`）
+    //     不参与短路 —— 它存在的理由就是"0 点之前能跑"。
+    //   ★ 相对段 / 绝对段各有自己的最小缓存（见 `rebuildPending`）；相对段的条数 = 总条数 − 绝对条数。
+    const bool rel_any_due =
+        (pend_count_[static_cast<int>(TriggerKind::Frame)] > pend_count_abs_[static_cast<int>(TriggerKind::Frame)] &&
          frame >= pend_min_[static_cast<int>(TriggerKind::Frame)]) ||
-        (pend_count_[static_cast<int>(TriggerKind::GuestMs)] != 0 &&
+        (pend_count_[static_cast<int>(TriggerKind::GuestMs)] > pend_count_abs_[static_cast<int>(TriggerKind::GuestMs)] &&
          guest_ms >= pend_min_[static_cast<int>(TriggerKind::GuestMs)]) ||
-        (pend_count_[static_cast<int>(TriggerKind::Insn)] != 0 &&
+        (pend_count_[static_cast<int>(TriggerKind::Insn)] > pend_count_abs_[static_cast<int>(TriggerKind::Insn)] &&
          insns >= pend_min_[static_cast<int>(TriggerKind::Insn)]) ||
-        (pend_count_[static_cast<int>(TriggerKind::WallMs)] != 0 &&
+        (pend_count_[static_cast<int>(TriggerKind::WallMs)] > pend_count_abs_[static_cast<int>(TriggerKind::WallMs)] &&
          wall_ms >= pend_min_[static_cast<int>(TriggerKind::WallMs)]);
+    const bool abs_any_due =
+        (pend_count_abs_[static_cast<int>(TriggerKind::Frame)] != 0 &&
+         frame >= pend_min_abs_[static_cast<int>(TriggerKind::Frame)]) ||
+        (pend_count_abs_[static_cast<int>(TriggerKind::GuestMs)] != 0 &&
+         guest_ms >= pend_min_abs_[static_cast<int>(TriggerKind::GuestMs)]) ||
+        (pend_count_abs_[static_cast<int>(TriggerKind::Insn)] != 0 &&
+         insns >= pend_min_abs_[static_cast<int>(TriggerKind::Insn)]) ||
+        (pend_count_abs_[static_cast<int>(TriggerKind::WallMs)] != 0 &&
+         wall_ms >= pend_min_abs_[static_cast<int>(TriggerKind::WallMs)]);
+    const bool any_due = abs_any_due || (!origin_pending && rel_any_due);
     // 收口与延迟抬起也必须保住：两者都只在"有活可干"时才有意义。
     const bool finish_pending = !finish_logged_ && (finished() || quit_requested_);
     if (!any && !any_due && releases_.empty() && !finish_pending) return false;
@@ -1019,6 +1236,11 @@ bool InputScript::tick(WindowManager& wm, std::uint64_t frame, std::uint64_t gue
     }
     for (Action& a : actions_) {
         if (a.applied) continue;
+        // ★ 0 点 pending ⇒ **相对段**的数值动作一律不应用（与上面的 `any_due` 同一条判据）。
+        //   ⛔ **绝对段豁免**：`before-anchor` 的触发按声明原样执行 —— 它就是"用输入把游戏推到某屏"
+        //     的那一段（`REQ-01M710E6PV4PPHECPPCCTRF5RA`）。⛔ 不要把它一起 suppress（那等于本单没做）。
+        //   `Marker` 在这条循环里本来就不会到期（`due()` 恒 false），它走 `noteMarker()`。
+        if (origin_pending && !a.absolute) continue;
         ++action_scans_;  // 可观测：到期的那一次才真正逐条比较
         if (quit_requested_) continue;
         if (!a.trigger.due(frame, guest_ms, insns, wall_ms)) continue;

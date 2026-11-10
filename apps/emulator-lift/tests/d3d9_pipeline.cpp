@@ -30,9 +30,16 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
 #include "check.h"
 #include "runtime/d3d9.h"
 #include "runtime/d3d9_pipeline.h"
+#include "runtime/log.h"
 #include "runtime/machine.h"
 #include "runtime/surface.h"
 #include "shims/register.h"
@@ -50,6 +57,112 @@ constexpr std::uint32_t kProcD3DXCreateTexture = 0x7FF81040u;
 constexpr std::uint32_t kSentinel = 0xFFFFFFFFu;
 constexpr std::uint32_t kFixtureHeapBytes = 0x00100000u;
 
+// ---- stderr **tee**（"默认级别能看见告警"的判据用；形态照 `tests/dsound.cpp`）----
+// ★ 只捕获不回显会让中途 abort 的现场全丢；`pump()` 把新增的一段同时写进内存 log 与真 stderr。
+#ifdef _WIN32
+using FdT = int;
+int dupFd(int fd) { return _dup(fd); }
+int dup2Fd(int src, int dst) { return _dup2(src, dst); }
+int filenoOf(std::FILE* f) { return _fileno(f); }
+void closeFd(int fd) { _close(fd); }
+int readFd(int fd, void* buf, unsigned n) { return _read(fd, buf, n); }
+int writeFd(int fd, const void* buf, unsigned n) { return _write(fd, buf, n); }
+#else
+using FdT = int;
+int dupFd(int fd) { return ::dup(fd); }
+int dup2Fd(int src, int dst) { return ::dup2(src, dst); }
+int filenoOf(std::FILE* f) { return ::fileno(f); }
+void closeFd(int fd) { ::close(fd); }
+int readFd(int fd, void* buf, unsigned n) { return static_cast<int>(::read(fd, buf, n)); }
+int writeFd(int fd, const void* buf, unsigned n) { return static_cast<int>(::write(fd, buf, n)); }
+#endif
+
+struct StderrTee {
+    std::FILE* tmp = nullptr;
+    FdT saved = -1;
+    bool active = false;
+    std::size_t moved = 0;
+    std::string log;
+
+    bool begin() {
+        tmp = std::tmpfile();
+        if (!tmp) return false;
+        std::fflush(stderr);
+        saved = static_cast<FdT>(dupFd(2));
+        if (saved < 0) return false;
+        if (dup2Fd(filenoOf(tmp), 2) < 0) return false;
+        active = true;
+        return true;
+    }
+
+    void pump() {
+        if (!active || !tmp) return;
+        std::fflush(stderr);
+        std::fseek(tmp, 0, SEEK_END);
+        const long size = std::ftell(tmp);
+        if (size < 0) return;
+        const std::size_t total = static_cast<std::size_t>(size);
+        if (total <= moved) return;
+        std::fseek(tmp, static_cast<long>(moved), SEEK_SET);
+        std::vector<char> chunk(total - moved);
+        const std::size_t got = std::fread(chunk.data(), 1, chunk.size(), tmp);
+        if (got == 0) return;
+        log.append(chunk.data(), got);
+        if (saved >= 0) {
+            std::size_t off = 0;
+            while (off < got) {
+                const int n = writeFd(saved, chunk.data() + off, static_cast<unsigned>(got - off));
+                if (n <= 0) break;
+                off += static_cast<std::size_t>(n);
+            }
+        }
+        moved += got;
+    }
+
+    std::string finish() {
+        if (!active) return log;
+        pump();
+        dup2Fd(saved, 2);
+        closeFd(saved);
+        saved = -1;
+        active = false;
+        if (tmp) {
+            std::fclose(tmp);
+            tmp = nullptr;
+        }
+        return log;
+    }
+};
+
+bool contains(const std::string& hay, const std::string& needle) {
+    return hay.find(needle) != std::string::npos;
+}
+
+std::size_t countOccurrences(const std::string& hay, const std::string& needle) {
+    if (needle.empty()) return 0;
+    std::size_t n = 0;
+    for (std::size_t at = hay.find(needle); at != std::string::npos; at = hay.find(needle, at + needle.size()))
+        ++n;
+    return n;
+}
+
+// 运行摘要 → 字符串（`dumpRunSummary` 写 `std::FILE*`）
+std::string captureRunSummary(lift::Machine& m) {
+    std::FILE* tmp = std::tmpfile();
+    if (!tmp) return {};
+    lift::RunResult rr;
+    rr.reason = lift::StopReason::UntilEa;  // 不打印"最近执行的指令"块
+    m.dumpRunSummary(rr, tmp);
+    std::fflush(tmp);
+    std::fseek(tmp, 0, SEEK_SET);
+    std::string out;
+    char buf[4096];
+    std::size_t n = 0;
+    while ((n = std::fread(buf, 1, sizeof(buf), tmp)) > 0) out.append(buf, n);
+    std::fclose(tmp);
+    return out;
+}
+
 // 设备槽偏移（★ 见 shims/d3d9.cpp 的方法表注释：每条都有 `.lst` 站点或明说未取证）
 constexpr std::uint32_t kOffPresent = 0x44u;
 constexpr std::uint32_t kOffBeginScene = 0xA4u;
@@ -66,6 +179,12 @@ constexpr std::uint32_t kOffDrawPrimitive = 0x144u;
 constexpr std::uint32_t kOffDrawPrimitiveUP = 0x14Cu;
 constexpr std::uint32_t kOffSetFVF = 0x164u;
 constexpr std::uint32_t kOffSetStreamSource = 0x190u;
+constexpr std::uint32_t kOffSetIndices = 0x1A0u;
+constexpr std::uint32_t kOffCreateVertexBuffer = 0x68u;
+constexpr std::uint32_t kOffCreateIndexBuffer = 0x6Cu;
+constexpr std::uint32_t kOffVertexBufferLock = 0x2Cu;    // ★ IDirect3DVertexBuffer9::Lock
+constexpr std::uint32_t kOffVertexBufferUnlock = 0x30u;  // ★ IDirect3DVertexBuffer9::Unlock
+constexpr std::uint32_t kOffDrawIndexedPrimitive = 0x148u;
 constexpr std::uint32_t kOffTextureLockRect = 0x4Cu;
 constexpr std::uint32_t kOffTextureUnlockRect = 0x50u;
 constexpr std::uint32_t kOffSetViewport = 0xBCu;
@@ -311,6 +430,41 @@ struct Fixture {
     std::uint32_t drawUp(std::uint32_t prim, std::uint32_t prim_count, std::uint32_t data_ea, std::uint32_t stride) {
         return method(device.object, kOffDrawPrimitiveUP, {prim, prim_count, data_ea, stride});
     }
+    std::uint32_t drawPrimitive(std::uint32_t prim, std::uint32_t start_vertex, std::uint32_t prim_count) {
+        return method(device.object, kOffDrawPrimitive, {prim, start_vertex, prim_count});
+    }
+    std::uint32_t drawIndexed(std::uint32_t prim, std::uint32_t base_vertex, std::uint32_t min_index,
+                              std::uint32_t num_vertices, std::uint32_t start_index,
+                              std::uint32_t prim_count) {
+        return method(device.object, kOffDrawIndexedPrimitive,
+                      {prim, base_vertex, min_index, num_vertices, start_index, prim_count});
+    }
+    // CreateVertexBuffer(this, Length, Usage, FVF, Pool, ppVB, pSharedHandle=0)（Usage=8 = WRITEONLY）
+    std::uint32_t createVertexBuffer(std::uint32_t length, std::uint32_t fvf, std::uint32_t* out_obj) {
+        const std::uint32_t out_ea = placeU32(0xDEADBEEFu);
+        const std::uint32_t hr = method(device.object, kOffCreateVertexBuffer, {length, 8u, fvf, 1u, out_ea, 0u});
+        if (out_obj) *out_obj = m.mem().rd32(out_ea);
+        return hr;
+    }
+    // CreateIndexBuffer(this, Length, Usage, Format(101=INDEX16), Pool, ppIB, pSharedHandle=0)
+    std::uint32_t createIndexBuffer(std::uint32_t length, std::uint32_t format, std::uint32_t* out_obj) {
+        const std::uint32_t out_ea = placeU32(0xDEADBEEFu);
+        const std::uint32_t hr = method(device.object, kOffCreateIndexBuffer, {length, 8u, format, 1u, out_ea, 0u});
+        if (out_obj) *out_obj = m.mem().rd32(out_ea);
+        return hr;
+    }
+    std::uint32_t lockBuffer(std::uint32_t obj, std::uint32_t* data_ea) {
+        const std::uint32_t out_ea = placeU32(0u);
+        const std::uint32_t hr = method(obj, kOffVertexBufferLock, {0u, 0u, out_ea, 0u});
+        if (data_ea) *data_ea = m.mem().rd32(out_ea);
+        return hr;
+    }
+    std::uint32_t unlockBuffer(std::uint32_t obj) { return method(obj, kOffVertexBufferUnlock, {}); }
+    std::uint32_t setStreamSource(std::uint32_t stream, std::uint32_t vb, std::uint32_t offset,
+                                  std::uint32_t stride) {
+        return method(device.object, kOffSetStreamSource, {stream, vb, offset, stride});
+    }
+    std::uint32_t setIndices(std::uint32_t ib) { return method(device.object, kOffSetIndices, {ib}); }
 
     std::uint32_t pixelAt(int x, int y) {
         return m.mem().rd32(device.info.arena + static_cast<std::uint32_t>(y) * device.info.pitch +
@@ -1160,32 +1314,35 @@ void caseRenderTargetLifetime() {
 }
 
 // ---------------------------------------------------------------------------------------
-// ⑪ 陈旧 owner：EA 被复用后，宿主侧缓存的那个 owner **不许**打到新对象
-//   （REQ-01M6X4NFHCW1Y6YDJ4DYFA92PS）
+// ⑪ owner 的**寿命**与**陈旧代际**（REQ-01M6X4NFHCW1Y6YDJ4DYFA92PS；04C 修好后 ① 翻面）
 // ---------------------------------------------------------------------------------------
-// ⚠⚠ **本用例的 ① 是一条"已知偏离"，不是真机语义** —— 读断言之前先读这段：
-//   · 真机 D3D9（引擎的口径，A 方案）：`GetSurfaceLevel` 建的 surface **替父纹理持一份资源引用**
-//     ⇒ `Release(纹理)` 之后 surface 仍代表那张纹理，`SetRenderTarget(surface)` **应当成功**。
-//   · 本线（**有意的偏离**）：surface **不持有**父纹理（`com.h` 的 `owner` 说明、`shims/d3dx9_surface.h`）
-//     ⇒ guest 合法地把纹理 Release 到 0 之后，surface 缓存的 owner EA 已经死了 / 可以被复用，
-//     所以本线**只能拒绝**绑定（`D3DERR_INVALIDCALL`）。跟踪单：`REQ-01M6ZZZ6PEVSFB93C6VJPKC04C`
-//     （= 让 surface 持父纹理 / A 方案）。
-//   · ⇒ **修 04C（若按 04C 正文的候选 A：surface 持有父纹理）之后，① 这条断言会翻面**
-//     （同一时序应当**成功**、`color_arena` 指向该纹理的 arena）。
-//     ⛔ 那时不要"改断言换绿"：按 04C 的判据把 ① 的期望值改成 kOk，并把症状描述留在 04C 里。
+// ★ 本用例有两条方向**相反**的判据，`①` 正向、`②` 负向 —— 读断言之前先读这段：
+//   · **①（正向 / A 方案，`REQ-01M6ZZZ6PEVSFB93C6VJPKC04C` 已修）**：`GetSurfaceLevel` 建的 surface
+//     **替父纹理持一份引用**（`shims/d3dx9_surface.h` / `com.h` 的 `owns_owner`）⇒ guest 只放掉
+//     自己那份 `Release(纹理)` 之后，纹理**仍然活着**（对象 / `'TEX1'` 状态块 / arena 像素块都在）
+//     ⇒ `SetRenderTarget(surface)` **应当成功**，`color_arena` 就是该纹理的 arena。
+//     ⚠ 修 04C **之前**这里被拒成 `D3DERR_INVALIDCALL`（当时 surface 不持父纹理）；那条"已知偏离"
+//     已随 04C 消失，本段现在是**正向**判据 —— ⛔ 不要改回"必须失败"，也不要为了让它变绿去删断言。
+//   · **②（负向 / 防御纵深）**：guest **越过自己的引用计数**把 surface 那一份也放掉 ⇒ owner 死、
+//     EA 被下一个同尺寸纹理复用。这时 surface 缓存的 owner 已经指向**别人**：
+//     `SetRenderTarget(surface)` 必须继续拒成 `D3DERR_INVALIDCALL`（代际判据），解绑时流水线缓存的
+//     owner 也必须走 `releaseIf` 拒绝 ⇒ 新占有者一个引用都不被减、对象还在。
+//     ⛔ **这条不变量必须留着**：它防的是"静默把 RT 绑到别人的像素上 + 对别人
+//     `markTextureContentUnknown`"。合法时序下 owner 死不了（① 就是它在保命）⇒ ② 只能用越界释放造。
 //   · 可达性：本仓**未在游戏路径观测到**该顺序（需求单 repro 也这么记："游戏路径里没观测到陈旧 Release"）；
 //     本用例是用夹具按判据造出来的最小重现，**不**代表"游戏里必然发生"。
 // ★ 判据（每条都在破坏时红）：
-//   ① 同尺寸的新纹理 T2 会**同时**拿到 T1 的对象 EA **与** `'TEX1'` 状态块 EA（`kTxBytes` 是常量）
-//      ⇒ 旧判据 `userOf(owner) != tex_state` 在这一格**通过**（它认对象靠 "EA + guest 派生状态"）
-//      ⇒ 旧实现会**静默**把 RT 绑到 T2 的像素上；代际判据下必须是上面的 INVALIDCALL（已知偏离）。
-//   ② 拒绝之后 T2 一个引用都不多、像素块不写、流水线属性停在"后缓冲"；
-//   ③ 解绑时流水线缓存的 owner **走 `releaseIf`**：代际不符 ⇒ 拒绝，T2 的 refcount 不动、对象还在。
-//      ⚠ ③ 要造出"绑定中 owner 已死"的状态 ⇒ 只能让 guest **越过自己的引用计数**释放（越界），
-//      所以它是**防御纵深**，不是合法时序路径（合法路径见 ⑩⑥：绑定期的 addRef 让纹理活到解绑）。
-void caseStaleOwnerGeneration() {
-    // 用例名带 `known-deviation`：红的时候输出里就能看出"这条断言是本线的偏离，不是真机语义"。
-    lift_test::g_current_case = "d3d9p/stale-owner-generation-known-deviation";
+//   ① surface 持父纹理 ⇒ guest 只放自己那份之后 owner 仍活、arena 仍在、绑定成功且指向该 arena；
+//      再 Release surface ⇒ owner 才到 0、arena 才回收（成对释放；⛔ 不是"只 addRef 不 release"——
+//      那样 arena 与堆会停在"建完之后"，① 的清理段会红）。
+//   ② 越界释放之后，新纹理 T4 会**同时**拿到 owner 的对象 EA **与** `'TEX1'` 状态块 EA（`kTxBytes`
+//      是常量）⇒ 旧判据 `userOf(owner) != tex_state` 在这一格**通过**（它认对象靠 "EA + guest 派生状态"）
+//      ⇒ 陈旧 owner 必须被代际判据拒成 INVALIDCALL；拒绝之后 T4 一个引用都不多、流水线属性不动。
+//   ③ 解绑时流水线缓存的 owner **走 `releaseIf`**：代际不符 ⇒ 拒绝，T4 的 refcount 不动、对象还在。
+void caseOwnerLifetimeAndStaleGeneration() {
+    // ★ 用例名不再带 `known-deviation`：那条偏离（surface 不持父纹理）已随 04C 修掉，
+    //   现在是"①正向 + ②负向"两条真判据（见函数头）。
+    lift_test::g_current_case = "d3d9p/owner-lifetime-and-stale-generation";
     Rig r;
     LIFT_CHECK(r.up());
     if (r.f.device.object == 0) return;
@@ -1228,17 +1385,20 @@ void caseStaleOwnerGeneration() {
         LIFT_CHECK_EQ_U32(r.f.method(s->owner, kOffTextureGetSurfaceLevel, {0u, out}), 0u);
         s->surface = mem.rd32(out);
         LIFT_CHECK_NE_U32(s->surface, 0u);
-        // surface 记下的是"我代表谁"，而且**不持有**它（`GetSurfaceLevel` 有意不替纹理持引用）
+        // surface 记下的是"我代表谁"，**并且替它持一份引用**（A 方案 / `owns_owner`，04C）
         LIFT_CHECK_EQ_U32(com->ownerOf(s->surface), s->owner);
         LIFT_CHECK_EQ_U32(com->ownerGenerationOf(s->surface), s->owner_gen);
+        // ★ 前提：建 surface 时父纹理被 addRef 了一份（guest 1 + surface 1）—— 坏掉这里后面全红。
+        LIFT_CHECK_EQ_U32(com->refCount(s->owner), 2u);
         return s->dummy != 0 && s->surface != 0;
     };
-    // 放掉哑纹理 + 对 owner 做 `releases` 次 Release（1 = 合法；2 = **越界**，把绑定中的那份也放掉）。
-    // ⚠ 各次 Release 的返回值不看（第一次是 rc-1 的返回值、最后一次才是 0）：判据是"对象真的没了"。
-    auto retire = [&](const StaleOwnerSet& s, std::uint32_t releases) {
+    // 放掉哑纹理 + 对 owner 做 `releases` 次 Release。**合法** guest 只该放 1 次（自己那份）；
+    // 多出来的每一次都是**越界**（把 surface / 设备 RT 那些引用也放掉）⇒ 只有 ② 用得到。
+    // ★ ⛔ 这里**不**断言 owner 已死：① 要的正是"放掉 guest 那份之后 owner 还活着"（A 方案）。
+    // ⚠ 各次 Release 的返回值不看（第一次是 rc-1 的返回值、最后一次才是 0）：判据是对象还在不在。
+    auto releaseOwnerTimes = [&](const StaleOwnerSet& s, std::uint32_t releases) {
         LIFT_CHECK_EQ_U32(r.f.method(s.dummy, kOffRelease, {}), 0u);
         for (std::uint32_t i = 0; i < releases; ++i) r.f.method(s.owner, kOffRelease, {});
-        LIFT_CHECK(!com->find(s.owner));  // owner 真死了（EA 可被复用）
     };
     // 建一张同尺寸纹理，并**硬断言**它落在 owner 的那一格（对象 EA + `'TEX1'` 状态块 EA）
     auto reuseOwnerSlot = [&](const StaleOwnerSet& s) -> std::uint32_t {
@@ -1250,51 +1410,51 @@ void caseStaleOwnerGeneration() {
         return tex;
     };
 
-    // ---- ① **已知偏离**（不是真机语义；见上面那段 ⚠⚠）：owner 与哑纹理一起被 guest 放掉，
-    //   新纹理拿到同一个 EA；随后绑 S 必须被拒。真机（A 方案）这里**应当成功** ——
-    //   修 REQ-01M6ZZZ6PEVSFB93C6VJPKC04C 之后，本段的 INVALIDCALL 要按 04C 翻成 kOk。
+    // ---- ① **正向**（A 方案 / 04C）：guest 只放掉自己那份纹理引用 ⇒ surface 保着父纹理，
+    //   纹理与它的 arena 都还在 ⇒ 绑 S 必须**成功**、`color_arena` 指向该纹理自己的像素块。
+    //   ⚠ 修 04C 之前这里被拒成 INVALIDCALL（surface 不持父纹理）；现在它反过来证明"surface 真的持着"。
     StaleOwnerSet a;
     if (!prepare(&a)) return;
-    retire(a, /*releases=*/1);
-    const std::uint32_t tex2 = reuseOwnerSlot(a);
-    if (tex2 == 0) return;
-    const std::uint32_t tex2_gen = com->generationOf(tex2);
-    LIFT_CHECK_NE_U32(tex2_gen, a.owner_gen);  // 同一个 EA、不同代际
-    LIFT_CHECK(r.f.m.surfaces().find(a.owner_arena) != nullptr);  // 像素块已被 T2 接手
+    releaseOwnerTimes(a, /*releases=*/1);  // 合法：只放 guest 那份（surface 那份是 surface 自己在持）
+    // ★ 修前（04C 之前）这四条当场红：owner 已死、状态块 / arena 已回收、EA 被 T2 接手
+    LIFT_CHECK(com->find(a.owner));
+    LIFT_CHECK_EQ_U32(com->refCount(a.owner), 1u);  // 只剩 surface 那一份
+    LIFT_CHECK_EQ_U32(com->generationOf(a.owner), a.owner_gen);  // 同一个对象、代际没变
+    LIFT_CHECK(r.f.m.surfaces().find(a.owner_arena) != nullptr);  // 像素块没被回收 / 没被 T2 接手
 
-    // 绑 S：owner 的 EA 现在是 T2，但 surface 记住的代际是旧 owner 的 ⇒ 必须拒绝。
-    //   ⚠ 旧判据（`userOf(owner) != tex_state`）在这一格**会通过** ⇒ 静默把 RT 绑到 T2 的像素上，
-    //   还会对 T2 调 `markTextureContentUnknown`（内容版本降级）。
-    //   ⚠ 这里的 `kInvalidCall` 是**本线的已知偏离**（surface 不持父纹理）⇒ 修 04C（候选 A）后翻面；
-    //   ⛔ 别为了让它一直绿去改断言方向（见函数头那段）。
     LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {a.surface, 0u}),
-                      lift::d3d9::kInvalidCall);
-    LIFT_CHECK(com->find(tex2));
-    LIFT_CHECK_EQ_U32(com->refCount(tex2), 1u);  // ⛔ 绑被拒绝 ⇒ 没有 addRef 到 T2
-    LIFT_CHECK_EQ_U32(com->generationOf(tex2), tex2_gen);
-    lift::d3d9::PipelineInfo pi;
-    LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &pi, nullptr));
-    LIFT_CHECK_EQ_U32(pi.color_surface, 0u);  // 没绑上
-    LIFT_CHECK_EQ_U32(pi.color_arena, 0u);
-    LIFT_CHECK_EQ_U32(r.f.method(tex2, kOffRelease, {}), 0u);   // T2 可以正常用：释放自己
-    LIFT_CHECK(!com->find(tex2));
-    LIFT_CHECK_EQ_U32(r.f.method(a.surface, kOffRelease, {}), 0u);  // S 的 guest 引用
+                      lift::d3d9::kOk);
+    lift::d3d9::PipelineInfo piA;
+    LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &piA, nullptr));
+    LIFT_CHECK_EQ_U32(piA.color_surface, a.surface);
+    LIFT_CHECK_EQ_U32(piA.color_arena, a.owner_arena);  // ← 该纹理自己的像素块（不是别人的）
+    // 设备那份 RT 引用叠在 surface 那份上（`REQ-01M6X4N7C0PAF6XT7EAC172V85` 的语义引用）
+    LIFT_CHECK_EQ_U32(com->refCount(a.owner), 2u);
 
-    // ---- ② 防御纵深（**不是**合法时序）：绑定中 owner 被越界释放 ⇒ 解绑时 `releaseIf` 拒绝 ----
-    //   合法 guest 走不到这里：绑定期那份 addRef 让 owner 活到解绑（见 ⑩ ⑥）。
+    // 清理：解绑 ⇒ surface 的 guest 引用 ⇒ 纹理此刻才到 0（arena 随它回收）
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, 0u}), lift::d3d9::kOk);
+    LIFT_CHECK_EQ_U32(com->refCount(a.surface), 1u);  // 流水线那份已放，guest 那份还在
+    LIFT_CHECK_EQ_U32(r.f.method(a.surface, kOffRelease, {}), 0u);
+    LIFT_CHECK(!com->find(a.surface));
+    LIFT_CHECK(!com->find(a.owner));  // 纹理到 0 = surface 还了它那一份（A 方案的成对释放）
+    LIFT_CHECK(r.f.m.surfaces().find(a.owner_arena) == nullptr);
+
+    // ---- ② 防御纵深（**不是**合法时序）：绑定中 owner 被越界释放 ⇒ 陈旧 owner 不许绑、也不许解绑 ----
+    //   合法 guest 走不到这里：surface + 绑定期各持一份引用，owner 会在解绑时才到 0（见 ① 与 ⑩ ⑥）。
     StaleOwnerSet b;
     if (!prepare(&b)) return;
     LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {b.surface, 0u}), 0u);  // 这时代际匹配
-    // ⚠ `refCount == 2` 锁的是 `REQ-01M6X4N7C0PAF6XT7EAC172V85` **有意选择**的 guest 可见差异
-    //   （设备把 RT 引用算在纹理的公开 refcount 上）—— 不是引擎语义；那条单改了这里要跟着改。
-    LIFT_CHECK_EQ_U32(com->refCount(b.owner), 2u);  // guest 的 + 设备的（owner 语义引用）
-    retire(b, /*releases=*/2);  // 越界：连设备那份也放掉 ⇒ owner 死
+    // ⚠ `refCount == 3` 锁的是 **A 方案下**的三份引用：guest 的 + surface 的（04C）+ 设备的（RT 语义引用，
+    //   `REQ-01M6X4N7C0PAF6XT7EAC172V85` 有意选择的 guest 可见差异）—— 不是引擎语义。
+    LIFT_CHECK_EQ_U32(com->refCount(b.owner), 3u);
+    releaseOwnerTimes(b, /*releases=*/3);  // 越界：连 surface 与设备那两份也放掉
+    LIFT_CHECK(!com->find(b.owner));       // owner 真死了 ⇒ EA 可被复用（② 的前提）
     const std::uint32_t tex4 = reuseOwnerSlot(b);
     if (tex4 == 0) return;
     const std::uint32_t tex4_gen = com->generationOf(tex4);
     LIFT_CHECK_NE_U32(tex4_gen, b.owner_gen);
 
-    // 解绑 ⇒ 流水线释放它那两份引用：owner 代际不符 ⇒ **拒绝**；surface 照常释放
+    // ②-a 解绑 ⇒ 流水线释放它那两份引用：owner 代际不符 ⇒ **拒绝**；surface 照常释放
     LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, 0u}), 0u);
     LIFT_CHECK(com->find(tex4));                 // ⛔ 新占有者还在
     LIFT_CHECK_EQ_U32(com->refCount(tex4), 1u);  // ⛔ 一个引用都没被减（陈旧持有者打不到它）
@@ -1303,11 +1463,552 @@ void caseStaleOwnerGeneration() {
     LIFT_CHECK_EQ_U32(com->refCount(b.surface), 1u);  // surface 的那份引用正常放掉（guest 的那份还在）
     LIFT_CHECK(com->find(b.surface));
 
+    // ②-b 陈旧 owner **不许绑**：surface 缓存的 owner EA 现在归 T4（代际不符）⇒ 必须 INVALIDCALL，
+    //   且 T4 一个引用都不多、像素不被标记、流水线属性不动（⛔ 不许把 RT 静默绑到 T4 的像素上）。
+    //   ⚠ 这段是那条"短路 SetRenderTarget 的 owner 代际校验"变异条目的**唯一**判据。
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {b.surface, 0u}),
+                      lift::d3d9::kInvalidCall);
+    LIFT_CHECK(com->find(tex4));
+    LIFT_CHECK_EQ_U32(com->refCount(tex4), 1u);
+    LIFT_CHECK_EQ_U32(com->generationOf(tex4), tex4_gen);
+    lift::d3d9::PipelineInfo piB;
+    LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &piB, nullptr));
+    LIFT_CHECK_EQ_U32(piB.color_surface, 0u);  // 仍停在"后缓冲"（拒绝没有悄悄换 target）
+    LIFT_CHECK_EQ_U32(piB.color_arena, 0u);
+
     // 清理
     LIFT_CHECK_EQ_U32(r.f.method(tex4, kOffRelease, {}), 0u);
     LIFT_CHECK_EQ_U32(r.f.method(b.surface, kOffRelease, {}), 0u);
     LIFT_CHECK(!com->find(tex4));
     LIFT_CHECK(!com->find(b.surface));
+}
+
+// =======================================================================================
+// ⑫ 绑定槽的**身份**与**绑定引用**（`REQ-01M701NYF2B3YV1YFSZBMPQZ41` 段 2 的 ① 与 ③）
+// =======================================================================================
+// 两份判据分开写、各自会红：
+//   · ① **身份**：流槽 / 索引槽里存 (对象 EA, 绑定时代际)。同长度新缓冲会**同时**复用对象 EA 与
+//     `'VB09'`/`'IB09'` 状态块 EA（首次适配，确定性）⇒ 只验 magic 的旧口径"假匹配"、静默改用别人的
+//     顶点。判据（写死一条）：旧句柄的 Draw **被拒**（`D3DERR_INVALIDCALL`）且目标像素**一个都没变**；
+//     另有一行默认级别（warn）可见的告警（`pipeWarn`，`tests/check.h` 抓不到日志 ⇒ 断言落在行为上）。
+//   · ③ **绑定引用**：`SetStreamSource` / `SetIndices` 之后设备替 guest 持一份（与 `SetTexture` 同口径）
+//     ⇒ guest 放掉自己那份时 refCount 从 1 归 0（⛔ 不是 0）；解绑 ⇒ 设备那份还回去、`on_zero` 回收
+//     状态块 ⇒ guest 堆回到建缓冲之前的基线。
+// ★ 夹具前提（EA 复用）**硬断言**，不成立就红 —— ⛔ 不是删断言；若红了先按 `runtime/heap.cpp` 的
+//   分块 / `min_split` 重造夹具（同 `caseOwnerLifetimeAndStaleGeneration` 的口径）。
+void writeRhwTriangle(std::uint32_t vb, float ox, float oy, std::uint32_t color, Fixture& f) {
+    auto& mem = f.m.mem();
+    std::uint32_t base = 0;
+    LIFT_CHECK_EQ_U32(f.lockBuffer(vb, &base), 0u);
+    LIFT_CHECK_NE_U32(base, 0u);
+    if (base == 0) return;
+    const float pts[3][2] = {{ox, oy}, {ox + 10.0f, oy}, {ox, oy + 10.0f}};
+    for (int i = 0; i < 3; ++i) {
+        const std::uint32_t at = base + static_cast<std::uint32_t>(i) * 20u;
+        for (int k = 0; k < 2; ++k) {
+            std::uint32_t bits = 0;
+            std::memcpy(&bits, &pts[i][k], sizeof(bits));
+            mem.wr32(at + static_cast<std::uint32_t>(k) * 4u, bits);
+        }
+        mem.wr32(at + 8u, 0u);            // z = 0.0f
+        mem.wr32(at + 12u, 0x3F800000u);  // rhw = 1.0f
+        mem.wr32(at + 16u, color);        // D3DCOLOR
+    }
+    LIFT_CHECK_EQ_U32(f.unlockBuffer(vb), 0u);
+}
+
+void caseStaleStreamBinding() {
+    lift_test::g_current_case = "d3d9p/stale-stream-binding";
+    Rig r;
+    LIFT_CHECK(r.up());
+    if (r.f.device.object == 0) return;
+    lift::ComRegistry* com = r.f.m.cpu().com;
+    LIFT_CHECK(com != nullptr);
+    if (com == nullptr) return;
+
+    constexpr std::uint32_t kLen = 60u;  // 3 个 XYZRHW+DIFFUSE 顶点（20 B 一个）
+    const std::uint32_t red = 0xFFFF0000u;
+    const std::uint32_t blue = 0xFF0000FFu;
+
+    LIFT_CHECK_EQ_U32(r.f.clearTo(kClearColor), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsZEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsCullMode, lift::d3d9::kCullNone), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsAlphaBlendEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setFvf(kFvfXyzRhwDiffuse), 0u);
+
+    // ---- ①-A 顶点缓冲：绑 → 放自己那份 → 越界再放一次（对象死）→ 新缓冲拿回同一对 EA ----
+    std::uint32_t vb1 = 0;
+    std::uint32_t vb_dummy = 0;
+    LIFT_CHECK_EQ_U32(r.f.createVertexBuffer(kLen, kFvfXyzRhwDiffuse, &vb1), 0u);
+    LIFT_CHECK_NE_U32(vb1, 0u);
+    if (vb1 == 0) return;
+    writeRhwTriangle(vb1, 0.0f, 0.0f, red, r.f);
+    const std::uint32_t vb1_state = com->userOf(vb1);
+    const std::uint32_t vb1_gen = com->generationOf(vb1);
+    LIFT_CHECK_NE_U32(vb1_state, 0u);
+    LIFT_CHECK_NE_U32(vb1_gen, 0u);
+    // 哑缓冲（同长度）：两者都释放后空洞连成一片 ⇒ 新缓冲能把对象 / vtable / 状态块**逐个**搬回原址
+    LIFT_CHECK_EQ_U32(r.f.createVertexBuffer(kLen, kFvfXyzRhwDiffuse, &vb_dummy), 0u);
+    LIFT_CHECK_NE_U32(vb_dummy, 0u);
+
+    LIFT_CHECK_EQ_U32(r.f.setStreamSource(0u, vb1, 0u, 20u), 0u);
+    // ③（同一时序的前半段）：设备持绑定引用 ⇒ guest 放掉自己那份之后 refCount = 1
+    LIFT_CHECK_EQ_U32(r.f.method(vb1, kOffRelease, {}), 1u);
+    LIFT_CHECK(com->find(vb1));
+    // 越界再放一次：把设备那份也抵掉 ⇒ 对象死、`'VB09'` 状态块回收。**只有越界释放**能造出陈旧句柄
+    //   （合法时序里 ③ 的引用钉着它）—— 这一格就是"引用记账不是身份校验"的那条缝。
+    //   ★ 判活再调（同 `caseVertexDeclaration` 的说明）：③ 被破坏时对象在上一条就归 0 了，
+    //     再按 `this` 调方法会读已释放对象的 vtable 并打到未提交页 —— 那会把其余断言一起吞掉。
+    if (com->find(vb1)) LIFT_CHECK_EQ_U32(r.f.method(vb1, kOffRelease, {}), 0u);
+    LIFT_CHECK(!com->find(vb1));
+    LIFT_CHECK_EQ_U32(r.f.method(vb_dummy, kOffRelease, {}), 0u);
+
+    std::uint32_t vb2 = 0;
+    LIFT_CHECK_EQ_U32(r.f.createVertexBuffer(kLen, kFvfXyzRhwDiffuse, &vb2), 0u);
+    LIFT_CHECK_EQ_U32(vb2, vb1);                     // 前提 1：对象 EA 复用
+    LIFT_CHECK_EQ_U32(com->userOf(vb2), vb1_state);   // 前提 2：状态块 EA 也复用 ⇒ magic 校验必过
+    LIFT_CHECK_NE_U32(com->generationOf(vb2), vb1_gen);
+    writeRhwTriangle(vb2, 40.0f, 40.0f, blue, r.f);
+
+    LIFT_CHECK_EQ_U32(r.f.beginScene(), 0u);
+    // ★ 判据：Draw **被拒**（⛔ 不是"画了别人的顶点"）
+    LIFT_CHECK_EQ_U32(r.f.drawPrimitive(lift::d3d9::kPtTriangleList, 0u, 1u), lift::d3d9::kInvalidCall);
+    LIFT_CHECK_EQ_U32(r.f.endScene(), 0u);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(41, 41), kClearPixel);  // 蓝三角形**没有**被画（修前这里 = 蓝）
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(1, 1), kClearPixel);    // 旧位置也没画出任何东西
+
+    // ---- ①-B 索引缓冲：同一判据的第二个身份槽（`DrawIndexedPrimitive`）----
+    std::uint32_t vb3 = 0;
+    std::uint32_t ib1 = 0;
+    std::uint32_t ib_dummy = 0;
+    LIFT_CHECK_EQ_U32(r.f.createVertexBuffer(kLen, kFvfXyzRhwDiffuse, &vb3), 0u);
+    if (vb3 == 0) return;
+    writeRhwTriangle(vb3, 0.0f, 0.0f, red, r.f);
+    LIFT_CHECK_EQ_U32(r.f.setStreamSource(0u, vb3, 0u, 20u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.createIndexBuffer(12u, 101u, &ib1), 0u);
+    LIFT_CHECK_NE_U32(ib1, 0u);
+    if (ib1 == 0) return;
+    const std::uint32_t ib1_state = com->userOf(ib1);
+    const std::uint32_t ib1_gen = com->generationOf(ib1);
+    LIFT_CHECK_NE_U32(ib1_state, 0u);
+    LIFT_CHECK_NE_U32(ib1_gen, 0u);
+    LIFT_CHECK_EQ_U32(r.f.createIndexBuffer(12u, 101u, &ib_dummy), 0u);
+    LIFT_CHECK_NE_U32(ib_dummy, 0u);
+    {
+        std::uint32_t ibase = 0;
+        LIFT_CHECK_EQ_U32(r.f.lockBuffer(ib1, &ibase), 0u);
+        LIFT_CHECK_NE_U32(ibase, 0u);
+        if (ibase != 0) {
+            for (int i = 0; i < 3; ++i) r.f.m.mem().wr16(ibase + static_cast<std::uint32_t>(i) * 2u, static_cast<std::uint16_t>(i));
+        }
+        LIFT_CHECK_EQ_U32(r.f.unlockBuffer(ib1), 0u);
+    }
+    LIFT_CHECK_EQ_U32(r.f.setIndices(ib1), 0u);
+    LIFT_CHECK_EQ_U32(r.f.method(ib1, kOffRelease, {}), 1u);  // ③：设备持绑定引用
+    if (com->find(ib1)) LIFT_CHECK_EQ_U32(r.f.method(ib1, kOffRelease, {}), 0u);  // 越界：对象死
+    LIFT_CHECK(!com->find(ib1));
+    LIFT_CHECK_EQ_U32(r.f.method(ib_dummy, kOffRelease, {}), 0u);
+    std::uint32_t ib2 = 0;
+    LIFT_CHECK_EQ_U32(r.f.createIndexBuffer(12u, 101u, &ib2), 0u);
+    LIFT_CHECK_EQ_U32(ib2, ib1);                    // 前提 1：对象 EA 复用
+    LIFT_CHECK_EQ_U32(com->userOf(ib2), ib1_state);  // 前提 2：`'IB09'` 状态块 EA 也复用
+    LIFT_CHECK_NE_U32(com->generationOf(ib2), ib1_gen);
+
+    LIFT_CHECK_EQ_U32(r.f.beginScene(), 0u);
+    LIFT_CHECK_EQ_U32(r.f.drawIndexed(lift::d3d9::kPtTriangleList, 0u, 0u, 3u, 0u, 1u),
+                      lift::d3d9::kInvalidCall);
+    LIFT_CHECK_EQ_U32(r.f.endScene(), 0u);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(1, 1), kClearPixel);  // 修前：用 IB2 的索引画 VB3 的红三角
+}
+
+// =======================================================================================
+// ⑬ Draw 读纹理槽的**身份校验**（`REQ-01M701NYF2B3YV1YFSZBMPQZ41` 段 4）
+// =======================================================================================
+// 缺陷形态：`prepareContext` 只按槽里的 EA 解 `'TEX1'`（只验 magic）。guest 堆复用 EA ⇒
+// 纹理 A 被越界释放、同尺寸的纹理 B 拿回**同一个对象 EA + 同一个 `'TEX1'` 状态块 EA** ⇒
+// 旧槽在 Draw 时"看起来完全合法"，于是**静默采样 B 的像素**（A 的那笔绘制变成 B 的内容）。
+// 判据（写死一条）：同一个槽（没重新 SetTexture）的第二次 Draw 被拒（`D3DERR_INVALIDCALL`）
+// 且目标像素**还是清屏色**；`draws` 不增（这次绘制被整个跳过，⛔ 不是"画了一半"）。
+// 告警走 `pipeWarn`（`tests/check.h` 抓不到日志 ⇒ 断言落在行为上）。
+// ★ 夹具前提（EA 复用）**硬断言**，不成立就红 —— ⛔ 不是删断言；若红了先按 `runtime/heap.cpp`
+//   的分块 / `min_split` 重造夹具（同 `caseStaleStreamBinding` 的口径）。
+void caseStaleTextureBindingInDraw() {
+    lift_test::g_current_case = "d3d9p/stale-texture-binding-in-draw";
+    Rig r;
+    LIFT_CHECK(r.up());
+    if (r.f.device.object == 0) return;
+    lift::ComRegistry* com = r.f.m.cpu().com;
+    LIFT_CHECK(com != nullptr);
+    if (com == nullptr) return;
+
+    // ---- 状态：纯纹理四边形（POINT + CLAMP），无混合 / 无 Z ----
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsZEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsCullMode, lift::d3d9::kCullNone), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsAlphaBlendEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMagFilter, lift::d3d9::kTexfPoint), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMinFilter, lift::d3d9::kTexfPoint), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampAddressU, lift::d3d9::kAddressClamp), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampAddressV, lift::d3d9::kAddressClamp), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setFvf(kFvfXyzRhwDiffuseTex1), 0u);
+
+    // 2×2 纹理整块填成同一个 texel ⇒ 四边形内每个像素都能读出"这是哪张纹理"
+    auto fill2x2 = [&](std::uint32_t tex, std::uint32_t argb) {
+        const std::uint32_t locked = r.f.placeBytes(std::vector<std::uint8_t>(8u, 0u));
+        LIFT_CHECK_EQ_U32(r.f.method(tex, kOffTextureLockRect, {0u, locked, 0u, 0u}), 0u);
+        const std::uint32_t pitch = r.f.m.mem().rd32(locked + 0u);
+        const std::uint32_t bits = r.f.m.mem().rd32(locked + 4u);
+        LIFT_CHECK_NE_U32(bits, 0u);
+        if (bits == 0) return;
+        for (int y = 0; y < 2; ++y) {
+            for (int x = 0; x < 2; ++x) {
+                r.f.m.mem().wr32(bits + static_cast<std::uint32_t>(y) * pitch +
+                                     static_cast<std::uint32_t>(x) * 4u,
+                                 argb);
+            }
+        }
+        LIFT_CHECK_EQ_U32(r.f.method(tex, kOffTextureUnlockRect, {0u}), 0u);
+    };
+
+    constexpr std::uint32_t kTexelA = 0xFFFF0000u;  // A：红
+    constexpr std::uint32_t kTexelB = 0xFF0000FFu;  // B：蓝
+
+    // ---- 夹具：A → 哑纹理（两者一起释放后空洞连成一片 ⇒ B 能把三块**逐个**搬回 A 的地址）----
+    std::uint32_t tex_a = 0;
+    std::uint32_t tex_dummy = 0;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, 2u, 2u, lift::d3d9::kFmtA8R8G8B8, &tex_a), 0u);
+    LIFT_CHECK_NE_U32(tex_a, 0u);
+    if (tex_a == 0) return;
+    lift::d3d9::TextureInfo ta;
+    LIFT_CHECK(lift::d3d9::textureInfo(r.f.m.cpu(), tex_a, &ta, nullptr));
+    const std::uint32_t a_state = ta.state;
+    const std::uint32_t a_gen = com->generationOf(tex_a);
+    LIFT_CHECK_NE_U32(a_state, 0u);
+    LIFT_CHECK_NE_U32(a_gen, 0u);
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, 2u, 2u, lift::d3d9::kFmtA8R8G8B8, &tex_dummy), 0u);
+    LIFT_CHECK_NE_U32(tex_dummy, 0u);
+    fill2x2(tex_a, kTexelA);
+
+    // ---- ① 正向：A 绑定 + Draw ⇒ 四边形是 A 的红色（证明这个槽真的参与采样）----
+    LIFT_CHECK_EQ_U32(r.f.setTexture(0u, tex_a), 0u);
+    LIFT_CHECK_EQ_U32(r.f.clearTo(kClearColor), 0u);
+    const std::vector<Fixture::TexVertex> quad = {
+        {0.0f, 0.0f, 0.0f, 1.0f, 0xFFFFFFFFu, 0.0f, 0.0f},
+        {8.0f, 0.0f, 0.0f, 1.0f, 0xFFFFFFFFu, 1.0f, 0.0f},
+        {0.0f, 8.0f, 0.0f, 1.0f, 0xFFFFFFFFu, 0.0f, 1.0f},
+        {8.0f, 0.0f, 0.0f, 1.0f, 0xFFFFFFFFu, 1.0f, 0.0f},
+        {8.0f, 8.0f, 0.0f, 1.0f, 0xFFFFFFFFu, 1.0f, 1.0f},
+        {0.0f, 8.0f, 0.0f, 1.0f, 0xFFFFFFFFu, 0.0f, 1.0f},
+    };
+    const std::uint32_t quad_ea = r.f.placeTexVertices(quad);
+    LIFT_CHECK_EQ_U32(r.f.beginScene(), 0u);
+    LIFT_CHECK_EQ_U32(r.f.drawUp(lift::d3d9::kPtTriangleList, 2u, quad_ea, 28u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.endScene(), 0u);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(0, 0), 0x00FF0000u);  // 后缓冲 X8R8G8B8 ⇒ alpha 丢掉
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(7, 7), 0x00FF0000u);
+    lift::d3d9::PipelineInfo info;
+    LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &info, nullptr));
+    LIFT_CHECK_EQ_U32(info.draws, 1u);
+
+    // ---- 越界释放 A（guest 那份 + 设备替绑定持的那份）----
+    //   ★ 合法 guest 只放 1 次；第二次是**越界**（把设备那份也抵掉）⇒ 对象死、`'TEX1'` 与像素块回收。
+    //     只有越界释放能造出"槽里是陈旧 EA"（合法时序里绑定引用钉着它 —— 见 `d3d9p/binding-lifetime`）。
+    //   ★ 判活再调（同 `caseStaleStreamBinding` 的说明）：绑定引用那条被破坏时对象在上一条就归 0 了，
+    //     再按 this 调方法会读已释放对象的 vtable 并打到未提交页 —— 那会把其余断言一起吞掉。
+    LIFT_CHECK_EQ_U32(r.f.method(tex_a, kOffRelease, {}), 1u);  // 设备那份还在
+    if (com->find(tex_a)) LIFT_CHECK_EQ_U32(r.f.method(tex_a, kOffRelease, {}), 0u);  // 越界：对象死
+    LIFT_CHECK(!com->find(tex_a));
+    LIFT_CHECK_EQ_U32(r.f.method(tex_dummy, kOffRelease, {}), 0u);
+
+    // ---- ② B 拿回同一对 EA（前提硬断言）----
+    std::uint32_t tex_b = 0;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, 2u, 2u, lift::d3d9::kFmtA8R8G8B8, &tex_b), 0u);
+    LIFT_CHECK_NE_U32(tex_b, 0u);
+    if (tex_b == 0) return;
+    LIFT_CHECK_EQ_U32(tex_b, tex_a);                     // 前提 1：对象 EA 复用
+    LIFT_CHECK_EQ_U32(com->userOf(tex_b), a_state);       // 前提 2：`'TEX1'` 状态块 EA 也复用 ⇒ magic 校验必过
+    LIFT_CHECK_NE_U32(com->generationOf(tex_b), a_gen);   // 前提 3：身份换了
+    fill2x2(tex_b, kTexelB);
+
+    // ---- ③ 同一个槽（**没有**重新 SetTexture）再 Draw ⇒ 必须跳过，⛔ 不许采 B 的蓝色 ----
+    LIFT_CHECK_EQ_U32(r.f.clearTo(kClearColor), 0u);
+    LIFT_CHECK_EQ_U32(r.f.beginScene(), 0u);
+    LIFT_CHECK_EQ_U32(r.f.drawUp(lift::d3d9::kPtTriangleList, 2u, quad_ea, 28u), lift::d3d9::kInvalidCall);
+    LIFT_CHECK_EQ_U32(r.f.endScene(), 0u);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(0, 0), kClearPixel);  // 修前：B 的蓝 0x000000FF
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(7, 7), kClearPixel);
+    LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &info, nullptr));
+    LIFT_CHECK_EQ_U32(info.draws, 1u);  // 这一次绘制**没有被执行**（快照 / 像素都没进光栅）
+
+    // 清理：放掉 B 自己那份（到 0 ⇒ 像素块 / 状态块回收）
+    LIFT_CHECK_EQ_U32(r.f.method(tex_b, kOffRelease, {}), 0u);
+    LIFT_CHECK(!com->find(tex_b));
+}
+
+void caseBindingLifetime() {
+    lift_test::g_current_case = "d3d9p/binding-lifetime";
+    Rig r;
+    LIFT_CHECK(r.up());
+    if (r.f.device.object == 0) return;
+    lift::ComRegistry* com = r.f.m.cpu().com;
+    LIFT_CHECK(com != nullptr);
+    if (com == nullptr) return;
+
+    // ---- ③-A 顶点缓冲：SetStreamSource 持一份；解绑后才到 0（堆回基线）----
+    const std::uint32_t heap_before = r.f.m.heap().bytesInUse();
+    std::uint32_t vb = 0;
+    LIFT_CHECK_EQ_U32(r.f.createVertexBuffer(60u, kFvfXyzRhwDiffuse, &vb), 0u);
+    LIFT_CHECK_NE_U32(vb, 0u);
+    if (vb == 0) return;
+    const std::uint32_t vb_state = com->userOf(vb);
+    LIFT_CHECK_NE_U32(vb_state, 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(vb), 1u);  // 只有 guest 那份
+    LIFT_CHECK_EQ_U32(r.f.setStreamSource(0u, vb, 0u, 20u), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(vb), 2u);  // + 设备绑定那份
+    // ★ 判据：guest 放掉自己那份 ⇒ **不是 0**（修前 = 0，对象与 `'VB09'` 状态块当场没）
+    LIFT_CHECK_EQ_U32(r.f.method(vb, kOffRelease, {}), 1u);
+    LIFT_CHECK(com->find(vb));
+    LIFT_CHECK_EQ_U32(com->userOf(vb), vb_state);
+    // ★ 这里**不再** Release 一次：此刻只剩设备那一份，再 Release 就是越界（③ 的判据正是
+    //   "合法时序不需要第二次 Release"）。设备那份由下面的解绑放掉。
+    LIFT_CHECK_EQ_U32(r.f.setStreamSource(0u, 0u, 0u, 0u), 0u);  // 解绑
+    LIFT_CHECK(!com->find(vb));                                  // 设备那份还回去 ⇒ on_zero 回收
+    LIFT_CHECK_EQ_U32(r.f.m.heap().bytesInUse(), heap_before);    // 堆回到建缓冲之前的基线
+
+    // ---- ③-B 索引缓冲：同形 ----
+    std::uint32_t ib = 0;
+    LIFT_CHECK_EQ_U32(r.f.createIndexBuffer(12u, 101u, &ib), 0u);
+    LIFT_CHECK_NE_U32(ib, 0u);
+    if (ib == 0) return;
+    LIFT_CHECK_EQ_U32(com->refCount(ib), 1u);
+    LIFT_CHECK_EQ_U32(r.f.setIndices(ib), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(ib), 2u);
+    LIFT_CHECK_EQ_U32(r.f.method(ib, kOffRelease, {}), 1u);  // 修前 = 0
+    LIFT_CHECK(com->find(ib));
+    LIFT_CHECK_EQ_U32(r.f.setIndices(0u), 0u);  // 解绑
+    LIFT_CHECK(!com->find(ib));
+    LIFT_CHECK_EQ_U32(r.f.m.heap().bytesInUse(), heap_before);
+
+    // ---- ③-D 同一 EA 的**新顶点缓冲**再 `SetStreamSource`（`REQ-01M701NYF2B3YV1YFSZBMPQZ41` 段 3 的 ③）----
+    //   ★ 槽里存 (EA, 代际)。同 EA 不同代际 = 复用 EA 的**新对象** ⇒ 必须 addRef 新的、旧绑定按
+    //     (EA, 旧代际) 判还（`releaseIf` 会拒绝 ⇒ 只出声）。旧判据只比 EA ⇒ "同 EA"被当成
+    //     "重复 Set 同一个" ⇒ 新缓冲**没有**绑定引用，guest 一放就归 0（对象 + `'VB09'` 当场没）。
+    //   ★ 修前：`refCount(vbd2)` 期望 2 得 1、`find(vbd2)` 假、堆基线不符。
+    std::uint32_t vbd1 = 0;
+    std::uint32_t vbd_dummy = 0;
+    LIFT_CHECK_EQ_U32(r.f.createVertexBuffer(60u, kFvfXyzRhwDiffuse, &vbd1), 0u);
+    if (vbd1 == 0) return;
+    const std::uint32_t vbd1_state = com->userOf(vbd1);
+    const std::uint32_t vbd1_gen = com->generationOf(vbd1);
+    LIFT_CHECK_NE_U32(vbd1_state, 0u);
+    LIFT_CHECK_NE_U32(vbd1_gen, 0u);
+    LIFT_CHECK_EQ_U32(r.f.createVertexBuffer(60u, kFvfXyzRhwDiffuse, &vbd_dummy), 0u);
+    if (vbd_dummy == 0) return;
+    writeRhwTriangle(vbd1, 0.0f, 0.0f, 0xFFFF0000u, r.f);
+    LIFT_CHECK_EQ_U32(r.f.setStreamSource(0u, vbd1, 0u, 20u), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(vbd1), 2u);
+    LIFT_CHECK_EQ_U32(r.f.method(vbd1, kOffRelease, {}), 1u);
+    if (com->find(vbd1)) LIFT_CHECK_EQ_U32(r.f.method(vbd1, kOffRelease, {}), 0u);  // 越界：对象死
+    LIFT_CHECK(!com->find(vbd1));
+    LIFT_CHECK_EQ_U32(r.f.method(vbd_dummy, kOffRelease, {}), 0u);
+
+    std::uint32_t vbd2 = 0;
+    LIFT_CHECK_EQ_U32(r.f.createVertexBuffer(60u, kFvfXyzRhwDiffuse, &vbd2), 0u);
+    LIFT_CHECK_EQ_U32(vbd2, vbd1);                      // 前提 1：对象 EA 复用
+    LIFT_CHECK_EQ_U32(com->userOf(vbd2), vbd1_state);    // 前提 2：`'VB09'` 状态块 EA 也复用
+    LIFT_CHECK_NE_U32(com->generationOf(vbd2), vbd1_gen);  // 前提 3：身份换了
+    LIFT_CHECK_EQ_U32(r.f.setStreamSource(0u, vbd2, 0u, 20u), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(vbd2), 2u);        // ← 修前 = 1（被当成"重复 Set 同一个"）
+    LIFT_CHECK_EQ_U32(r.f.method(vbd2, kOffRelease, {}), 1u);  // guest 放掉自己那份
+    LIFT_CHECK(com->find(vbd2));                               // ← 修前：对象当场归 0
+    LIFT_CHECK_EQ_U32(r.f.setStreamSource(0u, 0u, 0u, 0u), 0u);  // 解绑 ⇒ 设备那份还回
+    LIFT_CHECK(!com->find(vbd2));
+    LIFT_CHECK_EQ_U32(r.f.m.heap().bytesInUse(), heap_before);
+
+    // ---- ③-E 索引缓冲：同形判据（`SetIndices` 的槽）----
+    std::uint32_t ibd1 = 0;
+    std::uint32_t ibd_dummy = 0;
+    LIFT_CHECK_EQ_U32(r.f.createIndexBuffer(12u, 101u, &ibd1), 0u);
+    if (ibd1 == 0) return;
+    const std::uint32_t ibd1_state = com->userOf(ibd1);
+    const std::uint32_t ibd1_gen = com->generationOf(ibd1);
+    LIFT_CHECK_NE_U32(ibd1_state, 0u);
+    LIFT_CHECK_NE_U32(ibd1_gen, 0u);
+    LIFT_CHECK_EQ_U32(r.f.createIndexBuffer(12u, 101u, &ibd_dummy), 0u);
+    if (ibd_dummy == 0) return;
+    LIFT_CHECK_EQ_U32(r.f.setIndices(ibd1), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(ibd1), 2u);
+    LIFT_CHECK_EQ_U32(r.f.method(ibd1, kOffRelease, {}), 1u);
+    if (com->find(ibd1)) LIFT_CHECK_EQ_U32(r.f.method(ibd1, kOffRelease, {}), 0u);
+    LIFT_CHECK(!com->find(ibd1));
+    LIFT_CHECK_EQ_U32(r.f.method(ibd_dummy, kOffRelease, {}), 0u);
+
+    std::uint32_t ibd2 = 0;
+    LIFT_CHECK_EQ_U32(r.f.createIndexBuffer(12u, 101u, &ibd2), 0u);
+    LIFT_CHECK_EQ_U32(ibd2, ibd1);                       // 前提 1：对象 EA 复用
+    LIFT_CHECK_EQ_U32(com->userOf(ibd2), ibd1_state);     // 前提 2：`'IB09'` 状态块 EA 也复用
+    LIFT_CHECK_NE_U32(com->generationOf(ibd2), ibd1_gen);  // 前提 3：身份换了
+    LIFT_CHECK_EQ_U32(r.f.setIndices(ibd2), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(ibd2), 2u);          // ← 修前 = 1
+    LIFT_CHECK_EQ_U32(r.f.method(ibd2, kOffRelease, {}), 1u);
+    LIFT_CHECK(com->find(ibd2));                          // ← 修前：对象当场归 0
+    LIFT_CHECK_EQ_U32(r.f.setIndices(0u), 0u);            // 解绑 ⇒ 设备那份还回
+    LIFT_CHECK(!com->find(ibd2));
+    LIFT_CHECK_EQ_U32(r.f.m.heap().bytesInUse(), heap_before);
+
+    // ---- ③-F 设备销毁：设备替 guest 持的那份也必须成对还回去（★ 放最后：它会销毁设备）----
+    //   ★ 判据：销毁之后缓冲**还在**（只剩 guest 那份，refCount = 1）—— 若流水线把自己的绑定引用
+    //     也当成"guest 的"减掉，这里会看到对象已经没了；若**不**还，缓冲就永久钉在对象表里。
+    std::uint32_t vb2 = 0;
+    std::uint32_t ib2 = 0;
+    LIFT_CHECK_EQ_U32(r.f.createVertexBuffer(60u, kFvfXyzRhwDiffuse, &vb2), 0u);
+    LIFT_CHECK_EQ_U32(r.f.createIndexBuffer(12u, 101u, &ib2), 0u);
+    if (vb2 == 0 || ib2 == 0) return;
+    LIFT_CHECK_EQ_U32(r.f.setStreamSource(0u, vb2, 0u, 20u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setIndices(ib2), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(vb2), 2u);
+    LIFT_CHECK_EQ_U32(com->refCount(ib2), 2u);
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffRelease, {}), 0u);  // 设备到 0 ⇒ destroyForDevice
+    LIFT_CHECK(com->find(vb2));
+    LIFT_CHECK(com->find(ib2));
+    LIFT_CHECK_EQ_U32(com->refCount(vb2), 1u);  // 设备那份已还
+    LIFT_CHECK_EQ_U32(com->refCount(ib2), 1u);
+    LIFT_CHECK_EQ_U32(r.f.method(vb2, kOffRelease, {}), 0u);
+    LIFT_CHECK_EQ_U32(r.f.method(ib2, kOffRelease, {}), 0u);
+    LIFT_CHECK(!com->find(vb2));
+    LIFT_CHECK(!com->find(ib2));
+}
+
+// =======================================================================================
+// ⑭ `pipeWarn` 的配额 key = (调用点, 类别) + 每类拒绝次数进运行摘要
+//    （`REQ-01M70SHFT6RZA7RRY1R051Z2PB` #2）
+// =======================================================================================
+// 缺陷形态：配额 key 只有**调用点名** ⇒ 同一个 `DrawIndexedPrimitive` 上"顶点流陈旧"每帧刷屏会把
+//   "纹理陈旧"的可见配额吃光（第 5 次起纹理那条只打 debug），且拒绝次数**不进** `dumpRunSummary`
+//   ⇒ 默认跑法里那条信号既看不见也数不到。
+// 判据（红了意味着什么）：
+//   ① 两类各造 6 次拒绝（**同一个调用点** `DrawIndexedPrimitive`），默认级别（warn）下 stderr 里
+//      `[warn] [d3d9] DrawIndexedPrimitive:` ≥ 10 行（每类 4 条全量 + 1 条"打满"行；共用桶时只有 5 行）；
+//   ② 运行摘要的 `pipe-warn` 行里**两类计数都在**（各 6），且 index / other 的增量为 0；
+//   ③ 两类各自的告警文本都出现过（证明不是一类把另一类顶掉）。
+// ★ 变异（key 退回只用调用点名）⇒ ① 的 10 行降到 5 行 ⇒ 红。
+// ★ 触发路径都是**真 API**（SetStreamSource / SetIndices / SetTexture / DrawIndexedPrimitive）；
+//   计数与限流桶同一份（进程级 ⇒ 桶的选择要避开更早用例用过的那个）。
+// =======================================================================================
+void casePipeWarnCategoriesAndSummary() {
+    lift_test::g_current_case = "d3d9p/pipe-warn-categories";
+    Rig r;
+    LIFT_CHECK(r.up());
+    if (r.f.device.object == 0) return;
+    lift::ComRegistry* com = r.f.m.cpu().com;
+    LIFT_CHECK(com != nullptr);
+    if (com == nullptr) return;
+
+    // 默认级别；下面的断言就是"默认跑法看得见 / 数得到"
+    lift::logSetLevel("warn");
+    LIFT_CHECK(lift::logConfig().level == lift::LogLevel::Warn);
+
+    const lift::d3d9::PipeWarnCounts before = lift::d3d9::pipeWarnCounts();
+    auto delta = [&before](lift::d3d9::PipeWarnCategory cat) -> long long {
+        return static_cast<long long>(lift::d3d9::pipeWarnCounts().of(cat) -
+                                      before.of(cat));
+    };
+
+    // 状态：无混合 / 无 Z，FVF = XYZRHW + DIFFUSE + TEX1（28 B/顶点）
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsZEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsCullMode, lift::d3d9::kCullNone), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsAlphaBlendEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setFvf(kFvfXyzRhwDiffuseTex1), 0u);
+
+    std::uint32_t vb = 0;
+    LIFT_CHECK_EQ_U32(r.f.createVertexBuffer(3u * 28u, kFvfXyzRhwDiffuseTex1, &vb), 0u);
+    LIFT_CHECK_NE_U32(vb, 0u);
+    if (vb == 0) return;
+    LIFT_CHECK_EQ_U32(r.f.setStreamSource(0u, vb, 0u, 28u), 0u);
+    // 索引缓冲（3 个 INDEX16）—— 两类拒绝都走**同一个调用点** `DrawIndexedPrimitive`：
+    //   ★ 为什么不用 `DrawPrimitive`：本进程里更早的用例已经用过那个桶（配额是进程级的），
+    //     这里要的是"两类各自从 0 开始"的干净桶；`DrawIndexedPrimitive` 在本文件里只被
+    //     `d3d9p/stale-stream-binding` 用过一次，且那次是**索引**类（第三个桶），不污染这两个。
+    std::uint32_t ib = 0;
+    LIFT_CHECK_EQ_U32(r.f.createIndexBuffer(12u, 101u, &ib), 0u);
+    LIFT_CHECK_NE_U32(ib, 0u);
+    if (ib == 0) return;
+    {
+        std::uint32_t ibase = 0;
+        LIFT_CHECK_EQ_U32(r.f.lockBuffer(ib, &ibase), 0u);
+        LIFT_CHECK_NE_U32(ibase, 0u);
+        if (ibase != 0)
+            for (int i = 0; i < 3; ++i)
+                r.f.m.mem().wr16(ibase + static_cast<std::uint32_t>(i) * 2u, static_cast<std::uint16_t>(i));
+        LIFT_CHECK_EQ_U32(r.f.unlockBuffer(ib), 0u);
+    }
+    LIFT_CHECK_EQ_U32(r.f.setIndices(ib), 0u);
+
+    std::uint32_t tex_a = 0;
+    std::uint32_t tex_dummy = 0;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, 2u, 2u, lift::d3d9::kFmtA8R8G8B8, &tex_a), 0u);
+    LIFT_CHECK_NE_U32(tex_a, 0u);
+    if (tex_a == 0) return;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, 2u, 2u, lift::d3d9::kFmtA8R8G8B8, &tex_dummy), 0u);
+    LIFT_CHECK_NE_U32(tex_dummy, 0u);
+    LIFT_CHECK_EQ_U32(r.f.setTexture(0u, tex_a), 0u);
+    // 越界释放 A（guest 那份 + 设备替绑定持的那份）⇒ 对象死；同尺寸 B 拿回同一对象 EA
+    LIFT_CHECK_EQ_U32(r.f.method(tex_a, kOffRelease, {}), 1u);  // 设备那份还在
+    if (com->find(tex_a)) LIFT_CHECK_EQ_U32(r.f.method(tex_a, kOffRelease, {}), 0u);
+    LIFT_CHECK(!com->find(tex_a));
+    LIFT_CHECK_EQ_U32(r.f.method(tex_dummy, kOffRelease, {}), 0u);
+    std::uint32_t tex_b = 0;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, 2u, 2u, lift::d3d9::kFmtA8R8G8B8, &tex_b), 0u);
+    LIFT_CHECK_NE_U32(tex_b, 0u);
+    if (tex_b == 0) return;
+    LIFT_CHECK_EQ_U32(tex_b, tex_a);  // 前提：对象 EA 复用
+
+    StderrTee cap;
+    LIFT_CHECK(cap.begin());
+
+    // ---- 类别 ①：纹理陈旧（同一个调用点 DrawIndexedPrimitive，6 次）----
+    LIFT_CHECK_EQ_U32(r.f.beginScene(), 0u);
+    for (int i = 0; i < 6; ++i)
+        LIFT_CHECK_EQ_U32(r.f.drawIndexed(lift::d3d9::kPtTriangleList, 0u, 0u, 3u, 0u, 1u),
+                          lift::d3d9::kInvalidCall);
+    LIFT_CHECK_EQ_U32(r.f.endScene(), 0u);
+
+    // ---- 类别 ②：顶点流陈旧（**同一个**调用点，6 次）----
+    //   先越界放掉顶点缓冲（guest 那份 + 设备绑定那份）⇒ 槽里的 (EA, 代际) 已不是对象
+    LIFT_CHECK_EQ_U32(r.f.method(vb, kOffRelease, {}), 1u);
+    if (com->find(vb)) LIFT_CHECK_EQ_U32(r.f.method(vb, kOffRelease, {}), 0u);
+    LIFT_CHECK(!com->find(vb));
+    LIFT_CHECK_EQ_U32(r.f.beginScene(), 0u);
+    for (int i = 0; i < 6; ++i)
+        LIFT_CHECK_EQ_U32(r.f.drawIndexed(lift::d3d9::kPtTriangleList, 0u, 0u, 3u, 0u, 1u),
+                          lift::d3d9::kInvalidCall);
+    LIFT_CHECK_EQ_U32(r.f.endScene(), 0u);
+
+    const std::string log = cap.finish();
+
+    // ① 默认级别下，两类都**超过**每桶 4 条的配额后仍各留一行（第 5 条是"打满"汇总行）
+    LIFT_CHECK(contains(log, "纹理级 0 的槽里"));
+    LIFT_CHECK(contains(log, "已不是绑定时那张纹理"));
+    LIFT_CHECK(contains(log, "绑定身份不符：槽里的顶点缓冲"));
+    LIFT_CHECK(countOccurrences(log, "[warn] [d3d9] DrawIndexedPrimitive:") >= 10u);
+
+    // ② 每类拒绝次数都进了运行摘要（各 6；index / other 未被污染）
+    LIFT_CHECK_EQ_I64(delta(lift::d3d9::PipeWarnCategory::VertexStream), 6);
+    LIFT_CHECK_EQ_I64(delta(lift::d3d9::PipeWarnCategory::Texture), 6);
+    LIFT_CHECK_EQ_I64(delta(lift::d3d9::PipeWarnCategory::Index), 0);
+    LIFT_CHECK_EQ_I64(delta(lift::d3d9::PipeWarnCategory::Other), 0);
+    const lift::d3d9::PipeWarnCounts& wc = lift::d3d9::pipeWarnCounts();
+    char want[256];
+    std::snprintf(want, sizeof(want), "pipe-warn : vertex-stream=%llu index=%llu texture=%llu other=%llu",
+                  (unsigned long long)wc.of(lift::d3d9::PipeWarnCategory::VertexStream),
+                  (unsigned long long)wc.of(lift::d3d9::PipeWarnCategory::Index),
+                  (unsigned long long)wc.of(lift::d3d9::PipeWarnCategory::Texture),
+                  (unsigned long long)wc.of(lift::d3d9::PipeWarnCategory::Other));
+    const std::string summary = captureRunSummary(r.f.m);
+    LIFT_CHECK(contains(summary, want));
+
+    // 收尾：B 的 guest 那份（判活再调：EA 复用下这里总是活着的）
+    if (com->find(tex_b)) LIFT_CHECK_EQ_U32(r.f.method(tex_b, kOffRelease, {}), 0u);
+    LIFT_CHECK(!com->find(tex_b));
 }
 
 }  // namespace
@@ -1325,7 +2026,11 @@ int main() {
         caseDrawStateSnapshot();
         caseClipPlanes();
         caseRenderTargetLifetime();
-        caseStaleOwnerGeneration();
+        caseOwnerLifetimeAndStaleGeneration();
+        caseStaleStreamBinding();
+        caseStaleTextureBindingInDraw();
+        casePipeWarnCategoriesAndSummary();
+        caseBindingLifetime();
         return finish("d3d9-pipeline");
     } catch (const std::exception& e) {
         std::fprintf(stderr, "DIAG uncaught std::exception: %s\n", e.what());

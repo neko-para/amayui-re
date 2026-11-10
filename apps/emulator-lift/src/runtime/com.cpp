@@ -49,6 +49,21 @@ void comLog(const char* iface, const char* fmt, ...) {
     va_end(ap);
 }
 
+// ★ **默认级别可见**的告警（默认 `--log-level` 是 `warn`；`Info` 默认看不见）。
+//   只给"响亮拒绝"这类**本会静默改变资源记账**的失败用（`REQ-01M70FP71PWDFKGQ06QE37EQJY` #2）：
+//   · `createObject` 的 `owns_owner=true` 但 `owner=0`（调用点写错 ⇒ 不建对象）；
+//   · 对象到 0 时替 owner 持的那份引用**还不回去**（期间 guest 越界 Release 过 owner）。
+//   ⛔ 不要把 `comLog` 整体升到 Warn：正常事件（建对象 / 释放 / 诊断）会淹没默认输出。
+//   级别口径与 `ddrawWarn` / `d3dxWarn` / `pipeWarn` / `spriteWarn` 一致。
+void comWarn(const char* iface, const char* fmt, ...) {
+    char prefix[256];
+    std::snprintf(prefix, sizeof(prefix), "[shim] com!%s: ", iface ? iface : "?");
+    va_list ap;
+    va_start(ap, fmt);
+    logV(LogLevel::Warn, LogCom, prefix, fmt, ap);
+    va_end(ap);
+}
+
 }  // namespace
 
 std::string ComRegistry::qualifiedName(const std::string& iface, const char* name) {
@@ -108,11 +123,18 @@ std::uint32_t ComRegistry::registerSlot(X86& cpu, const std::string& iface, cons
 }
 
 std::uint32_t ComRegistry::createObject(X86& cpu, const char* iface, const std::vector<ComMethod>& methods,
-                                       std::uint32_t user, ComOnZero on_zero, std::uint32_t owner) {
+                                       std::uint32_t user, ComOnZero on_zero, std::uint32_t owner,
+                                       bool owns_owner) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     const std::string face = iface ? iface : "";
     if (face.empty()) {
         comLog("?", "createObject 的 iface 为空（日志 / 注册名都要靠它）");
+        return 0;
+    }
+    // ★ `owns_owner` 是"替 owner 持一份引用"，没有 owner 就没有可还的引用 ⇒ 调用点写错了，响亮拒绝。
+    //   （静默当 false 会让"surface 忘了传 owner"重新变成 04C 那个缺陷，而且看不出来。）
+    if (owns_owner && owner == 0) {
+        comWarn(face.c_str(), "createObject 的 owns_owner=true 但 owner=0（没有可持引用的父对象）⇒ 拒绝");
         return 0;
     }
     if (methods.empty()) {
@@ -227,6 +249,7 @@ std::uint32_t ComRegistry::createObject(X86& cpu, const char* iface, const std::
     o.bytes = obj_bytes;
     o.user = user;
     o.owner = owner;
+    o.owns_owner = owns_owner;
     // ★ 代际（宿主表内，⛔ 不进 guest 内存）：建对象时固化 owner 的**当前**代际。
     //   `generationOf(owner) == 0` ⇒ 建 surface 时父对象已经不在表里（调用方传了个死 EA）。
     //   ⛔ 不静默：那是调用点的实现错误，之后 `SetRenderTarget` 的代际判据会拒绝绑定。
@@ -330,13 +353,29 @@ bool ComRegistry::releaseImpl(X86& cpu, std::uint32_t obj, std::uint32_t expect_
     const std::uint32_t slots = it->second.slots;
     const std::uint32_t obj_bytes = it->second.bytes;
     const std::uint32_t user = it->second.user;
+    const std::uint32_t owner = it->second.owner;
+    const std::uint32_t owner_generation = it->second.owner_generation;
+    const bool owns_owner = it->second.owns_owner;
     const ComOnZero on_zero = it->second.on_zero;
     const std::string iface = it->second.iface;
     objects_.erase(it);
     // 钩子在对象表删除**之后**跑：它只该回收子资源，⛔ 不许再按 this 回调到本对象。
     if (on_zero) on_zero(cpu, user);
+    // ★ 替 `owner` 持的那份引用（`owns_owner`）成对还回去（`REQ-01M6ZZZ6PEVSFB93C6VJPKC04C`）。
+    //   走的是 `releaseImpl` —— 与 guest `Release` / 内部裸 `cpu.com->release` **同一条收敛点**
+    //   （⛔ 不是另写一条影子回收：那样内部裸 release 又会漏掉这条路）。
+    //   ★ 带代际：持引用期间 owner 钉得住，但 guest 越界 Release 之后 EA 可能已被复用 ⇒ 不符就不减。
+    auto giveBackOwner = [&]() {
+        if (!owns_owner) return;
+        if (releaseImpl(cpu, owner, owner_generation)) return;
+        comWarn(iface.c_str(),
+                "release(0x%08X)：替 owner 0x%08X 持的引用还不回去（建对象时的代际 %u 已不符 / 已不在表里）"
+                "—— 期间 guest 越界 Release 过 owner？",
+                obj, owner, owner_generation);
+    };
     if (!cpu.heap) {
         comLog(iface.c_str(), "release(0x%08X)：cpu.heap 为空 ⇒ vtable 0x%08X 与对象都泄漏", obj, vtable);
+        giveBackOwner();  // 本对象回收不了，但 owner 的引用不许跟着漏
         return false;
     }
     // 先把对象头抹掉：残留的 guest 指针再被解引用时能看出"已经不是对象了"
@@ -350,10 +389,12 @@ bool ComRegistry::releaseImpl(X86& cpu, std::uint32_t obj, std::uint32_t expect_
     if (!ok_vtable || !ok_obj) {
         comLog(iface.c_str(), "release(0x%08X)：释放失败（vtable 0x%08X %s / 对象 %s）—— guest 堆报错见上一行",
                obj, vtable, ok_vtable ? "ok" : "FAILED", ok_obj ? "ok" : "FAILED");
+        giveBackOwner();  // 同上：本对象回收失败不是 owner 那份引用漏掉的借口
         return false;
     }
     comLog(iface.c_str(), "release(0x%08X)：refcount 到 0 ⇒ 已释放 vtable 0x%08X（%u 槽）与对象", obj,
            vtable, slots);
+    giveBackOwner();
     return true;
 }
 

@@ -29,7 +29,24 @@ bool SurfaceArena::init(GuestMemory* mem, std::uint32_t begin, std::uint32_t siz
     return true;
 }
 
+// ★ 并发契约的检查点（`guest_token.h`）：`SurfaceArena` 的簿记是 guest 可见共享容器之一。
+//   · 未持令牌 ⇒ `GuestToken::check` 计数（`--assert-guest-token` 判红）；
+//   · **响亮**：第一次违规在 stderr 打一行 —— 只靠摘要里的计数，没人看摘要时它等于静默。
+//   ⛔ 不改变调用方的返回值（违规必须能活着进摘要；见 surface.h 的注释）。
+void SurfaceArena::checkToken(const char* site) const {
+    if (guestToken().check(site)) return;
+    // 只喊第一次（热路径不刷屏；计数仍在 GuestToken 里累加）。CAS 而不是"先读再写"：
+    // 并发的两次违规只允许打一行，`violationReports()` 也才真的等于"喊过的次数"。
+    std::uint64_t expected = 0;
+    if (!reports_.compare_exchange_strong(expected, 1, std::memory_order_relaxed)) return;
+    std::fprintf(stderr,
+                 "[guest-token] 违规：SurfaceArena 的簿记在令牌之外被访问（site=%s）⇒ "
+                 "容器可能与另一条执行流并发改；真跑时 `--assert-guest-token` 会判红\n",
+                 site ? site : "?");
+}
+
 std::uint32_t SurfaceArena::create(std::int32_t width, std::int32_t height, const SurfaceFormat& fmt) {
+    checkToken("arena.create");
     if (!ready()) {
         std::snprintf(last_error_, sizeof(last_error_), "surface arena 未初始化");
         return 0;
@@ -66,6 +83,7 @@ std::uint32_t SurfaceArena::create(std::int32_t width, std::int32_t height, cons
 }
 
 bool SurfaceArena::destroy(std::uint32_t ea) {
+    checkToken("arena.destroy");
     auto it = surfaces_.find(ea);
     if (it == surfaces_.end()) return false;
     surfaces_.erase(it);
@@ -73,11 +91,13 @@ bool SurfaceArena::destroy(std::uint32_t ea) {
 }
 
 GuestSurface* SurfaceArena::find(std::uint32_t ea) {
+    checkToken("arena.find");
     auto it = surfaces_.find(ea);
     return it == surfaces_.end() ? nullptr : &it->second;
 }
 
 const GuestSurface* SurfaceArena::find(std::uint32_t ea) const {
+    checkToken("arena.find");
     auto it = surfaces_.find(ea);
     return it == surfaces_.end() ? nullptr : &it->second;
 }
@@ -88,6 +108,7 @@ const std::uint8_t* SurfaceArena::pixels(const GuestSurface& s) const {
 }
 
 bool SurfaceArena::lock(std::uint32_t ea) {
+    checkToken("arena.lock");
     GuestSurface* s = find(ea);
     if (!s) return false;
     ++s->lock_count;
@@ -95,6 +116,7 @@ bool SurfaceArena::lock(std::uint32_t ea) {
 }
 
 bool SurfaceArena::unlock(std::uint32_t ea) {
+    checkToken("arena.unlock");
     GuestSurface* s = find(ea);
     if (!s || s->lock_count == 0) return false;
     --s->lock_count;

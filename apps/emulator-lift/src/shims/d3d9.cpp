@@ -1049,6 +1049,20 @@ constexpr std::uint32_t kVdBytes = 8;
 constexpr std::uint32_t kVdData = 12;
 constexpr std::uint32_t kVdHeader = 12;
 
+// `'VDCL'` 状态块的**唯一**回收实现（幂等：先清 magic 再 free，第二次进来直接返回）。
+// ★ 为什么它必须是 `createObject` 的 `on_zero` 而不是只挂在 iface 的 Release shim 上：
+//   `ComRegistry::releaseImpl` 是对象销毁的**唯一收敛点** —— guest 走 iface 的 Release、宿主侧
+//   内部裸 `cpu.com->release(...)`、带代际的 `releaseIf(...)` 都在那里归零。谁把引用降到 0 不可预知
+//   ⇒ 回收挂在"调用点"上就一定会漏（本批给 VB / IB / VD 补 `on_zero` 就是为了这个）。
+//   ⛔ 不要在这里读 `self` / 对象表：钩子跑的时候对象已经从表里删掉了（`com.cpp` 的顺序）。
+void destroyVertexDeclarationState(X86& cpu, std::uint32_t state) {
+    if (state == 0 || !cpu.mem || !cpu.heap) return;
+    if (!cpu.mem->committed(state, kVdHeader)) return;
+    if (cpu.mem->rd32(state) != kVdMagicValue) return;  // 已经不是 'VDCL'（重复回收 / EA 已复用）
+    cpu.mem->wr32(state, 0u);
+    cpu.heap->free(state);
+}
+
 void shimVertexDeclarationQueryInterface(X86& cpu, ShimCall& call) {
     shimQueryInterface(cpu, call, kIidUnknown, "IDirect3DVertexDeclaration9");
 }
@@ -1067,10 +1081,9 @@ void shimVertexDeclarationRelease(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
-    if (last && user != 0 && cpu.mem->committed(user, kVdHeader) &&
-        cpu.mem->rd32(user) == kVdMagicValue && cpu.heap) {
-        cpu.heap->free(user);
-    }
+    // ★ 归零那一步已经由 `releaseImpl` 的 `on_zero`（= 上面那个函数）回收过 ⇒ 这里只是同一个
+    //   幂等函数的第二次调用（老路径保留，形状不变；两处都走同一实现，⛔ 不是两份重复逻辑）。
+    if (last) destroyVertexDeclarationState(cpu, user);
     call.result = last ? 0u : cpu.com->refCount(self);
 }
 
@@ -1089,8 +1102,21 @@ void shimVertexDeclarationGetDevice(X86& cpu, ShimCall& call) {
         return;
     }
     const std::uint32_t state = cpu.com->userOf(self);
-    cpu.mem->wr32(out_ea, state != 0 && cpu.mem->committed(state, kVdHeader) ? cpu.mem->rd32(state + kVdDevice)
-                                                                           : 0u);
+    const std::uint32_t device =
+        state != 0 && cpu.mem->committed(state, kVdHeader) ? cpu.mem->rd32(state + kVdDevice) : 0u;
+    // ★ `IDirect3DVertexDeclaration9::GetDevice` 的微软页面**没写**引用计数（该接口只继承 IUnknown），
+    //   但 D3D9 的 `Get*` 家族一致 AddRef（`Resource9::GetDevice` / `GetTexture` / `GetStreamSource` /
+    //   `GetIndices` / `GetRenderTarget` 的文档都写了"调用方必须 Release"）⇒ 本仓按**家族一致**办
+    //   （裁决见缺陷单，⛔ 不用"本仓以前返回裸 EA"当依据）。
+    //   · guest 不 Release ⇒ 设备对象永远到不了 0（`destroyDeviceState` 不跑，后缓冲/深度/流水线块全漏）；
+    //   · guest 多 Release ⇒ 减的是设备自己的那份宿主引用（CreateDevice 给的那份），不是别人的。
+    if (device != 0 && !cpu.com->addRef(cpu, device)) {
+        d3d9Log("IDirect3DVertexDeclaration9::GetDevice",
+                "设备 0x%08X 借不出引用（已不是本模块的对象）⇒ D3DERR_INVALIDCALL", device);
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    cpu.mem->wr32(out_ea, device);
     call.result = d3d9::kOk;
 }
 
@@ -1201,8 +1227,8 @@ void shimCreateVertexDeclaration(X86& cpu, ShimCall& call) {
     cpu.mem->wr32(state + kVdDevice, self);
     cpu.mem->wr32(state + kVdBytes, bytes);
     std::memcpy(cpu.mem->host(state + kVdData), cpu.mem->host(elements_ea), bytes);
-    const std::uint32_t obj =
-        cpu.com->createObject(cpu, "IDirect3DVertexDeclaration9", vertexDeclarationMethods(), state);
+    const std::uint32_t obj = cpu.com->createObject(cpu, "IDirect3DVertexDeclaration9", vertexDeclarationMethods(),
+                                                   state, &destroyVertexDeclarationState);
     if (obj == 0) {
         cpu.heap->free(state);
         d3d9Trap(cpu, "IDirect3DDevice9::CreateVertexDeclaration(+0x158)",
@@ -1261,7 +1287,13 @@ void shimCreateVertexBuffer(X86& cpu, ShimCall& call) {
         call.result = d3d9::kInvalidCall;
         return;
     }
-    const std::uint32_t obj = cpu.com->createObject(cpu, "IDirect3DVertexBuffer9", vertexBufferMethods(), state);
+    // ★ `on_zero` = 状态块的回收走 `ComRegistry::releaseImpl` 这个**唯一收敛点**（见
+    //   `com.h` 文件头 / `d3dx9.cpp` 的 `destroyTextureState` 同款）：引用到 0 的那一次不一定
+    //   是 iface 的 Release shim（宿主侧内部裸 release / SetTexture 换绑 / 设备销毁都会走到）。
+    //   把回收只挂在调用点上 ⇒ 漏一处就漏一块 guest 堆 —— 本单把 VB / IB / VD 三类补齐
+    //   （此前它们没有 on_zero，内部 release 到 0 时 `'VB09'` 状态块永久留在堆上）。
+    const std::uint32_t obj = cpu.com->createObject(cpu, "IDirect3DVertexBuffer9", vertexBufferMethods(),
+                                                   state, &d3d9::destroyVertexBufferState);
     if (obj == 0) {
         d3d9::destroyVertexBufferState(cpu, state);
         d3d9Trap(cpu, "IDirect3DDevice9::CreateVertexBuffer(+0x68)", "建 COM 对象失败（见上一行 com 日志）");
@@ -1305,7 +1337,8 @@ void shimCreateIndexBuffer(X86& cpu, ShimCall& call) {
         call.result = d3d9::kInvalidCall;
         return;
     }
-    const std::uint32_t obj = cpu.com->createObject(cpu, "IDirect3DIndexBuffer9", indexBufferMethods(), state);
+    const std::uint32_t obj = cpu.com->createObject(cpu, "IDirect3DIndexBuffer9", indexBufferMethods(), state,
+                                                   &d3d9::destroyIndexBufferState);
     if (obj == 0) {
         d3d9::destroyIndexBufferState(cpu, state);
         d3d9Log("CreateIndexBuffer", "建 COM 对象失败（见上一行 com 日志）⇒ E_FAIL");
@@ -1331,12 +1364,26 @@ void shimIndexBufferGetType(X86& cpu, ShimCall& call) {
     call.result = 7u;  // D3DRTYPE_INDEXBUFFER
 }
 
+// ★ `IDirect3DResource9::GetDevice` 的微软文档明确："Calling this method will increase the internal
+//   reference count on the IDirect3DDevice9 interface. Failure to call IUnknown::Release ... results in
+//   a memory leak."（VB / IB 都继承 `IDirect3DResource9`）⇒ 借出时 AddRef，调用方负责 Release。
+//   · guest 不 Release ⇒ 设备对象永远到不了 0：`destroyDeviceState` 不跑，后缓冲 / 深度 / 流水线块
+//     + 纹理一起漏（设备销毁是第一回收点）。
+//   · guest 多 Release ⇒ 减掉的是设备自己那份（CreateDevice 给的）—— 数值上"提前少一份"，
+//     再少一次设备就会在还有人用的时候被回收（本仓会亮声：对象表里查不到）。
+//   校验顺序：⛔ 绝不"先 AddRef 再校验"（那会把引用加到陌生对象身上）。
 void shimVertexBufferGetDevice(X86& cpu, ShimCall& call) {
     const std::uint32_t self = call.u32(0);
     const std::uint32_t user = cpu.com ? cpu.com->userOf(self) : 0;
     const std::uint32_t device = d3d9::vertexBufferDevice(cpu, user);
     const std::uint32_t out_ea = call.u32(1);
     if (device == 0 || out_ea == 0 || !cpu.mem->committed(out_ea, 4)) {
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    if (!cpu.com || !cpu.com->addRef(cpu, device)) {
+        d3d9Log("IDirect3DVertexBuffer9::GetDevice", "设备 0x%08X 借不出引用（已不是本模块的对象）⇒ D3DERR_INVALIDCALL",
+                device);
         call.result = d3d9::kInvalidCall;
         return;
     }
@@ -1350,6 +1397,13 @@ void shimIndexBufferGetDevice(X86& cpu, ShimCall& call) {
     const std::uint32_t device = d3d9::indexBufferDevice(cpu, user);
     const std::uint32_t out_ea = call.u32(1);
     if (device == 0 || out_ea == 0 || !cpu.mem->committed(out_ea, 4)) {
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    // 同 `shimVertexBufferGetDevice` 上面的文档口径（`Resource9::GetDevice` 明确 AddRef）。
+    if (!cpu.com || !cpu.com->addRef(cpu, device)) {
+        d3d9Log("IDirect3DIndexBuffer9::GetDevice", "设备 0x%08X 借不出引用（已不是本模块的对象）⇒ D3DERR_INVALIDCALL",
+                device);
         call.result = d3d9::kInvalidCall;
         return;
     }

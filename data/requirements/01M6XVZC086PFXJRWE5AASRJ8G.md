@@ -2,18 +2,10 @@
 
 - id: REQ-01M6XVZC086PFXJRWE5AASRJ8G
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
 - order: 4
-- tags: [emulator-lift, performance, throughput]
-
-# emulator-lift · 指令吞吐：15.5 M insn/s 的基线与瓶颈定位（装载帧延迟的根因量级）
-
-- id: REQ-01M6XVZC086PFXJRWE5AASRJ8G
-- type: req
-- status: open
-- parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
-- order: 4
+- done_reason: 基线可复跑（pnpm tools lift bench idle --n 5 ⇒ 中位 105.87 ms/M = 9.446 M insn/s，10 遍合并 105.65，块命中 99.981%、平均块长 8.20-8.23），目标已裁（装载帧 ≤4.0 s ⇔ 19.0 M insn/s），瓶颈定位由子单完成：b=67.6-71.4 ns/块、c=20.0-22.2 ns/条，派发税 8.0% 墙钟（下界），可安全拿回的只有 mutex 1.9%。把整个派发层拿掉只到 10.02 M insn/s，离目标 52.63 ms/M 差 6.5 倍 ⇒ 光靠派发层永远不够；下一步必须压逐条成本（~99.8 ns → ≤44 ns，2.3×）。仍未做：不 Present 的空转工况（与 OBS-05 同表）与逐条成本分解。
 - tags: [emulator-lift, performance, throughput]
 
 ## 为什么单独成单
@@ -56,4 +48,24 @@
   ⛔ 不能用 profiler 的 `guest fns` self（块粒度）。
 - 风险：本机 mach 时基 41.67 ns **分辨率**（不是调用成本）；`--present window` 必须 `--present-vsync 0`；
   基线必须带 `CMAKE_BUILD_TYPE` 回读 + 二进制新鲜度 + **工作树指纹**。
-- 分析全文 `.tmp/reveq/01M6XVZC086PFXJRWE5AASRJ8G/analysis.md`（**不入库**；入库的是本节要点）。下一步 = `tools/lift.mjs bench` + 一次 N=5 基线。
+- 分析全文 `.tmp/reveq/01M6XVZC086PFXJRWE5AASRJ8G/analysis.md`（**不入库**；入库的是本节要点）。
+
+## 本轮进展（2026-11-10）：基线已成形，**瓶颈定位未做**
+
+- **`pnpm tools lift bench idle --n 5`**（一条命令 + 落文件）已落地：`tools/lift.mjs` 新 op `bench`（口径 A 写死
+  `--present window --present-vsync 0 --present-hidden --raster gpu --native-overrides all --skip-logo`；每遍**独立子进程**；
+  JSON 落 `.cache/lift-bench/`，含 exe sha256+mtime、`CMAKE_BUILD_TYPE` 回读、脚本 sha256、工作树指纹、逐遍原始值 + 中位数；
+  `Debug` 直接拒绝；解析失败**不估算**，落 `*-FAILED.json`）。守卫 `repo:tools/test/lift-bench.test.mjs`（10 用例，纯解析器）。
+- **N=5 基线（TITLE 空转）**：`106.19 / 105.42 / 105.05 / 106.37 / 105.87` ms/M ⇒ **中位 105.87 ms/M = 9.446 M insn/s**（极差 1.2%）；
+  另一轮独立 N=5 = 104.97（极差 1.4%）；10 遍合并中位 105.65 ⇒ **可复跑**。块命中 99.981% · 平均块长 8.20–8.23。
+  ⚠ 工况是 **TITLE（每帧都 Present，≈34 fps）**，⛔ **不能**与 OBS-05 的 64.7 ms/M（EU-ROOM 静置、Present=0）相减比快慢。
+- 与已裁决目标（约 19.0 M insn/s ⇔ 52.6 ms/M）差 **2.01×**；换算：75.9 M 条 ⇒ 8.03 s，151 M ⇒ 15.98 s。
+- **派发层已拆（子单 `REQ-01M70S2WR4S8MN2JDWJRJD6WFD` 收口）**：块长扫描**真测量** ⇒ `b = 67.6–71.4 ns/块`、`c = 20.0–22.2 ns/条`；
+  真工况派发税 **8.65 ms/M = 8.0% 墙钟**（下界）。可安全拿回的只有 mutex：A/B（N=5 交错、`audio off`）**2.08 ms/M = 1.9%**；
+  令牌原子记账另 ~1.6%，**裁决不做**（不值得让 `--assert-guest-token` 变成只在打开时可信）。
+  ★ **把整个派发层拿掉只到 10.02 M insn/s（99.81 ms/M）**，离目标 52.63 ms/M **差 6.5 倍** ⇒ **光靠派发层永远不够**。
+- **结论与下一步**：要达标必须把**每条成本从 ~99.8 ns 压到 ≤44 ns（2.3×）** ⇒ 本单之后该压的是**解释器逐条开销**（译码/dispatch 表/热 op 的内联），
+  不是派发层。⛔ 且不许用"改 guest 可见语义"换速度（要改另开语义单，走 `AGENTS.md` §6）。
+- **仍未做**：① "不 Present 的空转"工况（与 OBS-05 的 64.7 ms/M 同表 —— 现在只有 TITLE 工况，两数不可相减）；
+  ② 逐条成本的分解（译码 / dispatch / 热 op / FPU / 字符串各自占比）；③ 合成体 `pnpm tools lift report --bench` 的块长**不可调**（`tests/bench.cpp` 写死 3 条/块），
+  已在 `dispatch-tax` 里另造可调合成体 ⇒ 若要把"块长扫描"做成常设能力，应把它挪进 `tools/lift.mjs`。

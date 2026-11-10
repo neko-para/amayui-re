@@ -18,9 +18,16 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
 #include "check.h"
 #include "runtime/com.h"
 #include "runtime/handles.h"
+#include "runtime/log.h"
 #include "runtime/machine.h"
 #include "shims/register.h"
 
@@ -33,6 +40,88 @@ constexpr std::uint32_t kStubPage = 0x7FF80000u; // bare 夹具的桩页（⛔ �
 constexpr std::uint32_t kStubSlots = 0x1000u;
 constexpr std::uint32_t kProcStubEa = 0x7FF81000u;  // LoadLibraryA / GetProcAddress 在本夹具里的地址
 constexpr std::uint32_t kFixtureHeap = 0x00100000u; // 1 MiB 足够，别为夹具 commit 128 MiB
+
+// ---- stderr **tee**（"默认日志级别看得见"的判据用；形态照 `tests/dsound.cpp`）----
+// ★ 为什么是 tee 而不是"最后一次性读出来"：本夹具的其他用例会故意走到 loud trap / abort，
+//   只捕获不回显的话，一旦中途停住现场就全丢了。`pump()` 把新增的一段同时写进内存 log 与真 stderr。
+#ifdef _WIN32
+using FdT = int;
+int dupFd(int fd) { return _dup(fd); }
+int dup2Fd(int src, int dst) { return _dup2(src, dst); }
+int filenoOf(std::FILE* f) { return _fileno(f); }
+void closeFd(int fd) { _close(fd); }
+int readFd(int fd, void* buf, unsigned n) { return _read(fd, buf, n); }
+int writeFd(int fd, const void* buf, unsigned n) { return _write(fd, buf, n); }
+#else
+using FdT = int;
+int dupFd(int fd) { return ::dup(fd); }
+int dup2Fd(int src, int dst) { return ::dup2(src, dst); }
+int filenoOf(std::FILE* f) { return ::fileno(f); }
+void closeFd(int fd) { ::close(fd); }
+int readFd(int fd, void* buf, unsigned n) { return static_cast<int>(::read(fd, buf, n)); }
+int writeFd(int fd, const void* buf, unsigned n) { return static_cast<int>(::write(fd, buf, n)); }
+#endif
+
+struct StderrTee {
+    std::FILE* tmp = nullptr;
+    FdT saved = -1;
+    bool active = false;
+    std::size_t moved = 0;  // 已经从 tmp 搬走多少字节
+    std::string log;
+
+    bool begin() {
+        tmp = std::tmpfile();
+        if (!tmp) return false;
+        std::fflush(stderr);
+        saved = static_cast<FdT>(dupFd(2));
+        if (saved < 0) return false;
+        if (dup2Fd(filenoOf(tmp), 2) < 0) return false;
+        active = true;
+        return true;
+    }
+
+    void pump() {
+        if (!active || !tmp) return;
+        std::fflush(stderr);
+        std::fseek(tmp, 0, SEEK_END);
+        const long size = std::ftell(tmp);
+        if (size < 0) return;
+        const std::size_t total = static_cast<std::size_t>(size);
+        if (total <= moved) return;
+        std::fseek(tmp, static_cast<long>(moved), SEEK_SET);
+        std::vector<char> chunk(total - moved);
+        const std::size_t got = std::fread(chunk.data(), 1, chunk.size(), tmp);
+        if (got == 0) return;
+        log.append(chunk.data(), got);
+        if (saved >= 0) {
+            std::size_t off = 0;
+            while (off < got) {
+                const int n = writeFd(saved, chunk.data() + off, static_cast<unsigned>(got - off));
+                if (n <= 0) break;
+                off += static_cast<std::size_t>(n);
+            }
+        }
+        moved += got;
+    }
+
+    std::string finish() {
+        if (!active) return log;
+        pump();
+        dup2Fd(saved, 2);
+        closeFd(saved);
+        saved = -1;
+        active = false;
+        if (tmp) {
+            std::fclose(tmp);
+            tmp = nullptr;
+        }
+        return log;
+    }
+};
+
+bool contains(const std::string& hay, const std::string& needle) {
+    return hay.find(needle) != std::string::npos;
+}
 
 // 只做本文件要用的几条编码；位移由 `currentEa()` 算，⛔ 不手填
 struct Asm {
@@ -486,6 +575,28 @@ int main() {
         LIFT_CHECK(com.release(m.cpu(), gen_parent2));
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(com.objectCount()), 0u);
         LIFT_CHECK_EQ_U32(m.heap().bytesInUse(), heap_before);
+
+        // ---- ④ 响亮拒绝的**默认级别可见性**（`REQ-01M70FP71PWDFKGQ06QE37EQJY` #2）----
+        // 缺陷形态：两处"响亮拒绝"走 `comLog`（`LogLevel::Info`），而默认 `--log-level` 是 `warn`
+        //   ⇒ 默认跑法下这两行**根本看不见**（`ddrawWarn` / `d3dxWarn` / `pipeWarn` / `spriteWarn`
+        //   都是 Warn，只有它低一级）。判据：在**默认级别**（warn）下造出该拒绝，stderr 里必须有那行。
+        // ★ 变异（把 `comWarn` 改回 `logV(LogLevel::Info, …)`）⇒ 捕获到的 log 里没有这行 ⇒ 红。
+        g_current_case = "com-rejection-visible-at-default-level";
+        {
+            lift::logSetLevel("warn");  // 默认级别；⛔ 不许用 info 把断言混过去
+            LIFT_CHECK(lift::logConfig().level == lift::LogLevel::Warn);
+            StderrTee cap;
+            LIFT_CHECK(cap.begin());
+            // `owns_owner=true` 但 `owner=0` ⇒ 没有可持引用的父对象 ⇒ 拒绝建对象（两处之一）
+            LIFT_CHECK_EQ_U32(com.createObject(m.cpu(), "ITest", methods, /*user=*/0u,
+                                               /*on_zero=*/nullptr, /*owner=*/0u, /*owns_owner=*/true),
+                              0u);
+            const std::string log = cap.finish();
+            LIFT_CHECK(contains(log, "[warn] [shim] com!ITest:"));
+            LIFT_CHECK(contains(log, "owns_owner=true 但 owner=0"));
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(com.objectCount()), 0u);
+            LIFT_CHECK_EQ_U32(m.heap().bytesInUse(), heap_before);  // 拒绝路径不分配
+        }
     }
 
     // =====================================================================================

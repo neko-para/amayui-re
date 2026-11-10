@@ -764,6 +764,96 @@ void caseTextureDraw() {
 }
 
 // ---------------------------------------------------------------------------------------
+// ②d 纹理 surface 的**非 RT 寿命**（REQ-01M6ZZZ6PEVSFB93C6VJPKC04C，A 方案 = surface 持有父纹理）
+//
+// 时序（本单的判据场景）：建纹理 → `GetSurfaceLevel` 拿 surface → **guest 先 Release 纹理** →
+//   仍用 surface 做 `GetDesc` / `LockRect` / 写像素 → 再 Release surface。
+// ★ 修前（缺陷态）：纹理 refcount 到 0 ⇒ `destroyTextureState` 当场把 `'TEX1'` 状态块 + arena
+//   像素块回收 ⇒ surface 的 `user` 变成已 free / 可被复用的 EA（`find(tex)` 已经是 false）。
+// ★ A 方案：surface 建的时候就替父纹理 addRef 了一份 ⇒ 纹理 refcount 是 1，**没被回收**；
+//   surface 到 0 时由 `ComRegistry::releaseImpl`（`owns_owner`）成对还回去 ⇒ 纹理此刻才到 0。
+//
+// 判据（每条在破坏时都会红）：
+//   ① 纹理 Release 之后**对象还在**、refcount == 1（= surface 那一份）⇒ A 方案的直接可观测结果；
+//   ② surface 的 `GetDesc` 仍给出同一张纹理的尺寸 / 格式（状态块没被 free、没被复用）；
+//   ③ surface 的 `LockRect` 给出的 pBits 仍落在**同一块** arena 上（像素块没被回收 / 换人），
+//      写进去的哨兵读得回来；再锁一次仍拿到同一个基址；
+//   ④ 再 Release surface ⇒ 纹理此刻到 0 ⇒ 纹理对象 + arena 一起回收，且 guest 堆（`bytesInUse`
+//      与块数）**回到基线** —— ⛔ 只测 ①~③ 会漏掉"只 addRef 不 release"（那正是漏堆），
+//      这条断言就是防它的。
+// ---------------------------------------------------------------------------------------
+void caseSurfaceKeepsParentAlive() {
+    lift_test::g_current_case = "d3dx9/surface-keeps-parent-alive";
+    Rig r;
+    LIFT_CHECK(r.up());
+    if (r.dev.object == 0) return;
+    auto& mem = r.f.m.mem();
+    auto& h = r.f.m.heap();
+    lift::ComRegistry* com = r.f.m.cpu().com;
+    LIFT_CHECK(com != nullptr);
+    if (com == nullptr) return;
+
+    constexpr std::uint32_t kTexel = 0xA1B2C3D4u;
+    const std::size_t surfaces_before = r.f.m.surfaces().surfaceCount();
+    const std::uint32_t heap_before = h.bytesInUse();
+    const std::size_t blocks_before = h.blockCount();
+
+    std::uint32_t tex = 0;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.dev.object, 4, 4, 1, 0, lift::d3d9::kFmtA8R8G8B8, 1, &tex), 0u);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return;
+    lift::d3d9::TextureInfo ti;
+    LIFT_CHECK(lift::d3d9::textureInfo(r.f.m.cpu(), tex, &ti, nullptr));
+    LIFT_CHECK_EQ_U32(ti.width, 4u);
+    LIFT_CHECK_EQ_U32(ti.height, 4u);
+    LIFT_CHECK_EQ_U32(com->refCount(tex), 1u);
+
+    const std::uint32_t out = r.f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(r.f.method(tex, 0x48u, {0u, out}), lift::d3d9::kOk);  // GetSurfaceLevel
+    const std::uint32_t surf = mem.rd32(out);
+    LIFT_CHECK_NE_U32(surf, 0u);
+    if (surf == 0) return;
+    LIFT_CHECK_EQ_U32(com->refCount(tex), 2u);  // ← A 方案：surface 替父纹理持一份
+
+    // ---- guest 先放掉自己那份纹理引用（surface 仍在手）----
+    LIFT_CHECK_EQ_U32(r.f.method(tex, 0x08u, {}), 1u);  // 2 → 1（= surface 那一份）
+    // ① 纹理**没被回收**：对象还在，refcount 停在 surface 那一份上
+    LIFT_CHECK(com->find(tex));
+    LIFT_CHECK_EQ_U32(com->refCount(tex), 1u);
+    LIFT_CHECK(r.f.m.surfaces().find(ti.arena) != nullptr);
+
+    // ② 状态块仍归它：GetDesc 给出同一张纹理的尺寸 / 格式
+    const std::uint32_t desc = r.f.placeBytes(std::vector<std::uint8_t>(32u, 0xEE));
+    LIFT_CHECK_EQ_U32(r.f.method(surf, 0x30u, {desc}), lift::d3d9::kOk);  // GetDesc
+    LIFT_CHECK_EQ_U32(mem.rd32(desc + 0x00u), lift::d3d9::kFmtA8R8G8B8);
+    LIFT_CHECK_EQ_U32(mem.rd32(desc + 0x18u), 4u);  // Width
+    LIFT_CHECK_EQ_U32(mem.rd32(desc + 0x1Cu), 4u);  // Height
+
+    // ③ 像素块仍归它：LockRect 的 pBits 还在同一块 arena 上，写进去的哨兵读得回来
+    const std::uint32_t lr = r.f.placeBytes(std::vector<std::uint8_t>(8u, 0xEE));
+    LIFT_CHECK_EQ_U32(r.f.method(surf, 0x34u, {lr, 0u, 0u}), lift::d3d9::kOk);  // LockRect
+    LIFT_CHECK_EQ_U32(mem.rd32(lr + 0u), ti.pitch);
+    LIFT_CHECK_EQ_U32(mem.rd32(lr + 4u), ti.arena);  // 整幅锁定 ⇒ pBits = 像素块基址（没换人）
+    mem.wr32(mem.rd32(lr + 4u), kTexel);
+    LIFT_CHECK_EQ_U32(r.f.method(surf, 0x38u, {}), lift::d3d9::kOk);  // UnlockRect
+    LIFT_CHECK_EQ_U32(mem.rd32(ti.arena), kTexel);
+    // 再锁一次仍拿到同一份：状态块没被复用成别人的（否则这里会给出别的 arena / pitch）
+    LIFT_CHECK_EQ_U32(r.f.method(surf, 0x34u, {lr, 0u, 0u}), lift::d3d9::kOk);
+    LIFT_CHECK_EQ_U32(mem.rd32(lr + 4u), ti.arena);
+    LIFT_CHECK_EQ_U32(r.f.method(surf, 0x38u, {}), lift::d3d9::kOk);
+
+    // ---- ④ 成对释放：surface 到 0 ⇒ 纹理此刻才到 0 ⇒ 对象 + arena 一起回收，堆回基线 ----
+    LIFT_CHECK_EQ_U32(r.f.method(surf, 0x08u, {}), 0u);  // Release(surface) ⇒ 0
+    LIFT_CHECK(!com->find(surf));
+    LIFT_CHECK(!com->find(tex));  // 纹理到 0 是**因为** surface 还了那一份
+    LIFT_CHECK(r.f.m.surfaces().find(ti.arena) == nullptr);
+    LIFT_CHECK_EQ_U32(r.f.m.surfaces().surfaceCount(), surfaces_before);
+    LIFT_CHECK_EQ_U32(h.bytesInUse(), heap_before);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(h.blockCount()),
+                      static_cast<std::uint32_t>(blocks_before));
+}
+
+// ---------------------------------------------------------------------------------------
 // ②c D3DX math（本线实现的那几条；行向量约定）
 // ---------------------------------------------------------------------------------------
 void caseMatrix() {
@@ -1022,11 +1112,15 @@ void caseCreateSpriteOom() {
 
     const std::uint32_t baseline = h.bytesInUse();
     // 载荷 = `createSpriteState` 真会申请的两次：
-    //   状态块 `kSpBytes` = 128（`d3dx9_sprite.cpp:60`）；
-    //   批次数组 `kInitialBatchCapacity`(16) × `kBatchEntryBytes`(64) = 1024（`:64` / `d3dx9_sprite.h:91`）。
-    // ★ 这两个字面量漂了不会静默失去覆盖：下面的窗口断言与 `allocCount()+1` 会当场红。
+    //   状态块 `kSpBytes` = 128（`d3dx9_sprite.cpp` 的 `kSpBytes`）；
+    //   批次数组 `kInitialBatchCapacity`(16) × `kBatchEntryBytes`（`d3dx9_sprite.h`）。
+    //   ★ 批次载荷写成**算式**（段 3 的 ⑥）：原先这里写死 `1152`，于是条目一变大（72 → 80 B）
+    //     夹具仍在按 16×72 造窗口 —— 窗口的**上沿**与代码真实申请的字节数脱钩，载荷增长不会被发现。
+    //     算式与 `kBatchEntryBytes` 同源：改常量 ⇒ 窗口跟着动 ⇒ 下面的范围断言 / 覆盖率警戒线红。
+    //     ⛔ 常量 16 是 `d3dx9_sprite.cpp` 里 `kInitialBatchCapacity` 的值（内部量，不导出）；
+    //     它若变大，`need_batch < 堆` 与失败位置会一起变，用例当场红而不是静默换窗口。
     const std::uint32_t need_state = footprint(128u);
-    const std::uint32_t need_batch = footprint(1024u);
+    const std::uint32_t need_batch = footprint(16u * lift::d3dx9::kBatchEntryBytes);
     const std::uint32_t header = footprint(0u);
     LIFT_CHECK_EQ_U32(h.bytesInUse(), baseline);  // 探针没留下块
     LIFT_CHECK_NE_U32(need_state, 0u);
@@ -1100,7 +1194,341 @@ void caseCreateSpriteOom() {
     LIFT_CHECK_EQ_U32(h.bytesInUse(), baseline);
 }
 
+// ---------------------------------------------------------------------------------------
+// ⑧ `IDirect3DSurface9::GetDevice` 借出的是**一份新引用**（`REQ-01M701NYF2B3YV1YFSZBMPQZ41` 段 3 的 ①）
+//
+// 判据（红了意味着什么）：`IDirect3DSurface9` 继承 `IDirect3DResource9` ⇒ `GetDevice` 的文档与
+//   纹理 / VB / IB / 顶点声明是**同一条**（"increase the internal reference count … failure to
+//   Release results in a memory leak"）。⇒ 每次调用后设备 refcount **+1**、把那一份 Release 掉回到
+//   基线；出参非法时**不**加引用（先校验出参再 AddRef）。
+//   ★ 修前这个 shim 是**裸借出** ⇒ `base + 1` 那条红（got = base）。
+//   ★ 只造"借出 +1 / 归还"这一条判据：设备对象是**纹理表面**（`GetSurfaceLevel`）而不是后缓冲 ——
+//     后者在 `tests/d3d9.cpp` 的 backbuffer 用例里另有一条同形断言。
+// ---------------------------------------------------------------------------------------
+void caseSurfaceGetDeviceRefcount() {
+    lift_test::g_current_case = "d3dx9/surface-getdevice-refcount";
+    Rig r;
+    LIFT_CHECK(r.up());
+    if (r.dev.object == 0) return;
+    lift::ComRegistry* com = r.f.m.cpu().com;
+    LIFT_CHECK(com != nullptr);
+    if (com == nullptr) return;
+
+    std::uint32_t tex = 0;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.dev.object, 4u, 4u, 1u, 0u, lift::d3d9::kFmtA8R8G8B8, 1u, &tex), 0u);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return;
+    const std::uint32_t out_surf = r.f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(r.f.method(tex, 0x48u, {0u, out_surf}), 0u);  // GetSurfaceLevel(0)
+    const std::uint32_t surf = r.f.m.mem().rd32(out_surf);
+    LIFT_CHECK_NE_U32(surf, 0u);
+    if (surf == 0) return;
+
+    // 基线 = 设备当前引用计数（不从 1 写死：设备自己持引用时用例不用改）
+    const std::uint32_t base = com->refCount(r.dev.object);
+    const std::uint32_t out_dev = r.f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(r.f.method(surf, 0x0Cu, {out_dev}), 0u);
+    LIFT_CHECK_EQ_U32(r.f.m.mem().rd32(out_dev), r.dev.object);
+    LIFT_CHECK_EQ_U32(com->refCount(r.dev.object), base + 1u);  // ← 修前 = base
+    // 归还借出的那份 ⇒ 回基线（⛔ 不是"再借一次"）
+    if (com->refCount(r.dev.object) == base + 1u)
+        LIFT_CHECK_EQ_U32(r.f.method(r.dev.object, 0x08u, {}), base);
+    LIFT_CHECK_EQ_U32(com->refCount(r.dev.object), base);
+
+    // 出参 = NULL ⇒ D3DERR_INVALIDARG，且**不**给设备加引用（顺序判据）
+    LIFT_CHECK_EQ_U32(r.f.method(surf, 0x0Cu, {0u}), lift::d3d9::kInvalidArg);
+    LIFT_CHECK_EQ_U32(com->refCount(r.dev.object), base);
+
+    // 收尾：surface 释放（它替父纹理持的那份由 `owns_owner` 还回）⇒ 再放纹理 ⇒ 堆回基线
+    LIFT_CHECK_EQ_U32(r.f.method(surf, 0x08u, {}), 0u);
+    LIFT_CHECK_EQ_U32(r.f.method(tex, 0x08u, {}), 0u);
+    LIFT_CHECK(!com->find(tex));
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑨ 未提交批次里的纹理：`OnLostDevice` / Sprite `Release` 必须按**身份**释放（段 3 的 ④）
+//
+// 判据（红了意味着什么）：批次条目只缓存对象 EA；guest 堆会**复用** EA ⇒ 纹理在批次还活着时被
+//   （越界）Release、EA 被**另一张**纹理拿走之后，按裸 EA `release` 减的是**新占有者**。
+//   Draw 时已记下 serial（进程级单调、永不复用）⇒ 销毁 / 设备丢失时 serial 不符就**不释放**、
+//   只清"我们持引用"的标记（⛔ 一个引用都不减），并打默认级别可见的告警。
+//   ★ 修前 `releaseQueuedTextures` 只按 EA Release ⇒ ② 的 refCount(t2) 期望 1 得 0（对象被减死）。
+//   ★ ③ 是**正向对照**：没被替换的纹理仍然在 OnLostDevice 时被释放（证明 ② 不是"整条路径关掉"）。
+// ---------------------------------------------------------------------------------------
+void caseSpriteReleaseQueuedStaleTexture() {
+    lift_test::g_current_case = "d3dx9/sprite-release-queued-stale-texture";
+    Rig r;
+    LIFT_CHECK(r.withSprite());
+    if (r.sprite == 0) return;
+    lift::ComRegistry* com = r.f.m.cpu().com;
+    LIFT_CHECK(com != nullptr);
+    if (com == nullptr) return;
+
+    auto fillTexture = [&](std::uint32_t tex, std::uint32_t value) {
+        const std::uint32_t lr = r.f.placeBytes(std::vector<std::uint8_t>(8u, 0xEE));
+        LIFT_CHECK_EQ_U32(r.f.method(tex, 0x4Cu, {0u, lr, 0u, 0u}), 0u);
+        const std::uint32_t pitch = r.f.m.mem().rd32(lr + 0u);
+        const std::uint32_t bits = r.f.m.mem().rd32(lr + 4u);
+        LIFT_CHECK_NE_U32(bits, 0u);
+        if (bits == 0) return;
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 4; ++x)
+                r.f.m.mem().wr32(bits + static_cast<std::uint32_t>(y) * pitch +
+                                     static_cast<std::uint32_t>(x) * 4u,
+                                 value);
+        LIFT_CHECK_EQ_U32(r.f.method(tex, 0x50u, {0u}), 0u);
+    };
+    auto makeTexture = [&](std::uint32_t* out) {
+        LIFT_CHECK_EQ_U32(r.f.createTexture(r.dev.object, 4u, 4u, 1u, 0u, lift::d3d9::kFmtA8R8G8B8, 1u, out),
+                          0u);
+        LIFT_CHECK_NE_U32(*out, 0u);
+    };
+
+    // ② 被替换的那一张：Draw 时 sprite 替它持一份引用（refCount 2），guest 放掉自己那份（1），
+    //    再越界放一次 ⇒ 把 sprite 那份也抵掉 ⇒ 对象死、EA 被另一张纹理复用。
+    std::uint32_t t1 = 0;
+    std::uint32_t t_dummy = 0;
+    makeTexture(&t1);
+    if (t1 == 0) return;
+    fillTexture(t1, 0xFF0000FFu);
+    const std::uint32_t t1_gen = com->generationOf(t1);
+    LIFT_CHECK_NE_U32(t1_gen, 0u);
+    makeTexture(&t_dummy);  // 同尺寸哑纹理：两者释放后空洞连成一片 ⇒ EA 复用
+    if (t_dummy == 0) return;
+
+    LIFT_CHECK_EQ_U32(r.begin(0u), 0u);
+    const std::uint32_t pos0 = r.f.placeVec3(4.0f, 4.0f, 0.0f);
+    LIFT_CHECK_EQ_U32(r.drawTex(t1, 0u, 0u, pos0, 0xFFFFFFFFu), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(t1), 2u);  // guest 1 + 批次 1（Draw 的 AddRef）
+    LIFT_CHECK_EQ_U32(r.f.method(t1, 0x08u, {}), 1u);  // guest 放掉自己那份
+    if (com->find(t1)) LIFT_CHECK_EQ_U32(r.f.method(t1, 0x08u, {}), 0u);  // 越界：批次那份被抵掉
+    LIFT_CHECK(!com->find(t1));
+    LIFT_CHECK_EQ_U32(r.f.method(t_dummy, 0x08u, {}), 0u);
+
+    std::uint32_t t2 = 0;
+    makeTexture(&t2);
+    if (t2 == 0) return;
+    LIFT_CHECK_EQ_U32(t2, t1);                        // 前提 1：对象 EA 复用
+    LIFT_CHECK_NE_U32(com->generationOf(t2), t1_gen);  // 前提 2：身份确实换了
+    fillTexture(t2, 0xFFFF0000u);
+
+    // 丢弃未提交批次 ⇒ serial 不符 ⇒ 不减新占有者（修前这里把 t2 减到 0 / 对象消失）
+    LIFT_CHECK_EQ_U32(r.f.method(r.sprite, 0x30u, {}), 0u);  // OnLostDevice
+    LIFT_CHECK_EQ_U32(com->refCount(t2), 1u);                 // ← 修前 = 0
+    LIFT_CHECK(com->find(t2));
+    // OnLostDevice 丢弃批次但**不**关 Begin（真机也是"设备丢了、批次没了"）⇒ 关掉再开新批次。
+    LIFT_CHECK_EQ_U32(r.end(), 0u);
+
+    // ③ 正向对照：没被替换的纹理照旧在 OnLostDevice 时释放（堆回基线）
+    const std::uint32_t heap_before = r.f.m.heap().bytesInUse();
+    std::uint32_t t3 = 0;
+    makeTexture(&t3);
+    if (t3 == 0) return;
+    fillTexture(t3, 0xFF00FF00u);
+    LIFT_CHECK_EQ_U32(r.begin(0u), 0u);
+    const std::uint32_t pos1 = r.f.placeVec3(8.0f, 8.0f, 0.0f);
+    LIFT_CHECK_EQ_U32(r.drawTex(t3, 0u, 0u, pos1, 0xFFFFFFFFu), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(t3), 2u);
+    LIFT_CHECK_EQ_U32(r.f.method(t3, 0x08u, {}), 1u);  // 只剩批次那份
+    LIFT_CHECK_EQ_U32(r.f.method(r.sprite, 0x30u, {}), 0u);  // OnLostDevice ⇒ 还真回去
+    LIFT_CHECK(!com->find(t3));
+    LIFT_CHECK_EQ_U32(r.f.m.heap().bytesInUse(), heap_before);
+
+    // 收尾
+    LIFT_CHECK_EQ_U32(r.f.method(t2, 0x08u, {}), 0u);
+    LIFT_CHECK(!com->find(t2));
+    LIFT_CHECK_EQ_U32(r.f.method(r.sprite, 0x08u, {}), 0u);
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑩ `compositeBatch` 的**早退分支**也必须按纹理身份释放（`REQ-01M70SHFT6RZA7RRY1R051Z2PB` #1）
+//
+// 判据（红了意味着什么）：`compositeBatch` 有 4 个**在合成主路径身份校验之前**的早退出口
+//   （无 src rect / 空矩形 / 四边形退化 / 完全在屏外）。它们以前对该条目裸 `releaseEntry`
+//   ⇒ 纹理在批次还活着时被（越界）Release、同一对象 EA 被**另一张**纹理拿走之后，End 走早退
+//   分支就把**新纹理**减到 0（对象被减死）。修法 = 把 serial 校验放进 releaseEntry（所有出口共用）。
+// ★ 本用例走"完全在屏外"这个早退口（位置 5000,5000 ⇒ 后缓冲 1280×720 裁剪后为空）。
+// ★ ③ 是**正向对照**：没被替换的纹理仍然在正常出口被释放（证明 ② 不是"把 release 全关掉"）。
+// ★ 变异（`if (!entryTextureIsCurrent(...)) return;` 改成丢弃返回值）⇒ ② 的 refcount 期望 1 得 0。
+// ---------------------------------------------------------------------------------------
+void caseSpriteEarlyExitStaleTexture() {
+    lift_test::g_current_case = "d3dx9/sprite-early-exit-stale-texture";
+    Rig r;
+    LIFT_CHECK(r.withSprite());
+    if (r.sprite == 0) return;
+    lift::ComRegistry* com = r.f.m.cpu().com;
+    LIFT_CHECK(com != nullptr);
+    if (com == nullptr) return;
+
+    auto fillTexture = [&](std::uint32_t tex, std::uint32_t value) {
+        const std::uint32_t lr = r.f.placeBytes(std::vector<std::uint8_t>(8u, 0xEE));
+        LIFT_CHECK_EQ_U32(r.f.method(tex, 0x4Cu, {0u, lr, 0u, 0u}), 0u);
+        const std::uint32_t pitch = r.f.m.mem().rd32(lr + 0u);
+        const std::uint32_t bits = r.f.m.mem().rd32(lr + 4u);
+        LIFT_CHECK_NE_U32(bits, 0u);
+        if (bits == 0) return;
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 4; ++x)
+                r.f.m.mem().wr32(bits + static_cast<std::uint32_t>(y) * pitch +
+                                     static_cast<std::uint32_t>(x) * 4u,
+                                 value);
+        LIFT_CHECK_EQ_U32(r.f.method(tex, 0x50u, {0u}), 0u);
+    };
+    auto makeTexture = [&](std::uint32_t* out) {
+        LIFT_CHECK_EQ_U32(r.f.createTexture(r.dev.object, 4u, 4u, 1u, 0u, lift::d3d9::kFmtA8R8G8B8, 1u, out),
+                          0u);
+        LIFT_CHECK_NE_U32(*out, 0u);
+    };
+
+    // ① 批次里替 T1 持一份引用（refCount 2）；guest 放掉自己那份、再越界放一次 ⇒ 对象死、EA 可复用。
+    std::uint32_t t1 = 0;
+    std::uint32_t t_dummy = 0;
+    makeTexture(&t1);
+    if (t1 == 0) return;
+    fillTexture(t1, 0xFF0000FFu);
+    const std::uint32_t t1_gen = com->generationOf(t1);
+    LIFT_CHECK_NE_U32(t1_gen, 0u);
+    makeTexture(&t_dummy);  // 同尺寸哑纹理：两者释放后空洞连成一片 ⇒ EA 复用
+    if (t_dummy == 0) return;
+
+    LIFT_CHECK_EQ_U32(r.begin(0u), 0u);
+    // ★ 位置在**后缓冲之外**：这个条目会从"完全屏外"那个早退出口收尾（身份校验之前）
+    const std::uint32_t pos0 = r.f.placeVec3(5000.0f, 5000.0f, 0.0f);
+    LIFT_CHECK_EQ_U32(r.drawTex(t1, 0u, 0u, pos0, 0xFFFFFFFFu), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(t1), 2u);  // guest 1 + 批次 1（Draw 的 AddRef）
+    LIFT_CHECK_EQ_U32(r.f.method(t1, 0x08u, {}), 1u);
+    if (com->find(t1)) LIFT_CHECK_EQ_U32(r.f.method(t1, 0x08u, {}), 0u);  // 越界：批次那份被抵掉
+    LIFT_CHECK(!com->find(t1));
+    LIFT_CHECK_EQ_U32(r.f.method(t_dummy, 0x08u, {}), 0u);
+
+    // ② T2 拿回 T1 的对象 EA（前提硬断言：不成立先按 heap 的分块重造夹具，⛔ 不是删断言）
+    std::uint32_t t2 = 0;
+    makeTexture(&t2);
+    if (t2 == 0) return;
+    LIFT_CHECK_EQ_U32(t2, t1);
+    LIFT_CHECK_NE_U32(com->generationOf(t2), t1_gen);
+    fillTexture(t2, 0xFFFF0000u);
+
+    // 合成走"完全在屏外"早退分支 ⇒ serial 不符 ⇒ 新占有者一个引用都不减（修前 = 0）
+    LIFT_CHECK_EQ_U32(r.end(), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(t2), 1u);  // ← 修前 = 0
+    LIFT_CHECK(com->find(t2));
+
+    // ③ 正向对照：没被替换的纹理在正常出口照旧被释放
+    LIFT_CHECK_EQ_U32(r.begin(0u), 0u);
+    const std::uint32_t pos1 = r.f.placeVec3(8.0f, 8.0f, 0.0f);
+    LIFT_CHECK_EQ_U32(r.drawTex(t2, 0u, 0u, pos1, 0xFFFFFFFFu), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(t2), 2u);
+    LIFT_CHECK_EQ_U32(r.end(), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(t2), 1u);  // 正常出口真的把批次那份还回去
+
+    // 收尾（判活再调：变异下 T2 可能已经被减死）
+    if (com->find(t2)) LIFT_CHECK_EQ_U32(r.f.method(t2, 0x08u, {}), 0u);
+    LIFT_CHECK(!com->find(t2));
+}
+
 }  // namespace
+
+// ---------------------------------------------------------------------------------------
+// ②e `D3DXSPRITE_DO_NOT_ADDREF_TEXTURE` 批次的**纹理身份**（`REQ-01M701NYF2B3YV1YFSZBMPQZ41` 段 2 的 ②）
+//
+// ★ flag 的语义**不改**（微软原文："Disables calling AddRef() on every draw, and Release() on Flush()"
+//   ⇒ Draw 不 AddRef、End/Flush 不 Release 是**文档语义**，不是缺陷）。真残余是"没有身份戳"：
+//   批次条目只存对象 EA，而 guest 堆会复用 EA ⇒ 纹理在批次还活着时被释放、EA 被**另一张**纹理拿走，
+//   `End()` 只按 EA + `'TEX1'` magic 重解析会**成功**并静默采别人的像素。
+//
+// 判据（红了意味着什么）：
+//   ① `DO_NOT_ADDREF` 下 Draw **不**改纹理 refcount（文档语义；修后仍成立）；
+//   ② 批次里的纹理被释放、EA + `'TEX1'` 状态块 EA 被同尺寸新纹理**同时**复用之后，`End()` 必须
+//      **跳过这个精灵**（批次的其余部分不受影响）⇒ 目标像素**一个都没变**、新纹理的 refcount
+//      不被误减、对象还在。★ 判据落在**像素 + refcount** 上（日志抓不到；告警是默认级别 warn）。
+//   ③ 没被替换的 `DO_NOT_ADDREF` 精灵仍然正常合成（证明②的判据不是"把这条路径整个关掉"）。
+// ★ EA 复用的**前提**硬断言（对象 EA + 状态块 EA 都要落回原址）；不成立就红 —— ⛔ 不是删断言，
+//   先按 `runtime/heap.cpp` 的分块 / `min_split` 重造夹具（同 `caseSurfaceKeepsParentAlive` 的口径）。
+// ---------------------------------------------------------------------------------------
+void caseDoNotAddRefStaleTexture() {
+    lift_test::g_current_case = "d3dx9/sprite-donotaddref-stale-texture";
+    Rig r;
+    LIFT_CHECK(r.withSprite());
+    if (r.sprite == 0) return;
+    const lift::d3d9::DeviceInfo& d = r.dev.info;
+    LIFT_CHECK_EQ_U32(r.f.clearTo(r.dev, 0x004080C0u), 0u);
+    lift::ComRegistry* com = r.f.m.cpu().com;
+    LIFT_CHECK(com != nullptr);
+    if (com == nullptr) return;
+
+    auto fillTexture = [&](std::uint32_t tex, std::uint32_t value) {
+        const std::uint32_t lr = r.f.placeBytes(std::vector<std::uint8_t>(8u, 0xEE));
+        LIFT_CHECK_EQ_U32(r.f.method(tex, 0x4Cu, {0u, lr, 0u, 0u}), 0u);
+        const std::uint32_t pitch = r.f.m.mem().rd32(lr + 0u);
+        const std::uint32_t bits = r.f.m.mem().rd32(lr + 4u);
+        LIFT_CHECK_NE_U32(bits, 0u);
+        if (bits == 0) return;
+        for (int y = 0; y < 4; ++y) {
+            for (int x = 0; x < 4; ++x) {
+                r.f.m.mem().wr32(bits + static_cast<std::uint32_t>(y) * pitch + static_cast<std::uint32_t>(x) * 4u,
+                                 value);
+            }
+        }
+        LIFT_CHECK_EQ_U32(r.f.method(tex, 0x50u, {0u}), 0u);
+    };
+    auto makeTexture = [&](std::uint32_t* out) {
+        LIFT_CHECK_EQ_U32(r.f.createTexture(r.dev.object, 4, 4, 1, 0, lift::d3d9::kFmtA8R8G8B8, 1, out), 0u);
+        LIFT_CHECK_NE_U32(*out, 0u);
+    };
+
+    std::uint32_t t0 = 0;
+    std::uint32_t t1 = 0;
+    makeTexture(&t1);
+    if (t1 == 0) return;
+    fillTexture(t1, 0xFF0000FFu);  // 不透明蓝（A8R8G8B8 的 D3DCOLOR 位序：A R G B）
+    const std::uint32_t t1_state = com->userOf(t1);
+    const std::uint32_t t1_gen = com->generationOf(t1);
+    LIFT_CHECK_NE_U32(t1_state, 0u);
+    LIFT_CHECK_NE_U32(t1_gen, 0u);
+    makeTexture(&t0);  // 哑纹理：同尺寸 ⇒ 一起释放后空洞连成一片（EA 复用的前提）
+    if (t0 == 0) return;
+
+    const std::uint32_t flags = lift::d3dx9::kSpriteAlphaBlend | lift::d3dx9::kSpriteDoNotAddRefTexture;
+    LIFT_CHECK_EQ_U32(r.begin(flags), 0u);
+    const std::uint32_t pos0 = r.f.placeVec3(10.0f, 10.0f, 0.0f);
+    LIFT_CHECK_EQ_U32(r.drawTex(t1, 0u, 0u, pos0, 0xFFFFFFFFu), 0u);
+    // ① 文档语义：这一位就是"不 AddRef" ⇒ Draw 之后 refcount 仍是 1
+    LIFT_CHECK_EQ_U32(com->refCount(t1), 1u);
+    // guest 放掉自己那份 ⇒ 因为没钉住，对象当场到 0（这正是 flag 的语义，不是缺陷）
+    LIFT_CHECK_EQ_U32(r.f.method(t1, 0x08u, {}), 0u);
+    LIFT_CHECK(!com->find(t1));
+    LIFT_CHECK_EQ_U32(r.f.method(t0, 0x08u, {}), 0u);
+
+    std::uint32_t t2 = 0;
+    makeTexture(&t2);
+    if (t2 == 0) return;
+    LIFT_CHECK_EQ_U32(t2, t1);                       // 前提 1：对象 EA 复用
+    LIFT_CHECK_EQ_U32(com->userOf(t2), t1_state);     // 前提 2：`'TEX1'` 状态块 EA 也复用 ⇒ magic 校验必过
+    LIFT_CHECK_NE_U32(com->generationOf(t2), t1_gen);
+    fillTexture(t2, 0xFFFF0000u);  // 不透明红：若静默采错，下面的像素会变成红
+
+    // ② 合成：身份不符 ⇒ 跳过这个精灵（⛔ 不采 T2 的像素）
+    LIFT_CHECK_EQ_U32(r.end(), 0u);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 10, 10), 0x004080C0u);  // 清屏色原样（修前 = 0x00FF0000）
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 11, 11), 0x004080C0u);
+    LIFT_CHECK_EQ_U32(com->refCount(t2), 1u);  // ⛔ 新占有者一个引用都不被减
+    LIFT_CHECK(com->find(t2));
+
+    // ③ 没被替换的 DO_NOT_ADDREF 精灵照常合成（否则 ② 就成了"把这条路径整个关掉"）
+    LIFT_CHECK_EQ_U32(r.begin(flags), 0u);
+    const std::uint32_t pos1 = r.f.placeVec3(20.0f, 20.0f, 0.0f);
+    LIFT_CHECK_EQ_U32(r.drawTex(t2, 0u, 0u, pos1, 0xFFFFFFFFu), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(t2), 1u);  // 仍然不 AddRef（文档语义没变）
+    LIFT_CHECK_EQ_U32(r.end(), 0u);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 20, 20), 0x00FF0000u);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 23, 23), 0x00FF0000u);
+    LIFT_CHECK_EQ_U32(com->refCount(t2), 1u);
+
+    // 收尾：guest 那份释放 ⇒ 对象 + 状态块 + 像素块一起回收
+    LIFT_CHECK_EQ_U32(r.f.method(t2, 0x08u, {}), 0u);
+    LIFT_CHECK(!com->find(t2));
+}
 
 int main() {
     using namespace lift_test;
@@ -1109,6 +1537,11 @@ int main() {
         caseDrawEndPixels();
         caseTextureFromMemory();
         caseTextureDraw();
+        caseSurfaceKeepsParentAlive();
+        caseSurfaceGetDeviceRefcount();
+        caseSpriteReleaseQueuedStaleTexture();
+        caseSpriteEarlyExitStaleTexture();
+        caseDoNotAddRefStaleTexture();
         caseMatrix();
         caseTraps();
         caseCreateSpriteOom();

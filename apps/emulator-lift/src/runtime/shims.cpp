@@ -382,17 +382,25 @@ void ShimRegistry::invoke(X86& cpu, ShimDef& def) {
         return;
     }
 
-    const auto time_begin = timing_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    // ★ 并发契约（guest_token.h）：**所有 guest 可见的共享容器访问都发生在 shim 实现里**
+    //   （GuestHeap / HandleTable / Vfs / ComRegistry / SurfaceArena / guest 内存账本 …
+    //   都经由 shim 的 `fn` 走到）。⇒ shim 边界就是"容器临界区"：
+    //   主线程本来就按块持有令牌；feeder 线程**不**在整次 fill 期间持令牌（那样等于单核
+    //   串行，实测 wall ≥ 两侧 CPU 之和），只在每次 shim 调用时取 —— 与主线程的块互斥。
+    //   ⛔ 不要在 `fn` 里再手写"绕过令牌"的共享容器访问：新增容器入口要么走 shim，要么单独加锁。
+    //
+    // ★ M1（REQ-01M6XVZG4T9WY8SQ1WS7P8RNW9）：`defs_[id].ns` 的口径是「**shim 实现自身**」，
+    //   所以计时起点必须在**取到令牌之后**（见下面 `time_begin`）。"等令牌"的墙钟不属于这里 ——
+    //   它另记在 `GuestToken::waits()/waitNs()`（运行摘要的 `tokenwait` 行 + `--profile` 的
+    //   token-wait 块）。★ 口径影响：同一场景下 `ns` 比旧读数**小**（少掉等待那段）——
+    //   不是回归，是这条注释终于与事实一致（旧代码把等待记进了 shim 自己的墙钟）。
+    std::chrono::steady_clock::time_point time_begin{};
     {
-        // ★ 并发契约（guest_token.h）：**所有 guest 可见的共享容器访问都发生在 shim 实现里**
-        //   （GuestHeap / HandleTable / Vfs / ComRegistry / SurfaceArena / guest 内存账本 …
-        //   都经由 shim 的 `fn` 走到）。⇒ shim 边界就是"容器临界区"：
-        //   主线程本来就按块持有令牌；feeder 线程**不**在整次 fill 期间持令牌（那样等于单核
-        //   串行，实测 wall ≥ 两侧 CPU 之和），只在每次 shim 调用时取 —— 与主线程的块互斥。
-        //   ⛔ 不要在 `fn` 里再手写"绕过令牌"的共享容器访问：新增容器入口要么走 shim，要么单独加锁。
         GuestToken::Guard shim_token(guestToken());
         // ★ 检查点：Guard 被删/短路时，**第一次 shim 调用**就计数（不依赖 heap 恰好被碰到）。
         guestToken().check("shim.invoke");
+        // ★ M1：计时起点在**取到令牌之后**（等令牌的时间⛔ 不进 ns，见上方注释）。
+        if (timing_on) time_begin = std::chrono::steady_clock::now();
         local.fn(cpu, call);
     }
     if (timing_on) {

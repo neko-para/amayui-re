@@ -15,7 +15,10 @@
  *
  * ## 语料的盘上事实（IDC 导出形态，实测）
  * * 每行前缀是 **`.text:00401000`** 这种 `段:EA` 形式；**同一 EA 会连续出现在多行**上。
- * * `Imagebase 400000` 写在头部注释里 ⇒ **EA 是虚拟地址**，要读字节得先映射到文件偏移（PE 节表，见 `ledger.mjs` 的 `peOffsetOf`）。
+ * * `Imagebase 400000` 写在头部注释里 ⇒ **EA 是虚拟地址**，要读字节得先映射到文件偏移（PE 节表，
+ *   见 `lib/ledger.mjs` 的 `readPeSections` / `eaToFileOffset` / `readBytesAt`（★ 本仓**只有一处** PE 节表解析，
+ *   由 `tools/test/ledger.test.mjs` 的"EA → 文件偏移只有一条路"钉住）；
+ *   台账那份 `ledger.peOffsetOf` 是另一条契约，它对映射不到**返回 null**，而取字节那条必须**响亮报错**）。
  * * 实测段：`.text` / `.data` / `seg002` / `.idata` / `poly` / `seg003`（**不止 .text**）⇒ 索引必须按段分组。
  *
  * ## ★ 分工（重划）：本模块**只做定位与切片**
@@ -40,6 +43,7 @@ export const DOMAIN = {
   data: [
     '`corpus/disasm/files/*.lst` / `*.c`（**只读**语料；解压产物，gitignore）',
     '`.cache/disasm/*.idx.txt`（**派生**索引：段 → `[起始行, EA]` 稀疏表；可删可重建）',
+    '`corpus/assets/**` 里与 `.lst` 同名的二进制（**只读**；`--bytes` 的字节来源，按 `corpus/assets.json` 解析）',
   ],
   access: 'r（**只读**：本工具不改语料、只读它；索引写 `.cache/`，不入库）',
   tool: 'tools/disasm.mjs',
@@ -47,7 +51,7 @@ export const DOMAIN = {
 
 export const OPERATIONS = [
   { name: 'stats', argv: ['--stats'], mutates: false, summary: '语料盘点：段 / 行数 / EA 范围 / 行号→EA 是否单调' },
-  { name: 'at', argv: ['--at'], mutates: false, summary: '★ **取有界上下文**：`--ea <EA> [--lines N]`（被截断会明说）' },
+  { name: 'at', argv: ['--at'], mutates: false, summary: '★ **取有界上下文**：`--ea <EA> [--lines N]`（被截断会明说）；加 `--bytes <n>` 额外给该 EA 起 n 字节 hex（EA → PE 段表 → 文件偏移，**折叠区间也能取**，不依赖外部工具）' },
   { name: 'span', argv: ['--span'], mutates: false, summary: '一个名字/串的**行号区间**：`--match <子串>`（或 `--regex`）' },
   { name: 'search', argv: ['--search'], mutates: false, summary: '机械检索：`--match <子串>` 找出现的**全部位置**（带行号，可 `--limit`）' },
   { name: 'cases', argv: ['--cases'], mutates: false, summary: '★ **枚举函数里的 switch / 跳转表**：`--ea <EA>` ⇒ case 数 + 每个 case 的目标（类型分派 / opcode 分派全靠它）' },
@@ -351,6 +355,32 @@ export function contextAt(file, idx, ea, { lines = DEFAULT_MAX_LINES, seg = null
   };
 }
 
+/**
+ * ★ 解析一条 **COLLAPSED 折叠行**（IDA 导出形态），只回答"它**声明**了多少字节"。
+ *
+ * 为什么需要它（这是本单第 1 项的观察入口）：
+ * 折叠段在语料里**一行指令都没有** —— 只有 `.text:004E8A6E ; [0000004C BYTES: COLLAPSED FUNCTION …]`。
+ * 于是"折叠区间的字节"只能从二进制读（`lib/ledger.mjs` 的 `readBytesAt` —— 本仓唯一的 PE 解析处），而**唯一能对账的独立事实**
+ * 就是这一行声明的字节数：读出来的长度必须等于它，否则"取到了那一段"这句话不成立。
+ *
+ * ★ 为什么不复用 `anchor-lst.mjs` 的 `COLLAPSED_RE`：那是**布尔站点判据**，而实测它漏了
+ *   `COLLAPSED CHUNK OF FUNCTION` 这一形态（本语料里有：`; [0000002B BYTES: COLLAPSED CHUNK OF FUNCTION _setlocale.`）。
+ *   这里要的是**能同时读出长度**的形态，所以判据按 `[NNNN BYTES: COLLAPSED …]` 写；
+ *   `START OF FUNCTION CHUNK`（没有 `[NNNN BYTES:`）单独认，长度返回 `null`。
+ *
+ * ★ `declaredBytes` 允许是 `null`：`; START OF FUNCTION CHUNK FOR sub_XXXXXX` 这类折叠/孤立块
+ *   **没有** `[NNNN BYTES: …]` 形态。`null` 表示"这行没声明长度"——**不是 0**（0 会让下游以为"空区间"）。
+ *
+ * @param {string} line 一行 `.lst` 文本（带 `段:EA` 前缀）
+ * @returns {{declaredBytes:number|null, text:string}|null} 不是折叠行 ⇒ `null`
+ */
+export function parseCollapsedLine(line) {
+  if (typeof line !== 'string') return null;
+  const m = /\[([0-9A-Fa-f]{8})\s+BYTES:\s*COLLAPSED\s+(?:FUNCTION|CHUNK OF FUNCTION)\b|START OF FUNCTION CHUNK\b/i.exec(line);
+  if (!m) return null;
+  return { declaredBytes: m[1] ? Number.parseInt(m[1], 16) : null, text: line.trim() };
+}
+
 /** 机械检索：给一个子串（或正则），返回**全部**命中位置（带行号与所在段/EA） */
 export function search(file, { match, regex = false, limit = 200, ctx = 0 } = {}) {
   if (!match) throw new Error('--search 需要 --match <子串>（加 --regex 才当正则）');
@@ -550,7 +580,9 @@ export function describe() {
     file: 'corpus/disasm/files/*.lst（**只读**语料；解压产物，不入库）',
     purpose:
       '把"大文件里漫游"换成**机械提取**：给定 **EA** 或一个字符串，确定性地取出**一小段**上下文。' +
-      '这是所有引擎分析的第一步 —— 分析不该以"读几十 MB 反汇编"开始。',
+      '这是所有引擎分析的第一步 —— 分析不该以"读几十 MB 反汇编"开始。' +
+      '★ 另有一条**不依赖外部工具**的字节路径（`--bytes <n>`）：EA → PE 节表 → 文件偏移 → 字节 ——' +
+      '语料里只有一行 `COLLAPSED` 注释的折叠区间，也能拿到机器码（解码器选型另裁，本域只给字节）。',
     notHere:
       '索引**不是真源**（它落 `.cache/`、可删可重建）；语料**不得就地修改**（任何友好化只许是派生的内存视图）。' +
       '也不是"语义层"：本工具只做**定位与切片**，不做解释（解释是分析的事，要过 `AGENTS.md` §6 准入门）。' +
@@ -562,6 +594,8 @@ export function describe() {
       ['match', 'search 必填', '字面量子串', CONDITIONAL.match],
       ['limit', '⬜', '整数', CONDITIONAL.limit],
       ['lines', '⬜', '整数', CONDITIONAL.lines],
+      ['bytes', '⬜', '正整数', '`--bytes <n>`：额外打印该 EA 起 n 字节的 **hex**（EA → PE 段表 → 文件偏移 → 字节；**折叠区间也能取**）。不给 ⇒ 输出与旧版**逐字相同**。'],
+      ['bin', '⬜', '路径', '`--bin <path>`：`--bytes` 读的二进制（缺省按 `corpus/assets.json` 找与 `.lst` 同名的入库件，并核对 sha256 == `.lst` 头部 `Input SHA256`）。只与 `--bytes` 一起用。'],
       ['write', '⬜', 'flag', CONDITIONAL.write],
     ],
     invariants: [
@@ -569,6 +603,7 @@ export function describe() {
       { id: 2, text: '**索引可删可重建**：同一份语料、同一份索引 ⇒ 同字节（派生缓存不是真源）', enforcedBy: 'tools/test/disasm.test.mjs' },
       { id: 3, text: '**截断必须明说**：`--lines` / `--limit` 触顶时如实报 `truncated`', enforcedBy: 'tools/test/disasm.test.mjs' },
       { id: 4, text: '**语料只读**：本工具只读语料；任何产物落 `.cache/` 或 stdout', enforcedBy: 'tools/test/disasm.test.mjs + corpus/assets.json 的 readOnly' },
+      { id: 5, text: '**取字节不依赖外部工具**：EA → PE 节表 → 文件偏移 → 字节（纯 JS；PE 解析只有 `lib/ledger.mjs` 这一处）；非映射 / 越界 / 虚拟尾部 / 跨节一律**响亮报错**，不许给空', enforcedBy: 'tools/test/pe.test.mjs + tools/test/pe-corpus.assets.test.mjs' },
     ],
     operations: OPERATIONS,
   };
@@ -590,6 +625,9 @@ export function describeText(d = describe()) {
   for (const i of d.invariants) L.push(`${i.id}. ${i.text}　—　${i.enforcedBy}`);
   L.push('');
   L.push('## 操作');
-  for (const o of OPERATIONS) L.push(`* \`${o.name}\`${o.mutates ? '（会写）' : ''} —— ${o.summary}　→ \`pnpm tools disasm ${o.name}\``);
+  // ★ 命令提示用**域自己的 id**（`disasm-at`），不是 `disasm` —— 后者是**语料保真**域
+  //   （`disasm-recode.mjs`），`pnpm tools disasm at` 会报"该域没有动作 at"。写死 `disasm` 会
+  //   让读者（和需求单）按一条**不存在**的命令去核（本单就是这么被写错的）。
+  for (const o of OPERATIONS) L.push(`* \`${o.name}\`${o.mutates ? '（会写）' : ''} —— ${o.summary}　→ \`pnpm tools ${DOMAIN.id} ${o.name}\``);
   return `${L.join('\n')}\n`;
 }

@@ -11,7 +11,7 @@
 //      caps 的 0xD4 字节**全部被写**（两块不同初值的缓冲得到逐字节相同的结果）+ 0xD4 外不被写。
 //   ⑤ `Clear(0,NULL,3,0,1.0f,0)`（以及带 D3DRECT 的 Clear）**真的**改后缓冲像素：颜色对、矩形外不变。
 //   ⑥ `Present` 之后 `frameCount()==1`、`lastHash()` 与 arena 哈希一致；**两台新机器同输入 ⇒ 同帧哈希**。
-//   ⑦ CreateVertexBuffer 返回对象，SetStreamSource 接收同一对象（内部换算成状态块）。
+//   ⑦ CreateVertexBuffer 返回对象，SetStreamSource 接收同一对象（内部存**对象 EA + 绑定时代际**， //      Draw 时按身份校验换算成状态块）。
 //   ⑦b CreateVertexDeclaration / IDirect3DVertexDeclaration9（Live2D 的 3 元素声明）：GetDeclaration
 //      逐字节回读、Set/Get 往返、非本对象拒绝、SetFVF 清声明、Release 回堆基线。
 //   ⑧ GetBackBuffer / SetRenderTarget / 后缓冲 surface 的 GetDesc 可回查；`--dump-frame` 的
@@ -587,7 +587,7 @@ void caseFrameDump() {
 }
 
 // ---------------------------------------------------------------------------------------
-// ⑦ CreateVertexBuffer 返回对象，SetStreamSource 接收的也是**对象**（内部换算成状态块）
+// ⑦ CreateVertexBuffer 返回对象，SetStreamSource 接收的也是**对象**（内部存对象 EA + 绑定时代际）
 // ---------------------------------------------------------------------------------------
 void caseVertexStreamBinding() {
     lift_test::g_current_case = "d3d9/vertex-stream-binding";
@@ -610,7 +610,13 @@ void caseVertexStreamBinding() {
     LIFT_CHECK_EQ_U32(f.method(dev.object, 0x190u, {0u, vb, 0u, 12u}), 0u);
     // 非本模块对象仍必须拒绝
     LIFT_CHECK_EQ_U32(f.method(dev.object, 0x190u, {0u, 0xDEADBEEFu, 0u, 12u}), 0x8876086Cu);
-    LIFT_CHECK_EQ_U32(f.method(vb, 0x08u, {}), 0u);  // Release VB
+    // ★ 期望值由 0 改成 **1**：段 2（`REQ-01M701NYF2B3YV1YFSZBMPQZ41` 的 ③）之后**设备持绑定引用**
+    //   （与 `SetTexture` 的既有口径一致）⇒ guest 放掉自己那份之后还剩设备那一份。
+    //   ⛔ 这条不是"放宽断言"：它钉的正是"绑定期对象不能死"（修前返回 0 = 设备没持，合法时序会崩）。
+    LIFT_CHECK_EQ_U32(f.method(vb, 0x08u, {}), 1u);  // Release 自己那份 ⇒ 设备那份还在
+    // 解绑 ⇒ 设备那份由流水线还回去 ⇒ 对象与 'VB09' 状态块一起回收（⛔ 不是靠测试补 Release）
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x190u, {0u, 0u, 0u, 0u}), 0u);
+    LIFT_CHECK(!f.m.cpu().com->find(vb));
 }
 
 // ---------------------------------------------------------------------------------------
@@ -653,10 +659,16 @@ void caseVertexDeclaration() {
     LIFT_CHECK_NE_U32(vdecl, 0xDEADBEEFu);
     if (vdecl == 0) return;
 
-    // GetDevice(+0x0C)：返回同一台设备（不 AddRef）
+    // GetDevice(+0x0C)：返回同一台设备，且**借出一份新引用**（`Get*` 家族口径：调用方必须 Release）
+    const std::uint32_t dev_ref = f.m.cpu().com->refCount(dev.object);
     const std::uint32_t dev_out = f.placeU32(0xDEADBEEFu);
     LIFT_CHECK_EQ_U32(f.method(vdecl, 0x0Cu, {dev_out}), 0u);
     LIFT_CHECK_EQ_U32(f.m.mem().rd32(dev_out), dev.object);
+    LIFT_CHECK_EQ_U32(f.m.cpu().com->refCount(dev.object), dev_ref + 1u);
+    // 只在"确实借出了那份"时还它：缺陷态（没 AddRef）下再 Release 会把设备降到 0 ⇒
+    // 后面全变成"在已释放的设备上调方法"，平台异常会把其余断言一起吞掉（红就看不出来了）。
+    if (f.m.cpu().com->refCount(dev.object) == dev_ref + 1u)
+        LIFT_CHECK_EQ_U32(f.method(dev.object, 0x08u, {}), dev_ref);  // 还掉 GetDevice 借出的那份
 
     // GetDeclaration(+0x10)：逐字节回读（含结束元素）
     const std::uint32_t copy = f.placeBytes(std::vector<std::uint8_t>(24u, 0xEE));
@@ -680,8 +692,15 @@ void caseVertexDeclaration() {
     LIFT_CHECK_EQ_U32(f.method(dev.object, 0x160u, {got}), 0u);
     LIFT_CHECK_EQ_U32(f.m.mem().rd32(got), 0u);
 
+    // 上面 `GetVertexDeclaration` **借出过一份**（`Get*` 家族口径）⇒ 先还它，再放自己那份。
+    //   ★ 少了"先还借出那份"：这里会 expected 1 got 0、`find(vdecl)` 仍真、堆高出
+    //     `'VDCL'` 那一块 —— 那不是缺陷，是测试自己少 Release 一次。
+    LIFT_CHECK_EQ_U32(f.method(vdecl, 0x08u, {}), 1u);
     // Release 到 0 ⇒ 对象与声明状态块都回收
-    LIFT_CHECK_EQ_U32(f.method(vdecl, 0x08u, {}), 0u);
+    //   ★ 先判活再调：`Fixture::method` 要读对象的 vtable（`rd32(obj)`），对象若已在上一条归零，
+    //     这里会 `call [0+8]` 打到未提交页（平台异常 0xC0000005）—— 那会把后面的用例一起吞掉，
+    //     红的地方就看不出来了。
+    if (f.m.cpu().com->find(vdecl)) LIFT_CHECK_EQ_U32(f.method(vdecl, 0x08u, {}), 0u);
     LIFT_CHECK(!f.m.cpu().com->find(vdecl));
     LIFT_CHECK_EQ_U32(f.m.heap().bytesInUse(), heap_before);
 }
@@ -708,9 +727,15 @@ void caseGetBackBufferAndRenderTarget() {
     LIFT_CHECK_NE_U32(surf, 0xDEADBEEFu);
 
     // 后缓冲 surface 的 GetDevice / GetDesc：设备对象与宽高都与设备一致
+    // ★ `GetDevice` 借出的是**一份新引用**（`IDirect3DResource9` 文档；段 3 的 ①）⇒ +1 后再还回
+    //   （纹理表面的同形判据在 `d3dx9/surface-getdevice-refcount`）。
+    const std::uint32_t dev_base = f.m.cpu().com ? f.m.cpu().com->refCount(dev.object) : 0u;
     const std::uint32_t dev_out = f.placeU32(0);
     LIFT_CHECK_EQ_U32(f.method(surf, 0x0Cu, {dev_out}), 0u);
     LIFT_CHECK_EQ_U32(f.m.mem().rd32(dev_out), dev.object);
+    LIFT_CHECK_EQ_U32(f.m.cpu().com->refCount(dev.object), dev_base + 1u);  // ← 修前 = dev_base
+    if (f.m.cpu().com->refCount(dev.object) == dev_base + 1u)
+        LIFT_CHECK_EQ_U32(f.method(dev.object, 0x08u, {}), dev_base);  // 还掉借出的那份
     const std::uint32_t desc = f.placeBytes(std::vector<std::uint8_t>(32u, 0));
     LIFT_CHECK_EQ_U32(f.method(surf, 0x30u, {desc}), 0u);
     LIFT_CHECK_EQ_U32(f.m.mem().rd32(desc + 0x18u), 1280u);
@@ -821,6 +846,21 @@ std::uint32_t callD3DXCreateTexture(Fixture& f, std::uint32_t device, std::uint3
     a.callRel(f.code_ea, kProcD3DXCreateTexture);
     a.ret();
     return f.runAsm(a);
+}
+
+// 最小合法顶点声明（16 B）：元素 0 = Stream 0 / Offset 0 / FLOAT3(2) / POSITION(0)，紧跟 D3DDECL_END。
+std::vector<std::uint8_t> positionOnlyDeclaration() {
+    std::vector<std::uint8_t> d(16u, 0u);
+    auto set = [&d](std::size_t off, std::uint32_t v, int bytes) {
+        for (int i = 0; i < bytes; ++i)
+            d[off + static_cast<std::size_t>(i)] = static_cast<std::uint8_t>((v >> (8 * i)) & 0xFF);
+    };
+    set(0u, 0u, 2);    // Stream 0
+    set(2u, 0u, 2);    // Offset 0
+    set(4u, 2u, 1);    // D3DDECLTYPE_FLOAT3
+    set(6u, 0u, 1);    // D3DDECLUSAGE_POSITION
+    set(8u, 0xFFu, 2);  // D3DDECL_END().Stream
+    return d;
 }
 
 // ⑩ 纹理生命周期：**最后一次 Release 是内部裸 release**（设备销毁解绑）时，也必须回收
@@ -1074,6 +1114,499 @@ void caseBackBufferLockRect() {
     LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(f.m.cpu().shim.unimplemented_calls), 0u);
 }
 
+// ---------------------------------------------------------------------------------------
+// ⑫ `GetDevice` 的**引用计数**（REQ-01M701NYF2B3YV1YFSZBMPQZ41 · 第 1 段）
+//
+// 判据（红了意味着什么）：微软文档对 `IDirect3DResource9::GetDevice` 明确写"调用会增加
+//   `IDirect3DDevice9` 的引用计数、调用方必须 Release"（纹理 / VB / IB 都继承它）；
+//   `IDirect3DVertexDeclaration9::GetDevice` 的页面没写，本仓按 `Get*` 家族一致性办。
+//   ⇒ 四处都必须是"返回同一台设备 + 设备 refcount **+1**"，把那一份 Release 掉回到基线。
+//   ★ 修前这四个 shim 都是**裸借出** ⇒ 四条 `base + 1` 断言全红（got = base）。
+//   ★ 反过来它们也盯"加到陌生对象上"：出参没校验时 `out_dev` 仍会是 guest 的初值、
+//     基线断言也会在**前一条**（out == dev.object）先红。
+// ---------------------------------------------------------------------------------------
+void caseResourceGetDeviceRefcount() {
+    lift_test::g_current_case = "d3d9/resource-getdevice-refcount";
+    Fixture f;
+    LIFT_CHECK(f.boot());
+    lift::registerD3DX9Shims(f.m.shims());
+    lift::ShimDef* dx = f.m.shims().findMutable("d3dx9_43", "D3DXCreateTexture");
+    LIFT_CHECK(dx != nullptr);
+    if (!dx) return;
+    dx->stub_ea = kProcD3DXCreateTexture;
+    f.m.cache().installShim(kProcD3DXCreateTexture, dx->id);
+
+    const std::uint32_t d3d9 = f.createDirect3D();
+    LIFT_CHECK_NE_U32(d3d9, 0u);
+    if (d3d9 == 0) return;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(d3d9, 1u, 0x44u, 1280, 720, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+
+    // 基线 = CreateDevice 给的那一份（不从 1 写死：以后设备自己再持引用时用例不用改）
+    const std::uint32_t base = f.m.cpu().com->refCount(dev.object);
+    const std::uint32_t out_dev = f.placeU32(0xDEADBEEFu);
+    const std::uint32_t out = f.placeU32(0xDEADBEEFu);
+    const std::uint32_t decl_ea = f.placeBytes(positionOnlyDeclaration());
+
+    // 每次 `GetDevice` 之后：设备 refcount 必须 +1（借出）、把它还掉回到基线。
+    // ★ 只在"确实借出了那份"时再 Release：缺陷态（没 AddRef）下 Release 会把设备降到 0，
+    //   后面的子块就全成了"在已释放的设备上调方法"，平台异常会把其余断言一起吞掉 ⇒
+    //   一处缺陷只应该红一处，而不是让整个用例组崩掉。
+    auto giveBackBorrowedDeviceRef = [&]() {
+        LIFT_CHECK_EQ_U32(f.m.cpu().com->refCount(dev.object), base + 1u);  // ← 修前 = base
+        if (f.m.cpu().com->refCount(dev.object) == base + 1u)
+            LIFT_CHECK_EQ_U32(f.method(dev.object, 0x08u, {}), base);
+        LIFT_CHECK_EQ_U32(f.m.cpu().com->refCount(dev.object), base);
+    };
+
+    // ① 纹理（`IDirect3DTexture9`，继承 IDirect3DResource9 ⇒ 文档明确 AddRef）
+    LIFT_CHECK_EQ_U32(callD3DXCreateTexture(f, dev.object, 4u, 4u, lift::d3d9::kFmtA8R8G8B8, out), 0u);
+    const std::uint32_t tex = f.m.mem().rd32(out);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    LIFT_CHECK_EQ_U32(f.m.cpu().com->refCount(tex), 1u);
+    LIFT_CHECK_EQ_U32(f.method(tex, 0x0Cu, {out_dev}), 0u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(out_dev), dev.object);
+    giveBackBorrowedDeviceRef();
+
+    // ② 顶点缓冲（IDirect3DVertexBuffer9）
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x68u, {12u, 8u, 0x0044u, 1u, out, 0u}), 0u);
+    const std::uint32_t vb = f.m.mem().rd32(out);
+    LIFT_CHECK_NE_U32(vb, 0u);
+    LIFT_CHECK_EQ_U32(f.method(vb, 0x0Cu, {out_dev}), 0u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(out_dev), dev.object);
+    giveBackBorrowedDeviceRef();
+    LIFT_CHECK_EQ_U32(f.method(vb, 0x08u, {}), 0u);
+    LIFT_CHECK(!f.m.cpu().com->find(vb));
+
+    // ③ 索引缓冲（IDirect3DIndexBuffer9；Format=101 = D3DFMT_INDEX16）
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x6Cu, {12u, 8u, 101u, 1u, out, 0u}), 0u);
+    const std::uint32_t ib = f.m.mem().rd32(out);
+    LIFT_CHECK_NE_U32(ib, 0u);
+    LIFT_CHECK_EQ_U32(f.method(ib, 0x0Cu, {out_dev}), 0u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(out_dev), dev.object);
+    giveBackBorrowedDeviceRef();
+    LIFT_CHECK_EQ_U32(f.method(ib, 0x08u, {}), 0u);
+    LIFT_CHECK(!f.m.cpu().com->find(ib));
+
+    // ④ 顶点声明（IDirect3DVertexDeclaration9；文档未写 ⇒ 家族一致裁决）
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x158u, {decl_ea, out}), 0u);
+    const std::uint32_t vdecl = f.m.mem().rd32(out);
+    LIFT_CHECK_NE_U32(vdecl, 0u);
+    LIFT_CHECK_EQ_U32(f.method(vdecl, 0x0Cu, {out_dev}), 0u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(out_dev), dev.object);
+    giveBackBorrowedDeviceRef();
+    LIFT_CHECK_EQ_U32(f.method(vdecl, 0x08u, {}), 0u);
+    LIFT_CHECK(!f.m.cpu().com->find(vdecl));
+
+    // 收尾：纹理那份 guest 引用也放掉（它没绑过，直接归 0）
+    LIFT_CHECK_EQ_U32(f.method(tex, 0x08u, {}), 0u);
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑬ `GetVertexDeclaration` 的引用计数 + VD 的 `on_zero`
+//
+// 判据（红了意味着什么）：
+//   ① 绑定后 `GetVertexDeclaration` 借出的是**新的一份** ⇒ refCount 1 → 2（修前仍是 1）；
+//   ② guest 放掉自己那份之后 **对象仍在**、`GetDeclaration` 仍逐字节可读（修前它会当场归 0，
+//      对象与 `'VDCL'` 状态块一起没了 —— 这就是"借出裸 EA"的实际危害）；
+//   ③ **最后一份**由宿主侧收敛点（`ComRegistry::releaseImpl`，不是 iface 的 Release shim）放掉时，
+//      `'VDCL'` 状态块必须由 `on_zero` 回收 ⇒ guest 堆回到建声明之前的基线。
+//      ★ 修前 VD 的 `createObject` 没有 `on_zero` ⇒ 这一条红（漏 28 B：12 B 头 + 16 B 声明）。
+// ---------------------------------------------------------------------------------------
+void caseVertexDeclarationGetRefcount() {
+    lift_test::g_current_case = "d3d9/vertex-decl-get-refcount";
+    Fixture f;
+    LIFT_CHECK(f.boot());
+    const std::uint32_t d3d9 = f.createDirect3D();
+    LIFT_CHECK_NE_U32(d3d9, 0u);
+    if (d3d9 == 0) return;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(d3d9, 1u, 0x44u, 1280, 720, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+
+    const std::uint32_t decl_ea = f.placeBytes(positionOnlyDeclaration());
+    const std::uint32_t out = f.placeU32(0xDEADBEEFu);
+    const std::uint32_t got = f.placeU32(0xDEADBEEFu);
+    const std::uint32_t heap_before = f.m.heap().bytesInUse();
+
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x158u, {decl_ea, out}), 0u);
+    const std::uint32_t vdecl = f.m.mem().rd32(out);
+    LIFT_CHECK_NE_U32(vdecl, 0u);
+    if (vdecl == 0) return;
+    LIFT_CHECK_EQ_U32(f.m.cpu().com->refCount(vdecl), 1u);
+
+    // ① 没绑定时 GetVertexDeclaration 返回 0，且**不**给 0 加引用（AddRef 不许发生在"没有对象"上）
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x160u, {got}), 0u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(got), 0u);
+
+    // ② 绑定后借出新的一份
+    //   ★ 段 2（`REQ-01M701NYF2B3YV1YFSZBMPQZ41` 的 ③）之后设备**自己**也持一份绑定引用
+    //     （与 `SetTexture` 同口径）⇒ 这里的三份 = guest 1 + 绑定期 1 + GetVertexDeclaration 借出的 1。
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x15Cu, {vdecl}), 0u);
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x160u, {got}), 0u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(got), vdecl);
+    LIFT_CHECK_EQ_U32(f.m.cpu().com->refCount(vdecl), 3u);  // ← 修前 = 1（既没绑定引用也没借出）
+
+    // ③ guest 放掉自己那份 ⇒ 只剩"绑定期 + Get* 借出"两份：对象仍在、声明内容完好
+    LIFT_CHECK_EQ_U32(f.method(vdecl, 0x08u, {}), 2u);
+    LIFT_CHECK(f.m.cpu().com->find(vdecl));
+    //   ★ 判活再调（同 `caseVertexDeclaration` 的说明）：对象若已经没了，`Fixture::method` 读 vtable
+    //     会打到未提交页，把整个用例组吞掉。
+    if (f.m.cpu().com->find(vdecl)) {
+        const std::uint32_t copy = f.placeBytes(std::vector<std::uint8_t>(16u, 0xEE));
+        LIFT_CHECK_EQ_U32(f.method(vdecl, 0x10u, {copy}), 0u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd8(copy + 4u), 2u);  // D3DDECLTYPE_FLOAT3（状态块没被提前回收）
+    }
+
+    // ④ 解绑 ⇒ 设备那份绑定引用由流水线还回去（不是 guest 还）；然后**最后一份**（借出的那份）
+    //   走**宿主侧收敛点**（等价于任何内部持有者 Release）：on_zero 必须回收 'VDCL'
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x15Cu, {0u}), 0u);
+    LIFT_CHECK_EQ_U32(f.m.cpu().com->refCount(vdecl), 1u);
+    LIFT_CHECK(f.m.cpu().com->release(f.m.cpu(), vdecl));
+    LIFT_CHECK(!f.m.cpu().com->find(vdecl));
+    LIFT_CHECK_EQ_U32(f.m.heap().bytesInUse(), heap_before);  // ← 修前漏 'VDCL'
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑭ `GetTexture` 的引用计数（文档明确 AddRef）
+//
+// 判据（红了意味着什么）：
+//   ① 绑定期设备持一份（`setTexture` 的 addRef，既有口径）；guest 放掉自己那份后是 1；
+//      `GetTexture` 借出 ⇒ 2（**修前 = 1**）；
+//   ② 还掉借出的那份后对象仍在、`'TEX1'` 状态块仍完好（`GetLevelCount` 可读）；
+//   ③ 解绑 ⇒ 最后一次是**内部裸 release** ⇒ 纹理的 `on_zero`（`destroyTextureState`）回收
+//      状态块 + arena 像素块 ⇒ guest 堆与 arena 都回到建纹理之前的基线。
+// ---------------------------------------------------------------------------------------
+void caseGetTextureRefcount() {
+    lift_test::g_current_case = "d3d9/gettexture-refcount";
+    Fixture f;
+    LIFT_CHECK(f.boot());
+    lift::registerD3DX9Shims(f.m.shims());
+    lift::ShimDef* dx = f.m.shims().findMutable("d3dx9_43", "D3DXCreateTexture");
+    LIFT_CHECK(dx != nullptr);
+    if (!dx) return;
+    dx->stub_ea = kProcD3DXCreateTexture;
+    f.m.cache().installShim(kProcD3DXCreateTexture, dx->id);
+
+    const std::uint32_t d3d9 = f.createDirect3D();
+    LIFT_CHECK_NE_U32(d3d9, 0u);
+    if (d3d9 == 0) return;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(d3d9, 1u, 0x44u, 1280, 720, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+
+    const std::uint32_t heap_before = f.m.heap().bytesInUse();
+    const std::size_t surfaces_before = f.m.surfaces().surfaceCount();
+    const std::uint32_t bytes_before = f.m.surfaces().bytesInUse();
+
+    const std::uint32_t out = f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(callD3DXCreateTexture(f, dev.object, 4u, 4u, lift::d3d9::kFmtA8R8G8B8, out), 0u);
+    const std::uint32_t tex = f.m.mem().rd32(out);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return;
+    LIFT_CHECK_EQ_U32(f.m.cpu().com->refCount(tex), 1u);
+
+    // 绑定 ⇒ 设备持一份（SetTexture 的 AddRef，既有口径）；guest 放掉自己那份 ⇒ 1
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x104u, {0u, tex}), 0u);
+    LIFT_CHECK_EQ_U32(f.m.cpu().com->refCount(tex), 2u);
+    LIFT_CHECK_EQ_U32(f.method(tex, 0x08u, {}), 1u);
+
+    // ① GetTexture 借出新的一份
+    const std::uint32_t got = f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x108u, {0u, got}), 0u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(got), tex);
+    LIFT_CHECK_EQ_U32(f.m.cpu().com->refCount(tex), 2u);  // ← 修前 = 1
+
+    // ② 还掉借出的那份 ⇒ 只剩绑定那份，对象与状态块都还在
+    LIFT_CHECK_EQ_U32(f.method(tex, 0x08u, {}), 1u);
+    LIFT_CHECK(f.m.cpu().com->find(tex));
+    //   ★ 判活再调：借出的那份若没加上（缺陷态），对象此刻已经归 0，`Fixture::method` 读 vtable
+    //     会打到未提交页（把后面的断言一起吞掉）。
+    if (f.m.cpu().com->find(tex)) LIFT_CHECK_EQ_U32(f.method(tex, 0x34u, {}), 1u);  // GetLevelCount
+
+    // ③ 解绑 ⇒ 内部裸 release 归 0 ⇒ on_zero 回收像素块 + 'TEX1'，堆 / arena 回基线
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x104u, {0u, 0u}), 0u);
+    LIFT_CHECK(!f.m.cpu().com->find(tex));
+    LIFT_CHECK_EQ_U32(f.m.heap().bytesInUse(), heap_before);
+    LIFT_CHECK_EQ_U32(f.m.surfaces().surfaceCount(), surfaces_before);
+    LIFT_CHECK_EQ_U32(f.m.surfaces().bytesInUse(), bytes_before);
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑮ VB / IB / VD 的 `on_zero`：**最后一次引用由宿主侧内部 release 放掉**时状态块也必须回收
+//
+// 判据（红了意味着什么）：照 `SetTexture` 的形态让宿主替资源持一份引用（`com->addRef`），
+//   guest 放掉自己那份，最后一份走 `com->release`（**不是** iface 的 Release shim）⇒
+//   `'VB09'` / `'IB09'` / `'VDCL'` 状态块必须由 `on_zero` 回收 ⇒ guest 堆逐次回到基线。
+//   ★ 修前这三类 `createObject` 都没传 `on_zero` ⇒ 三条 `bytesInUse()` 逐条红（各漏 40 / 40 / 28 B）。
+//   ★ iface Release shim 那条老路径照旧（`destroy*State` 幂等），所以既有用例不会因此变红 ——
+//     本用例专门盯"内部"那条收敛点。
+// ---------------------------------------------------------------------------------------
+void caseResourceOnZeroInternalRelease() {
+    lift_test::g_current_case = "d3d9/resource-onzero-internal-release";
+    Fixture f;
+    LIFT_CHECK(f.boot());
+    const std::uint32_t d3d9 = f.createDirect3D();
+    LIFT_CHECK_NE_U32(d3d9, 0u);
+    if (d3d9 == 0) return;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(d3d9, 1u, 0x44u, 1280, 720, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+
+    const std::uint32_t heap_base = f.m.heap().bytesInUse();
+    const std::uint32_t out = f.placeU32(0xDEADBEEFu);
+    const std::uint32_t decl_ea = f.placeBytes(positionOnlyDeclaration());
+
+    // ① 顶点缓冲
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x68u, {12u, 8u, 0x0044u, 1u, out, 0u}), 0u);
+    const std::uint32_t vb = f.m.mem().rd32(out);
+    LIFT_CHECK_NE_U32(vb, 0u);
+    LIFT_CHECK(f.m.cpu().com->addRef(f.m.cpu(), vb));   // 宿主侧持一份（= SetTexture 的形态）
+    LIFT_CHECK_EQ_U32(f.method(vb, 0x08u, {}), 1u);      // guest 放掉自己那份
+    LIFT_CHECK(f.m.cpu().com->find(vb));
+    LIFT_CHECK(f.m.cpu().com->release(f.m.cpu(), vb));   // 最后一次：内部裸 release
+    LIFT_CHECK(!f.m.cpu().com->find(vb));
+    LIFT_CHECK_EQ_U32(f.m.heap().bytesInUse(), heap_base);  // ← 修前漏 'VB09'
+
+    // ② 索引缓冲
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x6Cu, {12u, 8u, 101u, 1u, out, 0u}), 0u);
+    const std::uint32_t ib = f.m.mem().rd32(out);
+    LIFT_CHECK_NE_U32(ib, 0u);
+    LIFT_CHECK(f.m.cpu().com->addRef(f.m.cpu(), ib));
+    LIFT_CHECK_EQ_U32(f.method(ib, 0x08u, {}), 1u);
+    LIFT_CHECK(f.m.cpu().com->find(ib));
+    LIFT_CHECK(f.m.cpu().com->release(f.m.cpu(), ib));
+    LIFT_CHECK(!f.m.cpu().com->find(ib));
+    LIFT_CHECK_EQ_U32(f.m.heap().bytesInUse(), heap_base);  // ← 修前漏 'IB09'
+
+    // ③ 顶点声明
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x158u, {decl_ea, out}), 0u);
+    const std::uint32_t vdecl = f.m.mem().rd32(out);
+    LIFT_CHECK_NE_U32(vdecl, 0u);
+    LIFT_CHECK(f.m.cpu().com->addRef(f.m.cpu(), vdecl));
+    LIFT_CHECK_EQ_U32(f.method(vdecl, 0x08u, {}), 1u);
+    LIFT_CHECK(f.m.cpu().com->find(vdecl));
+    LIFT_CHECK(f.m.cpu().com->release(f.m.cpu(), vdecl));
+    LIFT_CHECK(!f.m.cpu().com->find(vdecl));
+    LIFT_CHECK_EQ_U32(f.m.heap().bytesInUse(), heap_base);  // ← 修前漏 'VDCL'
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑯ `GetTexture` 的**身份校验**（`REQ-01M701NYF2B3YV1YFSZBMPQZ41` 段 3 的 ②）
+//
+// 判据（红了意味着什么）：纹理绑定时必须把**对象代际**一起记进流水线（`kPlTextureGens`，与
+//   `kPlVertexDeclGen` 同口径）；`GetTexture` 借出前必须同时证明"iface 还是 IDirect3DTexture9"
+//   与"代际还是绑定时那个"。只 addRef 不校验的旧口径会把**新纹理** +1 交回 guest：
+//   ① 本用例的 `GetTexture` 期望 D3DERR_INVALIDCALL，却返回 S_OK + 新纹理 EA（= 别人的对象）；
+//   ② 新纹理的 refcount 被莫名 +1（期望 1 得 2），guest 之后 Release 它时减的是**自己的**那份。
+//   ★ 正向对照（③）钉住"没有退化成一概拒绝"：槽里还是同一张纹理时 GetTexture 必须借出 +1。
+// ★ 夹具前提（对象 EA 复用 + `'TEX1'` 状态块 EA 复用）硬断言，不成立就红 —— 同
+//   `d3d9p/stale-stream-binding` 的口径（先按 `runtime/heap.cpp` 的分块重造夹具，⛔ 不删断言）。
+// ---------------------------------------------------------------------------------------
+void caseGetTextureStaleGeneration() {
+    lift_test::g_current_case = "d3d9/gettexture-stale-generation";
+    Fixture f;
+    LIFT_CHECK(f.boot());
+    lift::registerD3DX9Shims(f.m.shims());
+    lift::ShimDef* dx = f.m.shims().findMutable("d3dx9_43", "D3DXCreateTexture");
+    LIFT_CHECK(dx != nullptr);
+    if (!dx) return;
+    dx->stub_ea = kProcD3DXCreateTexture;
+    f.m.cache().installShim(kProcD3DXCreateTexture, dx->id);
+
+    const std::uint32_t d3d9 = f.createDirect3D();
+    LIFT_CHECK_NE_U32(d3d9, 0u);
+    if (d3d9 == 0) return;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(d3d9, 1u, 0x44u, 1280, 720, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+    lift::ComRegistry* com = f.m.cpu().com;
+    LIFT_CHECK(com != nullptr);
+    if (com == nullptr) return;
+
+    auto makeTexture = [&](std::uint32_t* out) {
+        const std::uint32_t out_ea = f.placeU32(0xDEADBEEFu);
+        LIFT_CHECK_EQ_U32(callD3DXCreateTexture(f, dev.object, 4u, 4u, lift::d3d9::kFmtA8R8G8B8, out_ea), 0u);
+        *out = f.m.mem().rd32(out_ea);
+        LIFT_CHECK_NE_U32(*out, 0u);
+    };
+
+    std::uint32_t t1 = 0;
+    std::uint32_t t_dummy = 0;
+    makeTexture(&t1);
+    if (t1 == 0) return;
+    const std::uint32_t t1_state = com->userOf(t1);
+    const std::uint32_t t1_gen = com->generationOf(t1);
+    LIFT_CHECK_NE_U32(t1_state, 0u);
+    LIFT_CHECK_NE_U32(t1_gen, 0u);
+    makeTexture(&t_dummy);  // 同尺寸哑纹理：释放后空洞连成一片 ⇒ 新纹理能拿回同一对 EA
+    if (t_dummy == 0) return;
+
+    // 绑 Stage 0 ⇒ 设备持一份（2）；guest 放掉自己那份（1）；越界再放一次 ⇒ 对象死、EA 可复用。
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x104u, {0u, t1}), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(t1), 2u);
+    LIFT_CHECK_EQ_U32(f.method(t1, 0x08u, {}), 1u);
+    if (com->find(t1)) LIFT_CHECK_EQ_U32(f.method(t1, 0x08u, {}), 0u);  // 越界：把设备那份也抵掉
+    LIFT_CHECK(!com->find(t1));
+    LIFT_CHECK_EQ_U32(f.method(t_dummy, 0x08u, {}), 0u);
+
+    std::uint32_t t2 = 0;
+    makeTexture(&t2);
+    if (t2 == 0) return;
+    LIFT_CHECK_EQ_U32(t2, t1);                           // 前提 1：对象 EA 复用
+    LIFT_CHECK_EQ_U32(com->userOf(t2), t1_state);        // 前提 2：`'TEX1'` 状态块 EA 也复用
+    LIFT_CHECK_NE_U32(com->generationOf(t2), t1_gen);    // 前提 3：身份确实换了
+
+    // ② 判据：槽里的 (EA, 代际) 已不是绑定时那张纹理 ⇒ 拒绝借出（⛔ 不把新占有者交回 guest）
+    const std::uint32_t got = f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x108u, {0u, got}), 0x8876086Cu);  // ← 修前 = 0
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(got), 0xDEADBEEFu);                      // 出参没被写
+    LIFT_CHECK_EQ_U32(com->refCount(t2), 1u);                                 // ← 修前 = 2（别人的对象被 +1）
+    LIFT_CHECK(com->find(t2));
+
+    // ③ 正向对照：重新绑同一张（EA 与代际都对上）⇒ GetTexture 必须借出 +1
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x104u, {0u, t2}), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(t2), 2u);  // 设备那份（旧绑定的 releaseIf 被代际拒绝 ⇒ 不减）
+    const std::uint32_t got2 = f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x108u, {0u, got2}), 0u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(got2), t2);
+    LIFT_CHECK_EQ_U32(com->refCount(t2), 3u);
+    LIFT_CHECK_EQ_U32(f.method(t2, 0x08u, {}), 2u);  // 还掉借出的那份
+    // ★ 重复 Set **同一份绑定**（EA + 代际都对）⇒ 两边都不动 ⇒ 计数不漂（不是"每次 +1"）
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x104u, {0u, t2}), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(t2), 2u);
+    // 解绑 ⇒ 设备那份还回；guest 最后那份释放 ⇒ 对象 / `'TEX1'` / 像素块一起回收
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x104u, {0u, 0u}), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(t2), 1u);
+    LIFT_CHECK_EQ_U32(f.method(t2, 0x08u, {}), 0u);
+    LIFT_CHECK(!com->find(t2));
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑰ `SetFVF` 两个清声明的分支都必须**还回绑定引用**（`REQ-01M701NYF2B3YV1YFSZBMPQZ41` 段 3 的 ⑤）
+//
+// 判据（红了意味着什么）：`FVF` 与顶点声明是二选一 ⇒ `SetFVF(0)`（合法清除）与 `SetFVF(有效值)`
+//   都要把设备替那句声明持的引用还回去。漏掉任一支 = 声明永远到不了 0（`'VDCL'` 留在堆上）⇒
+//   对象仍 `find()` 得到、堆基线高出声明块。
+//   ★ 复审实测过：把 `fvf == 0` 那一支改成"只清槽不还引用"，旧用例仍全绿 —— 所以这里两支各一条判据。
+//   ★ 修前这一支没有守卫（`SetFVF(0)` 在整套 CTest 里一次都没被调用过）。
+// ---------------------------------------------------------------------------------------
+void caseSetFVFReleasesDecl() {
+    lift_test::g_current_case = "d3d9/setfvf-releases-decl";
+    Fixture f;
+    LIFT_CHECK(f.boot());
+    const std::uint32_t d3d9 = f.createDirect3D();
+    LIFT_CHECK_NE_U32(d3d9, 0u);
+    if (d3d9 == 0) return;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(d3d9, 1u, 0x44u, 1280, 720, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+    lift::ComRegistry* com = f.m.cpu().com;
+    LIFT_CHECK(com != nullptr);
+    if (com == nullptr) return;
+
+    const std::uint32_t heap_before = f.m.heap().bytesInUse();
+    const std::uint32_t decl_ea = f.placeBytes(positionOnlyDeclaration());
+    const std::uint32_t out = f.placeU32(0xDEADBEEFu);
+
+    // ① `SetFVF(0)`（合法清除）：绑定引用必须还回 ⇒ guest 那份一放就归 0
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x158u, {decl_ea, out}), 0u);
+    const std::uint32_t vdecl = f.m.mem().rd32(out);
+    LIFT_CHECK_NE_U32(vdecl, 0u);
+    if (vdecl == 0) return;
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x15Cu, {vdecl}), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(vdecl), 2u);       // guest 1 + 设备绑定 1
+    LIFT_CHECK_EQ_U32(f.method(vdecl, 0x08u, {}), 1u);  // guest 放掉自己那份
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x164u, {0u}), 0u);  // SetFVF(0)
+    LIFT_CHECK(!com->find(vdecl));                              // ← 修前：对象还活着（绑定引用没还）
+    LIFT_CHECK_EQ_U32(f.m.heap().bytesInUse(), heap_before);    // ← 修前：`'VDCL'` 留在堆上
+
+    // ② `SetFVF(有效值)`：同一判据（这一支原本由 `d3d9/vertex-declaration` 的堆基线守着）
+    const std::uint32_t out2 = f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x158u, {decl_ea, out2}), 0u);
+    const std::uint32_t vdecl2 = f.m.mem().rd32(out2);
+    LIFT_CHECK_NE_U32(vdecl2, 0u);
+    if (vdecl2 == 0) return;
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x15Cu, {vdecl2}), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(vdecl2), 2u);
+    LIFT_CHECK_EQ_U32(f.method(vdecl2, 0x08u, {}), 1u);
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x164u, {0x0044u}), 0u);  // SetFVF(XYZ|DIFFUSE? 0x44)
+    LIFT_CHECK(!com->find(vdecl2));
+    LIFT_CHECK_EQ_U32(f.m.heap().bytesInUse(), heap_before);
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑱ 同一 EA 的**新顶点声明**再 `SetVertexDeclaration`（段 3 的 ③，声明这一格）
+//
+// 判据（红了意味着什么）：槽里同时存 (EA, 代际)。guest 堆复用 EA ⇒ 同 EA 不同代际是**新对象**：
+//   必须给它 addRef（设备绑定引用）、并把旧绑定按 (EA, 旧代际) 判还（`releaseIf` 会拒绝 ⇒ 只出声）。
+//   旧判据只比 EA ⇒ "同 EA"被当"重复 Set 同一个" ⇒ 新声明**没有**绑定引用，guest 一放就归 0
+//   （对象 + `'VDCL'` 当场没；修前 `expected 1, got 0`）。
+//   ★ 三处 Set*（声明 / 流 / 索引）同形；流与索引的对应判据在 `d3d9p/binding-lifetime` 的 ③-D/E。
+// ---------------------------------------------------------------------------------------
+void caseVertexDeclarationStaleRebind() {
+    lift_test::g_current_case = "d3d9/vertex-decl-stale-rebind";
+    Fixture f;
+    LIFT_CHECK(f.boot());
+    const std::uint32_t d3d9 = f.createDirect3D();
+    LIFT_CHECK_NE_U32(d3d9, 0u);
+    if (d3d9 == 0) return;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(d3d9, 1u, 0x44u, 1280, 720, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+    lift::ComRegistry* com = f.m.cpu().com;
+    LIFT_CHECK(com != nullptr);
+    if (com == nullptr) return;
+
+    const std::uint32_t heap_before = f.m.heap().bytesInUse();
+    const std::uint32_t decl_ea = f.placeBytes(positionOnlyDeclaration());
+    const std::uint32_t out = f.placeU32(0xDEADBEEFu);
+
+    // 声明 1 + 哑声明（同尺寸 ⇒ 一起释放后空洞连成一片，新声明能拿回同一对 EA）
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x158u, {decl_ea, out}), 0u);
+    const std::uint32_t v1 = f.m.mem().rd32(out);
+    LIFT_CHECK_NE_U32(v1, 0u);
+    if (v1 == 0) return;
+    const std::uint32_t v1_state = com->userOf(v1);
+    const std::uint32_t v1_gen = com->generationOf(v1);
+    LIFT_CHECK_NE_U32(v1_state, 0u);
+    LIFT_CHECK_NE_U32(v1_gen, 0u);
+    const std::uint32_t out_dummy = f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x158u, {decl_ea, out_dummy}), 0u);
+    const std::uint32_t v_dummy = f.m.mem().rd32(out_dummy);
+    LIFT_CHECK_NE_U32(v_dummy, 0u);
+    if (v_dummy == 0) return;
+
+    // 绑定 ⇒ 设备持一份（2）；guest 放掉自己那份（1）；越界再放一次 ⇒ 对象死、EA 可复用
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x15Cu, {v1}), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(v1), 2u);
+    LIFT_CHECK_EQ_U32(f.method(v1, 0x08u, {}), 1u);
+    if (com->find(v1)) LIFT_CHECK_EQ_U32(f.method(v1, 0x08u, {}), 0u);
+    LIFT_CHECK(!com->find(v1));
+    LIFT_CHECK_EQ_U32(f.method(v_dummy, 0x08u, {}), 0u);
+
+    // 新声明拿回同一对 EA（对象 EA + `'VDCL'` 状态块 EA），代际不同
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x158u, {decl_ea, out}), 0u);
+    const std::uint32_t v2 = f.m.mem().rd32(out);
+    LIFT_CHECK_EQ_U32(v2, v1);                        // 前提 1：对象 EA 复用
+    LIFT_CHECK_EQ_U32(com->userOf(v2), v1_state);      // 前提 2：状态块 EA 也复用
+    LIFT_CHECK_NE_U32(com->generationOf(v2), v1_gen);  // 前提 3：身份换了
+
+    // ③ 判据：同 EA 不同代际 ⇒ 视为**新对象** ⇒ 正常 addRef 新的、旧绑定按代际判还
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x15Cu, {v2}), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(v2), 2u);  // ← 修前 = 1（被当成"重复 Set 同一个"）
+    // ★ 重复 Set **同一份绑定**（EA + 代际都对）⇒ 不再 addRef（计数不漂）
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x15Cu, {v2}), 0u);
+    LIFT_CHECK_EQ_U32(com->refCount(v2), 2u);
+    LIFT_CHECK_EQ_U32(f.method(v2, 0x08u, {}), 1u);  // guest 放掉自己那份 ⇒ 设备那份还在
+    LIFT_CHECK(com->find(v2));                       // ← 修前：对象当场归 0
+    // 解绑 ⇒ 设备那份还回 ⇒ 对象 / `'VDCL'` / 堆一起回基线
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x15Cu, {0u}), 0u);
+    LIFT_CHECK(!com->find(v2));
+    LIFT_CHECK_EQ_U32(f.m.heap().bytesInUse(), heap_before);
+}
+
 }  // namespace
 
 int main() {
@@ -1092,6 +1625,13 @@ int main() {
         caseTextureBoundThenGuestRelease();
         caseArenaReclaimUnderOtherMachine();
         caseUnimplementedSlotTraps();
+        caseResourceGetDeviceRefcount();
+        caseVertexDeclarationGetRefcount();
+        caseGetTextureRefcount();
+        caseResourceOnZeroInternalRelease();
+        caseGetTextureStaleGeneration();
+        caseSetFVFReleasesDecl();
+        caseVertexDeclarationStaleRebind();
         return finish("d3d9");
     } catch (const std::exception& e) {
         std::fprintf(stderr, "DIAG uncaught std::exception: %s\n", e.what());

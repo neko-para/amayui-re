@@ -2,18 +2,11 @@
 
 - id: REQ-01M6XVZF3VDC5NSBJ20J2451VJ
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
 - order: 6
-- tags: [emulator-lift, performance]
-
-# emulator-lift · 每帧固定税：0x4BBAB0（DirectSound 槽管理器）空转 79 s 内 2.77M 次调用（3 槽轮询）
-
-- id: REQ-01M6XVZF3VDC5NSBJ20J2451VJ
-- type: req
-- status: open
-- parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
-- order: 6
+- verify: apps/emulator-lift/tests/voice_poll.cpp#lift-voice-poll
+- done_reason: A 案已落地：0x4BBAB0 的 NativeOverride 只接管「三槽全惰性」纯查询支（只读 7 dword、零写、*result=0），其余回退解释器；补偿 k=60。守卫 lift-voice-poll 13 组/134 断言（变异：放宽 active 判据 ⇒ 29 红）。A/B（RelWithDebInfo，N=3 交错，只差 --native-overrides all vs all,-sub_4BBAB0）：hits 274,541/274,685/274,505 且 fast_hits==hits=100%、declines=[]；被替代 16.47M insn = 总 insns 1.41%；墙钟 A 中位 1.15% 快但组内散布 ≥ 差值 ⇒ 测不出可靠方向性；像素 15 张 BMP 逐字节相同。判据订正：原写「调用次数下降」与设计不符，改成「被替代指令数 + 墙钟 + 像素」。
 - tags: [emulator-lift, performance]
 
 ## 观测
@@ -54,3 +47,21 @@
 - **诚实项**：这 2.77M 里"语义必需"的**逐次分类数字**本轮给不出（原始 profile artifacts 已不在，且不许跑）——只给结构判据与取数口
   （`fast_hits` / `declines[]`）。副产品：`T_Voice` 实体 ≥`0x490`（shape 记 `0x484` 且缺 `0x484` 那张表）⇒ 建议挂 shape 残差。
 - 分析全文 `.tmp/reveq/01M6XVZF3VDC5NSBJ20J2451VJ/analysis.md`（**不入库**；入库的是本节要点）。
+
+## 收口（2026-11-10）：A 案已落地 + A/B 读数 + 一处判据订正
+
+- **实现**：`repo:apps/emulator-lift/src/runtime/native_voice.cpp`（纯核 `voiceTickIsPureQuery` + `nativeVoiceTick4BBAB0`）注册进
+  `kKnown`（thiscall / 4 B，`kMax 12→13`）；只接管"**三槽全惰性**"的纯查询支（`*result=0`、**只读 7 个 dword、零写**），
+  内层扫描 / 已启动 / 首 tick / 未到期**与**到期 / 无设备 / 读不到 ⇒ 一律回退解释器。时钟 + insns 补偿 **k=60**（fn 补 59，dispatcher 补 1）。
+- **守卫**：pure CTest `lift-voice-poll`（顶层 `add_test`）**13 组 / 134 断言**；变异一条（把 `active==0` 放宽成 `active<2`）⇒ **29 条断言红**。
+- **判据订正（父级裁决）**：原判据写"改后**调用次数下降**"——那与设计不符：**调用次数不变**，省的是每次被替代的 60 条解释指令。
+  ⇒ 计量口径改成"被替代的指令数 + 墙钟 + 像素等价"，本条不再是"次数下降"。
+- **A/B 读数**（RelWithDebInfo，两条命令只差 `--native-overrides all` vs `all,-sub_4BBAB0`，交错 N=3，`at frame 600 / wait 2900 frames / quit`）：
+  - `sub_4BBAB0` 进入 **274,541 / 274,685 / 274,505** 次，**`fast_hits == hits`（100.00%）、`declines=[]`（8 桶全 0）**；
+    被替代 = 274,541×60 = **16.47 M 条 = 总 insns 的 1.41%**。
+  - 墙钟 A 中位 111,881 ms vs B 113,166 ms（A 快 1.15%，CPU 0.77%）—— 但**组内散布 ≥ 差值、3 对只 2 对同向 ⇒ 本机测不出可靠方向性**（机制预测正是 0.5–1% 量级）。
+  - **像素逐字节 0 差**：15 张 BMP（含 boot 帧）同一 sha256。⚠ TITLE 空转是静态画面 ⇒ 只算"无可见差异"。
+  - 交叉核对：A 的 `native-ovr` 总 hits − B 的 149,221（三遍逐位相同）= 逐遍 `sub_4BBAB0` hits ⇒ 两臂**只差这一项**。
+- **残差**（不要当"没做"重复记）：① 墙钟方向性要 N=8–10 或 ~5 min/遍空转才能坐实；② 单里 2.77M / 79 s 的原窗口**复现不出**
+  （本窗口 ≈1.5k 次/s），可传输口径是**比例（本窗口 100% 纯查询）**而不是绝对次数；③ 函数级自耗毫秒必须开 `--profile`
+  （profiler 有膨胀，⛔ 不能当基线）；④ `T_Voice` 实体 ≥`0x490`（shape 记 `0x484`）⇒ 归 shape 侧，本单未动 `data/shape/`。

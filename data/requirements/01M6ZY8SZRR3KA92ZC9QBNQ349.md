@@ -2,8 +2,9 @@
 
 - id: REQ-01M6ZY8SZRR3KA92ZC9QBNQ349
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
+- verify: apps/emulator-lift/tests/ddraw.cpp#ddraw/release-owner-not-active
 - repro: apps/emulator-lift/src/runtime/ddraw_surface.cpp#destroySurfaceState
 - severity: S3
 - tags: [emulator-lift, ddraw, leak, m2]

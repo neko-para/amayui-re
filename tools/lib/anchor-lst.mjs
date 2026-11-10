@@ -50,8 +50,25 @@ export function isRealInsnLine(body) {
   return !FAKE_LINE_RES.some((re) => re.test(body));
 }
 
-/** 折叠 / 孤立块的注释行（保守判成站点，不算"落在指令中间"） */
-export const COLLAPSED_RE = /COLLAPSED FUNCTION|START OF FUNCTION CHUNK/i;
+/**
+ * 折叠 / 孤立块的注释行（保守判成站点，不算"落在指令中间"）。
+ *
+ * ★ 判据是"**注释行里出现 `COLLAPSED`**"，不是"出现某个固定短语"。IDA 对同一件事有两种说法：
+ *   `; [NNNNNNNN BYTES: COLLAPSED FUNCTION <名>. …]`（整个函数被折叠）
+ *   `; [NNNNNNNN BYTES: COLLAPSED CHUNK OF FUNCTION <名>. …]`（函数的**一段**被折叠）
+ *   只认前一种的代价（本单实测，`REQ-01M71BT8GMBMMYQNA8FGWWJB`）：后者 **122 行**整类漏掉 ⇒ 那些 EA 的
+ *   `collapsed` 是 `false`，被当成"函数体只有一行注释"的普通站点（`bodies` 只有一条注释放不进真正的指令），
+ *   依赖它的判定在这一类站点上**绿而错**。所以这里只看词根 `COLLAPSED`（两种说法都含它）；
+ *   形态差异留给 `disasm.mjs` 的 `parseCollapsedLine`（那里要**读出长度**）。
+ *   第三种是 `; START OF FUNCTION CHUNK FOR sub_XXXXXX`（孤立 CHUNK，没有 `[NNNN BYTES:`）—— 它**不含** `COLLAPSED`，
+ *   单独保留：它也是折叠块的位置（不是函数体），语义与前两者同一类。
+ *
+ * ★ 裸 `COLLAPSED` 不会吸进别的东西：`parseListingText` 在调用处先过 `isCommentLine`，
+ *   而这个词只会出现在 IDA 的折叠注释里（指令行没有 `;` 正文）。
+ * ★ 守卫：`tools/test/anchor-lst-collapsed.assets.test.mjs` 机械遍历语料的**每一条**注释行，
+ *   要求"含 `COLLAPSED` ⇒ 必须命中"，不许只看一个样例。
+ */
+export const COLLAPSED_RE = /COLLAPSED|START OF FUNCTION CHUNK/i;
 
 /**
  * 解析 listing 文本 ⇒ 索引。

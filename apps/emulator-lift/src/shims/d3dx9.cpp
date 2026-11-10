@@ -478,6 +478,18 @@ void shimTextureGetDevice(X86& cpu, ShimCall& call) {
         call.result = d3d9::kInvalidArg;
         return;
     }
+    // ★ `IDirect3DResource9::GetDevice` 的文档明确："Calling this method will increase the internal
+    //   reference count on the IDirect3DDevice9 interface. Failure to call IUnknown::Release when
+    //   finished ... results in a memory leak." ⇒ 借出的是一份**新引用**。
+    //   · guest 不 Release ⇒ 设备对象永远到不了 0：`destroyDeviceState` 不跑（后缓冲 / 深度 /
+    //     流水线块 + 绑定的纹理全漏，`caseTextureBoundThenGuestRelease` 那种按 arena 基线判的用例会红）；
+    //   · guest 多 Release ⇒ 减掉的是设备自己那份（CreateDevice 给的），设备会被提前回收。
+    //   ⛔ 顺序：先校验出参再 AddRef（绝不把引用加到"还没确认能给出去"的对象上）。
+    if (ti.device != 0 && !cpu.com->addRef(cpu, ti.device)) {
+        d3dxWarn("IDirect3DTexture9::GetDevice", "设备 0x%08X 借不出引用（已不是本模块的对象）", ti.device);
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
     cpu.mem->wr32(out_ea, ti.device);
     call.result = d3d9::kOk;
 }
@@ -607,8 +619,10 @@ void shimTextureGetSurfaceLevel(X86& cpu, ShimCall& call) {
         call.result = d3d9::kFail;
         return;
     }
-    // ★ owner = 父纹理对象（`self`）：像素块 + 'TEX1' 状态块的寿命挂在纹理对象的 refcount 上，
-    //   surface 自己**没有**析构钩子（见 com.h 文件头）⇒ 绑定为 RT 时必须经 `ownerOf` 保住它。
+    // ★ owner = 父纹理对象（`self`）：像素块 + 'TEX1' 状态块的寿命挂在纹理对象的 refcount 上。
+    //   `createD3dxSurfaceObject` 会**替父纹理持一份引用**（A 方案 / REQ-01M6ZZZ6PEVSFB93C6VJPKC04C）
+    //   ⇒ guest 先 Release 纹理、仍持这个 surface 时，状态块与像素块都还在（surface 到 0 才回收）。
+    //   绑定为 RT 时 `SetRenderTarget` 还会**另**加一份（绑定期的语义引用，见 d3d9_pipeline.cpp）。
     const std::uint32_t surface = createD3dxSurfaceObject(cpu, state, self);
     if (surface == 0) {
         d3dxTrap(cpu, "IDirect3DTexture9::GetSurfaceLevel(+0x48)", "在 guest 内存里建 surface 对象失败");
@@ -705,6 +719,16 @@ void shimSurfaceGetDevice(X86& cpu, ShimCall& call) {
     const std::uint32_t out_ea = call.u32(1);
     if (out_ea == 0 || !cpu.mem->committed(out_ea, 4)) {
         call.result = d3d9::kInvalidArg;
+        return;
+    }
+    // ★ `IDirect3DSurface9` 继承 `IDirect3DResource9` ⇒ `GetDevice` 的文档与纹理 / VB / IB / 顶点声明
+    //   是**同一条**："Calling this method will increase the internal reference count on the
+    //   IDirect3DDevice9 interface. Failure to call IUnknown::Release ... results in a memory leak."
+    //   ⇒ 借出的是一份**新引用**（与段 1 已统一的 `IDirect3DResource9::GetDevice` 家族一致）。
+    //   ⛔ 顺序：先校验出参再 AddRef（绝不把引用加到"还没确认能给出去"的对象上）。
+    if (ti.device != 0 && !cpu.com->addRef(cpu, ti.device)) {
+        d3dxWarn("IDirect3DSurface9::GetDevice", "设备 0x%08X 借不出引用（已不是本模块的对象）", ti.device);
+        call.result = d3d9::kInvalidCall;
         return;
     }
     cpu.mem->wr32(out_ea, ti.device);
@@ -1418,7 +1442,25 @@ const std::vector<ComMethod>& spriteMethods() {
 
 std::uint32_t createD3dxSurfaceObject(X86& cpu, std::uint32_t user, std::uint32_t owner) {
     if (!cpu.com) return 0;
-    return cpu.com->createObject(cpu, "IDirect3DSurface9", surfaceMethods(), user, nullptr, owner);
+    // ★ A 方案（`REQ-01M6ZZZ6PEVSFB93C6VJPKC04C`）：`owner != 0` 的 surface **替父纹理持一份引用**。
+    //   ① 加引用必须在"父纹理 refcount 归零"**之前**：`GetSurfaceLevel` 是在纹理对象的方法里被调到的，
+    //      那一刻它的 refcount ≥ 1 ⇒ 这里加完就再也不会归零，直到 surface 自己也到 0。
+    //      ⛔ 不是"建完 surface 再补"：那个窗口里任何一次 Release 都会让 `destroyTextureState` 把像素块 +
+    //      `'TEX1'` 状态块回收掉 ⇒ surface 的 `user` 当场变成悬空 EA（本单的缺陷本身）。
+    //   ② 还回去的地点是 `ComRegistry::releaseImpl` 的唯一收敛点（`owns_owner`）：内部裸
+    //      `cpu.com->release` 与 guest 走 iface `Release` 都会到那里。⛔ 不能只挂在 `shimSurfaceRelease`
+    //      上 —— 那会让"流水线内部裸 release"漏掉这份引用（= 纹理永远到不了 0）。
+    //   ③ `owner == 0`（后缓冲表面）什么都不做：它没有可持的父对象，布局 / refcount 一字不改。
+    if (owner != 0 && !cpu.com->addRef(cpu, owner)) {
+        d3dxWarn("createD3dxSurfaceObject", "对父对象 0x%08X addRef 失败（不在对象表里？）⇒ 不建 surface",
+                 owner);
+        return 0;
+    }
+    const std::uint32_t obj = cpu.com->createObject(cpu, "IDirect3DSurface9", surfaceMethods(), user, nullptr,
+                                                    owner, /*owns_owner=*/owner != 0);
+    // 建对象失败 ⇒ 把刚加的那一份还回去（否则父纹理凭空多 1 个引用，谁都减不掉 = 静默泄漏）。
+    if (obj == 0 && owner != 0) cpu.com->release(cpu, owner);
+    return obj;
 }
 
 void registerD3DX9Shims(ShimRegistry& shims) {

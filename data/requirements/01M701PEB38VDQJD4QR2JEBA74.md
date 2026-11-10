@@ -2,8 +2,9 @@
 
 - id: REQ-01M701PEB38VDQJD4QR2JEBA74
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
+- verify: apps/emulator-lift/tests/profile_window.cpp#profile-window-runtime-append-arm
 - repro: apps/emulator-lift/src/runtime/machine.cpp#window_prof_.setArmed
 - severity: S3
 - tags: [emulator-lift, tooling, profiler]
@@ -28,6 +29,16 @@
 - 守卫（必须能红）：pure CTest —— 用合成输入走"**运行期 appendText** 追加 `profile_begin/end`"的路径，
   断言窗口表的 `insns` / shim 计数**非 0**（修前为 0 ⇒ 红）；变异 = 去掉重新 arm 那一行。
   现有 `repo:apps/emulator-lift/tests/profile_window.cpp` 是合适落点。
+
+## 收口（2026-11-09，已落地）
+
+- 选的是**第一条**：「`InputScript` 消费 `ProfileBegin` 的那一刻（`Machine::pumpScript` 里 `takeProfileBegin` 成功处）重新 arm」，
+  并同时打开 shim 计时与摘要里的 `window-prof` 位（否则窗口里的 shim 行只有 `calls`、`ns` 恒 0，仍是残表）；
+  `closeProfileWindow` 在仍未 arm 时打一行"残表"告警。
+- 守卫 `repo:apps/emulator-lift/tests/profile_window.cpp` 的 `profile-window-runtime-append-arm`（7 条断言，修前全红）；
+  变异 `tools/mutate-check.mjs` 一条（`--match profile-window-runtime-append-arm` 实测红后自动还原）。
+- 端到端（真图 + 真安装）**没有**进 pure 守卫：bare machine 无 Present ⇒ 图的 `at frame <F+1>` 永不到期。
+  该缺口在装安装树的 assets 档才有意义，属性能单 `REQ-01M6XVZ8AXJNG492WA2QAMTA35` 的测量口径。
 
 ## 与别的单的关系
 

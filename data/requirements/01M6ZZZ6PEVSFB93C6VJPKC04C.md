@@ -2,8 +2,9 @@
 
 - id: REQ-01M6ZZZ6PEVSFB93C6VJPKC04C
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
+- verify: apps/emulator-lift/tests/d3dx9.cpp#d3dx9/surface-keeps-parent-alive
 - repro: apps/emulator-lift/src/shims/d3dx9_surface.h#createD3dxSurfaceObject
 - severity: S3
 - tags: [emulator-lift, d3dx9, lifetime, m2]
@@ -32,6 +33,19 @@
 - ⛔ 不许把 `user` 改成"查不到就 silent 0"：那会把"读已释放"伪装成"没有扩展块"。
 - 守卫：`repo:apps/emulator-lift/tests/d3dx9.cpp` 造"纹理 Release → 仍持 surface → `LockRect`/`GetDesc`"，
   断言 surface 仍可用且 `user` 指向的块仍归它（A 方案下 = 纹理没被回收）；变异把配对 addRef 短路 ⇒ 红。
+
+## 裁决与收口（2026-11-09）
+
+- **裁决：选 A 方案**（surface 对父纹理 addRef，`on_zero` 成对归还）。理由：语义最接近真机、不动内存布局；
+  B 方案要复制/转移像素块，代价与"内存翻倍"不成比例。
+- 落地：`createD3dxSurfaceObject` 在建对象**之前** addRef（建失败归还）；归还走 `ComRegistry::releaseImpl` 的
+  **同一收敛点**（新 `owns_owner` 字段 + `giveBackOwner()`），⛔ 没有影子回收。
+- 连锁交付：`tests/d3d9_pipeline.cpp` 的 known-deviation 用例按它自己的文件头预言**翻成正向**
+  （`d3d9p/owner-lifetime-and-stale-generation`：① `SetRenderTarget` = `kOk` + `color_arena` == 该纹理 arena；
+  ② 越界释放仍是负向，"陈旧 owner 不许绑 / 不许解绑"由 ②-b 守）。
+- 守卫 `repo:apps/emulator-lift/tests/d3dx9.cpp` 的 `d3dx9/surface-keeps-parent-alive`（修前 11 条红，
+  红输出里能直接看到 `'TEX1'` magic 变 0、`GetDesc` 读到野值）；变异 `04C-surface-holds-parent`。
+- 既有期望变化：`tests/d3dx9.cpp` **0 处**；`tests/d3d9_pipeline.cpp` 只改那条自己声明要翻面的用例。
 
 ## 与别的单的关系
 

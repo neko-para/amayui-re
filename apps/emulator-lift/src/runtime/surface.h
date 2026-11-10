@@ -4,12 +4,21 @@
 //   guest 的 BMP 缩略图代码按 pitch + 通道掩码直接读）。⛔ 不能把宿主 `malloc` 指针交给 guest。
 // ★ 这里只做“像素 + 格式 + 锁计数 + 哈希”的叶子设施；DDraw 对象 / vtable 在 P1。
 // ★ 分配器 = 一个独立的 `GuestHeap` 区间（不与 Win32 堆共享），这样 `destroy` 可复用。
+//
+// ★ **并发契约**（`guest_token.h` 的不变量）：`SurfaceArena` 是 guest 可见的共享容器之一
+//   （`surfaces_` 是宿主 `std::map`、`heap_` 是独立的 `GuestHeap`）⇒ 它的**簿记入口**
+//   （create / destroy / find / lock / unlock）只能在**持令牌**时进。这些入口现在都会
+//   `guestToken().check("arena.<op>")`：令牌之外访问 ⇒ `++violations`（`--assert-guest-token`
+//   判红）**并**在 stderr 打一行（一次运行只打一次，避免热路径刷屏）。
+//   ⛔ 不要因为"读一下 map 看起来无害"就把新入口漏掉 check —— 那正是这一轮补的缺口。
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <map>
 #include <string>
 
+#include "runtime/guest_token.h"
 #include "runtime/heap.h"
 #include "runtime/memory.h"
 
@@ -79,11 +88,21 @@ public:
     std::uint32_t peak() const { return heap_.peak(); }
     std::uint32_t largestFreeBlock() const { return heap_.largestFreeBlock(); }
 
+    // ★ 诊断（`--assert-guest-token` 的配套）：`checkToken` 真的**喊出来过**几次
+    //   （0 / 1 —— 只报第一次，之后靠 `violations` 计数）。判据是"喊了"，不是"喊了几次"。
+    std::uint64_t violationReports() const { return reports_.load(std::memory_order_relaxed); }
+
 private:
+    // 簿记入口的令牌检查点：未持令牌 ⇒ 计数（guest_token.h）+ 一次 stderr 响亮报告。
+    // ⚠ 与 `GuestToken::check` 一样**不改变返回值**：违规要能活着进摘要（`--assert-guest-token`
+    //   才判得了红）；⛔ 不要在这里返回 false 让调用方"失败" —— 那会把账藏进一条错误路径。
+    void checkToken(const char* site) const;
+
     GuestMemory* mem_ = nullptr;
     GuestHeap heap_;
     std::map<std::uint32_t, GuestSurface> surfaces_;
     char last_error_[256] = {};
+    mutable std::atomic<std::uint64_t> reports_{0};
 };
 
 }  // namespace lift

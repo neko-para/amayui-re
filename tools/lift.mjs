@@ -3,7 +3,7 @@
  * tools/lift.mjs — **CLI**：`data/lift/overrides.json`（emulator-lift 覆盖清单）的自描述 / 校验 / 同步 / 报告
  *               + `.lst` 语料报告。
  *
- * 经派发器：`pnpm tools lift <describe|check|report|corpus-report|sync> [args…]`
+ * 经派发器：`pnpm tools lift <describe|check|report|bench|corpus-report|sync|diff> [args…]`
  * 也可独立跑：`node tools/lift.mjs --check`
  *
  * ★ 分工（`tools/README.md` §0）：本文件只做"读 → 判 → 打印 / 落盘"；字段语义的唯一真源
@@ -37,6 +37,8 @@ export const DOMAIN = {
     '`apps/emulator-lift/src/shims/register_import_gaps.cpp`（**派生、入库**：导入表缺口的显式登记，`sync --write` 生成）',
     '`corpus/assets/age/AGE.EXE__dumped.sectfix.EXE`（PE 导入表 / sha256，只读）',
     '`corpus/disasm/files/AGE.EXE__dumped.sectfix.EXE.lst`（语料：指令行 / 段 / collapsed，只读）',
+    '`apps/emulator-lift/scripts/bench/*.txt`（`bench` 的工况脚本 = `--input-script` 时间线，**入库**）',
+    '`.cache/lift-bench/*.json`（`bench` 的读数：N 遍原始值 + 中位数 + build / 二进制 / 工作树指纹；**派生、gitignored**）',
   ],
   access: '`overrides.json` 与 `register_import_gaps.cpp` 只经 `sync --write` 写；其余全部只读',
   tool: 'tools/lift.mjs',
@@ -46,6 +48,7 @@ export const OPERATIONS = [
   { name: 'describe', argv: ['--describe'], mutates: false, summary: '自描述：字段 / 枚举 / 不变量（含谁在守）/ 操作（schema 真源）' },
   { name: 'check', argv: ['--check'], mutates: false, summary: '全量校验：JSON ↔ C++ 注册表 ↔ PE 导入表 ↔ 派生缺口文件（红 ⇒ 退出码 1）' },
   { name: 'report', argv: ['--report'], mutates: false, summary: '覆盖报告：implemented / stub / bare / never-imported 四类计数 + 逐条清单；`--bench N` 顺带把 MIPS 写进报告（S8）' },
+  { name: 'bench', argv: ['--bench'], mutates: true, summary: '吞吐基线（一条命令 + 落文件）：同一 `--input-script` 工况独立子进程跑 N 遍，取中位数 ms/百万条指令 + MIPS，落 `.cache/lift-bench/*.json`（⛔ 不重建、不跑 ctest；与 `report --bench` 的合成循环单样本**不是**一回事）' },
   { name: 'sync', argv: ['--sync'], mutates: true, summary: '把 C++ 注册表与 PE 导入表派生到 `overrides.json` + `register_import_gaps.cpp`（缺省 dry-run，`--write` 落盘）' },
   { name: 'corpus-report', argv: ['--corpus-report'], mutates: false, summary: '`.lst` 语料报告：指令行 / 助记符形态 / 段 / collapsed / x87·MMX·SSE 计数' },
   { name: 'diff', argv: ['--diff'], mutates: false, summary: '两张 BMP 逐像素比对：max-diff / diff-pixels / diff-ratio / at=x,y；退出码 0=全在 tolerance 内 · 1=有像素超差 · 2=参数/读文件/格式错' },
@@ -1109,6 +1112,412 @@ export function runBench(insns = 2000000) {
 }
 
 // ---------------------------------------------------------------------------------------
+// bench（吞吐基线：**一条命令 + 落文件**）
+//
+// ★ 与上面 `runBench`（`lift-bench.exe` 的合成循环、单次样本、不落文件）**不是**一回事：
+//   那个只能当 core 探针（`pnpm tools lift report --bench N`），⛔ 不当基线。
+//   基线的定义：**真工况**（`--input-script` 驱动真游戏）+ **N 个独立子进程** + **中位数** + **落文件**，
+//   并把口径一起记下来（build 类型 / 二进制 sha256+mtime / 工作树指纹 / 命令行原文）。
+//
+// ★ 为什么不需要 profiler：`--present window` 是 **real-time** 时钟 ⇒ 两个
+//   `at insn N` + `wait 0 insn` 打点之间 `guest_ms` 的差 = **宿主毫秒**。
+//   所以窗口吞吐 = Δinsns / Δguest_ms，直接读 `[input-script]` 打点行即可（profiler 有 +33~40% 膨胀）。
+//
+// ★ 本工具**只调 exe**：⛔ 不重建（cmake）、⛔ 不跑 ctest。exe 不存在就响亮失败。
+// ---------------------------------------------------------------------------------------
+export const BENCH_SCRIPTS_DIR = 'apps/emulator-lift/scripts/bench';
+export const BENCH_OUT_DIR = '.cache/lift-bench';
+export const EMULATOR_EXE = process.platform === 'win32'
+  ? 'apps/emulator-lift/out/emulator-lift.exe'
+  : 'apps/emulator-lift/out/emulator-lift';
+export const CMAKE_CACHE = 'apps/emulator-lift/out/CMakeCache.txt';
+
+/**
+ * 解析一次运行的日志 ⇒ 窗口 + ms/百万条指令 + 块统计（**纯函数**，不读文件、不起进程）。
+ *
+ * 打点行 = `[input-script] frame=<f> guest_ms=<t> insns=<n> <动作原文>`（`input_script.cpp` 在动作
+ * **被应用**的那一刻打；`wait 0 insn` 就是"什么都不做、只把这一刻记下来"）。
+ * ★ 同一 tick 里的第二条（典型：脚本尾部的 `quit` 与最后一个 `wait` 同时到期）⇒ **同 (guest_ms, insns)
+ *   的连续重复点去掉**（零宽窗口没有意义），去掉几个记在 `duplicateMarks`。
+ *
+ * 窗口 = **第一个打点 → 最后一个打点**（脚本写两个打点就是唯一窗口；多写只作诊断）。
+ *
+ * 会 **throw** 的（= 算不出数，⛔ 不许用估的数值充基线）：没有打点 / 打点 < 2 / Δguest_ms ≤ 0 / Δinsns ≤ 0。
+ * 只会进 `problems` 的（= 数能算，但这次运行不完整）：缺 `insns :` / 缺 `blocks :` 摘要行。
+ */
+export function parseBenchLog(text) {
+  const all = [];
+  let summaryInsns = null;
+  let blocks = null;
+  let shims = null;
+  let stop = null;
+  const lines = String(text ?? '').split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const m = /^\[input-script\]\s+frame=(\d+)\s+guest_ms=(\d+)\s+insns=(\d+)\s*(.*)$/.exec(line);
+    if (m) {
+      all.push({
+        line: i + 1,
+        frame: Number(m[1]),
+        guestMs: Number(m[2]),
+        insns: Number(m[3]),
+        action: m[4].trim(),
+      });
+      continue;
+    }
+    // 摘要行（`Machine::run` 收口时打；顺序固定，但这里不依赖顺序）
+    const s = /^insns\s*:\s*(\d+)\s*$/.exec(line);
+    if (s) { summaryInsns = Number(s[1]); continue; }
+    const b = /^blocks\s*:\s*(\d+)\s*\(insns cached (\d+),\s*hits (\d+),\s*misses (\d+)\)\s*$/.exec(line);
+    if (b) {
+      blocks = { blocks: Number(b[1]), insnsCached: Number(b[2]), hits: Number(b[3]), misses: Number(b[4]) };
+      continue;
+    }
+    const h = /^shims\s*:\s*imported (\d+)\s*\/\s*called-unimplemented (\d+)\s*$/.exec(line);
+    if (h) { shims = { imported: Number(h[1]), calledUnimplemented: Number(h[2]) }; continue; }
+    const st = /^stop\s*:\s*(.+)$/.exec(line);
+    if (st) stop = st[1].trim();
+  }
+
+  if (all.length === 0) {
+    throw new Error(
+      '日志里没有 `[input-script]` 打点（找不到 `… guest_ms= … insns= …`）⇒ 算不出窗口。\n' +
+      '  脚本里要有 **两处** `at insn N` + `wait 0 insn`（第二条用 `after N insn` / `at insn` 都比 `at frame` 可靠），\n' +
+      '  并且这次运行真的跑到了它们（看同一份日志里有没有 `input-script: <path>（N 条动作` 与 `stop :`）。',
+    );
+  }
+
+  // 去掉"同一 tick 的连续重复点"（典型是脚本尾部的 `quit` 与最后一个 `wait` 同时到期）
+  const marks = [];
+  let duplicateMarks = 0;
+  for (const m of all) {
+    const last = marks[marks.length - 1];
+    if (last && last.guestMs === m.guestMs && last.insns === m.insns) { duplicateMarks += 1; continue; }
+    marks.push(m);
+  }
+
+  if (marks.length < 2) {
+    throw new Error(
+      `只有 ${marks.length} 个打点（去掉同一 tick 的重复点后）⇒ 窗口至少要 2 个点。` +
+      (duplicateMarks ? `（另有 ${duplicateMarks} 个同 tick 重复点被去掉）` : '') + '\n' +
+      '  一个点只知道"某一刻在哪"，两个点才给出 Δinsns / Δguest_ms。',
+    );
+  }
+
+  const from = marks[0];
+  const to = marks[marks.length - 1];
+  const hostMs = to.guestMs - from.guestMs;
+  const insns = to.insns - from.insns;
+  if (!(hostMs > 0)) {
+    throw new Error(`窗口 Δguest_ms = ${hostMs} ≤ 0（first=${from.guestMs} last=${to.guestMs}）⇒ 两个打点没有时间跨度`);
+  }
+  if (!(insns > 0)) {
+    throw new Error(`窗口 Δinsns = ${insns} ≤ 0（first=${from.insns} last=${to.insns}）⇒ 两个打点没有指令跨度`);
+  }
+
+  const problems = [];
+  if (summaryInsns === null) problems.push('日志里没有 `insns     : <N>`（运行摘要没打 ⇒ 这次运行可能没正常收口）');
+  if (blocks === null) problems.push('日志里没有 `blocks    : …`（同上 ⇒ 块命中率 / 平均块长缺席）');
+
+  const blockTotal = blocks ? blocks.hits + blocks.misses : 0;
+  return {
+    marks,
+    duplicateMarks,
+    window: { from, to, hostMs, insns },
+    // ms / 百万条指令（越小越快）；mips = 百万条/秒
+    msPerMinsn: (hostMs * 1e6) / insns,
+    mips: insns / hostMs / 1000,
+    summary: summaryInsns === null && blocks === null && shims === null && stop === null
+      ? null
+      : {
+        insns: summaryInsns,
+        stop,
+        shims,
+        blocks: blocks ? blocks.blocks : null,
+        insnsCached: blocks ? blocks.insnsCached : null,
+        hits: blocks ? blocks.hits : null,
+        misses: blocks ? blocks.misses : null,
+      },
+    // 块命中率 / 平均块长：运行摘要 `blocks :` 行的三个数**免费**给出（不需要 profiler）
+    blockHitRate: blockTotal ? blocks.hits / blockTotal : null,
+    avgBlockLen: blockTotal && summaryInsns ? summaryInsns / blockTotal : null,
+    problems,
+  };
+}
+
+/** CMake 配置回读（性能判据固定 RelWithDebInfo；⛔ 不认 Debug 的读数）。 */
+export function readBuildType(cachePath = CMAKE_CACHE) {
+  if (!exists(cachePath)) return { configured: false, buildType: null, path: cachePath };
+  const m = /^CMAKE_BUILD_TYPE:STRING=(.*)$/m.exec(readText(cachePath));
+  return { configured: true, buildType: m ? m[1].trim() : null, path: cachePath };
+}
+
+/** 跑一条子进程，stdout+stderr 一起重定向到文件（⛔ 不用管道：受限沙箱里管道会 EPERM）。 */
+function runRedirected(cmd, argv, { cwd = REPO_ROOT, logPath, timeoutMs = 0 } = {}) {
+  const fd = fs.openSync(logPath, 'w');
+  let r;
+  try {
+    r = spawnSync(cmd, argv, { cwd, stdio: ['ignore', fd, fd], timeout: timeoutMs, windowsHide: true });
+  } finally {
+    fs.closeSync(fd);
+  }
+  const text = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : '';
+  return { status: r.status, signal: r.signal ?? null, error: r.error ?? null, text };
+}
+
+/**
+ * **工作树指纹**（同一个 sha256 才可比的另一半：换一份二进制 / 换一棵树就不许混表）。
+ * 取 `git status --porcelain` 的全文 sha256 + 行数；git 不可用 ⇒ available=false（读数里说清楚，⛔ 不假装）。
+ */
+export function worktreeFingerprint() {
+  const log = path.join(os.tmpdir(), `lift-bench-git-${process.pid}.log`);
+  try {
+    const r = runRedirected('git', ['status', '--porcelain'], { logPath: log, timeoutMs: 60000 });
+    if (r.error || r.status !== 0) {
+      return { available: false, dirtyLines: null, porcelainSha256: null, reason: r.error ? r.error.message : `git 退出码 ${r.status}` };
+    }
+    const lines = r.text.split(/\r?\n/).filter((s) => s.length > 0);
+    return {
+      available: true,
+      dirtyLines: lines.length,
+      porcelainSha256: crypto.createHash('sha256').update(r.text).digest('hex'),
+    };
+  } finally {
+    fs.rmSync(log, { force: true });
+  }
+}
+
+/** 工况名 → 脚本路径（`idle` ⇒ `apps/emulator-lift/scripts/bench/idle.txt`；带分隔符 / `.txt` 的当路径）。 */
+export function resolveBenchScript(scenario) {
+  if (!scenario) throw new Error('bench 需要一个工况名或脚本路径（例：`pnpm tools lift bench idle`）');
+  const asPath = /[\\/]/.test(scenario) || scenario.endsWith('.txt');
+  const cand = asPath ? scenario : `${BENCH_SCRIPTS_DIR}/${scenario}.txt`;
+  if (!exists(cand)) {
+    const avail = (() => {
+      try {
+        return fs.readdirSync(abs(BENCH_SCRIPTS_DIR)).filter((f) => f.endsWith('.txt')).map((f) => f.replace(/\.txt$/, ''));
+      } catch { return []; }
+    })();
+    throw new Error(`找不到工况脚本 ${cand}${avail.length ? `\n  可用工况：${avail.join(' / ')}` : `（目录 ${BENCH_SCRIPTS_DIR} 不存在）`}`);
+  }
+  return cand;
+}
+
+const BENCH_BASE_ARGS = [
+  // ★ 口径A（docs/03-emulator/observations.md 顶部）：window + hidden + gpu + native-overrides all + skip-logo
+  '--present', 'window', '--present-vsync', '0', '--present-hidden', '--raster', 'gpu',
+  '--native-overrides', 'all', '--skip-logo',
+];
+
+function shellQuote(token) {
+  return /[\s"]/.test(token) ? `"${token.replace(/"/g, '\\"')}"` : token;
+}
+
+function median(values) {
+  const v = [...values].sort((a, b) => a - b);
+  if (v.length === 0) return null;
+  const mid = Math.floor(v.length / 2);
+  return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
+}
+
+function writeBenchJson(outDir, name, obj) {
+  const p = abs(`${outDir}/${name}.json`);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  const text = `${JSON.stringify(obj, null, 2)}\n`;
+  fs.writeFileSync(p, text);
+  if (fs.readFileSync(p, 'utf8') !== text) throw new Error(`${outDir}/${name}.json 写后回读不一致`);
+  return `${outDir}/${name}.json`;
+}
+
+/**
+ * 跑 N 遍同一工况，取中位数，落 JSON。
+ *
+ * @param {{scenario?: string, n?: number, outDir?: string, install?: string, appdata?: string,
+ *          extraArgs?: string[], label?: string, timeoutSec?: number, write?: boolean,
+ *          run?: Function}} opts
+ *   `run` 只为测试注入（缺省用真子进程）；生产路径上不许传。
+ */
+export function bench(opts = {}) {
+  const n = opts.n ?? 5;
+  if (!Number.isInteger(n) || n < 1) throw new Error(`--n 必须是正整数（收到 ${opts.n}）`);
+  const timeoutSec = opts.timeoutSec ?? 600;
+  if (!Number.isFinite(timeoutSec) || timeoutSec <= 0) throw new Error(`--timeout 必须是正数秒（收到 ${opts.timeoutSec}）`);
+  const install = opts.install ?? 'links/install';
+  const outDir = opts.outDir ?? BENCH_OUT_DIR;
+  const script = resolveBenchScript(opts.scenario);
+  const label = opts.label ?? path.basename(script).replace(/\.txt$/, '');
+  const write = opts.write !== false;
+
+  if (!exists(EMULATOR_EXE)) {
+    throw new Error(
+      `找不到 ${EMULATOR_EXE} —— bench **只调 exe，不重建**（⛔ 不 cmake、⛔ 不 ctest）。\n` +
+      '  先手工：`cd apps/emulator-lift && cmake --preset windows-x64 && cmake --build --preset windows-x64`',
+    );
+  }
+  if (!exists(install)) throw new Error(`找不到安装树 ${install}（--install 可指定；本工具不猜游戏装在别处）`);
+
+  const build = readBuildType();
+  if (build.buildType === 'Debug') {
+    throw new Error(
+      `CMAKE_BUILD_TYPE = Debug（${CMAKE_CACHE}）⇒ ⛔ 不用 Debug 构建的读数当性能判据（固定 RelWithDebInfo）。`,
+    );
+  }
+
+  const appdata = opts.appdata ?? `${outDir}/appdata`;
+  fs.mkdirSync(abs(appdata), { recursive: true });
+
+  const argv = [
+    '--game-dir', install,
+    '--appdata', appdata,
+    ...BENCH_BASE_ARGS,
+    '--input-script', script,
+    ...(opts.extraArgs ?? []),
+  ];
+  const exeAbs = abs(EMULATOR_EXE);
+  const stat = fs.statSync(exeAbs);
+  const meta = {
+    schema: 1,
+    tool: 'pnpm tools lift bench',
+    note: '口径A（window / vsync 0 / hidden / gpu / native-overrides all / skip-logo）+ 工况脚本；'
+      + '窗口吞吐 = Δinsns / Δguest_ms（window 模式是 real-time 时钟）；⛔ 未开 profiler、⛔ 未重建',
+    timestamp: new Date().toISOString(),
+    label,
+    scenario: opts.scenario,
+    script: { path: script, sha256: sha256File(script) },
+    build: { cmakeBuildType: build.buildType, configured: build.configured, cmakeCache: CMAKE_CACHE },
+    binary: {
+      path: EMULATOR_EXE,
+      sha256: sha256File(EMULATOR_EXE),
+      bytes: stat.size,
+      mtime: stat.mtime.toISOString(),
+    },
+    worktree: worktreeFingerprint(),
+    host: {
+      platform: process.platform,
+      arch: process.arch,
+      cpus: os.cpus().length,
+      cpuModel: os.cpus()[0] ? os.cpus()[0].model : null,
+      totalMemMiB: Math.round(os.totalmem() / (1024 * 1024)),
+      node: process.version,
+    },
+    n,
+    timeoutSec,
+    argv,
+    commandLine: [EMULATOR_EXE, ...argv].map(shellQuote).join(' '),
+    passes: [],
+  };
+
+  const passes = [];
+  const run = opts.run ?? ((logRel) => runRedirected(exeAbs, argv, { logPath: abs(logRel), timeoutMs: timeoutSec * 1000 }));
+  for (let i = 1; i <= n; i += 1) {
+    const logRel = `${outDir}/${label}-pass${i}.log`;
+    fs.mkdirSync(abs(outDir), { recursive: true });
+    const r = run(logRel);
+    const pass = { index: i, log: logRel, exitCode: r.status, signal: r.signal ?? null, spawnError: r.error ? (r.error.message ?? String(r.error)) : null };
+    let parsed = null;
+    let failure = null;
+    if (r.error) failure = `起不来：${r.error.message ?? r.error}`;
+    else {
+      try {
+        parsed = parseBenchLog(r.text);
+        if (parsed.problems.length) failure = `日志不完整：${parsed.problems.join('；')}`;
+      } catch (err) {
+        failure = err.message;
+      }
+    }
+    if (parsed) {
+      pass.window = parsed.window;
+      pass.hostMs = parsed.window.hostMs;
+      pass.insns = parsed.window.insns;
+      pass.msPerMinsn = parsed.msPerMinsn;
+      pass.mips = parsed.mips;
+      pass.marks = parsed.marks;
+      pass.duplicateMarks = parsed.duplicateMarks;
+      pass.frameFrom = parsed.window.from.frame;
+      pass.frameTo = parsed.window.to.frame;
+      pass.blockHitRate = parsed.blockHitRate;
+      pass.avgBlockLen = parsed.avgBlockLen;
+      pass.summary = parsed.summary;
+    }
+    if (r.status !== 0 && !failure) failure = `exe 退出码 ${r.status}${r.signal ? `（signal ${r.signal}）` : ''}`;
+    if (failure) pass.error = failure;
+    passes.push(pass);
+    meta.passes = passes;
+
+    if (failure) {
+      const where = parsed ? '.' : `\n  ── 原始日志片段（${logRel}）──\n${excerpt(r.text)}`;
+      if (write) {
+        const p = writeBenchJson(outDir, `${label}-FAILED`, meta);
+        throw new Error(`第 ${i} 遍失败：${failure}\n  日志：${logRel}${where}\n  （失败记录已落 ${p}；⛔ 不拿估的数值充基线）`);
+      }
+      throw new Error(`第 ${i} 遍失败：${failure}\n  日志：${logRel}${where}`);
+    }
+  }
+
+  const values = passes.map((p) => p.msPerMinsn);
+  const med = median(values);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const spread = med > 0 ? (max - min) / med : 0;
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  const sd = values.length > 1 ? Math.sqrt(values.reduce((a, b) => a + (b - mean) ** 2, 0) / (values.length - 1)) : 0;
+  // 要多少遍才够（95% CI、目标 ±5% 半宽）：n ≈ (1.96·sd / (0.05·median))²
+  const suggestedN = med > 0 ? Math.max(5, Math.ceil(((1.96 * sd) / (0.05 * med)) ** 2)) : null;
+
+  meta.median = { msPerMinsn: med, mips: med > 0 ? 1e6 / med / 1000 : null };
+  meta.spread = { min, max, ratio: spread };
+  meta.sd = sd;
+  meta.jitter = {
+    warn: spread > 0.3,
+    text: spread > 0.3
+      ? `逐遍极差 ${(spread * 100).toFixed(1)}% > 30% ⇒ 这批读数不足以定基线（每遍原始值见 passes）；`
+        + `按当前离散度，±5%（95% CI）要约 ${suggestedN} 遍`
+      : null,
+    suggestedN,
+  };
+
+  let written = null;
+  if (write) {
+    const stamp = meta.timestamp.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+    written = {
+      stamp: writeBenchJson(outDir, `${label}-${stamp}`, meta),
+      latest: writeBenchJson(outDir, `${label}-latest`, meta),
+    };
+  }
+  return { ...meta, written };
+}
+
+/** 失败时贴得进报告的那一段（尾部 40 行；摘要 / 打点都在尾部）。 */
+function excerpt(text, lines = 40) {
+  const all = String(text ?? '').split(/\r?\n/);
+  const tail = all.slice(Math.max(0, all.length - lines));
+  return tail.map((s) => `  | ${s}`).join('\n');
+}
+
+export function benchText(r) {
+  const L = [];
+  const pct = (x) => (x === null || x === undefined ? '—' : `${(x * 100).toFixed(3)}%`);
+  const f = (x, d = 2) => (x === null || x === undefined ? '—' : x.toFixed(d));
+  L.push(`lift bench —— ${r.label} × ${r.n}（${r.script.path}）`);
+  L.push(`  构建      : ${r.build.cmakeBuildType ?? '（未知）'}${r.build.cmakeBuildType === 'Debug' ? ' ⛔ Debug 不当判据' : ''}`);
+  L.push(`  二进制    : ${r.binary.path}  sha256=${r.binary.sha256.slice(0, 16)}…  mtime=${r.binary.mtime}  ${r.binary.bytes} B`);
+  L.push(`  工作树    : ${r.worktree.available ? `${r.worktree.dirtyLines} 行未提交（porcelain sha256=${String(r.worktree.porcelainSha256).slice(0, 16)}…）` : `不可用（${r.worktree.reason}）`}`);
+  L.push(`  脚本      : sha256=${r.script.sha256.slice(0, 16)}…`);
+  L.push(`  命令      : ${r.commandLine}`);
+  L.push('');
+  for (const p of r.passes) {
+    L.push(`  第 ${p.index} 遍   : ${p.insns} 条 / ${p.hostMs} ms ⇒ ${f(p.msPerMinsn)} ms/M = ${f(p.mips, 3)} M insn/s  `
+      + `（frame ${p.frameFrom}→${p.frameTo}；块命中 ${pct(p.blockHitRate)} / 平均块长 ${f(p.avgBlockLen, 2)}）`);
+  }
+  L.push('');
+  L.push(`  中位数    : ${f(r.median.msPerMinsn)} ms/百万条 = ${f(r.median.mips, 3)} M insn/s`
+    + `（极差 ${f(r.spread.ratio * 100, 1)}%：min ${f(r.spread.min)} / max ${f(r.spread.max)}）`);
+  if (r.jitter.warn) L.push(`  ⚠ ${r.jitter.text}`);
+  if (r.written) L.push(`  落盘      : ${r.written.stamp} · ${r.written.latest}`);
+  return `${L.join('\n')}\n`;
+}
+
+// ---------------------------------------------------------------------------------------
 // describe / 文本
 // ---------------------------------------------------------------------------------------
 export function describe() {
@@ -1198,11 +1607,19 @@ export function sync({ write = false, exePath = EXE_FILE } = {}) {
   return { gaps, entries };
 }
 
-const HELP = `tools/lift.mjs — emulator-lift 覆盖清单（describe / check / report / corpus-report / sync / diff）
+const HELP = `tools/lift.mjs — emulator-lift 覆盖清单（describe / check / report / bench / corpus-report / sync / diff）
 
   pnpm tools lift describe       字段 / 不变量 / 操作（schema 真源）
   pnpm tools lift check          全量校验（红 ⇒ 退出码 1）
   pnpm tools lift report         覆盖报告（实现 / stub / 裸缺口 / 从未被引用；--bench N 出 MIPS）
+  pnpm tools lift bench <工况|脚本> [--n N] [--out DIR] [--install DIR] [--appdata DIR]
+                     [--arg TOKEN]... [--label NAME] [--timeout S] [--no-write] [--json]
+                                 吞吐基线（一条命令 + 落文件）：同一 --input-script 工况**独立子进程**跑 N 遍
+                                 （缺省 5），取中位数 ms/百万条 + MIPS，落 .cache/lift-bench/*.json
+                                 （含 exe sha256+mtime / CMAKE_BUILD_TYPE 回读 / 工作树指纹 / 命令行原文）。
+                                 口径A：--present window --present-vsync 0 --present-hidden --raster gpu
+                                 --native-overrides all --skip-logo。⛔ 不重建、不跑 ctest。
+                                 ⛔ 与 report --bench（合成循环、单样本）不是一回事
   pnpm tools lift corpus-report  .lst 语料报告
   pnpm tools lift sync [--write] 派生 overrides.json + register_import_gaps.cpp（缺省 dry-run）
   pnpm tools lift diff <a.bmp> <b.bmp> [--tolerance N] [--json]
@@ -1230,6 +1647,76 @@ export async function main(argv = process.argv.slice(2)) {
     void counts;
     process.stdout.write('lift check: 绿（0 个问题）\n');
     return 0;
+  }
+  if ((argv[0] === '--bench' || argv[0] === 'bench') && !has('--report')) {
+    // ★ 与 `report --bench N`（合成循环 MIPS，**不是**基线）分开：本 op 是"真工况 + N 遍 + 中位数 + 落文件"。
+    //   两处都叫 `--bench`：`report` 那个是**取值 flag**（`--report` 在前时归 report），本 op 是**动作**
+    //   （派发器给的首项就是它）⇒ 用 `!has('--report')` 这条互斥判据分开，⛔ 不靠参数顺序猜。
+    const rest = argv.slice(1);
+    const usage = (msg) => (msg ? `${msg}\n\n` : '') + HELP;
+    const takeVal = (name) => {
+      for (let i = 0; i < rest.length; i += 1) {
+        if (rest[i] === name) {
+          const v = rest[i + 1];
+          if (v === undefined) throw new Error(`${name} 后面缺一个值`);
+          rest.splice(i, 2);
+          return v;
+        }
+        if (rest[i].startsWith(`${name}=`)) {
+          const v = rest[i].slice(name.length + 1);
+          rest.splice(i, 1);
+          return v;
+        }
+      }
+      return null;
+    };
+    try {
+      const nRaw = takeVal('--n');
+      const outDir = takeVal('--out');
+      const install = takeVal('--install');
+      const appdata = takeVal('--appdata');
+      const label = takeVal('--label');
+      const timeoutRaw = takeVal('--timeout');
+      const extraArgs = [];
+      for (let i = 0; i < rest.length;) {
+        if (rest[i] === '--arg') {
+          if (rest[i + 1] === undefined) throw new Error('--arg 后面缺一个 token');
+          extraArgs.push(rest[i + 1]);
+          rest.splice(i, 2);
+          continue;
+        }
+        if (rest[i].startsWith('--arg=')) {
+          extraArgs.push(rest[i].slice('--arg='.length));
+          rest.splice(i, 1);
+          continue;
+        }
+        i += 1;
+      }
+      const noWrite = has('--no-write');
+      const json = has('--json');
+      const scenario = rest.find((a) => !a.startsWith('--'));
+      const unknown = rest.filter((a) => a !== scenario && a !== '--no-write' && a !== '--json');
+      if (unknown.length) {
+        process.stderr.write(`lift bench: 不认识的参数 ${unknown.join(' ')}\n\n${usage()}`);
+        return 2;
+      }
+      const r = bench({
+        scenario,
+        n: nRaw === null ? 5 : Number(nRaw),
+        outDir: outDir ?? undefined,
+        install: install ?? undefined,
+        appdata: appdata ?? undefined,
+        label: label ?? undefined,
+        timeoutSec: timeoutRaw === null ? undefined : Number(timeoutRaw),
+        extraArgs,
+        write: !noWrite,
+      });
+      process.stdout.write(json ? `${JSON.stringify(r, null, 2)}\n` : benchText(r));
+      return 0;
+    } catch (err) {
+      process.stderr.write(`lift bench: ${err.message}\n`);
+      return 2;
+    }
   }
   if (has('--report')) {
     const r = reportCoverage();

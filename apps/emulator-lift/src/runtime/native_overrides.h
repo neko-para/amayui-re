@@ -45,6 +45,16 @@ struct NativeOverride {
     NativeFn fn = nullptr;
     std::uint64_t hits = 0;
     std::uint64_t fallbacks = 0;
+    // ★ 条件式 override 的**台账**（2026-11-10，REQ-01M6XVZF3VDC5NSBJ20J2451VJ）：
+    //   · `fast_hits` = 走**零写短路**快路径的次数（`hits` 的子集；无条件项恒 0。对 `sub_4BBAB0`
+    //     它 == `hits`：该项唯一的接管路径就是"三槽全惰性"的纯查询短路）。
+    //   · `declines[]` = fn 自己回退时的**原因分桶**（`fallbacks` 的细分；桶 0 = 未分类 ——
+    //     invoke 自己判的回退（栈参不在已提交页 / 没有实现）落进 `fallbacks` 但不落桶）。
+    //   ⛔ 纯诊断：不参与任何判据、不改 guest 可见语义、不进 guest 内存。
+    //   ★ 写入通道 = `X86::current_override`（invoke 在调 fn 期间设置，见 x86.h）。
+    static constexpr std::size_t kDeclineSlots = 8;
+    std::uint64_t fast_hits = 0;
+    std::uint64_t declines[kDeclineSlots] = {};
 };
 
 class NativeOverrideTable {
@@ -52,7 +62,8 @@ public:
     // ★ 2026-11-07：8 → 12（BOOT profile 选出的 sub_429020 / sub_48AE90 两项 + 给后续留坑）。
     // ★ 2026-11-08：sub_4CCC60 用掉最后一格 ⇒ **表已满**；再加项必须同时抬高 kMax
     //   （下面的 static_assert 会先红，别等到 `all` 起不来）。
-    static constexpr std::size_t kMax = 12;
+    // ★ 2026-11-10：12 → 13（`sub_4BBAB0` = Voice::Tick 的 stateless 快路径）。
+    static constexpr std::size_t kMax = 13;
 
     bool add(std::uint32_t ea, const std::string& name, GuestConv conv, std::uint32_t arg_bytes, NativeFn fn,
              std::string* err);
@@ -209,6 +220,50 @@ bool nativeAffine4CCC60(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 // `sub_487C60`（CMovieTextureRenderer::DoRenderSample，thiscall `retn 4`）：影片样本 → A8R8G8B8 纹理。
 // 只覆盖主路径（无 alpha 面 / 无 alpha 拷贝 / 3 或 4 字节源）；其余回退解释器。
 bool nativeRender487C60(X86& cpu, GuestMemory& mem, std::uint32_t* result);
+// ---------------------------------------------------------------------------------------
+// `sub_4BBAB0` = `Voice::Tick(now)`（每帧固定税；REQ-01M6XVZF3VDC5NSBJ20J2451VJ 的 **A 案**）
+//
+// ★ 身份 / 形状（`.lst` 0x4BBAB0..0x4BBC24，thiscall / `retn 4`）：`ecx = this`（= T_Engine+0x148A0）、
+//   1 个栈参 = `now`(ms)；三个槽 = `this+0x424 + 4*i`（i = 0..2 ⇔ 声道 12/13/14）；
+//   每个槽只按两个 dword 分流：`[slot+0x30] & 3`（== 3 ⇒ 内层扫描）与 `[slot+0]`（非 0 ⇒ 已启动）。
+// ★ 只接管**三槽全惰性**的那一种调用（`(slot[0x30] & 3) != 3` 且 `slot[0] == 0`，三个槽都如此）：
+//   那条路径**一条写都没有、一个调用都没有**（只有读 + 循环尾），所以整条调用退化成
+//   "读 6 个槽 dword（+ 1 个设备指针 dword）+ 返回 0" ⇒ `*result = 0` 直接返回。
+// ★ 其它一切（内层扫描 / 已启动 / 首 tick / 到期 / 无设备 / 读不到）⇒ 返回 false **回退解释器**：
+//   ⛔ 不重写 `sub_4BB840`，⛔ 不重写整个 Tick。**有写时**跨槽顺序本身承载语义 ⇒ 更不能跳读 / 换序。
+// ★ 回退分支**不写任何 guest 字节**（判据：tests/voice_poll.cpp 的 ⑧）。
+// ★ 时钟补偿见 `kVoiceTickPureInsns`（**判据**，不是优化细节）。
+//
+// 回退原因（**枚举值就是 `NativeOverride::declines[]` 的下标**；0 是 `Pure`，不落桶）：
+enum class VoicePollWhy : std::uint8_t {
+    Pure = 0,       // 三槽全惰性 ⇒ 唯一可短路的形态
+    NoDevice = 1,   // `[this+0x408] == 0`（无设备）⇒ 回退（保守：设备都没了就交给解释器）
+    BadThis = 2,    // this == 0 / 会回绕 ⇒ 或 `this+0x408..0x460` 不在已提交页 ⇒ 回退
+    InnerScan = 3,  // `(slot[0x30] & 3) == 3` ⇒ 内层扫描 + 可能写 ⇒ 回退
+    FirstTick = 4,  // 已启动且 `[slot+0xC] == 0` ⇒ 解释器会写 `last = now` ⇒ 回退
+    NotDue = 5,     // 已启动、未到期 ⇒ **语义上**是纯查询，但**指令数不同**（k 不成立）⇒ 回退
+    Due = 6,        // 已启动、到期 ⇒ 会清标志 / 调 `sub_4BB840` ⇒ 回退
+};
+struct VoicePollDecision {
+    bool pure = false;      // true ⇒ 只有这一个形态可以短路
+    VoicePollWhy why = VoicePollWhy::BadThis;
+    unsigned slot = 0;      // 让它不纯的槽（0..2）；pure 时为 3（= 全部走完）
+};
+// 纯核（测试直接用）：**只读** guest 内存（committed 检查先行），不写、不调任何 guest 代码。
+VoicePollDecision voiceTickIsPureQuery(const GuestMemory& mem, std::uint32_t self, std::uint32_t now_ms);
+// `sub_4BBAB0` 的**三槽全惰性**路径执行的 guest 指令数（= 时钟补偿的定值 k）。
+// ★ 为什么它是判据：`now` 来自 `timeGetTime`，而本线虚拟时钟按**指令数**推进（clock.h）⇒
+//   override 少走/多走一条指令就改了"下一次 tick 看到的 now"这个**输入序列**。
+// ★ 推导（`.lst` 0x4BBAB0..0x4BBC24 逐条数）：
+//     prologue 15（`push ebp` .. `jmp loc_4BBAD7`）
+//   + 3 × 12（槽内 6：`mov eax,[esi+30h]` / `and` / `cmp` / `jnz` / `cmp [esi],0` / `jz`
+//               循环尾 6：`mov eax,ArgList` / `inc` / `add esi,4` / `mov ArgList,eax` / `cmp` / `jl`）
+//   + 2 × 1（`loc_4BBAD5` 的 `xor ecx,ecx`；第 3 次 `jl` 不跳、不进它）
+//   + epilogue 7（`mov eax,[ebp-0xC]` / `pop edi` / `pop esi` / `pop ebx` / `mov esp,ebp` /
+//                 `pop ebp` / `retn 4`）
+//   = 15 + 36 + 2 + 7 = 60。
+constexpr std::uint32_t kVoiceTickPureInsns = 60;
+bool nativeVoiceTick4BBAB0(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 // `sub_48AE90`（NormalTexture 虚表第 6 项 = 纯色填充 Fill(rect, color888, alpha)）：thiscall `retn 0Ch`。
 // 对 `[self+0x40C]` 的纹理 `LockRect(rect)`（vtable +0x4C）→ 按**虚拟显示器 bpp**（guest 全局
 // `ds:dword_5518C0`，⛔ **不是** `ddraw::displayMode`）走 16bpp（A4R4G4B4）或 32bpp →

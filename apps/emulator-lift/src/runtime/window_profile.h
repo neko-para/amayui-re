@@ -30,9 +30,31 @@
 // ★ 触发源是**条件**，不是"帧号"（见 input_script.h 的 TriggerKind）：
 //   窗口边界 = 脚本动作被触发的那一个 **block 边界**。因此 `at frame` / `at insn` / `at guest_ms`
 //   都能当边界；将来加"场景/脚本标记"只需给 Trigger 加一种 kind，本类不用改。
+//
+// ★ 三张表（REQ-01M6XVZ8AXJNG492WA2QAMTA35）：函数表 / **块级 EA 表** / **父子边表**。
+//   - 函数表（`fns`）= 既有口径：块耗时按**函数入口**聚合（`.lst` 命中时是 `LSTFunction::ea`）。
+//     它答"哪个函数吃得多"，**答不了**"这一段 inclusive 里是哪一块在跑"。
+//   - 块级 EA 表（`blocks`）= 每行一个 **block 入口 EA**，self 仍是互斥的块耗时（求和 = guest 的块耗时），
+//     `incl/calls/depth` 取自**包含该块的函数**（影子栈只到函数粒度 ⇒ 块没有自己的 inclusive；
+//     ⛔ 打印时必须把这一点写出来，不许让人把 fn 的 incl 读成"这一块的 incl"）。
+//     `calls == 0` 的行 = 窗口内**没有进入计数**（尾调用 `jmp` 进入 / 窗口起点已经在它内部）⇒
+//     那不是"调用 0 次"，是"进入次数不可见"；打印时**必须显式标记**（`!BLIND`）。
+//   - 块级**指令数**（`WindowBlockRow::insns`，2026-11-10 追加）：每行 = 该块在窗口内**执行过的指令数**
+//     （不是时间；口径 = `cpu_.insns` 在块内的差值）。窗口内 `cpu_.insns` 还有一类增量**不在任何块里**
+//     —— 函数级 / 段级 native override 用 `cpu_.insns += n` 补的"被替代指令数"（含 `native_voice` 的
+//     时钟补偿）⇒ 用 `override_insns` 单独计数。闭合式（汇总行逐字打印）：
+//         window_insns（end−begin） = Σ block_insns + override_insns + insns_unattributed
+//     其中 `insns_unattributed` 允许非 0 但**必须打印**（⛔ 不许用"约等于"把差说过去）。
+//   - 父子边表（`edges`）= 影子栈的 (parent fn_key → child fn_key) 墙钟与次数。
+//     父 = 压帧**之前**的栈顶帧；栈空时没有父（顶层进入 / 窗口起点在函数内部）⇒ 记 `edge_no_parent`，
+//     ⛔ 不静默丢：边表覆盖不到那部分，汇总行必须打出来。
+//   - **内存上界**：块表复用既有的 `block_ns_delta_`（= 窗口内不同块 EA 的个数，本来就有）；
+//     边表按 distinct (parent, child) 对数增长 ⇒ 加硬上界 `kMaxEdgePairs`，越界计数（`edge_overflow`），
+//     ⛔ 不让它无界长。窗口收尾时全部清空。
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -58,6 +80,32 @@ struct WindowShimRow {
     std::uint64_t calls = 0;
 };
 
+// 窗口内的一行"块级 EA"记账（REQ-01M6XVZ8AXJNG492WA2QAMTA35）。
+// self 互斥（求和 = guest 的块耗时）；incl / calls / depth 是**包含该块的函数**的口径
+// （影子栈只到函数粒度 ⇒ 块没有自己的 inclusive ⇒ ⛔ 打印时不许省略这个限定）。
+struct WindowBlockRow {
+    std::uint32_t ea = 0;       // block 入口 EA（不是函数入口）
+    std::uint32_t fn_key = 0;   // 该块归属的函数（`.lst` 命中 = 函数入口；否则 = ea）
+    std::uint64_t self_ns = 0;
+    std::uint64_t incl_ns = 0;  // 函数 inclusive（块继承）
+    std::uint64_t calls = 0;    // 函数最外层进入次数；0 = 窗口内没有进入计数（尾调用 / 窗口起点已在内部）
+    std::uint32_t depth = 0;    // 该函数帧在影子栈上的最大深度（1 = 没有父帧）；0 = 未知
+    // ★ 该块在窗口内**执行过的指令数**（不是时间）。口径 = `cpu_.insns` 在**块内**的差值
+    //   （块里每执行成功一条就 `++cpu_.insns`；块中途 break 掉的剩余指令不算）。
+    //   ⛔ 与 `--profile` 摘要里的 `hits × insns.size()` **不是**同一份读数：后者在 `until_ea` /
+    //      `--max-insns` / 指令执行失败时会多算（那些路径没有执行完整块）。
+    //   ⇒ 块级 `insns` 之和 + override 补账 必须**精确**等于窗口的 `insns end−begin`（见汇总行）。
+    std::uint64_t insns = 0;
+};
+
+// 窗口内的一条父子边（parent → child 的**函数级**墙钟与次数）。
+struct WindowEdgeRow {
+    std::uint32_t parent = 0;
+    std::uint32_t child = 0;
+    std::uint64_t incl_ns = 0;  // 该边下 child 帧的墙钟合计（递归边按帧累计 ⇒ 可能大于 child 的 incl）
+    std::uint64_t calls = 0;    // 该边被走的次数
+};
+
 struct WindowReport {
     std::string label;
     std::uint64_t wall_ns = 0;
@@ -76,6 +124,21 @@ struct WindowReport {
     std::uint64_t begin_guest_ms = 0;
     std::uint64_t end_guest_ms = 0;
     std::vector<WindowFnRow> fns;      // 按 self 降序
+    std::vector<WindowBlockRow> blocks;  // 块级 EA，按 self 降序（全量；打印时截前 N）
+    std::vector<WindowEdgeRow> edges;    // (parent, child)，按父的 inclusive 降序、同父内 child incl 降序
+    std::uint64_t block_rows = 0;        // 窗口内不同块 EA 的行数（未截断）
+    std::uint64_t block_self_ns = 0;     // 这些行的 self 合计（应与 guest 桶相等）
+    // ---- 块级指令数的闭合（REQ-01M6XVZ8AXJNG492WA2QAMTA35）----
+    //   window_insns = Σ block_insns + override_insns + insns_unattributed
+    std::uint64_t block_insns = 0;        // 块行 `insns` 合计
+    std::uint64_t window_insns = 0;       // end_insns − begin_insns（窗口边界上的 cpu_.insns 差）
+    std::uint64_t override_insns = 0;     // 窗口内 native override 补进 cpu_.insns 的条数（⛔ 不在任何块里）
+    std::int64_t insns_diff = 0;          // window_insns − block_insns
+    std::int64_t insns_unattributed = 0;  // insns_diff − override_insns（⛔ 非 0 必须报出来，不许吞）
+    std::uint64_t edge_rows = 0;         // 不同 (parent, child) 对数（未截断）
+    std::uint64_t edge_parents = 0;      // 不同父的个数（未截断）
+    std::uint64_t edge_no_parent = 0;    // 没有父帧的进入次数（顶层进入 / 窗口起点已在函数内部）
+    std::uint64_t edge_overflow = 0;     // 超过上界未记的边对数（⛔ 不静默）
     std::vector<WindowShimRow> shims;  // 按 ns 降序
     std::uint64_t gpu_readback_ns = 0;
     std::uint64_t gpu_hash_ns = 0;
@@ -127,23 +190,45 @@ public:
     void addShim(std::uint64_t ns);
     void addNative(std::uint64_t ns);
     void addHost(int slot, std::uint64_t ns);
+    // ---- 块级指令数（窗口外一律 no-op）----
+    //   `addBlockInsns` 由 dispatcher 在**每个块执行完之后**调一次（n = 该块实际执行的指令数）。
+    void addBlockInsns(std::uint32_t ea, std::uint64_t n);
+    //   `addOverrideInsns` = native override 直接补进 `cpu_.insns` 的条数（不在任何块里）。
+    void addOverrideInsns(std::uint64_t n);
     // dispatcher 迭代边界：`iterationEnd` 把"没被上面任何一段覆盖的墙钟"记进 interp。
     void iterationBegin(Clock::time_point now);
     void iterationEnd(Clock::time_point now);
 
     // ---- guest 影子调用栈（inclusive；窗口外 no-op）----
-    void pushCall(std::uint32_t fn_key, std::uint32_t ret_ea);
+    //   `frame_esp` = 这一帧**进入时**的 guest esp（= 被调方入口的栈顶，指向返回地址）。
+    //   ★ 为什么需要它：SEH 展开是"不经 `ret` 的跳转"（`_JumpToContinuation` / CONTEXT 装载 /
+    //     `RtlUnwind` 的 TargetIp），被跳过的帧永远不会 `ret` ⇒ 只能靠 esp 判断"哪些帧在落地
+    //     点之下"（`dropFramesBelowEsp`）。没有它，`inclusive` 会**静默偏大**。
+    void pushCall(std::uint32_t fn_key, std::uint32_t ret_ea, std::uint32_t frame_esp = 0);
     void popRet(std::uint32_t eip);
     void popNoReturn(std::uint32_t fn_key);  // native override / shim 调用：没有 ret 指令
+    // 当前影子栈深度（守卫 / 诊断用：展开前后必须回得到同一个值）。
+    std::size_t depth() const { return stack_.size(); }
+    // ★ 展开（不经 `ret` 的跳转）落地：丢掉"进入时 esp 落在新 esp **之下**"的帧（= 被跳过的内层帧），
+    //   目标帧与它的调用者保留。返回丢掉的帧数。⛔ 不增加 `unbalanced_`：这是**合法**的丢帧。
+    std::size_t dropFramesBelowEsp(std::uint32_t target_esp);
 
 private:
     struct Frame {
         std::uint32_t fn_key = 0;
         std::uint32_t ret_ea = 0;
+        // 进入这一帧时的 guest esp（见 `pushCall` / `dropFramesBelowEsp`）。
+        std::uint32_t frame_esp = 0;
+        // 压帧**之前**的栈顶帧（0 = 没有父帧：顶层进入 / 窗口起点已在函数内部）⇒ 边表的父。
+        std::uint32_t parent_key = 0;
         Clock::time_point start{};
     };
     void attributeFrame(const Frame& f, Clock::time_point now);
     void closeAllFrames(Clock::time_point now, bool count_open);
+    void recordEdge(std::uint32_t parent, std::uint32_t child);
+    static std::uint64_t edgeKey(std::uint32_t parent, std::uint32_t child) {
+        return (static_cast<std::uint64_t>(parent) << 32) | static_cast<std::uint64_t>(child);
+    }
 
     bool armed_ = false;
     bool active_ = false;
@@ -176,6 +261,12 @@ private:
     // 快照（全局累计量 → 窗口内增量）
     std::unordered_map<std::uint32_t, std::uint64_t> block_ns_at_begin_;
     std::unordered_map<std::uint32_t, std::uint64_t> block_ns_delta_;
+    // 块级指令数（按块入口 EA）。★ 热路径靠 `last_block_*` 缓存：unordered_map 的**元素指针**
+    //   在 insert / rehash 后仍然有效 ⇒ 循环里反复回到同一块时只做一次比较 + 一次加。
+    std::unordered_map<std::uint32_t, std::uint64_t> block_insns_delta_;
+    std::uint32_t last_block_ea_ = 0;
+    std::uint64_t* last_block_insns_ = nullptr;
+    std::uint64_t override_insns_ = 0;
     std::vector<std::uint64_t> shim_ns_at_begin_;
     std::vector<std::uint64_t> shim_calls_at_begin_;
     std::vector<WindowShimRow> shim_rows_;
@@ -190,6 +281,13 @@ private:
     std::unordered_map<std::uint32_t, std::uint64_t> incl_ns_;
     std::unordered_map<std::uint32_t, std::uint32_t> top_calls_;   // 当前栈上该函数的帧数（排重用）
     std::unordered_map<std::uint32_t, std::uint64_t> calls_by_fn_;  // 最外层进入次数
+    std::unordered_map<std::uint32_t, std::uint32_t> max_depth_;    // 该函数帧的最大栈深度（1 = 无父帧）
+    // 父子边：key = (parent << 32) | child。★ 硬上界，越界只计数（kMaxEdgePairs）。
+    static constexpr std::size_t kMaxEdgePairs = 4096;
+    std::unordered_map<std::uint64_t, std::uint64_t> edge_calls_;
+    std::unordered_map<std::uint64_t, std::uint64_t> edge_incl_ns_;  // 只在 edge_calls_ 里有的 key 上累加
+    std::uint64_t edge_no_parent_ = 0;
+    std::uint64_t edge_overflow_ = 0;
     std::uint64_t unbalanced_ = 0;
     std::uint64_t open_at_end_ = 0;
 };

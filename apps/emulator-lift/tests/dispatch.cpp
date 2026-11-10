@@ -7,9 +7,20 @@
 //   ④ SMC（guest 写已解码的代码页）**只丢 guest 指令块**，⛔ 不连带丢掉 `installShim` 的 shim 块；
 //   ⑤ **SSE 对齐违例必须响亮失败**（`movaps` / `movdqa` 的 m128 未 16 字节对齐 ⇒ Unimplemented，
 //      一条都不执行、目标一个字节都不写 —— ⛔ 不许静默按 movups / movdqu 处理）。
+//   ⑥ `cld`/`std`（FC/FD）只改 `EFLAGS.DF`，其它标志与寄存器一位都不动；`std` 的告警
+//      **默认级别可见**（⛔ 不许静默 no-op）。★ 这条 2026-11-10 补：`___CxxFrameHandler3` 的
+//      序言 `0x4E709D` 就是 `cld`（C++ EH 一进 handler 就撞上），此前落到 `Op::Other` 响亮失败。
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+#include <io.h>  // _dup / _dup2 / _fileno / _close / _write（stderr tee 用）
+#else
+#include <unistd.h>  // dup / dup2 / fileno / close / write
+#endif
 
 #include "check.h"
 #include "fixture.h"
@@ -62,6 +73,84 @@ std::uint32_t bootWithShim(lift::Machine& m, std::uint32_t stub_page, std::strin
     m.cache().installShim(def->stub_ea, def->id);
     return def->stub_ea;
 }
+
+// ---- stderr **tee**（⑥ 的"告警默认可见"判据用；照 `tests/dsound.cpp` 的既有用法）----
+// ★ 为什么是 tee 而不是"跑完一次性读"：`std` 的判据有一半是**日志**（⛔ 不许静默 no-op），
+//   而进程若在中途 loud 停住就看不到现场 ⇒ 边跑边把新增的一段同时写进 log 与**真 stderr**。
+//   Windows 走 `_dup/_dup2/_read/_write`，POSIX 走 `dup/dup2/read/write`。
+struct StderrTee {
+#ifdef _WIN32
+    using Fd = int;
+    static Fd dupFd(int fd) { return _dup(fd); }
+    static int dup2Fd(int src, int dst) { return _dup2(src, dst); }
+    static int fdOf(std::FILE* f) { return _fileno(f); }
+    static void closeFd(Fd fd) { _close(fd); }
+    static int writeFd(Fd fd, const void* p, unsigned n) { return _write(fd, p, n); }
+#else
+    using Fd = int;
+    static Fd dupFd(int fd) { return ::dup(fd); }
+    static int dup2Fd(int src, int dst) { return ::dup2(src, dst); }
+    static int fdOf(std::FILE* f) { return ::fileno(f); }
+    static void closeFd(Fd fd) { ::close(fd); }
+    static int writeFd(Fd fd, const void* p, unsigned n) {
+        return static_cast<int>(::write(fd, p, n));
+    }
+#endif
+    std::FILE* tmp = nullptr;
+    Fd saved = -1;
+    bool active = false;
+    std::size_t moved = 0;  // 已经从 tmp 搬走多少字节（tmp 与 fd 2 共享同一个 open file description）
+    std::string log;
+
+    bool begin() {
+        tmp = std::tmpfile();
+        if (!tmp) return false;
+        std::fflush(stderr);
+        saved = dupFd(2);
+        if (saved < 0) return false;
+        if (dup2Fd(fdOf(tmp), 2) < 0) return false;  // POSIX dup2 成功返回目标 fd（2），不是 0
+        active = true;
+        return true;
+    }
+
+    void pump() {
+        if (!active || !tmp) return;
+        std::fflush(stderr);
+        std::fseek(tmp, 0, SEEK_END);
+        const long size = std::ftell(tmp);
+        if (size < 0) return;
+        const std::size_t total = static_cast<std::size_t>(size);
+        if (total <= moved) return;
+        std::fseek(tmp, static_cast<long>(moved), SEEK_SET);
+        std::vector<char> chunk(total - moved);
+        const std::size_t got = std::fread(chunk.data(), 1, chunk.size(), tmp);
+        if (got == 0) return;
+        log.append(chunk.data(), got);
+        if (saved >= 0) {
+            std::size_t off = 0;
+            while (off < got) {
+                const int n = writeFd(saved, chunk.data() + off, static_cast<unsigned>(got - off));
+                if (n <= 0) break;
+                off += static_cast<std::size_t>(n);
+            }
+        }
+        moved += got;
+    }
+
+    std::string finish() {
+        if (!active) return log;
+        pump();
+        dup2Fd(saved, 2);
+        closeFd(saved);
+        saved = -1;
+        active = false;
+        if (tmp) {
+            std::fclose(tmp);
+            tmp = nullptr;
+        }
+        return log;
+    }
+};
 
 }  // namespace
 
@@ -349,6 +438,67 @@ int main() {
             LIFT_CHECK_EQ_U32(m.mem().rd8(0x00480003u + i), 0xCCu);  // 目标 16 字节逐字节未写
         }
         LIFT_CHECK_EQ_U32(m.cpu().xmm[0][0], 0x11111111u);  // 源也没被动（本来就不该写源）
+    }
+
+    // ⑬ `cld`(FC)：只清 `EFLAGS.DF`，其它标志与 8 个 GPR 一位都不许变。
+    //   ★ 为什么它是守卫：`___CxxFrameHandler3`(0x4E7094) 的序言 0x4E709D 就是 `cld` ——
+    //     C++ EH 一进 guest handler 就撞上；以前它落 `Op::Other` ⇒ 整条 SEH 派发当场停。
+    //   ★ 变异判据：删掉 `kOpMap` 的 `{"cld", Op::Cld}` ⇒ 解码回 `Op::Other` ⇒ 这里
+    //     `reason` 变成 Unimplemented、`DF` 仍是 1 ⇒ 红。
+    {
+        g_current_case = "cld-clears-df-only";
+        lift::Machine m;
+        const std::vector<std::uint8_t> code = {0xFC,  // cld
+                                                0xC3}; // ret
+        LIFT_CHECK(boot(m, code));
+        // 初值：DF=1 + 一串**不该被碰**的标志（CF/PF/AF/ZF/SF/OF）+ IF 保持
+        const std::uint32_t keep = 0x202u | 0x01u | 0x04u | 0x10u | 0x40u | 0x80u | 0x800u;
+        m.cpu().eflags = keep | 0x400u;  // DF=1
+        m.cpu().eax() = 0x11111111u;
+        m.cpu().ebx() = 0x22222222u;
+        m.cpu().ecx() = 0x33333333u;
+        m.cpu().edx() = 0x44444444u;
+        m.cpu().esi() = 0x55555555u;
+        m.cpu().edi() = 0x66666666u;
+        m.cpu().ebp() = 0x77777777u;
+        const lift::RunResult r = run(m);
+        LIFT_CHECK(r.reason == lift::StopReason::UntilEa);  // 不红：cld 被实现（否则 Unimplemented）
+        LIFT_CHECK(!m.cpu().df());                          // DF 清零
+        LIFT_CHECK_EQ_U32(m.cpu().eflags, keep);            // 其它标志逐位不变
+        LIFT_CHECK_EQ_U32(m.cpu().eax(), 0x11111111u);
+        LIFT_CHECK_EQ_U32(m.cpu().ebx(), 0x22222222u);
+        LIFT_CHECK_EQ_U32(m.cpu().ecx(), 0x33333333u);
+        LIFT_CHECK_EQ_U32(m.cpu().edx(), 0x44444444u);
+        LIFT_CHECK_EQ_U32(m.cpu().esi(), 0x55555555u);
+        LIFT_CHECK_EQ_U32(m.cpu().edi(), 0x66666666u);
+        LIFT_CHECK_EQ_U32(m.cpu().ebp(), 0x77777777u);
+    }
+
+    // ⑭ `std`(FD)：置 `EFLAGS.DF`，且**必须打一条默认级别可见的告警**（⛔ 不许静默 no-op）。
+    //   ★ 为什么这条要抓 stderr：本线串操作**确实**按 DF 反向推进（`exec_string.cpp` 的
+    //     `advance` 读 `cpu.df()`），但 DF 过去只能由 `popfd`/`sahf` 改 ⇒ "`std` 生效了"
+    //     这件事没有任何日志可见。告警走统一日志闸门（`log.h`，缺省 `warn` ⇒ 可见）。
+    {
+        g_current_case = "std-sets-df-and-warns";
+        lift::Machine m;
+        const std::vector<std::uint8_t> code = {0xFD,  // std
+                                                0xC3}; // ret
+        LIFT_CHECK(boot(m, code));
+        const std::uint32_t keep = 0x202u | 0x01u | 0x04u | 0x10u | 0x40u | 0x80u | 0x800u;
+        m.cpu().eflags = keep;  // DF=0
+        StderrTee tee;
+        LIFT_CHECK(tee.begin());
+        const lift::RunResult r = run(m);
+        const std::string log = tee.finish();
+        LIFT_CHECK(r.reason == lift::StopReason::UntilEa);
+        LIFT_CHECK(m.cpu().df());  // DF 置位
+        LIFT_CHECK_EQ_U32(m.cpu().eflags, keep | 0x400u);
+        LIFT_CHECK(std::strstr(log.c_str(), "[warn]") != nullptr);  // 默认级别可见（Warn）
+        LIFT_CHECK(std::strstr(log.c_str(), "std") != nullptr);     // 点名是哪条
+        LIFT_CHECK(std::strstr(log.c_str(), "DF") != nullptr);      // 说清后果
+        if (log.find("std") == std::string::npos) {
+            std::fprintf(stderr, "[std-df] 没捕获到告警；stderr 原文 = \"%s\"\n", log.c_str());
+        }
     }
 
     return finish("dispatch");

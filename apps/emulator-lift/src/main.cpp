@@ -11,6 +11,7 @@
 #include <SDL3/SDL.h>
 
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -48,6 +49,36 @@ std::uint32_t parseHex(const char* s) {
     if (!s) return 0;
     if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
     return static_cast<std::uint32_t>(std::strtoul(s, nullptr, 16));
+}
+
+// ★ `--anchor-script <id>` 的 id 解析：十进制或 `0x` 十六进制，**0..0xFFFFFFFF**（32 位原值）。
+//   ⛔ 不用 `std::strtoull`：它接受 `-1`（回绕成 ULLONG_MAX）与溢出值，而那是"参数非法"（exit 2），
+//   不是"目标脚本 id = 2^64-1"。⛔ 也不接受其它进制（`08` 之类不该被当八进制）。
+bool parseAnchorScriptId(const char* text, std::uint64_t* out) {
+    if (text == nullptr || *text == '\0') return false;
+    const char* p = text;
+    int base = 10;
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+        base = 16;
+        p += 2;
+    }
+    if (*p == '\0') return false;
+    std::uint64_t v = 0;
+    for (; *p != '\0'; ++p) {
+        int d = -1;
+        if (*p >= '0' && *p <= '9') {
+            d = *p - '0';
+        } else if (base == 16 && *p >= 'a' && *p <= 'f') {
+            d = *p - 'a' + 10;
+        } else if (base == 16 && *p >= 'A' && *p <= 'F') {
+            d = *p - 'A' + 10;
+        }
+        if (d < 0 || d >= base) return false;
+        v = v * static_cast<std::uint64_t>(base) + static_cast<std::uint64_t>(d);
+        if (v > 0xFFFFFFFFull) return false;  // id 是 32 位原值（含 ≥0x80000000 的"负 id"形态）
+    }
+    *out = v;
+    return true;
 }
 
 void usage() {
@@ -94,9 +125,18 @@ void usage() {
         "  --present-screenshot-frame <N>  只回读第 N 个 Present（1 起；缺省 0 = 每帧都写）\n"
         "  --input-script <path>  指令式输入时间线（`at frame N` / `at insn N` / `at guest_ms T` / `at wall_ms T` / at marker <名字> / after / wait；\n"
         "                     动作 = mouse_move / mouse_down / mouse_up / click / key_down / key_up / profile_begin / profile_end / quit）。\n"
+        "                     段标记（各独占一行、**必须成对**，且需 --anchor-script）：\n"
+        "                       before-anchor  之后 = **绝对**段：按声明值执行（不随 0 点重定基、闩锁前也执行）；\n"
+        "                       after-anchor   之后 = **相对**段：参与 0 点重定基、闩锁前被抑制；\n"
+        "                       ⛔ 缺 after-anchor = 解析期错误（不猜\"绝对到文件尾\"还是\"绝对止于闩锁\"）；\n"
+        "                       ⛔ 绝对段内不许 profile_begin / profile_end（窗口 profiler 的 0 点语义与锚点冲突：\n"
+        "                          0 点之前的时刻与 0 点之后不是同一把尺子）\n"
         "                     注入**不需要窗口焦点、也不移动真实光标**；格式见 README §4.2c\n"
         "  --input-marker-timeout-ms <ms>  `at marker <名字>` 等不到的超时（**宿主墙钟** ms，缺省 30000；0 = 不设限）；\n"
         "                             到点 ⇒ InteractionFailed + `marker-timeout:` detail + exit 5（⛔ 不静默继续）\n"
+        "  --anchor-script <id>  时间线的 **0 点** = 首次**观察到**进入引擎脚本 <id>（十进制 / `0x` 十六进制；\n"
+        "                     0 是根脚本的**合法** id，⛔ 不是\"关闭\"）。0 点作用于 frame / insn / guest_ms / wall_ms；\n"
+        "                     与 --interaction-graph 互斥；跑完仍未观察到 ⇒ InteractionFailed + `origin-missed:` + exit 5\n"
         "  --input-stall-ms <ms>      帧号停住多久之后把剩余 frame 条件折成 wall_ms（缺省 10000；0 = 关闭兜底）\n"
         "  --input-stall-boot-ms <ms> 还没出现第一帧（boot）时的宽限（缺省 30000；⛔ boot 不算停滞）\n"
         "  --interaction-graph <path>  识别驱动的交互任务（节点图：when → action → next）。与 --input-script **并存**；\n"
@@ -194,6 +234,11 @@ int main(int argc, char** argv) {
     // ★ marker 超时（`at marker <名字>` 等不到）：**宿主墙钟** ms；0 = 不设限。
     //   到点 ⇒ `InteractionFailed` + `marker-timeout:` detail + exit 5（⛔ 不静默继续）。
     std::uint64_t input_marker_timeout_ms = 30000;
+    // ★ 时间线的 **0 点**（`--anchor-script <id>`，见 `runtime/input_script.h` 的 `TimelineOrigin`）。
+    //   ★ 启用判据是 `anchor_script_set`，⛔ 不是 `id != 0` —— `0` 是**根脚本的合法 id**
+    //     （`engine_marker.cpp` 明说），拿它当"关闭"哨兵会让"锚根脚本"变成"没给"。
+    bool anchor_script_set = false;
+    std::uint32_t anchor_script_id = 0;
     // ★ 时间线的效果级判据（README §4.2c）：`--expect-change-after` 的原始写法 + 窗口长度（采样数）。
     //   缺省关（打开会改变既有脚本的退出码）。窗口缺省 30 个采样（60 fps 下 ≈0.5 s）。
     std::string expect_change_after;
@@ -265,11 +310,19 @@ int main(int argc, char** argv) {
                 return 2;
             }
         } else if (std::strcmp(a, "--time-limit") == 0 && i + 1 < arg_count) {
-            time_limit_sec = std::strtod(args[++i].c_str(), nullptr);
-            if (time_limit_sec <= 0.0) {
-                std::fprintf(stderr, "--time-limit 需要正数秒\n");
+            // ★ `0` = **不设墙钟上限**，与省略该参数**完全等价**（三处同一口径：usage 的
+            //   "0 = 不限，缺省" / 本行 / `Machine::run` 的 `opts.time_limit_sec > 0.0` 判据）。
+            //   修前这里是 `<= 0.0` ⇒ usage 说"0 = 不限"，实际 exit 2（explore 脚本写死的
+            //   `--time-limit 0` 整轮跑不起来）。⛔ 不要写回 `<= 0.0`（help 会重新变成骗人）。
+            //   负数 / 非数字仍然是 exit 2（消息说清是哪个 flag + 收到了什么）。
+            const char* text = args[++i].c_str();
+            char* end = nullptr;
+            const double secs = std::strtod(text, &end);
+            if (end == text || *end != '\0' || !std::isfinite(secs) || secs < 0.0) {
+                std::fprintf(stderr, "--time-limit 需要非负数秒（0 = 不限；收到 %s）\n", text);
                 return 2;
             }
+            time_limit_sec = secs;
         } else if (std::strcmp(a, "--bench") == 0 && i + 1 < arg_count) {
             bench = std::strtoull(args[++i].c_str(), nullptr, 10);
         } else if (std::strcmp(a, "--profile") == 0) {
@@ -382,6 +435,18 @@ int main(int argc, char** argv) {
                 return 2;
             }
             input_marker_timeout_ms = static_cast<std::uint64_t>(v);
+        } else if (std::strcmp(a, "--anchor-script") == 0 && i + 1 < arg_count) {
+            // 时间线 0 点 = 首次**观察到**进入脚本 <id>（语义见 runtime/input_script.h 的 TimelineOrigin）。
+            const char* text = args[++i].c_str();
+            std::uint64_t v = 0;
+            if (!parseAnchorScriptId(text, &v)) {
+                std::fprintf(stderr,
+                             "--anchor-script 需要 0..0xFFFFFFFF 的整数（十进制或 0x 十六进制；收到 %s）\n",
+                             text);
+                return 2;
+            }
+            anchor_script_set = true;
+            anchor_script_id = static_cast<std::uint32_t>(v);
         } else if (std::strcmp(a, "--expect-change-after") == 0 && i + 1 < arg_count) {
             // 效果级判据：动作之后必须观测到画面变化（见 README §4.2c）。
             expect_change_after = args[++i];
@@ -479,6 +544,18 @@ int main(int argc, char** argv) {
         } else {
             std::fprintf(stderr, "未知参数：%s\n", a);
             usage();
+            return 2;
+        }
+    }
+
+    // ---- ★ `--anchor-script` 的**解析期**校验（互斥 / 依赖；⛔ 不跑一半就退化成"0 点从 run 起算"）----
+    //   判据的**唯一实现**在 `runtime/input_script.cpp`（`validateOriginCli`）：那里也是 pure CTest
+    //   断言"与 --interaction-graph 同给 ⇒ 解析期报错"的入口（进程退出码在 CTest 里不可达）。
+    {
+        const std::string why =
+            lift::validateOriginCli(anchor_script_set, !input_script_path.empty(), !interaction_graph_path.empty());
+        if (!why.empty()) {
+            std::fprintf(stderr, "emulator-lift: %s\n", why.c_str());
             return 2;
         }
     }
@@ -776,6 +853,10 @@ int main(int argc, char** argv) {
     }
     machine.setSkipLogo(skip_logo);
 
+    // ★ 0 点的**配置**必须先于脚本解析：`before-anchor` / `after-anchor` 的解析期判据要问
+    //   "有没有 `--anchor-script`"（没开却写段标记 ⇒ 解析期报错）。配置跨 `clear()` 存活
+    //   ⇒ 放在 `loadInputScript` 之前不会丢（`REQ-01M710E6PV4PPHECPPCCTRF5RA`）。
+    if (anchor_script_set) machine.inputScript().setOriginScript(anchor_script_id);
     // ---- 指令式输入时间线（`--input-script`）：启动前解析，失败立刻拒绝（⛔ 不跑一半）----
     if (!input_script_path.empty()) {
         std::string script_err;
@@ -805,6 +886,35 @@ int main(int argc, char** argv) {
     }
     // ★ marker 只是**时间线**的事件源（交互图的 actuator 生成的是 `at frame`，没有 marker 动作）。
     if (!input_script_path.empty()) machine.setInputMarkerTimeoutMs(input_marker_timeout_ms);
+    // ★ 时间线的 0 点（`--anchor-script <id>`）：配置 + 启动日志 + "不可复现"的警告。
+    //   ★ 配置**跨 run / clear() 存活**（`setOriginScript` 只写配置；闩锁状态每轮重置）——
+    //     所以必须在这里、`run()` 之前设。
+    if (anchor_script_set) {
+        const std::string why = lift::validateOriginScript(true, machine.inputScript().actionCount());
+        if (!why.empty()) {
+            std::fprintf(stderr, "emulator-lift: %s\n", why.c_str());
+            return 2;
+        }
+        // ★ 配置已在解析**之前**设过（段标记的解析期判据要用它）—— 这里只做启动日志与警告。
+        std::printf(
+            "anchor    : 0 点 = 首次**观察到**进入脚本 0x%08X（frame / insn / guest_ms / wall_ms 全部重定基；\n"
+            "            跑完仍未观察到 ⇒ stderr `[anchor] FAIL origin-missed:` + exit 5）\n",
+            anchor_script_id);
+        // ★ 裁决 6：`at wall_ms` **允许**，但必须打一行"该锚在 real-time 档不可复现"的警告
+        //   （⛔ 不因此 exit 2：墙钟在 headless 档是确定性的，脚本本身仍然可跑）。
+        bool has_wall_ms = false;
+        for (const lift::InputScript::Action& act : machine.inputScript().actions()) {
+            if (act.trigger.kind == lift::TriggerKind::WallMs) {
+                has_wall_ms = true;
+                break;
+            }
+        }
+        if (has_wall_ms) {
+            std::fprintf(stderr,
+                         "emulator-lift: ⚠ 脚本里有 `at wall_ms` 条件，而 0 点来自脚本身份 ⇒ 该锚在 real-time 档"
+                         "（--present window）**不可复现**（墙钟不随 guest 脚本推进；那一档请用 frame / insn）\n");
+        }
+    }
     if (!interaction_fail_dump.empty() && !interaction_graph_loaded) {
         std::fprintf(stderr, "--interaction-fail-dump 需要同时给 --interaction-graph\n");
         return 2;
@@ -1103,6 +1213,13 @@ int main(int argc, char** argv) {
     // ★ 交互任务的三种失败（真源 §2）：**非 0 退出**（5，可与 2 = 未实现缺口区分）+ stderr 打
     //   "最后状态与全部候选" + 存最后画面。⛔ 不许 warning-only、⛔ 不许当 0 点继续跑。
     if (r.reason == lift::StopReason::InteractionFailed) {
+        // ★ 时间线 0 点没闩锁（`--anchor-script`）：**先于**其它三个分流（marker 超时 / expect-change /
+        //   交互图）。复用同一个 `InteractionFailed`（退出码 5），detail 是 `origin-missed:` 那一行；
+        //   ⛔ 不许落到交互图分支（图没加载时 `failureReport()` 是空串、还会往 CWD 写 `.fail.bmp`）。
+        if (r.origin_missed) {
+            std::fprintf(stderr, "[anchor] %s\n", r.detail.c_str());
+            return 5;
+        }
         // ★ marker 超时（`at marker <名字>` 等不到）：**先于** expect-change / 交互图两条分流。
         //   复用同一个 `InteractionFailed`（退出码 5），但 `detail` 是 `marker-timeout:` 那一行；
         //   ⛔ 不许落到交互图分支：图没加载时 `failureReport()` 是空串、还会往 CWD 写 `.fail.bmp`。

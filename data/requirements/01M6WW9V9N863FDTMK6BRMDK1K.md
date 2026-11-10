@@ -2,16 +2,10 @@
 
 - id: REQ-01M6WW9V9N863FDTMK6BRMDK1K
 - type: spike
-- status: open
+- status: done
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
-- tags: [emulator-lift d3d9]
-
-# emulator-lift · TITLE 往返后的一次性 +2 surfaces / +1.3 MB：判「预期缓存」还是「真残留」（两种结局都落结论）
-
-- id: REQ-01M6WW9V9N863FDTMK6BRMDK1K
-- type: spike
-- status: open
-- parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
+- verify: apps/emulator-lift/tests/option_roundtrip.cpp#option-roundtrip/3cycles
+- done_reason: 结局 A（预期的一次性工作集，不是残留）：0 轮基线 21 面 / 108,595,152 B；1=2=3 轮 23 面 / 109,895,008 B，四字段逐字段相同；0→1 = +2 面 / +1,299,856 B，1→2 与 2→3 = +0。两张 surface 点名 = 824×120 与 628×360（首次 OPTION 装载 6 张里回 TITLE 时留下的两张）。结论已写进 tests/option_roundtrip.cpp 文件头；⛔ 不要修成 0。
 - tags: [emulator-lift d3d9]
 
 ## 已知（父级验收实测）
@@ -57,8 +51,25 @@
 - ⛔ 不用"调大容差"或"调大 arena"把它盖掉。
 - 终点必须都是"回到 TITLE 之后"：终点不同就没法比（TITLE 静止态与 OPTION 屏的工作集本来就不同）。
 
-## 本轮状态（2026-11-09）
+## 结论（2026-11-10）：**结局 A —— 每屏工作集，不是残留**
 
-**未处理**（父级按用户要求暂停了后续派发）。它是本子树里唯一一张**既没有实现、也没有只读分析**的未收口单 ——
-前置是**真机三次独立子进程**（0 轮 / 1 轮 / 2 轮 / 3 轮往返）读 `arena : surfaces N in_use U peak P largest-free F`，
-不接受静态推断。下一轮的第一步就是跑那四条命令并落读数（`.tmp/` 不算交付，读数要点写回本节）。
+四次**独立子进程**（同一份 exe sha256 `39A33ADE…15FE69`、同一份 appdata、`--skip-logo` + `--present window --present-hidden
+--present-vsync 0 --raster gpu --native-overrides all --assert-guest-token`，`violations=0`），终点都是"回到 TITLE 之后"：
+
+| 跑法 | insns | surfaces | in_use | peak | largest-free |
+|---|---|---|---|---|---|
+| **0 轮**（基线，停在同帧 252） | 245,519,829 | **21** | **108,595,152** | 108,595,152 | 22,591,536 |
+| 1 轮 | 281,186,675 | **23** | **109,895,008** | 126,672,232 | 16,777,224 |
+| 2 轮 | 351,498,179 | **23** | **109,895,008** | 126,672,232 | 16,777,224 |
+| 3 轮 | 422,372,904 | **23** | **109,895,008** | 126,672,232 | 16,777,224 |
+
+- **1 = 2 = 3 轮：四个字段逐字段完全相同**（不是"在 1 MiB 容差内"）；0 → 1 = **+2 面 / +1,299,856 B**；1→2 与 2→3 = **+0 / +0**。
+  0 / 1 / 2 轮各复跑一次，arena 四字段依旧完全一致（只有 `insns` 抖 0.1% —— `--present window` 是 real-time）。
+- **那两张点得到名**（两条独立算术逐字节闭合）：第一次进 OPTION 新建 6 张纹理（`824×120` / `1280×720` / `1280×1152` /
+  `712×256` / `300×404` / `628×360`，含 8 B 块头合计 **12,098,416** = 实测 OPTION−TITLE）；回 TITLE 时释放其中 4 张
+  （10,798,560）⇒ 留下 `824×120` + `628×360` = **1,299,856**（= 实测增量）。2 轮日志里这 6 张**每次进 OPTION 各重建一次**、
+  终局仍 23 面 ⇒ 上一轮留下的两张在下次进 OPTION 时被清掉（否则 25 面）⇒ **每屏工作集**，不是"引用归零却没回收"。
+- ⛔ **不要把它修成 0**（那是改引擎的缓存策略）。结论已写进 `repo:apps/emulator-lift/tests/option_roundtrip.cpp` 文件头。
+- **回归哨（若日后复发 = 结局 B）**：`arena` 行 `surfaces > 23`、或 `in_use > 109,895,008`（0 字节超出，非容差）、或 2 轮 ≠ 3 轮任一字段。
+- **没做到**：那两张的 **guest 侧引用计数**没有直接读数（无 per-surface dump、`Release` 只在失败时记日志、`--trace-shims`
+  不按 `--log-cat` 过滤），也没点名持它们的引擎对象。复跑：`.tmp/reveq/01M6WW9V9N863FDTMK6BRMDK1K/run-cycle.ps1 -Cycles N`（不入库）。

@@ -1000,6 +1000,53 @@ void shimCoUninitialize(X86&, ShimCall& call) { call.result = 0; }
 void shimVoidOk(X86&, ShimCall& call) { call.result = 0; }
 void shimCoAddRefServerProcess(X86&, ShimCall& call) { call.result = 1; }
 
+// ---------------------------------------------------------------------------------------
+// SEH / C++ EH 的两个 OS 原语（`REQ-01M708DF24KY0QZNEHY66S0HYW`）
+//
+// ★ 这里**只搬参数**：真正的派发在 `Machine::pumpSeh`（块边界）——⛔ 不在 shim 里跑 guest。
+//   guest 自己的 `_CxxThrowException` 用 `call dword ptr [0x51d1dc]`（0x4E8AB0）调进来，
+//   所以 `call.ret_ea` 就是 `EXCEPTION_RECORD.ExceptionAddress`（Win32 文档语义）。
+// ★ 四个实参**原样透传**：guest 在 `CallCatchBlock` 里自己校验
+//   `code@+0x00` / `NumberParameters@+0x10` / `ExceptionInformation[0]@+0x14`
+//   （0x4F00F8 / 0x4F0100 / 0x4F0109：`Info[0] ∈ {0x19930520,21,22}`）——宿主合成任何一个值都会
+//   让那个 catch **静默不成立**。
+// ★ 交接方式 = `take_control`：esp 铺成"形如 stdcall 返回"、eip = `kSehDispatchEa`；
+//   下一次块边界由 `Machine::pumpSeh` 认领。失败（结构铺不下等）也已写进 pending stop ⇒ 响亮停。
+// ---------------------------------------------------------------------------------------
+void shimRaiseException(X86& cpu, ShimCall& call) {
+    Machine* machine = cpu.machine;
+    if (machine == nullptr) {
+        // ⛔ 不许静默 no-op：没有状态机就只能响亮停（`Trap` ⇒ 非 0 退出）。
+        std::fprintf(stderr, "[seh] RaiseException 无法派发：这台 cpu 没有 Machine 归属\n");
+        cpu.running = false;
+        cpu.stop_why = "kernel32!RaiseException：cpu 没有 Machine 归属（无法派发）";
+        cpu.stop_kind = HostStopKind::Trap;
+        return;
+    }
+    (void)machine->seh().beginRaise(cpu, *cpu.mem, call.u32(0), call.u32(1), call.u32(2), call.u32(3),
+                                    cpu.esp(), call.ret_ea);
+    call.take_control = true;
+    cpu.esp() += 4u + call.stdcall_bytes;
+    cpu.eip = kSehDispatchEa;
+}
+
+void shimRtlUnwind(X86& cpu, ShimCall& call) {
+    Machine* machine = cpu.machine;
+    if (machine == nullptr) {
+        std::fprintf(stderr, "[seh] RtlUnwind 无法派发：这台 cpu 没有 Machine 归属\n");
+        cpu.running = false;
+        cpu.stop_why = "kernel32!RtlUnwind：cpu 没有 Machine 归属（无法派发）";
+        cpu.stop_kind = HostStopKind::Trap;
+        return;
+    }
+    // (TargetFrame, TargetIp, ExceptionRecord, ReturnValue)（stdcall 4 参，右到左压栈）
+    (void)machine->seh().beginUnwind(cpu, *cpu.mem, call.u32(0), call.u32(1), call.u32(2), call.u32(3),
+                                     cpu.esp(), call.ret_ea);
+    call.take_control = true;
+    cpu.esp() += 4u + call.stdcall_bytes;
+    cpu.eip = kSehDispatchEa;
+}
+
 }  // namespace
 
 // 由 machine.cpp 在 registerKernel32Shims() 之后调用
@@ -1060,9 +1107,12 @@ void registerBootstrapShims(ShimRegistry& s) {
     s.add("ole32", "CoAddRefServerProcess", Conv::Stdcall, 0, &shimCoAddRefServerProcess);
     s.add("ole32", "CoReleaseServerProcess", Conv::Stdcall, 0, &shimCoAddRefServerProcess);
 
+    // ★ SEH / C++ EH 的两个 OS 原语（`REQ-01M708DF24KY0QZNEHY66S0HYW`）：**已实现**。
+    //   shim 只搬参数 + 把控制交给状态机（派发在 `Machine::pumpSeh`，块边界）。
+    s.add("kernel32", "RaiseException", Conv::Stdcall, 4, &shimRaiseException);
+    s.add("kernel32", "RtlUnwind", Conv::Stdcall, 4, &shimRtlUnwind);
+
     // 明确登记为缺口（⛔ 不假装成功）
-    s.addUnimplemented("kernel32", "RaiseException", "SEH 展开不在 M1（plan §9 R1）");
-    s.addUnimplemented("kernel32", "RtlUnwind", "SEH 展开不在 M1（plan §9 R1）");
     s.addUnimplemented("kernel32", "FindResourceA", "M2 资源族（用户 2026-11-04：资源等 M2；不属 M1）");
     s.addUnimplemented("kernel32", "SizeofResource", "M2 资源族（用户 2026-11-04：资源等 M2；不属 M1）");
     s.addUnimplemented("kernel32", "LoadResource", "M2 资源族（用户 2026-11-04：资源等 M2；不属 M1）");

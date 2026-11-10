@@ -788,6 +788,72 @@ void caseEnumDisplayModes() {
     LIFT_CHECK_EQ_U32(f.m.mem().rd32(count_ea), 1u);
 }
 
+// ---------------------------------------------------------------------------------------
+// ⑨ 销毁路径的**归属**判据：Machine A 建 surface → Machine B 抢 `g_active` → 用 A 的 cpu 销毁
+//    REQ-01M6ZY8SZRR3KA92ZC9QBNQ349
+//
+// 缺陷：旧实现先 `wr32(state+kSfMagic, 0)`、后判 `activeMachine()`。判据不成立时（g_active 是另一台
+//   Machine / 已被析构清空）magic 已经没了 ⇒ 这块 arena **永久没有回收入口**（谁也再进不了本函数）。
+// 修法：先取 `machineOf(cpu)`（`Machine::wire()` 装配时捕获的归属），再清 magic；回收用 owner 判据。
+//
+// ★ 这条用例在修复前**会红**（arena 的 surfaceCount / bytesInUse 停在"建完之后"，设备链头仍指着它）。
+// ★ 两台 Machine 同时活着是合法的（`initBare` 各留 4 GiB 虚拟地址）；`~Machine` 只在自己是 g_active
+//   时清空它 ⇒ 本用例借用的 `g_active` 不会被销毁路径"抢回来"。
+// ---------------------------------------------------------------------------------------
+void caseReleaseReclaimsArenaOfOwnerNotActive() {
+    lift_test::g_current_case = "ddraw/release-owner-not-active";
+    Fixture f;
+    LIFT_CHECK(f.boot());
+    LIFT_CHECK(f.createDirectDraw());
+    if (f.device == 0) return;
+
+    lift::SurfaceArena& arena = f.m.surfaces();
+    // 基线：还没有任何 surface（arena 空 / 设备链空 / primary 无）
+    LIFT_CHECK_EQ_U32(arena.bytesInUse(), 0u);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(arena.surfaceCount()), 0u);
+    LIFT_CHECK_EQ_U32(lift::ddraw::surfaceChainHead(f.m.cpu()), 0u);
+    LIFT_CHECK_EQ_U32(lift::ddraw::primarySurface(f.m.cpu()), 0u);
+    const std::uint32_t heap_baseline = f.m.heap().bytesInUse();
+
+    // 主表面：设备链头与 kDevPrimary 都指向它 ⇒ 回收后两者都要回基线
+    std::uint32_t surf = 0;
+    LIFT_CHECK_EQ_U32(f.createSurface(8, 8, lift::ddraw::kCapsPrimarySurface, &surf), 0u);
+    LIFT_CHECK_NE_U32(surf, 0u);
+    if (surf == 0) return;
+    const std::uint32_t state = lift::ddraw::stateOfObject(f.m.cpu(), surf);
+    LIFT_CHECK_NE_U32(state, 0u);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(arena.surfaceCount()), 1u);
+    LIFT_CHECK(arena.bytesInUse() > 0u);
+    LIFT_CHECK_EQ_U32(lift::ddraw::surfaceChainHead(f.m.cpu()), state);
+    // ★ primary 登记的是**状态块** EA（不是 COM 对象 EA —— createSurface 的 out 是对象）
+    LIFT_CHECK_EQ_U32(lift::ddraw::primarySurface(f.m.cpu()), state);
+
+    // ★ 第二台 Machine 抢走进程级 `g_active`（生产里 = 另一台 Machine init 过 / 旧 Machine 已析构）
+    lift::Machine other;
+    std::string other_err;
+    const bool other_ok = other.initBare(&other_err);
+    LIFT_CHECK(other_ok);
+    if (!other_ok) {
+        lift_test::failf(__FILE__, __LINE__, "第二台 Machine initBare 失败：%s", other_err.c_str());
+        return;
+    }
+    lift::setActiveMachine(&other);
+    LIFT_CHECK(lift::activeMachine() == &other);
+
+    // 用 **A 的 cpu** 从 guest 侧 Release（refcount 1→0）：返回值 / 链摘除 / primary 归零照旧发生
+    LIFT_CHECK_EQ_U32(f.method(surf, 8u, {}), 0u);
+
+    // ★ 判据：arena 与设备表面链**都回到基线**（修复前 arena 两处停在"建完之后"）
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(arena.surfaceCount()), 0u);
+    LIFT_CHECK_EQ_U32(arena.bytesInUse(), 0u);
+    LIFT_CHECK_EQ_U32(lift::ddraw::surfaceChainHead(f.m.cpu()), 0u);
+    LIFT_CHECK_EQ_U32(lift::ddraw::primarySurface(f.m.cpu()), 0u);
+    LIFT_CHECK_EQ_U32(f.m.heap().bytesInUse(), heap_baseline);  // 状态块照旧还给 guest 堆
+
+    // 修法不许靠"把 g_active 抢回来"：销毁路径不改它
+    LIFT_CHECK(lift::activeMachine() == &other);
+}
+
 }  // namespace
 
 int main() {
@@ -801,6 +867,7 @@ int main() {
         caseGetDc();
         caseFlip();
         caseEnumDisplayModes();
+        caseReleaseReclaimsArenaOfOwnerNotActive();
         return finish("ddraw");
     } catch (const std::exception& e) {
         std::fprintf(stderr, "DIAG uncaught std::exception: %s\n", e.what());

@@ -33,6 +33,7 @@
 #include "runtime/interaction_graph.h"
 #include "runtime/memory.h"
 #include "runtime/native_overrides.h"
+#include "runtime/seh.h"
 #include "runtime/shims.h"
 #include "runtime/vfs.h"
 #include "runtime/window_profile.h"
@@ -62,6 +63,12 @@ enum class StopReason : std::uint8_t {
     //   为什么不复用 `Unimplemented`：那条的判据是"注册表里没有 fn"（`had_impl == false`），
     //   而这里 `had_impl == true` —— 导出 / 槽**已注册**，只是方法体是 loud trap。
     Trap,
+    // ★ guest 的 SEH / C++ EH 走不完（`RaiseException` / `RtlUnwind` 的派发状态机报的）：
+    //   ① `fs:[0]` 链走到底仍没有 handler 接受（= 真机上的"未处理异常"）；
+    //   ② 派发本身做不下去（结构铺不下 / fs_base 没装配 / 展开要跨过宿主 guest 回调帧 / 嵌套异常）。
+    //   ⛔ 不是正常结局、不进 `ok()`：它**必须**与"跑完了"区分开（旧形态 `unimplemented` 只说明
+    //   "宿主缺导入"，而这里导入已经有了，缺的是"这条异常没人接"）。detail 里写清是哪一种。
+    UnhandledException,
 };
 const char* stopReasonName(StopReason r);
 
@@ -110,6 +117,11 @@ struct RunResult {
     //   ⛔ 不新增 `StopReason` 成员：退出码契约里 `InteractionFailed` 已经是 5；这里只做**分流标志**，
     //   让 `main.cpp` 打对的那条 stderr、⛔ 不落到交互图的 `failureReport()` / `.fail.bmp`。
     bool marker_timeout = false;
+    // ★ 这次 `InteractionFailed` 是**时间线 0 点没闩锁**（`--anchor-script` 整个 run 都没**观察到**
+    //   进入目标脚本）。⛔ 不新增 `StopReason`：退出码契约里 `InteractionFailed` 已经是 5，这里只做
+    //   **分流标志**，让 `main.cpp` 打 `[anchor] FAIL origin-missed: …`、⛔ 不落到交互图的
+    //   `failureReport()` / `.fail.bmp`（与 `marker_timeout` 同一条理由）。
+    bool origin_missed = false;
     // ★ 只有"正常结局"为真。`ResourceExhausted` / `Trap` / `Unimplemented` / `DecodeError` /
     //   `NoCode` / `None` / `InteractionFailed` 都是非 ok ⇒ 退出码非 0（见 `exitCodeForRun`）。
     bool ok() const { return reason == StopReason::UntilEa || reason == StopReason::MaxInsns ||
@@ -282,6 +294,11 @@ public:
     bool profilerArmed() const { return window_prof_.armed(); }
     const InstrumentationState& instrumentation() const { return instrument_; }
 
+    // ★ SEH 派发状态机（`RaiseException` / `RtlUnwind`）：shim 只把参数搬进来，真正的
+    //   "铺 handler 帧 → 跑 guest → 收 disposition"在**块边界**（`pumpSeh`）。
+    Seh& seh() { return seh_; }
+    const Seh& seh() const { return seh_; }
+
     // ---- 访问器 ----
     GuestMemory& mem() { return mem_; }
     const GuestMemory& mem() const { return mem_; }
@@ -366,6 +383,11 @@ private:
     // winmm 定时器：找到期最早的一个并把控制权交给 guest 回调（协作式；见 x86.h 的 GuestTimer）。
     // 返回 true = 已铺好回调帧（调用方应 continue）；false = 没有到期项或铺帧失败（后者设 r）。
     bool fireDueTimer(RunResult& r);
+    // ★ SEH 派发（块边界）：① 认领 shim 的交接（`kSehDispatchEa`）；② 若 handler 已返回或
+    //   guest 弃帧就推进状态机，并同步影子栈（`WindowProfiler`）。
+    //   返回 true = 本次迭代已经铺好 guest 帧（调用方 `continue`）；false = 照常往下，
+    //   但 `r.reason != None` 时调用方必须 `break`（响亮停）。
+    bool pumpSeh(RunResult& r);
     friend void liftFaultHook(const AccessSite& site);
 
     GuestMemory mem_;
@@ -393,6 +415,15 @@ private:
     // ★ 区间 profiler（`runtime/window_profile.h`）：armed = 脚本里有 profile_begin/end 动作。
     //   ⛔ 没有这些动作时它整条路径都是 no-op（两次 steady_clock 也不会有）。
     WindowProfiler window_prof_;
+    // ★ SEH / C++ EH 的派发状态机（见 runtime/seh.h）。跨块迭代存活；每轮 `run()` 开头清空。
+    Seh seh_;
+    // ★ SEH 展开的**宿主 guest 回调边界**（0 = 没有）：某个 guest 回调帧的返回槽 EA
+    //   （`GuestCallStack::start` 在那里写 `kContinuationEa`；winmm 定时器回调是 `timer_saved_esp-24`）。
+    //   判据：展开落地 `esp >= 这个槽` ⇒ 异常要"从回调里穿出去"——真机上那会穿过宿主 C++ 栈（UB）
+    //   ⇒ 本线**响亮失败**（⛔ 不许静默把 `guest_calls_` 清掉继续跑）。
+    //   ★ "在回调**里面** catch"（room-exit 的形状：throw 与 catch 同在 `sub_412290` 的帧里）
+    //     落地 esp 仍在这个槽之下 ⇒ 放行；这不是"跨帧"。
+    std::uint32_t seh_guest_boundary_ = 0;
     bool profile_begin_pending_ = false;
     bool profile_end_pending_ = false;
     std::string profile_begin_label_;

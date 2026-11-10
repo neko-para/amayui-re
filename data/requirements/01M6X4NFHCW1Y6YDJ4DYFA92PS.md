@@ -47,9 +47,11 @@
 - 修法：`ComRegistry` 宿主对象表加 `generation` / `owner_generation`（**只在宿主表**，guest ABI / `kObjectBytes` 不变）
   + `releaseIf(EA, gen)`（代际比较与减引用同一把锁）；`setRenderTarget` 的陈旧判据从
   `userOf(owner) != tex_state` 换成代际（旧判据会被"对象 EA + `'TEX1'` 状态块 EA 同时复用"骗过——实测换回旧判据 ⇒ 8 条红）。
-- 守卫：`verify` 那条；端到端备选 `apps/emulator-lift/tests/d3d9_pipeline.cpp#d3d9p/stale-owner-generation-known-deviation`。
+- 守卫：`verify` 那条；端到端备选 `apps/emulator-lift/tests/d3d9_pipeline.cpp#d3d9p/owner-lifetime-and-stale-generation`。
   变异：`tools/mutate-check.mjs` 两条（代际短路 ⇒ mechanism 红；判据短路 ⇒ d3d9-pipeline 红），`--match 代际` 2/2 红。
-- 已知偏离（**不是**真机语义）：`GetSurfaceLevel → Release(纹理) → SetRenderTarget` 在本线被拒成 INVALIDCALL，
-  因为 surface 不持父纹理；跟踪 `REQ-01M6ZZZ6PEVSFB93C6VJPKC04C`，修 04C 后该断言必须翻面。
-  可达性：**未在游戏路径观测到**该顺序。
+- ~~已知偏离~~ **已消除（`REQ-01M6ZZZ6PEVSFB93C6VJPKC04C` 收口时翻面）**：原先
+  `GetSurfaceLevel → Release(纹理) → SetRenderTarget` 在本线被拒成 INVALIDCALL，因为 surface 不持父纹理。
+  04C 落地 A 方案（surface 持父纹理）后该时序**合法** ⇒ 用例翻成正向（`SetRenderTarget` = `kOk`、
+  `color_arena` == 该纹理 arena），"陈旧 owner 不许绑 / 不许解绑"改由**越界释放**那条负向断言守（② + ②-b）。
+  可达性：**未在游戏路径观测到**该顺序（翻面不改变这一点）。
 - 同根残余另开 `REQ-01M701NYF2B3YV1YFSZBMPQZ41`（Get* 借出陈旧 EA / Sprite 批次未钉住 / 流与索引假匹配）。

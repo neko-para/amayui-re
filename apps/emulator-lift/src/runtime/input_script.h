@@ -16,6 +16,17 @@
 //     wait N frames|ms|insn   同上，并记一个 **no-op 动作**（脚本要等它到期才收口）
 //     ... [stall MS]          （只对 frame 有效）帧停滞兜底：见下
 //
+//     before-anchor           ★ 段标记（独占一行；**必须**配 `--anchor-script`）：之后的触发 = **绝对**
+//                             （按声明的 frame / insn / guest_ms / wall_ms 原样执行：不参与 `+= origin`
+//                              重定基，且 0 点闩锁之前**不被抑制**）⇒ 用输入把游戏推到某屏、再锚那一刻
+//     after-anchor            ★ 段标记（独占一行）：之后的触发恢复**相对**（参与重定基 / 闩锁前被抑制）。
+//                             ★ **必须成对**：缺 `after-anchor` ⇒ 解析期错误（⛔ 不猜"隐式边界"：
+//                               "绝对到文件尾"与"绝对止于闩锁"两种都能自圆其说，脚本字面看不出来）
+//     ⛔ 解析期错误（都带行号）：没开 `--anchor-script` 却写段标记 / 重复 `before-anchor` /
+//        `after-anchor` 在 `before-anchor` 之前 / `before-anchor` 缺配对的 `after-anchor` /
+//        绝对段里出现 `profile_begin` / `profile_end`（窗口 profiler 的 0 点语义与锚点冲突：
+//        0 点之前的时刻与 0 点之后不是同一把尺子）
+//
 //     mouse_move X Y          guest 客户区坐标（= 引擎 1280×720 虚拟屏），顺带把光标给脚本
 //     mouse_down [left|right|middle]     用脚本上一次的坐标
 //     mouse_up   [left|right|middle]
@@ -111,6 +122,31 @@ struct Trigger {
     bool due(std::uint64_t frame, std::uint64_t guest_ms, std::uint64_t insns, std::uint64_t wall_ms) const;
 };
 
+// ★ **时间线的 0 点**（`--anchor-script <id>`）：**首次观察到进入**引擎脚本 `id` 的那一个可观察样本。
+//   ⛔ 与 `InputScript` 里的 `anchor_*`（`after` / `wait` 的**解析期**基准 = "上一条同单位动作"）
+//      是两个概念 —— 那个负责相对推进，这个负责"run 的 0 时刻"。名字分开是为了让下一个人改不错。
+//   ★ 措辞：一律写"**观察到**进入脚本 X" —— 0 点只定义在可观测样本上（采样点 = VM 循环头，
+//      切换指令本身没有观察口；见 `runtime/engine_marker.h`）。
+//   ★ `id` 是 guest 真值（记录 `+0x3C` 的原始 32 位），**整数、≥ 0**；`0` 是**合法的根脚本 id**，
+//      ⛔ 不许用 `0` 当"关闭"哨兵（"没给 `--anchor-script`"才是关闭）。
+struct TimelineOrigin {
+    std::uint32_t id = 0;
+    // 闩锁那个样本的**四个单位**（0 点作用于全部四个：frame / insn / guest_ms / wall_ms）。
+    std::uint64_t frame = 0;
+    std::uint64_t guest_ms = 0;
+    std::uint64_t insns = 0;
+    std::uint64_t wall_ms = 0;
+};
+
+// ★ `--anchor-script` 的**启动期**校验（解析期报错，⛔ 不跑一半就退化成"0 点从 run 起算"）。
+//   两条判据分开是因为它们的信息不同：① 只依赖 CLI 组合（argv 解析完就能判），
+//   ② 依赖脚本已解析（"一个触发 / 动作都没有"的脚本让 0 点无从谈起）。
+//   抽成**纯函数**是为了让 pure CTest 能断言"与 `--interaction-graph` 同给 ⇒ 解析期报错" ——
+//   `main` 的进程退出码在 CTest 里不可达，这里是同一段判据的**唯一实现**（⛔ 不复制一份到 test 里）。
+//   返回空串 = 通过；非空 = 用法错误的原因（调用方 `exit 2`）。
+std::string validateOriginCli(bool anchor_requested, bool input_script_given, bool interaction_graph_given);
+std::string validateOriginScript(bool anchor_requested, std::size_t action_count);
+
 class InputScript {
 public:
     enum class Kind : std::uint8_t {
@@ -140,6 +176,11 @@ public:
         std::string label;              // ProfileBegin/End
         std::string text;               // 原始行（日志 / 报错定位）
         bool applied = false;
+        // ★ 段标记 `before-anchor` 之后的动作 = **绝对**段（`REQ-01M710E6PV4PPHECPPCCTRF5RA`）：
+        //   触发值**按声明原样**执行（⛔ 不参与 `+= origin` 重定基），且闩锁前**不被抑制**
+        //   （抑制只压相对段 —— 它的存在理由正是"让输入在 0 点之前能跑"）。
+        //   ⛔ 不是"anchor 可选"：没进入目标脚本仍然响亮失败（`origin-missed:`）。
+        bool absolute = false;
     };
 
     // "抬起"是**延迟动作**，单独排队；否则一次 tick 里 down+up 会被 guest 漏掉。
@@ -248,7 +289,10 @@ public:
     //   · 首个有效样本只**播种**（记下 (cur,id)，不发事件）；
     //   · `(cur,id)` 与上次相同 ⇒ 0 事件（⛔ 不重复发）；
     //   · 变化 ⇒ 扫未应用的 Marker 动作，名字 / `id:0x%08X` 任一形态匹配即走**同一条** apply 路径。
-    bool noteMarker(WindowManager& wm, const MarkerSample& s, std::uint64_t frame, std::uint64_t guest_ms);
+    //   ★ 两个可选参数（`insns` / `wall_ms`）只给 0 点重定基用：`Machine::sampleMarker()` 两个调用点
+    //     都传四个单位；只给 frame / guest_ms 的老夹具（默认 0）行为不变。
+    bool noteMarker(WindowManager& wm, const MarkerSample& s, std::uint64_t frame, std::uint64_t guest_ms,
+                    std::uint64_t insns = 0, std::uint64_t wall_ms = 0);
     // 超时（缺省 30000 **宿主墙钟** ms；0 = 不设限 ⇒ 显式选择"宁可挂死"）。
     //   ★ 用墙钟而不是 guest_ms：guest 阻塞在 `GetMessageA` 时虚拟时钟不推进，guest_ms 超时等于永不触发。
     void setMarkerTimeoutMs(std::uint64_t ms) { marker_timeout_ms_ = ms; }
@@ -268,7 +312,37 @@ public:
     const std::string& lastMarkerName() const { return marker_last_name_; }
     bool lastMarkerNameDegraded() const { return marker_last_name_degraded_; }
     // 每轮 run 重置 seed / 边沿 / 计数 / 超时（同一台 Machine 可以跑多轮，⛔ 不许把上轮 (cur,id) 当基线）。
+    //   ★ 顺带重置 0 点的**状态**（`resetOriginState()`）；0 点的**配置**（目标 id）不在这里清
+    //     —— 与 `marker_timeout_ms_` 同一口径。
     void resetMarkerState();
+
+    // ---- ★ 时间线的 0 点（`--anchor-script <id>`；语义见文件上方的 `TimelineOrigin`）----
+    // 配置：**跨 `clear()` / 跨 run 存活**（照 `marker_timeout_ms_` 的先例）。`0` 是合法 id。
+    void setOriginScript(std::uint32_t id) {
+        origin_requested_ = true;
+        origin_id_ = id;
+    }
+    bool originRequested() const { return origin_requested_; }
+    std::uint32_t originScriptId() const { return origin_id_; }
+    bool originSet() const { return origin_set_; }
+    const TimelineOrigin& origin() const { return origin_; }
+    // 闩锁次数（正常 = 0 或 1；> 1 = "重进又定基"那个 bug）与观察到的**重进**次数（只记 info，⛔ 不定基）。
+    std::uint64_t originLatches() const { return origin_latches_; }
+    std::uint64_t originReentries() const { return origin_reentries_; }
+    // ★ 采样门控（`Machine::run` 的块入口钩子只问它）：marker 动作**或** 0 点配置 ⇒ 必须采样。
+    //   ⛔ 退回 `hasMarkerActions()` 会让"只有 anchor、没有 marker 动作"的脚本**一次也不采样**
+    //      ⇒ 0 点永不闩锁 ⇒ 收尾假报 `origin-missed:`（这是本单最容易漏的一条）。
+    bool needsIdentitySamples() const { return marker_actions_ > 0 || origin_requested_; }
+    // ★ 喂一个**有效**样本 ⇒ 先判 0 点闩锁（电平 + 首次），再走 marker 的播种 / 边沿逻辑。
+    //   由 `noteMarker()` 在入口（`s.valid` 之后、**播种之前**）调用 —— ⛔ 不要另开一条采样路径。
+    //   返回 true = **本次**刚闩锁。四个单位都要给（0 点作用于全部四个）。
+    bool noteIdentity(const MarkerSample& s, std::uint64_t frame, std::uint64_t guest_ms,
+                      std::uint64_t insns, std::uint64_t wall_ms);
+    // 收尾的**响亮失败** detail（前缀 `origin-missed:`；⛔ 不新增 `StopReason`）。
+    //   措辞必须写"没**观察到**进入脚本 X"：0 点定义在首个可观察样本上，宿主可能漏掉"进又出"。
+    std::string originMissedDetail(std::uint64_t frame, std::uint64_t wall_ms) const;
+    // 每轮 run 重置 0 点的**状态**（配置保留）。
+    void resetOriginState();
     // 帧停滞兜底是否已经生效（测试 / 诊断用）
     bool stallFallbackFired() const { return stall_fired_; }
     // 缺省帧停滞阈值（ms；0 = 关闭兜底）。由 main 从 `--input-stall-ms` 设。
@@ -309,6 +383,10 @@ private:
     void applyAction(WindowManager& wm, Action& a, std::uint64_t frame, std::uint64_t guest_ms);
     // marker 超时：每 tick 算一次"文件序第一条未应用 Marker 动作"的等待基线（基线一变就重置）。
     void updateMarkerTimeout(std::uint64_t wall_ms);
+    // ★ 0 点的一次性重定基：把**未应用的数值触发**整体 `+= origin`（只做一次；照
+    //   `convertFrameTriggersToWall()` 的先例：就地改触发值 + 作废聚合缓存）。
+    //   ⛔ 跳过 Marker（名字条件没有数值可平移）与已应用的（⛔ 不撤已发生的事）。
+    void rebasePendingTriggers();
     // 收口：把脚本仍按着的键 / 按钮按同一组 WM_* 抬起（⛔ 只清状态不发消息会让 guest 的事件锁存卡住）。
     void releaseOwnedInputs(WindowManager& wm, std::uint32_t time_ms);
     // 帧停滞兜底：把剩下的 Frame 条件折算成 WallMs（只做一次）。
@@ -317,6 +395,9 @@ private:
     // ★ 缓存"未应用动作"的聚合量（每单位的最小触发值 / 条数 / 帧停滞最小阈值）。
     //   动作集只在 apply / 折算 / 重载时变 ⇒ 每次 tick 只做 4 次整数比较就能判"一个都还没到期"。
     //   ⛔ 触发语义不变：`min <= now` 就是"该单位至少有一条到期"（due() 就是 `now >= value`）。
+    //   ★ **相对段 / 绝对段分开缓存**（`before-anchor`）：闩锁 pending 期间只有相对段被抑制，
+    //     绝对段照常到期 ⇒ 两类的 `min` 必须分开算（⛔ 混一个 min 会让绝对段被相对段的最小值掩盖）。
+    //     条数仍按"全部（含绝对）"累计：`pend_count_` 是帧停滞兜底 / marker 超时的存在性判据。
     void rebuildPending();
     void markPendingDirty() { pending_dirty_ = true; }
 
@@ -383,6 +464,16 @@ private:
     std::size_t marker_wait_action_ = static_cast<std::size_t>(-1);  // 基线对应的"第一条未应用 Marker 动作"下标
     std::uint64_t marker_wait_ms_ = 0;  // 等待基线（墙钟；第一次看见这条 pending 时记）
     std::string marker_wait_name_;
+    // ★ 0 点（`--anchor-script`）：`origin_requested_` / `origin_id_` 是**配置**（跨 clear / 跨 run），
+    //   其余是**状态**（每轮 run 重置）。⛔ 两类别混在同一个重置点里（会有一边错）。
+    bool origin_requested_ = false;
+    std::uint32_t origin_id_ = 0;
+    bool origin_set_ = false;
+    TimelineOrigin origin_;
+    std::uint64_t origin_latches_ = 0;
+    std::uint64_t origin_reentries_ = 0;
+    // 重进日志去重：上一次样本的 id 已经是目标 ⇒ 同一段停留只记一行 info（⛔ 不每样本刷屏）。
+    bool origin_reentry_seen_ = false;
     bool profile_begin_pending_ = false;
     bool profile_end_pending_ = false;
     std::string profile_begin_label_;
@@ -398,8 +489,12 @@ private:
     std::uint64_t frame_interval_sum_ms_ = 0;
     std::uint32_t frame_interval_count_ = 0;
     // ★ 未应用动作的聚合缓存（见 rebuildPending）。`pending_dirty_` 在动作集变化时置位。
+    //   `pend_min_` / 条数 = **相对段**（参与重定基 / 闩锁前被抑制）；`pend_min_abs_` / `pend_count_abs_`
+    //   = **绝对段**（`before-anchor` 之后；不重定基、闩锁前照常到期）。
     std::uint64_t pend_min_[kTriggerKindCount] = {};
     std::uint32_t pend_count_[kTriggerKindCount] = {};
+    std::uint64_t pend_min_abs_[kTriggerKindCount] = {};
+    std::uint32_t pend_count_abs_[kTriggerKindCount] = {};
     std::uint64_t pend_frame_limit_ = 0;  // pending Frame 动作里最小的非 0 停滞阈值；0 = 没有
     bool pending_dirty_ = true;
     // 可观测计数（tick 次数 / 逐条动作比较次数）

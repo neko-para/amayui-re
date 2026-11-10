@@ -340,6 +340,300 @@ export function peImageBase(buf, peAt) {
   return 0;
 }
 
+/* ───────────────────────────── PE：取字节（EA → 段 → 文件偏移 → 字节） ───────────────────────────── */
+
+/**
+ * ## 这段为什么归 `ledger.mjs`（⛔ 不要另开 `lib/pe.mjs` 之类的第二处）
+ *
+ * `tools/test/ledger.test.mjs` 有一条机械不变量：**工具侧不许出现第二处 PE 节表解析**
+ * （判据：`readUInt32LE(0x3c)` 与 `'PE\0\0'` 这两个特征串只许出现在本文件）。
+ * 理由不是洁癖：`--add` 的落盘前校验与 `validate` 的 #3/#4 都经 `peOffsetOf`，
+ * 一旦别处再算一遍 "EA → 文件偏移"，两条路会**在某些记录上**给出不同的数 ——
+ * 而"带 sha256 的锚 = 这条观察没被换掉"这套机制就会在两条路之间悄悄失真（**绿而错**）。
+ * ⇒ 需要"取字节"时，**能力就加在这里**（同一份解析、同一套 VA/RVA 口径）。
+ *
+ * ## 两套契约（为什么不是把 `peOffsetOf` 改成抛）
+ * | 用途 | 函数 | 失败时 |
+ * |---|---|---|
+ * | 锚点解析（`--add` / `validate` 要判"这条锚还能不能校验"） | `peOffsetOf` / `peMap` | 返回 `null`（**不可校验 ≠ 失效**，由调用方降级成 warning） |
+ * | **取字节**（`disasm-at at --bytes`，折叠区间只有一行 `COLLAPSED` 注释） | `readPeSections` / `eaToFileOffset` / `readBytesAt` | **抛 `PeError`**（带 `code`）：非映射 / 越界 / 虚拟尾部 / 跨节 / 文件截断 |
+ * 取字节这一侧**不能**沿用 `null`：`null` 与"读到 0 字节"在下游长得一样，
+ * 而后者会把"折叠区间取到了机器码"变成一句假话。
+ */
+
+/**
+ * PE 读取 / 映射失败。**取字节这条路的**所有失败都抛它（带 `code`，便于守卫逐案断言），
+ * 绝不返回 `null` / 空 Buffer —— 见上一段的"两套契约"。
+ */
+export class PeError extends Error {
+  /**
+   * @param {string} code 闭集合（`not-mz` / `bad-section-count` / `unmapped` / `no-raw-bytes` / …）
+   * @param {string} message 人读的一句话（要能回答"哪个 EA、哪个段、差多少"）
+   */
+  constructor(code, message) {
+    super(message);
+    this.name = 'PeError';
+    this.code = code;
+  }
+}
+
+/** 可选头 magic：PE32。PE32+（0x20B）故意不支持，见 `readPeSections` */
+const PE32_MAGIC = 0x10b;
+/** 节表项长度 */
+const SECTION_HEADER_SIZE = 40;
+/** PE 规范上限（`NumberOfSections` 的 WinNT 上限是 96） */
+const MAX_SECTIONS = 96;
+/** PE32 可选头里"取字节要用到"的字段都在前 60 B 内 */
+const MIN_OPTIONAL_HEADER = 60;
+
+const IMAGE_SCN_CNT_CODE = 0x00000020;
+const IMAGE_SCN_MEM_EXECUTE = 0x20000000;
+const IMAGE_SCN_MEM_READ = 0x40000000;
+const IMAGE_SCN_MEM_WRITE = 0x80000000;
+
+const peHex = (n, width = 0) => (Number.isInteger(n) ? `0x${n.toString(16).padStart(width, '0')}` : String(n));
+
+/** 接受 Buffer / Uint8Array（不复制）；其余形态直接响亮拒绝 */
+function peAsBuffer(buf) {
+  if (Buffer.isBuffer(buf)) return buf;
+  if (buf instanceof Uint8Array) return Buffer.from(buf.buffer, buf.byteOffset, buf.byteLength);
+  throw new PeError('bad-buffer', `需要 Buffer / Uint8Array（拿到 ${buf === null ? 'null' : typeof buf}）`);
+}
+
+/** 读之前先验证区间在文件内（把 RangeError 换成人话） */
+function peNeed(buf, offset, length, what) {
+  if (!Number.isInteger(offset) || offset < 0 || offset + length > buf.length) {
+    throw new PeError('truncated', `${what}读不出来：要 ${length} 字节 @${peHex(offset)}，文件只有 ${buf.length} 字节`);
+  }
+}
+
+/**
+ * 读一份 PE32 的**头部 + 节表**（不读节内容、不校验节内容是否越出文件 —— 那是 `readBytesAt` 的事）。
+ *
+ * 字段偏移（PE/COFF 规范）：DOS 头 `e_magic` @0x00、`e_lfanew` @0x3C；PE 签名 @e_lfanew（4 B）；
+ * COFF 头 @e_lfanew+4：`Machine` +0 · `NumberOfSections` +2 · `SizeOfOptionalHeader` +16；
+ * 可选头（PE32，@COFF+20）：`Magic` +0 · `ImageBase` +28 · `SizeOfImage` +56；
+ * 节表（@可选头 + `SizeOfOptionalHeader`，每项 40 B）：`Name` +0（8 B）· `VirtualSize` +8 ·
+ * `VirtualAddress` +12（★ **RVA**）· `SizeOfRawData` +16 · `PointerToRawData` +20 · `Characteristics` +36。
+ *
+ * ★ 不认 PE32+（`0x20B`）：本仓的两份镜像都是 PE32；遇到就**响亮说**"只读 PE32"，
+ *   而不是按 PE32 的偏移去错读（PE32+ 的 ImageBase 在 +24 的 u64，按 +28 的 u32 读会给出**看起来对**的偏移）。
+ *
+ * @param {Buffer|Uint8Array} buf 整份文件
+ * @returns {{peOffset:number, machine:number, numberOfSections:number, sizeOfOptionalHeader:number,
+ *            characteristics:number, magic:number, imageBase:number, sectionAlignment:number,
+ *            fileAlignment:number, sizeOfImage:number,
+ *            sections: ReadonlyArray<{index:number, name:string, virtualAddress:number, virtualSize:number,
+ *              sizeOfRawData:number, pointerToRawData:number, characteristics:number, mappedSize:number,
+ *              code:boolean, executable:boolean, readable:boolean, writable:boolean}>}}
+ */
+export function readPeSections(buf) {
+  const b = peAsBuffer(buf);
+  if (b.length < 0x40) {
+    throw new PeError('too-small', `文件只有 ${b.length} 字节，连 DOS 头（0x40）都放不下 ⇒ 不是 PE`);
+  }
+  if (b.toString('latin1', 0, 2) !== 'MZ') {
+    throw new PeError('not-mz', `开头不是 "MZ"（拿到 ${JSON.stringify(b.toString('latin1', 0, 2))}）⇒ 不是 PE 文件`);
+  }
+  const peOffset = b.readUInt32LE(0x3c);
+  peNeed(b, peOffset, 4 + 20, 'PE 签名 + COFF 头');
+  if (b.toString('latin1', peOffset, peOffset + 4) !== 'PE\0\0') {
+    throw new PeError('not-pe', `e_lfanew=${peHex(peOffset)} 处不是 "PE\\0\\0" ⇒ 不是 PE 文件`);
+  }
+  const coff = peOffset + 4;
+  const machine = b.readUInt16LE(coff);
+  const numberOfSections = b.readUInt16LE(coff + 2);
+  const sizeOfOptionalHeader = b.readUInt16LE(coff + 16);
+  const characteristics = b.readUInt16LE(coff + 18);
+  if (numberOfSections < 1 || numberOfSections > MAX_SECTIONS) {
+    throw new PeError(
+      'bad-section-count',
+      `NumberOfSections=${numberOfSections} 不在 1..${MAX_SECTIONS} —— 头部坏了（或这不是一份可装载镜像）`,
+    );
+  }
+  const opt = coff + 20;
+  peNeed(b, opt, 2, '可选头 magic');
+  const magic = b.readUInt16LE(opt);
+  if (magic !== PE32_MAGIC) {
+    throw new PeError(
+      'unsupported-optional-header',
+      `可选头 magic=${peHex(magic)}，本模块**只读 PE32**（0x10B）—— PE32+ 的 ImageBase 在别处，按 PE32 读会给出**看起来对**的偏移`,
+    );
+  }
+  if (sizeOfOptionalHeader < MIN_OPTIONAL_HEADER) {
+    throw new PeError(
+      'truncated-optional-header',
+      `SizeOfOptionalHeader=${sizeOfOptionalHeader} < ${MIN_OPTIONAL_HEADER} ⇒ 连 ImageBase / SizeOfImage 都放不下`,
+    );
+  }
+  peNeed(b, opt, MIN_OPTIONAL_HEADER, 'PE32 可选头');
+  const imageBase = b.readUInt32LE(opt + 28);
+  const sectionAlignment = b.readUInt32LE(opt + 32);
+  const fileAlignment = b.readUInt32LE(opt + 36);
+  const sizeOfImage = b.readUInt32LE(opt + 56);
+
+  const table = opt + sizeOfOptionalHeader;
+  peNeed(b, table, numberOfSections * SECTION_HEADER_SIZE, `节表（${numberOfSections} × ${SECTION_HEADER_SIZE} B）`);
+  const sections = [];
+  for (let i = 0; i < numberOfSections; i += 1) {
+    const h = table + i * SECTION_HEADER_SIZE;
+    // 段名是 8 字节定长、NUL 填充；名字**可以为空**（实测本仓镜像里就有两个无名节）
+    const name = b.toString('latin1', h, h + 8).split('\0')[0] || `(sec${i + 1})`;
+    const virtualSize = b.readUInt32LE(h + 8);
+    const virtualAddress = b.readUInt32LE(h + 12);
+    const sizeOfRawData = b.readUInt32LE(h + 16);
+    const pointerToRawData = b.readUInt32LE(h + 20);
+    const ch = b.readUInt32LE(h + 36);
+    sections.push(
+      Object.freeze({
+        index: i,
+        name,
+        virtualAddress,
+        virtualSize,
+        sizeOfRawData,
+        pointerToRawData,
+        characteristics: ch,
+        // ★ 锚定"EA 落在段里"用 `max(VirtualSize, SizeOfRawData)`：VirtualSize > SizeOfRawData 的那一截
+        //   是**虚拟尾部**（BSS 类）。只用 SizeOfRawData 判会把它报成"不在任何段里"，
+        //   而正确的话是"在段里，但文件里没有字节"——两者对调用方是**不同**的结论。
+        mappedSize: Math.max(virtualSize, sizeOfRawData),
+        code: (ch & IMAGE_SCN_CNT_CODE) !== 0,
+        executable: (ch & IMAGE_SCN_MEM_EXECUTE) !== 0,
+        readable: (ch & IMAGE_SCN_MEM_READ) !== 0,
+        writable: (ch & IMAGE_SCN_MEM_WRITE) !== 0,
+      }),
+    );
+  }
+
+  return Object.freeze({
+    peOffset,
+    machine,
+    numberOfSections,
+    sizeOfOptionalHeader,
+    characteristics,
+    magic,
+    imageBase,
+    sectionAlignment,
+    fileAlignment,
+    sizeOfImage,
+    sections: Object.freeze(sections),
+  });
+}
+
+/**
+ * **EA（VA）→ 文件偏移**（取字节用的**响亮**版本；锚点解析仍走 `peOffsetOf`，见上面的"两套契约"）。
+ *
+ * @param {object} pe `readPeSections(buf)` 的返回值（★ 必须带 `imageBase` —— EA 是 VA）
+ * @param {number} ea 虚拟地址（语料里的 EA）
+ * @returns {{ea:number, rva:number, fileOffset:number, sectionIndex:number, sectionName:string,
+ *            offsetInSection:number, sizeOfRawData:number, pointerToRawData:number,
+ *            virtualAddress:number, virtualSize:number}}
+ * @throws {PeError} `bad-pe-model` / `bad-ea` / `below-image-base` / `beyond-image` / `unmapped` / `no-raw-bytes`
+ */
+export function eaToFileOffset(pe, ea) {
+  if (!pe || !Array.isArray(pe.sections) || !Number.isInteger(pe.imageBase)) {
+    throw new PeError(
+      'bad-pe-model',
+      '需要 readPeSections(buf) 的返回值（含 imageBase + sections）—— EA 是 **VA**，只给一份节表数组算不出偏移' +
+        '（把 VA 直接当 RVA 比，正是本文件 `peMap` 的注释里记着的那个错）',
+    );
+  }
+  if (!Number.isInteger(ea) || ea < 0 || ea > 0xffffffff) {
+    throw new PeError('bad-ea', `EA 必须是非负 32 位整数（拿到 ${JSON.stringify(ea)}）`);
+  }
+  const { imageBase, sizeOfImage = 0 } = pe;
+  if (ea < imageBase) {
+    throw new PeError(
+      'below-image-base',
+      `EA ${peHex(ea)} < ImageBase ${peHex(imageBase)} ⇒ RVA 会是负的 —— 你是不是把 **RVA 当成 EA** 了？（语料里的 EA 是 VA）`,
+    );
+  }
+  const rva = ea - imageBase;
+  if (sizeOfImage > 0 && rva >= sizeOfImage) {
+    throw new PeError(
+      'beyond-image',
+      `EA ${peHex(ea)} ⇒ RVA ${peHex(rva)} ≥ SizeOfImage ${peHex(sizeOfImage)}（镜像只到 ${peHex(imageBase + sizeOfImage)}）`,
+    );
+  }
+  for (const s of pe.sections) {
+    // RVA 0 是头部（不是节）；真实镜像里没有节从 0 起（对齐后第一节在 SectionAlignment 之后）
+    if (s.virtualAddress === 0 || s.mappedSize === 0) continue;
+    if (rva < s.virtualAddress || rva >= s.virtualAddress + s.mappedSize) continue;
+    const offsetInSection = rva - s.virtualAddress;
+    if (offsetInSection >= s.sizeOfRawData) {
+      throw new PeError(
+        'no-raw-bytes',
+        `EA ${peHex(ea)} 落在段 ${s.name} 的**虚拟尾部**（段内 ${peHex(offsetInSection)} ≥ SizeOfRawData ${peHex(s.sizeOfRawData)}，` +
+          `VirtualSize ${peHex(s.virtualSize)}）⇒ 这一段在**文件里没有字节**（未初始化 / BSS 类），读不到就是读不到`,
+      );
+    }
+    return {
+      ea,
+      rva,
+      fileOffset: s.pointerToRawData + offsetInSection,
+      sectionIndex: s.index,
+      sectionName: s.name,
+      offsetInSection,
+      sizeOfRawData: s.sizeOfRawData,
+      pointerToRawData: s.pointerToRawData,
+      virtualAddress: s.virtualAddress,
+      virtualSize: s.virtualSize,
+    };
+  }
+  const ranges = pe.sections
+    .filter((s) => s.virtualAddress !== 0 && s.mappedSize > 0)
+    .map((s) => `${s.name}=RVA ${peHex(s.virtualAddress)}+${peHex(s.mappedSize)}`)
+    .join(' · ');
+  throw new PeError(
+    'unmapped',
+    `EA ${peHex(ea)}（RVA ${peHex(rva)}）不落在任何 PE 段里 —— 已映射：${ranges || '（一个都没有）'}`,
+  );
+}
+
+/**
+ * 取 EA 起 `n` 字节（**拷贝**；⛔ 不把语料缓冲的视图递给别人改）。
+ *
+ * @param {Buffer|Uint8Array} buf 整份文件
+ * @param {object} pe `readPeSections(buf)` 的返回值
+ * @param {number} ea VA
+ * @param {number} n 要读的字节数（**正整数**；0 是"静默的空结果"，直接拒绝）
+ * @returns {{ea:number, length:number, fileOffset:number, sectionName:string, sectionIndex:number,
+ *            rva:number, offsetInSection:number, bytes:Buffer}}
+ * @throws {PeError} `bad-buffer` / `bad-length`，以及 `eaToFileOffset` 的全部失败码，
+ *   外加 `range-exceeds-raw`（跨节）/ `file-truncated`（文件短于声明）
+ */
+export function readBytesAt(buf, pe, ea, n) {
+  const b = peAsBuffer(buf);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new PeError('bad-length', `n 必须是正整数（拿到 ${JSON.stringify(n)}）—— 0 字节的"成功"是静默的空结果`);
+  }
+  const at = eaToFileOffset(pe, ea);
+  const available = at.sizeOfRawData - at.offsetInSection;
+  if (n > available) {
+    throw new PeError(
+      'range-exceeds-raw',
+      `EA ${peHex(ea)} 起要读 ${n} 字节，但段 ${at.sectionName} 从段内 ${peHex(at.offsetInSection)} 起只剩 ${available} 字节` +
+        `（SizeOfRawData ${peHex(at.sizeOfRawData)}）—— 再往下读会跨进**别的段**，把它的字节当成这里的（静默给错）`,
+    );
+  }
+  if (at.fileOffset + n > b.length) {
+    throw new PeError(
+      'file-truncated',
+      `文件偏移 ${peHex(at.fileOffset)} + ${n} 字节越过文件末尾（文件只有 ${b.length} 字节）⇒ 节表声明与文件实际长度不符`,
+    );
+  }
+  return Object.freeze({
+    ea,
+    length: n,
+    fileOffset: at.fileOffset,
+    sectionName: at.sectionName,
+    sectionIndex: at.sectionIndex,
+    rva: at.rva,
+    offsetInSection: at.offsetInSection,
+    bytes: Buffer.from(b.subarray(at.fileOffset, at.fileOffset + n)),
+  });
+}
+
 /** 锚点的人读形态（日志 / 报告里一律用它，别各写各的） */
 export const anchorText = (a) =>
   a.type === 'bin' ? `${a.repo}:${a.path}@${a.ea}` : `${a.repo}:${a.path}#${a.test}`;

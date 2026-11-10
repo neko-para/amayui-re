@@ -89,8 +89,14 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/native_movie.cpp
     src/runtime/native_block.cpp
     src/runtime/native_affine.cpp
+    # ★ 每帧固定税 `sub_4BBAB0`（Voice::Tick）的 stateless 快路径
+    #   （REQ-01M6XVZF3VDC5NSBJ20J2451VJ；契约见 native_overrides.h）
+    src/runtime/native_voice.cpp
     src/runtime/shims.cpp
     src/runtime/window_profile.cpp
+    # ★ SEH / C++ EH 的两个 OS 原语（`RaiseException` / `RtlUnwind` 的派发状态机；
+    #   契约与取证见 runtime/seh.h 的头注）。shim 只搬参数，派发在 Machine 的块边界。
+    src/runtime/seh.cpp
     src/corpus/lst_index.cpp
     src/shims/register.cpp
     src/shims/register_import_gaps.cpp
@@ -180,10 +186,40 @@ add_test(NAME gpu-strict-rejects-no-sprites
     COMMAND emulator-lift --present window --raster gpu --raster-sprites 0 --gpu-strict)
 set_tests_properties(gpu-strict-rejects-no-sprites PROPERTIES WILL_FAIL TRUE)
 
+# ---- pure：`--time-limit` 的 CLI 契约（`REQ-01M711JN018QDSWK4726Y1A0KV`）----
+# 判据见 tests/cli_time_limit.cpp 的头注释：① `--time-limit 0` 与**省略该参数**行为等价
+# （退出码 + 摘要里 stop / insns / blocks / trace-in / instr 五行逐字相同，且 stop 不是 time-limit）；
+# ② 正数仍然生效；③ `-1` / `abc` 仍然 exit 2 且 stdout 没有运行摘要。
+# ★ 纯档：执行源是**测试自己构造的最小 PE32** + `--max-insns 1` ⇒ 不需要 LFS / 游戏安装；
+#   顶层无条件注册 ⇒ pure（判据 = 注册位置，见 AGENTS.md §5）。
+# ★ 子进程的 cwd 由测试指到临时目录 ⇒ 默认的 `../../corpus/...` 执行源 / `.lst` 候选都找不到，
+#   结果不随宿主 cwd 漂。
+add_executable(lift-cli-time-limit tests/cli_time_limit.cpp)
+target_link_libraries(lift-cli-time-limit PRIVATE emulator-lift-runtime)
+add_test(NAME cli-time-limit COMMAND lift-cli-time-limit $<TARGET_FILE:emulator-lift>)
+set_tests_properties(cli-time-limit PROPERTIES SKIP_RETURN_CODE 77)
+
 # ---- pure：guest 函数级 native override（差分 / 回退 / ABI）----
 add_executable(lift-native-override tests/native_override.cpp)
 target_link_libraries(lift-native-override PRIVATE emulator-lift-runtime)
 add_test(NAME native-override COMMAND lift-native-override)
+
+# ---- pure：`sub_4BBAB0`（Voice::Tick）的 stateless 快路径判据 ----
+# 判据见 tests/voice_poll.cpp 的头注释（红了意味着什么 / k = 60 怎么来的）。
+# ★ **顶层无条件**注册 ⇒ pure 档（判据 = 注册位置，见 AGENTS.md §5）。
+# ★ 用例名 = `lift-voice-poll`：`tools/mutate-check.mjs` 的 `ctest:lift-voice-poll` 指向它。
+add_executable(lift-voice-poll tests/voice_poll.cpp)
+target_link_libraries(lift-voice-poll PRIVATE emulator-lift-runtime)
+add_test(NAME lift-voice-poll COMMAND lift-voice-poll)
+
+# ---- pure：SEH / C++ EH 的两个 OS 原语（`RaiseException` / `RtlUnwind` 的派发状态机）----
+# 判据见 tests/seh.cpp 的头注释（A 参数逐位/时机、B "未处理必须响亮"、C RtlUnwind 端点与 esp 口径、
+# D 影子栈展开丢帧）。红了意味着：`room-exit` 那条 C++ throw 的退出路径又断了，或者异常变成静默 no-op。
+# ★ **顶层无条件**注册 ⇒ pure 档（判据 = 注册位置，见 AGENTS.md §5）。
+# ★ 用例名 = `seh`：`tools/mutate-check.mjs` 的 `ctest:seh` 指向它。
+add_executable(lift-seh tests/seh.cpp)
+target_link_libraries(lift-seh PRIVATE emulator-lift-runtime)
+add_test(NAME seh COMMAND lift-seh)
 
 # ---- Windows 宿主编码契约（argv = UTF-8 / 输出字节 = UTF-8）----
 # ★ 子进程用**文件**重定向（不走管道：受限沙箱里捕获管道会 EPERM）。
@@ -307,6 +343,15 @@ add_test(NAME input-tick COMMAND lift-input-tick)
 add_executable(lift-input-marker tests/input_marker.cpp)
 target_link_libraries(lift-input-marker PRIVATE emulator-lift-runtime)
 add_test(NAME input-marker COMMAND lift-input-marker)
+
+# ---- pure：时间线的 **0 点**（`--anchor-script <id>` = 首次**观察到**进入引擎脚本 <id>）----
+# ★ 顶层无条件注册 ⇒ pure 档：前半是纯 `InputScript`（四个单位直接喂），后半是裸 `Machine` +
+#   自造字节摆在 VM 循环头（⛔ 不依赖游戏安装 / LFS / 真实窗口）。
+#   红 = 0 点语义坏了（首样本不闩锁 / 重进又定基 / 闩锁前没抑制 / pending 期间被折算 /
+#   四单位只重定基了俩 / 没观察到时静默 exit 0 / 与交互图不互斥）。
+add_executable(lift-input-anchor tests/input_anchor.cpp)
+target_link_libraries(lift-input-anchor PRIVATE emulator-lift-runtime)
+add_test(NAME input-anchor COMMAND lift-input-anchor)
 
 # ---- pure：识别驱动的交互状态机（节点图解析 / 三种失败 / trace 可 diff）----
 # ★ 顶层无条件注册 ⇒ pure 档：判定是观测值的纯函数，测试自己给 frame / guest_ms / wall_ms
@@ -777,3 +822,17 @@ add_test(NAME dshow-graph COMMAND lift-dshow-graph)
 add_executable(lift-guest-token tests/guest_token.cpp)
 target_link_libraries(lift-guest-token PRIVATE emulator-lift-runtime)
 add_test(NAME guest-token-stress COMMAND lift-guest-token)
+
+# =====================================================================================
+# 吞吐的**派发层固定税**（`REQ-01M70S2WR4S8MN2JDWJRJD6WFD`）+ 诊断开关守卫
+# ★ 判据见 `tests/dispatch_tax.cpp` 文件头：
+#   ① 微基准的**量级不变量**（未竞争 mutex lock+unlock / steady_clock::now；⛔ 不断言具体数字）；
+#   ② 块长扫描 k=1/3/8 条/块（自造字节 ⇒ 不改 `tests/bench.cpp` 的合成体）拟合 `t=b+c·k`；
+#   ③④ `LIFT_TOKEN_DIAG_SKIP_LOCK` 默认关 / 打开时摘要行 `token-diag : skip-lock=` 与 `waits 0`；
+#   ⑤ 不靠计时地证明诊断臂**真的绕过**了 mutex（另一条线程能同时拿到令牌）；
+#   ⑥ 诊断臂里 `check()` 的违规计数照旧 ⇒ `--assert-guest-token` 的可信度不变。
+# ★ 顶层无条件注册 ⇒ **pure** 档（裸 `Machine` + 自造字节；不碰游戏 / LFS / GPU / 音频设备）。
+# =====================================================================================
+add_executable(lift-dispatch-tax tests/dispatch_tax.cpp)
+target_link_libraries(lift-dispatch-tax PRIVATE emulator-lift-runtime)
+add_test(NAME dispatch-tax COMMAND lift-dispatch-tax)

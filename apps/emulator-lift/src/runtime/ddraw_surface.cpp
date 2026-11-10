@@ -92,6 +92,16 @@ void ddrawLog(const char* what, const char* fmt, ...) {
     va_end(ap);
 }
 
+// 契约级失败 / "资源没回收"这类**必须在默认级别看得见**的用它（Info 要 --verbose；同形：d3d9Warn）。
+void ddrawWarn(const char* what, const char* fmt, ...) {
+    char prefix[256];
+    std::snprintf(prefix, sizeof(prefix), "[ddraw] %s: ", what ? what : "?");
+    va_list ap;
+    va_start(ap, fmt);
+    logV(LogLevel::Warn, LogGeneral, prefix, fmt, ap);
+    va_end(ap);
+}
+
 bool requireMachine(X86& cpu, Machine** out, std::string* why) {
     Machine* m = activeMachine();
     if (!m || &m->cpu() != &cpu) {
@@ -305,6 +315,11 @@ std::uint32_t primarySurface(X86& cpu) {
     return d == 0 ? 0u : cpu.mem->rd32(d + kDevPrimary);
 }
 
+std::uint32_t surfaceChainHead(X86& cpu) {
+    const std::uint32_t d = deviceState(cpu, nullptr);
+    return d == 0 ? 0u : cpu.mem->rd32(d + kDevSurfaceHead);
+}
+
 // ---------------------------------------------------------------------------------------
 // surface 状态块
 // ---------------------------------------------------------------------------------------
@@ -407,7 +422,14 @@ void destroySurfaceState(X86& cpu, std::uint32_t state) {
     if (cpu.mem->rd32(state + kSfMagic) != kSfMagicValue) return;
     const std::uint32_t d = deviceState(cpu, nullptr);
     const std::uint32_t arena_ea = cpu.mem->rd32(state + kSfArena);
-    // 从链表里摘掉
+    // ★ 先取 owner，**再**清 magic（本单 REQ-01M6ZY8SZRR3KA92ZC9QBNQ349）：
+    //   magic 清了就再也进不了本函数 ⇒ "arena 该不该回收"的判据必须在它之前成立。
+    //   归属取 `machineOf(cpu)`（`Machine::wire()` 装配时捕获的宿主侧归属），⛔ 不是
+    //   `activeMachine()` —— 后者是"最后 init 的那台"的进程级全局，会被别的 Machine /
+    //   析构合法改写；用它当判据，判据一失败 arena 就永久没有回收入口
+    //   （同族：d3d9.cpp 的 destroyTextureState / destroyDeviceState）。
+    Machine* m = machineOf(cpu);
+    // 从链表里摘掉（★ guest 可见语义：不论 owner 找不找得到都照旧发生）
     if (d != 0) {
         std::uint32_t prev = 0;
         std::uint32_t cur = cpu.mem->rd32(d + kDevSurfaceHead);
@@ -425,8 +447,15 @@ void destroySurfaceState(X86& cpu, std::uint32_t state) {
         if (cpu.mem->rd32(d + kDevPrimary) == state) cpu.mem->wr32(d + kDevPrimary, 0);
     }
     cpu.mem->wr32(state + kSfMagic, 0);
-    if (Machine* m = activeMachine(); m && &m->cpu() == &cpu) {
-        if (arena_ea != 0) m->surfaces().destroy(arena_ea);
+    if (arena_ea != 0) {
+        if (m != nullptr) {
+            m->surfaces().destroy(arena_ea);
+        } else {
+            // ⛔ 不许静默丢资源：宿主不知道这块 arena 归谁（没走 `Machine::wire()` 的 X86）
+            //    ⇒ 响亮点名（默认 warn 级别就看得见）。生产路径不存在这种 X86（见 machine.h）。
+            ddrawWarn("destroySurfaceState",
+                      "arena 0x%08X 无法回收：这台 cpu 没有宿主侧归属（machineOf == nullptr）", arena_ea);
+        }
     }
     if (cpu.heap) cpu.heap->free(state);
 }

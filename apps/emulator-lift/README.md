@@ -822,7 +822,9 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
 LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe ... --input-script .tmp/room/enter.txt
 ```
 
-- **只用脚本里有 `profile_*` 时才计时**（没有这些动作 ⇒ 整条记账路径是 no-op）。
+- **只在该脚本真有 `profile_*` 动作时才计时**（没有这些动作 ⇒ 整条记账路径是 no-op）。
+  解析期就在脚本里的与**运行期经 `appendText` 追加的**（`--interaction-graph` 走这条）都算：
+  后者的 arm 发生在 `profile_begin` 被消费的那一刻（否则窗口照开照收、表全是 0）。
   `--profile` 的输出格式**不变**（`tests/profile_shims.cpp` 仍在解析它）。
 - **闭式**：`wall = guest + shim + native + interp + host + unattributed`。各项互斥，量都来自
   dispatcher 的同一条时间轴：`guest` = 块执行；`shim` = `ShimRegistry::invoke` 整段；

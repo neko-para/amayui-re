@@ -87,15 +87,21 @@ constexpr std::uint32_t kFail = 0x80004005u;
 constexpr std::uint32_t kInvalidCall = 0x8876086Cu;  // D3DERR_INVALIDCALL
 
 // 批次条目在 guest 堆上的布局（**我们自己的**布局；⛔ 不是 Win32 结构体）。
-// 每个条目 64 B = 一次 Draw 的全部输入 + **Draw 时**算好的四个屏幕空间角点。
-constexpr std::uint32_t kBatchEntryBytes = 64u;
+// 每个条目 72 B = 一次 Draw 的全部输入 + **Draw 时**算好的四个屏幕空间角点 + 纹理身份。
+// ★ 为什么 72（原 64）：`D3DXSPRITE_DO_NOT_ADDREF_TEXTURE` 的文档语义就是"Draw 不 AddRef、
+//   Flush 不 Release"（微软原文），所以批次里只能存**身份**，不能靠引用计数钉住纹理 —— 而身份
+//   不能是对象 EA（guest 堆会复用同一个 EA）。末尾 4 B 存纹理的 **serial**（进程级单调、永不复用；
+//   `d3d9::TextureInfo::serial`）。合成时 serial 不符 ⇒ 跳过这个精灵 + 默认级别可见的告警。
+//   ⛔ 这不是改 guest 可见布局：条目是本簇私有的簿记，guest 拿不到指针。
+constexpr std::uint32_t kBatchEntryBytes = 72u;
 enum BatchOff : std::uint32_t {
-    kBeTexture = 0,   // pTexture（本线只可能是 0；非 0 在 shim 就 loud trap）
+    kBeTexture = 0,   // pTexture 对象 EA（0 = 没有纹理 ⇒ 采样白色）
     kBeFlags = 4,     // bit0 = 有 pSrcRect / bit1 = 有 pCenter / bit2 = 有 pPosition
     kBeSrc = 8,       // RECT：left +8 / top +12 / right +16 / bottom +20
     kBeQuad = 24,     // 四角：x0,y0 (u=0,v=0) · x1,y1 (u=w,v=0) · x2,y2 (u=0,v=h) · x3,y3
     kBeColor = 56,    // D3DCOLOR（0xAARRGGBB）
-    kBeReserved = 60,
+    kBeReserved = 60,  // bit0 = 这条纹理是我们 AddRef 的（Flush/End 要对称 Release）
+    kBeTextureSerial = 64,  // 纹理身份（Draw 时的 `TextureInfo::serial`；0 = 无纹理）
 };
 constexpr std::uint32_t kBeHasSrcRect = 0x1u;
 constexpr std::uint32_t kBeHasCenter = 0x2u;

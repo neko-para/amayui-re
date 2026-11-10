@@ -328,10 +328,21 @@ std::uint32_t getTextureStageState(X86& cpu, std::uint32_t dev, std::uint32_t st
 // SetTexture：伪 0 / 本模块建的纹理对象 EA。真机会对绑定的纹理 AddRef（本线照做）。
 std::uint32_t setTexture(X86& cpu, std::uint32_t dev, std::uint32_t stage, std::uint32_t texture,
                          std::string* why);
+// GetTexture / GetVertexDeclaration：都**借出一份新引用**（出参带 +1；调用方必须 Release）。
+//   GetTexture 的 AddRef 是微软文档明确写的；GetVertexDeclaration 的页面没写，按 D3D9 `Get*`
+//   家族一致性办（缺陷单 REQ-01M701NYF2B3YV1YFSZBMPQZ41 的裁决）。⛔ 别再把裸 EA 交回去。
 std::uint32_t getTexture(X86& cpu, std::uint32_t dev, std::uint32_t stage, std::uint32_t out_ea,
                          std::string* why);
 std::uint32_t setFVF(X86& cpu, std::uint32_t dev, std::uint32_t fvf, std::string* why);
 std::uint32_t getFVF(X86& cpu, std::uint32_t dev, std::uint32_t out_ea, std::string* why);
+// SetVertexDeclaration / SetStreamSource / SetIndices（绑定槽的契约，段 2 之后）：
+//   · 入参是 guest 可见的**对象 EA**；槽里存 **(对象 EA, 绑定时代际)** + 该流自己的 offset/stride。
+//     ⛔ 不再存状态块 EA —— EA 会被 guest 堆复用，"只验 magic"会让同长度新缓冲静默顶替旧缓冲。
+//   · 三者都**替 guest 持一份绑定引用**（与 `setTexture` 同口径）：换绑 / 解绑（参数给 0）/ 设备销毁
+//     时成对还回去（`releaseIf(EA, 代际)`，代际不符只出声、不减到新占有者）。guest 可见差异：
+//     绑定期对绑定对象 `Release` 的返回值是 +1（例如 `SetStreamSource` 之后 guest 放自己那份 = 1）。
+//   · Draw 侧读槽时先过身份校验（`find` + 代际 + iface + 状态块 magic）；不符 ⇒ `D3DERR_INVALIDCALL`
+//     + **默认级别可见**的告警（`pipeWarn`），⛔ 绝不改读别人的顶点 / 索引。
 std::uint32_t setVertexDeclaration(X86& cpu, std::uint32_t dev, std::uint32_t decl, std::string* why);
 std::uint32_t getVertexDeclaration(X86& cpu, std::uint32_t dev, std::uint32_t out_ea, std::string* why);
 std::uint32_t setViewport(X86& cpu, std::uint32_t dev, std::uint32_t viewport_ea, std::string* why);
@@ -370,7 +381,8 @@ std::uint32_t indexBufferLock(X86& cpu, std::uint32_t state, std::uint32_t offse
                               std::uint32_t out_ea, std::uint32_t flags, std::string* why);
 std::uint32_t indexBufferUnlock(X86& cpu, std::uint32_t state, std::string* why);
 
-// SetStreamSource / SetIndices
+// SetStreamSource / SetIndices（契约见上面 `setVertexDeclaration` 那一段：对象 EA + 绑定时代际、
+// 持绑定引用、Draw 侧身份校验；`vb`/`ib` 给 0 = 解绑并还回旧绑定的那份引用）。
 std::uint32_t setStreamSource(X86& cpu, std::uint32_t dev, std::uint32_t stream, std::uint32_t vb,
                               std::uint32_t offset, std::uint32_t stride, std::string* why);
 std::uint32_t setIndices(X86& cpu, std::uint32_t dev, std::uint32_t ib, std::string* why);
@@ -459,6 +471,32 @@ void gpuNoteFallback(const std::string& reason, std::uint64_t pixels);
 void gpuNoteSpriteResult(bool gpu, std::uint64_t pixels, const std::string& reason);
 // 记一次 D3DXSprite 条目被裁剪（不计 fallback、不计 GPU）。
 void gpuNoteSpriteSkipped();
+
+// =====================================================================================
+// 默认级别告警（`pipeWarn`）的**配额类别**与**拒绝计数**
+//
+// · 配额 key = **(调用点, 类别)**（`REQ-01M70SHFT6RZA7RRY1R051Z2PB` #2）：同一个 `DrawPrimitive`
+//   里的"顶点流陈旧"与"纹理陈旧"是两个桶 ⇒ 一类每帧刷屏不会吃掉另一类的可见配额。
+//   ⛔ 退回"只用调用点名"就是原始缺陷（第 5 次起两类告警一起变 debug）。
+// · 每类拒绝次数（**与限流桶同一份**，进程级）进 `dumpRunSummary` 的 `pipe-warn` 行 ——
+//   "默认级别看不见"的事件在摘要里仍然数得到。
+// =====================================================================================
+enum class PipeWarnCategory : unsigned {
+    VertexStream = 0,  // 顶点流 / 顶点缓冲绑定
+    Index = 1,         // 索引缓冲绑定
+    Texture = 2,       // 纹理绑定
+    Other = 3,         // 顶点声明 / 其它（含设备销毁时的绑定释放）
+};
+constexpr unsigned kPipeWarnCategoryCount = 4;
+
+struct PipeWarnCounts {
+    std::uint64_t by_category[kPipeWarnCategoryCount] = {0, 0, 0, 0};
+    std::uint64_t of(PipeWarnCategory cat) const { return by_category[static_cast<unsigned>(cat)]; }
+    std::uint64_t total() const {
+        return by_category[0] + by_category[1] + by_category[2] + by_category[3];
+    }
+};
+const PipeWarnCounts& pipeWarnCounts();
 
 // Present 的像素统计（"非背景像素数"的判据；用后缓冲像素算，⛔ 不是猜）
 struct FrameStats {

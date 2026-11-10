@@ -75,6 +75,8 @@ void comUnsupported(X86& cpu, ShimCall& call);
 //   钩子把它挪回对象：无论谁把引用降到 0，子资源都跟着回收。
 // ★ 钩子只能回收**对象独占**的资源。`IDirect3DSurface9` 的 `user` 常指向**别人**的状态块
 //   （`GetSurfaceLevel` 复用纹理状态块）⇒ 那种对象**不登记**钩子（⛔ 会提前释放纹理像素）。
+//   ★ 那它的寿命怎么保？靠**引用**而不是钩子：surface 建的时候就替父纹理 `addRef`，到 0 时由
+//   `owns_owner`（见 `createObject`）成对还回去（`REQ-01M6ZZZ6PEVSFB93C6VJPKC04C`）。
 using ComOnZero = void (*)(X86& cpu, std::uint32_t user);
 
 class ComRegistry {
@@ -100,6 +102,19 @@ public:
     //   做语义 addRef/release，而 owner 要在建对象时固化（⛔ 不能解绑时按 `user` 反查：那个 EA
     //   会随对象表复用而指向别人）。
     //   `release` 到 0 **不会**去释放 owner（这不是所有权转移，只是"我代表谁"）。
+    //   ★ 例外只有一处、且必须显式开口：`owns_owner`（见下）。
+    //
+    // ★ `owns_owner`（宿主侧的**引用所有权**；默认 false ⇒ 上面那条"不释放 owner"不变）：
+    //   true 表示"这个对象替 `owner` 持一份引用"，到 0 时**还回去**（`releaseIf(owner, owner_generation)`）。
+    //   为什么需要它：`IDirect3DSurface9`（`GetSurfaceLevel` 建的）的 `user` 指向**父纹理**的状态块，
+    //   像素块 + 状态块只由父纹理 refcount 到 0 时的 `on_zero` 回收（`destroyTextureState`）。
+    //   surface 不持父纹理 ⇒ guest 合法地 `Release(纹理)` 之后 surface 还活着（读到已 free / 被复用的
+    //   状态块）—— `REQ-01M6ZZZ6PEVSFB93C6VJPKC04C`。所以建 surface 时对父纹理 addRef、到 0 时成对释放。
+    //   ★ 为什么是 `releaseIf`（带代际）而不是裸 `release`：`owner` 是宿主表里**不持引用时**唯一的
+    //     EA 缓存；持引用期间它钉得住，但 guest **越界 Release**（把父纹理减到 0）之后 EA 会被下一个
+    //     对象拿走 ⇒ 裸 `release` 会减到**当前占有者**身上。代际在建对象时固化 ⇒ 不符就只出声、不减。
+    //   ★ 归还走的是 `releaseImpl` —— 与 guest `Release` / 内部裸 `cpu.com->release` **同一条**收敛点，
+    //     ⛔ 不是另写的一条影子回收（否则内部裸 release 又会漏掉这条路）。
     //
     // ★ **代际**（`generation`：宿主表内单调自增、非 0；REQ-01M6X4NFHCW1Y6YDJ4DYFA92PS）：
     //   对象表的键是 guest EA，而 guest 堆会**复用** EA —— `create A → release A（到 0 删表 + 归还堆）
@@ -111,13 +126,14 @@ public:
     //   ★ 与 `GpuRasterTexture::generation`（`gpu_raster.h:207`，"序列号只增不复用"）是同一个理由。
     std::uint32_t createObject(X86& cpu, const char* iface, const std::vector<ComMethod>& methods,
                                std::uint32_t user = 0, ComOnZero on_zero = nullptr,
-                               std::uint32_t owner = 0);
+                               std::uint32_t owner = 0, bool owns_owner = false);
 
     // 对象的扩展块 EA（**宿主编表里的权威值**，不读 guest 内存）；未知对象 / 没挂扩展 ⇒ 0。
     std::uint32_t userOf(std::uint32_t obj) const;
 
     // 对象的父对象 EA（`createObject` 的 `owner`；0 = 没有 / 未知对象）。**不判活** ——
     // 调用方要用它做释放，必须自己保证"绑定期间持有它的一份引用"（见 `d3d9_pipeline.cpp`）。
+    // ★ `owns_owner`（见 `createObject`）就是"对象自己替 owner 持一份"的那一档：纹理 surface 走它。
     std::uint32_t ownerOf(std::uint32_t obj) const;
 
     // 对象的**代际**（宿主表内单调自增；未知对象 ⇒ 0）。见 `createObject` 的说明。
@@ -125,9 +141,11 @@ public:
     std::uint32_t generationOf(std::uint32_t obj) const;
 
     // `owner` 在**建这个对象那一刻**的代际（0 = 没有 owner，或建的时候 owner 不在表里）。
-    // ★ 这是本类里唯一一个**不持引用的 EA 缓存**（`Object::owner`）配套的代际：
-    //   surface 不拥有父纹理（`GetSurfaceLevel` 不替纹理持引用是**有意**的，见上面 `owner`），
-    //   所以"guest 合法地把纹理放掉、surface 还活着"这条时序里 owner 一定已经死了 / EA 已被复用。
+    // ★ 用途 = 让 `Object::owner` 这个 EA 缓存在**持引用期间**也能被校验：纹理 surface 现在替父纹理
+    //   持一份引用（`owns_owner`，见 `createObject`）⇒ 正常情况下 owner 死不了；但 guest **越界
+    //   Release** 之后 owner 的 EA 会被下一个对象拿走 ⇒ 归还 / 绑定时按代际判"这还是不是那个对象"。
+    //   （`d3d9_pipeline.cpp` 的 `releaseIf(owner, ownerGenerationOf(surface))` 与本类的
+    //   `owns_owner` 归还走的是同一条判据。）
     std::uint32_t ownerGenerationOf(std::uint32_t obj) const;
 
     // refcount +1 / -1；未知对象 ⇒ false + 一行日志。
@@ -164,6 +182,8 @@ private:
         std::uint32_t bytes = 8;     // 对象头大小（8 = P0 布局；12 = 挂了扩展块 EA）
         std::uint32_t user = 0;      // 扩展块 EA（obj+8；0 = 没有）
         std::uint32_t owner = 0;     // 父对象 EA（见 createObject 的 `owner`；0 = 没有）
+        // ★ 真 = 本对象**替 owner 持一份引用**（见 createObject 的 `owns_owner`）：到 0 时还回去。
+        bool owns_owner = false;
         // ★ 下面两个只在宿主表里（⛔ 不进 guest 内存；见 createObject 的代际说明）。
         std::uint32_t generation = 0;        // 本对象的代际（单调自增、非 0）
         std::uint32_t owner_generation = 0;  // 建这个对象时 `owner` 的代际（0 = 没有 owner / 当时就不在表里）

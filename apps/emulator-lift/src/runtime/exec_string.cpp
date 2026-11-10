@@ -1,7 +1,9 @@
 // emulator-lift · 串操作语义（movs / stos / lods / scas / cmps + rep）
 //
-// ★ 方向由 DF 决定（`std` / `cld` 已经是普通整数语义？— 不：`cld`/`std` 是独立助记符，
-//   本作语料里没有，所以 DF 只由 `popfd`/`sahf` 改。这里按 DF 正负推进）。
+// ★ 方向由 DF 决定。`cld`(FC) / `std`(FD) 是**独立助记符**（`Op::Cld` / `Op::Std`；2026-11-10 补：
+//   `.lst` 里引擎自己写的代码确实没有它们，但 **CRT 的折叠段**有 —— `___CxxFrameHandler3`
+//   的序言 `0x4E709D` 就是 `cld`，room-exit 的 C++ EH 一进 handler 就撞上）。此外
+//   `popfd` / `sahf` 也能改 DF。这里按 DF 正负推进（`advance`）。
 // ★ 元素宽度取解码器的 `opsz`（`rep movsd` ⇒ 4）。`rep` = 0xF3，`repne` = 0xF2。
 // ★ `rep movsd` / `rep stosd` 是 S3 点名要做的两条（语料里有 300 / 18 处）。
 #include <cstdio>

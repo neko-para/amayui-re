@@ -19,11 +19,28 @@
 //   - 任何**会阻塞**的宿主等待都必须 `Yield`（临时让出令牌）后再等：guest CRITICAL_SECTION、
 //     `GetMessageA` 的宿主事件泵、`WaitForSingleObject(喂料线程)`。
 //     ⛔ 持令牌阻塞 = 死锁（另一条执行流永远等不到令牌去 Leave）。
+//   - ★ **Yield 之后必须重新校验**：让出期间令牌可能被别人拿走，而别人**有权改容器**
+//     （建/销 surface、alloc/free、改句柄表…）⇒ 让出前读到的**指针 / 迭代器 / 已查表结论
+//     一律作废**；取回之后要重新 `check()`（确认自己真的又拿着）并**重新查表**。
+//     ⛔ 不许拿 Yield 之前的 `GuestSurface*` / `std::map` 迭代器直接用（那是 use-after-erase）。
+//     判据见 `tests/guest_token.cpp` 的 `guest-token/yield-revalidate`。
 //
 // ★ 违规计数（把不变量变成可观测）：`check(site)` 在"未持令牌"时 `++violations`。
 //   主线程块（`machine.block`）、`GuestHeap` 的 alloc/free/realloc、`HandleTable::add` 都会 check；
 //   `--assert-guest-token` 让"违规 > 0"变成非 0 退出码。⛔ 这些 check 在 shim 里执行 ⇒ 天然
 //   覆盖 feeder 的容器访问；新增"绕过 shim 的容器入口"必须显式 acquire 令牌。
+//
+// ★★ 诊断开关（**默认关**，只给"派发层每块交多少固定税"的 A/B 用）：
+//   `LIFT_TOKEN_DIAG_SKIP_LOCK=1` ⇒ `arm()` 把 `diag_skip_lock_` 置真，此后 `acquire/tryAcquire/
+//   release/YieldGuard` **完全不碰 `mutex_`**（只做 `owner_/depth_` 与原子记账）。
+//   - 目的：把"每块一次未竞争 mutex"这块钱从墙钟里**移除**，看它值多少（诊断臂，不是产品行为）。
+//   - ⛔ 只允许**单线程**工况（`--audio off` ⇒ 没有音频 feeder 真线程）。并发下它等于把容器互斥
+//     静默关掉 —— 所以 `Machine::run` 启动时用**默认级别**喊一条告警，摘要里也留一行
+//     `token-diag : skip-lock=1`（⛔ 不许让它悄悄影响读数）。
+//   - ★ 它**不影响** `--assert-guest-token` 的可信度：`violations_` / `concurrent_` / `max_concurrent_`
+//     全部照旧记账（它们与 mutex 无关）。⇒ 打开时若真的出现两条执行流，"违规计数 / 持有者数 > 1"
+//     仍然照旧判红 —— 这正是"该开关只能在单线程用"的机械判据。
+//   - 读点在 `arm()`（每次 run 一次），⛔ 不在热路径读环境变量。
 #pragma once
 
 #include <atomic>
@@ -62,6 +79,23 @@ public:
     // 同时**真正**持有令牌的线程数（重入不重复计数）。正确实现下恒 <= 1。
     unsigned concurrent() const { return concurrent_.load(std::memory_order_relaxed); }
     unsigned maxConcurrent() const { return max_concurrent_.load(std::memory_order_relaxed); }
+
+    // ★ 诊断开关（见文件头）：本轮 `arm()` 时从 `LIFT_TOKEN_DIAG_SKIP_LOCK` 读出。
+    //   真 ⇒ acquire/release 不碰 `mutex_`（⛔ 只允许单线程工况；`--assert-guest-token` 的
+    //   violations / max-concurrent 判据**不受影响**）。摘要行 = `token-diag : skip-lock=<0|1>`。
+    bool diagSkipLock() const { return diag_skip_lock_; }
+
+    // ---- ★ M1 计量：**等令牌**的独立账（REQ-01M6XVZG4T9WY8SQ1WS7P8RNW9）----
+    //   为什么要独立一栏：shim 的 `ShimDef::ns` 口径是「shim 实现自身」—— 它**不是**等待时间。
+    //   这一栏把"想拿令牌 → 真拿到"的那段墙钟分出来，供 M2 排序"谁在持令牌做阻塞型宿主等待"。
+    //   `waits()` = **真的被挡住**的取令牌次数（重入 / 未竞争不计：未竞争路径不读时钟）。
+    //   `waitNs()` = 这些等待的累计墙钟（steady_clock；与 `ns` **不可相加**：两段时间不重叠，
+    //               但也不覆盖同一段 —— 与 guest 块表 / shim 表的关系一样）。
+    //   `lastAcquireWaitNs()` = **调用线程**最近一次 acquire 等了多少 ns（重入 / 未竞争 ⇒ 0）。
+    //   ⛔ 这三者是计量，不是契约：拿它们做判据时只能断言"真的分开了"，⛔ 不要断言具体数值。
+    std::uint64_t waits() const { return waits_.load(std::memory_order_relaxed); }
+    std::uint64_t waitNs() const { return wait_ns_.load(std::memory_order_relaxed); }
+    std::uint64_t lastAcquireWaitNs() const;
 
     // 只给夹具（进程内的独立用例）：清计数。⛔ 运行期不许调。
     void resetForTest();
@@ -110,6 +144,11 @@ private:
     std::atomic<unsigned> concurrent_{0};
     std::atomic<unsigned> max_concurrent_{0};
     std::atomic<bool> armed_{false};
+    // ★ M1：等令牌的累计账（只在**真的被挡**时写 ⇒ 未竞争路径不付时钟开销）。
+    std::atomic<std::uint64_t> waits_{0};
+    std::atomic<std::uint64_t> wait_ns_{0};
+    // ★ 诊断开关（文件头）：`arm()` 每次 run 重读环境变量；热路径只读这个 bool。
+    bool diag_skip_lock_ = false;
 };
 
 // 一台 Machine 一份（进程级单例；本线的 Machine 也是进程级）。

@@ -3,10 +3,12 @@
 // ★ 所有写回都走 `writeOp` / `writeMem`（8 位高半与 16 位的合并规则在 x86.cpp 里只写一次）。
 // ★ 标志位：CF/OF/AF/PF/ZF/SF 全部显式算，⛔ 不依赖宿主 flags（那在另一台机器上就变了）。
 // ★ 除零 / 商溢出是 **CPU 异常**：这里打印诊断并停止（M1 不做 SEH 展开，plan §9 R1）。
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 
 #include "runtime/exec.h"
+#include "runtime/log.h"
 #include "runtime/x86.h"
 
 namespace lift {
@@ -622,6 +624,30 @@ bool execInteger(X86& cpu, const Insn& in) {
         case Op::Lahf: {
             const std::uint32_t v = (cpu.eflags & 0xD5u) | 0x2u;
             cpu.writeReg(Reg::AH, v);
+            return true;
+        }
+        // ★ `cld`(FC) / `std`(FD)：只动 EFLAGS.DF（SDM：其它位都不受影响）。
+        //   为什么它们曾是缺口：`.lst` 里引擎自己写的代码没有这两条，但 **CRT 的折叠段**有 ——
+        //   `___CxxFrameHandler3`(0x4E7094) 的序言 0x4E709D 就是 `cld`，C++ EH 一跑就撞上
+        //   （实测：`REQ-01M708DF24KY0QZNEHY66S0HYW` 的 room-exit 停点）。
+        //   ⛔ 不许把 `std` 做成静默 no-op：本线串操作**确实**按 DF 反向推进
+        //   （`exec_string.cpp` 的 `advance` 读 `cpu.df()`），但 DF 过去只能由 `popfd`/`sahf` 改，
+        //   于是"`std` 生效了"这件事没有任何日志可见 ⇒ 首次执行时打一条默认可见的 Warn。
+        case Op::Cld: {
+            cpu.setDf(false);
+            return true;
+        }
+        case Op::Std: {
+            cpu.setDf(true);
+            // 一次就够（同 EA 的重复执行不刷屏）；原子量：音频 feeder 线程也会跑 guest 指令。
+            static std::atomic<bool> warned{false};
+            if (!warned.exchange(true)) {
+                logAt(LogLevel::Warn, LogGeneral, "[instr] ",
+                      "std @ %08X：EFLAGS.DF=1 ⇒ 之后的串操作（movs/stos/lods/scas/cmps）按 DF "
+                      "**反向**推进（exec_string 的 advance）。⛔ 不是静默 no-op：这条过去只能由 "
+                      "popfd/sahf 改，现在有独立助记符了。",
+                      in.ea);
+            }
             return true;
         }
         case Op::Setcc: {

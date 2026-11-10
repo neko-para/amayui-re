@@ -38,6 +38,7 @@ class FontEngine;
 class AudioEngine;
 class CriticalSectionTable;
 class NativeOverrideTable;
+struct NativeOverride;
 
 // ★ SMC 钩子：`X86::writeMem` 在类定义之前，不能直接调 `BlockCache::noteWrite`（不完整类型）。
 //   `cache == nullptr` 时（测试里没装缓存）是 no-op。
@@ -231,6 +232,12 @@ struct X86 {
     // ★ 方案 C：feeder 的私有 dispatcher 也要跑 `--native-overrides`（_memcpy/_memset 在
     //   Ogg 解码里是热路径）；指向 Machine 的只读表，AudioEngine 在启动线程时**拷贝**一份。
     const NativeOverrideTable* native_overrides = nullptr;
+    // ★ 宿主诊断（**不进 guest 状态**）：`NativeOverrideTable::invoke()` 在调 native 实现期间指向
+    //   "正在执行的那一项"，返回后复位 nullptr。为什么需要这条通道：`NativeFn` 的签名是
+    //   `(cpu, mem, result)`，条件式 override（例如 `sub_4BBAB0` 的 stateless 查询短路）没有别的位置
+    //   能把自己的 `fast_hits` / `declines[]` 记到**自己那一项**上（`hits` / `fallbacks` 仍由 invoke 记）。
+    //   ⛔ 只许写诊断计数，不许借它改语义；也⛔ 不要把它写进 guest 内存。
+    NativeOverride* current_override = nullptr;
     // ★ 宿主侧归属：这台 cpu 属于哪台 Machine（`Machine::wire()` 装配时设置，`machineOf()` 读）。
     //   为什么不能只靠 `activeMachine()`：那是"**最后 init 的那台**"的进程级全局，会被别的 Machine
     //   合法改写（连 `~Machine` 也会把它清成 nullptr）⇒ 销毁路径拿它当"该不该回收"的判据时，
