@@ -239,6 +239,9 @@ int main(int argc, char** argv) {
     LIFT_CHECK(hasLineStartingWith(omit.out, "stop"));
     LIFT_CHECK(hasLineStartingWith(omit.out, "insns"));
     LIFT_CHECK(lineStartingWith(omit.out, "stop").find("max-insns") != std::string::npos);
+    // ★ `present-tail` 只在**本轮 ≥1 次 Present**时打；这条 run 是自造 PE + `--max-insns 1` ⇒ **0 次 Present**
+    //   ⇒ 摘要里**不许**有这行（把"没有 Present"打成 `tail_insns=0` 会被读成"没卡"）。
+    LIFT_CHECK(!hasLineStartingWith(omit.out, "present-tail"));
 
     // ---- ① `--time-limit 0` 必须与省略**完全等价** ----
     g_current_case = "zero-equals-omit";

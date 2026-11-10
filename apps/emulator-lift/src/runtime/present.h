@@ -47,6 +47,25 @@ struct PresentBreakdown {
 };
 PresentBreakdown& presentBreakdown();
 
+// ---------------------------------------------------------------------------------------
+// 运行摘要 `present-tail` 一行的**打印字段**：`Machine::run` 收口时填，`Machine::dumpRunSummary` 打。
+//   口径 = **最后一次 Present 调用 → 本次 run 停**之间的 guest 指令数。
+//   ★ 是"**调用**"不是"成功"：`present()` 先 `++frame_count_` 再交给 sink（sink 失败只记账、不回滚），
+//     所以 frameCount / 盖章记的都是**调用**（见 `present.cpp` 的 `present()`）。
+//   ★ 确定性只在**可复现档**（`--present headless` + 虚拟时钟）成立：那时 `tail_insns` 可进断言；
+//     real-time 档（`--present window` / `--real-time` / `--audio sdl`）下三个读数都只是单样本
+//     （同命令两轮就会不同）。`tail_wall_ms` 在任何档位都只是宿主墙钟；
+//     `last_frame` / `insns_at_last_present` 是**跨 run 累计**值（盖章 append-only，永不清）。
+//   ★ `any == false`（本轮一次 Present 都没有）⇒ **不打这一行**；⛔ 不要把"没有这行"读成"尾段为 0"。
+// ---------------------------------------------------------------------------------------
+struct PresentTail {
+    bool any = false;                        // 本轮 run 内是否 ≥1 次 Present（per-run 门 = frameCount 差分）
+    std::uint64_t last_frame = 0;            // 最后一次 Present 之后的 frameCount()
+    std::uint64_t insns_at_last_present = 0; // Present **那一刻**的 cpu_.insns（没注入源 ⇒ 恒 0）
+    std::uint64_t tail_insns = 0;            // = `insns:` − insns_at_last_present（clamp 到 ≥ 0）
+    double tail_wall_ms = 0.0;                // Present 那一刻 → run 收口 的宿主墙钟
+};
+
 class HeadlessPresenter {
 public:
     HeadlessPresenter();
@@ -71,6 +90,15 @@ public:
     std::uint64_t frameCount() const { return frame_count_; }
     std::uint64_t lastHash() const { return last_hash_; }
     std::string lastDump() const { return last_dump_; }
+
+    // ★ 运行摘要 `present-tail` 的**盖章**（append-only，永不清）：`present()` 里与 `++frame_count_`
+    //   **同一刻**记下 (insns / ns)，frame 就是 `frameCount()`。⛔ 不要在别的层另找一个"Present 那一刻"。
+    //   insns 源由 `Machine::wire()` 注入（只读指针，生命周期 = Machine）；没注入 ⇒ 静默留 0
+    //   ⇒ 摘要会打出 `insns_at_last_present=0` 且恒等式不成立（由守卫暴露，⛔ 不要在这里猜）。
+    void setInsnSource(const std::uint64_t* insns) { insn_source_ = insns; }
+    std::uint64_t lastPresentInsns() const { return last_present_insns_; }
+    // 最后一次 Present 那一刻 → 现在 的宿主墙钟（ms）；还没 Present 过 ⇒ 0.0。
+    double msSinceLastPresent() const;
 
     // ★ 画面特征采样（`runtime/screen_sample.h`）：采样点只能在这里 —— Present 是**唯一**呈现汇点。
     //   没挂 sampler ⇒ 一次也不读像素（零成本）；⛔ 不要在别的层另找一个"采样时机"。
@@ -104,6 +132,10 @@ private:
     GuestSurface last_surface_{};
     std::uint64_t last_surface_hash_ = 0;
     bool have_last_surface_ = false;
+    // ★ `present-tail` 的盖章状态（append-only：只由 `present()` 写，⛔ 从不重置）。
+    const std::uint64_t* insn_source_ = nullptr;  // `Machine::wire()` 注入；nullptr ⇒ 盖章恒 0
+    std::uint64_t last_present_insns_ = 0;
+    std::uint64_t last_present_ns_ = 0;           // 0 = 还没 Present 过（`msSinceLastPresent` 的哨兵）
 };
 
 }  // namespace lift

@@ -321,6 +321,24 @@ if(EXISTS "E:/Games/Eushully/天結/install/SYS4INI.BIN" AND DEFINED ENV{LIFT_AS
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         SKIP_RETURN_CODE 77
         TIMEOUT 600)
+
+    # ---- assets：运行摘要 `present-tail`（最后一次 Present 调用 → run 停）的端到端守卫 ----
+    # 判据见 tests/quit_tail.cpp 的头注释：两次**逐字相同**的命令（只有 `--appdata` 各自私有），
+    # 断言 ①两次 exit 0 ②`[input-script] finished` ③各恰好 1 行 `present-tail:` ④恒等式
+    # `insns_at_last_present + tail_insns == insns` ⑤存在性 ⑥两次前缀逐字相同。
+    # ⛔ 不断言任何当前数字（那是 observations.md 的读数，会随构建变）。
+    # 两次 run 各 ~30 s 量级（`--present headless --raster gpu`），给 30 分钟上限。
+    add_executable(lift-quit-tail tests/quit_tail.cpp)
+    target_link_libraries(lift-quit-tail PRIVATE emulator-lift-runtime)
+    add_test(NAME quit-tail COMMAND lift-quit-tail
+        $<TARGET_FILE:emulator-lift>
+        "E:/Games/Eushully/天結/install"
+        "${CMAKE_CURRENT_BINARY_DIR}/quit-tail-work")
+    set_tests_properties(quit-tail PROPERTIES
+        # ★ 同 title-entry-paths：子进程继承这个 cwd（执行源按相对当前目录找）。
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 1800)
 endif()
 
 # =====================================================================================
@@ -452,6 +470,17 @@ add_test(NAME input-injection COMMAND lift-input-injection)
 add_executable(lift-input-expect tests/input_expect.cpp)
 target_link_libraries(lift-input-expect PRIVATE emulator-lift-runtime)
 add_test(NAME input-expect COMMAND lift-input-expect)
+
+# =====================================================================================
+# pure：输入脚本的**否定证据**（`input-script: unfinished`；BUG-20）
+# ★ 判据（红了意味着什么）：条件永不满足的动作在 run 结束时**必须**留下可解析的读数
+#   （`pending=<n>` + `first="<原动作行>"`）；全部已应用 / 脚本自己 `quit` 时**不许**有那一行。
+# ★ 夹具：裸 Machine + 自造 guest 循环（**一次 Present 都没有** ⇒ `frame` 恒 0）+ 捕获 stdout。
+#   ⛔ 不依赖游戏安装 / 窗口 / LFS。★ 顶层无条件注册 ⇒ **pure** 档。
+# =====================================================================================
+add_executable(lift-input-unfinished tests/input_unfinished.cpp)
+target_link_libraries(lift-input-unfinished PRIVATE emulator-lift-runtime)
+add_test(NAME input-unfinished COMMAND lift-input-unfinished)
 
 # ---- pure：`--skip-logo` 的字段写入（T_Command+0x5EB5C；锚 0x004BAA37）----
 add_executable(lift-skip-logo tests/skip_logo.cpp)

@@ -39,8 +39,11 @@ TITLE 点 Quit 之后：**(A)** 窗口停在最后一帧 **约 4.1 s**（期间 
 
 ## 判据（修好后必须成立）
 1. (A) run summary 能给出**确定性的** `present-tail`（最后一帧 → 退出的 guest 指令数；可进 CTest），且退出期不再是"40 M 量级的 LZSS 解释"——或明确登记为**已知性能偏差**（真机 ~100 ms）。
+   - **计数器部分已交付**（2026-11-10）：子单 `REQ-01M72QRX9X1BRE5CYNSZ18QS56`，`verify: apps/emulator-lift/tests/input_injection.cpp#present-tail-stamp`。实测读数 `present-tail: last_frame=150 insns_at_last_present=811344273 tail_insns=131104827 tail_wall_ms=2595.4`（README §4.5 有读法）。
+   - 剩下的是"把它降下来"：spike `REQ-01M72QS2WFNP61Y6EGFAEVRFG4` 的结论 = 整函数 override `sub_4367B0`（LZSS Encode）可把尾段从 3.58 s 压到 ≈0.26 s（**估计**），但**本轮未实现**，且正确性判据不能用整文件 sha256（`SAVE.DAT` 头 `[264..284)` 是虚拟时钟）。
 2. (B) 退出序列的**连续帧像素均值单调下降**且**至少一帧**背景像素值 ≈ `0x00000000`（ESC 支已经能做到，可作为同一判据的参照）。
 
 ## 未做
 - 未定位 (B) 那笔叠加层的纹理来源（需加一行诊断：打印纹理 id + 顶点色 alpha）。
-- 未改任何代码；未 commit。
+- 未实现任何 override（`kMax` 未动）；(A) 的性能部分仍 open。
+- 未改 (B) 相关代码；未 commit。

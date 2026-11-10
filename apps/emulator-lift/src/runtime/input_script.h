@@ -272,6 +272,17 @@ public:
     void abandon(WindowManager& wm, std::uint32_t time_ms);
     std::size_t actionCount() const { return actions_.size(); }
     std::size_t appliedCount() const { return applied_; }
+    // ★ **否定证据**（`REQ-01M72QSNQCH3GHH3158A7YX96V` / BUG-20）：run 结束时"哪些动作没跑"。
+    //   为什么需要：`finished` 那条日志在 `finished()` **或 `quit`** 时打（`quit` 路径报的是**总**动作数
+    //   ⇒ ⛔ 别当"应用数"读），所以"没打那行"同时意味着"脚本没跑完 / 条件写错 / run 提前停了"
+    //   ⇒ 三者当前不可区分。这三个访问器把那份否定证据变成**正面**读数（几条没跑 + 第一条是什么）。
+    //   口径：动作**按到期 / 边沿**应用（`tick()` 逐条判到期、`noteMarker()` 按边沿）⇒ 应用顺序
+    //   **不一定**是文件顺序，`applied_` 只是计数 ⇒ "第一条未应用"只能扫 `applied` 标志。
+    //   `first…Text()` = **原动作行**（`Action::text`，⛔ 不是触发条件行）；没有对应项 ⇒ 空串。
+    //   ⛔ 不暴露可写引用（只给 `const std::string&`；越界一律空串）。
+    std::size_t unfinishedActionCount() const;
+    const std::string& firstUnfinishedActionText() const;
+    const std::string& firstPendingReleaseText() const;
     const std::string& source() const { return source_; }
     const std::vector<Action>& actions() const { return actions_; }
 

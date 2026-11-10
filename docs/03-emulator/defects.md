@@ -274,3 +274,80 @@
 - **相关但独立**：同一次崩溃的异常本该被 WinMain 的 `catch(...)`（`.data:00544784`）接住，但我们的 SEH 在
   `disposition=1` 且 CONTEXT 未改时"继续执行" ⇒ 异常被静默丢弃、落到 `_Xout_of_range` 的 `int3`（这才是
   `detail: 软件中断` 这个误导性文案的来源）。单开 `REQ-01M72GAA7CVKBPP9QRT0PRPBTM`。
+
+### BUG-19 · `dispatch-tax/block-scan` 断言的是一条**均值本身≈0** 的假命题 ⇒ 墙钟抖动时会自己变红（2/6）
+- **现象**：`ctest --test-dir out` 偶发红在 `tests/dispatch_tax.cpp` 的 `LIFT_CHECK(fit_off.b >= fit_on.b)`
+  （"跳过令牌锁的那一臂每块边际成本不低于正常臂"）。同一条命令重跑就绿 ⇒ 看起来像"环境抖动"。
+- **根因（实测，不是猜）**：20 次连跑（`./out/lift-dispatch-tax`，HEAD 版）的 `Δb` =
+  `-12.79 1.64 -11.25 3.88 -9.75 -15.52 16.94 -13.01 19.16 9.95 6.74 1.74 -3.33 4.93 16.55 5.89 -9.44 -6.89 -8.33 -0.62`
+  ⇒ **mean -0.18 / σ 10.67 / 10 次为负**，而要测的"每块一次 mutex 的成本"只有 ~3 ns。
+  三条机制：① 两臂各跑一次长循环 ⇒ 两个读数相隔数百 ms，频率/热/调度不同步；② 三点拟合的三个点也各占一段时间
+  ⇒ 慢漂移把拟合线整体**倾斜**，直接变成截距的噪声；③ `b` 本身不是"锁成本"的好载体 —— 配对差 `Δt(k)` 随 `k`
+  增长（k=1≈2.5 ns、k=8≈5–20 ns/块），三点拟合把这份成本摊进了**斜率** `c` ⇒ 截距差只剩 ~3 ns。
+  同类还有一处：① 的 `token_ns >= lock_ns` 用**中位**（token 中位实测在 8.4–17.3 ns 之间摆），20 次里撞到过一次红。
+- **修法**（只改 `apps/emulator-lift/tests/dispatch_tax.cpp`）：片循环把 (档, 臂) 六个格子**轮流**各跑 10 000 块
+  （同一台 Machine），每格取**逐片每块时间的中位**（实测出现过 +3457 ns/块 的单片），先测哪一臂也轮流
+  （否则"后测的那一臂"普遍更快，实测偏差可达 +20 ns/块）；判据拆成
+  (a) `Δb >= -5 ns`（由 20 次实测分布定：满载那批 `Δb ∈ [-1.37, +5.92]`、mean +3.08、σ≈1.8 ⇒ 均值下 ~4.5σ）
+  (b) `dt1 >= max(0.5 ns, 10% × 未竞争 lock+unlock)` —— `k=1` 的**配对差**（同片相邻，实测 σ≈0.1 ns），
+  这才抓得住"诊断臂其实没跳过锁"；`token_ns >= lock_ns` 改成 **7 样本取最小**。
+- **读数**：20 次连跑 0 失败（`Δb ∈ [2.57, 3.16]`、`dt1 ∈ [2.41, 2.61]`）；`ctest -R ^dispatch-tax$` 3/3 Passed。
+- **变异（判据真会红）**：把 `src/runtime/guest_token.cpp` 的 skip-lock 改成 no-op（3 行）⇒ 稳定红在
+  `tests/dispatch_tax.cpp:555` 的 `dt1 >= dt1_floor`（`dt1 = -0.18` vs 下界 0.50），**而 (a) 仍是绿的**
+  （`Δb = -0.35 > -5`）—— 这正是"`b` 的信号与噪声同量级"的直接证据，也是为什么必须另有一条锐判据。
+- **教训**：**墙钟微基准不许断言"某个均值关系的符号"**；要么降噪到噪声远小于信号（配对 + 中位 + 轮换），
+  要么把判据放到**同一时刻的配对差**上，并给出容差的实测来源。
+
+### BUG-20 · 输入脚本的条件永不满足 ⇒ 动作在 run 结束时**静默丢弃**（唯一线索是"**没有** `[input-script] finished`"）
+- **现象**（2026-11-10，macOS arm64 / RelWithDebInfo）：脚本 `at frame 130 / click 1190 630 / at frame 151 /
+  profile_begin tail`，本二进制末帧 = **150** ⇒ `at frame 151` 永不触发。run 正常 `ExitProcess`（exit 0），但
+  stdout 没有 `=== profile window: tail ===`、**没有** `[profile-window] begin "tail"`，stderr **没有任何告警**；
+  唯一的痕迹是**缺少** `[input-script] finished` 那一行。缺这一行同时意味着「脚本跑完了 / 条件写错 / run 提前停了」
+  三件事 —— 当前**分不开**（这一单就是拿"窗口没开、表全 0"当成了读数，而不是报错）。
+- **根因**：`InputScript::finished()` 是**存在性**观测（`applied_ == actions_.size() && releases_.empty()`），
+  `[input-script] finished` 只在它为真（或 `quit`）时打 ⇒ **没被应用的动作在 run 结束时一条读数都不产生**。
+  运行摘要的 `inputstat :` 段只报 `ticks` / `action-scans` / 抬起账，不报"还剩几条、第一条是什么"。
+- **修法**（`src/runtime/machine.cpp` 的 `dumpRunSummary`，`input_script_.active()` 段**内**、`inputstat :` 的缩进
+  续行（`release :` / `marker :`）**之后**——它自己是行首锚定的新字段，夹在续行中间会把一组读数切开）：
+  `active() && !finished() && !quitRequested()` 时打一行
+  `input-script: unfinished pending=<n> releases=<m> first="<原动作行>"`。`pending` = `actionCount() − appliedCount()` ·
+  `releases` = `pendingReleaseCount()` · `first` = **文件序第一条** `applied == false` 的动作的 `Action::text`
+  （`pending==0` 但还有没交付的抬起时取第一条 `Release::text`）。★ **⛔ 不能取 `actions_[applied_]`**：动作是
+  **按到期 / 边沿**应用的（`tick()` 逐条判到期、`noteMarker()` 按边沿）⇒ 应用顺序**不一定**是文件顺序，
+  `applied_` 只是计数。实测反例：`at frame 50 / mouse_move 10 10 / at insn 30 / mouse_move 20 20` ⇒ 后一条先应用，
+  `actions_[applied_]` 会报**已应用**的 `20 20`、把真正没跑的 `10 10` 藏起来（复审就是这么抓到的；守卫见
+  `unfinished-out-of-order-applied`）。
+  含空格 ⇒ 双引号包住、内部 `"` 换成 `'`（行首锚定、可解析）。三个 `const` 访问器在 `src/runtime/input_script.h`
+  （`unfinishedActionCount` / `firstUnfinishedActionText` / `firstPendingReleaseText`）：⛔ 不给可写引用、越界返回空串。
+  ⛔ 不加 CLI 参数、⛔ 不改退出码（摘要是每次 run 都打的那一份且机器可解析；改退出码会把既有脚本全变红）。
+  ★ 它**不替换** stdout 的 `[input-script] finished`：那条在 `finished()` **或 `quit`** 时打，而 `quit` 路径写的
+  是**总**动作数（`actions_.size()`；实测 `at insn 10 / quit / at insn 20 / wait 1 insn` 打的是 `2 条动作全部应用`
+  而实际只应用了 1 条）⇒ ⛔ 别当"应用数"读。
+  ★ `quit` 之后剩下的动作是脚本**有意**跳过的 ⇒ 不报（否则正常脚本会天天告警）；
+  0 条未应用（且没有未交付的抬起）⇒ 不报。
+- **读数**（2026-11-10，macOS arm64 / RelWithDebInfo，`--present headless --raster gpu`；两轮只有 `--input-script`
+  与私有 `--appdata` 不同，都 exit 0、停因 `stopped @ eip=004EE0EA` / `detail: shim 主动结束运行：kernel32!ExitProcess`）：
+  · 永不满足那份（`last_frame=150`，与上面的现象同一末帧）⇒ 摘要里
+    `input-script: unfinished pending=1 releases=0 first="profile_begin tail"`；stdout **没有** `[input-script] finished`，
+    stderr **没有** `[profile-window]` 行。
+  · 只留 `at frame 130 / click 1190 630` 那份 ⇒ 该行**没有**，`[input-script] finished：1 条动作全部应用…` **在**。
+  · 位置上那行排在 `inputstat :` 的缩进续行 `release :` **之后**（`inputstat :` 那一组先读完，再看这一行）。
+- **代表守卫**：`apps/emulator-lift/tests/input_unfinished.cpp`（pure，顶层 `add_test(NAME input-unfinished)`）七例
+  （35 checks）：`unfinished-never-due`（`at frame 50` + `mouse_move`，run 一次 Present 都没有 ⇒ 行在、`pending=1`、
+  `first` 逐字）· `unfinished-all-applied`（行不在、`[input-script] finished` 在）· `unfinished-quit-negative-control`
+  （`quit` 后面还有动作 ⇒ 行不在）· `unfinished-out-of-order-applied`（`at frame 50` + `at insn 30` ⇒ `first` 必须是
+  **没跑的** `10 10`）· `unfinished-quote-escaped`（`profile_begin a"b` ⇒ `first="profile_begin a'b"` 且带行尾 `\n`，
+  摘要里没有裸 `a"b`）· `unfinished-no-script`（**一份脚本都没装** ⇒ 摘要里连 `inputstat :` 都没有，更没有这一行）·
+  `unfinished-pending-release`（`pending=0` / `releases=1` ⇒ `first` 取抬起原文）。
+  变异实测**五处**（每处：施加 → 构建 → 只跑这一条 → 红 → 还原 → 全文逐字节一致 → 复绿）：
+  ① 去掉 `!quitRequested()` ⇒ `unfinished-quit-negative-control` 红（实参 `pending=1 … first="wait 1 insn"`）；
+  ② `unfinishedActionCount()` 少算 1 ⇒ `unfinished-never-due` 红（实参 `pending=0 releases=0 first=""`）；
+  ③ `firstUnfinishedActionText()` 改回 `actions_[applied_]` ⇒ `unfinished-out-of-order-applied` 红（实参
+  `first="mouse_move 20 20"` = **已应用**那条）；④ 去掉转义循环 ⇒ `unfinished-quote-escaped` 红 2 条（实参
+  `first="profile_begin a"b"`）；⑤ 把整段挪出 `active()` 段 ⇒ `unfinished-no-script` 红。
+- **复现**（在 `apps/emulator-lift` 下）：
+  `./out/emulator-lift --game-dir ../../links/install --appdata <私有 tmp> --skip-logo --audio off --present headless
+  --raster gpu --input-script <脚本> --time-limit 300`；脚本 A = `at frame 130 / click 1190 630 / at frame 151 /
+  profile_begin tail`（末帧 150 ⇒ 最后一条永不触发），脚本 B = 去掉后两行。
+- **未做**：`at frame 151` 本身是**脚本写法**问题（末帧号随档位变），本条只保证"写错了要能看见"；
+  ⛔ 不改退出码、⛔ 不加"严格模式"开关。

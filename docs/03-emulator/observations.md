@@ -127,3 +127,44 @@
 ### OBS-20261108-18 · `input-script` 每 tick 逐条比较量（**未取证**）
 - **声称**：`975.9M → 1.6M`（快路径：没有任何条件到期时一次也不扫）。**仓内没找到留档读数** —— 只有计数接口 `src/runtime/input_script.h:229-232`（`tickCount()` / `actionScans()`）与一条守卫 `tests/input_tick.cpp:43`（`actionScans() <= 16`）。⇒ 标**未取证**；要落这条：把 `actionScans()` 打进运行摘要（现在没打）。
 - **2026-11-08**（记录的是"找不到落点"，不是读数）。
+
+## 退出尾段（最后一次 Present → 进程退出）
+
+### OBS-20261110-05 · TITLE 点 Quit 之后还有 3.58 s / 131,104,825 条 guest 指令，窗口内 0 次 Present
+- **读数**（区间 profiler 窗口 `tail`）：`window : wall=3584.4ms frame 150→150 insns 811344275→942449100`
+  ⇒ 尾段 **131,104,825 条**（`942449100 − 811344275`，与 `insnsBlk : block=131104825 window=131104825 diff=0` 闭合）/
+  **3.58 s 墙钟** / 窗口内 **0 次 D3D9 Present**（`gpu : frames=0`、`frame 150→150`）/
+  `buckets : guest=1470.2ms shim=5.6ms native=0.0ms interp=2099.0ms host=8.9ms sum=3583.8ms unattributed=0.6ms`。
+  guest 函数表（按 `self` 取前 12）里 `self ≥ 500 ms` 的**只有一行**：`sub_436550`
+  （`self=1265.099ms(35.3%)` / `incl=3106.837ms(86.7%)` / `calls=150086`）；`inclusive ≥ 500 ms` 的两条是
+  `sub_4367B0`（`incl=3328.082ms` / `self=60.235ms` / `calls=1`）与 `sub_436550`。
+- **复现**（工作目录 `apps/emulator-lift`；脚本 = `at frame 130` / `click 1190 630` / `at frame 150` /
+  `profile_begin tail`，不写 `profile_end`、run 停止时自动收口）：
+  `LIFT_WINDOW_BLOCK_TOP=512 LIFT_WINDOW_EDGE_TOP=256 ./out/emulator-lift --game-dir ../../links/install
+  --appdata ../../.tmp/quit-tail/appdata-tail150 --skip-logo --audio off --present headless --raster gpu
+  --input-script ../../.tmp/quit-tail/s-tail150.txt --profile --profile-top 200 --time-limit 300`
+- **口径**：macOS arm64 / RelWithDebInfo / `--present headless --raster gpu`（`raster : sdl-gpu/metal/MSL`）/
+  `--audio off` / 无 `--real-time` ⇒ `trace-in : clock=virtual` / 每个 run 一个**全新**私有 `--appdata`。
+  二进制 `sha256 3459f789…`（mtime 19:09）；同一工作树 `cmake --build` 报 `ninja: no work to do` ⇒ 它就是
+  HEAD `1907423` 源码的构建（commit 时间 19:45 只是提交时刻，⛔ 不是"二进制比源码旧"）。
+  2026-11-10 19:49–19:58 +08:00。原始日志 `.tmp/quit-tail/A2-tail.out`（窗口表 / 边表全文见 `.tmp/quit-tail/profile.md`）。
+- **同脚本两次独立 run**（唯一差异 = `--appdata`）：`insns=942,449,100` **逐字相同** / 末帧 `150` /
+  Present 总数 `150`；墙钟类数值不同（`Present` 2977.4 / 3087.2 ms）。
+
+### OBS-20261110-06 · 运行摘要 `present-tail` 这一行自己的读数（量的是同一段尾段）
+- **读数**：`present-tail: last_frame=150 insns_at_last_present=811344273 tail_insns=131104827 tail_wall_ms=2626.4`
+  （另一次 run 同一行只差墙钟：`tail_wall_ms=2791.4`）⇒ `insns_at_last_present + tail_insns = 942,449,100`，
+  与摘要 `insns     : 942449100` 逐字相等。
+- **复现**：机器 / 安装树 / 档位与脚本同 OBS-20261110-05，只是**不加** `--profile`：
+  `./out/emulator-lift --game-dir ../../links/install --appdata <全新私有目录> --skip-logo --audio off
+  --present headless --raster gpu --input-script <at frame 130 / click 1190 630> --time-limit 900`
+  · 原始日志 `.tmp/present-tail/runA.out:44` / `runB.out:44`（两次 run 各一份全新私有 appdata）。
+- **口径**：macOS arm64 / RelWithDebInfo / `--present headless --raster gpu` / `--audio off` / `clock=virtual`。
+  `insns_at_last_present` 比 OBS-20261110-05 的**窗口起点**少 2 条 —— 不是构建差异：窗口起点是
+  `profile_begin` 被消费的那个 **block 边界**（在 Present 之后），盖章才是 Present 那一刻。
+  **实测对照**（同脚本 + `--profile`）：`window … insns 811344275→942449100` 与同一 run 的
+  `present-tail: … insns_at_last_present=811344273 tail_insns=131104827` 并列出现，`tail_insns` 与不带
+  `--profile` 的两次**逐字相同**（`.tmp/quit-tail/parent-tail150.out:40,185`）⇒ 2 条差来自边界偏移，
+  且 `--profile` 不改变 `tail_insns`。`tail_wall_ms` 是宿主墙钟、单样本（两次 2626.4 / 2791.4 ms）；
+  这一档（headless + 虚拟时钟）下 `last_frame` / `insns_at_last_present` / `tail_insns` 多次 run 逐字相同。
+  2026-11-10 20:03–20:06 +08:00。

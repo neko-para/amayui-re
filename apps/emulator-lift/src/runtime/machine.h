@@ -113,6 +113,10 @@ struct RunResult {
     std::uint32_t ea = 0;        // 停下来的 eip
     std::uint64_t insns = 0;
     std::string detail;
+    // ★ 运行摘要 `present-tail` 的打印字段（口径：**最后一次 Present 调用 → 本次 run 停**的 guest 指令）。
+    //   `any == false`（本轮 run 内一次 Present 都没有）⇒ 摘要**不打**这一行（⛔ 不是"尾段为 0"）。
+    //   字段语义 / 确定性边界见 `runtime/present.h` 的 `PresentTail`（⛔ 这里不重复一份）。
+    PresentTail present_tail;
     // ★ 这次 `InteractionFailed` 是**marker 超时**（不是 expect-change 的三种失败，也不是交互图失败）。
     //   ⛔ 不新增 `StopReason` 成员：退出码契约里 `InteractionFailed` 已经是 5；这里只做**分流标志**，
     //   让 `main.cpp` 打对的那条 stderr、⛔ 不落到交互图的 `failureReport()` / `.fail.bmp`。

@@ -226,6 +226,31 @@ void InputScript::clear() {
     pending_dirty_ = true;  // 动作集被清空 ⇒ 聚合缓存作废
 }
 
+// ---- ★ 未应用动作 / 未完成抬起（run summary 的 `input-script: unfinished` 行读这三条）----
+//   见 `input_script.h` 的声明处：它们只回答"还剩什么没跑"，⛔ 不改任何状态。
+std::size_t InputScript::unfinishedActionCount() const {
+    // `applied_` 正常恒 ≤ size（只用 push_back 追加）；越界按 0 处理，⛔ 不让减法下溢成大数。
+    return applied_ < actions_.size() ? actions_.size() - applied_ : 0;
+}
+
+const std::string& InputScript::firstUnfinishedActionText() const {
+    static const std::string kEmpty;
+    // ★ ⛔ 不能取 `actions_[applied_]`：动作是**按到期 / 边沿**应用的（`tick()` 逐条判到期就应用、
+    //   `noteMarker()` 按边沿应用）⇒ 应用顺序**不一定**是文件顺序，`applied_` 只是**计数**。
+    //   实测反例：`at frame 50 / mouse_move 10 10 / at insn 30 / mouse_move 20 20` ⇒ 后一条先应用，
+    //   `actions_[applied_]` 会指向**已应用**的 `20 20`。所以只能扫 `applied` 标志
+    //   （与 `updateMarkerTimeout()` 找"文件序第一条未应用 Marker 动作"同一写法）。
+    for (const Action& a : actions_) {
+        if (!a.applied) return a.text;
+    }
+    return kEmpty;
+}
+
+const std::string& InputScript::firstPendingReleaseText() const {
+    static const std::string kEmpty;
+    return releases_.empty() ? kEmpty : releases_.front().text;
+}
+
 bool InputScript::loadFile(const std::string& path, std::string* err) {
     std::FILE* f = openHostFileUtf8(path, "rb");
     if (f == nullptr) {

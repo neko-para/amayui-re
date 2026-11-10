@@ -54,6 +54,11 @@ bool HeadlessPresenter::present(const SurfaceArena& arena, const GuestSurface& s
     last_hash_ = arena.hash(surface);
     pb.hash_ns = nowNs() - hash_begin;
     ++frame_count_;
+    // ★ `present-tail` 的**唯一**盖章点：与 `frame_count_` 同一刻记下 (insns / ns)。
+    //   口径是"最后一次 Present **调用**"——这里在 sink / dump **之前**，所以 sink 失败的那次也算
+    //   （与 `++frame_count_` 同一条契约）。只读解引用注入的计数器 ⇒ 不碰 guest 状态。
+    last_present_insns_ = insn_source_ != nullptr ? *insn_source_ : 0;
+    last_present_ns_ = nowNs();
     last_dump_.clear();
 
     // ★ 采样点（交互模型的 `screen` 源）：**只在这里**。帧号 / hash 已经算好 ⇒ 判定侧拿到的
@@ -87,6 +92,13 @@ bool HeadlessPresenter::present(const SurfaceArena& arena, const GuestSurface& s
         last_dump_ = dump_path;
     }
     return true;
+}
+
+// ★ 运行摘要 `present-tail` 的墙钟：最后一次 Present 那一刻 → **现在**（`dumpRunSummary` 在 run 收口
+//   之后才读，所以"现在"就是收口时刻）。还没 Present 过 ⇒ 0.0（⛔ 不拿 epoch 差冒充）。
+double HeadlessPresenter::msSinceLastPresent() const {
+    if (last_present_ns_ == 0) return 0.0;
+    return static_cast<double>(nowNs() - last_present_ns_) / 1e6;
 }
 
 void HeadlessPresenter::pumpHostEvents() {

@@ -928,6 +928,21 @@ emulator-lift --game-dir <install> --skip-logo --native-overrides all --present 
   ★ `reason` 本身也分开：`resource-exhausted`（我方 arena / guest 堆不够）· `unimplemented-slot`
   （已注册但方法槽 / 形态没实现）· `unimplemented`（注册表里根本没有 fn）· `stopped`（正常主动停：
   `ExitProcess` / `--max-frames` / 影片放完 / 窗口关闭）。前三个**非 ok** ⇒ 退出码 2（见 §4.2d）。
+- `present-tail: last_frame=<N> insns_at_last_present=<N> tail_insns=<N> tail_wall_ms=<ms>`：口径 =
+  **最后一次 Present 调用 → 本次 run 停**的 guest 指令数（= 上面 `insns :` − `insns_at_last_present`，
+  同源 `cpu_.insns`）。★ 是"**调用**"不是"成功"：sink / dump 失败的那次**也算**（与 `frameCount` 同一契约）。
+  ★ **可复现档（`--present headless` + 虚拟时钟）下 `tail_insns` 确定**；real-time 档（`--present window` /
+  `--real-time` / `--audio sdl`）下 `last_frame` / `insns_at_last_present` / `tail_insns` **都只能当单样本**
+  （同命令两轮读数就会不同），`tail_wall_ms` 在任何档位都只是宿主墙钟单样本。**本轮 0 次 Present ⇒ 不打这行**
+  （⛔ 别读成"尾段为 0"）；`--max-frames` 下恒为 0（停点在 Present 内部；实测、无用例钉）、`--bench` 下停在
+  bench 上限而非进程退出。
+- `input-script: unfinished pending=<n> releases=<m> first="<原动作行>"`（BUG-20）：**只有**在脚本还有
+  没跑完的东西、且**不是脚本自己 `quit`** 时打。`pending` = 没应用的动作条数；`releases` = 还没交付的抬起
+  （`click` 的自动 hold 在等 guest 采样 / 显式 hold 没到期）；`first` = 第一条未应用动作的原文
+  （`pending==0` 时取第一条未完成的抬起），含空格 ⇒ 双引号包住，内部 `"` 显示成 `'`。
+  ★ 0 条未应用**且没有未交付的抬起** ⇒ 不打；`quit` 提前结束 ⇒ 不打（剩下的动作是脚本有意跳过的）。
+  它**不替代** stdout 的 `[input-script] finished`：那条在 `finished()` **或 `quit`** 时打，而 `quit` 路径
+  写的是**总**动作数（⛔ 别当"应用数"读）。
 - `heap      : in_use … peak … allocs …`：**主 guest 堆**（Win32 / CRT 分配走它）。
 - `arena     : surfaces N in_use U peak P largest-free F`：**surface arena**（D3D9 纹理 / 后缓冲 /
   深度的独立 GuestHeap）。★ 它不与主堆共享 ⇒"纹理没回收"在主堆那行**完全看不见**。

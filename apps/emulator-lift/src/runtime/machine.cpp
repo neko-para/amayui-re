@@ -308,6 +308,11 @@ void Machine::wire() {
     cpu_.com = &com_;
     cpu_.fonts = &fonts_;
     cpu_.machine = this;  // ★ 宿主侧归属（销毁路径的可回收判据；见 machineOf）
+    // ★ `present-tail` 的 insns 源：**唯一**注入点就在这里（init / initBare / 纯夹具的 Fixture 全过 wire()）。
+    //   只读指针，指向 `cpu_.insns`（同一台 Machine 的成员 ⇒ 与 run 收口读的 `r.insns = cpu_.insns` 同源）。
+    //   ⚠ `cpu_` 声明在 `presenter_` **之后** ⇒ 先析构；但 presenter 只在 `present()` 里解引用，
+    //   而那时 Machine 还活着 ⇒ 不悬垂（⛔ 不要在 `~Machine` 里补摘指针的"保险"）。
+    presenter_.setInsnSource(&cpu_.insns);
     audio_.attach(&cpu_, &mem_, &clock_);
     cpu_.audio = &audio_;
     cpu_.cs_table = &critical_sections_;
@@ -840,6 +845,10 @@ RunResult Machine::run(const RunOptions& opts) {
     //   记的是**这一轮真正生效**的位，⛔ 不是 CLI 回显 —— `window-prof` 读 `WindowProfiler::armed()`
     //   的真值（脚本里写了 `profile_begin` 但没 arm 的缺陷会在这里如实暴露，见 §2.5 单）。
     instrument_ = InstrumentationState{};
+    // ★ 运行摘要 `present-tail` 的 **per-run 门**：`frame_count_` 跨 run 累加、**永不清**（与 `cpu_.insns`
+    //   同一条契约）⇒ "本轮有没有 Present" 只能靠**差分**，⛔ 不是 `frameCount() != 0`。
+    //   局部量而不是 Machine 成员 ⇒ 没有"忘了清"的位置。
+    const std::uint64_t frame_at_run_start = presenter_.frameCount();
     // ★ SEH 派发状态机：**跨块迭代**存活（一次 raise 可能要在多个块边界上调多个 handler）⇒
     //   只在这里清一次。⛔ 不许在块边界清（那会把"等 handler 返回"丢成静默 no-op）。
     seh_.reset();
@@ -1585,6 +1594,25 @@ RunResult Machine::run(const RunOptions& opts) {
     wall_start_valid_ = false;
     r.ea = cpu_.eip;
     r.insns = cpu_.insns;
+    // ★ 运行摘要 `present-tail`（口径 = **最后一次 Present 调用 → 这里** 的 guest 指令数）：
+    //   三个盖章都在 `HeadlessPresenter::present()` 里（Present **那一刻**），⛔ 不许在这里拿
+    //   `cpu_.insns` 冒充它（那会让 `tail_insns` 恒 0 —— 恒等式仍成立，只能靠纯档的
+    //   `present-tail-stamp`（与 shim 记下的 `cpu.insns` 精确相等）抓）。
+    //   clamp 是**纯防御**（实测：去掉它全 ctest 仍绿）：它只在"章 > `insns`"这一种情况下生效 ——
+    //   章被换成别的计数器 / 读到未来的值 ⇒ 不 clamp 会打出 `tail_insns=18446744073709551615`，
+    //   而 `insns_at_last_present + tail ≡ insns (mod 2^64)` **仍然成立**（恒等式抓不到）。
+    //   ⛔ 别把 clamp 当守卫。
+    {
+        const std::uint64_t frames_now = presenter_.frameCount();
+        r.present_tail.any = frames_now != frame_at_run_start;
+        r.present_tail.last_frame = frames_now;
+        r.present_tail.insns_at_last_present = presenter_.lastPresentInsns();
+        r.present_tail.tail_insns = r.present_tail.insns_at_last_present <= r.insns
+                                        ? r.insns - r.present_tail.insns_at_last_present
+                                        : 0;
+        // ⚠ 取"现在"= 收口这一刻：⛔ 不含 `audio_.end()` 的收尾（否则 `--audio sdl` 会把它算进尾段）。
+        r.present_tail.tail_wall_ms = presenter_.msSinceLastPresent();
+    }
     audio_.end();  // 关闭 SDL / 回填 WAV；此后不再写 guest
     // ★ run 结束：关掉违规计数。⚠ 计数本身**保留**（summary / `--assert-guest-token` 还要读），
     //   只是之后的 Machine 析构（COM/surface 回收 guest 堆）不再算进本轮账。
@@ -2153,6 +2181,16 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
     std::fprintf(out, "stop      : %s @ eip=%08X\n", stopReasonName(r.reason), r.ea);
     if (!r.detail.empty()) std::fprintf(out, "detail    : %s\n", r.detail.c_str());
     std::fprintf(out, "insns     : %llu\n", (unsigned long long)r.insns);
+    // ★ `present-tail`：**最后一次 Present 调用 → 本次 run 停**的 guest 指令数。
+    //   只在**本轮 ≥1 次 Present** 时打（0 次打一行 0 会被读成"没卡"；⛔ 没有这行 = 一次都没 Present）。
+    //   字段顺序 = 确定性量在前、宿主墙钟在后；`tail_insns` 与上面 `insns :` / `insns_at_last_present` 同源
+    //   ⇒ 恒等式 `insns_at_last_present + tail_insns == insns` 必须成立（这是守卫的判据）。
+    if (r.present_tail.any) {
+        std::fprintf(out, "present-tail: last_frame=%llu insns_at_last_present=%llu tail_insns=%llu tail_wall_ms=%.1f\n",
+                     (unsigned long long)r.present_tail.last_frame,
+                     (unsigned long long)r.present_tail.insns_at_last_present,
+                     (unsigned long long)r.present_tail.tail_insns, r.present_tail.tail_wall_ms);
+    }
     if (skip_logo_) {
         if (skip_logo_applied_) {
             std::fprintf(out, "skip-logo : applied @ T_Command=0x%08X (+0x%05X=0)\n", skip_logo_object_,
@@ -2242,6 +2280,36 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                          (unsigned long long)marker_sampler_.unpublished(), input_script_.lastMarkerCur(),
                          input_script_.lastMarkerId(), input_script_.lastMarkerName().c_str(),
                          input_script_.lastMarkerNameDegraded() ? "（降级）" : "");
+        }
+        // ★ **否定证据**（BUG-20 / `REQ-01M72QSNQCH3GHH3158A7YX96V`）：条件永不满足的动作在 run
+        //   结束时会被静默丢弃 —— 旧口径下唯一的线索是"**没有** `[input-script] finished` 那行"，
+        //   而缺那行同时意味着"脚本跑完了 / 脚本没跑完 / run 提前停了"三件事，读输出的人分不开。
+        //   这一行把那份否定证据变成**正面**读数：`pending` = 几条动作没跑、`first` = 第一条是什么。
+        //   ★ 位置：`inputstat :` 那一组的缩进续行（`release :` / `marker :`）**之后**才打 —— 它自己是
+        //     行首锚定的新字段，夹在续行中间会把"一组读数"切开；⛔ 但仍留在 `active()` 这一段内
+        //     （没有脚本 ⇒ 一个字都不打）。
+        //   判据（⛔ 不要放宽）：
+        //   · 只在 `active() && !finished() && !quitRequested()` 时打 —— `quit` 之后剩下的动作是脚本
+        //     **有意**跳过的（`quit` 就是"到此为止"），报它会让正常脚本天天告警；全部已应用
+        //     （`finished()`）⇒ 没有可报的。
+        //   · 与 `[input-script] finished` 那行**并存、不互相替代**：那行在 `finished()` **或 `quit`**
+        //     时打，且 `quit` 路径写的是**总**动作数（⛔ 别当"应用数"读）。
+        //   · `first` = 第一条**未应用动作**的原文（`Action::text`；按 `applied` 标志扫 —— 动作按到期 /
+        //     边沿应用 ⇒ 应用顺序不一定是文件顺序）；`pending==0` 但还有没交付完的抬起时取第一条未完成
+        //     抬起的原文。含空格 ⇒ 双引号包住行首锚定的字段；内部的 `"` 换成 `'`（⛔ 不破可解析格式）。
+        //   · `releases` = 还没交付的抬起条数（`pendingReleaseCount()`）：自动 hold 等 guest 采样 / 显式
+        //     hold 没到期，都会让 `finished()` 为假 ⇒ 只报 `pending` 会把这类收口说成"动作没跑"。
+        if (!input_script_.finished() && !input_script_.quitRequested()) {
+            const std::size_t pending = input_script_.unfinishedActionCount();
+            const std::size_t rel = input_script_.pendingReleaseCount();
+            const std::string& raw = pending > 0 ? input_script_.firstUnfinishedActionText()
+                                                 : input_script_.firstPendingReleaseText();
+            std::string first = raw;
+            for (char& c : first) {
+                if (c == '"') c = '\'';
+            }
+            std::fprintf(out, "input-script: unfinished pending=%zu releases=%zu first=\"%s\"\n", pending, rel,
+                         first.c_str());
         }
     }
     // ★ 时间线 **0 点**（`--anchor-script <id>`）的可观测面：闩锁了就**一定**打一行（四单位齐全）。

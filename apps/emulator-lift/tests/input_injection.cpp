@@ -42,6 +42,8 @@ constexpr std::uint32_t kConsumer = 0x00403000u;  // 伪造的"每 50 ms 采样�
 // ★ 不采样的 guest 放**另一个**地址：`placeCode` 不失效块缓存（同一 EA 重放会跑旧块），
 //   两个夹具共用地址会让"不采样"的用例偷偷跑成"采样"的（实测过）。
 constexpr std::uint32_t kSpinner = 0x00404000u;
+// ★ 运行摘要 `present-tail` 的埋点夹具（⑪）：**又一个**新地址，理由同上一行（块缓存不失效）。
+constexpr std::uint32_t kPresentTail = 0x00405000u;
 constexpr std::uint32_t kMsg = 0x00402000u;   // MSG（28 字节）
 constexpr std::uint32_t kPoint = 0x00402100u; // POINT（8 字节）
 constexpr std::uint32_t kRes = 0x00402200u;   // 观测槽
@@ -426,6 +428,49 @@ bool buildSpinnerBody(std::vector<std::uint8_t>* out, std::uint32_t burn, std::s
     return true;
 }
 
+// ★ `present-tail` 的夹具 shim（⑪）：guest 走到"这个 block 边界"时**调一次**汇点 `present()`。
+//   `present()` 是唯一的呈现汇点（`runtime/present.h` 文件头：D3D9 Present 与 DDraw Flip 都走它）；
+//   纯夹具照样能真造出一次 Present（本文件早已直接调过它）⇒ 埋点与"跨 run 门"不必降级到 assets 档。
+//   内部**记下 Present 那一刻的 `cpu.insns`** —— run 结束后与摘要字段**精确**比对，这是抓
+//   "字段接错"的唯一守卫（⛔ 不要放宽成 `> 0`）。
+std::uint64_t g_present_insns = 0;    // Present 那一刻（shim 内）看到的 cpu.insns
+std::uint64_t g_present_calls = 0;    // 真调了 present() 几次
+std::uint32_t g_present_surface = 0;  // 要呈现的 guest surface
+bool g_present_armed = true;          // false ⇒ 本轮一次都不调（造"同一台机第二轮的 0-Present"）
+bool g_present_failed = false;        // shim 内部的硬失败（拿不到 Machine / surface / present 返回 false）
+
+void presentAtBoundary(lift::X86& cpu, lift::ShimCall&) {
+    if (!g_present_armed) return;
+    lift::Machine* m = lift::machineOf(cpu);
+    if (m == nullptr) {
+        g_present_failed = true;
+        return;
+    }
+    lift::GuestSurface* surf = m->surfaces().find(g_present_surface);
+    if (surf == nullptr) {
+        g_present_failed = true;
+        return;
+    }
+    g_present_insns = cpu.insns;  // ← Present **那一刻**（⛔ 不是 run 收口那一刻）
+    ++g_present_calls;
+    std::string perr;
+    if (!m->presenter().present(m->surfaces(), *surf, "", &perr)) g_present_failed = true;
+}
+
+// guest 体：一条 `mov` → `call <PresentAtBoundary>`（Present 发生在这个块边界）→ 两条 `mov` → `ret`。
+//   ⇒ 最后一次 Present 之后**一定还有指令**（`tail_insns > 0`），且 `ret` 把 eip 弹到哨兵。
+bool buildPresentBoundaryBody(std::vector<std::uint8_t>* out, std::uint32_t stub, std::string* err) {
+    Asm a(kPresentTail);
+    a.movEaxImm(0x11111111u);
+    a.callRel(stub);
+    a.movEaxImm(0x22222222u);
+    a.movEaxImm(0x33333333u);
+    a.ret();
+    if (!a.patch(err)) return false;
+    *out = std::move(a.b);
+    return true;
+}
+
 // 推进一块 guest 执行（`max_insns` 是**累计值** ⇒ 这里传"再跑多少条"）。
 bool runChunk(lift::Machine& m, std::uint64_t insns) {
     lift::RunOptions opt;
@@ -542,6 +587,82 @@ int main() {
         LIFT_CHECK_EQ_I64(cx, 0);
         LIFT_CHECK_EQ_I64(cy, 0);
     }
+
+    // =================================================================================
+    // ⑪ 运行摘要的 `present-tail`：埋点必须在 **Present 那一刻**，门必须是 **per-run 差分**
+    // =================================================================================
+    // ★ 用**自己的一台** Machine（`m2`）：`frameCount() == 0` 起点 ⇒ `last_frame == 1` 是确定的，
+    //   而不是"当前值"；也不会把下面既有用例的前置条件（`script-frame` 要求"还没 Present 过"）打歪。
+    // 判据（红了意味着什么）：
+    //   ① run 内真的走了一次汇点（`presenter().present(...)`，与 D3D9 / DDraw 同一条路径）⇒
+    //      `any` 真 / `last_frame == 1` / `insns_at_last_present` **精确等于** shim 里记下的
+    //      `cpu.insns`（⛔ 不是 `> 0` —— "章取自 run 收口那一刻" / "字段接错"只有这条会红）/
+    //      `tail_insns == r.insns − 记下的值`；
+    //   ② **同一台 Machine 的第二轮 run 不 Present** ⇒ `any == false`（门 = frameCount **差分**，
+    //      ⛔ 不是 `!= 0`：否则第二轮会拿第一轮留下的章继续打）。
+    g_current_case = "present-tail-stamp";
+    {
+        lift::Machine m2;
+        std::string e2;
+        LIFT_CHECK(m2.initBare(&e2));
+        LIFT_CHECK(m2.prepareStack(&e2));
+        const std::uint32_t surf2 = m2.surfaces().create(4, 3, fmt);
+        LIFT_CHECK_NE_U32(surf2, 0u);
+        LIFT_CHECK(m2.surfaces().find(surf2) != nullptr);
+        if (m2.surfaces().find(surf2) == nullptr) return lift_test::finish("input-injection");
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m2.presenter().frameCount()), 0u);  // 起点：一帧都没 Present
+
+        // 登记夹具 shim（与 `tests/profile_window.cpp` 的 attach() 同形：add → 拿 stub_ea → installShim）。
+        m2.shims().add("test", "PresentAtBoundary", lift::Conv::Stdcall, 0, &presentAtBoundary);
+        lift::ShimDef* present_def = m2.shims().findMutable("test", "PresentAtBoundary");
+        LIFT_CHECK(present_def != nullptr);
+        if (present_def == nullptr) return lift_test::finish("input-injection");
+        present_def->stub_ea = kStubBase + present_def->id * 4u;
+        m2.cache().installShim(present_def->stub_ea, present_def->id);
+        const std::uint32_t present_stub = present_def->stub_ea;
+
+        std::vector<std::uint8_t> tailbody;
+        LIFT_CHECK(buildPresentBoundaryBody(&tailbody, present_stub, &aerr));
+        if (tailbody.empty()) return lift_test::finish("input-injection");
+        LIFT_CHECK(m2.placeCode(kPresentTail, tailbody.data(), tailbody.size(), &e2));
+        g_present_surface = surf2;
+
+        lift::RunOptions opt;
+        opt.until_ea = kSentinel;
+        opt.time_limit_sec = 60.0;  // 兜底：⛔ 守卫不许挂死
+        m2.cpu().eip = kPresentTail;
+        m2.cpu().esp() = m2.layout().stack_top - 4u;
+        m2.mem().wr32(m2.cpu().esp(), kSentinel);
+        const lift::RunResult r1 = m2.run(opt);
+        LIFT_CHECK(!g_present_failed);                                     // shim 真的拿到了 Machine / surface
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(g_present_calls), 1);  // 只调了一次汇点
+        LIFT_CHECK(r1.reason == lift::StopReason::UntilEa);
+        LIFT_CHECK(r1.present_tail.any);                                   // ① 本轮 ≥1 次 Present
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(r1.present_tail.last_frame), 1);  // 跨 run 累计帧号
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(r1.present_tail.insns_at_last_present),
+                          static_cast<std::int64_t>(g_present_insns));  // ★ 精确相等
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(r1.present_tail.tail_insns),
+                          static_cast<std::int64_t>(r1.insns - g_present_insns));  // 恒等式
+        LIFT_CHECK(g_present_insns > 0u);             // 章不是"静默 0"（没注入 insns 源就会是 0）
+        LIFT_CHECK(r1.present_tail.tail_insns > 0u);  // Present 之后还有两条 mov + ret
+
+        // ② 同一台 Machine 的第二轮：**一次也不 Present** ⇒ 门必须是差分。
+        g_present_armed = false;
+        m2.cpu().eip = kPresentTail;
+        m2.cpu().esp() = m2.layout().stack_top - 4u;
+        m2.mem().wr32(m2.cpu().esp(), kSentinel);
+        const lift::RunResult r2 = m2.run(opt);
+        g_present_armed = true;
+        LIFT_CHECK(r2.reason == lift::StopReason::UntilEa);
+        LIFT_CHECK(!r2.present_tail.any);  // ⛔ 第二轮不许拿第一轮留下的章继续打
+        std::printf("present-tail-stamp: 第一轮 last_frame=%llu insns_at_last_present=%llu tail_insns=%llu；"
+                    "第二轮 any=%d\n",
+                    (unsigned long long)r1.present_tail.last_frame,
+                    (unsigned long long)r1.present_tail.insns_at_last_present,
+                    (unsigned long long)r1.present_tail.tail_insns, r2.present_tail.any ? 1 : 0);
+    }
+    // `~Machine` 把进程级 "active machine" 清空 ⇒ 恢复成主夹具那台（fault 诊断读它）。
+    lift::setActiveMachine(&m);
 
     // =================================================================================
     // ① `at guest_ms`：headless 时间线（不 Present、不建 SDL 视频）⇒ guest 看到按键 / 光标 / 消息
