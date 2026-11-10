@@ -298,6 +298,31 @@ if(EXISTS "E:/Games/Eushully/天結/install/SYS4INI.BIN" AND DEFINED ENV{LIFT_AS
         TIMEOUT 420)
 endif()
 
+# ---- assets：TITLE 之后两条入口路径（OPTION→ADV设定 / GameStart）不许崩 ----
+# 判据见 tests/title_entry_paths.cpp 的头注释（红了意味着什么 / 为什么脚本里有 `wait`）。
+# 缺游戏安装 ⇒ 不注册（assets 档的判据 = 注册位置）；
+# GPU / 窗口不可用 ⇒ 测试自己 `LIFT_SKIP`(77)。
+# ★ **opt-in**（与 option-roundtrip 同一判据）：这条真启模拟器跑两次子进程（各 ≥ 15 s），
+#   默认门禁**不注册**它，必须显式打开（判据 = 条件里的 `DEFINED ENV{LIFT_ASSETS}`）：
+#     $env:LIFT_ASSETS=1; ctest --test-dir out -R title-entry-paths --output-on-failure
+#   ⛔ `DEFINED ENV{…}` 是**配置期**求值 ⇒ 改了环境变量必须重新 configure
+#   （`cmake --preset windows-x64`），`ctest -N` 才会跟着变。
+# ★ `add_executable` 也在这个 if 里：纯构建环境（没有游戏安装 / 没开 LIFT_ASSETS）连 target 都不编。
+if(EXISTS "E:/Games/Eushully/天結/install/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
+    add_executable(lift-title-entry-paths tests/title_entry_paths.cpp)
+    target_link_libraries(lift-title-entry-paths PRIVATE emulator-lift-runtime)
+    add_test(NAME title-entry-paths COMMAND lift-title-entry-paths
+        $<TARGET_FILE:emulator-lift>
+        "E:/Games/Eushully/天結/install"
+        "${CMAKE_CURRENT_BINARY_DIR}/title-entry-paths-work")
+    set_tests_properties(title-entry-paths PROPERTIES
+        # ★ 子进程继承这个 cwd：模拟器默认的执行源是按**相对当前目录**找的
+        #   （`../../corpus/assets/age/…sectfix.EXE`）⇒ 停在 `out/` 会找不到执行源、被测试 SKIP。
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 600)
+endif()
+
 # =====================================================================================
 # 测试分级（AGENTS.md §5「CTest 那一档不写 pragma，判据是注册位置」）：#   - **顶层无条件注册** ⇒ 默认 ctest 就跑（不需要游戏 / LFS）⇒ pure
 #   - 落在 if(...) / foreach / function 里 ⇒ 需要 LFS 资产或游戏安装 ⇒ assets

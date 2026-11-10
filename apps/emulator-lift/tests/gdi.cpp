@@ -31,8 +31,11 @@ namespace {
 
 constexpr std::uint32_t kCode = 0x00401000u;
 constexpr std::uint32_t kCode2 = 0x00401400u;
+constexpr std::uint32_t kCode3 = 0x00401C00u;  // 第 2 次枚举（"回调返回 0 就停"档）
+constexpr std::uint32_t kCode4 = 0x00402400u;  // 第 3 次枚举（"回调一路继续到跑完"档：只量堆账）
 constexpr std::uint32_t kProc = 0x00401800u;  // EnumFontFamiliesExA 的 guest 回调（⛔ 与主程序不重叠）
 constexpr std::uint32_t kLogFont = 0x00402000u;
+constexpr std::uint32_t kEnumFilter = 0x00402040u;  // 枚举**过滤器** LOGFONTA（lfCharSet = 0x80）
 constexpr std::uint32_t kGm = 0x00402100u;
 constexpr std::uint32_t kGm2 = 0x00402140u;
 constexpr std::uint32_t kGm1 = 0x00402180u;
@@ -43,9 +46,14 @@ constexpr std::uint32_t kDisplay = 0x00402640u;
 constexpr std::uint32_t kSize = 0x00402660u;
 constexpr std::uint32_t kTm = 0x00402680u;
 constexpr std::uint32_t kEnumResult = 0x00402700u;
-constexpr std::uint32_t kEnumSeen = 0x00402704u;
-constexpr std::uint32_t kEnumFaceFirst = 0x00402708u;
 constexpr std::uint32_t kEnumLparam = 0x0040270Cu;
+// ★ 枚举回调的记录区：次数 / 每条的 lfFaceName（32 字节 CP932）/ 每条看到的 lfCharSet / 停止开关
+constexpr std::uint32_t kEnumCount = 0x00402800u;
+constexpr std::uint32_t kEnumNames = 0x00402900u;    // N × 32 字节（最多 kEnumMax 条）
+constexpr std::uint32_t kEnumCharset = 0x00402D00u;  // N × 4
+constexpr std::uint32_t kEnumStop = 0x00402E00u;     // dword：非 0 ⇒ 回调返回 0（= 停止枚举）
+constexpr std::uint32_t kEnumResult2 = 0x00402E04u;  // 第 2 次枚举的返回值
+constexpr std::uint32_t kEnumMax = 64;               // 记录区容量（⛔ 不断言总数，只兜住越界）
 constexpr std::uint32_t kHdc = 0x00402710u;
 constexpr std::uint32_t kFont = 0x00402714u;
 constexpr std::uint32_t kCurrentFont = 0x00402718u;
@@ -148,6 +156,39 @@ std::uint32_t rowBytesFor(std::uint32_t format, int width) {
 // 独立实现的覆盖率 → 级数（GRAY4 17 级 / GRAY8 65 级），用来核对写出的字节
 std::uint8_t grayLevel(std::uint32_t max_level, std::uint32_t coverage) {
     return static_cast<std::uint8_t>((coverage * max_level + 127u) / 255u);
+}
+
+// 记录区里是否有一条**逐字节等于** `want` 的 `lfFaceName`（32 字节定长、NUL 结尾的 CP932）
+bool enumSawFamily(lift::Machine& m, std::uint32_t count, std::initializer_list<int> want) {
+    for (std::uint32_t i = 0; i < count && i < kEnumMax; ++i) {
+        const std::uint32_t base = kEnumNames + i * 32u;
+        std::uint32_t k = 0;
+        bool same = true;
+        for (const int byte : want) {
+            if (m.mem().rd8(base + k) != static_cast<std::uint8_t>(byte)) {
+                same = false;
+                break;
+            }
+            ++k;
+        }
+        // 末尾必须是 NUL —— 否则只是"前缀相同"
+        if (same && m.mem().rd8(base + k) != 0) same = false;
+        if (same) return true;
+    }
+    return false;
+}
+
+// 记录区里第 i 条的名字（NUL 结尾）转成可读文本（ASCII 名用；CP932 名只看字节）
+std::string enumFamilyAscii(lift::Machine& m, std::uint32_t count, std::uint32_t i) {
+    if (i >= count) return {};
+    const std::uint32_t base = kEnumNames + i * 32u;
+    std::string s;
+    for (std::uint32_t k = 0; k < 31; ++k) {
+        const std::uint8_t c = m.mem().rd8(base + k);
+        if (c == 0) break;
+        s.push_back(static_cast<char>(c));
+    }
+    return s;
 }
 
 }  // namespace
@@ -278,22 +319,65 @@ int main() {
     LIFT_CHECK(m.placeData(kSize, zeros.data(), 8, &err));
     for (const std::uint32_t slot : {kHdc, kFont, kCurrentFont, kOldObject, kOldObject2, kNeeded, kGot,
                                      kDelSelected, kRestored, kDelFree, kDelAgain, kDelDc, kDelDcObject,
-                                     kBkOld, kTextColorOld, kStockBrush, kEnumResult, kEnumSeen,
-                                     kEnumFaceFirst, kEnumLparam, kNeed1, kSelectDeleted}) {
+                                     kBkOld, kTextColorOld, kStockBrush, kEnumResult, kEnumLparam,
+                                     kEnumCount, kEnumStop, kEnumResult2, kNeed1, kSelectDeleted}) {
         LIFT_CHECK(m.placeData(slot, zeros.data(), 4, &err));
     }
+    // 枚举回调的记录区（N 条族名 × 32 字节 + N × 4 字节 charset）
+    LIFT_CHECK(m.placeData(kEnumNames, zeros.data(), 0x400, &err));
+    LIFT_CHECK(m.placeData(kEnumCharset, zeros.data(), 0x100, &err));
 
-    // EnumFontFamiliesExA 的 guest 回调：记录 lfFaceName[0] 与 lParam，返回 0（继续枚举）
-    const std::vector<std::uint8_t> proc = {
-        0x8B, 0x44, 0x24, 0x04,              // mov eax,[esp+4]      ; LOGFONTA*
-        0x0F, 0xB6, 0x48, 0x1C,              // movzx ecx, byte [eax+28]
-        0x89, 0x0D, 0x08, 0x27, 0x40, 0x00,  // mov [kEnumFaceFirst], ecx
-        0x8B, 0x54, 0x24, 0x10,              // mov edx,[esp+16]     ; lParam
-        0x89, 0x15, 0x0C, 0x27, 0x40, 0x00,  // mov [kEnumLparam], edx
-        0xC7, 0x05, 0x04, 0x27, 0x40, 0x00, 0x01, 0x00, 0x00, 0x00,  // mov dword [kEnumSeen],1
-        0x31, 0xC0,                          // xor eax,eax
-        0xC2, 0x10, 0x00};                   // ret 16
-    LIFT_CHECK(m.placeCode(kProc, proc.data(), proc.size(), &err));
+    // ★ 枚举的**过滤器** LOGFONTA：lfCharSet = SHIFTJIS_CHARSET(0x80)（引擎自己就是这么调的：
+    //   `sub_45F6C0` 的 `Logfont.lfCharSet = 0x80`，EA 0x45F6C0）。⛔ 不传 NULL ——
+    //   "每条都回显请求的 charset"这条判据只有在请求值真的存在时才成立。
+    std::vector<std::uint8_t> filter_logfont(60, 0);
+    filter_logfont[23] = 0x80;
+    LIFT_CHECK(m.placeData(kEnumFilter, filter_logfont.data(), filter_logfont.size(), &err));
+
+    // EnumFontFamiliesExA 的 guest 回调（= 引擎 `Proc`(EA 0x45EAC0) 的记录版）：
+    //   ① 把这一条的 `lfFaceName`（32 字节 CP932）抄到 `kEnumNames + count*32`；
+    //   ② 把这一条看到的 `lfCharSet`（[lf+23]）记到 `kEnumCharset + count*4`；
+    //   ③ 记 lParam；④ count++；⑤ 返回 **1 = 继续**（`kEnumStop != 0` 时返回 **0 = 停止**）。
+    //   ★ 极性：MSDN `EnumFontFamExProc`："必须返回**非 0** 才能继续枚举；返回 **0** 停止"。
+    Asm pa(kProc);
+    pa.u8(0x53);                                                    // push ebx
+    pa.u8(0x56);                                                    // push esi
+    pa.u8(0x57);                                                    // push edi
+    pa.u8(0x8B); pa.u8(0x44); pa.u8(0x24); pa.u8(0x10);             // mov eax,[esp+16]   ; a1 = LOGFONTA*
+    pa.u8(0x8B); pa.u8(0x0D); pa.u32(kEnumCount);                   // mov ecx,[kEnumCount]
+    pa.u8(0x89); pa.u8(0xCA);                                       // mov edx,ecx
+    pa.u8(0xC1); pa.u8(0xE2); pa.u8(0x05);                          // shl edx,5          ; count*32
+    pa.u8(0x81); pa.u8(0xC2); pa.u32(kEnumNames);                   // add edx,kEnumNames
+    pa.u8(0x8D); pa.u8(0x70); pa.u8(0x1C);                          // lea esi,[eax+28]   ; lfFaceName
+    pa.u8(0x89); pa.u8(0xD7);                                       // mov edi,edx
+    pa.u8(0xBB); pa.u32(32);                                        // mov ebx,32
+    const std::uint32_t loop = pa.ea();                             // loop:
+    pa.u8(0x8A); pa.u8(0x06);                                       //   mov al,[esi]
+    pa.u8(0x88); pa.u8(0x07);                                       //   mov [edi],al
+    pa.u8(0x46);                                                    //   inc esi
+    pa.u8(0x47);                                                    //   inc edi
+    pa.u8(0x4B);                                                    //   dec ebx
+    pa.u8(0x75);                                                    //   jnz loop
+    pa.u8(static_cast<std::uint8_t>(static_cast<std::int32_t>(loop) -
+                                    static_cast<std::int32_t>(pa.ea() + 1)));
+    pa.u8(0x8B); pa.u8(0x0D); pa.u32(kEnumCount);                   // mov ecx,[kEnumCount]
+    pa.u8(0x8B); pa.u8(0x44); pa.u8(0x24); pa.u8(0x10);             // mov eax,[esp+16]
+    pa.u8(0x0F); pa.u8(0xB6); pa.u8(0x50); pa.u8(0x17);             // movzx edx,byte [eax+23]  ; lfCharSet
+    pa.u8(0x89); pa.u8(0x14); pa.u8(0x8D); pa.u32(kEnumCharset);    // mov [kEnumCharset+ecx*4],edx
+    pa.u8(0x8B); pa.u8(0x44); pa.u8(0x24); pa.u8(0x1C);             // mov eax,[esp+28]   ; lParam
+    pa.storeEax(kEnumLparam);                                       // mov [kEnumLparam],eax
+    pa.u8(0x41);                                                    // inc ecx
+    pa.u8(0x89); pa.u8(0x0D); pa.u32(kEnumCount);                   // mov [kEnumCount],ecx
+    pa.u8(0xB8); pa.u32(1);                                         // mov eax,1          ; 非 0 = 继续
+    pa.u8(0x8B); pa.u8(0x15); pa.u32(kEnumStop);                    // mov edx,[kEnumStop]
+    pa.u8(0x85); pa.u8(0xD2);                                       // test edx,edx
+    pa.u8(0x74); pa.u8(0x02);                                       // jz  epilogue
+    pa.u8(0x31); pa.u8(0xC0);                                       // xor eax,eax        ; 0 = 停止
+    pa.u8(0x5F);                                                    // pop edi
+    pa.u8(0x5E);                                                    // pop esi
+    pa.u8(0x5B);                                                    // pop ebx
+    pa.u8(0xC2); pa.u8(0x10); pa.u8(0x00);                          // ret 16
+    LIFT_CHECK(m.placeCode(kProc, pa.b.data(), pa.b.size(), &err));
 
     // ---- 程序 1：建 DC / 字体 / 选入 / 当前对象 / 度量 / 枚举 / GGO / extent / 绘制 / 删已选中 ----
     Asm a;
@@ -325,11 +409,11 @@ int main() {
     a.pushImm(kTm);
     a.pushMem(kHdc);
     a.callRel(stubOf(m, "GetTextMetricsA"));
-    // EnumFontFamiliesExA(hdc, NULL, proc, 0xABCD, 0)
+    // EnumFontFamiliesExA(hdc, &filter{lfCharSet=0x80}, proc, 0xABCD, 0)
     a.pushImm(0);
     a.pushImm(0xABCDu);
     a.pushImm(kProc);
-    a.pushImm(0);
+    a.pushImm(kEnumFilter);
     a.pushMem(kHdc);
     a.callRel(stubOf(m, "EnumFontFamiliesExA"));
     a.storeEax(kEnumResult);
@@ -435,10 +519,33 @@ int main() {
     LIFT_CHECK_EQ_I64(m.mem().rd32(kTm + 28), 400);  // tmWeight
 
     g_current_case = "enum-font-families";
-    LIFT_CHECK_EQ_U32(m.mem().rd32(kEnumSeen), 1u);          // guest 回调真的被调到（恰好一次）
-    LIFT_CHECK_EQ_U32(m.mem().rd32(kEnumFaceFirst), 0x41u);  // lfFaceName[0] = 'A'（Amayui CN）
-    LIFT_CHECK_EQ_U32(m.mem().rd32(kEnumLparam), 0xABCDu);   // lParam 原样送到
-    LIFT_CHECK_EQ_U32(m.mem().rd32(kEnumResult), 0u);        // 返回值 = 回调的返回值
+    // ★ 判据（缺一条都不算）：① 回调**不止一条**（修前只报宿主族名一条 ⇒ 这里红）；
+    //   ② 五条引擎查表目标**逐字节**命中（CP932）；③ 每条的 lfCharSet == 请求的 0x80；
+    //   ④ lParam 原样送到；⑤ 返回值 = 回调最后一次的返回值（全部返回 1 ⇒ 1）。
+    //   ⛔ 不断言"总数恰好等于 N"（加一条族名就红的脆弱断言）。
+    const std::uint32_t enum_count = m.mem().rd32(kEnumCount);
+    LIFT_CHECK(enum_count > 1u);                 // ①（修前 = 1 ⇒ 红）
+    LIFT_CHECK(enum_count <= kEnumMax);          // 记录区不越界
+    LIFT_CHECK_EQ_U32(m.mem().rd32(kEnumLparam), 0xABCDu);  // ④
+    LIFT_CHECK_NE_U32(m.mem().rd32(kEnumResult), 0u);       // ⑤
+    // 首条 = 宿主族名（字形真的来自它）
+    LIFT_CHECK(enumFamilyAscii(m, enum_count, 0) == "Amayui CN");
+    // ② 引擎的查表目标（字面量来路见 `src/shims/gdi32_font.cpp` 的 kEnumFamilyNames；CP932 字节
+    //    由 python3 `'…'.encode('cp932')` 独立算出，⛔ 不抄实现的转换）
+    LIFT_CHECK(enumSawFamily(m, enum_count, {0x82, 0x6C, 0x82, 0x72, 0x20, 0x83, 0x53, 0x83, 0x56, 0x83,
+                                             0x62, 0x83, 0x4E}));  // ＭＳ ゴシック（EA 0x52686C）
+    LIFT_CHECK(enumSawFamily(m, enum_count, {0x82, 0x6C, 0x82, 0x72, 0x20, 0x96, 0xBE, 0x92,
+                                             0xA9}));              // ＭＳ 明朝（引擎配置）
+    LIFT_CHECK(enumSawFamily(m, enum_count, {0x41, 0x47, 0x45, 0x20, 0x45, 0x78, 0x74, 0x65, 0x6E,
+                                             0x64}));              // AGE Extend（EA 0x5268F9）
+    LIFT_CHECK(enumSawFamily(m, enum_count, {0x49, 0x50, 0x41, 0x20, 0x50, 0x83, 0x53, 0x83, 0x56, 0x83,
+                                             0x62, 0x83, 0x4E}));  // IPA Pゴシック（EA 0x5268CC）
+    LIFT_CHECK(enumSawFamily(m, enum_count, {0x49, 0x50, 0x41, 0x20, 0x50, 0x96, 0xBE, 0x92,
+                                             0xA9}));              // IPA P明朝（EA 0x5268C0）
+    // ③ 每条的 lfCharSet 都等于**请求的** 0x80（引擎 `Proc` 的过滤条件：不是 0x80 就整条丢掉）
+    for (std::uint32_t i = 0; i < enum_count && i < kEnumMax; ++i) {
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kEnumCharset + i * 4u), 0x80u);
+    }
 
     g_current_case = "ggo-needed-and-metrics";
     const std::uint32_t needed = m.mem().rd32(kNeeded);
@@ -503,6 +610,63 @@ int main() {
             LIFT_CHECK_EQ_I64(width, sum);  // ③ extent == Σ gmCellIncX
             LIFT_CHECK_EQ_I64(height, 22);
         }
+    }
+
+    // ---- 程序 1b：回调返回 **0** ⇒ 只调 1 条就停（Win32 合同；shim 返回值 = 那个 0）----
+    //   ★ 极性判据：MSDN `EnumFontFamExProc`「return value must be a **nonzero** value to
+    //   continue enumeration; to stop enumeration, the return value must be **zero**」。
+    //   ⇒ "返回非 0 就停"是**反的**；这条用例把正确极性钉住（按错的写 ⇒ 只回调 1 条就返回，
+    //   枚举永远拿不到第 2 条 ⇒ 本用例红）。
+    {
+        // ★ 堆账：本次枚举在 guest 堆上**只分配 lf/tm 各一次、收尾各释放一次** ⇒ 跑完必须回到基线
+        //   （任一出口漏释放 ⇒ 这里红。2026-11-10 复审实测：只删一处 free，别的守卫全绿，只有这条能抓）。
+        const std::uint32_t heap_before = m.heap().bytesInUse();
+        m.mem().wr32(kEnumStop, 1u);  // 让 guest 回调返回 0（= 停止）
+        m.mem().wr32(kEnumCount, 0u);
+        m.mem().wr32(kEnumResult2, 0u);
+        Asm c(kCode3);
+        c.pushImm(0);
+        c.pushImm(0x1234u);
+        c.pushImm(kProc);
+        c.pushImm(kEnumFilter);
+        c.pushMem(kHdc);
+        c.callRel(stubOf(m, "EnumFontFamiliesExA"));
+        c.storeEax(kEnumResult2);
+        c.ret();
+        LIFT_CHECK(m.placeCode(kCode3, c.b.data(), c.b.size(), &err));
+        reprimeStack(m);
+        g_current_case = "enum-font-families-stop";
+        LIFT_CHECK(run(m, kCode3).reason == lift::StopReason::UntilEa);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kEnumCount), 1u);        // 只回调 1 条
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kEnumResult2), 0u);      // 返回值 = 回调最后一次的返回值
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kEnumLparam), 0x1234u);  // lParam 照样送到
+        LIFT_CHECK_EQ_U32(m.heap().bytesInUse(), heap_before);  // 堆账：漏释放这里红
+        m.mem().wr32(kEnumStop, 0u);
+    }
+
+    // ---- 程序 1c：回调**一路继续**（跑完 16 条）⇒ 堆账必须回到基线 ----
+    //   ★ 与 1b 是两个不同的出口（"跑完" vs "回调叫停"），各漏一处 free 只有对应的那条能抓。
+    {
+        const std::uint32_t heap_before = m.heap().bytesInUse();
+        m.mem().wr32(kEnumStop, 0u);  // 非 0 = 继续（MSDN 极性）
+        m.mem().wr32(kEnumCount, 0u);
+        m.mem().wr32(kEnumResult2, 0u);
+        Asm d(kCode4);
+        d.pushImm(0);
+        d.pushImm(0x5678u);
+        d.pushImm(kProc);
+        d.pushImm(kEnumFilter);
+        d.pushMem(kHdc);
+        d.callRel(stubOf(m, "EnumFontFamiliesExA"));
+        d.storeEax(kEnumResult2);
+        d.ret();
+        LIFT_CHECK(m.placeCode(kCode4, d.b.data(), d.b.size(), &err));
+        reprimeStack(m);
+        g_current_case = "enum-font-families-complete";
+        LIFT_CHECK(run(m, kCode4).reason == lift::StopReason::UntilEa);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kEnumCount), enum_count);   // 跑完整张名单
+        LIFT_CHECK_NE_U32(m.mem().rd32(kEnumResult2), 0u);         // 返回值 = 最后一次回调的返回值
+        LIFT_CHECK_EQ_U32(m.heap().bytesInUse(), heap_before);     // 堆账：漏释放这里红
     }
 
     // ---- 程序 2：DeleteObject 释放 / 重复删除 / DeleteDC / DeleteObject(DC) / GetStockObject ----

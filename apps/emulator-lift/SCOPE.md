@@ -108,6 +108,7 @@
 |---|---|---|---|---|
 | **平台偏差（用户裁决）** | **字体来源 = 宿主 Amayui CN** | 一律取 `corpus/assets/fonts/Amayui-CN_cnjp.ttf`（粗体同目录 `-Bold.ttf`，CMake 注入 `LIFT_HOST_FONT_PATH`；`--font` 只是调试覆盖）。`CreateFontIndirectA` 的**字面名忽略**；`AddFontMemResourceEx` 送进来的**内存忽略**（仍返回非 0 句柄 + `*pNumFonts = 1`：宿主字体确实可用，但**不是**这段内存加进去的，日志会明说）。`--font-engine-name` 是显式 A/B 对照档 | 与真机（= 引擎字面名那份 MS Gothic）字形不同；简体字形由 Amayui 覆盖 | 字体对象的 `lfHeight` / `lfWeight` / 斜体等**请求形态**；`GetTextMetricsA` 的各格由 FT face 的 `size` 算；`SelectObject` / `DeleteObject` / `GetCurrentObject` 的对象语义 |
 | 平台偏差 | **A/B 对照档只到"上报族名"为止** | `--font-engine-name` 打开时，`EnumFontFamiliesExA` 上报引擎字面名；字形仍来自宿主文件（lift 没有"按系统族名查字"的平台入口；⛔ 不造第二条取字路径） | 对照档不能真的画出 MS Gothic | 默认档完全不受影响 |
+| **平台偏差（2026-11-10 新增）** | **枚举时把引擎硬编码的族名全部报出（字形仍一律 Amayui CN）** | `EnumFontFamiliesExA` 按**固定名单逐条回调**（第一条 = 宿主 `Amayui CN`）：`ＭＳ ゴシック`（EA `0x52686C`）、引擎配置里的 `ＭＳ 明朝`、`AGE Extend`（EA `0x5208D8` = `aAgeExtend`；`@AGE Extend` @`0x5268F8` 是竖排变体、不报。引擎经 `AddFontMemResourceEx` 送进来的字体）、`IPA Pゴシック`（EA `0x5268CC`）/ `IPA P明朝`（EA `0x5268C0`）、以及 `.data` 那 10 条已知族名（EA `0x52985C` 起：MS PMincho / MS Mincho / MS UI Gothic / MS PGothic MC / MS PGothic / MS Gothic / Meiryo UI Bold / Meiryo UI / Meiryo Bold / Meiryo，`sub_491060` 用它过滤 `FontLink\SystemLink`）。**字形一律仍来自宿主 Amayui CN** —— 名字只是**标签**（`lfCharSet` 回显请求值；`@` 开头的竖排族名不报，见下）。名单在 `src/shims/gdi32_font.cpp` 的 `kEnumFamilyNames`，⛔ 不解析 TTF 的 name 表、⛔ 不枚举宿主系统字体（名字不对且不确定） | "按字面名查系统字体"被替换成"名单里的名字都落到同一份宿主字形" ⇒ 真机上会出现的字体差异在这里不出现 | **名字表的填充本身**（引擎 boot 时用它建字体名表 `this+0x313C0..0x313C4`，运行期 `sub_4581F0` 按自己配置里的字面名查 `sub_428990`）；缺一条 ⇒ 查表返回 `-1` ⇒ `0x4586AA` 抛 `std::out_of_range`（`TITLE→OPTION→ADV设定` 与 `TITLE→GameStart` 都崩，2026-11-10 实测）。**回调极性**：返回 **0** 才停、非 0 **继续**（MSDN `EnumFontFamExProc`；引擎的 `Proc` EA `0x45EAC0` 所有路径都返回 1） |
 | **平台偏差（宿主视觉策略）** | **基线补偿 +2px** | 画字前把基线抬 `--baseline-lift`（缺省 **2**；`0` = 关）。理由：Amayui 的 ascent 比引擎的参考字体「ＭＳ ゴシック」大（emulator-cxx 实测 20px 20 / 28px 28 vs 17 / 24），墨迹整体偏低 | 行高 / 基线与真机可能差 1–2px | `tmAscent` 仍是 FT 的真值（补偿**不**写进度量）；`GetTextExtentPoint32A` / GGO 的 advance 与补偿无关 |
 | 平台偏差 | **GGO 位图布局按 Wine 的实测口径** | `GGO_BITMAP`：1bpp、行 = `((w+31)>>5)<<2`（DWORD 对齐）、覆盖率 ≥ 128 置位；`GGO_GRAY4/8`：**每像素 1 字节**、行 = `(w+3)&~3`、值域 0..16 / 0..64（17 / 65 级，满覆盖 = 16 / 64）；`cbBuffer == 0` ⇒ 返回所需字节数 | 灰度档的字节布局与"4bpp"的常见误解不同（按 Wine `win32u/freetype.c` 的 `max_level` 口径，见 ops-forensics §35） | 行对齐 / 值域 / 返回字节数 / `gmBlackBoxX·Y` / `gmptGlyphOrigin` / `gmCellIncX` 的自洽（`tests/gdi.cpp` 逐条钉住） |
 | 平台偏差 | **`TextOutA` 用 FT 连续覆盖率混合** | 屏幕 DC 只记账（不写宿主窗口）；表面 DC 写 guest surface 的像素（通道掩码解码 + 裁剪 + 文字色 + bk mode） | GDI 自己的文字默认是 1 位（`font_smoothing = GGO_BITMAP`）；1px 级栅格差按平台 discard | 文字色 / 背景模式 / 裁剪 / 推进（`advance` = `Σ gmCellIncX`） |
@@ -122,8 +123,11 @@
 在 `ReleaseDC`（vtable +104）里调 `fontDetachDc(hdc)`；`TextOutA` 于是直接写进那块 guest surface 的像素。
 绑定后 arena 里找不到表面 ⇒ `TextOutA` **loud trap**（P1 的拼装错误，不静默跳过）。
 
-★ **测试档位**：`tests/gdi.cpp` 顶层注册（pure，合成字形源）；`tests/gdi_font.cpp` 在
-`if(EXISTS "${LIFT_HOST_FONT_PATH}")` 里（assets，`SKIP_RETURN_CODE 77`）。
+★ **测试档位**：`tests/gdi.cpp` 顶层注册（pure，合成字形源；里面的 `enum-font-families*`
+两条用例钉住"枚举条数 > 1 / 引擎的查表目标逐字节命中 / 每条 lfCharSet 回显 / 回调返回 0 才停"）；
+`tests/gdi_font.cpp` 在 `if(EXISTS "${LIFT_HOST_FONT_PATH}")` 里（assets，`SKIP_RETURN_CODE 77`）；
+`tests/title_entry_paths.cpp` 在 `if(EXISTS "…/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})` 里
+（assets，端到端跑 `TITLE→OPTION→ADV设定` 与 `TITLE→GameStart` 两条路径）。
 
 ## 5.1 修订（2026-11-08）：基线补偿的**位移点**从 TextOutA 搬到 `gmptGlyphOrigin.y`
 

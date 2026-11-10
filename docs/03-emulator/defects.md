@@ -239,3 +239,38 @@
 **守卫**：`apps/emulator-lift/tests/gpu_batch.cpp#gpu-batch/unaligned-row-pitch`（40x20 纹理 + 逐像素图案 +
 1:1 采样 ⇒ 目标像素必须逐字节等于纹理）。实测：**修前 800 个像素里 760 个不同**，修后 0 个。
 ★ 旧的 `subrect-upload` 用例看不到这件事，因为它用的是**纯色**纹理（削了也看不出来）——新用例特意用图案。
+
+### BUG-18 · `EnumFontFamiliesExA` 只上报一条族名 ⇒ 引擎字体名表查不到 `ＭＳ ゴシック` ⇒ `std::out_of_range` ⇒ CRT `int3`（TITLE→OPTION→ADV设定 / TITLE→GameStart 都崩）
+- **现象**：`TITLE→OPTION→左侧「ADV设定」` 与 `TITLE→GameStart` 两条路径都停在
+  `stop: unimplemented @ eip=004E6E3F` / `detail: 软件中断（M1 不建模中断表）`（exit 2；同一抛点偶尔表现为
+  `=== guest memory fault ===` + exit 3）。`0x4E6E3F` 是 `std::_Xout_of_range`（0x4E6E10, 0x30 B, 语料里 COLLAPSED）
+  末尾 padding 的 `int3` —— **不是 abort**，也不是"没人接的 `RaiseException`"。
+- **根因**：`sub_4581F0`（EA 0x4581F0）拿**当前字体的字面名**去 `sub_428990`（EA 0x428990）的字体名表
+  （`this+0x313C0..0x313C4`，元素 32 字节，线性查，**找不到返回 -1**）里查；表里只有我们自己上报的那一条
+  `Amayui CN`，而引擎配置里的字面名是 `ＭＳ ゴシック` / `ＭＳ 明朝`（还有引擎自带 `AGE Extend`）⇒ `-1` 被当
+  下标用 ⇒ `0x4586A6 cmp edx,eax` / `0x4586A8 ja` 不跳 ⇒ `0x4586AA push "invalid vector<T> subscript"` +
+  `0x4586AF call ?_Xout_of_range@std`。该表的**唯一填充点** = boot 时 `EnumFontFamiliesExA` 的回调 `Proc`
+  （EA 0x45EAC0）。
+- **修法**：`src/shims/gdi32_font.cpp` 的 `shimEnumFontFamiliesExA` 从"一条"改成"按 `kEnumFamilyNames` 逐条回调"
+  （16 条：宿主 `Amayui CN` + `ＭＳ ゴシック`(0x52686C) / `ＭＳ 明朝` / `AGE Extend`(0x5208D8) /
+  `IPA Pゴシック`(0x5268CC) / `IPA P明朝`(0x5268C0) + `.data:0x52985C` 那 10 条已知族名），
+  字形仍一律来自宿主 Amayui CN（名字只是标签）；`@` 开头的竖排族名不报（`Proc` 跳过下标 0 的 `@`、
+  `sub_428990` 查表时剥 `@`）。多回调走 `guest_call.h` 的"续延里再 `start()` 返回 false"（同 DDraw `EnumDisplayModes`）。
+  ★ **回调极性**是「**非 0 = 继续、0 = 停止**」（MSDN `EnumFontFamExProc`；引擎 `Proc` 所有路径 `mov eax,1`）——
+  先前的注释写成"非 0 = 停止"是错的，照它写会让枚举在第 1 条被我们自己的 shim 掐断、崩溃照旧。
+- **读数（2026-11-10，macOS arm64 / RelWithDebInfo）**：修前 A `exit=3` + `guest memory fault`（栈
+  `0x4E6E3F ← 0x4586B4 ← 0x458A9D ← 0x4716B0 ← 0x4567DA ← 0x42346B ← 0x41346D ← 0x4BB51C`）、B `exit=2` +
+  `软件中断`（insns 898,729,338）；修后 A/B 都 `exit 0` + `detail: input script: quit`（A insns 1,176,455,637 /
+  B 1,008,053,822）。日志新增 `EnumFontFamiliesExA: 回调 16 条族名 …` + `枚举完成：16 条族名`。
+- **代表守卫**：`apps/emulator-lift/tests/gdi.cpp` 的 `enum-font-families`（pure：枚举条数 > 1、5 条查表目标
+  逐字节命中、每条 `lfCharSet` = 请求值）与 `enum-font-families-stop`（回调返回 0 ⇒ 只 1 条）；
+  端到端 `apps/emulator-lift/tests/title_entry_paths.cpp`（assets，Windows 安装 + `LIFT_ASSETS` 才注册）。
+  变异实测：名单缩回一条 ⇒ `lift-gdi` 6 failures + 同一二进制 A/B 端到端都 exit 2 且回到 `0x4E6E3F`。
+- **复现**（`apps/emulator-lift`）：`--game-dir ../../links/install --skip-logo --present window --present-hidden
+  --raster gpu --max-frames 400 --time-limit 150 --input-script <A|B>`；A = `at frame 130 / click 812 622 /
+  at frame 200 / click 112 216 / wait 100 frames / quit`，B = `at frame 130 / click 1175 355 / wait 100 frames / quit`。
+  ★ 脚本末尾的 `wait` **是判据的一部分**：`quit` 若与最后一次 `click` 同帧生效，目标画面还没建起来就退出 ⇒
+  崩溃不发生 ⇒ 守卫恒绿（实测）。
+- **相关但独立**：同一次崩溃的异常本该被 WinMain 的 `catch(...)`（`.data:00544784`）接住，但我们的 SEH 在
+  `disposition=1` 且 CONTEXT 未改时"继续执行" ⇒ 异常被静默丢弃、落到 `_Xout_of_range` 的 `int3`（这才是
+  `detail: 软件中断` 这个误导性文案的来源）。单开 `REQ-01M72GAA7CVKBPP9QRT0PRPBTM`。
