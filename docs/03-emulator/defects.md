@@ -121,6 +121,9 @@
 - **现状（2026-11-09 复核，以仓为准）**：上面点名的四件事**都还在仓里** —— `tests/input_tick.cpp:43`（`actionScans() <= 16` 仍在）、`tests/gpu_batch.cpp:923`（`cuts - s0.cuts == 1` 仍在），`tests/{heap_layout,gdi_font_metrics_cache,profile_window}.cpp` 三个文件也都在、且都注册在默认门禁里。⇒ 这条审计的**知识侧**（落 `L3-*` / `measurement.md`）已落地，**测试侧的删除还没做**；要删是单独一条单，⛔ 不顺手删证据（`AGENTS.md` §11）。
 
 ### BUG-15 · 出 EU-ROOM 的路径停在后缓冲 surface 的 `LockRect`（未实现），且**退出码 0**（**LockRect 一跳已修 + 有守卫**；端到端仍被新的 SEH gap 挡住）
+- **★ 归属更正（2026-11-10，spike `REQ-01M71P87BMTZK4MHT8468BMC3G`）**：这里按 ESC 走的是**退出游戏（关窗）**，
+  不是"回到 TITLE"；"出 EU-ROOM"是当时的错误口径（把 BUG-16 的「戻る」与 ESC 混成一件事）。
+  `LockRect` 是退出清理里读后缓冲，不是"出房间"的必经点。
 - **现象**：在 `EU-ROOM`（房间稳定帧 hash `0x96E51755F00B2E9E`）里按 **ESC**（VK `0x1B`）⇒ 900 条指令后停：`stop: stopped @ eip=004A4F8D`、`detail: unimplemented D3DX9 call（shim com!IDirect3DSurface9::LockRect）`，而**进程 exit 0**。⇒ 自动化会把它当成"任务成功"。
 - **根因**：两次叠加。① `src/shims/d3dx9.cpp` 的 `shimSurfaceLockRect` / `shimSurfaceUnlockRect` 对"后缓冲 surface（`state` == 设备状态块）"**明确 trap**（"⛔ 不把锁字段写进设备状态块"）⇒ 房间退出路径要读后缓冲，这里没有实现。② `src/runtime/machine.cpp:1030-1059`：`had_impl` 为真但 shim 自己 `stop_why` 的停机被归成 `StopReason::Stopped`（`ok()` 为真）⇒ **未实现的方法槽被当成正常结束**（本单已把这类停改成 `Trap`，见下面的"现状"）。
 - **读数（2026-11-09，macOS arm64 / RelWithDebInfo，`--skip-logo`）**：ESC 在 insn `1,400,000,000` 落下 ⇒ 停于 `1,400,000,900`；同一次运行 `--max-frames 600` 只呈现到第 318 帧（房间稳定帧从第 141 帧起）。对照：同一房间点 **CG 鑑賞**（`1100,150`）会正常切画面（hash 连变 3 帧）⇒ 不是"房间完全不吃输入"。
@@ -174,6 +177,10 @@
   `stopReasonName` / `exitCodeForRun`。
 
 ### BUG-16 · `EU-ROOM` 里的「戻る」按钮对**注入点击**没有反应（hover 有高亮）
+- **★ 归属更正（2026-11-10，spike `REQ-01M71P87BMTZK4MHT8468BMC3G`）**：本条的"ESC 有效"指 ESC 触发
+  **关窗 / 退出游戏**，**不是**「戻る」的同一条路（窗口过程把 ESC 无条件转成关闭消息）。另外
+  `OBS-20261108-03/04` 记录过 2026-11-08（Windows）一次**点击 → TITLE** 的完整读数（151M 条重载帧），
+  所以"点不动"至少是 2026-11-09 macOS 上的现象，⛔ 不要写成"这个按钮永远点不动"。
 - **现象**：把光标移到右下角「戻る」（约 `1200..1272 × 652..711`，框内均值 `0xB6957E`）⇒ 画面**会**变（按钮高亮，hash `0x96E5…` → `0xF13F…`）；但在同一位置点击 / 长按 4 s 再抬 / 双击，画面**一次都不再变**，也不产生任何停因。同一次运行里点 CG 鑑賞（`1100,150`）有效、TITLE 上点 OPTION（`812,622`）有效。
 - **根因**：待查。已知排除项：① 光标与命中测试在工作（hover 会换高亮）；② 注入的按钮电平在工作（`GetAsyncKeyState` 走同一份影子状态，且 `click-release … waited_samples=3` 说明 guest 采到过）；③ 不是"房间不吃输入"（CG 鑑賞 有效、ESC 有效）。⇒ 怀疑方向：该按钮走的是另一条读点（例如只在某个定时器回调里轮询），或命中区与绘制区不同。
 - **读数（2026-11-09，同机）**：三次独立运行（纯 click / move 后 click / `mouse_down` 4 s 后 `mouse_up`），房间帧 hash 稳定在 `0xF13F23F24EEEE636`（hover 态）不变。

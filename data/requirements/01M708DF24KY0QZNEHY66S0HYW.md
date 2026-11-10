@@ -1,4 +1,4 @@
-# 修 EU-ROOM 退出的 C++ EH 展开：RaiseException / RtlUnwind 未实现 ⇒ Command_Exit_Exception 一抛就停
+# 修退出游戏的 C++ EH 展开（ESC / 关窗）：RaiseException / RtlUnwind 未实现 ⇒ Command_Exit_Exception 一抛就停
 
 - id: REQ-01M708DF24KY0QZNEHY66S0HYW
 - type: bug
@@ -7,13 +7,13 @@
 - verify: apps/emulator-lift/tests/seh.cpp#seh/B-unhandled-is-loud
 - repro: apps/emulator-lift/src/shims/kernel32_bootstrap.cpp#RaiseException
 - severity: S2
-- done_reason: SEH 派发机制落地并真机跑通：新 runtime/seh.{h,cpp}（RaiseException/RtlUnwind 状态机：guest 栈铺 EXCEPTION_RECORD/CONTEXT/DISPATCHER_CONTEXT + 宿主深拷贝、沿 fs:[0] 调 handler、EAX=0/1/2 三种 disposition、链走到底 ⇒ UnhandledException 响亮停；RtlUnwind 置 flags|=2、收口 fs:[0]、TargetIp!=0 按 call 前+0x10 跳走）；块边界 pumpSeh 接线；影子栈 dropFramesBelowEsp。真机 trace：RaiseException → handler 0x513B90 → RtlUnwind(TargetIp=0x4E706B) → 落 catch 0x41389A → WinMain 返回 → guest ExitProcess。守卫 seh A/B/C/D 59 断言 + dispatch cld/std 两组，变异 2 条实测红，ctest 74/74。判据修订：ESC 是退出游戏不是回 TITLE ⇒ room-exit.graph 的 exit 0 移交新子单（终态口径）。设计更正：catch 转移走 handler 自己的 _JumpToContinuation，不是 disposition=1 装 CONTEXT。
+- done_reason: SEH 派发机制落地并真机跑通：新 runtime/seh.{h,cpp}（RaiseException/RtlUnwind 状态机：guest 栈铺 EXCEPTION_RECORD/CONTEXT/DISPATCHER_CONTEXT + 宿主深拷贝、沿 fs:[0] 调 handler、EAX=0/1/2 三种 disposition、链走到底 ⇒ UnhandledException 响亮停；RtlUnwind 置 flags|=2、收口 fs:[0]、TargetIp!=0 按 call 前+0x10 跳走）；块边界 pumpSeh 接线；影子栈 dropFramesBelowEsp。真机 trace：RaiseException → handler 0x513B90 → RtlUnwind(TargetIp=0x4E706B) → 落 catch 0x41389A → WinMain 返回 → guest ExitProcess。守卫 seh A/B/C/D 59 断言 + dispatch cld/std 两组，变异 2 条实测红，ctest 74/74。判据修订：ESC 是退出游戏不是回 TITLE ⇒ room-exit.graph 的 exit 0 移交新子单（终态口径）。设计更正：catch 转移走 handler 自己的 _JumpToContinuation，不是 disposition=1 装 CONTEXT。归属已确认（spike REQ-01M71P87BMTZK4MHT8468BMC3G）：本单修的是退出链（ESC/关窗），不是出房间链。
 - tags: [emulator-lift, seh, exception]
 
 ## 判据（存在性 + 观察）
 
-**现象**：`EU-ROOM` 点「戻る」/ 按 ESC 走退出路径时，`room-exit.graph` 停在
-`stop: stopped @ eip=004123C4` / `detail: unimplemented kernel32!RaiseException`，没有 `task done`。
+**现象**：在 `EU-ROOM` 里按 ESC（或任何界面关窗）走退出路径时，`room-exit.graph` 停在 `stop: stopped @ eip=004123C4` /
+`detail: unimplemented kernel32!RaiseException`，没有 `task done`。（2026-11-10 归属确认：这是**退出游戏（关窗）**，不是"点「戻る」回 TITLE"。）
 
 **根因（已取证）**：`0x4123C4` 是 `__CxxThrowException(Command_Exit_Exception)` 的调用点；CRT **静态链接**（`_CxxThrowException`=0x4E8A6E、
 `___CxxFrameHandler3`=0x4E7094 都在镜像内）⇒ 宿主**不需要**写 C++ EH 展开器，缺的只有两个 OS 原语：
@@ -57,18 +57,20 @@
   `[seh] handler 0x00513B90 弃帧 ⇒ 派发结束，落到 eip=0x0041389A esp=0x6FFFF320` ⇒ 之后 `stop: stopped`、`detail: shim 主动结束运行：kernel32!ExitProcess`。
   ⇒ **SEH 这条链完整跑通**（不再停 `0x4E7123C4`/`0x4E709D`）。
 
+## 归属确认（2026-11-10，spike `REQ-01M71P87BMTZK4MHT8468BMC3G`）
+
+- `0x4123C4` **只**可能是"主循环取到 WM_QUIT"（`0x412391 GetMessageA` → `0x412399 jnz`）；引擎侧 WM_QUIT 的唯一来源是
+  WM_CLOSE（ESC 在 `0x4B9367` 起被无条件转成关闭消息）→ `DestroyWindow`（`0x4B967B`）→ WM_DESTROY → `PostQuitMessage(0)`（`0x4B9691`）。
+- ⇒ **本单修的是"退出游戏（关窗）"的 SEH**；"它是 EU-ROOM 退出的前置"**不成立**（已从标题 / 正文改掉）。
+- 真机复跑（2026-11-10，macOS arm64）：`PostQuitMessage(0)` → `"Destroyed"` → `"Exit"` → `RaiseException`/`ExitProcess`；`key_up` 的 `samples=0`。
+
 ## 判据修订（父级裁决，2026-11-10）
 
-**ESC 不是"回 TITLE"，是"退出游戏"**：`GetMessageA` 返回 0（WM_QUIT）→ `Command_Exit_Exception` → catch → `_WinMain@16` 返回 → guest 自己调 `ExitProcess`。
-所以 `room-exit.graph` 的 `back` 节点（等 TITLE hash）**永远等不到** ⇒ exit 5 是**交互图的口径问题**，不是 SEH 缺陷（`--skip-logo` 下也不适用）。
+**ESC 不是"回 TITLE"，是"退出游戏"**（已由上面的归属确认钉死）：`GetMessageA` 返回 0（WM_QUIT）→ `Command_Exit_Exception` → catch →
+`_WinMain@16` 返回 → guest 调 `ExitProcess`。所以 `room-exit.graph` 的 `back` 节点（等 TITLE hash）**永远等不到** ⇒ exit 5 是**交互图的口径问题**，不是 SEH 缺陷。
 
 ⇒ 本单的验收拆成两层：**机制级留在本单**（上面那条真机 trace + 夹具）；**终态级移到子单"room-exit 的终态判据"**
 （要么走「戻る」`REQ-01M6ZDSPVYS3R78TK8TFKVBC8N`，要么改图的终态口径）。⛔ 不许为了凑 `exit 0` 改 `room-exit.graph` 或业务逻辑。
-
-★★ **归属待核（用户 2026-11-10 提出，父级承认这个怀疑站得住）**：那次真机的 throw **可能根本不属于"EU-ROOM 退出"**，
-而是我们注入的 ESC / 坐标点击落到了后面的 `Quit`（abort）—— `GetMessageA` 返回 0 正是"退出消息循环"，回上一屏没有理由抛异常。
-⇒ 见 spike 单 `REQ-01M71P87BMTZK4MHT8468BMC3G`。**本单的"机制成立"不受影响**（`RaiseException`/`RtlUnwind` 原本确是桩、实现后确实跑通），
-但"**它是 EU-ROOM 退出的前置**"这句话**待核**；在 spike 出结论前，⛔ 不要把本单当成"出房间"的前置引用。
 
 ## 明确不做
 

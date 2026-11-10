@@ -18,9 +18,11 @@
   `stop: stopped` / `detail: shim 主动结束运行：kernel32!ExitProcess`。
 - 交互图侧：`node room done` / `node back enter frame=49` 之后再没有 Present ⇒ `back` 的 `when screen hash`（等 TITLE）没机会命中 ⇒ **exit 5**。
 - ⇒ **ESC = "退出游戏"**（WM_QUIT → `Command_Exit_Exception` → catch → 进程退出），不是"回 TITLE"。这与设计一致（catch 体就是收尾 + 返回 WinMain）。
-- ★ **但"这是 EU-ROOM 退出"这件事本身待核**（用户 2026-11-10 提出）：极可能是注入的 ESC/坐标点击落到了 `Quit`（abort）这条路上，
-  而我们**从未真正点中过「戻る」**（`REQ-01M6ZDSPVYS3R78TK8TFKVBC8N` 仍 open）。⇒ 见 spike 单 `REQ-01M71P87BMTZK4MHT8468BMC3G`。
-  ⛔ 在该 spike 出结论前，本单的"终态判据"**不要**被当成"EU-ROOM 退出的判据"引用。
+- ★ **已确认（2026-11-10，spike `REQ-01M71P87BMTZK4MHT8468BMC3G`）**：这条 ESC 是**退出游戏（关窗）**，不是"EU-ROOM 退出"。
+  `0x4123C4` 只在 `GetMessageA` 返回 0 时抛；引擎侧 WM_QUIT 的唯一来源是 `WM_CLOSE`（ESC 在 `0x4B9367` 被无条件转成关闭消息）→
+  `DestroyWindow`（`0x4B967B`）→ WM_DESTROY → `PostQuitMessage(0)`（`0x4B9691`）。⇒ 本单的"终态判据"**不是**"EU-ROOM 退出的判据"；
+  出房间的终态仍等 `REQ-01M6ZDSPVYS3R78TK8TFKVBC8N`（戻る 点击）。★ "从未真正点中过戻る"这句不准确：`OBS-20261108-03/04`
+  有 2026-11-08（Windows）点击 → TITLE 的读数；今天 macOS 点不动是 BUG-16。
 
 ## 要裁的两条路（父级尚未裁）
 

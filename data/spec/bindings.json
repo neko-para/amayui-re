@@ -11709,12 +11709,24 @@
           "what": "窗口过程：销毁消息 ⇒ PostQuitMessage(0)"
         },
         {
+          "ea": "0x4b9367",
+          "what": "窗口过程：按键消息的键是 ESC ⇒ 进入关闭请求分支"
+        },
+        {
+          "ea": "0x4b9373",
+          "what": "窗口过程：ESC ⇒ PostMessageA(关闭消息, wParam=0, lParam=0)"
+        },
+        {
           "ea": "0x4b9674",
           "what": "窗口过程：关闭消息 ⇒ KillTimer(标识 2)"
         },
         {
           "ea": "0x4b967b",
           "what": "窗口过程：关闭消息 ⇒ DestroyWindow"
+        },
+        {
+          "ea": "0x4b95ff",
+          "what": "窗口过程：关闭消息（wParam≠1）⇒ 走关闭前处理（返回值 0 ⇒ 不销毁窗口）"
         },
         {
           "ea": "0x4b9bbb",

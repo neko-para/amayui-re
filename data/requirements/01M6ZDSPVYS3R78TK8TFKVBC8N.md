@@ -7,15 +7,6 @@
 - repro: docs/03-emulator/defects.md#BUG-16
 - tags: [emulator-lift, input]
 
-# 🐞S3 emulator-lift · EU-ROOM 的「戻る」按钮对注入点击无反应（hover 有效、ESC 有效）
-
-- id: REQ-01M6ZDSPVYS3R78TK8TFKVBC8N
-- type: bug
-- status: open
-- parent: REQ-01M3TC7BK0J9TBQKGGWQ35A3NR
-- repro: docs/03-emulator/defects.md#BUG-16
-- tags: [emulator-lift, input]
-
 ## 现象
 
 `EU-ROOM` 右下角「戻る」按钮（约 `1200..1272 × 652..711`，框内均值 `0xB6957E`）对**注入点击没有反应**：
@@ -67,7 +58,9 @@
   "DOWN/UP 同一次采样"（ClickOnUp=1 + 电平每帧置位）、消息没送到（其它按钮同路径有效）。
 - 剩余候选（按代价）：C1 命中区 ≠ 绘制区（一次 run 点 5 个点）；C2 该按钮在房间顶层不是点击目标（先点 CG 鑑賞 1100,150 再点它）；
   C3 被 `+0x1E70` 吞一次（同一 run 连点两次）；C4 另一读点 / 定时器（`--trace-shims --log-cat shim --log-level info` 抓 SetTimer/KillTimer/SetCursor）。
-- **探针判据要改**：原先"停在 `0x4A4F8D`（LockRect）"已不成立（后缓冲 LockRect 已收口）。今天点中「戻る」会走退出路径，
-  在 C++ EH 修复前表现为停在 `0x4123C4`（`RaiseException`，见 `REQ-01M708DF24KY0QZNEHY66S0HYW`）；EH 修好后表现为 `task done`。
+- **探针判据要改**：原先"停在 `0x4A4F8D`（LockRect）"已不成立（后缓冲 LockRect 已收口）。★ 但"点中「戻る」会走退出路径"
+  **是错的**（2026-11-10 spike `REQ-01M71P87BMTZK4MHT8468BMC3G` 已确认）：退出路径（ESC / 关窗）走 `0x4B9367` → WM_CLOSE →
+  DestroyWindow → WM_DESTROY → PostQuitMessage → `0x4123C4`，与「戻る」无关。点中「戻る」的期望是**回 TITLE**
+  （`OBS-20261108-03/04` 有一次点击 → TITLE 的读数），判据仍是 `room-exit.graph` 的 `exit 0 + task done`（终态 = TITLE 稳定帧 hash）。
   修复形状：C1 ⇒ 只校正 room 节点的 `screen rect`（`click center` 不动）；C2/C3 需裁决。
 - 分析全文 `.tmp/reveq/01M6XVYY5TCKSAS80WS7PADF8P/analysis.md`（**不入库**；卡点 2 部分）。
