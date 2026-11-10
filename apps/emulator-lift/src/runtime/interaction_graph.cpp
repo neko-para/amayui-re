@@ -171,19 +171,6 @@ const char* condKindName(CondKind k) {
     return "?";
 }
 
-const char* graphActionKindName(GraphActionKind k) {
-    switch (k) {
-        case GraphActionKind::Click: return "click";
-        case GraphActionKind::ClickCenter: return "click center";
-        case GraphActionKind::Key: return "key";
-        case GraphActionKind::Wait: return "wait";
-        case GraphActionKind::ProfileBegin: return "profile_begin";
-        case GraphActionKind::ProfileEnd: return "profile_end";
-        case GraphActionKind::Quit: return "quit";
-    }
-    return "?";
-}
-
 const char* graphFailureName(GraphFailure f) {
     switch (f) {
         case GraphFailure::None: return "none";
@@ -228,6 +215,102 @@ bool condHolds(const GraphCond& c, const FrameSampler& sampler, std::uint64_t sa
 
 namespace {
 
+// ---- `CondKind` / `GraphActionKind` 的分类谓词 ------------------------------------------
+// 每个谓词只回答"这一类值在某个落点上要不要做某事"（要产框 / 要登记矩形 / 要盯整帧 /
+// expect 是否必须等新样本 / 动作要不要框 / 动作是否一发即收口）。
+// ★ 为什么是**不带 `default:` 的 `switch`**：这些判断原先散在 6 处 `if (k == X || k == Y)` 里，
+//   加一个枚举值而忘了表态**不会红**（静默漏改）。本工程开着 `-Wall -Wextra -Werror`（MSVC 侧
+//   `/W4 /WX`）⇒ 写成穷举 `switch` 后，漏一个 case 就是**编译错误**。
+// ⛔ 不许补 `default:`，也不许拆回 `if` —— 那会把这里唯一的完备性护栏关掉。
+// ⛔ 也不要升级成"一张每 kind 一行的表"：表是另一层东西（需求单已判不建表，理由见 `design-notes`
+//   的 `L3-graphfmt-01` 与需求单的裁决记录）。
+
+// `when` 命中时是否**产出框**（`click center` 的唯一坐标来源）。
+bool condYieldsBox(CondKind k) {
+    switch (k) {
+        case CondKind::ScreenRect: return true;
+        case CondKind::Always:
+        case CondKind::ScreenHash:
+        case CondKind::ScreenChanged:
+        case CondKind::Script: return false;
+    }
+    return false;
+}
+
+// 是否要在采样器里**登记矩形**（不登记 ⇒ 判定时 `rect_index` 恒 -1 ⇒ 永不命中）。
+bool condNeedsRectBinding(CondKind k) {
+    switch (k) {
+        case CondKind::ScreenRect: return true;
+        case CondKind::Always:
+        case CondKind::ScreenHash:
+        case CondKind::ScreenChanged:
+        case CondKind::Script: return false;
+    }
+    return false;
+}
+
+// 是否要 `setWatchFrame(true)`：这张图用不用整帧量（整帧 hash 由 Present 无条件算，这只是记账）。
+// 是否要 `setWatchFrame(true)`：这张图用不用整帧量（整帧 hash 由 Present 无条件算，这只是记账）。
+// ⚠ 今天这一格**不可观测**：`watchFrame()` / `watchesAnything()` 全仓 0 调用者 ⇒ 写反了不会有任何
+//   行为差异、也不会有用例红。保留它是因为 `FrameSampler::setWatchFrame` 的记账口径属于采样器
+//   （`machine.cpp` 另有一处写它），**不是**本文件的判据。
+bool condNeedsFrameWatch(CondKind k) {
+    switch (k) {
+        case CondKind::ScreenHash:
+        case CondKind::ScreenChanged: return true;
+        case CondKind::Always:
+        case CondKind::ScreenRect:
+        case CondKind::Script: return false;
+    }
+    return false;
+}
+
+// `expect` 是否**必须**等到动作之后的新样本（见 `expectMayMatch` 的理由）。
+bool condNeedsNewSample(CondKind k) {
+    switch (k) {
+        case CondKind::Always:
+        case CondKind::ScreenChanged: return false;  // 纯推进 / 计数型：不要求新样本
+        case CondKind::ScreenHash:
+        case CondKind::ScreenRect: return true;
+        case CondKind::Script:
+            // ⚠ 今天**不可达**（解析期就拒绝）。这一格刻意沿用"要新样本"，只是为了**保持今天的行为**：
+            //   真落地 `when script` 时它很可能必须改成 false —— 脚本源的判据是 **marker 边沿计数**，
+            //   不是 `sampleCount()`（房间空闲时帧会停、Present 计数不涨 ⇒ 等"新样本"等于永远不成立，
+            //   正是 `interaction-model.md` §5 那个坑）。⛔ 不要照抄这一格。
+            return true;
+    }
+    return false;
+}
+
+// 这个动作是否需要 `when` 产出的框（今天只有 `click center`）。
+bool actionNeedsBox(GraphActionKind k) {
+    switch (k) {
+        case GraphActionKind::ClickCenter: return true;
+        case GraphActionKind::Click:
+        case GraphActionKind::Key:
+        case GraphActionKind::Wait:
+        case GraphActionKind::ProfileBegin:
+        case GraphActionKind::ProfileEnd:
+        case GraphActionKind::Quit: return false;
+    }
+    return false;
+}
+
+// 这个动作**一发出去就等于任务收口**（`quit`）：`issueAction` 要立刻记"已应用 + 完成"，
+// 不等 actuator 的 applied 计数（`Machine::run` 在同一个块边界就会停 ⇒ 状态机没有下一次推进）。
+bool actionFinishesTask(GraphActionKind k) {
+    switch (k) {
+        case GraphActionKind::Quit: return true;
+        case GraphActionKind::Click:
+        case GraphActionKind::ClickCenter:
+        case GraphActionKind::Key:
+        case GraphActionKind::Wait:
+        case GraphActionKind::ProfileBegin:
+        case GraphActionKind::ProfileEnd: return false;
+    }
+    return false;
+}
+
 // 只看文件名：trace 是**可 diff** 的产物（真源 §4），⛔ 不能把宿主的 checkout 路径写进去
 // （换一台机器 / 换一个目录就不同 ⇒ 同一路径的两次运行 diff 出差异）。
 std::string baseNameOf(const std::string& p) {
@@ -239,7 +322,7 @@ std::string baseNameOf(const std::string& p) {
 // **新样本**才允许命中 —— 否则"动作前的旧样本本来就等于目标值"会让 expect 恒真（`screen changed`
 // 与 `always` 不受这条限制：前者本来就按计数判，后者是纯推进）。
 bool expectMayMatch(const GraphCond& c, const FrameSampler& sampler, std::uint64_t samples_at_start) {
-    if (c.kind == CondKind::Always || c.kind == CondKind::ScreenChanged) return true;
+    if (!condNeedsNewSample(c.kind)) return true;
     return sampler.sampleCount() > samples_at_start;
 }
 
@@ -272,20 +355,23 @@ bool InteractionGraph::loadText(const std::string& text, const std::string& orig
     };
 
     // ---- 条件项（`when` / `expect` 共用）：tokens[0] 是键名 ----
-    auto parseCond = [&](const std::vector<std::string>& tok, int ln, GraphCond* out) -> bool {
+    // ★ 分两段：① 词 → kind（**本文件唯一允许的手写字符串分派**；未知词必须带行号响亮报错）；
+    //   ② `switch (kind)` 落值 / 校验元数（**不带 `default:`** ⇒ 加一个 `CondKind` 而忘了在这里
+    //   处理它的词数 = 编译期红）。⛔ 不要把这两段合回一串 `if (head == …)`：那就又变成"漏了不红"。
+    // ⚠ 报错串的口径**刻意不统一**（不是笔误）：`key` / `head` 是小写化的，而"未知条件" /
+    //   "未知的 screen 条件"用**原文** token ⇒ 人写 `FOO` 时能在报错里看到 `FOO`。
+    //   ⛔ 不要"顺手统一规范化"：现有测试与三份真图全是小写，改成小写化**没有任何用例会红**。
+    auto condKindFrom = [&](const std::vector<std::string>& tok, int ln, CondKind* out) -> bool {
         const std::string key = lowerCopy(tok[0]);
         const std::string head = tok.size() > 1 ? lowerCopy(tok[1]) : std::string();
         if (head.empty()) return failAt(ln, "`" + key + "` 后面没有条件（只认 always / screen … / script …）");
         if (head == "always") {
-            if (tok.size() != 2) return failAt(ln, "`always` 不带参数");
-            out->kind = CondKind::Always;
-            out->text = "always";
+            *out = CondKind::Always;
             return true;
         }
         if (head == "script") {
-            // ⛔ 不静默退化成 always（真源 §6：引擎脚本身份源未实现）。
-            return failAt(ln, "`script` 条件今天不可用：见 interaction-model.md §6（未实现的识别源，"
-                              "解析期拒绝而不是退化成 always）");
+            *out = CondKind::Script;
+            return true;
         }
         if (head != "screen") {
             return failAt(ln, "未知条件：" + tok[1] +
@@ -294,52 +380,77 @@ bool InteractionGraph::loadText(const std::string& text, const std::string& orig
         if (tok.size() < 3) return failAt(ln, "`screen` 后面要写 hash / rect / changed");
         const std::string sub = lowerCopy(tok[2]);
         if (sub == "changed") {
-            if (tok.size() != 3) return failAt(ln, "`screen changed` 不带参数");
-            out->kind = CondKind::ScreenChanged;
-            out->text = "screen changed";
+            *out = CondKind::ScreenChanged;
             return true;
         }
         if (sub == "hash") {
-            if (tok.size() != 4) return failAt(ln, "`screen hash` 需要一个指纹（0x 十六进制，最多 16 位）");
-            std::uint64_t hash = 0;
-            if (!parseUnsigned(tok[3], &hash)) return failAt(ln, "不是合法数字：" + tok[3]);
-            out->kind = CondKind::ScreenHash;
-            out->hash = hash;
-            out->text = "screen hash " + hex64(hash);
+            *out = CondKind::ScreenHash;
             return true;
         }
         if (sub == "rect") {
-            // when screen rect <x> <y> <w> <h> avg <0xRRGGBB>
-            if (tok.size() != 9) {
-                return failAt(ln, "`screen rect` 需要 `x y w h avg 0xRRGGBB` 六个词（收到 " +
-                                      std::to_string(tok.size() - 3) + " 个）");
-            }
-            std::int32_t x = 0;
-            std::int32_t y = 0;
-            std::int32_t w = 0;
-            std::int32_t h = 0;
-            if (!parseInt32(tok[3], &x) || !parseInt32(tok[4], &y) || !parseInt32(tok[5], &w) ||
-                !parseInt32(tok[6], &h)) {
-                return failAt(ln, "矩形坐标 / 尺寸不是合法数字");
-            }
-            if (w <= 0 || h <= 0) return failAt(ln, "矩形宽高必须为正（w>0, h>0）");
-            if (lowerCopy(tok[7]) != "avg") {
-                return failAt(ln, "`screen rect` 的第五个量必须是 `avg`（收到 " + tok[7] + "）");
-            }
-            std::uint64_t rgb = 0;
-            if (!parseUnsigned(tok[8], &rgb)) return failAt(ln, "不是合法数字：" + tok[8]);
-            if (rgb > 0xFFFFFFull) return failAt(ln, "均值必须是 0xRRGGBB（收到 " + tok[8] + "）");
-            out->kind = CondKind::ScreenRect;
-            out->rect.x = x;
-            out->rect.y = y;
-            out->rect.w = w;
-            out->rect.h = h;
-            out->avg_rgb = static_cast<std::uint32_t>(rgb);
-            out->text = "screen rect " + std::to_string(x) + " " + std::to_string(y) + " " +
-                        std::to_string(w) + " " + std::to_string(h) + " avg " + hexRgb(out->avg_rgb);
+            *out = CondKind::ScreenRect;
             return true;
         }
         return failAt(ln, "未知的 screen 条件：" + tok[2] + "（只认 hash / rect / changed）");
+    };
+
+    auto parseCond = [&](const std::vector<std::string>& tok, int ln, GraphCond* out) -> bool {
+        CondKind kind = CondKind::Always;
+        if (!condKindFrom(tok, ln, &kind)) return false;
+        out->kind = kind;
+        switch (kind) {
+            case CondKind::Always:
+                if (tok.size() != 2) return failAt(ln, "`always` 不带参数");
+                out->text = "always";
+                return true;
+            case CondKind::Script:
+                // ⛔ 不静默退化成 always（真源 §6：引擎脚本身份源未实现）。
+                return failAt(ln, "`script` 条件今天不可用：见 interaction-model.md §6（未实现的识别源，"
+                                  "解析期拒绝而不是退化成 always）");
+            case CondKind::ScreenChanged:
+                if (tok.size() != 3) return failAt(ln, "`screen changed` 不带参数");
+                out->text = "screen changed";
+                return true;
+            case CondKind::ScreenHash: {
+                if (tok.size() != 4) return failAt(ln, "`screen hash` 需要一个指纹（0x 十六进制，最多 16 位）");
+                std::uint64_t hash = 0;
+                if (!parseUnsigned(tok[3], &hash)) return failAt(ln, "不是合法数字：" + tok[3]);
+                out->hash = hash;
+                out->text = "screen hash " + hex64(hash);
+                return true;
+            }
+            case CondKind::ScreenRect: {
+                // when screen rect <x> <y> <w> <h> avg <0xRRGGBB>
+                if (tok.size() != 9) {
+                    return failAt(ln, "`screen rect` 需要 `x y w h avg 0xRRGGBB` 六个词（收到 " +
+                                          std::to_string(tok.size() - 3) + " 个）");
+                }
+                std::int32_t x = 0;
+                std::int32_t y = 0;
+                std::int32_t w = 0;
+                std::int32_t h = 0;
+                if (!parseInt32(tok[3], &x) || !parseInt32(tok[4], &y) || !parseInt32(tok[5], &w) ||
+                    !parseInt32(tok[6], &h)) {
+                    return failAt(ln, "矩形坐标 / 尺寸不是合法数字");
+                }
+                if (w <= 0 || h <= 0) return failAt(ln, "矩形宽高必须为正（w>0, h>0）");
+                if (lowerCopy(tok[7]) != "avg") {
+                    return failAt(ln, "`screen rect` 的第五个量必须是 `avg`（收到 " + tok[7] + "）");
+                }
+                std::uint64_t rgb = 0;
+                if (!parseUnsigned(tok[8], &rgb)) return failAt(ln, "不是合法数字：" + tok[8]);
+                if (rgb > 0xFFFFFFull) return failAt(ln, "均值必须是 0xRRGGBB（收到 " + tok[8] + "）");
+                out->rect.x = x;
+                out->rect.y = y;
+                out->rect.w = w;
+                out->rect.h = h;
+                out->avg_rgb = static_cast<std::uint32_t>(rgb);
+                out->text = "screen rect " + std::to_string(x) + " " + std::to_string(y) + " " +
+                            std::to_string(w) + " " + std::to_string(h) + " avg " + hexRgb(out->avg_rgb);
+                return true;
+            }
+        }
+        return false;
     };
 
     // `click` 的按钮词：只收 `left` / `right`（省略 = left）。词表真源是
@@ -358,79 +469,113 @@ bool InteractionGraph::loadText(const std::string& text, const std::string& orig
     };
 
     // ---- 动作（闭集合）。`text` 由调用方填原始行（日志 / 报错定位）----
-    auto parseAction = [&](const std::vector<std::string>& tok, int ln, GraphAction* out) -> bool {
+    // ★ 与 `parseCond` 同形：① 词 → kind（唯一手写字符串分派）② `switch (kind)` 落值（无 `default:`）。
+    //   注意 `click` 的两条写法是**两个 kind**（`ClickCenter` 打命中框中心、`Click` 打固定点），
+    //   所以"是不是 center"这一步判在 ①（它是在**选 kind**，不是在落值）。
+    auto actionKindFrom = [&](const std::vector<std::string>& tok, int ln, GraphActionKind* out) -> bool {
         const std::string head = lowerCopy(tok[0]);
         if (head == "click") {
-            // `click center [left|right]`（2–3 个词）或 `click <x> <y> [left|right]`（3–4 个词）。
-            // ★ 按钮词收进来，`hold` 仍不收 —— 两者不是同一类东西：
-            //   · 按钮 = **输入目标**：换个按钮再点一次，同一张图多一条同构节点就够了，
-            //     发到时间线也只是那行多一个词（`click x y right`）；
-            //   · `hold` = **时序语义**：按下与抬起之间隔多久。图只在块边界上"发一次动作"，
-            //     抬起由注入层的自动 hold 决定（`input_script.h`）；把 hold 收进图里等于把时间线
-            //     的时序旋钮搬进来，而图的语法是时间线的**真子集**（真源 §1）。
-            const bool center = tok.size() >= 2 && lowerCopy(tok[1]) == "center";
-            const std::size_t base = center ? 2u : 3u;  // 不带按钮词时的词数
-            if (tok.size() != base && tok.size() != base + 1) {
-                return failAt(ln, "`click` 需要 `X Y` 或 `center`，后面可选按钮词 `left|right`"
-                                  "（⛔ 不猜坐标、也不收 hold）");
-            }
-            MouseButton button = MouseButton::Left;  // 省略按钮词 = left（= `GraphAction::button` 的缺省值）
-            if (tok.size() == base + 1 && !parseButtonWord(tok[base], ln, &button)) return false;
-            if (center) {
-                out->kind = GraphActionKind::ClickCenter;
-            } else {
-                std::int32_t x = 0;
-                std::int32_t y = 0;
-                if (!parseInt32(tok[1], &x) || !parseInt32(tok[2], &y)) {
-                    return failAt(ln, "坐标不是合法数字");
-                }
-                out->kind = GraphActionKind::Click;
-                out->x = x;
-                out->y = y;
-            }
-            out->button = button;
+            *out = (tok.size() >= 2 && lowerCopy(tok[1]) == "center") ? GraphActionKind::ClickCenter
+                                                                     : GraphActionKind::Click;
             return true;
         }
         if (head == "key") {
-            if (tok.size() != 2) return failAt(ln, "`key` 需要一个 VK（1..255）");
-            std::uint64_t vk = 0;
-            if (!parseUnsigned(tok[1], &vk)) return failAt(ln, "不是合法数字：" + tok[1]);
-            if (vk == 0 || vk > 255) return failAt(ln, "VK 必须是 1..255（收到 " + tok[1] + "）");
-            out->kind = GraphActionKind::Key;
-            out->vk = static_cast<std::uint32_t>(vk);
+            *out = GraphActionKind::Key;
             return true;
         }
         if (head == "wait") {
-            if (tok.size() != 3) return failAt(ln, "`wait` 需要 `N frames|ms`");
-            std::uint64_t value = 0;
-            if (!parseUnsigned(tok[1], &value)) return failAt(ln, "不是合法数字：" + tok[1]);
-            const std::string unit = lowerCopy(tok[2]);
-            TriggerKind kind = TriggerKind::Frame;
-            if (unit == "frame" || unit == "frames") {
-                kind = TriggerKind::Frame;
-            } else if (unit == "ms" || unit == "guest_ms") {
-                kind = TriggerKind::GuestMs;
-            } else {
-                return failAt(ln, "`wait` 的单位只认 `frames` / `ms`（收到 " + tok[2] + "）");
-            }
-            out->kind = GraphActionKind::Wait;
-            out->wait_value = value;
-            out->wait_unit = kind;
+            *out = GraphActionKind::Wait;
             return true;
         }
-        if (head == "profile_begin" || head == "profile_end") {
-            if (tok.size() != 2) return failAt(ln, "`" + head + "` 需要一个 label（单个词）");
-            out->kind = head == "profile_begin" ? GraphActionKind::ProfileBegin : GraphActionKind::ProfileEnd;
-            out->label = tok[1];
+        if (head == "profile_begin") {
+            *out = GraphActionKind::ProfileBegin;
+            return true;
+        }
+        if (head == "profile_end") {
+            *out = GraphActionKind::ProfileEnd;
             return true;
         }
         if (head == "quit" || head == "exit") {
-            if (tok.size() != 1) return failAt(ln, "`quit` 不带参数");
-            out->kind = GraphActionKind::Quit;
+            *out = GraphActionKind::Quit;
             return true;
         }
         return failAt(ln, "未知动作：" + tok[0] +
                               "（只认 click / key / wait / profile_begin / profile_end / quit）");
+    };
+
+    auto parseAction = [&](const std::vector<std::string>& tok, int ln, GraphAction* out) -> bool {
+        GraphActionKind kind = GraphActionKind::Quit;
+        if (!actionKindFrom(tok, ln, &kind)) return false;
+        out->kind = kind;
+        switch (kind) {
+            case GraphActionKind::Click:
+            case GraphActionKind::ClickCenter: {
+                // `click center [left|right]`（2–3 个词）或 `click <x> <y> [left|right]`（3–4 个词）。
+                // ★ 按钮词收进来，`hold` 仍不收 —— 两者不是同一类东西：
+                //   · 按钮 = **输入目标**：换个按钮再点一次，同一张图多一条同构节点就够了，
+                //     发到时间线也只是那行多一个词（`click x y right`）；
+                //   · `hold` = **时序语义**：按下与抬起之间隔多久。图只在块边界上"发一次动作"，
+                //     抬起由注入层的自动 hold 决定（`input_script.h`）；把 hold 收进图里等于把时间线
+                //     的时序旋钮搬进来，而图的语法是时间线的**真子集**（真源 §1）。
+                const bool center = kind == GraphActionKind::ClickCenter;
+                const std::size_t base = center ? 2u : 3u;  // 不带按钮词时的词数
+                if (tok.size() != base && tok.size() != base + 1) {
+                    return failAt(ln, "`click` 需要 `X Y` 或 `center`，后面可选按钮词 `left|right`"
+                                      "（⛔ 不猜坐标、也不收 hold）");
+                }
+                MouseButton button = MouseButton::Left;  // 省略按钮词 = left（= `GraphAction::button` 的缺省值）
+                if (tok.size() == base + 1 && !parseButtonWord(tok[base], ln, &button)) return false;
+                if (!center) {
+                    std::int32_t x = 0;
+                    std::int32_t y = 0;
+                    if (!parseInt32(tok[1], &x) || !parseInt32(tok[2], &y)) {
+                        return failAt(ln, "坐标不是合法数字");
+                    }
+                    out->x = x;
+                    out->y = y;
+                }
+                out->button = button;
+                return true;
+            }
+            case GraphActionKind::Key: {
+                if (tok.size() != 2) return failAt(ln, "`key` 需要一个 VK（1..255）");
+                std::uint64_t vk = 0;
+                if (!parseUnsigned(tok[1], &vk)) return failAt(ln, "不是合法数字：" + tok[1]);
+                if (vk == 0 || vk > 255) return failAt(ln, "VK 必须是 1..255（收到 " + tok[1] + "）");
+                out->vk = static_cast<std::uint32_t>(vk);
+                return true;
+            }
+            case GraphActionKind::Wait: {
+                if (tok.size() != 3) return failAt(ln, "`wait` 需要 `N frames|ms`");
+                std::uint64_t value = 0;
+                if (!parseUnsigned(tok[1], &value)) return failAt(ln, "不是合法数字：" + tok[1]);
+                const std::string unit = lowerCopy(tok[2]);
+                TriggerKind unit_kind = TriggerKind::Frame;
+                if (unit == "frame" || unit == "frames") {
+                    unit_kind = TriggerKind::Frame;
+                } else if (unit == "ms" || unit == "guest_ms") {
+                    unit_kind = TriggerKind::GuestMs;
+                } else {
+                    return failAt(ln, "`wait` 的单位只认 `frames` / `ms`（收到 " + tok[2] + "）");
+                }
+                out->wait_value = value;
+                out->wait_unit = unit_kind;
+                return true;
+            }
+            case GraphActionKind::ProfileBegin:
+            case GraphActionKind::ProfileEnd: {
+                // ⚠ 报错串里的词与 `lowerCopy` 后的 head 等价（这两条只可能是小写词进来的）。
+                const char* word = kind == GraphActionKind::ProfileBegin ? "profile_begin" : "profile_end";
+                if (tok.size() != 2) return failAt(ln, std::string("`") + word + "` 需要一个 label（单个词）");
+                out->label = tok[1];
+                return true;
+            }
+            case GraphActionKind::Quit:
+                // ⚠ 串里写死 `quit`：`exit` 也走这条（今天就是这样，⛔ 不为"更准确"改字节）。
+                if (tok.size() != 1) return failAt(ln, "`quit` 不带参数");
+                return true;
+        }
+        return false;
     };
 
     // 块收尾：必填键齐了没有、`click center` 的坐标来源合不合法
@@ -441,7 +586,9 @@ bool InteractionGraph::loadText(const std::string& text, const std::string& orig
         if (b.when == 0) return failAt(b.node, "节点 `" + n.id + "` 缺 `when`（每个键恰好一次）");
         if (b.action == 0) return failAt(b.node, "节点 `" + n.id + "` 缺 `action`（每个键恰好一次）");
         if (b.next == 0) return failAt(b.node, "节点 `" + n.id + "` 缺 `next`（要到任务结束就写一个空的 `next`）");
-        if (n.action.kind == GraphActionKind::ClickCenter && n.when.kind != CondKind::ScreenRect) {
+        if (actionNeedsBox(n.action.kind) && !condYieldsBox(n.when.kind)) {
+            // ⚠ 报错串里写死 `click center`：今天只有它需要框。若将来出现第二个"要框的动作"，
+            //   这句要跟着泛化（⛔ 不要为了这个把 `actionNeedsBox` 拆回 if —— 见谓词处的理由）。
             return failAt(b.action, "`click center` 只在 `when screen rect …` 下合法（框中心是它唯一的坐标来源；"
                                     "本节点的 when 是 `" + n.when.text + "`）");
         }
@@ -632,7 +779,6 @@ void InteractionGraph::clear() {
     fail_quit_requested_ = false;
     rect_bindings_.clear();
     bound_ = false;
-    trace_watch_frame_ = false;
     trace_header_done_ = false;  // 新图重新开一份头（`trace_` 是调用方的汇，不清它）
     transitions_ = 0;
     actions_issued_ = 0;
@@ -659,7 +805,7 @@ void InteractionGraph::bindSampler(FrameSampler& sampler) {
     bool watch_frame = false;
     for (Node& n : nodes_) {
         auto bind = [&](GraphCond& c) {
-            if (c.kind == CondKind::ScreenRect) {
+            if (condNeedsRectBinding(c.kind)) {
                 c.rect_index = static_cast<int>(sampler.watchRect(c.rect));
                 bool known = false;
                 for (const RectBinding& b : rect_bindings_) {
@@ -672,7 +818,7 @@ void InteractionGraph::bindSampler(FrameSampler& sampler) {
                     rect_bindings_.push_back(b);
                 }
             }
-            if (c.kind == CondKind::ScreenHash || c.kind == CondKind::ScreenChanged) watch_frame = true;
+            if (condNeedsFrameWatch(c.kind)) watch_frame = true;
         };
         bind(n.when);
         if (n.has_expect) bind(n.expect);
@@ -680,7 +826,6 @@ void InteractionGraph::bindSampler(FrameSampler& sampler) {
     // ★ 整帧 hash 由 `HeadlessPresenter::present` **无条件**算（它同时是帧日志与 A4 的判据），
     //   所以 `setWatchFrame` 只是"这张图用不用它"的记账（报告 / 诊断用），⛔ 不是"打不打开采样"。
     sampler.setWatchFrame(watch_frame);
-    trace_watch_frame_ = sampler.watchFrame();
     bound_ = true;
 }
 
@@ -862,7 +1007,7 @@ bool InteractionGraph::issueAction(WindowManager& wm, std::uint64_t frame, std::
     issue_blocked_logged_ = false;
     applied_before_ = actuator_.appliedCount();
     ++actions_issued_;
-    if (n.action.kind == GraphActionKind::Quit) {
+    if (actionFinishesTask(n.action.kind)) {
         // ★ `quit` 的语义就是"这次运行到此为止"：⛔ 不要等 actuator 的 applied 计数 ——
         //   `Machine::run` 在**同一个块边界**就会看到 `quitRequested()` 停下来，状态机再没有
         //   机会推进 ⇒ trace 会停在 `when … hit`，读起来像"半截失败"（第一版实测就是这样）。
@@ -956,7 +1101,9 @@ void InteractionGraph::fail(GraphFailure kind, const std::string& why, const Gra
     r += "  rects    : " + u64s(rect_bindings_.size()) + " watched\n";
     for (const Node& nn : nodes_) {
         auto report = [&](const GraphCond& c) {
-            if (c.kind != CondKind::ScreenRect) return;
+            // ★ 判据问的是"**登记过矩形**的条件"，⛔ 不是"kind == ScreenRect"：两者今天恒等，
+            //   但 `script` 若将来也带一个框，报告要跟着它走（否则会少一行候选 / 打一行假候选）。
+            if (!condNeedsRectBinding(c.kind)) return;
             const bool bound = c.rect_index >= 0;
             const bool have = bound && static_cast<std::size_t>(c.rect_index) < fail_rects_.size();
             const RectSample& s = have ? fail_rects_[static_cast<std::size_t>(c.rect_index)] : RectSample{};
@@ -1048,7 +1195,7 @@ bool InteractionGraph::tick(WindowManager& wm, const FrameSampler& sampler, std:
             if (!hit_pending_) {
                 if (condHolds(n.when, sampler, samples_at_start_, changes_at_start_)) {
                     hit_pending_ = true;
-                    if (n.when.kind == CondKind::ScreenRect) {
+                    if (condYieldsBox(n.when.kind)) {
                         // ★ 命中框 = 本节点 `click center` 的唯一坐标来源。
                         box_ = n.when.rect;
                         have_box_ = true;

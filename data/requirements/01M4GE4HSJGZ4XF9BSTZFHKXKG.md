@@ -8,15 +8,6 @@
 - dropped_reason: 不是缺陷/不修：本机四份 AGERC 逐个实测都与清单一致（旧仓 install/ 与 patch/ = 6241de666d2f533b…、入库件 corpus/assets/agerc/AGERC.DLL 同、corpus validate #4 全绿），而 5f318955f605… 的真身是**另一条** binary/agerc-packed（root=gameInstall）的带壳原版；git show 16fbd0a:corpus/assets.json 显示该条自 init 起就是 install/AGERC.DLL + 6241de…，**从没记过 5f3189** ⇒ 不是 pin 指错，而是**跨机器 root 解析差异**（原始报告在 macOS，那里 oldRepo/gameInstall 解析到另一棵树）；真问题由 REQ-01M4FEFA9RRP5TKVWH351NV1RD（origin 与机器/平台绑定）跟踪。★ 边界：mac 侧**无法在本机验证**（本机是 win32，没有那两条 mac 绝对路径），"mac 上 install/AGERC.DLL 是 5f3189"只是推断而非直接观察；重开条件 = corpus validate #4 对该条目再报红。
 - tags: [corpus, release, assets]
 
-# `binary/agerc-modified-install` 的 sha256 pin 指向旧仓里的旧产物（5f3189…），与 v1.14 发布包/入库件的 6241de… 不符
-
-- id: REQ-01M4GE4HSJGZ4XF9BSTZFHKXKG
-- type: bug
-- status: dropped
-- parent: REQ-01M4FEF7VH1N0JDT5ZVPZS204M
-- repro: corpus/assets.json#binary/agerc-modified-install
-- tags: [corpus, release, assets]
-
 ## 现场（原始报告，2026-10）
 
 `pnpm tools corpus validate` 的 #4（校验和纪律）报红：

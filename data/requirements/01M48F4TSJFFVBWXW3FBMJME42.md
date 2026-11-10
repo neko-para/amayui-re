@@ -10,18 +10,6 @@
 - severity: S2
 - tags: [engine, emulator, ledger]
 
-# 🐞S2 local 池基址几何与旧仓说法不一致（`local_float` 的基址在 `帧+0x84`，不在 `+0x38`）
-
-- id: REQ-01M48F4TSJFFVBWXW3FBMJME42
-- type: bug
-- status: done
-- parent: REQ-01M48DJ3PK48CXQXAV1M3EEQNR
-- order: 13
-- tags: [engine, emulator, ledger]
-- severity: S2
-- repro: tools/test/emulator-model.test.mjs#★ local 池的 slot 几何
-- verify: tools/test/emulator-model.test.mjs#★ local_float 的基址在 `帧+0x84`
-
 ## 分歧与裁决
 * **旧仓口径**（`analysis/fields.json` ScriptContext）：基址 `帧+0x34..+0x48`（两组各 6 个、整齐对齐）。
 * **实测（已裁决）**：基址 **6 个但不整齐** = `{+0x34 int, +0x84 float, +0x3C string, +0x40 ptr, +0x44 floatPtr, +0x48 stringPtr}`；

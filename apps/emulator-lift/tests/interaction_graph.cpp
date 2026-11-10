@@ -368,6 +368,104 @@ int main() {
     }
 
     // =================================================================================
+    // ①b parse-uppercase-ok —— 大小写不敏感**不改变语义**：大写图与小写图解析成同一批字段
+    // ★ 为什么单列一条：报错串与 `text` 的口径是**刻意混着**的（键名 / 条件头小写化，未知词回显
+    //   **原文**，`action` 的 `text` 保留**原始词序**）。任何"顺手统一规范化"的重构都会改字节，
+    //   而其余用例与三份真图**全是小写** ⇒ 没有这条就静默通过。
+    // ⛔ 断言的是**契约**（大写输入 ⇒ 同一个 kind + 归一化后的 text），不是"当前取值"。
+    // =================================================================================
+    g_current_case = "parse-uppercase-ok";
+    {
+        lift::InteractionGraph g;
+        std::string err;
+        // ★ 大写覆盖**每一个**靠 `lowerCopy` 的词位：键名 / 条件头 / `screen` 子词 / `rect` 的 `avg`
+        //   / `click` 的 `right` / `wait` 的单位词 / `profile_begin` / `exit`（后者全仓只在这里出现）。
+        //   任何一处去掉 `lowerCopy` 都必须让本用例红 —— 漏一处就等于漏一个静默改坏的机会。
+        const bool ok = g.loadText(
+            "ENTRY A\n"
+            "NODE A\n"
+            "  WHEN SCREEN HASH 0xdeadbeef\n"
+            "  ACTION CLICK 10 20 RIGHT\n"
+            "  NEXT B\n"
+            "  TIMEOUT 1500\n"
+            "  EXPECT SCREEN CHANGED\n"
+            "node B\n"
+            "  WHEN SCREEN RECT 0 560 120 80 AVG 0x1B2B3C\n"
+            "  ACTION WAIT 3 FRAMES\n"
+            "  NEXT C\n"
+            "node C\n"
+            "  when ALWAYS\n"
+            "  action WAIT 30 MS\n"
+            "  next D\n"
+            "node D\n"
+            "  when always\n"
+            "  action PROFILE_BEGIN Boot\n"
+            "  next E\n"
+            "node E\n"
+            "  when always\n"
+            "  action EXIT\n"
+            "  next\n",
+            "up.graph", &err);
+        LIFT_CHECK(ok);
+        // ★ 解析失败 ⇒ **不要**往下索引：失败时 `nodes()` 是空的，`nodes()[i]` 是 UB
+        //   （实测：`screen rect … AVG` 那格坏掉时，旧写法把"一条断言红"变成 **SEGFAULT**，
+        //   连 `finish()` 的汇总行都打不出来）。⇒ 其余断言挂在 `else` 上。
+        if (!ok) {
+            std::fprintf(stderr, "  err = %s\n", err.c_str());
+        } else {
+            LIFT_CHECK(g.active());
+            LIFT_CHECK(g.nodes().size() == 5);
+            const lift::Node& a = g.nodes()[0];
+            LIFT_CHECK(a.when.kind == lift::CondKind::ScreenHash);
+            LIFT_CHECK(a.when.hash == 0xDEADBEEFull);
+            // 归一化：条件头一律小写 + hex 一律 `0x%016X`（trace 可 diff 的前提）
+            LIFT_CHECK(a.when.text == "screen hash 0x00000000DEADBEEF");
+            LIFT_CHECK(a.action.kind == lift::GraphActionKind::Click);
+            LIFT_CHECK(a.action.x == 10 && a.action.y == 20);
+            LIFT_CHECK(a.action.button == lift::MouseButton::Right);
+            // ⚠ `action` 的 `text` 是**原始词序**（trace 打 `action <text> applied`）⇒ 大写原样留着
+            LIFT_CHECK(a.action.text == "CLICK 10 20 RIGHT");
+            LIFT_CHECK(a.has_expect);
+            LIFT_CHECK(a.expect.kind == lift::CondKind::ScreenChanged);
+            LIFT_CHECK(a.expect.text == "screen changed");
+            LIFT_CHECK(a.timeout_ms == 1500 && a.timeout_explicit);
+            // `screen rect … AVG …`：子词与 `avg` 关键字都是大写进来的
+            const lift::Node& b = g.nodes()[1];
+            LIFT_CHECK(b.when.kind == lift::CondKind::ScreenRect);
+            LIFT_CHECK(b.when.rect.x == 0 && b.when.rect.y == 560);
+            LIFT_CHECK(b.when.rect.w == 120 && b.when.rect.h == 80);
+            LIFT_CHECK(b.when.avg_rgb == 0x1B2B3Cu);
+            LIFT_CHECK(b.when.text == "screen rect 0 560 120 80 avg 0x1B2B3C");
+            LIFT_CHECK(b.action.kind == lift::GraphActionKind::Wait);
+            LIFT_CHECK(b.action.wait_unit == lift::TriggerKind::Frame);
+            LIFT_CHECK(b.action.wait_value == 3);
+            // 单位词两个方向各一次：`MS` ⇒ GuestMs
+            LIFT_CHECK(g.nodes()[2].action.kind == lift::GraphActionKind::Wait);
+            LIFT_CHECK(g.nodes()[2].action.wait_unit == lift::TriggerKind::GuestMs);
+            LIFT_CHECK(g.nodes()[2].action.wait_value == 30);
+            // `PROFILE_BEGIN`：label 是**原样**的（不归一化）
+            LIFT_CHECK(g.nodes()[3].action.kind == lift::GraphActionKind::ProfileBegin);
+            LIFT_CHECK(g.nodes()[3].action.label == "Boot");
+            // `EXIT` 与 `quit` 同义（同一个 kind）
+            LIFT_CHECK(g.nodes()[4].action.kind == lift::GraphActionKind::Quit);
+            LIFT_CHECK(g.nodes()[4].next.empty());
+        }
+    }
+
+    // =================================================================================
+    // ①c parse-unknown-echoes-raw —— 未知词**原样回显**（大小写不被吞掉）
+    // ★ 三条分别走 `parseCond` / `parseAction` / 主循环的"未知"分支 —— 这三处的报错串用的是
+    //   **原文 token**，不是小写化后的词。改成小写化不会有别的用例红，但人就看不到自己写的是
+    //   `FOO` 还是 `foo` 了。
+    // =================================================================================
+    g_current_case = "parse-unknown-echoes-raw";
+    {
+        expectLoadError("entry a\nnode a\n  when SCREEN FOO\n  action quit\n  next\n", 3, "FOO");
+        expectLoadError("entry a\nnode a\n  when always\n  action JUMP\n  next\n", 4, "JUMP");
+        expectLoadError("entry a\nnode a\n  when always\n  action quit\n  next\n  RETRY 3\n", 6, "RETRY");
+    }
+
+    // =================================================================================
     // ②b parse-button-right —— 按钮词 `right` 必须落到 `GraphAction::button`
     // ★ 这条在"只收 `click center` / `click x y`"的旧解析器上必红（`click 10 20 right` 是 4 个词 ⇒
     //   旧码直接报错；`click center right` 旧码会把 `center` 当坐标解析失败）。

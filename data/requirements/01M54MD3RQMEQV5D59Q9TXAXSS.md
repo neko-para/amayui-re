@@ -8,15 +8,6 @@
 - done_reason: 这四条挂起项已全部裁定并写进正文。S2b 五项实测结论：offsetUnusable 漏无索引 lea 不成立（探针 acc=a abs=0x300）；claims 与 access 对 sub_43E9F0 的差异是显示口径（274 站点多在数据段符号桶，载体行统计的是 obj0 相对解释数）；lea 索引丢失未修但评估为不划算（132 处受影响，而修法要改 1213 处 lea 的抽象解释）因此改走 axis 标注；rep movsd 后寄存器未失效已修（守卫 ★access-05/★access-06 + 变异 123/123，解释 8439 降到 7644 即 795 处假解释，差额 795 加 5 等于 800 可逐类解释）；coverage 的 call reg 未测，延后理由：它只影响 coverage 视图的口径，不进 claims 的任何守恒等式与判据，且 --by-type 全量检查现跑 0 处已作兜底；一旦 coverage 视图与 claims 数字对不上，它会以某载体访问数与站点数不符的形式暴露，届时再测。
 - tags: [engine shape]
 
-# 批 S2a · batch-01/02 的裁决：T0 的内嵌子对象族 + 内指规则 + 挂起项（本轮重新裁定）
-
-- id: REQ-01M54MD3RQMEQV5D59Q9TXAXSS
-- type: req
-- parent: REQ-01M54KEF7X560CMPMGABG2W3CW
-- order: 53
-- tags: [engine shape]
-- status: open
-
 ## 目标
 
 batch-01…04 的裁决与挂起项。机制与证据细节在 `docs/02-engine/shape-census.md` §7.7（批次机制）/ §7.8（裁决记录）。

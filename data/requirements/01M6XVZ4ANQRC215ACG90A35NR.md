@@ -8,15 +8,6 @@
 - verify: apps/emulator-lift/tests/input_marker.cpp#marker-value-change-one-event
 - tags: [emulator-lift, interaction, marker]
 
-# emulator-lift · 脚本身份 marker 事件源：TriggerKind::Marker（VM 循环头采样 cur + frame[cur].+0x50 → id→名字 → 边沿触发 → 超时响亮失败）
-
-- id: REQ-01M6XVZ4ANQRC215ACG90A35NR
-- type: req
-- status: open
-- parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
-- order: 2
-- tags: [emulator-lift, interaction, marker]
-
 ## 缺的是什么
 
 `--anchor-script`（子节点 `REQ-01M6WS9G1EQRZ0EYM21V0DPZVY`）要求"以进入某引擎脚本为 0 点"，但**现在没有任何"引擎脚本可观察事件"的接口**。本单只做那个**事件源**。

@@ -8,16 +8,6 @@
 - repro: data/ledger/observation/2026-10.jsonl#tool/ledger/pe-offset-and-anchor-alignment
 - severity: S2
 
-# 台账 bin 锚的站点口径与复核机制：锚 EA 与 claim 引用的地址错位（0x1000 级）无判据可发现
-
-- id: REQ-01M4N3QC4SYG4C36QDBQCFRMSW
-- type: bug
-- status: done
-- parent: REQ-01M3TD4N309J3Y6YMWWR2GTQAA
-- repro: data/ledger/observation/2026-10.jsonl#tool/ledger/pe-offset-and-anchor-alignment
-- severity: S2
-- verify: tools/test/ledger.anchor-lst.assets.test.mjs#★ 站点口径：在场 reference bin 锚必须落 `.lst` 行首真指令（A）或折叠/孤立站点（S）；落指令中间的必须在 allowlist 里
-
 ## 口径（2026-10-11 用户批准；上一版"站点还须被 claim 逐字引用"**作废**）
 `bin` 锚**默认只许落站点起点** = `.lst` 里**行首那条真指令**的地址（"折叠 / 孤立 CHUNK 站点"——该 EA 处只有 `;` 注释行 —— 同算站点起点）。**落在指令中间**的例外必须（a）claim 说清"是哪条指令的第几个**字节**"、（b）带 `len`+`sha256`，并逐条登记进 `tools/lib/anchor-lst.mjs` 的 `AUDIT_ALLOWLIST`（**B 类不在表里 ⇒ 红**）。逐字引用是**人读的旁证**，不是判据 —— 它判不了"这个 EA 在语料里是什么"。
 

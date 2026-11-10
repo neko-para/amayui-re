@@ -7,14 +7,6 @@
 - verify: tools/test/emulator-numeric-ops.test.mjs#★ 静态出现次数可复算：0 次的那批必须真的是 0（不是"没数到"）
 - tags: [emulator, guard, assets]
 
-# 模拟器纯数值族的 corpus 来源：`<repo>/dist/install`（发行产物 + 会被 patch）应换成清单 gameInstall 解出的原始语料
-
-- id: REQ-01M4G9YTEKGER7N99C3M7F443R
-- type: req
-- status: open
-- parent: REQ-01M4FEF7VH1N0JDT5ZVPZS204M
-- tags: [emulator, guard, assets]
-
 ## 现场
 
 `tools/test/emulator-numeric-ops.test.mjs` 的两条 corpus 用例要 `.BIN` 语料，来源是

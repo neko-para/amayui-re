@@ -10,16 +10,6 @@
 - done_reason: 按用户口径"冲突以最新复核结论为准"裁定为语料侧（帧+0x34/0x38/0x3C/0x40/0x44/0x48）：两条独立判据（装载器"读计数→new[]→写基址"的 6 处 store；取址原语 case 号=operand type 的配对）+ 一条旁证（ENC(key,0) 填在 +0x34 那池）。已改 LOCAL_POOL_SLOTS、把守卫判据从"偏移在语料里出现过"（绿而错）换成"双向对上"、加两条变异，并按 append-only 追加台账更正记录。
 - tags: [emulator, layout, guard]
 
-# 🐞S2 local 池基址：语料逐字 = 帧+0x34..+0x48（读侧+装载器+ENC(key,0) 三者互证），代码/守卫写 0x3C..+0x54 且守卫绿而错
-
-- id: REQ-01M4FEEKZ5S4TYW881T5HMXGPK
-- type: bug
-- status: open
-- parent: REQ-01M4AGPP1T9A60HQYW3GX9W592
-- repro: tools/test/emulator-model.test.mjs#★ local 池的 slot 几何
-- severity: S2
-- tags: [emulator, layout, guard]
-
 ## 结论（本轮独立复核，两条独立取证线）
 
 local 池的 **6 个基址偏移**与 **type 9..14 的配对**，语料逐字支持的是 **`帧+0x34 … 帧+0x48`**；

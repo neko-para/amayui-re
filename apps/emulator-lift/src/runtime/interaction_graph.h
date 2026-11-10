@@ -85,7 +85,6 @@ enum class GraphActionKind : std::uint8_t {
     ProfileEnd = 5,
     Quit = 6,
 };
-const char* graphActionKindName(GraphActionKind k);
 
 struct GraphAction {
     GraphActionKind kind = GraphActionKind::Quit;
@@ -251,7 +250,6 @@ private:
     // 采样接线
     std::vector<RectBinding> rect_bindings_;
     bool bound_ = false;
-    bool trace_watch_frame_ = false;
     // trace
     std::FILE* trace_ = nullptr;
     bool trace_owned_ = false;

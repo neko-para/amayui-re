@@ -1357,12 +1357,15 @@ const MUTATIONS = [
   // ── 交互图的可选按钮词（图语法 `click <x> <y> [left|right]` / `click center [left|right]`）──
   {
     file: 'apps/emulator-lift/src/runtime/interaction_graph.cpp',
-    from: '            out->button = button;',
-    // ⚠ 变异后局部变量 `button` 没人用了，而本工程开着 `-Werror` ⇒ 少 `(void)button;`
-    //   就是"构建失败"，自检只能判「无法判定」（与上面 `changes_at_start` 那条同一个坑）。
+    // ★ 缩进是 16 空格：`click` / `click center` 现在共用一个 `case` 块（无 `default:` 的穷举
+    //   `switch (kind)` 里的落值分支），比原先的 if 链深一层。改这一行必须同步这里（`from` 逐字）。
+    from: '                out->button = button;',
+    // ⚠ 变异后 `button` 只剩 `&button` 这一处**取址**传给 `parseButtonWord` ⇒ 实测（clang 本机，
+    //   按 `compile_commands.json` 的真命令）带不带 `(void)button;` 都退出 0。这一行保留是**防御性**的
+    //   （某些档位 / 编译器会把"只取址不读"报成 `-Wunused-but-set-variable`），不是必需的。
     to:
-      '            (void)button;\n' +
-      '            out->button = MouseButton::Left;  // 变异：解析完把按钮词丢掉（right 静默变 left）',
+      '                (void)button;\n' +
+      '                out->button = MouseButton::Left;  // 变异：解析完把按钮词丢掉（right 静默变 left）',
     guard: 'ctest:interaction-graph',
     ctest: 'interaction-graph',
     buildDir: 'apps/emulator-lift/out',
