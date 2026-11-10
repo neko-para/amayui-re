@@ -1,0 +1,37 @@
+# 出 Eushully-chan Room（右键）：TITLE → EU-ROOM → TITLE
+#
+# 与 `room-exit.graph` **同构**，唯一差别是 room 节点的动作带按钮词
+# `click center right`（右键）。其余节点 / 判据逐字相同。
+#
+# ★ 右键在这条路上等价于「戻る」：引擎把鼠标右键当成**取消位** ——
+#   `WM_RBUTTONUP` → `0x4B9D3F` → `sub_4B8DC0(1)` → 输入字第 5 位（bit5, 0x20），
+#   而「戻る」的按钮等待 handler 读的正是 `0x411CFE test byte ptr [ebx],20h`。
+#   ⇒ 判据 / 复现 / 重开条件见 `docs/03-emulator/defects.md` 的 BUG-16（`.tmp` 里的取证记录不入库）。
+# ⛔ **别把这份当模板套到别的屏**：右键 ≠ 通用"返回"。取消位跳到哪个标签由**脚本**决定
+#   （`[engine+0x77810+ctx*4]`；由脚本 opcode `sub_41F530` 登记），没有登记取消标签的界面里
+#   右键什么都不做；别的屏要单独取证，而不是照抄这一行。
+# ★ 终态判据同 `room-exit.graph`：TITLE 稳定帧 hash `0x94CB492BF7F1AEEB`。
+entry title
+
+node title
+  when screen hash 0x94CB492BF7F1AEEB
+  action click 944 562
+  next room
+  timeout 180000
+  expect screen changed
+
+node room
+  when screen rect 1200 665 80 45 avg 0xB6957E
+  # ⛔ ESC（VK=0x1B）**不是**「戻る」的同一条路：窗口过程把 ESC 无条件转成关闭消息 ⇒
+  #   销毁窗口 → WM_QUIT → Command_Exit_Exception；那是"退出游戏"，不是"回 TITLE"
+  #   （spike REQ-01M71P87BMTZK4MHT8468BMC3G 已确认）。
+  action click center right
+  next back
+  timeout 180000
+  expect screen changed
+
+node back
+  when screen hash 0x94CB492BF7F1AEEB
+  action quit
+  next
+  timeout 180000

@@ -25,11 +25,17 @@ import { peImageBase, peMap, peOffsetOf } from '../lib/ledger.mjs';
 
 const MANIFEST = path.join(REPO_ROOT, 'corpus', 'assets.json');
 
-/** 按清单条目解析出真镜像的绝对路径（不硬编码旧仓路径） */
+/** 按清单条目解析出真镜像的绝对路径（不硬编码旧仓路径）
+ *  ★ 入库件（`dest` 在仓里）优先读 `dest`：那些条目可能已经**自足**（`origin` 为空），
+ *    再按 origin 找会把它误判成"不在场"而静默 skip。 */
 function imageOf(id) {
   const m = JSON.parse(fs.readFileSync(MANIFEST, 'utf8'));
   const e = m.entries.find((x) => x.id === id);
   if (!e) return null;
+  if (typeof e.dest === 'string' && e.dest !== '') {
+    const inRepo = path.join(REPO_ROOT, e.dest);
+    if (fs.existsSync(inRepo)) return inRepo;
+  }
   const o = (e.origin ?? [])[0];
   if (!o) return null;
   const root = m.roots?.[o.root];

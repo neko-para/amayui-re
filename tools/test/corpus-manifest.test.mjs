@@ -106,15 +106,68 @@ test('#1 schema：非自足条目的 origin 为空数组 → 红', () => {
   assert.ok(failIds(check(root, [noOrigin])).includes(1));
 });
 
-test('#1 schema：★ 自足条目（入库的 kind=fixture）origin 允许为空 / 缺席', () => {
+test('#1 schema：★ 自足条目（入库件）origin 允许为空 / 缺席', () => {
   const root = makeRepo();
   const base = { kind: 'fixture', role: 'fixture', storage: 'lfs', dest: 'corpus/payload.bin' };
   assert.deepEqual(failIds(check(root, [validEntry({ ...base, origin: [] })])), []);
   const noOrigin = validEntry(base);
   delete noOrigin.origin;
   assert.deepEqual(failIds(check(root, [noOrigin])), []);
-  // 但"自足"只认 kind=fixture：同样的 shape 换成别的 kind 仍然要 origin
-  assert.ok(failIds(check(root, [validEntry({ ...base, kind: 'asset', origin: [] })])).includes(1));
+  // 判据是"仓里有没有那一份"（storage 入库），不是 kind
+  assert.deepEqual(failIds(check(root, [validEntry({ ...base, kind: 'asset', origin: [] })])), []);
+});
+
+test('#1 schema：★ 自足条目（入库件）origin 允许缺席；没入库的仍然必须非空', () => {
+  const root = makeRepo();
+  // ★ 判据是"仓里有没有那一份"（storage lfs/git），不是 kind：入库的 binary 本身就是新产物（`binary/age-sectfix`）
+  for (const kind of ['binary', 'asset', 'fixture']) {
+    const base = { kind, storage: 'lfs', dest: 'corpus/payload.bin' };
+    assert.deepEqual(failIds(check(root, [validEntry({ ...base, origin: [] })])), []);
+    const noOrigin = validEntry(base);
+    delete noOrigin.origin;
+    assert.deepEqual(failIds(check(root, [noOrigin])), []);
+  }
+  // 但没入库（external-only / deferred）就没有"入库的那一份" ⇒ 仍然必须非空
+  for (const storage of ['external-only', 'deferred']) {
+    assert.ok(
+      failIds(
+        check(root, [validEntry({ kind: 'binary', storage, dest: null, origin: [] })]),
+      ).includes(1),
+    );
+  }
+});
+
+test('★ 本机私有覆盖（assets.local.json）不许被写进入库清单', () => {
+  const root = makeRepo();
+  const manifestPath = path.join(root, 'corpus', 'assets.json');
+  const committedOldRepo = path.join(root, 'old');
+  const opts = { repoRoot: root, runGit: false, checkHashes: false, runRecipe: false };
+  fs.writeFileSync(manifestPath, canonicalStringify(makeManifest(root, [validEntry()])), 'utf8');
+  // 本机把 roots 指到别处（真实场景：入库清单里是 Windows 路径，macOS 靠 assets.local.json）
+  fs.writeFileSync(
+    path.join(root, 'corpus', 'assets.local.json'),
+    JSON.stringify({ roots: { oldRepo: path.join(root, 'elsewhere'), extraRoot: path.join(root, 'game') } }),
+    'utf8',
+  );
+
+  // 写入口的典型路径：loadManifest（= 本机合并视图）→ 改条目 → saveManifest
+  const merged = loadManifest(manifestPath);
+  assert.equal(merged.roots.oldRepo, path.join(root, 'elsewhere'), '加载器必须看到本机覆盖（否则本机跑不起来）');
+  merged.entries[0].consume = '改了一下';
+  const res = saveManifest(merged, manifestPath, opts);
+  assert.equal(res.ok, true, res.reason);
+  const written = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  assert.equal(written.roots.oldRepo, committedOldRepo, '入库清单里的 oldRepo 必须还是盘上的值（本机覆盖不许落盘）');
+  assert.ok(!('extraRoot' in written.roots), '只在本机覆盖里的键不许落盘');
+  assert.equal(written.entries[0].consume, '改了一下', '条目改动照常写进去');
+
+  // 只有**显式点名**（--set-root 非 --local）才允许改入库清单里的 root
+  const again = loadManifest(manifestPath);
+  const newer = path.join(root, 'newer');
+  again.roots.oldRepo = newer;
+  const res2 = saveManifest(again, manifestPath, { ...opts, rootsPatch: { oldRepo: newer } });
+  assert.equal(res2.ok, true, res2.reason);
+  assert.equal(JSON.parse(fs.readFileSync(manifestPath, 'utf8')).roots.oldRepo, newer, 'rootsPatch 点名的键要写');
 });
 
 test('#2 自洽：external-only 却给了 dest → 红', () => {

@@ -16,9 +16,11 @@
 * **"两条记录"只属于有加工链的入库件**：**载荷**（`storage: lfs` + `dest`）说"仓库里有什么"；
   **来源记录**（`external-only` + 逐件 sha256）说"加工之前它长什么样、没被改过"。两者用 `derivedFrom` 相连
   （范例：`disasm/bundle` ↔ `disasm/raw-source-*`）。
-  ★ 这条**不套用到自足条目**：入库的 `kind=fixture`（固化资源：没有加工链、没有可再取的上游，
-  入库的那一份就是原件）**允许 `origin` 为空**（`fixtures/save-samples` 就是这样）——
-  给它记来源等于把 `dest` 抄第二遍，也换不来任何"可复核"的能力。
+  ★ 这条**不套用到自足条目**：**入库件**（`storage=lfs|git`）—— 仓库里那一份就是原件、没有可再取的外部上游
+  ——**允许 `origin` 为空**（`fixtures/save-samples`、`binary/age-sectfix` 就是这样）。
+  判据是"仓里有没有那一份"，不是 `kind`：执行源本身就是一个**新产物**，给它记来源等于把 `dest` 抄第二遍，
+  也换不来任何"可复核"的能力（它的字节真值锚是反汇编语料 `.lst` 的 `Input SHA256`）。
+  ★ 有加工链的入库件（如 `disasm-corpus`）照旧**可以**记 `origin` —— 允许缺席不等于必须缺席。
 * **入库件的 `origin` 不许带 `sha256`**（校验和交给 git/LFS）；翻牌 `deferred → lfs` 时工具**会自动剔除**残留的。
 * **`origin[].disposition = "machine-local"` 是"本机现场产物"那一档**（闭集合由 `--describe` 给）：上游 `.gitignore`
   忽略的目录（旧仓 `install/` / `raw-parts/`）、以及本机工具跑出来的件 ⇒ 它在**另一台机器上本来就不该存在**、
@@ -41,6 +43,9 @@
   本机用**同目录的 `corpus/assets.local.json`**（`.gitignore` 命中 `*.local.json` ⇒ **不入库**）**逐键覆盖 `roots`**。
   ★ 它**只覆盖 `roots`**：条目（来源与去向）是仓库事实，多写一个键就抛 —— 否则"这台机器上少一条"会表现成"仓库里少一条"。
   ★ 读它的是**唯一的清单加载器**（`loadManifest`，所有消费者共用）；`--set-root <名> <路径> --local [--write]` 是唯一写入口。
+  ★ **覆盖永远不会被写进入库清单**：`saveManifest` 落盘前把被覆盖的键**还原成盘上的值**（本机新增的键直接删掉），
+  只有 `--set-root <名> <路径>`（非 `--local`）显式点名的键才写。判据 = `corpus-manifest.test.mjs` 的
+  "本机私有覆盖不许被写进入库清单"（⛔ 少了它，macOS 上跑一次 `corpus set --write` 就会把 Windows 的路径冲掉）。
 
 ## 怎么查
 

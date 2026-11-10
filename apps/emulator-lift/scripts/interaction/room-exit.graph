@@ -2,10 +2,8 @@
 #
 # 真源：`docs/03-emulator/interaction-model.md`；跑法同 `room-enter.graph`。
 # ★ 终态判据 = 回到进入前那一屏（`screen hash` 与 `room-enter.graph` 的 title 节点同一个值）。
-# ★ 房间节点本应用 `screen rect … avg` + `click center`：**不写坐标**，点的是识别到的框中心
+# ★ 房间节点用 `screen rect … avg` + `click center`：**不写坐标**，点的是识别到的框中心
 #   （真源 §1：`screen rect` 命中时产出框，`click center` 唯一的坐标来源就是它）。
-#   ⚠ 今天「戻る」的注入点击点不动（BUG-16），临时退回 `key 0x1B`（ESC）；ESC **不是**同一条路，
-#   只证明"进程退出"，不证明"回到 TITLE"（见下面的节点注释）。
 entry title
 
 node title
@@ -17,14 +15,10 @@ node title
 
 node room
   when screen rect 1200 665 80 45 avg 0xB6957E
-  # ⚠ 房间里的「戻る」按钮在**注入点击**下没有反应（hover 有高亮、点 CG 鑑賞 有效、点它无变化；
-  #   右键 / Enter 也无变化）—— 已登记缺陷（BUG-16）。
-  #   ⛔ ESC（VK=0x1B）**不是**「戻る」的同一条路：窗口过程把 ESC 无条件转成关闭消息 ⇒
+  # ⛔ ESC（VK=0x1B）**不是**「戻る」的同一条路：窗口过程把 ESC 无条件转成关闭消息 ⇒
   #   销毁窗口 → WM_QUIT → Command_Exit_Exception；那是"退出游戏"，不是"回 TITLE"
-  #   （spike REQ-01M71P87BMTZK4MHT8468BMC3G 已确认）。所以这一行只能验证"进程退出"。
-  #   等那条缺陷收口后把这一行换回 `click center`（那时它还会顺带证明"框中心"能用）。
-  #   action click center
-  action key 0x1B
+  #   （spike REQ-01M71P87BMTZK4MHT8468BMC3G 已确认）。
+  action click center
   next back
   timeout 180000
   expect screen changed

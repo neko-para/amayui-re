@@ -572,7 +572,8 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-d
 - ⚠ **两条通道并存时不要同时"按着"输入**：脚本的键 / 按钮所有权是**全局一份**（`WindowManager` 按 vk 记），
   任一份脚本收口都会把它按下的键抬起来。现在图的动作是"追加进它自己的 actuator"，所以两条脚本
   **同时各按一个键**不安全 —— 要么只用一条，要么把两条的动作时间错开。
-- 现成的两条路径脚本在 `scripts/interaction/`（进 / 出 EU-ROOM）；需求单的判据与进度见需求树
+- 现成的路径脚本在 `scripts/interaction/`（进 / 出 EU-ROOM；出房间的左键 / 右键变体也在那里）。
+  `click` 可带按钮词 `left` / `right`（省略 = `left`）；需求单的判据与进度见需求树
   （`pnpm tools requirements show REQ-01M6XVYY5TCKSAS80WS7PADF8P`）。
 
 

@@ -29,6 +29,41 @@
 - **读数**：`.tmp/exitstall` 记 `151.05M / 8,691 ms`（55.3–57.7 ms/M）；`.tmp/clickfix` 记 `151,040,106 / 7325.7 ms`（另两次 7,246.4 / 7,448.5）⇒ 48.1–49.3 ms/M。
 - **复现**：两处都用 `LIFT_FRAME_TRACE=1`；结论**只用在这里** —— 跨构建/跨留档不可比，引用 TITLE 重载耗时必须连构建一起引用 · 2026-11-08 · `[.tmp/clickfix/report.md:31-33]`、`[.tmp/exitstall/report.md:55-57]`
 
+### OBS-20261110-01 · 出 EU-ROOM：点「戻る」⇒ TITLE，三次 run 读数逐位相同
+- **读数**：`exit 0` / `detail: interaction: task done` / `transitions=11 actions=3 samples=249 changes=44` /
+  末帧第 249 帧 `0x94CB492BF7F1AEEB`（TITLE）/ `insns=2,120,728,564`（三次 run 同值）。
+  trace：两份 copy 图的 run（`determinism.graph` 两遍）**逐行相同**；本尊 `room-exit.graph` 那份只差
+  `task start origin=` 那一行（文件名不同），其余 17 行逐字节相同（`diff` 实测）。
+- **复现**：`--game-dir /Users/nekosu/Documents/Projects/amayui-cn/raw --skip-logo --audio off
+  --present headless --raster cpu --interaction-graph scripts/interaction/room-exit.graph --interaction-trace <路径>`
+  （room 节点 `when screen rect 1200 665 80 45 avg 0xB6957E` + `action click center` ⇒ 实际点 `(1240,687)`）·
+  2026-11-10 · macOS arm64 / RelWithDebInfo / `--skip-logo`
+- **对照（同一台机、同一构建）**：`click 100 100` / 不点击 / 只 `mouse_move` ⇒ 全部 exit 5（`expect-change(node room)` 或
+  `timeout(node back)`）；`click 1100 150`（CG 鑑賞）⇒ 画面变了但不是 TITLE。⇒ 成功可归因于"在按钮上的一次点击"。
+
+### OBS-20261110-02 · 出 EU-ROOM 的时间结构：103 帧退场 + **单帧 730,765,167 条**重载帧
+- **读数**（`LIFT_FRAME_TRACE=1`）：抬起帧 n=115 → n=116..218 共 **103 帧** hover 画面（≈29.5k 条/帧）
+  → n=219 单帧 **730,765,167 条 / 24.0 s 墙钟** → n=220+ TITLE 动画；重载帧像素 `0xD6ED710894A39FA5`。
+- **复现**：同 OBS-20261110-01 的图 + `LIFT_FRAME_TRACE=1` · 2026-11-10 · macOS arm64 / RelWithDebInfo
+- **用途**：BUG-16 的误判根因 —— 2026-11-09 那三次 run 的 `quit` 全落在这一个重载帧里（抬起后 +98M/+188M/+350M 条）。
+
+### OBS-20261110-03 · 房间「戻る」的命中区比识别框窄（绘制框左边缘不在命中区）
+- **读数**：`(1240,687)`（框中心）与 `(1267,706)`（右下内缩 5px）⇒ exit 0 + TITLE；同框内的 `(1205,670)`
+  与框外的 `(1190,690)` 在 900M 条窗口里都 exit 5、无 TITLE。⇒ 识别框 `1200..1272 × 652..711`
+  只适合"认出这一屏 + 取中心"，⛔ 不要当精确命中区。
+- **复现**：`room-exit.graph` 的 room 节点分别用 `action click <x> <y>` 固定点跑 · 2026-11-10 · macOS arm64 / RelWithDebInfo
+
+### OBS-20261110-04 · 右键点「戻る」⇒ 同一个 TITLE 终态（与左键读数同形）
+- **读数**：`room-exit-right.graph` ⇒ `exit 0` / `detail: interaction: task done` / `transitions=11 actions=3
+  samples=249 changes=44` / 末帧第 249 帧 `0x94CB492BF7F1AEEB` / `insns=2,120,726,066`。
+  与左键版 trace 的差别**只有三处**（`diff` 实测）：`origin=` 行、`action click center right applied`、
+  以及 `node back enter … insn=1378353046`（左键版是 `…042`，差 4 条）。
+- **复现**：`--game-dir /Users/nekosu/Documents/Projects/amayui-cn/raw --skip-logo --audio off
+  --present headless --raster cpu --interaction-graph scripts/interaction/room-exit-right.graph` ·
+  2026-11-10 · macOS arm64 / RelWithDebInfo / `--skip-logo`
+- **口径**：右键 = 引擎的**取消位**（输入字 bit5，`0x4B9D3F` → `sub_4B8DC0(1)` → `0x411CFE test byte ptr [ebx],20h`），
+  取消目标由脚本登记的取消标签决定 ⇒ 这条读数只对"房间里那个取消标签 = 回 TITLE"成立。
+
 ## 吞吐与空转
 
 ### OBS-20261108-05 · 空转吞吐基线 = 64.7 ms/百万条（≈15.5M insn/s）

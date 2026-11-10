@@ -368,6 +368,199 @@ int main() {
     }
 
     // =================================================================================
+    // ②b parse-button-right —— 按钮词 `right` 必须落到 `GraphAction::button`
+    // ★ 这条在"只收 `click center` / `click x y`"的旧解析器上必红（`click 10 20 right` 是 4 个词 ⇒
+    //   旧码直接报错；`click center right` 旧码会把 `center` 当坐标解析失败）。
+    // =================================================================================
+    g_current_case = "parse-button-right";
+    {
+        lift::InteractionGraph g;
+        std::string err;
+        const bool ok = g.loadText(
+            "entry a\n"
+            "node a\n"
+            "  when screen rect 0 0 10 10 avg 0x112233\n"
+            "  action click center right\n"
+            "  next b\n"
+            "node b\n"
+            "  when always\n"
+            "  action click 10 20 right\n"
+            "  next\n",
+            "synthetic:button-right", &err);
+        LIFT_CHECK(ok);
+        if (!ok) std::fprintf(stderr, "  err = %s\n", err.c_str());
+        if (ok) {
+            const lift::Node& center = g.nodes()[0];
+            LIFT_CHECK(center.action.kind == lift::GraphActionKind::ClickCenter);
+            LIFT_CHECK(center.action.button == lift::MouseButton::Right);
+            const lift::Node& fixed = g.nodes()[1];
+            LIFT_CHECK(fixed.action.kind == lift::GraphActionKind::Click);
+            LIFT_CHECK_EQ_I64(fixed.action.x, 10);
+            LIFT_CHECK_EQ_I64(fixed.action.y, 20);
+            LIFT_CHECK(fixed.action.button == lift::MouseButton::Right);
+        }
+    }
+
+    // =================================================================================
+    // ②c parse-button-default —— 省略按钮词 = `left`（两种写法都要）
+    // =================================================================================
+    g_current_case = "parse-button-default";
+    {
+        lift::InteractionGraph g;
+        std::string err;
+        const bool ok = g.loadText(
+            "entry a\n"
+            "node a\n"
+            "  when screen rect 0 0 10 10 avg 0x112233\n"
+            "  action click center\n"
+            "  next b\n"
+            "node b\n"
+            "  when always\n"
+            "  action click 944 562\n"
+            "  next\n",
+            "synthetic:button-default", &err);
+        LIFT_CHECK(ok);
+        if (!ok) std::fprintf(stderr, "  err = %s\n", err.c_str());
+        if (ok) {
+            LIFT_CHECK(g.nodes()[0].action.kind == lift::GraphActionKind::ClickCenter);
+            LIFT_CHECK(g.nodes()[0].action.button == lift::MouseButton::Left);
+            LIFT_CHECK_EQ_I64(g.nodes()[1].action.x, 944);
+            LIFT_CHECK_EQ_I64(g.nodes()[1].action.y, 562);
+            LIFT_CHECK(g.nodes()[1].action.button == lift::MouseButton::Left);
+        }
+    }
+
+    // =================================================================================
+    // ②d parse-button-illegal —— 词表外的词在**解析期**报错（带行号，且点名合法词）
+    // ★ ⛔ 不静默退化成 left：那会让"写错一个词"变成"点了另一个按钮"。
+    // =================================================================================
+    g_current_case = "parse-button-illegal";
+    {
+        lift::InteractionGraph g;
+        std::string err;
+        const bool ok = g.loadText(
+            "entry a\n"
+            "node a\n"
+            "  when always\n"
+            "  action click 1 2 sideways\n"
+            "  next\n",
+            "t.graph", &err);
+        LIFT_CHECK(!ok);
+        LIFT_CHECK(!g.active());  // 解析失败 ⇒ 不留半张图
+        LIFT_CHECK(startsWith(err, "t.graph:4: "));
+        LIFT_CHECK(contains(err, "left"));      // 合法词（词表真源见 interaction-model.md §1）
+        LIFT_CHECK(contains(err, "right"));
+        LIFT_CHECK(contains(err, "sideways"));  // 点名收到的是什么
+        if (!startsWith(err, "t.graph:4: ")) std::fprintf(stderr, "  err = %s\n", err.c_str());
+        // `click center <坏词>` 走同一条词表检查（不是"center 后面什么都不看"）
+        lift::InteractionGraph g2;
+        std::string err2;
+        const bool ok2 = g2.loadText(
+            "entry a\n"
+            "node a\n"
+            "  when screen rect 0 0 10 10 avg 0x112233\n"
+            "  action click center sideways\n"
+            "  next\n",
+            "t.graph", &err2);
+        LIFT_CHECK(!ok2);
+        LIFT_CHECK(startsWith(err2, "t.graph:4: "));
+        LIFT_CHECK(contains(err2, "right"));
+    }
+
+    // =================================================================================
+    // ②e emit-button-carried —— 动作发到时间线之后，`actions()` 里那条 Click 的按钮对得上
+    // ★ ⛔ 不锁字符串（"click … right" 的拼写不属于对外合同）：断言的是**按钮这个值**活着穿过
+    //   解析 → 状态机 → actuator 三层。`input_script.h` 的 `Action::button` / `actions()` 是公开 seam。
+    // ★ 两条 emit 路径（Click / ClickCenter）各跑一次：`issueAction` 里它们是两段独立代码。
+    // =================================================================================
+    g_current_case = "emit-button-carried";
+    {
+        auto firstClick = [](const lift::InputScript& script) -> const lift::InputScript::Action* {
+            for (const lift::InputScript::Action& a : script.actions()) {
+                if (a.kind == lift::InputScript::Kind::Click) return &a;
+            }
+            return nullptr;
+        };
+
+        // ① `click x y right` ⇒ Click 路径
+        {
+            Driver d;
+            LIFT_CHECK(d.load(
+                "entry a\n"
+                "node a\n"
+                "  when always\n"
+                "  action click 10 20 right\n"
+                "  next\n",
+                "synthetic:emit-right"));
+            LIFT_CHECK(d.runUntil([&] { return d.graph.actuator().appliedCount() >= 1; }, 40));
+            const lift::InputScript::Action* a = firstClick(d.graph.actuator());
+            LIFT_CHECK(a != nullptr);
+            if (a != nullptr) LIFT_CHECK(a->button == lift::MouseButton::Right);
+        }
+        // ② `click center right` ⇒ ClickCenter 路径（漏改那一段就只有这里红）
+        {
+            Driver d;
+            d.rects.push_back(lift::RectSample{/*valid=*/true, /*avg_rgb=*/0x112233, /*hash=*/0x1});
+            LIFT_CHECK(d.load(
+                "entry a\n"
+                "node a\n"
+                "  when screen rect 0 0 10 10 avg 0x112233\n"
+                "  action click center right\n"
+                "  next\n",
+                "synthetic:emit-right-center"));
+            LIFT_CHECK(d.runUntil([&] { return d.graph.actuator().appliedCount() >= 1; }, 40));
+            const lift::InputScript::Action* a = firstClick(d.graph.actuator());
+            LIFT_CHECK(a != nullptr);
+            if (a != nullptr) LIFT_CHECK(a->button == lift::MouseButton::Right);
+        }
+        // ③ 左键（缺省）⇒ Left（同一条 seam 的另一半：⛔ 别把"缺省"变成别的按钮）
+        {
+            Driver d;
+            LIFT_CHECK(d.load(
+                "entry a\n"
+                "node a\n"
+                "  when always\n"
+                "  action click 10 20\n"
+                "  next\n",
+                "synthetic:emit-left"));
+            LIFT_CHECK(d.runUntil([&] { return d.graph.actuator().appliedCount() >= 1; }, 40));
+            const lift::InputScript::Action* a = firstClick(d.graph.actuator());
+            LIFT_CHECK(a != nullptr);
+            if (a != nullptr) LIFT_CHECK(a->button == lift::MouseButton::Left);
+        }
+    }
+
+    // =================================================================================
+    // ②f button-word-accepted-by-timeline —— 图认的每个按钮词，时间线也必须认
+    // ★ 防"图发出一个时间线不认识的字"：那会在**运行期**追加动作时解析失败（图已开跑才发现）。
+    // =================================================================================
+    g_current_case = "button-word-accepted-by-timeline";
+    {
+        struct WordCase {
+            const char* word;
+            lift::MouseButton button;
+        };
+        const WordCase cases[] = {{"left", lift::MouseButton::Left}, {"right", lift::MouseButton::Right}};
+        for (const WordCase& c : cases) {
+            lift::InputScript script;
+            std::string err;
+            const std::string text = std::string("at frame 2\nclick 1 1 ") + c.word + "\n";
+            const bool ok = script.appendText(text, "synthetic:timeline-word", &err);
+            if (!ok) std::fprintf(stderr, "  word=%s err=%s\n", c.word, err.c_str());
+            LIFT_CHECK(ok);
+            if (!ok) continue;
+            LIFT_CHECK(script.actionCount() >= 1);
+            bool found = false;
+            for (const lift::InputScript::Action& a : script.actions()) {
+                if (a.kind != lift::InputScript::Kind::Click) continue;
+                found = true;
+                LIFT_CHECK(a.button == c.button);  // 同一个词在两层里指的是同一个按钮
+            }
+            LIFT_CHECK(found);
+        }
+    }
+
+    // =================================================================================
     // ③ only-next-target —— `next` 是**单个** id：a→c（b 存在但没人指向它）⇒ b 一次也不进
     // =================================================================================
     g_current_case = "only-next-target";
@@ -726,7 +919,7 @@ int main() {
             break;
         }
         if (found.empty()) {
-            // ★ 两条路径脚本已入库（`room-enter.graph` / `room-exit.graph`）⇒ **找不到就是红**：
+            // ★ 路径脚本已入库（见 `scripts/interaction/`）⇒ **找不到就是红**：
             //   静默 SKIP 会让"有人删了脚本"没有任何信号，而"脚本还能解析"正是这条用例的判据。
             //   ⛔ 不用 `LIFT_SKIP`（77）：那会把整条 `interaction-graph` 标成 Skipped，把别的判据一起藏掉。
             std::fprintf(stderr, "找不到 scripts/interaction/*.graph（试过 %s 与 cwd）\n", roots[0].c_str());

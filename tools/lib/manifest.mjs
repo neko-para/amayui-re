@@ -58,13 +58,16 @@ export const DISPOSITIONS = ['machine-local'];
 export const isMachineLocal = (o) => o?.disposition === 'machine-local';
 
 /**
- * **自足条目**：`kind=fixture` 的入库件 —— 固化资源（如实录下来的存档 / 截图），
- * **没有加工链、也没有可再取的上游**：入库的那一份**就是**原件。
- * ⇒ `origin` 允许缺席（写空数组或省略都一样，见 `originRequired`）。
- * ★ 反例：`disasm-corpus` 的入库件是从二进制**转写**出来的（有 recipe / derivedFrom），它的 `origin`
- *   记的是"转写前长什么样"的参照件；那个能力来自"来源 ≠ 入库件"，fixture 天生没有。
+ * **自足条目**：**入库件**（`storage=lfs|git`）—— 仓库里那一份就是原件，没有可再取的外部上游。
+ * ⇒ `origin` 允许缺席（写空数组或省略都一样，见 `originRequired`）：给它记来源等于把 `dest` 抄第二遍。
+ *   · `kind=fixture`：固化资源（如实录下来的存档 / 截图），没有加工链；
+ *   · `kind=binary` 的**执行源**：字节真值锚在仓内（反汇编语料 `.lst` 头部的 `; Input SHA256 :`，
+ *     `tools/test/age-sectfix-artifact.test.mjs` 守着）；它本身就是新产物，上游只是本机 dump 产物；
+ *   · 有加工链的入库件（如 `disasm-corpus`）照旧可以记 `origin`（"转写前长什么样"的参照件）——
+ *     允许缺席不等于必须缺席，`derivedFrom` / `recipe` 记的是**链条**，与 `origin`（外部来源）是两件事。
+ * ★ 外部对照件（`external-only` / `deferred`）仍然**必须**有 `origin`：它没有入库的那一份。
  */
-export const SELF_CONTAINED = (e) => e?.kind === 'fixture' && CARRYING.has(e?.storage);
+export const SELF_CONTAINED = (e) => CARRYING.has(e?.storage);
 
 /** 该条目是否必须登记 `origin`（非空）——"自足条目"豁免 */
 export const originRequired = (e) => !SELF_CONTAINED(e);
@@ -136,7 +139,7 @@ const ENTRY_FIELD_DOC = [
   ['kind', '✅', `\`${KINDS.join('` \\| `')}\``, '类别'],
   ['role', '✅', `\`${ROLES.join('` \\| `')}\``, '人类语义角色'],
   ['storage', '✅', `\`${STORAGES.join('` \\| `')}\``, '存储去向（也是进度：deferred → lfs）'],
-  ['origin', '条件', '数组 {root,path,sha256?,disposition?}', '来源；root ∈ roots 的键或 abs。★ **自足条目**（入库的 `kind=fixture`）允许缺席：它的"来源"就是入库的那一份本身，登记它等于把 dest 抄第二遍；其余条目必须非空。★ `disposition` 是**闭集合**（见 `originDisposition`）'],
+  ['origin', '条件', '数组 {root,path,sha256?,disposition?}', '来源；root ∈ roots 的键或 abs。★ **自足条目**（**入库件**：`storage=lfs|git`）允许缺席：仓库里那一份就是原件，没有可再取的外部上游，登记它等于把 dest 抄第二遍；外部对照件（external-only / deferred）必须非空。★ `disposition` 是**闭集合**（见 `originDisposition`）'],
   ['derivedFrom', '条件', '[{ref,tool?,note?}]', '真前身（**从**某个件、**用工具**产出的那份）；入库的 disasm-corpus 必填且要指到 kind=binary'],
   ['dest', '✅', 'string \\| null', '入库路径；external-only/deferred ⇒ 必须 null'],
   ['readOnly', '✅', 'boolean', '只读件禁止就地修改'],
@@ -819,9 +822,34 @@ export function saveManifest(manifest, manifestPath, opts = {}) {
     return { ok: false, restored: false, reason: `读当前清单作基线失败（未写盘）：${err.message}` };
   }
 
+  // ★ **本机私有覆盖不许被写进入库清单**（`assets.local.json` 只用于本机解析）。
+  //   调用方拿到的 `manifest` 来自 `loadManifest()` ⇒ 它的 `roots` 是**合并后**的；原样落盘等于
+  //   把 macOS 的路径写进仓库，另一台机器上就全错（2026-11-10 实测踩到：commit 里的
+  //   `oldRepo` / `gameInstall` 被换成本机路径）。⇒ 落盘前，覆盖到的键一律**还原成盘上的值**
+  //   （本机新增的键直接删掉），只有 `opts.rootsPatch` 显式点名的键才写。
+  const local = readLocalOverrides(localManifestFor(manifestPath));
+  const localRoots = local?.roots ?? {};
+  const onDisk = (() => {
+    try {
+      return JSON.parse(backup)?.roots ?? {};
+    } catch {
+      return {};
+    }
+  })();
+  const rootsPatch = opts.rootsPatch ?? {};
+  const commitRoots = { ...(manifest.roots ?? {}) };
+  for (const k of Object.keys(localRoots)) {
+    if (Object.prototype.hasOwnProperty.call(rootsPatch, k)) continue; // 显式改这一键 ⇒ 写新值
+    if (Object.prototype.hasOwnProperty.call(onDisk, k)) commitRoots[k] = onDisk[k];
+    else delete commitRoots[k];
+  }
+  const commit = { ...manifest, roots: commitRoots };
+  /** 校验要看**本机有效视图**（合并后），落盘写**入库视图**（不含本机覆盖） */
+  const effective = { ...commit, roots: { ...commitRoots, ...localRoots } };
+
   // ① 内存预验：不新增失败才落盘
   try {
-    const added = addedFailures(before, validateManifest(manifest, opts));
+    const added = addedFailures(before, validateManifest(effective, opts));
     if (added.length) return { ok: false, restored: false, failures: added.length, reason: failText('预验未通过（未写盘）', added) };
   } catch (err) {
     return { ok: false, restored: false, reason: `预验抛错（未写盘）：${err.message}` };
@@ -829,7 +857,7 @@ export function saveManifest(manifest, manifestPath, opts = {}) {
 
   // ② 写 → 回读 → 复验
   try {
-    writeAtomically(manifestPath, canonicalStringify(manifest));
+    writeAtomically(manifestPath, canonicalStringify(commit));
     const reread = loadManifest(manifestPath);
     const added = addedFailures(before, validateManifest(reread, opts));
     if (added.length) {

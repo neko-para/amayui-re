@@ -15,16 +15,18 @@
 {
   "entry": "title",
   "nodes": [
-    { "id": "title", "when": { "screen_hash": "9F3C1A7D…" }, "action": { "click": "center" },
+    { "id": "title", "when": { "screen_hash": "9F3C1A7D…" }, "action": { "click": "944 562" },
       "next": "room", "timeout": 3000, "expect_change": { "screen_changed": true } },
     { "id": "room", "when": { "screen_rect": { "x": 944, "y": 562, "w": 120, "h": 40,
                                                "avg": "0x1B2B3C" } },
-      "action": { "click": "center" }, "next": "", "timeout": 3000 }
+      "action": { "click": "center", "button": "right" }, "next": "", "timeout": 3000 }
   ]
 }
 ```
 
-JSON 与行写法一一对应（`screen hash` ↔ `"screen_hash"`、`click center` ↔ `"click": "center"`）：
+JSON 与行写法一一对应（`screen hash` ↔ `"screen_hash"`、`click center` ↔ `"click": "center"`、
+`click center right` ↔ `"click": "center", "button": "right"`、
+`click 1240 687 right` ↔ `"click": "1240 687", "button": "right"`）：
 同一份节点，人读写行、生成器读写 JSON。
 
 ★ **解析入口只有一份：行写法**（`--interaction-graph <file>`）。上面的 JSON 是**同一份节点的等价展示**
@@ -34,7 +36,7 @@ JSON 文件入口留到"生成器落地"时再加，重开条件写在同一张�
 | 字段 | 必填 | 取值 | 语义 |
 |---|---|---|---|
 | `when` | ✅ | 条件项（闭集合；行写法 `script <名字>` / `screen hash <hex>` / `screen rect x y w h avg <0xRRGGBB>` / `screen changed` / `always`） | 成立才轮到本节点。一条节点 = **一个**条件项：不做 AND/OR 组合、不做条件分支图。`screen rect …` 命中时**产出框**（= 该 rect），这是 `click center` 唯一合法的坐标来源；`always` 是纯推进 |
-| `action` | ✅ | `click [x y]` / `click center` / `key <VK>` / `wait <n> frames\|ms` / `profile_begin` \| `profile_end` `<label>` / `quit` | 与 `when` **解耦**：命中才执行。`click center` 打**识别到的框**中心；`click x y` 打固定点 |
+| `action` | ✅ | `click [x y] [left\|right]` / `click center [left\|right]` / `key <VK>` / `wait <n> frames\|ms` / `profile_begin` \| `profile_end` `<label>` / `quit` | 与 `when` **解耦**：命中才执行。`click center` 打**识别到的框**中心；`click x y` 打固定点。按钮词只有 `left` / `right`，省略 = `left`（⛔ 不收 `middle` / `hold`：按钮是输入目标，`hold` 是时序语义） |
 | `next` | ✅（可空） | **单个**节点 id / 空 | 前进到哪一个；空 = 任务结束。⛔ 不是候选列表。id 必须已定义，否则解析期失败（带行号） |
 | `timeout` | ✅ | ms | 等到 `when` 成立的上限；到点 = `timeout` 失败。必填；解析器给一个**固定缺省值**（生成器应显式写出来，缺省在 trace 里标出） |
 | `expect_change` | ⬜ | 条件项（同上闭集合） | 动作执行后**必须**观测到的变化；到点没变 = `expect_change` 失败 |

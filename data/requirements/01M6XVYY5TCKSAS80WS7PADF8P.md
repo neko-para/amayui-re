@@ -2,67 +2,52 @@
 
 - id: REQ-01M6XVYY5TCKSAS80WS7PADF8P
 - type: req
-- status: blocked
+- status: open
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
 - order: 1
-- blocked_by: [01M6ZDSPVYS3R78TK8TFKVBC8N]
 - tags: [emulator-lift, interaction, state-machine]
 
-## 现在到哪了（2026-11-09：第一期落地，出房间卡在另一条单）
+## 现在到哪了（2026-11-10：进 / 出 EU-ROOM 都跑通；只剩"脚本身份"识别源）
 
-- **节点图 runner**：`repo:apps/emulator-lift/src/runtime/interaction_graph.h` + `repo:apps/emulator-lift/src/runtime/interaction_graph.cpp`（行写法解析 / 状态机 / 三种失败 /
-  trace / `failureReport()` / `defaultFailDumpPath`）。
-- **画面采样**：`repo:apps/emulator-lift/src/runtime/screen_sample.h` + `repo:apps/emulator-lift/src/runtime/screen_sample.cpp`，采样点 = Present（唯一呈现汇点）；
+- **节点图 runner**：`repo:apps/emulator-lift/src/runtime/interaction_graph.h` + `repo:apps/emulator-lift/src/runtime/interaction_graph.cpp`
+  （行写法解析 / 状态机 / 三种失败 / trace / `failureReport()` / `defaultFailDumpPath`）。
+- **画面采样**：`repo:apps/emulator-lift/src/runtime/screen_sample.h` + `.cpp`，采样点 = Present（唯一呈现汇点）；
   整帧 hash / 矩形均值 / 矩形 hash / "与上一次采样不同"的**单调计数**。
 - **CLI**：`--interaction-graph` / `--interaction-trace` / `--interaction-fail-dump`；三种失败 **exit 5**；
   "任务没走完"（guest 侧硬停）也 **exit 5** —— 见 `repo:apps/emulator-lift/README.md` §4.2d。
-- **动作仍走时间线那套注入**：图把动作**追加**进 `InputScript`（新 `appendText`），自动 hold / 延迟抬起 /
-  profiler 窗口 / `quit` 只有一份实现（⛔ 不另写一套按下抬起）。
-- **守卫**：`repo:apps/emulator-lift/tests/interaction_graph.cpp`（14 条 pure 用例）+ 变异条目 `ctest:interaction-graph`
-  （`--match interaction_graph.cpp` 实测红后还原）。
-- **脚本**：`repo:apps/emulator-lift/scripts/interaction/room-enter.graph` 与 `room-exit.graph`；
-  后者用 `screen rect … avg` 命中房间、再用 `key 0x1B`（ESC）而不是写死坐标，两条都**零帧号**。
-  ★ ESC 只验证"进程退出"，**不是**「戻る」那条路（见下第 3 条与 spike `REQ-01M71P87BMTZK4MHT8468BMC3G`）。
+- **动作仍走时间线那套注入**：图把动作**追加**进 `InputScript`，自动 hold / 延迟抬起 / profiler 窗口 / `quit` 只有一份实现
+  （⛔ 不另写一套按下抬起）。可选按钮词（`click … [left|right]`，缺省 left）也走同一条路。
+- **守卫**：`repo:apps/emulator-lift/tests/interaction_graph.cpp`（19 条 pure 用例）+ 变异条目 `ctest:interaction-graph`。
+- **脚本**：`repo:apps/emulator-lift/scripts/interaction/` 三份（进房间 / 出房间·左键 / 出房间·右键），全部**零帧号**。
 
 ## 判据对照
 
 | 判据 | 现状 |
 |---|---|
-| 进 Eushully-chan Room，且**不依赖帧号** | ✅ 真机实测（`--interaction-graph room-enter.graph` ⇒ exit 0；trace：title 命中 → click → `expect screen changed` → room 命中 → `task done`） |
-| 三种失败全部响亮 | ✅ 各一条 pure 用例（`timeout-loud` / `no-sample-blind` / `expect-change-loud`，另有 `rect-blind-is-no-sample` / `acting-expires` / `expect-needs-new-sample` 三条回归）+ stderr 打"最后状态与全部候选"；⚠ **exit 5 只有真机实测**（`room-exit` 跑出 exit 5），退出码路径在 `main` 里，pure CTest 看不见 |
+| 进 Eushully-chan Room，且**不依赖帧号** | ✅ 真机实测（`--interaction-graph room-enter.graph` ⇒ exit 0） |
+| 三种失败全部响亮 | ✅ 各一条 pure 用例（`timeout-loud` / `no-sample-blind` / `expect-change-loud`，另有 3 条回归）+ stderr 打"最后状态与全部候选"；⚠ **exit 5 只有真机实测**（退出码路径在 `main`，pure CTest 看不见） |
 | `next` 是单个 id；写不存在的 id ⇒ 解析期失败（带行号） | ✅ `parse-errors`（13 条错误各带 `origin:行:`） |
-| 节点图可在 pure CTest 里用合成输入跑 | ✅ 14 条：`parse-ok` / `parse-errors` / `only-next-target` / `timeout-loud` / `no-sample-blind` / `expect-change-loud` / `changed-counts-window` / `stall-fallback-expires` / `quit-marks-task-done` / `acting-expires` / `expect-needs-new-sample` / `rect-blind-is-no-sample` / `trace-diff-stable` / `graph-scripts-parse` |
+| 节点图可在 pure CTest 里用合成输入跑 | ✅ 19 条（含 `graph-scripts-parse` 把三份真图纳入"必须能解析"） |
 | trace 可 diff | ✅ `trace-diff-stable`（逐字节相同）；`--present window` 首行 `# NON-DIFFABLE` |
-| ⛔ 不以"帧号到 X"当判据 | ✅ 两条脚本里 0 个帧号（房间空闲时 Present 稀疏到 ~0.5 s/帧） |
-| **出** Eushully-chan Room（同一终态） | ⛔ **只差「戻る」点击**（SEH 机制已收口；见下） |
+| ⛔ 不以"帧号到 X"当判据 | ✅ 三份脚本里 0 个帧号 |
+| **出** Eushully-chan Room（同一终态） | ✅ 真机 exit 0 + `task done` + TITLE hash `0x94CB492BF7F1AEEB`；左键 / 右键各一份图（`OBS-20261110-01/04`） |
+| 两种识别源（画面特征 / 脚本身份） | ⚠ 画面特征 ✅；**`when script` 仍解析期拒绝**（`interaction-model.md` §6）—— 本单剩余的唯一一条 |
 
-## 卡住的（都不是本单能修的，各有一条单）
+## 卡住的（已清空，留记录）
 
 1. ~~`REQ-01M6ZDSGQY1RXX3N3WJKA8D26H`~~ —— 后缓冲 `LockRect`/`UnlockRect` **已实现并收口**（2026-11-09）。
-2. ~~`REQ-01M708DF24KY0QZNEHY66S0HYW`~~ —— SEH 展开 **已收口**（机制级；2026-11-10）。★ 归属已改：它修的是
-   **退出游戏（ESC / 关窗）**的展开，**不是**"出房间"的前置（spike `REQ-01M71P87BMTZK4MHT8468BMC3G`）。
-3. `REQ-01M6ZDSPVYS3R78TK8TFKVBC8N` —— 房间里「戻る」按钮对**注入点击**无反应（hover 有高亮、点 CG 鑑賞 有效、
-   ESC 有效）。★ ESC **不是**「戻る」的同一条路：ESC 走窗口关闭 → 退出游戏（spike 已确认）。所以脚本暂时用
-   `key 0x1B` 只验证"进程退出"，不验证"回到 TITLE"；那条单修好后换回 `click center`。
+2. ~~`REQ-01M708DF24KY0QZNEHY66S0HYW`~~ —— SEH 展开 **已收口**（机制级；它修的是**退出游戏**，不是出房间，
+   见 spike `REQ-01M71P87BMTZK4MHT8468BMC3G`）。
+3. ~~`REQ-01M6ZDSPVYS3R78TK8TFKVBC8N`~~ —— 「戻る」点击**不是缺陷**（2026-11-10 判 dropped：11-09 的
+   "点不动"是量测窗 artifact），图已换回 `action click center`。
 
-## 实测记录（2026-11-09，macOS arm64 / RelWithDebInfo，`--skip-logo`，`--audio off`）
+## 实测记录
 
-- `room-enter.graph`：**两次运行各 exit 0**，且两份 trace **逐字节相同**（`diff` 无输出）。
-  trace 全文：`task start nodes=2 entry=title` → `node title enter frame=0` → `when screen hash 0x94CB492BF7F1AEEB samples=31 hit`
-  → `action click 944 562 applied` → `expect screen changed samples=33 hit` → `node title done` → `node room enter frame=33`
-  → `when screen hash 0x96E51755F00B2E9E samples=44 hit` → `action quit applied` → `node room done`
-  → `task done nodes=2 transitions=6 actions=2`（insns ≈ 1.30e9）。
-  ⇒ "不依赖帧号 / 重复到稳定 / trace 可 diff"三条都在真机上成立。
-- `room-exit.graph`：**仍 exit 5**（2026-11-09 复测）：`LockRect(backbuffer)` 已成功 2 次
-  （Pitch=5120 / pBits=0x28000008 / 0,0..1280,720）+ `UnlockRect` 2 次，随后 `eip=0x4123C4` 的
-  `__CxxThrowException(Command_Exit_Exception)` 撞上未实现的 `kernel32!RaiseException`（2026-11-10 已修；
-  这条是**退出游戏**的展开，见 spike `REQ-01M71P87BMTZK4MHT8468BMC3G`）。
-  旧读数（停 LockRect）保留在 git 历史里。
-  ★ 注意这条的"停"在运行摘要里是 `Stopped`（`ok()` 为真、退出码 0）—— 那是 `REQ-01M6WW9R6SJ7P8XA4522XCR48A`
-  记的口径问题；本单在 `main` 里按"任务没到 `task done` 就是失败"把它拦成 exit 5。
-
-## 不做
-
-- ⛔ 不在此单重新设计 profiler / 吞吐（各有单）。
-- ⛔ 不把画面识别做成通用 CV 框架：只做本组需要的几种特征；模板匹配不做。
-- ⛔ 不用 OCR / 泛化模型：不可复现、不可 diff。
+- **进房间（2026-11-09）**：`room-enter.graph` **两次 exit 0**，两份 trace **逐字节相同**
+  （`task done nodes=2 transitions=6 actions=2`，insns ≈ 1.30e9）。
+- **出房间（2026-11-10，macOS arm64 / RelWithDebInfo，`--present headless --raster cpu`）**：
+  `room-exit.graph` 与 `room-exit-right.graph` 各 **exit 0 + `task done`**，
+  `transitions=11 actions=3 samples=249 changes=44`，终态 TITLE hash `0x94CB492BF7F1AEEB`
+  （三次读数逐位相同，`insns=2,120,728,564`）。
+  ★ 观测窗必须盖住一次 TITLE 重载帧（今天单帧 **7.3e8 条** ≈73 s guest）——
+  11-09 的误判就是这么来的（`OBS-20261110-02`）。

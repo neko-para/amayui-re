@@ -170,6 +170,10 @@ function cmdSet(manifest, manifestPath, args) {
   const patch = JSON.parse(raw);
   const before = manifest.entries[idx];
   const after = { ...before, ...patch };
+  // ★ `null` = **删掉这个字段**（JSON 合并不了"删除"；`origin: null` 是移除来源的唯一写法）。
+  //   自足条目就该把 `origin` 删掉而不是留 `[]`：`--describe` 的口径是"写空数组或省略都一样"，
+  //   但入库件里留个 `[]` 读起来像"忘了填"。
+  for (const [k, v] of Object.entries(patch)) if (v === null) delete after[k];
   const preview = { ...manifest, entries: manifest.entries.map((e, i) => (i === idx ? after : e)) };
   process.stdout.write(`${id} 的改动：\n`);
   for (const k of new Set([...Object.keys(before), ...Object.keys(patch)])) {
@@ -215,7 +219,8 @@ function cmdSetRoot(manifest, manifestPath, args) {
     return 0;
   }
   const preview = { ...manifest, roots: { ...manifest.roots, [name]: value } };
-  const res = saveManifest(preview, manifestPath, validateOpts(args));
+  // ★ 显式点名这一键：否则 `saveManifest` 会把它当成"本机私有覆盖"还原回盘上的旧值
+  const res = saveManifest(preview, manifestPath, { ...validateOpts(args), rootsPatch: { [name]: value } });
   if (!res.ok) {
     process.stderr.write(`--set-root 失败：${res.reason}\n`);
     return 1;

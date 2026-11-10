@@ -27,8 +27,10 @@
 //   条件的写法（闭集合，与真源 §1 的表一一对应）：
 //     always | screen hash <hex64> | screen rect <x> <y> <w> <h> avg <0xRRGGBB> |
 //     screen changed | script <名字>（今天**解析期拒绝**，见真源 §6）
-//   动作的写法：click [<x> <y>] | click center | key <VK> | wait <n> frames|ms |
-//     profile_begin <label> | profile_end <label> | quit
+//   动作的写法：click <x> <y> [left|right] | click center [left|right] | key <VK> |
+//     wait <n> frames|ms | profile_begin <label> | profile_end <label> | quit
+//   按钮词只有 `left` / `right`（省略 = left；⛔ 没有 `middle` / `hold`）——
+//   词表与 JSON 写法的真源见 `docs/03-emulator/interaction-model.md` §1（这里只列有哪些词）。
 //   `next` 不带 id = 任务结束；`timeout` 省略 = 缺省 5000 ms（trace 里标 `(default)`）。
 //   `click center` 只在 `when screen rect …` 下合法（框中心是它唯一的坐标来源）。
 #pragma once
@@ -75,8 +77,8 @@ bool condHolds(const GraphCond& c, const FrameSampler& sampler, std::uint64_t sa
 // 动作（闭集合）
 // ---------------------------------------------------------------------------------------
 enum class GraphActionKind : std::uint8_t {
-    Click = 0,       // click x y
-    ClickCenter = 1, // click center（= 上一个命中框的中心；真源 §1）
+    Click = 0,       // click x y [left|right]
+    ClickCenter = 1, // click center [left|right]（= 上一个命中框的中心；真源 §1）
     Key = 2,         // key <VK>
     Wait = 3,        // wait <n> frames|ms（纯延迟，不碰输入）
     ProfileBegin = 4,
@@ -89,6 +91,8 @@ struct GraphAction {
     GraphActionKind kind = GraphActionKind::Quit;
     int x = 0;                       // Click
     int y = 0;                       // Click
+    // Click / ClickCenter 的输入目标：词表只有 `left` / `right`，缺省 `Left`；
+    // `Left` 发到时间线**不带词**（`click <x> <y>`），只有 `Right` 才写成 `click <x> <y> right`。
     MouseButton button = MouseButton::Left;
     std::uint32_t vk = 0;            // Key
     std::uint64_t wait_value = 0;    // Wait

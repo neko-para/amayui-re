@@ -342,17 +342,43 @@ bool InteractionGraph::loadText(const std::string& text, const std::string& orig
         return failAt(ln, "未知的 screen 条件：" + tok[2] + "（只认 hash / rect / changed）");
     };
 
+    // `click` 的按钮词：只收 `left` / `right`（省略 = left）。词表真源是
+    // `docs/03-emulator/interaction-model.md` §1 —— 这里只实现，⛔ 不复述它的语义。
+    auto parseButtonWord = [&](const std::string& word, int ln, MouseButton* out) -> bool {
+        const std::string w = lowerCopy(word);
+        if (w == "left") {
+            *out = MouseButton::Left;
+            return true;
+        }
+        if (w == "right") {
+            *out = MouseButton::Right;
+            return true;
+        }
+        return failAt(ln, "`click` 的按钮词只认 `left` / `right`（收到 `" + word + "`）");
+    };
+
     // ---- 动作（闭集合）。`text` 由调用方填原始行（日志 / 报错定位）----
     auto parseAction = [&](const std::vector<std::string>& tok, int ln, GraphAction* out) -> bool {
         const std::string head = lowerCopy(tok[0]);
         if (head == "click") {
-            // `click center`（2 个词）或 `click <x> <y>`（3 个词）；⛔ 不接受别的参数（按钮 / hold
-            // 属于时间线语法，节点图里没有它们的位置 —— 真源 §1 的动作是闭集合）。
-            if (tok.size() == 2 && lowerCopy(tok[1]) == "center") {
-                out->kind = GraphActionKind::ClickCenter;
-                return true;
+            // `click center [left|right]`（2–3 个词）或 `click <x> <y> [left|right]`（3–4 个词）。
+            // ★ 按钮词收进来，`hold` 仍不收 —— 两者不是同一类东西：
+            //   · 按钮 = **输入目标**：换个按钮再点一次，同一张图多一条同构节点就够了，
+            //     发到时间线也只是那行多一个词（`click x y right`）；
+            //   · `hold` = **时序语义**：按下与抬起之间隔多久。图只在块边界上"发一次动作"，
+            //     抬起由注入层的自动 hold 决定（`input_script.h`）；把 hold 收进图里等于把时间线
+            //     的时序旋钮搬进来，而图的语法是时间线的**真子集**（真源 §1）。
+            const bool center = tok.size() >= 2 && lowerCopy(tok[1]) == "center";
+            const std::size_t base = center ? 2u : 3u;  // 不带按钮词时的词数
+            if (tok.size() != base && tok.size() != base + 1) {
+                return failAt(ln, "`click` 需要 `X Y` 或 `center`，后面可选按钮词 `left|right`"
+                                  "（⛔ 不猜坐标、也不收 hold）");
             }
-            if (tok.size() == 3) {
+            MouseButton button = MouseButton::Left;  // 省略按钮词 = left（= `GraphAction::button` 的缺省值）
+            if (tok.size() == base + 1 && !parseButtonWord(tok[base], ln, &button)) return false;
+            if (center) {
+                out->kind = GraphActionKind::ClickCenter;
+            } else {
                 std::int32_t x = 0;
                 std::int32_t y = 0;
                 if (!parseInt32(tok[1], &x) || !parseInt32(tok[2], &y)) {
@@ -361,9 +387,9 @@ bool InteractionGraph::loadText(const std::string& text, const std::string& orig
                 out->kind = GraphActionKind::Click;
                 out->x = x;
                 out->y = y;
-                return true;
             }
-            return failAt(ln, "`click` 需要 `X Y` 或 `center`（⛔ 不猜坐标、也不带别的参数）");
+            out->button = button;
+            return true;
         }
         if (head == "key") {
             if (tok.size() != 2) return failAt(ln, "`key` 需要一个 VK（1..255）");
@@ -773,11 +799,16 @@ bool InteractionGraph::issueAction(WindowManager& wm, std::uint64_t frame, std::
     Node& n = nodes_[current_];
     // ★ 绝对触发 = **下一个 Present**（+1）。理由见文件头第 2 条。
     const std::string at = "at frame " + u64s(frame + 1) + "\n";
+    // ★ 按钮词只在**非 left** 时发：left 是缺省 ⇒ 时间线收到的仍是逐字节相同的 `click <x> <y>`
+    //   （trace 可 diff、老图/老 trace 不因这条特性而变）。两条 emit 路径都必须带它。
+    const std::string button_word =
+        n.action.button == MouseButton::Left ? std::string() : std::string(" right");
     std::string text;
 
     switch (n.action.kind) {
         case GraphActionKind::Click:
-            text = at + "click " + std::to_string(n.action.x) + " " + std::to_string(n.action.y) + "\n";
+            text = at + "click " + std::to_string(n.action.x) + " " + std::to_string(n.action.y) +
+                   button_word + "\n";
             break;
         case GraphActionKind::ClickCenter: {
             if (!have_box_) {
@@ -788,7 +819,7 @@ bool InteractionGraph::issueAction(WindowManager& wm, std::uint64_t frame, std::
             }
             const int cx = n.when.rect.x + n.when.rect.w / 2;
             const int cy = n.when.rect.y + n.when.rect.h / 2;
-            text = at + "click " + std::to_string(cx) + " " + std::to_string(cy) + "\n";
+            text = at + "click " + std::to_string(cx) + " " + std::to_string(cy) + button_word + "\n";
             break;
         }
         case GraphActionKind::Key:

@@ -1246,6 +1246,23 @@ const MUTATIONS = [
       '⇒ interaction-graph 的 `changed-counts-window` 当场红',
   },
 
+  // ── 交互图的可选按钮词（图语法 `click <x> <y> [left|right]` / `click center [left|right]`）──
+  {
+    file: 'apps/emulator-lift/src/runtime/interaction_graph.cpp',
+    from: '            out->button = button;',
+    // ⚠ 变异后局部变量 `button` 没人用了，而本工程开着 `-Werror` ⇒ 少 `(void)button;`
+    //   就是"构建失败"，自检只能判「无法判定」（与上面 `changes_at_start` 那条同一个坑）。
+    to:
+      '            (void)button;\n' +
+      '            out->button = MouseButton::Left;  // 变异：解析完把按钮词丢掉（right 静默变 left）',
+    guard: 'ctest:interaction-graph',
+    ctest: 'interaction-graph',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '`click` 解析完把按钮无条件改回 `left`（`right` 被静默吞掉）⇒ interaction-graph 的 ' +
+      '`emit-button-carried` 红（图发到时间线的那条 Click 的 button 不是 Right）',
+  },
+
   {
     file: 'apps/emulator-lift/src/runtime/decode.cpp',
     from: '    if (sseMovsdByOperands(zi, zops, key)) {',

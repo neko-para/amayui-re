@@ -1,66 +1,40 @@
-# 🐞S3 emulator-lift · EU-ROOM 的「戻る」按钮对注入点击无反应（hover 有效、ESC 有效）
+# 🐞S3 emulator-lift · EU-ROOM 的「戻る」按钮「注入点击无反应」⇒ **不是缺陷**（2026-11-09 是量测窗 artifact）
 
 - id: REQ-01M6ZDSPVYS3R78TK8TFKVBC8N
 - type: bug
-- status: open
+- status: dropped
 - parent: REQ-01M3TC7BK0J9TBQKGGWQ35A3NR
 - repro: docs/03-emulator/defects.md#BUG-16
+- dropped_reason: 不是缺陷 / 不修：点击一直有效 —— room-exit.graph 换回 click center 即 exit 0 + task done + TITLE hash（三次读数逐位相同）。2026-11-09 读到的'点不动'是量测窗 artifact：出房间要跨 103 帧退场 + 单帧 730,765,167 条的重载帧，那三次 run 的 quit 全落在重载帧里面。判据保留在两份任务图的真机 run + interaction-graph 的 pure 守卫。
 - tags: [emulator-lift, input]
 
-## 现象
+## 现象（原记录）
 
-`EU-ROOM` 右下角「戻る」按钮（约 `1200..1272 × 652..711`，框内均值 `0xB6957E`）对**注入点击没有反应**：
+`EU-ROOM` 右下角「戻る」按钮（约 `1200..1272 × 652..711`，框内均值 `0xB6957E`）对**注入点击**没有反应：
+hover 会换高亮、点 CG 鑑賞 有效、ESC 有效，而同一位置的 click / 长按 4 s 再抬 / 双击画面都不再变、也不产生停因。
 
-- 把光标移上去 ⇒ 画面**会**变（按钮高亮：房间稳定 hash `0x96E51755F00B2E9E` → hover 态 `0xF13F23F24EEEE636`）；
-- 在同一位置 `click` / `mouse_down` 4 s 后 `mouse_up` / 双击 ⇒ 画面**一次都不再变**，也不产生任何停因；
-- 同一次运行里点 **CG 鑑賞**（`1100,150`）正常切画面，TITLE 上点 OPTION（`812,622`）也正常，按 **ESC** 有效。
+## 改判（2026-11-10）：**不是缺陷** —— 2026-11-09 的读数是量测窗 artifact
 
-⇒ 房间的"退出"这件事今天只能靠 ESC 触发（而 ESC 那条路本身还缺后缓冲 LockRect，见同父的另一张单）。
+- `room-exit.graph` 的 room 节点换回 `action click center` ⇒ **exit 0 + `task done`**，终态 TITLE hash `0x94CB492BF7F1AEEB`；
+  三次 run 读数逐位相同（`insns=2,120,728,564`、`transitions=11 actions=3 samples=249 changes=44`）。
+- 点击**当时就生效**：抬起那一下的 hover 重绘（第 115 帧 `0xF13F…`）就是它的效果；之后是 **103 帧退场**
+  + **单帧 730,765,167 条**的 TITLE 重载帧（≈73 s guest / 24 s 墙钟）。
+- 2026-11-09 那三次 run 的 `quit` 落在抬起后 +98M / +188M / +350M 条 —— **全在那个重载帧里面**，
+  而且三次都恰好"抬起后 103 帧"（与今天的退场帧数相同）⇒ 退出已经在进行，只是取样窗提前关掉了。
+- **四路对照（同机同构建）**：空白点 `click 100 100` / 不点击 / 只 `mouse_move` ⇒ 全部 exit 5
+  （`expect-change` 或 `timeout(node back)`）；点 CG 鑑賞 `1100,150` ⇒ 画面变了但不是 TITLE。
 
-## 已排除（别重复查）
+## 处置
 
-- 光标与命中测试在工作：hover 会换高亮。
-- 注入的按钮电平在工作：`click-release … auto=1 waited_samples=3`（guest 采到过按下）。
-- 不是"房间不吃输入"：CG 鑑賞 / ESC 都有效。
+- 图：`repo:apps/emulator-lift/scripts/interaction/room-exit.graph` 的 room 节点回到 `action click center`
+  （删掉"退回 ESC"的临时行与错误注记）；新增 `repo:apps/emulator-lift/scripts/interaction/room-exit-right.graph`
+  （右键 = 引擎取消位 bit5，同一终态）。
+- 判据：两份图真机 `exit 0 + task done + TITLE hash`；pure 守卫
+  `repo:apps/emulator-lift/tests/interaction_graph.cpp` 的 `graph-scripts-parse`（两份图必须能解析）
+  与 `parse-button-right` / `emit-button-carried`。
+- 文档：`repo:docs/03-emulator/defects.md` 的 BUG-16 已改写为"不是缺陷"；读数进 `OBS-20261110-01..04`。
 
-## 待查方向（按代价排序）
+## 重开条件
 
-1. 该按钮的命中区与绘制区不同（把 `screen rect` 往按钮**外框**挪几像素再试；hover 高亮可能来自整块 UI 的"光标进入"而非按钮本身）。
-2. 它走另一条读点（只在某个定时器回调 / 另一条消息路径里轮询按钮电平）⇒ `--trace-shims` 看点击前后 `GetAsyncKeyState` / `GetCursorPos` 的调用是否发生、参数是什么。
-3. 它要求 `WM_LBUTTONUP` 落在**同一次光标采样**内（我们的自动 hold 是"等一个采样周期再抬"，可能刚好跨过它要的窗口）。
-
-## 判据（修好后）
-
-把 `repo:apps/emulator-lift/scripts/interaction/room-exit.graph` 的 `room` 节点从 `action key 0x1B` 换回
-`action click center`，真机跑 **exit 0** + trace 末尾 `task done`（终态 = TITLE 稳定帧 hash）。
-
-## 读数（2026-11-09，macOS arm64 / RelWithDebInfo，`--skip-logo`）
-
-三次独立运行（纯 click / move 后 click / down 4 s 后 up）：房间帧 hash 稳定在 hover 态 `0xF13F23F24EEEE636` 不变。
-缺陷史 `repo:docs/03-emulator/defects.md` 的 BUG-16。
-
-## 只读取证（2026-11-09，**未实施**；来自 `.lst` 的 EA 级阅读）
-
-★ 先纠正本单"已排除②（注入按钮电平在工作）"：`waited_samples` 的计数点只有 `GetCursorPos` 与 `GetAsyncKeyState`，
-而这条 UI 的 20 Hz 心跳来自 `GetCursorPos` ⇒ 它只证明"读了 3 次位置"；`GetAsyncKeyState` **一行日志都没有**，
-今天无法用 trace 判死"电平被读到"。
-
-- WndProc = `sub_4B92F0`（`0x4BA973`；类 "ARCGameEngine"）。`WM_MOUSEMOVE`(0x4B9B27) 只做 `_TrackMouseEvent` + 光标自动隐藏 SetTimer，
-  **不做命中测试、不派发点击**。
-- `WM_LBUTTONDOWN`→`0x4B9D66`：`if (dword_55E1D4 != 0) return;` → `sub_4B8DC0(0)`；`WM_LBUTTONUP`→`0x4B9D18`：`if (dword_55E1D4 == 0) return;`
-  → `sub_4B8DC0(0)`。**两个 case 都不读 lParam**（坐标另取）。
-- `dword_55E1D4` = 配置 **`set:ClickOnUp`**（`0x4BB428/0x4BB432`），本机配置 = **1** ⇒ **DOWN 被有意丢弃，只有 UP 派发一次事件**
-  ⇒ 之前"长按 4 s"与"纯 click"是同一路，不能拿来排除时序。
-- `sub_4B8DC0`：`[engine+0x1E70] != 0` ⇒ **吞掉这一次点击**（清位直接 return）；否则 `[engine+0x1620] |= 1<<btn`。
-  该锁存由 `sub_477280` 消费成输入字第 4 位；另有**电平路** `sub_477150`（GetAsyncKeyState 当前按下也置同一位）
-  ⇒ "吞一次"只解释一次点击，不解释"永远点不动"。
-- 已判死：坐标映射（`setCursorClientPos`/`cursorClientPos` 与 `ScreenToClient`/`ClientToScreen` 同一原点）、
-  "DOWN/UP 同一次采样"（ClickOnUp=1 + 电平每帧置位）、消息没送到（其它按钮同路径有效）。
-- 剩余候选（按代价）：C1 命中区 ≠ 绘制区（一次 run 点 5 个点）；C2 该按钮在房间顶层不是点击目标（先点 CG 鑑賞 1100,150 再点它）；
-  C3 被 `+0x1E70` 吞一次（同一 run 连点两次）；C4 另一读点 / 定时器（`--trace-shims --log-cat shim --log-level info` 抓 SetTimer/KillTimer/SetCursor）。
-- **探针判据要改**：原先"停在 `0x4A4F8D`（LockRect）"已不成立（后缓冲 LockRect 已收口）。★ 但"点中「戻る」会走退出路径"
-  **是错的**（2026-11-10 spike `REQ-01M71P87BMTZK4MHT8468BMC3G` 已确认）：退出路径（ESC / 关窗）走 `0x4B9367` → WM_CLOSE →
-  DestroyWindow → WM_DESTROY → PostQuitMessage → `0x4123C4`，与「戻る」无关。点中「戻る」的期望是**回 TITLE**
-  （`OBS-20261108-03/04` 有一次点击 → TITLE 的读数），判据仍是 `room-exit.graph` 的 `exit 0 + task done`（终态 = TITLE 稳定帧 hash）。
-  修复形状：C1 ⇒ 只校正 room 节点的 `screen rect`（`click center` 不动）；C2/C3 需裁决。
-- 分析全文 `.tmp/reveq/01M6XVYY5TCKSAS80WS7PADF8P/analysis.md`（**不入库**；卡点 2 部分）。
+若再出现"点了没反应"：先确认观测窗盖住了一次 TITLE 重载帧（今天 7.3e8 条），
+⛔ 别再用 `--input-script` 里 `at insn` 的硬锚点当终点。

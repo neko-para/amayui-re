@@ -382,16 +382,10 @@
       "kind": "binary",
       "role": "baseline",
       "storage": "lfs",
-      "origin": [
-        {
-          "root": "oldRepo",
-          "path": "raw-parts/AGE.EXE__dumped.sectfix.EXE"
-        }
-      ],
       "dest": "corpus/assets/age/AGE.EXE__dumped.sectfix.EXE",
       "readOnly": true,
       "consume": "只读：emulator-lift 的 **执行源**（guest 机器码字节；载入时用反汇编语料 `.lst` 头部的 `Input SHA256` 自校验）。⛔ 不许就地修改；任何派生视图不得落回本件。",
-      "note": "与原文件（`binary/age-original`）仅节表 24 字节不同；字节判据（MD5 口径）见 docs/02-engine/README.md。★ 2026-11-03 用户决定入库（原 external-only）：执行源必须在仓里，否则 CPU 核心的判据只能锁在“本机恰好有那个二进制”上。origin 仍是旧仓 `raw-parts/` 的原址（本机现场产物 ⇒ 不写 pin）；入库件的字节真值锚 = 反汇编语料 `.lst` 头部的 `; Input SHA256 :`，运行时校验。"
+      "note": "与原文件（`binary/age-original`）仅节表 24 字节不同；字节判据（MD5 口径）见 docs/02-engine/README.md。★ 2026-11-03 用户决定入库（原 external-only）：执行源必须在仓里，否则 CPU 核心的判据只能锁在“本机恰好有那个二进制”上。★ 2026-11-10：本条目是**自足条目**（origin 移除）—— 它本身就是入库的那一份，没有可再取的外部上游；字节真值锚 = 反汇编语料 `.lst` 头部的 `; Input SHA256 :`（运行时自校验 + `tools/test/age-sectfix-artifact.test.mjs`）。"
     },
     {
       "id": "binary/agerc-debug-unpacked",

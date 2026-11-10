@@ -176,16 +176,35 @@
   名字与分类的真源是 `apps/emulator-lift/src/runtime/machine.h` 的 `StopReason` + `machine.cpp` 的
   `stopReasonName` / `exitCodeForRun`。
 
-### BUG-16 · `EU-ROOM` 里的「戻る」按钮对**注入点击**没有反应（hover 有高亮）
-- **★ 归属更正（2026-11-10，spike `REQ-01M71P87BMTZK4MHT8468BMC3G`）**：本条的"ESC 有效"指 ESC 触发
-  **关窗 / 退出游戏**，**不是**「戻る」的同一条路（窗口过程把 ESC 无条件转成关闭消息）。另外
-  `OBS-20261108-03/04` 记录过 2026-11-08（Windows）一次**点击 → TITLE** 的完整读数（151M 条重载帧），
-  所以"点不动"至少是 2026-11-09 macOS 上的现象，⛔ 不要写成"这个按钮永远点不动"。
-- **现象**：把光标移到右下角「戻る」（约 `1200..1272 × 652..711`，框内均值 `0xB6957E`）⇒ 画面**会**变（按钮高亮，hash `0x96E5…` → `0xF13F…`）；但在同一位置点击 / 长按 4 s 再抬 / 双击，画面**一次都不再变**，也不产生任何停因。同一次运行里点 CG 鑑賞（`1100,150`）有效、TITLE 上点 OPTION（`812,622`）有效。
-- **根因**：待查。已知排除项：① 光标与命中测试在工作（hover 会换高亮）；② 注入的按钮电平在工作（`GetAsyncKeyState` 走同一份影子状态，且 `click-release … waited_samples=3` 说明 guest 采到过）；③ 不是"房间不吃输入"（CG 鑑賞 有效、ESC 有效）。⇒ 怀疑方向：该按钮走的是另一条读点（例如只在某个定时器回调里轮询），或命中区与绘制区不同。
-- **读数（2026-11-09，同机）**：三次独立运行（纯 click / move 后 click / `mouse_down` 4 s 后 `mouse_up`），房间帧 hash 稳定在 `0xF13F23F24EEEE636`（hover 态）不变。
-- **代表守卫**：暂无（`room-exit.graph` 若把这行换回 `click center`，会以 `expect_change` **响亮失败** —— 那就是它的判据形状）。
-- **复现**：`apps/emulator-lift/scripts/interaction/room-exit.graph` 的 `room` 节点把 `action key 0x1B` 换回 `action click center`。
+### BUG-16 · `EU-ROOM` 里的「戻る」按钮对**注入点击**没有反应 ⇒ **不是缺陷**（2026-11-09 是量测窗 artifact）
+- **归属改判（2026-11-10）**：`room-exit.graph` 的 room 节点换回 `action click center` 后**真机 exit 0 + `task done`**，
+  终态 = TITLE 稳定帧 hash `0x94CB492BF7F1AEEB`。三次 run（12:39 / 12:47 / 12:52）**读数逐位相同**：
+  `insns=2120728564`、`transitions=11 actions=3 samples=249 changes=44`；三份 trace 里两份 copy 图逐行相同，
+  本尊那份只差 `origin=` 一行（`diff` 实测）。
+  ⇒ 按钮不是"点不动"；**抬起那一下点击就已生效**，只是"出房间"要跨过一个极长的重载帧才落到 TITLE。
+- **2026-11-09 为什么读成"点不动"（已核，不是猜测）**：退出要经过 **抬起帧之后 103 帧退场**
+  （每帧 ≈29.5k 条，画面就是 hover 态 `0xF13F…`），再进 **单帧 730,765,167 条**的 TITLE 重载帧
+  （`LIFT_FRAME_TRACE=1`，≈73 s guest / 24 s 墙钟）。那三次 run 的 `quit` 分别落在抬起后
+  +98M / +188M / +350M 条 —— **全在那一个重载帧里面**，而且三次都恰好"抬起后 103 帧"
+  （与今天的退场帧数相同）⇒ 退出当时**已经在进行**，取样窗在重载帧结束前被 `quit` 关掉了。
+  旧读数"hash 稳定在 hover 态不变"正是那 103 帧退场期的画面。
+- **点击确实是原因（四路对照，2026-11-10，同机）**：空白点 `click 100 100` / 不点击 / 只 hover ⇒ 全部 **exit 5**
+  （`expect-change(node room)` 或 `timeout(node back)`）；点 CG 鑑賞 `1100,150` ⇒ 画面变了但**不是** TITLE。
+- **★ 判据的坑（留着防再犯）**：room 节点的 `expect screen changed` 会被**抬起那一下的 hover 重绘**满足 ⇒
+  它**不能**证明"点击生效"；真正的判据是 `back` 节点等到 TITLE hash。
+- **命中区 ≠ 绘制框**：`(1240,687)`（框中心）与 `(1267,706)`（右下内缩 5px）都能触发；同框内的 `(1205,670)` 与
+  框外的 `(1190,690)` 在 900M 条窗口里都无效 ⇒ 绘制框 `1200..1272 × 652..711` 的**左边缘不在命中区**。
+  命中矩形由脚本参数给定（handler `sub_420640` → `sub_403B30`），不是硬编码 ⇒ `screen rect … avg` 的用途是
+  "认出这一屏 + 取中心"，不是"精确命中区"。
+- **右键是同一条路**：`WM_RBUTTONUP`→`0x4B9D3F`→`sub_4B8DC0(1)` ⇒ 输入字 **bit5 = 引擎的取消位**
+  （`0x411CFE test byte ptr [ebx],20h`）。实测 `room-exit-right.graph`（`click center right`）⇒ exit 0 +
+  `task done` + 同一个 TITLE hash（`OBS-20261110-04`）⇒ 任务图已覆盖它
+  （⛔ 取消目标由脚本登记的取消标签决定，别把右键图当模板套到别的屏）。
+- **代表守卫**：`apps/emulator-lift/tests/interaction_graph.cpp` 的 `graph-scripts-parse`（两份出房间图必须能解析）
+  + `parse-button-right` / `emit-button-carried`；**终态级判据仍是 assets 档真机 run**（要安装树）。
+- **复现（成功路径）**：`--interaction-graph scripts/interaction/room-exit.graph` ⇒ exit 0 + trace 末 `task done`。
+- **重开条件**：若再出现"点了没反应"，先确认观测窗盖住了一次 TITLE 重载帧 —— ⛔ 别再用 `--input-script` 里
+  `at insn` 的硬锚点当终点（11-09 就是那么误判的）。
 
 ### BUG-17 · 纹理上传的行距按 256 对齐、SDL/Metal 按目标宽度算源行距 ⇒ 整张纹理被削成横条（**已修**）
 - **现象**：`--raster gpu --raster-sprites 1`（本次改动前的缺省）进 **OPTION** 或 **EU-ROOM** 后，整块大背景（房间的糕点店照片、OPTION 列表文字）呈**横向条带 / 撕裂**；同一帧里的小 UI 面板（按钮框、图标）正常。同一帧把 sprite 交给 CPU（`--raster-sprites 0`）画面**完全正确**。
