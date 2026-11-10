@@ -640,6 +640,13 @@ void shimSetTextureStageState(X86& cpu, ShimCall& call) {
     const std::uint32_t stage = call.u32(1);
     const std::uint32_t type = call.u32(2);
     const std::uint32_t value = call.u32(3);
+    // ★ 诊断（默认关，`LIFT_DRAW_CALLSITE=1` 时开）：带**返回地址**的 stage 状态写。渐变层的
+    //   arg2 到底是 DIFFUSE(0) 还是 TFACTOR(3) 决定它是不是 no-op；`ret=` 用来定位写它的引擎 EA。
+    static const bool stage_trace = std::getenv("LIFT_DRAW_CALLSITE") != nullptr;
+    if (stage_trace && stage < 2u && type >= 1u && type <= 6u) {
+        std::fprintf(stderr, "[sts] stage=%u type=%u value=%u ret=%08X\n", stage, type, value, call.ret_ea);
+        std::fflush(stderr);
+    }
     std::string why;
     const std::uint32_t hr = d3d9::setTextureStageState(cpu, dev.state, stage, type, value, &why);
     if (hr != d3d9::kOk) {
@@ -859,11 +866,53 @@ void shimSetIndices(X86& cpu, ShimCall& call) {
     call.result = hr;
 }
 
+// ★ 诊断（默认关，`LIFT_DRAW_CALLSITE=1` 时开）：打一条 guest 调用链 —— `[<tag>] chain=<ebp 链上的返回地址…>`。
+//   用途 = 回答"这一笔是**谁**发的"：只用 `ret=` 只能看到最近一跳，整条链才能落到引擎函数上。
+//   加 `LIFT_DRAW_LOCALS=<hex EA>` 时，链上**返回地址等于该 EA** 的那一帧多打 `locals=[ebp-0x40..ebp-0x08]`
+//   （读该调用点的实参与局部；例 `004B4335` = RenderPolygon 那一帧，`[ebp-0x24]`/`[ebp-0x20]` 是纹理 id 数组）。
+//   ⛔ 只读、不改执行结果，也不进任何基线。
+static bool callSiteTraceOn() {
+    static const bool on = std::getenv("LIFT_DRAW_CALLSITE") != nullptr;
+    return on;
+}
+
+static void printGuestChain(X86& cpu, const char* tag) {
+    static const std::uint32_t locals_ea = [] {
+        const char* text = std::getenv("LIFT_DRAW_LOCALS");
+        return text != nullptr ? static_cast<std::uint32_t>(std::strtoul(text, nullptr, 16)) : 0u;
+    }();
+    std::fprintf(stderr, "[%s] chain=", tag);
+    std::uint32_t fp = cpu.r[kEbp];
+    for (int i = 0; i < 6; ++i) {
+        if (fp < 0x10000u || (fp & 3u) != 0u) break;
+        const std::uint32_t ret = cpu.mem->rd32(fp + 4u);
+        const std::uint32_t next = cpu.mem->rd32(fp);
+        if (ret < 0x10000u) break;
+        std::fprintf(stderr, "%08X ", ret);
+        if (locals_ea != 0 && ret == locals_ea) {
+            std::fprintf(stderr, "locals=");
+            for (int off = 0x40; off >= 0x08; off -= 4) {
+                std::fprintf(stderr, "%08X ", cpu.mem->rd32(fp - static_cast<std::uint32_t>(off)));
+            }
+        }
+        if (next <= fp || (next & 3u) != 0u) break;
+        fp = next;
+    }
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+}
+
 void shimDrawPrimitive(X86& cpu, ShimCall& call) {
     d3d9::DeviceInfo dev;
     if (!requireDevice(cpu, call, "IDirect3DDevice9::DrawPrimitive(+0x144)", &dev)) {
         call.result = d3d9::kInvalidCall;
         return;
+    }
+    // ★ 诊断（默认关）：这一批是**哪个 guest EA 调的**。`ret=` 是 shim 的返回地址 ⇒ 调用点 = `ret-5`
+    //   （`call rel32`）或 `ret-6`（`call ds:`）；`chain=` 是整条 ebp 链。⛔ 只读、不改执行结果。
+    if (callSiteTraceOn()) {
+        std::fprintf(stderr, "[draw-call] prim=%u verts=%u ret=%08X ", call.u32(1), call.u32(2), call.ret_ea);
+        printGuestChain(cpu, "draw-call-chain");
     }
     std::string why;
     const std::uint32_t hr = d3d9::drawPrimitive(cpu, dev.state, call.u32(1), call.u32(2), call.u32(3), &why);
@@ -1043,11 +1092,8 @@ void shimCreateStateBlock(X86& cpu, ShimCall& call) {
 //     所以这里只是"让 Create/Set 不再炸"，不是"已经能画 Live2D"。
 // ★ 声明内容按字节复制到 guest 堆（调用方的 `unk_551FF0` 在 .data，生命周期长；复制更稳）。
 // ---------------------------------------------------------------------------------------
-constexpr std::uint32_t kVdMagicValue = 0x4C434456u;  // 'VDCL'
-constexpr std::uint32_t kVdDevice = 4;
-constexpr std::uint32_t kVdBytes = 8;
-constexpr std::uint32_t kVdData = 12;
-constexpr std::uint32_t kVdHeader = 12;
+// ★ `'VDCL'` 状态块的布局常量**只有一份**：`runtime/d3d9.h` 里 `namespace lift` 的那 5 个
+//   （shim / 流水线共用）。⛔ 这里不再重复定义。
 
 // `'VDCL'` 状态块的**唯一**回收实现（幂等：先清 magic 再 free，第二次进来直接返回）。
 // ★ 为什么它必须是 `createObject` 的 `on_zero` 而不是只挂在 iface 的 Release shim 上：
@@ -1414,6 +1460,8 @@ void shimIndexBufferGetDevice(X86& cpu, ShimCall& call) {
 void shimVertexBufferLock(X86& cpu, ShimCall& call) {
     const std::uint32_t self = call.u32(0);
     const std::uint32_t user = cpu.com ? cpu.com->userOf(self) : 0;
+    // ★ 诊断（默认关）：谁在填顶点缓冲（渐变层的顶点 alpha 就是在这一笔之后写进去的）。
+    if (callSiteTraceOn()) printGuestChain(cpu, "vblock");
     std::string why;
     const std::uint32_t hr =
         d3d9::vertexBufferLock(cpu, user, call.u32(1), call.u32(2), call.u32(3), call.u32(4), &why);

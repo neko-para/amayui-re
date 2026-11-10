@@ -540,9 +540,16 @@ std::uint32_t pixelFromColor(const SurfaceFormat& fmt, std::uint32_t argb) {
     return pixel_format::pixelFromColor(fmt, argb);
 }
 
+// ★ 诊断（见 `frameSeq()` 的注释）：清过后缓冲的次数 = 帧序号。只读、不参与语义、不进基线。
+static std::uint32_t g_frame_seq = 0;
+
+std::uint32_t frameSeq() { return g_frame_seq; }
+
 std::uint32_t clear(X86& cpu, const DeviceInfo& dev, std::uint32_t count, std::uint32_t rects_ea,
                     std::uint32_t flags, std::uint32_t color, float z, std::uint32_t stencil,
                     std::string* why) {
+    // ★ 诊断计数：清后缓冲 = 新的一帧（见 `frameSeq()` 的注释）。只读、不参与语义、不进基线。
+    if ((flags & kClearTarget) != 0) ++g_frame_seq;
     Machine* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return kFail;
     const std::uint32_t allowed = kClearTarget | kClearZBuffer | kClearStencil;
@@ -1171,6 +1178,22 @@ bool unlockRect(X86& cpu, const TextureInfo& tex, std::uint32_t level, std::stri
     }
 
     return true;
+}
+
+// ★ 顶点声明对象 → 元素表（'VDCL' 头 + `CreateVertexDeclaration` 当时那份 D3DVERTEXELEMENT9 数组）。
+//   光栅侧要按声明取顶点就必须能读到它；⛔ 不猜布局：magic / 长度不对就返回 false，由调用方响亮拒绝。
+bool declarationElements(X86& cpu, std::uint32_t decl_object, const std::uint8_t** data, std::uint32_t* bytes) {
+    if (data) *data = nullptr;
+    if (bytes) *bytes = 0;
+    if (decl_object == 0 || !cpu.com) return false;
+    const std::uint32_t state = cpu.com->userOf(decl_object);
+    if (state == 0 || !cpu.mem->committed(state, kVdHeader)) return false;
+    if (cpu.mem->rd32(state) != kVdMagicValue) return false;
+    const std::uint32_t n = cpu.mem->rd32(state + kVdBytes);
+    if (n == 0 || n % 8u != 0 || !cpu.mem->committed(state + kVdData, n)) return false;
+    if (data) *data = cpu.mem->host(state + kVdData);
+    if (bytes) *bytes = n;
+    return data != nullptr ? *data != nullptr : true;
 }
 
 // ---------------------------------------------------------------------------------------

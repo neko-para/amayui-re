@@ -18,8 +18,11 @@
 //     （决策见 `samplerUsesLinear`，⛔ 不是"参数传了却不用"）。
 //   · 采样器 MIPFILTER / MAXMIPLEVEL / LODBIAS：本线只有 level 0 ⇒ 记录、不影响像素。
 //   · 多重采样 / 抗锯齿 / 线框 / patch / 顶点混合：不支持 ⇒ 记录 + 一行日志。
-//   · 顶点声明（D3DVERTEXELEMENT9）：`CreateVertexDeclaration` / `SetVertexDeclaration` 已接对象形状，
-//     但 Draw 仍只认 FVF ⇒ 有声明时响亮失败（⛔ 不猜两个 stream 的语义）。
+//   · 顶点声明（D3DVERTEXELEMENT9）：`DrawPrimitive` / `DrawIndexedPrimitive` 支持**一份**受支持形状
+//     —— POSITION(FLOAT3) + TEXCOORD0(FLOAT2) [+ COLOR0(D3DCOLOR)]，元素可以落在**两条流**上
+//     （引擎的 2D 图层就是 stream0=POSITION、stream1=TEXCOORD）。做法 = 按声明把两条流**去交错**
+//     成一份临时缓冲（XYZ+UV[+diffuse]）再走既有 FVF 路；⛔ 其它元素（法线 / 混合权 / 第二套 UV /
+//     非 32 位分量）与 `*UP` 变体仍**响亮失败**（`declLayoutOf` 给原因）。
 //   · 纹理级运算：支持 DISABLE/SELECTARG1/2/MODULATE(2X/4X)/ADD/ADDSIGNED(2X)/SUBTRACT/
 //     ADDSMOOTH/BLEND*ALPHA/MULTIPLYADD/LERP；其余 ⇒ 记录一次 + 退回 SELECTARG1。
 //   · 光栅：像素中心采样 + 左上填充规则（顶点顺序 = 屏幕空间顺时针 = D3D 正面）。
@@ -1162,6 +1165,15 @@ void applyTextureOp(X86& cpu, const DrawContext& ctx, std::uint32_t stage, const
 // ---------------------------------------------------------------------------------------
 // 光栅化一个屏幕空间三角形
 // ---------------------------------------------------------------------------------------
+// ★ 诊断聚合：这一批 CPU 光栅**真正用来混合**的 α（均值/最小/最大）。只读、不影响像素。
+struct AlphaAgg {
+    unsigned long long n = 0;
+    unsigned long long sum = 0;
+    unsigned mn = 255;
+    unsigned mx = 0;
+};
+static AlphaAgg g_alpha_agg;
+
 void rasterTriangle(DrawContext& ctx, const SVertex& va, const SVertex& vb, const SVertex& vc) {
     X86& cpu = *ctx.cpu;
     const double area = (vb.x - va.x) * (vc.y - va.y) - (vb.y - va.y) * (vc.x - va.x);
@@ -1321,6 +1333,16 @@ void rasterTriangle(DrawContext& ctx, const SVertex& va, const SVertex& vb, cons
             unsigned fg = clamp255(current.c[1]);
             unsigned fb = clamp255(current.c[2]);
             unsigned fa = clamp255(current.c[3]);
+            // ★ 诊断聚合（`[draw] fa=`）：这一批**真正参与混合**的 α 的均值/最小/最大。
+            //   用途 = 分辨"α 是 0 / 是 TFACTOR 的 α / 是顶点 α"。只在 `LIFT_SLOW_DRAW=1` 时累积
+            //   （静态缓存 ⇒ 每像素只是一次可预测分支），⛔ 不影响像素。
+            static const bool alpha_agg_on = std::getenv("LIFT_SLOW_DRAW") != nullptr;
+            if (alpha_agg_on) {
+                ++g_alpha_agg.n;
+                g_alpha_agg.sum += fa;
+                if (fa < g_alpha_agg.mn) g_alpha_agg.mn = fa;
+                if (fa > g_alpha_agg.mx) g_alpha_agg.mx = fa;
+            }
             // alpha test
             if (ctx.alpha_test) {
                 const std::uint32_t ref = ctx.alpha_ref & 0xFFu;
@@ -2181,6 +2203,7 @@ std::uint32_t setTextureStageState(X86& cpu, std::uint32_t dev, std::uint32_t st
         pipeLog("SetTextureStageState", "Type=%u 越界 ⇒ D3DERR_INVALIDCALL", type);
         return kInvalidCall;
     }
+    // ★ 诊断在 shim 层（`shims/d3d9.cpp` 的 shimSetTextureStageState）：那里才有**返回地址**。
     if (type == kTssColorOp || type == kTssAlphaOp) {
         if (value == 0u || value > 26u) {
             pipeLog("SetTextureStageState", "D3DTOP=%u 非法 ⇒ D3DERR_INVALIDCALL", value);
@@ -3346,6 +3369,7 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
         SVertex a, b, c;
     };
     std::vector<SavedTri> saved_tris;
+    g_alpha_agg = AlphaAgg{};  // ★ 诊断：本批的混合 α 聚合（见 `[draw] fa=`）
     GpuRaster* gpu = gpu_ok ? ctx.gpu : nullptr;
     // 纹理坐标按 **stage 0 的 D3DTSS_TEXCOORDINDEX** 取（⛔ 不硬编码 TEXCOORD0）
     const std::uint32_t gpu_tex_coord = plan.textured ? (ctx.stages[0].tex_coord_index & 0xFFFFu) : 0u;
@@ -3623,20 +3647,262 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
             for (std::uint32_t s = 0; s < kMaxTextureStages; ++s) {
                 if (ctx.textures[s].present) ++tex_present;
             }
+            // ★ `texserial=` 是**纹理身份**（`TextureInfo::serial`，进程级单调、永不复用）⇒ 两次 Draw 的
+            //   这个数相同 = 它们采的是同一张纹理；不同 = 换了纹理（⛔ 只看 `texfmt=` 的 w/h/format 分不出来）。
+            // ★ `alpha=` 是**本批输入顶点**的 diffuse alpha 区间：渐变层每帧推进的就是这个数 ——
+            //   它不变而画面也不变，就不是"混合画错"，而是这一批本来就没有变化。
+            double alpha_min = 255.0;
+            double alpha_max = 0.0;
+            for (const CVertex& v : verts) {
+                if (v.a < alpha_min) alpha_min = v.a;
+                if (v.a > alpha_max) alpha_max = v.a;
+            }
+            // ★ `d0=` 是**第一个顶点**的 diffuse（r,g,b,a，0..255）：只打逐帧会推进的那个数，
+            //   `alpha=` 是整批 alpha 区间（4 个顶点同值 ⇒ 两者相等）。`uv=` 是本批 UV 的**范围**
+            //   （min..max）：同一张纹理覆盖整屏 vs 只取一个小区域（纯色块 / 黑块）靠它分辨。
+            static const CVertex kZeroVertex{};
+            const CVertex& v0 = verts.empty() ? kZeroVertex : verts.front();
+            double u0 = 1e9, u1 = -1e9, vv0 = 1e9, vv1 = -1e9;
+            for (const CVertex& v : verts) {
+                if (v.u[0] < u0) u0 = v.u[0];
+                if (v.u[0] > u1) u1 = v.u[0];
+                if (v.v[0] < vv0) vv0 = v.v[0];
+                if (v.v[0] > vv1) vv1 = v.v[0];
+            }
+            if (verts.empty()) {
+                u0 = u1 = vv0 = vv1 = 0.0;
+            }
+            // ★ `texa=` 是**绑定纹理自身**的 α（在 4 个 1/4–3/4 位置采样，给 min..max）。
+            //   用途 = 分辨"混合 α=0 是因为纹理 α=0"还是"stage 数学算错"；`n` = 采样点数。
+            //   ⚠ 只打 stage 0；纹理不在 arena 里 / 没绑 ⇒ `texa=none`。
+            int texa_n = 0;
+            unsigned texa_min = 255, texa_max = 0;
+            unsigned long long texa_sum = 0;
+            if (ctx.textures[0].present && ctx.textures[0].pixels != nullptr) {
+                const TextureView& tv = ctx.textures[0];
+                // ★ 16×16 网格（不是 4 点）：判断"整张纹理 α 是不是 0"必须覆盖足够多的位置，
+                //   4 点采样会在大图上命中空白区，把"局部透明"误读成"整张透明"。
+                const int kGrid = 16;
+                for (int gy = 0; gy < kGrid; ++gy) {
+                    for (int gx = 0; gx < kGrid; ++gx) {
+                        const int px = static_cast<int>((static_cast<long long>(tv.width) * (2 * gx + 1)) / (2 * kGrid));
+                        const int py = static_cast<int>((static_cast<long long>(tv.height) * (2 * gy + 1)) / (2 * kGrid));
+                        const std::uint8_t* p = tv.pixels + static_cast<std::size_t>(py) * tv.pitch +
+                                                static_cast<std::size_t>(px) * tv.format.bytesPerPixel();
+                        const std::uint32_t raw = pixel_format::loadPixel(p, tv.format.bpp);
+                        const unsigned a = pixel_format::expandChannel(raw, tv.format.amask);
+                        ++texa_n;
+                        texa_sum += a;
+                        if (a < texa_min) texa_min = a;
+                        if (a > texa_max) texa_max = a;
+                    }
+                }
+            }
+            const double texa_mean =
+                texa_n != 0 ? static_cast<double>(texa_sum) / static_cast<double>(texa_n) : 0.0;
             std::fprintf(stderr,
-                         "[draw] prim=%u verts=%zu tris=%u rast=%u pixels=%llu gpu=%d why=%s "
-                         "sep_alpha=%d tex=%u blend=%u/%u op=%u cw=%X fvf=%X coord=%u "
-                         "stage0=%u/%u(%u/%u) samp=U%uV%u M%u%u texfmt=%u/%X %dx%d submit=%.1fms\n",
-                         prim, verts.size(), triangles, rasterized,
+                         "[draw] frame=%u prim=%u verts=%zu tris=%u rast=%u pixels=%llu gpu=%d why=%s "
+                         "sep_alpha=%d tex=%u texserial=%u tfactor=%08X alpha=%.1f..%.1f d0=%.0f,%.0f,%.0f,%.0f "
+                         "uv=%.4f..%.4f,%.4f..%.4f "
+                         "blend=%d/%u/%u op=%u cw=%X fvf=%X coord=%u "
+                         "stage0=%u/%u(%u/%u,%u/%u) samp=U%uV%u M%u%u texfmt=%u/%X %dx%d "
+                         "texa=%d:%u..%u/%.0f fa=%lld:%.0f/%u/%u submit=%.1fms\n",
+                         d3d9::frameSeq(), prim, verts.size(), triangles, rasterized,
                          (unsigned long long)ctx.pixels_written, gpu_done ? 1 : 0,
                          gpu_why.empty() ? "-" : gpu_why.c_str(), ctx.separate_alpha_blend ? 1 : 0,
-                         tex_present, ctx.src_blend, ctx.dst_blend, ctx.blend_op, ctx.color_write, ctx.fvf,
+                         tex_present, ctx.textures[0].serial, ctx.texture_factor, alpha_min, alpha_max, v0.r, v0.g,
+                         v0.b, v0.a, u0,
+                         u1, vv0, vv1, ctx.blend ? 1 : 0, ctx.src_blend, ctx.dst_blend, ctx.blend_op,
+                         ctx.color_write, ctx.fvf,
                          ctx.stages[0].tex_coord_index & 0xFFFFu, ctx.stages[0].color_op, ctx.stages[0].alpha_op,
-                         ctx.stages[0].color_arg1, ctx.stages[0].alpha_arg1, ctx.samplers[0].address_u,
-                         ctx.samplers[0].address_v, ctx.samplers[0].mag_filter, ctx.samplers[0].min_filter,
-                         static_cast<unsigned>(ctx.textures[0].format.bpp),
-                         ctx.textures[0].format.amask, ctx.textures[0].width, ctx.textures[0].height, ms);
+                         ctx.stages[0].color_arg1, ctx.stages[0].color_arg2, ctx.stages[0].alpha_arg1,
+                         ctx.stages[0].alpha_arg2, ctx.samplers[0].address_u, ctx.samplers[0].address_v,
+                         ctx.samplers[0].mag_filter, ctx.samplers[0].min_filter,
+                         static_cast<unsigned>(ctx.textures[0].format.bpp), ctx.textures[0].format.amask,
+                         ctx.textures[0].width, ctx.textures[0].height, texa_n, texa_min, texa_max, texa_mean,
+                         static_cast<long long>(g_alpha_agg.n),
+                         g_alpha_agg.n != 0 ? static_cast<double>(g_alpha_agg.sum) / static_cast<double>(g_alpha_agg.n)
+                                            : 0.0,
+                         g_alpha_agg.mn, g_alpha_agg.mx, ms);
             std::fflush(stderr);
+        }
+    }
+    return true;
+}
+
+// =====================================================================================
+// 顶点声明（D3DVERTEXELEMENT9）→ 本线的取顶点计划
+// =====================================================================================
+// ★ 为什么需要：引擎的 2D 图层走 `SetVertexDeclaration` + **两条流**（stream0 = POSITION FLOAT3、
+//   stream1 = TEXCOORD0 FLOAT2）+ `DrawIndexedPrimitive`，而本线的光栅只吃"一路交错顶点"。
+//   ⇒ 这里按声明把两条流**去交错**成一份临时缓冲（XYZ + UV [+ diffuse]），再交给既有的
+//   gather / transform。⛔ 不认识的元素（法线 / 混合权 / 第二套 UV / 非 32 位分量）一律响亮拒绝。
+struct DeclElem {
+    std::uint32_t stream = 0;
+    std::uint32_t offset = 0;
+    std::uint32_t type = 0;   // D3DDECLTYPE
+    std::uint32_t usage = 0;  // D3DDECLUSAGE
+};
+
+struct DeclLayout {
+    bool present = false;   // 这一批用的是顶点声明（而不是 SetFVF）
+    DeclElem pos;
+    DeclElem tex;
+    DeclElem color;
+    bool has_tex = false;
+    bool has_color = false;
+    std::uint32_t synth_stride = 0;  // 去交错后的步长（12 / 20 / 24）
+    FvfLayout synth;                 // 给既有 gather 用的合成布局
+};
+
+// D3DDECLTYPE（只认本线用得到的几种）
+constexpr std::uint32_t kDeclFloat1 = 0;
+constexpr std::uint32_t kDeclFloat2 = 1;
+constexpr std::uint32_t kDeclFloat3 = 2;
+constexpr std::uint32_t kDeclFloat4 = 3;
+constexpr std::uint32_t kDeclD3DColor = 4;
+// D3DDECLUSAGE
+constexpr std::uint32_t kDeclUsagePosition = 0;
+constexpr std::uint32_t kDeclUsageTexCoord = 5;
+constexpr std::uint32_t kDeclUsageColor = 10;
+
+// 元素表（8 B/项：Stream u16 / Offset u16 / Type u8 / Method u8 / Usage u8 / UsageIndex u8）。
+bool declLayoutOf(X86& cpu, std::uint32_t decl, DeclLayout* out, std::string* why) {
+    out->present = true;
+    const std::uint8_t* elems = nullptr;
+    std::uint32_t bytes = 0;
+    if (!declarationElements(cpu, decl, &elems, &bytes)) {
+        if (why) *why = "D3D9 流水线：顶点声明的元素表不可读（不是本模块建的 / 已被回收）";
+        return false;
+    }
+    bool have_pos = false;
+    for (std::uint32_t at = 0; at + 8u <= bytes; at += 8u) {
+        const std::uint32_t stream = static_cast<std::uint32_t>(elems[at]) | (static_cast<std::uint32_t>(elems[at + 1]) << 8);
+        if (stream == 0xFFu) break;  // D3DDECL_END
+        const std::uint32_t offset = static_cast<std::uint32_t>(elems[at + 2]) |
+                                     (static_cast<std::uint32_t>(elems[at + 3]) << 8);
+        const std::uint32_t type = elems[at + 4];
+        // ⚠ D3DVERTEXELEMENT9 的字段序：Stream u16 / Offset u16 / Type u8 / Method u8 / Usage u8 /
+        //   UsageIndex u8 ⇒ usage 在**第 6 字节**、usageIndex 在第 7 字节（⛔ 不是 5/6）。
+        const std::uint32_t usage = elems[at + 6];
+        const std::uint32_t usage_index = elems[at + 7];
+        DeclElem e;
+        e.stream = stream;
+        e.offset = offset;
+        e.type = type;
+        e.usage = usage;
+        if (usage == kDeclUsagePosition && usage_index == 0 && type == kDeclFloat3) {
+            out->pos = e;
+            have_pos = true;
+        } else if (usage == kDeclUsageTexCoord && usage_index == 0 && type == kDeclFloat2) {
+            out->tex = e;
+            out->has_tex = true;
+        } else if (usage == kDeclUsageColor && usage_index == 0 && type == kDeclD3DColor) {
+            out->color = e;
+            out->has_color = true;
+        } else {
+            if (why) {
+                char buf[176];
+                std::snprintf(buf, sizeof(buf),
+                              "D3D9 流水线：顶点声明的元素 stream=%u offset=%u type=%u usage=%u idx=%u 不在本线支持集"
+                              "（只支持 POSITION/FLOAT3、TEXCOORD0/FLOAT2、COLOR0/D3DCOLOR）",
+                              stream, offset, type, usage, usage_index);
+                *why = buf;
+            }
+            return false;
+        }
+        if (stream >= 2u) {
+            if (why) *why = "D3D9 流水线：顶点声明用到 stream≥2（本线只接 2 条流）";
+            return false;
+        }
+    }
+    if (!have_pos) {
+        if (why) *why = "D3D9 流水线：顶点声明里没有 POSITION(FLOAT3)";
+        return false;
+    }
+    FvfLayout& l = out->synth;
+    l = FvfLayout{};
+    l.valid = true;
+    l.xyz = true;
+    l.pos_offset = 0;
+    l.stride = 12;
+    if (out->has_tex) {
+        l.tex_count = 1;
+        l.tex_size[0] = 2;
+        l.tex_offset[0] = l.stride;
+        l.stride += 8u;
+    }
+    if (out->has_color) {
+        l.has_diffuse = true;
+        l.diffuse_offset = l.stride;
+        l.stride += 4u;
+    }
+    out->synth_stride = l.stride;
+    return true;
+}
+
+// 按声明把两条流去交错成一份临时缓冲（`first` = 起始顶点序号，`count` = 顶点数）。
+bool buildDeclVertices(X86& cpu, std::uint32_t pe, const char* method, const DeclLayout& d, std::uint32_t first,
+                       std::uint32_t count, std::vector<std::uint8_t>* out, std::string* why) {
+    struct StreamBinding {
+        const std::uint8_t* base = nullptr;
+        std::uint32_t offset = 0;
+        std::uint32_t stride = 0;
+        std::uint32_t length = 0;
+    } sb[2];
+    const DeclElem* used[3] = {&d.pos, d.has_tex ? &d.tex : nullptr, d.has_color ? &d.color : nullptr};
+    for (const DeclElem* e : used) {
+        if (e == nullptr) continue;
+        StreamBinding& s = sb[e->stream];
+        if (s.base != nullptr) continue;  // 同一条流只解析一次
+        const std::uint32_t slot = kPlStreams + e->stream * 16u;
+        const std::uint32_t vb = plGet(cpu, pe, slot);
+        const std::uint32_t gen = plGet(cpu, pe, slot + 12u);
+        if (vb == 0) {
+            if (why) *why = "D3D9 流水线：顶点声明用到的流没有 SetStreamSource";
+            return false;
+        }
+        std::uint32_t data = 0;
+        if (!boundVertexBufferOfState(cpu, vb, gen, method, nullptr, &s.length, &data, why)) return false;
+        s.base = cpu.mem->host(data);
+        if (s.base == nullptr) {
+            if (why) *why = "D3D9 流水线：顶点缓冲的宿主映射为空";
+            return false;
+        }
+        s.offset = plGet(cpu, pe, slot + 4u);
+        s.stride = plGet(cpu, pe, slot + 8u);
+        if (s.stride == 0) {
+            if (why) *why = "D3D9 流水线：顶点声明的流步长是 0（SetStreamSource 没给 stride）";
+            return false;
+        }
+    }
+    const std::uint32_t elem_bytes[3] = {12u, d.has_tex ? 8u : 0u, d.has_color ? 4u : 0u};
+    for (int k = 0; k < 3; ++k) {
+        if (used[k] == nullptr) continue;
+        const StreamBinding& s = sb[used[k]->stream];
+        const std::uint64_t need = static_cast<std::uint64_t>(s.offset) +
+                                   static_cast<std::uint64_t>(first + count) * s.stride;
+        if (need + elem_bytes[k] > static_cast<std::uint64_t>(s.length) + elem_bytes[k] ||
+            need > s.length) {
+            char buf[192];
+            std::snprintf(buf, sizeof(buf),
+                          "D3D9 流水线：声明取顶点越过流 %u 的缓冲（需要 %llu B，缓冲 %u B，stride=%u）",
+                          used[k]->stream, static_cast<unsigned long long>(need), s.length, s.stride);
+            if (why) *why = buf;
+            return false;
+        }
+    }
+    out->assign(static_cast<std::size_t>(count) * d.synth_stride, 0);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const std::uint32_t idx = first + i;
+        std::uint8_t* dst = out->data() + static_cast<std::size_t>(i) * d.synth_stride;
+        for (int k = 0; k < 3; ++k) {
+            if (used[k] == nullptr) continue;
+            const StreamBinding& s = sb[used[k]->stream];
+            const std::uint32_t dst_off = k == 0 ? 0u : (k == 1 ? d.synth.tex_offset[0] : d.synth.diffuse_offset);
+            std::memcpy(dst + dst_off,
+                        s.base + s.offset + static_cast<std::size_t>(idx) * s.stride + used[k]->offset,
+                        elem_bytes[k]);
         }
     }
     return true;
@@ -3644,7 +3910,7 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
 
 // Draw 的公共前置检查（真机的失败码）
 bool drawPrecheck(X86& cpu, const char* method, std::uint32_t dev, std::uint32_t* pe_out,
-                  FvfLayout* fvf_out, std::string* why) {
+                  FvfLayout* fvf_out, DeclLayout* decl_out, std::string* why) {
     std::uint32_t pe = 0;
     if (!pipelineOf(cpu, dev, &pe, why)) return false;
     // ★ 进入 Draw 就算一次调用（含之后的失败）—— 计数器是引擎要求画了几次的可观察量
@@ -3656,9 +3922,19 @@ bool drawPrecheck(X86& cpu, const char* method, std::uint32_t dev, std::uint32_t
     }
     const std::uint32_t decl = plGet(cpu, pe, kPlVertexDecl);
     if (decl != 0) {
-        pipeLog(method, "设了顶点声明（0x%08X）但本线只支持 SetFVF ⇒ D3DERR_INVALIDCALL", decl);
-        if (why) *why = "D3D9 流水线：只支持 FVF 路";
-        return false;
+        // ★ 声明路：只有调用方要得出"声明布局"时才支持（UP 变体没有流，仍按不支持拒绝）。
+        if (decl_out == nullptr) {
+            pipeLog(method, "设了顶点声明（0x%08X）但这一条 Draw 不支持声明路 ⇒ D3DERR_INVALIDCALL", decl);
+            if (why) *why = "D3D9 流水线：这一条 Draw 不支持顶点声明";
+            return false;
+        }
+        if (!declLayoutOf(cpu, decl, decl_out, why)) {
+            pipeLog(method, "顶点声明（0x%08X）不支持：%s ⇒ D3DERR_INVALIDCALL", decl, why ? why->c_str() : "");
+            return false;
+        }
+        *pe_out = pe;
+        *fvf_out = decl_out->synth;
+        return true;
     }
     const std::uint32_t fvf = plGet(cpu, pe, kPlFvf);
     if (fvf == 0) {
@@ -3717,7 +3993,8 @@ std::uint32_t drawPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t prim, std
                             std::uint32_t prim_count, std::string* why) {
     FvfLayout fvf;
     std::uint32_t pe = 0;
-    if (!drawPrecheck(cpu, "DrawPrimitive", dev, &pe, &fvf, why)) return kInvalidCall;
+    DeclLayout decl;
+    if (!drawPrecheck(cpu, "DrawPrimitive", dev, &pe, &fvf, &decl, why)) return kInvalidCall;
     if (prim < kPtPointList || prim > kPtTriangleFan) {
         pipeLog("DrawPrimitive", "PrimitiveType=%u 非法 ⇒ D3DERR_INVALIDCALL", prim);
         return kInvalidCall;
@@ -3729,19 +4006,25 @@ std::uint32_t drawPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t prim, std
     // ★ 槽里是 **(对象 EA, 绑定时代际)**，⛔ 不是状态块 EA —— 只能经身份校验换算成状态块
     //   （缺陷单 `REQ-01M701NYF2B3YV1YFSZBMPQZ41` 的 #4：只验 `'VB09'` magic 会让"同 EA 新缓冲"
     //   静默顶替旧缓冲的顶点）。不符 ⇒ `kInvalidCall` + 默认级别可见的告警，⛔ 不画别人的数据。
-    const std::uint32_t vb = plGet(cpu, pe, kPlStreams);
-    const std::uint32_t vb_gen = plGet(cpu, pe, kPlStreams + 12u);
-    if (vb == 0) {
-        pipeLog("DrawPrimitive", "没有 SetStreamSource(0) ⇒ D3DERR_INVALIDCALL");
-        return kInvalidCall;
-    }
+    // ★ 声明路（`decl.present`）不用流 0 的 vb/stride：那是 POSITION 流的布局，顶点由
+    //   `buildDeclVertices` 按声明从各自的流里取（越界检查也在那里逐流做）。
     std::uint32_t length = 0;
     std::uint32_t data = 0;
-    if (!boundVertexBufferOfState(cpu, vb, vb_gen, "DrawPrimitive", nullptr, &length, &data, why))
-        return kInvalidCall;
-    const std::uint32_t offset = plGet(cpu, pe, kPlStreams + 4u);
-    std::uint32_t stride = plGet(cpu, pe, kPlStreams + 8u);
-    if (stride == 0) stride = fvf.stride;
+    std::uint32_t offset = 0;
+    std::uint32_t stride = 0;
+    if (!decl.present) {
+        const std::uint32_t vb = plGet(cpu, pe, kPlStreams);
+        const std::uint32_t vb_gen = plGet(cpu, pe, kPlStreams + 12u);
+        if (vb == 0) {
+            pipeLog("DrawPrimitive", "没有 SetStreamSource(0) ⇒ D3DERR_INVALIDCALL");
+            return kInvalidCall;
+        }
+        if (!boundVertexBufferOfState(cpu, vb, vb_gen, "DrawPrimitive", nullptr, &length, &data, why))
+            return kInvalidCall;
+        offset = plGet(cpu, pe, kPlStreams + 4u);
+        stride = plGet(cpu, pe, kPlStreams + 8u);
+        if (stride == 0) stride = fvf.stride;
+    }
     std::uint32_t vertex_count = 0;
     switch (prim) {
         case kPtTriangleList: vertex_count = prim_count * 3u; break;
@@ -3751,23 +4034,32 @@ std::uint32_t drawPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t prim, std
         case kPtLineStrip: vertex_count = prim_count + 1u; break;
         default: vertex_count = prim_count; break;
     }
-    const std::uint64_t need = static_cast<std::uint64_t>(offset) +
-                               static_cast<std::uint64_t>(start_vertex + vertex_count) * stride;
-    if (need > length) {
-        char buf[192];
-        std::snprintf(buf, sizeof(buf),
-                      "D3D9 流水线：DrawPrimitive 越过顶点缓冲（需要 %llu B，缓冲 %u B，stride=%u）",
-                      static_cast<unsigned long long>(need), length, stride);
-        pipeLog("DrawPrimitive", "%s ⇒ D3DERR_INVALIDCALL", buf);
-        if (why) *why = buf;
-        return kInvalidCall;
+    if (!decl.present) {
+        const std::uint64_t need = static_cast<std::uint64_t>(offset) +
+                                   static_cast<std::uint64_t>(start_vertex + vertex_count) * stride;
+        if (need > length) {
+            char buf[192];
+            std::snprintf(buf, sizeof(buf),
+                          "D3D9 流水线：DrawPrimitive 越过顶点缓冲（需要 %llu B，缓冲 %u B，stride=%u）",
+                          static_cast<unsigned long long>(need), length, stride);
+            pipeLog("DrawPrimitive", "%s ⇒ D3DERR_INVALIDCALL", buf);
+            if (why) *why = buf;
+            return kInvalidCall;
+        }
     }
     Machine* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return kInvalidCall;
     DrawContext ctx;
     if (!prepareContext(cpu, "DrawPrimitive", dev, pe, &ctx, why)) return kInvalidCall;
+    std::vector<std::uint8_t> decl_buf;
     const std::uint8_t* base = nullptr;
-    {
+    if (decl.present) {
+        if (!buildDeclVertices(cpu, pe, "DrawPrimitive", decl, start_vertex, vertex_count, &decl_buf, why))
+            return kInvalidCall;
+        base = decl_buf.data();
+        offset = 0;
+        stride = decl.synth_stride;
+    } else {
         // guest 内存里的顶点数据（不走 arena ⇒ 直接指针）
         // ⚠ 这里用 GuestMemory 的宿主映射（与 Lock 返回的 guest EA 是同一块内存）
         base = cpu.mem->host(data);
@@ -3800,7 +4092,8 @@ std::uint32_t drawIndexedPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t pr
                                    std::uint32_t prim_count, std::string* why) {
     FvfLayout fvf;
     std::uint32_t pe = 0;
-    if (!drawPrecheck(cpu, "DrawIndexedPrimitive", dev, &pe, &fvf, why)) return kInvalidCall;
+    DeclLayout decl;
+    if (!drawPrecheck(cpu, "DrawIndexedPrimitive", dev, &pe, &fvf, &decl, why)) return kInvalidCall;
     if (prim < kPtPointList || prim > kPtTriangleFan) return kInvalidCall;
     if (prim_count == 0) return kOk;
     const std::uint32_t vb = plGet(cpu, pe, kPlStreams);
@@ -3842,7 +4135,14 @@ std::uint32_t drawIndexedPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t pr
     if (!requireMachine(cpu, &m, why)) return kInvalidCall;
     DrawContext ctx;
     if (!prepareContext(cpu, "DrawIndexedPrimitive", dev, pe, &ctx, why)) return kInvalidCall;
-    const std::uint8_t* vbase = reinterpret_cast<const std::uint8_t*>(cpu.mem->host(vdata));
+    // ★ 声明路：把两条流按声明去交错成一份 `num_vertices` 个顶点的临时缓冲，后面逐索引取顶点
+    //   就退化成"从这份交错缓冲里按 `synth_stride` 取"——与 FVF 路完全同一条。
+    std::vector<std::uint8_t> decl_buf;
+    if (decl.present && !buildDeclVertices(cpu, pe, "DrawIndexedPrimitive", decl, 0u, num_vertices, &decl_buf, why)) {
+        return kInvalidCall;
+    }
+    const std::uint8_t* vbase =
+        decl.present ? decl_buf.data() : reinterpret_cast<const std::uint8_t*>(cpu.mem->host(vdata));
     const std::uint8_t* ibase = reinterpret_cast<const std::uint8_t*>(cpu.mem->host(idata));
     if (!vbase || !ibase) {
         if (why) *why = "D3D9 流水线：顶点 / 索引缓冲的宿主映射为空";
@@ -3851,7 +4151,9 @@ std::uint32_t drawIndexedPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t pr
     const math::Mat4d world = readMatrix(cpu, pe + kPlTransforms + kTsWorld * 64u);
     const math::Mat4d view = readMatrix(cpu, pe + kPlTransforms + kTsView * 64u);
     const math::Mat4d proj = readMatrix(cpu, pe + kPlTransforms + kTsProjection * 64u);
-    const std::uint32_t offset = plGet(cpu, pe, kPlStreams + 4u);
+    const std::uint32_t voffset = decl.present ? 0u : plGet(cpu, pe, kPlStreams + 4u);
+    const std::uint32_t vstride = decl.present ? decl.synth_stride : stride;
+    const std::uint32_t vlen_eff = decl.present ? static_cast<std::uint32_t>(decl_buf.size()) : vlength;
     std::vector<CVertex> verts;
     verts.reserve(index_count);
     for (std::uint32_t i = 0; i < index_count; ++i) {
@@ -3868,13 +4170,13 @@ std::uint32_t drawIndexedPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t pr
             return kInvalidCall;
         }
         const std::uint32_t vertex_index = idx + base_vertex;
-        if ((static_cast<std::uint64_t>(offset) +
-             static_cast<std::uint64_t>(vertex_index + 1u) * stride) > vlength) {
+        if ((static_cast<std::uint64_t>(voffset) +
+             static_cast<std::uint64_t>(vertex_index + 1u) * vstride) > vlen_eff) {
             pipeLog("DrawIndexedPrimitive", "顶点 %u 越过顶点缓冲 ⇒ D3DERR_INVALIDCALL", vertex_index);
             return kInvalidCall;
         }
         CVertex v;
-        transformVertex(cpu, pe, fvf, vbase + offset + static_cast<std::size_t>(vertex_index) * stride,
+        transformVertex(cpu, pe, fvf, vbase + voffset + static_cast<std::size_t>(vertex_index) * vstride,
                         vertex_index, world, view, proj, &v);
         verts.push_back(v);
     }
@@ -3894,7 +4196,7 @@ std::uint32_t drawPrimitiveUP(X86& cpu, std::uint32_t dev, std::uint32_t prim, s
                               std::uint32_t data_ea, std::uint32_t stride, std::string* why) {
     FvfLayout fvf;
     std::uint32_t pe = 0;
-    if (!drawPrecheck(cpu, "DrawPrimitiveUP", dev, &pe, &fvf, why)) return kInvalidCall;
+    if (!drawPrecheck(cpu, "DrawPrimitiveUP", dev, &pe, &fvf, nullptr, why)) return kInvalidCall;
     if (prim < kPtPointList || prim > kPtTriangleFan) return kInvalidCall;
     if (prim_count == 0) return kOk;
     if (data_ea == 0) {
@@ -3954,7 +4256,7 @@ std::uint32_t drawIndexedPrimitiveUP(X86& cpu, std::uint32_t dev, std::uint32_t 
                                      std::uint32_t stride, std::string* why) {
     FvfLayout fvf;
     std::uint32_t pe = 0;
-    if (!drawPrecheck(cpu, "DrawIndexedPrimitiveUP", dev, &pe, &fvf, why)) return kInvalidCall;
+    if (!drawPrecheck(cpu, "DrawIndexedPrimitiveUP", dev, &pe, &fvf, nullptr, why)) return kInvalidCall;
     if (prim < kPtPointList || prim > kPtTriangleFan) return kInvalidCall;
     if (prim_count == 0) return kOk;
     if (data_ea == 0 || index_ea == 0) {

@@ -9,7 +9,7 @@
 ## 一句话
 真机上**点击窗口关闭（X）**会走 AGERC.DLL 的一个**二次确认对话框**（「終了」：退出程序 / 返回标题 / 取消）。本线现在把这 3 个导出做成 no-op（`_ShowDialog@12` 恒返回 1 = "退出程序"）。本单的产出是**设计结论**：能不能桥接成我们自己的普通模态对话框、要什么能力、最小第一步是什么。
 
-## 已核（全部 EA 锚定；详见 `repo:.tmp/agerc-dialog/design.md`）
+## 已核（全部 EA 锚定；原草稿在临时区 `.tmp/agerc-dialog/design.md` —— `.tmp` 不入库、已随清理丢失，故这里不留 `repo:` 锚）
 1. 链：`WM_CLOSE(0)`（X / ESC）→ `sub_4B92F0` case16（`0x4B95FA cmp ebx,1` / `0x4B95FD jz` / `0x4B95FF call sub_4057B0`）→ `sub_4057B0` 先减光（`0x4058A9 push 80h` → `0x4058BC call sub_4A4C70`，layer `0x1F`、alpha 128）→ `0x40597B call ds:dword_55E1B4` = **`_ShowDialog@12`**（`dword_55E1B4 = [RCDLL+0x0C]`，WinMain 在 `0x4BA947` 落盘；`sub_453870` = `mov eax,[ecx+0Ch]`）。
 2. 调用参数 `(id=3, hWndOwner, 0)`：**id 是选择子**，不是模板句柄（AGERC 内部再 switch 到 `DialogBoxParamA(hInstance, 3, hWndParent, proc=0x1003269F, 0)` @`0x10038420`）。
 3. 对话框 = AGERC `RT_DIALOG id=3`（DIALOGEX，lang 1041）：标题「終了」、187×93 DLU、`ＭＳ Ｐゴシック` 9pt、6 控件（Static 图标 1028、提示文 Static -1、Radio 1002「プログラムを終了する(&E)」默认选中、Radio 1003「タイトルに戻る(&T)」、默认按钮 IDOK、IDCANCEL）。

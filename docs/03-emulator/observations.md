@@ -168,3 +168,57 @@
   且 `--profile` 不改变 `tail_insns`。`tail_wall_ms` 是宿主墙钟、单样本（两次 2626.4 / 2791.4 ms）；
   这一档（headless + 虚拟时钟）下 `last_frame` / `insns_at_last_present` / `tail_insns` 多次 run 逐字相同。
   2026-11-10 20:03–20:06 +08:00。
+
+### OBS-20261110-06 · TITLE→Quit：引擎每帧发一笔 0→255 的"黑色"多边形，但顶点色不参与混合
+- **读数**：点击（frame 130）后每帧 **2 笔**全屏 TRIANGLESTRIP（点击前 1 笔）。第二笔顶点 diffuse
+  `d0=0,0,0,α`，α = `0 / 13 / 27 / … / 241 / 255`（≈14.2/帧 ⇒ 约 18 帧 ≈ 0.3 s）。两笔都是
+  `texserial=22`、`blend=5/6`、`stage0=4/4(2/3,2/3)`（color 与 alpha 都是 `MODULATE(TEXTURE, TFACTOR)`）、
+  `tfactor=0xDEFFFFFF…0xDFFFFFFF`；帧像素 hash 从 frame 131 到 150 **恒为 `0xF4DC13F10D95EBD7`**。
+- **纹理 id**：`sub_4AF1C0`（RenderPolygon）那两帧的 `[ebp-0x24]` / `[ebp-0x20]` = `FFFFFFFF FFFFFFFF`
+  （`-1` ⇒ 这一笔**没有纹理**）。调用链（`[draw-call] chain=`）：`sub_49E310 ← sub_49E390 ← sub_4AF1C0
+  ← 0x4B4335（帧内 display-list 分派）← sub_412290（主循环）← _WinMain`。
+- **stage 状态是谁写的**（`[sts]` 行，带返回地址）：每帧 `0x4C1A29` 写 `COLORARG2=0(DIFFUSE)`、
+  `0x4C1A9C` 改写成 `3(TFACTOR)`、`0x4C1A57` 写 `ALPHAARG2=3`；另有约 60 次/帧（每个 D3DXSprite）
+  的 `0x4C2346 / 0x4C235D / 0x4C238B` 也写成 `ARG1=TEXTURE / ARG2=TFACTOR / COLOROP=MODULATE`。
+- **复现**（`apps/emulator-lift` 下）：
+  `LIFT_SLOW_DRAW=1 LIFT_SLOW_DRAW_MS=0 LIFT_DRAW_CALLSITE=1 LIFT_DRAW_LOCALS=004B4335 ./out/emulator-lift.exe
+  --game-dir ../../links/install --appdata <私有 tmp> --skip-logo --present headless --raster gpu --audio off
+  --native-overrides all --max-frames 133 --input-script <at frame 130 / click 1190 630>`
+- **口径**：win32 x64 / RelWithDebInfo / headless + `--max-frames`（压日志；(A) 的墙钟要用窗口档）·
+  `--native-overrides all` · 2026-11-10 · 工作树 `c0a0f39` + 本轮诊断（`[draw]` 扩字段 /
+  `LIFT_DRAW_CALLSITE` / `LIFT_DRAW_LOCALS`，口径见 `apps/emulator-lift/README.md` §4.3.1）。
+
+### OBS-20261110-07 · 取代 OBS-20261110-06：Quit 那两笔多边形的**实测混合 α = 0**（全透明），且顺序/来源都变了
+- **取代**：OBS-20261110-06 的"(a) 同图叠同图任意 α 幂等"与"顺序是先渐变后不透明"**两条都错**，读数保留但结论作废。
+- **来源**：脚本 **opcode 0x15（画多边形）**，handler `0x432168`（`mov dword ptr [esi+ecx*8+5D8F4h], 15h`）；顶点色在该层解码
+  （`ROR(key ^ ROL(raw,11),25)`，key=`[engine+0x5EC8C]`）⇒ **α 是脚本参数，逐帧重发**。
+- **顺序**（`[draw] frame=` 分组）：`Clear(0,0,3,0x00000000,1.0,0)` = **每帧清黑** → 黑多边形（顶点 α=255，**在 sprite 批之前**）
+  → 60 笔 sprite（真正画面）→ 黑多边形（顶点 α = 0,13,27,…,255，**在 sprite 批之后** = 渐变覆盖层）。
+- **新读数（决定性）**：`[draw] fa=` = 本批真正参与混合的 α（n/均值/最小/最大）——两笔分别
+  `894575/0/0/0` 与 `919601/0/0/0` ⇒ **α 恒 0、整笔全透明**。stage0 两段都是 `MODULATE(TEXTURE, TFACTOR)`：
+  α 取自**纹理**（当前绑的是几万条指令前留下的 `texserial=22`，α=0），**顶点 α 不参与**。
+- **引擎侧**：`sub_49E390` 只在 `edi==1/2`（绑到 1~2 张纹理）时设 `COLORARG2/ALPHAARG2=DIFFUSE`（`0x49E608–0x49E660`）；
+  这两笔的纹理 id 是 payload 里的 `-1/-1` ⇒ `edi==0` ⇒ **一条不设**。而 `sub_4C19E0` 是
+  `COLORARG2=DIFFUSE(0x4C1A29)` → `ALPHAARG2=TFACTOR(0x4C1A57)` → `COLORARG2=TFACTOR(0x4C1A9C)`（中间无 Draw）⇒ 最终 TFACTOR。
+- **没有别的路**（frame 133–150，独立复核）：`Clear`=1/帧、`DrawPrimitive`=2/帧、`DrawIndexedPrimitive`=60/帧；
+  `LockRect/UnlockRect/StretchRect/UpdateSurface/ColorFill/SetRenderTarget/GetRenderTargetData/UpdateTexture` **全 0**。
+- **复现**（`apps/emulator-lift` 下；`--raster cpu` 才有 `fa=`）：
+  `LIFT_SLOW_DRAW=1 LIFT_SLOW_DRAW_MS=0 ./out/emulator-lift.exe --game-dir ../../links/install --appdata <私有 tmp>
+  --skip-logo --present headless --raster cpu --audio off --native-overrides all --max-frames 136
+  --input-script <at frame 130 / click 1190 630>`
+- **口径**：win32 x64 / RelWithDebInfo / headless / `--native-overrides all` · 2026-11-10 · 工作树 `c0a0f39` + 本轮诊断
+  （`[draw]` 扩字段 / `frame=` / `fa=` / `LIFT_DRAW_CALLSITE` / `LIFT_DRAW_LOCALS`，见 `apps/emulator-lift/README.md` §4.3.1）。
+
+### OBS-20261111-01 · 固定功能批次全部 `fa=0`（纹理 α=0）⇒ 屏幕内容只来自宿主 sprite
+- **读数**（`--raster cpu`，frame 134–136，`LIFT_SLOW_DRAW=1`）：每帧 62 笔 `[draw]` —— 2 笔脚本多边形
+  （`va=255` / `va=13,27,41`）+ 60 笔 `DrawIndexedPrimitive` 图层批（`d0=255,255,255,255`）。
+  **全部** `fa=<n>:0/0/0`（真正参与混合的 α 恒 0）、`texa=4:0..0`（绑定纹理自身 α 在 4 点采样都是 0）。
+- **另一条事实**：这 60 笔图层批在本轮之前**整批失败**（`drawPrecheck` 报"设了顶点声明…只支持 SetFVF"，
+  60 笔/帧 `D3DERR_INVALIDCALL`）。本轮实现顶点声明路后成功（`DrawIndexedPrimitive: PrimitiveType=4 …
+  ⇒ 三角形 4（光栅化 4），写 921600 个像素`），但帧像素 hash 不变 —— 与 `fa=0` 自洽。
+- **复现**（`apps/emulator-lift` 下）：
+  `LIFT_SLOW_DRAW=1 LIFT_SLOW_DRAW_MS=0 ./out/emulator-lift.exe --game-dir ../../links/install
+  --appdata <私有 tmp> --skip-logo --present headless --raster cpu --audio off --native-overrides all
+  --max-frames 136 --input-script <at frame 130 / click 1190 630>`
+- **口径**：win32 x64 / RelWithDebInfo / headless / CPU 光栅（`fa=` 只在 CPU 路统计）· 2026-11-11 ·
+  工作树 `c0a0f39` + 本轮改动（顶点声明路 + `fa=`/`texa=` 诊断）。

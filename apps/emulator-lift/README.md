@@ -635,6 +635,19 @@ D3DXSprite 源矩形越界 / GPU 后端绘制失败。D3DXSprite 的纹理上传
 深度测试/写（与 CPU sprite 一致）。因此非 1.0 的 `Clear(ZBUFFER)`、或 CPU/GPU 交替写同一块深度的
 场景，像素结果可能与 CPU 参考不一致 —— 判据仍以 `--dump-frame` 的逐像素对照为准。
 
+### 顶点声明（`SetVertexDeclaration` + 两条流）
+
+固定功能路**支持一份受支持形状**：`POSITION(FLOAT3)` + `TEXCOORD0(FLOAT2)` [+ `COLOR0(D3DCOLOR)`]，
+元素可以落在**两条流**上（引擎的 2D 图层就是 `stream0` = POSITION、`stream1` = TEXCOORD，
+`DrawIndexedPrimitive` + 索引缓冲）。实现 = 按声明把各条流**去交错**成一份临时交错缓冲
+（`XYZ`+`UV`[+`diffuse`]，步长 12/20/24），再走既有的 FVF 光栅路（见 `declLayoutOf` /
+`buildDeclVertices`）。
+- 其它元素（法线 / 混合权 / 第二套 UV / 非 32 位分量）、`stream≥2`、以及 `*UP` 变体 —— **响亮失败**并
+  在 `[d3d9] DrawIndexedPrimitive: 顶点声明（0x…）不支持：…` 里给出**具体是哪一项**（⛔ 不猜布局）。
+- 怎么查：`--log-cat d3d9 --log-level info` 的 `DrawIndexedPrimitive: PrimitiveType=… ⇒ 三角形 …（光栅化 …），
+  写 N 个像素`；被拒时是同一行换成 `顶点声明（0x…）不支持：…`。⚠ 顶点声明的**对象**在创建那一刻
+  把元素表复制进 guest 堆（`'VDCL'` 状态块，常量见 `runtime/d3d9.h`）—— 光栅侧读的就是这份副本。
+
 ### 怎么查（口径，不是进度）
 
 `Machine::dumpRunSummary` 固定打印：
@@ -795,12 +808,32 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
 - 只有 shim 慢、guest 不慢 ⇒ 先看 `--profile` 的 `=== profile: shims` 表（哪一项、调用几次、平均多少），
   不要再到 guest 函数表里找热点；`shim :` 行仍用于"这一帧"的归因。
 - `LIFT_SLOW_DRAW=1`（可选 `LIFT_SLOW_DRAW_MS=<ms>`，缺省 20）会为每次慢 `Draw*` 打一行
-  `[draw] prim=… pixels=… gpu=… why=… sep_alpha=… tex=… blend=…/… op=… cw=… fvf=… coord=… stage0=… samp=… texfmt=… submit=…ms`：
+  `[draw] frame=… prim=… pixels=… gpu=… why=… sep_alpha=… tex=… texserial=… tfactor=… alpha=… d0=… uv=… blend=<0/1>/…/… op=… cw=… fvf=… coord=… stage0=… samp=… texfmt=… fa=<n>:<均值>/<min>/<max> submit=…ms`：
   `gpu=0` 与 `why=` 就是"这一批为什么回退 CPU"的**第一原因**（不是猜测）；`stage0=` 是
-  color/alpha op 与 arg1/arg1，`samp=` 是 address U/V 与 MAG/MIN，`texfmt=` 是 bpp/amask 与尺寸。
+  color/alpha op 与 arg1/arg2（颜色与 alpha 各一对），`samp=` 是 address U/V 与 MAG/MIN，
+  `texfmt=` 是 bpp/amask 与尺寸。
+  ★ `frame=` = **清过后缓冲的次数**（`Clear(TARGET)` 是"新的一帧开始"的机械判据，见 `d3d9::frameSeq()`）——
+  同一 `frame` 里两行 `[draw]` 的先后就是**真实的绘制顺序**（⛔ 不要拿时间戳或日志交错猜）。
+  ★ **"这一批画的是不是同一个东西"要看的字段**：`texserial=` 是**纹理身份**（`TextureInfo::serial`，
+  进程级单调、永不复用）—— 两批相同 = 同一张纹理；`alpha=` 是**输入顶点**的 diffuse alpha 区间、
+  `d0=` 是第一个顶点的 `r,g,b,a`、`uv=` 是本批 UV 范围。★ 只看 `texfmt=`（w/h/format）**分不出**
+  "同一张纹理"与"同尺寸的另一张"。
+  ⚠ `tfactor=` 是 `D3DRS_TEXTUREFACTOR`（0xAARRGGBB）：**stage0 的 arg 是 3(TFACTOR) 时，顶点色
+  根本不参与** ⇒ 顶点 alpha 推进也不会有任何像素变化。
+  ★ `fa=` 是**真正参与混合的 α**（CPU 光栅逐像素统计：n / 均值 / min / max；GPU 批不打——CPU 那条
+  不跑）。"这一笔到底有没有画上去"只能看它：`fa=…:0/0/0` = 整笔全透明（α 取自纹理 / 顶点色没参与 /
+  alpha test 全灭，三者表现相同，要接着看 `stage0=` 与 `texserial=`）。
+- `LIFT_DRAW_CALLSITE=1`（诊断，默认关）：每次 `IDirect3DDevice9::DrawPrimitive` 打一行
+  `[draw-call] prim=… ret=<shim 返回地址> chain=<ebp 链上的返回地址…>` —— `ret=`/`chain=` 拿去 `.lst`
+  就能回答"谁画了这一批"（最近的调用点 = `ret-5`），不用猜。
+  加 `LIFT_DRAW_LOCALS=<hex EA>` 时，链上**返回地址等于该 EA** 的那一帧会多打 `locals=[ebp-0x40..ebp-0x08]`
+  （读某个绘制调用点的实参与局部；例：`LIFT_DRAW_LOCALS=004B4335` 读 `sub_4AF1C0`（RenderPolygon）那一帧，
+  `[ebp-0x24]`/`[ebp-0x20]` 是它传给 `sub_49E390` 的纹理 id 数组，`-1` = 这一批**没有纹理**）。
+  同一个开关还会为 stage 0/1 的 op/arg 写打 `[sts] stage=… type=… value=… ret=…` ——
+  **"这一批用的到底是 DIFFUSE 还是 TFACTOR"只能看这个**（`ret=` 定位写它的 guest EA）。
 - 回退原因还按字符串聚合进 `dumpRunSummary` 的 `gpu       :` / `fallback top:` 行
   （见 §4.2b）；`--gpu-strict` 把"还有回退"变成 exit 3，而不是靠读日志判断。
-- 两个环境变量都只读、默认关；⛔ 不改变执行结果，也不进 A4 的逐字节基线。
+- 这些环境变量都只读、默认关；⛔ 不改变执行结果，也不进 A4 的逐字节基线。
 
 ### 4.3.2 可定界的区间 profiler（`profile_begin` / `profile_end`）
 

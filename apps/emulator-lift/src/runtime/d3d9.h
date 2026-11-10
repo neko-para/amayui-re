@@ -28,6 +28,14 @@ namespace lift {
 struct X86;
 class Machine;
 
+// IDirect3DVertexDeclaration9 的状态块（'VDCL'）：**唯一一份**布局定义。
+//   shim（创建/回收/Get）与流水线（按声明取顶点）都读这一份；⛔ 不要在别处再写一遍。
+constexpr std::uint32_t kVdMagicValue = 0x4C434456u;  // 'VDCL'
+constexpr std::uint32_t kVdDevice = 4;                 // 设备状态块 EA
+constexpr std::uint32_t kVdBytes = 8;                  // 元素表字节数
+constexpr std::uint32_t kVdData = 12;                  // 元素表（D3DVERTEXELEMENT9 数组）
+constexpr std::uint32_t kVdHeader = 12;
+
 namespace d3d9 {
 
 // =====================================================================================
@@ -263,6 +271,13 @@ struct DeviceInfo {
     std::uint32_t clears = 0;
 };
 bool deviceInfo(X86& cpu, std::uint32_t object, DeviceInfo* out, std::string* why);
+// ★ 诊断用（只读）：到目前为止**清过后缓冲**的次数。`Clear(TARGET)` 是"新的一帧开始"的机械判据，
+//   逐帧诊断拿它给 Draw 编号（`[draw] frame=`），比时间戳可靠。⛔ 不参与任何语义、不进基线。
+std::uint32_t frameSeq();
+// ★ 顶点声明对象 → (元素表宿主指针, 字节数)。`IDirect3DVertexDeclaration9` 的状态块里存着
+//   `CreateVertexDeclaration` 当时那份 D3DVERTEXELEMENT9 数组（'VDCL' 头 + 数据）。
+//   ⛔ 不是本模块建的对象 / magic 不符 ⇒ false（不猜布局）。
+bool declarationElements(X86& cpu, std::uint32_t decl_object, const std::uint8_t** data, std::uint32_t* bytes);
 bool deviceInfoOfState(X86& cpu, std::uint32_t state, DeviceInfo* out, std::string* why);
 void destroyDeviceState(X86& cpu, std::uint32_t state);
 
