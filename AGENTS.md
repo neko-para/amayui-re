@@ -340,6 +340,11 @@ skip-logo > 30 s，音频 fill 会必然 underrun。⛔ 不要用 Debug 的墙�
 
 ## 11. 项目本体：交付物是 spec，不是 emulator
 
+★ **2026-11-10 起 spec 层短期冻结（用户口径）**：`data/spec/` **暂不维护** —— 不新增规则、不修订、不做 spec 审计 / 复审 / 残差收敛 / 语义登记；
+由 spec 派生的待办一律 **drop**（`dropped_reason` 指向本冻结）。重启时**整体重审**（不沿用当前审计结论），并从 git 恢复被 drop 的单。
+原因：当前实现线是 `apps/emulator-lift`（执行原机器码），spec 对 lift 只作调试对照、不是真源。
+★ 这不改变下一条的**长期定位**（交付物仍是 spec），只是本轮不做；`pnpm test` 里的既有 spec 守卫仍照跑（防冻结件被无意改坏）。
+
 * 主交付物是 **spec（引擎规范）**（落点 `data/spec/`，工具 `pnpm tools spec`）；**emulator 是示范与测试项目**（cleanroom rewrite，类比 Wine —— 但这里的界面是**未文档化**的私有语义 ⇒ 理解是唯一路径）。
   ⇒ ⛔ **emulator 不许当 spec 的真源**；spec 也不许依赖 emulator 的实现细节（shape 已按此守：`⛔ 不读 apps/emulator`）。
 * **当前唯一在维护的模拟器实现是 `apps/emulator-lift`**（执行 AGE.EXE 原机器码的 guest-state 模拟器）。

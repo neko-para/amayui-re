@@ -56,11 +56,10 @@
   anchor-script（机制 + 真机两档）· anchor 前的绝对输入（真机 `origin.frame=100`）· EH 链补字节 · **C++ EH 派发（真机 trace 到 catch 0x41389A）** ·
   **C 装载帧性能**（12 段表 + 语义归因 + 裁决"不做 override"）· **D 吞吐 + 派发层拆分**（派发税 8.0%、整个派发层拿掉只到 10.02 M insn/s ⇒ 离 19.0 差 6.5 倍）·
   **mutate-check 守卫超时**（超时=不可判定、收进程树、exit 5）· **折叠区间取字节 `disasm-at --bytes`**（纯 JS，复用唯一 PE 解析）· **`COLLAPSED_RE` 漏形态**（122/1805 → 1805/1805）。
-- **仍未收口 5 张**（都不是"没做"）：`REQ-01M6XVYY5TCKSAS80WS7PADF8P`（`blocked`：只剩「戻る」点击 `REQ-01M6ZDSPVYS3R78TK8TFKVBC8N`；本批已把它的前置 C++ EH 做完了）·
-  `REQ-01M717SQJ2RDFRJCB41RREXQYX`（`blocked`：**已裁"等戻る、不改图口径"**）· 开音频令牌等待 M2（有窗口级等待账的下一步）· 折叠 #2（调用边静默消失，有候选）· C 单语义登记（草案 670 行就绪）。
-  下一轮入口：解释器逐条成本分解（D 的下一步，2.3× 才有意义）；M2 窗口级等待账；知识登记（`CORE-SCENE-RESET`）。
-  下一轮入口：M2 → 窗口级等待账；知识登记（`CORE-SCENE-RESET`）；解释器逐条成本分解（D 的下一步）。
-  下一轮入口：D → 派发层拆分；M2 → 窗口级等待账；知识登记（`CORE-SCENE-RESET`）。
+- **仍未收口 4 张**（都不是"没做"）：`REQ-01M6XVYY5TCKSAS80WS7PADF8P`（`blocked`：只剩「戻る」点击 `REQ-01M6ZDSPVYS3R78TK8TFKVBC8N`；本批已把它的前置 C++ EH 做完了）·
+  `REQ-01M717SQJ2RDFRJCB41RREXQYX`（`blocked`：**已裁"等戻る、不改图口径"**）· 开音频令牌等待 M2（有窗口级等待账的下一步）· 折叠 #2（调用边静默消失，有候选）。
+  下一轮入口：M2 → 窗口级等待账；解释器逐条成本分解（D 的下一步，2.3× 才有意义）；折叠 #2（调用边静默消失）。
+  ★ **spec 层 2026-11-10 起短期冻结**：C 单语义登记单已 drop（`REQ-01M718T18NYQDGJP71HE2XNE97`），重启 spec 时整体重审。
 
 ## 明确不做什么
 

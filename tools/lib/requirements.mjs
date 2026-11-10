@@ -178,7 +178,7 @@ export const DOMAIN = {
 };
 
 export const OPERATIONS = [
-  { name: 'list', argv: ['--list'], mutates: false, summary: '一览：id / type / status / 父 / 标题（+ --json）' },
+  { name: 'list', argv: ['--list'], mutates: false, summary: '一览：id / type / status / 父 / 标题（+ --json）；`--live` 只列活节点，`--status a,b` 显式筛选（二者互斥）' },
   { name: 'show', argv: ['--show'], mutates: false, summary: '一个节点：字段 + 子树 + 正文：`<id 或唯一前缀>`' },
   { name: 'plan', argv: ['--plan'], mutates: false, summary: '★ 进度视图（唯一的进度真源）：按树打印 + 聚合状态' },
   { name: 'validate', argv: ['--validate'], mutates: false, summary: '跑全部不变量（红/绿 + 逐条详情）—— 全仓门禁' },

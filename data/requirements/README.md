@@ -41,6 +41,7 @@
 ```bash
 pnpm tools requirements plan            # ★ 进度视图（按父子树打印 + 聚合状态）
 pnpm tools requirements list            # 一览（type / status / 严重度 / 父 / 子树活节点数）
+pnpm tools requirements list --live     # 同上，但只列活节点（open/doing/blocked）；--status a,b 显式筛选
 pnpm tools requirements show <引用>      # 一个节点：字段 + 子树 + 正文
 pnpm tools requirements validate        # 全部不变量（红 = 退出码 1；条数与措辞见 describe）
 pnpm tools requirements describe        # ★ 字段 / 不变量 / 预算 / 命令（本文件不含这些）

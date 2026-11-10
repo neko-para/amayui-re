@@ -2,8 +2,9 @@
 
 - id: REQ-01M718T18NYQDGJP71HE2XNE97
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
+- dropped_reason: spec 层短期冻结（2026-11-10 用户口径）：data/spec/ / data/ledger/ 暂不登记新语义 —— 不新增规则、不修订、不复审。本单是往 spec 登记 CORE-SCENE-RESET 等语义，冻结期间不做；来源的语义取证仍留在 REQ-01M6XVZ8AXJNG492WA2QAMTA35 正文与 git 历史，重启 spec 时整体重审后再登记。
 - tags: [spec, ledger, shape, audio]
 
 ## 判据（存在性 + 观察）

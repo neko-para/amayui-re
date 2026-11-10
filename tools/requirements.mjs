@@ -21,6 +21,7 @@ import {
   DOMAIN,
   LIVE_STATUSES,
   OPERATIONS,
+  STATUSES,
   STATUS_MARK,
   buildTree,
   budgeted,
@@ -43,8 +44,26 @@ export { DEFAULT_REQUIREMENTS_DIR, DOMAIN, OPERATIONS, describe, describeText };
 
 // ─────────────────────────────────────────────────────────── 子命令
 
+/** `--list` 的筛选：`--live`（= open/doing/blocked）或 `--status a,b`；缺省全量。 */
+function listFilter(args) {
+  const hasLive = Object.hasOwn(args.flags, 'live');
+  const hasStatus = Object.hasOwn(args.flags, 'status');
+  if (hasLive && hasStatus) throw new Error('--live 与 --status 只能二选一');
+  if (hasLive) return { label: '--live', statuses: new Set(LIVE_STATUSES) };
+  if (!hasStatus) return null;
+  const raw = args.flags.status;
+  if (raw === undefined) throw new Error(`--status 需要逗号分隔的状态（${STATUSES.join(' / ')}）`);
+  const parts = String(raw).split(',').map((s) => s.trim()).filter(Boolean);
+  if (parts.length === 0) throw new Error(`--status 需要逗号分隔的状态（${STATUSES.join(' / ')}）`);
+  const bad = parts.filter((s) => !STATUSES.includes(s));
+  if (bad.length > 0) throw new Error(`--status 有不认识的状态：${bad.join(', ')}（只接受 ${STATUSES.join(' / ')}）`);
+  return { label: `--status ${parts.join(',')}`, statuses: new Set(parts) };
+}
+
 function cmdList(args, nodes, tree) {
-  const rows = nodes.map((n) => {
+  const filter = listFilter(args);
+  const shown = filter === null ? nodes : nodes.filter((n) => filter.statuses.has(n.fields.status));
+  const rows = shown.map((n) => {
     const r = rollup(n, tree);
     return {
       id: n.fields.id ?? n.name,
@@ -74,12 +93,15 @@ function cmdList(args, nodes, tree) {
   const w = head.map((h, i) => Math.max(h.length, ...cells.map((c) => c[i].length)));
   const line = (c) => c.map((x, i) => x.padEnd(w[i])).join('  ');
   const live = budgeted(nodes).length;
+  const summary = filter === null
+    ? `${rows.length} 个节点（活 ${live} / 预算 ${BUDGET.maxNodes}；收口的 ${rows.length - live} 个不计）`
+    : `${rows.length} 个节点（筛选：${filter.label}；全库 ${nodes.length}，活 ${live} / 预算 ${BUDGET.maxNodes}）`;
   return [
     line(head),
     line(w.map((n) => '-'.repeat(n))),
     ...cells.map(line),
     '',
-    `${rows.length} 个节点（活 ${live} / 预算 ${BUDGET.maxNodes}；收口的 ${rows.length - live} 个不计）`,
+    summary,
   ];
 }
 
@@ -317,6 +339,7 @@ function parseArgs(argv) {
       if (a !== '--add') out.rest.push(argv[++i]);
     } else if (a === '--write') out.write = true;
     else if (a === '--json') out.json = true;
+    else if (a === '--live') out.flags.live = true;
     else if (a === '--help' || a === '-h') out.action = 'help';
     else if (a.startsWith('--')) {
       const key = a.slice(2);
@@ -327,6 +350,17 @@ function parseArgs(argv) {
   if (out.flags.dir) out.dir = path.resolve(out.flags.dir);
   if (!out.action) out.action = 'plan';
   return out;
+}
+
+/** `--live` / `--status` 的动作边界：别让"给 `--set` 的字段参数"在 `--list` 上静默失效。 */
+function validateQueryFlags(args) {
+  const hasLive = Object.hasOwn(args.flags, 'live');
+  const hasStatus = Object.hasOwn(args.flags, 'status');
+  if (hasLive && args.action !== 'list') throw new Error('--live 只用于 --list');
+  if (hasStatus && !['list', 'add', 'set'].includes(args.action)) {
+    throw new Error('--status 只用于 --list（筛选）或 --add / --set（字段）');
+  }
+  if (hasLive && hasStatus) throw new Error('--live 与 --status 只能二选一');
 }
 
 /**
@@ -375,7 +409,7 @@ function serveWeb(args) {
 const HELP = `tools/requirements.mjs — data/requirements/ 的查询与唯一编辑入口（缺省动作 plan；缺省 dry-run）
 
   node tools/requirements.mjs --plan                  # ★ 进度视图（唯一的进度真源）
-  node tools/requirements.mjs --list [--json]         # 一览
+  node tools/requirements.mjs --list [--json] [--live | --status open,doing]  # 一览（可筛选）
   node tools/requirements.mjs --show <id|前缀>         # 一个节点：字段 + 子树 + 正文
   node tools/requirements.mjs --validate [--json]     # 全部不变量（红 = 退出码 1）
   node tools/requirements.mjs --serve [--port 7788]   # 本地只读网页（需求 + AGE 脚本），项目在 apps/workbench/
@@ -386,6 +420,7 @@ const HELP = `tools/requirements.mjs — data/requirements/ 的查询与唯一�
   pnpm tools requirements describe                    # 自描述：字段 / 不变量 / 预算 / 操作
 
 ★ 字段与不变量只有一份真源：本文件的 --describe（文档 data/requirements/README.md 只写口径与指向）。
+★ --list 的筛选：--live = 活节点（${LIVE_STATUSES.join(' / ')}）；--status a,b = 任选状态（${STATUSES.join(' / ')}）。二者互斥。
 ★ 层次：parent 只写在子节点上；children 一律派生。预算：单节点 ≤ ${BUDGET.maxLinesPerNode} 行、**活节点** ≤ ${BUDGET.maxNodes}（收口的 done/dropped/superseded **不计**）。
 `;
 
@@ -399,6 +434,7 @@ export function main(argv = process.argv.slice(2)) {
     process.stdout.write(args.json ? `${JSON.stringify(describe(), null, 2)}\n` : describeText());
     return 0;
   }
+  validateQueryFlags(args);
   if (args.action === 'add' && !args.write) {
     // dry-run：也要先算一遍，才能报告"要是写会怎样"
   }

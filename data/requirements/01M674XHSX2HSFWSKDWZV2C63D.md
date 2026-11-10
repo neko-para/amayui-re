@@ -2,8 +2,9 @@
 
 - id: REQ-01M674XHSX2HSFWSKDWZV2C63D
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M5851Z51V1MTSWH414M7WN5Q
+- dropped_reason: spec 层短期冻结（2026-11-10 用户口径）：data/spec/ 暂不维护 —— 不新增规则、不修订、不跑残差收敛/审计/复审。本单是 spec 残差收敛，冻结期间不做；重启 spec 时从 git 恢复并按当时口径整体重审（父单 REQ-01M5851Z51V1MTSWH414M7WN5Q 的 dropped_reason 同口径：spec 对 lift 只作调试对照、不是真源）。
 - tags: [spec residual]
 
 ## 目标与界限
@@ -72,7 +73,6 @@
 - ⛔ 不把 C 类当本批目标（按场景临时取证）。⛔ 不动 `apps/emulator-new`。⛔ 不为清零删残差。⛔ 不把"弃权"（正文「未规定」）与"残差"（`audit.json`）混写。
 
 ## 交接
-
 
 - **批 1（vm）完成**（2026-10-31）· 裁决 25 条 · 收紧成合同 20 · discarded 3 · 保留 unknown 2（S2 1 / S1 1）· 通道 vm 的 A 33→9 · 余量见 `REQ-01M676K7E62R5YNY6PT3X17R8K`（movie 8 条）与 `REQ-01M6778APC51QF8BQJ8TYWG450`（门模型）· **遗留 10 条已清**（P1 二阶段：门模型重写 + 143/D9/voice 位 + 渲染步收尾判据 + texture 符号性 + 帧章四缺口 + 7B + 5 处悬空引用 + 队列四格 storage）· **emulator 同步已开片**（S1 帧族：ctest 50/50、变异 27/27）
 - **批 2（vm + state）完成**（2026-10-31）· 裁决 46 条（vm 1 + state 45）· 通道 state 的 A **42→0**、B 3→1（余 `RES-OPS-142-CELL-NAME`，S1）· vm A **9→8**（余 8 = movie，用户裁决「属 renderer、暂不处理」，见 movie 单）· 全库正文弃权规则 119→96（A 317→273）· ★ **推翻批 1 一条结论**：`0x143` 的登记表是**文件表对象的 256 格槽位表**、写点 `0x455948` ⇒ 投递支可达 · 本批新开 12 张子单（含 emulator 对齐与复审遗留） · 新守卫 3 条 CTest + 2 条变异（ctest 53/53）· 两路独立复审（规则面 39 条 / 忠实性 66 条）已跑过一轮修复
