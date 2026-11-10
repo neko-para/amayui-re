@@ -84,3 +84,38 @@
   - `rg -n 'mxcsr' apps/emulator-lift/src/runtime/audio.h apps/emulator-lift/src/runtime/audio.cpp` ⇒ **0 行**：`AudioEngine::Context`（`audio.h:200-211`，含 `r[8]/eip/eflags/seg/fpu/xmm`）与 `capture()` / `restore()`（`audio.cpp:506` / `:521`）**没有** `mxcsr`；pump 借用主 `cpu_`（`attach(X86* …)`，`audio.h:100`）。
 - **重写必须保持不变**：① `movsd` 的分派按**操作数形态**（⛔ 不按前缀、⛔ 不按助记符查表）；② 串操作 `A5` 永远留在 `Op::Movs`；③ MXCSR 复位值 = `0x1F80` 且只置 IE（`comiss` / `ucomiss` 的 QNaN / SNaN 差别靠它）；④ 未建模的异常**不投递**、也不假装置位。
 - **重开条件（三条，任一条成立就重开）**：① 语料或 `src` 出现 `ldmxcsr` / `stmxcsr` / `fxsave` / `fxrstor`（机械触发器：assets 档 `corpus-mnemonics` 会红）；② 要投递 `#XM` 或实现掩码 / 舍入控制（RC）；③ feeder 可达任何 XMM 指令 —— 那时 `AudioEngine::Context` **必须**一起加 `mxcsr`，否则 pump 路径会**静默**泄漏 IE（save/restore 借的是主 `cpu_` 的寄存器）。
+
+### L3-graphfmt-01 · 交互图格式：**保持行写法**；⛔ 不换 YAML/TOML/JSON（要省维护就 table 化解析器）
+- **取舍**：`--interaction-graph` 的输入**只保留行写法**（`node` / `when` / `action` / `next` / `timeout` / `expect`）。
+  `docs/03-emulator/interaction-model.md` 是唯一 schema；JSON 只是**等价展示**，文件入口留到"生成器落地"时按原计划
+  作为**第二入口**加，⛔ 不取代行写法。
+- **备选**：YAML（yaml-cpp）/ TOML（toml++）/ JSON（nlohmann，emulator 共用 baseline 里**已有** 3.12.0）。**没选**，三条读数：
+  - 换格式只删得掉**词法层 ~110 行**（`interaction_graph.cpp` 1154 行的 9.5%）；剩下 ~250 行是**闭集合的语义校验**
+    （未知键 / 重复键 / `next` 不存在 / `click center` 无框…），换格式照样得写；而标准库**不给行号**：
+    nlohmann 对重复键**静默取最后一个**、未知键**直接放行** ⇒ 现有 13 条 `origin:行:` 断言里 12 条是语义错，
+    其中两条的失败类会**无声消失**。
+  - 最大的一次真实改动（`e4a5457` 加一个按钮词）动了 7 个文件 +292/−30，**解析器只占 41 行（14%）**，测试占 194 行
+    —— 维护成本不在词法，在"闭集合语义 + 用例"。
+  - **64 位 hash 是硬伤**：`0x94CB492BF7F1AEEB` = 10721743791077830379 > INT64_MAX 且 > 2^53。JSON 里 `0x…` 非法；
+    十进制在 nlohmann 精确，但 **JS `JSON.parse` 会变成 …830000（差 277）**；TOML 的 int64 装不下
+    （Python tomllib 接受 / toml++ 拒绝 ⇒ 同一份文件不同实现语义不同）。唯一安全写法是**带引号的 `"0x%016X"` 字符串**。
+- **重写必须保持不变**：① 解析错误带 `origin:行:` 且**逐条**（13 条断言）；② trace 逐行可 diff；
+  ③ hash 一律**当字符串**走（复用 `parseUnsigned` 的溢出检查）；④ 真源只有一份 —— 将来加第二入口时两边**共用同一张闭集合表**。
+- **重开条件（四条全真才值得换）**：图以**生成物**为主（>50%）· schema 长出**嵌套** · 有**第三方**消费者 · **行号**不再是硬约束。
+  今天的读数四条全假（3 份手写图、schema 是单层、无外部消费者、13 条行号断言）。
+
+### L3-mutate-01 · 变异自检的超时：等待循环必须**异步**（POSIX 上 zombie 不会被同步循环收尸）
+- **取舍**：`tools/mutate-check.mjs` 的 `runTimedCommand` 用 **async** 等待（`await sleep(25)`）+ `events`/`exit` 语义；
+  超时后用 `killProcessTree` 收整棵；**wrapper 崩了（`gone`）也要收树**，Windows 上靠 **wrapper 写下的子进程 pid**
+  （`taskkill /T /PID <ctest>`），POSIX 上进程组已经够。
+- **备选**：保持 `sleepSync`（`Atomics.wait`）同步等待，只把 deadline 收窄。**没选**，因为同一根因还带着两个缺陷：
+  ① 正常结束也白等 2 s（trivial 命令 2094 ms；81 条 CTest × 3 次调用 ≈ 486 s 推算）；
+  ② wrapper 在写退出码前死 ⇒ 被误报成 `timedOut`（`timeoutSec:1` 实测 6036 ms）。
+- **为什么同步不行（机制，2026-11-10 实测）**：`Atomics.wait` **阻塞事件循环**，而 libuv 的 `uv__chld → waitpid`
+  是事件循环里的 watcher ⇒ 被 SIGKILL 的孩子停在 **zombie**（`exitCode`/`signalCode` 恒 null、`'exit'` 在解除阻塞那刻
+  才触发），而 `kill(pid,0)` 对 zombie **仍然成功** ⇒ "等它消失"永远看不到消失。
+  同一原因让 `restoreOnSignal` 在这之前是**死代码**（`Atomics.wait` 与 `spawnSync` 期间 SIGINT 根本不派发）。
+- **重写必须保持不变**：① 超时**不等它自己结束**（墙钟预算 = `timeout + 余量`，⛔ 不是"睡够 sleep 时间"）；
+  ② 超时/崩溃**都要收整棵进程树**（只杀壳会留下继续烧 CPU 的孤儿）；③ 还原 + 全文比对 + journal 的写序不变；
+  ④ `--help` 里 `2 = 还原失败 / 内部错误`，⛔ 内部错误不许落 0。
+- **已知残余**：`restoreOnSignal` 里"杀掉在飞 wrapper"**没有机械守卫**（要真 CTest + 真 Ctrl-C）；Windows 侧未实测。

@@ -118,41 +118,100 @@ function killProcessTree(pid) {
   }
 }
 
-/** 退出码落盘用的 wrapper：`node -e <它> <command> <args...>`（`-e` 下 `argv[1]` 就是第一个参数）。 */
+/**
+ * 退出码落盘用的 wrapper：`node -e <它> <command> <args...>`（`-e` 下 `argv[1]` 就是第一个参数）。
+ *
+ * ★ 为什么是 `spawn` 而不是 `spawnSync`（复审裁决）：wrapper 必须把**真命令的 pid** 记下来 ——
+ *   Windows 上 `taskkill /T /F` 是靠**父进程枚举子进程**收树的，wrapper 一死就再也枚举不到
+ *   `ctest` / 被守的可执行（= 孤儿）。`spawnSync` 的返回对象**有** `pid`，但它**只在子进程退出后才返回**
+ *   ⇒ pid 到手时子进程已经没了、`gone` 分支用不上；所以必须 `spawn` + `exit` 事件（pid 在跑的时候就拿得到）。
+ *   语义不变：仍然是"先写退出码文件，再 `process.exit`"。
+ */
 const TIMED_WRAPPER = `
-const { spawnSync } = require('node:child_process');
+const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const out = process.env.AMAYUI_MUTATE_EXIT_FILE;
+const childFile = process.env.AMAYUI_MUTATE_CHILD_FILE;
 const cmd = process.argv[1];
 const args = process.argv.slice(2);
-let res;
+const writeOut = (code) => {
+  if (!out) return;
+  try { fs.writeFileSync(out, String(code)); } catch { /* 写不进去就只剩 126 兜底 */ }
+};
+let child;
 try {
-  res = spawnSync(cmd, args, { stdio: 'inherit' });
+  child = spawn(cmd, args, { stdio: 'inherit' });
 } catch (err) {
-  if (out) fs.writeFileSync(out, '126');
+  writeOut(126);
   process.exit(126);
 }
-const code = typeof res.status === 'number' ? res.status : (res.error ? 126 : 125);
-if (out) fs.writeFileSync(out, String(code));
-process.exit(code);
+// ★ 记下真命令的 pid：wrapper 死了之后，父进程只能靠这个文件找到这棵树。
+//   ⛔ 写失败不影响主路径（它只用于"wrapper 崩了"那条兜底分支）。
+if (childFile && child.pid) {
+  try { fs.writeFileSync(childFile, String(child.pid)); } catch { /* 兜底用，失败不致命 */ }
+}
+let exited = false;
+child.on('error', () => {
+  if (exited) return;
+  exited = true;
+  writeOut(126);
+  process.exit(126);
+});
+child.on('exit', (code) => {
+  if (exited) return;
+  exited = true;
+  const c = typeof code === 'number' ? code : 125;
+  writeOut(c);
+  process.exit(c);
+});
 `;
+
+/**
+ * 读 wrapper 记下的**真命令** pid（`AMAYUI_MUTATE_CHILD_FILE`）。
+ * 只有 `gone`（wrapper 在写出退出码之前就没了）分支在 **Windows** 上用它：那边 `taskkill /T`
+ * 靠父进程枚举子进程，wrapper 一死就枚举不出被收养的 `ctest` / 被守的可执行。
+ * @returns {number|null} 读不到 / 内容非法 ⇒ `null`
+ */
+function readRecordedChildPid(file) {
+  try {
+    const pid = Number.parseInt(fs.readFileSync(file, 'utf8').trim(), 10);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
 
 let timedCommandSeq = 0;
 
 /**
- * **同步**跑一条命令，带**单测超时**与**进程树收尾**。
+ * 当前**在飞**的 wrapper pid（spawn 成功后置、`finally` 清）。
+ * ★ 只给 `restoreOnSignal()` 用：等待循环改 async 之后，SIGINT / SIGTERM **真的会**在 `await` 期间派发
+ *   （旧的 `Atomics.wait` 把它整整挡住），而它会 `process.exit` —— 不先把在飞的 wrapper 树收掉，
+ *   `ctest` 与被守的可执行就变成孤儿继续烧 CPU。
+ */
+let activeTimedPid = null;
+
+/**
+ * 跑一条命令（**async**），带**单测超时**与**进程树收尾**。
  *
- * 为什么要一层 `node -e` wrapper（而不是 `spawnSync({timeout})`）：主流程是同步的，`spawnSync` 的
- * `timeout` 到点只 `TerminateProcess` 直接子进程（= `ctest`），被守的可执行变孤儿继续烧 CPU；
- * 而我们需要在**根进程还活着时**执行 `taskkill /T`（父子链还在）。wrapper 的职责只有两条：
- * ① 用 `spawnSync` 等 `cmd` 结束；② 把退出码写进文件（同步轮询拿不到子进程的 `exitCode`）。
+ * 为什么要一层 `node -e` wrapper（而不是 `spawnSync({timeout})`）：`spawnSync` 的 `timeout` 到点只
+ * `TerminateProcess` 直接子进程（= `ctest`），被守的可执行变孤儿继续烧 CPU；而我们需要在**根进程还
+ * 活着时**执行 `taskkill /T`（父子链还在）。wrapper 的职责有三条：
+ * ① 用 `spawn` 等 `cmd` 结束；② 把退出码写进文件（父进程轮询，拿不到子进程的 `exitCode`）；
+ * ③ 把 `cmd` 的 pid 记进 `AMAYUI_MUTATE_CHILD_FILE`（`gone` 分支在 Windows 上只能靠它找树）。
+ *
+ * ★ 为什么是 **async**（`REQ-01M71YHT35RMW1XA6CCSNT4RNM`）：等待循环原先用 `sleepSync`（`Atomics.wait`）
+ *   阻塞事件循环 ⇒ libuv 的 `waitpid` 永远跑不到 ⇒ 根进程停在 **zombie**，而 POSIX 的
+ *   `process.kill(pid, 0)` 对 zombie **仍然成功** ⇒ "等它消失"等的是一个永远收不到的尸体
+ *   （实测：超时白等满 5 s、正常结束白等 2 s、wrapper 崩了还被误报成"超时"）。
+ *   改成 `await sleep(…)` 后事件循环每一轮都能收尸，"根真的没了"才成为真判据。
  *
  * @param {string} command
  * @param {string[]} args
  * @param {{cwd?:string, logFd?:number|null, timeoutSec?:number, root?:string, env?:object}} [opts]
- * @returns {{status:number}|{timedOut:true, timeoutSec:number, treeKilled:boolean, elapsedMs:number}|{error:Error}}
+ * @returns {Promise<{status:number}|{timedOut:true, timeoutSec:number, treeKilled:boolean, elapsedMs:number}|{error:Error}>}
  */
-export function runTimedCommand(command, args, opts = {}) {
+export async function runTimedCommand(command, args, opts = {}) {
   const root = opts.root ?? ROOT;
   const timeoutSec = opts.timeoutSec ?? CTEST_TIMEOUT_SEC.normal;
   const dir = path.join(root, '.tmp', 'mutate-check');
@@ -161,12 +220,19 @@ export function runTimedCommand(command, args, opts = {}) {
     dir,
     `.exit-${process.pid}-${++timedCommandSeq}-${Math.random().toString(36).slice(2, 10)}`,
   );
+  // ★ wrapper 会把**真命令**的 pid 写进它（见 `TIMED_WRAPPER`）：`gone` 分支在 Windows 上要靠它收树。
+  const childFile = `${statusFile}.child`;
   const stdio = opts.logFd == null ? 'ignore' : ['ignore', opts.logFd, opts.logFd];
   let child;
   try {
     child = spawn(process.execPath, ['-e', TIMED_WRAPPER, command, ...args], {
       cwd: opts.cwd ?? ROOT,
-      env: { ...process.env, ...(opts.env ?? {}), AMAYUI_MUTATE_EXIT_FILE: statusFile },
+      env: {
+        ...process.env,
+        ...(opts.env ?? {}),
+        AMAYUI_MUTATE_EXIT_FILE: statusFile,
+        AMAYUI_MUTATE_CHILD_FILE: childFile,
+      },
       stdio,
       windowsHide: true,
       // POSIX：自成进程组 ⇒ 超时可以整组收掉（Windows 走 taskkill /T）
@@ -178,58 +244,89 @@ export function runTimedCommand(command, args, opts = {}) {
   // spawn 的失败是**异步**的（'error' 事件）；不挂监听器会变成未捕获异常。挂上并靠 pid 判早期失败。
   child.on('error', () => {});
   if (!child.pid) return { error: new Error(`spawn 失败：${command}`) };
-
-  const timeoutMs = Math.max(1, Math.round(timeoutSec * 1000));
-  const started = Date.now();
-  let done = false; // wrapper 写出了退出码
-  let gone = false; // wrapper 没了却没写退出码（崩了）
-  let timedOut = false;
-  while (!done && !gone && !timedOut) {
-    if (fs.existsSync(statusFile)) {
-      done = true;
-      break;
+  // ★ 在飞期间登记：`restoreOnSignal()` 会在 `process.exit` 之前把这一棵树收掉（见 `activeTimedPid`）。
+  activeTimedPid = child.pid;
+  try {
+    const timeoutMs = Math.max(1, Math.round(timeoutSec * 1000));
+    const started = Date.now();
+    let done = false; // wrapper 写出了退出码
+    let gone = false; // wrapper 没了却没写退出码（崩了）
+    let timedOut = false;
+    while (!done && !gone && !timedOut) {
+      if (fs.existsSync(statusFile)) {
+        done = true;
+        break;
+      }
+      if (Date.now() - started >= timeoutMs) {
+        timedOut = true;
+        break;
+      }
+      // ★ 顺序很重要：先看退出码文件、再看进程存活 —— wrapper 先写文件后退出，反过来会误判成"崩了"
+      if (!isProcessAlive(child.pid)) {
+        gone = true;
+        break;
+      }
+      // ★ 必须 `await`（⛔ 不是 `sleepSync`）：阻塞事件循环 ⇒ libuv 收不了尸 ⇒ zombie 的 `kill(pid,0)`
+      //   仍然成功 ⇒ "等它消失"等的是永远收不到的东西（见函数头注释）。
+      await sleep(25);
     }
-    if (Date.now() - started >= timeoutMs) {
-      timedOut = true;
-      break;
-    }
-    // ★ 顺序很重要：先看退出码文件、再看进程存活 —— wrapper 先写文件后退出，反过来会误判成"崩了"
-    if (!isProcessAlive(child.pid)) {
-      gone = true;
-      break;
-    }
-    sleepSync(25);
-  }
 
-  let treeKilled = false;
-  if (timedOut) {
-    treeKilled = killProcessTree(child.pid);
-    // 等根进程真的消失（最多 5 s）：下一次重建 / restore 要独占构建目录里的文件
-    const deadline = Date.now() + 5000;
-    while (Date.now() < deadline && isProcessAlive(child.pid)) sleepSync(25);
-  } else if (done) {
-    // 正常结束时也短暂等它退出：避免紧接着的重建撞上还没释放句柄的进程（Windows 文件占用）
-    const deadline = Date.now() + 2000;
-    while (Date.now() < deadline && isProcessAlive(child.pid)) sleepSync(10);
-  }
+    let treeKilled = false;
+    if (timedOut) {
+      treeKilled = killProcessTree(child.pid);
+      // 等根进程真的消失（最多 5 s）：下一次重建 / restore 要独占构建目录里的文件
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline && isProcessAlive(child.pid)) await sleep(25);
+    } else if (done) {
+      // 正常结束时也短暂等它退出：避免紧接着的重建撞上还没释放句柄的进程（Windows 文件占用）
+      const deadline = Date.now() + 2000;
+      while (Date.now() < deadline && isProcessAlive(child.pid)) await sleep(10);
+    } else {
+      // ★ `gone`（wrapper 在写出退出码之前就没了：崩 / 被外人杀）也必须**收树**。
+      //   旧实现靠"这条分支在 POSIX 上走不到、最终走 timedOut ⇒ 上面那个 `killProcessTree`"兜住；
+      //   改 async 之后它 ~25–50 ms 就会返回 `{error}` ⇒ 不在这里补一刀，ctest 与被守的可执行
+      //   就被 launchd/init 收养成孤儿继续烧 CPU。
+      //   实测：根（group leader）即使已被收尸，`kill(-pgid)` 仍有效 ⇒ 组里的孙进程 300 ms 内死。
+      treeKilled = killProcessTree(child.pid);
+      // ★ **Windows 必须再收一次**（复审裁决）：那边 `taskkill /T /F /PID <pid>` 靠**枚举 `pid` 的子进程**
+      //   找整棵树，而 wrapper 已经死了 ⇒ 枚举不到被收养的 `ctest` / 被守的可执行 ⇒ 上面那一刀只会
+      //   "找不到 pid"，孤儿照留。⇒ 拿 wrapper 自己记下的**真命令 pid** 再收一次（`ctest` 还活着时，
+      //   `taskkill /T` 能枚举到它自己的孩子）。
+      //   ⚠ pid 复用（残余风险）：只在 `recordedPid` **此刻还活着**时才动手，窗口 = wrapper 死亡 →
+      //   本分支（`await sleep(25)` 的量级，毫秒级）；pid 文件名带 `-<pid>-<seq>-<random>` ⇒ 不会读到
+      //   别次运行的记录。即便如此，"pid 刚好被复用成另一个无关进程"是理论上的误杀面。
+      //   ★ **POSIX 不走这条**：进程组（`kill(-pgid)`）在组长被收尸后仍然有效，不必猜 pid（杜绝误杀）。
+      if (process.platform === 'win32') {
+        const recordedPid = readRecordedChildPid(childFile);
+        if (recordedPid && recordedPid !== child.pid && isProcessAlive(recordedPid)) {
+          treeKilled = killProcessTree(recordedPid) || treeKilled;
+        }
+      }
+    }
 
-  let result;
-  if (timedOut) {
-    result = { timedOut: true, timeoutSec, treeKilled, elapsedMs: Date.now() - started };
-  } else if (done) {
-    const text = fs.readFileSync(statusFile, 'utf8').trim();
-    const status = Number.parseInt(text, 10);
-    result = Number.isInteger(status)
-      ? { status }
-      : { error: new Error(`退出码文件内容非法：${JSON.stringify(text)}`) };
-  } else {
-    result = { error: new Error(`子进程在写出退出码之前就结束了（${command}）`) };
+    if (timedOut) {
+      return { timedOut: true, timeoutSec, treeKilled, elapsedMs: Date.now() - started };
+    }
+    if (done) {
+      const text = fs.readFileSync(statusFile, 'utf8').trim();
+      const status = Number.parseInt(text, 10);
+      return Number.isInteger(status)
+        ? { status }
+        : { error: new Error(`退出码文件内容非法：${JSON.stringify(text)}`) };
+    }
+    return { error: new Error(`子进程在写出退出码之前就结束了（${command}）`) };
+  } finally {
+    activeTimedPid = null;
+    fs.rmSync(statusFile, { force: true });
+    fs.rmSync(childFile, { force: true });
   }
-  fs.rmSync(statusFile, { force: true });
-  return result;
 }
 
-/** 同步睡 `ms`（用 Atomics.wait 而不是 Promise：本工具的主流程是同步的 spawnSync 序列） */
+/** 让事件循环转一次（libuv 才收得到尸）；⚠ 只有 `buildCtestTargets` 的重试退避还用它 */
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** 同步睡 `ms`（`Atomics.wait`）。★ 只留给 `buildCtestTargets` 的**重试退避** —— 它不需要收尸，
+ *  而且那里是纯同步的 `spawnSync` 序列；⛔ 别把它再用回"等子进程消失"（那等于等一个收不到的 zombie）。 */
 function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
@@ -271,12 +368,13 @@ function buildCtestTargets(logFd, buildDir = CTEST_BUILD_DIR, { attempts = 3, de
 /**
  * 只跑**一条** CTest（不构建），带**单测超时**。
  * 抽出来是为了"还原后复验基线"与"变异后跑守卫"走同一份超时逻辑（⛔ 不许一处有一处没有）。
- * @returns {{status:number}|{timedOut:true, timeoutSec:number, unavailable:string, reason:'timeout'}|{unavailable:string, reason:string}}
+ * ★ async 是因为 `runTimedCommand` 的等待循环必须让事件循环转（见那边注释）。
+ * @returns {Promise<{status:number}|{timedOut:true, timeoutSec:number, unavailable:string, reason:'timeout'}|{unavailable:string, reason:string}>}
  */
-function runCtestOnce(name, logFd, buildDir, opts = {}) {
+async function runCtestOnce(name, logFd, buildDir, opts = {}) {
   const timeoutSec = opts.timeoutSec ?? defaultCtestTimeoutSec(name);
   const args = opts.args ?? ['--test-dir', buildDir, '-R', `^${name}$`, '--output-on-failure'];
-  const r = runTimedCommand(opts.command ?? 'ctest', args, {
+  const r = await runTimedCommand(opts.command ?? 'ctest', args, {
     cwd: opts.cwd ?? ROOT,
     logFd,
     timeoutSec,
@@ -301,8 +399,11 @@ function runCtestOnce(name, logFd, buildDir, opts = {}) {
  * ★ `buildDir` 可按条目覆盖（`apps/emulator-lift/out` 与 `apps/emulator-cxx/out` 是两个独立工程）。
  * ★ `opts` 是**测试注入点**（`tools/test/mutate-timeout.test.mjs` 用假命令验超时，不碰真 C++ 构建）：
  *   `root` / `cwd` / `timeoutSec` / `command` / `args` / `skipBuild` / `build`。
- * @returns {{status:number}|{unavailable:string}|{timedOut:true, timeoutSec:number, unavailable:string}}
+ * @returns {{status:number}|{unavailable:string}|{timedOut:true, timeoutSec:number, unavailable:string}
+ *   |Promise<{status:number}|{unavailable:string}|{timedOut:true, timeoutSec:number, unavailable:string}>}
  *   `unavailable` = 本机跑不起来（没配置构建目录 / 没 cmake / 构建失败 / **超时**）。
+ *   ★ 构建前的前置检查是**同步**返回，真正跑 CTest 那条路返回 `Promise`（`runCtestOnce` 是 async）
+ *     ⇒ 调用方一律 `await`（`await` 非 Promise 值原样返回，两种返回形态都吃）。
  */
 export function runCtestGuard(name, logFd, buildDir = CTEST_BUILD_DIR, opts = {}) {
   const root = opts.root ?? ROOT;
@@ -641,6 +742,13 @@ function restoreOnSignal(signal) {
   restoringFromSignal = true;
   const code = signal === 'SIGINT' ? 130 : 143;
   const n = appliedEntries.length;
+  // ★ **先收在飞的 wrapper 树，再写回 / 重建**（复审裁决的顺序）：改 async 之后信号真的会在 `await`
+  //   期间派发（旧的 `Atomics.wait` 把它挡住 ⇒ 这条路径从没被走到过）。留到重建之后才杀，Windows 上
+  //   就是"边重建边跑 ctest"⇒ 构建目录里的 exe 还被占着（那正是 `buildCtestTargets` 重试要兜的抖动）。
+  if (activeTimedPid) {
+    killProcessTree(activeTimedPid);
+    activeTimedPid = null;
+  }
   try {
     for (const entry of appliedEntries) {
       const abs = path.join(ROOT, entry.file);
@@ -2243,6 +2351,28 @@ const MUTATIONS = [
       '`dispatch-tax/diag-on` 的 `token-diag : skip-lock=1` 与 `diag-really-skips` 的' +
       '`maxConcurrent()==2` 当场红（A/B 两臂其实是同一份行为）',
   },
+
+  // ── 本工具自己（`tools/mutate-check.mjs`）：**超时后"等根进程真的消失"退回阻塞式 sleep** ──────────
+  //   ★ 缺陷形态（`REQ-01M71YHT35RMW1XA6CCSNT4RNM`）：`sleepSync`（`Atomics.wait`）挡住事件循环 ⇒
+  //     libuv 的 `waitpid` 跑不到 ⇒ 根进程停在 **zombie**，而 POSIX 的 `process.kill(pid, 0)` 对 zombie
+  //     **仍然成功** ⇒ 这段等待等的是永远收不到的东西（实测：每条挂死变异白等满 5 s）。
+  //   ★ 为什么必须有一条指向**本工具自己**：它坏掉时**所有**变异的结论都不可信，而"白等 5 s"与
+  //     "等到了"在输出里长得一样（= 静默）。这里只回退**超时那条**（25 ms）。
+  //   ★ 正常结束那条（10 ms）**不守**：复审实测把它单独回退成 `sleepSync(10)` 后 5/5 仍绿 ——
+  //     主循环的 `await` 已经把尸收完，快路径**没有可观测效应**（不值得为它配断言/条目，
+  //     ⛔ 也别为它加"看起来在守"的恒真断言）。
+  //   ⚠ **自指条目**：`from` 在这份文件里出现**两次** —— 真代码（在本条目之前）+ 本条 `from` 字面量自己。
+  //     `before.replace()` 取**第一处** ⇒ 施加在代码上（正确）。若哪天把代码行挪到清单之后，它就会改到
+  //     清单字面量上 ⇒ 代码没变 ⇒ 守卫**不会红** ⇒ 记「❌ 守卫没红」并 exit 1（响亮，⛔ 不会假绿）。
+  {
+    file: 'tools/mutate-check.mjs',
+    from: '      while (Date.now() < deadline && isProcessAlive(child.pid)) await sleep(25);',
+    to: '      while (Date.now() < deadline && isProcessAlive(child.pid)) sleepSync(25);',
+    guard: 'tools/test/mutate-timeout.test.mjs',
+    what:
+      '超时后"等根进程消失"退回阻塞式 `sleepSync` ⇒ POSIX 上等的是永远收不到的 zombie' +
+      '（每条挂死变异白等 5 s；超时守卫 a) 的墙钟预算当场红）',
+  },
 ];
 
 let mutationRunSeq = 0;
@@ -2262,9 +2392,10 @@ let mutationRunSeq = 0;
  *   - 不可判定(超时)：`unverifiable:true, unverifiableKind:'timeout'`（**不是**红）；
  *   - 不可判定(其它)：`unverifiableKind:'other'`（构建失败 / 构建目录未配置 / node 守卫 skip）。
  *
- * @returns {{result:object|null, restoreProblem:string|null}} `result:null` ⇒ 还原失败（调用方必须中止）
+ * @returns {Promise<{result:object|null, restoreProblem:string|null}>} `result:null` ⇒ 还原失败（调用方必须中止）
+ *   ★ async：`runCtest` / `verifyCtest` 走 `runCtestOnce` → `runTimedCommand`，那条路必须让事件循环转。
  */
-export function runMutationEntry(m, ctx = {}) {
+export async function runMutationEntry(m, ctx = {}) {
   const root = ctx.root ?? ROOT;
   const runCtest = ctx.runCtest ?? runCtestGuard;
   const rebuild = ctx.rebuild ?? ((buildDir) => buildCtestTargets(null, buildDir));
@@ -2287,7 +2418,7 @@ export function runMutationEntry(m, ctx = {}) {
   // ★ CTest 条目在**施加变异之前**先验基线：构建目录没配置 / 用例不存在 / 基线本来就红 / **超时** ⇒
   //   这次变异什么都证明不了 ⇒ 记"无法判定"，⛔ 不记成"守卫没红"、更不记成"守卫红了"。
   if (m.ctest) {
-    const pre = runCtest(m.ctest, null, buildDir, ctestOpts);
+    const pre = await runCtest(m.ctest, null, buildDir, ctestOpts);
     if (pre.unavailable || pre.status !== 0) {
       const why = pre.unavailable ?? `\`${m.ctest}\` 基线退出码 ${pre.status}`;
       return {
@@ -2332,7 +2463,7 @@ export function runMutationEntry(m, ctx = {}) {
     const fd = fs.openSync(log, 'w');
     try {
       if (m.ctest) {
-        const r = runCtest(m.ctest, fd, buildDir, ctestOpts);
+        const r = await runCtest(m.ctest, fd, buildDir, ctestOpts);
         code = r.status ?? null;
         unavailable = r.unavailable ?? null;
         timedOut = Boolean(r.timedOut);
@@ -2363,7 +2494,7 @@ export function runMutationEntry(m, ctx = {}) {
       if (build.error || build.status !== 0) {
         restoreProblem = '还原后重建失败（exe 仍是变异版）';
       } else {
-        const run = verifyCtest(m.ctest, buildDir, ctestOpts);
+        const run = await verifyCtest(m.ctest, buildDir, ctestOpts);
         if (run.timedOut) {
           restoreProblem = `还原后 \`${m.ctest}\` 超时未结束（基线判不了）`;
         } else if (run.unavailable || run.status !== 0) {
@@ -2421,12 +2552,13 @@ export function runMutationEntry(m, ctx = {}) {
 }
 
 /**
- * @returns {number} 退出码：0 = 全部按预期变红；1 = 有守卫没抓住破坏 / 清单过期；
- *   2 = 还原失败（已中止）；3 = 启动自愈拒绝运行（journal 非法 / 工作树内容与 journal 不符）；
- *   4 = **全部条目都无法判定（其它原因）**（本机没有可跑的守卫 ⇒ 不能算通过）；
+ * @returns {Promise<number>} 退出码：0 = 全部按预期变红；1 = 有守卫没抓住破坏 / 清单过期；
+ *   2 = 还原失败 / **内部错误**（已中止；工作树可能被污染）；3 = 启动自愈拒绝运行（journal 非法 /
+ *   工作树内容与 journal 不符）；4 = **全部条目都无法判定（其它原因）**（本机没有可跑的守卫 ⇒ 不能算通过）；
  *   5 = **有 CTest 守卫超时**（不可判定(超时) ⇒ 不能算通过；⛔ 不许被 exit 0 掩盖）
+ *   ★ async：`runMutationEntry` → `runCtestOnce` → `runTimedCommand` 的等待循环必须让事件循环转。
  */
-export function main(argv = process.argv.slice(2)) {
+export async function main(argv = process.argv.slice(2)) {
   // ★ `--match <子串>`：只跑匹配的变异（匹配 `file` / `what` / `guard`）。
   //   ★ 为什么必须有：本工具**会临时改写工作树里的文件** ⇒ 只想验"我这一域新加的守卫会不会红"时，
   //     不该被迫把全部变异跑一遍（窗口越长，越可能撞上别的进程在编辑）。技能文档里写的
@@ -2479,7 +2611,7 @@ export function main(argv = process.argv.slice(2)) {
         '    ★ 它同时做**静态存在性检查**（`file` 在不在、`from` 还是不是源文件的子串；不构建、不施加变异）\n' +
         '      ⇒ 清单过期（源文件改名 / 搬家 / 文案改写）在这里就非 0 退出，而不是等全量跑到那一条。\n' +
         '  --match <子串> 只跑 file / what / guard 里含该子串的变异（例：--match shape）。\n\n' +
-        '  退出码：0 全部按预期变红 / 1 有守卫没抓住或清单过期 / 2 还原失败 / 3 启动自愈拒绝运行 /\n' +
+        '  退出码：0 全部按预期变红 / 1 有守卫没抓住或清单过期 / 2 还原失败 / 内部错误 / 3 启动自愈拒绝运行 /\n' +
         '          4 全部不可判定(其它) / 5 有不可判定(超时)。\n\n' +
         '  崩溃安全：动文件前把 {file,before,mutated,guard?} 原子写进 .tmp/mutate-check/journal.json；\n' +
         '  SIGINT/SIGTERM 同步恢复；SIGKILL/断电后下次启动自己恢复。判不了（盘上是第三种内容）⇒\n' +
@@ -2554,7 +2686,7 @@ export function main(argv = process.argv.slice(2)) {
       continue;
     }
     // ★ 施加 → 跑守卫 → 还原 → 判四态，全在 `runMutationEntry` 里（导出给超时守卫用同一份实现）
-    const { result, restoreProblem } = runMutationEntry(m, {
+    const { result, restoreProblem } = await runMutationEntry(m, {
       root: ROOT,
       journalPath,
       journalEntries,
@@ -2636,5 +2768,18 @@ export function main(argv = process.argv.slice(2)) {
 }
 
 const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
-if (isDirectRun) process.exitCode = main();
+if (isDirectRun) {
+  // ★ `main()` 现在是 async ⇒ 直接赋 Promise 会 `ERR_INVALID_ARG_TYPE`（`process.exitCode` 只认数字）。
+  //   ⛔ `.catch` 绝不许落 0：那会把"内部错误"读成"全部按预期变红"。复用 2（还原失败 / 内部错误），
+  //   与 `main()` 里还原失败那条同码同口径（工作树可能被污染 ⇒ 调用方本来就必须查 `git diff`）。
+  main().then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (err) => {
+      console.error(`\n✗ 内部错误（工作树可能被污染，请查 git diff）：${err?.stack ?? err}`);
+      process.exitCode = 2;
+    },
+  );
+}
 

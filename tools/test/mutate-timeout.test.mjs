@@ -3,16 +3,20 @@
  * tools/test/mutate-timeout.test.mjs —— `tools/mutate-check.mjs` 的 **CTest 单测超时**守卫
  * （`REQ-01M71B4JXCGWR3MV1HNB6T8D05`）
  *
- * 判据（单里的四条，全部落在这里）：
+ * 判据（全部落在这里；★ 用例名就是下面这些小写字母）：
  *   a. **超时真的会触发**：假守卫 sleep 5 s、超时设 2 s ⇒ `runTimedCommand` 在 ~2 s 返回
- *      `{timedOut:true}`，**不**等它自己结束；且 `ctest` 与被守可执行组成的**进程树**（含孙进程）
- *      被收掉（Windows `taskkill /T`；只杀直接子进程会留下孤儿继续烧 CPU）。
+ *      `{timedOut:true}`，**不**等它自己结束（墙钟预算 `TIMEOUT_SEC*1000 + 1000`）；且
+ *      `ctest` 与被守可执行组成的**进程树**（含孙进程）被收掉（Windows `taskkill /T`；只杀直接子进程
+ *      会留下孤儿继续烧 CPU）。
+ *   a2. **对照**：`ok` / `red` 两条假命令照常交回退出码（`timedOut` 不是恒真），且**不许白等**
+ *      —— 两次调用合计的墙钟必须 < `TIMEOUT_SEC*1000`（旧实现每次在退出码之后再等 2 s zombie）。
  *   b. **超时 ≠ 红**：`runMutationEntry` 把它记成
  *      `unverifiableKind:'timeout'` + `⏭ **无法判定（超时）**`，⛔ 不是 `✅ 守卫红了`；
- *      同一次运行里**下一条**假条目照跑（两条 `ctest` 各被调用两次：基线 + 施加后）。
- *   c. **还原仍执行**：超时条目与正常条目都走完"写回原文 + 全文比对 + 复验基线"，
- *      journal 清空；源文件内容逐字节等于施加前。
- *   d. **超时值按守卫名分层**、`--ctest-timeout <秒>` 可覆盖（规则同时写在 `--help` 里）。
+ *      同一次运行里**下一条**假条目照跑（两条 `ctest` 各被调用两次：基线 + 施加后），
+ *      还原 + 全文比对仍执行，journal 清空。
+ *   c. **超时值按守卫名分层**、`--ctest-timeout <秒>` 可覆盖（规则同时写在 `--help` 里）。
+ *   d. **wrapper 崩了 ≠ 超时**：假守卫在写出退出码**之前**死（`process.kill(process.ppid,'SIGKILL')`）
+ *      ⇒ 立刻返回 `{error}` 而不是熬到超时，**且它下面那棵树（含孙进程）必须被收掉**。
  *
  * ★ **本用例自己不会挂死**：假守卫无论模式都最多睡 5 s 后自行退出（即使超时逻辑坏掉），
  *   而且它只写 `.tmp/mutate-timeout-test/`（gitignored）—— ⛔ 不碰真实工作树 / 不构建 C++。
@@ -53,10 +57,15 @@ import { spawn } from 'node:child_process';
 
 const mode = process.argv[2] ?? 'ok';
 const sleepMs = Number(process.argv[3] ?? '${SLEEP_MS}');
-if (mode === 'hang') {
+if (mode === 'hang' || mode === 'crash') {
   fs.writeFileSync(process.env.AMAYUI_FAKE_PID_FILE, String(process.pid));
   const grand = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300000)'], { stdio: 'ignore' });
   fs.writeFileSync(process.env.AMAYUI_FAKE_GRANDCHILD_FILE, String(grand.pid));
+  if (mode === 'crash') {
+    // ★ 模拟 wrapper 在**写出退出码之前**就死（崩 / 被外人杀）：杀掉父进程 = wrapper。
+    //   我们与孙进程还留在原来的进程组里 ⇒ 收树只能靠 kill(-pgid)，这正是 d) 要验的东西。
+    process.kill(process.ppid, 'SIGKILL');
+  }
   try {
     await new Promise((resolve) => setTimeout(resolve, sleepMs));
   } finally {
@@ -83,8 +92,14 @@ function alive(pid) {
   }
 }
 
-/** 等 `pid` 消失（最多 `ms`）；返回最终是否已消失 */
-function waitDead(pid, ms = 3000) {
+/**
+ * 等 `pid` 消失（最多 `ms`）；返回最终是否已消失。
+ * ★ 缺省预算 1500 ms（不是 3000）：这里的余量 = `SLEEP_MS − runTimedCommand 返回时刻`。
+ *   修好后挂在树里的进程 ~0.1–0.2 s 内就 ESRCH（余量 8–15×）；而"只杀壳"那种退化下，
+ *   假守卫要睡满剩下的 ~2900 ms 才自己退出 ⇒ 1500 的窗口足够抓住它，3000 只剩 76 ms 余量（实测）。
+ *   ⛔ 别用"当前实测值"当阈值：这是**失败判定**的预算，不影响通过路径。
+ */
+function waitDead(pid, ms = 1500) {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
     if (!alive(pid)) return true;
@@ -98,12 +113,12 @@ function readPid(file) {
   return Number(fs.readFileSync(file, 'utf8').trim());
 }
 
-test('a) 超时真的触发：假守卫睡 5 s、超时 2 s ⇒ 立刻返回 timedOut，且整棵进程树（含孙进程）被收掉', () => {
+test('a) 超时真的触发：假守卫睡 5 s、超时 2 s ⇒ 立刻返回 timedOut，且整棵进程树（含孙进程）被收掉', async () => {
   const caseDir = fs.mkdtempSync(path.join(SCRATCH, 'timed-'));
   const pidFile = path.join(caseDir, 'fake.pid');
   const grandFile = path.join(caseDir, 'grand.pid');
   const started = Date.now();
-  const r = runTimedCommand(process.execPath, [FAKE, 'hang', String(SLEEP_MS)], {
+  const r = await runTimedCommand(process.execPath, [FAKE, 'hang', String(SLEEP_MS)], {
     root: caseDir,
     cwd: caseDir,
     timeoutSec: TIMEOUT_SEC,
@@ -115,7 +130,15 @@ test('a) 超时真的触发：假守卫睡 5 s、超时 2 s ⇒ 立刻返回 tim
   assert.equal(r.timeoutSec, TIMEOUT_SEC, '超时值要如实回传（排障要看它）');
   assert.equal(r.treeKilled, true, '超时必须执行进程树收尾（Windows taskkill /T /F）；false 说明只杀了壳');
   assert.ok(r.status === undefined, '超时不许带退出码（否则会被上层读成"守卫红了/没红"）');
-  assert.ok(elapsed < SLEEP_MS, `超时必须**不等它自己结束**（等了 ${elapsed} ms ≥ sleep ${SLEEP_MS} ms）`);
+  // ★ 预算是**关系式**（超时值 + 1 s），⛔ 不是实测常数：修好 ≈2.0 s。
+  //   上限别超过 4000（= 4×TIMEOUT_SEC）：它要抓住"超时之后又真的多等一截"的每一种退化；再放宽
+  //   （旧的 `elapsed < SLEEP_MS` = 5000 就是这么失去牙口的），"2 s 超时 + 1.9 s 空转"就会静默滑过。
+  //   ⚠ 单独回退**正常结束**那条 10 ms 循环是**不可观测**的（复审实测 5/5 仍绿：主循环的 `await`
+  //     已经把尸收完）⇒ 别以为 4000 这个上界是为它留的。
+  assert.ok(
+    elapsed < TIMEOUT_SEC * 1000 + 1000,
+    `超时必须**不等它自己结束**（等了 ${elapsed} ms ≥ 预算 ${TIMEOUT_SEC * 1000 + 1000} ms）`,
+  );
 
   // 进程树：假守卫（≈ ctest）+ 它起的孙进程（≈ 被守的可执行）都必须死
   const fakePid = readPid(pidFile);
@@ -124,14 +147,25 @@ test('a) 超时真的触发：假守卫睡 5 s、超时 2 s ⇒ 立刻返回 tim
   assert.ok(waitDead(grandPid), `孙进程 ${grandPid} 还活着 ⇒ 没做到"收掉进程树"（它会继续烧 CPU）`);
 });
 
-test('a2) 对照：没超时的命令照常返回退出码（证明 timedOut 不是恒真）', () => {
-  const ok = runTimedCommand(process.execPath, [FAKE, 'ok'], { root: SCRATCH, timeoutSec: TIMEOUT_SEC });
+test('a2) 对照：没超时的命令照常返回退出码（证明 timedOut 不是恒真），且**不许白等**', async () => {
+  const started = Date.now();
+  const ok = await runTimedCommand(process.execPath, [FAKE, 'ok'], { root: SCRATCH, timeoutSec: TIMEOUT_SEC });
   assert.deepEqual(ok, { status: 0 }, `正常结束要交回退出码 0（实际：${JSON.stringify(ok)}）`);
-  const red = runTimedCommand(process.execPath, [FAKE, 'red'], { root: SCRATCH, timeoutSec: TIMEOUT_SEC });
+  const red = await runTimedCommand(process.execPath, [FAKE, 'red'], { root: SCRATCH, timeoutSec: TIMEOUT_SEC });
   assert.deepEqual(red, { status: 1 }, `正常结束要交回退出码 1（实际：${JSON.stringify(red)}）`);
+  const elapsed = Date.now() - started;
+  // ★ 关系式（⛔ 不写实测常数）：两条"立刻退 0/1"的命令合计**不许**花到一次超时的时间。
+  //   坏实现（主循环也是阻塞的）每次在退出码之后再等 2 s zombie ⇒ ≈4216 ms（2.1× 预算）；修好 ≈190 ms。
+  //   ⚠ 这条守的是**整体**（主循环 + 两段收尾都 async）。**单独**把正常结束那条 10 ms 回退成
+  //     `sleepSync(10)` 是**不可观测**的（复审实测：5/5 仍绿）—— 主循环的 `await` 已经把尸收完了。
+  //     ⇒ 别据此以为"10 ms 那条有守卫"（那里不需要、也不值得一条断言）。
+  assert.ok(
+    elapsed < TIMEOUT_SEC * 1000,
+    `普通结束不许白等（实际 ${elapsed} ms ≥ ${TIMEOUT_SEC * 1000} ms —— 退出码写完之后还在等它消失？）`,
+  );
 });
 
-test('b) 假守卫超时 ⇒ 记「不可判定（超时）」而不是「守卫红了」；继续跑下一条；还原 + 全文比对仍执行', () => {
+test('b) 假守卫超时 ⇒ 记「不可判定（超时）」而不是「守卫红了」；继续跑下一条；还原 + 全文比对仍执行', async () => {
   const root = fs.mkdtempSync(path.join(SCRATCH, 'e2e-'));
   const fileA = 'a.txt';
   const fileB = 'b.txt';
@@ -200,8 +234,8 @@ test('b) 假守卫超时 ⇒ 记「不可判定（超时）」而不是「守卫
   };
 
   const started = Date.now();
-  const first = runMutationEntry(hang, ctx);
-  const second = runMutationEntry(red, ctx);
+  const first = await runMutationEntry(hang, ctx);
+  const second = await runMutationEntry(red, ctx);
   const elapsed = Date.now() - started;
 
   // ① 超时 = 不可判定（超时），⛔ 不是红
@@ -235,7 +269,14 @@ test('b) 假守卫超时 ⇒ 记「不可判定（超时）」而不是「守卫
   assert.equal(loaded.exists, false, '两条都还原并通过后 journal 应被删除（⛔ 不许留下"以为还原了"的条目）');
   assert.ok(waitDead(readPid(hangPidFile)), '超时条目的假守卫进程树必须被收掉');
   assert.ok(waitDead(readPid(grandPidFile)), '超时条目的孙进程必须被收掉');
-  assert.ok(elapsed < 4 * SLEEP_MS, `整轮不能卡在挂死条目上（实际 ${elapsed} ms）`);
+  // ★ 预算是**关系式**（超时值 + 3 s）。修好 ≈2.3 s（一条 hang 2 s + 一条立刻红的正常条目）。
+  //   ⚠ **将来再加一条 hang 条目必须重算**：每条 hang ≈ +TIMEOUT_SEC，现在的 3 s 余量只够兜住
+  //     "一条 hang"，加第二条就要写成 `（hang 条数 + 1) * TIMEOUT_SEC * 1000 + 余量`，否则再次退化成
+  //     "等于没设防"（旧的 `4 * SLEEP_MS` = 20 s 就是这么失去牙口的）。
+  assert.ok(
+    elapsed < TIMEOUT_SEC * 1000 + 3000,
+    `整轮不能卡在挂死条目上（实际 ${elapsed} ms ≥ 预算 ${TIMEOUT_SEC * 1000 + 3000} ms）`,
+  );
 });
 
 test('c) 超时值按守卫名分层（assets / external 更大）+ CLI `--ctest-timeout` 可覆盖且在 help 里写明', () => {
@@ -287,4 +328,48 @@ test('c) 超时值按守卫名分层（assets / external 更大）+ CLI `--ctest
   }
   assert.notEqual(bad.status, 0, '--ctest-timeout abc 必须非 0 退出');
   assert.match(fs.readFileSync(badErr, 'utf8'), /正数秒/, '必须说明合法形态（而不是静默用缺省值）');
+});
+
+test('d) wrapper 崩了（写出退出码之前就死）≠ 超时：立刻返回 {error}，且它下面那棵树（含孙进程）被收掉', async () => {
+  // 判据来源（实测）：旧实现里 wrapper 一死就永远看不到（zombie + POSIX 的 `kill(pid,0)` 恒成功）
+  // ⇒ 熬到 `timeoutSec` 才返回 `{timedOut:true}`（`timeoutSec:1` 实测 6036 ms / timedOut:true）。
+  // ⛔ 别用"自己 1.5 s 就退出"的假命令来"证明"树被收 —— 那证明不了任何东西。这里必须真起一个
+  // 孙进程（≈ ctest 起被守的可执行），再验**两个 pid 都 ESRCH**。
+  const caseDir = fs.mkdtempSync(path.join(SCRATCH, 'gone-'));
+  const pidFile = path.join(caseDir, 'fake.pid');
+  const grandFile = path.join(caseDir, 'grand.pid');
+  try {
+    const started = Date.now();
+    const r = await runTimedCommand(process.execPath, [FAKE, 'crash', String(SLEEP_MS)], {
+      root: caseDir,
+      cwd: caseDir,
+      timeoutSec: 1,
+      env: { AMAYUI_FAKE_PID_FILE: pidFile, AMAYUI_FAKE_GRANDCHILD_FILE: grandFile },
+    });
+    const elapsed = Date.now() - started;
+
+    assert.notEqual(r.timedOut, true, `wrapper 崩了不许记成超时（实际：${JSON.stringify(r)}）`);
+    assert.ok(r.error instanceof Error, `必须交回"子进程异常结束"的 Error（实际：${JSON.stringify(r)}）`);
+    assert.ok(
+      elapsed < 1000,
+      `必须在"发现它没了"之后立刻返回（实际 ${elapsed} ms ≥ 1000 ms —— 又熬到超时了）`,
+    );
+
+    // ★ 树：wrapper 一死，ctest / 被守的可执行就被 launchd/init 收养 ⇒ 只有 `kill(-pgid)` 能收到它们。
+    //   收不到就是孤儿继续烧 CPU（假守卫还要自己睡满 SLEEP_MS，孙进程睡 300 s）。
+    const fakePid = readPid(pidFile);
+    const grandPid = readPid(grandFile);
+    assert.ok(waitDead(fakePid, 1500), `假守卫 ${fakePid} 还活着 ⇒ "wrapper 崩了"那条分支没收树`);
+    assert.ok(waitDead(grandPid, 1500), `孙进程 ${grandPid} 还活着 ⇒ 只杀了壳 / 没杀整个进程组`);
+  } finally {
+    // 坏实现下树可能没被收掉：别把 5 s 的假守卫 / 300 s 的孙进程留给 after()（那会拖住整个测试进程）
+    for (const file of [pidFile, grandFile]) {
+      try {
+        const pid = Number(fs.readFileSync(file, 'utf8').trim());
+        if (pid) process.kill(pid, 'SIGKILL');
+      } catch {
+        /* 已经死了 / pid 文件没写出来 */
+      }
+    }
+  }
 });
