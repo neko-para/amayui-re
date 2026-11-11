@@ -259,6 +259,16 @@ const KnownNative kKnown[] = {
     //   ★ 已知边界（登记，不是缺陷）：省掉的 guest 指令数**随数据变**（没有定值 k 可补）⇒ 存档里的
     //     虚拟时钟时间戳会比基线早一截（相位偏移）；可用 `all,-sub_4367B0` 隔离。
     {"sub_4367B0", GuestConv::Thiscall, 8, nativeLzss4367B0},
+    // ★ 2026-11-11：libvorbis `mdct_backward`（cdecl 12 B = `(lookup*, float* in, float* out)`；
+    //   `.lst` 0x4E0B40..0x4E0DB8；调用点 0x4E2EAA 是 `in == out` 的原地调用）。
+    //   为什么是它：语音起播那一下 `sub_4E2A30 -> sub_4E0B40` = **163.3 ms / 语音**（区间 profiler），
+    //   里面包含整条 FFT 链（`sub_4E08D0` 驱动 + `sub_4E0760` 蝶形 + `sub_4E09D0` 位反转）。
+    //   ★ **数值容忍档**（本仓第一项）：不是逐位等价 —— guest 走 x87 80-bit 中间值，本实现用 double
+    //     中间值 + float 落盘 ⇒ 每个存储值最多差 1 ulp。用户口径（2026-11-11）：音频可接受偏差。
+    //     ⇒ 不满足"函数级字节等价档"；`EAX` 按 0 写（`void` 函数，调用点不读它）；不复刻 x87 的
+    //       PE/UE 粘性位。契约与判据见 native_mdct.h；差分守卫见 tests/native_override_assets.cpp。
+    //     可用 `all,-sub_4E0B40` 隔离。
+    {"sub_4E0B40", GuestConv::Cdecl, 12, nativeMdct4E0B40},
 };
 constexpr std::size_t kKnownCount = sizeof(kKnown) / sizeof(kKnown[0]);
 // ★ 表容量是**硬约束**：`--native-overrides=all` 会把每个 `debug == false` 的项都 `add()` 一遍

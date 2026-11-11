@@ -8,6 +8,7 @@
 //   `prepareStack()` 只写一次，而每次 ret 都会把哨兵弹掉；不重铺的话第二次调用会 ret 到 0。
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <initializer_list>
@@ -81,6 +82,35 @@ struct Asm {
         u8(n);
     }
 };
+
+// `mdct_backward`（`sub_4E0B40`）差分夹具用的两张表。
+//
+// ★ 为什么不照抄 `sub_4E0030` 的三段 trig 公式：那会把 guest 的逻辑在测试里再写一遍，变成第二份
+//   "没人验证的真源"（改一处就静默漂）；而 `mdct_backward` 是**无分支纯算术**，`trig` 取什么值
+//   不改变它走哪条路。判据只需要"两臂拿到**同一份**表"。
+// ★ `bitrev` 不一样：它**不是纯算术的输入**，而是**下标**（`x0 = out + n/2 + bit[k]`，读 `x0[0]/x0[1]`）。
+//   所以取值域必须与真表一致 —— `mdct_init` 的公式 `((~acc)&mask)-1` 给出 **`[0, n/2-2]`**，且
+//   **`bitrev[0]` 恰好就是最大值 `n/2-2`**。这里刻意复现这个范围（并把最大值放在 `[0]`）：
+//   ⚠ 实测踩过 —— 准入判据一度写成 `[0, n/4)`，真表一半以上越界 ⇒ 生产里 `all` 那一项永远回退，
+//   而夹具表落在窄区间内 ⇒ 两臂差分照样全绿。**窄夹具会让上界判据永远不被触发。**
+// ★ `trig` 用 `sin` 的有界序列（⛔ 不用随下标线性增长的值：n=2048 时 11 级蝶形会把它放大到接近
+//   float 上限，两臂都溢出就看不出差异了）。
+inline void mdctFixtureTables(int n, std::vector<float>* trig, std::vector<std::int32_t>* bitrev) {
+    const int n4 = n / 4;
+    const int n2 = n / 2;
+    const int span = n2 - 2;  // 真表的最大值（也是 `bitrev[0]`）
+    trig->assign(static_cast<std::size_t>(n + n4), 0.0f);
+    for (std::size_t i = 0; i < trig->size(); ++i)
+        (*trig)[i] = static_cast<float>(std::sin(0.37 * static_cast<double>(i) + 0.11));
+    bitrev->assign(static_cast<std::size_t>(n4), 0);
+    for (int k = 0; k < n4; ++k) {
+        if (k == 0) {
+            (*bitrev)[0] = span;  // 真表的最大值：判据的上界必须接受它
+            continue;
+        }
+        (*bitrev)[static_cast<std::size_t>(k)] = (k * 37 + 11) % (span + 1);  // 覆盖 [0, n/2-2]
+    }
+}
 
 struct Fixture {
     lift::Machine m;

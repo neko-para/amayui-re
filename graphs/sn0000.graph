@@ -1,0 +1,36 @@
+# 窄窗口 profile —— 与 test.graph.wide 同一路径 / 同一点击时刻，只把 10 s 大窗拆成三片：
+#   ① idle  1 s   不点击（对照：稳态每帧成本）
+#   ② click1 3 s  点击后立刻开窗（覆盖"语音解码那一下"的突发；实测突发在点击后 ~1.4 s）
+#   ③ click2 3 s  第二次点击，间隔仍是 5 s（与宽窗脚本一致 ⇒ 触发的语音相同）
+# 边界照样是 block 边界；`profile_end` 之后到下一次 `profile_begin` 之间的 2 s 不计入任何窗。
+
+await script TITLE
+wait 3000 wall_ms
+timeout 30000
+
+click 1186 373
+
+await script GAMESTART
+wait 2000 wall_ms
+
+click 830 592
+
+await script SN0000
+wait 20000 wall_ms
+timeout 30000
+
+profile_begin idle
+wait 1000 wall_ms
+profile_end idle
+
+profile_begin click1
+click 500 500
+wait 3000 wall_ms
+profile_end click1
+
+wait 2000 wall_ms
+
+profile_begin click2
+click 500 500
+wait 3000 wall_ms
+profile_end click2

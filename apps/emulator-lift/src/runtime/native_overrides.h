@@ -55,7 +55,9 @@ struct NativeOverride {
     //     invoke 自己判的回退（栈参不在已提交页 / 没有实现）落进 `fallbacks` 但不落桶）。
     //   ⛔ 纯诊断：不参与任何判据、不改 guest 可见语义、不进 guest 内存。
     //   ★ 写入通道 = `X86::current_override`（invoke 在调 fn 期间设置，见 x86.h）。
-    static constexpr std::size_t kDeclineSlots = 8;
+    //   ★ 2026-11-11：8 → 12（`sub_4E0B40` 一项就用满 9 个原因：init/尺寸/幂次/log2/io/trig/bitrev 各一
+    //     + `bitrev` 值域越界；留三格给后续）。桶只是诊断计数，扩容不影响任何既有下标。
+    static constexpr std::size_t kDeclineSlots = 12;
     std::uint64_t fast_hits = 0;
     std::uint64_t declines[kDeclineSlots] = {};
 };
@@ -67,9 +69,11 @@ public:
     //   （下面的 static_assert 会先红，别等到 `all` 起不来）。
     // ★ 2026-11-10：12 → 13（`sub_4BBAB0` = Voice::Tick 的 stateless 快路径）。
     // ★ 2026-11-11：13 → 14（`sub_4367B0` = 退出写存档的 LZSS Encode 整函数）。
-    // ★ **14 = 表满，全部稳定项**（`debug` 机制保留，但当前**没有** debug 项 ⇒ `--native-overrides all`
+    // ★ 2026-11-11：14 → 15（`sub_4E0B40` = libvorbis `mdct_backward`；**数值容忍档**，
+    //   不满足"函数级字节等价"，已知偏差见 native_mdct.h）。
+    // ★ **15 = 表满，全部稳定项**（`debug` 机制保留，但当前**没有** debug 项 ⇒ `--native-overrides all`
     //   会把每一项都开）。再加项必须同时抬高 kMax（`kKnown[]` 的 static_assert 会先红，别等到 `all` 起不来）。
-    static constexpr std::size_t kMax = 14;
+    static constexpr std::size_t kMax = 15;
 
     bool add(std::uint32_t ea, const std::string& name, GuestConv conv, std::uint32_t arg_bytes, NativeFn fn,
              std::string* err);
@@ -248,6 +252,9 @@ bool nativeFindIndex429020(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 // ★ 空循环（bound <= i0）一律回退解释器：`.lst` 0x4CCC71..0x4CCCDB 的序言在 `0x4CCCDE jge` 之前，
 //   guest 即使不进循环也会置 `fpu.status` 的 PE/ES、清 C0..C3（见 `native_affine.cpp` 那一支的注释）。
 bool nativeAffine4CCC60(X86& cpu, GuestMemory& mem, std::uint32_t* result);
+// `sub_4E0B40`（libvorbis `mdct_backward`，`__cdecl` 12 B）：语音起播那一下的 FFT/MDCT 内核。
+// 纯核 + 已知偏差（**数值容忍档**，本仓第一项）+ 9 个回退原因都在 `native_mdct.h`。
+bool nativeMdct4E0B40(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 // `sub_487C60`（CMovieTextureRenderer::DoRenderSample，thiscall `retn 4`）：影片样本 → A8R8G8B8 纹理。
 // 只覆盖主路径（无 alpha 面 / 无 alpha 拷贝 / 3 或 4 字节源）；其余回退解释器。
 bool nativeRender487C60(X86& cpu, GuestMemory& mem, std::uint32_t* result);

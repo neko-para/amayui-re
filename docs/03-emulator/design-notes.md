@@ -119,3 +119,42 @@
   ② 超时/崩溃**都要收整棵进程树**（只杀壳会留下继续烧 CPU 的孤儿）；③ 还原 + 全文比对 + journal 的写序不变；
   ④ `--help` 里 `2 = 还原失败 / 内部错误`，⛔ 内部错误不许落 0。
 - **已知残余**：`restoreOnSignal` 里"杀掉在飞 wrapper"**没有机械守卫**（要真 CTest + 真 Ctrl-C）；Windows 侧未实测。
+
+### L3-mdct-01 · 语音起播的 FFT/MDCT：**数值容忍档**（追"1 ulp + 可差分"，不追逐位）
+- **取舍**：`sub_4E0B40`（libvorbis `mdct_backward`）整函数 native 化 —— 纯核逐行照抄 xiph vorbis
+  **v1.0.1 `lib/mdct.c` v1.32**（`mdct_backward` + `mdct_butterflies` + 四个蝶形 + `mdct_bitreverse`），
+  中间值用 `double`、落盘 `float`；guest 入口只做 9 条准入（`init` / `n` / 幂次 / `log2n` / `in` / `out` /
+  `trig(n+n/4)` / `bitrev(n/4)`），失败一律回退解释器。判据 = **真 guest 字节的解释器臂当 oracle**
+  （`tests/native_override_assets.cpp` 的 `mdct/*`，`max|Δ| ≤ 1e-6 * peak`；实测 1.0e-7…1.5e-7）。
+- **备选**：① 像 `sub_4CCC60` 那样走 SoftFloat 逐位 —— **没选**：一包 4096 个 x87 操作，softfloat
+  每个操作都要构造 `Ext80` + 舍入，会比解释器还慢，换来的只有"可逐字节 A/B"，而用户已明确**音频可接受偏差**；
+  ② 不复刻循环、直接写 IMDCT 数学式 —— **没选**：窗口/折叠约定藏在 `trig` 表里，重建约定的风险高于照抄，
+  且 oracle 之外没有任何额外收益；③ 整段 `sub_4E2A30`（`mapping0_inverse`）native 化 —— **没选**：那要把
+  Huffman + 码本解码（同一窗口实测 251 ms，比 MDCT 更大）一起重写，是另一个量级的活，另立单。
+- **偏差的真正来源（⛔ 不是 "x87 80-bit vs double"）**：跑这条链的是 **feeder 线程**
+  （`AudioEngine` 从 `kSub4B6C30` 起跑、并把 override 表拷过去；`audio_cpu_.fpu.reset()` 把控制字设回
+  **0x037F = 80-bit**），所以寄存器段是 80-bit；guest 的 `REG_TYPE` 虽是 `float`，编译后**只在溢出槽**
+  （`.lst` 0x4E02F7 / 0x4E0308 / 0x4E0626 的 `fstp [ebp+var_*]`，dword）才舍入到 32-bit。
+  实测评据：把夹具精度改成 53-bit 重跑，七个用例的 `max|d|` **一个数都不变** ⇒ 主导项是溢出槽。
+- **为什么中间值用 `double` 而不是 `float`**：`float` 会把**所有**中间量压到 24-bit（比 guest 差一个
+  量级）；`double` 只有寄存器段的 53-bit 差异（1e-16，远小于溢出槽的 1e-7）且不复现溢出点 ⇒
+  实测 `max|Δ|/peak` = 1.0e-7…1.5e-7（n=64…8192，容差 `1e-6`，余量 ~6.7×）。⚠ 夹具的 `fpu.control` **保持 bare Machine 缺省
+  0x037F**，别改成 0x027F：那是主线程 CRT 的精度，被 feeder 的 `fpu.reset()` 盖掉了。
+- **重写必须保持不变**：① `in == out` 的**原地**语义（真实调用点 `0x4E2EAA` 两个参数是同一个缓冲）；
+  ② 输出**不依赖 `out` 的旧内容**（实测：预填 `777.0f` 与 `-999.0f` 两臂逐字节相同 ⇒ 原地调用安全）；
+  ③ 读边界：`trig` 最远到 `n + n/4`（`mdct_bitreverse` 从 `trig+n` 起走 `n/4`），`bitrev` 取值域
+  `[0, n/2-2]`（真表范围：偶数项 `[2, n/2-2]`、奇数项 `[0, n/2-4]`，最大值 `n/2-2` 在 `[0]`）
+  ⇒ `mdct_bitreverse` 只在**已写过的那半段**里读（⚠ 编一个含负值的假表会让它读未初始化区、输出随机
+  —— 实测踩到过；准入因此取真表范围而不是更宽的"内存安全界"）；④ 9 条回退都在**任何写之前**；
+  ⑤ 判据的 oracle 必须是**解释器臂**（⛔ 不是手写参考实现：那会让"两边都错"看不出来）。
+- **⚠ 落地时踩到的两个假绿（比实现本身更值得记）**：
+  ① **准入判据凭直觉收紧 ⇒ 生产永远回退、而夹具全绿**：`bitrev` 的真表是 `((~acc)&mask)-1`，
+     取值 `[0, n/2-2]` 且 **`[0]` 就是最大值**。一度写成 `[0, n/4)` ⇒ 每个 n 立刻 decline（`all` 里这项
+     `hits=0`），而夹具表落在窄区间内 ⇒ 两臂差分照样绿。⇒ 判据的边界只能按**真实读取**推
+     （`x0 = out+n/2+bit` 读 `x0[0]/x0[1]` ⇒ `[-n/2, n/2-2]`），且**夹具表必须覆盖真表的范围**。
+  ② **数值判据要单独数 NaN/Inf**：`if (d > maxdiff)` 对 NaN 恒 false ⇒ 一个 NaN 输出能让整条
+     `max|Δ|` 判据静默通过（实测：纯核末尾写 `out[0] = NaN`，旧判据一位不变、全绿）。现在的做法是
+     逐值 `isfinite` 计数并断言 0。
+- **已知残余**：`EAX` 登记为 0（guest 结束时它是 `out` 派生指针的残留，Hex-Rays 因此猜成 `float *`；
+  唯一调用点 0x4E2EAA 之后不读它）、不复刻 x87 的 PE/UE 粘性位、相位偏移照旧；
+  可用 `--native-overrides all,-sub_4E0B40` 隔离。

@@ -94,6 +94,9 @@ add_library(emulator-lift-runtime STATIC
     # ★ 每帧固定税 `sub_4BBAB0`（Voice::Tick）的 stateless 快路径
     #   （REQ-01M6XVZF3VDC5NSBJ20J2451VJ；契约见 native_overrides.h）
     src/runtime/native_voice.cpp
+    # ★ libvorbis `mdct_backward`（`sub_4E0B40`）= 语音起播那一下的 FFT/MDCT 内核
+    #   （**数值容忍档**，契约与已知偏差见 native_mdct.h）
+    src/runtime/native_mdct.cpp
     src/runtime/shims.cpp
     src/runtime/window_profile.cpp
     # ★ SEH / C++ EH 的两个 OS 原语（`RaiseException` / `RtlUnwind` 的派发状态机；

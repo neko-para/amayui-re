@@ -745,11 +745,16 @@ sprite 合批与那条直方图的算法。⛔ 不把逐帧数字写进 README�
   S4IC/LZSS `sub_436A80`（`__thiscall`，`info[0]=输出大小`、`info[2]=压缩大小`）、
   `NormalTexture` 的三项 `sub_48B090` / `sub_429020` / `sub_48AE90`、影片 `sub_487C60`、
   字形 `sub_46D9F0`、Live2D 仿射 `sub_4CCC60`（本线第一项 x87 override）、
-  退出写存档的 LZSS 编码 `sub_4367B0`，以及**段级** `sub_414AC0`（SYS4INI 装载器的中段填池循环；
+  退出写存档的 LZSS 编码 `sub_4367B0`、语音起播的 FFT/MDCT `sub_4E0B40`（libvorbis
+  `mdct_backward`；**本线第一项「数值容忍档」**，不是真字节等价，见下一段），以及**段级** `sub_414AC0`（SYS4INI 装载器的中段填池循环；
   不是整函数）。每一项都能用 `all,-<名字>` 单独排除。
   ★ GPU 逐像素黄金图守卫（`golden-image` / `golden-image-compare`）已按用户裁决**移除**：
   该判据依赖虚拟时钟相位与 GPU 驱动，**不能稳定复现**。画面回归改由各 override 自己的
   函数级两臂差分 + 既有 GPU 用例承担。
+- **「数值容忍档」**（`sub_4E0B40` 起）：判据不是"逐字节等价"，而是**两臂（解释器臂当 oracle）逐值比
+  `max|Δ| ≤ 1e-6 × peak`**，实测偏差与全部已知边界登记在实现处（`native_mdct.h` +
+  `docs/03-emulator/design-notes.md` 的 `L3-mdct-01`）。⇒ 它**不满足**下面"准入五条"里的真字节等价档，
+  是用户明确接受的例外（音频）。
 - **函数级 override 只记 1 条指令 + 1 个 tick**（`machine.cpp` 的 dispatcher）⇒ 跳过 N 条 guest 指令
   就少走 `(N−1) × 100 ns` 虚拟时间，**相位偏移是登记的已知边界，不是缺陷**；因此"帧级 / 逐像素 A/B"
   **不是**准入门。准入的五条（契约可核 · 准入零写 · 纯核 + 分支覆盖 · 有一档函数级真字节等价 ·

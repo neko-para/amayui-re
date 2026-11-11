@@ -1041,6 +1041,24 @@ const MUTATIONS = [
   },
 
   {
+    // ★ 代表 "MDCT/FFT 内核的旋转符号被弄错" 这一类错（sub_4E0B40，**数值容忍档**）。
+    //   判据：`apps/emulator-lift/tests/native_override_assets.cpp` 的 `mdct/*` —— 同一份
+    //   `mdct_lookup` + 同一份输入跑**解释器臂**（真 guest 字节 = oracle）与 native 臂，
+    //   逐值比 `max|Δ| <= 1e-6 * peak`。把第一段旋转的 `-` 改成 `+` ⇒ 输出整段错 ⇒ 当场红。
+    //   ★ 为什么挑这一条而不是"蝶形里某个乘加顺序"：顺序类改动只差 1 ulp，容差档**本来**就允许，
+    //   红不了（也不该红）；符号改动是 O(1) 的差，才配当这一档的代表。
+    file: 'apps/emulator-lift/src/runtime/native_mdct.cpp',
+    from: '            oX[1] = store(ld(iX[0]) * ld(T[3]) - ld(iX[2]) * ld(T[2]));',
+    to: '            oX[1] = store(ld(iX[0]) * ld(T[3]) + ld(iX[2]) * ld(T[2]));',
+    guard: 'ctest:native-override-assets',
+    ctest: 'native-override-assets',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '`mdct_backward` 第一段旋转的符号翻正 ⇒ 输出整段错（O(1) 量级）⇒ ' +
+      'native-override-assets 的 mdct 两臂差分当场红',
+  },
+
+  {
     file: 'apps/emulator-lift/src/shims/kernel32_bootstrap.cpp',
     from: '            wide.push_back(u);\n            i += static_cast<std::size_t>(n);',
     to: '            (void)u;\n            wide.push_back(static_cast<char16_t>(p[i]));\n            ++i;',

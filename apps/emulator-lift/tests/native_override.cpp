@@ -6,6 +6,7 @@
 //   ② **回退**：native 实现返回 false 时，dispatcher 必须继续解释原字节（结果仍与基线一致），
 //      并把 fallback 记到账上 —— ⛔ 不许静默跳过、也不许直接 trap。
 //   ③ **ABI**：cdecl 只弹返回地址；stdcall / thiscall 由被调用方再弹 arg_bytes；ECX = this。
+//   ④ **纯核不变量**（`sub_4E0B40` `/` sub_4CCC60` 的纯核）：原地等价、不越界、输出不依赖旧内容。
 // ★ 这里不测 profile / 首帧性能：那些用 `--native-overrides` 的真实 boot A/B（见 requirement 正文）。
 #include <cstdint>
 #include <cstdio>
@@ -20,6 +21,7 @@
 #include "runtime/d3d9.h"
 #include "runtime/ddraw_surface.h"
 #include "runtime/native_affine.h"
+#include "runtime/native_mdct.h"
 #include "runtime/native_overrides.h"
 #include "runtime/surface.h"
 
@@ -2431,8 +2433,271 @@ int main() {
         }
     }
 
+    // ---- sub_4E0B40（libvorbis `mdct_backward`，**数值容忍档**）：准入零写 + 纯核不变量 ----
+    //
+    // 判据（红了意味着什么）：
+    //   ① **准入零写**：`trig` 指向未提交页 ⇒ 必须在任何写之前回退，`out` 一字节不变，
+    //      且原因落进 `declines[MdctWhy::TrigUnreadable]`（⛔ 不是"静默跳过"）；
+    //   ② 纯核 **in == out 与 in != out 逐字节相同**（真实调用点 0x4E2EAA 就是原地）；
+    //   ③ 纯核不越界：`out` 前后的哨兵不被写、`in` / `trig` / `bitrev` 不被改；
+    //   ④ 成功路径的 ABI：`invoke` 后 EIP = 返回地址、ESP = esp + 4 + 12（cdecl 只弹返回地址）。
+    // ★ 数学正确性**不在**这里判（本档没有 git 里的 oracle）：那是 native_override_assets 的
+    //   `mdct/*` 两臂差分（真 guest 字节当 oracle，容差 `1e-6 * peak`）。
+    {
+        constexpr std::uint32_t kInitEa = 0x00420000u;
+        constexpr std::uint32_t kTrigEa = 0x00430000u;
+        constexpr std::uint32_t kInEa = 0x00470000u;
+        constexpr std::uint32_t kOutEa = 0x00490000u;
+        constexpr std::uint32_t kBadEa = 0x00B00000u;       // 从不 placeData ⇒ 未提交（init 用）
+        constexpr std::uint32_t kBadPartial = 0x00B00010u;  // 同上（表驱动里"这一段不铺"）
+        constexpr std::uint32_t kBitrevEa = 0x00450000u;
+        constexpr int kN = 256;
+        constexpr int kLog2N = 8;
+        const int n2 = kN / 2;
+        const int n4 = kN / 4;
+
+        // 表 = `lift_fixture::mdctFixtureTables`（任意但有界的确定性数据；只测不变量，不测数值）
+        std::vector<float> trig;
+        std::vector<std::int32_t> bitrev;
+        lift_fixture::mdctFixtureTables(kN, &trig, &bitrev);
+        std::vector<float> src(static_cast<std::size_t>(n2));
+        for (int i = 0; i < n2; ++i) src[static_cast<std::size_t>(i)] = static_cast<float>(0.125 * (i % 17) - 1.0);
+
+        // ② / ③ 纯核：`out` 前后各留 4 个哨兵。
+        {
+            lift_test::g_current_case = "mdct/host-invariants";
+            constexpr int kGuard = 4;
+            std::vector<float> out_a(static_cast<std::size_t>(kN) + 2 * kGuard, 777.0f);
+            std::vector<float> out_b = out_a;
+            const std::vector<float> src_before = src;
+            float* pa = out_a.data() + kGuard;
+            float* pb = out_b.data() + kGuard;
+            lift::mdctBackwardHost(kN, kLog2N, trig.data(), bitrev.data(), src.data(), pa);
+            lift::mdctBackwardHost(kN, kLog2N, trig.data(), bitrev.data(), src.data(), pb);  // in != out
+            LIFT_CHECK(std::memcmp(pa, pb, static_cast<std::size_t>(kN) * 4u) == 0);
+            // ② **真正的原地**：同一缓冲既当 `in` 又当 `out`（真实调用点 0x4E2EAA 就是这个形状）。
+            //   ⛔ 上面那两次都不是原地（`in`/`out` 不同缓冲）—— 只比它俩等于没测 alias。
+            {
+                std::vector<float> buf(static_cast<std::size_t>(kN) + 2 * kGuard, 555.0f);
+                std::memcpy(buf.data() + kGuard, src.data(), static_cast<std::size_t>(n2) * 4u);
+                float* same = buf.data() + kGuard;
+                lift::mdctBackwardHost(kN, kLog2N, trig.data(), bitrev.data(), same, same);
+                LIFT_CHECK(std::memcmp(same, pb, static_cast<std::size_t>(kN) * 4u) == 0);
+            }
+            bool guards_ok = true;
+            for (int i = 0; i < kGuard; ++i) {
+                guards_ok = guards_ok && out_a[static_cast<std::size_t>(i)] == 777.0f;
+                guards_ok = guards_ok && out_a[static_cast<std::size_t>(kN + kGuard + i)] == 777.0f;
+            }
+            LIFT_CHECK(guards_ok);                            // ③ 不越界
+            LIFT_CHECK(src == src_before);                    // ③ 不改输入
+            // 纯核不依赖 `out` 的旧内容（⇒ `in == out` 的原地调用安全，且输出可复现）：
+            // 这次把 `out` 预填成**另一个**哨兵值，结果必须逐字节相同。
+            std::vector<float> out_c(static_cast<std::size_t>(kN) + 2 * kGuard, -999.0f);
+            lift::mdctBackwardHost(kN, kLog2N, trig.data(), bitrev.data(), src.data(), out_c.data() + kGuard);
+            LIFT_CHECK(std::memcmp(out_c.data() + kGuard, pb, static_cast<std::size_t>(kN) * 4u) == 0);
+        }
+
+        // ④ ABI + ① 回退：同一套 guest 夹具，只把 `trig` 换成未提交页。
+        auto armMdct = [&](lift::Machine& m, int n_arg = kN) {
+            auto& cpu = m.cpu();
+            auto& mem = m.mem();
+            const std::uint32_t esp = m.layout().stack_top - 0x40u;
+            cpu.esp() = esp;
+            mem.wr32(esp, lift_fixture::kSentinel);
+            (void)n_arg;
+            mem.wr32(esp + 4u, kInitEa);   // init
+            mem.wr32(esp + 8u, kInEa);     // in
+            mem.wr32(esp + 12u, kOutEa);   // out
+            return esp;
+        };
+        // 表驱动用：按给定 EA 铺区段（不铺的那一段就是"未提交页"，用来触发对应回退原因）。
+        auto bootMdctVariant = [&](lift::Machine& m, int n, int log2n, std::uint32_t trig_ea, std::uint32_t in_ea,
+                                  std::uint32_t out_ea, std::uint32_t bitrev_ea, bool init_unreadable) {
+            std::string err;
+            if (!m.initBare(&err) || !m.prepareStack(&err)) return false;
+            const int n2v = n / 2;
+            std::vector<float> tv;
+            std::vector<std::int32_t> bv;
+            lift_fixture::mdctFixtureTables(n, &tv, &bv);
+            std::vector<std::uint8_t> init(16u, 0), in_b(static_cast<std::size_t>(n2v) * 4u);
+            std::memcpy(init.data() + 0, &n, 4);
+            std::memcpy(init.data() + 4, &log2n, 4);
+            std::memcpy(init.data() + 8, &trig_ea, 4);
+            std::memcpy(init.data() + 12, &bitrev_ea, 4);
+            std::memcpy(in_b.data(), src.data(), in_b.size());
+            std::vector<std::uint8_t> tv_b(tv.size() * 4u), bv_b(bv.size() * 4u);
+            std::memcpy(tv_b.data(), tv.data(), tv_b.size());
+            std::memcpy(bv_b.data(), bv.data(), bv_b.size());
+            std::vector<std::uint8_t> out_b(static_cast<std::size_t>(n) * 4u, 0x5A);
+            if (!init_unreadable && !m.placeData(kInitEa, init.data(), init.size(), &err)) return false;
+            if (!m.placeData(in_ea, in_b.data(), in_b.size(), &err)) return false;
+            if (!m.placeData(out_ea, out_b.data(), out_b.size(), &err)) return false;
+            if (trig_ea != kBadPartial && !m.placeData(trig_ea, tv_b.data(), tv_b.size(), &err)) return false;
+            if (bitrev_ea != kBadPartial && !m.placeData(bitrev_ea, bv_b.data(), bv_b.size(), &err)) return false;
+            return true;
+        };
+        auto bootMdct = [&](lift::Machine& m, std::uint32_t trig_ea, int bad_bitrev = 0) {
+            std::string err;
+            if (!m.initBare(&err) || !m.prepareStack(&err)) return false;
+            auto& mem = m.mem();
+            std::vector<std::uint8_t> init(16u, 0), in_b(static_cast<std::size_t>(n2) * 4u);
+            std::memcpy(init.data() + 0, &kN, 4);
+            std::memcpy(init.data() + 4, &kLog2N, 4);
+            std::memcpy(init.data() + 8, &trig_ea, 4);
+            std::memcpy(init.data() + 12, &kBitrevEa, 4);
+            std::memcpy(in_b.data(), src.data(), in_b.size());
+            std::vector<std::uint8_t> trig_b(trig.size() * 4u), bitrev_b(bitrev.size() * 4u);
+            std::memcpy(trig_b.data(), trig.data(), trig_b.size());
+            std::memcpy(bitrev_b.data(), bitrev.data(), bitrev_b.size());
+            if (bad_bitrev != 0) {
+                // 坏表：`bitrev[0]` 越界。准入取**真表的范围** `[0, n/2-2]` ⇒ 下界用例用 `-1`
+                //   （负值会让 `mdct_bitreverse` 读 `out[n/2-1]`，即**还没写过**的半段），
+                //   上界用例用 `n/2-1`（`x0[1]` 落到 `out+n`）。
+                // 宿主裸指针没有页表兜底 ⇒ 必须在**运行纯核之前**被值域判据挡掉（MdctWhy::BitrevOutOfRange）。
+                std::memcpy(bitrev_b.data(), &bad_bitrev, 4u);
+            }
+            std::vector<std::uint8_t> out_b(static_cast<std::size_t>(kN) * 4u, 0x5A);
+            if (!m.placeData(kInitEa, init.data(), init.size(), &err)) return false;
+            if (!m.placeData(kInEa, in_b.data(), in_b.size(), &err)) return false;
+            if (!m.placeData(kOutEa, out_b.data(), out_b.size(), &err)) return false;
+            if (trig_ea != kBadEa) {
+                if (!m.placeData(kTrigEa, trig_b.data(), trig_b.size(), &err)) return false;
+                if (!m.placeData(kBitrevEa, bitrev_b.data(), bitrev_b.size(), &err)) return false;
+            }
+            return true;
+        };
+        auto outBytes = [&](lift::Machine& m) {
+            std::vector<std::uint8_t> v(static_cast<std::size_t>(kN) * 4u);
+            std::memcpy(v.data(), m.mem().host(kOutEa), v.size());
+            return v;
+        };
+
+        // ④ 成功路径：所有区段都提交 ⇒ 接管一次，ABI 对得上
+        {
+            lift_test::g_current_case = "mdct/abi";
+            lift::Machine m;
+            LIFT_CHECK(bootMdct(m, kTrigEa));
+            const std::uint32_t esp = armMdct(m);
+            std::string err;
+            LIFT_CHECK(m.overrides().add(0x004E0B40u, "ref_mdct", lift::GuestConv::Cdecl, 12,
+                                        lift::nativeMdct4E0B40, &err));
+            lift::NativeOverride* e = m.overrides().at(0);
+            const char* why = "";
+            LIFT_CHECK(e != nullptr && m.overrides().invoke(*e, m.cpu(), m.mem(), &why));
+            LIFT_CHECK_EQ_U32(e->hits, 1u);
+            LIFT_CHECK_EQ_U32(e->fallbacks, 0u);
+            LIFT_CHECK_EQ_U32(m.cpu().eip, lift_fixture::kSentinel);  // eip = 返回地址
+            LIFT_CHECK_EQ_U32(m.cpu().esp(), esp + 4u);               // cdecl：只弹返回地址（调用方清栈）
+            LIFT_CHECK_EQ_U32(m.cpu().eax(), 0u);                     // `void` 函数 ⇒ 登记为 0
+            // 真的写了 out（排除"空跑"）
+            const std::vector<std::uint8_t> got = outBytes(m);
+            bool changed = false;
+            for (std::uint8_t b : got) changed = changed || b != 0x5A;
+            LIFT_CHECK(changed);
+        }
+        // ① 回退零写：trig 未提交 ⇒ 回退、out 一字节不变、原因落桶
+        {
+            lift_test::g_current_case = "mdct/decline-trig-unreadable";
+            lift::Machine m;
+            LIFT_CHECK(bootMdct(m, kBadEa));
+            const std::uint32_t esp = armMdct(m);
+            std::string err;
+            LIFT_CHECK(m.overrides().add(0x004E0B40u, "ref_mdct", lift::GuestConv::Cdecl, 12,
+                                        lift::nativeMdct4E0B40, &err));
+            lift::NativeOverride* e = m.overrides().at(0);
+            const std::vector<std::uint8_t> frozen = outBytes(m);
+            const char* why = "";
+            LIFT_CHECK(!m.overrides().invoke(*e, m.cpu(), m.mem(), &why));
+            LIFT_CHECK_EQ_U32(e->hits, 0u);
+            LIFT_CHECK_EQ_U32(e->fallbacks, 1u);
+            LIFT_CHECK_EQ_U32(e->declines[static_cast<std::size_t>(lift::MdctWhy::TrigUnreadable)], 1u);
+            LIFT_CHECK_EQ_U32(m.cpu().eip, 0u);          // 回退：EIP 没被改（dispatcher 自己会解释原字节）
+            LIFT_CHECK_EQ_U32(m.cpu().esp(), esp);       // 回退：栈没动
+            LIFT_CHECK(outBytes(m) == frozen);           // ① 零写
+        }
+        // ①' `bitrev` 值越界 ⇒ 同样必须在写之前回退（⛔ 否则 `x0 = x + bit[k]` 是宿主野指针：
+        //    不是 guest fault，没有页表兜底，会读/写任意宿主内存）
+        {
+            lift_test::g_current_case = "mdct/decline-bitrev-low";
+            lift::Machine m;
+            LIFT_CHECK(bootMdct(m, kTrigEa, /*bad_bitrev=*/-1));
+            const std::uint32_t esp = armMdct(m);
+            std::string err;
+            LIFT_CHECK(m.overrides().add(0x004E0B40u, "ref_mdct", lift::GuestConv::Cdecl, 12,
+                                        lift::nativeMdct4E0B40, &err));
+            lift::NativeOverride* e = m.overrides().at(0);
+            const std::vector<std::uint8_t> frozen = outBytes(m);
+            const char* why = "";
+            LIFT_CHECK(!m.overrides().invoke(*e, m.cpu(), m.mem(), &why));
+            LIFT_CHECK_EQ_U32(e->hits, 0u);
+            LIFT_CHECK_EQ_U32(e->fallbacks, 1u);
+            LIFT_CHECK_EQ_U32(e->declines[static_cast<std::size_t>(lift::MdctWhy::BitrevOutOfRange)], 1u);
+            LIFT_CHECK_EQ_U32(m.cpu().esp(), esp);
+            LIFT_CHECK(outBytes(m) == frozen);
+        }
+        // ①2 其余 6 个原因逐个触发一次（表驱动：只铺"该铺的"区段，其余指向未提交页）
+        //   ⇒ 保证 9 个桶每一个都有一次真实触发（否则"分桶"只是扇没被敲过的门）。
+        {
+            struct DeclineCase {
+                const char* name;
+                int n;
+                int log2n;
+                std::uint32_t trig_ea;
+                std::uint32_t in_ea;
+                std::uint32_t out_ea;
+                std::uint32_t bitrev_ea;
+                lift::MdctWhy why;
+            };
+            const DeclineCase cases[] = {
+                {"init-unreadable", kN, kLog2N, kTrigEa, kInEa, kOutEa, kBitrevEa, lift::MdctWhy::InitUnreadable},
+                {"size-out-of-range", 48, 6, kTrigEa, kInEa, kOutEa, kBitrevEa, lift::MdctWhy::SizeOutOfRange},
+                {"not-power-of-two", 200, 8, kTrigEa, kInEa, kOutEa, kBitrevEa, lift::MdctWhy::NotPowerOfTwo},
+                {"log2-mismatch", kN, 7, kTrigEa, kInEa, kOutEa, kBitrevEa, lift::MdctWhy::Log2Mismatch},
+                {"in-unreadable", kN, kLog2N, kTrigEa, kBadPartial, kOutEa, kBitrevEa, lift::MdctWhy::InUnreadable},
+                {"out-unreadable", kN, kLog2N, kTrigEa, kInEa, kBadPartial, kBitrevEa, lift::MdctWhy::OutUnreadable},
+                {"trig-unreadable", kN, kLog2N, kBadPartial, kInEa, kOutEa, kBitrevEa, lift::MdctWhy::TrigUnreadable},
+                {"bitrev-unreadable", kN, kLog2N, kTrigEa, kInEa, kOutEa, kBadPartial, lift::MdctWhy::BitrevUnreadable},
+            };
+            for (const DeclineCase& c : cases) {
+                lift_test::g_current_case = (std::string("mdct/decline-") + c.name).c_str();
+                lift::Machine m;
+                LIFT_CHECK(bootMdctVariant(m, c.n, c.log2n, c.trig_ea, c.in_ea, c.out_ea, c.bitrev_ea,
+                                          c.why == lift::MdctWhy::InitUnreadable));
+                const std::uint32_t esp = armMdct(m, c.n);
+                std::string err;
+                LIFT_CHECK(m.overrides().add(0x004E0B40u, "ref_mdct", lift::GuestConv::Cdecl, 12,
+                                            lift::nativeMdct4E0B40, &err));
+                lift::NativeOverride* e = m.overrides().at(0);
+                const char* why = "";
+                LIFT_CHECK(!m.overrides().invoke(*e, m.cpu(), m.mem(), &why));
+                LIFT_CHECK_EQ_U32(e->hits, 0u);
+                LIFT_CHECK_EQ_U32(e->fallbacks, 1u);
+                LIFT_CHECK_EQ_U32(e->declines[static_cast<std::size_t>(c.why)], 1u);
+                LIFT_CHECK_EQ_U32(m.cpu().esp(), esp);
+            }
+        }
+        // ①'' 上界：`bitrev[0] = n/2-1`（真表最大值 `n/2-2` 的下一格）也必须回退
+        {
+            lift_test::g_current_case = "mdct/decline-bitrev-high";
+            lift::Machine m;
+            LIFT_CHECK(bootMdct(m, kTrigEa, /*bad_bitrev=*/n2 - 1));
+            const std::uint32_t esp = armMdct(m);
+            std::string err;
+            LIFT_CHECK(m.overrides().add(0x004E0B40u, "ref_mdct", lift::GuestConv::Cdecl, 12,
+                                        lift::nativeMdct4E0B40, &err));
+            lift::NativeOverride* e = m.overrides().at(0);
+            const char* why = "";
+            LIFT_CHECK(!m.overrides().invoke(*e, m.cpu(), m.mem(), &why));
+            LIFT_CHECK_EQ_U32(e->declines[static_cast<std::size_t>(lift::MdctWhy::BitrevOutOfRange)], 1u);
+            LIFT_CHECK_EQ_U32(m.cpu().esp(), esp);
+        }
+    }
+
     // ---- ⑱ known 表：新项的默认分层（全部 debug=false ⇒ 都在 all 里）+ kMax 容得下 ----
     {
+        LIFT_CHECK(lift::findKnownNative("sub_4E0B40") != nullptr);
+        LIFT_CHECK(!lift::findKnownNative("sub_4E0B40")->debug);
         LIFT_CHECK(lift::findKnownNative("sub_429020") != nullptr);
         LIFT_CHECK(lift::findKnownNative("sub_48AE90") != nullptr);
         LIFT_CHECK(!lift::findKnownNative("sub_429020")->debug);

@@ -1,7 +1,7 @@
 // emulator-lift · assets 档：**真 guest 字节**的 native override 差分（解释器 vs override）
 //
 // 判据（红了意味着什么）：
-//   ① 从 `AGE.EXE` 里取出 `sub_429020` / `sub_48AE90` / `sub_401000` 的**真字节**，放进 bare 机
+//   ① 从 `AGE.EXE` 里取出 `sub_429020` / `sub_48AE90` / `sub_401000` / `sub_4CCC60` / `sub_4E0B40` 的**真字节**，放进 bare 机
 //      的**同一 EA**（与 boot 里一模一样），同一份夹具跑**解释器** vs **override**；
 //      目的内存 / EAX / ESP / 标号寄存器 / EIP 必须逐位一致。
 //   ② 48AE90 还要比**整张纹理逐字节** + 锁记账（locks / version / locked）。
@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,7 @@
 #include "runtime/com.h"
 #include "runtime/d3d9.h"
 #include "runtime/native_affine.h"
+#include "runtime/native_mdct.h"
 #include "runtime/native_overrides.h"
 #include "shims/register.h"
 
@@ -1190,6 +1192,159 @@ int main() {
                 LIFT_CHECK_EQ_U32(ovr.info[0], static_cast<std::uint32_t>(input.size()));
                 LIFT_CHECK(ovr.info[2] != 0u);
             }
+        }
+    }
+
+    // ---- ④ sub_4E0B40：libvorbis `mdct_backward`（**数值容忍档**；解释器臂 = 同一 EA 的 oracle）----
+    //
+    // 判据（红了意味着什么）：
+    //   ① 同一份 `mdct_lookup`（n / log2n / trig / bitrev）与同一份输入，解释器臂 vs override 臂的
+    //      `out[0..n)` **逐值比**，`max|Δ| <= 1e-6 * peak`（容差 = 这一档的"契约"；写坏了是 O(1) 的差）；
+    //   ② override 臂 `hits==1 && fallbacks==0`（排除"没接管"与"每次回退"两种假绿）；
+    //   ③ 两臂都真的算出了东西（peak > 1e-3，排除"两边全零"）。
+    // ★ 为什么 oracle 是解释器而不是手写参考：真字节是唯一外部真值；`.lst` 只用来定 EA。
+    // ★ `in == out`（原地）是**真实调用点** 0x4E2EAA 的形状，必须单列；`n` 覆盖 64..2048。
+    {
+        // 0x4E0230..0x4E0DC0 是自足的一整块（`mdct_backward` + `butterflies` + `bitreverse` +
+        // 四个蝶形）。唯一的对外调用是 `mdct_clear` 里的 `_free`，本用例不走那条。
+        const std::vector<std::uint8_t> code_mdct = img.at(0x004E0230u, 0x004E0DC0u - 0x004E0230u);
+
+        // 表 = `lift_fixture::mdctFixtureTables`（**不复刻** guest 的 `mdct_init`：见 fixture.h 的说明）
+        struct MdctOutcome {
+            bool valid = false;
+            std::uint32_t hits = 0;
+            std::uint32_t fallbacks = 0;
+            std::vector<float> out;
+        };
+
+        auto runMdct = [&](int n, bool aliased, bool with_override) -> MdctOutcome {
+            MdctOutcome res;
+            lift_fixture::Fixture fx;
+            if (!fx.ok) return res;
+            const int n2 = n / 2;
+            std::vector<float> trig;
+            std::vector<std::int32_t> bitrev;
+            lift_fixture::mdctFixtureTables(n, &trig, &bitrev);
+
+            constexpr std::uint32_t kInitEa = 0x00420000u;
+            constexpr std::uint32_t kTrigEa = 0x00430000u;
+            constexpr std::uint32_t kBitrevEa = 0x00450000u;
+            constexpr std::uint32_t kInEa = 0x00470000u;
+            constexpr std::uint32_t kOutEa = 0x00490000u;
+            const std::uint32_t in_arg = aliased ? kOutEa : kInEa;
+
+            int log2n = 0;
+            while ((1 << log2n) < n) ++log2n;
+            std::vector<std::uint8_t> init(16u, 0);
+            std::memcpy(init.data() + 0, &n, 4);
+            std::memcpy(init.data() + 4, &log2n, 4);
+            std::memcpy(init.data() + 8, &kTrigEa, 4);
+            std::memcpy(init.data() + 12, &kBitrevEa, 4);
+            std::vector<std::uint8_t> trig_b(trig.size() * 4u);
+            std::memcpy(trig_b.data(), trig.data(), trig_b.size());
+            std::vector<std::uint8_t> bitrev_b(bitrev.size() * 4u);
+            std::memcpy(bitrev_b.data(), bitrev.data(), bitrev_b.size());
+
+            // 输入：确定性 LCG ⇒ [-1, 1)（不依赖 rand()/时间，两臂同一份）
+            std::vector<float> in(static_cast<std::size_t>(n2));
+            std::uint32_t x = 0x12345678u;
+            for (float& v : in) {
+                x = x * 1664525u + 1013904223u;
+                v = static_cast<float>((x >> 8) & 0xFFFFu) / 32768.0f - 1.0f;
+            }
+            std::vector<std::uint8_t> in_b(in.size() * 4u);
+            std::memcpy(in_b.data(), in.data(), in_b.size());
+            std::vector<std::uint8_t> out_b(static_cast<std::size_t>(n) * 4u, 0x5A);
+
+            // guest 的蝶形从 `.data` 读 4 个常量（`dbl_51D7F8`=0.5 / `dbl_52FA00`=cPI2_8 /
+            // `dbl_52FA08`=cPI3_8 / `dbl_52FA10`=cPI1_8）—— bare 夹具里得把这几页放进去，
+            // 否则解释器臂会 SIGSEGV（⛔ 这不是 false positive：真 boot 里它们本来就在）。
+            const std::vector<std::uint8_t> const_half = img.at(0x0051D7F8u, 8u);
+            const std::vector<std::uint8_t> const_trig = img.at(0x0052FA00u, 24u);
+            if (!fx.m.placeData(0x0051D7F8u, const_half.data(), const_half.size(), &fx.err)) return res;
+            if (!fx.m.placeData(0x0052FA00u, const_trig.data(), const_trig.size(), &fx.err)) return res;
+            if (!fx.m.placeData(kInitEa, init.data(), init.size(), &fx.err)) return res;
+            if (!fx.m.placeData(kTrigEa, trig_b.data(), trig_b.size(), &fx.err)) return res;
+            if (!fx.m.placeData(kBitrevEa, bitrev_b.data(), bitrev_b.size(), &fx.err)) return res;
+            // ⚠ 顺序有意：先铺整个 `out`（n 个 float，`out` 段必须整段已提交），再把输入写到
+            // `in_arg`。`in == out` 的那条里 `in_arg == kOutEa` ⇒ 前半段被输入覆盖，正是原地调用的形状。
+            if (!fx.m.placeData(kOutEa, out_b.data(), out_b.size(), &fx.err)) return res;
+            if (!fx.m.placeData(in_arg, in_b.data(), in_b.size(), &fx.err)) return res;
+            if (!fx.m.placeCode(0x004E0230u, code_mdct.data(), code_mdct.size(), &fx.err)) return res;
+            if (with_override) {
+                std::string err;
+                if (!fx.m.overrides().add(0x004E0B40u, "ref_mdct", lift::GuestConv::Cdecl, 12,
+                                          lift::nativeMdct4E0B40, &err))
+                    return res;
+            }
+
+            constexpr std::uint32_t kCallEa = 0x00402000u;
+            lift_fixture::Asm a(kCallEa);
+            a.pushImm(kOutEa);   // out
+            a.pushImm(in_arg);   // in
+            a.pushImm(kInitEa);  // init
+            a.callRel(0x004E0B40u);
+            a.addEspImm8(12);  // cdecl：调用方清栈
+            a.ret();
+            if (!fx.m.placeCode(kCallEa, a.b.data(), a.b.size(), &fx.err)) return res;
+            fx.rearmStack();
+            fx.runCode(kCallEa);
+            if (!fx.ok) return res;
+
+            res.valid = true;
+            res.out.resize(static_cast<std::size_t>(n));
+            std::memcpy(res.out.data(), fx.m.mem().host(kOutEa), res.out.size() * 4u);
+            if (with_override) {
+                const lift::NativeOverride* e = fx.m.overrides().at(0);
+                res.hits = static_cast<std::uint32_t>(e->hits);
+                res.fallbacks = static_cast<std::uint32_t>(e->fallbacks);
+            }
+            return res;
+        };
+
+        struct MdctCase {
+            const char* name;
+            int n;
+            bool aliased;
+        };
+        const MdctCase mdct_cases[] = {
+            {"mdct/n=64", 64, false},     {"mdct/n=256", 256, false},   {"mdct/n=256/alias", 256, true},
+            {"mdct/n=1024", 1024, false}, {"mdct/n=2048", 2048, false}, {"mdct/n=2048/alias", 2048, true},
+            {"mdct/n=8192", 8192, false},  // 上界（`kMaxN`）
+        };
+        for (const MdctCase& c : mdct_cases) {
+            lift_test::g_current_case = c.name;
+            const MdctOutcome base = runMdct(c.n, c.aliased, false);
+            const MdctOutcome ovr = runMdct(c.n, c.aliased, true);
+            LIFT_CHECK(base.valid && ovr.valid);
+            if (!base.valid || !ovr.valid) continue;
+            float peak = 0.0f;
+            float maxdiff = 0.0f;
+            std::size_t at = 0;
+            std::size_t nonfinite = 0;
+            for (std::size_t i = 0; i < base.out.size(); ++i) {
+                // ★ NaN/Inf 必须**单独数**：`d > maxdiff` 对 NaN 恒 false ⇒ 一个 NaN 输出会让整条
+                //   数值判据静默通过（实测：在纯核末尾写 `out[0] = NaN`，旧的 `max|d|` 一位不变、749 checks 全绿）。
+                if (!std::isfinite(base.out[i]) || !std::isfinite(ovr.out[i])) {
+                    ++nonfinite;
+                    continue;
+                }
+                peak = std::fmax(peak, std::fabs(base.out[i]));
+                const float d = std::fabs(ovr.out[i] - base.out[i]);
+                if (d > maxdiff) {
+                    maxdiff = d;
+                    at = i;
+                }
+            }
+            std::printf("  [mdct %-12s] peak=%9.5f max|d|=%.3e @%4zu rel=%.2e\n", c.name, peak, maxdiff, at,
+                        peak > 0.0f ? maxdiff / peak : 0.0f);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(nonfinite), 0u);  // ⛔ 不许有 NaN/Inf（见上面的注释）
+            LIFT_CHECK(peak > 1e-3f);  // ③ 两臂都真的算出了东西
+            // ② 这一项**真的被接管**了，且没有偷偷回退
+            LIFT_CHECK_EQ_U32(ovr.hits, 1u);
+            LIFT_CHECK_EQ_U32(ovr.fallbacks, 0u);
+            // ① 数值档容差（这一档的契约；实测见上面那行打印）
+            LIFT_CHECK(maxdiff <= 1e-6f * peak);
         }
     }
 
