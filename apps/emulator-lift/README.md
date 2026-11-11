@@ -245,13 +245,14 @@ apps/emulator-lift/
 
 `assets` 档里有一条**不跟默认门禁走**：`movie-logo`（`tests/movie_logo.cpp`）。它真启模拟器、真放
 LOGO 影片（子进程按**墙钟秒**计），默认**不注册**（`add_executable` 也在同一个 `if` 里 ⇒ 纯构建环境
-连这个 target 都不编）。注册条件是**两条同时成立**：本机存在
-`E:/Games/Eushully/天結/install/SYS4INI.BIN`，且设了 `LIFT_ASSETS`（换机器没装游戏 ⇒ 设了也不会出现）。
+连这个 target 都不编）。注册条件是**两条同时成立**：安装根下存在 `SYS4INI.BIN`，且设了 `LIFT_ASSETS`。
+安装根只有一处 —— 仓库根的 `links/install`（Windows / macOS 都指向真实安装树；见根 `.gitignore`），
+换机器时用 `-DLIFT_ASSETS_GAME_DIR=<目录>` 覆盖（CMake 缓存变量，缺省 = `links/install`）。
 判据见 `tests/movie_logo.cpp` 的文件头。
 
 ```powershell
-# ① 显式注册 / 跑这条 assets 用例
-$env:LIFT_ASSETS = "1"
+# ① 显式注册 / 跑这条 assets 用例（macOS / Linux 把 preset 换成对应的那个）
+$env:LIFT_ASSETS = "1"                # POSIX：export LIFT_ASSETS=1
 cmake --preset windows-x64            # ★ DEFINED ENV{...} 是**配置期**求值 ⇒ 必须重新 configure
 cmake --build --preset windows-x64
 ctest --test-dir out -N               # 这时才会列出 movie-logo
@@ -270,9 +271,9 @@ $env:LIFT_STOP_AFTER_MOVIE = "1"
   `out/lift-movie-logo.exe`（参数见 `CMakeLists.txt` 的 `add_test`）而不设该变量、也不传那个开关。
 - 测试据此断言钩子生效（两个子进程的 run summary 都得是 `stop      : stopped`）—— 钩子失效时它不会
   静默退回"变慢但仍绿"。判据挂在 CMake 传的那个参数上，**不挂在环境变量**上（env 被删掉时也要红）。
-- 另一条 assets 用例是 `option-roundtrip`（`tests/option_roundtrip.cpp`）：注册条件**只有**
-  `SYS4INI.BIN` 存在，**不要求** `LIFT_ASSETS`（它是"OPTION 往返后纹理 arena 不增长"的端到端判据，
-  默认门禁里必须真跑）。它自己起三次模拟器（1 / 2 / 3 轮往返），判据与容差写在该文件头注释里。
+- 另一条 assets 用例是 `option-roundtrip`（`tests/option_roundtrip.cpp`）：注册条件与其他 opt-in
+  资产用例相同（安装根 + `LIFT_ASSETS`）。它自己起三次模拟器（1 / 2 / 3 轮往返），判据与容差写在该
+  文件头注释里。
 
 ## 4.1 渲染产物导出
 D3D9 `Present` 可以把**后缓冲的 guest 像素**写成 BMP（`SurfaceArena::dumpBmp`，支持 16/32bpp）：
@@ -609,7 +610,10 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-d
 - 直出只换**呈现**：`d3d9::Present` 的 guest 回读（hash / frameCount / `--dump-frame` / 后缓冲语义）
   照旧每帧做，`--present-screenshot` 从 target 回读（swapchain 是 write-only）。
 
-### 能力范围（准入在 `d3d9::gpuEligible`，映射是纯函数；守卫 `tests/gpu_mapping.cpp`）
+### 能力范围（准入在 `d3d9::gpuEligible`；守卫 `tests/gpu_batch.cpp` 的 `gpu-batch/sampler-filter-eligibility`）
+
+★ 准入的其余条件**没有**逐条纯档用例（原 `tests/gpu_mapping.cpp` 已随 `5e4fca3 refactor: clean tests` 删除）；
+只有"采样器 mag≠min ⇒ 不接受"这一条被端到端钉住（回退 + 记账）。
 
 明确支持（TITLE 的黑场渐变全屏四边形就在这一类）：
 - 32bpp 默认后缓冲、GOURAUD、无 alpha test；color write mask 任意 4 位组合；
@@ -859,7 +863,8 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe ... --input-script .tmp/room/enter.tx
 - **只在该脚本真有 `profile_*` 动作时才计时**（没有这些动作 ⇒ 整条记账路径是 no-op）。
   解析期就在脚本里的与**运行期经 `appendText` 追加的**（`--interaction-graph` 走这条）都算：
   后者的 arm 发生在 `profile_begin` 被消费的那一刻（否则窗口照开照收、表全是 0）。
-  `--profile` 的输出格式**不变**（`tests/profile_shims.cpp` 仍在解析它）。
+  `--profile` 的**表格内容**由 `tests/profile_window.cpp` 从 API 断言（窗口/块/边表）；**文本格式本身没有守卫**
+  （纯诊断输出；原先解析它的 `tests/profile_shims.cpp` 已随 `5e4fca3 refactor: clean tests` 删除）。
 - **闭式**：`wall = guest + shim + native + interp + host + unattributed`。各项互斥，量都来自
   dispatcher 的同一条时间轴：`guest` = 块执行；`shim` = `ShimRegistry::invoke` 整段；
   `native` = 函数级/段级 override；`host` = 音频泵 / 事件泵 / 脚本 tick / 定时器；

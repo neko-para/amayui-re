@@ -264,7 +264,7 @@
   B 1,008,053,822）。日志新增 `EnumFontFamiliesExA: 回调 16 条族名 …` + `枚举完成：16 条族名`。
 - **代表守卫**：`apps/emulator-lift/tests/gdi.cpp` 的 `enum-font-families`（pure：枚举条数 > 1、5 条查表目标
   逐字节命中、每条 `lfCharSet` = 请求值）与 `enum-font-families-stop`（回调返回 0 ⇒ 只 1 条）；
-  端到端 `apps/emulator-lift/tests/title_entry_paths.cpp`（assets，Windows 安装 + `LIFT_ASSETS` 才注册）。
+  端到端 `apps/emulator-lift/tests/title_entry_paths.cpp`（assets，安装根 `links/install` + `LIFT_ASSETS` 才注册）。
   变异实测：名单缩回一条 ⇒ `lift-gdi` 6 failures + 同一二进制 A/B 端到端都 exit 2 且回到 `0x4E6E3F`。
 - **复现**（`apps/emulator-lift`）：`--game-dir ../../links/install --skip-logo --present window --present-hidden
   --raster gpu --max-frames 400 --time-limit 150 --input-script <A|B>`；A = `at frame 130 / click 812 622 /
@@ -351,3 +351,35 @@
   profile_begin tail`（末帧 150 ⇒ 最后一条永不触发），脚本 B = 去掉后两行。
 - **未做**：`at frame 151` 本身是**脚本写法**问题（末帧号随档位变），本条只保证"写错了要能看见"；
   ⛔ 不改退出码、⛔ 不加"严格模式"开关。
+
+### BUG-21 · `quit-tail` 夹具用 `at frame` 当锚（boot 期没有 Present）⇒ 为证明"夹具自己会红"养了一条 13 分钟的变异（**夹具已删**）
+
+- **现象**：`quit-tail`（`tests/quit_tail.cpp`，assets 档、两臂各 ~44 s）在 Windows 上先红成
+  24 checks / 1 failure（1203 s，两臂都停在 `--time-limit 600`）；为证明"锚退回帧号会红"，
+  `tools/mutate-check.mjs` 给它配了一条 `ctestTimeoutSec: 1800` 的测试侧变异 ⇒ 每轮自检 ~13 min。
+- **根因（一行）**：`at frame N` 在 boot 的**帧停滞**里被折算成墙钟
+  （`[input-script] ⚠ 帧停滞 30001ms（n=0）⇒ 剩余 frame 触发条件按最近帧间隔均值…折算成 wall_ms`，
+  `apps/emulator-lift/src/runtime/input_script.cpp`），而 boot 段没有 Present ⇒ 帧号不推进。
+  **这条行为本身是文档化的、且有纯档守卫**（`tests/input_tick.cpp` ④、`tests/profile_window.cpp` ④、
+  `tests/input_anchor.cpp#anchor/no-stall-fallback-while-pending`）⇒ 夹具拿帧号当锚是**夹具写法错**，
+  不是引擎缺陷；端到端重跑它只能量到"夹具自检 + 读数稳定性"。
+- **修法（2026-11-11 裁决）**：**删掉整个夹具**（`tests/quit_tail.cpp` + CTest `quit-tail` + 两条测试侧变异），
+  两张相关需求单按"夹具已删"drop。理由（`README.md` §0.1 三问）：
+  ① `present-tail` 字段接错由纯档 `tests/input_injection.cpp#present-tail-stamp` 守；
+  ② 端到端那半（各 1 行 `present-tail` + `stop=stopped` + `detail` 含 `kernel32!ExitProcess`）由
+     `tests/native_override_e2e.cpp` 断言；
+  ③ 剩下的"锚命中 / 两次逐字相同"是**测试自己**的结论，属观察 → 文档，不配守卫。
+- **留下的规则**：e2e 夹具的触发锚用 **`at guest_ms` / `at insn`**（guest 时间跨机器确定），⛔ 不用 `at frame`；
+  `--appdata` **每次 `remove_all`**（退出路径会写 `SAVE.DAT`：同一二进制、同一锚，空 appdata 的
+  `tail_insns=131104827`，带上一轮存档的 `143751706` ⇒ 两臂会差一帧）。
+  Windows 子进程命令行**只用 UTF-16**（`CreateProcessW` + `path::wstring()`），
+  `path::string()` 走 ANSI 代码页会把 `天結` 转成 GBK 字节、`utf8ToWide()` 严格解码失败 ⇒ 子进程丢 game-dir；
+  仍在用的样例见 `tests/title_entry_paths.cpp`。
+- **代表守卫**：无（夹具已删）。"夹具写错要能看见"这一类由 `tests/input_unfinished.cpp` 的未应用动作摘要承担。
+- **读数**（2026-11-11，macOS arm64 / RelWithDebInfo / `LIFT_ASSETS=1`，删前最后一跑）：
+  `ctest -R '^quit-tail$'` = **Passed 87.91 s**；直接跑夹具 = **43 checks / 0 failures**，
+  两臂逐字相同：`last_frame=1493 insns_at_last_present=1191989436 tail_insns=131104827`、
+  `click frame=1472 guest_ms=120038 waited_samples=3`、`stop=stopped`。`tail_insns` 与 Windows 实测相同。
+- **复现（历史）**：`apps/emulator-lift` 下 `./out/emulator-lift --game-dir ../../links/install --appdata <全新私有>
+  --skip-logo --audio off --present headless --raster gpu --input-script <at frame 130 / click 1190 630>
+  --time-limit 600` ⇒ boot 里点空、run 停在墙钟兜底。

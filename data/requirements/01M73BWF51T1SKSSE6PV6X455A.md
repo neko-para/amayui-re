@@ -2,10 +2,10 @@
 
 - id: REQ-01M73BWF51T1SKSSE6PV6X455A
 - type: bug
-- status: doing
+- status: dropped
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- repro: apps/emulator-lift/tests/quit_tail.cpp#game_dir.string()
 - severity: S3
+- dropped_reason: 夹具已删（2026-11-11 裁决，同 REQ-01M745ZGKZAHTCEQ9KQ7CY3JJ0）：这条修的是 quit-tail 夹具自己的子进程路径编码（Windows ANSI 代码页转坏 天結），夹具没了就没有守卫对象。口径（Windows 子进程命令行只用 UTF-16）落到 defects.md 的 BUG-21；仍在用的同族样例见 tests/title_entry_paths.cpp。
 - tags: [emulator-lift test encoding]
 
 ## 一句话

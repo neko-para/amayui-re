@@ -31,3 +31,5 @@
 ## 未做
 - `tail_wall_ms` 的**单位**无守卫（ms→us 的变异全绿）—— 它是读数，不进断言。
 - `--max-frames ⇒ tail_insns == 0` 实测成立，但**没有用例钉**（README 已标"实测"）。
+
+> 2026-11-11：上面那条 assets `quit-tail` 已**删掉**（它量的其实是夹具自检 + 读数稳定性；`at frame` 锚在 boot 帧停滞里会折算成墙钟）。纯档 `present-tail-stamp` 判据不变；理由与读数见 `docs/03-emulator/defects.md` BUG-21。

@@ -235,6 +235,19 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/age/AGE.EXE__dumped.s
         SKIP_RETURN_CODE 77)
 endif()
 
+# ---- assets 档的"真机安装根"：仓库根的 `links/install`（本机符号链接，总指向真实安装树）----
+# ★ 为什么是变量而不是字面量：本仓在 macOS 上也要跑 assets 档（`tests/title_entry_paths.cpp`
+#   等 e2e 的 POSIX 分支就是为它写的）。安装根写死成某个盘符会让 macOS / 换机器的资产用例**永远不注册**
+#   —— 而"没跑"与"跑绿了"在 `ctest` 输出里长得一样（AGENTS.md §5 的分级判据正是防这个）。
+# ★ 落点只有一处：仓库根的 `links/install`（Windows / macOS 都是它，见 `.gitignore` 的 `/raw`、`/install`）。
+#   ⛔ 它只决定"去哪找安装树"，**不决定档位**：CTest 仍只在 `DEFINED ENV{LIFT_ASSETS}` 下注册。
+#   显式覆盖：`cmake --preset <preset> -DLIFT_ASSETS_GAME_DIR=<含 SYS4INI.BIN 的目录>`。
+set(LIFT_ASSETS_GAME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../links/install"
+    CACHE PATH "assets 档的安装根（含 SYS4INI.BIN）")
+if(NOT EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN")
+    message(STATUS "assets 档：${LIFT_ASSETS_GAME_DIR} 下没有 SYS4INI.BIN ⇒ 资产用例不注册")
+endif()
+
 # ---- assets：真机安装上的 LOGO 影片必须"真的放完"（首帧 / completed / 堆平稳 / tex#1 差分）----
 # 判据见 tests/movie_logo.cpp 的头注释。缺游戏安装 ⇒ 不注册（assets 档的判据 = 注册位置）；
 # GPU 不可用（raster 行不是 sdl-gpu）⇒ 测试自己 `LIFT_SKIP`(77)。
@@ -245,7 +258,7 @@ endif()
 #   （`cmake --preset windows-x64`），`ctest -N` 才会跟着变。
 # ★ `add_executable` 也在同一个 if 里：纯构建环境（没有游戏安装 / 没开 LIFT_ASSETS）连这个 target 都不编。
 # ★ 不改测试名与文件路径（需求单 `01M6T07SC0XN81G1MZJYJXXGV9` 的 verify 指向它们）。
-if(EXISTS "E:/Games/Eushully/天結/install/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
+if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
     add_executable(lift-movie-logo tests/movie_logo.cpp)
     target_link_libraries(lift-movie-logo PRIVATE emulator-lift-runtime)
     # ★ 真机影片只在 RelWithDebInfo 树里跑（用户口径：Debug 解释器慢到无法使用；
@@ -256,7 +269,7 @@ if(EXISTS "E:/Games/Eushully/天結/install/SYS4INI.BIN" AND DEFINED ENV{LIFT_AS
     #   成对）—— 若只让测试拿 env 变量自证，将来删掉 ENVIRONMENT 就会静默退回 45 s 仍然绿。
     add_test(NAME movie-logo COMMAND lift-movie-logo $<TARGET_FILE:emulator-lift>
         "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE"
-        "E:/Games/Eushully/天結/install"
+        "${LIFT_ASSETS_GAME_DIR}"
         "${CMAKE_CURRENT_BINARY_DIR}/movie-logo-work"
         --expect-early-stop)
     set_tests_properties(movie-logo PROPERTIES
@@ -283,12 +296,12 @@ endif()
 # ★ `add_executable` 也在同一个 if 里：纯构建环境（没有游戏安装 / 没开 LIFT_ASSETS）连这个 target 都不编。
 # ★ 子进程走 `--present window --present-hidden --raster gpu`：headless 的 CPU 光栅化实测
 #   490 帧要 10 分钟以上；窗口隐藏仍无焦点、无真实光标。
-if(EXISTS "E:/Games/Eushully/天結/install/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
+if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
     add_executable(lift-option-roundtrip tests/option_roundtrip.cpp)
     target_link_libraries(lift-option-roundtrip PRIVATE emulator-lift-runtime)
     add_test(NAME option-roundtrip COMMAND lift-option-roundtrip
         $<TARGET_FILE:emulator-lift>
-        "E:/Games/Eushully/天結/install"
+        "${LIFT_ASSETS_GAME_DIR}"
         "${CMAKE_CURRENT_BINARY_DIR}/option-roundtrip-work")
     set_tests_properties(option-roundtrip PROPERTIES
         # ★ 子进程继承这个 cwd：模拟器默认的执行源是按**相对当前目录**找的
@@ -308,12 +321,12 @@ endif()
 #   ⛔ `DEFINED ENV{…}` 是**配置期**求值 ⇒ 改了环境变量必须重新 configure
 #   （`cmake --preset windows-x64`），`ctest -N` 才会跟着变。
 # ★ `add_executable` 也在这个 if 里：纯构建环境（没有游戏安装 / 没开 LIFT_ASSETS）连 target 都不编。
-if(EXISTS "E:/Games/Eushully/天結/install/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
+if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
     add_executable(lift-title-entry-paths tests/title_entry_paths.cpp)
     target_link_libraries(lift-title-entry-paths PRIVATE emulator-lift-runtime)
     add_test(NAME title-entry-paths COMMAND lift-title-entry-paths
         $<TARGET_FILE:emulator-lift>
-        "E:/Games/Eushully/天結/install"
+        "${LIFT_ASSETS_GAME_DIR}"
         "${CMAKE_CURRENT_BINARY_DIR}/title-entry-paths-work")
     set_tests_properties(title-entry-paths PROPERTIES
         # ★ 子进程继承这个 cwd：模拟器默认的执行源是按**相对当前目录**找的
@@ -321,24 +334,6 @@ if(EXISTS "E:/Games/Eushully/天結/install/SYS4INI.BIN" AND DEFINED ENV{LIFT_AS
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         SKIP_RETURN_CODE 77
         TIMEOUT 600)
-
-    # ---- assets：运行摘要 `present-tail`（最后一次 Present 调用 → run 停）的端到端守卫 ----
-    # 判据见 tests/quit_tail.cpp 的头注释：两次**逐字相同**的命令（只有 `--appdata` 各自私有），
-    # 断言 ①两次 exit 0 ②`[input-script] finished` ③各恰好 1 行 `present-tail:` ④恒等式
-    # `insns_at_last_present + tail_insns == insns` ⑤存在性 ⑥两次前缀逐字相同。
-    # ⛔ 不断言任何当前数字（那是 observations.md 的读数，会随构建变）。
-    # 两次 run 各 ~30 s 量级（`--present headless --raster gpu`），给 30 分钟上限。
-    add_executable(lift-quit-tail tests/quit_tail.cpp)
-    target_link_libraries(lift-quit-tail PRIVATE emulator-lift-runtime)
-    add_test(NAME quit-tail COMMAND lift-quit-tail
-        $<TARGET_FILE:emulator-lift>
-        "E:/Games/Eushully/天結/install"
-        "${CMAKE_CURRENT_BINARY_DIR}/quit-tail-work")
-    set_tests_properties(quit-tail PROPERTIES
-        # ★ 同 title-entry-paths：子进程继承这个 cwd（执行源按相对当前目录找）。
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        SKIP_RETURN_CODE 77
-        TIMEOUT 1800)
 
     # ---- assets：退出写存档尾段的 LZSS Encode native override 端到端守卫 ----
     # 判据见 `tests/native_override_e2e.cpp` 文件头：三份 run（a1 空 / b 开 / a2 空，唯一差异
@@ -352,10 +347,10 @@ if(EXISTS "E:/Games/Eushully/天結/install/SYS4INI.BIN" AND DEFINED ENV{LIFT_AS
     target_link_libraries(lift-native-override-e2e PRIVATE emulator-lift-runtime)
     add_test(NAME native-override-e2e COMMAND lift-native-override-e2e
         $<TARGET_FILE:emulator-lift>
-        "E:/Games/Eushully/天結/install"
+        "${LIFT_ASSETS_GAME_DIR}"
         "${CMAKE_CURRENT_BINARY_DIR}/native-override-e2e-work")
     set_tests_properties(native-override-e2e PROPERTIES
-        # ★ 同 quit-tail：子进程继承这个 cwd（执行源 / `.lst` 按相对当前目录找）。
+        # ★ 同 title-entry-paths：子进程继承这个 cwd（执行源 / `.lst` 按相对当前目录找）。
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         SKIP_RETURN_CODE 77
         TIMEOUT 2400)
@@ -952,12 +947,12 @@ add_test(NAME d3d9-mip COMMAND lift-d3d9-mip)
 #   只打印、**不断言**（那是读数）。
 # ★ 缺游戏安装 ⇒ 不注册（assets 档的判据 = 注册位置）；与其它 e2e 同一条 opt-in 判据。
 # =====================================================================================
-if(EXISTS "E:/Games/Eushully/天結/install/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
+if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
     add_executable(lift-mip-e2e tests/mip_e2e.cpp)
     target_link_libraries(lift-mip-e2e PRIVATE emulator-lift-runtime)
     add_test(NAME mip-e2e COMMAND lift-mip-e2e
         $<TARGET_FILE:emulator-lift>
-        "E:/Games/Eushully/天結/install"
+        "${LIFT_ASSETS_GAME_DIR}"
         "${CMAKE_CURRENT_BINARY_DIR}/mip-e2e-work")
     set_tests_properties(mip-e2e PROPERTIES
         # ★ 子进程继承这个 cwd：模拟器默认的执行源是按相对当前目录找的。
@@ -992,10 +987,10 @@ add_test(NAME golden-image-compare COMMAND lift-golden-image --self-test)
 # ---- assets：TITLE 第 2 帧的 GPU 黄金图（缺安装树 ⇒ 不注册；GPU 不可用 ⇒ SKIP 77）----
 # ★ 与 `loader` / `host-encoding` 同一条判据（`EXISTS` 资产 / 安装树），⛔ 不加 `LIFT_ASSETS`
 #   opt-in：这条是**每次都要跑**的画面回归（S1 那种"账本全绿、画面丢了"的唯一自动判据）。
-if(EXISTS "E:/Games/Eushully/天結/install/SYS4INI.BIN")
+if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN")
     add_test(NAME golden-image COMMAND lift-golden-image --fixture
         $<TARGET_FILE:emulator-lift>
-        "E:/Games/Eushully/天結/install"
+        "${LIFT_ASSETS_GAME_DIR}"
         "${CMAKE_CURRENT_BINARY_DIR}/golden-image-work"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/title-f2-gpu.png")
     set_tests_properties(golden-image PROPERTIES

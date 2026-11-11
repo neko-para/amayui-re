@@ -2,10 +2,10 @@
 
 - id: REQ-01M745ZGKZAHTCEQ9KQ7CY3JJ0
 - type: bug
-- status: doing
+- status: dropped
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- repro: apps/emulator-lift/tests/quit_tail.cpp#at frame
 - severity: S3
+- dropped_reason: 夹具已删（2026-11-11 裁决）：quit-tail 的输入锚 at frame 在 boot 帧停滞里被折算成墙钟——这是文档化且有纯档守卫（input_tick ④ / profile_window ④）的行为，用 88 s 的 e2e + 13 min 的变异去证明"夹具自己会红"不属于守卫门槛（docs/03-emulator/README.md §0.1）。知识落到 defects.md 的 BUG-21。重开条件：出现"只能靠这套夹具看见"的静默回归。
 - tags: [emulator-lift test determinism input-script]
 
 ## 一句话（原假设）
