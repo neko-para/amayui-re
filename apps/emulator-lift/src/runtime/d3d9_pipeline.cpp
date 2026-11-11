@@ -14,9 +14,11 @@
 //     法线只做 world/view 线性变换后归一化（真机用逆转置 ⇒ 非等比缩放下会偏）。
 //   · 雾：**不实现**（FOGENABLE=1 时记录 + 一行日志，颜色不参与雾化）。
 //   · 纹理过滤：MIN/MAG **都参与**决策（任一要求 LINEAR ⇒ 双线性；各向异性按 LINEAR 近似）。
-//     本线没有 mip 链 / LOD / 导数 ⇒ 不按 LOD 在 MIN/MAG 之间选，这是**明确记录的近似**
-//     （决策见 `samplerUsesLinear`，⛔ 不是"参数传了却不用"）。
-//   · 采样器 MIPFILTER / MAXMIPLEVEL / LODBIAS：本线只有 level 0 ⇒ 记录、不影响像素。
+//     本线**有**派生 mip 链（`REQ-01M73G2724479XAVS176WBZ65Q`）：按屏幕空间 UV 导数算 LOD，
+//     取**最近级**（不做三线性）—— 但"1:1 / 放大 ⇒ level 0"这条必须成立（判据在守卫里）。
+//     决策见 `samplerUsesLinear` + `mipLevelForLod`（⛔ 不是"参数传了却不用"）。
+//   · 采样器 MIPFILTER：`NONE` ⇒ 只 level 0；非 NONE ⇒ 允许选 mip 级（LINEAR 三线性按**最近级**近似）。
+//   · 采样器 MAXMIPLEVEL / LODBIAS：仍记录、不影响像素（本线不做 LOD 偏置/上限，⛔ 不静默改像素）。
 //   · 多重采样 / 抗锯齿 / 线框 / patch / 顶点混合：不支持 ⇒ 记录 + 一行日志。
 //   · 顶点声明（D3DVERTEXELEMENT9）：`DrawPrimitive` / `DrawIndexedPrimitive` 支持**一份**受支持形状
 //     —— POSITION(FLOAT3) + TEXCOORD0(FLOAT2) [+ COLOR0(D3DCOLOR)]，元素可以落在**两条流**上
@@ -26,6 +28,9 @@
 //   · 纹理级运算：支持 DISABLE/SELECTARG1/2/MODULATE(2X/4X)/ADD/ADDSIGNED(2X)/SUBTRACT/
 //     ADDSMOOTH/BLEND*ALPHA/MULTIPLYADD/LERP；其余 ⇒ 记录一次 + 退回 SELECTARG1。
 //   · 光栅：像素中心采样 + 左上填充规则（顶点顺序 = 屏幕空间顺时针 = D3D 正面）。
+//   · 点 / 线：**只做无纹理**（顶点色 + z 按段参数 t 插值），走与三角形**同一份**像素收尾
+//     （`writeShadedPixel`：深度 / alpha test / 混合 / 写掩码）；线宽恒 1px（diamond-exit 主轴步进）。
+//     带纹理或 COLOROP/ALPHAOP 需要采样的点 / 线**响亮拒绝**（见 `admitLinePointDraw`）。
 #include "runtime/d3d9_pipeline.h"
 
 #include <chrono>
@@ -36,7 +41,9 @@
 #include <cstring>
 
 #include "runtime/gpu_raster.h"
+#include <deque>
 #include <map>
+#include <new>  // std::bad_alloc（状态块快照的分配失败面）
 #include <string>
 #include <vector>
 
@@ -52,12 +59,64 @@
 #include "runtime/x86.h"
 
 namespace lift {
+// =====================================================================================
+// GPU 覆盖账本的**批号表**（`REQ-01M73PZN6R3AC3RCQ8WZEA0Y0M`；"为什么"见 `gpu_raster.h`）
+// =====================================================================================
+// ★ 放在 `lift` 而不是 `lift::d3d9` 里：回报入口是 `lift::gpuLedgerNoteRecordedDraw`
+//   （声明在 `gpu_raster.h`，后端 `d3d9_gpu.cpp` 调），而写账的 `GpuCoverage` 在 `lift::d3d9` ——
+//   两边都要看得见，所以表放外层、计数留原处。
+// ★ 每个 tag 两个布尔（为什么不是"一个 recorded"）：`LIFT_GPU_VERIFY` 的旧接口会在
+//   `++empty` **之前**就 flush 并回报 ⇒ 回报时还不知道这笔"该不该从 empty 里减"。
+//   · `recorded`      = 后端回报过"这条 draw 真的进了 render pass"；
+//   · `counted_empty` = 这批已经被记进 `GpuCoverage::empty`（⇒ 回报时要把它挪出去）。
+namespace {
+struct GpuBatchLedgerEntry {
+    bool recorded = false;
+    bool counted_empty = false;
+};
+std::map<std::uint64_t, GpuBatchLedgerEntry> g_gpu_batch_ledger;
+// ★ 进程内只增、跨轮不复用：`gpuCoverageReset` 清表，但序号继续往前 ⇒ 上一轮迟到的回报
+//   撞不上新一轮的 slot（否则"上一轮的批"会被记成"这一轮已 recorded"）。
+std::uint64_t g_gpu_batch_seq = 0;
+// `[draw]` 的**延后打印**（只在 `LIFT_SLOW_DRAW=1` 时非空）：入队那一刻还不可能知道是否 recorded，
+// 所以先把行挂进**提交顺序**队列，由后端回报点按序放出 `rec=1`（见 `drainPendingDrawLines`）。
+// ★ `tag == 0` = 这一批**没入队**（CPU 路 / 回退 / 顶点全被裁掉）⇒ 永远不会有回报，当场定为 rec=0。
+struct GpuPendingDrawLine {
+    std::uint64_t tag = 0;
+    std::string text;
+};
+std::deque<GpuPendingDrawLine> g_pending_draw_lines;
+
+// 把**队首**已经能定论的行按提交顺序打出去：
+//   · `tag == 0` ⇒ rec=0（没入队，永远不会有记录）；
+//   · 队首那批已经 recorded ⇒ rec=1；
+//   · 队首那批**已入队但还没回报** ⇒ 停（否则日志顺序会与提交顺序不一致）。
+// ★ `force = true` 只在一轮收口时用：剩下的永远不会再被回报 ⇒ 一律 rec=0 打出来。
+void drainPendingDrawLines(bool force) {
+    bool printed = false;
+    while (!g_pending_draw_lines.empty()) {
+        const GpuPendingDrawLine& front = g_pending_draw_lines.front();
+        const auto it = front.tag != 0 ? g_gpu_batch_ledger.find(front.tag) : g_gpu_batch_ledger.end();
+        const bool recorded = it != g_gpu_batch_ledger.end() && it->second.recorded;
+        if (!recorded && front.tag != 0 && !force) break;
+        std::fprintf(stderr, "[draw] rec=%d %s\n", recorded ? 1 : 0, front.text.c_str());
+        g_pending_draw_lines.pop_front();
+        printed = true;
+    }
+    if (printed) std::fflush(stderr);
+}
+}  // namespace
+
 namespace d3d9 {
 std::uint64_t g_gpu_draws = 0;
 std::uint64_t g_gpu_triangles = 0;
 namespace {
 // GPU 覆盖账本（定义放最前：submitPrimitives / d3dx9_sprite 都写它；dumpRunSummary 读它）。
 GpuCoverage g_gpu_coverage;
+
+// ★ 本单（`REQ-01M73PZN6R3AC3RCQ8WZEA0Y0M`）：一批被记进 `empty` 的**唯一入口**。
+//   两个调用点（"入队成功但还没回报" / "连队都没入"）共用 ⇒ 要验"empty 恒 0 会被抓住"只需改这一行。
+void noteCoverageEmpty() { ++g_gpu_coverage.empty; }
 
 void noteFallbackReason(const std::string& reason) {
     std::uint64_t& n = g_gpu_coverage.fallback_reasons[reason];
@@ -83,6 +142,12 @@ constexpr std::uint32_t kPlTransforms = 64;  // 260 个 D3DMATRIX（64 B 一个�
 constexpr std::uint32_t kPlTransformCount = 260;
 constexpr std::uint32_t kPlRenderStates = kPlTransforms + kPlTransformCount * 64u;  // 256 个 DWORD
 constexpr std::uint32_t kPlRenderStateCount = 256;
+// D3DRENDERSTATETYPE 的**点尺寸族**（只在点光栅里读；状态数组本身覆盖 0..255，⛔ 不新增槽位）：
+//   POINTSIZE=154 / POINTSPRITEENABLE=156 / POINTSCALEENABLE=157（值来自 SDK d3d9types.h）。
+// ★ 本线**不实现**点尺寸：只读它们判"这一批的点不是 1px ⇒ 记账"，⛔ 不猜缩放语义。
+constexpr std::uint32_t kRsPointSize = 154;
+constexpr std::uint32_t kRsPointSpriteEnable = 156;
+constexpr std::uint32_t kRsPointScaleEnable = 157;
 constexpr std::uint32_t kPlSamplers = kPlRenderStates + kPlRenderStateCount * 4u;   // 16 * 16
 constexpr std::uint32_t kPlSamplerCount = kMaxSamplers * 16u;
 constexpr std::uint32_t kPlTexStages = kPlSamplers + kPlSamplerCount * 4u;          // 8 * 40
@@ -434,6 +499,11 @@ struct TextureView {
     std::uint32_t pitch = 0;
     std::uint32_t version = 0;  // 内容版本（TextureInfo::version）；GPU 上传缓存用
     std::uint32_t serial = 0;   // 纹理身份（TextureInfo::serial）；GPU 缓存键用
+    // ---- 派生 mip 链（`REQ-01M73G2724479XAVS176WBZ65Q`）----
+    // `state` = `'TEX1'` 状态块 EA（按需重取内容版本 / 现算链）；`mips` = 本批用的链
+    // （宿主旁路表里的条目，生命周期到下一次重建 / 纹理销毁 ⇒ ⛔ 不要跨 Draw 存）。
+    std::uint32_t state = 0;
+    const TextureMipChain* mips = nullptr;
     // ★ 方案 C 的脏区输入（TextureInfo 的写入矩形 + 版本链）
     std::uint32_t write_version = 0;
     std::uint32_t prev_write_version = 0;
@@ -457,6 +527,7 @@ bool resolveTexture(X86& cpu, Machine* m, std::uint32_t object_ea, TextureView* 
     out->pitch = gs->pitch;
     out->version = ti.version;
     out->serial = ti.serial;
+    out->state = ti.state;
     out->write_version = ti.write_version;
     out->prev_write_version = ti.prev_write_version;
     for (int k = 0; k < 4; ++k) out->write_rect[k] = ti.write_rect[k];
@@ -759,6 +830,8 @@ struct SamplerSnapshot {
     std::uint32_t address_v = kAddressWrap;
     std::uint32_t mag_filter = kTexfPoint;
     std::uint32_t min_filter = kTexfPoint;
+    // ★ `D3DTEXF_NONE` = **不做 mipmap**（D3D9 语义）⇒ 只采 level 0。缺省与 `initDefaults` 一致。
+    std::uint32_t mip_filter = kTexfNone;
 };
 
 struct DrawContext {
@@ -775,6 +848,11 @@ struct DrawContext {
     std::uint32_t color_surface = 0;  // 0 = 设备后缓冲
     float* depth_base = nullptr;  // 后缓冲尺寸的 float 深度
     std::uint32_t depth_pitch_floats = 0;
+    // ★ 深度缓冲的**矩形**（来自 `createForDevice` 的分配尺寸 = 后缓冲尺寸）。
+    //   像素循环的上界是**渲染目标**尺寸 ⇒ RT 比后缓冲大时 py/px 会越出深度缓冲，
+    //   越界写会踩进 SurfaceArena 的相邻表面（静默损坏）⇒ z 的读/写只在矩形内生效。
+    int depth_width = 0;
+    int depth_height = 0;
     int viewport_x = 0, viewport_y = 0, viewport_w = 0, viewport_h = 0;
     int scissor_x0 = 0, scissor_y0 = 0, scissor_x1 = 0, scissor_y1 = 0;
     // 状态快照
@@ -802,6 +880,17 @@ struct DrawContext {
     SamplerSnapshot samplers[kMaxTextureStages];
     std::uint64_t pixels_written = 0;
     int serial = 0;
+    // ---- 派生 mip 的诊断 / 记账（`REQ-01M73G2724479XAVS176WBZ65Q`）----
+    // ★ `mip_attempted[s]`：本批对第 s 级**已经尝试过**取链（内容版本未知的纹理 —— RT 降级 ——
+    //   每次取链都要全量重算，⛔ 不能每个三角形都重算一遍）。
+    // ★ `mip_bytes_built`：本批因失效而重建的链字节数（`[draw] miprb=`）。
+    bool mip_attempted[kMaxTextureStages] = {false, false, false, false, false, false, false, false};
+    bool mip_level0_fallback = false;  // 本批有"要 mip 但链不可用 ⇒ 退回 level 0"（记账一次）
+    std::uint64_t mip_bytes_built = 0;
+    std::uint32_t mip_level_min = 0xFFFFFFFFu;  // 本批采到的级号（min..max；0xFFFFFFFF = 没选过）
+    std::uint32_t mip_level_max = 0;
+    // ★ 诊断（`[draw] bbox=`）：本批真的写进屏幕的像素范围（右/下开区间；0x7FFFFFFF = 没写过）。
+    int bbox_x0 = 0x7FFFFFFF, bbox_y0 = 0x7FFFFFFF, bbox_x1 = 0, bbox_y1 = 0;
 };
 
 // 8 位通道的混合因子
@@ -851,18 +940,26 @@ unsigned clamp255(double v) {
     return static_cast<unsigned>(v + 0.5);
 }
 
-// 采样：本线只有 level 0（没有 mip/LOD/导数）⇒ MIN/MAG 合成一条决策：
-//   任一要求 LINEAR（ANISOTROPIC 也按 LINEAR 近似）⇒ 双线性；否则 POINT。
-//   ★ 这是**近似**：真机会按 LOD 在 MIN 与 MAG 之间选，本线没有足迹信息，无法区分。
-void sampleTexture(const TextureView& t, const std::uint32_t address_u, const std::uint32_t address_v,
-                   const std::uint32_t mag_filter, const std::uint32_t min_filter, double u, double v,
-                   unsigned out[4]) {
+// ★ 诊断开关（默认 = 开）：`LIFT_NO_MIP=1` 关掉 mip 选级 ⇒ 恒 level 0。
+//   唯一用途 = e2e 守卫的**对照臂**（同一份 repro、同一份二进制，只差这一步）——
+//   ⛔ 不是"画质开关"，也不改变任何其它语义（TEXF_*/寻址/混合都不动）。
+bool mipSamplingEnabled() {
+    static const bool enabled = std::getenv("LIFT_NO_MIP") == nullptr;
+    return enabled;
+}
+
+// 采样**一个 mip 级**：寻址 + 过滤的唯一实现（level 0 与派生各级都走这里，
+// 只是 `pixels/pitch/w/h` 换成该级的）。⛔ 不要再写第二份双线性。
+void sampleTextureLevel(const std::uint8_t* pixels, std::uint32_t pitch, int width, int height,
+                        const SurfaceFormat& fmt, const std::uint32_t address_u, const std::uint32_t address_v,
+                        const std::uint32_t mag_filter, const std::uint32_t min_filter, double u, double v,
+                        unsigned out[4]) {
     out[0] = 255u;
     out[1] = 255u;
     out[2] = 255u;
     out[3] = 255u;
-    if (!t.present || t.width <= 0 || t.height <= 0) return;
-    const std::uint32_t bpp = t.format.bytesPerPixel();
+    if (pixels == nullptr || width <= 0 || height <= 0) return;
+    const std::uint32_t bpp = fmt.bytesPerPixel();
     if (bpp == 0) return;
     auto applyAddress = [](std::uint32_t mode, double coord, int size) -> int {
         double c = coord;
@@ -894,20 +991,19 @@ void sampleTexture(const TextureView& t, const std::uint32_t address_u, const st
         return i;
     };
     auto load = [&](int x, int y, unsigned rgba[4]) {
-        if (x < 0 || y < 0 || x >= t.width || y >= t.height) {
+        if (x < 0 || y < 0 || x >= width || y >= height) {
             rgba[0] = rgba[1] = rgba[2] = rgba[3] = 0u;
             return;
         }
-        const std::uint8_t* p =
-            t.pixels + static_cast<std::size_t>(y) * t.pitch + static_cast<std::size_t>(x) * bpp;
-        const std::uint32_t raw = pixel_format::loadPixel(p, t.format.bpp);
-        rgba[0] = pixel_format::expandChannel(raw, t.format.rmask);
-        rgba[1] = pixel_format::expandChannel(raw, t.format.gmask);
-        rgba[2] = pixel_format::expandChannel(raw, t.format.bmask);
+        const std::uint8_t* p = pixels + static_cast<std::size_t>(y) * pitch + static_cast<std::size_t>(x) * bpp;
+        const std::uint32_t raw = pixel_format::loadPixel(p, fmt.bpp);
+        rgba[0] = pixel_format::expandChannel(raw, fmt.rmask);
+        rgba[1] = pixel_format::expandChannel(raw, fmt.gmask);
+        rgba[2] = pixel_format::expandChannel(raw, fmt.bmask);
         // ★ mask==0（无 alpha 通道）⇒ expandChannel 返回 255（= 不透明）；这份语义只在 pixel_format 里
-        rgba[3] = pixel_format::expandChannel(raw, t.format.amask);
+        rgba[3] = pixel_format::expandChannel(raw, fmt.amask);
     };
-    // ★ MIN 与 MAG 都参与（MIN 不再被忽略）；没有 mip/LOD ⇒ 这是明确记录的近似。
+    // ★ MIN 与 MAG 都参与（MIN 不再被忽略）；mip 选级在调用方（按 LOD），这里只管单级过滤。
     const bool linear = samplerUsesLinear(mag_filter, min_filter);
     if (mag_filter == kTexfNone && min_filter == kTexfNone) {
         // 不可见组合（D3D 不会这样用）：不猜像素 ⇒ 透明黑；SetSamplerState 已 recordUnsupported。
@@ -915,8 +1011,8 @@ void sampleTexture(const TextureView& t, const std::uint32_t address_u, const st
         return;
     }
     if (!linear) {
-        const int x = applyAddress(address_u, u, t.width);
-        const int y = applyAddress(address_v, v, t.height);
+        const int x = applyAddress(address_u, u, width);
+        const int y = applyAddress(address_v, v, height);
         if (x < 0 || y < 0) {
             out[0] = out[1] = out[2] = out[3] = 0u;
             return;
@@ -930,16 +1026,16 @@ void sampleTexture(const TextureView& t, const std::uint32_t address_u, const st
         return;
     }
     // LINEAR：双线性（texel 中心对齐；D3D 的 -0.5 偏移）
-    const double fx = u * static_cast<double>(t.width) - 0.5;
-    const double fy = v * static_cast<double>(t.height) - 0.5;
+    const double fx = u * static_cast<double>(width) - 0.5;
+    const double fy = v * static_cast<double>(height) - 0.5;
     const double x0f = std::floor(fx);
     const double y0f = std::floor(fy);
     const double tx = fx - x0f;
     const double ty = fy - y0f;
-    const int x0 = applyAddress(address_u, (x0f + 0.5) / static_cast<double>(t.width), t.width);
-    const int x1 = applyAddress(address_u, (x0f + 1.5) / static_cast<double>(t.width), t.width);
-    const int y0 = applyAddress(address_v, (y0f + 0.5) / static_cast<double>(t.height), t.height);
-    const int y1 = applyAddress(address_v, (y0f + 1.5) / static_cast<double>(t.height), t.height);
+    const int x0 = applyAddress(address_u, (x0f + 0.5) / static_cast<double>(width), width);
+    const int x1 = applyAddress(address_u, (x0f + 1.5) / static_cast<double>(width), width);
+    const int y0 = applyAddress(address_v, (y0f + 0.5) / static_cast<double>(height), height);
+    const int y1 = applyAddress(address_v, (y0f + 1.5) / static_cast<double>(height), height);
     unsigned c00[4], c10[4], c01[4], c11[4];
     load(x0, y0, c00);
     load(x1, y0, c10);
@@ -950,6 +1046,31 @@ void sampleTexture(const TextureView& t, const std::uint32_t address_u, const st
         const double b = static_cast<double>(c01[i]) * (1.0 - tx) + static_cast<double>(c11[i]) * tx;
         out[i] = clamp255(a * (1.0 - ty) + b * ty);
     }
+}
+
+// 按**级号**采样：`level == 0` ⇒ arena 里的 level 0；`level > 0` ⇒ 派生链里的第 level 级。
+// ★ 链不可用（没算出来 / 级号越界）⇒ **退回 level 0**（调用方必须已经记过账，⛔ 不在这里静默）。
+void sampleTexture(const TextureView& t, const std::uint32_t address_u, const std::uint32_t address_v,
+                   const std::uint32_t mag_filter, const std::uint32_t min_filter, std::uint32_t level, double u,
+                   double v, unsigned out[4]) {
+    if (!t.present || t.width <= 0 || t.height <= 0) {
+        out[0] = out[1] = out[2] = out[3] = 255u;
+        return;
+    }
+    if (level > 0 && (t.mips == nullptr || level >= t.mips->levels || t.mips->bytes.empty())) level = 0;
+    if (level == 0) {
+        sampleTextureLevel(t.pixels, t.pitch, t.width, t.height, t.format, address_u, address_v, mag_filter,
+                           min_filter, u, v, out);
+        return;
+    }
+    const std::uint32_t w0 = static_cast<std::uint32_t>(t.width);
+    const std::uint32_t h0 = static_cast<std::uint32_t>(t.height);
+    const std::uint32_t offset = mipLevelOffset(w0, h0, t.format.bpp, level);
+    const std::uint32_t pitch = mipLevelPitch(w0, t.format.bpp, level);
+    const std::uint8_t* pixels = t.mips->bytes.data() + offset;
+    sampleTextureLevel(pixels, pitch, static_cast<int>(mipLevelWidth(w0, level)),
+                       static_cast<int>(mipLevelHeight(h0, level)), t.format, address_u, address_v, mag_filter,
+                       min_filter, u, v, out);
 }
 
 struct StageColor {
@@ -1174,6 +1295,161 @@ struct AlphaAgg {
 };
 static AlphaAgg g_alpha_agg;
 
+// ---------------------------------------------------------------------------------------
+// 一个三角形的**派生 mip 级号**（每三角形常量；`REQ-01M73G2724479XAVS176WBZ65Q`）
+//   · LOD = log2(纹理足迹)，足迹 = 屏幕空间 UV 导数 × **该 stage 自己**的纹理尺寸；
+//   · UV 导数用**透视校正后的 u（U/W）** —— 与采样器同一个插值式子；
+//   · 退化三角形 / 尺寸非法 / 只有一级 ⇒ 0。
+// ★ 这一个函数同时服务三条路：CPU 选级（`rasterTriangle`）、GPU 的 MIPFILTER 分叉判据
+//   （`submitPrimitives`：`MIPFILTER=NONE` 但这一批有缩小采样 ⇒ GPU 的 sampler 表达不了
+//   "关掉 mip"，必须回退 CPU），以及"1:1 / 放大必须仍是 level 0"这条判据。
+// ---------------------------------------------------------------------------------------
+std::uint32_t triangleMipLevel(const SVertex& a, const SVertex& b, const SVertex& c, std::uint32_t coord,
+                               int tex_width, int tex_height) {
+    if (tex_width <= 0 || tex_height <= 0 || coord >= kMaxTexCoords) return 0u;
+    const std::uint32_t levels =
+        mipLevelCount(static_cast<std::uint32_t>(tex_width), static_cast<std::uint32_t>(tex_height));
+    if (levels <= 1u) return 0u;
+    const double vx[3] = {a.x, b.x, c.x};
+    const double vy[3] = {a.y, b.y, c.y};
+    const double invw[3] = {a.invw, b.invw, c.invw};
+    const double uw[3] = {a.u[coord], b.u[coord], c.u[coord]};
+    const double vw[3] = {a.v[coord], b.v[coord], c.v[coord]};
+    double dux = 0.0, dvx = 0.0, duy = 0.0, dvy = 0.0;
+    if (!screenUvDerivatives(vx, vy, invw, uw, vw, &dux, &dvx, &duy, &dvy)) return 0u;
+    const double lod = lodFromUvDerivatives(dux, dvx, duy, dvy, static_cast<double>(tex_width),
+                                            static_cast<double>(tex_height));
+    return mipLevelForLod(lod, levels);
+}
+
+// =====================================================================================
+// 像素收尾（**唯一一份**）：深度测试 → 着色 → alpha test → 混合 → 颜色写掩码 → 深度写。
+//
+// ★ 为什么抽出来（`REQ-01M7372JNFAC2RWX2FXVV6YM5C`）：点 / 线光栅必须走与三角形**同一套**
+//   深度测试 / alpha test / 混合 / 写掩码语义 —— 再抄一份公式，就会在"线的 α 怎么混"这类
+//   地方与三角形分叉。
+// ★ `shade` 在深度测试**之后**才调用：顺序照原像素循环（被深度挡住的像素既不采样、也不算
+//   纹理级 / 插值）。它返回最终像素色（0..255，已 clamp）。
+// ★ 返回 false = 这个像素没写（越界 / 深度测试 / alpha test 没过）；调用方据此跳过。
+// ★ **越界检查在这里是唯一的兜底**：三角形外面还有 bbox∩scissor，而点 / 线的像素是 floor
+//   出来的 —— 不查就会写穿 arena（静默损坏）。
+// =====================================================================================
+struct PixelRGBA {
+    unsigned r = 0, g = 0, b = 0, a = 0;
+};
+
+template <typename Shade>
+bool writeShadedPixel(DrawContext& ctx, int px, int py, double z, Shade&& shade) {
+    if (px < ctx.scissor_x0 || px >= ctx.scissor_x1 || py < ctx.scissor_y0 || py >= ctx.scissor_y1)
+        return false;
+    std::size_t depth_off = static_cast<std::size_t>(py) * ctx.depth_pitch_floats +
+                            static_cast<std::size_t>(px);
+    // ★ 深度缓冲只有**后缓冲尺寸**（`createForDevice` 分配），而像素循环的上界是**渲染目标**
+    //   尺寸（scissor 夹到 color 表面）⇒ RT > 后缓冲时 py/px 会越出深度缓冲的行/末尾，越界写
+    //   会踩进 SurfaceArena 的相邻表面（静默损坏）。⇒ z 的读/写只在深度缓冲矩形内生效
+    //   （**颜色照写**）。本线"共用一张设备深度缓冲"是明写的偏离（`setRenderTarget` 的
+    //   pNewZStencil 分支）；RT 与深度尺寸不符时真机也没有可依赖的语义。
+    const bool depth_in_range =
+        ctx.z_enable && px >= 0 && py >= 0 && px < ctx.depth_width && py < ctx.depth_height;
+    if (depth_in_range) {
+        const float old = ctx.depth_base[depth_off];
+        bool pass = false;
+        switch (ctx.z_func) {
+            case kCmpNever: pass = false; break;
+            case kCmpLess: pass = z < static_cast<double>(old); break;
+            case kCmpEqual: pass = z == static_cast<double>(old); break;
+            case kCmpLessEqual: pass = z <= static_cast<double>(old); break;
+            case kCmpGreater: pass = z > static_cast<double>(old); break;
+            case kCmpNotEqual: pass = z != static_cast<double>(old); break;
+            case kCmpGreaterEqual: pass = z >= static_cast<double>(old); break;
+            case kCmpAlways: pass = true; break;
+            default: pass = false; break;
+        }
+        if (!pass) return false;
+    }
+    const PixelRGBA c = shade();
+    // ★ 诊断聚合（`[draw] fa=`）：这一批**真正参与混合**的 α 的均值/最小/最大。
+    //   用途 = 分辨"α 是 0 / 是 TFACTOR 的 α / 是顶点 α"。只在 `LIFT_SLOW_DRAW=1` 时累积
+    //   （静态缓存 ⇒ 每像素只是一次可预测分支），⛔ 不影响像素。
+    static const bool alpha_agg_on = std::getenv("LIFT_SLOW_DRAW") != nullptr;
+    if (alpha_agg_on) {
+        ++g_alpha_agg.n;
+        g_alpha_agg.sum += c.a;
+        if (c.a < g_alpha_agg.mn) g_alpha_agg.mn = c.a;
+        if (c.a > g_alpha_agg.mx) g_alpha_agg.mx = c.a;
+    }
+    // alpha test
+    if (ctx.alpha_test) {
+        const std::uint32_t ref = ctx.alpha_ref & 0xFFu;
+        bool pass = false;
+        switch (ctx.alpha_func) {
+            case kCmpNever: pass = false; break;
+            case kCmpLess: pass = c.a < ref; break;
+            case kCmpEqual: pass = c.a == ref; break;
+            case kCmpLessEqual: pass = c.a <= ref; break;
+            case kCmpGreater: pass = c.a > ref; break;
+            case kCmpNotEqual: pass = c.a != ref; break;
+            case kCmpGreaterEqual: pass = c.a >= ref; break;
+            case kCmpAlways: pass = true; break;
+            default: pass = false; break;
+        }
+        if (!pass) return false;
+    }
+    std::uint8_t* dst = ctx.color_base + static_cast<std::size_t>(py) * ctx.color_pitch +
+                        static_cast<std::size_t>(px) * ctx.color_fmt.bytesPerPixel();
+    std::uint32_t out_r = c.r, out_g = c.g, out_b = c.b, out_a = c.a;
+    if (ctx.blend) {
+        const std::uint32_t dst_raw = pixel_format::loadPixel(dst, ctx.color_fmt.bpp);
+        const unsigned dr = pixel_format::expandChannel(dst_raw, ctx.color_fmt.rmask);
+        const unsigned dg = pixel_format::expandChannel(dst_raw, ctx.color_fmt.gmask);
+        const unsigned db = pixel_format::expandChannel(dst_raw, ctx.color_fmt.bmask);
+        const unsigned da = pixel_format::expandChannel(dst_raw, ctx.color_fmt.amask);
+        unsigned sr_f = 0, sg_f = 0, sb_f = 0, sa_f = 0;
+        blendFactors8(ctx.src_blend, c.r, c.g, c.b, c.a, dr, dg, db, da, &sr_f, &sg_f, &sb_f, &sa_f);
+        unsigned dr_f = 0, dg_f = 0, db_f = 0, da_f = 0;
+        blendFactors8(ctx.dst_blend, c.r, c.g, c.b, c.a, dr, dg, db, da, &dr_f, &dg_f, &db_f, &da_f);
+        out_r = applyBlendOp(ctx.blend_op, c.r * sr_f, dr * dr_f);
+        out_g = applyBlendOp(ctx.blend_op, c.g * sg_f, dg * dg_f);
+        out_b = applyBlendOp(ctx.blend_op, c.b * sb_f, db * db_f);
+        if (ctx.separate_alpha_blend) {
+            unsigned sa2 = 0, da2 = 0, dummy1 = 0, dummy2 = 0;
+            blendFactors8(ctx.src_blend_a, c.r, c.g, c.b, c.a, dr, dg, db, da, &sa2, &dummy1, &dummy2,
+                          &dummy1);
+            unsigned ds2 = 0;
+            blendFactors8(ctx.dst_blend_a, c.r, c.g, c.b, c.a, dr, dg, db, da, &ds2, &dummy1, &dummy2,
+                          &dummy1);
+            out_a = applyBlendOp(ctx.blend_op_a, c.a * sa2, da * ds2);
+        } else {
+            out_a = applyBlendOp(ctx.blend_op, c.a * sa_f, da * da_f);
+        }
+    }
+    const std::uint32_t mask = ctx.color_write & 0xFu;
+    if ((mask & 0x1u) == 0) out_r = pixel_format::expandChannel(pixel_format::loadPixel(dst, ctx.color_fmt.bpp), ctx.color_fmt.rmask);
+    if ((mask & 0x2u) == 0) out_g = pixel_format::expandChannel(pixel_format::loadPixel(dst, ctx.color_fmt.bpp), ctx.color_fmt.gmask);
+    if ((mask & 0x4u) == 0) out_b = pixel_format::expandChannel(pixel_format::loadPixel(dst, ctx.color_fmt.bpp), ctx.color_fmt.bmask);
+    if ((mask & 0x8u) == 0)
+        out_a = pixel_format::expandChannel(pixel_format::loadPixel(dst, ctx.color_fmt.bpp),
+                                            ctx.color_fmt.amask);
+    if (mask != 0u) {
+        pixel_format::storePixel(dst, ctx.color_fmt.bpp,
+                                 pixel_format::packColor(ctx.color_fmt, out_r, out_g, out_b, out_a));
+        // ★ 诊断（`[draw] bbox=`）：这一批**真的写进屏幕**的像素范围 —— 用来分辨
+        //   "哪笔贡献了屏幕上的哪一段"（此前 `[draw]` 没有 bbox，A5-2 指出的诊断缺口）。
+        //   只在 `LIFT_SLOW_DRAW=1` 时统计（与 `[draw] fa=` 同一个开关 ⇒ 热路径上只多一个
+        //   可预测分支），⛔ 不改变任何像素。
+        static const bool bbox_on = std::getenv("LIFT_SLOW_DRAW") != nullptr;
+        if (bbox_on) {
+            if (px < ctx.bbox_x0) ctx.bbox_x0 = px;
+            if (py < ctx.bbox_y0) ctx.bbox_y0 = py;
+            if (px + 1 > ctx.bbox_x1) ctx.bbox_x1 = px + 1;
+            if (py + 1 > ctx.bbox_y1) ctx.bbox_y1 = py + 1;
+        }
+    }
+    if (depth_in_range && ctx.z_write) ctx.depth_base[depth_off] = static_cast<float>(z);
+    ++ctx.pixels_written;
+    return true;
+}
+
 void rasterTriangle(DrawContext& ctx, const SVertex& va, const SVertex& vb, const SVertex& vc) {
     X86& cpu = *ctx.cpu;
     const double area = (vb.x - va.x) * (vc.y - va.y) - (vb.y - va.y) * (vc.x - va.x);
@@ -1227,10 +1503,56 @@ void rasterTriangle(DrawContext& ctx, const SVertex& va, const SVertex& vb, cons
     const bool tl0 = topLeft(*p0, *p1);
     const bool tl1 = topLeft(*p1, *p2);
     const bool tl2 = topLeft(*p2, *p0);
-    // 状态快照
-    const bool z_enable = ctx.z_enable;
-    const bool z_write = ctx.z_write;
-    const std::uint32_t z_func = ctx.z_func;
+    // =====================================================================================
+    // ★ 派生 mip 的级号（每三角形常量；`REQ-01M73G2724479XAVS176WBZ65Q`）
+    //   · LOD = log2(纹理足迹)，足迹 = 屏幕空间 UV 导数 × 该 **stage 自己**的纹理尺寸；
+    //   · UV 导数用**透视校正后的 u（U/W）** —— 与像素循环里的插值同一个式子；
+    //   · `MIPFILTER = NONE` ⇒ 只 level 0（D3D9 语义：mipmap 关掉）；`LIFT_NO_MIP=1` 同理（诊断对照臂）；
+    //   · 链失效 / 算不出来 ⇒ 退回 level 0 并**记账**（`ctx.mip_level0_fallback`），⛔ 不静默。
+    // =====================================================================================
+    std::uint32_t stage_level[kMaxTextureStages] = {0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u};
+    const bool mip_ok = mipSamplingEnabled();
+    for (std::uint32_t s = 0; mip_ok && s < kMaxTextureStages; ++s) {
+        const TextureStageSnapshot& ts = ctx.stages[s];
+        if (ts.color_op == kTopDisable && ts.alpha_op == kTopDisable) break;
+        TextureView& tv = ctx.textures[s];
+        if (!tv.present || tv.width <= 0 || tv.height <= 0) continue;
+        if (ctx.samplers[s].mip_filter == kTexfNone) continue;  // 关掉 mipmap ⇒ 只 level 0
+        const std::uint32_t coord = (ts.tex_coord_index & 0xFFFFu) < kMaxTexCoords ? (ts.tex_coord_index & 0xFFFFu) : 0u;
+        // ★ 级号只由"这一三角形的屏幕足迹 × 该 stage 的纹理尺寸"决定（`triangleMipLevel` 一处实现）。
+        std::uint32_t level = triangleMipLevel(*p0, *p1, *p2, coord, tv.width, tv.height);
+        if (level == 0u) continue;
+        // 需要用 mip：本批第一次（内容版本未知时每次取链都要全量重算 ⇒ 每级每批只试一次）
+        if (!ctx.mip_attempted[s]) {
+            ctx.mip_attempted[s] = true;
+            TextureInfo ti;
+            std::string mip_why;
+            if (!textureInfoOfState(cpu, tv.state, &ti, &mip_why)) {
+                pipeWarn(PipeWarnCategory::Texture, "mip",
+                         "纹理级 %u 的状态块读不出来（%s）⇒ 本批按 level 0 采样并记账", s, mip_why.c_str());
+                ctx.mip_level0_fallback = true;
+                continue;
+            }
+            bool rebuilt = false;
+            const TextureMipChain* chain = ensureTextureMipChain(cpu, ti, &rebuilt, &mip_why);
+            if (chain == nullptr) {
+                pipeWarn(PipeWarnCategory::Texture, "mip",
+                         "纹理级 %u（serial=%u，%dx%d）的派生 mip 链不可用：%s ⇒ 本批按 level 0 采样并记账", s,
+                         tv.serial, tv.width, tv.height, mip_why.c_str());
+                ctx.mip_level0_fallback = true;
+                continue;
+            }
+            tv.mips = chain;
+            if (rebuilt) ctx.mip_bytes_built += chain->bytes.size();
+        }
+        if (tv.mips == nullptr || level >= tv.mips->levels || tv.mips->bytes.empty()) {
+            ctx.mip_level0_fallback = true;
+            continue;
+        }
+        stage_level[s] = level;
+        if (level < ctx.mip_level_min) ctx.mip_level_min = level;
+        if (level > ctx.mip_level_max) ctx.mip_level_max = level;
+    }
     for (int py = y0; py < y1; ++py) {
         const double cy = static_cast<double>(py) + 0.5;
         for (int px = x0; px < x1; ++px) {
@@ -1251,156 +1573,73 @@ void rasterTriangle(DrawContext& ctx, const SVertex& va, const SVertex& vb, cons
             const double invw_sum = wsum;
             if (invw_sum == 0.0) continue;
             const double z = l0 * p0->z + l1 * p1->z + l2 * p2->z;
-            std::size_t depth_off = static_cast<std::size_t>(py) * ctx.depth_pitch_floats +
-                                    static_cast<std::size_t>(px);
-            if (z_enable) {
-                const float old = ctx.depth_base[depth_off];
-                bool pass = false;
-                switch (z_func) {
-                    case kCmpNever: pass = false; break;
-                    case kCmpLess: pass = z < static_cast<double>(old); break;
-                    case kCmpEqual: pass = z == static_cast<double>(old); break;
-                    case kCmpLessEqual: pass = z <= static_cast<double>(old); break;
-                    case kCmpGreater: pass = z > static_cast<double>(old); break;
-                    case kCmpNotEqual: pass = z != static_cast<double>(old); break;
-                    case kCmpGreaterEqual: pass = z >= static_cast<double>(old); break;
-                    case kCmpAlways: pass = true; break;
-                    default: pass = false; break;
-                }
-                if (!pass) continue;
-            }
-            // 顶点属性（透视校正）
-            double u[kMaxTexCoords];
-            double v[kMaxTexCoords];
-            for (std::uint32_t t = 0; t < kMaxTexCoords; ++t) {
-                u[t] = (l0 * p0->u[t] + l1 * p1->u[t] + l2 * p2->u[t]) / invw_sum;
-                v[t] = (l0 * p0->v[t] + l1 * p1->v[t] + l2 * p2->v[t]) / invw_sum;
-            }
-            StageColor diffuse;
-            diffuse.c[0] = (l0 * p0->r + l1 * p1->r + l2 * p2->r) / invw_sum;
-            diffuse.c[1] = (l0 * p0->g + l1 * p1->g + l2 * p2->g) / invw_sum;
-            diffuse.c[2] = (l0 * p0->b + l1 * p1->b + l2 * p2->b) / invw_sum;
-            diffuse.c[3] = (l0 * p0->a + l1 * p1->a + l2 * p2->a) / invw_sum;
-            StageColor specular;
-            specular.c[0] = (l0 * p0->sr + l1 * p1->sr + l2 * p2->sr) / invw_sum;
-            specular.c[1] = (l0 * p0->sg + l1 * p1->sg + l2 * p2->sg) / invw_sum;
-            specular.c[2] = (l0 * p0->sb + l1 * p1->sb + l2 * p2->sb) / invw_sum;
-            specular.c[3] = (l0 * p0->sa + l1 * p1->sa + l2 * p2->sa) / invw_sum;
-            if (ctx.shade == kShadeFlat) {
-                // FLAT：用 p0（D3D 的 provoking vertex 是第 0 个顶点；本线按此实现）
-                diffuse.c[0] = p0->r;
-                diffuse.c[1] = p0->g;
-                diffuse.c[2] = p0->b;
-                diffuse.c[3] = p0->a;
-                specular.c[0] = p0->sr;
-                specular.c[1] = p0->sg;
-                specular.c[2] = p0->sb;
-                specular.c[3] = p0->sa;
+            // ★ 深度测试 / alpha test / 混合 / 写掩码只在 `writeShadedPixel` 一处（点 / 线与
+            //   三角形共用）；顶点属性 + 纹理级链放在 `shade` 里 ⇒ 被深度挡住的像素不采样
+            //   （与抽取前的顺序一致：深度测试在插值 / 采样之前）。
+            writeShadedPixel(ctx, px, py, z, [&]() -> PixelRGBA {
+                // 顶点属性（透视校正）
+                double u[kMaxTexCoords];
+                double v[kMaxTexCoords];
                 for (std::uint32_t t = 0; t < kMaxTexCoords; ++t) {
-                    u[t] = p0->u[t] / (p0->invw != 0.0 ? p0->invw : 1.0);
-                    v[t] = p0->v[t] / (p0->invw != 0.0 ? p0->invw : 1.0);
+                    u[t] = (l0 * p0->u[t] + l1 * p1->u[t] + l2 * p2->u[t]) / invw_sum;
+                    v[t] = (l0 * p0->v[t] + l1 * p1->v[t] + l2 * p2->v[t]) / invw_sum;
                 }
-            }
-            // 纹理级链（★ 状态全来自 Draw 快照；⛔ 不再每像素读 guest）
-            StageColor current = diffuse;
-            for (std::uint32_t stage = 0; stage < kMaxTextureStages; ++stage) {
-                const TextureStageSnapshot& ts = ctx.stages[stage];
-                if (ts.color_op == kTopDisable && ts.alpha_op == kTopDisable) break;
-                StageColor texture;
-                texture.c[0] = texture.c[1] = texture.c[2] = texture.c[3] = 255.0;
-                std::uint32_t coord = ts.tex_coord_index & 0xFFFFu;
-                if (coord >= kMaxTexCoords) coord = 0;
-                const TextureView& tv = ctx.textures[stage];
-                if (tv.present) {
-                    const SamplerSnapshot& ss = ctx.samplers[stage];
-                    unsigned rgba[4];
-                    sampleTexture(tv, ss.address_u, ss.address_v, ss.mag_filter, ss.min_filter, u[coord], v[coord],
-                                  rgba);
-                    texture.c[0] = static_cast<double>(rgba[0]);
-                    texture.c[1] = static_cast<double>(rgba[1]);
-                    texture.c[2] = static_cast<double>(rgba[2]);
-                    texture.c[3] = static_cast<double>(rgba[3]);
+                StageColor diffuse;
+                diffuse.c[0] = (l0 * p0->r + l1 * p1->r + l2 * p2->r) / invw_sum;
+                diffuse.c[1] = (l0 * p0->g + l1 * p1->g + l2 * p2->g) / invw_sum;
+                diffuse.c[2] = (l0 * p0->b + l1 * p1->b + l2 * p2->b) / invw_sum;
+                diffuse.c[3] = (l0 * p0->a + l1 * p1->a + l2 * p2->a) / invw_sum;
+                StageColor specular;
+                specular.c[0] = (l0 * p0->sr + l1 * p1->sr + l2 * p2->sr) / invw_sum;
+                specular.c[1] = (l0 * p0->sg + l1 * p1->sg + l2 * p2->sg) / invw_sum;
+                specular.c[2] = (l0 * p0->sb + l1 * p1->sb + l2 * p2->sb) / invw_sum;
+                specular.c[3] = (l0 * p0->sa + l1 * p1->sa + l2 * p2->sa) / invw_sum;
+                if (ctx.shade == kShadeFlat) {
+                    // FLAT：用 p0（D3D 的 provoking vertex 是第 0 个顶点；本线按此实现）
+                    diffuse.c[0] = p0->r;
+                    diffuse.c[1] = p0->g;
+                    diffuse.c[2] = p0->b;
+                    diffuse.c[3] = p0->a;
+                    specular.c[0] = p0->sr;
+                    specular.c[1] = p0->sg;
+                    specular.c[2] = p0->sb;
+                    specular.c[3] = p0->sa;
+                    for (std::uint32_t t = 0; t < kMaxTexCoords; ++t) {
+                        u[t] = p0->u[t] / (p0->invw != 0.0 ? p0->invw : 1.0);
+                        v[t] = p0->v[t] / (p0->invw != 0.0 ? p0->invw : 1.0);
+                    }
                 }
-                StageColor c_out;
-                StageColor a_out;
-                applyTextureOp(cpu, ctx, stage, diffuse, specular, texture, current, &c_out, &a_out);
-                current.c[0] = c_out.c[0];
-                current.c[1] = c_out.c[1];
-                current.c[2] = c_out.c[2];
-                current.c[3] = a_out.c[3];
-            }
-            unsigned fr = clamp255(current.c[0]);
-            unsigned fg = clamp255(current.c[1]);
-            unsigned fb = clamp255(current.c[2]);
-            unsigned fa = clamp255(current.c[3]);
-            // ★ 诊断聚合（`[draw] fa=`）：这一批**真正参与混合**的 α 的均值/最小/最大。
-            //   用途 = 分辨"α 是 0 / 是 TFACTOR 的 α / 是顶点 α"。只在 `LIFT_SLOW_DRAW=1` 时累积
-            //   （静态缓存 ⇒ 每像素只是一次可预测分支），⛔ 不影响像素。
-            static const bool alpha_agg_on = std::getenv("LIFT_SLOW_DRAW") != nullptr;
-            if (alpha_agg_on) {
-                ++g_alpha_agg.n;
-                g_alpha_agg.sum += fa;
-                if (fa < g_alpha_agg.mn) g_alpha_agg.mn = fa;
-                if (fa > g_alpha_agg.mx) g_alpha_agg.mx = fa;
-            }
-            // alpha test
-            if (ctx.alpha_test) {
-                const std::uint32_t ref = ctx.alpha_ref & 0xFFu;
-                bool pass = false;
-                switch (ctx.alpha_func) {
-                    case kCmpNever: pass = false; break;
-                    case kCmpLess: pass = fa < ref; break;
-                    case kCmpEqual: pass = fa == ref; break;
-                    case kCmpLessEqual: pass = fa <= ref; break;
-                    case kCmpGreater: pass = fa > ref; break;
-                    case kCmpNotEqual: pass = fa != ref; break;
-                    case kCmpGreaterEqual: pass = fa >= ref; break;
-                    case kCmpAlways: pass = true; break;
-                    default: pass = false; break;
+                // 纹理级链（★ 状态全来自 Draw 快照；⛔ 不再每像素读 guest）
+                StageColor current = diffuse;
+                for (std::uint32_t stage = 0; stage < kMaxTextureStages; ++stage) {
+                    const TextureStageSnapshot& ts = ctx.stages[stage];
+                    if (ts.color_op == kTopDisable && ts.alpha_op == kTopDisable) break;
+                    StageColor texture;
+                    texture.c[0] = texture.c[1] = texture.c[2] = texture.c[3] = 255.0;
+                    std::uint32_t coord = ts.tex_coord_index & 0xFFFFu;
+                    if (coord >= kMaxTexCoords) coord = 0;
+                    const TextureView& tv = ctx.textures[stage];
+                    if (tv.present) {
+                        const SamplerSnapshot& ss = ctx.samplers[stage];
+                        unsigned rgba[4];
+                        sampleTexture(tv, ss.address_u, ss.address_v, ss.mag_filter, ss.min_filter,
+                                      stage_level[stage], u[coord], v[coord], rgba);
+                        texture.c[0] = static_cast<double>(rgba[0]);
+                        texture.c[1] = static_cast<double>(rgba[1]);
+                        texture.c[2] = static_cast<double>(rgba[2]);
+                        texture.c[3] = static_cast<double>(rgba[3]);
+                    }
+                    StageColor c_out;
+                    StageColor a_out;
+                    applyTextureOp(cpu, ctx, stage, diffuse, specular, texture, current, &c_out, &a_out);
+                    current.c[0] = c_out.c[0];
+                    current.c[1] = c_out.c[1];
+                    current.c[2] = c_out.c[2];
+                    current.c[3] = a_out.c[3];
                 }
-                if (!pass) continue;
-            }
-            std::uint8_t* dst = ctx.color_base + static_cast<std::size_t>(py) * ctx.color_pitch +
-                                static_cast<std::size_t>(px) * ctx.color_fmt.bytesPerPixel();
-            std::uint32_t out_r = fr, out_g = fg, out_b = fb, out_a = fa;
-            if (ctx.blend) {
-                const std::uint32_t dst_raw = pixel_format::loadPixel(dst, ctx.color_fmt.bpp);
-                const unsigned dr = pixel_format::expandChannel(dst_raw, ctx.color_fmt.rmask);
-                const unsigned dg = pixel_format::expandChannel(dst_raw, ctx.color_fmt.gmask);
-                const unsigned db = pixel_format::expandChannel(dst_raw, ctx.color_fmt.bmask);
-                const unsigned da = pixel_format::expandChannel(dst_raw, ctx.color_fmt.amask);
-                unsigned sr_f = 0, sg_f = 0, sb_f = 0, sa_f = 0;
-                blendFactors8(ctx.src_blend, fr, fg, fb, fa, dr, dg, db, da, &sr_f, &sg_f, &sb_f, &sa_f);
-                unsigned dr_f = 0, dg_f = 0, db_f = 0, da_f = 0;
-                blendFactors8(ctx.dst_blend, fr, fg, fb, fa, dr, dg, db, da, &dr_f, &dg_f, &db_f, &da_f);
-                out_r = applyBlendOp(ctx.blend_op, fr * sr_f, dr * dr_f);
-                out_g = applyBlendOp(ctx.blend_op, fg * sg_f, dg * dg_f);
-                out_b = applyBlendOp(ctx.blend_op, fb * sb_f, db * db_f);
-                if (ctx.separate_alpha_blend) {
-                    unsigned sa2 = 0, da2 = 0, dummy1 = 0, dummy2 = 0;
-                    blendFactors8(ctx.src_blend_a, fr, fg, fb, fa, dr, dg, db, da, &sa2, &dummy1, &dummy2,
-                                  &dummy1);
-                    unsigned ds2 = 0;
-                    blendFactors8(ctx.dst_blend_a, fr, fg, fb, fa, dr, dg, db, da, &ds2, &dummy1, &dummy2,
-                                  &dummy1);
-                    out_a = applyBlendOp(ctx.blend_op_a, fa * sa2, da * ds2);
-                } else {
-                    out_a = applyBlendOp(ctx.blend_op, fa * sa_f, da * da_f);
-                }
-            }
-            const std::uint32_t mask = ctx.color_write & 0xFu;
-            if ((mask & 0x1u) == 0) out_r = pixel_format::expandChannel(pixel_format::loadPixel(dst, ctx.color_fmt.bpp), ctx.color_fmt.rmask);
-            if ((mask & 0x2u) == 0) out_g = pixel_format::expandChannel(pixel_format::loadPixel(dst, ctx.color_fmt.bpp), ctx.color_fmt.gmask);
-            if ((mask & 0x4u) == 0) out_b = pixel_format::expandChannel(pixel_format::loadPixel(dst, ctx.color_fmt.bpp), ctx.color_fmt.bmask);
-            if ((mask & 0x8u) == 0)
-                out_a = pixel_format::expandChannel(pixel_format::loadPixel(dst, ctx.color_fmt.bpp),
-                                                    ctx.color_fmt.amask);
-            if (mask != 0u) {
-                pixel_format::storePixel(dst, ctx.color_fmt.bpp,
-                                  pixel_format::packColor(ctx.color_fmt, out_r, out_g, out_b, out_a));
-            }
-            if (z_enable && z_write) ctx.depth_base[depth_off] = static_cast<float>(z);
-            ++ctx.pixels_written;
+                return PixelRGBA{clamp255(current.c[0]), clamp255(current.c[1]), clamp255(current.c[2]),
+                                 clamp255(current.c[3])};
+            });
         }
     }
 }
@@ -1607,6 +1846,146 @@ bool toScreen(const CVertex& v, const DrawContext& ctx, SVertex* out) {
     out->sb = v.sb * invw;
     out->sa = v.sa * invw;
     return true;
+}
+
+// =====================================================================================
+// 点 / 线图元（`REQ-01M7372JNFAC2RWX2FXVV6YM5C`）
+//
+// ★ 线段像素规则 = **diamond-exit 的主轴步进实现**（D3D9 文档规则）：
+//   · 主轴 = |dx| >= |dy| ? x : y；主轴像素索引从 floor(起点) 到 floor(终点)**含两端**，
+//     每个主轴列落**一个**像素；步进按符号（LINELIST 的顶点顺序可能右→左 / 下→上）。
+//   · 次轴 = 该列像素中心处线段值所在的像素（`floor`，= 最近像素中心）；段参数
+//     `t = (主轴像素中心 − 主轴起点) / 主轴跨度`（clamp 到 [0,1]）。
+//   · 颜色 / z 在 t 处插值：z 用屏幕空间线性（`SVertex.z` 已是 z/w）；颜色用与三角形
+//     **同一个式子** `(Σ t·c) / (Σ t·invw)`（`SVertex` 的颜色已乘过 invw）。
+//   · 为什么选它：① 真机 D3D9 的文档规则就是 diamond-exit，|slope|≤1 时"每列取该列中心处
+//     的行"与 exit-point 记账等价；② 线宽**恒 1px**（D3D9 固定功能没有线宽 state）——
+//     "垂直距离 ≤ 0.5px"那种规则会在整数屏幕坐标处同时覆盖相邻两行（变 2px）；
+//     ③ 每段像素数 = 主轴覆盖列数 ⇒ 无缺口、可预测。残差：精确 45°/端点所属像素是实现
+//     定义（微软文档允许）；LASTPIXEL=0 仍画最后一像素（记账，见 `submitPrimitives`）。
+// ★ 裁剪：线段用参数区间（Liang-Barsky 式；`dist` 对 t 是线性的），面与 `clipHomogeneous` /
+//   `clipScreen` **同一组**（XYZ 六齐次面；XYZRHW 视口矩形 + z∈[0,1]）。⛔ 不用 `clipAgainst`：
+//   它把输入当**闭合多边形**，2 个顶点会退化成 a→b→a。
+// ★ 点也裁剪（w<0 的点不裁会被 `toScreen` 镜像到错误位置）；落 1px（`floor(x), floor(y)`）。
+// ⚠ 未做（⛔ 不静默）：线宽 / 抗锯齿线；点尺寸（POINTSIZE / POINTSCALE / POINTSPRITE /
+//   FVF PSIZE）—— 按 1px 画并在 `submitPrimitives` 里 `recordUnsupported`。
+// =====================================================================================
+bool clipSegmentEndpoints(const DrawContext& ctx, const CVertex& a, const CVertex& b, CVertex* out_a,
+                          CVertex* out_b) {
+    double t0 = 0.0;
+    double t1 = 1.0;
+    auto pass = [&](auto dist) {
+        const double da = dist(a);
+        const double db = dist(b);
+        if (da >= 0.0 && db >= 0.0) return true;
+        if (da < 0.0 && db < 0.0) return false;
+        const double t = da / (da - db);  // 穿点（与 clipHalfSpace 同一个式子）
+        if (da >= 0.0) {
+            if (t < t1) t1 = t;
+        } else if (t > t0) {
+            t0 = t;
+        }
+        return t0 <= t1;
+    };
+    bool ok = true;
+    if (a.pretransformed) {
+        if (ctx.viewport_w <= 0 || ctx.viewport_h <= 0) return false;
+        const double x0 = static_cast<double>(ctx.viewport_x);
+        const double y0 = static_cast<double>(ctx.viewport_y);
+        const double x1 = x0 + static_cast<double>(ctx.viewport_w);
+        const double y1 = y0 + static_cast<double>(ctx.viewport_h);
+        ok = pass([x0](const CVertex& v) { return v.x - x0; }) &&
+             pass([x1](const CVertex& v) { return x1 - v.x; }) &&
+             pass([y0](const CVertex& v) { return v.y - y0; }) &&
+             pass([y1](const CVertex& v) { return y1 - v.y; }) &&
+             pass([](const CVertex& v) { return v.z; }) &&
+             pass([](const CVertex& v) { return 1.0 - v.z; });
+    } else {
+        ok = pass([](const CVertex& v) { return v.z; }) &&
+             pass([](const CVertex& v) { return v.w - v.z; }) &&
+             pass([](const CVertex& v) { return v.x + v.w; }) &&
+             pass([](const CVertex& v) { return v.w - v.x; }) &&
+             pass([](const CVertex& v) { return v.y + v.w; }) &&
+             pass([](const CVertex& v) { return v.w - v.y; });
+    }
+    if (!ok || t0 > t1) return false;
+    *out_a = lerpVertex(a, b, t0);
+    *out_b = lerpVertex(a, b, t1);
+    return true;
+}
+
+bool clipPointVertex(const DrawContext& ctx, const CVertex& v) {
+    if (v.pretransformed) {
+        if (ctx.viewport_w <= 0 || ctx.viewport_h <= 0) return false;
+        const double x0 = static_cast<double>(ctx.viewport_x);
+        const double y0 = static_cast<double>(ctx.viewport_y);
+        const double x1 = x0 + static_cast<double>(ctx.viewport_w);
+        const double y1 = y0 + static_cast<double>(ctx.viewport_h);
+        return v.x >= x0 && v.x <= x1 && v.y >= y0 && v.y <= y1 && v.z >= 0.0 && v.z <= 1.0;
+    }
+    return v.z >= 0.0 && v.w - v.z >= 0.0 && v.x + v.w >= 0.0 && v.w - v.x >= 0.0 &&
+           v.y + v.w >= 0.0 && v.w - v.y >= 0.0;
+}
+
+// 点：1px（顶点色 + 屏幕 z），像素收尾走与三角形同一份助手。
+void rasterizePoint(DrawContext& ctx, const CVertex& v) {
+    if (!clipPointVertex(ctx, v)) return;
+    SVertex sv;
+    if (!toScreen(v, ctx, &sv)) return;
+    const PixelRGBA c{clamp255(v.r), clamp255(v.g), clamp255(v.b), clamp255(v.a)};
+    const int px = static_cast<int>(std::floor(sv.x));
+    const int py = static_cast<int>(std::floor(sv.y));
+    writeShadedPixel(ctx, px, py, sv.z, [c]() { return c; });
+}
+
+void rasterizeLineSegment(DrawContext& ctx, const CVertex& ca, const CVertex& cb) {
+    CVertex a;
+    CVertex b;
+    if (!clipSegmentEndpoints(ctx, ca, cb, &a, &b)) return;
+    SVertex sa;
+    SVertex sb;
+    // w≈0 与三角形同口径：整段丢（⛔ 不拿坏坐标继续）
+    if (!toScreen(a, ctx, &sa) || !toScreen(b, ctx, &sb)) return;
+    const double dx = sb.x - sa.x;
+    const double dy = sb.y - sa.y;
+    if (std::fabs(dx) < 1e-12 && std::fabs(dy) < 1e-12) {
+        // 退化线段 ⇒ 单像素（与点同口径：取裁剪后起点的顶点色）
+        const PixelRGBA c{clamp255(a.r), clamp255(a.g), clamp255(a.b), clamp255(a.a)};
+        writeShadedPixel(ctx, static_cast<int>(std::floor(sa.x)), static_cast<int>(std::floor(sa.y)), sa.z,
+                         [c]() { return c; });
+        return;
+    }
+    const bool major_x = std::fabs(dx) >= std::fabs(dy);
+    const double m0 = major_x ? sa.x : sa.y;
+    const double m1 = major_x ? sb.x : sb.y;
+    const int first = static_cast<int>(std::floor(m0));
+    const int last = static_cast<int>(std::floor(m1));
+    // ★ 方向：顶点顺序可能右→左 / 下→上 ⇒ 步进按符号；否则 `p <= last` 一个像素都不画。
+    const int dir = (last >= first) ? 1 : -1;
+    for (int p = first;; p += dir) {
+        const double major_center = static_cast<double>(p) + 0.5;
+        double t = (m1 != m0) ? (major_center - m0) / (m1 - m0) : 0.0;
+        if (t < 0.0) t = 0.0;
+        if (t > 1.0) t = 1.0;
+        const double minor_center =
+            (major_x ? sa.y : sa.x) + t * (major_x ? (sb.y - sa.y) : (sb.x - sa.x));
+        const int q = static_cast<int>(std::floor(minor_center));  // 最近像素中心
+        const int px = major_x ? p : q;
+        const int py = major_x ? q : p;
+        const double wsum = (1.0 - t) * sa.invw + t * sb.invw;
+        if (finite(wsum) && wsum != 0.0) {
+            // z：屏幕空间线性（真机对线段的深度就是屏幕线性）；颜色：与三角形同一个透视校正式。
+            const double z = (1.0 - t) * sa.z + t * sb.z;
+            const PixelRGBA c{
+                clamp255(((1.0 - t) * sa.r + t * sb.r) / wsum),
+                clamp255(((1.0 - t) * sa.g + t * sb.g) / wsum),
+                clamp255(((1.0 - t) * sa.b + t * sb.b) / wsum),
+                clamp255(((1.0 - t) * sa.a + t * sb.a) / wsum),
+            };
+            writeShadedPixel(ctx, px, py, z, [c]() { return c; });
+        }
+        if (p == last) break;
+    }
 }
 
 }  // namespace
@@ -1818,6 +2197,25 @@ std::uint32_t renderTargetArena(X86& cpu, std::uint32_t pipeline_state) {
     return plGet(cpu, pipeline_state, kPlColorArena);
 }
 
+namespace {
+// D3D9：**绑定新 render target 会把 viewport 设成新目标的全幅**
+// （IDirect3DDevice9::SetRenderTarget 的 Remarks）。本引擎只在 Reset 之后设一次全屏 viewport
+// （`0x4988D1-0x498910`），之后每次渲染到纹理（`0x4A778B` / `0x4A515E` / `0x4A521B`）都靠这条
+// ⇒ 不回写就按**旧**视口做 NDC→屏幕映射（`toScreen`）与 XYZRHW 的视口裁剪，渲染到纹理的那一段
+// 整块错位/被裁（REQ-01M7372FBT0WBXAS2Z1NESBRFG）。
+// ★ 只写 X/Y/W/H；`MinZ/MaxZ`（+16/+20）**不动**（本线只把它们原样存取，从不消费）。
+// ★ w/h == 0 不写：`SetViewport` 把 0 拒成 D3DERR_INVALIDCALL（见该函数），写出 guest 造不出来的
+//   状态会让视口裁剪把一切都裁掉。尺寸的来源与调用点同源（纹理表面 = `TextureInfo`，
+//   后缓冲 = `DeviceInfo`），⛔ 不在这里另读一份表面状态块。
+void writeViewportFullTarget(X86& cpu, std::uint32_t pe, std::uint32_t w, std::uint32_t h) {
+    if (w == 0 || h == 0) return;
+    plSet(cpu, pe, kPlViewport + 0u, 0u);
+    plSet(cpu, pe, kPlViewport + 4u, 0u);
+    plSet(cpu, pe, kPlViewport + 8u, w);
+    plSet(cpu, pe, kPlViewport + 12u, h);
+}
+}  // namespace
+
 std::uint32_t setRenderTarget(X86& cpu, std::uint32_t dev, std::uint32_t target, std::uint32_t zstencil,
                               std::string* why) {
     std::uint32_t pe = 0;
@@ -1860,6 +2258,15 @@ std::uint32_t setRenderTarget(X86& cpu, std::uint32_t dev, std::uint32_t target,
     }
     if (target == 0) {
         if (cpu.com) releaseRenderTarget(cpu, pe);
+        // ★ viewport 回写成**新目标的全幅**（D3D9 语义）：`target == 0` 在本线代表后缓冲
+        //   ⇒ 后缓冲尺寸。尺寸与 `surfaceInfoOfState` 的后缓冲分支同源（`DeviceInfo`）。
+        DeviceInfo di;
+        if (deviceInfoOfState(cpu, dev, &di, nullptr)) {
+            writeViewportFullTarget(cpu, pe, static_cast<std::uint32_t>(di.width),
+                                    static_cast<std::uint32_t>(di.height));
+        } else {
+            pipeLog("SetRenderTarget", "⛔ 取不到后缓冲尺寸 ⇒ viewport 未回写（保留旧视口）");
+        }
         pipeLog("SetRenderTarget", "目标 = 后缓冲（0）");
         return kOk;
     }
@@ -1933,6 +2340,13 @@ std::uint32_t setRenderTarget(X86& cpu, std::uint32_t dev, std::uint32_t target,
         plSet(cpu, pe, kPlColorSurface, target);
         plSet(cpu, pe, kPlColorArena, ti.arena);
     }
+    // ★ viewport = **新目标的全幅**（D3D9 SetRenderTarget 的 Remarks）。放在所有校验/引用记账
+    //   **之后** ⇒ 失败返回不留半个状态；重复设同一 target（`old_surface == target`，不走上面那块）
+    //   也写 —— 这条副作用不依赖"目标换没换"。
+    //   ★ 尺寸取 `ti`（`surfaceInfoOfState`：纹理表面读 `'TEX1'`，后缓冲表面读 `DeviceInfo`）
+    //     ⇒ 引擎"切回后缓冲"传的是 `GetBackBuffer` 的 surface 对象（`0x4A521B`），不是 NULL，
+    //     这里同样得到后缓冲尺寸；⛔ 不另写一份"从表面状态块读宽高"的旁路。
+    writeViewportFullTarget(cpu, pe, ti.width, ti.height);
     pipeLog("SetRenderTarget", "目标 = 纹理表面 0x%08X（%ux%u，像素块 0x%08X）", target, ti.width,
             ti.height, ti.arena);
     // ★ 纹理当 render target ⇒ 内容版本降级为"未知"（0）：之后 Clear(TARGET) / CPU 光栅回退 /
@@ -2027,6 +2441,14 @@ std::uint32_t setRenderState(X86& cpu, std::uint32_t dev, std::uint32_t state, s
                              std::string* why) {
     std::uint32_t pe = 0;
     if (!pipelineOf(cpu, dev, &pe, why)) return kInvalidCall;
+    // ★ 上界必须在**任何写**之前（`REQ-01M7372P560TMY51NJ3ARG4ENG`）：`setRs` 直接把 state 当索引算
+    //   `kPlRenderStates + state*4`，越界的 state 会写穿状态块（state=0xFFFF ⇒ 写出 ≈256 KB）踩到
+    //   相邻 guest 堆。`GetRenderState` 早就对 256+ 返回 `D3DERR_INVALIDCALL` ⇒ Set/Get 必须对称。
+    if (state >= kPlRenderStateCount) {
+        if (why) *why = "D3D9 流水线：SetRenderState 的 State 越界（" + std::to_string(state) + " ≥ " +
+                        std::to_string(kPlRenderStateCount) + "）⇒ D3DERR_INVALIDCALL（⛔ 不写状态块）";
+        return kInvalidCall;
+    }
     switch (state) {
         case kRsZEnable:
             if (value > 2u) {
@@ -2165,7 +2587,14 @@ std::uint32_t setSamplerState(X86& cpu, std::uint32_t dev, std::uint32_t stage, 
                 recordUnsupported(cpu, pe, 17u, "D3DTEXF_NONE（MIN/MAG 无过滤；两侧都 NONE 时按透明黑）", value);
             break;
         case kSampMipFilter:
-            if (value != 0u) recordUnsupported(cpu, pe, 11u, "MIPFILTER（本线没有 mip 链）", value);
+            // ★ 语义（`REQ-01M73G2724479XAVS176WBZ65Q`）：NONE(0) = 关掉 mipmap ⇒ 只采 level 0；
+            //   POINT(1) / LINEAR(2) 都允许按 LOD 选级。本线取**最近级** ⇒ LINEAR（三线性）按最近级近似，
+            //   这一条要记账（⛔ 不要再说"本线没有 mip 链" —— 那是修前的状态）。
+            if (value == kTexfLinear) {
+                recordUnsupported(cpu, pe, 11u, "MIPFILTER=LINEAR（三线性）按最近级近似", value);
+            } else if (value > kTexfLinear) {
+                recordUnsupported(cpu, pe, 11u, "MIPFILTER（不认识的值）", value);
+            }
             break;
         case kSampMaxMipLevel:
         case kSampMaxAnisotropy:
@@ -2621,18 +3050,28 @@ std::uint32_t vertexBufferLock(X86& cpu, std::uint32_t state, std::uint32_t offs
     }
     if (!committed(cpu, out_ea, 4u, "顶点缓冲 Lock 的 ppbData", why)) return kInvalidCall;
     if (offset > length) {
-        if (why) *why = "D3D9 流水线：Lock 的 OffsetToLock 越界";
+        if (why) *why = "D3D9 流水线：顶点缓冲 Lock 的 OffsetToLock 越界（" + std::to_string(offset) + " > " +
+                        std::to_string(length) + "）";
         return kInvalidCall;
     }
+    // ★ `offset + size > length` ⇒ `D3DERR_INVALIDCALL`（`REQ-01M7372P560TMY51NJ3ARG4ENG`）：
+    //   旧口径只是把 size 夹到剩余长度、照样返回 `kOk` ⇒ guest 以为"锁了 16 字节"，实际只锁到尾部，
+    //   之后的写入跨过缓冲末尾、踩到相邻 guest 堆，而返回值装作成功。
+    //   ★ `size == 0` 仍然合法 = "锁到尾部"（D3D9 文档口径），不是越界。
+    //   ★ 用 `length - offset` 判（⛔ 不用 `offset + size`：那是 uint32 溢出面，size=0xFFFFFFFF 会绕过）。
     const std::uint32_t avail = length - offset;
-    const std::uint32_t n = (size == 0u || size > avail) ? avail : size;
+    if (size > avail) {
+        if (why) *why = "D3D9 流水线：顶点缓冲 Lock 的 OffsetToLock + SizeToLock 越界（" + std::to_string(offset) +
+                        " + " + std::to_string(size) + " > " + std::to_string(length) +
+                        "）⇒ D3DERR_INVALIDCALL（⛔ 不夹到尾部、⛔ 不置锁）";
+        return kInvalidCall;
+    }
     wrU32(cpu, out_ea, data + offset);
     wrU32(cpu, state + kVbLocked, 1u);
     if (flags != 0u) {
         // DISCARD/NOOVERWRITE 对 guest 内存里的顶点缓冲没有可观察差异 ⇒ 只记录（不静默）
         pipeLog("VertexBuffer::Lock", "Flags=0x%X 被记录（guest 内存没有 DISCARD/NOOVERWRITE 语义）", flags);
     }
-    (void)n;
     return kOk;
 }
 
@@ -2719,12 +3158,21 @@ std::uint32_t indexBufferLock(X86& cpu, std::uint32_t state, std::uint32_t offse
     }
     if (!committed(cpu, out_ea, 4u, "索引缓冲 Lock 的 ppbData", why)) return kInvalidCall;
     if (offset > length) {
-        if (why) *why = "D3D9 流水线：索引缓冲 Lock 的 OffsetToLock 越界";
+        if (why) *why = "D3D9 流水线：索引缓冲 Lock 的 OffsetToLock 越界（" + std::to_string(offset) + " > " +
+                        std::to_string(length) + "）";
+        return kInvalidCall;
+    }
+    // ★ 与顶点缓冲同口径（`REQ-01M7372P560TMY51NJ3ARG4ENG` 的第 3 处）：`offset + size > length`
+    //   ⇒ `D3DERR_INVALIDCALL`；旧口径**完全不看 size**，越界照样 `kOk`。`size == 0` = 锁到尾部。
+    const std::uint32_t avail = length - offset;
+    if (size > avail) {
+        if (why) *why = "D3D9 流水线：索引缓冲 Lock 的 OffsetToLock + SizeToLock 越界（" + std::to_string(offset) +
+                        " + " + std::to_string(size) + " > " + std::to_string(length) +
+                        "）⇒ D3DERR_INVALIDCALL（⛔ 不置锁）";
         return kInvalidCall;
     }
     wrU32(cpu, out_ea, data + offset);
     wrU32(cpu, state + kIbLocked, 1u);
-    (void)size;
     (void)flags;
     return kOk;
 }
@@ -2940,6 +3388,454 @@ std::uint32_t setIndices(X86& cpu, std::uint32_t dev, std::uint32_t ib, std::str
 }
 
 // =====================================================================================
+// IDirect3DStateBlock9：宿主私有状态快照（`REQ-01M7372BPVGBD247KAGHB53YK7`）
+//
+// ★ 为什么要有它：引擎每帧 Live2D 都走 `CreateStateBlock(D3DSBT_ALL=1) → draw → Apply → Release`
+//   （`.lst` 0x47843A–0x47847B）。修前 Capture / Apply 直接 S_OK ⇒ draw 里改的 FVF / 纹理绑定 /
+//   渲染状态 / 变换**不还原**，泄漏到后续 2D 绘制。
+// ★ 快照收什么：**本线 `kPl*` 区里真的有的字段**（⛔ 不按 SDK 全字段猜），按 D3DSBT 掩码选：
+//   · ALL(1)    = 全部。渲染状态取**整块 256 项** —— 本线没有它们的"像素 / 顶点"归类证据，
+//                 所以 ALL 不挑（也让 `GetRenderState` 的任意一项都能回滚）；
+//   · PIXEL(2)  = 采样器 + 纹理级 + 纹理绑定 + **光栅阶段真的读**的渲染状态
+//                 （`kSbPixelRenderStates`，读点全在 `prepareContext` 的一次性快照里）；
+//   · VERTEX(3) = 变换 + FVF / 顶点声明 + 流 + 索引 + 视口 / 裁剪矩形 + 材质 / 灯
+//                 + **顶点 / 光照阶段真的读**的渲染状态（`kSbVertexRenderStates`，读点在
+//                 `applyLighting` / `transformVertex`）。
+//   ⇒ ALL ⊇ PIXEL ∪ VERTEX；两个半块各有对方没有的字段 ⇒ 掩码**有意义**（不是三档同一个东西）。
+//   ★ 如实登记的缺项（⛔ 不按记忆补）：
+//     ① 渲染目标（`kPlColorArena` / `kPlColorSurface`）不在任何掩码里 —— D3D9 的状态块也不恢复 RT；
+//     ② `kPlUnsupported` / `kPlStageSnapshots` / Draw 计数器是**诊断**，不是设备状态；
+//     ③ 渲染状态的"像素 / 顶点"归类**只按本线的读点**给出，⛔ 不声称与 SDK 的 D3DSBT 分类一致
+//        （那需要一份能再校验的分类表，本单没有）。
+// ★ 引用：快照**替 guest 持一份**四类绑定（纹理 / 流 / 索引 / 顶点声明）的引用 —— 与 `SetTexture`
+//   等既有口径同形（`addRef` + 带代际的 `releaseIf`）。于是"建块之后 guest 放掉自己那份"这条
+//   合法的 D3D9 时序里对象死不了，Apply 还能把它写回；块销毁时成对还回去。
+// =====================================================================================
+namespace {
+
+// ---- 渲染状态的掩码表（⛔ 不是 SDK 分类表：每一条都能在本文件找到读点）----
+// 光栅（像素）阶段：`prepareContext` 的一次性状态快照（`rsOf(cpu, pe, …)` 的批量段）。
+const std::uint32_t kSbPixelRenderStates[] = {
+    kRsScissorTestEnable,     kRsZEnable,       kRsZWriteEnable,        kRsZFunc,
+    kRsCullMode,              kRsShadeMode,     kRsAlphaTestEnable,     kRsAlphaFunc,
+    kRsAlphaRef,              kRsAlphaBlendEnable, kRsSrcBlend,        kRsDestBlend,
+    kRsBlendOp,               kRsSeparateAlphaBlendEnable, kRsSrcBlendAlpha,
+    kRsDestBlendAlpha,        kRsBlendOpAlpha,  kRsColorWriteEnable,    kRsTextureFactor,
+};
+// 顶点 / 光照阶段：`applyLighting`（环境光 / 镜面开关）与 `transformVertex`（光照开关 / 材质来源）。
+const std::uint32_t kSbVertexRenderStates[] = {
+    kRsLighting,
+    kRsAmbient,
+    kRsSpecularEnable,
+    kRsDiffuseMaterialSource,
+};
+constexpr std::uint32_t kSbPixelRenderStateCount =
+    static_cast<std::uint32_t>(sizeof(kSbPixelRenderStates) / sizeof(kSbPixelRenderStates[0]));
+constexpr std::uint32_t kSbVertexRenderStateCount =
+    static_cast<std::uint32_t>(sizeof(kSbVertexRenderStates) / sizeof(kSbVertexRenderStates[0]));
+
+struct SbMask {
+    bool render_all = false;     // 渲染状态整块（只有 ALL 走这一档）
+    bool render_pixel = false;   // 只取 `kSbPixelRenderStates`
+    bool render_vertex = false;  // 只取 `kSbVertexRenderStates`
+    bool transforms = false;     // `kPlTransforms`（260 个 D3DMATRIX）
+    bool sampler_stages = false;  // `kPlSamplers` + `kPlTexStages`
+    bool textures = false;       // `kPlTextures` + `kPlTextureGens`
+    bool vertex_format = false;  // `kPlFvf` + `kPlVertexDecl`(+gen)
+    bool streams = false;        // `kPlStreams`
+    bool indices = false;        // `kPlIndices`(+gen)
+    bool vertex_geometry = false;  // `kPlViewport` + `kPlScissor`
+    bool material_lights = false;  // `kPlMaterial` + 8 个灯 + `kPlLightEnabled`
+    bool any() const {
+        return render_all || render_pixel || render_vertex || transforms || sampler_stages ||
+               textures || vertex_format || streams || indices || vertex_geometry ||
+               material_lights;
+    }
+};
+
+SbMask sbMaskOf(std::uint32_t type) {
+    SbMask m;
+    switch (type) {
+        case 1u:  // D3DSBT_ALL
+            m.render_all = true;
+            m.transforms = m.sampler_stages = m.textures = m.vertex_format = true;
+            m.streams = m.indices = m.vertex_geometry = m.material_lights = true;
+            break;
+        case 2u:  // D3DSBT_PIXELSTATE
+            m.render_pixel = m.sampler_stages = m.textures = true;
+            break;
+        case 3u:  // D3DSBT_VERTEXSTATE
+            m.render_vertex = m.transforms = m.vertex_format = true;
+            m.streams = m.indices = m.vertex_geometry = m.material_lights = true;
+            break;
+        default:
+            break;
+    }
+    return m;
+}
+
+// 一条绑定：**(对象 EA, 捕获时代际)** —— 与 `kPl*Gens` 的既有约定同一口径。
+struct SbBinding {
+    std::uint32_t obj = 0;
+    std::uint32_t gen = 0;
+    // ★ 捕获时身份就不符 ⇒ `usable = false`：Apply **跳过**这一槽。⛔ 不把它记成 0 ——
+    //   记 0 会让 Apply 主动**解绑**，把"我们认不出这个 EA 是谁"变成"设备状态被改了"。
+    bool usable = true;
+    bool held = false;  // 本快照替 guest 持了这份引用（AddRef 成功）
+};
+
+struct SbStreamState {
+    std::uint32_t offset = 0;
+    std::uint32_t stride = 0;
+    SbBinding binding;
+};
+
+struct StateBlockSnapshot {
+    std::uint32_t type = 0;
+    std::uint32_t dev_object = 0;
+    std::uint32_t dev_state = 0;
+    std::vector<std::uint32_t> render_states;   // 256 项（按掩码填；未选中的保持 0 且不写回）
+    std::vector<std::uint8_t> transforms;       // [kPlTransforms, kPlRenderStates)
+    std::vector<std::uint8_t> samplers;         // [kPlSamplers, kPlTexStages)
+    std::vector<std::uint8_t> tex_stages;       // [kPlTexStages, kPlTextures)
+    std::vector<std::uint8_t> vertex_geometry;  // [kPlViewport, kPlTransforms)（视口 + 裁剪矩形）
+    std::vector<std::uint8_t> material_lights;  // [kPlMaterial, kPlDraws)（材质 + 灯 + 开关）
+    std::uint32_t fvf = 0;
+    SbBinding vertex_decl;
+    SbBinding textures[kMaxSamplers];
+    SbStreamState streams[kMaxStreams];
+    SbBinding indices;
+};
+
+// 宿主表：serial → 快照。
+// ★ 键是**进程内只增不复用**的 serial（`kSbSerial`，由 `shims/d3d9.cpp` 发），⛔ 不是
+//   `(ComRegistry*, 代际)` —— 后者会跨 Machine 串台（见本文件头第 22 行的禁令：`ComRegistry` 的
+//   代际每个 registry 各自从 1 起，而夹具的 Machine 反复建在同一栈地址）。
+// ★ 故意 `new` 出来不释放（与 `pipeWarn` 的计数表同形：进程退出时跑静态析构没有意义）；
+//   表项由 `on_zero` 的 `destroyStateBlockSnapshot` 摘除。
+std::map<std::uint32_t, StateBlockSnapshot>& sbSnapshots() {
+    static std::map<std::uint32_t, StateBlockSnapshot>* table =
+        new std::map<std::uint32_t, StateBlockSnapshot>();
+    return *table;
+}
+
+void sbCaptureRange(X86& cpu, std::uint32_t pe, std::uint32_t off, std::uint32_t bytes,
+                    std::vector<std::uint8_t>* out) {
+    out->resize(bytes);
+    cpu.mem->readBytes(pe + off, out->data(), bytes);
+}
+
+// ★ 只用于**纯标量**区段：⛔ 绝不给绑定槽用（绑定槽必须走 setter，见 `applyStateBlock`）。
+void sbApplyRange(X86& cpu, std::uint32_t pe, std::uint32_t off, const std::vector<std::uint8_t>& bytes) {
+    if (bytes.empty()) return;
+    cpu.mem->writeBytes(pe + off, bytes.data(), bytes.size());
+}
+
+SbBinding sbMakeBinding(X86& cpu, std::uint32_t obj, std::uint32_t gen, const char* iface,
+                        const char* what) {
+    SbBinding b;
+    if (obj == 0) return b;  // 捕获那一刻就是空槽 ⇒ Apply 写回 0（解绑），这是正确语义
+    b.obj = obj;
+    b.gen = gen;
+    const char* got = cpu.com ? cpu.com->ifaceOf(obj) : nullptr;
+    const bool same = cpu.com != nullptr && got != nullptr && std::strcmp(got, iface) == 0 &&
+                      gen != 0 && cpu.com->generationOf(obj) == gen;
+    if (!same) {
+        b.usable = false;
+        pipeWarn(PipeWarnCategory::Other, "状态块快照",
+                 "%s：槽里的 0x%08X 已不是捕获那一刻的对象（%s；捕获时代际 %u，当前 %u）"
+                 "⇒ 这一槽不进快照（⛔ 不按 EA 抓别人的对象）",
+                 what, obj, got ? got : "不在对象表里", gen,
+                 cpu.com ? cpu.com->generationOf(obj) : 0u);
+    }
+    return b;
+}
+
+// 把快照持有的引用**成对还回去**（带代际 ⇒ EA 已被复用就只出声、⛔ 不减到新占有者身上）。
+void sbReleaseRefs(X86& cpu, StateBlockSnapshot& snap) {
+    auto drop = [&cpu](SbBinding& b, const char* what) {
+        if (!b.held) {
+            b.obj = 0;
+            b.gen = 0;
+            b.usable = true;
+            return;
+        }
+        b.held = false;
+        const std::uint32_t obj = b.obj;
+        const std::uint32_t gen = b.gen;
+        b.obj = 0;
+        b.gen = 0;
+        b.usable = true;
+        if (obj != 0) releaseBound(cpu, obj, gen, what, PipeWarnCategory::Other);
+    };
+    for (std::uint32_t s = 0; s < kMaxSamplers; ++s) drop(snap.textures[s], "状态块快照/纹理");
+    drop(snap.vertex_decl, "状态块快照/顶点声明");
+    drop(snap.indices, "状态块快照/索引");
+    for (std::uint32_t s = 0; s < kMaxStreams; ++s) drop(snap.streams[s].binding, "状态块快照/流");
+    snap.render_states.clear();
+    snap.transforms.clear();
+    snap.samplers.clear();
+    snap.tex_stages.clear();
+    snap.vertex_geometry.clear();
+    snap.material_lights.clear();
+    snap.fvf = 0;
+}
+
+// 替 guest 持引用（`addRef`）。失败 ⇒ 一条 warn + 该槽标成不可用（返回值 = 有没有失败）。
+bool sbHoldRefs(X86& cpu, StateBlockSnapshot* snap) {
+    bool ok = true;
+    auto hold = [&](SbBinding& b, const char* what) {
+        if (!b.usable || b.obj == 0 || b.held) return;
+        if (!cpu.com || !cpu.com->addRef(cpu, b.obj)) {
+            pipeWarn(PipeWarnCategory::Other, "状态块快照",
+                     "%s 0x%08X 的 AddRef 失败（COM 状态坏了）⇒ 快照不持有它", what, b.obj);
+            b.usable = false;
+            ok = false;
+            return;
+        }
+        b.held = true;
+    };
+    for (std::uint32_t s = 0; s < kMaxSamplers; ++s) hold(snap->textures[s], "纹理");
+    hold(snap->vertex_decl, "顶点声明");
+    hold(snap->indices, "索引缓冲");
+    for (std::uint32_t s = 0; s < kMaxStreams; ++s) hold(snap->streams[s].binding, "顶点缓冲");
+    return ok;
+}
+
+// 采集：**只填纯数据**（不 addRef ⇒ 分配失败时没有任何引用要回滚；引用由 `sbHoldRefs` 统一加）。
+void sbCapture(X86& cpu, std::uint32_t pe, const SbMask& mask, std::uint32_t type,
+               const DeviceInfo& dev, StateBlockSnapshot* out) {
+    out->type = type;
+    out->dev_object = dev.object;
+    out->dev_state = dev.state;
+    if (mask.render_all || mask.render_pixel || mask.render_vertex) {
+        out->render_states.assign(kPlRenderStateCount, 0u);
+        if (mask.render_all) {
+            for (std::uint32_t id = 0; id < kPlRenderStateCount; ++id)
+                out->render_states[id] = rsOf(cpu, pe, id);
+        } else if (mask.render_pixel) {
+            for (std::uint32_t i = 0; i < kSbPixelRenderStateCount; ++i) {
+                const std::uint32_t id = kSbPixelRenderStates[i];
+                if (id < kPlRenderStateCount) out->render_states[id] = rsOf(cpu, pe, id);
+            }
+        } else {
+            for (std::uint32_t i = 0; i < kSbVertexRenderStateCount; ++i) {
+                const std::uint32_t id = kSbVertexRenderStates[i];
+                if (id < kPlRenderStateCount) out->render_states[id] = rsOf(cpu, pe, id);
+            }
+        }
+    }
+    if (mask.transforms)
+        sbCaptureRange(cpu, pe, kPlTransforms, kPlRenderStates - kPlTransforms, &out->transforms);
+    if (mask.sampler_stages) {
+        sbCaptureRange(cpu, pe, kPlSamplers, kPlTexStages - kPlSamplers, &out->samplers);
+        sbCaptureRange(cpu, pe, kPlTexStages, kPlTextures - kPlTexStages, &out->tex_stages);
+    }
+    if (mask.vertex_geometry)
+        sbCaptureRange(cpu, pe, kPlViewport, kPlTransforms - kPlViewport, &out->vertex_geometry);
+    if (mask.material_lights)
+        sbCaptureRange(cpu, pe, kPlMaterial, kPlDraws - kPlMaterial, &out->material_lights);
+    if (mask.vertex_format) {
+        out->fvf = plGet(cpu, pe, kPlFvf);
+        out->vertex_decl = sbMakeBinding(cpu, plGet(cpu, pe, kPlVertexDecl),
+                                         plGet(cpu, pe, kPlVertexDeclGen), "IDirect3DVertexDeclaration9",
+                                         "捕获/顶点声明");
+    }
+    if (mask.textures) {
+        for (std::uint32_t s = 0; s < kMaxSamplers; ++s) {
+            out->textures[s] = sbMakeBinding(cpu, plGet(cpu, pe, kPlTextures + s * 4u),
+                                             plGet(cpu, pe, kPlTextureGens + s * 4u),
+                                             "IDirect3DTexture9", "捕获/纹理绑定");
+        }
+    }
+    if (mask.streams) {
+        for (std::uint32_t s = 0; s < kMaxStreams; ++s) {
+            const std::uint32_t slot = kPlStreams + s * 16u;
+            out->streams[s].offset = plGet(cpu, pe, slot + 4u);
+            out->streams[s].stride = plGet(cpu, pe, slot + 8u);
+            out->streams[s].binding =
+                sbMakeBinding(cpu, plGet(cpu, pe, slot + 0u), plGet(cpu, pe, slot + 12u),
+                              "IDirect3DVertexBuffer9", "捕获/流绑定");
+        }
+    }
+    if (mask.indices) {
+        out->indices = sbMakeBinding(cpu, plGet(cpu, pe, kPlIndices), plGet(cpu, pe, kPlIndicesGen),
+                                     "IDirect3DIndexBuffer9", "捕获/索引绑定");
+    }
+}
+
+}  // namespace
+
+std::uint32_t captureStateBlock(X86& cpu, std::uint32_t handle, std::string* why,
+                                bool* out_of_memory) {
+    if (out_of_memory) *out_of_memory = false;
+    if (handle == 0 || !cpu.mem || !cpu.mem->committed(handle, kSbBytes) ||
+        cpu.mem->rd32(handle + kSbMagic) != kSbMagicValue) {
+        if (why) *why = "D3D9 状态块：句柄块不是 'SB09'（对象状态崩坏）";
+        return kInvalidCall;
+    }
+    const std::uint32_t serial = cpu.mem->rd32(handle + kSbSerial);
+    const std::uint32_t type = cpu.mem->rd32(handle + kSbType);
+    const std::uint32_t dev_object = cpu.mem->rd32(handle + kSbDevice);
+    if (serial == 0) {
+        if (why) *why = "D3D9 状态块：句柄块里的 serial 为 0（没走 nextStateBlockSerial？）";
+        return kInvalidCall;
+    }
+    if (!cpu.com || !cpu.com->find(dev_object)) {
+        if (why) *why = "D3D9 状态块：句柄里的设备对象已不在对象表里";
+        return kInvalidCall;
+    }
+    DeviceInfo dev;
+    if (!deviceInfo(cpu, dev_object, &dev, why)) return kInvalidCall;
+    std::uint32_t pe = 0;
+    if (!pipelineOf(cpu, dev.state, &pe, why)) return kInvalidCall;
+    const SbMask mask = sbMaskOf(type);
+    if (!mask.any()) {
+        if (why) *why = "D3D9 状态块：Type 不是 D3DSBT_ALL / PIXELSTATE / VERTEXSTATE";
+        return kInvalidCall;
+    }
+    StateBlockSnapshot fresh;
+    try {
+        sbCapture(cpu, pe, mask, type, dev, &fresh);
+        if (!sbHoldRefs(cpu, &fresh)) {
+            sbReleaseRefs(cpu, fresh);
+            if (why) *why = "D3D9 状态块：快照替绑定对象持引用失败（COM 状态坏了）";
+            return kFail;
+        }
+        StateBlockSnapshot& slot = sbSnapshots()[serial];
+        // ★ 顺序 = **先加新的、再放旧的**（与 `SetTexture` 的换绑同口径）：同一对象重捕时不会
+        //   在两步之间瞬时针到 0。
+        sbReleaseRefs(cpu, slot);
+        slot = std::move(fresh);  // `std::vector` 的 move 赋值 ⇒ 不抛
+    } catch (const std::bad_alloc&) {
+        sbReleaseRefs(cpu, fresh);
+        if (out_of_memory) *out_of_memory = true;
+        if (why) *why = "D3D9 状态块：宿主堆分配快照失败 ⇒ E_OUTOFMEMORY（不 trap、不留半个快照）";
+        return kOutOfMemory;
+    }
+    return kOk;
+}
+
+std::uint32_t applyStateBlock(X86& cpu, std::uint32_t handle, std::string* why) {
+    if (handle == 0 || !cpu.mem || !cpu.mem->committed(handle, kSbBytes) ||
+        cpu.mem->rd32(handle + kSbMagic) != kSbMagicValue) {
+        if (why) *why = "D3D9 状态块：句柄块不是 'SB09'（对象状态崩坏）";
+        return kInvalidCall;
+    }
+    const std::uint32_t serial = cpu.mem->rd32(handle + kSbSerial);
+    const auto it = sbSnapshots().find(serial);
+    if (it == sbSnapshots().end()) {
+        if (why) *why = "D3D9 状态块：宿主快照表里没有这个 serial（块没建过 / 已销毁）";
+        return kInvalidCall;
+    }
+    const StateBlockSnapshot& snap = it->second;
+    // ★ 设备按**句柄里的设备对象**重新解析（⛔ 不缓存设备状态块 EA：guest 堆会复用 EA）。
+    const std::uint32_t dev_object = cpu.mem->rd32(handle + kSbDevice);
+    if (!cpu.com || !cpu.com->find(dev_object)) {
+        if (why) *why = "D3D9 状态块：句柄里的设备对象已不在对象表里";
+        return kInvalidCall;
+    }
+    DeviceInfo dev;
+    if (!deviceInfo(cpu, dev_object, &dev, why)) return kInvalidCall;
+    std::uint32_t pe = 0;
+    if (!pipelineOf(cpu, dev.state, &pe, why)) return kInvalidCall;
+    const SbMask mask = sbMaskOf(snap.type);
+    bool failed = false;
+    // ① 绑定：走既有 setter ⇒ 身份校验 / addRef / `releaseIf` / 日志全部是**同一份**既有约定。
+    //    ⛔ 不先写绑定槽再调 setter：setter 按槽里的 (EA, 代际) 判"同一份绑定"，先写就会让
+    //    旧绑定的设备引用永远还不回去（设备销毁时正是从这些槽里回收的）。
+    if (mask.textures) {
+        for (std::uint32_t s = 0; s < kMaxSamplers; ++s) {
+            const SbBinding& b = snap.textures[s];
+            if (!b.usable) {
+                failed = true;
+                continue;
+            }
+            // ★ 空槽也写回 0：捕获那一刻没绑 ⇒ Apply 之后也没绑（⛔ 不是"跳过"）。
+            if (setTexture(cpu, dev.state, s, b.obj, nullptr) != kOk) failed = true;
+        }
+    }
+    if (mask.streams) {
+        for (std::uint32_t s = 0; s < kMaxStreams; ++s) {
+            const SbStreamState& st = snap.streams[s];
+            if (!st.binding.usable) {
+                failed = true;
+                continue;
+            }
+            if (setStreamSource(cpu, dev.state, s, st.binding.obj, st.offset, st.stride, nullptr) != kOk)
+                failed = true;
+        }
+    }
+    if (mask.indices) {
+        if (!snap.indices.usable) {
+            failed = true;
+        } else if (setIndices(cpu, dev.state, snap.indices.obj, nullptr) != kOk) {
+            failed = true;
+        }
+    }
+    if (mask.vertex_format) {
+        if (!snap.vertex_decl.usable) {
+            failed = true;  // 声明身份不符 ⇒ ⛔ 不动顶点格式（跳过，不是解绑）
+        } else if (snap.vertex_decl.obj != 0) {
+            if (setVertexDeclaration(cpu, dev.state, snap.vertex_decl.obj, nullptr) != kOk) failed = true;
+        } else if (setFVF(cpu, dev.state, snap.fvf, nullptr) != kOk) {
+            // 捕获那一刻没有顶点声明 ⇒ FVF 路（本线的二选一：`setFVF` 会清声明）。
+            failed = true;
+        }
+    }
+    // ② 纯标量：⛔ 不含任何绑定槽（`kPlTextures` / `kPlStreams` / `kPlIndices` /
+    //    `kPlVertexDecl`(+gen) / `kPlFvf`）—— 那些必须由上面的 setter 改。
+    if (!snap.render_states.empty()) {
+        if (mask.render_all) {
+            for (std::uint32_t id = 0; id < kPlRenderStateCount; ++id)
+                plSet(cpu, pe, kPlRenderStates + id * 4u, snap.render_states[id]);
+        } else if (mask.render_pixel) {
+            for (std::uint32_t i = 0; i < kSbPixelRenderStateCount; ++i) {
+                const std::uint32_t id = kSbPixelRenderStates[i];
+                if (id < kPlRenderStateCount)
+                    plSet(cpu, pe, kPlRenderStates + id * 4u, snap.render_states[id]);
+            }
+        } else if (mask.render_vertex) {
+            for (std::uint32_t i = 0; i < kSbVertexRenderStateCount; ++i) {
+                const std::uint32_t id = kSbVertexRenderStates[i];
+                if (id < kPlRenderStateCount)
+                    plSet(cpu, pe, kPlRenderStates + id * 4u, snap.render_states[id]);
+            }
+        }
+    }
+    sbApplyRange(cpu, pe, kPlTransforms, snap.transforms);
+    sbApplyRange(cpu, pe, kPlSamplers, snap.samplers);
+    sbApplyRange(cpu, pe, kPlTexStages, snap.tex_stages);
+    sbApplyRange(cpu, pe, kPlViewport, snap.vertex_geometry);
+    sbApplyRange(cpu, pe, kPlMaterial, snap.material_lights);
+    if (failed) {
+        // ★ 默认级别可见（`pipeWarn`），⛔ 不谎报 S_OK：引擎虽然丢弃了 Apply 的返回值
+        //   （`.lst` 0x478470 之后直接取 var_4），但"没恢复"这件事必须留痕。
+        pipeWarn(PipeWarnCategory::Other, "StateBlock::Apply",
+                 "0x%08X：有绑定没能恢复（槽里的对象已不是捕获时那个 / COM 状态坏了）"
+                 "⇒ D3DERR_INVALIDCALL（已写回的标量不回滚）",
+                 handle);
+        if (why) *why = "D3D9 状态块：Apply 有绑定未能恢复";
+        return kInvalidCall;
+    }
+    return kOk;
+}
+
+void destroyStateBlockSnapshot(X86& cpu, std::uint32_t handle) {
+    if (handle == 0 || !cpu.mem || !cpu.heap) return;
+    if (!cpu.mem->committed(handle, kSbBytes)) return;
+    if (cpu.mem->rd32(handle + kSbMagic) != kSbMagicValue) return;  // 幂等：已经回收过
+    const std::uint32_t serial = cpu.mem->rd32(handle + kSbSerial);
+    cpu.mem->wr32(handle + kSbMagic, 0u);
+    const auto it = sbSnapshots().find(serial);
+    if (it != sbSnapshots().end()) {
+        sbReleaseRefs(cpu, it->second);
+        sbSnapshots().erase(it);
+    }
+    cpu.heap->free(handle);
+}
+
+// =====================================================================================
 // Draw：顶点装配 → T&L → 裁剪 → 光栅
 // =====================================================================================
 namespace {
@@ -2980,6 +3876,8 @@ bool prepareContext(X86& cpu, const char* what, std::uint32_t dev, std::uint32_t
     ctx->color_surface = plGet(cpu, pe, kPlColorSurface);
     ctx->depth_base = reinterpret_cast<float*>(m->surfaces().pixels(*dgs));
     ctx->depth_pitch_floats = dgs->pitch / 4u;
+    ctx->depth_width = dgs->width;
+    ctx->depth_height = dgs->height;
     if (!ctx->color_base || !ctx->depth_base) {
         if (why) *why = "D3D9 流水线：后缓冲 / 深度缓冲像素指针为空";
         return false;
@@ -3027,6 +3925,8 @@ bool prepareContext(X86& cpu, const char* what, std::uint32_t dev, std::uint32_t
     ctx->blend_op_a = rsOf(cpu, pe, kRsBlendOpAlpha);
     ctx->color_write = rsOf(cpu, pe, kRsColorWriteEnable);
     ctx->texture_factor = rsOf(cpu, pe, kRsTextureFactor);
+    // ★ 派生 mip 的"轮"：本 Draw 里取到的链指针在本轮内不会被 LRU 回收（多 stage 同时持有）。
+    beginMipEpoch();
     { static int serial = 0; ctx->pixels_written = 0; ctx->serial = ++serial; }
     for (std::uint32_t s = 0; s < kMaxTextureStages; ++s) {
         std::string terr;
@@ -3081,6 +3981,9 @@ bool prepareContext(X86& cpu, const char* what, std::uint32_t dev, std::uint32_t
         ss.address_v = samplerOf(cpu, pe, s, kSampAddressV);
         ss.mag_filter = samplerOf(cpu, pe, s, kSampMagFilter);
         ss.min_filter = samplerOf(cpu, pe, s, kSampMinFilter);
+        // ★ MIPFILTER 必须读：`D3DTEXF_NONE` = 关掉 mipmap（只 level 0），其余才允许按 LOD 选级。
+        //   引擎在真机上设的是 `D3DTEXF_LINEAR`（`.tmp/d3d9/art-debug.log:155`）⇒ 不能当成"没设"。
+        ss.mip_filter = samplerOf(cpu, pe, s, kSampMipFilter);
     }
     plSet(cpu, pe, kPlStageSnapshots, plGet(cpu, pe, kPlStageSnapshots) + 1u);
     return true;
@@ -3181,6 +4084,76 @@ bool untexturedResolvesToDiffuse(std::uint32_t op, std::uint32_t arg1, std::uint
             return (texture(arg1) && diffuse(arg2)) || (diffuse(arg1) && texture(arg2));
         default: return false;
     }
+}
+
+// =====================================================================================
+// 点 / 线的状态准入（`REQ-01M7372JNFAC2RWX2FXVV6YM5C`）
+//
+// ★ 结构刻意与三角形的**像素循环同构**（`rasterTriangle` 的 stage 循环）：两边必须在同一批
+//   状态上得出同一个"取顶点色 / 取纹理色"的结论，否则点 / 线与三角形在相邻几何上分叉。
+// ★ 只放行"结果恒等于顶点色"的组合：级活跃（`color_op`/`alpha_op` 不全 DISABLE）时
+//   · 绑了纹理 ⇒ 需要采样 ⇒ **拒绝**（⛔ 不画成纯色糊过去）；
+//   · 没绑纹理 ⇒ 复用 `untexturedResolvesToDiffuse`（与 GPU 准入同一个判据）。
+//   默认 stage0 = MODULATE(TEXTURE, CURRENT) 且无纹理绑定 ⇒ 通过（夹具就是按这个状态构造的）。
+//   ⚠ **站点处是否绑着纹理：未观察**。`.lst` 0x48E08A–0x48E1FB 只调 SetTransform / SetFVF(0x42) /
+//   SetRenderState(145,0) / SetMaterial / DrawPrimitiveUP，**既不绑也不解绑纹理**、也不设
+//   SetTextureStageState ⇒ 若前一笔遗留了 stage0 纹理，这两条线会被本函数**响亮拒绝**（而不是
+//   像修前那样假 S_OK + 0 像素）。真要覆盖那种情况 = "带纹理的线"另开单，不在本单范围。
+// ★ 拒绝 = `recordUnsupported(bit16)` + 默认级别可见的 `pipeWarn` + 返回 false（Draw 侧变成
+//   `D3DERR_INVALIDCALL`）。why 具体到 stage/op/arg —— 引擎虽然丢弃 Draw 的返回值，日志与
+//   状态块位图仍然指得出是哪一项。
+// =====================================================================================
+bool admitLinePointDraw(X86& cpu, std::uint32_t pe, const DrawContext& ctx, std::string* why) {
+    for (std::uint32_t s = 0; s < kMaxTextureStages; ++s) {
+        const TextureStageSnapshot& ts = ctx.stages[s];
+        if (ts.color_op == kTopDisable && ts.alpha_op == kTopDisable) break;
+        if (ctx.textures[s].present) {
+            char buf[224];
+            std::snprintf(buf, sizeof(buf),
+                          "点/线只做无纹理光栅：级 %u 绑定了纹理 ⇒ COLOROP/ALPHAOP 需要采样", s);
+            recordUnsupported(cpu, pe, 16u, buf, s);
+            pipeWarn(PipeWarnCategory::Other, "点/线光栅", "%s", buf);
+            if (why) *why = buf;
+            return false;
+        }
+        if (!untexturedResolvesToDiffuse(ts.color_op, ts.color_arg1, ts.color_arg2)) {
+            char buf[256];
+            std::snprintf(buf, sizeof(buf),
+                          "点/线只做顶点色：级 %u 的 COLOROP=%u arg=%u/%u 需要纹理采样（无纹理时也不等于顶点色）",
+                          s, ts.color_op, ts.color_arg1, ts.color_arg2);
+            recordUnsupported(cpu, pe, 16u, buf, s);
+            pipeWarn(PipeWarnCategory::Other, "点/线光栅", "%s", buf);
+            if (why) *why = buf;
+            return false;
+        }
+        if (!untexturedResolvesToDiffuse(ts.alpha_op, ts.alpha_arg1, ts.alpha_arg2)) {
+            char buf[256];
+            std::snprintf(buf, sizeof(buf),
+                          "点/线只做顶点色：级 %u 的 ALPHAOP=%u arg=%u/%u 需要纹理采样（无纹理时也不等于顶点色）",
+                          s, ts.alpha_op, ts.alpha_arg1, ts.alpha_arg2);
+            recordUnsupported(cpu, pe, 16u, buf, s);
+            pipeWarn(PipeWarnCategory::Other, "点/线光栅", "%s", buf);
+            if (why) *why = buf;
+            return false;
+        }
+    }
+    return true;
+}
+
+// ★ 覆盖边界**默认级别可见**的一行（只打一次）：`LineCaps` 是 `d3d9.cpp` 的声明，本单不改那个
+//   文件 ⇒ 必须在日志里说清"哪些位名副其实"。用 `logAt` 而不是 `pipeWarn`：这不是一次"拒绝"，
+//   ⛔ 不进 `pipe-warn` 的分类计数（那份计数被 `tests/d3d9_pipeline.cpp` 的用例盯着）。
+void noteLinePointCapsOnce() {
+    static bool noted = false;
+    if (noted) return;
+    noted = true;
+    logAt(LogLevel::Warn, LogD3d9, "[d3d9] 点/线: ",
+          "LineCaps=0x1F 是 d3d9.cpp 的 fillCaps(kCapsLineCaps) **声明**（本单不许改那个文件）；"
+          "引擎实测只读 caps 的 MaxTextureWidth/Height（0x499128/0x49912E）⇒ LineCaps 不是引擎判据。"
+          "本线**名副其实**的位只有 ZTEST|BLEND|ALPHACMP(0x0E)：1px 无纹理点/线（顶点色 + z 插值，"
+          "深度/alpha test/混合/写掩码与三角形同一份）；TEXTURE(0x01) 的点/线**响亮拒绝**"
+          "（D3DERR_INVALIDCALL + recordUnsupported bit16）；FOG(0x10) 全局未做；"
+          "点尺寸（POINTSIZE/POINTSCALE/POINTSPRITE）未实现 ⇒ 点按 1px 并记账（bit19）。");
 }
 
 // ★ 准入条件精确到"能等价表达"的状态；其余全部**显式回退**（reason 会进 fallback 账本）。
@@ -3292,6 +4265,20 @@ bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why) {
             if (why) *why = buf;
             return false;
         }
+        // ★ CPU 参考把两个过滤**合成一条**决策（`samplerUsesLinear`：任一 LINEAR ⇒ 双线性），
+        //   而 SDL_GPU 的 sampler 把 MAG / MIN **分开存、分开用** ⇒ `MAG=POINT + MIN=LINEAR`
+        //   这种组合两边都"成功"、整批像素却不同，且 `--gpu-strict` 看不见（它不是 fallback）。
+        //   按 `docs/00-origin/decisions.md` §8.1（CPU=oracle / GPU=product）：**要么一致，要么
+        //   不接受该批** ⇒ 这里只放行 `MAG == MIN`，其余显式回退并记账。
+        //   ⛔ 不去改 CPU 的采样决策（那是另一条单的内容）。
+        if (ss.mag_filter != ss.min_filter) {
+            char buf[192];
+            std::snprintf(buf, sizeof(buf),
+                          "GPU 采样要求 MAG==MIN（CPU 参考按任一 LINEAR 取双线性；当前 MAG=%u MIN=%u）",
+                          ss.mag_filter, ss.min_filter);
+            if (why) *why = buf;
+            return false;
+        }
         if (!gpuFilterFor(ss.mag_filter, &p.texture.sampler.mag_filter) ||
             !gpuFilterFor(ss.min_filter, &p.texture.sampler.min_filter)) {
             char buf[144];
@@ -3355,9 +4342,21 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
     // ★ `--raster cpu`（ctx.gpu == nullptr）是**显式参考后端**：⛔ 不计 fallback、⛔ 不打印
     //   `[gpu] fallback`。只有 GPU 已启用、本批因能力/后端失败而回退 CPU 时才记账。
     const bool have_gpu_backend = ctx.gpu != nullptr && ctx.gpu->rasterActive();
+    // ★ 点 / 线**只走 CPU 软光栅**（GPU 后端只覆盖三角形；`gpuEligible` 的判据本身不改）。
+    //   ⇒ 显式 `gpu_ok=false` + 一句精确 reason：GPU 已启用时账本会记一次 fallback，
+    //   ⛔ 不会把"点/线没在 GPU 上画"藏成"画了 0 个三角形"。
+    //   ★ `--gpu-strict` 下这会让真实 boot 在引擎画线时 exit 3（诚实：GPU 确实没有线覆盖）。
+    //   ★ 下面的 `!gpu_ok && have_gpu_backend && rasterDirty()` 同步**照常**发生：更早的 GPU
+    //     批必须先落回 guest，否则 Present 读回时会盖掉 CPU 刚写出的线像素。
+    const bool line_or_point = prim == kPtPointList || prim == kPtLineList || prim == kPtLineStrip;
     GpuBatchPlan plan;
     std::string gpu_why;
-    const bool gpu_ok = have_gpu_backend && gpuEligible(ctx, &plan, &gpu_why);
+    bool gpu_ok = false;
+    if (line_or_point) {
+        gpu_why = "点/线图元只走 CPU 软光栅（GPU 后端只覆盖三角形）";
+    } else if (have_gpu_backend) {
+        gpu_ok = gpuEligible(ctx, &plan, &gpu_why);
+    }
     if (!gpu_ok && have_gpu_backend && ctx.gpu->rasterDirty()) {
         // 上一批走 GPU、这一批要回 CPU：先把 GPU 像素落回 guest，CPU 才能接着画。
         std::string sync_err;
@@ -3459,9 +4458,57 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
             break;
         case kPtPointList:
         case kPtLineList:
-        case kPtLineStrip:
-            recordUnsupported(cpu, pe, 16u, "点/线图元（只做三角形）", prim);
+        case kPtLineStrip: {
+            // ★ 覆盖边界先声明（默认级别可见、只打一次）：即使这批被拒绝，也要让人看到
+            //   "LineCaps 的哪些位本线真的做了"。
+            noteLinePointCapsOnce();
+            // ★ 再抛状态准入：需要纹理采样的点 / 线**响亮拒绝**（⛔ 不画成纯色糊过去）。
+            //   `why` 由 Draw 侧变成 `D3DERR_INVALIDCALL`；`recordUnsupported(bit16)` 已记账。
+            std::string lp_why;
+            if (!admitLinePointDraw(cpu, pe, ctx, &lp_why)) {
+                if (why) *why = lp_why;
+                return false;
+            }
+            if (prim == kPtPointList) {
+                // ★ 点尺寸（POINTSIZE / POINTSCALE / POINTSPRITE / FVF PSIZE）**未实现** ⇒ 1px + 记账。
+                //   状态值 0 = 从没 Set 过（D3D 默认 POINTSIZE=1.0f）；只要被显式设置过就记账，
+                //   ⛔ 不判它"是不是恰好 1.0"（那需要猜 POINTSIZE_MIN/MAX 的语义，本单不猜）。
+                const std::uint32_t psize_bits = rsOf(cpu, pe, kRsPointSize);
+                const std::uint32_t point_scale = rsOf(cpu, pe, kRsPointScaleEnable);
+                const std::uint32_t point_sprite = rsOf(cpu, pe, kRsPointSpriteEnable);
+                if (psize_bits != 0u || point_scale != 0u || point_sprite != 0u ||
+                    (ctx.fvf & kFvfPSize) != 0u) {
+                    float psize = 1.0f;
+                    std::memcpy(&psize, &psize_bits, sizeof(psize));
+                    char buf[224];
+                    std::snprintf(buf, sizeof(buf),
+                                  "点尺寸（POINTSIZE=%g / POINTSCALE=%u / POINTSPRITE=%u / FVF PSIZE=%d）"
+                                  "未实现 ⇒ 点按 1px 画",
+                                  static_cast<double>(psize), point_scale, point_sprite,
+                                  (ctx.fvf & kFvfPSize) != 0u ? 1 : 0);
+                    recordUnsupported(cpu, pe, 19u, buf, psize_bits);
+                }
+                for (std::uint32_t i = 0; i < n; ++i) rasterizePoint(ctx, verts[i]);
+            } else {
+                // LASTPIXEL=0（真机不画最后一像素）：本线仍画 ⇒ 记账，⛔ 不静默。
+                if (rsOf(cpu, pe, kRsLastPixel) == 0u)
+                    recordUnsupported(cpu, pe, 20u, "D3DRS_LASTPIXEL=0（本线仍画每段最后一像素）", 0u);
+                if (prim == kPtLineList) {
+                    if ((n & 1u) != 0u)
+                        pipeLog("点/线", "LINELIST 顶点数为奇数（%u）⇒ 丢掉末尾 1 个顶点", n);
+                    for (std::uint32_t i = 0; i + 1u < n; i += 2u)
+                        rasterizeLineSegment(ctx, verts[i], verts[i + 1u]);
+                } else {
+                    for (std::uint32_t i = 0; i + 1u < n; ++i)
+                        rasterizeLineSegment(ctx, verts[i], verts[i + 1u]);
+                }
+            }
+            // 诊断：点 / 线不计入 `kPlTriangles` / `kPlRasterized`（那两个数就是**三角形**计数）；
+            // 像素数走 `ctx.pixels_written`（与三角形同一个账）。
+            pipeLog("点/线", "图元=%u：%u 个顶点 ⇒ 写 %llu 个像素", prim, n,
+                    static_cast<unsigned long long>(ctx.pixels_written));
             break;
+        }
         default:
             if (why) *why = "D3D9 流水线：未知图元类型";
             return false;
@@ -3469,9 +4516,32 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
 
     bool gpu_done = false;
     std::string fallback_reason;
-    if (gpu != nullptr && !gpu_invw_ok) {
-        // GPU 已启用，但这批顶点的 invw != 1：屏幕空间插值会与 CPU 的透视校正产生像素差 ⇒
-        // 明确回退（记账 + 首次打印），⛔ 不静默。
+    // ★ 本单：`gpu_queued`= 真的把 draw 交进了后端队列（⛔ 不是"准入通过"）；
+    //   `gpu_batch_tag`= 这一批在账本里的批号（0 = 没入队）。
+    bool gpu_queued = false;
+    std::uint64_t gpu_batch_tag = 0;
+    // ★ GPU 的 sampler **表达不了** `MIPFILTER = NONE`（`GpuSampler` 只有 address/filter；`max_lod`
+    //   是**整张纹理一档**，见 `d3d9_gpu.cpp` 的 `samplerFor`）⇒ 若这一批**真的**有缩小采样，
+    //   CPU（关掉 mipmap ⇒ 只 level 0）与 GPU（会采 mip）必然出不同的像素。按
+    //   `docs/00-origin/decisions.md` §8.1（CPU=oracle，"要么一致、要么不接受该批"）**显式回退并记账**。
+    //   ⛔ 不是"把 GPU 的 max_lod 设回 0"—— 那会让 `MIPFILTER != NONE` 的正常批次在 GPU 上静默走样。
+    bool gpu_mip_divergence = false;
+    if (gpu != nullptr && plan.textured && !plan.tex_color_from_tfactor && ctx.samplers[0].mip_filter == kTexfNone &&
+        ctx.textures[0].present) {
+        const std::uint32_t coord =
+            (ctx.stages[0].tex_coord_index & 0xFFFFu) < kMaxTexCoords ? (ctx.stages[0].tex_coord_index & 0xFFFFu) : 0u;
+        for (const SavedTri& t : saved_tris) {
+            if (triangleMipLevel(t.a, t.b, t.c, coord, ctx.textures[0].width, ctx.textures[0].height) >= 1u) {
+                gpu_mip_divergence = true;
+                break;
+            }
+        }
+    }
+    if (gpu != nullptr && (!gpu_invw_ok || gpu_mip_divergence)) {
+        // GPU 已启用，但这一批**不能等价**交给 GPU：
+        //   · invw != 1：屏幕空间插值会与 CPU 的透视校正产生像素差；
+        //   · MIPFILTER=NONE 且有缩小采样：GPU 的 sampler 关不掉 mip（见上）。
+        // ⇒ 明确回退（记账 + 首次打印），⛔ 不静默。
         // ★ 合批屏障：这一批要由 CPU 直接写 guest，而**更早**的批可能还在 GPU 队列里 ⇒ 先 flush +
         //   读回，否则它们在 Present 读回时会盖掉这些 CPU 像素。
         if (gpu->rasterDirty()) {
@@ -3480,7 +4550,10 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
         }
         for (const SavedTri& t : saved_tris) rasterTriangle(ctx, t.a, t.b, t.c);
         gpu_vertices.clear();
-        fallback_reason = "顶点 invw!=1（屏幕空间 GPU 插值不能等价替代透视校正）";
+        fallback_reason = gpu_mip_divergence
+                              ? "MIPFILTER=NONE 且这一批有缩小采样（GPU sampler 的 max_lod 是一张纹理一档，"
+                                "表达不了\"关掉 mipmap\"）"
+                              : "顶点 invw!=1（屏幕空间 GPU 插值不能等价替代透视校正）";
     } else if (gpu != nullptr) {
         std::string gerr;
         // ★ 目标身份必须带 guest 像素基址：同尺寸换 surface 只看尺寸/格式判不出来（见 gpu_raster.h）。
@@ -3517,6 +4590,12 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
             ref_valid = true;
         }
         if (ok && !gpu_vertices.empty()) {
+            // ★ 账本批号（本单）：**入队前**设、入队后立刻清 0 —— 后端在命令缓冲**提交成功之后**
+            //   按这个号回报"这条 draw 真的进了 render pass"。⛔ 不许拿 `rasterQueue` 的返回值当
+            //   recorded（那正是"入队成功 = 已覆盖"的原缺陷）。
+            gpu_batch_tag = ++g_gpu_batch_seq;
+            g_gpu_batch_ledger[gpu_batch_tag] = GpuBatchLedgerEntry{};
+            gpuRasterSetBatchTag(gpu_batch_tag);
             // ★ 合批：正常路径**只入队**（End/Present/Clear 才 flush）。`LIFT_GPU_VERIFY=1` 的判据
             //   要求"画完立刻能读"，所以诊断模式仍走会立即 flush 的旧接口（⛔ 不改判据）。
             if (gpu_verify) {
@@ -3531,6 +4610,8 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
             } else {
                 ok = gpu->rasterQueue(gpu_vertices.data(), gpu_vertices.size(), nullptr, plan.state, &gerr);
             }
+            gpuRasterSetBatchTag(0);
+            gpu_queued = ok;
         }
         if (ok && ref_valid) {
             std::string verr;
@@ -3620,6 +4701,24 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
         ++g_gpu_coverage.draw_calls;
         if (gpu_done) {
             ++g_gpu_coverage.gpu_draws;
+            // ★ 本单：入队 ≠ 覆盖。`queued` 只数**真的交进后端队列**的批；`fragments` 是交出去的顶点数
+            //   （"能拿到的片元/顶点计数"—— 片元数后端拿不到，这里给顶点数）。
+            if (gpu_queued) {
+                ++g_gpu_coverage.queued;
+                g_gpu_coverage.fragments += gpu_vertices.size();
+            }
+            // 这一批还没有任何 render pass 录过它 ⇒ 先记进 `empty`（后端回报时再挪到 `recorded`）。
+            // ★ `gpu_batch_tag == 0` 也记：连队都没入（`gpu_vertices` 全被裁掉 / 准入在 queue 之前就
+            //   失败）比"入队成功但没录"更坏，同样属于"账上覆盖、实际零像素"。
+            if (gpu_batch_tag != 0) {
+                auto it = g_gpu_batch_ledger.find(gpu_batch_tag);
+                if (it != g_gpu_batch_ledger.end() && !it->second.recorded && !it->second.counted_empty) {
+                    it->second.counted_empty = true;
+                    noteCoverageEmpty();
+                }
+            } else {
+                noteCoverageEmpty();
+            }
         } else if (ctx.pixels_written > 0) {
             gpuNoteFallback(fallback_reason.empty()
                                 ? (gpu_why.empty() ? std::string("GPU 不可用（原因未登记）") : gpu_why)
@@ -3638,6 +4737,8 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
     pixels += ctx.pixels_written;
     cpu.mem->wr32(pe + kPlPixels, static_cast<std::uint32_t>(pixels & 0xFFFFFFFFu));
     cpu.mem->wr32(pe + kPlPixels + 4u, static_cast<std::uint32_t>(pixels >> 32));
+    // ★ 派生 mip 的账：本批"想用 mip 但链不可用 ⇒ 退回 level 0"记账**一次**（⛔ 不静默走样）。
+    if (ctx.mip_level0_fallback) noteMipLevel0Sampled();
     if (slow_draw_trace) {
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                                     slow_draw_begin)
@@ -3700,31 +4801,54 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
             }
             const double texa_mean =
                 texa_n != 0 ? static_cast<double>(texa_sum) / static_cast<double>(texa_n) : 0.0;
-            std::fprintf(stderr,
-                         "[draw] frame=%u prim=%u verts=%zu tris=%u rast=%u pixels=%llu gpu=%d why=%s "
-                         "sep_alpha=%d tex=%u texserial=%u tfactor=%08X alpha=%.1f..%.1f d0=%.0f,%.0f,%.0f,%.0f "
-                         "uv=%.4f..%.4f,%.4f..%.4f "
-                         "blend=%d/%u/%u op=%u cw=%X fvf=%X coord=%u "
-                         "stage0=%u/%u(%u/%u,%u/%u) samp=U%uV%u M%u%u texfmt=%u/%X %dx%d "
-                         "texa=%d:%u..%u/%.0f fa=%lld:%.0f/%u/%u submit=%.1fms\n",
-                         d3d9::frameSeq(), prim, verts.size(), triangles, rasterized,
-                         (unsigned long long)ctx.pixels_written, gpu_done ? 1 : 0,
-                         gpu_why.empty() ? "-" : gpu_why.c_str(), ctx.separate_alpha_blend ? 1 : 0,
-                         tex_present, ctx.textures[0].serial, ctx.texture_factor, alpha_min, alpha_max, v0.r, v0.g,
-                         v0.b, v0.a, u0,
-                         u1, vv0, vv1, ctx.blend ? 1 : 0, ctx.src_blend, ctx.dst_blend, ctx.blend_op,
-                         ctx.color_write, ctx.fvf,
-                         ctx.stages[0].tex_coord_index & 0xFFFFu, ctx.stages[0].color_op, ctx.stages[0].alpha_op,
-                         ctx.stages[0].color_arg1, ctx.stages[0].color_arg2, ctx.stages[0].alpha_arg1,
-                         ctx.stages[0].alpha_arg2, ctx.samplers[0].address_u, ctx.samplers[0].address_v,
-                         ctx.samplers[0].mag_filter, ctx.samplers[0].min_filter,
-                         static_cast<unsigned>(ctx.textures[0].format.bpp), ctx.textures[0].format.amask,
-                         ctx.textures[0].width, ctx.textures[0].height, texa_n, texa_min, texa_max, texa_mean,
-                         static_cast<long long>(g_alpha_agg.n),
-                         g_alpha_agg.n != 0 ? static_cast<double>(g_alpha_agg.sum) / static_cast<double>(g_alpha_agg.n)
-                                            : 0.0,
-                         g_alpha_agg.mn, g_alpha_agg.mx, ms);
-            std::fflush(stderr);
+            // ★ 本单：`rec=` **不许**只打"入队成功"。正常合批路径此刻还没 flush（Present / Clear 才提交）
+            //   ⇒ 这一行先挂起，由后端的回报点（命令缓冲提交成功之后）补打成 `rec=1`；
+            //   只有"已经确定不会进 render pass"的批（CPU 路 / GPU 回退 / 空批）才当场打 `rec=0`。
+            //   ★ `vp` / `tgt` / `sc` / `z` 是**本批入队时**的状态（`A9` 分诊缺的就是这四个读数）：
+            //     `vp` 与 `tgt` 不等 ⇒ `toScreen` 的视口映射会被 GPU 的 NDC→viewport 再乘一次。
+            char draw_line[2048];
+            std::snprintf(
+                draw_line, sizeof(draw_line),
+                "frame=%u prim=%u verts=%zu tris=%u rast=%u pixels=%llu gpu=%d "
+                "vp=%d,%d,%d,%d tgt=%dx%d sc=%d,%d..%d,%d z=%d/%d/%u "
+                "why=%s "
+                "sep_alpha=%d tex=%u texserial=%u tfactor=%08X alpha=%.1f..%.1f d0=%.0f,%.0f,%.0f,%.0f "
+                "uv=%.4f..%.4f,%.4f..%.4f "
+                "blend=%d/%u/%u op=%u cw=%X fvf=%X coord=%u "
+                "stage0=%u/%u(%u/%u,%u/%u) samp=U%uV%u M%u%u MF%u lvl=%u..%u miprb=%llu bbox=%d,%d..%d,%d "
+                "texfmt=%u/%X %dx%d "
+                "texa=%d:%u..%u/%.0f fa=%lld:%.0f/%u/%u submit=%.1fms",
+                d3d9::frameSeq(), prim, verts.size(), triangles, rasterized,
+                (unsigned long long)ctx.pixels_written, gpu_done ? 1 : 0, ctx.viewport_x, ctx.viewport_y,
+                ctx.viewport_w, ctx.viewport_h, ctx.color_width, ctx.color_height, ctx.scissor_x0, ctx.scissor_y0,
+                ctx.scissor_x1, ctx.scissor_y1, ctx.z_enable ? 1 : 0, ctx.z_write ? 1 : 0, ctx.z_func,
+                gpu_why.empty() ? "-" : gpu_why.c_str(), ctx.separate_alpha_blend ? 1 : 0,
+                tex_present, ctx.textures[0].serial, ctx.texture_factor, alpha_min, alpha_max, v0.r, v0.g,
+                v0.b, v0.a, u0,
+                u1, vv0, vv1, ctx.blend ? 1 : 0, ctx.src_blend, ctx.dst_blend, ctx.blend_op,
+                ctx.color_write, ctx.fvf,
+                ctx.stages[0].tex_coord_index & 0xFFFFu, ctx.stages[0].color_op, ctx.stages[0].alpha_op,
+                ctx.stages[0].color_arg1, ctx.stages[0].color_arg2, ctx.stages[0].alpha_arg1,
+                ctx.stages[0].alpha_arg2, ctx.samplers[0].address_u, ctx.samplers[0].address_v,
+                ctx.samplers[0].mag_filter, ctx.samplers[0].min_filter, ctx.samplers[0].mip_filter,
+                ctx.mip_level_min == 0xFFFFFFFFu ? 0u : ctx.mip_level_min, ctx.mip_level_max,
+                static_cast<unsigned long long>(ctx.mip_bytes_built),
+                ctx.bbox_x0 == 0x7FFFFFFF ? 0 : ctx.bbox_x0, ctx.bbox_y0 == 0x7FFFFFFF ? 0 : ctx.bbox_y0,
+                ctx.bbox_x1, ctx.bbox_y1,
+                static_cast<unsigned>(ctx.textures[0].format.bpp), ctx.textures[0].format.amask,
+                ctx.textures[0].width, ctx.textures[0].height, texa_n, texa_min, texa_max, texa_mean,
+                static_cast<long long>(g_alpha_agg.n),
+                g_alpha_agg.n != 0 ? static_cast<double>(g_alpha_agg.sum) / static_cast<double>(g_alpha_agg.n)
+                                   : 0.0,
+                g_alpha_agg.mn, g_alpha_agg.mx, ms);
+            // ★ `rec=` 的判据（本单）：后端**真的**把这条 draw 录进过 render pass（命令缓冲提交成功
+            //   之后的回报），⛔ 不是 `rasterQueue` 的返回值。正常合批路径此刻还没 flush ⇒ 行挂进
+            //   **提交顺序**队列，由回报点按序放出；`tag==0`（没入队）的行永远不会有回报 ⇒ 当场 rec=0。
+            //   ★ 入队**失败**时批号已经发出去、但后端队列里没有这条 draw ⇒ 行必须按 tag 0 处理，
+            //     否则它会永远等一个不会来的回报、把后面的行一起卡到下一轮（复审 Note 1）。
+            g_pending_draw_lines.push_back(
+                GpuPendingDrawLine{gpu_queued ? gpu_batch_tag : 0, std::string(draw_line)});
+            drainPendingDrawLines(false);
         }
     }
     return true;
@@ -3982,6 +5106,67 @@ bool gatherVertices(X86& cpu, std::uint32_t pe, const FvfLayout& fvf, const std:
 }
 
 }  // namespace
+
+// =====================================================================================
+// 派生 mip 的 LOD（`REQ-01M73G2724479XAVS176WBZ65Q`）：纯函数，守卫直接打
+// =====================================================================================
+bool screenUvDerivatives(const double vx[3], const double vy[3], const double invw[3],
+                         const double u_over_w[3], const double v_over_w[3], double* du_dx, double* dv_dx,
+                         double* du_dy, double* dv_dy) {
+    if (du_dx != nullptr) *du_dx = 0.0;
+    if (dv_dx != nullptr) *dv_dx = 0.0;
+    if (du_dy != nullptr) *du_dy = 0.0;
+    if (dv_dy != nullptr) *dv_dy = 0.0;
+    if (vx == nullptr || vy == nullptr || invw == nullptr || u_over_w == nullptr || v_over_w == nullptr) return false;
+    const double x0 = vx[0], x1 = vx[1], x2 = vx[2];
+    const double y0 = vy[0], y1 = vy[1], y2 = vy[2];
+    const double det = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+    if (!std::isfinite(det) || std::fabs(det) < 1e-12) return false;
+    // 线性函数在三角形上的**屏幕空间梯度**（f_i 为顶点值）：
+    //   f_x = ((f1-f0)*(y2-y0) - (f2-f0)*(y1-y0)) / det
+    //   f_y = ((x1-x0)*(f2-f0) - (x2-x0)*(f1-f0)) / det
+    auto grad = [&](const double f[3], double* gx, double* gy) {
+        *gx = ((f[1] - f[0]) * (y2 - y0) - (f[2] - f[0]) * (y1 - y0)) / det;
+        *gy = ((x1 - x0) * (f[2] - f[0]) - (x2 - x0) * (f[1] - f[0])) / det;
+    };
+    double ux = 0.0, uy = 0.0, vx_ = 0.0, vy_ = 0.0, wx = 0.0, wy = 0.0;
+    grad(u_over_w, &ux, &uy);
+    grad(v_over_w, &vx_, &vy_);
+    grad(invw, &wx, &wy);
+    // 质心处的 U/W（与采样器同一个式子）：l_i = 1/3。
+    const double w_mid = (invw[0] + invw[1] + invw[2]) / 3.0;
+    if (!std::isfinite(w_mid) || std::fabs(w_mid) < 1e-12) return false;
+    const double u_mid = (u_over_w[0] + u_over_w[1] + u_over_w[2]) / 3.0 / w_mid;
+    const double v_mid = (v_over_w[0] + v_over_w[1] + v_over_w[2]) / 3.0 / w_mid;
+    // ∂(U/W)/∂x = (U_x − (U/W)·W_x) / W
+    if (du_dx != nullptr) *du_dx = (ux - u_mid * wx) / w_mid;
+    if (dv_dx != nullptr) *dv_dx = (vx_ - v_mid * wx) / w_mid;
+    if (du_dy != nullptr) *du_dy = (uy - u_mid * wy) / w_mid;
+    if (dv_dy != nullptr) *dv_dy = (vy_ - v_mid * wy) / w_mid;
+    return std::isfinite(*du_dx) && std::isfinite(*dv_dx) && std::isfinite(*du_dy) && std::isfinite(*dv_dy);
+}
+
+double lodFromUvDerivatives(double du_dx, double dv_dx, double du_dy, double dv_dy, double tex_width,
+                            double tex_height) {
+    // ★ 退化 / 非法 ⇒ 返回一个**必然落到 0 级**的 LOD（⛔ 不返回 0，那会把"1:1"与"不知道"混起来）。
+    if (!(tex_width > 0.0) || !(tex_height > 0.0)) return -1000.0;
+    const double rx = std::sqrt((du_dx * tex_width) * (du_dx * tex_width) +
+                                (dv_dx * tex_height) * (dv_dx * tex_height));
+    const double ry = std::sqrt((du_dy * tex_width) * (du_dy * tex_width) +
+                                (dv_dy * tex_height) * (dv_dy * tex_height));
+    const double rho = rx > ry ? rx : ry;
+    if (!std::isfinite(rho) || rho <= 0.0) return -1000.0;
+    return std::log2(rho);
+}
+
+std::uint32_t mipLevelForLod(double lod, std::uint32_t levels) {
+    if (levels <= 1u || !std::isfinite(lod)) return 0u;
+    // 最近级：floor(lod + 0.5)。放大（lod < 0）/ 1:1（lod == 0）都落到 0 级。
+    const double biased = std::floor(lod + 0.5);
+    if (!(biased > 0.0)) return 0u;
+    if (biased >= static_cast<double>(levels - 1u)) return levels - 1u;
+    return static_cast<std::uint32_t>(biased);
+}
 
 bool samplerUsesLinear(std::uint32_t mag_filter, std::uint32_t min_filter) {
     // 定义放匿名 namespace 外面：头文件里是公开 API（夹具直接调，证明 MIN 不再被忽略）
@@ -4401,9 +5586,27 @@ std::uint64_t gpuTriangleCount() { return g_gpu_triangles; }
 const GpuCoverage& gpuCoverage() { return g_gpu_coverage; }
 
 void gpuCoverageReset() {
+    // ★ 本单：上一轮永远没被回报的 `[draw]` 行在这里按提交顺序补打 `rec=0`
+    //   （"到这一轮开始都没进过 pass"）。正常情况下（最后有 Present）不会有残留。
+    drainPendingDrawLines(true);
+    g_pending_draw_lines.clear();
+    g_gpu_batch_ledger.clear();  // ★ 批号表按轮清；序号继续往前 ⇒ 上一轮迟到的回报撞不上新 slot
     g_gpu_coverage = GpuCoverage{};
     g_gpu_draws = 0;
     g_gpu_triangles = 0;
+}
+
+// ★ 后端回报：一条 draw 真的被录进 render pass、且命令缓冲**提交成功之后**（见 `gpu_raster.h`）。
+//   判据就是"后端真的回报了"，⛔ 与 `rasterQueue` 的返回值无关。tag 不在本轮批号表里 ⇒ 忽略。
+void gpuLedgerNoteRecorded(std::uint64_t tag) {
+    if (tag == 0) return;
+    auto it = g_gpu_batch_ledger.find(tag);
+    if (it == g_gpu_batch_ledger.end() || it->second.recorded) return;
+    it->second.recorded = true;
+    ++g_gpu_coverage.recorded;
+    if (it->second.counted_empty) --g_gpu_coverage.empty;
+    // `[draw]` 行按**提交顺序**放出（队首那批已经 recorded 才轮得到它）。
+    drainPendingDrawLines(false);
 }
 
 void gpuNoteFallback(const std::string& reason, std::uint64_t pixels) {
@@ -4660,4 +5863,9 @@ bool gpuTextureModeFor(std::uint32_t color_op, std::uint32_t color_arg1, std::ui
 }
 
 }  // namespace d3d9
+
+// ★ 覆盖账本的回报入口（声明在 `gpu_raster.h`，由 `d3d9_gpu.cpp` 在提交成功之后调用）。
+//   账本本身在 d3d9 侧（批号表与 `GpuCoverage` 都在那边）⇒ 这里只做一层转调。
+void gpuLedgerNoteRecordedDraw(std::uint64_t tag) { d3d9::gpuLedgerNoteRecorded(tag); }
+
 }  // namespace lift

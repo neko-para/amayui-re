@@ -339,6 +339,26 @@ if(EXISTS "E:/Games/Eushully/天結/install/SYS4INI.BIN" AND DEFINED ENV{LIFT_AS
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         SKIP_RETURN_CODE 77
         TIMEOUT 1800)
+
+    # ---- assets：退出写存档尾段的 LZSS Encode native override 端到端守卫 ----
+    # 判据见 `tests/native_override_e2e.cpp` 文件头：三份 run（a1 空 / b 开 / a2 空，唯一差异
+    # `--native-overrides sub_4367B0`）—— ①各自 exit 0 + 脚本跑完 + 各 1 行 `present-tail`
+    # ②`b` 的 `sub_4367B0` 明细行 `hits==1 && fallbacks==0`、`a*` 里没有 `native-ovr` 行
+    # ③`tail_insns(b) < tail_insns(a1)/2` ④`stop=stopped` / `detail` 含 `ExitProcess`
+    # ⑤`tail_wall_ms(b) < tail_wall_ms(a1)`（只比更低，⛔ 无绝对阈值）⑥存档差分：同臂两次逐字节相同、
+    # 两臂差异必须落在**虚拟时钟区**（具名常量；由第一次两臂实测回填）且打印实测区间。
+    # ⛔ 不断言任何当前数字（那是 `.tmp/reveq/…/report.md` 的读数）。三份 run 各 ~1–2 min。
+    add_executable(lift-native-override-e2e tests/native_override_e2e.cpp)
+    target_link_libraries(lift-native-override-e2e PRIVATE emulator-lift-runtime)
+    add_test(NAME native-override-e2e COMMAND lift-native-override-e2e
+        $<TARGET_FILE:emulator-lift>
+        "E:/Games/Eushully/天結/install"
+        "${CMAKE_CURRENT_BINARY_DIR}/native-override-e2e-work")
+    set_tests_properties(native-override-e2e PROPERTIES
+        # ★ 同 quit-tail：子进程继承这个 cwd（执行源 / `.lst` 按相对当前目录找）。
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 2400)
 endif()
 
 # =====================================================================================
@@ -890,3 +910,121 @@ add_test(NAME guest-token-stress COMMAND lift-guest-token)
 add_executable(lift-dispatch-tax tests/dispatch_tax.cpp)
 target_link_libraries(lift-dispatch-tax PRIVATE emulator-lift-runtime)
 add_test(NAME dispatch-tax COMMAND lift-dispatch-tax)
+
+# =====================================================================================
+# M2 · PNG 解码（`D3DXCreateTextureFromFileInMemory` 的真解码 + 上传）
+#   `REQ-01M738VYG0DP3TNJKYDSA49J7H` —— 三张 2048² Live2D 图集页（`texserial=21/22/23`）
+#   原先"只读文件头、像素全 0"。`runtime/png_decode.cpp` = libpng **简化 API** 的解码层，
+#   `shims/d3dx9.cpp` 把它解出来的 RGBA 经**既有** `d3d9::lockRect/unlockRect` 写进纹理 arena。
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+# ★ libpng 本来就躺在 vcpkg 安装树里（freetype 的传递依赖）—— 但那是**幽灵依赖**：
+#   不显式 find_package + 链接，换一次依赖树或去掉 freetype 就会在链接期炸。
+#   `vcpkg.json` 的 `dependencies` 里也已显式加 `libpng`（端口已装 ⇒ 不触发重建）。
+# ★ 判据见 `tests/d3dx9.cpp` 的 `d3dx9/texture-from-memory` / `d3dx9/texture-from-memory-png`
+#   （8×8 内嵌 PNG 的逐像素 + 脏区/版本不变量 + 坏输入不 trap）/ `d3dx9/png-decode`
+#   （模块级：RGBA / 调色板 / 灰度 + 坏输入矩阵）/ `d3dx9/texture-upload-rollback`
+#   （上传失败的失败面：arena + 状态块回滚）。
+# =====================================================================================
+find_package(PNG REQUIRED)
+target_sources(emulator-lift-runtime PRIVATE
+    src/runtime/png_decode.cpp)
+target_link_libraries(emulator-lift-runtime PRIVATE PNG::PNG)
+
+# =====================================================================================
+# M2 · 派生 mip 链（`REQ-01M73G2724479XAVS176WBZ65Q`：缩小采样必须有 mip，否则走样）
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+# ★ 判据见 tests/d3d9_mip.cpp 文件头：① 2×2→1×1 的 box filter 逐通道；② 奇数尺寸按覆盖范围；
+#   ③ 链的级数/尺寸/行距/偏移/总字节；④ LOD 在 1:1 / 2:1 / 4:1 的级号（★ 1:1 必须 level 0）；
+#   ⑤ 屏幕空间 UV 导数必须是**透视校正**的（w≠1 的三角形上与手算值一致、且不等于仿射梯度）。
+# ★ 顶层无条件注册 ⇒ **pure** 档。`tools/mutate-check.mjs` 的 `ctest:d3d9-mip` 指向它
+#   （把 LOD 恒取 0 ⇒ 第 ④ 条当场红）。
+# =====================================================================================
+add_executable(lift-d3d9-mip tests/d3d9_mip.cpp)
+target_link_libraries(lift-d3d9-mip PRIVATE emulator-lift-runtime)
+add_test(NAME d3d9-mip COMMAND lift-d3d9-mip)
+
+# =====================================================================================
+# assets（可 SKIP）· 派生 mip 的端到端守卫（`REQ-01M73G2724479XAVS176WBZ65Q`）
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+# ★ 判据见 tests/mip_e2e.cpp 文件头：①两臂 exit 0；②开臂真有缩小批取到 level ≥ 1 且派生链
+#   真的被算过（`[draw] lvl=` / `miprb=`）；③关臂（`LIFT_NO_MIP=1`）必须全 level 0；
+#   ④全屏 2048² 背景层（本 repro 是放大采样）仍必须 level 0；⑤右侧区域点密度/逐行高频能量
+#   只打印、**不断言**（那是读数）。
+# ★ 缺游戏安装 ⇒ 不注册（assets 档的判据 = 注册位置）；与其它 e2e 同一条 opt-in 判据。
+# =====================================================================================
+if(EXISTS "E:/Games/Eushully/天結/install/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
+    add_executable(lift-mip-e2e tests/mip_e2e.cpp)
+    target_link_libraries(lift-mip-e2e PRIVATE emulator-lift-runtime)
+    add_test(NAME mip-e2e COMMAND lift-mip-e2e
+        $<TARGET_FILE:emulator-lift>
+        "E:/Games/Eushully/天結/install"
+        "${CMAKE_CURRENT_BINARY_DIR}/mip-e2e-work")
+    set_tests_properties(mip-e2e PROPERTIES
+        # ★ 子进程继承这个 cwd：模拟器默认的执行源是按相对当前目录找的。
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 1200)
+endif()
+
+# =====================================================================================
+# GPU 黄金图回归（`REQ-01M73G49T01W1CQDSME83ES0YD`）
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+# ★ 判据见 `tests/golden_image.cpp` 文件头：分块 16×16 均值 + 全图 mean|Δch| + 超阈像素比例
+#   三层**与**判据（⛔ 不用整帧哈希 —— 同配置两次运行的亮度档数实测漂到 243 vs 248）。
+# ★ 两层注册（判据 = 注册位置，见 AGENTS.md §5）：
+#   ① `golden-image-compare` = **pure**：顶层无条件 ⇒ 默认 `ctest` 就跑。比较器 + PNG 编解码的
+#      合成用例（自己比自己必过 / 只改一个 16×16 块必红 / 全图 +1 LSB 仍过 / 尺寸不一致必红）。
+#      `tools/mutate-check.mjs` 的 `ctest:golden-image-compare` 指向它。
+#   ② `golden-image` = **assets**：落在 `if(EXISTS 安装树)` 里；GPU 不可用 / 没有安装树时
+#      **运行期** `LIFT_SKIP`(77) 并打印原因（⛔ 不静默通过）。它在默认门禁里跑（本机 ~7 s），
+#      因为它要抓的正是"`--gpu-strict` 绿但画面错"这一类（S1）。
+#      `LIFT_UPDATE_GOLDEN=1` ⇒ 覆盖 `tests/golden/title-f2-gpu.png`（仅供人工确认后使用，日志大声报）。
+# ★ 黄金图入库走 LFS（`.gitattributes` 的 `*.png` 规则）。
+# =====================================================================================
+target_sources(emulator-lift-runtime PRIVATE
+    src/runtime/golden_image.cpp)
+
+# ---- pure：黄金图比较器（合成 PNG：自反 / 单块改动 / 1 LSB / 尺寸不一致）----
+add_executable(lift-golden-image tests/golden_image.cpp)
+target_link_libraries(lift-golden-image PRIVATE emulator-lift-runtime)
+add_test(NAME golden-image-compare COMMAND lift-golden-image --self-test)
+
+# ---- assets：TITLE 第 2 帧的 GPU 黄金图（缺安装树 ⇒ 不注册；GPU 不可用 ⇒ SKIP 77）----
+# ★ 与 `loader` / `host-encoding` 同一条判据（`EXISTS` 资产 / 安装树），⛔ 不加 `LIFT_ASSETS`
+#   opt-in：这条是**每次都要跑**的画面回归（S1 那种"账本全绿、画面丢了"的唯一自动判据）。
+if(EXISTS "E:/Games/Eushully/天結/install/SYS4INI.BIN")
+    add_test(NAME golden-image COMMAND lift-golden-image --fixture
+        $<TARGET_FILE:emulator-lift>
+        "E:/Games/Eushully/天結/install"
+        "${CMAKE_CURRENT_BINARY_DIR}/golden-image-work"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/title-f2-gpu.png")
+    set_tests_properties(golden-image PROPERTIES
+        # ★ 子进程继承这个 cwd：模拟器默认的执行源是按相对当前目录找的。
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 600)
+endif()
+
+# =====================================================================================
+# `--dump-frame` 的目录必须在开跑前建好（`REQ-01M73YBCC3DZ05Y9NSDTRKTMMY`）
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+# ★ 判据见 tests/cli_dump_frame.cpp 头注释：
+#   ① 不存在的目录 ⇒ 子进程 exit 0 **且目录真的建出来**；
+#   ② 建不出来（中间被普通文件挡住）⇒ exit 2 + stderr 说清是 `--dump-frame` / 目录；
+#   ③ 两条子进程都在 30 s 内结束（旧实现的缺陷形态 = 目录不存在时空转 546 s）。
+# ★ 顶层无条件注册 ⇒ **pure** 档：执行源是测试自己构造的最小 PE32 + `--max-insns 1`
+#   （⛔ 不碰 LFS / 游戏安装 / 窗口；与 cli-time-limit 同一口径）。
+# ★ `tools/mutate-check.mjs` 的 `ctest:cli-dump-frame` 指向它（去掉 create_directories ⇒ 当场红）。
+# =====================================================================================
+add_executable(lift-cli-dump-frame tests/cli_dump_frame.cpp)
+target_link_libraries(lift-cli-dump-frame PRIVATE emulator-lift-runtime)
+add_test(NAME cli-dump-frame COMMAND lift-cli-dump-frame $<TARGET_FILE:emulator-lift>)
+set_tests_properties(cli-dump-frame PROPERTIES SKIP_RETURN_CODE 77)
+
+# ---- pure：帧导出**每帧失败**不拖住 Present / 计数 / warn 只一次 / 成功路径照旧 ----
+# ★ 判据见 tests/frame_dump_failure.cpp 头注释。裸 GuestMemory + SurfaceArena（⛔ 不碰游戏）。
+# ★ 顶层无条件注册 ⇒ pure 档。
+add_executable(lift-frame-dump-failure tests/frame_dump_failure.cpp)
+target_link_libraries(lift-frame-dump-failure PRIVATE emulator-lift-runtime)
+add_test(NAME frame-dump-failure COMMAND lift-frame-dump-failure)
+set_tests_properties(frame-dump-failure PROPERTIES SKIP_RETURN_CODE 77)

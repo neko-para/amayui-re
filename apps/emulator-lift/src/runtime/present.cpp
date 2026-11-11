@@ -5,6 +5,7 @@
 #include <exception>
 #include <utility>
 
+#include "runtime/log.h"
 #include "runtime/screen_sample.h"
 
 namespace lift {
@@ -43,6 +44,19 @@ void HeadlessPresenter::noteSinkFailure(const std::string& why) {
         // 第一次失败就要可见；latch 后只是停止 submitFrame，窗口事件泵/关窗仍然继续。
         std::fprintf(stderr, "[present] sink 失败：%s（后续帧继续尝试；连续 %llu 次后停止提交）\n",
                      last_sink_error_.c_str(), (unsigned long long)kLatchAfterFailures);
+    }
+}
+
+void HeadlessPresenter::noteDumpFailure(const std::string& path, const std::string& why) {
+    // ★ 与 sink 失败同一条口径：**计数**（进 run summary 的 `dumpFailures=`）+ **只第一次**喊。
+    //   ⛔ 不每帧刷屏：帧导出是宿主诊断，1280×720@60 下一旦坏了就是 60 行/秒。
+    ++dump_failures_;
+    if (!dump_failure_warned_) {
+        dump_failure_warned_ = true;
+        logAt(LogLevel::Warn, LogD3d9, "[present] ",
+              "帧导出失败：%s（%s）⇒ 继续跑（guest 的 Present 不受影响）；后续失败只计数，"
+              "见 run summary 的 dumpFailures=",
+              path.c_str(), why.c_str());
     }
 }
 
@@ -88,8 +102,18 @@ bool HeadlessPresenter::present(const SurfaceArena& arena, const GuestSurface& s
     }
 
     if (!dump_path.empty()) {
-        if (!arena.dumpBmp(surface, dump_path, err)) return false;
-        last_dump_ = dump_path;
+        // ★ 帧导出是**宿主诊断**：写失败只记账（第一次 warn + 计数），⛔ **不**让 guest 的 Present 失败。
+        //   为什么必须这样（REQ-01M73YBCC3DZ05Y9NSDTRKTMMY）：旧实现 `return false` ⇒ `d3d9::present`
+        //   在 `--max-frames` 的停机检查**之前**返回 ⇒ 目录不存在时永远到不了帧数上限，进程空转到
+        //   别的停止条件（实测 546 s）。目录已由 `main` 在开跑前建好（那是第一道闸），这里只兜
+        //   "跑到一半写不进去"（磁盘满 / 权限被撤 / 目标是目录）—— 同样不许把整轮拖住。
+        std::string dump_err;
+        if (arena.dumpBmp(surface, dump_path, &dump_err)) {
+            last_dump_ = dump_path;
+        } else {
+            noteDumpFailure(dump_path, dump_err);
+            if (err != nullptr) *err = dump_err;  // 失败原因仍交给调用方（诊断用；不改变返回值）
+        }
     }
     return true;
 }

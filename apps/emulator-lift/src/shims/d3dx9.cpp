@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "runtime/com.h"
@@ -32,6 +33,7 @@
 #include "runtime/exec.h"
 #include "runtime/math.h"
 #include "runtime/memory.h"
+#include "runtime/png_decode.h"
 #include "runtime/x86.h"
 #include "shims/d3dx9_surface.h"
 #include "shims/register.h"
@@ -881,22 +883,30 @@ const std::vector<ComMethod>& textureMethods() {
 }
 
 // ---------------------------------------------------------------------------------------
-// D3DXCreateTextureFromFileInMemory：只**读文件头**建一张同尺寸的纹理（stub 级）
+// D3DXCreateTextureFromFileInMemory：读文件头建纹理 + **解 PNG 像素并上传**
 //
-// ★ 为什么先做到这里：TITLE 的 Live2D 纹理走这条导出（`.lst` 0x478398，调用点
-//   `sub_478370`；参数 = pDevice / pSrcData / SrcDataSize / ppTexture）。此前它是导入缺口，
-//   游戏在 `0x47839D test eax,eax; jns` 之后拿到失败 ⇒ 走不到模型 draw。
-//   现在返回一张**尺寸正确、像素清零**的 IDirect3DTexture9：足以让调用方继续、足以枚举
-//   后续接口；纹理内容解码是下一层（`runtime/d3dx9*` 里目前没有 PNG 解码器）。
-// ★ 支持的容器：PNG / BMP / DDS（仅未压缩 16/24/32bpp）。其它格式返回 E_FAIL（调用方本来
-//   就会处理 HRESULT 失败），并且 Warn 里点名首 8 字节 —— ⛔ 不猜尺寸。
-// ★ 像素为零 ⇒ 若后续有 draw，模型会透明/黑；这是**故意的 stub**，不是"以为画对了"。
+// ★ 这条导出是 TITLE 的 Live2D 图集页入口（`.lst` 0x478398，调用点 `sub_478370`；
+//   参数 = pDevice / pSrcData / SrcDataSize / ppTexture）。它**没有尺寸参数**：宽高来自图像头。
+// ★ 历史（`REQ-01M738VYG0DP3TNJKYDSA49J7H`）：本 shim 原先只从 PNG 的 IHDR 取宽高、像素不解码
+//   ⇒ 建出来的是一块全 0 的 arena（三张 2048² 图集页 `texserial=21/22/23` 因此永远不可见；
+//   根因定案见 `.tmp/d3d9/a4-creator.md`）。现在 PNG 走 libpng 简化 API 解成 8-bit RGBA，
+//   再**走既有的 `d3d9::lockRect` / `unlockRect`** 写进纹理 arena —— 与 native upload 同一份
+//   语义（版本号 / 脏区 / GPU 上传缓存都挂在那条路上，⛔ 不另造像素写路径）。
+// ★ 支持的容器：PNG（**真解码**，一律 A8R8G8B8）/ BMP / DDS（仅未压缩 16/24/32bpp，仍**只读头**）。
+//   其它格式返回 E_FAIL（调用方本来就会处理 HRESULT 失败），并且 Warn 里点名首 8 字节 —— ⛔ 不猜尺寸。
+// ★ 失败面：坏 PNG / 截断 / 尺寸超上限 / 上传失败 ⇒ `E_FAIL`（**可继续**，调用方 `0x47839D` 有失败分支），
+//   ⛔ 不 trap；且**不留半张纹理**（解码在 createTextureState 之前，上传失败则回收状态块 + arena ——
+//   两条失败面都有用例：`d3dx9/texture-from-memory-png` 的 ③ 与 `d3dx9/texture-upload-rollback`）。
+//   BMP / DDS 的像素仍是清零的 arena（**故意的 stub**，见需求单的"未做"）。
 // ---------------------------------------------------------------------------------------
+enum class ImageContainer { kPng, kBmp, kDds };
+
 struct ImageInfo {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::uint32_t format = 0;
     const char* kind = "?";
+    ImageContainer container = ImageContainer::kPng;
 };
 
 std::uint32_t rdBe32(const std::uint8_t* p) {
@@ -926,6 +936,7 @@ bool parseImageHeader(const std::uint8_t* b, std::size_t n, ImageInfo* out, std:
         }
         // D3DX 对 PNG 走 32bpp；带 alpha 的模型贴图必须有 alpha 通道，否则整张图会被当成不透明。
         out->kind = "PNG";
+        out->container = ImageContainer::kPng;
         out->width = w;
         out->height = h;
         out->format = d3d9::kFmtA8R8G8B8;
@@ -954,6 +965,7 @@ bool parseImageHeader(const std::uint8_t* b, std::size_t n, ImageInfo* out, std:
             return false;
         }
         out->kind = "BMP";
+        out->container = ImageContainer::kBmp;
         out->width = w;
         out->height = static_cast<std::uint32_t>(h);
         out->format = fmt;
@@ -1000,6 +1012,7 @@ bool parseImageHeader(const std::uint8_t* b, std::size_t n, ImageInfo* out, std:
             return false;
         }
         out->kind = "DDS";
+        out->container = ImageContainer::kDds;
         out->width = w;
         out->height = h;
         out->format = fmt;
@@ -1013,6 +1026,82 @@ bool parseImageHeader(const std::uint8_t* b, std::size_t n, ImageInfo* out, std:
         *why = buf;
     }
     return false;
+}
+
+// ---------------------------------------------------------------------------------------
+// 解码结果 → 纹理 arena：**只经** `d3d9::lockRect` / `unlockRect`（版本号 / 脏区 / GPU 上传缓存
+// 全挂在那条路上）。返回 false 时纹理**已解锁**，调用方负责回收状态块（⛔ 不留半张）。
+//
+// ★ 为什么不用 `esp - 8` 放 `D3DLOCKED_RECT`（native_image_upload.cpp:144 的写法）：那是
+//   "native override 在函数入口整体替掉 guest 函数、它的序言从不执行"这条特定理由；本 shim 是
+//   **导出调用**（guest 自己 `call` 进来的），没有那条前提 ⇒ 放 guest 堆上，用完立刻 free。
+// ---------------------------------------------------------------------------------------
+bool uploadRgbaToTexture(X86& cpu, std::uint32_t state, const png::RgbaImage& image, std::string* why) {
+    auto bad = [why](std::string text) {
+        if (why != nullptr) *why = std::move(text);
+        return false;
+    };
+    d3d9::TextureInfo tex;
+    if (!d3d9::textureInfoOfState(cpu, state, &tex, why)) return false;
+    if (tex.format != d3d9::kFmtA8R8G8B8 || tex.bpp != 32u) return bad("目标纹理不是 A8R8G8B8/32bpp");
+    if (tex.width != image.width || tex.height != image.height) {
+        return bad("目标纹理尺寸与解码结果不一致");
+    }
+    if (tex.locked) return bad("目标纹理已处于锁定态");
+    if (cpu.heap == nullptr) return bad("guest 堆未就绪（放不下 D3DLOCKED_RECT）");
+    const std::uint32_t locked_rect_ea = cpu.heap->alloc(8u, /*zero=*/true);
+    if (locked_rect_ea == 0) return bad("guest 堆分配 D3DLOCKED_RECT 失败");
+
+    bool ok = true;
+    std::string why_text;
+    if (!d3d9::lockRect(cpu, tex, 0u, locked_rect_ea, 0u, 0u, &why_text)) {
+        ok = false;  // 没锁上 ⇒ 不需要解锁
+    } else {
+        const std::uint32_t pitch = cpu.mem->rd32(locked_rect_ea + 0u);
+        const std::uint32_t bits = cpu.mem->rd32(locked_rect_ea + 4u);
+        const std::uint64_t need = static_cast<std::uint64_t>(pitch) * image.height;
+        if (pitch < 4u * image.width) {
+            why_text = "Lock 的 Pitch 小于 4*width（目标布局不是 32bpp top-down）";
+            ok = false;
+        } else if (bits == 0 || static_cast<std::uint64_t>(bits) + need > GuestMemory::kSpace ||
+                   !cpu.mem->committed(bits, static_cast<std::size_t>(need))) {
+            why_text = "Lock 返回的像素区间不可写（pBits 越界 / 未提交）";
+            ok = false;
+        } else {
+            // 逐行按 Lock 的 Pitch 写（⛔ 不按 width 推行距）；行序 top-down（PNG 与 D3D 一致）。
+            std::uint8_t* const dst = cpu.mem->host(bits);
+            for (std::uint32_t y = 0; y < image.height; ++y) {
+                const std::uint8_t* const src =
+                    image.rgba.data() + static_cast<std::size_t>(y) * image.width * 4u;
+                std::uint8_t* const row = dst + static_cast<std::size_t>(y) * pitch;
+                for (std::uint32_t x = 0; x < image.width; ++x) {
+                    // PNG 的 R,G,B,A ⇒ guest 的 A8R8G8B8（**内存序 B,G,R,A**，最低字节 = 蓝）。
+                    row[x * 4u + 0u] = src[x * 4u + 2u];
+                    row[x * 4u + 1u] = src[x * 4u + 1u];
+                    row[x * 4u + 2u] = src[x * 4u + 0u];
+                    row[x * 4u + 3u] = src[x * 4u + 3u];
+                }
+            }
+        }
+        // ★ 解锁**必须**发生（哪怕上面已判失败）：`lockRect` 已把状态块置成"已锁 / 内容未知"，
+        //   不解锁 ⇒ 下一次 Lock 撞 D3DERR_INVALIDCALL，且版本号永远停在 0（GPU 每次都重传 + 哈希）。
+        // ★ 快照必须**重取**：`lockRect` / `unlockRect` 只吃调用方给的 `TextureInfo`（其中的
+        //   `locked` 是**调用前**的旧值）⇒ 拿旧快照去解锁会被以"未锁"拒绝（实测口径见 d3d9.cpp:1137）。
+        d3d9::TextureInfo fresh;
+        std::string unlock_why;
+        if (!d3d9::textureInfoOfState(cpu, state, &fresh, nullptr)) {
+            if (ok) {
+                why_text = "解锁前重取纹理状态块失败";
+                ok = false;
+            }
+        } else if (!d3d9::unlockRect(cpu, fresh, 0u, &unlock_why) && ok) {
+            why_text = "解锁失败：" + unlock_why;
+            ok = false;
+        }
+    }
+    cpu.heap->free(locked_rect_ea);
+    if (!ok) return bad(std::move(why_text));
+    return true;
 }
 
 void shimD3DXCreateTextureFromFileInMemory(X86& cpu, ShimCall& call) {
@@ -1059,6 +1148,44 @@ void shimD3DXCreateTextureFromFileInMemory(X86& cpu, ShimCall& call) {
         call.result = d3d9::kFail;
         return;
     }
+    // ── PNG：**在 createTextureState 之前**解码 ───────────────────────────────────────────────
+    // ★ 顺序的唯一理由 = 失败面：解码失败 ⇒ 什么都不建（⛔ 不留一张"建好但像素全 0"的纹理）；
+    //   上传失败 ⇒ 只需 `destroyTextureState`（arena + 状态块一起回，见下面）。
+    // ★ 输入 = **guest 内存里的文件字节**：libpng 简化 API 不拷输入（只存指针，直到
+    //   `png_image_finish_read` 返回都可能读它）。这里直接把 guest 平坦映射交给它，依据：
+    //   ① `GuestMemory::host(ea) = base_ + ea`，`base_` 进程内不变；② 解码是同步的、期间不跑
+    //   guest 代码、不分配 guest 内存；③ 下面先做整段 `committed` 检查。⛔ 不用 `FILE*`。
+    png::RgbaImage decoded;
+    if (info.container == ImageContainer::kPng) {
+        // ★ 整段检查（不是仅前 128 B）：跨未提交页的读会被判成 guest fault，而 `g_access` 会带着
+        //   **上一次**访存的地址，归因会张冠李戴（见 memory.h 的 head 注释）。
+        if (static_cast<std::uint64_t>(src_ea) + static_cast<std::uint64_t>(src_size) > GuestMemory::kSpace ||
+            !cpu.mem->committed(src_ea, src_size)) {
+            d3dxWarn("D3DXCreateTextureFromFileInMemory",
+                     "PNG 的 SrcDataSize=%u 字节不全在已提交内存里（pSrcData=0x%08X）⇒ E_FAIL", src_size,
+                     src_ea);
+            call.result = d3d9::kFail;
+            return;
+        }
+        std::string decode_why;
+        if (!png::decodeRgba8(cpu.mem->host(src_ea), src_size, d3d9::kMaxTextureWidth, &decoded,
+                              &decode_why)) {
+            // ★ 坏 PNG / 截断 / 超上限 = **可继续**的失败（真机 D3DX 同样返回 E_FAIL；调用方
+            //   `0x47839D` 有失败分支）⇒ ⛔ 不 trap、⛔ 不建纹理。
+            d3dxWarn("D3DXCreateTextureFromFileInMemory", "%s（SrcDataSize=%u）⇒ E_FAIL", decode_why.c_str(),
+                     src_size);
+            call.result = d3d9::kFail;
+            return;
+        }
+        if (decoded.width != info.width || decoded.height != info.height) {
+            // 两份读数来自**同一份 IHDR**，不一致说明解析路径有问题 ⇒ 以解码结果为准（那是像素的真实尺寸）。
+            d3dxWarn("D3DXCreateTextureFromFileInMemory",
+                     "PNG 头宽高 %ux%u 与解码结果 %ux%u 不一致 ⇒ 按解码结果建纹理", info.width, info.height,
+                     decoded.width, decoded.height);
+            info.width = decoded.width;
+            info.height = decoded.height;
+        }
+    }
     std::string make_why;
     bool out_of_memory = false;
     const std::uint32_t state = d3d9::createTextureState(cpu, device, info.width, info.height, 1u, 0u,
@@ -1080,6 +1207,20 @@ void shimD3DXCreateTextureFromFileInMemory(X86& cpu, ShimCall& call) {
         call.result = d3d9::kFail;
         return;
     }
+    // ── 上传：**走既有的 lock/unlock 路径**（与 native upload 同一份语义）───────────────────
+    // ★ 失败 ⇒ 回收状态块 + arena（`destroyTextureState`），返回 E_FAIL。
+    //   这是"不留半张纹理"的唯一保证：此时 COM 对象还没建，只欠这一个清理动作。
+    if (info.container == ImageContainer::kPng) {
+        std::string upload_why;
+        if (!uploadRgbaToTexture(cpu, state, decoded, &upload_why)) {
+            d3d9::destroyTextureState(cpu, state);
+            d3dxWarn("D3DXCreateTextureFromFileInMemory",
+                     "PNG %ux%u 像素上传失败：%s ⇒ E_FAIL（状态块 / 像素块已回收）", decoded.width,
+                     decoded.height, upload_why.c_str());
+            call.result = d3d9::kFail;
+            return;
+        }
+    }
     // ★ 析构钩子：纹理对象**独占**状态块 + arena 像素块 ⇒ 引用降到 0 时由 ComRegistry 的
     //   唯一收敛点回收（内部裸 release 也覆盖）。⛔ 不要再在 Release shim 里单独调一次。
     const std::uint32_t obj =
@@ -1092,8 +1233,10 @@ void shimD3DXCreateTextureFromFileInMemory(X86& cpu, ShimCall& call) {
     }
     cpu.mem->wr32(out_ea, obj);
     d3dxLog("D3DXCreateTextureFromFileInMemory",
-            "%s %ux%u（SrcDataSize=%u）⇒ S_OK，IDirect3DTexture9 对象 0x%08X（stub：像素未解码）", info.kind,
-            info.width, info.height, src_size, obj);
+            "%s %ux%u（SrcDataSize=%u）⇒ S_OK，IDirect3DTexture9 对象 0x%08X（%s）", info.kind, info.width,
+            info.height, src_size, obj,
+            info.container == ImageContainer::kPng ? "像素已解码，经 LockRect/UnlockRect 上传"
+                                                   : "BMP/DDS 仍是 stub：只建不写");
     call.result = d3d9::kOk;
 }
 

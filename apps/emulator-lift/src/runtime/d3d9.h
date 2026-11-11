@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "runtime/surface.h"  // SurfaceFormat（像素换算与后缓冲格式）
 
@@ -49,6 +50,16 @@ constexpr std::uint32_t kFmtR5G6B5 = 23;
 constexpr std::uint32_t kFmtX1R5G5B5 = 24;
 constexpr std::uint32_t kFmtA1R5G5B5 = 25;
 constexpr std::uint32_t kFmtA4R4G4B4 = 26;
+
+// ★ 深度格式（⛔ **不在**上面那份纹理支持集里：`formatForD3dFormat` 不认它 ⇒ 当纹理问就该答"不支持"）。
+//   本线**真的建**的深度面是 32bpp（`d3d9_pipeline.cpp` 的 `createForDevice`：
+//   `pixel_format::formatForBpp(32)`），与 D3DFMT_D24S8 的字节足迹一致 ⇒ 只有 75 算"真的建了"；
+//   D16(80) 是 16bpp ⇒ ⛔ 不放行（放行就等于声称有一个没建的 16bpp 深度面）。
+constexpr std::uint32_t kFmtD24S8 = 75;
+
+// D3DUSAGE（CheckDeviceFormat 只认下面这两位；判定见 `checkDeviceFormat` 的注释）
+constexpr std::uint32_t kUsageRenderTarget = 0x00000001u;  // D3DUSAGE_RENDERTARGET
+constexpr std::uint32_t kUsageDepthStencil = 0x00000002u;  // D3DUSAGE_DEPTHSTENCIL
 
 // D3DDEVTYPE
 constexpr std::uint32_t kDevTypeHal = 1;
@@ -287,9 +298,9 @@ void destroyDeviceState(X86& cpu, std::uint32_t state);
 //   （⛔ 不谎称 3.0 让引擎走进没实现的路径）。
 std::uint32_t fillCaps(X86& cpu, std::uint32_t caps_ea, std::string* why);
 
-// ---- CheckDeviceFormat 的**诊断记录**（宿主侧环形缓冲；⛔ 不是语义状态）----
-// ★ 为什么要有：`CheckDeviceFormat` 本线一律答 S_OK（不真的枚举格式），但不许"对什么都答 S_OK
-//   又不留痕" ⇒ 每次调用记一条，夹具可以断言"引擎问了什么"。
+// ---- CheckDeviceFormat：**真值判定** + 诊断记录（宿主侧环形缓冲；⛔ 记录不是语义状态）----
+// ★ 为什么记录：判定的答案必须**能与"引擎问了什么"对账** ⇒ 每次调用记一条（含不支持的那些），
+//   夹具可以断言"引擎问了什么 / 我们答了什么"。
 struct CheckFormatQuery {
     std::uint32_t adapter = 0;
     std::uint32_t device_type = 0;
@@ -304,6 +315,11 @@ std::size_t checkFormatQueryCount();
 // `newest` = 0 是最新一条；越界 ⇒ false。
 bool checkFormatQueryAt(std::size_t newest, CheckFormatQuery* out);
 void recordCheckFormatQuery(const CheckFormatQuery& q);
+// ★ CheckDeviceFormat 的**真值**判定（D3D9 语义）：支持 ⇒ `kOk`，不支持 ⇒ `kNotAvailable`。
+//   支持集**与纹理创建同一份**（`runtime/d3d9.cpp` 的 `formatForD3dFormat`，⛔ 不另写一张表）；
+//   规则（RType/Usage 的组合、RT 只认 32bpp、SURFACE 只认真的建的深度格式）写在实现处。
+//   ⛔ 未知格式 / 未知 Usage / 其它 RType 一律不支持（不"放行未知"）。
+std::uint32_t checkDeviceFormat(const CheckFormatQuery& q);
 
 // ---- 渲染动作（本簇的"真的做"那一半）----
 // Clear：把**后缓冲**像素清成给定颜色（D3DCOLOR = 0xAARRGGBB，按 back buffer 的像素格式换算）。
@@ -416,6 +432,79 @@ struct TexturePixels {
     std::uint64_t hash = 0;     // FNV-1a over sampled pixels
 };
 bool sampleTexture(X86& cpu, std::uint32_t object, TexturePixels* out);
+
+// =====================================================================================
+// 派生 mip 链（REQ-01M73G2724479XAVS176WBZ65Q：缩小采样必须有 mip，否则走样）
+//
+// ★ 口径（**与 guest 可见的 `MipLevels` 解耦**）：
+//   · 真机 `D3DXCreateTextureFromFileInMemory` 缺省 `D3DX_DEFAULT` = **整条 mip 链**；本线建纹理时
+//     `kTxLevels` 仍是调用方传的那个数（GetLevelCount 不变），链是**我们的内部派生数据**；
+//   · `LockRect` / `GetLevelDesc` 仍**只支持 level 0**（其余返回既有失败码）—— 链不经 guest 内存，
+//     ⛔ 也不进 SurfaceArena（那是另一本账：`surfaceCount()` / `bytesInUse()` 的基线断言会跟着动），
+//     放在 `d3d9.cpp` 里的**宿主旁路表**（键 = `TextureInfo::serial`，进程级单调、永不复用）；
+//   · 各级尺寸 = `w>>i × h>>i`（最小 1×1），每级 pitch = `align(w_i * bpp/8, 4)` 字节；
+//     `mipChainBytes()` = level 1..N 之和（level 0 仍在 arena 里）。
+// ★ 失效判据：`valid && version != 0 && version == 生成时的内容版本`。`version == 0`（正在 Lock /
+//   被当 render target / `markTextureContentUnknown`）⇒ **每次取都重建**并保持 valid=false：
+//   ⛔ 不许"内容未知就只采 level 0"（那正是本单要修的静默走样）。
+// =====================================================================================
+// 全链级数（含 level 0；`1×1` ⇒ 1；`2048×2048` ⇒ 12；`350×35` ⇒ 9）。
+std::uint32_t mipLevelCount(std::uint32_t width, std::uint32_t height);
+// 第 level 级的尺寸（`>> level`，最小 1）。
+std::uint32_t mipLevelWidth(std::uint32_t width, std::uint32_t level);
+std::uint32_t mipLevelHeight(std::uint32_t height, std::uint32_t level);
+// 第 level 级的行距（字节）：`align(w_level * ceil(bpp/8), 4)`。bpp 是**位**/像素（与 TextureInfo 一致）。
+std::uint32_t mipLevelPitch(std::uint32_t width, std::uint32_t bpp, std::uint32_t level);
+// 第 level 级在链块里的偏移（level >= 1；level 0 **以及越界**都返回 0 —— 越界取级由调用方拒绝）。
+std::uint32_t mipLevelOffset(std::uint32_t width, std::uint32_t height, std::uint32_t bpp, std::uint32_t level);
+// level 1..N 的字节总数（链块大小；1×1 纹理 = 0）。
+std::uint64_t mipChainBytes(std::uint32_t width, std::uint32_t height, std::uint32_t bpp);
+// 单级 box filter 降采样（含 alpha；逐通道 `(sum + n/2) / n`）：
+//   · 偶数尺寸 ⇒ **严格 2×2 平均**；
+//   · 奇数尺寸 ⇒ 按覆盖范围 `[floor(x*sw/dw), floor((x+1)*sw/dw))` 取整块（不丢最后一行/列）。
+// `dst_w` 必须 == `max(1, src_w/2)`、`dst_h` 同理（否则什么都不做）。
+void mipDownsampleBox(const std::uint8_t* src, std::uint32_t src_w, std::uint32_t src_h, std::uint32_t src_pitch,
+                      std::uint8_t* dst, std::uint32_t dst_w, std::uint32_t dst_h, std::uint32_t dst_pitch,
+                      std::uint32_t bytes_per_pixel);
+
+struct TextureMipChain {
+    std::uint32_t serial = 0;   // 纹理身份（TextureInfo::serial）
+    std::uint32_t levels = 1;   // 全链级数（含 level 0）
+    std::uint32_t width = 0;    // level 0 尺寸（跨纹理防串台）
+    std::uint32_t height = 0;
+    std::uint32_t bpp = 0;      // 位/像素（与 TextureInfo::bpp 同口径）
+    std::uint32_t version = 0;  // 生成时 level 0 的内容版本（0 = 未知）
+    bool valid = false;         // 见上面的失效判据
+    std::vector<std::uint8_t> bytes;  // level 1..N（每级 pitch = mipLevelPitch）
+    std::uint64_t use = 0;            // LRU 用（纯回收策略，不是语义）
+    std::uint64_t epoch = 0;          // 被哪一个"轮"用过（见下；同轮内的链不许被 LRU 回收）
+};
+
+// ★ 指针生命周期（**必须成对理解**）：
+//   `beginMipEpoch()` 之后建/取到的链，在本"轮"内**不会被 LRU 回收** ⇒ 同一次 Draw 里多个 stage 的
+//   链指针可以同时有效（否则"后一个 stage 重建链"会按 LRU 把前一个 stage 刚拿到的链收掉 ⇒ 悬垂）。
+//   `d3d9_pipeline.cpp` 的 `prepareContext` **每次 Draw 调一次**（一轮 = 一个 Draw 的时间窗）。
+//   ⛔ 仍然不要跨 Draw 存 `TextureMipChain*`（下一轮就可能被回收 / 被重建换掉）。
+void beginMipEpoch();
+
+// 取（必要时从 level 0 **box filter 逐级生成**）某纹理的派生链。
+//   · 链有效且版本一致 ⇒ 直接返回（不重算）；
+//   · 链不存在 / 版本变了 / `version == 0`（内容未知）⇒ 重建（`*rebuilt` 置 true，供 `[draw] miprb=` 记账）；
+//   · 返回 nullptr ⇒ 不可用（OOM / 状态块或 arena 对不上）—— 调用方按 level 0 采样
+//     并 `noteMipLevel0Sampled()` 记账（⛔ 不静默）。
+// ★ 返回的指针在本轮内有效（见 `beginMipEpoch`）。
+const TextureMipChain* ensureTextureMipChain(X86& cpu, const TextureInfo& tex, bool* rebuilt, std::string* why);
+// 链缓存诊断 / 守卫用（宿主旁路表：链数 / 字节 / 生成次数 / 退回 level 0 的采样次数）。
+struct MipCacheStats {
+    std::uint64_t chains = 0;
+    std::uint64_t bytes = 0;
+    std::uint64_t builds = 0;
+    std::uint64_t level0_fallbacks = 0;
+};
+MipCacheStats mipCacheStats();
+void resetMipCache();
+void noteMipLevel0Sampled();
+
 // IDirect3DSurface9 的状态块：纹理表面（'TEX1'）或后缓冲（'D9D1'）。
 // 返回的 TextureInfo 只填 surface 需要的字段（state 是原状态块；后缓冲的 device = 设备状态块 +60）。
 bool surfaceInfoOfState(X86& cpu, std::uint32_t state, TextureInfo* out, std::string* why);

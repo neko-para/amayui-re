@@ -188,7 +188,9 @@ constexpr std::uint32_t kOffDrawIndexedPrimitive = 0x148u;
 constexpr std::uint32_t kOffTextureLockRect = 0x4Cu;
 constexpr std::uint32_t kOffTextureUnlockRect = 0x50u;
 constexpr std::uint32_t kOffSetViewport = 0xBCu;
+constexpr std::uint32_t kOffGetViewport = 0xC0u;             // SetViewport(+0xBC) 的下一个槽
 constexpr std::uint32_t kOffSetRenderTarget = 0x94u;         // ★ 0x4A778B
+constexpr std::uint32_t kOffGetBackBuffer = 0x48u;           // ★ 0x4A51DF（回程 0x4A521B 用它取后缓冲表面）
 constexpr std::uint32_t kOffTextureGetSurfaceLevel = 0x48u;  // ★ 0x4A7755
 constexpr std::uint32_t kOffRelease = 0x08u;                 // IUnknown::Release（所有 COM 对象同槽）
 
@@ -404,6 +406,14 @@ struct Fixture {
         wr(20u, 0x3F800000u);  // MaxZ = 1.0f
         return method(device.object, kOffSetViewport, {placeBytes(vp)});
     }
+    // GetViewport：只读回 X/Y/W/H（MinZ/MaxZ 也在同一块里，但本线不消费它们 ⇒ 不断言）
+    std::uint32_t getViewport(std::uint32_t* xywh) {
+        const std::vector<std::uint8_t> vp(24u, 0xEEu);
+        const std::uint32_t ea = placeBytes(vp);
+        const std::uint32_t hr = method(device.object, kOffGetViewport, {ea});
+        for (int i = 0; i < 4; ++i) xywh[i] = m.mem().rd32(ea + static_cast<std::uint32_t>(i) * 4u);
+        return hr;
+    }
     std::uint32_t setTexture(std::uint32_t stage, std::uint32_t tex) {
         return method(device.object, kOffSetTexture, {stage, tex});
     }
@@ -589,6 +599,66 @@ void caseTransformRoundtrip() {
     LIFT_CHECK_EQ_U32(r.f.m.mem().rd32(fvf_out), kFvfXyzRhwDiffuse);
     // 不支持的 FVF（位置类型 = 0x0E XYZB5 之外没有 ⇒ 用 0x1 = RESERVED0）⇒ INVALIDCALL
     LIFT_CHECK_EQ_U32(r.f.setFvf(0x0001u), lift::d3d9::kInvalidCall);
+}
+
+// ---------------------------------------------------------------------------------------
+// ①b `SetRenderState` 的 State 上界（`REQ-01M7372P560TMY51NJ3ARG4ENG` 第 1 处）
+//
+// 判据（红了意味着什么）：
+//   ① `SetRenderState(0xFFFF, 1)` / `SetRenderState(256, 1)` / `SetRenderState(0xFFFFFFFF, 1)`
+//      ⇒ `D3DERR_INVALIDCALL`（修前：直接算 `kPlRenderStates + state*4` ⇒ 返回 S_OK 并**写穿**
+//      20.7 KB 的状态块，state=0xFFFF 时写到块外 ≈256 KB 的 guest 堆里）；
+//   ② 那 256 项渲染状态**逐项不变**（guest 可见路径 `GetRenderState` 回读，修前越界写不在这 256 项里，
+//      但"Set 失败却改了状态"这一类错会当场红）；
+//   ③ 整个 guest 堆**逐字节不变**（修前那次写落在相邻堆空间里，256 项回读看不见 ⇐ 这条才抓它）；
+//   ④ Set / Get 对称：`GetRenderState(256)` 早就 INVALIDCALL，Set 现在同口径。
+// ---------------------------------------------------------------------------------------
+void caseRenderStateBound() {
+    lift_test::g_current_case = "d3d9p/render-state-bound";
+    Rig r;
+    LIFT_CHECK(r.up());
+    if (r.f.device.object == 0) return;
+
+    // 先写几项**非零**状态：否则"字节不变"退化成"全 0 对比全 0"，越界写也看不出来。
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsZEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsFillMode, 3u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsShadeMode, 2u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsCullMode, 3u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsColorWriteEnable, 0xFu), 0u);
+
+    // ① 256 项基线（全部走 guest 可见的 GetRenderState）
+    std::vector<std::uint32_t> before(256u, 0xDEADBEEFu);
+    for (std::uint32_t i = 0; i < 256u; ++i) before[i] = r.f.getRs(i);
+    LIFT_CHECK_NE_U32(before[lift::d3d9::kRsColorWriteEnable], 0xDEADBEEFu);
+
+    // ② 整个 guest 堆的字节基线（状态块就在这块堆里 ⇒ 覆盖"256 项"且能抓块外写）
+    auto heapBytes = [&r]() {
+        const std::uint32_t base = r.f.m.layout().heap_base;
+        std::vector<std::uint8_t> out(kFixtureHeapBytes, 0u);
+        for (std::uint32_t i = 0; i < kFixtureHeapBytes; ++i)
+            out[i] = r.f.m.mem().rd8(base + i);
+        return out;
+    };
+    const std::vector<std::uint8_t> heap_before = heapBytes();
+
+    // ③ 越界 Set：三条都必须 INVALIDCALL（边界 256 / 典型 0xFFFF / 回绕 0xFFFFFFFF）
+    LIFT_CHECK_EQ_U32(r.f.setRs(256u, 1u), lift::d3d9::kInvalidCall);
+    LIFT_CHECK_EQ_U32(r.f.setRs(0xFFFFu, 1u), lift::d3d9::kInvalidCall);
+    LIFT_CHECK_EQ_U32(r.f.setRs(0xFFFFFFFFu, 1u), lift::d3d9::kInvalidCall);
+
+    // ④ 一项都没变（先看 256 项，再看整块堆）
+    for (std::uint32_t i = 0; i < 256u; ++i) LIFT_CHECK_EQ_U32(r.f.getRs(i), before[i]);
+    const std::vector<std::uint8_t> heap_after = heapBytes();
+    LIFT_CHECK(heap_before.size() == heap_after.size());
+    LIFT_CHECK(heap_before == heap_after);
+
+    // ⑤ Set/Get 对称：256 时 Get 的既有口径就是 INVALIDCALL
+    const std::uint32_t out = r.f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffGetRenderState, {256u, out}), lift::d3d9::kInvalidCall);
+
+    // ⑥ 非法调用之后，合法状态照旧可写可读（⛔ 不是把整条路关掉）
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsZEnable, 1u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.getRs(lift::d3d9::kRsZEnable), 1u);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -828,6 +898,117 @@ void caseMinFilterSampling() {
 
     LIFT_CHECK_EQ_U32(r.f.setTexture(0u, 0u), 0u);
     LIFT_CHECK_EQ_U32(r.f.method(tex, 0x08u, {}), 0u);
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑤b 派生 mip 的**选级**（`REQ-01M73G2724479XAVS176WBZ65Q`；缩小采样必须有 mip）
+//
+// 判据（红了意味着什么）：
+//   ① 同一张 4×4 纹理在 **1:1** 下（且 MIPFILTER 已开）四角/网格像素**必须等于 level 0 的 texel**
+//      —— 这是"不改变已经正确的情形"的判据；LOD 公式符号错 / 取整偏一档，这条当场红；
+//   ② **2:1** 下必须等于 level 1 的 box filter 值；**4:1** 下必须等于 level 2（整张平均）；
+//   ③ `MIPFILTER = NONE` ⇒ 关掉 mipmap，4:1 也必须只采 level 0（D3D9 语义）；
+//   ④ Unlock 改了像素 ⇒ 下次再画必须用**新**链（旧链不许留在缓存里）；
+//   ⑤ 纹理 Release 之后链缓存里那一条必须没了（`mipCacheStats().chains` 归零）。
+// ★ 期望值全部是**手算**的：4×4 的 R 通道 = 行优先 0,2,10,14 / 4,6,18,22 / 100,108,0,0 / 120,128,0,0
+//   ⇒ level1（2×2）= [3, 16; 114, 0]（每块 4 个数取 (sum+2)/4），level2 = (3+16+114+0)/4 = 33。
+// ---------------------------------------------------------------------------------------
+void caseMipLevels() {
+    lift_test::g_current_case = "d3d9p/mip-levels";
+    Rig r;
+    LIFT_CHECK(r.up());
+    if (r.f.device.object == 0) return;
+
+    std::uint32_t tex = 0;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, 4u, 4u, lift::d3d9::kFmtA8R8G8B8, &tex), 0u);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return;
+
+    const std::uint32_t texels[16] = {0u, 2u, 10u, 14u, 4u, 6u, 18u, 22u, 100u, 108u, 0u, 0u, 120u, 128u, 0u, 0u};
+    auto writeTexels = [&](const std::uint32_t values[16]) -> bool {
+        const std::uint32_t locked = r.f.placeBytes(std::vector<std::uint8_t>(8, 0));
+        if (r.f.method(tex, kOffTextureLockRect, {0u, locked, 0u, 0u}) != 0u) return false;
+        const std::uint32_t pitch = r.f.m.mem().rd32(locked + 0u);
+        const std::uint32_t bits = r.f.m.mem().rd32(locked + 4u);
+        for (int y = 0; y < 4; ++y) {
+            for (int x = 0; x < 4; ++x) {
+                r.f.m.mem().wr32(bits + static_cast<std::uint32_t>(y) * pitch + static_cast<std::uint32_t>(x) * 4u,
+                                 0xFF000000u | (values[y * 4 + x] << 16));
+            }
+        }
+        return r.f.method(tex, kOffTextureUnlockRect, {0u}) == 0u;
+    };
+    LIFT_CHECK(writeTexels(texels));
+
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsZEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsCullMode, lift::d3d9::kCullNone), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsAlphaBlendEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setTexture(0u, tex), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMagFilter, lift::d3d9::kTexfPoint), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMinFilter, lift::d3d9::kTexfPoint), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampAddressU, lift::d3d9::kAddressClamp), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampAddressV, lift::d3d9::kAddressClamp), 0u);
+    // ★ MIPFILTER 缺省是 NONE（= 关掉 mipmap）⇒ 想测选级就必须显式打开。
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMipFilter, lift::d3d9::kTexfPoint), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setFvf(kFvfXyzRhwDiffuseTex1), 0u);
+
+    const std::uint32_t white = 0xFFFFFFFFu;
+    auto drawQuad = [&](float size) {
+        const std::vector<Fixture::TexVertex> quad = {
+            {0.0f, 0.0f, 0.0f, 1.0f, white, 0.0f, 0.0f},
+            {size, 0.0f, 0.0f, 1.0f, white, 1.0f, 0.0f},
+            {0.0f, size, 0.0f, 1.0f, white, 0.0f, 1.0f},
+            {size, 0.0f, 0.0f, 1.0f, white, 1.0f, 0.0f},
+            {size, size, 0.0f, 1.0f, white, 1.0f, 1.0f},
+            {0.0f, size, 0.0f, 1.0f, white, 0.0f, 1.0f},
+        };
+        const std::uint32_t data = r.f.placeTexVertices(quad);
+        LIFT_CHECK_EQ_U32(r.f.clearTo(kClearColor), 0u);
+        LIFT_CHECK_EQ_U32(r.f.beginScene(), 0u);
+        LIFT_CHECK_EQ_U32(r.f.drawUp(lift::d3d9::kPtTriangleList, 2u, data, 28u), 0u);
+        LIFT_CHECK_EQ_U32(r.f.endScene(), 0u);
+    };
+
+    // ---- ② 先做 2:1 / 4:1（这一步才**建**链），这样随后的 1:1 是"链已存在但仍然取 level 0"----
+    drawQuad(2.0f);  // 2:1 ⇒ level 1（[3,16;114,0]）
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(0, 0), 0x00030000u);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(1, 0), 0x00100000u);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(0, 1), 0x00720000u);  // 114 = 0x72
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(1, 1), 0x00000000u);
+
+    drawQuad(1.0f);  // 4:1 ⇒ level 2（整张平均 = 33 = 0x21）
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(0, 0), 0x00210000u);
+
+    // ---- ③ MIPFILTER=NONE ⇒ 只 level 0：4:1 也取 level 0 的 texel(2,2) = 0（黑）----
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMipFilter, lift::d3d9::kTexfNone), 0u);
+    drawQuad(1.0f);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(0, 0), 0x00000000u);
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMipFilter, lift::d3d9::kTexfPoint), 0u);
+
+    // ---- ① 1:1（链已存在）⇒ 必须逐 texel 等于 level 0 ----
+    drawQuad(4.0f);
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            LIFT_CHECK_EQ_U32(r.f.pixelAt(x, y), (texels[y * 4 + x] << 16));
+        }
+    }
+
+    // ---- ④ Unlock 换像素 ⇒ 同一 4:1 画必须用新链（全部 200 ⇒ 200，⛔ 不是旧的 33）----
+    const std::uint32_t builds_before = static_cast<std::uint32_t>(lift::d3d9::mipCacheStats().builds);
+    std::uint32_t all200[16];
+    for (int i = 0; i < 16; ++i) all200[i] = 200u;
+    LIFT_CHECK(writeTexels(all200));
+    drawQuad(1.0f);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(0, 0), 0x00C80000u);  // 200 = 0xC8
+    LIFT_CHECK(lift::d3d9::mipCacheStats().builds > builds_before);
+
+    // ---- ⑤ Release 之后链缓存里那条必须没了 ----
+    const std::uint64_t chains_before = lift::d3d9::mipCacheStats().chains;
+    LIFT_CHECK(chains_before >= 1u);
+    LIFT_CHECK_EQ_U32(r.f.setTexture(0u, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.method(tex, 0x08u, {}), 0u);  // 纹理 Release 到 0
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::d3d9::mipCacheStats().chains),
+                      static_cast<std::int64_t>(chains_before) - 1);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1311,6 +1492,92 @@ void caseRenderTargetLifetime() {
 
     // 清理：B（guest 的引用；A/C/D/E 的引用在 ③④⑤⑥⑦ 里已经放掉 / 随 RT 回收）
     LIFT_CHECK_EQ_U32(r.f.method(tex_b, kOffRelease, {}), 0u);
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑩-B SetRenderTarget 把 viewport 回写成**新目标的全幅**（REQ-01M7372FBT0WBXAS2Z1NESBRFG）
+//    D3D9（IDirect3DDevice9::SetRenderTarget 的 Remarks）：绑定新 render target 会把 viewport
+//    设成新目标的全幅。引擎只在 Reset 后设一次全屏 viewport（`0x4988D1-0x498910`），之后三处
+//    渲染到纹理（`0x4A778B` / `0x4A515E` / `0x4A521B`）都靠这条 ⇒ 不回写就按**旧**视口映射/裁剪。
+// ★ 修前红点：`setRenderTarget` 只写 `kPlColorSurface` / `kPlColorArena` ⇒ ② 里 `GetViewport`
+//   仍是 guest 设的 48×48（不是纹理的 32×16）。
+// ★ 断言里**不碰** MinZ/MaxZ：本线只把它们原样存取、光栅从不消费 ⇒ 锁住"不动"等于把无证据的
+//   实现取舍写进 test（本单只要求 X/Y/W/H）。
+// ---------------------------------------------------------------------------------------
+void caseSetRenderTargetViewport() {
+    lift_test::g_current_case = "d3d9p/set-render-target-viewport";
+    Rig r;
+    LIFT_CHECK(r.up());
+    if (r.f.device.object == 0) return;
+    auto& mem = r.f.m.mem();
+
+    constexpr std::uint32_t kTexW = 32u;
+    constexpr std::uint32_t kTexH = 16u;  // 两个维度都与后缓冲（64×64）不同
+    std::uint32_t tex = 0;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, kTexW, kTexH, lift::d3d9::kFmtA8R8G8B8, &tex), 0u);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return;
+    const std::uint32_t surface_out = r.f.placeU32(0u);
+    LIFT_CHECK_EQ_U32(r.f.method(tex, kOffTextureGetSurfaceLevel, {0u, surface_out}), 0u);
+    const std::uint32_t surface = mem.rd32(surface_out);
+    LIFT_CHECK_NE_U32(surface, 0u);
+    if (surface == 0) return;
+
+    // 前提：初始 viewport = 后缓冲全幅（`initDefaults` 造的就是 Reset 后引擎自己设的那个）
+    std::uint32_t vp[4] = {0xDEADBEEFu, 0xDEADBEEFu, 0xDEADBEEFu, 0xDEADBEEFu};
+    LIFT_CHECK_EQ_U32(r.f.getViewport(vp), 0u);
+    LIFT_CHECK_EQ_U32(vp[0], 0u);
+    LIFT_CHECK_EQ_U32(vp[1], 0u);
+    LIFT_CHECK_EQ_U32(vp[2], 64u);
+    LIFT_CHECK_EQ_U32(vp[3], 64u);
+
+    // ① guest 自己设一个子视口（与纹理、后缓冲的尺寸都不同）
+    LIFT_CHECK_EQ_U32(r.f.setViewport(8u, 8u, 48u, 48u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.getViewport(vp), 0u);
+    LIFT_CHECK_EQ_U32(vp[0], 8u);
+    LIFT_CHECK_EQ_U32(vp[1], 8u);
+    LIFT_CHECK_EQ_U32(vp[2], 48u);
+    LIFT_CHECK_EQ_U32(vp[3], 48u);
+
+    // ② 绑定纹理表面 ⇒ viewport 必须是 (0,0,纹理宽,纹理高)　★ 修前这里读到 (8,8,48,48) ⇒ 红
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {surface, 0u}), 0u);
+    LIFT_CHECK_EQ_U32(r.f.getViewport(vp), 0u);
+    LIFT_CHECK_EQ_U32(vp[0], 0u);
+    LIFT_CHECK_EQ_U32(vp[1], 0u);
+    LIFT_CHECK_EQ_U32(vp[2], kTexW);
+    LIFT_CHECK_EQ_U32(vp[3], kTexH);
+
+    // ③ 重复设**同一个** target（不换目标）：这条副作用不依赖"目标换没换"
+    LIFT_CHECK_EQ_U32(r.f.setViewport(4u, 4u, 8u, 8u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {surface, 0u}), 0u);
+    LIFT_CHECK_EQ_U32(r.f.getViewport(vp), 0u);
+    LIFT_CHECK_EQ_U32(vp[2], kTexW);
+    LIFT_CHECK_EQ_U32(vp[3], kTexH);
+
+    // ④ target == 0 ⇒ 回到后缓冲尺寸
+    //    ★ "NULL 当成后缓冲"是**本线契约**（真机 SetRenderTarget(NULL, 0) 是 D3DERR_INVALIDCALL），
+    //      这里断的是本线契约 + 回写副作用，⛔ 不宣称这是 D3D9 语义。
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, 0u}), 0u);
+    LIFT_CHECK_EQ_U32(r.f.getViewport(vp), 0u);
+    LIFT_CHECK_EQ_U32(vp[0], 0u);
+    LIFT_CHECK_EQ_U32(vp[1], 0u);
+    LIFT_CHECK_EQ_U32(vp[2], 64u);
+    LIFT_CHECK_EQ_U32(vp[3], 64u);
+
+    // ⑤ 引擎的真实回程（`0x4A521B`）：传的是 `GetBackBuffer` 的**后缓冲 surface 对象**（不是 NULL）
+    //    ⇒ 尺寸走 `surfaceInfoOfState` 的 DeviceInfo 分支，仍然必须是后缓冲尺寸。
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {surface, 0u}), 0u);
+    const std::uint32_t bb_out = r.f.placeU32(0u);
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffGetBackBuffer, {0u, 0u, 0u, bb_out}), 0u);
+    const std::uint32_t bb_surface = mem.rd32(bb_out);
+    LIFT_CHECK_NE_U32(bb_surface, 0u);
+    if (bb_surface == 0) return;
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {bb_surface, 0u}), 0u);
+    LIFT_CHECK_EQ_U32(r.f.getViewport(vp), 0u);
+    LIFT_CHECK_EQ_U32(vp[0], 0u);
+    LIFT_CHECK_EQ_U32(vp[1], 0u);
+    LIFT_CHECK_EQ_U32(vp[2], 64u);
+    LIFT_CHECK_EQ_U32(vp[3], 64u);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -2017,15 +2284,18 @@ int main() {
     using namespace lift_test;
     try {
         caseTransformRoundtrip();
+        caseRenderStateBound();
         caseScenePairing();
         caseSolidTriangle();
         caseTexturedQuad();
         caseMinFilterSampling();
+        caseMipLevels();
         caseZBuffer();
         caseAlphaBlend();
         caseDrawStateSnapshot();
         caseClipPlanes();
         caseRenderTargetLifetime();
+        caseSetRenderTargetViewport();
         caseOwnerLifetimeAndStaleGeneration();
         caseStaleStreamBinding();
         caseStaleTextureBindingInDraw();

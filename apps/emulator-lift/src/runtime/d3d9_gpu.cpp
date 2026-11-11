@@ -28,6 +28,8 @@
 //   · 混合 = SDL_GPUColorTargetBlendState 的 **color / alpha 两段**（支持 D3D 的 separate alpha）；
 //     映射不了的因子/op 明确失败（d3d9_pipeline 会先拒绝，这里再兜一层）。
 //   · 纹理 = stage 0 单级 32bpp；片元置换（GpuTexMode）选择对应 entrypoint。
+//   · 派生 mip（`REQ-01M73G2724479XAVS176WBZ65Q`）：`num_levels` = 整链，level 1..N 由 box filter
+//     从**完整 level 0** 算好逐级整级上传；sampler 显式 `max_lod > 0`（缺省 0 会静默只用 level 0）。
 //   · sampler = 缓存 (address U/V × MAG/MIN)；缺省 NEAREST+CLAMP（D3DXSprite 现状不变）。
 //   · 纹理上传按 (guest 指针/尺寸/alpha) 缓存，**像素内容未变就不重传**
 //     （TITLE 的 ID3DXSprite::End 曾因每次 draw 完整 upload 而 ~118–206 ms）。
@@ -42,12 +44,14 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <string>
 #include <vector>
 
 #include "runtime/gpu_raster.h"
+#include "runtime/d3d9.h"  // 派生 mip 的尺寸 / 偏移 / box filter（唯一一份实现，见 d3d9.cpp）
 #include "runtime/pixel_format.h"
 
 namespace lift {
@@ -191,6 +195,10 @@ constexpr TexEntry kTexEntries[] = {
     {"PSMainTexSelAlphaDiff", GpuTexMode::SelectColorDiffuseAlpha},
 };
 constexpr std::size_t kTexEntryCount = sizeof(kTexEntries) / sizeof(kTexEntries[0]);
+
+// ★ 诊断用：到目前为止入队的**带批号** draw 数（`LIFT_GPU_FF_TEX` 的 `[gpu-depth]` 用它定位
+//   `Clear(ZBUFFER)` 落在哪两批之间）。只在探针开启时被读，⛔ 不参与任何判据。
+std::uint64_t g_ff_tag_seq = 0;
 
 std::uint64_t hashPixels(const std::uint8_t* pixels, std::uint32_t pitch, int width, int height) {
     std::uint64_t h = 1469598103934665603ull;
@@ -455,6 +463,77 @@ public:
         return true;
     }
 
+    // -----------------------------------------------------------------------------------
+    // 诊断探针（`LIFT_GPU_FF_TEX=1`）：把一张**采样纹理**的 level 0 整级读回 CPU。
+    // ★ 只读：独立的 command buffer + fence 等待，⛔ 不改任何状态、⛔ 不计入 `g_stats`
+    //   （计数器的口径是"光栅化/呈现路径的提交次数"，诊断不该污染它）。
+    // ★ 为什么读**整级**而不是 1×1：D3D12 的 buffer row pitch 有 256 字节对齐要求，1 texel 宽的
+    //   下载会落到"行距 4 字节"这种边角上；整级读回的行距 = w*4（2048 ⇒ 8192，天然对齐），
+    //   而且顺带给出"整幅是不是空"的判据。代价 = 一张 2048² 的 16 MiB 拷贝，只在探针开启时付一次。
+    bool downloadTextureLevel0(SDL_GPUTexture* tex, int width, int height, std::vector<std::uint8_t>* out) {
+        if (tex == nullptr || width <= 0 || height <= 0 || out == nullptr) return false;
+        const std::size_t bytes = static_cast<std::size_t>(width) * 4u * static_cast<std::size_t>(height);
+        if (bytes > 0xFFFFFFFFull) return false;
+        SDL_GPUTransferBufferCreateInfo ti{};
+        ti.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+        ti.size = static_cast<Uint32>(bytes);
+        SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(device_, &ti);
+        if (tb == nullptr) return false;
+        SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+        if (cmd == nullptr) {
+            SDL_ReleaseGPUTransferBuffer(device_, tb);
+            return false;
+        }
+        SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+        SDL_GPUTextureRegion src{};
+        src.texture = tex;
+        src.w = static_cast<Uint32>(width);
+        src.h = static_cast<Uint32>(height);
+        src.d = 1;
+        SDL_GPUTextureTransferInfo dst{};
+        dst.transfer_buffer = tb;
+        // 0 = 由 SDL 按目标区域宽度推行距（= w*4，紧密）⇒ 映射出来的字节就是 BGRA 紧排。
+        dst.pixels_per_row = 0;
+        dst.rows_per_layer = 0;
+        SDL_DownloadFromGPUTexture(copy, &src, &dst);
+        SDL_EndGPUCopyPass(copy);
+        SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+        if (fence == nullptr) {
+            SDL_ReleaseGPUTransferBuffer(device_, tb);
+            return false;
+        }
+        SDL_WaitForGPUFences(device_, true, &fence, 1);
+        SDL_ReleaseGPUFence(device_, fence);
+        bool ok = false;
+        const void* mapped = SDL_MapGPUTransferBuffer(device_, tb, false);
+        if (mapped != nullptr) {
+            const auto* p = static_cast<const std::uint8_t*>(mapped);
+            out->assign(p, p + bytes);
+            SDL_UnmapGPUTransferBuffer(device_, tb);
+            ok = true;
+        }
+        SDL_ReleaseGPUTransferBuffer(device_, tb);
+        return ok;
+    }
+
+    // env 只读一次（`LIFT_GPU_FF_TEX` 关掉时下面所有调用点都在第一行短路）。
+    static const char* ffTexProbeEnv() {
+        static const char* const env = std::getenv("LIFT_GPU_FF_TEX");
+        return env;
+    }
+
+    // 诊断**轨迹**总开关：`LIFT_GPU_FF_TEX`（纹理探针）**或** `LIFT_GPU_DEPTH_TRACE`（深度/批次轨迹）。
+    // ★ 为什么分开：修复自身的可观测性（`[gpu-depth] arm=clear` / `[gpu-pass]` / `[gpu-ff-z]`）不该
+    //   挂在"纹理探针"那个无关的 env 上 —— 只想看深度时序的人不该被迫付整级纹理下载的钱。
+    static bool gpuTraceEnabled() {
+        static const bool on = [] {
+            const char* a = std::getenv("LIFT_GPU_FF_TEX");
+            const char* b = std::getenv("LIFT_GPU_DEPTH_TRACE");
+            return (a != nullptr && a[0] != '\0') || (b != nullptr && b[0] != '\0');
+        }();
+        return on;
+    }
+
     // ★ 旧接口 = 入队 + 立即 flush（语义不变；fixtures / `--gpu-verify` 靠它"画完立刻能读"）。
     bool rasterDraw(const GpuRasterVertex* vertices, std::size_t count, const GpuRasterState& state,
                     std::string* err) override {
@@ -492,6 +571,7 @@ public:
         // ★ 纹理在**入队时**就交给后端（像素拷进 staging；⛔ 不存 guest 指针）。
         //   采样矩形先算好（后面的内容变更要拿它判"要不要切段"）；`ensureTexture` 可能因此
         //   在本段后面切开一个新段。
+        const std::uint64_t uploads_before = g_stats.uploads;
         if (texture != nullptr) {
             const int tex_w = texture->pixels != nullptr ? texture->width : 1;
             const int tex_h = texture->pixels != nullptr ? texture->height : 1;
@@ -504,6 +584,94 @@ public:
         }
         draw.vertex_offset = static_cast<std::uint32_t>(queued_vertices_);
         queued_vertices_ += count;
+        // ★ 批号在**入队那一刻**取值（生产者随队列设/清）；flush 时按条目回报，⛔ 不读全局当前值。
+        draw.batch_tag = gpuRasterBatchTag();
+        // ★ 诊断探针（`LIFT_GPU_FF_TEX=1`）：装不装、采哪个 texel 全由纯函数判（`gpu_raster.h`）。
+        //   ⛔ 这一段无论走不走都不碰像素/状态；env 关闭时 `gpuFfTexProbeWanted` 第一行就 false。
+        if (gpuTraceEnabled() && draw.batch_tag != 0 && !draw.vertices.empty()) {
+            ++g_ff_tag_seq;
+            // 每批一行的 z 范围（`a12` §5 的 `<待核>` #1：`[draw]` 的 `z=` 只是状态位，不是顶点 z）。
+            float zlo = draw.vertices[0].z;
+            float zhi = zlo;
+            float xlo = draw.vertices[0].x, xhi = xlo;
+            float ylo = draw.vertices[0].y, yhi = ylo;
+            for (const GpuRasterVertex& v : draw.vertices) {
+                if (v.z < zlo) zlo = v.z;
+                if (v.z > zhi) zhi = v.z;
+                if (v.x < xlo) xlo = v.x;
+                if (v.x > xhi) xhi = v.x;
+                if (v.y < ylo) ylo = v.y;
+                if (v.y > yhi) yhi = v.y;
+            }
+            std::fprintf(stderr,
+                         "[gpu-ff-z] tag=%llu tex=%d zr=%.4f..%.4f depth=%d/%d/%u count=%zu "
+                         "bb=%.1f,%.1f..%.1f,%.1f cw=%u blend=%d/%u,%u/%u\n",
+                         static_cast<unsigned long long>(draw.batch_tag), draw.textured ? 1 : 0,
+                         static_cast<double>(zlo), static_cast<double>(zhi), draw.state.depth_test ? 1 : 0,
+                         draw.state.depth_write ? 1 : 0, draw.state.depth_func, count, static_cast<double>(xlo),
+                         static_cast<double>(ylo), static_cast<double>(xhi), static_cast<double>(yhi),
+                         static_cast<unsigned>(draw.state.color_write), draw.state.blend ? 1 : 0,
+                         static_cast<unsigned>(draw.state.src_blend), static_cast<unsigned>(draw.state.dst_blend),
+                         static_cast<unsigned>(draw.state.tex_mode));
+        }
+        if (texture != nullptr && texture->pixels != nullptr) {
+            const int tex_w = texture->width;
+            const int tex_h = texture->height;
+            const std::uint64_t key = gpuTextureCacheKey(*texture, tex_w, tex_h);
+            const bool already = std::find(ff_probe_keys_.begin(), ff_probe_keys_.end(), key) !=
+                                 ff_probe_keys_.end();
+            int px = 0;
+            int py = 0;
+            if (ff_probe_keys_.size() < kFfProbeMax && ff_probe_round_ < kFfProbeRounds &&
+                gpuFfTexProbeWanted(ffTexProbeEnv(), already, draw.batch_tag, true) && !draw.vertices.empty() &&
+                gpuFfTexProbeTexel(draw.vertices[0].u, draw.vertices[0].v, tex_w, tex_h, &px, &py)) {
+                ff_probe_keys_.push_back(key);
+                draw.probe.armed = true;
+                draw.probe.x = px;
+                draw.probe.y = py;
+                draw.probe.width = static_cast<std::uint32_t>(tex_w);
+                draw.probe.height = static_cast<std::uint32_t>(tex_h);
+                draw.probe.generation = texture->generation;
+                draw.probe.has_alpha = texture->format.amask != 0;
+                draw.probe.serial = texture->serial;
+                draw.probe.upload_blocks = static_cast<std::uint32_t>(g_stats.uploads - uploads_before);
+                draw.probe.round = ff_probe_round_;
+                const auto rec = textures_.find(key);
+                draw.probe.recorded = rec != textures_.end() ? rec->second.recorded_generation : 0u;
+                const std::uint8_t* gp = texture->pixels + static_cast<std::size_t>(py) *
+                                                               static_cast<std::size_t>(texture->pitch) +
+                                         static_cast<std::size_t>(px) * 4u;
+                std::memcpy(draw.probe.guest, gp, 4);
+                // 整幅哈希：**这一条**才是"GPU 上的副本与 guest 是同一份吗"的判据（单 texel 只是定位）。
+                draw.probe.guest_hash = hashPixels(texture->pixels, texture->pitch, tex_w, tex_h);
+                const GpuRasterVertex& v0 = draw.vertices[0];
+                const float nx = v0.x / static_cast<float>(width_) * 2.0f - 1.0f;
+                const float ny = 1.0f - v0.y / static_cast<float>(height_) * 2.0f;
+                // 整批 z 的范围：只打 `v0.z` 会把"深度被谁判掉"这条线索藏起来
+                //   （`a12` §5 的 `<待核>` #1：`[draw]` 的 `z=` 是状态位，不是顶点 z 范围）。
+                float zmin = v0.z;
+                float zmax = v0.z;
+                for (const GpuRasterVertex& v : draw.vertices) {
+                    if (v.z < zmin) zmin = v.z;
+                    if (v.z > zmax) zmax = v.z;
+                }
+                std::fprintf(stderr,
+                             "[gpu-ff-tex] round=%zu tag=%llu texserial=%u tex=%dx%d gen=%u rec=%u up=%u "
+                             "v0_screen=(%.1f,%.1f,%.4f) v0_ndc=(%.4f,%.4f,%.4f) uv=(%.4f,%.4f) zr=%.4f..%.4f "
+                             "bind_off=%u count=%zu tgt=%dx%d vp=%d,%d,%d,%d sc=%d,%d..%d,%d "
+                             "depth=%d/%d/%u texel_xy=%d,%d\n",
+                             draw.probe.round, static_cast<unsigned long long>(draw.batch_tag), draw.probe.serial,
+                             tex_w, tex_h, draw.probe.generation, draw.probe.recorded, draw.probe.upload_blocks,
+                             static_cast<double>(v0.x), static_cast<double>(v0.y), static_cast<double>(v0.z),
+                             static_cast<double>(nx), static_cast<double>(ny), static_cast<double>(v0.z),
+                             static_cast<double>(v0.u), static_cast<double>(v0.v), static_cast<double>(zmin),
+                             static_cast<double>(zmax), draw.vertex_offset, count, width_, height_,
+                             draw.state.viewport_x, draw.state.viewport_y, draw.state.viewport_w,
+                             draw.state.viewport_h, draw.state.scissor_x0, draw.state.scissor_y0,
+                             draw.state.scissor_x1, draw.state.scissor_y1, draw.state.depth_test ? 1 : 0,
+                             draw.state.depth_write ? 1 : 0, draw.state.depth_func, px, py);
+            }
+        }
         queue_.push_back(std::move(draw));
         return true;
     }
@@ -636,12 +804,13 @@ public:
                     src.rows_per_layer = 0;
                     SDL_GPUTextureRegion dst{};
                     dst.texture = u.texture;
+                    dst.mip_level = u.mip_level;
                     dst.x = static_cast<Uint32>(u.rect.x);
                     dst.y = static_cast<Uint32>(u.rect.y);
                     dst.w = static_cast<Uint32>(u.rect.w);
                     dst.h = static_cast<Uint32>(u.rect.h);
                     dst.d = 1;
-                    SDL_UploadToGPUTexture(copy, &src, &dst, /*cycle=*/u.whole);
+                    SDL_UploadToGPUTexture(copy, &src, &dst, /*cycle=*/u.cycle);
                 }
                 if (first_copy_pass && vertex_bytes > 0) {
                     SDL_GPUTransferBufferLocation src{};
@@ -656,6 +825,15 @@ public:
                 SDL_EndGPUCopyPass(copy);
             }
             if (!seg_has_draws) continue;
+            if (gpuTraceEnabled()) {
+                std::fprintf(stderr,
+                             "[gpu-pass] seg=%zu/%zu draws=%zu..%zu first=%d need_clear=%d load=%d queue=%zu\n",
+                             seg_index, segments_.size(), seg.first_draw, draw_end, first_render_pass ? 1 : 0,
+                             need_depth_clear_ ? 1 : 0,
+                             static_cast<int>((need_depth_clear_ && first_render_pass) ? SDL_GPU_LOADOP_CLEAR
+                                                                                        : SDL_GPU_LOADOP_LOAD),
+                             queue_.size());
+            }
             // render pass：color 始终 LOAD（第二段起必须保留前面画的内容）
             SDL_GPUColorTargetInfo color{};
             color.texture = target_;
@@ -666,7 +844,12 @@ public:
             SDL_GPUDepthStencilTargetInfo depth{};
             depth.texture = depth_;
             depth.clear_depth = 1.0f;
-            depth.load_op = (need_depth_clear_ && first_render_pass) ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+            // ★ 诊断（`LIFT_GPU_DEPTH_CLEAR=frame`）：把"每个 flush 的第一段"当成需要清 —— 用来
+            //   **验证**"深度附件自创建后没再清过"这条根因（`LIFT_GPU_FF_TEX` 的 `[gpu-depth]` 显示
+            //   `arm=clear` 一次都没有）。语义上它就是"每帧清一次深度"，⛔ 缺省关闭、不是修复。
+            depth.load_op = ((need_depth_clear_ || depthClearEveryFlush()) && first_render_pass)
+                                ? SDL_GPU_LOADOP_CLEAR
+                                : SDL_GPU_LOADOP_LOAD;
             depth.store_op = SDL_GPU_STOREOP_STORE;
             depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
             depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
@@ -711,6 +894,56 @@ public:
         release_tbs();
         ++g_stats.submits;
         ++g_stats.submits_flush;
+        // ★ 覆盖账本（`REQ-01M73PZN6R3AC3RCQ8WZEA0Y0M`）：**提交成功之后**才算是"真的录进了
+        //   render pass"（提交失败的路径上面已经 `return false` 且保留队列）⇒ 这里逐条回报批号。
+        //   ⛔ 不要放到 `rasterQueue` 里：那正是"入队当已覆盖"的原缺陷。
+        for (const QueuedDraw& d : queue_) {
+            if (d.batch_tag != 0) gpuLedgerNoteRecordedDraw(d.batch_tag);
+        }
+
+        // ---- 3b) 诊断探针（`LIFT_GPU_FF_TEX=1`）：**提交成功之后**把 level 0 读回来，与
+        //   `rasterQueue` 里存下的 guest 同一 texel 对打。⛔ 只读：不改状态、不计入 `g_stats`、
+        //   失败只打一行（⛔ 不许因此改 draw 的成败）。`probe.armed` 默认 false ⇒ 常态零成本。
+        bool ff_probe_ran = false;
+        for (const QueuedDraw& d : queue_) {
+            if (!d.probe.armed || d.texture == nullptr) continue;
+            ff_probe_ran = true;
+            const int pw = static_cast<int>(d.probe.width);
+            const int ph = static_cast<int>(d.probe.height);
+            std::vector<std::uint8_t> level0;
+            if (!downloadTextureLevel0(d.texture, pw, ph, &level0)) {
+                std::fprintf(stderr, "[gpu-ff-tex] round=%zu texserial=%u texel=(%d,%d) download=FAILED\n",
+                             d.probe.round, d.probe.serial, d.probe.x, d.probe.y);
+                continue;
+            }
+            const std::size_t off = (static_cast<std::size_t>(d.probe.y) * static_cast<std::size_t>(pw) +
+                                     static_cast<std::size_t>(d.probe.x)) * 4u;
+            const std::uint8_t* g = level0.data() + off;
+            std::size_t nonzero = 0;
+            std::size_t alpha_nonzero = 0;
+            for (std::size_t i = 0; i + 3u < level0.size(); i += 4u) {
+                if ((level0[i] | level0[i + 1] | level0[i + 2] | level0[i + 3]) != 0u) ++nonzero;
+                if (level0[i + 3u] != 0u) ++alpha_nonzero;
+            }
+            // 整幅内容对打：GPU 下载的 level 0（行距 = w*4）vs 入队时 guest 的整幅哈希。
+            const std::uint64_t gpu_hash = hashPixels(level0.data(), static_cast<std::uint32_t>(pw) * 4u, pw, ph);
+            const std::uint8_t* q = d.probe.guest;  // guest 原始字节序 = B,G,R,X/A
+            std::fprintf(
+                stderr,
+                "[gpu-ff-tex] round=%zu texserial=%u texel=(%d,%d) guest=(R%u,G%u,B%u,A%u)[B%u G%u R%u X%u] "
+                "gpu=(R%u,G%u,B%u,A%u) same=%d hash_same=%d gpu_nonzero=%zu alpha_nonzero=%zu n=%zu "
+                "amask=%d gen=%u rec=%u up=%u tex=%dx%d\n",
+                d.probe.round, d.probe.serial, d.probe.x, d.probe.y, q[2], q[1], q[0],
+                d.probe.has_alpha ? q[3] : static_cast<std::uint8_t>(255), q[0], q[1], q[2], q[3], g[2], g[1],
+                g[0], g[3], gpuFfTexProbeSameTexel(q, g, d.probe.has_alpha) ? 1 : 0,
+                gpu_hash == d.probe.guest_hash ? 1 : 0, nonzero, alpha_nonzero, level0.size() / 4u,
+                d.probe.has_alpha ? 1 : 0, d.probe.generation, d.probe.recorded, d.probe.upload_blocks, pw, ph);
+        }
+        if (ff_probe_ran) {
+            // 这一轮的纹理键作废 ⇒ 下一轮（下一帧）按同样的门控再采一次（最多 `kFfProbeRounds` 轮）。
+            ++ff_probe_round_;
+            ff_probe_keys_.clear();
+        }
 
         // ---- 4) 记账：上传已落盘、段与队列清空、depth 已经清过 ----
         for (auto& kv : textures_) kv.second.pending = false;
@@ -739,7 +972,19 @@ public:
         return false;
     }
 
-    void rasterRequestDepthClear() override { need_depth_clear_ = true; }
+    void rasterRequestDepthClear() override {
+        // ★ 交付契约（与 `gpu_raster.h` 的同名注释同口径）：一次 arm ⇒ **下一次真的录到 render pass
+        //   的 flush** 的第一个 render pass 用 `LOADOP_CLEAR` 清成 1.0；多次 arm 合并；不绑 target 身份。
+        //   ⛔ 调用方必须**先 flush 队列再 arm**；本场景实测第一帧 `arm=clear seq=0 queue=1`
+        //   （窄窗**已命中**，但那条是不带批号的 sprite ⇒ 它关深度测试/写 ⇒ 无后果；见 gpu_raster.h）。
+        //   ★ 诊断（`LIFT_GPU_FF_TEX` 或 `LIFT_GPU_DEPTH_TRACE`）：`seq` = 到目前为止入队的带批号
+        //   draw 数 ⇒ 能判 arm 落在哪两批之间。
+        if (gpuTraceEnabled()) {
+            std::fprintf(stderr, "[gpu-depth] arm=clear seq=%llu queue=%zu\n",
+                         static_cast<unsigned long long>(g_ff_tag_seq), queue_.size());
+        }
+        need_depth_clear_ = true;
+    }
 
     void rasterDiscardTarget() override {
         // ★ 设备销毁前调用：队列与镜像都指向即将释放的 guest 像素 ⇒ 丢掉，⛔ 不回读。
@@ -1175,6 +1420,9 @@ private:
     struct PendingUpload {
         SDL_GPUTexture* texture = nullptr;
         GpuTexelRect rect;            // 目标子矩形（texel；右/下开）
+        // ★ 目标 mip 级（`REQ-01M73G2724479XAVS176WBZ65Q`）：0 = level 0（脏区上传），>=1 = 派生级
+        //   （整级上传；源是 box filter 从**完整** level 0 逐级算出来的）。
+        std::uint32_t mip_level = 0;
         std::size_t staging_offset = 0;  // `staging_` 内偏移
         std::size_t size = 0;            // 字节数 = row_pitch * rect.h
         // staging 里每行的字节数：按 **256 对齐**（D3D12 的 texture row pitch 要求 256 字节对齐；
@@ -1186,6 +1434,9 @@ private:
         //   （cycle = 丢弃该纹理原有内容）；子矩形上传传 true 会把矩形外的内容**清成未定义**
         //   —— 实测：整幅蓝 + 子矩形红 ⇒ 矩形外全变黑（真后端像素用例当场红）。
         bool whole = false;
+        // ★ 真正传给 SDL 的 `cycle`：**有 mip 链的纹理一律 false** —— D3D12 的 cycle=true 会换掉
+        //   整张物理纹理（`SDL_gpu_d3d12.c` 的 CycleActiveTexture），多级上传没法"cycle 一半"。
+        bool cycle = false;
     };
 
     // 方案 C 的"段"：`uploads` 在本段第一个 draw 之前用 copy pass 上传，然后 render pass 画
@@ -1207,6 +1458,30 @@ private:
         // 这条 draw 采样到的 texel 区域（`gpuDrawSampleRect`；textured 且非空）——切段判据用它。
         GpuTexelRect sample_rect;
         std::uint32_t vertex_offset = 0;  // 在 flush 的顶点缓冲里（单位 = Vertex）
+        // ★ 覆盖账本的批号（入队那一刻的 `gpuRasterBatchTag()`；0 = 生产者没标）。
+        //   flush **提交成功之后**用它回报"这条 draw 真的进了 render pass"。
+        std::uint64_t batch_tag = 0;
+        // ---------------------------------------------------------------------------
+        // ★ 诊断探针（`LIFT_GPU_FF_TEX=1`；`REQ-01M73P3GXW22Y467YGYPQSM571`）：入队时按 v0 的
+        //   uv 从 **guest 像素**取同一 texel 的 4 字节（⛔ 不保存 guest 指针 —— 契约只允许在
+        //   入队那一刻读），flush 提交成功之后再下载 GPU level 0 的同一 texel 对打。
+        //   `armed == false` 时下面所有分支都不进（默认零成本）。
+        struct FfProbe {
+            bool armed = false;
+            int x = 0;
+            int y = 0;
+            std::uint8_t guest[4] = {0, 0, 0, 0};
+            std::uint32_t width = 0;
+            std::uint32_t height = 0;
+            std::uint32_t generation = 0;        // 入队时的 guest 内容版本（0 = 未知）
+            std::uint32_t recorded = 0;          // 入队后后端记下的"已录版本"
+            std::uint32_t upload_blocks = 0;     // 本次 ensureTexture 入队的上传块数（0 = 走了版本快路径）
+            std::uint64_t guest_hash = 0;         // 入队那一刻 guest 整幅 level 0 的内容哈希
+            std::size_t round = 0;                // 第几轮探针（1 = 首次上传那一轮；2 = 没重传那一轮）
+            bool has_alpha = false;
+            std::uint32_t serial = 0;
+        };
+        FfProbe probe;
     };
 
     // 帧内 staging arena：容量只增、**只在扩容时**付一次零初始化（摊薄）。
@@ -1285,6 +1560,13 @@ private:
             return false;
         }
         const bool has_alpha = t.format.amask != 0;
+        // ★ 派生 mip 链（`REQ-01M73G2724479XAVS176WBZ65Q`）：SDL_GPU **不**替我们生成 mip
+        //   （没有 glGenerateMipmap 对应物）⇒ 我们自己按 box filter 逐级算好、**逐级整级上传**；
+        //   `num_levels` 必须 = 链长，sampler 的 `max_lod` 才取得到级（见 `samplerFor`）。
+        //   ★ 策略与 CPU 一致：凡 32bpp 纹理都建整链（不按"这一批缩没缩小"逐批摇摆），
+        //     否则同一张纹理会出现"CPU 有链、GPU 没链"的静默分叉。
+        const std::uint32_t mip_levels = d3d9::mipLevelCount(static_cast<std::uint32_t>(width),
+                                                             static_cast<std::uint32_t>(height));
         // ★ 身份键：serial != 0 时用进程级纹理 serial（⛔ 不用 arena 指针 / 状态块 EA —— 两者都会复用）；
         //   serial == 0（夹具的 1×1 白纹理）才退回 guest 指针键。
         const std::uint64_t key = gpuTextureCacheKey(t, width, height);
@@ -1332,7 +1614,7 @@ private:
             ci.width = static_cast<Uint32>(width);
             ci.height = static_cast<Uint32>(height);
             ci.layer_count_or_depth = 1;
-            ci.num_levels = 1;
+            ci.num_levels = mip_levels;
             ci.sample_count = SDL_GPU_SAMPLECOUNT_1;
             tex = SDL_CreateGPUTexture(device_, &ci);
             if (tex == nullptr) {
@@ -1355,7 +1637,9 @@ private:
             for (std::size_t i = seg.first_draw; i < queue_.size(); ++i) {
                 const QueuedDraw& d = queue_[i];
                 if (!d.textured || d.texture != tex) continue;
-                if (gpuTexelRectsIntersect(dirty.rect, d.sample_rect)) {
+                // ★ 有 mip 链时内容一变就等于**整张**变（派生级要整级重传）⇒ 一律切段；
+                //   ⛔ 不能只按 dirty.rect 判交（那会让更早的 draw 采到旧的上层 mip）。
+                if (mip_levels > 1u || gpuTexelRectsIntersect(dirty.rect, d.sample_rect)) {
                     need_cut = true;
                     break;
                 }
@@ -1387,6 +1671,8 @@ private:
         up.size = stage_size;
         up.row_pitch = row_pitch;
         up.whole = dirty.whole;
+        // ★ 有 mip 链的纹理一律不 cycle（D3D12 的 cycle 会换掉整张物理纹理，多级上传没法"cycle 一半"）。
+        up.cycle = dirty.whole && mip_levels == 1u;
         for (int y = 0; y < dirty.rect.h; ++y) {
             const std::uint8_t* src_row = pixels +
                                           static_cast<std::size_t>(dirty.rect.y + y) * pitch +
@@ -1401,6 +1687,60 @@ private:
         segments_.back().uploads.push_back(std::move(up));
         ++g_stats.uploads;
         if (dirty.whole) ++g_stats.full_uploads;
+        // ⑥b 派生 mip：**从完整 level 0**（`pixels`，不是 dirty 区）box filter 逐级算，逐级整级上传。
+        //    ★ 顺序：level 0 的脏区上传已经入队在前 ⇒ 链随后覆盖。
+        if (mip_levels > 1u) {
+            const std::uint32_t w0 = static_cast<std::uint32_t>(width);
+            const std::uint32_t h0 = static_cast<std::uint32_t>(height);
+            const std::uint64_t chain_bytes = d3d9::mipChainBytes(w0, h0, 32u);
+            if (chain_bytes == 0u || chain_bytes > 0x40000000ull) {
+                if (err) *err = "SDL_GPU：派生 mip 链字节数非法";
+                return false;
+            }
+            mip_scratch_.assign(static_cast<std::size_t>(chain_bytes), 0u);
+            for (std::uint32_t lvl = 1u; lvl < mip_levels; ++lvl) {
+                const std::uint32_t sw = d3d9::mipLevelWidth(w0, lvl - 1u);
+                const std::uint32_t sh = d3d9::mipLevelHeight(h0, lvl - 1u);
+                const std::uint32_t spitch = (lvl == 1u) ? pitch : d3d9::mipLevelPitch(w0, 32u, lvl - 1u);
+                const std::uint8_t* s = (lvl == 1u) ? pixels
+                                                    : mip_scratch_.data() +
+                                                          d3d9::mipLevelOffset(w0, h0, 32u, lvl - 1u);
+                const std::uint32_t dw = d3d9::mipLevelWidth(w0, lvl);
+                const std::uint32_t dh = d3d9::mipLevelHeight(h0, lvl);
+                const std::uint32_t dpitch = d3d9::mipLevelPitch(w0, 32u, lvl);
+                d3d9::mipDownsampleBox(s, sw, sh, spitch, mip_scratch_.data() + d3d9::mipLevelOffset(w0, h0, 32u, lvl),
+                                       dw, dh, dpitch, 4u);
+            }
+            for (std::uint32_t lvl = 1u; lvl < mip_levels; ++lvl) {
+                const std::uint32_t dw = d3d9::mipLevelWidth(w0, lvl);
+                const std::uint32_t dh = d3d9::mipLevelHeight(h0, lvl);
+                const std::uint32_t dpitch = d3d9::mipLevelPitch(w0, 32u, lvl);
+                const std::size_t lvl_bytes = static_cast<std::size_t>(dpitch) * dh;
+                std::uint8_t* stage2 = nullptr;
+                if (!reserveStaging(lvl_bytes, &stage2, err)) return false;
+                const std::uint8_t* src_lvl =
+                    mip_scratch_.data() + d3d9::mipLevelOffset(w0, h0, 32u, lvl);
+                std::memcpy(stage2, src_lvl, lvl_bytes);
+                if (!has_alpha) {
+                    // 与 level 0 同口径：guest X8R8G8B8 的 X 字节不是 alpha ⇒ 派生级也按 255。
+                    for (std::uint32_t y = 0; y < dh; ++y) {
+                        std::uint8_t* row = stage2 + static_cast<std::size_t>(y) * dpitch;
+                        for (std::uint32_t x = 0; x < dw; ++x) row[x * 4u + 3u] = 255;
+                    }
+                }
+                PendingUpload mup;
+                mup.texture = tex;
+                mup.mip_level = lvl;
+                mup.rect = GpuTexelRect{0, 0, static_cast<int>(dw), static_cast<int>(dh)};
+                mup.staging_offset = staging_used_ - lvl_bytes;
+                mup.size = lvl_bytes;
+                mup.row_pitch = dpitch;
+                mup.whole = false;
+                mup.cycle = false;
+                segments_.back().uploads.push_back(std::move(mup));
+                ++g_stats.uploads;
+            }
+        }
         // ⑦ 记账：这一版的内容**即将**进 GPU（录进命令缓冲），所以 recorded = 这个版本。
         TextureEntry& e = textures_[key];
         e.texture = tex;
@@ -1453,6 +1793,11 @@ private:
         si.min_filter = filt(s.min_filter);
         si.mag_filter = filt(s.mag_filter);
         si.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+        // ★ `max_lod` 的缺省值在 SDL_GPU 里是 **0**（= LOD 被钳到 0 ⇒ 只采 level 0）。
+        //   不显式放开，就是"CPU 修好、GPU 静默走样"（`REQ-01M73G2724479XAVS176WBZ65Q`）。
+        //   采样器缓存键不用带它：这里是个常量（1 级纹理由 API 自己钳住）。
+        si.min_lod = 0.0f;
+        si.max_lod = 1000.0f;
         si.address_mode_u = addr(s.address_u);
         si.address_mode_v = addr(s.address_v);
         si.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
@@ -1562,7 +1907,7 @@ private:
         ci.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
         ci.rasterizer_state.front_face = SDL_GPU_FRONTFACE_CLOCKWISE;
         ci.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
-        ci.depth_stencil_state.compare_op = compareOp(state.depth_func);
+        ci.depth_stencil_state.compare_op = ztestAlways() ? SDL_GPU_COMPAREOP_ALWAYS : compareOp(state.depth_func);
         ci.depth_stencil_state.enable_depth_test = state.depth_test;
         ci.depth_stencil_state.enable_depth_write = state.depth_test && state.depth_write;
         ci.target_info.color_target_descriptions = &color;
@@ -1576,6 +1921,42 @@ private:
         }
         pipelines_[key] = p;
         return p;
+    }
+
+    // -----------------------------------------------------------------------------------
+    // 诊断（`LIFT_GPU_ZTEST=always`）：把深度比较强制成 ALWAYS —— **下一层判据**，不是修复
+    // -----------------------------------------------------------------------------------
+    // ★ 用途（`REQ-01M73P3GXW22Y467YGYPQSM571` 的 D1 被否掉之后的判别实验）：
+    //   `--raster gpu` 臂整层丢 FF 纹理批；纹理副本已用 `LIFT_GPU_FF_TEX` 证明与 guest 逐字节相同
+    //   ⇒ 下一次要分的是"**片元被深度判掉**"还是"片元根本没到 target / 采样错"。
+    //   ALWAYS 让深度测试**完全不拒片元**：角色区从 0 变非 0 ⇒ 深度是机制；仍 0 ⇒ 深度被否掉。
+    // ★ ⛔ 不是修复：缺省关闭、env 不设时与原行为逐指令相同（只是多读一次 static bool）。
+    // ★ 诊断（`LIFT_GPU_DEPTH_CLEAR=frame`）：每个 flush 的第一段都把深度清成 1.0。
+    //   用途 = 验证"深度附件只在 `rasterPrepare` 建 target 时清过一次"这条根因：
+    //   `d3d9::clear(ZBUFFER)` 的 arm 走的是 `m->gpuRaster()->rasterRequestDepthClear()`，而
+    //   `SdlWindow`（present_sdl）**没有转发**这个虚函数 ⇒ 后端拿到的一直是基类 no-op。
+    //   ⛔ 缺省关闭、不是修复（真修法是把转发补到 SdlWindow，那不在本单的允许改动面里）。
+    static bool depthClearEveryFlush() {
+        static const bool on = [] {
+            const char* v = std::getenv("LIFT_GPU_DEPTH_CLEAR");
+            const bool want = v != nullptr && std::strcmp(v, "frame") == 0;
+            if (want) {
+                std::fprintf(stderr, "[gpu-depth] mode=clear-every-flush（诊断；⛔ 不是修复）\n");
+            }
+            return want;
+        }();
+        return on;
+    }
+
+    static bool ztestAlways() {        static const bool on = [] {
+            const char* v = std::getenv("LIFT_GPU_ZTEST");
+            const bool want = v != nullptr && std::strcmp(v, "always") == 0;
+            if (want) {
+                std::fprintf(stderr, "[gpu-ztest] compare_op=ALWAYS（诊断覆盖：深度不拒片元；⛔ 不是修复）\n");
+            }
+            return want;
+        }();
+        return on;
     }
 
     SDL_GPUShader* texShaderFor(GpuTexMode mode) const {
@@ -1731,6 +2112,13 @@ private:
     std::map<std::uint64_t, TextureEntry> textures_;
     std::map<std::uint32_t, SDL_GPUSampler*> samplers_;
     std::uint64_t texture_use_ = 0;
+    // ★ 诊断探针（`LIFT_GPU_FF_TEX`）：已经采过的纹理键 / 上限。
+    //   上限 = "每轮每条纹理一次、最多 4 条 / 只采前 2 轮"：第 1 轮证明**首次上传**的内容对不对，
+    //   第 2 轮证明**没重传的那一帧**（`up=0`、版本没变的快路径）GPU 副本是否仍等于 guest。
+    static constexpr std::size_t kFfProbeMax = 4;
+    static constexpr std::size_t kFfProbeRounds = 2;
+    std::vector<std::uint64_t> ff_probe_keys_;
+    std::size_t ff_probe_round_ = 0;
     int width_ = 0;
     int height_ = 0;
     bool alpha_ = false;
@@ -1747,6 +2135,9 @@ private:
     // 帧内 staging arena（见 reserveStaging）；flush 成功或 discard 后 `staging_used_ = 0`。
     std::vector<std::uint8_t> staging_;
     std::size_t staging_used_ = 0;
+    // ★ 派生 mip 的中间缓冲（等级链，按 `mipLevelOffset` 排）：容量只增、跨上传复用，
+    //   ⛔ 不放 staging_（staging 只放**要上传的字节**，混用会让 offset 记账变复杂）。
+    std::vector<std::uint8_t> mip_scratch_;
     std::size_t queued_vertices_ = 0;
     bool need_depth_clear_ = true;
     // ★ dirty_ = 「**已提交**但尚未读回 guest」；队列/未提交上传也算脏 —— 对外只暴露
@@ -1768,6 +2159,19 @@ private:
 }  // namespace
 
 GpuRasterStats gpuRasterStats() { return g_stats; }
+
+// ---------------------------------------------------------------------------------------
+// 覆盖账本的批号通道（声明与"为什么"见 `gpu_raster.h`）
+// ---------------------------------------------------------------------------------------
+// ★ 生产者（`d3d9_pipeline.cpp`）在每次 `rasterQueue` 前后设/清；后端只读**入队那一刻**的值，
+//   存进队列条目 ⇒ flush 时按条目回报（一条 draw 一个批号，⛔ 不按"当前值"猜）。
+namespace {
+std::uint64_t g_batch_tag = 0;
+}  // namespace
+
+void gpuRasterSetBatchTag(std::uint64_t tag) { g_batch_tag = tag; }
+
+std::uint64_t gpuRasterBatchTag() { return g_batch_tag; }
 
 std::unique_ptr<GpuRaster> createSdlGpuRaster(std::string* err) {
     auto r = std::make_unique<SdlGpuRaster>();

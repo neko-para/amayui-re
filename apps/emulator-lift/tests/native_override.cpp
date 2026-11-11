@@ -226,6 +226,196 @@ struct TextureRig {
     }
 };
 
+// ---------------------------------------------------------------------------------------
+// `sub_4367B0`（退出写存档的 LZSS Encode）的**独立转写** —— 只给 pure 档当**回归网**。
+//
+// ★ 与生产核分开写：生产核是"逐条照 `.lst` 转写"（保留寄存器/变量的一一对应），这里是
+//   "按经典 Okumura LZSS 的结构重写 + 本 guest 的六条怪癖"（`text_buf` 只清前 N 字节、
+//   `s < F-1` 才写 `text_buf[s+N]`、**平局严格 `>`**、`size > 1` 才收尾 flush、放弃时从
+//   输入起点整体重拷）。两份独立写出来的东西对同一输入给出同一串字节，才说明"照 asm 转写"
+//   没抄错一行。
+// ★ 诚实项：它**不是独立 oracle**（可能是同一份误读）；真正的 oracle 是 assets 档的**真字节两臂**
+//   （解释器跑 `AGE.EXE` 的同一 EA）。这里只当"改一处转写就红"的回归网。
+// ★ 不覆盖 `a2 + a3[0]` 的 32 位回绕（这里没有 guest 地址）；那条由生产核的 `in_ea` 用例覆盖。
+struct NaiveEncoded {
+    std::uint32_t consumed = 0;
+    std::uint32_t comp = 0;
+    bool gave_up = false;
+    std::vector<std::uint8_t> out;
+};
+
+NaiveEncoded naiveLzssEncode(const std::uint8_t* input, std::uint32_t n) {
+    constexpr int N = 4096;
+    constexpr int F = 18;
+    constexpr int NIL = N;
+    NaiveEncoded res;
+    std::vector<int> dad(N + 1, NIL);
+    std::vector<int> lson(N + 1, NIL);
+    std::vector<int> rson(N + 1 + 256, NIL);  // 根索引 p = 0x1001+byte ∈ [4097,4352]
+    // ★ 预填必须与夹具/guest 对象同形（0xCC）：`text_buf` 只清前 0xFEE，`[4078..4112]` 里
+    //   首灌写 [4078..4095] 的前 len 个，**其余保留对象原值**——而比较循环会读到它们
+    //   （`text_buf[p+i]`，p ≤ 4095、i ≤ 17 ⇒ 最远 4112）。用 0 填会把一条真实依赖抹掉。
+    std::vector<std::uint8_t> text(N + F - 1, 0xCC);
+    std::memset(text.data(), 0, 0xFEEu);  // `0x43683D`：只清 0xFEE = 4078 字节
+    int match_pos = 0;
+    int match_len = 0;
+
+    auto insert = [&](int r) {
+        int p = N + 1 + static_cast<int>(text[r]);
+        lson[r] = rson[r] = NIL;
+        match_len = 0;
+        int cmp = 1;
+        for (;;) {
+            if (cmp >= 0) {
+                if (rson[p] != NIL) {
+                    p = rson[p];
+                } else {
+                    rson[p] = r;
+                    dad[r] = p;
+                    return;
+                }
+            } else {
+                if (lson[p] != NIL) {
+                    p = lson[p];
+                } else {
+                    lson[p] = r;
+                    dad[r] = p;
+                    return;
+                }
+            }
+            int i = 1;
+            for (; i < F; ++i) {
+                cmp = static_cast<int>(text[r + i]) - static_cast<int>(text[p + i]);
+                if (cmp != 0) break;
+            }
+            if (i > match_len) {  // ★ 平局严格大于：等长保留先入树者
+                match_pos = p;
+                match_len = i;
+                if (i >= F) break;
+            }
+        }
+        // i == F：把 p 换成 r
+        dad[r] = dad[p];
+        lson[r] = lson[p];
+        rson[r] = rson[p];
+        dad[lson[p]] = r;
+        dad[rson[p]] = r;
+        if (rson[dad[p]] == p) {
+            rson[dad[p]] = r;
+        } else {
+            lson[dad[p]] = r;
+        }
+        dad[p] = NIL;
+    };
+
+    auto remove = [&](int p) {
+        if (dad[p] == NIL) return;
+        int q = 0;
+        if (rson[p] == NIL) {
+            q = lson[p];
+        } else if (lson[p] == NIL) {
+            q = rson[p];
+        } else {
+            q = lson[p];
+            if (rson[q] != NIL) {
+                do {
+                    q = rson[q];
+                } while (rson[q] != NIL);
+                rson[dad[q]] = lson[q];
+                dad[lson[q]] = dad[q];
+                lson[q] = lson[p];
+                dad[lson[p]] = q;
+            }
+            rson[q] = rson[p];
+            dad[rson[p]] = q;
+        }
+        dad[q] = dad[p];
+        if (rson[dad[p]] == p) {
+            rson[dad[p]] = q;
+        } else {
+            lson[dad[p]] = q;
+        }
+        dad[p] = NIL;
+    };
+
+    std::uint8_t code[20] = {};
+    int mask = 1;
+    int size = 1;
+    code[0] = 0;
+    int r = N - F;
+    int len = 0;
+    while (len < F && static_cast<std::uint32_t>(len) < n) text[r + len++] = input[len];
+    res.consumed = static_cast<std::uint32_t>(len);
+    if (len == 0) return res;
+    for (int j = r - 1; j >= r - F; --j) insert(j);
+    insert(r);
+    int s = 0;
+    std::uint32_t in_pos = static_cast<std::uint32_t>(len);
+    std::vector<std::uint8_t> outbuf(static_cast<std::size_t>(n) + 0x1000u, 0);
+    std::uint32_t out_pos = 0;
+    bool gave_up = false;
+    for (;;) {
+        if (match_len > len) match_len = len;
+        if (match_len >= 3) {
+            code[size] = static_cast<std::uint8_t>(match_pos & 0xFF);
+            code[size + 1] = static_cast<std::uint8_t>(((match_pos >> 4) & 0xF0) | (match_len - 3));
+            size += 2;
+        } else {
+            code[0] = static_cast<std::uint8_t>(code[0] | mask);
+            match_len = 1;
+            code[size] = text[r];
+            ++size;
+        }
+        mask = (mask << 1) & 0xFF;
+        if (mask == 0) {
+            std::memcpy(outbuf.data() + out_pos, code, static_cast<std::size_t>(size));
+            out_pos += static_cast<std::uint32_t>(size);
+            res.comp += static_cast<std::uint32_t>(size);
+            if (res.comp >= n) {
+                gave_up = true;
+                break;
+            }
+            code[0] = 0;
+            mask = 1;
+            size = 1;
+        }
+        const int last_match_length = match_len;
+        int i = 0;
+        while (i < last_match_length && in_pos < n) {
+            const std::uint8_t ch = input[in_pos++];
+            remove(s);
+            text[s] = ch;
+            if (s < F - 1) text[s + N] = ch;
+            s = (s + 1) & (N - 1);
+            r = (r + 1) & (N - 1);
+            insert(r);
+            ++i;
+        }
+        res.consumed += static_cast<std::uint32_t>(i);
+        while (i++ < last_match_length) {
+            remove(s);
+            s = (s + 1) & (N - 1);
+            r = (r + 1) & (N - 1);
+            if (--len) insert(r);
+        }
+        if (len <= 0) break;
+    }
+    if (!gave_up && size > 1) {
+        std::memcpy(outbuf.data() + out_pos, code, static_cast<std::size_t>(size));
+        out_pos += static_cast<std::uint32_t>(size);
+        res.comp += static_cast<std::uint32_t>(size);
+        if (res.comp >= n) gave_up = true;
+    }
+    if (gave_up) {
+        if (n != 0) std::memcpy(outbuf.data(), input, n);
+        res.consumed = n;
+        res.comp = n;
+    }
+    res.gave_up = gave_up;
+    res.out.assign(outbuf.begin(), outbuf.begin() + res.comp);
+    return res;
+}
+
 }  // namespace
 
 int main() {
@@ -2144,6 +2334,373 @@ int main() {
         //   否则 configureNativeOverrides 会硬失败（模拟器拒绝启动）。⛔ 不写死数字。
         LIFT_CHECK(lift::NativeOverrideTable::kMax >= lift::knownNativeCount());
         LIFT_CHECK(lift::NativeBlockTable::kMax >= lift::knownBlockNativeCount());
+        // ★ sub_4367B0：thiscall `retn 8` = 8 B；**debug 层**（不进 all ⇒ 必须显式点名）。
+        const lift::KnownNative* lzss = lift::findKnownNative("sub_4367B0");
+        LIFT_CHECK(lzss != nullptr);
+        if (lzss != nullptr) {
+            LIFT_CHECK(lzss->debug);
+            LIFT_CHECK(lzss->conv == lift::GuestConv::Thiscall);
+            LIFT_CHECK_EQ_U32(lzss->arg_bytes, 8u);
+            LIFT_CHECK(lzss->fn == &lift::nativeLzss4367B0);
+        }
+    }
+
+    // ---- ⑲ sub_4367B0（退出写存档的 LZSS Encode）的纯核 ----
+    // 判据（红了意味着什么；缺一条都不算）：
+    //   ① **树不变量**：`dad/lson/rson` 互反、无环、根索引域（`dad[r]` 永不为 NIL 假根 4096）；
+    //   ② **平局定点**：`InsertNode` 的 `i > match_len` 放宽成 `>=` ⇒ 固定的 7 字节输出当场变；
+    //   ③ **独立转写对拍**：同一输入下生产核与 `naiveLzssEncode` 的 `consumed/comp/gave_up/out` 全同；
+    //   ④ `lzssEncodeObject` ↔ `lzssDecode` **往返**（含 give_up 的 `comp == in_size` 直通；
+    //      0 / 1 / 17 / 18 / 4078 / 4096 / 4097 / 150068 档 × 5 种数据形态）；
+    //   ⑤ **准入面**：`nativeLzss4367B0` 每条回退路径都**零写**（对象 0xD430 + info 12 B 快照 memcmp），
+    //      且 declines 桶点名；happy path 的出参与独立算出的核结果逐字节相同。
+    // ★ 修前红：`lift::lzssEncodeObject` / `lift::nativeLzss4367B0` 不存在 ⇒ **编译期红**（新符号）。
+    {
+        constexpr std::uint32_t kObjBytes = 0xD430u;
+        constexpr std::uint32_t kDad = 0x1018u;
+        constexpr std::uint32_t kLson = 0x501Cu;
+        constexpr std::uint32_t kRson = 0x9020u;
+        constexpr std::uint32_t kOutField = 0xD42Cu;
+        constexpr std::uint32_t kNil = 4096u;
+        auto makeObj = [] { return std::vector<std::uint8_t>(kObjBytes, 0xCC); };
+        auto getU32 = [](const std::vector<std::uint8_t>& o, std::uint32_t off) {
+            std::uint32_t v = 0;
+            std::memcpy(&v, o.data() + off, 4);
+            return v;
+        };
+        // 5 种数据形态：全 0 / 全同 / 有 LZSS 结构 / 伪随机（可压） / xorshift（不可压 ⇒ give_up）
+        auto mkInput = [](std::uint32_t n, std::uint32_t kind) {
+            std::vector<std::uint8_t> v(n, 0);
+            std::uint32_t x = 0x12345678u + kind;
+            for (std::uint32_t i = 0; i < n; ++i) {
+                switch (kind) {
+                    case 0: v[i] = 0; break;
+                    case 1: v[i] = 0x41; break;
+                    case 2: v[i] = static_cast<std::uint8_t>("ABRACADABRA"[i % 11u]); break;
+                    case 3: v[i] = static_cast<std::uint8_t>((i * 37u + 11u) % 251u); break;
+                    default:
+                        x ^= x << 13;
+                        x ^= x >> 17;
+                        x ^= x << 5;
+                        v[i] = static_cast<std::uint8_t>(x & 0xFFu);
+                        break;
+                }
+            }
+            return v;
+        };
+        auto runKernel = [&](const std::vector<std::uint8_t>& in, std::uint32_t in_ea, std::vector<std::uint8_t>* obj,
+                             std::vector<std::uint8_t>* out) {
+            out->assign(in.size() + 0x1000u, 0x5A);
+            return lift::lzssEncodeObject(obj->data(), in_ea, in.empty() ? nullptr : in.data(),
+                                         static_cast<std::uint32_t>(in.size()), out->data());
+        };
+        // ①③④ 的树检查：对**结果对象**直接查 dad/lson/rson。
+        auto checkTree = [&](const std::vector<std::uint8_t>& obj, const std::vector<std::uint8_t>& input,
+                             std::uint32_t consumed, bool gave_up) {
+            // ① `dad[r]` ∈ {NIL} ∪ [0,4095] ∪ [4097,4352]；**非 NIL 的父索引永不为 4096**
+            //   （根不会挂在 NIL 下 —— 4096 只是"没有父"的哨兵，不是任何节点的编号）。
+            for (std::uint32_t r = 0; r < 4096u; ++r) {
+                const std::uint32_t d = getU32(obj, kDad + 4u * r);
+                LIFT_CHECK(d == kNil || d < 4096u || (d >= 4097u && d <= 4352u));
+            }
+            // ② 互反：树里每个节点的孩子都指回它（已删除节点 `dad==NIL`，其 lson/rson 是残值 ⇒ 跳过）
+            for (std::uint32_t p = 0; p < 4096u; ++p) {
+                if (getU32(obj, kDad + 4u * p) == kNil) continue;
+                const std::uint32_t l = getU32(obj, kLson + 4u * p);
+                const std::uint32_t rs = getU32(obj, kRson + 4u * p);
+                if (l != kNil) LIFT_CHECK(l < 4096u && getU32(obj, kDad + 4u * l) == p);
+                if (rs != kNil) LIFT_CHECK(rs < 4096u && getU32(obj, kDad + 4u * rs) == p);
+            }
+            // ②b 根的孩子只在 `rson[]` 里（`lson[4097..4352]` 不在这份对象的数组域内）
+            for (std::uint32_t root = 4097u; root <= 4352u; ++root) {
+                const std::uint32_t rs = getU32(obj, kRson + 4u * root);
+                if (rs != kNil) LIFT_CHECK(rs < 4096u && getU32(obj, kDad + 4u * rs) == root);
+            }
+            // ③ 无环：从所有根出发，每个节点最多被访问一次、步数 ≤ 节点总数
+            {
+                std::vector<std::uint8_t> seen(4096u, 0);
+                std::vector<std::uint32_t> stack;
+                for (std::uint32_t root = 4097u; root <= 4352u; ++root) {
+                    const std::uint32_t rs = getU32(obj, kRson + 4u * root);
+                    if (rs != kNil) stack.push_back(rs);
+                }
+                std::uint32_t steps = 0;
+                bool bad = false;
+                while (!stack.empty() && !bad) {
+                    const std::uint32_t p = stack.back();
+                    stack.pop_back();
+                    ++steps;
+                    if (p >= 4096u || seen[p] != 0u || steps > 4096u) {
+                        bad = true;
+                        break;
+                    }
+                    seen[p] = 1;
+                    const std::uint32_t l = getU32(obj, kLson + 4u * p);
+                    const std::uint32_t rs = getU32(obj, kRson + 4u * p);
+                    if (l != kNil) stack.push_back(l);
+                    if (rs != kNil) stack.push_back(rs);
+                }
+                LIFT_CHECK(!bad);
+            }
+            // ④ `text_buf` 与输入逐字节对得上。★ 两段的**下标不同**（这不是笔误）：
+            //   首灌把 `input[0..len0)` 写进 `text_buf[4078..]`；拷回阶段从 **s = 0** 起把
+            //   `input[len0 + s]` 写进 `text_buf[s]`。★ 只在**没放弃压缩**时查：give_up 会把 `a3[1]`
+            //   改成输入长度，而 ring 只装了"放弃前"那一段 ⇒ 用 consumed 查会冤枉它（`a3[1]` 的双语义）。
+            if (!gave_up) {
+                const std::uint32_t len0 =
+                    input.size() < 18u ? static_cast<std::uint32_t>(input.size()) : 18u;
+                LIFT_CHECK(consumed >= len0);
+                const std::uint32_t copied = consumed - len0;
+                // 首灌段（s 还没推进到 4078 之前才没被覆盖）
+                if (copied <= 4078u) {
+                    for (std::uint32_t i = 0; i < len0; ++i) LIFT_CHECK(obj[0x004u + 4078u + i] == input[i]);
+                }
+                // 拷贝段：`text_buf[j & 0xFFF] == input[len0 + j]`
+                const std::uint32_t lo = copied > 4096u ? copied - 4096u : 0u;
+                for (std::uint32_t j = lo; j < copied && (len0 + j) < input.size(); ++j) {
+                    LIFT_CHECK(obj[0x004u + (j & 0xFFFu)] == input[len0 + j]);
+                }
+            }
+        };
+
+        // ---- ① 树不变量（多个输入档；含 give_up 与空输入）----
+        lift_test::g_current_case = "lzss/tree-invariants";
+        for (std::uint32_t n : {0u, 1u, 17u, 18u, 19u, 64u, 300u, 4096u, 4097u, 9000u}) {
+            for (std::uint32_t kind = 0; kind < 5u; ++kind) {
+                const std::vector<std::uint8_t> in = mkInput(n, kind);
+                std::vector<std::uint8_t> obj = makeObj();
+                std::vector<std::uint8_t> out;
+                const lift::LzssEncodeOutcome r = runKernel(in, 0x00400000u, &obj, &out);
+                LIFT_CHECK_EQ_U32(r.consumed, n);  // 非回绕：每条返回路径 a3[1] == a3[0]
+                checkTree(obj, in, r.consumed, r.gave_up);
+                if (n == 0u) {
+                    // ★ `len == 0` 的早退（0x43687E `jz 0x436A59`）只做 InitTree + text_buf 清零：
+                    //   `match_pos` / `match_len` **保持预填值**（guest 一个字节都没往那儿写）。
+                    //   这条能抓"InitTree 多清一项"这类越界（把 rson[4353] 也写掉 = 踩 match_pos）。
+                    LIFT_CHECK_EQ_U32(getU32(obj, 0xD424u), 0xCCCCCCCCu);
+                    LIFT_CHECK_EQ_U32(getU32(obj, 0xD428u), 0xCCCCCCCCu);
+                    LIFT_CHECK_EQ_U32(getU32(obj, 0xD42Cu), 0xCCCCCCCCu);  // out 由包装写，纯核不碰
+                }
+            }
+        }
+
+        // ---- ② 平局定点：`i > match_len` 放宽成 `>=` ⇒ 末尾两个字节从 `EE F0` 变 `F0 F0` ----
+        // 输入 "BABABBAB"（对象预填 0xCC ⇒ `text_buf[4086..4112]` 的尾巴参与比较）：两个候选
+        // （4078 与 4080）对最后一段的匹配**等长 3** ⇒ 严格 `>` 保留**先入树**的 4078（offset 0xFEE），
+        // `>=` 会改成 4080（offset 0xFF0）。输出字节就是判据（实测：把生产核那一行改成 `>=` 后本用例红）。
+        lift_test::g_current_case = "lzss/tie-strict-greater";
+        {
+            const std::uint8_t tie_in[] = {0x42, 0x41, 0x42, 0x41, 0x42, 0x42, 0x41, 0x42};
+            const std::uint8_t tie_expected[] = {0x03, 0x42, 0x41, 0xEE, 0xF0, 0xEE, 0xF0};
+            std::vector<std::uint8_t> in(tie_in, tie_in + sizeof(tie_in));
+            std::vector<std::uint8_t> obj = makeObj();
+            std::vector<std::uint8_t> out;
+            const lift::LzssEncodeOutcome r = runKernel(in, 0x00400000u, &obj, &out);
+            LIFT_CHECK_EQ_U32(r.consumed, 8u);
+            LIFT_CHECK_EQ_U32(r.comp, 7u);
+            LIFT_CHECK(!r.gave_up);
+            LIFT_CHECK_EQ_U32(out[3], 0xEEu);  // match_pos & 0xFF = 0xFEE 的低字节（= 4078，先入树者）
+            LIFT_CHECK(std::memcmp(out.data(), tie_expected, sizeof(tie_expected)) == 0);
+            checkTree(obj, in, r.consumed, r.gave_up);
+        }
+
+        // ---- ③ 独立转写对拍 ----
+        lift_test::g_current_case = "lzss/independent-transcription";
+        for (std::uint32_t n : {0u, 1u, 5u, 17u, 18u, 19u, 64u, 300u, 4096u, 4097u, 9000u}) {
+            for (std::uint32_t kind = 0; kind < 5u; ++kind) {
+                const std::vector<std::uint8_t> in = mkInput(n, kind);
+                std::vector<std::uint8_t> obj = makeObj();
+                std::vector<std::uint8_t> out;
+                const lift::LzssEncodeOutcome r = runKernel(in, 0x00400000u, &obj, &out);
+                const NaiveEncoded nv = naiveLzssEncode(in.empty() ? nullptr : in.data(), n);
+                LIFT_CHECK_EQ_U32(r.consumed, nv.consumed);
+                LIFT_CHECK_EQ_U32(r.comp, nv.comp);
+                LIFT_CHECK(r.gave_up == nv.gave_up);
+                if (r.comp != 0u) {
+                    const bool same = std::memcmp(out.data(), nv.out.data(), r.comp) == 0;
+                    LIFT_CHECK(same);
+                    if (!same) {
+                        std::size_t at = 0;
+                        for (; at < r.comp && out[at] == nv.out[at]; ++at) {
+                        }
+                        std::fprintf(stderr,
+                                     "  [naive n=%u kind=%u] comp=%u/%u 首个差异 @%zu: 生产=%02X 转写=%02X\n",
+                                     n, kind, r.comp, nv.comp, at, at < r.comp ? out[at] : 0,
+                                     at < nv.out.size() ? nv.out[at] : 0);
+                    }
+                }
+            }
+        }
+        {
+            // 真存档 payload 量级（150,068 B）× 可压 / 不可压 两档
+            for (std::uint32_t kind : {2u, 4u}) {
+                const std::vector<std::uint8_t> in = mkInput(150068u, kind);
+                std::vector<std::uint8_t> obj = makeObj();
+                std::vector<std::uint8_t> out;
+                const lift::LzssEncodeOutcome r = runKernel(in, 0x00400000u, &obj, &out);
+                const NaiveEncoded nv = naiveLzssEncode(in.data(), 150068u);
+                LIFT_CHECK_EQ_U32(r.consumed, nv.consumed);
+                LIFT_CHECK_EQ_U32(r.comp, nv.comp);
+                LIFT_CHECK(r.gave_up == nv.gave_up);
+                if (r.comp != 0u) LIFT_CHECK(std::memcmp(out.data(), nv.out.data(), r.comp) == 0);
+            }
+        }
+
+        // ---- ④ `lzssEncodeObject` ↔ `lzssDecode` 往返 ----
+        // ★ give_up 分支（`comp == in_size`）**不能只靠解码往返**：`lzssDecode` 在
+        //   `comp_size == out_size` 时直接 `memcpy`（native_lzss.cpp:18-21）⇒ "解码 = 原文"恒真、
+        //   等于没测。所以 give_up 要**单独**断言三件事：`consumed == in_size`、`comp == in_size`、
+        //   `out[0..in_size)` 逐字节是原文（这才是"放弃压缩 = 原样拷贝"的判据）。
+        lift_test::g_current_case = "lzss/roundtrip-decode";
+        for (std::uint32_t n : {0u, 1u, 17u, 18u, 4078u, 4096u, 4097u, 150068u}) {
+            for (std::uint32_t kind = 0; kind < 5u; ++kind) {
+                const std::vector<std::uint8_t> in = mkInput(n, kind);
+                std::vector<std::uint8_t> obj = makeObj();
+                std::vector<std::uint8_t> out;
+                const lift::LzssEncodeOutcome r = runKernel(in, 0x00400000u, &obj, &out);
+                LIFT_CHECK(r.comp <= n);
+                if (r.gave_up) {
+                    LIFT_CHECK_EQ_U32(r.comp, n);
+                    LIFT_CHECK_EQ_U32(r.consumed, n);
+                    if (n != 0u) LIFT_CHECK(std::memcmp(out.data(), in.data(), n) == 0);
+                }
+                std::vector<std::uint8_t> back(n + 1u, 0);  // n == 0 也要给非空指针（lzssDecode 拒 nullptr）
+                std::uint8_t ring[4096] = {};
+                LIFT_CHECK(lift::lzssDecode(out.data(), r.comp, back.data(), n, ring));
+                LIFT_CHECK(std::memcmp(back.data(), in.data(), n) == 0);
+            }
+        }
+
+        // ---- ⑤ 32 位回绕：`a2 + a3[0]` 回绕 ⇒ 首灌 0 次 ⇒ consumed == 0、comp == 0、只 InitTree ----
+        // （guest `0x43685D jnb`：地址比较是**无符号**；这里 in_ea 只参与那个比较，⛔ 不读 in。）
+        lift_test::g_current_case = "lzss/wrap-address";
+        {
+            std::vector<std::uint8_t> in(0x2000u, 0x42u);
+            std::vector<std::uint8_t> obj = makeObj();
+            std::vector<std::uint8_t> out;
+            const lift::LzssEncodeOutcome r = runKernel(in, 0xFFFFF000u, &obj, &out);
+            LIFT_CHECK_EQ_U32(r.consumed, 0u);  // **按计数**写：不是 a3[0]
+            LIFT_CHECK_EQ_U32(r.comp, 0u);
+            LIFT_CHECK(!r.gave_up);
+            LIFT_CHECK_EQ_U32(getU32(obj, kDad + 0u), 4096u);  // InitTree 写了 NIL（不是 0）
+            for (std::uint32_t i = 0; i < 4078u; ++i) LIFT_CHECK(obj[0x004u + i] == 0u);
+        }
+
+        // ---- ⑥ 准入面：每条回退路径都零写 + declines 桶；happy path 出参与核结果一致 ----
+        lift_test::g_current_case = "lzss/admission-no-write";
+        {
+            lift_fixture::Fixture fx;
+            LIFT_CHECK(fx.ok);
+            if (fx.ok) {
+                const std::uint32_t self = 0x00420000u;
+                const std::uint32_t info = 0x00430000u;
+                const std::uint32_t in_ea = 0x00440000u;
+                std::vector<std::uint8_t> obj0 = makeObj();
+                std::vector<std::uint8_t> info0(12u, 0);
+                std::vector<std::uint8_t> input(64u, 0x41u);
+                LIFT_CHECK(fx.m.placeData(self, obj0.data(), obj0.size(), &fx.err));
+                LIFT_CHECK(fx.m.placeData(info, info0.data(), info0.size(), &fx.err));
+                LIFT_CHECK(fx.m.placeData(in_ea, input.data(), input.size(), &fx.err));
+                fx.m.mem().wr32(self + kOutField, 0u);  // "新对象"形态（其余字节保持 0xCC）
+                fx.m.mem().wr32(info + 0u, 64u);
+                fx.m.mem().wr32(info + 4u, 0xAAAA5555u);
+                fx.m.mem().wr32(info + 8u, 0x5A5AA5A5u);
+
+                lift::NativeOverride ov;
+                auto armCall = [&](std::uint32_t ecx_self, std::uint32_t a0, std::uint32_t a1) {
+                    const std::uint32_t esp = fx.m.layout().stack_top - 0x100u;
+                    fx.m.cpu().esp() = esp;
+                    fx.m.mem().wr32(esp, 0xFFFFFFFFu);  // 返回地址（不真的返回）
+                    fx.m.mem().wr32(esp + 4u, a0);
+                    fx.m.mem().wr32(esp + 8u, a1);
+                    fx.m.cpu().ecx() = ecx_self;
+                    std::memset(ov.declines, 0, sizeof(ov.declines));
+                    fx.m.cpu().current_override = &ov;
+                };
+                auto invoke = [&](std::uint32_t ecx_self, std::uint32_t a0, std::uint32_t a1, std::uint32_t* eax) {
+                    armCall(ecx_self, a0, a1);
+                    const bool ok = lift::nativeLzss4367B0(fx.m.cpu(), fx.m.mem(), eax);
+                    fx.m.cpu().current_override = nullptr;
+                    return ok;
+                };
+                auto snapshot = [&](std::vector<std::uint8_t>* o, std::vector<std::uint8_t>* i) {
+                    const std::uint8_t* po = fx.m.mem().host(self);
+                    o->assign(po, po + kObjBytes);
+                    const std::uint8_t* pi = fx.m.mem().host(info);
+                    i->assign(pi, pi + 12u);
+                };
+                auto expectDecline = [&](lift::LzssWhy why, std::uint32_t ecx_self, std::uint32_t a0,
+                                         std::uint32_t a1) {
+                    std::vector<std::uint8_t> before_obj;
+                    std::vector<std::uint8_t> before_info;
+                    snapshot(&before_obj, &before_info);
+                    std::uint32_t eax = 0xDEADBEEFu;
+                    LIFT_CHECK(!invoke(ecx_self, a0, a1, &eax));
+                    std::vector<std::uint8_t> after_obj;
+                    std::vector<std::uint8_t> after_info;
+                    snapshot(&after_obj, &after_info);
+                    LIFT_CHECK(std::memcmp(before_obj.data(), after_obj.data(), kObjBytes) == 0);
+                    LIFT_CHECK(std::memcmp(before_info.data(), after_info.data(), 12u) == 0);
+                    LIFT_CHECK_EQ_U32(ov.declines[static_cast<std::size_t>(why)], 1u);
+                };
+
+                // 1) 没有堆（这个 Fixture 还没 init 堆）
+                expectDecline(lift::LzssWhy::NoHeap, self, in_ea, info);
+                // 2) info == 0 / info 不在已提交页
+                expectDecline(lift::LzssWhy::NoInfo, self, in_ea, 0u);
+                expectDecline(lift::LzssWhy::NoInfo, self, in_ea, 0x00001000u);
+                // 3) this == 0 / 不在已提交页
+                expectDecline(lift::LzssWhy::BadSelf, 0u, in_ea, info);
+                expectDecline(lift::LzssWhy::BadSelf, 0x00002000u, in_ea, info);
+                // 4) 输入跨度不在已提交页
+                expectDecline(lift::LzssWhy::BadInput, self, 0x00003000u, info);
+                // ★ `GuestHeap::init` 的最小尺寸是 0x10000（heap.cpp:27）⇒ 用一个 **0x10000** 的堆：
+                //   happy path 只要 64+0x1000，而下面的"分配失败"档要 0x10000+0x1000 > 0x10000。
+                LIFT_CHECK(fx.m.heap().init(&fx.m.mem(), fx.m.layout().heap_base, 0x10000u));
+                // 5) `a3[0] + 0x1000` 溢出（`0xFFFFF000` 是**边界**：它回绕成 0 ⇒ 必须拒）
+                fx.m.mem().wr32(info + 0u, 0xFFFFF000u);
+                expectDecline(lift::LzssWhy::Overflow, self, in_ea, info);
+                fx.m.mem().wr32(info + 0u, 64u);
+                // 6) `out != 0`（对象被复用 / 未构造）⇒ 拒，且不碰那个旧指针
+                fx.m.mem().wr32(self + kOutField, 0x1234u);
+                expectDecline(lift::LzssWhy::ReusedOut, self, in_ea, info);
+                fx.m.mem().wr32(self + kOutField, 0u);
+                // 7) 分配失败（堆只有 0x10000，请求 0x10000+0x1000）⇒ 回退、零写
+                {
+                    const std::uint32_t big_in = 0x00450000u;
+                    std::vector<std::uint8_t> big(0x10000u, 0x37u);
+                    LIFT_CHECK(fx.m.placeData(big_in, big.data(), big.size(), &fx.err));
+                    fx.m.mem().wr32(info + 0u, 0x10000u);
+                    expectDecline(lift::LzssWhy::AllocFailed, self, big_in, info);
+                    fx.m.mem().wr32(info + 0u, 64u);
+                }
+                // 8) happy path：出参 = 独立算出的核结果；只有 out 指针 / a3[1] / a3[2] 被写
+                {
+                    std::vector<std::uint8_t> before_obj;
+                    std::vector<std::uint8_t> before_info;
+                    snapshot(&before_obj, &before_info);
+                    std::uint32_t eax = 0u;
+                    LIFT_CHECK(invoke(self, in_ea, info, &eax));
+                    LIFT_CHECK(eax != 0u);
+                    std::vector<std::uint8_t> ref_obj = makeObj();
+                    std::vector<std::uint8_t> ref_out;
+                    const lift::LzssEncodeOutcome ref = runKernel(input, in_ea, &ref_obj, &ref_out);
+                    LIFT_CHECK_MEM_U32(fx.m.mem(), self + kOutField, eax);
+                    LIFT_CHECK_MEM_U32(fx.m.mem(), info + 0u, 64u);
+                    LIFT_CHECK_MEM_U32(fx.m.mem(), info + 4u, ref.consumed);
+                    LIFT_CHECK_MEM_U32(fx.m.mem(), info + 8u, ref.comp);
+                    // ★ 对象要从 `[0, 0xD42C)` 比：`+0xD42C`（= out 字段）由**包装**写（纯核不碰），
+                    //   单独逐字比对更紧（下一行）。
+                    LIFT_CHECK(std::memcmp(fx.m.mem().host(self), ref_obj.data(), kOutField) == 0);
+                    if (eax != 0u && ref.comp != 0u) {
+                        LIFT_CHECK(std::memcmp(fx.m.mem().host(eax), ref_out.data(), ref.comp) == 0);
+                    }
+                    for (std::size_t i = 0; i < lift::NativeOverride::kDeclineSlots; ++i)
+                        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ov.declines[i]), 0u);
+                }
+            }
+        }
+
     }
 
     return lift_test::finish("native-override");

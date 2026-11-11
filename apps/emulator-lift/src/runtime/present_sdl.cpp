@@ -127,6 +127,12 @@ struct SdlWindow::Impl {
     bool raster_gpu = false;
     bool raster_sprites = true;
     std::unique_ptr<GpuRaster> gpu_raster;
+    // ★ 夹具缝（`setGpuRasterForTest`）：非空时所有**转发**都到它，生命周期归夹具。
+    //   ⛔ 生产路径永远是 nullptr；`init`/`shutdown` 只碰 `gpu_raster`（所有权那一份）。
+    GpuRaster* raster_view = nullptr;
+    // 转发壳的**唯一**取用点：所有 `SdlWindow::raster*` 都走它（⛔ 不许各处直接写 `gpu_raster`，
+    // 否则夹具缝与"漏转发"两件事都会各自漏一条）。
+    GpuRaster* raster() const { return raster_view != nullptr ? raster_view : gpu_raster.get(); }
     SDL_Texture* raster_target = nullptr;
     int raster_w = 0;
     int raster_h = 0;
@@ -705,59 +711,99 @@ bool SdlWindow::readbackPixel(int x, int y, std::uint32_t* argb, std::string* er
 
 // ---------------------------------------------------------------------------------------
 // GPU 光栅化（--raster gpu）：独立 SDL_GPUDevice 的离屏 target（后端在 d3d9_gpu.cpp）
+// ★ 本类是 `GpuRaster` 的**转发壳**：除 `rasterName`（缓存身份）与 `rasterSpritesEnabled`
+//   （壳级 A/B 与后端能力的合成）两条**有意的非纯转发**外，每一条虚函数都必须显式转发到
+//   `impl_->raster()`。漏一条 == 后端"实现了但永远收不到"（静默；不报错、不改像素、测试全绿）——
+//   `rasterRequestDepthClear` 就这么漏过，代价是"GPU 臂整层丢 Live2D 角色"
+//   （`REQ-01M73P3GXW22Y467YGYPQSM571`）。守卫：`tests/gpu_batch.cpp::caseDepthClearForwarded`
+//   逐条断言"调用真的到后端了"（用 `setGpuRasterForTest` 注入替身，不需要 GPU 设备）。
 // ---------------------------------------------------------------------------------------
-GpuRaster* SdlWindow::gpuRaster() { return impl_->gpu_raster ? this : nullptr; }
+GpuRaster* SdlWindow::gpuRaster() { return impl_->raster() != nullptr ? this : nullptr; }
 
-bool SdlWindow::rasterActive() const { return impl_->gpu_raster != nullptr && impl_->gpu_raster->rasterActive(); }
+bool SdlWindow::rasterActive() const {
+    const GpuRaster* r = impl_->raster();
+    return r != nullptr && r->rasterActive();
+}
 
 const char* SdlWindow::rasterName() const { return impl_->raster_name.c_str(); }
 
 bool SdlWindow::rasterSpritesEnabled() const {
     // `--raster-sprites 0` 是 A/B 开关：即使后端本身支持 sprite，也必须能退回 CPU 路径。
-    return impl_->raster_sprites && impl_->gpu_raster != nullptr && impl_->gpu_raster->rasterSpritesEnabled();
+    const GpuRaster* r = impl_->raster();
+    return impl_->raster_sprites && r != nullptr && r->rasterSpritesEnabled();
 }
 
 bool SdlWindow::rasterPrepare(const SurfaceFormat& format, int width, int height, std::string* err,
                               const std::uint8_t* color_base) {
-    return impl_->gpu_raster ? impl_->gpu_raster->rasterPrepare(format, width, height, err, color_base) : false;
+    GpuRaster* r = impl_->raster();
+    return r != nullptr ? r->rasterPrepare(format, width, height, err, color_base) : false;
 }
 bool SdlWindow::rasterSyncFromGuest(const std::uint8_t* pixels, std::uint32_t pitch, int width, int height,
                                     std::string* err) {
-    return impl_->gpu_raster ? impl_->gpu_raster->rasterSyncFromGuest(pixels, pitch, width, height, err) : false;
+    GpuRaster* r = impl_->raster();
+    return r != nullptr ? r->rasterSyncFromGuest(pixels, pitch, width, height, err) : false;
 }
 bool SdlWindow::rasterSyncToGuest(std::uint8_t* pixels, std::uint32_t pitch, int width, int height,
                                   std::string* err) {
-    return impl_->gpu_raster ? impl_->gpu_raster->rasterSyncToGuest(pixels, pitch, width, height, err) : false;
+    GpuRaster* r = impl_->raster();
+    return r != nullptr ? r->rasterSyncToGuest(pixels, pitch, width, height, err) : false;
 }
 bool SdlWindow::rasterDraw(const GpuRasterVertex* vertices, std::size_t count, const GpuRasterState& state,
                            std::string* err) {
-    return impl_->gpu_raster ? impl_->gpu_raster->rasterDraw(vertices, count, state, err) : false;
+    GpuRaster* r = impl_->raster();
+    return r != nullptr ? r->rasterDraw(vertices, count, state, err) : false;
 }
 bool SdlWindow::rasterDrawTextured(const GpuRasterVertex* vertices, std::size_t count,
                                    const GpuRasterTexture& texture, const GpuRasterState& state,
                                    std::string* err) {
-    return impl_->gpu_raster ? impl_->gpu_raster->rasterDrawTextured(vertices, count, texture, state, err) : false;
+    GpuRaster* r = impl_->raster();
+    return r != nullptr ? r->rasterDrawTextured(vertices, count, texture, state, err) : false;
 }
 bool SdlWindow::rasterQueue(const GpuRasterVertex* vertices, std::size_t count,
                             const GpuRasterTexture* texture, const GpuRasterState& state, std::string* err) {
-    return impl_->gpu_raster ? impl_->gpu_raster->rasterQueue(vertices, count, texture, state, err) : false;
+    GpuRaster* r = impl_->raster();
+    return r != nullptr ? r->rasterQueue(vertices, count, texture, state, err) : false;
 }
 bool SdlWindow::rasterFlush(std::string* err) {
-    return impl_->gpu_raster ? impl_->gpu_raster->rasterFlush(err) : true;
+    GpuRaster* r = impl_->raster();
+    return r != nullptr ? r->rasterFlush(err) : true;
 }
 const void* SdlWindow::rasterTargetBase() const {
-    return impl_->gpu_raster ? impl_->gpu_raster->rasterTargetBase() : nullptr;
+    const GpuRaster* r = impl_->raster();
+    return r != nullptr ? r->rasterTargetBase() : nullptr;
 }
 std::size_t SdlWindow::rasterQueuedDraws() const {
-    return impl_->gpu_raster ? impl_->gpu_raster->rasterQueuedDraws() : 0;
+    const GpuRaster* r = impl_->raster();
+    return r != nullptr ? r->rasterQueuedDraws() : 0;
 }
 void SdlWindow::rasterDiscardTarget() {
-    if (impl_->gpu_raster) impl_->gpu_raster->rasterDiscardTarget();
+    GpuRaster* r = impl_->raster();
+    if (r != nullptr) r->rasterDiscardTarget();
 }
-bool SdlWindow::rasterDirty() const { return impl_->gpu_raster != nullptr && impl_->gpu_raster->rasterDirty(); }
+// ★ 这一条曾经**整条漏掉**（`REQ-01M73P3GXW22Y467YGYPQSM571`）：`d3d9::clear` 在
+//   `D3DCLEAR_ZBUFFER` 上就是调它 ⇒ 后端 D32 永不再清，上一帧的 z=0 全屏 quad 把深度写成 0，
+//   下一帧 z=0.5 的 FF 批全被 LESSEQUAL 判掉。
+void SdlWindow::rasterRequestDepthClear() {
+    GpuRaster* r = impl_->raster();
+    if (r != nullptr) r->rasterRequestDepthClear();
+}
+bool SdlWindow::rasterDirty() const {
+    const GpuRaster* r = impl_->raster();
+    return r != nullptr && r->rasterDirty();
+}
 
 GpuDirectPresenter* SdlWindow::directPresenter() {
-    return impl_->gpu_raster ? impl_->gpu_raster->directPresenter() : nullptr;
+    GpuRaster* r = impl_->raster();
+    return r != nullptr ? r->directPresenter() : nullptr;
+}
+
+void SdlWindow::setGpuRasterForTest(GpuRaster* raster) {
+    // ⛔ 只许在 `init()` **之前**用：`init()` 之后生产路径手里就是这个壳（`Machine::gpuRaster()`），
+    //   换后端会静默改掉全部 raster 行为（像素/屏障/直出）。替身生命周期归调用方，本类不持有。
+    // ★ 用**运行时**检查而不是 `assert`：RelWithDebInfo 带 `/DNDEBUG`（实测 `out/build.ninja` 的
+    //   FLAGS 里有它）⇒ `assert` 会被编掉，等于没有约束。
+    if (impl_->gpu_raster != nullptr) return;
+    impl_->raster_view = raster;
 }
 
 }  // namespace lift

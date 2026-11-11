@@ -9,7 +9,8 @@
 > **`文档 · <API>（✅ URL）`** = 本仓已存档页面（`external-docs.md` 有可点链接）·
 > **`文档 · <API>（URL 待补）`** = 代码注释点名过该文档、我们照它实现，但**本仓还没存下页面地址**（不许凭记忆补）·
 > **`我们自定`** = 文档没定义，或我们**故意偏离**（偏在哪 / 为什么见 `external-docs.md` 末节）。
-> `实现` 栏是**读过的**代码落点；`守卫` 栏是 CTest 用例名（`用例文件 / 子用例`），没有就写 `无`。
+> `实现` 栏是**读过的**代码落点；`守卫` 栏是用例名（`用例文件 / 子用例` = 该文件里的 `g_current_case`；
+> CTest 注册的是**整个用例文件**（一个文件可能注册成多个套件），子用例名本身不是 CTest 名），没有就写 `无`。
 
 ## MEM —— 堆 / 虚拟内存
 
@@ -80,6 +81,11 @@
 | L1-D3D9-03 | `Clear` 按掩码：无 `D3DCLEAR_TARGET` ⇒ 颜色不动且返回 `S_OK`；`Count==0` 清整幅、否则只清给定 `D3DRECT`（空矩形跳过）；`ZBUFFER` 位真清深度；`STENCIL` 位**没有模板缓冲** ⇒ 只记录，⛔ 不谎称清了 | 文档 · `IDirect3DDevice9::Clear`（URL 待补） | `runtime/d3d9.cpp:525-532`、`547-552`、`591-626` | `d3d9.cpp / d3d9/clear` |
 | L1-D3D9-04 | 资源耗尽（纹理像素 / 状态块分配失败）⇒ 返回 `E_OUTOFMEMORY(0x8007000E)`，**不算"未实现"**、不计 `unimplemented_calls`；随后本线**硬停**（真机会继续跑） | 文档 · D3DX/D3D9 的资源失败码（URL 待补）＋ `我们自定`（硬停，理由见 `external-docs.md` 偏离 §1） | `shims/d3dx9.cpp:1076-1083`、`104-127` · `runtime/d3d9.cpp:848-849` | `无` |
 | L1-D3D9-05 | 对象 `Release` 到 0 ⇒ **立即归还** guest 侧资源：设备带走后缓冲 + 深度两块 arena，纹理带走像素 arena 与状态块（`surfaceCount` / `bytesInUse` 回基线） | 文档 · COM `IUnknown::Release` 的所有权语义（URL 待补） | `runtime/d3d9.cpp:990-997` · `shims/ddraw.cpp:184-201` | `d3d9.cpp / d3d9/texture-bound-then-guest-release` |
+| L1-D3D9-06 | `CreateStateBlock` 在**建块那一刻**捕获设备状态（不是等到 `Capture`）；`Capture` 用当前状态重捕；`Apply` 把快照写回，**含绑定重建**（纹理 / 流 / 索引 / 顶点声明走正常绑定路径，⛔ 不裸写槽）；`D3DSBT_PIXELSTATE` / `VERTEXSTATE` 只回滚自己那一侧（像素块不碰 FVF / 变换 / 视口 / 裁剪矩形，反之亦然）；快照在块活着期间替 guest 持一份绑定引用（guest 放掉自己那份后 `Apply` 仍能写回），块 `Release` 到 0 时成对还回 | 文档 · `IDirect3DStateBlock9::CreateStateBlock` / `Capture` / `Apply`（URL 待补；`shims/d3d9.cpp:991` 注释引"a state block contains state data … when the object is created"） | `shims/d3d9.cpp:1057-1104`、`1143-1211` · `runtime/d3d9_pipeline.cpp:3669-3822` | `d3d9.cpp / d3d9/stateblock-capture-apply` |
+| L1-D3D9-07 | 缩小采样（每屏幕像素覆盖 > 1 texel）且 `MIPFILTER != NONE` 时，采样取对应的派生 mip 级（**最近级**，⛔ 不做三线性：1.5:1 ⇒ level 1、1.2:1 仍 level 0）；**1:1 与放大恒 level 0**；`MIPFILTER=NONE` ⇒ 只采 level 0（关掉 mipmap）；`Unlock` 改了 texel ⇒ 下一次绘制用按新内容重算的链（⛔ 不用旧链），纹理 `Release` 后链随之回收 | 文档 · D3D9 采样器的 MIPFILTER / `D3DTEXF_NONE` = 关掉 mipmap（URL 待补）＋ `我们自定`（最近级近似；多级链是采样侧内部派生的） | `runtime/d3d9.cpp:1359-1447` · `runtime/d3d9_pipeline.cpp:1299-1322`、`5149-5169` | `d3d9_mip.cpp / d3d9-mip/lod-levels` · `d3d9_pipeline.cpp / d3d9p/mip-levels` |
+| L1-D3D9-08 | `DrawPrimitive(UP)` 的 `LINELIST` / `LINESTRIP` 真的写像素：线宽恒 1px（主轴每列一个像素，起点 / 终点列都画、相邻列不画）；顶点顺序（右→左 / 下→上）不改变覆盖，颜色与 z 沿段按位置插值；线的深度测试 / 深度写 / alpha blend 与三角形**同一份**。点 / 线与三角形共用同一条状态准入：只接受"结果恒等于顶点色"的无纹理路径 —— 任一纹理级绑了纹理、或 `COLOROP` / `ALPHAOP` 需要采样 ⇒ `D3DERR_INVALIDCALL` 且**一个像素都不写**（⛔ 不画成纯色） | 文档 · `IDirect3DDevice9::DrawPrimitive` / `DrawPrimitiveUP` 的线图元规则（URL 待补）＋ `我们自定`（点尺寸 / 抗锯齿线未建模；带纹理的点 / 线不接受） | `runtime/d3d9_pipeline.cpp:1941-1989`、`4106-4141`、`4459-4510` | `d3d9.cpp / d3d9/linelist-writes-pixels`、`d3d9/linestrip-16`、`d3d9/line-axes-and-direction`、`d3d9/line-textured-loud-reject` |
+| L1-D3D9-09 | `CheckDeviceFormat` 只对**真的建得出来**的组合答 `S_OK`（支持集与纹理创建侧同一份，⛔ 不另写表）：`TEXTURE` 的 `X8R8G8B8` / `A8R8G8B8`（`Usage=0` 或 `RENDERTARGET`）答支持、`RENDERTARGET` 只接受 32bpp；`DXT1`、`D24S8` 当纹理、16bpp 当 `RENDERTARGET`、**未知格式**一律 `D3DERR_NOTAVAILABLE`；`SURFACE` 只接受 `DEPTHSTENCIL` + `D24S8`（`D16` / 纹理格式不支持）；其它 `RType` / 联合 `Usage` 位不支持；答 no 也留诊断 | 文档 · `IDirect3D9::CheckDeviceFormat`（URL 待补；判定规则见 `runtime/d3d9.cpp:543-555` 注释） | `runtime/d3d9.cpp:556-573` · `shims/d3d9.cpp:278-298` | `d3d9.cpp / d3d9/checkdeviceformat-truthful` |
+| L1-D3D9-10 | 挂了 GPU 光栅后端时，`Clear` 的 `D3DCLEAR_ZBUFFER` 位必须把"清深度"请求**穿过呈现壳**送到后端（一次 `Clear` 一次请求）；只带 `D3DCLEAR_TARGET` 的 `Clear` **不发**清深度请求。⛔ 不许出现"CPU 深度镜像清了、GPU 的 D32 没清"的静默分叉（下一帧的绘制会因此被上一帧的深度挡住） | 文档 · `IDirect3DDevice9::Clear` 的 `D3DCLEAR_ZBUFFER`（与 `L1-D3D9-03` 同一份语义；URL 待补）＋ `我们自定`（GPU 的 D32 与 guest 深度缓冲是两块内存，见 `external-docs.md` §3 #11） | `runtime/d3d9.cpp:603-609` · `runtime/present_sdl.h:91-97`、`runtime/present_sdl.cpp:786-789` | `gpu_batch.cpp / gpu-batch/depth-clear-forwarded` |
 
 ## DDRAW —— 表面 / Blt / Flip
 

@@ -17,6 +17,13 @@
 //   ④ 反例：`Draw` 在 `Begin` 之外 / `Begin` 嵌套 ⇒ D3DERR_INVALIDCALL（⛔ 不静默吞掉）。
 //   ②a `D3DXCreateTextureFromFileInMemory`（TITLE Live2D 的真实入口）：PNG 头 → 同尺寸纹理；
 //      未知容器 ⇒ E_FAIL + 出参 0（不 trap）。
+//   ②c 同一导出的 **PNG 真解码 + 上传**（`REQ-01M738VYG0DP3TNJKYDSA49J7H`）：8×8 RGBA 内嵌 PNG
+//      逐像素等于源公式；上传走 `d3d9::lockRect/unlockRect`（版本 / 写区不变量）；截断 / 错 magic
+//      ⇒ E_FAIL 且机器没停、不留半张纹理。
+//   ②d `lift::png::decodeRgba8` 的**模块级**判据：RGBA / 调色板 / 灰度三张真 PNG + 坏输入矩阵
+//      （出参必须被复位）。
+//   ②e **上传失败**的失败面（`createTextureState` 成功、8 B `D3DLOCKED_RECT` 失败）⇒ 回滚
+//      arena + 状态块，`E_FAIL`，机器不停。
 //   ⑤ 纹理簇（`D3DXCreateTexture` → IDirect3DTexture9）：GetLevelDesc 的 D3DSURFACE_DESC 字段
 //      与 `.lst` 0x48AD2A/0x48AD2D 的读法一致；LockRect 给出 guest 指针；**纹理 × 调制色**
 //      的像素级断言；源矩形越界裁剪；纹理在批次里 AddRef / 合成后对称 Release。
@@ -46,6 +53,7 @@
 #include "runtime/d3d9.h"
 #include "runtime/d3dx9_sprite.h"
 #include "runtime/machine.h"
+#include "runtime/png_decode.h"
 #include "runtime/surface.h"
 #include "shims/register.h"
 
@@ -84,6 +92,78 @@ constexpr std::uint8_t kIidSprite[16] = {0x2D, 0x76, 0x0B, 0xBA, 0x28, 0x7D, 0xE
 // IID_IUnknown = {00000000-0000-0000-C000-000000000046}
 constexpr std::uint8_t kIidUnknown[16] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                                           0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46};
+
+// ---------------------------------------------------------------------------------------
+// 内嵌的**真 PNG**（不是只有 IHDR 的假头）：像素判据需要一个能被 libpng 真解码的文件。
+// ★ 生成脚本 = `.tmp/reveq/REQ-01M738VYG0DP3TNJKYDSA49J7H/make_fixture_png.mjs`
+//   （逐字节可重建；下面每个数组的注释里写着源公式，测试按**同一公式**算期望值，
+//     ⛔ 不是把解码输出抄成 expected）。
+// ---------------------------------------------------------------------------------------
+// 8×8 RGBA，未压缩行 filter=None；像素公式：
+//   R = 16*x + 8 · G = 16*y + 8 · B = 240 - 16*x · A = 8 + 32*x（α 沿 x 的梯度）
+// ★ R 与 B 每一格都不同 ⇒ RGBA/BGRA 通道换序会被逐像素断言抓住。
+constexpr std::uint8_t kPng8x8Rgba[] = {
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+    0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x08,
+    0x08, 0x06, 0x00, 0x00, 0x00, 0xC4, 0x0F, 0xBE, 0x8B, 0x00, 0x00, 0x00,
+    0xB4, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x15, 0xCA, 0x21, 0x19, 0x04,
+    0x20, 0x0C, 0x06, 0xD0, 0x93, 0x8B, 0xB0, 0x08, 0x7F, 0x84, 0x45, 0x58,
+    0x84, 0x45, 0xF8, 0x23, 0x4C, 0x9E, 0x44, 0x12, 0x01, 0x89, 0x24, 0x02,
+    0x12, 0x49, 0x04, 0xE4, 0x49, 0x22, 0xDC, 0xC7, 0xD3, 0xEF, 0x23, 0x72,
+    0x45, 0xE5, 0x00, 0xB2, 0xDD, 0x64, 0xD2, 0x65, 0x94, 0x90, 0xD6, 0x29,
+    0x75, 0xA5, 0x7C, 0x7F, 0x1F, 0xD1, 0x2B, 0xAA, 0x07, 0xD0, 0xED, 0xA6,
+    0x93, 0xAE, 0xA3, 0x84, 0xB6, 0x4E, 0xAD, 0x2B, 0xF5, 0x05, 0x5C, 0x51,
+    0x1C, 0x00, 0xDB, 0x0D, 0x93, 0x8E, 0x51, 0x02, 0xAD, 0x13, 0x75, 0x25,
+    0x5E, 0xB0, 0x2B, 0x6A, 0x07, 0xB0, 0xED, 0x66, 0x93, 0x6E, 0xA3, 0x84,
+    0xB5, 0x4E, 0xAB, 0x2B, 0xED, 0x05, 0xBF, 0xA2, 0x7E, 0x00, 0xDF, 0x6E,
+    0x3E, 0xE9, 0x3E, 0x4A, 0x78, 0xEB, 0xF4, 0xBA, 0xD2, 0x5F, 0x88, 0x2B,
+    0x1A, 0x07, 0x88, 0xED, 0x16, 0x93, 0x1E, 0xA3, 0x44, 0xB4, 0xCE, 0xA8,
+    0x2B, 0xE3, 0x05, 0x5E, 0x51, 0x1E, 0x80, 0xDB, 0x8D, 0x93, 0xCE, 0x51,
+    0x82, 0xAD, 0x93, 0x75, 0x25, 0x5F, 0xC8, 0x2B, 0x9A, 0x07, 0xC8, 0xED,
+    0x96, 0x93, 0x9E, 0xA3, 0x44, 0xB6, 0xCE, 0xAC, 0x2B, 0xF3, 0xFB, 0xFB,
+    0x03, 0x33, 0x14, 0x6C, 0x01, 0x0D, 0x1E, 0x58, 0xF5, 0x00, 0x00, 0x00,
+    0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+};
+// 7×5 RGBA（**非方、非 2 的幂** ⇒ 宽高只能来自 IHDR）：R = 32*x · G = 32*y · B = 255-32*x · A = 255
+constexpr std::uint8_t kPng7x5[] = {
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+    0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x05,
+    0x08, 0x06, 0x00, 0x00, 0x00, 0x89, 0x9A, 0xF6, 0xD8, 0x00, 0x00, 0x00,
+    0x60, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x15, 0xCD, 0x41, 0x01, 0x00,
+    0x21, 0x0C, 0x04, 0xB1, 0x4A, 0xA9, 0x93, 0x5B, 0x27, 0xAC, 0x13, 0xEA,
+    0x04, 0x9C, 0x80, 0x13, 0xA4, 0xCC, 0xC1, 0x3B, 0x8F, 0x44, 0x04, 0x64,
+    0x1C, 0x14, 0x0B, 0xC7, 0xA0, 0xA2, 0x33, 0xA3, 0xB1, 0xE3, 0x23, 0x22,
+    0x21, 0xF3, 0xA0, 0x5C, 0x38, 0x07, 0x95, 0x9D, 0x99, 0x8D, 0x9D, 0x0F,
+    0x05, 0xA9, 0x83, 0xB4, 0xB0, 0x06, 0xA5, 0xCE, 0x54, 0x63, 0xEB, 0xA1,
+    0x21, 0x7D, 0x90, 0x17, 0xF6, 0xA0, 0xDC, 0x99, 0x6E, 0x6C, 0x3F, 0xAC,
+    0x7B, 0xD6, 0x3D, 0xEB, 0x9E, 0x75, 0xCF, 0xBA, 0x67, 0xDD, 0xB3, 0x3E,
+    0x7E, 0x16, 0x7F, 0x4E, 0x7B, 0x31, 0xCC, 0x18, 0x51, 0x00, 0x00, 0x00,
+    0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+};
+// 调色板 PNG（color type 3，4 色 PLTE）：像素 = (x+y) % 4 号下标，
+//   0 = (255,0,0) / 1 = (0,255,0) / 2 = (0,0,255) / 3 = (17,34,51)；无 tRNS ⇒ A=255。
+// ★ 它证明"用 libpng 而不是手写解码"的收益：色型转换由简化 API 做完，本线只看见 RGBA。
+constexpr std::uint8_t kPngPalette4x4[] = {
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+    0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04,
+    0x08, 0x03, 0x00, 0x00, 0x00, 0x9E, 0x2F, 0x6E, 0x4C, 0x00, 0x00, 0x00,
+    0x0C, 0x50, 0x4C, 0x54, 0x45, 0xFF, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00,
+    0x00, 0xFF, 0x11, 0x22, 0x33, 0xFE, 0x38, 0xA8, 0x95, 0x00, 0x00, 0x00,
+    0x14, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x63, 0x60, 0x60, 0x64, 0x62,
+    0x06, 0x63, 0x06, 0x10, 0xCD, 0x00, 0x62, 0x03, 0x00, 0x01, 0x04, 0x00,
+    0x19, 0x92, 0xAF, 0x76, 0xB7, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E,
+    0x44, 0xAE, 0x42, 0x60, 0x82,
+};
+// 灰度 PNG（color type 0，8-bit）：像素 = 16*x + 8*y ⇒ 期望 R=G=B=该值、A=255。
+constexpr std::uint8_t kPngGray4x4[] = {
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+    0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04,
+    0x08, 0x00, 0x00, 0x00, 0x00, 0x8C, 0x9A, 0xC1, 0xA2, 0x00, 0x00, 0x00,
+    0x19, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x63, 0x60, 0x10, 0x50, 0x30,
+    0x60, 0xE0, 0x90, 0xD0, 0xB0, 0x00, 0x31, 0x1C, 0x18, 0x24, 0x34, 0x2C,
+    0x3C, 0x00, 0x12, 0x34, 0x02, 0x41, 0x87, 0xFF, 0x68, 0xDF, 0x00, 0x00,
+    0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+};
 
 struct Asm {
     std::vector<std::uint8_t> b;
@@ -302,6 +382,16 @@ struct Fixture {
         a.callRel(code_ea, proc);
         a.ret();
         return runAsm(a);
+    }
+
+    // 同上，但把 RunResult 一起交回来（判"机器有没有停"：`reason` / `stop_why`）。
+    std::uint32_t callExportRaw(std::uint32_t proc, const std::vector<std::uint32_t>& args,
+                                lift::RunResult* rr) {
+        Asm a;
+        for (std::size_t i = args.size(); i > 0; --i) a.pushImm(args[i - 1]);
+        a.callRel(code_ea, proc);
+        a.ret();
+        return runAsmRaw(a, rr);
     }
 
     // D3DXCreateTexture(device, w, h, levels, usage, format, pool, &out)
@@ -583,8 +673,9 @@ void caseDrawEndPixels() {
 
 // ---------------------------------------------------------------------------------------
 // ②a D3DXCreateTextureFromFileInMemory（TITLE Live2D 纹理的真实入口；`.lst` 0x478398）
-//   本层只读文件头：PNG 2048×2048 ×3 在实跑里会出现；这里用 7×5 的合成 PNG 断言尺寸/格式。
-//   ★ 像素仍未解码（stub）⇒ 不在这里断言颜色；下一层接 PNG 解码时再加像素级用例。
+//   本层断言"**头**决定的属性"：宽高来自 PNG 的 IHDR（**非方、非 2 的幂**的 7×5 ⇒ 不可能是常量）、
+//   格式恒 A8R8G8B8、MipLevels=1、Release 之后 arena / 对象全部回收；未知容器 ⇒ E_FAIL。
+//   ★ 像素级判据在 ②c（8×8 的 α 梯度图，逐像素对源公式）。
 // ---------------------------------------------------------------------------------------
 void caseTextureFromMemory() {
     lift_test::g_current_case = "d3dx9/texture-from-memory";
@@ -598,19 +689,15 @@ void caseTextureFromMemory() {
     LIFT_CHECK(f.createDevice(d3d9, 1280, 720, lift::d3d9::kFmtX8R8G8B8, &dev));
     if (dev.object == 0) return;
 
-    std::vector<std::uint8_t> png(33u, 0u);
-    const std::uint8_t sig[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
-    std::memcpy(png.data(), sig, 8);
-    png[12] = 'I'; png[13] = 'H'; png[14] = 'D'; png[15] = 'R';
-    png[16] = 0; png[17] = 0; png[18] = 0; png[19] = 7;   // width 7
-    png[20] = 0; png[21] = 0; png[22] = 0; png[23] = 5;   // height 5
-    png[24] = 8;   // bit depth
-    png[25] = 6;   // color type RGBA
-    const std::uint32_t png_ea = f.placeBytes(png);
+    // ★ 真的 7×5 PNG（不是只填 IHDR 的假头）：真解码之后，假头会被 libpng 以
+    //   "read beyond end of data" 拒绝 —— 那是**正确**行为，但断言 S_OK 就变成了一条假用例。
+    const std::uint32_t png_ea = f.placeBytes(std::vector<std::uint8_t>(
+        kPng7x5, kPng7x5 + sizeof(kPng7x5)));
     const std::size_t surfaces_before = f.m.surfaces().surfaceCount();
     const std::uint32_t out = f.placeU32(0xDEADBEEFu);
-    LIFT_CHECK_EQ_U32(
-        f.callExport(kProcD3DXCreateTextureFromFileInMemory, {dev.object, png_ea, 33u, out}), 0u);
+    LIFT_CHECK_EQ_U32(f.callExport(kProcD3DXCreateTextureFromFileInMemory,
+                                   {dev.object, png_ea, static_cast<std::uint32_t>(sizeof(kPng7x5)), out}),
+                      0u);
     const std::uint32_t tex = f.m.mem().rd32(out);
     LIFT_CHECK_NE_U32(tex, 0u);
     if (tex == 0) return;
@@ -635,6 +722,317 @@ void caseTextureFromMemory() {
         f.callExport(kProcD3DXCreateTextureFromFileInMemory, {dev.object, junk_ea, 32u, out2}),
         lift::d3d9::kFail);
     LIFT_CHECK_EQ_U32(f.m.mem().rd32(out2), 0u);
+}
+
+// ---------------------------------------------------------------------------------------
+// ②c PNG 的**真解码 + 上传**（`REQ-01M738VYG0DP3TNJKYDSA49J7H`）
+//
+// 判据（红了意味着什么）：
+//   ① 8×8 RGBA PNG（α 沿 x 的梯度；R 与 B 每一格都不同）**逐像素**等于按**源公式**算的期望
+//      （四角 + 中心 + 两个非角点）⇒ 通道序（PNG 的 R,G,B,A → guest 的 B,G,R,A）、行序、
+//      α 通道任一错都红；
+//   ② 上传**走的是 `d3d9::lockRect` / `unlockRect` 那条路**（不是另造的像素写路径）：
+//      不变量 `locks+1` / `locked==false` / `version!=0` / `write_version==version` / 写区 == 整幅。
+//      ⇒ "只建不写" 与 "手写 version/脏区" 都红。⛔ 不断言具体版本号（内部序列）。
+//   ③ 截断的 PNG / 错 magic ⇒ `E_FAIL`、出参 0、**机器没停**（`reason==UntilEa`、`stop_why` 空、
+//      `unimplemented_calls` 不涨）、arena 与 guest 堆都回到调用前 ⇒ "坏输入留半张纹理" / "trap" 都红。
+// ---------------------------------------------------------------------------------------
+void caseTextureFromMemoryPng() {
+    lift_test::g_current_case = "d3dx9/texture-from-memory-png";
+    Fixture f;
+    LIFT_CHECK(f.boot());
+    if (!f.boot()) return;
+    const std::uint32_t d3d9 = f.createDirect3D();
+    LIFT_CHECK_NE_U32(d3d9, 0u);
+    if (d3d9 == 0) return;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(d3d9, 1280, 720, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+
+    const std::size_t surfaces_before = f.m.surfaces().surfaceCount();
+    const std::uint32_t heap_before = f.m.heap().bytesInUse();
+
+    // ── ① 真 PNG（8×8 RGBA）⇒ S_OK + 像素逐点等于源公式 ───────────────────────────────────
+    const std::uint32_t png_ea = f.placeBytes(
+        std::vector<std::uint8_t>(kPng8x8Rgba, kPng8x8Rgba + sizeof(kPng8x8Rgba)));
+    const std::uint32_t out = f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(
+        f.callExport(kProcD3DXCreateTextureFromFileInMemory,
+                     {dev.object, png_ea, static_cast<std::uint32_t>(sizeof(kPng8x8Rgba)), out}),
+        lift::d3d9::kOk);
+    const std::uint32_t tex = f.m.mem().rd32(out);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return;
+    LIFT_CHECK_EQ_U32(f.m.surfaces().surfaceCount(), surfaces_before + 1u);
+
+    lift::d3d9::TextureInfo ti;
+    LIFT_CHECK(lift::d3d9::textureInfo(f.m.cpu(), tex, &ti, nullptr));
+    LIFT_CHECK_EQ_U32(ti.width, 8u);
+    LIFT_CHECK_EQ_U32(ti.height, 8u);
+    LIFT_CHECK_EQ_U32(ti.format, lift::d3d9::kFmtA8R8G8B8);
+    LIFT_CHECK_EQ_U32(ti.levels, 1u);
+
+    // ── ② 上传走的是 lock/unlock：只断言 `d3d9.h` 写下的不变量（⛔ 不锁版本号的具体值）──
+    LIFT_CHECK_EQ_U32(ti.locks, 1u);         // 真的 Lock 过一次
+    LIFT_CHECK(!ti.locked);                  // 且**解开了**（半锁的纹理 = 下一次 Lock 必失败）
+    LIFT_CHECK_NE_U32(ti.version, 0u);       // 内容"已知"（0 = 未知 / 锁内 / RT 降级）
+    LIFT_CHECK_EQ_U32(ti.write_version, ti.version);  // 写区与当前版内容同号 ⇒ 脏区可用
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ti.write_rect[0]), 0u);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ti.write_rect[1]), 0u);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ti.write_rect[2]), 8u);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ti.write_rect[3]), 8u);
+
+    // 源公式（与内嵌 PNG 的生成脚本逐字一致）：
+    //   R = 16x+8 · G = 16y+8 · B = 240-16x · A = 8+32x；guest 的 A8R8G8B8 = 0xAARRGGBB。
+    auto expected = [](std::uint32_t x, std::uint32_t y) {
+        const std::uint32_t r = 16u * x + 8u;
+        const std::uint32_t g = 16u * y + 8u;
+        const std::uint32_t b = 240u - 16u * x;
+        const std::uint32_t a = 8u + 32u * x;
+        return (a << 24) | (r << 16) | (g << 8) | b;
+    };
+    auto texel = [&f, &ti](std::uint32_t x, std::uint32_t y) {
+        return f.m.mem().rd32(ti.arena + static_cast<std::uint32_t>(y) * ti.pitch + x * 4u);
+    };
+    const std::uint32_t probes[6][2] = {{0u, 0u}, {7u, 0u}, {0u, 7u}, {7u, 7u}, {4u, 4u}, {3u, 5u}};
+    for (const auto& p : probes) {
+        LIFT_CHECK_EQ_U32(texel(p[0], p[1]), expected(p[0], p[1]));
+    }
+    // ★ fixture 的性质（不是断言）：源公式里 R=16x+8 与 B=240-16x 每一格都不同 ⇒
+    //   "通道换序"不可能蒙混过去（这里⛔ 不再加一条对 `expected` 自身的断言 —— 那是同义反复，
+    //   真正建立这件事的是上面 6 条逐像素期望；fixture 变灰度会让它们全红）。
+
+    // Release ⇒ 对象 + 状态块 + 像素块 + 临时 D3DLOCKED_RECT 全部回收
+    LIFT_CHECK_EQ_U32(f.method(tex, 0x08u, {}), 0u);
+    LIFT_CHECK(!f.m.cpu().com->find(tex));
+    LIFT_CHECK_EQ_U32(f.m.surfaces().surfaceCount(), surfaces_before);
+    LIFT_CHECK_EQ_U32(f.m.heap().bytesInUse(), heap_before);
+
+    // ── ③ 失败面：截断 / 错 magic ⇒ E_FAIL 且机器没停 ──────────────────────────────────────
+    const std::uint32_t traps_before = f.m.cpu().shim.unimplemented_calls;
+    auto expectFailWithoutStop = [&](const char* label, std::uint32_t ea, std::uint32_t size) {
+        const std::uint32_t outc = f.placeU32(0xDEADBEEFu);  // 哨兵：没被写才算"调用真的失败"
+        const std::uint32_t heap_now = f.m.heap().bytesInUse();
+        const std::size_t surfaces_now = f.m.surfaces().surfaceCount();
+        lift::RunResult rr;
+        const std::uint32_t hr =
+            f.callExportRaw(kProcD3DXCreateTextureFromFileInMemory, {dev.object, ea, size, outc}, &rr);
+        if (hr != lift::d3d9::kFail) {
+            lift_test::failf(__FILE__, __LINE__, "%s：HRESULT 期望 E_FAIL(0x%08X)，得 0x%08X", label,
+                             lift::d3d9::kFail, hr);
+        }
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(outc), 0u);
+        // ★ "机器没停"的三条机械判据（缺一条就可能是"trap 了但 eax 恰好是失败码"）
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(rr.reason),
+                          static_cast<std::uint32_t>(lift::StopReason::UntilEa));
+        LIFT_CHECK(rr.ok());
+        LIFT_CHECK(std::string(f.m.cpu().stop_why ? f.m.cpu().stop_why : "").empty());
+        LIFT_CHECK_EQ_U32(f.m.cpu().shim.unimplemented_calls, traps_before);
+        // ★ 不留半张纹理：arena 与 guest 堆都回到调用前
+        LIFT_CHECK_EQ_U32(f.m.surfaces().surfaceCount(), surfaces_now);
+        LIFT_CHECK_EQ_U32(f.m.heap().bytesInUse(), heap_now);
+    };
+    // ③a 截断：签名 + 完整 IHDR（33 B）都在，IDAT 被切断 ⇒ 头能解析、解码必须失败
+    const std::uint32_t trunc_ea = f.placeBytes(std::vector<std::uint8_t>(kPng8x8Rgba, kPng8x8Rgba + 100));
+    expectFailWithoutStop("截断的 PNG", trunc_ea, 100u);
+    // ③b 错 magic（32 B 全 0x5A）⇒ 连容器都认不出来
+    const std::uint32_t junk_ea = f.placeBytes(std::vector<std::uint8_t>(32u, 0x5A));
+    expectFailWithoutStop("错 magic", junk_ea, 32u);
+}
+
+// ---------------------------------------------------------------------------------------
+// ②d `lift::png::decodeRgba8` 的**模块级**判据（不经 shim / guest 内存）
+//
+// 判据（红了意味着什么）：
+//   ① 8×8 RGBA / 4×4 调色板 / 4×4 灰度三张真 PNG 都解成 **8-bit RGBA**，通道序是 PNG 原生
+//      R,G,B,A（⚠ 与 guest 的 A8R8G8B8 相反；换序是 shim 的职责，本函数只保证"PNG 的 RGBA"）。
+//      调色板 / 灰度两条正是"用 libpng 而不是手写解码"的收益：色型转换由简化 API 做完。
+//   ② 坏输入矩阵（空指针 / 0 字节 / 错 magic / 截断 / 超上限）⇒ `false`、`why` 非空、
+//      且**出参被复位**（否则会把上一张图的结构静默当成这次的结果）；⛔ 不抛、不 trap。
+// ---------------------------------------------------------------------------------------
+void casePngDecode() {
+    lift_test::g_current_case = "d3dx9/png-decode";
+    lift::png::RgbaImage img;
+    std::string why;
+
+    auto rgbaAt = [&img](std::uint32_t x, std::uint32_t y, std::uint32_t c) {
+        return static_cast<std::uint32_t>(
+            img.rgba[(static_cast<std::size_t>(y) * img.width + x) * 4u + c]);
+    };
+
+    // ── ① 8×8 RGBA（源公式：R=16x+8 · G=16y+8 · B=240-16x · A=8+32x）──
+    LIFT_CHECK(lift::png::decodeRgba8(kPng8x8Rgba, sizeof(kPng8x8Rgba), lift::d3d9::kMaxTextureWidth,
+                                      &img, &why));
+    LIFT_CHECK_EQ_U32(img.width, 8u);
+    LIFT_CHECK_EQ_U32(img.height, 8u);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(img.rgba.size()), 8u * 8u * 4u);
+    LIFT_CHECK_EQ_U32(rgbaAt(0u, 0u, 0u), 8u);    // R
+    LIFT_CHECK_EQ_U32(rgbaAt(0u, 0u, 1u), 8u);    // G
+    LIFT_CHECK_EQ_U32(rgbaAt(0u, 0u, 2u), 240u);  // B
+    LIFT_CHECK_EQ_U32(rgbaAt(0u, 0u, 3u), 8u);    // A
+    LIFT_CHECK_EQ_U32(rgbaAt(7u, 7u, 0u), 120u);
+    LIFT_CHECK_EQ_U32(rgbaAt(7u, 7u, 1u), 120u);
+    LIFT_CHECK_EQ_U32(rgbaAt(7u, 7u, 2u), 128u);
+    LIFT_CHECK_EQ_U32(rgbaAt(7u, 7u, 3u), 232u);
+
+    // ── ① 调色板 PNG（下标 = (x+y)%4；0=红 1=绿 2=蓝 3=(17,34,51)；无 tRNS ⇒ A=255）──
+    LIFT_CHECK(lift::png::decodeRgba8(kPngPalette4x4, sizeof(kPngPalette4x4), 0u, &img, &why));
+    LIFT_CHECK_EQ_U32(img.width, 4u);
+    LIFT_CHECK_EQ_U32(rgbaAt(0u, 0u, 0u), 255u);  // (0+0)%4 = 0 ⇒ 红
+    LIFT_CHECK_EQ_U32(rgbaAt(0u, 0u, 1u), 0u);
+    LIFT_CHECK_EQ_U32(rgbaAt(0u, 0u, 2u), 0u);
+    LIFT_CHECK_EQ_U32(rgbaAt(0u, 0u, 3u), 255u);
+    LIFT_CHECK_EQ_U32(rgbaAt(0u, 1u, 1u), 255u);  // (0+1)%4 = 1 ⇒ 绿
+    LIFT_CHECK_EQ_U32(rgbaAt(1u, 1u, 2u), 255u);  // (1+1)%4 = 2 ⇒ 蓝
+    LIFT_CHECK_EQ_U32(rgbaAt(3u, 0u, 0u), 17u);   // (3+0)%4 = 3 ⇒ (17,34,51)
+    LIFT_CHECK_EQ_U32(rgbaAt(3u, 0u, 1u), 34u);
+    LIFT_CHECK_EQ_U32(rgbaAt(3u, 0u, 2u), 51u);
+
+    // ── ① 灰度 PNG（像素 = 16x+8y ⇒ R=G=B=该值、A=255）──
+    LIFT_CHECK(lift::png::decodeRgba8(kPngGray4x4, sizeof(kPngGray4x4), 0u, &img, &why));
+    LIFT_CHECK_EQ_U32(img.width, 4u);
+    LIFT_CHECK_EQ_U32(rgbaAt(3u, 3u, 0u), 72u);   // 48 + 24
+    LIFT_CHECK_EQ_U32(rgbaAt(3u, 3u, 1u), 72u);
+    LIFT_CHECK_EQ_U32(rgbaAt(3u, 3u, 2u), 72u);
+    LIFT_CHECK_EQ_U32(rgbaAt(3u, 3u, 3u), 255u);  // 灰度没有 alpha 通道 ⇒ 不透明
+
+    // ── ② 坏输入矩阵 ──
+    const std::vector<std::uint8_t> junk(32u, 0x5A);
+    struct BadInput {
+        const char* name;
+        const std::uint8_t* bytes;
+        std::size_t size;
+        std::uint32_t max_side;
+        const char* why_part;  // nullptr = 只要求 why 非空（libpng 的措辞不是我们的合同）
+    };
+    const BadInput bad[] = {
+        {"空指针", nullptr, 0u, lift::d3d9::kMaxTextureWidth, "空"},
+        {"0 字节", kPng8x8Rgba, 0u, lift::d3d9::kMaxTextureWidth, "空"},
+        {"错 magic", junk.data(), junk.size(), lift::d3d9::kMaxTextureWidth, nullptr},
+        {"截断", kPng8x8Rgba, 100u, lift::d3d9::kMaxTextureWidth, nullptr},
+        {"超上限", kPng8x8Rgba, sizeof(kPng8x8Rgba), 4u, "上限"},
+    };
+    for (const BadInput& b : bad) {
+        // ★ 先塞一张**好图**：下面要证明失败时出参被复位，而不是留着上一张的结构。
+        LIFT_CHECK(lift::png::decodeRgba8(kPngGray4x4, sizeof(kPngGray4x4), 0u, &img, nullptr));
+        LIFT_CHECK_EQ_U32(img.width, 4u);
+        LIFT_CHECK(!img.rgba.empty());
+        why.clear();
+        if (lift::png::decodeRgba8(b.bytes, b.size, b.max_side, &img, &why)) {
+            lift_test::failf(__FILE__, __LINE__, "%s：期望失败，实际成功（%ux%u）", b.name, img.width,
+                             img.height);
+        }
+        LIFT_CHECK(!why.empty());
+        if (b.why_part != nullptr) LIFT_CHECK(why.find(b.why_part) != std::string::npos);
+        LIFT_CHECK_EQ_U32(img.width, 0u);
+        LIFT_CHECK_EQ_U32(img.height, 0u);
+        LIFT_CHECK(img.rgba.empty());
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// ②e **上传失败**的失败面（`createTextureState` 成功、`uploadRgbaToTexture` 失败）
+//
+// ★ 为什么单独一条：②c 的两条失败用例都在**解码期**就返回了，纹理根本没建 ⇒ "arena 与堆回到基线"
+//   是**平凡真**。这条把"唯一会留半张纹理"的路径弄成可达：
+//   状态块（`kTxBytes`）与 `D3DLOCKED_RECT`（8 B）都从 **`Machine::heap()`** 分配，而像素块在
+//   `SurfaceArena` 的**另一个** GuestHeap 里 ⇒ 把 Machine 堆占成
+//   "正好放得下状态块、再 +8 B 就没了"的窗口，于是 `createTextureState` 成功、8 B 失败 ⇒ 回滚。
+//   窗口的**两个端点都是实测的**（`need_state` = 建一次真纹理的 `bytesInUse()` 差；
+//   `need_rect` = `footprint(8)`），⛔ 不写死 `kTxBytes`。
+//
+// 判据（红了意味着什么）：`E_FAIL`、出参 0、机器没停、`surfaces().surfaceCount()` 回到调用前
+// （变异：删掉回滚 ⇒ 停在 +1，arena 泄漏 256 B）、`heap().bytesInUse()` 回到占满后的量
+// （状态块被还回）。放开占块后逐字节回到基线。
+// ---------------------------------------------------------------------------------------
+void caseTextureUploadRollback() {
+    lift_test::g_current_case = "d3dx9/texture-upload-rollback";
+    Fixture f;
+    LIFT_CHECK(f.boot());
+    if (!f.boot()) return;
+    const std::uint32_t d3d9 = f.createDirect3D();
+    LIFT_CHECK_NE_U32(d3d9, 0u);
+    if (d3d9 == 0) return;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(d3d9, 1280, 720, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+
+    auto& h = f.m.heap();
+    auto footprint = [&h](std::uint32_t payload) -> std::uint32_t {
+        const std::uint32_t b0 = h.bytesInUse();
+        const std::uint32_t p = h.alloc(payload);
+        if (p == 0) return 0;
+        const std::uint32_t used = h.bytesInUse() - b0;
+        h.free(p);
+        return used;
+    };
+    const std::uint32_t baseline = h.bytesInUse();
+
+    // 状态块的真实堆足迹：建一次**同样的**纹理，量 `bytesInUse()` 的差，再销毁。
+    std::string why;
+    const std::uint32_t probe_state = lift::d3d9::createTextureState(
+        f.m.cpu(), dev.object, 8u, 8u, 1u, 0u, lift::d3d9::kFmtA8R8G8B8, 1u, &why);
+    LIFT_CHECK_NE_U32(probe_state, 0u);
+    const std::uint32_t need_state = h.bytesInUse() > baseline ? h.bytesInUse() - baseline : 0u;
+    lift::d3d9::destroyTextureState(f.m.cpu(), probe_state);
+    LIFT_CHECK_EQ_U32(h.bytesInUse(), baseline);
+    const std::uint32_t need_rect = footprint(8u);
+    const std::uint32_t header = footprint(0u);
+    LIFT_CHECK_NE_U32(need_state, 0u);
+    LIFT_CHECK(need_rect > header);  // 前提：8 B 的块比"空块"大（否则窗口分不开）
+
+    // 占块：把最大空闲块切到只剩"状态块 + 块头"。
+    std::vector<std::uint32_t> fillers;
+    for (int guard = 0; guard < 64; ++guard) {
+        const std::uint32_t biggest = h.largestFreeBlock();
+        if (biggest < need_state + need_rect) break;   // 已落进窗口
+        if (biggest <= need_state + header) break;     // 切不动（下面的范围断言会报）
+        const std::uint32_t p = h.alloc(biggest - need_state - header);
+        LIFT_CHECK_NE_U32(p, 0u);
+        if (p == 0) break;
+        fillers.push_back(p);
+    }
+    LIFT_CHECK_NE_U32(static_cast<std::uint32_t>(fillers.size()), 0u);
+    LIFT_CHECK(h.largestFreeBlock() >= need_state);             // 状态块放得下
+    LIFT_CHECK(h.largestFreeBlock() < need_state + need_rect);  // 再加 8 B 就不行
+
+    const std::uint32_t filled = h.bytesInUse();
+    const std::size_t surfaces_now = f.m.surfaces().surfaceCount();
+    const std::uint32_t traps_before = f.m.cpu().shim.unimplemented_calls;
+    const std::uint32_t png_ea = f.placeBytes(
+        std::vector<std::uint8_t>(kPng8x8Rgba, kPng8x8Rgba + sizeof(kPng8x8Rgba)));
+    const std::uint32_t out = f.placeU32(0xDEADBEEFu);
+    lift::RunResult rr;
+    const std::uint32_t hr = f.callExportRaw(
+        kProcD3DXCreateTextureFromFileInMemory,
+        {dev.object, png_ea, static_cast<std::uint32_t>(sizeof(kPng8x8Rgba)), out}, &rr);
+
+    // ★ 从 `fillers.push_back` 之后**不许 early return**（占块必须被释放，否则"回基线"是假红）。
+    LIFT_CHECK_EQ_U32(hr, lift::d3d9::kFail);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(out), 0u);
+    // 失败面不留半张：arena 与状态块都还回去（变异：删掉 destroyTextureState ⇒ 两条都红）
+    LIFT_CHECK_EQ_U32(f.m.surfaces().surfaceCount(), surfaces_now);
+    LIFT_CHECK_EQ_U32(h.bytesInUse(), filled);
+    // 机器没停（可继续的失败，不是 trap / 资源耗尽硬停）
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(rr.reason),
+                      static_cast<std::uint32_t>(lift::StopReason::UntilEa));
+    LIFT_CHECK(rr.ok());
+    LIFT_CHECK(std::string(f.m.cpu().stop_why ? f.m.cpu().stop_why : "").empty());
+    LIFT_CHECK_EQ_U32(f.m.cpu().shim.unimplemented_calls, traps_before);
+
+    for (const std::uint32_t p : fillers) LIFT_CHECK(h.free(p));
+    LIFT_CHECK_EQ_U32(h.bytesInUse(), baseline);
+
+    // 恢复之后同一张 PNG 仍然能建（红的是"堆满了"，不是"解码/上传坏了"）
+    const std::uint32_t out2 = f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(
+        f.callExport(kProcD3DXCreateTextureFromFileInMemory,
+                     {dev.object, png_ea, static_cast<std::uint32_t>(sizeof(kPng8x8Rgba)), out2}),
+        lift::d3d9::kOk);
+    const std::uint32_t tex = f.m.mem().rd32(out2);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex != 0) LIFT_CHECK_EQ_U32(f.method(tex, 0x08u, {}), 0u);  // Release 回收
+    LIFT_CHECK_EQ_U32(f.m.surfaces().surfaceCount(), surfaces_now);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1536,6 +1934,9 @@ int main() {
         caseCreateQueryRelease();
         caseDrawEndPixels();
         caseTextureFromMemory();
+        caseTextureFromMemoryPng();
+        casePngDecode();
+        caseTextureUploadRollback();
         caseTextureDraw();
         caseSurfaceKeepsParentAlive();
         caseSurfaceGetDeviceRefcount();

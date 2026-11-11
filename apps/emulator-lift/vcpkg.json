@@ -6,6 +6,7 @@
     "sdl3",
     "zydis",
     "freetype",
-    "glm"
+    "glm",
+    "libpng"
   ]
 }

@@ -3,6 +3,10 @@
 // ★ 唯一的呈现汇点：D3D9 Present 与 DDraw Flip 都走 `HeadlessPresenter::present()`。
 //   `present()` 永远先算 hash / 帧号，然后 **best-effort** 交给可选的 `PresentSink`（真实窗口 / GPU），
 //   最后再做可选 BMP dump；显示失败只记账，⛔ 不改变 guest 的 Present 结果。
+//   ★ BMP dump 同理（`REQ-01M73YBCC3DZ05Y9NSDTRKTMMY`）：它是**宿主诊断**，写失败**不**让 guest 的
+//     Present 失败 —— 否则 `d3d9::present` 会在 `--max-frames` 停机检查之前返回，进程空转到别的
+//     停止条件（实测 546 s）。失败**第一次**打默认级别 warn，之后只计数，计数进 run summary
+//     （`dumpFailures=`，由 `main` 读 `dumpFailures()` 打印）。
 // ★ 本头文件保持 **SDL-free**：所有 pure CTest 都 include 它；SDL 类型只出现在 present_sdl.cpp。
 // ★ 单线程契约：sink 只在主线程（Machine::run / shim）被调用；sink 不允许抛异常。
 #pragma once
@@ -116,8 +120,15 @@ public:
     const std::string& lastSinkError() const { return last_sink_error_; }
     std::string sinkDescription() const;
 
+    // ★ 诊断：`--dump-frame` 每帧写文件失败的**次数**（0 = 一次都没失败）。
+    //   ⛔ 这不是"跳过导出"的开关：失败只记账 + 第一次 warn，guest 的 Present 照旧成功。
+    //   读点：`main` 在 `dumpRunSummary` 之后打 `dumpFailures=<它>`。
+    std::uint64_t dumpFailures() const { return dump_failures_; }
+
 private:
     void noteSinkFailure(const std::string& why);
+    // 帧导出失败：计数 + **只第一次**打默认级别 warn（⛔ 不每帧刷屏）。
+    void noteDumpFailure(const std::string& path, const std::string& why);
 
     std::unique_ptr<PresentSink> sink_;
     std::uint64_t frame_count_ = 0;
@@ -126,6 +137,9 @@ private:
     std::uint64_t sink_failures_ = 0;
     std::string last_sink_error_;
     bool sink_latched_ = false;
+    // ★ 帧导出（BMP）失败账：`dump_failures_` 每帧累加；`dump_failure_warned_` 保证只喊一次。
+    std::uint64_t dump_failures_ = 0;
+    bool dump_failure_warned_ = false;
     // 最后帧的描述符 + 当时的 hash（`dumpLastFrame` 用；不持有像素）。
     FrameSampler* sampler_ = nullptr;
     const SurfaceArena* last_arena_ = nullptr;

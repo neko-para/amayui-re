@@ -21,6 +21,7 @@
 #include "runtime/d3d9.h"
 #include "runtime/native_affine.h"
 #include "runtime/native_overrides.h"
+#include "shims/register.h"
 
 namespace {
 
@@ -514,6 +515,129 @@ AffineResult runAffine(const std::vector<std::uint8_t>& code4CCC60, const Affine
     return out;
 }
 
+// ---- sub_4367B0（退出写存档的 LZSS Encode）：真字节两臂差分 ----
+// 判据（缺一条都不算）：同一份夹具（对象预填 0xCC + 同一输入 + 同一个新堆）跑**解释器臂**与
+// **override 臂**，比 ①`EAX`（= 出缓冲 guest EA）②`ESP` ③`EIP` ④`info[0..2]`（`a3[1]` 是本单的
+// `<待核>`）⑤`out[0..comp)` 逐字节 ⑥**整个 `0xD430` 对象**逐字节。
+// ★ 为什么对象要预填 0xCC：guest **不写** `text_buf[4078+len .. 4095]` 的尾巴、`text_buf[4096..4112]`
+//   的未写部分、`dad[4096]`、`lson[4096]`、`rson[0..4096]`、以及（`len==0` 时）`match_pos/match_len`
+//   ⇒ 不预填时这些字节是**堆里上一次留下的垃圾**，两臂的堆历史不同就会"差在任何地方"。
+// ★ 为什么两臂各用一个**全新** `Machine` + 同一个 `_crtheap` 预置：解释器臂的首次 `_malloc` 会走
+//   `_heap_init`（`0x4EA529`）并多动堆状态 ⇒ 出缓冲指针会稳定地差一点（测试形状的错，不是实现的错）。
+struct LzssCase {
+    const char* name;
+    std::vector<std::uint8_t> input;
+};
+
+struct LzssResult {
+    bool valid = false;
+    std::uint32_t eax = 0, esp = 0, eip = 0, ebx = 0, esi = 0, edi = 0, ebp = 0;
+    std::uint32_t info[3] = {0, 0, 0};
+    std::vector<std::uint8_t> obj;
+    std::vector<std::uint8_t> out;
+    std::uint64_t hits = 0, fallbacks = 0;
+};
+
+LzssResult runLzss(const std::string& exe, const std::vector<std::uint8_t>& input, bool with_override,
+                   const char* tag) {
+    constexpr std::uint32_t kObjBytes = 0xD430u;
+    constexpr std::uint32_t kSelf = 0x08000000u;
+    constexpr std::uint32_t kInfo = 0x08100000u;
+    constexpr std::uint32_t kIn = 0x08200000u;
+    constexpr std::uint32_t kCall = 0x08300000u;
+    constexpr std::uint32_t kCrtheap = 0x0055E920u;  // `_crtheap`（`0x4EA529 cmp dword [0x55E920],0`）
+    LzssResult out;
+    lift::Machine m;
+    std::string err;
+    if (!m.initBare(&err)) return out;
+    if (!m.loadImage(exe, &err)) return out;
+    if (!m.prepareStack(&err)) return out;
+    lift::registerKernel32Shims(m.shims());
+    // ★ 让 guest 的 `new[] → _malloc → HeapAlloc` 走得通：把 `kernel32!HeapAlloc` 的 **IAT 槽**改指到
+    //   我们装的桩（不 patch guest 字节；只改 IAT 里那一个 dword）。
+    lift::ShimDef* ha = m.shims().findMutable("kernel32", "HeapAlloc");
+    if (ha == nullptr) {
+        std::fprintf(stderr, "  [lzss %s] 没有 kernel32!HeapAlloc shim\n", tag);
+        return out;
+    }
+    constexpr std::uint32_t kHeapAllocStub = 0x7FF90000u;
+    ha->stub_ea = kHeapAllocStub;
+    m.cache().installShim(kHeapAllocStub, ha->id);
+    std::uint32_t iat_ea = 0;
+    for (const lift::PeImportInfo& imp : m.image().imports) {
+        if (imp.name == "HeapAlloc") iat_ea = m.image().image_base + imp.iat_rva;
+    }
+    if (iat_ea == 0) {
+        std::fprintf(stderr, "  [lzss %s] 导入表里找不到 HeapAlloc 的 IAT 槽\n", tag);
+        return out;
+    }
+    m.mem().wr32(iat_ea, kHeapAllocStub);
+    if (!m.heap().init(&m.mem(), m.layout().heap_base, 0x00400000u)) return out;
+    if (!m.mem().committed(kCrtheap, 4u)) {
+        std::fprintf(stderr, "  [lzss %s] 0x55E920 不在已提交页（_crtheap 定位失效）\n", tag);
+        return out;
+    }
+    m.mem().wr32(kCrtheap, m.cpu().shim.heap_handle);  // 非 0 ⇒ 跳过 `_heap_init`
+    // 夹具：对象（0xCC 预填）+ info（12 B）+ 输入 + 调用桩
+    std::vector<std::uint8_t> obj(kObjBytes, 0xCC);
+    if (!m.placeData(kSelf, obj.data(), obj.size(), &err)) return out;
+    std::vector<std::uint8_t> info(12u, 0);
+    if (!m.placeData(kInfo, info.data(), info.size(), &err)) return out;
+    const std::uint32_t in_ea = input.empty() ? 0u : kIn;
+    if (!input.empty() && !m.placeData(kIn, input.data(), input.size(), &err)) return out;
+    m.mem().wr32(kInfo + 0u, static_cast<std::uint32_t>(input.size()));
+    m.mem().wr32(kInfo + 4u, 0xDEADBEEFu);
+    m.mem().wr32(kInfo + 8u, 0xDEADBEEFu);
+    m.mem().wr32(kSelf + 0xD42Cu, 0u);  // "新对象"：out == 0（准入第 5 条；guest 也会 delete[] 它）
+    if (with_override) {
+        if (!m.overrides().add(0x004367B0u, "refLzss", lift::GuestConv::Thiscall, 8, lift::nativeLzss4367B0,
+                               &err)) {
+            return out;
+        }
+    }
+    lift_fixture::Asm a(kCall);
+    a.u8(0xB9);
+    a.u32(kSelf);
+    a.pushImm(kInfo);   // a3（arg_4）
+    a.pushImm(in_ea);   // a2（arg_0）
+    a.callRel(0x004367B0u);
+    a.ret();
+    if (!m.placeCode(kCall, a.b.data(), a.b.size(), &err)) return out;
+    m.cpu().esp() = m.layout().stack_top - 4u;
+    m.mem().wr32(m.cpu().esp(), 0xFFFFFFFFu);
+    m.cpu().eip = kCall;
+    lift::RunOptions o;
+    o.until_ea = 0xFFFFFFFFu;
+    o.max_insns = 400000000ull;  // 150,068 B 的解释器臂要 ~1.3e8 条（实测 131,104,825）
+    const lift::RunResult r = m.run(o);
+    if (r.reason != lift::StopReason::UntilEa) {
+        std::fprintf(stderr, "  [lzss %s] 运行停止：%s — %s\n", tag, lift::stopReasonName(r.reason),
+                     r.detail.c_str());
+        return out;
+    }
+    out.valid = true;
+    out.eax = m.cpu().eax();
+    out.esp = m.cpu().esp();
+    out.eip = m.cpu().eip;
+    out.ebx = m.cpu().ebx();
+    out.esi = m.cpu().esi();
+    out.edi = m.cpu().edi();
+    out.ebp = m.cpu().ebp();
+    for (int i = 0; i < 3; ++i) out.info[i] = m.mem().rd32(kInfo + static_cast<std::uint32_t>(i) * 4u);
+    const std::uint8_t* po = m.mem().host(kSelf);
+    out.obj.assign(po, po + kObjBytes);
+    if (out.eax != 0u && out.info[2] != 0u) {
+        const std::uint8_t* pb = m.mem().host(out.eax);
+        out.out.assign(pb, pb + out.info[2]);
+    }
+    if (with_override) {
+        const lift::NativeOverride* e = m.overrides().at(0);
+        out.hits = e->hits;
+        out.fallbacks = e->fallbacks;
+    }
+    return out;
+}
+
 int main() {
     const std::string exe = envValue("LIFT_AGE_EXE");
     if (exe.empty()) LIFT_SKIP("没有 LIFT_AGE_EXE（CMake 的 assets 档会设它）");
@@ -864,6 +988,83 @@ int main() {
                 std::fprintf(stderr, "  [4CCC60 %s] fpu.status %04X vs %04X（tag %04X/%04X top %u/%u）\n",
                              nc.name, b.fpu_status, o.fpu_status, b.fpu_tag, o.fpu_tag,
                              static_cast<unsigned>(b.fpu_top), static_cast<unsigned>(o.fpu_top));
+            }
+        }
+    }
+
+    // ---- ⑤ sub_4367B0：真字节，解释器 vs override；整个 0xD430 + info[0..2] + EAX/ESP/EIP + out ----
+    // ★ 输入档：4 KB / 150,068 B（真存档 payload 量级）各一档"可压"与一档"几乎不可压"（逼 give_up），
+    //   外加平局定点向量（8 B）、空输入、17/18 的边界。⛔ 不断言具体 comp 数字（会随输入变）。
+    {
+        auto mkPattern = [](std::uint32_t n) {
+            std::vector<std::uint8_t> v(n);
+            for (std::uint32_t i = 0; i < n; ++i) v[i] = static_cast<std::uint8_t>("ABRACADABRA"[i % 11u]);
+            return v;
+        };
+        auto mkNoise = [](std::uint32_t n) {
+            std::vector<std::uint8_t> v(n);
+            std::uint32_t x = 0x9E3779B9u;
+            for (std::uint32_t i = 0; i < n; ++i) {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                v[i] = static_cast<std::uint8_t>(x & 0xFFu);
+            }
+            return v;
+        };
+        std::vector<LzssCase> cases;
+        cases.push_back({"tie-8", {0x42, 0x41, 0x42, 0x41, 0x42, 0x42, 0x41, 0x42}});
+        cases.push_back({"empty-0", {}});
+        cases.push_back({"short-1", {0x7F}});
+        cases.push_back({"edge-17", mkPattern(17u)});
+        cases.push_back({"edge-18", mkPattern(18u)});
+        cases.push_back({"4k-pattern", mkPattern(4096u)});
+        cases.push_back({"4k-noise", mkNoise(4096u)});
+        cases.push_back({"150068-pattern", mkPattern(150068u)});
+        cases.push_back({"150068-noise", mkNoise(150068u)});
+        for (const LzssCase& c : cases) {
+            lift_test::g_current_case = c.name;
+            const LzssResult base = runLzss(exe, c.input, false, c.name);
+            const LzssResult ovr = runLzss(exe, c.input, true, c.name);
+            LIFT_CHECK(base.valid && ovr.valid);
+            if (!base.valid || !ovr.valid) continue;
+            const bool gave_up = base.info[0] != 0u && base.info[2] == base.info[0];
+            std::printf("  [lzss %-16s] in=%6zu comp=%6u gave_up=%d eax=%08X\n", c.name, c.input.size(),
+                        base.info[2], gave_up ? 1 : 0, base.eax);
+            LIFT_CHECK_EQ_U32(ovr.eax, base.eax);
+            LIFT_CHECK_EQ_U32(ovr.esp, base.esp);
+            LIFT_CHECK_EQ_U32(ovr.eip, base.eip);
+            LIFT_CHECK_EQ_U32(ovr.ebx, base.ebx);
+            LIFT_CHECK_EQ_U32(ovr.esi, base.esi);
+            LIFT_CHECK_EQ_U32(ovr.edi, base.edi);
+            LIFT_CHECK_EQ_U32(ovr.ebp, base.ebp);
+            for (int i = 0; i < 3; ++i) LIFT_CHECK_EQ_U32(ovr.info[i], base.info[i]);
+            LIFT_CHECK(ovr.obj == base.obj);
+            LIFT_CHECK(ovr.out == base.out);
+            // ★ 主判据：这一项**真的被接管了**，且没有偷偷回退（排除"没启用""每次回退"两种假绿）。
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.hits), 1u);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.fallbacks), 0u);
+            if (ovr.obj != base.obj) {
+                std::size_t diff = 0;
+                for (std::size_t k = 0; k < ovr.obj.size() && k < base.obj.size(); ++k) {
+                    if (ovr.obj[k] != base.obj[k]) {
+                        diff = k;
+                        break;
+                    }
+                }
+                std::fprintf(stderr, "  [lzss %s] 对象首个差异 @0x%zX: ovr=%02X base=%02X\n", c.name, diff,
+                             ovr.obj[diff], base.obj[diff]);
+            }
+            if (ovr.out != base.out) {
+                std::size_t diff = 0;
+                for (std::size_t k = 0; k < ovr.out.size() && k < base.out.size(); ++k) {
+                    if (ovr.out[k] != base.out[k]) {
+                        diff = k;
+                        break;
+                    }
+                }
+                std::fprintf(stderr, "  [lzss %s] out 首个差异 @%zu: ovr=%02X base=%02X（comp %u/%u）\n",
+                             c.name, diff, ovr.out[diff], base.out[diff], ovr.info[2], base.info[2]);
             }
         }
     }

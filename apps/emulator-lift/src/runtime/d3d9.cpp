@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 
 #include "runtime/com.h"
@@ -533,6 +534,45 @@ bool checkFormatQueryAt(std::size_t newest, CheckFormatQuery* out) {
 }
 
 // ---------------------------------------------------------------------------------------
+// CheckDeviceFormat：用**同一份支持集**回答（⛔ 不另写一张格式表）
+// ---------------------------------------------------------------------------------------
+// ★ 支持集只有一份：`formatForD3dFormat`（上面那个 switch 的 6 个纹理格式 —— 21/22 的 32bpp、
+//   23/24/25/26 的 16bpp）。纹理创建（`createTextureState`）用的就是它 ⇒ CheckDeviceFormat 必须
+//   答"真的能建出来"的那一份；否则引擎会拿着 S_OK 去建一个必然失败的资源（假支持）。
+//
+// 判定规则（D3D9 语义 + 本线的真实能力）：
+//   · RType == D3DRTYPE_TEXTURE(3)：`Usage` 只接受 0 / D3DUSAGE_RENDERTARGET(1)（其它位 ⇒ 不支持）；
+//     格式必须在支持集内；`D3DUSAGE_RENDERTARGET` 只接受 32bpp 的两个 —— 本线 RT 只在 32bpp 上工作
+//     （`createForDevice` / 渲染目标路径按 32bpp 像素走）。
+//   · RType == D3DRTYPE_SURFACE(1)：`Usage == D3DUSAGE_DEPTHSTENCIL(2)` 时只接受本线**真的建**的
+//     深度格式 D3DFMT_D24S8(75)：`createForDevice` 建的是 32bpp 深度面（见 d3d9_pipeline.cpp 的
+//     `pixel_format::formatForBpp(32)`），字节足迹 = D24S8；D16(80) 是 16bpp ⇒ ⛔ 不放行。
+//     其它 Usage（含 0 / RENDERTARGET）⇒ 不支持（本线没有可做 RT 的普通 surface）。
+//   · 其它 RType（VOLUME 等）⇒ 不支持。
+//   · 未知格式一律不支持（⛔ 不"放行未知"；`formatForD3dFormat` 的 default 就是这条判据）。
+//
+// ★ 返回码：支持 ⇒ `kOk`；不支持 ⇒ `kNotAvailable`（D3DERR_NOTAVAILABLE = 0x8876086A，真机语义）。
+// ★ 诊断不受影响：调用方**先** `recordCheckFormatQuery`（答 no 的也留痕）。
+std::uint32_t checkDeviceFormat(const CheckFormatQuery& q) {
+    SurfaceFormat fmt;
+    const bool format_supported = formatForD3dFormat(q.check_format, &fmt);
+    switch (q.resource_type) {
+        case kRTypeTexture:
+            if (q.usage != 0u && q.usage != kUsageRenderTarget) return kNotAvailable;
+            if (!format_supported) return kNotAvailable;
+            // RT 只在 32bpp 上工作（21/22）；16bpp 的 23/24/25/26 当 RT ⇒ 不支持。
+            if (q.usage == kUsageRenderTarget && fmt.bpp != 32u) return kNotAvailable;
+            return kOk;
+        case kRTypeSurface:
+            // 普通 surface 的 Usage 只有 DEPTHSTENCIL 有意义；深度格式只认真的建的 D24S8。
+            if (q.usage != kUsageDepthStencil) return kNotAvailable;
+            return q.check_format == kFmtD24S8 ? kOk : kNotAvailable;
+        default:
+            return kNotAvailable;
+    }
+}
+
+// ---------------------------------------------------------------------------------------
 // 渲染动作
 // ---------------------------------------------------------------------------------------
 // ★ 实现在 runtime/pixel_format（唯一一份掩码换算）；这里只留**薄转发**，既有 API 不变。
@@ -827,6 +867,22 @@ enum TexOff : std::uint32_t {
 };
 constexpr std::uint32_t kTxMagicValue = 0x31584554u;  // 'TEX1'
 
+// ---- 派生 mip 链的宿主旁路表（口径与理由见 d3d9.h 的「派生 mip 链」段 + 本文件实现段）----
+std::map<std::uint32_t, TextureMipChain> g_mip_chains;
+std::uint64_t g_mip_use = 0;
+std::uint64_t g_mip_builds = 0;
+std::uint64_t g_mip_level0_fallbacks = 0;
+// "轮"序号：`beginMipEpoch` 每次 Draw +1；同轮的链**不许被 LRU 回收**（否则同一次 Draw 里
+// 前一个 stage 刚拿到的指针会被后一个 stage 的重建收掉；见 d3d9.h 的生命周期段）。
+std::uint64_t g_mip_epoch = 1;
+// 只防失控增长：超过就按 LRU 回收（2048² A8R8G8B8 的链 ≈ 5.59 MiB）。
+constexpr std::uint64_t kMipCacheMaxBytes = 192ull * 1024ull * 1024ull;
+
+// 行距（字节）：DWORD 对齐 —— 与 `SurfaceArena` 的 pitch 口径一致（16/32bpp 都够用）。
+std::uint32_t alignedRowPitch(std::uint32_t width, std::uint32_t bytes_per_pixel) {
+    return (width * bytes_per_pixel + 3u) & ~3u;
+}
+
 }  // namespace
 
 bool surfaceFormatForD3DFormat(std::uint32_t format, SurfaceFormat* out) {
@@ -1021,11 +1077,16 @@ void destroyTextureState(X86& cpu, std::uint32_t state) {
     if (state == 0 || !cpu.mem || !cpu.mem->committed(state, kTxBytes)) return;
     if (cpu.mem->rd32(state + kTxMagic) != kTxMagicValue) return;
     const std::uint32_t arena = cpu.mem->rd32(state + kTxArena);
+    // ★ 派生 mip 链是**宿主旁路表**的一项（键 = serial）：纹理对象没了就必须一起删，
+    //   ⛔ 不能等 LRU（那会在 serial 早已不存在的表里留一条"没人认领"的链，把内存账弄脏）。
+    //   判据与下面要清 magic 的顺序无关，但**必须在清 magic 之前**读（清了就再进不了本函数）。
+    const std::uint32_t serial = cpu.mem->rd32(state + kTxSerial);
     // ★ 先取 owner，**再**清 magic / free 状态块（本单 REQ-01M6X4MSCMMFEXYXCSK6V61QR2）：
     //   这两步不可逆（magic 清了就再进不了本函数、状态块会随堆复用），所以"该不该回收"的判据
     //   必须在它们之前成立。owner 来自 `Machine::wire()`，不受 `activeMachine()` 被改写的影响。
     Machine* m = machineOf(cpu);
     cpu.mem->wr32(state + kTxMagic, 0);
+    if (serial != 0u) g_mip_chains.erase(serial);
     if (m != nullptr && arena != 0) m->surfaces().destroy(arena);
     if (cpu.heap) cpu.heap->free(state);
 }
@@ -1179,6 +1240,230 @@ bool unlockRect(X86& cpu, const TextureInfo& tex, std::uint32_t level, std::stri
 
     return true;
 }
+
+// =====================================================================================
+// 派生 mip 链（REQ-01M73G2724479XAVS176WBZ65Q）
+// ★ 为什么**不**放进状态块 / SurfaceArena（与需求单的字面落点不同，理由在 d3d9.h 的口径里）：
+//   ① `cpu.heap` 就是 **guest 自己的进程堆**（`HeapAlloc` / `LocalAlloc` / `GlobalAlloc` 全走它）⇒
+//      三张 2048² A8R8G8B8 的链 ≈ 16.8 MiB 会直接和游戏抢地址空间，而 Draw 时才申请连续块
+//      ⇒ 随机帧资源耗尽（那是硬停，不是"少一档画质"）。
+//   ② `SurfaceArena` 是另一本账（128 MiB，后缓冲 / 纹理像素都在里面）：每级建一个 surface 会改
+//      `surfaceCount()` / `bytesInUse()` —— `tests/d3dx9.cpp` 与 `tests/d3d9_pipeline.cpp` 拿它们当基线断言。
+//   ③ 链是**内部派生数据**（guest 不可见：`LockRect` / `GetLevelDesc` 仍只有 level 0）⇒ 放宿主侧
+//      旁路表最省事，也不给 guest 一个"能读到 mip"的假象。
+// ★ 键 = `TextureInfo::serial`（进程级单调、永不复用）；条目在 `destroyTextureState` 里删。
+// =====================================================================================
+
+std::uint32_t mipLevelWidth(std::uint32_t width, std::uint32_t level) {
+    if (width == 0u) return 0u;
+    std::uint32_t w = width;
+    for (std::uint32_t i = 0; i < level; ++i) {
+        if (w <= 1u) return 1u;
+        w >>= 1u;
+    }
+    return w;
+}
+
+std::uint32_t mipLevelHeight(std::uint32_t height, std::uint32_t level) {
+    if (height == 0u) return 0u;
+    std::uint32_t h = height;
+    for (std::uint32_t i = 0; i < level; ++i) {
+        if (h <= 1u) return 1u;
+        h >>= 1u;
+    }
+    return h;
+}
+
+std::uint32_t mipLevelCount(std::uint32_t width, std::uint32_t height) {
+    if (width == 0u || height == 0u) return 1u;
+    std::uint32_t levels = 1u;
+    std::uint32_t w = width;
+    std::uint32_t h = height;
+    while (w > 1u || h > 1u) {
+        w = w > 1u ? (w >> 1u) : 1u;
+        h = h > 1u ? (h >> 1u) : 1u;
+        ++levels;
+    }
+    return levels;
+}
+
+std::uint32_t mipLevelPitch(std::uint32_t width, std::uint32_t bpp, std::uint32_t level) {
+    const std::uint32_t bytes_per_pixel = bpp / 8u;
+    if (bytes_per_pixel == 0u) return 0u;
+    return alignedRowPitch(mipLevelWidth(width, level), bytes_per_pixel);
+}
+
+std::uint32_t mipLevelOffset(std::uint32_t width, std::uint32_t height, std::uint32_t bpp, std::uint32_t level) {
+    const std::uint32_t count = mipLevelCount(width, height);
+    if (level == 0u || level >= count) return 0u;
+    std::uint32_t off = 0u;
+    for (std::uint32_t i = 1u; i < level; ++i) {
+        off += mipLevelPitch(width, bpp, i) * mipLevelHeight(height, i);
+    }
+    return off;
+}
+
+std::uint64_t mipChainBytes(std::uint32_t width, std::uint32_t height, std::uint32_t bpp) {
+    const std::uint32_t count = mipLevelCount(width, height);
+    std::uint64_t bytes = 0;
+    for (std::uint32_t i = 1u; i < count; ++i) {
+        bytes += static_cast<std::uint64_t>(mipLevelPitch(width, bpp, i)) * mipLevelHeight(height, i);
+    }
+    return bytes;
+}
+
+void mipDownsampleBox(const std::uint8_t* src, std::uint32_t src_w, std::uint32_t src_h, std::uint32_t src_pitch,
+                      std::uint8_t* dst, std::uint32_t dst_w, std::uint32_t dst_h, std::uint32_t dst_pitch,
+                      std::uint32_t bytes_per_pixel) {
+    if (src == nullptr || dst == nullptr || bytes_per_pixel == 0u || bytes_per_pixel > 4u) return;
+    if (src_w == 0u || src_h == 0u || dst_w == 0u || dst_h == 0u) return;
+    // 只做"减半"这一档：尺寸对不上就什么都不做（⛔ 不猜调用方想要别的缩放）。
+    if (dst_w != (src_w > 2u ? src_w / 2u : 1u) || dst_h != (src_h > 2u ? src_h / 2u : 1u)) return;
+    for (std::uint32_t y = 0; y < dst_h; ++y) {
+        // 覆盖范围 = [y*src_h/dst_h, (y+1)*src_h/dst_h)：偶数尺寸下正好是 2 行；
+        // 奇数尺寸不丢最后一行（例如 3→1 取 3 行）。
+        std::uint32_t sy0 = static_cast<std::uint32_t>((static_cast<std::uint64_t>(y) * src_h) / dst_h);
+        std::uint32_t sy1 = static_cast<std::uint32_t>((static_cast<std::uint64_t>(y + 1u) * src_h) / dst_h);
+        if (sy1 <= sy0) sy1 = sy0 + 1u;
+        if (sy1 > src_h) sy1 = src_h;
+        for (std::uint32_t x = 0; x < dst_w; ++x) {
+            std::uint32_t sx0 = static_cast<std::uint32_t>((static_cast<std::uint64_t>(x) * src_w) / dst_w);
+            std::uint32_t sx1 = static_cast<std::uint32_t>((static_cast<std::uint64_t>(x + 1u) * src_w) / dst_w);
+            if (sx1 <= sx0) sx1 = sx0 + 1u;
+            if (sx1 > src_w) sx1 = src_w;
+            std::uint32_t sum[4] = {0u, 0u, 0u, 0u};
+            std::uint32_t count = 0u;
+            for (std::uint32_t sy = sy0; sy < sy1; ++sy) {
+                const std::uint8_t* row = src + static_cast<std::size_t>(sy) * src_pitch;
+                for (std::uint32_t sx = sx0; sx < sx1; ++sx) {
+                    const std::uint8_t* p = row + static_cast<std::size_t>(sx) * bytes_per_pixel;
+                    for (std::uint32_t c = 0; c < bytes_per_pixel; ++c) sum[c] += p[c];
+                    ++count;
+                }
+            }
+            std::uint8_t* d = dst + static_cast<std::size_t>(y) * dst_pitch +
+                              static_cast<std::size_t>(x) * bytes_per_pixel;
+            for (std::uint32_t c = 0; c < bytes_per_pixel; ++c) {
+                // 逐通道 (sum + n/2) / n（含 alpha；⛔ 不做 premultiply —— D3D 的 mip 生成也不做）。
+                d[c] = static_cast<std::uint8_t>((sum[c] + count / 2u) / count);
+            }
+        }
+    }
+}
+
+void beginMipEpoch() {
+    ++g_mip_epoch;
+    if (g_mip_epoch == 0u) g_mip_epoch = 1u;  // 回绕保护（4e9 次 Draw 才可能）
+}
+
+const TextureMipChain* ensureTextureMipChain(X86& cpu, const TextureInfo& tex, bool* rebuilt, std::string* why) {
+    if (rebuilt != nullptr) *rebuilt = false;
+    if (tex.serial == 0u) {
+        if (why) *why = "D3D9：纹理没有身份 serial（不是本模块建的纹理）";
+        return nullptr;
+    }
+    const std::uint32_t bytes_per_pixel = tex.bpp / 8u;
+    if (bytes_per_pixel == 0u || bytes_per_pixel > 4u || tex.width == 0u || tex.height == 0u) {
+        if (why) *why = "D3D9：纹理尺寸 / 像素格式不支持派生 mip（bpp/尺寸非法）";
+        return nullptr;
+    }
+    auto it = g_mip_chains.find(tex.serial);
+    if (it != g_mip_chains.end()) {
+        TextureMipChain& c = it->second;
+        // ★ 失效判据：内容版本**已知**且与生成时一致。version == 0（Lock 中 / RT 降级 /
+        //   markTextureContentUnknown）永远不命中 ⇒ 每批重建（⛔ 不许"未知就只采 level 0"）。
+        if (c.valid && tex.version != 0u && c.version == tex.version && c.width == tex.width &&
+            c.height == tex.height && c.bpp == tex.bpp && c.levels == mipLevelCount(tex.width, tex.height)) {
+            c.use = ++g_mip_use;
+            c.epoch = g_mip_epoch;  // 本轮用过 ⇒ 本轮的 LRU 回收不许碰它
+            return &c;
+        }
+    }
+    Machine* m = machineOf(cpu);
+    if (m == nullptr) {
+        if (why) *why = "D3D9：派生 mip 拿不到 Machine（纹理像素在 SurfaceArena 里）";
+        return nullptr;
+    }
+    GuestSurface* gs = m->surfaces().find(tex.arena);
+    if (!gs) {
+        if (why) *why = "D3D9：派生 mip 找不到纹理像素块（状态块与 arena 不一致）";
+        return nullptr;
+    }
+    const std::uint8_t* base = m->surfaces().pixels(*gs);
+    if (base == nullptr) {
+        if (why) *why = "D3D9：派生 mip 的 level 0 像素指针为空";
+        return nullptr;
+    }
+    if (gs->width != static_cast<int>(tex.width) || gs->height != static_cast<int>(tex.height)) {
+        if (why) *why = "D3D9：派生 mip 的 arena 尺寸与状态块不一致";
+        return nullptr;
+    }
+    // ★ 逐级生成**从 level 1 开始、必须真的从 level 0 的像素算**：`mipLevels` 里 level 0 的源码
+    //   就是 arena 里的像素（pitch = gs->pitch，可能比 w*4 宽 —— 按它读，⛔ 不假设紧密）。
+    const std::uint32_t levels = mipLevelCount(tex.width, tex.height);
+    const std::uint64_t bytes = mipChainBytes(tex.width, tex.height, tex.bpp);
+    TextureMipChain& c = g_mip_chains[tex.serial];
+    if (c.bytes.size() != bytes) c.bytes.assign(static_cast<std::size_t>(bytes), 0u);
+    c.serial = tex.serial;
+    c.levels = levels;
+    c.width = tex.width;
+    c.height = tex.height;
+    c.bpp = tex.bpp;
+    for (std::uint32_t lvl = 1u; lvl < levels; ++lvl) {
+        const std::uint32_t sw = mipLevelWidth(tex.width, lvl - 1u);
+        const std::uint32_t sh = mipLevelHeight(tex.height, lvl - 1u);
+        const std::uint32_t spitch = (lvl == 1u) ? gs->pitch : mipLevelPitch(tex.width, tex.bpp, lvl - 1u);
+        const std::uint8_t* s = (lvl == 1u)
+                                   ? base
+                                   : c.bytes.data() + mipLevelOffset(tex.width, tex.height, tex.bpp, lvl - 1u);
+        const std::uint32_t dw = mipLevelWidth(tex.width, lvl);
+        const std::uint32_t dh = mipLevelHeight(tex.height, lvl);
+        const std::uint32_t dpitch = mipLevelPitch(tex.width, tex.bpp, lvl);
+        std::uint8_t* d = c.bytes.data() + mipLevelOffset(tex.width, tex.height, tex.bpp, lvl);
+        mipDownsampleBox(s, sw, sh, spitch, d, dw, dh, dpitch, bytes_per_pixel);
+    }
+    c.version = tex.version;
+    c.valid = tex.version != 0u;
+    c.use = ++g_mip_use;
+    c.epoch = g_mip_epoch;
+    ++g_mip_builds;
+    if (rebuilt != nullptr) *rebuilt = true;
+    // LRU：总量超上限就收最久没用的（⛔ 不收刚建出来的这张、也⛔ 不收本轮用过的任何一条
+    //   —— 调用方可能正拿着它的指针）。
+    for (;;) {
+        std::uint64_t total = 0u;
+        auto victim = g_mip_chains.end();
+        for (auto i2 = g_mip_chains.begin(); i2 != g_mip_chains.end(); ++i2) {
+            total += i2->second.bytes.size();
+            if (i2->first == tex.serial) continue;
+            // ★ 本轮（这次 Draw）用过的一律不动：调用方可能正拿着它的指针（见 d3d9.h 的契约）。
+            if (i2->second.epoch == g_mip_epoch) continue;
+            if (victim == g_mip_chains.end() || i2->second.use < victim->second.use) victim = i2;
+        }
+        if (total <= kMipCacheMaxBytes || victim == g_mip_chains.end()) break;
+        g_mip_chains.erase(victim);
+    }
+    return &g_mip_chains[tex.serial];
+}
+
+MipCacheStats mipCacheStats() {
+    MipCacheStats s;
+    s.chains = g_mip_chains.size();
+    for (const auto& kv : g_mip_chains) s.bytes += kv.second.bytes.size();
+    s.builds = g_mip_builds;
+    s.level0_fallbacks = g_mip_level0_fallbacks;
+    return s;
+}
+
+void resetMipCache() {
+    g_mip_chains.clear();
+    g_mip_use = 0;
+    g_mip_builds = 0;
+    g_mip_level0_fallbacks = 0;
+    g_mip_epoch = 1;
+}
+
+void noteMipLevel0Sampled() { ++g_mip_level0_fallbacks; }
 
 // ★ 顶点声明对象 → 元素表（'VDCL' 头 + `CreateVertexDeclaration` 当时那份 D3DVERTEXELEMENT9 数组）。
 //   光栅侧要按声明取顶点就必须能读到它；⛔ 不猜布局：magic / 长度不对就返回 false，由调用方响亮拒绝。
@@ -1388,6 +1673,10 @@ void markTextureContentUnknown(X86& cpu, std::uint32_t state) {
     //   作废之后 `prev = 0` ⇒ `gpuContentDirtyRegion` 退整幅（保守但不猜）。
     cpu.mem->wr32(state + kTxWriteVersion, 0u);
     cpu.mem->wr32(state + kTxPrevWriteVersion, 0u);
+    // ★ 派生 mip 链**一起作废**（显式，不靠"version==0 时取链的那条判据"兜）：这里之后像素
+    //   会被宿主写，链与内容对不上；`valid=false` 是给下一个人看的"这条链已经不能信"。
+    auto it = g_mip_chains.find(ti.serial);
+    if (it != g_mip_chains.end()) it->second.valid = false;
 }
 
 }  // namespace d3d9

@@ -77,6 +77,17 @@ void d3d9Log(const char* method, const char* fmt, ...) {
     va_end(ap);
 }
 
+// ★ **默认级别可见**的告警（`warn` 是默认日志级别；`d3d9Log` 是 Info，默认看不见）。
+//   用于"资源耗尽 / 状态块没能恢复"这类**本会静默**的事件（与流水线的 `pipeWarn` 同口径）。
+void d3d9Warn(const char* method, const char* fmt, ...) {
+    char prefix[256];
+    std::snprintf(prefix, sizeof(prefix), "[d3d9] %s: ", method ? method : "?");
+    va_list ap;
+    va_start(ap, fmt);
+    logV(LogLevel::Warn, LogD3d9, prefix, fmt, ap);
+    va_end(ap);
+}
+
 // ★ loud trap：状态崩坏 / 参数形态没实现 ⇒ 打印现场并停机器（⛔ 不静默返回 0）。
 void d3d9Trap(X86& cpu, const char* method, const char* fmt, ...) {
     std::fprintf(stderr, "\n=== unimplemented D3D9 call ===\n  %s\n  reason: ", method);
@@ -265,7 +276,7 @@ void shimGetAdapterDisplayMode(X86& cpu, ShimCall& call) {
 }
 
 void shimCheckDeviceFormat(X86& cpu, ShimCall& call) {
-    (void)cpu;  // 本线只用参数做记录（不真的枚举格式）
+    (void)cpu;  // 判定全在参数上（支持集是宿主常量，不读 guest 内存）
     d3d9::CheckFormatQuery q;
     q.adapter = call.u32(1);
     q.device_type = call.u32(2);
@@ -273,13 +284,17 @@ void shimCheckDeviceFormat(X86& cpu, ShimCall& call) {
     q.usage = call.u32(4);
     q.resource_type = call.u32(5);
     q.check_format = call.u32(6);
-    // ★ 本线不真的枚举格式 ⇒ 一律 S_OK，但**必须**留下"问了什么"（诊断环形 + 一行日志）。
+    // ★ 诊断环形：**先记录**（答 no 的也要留痕），再按**同一份支持集**答真话
+    //   （判定规则见 `runtime/d3d9.cpp` 的 `checkDeviceFormat`；⛔ 不在这里另写一张表）。
     d3d9::recordCheckFormatQuery(q);
+    const std::uint32_t hr = d3d9::checkDeviceFormat(q);
     d3d9Log("CheckDeviceFormat",
-            "Adapter=%u DeviceType=%u AdapterFormat=%u Usage=0x%08X RType=%u CheckFormat=%u ⇒ S_OK"
-            "（本线不枚举格式，只记录）",
-            q.adapter, q.device_type, q.adapter_format, q.usage, q.resource_type, q.check_format);
-    call.result = d3d9::kOk;
+            "Adapter=%u DeviceType=%u AdapterFormat=%u Usage=0x%08X RType=%u CheckFormat=%u ⇒ 0x%08X%s",
+            q.adapter, q.device_type, q.adapter_format, q.usage, q.resource_type, q.check_format, hr,
+            hr == d3d9::kOk ? "" : "（不在本线支持集 ⇒ D3DERR_NOTAVAILABLE）");
+    call.result = hr;
+    // ★ 变异自检的施加点（`tools/mutate-check.mjs`）：把上面那行改成恒 `kOk` = 修前行为，
+    //   `tests/d3d9.cpp` 的 `d3d9/checkdeviceformat-truthful` 必须至少有 3 条断言红。
 }
 
 void shimCreateDevice(X86& cpu, ShimCall& call) {
@@ -969,8 +984,18 @@ void shimDrawIndexedPrimitiveUP(X86& cpu, ShimCall& call) {
 //     block->vtbl[+0x14](block);                            // Apply
 //     block->vtbl[+8](block);                               // Release
 //   ⇒ 这一条不是可选装饰：`var_4` 为 0 时 0x47846A 直接 `[eax]` 取 vtable ⇒ guest AV。
-// ★ 本层只做**形状**：Capture / Apply 返回 S_OK，不真的快照/恢复设备状态。TITLE 的单模型
-//   draw 不依赖恢复；后续若要接 UI 混合，再把 DeviceInfo 的 render state 真正快照进来。
+// ★ 快照 / 写回的语义在 `runtime/d3d9_pipeline.cpp`（`REQ-01M7372BPVGBD247KAGHB53YK7`：
+//   宿主私有快照 + 按 D3DSBT 掩码选字段 + 绑定引用重建）。本文件只管**对象形状 + 句柄块**：
+//   · 状态块对象的 `user` 扩展块 = `'SB09'`（16 B，`kSb*` 常量）：magic / 设备对象 EA /
+//     进程内唯一 serial / D3DSBT 类型。快照本体按 serial 存在宿主表里（⛔ 不在 guest 内存里）。
+//   · `CreateStateBlock` 在**建块那一刻**就捕获（D3D9 文档："a state block contains state data …
+//     when the object is created"）；`Capture` 重捕；`Apply` 写回。
+//   · 回收挂在 `createObject` 的 `on_zero`（`d3d9::destroyStateBlockSnapshot`）—— 对象销毁的
+//     **唯一收敛点**（`runtime/com.h`）：还回快照持有的绑定引用 + 摘宿主表 + free 句柄块。
+//   ⛔ 为什么**不**用"宿主表按 `(ComRegistry*, 代际)` 做键"：`ComRegistry` 的代际每个 registry
+//   各自从 1 起，而夹具的 Machine 反复建在同一栈地址 ⇒ 那种键会跨 Machine 串台
+//   （`runtime/d3d9_pipeline.h` 文件头第 22 行的禁令）。serial 由下面 `nextStateBlockSerial()`
+//   发，进程内只增不复用。
 // ★ QueryInterface 只认 IUnknown：本作不 QI 状态块；IID_IDirect3DStateBlock9 未取证，
 //   ⛔ 不按记忆编 GUID（真要 QI 时先取证）。
 // ---------------------------------------------------------------------------------------
@@ -981,6 +1006,25 @@ void d3d9LogDebug(const char* method, const char* fmt, ...) {
     va_start(ap, fmt);
     logV(LogLevel::Debug, LogD3d9, prefix, fmt, ap);
     va_end(ap);
+}
+
+// 状态块句柄的 serial：进程内**只增不复用**（0 保留 = 未分配）。宿主快照表的键。
+// ⛔ 不用 `ComRegistry::generationOf`：那个每个 registry 各自从 1 起（跨 Machine 会撞）。
+std::uint32_t nextStateBlockSerial() {
+    static std::uint32_t next = 1;
+    return next++;
+}
+
+// 状态块对象的 `'SB09'` 句柄块 EA（`user` 扩展位）；不可用 ⇒ 0 + 一行 trap 由调用方决定。
+std::uint32_t stateBlockHandleOf(X86& cpu, const char* method, std::uint32_t self) {
+    if (!cpu.com) return 0;
+    const std::uint32_t handle = cpu.com->userOf(self);
+    if (handle == 0 || !cpu.mem || !cpu.mem->committed(handle, d3d9::kSbBytes) ||
+        cpu.mem->rd32(handle + d3d9::kSbMagic) != d3d9::kSbMagicValue) {
+        d3d9Trap(cpu, method, "状态块 0x%08X 的 'SB09' 句柄块不可用（handle=0x%08X）", self, handle);
+        return 0;
+    }
+    return handle;
 }
 
 void shimStateBlockQueryInterface(X86& cpu, ShimCall& call) {
@@ -994,13 +1038,19 @@ void shimStateBlockGetDevice(X86& cpu, ShimCall& call) {
         call.result = d3d9::kInvalidCall;
         return;
     }
+    const std::uint32_t handle = stateBlockHandleOf(cpu, "IDirect3DStateBlock9::GetDevice(+0x0C)", self);
+    if (handle == 0) {
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
     const std::uint32_t out_ea = call.u32(1);
     if (out_ea == 0 || !cpu.mem->committed(out_ea, 4)) {
         d3d9Trap(cpu, "IDirect3DStateBlock9::GetDevice(+0x0C)", "ppDevice=0x%08X 为 NULL / 未提交", out_ea);
         call.result = d3d9::kInvalidArg;
         return;
     }
-    cpu.mem->wr32(out_ea, cpu.com->userOf(self));
+    // ★ 句柄里的设备**对象** EA（对外返回值与修前一致：`GetDevice` 答 IDirect3DDevice9 对象）。
+    cpu.mem->wr32(out_ea, cpu.mem->rd32(handle + d3d9::kSbDevice));
     call.result = d3d9::kOk;
 }
 
@@ -1011,8 +1061,21 @@ void shimStateBlockCapture(X86& cpu, ShimCall& call) {
         call.result = d3d9::kInvalidCall;
         return;
     }
-    d3d9LogDebug("StateBlock::Capture", "0x%08X（stub：不快照状态）", self);
-    call.result = d3d9::kOk;
+    const std::uint32_t handle = stateBlockHandleOf(cpu, "IDirect3DStateBlock9::Capture(+0x10)", self);
+    if (handle == 0) {
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    std::string why;
+    bool out_of_memory = false;
+    const std::uint32_t hr = d3d9::captureStateBlock(cpu, handle, &why, &out_of_memory);
+    if (hr != d3d9::kOk) {
+        d3d9Warn("StateBlock::Capture", "0x%08X 重捕失败（0x%08X）：%s", self, hr, why.c_str());
+    } else {
+        d3d9LogDebug("StateBlock::Capture", "0x%08X 已重新捕获：Type=%u", self,
+                     cpu.mem->rd32(handle + d3d9::kSbType));
+    }
+    call.result = hr;
 }
 
 void shimStateBlockApply(X86& cpu, ShimCall& call) {
@@ -1022,8 +1085,38 @@ void shimStateBlockApply(X86& cpu, ShimCall& call) {
         call.result = d3d9::kInvalidCall;
         return;
     }
-    d3d9LogDebug("StateBlock::Apply", "0x%08X（stub：不恢复状态）", self);
-    call.result = d3d9::kOk;
+    const std::uint32_t handle = stateBlockHandleOf(cpu, "IDirect3DStateBlock9::Apply(+0x14)", self);
+    if (handle == 0) {
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    std::string why;
+    const std::uint32_t hr = d3d9::applyStateBlock(cpu, handle, &why);
+    if (hr != d3d9::kOk) {
+        d3d9Warn("StateBlock::Apply", "0x%08X 写回失败（0x%08X）：%s", self, hr, why.c_str());
+    } else {
+        d3d9LogDebug("StateBlock::Apply", "0x%08X 已写回（Type=%u）", self,
+                     cpu.mem->rd32(handle + d3d9::kSbType));
+    }
+    call.result = hr;
+}
+
+// ★ 专用 Release：句柄块（`'SB09'`）+ 快照由 `createObject` 的 `on_zero` 回收，这里**只**做引用计数。
+//   ⛔ 不走 `shimResourceRelease`：它会把 `user`（= 句柄块 EA）当**资源状态块**读 magic 再分派，
+//   而句柄块的 magic 是 'SB09'（不是 VB09/IB09/D9D1）。幂等回收仍由钩子里的 magic 兜住。
+void shimStateBlockRelease(X86& cpu, ShimCall& call) {
+    const std::uint32_t self = call.u32(0);
+    if (!cpu.com || !cpu.com->find(self)) {
+        d3d9Log("Release", "IDirect3DStateBlock9 this=0x%08X 不是本对象（重复 Release / 野指针）⇒ 0", self);
+        call.result = 0;
+        return;
+    }
+    const bool last = cpu.com->refCount(self) == 1u;
+    if (!cpu.com->release(cpu, self)) {
+        call.result = 0;
+        return;
+    }
+    call.result = last ? 0u : cpu.com->refCount(self);
 }
 
 // 前置声明：定义在文件后半（顶点/索引缓冲共用同一个 Release 实现）。
@@ -1033,10 +1126,16 @@ const std::vector<ComMethod>& stateBlockMethods() {
     static const std::vector<ComMethod> methods = {
         {0x00u, "QueryInterface", Conv::Stdcall, 2, &shimStateBlockQueryInterface},
         {0x04u, "AddRef", Conv::Stdcall, 0, &shimAddRef},
-        {0x08u, "Release", Conv::Stdcall, 0, &shimResourceRelease},
+        {0x08u, "Release", Conv::Stdcall, 0, &shimStateBlockRelease},
         {0x0Cu, "GetDevice", Conv::Stdcall, 1, &shimStateBlockGetDevice},
         {0x10u, "Capture", Conv::Stdcall, 0, &shimStateBlockCapture},
         {0x14u, "Apply", Conv::Stdcall, 0, &shimStateBlockApply},
+        // ★ 哨兵（fn = nullptr ⇒ comUnsupported），与设备接口 `kLastDeviceSlotOffset` 同一条口径：
+        //   `IDirect3DStateBlock9` 的真实 vtable 到 `GetDescription`（+0x18）为止。不填它 ⇒ vtable 只
+        //   分配 6 槽，guest `call [vtbl+0x18]` 读到的是**堆里的下一个 DWORD**（不是我们的 stub），
+        //   于是间接跳到任意 EA（`REQ-01M7372P560TMY51NJ3ARG4ENG` 第 2 处）。填了 ⇒ loud trap：
+        //   打印 iface + 偏移 + 现场后停机器，⛔ 不野跳、⛔ 不静默返回 0。
+        {0x18u, "GetDescription", Conv::Stdcall, 1, nullptr},
     };
     return methods;
 }
@@ -1067,16 +1166,47 @@ void shimCreateStateBlock(X86& cpu, ShimCall& call) {
         call.result = d3d9::kFail;
         return;
     }
-    const std::uint32_t obj = cpu.com->createObject(cpu, "IDirect3DStateBlock9", stateBlockMethods(), self);
+    // ★ 失败面（本单的硬口径）：**分配不到 ⇒ E_OUTOFMEMORY**，⛔ 不 trap、⛔ 不留半个对象。
+    //   `out_ea` 上面已经写成 0（真机失败时它也不该是野指针）。
+    if (!cpu.heap || !cpu.heap->ready()) {
+        d3d9Warn("CreateStateBlock", "guest 堆未就绪 ⇒ E_OUTOFMEMORY（不 trap、不留半个对象）");
+        call.result = d3d9::kOutOfMemory;
+        return;
+    }
+    const std::uint32_t handle = cpu.heap->alloc(d3d9::kSbBytes, /*zero=*/true);
+    if (handle == 0) {
+        d3d9Warn("CreateStateBlock", "guest 堆分配 'SB09' 句柄块失败：%s ⇒ E_OUTOFMEMORY（不 trap）",
+                 cpu.heap->lastError());
+        call.result = d3d9::kOutOfMemory;
+        return;
+    }
+    // ★ magic **最后**写（见下）：先填字段，对象建不出来时自己 free ⇒ 不存在"看起来有效的半个句柄"。
+    cpu.mem->wr32(handle + d3d9::kSbDevice, self);
+    cpu.mem->wr32(handle + d3d9::kSbSerial, nextStateBlockSerial());
+    cpu.mem->wr32(handle + d3d9::kSbType, type);
+    const std::uint32_t obj = cpu.com->createObject(cpu, "IDirect3DStateBlock9", stateBlockMethods(),
+                                                   handle, &d3d9::destroyStateBlockSnapshot);
     if (obj == 0) {
-        d3d9Trap(cpu, "IDirect3DDevice9::CreateStateBlock(+0xEC)",
-                 "在 guest 内存里建 IDirect3DStateBlock9 对象失败");
-        call.result = d3d9::kFail;
+        cpu.heap->free(handle);  // 还没有对象 ⇒ `on_zero` 不会被调用，这里自己回收
+        d3d9Warn("CreateStateBlock", "在 guest 内存里建 IDirect3DStateBlock9 对象失败 ⇒ E_OUTOFMEMORY");
+        call.result = d3d9::kOutOfMemory;
+        return;
+    }
+    cpu.mem->wr32(handle + d3d9::kSbMagic, d3d9::kSbMagicValue);
+    std::string why;
+    bool out_of_memory = false;
+    const std::uint32_t hr = d3d9::captureStateBlock(cpu, handle, &why, &out_of_memory);
+    if (hr != d3d9::kOk) {
+        // ⛔ 不留半个对象：release 到 0 ⇒ `on_zero` 把句柄块 free 掉（magic 已写 ⇒ 钩子认得）。
+        cpu.com->release(cpu, obj);
+        d3d9Warn("CreateStateBlock", "Type=%u 建块后捕获失败（0x%08X）：%s", type, hr, why.c_str());
+        call.result = out_of_memory ? d3d9::kOutOfMemory : hr;
         return;
     }
     cpu.mem->wr32(out_ea, obj);
     d3d9LogDebug("CreateStateBlock",
-                 "Type=%u ⇒ S_OK，IDirect3DStateBlock9 对象 0x%08X（stub：Capture/Apply 为空）", type, obj);
+                 "Type=%u ⇒ S_OK，IDirect3DStateBlock9 对象 0x%08X（句柄 0x%08X，建块时已捕获）", type, obj,
+                 handle);
     call.result = d3d9::kOk;
 }
 

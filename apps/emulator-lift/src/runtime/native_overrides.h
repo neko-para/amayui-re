@@ -3,6 +3,9 @@
 // ★ 口径（REQ-01M6NZSAAD0WCNBE3RKMFF84R5）：
 //   - 只在 **dispatcher 的 block 入口**按 EA 拦截（不 patch guest 字节 ⇒ 天然避开 SMC / 代码页保护）；
 //   - native 实现只能经 `GuestMemory` 读写 guest；⛔ 宿主指针不进 guest 状态；
+//     ★ 例外（有契约）：准入门逐段 `committed()` 之后，允许用 `GuestMemory::host()` 的平坦映射裸指针
+//       就地读写一段 guest 内存（先例 `nativeLzss436A80`；`sub_4367B0` 的纯核原地改 `0xD430` 对象）。
+//       ⛔ 裸指针**不**绕过准入门 —— 没做 `committed()` 就不许用。
 //   - 返回后由本框架按 ABI 设置 `EAX` / `ESP` / `EIP`，未覆盖路径照旧走解释器；
 //   - 每一项都**默认关闭**，由 `--native-overrides=<list>` 显式启用。
 // ★ 本文件 = **契约**（机制 + 纯核声明）；实现按域拆在 `src/runtime/native_*.cpp`（2026-11-08，
@@ -63,7 +66,8 @@ public:
     // ★ 2026-11-08：sub_4CCC60 用掉最后一格 ⇒ **表已满**；再加项必须同时抬高 kMax
     //   （下面的 static_assert 会先红，别等到 `all` 起不来）。
     // ★ 2026-11-10：12 → 13（`sub_4BBAB0` = Voice::Tick 的 stateless 快路径）。
-    static constexpr std::size_t kMax = 13;
+    // ★ 2026-11-11：13 → 14（`sub_4367B0` = 退出写存档的 LZSS Encode 整函数）。
+    static constexpr std::size_t kMax = 14;
 
     bool add(std::uint32_t ea, const std::string& name, GuestConv conv, std::uint32_t arg_bytes, NativeFn fn,
              std::string* err);
@@ -364,6 +368,55 @@ bool convertImageTo32(const ImageSource& src, std::uint8_t* dst, std::uint32_t d
 // ★ 前置条件（guest 侧的观察，不是本函数编的）：目标必须是 32bpp、尺寸与 src 相符。
 // ★ 失败时不写像素、并保证**不留下锁**（除非锁本来就不是我们加的）。
 bool uploadPixelsToTexture(X86& cpu, std::uint32_t texture_object, const ImageSource& src, std::string* why);
+
+// ---------------------------------------------------------------------------------------
+// `sub_4367B0` = 退出写存档的 **LZSS Encode 整函数**（REQ-01M7375DARF1QFZEFNWX3CAK6T）
+//
+// ★ 形状（`.lst` 0x4367B0..0x436A75，thiscall `retn 8`）：`ecx = this` = `Compress` 对象（长 `0xD430`）、
+//   栈参 `a2` = 输入、`a3` = 3 个 dword 的 out-params（`a3[0]` 读、`a3[1]`/`a3[2]` 写）；**返回 EAX = `[this+0xD42C]`**。
+//   `a3[1]` = **实际消费掉的输入字节数**（初值 = 首灌条数，逐轮 `+= n`；放弃压缩时整体 = 输入长度）。
+//   `a3[2]` = 压缩后字节数。
+// ★ 分层（**为什么不是"宿主数组 + 最后整块拷回"**）：纯核拿到的是 `this` 的**宿主视图**并**原地改**它
+//   ⇒ 校验过的"未触碰字节天然相同"是结构保证，不需要逐字段复刻。★ 诚实清单（复审更正）：
+//   guest 会写 `dad[4096]`（`0x43662D/0x436634` 的 `dad[lson[p]]`/`dad[rson[p]]`，lson/rson 可为 NIL）、
+//   `text_buf[4096..4112]`（`0x43699D`，s<17）、以及 `match_pos`/`match_len`；**真正不写的**只有
+//   vftable（+0）、`lson[4096]`、`rson[0..4096]`、`text_buf[4113..)` —— 这些靠"没碰"保证相同。
+// ★ 宿主视图的**契约**：`obj`/`in`/`out` 都是 `GuestMemory::host()` 的平坦映射裸指针（`base_ + ea`），
+//   先例 `nativeLzss436A80` 已这么写；代价是绕过 `g_access` 与 safe-mode 的逐次检查 ⇒ **调用方必须先
+//   逐段 `committed()`**（`nativeLzss4367B0` 的**准入 7 条**就是这件事），纯核本身不做提交检查。
+// ★ 分配：`cpu.heap->alloc(a3[0] + 0x1000, /*zero=*/false)` 与 guest 的 `new[] → _malloc → HeapAlloc`
+//   是同一条路（同一个 `GuestHeap`、同一请求字节数、同一个 zero 标志）。分配失败 ⇒ `return false`
+//   （**在任何 guest 写之前**）—— ⛔ 不许编造 `EAX=0`：`0x436811` 的 `if (!p) return 0` 在真机上
+//   是**走不到的死代码**（`operator new` 的 `ret` 只在 `_malloc` 非 0 时到达）。
+// ★ 准入（不满足 ⇒ false + `declines[]` 分桶；**零写**）：`a3` 12 B 已提交 ∧ `[this, this+0xD430)` 已提交
+//   ∧ 输入跨度已提交（`a2+a3[0]` **不**回绕时）∧ **`a3[0] <= 0xFFFFEFFF`**（`a3[0]+0x1000` 不回绕；
+//   `0xFFFFF000` 那格会让 guest 走 `new[](0)`）∧ **`[this+0xD42C] == 0`**（只接管"新对象"，见
+//   `LzssWhy::ReusedOut`）∧ 有可用的 guest 堆。
+// ★ 不补虚拟时钟：本函数省掉的 guest 指令数**随数据变**（150k 次 `InsertNode` 级别），没有定值 k 可补
+//   （需求单已裁决：存档时间戳仍会比基线早 ~12 s，属已知边界）。
+// ★ 撤销：删 `kKnown` 里那一项 + 把 `kMax` 调回 13。
+enum class LzssWhy : std::uint8_t {
+    Ok = 0,          // 接管（不落桶）
+    ReusedOut = 1,   // `[this+0xD42C] != 0`（对象被复用 / 未构造）⇒ 拒
+    NoInfo = 2,      // `a3 == 0` 或那 12 B 不在已提交页
+    BadSelf = 3,     // `this == 0` / `this+0xD430` 回绕 / 不在已提交页
+    BadInput = 4,    // 输入跨度不在已提交页
+    Overflow = 5,    // `a3[0] + 0x1000` 溢出
+    NoHeap = 6,      // 没有可用的 guest 堆
+    AllocFailed = 7, // `cpu.heap->alloc` 失败（⇒ 回退，由真正的 `_malloc`/`__callnewh` 自己表态）
+};
+struct LzssEncodeOutcome {
+    std::uint32_t consumed = 0;  // -> `a3[1]`（**按计数**写，⛔ 不写死 = a3[0]）
+    std::uint32_t comp = 0;      // -> `a3[2]`
+    bool gave_up = false;        // `comp >= a3[0]` ⇒ 已把输入**从 a2 起点**原样拷进 out
+};
+// 纯核（测试直接用）：完全在宿主侧，不碰 `X86` / ABI / 分配。`obj` = `this` 的宿主视图（**原地改**）、
+// `in`/`in_size` = 输入宿主视图、`out` = 出缓冲宿主视图（容量 = `in_size + 0x1000`）。
+// ★ `in_ea` **只**用来复现 guest 的 **32 位地址比较**（首灌循环的 `cmp/jnb`：`a2+a3[0]` 回绕时
+//   首灌 0 次 ⇒ `consumed == 0`、`comp == 0`、只做 InitTree + text_buf 清零）。⛔ 不当指针用。
+LzssEncodeOutcome lzssEncodeObject(std::uint8_t* obj, std::uint32_t in_ea, const std::uint8_t* in,
+                                   std::uint32_t in_size, std::uint8_t* out);
+bool nativeLzss4367B0(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 
 // 从 native override 里铺一个 guest 回调帧（必须由 NativeOverrideTable::invoke 的 suspended 机制接住）。
 // `callee_ecx` = 进入 callee 前要写进 ECX 的 `this`（thiscall）；0 = 不动。

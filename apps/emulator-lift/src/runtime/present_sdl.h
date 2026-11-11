@@ -62,6 +62,9 @@ public:
     GpuRaster* gpuRaster() override;
 
     // GpuRaster
+    // ★ 除下面两条**有意的非纯转发**，其余每一条都必须显式转发到 `impl_->raster()`：
+    //   · `rasterName()` = init 时缓存的那个后端的名字（生产只有一个后端 ⇒ 与转发观测等价）；
+    //   · `rasterSpritesEnabled()` = **壳级** `--raster-sprites` A/B 与后端能力的**合成**。
     bool rasterActive() const override;
     const char* rasterName() const override;
     bool rasterSpritesEnabled() const override;
@@ -85,8 +88,22 @@ public:
     std::size_t rasterQueuedDraws() const override;
     void rasterDiscardTarget() override;
     bool rasterDirty() const override;
+    // ★ 深度清（D3D9 `Clear(..., D3DCLEAR_ZBUFFER)`）的转发。
+    //   ⛔ 少了这一行，后端的 D32 就只在"建 target"时清过一次：上一帧末尾那张全屏 **z=0** 的
+    //   quad 会把整屏深度写成 0，下一帧所有 `z>0` 的批都 `z <= 0` 判假 ⇒ 整层消失，而且
+    //   `fallback` 仍是 0（`REQ-01M73P3GXW22Y467YGYPQSM571` 的实测根因：`--raster gpu` 的
+    //   Live2D 角色整层丢失就是这个）。★ 它属于"转发壳漏一个虚函数"这一类错 —— 不改像素、
+    //   不报错、测试全绿 ⇒ 守卫必须是"逐条转发"的（`tests/gpu_batch.cpp::caseDepthClearForwarded`）。
+    void rasterRequestDepthClear() override;
     // GPU 直出接口转发到真正的后端（`--raster gpu` 的后端在 d3d9_gpu.cpp）。
     GpuDirectPresenter* directPresenter() override;
+
+    // ★ 夹具缝：把 GPU 后端换成**替身**（不建 device、不 claim 窗口）。`nullptr` = 恢复自己那份。
+    //   存在理由见上面 `rasterRequestDepthClear` 的注释：转发壳漏一条转发是**静默**的，必须能在
+    //   没有 GPU 的机器上逐条断言"调用真的到后端了"。
+    //   ⛔ 只许在 `init()` **之前**用（`init()` 之后生产路径手里就是这个壳 ⇒ 换后端会静默改行为；
+    //   实现里有**运行时**检查：`init()` 之后调用直接忽略）。替身的生命周期归调用方，本类不持有。
+    void setGpuRasterForTest(GpuRaster* raster);
 
     // 诊断 / 测试
     // ★ 「走的是不是 SDL_GPU」在两条路径上都成立：renderer 路径看 `SDL_GetGPURendererDevice()`，

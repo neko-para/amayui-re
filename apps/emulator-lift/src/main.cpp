@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -545,6 +546,39 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "未知参数：%s\n", a);
             usage();
             return 2;
+        }
+    }
+
+    // ---- ★ `--dump-frame` 的目录：**解析完参数就建**（REQ-01M73YBCC3DZ05Y9NSDTRKTMMY）----
+    //   为什么必须在跑之前：BMP 是在**每帧 Present** 里写的；目录不存在时 `dumpBmp` 每次
+    //   `fopen` 都失败。旧实现把这次失败当成 Present 失败 ⇒ `d3d9::present` 在到达
+    //   `--max-frames` 的停机检查**之前**就返回了 ⇒ 进程一直跑到别的停止条件
+    //   （实测 546 s；目录建好后同一条命令 7 s —— 取证 agent 两次误以为模拟器卡死）。
+    //   ⇒ 建不出来（权限 / 路径非法 / 中间被文件挡住）就**当场** exit 2：
+    //   ⛔ 不静默、⛔ 不"跑到第一帧再说"。
+    //   ★ `frame_{frame}.bmp` 这种没有目录成分的写法：`parent_path()` 为空 ⇒ 跳过
+    //     （当前目录必然存在，⛔ 不要去 create 一个空路径）。
+    if (!frame_dump.empty()) {
+#if defined(_WIN32)
+        // ★ `--dump-frame` 是 UTF-8（argvUtf8 的重建口径）；Windows 的窄 path 会按 ANSI 码页解释
+        //   ⇒ 日文目录建错。⇒ 先转宽字符（与 `openHostFileUtf8` 同一口径）。
+        const std::filesystem::path dump_path(lift::utf8ToWide(frame_dump));
+#else
+        const std::filesystem::path dump_path(frame_dump);
+#endif
+        const std::filesystem::path dump_dir = dump_path.parent_path();
+        if (!dump_dir.empty()) {
+            std::error_code ec;
+            std::filesystem::create_directories(dump_dir, ec);
+            if (ec) {
+                std::fprintf(stderr,
+                             "emulator-lift: --dump-frame 的目录建不出来，拒绝启动\n"
+                             "  path : %s\n"
+                             "  err  : %s（error_code=%d）\n"
+                             "  提示：换成可写目录，或先手工建好它（本程序只负责建目录，不猜你要写到哪）\n",
+                             frame_dump.c_str(), ec.message().c_str(), ec.value());
+                return 2;
+            }
         }
     }
 
@@ -1136,6 +1170,14 @@ int main(int argc, char** argv) {
     if (present_window_active) machine.cpu().windows->clearHostEventPump();
 
     machine.dumpRunSummary(r, stdout);
+    // ★ `dumpFailures=`：`--dump-frame` **每帧写文件失败的次数**（宿主诊断账）。
+    //   只在这轮**要求了**帧导出时打；`0` = 一次都没失败。
+    //   ⛔ 没有这行 = 本轮没要求帧导出，**不是** "0 次失败"（与 `present-tail` 同一口径）。
+    //   ★ 为什么在 `dumpRunSummary` 之后由 main 打：这个计数属于 presenter（`present()` 里写），
+    //     而 run summary 的字段格式由 `machine.cpp` 拥有 —— 本单不改 `machine.cpp`（并发编辑协议）。
+    if (!frame_dump.empty()) {
+        std::printf("dumpFailures=%llu\n", (unsigned long long)machine.presenter().dumpFailures());
+    }
     if (profile) machine.dumpProfile(stdout, profile_top);
     if (bench) {
         const double secs = static_cast<double>(t1 - t0) / 1e9;

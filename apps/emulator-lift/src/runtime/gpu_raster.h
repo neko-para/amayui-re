@@ -382,6 +382,20 @@ public:
     // ★ 请后端在**下一个** render pass 把深度清成 1.0（D3D9 `Clear(...,D3DCLEAR_ZBUFFER)` 的语义）。
     //   只由 `d3d9::clear` 在 ZBUFFER 位上调用；颜色定向的同步 / 整块上传**不许**顺带清深度
     //   （D3D9 里 Clear(TARGET) 不动深度，而"每帧清一次"会掩盖这个差异）。默认 no-op。
+    // ★ **交付契约**（`REQ-01M73P3GXW22Y467YGYPQSM571` 定案；实现 = `d3d9_gpu.cpp` 的同名 override）：
+    //   · 生效点 = **下一次真的录到 render pass 的 flush** 的**第一个** render pass
+    //     （`LOADOP_CLEAR`，清值恒 1.0，⛔ 不取 guest 的 z）；只录 copy pass 的 flush 不消费它；
+    //   · **一次 arm 只清一次**；一帧内多次 arm 合并成一次（⇒ "先画后清 / 一帧多次 Clear(Z)" 是
+    //     **已知窄窗**：中间那些 draw 的深度写不会被第二次清。根治要把清深度做成有序屏障 = 另一单）；
+    //   · ⛔ 调用方**必须先 flush 队列再 arm**（样板 = `d3d9_gpu.cpp::rasterPrepare`：先 flush/回读
+    //     旧 target，再建新 target 并 arm）。`d3d9::clear` 现在把 arm 放在它自己的 flush **之前** ⇒
+    //     队列非空时就是**窄窗**（"先画后清"）。本场景**已命中一次**（实测第一帧 `arm=clear seq=0
+    //     queue=1`）：队列里那条是**不带批号**的 sprite，而 sprite 路径的 `depth_test/depth_write`
+    //     都是 false（`d3dx9_sprite.cpp` 的 `gs_state`）⇒ 无深度后果。根治 = 把清深度做成队列里的
+    //     有序屏障（另一单）；⛔ 在那之前别在"队列非空时 arm"的路径上加**写深度**的批。
+    //   · 不绑 target 身份：换 target 由 `rasterPrepare` 自己 arm（最坏多清一次，无害）；
+    //   · ⛔ **转发壳**（`present_sdl.cpp::SdlWindow`）必须显式转发 —— 这一条曾经整条漏掉，症状是
+    //     "`--raster gpu` 整层丢 Live2D 角色而 `fallback=0`"（静默、不改像素、所有既有测试全绿）。
     virtual void rasterRequestDepthClear() {}
     // 设备 / target 销毁前丢掉队列与镜像（⛔ 不要往即将释放的 guest 像素回读）。默认 no-op。
     virtual void rasterDiscardTarget() {}
@@ -415,5 +429,78 @@ struct GpuRasterStats {
     std::uint64_t full_uploads = 0;  // 其中"整幅"上传数（写区未知 ⇒ 退化）
 };
 GpuRasterStats gpuRasterStats();
+
+// ---------------------------------------------------------------------------------------
+// 覆盖账本的**批号**通道（`REQ-01M73PZN6R3AC3RCQ8WZEA0Y0M`）
+// ---------------------------------------------------------------------------------------
+// ★ 为什么需要这条通道：`rasterQueue` 的返回值只证明"**入队**成功"；"**真的**录进了一次
+//   render pass"发生在之后的 `rasterFlush`（Present / Clear / 换 target 才提交）。
+//   账本要把这两件事分开，后端就必须在**录命令的那一刻**把批号回报给账本 ——
+//   ⛔ 拿 `rasterQueue` 的返回值当 recorded 就是本单要修的那个缺陷。
+// ★ 形状 = 全局函数（与上面 `gpuRasterStats()` 同一个理由：同一时刻只有一个 SDL_GPU 后端；
+//   `SdlWindow` 是转发壳，加虚函数那一层就要再写一遍转发）。
+//   ★ 0 = 没有批号（D3DXSprite / 夹具直接调后端）⇒ 后端不回报、账本也不认。
+//   ⇒ 生产者**每次 rasterQueue 前后**设/清（⛔ 不许一直挂着：sprite 的 draw 会记到别人的批上）。
+void gpuRasterSetBatchTag(std::uint64_t tag);
+std::uint64_t gpuRasterBatchTag();
+// 后端侧：一条 draw 真的被录进 render pass、且 command buffer **提交成功之后**回报一次
+// （定义在 `d3d9_pipeline.cpp` 的账本侧；tag 不属于当前这一轮 ⇒ 忽略）。
+void gpuLedgerNoteRecordedDraw(std::uint64_t tag);
+
+// ---------------------------------------------------------------------------------------
+// 诊断探针的判据（`LIFT_GPU_FF_TEX=1`；`REQ-01M73P3GXW22Y467YGYPQSM571`）
+// ---------------------------------------------------------------------------------------
+// ★ 问题形状：FF 纹理批在 GPU 臂**零片元**，而同一帧里无纹理的 FF 批逐点吻合、顶点链闭合、
+//   mip 已判死 ⇒ 要分辨的是「GPU 上 level 0 的副本与 CPU 看到的那份一样吗」。
+//   探针= 对**第一条**带批号的纹理 draw，取 v0 的 uv 对应的那个 texel，把 **GPU level 0 的
+//   1 个 texel** 与 **guest 同一 texel** 一起打出来（四通道）。
+// ★ 纪律：⛔ 不改像素 / 不改状态；env 关闭时**零开销**（门控函数第一行就返回，且调用点外面
+//   还有一个 `static` 的 env 缓存）。
+// ★ 为什么判据是纯函数：探针本身跑在真后端里（要 GPU 设备），但"哪条 draw 该采 / 采哪个 texel"
+//   是可以机械测的口径 —— 放在这里让 Mock 与夹具用**同一份**判据（⛔ 不要在后端里再写一份）。
+inline bool gpuFfTexProbeWanted(const char* env_value, bool already_probed, std::uint64_t batch_tag,
+                                bool textured) {
+    // ① env 关闭 ⇒ 立刻 false（这是"诊断关掉时零开销"的唯一落地点）。
+    if (env_value == nullptr || env_value[0] == '\0') return false;
+    // ② 只采一次（进程内第一条满足条件的 draw；⛔ 不要每帧都加一次 fence 等待）。
+    if (already_probed) return false;
+    // ③ 必须是**带批号**的**纹理** draw：无批号 = D3DXSprite / 夹具（不在本单范围）。
+    if (!textured || batch_tag == 0) return false;
+    return true;
+}
+
+// v0 的 uv → level 0 的 texel 坐标（`floor(u*W), floor(v*H)`，再钳到 `[0,W-1] × [0,H-1]`）。
+//   · u/v 非有限 / 尺寸非法 ⇒ false（探针放弃这一条，⛔ 不要猜一个坐标出来）；
+//   · u/v 落在 [0,1] 之外（WRAP 寻址会绕回去）⇒ 按 floor 后钳制，与"最近 texel"同阶近似。
+inline bool gpuFfTexProbeTexel(float u, float v, int width, int height, int* x, int* y) {
+    if (x == nullptr || y == nullptr || width <= 0 || height <= 0) return false;
+    if (!std::isfinite(u) || !std::isfinite(v)) return false;
+    const double fx = std::floor(static_cast<double>(u) * static_cast<double>(width));
+    const double fy = std::floor(static_cast<double>(v) * static_cast<double>(height));
+    // 巨值（1e18 之类）转 int 是未定义行为 ⇒ 先拒绝。正常 uv 离这里很远。
+    if (!(fx > -1.0e9 && fx < 1.0e9 && fy > -1.0e9 && fy < 1.0e9)) return false;
+    int ix = static_cast<int>(fx);
+    int iy = static_cast<int>(fy);
+    if (ix < 0) ix = 0;
+    if (iy < 0) iy = 0;
+    if (ix >= width) ix = width - 1;
+    if (iy >= height) iy = height - 1;
+    *x = ix;
+    *y = iy;
+    return true;
+}
+
+// 同一 texel 的**可比较**结论（纯函数）：两条读数的四通道是否一致。
+// ★ alpha 口径：`has_alpha == false`（guest X8R8G8B8）时上传会把 X 字节写成 255（CPU 采样也按
+//   amask==0 取 255）⇒ 比较时 guest 的有效 alpha 也是 255，⛔ 不拿 guest 的 X 字节直接比。
+inline bool gpuFfTexProbeSameTexel(const std::uint8_t* guest_bgra, const std::uint8_t* gpu_bgra,
+                                   bool has_alpha) {
+    if (guest_bgra == nullptr || gpu_bgra == nullptr) return false;
+    if (guest_bgra[0] != gpu_bgra[0] || guest_bgra[1] != gpu_bgra[1] || guest_bgra[2] != gpu_bgra[2]) {
+        return false;
+    }
+    const std::uint8_t guest_alpha = has_alpha ? guest_bgra[3] : static_cast<std::uint8_t>(255);
+    return guest_alpha == gpu_bgra[3];
+}
 
 }  // namespace lift

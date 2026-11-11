@@ -2360,9 +2360,16 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
     // ★ 固定打印 GPU 覆盖账（`--raster cpu` 时全 0；GPU 启用后回退必须可见，⛔ 不静默）。
     {
         const d3d9::GpuCoverage& cov = d3d9::gpuCoverage();
-        std::fprintf(out, "gpu       : draws=%llu gpu=%llu fallback=%llu fallback_pixels=%llu\n",
+        // ★ `queued/recorded/empty/fragments` = 本单（REQ-01M73PZN6R3AC3RCQ8WZEA0Y0M）拆开的账：
+        //   `gpu` 记的是"入队成功"，`recorded` 才是"真的进过 render pass"，`empty` = 两者之差
+        //   （`gpu>0` 却一个 pass 都没进 ⇒ 这批不可能有像素）。
+        std::fprintf(out,
+                     "gpu       : draws=%llu gpu=%llu fallback=%llu fallback_pixels=%llu "
+                     "recorded=%llu queued=%llu empty=%llu fragments=%llu\n",
                      (unsigned long long)cov.draw_calls, (unsigned long long)cov.gpu_draws,
-                     (unsigned long long)cov.fallback_draws, (unsigned long long)cov.fallback_pixels);
+                     (unsigned long long)cov.fallback_draws, (unsigned long long)cov.fallback_pixels,
+                     (unsigned long long)cov.recorded, (unsigned long long)cov.queued,
+                     (unsigned long long)cov.empty, (unsigned long long)cov.fragments);
         if (cov.sprite_draws != 0 || cov.sprite_fallback_draws != 0 || cov.sprite_skipped != 0) {
             std::fprintf(out,
                          "            sprite: draws=%llu gpu=%llu fallback=%llu fallback_pixels=%llu skipped=%llu\n",

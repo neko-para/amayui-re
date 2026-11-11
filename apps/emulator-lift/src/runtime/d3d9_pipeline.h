@@ -281,10 +281,31 @@ struct PipelineInfo {
 // =====================================================================================
 // 采样过滤决策（pure；夹具直接调，⛔ 不再"参数传了却不用"）
 // =====================================================================================
-// 本线**没有** mip 链 / LOD / 导数（没有像素足迹信息 ⇒ 无法在 MIN 与 MAG 之间按 LOD 选）。
-// 因此把两个过滤器的要求并起来：**任一**要求 LINEAR（含 ANISOTROPIC，按 LINEAR 近似）
-// 就走双线性，否则走 POINT。这是**近似**（真机按 LOD 分别选 MIN/MAG），已在采样点注释。
+// 两个过滤器（MAG / MIN）的要求并起来：**任一**要求 LINEAR（含 ANISOTROPIC，按 LINEAR 近似）
+// 就走双线性，否则走 POINT。★ 这是"按 LOD 分别选 MIN/MAG"的**近似**（本线不做各向异性）；
+// mip 级的选择在下面 `mipLevelForLod`（`REQ-01M73G2724479XAVS176WBZ65Q`）。
 bool samplerUsesLinear(std::uint32_t mag_filter, std::uint32_t min_filter);
+
+// =====================================================================================
+// 派生 mip 的 LOD 选择（REQ-01M73G2724479XAVS176WBZ65Q；纯函数 ⇒ 守卫直接打）
+//
+// ★ 判据链（每三角形常量，⛔ 不做逐像素）：屏幕空间 UV 导数（texel / 屏幕像素）→ LOD → 级号。
+//   · "1:1 或放大时**仍走 level 0**"靠 `mipLevelForLod` 的 clamp 保证（放大 ⇒ lod<0 ⇒ 0 级）；
+//   · 采到的级是**最近级**（不做三线性）；`MIPFILTER = NONE` 时调用方根本不选级（只 level 0）。
+// =====================================================================================
+// 透视校正后的屏幕空间 UV 导数：顶点 = 屏幕 (x,y) + `1/w` + `u/w` / `v/w`（与 `SVertex` 同口径）。
+// ★ 式子与采样器**同一个**：`u = U/W`，`U = Σ l_i·(u_i/w_i)`、`W = Σ l_i·(1/w_i)` ⇒
+//   `du/dx = (U_x − u·W_x) / W`。⛔ 不要直接对"顶点 uv"做仿射梯度 —— 那在 w≠1 时系统性错。
+// 退化三角形（|det| 太小）⇒ 返回 false 且导数全 0（调用方按 level 0 走）。
+bool screenUvDerivatives(const double vx[3], const double vy[3], const double invw[3],
+                         const double u_over_w[3], const double v_over_w[3], double* du_dx, double* dv_dx,
+                         double* du_dy, double* dv_dy);
+// 纹理足迹（texel / 屏幕像素）= max(两轴的 |d(uv)| 在**该纹理尺寸**上的长度) ⇒ `LOD = log2(足迹)`。
+// 尺寸 <= 0 / 非有限 ⇒ 返回一个必然落到 0 级的 LOD（`-1000`）。
+double lodFromUvDerivatives(double du_dx, double dv_dx, double du_dy, double dv_dy, double tex_width,
+                            double tex_height);
+// LOD → 级号：`clamp(floor(lod + 0.5), 0, levels-1)`（最近级）。非有限 / `levels <= 1` ⇒ 0。
+std::uint32_t mipLevelForLod(double lod, std::uint32_t levels);
 
 // =====================================================================================
 // 状态块生命周期（createDeviceState / destroyDeviceState 里挂钩）
@@ -295,6 +316,42 @@ void destroyForDevice(X86& cpu, std::uint32_t device_state);
 std::uint32_t pipelineOfDevice(X86& cpu, std::uint32_t device_state);
 bool pipelineInfoOfState(X86& cpu, std::uint32_t state, PipelineInfo* out, std::string* why);
 bool pipelineInfoOfDevice(X86& cpu, std::uint32_t device_state, PipelineInfo* out, std::string* why);
+
+// =====================================================================================
+// IDirect3DStateBlock9 的状态快照（`REQ-01M7372BPVGBD247KAGHB53YK7`）
+//
+// ★ 为什么要它：引擎每帧 Live2D 都走 `CreateStateBlock(D3DSBT_ALL=1) → draw → Apply → Release`
+//   （`.lst` 0x47843A–0x47847B）。修前 Capture / Apply 是纯 stub（直接 S_OK）⇒ draw 里改的
+//   FVF / 纹理绑定 / 渲染状态 / 变换**不还原**，泄漏到后续 2D 绘制。
+// ★ 快照放**宿主堆**（⛔ 不是 guest 可见内存）。guest 只看到状态块对象的 `user` 扩展块
+//   `'SB09'`（16 B，下面那 5 个常量）：magic / 设备对象 EA / 进程内唯一 serial / D3DSBT 类型。
+//   快照本体按 serial 存在 `d3d9_pipeline.cpp` 的宿主表里。
+// ★ 为什么是 "guest 句柄 + `on_zero`"，而不是"宿主表按 `(ComRegistry*, 代际)` 做键"：
+//   `ComRegistry` 的代际**每个 registry 各自从 1 起**（`runtime/com.h`），而夹具的 Machine 反复
+//   建在同一栈地址 ⇒ 那种键会跨 Machine 串台（本文件头第 22 行那句禁令说的就是它）。句柄里的
+//   serial 只由 `shims/d3d9.cpp` 的 `nextStateBlockSerial()` 发（进程内只增不复用）；回收挂在
+//   `createObject` 的 `on_zero` = `destroyStateBlockSnapshot`（对象销毁的**唯一收敛点**，见
+//   `runtime/com.h` 文件头）⇒ guest Release 与将来任何宿主侧裸 release 都覆盖得到。
+constexpr std::uint32_t kSbMagic = 0;                  // 'SB09'
+constexpr std::uint32_t kSbMagicValue = 0x39304253u;  // 'SB09'
+constexpr std::uint32_t kSbDevice = 4;                 // 设备**对象** EA（GetDevice / Apply 从这里取）
+constexpr std::uint32_t kSbSerial = 8;                 // 进程内唯一 serial（宿主快照表的键；0 = 未分配）
+constexpr std::uint32_t kSbType = 12;                  // D3DSBT_ALL(1) / PIXELSTATE(2) / VERTEXSTATE(3)
+constexpr std::uint32_t kSbBytes = 16;
+
+// 捕获（`CreateStateBlock` = 首次、`Capture` = 重捕；同一个实现：宿主表里已有该 serial 就替换）。
+// 返回 S_OK / E_OUTOFMEMORY（快照分配失败，⛔ 不 trap、⛔ 不留半个快照）/
+//      D3DERR_INVALIDCALL（句柄 / 设备 / 流水线状态不对）。
+std::uint32_t captureStateBlock(X86& cpu, std::uint32_t handle, std::string* why, bool* out_of_memory);
+// 写回：**先**用既有 setter（`setTexture` / `setStreamSource` / `setIndices` / `setVertexDeclaration`
+// / `setFVF`）恢复四类绑定 —— 引用计数 / 代际 / 身份校验 / 日志全走同一份既有约定，⛔ 不新造一套；
+// **再**写纯标量区（渲染状态 / 变换 / 采样器 / 纹理级 / 视口 / 裁剪矩形 / 材质 / 灯）。
+// 任一绑定恢复失败 ⇒ 记一条 `pipeWarn`（默认可见）并返回 D3DERR_INVALIDCALL（已写回的标量不回滚，
+// 但⛔ 不谎报 S_OK）。
+std::uint32_t applyStateBlock(X86& cpu, std::uint32_t handle, std::string* why);
+// `createObject` 的 `on_zero`：把快照持有的绑定引用还回去（`releaseIf`，带代际）+ 从宿主表摘除
+// + free 句柄块。**幂等**（先清 magic；重复调用只返回）。
+void destroyStateBlockSnapshot(X86& cpu, std::uint32_t handle);
 
 // =====================================================================================
 // 方法语义（返回 HRESULT；`dev` 是设备状态块 EA）
@@ -447,6 +504,14 @@ bool gpuUntexturedIsIdentity(std::uint32_t op, std::uint32_t arg1, std::uint32_t
 //   `sprite_skipped` = 被裁剪掉的条目（空源矩形 / 屏外 / 退化），**不是** fallback。
 // · `fallback_reasons` 按**原因字符串**聚合；`gpuNoteFallback` 在进程内首次出现某原因时
 //   打印一行 `[gpu] fallback ...` 到 stderr（同原因不刷屏）。
+// ★ 本单（`REQ-01M73PZN6R3AC3RCQ8WZEA0Y0M`）把"入队成功"与"真的覆盖"拆成三个数：
+//   · `queued`    = 至少成功入队 1 条 draw 的**批数**（`rasterQueue` 返回 true 且顶点非空）；
+//   · `recorded`  = 其中后端真的把它们录进过 render pass 的批数 —— 判据在后端**命令缓冲提交
+//                   成功之后**的回报（`gpuLedgerNoteRecordedDraw`），⛔ 不是 `rasterQueue` 的返回值；
+//   · `fragments` = 入队的 GPU **顶点**数（片元数后端拿不到 ⇒ 给能拿到的那个量）。
+//   `empty` = `gpu_draws` 账上"覆盖了"、却没有一条 draw 真的进过 render pass 的批数
+//             （`queued>0 && recorded==0` 是它的主要形态；**也包含** `queued==0` 那种更坏的情况：
+//             顶点全被裁掉 ⇒ 连队都没入）。
 // =====================================================================================
 struct GpuCoverage {
     std::uint64_t draw_calls = 0;
@@ -454,6 +519,11 @@ struct GpuCoverage {
     std::uint64_t fallback_draws = 0;
     std::uint64_t fallback_pixels = 0;
     std::uint64_t gpu_failures = 0;  // 准入通过、但 GPU 后端真的画失败了（已 CPU 重放）
+    // ---- 本单：入队 / 录进 pass / 顶点数（口径见上）----
+    std::uint64_t queued = 0;     // 入队成功的批数
+    std::uint64_t recorded = 0;   // 真的进过 render pass 的批数
+    std::uint64_t empty = 0;      // 账上覆盖、但 recorded==0 的批数（= 没有像素的"已覆盖"）
+    std::uint64_t fragments = 0;  // 入队的 GPU 顶点数
     std::uint64_t sprite_draws = 0;
     std::uint64_t sprite_gpu_draws = 0;
     std::uint64_t sprite_fallback_draws = 0;

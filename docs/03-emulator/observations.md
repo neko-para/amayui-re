@@ -222,3 +222,15 @@
   --max-frames 136 --input-script <at frame 130 / click 1190 630>`
 - **口径**：win32 x64 / RelWithDebInfo / headless / CPU 光栅（`fa=` 只在 CPU 路统计）· 2026-11-11 ·
   工作树 `c0a0f39` + 本轮改动（顶点声明路 + `fa=`/`texa=` 诊断）。
+
+### OBS-20261111-02 · `--raster cpu` 在本机 300 s 只跑到 frame 69（墙钟大头在 CPU 光栅化）
+- **读数**（win32 x64 / RelWithDebInfo / `--present headless --raster cpu` / clock=virtual）：
+  `--time-limit 300` 到点停止时 **frame 69**（不是跑完）；`--profile` 的 `shim` 桶 **236.5 s**，几乎全在 CPU 光栅化。
+  同一份输入脚本换 `--raster gpu` 能跑到点中 Quit（尾段读数见本文件 `OBS-20261110-05` 的本机复现）。
+- **复现**（`apps/emulator-lift` 下；副本二进制，避免与构建抢文件）：
+  `.tmp/quit-tail/bin/emulator-lift.exe --game-dir .\links\install --appdata .\.tmp\quit-tail\appdata-cpu
+  --skip-logo --audio off --present headless --raster cpu --input-script .\.tmp\quit-tail\s-quit.txt
+  --input-stall-boot-ms 600000 --profile --profile-top 200 --time-limit 300`
+- **口径**：2026-11-11 · 副本二进制（`out/*` 复制到 `.tmp/quit-tail/bin/`，exe sha256 `3818CEB9…`）· 有安装树 · 无 override。
+- **用途**：`REQ-01M737M1PPHHXDN65RCTK6XTV6` 的第一条读数 —— "CPU 光栅慢"从此是读数而不是印象；
+  也说明**长流程不能用 CPU 光栅跑**（这会反过来决定 oracle 的保留成本）。
