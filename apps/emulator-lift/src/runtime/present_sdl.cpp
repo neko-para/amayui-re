@@ -12,6 +12,7 @@
 #include "runtime/frame_blit.h"
 #include "runtime/host_window.h"
 #include "runtime/input.h"
+#include "runtime/overlay.h"
 
 namespace lift {
 namespace {
@@ -91,6 +92,22 @@ bool mouseButtonFromSdl(Uint8 button, MouseButton* out) {
     }
 }
 
+// ---- 调试叠层（`--overlay`）----
+// ★ fps 的滚动窗口 = 最近 1 s；`kOverlayFpsWindowNs` 是这条口径的唯一定义。
+constexpr std::uint64_t kOverlayFpsWindowNs = 1000ull * 1000ull * 1000ull;
+// ★ 文本重建 / 上传的节流间隔：`frame` 每帧都变，不节流就每帧重传（直出还会多一次 submit）。
+//   100 ms 对 fps / frame 的滞后上限；鼠标位置变化**不受**这个节流（见 `overlayRefreshDue`）。
+constexpr std::uint64_t kOverlayRefreshNs = 100ull * 1000ull * 1000ull;  // 100 ms
+
+std::string joinOverlayLines(const std::vector<std::string>& lines) {
+    std::string key;
+    for (const std::string& line : lines) {
+        key += line;
+        key.push_back('\n');
+    }
+    return key;
+}
+
 }  // namespace
 
 struct SdlWindow::Impl {
@@ -151,6 +168,37 @@ struct SdlWindow::Impl {
     int close_frames_left = 0;
     std::uint64_t close_deadline_ns = 0;
 
+    // ---- 调试叠层（`--overlay`，默认关）----
+    // ★ 两条呈现路径共用**同一份**行 / 尺寸（`overlayLines`），只有上传方式不同。
+    //   SDL_Renderer 路径：一张 STREAMING 小纹理；GPU 直出路径：后端 device 上的纹理
+    //   （`GpuDirectPresenter::directOverlay`）。
+    bool overlay = false;
+    bool overlay_dirty = true;        // 开关变化 / 上帧失败后强制重传
+    std::string overlay_text_key;     // 上一次**上传**的内容；相同就不重传
+    SDL_Texture* overlay_tex = nullptr;  // 只有 SDL_Renderer 路径用
+    int overlay_tex_w = 0;
+    int overlay_tex_h = 0;
+    int overlay_w = 0;  // 直出路径上次上传的尺寸
+    int overlay_h = 0;
+    // ★ 节流：文本（`frame` 每帧都变）最多每 `kOverlayRefreshNs` 重建 / 上传一次；
+    //   鼠标位置变了**立即**重建（用户可感知的那一项优先）。fps / frame 允许滞后 ≤ 100 ms。
+    std::uint64_t overlay_last_build_ns = 0;  // 0 = 还没生成过
+    int overlay_last_mouse_x = 0;
+    int overlay_last_mouse_y = 0;
+    bool overlay_last_mouse_valid = false;
+    // 最近 1 s 的 Present 时刻（单调 ns；只用于 fps 那一行；叠层关闭时一次也不记）
+    std::vector<std::uint64_t> present_times_ns;
+
+    void notePresentTime();
+    bool overlayMousePos(int* x, int* y) const;
+    bool overlayRefreshDue(int mx, int my, bool mouse_ok, std::uint64_t now_ns) const;
+    void overlayMarkBuilt(int mx, int my, bool mouse_ok, std::uint64_t now_ns);
+    std::vector<std::string> overlayLines() const;
+    bool drawOverlayRenderer(std::string* err);
+    bool drawOverlayDirect(std::string* err);
+    // 叠层画不出来 ⇒ 只告警 + 关掉叠层，呈现照旧（⛔ 不因为诊断层让整帧失败）。
+    void disableOverlay(const char* why);
+
     void postMessage(std::uint32_t message, std::uint32_t wparam, std::uint32_t lparam);
     void requestStop();
     void requestClose();
@@ -207,6 +255,192 @@ bool SdlWindow::Impl::shotWanted() const {
     if (capture) return true;
     if (screenshot_path.empty()) return false;
     return screenshot_frame == 0 || frame_no == screenshot_frame;
+}
+
+// ---------------------------------------------------------------------------------------
+// 调试叠层（`--overlay`）：行 / 时间窗 / 两条路径各自的上传与绘制
+// ---------------------------------------------------------------------------------------
+// ★ 鼠标坐标的真源 = `WindowManager::cursorClientPos(hwnd)` —— 与 `click x y` /
+//   `--input-script` 用的是**同一格**（guest 客户区坐标）。没有主窗口 ⇒ 整行省略。
+void SdlWindow::Impl::notePresentTime() {
+    if (!overlay) return;  // ★ 叠层关闭时一次也不记（零成本）
+    const std::uint64_t now = SDL_GetTicksNS();
+    present_times_ns.push_back(now);
+    const std::uint64_t cutoff = now > kOverlayFpsWindowNs ? now - kOverlayFpsWindowNs : 0;
+    std::size_t drop = 0;
+    while (drop < present_times_ns.size() && present_times_ns[drop] < cutoff) ++drop;
+    if (drop > 0) {
+        present_times_ns.erase(present_times_ns.begin(),
+                               present_times_ns.begin() + static_cast<std::ptrdiff_t>(drop));
+    }
+    // 兜底上限：窗口极长且从不清理时也不让这个向量无限长（正常 1 s 窗口远小于它）。
+    if (present_times_ns.size() > 8192) present_times_ns.erase(present_times_ns.begin(), present_times_ns.begin() + 4096);
+}
+
+// 光标在**当前主窗口**的客户区坐标（= `click x y` 的同一格）。false = 还没有 guest 窗口。
+bool SdlWindow::Impl::overlayMousePos(int* x, int* y) const {
+    if (windows == nullptr) return false;
+    const std::uint32_t hwnd = windows->primaryWindow();
+    if (hwnd == 0) return false;
+    windows->cursorClientPos(hwnd, x, y);
+    return true;
+}
+
+// ★ 节流判据（两条路径共用同一份口径）：
+//   ① 开关刚变 / 还没生成过 ⇒ 立刻；
+//   ② **鼠标位置变了** ⇒ 立刻（用户可感知的那一项优先）；
+//   ③ 否则最多每 `kOverlayRefreshNs`（100 ms）重建 / 上传一次 —— `frame` 每帧都变，
+//      不节流就是每帧一次 CPU 栅格化 + 一次纹理上传（直出还多一次 submit）。
+bool SdlWindow::Impl::overlayRefreshDue(int mx, int my, bool mouse_ok, std::uint64_t now_ns) const {
+    if (overlay_dirty || overlay_last_build_ns == 0) return true;
+    if (mouse_ok != overlay_last_mouse_valid) return true;
+    if (mouse_ok && (mx != overlay_last_mouse_x || my != overlay_last_mouse_y)) return true;
+    return now_ns - overlay_last_build_ns >= kOverlayRefreshNs;
+}
+
+void SdlWindow::Impl::overlayMarkBuilt(int mx, int my, bool mouse_ok, std::uint64_t now_ns) {
+    overlay_last_build_ns = now_ns;
+    overlay_last_mouse_valid = mouse_ok;
+    overlay_last_mouse_x = mx;
+    overlay_last_mouse_y = my;
+    overlay_dirty = false;
+}
+
+std::vector<std::string> SdlWindow::Impl::overlayLines() const {
+    OverlayState st;
+    // frame = Present 计数（`frame_no`；调用方已经自增过这一帧）。
+    st.frame_available = true;
+    st.frame = frame_no;
+    if (windows != nullptr) {
+        const std::uint32_t hwnd = windows->primaryWindow();
+        if (hwnd != 0) {
+            int mx = 0;
+            int my = 0;
+            windows->cursorClientPos(hwnd, &mx, &my);
+            st.mouse_available = true;
+            st.mouse_x = mx;
+            st.mouse_y = my;
+        }
+    }
+    if (!present_times_ns.empty()) {
+        st.fps_available = true;
+        st.fps = static_cast<double>(present_times_ns.size());  // 最近 1 s 的 Present 次数
+    }
+    // raster = 这一帧**真的**由谁光栅化（不是"想要谁"）：后端未激活就如实写 cpu。
+    const GpuRaster* r = raster();
+    st.raster = (r != nullptr && r->rasterActive()) ? "gpu" : "cpu";
+    st.present = (direct_present && direct != nullptr) ? "direct" : "renderer";
+    return formatOverlayLines(st);
+}
+
+void SdlWindow::Impl::disableOverlay(const char* why) {
+    std::fprintf(stderr, "[overlay] 叠层不可用 ⇒ 关掉（呈现照旧）：%s\n", why != nullptr ? why : "(unknown)");
+    overlay = false;
+    overlay_dirty = true;
+    overlay_text_key.clear();
+    overlay_w = 0;
+    overlay_h = 0;
+    if (overlay_tex != nullptr) {
+        SDL_DestroyTexture(overlay_tex);
+        overlay_tex = nullptr;
+    }
+    overlay_tex_w = 0;
+    overlay_tex_h = 0;
+    if (direct != nullptr) {
+        std::string ignored;
+        direct->directOverlay(nullptr, 0, 0, &ignored);
+    }
+}
+
+// SDL_Renderer 路径：小纹理（尺寸随文本变）+ 节流后才 `SDL_UpdateTexture`，画在主纹理之后。
+// ★ 没到重建时间也要**每帧画**（纹理还在，画面每帧都要有叠层）；重建/上传按 `overlayRefreshDue`。
+bool SdlWindow::Impl::drawOverlayRenderer(std::string* err) {
+    if (renderer == nullptr) return true;
+    int mx = 0;
+    int my = 0;
+    const bool mouse_ok = overlayMousePos(&mx, &my);
+    const std::uint64_t now = SDL_GetTicksNS();
+    if (overlayRefreshDue(mx, my, mouse_ok, now)) {
+        const std::vector<std::string> lines = overlayLines();
+        const OverlaySize size = overlaySize(lines);
+        if (size.w <= 0 || size.h <= 0) {
+            overlayMarkBuilt(mx, my, mouse_ok, now);
+            return true;
+        }
+        if (overlay_tex == nullptr || overlay_tex_w != size.w || overlay_tex_h != size.h) {
+            if (overlay_tex != nullptr) SDL_DestroyTexture(overlay_tex);
+            // ★ 字节序：叠层图像是**内存序 RGBA8**（`renderOverlay` 写 R,G,B,A）。
+            //   SDL 的像素格式名按 u32 的位序定义 ⇒ 内存序 R,G,B,A 对应 `ABGR8888`
+            //   （A 在最高位 ⇒ 小端内存里的字节序是 R,G,B,A）。用 `RGBA8888` 会变成
+            //   A,B,G,R ⇒ 颜色整体错位（实测：深底 0x101820 被读成 0xFF2018）。
+            overlay_tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING,
+                                            size.w, size.h);
+            if (overlay_tex == nullptr) {
+                if (err) *err = std::string("SDL_CreateTexture(overlay) 失败：") + SDL_GetError();
+                return false;
+            }
+            // ★ 不透明底：混合模式必须是 NONE（默认混合会按 alpha 混，深底就变半透明了）。
+            if (!SDL_SetTextureBlendMode(overlay_tex, SDL_BLENDMODE_NONE)) {
+                if (err) *err = std::string("SDL_SetTextureBlendMode(overlay, NONE) 失败：") + SDL_GetError();
+                return false;
+            }
+            if (!SDL_SetTextureScaleMode(overlay_tex, SDL_SCALEMODE_NEAREST)) {
+                if (err) *err = std::string("SDL_SetTextureScaleMode(overlay, NEAREST) 失败：") + SDL_GetError();
+                return false;
+            }
+            overlay_tex_w = size.w;
+            overlay_tex_h = size.h;
+            overlay_text_key.clear();  // 新纹理 ⇒ 必须重传
+        }
+        const std::string key = joinOverlayLines(lines);
+        if (key != overlay_text_key) {
+            const std::vector<std::uint8_t> image = renderOverlayImage(lines, nullptr, nullptr);
+            if (image.empty() || !SDL_UpdateTexture(overlay_tex, nullptr, image.data(), size.w * 4)) {
+                if (err) *err = std::string("SDL_UpdateTexture(overlay) 失败：") + SDL_GetError();
+                return false;
+            }
+            overlay_text_key = key;
+        }
+        overlayMarkBuilt(mx, my, mouse_ok, now);
+    }
+    if (overlay_tex == nullptr || overlay_tex_w <= 0 || overlay_tex_h <= 0) return true;
+    // ★ 逻辑坐标 (0,0) = **呈现画面**左上角（`SDL_SetRenderLogicalPresentation(LETTERBOX)` 生效时
+    //   窗口像素 ≠ 逻辑坐标；这里要的是叠在画面上，不是叠在黑边里）。
+    const SDL_FRect dst{0.0f, 0.0f, static_cast<float>(overlay_tex_w), static_cast<float>(overlay_tex_h)};
+    if (!SDL_RenderTexture(renderer, overlay_tex, nullptr, &dst)) {
+        if (err) *err = std::string("SDL_RenderTexture(overlay) 失败：") + SDL_GetError();
+        return false;
+    }
+    return true;
+}
+
+// GPU 直出路径：把同一份 RGBA8 图像交给后端（同一 device / swapchain 格式纹理）；
+// 真正的绘制在 `directPresent` 的 letterbox blit 之后。节流见 `overlayRefreshDue`。
+bool SdlWindow::Impl::drawOverlayDirect(std::string* err) {
+    if (direct == nullptr) return true;
+    int mx = 0;
+    int my = 0;
+    const bool mouse_ok = overlayMousePos(&mx, &my);
+    const std::uint64_t now = SDL_GetTicksNS();
+    if (overlayRefreshDue(mx, my, mouse_ok, now)) {
+        const std::vector<std::string> lines = overlayLines();
+        const OverlaySize size = overlaySize(lines);
+        if (size.w <= 0 || size.h <= 0) {
+            overlayMarkBuilt(mx, my, mouse_ok, now);
+            return true;
+        }
+        const std::string key = joinOverlayLines(lines);
+        if (overlay_dirty || key != overlay_text_key || overlay_w != size.w || overlay_h != size.h) {
+            const std::vector<std::uint8_t> image = renderOverlayImage(lines, nullptr, nullptr);
+            if (image.empty()) return true;
+            if (!direct->directOverlay(image.data(), size.w, size.h, err)) return false;
+            overlay_w = size.w;
+            overlay_h = size.h;
+            overlay_text_key = key;
+        }
+        overlayMarkBuilt(mx, my, mouse_ok, now);
+    }
+    return true;
 }
 
 void SdlWindow::Impl::mapMouse(float mx, float my, std::int32_t* gx, std::int32_t* gy) const {
@@ -324,6 +558,8 @@ bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
     impl_->screenshot_frame = options.screenshot_frame;
     impl_->raster_gpu = options.raster_gpu;
     impl_->raster_sprites = options.raster_sprites;
+    impl_->overlay = options.overlay;
+    impl_->overlay_dirty = true;
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         if (err) *err = std::string("SDL_Init(VIDEO) 失败：") + SDL_GetError();
@@ -449,6 +685,11 @@ void SdlWindow::shutdown() {
         SDL_DestroyTexture(impl_->texture);
         impl_->texture = nullptr;
     }
+    // ★ 叠层纹理属于 renderer ⇒ 必须在 `SDL_DestroyRenderer` **之前**释放。
+    if (impl_->overlay_tex != nullptr) {
+        SDL_DestroyTexture(impl_->overlay_tex);
+        impl_->overlay_tex = nullptr;
+    }
     if (impl_->renderer != nullptr) {
         SDL_DestroyRenderer(impl_->renderer);
         impl_->renderer = nullptr;
@@ -483,6 +724,15 @@ void SdlWindow::shutdown() {
     impl_->capture_argb.clear();
     impl_->capture_w = 0;
     impl_->capture_h = 0;
+    // 叠层状态（纹理已在 renderer 之前释放；直出那一份随 `directDetachWindow` 释放）。
+    impl_->overlay_tex_w = 0;
+    impl_->overlay_tex_h = 0;
+    impl_->overlay_w = 0;
+    impl_->overlay_h = 0;
+    impl_->overlay = false;
+    impl_->overlay_dirty = true;
+    impl_->overlay_text_key.clear();
+    impl_->present_times_ns.clear();
 }
 
 bool SdlWindow::submitFrame(const SurfaceArena& arena, const GuestSurface& surface, std::string* err) {
@@ -560,6 +810,13 @@ bool SdlWindow::submitFrame(const SurfaceArena& arena, const GuestSurface& surfa
     SDL_RenderClear(impl_->renderer);
     SDL_RenderTexture(impl_->renderer, impl_->texture, nullptr, nullptr);
     ++impl_->frame_no;
+    impl_->notePresentTime();
+    // ★ 叠层画在主纹理**之后**、截图**之前** ⇒ `--present-screenshot` 里可见（窗口像素）。
+    //   ⛔ `--dump-frame` 读的是 guest arena，天然不含它。
+    if (impl_->overlay) {
+        std::string oerr;
+        if (!impl_->drawOverlayRenderer(&oerr)) impl_->disableOverlay(oerr.c_str());
+    }
 
     if (impl_->shotWanted()) {
         SDL_Surface* shot = SDL_RenderReadPixels(impl_->renderer, nullptr);
@@ -640,6 +897,13 @@ bool SdlWindow::Impl::submitDirect(const SurfaceArena& arena, const GuestSurface
         sized = true;
     }
     ++frame_no;
+    notePresentTime();
+    // ★ 叠层：先把 RGBA8 交给后端（文本不变不重传），真正的 blit 在 `directPresent` 的
+    //   letterbox 之后。画不出来 ⇒ 关掉叠层，呈现照旧（⛔ 不因为诊断层让整帧失败）。
+    if (overlay) {
+        std::string oerr;
+        if (!drawOverlayDirect(&oerr)) disableOverlay(oerr.c_str());
+    }
     if (!direct->directPresent(err)) return false;
     // 一帧用过就消费掉：下一位调用方（DDraw Flip / 直接 submitFrame）仍然会先上传 guest。
     direct->directSetTargetCurrent(false);
@@ -697,6 +961,33 @@ const char* SdlWindow::directPresentMode() const {
 }
 
 const char* SdlWindow::rendererName() const { return impl_->renderer_name.c_str(); }
+
+// 调试叠层开关：关掉时**立刻**把两条路径的叠层状态都释放（renderer 纹理 / 直出纹理 + CPU 副本
+// —— 直出那一份由后端 `directOverlay(nullptr,...)` **真的释放** GPU 纹理，不是只置 flag），
+// 下一帧起窗口像素恢复成"只有画面"。默认关（`--overlay` 才打开）。
+void SdlWindow::setOverlay(bool on) {
+    impl_->overlay = on;
+    impl_->overlay_dirty = true;
+    // 开关变化 ⇒ 丢掉节流状态：下次开启时立刻重建，不受上一轮 100 ms 窗口影响。
+    impl_->overlay_last_build_ns = 0;
+    impl_->overlay_last_mouse_valid = false;
+    if (on) return;
+    impl_->overlay_text_key.clear();
+    impl_->overlay_w = 0;
+    impl_->overlay_h = 0;
+    if (impl_->overlay_tex != nullptr) {
+        SDL_DestroyTexture(impl_->overlay_tex);
+        impl_->overlay_tex = nullptr;
+    }
+    impl_->overlay_tex_w = 0;
+    impl_->overlay_tex_h = 0;
+    if (impl_->direct != nullptr) {
+        std::string ignored;
+        impl_->direct->directOverlay(nullptr, 0, 0, &ignored);
+    }
+}
+
+bool SdlWindow::overlayEnabled() const { return impl_->overlay; }
 
 void SdlWindow::setCaptureForTest(bool on) { impl_->capture = on; }
 

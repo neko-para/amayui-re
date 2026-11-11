@@ -32,6 +32,11 @@ struct SdlWindowOptions {
     bool hidden = false;
     bool raster_gpu = false;  // 同一 SDL_GPUDevice 上的 GPU 光栅化（`--raster gpu`）
     bool raster_sprites = true;  // D3DXSprite 也走 GPU（A/B 可关）
+    // ★ 左上角调试叠层（`--overlay`，默认关）：鼠标 guest 客户区坐标 / fps / frame / raster / present。
+    //   只改**宿主送显的那一份像素** —— ⛔ 不写 guest 内存、⛔ 不进 `--dump-frame`。
+    //   两条呈现路径各自绘制（见 present_sdl.cpp）：SDL_Renderer 用小纹理；GPU 直出在
+    //   letterbox blit 之后再 blit 一次。
+    bool overlay = false;
     std::string screenshot_path;  // 支持 {frame}
     // ★ 只回读**这一帧**（1 起；0 = 每帧都写）。配合 `--max-frames N` 就是"定帧截图"：
     //   `--present-screenshot out.bmp --present-screenshot-frame N --max-frames N` 只产出一张。
@@ -109,6 +114,10 @@ public:
     // ★ 「走的是不是 SDL_GPU」在两条路径上都成立：renderer 路径看 `SDL_GetGPURendererDevice()`，
     //   直出路径看 swapchain 所用的 GPU device（`present=direct/<mode>` 是正证据）。
     bool isGpuRenderer() const;
+    // ★ 调试叠层开关（`--overlay`）。`init()` 之后也能改：关掉时立刻把已建的叠层纹理丢掉。
+    //   默认关；只影响窗口像素（⛔ 不碰 guest 内存）。
+    void setOverlay(bool on);
+    bool overlayEnabled() const;
     const char* rendererName() const;    // 直出时是 `gpu-direct`
     // GPU 直出是否成立（窗口已 claim 给光栅化的 device）。false ⇒ 呈现走 SDL_Renderer 上传。
     bool directPresentActive() const;

@@ -59,6 +59,8 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/interaction_graph.cpp
     src/runtime/present.cpp
     src/runtime/present_sdl.cpp
+    # ★ 窗口调试叠层（`--overlay`）：纯逻辑（5×7 位图字体 + 行格式化 + RGBA8 矩形绘制），无 SDL 类型。
+    src/runtime/overlay.cpp
     src/runtime/frame_blit.cpp
     src/runtime/d3d9_gpu.cpp
     src/runtime/ddraw_surface.cpp
@@ -246,6 +248,28 @@ set(LIFT_ASSETS_GAME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../links/install"
     CACHE PATH "assets 档的安装根（含 SYS4INI.BIN）")
 if(NOT EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN")
     message(STATUS "assets 档：${LIFT_ASSETS_GAME_DIR} 下没有 SYS4INI.BIN ⇒ 资产用例不注册")
+endif()
+
+# =====================================================================================
+# assets：窗口调试叠层（`--overlay`）的 CLI smoke（`REQ-01M74Z3E0K9QXP93T881KRQ1B2`）
+# ★ 判据见 `tests/overlay.cpp` 文件头 ⑥：`--present window --present-hidden --overlay
+#   --max-frames 2` exit 0，且 `--present-screenshot` 的 BMP 左上角真的被叠层覆盖（精确颜色）；
+#   同一配置去掉 `--overlay` 也 exit 0。
+# ★ 注册条件按需求单的口径 = **安装树存在**（不另加 `LIFT_ASSETS` opt-in：这条要证明的正是
+#   "真机窗口路径能带着叠层跑完两帧"）。窗口 / GPU 不可用 ⇒ 测试自己 `LIFT_SKIP`(77) + 原因。
+# ★ `add_executable` 在上面的 pure 块里（`lift-overlay`）；这里只加 CTest 项。
+# =====================================================================================
+if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN")
+    add_test(NAME overlay-window-smoke COMMAND lift-overlay --window-smoke
+        $<TARGET_FILE:emulator-lift>
+        "${LIFT_ASSETS_GAME_DIR}"
+        "${CMAKE_CURRENT_BINARY_DIR}/overlay-work")
+    set_tests_properties(overlay-window-smoke PROPERTIES
+        # ★ 子进程继承这个 cwd：模拟器默认的执行源是按相对当前目录找的
+        #   （`../../corpus/assets/age/…sectfix.EXE`）⇒ 停在 `out/` 会找不到执行源、被测试 SKIP。
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 1200)
 endif()
 
 # ---- assets：真机安装上的 LOGO 影片必须"真的放完"（首帧 / completed / 堆平稳 / tex#1 差分）----
@@ -517,6 +541,20 @@ set_tests_properties(present-window PROPERTIES
     ENVIRONMENT "SDL_VIDEODRIVER=dummy" SKIP_RETURN_CODE 77)
 add_test(NAME present-window-gpu COMMAND lift-present-window --gpu)
 set_tests_properties(present-window-gpu PROPERTIES SKIP_RETURN_CODE 77)
+
+# =====================================================================================
+# 窗口调试叠层（`--overlay`，默认关）—— 判据见 `tests/overlay.cpp` 文件头
+# =====================================================================================
+# ★ 顶层无条件注册 ⇒ **pure** 档（字体 / 格式化 / 只写矩形 + software 渲染器上的可见性）。
+#   dummy 视频下只测窗口/纹理/上传/回读的机械正确性；`--gpu` 那条测**直出**（无 GPU ⇒ SKIP 77）。
+#   ★ `overlay-gpu` 必须不带 SDL_VIDEODRIVER=dummy：直出要真的 claim 窗口。
+add_executable(lift-overlay tests/overlay.cpp)
+target_link_libraries(lift-overlay PRIVATE emulator-lift-runtime)
+add_test(NAME overlay COMMAND lift-overlay)
+set_tests_properties(overlay PROPERTIES
+    ENVIRONMENT "SDL_VIDEODRIVER=dummy" SKIP_RETURN_CODE 77)
+add_test(NAME overlay-gpu COMMAND lift-overlay --gpu)
+set_tests_properties(overlay-gpu PROPERTIES SKIP_RETURN_CODE 77)
 
 # ---- GPU 光栅化（--raster gpu）：独立 SDL_GPUDevice + 离屏 target + 读回 ----
 # 两档都要求真的 GPU 设备：dummy 视频下建不出设备 ⇒ 返回 77（SKIP），⛔ 不是"跑绿"。
@@ -984,3 +1022,29 @@ add_executable(lift-frame-dump-failure tests/frame_dump_failure.cpp)
 target_link_libraries(lift-frame-dump-failure PRIVATE emulator-lift-runtime)
 add_test(NAME frame-dump-failure COMMAND lift-frame-dump-failure)
 set_tests_properties(frame-dump-failure PROPERTIES SKIP_RETURN_CODE 77)
+
+# =====================================================================================
+# assets（可 SKIP）· 线性 `await script TITLE` + `LIFT_LOG_MARKERS` 的端到端守卫
+# （`REQ-01M74Z3DBK8K5MQVHZPCEX2SXP`）
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+# ★ 判据见 tests/interaction_script_e2e.cpp 文件头：①`await script TITLE` + `quit` 的子进程
+#   exit 0；②它的 trace 有 `node step1 enter` / `when script TITLE` / `task done`（`script` 是电平）；
+#   ③不带 `LIFT_LOG_MARKERS` 那次**没有** `[marker] frame=` 行（默认关）；
+#   ④带 `LIFT_LOG_MARKERS=1` 那次 ≥ 1 行 `[marker] … name=` 且名字非空、至少一行不是降级名；
+#   ⑤④那次用的图**没有** `script` 条件 ⇒ 采样只因环境变量而开（门控的机械判据）。
+# ★ 缺游戏安装 ⇒ 不注册（assets 档的判据 = 注册位置）；与其它 e2e 同一条 opt-in 判据。
+# =====================================================================================
+if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
+    add_executable(lift-interaction-script-e2e tests/interaction_script_e2e.cpp)
+    target_link_libraries(lift-interaction-script-e2e PRIVATE emulator-lift-runtime)
+    add_test(NAME interaction-script-e2e COMMAND lift-interaction-script-e2e
+        $<TARGET_FILE:emulator-lift>
+        "${LIFT_ASSETS_GAME_DIR}"
+        "${CMAKE_CURRENT_BINARY_DIR}/interaction-script-e2e-work")
+    set_tests_properties(interaction-script-e2e PROPERTIES
+        # ★ 子进程继承这个 cwd：模拟器默认的执行源是按相对当前目录找的
+        #   （`../../corpus/assets/age/…sectfix.EXE`）⇒ 停在 `out/` 会找不到执行源、被测试 SKIP。
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 1200)
+endif()

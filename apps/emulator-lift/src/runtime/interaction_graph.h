@@ -26,9 +26,26 @@
 //
 //   条件的写法（闭集合，与真源 §1 的表一一对应）：
 //     always | screen hash <hex64> | screen rect <x> <y> <w> <h> avg <0xRRGGBB> |
-//     screen changed | script <名字>（今天**解析期拒绝**，见真源 §6）
+//     screen changed | script <名字|id>
+//   `script` 是**电平**（"当前身份 == X"，读最近一次 VM 循环头采样）；`at marker` 的**边沿**
+//   语义不在本类里、也一个字都不改（真源 §1 / §6）。
 //   动作的写法：click <x> <y> [left|right] | click center [left|right] | key <VK> |
 //     wait <n> frames|ms | profile_begin <label> | profile_end <label> | quit
+//
+// ---- 线性写法（与 `node` 块可混用；解析期展开成同一份 `Node` IR）----
+//
+//     await script TITLE      ← 开一个 step（= 一个节点），条件就是 `await` 后面的那个
+//     click 1174 377          ← 动作行：属于最近的 step；没有 `await` 的动作行 = `always` step
+//     timeout 3000            ← 可选，作用域 = 当前 step
+//     expect screen changed   ← 可选，作用域 = 当前 step
+//     await script GAMESTART
+//     click 715 576
+//
+//   step id = `step1` / `step2` …（稳定；与已有 node id 冲突 ⇒ 解析期失败）。
+//   隐式 `next` = 下一个 step；最后一个 step 的 `next` 为空（任务结束）。
+//   线性写法下不写 `entry` ⇒ entry = 第一个 step（写了 `entry` 就照旧）。
+//   ⛔ 线性写法**不默认** `expect`：下一个 `await` 就是期望（默认加 `screen changed`
+//   会让 no-op 动作误判）。一个 step 恰好一个动作 —— 要连点就再写一行 `await …`。
 //   按钮词只有 `left` / `right`（省略 = left；⛔ 没有 `middle` / `hold`）——
 //   词表与 JSON 写法的真源见 `docs/03-emulator/interaction-model.md` §1（这里只列有哪些词）。
 //   `next` 不带 id = 任务结束；`timeout` 省略 = 缺省 5000 ms（trace 里标 `(default)`）。
@@ -40,6 +57,7 @@
 #include <string>
 #include <vector>
 
+#include "runtime/engine_marker.h"
 #include "runtime/host_window.h"
 #include "runtime/input_script.h"
 #include "runtime/screen_sample.h"
@@ -54,7 +72,7 @@ enum class CondKind : std::uint8_t {
     ScreenHash = 1,   // 整帧 hash 相等
     ScreenRect = 2,   // 矩形均值命中（产出框 ⇒ `click center` 的坐标来源）
     ScreenChanged = 3,// 自进入等待以来"与上一次采样不同"发生过（读 `changeCount()`）
-    Script = 4,       // 引擎脚本身份（marker 源；**今天解析期拒绝**）
+    Script = 4,       // 引擎脚本身份（marker 源的**电平**：当前身份 == X）
 };
 const char* condKindName(CondKind k);
 
@@ -63,15 +81,19 @@ struct GraphCond {
     std::uint64_t hash = 0;                 // ScreenHash
     PixelRect rect;                         // ScreenRect
     std::uint32_t avg_rgb = 0;              // ScreenRect 的目标均值（0xRRGGBB）
-    std::string script;                     // Script（未实现）
+    std::string script;                     // Script：**原文**（报错 / trace 用，⛔ 不参与判定）
+    std::uint32_t script_id = 0;            // Script 且 script_by_id ⇒ 按 id 判
+    bool script_by_id = false;              // true = 文本能解析成 u32（十进制 / 0x）⇒ 按 id
     std::string text;                       // 规范化后的可读写法（trace / 报错用，⛔ 不参与判定）
     int rect_index = -1;                    // bindSampler 填（= 该矩形在 sampler 里的索引）
 };
-// 只读 `FrameSampler` 的单调计数：不采样、不读像素。
+// 只读 `FrameSampler` 的单调计数 + **最近一次身份采样**：不采样、不读像素。
+// `identity` = 最近一次 VM 循环头采样（`Machine::last_marker_sample_`；可为 nullptr ⇒
+//   `script` 条件不成立）。⚠ 身份是**电平**：同一个身份重复喂进来仍然成立（不是边沿）。
 // ⚠ 这条声明写在 `struct GraphCond` **之后**：`GraphCond` 按引用/值做参数时编译器要知道它的完整
 //   定义才能实例化签名（前向声明只够指针 / 引用**声明**，不够这里）。⟹ 顺序是编译前提，不是排版偏好。
 bool condHolds(const GraphCond& c, const FrameSampler& sampler, std::uint64_t samples_at_start,
-               std::uint64_t changes_at_start);
+               std::uint64_t changes_at_start, const MarkerSample* identity);
 
 // ---------------------------------------------------------------------------------------
 // 动作（闭集合）
@@ -133,6 +155,9 @@ public:
     const std::vector<Node>& nodes() const { return nodes_; }
     const Node* findNode(const std::string& id) const;
     const std::string& entry() const { return entry_; }
+    // ★ 采样门控（`Machine::run` 的块入口钩子只问它）：图里**有** `script` 条件 ⇒ 必须采身份。
+    //   ⛔ 漏了它 ⇒ 条件恒不成立（`last_marker_sample_` 永远是无效样本）。
+    bool needsIdentitySamples() const;
 
     // ---- 结果 ----
     bool done() const { return state_ == State::Done; }
@@ -159,8 +184,9 @@ public:
 
     // 块边界推进。返回 true = 本 tick 追加了动作（或发生了状态迁移）。
     //   `wm` 只用于 `click center` 的坐标（框中心）与 Wait 的判定基数，实际注入走 actuator。
+    //   `identity` = 最近一次 VM 循环头采样（可为 nullptr）；`script` 条件读它（**电平**）。
     bool tick(WindowManager& wm, const FrameSampler& sampler, std::uint64_t frame, std::uint64_t guest_ms,
-              std::uint64_t insns, std::uint64_t wall_ms);
+              std::uint64_t insns, std::uint64_t wall_ms, const MarkerSample* identity);
 
     // ---- 可观测账（守卫 / run summary 用）----
     // 当前节点（Idle/Done/Failed 时为 nullptr；summary / 失败报告用）。
@@ -231,6 +257,9 @@ private:
     bool issue_blocked_logged_ = false;
     // 采样接线（`bindSampler` 记住来源：窗口起点要记计数，失败快照要读采样值）
     const FrameSampler* sampler_ = nullptr;
+    // 身份接线（`tick` 每次记下；`fail()` 要快照它 ⇒ 报告里能写出"最后一次身份"）
+    const MarkerSample* identity_ = nullptr;
+    MarkerSample fail_identity_;
     // 失败瞬间的快照。为什么不留着"到时候再读"：失败之后调用方还会继续 Present / 继续 tick actuator，
     // 那时 `sampler` 与 `actuator_` 的值已经不是"失败时的候选"了 —— 报告必须打**那一刻**的。
     std::uint64_t fail_samples_total_ = 0;

@@ -124,6 +124,8 @@ void usage() {
         "  --present-hidden          隐藏窗口（CTest / 无人值守）\n"
         "  --present-screenshot <path>  窗口像素 BMP（present 前回读；支持 {frame}）\n"
         "  --present-screenshot-frame <N>  只回读第 N 个 Present（1 起；缺省 0 = 每帧都写）\n"
+        "  --overlay           窗口左上角调试叠层（鼠标 guest 客户区坐标 / fps / frame / raster / present；\n"
+        "                      默认关；只改宿主送显的窗口像素，⛔ 不写 guest 内存、不进 --dump-frame）\n"
         "  --input-script <path>  指令式输入时间线（`at frame N` / `at insn N` / `at guest_ms T` / `at wall_ms T` / at marker <名字> / after / wait；\n"
         "                     动作 = mouse_move / mouse_down / mouse_up / click / key_down / key_up / profile_begin / profile_end / quit）。\n"
         "                     段标记（各独占一行、**必须成对**，且需 --anchor-script）：\n"
@@ -216,6 +218,8 @@ int main(int argc, char** argv) {
     std::string present_driver = lift::SdlWindowOptions{}.driver_list;
     std::string present_screenshot;
     std::uint64_t present_screenshot_frame = 0;
+    // ★ 窗口调试叠层（`--overlay`，默认关）：只画进宿主送显的窗口像素，⛔ 不碰 guest 内存。
+    bool overlay = false;
     std::string input_script_path;
     // ★ 识别驱动的交互任务（`--interaction-graph`）：见 docs/03-emulator/interaction-model.md。
     std::string interaction_graph_path;
@@ -372,6 +376,9 @@ int main(int argc, char** argv) {
             }
             present_screenshot_frame = static_cast<std::uint64_t>(v);
             present_screenshot_set = true;  // 同属窗口参数：headless 下拒绝
+        } else if (std::strcmp(a, "--overlay") == 0) {
+            // 调试叠层：只作用于 `--present window`（headless 没有窗口可画）。
+            overlay = true;
         } else if (std::strcmp(a, "--input-script") == 0 && i + 1 < arg_count) {
             input_script_path = args[++i];
             if (input_script_path.empty()) {
@@ -616,14 +623,14 @@ int main(int argc, char** argv) {
         return 2;
     }
     const bool present_window_flag =
-        present_driver_set || present_vsync_set || present_hidden || present_screenshot_set;
+        present_driver_set || present_vsync_set || present_hidden || present_screenshot_set || overlay;
     if (present_screenshot_frame != 0 && present_screenshot.empty()) {
         std::fprintf(stderr, "--present-screenshot-frame 需要同时给 --present-screenshot <path>\n");
         return 2;
     }
     if (present_mode == "headless" && present_window_flag) {
         std::fprintf(stderr, "--present headless 不接受窗口参数（--present-driver / --present-vsync / "
-                             "--present-hidden / --present-screenshot）\n");
+                             "--present-hidden / --present-screenshot / --overlay）\n");
         return 2;
     }
     if (present_mode != "headless" && present_driver.find("software") != std::string::npos) {
@@ -1053,6 +1060,7 @@ int main(int argc, char** argv) {
         wopt.hidden = present_hidden;
         wopt.screenshot_path = present_screenshot;
         wopt.screenshot_frame = present_screenshot_frame;
+        wopt.overlay = overlay;
         wopt.raster_gpu = raster_wants_gpu;
         wopt.raster_sprites = raster_sprites;
         auto sdl = std::make_unique<lift::SdlWindow>();

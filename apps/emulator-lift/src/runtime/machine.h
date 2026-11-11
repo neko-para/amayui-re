@@ -407,9 +407,19 @@ private:
     NativeOverrideTable overrides_;
     NativeBlockTable block_overrides_;
     InputScript input_script_;
-    // ★ marker 采样器 + 最近一次样本（只在脚本里有 marker 动作时才会被 run 钩子调用）。
+    // ★ marker 采样器 + 最近一次样本（时间线要身份 / 图里有 `script` 条件 / `LIFT_LOG_MARKERS`
+    //   任一成立时才会被 run 钩子调用）。
     MarkerSampler marker_sampler_;
     MarkerSample last_marker_sample_;
+    // ★ 诊断（`LIFT_LOG_MARKERS`）：身份**变化**时打一行 `[marker] …`（发现路径：没有它，
+    //   写 `script <名字>` 只能靠猜）。**存在即开**（`=0` 也算开 —— 与 `LIFT_FRAME_TRACE` 同口径）。
+    //   下面几个字段只是"上一次打过的身份"（稳态不刷屏的判据）。
+    bool log_markers_ = false;
+    bool marker_logged_identity_ = false;
+    std::uint32_t marker_logged_cur_ = 0;
+    std::uint32_t marker_logged_id_ = 0;
+    bool marker_logged_degraded_ = false;
+    std::string marker_logged_name_;
     // ★ 识别驱动的交互任务（`--interaction-graph`）+ 它的画面采样器。
     //   采样器只在这张图被加载时挂到 presenter 上（`loadInteractionGraph`），否则一次也不采样。
     InteractionGraph interaction_;

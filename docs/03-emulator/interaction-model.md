@@ -35,16 +35,52 @@ JSON 文件入口留到"生成器落地"时再加，重开条件写在同一张�
 
 | 字段 | 必填 | 取值 | 语义 |
 |---|---|---|---|
-| `when` | ✅ | 条件项（闭集合；行写法 `script <名字>` / `screen hash <hex>` / `screen rect x y w h avg <0xRRGGBB>` / `screen changed` / `always`） | 成立才轮到本节点。一条节点 = **一个**条件项：不做 AND/OR 组合、不做条件分支图。`screen rect …` 命中时**产出框**（= 该 rect），这是 `click center` 唯一合法的坐标来源；`always` 是纯推进 |
+| `when` | ✅ | 条件项（闭集合；行写法 `script <名字\|id>` / `screen hash <hex>` / `screen rect x y w h avg <0xRRGGBB>` / `screen changed` / `always`） | 成立才轮到本节点。一条节点 = **一个**条件项：不做 AND/OR 组合、不做条件分支图。`screen rect …` 命中时**产出框**（= 该 rect），这是 `click center` 唯一合法的坐标来源；`always` 是纯推进。`script` 是**电平**（见下） |
 | `action` | ✅ | `click [x y] [left\|right]` / `click center [left\|right]` / `key <VK>` / `wait <n> frames\|ms` / `profile_begin` \| `profile_end` `<label>` / `quit` | 与 `when` **解耦**：命中才执行。`click center` 打**识别到的框**中心；`click x y` 打固定点。按钮词只有 `left` / `right`，省略 = `left`（⛔ 不收 `middle` / `hold`：按钮是输入目标，`hold` 是时序语义） |
 | `next` | ✅（可空） | **单个**节点 id / 空 | 前进到哪一个；空 = 任务结束。⛔ 不是候选列表。id 必须已定义，否则解析期失败（带行号） |
 | `timeout` | ✅ | ms | 等到 `when` 成立的上限；到点 = `timeout` 失败。必填；解析器给一个**固定缺省值**（生成器应显式写出来，缺省在 trace 里标出） |
 | `expect_change` | ⬜ | 条件项（同上闭集合） | 动作执行后**必须**观测到的变化；到点没变 = `expect_change` 失败 |
 | `enabled-if` 之类 | — | — | **不需要**：不做条件分支图 |
 
-`when` 的五个源：`script <名字>` = 引擎帧身份（来自 marker 事件源，见 §5）· `screen hash <hex>` = 整帧指纹相等 ·
+`when` 的五个源：`script <名字|id>` = 引擎帧身份（来自 marker 事件源，见 §5）· `screen hash <hex>` = 整帧指纹相等 ·
 `screen rect x y w h avg <0xRRGGBB>` = 该矩形区域均值命中（并**产出框**）· `screen changed` = 与上一次采样不同 ·
 `always` = 恒成立（纯推进）。
+
+`script` 是**电平**条件：判据 = `当前身份 == X`，读的是**最近一次** VM 循环头采样（`0x4123F0` / `0x4123E5`），
+所以"**已经**在那一屏"也成立（这正是"等一屏 → 点一下"能自足写出来的前提）。匹配规则：
+能解析成 `u32`（十进制 / `0x`）⇒ 按 **id**；否则按**名字**（ASCII 大小写不敏感、**允许省略 `.BIN` 后缀**
+——`TITLE` 命中 `TITLE.BIN`；`id:0x%08X` 退化名**始终接受**）。名字表与 `id:0x…` 退化名规则**与时间线
+`at marker` 相同**；但 `script` **更宽松**：允许省略 `.BIN` 后缀（`at marker` 不接受省略 ——
+`at marker TITLE` 今天**不**命中 `TITLE.BIN`）。
+⚠ **边沿**语义不属于本条件：`at marker <名字>` 仍是"进入才发事件、首个样本只播种"（§6 / §7），两者互不改写。
+
+### 1.1 线性写法（解析期展开成同一份节点）
+
+一条近似线性的任务可以直接写成"等一屏 → 点一下"：
+
+```
+await script TITLE
+click 1174 377
+await script GAMESTART
+click 715 576
+await script SN0000
+click 100 100
+```
+
+- `await <cond>` 开一个 step（= 一个节点），`when` = `await` 后面的那个条件；条件闭集合与节点形式**完全相同**
+  （`script` / `screen hash` / `screen rect … avg` / `screen changed` / `always`）。
+- `await` 之后的**第一个**动作行（`click` / `key` / `wait` / `profile_begin` / `profile_end` / `quit`）属于
+  当前 step；**再写一个动作行 = 新的 `always` step**（是有意的，⛔ 不是解析错误 —— 一个 step 恰好一个动作）。
+  没有 `await` 的动作行同样是 `always` step。要"连点两次、等的是同一屏"就再写一行 `await …`。
+- 每个 step 可再跟 `timeout <ms>` / `expect <cond>`（**作用域 = 当前 step**，语义与节点形式完全相同）；
+  缺省 `timeout` 仍用固定缺省值（trace 标 `(default)`）。⛔ **不默认** `expect`
+  （线性程序里"下一个 `await`"就是期望；默认加会让 no-op 动作误判）。
+- 隐式 `next` = 下一个 step；最后一个 step 的 `next` 为空（任务结束）。`next` / `when` 这类键在 step 里
+  不合法（条件来自 `await`、连边是隐式的）⇒ 解析期失败。
+- step id = `step1` / `step2` …（稳定、进 trace）；与已有 `node` id 冲突 ⇒ 解析期失败（带行号）。
+- 线性写法下不写 `entry` ⇒ entry = 第一个 step；写了 `entry` 就照旧。与 `node` 块**可混用**。
+- 解析失败一律 `origin:行: 原因`。
+
 
 ## 2. 三种失败，全部响亮
 
@@ -118,14 +154,16 @@ JSON 文件入口留到"生成器落地"时再加，重开条件写在同一张�
 |---|---|
 | 区域 hash / 区域均值 / 单点取色 / **模板匹配** | ✅ 已实现区域均值 + 区域 hash（采样点 = Present，`runtime/screen_sample.h`）；单点取色 = 1×1 矩形 ⇒ 不再单列；⚠ 区域 hash 目前**只采样、没有条件消费它**（闭集合里只有 `avg`）—— 要加 `screen rect … hash` 时再接上；**模板匹配不做** |
 | presenter 保留"最后呈现那帧"的句柄 | ✅ 已保留（描述符 + 帧号；失败时补写一张，并注明像素是否仍是**被采样到的那一帧**） |
-| `script` 事件源**未实现** | `when script <名字>` 今天不可用：解析期**拒绝**并报错（⛔ 不静默退化成 `always`）；身份格的偏移在仓内，但"名字表基址 + VM 循环头 EA"没有仓内取证 ⇒ 实现落点是另一张单（"脚本身份 marker 事件源"） |
+| `script` 条件 | ✅ 已实现，且是**电平**：`script <名字\|id>` = "当前身份 == X"（读最近一次 VM 循环头采样）；采样门控由"图里有 `script` 条件"打开，失败报告写**最后一次身份**（`cur` / `id` / `name`，降级标出）。**边沿**仍是时间线的 `at marker <名字>`，语义不同、互不改写。身份发现路径 = `LIFT_LOG_MARKERS`（环境变量，存在即开）打每次身份变化 |
 
 
 ## 7. 分期（每步独立可验收）
 
 1. **`screen` 源 + 节点图 + 三种响亮失败 + trace** —— 今天就要覆盖**进 / 出 Eushully-chan Room**
-   （不依赖未实现的 `script` 源）。
-2. **`script` 源**（引擎帧身份采样器；帧停住时仍看得见场景切换）—— 需求单：脚本身份 marker 事件源。
+   （这一期**不依赖** `script` 源）。
+2. **`script` 源**（引擎帧身份采样器；帧停住时仍看得见场景切换）—— ✅ **已落地**：`when script <名字|id>`
+   是**电平**条件（另有线性写法 `await script …` 与身份发现日志 `LIFT_LOG_MARKERS`）；时间线
+   `at marker` 的**边沿**语义不变。需求单：脚本身份 marker 事件源。
 3. **把现有 `--input-script` 时间线并入**：`at frame N` / `wait N frames` 折成节点图里的等待条件
    （`wait n frames`）；**旧解析器保留**，另加一个**机械转换器**（不改旧语法、不改旧守卫）。
 

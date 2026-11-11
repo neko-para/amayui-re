@@ -573,6 +573,19 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-d
 - ⚠ **两条通道并存时不要同时"按着"输入**：脚本的键 / 按钮所有权是**全局一份**（`WindowManager` 按 vk 记），
   任一份脚本收口都会把它按下的键抬起来。现在图的动作是"追加进它自己的 actuator"，所以两条脚本
   **同时各按一个键**不安全 —— 要么只用一条，要么把两条的动作时间错开。
+- **线性写法**：人写用的短形态，解析期展开成同一份节点；schema 与判据的唯一真源是
+  `docs/03-emulator/interaction-model.md`（§1 / §1.1），本文件**不复述**。示例：
+
+  ```
+  await script TITLE
+  click 1174 377
+  await script GAMESTART
+  click 715 576
+  await script SN0000
+  click 100 100
+  ```
+
+  不知道 `script` 该写哪个名字时，用诊断 `LIFT_LOG_MARKERS`（见 §4.3.1 的诊断环境变量列表）先看身份。
 - 现成的路径脚本在 `scripts/interaction/`（进 / 出 EU-ROOM；出房间的左键 / 右键变体也在那里）。
   `click` 可带按钮词 `left` / `right`（省略 = `left`）；需求单的判据与进度见需求树
   （`pnpm tools requirements show REQ-01M6XVYY5TCKSAS80WS7PADF8P`）。
@@ -776,6 +789,15 @@ sprite 合批与那条直方图的算法。⛔ 不把逐帧数字写进 README�
   不计入上面的表 —— 摘要会显式列出每一项的 hits / declines / fallbacks。
 - 是否继续扩展、以及 A/B 数字见需求单（§5）。
 
+**窗口调试叠层（`--overlay`，默认关；只作用于 `--present window`）**：在**呈现画面左上角**叠一块
+`mouse <x>,<y>` / `fps <x.x>` / `frame <n>` / `raster <cpu|gpu>` / `present <direct|renderer>`
+（`mouse` = **guest 客户区坐标**，与 `click x y` / `--input-script` 同一格；最近 1 s 的 Present 次数 = `fps`）。
+拿不到的字段**整行省略**（⛔ 不编数字）。⛔ 只改**宿主送显的窗口像素**：不写 guest 内存。
+叠层只在**窗口**与 `--present-screenshot`（窗口像素）里可见；`--interaction-fail-dump` /
+`--dump-frame` 是 **guest 帧**（`arena.dumpBmp`），不含叠层 —— 与"guest 像素 / 整帧 hash 零改动"同口径。
+两条呈现路径（GPU 直出 / SDL_Renderer 上传）都画；守卫 = `tests/overlay.cpp`（CTest `overlay` /
+`overlay-gpu` / `overlay-window-smoke`）。
+
 ### 4.3.1 一帧的墙钟去哪了（逐帧诊断）
 
 `--profile` 回答两类热点：**guest**（块级 + 按 `.lst` 函数入口聚合）与**宿主 shim 实现自身**的墙钟
@@ -844,6 +866,10 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
   **"这一批用的到底是 DIFFUSE 还是 TFACTOR"只能看这个**（`ret=` 定位写它的 guest EA）。
 - 回退原因还按字符串聚合进 `dumpRunSummary` 的 `gpu       :` / `fallback top:` 行
   （见 §4.2b）；`--gpu-strict` 把"还有回退"变成 exit 3，而不是靠读日志判断。
+- `LIFT_LOG_MARKERS=1`（诊断，默认关）：引擎帧身份（marker 源）**变化**时往 stdout 打一行
+  `[marker] frame=… insn=… cur=… id=0x%08X name=…`（名字读不到时标 `（降级）`，稳态不刷屏）。
+  它是"`script <名字>` 该写什么"的**发现路径**；只开它、不写任何脚本动作也会打开身份采样。
+  ★ **存在即开**（`LIFT_LOG_MARKERS=0` 也算开 —— 与 `LIFT_FRAME_TRACE` 同口径）。
 - 这些环境变量都只读、默认关；⛔ 不改变执行结果，也不进 A4 的逐字节基线。
 
 ### 4.3.2 可定界的区间 profiler（`profile_begin` / `profile_end`）

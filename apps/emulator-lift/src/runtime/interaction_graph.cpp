@@ -117,6 +117,50 @@ std::string hexRgb(std::uint32_t v) {
 
 std::string u64s(std::uint64_t v) { return std::to_string(static_cast<unsigned long long>(v)); }
 
+std::string hexId(std::uint32_t id) {
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "0x%08X", static_cast<unsigned>(id));
+    return buf;
+}
+
+// ---- `script` 条件的名字口径 -------------------------------------------------------------
+// 与 `input_script.cpp` 的 `markerNameMatches()`（时间线 `at marker` 的判据）**共用同一份名字表** +
+// **同一套 `id:0x%08X` 退化名规则**：ASCII 大小写不敏感 · 解析出的名字与退化名**始终都接受**
+// （名字表某一刻读不到不该让条件静默失明）。
+// ⚠ 但 `script` **更宽松**：**允许省略 `.BIN` 后缀**（`TITLE` 命中 `TITLE.BIN`），需求单裁决 2 ——
+//   `at marker TITLE` 今天**不**命中 `TITLE.BIN`（边沿那条一个字都不改）。⛔ 不要把这条宽松带给
+//   `at marker`，也⛔ 不要在这里再加第三条规则（例如 Unicode 折叠）。
+// ⚠ 两份实现目前在两个 .cpp 的匿名命名空间里（`input_script.cpp` 那一份不导出）——
+//   合并成一份要动 `input_script.{h,cpp}`，本单的改动面不允许。
+bool asciiEqualsIgnoreCase(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        char ca = a[i];
+        char cb = b[i];
+        if (ca >= 'A' && ca <= 'Z') ca = static_cast<char>(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z') cb = static_cast<char>(cb - 'A' + 'a');
+        if (ca != cb) return false;
+    }
+    return true;
+}
+
+std::string degradedIdName(std::uint32_t id) { return "id:" + hexId(id); }
+
+// `TITLE` 与 `TITLE.BIN` 都算命中（**只**省略 `.BIN` 这一个后缀；⛔ 不做任意前缀 / 通配）。
+bool scriptNameHits(const std::string& want, const std::string& got) {
+    if (asciiEqualsIgnoreCase(want, got)) return true;
+    const std::string suffix = ".BIN";
+    if (got.size() > suffix.size() && asciiEqualsIgnoreCase(got.substr(got.size() - suffix.size()), suffix)) {
+        return asciiEqualsIgnoreCase(want, got.substr(0, got.size() - suffix.size()));
+    }
+    return false;
+}
+
+bool scriptNameMatches(const std::string& want, const MarkerSample& s) {
+    if (scriptNameHits(want, s.name)) return true;
+    return scriptNameHits(want, degradedIdName(s.id));
+}
+
 // 矩形均值的命中判据：**每通道**差 ≤ `kRectAvgTolerance`（与真源 §1 的"判定口径"一致）。
 // ⛔ 不比较 `RectSample::hash`：那个是"区域指纹"，不是 `avg` 的判据；写进去等于偷偷加了第二个条件。
 bool rectAvgHits(std::uint32_t got, std::uint32_t want) {
@@ -185,7 +229,7 @@ const char* graphFailureName(GraphFailure f) {
 // 条件判定：**只读**采样器的单调计数与最近一次采样值（⛔ 不采样、不读像素）
 // ---------------------------------------------------------------------------------------
 bool condHolds(const GraphCond& c, const FrameSampler& sampler, std::uint64_t samples_at_start,
-               std::uint64_t changes_at_start) {
+               std::uint64_t changes_at_start, const MarkerSample* identity) {
     // `samples_at_start` 不参与条件本身：它是调用方判 `no-sample` 的尺（窗口里到底有没有样本）。
     // ★ 判据与"有没有**新**样本"分开是**有意的**：画面已经停在目标那一屏时 `when` 应当立刻成立，
     //   ⛔ 不要求"再变一帧"（帧停住时那等于永远不成立 —— 正是真源 §5 说的那个坑）。
@@ -208,7 +252,10 @@ bool condHolds(const GraphCond& c, const FrameSampler& sampler, std::uint64_t sa
             //   ⛔ 不是 `last().changed`（两次判定之间帧会推进好几帧，只看最后两帧会漏掉中间那次）。
             return sampler.changeCount() > changes_at_start;
         case CondKind::Script:
-            return false;  // 解析期就拒绝了；留一条"永不成立"而不是静默退化成 always
+            // ★ **电平**（真源 §1 / §6）：当前身份 == X 成立，⛔ 不等新事件、⛔ 不看边沿计数。
+            //   没有有效身份（base 还没发布 / 没采样）⇒ 不成立（不是"总是成立"）。
+            if (identity == nullptr || !identity->valid) return false;
+            return c.script_by_id ? identity->id == c.script_id : scriptNameMatches(c.script, *identity);
     }
     return false;
 }
@@ -273,11 +320,10 @@ bool condNeedsNewSample(CondKind k) {
         case CondKind::ScreenHash:
         case CondKind::ScreenRect: return true;
         case CondKind::Script:
-            // ⚠ 今天**不可达**（解析期就拒绝）。这一格刻意沿用"要新样本"，只是为了**保持今天的行为**：
-            //   真落地 `when script` 时它很可能必须改成 false —— 脚本源的判据是 **marker 边沿计数**，
-            //   不是 `sampleCount()`（房间空闲时帧会停、Present 计数不涨 ⇒ 等"新样本"等于永远不成立，
-            //   正是 `interaction-model.md` §5 那个坑）。⛔ 不要照抄这一格。
-            return true;
+            // ★ `script` 是**电平**：判据是"当前身份 =="，不是"动作之后又来过一帧"。
+            //   ⛔ 不能沿用画面源的"要新样本"：房间空闲时帧会停、Present 计数不涨 ⇒
+            //   `expect script …` 会永远等不到（正是 `interaction-model.md` §5 那个坑）。
+            return false;
     }
     return false;
 }
@@ -342,8 +388,14 @@ bool InteractionGraph::loadText(const std::string& text, const std::string& orig
         int next = 0;
         int expect = 0;
         int timeout = 0;
+        // true = 这个块是**线性 step**（`await …` / 无 `await` 的动作行展开出来的）：
+        // 它的 `when` / 动作 / `next` 都是隐式的，块内只允许 `timeout` / `expect`。
+        bool is_step = false;
     };
     std::vector<BlockLines> blocks;
+    // 线性 step 的节点下标（按文件顺序）—— 隐式 `next` = 下一个 step。
+    std::vector<std::size_t> steps;
+    int step_seq = 0;  // `step1` / `step2` …（稳定；只数 step，不数 `node` 块）
     std::string entry;
     int entry_line = 0;
     bool have_entry = false;
@@ -351,6 +403,15 @@ bool InteractionGraph::loadText(const std::string& text, const std::string& orig
 
     auto failAt = [&](int ln, const std::string& why) {
         if (err) *err = origin + ":" + std::to_string(ln) + ": " + why;
+        return false;
+    };
+
+    // 线性 step 的 id 必须与既有 id 不撞（`node step1` 写在**前面**的情形；写在后面的由 `node`
+    // 分支的重复检查兜住）。⛔ 不自动跳过冲突号：那会让"第几步"随文件内容漂移。
+    auto stepIdTaken = [&nodes](const std::string& id) {
+        for (const Node& n : nodes) {
+            if (n.id == id) return true;
+        }
         return false;
     };
 
@@ -403,10 +464,21 @@ bool InteractionGraph::loadText(const std::string& text, const std::string& orig
                 if (tok.size() != 2) return failAt(ln, "`always` 不带参数");
                 out->text = "always";
                 return true;
-            case CondKind::Script:
-                // ⛔ 不静默退化成 always（真源 §6：引擎脚本身份源未实现）。
-                return failAt(ln, "`script` 条件今天不可用：见 interaction-model.md §6（未实现的识别源，"
-                                  "解析期拒绝而不是退化成 always）");
+            case CondKind::Script: {
+                // `script <id|名字>`：能解析成 u32（十进制 / 0x）⇒ 按 id；否则按名字。
+                // 名字口径（大小写不敏感 / 可省略 `.BIN` / `id:0x…` 退化名）在 `scriptNameMatches`。
+                if (tok.size() != 3) {
+                    return failAt(ln, "`script` 需要一个 id 或名字（收到 " +
+                                          std::to_string(tok.size() - 2) + " 个词）");
+                }
+                std::uint64_t value = 0;
+                const bool numeric = parseUnsigned(tok[2], &value) && value <= 0xFFFFFFFFull;
+                out->script_by_id = numeric;
+                out->script_id = numeric ? static_cast<std::uint32_t>(value) : 0u;
+                out->script = tok[2];  // 原文（报错 / trace）；⛔ 判定只读上面两个字段
+                out->text = "script " + tok[2];
+                return true;
+            }
             case CondKind::ScreenChanged:
                 if (tok.size() != 3) return failAt(ln, "`screen changed` 不带参数");
                 out->text = "screen changed";
@@ -584,8 +656,17 @@ bool InteractionGraph::loadText(const std::string& text, const std::string& orig
         Node& n = nodes.back();
         const BlockLines& b = blocks.back();
         if (b.when == 0) return failAt(b.node, "节点 `" + n.id + "` 缺 `when`（每个键恰好一次）");
-        if (b.action == 0) return failAt(b.node, "节点 `" + n.id + "` 缺 `action`（每个键恰好一次）");
-        if (b.next == 0) return failAt(b.node, "节点 `" + n.id + "` 缺 `next`（要到任务结束就写一个空的 `next`）");
+        if (b.action == 0) {
+            if (b.is_step) {
+                return failAt(b.node, "线性 step `" + n.id + "` 缺动作行（click / key / wait / "
+                                      "profile_begin / profile_end / quit）");
+            }
+            return failAt(b.node, "节点 `" + n.id + "` 缺 `action`（每个键恰好一次）");
+        }
+        // step 的 `next` 是隐式的（下一个 step / 最后一个 = 空）⇒ 不要求写（也不许写）。
+        if (!b.is_step && b.next == 0) {
+            return failAt(b.node, "节点 `" + n.id + "` 缺 `next`（要到任务结束就写一个空的 `next`）");
+        }
         if (actionNeedsBox(n.action.kind) && !condYieldsBox(n.when.kind)) {
             // ⚠ 报错串里写死 `click center`：今天只有它需要框。若将来出现第二个"要框的动作"，
             //   这句要跟着泛化（⛔ 不要为了这个把 `actionNeedsBox` 拆回 if —— 见谓词处的理由）。
@@ -593,6 +674,13 @@ bool InteractionGraph::loadText(const std::string& text, const std::string& orig
                                     "本节点的 when 是 `" + n.when.text + "`）");
         }
         return true;
+    };
+
+    // 动作行（线性写法）的动词：与 `actionKindFrom` 的闭集合一一对应。
+    // ⚠ 这里只是**分类**（"这行是不是动作行"），落值仍在 `parseAction`（无 `default:` 的 switch）。
+    auto isActionHead = [](const std::string& h) {
+        return h == "click" || h == "key" || h == "wait" || h == "profile_begin" || h == "profile_end" ||
+               h == "quit" || h == "exit";
     };
 
     const std::vector<SourceLine> lines = splitLines(text);
@@ -632,12 +720,93 @@ bool InteractionGraph::loadText(const std::string& text, const std::string& orig
             continue;
         }
 
+        // ---- 线性写法：`await <cond>` 开一个 step（= 一个 Node；`when` = 那个条件）----
+        // ★ 顶层语句 ⇒ 与 `node` / `entry` 一样先收上一个块（半截的 node 块会在这里响亮报错）。
+        if (head == "await") {
+            if (!closeBlock()) return false;
+            GraphCond cond;
+            if (!parseCond(line.tok, line.no, &cond)) return false;
+            Node n;
+            n.id = "step" + std::to_string(step_seq + 1);
+            if (stepIdTaken(n.id)) {
+                return failAt(line.no, "线性 step 的 id `" + n.id + "` 与已有节点 id 冲突"
+                                                                   "（step id 是隐式的 step1 / step2 …；"
+                                                                   "把 `node " + n.id + "` 改个名字）");
+            }
+            ++step_seq;
+            n.line = line.no;
+            n.when = cond;
+            n.timeout_ms = kDefaultNodeTimeoutMs;
+            n.timeout_explicit = false;
+            nodes.push_back(std::move(n));
+            BlockLines b;
+            b.node = line.no;
+            b.when = line.no;  // 条件已由 `await` 给出
+            b.is_step = true;
+            blocks.push_back(b);
+            steps.push_back(nodes.size() - 1);
+            continue;
+        }
+        if (isActionHead(head)) {
+            // ★ 动作行只属于**线性 step**。当前开着的块有两种：
+            //   ① `node` 块**写全了** ⇒ 它就是上一个节点，收尾，这一行动作开一个 `always` step
+            //      （与 `node` 块可混用）；
+            //   ② `node` 块还缺键 ⇒ 更像"动作漏写了 `action`"，在**这一行**报错（⛔ 不静默收一张残缺图）；
+            //   ③ 当前是 step 且已经有动作 ⇒ 也开新 step（每个 step 恰好一个动作）。
+            bool need_new_step = blocks.empty();
+            if (!blocks.empty() && !blocks.back().is_step) {
+                const BlockLines& prev = blocks.back();
+                if (prev.when == 0 || prev.action == 0 || prev.next == 0) {
+                    return failAt(line.no, "`" + line.tok[0] +
+                                               "` 是线性写法的动作行；当前 `node` 块还没写全 ⇒ 若这个动作属于"
+                                               "那个节点，请写成 `action " + line.tok[0] + " …`");
+                }
+                if (!closeBlock()) return false;
+                need_new_step = true;
+            } else if (!blocks.empty() && blocks.back().action != 0) {
+                if (!closeBlock()) return false;
+                need_new_step = true;
+            }
+            if (need_new_step) {
+                Node n;
+                n.id = "step" + std::to_string(step_seq + 1);
+                if (stepIdTaken(n.id)) {
+                    return failAt(line.no, "线性 step 的 id `" + n.id + "` 与已有节点 id 冲突"
+                                                                       "（step id 是隐式的 step1 / step2 …）");
+                }
+                ++step_seq;
+                n.line = line.no;
+                n.when.kind = CondKind::Always;
+                n.when.text = "always";
+                n.timeout_ms = kDefaultNodeTimeoutMs;
+                n.timeout_explicit = false;
+                nodes.push_back(std::move(n));
+                BlockLines b;
+                b.node = line.no;
+                b.when = line.no;
+                b.is_step = true;
+                blocks.push_back(b);
+                steps.push_back(nodes.size() - 1);
+            }
+            Node& n = nodes.back();
+            BlockLines& b = blocks.back();
+            if (!parseAction(line.tok, line.no, &n.action)) return false;
+            n.action.text = line.body;  // 原始写法（⛔ 不再拆词重拼）
+            b.action = line.no;
+            continue;
+        }
+
         // 其余都是块内键
         if (nodes.empty()) {
             return failAt(line.no, "`" + line.tok[0] + "` 必须写在 `node <id>` 块里");
         }
         Node& n = nodes.back();
         BlockLines& b = blocks.back();
+        // 线性 step 的 `when` / 动作 / `next` 都是隐式的 ⇒ 块内只认 `timeout` / `expect`。
+        if (b.is_step && head != "timeout" && head != "expect") {
+            return failAt(line.no, "线性 step 里只认动作行 / `timeout` / `expect`（收到 `" + line.tok[0] +
+                                       "`；step 的条件来自 `await`，`next` 隐式指向下一个 step）");
+        }
         auto duplicate = [&](int seen_line) {
             return failAt(line.no, "块内重复键：`" + line.tok[0] + "`（行 " + std::to_string(seen_line) +
                                        " 已经写过一次；每个键恰好一次）");
@@ -686,9 +855,23 @@ bool InteractionGraph::loadText(const std::string& text, const std::string& orig
     }
     if (!closeBlock()) return false;
 
-    // ---- 入口：真源没给缺省 ⇒ 省略就是错 ----
+    // ---- 线性 step 的隐式 `next` = 下一个 step（最后一个 = 空 = 任务结束）----
+    // ★ 在 `entry` / `next` 校验之前填好：这样"step 链"与手写 `node` 连边走**同一套**校验
+    //   （⛔ 不给线性写法开一条跳过校验的旁路）。
+    for (std::size_t i = 0; i < steps.size(); ++i) {
+        nodes[steps[i]].next = i + 1 < steps.size() ? nodes[steps[i + 1]].id : std::string();
+    }
+
+    // ---- 入口：真源没给缺省 ⇒ 省略就是错；**线性写法**的缺省 = 第一个 step ----
     if (!have_entry) {
-        return failAt(last_line > 0 ? last_line : 1, "缺少 `entry`（真源没给缺省：第一条语句要写 `entry <id>`）");
+        if (!steps.empty()) {
+            entry = nodes[steps.front()].id;
+            entry_line = nodes[steps.front()].line;
+            have_entry = true;
+        } else {
+            return failAt(last_line > 0 ? last_line : 1,
+                          "缺少 `entry`（真源没给缺省：第一条语句要写 `entry <id>`）");
+        }
     }
     std::size_t entry_index = nodes.size();
     for (std::size_t i = 0; i < nodes.size(); ++i) {
@@ -766,6 +949,8 @@ void InteractionGraph::clear() {
     hit_pending_ = false;
     issue_blocked_logged_ = false;
     sampler_ = nullptr;
+    identity_ = nullptr;
+    fail_identity_ = MarkerSample{};
     fail_samples_total_ = 0;
     fail_changes_total_ = 0;
     fail_blind_total_ = 0;
@@ -790,6 +975,14 @@ const Node* InteractionGraph::findNode(const std::string& id) const {
         if (n.id == id) return &n;
     }
     return nullptr;
+}
+
+bool InteractionGraph::needsIdentitySamples() const {
+    for (const Node& n : nodes_) {
+        if (n.when.kind == CondKind::Script) return true;
+        if (n.has_expect && n.expect.kind == CondKind::Script) return true;
+    }
+    return false;
 }
 
 std::string InteractionGraph::defaultFailDumpPath(const std::string& graph_path) {
@@ -1060,6 +1253,9 @@ void InteractionGraph::fail(GraphFailure kind, const std::string& why, const Gra
         fail_rects_ = sampler_->rectValues();
         fail_frame_ = sampler_->last();
     }
+    // ★ 身份快照：`script` 是**电平**条件，读的是"最近一次 VM 循环头采样"⇒ 报告必须打**那一刻**的身份
+    //   （失败之后调用方还会继续采样，那时 `identity_` 指的值已经变了）。
+    fail_identity_ = identity_ != nullptr ? *identity_ : MarkerSample{};
     fail_release_stats_ = actuator_.releaseStats();
     fail_last_release_ = actuator_.lastRelease();
     fail_applied_ = actuator_.appliedCount();
@@ -1086,6 +1282,16 @@ void InteractionGraph::fail(GraphFailure kind, const std::string& why, const Gra
     r += "  graph    : " + origin_ + "\n";
     r += "  node     : " + n.id + "（node 行 " + std::to_string(n.line) + "）\n";
     r += "  waiting  : " + describeCond(waited) + "\n";
+    // ★ 等的是 `script` ⇒ 报告必须写**最后一次身份**（cur / id / name；降级要标）：
+    //   "等 TITLE 超时"没有身份读数时无法判断是"还在别的屏"还是"识别源失明"。
+    if (waited.kind == CondKind::Script) {
+        if (fail_identity_.valid) {
+            r += "  identity : cur=" + u64s(fail_identity_.cur) + " id=" + hexId(fail_identity_.id) +
+                 " name=" + fail_identity_.name + (fail_identity_.name_degraded ? "（降级）" : "") + "\n";
+        } else {
+            r += "  identity : (一次有效身份采样都没有)\n";
+        }
+    }
     r += "  window   : frame=" + u64s(wait_start_frame_) + ".." + u64s(frame) + "  insn=" +
          u64s(wait_start_insns_) + ".." + u64s(insns) + "  guest_ms=" + u64s(wait_start_guest_ms_) + ".." +
          u64s(guest_ms) + "  timeout=" + u64s(n.timeout_ms) + "ms" +
@@ -1151,11 +1357,13 @@ void InteractionGraph::fail(GraphFailure kind, const std::string& why, const Gra
 std::string InteractionGraph::failureReport() const { return failure_report_; }
 
 bool InteractionGraph::tick(WindowManager& wm, const FrameSampler& sampler, std::uint64_t frame,
-                            std::uint64_t guest_ms, std::uint64_t insns, std::uint64_t wall_ms) {
+                            std::uint64_t guest_ms, std::uint64_t insns, std::uint64_t wall_ms,
+                            const MarkerSample* identity) {
     if (nodes_.empty()) return false;
     if (state_ == State::Done || state_ == State::Failed) return false;  // ⛔ 失败 / 完成不重复报
-    // ★ 判定只读**这次传进来的**采样器（`bindSampler` 只负责登记矩形与整帧开关）。
+    // ★ 判定只读**这次传进来的**采样器与身份（`bindSampler` 只负责登记矩形与整帧开关）。
     sampler_ = &sampler;
+    identity_ = identity;
     writeTraceHeader();
 
     // 命中（条件已成立）⇒ 尝试追加动作；`InputScript` 的前置没满足就下个块边界再试。
@@ -1193,7 +1401,7 @@ bool InteractionGraph::tick(WindowManager& wm, const FrameSampler& sampler, std:
             const Node& n = nodes_[current_];
             noteProgress(frame, insns, wall_ms);  // 停滞兜底的时钟：insns / frame 变了就是"有进展"
             if (!hit_pending_) {
-                if (condHolds(n.when, sampler, samples_at_start_, changes_at_start_)) {
+                if (condHolds(n.when, sampler, samples_at_start_, changes_at_start_, identity)) {
                     hit_pending_ = true;
                     if (condYieldsBox(n.when.kind)) {
                         // ★ 命中框 = 本节点 `click center` 的唯一坐标来源。
@@ -1275,7 +1483,7 @@ bool InteractionGraph::tick(WindowManager& wm, const FrameSampler& sampler, std:
             // ⛔ 这里**不能提前 return**：`expect` 没等到新样本时仍然要走下面的到期判定，
             //   否则"动作后再也没有采样"会永远停在 `wait-expect`（复审探针实测）。
             if (expectMayMatch(n.expect, sampler, samples_at_start_) &&
-                condHolds(n.expect, sampler, samples_at_start_, changes_at_start_)) {
+                condHolds(n.expect, sampler, samples_at_start_, changes_at_start_, identity)) {
                 traceLine("expect " + describeCond(n.expect) + " samples=" + u64s(sampler.sampleCount()) + " hit");
                 advance(frame, guest_ms, insns, wall_ms);
                 return true;

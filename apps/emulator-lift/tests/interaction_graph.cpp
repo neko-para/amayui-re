@@ -75,6 +75,9 @@ struct Driver {
     std::uint64_t hash_step = 1;
     std::uint64_t fed = 0;                        // 注入了多少次采样（= sampleCount 的期望值）
     std::vector<lift::RectSample> rects;          // 每次采样注入的矩形值（空 ⇒ 已登记矩形全部失效）
+    // ★ 身份（`script` 条件的**电平**输入）：默认无效（= 没采到身份 ⇒ `script` 不成立）。
+    //   测试里自己喂 —— 与真实 `Machine::last_marker_sample_` 同形。
+    lift::MarkerSample identity;
 
     Driver() {
         // 点击的自动抬起要等 guest 采样；测试里没有 guest ⇒ 用一个小上限让它别挂在那里
@@ -97,7 +100,7 @@ struct Driver {
             hash += hash_step;
             ++fed;
         }
-        graph.tick(wm, sampler, frame, guest_ms, insns, wall_ms);
+        graph.tick(wm, sampler, frame, guest_ms, insns, wall_ms, &identity);
         graph.actuator().tick(wm, frame, guest_ms, insns, wall_ms);
         ++frame;
         guest_ms += 10;
@@ -272,14 +275,23 @@ int main() {
             "  action quit\n"
             "  next\n",
             4, "entry");
-        // `script` 条件今天不可用（⛔ 不退化成 always）
+        // ★ `when script <名字>` 现在是**合法**条件（电平）—— 旧策略（解析期拒绝）的断言已按
+        //   需求单 `REQ-01M74Z3DBK8K5MQVHZPCEX2SXP` 改成新语义，见 `script-cond-forms`。
+        //   这里只留"词数不对"这一类**仍然**是解析期错误的形态。
         expectLoadError(
             "entry a\n"
             "node a\n"
-            "  when script title\n"
+            "  when script\n"
             "  action quit\n"
             "  next\n",
-            3, "interaction-model.md");
+            3, "script");
+        expectLoadError(
+            "entry a\n"
+            "node a\n"
+            "  when script TITLE GAMESTART\n"
+            "  action quit\n"
+            "  next\n",
+            3, "script");
         // `click center` 的 when 不是 `screen rect`（框中心没有坐标来源）
         expectLoadError(
             "entry a\n"
@@ -463,6 +475,237 @@ int main() {
         expectLoadError("entry a\nnode a\n  when SCREEN FOO\n  action quit\n  next\n", 3, "FOO");
         expectLoadError("entry a\nnode a\n  when always\n  action JUMP\n  next\n", 4, "JUMP");
         expectLoadError("entry a\nnode a\n  when always\n  action quit\n  next\n  RETRY 3\n", 6, "RETRY");
+    }
+
+    // =================================================================================
+    // ②c script-cond-forms —— `script <文本>` 的两种判定口径（**电平**条件）
+    // ★ 红在这意味着：`script` 又退回"解析期拒绝"，或数字/名字分派错了口径
+    //   （名字：大小写不敏感 + 可省略 `.BIN`；数字：十进制 / 0x ⇒ 按 id）。
+    // =================================================================================
+    g_current_case = "script-cond-forms";
+    {
+        lift::InteractionGraph g;
+        std::string err;
+        const bool ok = g.loadText(
+            "node a\n"
+            "  when script TITLE\n"
+            "  action quit\n"
+            "  next b\n"
+            "node b\n"
+            "  when script TITLE.BIN\n"
+            "  action quit\n"
+            "  next c\n"
+            "node c\n"
+            "  when script title.bin\n"
+            "  action quit\n"
+            "  next d\n"
+            "node d\n"
+            "  when script 21092\n"
+            "  action quit\n"
+            "  next e\n"
+            "node e\n"
+            "  when script 0x5264\n"
+            "  action quit\n"
+            "  next f\n"
+            "node f\n"
+            "  when script id:0x0000210A\n"
+            "  action quit\n"
+            "  next\n"
+            "entry a\n",
+            "synthetic:script-conds", &err);
+        LIFT_CHECK(ok);
+        if (!ok) std::fprintf(stderr, "  err = %s\n", err.c_str());
+        if (ok) {
+            // 名字形态：**原文**保留（报错 / trace 用），判定按名字
+            const lift::Node& a = g.nodes()[0];
+            LIFT_CHECK(a.when.kind == lift::CondKind::Script);
+            LIFT_CHECK(!a.when.script_by_id);
+            LIFT_CHECK(a.when.script == "TITLE");
+            LIFT_CHECK(a.when.text == "script TITLE");
+            LIFT_CHECK(!g.nodes()[1].when.script_by_id);  // TITLE.BIN
+            LIFT_CHECK(!g.nodes()[2].when.script_by_id);  // title.bin（大小写不敏感）
+            LIFT_CHECK(g.nodes()[1].when.script == "TITLE.BIN");
+            // 数字形态：十进制 / 0x 都 ⇒ 按 id（`0x5264 == 21092`）
+            LIFT_CHECK(g.nodes()[3].when.script_by_id);
+            LIFT_CHECK_EQ_U32(g.nodes()[3].when.script_id, 21092u);
+            LIFT_CHECK(g.nodes()[4].when.script_by_id);
+            LIFT_CHECK_EQ_U32(g.nodes()[4].when.script_id, 0x5264u);
+            // `id:0x…` 是**退化名**（不是数字 ⇒ 按名字走那条"始终接受"的路）
+            LIFT_CHECK(!g.nodes()[5].when.script_by_id);
+            LIFT_CHECK(g.nodes()[5].when.script == "id:0x0000210A");
+        }
+    }
+
+    // =================================================================================
+    // ②d script-cond-identity —— `condHolds` 用**假身份**注入（不碰真实 VM / 采样点）
+    // ★ 红在这意味着：`script` 的判据不再是"valid && (按 id / 按名字)"，或退化名 / 省略后缀 /
+    //   大小写中的一条口径漂了。
+    // =================================================================================
+    g_current_case = "script-cond-identity";
+    {
+        lift::FrameSampler sampler;  // 画面侧一概不喂：`script` 只读身份
+        auto condName = [](const std::string& want) {
+            lift::GraphCond c;
+            c.kind = lift::CondKind::Script;
+            c.script = want;
+            c.text = "script " + want;
+            return c;
+        };
+        auto condId = [](std::uint32_t id) {
+            lift::GraphCond c;
+            c.kind = lift::CondKind::Script;
+            c.script_by_id = true;
+            c.script_id = id;
+            return c;
+        };
+        lift::MarkerSample ident;
+        ident.valid = true;
+        ident.cur = 7;
+        ident.id = 21092;
+        ident.name = "TITLE.BIN";
+
+        LIFT_CHECK(lift::condHolds(condName("TITLE"), sampler, 0, 0, &ident));      // 省略 `.BIN`
+        LIFT_CHECK(lift::condHolds(condName("title"), sampler, 0, 0, &ident));      // 大小写不敏感
+        LIFT_CHECK(lift::condHolds(condName("TITLE.BIN"), sampler, 0, 0, &ident));  // 全名
+        LIFT_CHECK(lift::condHolds(condId(21092), sampler, 0, 0, &ident));          // 按 id
+        LIFT_CHECK(!lift::condHolds(condName("GAMESTART"), sampler, 0, 0, &ident)); // 不命中
+        LIFT_CHECK(!lift::condHolds(condId(1), sampler, 0, 0, &ident));             // id 不命中
+        // ★ 没有身份（没采样 / base 未发布）⇒ 不成立；⛔ 不是"无条件成立"也不是 always
+        LIFT_CHECK(!lift::condHolds(condName("TITLE"), sampler, 0, 0, nullptr));
+        ident.valid = false;
+        LIFT_CHECK(!lift::condHolds(condName("TITLE"), sampler, 0, 0, &ident));
+        // ★ 降级名 `id:0x%08X` **始终接受**（名字表某一刻读不到不该让条件静默失明）
+        ident.valid = true;
+        ident.id = 0x210A;
+        ident.name = "id:0x0000210A";
+        ident.name_degraded = true;
+        LIFT_CHECK(lift::condHolds(condName("id:0x0000210A"), sampler, 0, 0, &ident));
+        LIFT_CHECK(lift::condHolds(condName("ID:0x0000210a"), sampler, 0, 0, &ident));
+        LIFT_CHECK(!lift::condHolds(condName("TITLE"), sampler, 0, 0, &ident));  // 降级名不是 TITLE
+        LIFT_CHECK(lift::condHolds(condId(0x210A), sampler, 0, 0, &ident));      // 按 id 仍成立
+    }
+
+    // =================================================================================
+    // ②e linear-parse —— 线性写法展开成同一份 `Node` IR（id / when / action / next / timeout / entry）
+    // ★ 红在这意味着：`await` 的条件没落到 `when`、动作行没落到 `action`、隐式 next 链断了，
+    //   或 `timeout` / `expect` 的作用域不再是"当前 step"。
+    // =================================================================================
+    g_current_case = "linear-parse";
+    {
+        lift::InteractionGraph g;
+        std::string err;
+        const bool ok = g.loadText(
+            "await script TITLE\n"
+            "click 1174 377\n"
+            "timeout 2000\n"
+            "expect screen changed\n"
+            "await script GAMESTART\n"
+            "click 715 576\n"
+            "await script SN0000\n"
+            "click 100 100\n",
+            "synthetic:linear", &err);
+        LIFT_CHECK(ok);
+        if (!ok) std::fprintf(stderr, "  err = %s\n", err.c_str());
+        if (ok) {
+            // 线性模式不写 `entry` ⇒ entry = 第一个 step
+            LIFT_CHECK(g.entry() == "step1");
+            LIFT_CHECK(g.nodes().size() == 3);
+            LIFT_CHECK(g.findNode("step2") != nullptr);
+            LIFT_CHECK(g.findNode("step3") != nullptr);
+
+            const lift::Node& s1 = g.nodes()[0];
+            LIFT_CHECK(s1.id == "step1");
+            LIFT_CHECK(s1.when.kind == lift::CondKind::Script);
+            LIFT_CHECK(s1.when.script == "TITLE");
+            LIFT_CHECK(s1.action.kind == lift::GraphActionKind::Click);
+            LIFT_CHECK_EQ_I64(s1.action.x, 1174);
+            LIFT_CHECK_EQ_I64(s1.action.y, 377);
+            LIFT_CHECK(s1.next == "step2");           // 隐式 next = 下一个 step
+            LIFT_CHECK(s1.timeout_explicit);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(s1.timeout_ms), 2000u);
+            LIFT_CHECK(s1.has_expect);
+            LIFT_CHECK(s1.expect.kind == lift::CondKind::ScreenChanged);
+
+            const lift::Node& s2 = g.nodes()[1];
+            LIFT_CHECK(s2.id == "step2");
+            LIFT_CHECK(s2.when.script == "GAMESTART");
+            LIFT_CHECK(s2.next == "step3");
+            LIFT_CHECK(!s2.has_expect);       // ⛔ 线性写法**不默认** expect
+            LIFT_CHECK(!s2.timeout_explicit); // 省略 ⇒ 缺省值
+
+            const lift::Node& s3 = g.nodes()[2];
+            LIFT_CHECK(s3.id == "step3");
+            LIFT_CHECK(s3.when.kind == lift::CondKind::Script);
+            LIFT_CHECK(s3.next.empty());      // 最后一个 step ⇒ 任务结束
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(s3.timeout_ms),
+                              static_cast<std::uint32_t>(lift::kDefaultNodeTimeoutMs));
+            // trace 里的动作写法 = 原始行（⛔ 不带 `action` 键名）
+            LIFT_CHECK(s3.action.text == "click 100 100");
+        }
+    }
+
+    // =================================================================================
+    // ②f linear-mixed-and-always —— 没有 `await` 的动作行 = `always` step；与 `node` 块可混用；
+    //     写了 `entry` 就照旧（线性缺省只在**没写** entry 时生效）
+    // =================================================================================
+    g_current_case = "linear-mixed-and-always";
+    {
+        lift::InteractionGraph g;
+        std::string err;
+        const bool ok = g.loadText(
+            "node boot\n"
+            "  when always\n"
+            "  action quit\n"
+            "  next\n"
+            "click 10 10\n"          // 完整的 node 块之后 = 新 step（always）
+            "timeout 500\n"
+            "await screen changed\n"
+            "key 27\n"
+            "entry boot\n",          // 写了 entry ⇒ entry = boot（不是第一个 step）
+            "synthetic:linear-mixed", &err);
+        LIFT_CHECK(ok);
+        if (!ok) std::fprintf(stderr, "  err = %s\n", err.c_str());
+        if (ok) {
+            LIFT_CHECK(g.entry() == "boot");
+            LIFT_CHECK(g.nodes().size() == 3);
+            LIFT_CHECK(g.nodes()[0].id == "boot");
+            const lift::Node& a = g.nodes()[1];
+            LIFT_CHECK(a.id == "step1");
+            LIFT_CHECK(a.when.kind == lift::CondKind::Always);  // 没有 await ⇒ always
+            LIFT_CHECK(a.action.kind == lift::GraphActionKind::Click);
+            LIFT_CHECK(a.next == "step2");
+            LIFT_CHECK(a.timeout_explicit);
+            const lift::Node& b = g.nodes()[2];
+            LIFT_CHECK(b.id == "step2");
+            LIFT_CHECK(b.when.kind == lift::CondKind::ScreenChanged);  // await screen changed
+            LIFT_CHECK(b.action.kind == lift::GraphActionKind::Key);
+            LIFT_CHECK(b.next.empty());
+        }
+    }
+
+    // =================================================================================
+    // ②g linear-parse-errors —— 线性写法的解析期失败一律 `origin:行: 原因`
+    // =================================================================================
+    g_current_case = "linear-parse-errors";
+    {
+        // `await` 之后没有动作行（step 缺动作）
+        expectLoadError("await script TITLE\n", 1, "step1");
+        // 连续两个 `await`：前一个 step 还没有动作
+        expectLoadError("await script TITLE\nawait script GAMESTART\nclick 1 1\n", 1, "step1");
+        // step id 与已有 `node` id 冲突（报在 `await` / 动作行上）
+        expectLoadError(
+            "node step1\n  when always\n  action quit\n  next\n"
+            "await script TITLE\nclick 1 1\n",
+            5, "step1");
+        // `node` 块里漏写 `action`，直接写了动作行 ⇒ 报在动作行（不静默多出一张图）
+        expectLoadError("node a\n  when always\nclick 1 1\n", 3, "action");
+        // step 里不能写 `next`（隐式）也不能写 `when`（条件来自 `await`）
+        expectLoadError("await script TITLE\nclick 1 1\nnext\n", 3, "step");
+        expectLoadError("await script TITLE\nwhen always\nclick 1 1\n", 2, "step");
+        // `await` 后面的条件仍走同一个闭集合校验
+        expectLoadError("await jump\nclick 1 1\n", 1, "jump");
+        // `timeout` 仍只收毫秒数
+        expectLoadError("await script TITLE\nclick 1 1\ntimeout later\n", 3, "later");
     }
 
     // =================================================================================
@@ -720,7 +963,53 @@ int main() {
         LIFT_CHECK(contains(report, "hit=0"));
         LIFT_CHECK(!d.graph.failureDetail().empty());
         // ⛔ 失败之后不再重复报
-        LIFT_CHECK(!d.graph.tick(d.wm, d.sampler, d.frame, d.guest_ms, d.insns, d.wall_ms));
+        LIFT_CHECK(!d.graph.tick(d.wm, d.sampler, d.frame, d.guest_ms, d.insns, d.wall_ms, &d.identity));
+    }
+
+    // =================================================================================
+    // ④b script-timeout-report —— `script` 条件失败时，报告必须写出**最后一次身份**
+    // ★ 红在这意味着：`failureReport()` 丢了 `identity :` 行（"等 TITLE 超时"就分不清是
+    //   "还在别的屏"还是"识别源失明"），或降级样本没标出来。
+    // ⛔ 只断言身份（我们喂进去的那个）与"降级"标记，不断言帧号 / 耗时 / 采样数。
+    // =================================================================================
+    g_current_case = "script-timeout-report";
+    {
+        Driver d;
+        LIFT_CHECK(d.load(
+            "await script TITLE\n"
+            "timeout 100\n"
+            "quit\n",
+            "synthetic:script-report"));
+        // 假身份：名字与 id 都预置好（名字不命中 TITLE ⇒ 必然超时，报告里就是它）
+        d.identity.valid = true;
+        d.identity.cur = 7;
+        d.identity.id = 0x210A;
+        d.identity.name = "GAMESTART.BIN";
+        d.identity.name_degraded = false;
+        LIFT_CHECK(d.runUntil([&] { return d.graph.failed(); }, 200));
+        LIFT_CHECK(d.graph.failure() == lift::GraphFailure::Timeout);
+        const std::string report = d.graph.failureReport();
+        LIFT_CHECK(contains(report, "waiting  : script TITLE"));
+        // 名字 / id 都来自**喂进去的**假身份（不是读数）
+        LIFT_CHECK(contains(report, "identity : cur=7 id=0x0000210A name=GAMESTART.BIN"));
+        LIFT_CHECK(!contains(report, "（降级）"));
+
+        // 降级样本 ⇒ 名字是 `id:0x…`，报告必须标出"（降级）"
+        Driver deg;
+        LIFT_CHECK(deg.load(
+            "await script TITLE\n"
+            "timeout 100\n"
+            "quit\n",
+            "synthetic:script-report-degraded"));
+        deg.identity.valid = true;
+        deg.identity.cur = 7;
+        deg.identity.id = 0x210A;
+        deg.identity.name = "id:0x0000210A";
+        deg.identity.name_degraded = true;
+        LIFT_CHECK(deg.runUntil([&] { return deg.graph.failed(); }, 200));
+        const std::string degraded_report = deg.graph.failureReport();
+        LIFT_CHECK(contains(degraded_report,
+                            "identity : cur=7 id=0x0000210A name=id:0x0000210A（降级）"));
     }
 
     // =================================================================================
@@ -798,10 +1087,72 @@ int main() {
         //   换成 `last().changed` 的实现在这里一次也不会命中 ⇒ 本用例当场红。
         LIFT_CHECK(!d.sampler.last().changed);
         LIFT_CHECK(d.sampler.changeCount() >= 1);
-        d.graph.tick(d.wm, d.sampler, d.frame, d.guest_ms, d.insns, d.wall_ms);
+        d.graph.tick(d.wm, d.sampler, d.frame, d.guest_ms, d.insns, d.wall_ms, &d.identity);
         const std::string trace = cap.text();
         LIFT_CHECK(contains(trace, "when screen changed"));
         LIFT_CHECK(contains(trace, "hit"));
+    }
+
+    // =================================================================================
+    // ⑥b2 script-level-when —— `script` 是**电平**：身份**已经**是 TITLE 时也立刻成立
+    // ★ 红在这意味着：判定退回了边沿（"等进入才发事件"）—— 那正是"等一屏 → 点一下"写不出来的坑，
+    //   也是为什么要有这条独立的电平条件。
+    // =================================================================================
+    g_current_case = "script-level-when";
+    {
+        Driver d;
+        TraceCapture cap;
+        d.graph.setTrace(cap.file(), true);
+        LIFT_CHECK(d.load(
+            "await script TITLE\n"
+            "click 1174 377\n"
+            "await script GAMESTART\n"
+            "quit\n",
+            "synthetic:script-level"));
+        // ★ 一开始身份就**停在** TITLE（不是"刚进入"）：电平 ⇒ 必须立刻命中。
+        d.identity.valid = true;
+        d.identity.cur = 3;
+        d.identity.id = 21092;
+        d.identity.name = "TITLE.BIN";
+        LIFT_CHECK(d.graph.actionsIssued() == 0);
+        d.step();  // idle → step1 enter
+        d.step();  // step1 的 when(script TITLE) 命中 ⇒ 追加 click
+        LIFT_CHECK(d.graph.actionsIssued() >= 1);
+        // 身份换成 GAMESTART ⇒ step2（电平）要跟着成立
+        d.identity.cur = 4;
+        d.identity.id = 21099;
+        d.identity.name = "GAMESTART.BIN";
+        LIFT_CHECK(d.runUntil([&] { return d.graph.done(); }, 20));
+        const std::string trace = cap.text();
+        LIFT_CHECK(contains(trace, "node step1 enter"));
+        LIFT_CHECK(contains(trace, "when script TITLE"));
+        LIFT_CHECK(contains(trace, "node step2 enter"));  // 链没断：step1 → step2
+        LIFT_CHECK(contains(trace, "task done"));
+    }
+
+    // =================================================================================
+    // ⑥b3 script-expect-level —— `expect script …` **不等新样本**（身份是电平，不是帧计数）
+    // ★ 红在这意味着：`condNeedsNewSample(Script)` 被错写成 true ⇒ 房间空闲、帧停住时
+    //   `expect script …` 永远等不到（`interaction-model.md` §5 那个坑）。
+    // =================================================================================
+    g_current_case = "script-expect-level";
+    {
+        Driver d;
+        LIFT_CHECK(d.load(
+            "await always\n"
+            "click 10 10\n"
+            "expect script TITLE\n",
+            "synthetic:script-expect"));
+        d.identity.valid = true;
+        d.identity.cur = 3;
+        d.identity.id = 21092;
+        d.identity.name = "TITLE.BIN";
+        // 喂样本让 click 被应用（自动抬起要等 guest 采样），直到进 `wait-expect`
+        LIFT_CHECK(d.runUntil(
+            [&] { return std::strcmp(d.graph.stateName(), "wait-expect") == 0; }, 40, /*feed=*/true));
+        // ★ 这一 tick **不喂新样本**：如果 script 还要求"动作之后的新样本"，这里会停在 wait-expect。
+        d.step(false);
+        LIFT_CHECK(d.graph.done());
     }
 
     // =================================================================================
@@ -824,7 +1175,7 @@ int main() {
         //   没有停滞兜底 ⇒ 这里的 `guest_ms` 永远停在 0，窗口永远不会到期（整轮挂死）。
         for (int i = 0; i < 200 && !d.graph.failed(); ++i) {
             d.sampler.observeValues(d.frame, /*hash=*/0x1, {});
-            d.graph.tick(d.wm, d.sampler, d.frame, /*guest_ms=*/0, /*insns=*/0, d.wall_ms);
+            d.graph.tick(d.wm, d.sampler, d.frame, /*guest_ms=*/0, /*insns=*/0, d.wall_ms, &d.identity);
             d.wall_ms += 10;
         }
         LIFT_CHECK(d.graph.failed());
@@ -888,7 +1239,7 @@ int main() {
         bool failed = false;
         for (int i = 0; i < 400 && !failed; ++i) {
             // `frame` / `insns` 冻住（模拟 guest 阻塞 / 帧停住）⇒ 追加的 `at frame F+1` 永不 due。
-            d.graph.tick(d.wm, d.sampler, /*frame=*/2, d.guest_ms, /*insns=*/0, d.wall_ms);
+            d.graph.tick(d.wm, d.sampler, /*frame=*/2, d.guest_ms, /*insns=*/0, d.wall_ms, &d.identity);
             d.guest_ms += 10;
             d.wall_ms += 10;
             failed = d.graph.failed();

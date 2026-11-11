@@ -311,6 +311,37 @@ public:
     // 窗口像素回读（`--present-screenshot` / 捕获测试）：XRGB8888 字节序（B,G,R,X），含 letterbox 黑边。
     virtual bool directReadback(std::vector<std::uint8_t>* xrgb, int* width, int* height,
                                std::string* err) = 0;
+
+    // -----------------------------------------------------------------------------------
+    // 调试叠层（`--overlay`，默认关）：把一块 **RGBA8** 图像放到窗口 swapchain 的左上角
+    // -----------------------------------------------------------------------------------
+    // ★ 实现方只在 `directPresent` 的 letterbox blit **之后**再 blit 一次
+    //   （`load_op = SDL_GPU_LOADOP_LOAD`，dst 原点 = **letterbox 之后画面矩形**的左上角；
+    //   叠层尺寸保持 1:1 窗口像素）—— ⛔ 不要画进光栅化 target
+    //   （那会经 `rasterSyncToGuest` 写回 guest 像素）。
+    // ★ 纹理必须建在**同一 device**、格式与 `SDL_GetGPUSwapchainTextureFormat` 兼容；
+    //   拿不到 / 不支持 ⇒ false + err（调用方只记账，⛔ 不假装画上去了）。
+    // ★ 文本不变时调用方不必每帧重传；重复调用同尺寸只更新内容。
+    // ★ `rgba == nullptr`（或 w/h <= 0）= **关掉**叠层：之后 `directPresent` 不再 blit，
+    //   并且实现方应当**释放**已建的 GPU 纹理（⛔ 不许只置 visible=false 造成泄漏）。
+    // ★ 默认实现 = 不支持（CPU 后端 / 非 SDL_GPU 实现方不要为了这条改签名）。
+    virtual bool directOverlay(const std::uint8_t* rgba, int w, int h, std::string* err) {
+        (void)rgba;
+        (void)w;
+        (void)h;
+        if (err) *err = "directOverlay 未实现（这个 GpuDirectPresenter 不支持调试叠层）";
+        return false;
+    }
+
+    // 诊断 / 夹具：上一帧直出里叠层 blit 的 **dst 原点**（窗口像素空间）。
+    // ★ 语义契约：原点 = **letterbox 之后画面矩形**的左上角（⛔ 不是窗口 (0,0)）——
+    //   B1 的回归守卫用这条取数口断言"叠层跟着画面走"；`false` = 上一帧没画叠层。
+    // ★ 默认实现 = 不支持（其它实现方不需要改签名）。
+    virtual bool directLastOverlayOrigin(int* x, int* y) const {
+        (void)x;
+        (void)y;
+        return false;
+    }
 };
 
 class GpuRaster {

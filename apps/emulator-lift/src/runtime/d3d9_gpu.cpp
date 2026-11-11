@@ -1079,6 +1079,7 @@ public:
     }
 
     void directDetachWindow() override {
+        releaseOverlayTexture();
         if (claimed_ && device_ != nullptr && window_ != nullptr) SDL_ReleaseWindowFromGPUDevice(device_, window_);
         claimed_ = false;
         window_ = nullptr;
@@ -1203,6 +1204,19 @@ public:
         info.cycle = false;
         layoutLetterbox(static_cast<int>(sw), static_cast<int>(sh), &info.destination);
         SDL_BlitGPUTexture(cmd, &info);
+        // ★ 调试叠层（`--overlay`）：letterbox blit **之后**再 blit 一次，落到**画面**矩形的
+        //   左上角（= `info.destination.x/y`；⛔ 不是窗口左上角 —— 否则窗口 resize / 出现黑边时
+        //   叠层会落在黑边里）。叠层保持 **1:1 窗口像素**（不随画面缩放）。
+        //   `LOADOP_LOAD` 是承重墙（CLEAR 会把刚画上去的画面清掉）。
+        //   ⛔ 叠层只画进 swapchain，⛔ 不碰光栅化 target（否则会经 rasterSyncToGuest 写回 guest）。
+        if (overlay_visible_ && overlay_tex_ != nullptr) {
+            overlay_dst_x_ = static_cast<int>(info.destination.x);
+            overlay_dst_y_ = static_cast<int>(info.destination.y);
+            overlay_dst_valid_ = true;
+            blitOverlay(cmd, swap, overlay_dst_x_, overlay_dst_y_, static_cast<int>(sw), static_cast<int>(sh));
+        } else {
+            overlay_dst_valid_ = false;
+        }
         if (!SDL_SubmitGPUCommandBuffer(cmd)) {
             if (err) *err = std::string("SDL_SubmitGPUCommandBuffer 失败：") + SDL_GetError();
             return false;
@@ -1261,8 +1275,147 @@ public:
                 d[3] = 0;  // XRGB 的 X 字节没有语义（guest X8 的归一化口径见 rasterSyncToGuest）
             }
         }
+        // ★ 调试叠层：与 `directPresent` **同一块矩形**合成进回读像素 —— 原点是 letterbox 之后
+        //   **画面**矩形的左上角（`rect.x/rect.y`），⛔ 不是窗口左上角（否则 resize 时叠层落进黑边）。
+        //   swapchain 是 write-only ⇒ 窗口像素只能由 target + 同一份叠层重建；这里只改**回读缓冲**，
+        //   ⛔ 不碰 target、⛔ 不碰 guest 像素。
+        if (overlay_visible_ && overlay_w_ > 0 && overlay_h_ > 0 &&
+            overlay_rgba_.size() >= static_cast<std::size_t>(overlay_w_) * static_cast<std::size_t>(overlay_h_) * 4u) {
+            const int ox = static_cast<int>(rect.x);
+            const int oy = static_cast<int>(rect.y);
+            int ow = overlay_w_;
+            int oh = overlay_h_;
+            if (ox + ow > sw) ow = sw - ox;
+            if (oy + oh > sh) oh = sh - oy;
+            if (ow > 0 && oh > 0) {
+                for (int y = 0; y < oh; ++y) {
+                    std::uint8_t* drow = xrgb->data() + static_cast<std::size_t>(oy + y) *
+                                                          static_cast<std::size_t>(sw) * 4u;
+                    const std::uint8_t* srow =
+                        overlay_rgba_.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(overlay_w_) * 4u;
+                    for (int x = 0; x < ow; ++x) {
+                        const std::uint8_t* s = srow + static_cast<std::size_t>(x) * 4u;
+                        std::uint8_t* d = drow + static_cast<std::size_t>(ox + x) * 4u;
+                        d[0] = s[2];  // RGBA8 → XRGB8888 的字节序（B,G,R,X）
+                        d[1] = s[1];
+                        d[2] = s[0];
+                        d[3] = 0;
+                    }
+                }
+            }
+        }
         if (width != nullptr) *width = sw;
         if (height != nullptr) *height = sh;
+        return true;
+    }
+
+    // -----------------------------------------------------------------------------------
+    // 调试叠层（`--overlay`）：RGBA8 → **同一 device** 上的一张 swapchain 格式纹理。
+    // ★ 真正的"画到窗口"发生在 `directPresent` 的 letterbox blit 之后（`LOADOP_LOAD`）；
+    //   这里只负责建纹理 + 上传。文本不变时调用方不会重复调用（省掉每帧一次上传）。
+    // ★ 格式取 `SDL_GetGPUSwapchainTextureFormat` 的**实际值**（`swapchain_format_`）：
+    //   blit 源/目的的兼容性由后端决定，用实际 swapchain 格式是唯一能保证的组合；
+    //   不支持 SAMPLER 用法就如实失败，⛔ 不硬上。
+    // -----------------------------------------------------------------------------------
+    bool directOverlay(const std::uint8_t* rgba, int w, int h, std::string* err) override {
+        if (rgba == nullptr || w <= 0 || h <= 0) {
+            // ★ 关掉叠层 = **释放** GPU 纹理（⛔ 不许只把 visible 置 false 把纹理留在 device 上：
+            //   那是一次真实的泄漏，而且下次开叠层会再多一张）。
+            releaseOverlayTexture();
+            return true;
+        }
+        if (!directActive()) {
+            if (err) *err = "GPU 直出未建立（窗口没有 claim）";
+            return false;
+        }
+        if (!SDL_GPUTextureSupportsFormat(device_, swapchain_format_, SDL_GPU_TEXTURETYPE_2D,
+                                         SDL_GPU_TEXTUREUSAGE_SAMPLER)) {
+            if (err) *err = "swapchain 格式不支持 SAMPLER 用法（叠层不能作为 blit 源）";
+            return false;
+        }
+        if (overlay_tex_ == nullptr || overlay_w_ != w || overlay_h_ != h) {
+            releaseOverlayTexture();
+            SDL_GPUTextureCreateInfo ci{};
+            ci.type = SDL_GPU_TEXTURETYPE_2D;
+            ci.format = swapchain_format_;
+            ci.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+            ci.width = static_cast<Uint32>(w);
+            ci.height = static_cast<Uint32>(h);
+            ci.layer_count_or_depth = 1;
+            ci.num_levels = 1;
+            ci.sample_count = SDL_GPU_SAMPLECOUNT_1;
+            overlay_tex_ = SDL_CreateGPUTexture(device_, &ci);
+            if (overlay_tex_ == nullptr) {
+                if (err) *err = std::string("SDL_CreateGPUTexture(overlay) 失败：") + SDL_GetError();
+                return false;
+            }
+            overlay_w_ = w;
+            overlay_h_ = h;
+        }
+        // RGBA8 → swapchain 的字节序（B8G8R8A8 = 交换 R/B；R8G8B8A8 = verbatim）。
+        const bool bgra = swapchain_format_ == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
+        const std::size_t bytes = static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4u;
+        std::vector<std::uint8_t> upload(bytes);
+        for (std::size_t i = 0; i + 3 < bytes; i += 4) {
+            upload[i + 0] = bgra ? rgba[i + 2] : rgba[i + 0];
+            upload[i + 1] = rgba[i + 1];
+            upload[i + 2] = bgra ? rgba[i + 0] : rgba[i + 2];
+            upload[i + 3] = rgba[i + 3];
+        }
+        SDL_GPUTransferBufferCreateInfo ti{};
+        ti.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        ti.size = static_cast<Uint32>(bytes);
+        SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(device_, &ti);
+        if (tb == nullptr) {
+            if (err) *err = std::string("SDL_CreateGPUTransferBuffer(overlay) 失败：") + SDL_GetError();
+            return false;
+        }
+        void* mapped = SDL_MapGPUTransferBuffer(device_, tb, false);
+        if (mapped == nullptr) {
+            SDL_ReleaseGPUTransferBuffer(device_, tb);
+            if (err) *err = "SDL_MapGPUTransferBuffer(overlay) 失败";
+            return false;
+        }
+        std::memcpy(mapped, upload.data(), bytes);
+        SDL_UnmapGPUTransferBuffer(device_, tb);
+        SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+        if (cmd == nullptr) {
+            SDL_ReleaseGPUTransferBuffer(device_, tb);
+            if (err) *err = std::string("SDL_AcquireGPUCommandBuffer(overlay) 失败：") + SDL_GetError();
+            return false;
+        }
+        SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+        SDL_GPUTextureTransferInfo src{};
+        src.transfer_buffer = tb;
+        src.pixels_per_row = static_cast<Uint32>(w);
+        src.rows_per_layer = static_cast<Uint32>(h);
+        SDL_GPUTextureRegion dst{};
+        dst.texture = overlay_tex_;
+        dst.w = static_cast<Uint32>(w);
+        dst.h = static_cast<Uint32>(h);
+        dst.d = 1;
+        SDL_UploadToGPUTexture(copy, &src, &dst, true);
+        SDL_EndGPUCopyPass(copy);
+        const bool ok = SDL_SubmitGPUCommandBuffer(cmd);
+        SDL_ReleaseGPUTransferBuffer(device_, tb);
+        if (!ok) {
+            if (err) *err = std::string("SDL_SubmitGPUCommandBuffer(overlay) 失败：") + SDL_GetError();
+            return false;
+        }
+        ++g_stats.submits;
+        ++g_stats.submits_upload;
+        // CPU 侧副本（`directReadback` 合成同一块叠层用；⛔ 不进 guest、⛔ 不进 target）。
+        overlay_rgba_.assign(rgba, rgba + bytes);
+        overlay_visible_ = true;
+        return true;
+    }
+
+    // 诊断 / 夹具：上一次直出帧里叠层 blit 的 dst 原点（窗口像素；= letterbox 之后画面矩形原点）。
+    // ★ 这是 B1 的回归守卫取数口：测试断言它与"画面 rect 的原点"相等（⛔ 不是恒 0）。
+    bool directLastOverlayOrigin(int* x, int* y) const override {
+        if (!overlay_dst_valid_) return false;
+        if (x != nullptr) *x = overlay_dst_x_;
+        if (y != nullptr) *y = overlay_dst_y_;
         return true;
     }
 
@@ -1281,6 +1434,43 @@ private:
         out->y = static_cast<Uint32>((sh - dh) / 2);
         out->w = static_cast<Uint32>(dw);
         out->h = static_cast<Uint32>(dh);
+    }
+
+    // 叠层纹理 → **画面**矩形左上角（窗口**像素**空间；超出 swapchain 就裁掉，⛔ 不缩放）。
+    // ★ 必须在 letterbox blit 之后调用同一个 command buffer：`LOADOP_LOAD` 保留画面；
+    //   原点由 `directPresent` 从 `layoutLetterbox()` 的 `info.destination` 传入。
+    void blitOverlay(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* swap, int dst_x, int dst_y, int sw, int sh) {
+        int dw = overlay_w_;
+        int dh = overlay_h_;
+        if (dst_x + dw > sw) dw = sw - dst_x;
+        if (dst_y + dh > sh) dh = sh - dst_y;
+        if (dw <= 0 || dh <= 0) return;
+        SDL_GPUBlitInfo oi{};
+        oi.source.texture = overlay_tex_;
+        oi.source.w = static_cast<Uint32>(dw);  // 源也取同一块：1:1 裁剪，⛔ 不是缩放
+        oi.source.h = static_cast<Uint32>(dh);
+        oi.destination.texture = swap;
+        oi.destination.x = static_cast<Uint32>(dst_x);
+        oi.destination.y = static_cast<Uint32>(dst_y);
+        oi.destination.w = static_cast<Uint32>(dw);
+        oi.destination.h = static_cast<Uint32>(dh);
+        oi.load_op = SDL_GPU_LOADOP_LOAD;
+        oi.clear_color = SDL_FColor{0.0f, 0.0f, 0.0f, 1.0f};
+        oi.flip_mode = SDL_FLIP_NONE;
+        oi.filter = SDL_GPU_FILTER_NEAREST;
+        oi.cycle = false;
+        SDL_BlitGPUTexture(cmd, &oi);
+    }
+
+    // 释放叠层纹理 + CPU 侧副本（device 销毁 / 解 claim / 关掉叠层之前必须调用）。
+    void releaseOverlayTexture() {
+        if (overlay_tex_ != nullptr && device_ != nullptr) SDL_ReleaseGPUTexture(device_, overlay_tex_);
+        overlay_tex_ = nullptr;
+        overlay_w_ = 0;
+        overlay_h_ = 0;
+        overlay_visible_ = false;
+        overlay_dst_valid_ = false;
+        overlay_rgba_.clear();
     }
 
     // guest 后缓冲 → target（逐行 verbatim；X8 的 X 字节按 guest 原样，与 rasterSyncToGuest 的归一化对称）
@@ -2154,6 +2344,16 @@ private:
     const char* present_mode_name_ = "vsync";
     std::uint64_t presented_ = 0;
     std::uint64_t present_skipped_ = 0;
+    // ---- 调试叠层（`--overlay`；只存在于宿主送显的那一份像素里）----
+    // ★ 纹理建在**同一 device**、格式 = 实际 swapchain 格式（blit 源/目的兼容的唯一保证）。
+    SDL_GPUTexture* overlay_tex_ = nullptr;
+    int overlay_w_ = 0;
+    int overlay_h_ = 0;
+    bool overlay_visible_ = false;           // `directPresent` 是否要在 letterbox 之后再 blit 一次
+    int overlay_dst_x_ = 0;                  // 上一次叠层 blit 的 dst 原点（窗口像素 = 画面 rect 原点）
+    int overlay_dst_y_ = 0;
+    bool overlay_dst_valid_ = false;         // false = 上一帧没画叠层（隐藏 / 还没 present 过）
+    std::vector<std::uint8_t> overlay_rgba_;  // CPU 副本：`directReadback` 合成用（RGBA8）
 };
 
 }  // namespace

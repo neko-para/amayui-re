@@ -798,6 +798,27 @@ bool Machine::sampleMarker() {
     MarkerSample s = ident;
     if (s.valid) marker_sampler_.resolveName(mem_, &s);
     last_marker_sample_ = std::move(s);
+    // ★ 身份**发现路径**（`LIFT_LOG_MARKERS`；见 `Machine::run`）：每次身份变化打一行，
+    //   稳态不刷屏（同一 `(cur,id)` 与同一名字不重复打）。它回答"现在脚本名是什么" ——
+    //   没有它，写 `script <名字>` 只能靠猜（时间线的边沿日志只在"等的名字恰好匹配"时才打）。
+    if (log_markers_ && last_marker_sample_.valid) {
+        const MarkerSample& cur = last_marker_sample_;
+        const bool changed = !marker_logged_identity_ || cur.cur != marker_logged_cur_ ||
+                             cur.id != marker_logged_id_ || cur.name_degraded != marker_logged_degraded_ ||
+                             cur.name != marker_logged_name_;
+        if (changed) {
+            marker_logged_identity_ = true;
+            marker_logged_cur_ = cur.cur;
+            marker_logged_id_ = cur.id;
+            marker_logged_degraded_ = cur.name_degraded;
+            marker_logged_name_ = cur.name;
+            std::printf("[marker] frame=%llu insn=%llu cur=%u id=0x%08X name=%s%s\n",
+                        static_cast<unsigned long long>(presenter_.frameCount()),
+                        static_cast<unsigned long long>(cpu_.insns), cur.cur, cur.id, cur.name.c_str(),
+                        cur.name_degraded ? "（降级）" : "");
+            std::fflush(stdout);
+        }
+    }
     return input_script_.noteMarker(*cpu_.windows, last_marker_sample_, presenter_.frameCount(), clock_.nowMs(),
                                     cpu_.insns, wallMs());
 }
@@ -807,7 +828,10 @@ void Machine::tickInteraction(X86& cpu) {
     if (cpu.windows == nullptr) return;
     // ★ 顺序是判据的一部分：先让图判定并在命中时**追加**动作（`at frame <F+1>`，本块边界内绝不生效），
     //   再由 actuator 推进（真正发 WM_* + 自动 hold + 延迟抬起）。
-    interaction_.tick(*cpu.windows, sampler_, presenter_.frameCount(), clock_.nowMs(), cpu.insns, wallMs());
+    //   ★ 身份 = `last_marker_sample_`（最近一次 VM 循环头采样；门控见 `run()` 的块入口钩子）。
+    //     `script` 是**电平**条件：同一个身份重复传进去仍然成立（⛔ 不是边沿）。
+    interaction_.tick(*cpu.windows, sampler_, presenter_.frameCount(), clock_.nowMs(), cpu.insns, wallMs(),
+                      &last_marker_sample_);
     pumpScript(interaction_.actuator(), cpu, wallMs());
     // ★ 图在**宿主事件泵**里失败 / 完成时，guest 可能正阻塞在 `GetMessageA`（那时没有块边界）
     //   ⇒ 不叫醒它就永远到不了 `Machine::run` 的那条检查（`quit` 早就是这么做的，图没有理由不）。
@@ -832,6 +856,15 @@ RunResult Machine::run(const RunOptions& opts) {
     // ★ `--profile` 也要 shim 墙钟：`dumpProfile` 里的 shim 表读的就是这份累计（否则恒 0）。
     //   代价 = 每次 shim 调用多两次 steady_clock（`--bench --profile` 同用时 MIPS 不可当基准）。
     frame_trace_ = std::getenv("LIFT_FRAME_TRACE") != nullptr;
+    // ★ 诊断：`LIFT_LOG_MARKERS` ⇒ 身份**变化**时打一行 `[marker] …`（身份发现路径：
+    //   "现在脚本名是什么"）。**存在即开**（`=0` 也算开 —— 与上面的 `LIFT_FRAME_TRACE` 同口径）；
+    //   它也参与采样门控（只开日志、没有脚本动作时也必须采样，否则日志为空）。
+    log_markers_ = std::getenv("LIFT_LOG_MARKERS") != nullptr;
+    marker_logged_identity_ = false;
+    marker_logged_cur_ = 0;
+    marker_logged_id_ = 0;
+    marker_logged_degraded_ = false;
+    marker_logged_name_.clear();
     // ★ 区间 profiler：只有脚本里真的写了 `profile_begin/end` 才 armed（⇒ 没有这些动作时
     //   整条记账路径都是 no-op：不会因为"加了 profiler"给所有运行多两次 steady_clock）。
     window_prof_.setArmed(input_script_.hasProfileActions());
@@ -944,6 +977,9 @@ RunResult Machine::run(const RunOptions& opts) {
     //   只按 EA 拦会把 `jmp`/尾调用也当成函数入口（那时栈上没有本次调用的返回地址，
     //   抬栈 + 弹返回地址 = 静默改坏控制流）。所以 call 目标只对**下一次** dispatcher 迭代有效。
     std::uint32_t next_call_target = 0;
+    // ★ 图要不要身份采样：图在 `run()` 之前就加载完、运行时不变 ⇒ 在循环外算**一次**
+    //   （块入口钩子是每条主循环指令都会经过的热路径，⛔ 不要在那里扫节点表）。
+    const bool interaction_needs_identity = interaction_.needsIdentitySamples();
 
     while (cpu_.running) {
         // ★ 区间 profiler 的**窗口边界只在这里**开/关：上一个 block 边界的脚本 tick 只登记请求
@@ -980,6 +1016,30 @@ RunResult Machine::run(const RunOptions& opts) {
             }
             next_time_check = cpu_.insns + 4096u;
         }
+        // ★ marker 采样点 = VM 循环头的**块入口**（`0x4123F0`）与消息泵回来的块入口
+        //   （`0x4123E5`；它线性跨过循环头，见 runtime/engine_marker.h 的头注）。
+        //   ⛔ 不是任意块边界：帧装载器（`sub_40ED40` 的 `0x6` 路径）会把目标槽号临时写进
+        //   `cur` 再还原 ⇒ 在装载器内部的块边界采样会读到**错的 cur**。
+        // ★ 门控 = 三个消费者**任一**要身份：
+        //   ① 时间线（marker 动作 / 0 点配置）—— 只问 `hasMarkerActions()` 的话，"只有
+        //      `--anchor-script`、没有 marker 动作"的脚本一次也不采样 ⇒ 0 点永不闩锁 ⇒ 假报
+        //      `origin-missed:`；
+        //   ② 交互图里有 `script` 条件（**电平**；不采样 ⇒ 条件恒不成立）；
+        //   ③ `LIFT_LOG_MARKERS`（身份发现路径；没有它就只能靠猜名字）。
+        //   ⛔ 这一段**不能**放进下面 `input_script_.active()` 的块：只跑交互图 / 只开日志时
+        //     时间线可能是空的（那时采样一次也不会发生 ⇒ 图等不到 / 日志为空）。
+        //   三个都不需要时一次也不进（零成本）。
+        if (!guest_calls_.active() && !cpu_.shim.timer_firing && !seh_.busy()) {
+            if (input_script_.needsIdentitySamples() &&
+                (cpu_.eip == kMarkerLoopHeadEa || cpu_.eip == kMarkerPumpReturnEa)) {
+                sampleMarker();
+            } else if ((interaction_needs_identity || log_markers_) &&
+                       (cpu_.eip == kMarkerLoopHeadEa || cpu_.eip == kMarkerPumpReturnEa)) {
+                // ★ 时间线不需要、但图 / 日志需要：**同一次采样点只采一次**（`else if`
+                //   就是为了不重复喂 `noteMarker`）。
+                sampleMarker();
+            }
+        }
         // ★ 指令式输入时间线（`--input-script`）：在**块边界**推进。不依赖窗口 sink / OS 焦点 /
         //   真实光标：它只写 `cpu_.windows` 的那一份状态并发同组 WM_*（见 runtime/input.h）。
         //   ⛔ 嵌套 guest 调用（WndProc / 音频 fill）与定时器回调进行中不注入：那些帧的 eip 不是
@@ -988,18 +1048,6 @@ RunResult Machine::run(const RunOptions& opts) {
         if (input_script_.active() && !guest_calls_.active() && !cpu_.shim.timer_firing && !seh_.busy()) {
             const auto t_input = window_prof_.active() ? std::chrono::steady_clock::now()
                                                        : std::chrono::steady_clock::time_point{};
-            // ★ marker 采样点 = VM 循环头的**块入口**（`0x4123F0`）与消息泵回来的块入口
-            //   （`0x4123E5`；它线性跨过循环头，见 runtime/engine_marker.h 的头注）。
-            //   ⛔ 不是任意块边界：帧装载器（`sub_40ED40` 的 `0x6` 路径）会把目标槽号临时写进
-            //   `cur` 再还原 ⇒ 在装载器内部的块边界采样会读到**错的 cur**。
-            //   没有 Marker 动作时这一段一次也不进（零成本）。
-            // ★ 门控必须问 `needsIdentitySamples()`（= marker 动作 **或** 0 点配置）：
-            //   ⛔ 只问 `hasMarkerActions()` 的话，"只有 `--anchor-script`、没有 marker 动作"的脚本
-            //     **一次也不采样** ⇒ 0 点永不闩锁 ⇒ 收尾假报 `origin-missed:`（本单最容易漏的一条）。
-            if (input_script_.needsIdentitySamples() &&
-                (cpu_.eip == kMarkerLoopHeadEa || cpu_.eip == kMarkerPumpReturnEa)) {
-                sampleMarker();
-            }
             tickInputScript(cpu_);
             if (window_prof_.active())
                 window_prof_.addHost(WindowProfiler::HostInput,
