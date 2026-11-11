@@ -1399,12 +1399,15 @@ void shimDirectSoundCreate(X86& cpu, ShimCall& call) {
 //   IDirectSoundBuffer8（IUnknown 3 + IDirectSoundBuffer 17 + 3）
 //     +0/4/8  IUnknown
 //     +12  GetCaps              （引擎**没调**）
-//     +16  GetCurrentPosition   （引擎**没调**——它要混音线程推进游标，而线程是硬错误 ⇒ 见交付说明）
+//     +16  GetCurrentPosition   ★ **引擎会读**：`sub_418470@0x4184D0 call [DSBuffer+0x10]`，
+//                               与 `[+0x2468]`、`[+0x444]` 合成 **BGM 播放位置（ms）**
+//                               （调用链 `sub_415640 → sub_430990 → sub_418470`）
 //     +20  GetFormat / +24 GetVolume / +28 GetPan / +32 GetFrequency / +36 GetStatus
 //     +40  Initialize           → **没实现槽**（loud trap）
 //     +44  Lock                 ★ 0x004B5F77（7 个参数；primary 与流式缓冲各一次）
 //     +48  Play                 ★ 0x004B5FA3 / 0x004B5FB3（3 个参数，dwFlags=1 = DSBPLAY_LOOPING）
-//     +52  SetCurrentPosition   （引擎**没调**）
+//     +52  SetCurrentPosition   ★ **引擎会调**：`0x4B7441`（起播 seek 0）与
+//                               `0x4B751A`（按圈补齐后再 seek 0）
 //     +56  SetFormat / +60 SetVolume / +64 SetPan / +68 SetFrequency
 //     +72  Stop                 ★ 0x004B6B7F（清理路径）· +76 Unlock ★ 0x004B5FA3 前一步 0x004B5FA0
 //     +80  Restore              （引擎**没调**；`dsbWriteStream` 0x004B6C30 会读它的返回值分支）

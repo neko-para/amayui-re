@@ -5,7 +5,7 @@
 # 边界照样是 block 边界；`profile_end` 之后到下一次 `profile_begin` 之间的 2 s 不计入任何窗。
 
 await script TITLE
-wait 3000 wall_ms
+wait 5000 wall_ms
 timeout 30000
 
 click 1186 373
@@ -16,7 +16,7 @@ wait 2000 wall_ms
 click 830 592
 
 await script SN0000
-wait 20000 wall_ms
+wait 25000 wall_ms
 timeout 30000
 
 profile_begin idle

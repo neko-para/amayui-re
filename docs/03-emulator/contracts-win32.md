@@ -109,6 +109,7 @@
 | id | 合同 | 依据 | 实现 | 守卫 |
 |---|---|---|---|---|
 | L1-AUDIO-01 | `IDirectSoundBuffer::Lock` 给出**真 guest 内存**窗口（跨回绕给两段指针）；`offset ≥ 缓冲` 或 `dwBytes > 缓冲` ⇒ `DSERR_INVALIDPARAM`；`DSBLOCK_ENTIREBUFFER` 只接受 `offset=0`；`Unlock` 的指针/长度与 Lock 记的不一致 ⇒ `DSERR_INVALIDPARAM`，无未完成 Lock ⇒ `DSERR_INVALIDCALL`；`Play` 置 PLAYING(+LOOPING) 并返回 `DS_OK`；`GetCurrentPosition` 两个出参同值 | 文档 · `IDirectSoundBuffer::Lock`（取自 SDK `dsound.h`，代码注释 `dsound.cpp:50`；URL 待补）＋ `我们自定`（silent 档游标口径） | `shims/dsound.cpp:876-895`、`1081-1204`、`1253-1263` | `dsound.cpp / dsound-edge-lock-write-unlock-play-accounting` |
+| L1-AUDIO-02 | **已在播**的缓冲再 `Play` ⇒ `DS_OK`、继续播、只让最后一次的 flags 生效，**不重置游标、不重发 offset 0 的通知**；`Stop` / `SetCurrentPosition` **不倒灌**已经越过的位置通知——模型不得把"作废之前越过的那一刀 fill"投给重定位之后的位置（⛔ 引擎侧 `sub_4B73E0` 的重播次序是 `Stop → SetCurrentPosition(0) → 解码器 reset → 预填 q=1,2,3 → Play`，q0 靠 offset-0 通知补） | 文档 · `IDirectSoundBuffer8::Play`（"already playing" 一节，URL 待补）＋ `我们自定`（作废口径：真机 fill 是 µs–ms，本实现是 380–460 ms ⇒ 必须显式恢复"Stop 时队列已空"这条真机不变量；见 `apps/emulator-lift/docs/audio-implementation.md` §5 第 16 条） | `runtime/audio.cpp` 的 `play()` / `stop()` / `setPosition()` / `feederEvent()` 代次校验 | `audio.cpp / audio-device/stop-drops-stale-fill`、`audio-device/replay-on-playing` |
 
 ## PE —— 资源
 

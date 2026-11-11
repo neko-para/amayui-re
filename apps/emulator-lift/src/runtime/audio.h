@@ -60,6 +60,10 @@ enum class AudioPump : std::uint8_t {
 struct AudioNotifyEvent {
     std::uint32_t obj = 0;      // IDirectSoundBuffer8 的 guest EA
     std::uint32_t quarter = 0;  // 0..3（引擎 0x4B5AFF 的 `esi & 3`）
+    // ★ 产生这条通知时该 Buffer 的 generation。Stop / SetCurrentPosition 会 `++generation`
+    //   让**已经排队**与**已 pop、还没跑**的条目一起失效（见 `stop()` 的注释）。
+    //   只作废该 obj 自己的待办 ⇒ 别条流不受影响。
+    std::uint64_t generation = 0;
 };
 
 // 每条 DS 缓冲自己的 WAVEFORMATEX（引擎真的会建 44.1k mono / 48k stereo 两种；见实跑日志）。
@@ -85,6 +89,21 @@ struct AudioStats {
     std::uint64_t deferred = 0;
     std::uint64_t dropped = 0;
     std::uint64_t underruns = 0;
+    // ★ D1/D4 的诊断（只进 summary，不作为断言取值；见 docs/audio-implementation.md §5）：
+    //   stale = 被 Stop / SetCurrentPosition 作废掉的通知条目（generation 不符）；
+    //   slot_miss = feeder `findSlot` 失败（obj 反演不到槽；API 不定义"事件↔槽"）；
+    //   play_on_playing = 对已在播的缓冲再 Play（真 DS 的 DS_OK + 继续播语义）；
+    //   fill_waits / fill_wait_timeouts = `stop()` / `setPosition()` 等"正在跑的那一刀 fill"
+    //     的次数与超时次数（只计**真的等过**的）；fill_raced = 金丝雀：**fill 期间**该 obj 的
+    //     代次变了（= 有一次 Stop / 重定位与这一刀在时间上重叠）。★ 它不是错误计数：第 3 层
+    //     会等这一刀跑完再重锚，重叠是**被处理掉**的正常情形；真正"没兜住"的判据是
+    //     `fill_wait_timeouts > 0`（⛔ 只记账，不回滚已写进环的字节）。
+    std::uint64_t stale = 0;
+    std::uint64_t slot_miss = 0;
+    std::uint64_t play_on_playing = 0;
+    std::uint64_t fill_waits = 0;
+    std::uint64_t fill_wait_timeouts = 0;
+    std::uint64_t fill_raced = 0;
     std::uint32_t max_buffers = 0;
 };
 
@@ -154,6 +173,7 @@ public:
     // run 在 fill 中间结束（--time-limit / --max-insns / 停止）时回滚：
     // 还 [esp] / 以 feeder 身份 LeaveCS / --在飞 / 恢复上下文 / 丢掉 audio 帧。
     void abortFill();
+    // ⚠ 只给夹具 / 单线程读：不取 `pending_mutex_`（thread 模式里 feeder 正在改这个 deque）。
     const std::deque<AudioNotifyEvent>& pending() const { return pending_; }
 
     void dumpSummary(std::FILE* out) const;
@@ -163,6 +183,7 @@ public:
     // ---- 仅供夹具（不参与运行）----
     std::uint64_t playedBytes() const { return stats_.played_bytes; }
     std::uint64_t mixedBytes() const { return stats_.mixed_bytes; }
+    // ⚠ 只给夹具 / 单线程：不取 `pending_mutex_`。
     void clearPendingForTest() { pending_.clear(); }
 
 private:
@@ -175,6 +196,10 @@ private:
         AudioFormat fmt;
         bool playing = false;
         bool looping = false;
+        // ★ 失效代次：`stop()` / `setPosition()` / `addBuffer()` 会 `++generation`，
+        //   使该 obj 已排队的 `AudioNotifyEvent` 与已 pop 未跑的 fill 一起作废。
+        //   ⛔ 不要用它替代 `playing`（它不改播放状态，只标记"通知属于哪一代"）。
+        std::uint64_t generation = 0;
         std::uint32_t initial_pos = 0;   // Play / SetCurrentPosition 时的位置
         std::uint64_t start_mixed = 0;   // 这条流在全局混音时间线上的起点
         std::uint32_t notify_count = 0;
@@ -212,12 +237,26 @@ private:
 
     Buffer* find(std::uint32_t state_ea);
     const Buffer* find(std::uint32_t state_ea) const;
+    // 按 guest 的 IDirectSoundBuffer8 EA 反查（feeder 只有 obj）。★ 内部取递归 `mutex_`，
+    //   返回的指针只在同一次持锁里有效（`buffers_` 是 vector）。
+    Buffer* findByObj(std::uint32_t obj_ea);
     bool findSlot(std::uint32_t obj_ea, std::uint32_t* slot, std::uint32_t* stream) const;
+    // 本函数是否跑在 feeder 线程上（EOF 路径 `0x4B6C58` 会在 fill 里调到 `stop()`）。
+    bool isFeederThread() const;
+    // 等"正在跑的那一刀 fill"结束（S1）。返回 true = 已结束；false = 3000 ms 超时。
+    // `*waited` 只在谓词一开始不成立、真的进过 wait 时为 true。
+    bool waitFillDone(std::uint32_t obj_ea, std::uint32_t timeout_ms, bool* waited);
+    // ★ 调用方持有 `lock`（`mutex_`）；等待期间**放开**它，返回时重新持有。
+    //   返回 false = 超时（照常继续）。⛔ 调用方必须在返回后重新 `find()`：
+    //   等待期间别的线程可能已经 erase / 重排 `buffers_`。
+    bool waitFill(std::uint32_t obj_ea, std::unique_lock<std::recursive_mutex>& lock);
 
     Context capture() const;
     void restore(const Context& c, std::uint32_t* shim_result);
     void fireCrossings(std::uint64_t old_played, std::uint64_t new_played);
-    void enqueue(std::uint32_t obj_ea, std::uint32_t quarter);
+    void enqueue(std::uint32_t obj_ea, std::uint32_t quarter, std::uint64_t generation);
+    // 丢掉该 obj 的排队通知。★ 只在 `pending_mutex_` 下动 `pending_`（锁序 `mutex_ → pending_mutex_`）。
+    void dropPending(std::uint32_t obj_ea);
     void generateTo(std::uint64_t target);
     void pushMixed(const std::uint8_t* pcm, std::size_t n);
     void advanceDevice();
@@ -247,6 +286,8 @@ private:
     bool dump_ok_ = false;
     bool logged_sdl_fail_ = false;
     bool warned_slot_mismatch_ = false;
+    // feeder 的 `findSlot` 失败（D4）首次一行 Warn；之后只 `stats_.slot_miss` 计数。
+    bool warned_slot_miss_ = false;
     bool underrun_active_ = false;
 
     std::vector<Buffer> buffers_;
@@ -286,6 +327,17 @@ private:
     std::thread feeder_thread_;
     std::condition_variable feeder_cv_;
     std::mutex pending_mutex_;
+    // ★ S1：**正在跑**的那一刀 fill 属于哪个 obj（0 = 没有）。只有 `feederEvent` 在
+    //   `runFeederGuest` 之前置、跑完清 0 并 `pending_cv_.notify_all()`。
+    //   置它的那一步与"代次校验"在**同一把 `mutex_`** 下 ⇒ 与 `stop()` 的
+    //   `++generation` + "要不要等"不会交错（关掉"校验过了但还没置标志"的窗口）。
+    //   ⛔ 不要改成无锁的 check-then-set：那会留下一小段主线程看不见在跑 fill 的窗口。
+    std::atomic<std::uint32_t> filling_obj_{0};
+    // 等 `filling_obj_` 归零用（配 `pending_mutex_`；⛔ 不用 `mutex_`：等待期间必须放开它）。
+    std::condition_variable pending_cv_;
+    // feeder 线程**自己**登记的 id（`feederThreadMain` 首尾 store）⇒ `isFeederThread()` 不必读
+    // `feeder_thread_`（那会与主线程的 `join()` 竞争同一个 `std::thread` 对象）。
+    std::atomic<std::thread::id> feeder_tid_{};
     bool stop_requested_ = false;
     std::atomic<bool> feeder_error_{false};
     std::string feeder_error_text_;

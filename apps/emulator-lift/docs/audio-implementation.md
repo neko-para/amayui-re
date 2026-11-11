@@ -289,6 +289,44 @@ filled=21–23（虚拟时钟下泵会落后；dump 出现 2 s 环）
 15. **notify 接口 Release 不清位置**：位置属于 buffer（真 DS 语义）；`Release(IDirectSoundNotify)`
     只释放接口状态块，AudioEngine 里的 4 个 offset 保留到 buffer `removeBuffer`。⛔ 不要改回
     "Release notify ⇒ clearNotify"，那会让正常 COM 用法直接静音。
+16. **引擎在 Stop 之后不排空位置通知**（emulator 用三层补偿；残留偏差见后半段）：
+    `sub_4B73E0` / `sub_4B6B60` 全文没有 drain（音频段唯一的等待是 `0x4B6522` 的关机 join），
+    而引擎假设"喂料线程越过通知点后 **µs 级**就被消费掉"。让窗口存在的机制是"fill 期间主线程
+    **跳过槽 CS**"：`0x4B73E8` 取 `&Sound.inflight[slot]` → `0x4B73F5 InterlockedDecrement` →
+    `0x4B73FD jns 0x4B7413`，`sub_4B6B60` 同形（`0x4B6B6D` / `0x4B6B75`）。`jns` 的语义是
+    **"这次 `--` 之后计数 ≥ 0 就跳过 `EnterCriticalSection`"**：
+    - 空闲（计数 0）进来 ⇒ 新值 **−1** ⇒ 不跳 ⇒ **进 CS**（所以 P1 正常起播整段持 CS）；
+    - fill 进行中（计数 = 1）：
+      · 经 `sub_4B73E0` 起播：它自己先 `--`（1→0，跳过它自己的 CS），随后 `sub_4B6B60` 的
+        `--`（0→−1）⇒ 不跳 ⇒ **进 CS 并阻塞到 fill 结束** ⇒ 与 fill 串行化 ✓
+      · **直接**调 `sub_4B6B60`（`sub_4B60C0` 的 dsStop、以及 `sub_418520` 的 P2）：它自己的
+        `--`（1→0）⇒ **跳过 CS** ⇒ Stop 与 fill 并发 ✗
+    （跳过 CS 只对**同线程递归**是正确的；另一条线程在跑 fill 时跳过去就是真并发。）
+    真机上这个窗口是 µs/ms；emulator 单刀 fill **380–460 ms** 把它放大成常态。补偿分三层：
+    1. **排队**（还没被 pop）的条目：`stop()` / `setPosition()` / `addBuffer()` 直接
+       `dropPending(obj)` 丢掉；
+    2. **已 pop、还没跑**（还在令牌/CS 上打转）：`Buffer::generation` 代次校验 —— `stop()` 的
+       `++generation` 让它在 `feederEvent` 拿到槽 CS、重验完槽之后自查代次 ⇒ **不跑**；
+    3. **正在跑**（`runFeederGuest` 已开始，380–460 ms）：`stop()` / `setPosition()` 置完
+       `playing=false` / `++generation` / `dropPending` 之后，若 `filling_obj_ == obj` 就
+       **有界等它跑完**（上限 3000 ms，超时 Warn + 计数、照常返回）—— 这是真机次序
+       （Stop 在那一刀之后生效）。死锁判据：`filling_obj_ == obj` ⇒ 那一刀正持有槽 CS ⇒
+       主线程不可能同时持有它 ⇒ 等是安全的；反之"已 pop 未跑"不置该标志，由第 2 层接住。
+       ⛔ 等待期间不持 `mutex_`、不持令牌（fill 的每个 shim 要令牌，收尾还要 `mutex_`）；
+       等完必须重新 `find()`（`buffers_` 是 vector）。
+    ⛔ 不要改成"在 `stop()` 里等 feeder 把队列排空"：feeder 要那把槽 CS，而 P1 的 Stop 正持着
+    它 ⇒ 必然等到超时 / 死锁。
+    计数：`stale`（第 2 层作废的条目）、`fill_waits` / `fill_wait_timeouts`（第 3 层真的等过 /
+    超时）、`fill_raced`（金丝雀：**fill 期间**该 obj 的代次变了，即有一次 Stop / 重定位与这一刀
+    在时间上重叠）。★ `fill_raced` **不是错误计数**：`stop()` 是"先 `++generation` 再等"，
+    被第 3 层正常等住的那一次也会 +1 ⇒ 生产里可以是 > 0；"没兜住"的判据是
+    `fill_wait_timeouts > 0`。⛔ 只记账，不回滚已写进环的字节。
+    **残留偏差**：在 `sub_418520` 那条定位路径上（`0x41855F` 置 `[+0x245C]=1` ⇒ dsbPlay 跳过
+    restart 块、**不 reset 解码器**），被丢掉的那一刀会让解码器**少推进一个 quarter** ⇒ BGM
+    的起始内容比请求位置**早 ≤ 0.5 s**。它只出现在 seek 路径、不污染环。P1（`sub_4B73E0`）
+    不受影响：预填只填 `q=1,2,3`（`0x4B74AF` 的 `edi=1` / `cmp edi,4`），**q0 由 offset-0 的
+    通知补**；P1 随后 reset 解码器并重写 `q=1,2,3`，reset 抹掉解码器相位，所以那一刀被作废
+    只影响 q0 那一圈，下一次 dsbPlay 归位。
 
 ---
 
@@ -307,4 +345,20 @@ filled=21–23（虚拟时钟下泵会落后；dump 出现 2 s 环）
 - **音调不对**：检查该缓冲的 `WAVEFORMATEX` 是否被 `audioFormatOf` 正确带进 `AudioFormat`；
   特别是 48k stereo 与 44.1k mono。
 - **通知错序**：`fireCrossings` 必须先收集 `(pos,quarter)` 再排序；⛔ 不要按 quarter 循环直接入队。
+- **summary 里 `stale` / `slot_miss` / `fill_*` 怎么读**：
+  - `stale > 0` = 有位置通知被 Stop / SetCurrentPosition 的代次校验作废了（第 2 层；`stop()`
+    之后紧跟重定位的正常路径就会产生，它意味着**有一刀 fill 没有跑**，见 §5 第 16 条的残留偏差）。
+    ⛔ **不要反推**：`stale == 0` **不**等于"没有作废发生" —— D 模式是 eager drop（`dropPending`
+    直接丢、不计 `stale`），P1 那条被 reset 抹掉的 fill 也可能不经过这一层。
+  - `fill_waits` / `fill_wait_timeouts` = `stop()` / `setPosition()` 等"正在跑的那一刀"的次数 /
+    超时次数（第 3 层）。`fill_waits` 正常应接近"每首歌的 Stop/重定位次数"，`fill_wait_timeouts > 0`
+    说明 3 s 内那一刀都没跑完 —— 要么有 fill 卡住（看 `LIFT_AUDIO_TRACE=1` 的 fill 墙钟），
+    要么有新的长 shim 持锁；此时 Stop/重定位可能与 fill 并发，BGM 相位可能只对到上一圈。
+  - `fill_raced` = 金丝雀：**fill 期间**该 obj 的代次变了（有一次 Stop / 重定位与这一刀重叠）。
+    ⛔ 它不是错误计数：`stop()` 先 `++generation` 再等 ⇒ 被第 3 层正常等住的那次也会 +1。
+    判据是"**它增长时 `fill_wait_timeouts` 有没有一起长**"：一起长 ⇒ 那一次 re-anchor 与
+    fill 真的并发（要查卡住的 fill）；只有它长 ⇒ 正常（第 3 层等住了）。
+  - `slot_miss > 0` = feeder 的 `obj → 槽` 反演失败（引擎正在换槽），那刀 fill 被丢掉且
+    **不会自愈**；持续增长要查音频布局是否漂（`Sound+0x654` / `[stream+0x40C]`）。
+  - `play_on_playing > 0` = 引擎对已在播的缓冲又 `Play` 了（真 DS：DS_OK、继续播、不重锚）。
 - **改设备模型**：`tests/audio.cpp` 的 48k 斜坡 / 44.1k mono 两个用例是机械判据；先让它们红/绿。

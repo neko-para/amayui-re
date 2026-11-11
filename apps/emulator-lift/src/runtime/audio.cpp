@@ -39,6 +39,11 @@ constexpr std::uint64_t kLeadBytes = (kBytesPerSec * 600ull) / 1000ull;  // 1152
 // 独立 mixer 实测 fill ≈ 400 ms 也不影响设备队列；100 ms 足以覆盖 5 ms mixer 周期 + 抖动。
 constexpr std::uint64_t kThreadLeadBytes = (kBytesPerSec * 100ull) / 1000ull;  // 19200 B
 
+// ★ S1：`stop()` / `setPosition()` 等"正在跑的那一刀 fill"的上限。实测单刀 fill 380–460 ms
+//   （RelWithDebInfo，48k 立体声 BGM），3 s 留足一个数量级余量；超时只 Warn + 计数，
+//   ⛔ 不把主线程挂死。
+constexpr std::uint32_t kFillWaitTimeoutMs = 3000;
+
 // 引擎写死的线程体入口（`.lst` 0x004B5AA0；见 docs/thread-model-feasibility.md §2.1）。
 constexpr std::uint32_t kFeederStartEa = 0x004B5AA0u;
 constexpr std::uint32_t kSoundSlots = 0x654u;       // [Sound+0x654+4*s] = SoundBuffer*
@@ -356,6 +361,68 @@ const AudioEngine::Buffer* AudioEngine::find(std::uint32_t state_ea) const {
     return nullptr;
 }
 
+// ★ 走 `mutex_`（递归）：调用方可能已持它（`pump` 的 D 分支 / `fireCrossings` 的调用链），
+//   也可能没持（`feederEvent` 在令牌里）。锁序是 **令牌 → `mutex_`**（每个 DS shim 都是这个
+//   顺序）⇒ feeder 持令牌时取 `mutex_` 是安全的；⛔ 反过来"持 `mutex_` 再等令牌"只有 D 模式的
+//   `pump()` 会做，而 D 模式没有 feeder 线程。
+//   返回指针只在 `mutex_` 内有效：调用方必须在同一次持锁里读完 `generation`（`buffers_` 是
+//   vector ⇒ 别的线程 `addBuffer` / `removeBuffer` 会让它失效）。
+AudioEngine::Buffer* AudioEngine::findByObj(std::uint32_t obj_ea) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (obj_ea == 0) return nullptr;
+    for (auto& b : buffers_)
+        if (b.obj_ea == obj_ea) return &b;
+    return nullptr;
+}
+
+bool AudioEngine::isFeederThread() const {
+    // ⛔ 只作"是不是 feeder 自己"的判断（EOF 路径 `0x4B6C58` 在 fill 里调 stop ⇒ 自等会死锁）。
+    //   ★ 用 feeder 线程**自己**登记的 id，而不是 `feeder_thread_.joinable()/get_id()`：
+    //     `joinFeeder()` 会在主线程 join 同一个 `std::thread` 对象，而 feeder 此刻可能正跑
+    //     fill 并在其中调 `stop()` ⇒ 并发读 `std::thread` 是数据竞争。id 是 atomic 的、只读一次。
+    if (!thread_mode_) return false;
+    const std::thread::id id = feeder_tid_.load();
+    return id != std::thread::id{} && id == std::this_thread::get_id();
+}
+
+bool AudioEngine::waitFillDone(std::uint32_t obj_ea, std::uint32_t timeout_ms, bool* waited) {
+    // ⛔ 不用 `mutex_`：等待期间必须放开它（fill 收尾要它）。
+    //   `filling_obj_` 是 atomic，置/清都在别处；这里只作谓词。
+    //   清 0 的那一侧在 `pending_mutex_` 下 store 并 notify_all ⇒ 没有丢唤醒。
+    std::unique_lock<std::mutex> lk(pending_mutex_);
+    if (waited) *waited = false;
+    if (filling_obj_.load() != obj_ea) return true;
+    if (waited) *waited = true;
+    return pending_cv_.wait_for(lk, std::chrono::milliseconds(timeout_ms),
+                                [this, obj_ea] { return filling_obj_.load() != obj_ea; });
+}
+
+bool AudioEngine::waitFill(std::uint32_t obj_ea, std::unique_lock<std::recursive_mutex>& lock) {
+    // ★ 死锁判据（S1）：`filling_obj_ == obj` 意味着那一刀 fill **正持有槽 CS**（`feederEvent`
+    //   在拿到 CS、重验完槽之后才置标志，`++在飞`/`runFeederGuest` 紧跟其后）⇒ 主线程此刻
+    //   **不可能**持有那把 CS ⇒ 等它跑完不会与"引擎在同一把 CS 里递归进 Stop"互相等。
+    //   反过来，"已 pop 但还在 CS 上打转 / 还没进 CS"的那一段**不置**这个标志 —— 那一段由
+    //   代次校验处理（见 `feederEvent`），所以这里等不到它。
+    //   ⛔ 等待期间**不持 `mutex_`、不持令牌**：fill 的每个 shim 都要令牌，收尾还要 `mutex_`。
+    lock.unlock();
+    bool waited = false;
+    bool done = true;
+    {
+        GuestToken::YieldGuard yield(guestToken());
+        done = waitFillDone(obj_ea, kFillWaitTimeoutMs, &waited);
+    }
+    lock.lock();
+    if (waited) ++stats_.fill_waits;
+    if (!done) {
+        ++stats_.fill_wait_timeouts;
+        logAt(LogLevel::Warn,
+              "等“正在跑的 fill”超时 %u ms（obj=0x%08X）⇒ 照常返回：这一刀可能与本次重定位并发"
+              "（见 docs/audio-implementation.md §5 第 16 条）",
+              kFillWaitTimeoutMs, obj_ea);
+    }
+    return done;
+}
+
 void AudioEngine::addBuffer(std::uint32_t state_ea, std::uint32_t obj_ea, std::uint32_t data_ea,
                             std::uint32_t bytes, std::uint32_t flags, const AudioFormat& fmt) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -376,6 +443,9 @@ void AudioEngine::addBuffer(std::uint32_t state_ea, std::uint32_t obj_ea, std::u
     if (b->fmt.avg_bytes == 0) b->fmt.avg_bytes = b->fmt.sample_rate * b->fmt.block_align;
     b->playing = false;
     b->looping = false;
+    // 新缓冲（或同一 state 重新建）⇒ 旧代次的通知一律作废："每次换代都清"。
+    ++b->generation;
+    dropPending(obj_ea);
     b->initial_pos = 0;
     b->start_mixed = generated_;
     b->notify_count = 0;
@@ -396,9 +466,13 @@ void AudioEngine::removeBuffer(std::uint32_t state_ea) {
         if (it->state_ea != state_ea) continue;
         const std::uint32_t obj = it->obj_ea;
         buffers_.erase(it);
-        pending_.erase(std::remove_if(pending_.begin(), pending_.end(),
-                                      [obj](const AudioNotifyEvent& e) { return e.obj == obj; }),
-                       pending_.end());
+        // ★ D2：`pending_` 归 `pending_mutex_` 管；这里以前是唯一一处**在 `mutex_` 下裸动 deque**
+        //   的地方（宿主 UB：feeder / `enqueue` 都在 `pending_mutex_` 下动它）。
+        //   ⚠ **例外**：D 模式（`--audio virtual` / 无 real-time）没有 feeder 线程、也没有 mixer
+        //   线程 ⇒ `pump()` 是单执行流，**有意**不持 `pending_mutex_` 直接操作 `pending_`
+        //   （不能跨 fill 持锁：混音器每次 `enqueue` 都会被 fill 的 380–460 ms 堵住）。
+        //   ⛔ 不要在 thread 模式里加任何无锁 `pending_` 路径。
+        dropPending(obj);
         return;
     }
 }
@@ -422,6 +496,16 @@ void AudioEngine::play(std::uint32_t state_ea, bool looping) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     Buffer* b = find(state_ea);
     if (b == nullptr) return;
+    // ★ D3（API 语义）：真 DS 对**已经在播**的缓冲再 `Play` 返回 **DS_OK**、继续播、只让最后一次
+    //   的 flags 生效，且**不重置游标、不重发 offset 0 通知**（MS 文档 `IDirectSoundBuffer8::Play`
+    //   的 "Playing a Buffer That Is Already Playing" 一节；见 docs/audio-implementation.md §5）。
+    //   ⇒ 这里 must no-op（仍更新 `looping`）。
+    //   ⛔ 不要改成返回 S_FALSE：那会让引擎的 `arg==0 → sub_4B6190` 分支以为"没在播"而重锚。
+    if (b->playing) {
+        b->looping = looping;
+        ++stats_.play_on_playing;
+        return;
+    }
     b->playing = true;
     b->looping = looping;
     b->start_mixed = generated_;
@@ -433,26 +517,75 @@ void AudioEngine::play(std::uint32_t state_ea, bool looping) {
     // ★ 真 DS：Play 时游标从 `initial_pos` 开始；若某个通知点正好等于它，该点立即满足。
     //   （引擎只 SetCurrentPosition(0)，所以通常只命中 offset 0。）
     for (std::uint32_t i = 0; i < b->notify_count; ++i) {
-        if (b->notify_off[i] == b->initial_pos) enqueue(b->obj_ea, i);
+        if (b->notify_off[i] == b->initial_pos) enqueue(b->obj_ea, i, b->generation);
     }
 }
 
 void AudioEngine::stop(std::uint32_t state_ea) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    // ★ 需要 `unique_lock`：等"正在跑的那一刀 fill"时要放开 `mutex_`（见 `waitFill`）。
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
     Buffer* b = find(state_ea);
     if (b == nullptr) return;
     // 真 DS：Stop 冻结当前播放位置；再 Play 从冻结处继续（不是回到 initial_pos）。
-    b->initial_pos = playedCursor(state_ea);
-    b->playing = false;
+    // ★ 冻结值必须在 `playing=false` **之前**取：真机 Stop 冻结的就是这一刻的设备游标。
+    const std::uint32_t frozen = playedCursor(state_ea);
+    b->playing = false;  // 先阻断新的 crossing（`fireCrossings` 只看 playing 的缓冲）
+    b->looping = false;
+    // ★★ D1（见 docs/audio-implementation.md §5 第 16 条）：引擎**不在 Stop 里排空位置通知**，
+    //   而它在 `sub_4B6B60`（Stop）之后才做重定位 / 预填 / Play —— 那段**可能不在槽 CS 里**。
+    //   `jns` 的语义是"这次 `--` 之后计数 ≥ 0 就**跳过** EnterCriticalSection"：
+    //     · 空闲（0）进来 ⇒ 新值 −1 ⇒ 不跳 ⇒ **进 CS**（所以正常起播整段持 CS）；
+    //     · fill 进行中（计数 1）：
+    //        - 经 `sub_4B73E0` 起播：它自己先 `--`（1→0，跳过它自己的 CS），随后
+    //          `sub_4B6B60` 的 `--`（0→−1）⇒ 不跳 ⇒ **进 CS 并阻塞到 fill 结束** ⇒ 串行化 ✓
+    //        - **直接**调 `sub_4B6B60`（`sub_4B60C0` 的 dsStop、`sub_418520` 的 P2）：它自己的
+    //          `--`（1→0）⇒ **跳过 CS** ⇒ Stop 与 fill 并发 ✗
+    //   （跳过 CS 只对**同线程递归**是正确的；另一条线程在跑 fill 时跳过去就是真并发。）
+    //   真机上"越过通知点"的那一刀 fill 在 µs/ms 级就被喂料线程消费掉了，这个窗口没人注意；
+    //   emulator 单刀 fill 380–460 ms 把它放大成常态 ⇒ 一条**已经越过通知点**的通知会跨过 Stop
+    //   被投递，或一条 fill 与 Stop/重定位并发地把旧相位写回环。补偿分三层（恢复真机因果次序）：
+    //     ① `dropPending(obj)`：**排队**（还没被 pop）的直接丢；
+    //     ② `++generation`：**已 pop、还没跑**的在 `feederEvent` 自查代次后丢（关掉"pop 之后、
+    //        拿 CS 之前"的窗口）；
+    //     ③ `filling_obj_ == obj`：**正在跑**的那一刀有界等它跑完（真机次序：Stop 在 fill 之后
+    //        生效）。死锁判据见 `waitFill` 的注释。
+    //   ⛔ 不要改成"等 feeder 把队列排空"：feeder 要那把槽 CS，而 P1 的 Stop 正持着它 ⇒ 必然超时。
+    ++b->generation;
+    const std::uint32_t obj = b->obj_ea;
+    dropPending(obj);
+    if (thread_mode_ && !isFeederThread() && filling_obj_.load() == obj) {
+        // feeder 自己调（EOF 路径 `0x4B6C58`）必须跳过，否则自等。
+        waitFill(obj, lock);
+        // ★★ Yield 之后**必须重新查表**：等待期间别的线程可能已经 erase / 重排 `buffers_`
+        //    （它是 vector，旧指针已失效）。
+        b = find(state_ea);
+        if (b == nullptr) return;
+    }
+    // 冻结值是 Stop 这一刻的游标：之后设备继续走（以及被作废的那一刀 fill）都不影响它。
+    b->initial_pos = b->bytes ? (frozen % b->bytes) : 0u;
     if (std::getenv("LIFT_AUDIO_TRACE") != nullptr) {
-        logAt(LogLevel::Info, "stop state=0x%08X obj=0x%08X cursor=%u", state_ea, b->obj_ea, b->initial_pos);
+        logAt(LogLevel::Info, "stop state=0x%08X obj=0x%08X cursor=%u gen=%llu", state_ea, obj,
+              b->initial_pos, static_cast<unsigned long long>(b->generation));
     }
 }
 
 void AudioEngine::setPosition(std::uint32_t state_ea, std::uint32_t pos) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
     Buffer* b = find(state_ea);
     if (b == nullptr) return;
+    // ★ 引擎只在 **Stop 之后**调它（`0x4B7441` 起播 seek 0 与 `0x4B751A` 按圈补齐后再 seek 0），
+    //   而 `stop()` 已经 dropPending + `++generation`（+ 等完在飞 fill）⇒ 正常情况下这里立即返回。
+    //   仍然显式作废一次：防"Stop 之后又被别处投递"的迟到通知把旧位置的通知喂给新位置
+    //   （真机重定位后游标在新位置，旧位置的通知不该再出现）。
+    ++b->generation;
+    const std::uint32_t obj = b->obj_ea;
+    dropPending(obj);
+    if (thread_mode_ && !isFeederThread() && filling_obj_.load() == obj) {
+        waitFill(obj, lock);
+        // ★★ 同上：Yield 之后必须重新查表。
+        b = find(state_ea);
+        if (b == nullptr) return;
+    }
     b->initial_pos = b->bytes ? (pos % b->bytes) : 0u;
     const std::uint32_t align = b->fmt.block_align ? b->fmt.block_align : 4u;
     b->initial_pos -= b->initial_pos % align;  // 按**该缓冲**的帧对齐（mono 是 2，不是 4）
@@ -460,7 +593,7 @@ void AudioEngine::setPosition(std::uint32_t state_ea, std::uint32_t pos) {
         // 真机 SetCurrentPosition 会让游标跳到新位置；引擎只在 Play 前调它，这里按同一时间线重排。
         b->start_mixed = generated_;
         for (std::uint32_t i = 0; i < b->notify_count; ++i) {
-            if (b->notify_off[i] == b->initial_pos) enqueue(b->obj_ea, i);
+            if (b->notify_off[i] == b->initial_pos) enqueue(b->obj_ea, i, b->generation);
         }
     }
 }
@@ -534,21 +667,34 @@ void AudioEngine::restore(const Context& c, std::uint32_t* shim_result) {
     *shim_result = c.r[kEax];
 }
 
-void AudioEngine::enqueue(std::uint32_t obj_ea, std::uint32_t quarter) {
+void AudioEngine::enqueue(std::uint32_t obj_ea, std::uint32_t quarter, std::uint64_t generation) {
     if (obj_ea == 0 || quarter > 3) return;
     {
         std::lock_guard<std::mutex> lk(pending_mutex_);
-        for (const auto& e : pending_)
-            if (e.obj == obj_ea && e.quarter == quarter) return;  // 自动复位事件语义：重复 SetEvent 合并
+        for (const auto& e : pending_) {
+            // 自动复位事件语义：重复 SetEvent 合并。★ 代次必须一起比——否则"旧代次还排在队里"
+            // 会把同 quarter 的新代次条目吞掉（Stop 会先 drop，正常情况下不会出现）。
+            if (e.obj == obj_ea && e.quarter == quarter && e.generation == generation) return;
+        }
         if (pending_.size() >= 256) {
             pending_.pop_front();
             ++stats_.dropped;
         }
-        pending_.push_back(AudioNotifyEvent{obj_ea, quarter});
+        pending_.push_back(AudioNotifyEvent{obj_ea, quarter, generation});
         ++stats_.notifications;
     }
     // 真线程模式：唤醒 feeder；泵模式没有等待者，notify 无害。
     feeder_cv_.notify_one();
+}
+
+// ★ 所有对 `pending_` 的"删除"都走这里（D2）：`pending_` 归 `pending_mutex_` 管，
+//   锁序 `mutex_ → pending_mutex_`；⛔ 不要在 `mutex_` 下裸动 deque。
+void AudioEngine::dropPending(std::uint32_t obj_ea) {
+    if (obj_ea == 0) return;
+    std::lock_guard<std::mutex> lk(pending_mutex_);
+    pending_.erase(std::remove_if(pending_.begin(), pending_.end(),
+                                  [obj_ea](const AudioNotifyEvent& e) { return e.obj == obj_ea; }),
+                   pending_.end());
 }
 
 void AudioEngine::fireCrossings(std::uint64_t old_played, std::uint64_t new_played) {
@@ -597,7 +743,7 @@ void AudioEngine::fireCrossings(std::uint64_t old_played, std::uint64_t new_play
                      const std::pair<std::uint64_t, std::uint32_t>& c) {
                       return a.first != c.first ? a.first < c.first : a.second < c.second;
                   });
-        for (const auto& c : crosses) enqueue(b.obj_ea, c.second);
+        for (const auto& c : crosses) enqueue(b.obj_ea, c.second, b.generation);
     }
 }
 
@@ -866,6 +1012,15 @@ AudioPump AudioEngine::pump() {
 
     while (!pending_.empty()) {
         const AudioNotifyEvent ev = pending_.front();
+        // ★ 与 `feederEvent` 同一条语义（两条重播路径必须一个判据）：Stop / SetCurrentPosition
+        //   之后，之前排队的条目作废。D 模式下同一线程其实不会过期，但成本为零、少一处"两种
+        //   模式行为不同"的隐式约定。`findByObj` 走递归 `mutex_`（本函数已持有）。
+        const Buffer* gen_b = findByObj(ev.obj);
+        if (gen_b == nullptr || gen_b->generation != ev.generation) {
+            pending_.pop_front();
+            ++stats_.stale;
+            continue;
+        }
         std::uint32_t slot = 0;
         std::uint32_t stream = 0;
         if (!findSlot(ev.obj, &slot, &stream)) {
@@ -1167,6 +1322,9 @@ void AudioEngine::startFeederThread() {
 }
 
 void AudioEngine::feederThreadMain() {
+    // ★ 登记/注销自己的线程 id（`isFeederThread()` 用）：⛔ 不要改成读 `feeder_thread_`，
+    //   主线程会在 `joinFeeder()` 里 join 同一个对象（见 `isFeederThread` 的注释）。
+    feeder_tid_.store(std::this_thread::get_id());
     for (;;) {
         AudioNotifyEvent ev;
         {
@@ -1179,6 +1337,7 @@ void AudioEngine::feederThreadMain() {
         feederEvent(ev);
         if (feeder_error_.load()) break;
     }
+    feeder_tid_.store(std::thread::id{});
 }
 
 void AudioEngine::feederEvent(const AudioNotifyEvent& ev) {
@@ -1192,7 +1351,24 @@ void AudioEngine::feederEvent(const AudioNotifyEvent& ev) {
     std::uint32_t slot = 0;
     std::uint32_t stream = 0;
     if (!findSlot(ev.obj, &slot, &stream)) {
+        // ★ D4：API 不定义"位置事件 ↔ 哪个槽"，引擎的 obj→slot 反演（`&events[4*slot]`
+        //   `0x4B6656` + `[Sound+0x654+4s]` `0x4B667F`）在换槽窗口里会失败。丢掉比填到已经
+        //   换掉的 stream 更安全，但**必须留计数**，否则这条路径永久静默。
+        //   ⛔ 先 `token.release()` 再取 `mutex_`：锁序并不禁止持令牌取 `mutex_`，真正的理由是
+        //   **持有时间** —— 主线程的每个 shim 都要令牌，持令牌等 `mutex_`（混音器可能正持它做
+        //   一次 `generateTo`）会把整条主线程拖住。
         token.release();
+        {
+            std::lock_guard<std::recursive_mutex> lk(mutex_);
+            ++stats_.slot_miss;
+            if (!warned_slot_miss_) {
+                warned_slot_miss_ = true;
+                logAt(LogLevel::Warn,
+                      "feeder：通知的 obj=0x%08X 在 Sound+0x654 的 15 个槽里找不到（[stream+0x40C] "
+                      "不匹配）⇒ 丢掉该 fill；之后同类只计 stats.slot_miss",
+                      ev.obj);
+            }
+        }
         return;
     }
     const std::uint32_t cs = feeder_.sound + kSoundCsBase + 24u * slot;
@@ -1248,6 +1424,31 @@ void AudioEngine::feederEvent(const AudioNotifyEvent& ev) {
         token.release();
         return;
     }
+    // ★★ D1：**拿到槽 CS 之后**再查一次该 obj 的代次（`findByObj` 走递归 `mutex_`；本处持令牌，
+    //   锁序令牌 → `mutex_` 与每个 DS shim 相同）。这条关掉"pop 之后、拿 CS 之前被主线程
+    //   Stop/重定位"的窗口：条目在 pop 时还是有效代次，但拿到 CS 之前主线程已经
+    //   Stop / SetCurrentPosition（`++generation`）⇒ 这一刀 fill 属于**旧位置**，跑了就会把
+    //   BGM 写回旧相位。⇒ 不跑 fill、不碰环、不 +在飞，只留计数并放掉 CS。
+    //   ★ 置 `filling_obj_` 必须与这次代次校验**在同一把 `mutex_`** 下：`stop()` 的
+    //   `++generation` 与"要不要等 filling_obj_ == obj"也在同一把锁下 ⇒ 两者不会交错，
+    //   否则会留下"校验过了但标志还没置"的窗口，主线程就会以为没有 fill 在跑。
+    bool stale = false;
+    {
+        std::lock_guard<std::recursive_mutex> lk(mutex_);
+        const Buffer* gb = findByObj(ev.obj);  // 递归锁：这里已经持 `mutex_`
+        if (gb == nullptr || gb->generation != ev.generation) {
+            ++stats_.stale;
+            stale = true;
+        } else {
+            filling_obj_.store(ev.obj);
+        }
+    }
+    if (stale) {
+        std::string leave_err;
+        guestLeaveCriticalSectionAs(audio_cpu_, cs, feeder_.thread_id, &leave_err);
+        token.release();
+        return;
+    }
     const std::uint32_t inf_ea = feeder_.sound + kSoundInflight + 4u * slot;
     const std::uint32_t inf = mem_->committed(inf_ea, 4) ? mem_->rd32(inf_ea) : 0u;
     if (mem_->committed(inf_ea, 4)) mem_->wr32(inf_ea, inf + 1u);
@@ -1275,6 +1476,25 @@ void AudioEngine::feederEvent(const AudioNotifyEvent& ev) {
     token.release();
     const bool ok = runFeederGuest(&run_err);
     token.acquire();  // 回到令牌里再改 guest 可见状态（在飞计数 / CS 字段）
+    // ★ 金丝雀（S1）：fill 结束后该 obj 的代次是不是还是当初那一代。**不一致 = 有一次 Stop /
+    //   重定位与这一刀在时间上重叠**。★ 注意：`stop()` 是"先 `++generation` 再等" ⇒ 被第 3 层
+    //   正常等住的那一次也会让它 +1，所以它**不是错误计数**（生产里可以是 > 0）。
+    //   真正"没兜住"的判据是 `fill_wait_timeouts > 0`（那一次的 re-anchor 与 fill 真的并发）。
+    //   ⛔ 只记账，不回滚已写进环的字节。
+    {
+        std::lock_guard<std::recursive_mutex> lk(mutex_);
+        const Buffer* raced = findByObj(ev.obj);  // 递归锁：这里已经持 `mutex_`
+        if (raced == nullptr || raced->generation != ev.generation) ++stats_.fill_raced;
+    }
+    // ★ 清"正在跑"标志：到这一行为止 guest 环的写入已经结束，剩下的 trace / `--在飞` /
+    //   LeaveCS 属于收尾，不在 `stop()` 的等待范围内。存 0 与 notify 都在 `pending_mutex_` 下，
+    //   等的人也用同一把锁 ⇒ 不会丢唤醒。所有早退路径（`!ok` / LeaveCS 失败）都在这之后，
+    //   所以标志不会漏清。
+    {
+        std::lock_guard<std::mutex> lk(pending_mutex_);
+        filling_obj_.store(0);
+    }
+    pending_cv_.notify_all();
     if (std::getenv("LIFT_AUDIO_TRACE") != nullptr) {
         const double ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fill_start).count();
@@ -1394,7 +1614,9 @@ void AudioEngine::dumpSummary(std::FILE* out) const {
     const char* device = sdl_device_opened_ ? "ok" : (sdl_fallback_ ? "fallback" : "none");
     std::fprintf(out,
                  "audio     : mode=%s device=%s muted=%d muted_bytes=%llu fills=%llu fill_bytes=%llu "
-                 "mixed=%llu played=%llu notify=%llu deferred=%llu dropped=%llu underruns=%llu%s\n",
+                 "mixed=%llu played=%llu notify=%llu deferred=%llu dropped=%llu underruns=%llu "
+                 "stale=%llu slot_miss=%llu play_on_playing=%llu fill_waits=%llu "
+                 "fill_wait_timeouts=%llu fill_raced=%llu%s\n",
                  audioModeName(mode_), device, mute_ ? 1 : 0,
                  static_cast<unsigned long long>(stats_.muted_bytes),
                  static_cast<unsigned long long>(stats_.fills),
@@ -1405,6 +1627,12 @@ void AudioEngine::dumpSummary(std::FILE* out) const {
                  static_cast<unsigned long long>(stats_.deferred),
                  static_cast<unsigned long long>(stats_.dropped),
                  static_cast<unsigned long long>(stats_.underruns),
+                 static_cast<unsigned long long>(stats_.stale),
+                 static_cast<unsigned long long>(stats_.slot_miss),
+                 static_cast<unsigned long long>(stats_.play_on_playing),
+                 static_cast<unsigned long long>(stats_.fill_waits),
+                 static_cast<unsigned long long>(stats_.fill_wait_timeouts),
+                 static_cast<unsigned long long>(stats_.fill_raced),
                  dump_path_.empty() ? "" : (" dump=" + dump_path_).c_str());
 }
 

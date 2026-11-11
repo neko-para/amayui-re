@@ -421,6 +421,131 @@ void testCrossingSort() {
     a.end();
 }
 
+// ---- D1/D3 守卫：Stop 作废旧 fill / 已播再 Play 不重锚 --------------------------------
+//
+// ★ 判据（红了意味着什么）：
+//   **G1**：`stop()` 之后该 obj 的 pending 必须为空。引擎在 `sub_4B6B60`（Stop）之后才做
+//   重定位 / 预填 / Play，而那段**不在槽 CS 里**（见 docs/audio-implementation.md §5）；
+//   真机上"越过通知点"的那一刀 fill 早就被消费掉了，emulator 的慢 fill 让它跨过 Stop ⇒
+//   不排空就会把 Stop **之前**越过的通知当成 Stop **之后**的事件投递。
+//   随后按引擎的真实次序（Stop → SetCurrentPosition(0) `0x4B7441` → Play）必须只产生 `q=0`。
+//   **G2**：真 DS 对**已在播**的缓冲再 `Play` 返回 DS_OK、继续播、只有最后一次 flags 生效，
+//   **不重置游标、不重发 offset 0 通知**（MS 文档 Play）⇒ 第二次 `play()` 不得入队；
+//   之后越过 1/2 圈必须仍是 `q2`（重锚了这里会变成 `q0` / `q1`）。
+//
+// ★ 会红（这是本守卫存在的理由）：
+//   - `stop()` 不 `dropPending` ⇒ G1 的 `pending().empty()` 红，且随后 `play()` 多出旧 `q1`；
+//   - `play()` 不在 `b->playing` 时 no-op ⇒ G2 的 `pending().empty()` 红（重锚 q0 ⇒ 后面变 q1）。
+void testRepositionAndReplay() {
+    const std::uint32_t data_ea = 0x00440000u;
+    const std::uint32_t state_ea = 0x00430000u;
+    const std::uint32_t obj_ea = 0x00450000u;
+    const std::uint32_t bytes = 384000u;  // 48k / 16 / 2 ⇒ 2.0 s 一圈，4 个通知点每 0.5 s
+    const std::uint32_t offsets[4] = {0u, 96000u, 192000u, 288000u};
+
+    // ---- G1：stop() 作废"已越过通知点"的旧 fill --------------------------------------
+    {
+        lift_test::g_current_case = "audio-device/stop-drops-stale-fill";
+        std::string err;
+        lift::Machine m;
+        if (!initMachine(m, &err)) {
+            LIFT_CHECK(false);
+            return;
+        }
+        if (!m.configureAudio(lift::AudioMode::Virtual, "", /*sound=*/true, &err) || !m.audio().begin(&err)) {
+            LIFT_CHECK(false);
+            return;
+        }
+        lift::AudioEngine& a = m.audio();
+        std::vector<std::uint8_t> pcm(bytes, 0);
+        std::vector<std::uint8_t> zeros(16, 0);
+        LIFT_CHECK(m.placeData(data_ea, pcm.data(), pcm.size(), &err));
+        LIFT_CHECK(m.placeData(state_ea, zeros.data(), zeros.size(), &err));
+        lift::AudioFormat fmt;
+        fmt.sample_rate = 48000;
+        fmt.channels = 2;
+        fmt.bits = 16;
+        fmt.block_align = 4;
+        fmt.avg_bytes = 192000;
+        a.addBuffer(state_ea, obj_ea, data_ea, bytes, 0x181C8u, fmt);
+        a.setNotify(state_ea, 4, offsets);
+        a.play(state_ea, true);
+        LIFT_CHECK(a.pending().size() == 1);
+        if (a.pending().size() == 1) LIFT_CHECK_EQ_U32(a.pending().front().quarter, 0u);
+        a.clearPendingForTest();
+
+        // 0.5 s：设备游标越过 offset 96000 ⇒ 只该有 q1。
+        m.clock().advance100ns(5'000'000);
+        a.pump();
+        LIFT_CHECK(a.pending().size() == 1);
+        if (a.pending().size() == 1) LIFT_CHECK_EQ_U32(a.pending().front().quarter, 1u);
+
+        // ★ Stop：这条"已经越过通知点"的旧 fill 必须作废（真机上它早已被消费）。
+        a.stop(state_ea);
+        LIFT_CHECK(a.pending().empty());
+        // Stop 冻结在 0.5 s = 96000 B：**不重定位就 Play** 会从 96000 继续，于是立刻命中
+        // offset 96000 ⇒ 那是 `q1`（真 DS 的 Stop→Play 语义），不是本守卫要的 `q0`。
+        LIFT_CHECK_EQ_U32(a.playedCursor(state_ea), 96000u);
+        // 引擎的真实次序是 Stop → SetCurrentPosition(0)（`0x4B7441`）→ 预填 → Play。
+        a.setPosition(state_ea, 0);
+        a.play(state_ea, true);
+        LIFT_CHECK(a.pending().size() == 1);
+        if (a.pending().size() == 1) LIFT_CHECK_EQ_U32(a.pending().front().quarter, 0u);
+        a.end();
+    }
+
+    // ---- G2：已播再 Play 不重锚（不重置游标、不重发 offset 0）-------------------------
+    {
+        lift_test::g_current_case = "audio-device/replay-on-playing";
+        std::string err;
+        lift::Machine m;
+        if (!initMachine(m, &err)) {
+            LIFT_CHECK(false);
+            return;
+        }
+        if (!m.configureAudio(lift::AudioMode::Virtual, "", /*sound=*/true, &err) || !m.audio().begin(&err)) {
+            LIFT_CHECK(false);
+            return;
+        }
+        lift::AudioEngine& a = m.audio();
+        std::vector<std::uint8_t> pcm(bytes, 0);
+        std::vector<std::uint8_t> zeros(16, 0);
+        LIFT_CHECK(m.placeData(data_ea, pcm.data(), pcm.size(), &err));
+        LIFT_CHECK(m.placeData(state_ea, zeros.data(), zeros.size(), &err));
+        lift::AudioFormat fmt;
+        fmt.sample_rate = 48000;
+        fmt.channels = 2;
+        fmt.bits = 16;
+        fmt.block_align = 4;
+        fmt.avg_bytes = 192000;
+        a.addBuffer(state_ea, obj_ea, data_ea, bytes, 0x181C8u, fmt);
+        a.setNotify(state_ea, 4, offsets);
+        a.play(state_ea, true);
+        a.clearPendingForTest();
+
+        // 0.5 s ⇒ q1；再 0.25 s 还没到 1/2 圈 ⇒ 不该有 crossing。
+        m.clock().advance100ns(5'000'000);
+        a.pump();
+        LIFT_CHECK(a.pending().size() == 1);
+        if (a.pending().size() == 1) LIFT_CHECK_EQ_U32(a.pending().front().quarter, 1u);
+        a.clearPendingForTest();
+        m.clock().advance100ns(2'500'000);
+        a.pump();
+        LIFT_CHECK(a.pending().empty());
+
+        // ★ 第二次 Play（此时 playing 为真）：不得重锚 ⇒ 不得入队 q0。
+        a.play(state_ea, true);
+        LIFT_CHECK(a.pending().empty());
+
+        // 再 0.5 s（总 1.25 s）越过 offset 192000 ⇒ 必须仍是 q2（重锚了这里会是 q0/q1）。
+        m.clock().advance100ns(5'000'000);
+        a.pump();
+        LIFT_CHECK(a.pending().size() == 1);
+        if (a.pending().size() == 1) LIFT_CHECK_EQ_U32(a.pending().front().quarter, 2u);
+        a.end();
+    }
+}
+
 // ---- 静音门（缺省静音 / `--sound` 才出声）-------------------------------------------
 //
 // ★ 判据（红了意味着什么）：
@@ -613,6 +738,7 @@ int main() {
     testFeederLifecycle();
     testFeederContext();
     testCrossingSort();
+    testRepositionAndReplay();
     testDefaultMutedDelivery();
     testSoundOnDelivery();
     testMutedDeliveryParity();
