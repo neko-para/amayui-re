@@ -108,6 +108,25 @@ std::string joinOverlayLines(const std::vector<std::string>& lines) {
     return key;
 }
 
+// `worst` 行的数值按 `%.1f` 显示 ⇒ 只有**这一位小数**变了才算"文本变了"
+// （否则每帧一个微小差值都会让 dirty 恒真，节流形同虚设，见 `kOverlayRefreshNs`）。
+bool sameTenth(double a, double b) {
+    char ba[32];
+    char bb[32];
+    std::snprintf(ba, sizeof(ba), "%.1f", a);
+    std::snprintf(bb, sizeof(bb), "%.1f", b);
+    return std::strcmp(ba, bb) == 0;
+}
+
+// 推来的 status 会不会改变**画出来的文本**（⛔ 不是"结构体字节变没变"）。
+bool overlayStatusTextChanged(const OverlayStatus& a, const OverlayStatus& b) {
+    if (a.has_script != b.has_script || a.script != b.script) return true;
+    if (a.has_worst != b.has_worst || a.has_guest != b.has_guest) return true;
+    if (!a.has_worst) return false;
+    return !sameTenth(a.wall_max_ms, b.wall_max_ms) || !sameTenth(a.guest_max_ms, b.guest_max_ms) ||
+           !sameTenth(a.shim_max_ms, b.shim_max_ms);
+}
+
 }  // namespace
 
 struct SdlWindow::Impl {
@@ -188,6 +207,8 @@ struct SdlWindow::Impl {
     bool overlay_last_mouse_valid = false;
     // 最近 1 s 的 Present 时刻（单调 ns；只用于 fps 那一行；叠层关闭时一次也不记）
     std::vector<std::uint64_t> present_times_ns;
+    // ★ `Machine` 推来的两行数据（`script` 身份 / `worst` 3 s 最大值）；不画叠层时也只是几个字节。
+    OverlayStatus overlay_status;
 
     void notePresentTime();
     bool overlayMousePos(int* x, int* y) const;
@@ -330,7 +351,7 @@ std::vector<std::string> SdlWindow::Impl::overlayLines() const {
     const GpuRaster* r = raster();
     st.raster = (r != nullptr && r->rasterActive()) ? "gpu" : "cpu";
     st.present = (direct_present && direct != nullptr) ? "direct" : "renderer";
-    return formatOverlayLines(st);
+    return formatOverlayLines(st, overlay_status);
 }
 
 void SdlWindow::Impl::disableOverlay(const char* why) {
@@ -733,6 +754,7 @@ void SdlWindow::shutdown() {
     impl_->overlay_dirty = true;
     impl_->overlay_text_key.clear();
     impl_->present_times_ns.clear();
+    impl_->overlay_status = OverlayStatus{};
 }
 
 bool SdlWindow::submitFrame(const SurfaceArena& arena, const GuestSurface& surface, std::string* err) {
@@ -988,6 +1010,16 @@ void SdlWindow::setOverlay(bool on) {
 }
 
 bool SdlWindow::overlayEnabled() const { return impl_->overlay; }
+
+// ★ `Machine` → 窗口 sink 的两行数据（`script` / `worst`）。只在**文本会变**时让 dirty：
+//   · 身份（script 名字 / 有-无）变了 ⇒ 立刻重建（用户可感知的那一项优先，与鼠标同一档）；
+//   · `worst` 的三个最大值**按显示精度**（一位小数）变了 ⇒ 重建；
+//   · 其余情况**不**动 dirty ⇒ 仍走既有的 100 ms 节流（⛔ 不每帧重传纹理）。
+//   ★ 这里只存数据、不重建文本：两条呈现路径下一帧都会走 `overlayLines()`（同一份格式化）。
+void SdlWindow::setOverlayStatus(const OverlayStatus& status) {
+    if (overlayStatusTextChanged(impl_->overlay_status, status)) impl_->overlay_dirty = true;
+    impl_->overlay_status = status;
+}
 
 void SdlWindow::setCaptureForTest(bool on) { impl_->capture = on; }
 

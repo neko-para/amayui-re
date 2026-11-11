@@ -792,6 +792,8 @@ sprite 合批与那条直方图的算法。⛔ 不把逐帧数字写进 README�
 **窗口调试叠层（`--overlay`，默认关；只作用于 `--present window`）**：在**呈现画面左上角**叠一块
 `mouse <x>,<y>` / `fps <x.x>` / `frame <n>` / `raster <cpu|gpu>` / `present <direct|renderer>`
 （`mouse` = **guest 客户区坐标**，与 `click x y` / `--input-script` 同一格；最近 1 s 的 Present 次数 = `fps`）。
+另有 `script`（当前顶层脚本身份，名字来自引擎名字表；从未采到身份就整行省略）与 `worst`（最近 3 s 内
+**每帧** wall / guest / shim 的最大值，每帧 = 相邻两次 Present 的间隔；`guest` 需要块计时，没开时写 `--`）。
 拿不到的字段**整行省略**（⛔ 不编数字）。⛔ 只改**宿主送显的窗口像素**：不写 guest 内存。
 叠层只在**窗口**与 `--present-screenshot`（窗口像素）里可见；`--interaction-fail-dump` /
 `--dump-frame` 是 **guest 帧**（`arena.dumpBmp`），不含叠层 —— 与"guest 像素 / 整帧 hash 零改动"同口径。

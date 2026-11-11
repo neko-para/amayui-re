@@ -3,7 +3,11 @@
 // 判据（红了意味着什么，缺一条都不算）：
 //   ① **字体**：5×7 位图逐字栅格化 —— 选几个字符断言逐行位图（`A` / `0` / `a` / `-` / 空格），
 //      未覆盖字符必须返回 false（⛔ 不猜字形）；字号/字距/行距是确定的常量。
-//   ② **格式化**：给定 `OverlayState` ⇒ 确定的行；拿不到的字段**整行省略**（⛔ 不编数字）。
+//   ② **格式化**：给定 `OverlayState` + `OverlayStatus` ⇒ 确定的行；拿不到的字段**整行省略**
+//      （⛔ 不编数字）。顺序固定：mouse / script / fps / frame / raster / present / worst。
+//      身份降级写 `id:0x%08X（降级）`；`guest` 没开块计时写 `--`（⛔ 不写 0.0）。
+//   ②b **3 s 窗口**：`overlayWorstPush` / `overlayWorstMax` 是纯函数 ⇒ 用**假时间戳**测：
+//      窗口外的旧样本必须被丢、窗口内取最大、空窗口 ⇒ `has_worst=false`（⛔ 不编 0）。
 //   ③ **只写矩形**：给一块 0xCC 哨兵缓冲，画完之后叠层矩形**外**逐字节不变；矩形内每个像素都
 //      不透明（深底），且存在亮字像素。★ 把矩形写宽 1 像素 ⇒ 这条当场红（见测试记录）。
 //   ④ **renderer 路径**（`--present window`、SDL_Renderer 上传）：`SdlWindow` 用 software 渲染器
@@ -21,11 +25,13 @@
 // ★ 本文件的断言只写**不变量**（行格式 / 矩形边界 / 颜色精确值 / exit 0），⛔ 不断言 fps 或帧号
 //   的具体数值（那是读数，不是契约）。
 // ★ 子进程输出走**文件重定向**（⛔ 不走管道：受限沙箱里捕获管道会 EPERM）。
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -113,10 +119,24 @@ lift::OverlayState fullState() {
     return st;
 }
 
+// 两行"身份 / 卡顿"数据的满配：script 有待解析的名字、worst 有值且块计时开着。
+lift::OverlayStatus fullStatus() {
+    lift::OverlayStatus st;
+    st.has_script = true;
+    st.script = "startup";
+    st.has_worst = true;
+    st.wall_max_ms = 33.3;
+    st.guest_max_ms = 21.5;
+    st.has_guest = true;
+    st.shim_max_ms = 4.2;
+    return st;
+}
+
 void caseFormatLines() {
     lift_test::g_current_case = "overlay/format";
 
-    const std::vector<std::string> lines = lift::formatOverlayLines(fullState());
+    // ---- 无 script / 无 worst ⇒ 那两行整行省略（⛔ 不编 "script ?" / "worst 0.0"）----
+    const std::vector<std::string> lines = lift::formatOverlayLines(fullState(), lift::OverlayStatus{});
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lines.size()), 5);
     if (lines.size() == 5) {
         LIFT_CHECK(lines[0] == "mouse 812,622");
@@ -126,17 +146,52 @@ void caseFormatLines() {
         LIFT_CHECK(lines[4] == "present direct");
     }
 
+    // ---- 满配：顺序 = mouse / script / fps / frame / raster / present / worst ----
+    const std::vector<std::string> all = lift::formatOverlayLines(fullState(), fullStatus());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(all.size()), 7);
+    if (all.size() == 7) {
+        LIFT_CHECK(all[0] == "mouse 812,622");
+        LIFT_CHECK(all[1] == "script startup");
+        LIFT_CHECK(all[2] == "fps 59.9");
+        LIFT_CHECK(all[3] == "frame 1234");
+        LIFT_CHECK(all[4] == "raster gpu");
+        LIFT_CHECK(all[5] == "present direct");
+        LIFT_CHECK(all[6] == "worst 3s  wall=33.3ms guest=21.5ms shim=4.2ms");
+    }
+
+    // ---- 有 script + 有 worst + 块计时没开 ⇒ `guest=--`（⛔ 不写 0.0 冒充读数）----
+    lift::OverlayStatus no_guest = fullStatus();
+    no_guest.has_guest = false;
+    no_guest.guest_max_ms = 21.5;  // 就算有残留数值，显示也必须是 `--`
+    const std::vector<std::string> lines2 = lift::formatOverlayLines(
+        lift::OverlayState{}, no_guest);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lines2.size()), 2);
+    if (lines2.size() == 2) {
+        LIFT_CHECK(lines2[0] == "script startup");
+        LIFT_CHECK(lines2[1] == "worst 3s  wall=33.3ms guest=-- shim=4.2ms");
+    }
+
+    // ---- 身份降级：`script id:0x%08X（降级）`（⛔ 不猜名字）----
+    LIFT_CHECK(lift::overlayScriptPayload("startup", false, 0x0000002Au) == "startup");
+    LIFT_CHECK(lift::overlayScriptPayload("", true, 0x0000002Au) == "id:0x0000002A（降级）");
+    lift::OverlayStatus degraded;
+    degraded.has_script = true;
+    degraded.script = lift::overlayScriptPayload("", true, 0x0000002Au);
+    const std::vector<std::string> lines3 = lift::formatOverlayLines(lift::OverlayState{}, degraded);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lines3.size()), 1);
+    if (lines3.size() == 1) LIFT_CHECK(lines3[0] == "script id:0x0000002A（降级）");
+
     // 拿不到 present ⇒ 只少这一行（顺序不变）
     lift::OverlayState st = fullState();
     st.present = nullptr;
-    std::vector<std::string> four = lift::formatOverlayLines(st);
+    std::vector<std::string> four = lift::formatOverlayLines(st, lift::OverlayStatus{});
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(four.size()), 4);
     if (four.size() == 4) LIFT_CHECK(four.back() == "raster gpu");
 
     // 鼠标 / fps 也拿不到 ⇒ 只剩 frame / raster（⛔ 不编 0,0 / 0.0）
     st.mouse_available = false;
     st.fps_available = false;
-    std::vector<std::string> two = lift::formatOverlayLines(st);
+    std::vector<std::string> two = lift::formatOverlayLines(st, lift::OverlayStatus{});
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(two.size()), 2);
     if (two.size() == 2) {
         LIFT_CHECK(two[0] == "frame 1234");
@@ -147,7 +202,7 @@ void caseFormatLines() {
     st = fullState();
     st.raster = "";
     st.present = "";
-    std::vector<std::string> three = lift::formatOverlayLines(st);
+    std::vector<std::string> three = lift::formatOverlayLines(st, lift::OverlayStatus{});
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(three.size()), 3);
 
     // fps 的小数位固定 1 位；frame 是十进制整数（负数鼠标坐标照原样，不 clamp）
@@ -155,7 +210,7 @@ void caseFormatLines() {
     st.fps = 7.0;
     st.mouse_x = -3;
     st.mouse_y = 0;
-    const std::vector<std::string> edge = lift::formatOverlayLines(st);
+    const std::vector<std::string> edge = lift::formatOverlayLines(st, lift::OverlayStatus{});
     if (edge.size() == 5) {
         LIFT_CHECK(edge[0] == "mouse -3,0");
         LIFT_CHECK(edge[1] == "fps 7.0");
@@ -163,8 +218,81 @@ void caseFormatLines() {
         LIFT_CHECK(false);
     }
 
-    // 空 state ⇒ 0 行（⛔ 不编造任何一行）
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::formatOverlayLines(lift::OverlayState{}).size()), 0);
+    // 空 state / 空 status ⇒ 0 行（⛔ 不编造任何一行）
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(
+                          lift::formatOverlayLines(lift::OverlayState{}, lift::OverlayStatus{}).size()),
+                      0);
+}
+
+// =======================================================================================
+// ②b 最近 3 s 窗口：纯函数 + **假时间戳**（⛔ 不依赖真实时钟 / 真实帧）
+// =======================================================================================
+std::chrono::steady_clock::time_point fakeAt(std::int64_t ms) {
+    return std::chrono::steady_clock::time_point{} + std::chrono::milliseconds(ms);
+}
+
+lift::OverlayFrameSample sampleAt(std::int64_t ms, double wall, double guest, double shim) {
+    lift::OverlayFrameSample s;
+    s.at = fakeAt(ms);
+    s.wall_ms = wall;
+    s.guest_ms = guest;
+    s.shim_ms = shim;
+    return s;
+}
+
+void caseWorstWindow() {
+    lift_test::g_current_case = "overlay/worst-window";
+
+    // 空窗口 ⇒ has_worst=false（⛔ 不编 0 的一行）
+    const lift::OverlayWorst empty = lift::overlayWorstMax({});
+    LIFT_CHECK(!empty.has_worst);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(empty.wall_max_ms * 10.0), 0);
+
+    std::deque<lift::OverlayFrameSample> q;
+    lift::overlayWorstPush(q, sampleAt(0, 100.0, 1.0, 2.0));
+    lift::overlayWorstPush(q, sampleAt(1000, 50.0, 3.0, 9.0));
+    lift::overlayWorstPush(q, sampleAt(2500, 75.0, 2.0, 1.0));
+    // 窗口 = 最新样本往前 3 s ⇒ 这里 3 个都还在
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(q.size()), 3);
+    lift::OverlayWorst w = lift::overlayWorstMax(q);
+    LIFT_CHECK(w.has_worst);
+    LIFT_CHECK(w.wall_max_ms == 100.0);
+    LIFT_CHECK(w.guest_max_ms == 3.0);
+    LIFT_CHECK(w.shim_max_ms == 9.0);
+
+    // ★ 推一个 3500 的样本 ⇒ cutoff = 500 ⇒ t=0 的旧样本**必须被丢**
+    //   （把窗口改成 30 s ⇒ 这一条当场红：旧样本还在 ⇒ size=4 / wall_max 仍 100）。
+    lift::overlayWorstPush(q, sampleAt(3500, 10.0, 0.5, 0.5));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(q.size()), 3);
+    LIFT_CHECK(q.front().at == fakeAt(1000));
+    w = lift::overlayWorstMax(q);
+    LIFT_CHECK(w.wall_max_ms == 75.0);
+    LIFT_CHECK(w.guest_max_ms == 3.0);
+    LIFT_CHECK(w.shim_max_ms == 9.0);
+
+    // 空窗之后的第一个样本：窗口内**只剩它**（⛔ 不把上一轮的读数带过来）
+    lift::overlayWorstPush(q, sampleAt(10000, 12.0, 0.0, 0.0));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(q.size()), 1);
+    w = lift::overlayWorstMax(q);
+    LIFT_CHECK(w.has_worst);
+    LIFT_CHECK(w.wall_max_ms == 12.0);
+    LIFT_CHECK(w.guest_max_ms == 0.0);
+    LIFT_CHECK(w.shim_max_ms == 0.0);
+
+    // 时间倒退的样本直接丢（窗口口径只认"最新样本"；⛔ 不排序 / 不猜）
+    lift::overlayWorstPush(q, sampleAt(9000, 999.0, 999.0, 999.0));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(q.size()), 1);
+    w = lift::overlayWorstMax(q);
+    LIFT_CHECK(w.wall_max_ms == 12.0);
+
+    // 边界：恰好 3 s 差的样本仍在窗口内（窗口 = [at-3s, at]），再旧 1 ms 就丢
+    std::deque<lift::OverlayFrameSample> edge;
+    lift::overlayWorstPush(edge, sampleAt(0, 5.0, 0.0, 0.0));
+    lift::overlayWorstPush(edge, sampleAt(3000, 6.0, 0.0, 0.0));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(edge.size()), 2);
+    lift::overlayWorstPush(edge, sampleAt(3001, 7.0, 0.0, 0.0));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(edge.size()), 2);  // t=0 被丢，剩 3000 / 3001
+    LIFT_CHECK(edge.front().at == fakeAt(3000));
 }
 
 // =======================================================================================
@@ -371,7 +499,7 @@ lift::OverlaySize expectedFirstFrameSize(const char* raster, const char* present
     st.frame = 1;
     st.raster = raster;
     st.present = present;
-    return lift::overlaySize(lift::formatOverlayLines(st));
+    return lift::overlaySize(lift::formatOverlayLines(st, lift::OverlayStatus{}));
 }
 
 constexpr std::uint32_t kOverlayBgRgb = (static_cast<std::uint32_t>(lift::kOverlayBg[0]) << 16) |
@@ -756,6 +884,7 @@ int main(int argc, char** argv) {
 
     caseGlyphBitmaps();
     caseFormatLines();
+    caseWorstWindow();
     caseSize();
     caseOnlyWritesRect();
 

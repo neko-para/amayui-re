@@ -117,7 +117,11 @@ public:
     // ★ 调试叠层开关（`--overlay`）。`init()` 之后也能改：关掉时立刻把已建的叠层纹理丢掉。
     //   默认关；只影响窗口像素（⛔ 不碰 guest 内存）。
     void setOverlay(bool on);
-    bool overlayEnabled() const;
+    // ★ `PresentSink`：`Machine` 每帧 / 身份变化时推过来的两行数据（`script` / `worst`）。
+    //   文本变化才让 dirty（script 名字变 / worst 的**一位小数**变）；其余交给既有的 100 ms 节流，
+    //   ⛔ 不每帧重建纹理。
+    void setOverlayStatus(const OverlayStatus& status) override;
+    bool overlayEnabled() const override;
     const char* rendererName() const;    // 直出时是 `gpu-direct`
     // GPU 直出是否成立（窗口已 claim 给光栅化的 device）。false ⇒ 呈现走 SDL_Renderer 上传。
     bool directPresentActive() const;

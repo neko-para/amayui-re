@@ -618,7 +618,7 @@ bool InteractionGraph::loadText(const std::string& text, const std::string& orig
                 return true;
             }
             case GraphActionKind::Wait: {
-                if (tok.size() != 3) return failAt(ln, "`wait` 需要 `N frames|ms`");
+                if (tok.size() != 3) return failAt(ln, "`wait` 需要 `N frames|ms|wall_ms`");
                 std::uint64_t value = 0;
                 if (!parseUnsigned(tok[1], &value)) return failAt(ln, "不是合法数字：" + tok[1]);
                 const std::string unit = lowerCopy(tok[2]);
@@ -627,8 +627,11 @@ bool InteractionGraph::loadText(const std::string& text, const std::string& orig
                     unit_kind = TriggerKind::Frame;
                 } else if (unit == "ms" || unit == "guest_ms") {
                     unit_kind = TriggerKind::GuestMs;
+                } else if (unit == "wall_ms") {
+                    // ★ 图的闭集合只收这一个拼写（`wall` / `host_ms` 是时间线的别名，图不跟着放宽）。
+                    unit_kind = TriggerKind::WallMs;
                 } else {
-                    return failAt(ln, "`wait` 的单位只认 `frames` / `ms`（收到 " + tok[2] + "）");
+                    return failAt(ln, "`wait` 的单位只认 `frames` / `ms` / `wall_ms`（收到 " + tok[2] + "）");
                 }
                 out->wait_value = value;
                 out->wait_unit = unit_kind;
@@ -898,10 +901,20 @@ bool InteractionGraph::loadText(const std::string& text, const std::string& orig
         }
     }
     // ---- 提交 ----
+    // ★ `wall_ms` 在**解析期**记账（`usesWallClock()`）：墙钟等待让同一输入两次跑不再逐行相同，
+    //   调用方据此把 trace 标成 `NON-DIFFABLE`（真源 §4）。⛔ 不在运行期"看到了再降级"——
+    //   trace 头是在第一次 tick 前就写好的。
+    bool uses_wall_clock = false;
+    for (const Node& n : nodes) {
+        if (n.action.kind == GraphActionKind::Wait && n.action.wait_unit == TriggerKind::WallMs) {
+            uses_wall_clock = true;
+        }
+    }
     nodes_ = std::move(nodes);
     entry_ = entry;
     origin_ = origin;
     current_ = entry_index;
+    uses_wall_clock_ = uses_wall_clock;
     return true;
 }
 
@@ -924,6 +937,7 @@ void InteractionGraph::clear() {
     nodes_.clear();
     entry_.clear();
     origin_.clear();
+    uses_wall_clock_ = false;
     state_ = State::Idle;
     current_ = 0;
     next_index_ = 0;
@@ -944,6 +958,7 @@ void InteractionGraph::clear() {
     wait_pending_ = false;
     wait_due_frame_ = 0;
     wait_due_guest_ms_ = 0;
+    wait_due_wall_ms_ = 0;
     have_box_ = false;
     box_ = PixelRect{};
     hit_pending_ = false;
@@ -1122,6 +1137,9 @@ void InteractionGraph::enterNode(std::size_t index, std::uint64_t frame, std::ui
     have_box_ = false;
     hit_pending_ = false;
     wait_pending_ = false;
+    wait_due_frame_ = 0;
+    wait_due_guest_ms_ = 0;
+    wait_due_wall_ms_ = 0;
     issue_blocked_logged_ = false;
     ++transitions_;
     const Node& n = nodes_[index];
@@ -1131,7 +1149,8 @@ void InteractionGraph::enterNode(std::size_t index, std::uint64_t frame, std::ui
     traceLine(line);
 }
 
-bool InteractionGraph::issueAction(WindowManager& wm, std::uint64_t frame, std::uint64_t guest_ms) {
+bool InteractionGraph::issueAction(WindowManager& wm, std::uint64_t frame, std::uint64_t guest_ms,
+                                   std::uint64_t wall_ms) {
     // `wm` 不参与：`click center` 的坐标 = 识别到的框中心（guest 客户区像素，与注入层同一坐标系）。
     (void)wm;
     Node& n = nodes_[current_];
@@ -1169,9 +1188,11 @@ bool InteractionGraph::issueAction(WindowManager& wm, std::uint64_t frame, std::
             break;
         case GraphActionKind::Wait:
             // ★ `wait` 不碰输入（真源：纯延迟）⇒ 不追加任何动作，只记到期点。
+            //   三个单位各记各的：按**这个动作的单位**算 due（⛔ 不是"哪个先到"）。
             wait_pending_ = true;
             wait_due_frame_ = frame + n.action.wait_value;
             wait_due_guest_ms_ = guest_ms + n.action.wait_value;
+            wait_due_wall_ms_ = wall_ms + n.action.wait_value;
             applied_before_ = actuator_.appliedCount();
             ++actions_issued_;
             return true;
@@ -1368,7 +1389,7 @@ bool InteractionGraph::tick(WindowManager& wm, const FrameSampler& sampler, std:
 
     // 命中（条件已成立）⇒ 尝试追加动作；`InputScript` 的前置没满足就下个块边界再试。
     auto tryIssue = [&](const Node& n) -> bool {
-        if (issueAction(wm, frame, guest_ms)) {
+        if (issueAction(wm, frame, guest_ms, wall_ms)) {
             hit_pending_ = false;
             return true;
         }
@@ -1433,8 +1454,18 @@ bool InteractionGraph::tick(WindowManager& wm, const FrameSampler& sampler, std:
             const Node& n = nodes_[current_];
             bool applied = false;
             if (wait_pending_) {
-                applied = n.action.wait_unit == TriggerKind::Frame ? frame >= wait_due_frame_
-                                                                   : guest_ms >= wait_due_guest_ms_;
+                // ★ 按**这个动作声明的单位**判到期（三个可能的单位各一支）：
+                //   `frames` = Present 计数 · `ms` = guest 虚拟时钟 · `wall_ms` = 宿主墙钟。
+                //   ⛔ 不是"任一单位先到"—— 那会让 `ms` 与 `wall_ms` 在 real-time 档下互相污染。
+                switch (n.action.wait_unit) {
+                    case TriggerKind::Frame: applied = frame >= wait_due_frame_; break;
+                    case TriggerKind::GuestMs: applied = guest_ms >= wait_due_guest_ms_; break;
+                    case TriggerKind::WallMs: applied = wall_ms >= wait_due_wall_ms_; break;
+                    // 解析期不会产出这两支（`wait` 只收 Frame / GuestMs / WallMs）；留空 = 不完成，
+                    // 由窗口到期响亮失败（⛔ 不静默当成某一支）。
+                    case TriggerKind::Insn:
+                    case TriggerKind::Marker: applied = false; break;
+                }
             } else {
                 // ★ 动作真的被应用 = 追加进去的那一批**全部**应用完（Key 是 down + up 两条）。
                 applied = actuator_.appliedCount() > applied_before_ &&

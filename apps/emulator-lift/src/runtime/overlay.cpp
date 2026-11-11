@@ -1,5 +1,6 @@
 #include "runtime/overlay.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -106,6 +107,13 @@ std::string formatFps(double fps) {
     return std::string(buf);
 }
 
+// `worst` 行的一位小数（与 fps 同一份口径：`%.1f`；⛔ 不用 std::to_string 的 6 位）
+std::string formatMs(double ms) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.1f", ms);
+    return std::string(buf);
+}
+
 }  // namespace
 
 bool overlayGlyph(char ch, std::uint8_t rows[kOverlayGlyphH]) {
@@ -125,13 +133,52 @@ bool overlayGlyph(char ch, std::uint8_t rows[kOverlayGlyphH]) {
     return false;
 }
 
-std::vector<std::string> formatOverlayLines(const OverlayState& state) {
+std::string overlayScriptPayload(const std::string& name, bool name_degraded, std::uint32_t id) {
+    // ★ 降级形态**只用 id**（⛔ 不猜名字）：`MarkerSample.name` 在降级时也是 `id:0x…`，
+    //   这里显式格式化一次，保证"名字表读不到"与"名字恰好为空"不会混为一谈。
+    if (!name_degraded) return name;
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "id:0x%08X（降级）", static_cast<unsigned>(id));
+    return std::string(buf);
+}
+
+void overlayWorstPush(std::deque<OverlayFrameSample>& samples, const OverlayFrameSample& sample) {
+    // 时间戳必须单调（调用方只喂 `steady_clock`）：倒退的样本会让"窗口 = 最新样本往前 3 s"
+    // 失去意义 ⇒ 直接丢（⛔ 不排序、不猜哪一条才是"现在"）。
+    if (!samples.empty() && sample.at < samples.back().at) return;
+    samples.push_back(sample);
+    const auto cutoff = sample.at - kOverlayWorstWindow;
+    while (!samples.empty() && samples.front().at < cutoff) samples.pop_front();
+}
+
+OverlayWorst overlayWorstMax(const std::deque<OverlayFrameSample>& samples) {
+    OverlayWorst out;
+    for (const OverlayFrameSample& s : samples) {
+        out.has_worst = true;
+        out.wall_max_ms = std::max(out.wall_max_ms, s.wall_ms);
+        out.guest_max_ms = std::max(out.guest_max_ms, s.guest_ms);
+        out.shim_max_ms = std::max(out.shim_max_ms, s.shim_ms);
+    }
+    return out;
+}
+
+std::vector<std::string> formatOverlayLines(const OverlayState& state, const OverlayStatus& status) {
     std::vector<std::string> lines;
     if (state.mouse_available) lines.push_back("mouse " + std::to_string(state.mouse_x) + "," + std::to_string(state.mouse_y));
+    // ★ 身份行在 mouse 之后、fps 之前（固定顺序；拿到才写，⛔ 不占位）。
+    if (status.has_script && !status.script.empty()) lines.push_back("script " + status.script);
     if (state.fps_available) lines.push_back("fps " + formatFps(state.fps));
     if (state.frame_available) lines.push_back("frame " + std::to_string(state.frame));
     if (state.raster != nullptr && state.raster[0] != '\0') lines.push_back(std::string("raster ") + state.raster);
     if (state.present != nullptr && state.present[0] != '\0') lines.push_back(std::string("present ") + state.present);
+    // ★ `worst` 永远最后一行：3 s 窗口内每帧 wall / guest / shim 的最大值。
+    //   `guest` 没开块计时就写 `--`（⛔ 不写 0.0：那会被读成"guest 不用时间"）。
+    if (status.has_worst) {
+        std::string line = "worst 3s  wall=" + formatMs(status.wall_max_ms) + "ms guest=";
+        line += status.has_guest ? formatMs(status.guest_max_ms) + "ms" : std::string("--");
+        line += " shim=" + formatMs(status.shim_max_ms) + "ms";
+        lines.push_back(std::move(line));
+    }
     return lines;
 }
 

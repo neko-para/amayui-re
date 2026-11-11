@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -363,6 +364,8 @@ private:
     std::uint32_t fnKeyOf(std::uint32_t ea) const;
     // ★ 诊断（`LIFT_FRAME_TRACE=1`）：每次 presenter 帧号变化时打一行"这一帧的墙钟去哪了"。
     //   只读：不改变执行结果；shim 计时由 `shims_.setTiming(true)` 打开。
+    //   ★ 叠层（`--overlay`）复用**同一次** flush 的 wall / guest / shim 读数（⛔ 不另起一套计时）；
+    //     非 trace 模式下只记账、不打印（`frame_trace_` 门控打印部分）。
     void flushFrameTrace();
     // ★ 一份 `InputScript` 的公共推进（时间线与交互图的 actuator **共用**这条路径：
     //   tick / profiler 窗口边界登记 / `quit` 唤醒 WM_QUIT）。⛔ 不要给两条通道各写一遍。
@@ -492,6 +495,21 @@ private:
     std::uint64_t frame_trace_prev_gpu_fallback_px_ = 0;
     std::uint64_t frame_trace_prev_sprite_total_ = 0;
     std::uint64_t frame_trace_prev_sprite_fallback_ = 0;
+    // ★ 调试叠层（`--overlay`）的两行数据（`script` 身份 / `worst` 最近 3 s 每帧最大值）。
+    //   `overlay_on_` 在 `run()` 开头从 sink 读**一次**（sink 是"叠层开没开"的唯一真源；
+    //   块入口热路径只读这个 bool，⛔ 不每块问 sink）。它同时决定：
+    //   ① 身份采样门控（`script` 要名字）；② `shims_.setTiming`（`worst` 的 shim 列）。
+    //   ⛔ 它**不**决定块计时：guest 没值就写 `guest=--`（⛔ 不许为了读数改变被观测的性能）。
+    bool overlay_on_ = false;
+    // 本轮块计时是否打开（`opts.profile || window_prof_.armed()` 的**成员快照**；
+    // `flushFrameTrace` 绝不读 opts —— 同一台 Machine 可能换 opts 再跑）。
+    bool overlay_guest_timed_ = false;
+    // ★ 本轮是否已经有"上一次 Present"：`false` 时 `flushFrameTrace` 只**建立基线**、不推样本。
+    //   理由：第一个样本 = run 开始 → 第一次 Present，**不是一帧**（会把 boot 的几十秒塞进 3 s
+    //   窗口 ⇒ 开头必然显示那个大数，误导"卡顿点"）。⛔ `frame_trace_` 的 n=1 行照旧保留这段。
+    bool overlay_have_prev_frame_ = false;
+    OverlayStatus overlay_status_;
+    std::deque<OverlayFrameSample> overlay_worst_;  // 最近 3 s 的每帧样本（push 时丢旧）
 };
 
 // 纯档夹具用：`Machine` 的全局实例指针（fault 诊断要拿到寄存器与 `.lst`）

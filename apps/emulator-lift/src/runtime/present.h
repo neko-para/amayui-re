@@ -16,6 +16,7 @@
 #include <string>
 
 #include "runtime/gpu_raster.h"
+#include "runtime/overlay.h"
 #include "runtime/surface.h"
 
 namespace lift {
@@ -35,6 +36,12 @@ public:
     virtual std::string describe() const { return {}; }
     // 可选：同一 SDL_GPUDevice 上的 GPU 光栅化后端（--raster gpu 时才非空）。
     virtual GpuRaster* gpuRaster() { return nullptr; }
+    // ★ 调试叠层（`--overlay`）的两行数据（`script` 身份 / `worst` 3 s 最大值）。
+    //   **默认 no-op**：headless / 测试替身不画叠层，⛔ 不给它们加负担。
+    //   叠层开关只有 sink 知道（文本 / 纹理 / 直出都归它）⇒ `Machine` 在 `run()` 开头问一次。
+    //   ⛔ 本接口保持 SDL-free（`OverlayStatus` 来自 `runtime/overlay.h`，零 SDL 类型）。
+    virtual void setOverlayStatus(const OverlayStatus& /*status*/) {}
+    virtual bool overlayEnabled() const { return false; }
 };
 
 // ---------------------------------------------------------------------------------------

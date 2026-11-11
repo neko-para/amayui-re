@@ -532,7 +532,9 @@ bool Machine::prepareStack(std::string* err) {
 }
 
 void Machine::flushFrameTrace() {
-    if (!frame_trace_) return;
+    // ★ 两个消费者共用**同一次** flush：`frame_trace_` 打诊断行；`overlay_on_` 只要读数（不打印）。
+    //   ⛔ 不给叠层另起一套 steady_clock 记账（那会与 trace 的读数不一致，还会多一份开销）。
+    if (!frame_trace_ && !overlay_on_) return;
     const auto now = std::chrono::steady_clock::now();
     const double wall_ms = std::chrono::duration<double, std::milli>(now - frame_trace_last_).count();
     frame_trace_last_ = now;
@@ -563,13 +565,15 @@ void Machine::flushFrameTrace() {
         const std::uint64_t delta = total - prev;
         if (delta == 0) continue;
         shim_ns += delta;
-        shim_rows.push_back({&defs[i], delta, calls});
+        if (frame_trace_) shim_rows.push_back({&defs[i], delta, calls});
     }
-    std::sort(shim_rows.begin(), shim_rows.end(), [](const ShimRow& a, const ShimRow& b) {
-        if (a.ns != b.ns) return a.ns > b.ns;
-        if (a.def->module != b.def->module) return a.def->module < b.def->module;
-        return a.def->name < b.def->name;
-    });
+    if (frame_trace_) {
+        std::sort(shim_rows.begin(), shim_rows.end(), [](const ShimRow& a, const ShimRow& b) {
+            if (a.ns != b.ns) return a.ns > b.ns;
+            if (a.def->module != b.def->module) return a.def->module < b.def->module;
+            return a.def->name < b.def->name;
+        });
+    }
 
     // ---- guest 块（只有 `--profile` 才累计 b.ns；否则这一栏是 0）----
     struct GuestRow {
@@ -587,6 +591,8 @@ void Machine::flushFrameTrace() {
         const std::uint64_t delta = b.ns - prev;
         if (delta == 0) continue;
         guest_ns += delta;
+        // ★ 打印用的聚合只在 trace 模式下建（叠层只要 `guest_ns` 一个总数）。
+        if (!frame_trace_) continue;
         const LstFunction* fn = lst_.loaded() ? lst_.functionAt(b.ea) : nullptr;
         const std::uint32_t key = fn ? fn->ea : b.ea;
         GuestRow& row = guest_by_fn[key];
@@ -595,13 +601,45 @@ void Machine::flushFrameTrace() {
         row.ns += delta;
     }
     std::vector<GuestRow> guest_rows;
-    guest_rows.reserve(guest_by_fn.size());
-    for (const auto& kv : guest_by_fn) guest_rows.push_back(kv.second);
-    std::sort(guest_rows.begin(), guest_rows.end(), [](const GuestRow& a, const GuestRow& b) {
-        if (a.ns != b.ns) return a.ns > b.ns;
-        return a.fn_ea < b.fn_ea;
-    });
+    if (frame_trace_) {
+        guest_rows.reserve(guest_by_fn.size());
+        for (const auto& kv : guest_by_fn) guest_rows.push_back(kv.second);
+        std::sort(guest_rows.begin(), guest_rows.end(), [](const GuestRow& a, const GuestRow& b) {
+            if (a.ns != b.ns) return a.ns > b.ns;
+            return a.fn_ea < b.fn_ea;
+        });
+    }
 
+    // ★ 叠层 `worst` 行（最近 3 s 每帧最大值）：与 trace 的打印**无关** —— 叠层开着就记。
+    //   窗口口径 = 每帧 = 相邻两次 Present 的 steady_clock 间隔（本函数的 `wall_ms`），
+    //   样本由 `overlayWorstPush` 丢出 3 s 外的旧帧。`has_guest` 只读**本轮快照**（⛔ 不碰 opts）。
+    if (overlay_on_) {
+        // ★ 第一个样本 = run 开始 → 第一次 Present，**不是一帧** ⇒ **丢弃**（它会把 boot 的
+        //   几十秒塞进 3 s 窗口：`worst` 在开头必然显示那个大数，误导"卡顿点"）。
+        //   ★ 只丢叠层这一份；`frame_trace_` 的 `[frame] n=1` 行照旧含这一段（既有行为，⛔ 不改）。
+        //   ★ 这一次调用仍然把 `frame_trace_last_` 推到"第一次 Present"（本函数开头），
+        //     所以下一次 flush 的 `wall_ms` 就是真正的"相邻两次 Present 间隔"。
+        if (overlay_have_prev_frame_) {
+            OverlayFrameSample sample;
+            sample.at = now;
+            sample.wall_ms = wall_ms;
+            sample.guest_ms = static_cast<double>(guest_ns) / 1e6;
+            sample.shim_ms = static_cast<double>(shim_ns) / 1e6;
+            overlayWorstPush(overlay_worst_, sample);
+            const OverlayWorst worst = overlayWorstMax(overlay_worst_);
+            overlay_status_.has_worst = worst.has_worst;
+            overlay_status_.wall_max_ms = worst.wall_max_ms;
+            overlay_status_.guest_max_ms = worst.guest_max_ms;
+            overlay_status_.shim_max_ms = worst.shim_max_ms;
+            // ★ 块计时没开 ⇒ guest 这一列没有值：窗口 sink 会写 `guest=--`（⛔ 不编 0.0）。
+            overlay_status_.has_guest = overlay_guest_timed_;
+            // 两行数据用**同一份** `overlay_status_` 整体下发（script 那一处也改它 ⇒ 不会互相覆盖）。
+            if (PresentSink* sink = presenter_.sink()) sink->setOverlayStatus(overlay_status_);
+        }
+        overlay_have_prev_frame_ = true;
+    }
+
+    if (!frame_trace_) return;
     std::fprintf(stdout, "[frame] n=%llu wall=%.1fms insns=%llu guest=%.1fms shim=%.1fms other=%.1fms\n",
                  (unsigned long long)presenter_.frameCount(), wall_ms, (unsigned long long)insns,
                  (double)guest_ns / 1e6, (double)shim_ns / 1e6,
@@ -798,6 +836,15 @@ bool Machine::sampleMarker() {
     MarkerSample s = ident;
     if (s.valid) marker_sampler_.resolveName(mem_, &s);
     last_marker_sample_ = std::move(s);
+    // ★ 叠层 `script` 行：身份**变化**（含首个有效样本）时下发一次（稳态不重复推）。
+    //   与 `worst` 共用同一份 `overlay_status_`（两处都改它再整体下发 ⇒ 不会互相覆盖）。
+    //   ⛔ 从未采到身份 ⇒ 什么都不推 ⇒ 窗口那边整行省略（不是 "script ?"）。
+    if (overlay_on_ && last_marker_sample_.valid) {
+        overlay_status_.has_script = true;
+        overlay_status_.script = overlayScriptPayload(last_marker_sample_.name, last_marker_sample_.name_degraded,
+                                                      last_marker_sample_.id);
+        if (PresentSink* sink = presenter_.sink()) sink->setOverlayStatus(overlay_status_);
+    }
     // ★ 身份**发现路径**（`LIFT_LOG_MARKERS`；见 `Machine::run`）：每次身份变化打一行，
     //   稳态不刷屏（同一 `(cur,id)` 与同一名字不重复打）。它回答"现在脚本名是什么" ——
     //   没有它，写 `script <名字>` 只能靠猜（时间线的边沿日志只在"等的名字恰好匹配"时才打）。
@@ -873,7 +920,19 @@ RunResult Machine::run(const RunOptions& opts) {
     input_script_.resetMarkerState();
     marker_sampler_.resetCounters();
     last_marker_sample_ = MarkerSample{};
-    shims_.setTiming(frame_trace_ || opts.profile || window_prof_.armed());
+    // ★ 调试叠层（`--overlay`）：sink 是"叠层开没开"的**唯一真源**（`main` 在 `run()` 之前
+    //   `setSink`）。这里读一次 ⇒ 块入口热路径只读 `overlay_on_` 这个 bool（⛔ 不每块问 sink）。
+    //   它要两样东西：① 身份采样（`script`）；② shim 计时（`worst` 的 shim 列）。
+    //   ⛔ **不**打开块计时 —— 那会改变被观测的性能本身；guest 没值就写 `guest=--`。
+    overlay_on_ = false;
+    if (PresentSink* sink = presenter_.sink()) overlay_on_ = sink->overlayEnabled();
+    overlay_worst_.clear();
+    overlay_have_prev_frame_ = false;
+    overlay_status_ = OverlayStatus{};
+    // ★ `has_guest` 的判据 = 本轮块计时是否打开（与循环里 `b->ns += block_ns` 的条件同源）。
+    //   在这里快照一次 —— `flushFrameTrace` 绝不读 opts（同一台 Machine 会换 opts 再跑）。
+    overlay_guest_timed_ = opts.profile || window_prof_.armed();
+    shims_.setTiming(frame_trace_ || opts.profile || window_prof_.armed() || overlay_on_);
     // ★ 运行摘要 `instr :` 行（`docs/03-emulator/measurement.md` M-02 的**口径标签**）：
     //   记的是**这一轮真正生效**的位，⛔ 不是 CLI 回显 —— `window-prof` 读 `WindowProfiler::armed()`
     //   的真值（脚本里写了 `profile_begin` 但没 arm 的缺陷会在这里如实暴露，见 §2.5 单）。
@@ -924,7 +983,11 @@ RunResult Machine::run(const RunOptions& opts) {
     }
     wall_start_ = std::chrono::steady_clock::now();
     wall_start_valid_ = true;
-    if (frame_trace_) {
+    // ★ 逐帧记账的**基线**：`frame_trace_` 与叠层（`worst`）共用同一份 prev / 时间戳
+    //   ⇒ 任一开启就要初始化（叠层只读不打印，见 `flushFrameTrace`）。
+    //   ★ 第一个样本的间隔 = run 开始 → 第一次 Present（此前没有"上一次 Present"）：
+    //     `frame_trace_` 照旧打印它；**叠层丢弃它**（不是一帧，见 `overlay_have_prev_frame_`）。
+    if (frame_trace_ || overlay_on_) {
         frame_trace_last_ = std::chrono::steady_clock::now();
         frame_trace_last_insns_ = cpu_.insns;
         frame_trace_prev_shim_ns_.assign(shims_.all().size(), 0);
@@ -1025,17 +1088,18 @@ RunResult Machine::run(const RunOptions& opts) {
         //      `--anchor-script`、没有 marker 动作"的脚本一次也不采样 ⇒ 0 点永不闩锁 ⇒ 假报
         //      `origin-missed:`；
         //   ② 交互图里有 `script` 条件（**电平**；不采样 ⇒ 条件恒不成立）；
-        //   ③ `LIFT_LOG_MARKERS`（身份发现路径；没有它就只能靠猜名字）。
+        //   ③ `LIFT_LOG_MARKERS`（身份发现路径；没有它就只能靠猜名字）；
+        //   ④ 叠层 `script` 行（`--overlay`；不采样 ⇒ 这一行永远是空的）。
         //   ⛔ 这一段**不能**放进下面 `input_script_.active()` 的块：只跑交互图 / 只开日志时
         //     时间线可能是空的（那时采样一次也不会发生 ⇒ 图等不到 / 日志为空）。
-        //   三个都不需要时一次也不进（零成本）。
+        //   四个都不需要时一次也不进（零成本）。
         if (!guest_calls_.active() && !cpu_.shim.timer_firing && !seh_.busy()) {
             if (input_script_.needsIdentitySamples() &&
                 (cpu_.eip == kMarkerLoopHeadEa || cpu_.eip == kMarkerPumpReturnEa)) {
                 sampleMarker();
-            } else if ((interaction_needs_identity || log_markers_) &&
+            } else if ((interaction_needs_identity || log_markers_ || overlay_on_) &&
                        (cpu_.eip == kMarkerLoopHeadEa || cpu_.eip == kMarkerPumpReturnEa)) {
-                // ★ 时间线不需要、但图 / 日志需要：**同一次采样点只采一次**（`else if`
+                // ★ 时间线不需要、但图 / 日志 / 叠层需要：**同一次采样点只采一次**（`else if`
                 //   就是为了不重复喂 `noteMarker`）。
                 sampleMarker();
             }
@@ -1454,7 +1518,8 @@ RunResult Machine::run(const RunOptions& opts) {
                 // 回调自己的 call/ret 是独立的一帧，晚些时候由 ret 正常弹）。
                 window_prof_.popNoReturn(fnKeyOf(def->stub_ea));
             }
-            if (frame_trace_ && presenter_.frameCount() != frame_before) flushFrameTrace();
+            // ★ Present 之后才 flush（`frameCount` 变了）：trace 打印 + 叠层 `worst` 都读这一份。
+            if ((frame_trace_ || overlay_on_) && presenter_.frameCount() != frame_before) flushFrameTrace();
             if (!cpu_.running) {
                 // ★ 三种"停"要分清：
                 //   ① `!had_impl` ⇒ 注册表里没有 fn = 缺口（`Unimplemented`，红）；

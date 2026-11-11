@@ -1298,6 +1298,167 @@ int main() {
     }
 
     // =================================================================================
+    // ⑩b wait-wall-ms-parse —— `wait <n> wall_ms` 的**解析期**契约（图 / 线性两种写法）
+    // ★ 红在这意味着：图不收 `wall_ms`（用户要的"等真实 500 ms"没有写法），或非法单位的报错串
+    //   没把新单位列进去（人看不出该写哪个词）。
+    // ⛔ 不断言"墙钟读到多少"：这里只断言解析出的 kind / 值。
+    // =================================================================================
+    g_current_case = "wait-wall-ms-parse";
+    {
+        lift::InteractionGraph g;
+        std::string err;
+        const bool ok = g.loadText(
+            "entry a\n"
+            "node a\n"
+            "  when always\n"
+            "  action wait 500 wall_ms\n"
+            "  next\n",
+            "synthetic:wall-parse", &err);
+        LIFT_CHECK(ok);
+        if (!ok) {
+            std::fprintf(stderr, "  err = %s\n", err.c_str());
+        } else {
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(g.nodes().size()), 1u);
+            const lift::Node& n = g.nodes()[0];
+            LIFT_CHECK(n.action.kind == lift::GraphActionKind::Wait);
+            LIFT_CHECK(n.action.wait_unit == lift::TriggerKind::WallMs);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(n.action.wait_value), 500u);
+            LIFT_CHECK(g.usesWallClock());
+            // `clear()` / 下一次解析必须复位（否则空图也会被当成"含墙钟" ⇒ trace 无故降级）
+            g.clear();
+            LIFT_CHECK(!g.usesWallClock());
+        }
+
+        // 线性写法：`await always` + `wait 500 wall_ms` 也能过（同一个动作，隐式 step）
+        lift::InteractionGraph lin;
+        std::string lin_err;
+        const bool lin_ok = lin.loadText("await always\nwait 500 wall_ms\nquit\n", "synthetic:wall-linear", &lin_err);
+        LIFT_CHECK(lin_ok);
+        if (lin_ok) {
+            LIFT_CHECK(lin.usesWallClock());
+            LIFT_CHECK(lin.nodes().size() >= 2);
+            LIFT_CHECK(lin.nodes()[0].action.kind == lift::GraphActionKind::Wait);
+            LIFT_CHECK(lin.nodes()[0].action.wait_unit == lift::TriggerKind::WallMs);
+            LIFT_CHECK(lin.nodes()[0].action.wait_value == 500);
+        }
+
+        // 非法单位仍报错，且错误串**列出新单位**（`hours` 原样回显保持既有口径）
+        lift::InteractionGraph bad;
+        std::string bad_err;
+        const bool bad_ok = bad.loadText(
+            "entry a\n"
+            "node a\n"
+            "  when always\n"
+            "  action wait 3 hours\n"
+            "  next\n",
+            "t.graph", &bad_err);
+        LIFT_CHECK(!bad_ok);
+        LIFT_CHECK(!bad.active());
+        LIFT_CHECK(contains(bad_err, "hours"));
+        LIFT_CHECK(contains(bad_err, "wall_ms"));
+
+        // ★ 闭集合只收 `wall_ms` 一个拼写：`wall` / `host_ms` 是**时间线**的别名，图不跟着放宽。
+        expectLoadError(
+            "entry a\n"
+            "node a\n"
+            "  when always\n"
+            "  action wait 3 wall\n"
+            "  next\n",
+            4, "收到 wall）");
+    }
+
+    // =================================================================================
+    // ⑩c wait-wall-ms-behavior —— 到期判据**只看宿主墙钟**：wall 0..499 不完成、500 完成并进下一 step
+    // ★ 红在这意味着：`wall_ms` 被当成 guest 毫秒 / 帧数（等 500 guest_ms 会提前 / 推迟完成），
+    //   或到期后没推进（图挂在 acting）。
+    // ★ 用**测试自己给的** wall 值，⛔ 一次也不靠真实墙钟推进。
+    // =================================================================================
+    g_current_case = "wait-wall-ms-behavior";
+    {
+        Driver d;
+        LIFT_CHECK(d.load(
+            "await always\n"
+            "wait 500 wall_ms\n"
+            "quit\n",
+            "synthetic:wall-behavior"));
+        // 第 1 次 tick：Idle ⇒ 进 step1；第 2 次：`when always` 命中 ⇒ 追加 wait（due = wall + 500）
+        d.graph.tick(d.wm, d.sampler, d.frame, d.guest_ms, d.insns, 0, &d.identity);
+        d.graph.tick(d.wm, d.sampler, d.frame, d.guest_ms, d.insns, 0, &d.identity);
+        LIFT_CHECK(std::string(d.graph.stateName()) == "acting");
+        // ★ 这段也顺带把 guest_ms 推过 500（每步 +10）⇒ 若 WallMs 分支误读 guest_ms 就会在这里红
+        for (std::uint64_t wall = 0; wall < 500; ++wall) {
+            d.graph.tick(d.wm, d.sampler, d.frame, d.guest_ms, d.insns, wall, &d.identity);
+            d.guest_ms += 10;
+            LIFT_CHECK(!d.graph.done());
+            LIFT_CHECK(!d.graph.failed());
+        }
+        // wall = 500 ⇒ 到期：应用到下一 step（step2 = quit），但还没执行它
+        d.graph.tick(d.wm, d.sampler, d.frame, d.guest_ms, d.insns, 500, &d.identity);
+        LIFT_CHECK(!d.graph.failed());
+        const lift::Node* after_wait = d.graph.current();
+        LIFT_CHECK(after_wait != nullptr);
+        if (after_wait != nullptr) LIFT_CHECK(after_wait->id == "step2");
+        LIFT_CHECK(!d.graph.done());
+        // 下一个块边界：step2 的 `when always` 命中 ⇒ quit ⇒ 任务完成
+        d.graph.tick(d.wm, d.sampler, d.frame, d.guest_ms, d.insns, 500, &d.identity);
+        LIFT_CHECK(d.graph.done());
+        LIFT_CHECK(!d.graph.failed());
+
+        // ★ 裁决 3：`timeout` **仍然管** wall wait（⛔ 不是无限等待）。等不到就按现有规则响亮失败。
+        Driver t;
+        LIFT_CHECK(t.load(
+            "await always\n"
+            "timeout 100\n"
+            "wait 1000 wall_ms\n"
+            "quit\n",
+            "synthetic:wall-timeout"));
+        t.step(true);  // Idle ⇒ 进 step1（窗口起点 = 这次 tick 的 wall）
+        t.step(true);  // `when always` 命中 ⇒ 追加 wait（due = wall + 1000）⇒ Acting
+        LIFT_CHECK(std::string(t.graph.stateName()) == "acting");
+        for (std::uint64_t wall = 0; wall <= 300 && !t.graph.failed(); ++wall) {
+            t.graph.tick(t.wm, t.sampler, t.frame, t.guest_ms, t.insns, wall, &t.identity);
+        }
+        LIFT_CHECK(t.graph.failed());  // ⛔ 不许无限等
+        LIFT_CHECK(t.graph.failure() == lift::GraphFailure::Timeout);
+    }
+
+    // =================================================================================
+    // ⑩d wait-wall-ms-trace —— 含 `wall_ms` 的图 ⇒ `usesWallClock()` + trace 头 `# NON-DIFFABLE`
+    // ★ 红在这意味着：墙钟等待的 trace 被当成可 diff（同一输入两次跑不再逐行相同，diff 会骗人），
+    //   或反向：不含 `wall_ms` 的图被无故降级（对照组）。
+    // =================================================================================
+    g_current_case = "wait-wall-ms-trace";
+    {
+        Driver d;
+        LIFT_CHECK(d.load(
+            "await always\n"
+            "wait 500 wall_ms\n"
+            "quit\n",
+            "synthetic:wall-trace"));
+        LIFT_CHECK(d.graph.usesWallClock());
+        TraceCapture cap;
+        // = main.cpp 的表达式在 headless 档的取值（`!present_window_active` = true）
+        d.graph.setTrace(cap.file(), /*diffable=*/!d.graph.usesWallClock());
+        d.step();  // 第一次 tick 写 trace 头
+        const std::string trace = cap.text();
+        LIFT_CHECK(startsWith(trace, "# interaction trace v1\n"));
+        const std::size_t first_nl = trace.find('\n');
+        LIFT_CHECK(first_nl != std::string::npos);
+        if (first_nl != std::string::npos) {
+            const std::size_t second_end = trace.find('\n', first_nl + 1);
+            const std::string second = second_end == std::string::npos
+                                           ? trace.substr(first_nl + 1)
+                                           : trace.substr(first_nl + 1, second_end - first_nl - 1);
+            LIFT_CHECK(second == "# NON-DIFFABLE");
+        }
+
+        // 对照组：不含 `wall_ms` 的图 ⇒ 不触发降级（`frames` / `ms` 语义不变）
+        Driver plain;
+        LIFT_CHECK(plain.load("await always\nwait 1 frames\nquit\n", "synthetic:frames-trace"));
+        LIFT_CHECK(!plain.graph.usesWallClock());
+    }
+
+    // =================================================================================
     // ⑪ trace-diff-stable —— 同一合成序列跑两遍 ⇒ trace 文本**逐字节**相同
     // =================================================================================
     g_current_case = "trace-diff-stable";

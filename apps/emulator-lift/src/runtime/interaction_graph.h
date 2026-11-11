@@ -30,7 +30,7 @@
 //   `script` 是**电平**（"当前身份 == X"，读最近一次 VM 循环头采样）；`at marker` 的**边沿**
 //   语义不在本类里、也一个字都不改（真源 §1 / §6）。
 //   动作的写法：click <x> <y> [left|right] | click center [left|right] | key <VK> |
-//     wait <n> frames|ms | profile_begin <label> | profile_end <label> | quit
+//     wait <n> frames|ms|wall_ms | profile_begin <label> | profile_end <label> | quit
 //
 // ---- 线性写法（与 `node` 块可混用；解析期展开成同一份 `Node` IR）----
 //
@@ -102,7 +102,7 @@ enum class GraphActionKind : std::uint8_t {
     Click = 0,       // click x y [left|right]
     ClickCenter = 1, // click center [left|right]（= 上一个命中框的中心；真源 §1）
     Key = 2,         // key <VK>
-    Wait = 3,        // wait <n> frames|ms（纯延迟，不碰输入）
+    Wait = 3,        // wait <n> frames|ms|wall_ms（纯延迟，不碰输入）
     ProfileBegin = 4,
     ProfileEnd = 5,
     Quit = 6,
@@ -117,7 +117,7 @@ struct GraphAction {
     MouseButton button = MouseButton::Left;
     std::uint32_t vk = 0;            // Key
     std::uint64_t wait_value = 0;    // Wait
-    TriggerKind wait_unit = TriggerKind::Frame;  // Wait（只认 Frame / GuestMs）
+    TriggerKind wait_unit = TriggerKind::Frame;  // Wait（只认 Frame / GuestMs / WallMs）
     std::string label;               // ProfileBegin / ProfileEnd
     std::string text;                // 原始写法（日志 / 报错定位）
 };
@@ -158,6 +158,9 @@ public:
     // ★ 采样门控（`Machine::run` 的块入口钩子只问它）：图里**有** `script` 条件 ⇒ 必须采身份。
     //   ⛔ 漏了它 ⇒ 条件恒不成立（`last_marker_sample_` 永远是无效样本）。
     bool needsIdentitySamples() const;
+    // ★ 图里**出现过** `wall_ms` 单位（解析期置位）：墙钟等待 ⇒ trace 的时序不可复现，
+    //   调用方必须把它标成 `NON-DIFFABLE`（真源 §4）。
+    bool usesWallClock() const { return uses_wall_clock_; }
 
     // ---- 结果 ----
     bool done() const { return state_ == State::Done; }
@@ -206,7 +209,7 @@ private:
     // `waited` = 失败时正在等的那个条件（`when` 或 `expect`）—— 报告里的"等的是什么"只打它的 `text`
     void fail(GraphFailure kind, const std::string& why, const GraphCond& waited, std::uint64_t frame,
               std::uint64_t guest_ms, std::uint64_t insns);
-    bool issueAction(WindowManager& wm, std::uint64_t frame, std::uint64_t guest_ms);
+    bool issueAction(WindowManager& wm, std::uint64_t frame, std::uint64_t guest_ms, std::uint64_t wall_ms);
     void enterNode(std::size_t index, std::uint64_t frame, std::uint64_t guest_ms, std::uint64_t insns,
                    std::uint64_t wall_ms);
     // 两把尺都到期才叫到期：`guest_ms` 超过窗口 + `insns`/`frame` 都不推进的墙钟超过窗口
@@ -223,6 +226,8 @@ private:
     std::vector<Node> nodes_;
     std::string entry_;
     std::string origin_;
+    // 图里出现过 `wall_ms`（解析期置位；`clear()` 复位）⇒ trace 必须 `NON-DIFFABLE`
+    bool uses_wall_clock_ = false;
     State state_ = State::Idle;
     std::size_t current_ = 0;
     std::size_t next_index_ = 0;
@@ -247,6 +252,7 @@ private:
     bool wait_pending_ = false;
     std::uint64_t wait_due_frame_ = 0;
     std::uint64_t wait_due_guest_ms_ = 0;
+    std::uint64_t wait_due_wall_ms_ = 0;
     // 这次 `screen rect` 命中产出的框（`click center` 用）
     bool have_box_ = false;
     PixelRect box_;

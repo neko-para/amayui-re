@@ -1153,6 +1153,8 @@ int main(int argc, char** argv) {
 
     // ★ 交互 trace：首行必须标 `NON-DIFFABLE` 与否 ⇒ 只能在**知道呈现档位之后**开
     //   （`--present window` 是 real-time 时钟，那一档的 trace 不参与 diff）。见真源 §4。
+    //   ★ 墙钟等待（图里出现过 `wait … wall_ms`）⇒ 时序不可复现：同一输入两次跑的完成时刻
+    //     取决于宿主调度 ⇒ 那种图的 trace 一律标 `NON-DIFFABLE`（与窗口档同理）。
     std::FILE* interaction_trace = nullptr;
     if (!interaction_trace_path.empty()) {
         if (!machine.interactionGraph().active()) {
@@ -1165,7 +1167,8 @@ int main(int argc, char** argv) {
                          interaction_trace_path.c_str());
             return 2;
         }
-        machine.interactionGraph().setTrace(interaction_trace, !present_window_active);
+        machine.interactionGraph().setTrace(interaction_trace,
+                                            !present_window_active && !machine.interactionGraph().usesWallClock());
     }
 
     const std::uint64_t t0 = SDL_GetTicksNS();

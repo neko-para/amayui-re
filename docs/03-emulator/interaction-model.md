@@ -36,11 +36,15 @@ JSON 文件入口留到"生成器落地"时再加，重开条件写在同一张�
 | 字段 | 必填 | 取值 | 语义 |
 |---|---|---|---|
 | `when` | ✅ | 条件项（闭集合；行写法 `script <名字\|id>` / `screen hash <hex>` / `screen rect x y w h avg <0xRRGGBB>` / `screen changed` / `always`） | 成立才轮到本节点。一条节点 = **一个**条件项：不做 AND/OR 组合、不做条件分支图。`screen rect …` 命中时**产出框**（= 该 rect），这是 `click center` 唯一合法的坐标来源；`always` 是纯推进。`script` 是**电平**（见下） |
-| `action` | ✅ | `click [x y] [left\|right]` / `click center [left\|right]` / `key <VK>` / `wait <n> frames\|ms` / `profile_begin` \| `profile_end` `<label>` / `quit` | 与 `when` **解耦**：命中才执行。`click center` 打**识别到的框**中心；`click x y` 打固定点。按钮词只有 `left` / `right`，省略 = `left`（⛔ 不收 `middle` / `hold`：按钮是输入目标，`hold` 是时序语义） |
+| `action` | ✅ | `click [x y] [left\|right]` / `click center [left\|right]` / `key <VK>` / `wait <n> frames\|ms\|wall_ms` / `profile_begin` \| `profile_end` `<label>` / `quit` | 与 `when` **解耦**：命中才执行。`click center` 打**识别到的框**中心；`click x y` 打固定点。按钮词只有 `left` / `right`，省略 = `left`（⛔ 不收 `middle` / `hold`：按钮是输入目标，`hold` 是时序语义） |
 | `next` | ✅（可空） | **单个**节点 id / 空 | 前进到哪一个；空 = 任务结束。⛔ 不是候选列表。id 必须已定义，否则解析期失败（带行号） |
 | `timeout` | ✅ | ms | 等到 `when` 成立的上限；到点 = `timeout` 失败。必填；解析器给一个**固定缺省值**（生成器应显式写出来，缺省在 trace 里标出） |
 | `expect_change` | ⬜ | 条件项（同上闭集合） | 动作执行后**必须**观测到的变化；到点没变 = `expect_change` 失败 |
 | `enabled-if` 之类 | — | — | **不需要**：不做条件分支图 |
+
+`wait <n>` 的三个单位：`frames` = Present 计数（guest 帧）· `ms` = guest 虚拟毫秒 · `wall_ms` = **宿主墙钟**
+（自 run 起算；纯等待、不碰输入）。`wall_ms` 让完成时刻取决于宿主调度 ⇒ 该图的 trace 一律标
+`# NON-DIFFABLE`（见 §4）。
 
 `when` 的五个源：`script <名字|id>` = 引擎帧身份（来自 marker 事件源，见 §5）· `screen hash <hex>` = 整帧指纹相等 ·
 `screen rect x y w h avg <0xRRGGBB>` = 该矩形区域均值命中（并**产出框**）· `screen changed` = 与上一次采样不同 ·
@@ -140,6 +144,8 @@ click 100 100
   识别结果 + 动作 + 结果；同一路径两次运行逐行相同（时间戳除外）。
 - `--present window` 是 real-time ⇒ trace 的**头部**（第 2 行，含在 `# interaction trace v1` 之后）标
   `# NON-DIFFABLE`，该档 trace 不参与 diff。
+- 图里**出现过** `wait <n> wall_ms`（宿主墙钟）⇒ 完成时刻取决于宿主调度，同一输入两次跑的时序不同 ⇒
+  该图的 trace 头部同样标 `# NON-DIFFABLE`（与呈现档位无关）。
 
 ## 5. 两种识别源为什么都要（互补，不是二选一）
 
