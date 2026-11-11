@@ -1022,6 +1022,25 @@ const MUTATIONS = [
   },
 
   {
+    // ★ 代表 "x87 override 的运算顺序 / `fchs` 被弄丢" 这一类错（REQ-01M6NZSAAD0WCNBE3RKMFF84R5）。
+    //   判据：`apps/emulator-lift/tests/native_override_assets.cpp` 的 ④ = `sub_4CCC60` 的**函数级真字节
+    //   两臂**（同一份 guest 机器码跑解释器当 oracle，再跑 native 实现；比 dst / 寄存器 / x87 状态字）。
+    //   `x87ChangeSign(b)` 是 `.lst` 0x4CCCC8 `fchs` 的唯一落点（B = -(r*sy*sin)）⇒ 注释掉它，
+    //   B 的符号翻正 ⇒ 每个点的 dst[i] 都变 ⇒ 当场红。
+    //   ★ 为什么挑这一条而不是 sin/cos 对调：`.lst` 0x4CCC80/0x4CCC84 的两次求值互相独立
+    //   （都在同一个 θ 上，各自只写自己的栈槽）⇒ 那种"变异"不会改变任何 guest 可见状态，红得没意义。
+    file: 'apps/emulator-lift/src/runtime/native_affine.cpp',
+    from: '    x87ChangeSign(b);',
+    to: '    // x87ChangeSign(b);',
+    guard: 'ctest:native-override-assets',
+    ctest: 'native-override-assets',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'B 系数（`fchs` @0x4CCCC8）不再取号 ⇒ 每个顶点的 dst[i] 符号项错 ⇒ ' +
+      'native-override-assets 的 sub_4CCC60 两臂逐字节当场红',
+  },
+
+  {
     file: 'apps/emulator-lift/src/shims/kernel32_bootstrap.cpp',
     from: '            wide.push_back(u);\n            i += static_cast<std::size_t>(n);',
     to: '            (void)u;\n            wide.push_back(static_cast<char16_t>(p[i]));\n            ++i;',
@@ -1650,24 +1669,6 @@ const MUTATIONS = [
       'd3d9-mip 的 2:1 / 4:1 级号断言当场红（实测见 .tmp/reveq/REQ-01M73G2724479XAVS176WBZ65Q/report.md）',
   },
 
-
-  {
-    // ★ 代表 "黄金图判据被短路" 这一类错（REQ-01M73G49T01W1CQDSME83ES0YD）：比较器的三层
-    //   （块均值 / 全图均值 / 超阈比例）是**与**判据，块均值是"局部整块丢失"（S1 那种整层
-    //   Live2D 角色消失 = 一大批 16×16 块同时突变）的主抓点。短路成恒真 ⇒ 只剩全图均值在盯，
-    //   而它对**小面积**改动几乎无感（纯档用例里单块 +64 的全图均值才 5.33；改动面积再小就连它也过）。
-    //   守卫：`apps/emulator-lift/tests/golden_image.cpp` 的 `golden/compare-one-block-fails`
-    //   （`LIFT_CHECK(!rep.block_ok)` 与 `failing_blocks >= 1` 都会红）。
-    file: 'apps/emulator-lift/src/runtime/golden_image.cpp',
-    from: '        r.block_ok = r.failing_blocks == 0;',
-    to: '        r.block_ok = true;  // 变异：块判据短路成恒真',
-    guard: 'ctest:golden-image-compare',
-    ctest: 'golden-image-compare',
-    buildDir: 'apps/emulator-lift/out',
-    what:
-      '黄金图比较器的"分块（16×16）均值"判据短路成恒真（`r.block_ok = true`）⇒ 只改一个 16×16 块' +
-      '也能判过：golden/compare-one-block-fails 的 `!rep.block_ok` / `failing_blocks >= 1` 当场红',
-  },
 
 ];
 

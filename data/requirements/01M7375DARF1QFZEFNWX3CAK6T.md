@@ -8,56 +8,55 @@
 - tags: [emulator-lift profile native-override lzss save]
 
 ## 一句话
-把退出写存档尾段的 **LZSS Encode 整函数** `sub_4367B0`（`0x4367B0`，`retn 8`、thiscall）做成 native override：
-**1 次拦截**覆盖尾段 **92.85%** 的墙钟（`incl=3328.1 ms` / `self=60.2 ms` / `calls=1`）。
-可行性评估已由 spike `REQ-01M72QS2WFNP61Y6EGFAEVRFG4` 做完（结论：能，且整函数是首选）；本单只做**落地**。
 
-## 已核（来自 spike + `docs/03-emulator/observations.md` OBS-20261110-05）
-- 尾段 = 最后一帧之后 `3.58 s / 131.1 M` 条指令、窗口内 0 次 Present；`sub_4367B0` 子树占 93.46% 指令 / 92.85% 时间。
-- 形状：`Compress` 对象长 `0xD430`（`+4 text_buf[4114)` / `+0x1018 dad` / `+0x501C lson` / `+0x9020 rson` /
-  `+0xD424 match_pos` / `+0xD428 match_len` / `+0xD42C out`）；整函数会 `delete[]` 旧 `out` 再 `new[](*a3+4096)`
-  ⇒ override 里要能在 **guest 堆**分配（`cpu.heap->alloc/free` 与 guest `operator new[]/delete[]` 同源，已验证）。
-- **整文件 sha256 对 `SAVE.DAT` 不成立**：`[264..284)` 是 `GetLocalTime` / `timeGetTime` 落点，而虚拟时钟 = 指令数 × 100 ns
-  ⇒ 两臂时间戳必然差 ~12 s。正确判据见下。
-- 先例的洞：`nativeLzss436A80`（解压）成功路径恒写 `EAX=0`，而 guest 返回 `dst` ⇒ ⛔ 不要照抄。
+`sub_4367B0`（**`0x4367B0`**，`retn 8`、thiscall，`ecx` = `Compress` 对象 `0xD430`）的**整函数** override
+**已进 `all`（2026-11-11）**：1 次拦截覆盖退出写存档尾段 92.85% 的墙钟。
 
-## 修法
-1. 在 `src/runtime/native_overrides.cpp` 的 `kKnown` 里加整函数项（`debug=true`、`arg_bytes=8`）并抬 `kMax`。
-2. 实现与 guest **逐字节等价**的 LZSS 编码（同一棵 dad/lson/rson 树语义、同一 `match_len` 选择、同一 `out` 分配与返回 `EAX`）。
-3. ⛔ 落 override 之前先钉死 `sub_4367B0` 出参 `a3[1]` 的语义（spike 的 `<待核>`：`0x436879` 写 18 vs `0x436A50` 写输入长度）。
+## 已核（锚 = EA）
 
-## 守卫（修前必须红）
-1. **pure**：合成树用例——`InsertNode`/`DeleteNode` 对拍（同一输入下宿主实现与 guest 实现的树结构/输出逐字节相同）。
-2. **pure**：`lzssEncode` ↔ 现有 `lzssDecode` 往返（任意输入编码后解码回原文）。
-3. **assets**：真字节两臂差分（4 KB 与 150,068 B 两档）：比**函数输出 + `info` + `EAX` + 整个 `0xD430` 对象**；
-   存档**区域**差分时掩掉 `[264..284)` 的 24 B 时钟。
-4. **端到端**：同一 `--input-script` 跑 TITLE→Quit 两臂（override 开/关），尾段 `wall` 必须显著下降，
-   存档除时钟区外逐字节相同。
+- 尾段 = 最后一帧后 3.58 s / 131.1 M 条指令、0 次 Present；`sub_4367B0` 子树占 93.46% 指令 / 92.85% 时间。
+- 形状：`+4 text_buf[4114)` / `+0x1018 dad` / `+0x501C lson` / `+0x9020 rson` / `+0xD424 match_pos` /
+  `+0xD428 match_len` / `+0xD42C out`；整函数 `delete[]` 旧 `out` + `new[](*a3+4096)`。
+- 两个调用点：一个是 `new Compress`，另一个是**栈局部对象**（`0x457D17 lea ecx,[ebp+var_D44C]` /
+  `0x457D25 call sub_4364E0`）；两者 `out` 都为 0。
+- `0x436811` 的 `if (!p) return 0` 是**死代码**：`??_U`(`0x4E6DB8`) → `??2`(`0x4E7D0D`) 有 `__callnewh` 重试，
+  失败 `_CxxThrowException`(`0x4E8A6E`)，不返回 0。
+- `_malloc`(`0x4EA519`) = `HeapAlloc(hHeap,0,max(size,1))`（无 CRT 块头）⇒ 与
+  `cpu.heap->alloc(in_size+0x1000, zero=false)` 同源；`_free`(`0x4EA462`) 能释放我们的块。
+- 出参：`a3[1]` = 实际消费字节数（按计数写）、`a3[2]` = 压缩后大小；`EAX = [this+0xD42C]`；
+  `comp >= in` ⇒ 原样存储。
 
-## 验收
-- `--profile --profile-top 200` 两臂的尾段 wall 与 `sub_4367B0` 的 `incl` 读数（命令 + 读数，不接受"变快了"）。
-- `ctest` 全绿 + `pnpm test` 绿 + `pnpm tools requirements validate` 6/6。
-- 撤销方式写进正文：删 `kKnown` 一项 + 恢复 `kMax`。
+## 实现与准入
 
-## 交付（2026-11-11）
-- **纯核 + 薄包装**：`lzssEncodeObject`（原地改 guest 的 `0xD430` 对象，不动宿主影子）+ `nativeLzss4367B0`（分配 / 写 `EAX` / `a3[1]` / `a3[2]` / 失败回退）。
-  `kKnown` 加一项（`debug=true`）、`kMax` **13 → 14**（在 `native_overrides.h`）。
-- **守卫**：pure `lzss/{tree-invariants, tie-strict-greater, independent-transcription, roundtrip-decode, wrap-address, admission-no-write}`；
-  assets **9 档**真字节两臂（对象预填 `0xCC`、两臂各新 Fixture、`_crtheap` 预置）；e2e `native-override-e2e`（3 run：a1 空 / b 开 / a2 空，唯一差异 `--native-overrides sub_4367B0`）。
-- **变异**：`InsertNode` 的平局判据 `>` → `>=` ⇒ `lzss/tie-strict-greater` + 独立转写红（实测 1/1）；
-  复审另做 `s < 17u` → `s < 18u` ⇒ assets 4 条 `ovr.obj == base.obj` 红（差异 @0x1015）。
-- **实测时钟掩码 = 4 字节 `[276..280)`**（a1 == a2 逐字节相同）⇒ 具名常量 `276/5`。
-  ★ 任务单写的 24 与评估单的 `[264..284)` **都不对**——这就是"别照抄数字"的实例。
-- **e2e 读数**：尾段指令 131,104,827 → **8,495,927**（−93.53%）· `native-ovr` 明细 `sub_4367B0 @ 004367B0 thiscall(8B) hits=1 fallbacks=0` ·
-  墙钟 **7681.5 → 649.9 ms（11.8×）**；三臂 `stop=stopped / ExitProcess`。
-- **门禁**：build 绿 · `-R native-override` 3/3 · `pnpm test` 546/0 · 变异 1/1 红 · `requirements validate` 6/6 · `git diff --check` 0。
+- 纯核 `lzssEncodeObject`（原地改 `this` 的宿主视图；`in_ea` 只用来复现 32 位地址比较）+ 薄包装
+  `nativeLzss4367B0`（准入 / guest 堆分配 / 出参 / 失败回退）。
+- 准入 7 条（全部在**任何 guest 写之前**）：`a3` 12 B 已提交 · `[this, this+0xD430)` 已提交 · 输入跨度已提交
+  （`a2+a3[0]` 不回绕）· `a3[0] <= 0xFFFFEFFF` · `[this+0xD42C] == 0`（`ReusedOut`）· 有可用 guest 堆 ·
+  分配失败回退。
+- 已知边界：**不补虚拟时钟**（省掉的指令数随数据变，没有定值 k）⇒ 存档时间戳会比不 override 时早 ~12 s。
+  相位偏移是登记的已知偏差，不是缺陷。
 
-## 已知红（**不是本单引起**）
-- `quit-tail`：子进程日志首行 `没有 --game-dir` —— 夹具用 `game_dir.string()` 把日文路径转坏（pre-existing，已开 `REQ-01M73BWF51T1SKSSE6PV6X455A`）。
-- `movie-logo`：nooverride 臂 `stop: time-limit`（墙钟抖动；单跑绿、复审跑绿）。
-- `pnpm tools lift check` 4 条 pre-existing 红（`RaiseException` / `RtlUnwind` 与 JSON 不符）。
+## 守卫
 
-## 未做（已知边界，别当回归）
-- **虚拟时钟差**：省 ~1.2e8 条 ⇒ 存档时间戳仍会比不 override 时早 ~12 s（spike 已裁决不在本单补偿）。
+- pure：`lzss/tree-invariants` · `tie-strict-greater` · `independent-transcription` · `roundtrip-decode` ·
+  `wrap-address` · `admission-no-write`；`naiveLzssEncode` 的 `lson` 补到 `N+1+256` 并加左支上界自检。
+- assets：9 档真字节两臂（4 KB / 150,068 B 的可压与不可压、`tie-8`、空、1 字节、17/18）；比
+  `EAX/ESP/EIP/EBX/ESI/EDI/EBP` + `info[0..2]` + 整个 `0xD430` 对象 + `out`。
+- assets 新增 `lzss/decline-replay`：预设旧出缓冲（`out != 0`）⇒ `hits=0` / `fallbacks=1`，两臂全同、
+  `allocCount` 相同（证明 override 没在旁路分配）。夹具同时补绑了 `HeapFree` 的 IAT（原来只绑 `HeapAlloc`，
+  回退后 guest 的 `delete[]` 会跳进数据段）。
+- e2e：三份 run（a1 空 / b 开 / a2 空）；时钟判据改成**字段语义**（`SYSTEMTIME@264` 的 16 B ∪ `derived@280` 的 4 B），
+  不再用固定 5 字节掩码（旧掩码是数据快照：秒数跨 256 就无 bug 红）。
+
+## 实测
+
+- e2e：尾段 131,104,827 → 8,495,927 条（−93.53%）；墙钟 7681.5 → 649.9 ms；`hits=1 fallbacks=0`。
+- 存档差异 4 B 全落 `SYSTEMTIME`；派生秒 a1=93 / b=81、`Δtail_insns = 122,608,900` ⇒ 12.261 s（相位差的直接读数）。
+- a1 vs a2（同一臂两次）逐字节相同。
+
+## 未做
+
+- 不覆盖 `sub_436550`（InsertNode）：它的逻辑已在 `lzoInsertNode` 里，单独加项被整函数支配（150,086 次拦截只换
+  35%，整函数 1 次换 92.85%），且 `sub_4367B0` 命中后它一次都不会执行。
 - 不覆盖 `sub_4366A0`（DeleteNode）/ `sub_437480`（写文件）/ `sub_438320`（序列化）/ `sub_40AAE0`（事务层）。
-- 不证明"存档能被游戏读回"（那是另一条端到端单）。
+- 不证明"存档能被游戏读回"。

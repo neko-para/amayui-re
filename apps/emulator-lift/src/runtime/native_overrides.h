@@ -67,6 +67,8 @@ public:
     //   （下面的 static_assert 会先红，别等到 `all` 起不来）。
     // ★ 2026-11-10：12 → 13（`sub_4BBAB0` = Voice::Tick 的 stateless 快路径）。
     // ★ 2026-11-11：13 → 14（`sub_4367B0` = 退出写存档的 LZSS Encode 整函数）。
+    // ★ **14 = 表满，全部稳定项**（`debug` 机制保留，但当前**没有** debug 项 ⇒ `--native-overrides all`
+    //   会把每一项都开）。再加项必须同时抬高 kMax（`kKnown[]` 的 static_assert 会先红，别等到 `all` 起不来）。
     static constexpr std::size_t kMax = 14;
 
     bool add(std::uint32_t ea, const std::string& name, GuestConv conv, std::uint32_t arg_bytes, NativeFn fn,
@@ -160,6 +162,28 @@ struct KnownNative {
     NativeFn fn;
     bool debug = false;
 };
+// ---------------------------------------------------------------------------------------
+// ★ 函数级 override 的**准入门**（进 `all` = `debug == false` 的判据；五条缺一不可）
+//
+//   ① **契约可核**：函数身份（EA）、ABI（调用约定 + 清栈字节）、每个参数与返回值的来源都能在
+//      `.lst` 里逐字复核。⛔ 不许"看起来是这样"；`.c` 只能提假设，锚只有 EA。
+//   ② **准入零写**：任何前置条件不成立就 `return false`，且回退之前**没有任何 guest 可见副作用**
+//      —— guest 内存 / 寄存器 / x87 状态字与栈 / 堆 / 锁 / 宿主全局的软浮点状态都算。
+//      判据是"直接调 fn + 冻结快照"；⛔ 不是两臂差分（回退后解释器会重放整个函数，把回退前的写修回去）。
+//   ③ **纯核 + 分支覆盖**：把与 `X86`/ABI 无关的算术抽成纯函数（只吃宿主缓冲 / 标量），并用合成输入
+//      覆盖回绕 / 别名（src == dst）/ 极值 / 空输入这些分支。
+//   ④ **有一档函数级真字节等价**：让**同一份 guest 机器码**跑一遍解释器当 oracle，与 native 实现逐位
+//      比较输出（返回值 + 被改对象/内存 + 相关的 FPU/寄存器状态）。**只在输出确定时要求**
+//      （数据或时间相关的输出先由 oracle 定值；⛔ 不锁当前数字）。
+//   ⑤ **已知偏差登记 + 可隔离**：凡与 guest 不完全一致的地方（相位/时序偏移、故意更保守的回退、
+//      不复刻的死区写…）都要在实现处登记成**已知边界**，且必须能用 `all,-<名字>` 单独排除；
+//      `hits` / `fallbacks` / `declines[]` ⛔ **不得作为唯一判据**（可以作为"这一项真的被接管 /
+//      真的回退"的**伴随断言**）。
+//
+//   ★ 为什么"帧级 / 逐像素 A/B"**不是**准入门：函数级 override 在 dispatcher 里只记 **1 条指令 +
+//     1 个 tick** ⇒ 跳过 N 条 guest 指令就少走 `(N−1) × 100 ns` 虚拟时间，相位必然移动，
+//     逐帧相同在结构上不成立。相位偏移 = 登记的已知边界，不是缺陷。
+// ---------------------------------------------------------------------------------------
 const KnownNative* findKnownNative(const std::string& name);
 std::size_t knownNativeCount();
 const KnownNative& knownNativeAt(std::size_t i);
@@ -219,7 +243,10 @@ bool nativeUpload48B090(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 // ★ 只读 guest 内存；所有前置条件（this / 表 / 容量 / index / 提交状态）不成立 ⇒ 返回 false 回退。
 bool nativeFindIndex429020(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 // `sub_4CCC60`（Live2D `BDAffine` 虚表第 6 项，`__stdcall retn 1Ch` = 28 B）：逐顶点仿射变换。
-// 纯核在 `native_affine.h`；首版 `debug = true`（x87 逐位判据见 tests/native_override_assets.cpp）。
+// 纯核在 `native_affine.h`；已进 `all`（2026-11-11；x87 逐位判据见 tests/native_override_assets.cpp，
+// 回退零写见 tests/native_override.cpp 的 `affine/decline-no-write`）。
+// ★ 空循环（bound <= i0）一律回退解释器：`.lst` 0x4CCC71..0x4CCCDB 的序言在 `0x4CCCDE jge` 之前，
+//   guest 即使不进循环也会置 `fpu.status` 的 PE/ES、清 C0..C3（见 `native_affine.cpp` 那一支的注释）。
 bool nativeAffine4CCC60(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 // `sub_487C60`（CMovieTextureRenderer::DoRenderSample，thiscall `retn 4`）：影片样本 → A8R8G8B8 纹理。
 // 只覆盖主路径（无 alpha 面 / 无 alpha 拷贝 / 3 或 4 字节源）；其余回退解释器。

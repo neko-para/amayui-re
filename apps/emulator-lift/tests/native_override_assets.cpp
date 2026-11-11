@@ -411,6 +411,11 @@ struct AffineCase {
     bool pick_o24 = false;    // state+0x24 非 0 ⇒ 走第二个 inner 对象
     std::uint32_t dst_fill = 0xCCCCCCCCu;
     bool fpu_noise = false;   // 调用前 fld1（x87 栈非空 ⇒ override 必须 Declined）
+    // ★ x87 控制字 / 入口状态字：缺省值 = x87 reset 值（`0x037F` / 0）⇒ 现有用例的行为不变。
+    //   控制字是**真实输入面**（语料里 `fldcw` 94 处），状态字的 C0..C3 是 `fsin`/`fcos` 会清的位
+    //   （`.lst` 0x4CCC80/0x4CCC84 之后的 `fnstsw` 能读到）⇒ 两臂都必须从同一份初值出发。
+    std::uint16_t control = 0x037Fu;
+    std::uint16_t entry_status = 0;
 };
 
 struct AffineResult {
@@ -491,6 +496,14 @@ AffineResult runAffine(const std::vector<std::uint8_t>& code4CCC60, const Affine
     a.ret();
     if (!fx.m.placeCode(call_ea, a.b.data(), a.b.size(), &fx.err)) return out;
     fx.rearmStack();
+    // ★ 两臂都从同一份 x87 控制字 / 状态字出发（见 AffineCase 的字段注释）。
+    // ★ 还要把**宿主全局**的 softfloat 舍入/异常位复位：softfloat 的 `roundingMode` /
+    //   `roundingPrecision` 是进程级全局量，上一臂（解释器）跑完会把它留在**本用例的控制字**上
+    //   ⇒ 若不复位，"override 忘了 apply 控制字"会继承同一份残值而**静默相同**，控制字用例就白写了。
+    lift::x87ApplyControlWord(0x037Fu);
+    lift::x87ClearExceptionFlags();
+    fx.m.cpu().fpu.control = c.control;
+    fx.m.cpu().fpu.status = c.entry_status;
     fx.runCode(call_ea);
     if (!fx.ok) return out;
     out.valid = true;
@@ -536,10 +549,16 @@ struct LzssResult {
     std::vector<std::uint8_t> obj;
     std::vector<std::uint8_t> out;
     std::uint64_t hits = 0, fallbacks = 0;
+    // ★ `GuestHeap::allocCount()`：回退臂必须与解释器臂**同一份堆账**（证明 override 没有在旁路
+    //   自己分配 / 释放 —— 它只是 decline，然后由解释器重放 `delete[]` + `new[]`）。
+    std::uint32_t alloc_count = 0;
 };
 
+// `preset_out_bytes != 0` ⇒ 先在这个 guest 堆上分配一块"旧出缓冲"、写哨兵、把 EA 写进
+// `[this+0xD42C]` —— 这是 **复用对象** 形状（`0x4367DA` 读到非 0 ⇒ guest 会先 `delete[]` 0x4367E6
+// 再 `new[]` 0x436801）。override 的准入第 5 条只接管"新对象"⇒ 这条形状必须**回退**。
 LzssResult runLzss(const std::string& exe, const std::vector<std::uint8_t>& input, bool with_override,
-                   const char* tag) {
+                   const char* tag, std::uint32_t preset_out_bytes = 0u) {
     constexpr std::uint32_t kObjBytes = 0xD430u;
     constexpr std::uint32_t kSelf = 0x08000000u;
     constexpr std::uint32_t kInfo = 0x08100000u;
@@ -553,25 +572,32 @@ LzssResult runLzss(const std::string& exe, const std::vector<std::uint8_t>& inpu
     if (!m.loadImage(exe, &err)) return out;
     if (!m.prepareStack(&err)) return out;
     lift::registerKernel32Shims(m.shims());
-    // ★ 让 guest 的 `new[] → _malloc → HeapAlloc` 走得通：把 `kernel32!HeapAlloc` 的 **IAT 槽**改指到
-    //   我们装的桩（不 patch guest 字节；只改 IAT 里那一个 dword）。
-    lift::ShimDef* ha = m.shims().findMutable("kernel32", "HeapAlloc");
-    if (ha == nullptr) {
-        std::fprintf(stderr, "  [lzss %s] 没有 kernel32!HeapAlloc shim\n", tag);
-        return out;
-    }
-    constexpr std::uint32_t kHeapAllocStub = 0x7FF90000u;
-    ha->stub_ea = kHeapAllocStub;
-    m.cache().installShim(kHeapAllocStub, ha->id);
-    std::uint32_t iat_ea = 0;
-    for (const lift::PeImportInfo& imp : m.image().imports) {
-        if (imp.name == "HeapAlloc") iat_ea = m.image().image_base + imp.iat_rva;
-    }
-    if (iat_ea == 0) {
-        std::fprintf(stderr, "  [lzss %s] 导入表里找不到 HeapAlloc 的 IAT 槽\n", tag);
-        return out;
-    }
-    m.mem().wr32(iat_ea, kHeapAllocStub);
+    // ★ 让 guest 的 `new[] → _malloc → HeapAlloc` / `delete[] → _free → HeapFree` 走得通：把这两个
+    //   导入的 **IAT 槽**改指到我们装的桩（不 patch guest 字节；只改 IAT 里的那两个 dword）。
+    //   ★ 为什么 `HeapFree` 也要绑：`initBare + loadImage + prepareStack` 这条夹具路径**没有**跑
+    //     `Machine::prepare()`（那里才会 `bind()` + `installShim`）⇒ 未绑定的 IAT 槽里还是镜像原值，
+    //     guest 一调就跳进数据段（0x4367E6 的 `delete[]` 正好需要它）。
+    auto bindHeapImport = [&](const char* api, std::uint32_t stub) {
+        lift::ShimDef* d = m.shims().findMutable("kernel32", api);
+        if (d == nullptr) {
+            std::fprintf(stderr, "  [lzss %s] 没有 kernel32!%s shim\n", tag, api);
+            return false;
+        }
+        d->stub_ea = stub;
+        m.cache().installShim(stub, d->id);
+        std::uint32_t slot = 0;
+        for (const lift::PeImportInfo& imp : m.image().imports) {
+            if (imp.name == api) slot = m.image().image_base + imp.iat_rva;
+        }
+        if (slot == 0) {
+            std::fprintf(stderr, "  [lzss %s] 导入表里找不到 %s 的 IAT 槽\n", tag, api);
+            return false;
+        }
+        m.mem().wr32(slot, stub);
+        return true;
+    };
+    if (!bindHeapImport("HeapAlloc", 0x7FF90000u)) return out;
+    if (!bindHeapImport("HeapFree", 0x7FF90100u)) return out;
     if (!m.heap().init(&m.mem(), m.layout().heap_base, 0x00400000u)) return out;
     if (!m.mem().committed(kCrtheap, 4u)) {
         std::fprintf(stderr, "  [lzss %s] 0x55E920 不在已提交页（_crtheap 定位失效）\n", tag);
@@ -589,6 +615,16 @@ LzssResult runLzss(const std::string& exe, const std::vector<std::uint8_t>& inpu
     m.mem().wr32(kInfo + 4u, 0xDEADBEEFu);
     m.mem().wr32(kInfo + 8u, 0xDEADBEEFu);
     m.mem().wr32(kSelf + 0xD42Cu, 0u);  // "新对象"：out == 0（准入第 5 条；guest 也会 delete[] 它）
+    if (preset_out_bytes != 0u) {
+        const std::uint32_t old_out = m.heap().alloc(preset_out_bytes, /*zero=*/false);
+        if (old_out == 0u) {
+            std::fprintf(stderr, "  [lzss %s] 预置旧出缓冲失败（guest 堆申请不到）\n", tag);
+            return out;
+        }
+        std::vector<std::uint8_t> sentinel(preset_out_bytes, 0x5A);
+        std::memcpy(m.mem().host(old_out), sentinel.data(), sentinel.size());
+        m.mem().wr32(kSelf + 0xD42Cu, old_out);
+    }
     if (with_override) {
         if (!m.overrides().add(0x004367B0u, "refLzss", lift::GuestConv::Thiscall, 8, lift::nativeLzss4367B0,
                                &err)) {
@@ -630,6 +666,7 @@ LzssResult runLzss(const std::string& exe, const std::vector<std::uint8_t>& inpu
         const std::uint8_t* pb = m.mem().host(out.eax);
         out.out.assign(pb, pb + out.info[2]);
     }
+    out.alloc_count = m.heap().allocCount();
     if (with_override) {
         const lift::NativeOverride* e = m.overrides().at(0);
         out.hits = e->hits;
@@ -930,11 +967,58 @@ int main() {
         empty.stride = 2;
         empty.i0 = 4;  // bound = 4 <= i0 ⇒ 空循环（EAX = inner 对象）
         empty.src = {1, 2, 3, 4};
-        addCase("empty-loop", empty);
+        // ★ 空循环这一支**没有**快路径（序言仍要跑，见下一段的 `.lst` 依据）⇒ 必须交解释器重放。
+        //   参数保持原样（`r=1`、30° = **精确序言**档）：它现在与下面两条一起验"回退"，数值上仍是
+        //   一个独立数据点（这条的回退前状态字恰好是 0）。
+        addCase("empty-loop", empty, true);
+
+        // ★ 空循环**仍然执行序言**：`.lst` 的 `0x4CCC71 fld [eax+14h]` / `0x4CCC75 fmul flt_52F1B0` /
+        //   `0x4CCC80 fsin` / `0x4CCC84 fcos` / `0x4CCCC0..0x4CCCCE` 的四系数乘加 /
+        //   `0x4CCCD2..0x4CCCDB` 的取平移**全在 `0x4CCCDE jge` 之前** ⇒ 即使不进循环，guest 也会置
+        //   `fpu.status` 的粘性异常位（PE/ES）并清 C0..C3。override 一旦在这条分支上"直接成功返回"，
+        //   两者都会漏 ⇒ 这两条用例就是钉它的。
+        //   · `empty-loop-inexact`：`radius = 1.234567f` ⇒ `(sx*r)*cos` 的 77 位积放不进 PC=80 ⇒ inexact；
+        //   · `empty-loop-preset-cc`：入口 C3=1（`0x4000`，`fucomp` 之后的状态）⇒ `fsin`/`fcos` 会清 C0..C3。
+        AffineCase emptyInexact = empty;
+        emptyInexact.radius = 1.234567f;
+        addCase("empty-loop-inexact", emptyInexact, true);  // bound<=i0 ⇒ 必须交解释器重放序言
+
+        AffineCase emptyPresetCC = emptyInexact;
+        emptyPresetCC.entry_status = 0x4000u;  // C3 = 1
+        addCase("empty-loop-preset-cc", emptyPresetCC, true);
 
         AffineCase pick = base;
         pick.pick_o24 = true;  // `[state+0x24] ?: [state+0x20]` 的非零分支
         addCase("pick-o24", pick);
+
+        // ★ 非默认控制字：`fldcw` 在语料里 94 处（例 `0x4046B2` / `0x46236A`）⇒ "按 `cpu.fpu.control`
+        //   算"是真实不变量，且解释器对**每条** FP 指令都 `x87ApplyControlWord(cpu.fpu.control)`
+        //   （`exec_fpu.cpp`）⇒ override 必须在第一次算术之前做同一件事。
+        //   输入选**不可精确**的值：`radius = 1/3`、`angle_deg = 17` ⇒ 舍入模式 / 尾数位数一换，
+        //   dst 的最后一位就变（默认控制字下这两条仍然绿）。
+        //   ★ 0x077F：RC 位 [11:10] = 01 ⇒ round-down（向 −∞）；PC 位 [9:8] = 11 ⇒ 80 位（缺省）。
+        //   ★ 0x027F：RC 位 = 00（最近偶数）；PC 位 = 10 ⇒ 双精度（53 位尾数）。SoftFloat 侧这条映射
+        //     落到 `extF80_roundingPrecision = 64`（与解释器同一条 `x87ApplyControlWord`）⇒ 两臂一致。
+        AffineCase roundDown = base;
+        roundDown.control = 0x077Fu;  // RC = round-down
+        roundDown.radius = 1.0f / 3.0f;
+        roundDown.angle_deg = 17.0f;
+        roundDown.src = {0.25f, -1.5f, 3.75f, -0.1f, 7.0f, 2.0f};
+        addCase("rc/round-down", roundDown);
+
+        AffineCase pc53 = roundDown;
+        // ★ PC 位 [9:8] = 10 ⇒ 双精度（53 位尾数）；`x87ApplyControlWord` 把它映射到
+        //   `extF80_roundingPrecision = 64`（= 53 位 significand，与解释器同一条映射）。
+        pc53.control = 0x027Fu;
+        // ★ 让 PC 这一维**真的可见**（否则它只验"两臂都用同一个控制字"，删掉 apply 也不会红）：
+        //   `r = 1 + 2^-10`（11 位 significand）⇒ 四个系数 `cos*(1+2^-10)` 是 **63 位** significand
+        //   （53 位的 sin/cos × (2^10+1)）⇒ 在 PC=53 下 inexact、PC=80（64 位尾数）下精确；
+        //   而 `src` 全 0 使点积只剩平移项（f32 原值，精确）⇒ 两档的 `fpu.status`（PE 位）不同。
+        pc53.radius = 1.0009765625f;  // 1 + 2^-10
+        pc53.src = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        pc53.add4 = 1.0f;
+        pc53.add8 = 2.0f;
+        addCase("pc/53-bit", pc53);
 
         AffineCase zero = base;
         zero.angle_deg = 0.0f;
@@ -1065,6 +1149,46 @@ int main() {
                 }
                 std::fprintf(stderr, "  [lzss %s] out 首个差异 @%zu: ovr=%02X base=%02X（comp %u/%u）\n",
                              c.name, diff, ovr.out[diff], base.out[diff], ovr.info[2], base.info[2]);
+            }
+        }
+
+        // ---- ⑤b `ReusedOut` 回退 ⇒ **解释器真的重放**（`delete[]` 0x4367E6 + `new[]` 0x436801）----
+        // ★ 为什么单列：现有的 9 档全是"新对象"（`[this+0xD42C] == 0`），只验了"接管 + 逐字节等价"；
+        //   而 `ReusedOut` 只验过"零写 + declines 桶"（pure 的 `lzss/admission-no-write`），
+        //   **没有**验"回退之后 guest 自己走完对象生命周期"。进 `all` 后这是会被真实存档 / 对象
+        //   复用踩到的路径 ⇒ 这里用**堆上预置的旧出缓冲**把那条形状造出来，两臂各跑一次。
+        // 判据：①override 臂 `hits == 0 && fallbacks == 1`（真的回退，不是偷偷接管）；
+        //   ②两臂的 `eax / esp / eip / 寄存器 / info[0..2] / obj(0xD430) / out` 全同
+        //   （`obj` 里含 `[this+0xD42C]` = 重放后**新分配**的指针，所以这条同时钉住"旧块被 free、
+        //   新块从同一份堆状态里拿到同一个地址"）；③两臂 `heap.allocCount()` 相同
+        //   （override 没有在旁路自己分配 / 释放）。
+        {
+            lift_test::g_current_case = "lzss/decline-replay";
+            const std::vector<std::uint8_t> input = {0x42, 0x41, 0x42, 0x41, 0x42, 0x42, 0x41, 0x42};
+            const std::uint32_t kOldOutBytes = 16u;  // 旧出缓冲（内容不被读，只被 delete[]）
+            const LzssResult base = runLzss(exe, input, false, "decline-replay", kOldOutBytes);
+            const LzssResult ovr = runLzss(exe, input, true, "decline-replay", kOldOutBytes);
+            LIFT_CHECK(base.valid && ovr.valid);
+            if (base.valid && ovr.valid) {
+                std::printf("  [lzss %-16s] in=%6zu comp=%6u eax=%08X allocs=%u\n", "decline-replay",
+                            input.size(), base.info[2], base.eax, base.alloc_count);
+                LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.hits), 0u);
+                LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.fallbacks), 1u);
+                LIFT_CHECK_EQ_U32(ovr.eax, base.eax);
+                LIFT_CHECK_EQ_U32(ovr.esp, base.esp);
+                LIFT_CHECK_EQ_U32(ovr.eip, base.eip);
+                LIFT_CHECK_EQ_U32(ovr.ebx, base.ebx);
+                LIFT_CHECK_EQ_U32(ovr.esi, base.esi);
+                LIFT_CHECK_EQ_U32(ovr.edi, base.edi);
+                LIFT_CHECK_EQ_U32(ovr.ebp, base.ebp);
+                for (int i = 0; i < 3; ++i) LIFT_CHECK_EQ_U32(ovr.info[i], base.info[i]);
+                LIFT_CHECK(ovr.obj == base.obj);
+                LIFT_CHECK(ovr.out == base.out);
+                LIFT_CHECK_EQ_U32(ovr.alloc_count, base.alloc_count);
+                // 两臂都**真的做了事**（排除"两边都空跑"的假绿）
+                LIFT_CHECK(ovr.eax != 0u);
+                LIFT_CHECK_EQ_U32(ovr.info[0], static_cast<std::uint32_t>(input.size()));
+                LIFT_CHECK(ovr.info[2] != 0u);
             }
         }
     }

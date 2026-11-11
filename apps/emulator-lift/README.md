@@ -727,13 +727,20 @@ sprite 合批与那条直方图的算法。⛔ 不把逐帧数字写进 README�
 - **选择策略**：`--native-overrides all` 开 `KnownNative::debug == false` 的**稳定**项；
   `debug == true` 的项必须显式点名（日志带 `[debug]` 与警告）。`-名字` 表示**排除**，
   排除项优先于启用项，且与出现顺序无关：`all,-sub_48B090` 与 `-sub_48B090,all` 等价。
-  稳定层 / debug 层的**完整清单以启动行 `native-ovr: ...` 为准**（⛔ 本节不复述全部名字，它随加项而变）。
+  **完整清单以启动行 `native-ovr: ...` 为准**（⛔ 本节不复述全部名字，它随加项而变）。
   稳定层目前含 CRT 叶子（`_memcpy` / `_memcpy_0` / `_memset` / `_strlen` / `sub_401000`）、
   S4IC/LZSS `sub_436A80`（`__thiscall`，`info[0]=输出大小`、`info[2]=压缩大小`）、
   `NormalTexture` 的三项 `sub_48B090` / `sub_429020` / `sub_48AE90`、影片 `sub_487C60`、
-  字形 `sub_46D9F0`，以及**段级** `sub_414AC0`（SYS4INI 装载器的中段填池循环；不是整函数）。
-  **debug 层**（必须显式点名）：`sub_4CCC60`（Live2D `BDAffine` 逐顶点仿射；本线**第一项 x87** override，
-  逐位判据 = 真字节差分 `tests/native_override_assets.cpp`，含 `fpu.status`；⛔ G3 帧级 A/B 之前不进 `all`）。
+  字形 `sub_46D9F0`、Live2D 仿射 `sub_4CCC60`（本线第一项 x87 override）、
+  退出写存档的 LZSS 编码 `sub_4367B0`，以及**段级** `sub_414AC0`（SYS4INI 装载器的中段填池循环；
+  不是整函数）。每一项都能用 `all,-<名字>` 单独排除。
+  ★ GPU 逐像素黄金图守卫（`golden-image` / `golden-image-compare`）已按用户裁决**移除**：
+  该判据依赖虚拟时钟相位与 GPU 驱动，**不能稳定复现**。画面回归改由各 override 自己的
+  函数级两臂差分 + 既有 GPU 用例承担。
+- **函数级 override 只记 1 条指令 + 1 个 tick**（`machine.cpp` 的 dispatcher）⇒ 跳过 N 条 guest 指令
+  就少走 `(N−1) × 100 ns` 虚拟时间，**相位偏移是登记的已知边界，不是缺陷**；因此"帧级 / 逐像素 A/B"
+  **不是**准入门。准入的五条（契约可核 · 准入零写 · 纯核 + 分支覆盖 · 有一档函数级真字节等价 ·
+  已知偏差登记且可隔离）见 `src/runtime/native_overrides.h` 的契约段。
 - `sub_48B090` 的 8/24/32bpp 与 alpha 路径已按 `.lst` 核；4/1bpp 源、16bpp 目标与色键≠0
   仍**显式回退解释器**。锁走 `d3d9::lockRect`/`unlockRect`，失败不留半状态。
   **虚拟时钟相位**没有做补偿（明确不在当前范围）；Windows 侧曾观察到异常、macOS 未复现，

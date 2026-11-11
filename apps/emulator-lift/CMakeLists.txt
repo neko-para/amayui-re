@@ -962,45 +962,6 @@ if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
 endif()
 
 # =====================================================================================
-# GPU 黄金图回归（`REQ-01M73G49T01W1CQDSME83ES0YD`）
-# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
-# ★ 判据见 `tests/golden_image.cpp` 文件头：分块 16×16 均值 + 全图 mean|Δch| + 超阈像素比例
-#   三层**与**判据（⛔ 不用整帧哈希 —— 同配置两次运行的亮度档数实测漂到 243 vs 248）。
-# ★ 两层注册（判据 = 注册位置，见 AGENTS.md §5）：
-#   ① `golden-image-compare` = **pure**：顶层无条件 ⇒ 默认 `ctest` 就跑。比较器 + PNG 编解码的
-#      合成用例（自己比自己必过 / 只改一个 16×16 块必红 / 全图 +1 LSB 仍过 / 尺寸不一致必红）。
-#      `tools/mutate-check.mjs` 的 `ctest:golden-image-compare` 指向它。
-#   ② `golden-image` = **assets**：落在 `if(EXISTS 安装树)` 里；GPU 不可用 / 没有安装树时
-#      **运行期** `LIFT_SKIP`(77) 并打印原因（⛔ 不静默通过）。它在默认门禁里跑（本机 ~7 s），
-#      因为它要抓的正是"`--gpu-strict` 绿但画面错"这一类（S1）。
-#      `LIFT_UPDATE_GOLDEN=1` ⇒ 覆盖 `tests/golden/title-f2-gpu.png`（仅供人工确认后使用，日志大声报）。
-# ★ 黄金图入库走 LFS（`.gitattributes` 的 `*.png` 规则）。
-# =====================================================================================
-target_sources(emulator-lift-runtime PRIVATE
-    src/runtime/golden_image.cpp)
-
-# ---- pure：黄金图比较器（合成 PNG：自反 / 单块改动 / 1 LSB / 尺寸不一致）----
-add_executable(lift-golden-image tests/golden_image.cpp)
-target_link_libraries(lift-golden-image PRIVATE emulator-lift-runtime)
-add_test(NAME golden-image-compare COMMAND lift-golden-image --self-test)
-
-# ---- assets：TITLE 第 2 帧的 GPU 黄金图（缺安装树 ⇒ 不注册；GPU 不可用 ⇒ SKIP 77）----
-# ★ 与 `loader` / `host-encoding` 同一条判据（`EXISTS` 资产 / 安装树），⛔ 不加 `LIFT_ASSETS`
-#   opt-in：这条是**每次都要跑**的画面回归（S1 那种"账本全绿、画面丢了"的唯一自动判据）。
-if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN")
-    add_test(NAME golden-image COMMAND lift-golden-image --fixture
-        $<TARGET_FILE:emulator-lift>
-        "${LIFT_ASSETS_GAME_DIR}"
-        "${CMAKE_CURRENT_BINARY_DIR}/golden-image-work"
-        "${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/title-f2-gpu.png")
-    set_tests_properties(golden-image PROPERTIES
-        # ★ 子进程继承这个 cwd：模拟器默认的执行源是按相对当前目录找的。
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        SKIP_RETURN_CODE 77
-        TIMEOUT 600)
-endif()
-
-# =====================================================================================
 # `--dump-frame` 的目录必须在开跑前建好（`REQ-01M73YBCC3DZ05Y9NSDTRKTMMY`）
 # ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
 # ★ 判据见 tests/cli_dump_frame.cpp 头注释：

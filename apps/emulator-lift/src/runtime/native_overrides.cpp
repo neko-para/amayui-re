@@ -242,14 +242,23 @@ const KnownNative kKnown[] = {
     {"sub_4BBAB0", GuestConv::Thiscall, 4, nativeVoiceTick4BBAB0},
     // ★ 2026-11-08：Live2D `BDAffine` 逐顶点仿射（stdcall `retn 1Ch` = 28 B；虚表第 6 项 @0x52F0C0）。
     //   `.lst` 0x4CCC60..0x4CCD34；x87 逐位（SoftFloat 四则 + transcendental 同路径）。
-    //   ★ 首版 `debug = true`（⛔ 不进 `all`）：真字节差分见 tests/native_override_assets.cpp
-    //   （解释器 vs override，比 dst / 寄存器 / x87 ST 与状态字）。进 `all` 前要补帧级 A/B。
-    {"sub_4CCC60", GuestConv::Stdcall, 28, nativeAffine4CCC60, /*debug=*/true},
+    //   已进 `all`（2026-11-11）：准入判据 = 实现 + 独立复核（见 `native_overrides.h` 的五条契约）。
+    //   逐位判据 = tests/native_override_assets.cpp 的**函数级真字节两臂**（dst / 寄存器 / x87 状态字
+    //   / 非默认控制字），回退零写 = tests/native_override.cpp 的 `affine/decline-no-write`。
+    //   ★ 已知边界（登记，不是缺陷）：空循环（bound<=i0）**没有**快路径 —— `.lst` 0x4CCC71..0x4CCCDB
+    //     的序言在 `0x4CCCDE jge` 之前，guest 即使不进循环也会置 `fpu.status` 的 PE/ES 并清 C0..C3 ⇒
+    //     那一支一律回退解释器；另外它和其他函数级 override 一样会移动虚拟时钟相位（见头文件的准入门）。
+    //     可用 `all,-sub_4CCC60` 隔离。
+    {"sub_4CCC60", GuestConv::Stdcall, 28, nativeAffine4CCC60},
     // ★ 2026-11-11：退出写存档尾段的 **LZSS Encode 整函数**（`retn 8`、thiscall、EAX = `this->out`；
     //   `.lst` 0x4367B0..0x436A75）。1 次拦截覆盖尾段 92.85% 的墙钟（`incl=3328.1 ms` / `calls=1`）。
     //   契约见 `native_overrides.h` 的 `LzssEncodeOutcome` / `LzssWhy` 段。
-    //   ★ 首版 `debug = true`（⛔ 不进 `all`）：真字节两臂差分见 tests/native_override_assets.cpp。
-    {"sub_4367B0", GuestConv::Thiscall, 8, nativeLzss4367B0, /*debug=*/true},
+    //   已进 `all`（2026-11-11）：准入判据 = 实现 + 独立复核（见 `native_overrides.h` 的五条契约）。
+    //   真字节两臂差分见 tests/native_override_assets.cpp（解释器臂 = 同一 EA 的 oracle）；
+    //   "回退之后 guest 自己走完 delete[]/new[]" 见同文件的 `lzss/decline-replay`。
+    //   ★ 已知边界（登记，不是缺陷）：省掉的 guest 指令数**随数据变**（没有定值 k 可补）⇒ 存档里的
+    //     虚拟时钟时间戳会比基线早一截（相位偏移）；可用 `all,-sub_4367B0` 隔离。
+    {"sub_4367B0", GuestConv::Thiscall, 8, nativeLzss4367B0},
 };
 constexpr std::size_t kKnownCount = sizeof(kKnown) / sizeof(kKnown[0]);
 // ★ 表容量是**硬约束**：`--native-overrides=all` 会把每个 `debug == false` 的项都 `add()` 一遍
@@ -632,7 +641,10 @@ bool nativeLzss4367B0(X86& cpu, GuestMemory& mem, std::uint32_t* result) {
     // ★ 输入跨度的提交检查只在 `a2 + a3[0]` **不回绕**时做（回绕 ⇒ 首灌 0 次 ⇒ 一个字节都不读）。
     const std::uint32_t in_end = in_ea + in_size;
     if (in_size != 0u && in_end > in_ea && !mem.committed(in_ea, in_size)) return decline(LzssWhy::BadInput);
-    // ★ 只接管"**新对象**"（两个真实调用点都是 `new Compress` + ctor ⇒ `out == 0`）。
+    // ★ 只接管"**新对象**"（两个真实调用点的 `out` **都为 0**：一个是 `new Compress`（`.lst`
+    //   `0x4375ED push 0D430h` / `0x4375F2 call ??2` / `0x43760D call sub_4364E0`），另一个是**栈局部**
+    //   对象（`0x457D17 lea ecx,[ebp+var_D44C]` / `0x457D25 call sub_4364E0`）；两者都由 ctor
+    //   `0x4364E8` 把 `+0xD42C` 清零）。
     //   `out != 0` 时 guest 会先 `delete[]` 再 `new[]`，与"失败可回退（零写）"不可兼得 ⇒ 拒绝并落桶。
     if (mem.rd32(self + kLzoOut) != 0u) return decline(LzssWhy::ReusedOut);
     if (cpu.heap == nullptr || !cpu.heap->ready()) return decline(LzssWhy::NoHeap);

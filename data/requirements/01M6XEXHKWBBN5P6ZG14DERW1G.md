@@ -9,52 +9,47 @@
 
 ## 一句话
 
-`sub_4CCC60`（EA **`0x4CCC60`**，Live2D `BDAffine` 虚表第 6 项）**已实现**为函数级 native override，
-首版 **`debug = true`**（⛔ 不进 `all`；必须显式 `--native-overrides all,sub_4CCC60`）。
-它是**纯算术叶子**（x87 `fsin`/`fcos` + 逐顶点仿射；无 guest 回调 / 无锁 / 无全局写）。
-★ 本线**第一项 x87 override**：判据不是"看起来对"，而是与解释器**逐位相同**（见 G1）。
+`sub_4CCC60`（EA **`0x4CCC60`**，`__stdcall retn 1Ch`，Live2D `BDAffine` 虚表第 6 项）是函数级 native override，
+**已进 `all`（2026-11-11）**；它是本线第一项 x87 override，判据是**与解释器逐位相同**（`dst` + 寄存器 + `fpu.status/tag/top/control`）。
 
-## 身份与契约
+## 身份与契约（锚只有 EA）
 
-- `0x4CCC60` · `.text` · **`__stdcall` `retn 1Ch`** ⇒ 7 个栈参数 = 28 B；`cpu.arg(0)`（`[ebp+8]`）**全程未读**。
-  实参 = `cpu.arg(1..6)` = state / src / dst / count / i0 / stride。
-- 唯一调用证据 = `??_7BDAffine@live2d@@6B@`（@`0x52F0AC`）第 6 项（@`0x52F0C0`）；直接 `call` = 0。
-- 语义（`.lst` `0x4CCC60..0x4CCD34`）：`o=[state+0x24] ?: [state+0x20]`；`θ=[o+0x14]*flt_52F1B0`；
-  `r=[state+0x10]`；`sx=[o+0x18]==0?+1:-1`、`sy=[o+0x19]==0?+1:-1`；
-  `for(i=i0; i<count*stride; i+=stride){ ix=src[i]; iy=src[i+1];
-   dst[i]=iy*(-r*sy*sinθ)+ix*(r*sx*cosθ)+[o+4]; dst[i+1]=iy*(r*sy*cosθ)+ix*(r*sx*sinθ)+[o+8]; }`
-  `EAX = dst+4*(i0+1+N*stride)`（进循环）否则 `o`；`stride==1` 时相邻两点**重叠写**（后写赢）。
-- 唯一全局 `flt_52F1B0` 是**读**（工具按操作数位置记成"写"，是启发式）。
+- `.lst` `0x4CCC60..0x4CCD34`；7 个栈参 = 28 B，`[ebp+8]`（`cpu.arg(0)`）**全程未读**。
+- 唯一引用点 = `.data:0052F0C0 dd offset sub_4CCC60`（vtable 第 6 项）；直接 `call` = 0。可核调用方 `sub_4CCD40`
+  的三个 `call [[edi]+14h]`（`0x4CCD76` / `0x4CCDB6` / `0x4CCE22`）都在 x87 栈深 0。
+- 语义：`o = [state+0x24] ?: [state+0x20]`；`θ = [o+0x14] * flt_52F1B0`；`r = [state+0x10]`；
+  `sx/sy` 由 `[o+0x18]/[o+0x19]` 取 ±1；四系数 + `[o+4]/[o+8]` 平移；`stride==1` 时相邻点重叠（后写赢）；
+  `EAX = dst + 4*(i0+1+N*stride)`。
 
-## 实现（2026-11-08）
+## 实现
 
-- 落点：`native_affine.cpp`（准入 + 循环）+ `native_affine.h`（纯核）+ `native_overrides.h` 声明
-  + `native_overrides.cpp` 的 `kKnown[]` 一行 + `CMakeLists.txt`。
-- x87：四则/取号走 SoftFloat `extF80`；`fsin`/`fcos` 走 `exec_fpu.cpp` 的 `transcendental()` 同路径
-  （`x87ToDouble → std::sin/cos → x87FromDouble`）。⛔ 不许用 `double` 重写。
-- 状态字：末尾按 `syncStatus` 的映射补一次。C0..C3 由 `fsin`/`fcos` 清 0、之后无指令改；
-  异常位 OR 可交换 ⇒ 与解释器"每条指令 sync"等价（G1 比 `fpu.status` 验证）。
-- 准入（全部在**任何 FPU 副作用 / guest 写之前**）：state/obj/全局提交；**x87 栈必须为空**
-  （guest 峰值深度 8，非空栈在 guest 里是 push 溢出路径）；`|θ| < 2^63`（宿主 double 保守判）；
-  空循环早返回（`EAX=obj`）；非空循环要求 `stride>0 && i0>=0`；src/dst 访问区间提交。
-- 出口：dst 逐点写（先读两个再写两个）；`EAX = dst+4*(last+stride+1)`（32 位回绕）。
+- 纯核 `affineCoeffs` / `affinePoint`（`native_affine.h`）+ 准入与循环 `nativeAffine4CCC60`（`native_affine.cpp`）。
+- x87：SoftFloat `extF80` 四则 + `fsin`/`fcos` 走 `transcendental()` 同路径；`x87ApplyControlWord(cpu.fpu.control)`；
+  出口补一次 `syncX87Status`。
 
-## 守卫与结果
+## 进 `all` 时修的两处（2026-11-11）
 
-- **G1 assets 真字节差分**：`repo:apps/emulator-lift/tests/native_override_assets.cpp` —
-  **505 checks / 0 fail**。比 dst 逐字节 + `EAX/ESP/EIP` + `EBX/ESI/EDI/EBP` + **`fpu.status/control/tag/top`**；
-  覆盖 stride 1/2/3/4、i0 偏移、原地 alias、sx/sy 四种、r<0、空循环、`[state+0x24]` 分支、
-  以及 huge-angle / 非空 x87 栈两种 **Declined**。
-- **G2 pure 核**：`repo:apps/emulator-lift/tests/native_override.cpp` — **1218 checks / 0 fail**
-  （θ=0 的四系数含**零的符号位** + 单点乘加顺序 + C2 区拒绝）。
-- **分层**：`debug=true`；`all` 不含它（启动行 11 项 vs `all,sub_4CCC60` 12 项，已核）。
-- **变异自检**（手工施加后恢复，哈希比对通过）：flip_x 反转 ⇒ 8 failures；sin/cos 对调 ⇒ 8；
-  两个平移对调 ⇒ 8；去掉 `fchs` ⇒ 7。
-- **G3 帧级 A/B 未机械化**：点 OPTION 的输入脚本命中不稳定（同一脚本多次运行有的进 OPTION、有的没进）⇒
-  暂不作判据；与 `sub_46D9F0` 同口径登记为残余。⛔ G3 绿之前不进 `all`。
+1. **空循环**：`.lst 0x4CCCDE jge` 在 `0x4CCC80 fsin` / `0x4CCC84 fcos` / `0x4CCCC0..4CCCD0 fmulp` /
+   `0x4CCCD2..4CCCDB` **之后** ⇒ guest 即使不进循环，也已置 `fpu.status` 的 PE/ES 并清 C0..C3。
+   旧实现提前成功返回 ⇒ 改成 `return false`（交解释器重放）。真实调用方 `count=1, i0=0` ⇒ 该支产品路径走不到。
+2. 回退零写：17 条 `return false` 全部在 guest 写之前（独立复审逐条核过）。
 
-## 残余 / 下一步
+## 守卫
 
-1. **G3**：补一个与 boot 时序解耦的可重放 OPTION 输入，再比逐帧 hash（`all` vs `all,-sub_4CCC60`）。
-2. 进 `all` 的条件：G3 逐帧一致 + `hits>0` / `fallbacks=0` + 至少一次真实 OPTION 场景。
-3. 语法 / 语义仍以 `.lst` 为锚；⛔ 不把 `native_affine.h` 的纯核当"引擎规范"。
+- assets `empty-loop-inexact` / `empty-loop-preset-cc`：`fpu.status` 逐位（修前红：`00A0 vs 0000` / `00A0 vs 4000`）。
+- assets `rc/round-down` / `pc/53-bit`：控制字真的被应用（删 `x87ApplyControlWord` ⇒ 2 条红）。
+- assets 原有：stride 1/2/3、`i0` 偏移、原地 alias、sx/sy 四种、r<0、`[state+0x24]` 分支、huge-angle / 非空 x87 栈两种回退。
+- pure `affine/decline-no-write`：直接调 fn（`i0<0` / dst 跨度未提交 / x87 栈非空）⇒ 返回 false 且 `dst`／`status`／
+  `tag`／`top` 与快照逐字节相同。
+
+## 口径
+
+- **帧级 / 逐像素 A/B 不是准入门**：函数级 override 在 dispatcher 里只记 1 条指令 + 1 tick ⇒ 跳过 N 条就少走
+  `(N−1)×100ns` 虚拟时间（本项在 TITLE 实测 `Δinsns = 115,025` ≈ 11.5 ms）。准入五条见
+  `apps/emulator-lift/src/runtime/native_overrides.h` 的契约段。
+- 隔离：`all,-sub_4CCC60`。
+
+## 残余
+
+- `pc/53-bit` 这一维在本函数出口（f32 + 状态字）基本被 `fstp dword` 吃掉；用例只钉"控制字真的被应用"。
+- `edi` 是否恒为 `BDAffine` **未取证**；只证到"唯一引用点是该 vtable 第 6 项"。

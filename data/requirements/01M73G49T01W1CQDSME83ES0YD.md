@@ -2,9 +2,9 @@
 
 - id: REQ-01M73G49T01W1CQDSME83ES0YD
 - type: req
-- status: done
+- status: dropped
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- verify: apps/emulator-lift/tests/golden_image.cpp#golden/compare-one-block-fails
+- dropped_reason: 用户裁决（2026-11-11）：整条移除 GPU 像素黄金图守卫。判据依赖虚拟时钟相位与驱动、不能稳定复现——把 sub_4CCC60 放进 --native-overrides all 后 TITLE 第 2 帧 golden 红（global_mean=3.1497>1.5、910,564 字节差、2917/3600 块，但 max|Δch|=10；all vs all,-sub_4CCC60 的 insns 差 115,025 ≈ 11.5 ms）⇒ 画面没错、是相位挪了，且每加一个相位敏感的 override 都会复发。已删 tests/golden_image.cpp / src/runtime/golden_image.{h,cpp} / tests/golden/title-f2-gpu.png / golden-image 与 golden-image-compare 两个 CTest / tools/mutate-check.mjs 的对应条目。画面回归改由各 override 的函数级两臂差分 + 既有 GPU 用例承担。
 - tags: [emulator-lift gpu golden-image test]
 
 ## 一句话

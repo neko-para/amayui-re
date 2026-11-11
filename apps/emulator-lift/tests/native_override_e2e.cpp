@@ -13,10 +13,11 @@
 //   ⑤ 尾段墙钟 `tail_wall_ms(b) < tail_wall_ms(a1)`：**只比更低**，⛔ 不给绝对阈值、不给倍数下限
 //      （同一份二进制两次 run 的墙钟实测差到 1.48×，见 `.tmp/quit-tail/report.md` §1.3）。
 //      它是最弱的一条（宿主抖动），所以放在最后、只当辅助读数；
-//   ⑥ 存档差分：`a1` vs `a2` 的 `SAVE.DAT` **逐字节相同**（不需要掩码，抓"未初始化字节"这类真错）；
-//      `a1` vs `b` 的差异**必须落在虚拟时钟区**里，且**打印实测区间**：
-//        `kSaveClockOffset` / `kSaveClockSpan` 是**具名常量**，由落地后第一次两臂实测填
-//        （⛔ 不抄任务单的 24 / `[264..284)`：两者冲突且都没实测；见 `.tmp/reveq/…/report.md`）。
+//   ⑥ 存档差分：`a1` vs `a2` 的 `SAVE.DAT` **逐字节相同**（抓"未初始化字节"这类真错）；
+//      `a1` vs `b` 的差异**必须落在虚拟时钟的两个字段**里 —— `SYSTEMTIME`（@264，16 B）与
+//      时钟派生 dword（@280，4 B），且**打印**实测差异与"派生秒 vs 尾段指令数差"的对照。
+//      ★ 判据是**字段语义**，不是字节快照：280 是派生 dword 的**低字节**，虚拟时钟跨 256 s
+//        它就会进位 ⇒ 拿"最后一个差异字节 < 281"当断言是数据快照，无 bug 也会红。
 // ★ 不断言任何当前数字（`tail_insns ≈ 1.3e8`、`comp` 之类）—— 它们是**读数**，会随构建变。
 // ★ 环境不可用（没有游戏安装 / GPU / 执行源）⇒ `LIFT_SKIP`(77)：那不是判据红。
 // ★ 子进程输出走**文件重定向**（⛔ 不走管道：受限沙箱里捕获管道会 EPERM）。
@@ -55,16 +56,21 @@ namespace fs = std::filesystem;
 // ⛔ 不要在末尾加 `quit` / `wait`：本守卫要的是"引擎自己走到进程退出"的那一段尾段。
 constexpr const char* kScript = "at frame 130\nclick 1190 630\nat frame 150\nprofile_begin tail\n";
 
-// ★ 具名常量：写存档里**虚拟时钟**的落点（`GetLocalTime` / `timeGetTime` 的字节区间）。
-//   ★ 本机实测（2026-11-11，第一次两臂 run；见 `.tmp/reveq/REQ-01M7375DARF1QFZEFNWX3CAK6T/report.md`）：
-//     `SAVE.DAT`（48128 B）a1-vs-b 只有 **4 个字节**不同：偏移 **276 / 278 / 279 / 280**（277 相同）
-//     ⇒ 实测区间 = **[276..280]**，掩码取它的闭包 `[276, 281)`。
-//     虚拟时钟差 = (131,104,827 − 8,495,927) × 100 ns ≈ **12.26 s**（尾段省掉的指令数）。
-//     两臂同配置各自重复一次 ⇒ `SAVE.DAT` 逐字节相同（所以掩码**只**为时钟而存在）。
-//   ⛔ 不要照抄任务单的 `24` / `[264..284)`（两者都没实测、且与实测不符）；
-//     若将来这里红了而差异仍落在时间块内，**重新实测再改这两个数**，⛔ 不要放宽断言了事。
-constexpr std::uint32_t kSaveClockOffset = 276u;
-constexpr std::uint32_t kSaveClockSpan = 5u;
+// ★ 写存档里**虚拟时钟**的两个字段（字段语义，不是字节快照；⛔ 不是"逐字节反解了序列化"）：
+//   · `SAVE.DAT[264..279]` = `SYSTEMTIME`（`0x4377B6 call GetLocalTime`，8 × WORD = 16 B）。
+//     `wSecond`@276 / `wMilliseconds`@278 这两个落点**实测**自留档 `SAVE.DAT` 的 hex dump
+//     （其余 6 个 WORD 按 Win32 `SYSTEMTIME` 的字段顺序排：年/月/星期/日/时/分）。
+//   · `SAVE.DAT[280..283]` = 一个 dword = `timeGetTime()/1000 + ([ebx+0x40C] − [ebx+0x408])`：
+//     `0x4377BC call timeGetTime` / `0x4377C4 mov eax,10624DD3h` / `0x4377C9 mul ecx` /
+//     `0x4377DA shr edx,6`（魔数除法 ≈ `/1000`）。281..283 是这个 dword 的高字节 ——
+//     实测差异只落在 280（低字节），高位为 0。
+// ★ 两臂同配置各自重复一次 ⇒ `SAVE.DAT` 逐字节相同（所以这两个字段**只**为虚拟时钟而存在）。
+// ⛔ 不要把右界写成"最后一个差异字节 < 281"：280 是派生 dword 的**低字节**，虚拟时钟差跨过
+//   256 s 时它也会变 ⇒ 那是数据快照，无 bug 也会红。差异只许落在**字段区间**里。
+constexpr std::uint32_t kSaveClockSystemTime = 264u;  // 16 B（8 个 WORD）
+constexpr std::uint32_t kSaveClockSystemTimeBytes = 16u;
+constexpr std::uint32_t kSaveClockDerived = 280u;  // 4 B（时钟派生秒）
+constexpr std::uint32_t kSaveClockDerivedBytes = 4u;
 
 struct ChildResult {
     int exit_code = -1;
@@ -248,6 +254,7 @@ struct ByteDiff {
     std::size_t count = 0;
     std::size_t first = 0;
     std::size_t last = 0;
+    std::vector<std::size_t> offsets;  // 每一个差异偏移（逐字节判"落在哪个字段"用）
 };
 
 ByteDiff diffBytes(const std::vector<std::uint8_t>& a, const std::vector<std::uint8_t>& b) {
@@ -260,6 +267,7 @@ ByteDiff diffBytes(const std::vector<std::uint8_t>& a, const std::vector<std::ui
         if (d.count == 0) d.first = i;
         d.last = i;
         ++d.count;
+        d.offsets.push_back(i);
     }
     return d;
 }
@@ -465,15 +473,55 @@ int main(int argc, char** argv) {
         const ByteDiff same = diffBytes(save[0], save[2]);
         LIFT_CHECK(same.same_size);
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(same.count), 0);  // 同一臂两次：逐字节相同
-        g_current_case = "e2e/save-clock-mask";
+        g_current_case = "e2e/save-clock-fields";
         const ByteDiff d = diffBytes(save[0], save[1]);
         LIFT_CHECK(d.same_size);
         std::printf("native-override-e2e: SAVE.DAT a1-vs-b 差异：%zu 字节，区间 [%zu..%zu]；"
-                    "掩码 [%u..%u)\n",
-                    d.count, d.first, d.last, kSaveClockOffset, kSaveClockOffset + kSaveClockSpan);
+                    "允许字段 = SYSTEMTIME [%u..%u) ∪ 派生 dword [%u..%u)\n",
+                    d.count, d.first, d.last, kSaveClockSystemTime,
+                    kSaveClockSystemTime + kSaveClockSystemTimeBytes, kSaveClockDerived,
+                    kSaveClockDerived + kSaveClockDerivedBytes);
         LIFT_CHECK(d.count > 0);  // 时钟真的差（否则"两臂一样"本身就可疑）
-        LIFT_CHECK(d.first >= kSaveClockOffset);
-        LIFT_CHECK(d.last < kSaveClockOffset + kSaveClockSpan);
+        // ★ 逐字节判**字段**：每个差异都必须落在 SYSTEMTIME 或派生 dword 里。
+        for (const std::size_t off : d.offsets) {
+            const bool in_systemtime =
+                off >= kSaveClockSystemTime && off < kSaveClockSystemTime + kSaveClockSystemTimeBytes;
+            const bool in_derived =
+                off >= kSaveClockDerived && off < kSaveClockDerived + kSaveClockDerivedBytes;
+            if (!in_systemtime && !in_derived) {
+                std::fprintf(stderr, "  SAVE.DAT 差异落在时钟字段之外：偏移 %zu（共 %zu 字节）\n", off,
+                             d.count);
+            }
+            LIFT_CHECK(in_systemtime || in_derived);
+        }
+        LIFT_CHECK(d.last < kSaveClockDerived + kSaveClockDerivedBytes);
+        // ★ 读数（**不断言**）：派生秒的实测差 vs "尾段省掉的指令数 × 100 ns" 的对照。
+        //   虚拟时钟按指令数推进（`clock.h`）⇒ 两者应当接近；差得远说明"少走的时间"来源不是被替代的
+        //   那条指令流（或 run 之间还有别的差异）—— 这是给人看的诊断，不是判据。
+        {
+            const auto readU32At = [](const std::vector<std::uint8_t>& b, std::size_t at) {
+                std::uint32_t v = 0;
+                if (at + 4u <= b.size()) {
+                    v = static_cast<std::uint32_t>(b[at]) | (static_cast<std::uint32_t>(b[at + 1u]) << 8) |
+                        (static_cast<std::uint32_t>(b[at + 2u]) << 16) |
+                        (static_cast<std::uint32_t>(b[at + 3u]) << 24);
+                }
+                return v;
+            };
+            const std::int64_t derived_a = readU32At(save[0], kSaveClockDerived);
+            const std::int64_t derived_b = readU32At(save[1], kSaveClockDerived);
+            std::printf("native-override-e2e: 时钟读数：派生秒 a1=%lld b=%lld（Δ=%lld s）",
+                        (long long)derived_a, (long long)derived_b, (long long)(derived_b - derived_a));
+            if (tails[0].parsed && tails[1].parsed) {
+                const std::int64_t insn_delta =
+                    static_cast<std::int64_t>(tails[0].tail_insns) - static_cast<std::int64_t>(tails[1].tail_insns);
+                // 100 ns / 指令 ⇒ 秒 = Δinsns × 1e-7
+                const double insn_seconds = static_cast<double>(insn_delta) * 1e-7;
+                std::printf("；Δtail_insns=%lld ⇒ ×100ns ≈ %.3f s\n", (long long)insn_delta, insn_seconds);
+            } else {
+                std::printf("\n");
+            }
+        }
     }
     if (rt_ok[0] && rt_ok[2]) {
         g_current_case = "e2e/rt-reproducible";

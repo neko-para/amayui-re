@@ -138,13 +138,18 @@ bool nativeAffine4CCC60(X86& cpu, GuestMemory& mem, std::uint32_t* result) {
     if (!mem.committed(kAngleScaleEa, 4u)) return false;
     if (!fpuStackEmpty(cpu)) return false;  // guest 会把栈推到 8；非空栈在 guest 里是溢出路径
 
-    // 空循环：`cmp ecx, edx; jge`（32 位有符号；`bound = count*stride` 是 32 位回绕）
+    // 空循环（`cmp ecx, edx; jge`，32 位有符号；`bound = count*stride` 是 32 位回绕）：
+    // ★ 这一支**不能**"直接成功返回"。`.lst` 的序言全在 `0x4CCCDE jge` **之前**：
+    //     `0x4CCC71 fld [eax+14h]` / `0x4CCC75 fmul flt_52F1B0` / `0x4CCC80 fsin` / `0x4CCC84 fcos` /
+    //     `0x4CCCC0..0x4CCCD0` 的 `fmul/fchs/fxch/fmulp` / `0x4CCCD2..0x4CCCDB` 的取平移
+    //   ⇒ guest 即使不进循环，也会置 `fpu.status` 的粘性异常位（PE/ES）并清 C0..C3。
+    //   早退会漏掉这些 guest 可见状态：状态字本身就是 guest 状态（最近的读点是**调用方** `0x4CCDD0`
+    //   的 `fnstsw ax` + `test ah,44h` —— 它只读 C3/C2、不读 PE/ES；但别的读点不受我们控制）⇒
+    //   交解释器重放整段。
+    //   真实调用方（`.lst` 0x4CCD76 / 0x4CCDB6 / 0x4CCE22）都是 `count=1, i0=0` ⇒ 产品路径走不到这里。
     const std::int32_t bound = static_cast<std::int32_t>(static_cast<std::uint32_t>(count) *
                                                          static_cast<std::uint32_t>(stride));
-    if (bound <= i0) {
-        *result = obj;  // 跳过循环时 EAX 仍是 inner 对象
-        return true;
-    }
+    if (bound <= i0) return false;
     if (stride <= 0 || i0 < 0) return false;  // 非空循环：步长 <= 0 / 负起点 ⇒ 交解释器（可能死循环）
     const std::int64_t n = (static_cast<std::int64_t>(bound) - i0 + stride - 1) / stride;
     const std::int64_t last = static_cast<std::int64_t>(i0) + (n - 1) * stride;

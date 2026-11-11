@@ -250,7 +250,11 @@ NaiveEncoded naiveLzssEncode(const std::uint8_t* input, std::uint32_t n) {
     constexpr int NIL = N;
     NaiveEncoded res;
     std::vector<int> dad(N + 1, NIL);
-    std::vector<int> lson(N + 1, NIL);
+    // ★ 尺寸 = N+1+256（不是 N+1）：根索引 p = 0x1001+byte ∈ [4097,4352] 落在 `rson[]` 的前 256 项上
+    //   （guest 布局里 `lson[4097+i]` 与 `rson[i]` **同址**）。**根左支不可达**：首轮方向恒为 cmp=1
+    //   （走 rson）、且挂在根上的节点必是根的右孩子 ⇒ 这段下标只可能是"越界写"而不是语义。
+    //   补齐只是让这份转写在 ASan / 别的分配器下也**不会**靠运气不炸（现在它落在 vector 尾外 4 字节）。
+    std::vector<int> lson(N + 1 + 256, NIL);
     std::vector<int> rson(N + 1 + 256, NIL);  // 根索引 p = 0x1001+byte ∈ [4097,4352]
     // ★ 预填必须与夹具/guest 对象同形（0xCC）：`text_buf` 只清前 0xFEE，`[4078..4112]` 里
     //   首灌写 [4078..4095] 的前 len 个，**其余保留对象原值**——而比较循环会读到它们
@@ -278,6 +282,8 @@ NaiveEncoded naiveLzssEncode(const std::uint8_t* input, std::uint32_t n) {
                 if (lson[p] != NIL) {
                     p = lson[p];
                 } else {
+                    // 根左支不可达（见上面 lson 的尺寸注释）：这里 p 只该是普通节点
+                    // ⇒ `lson[p]` 的 p 与 `rson[0..255]` 同址的那一段**不会**被这里写到。
                     lson[p] = r;
                     dad[r] = p;
                     return;
@@ -2304,6 +2310,127 @@ int main() {
         LIFT_CHECK(!lift::affineCoeffs(huge, one, radius, false, false, &k));
     }
 
+    // ---- ⑰c sub_4CCC60 的**准入层**：Declined 必须**零写**（照 ⑳/sub_46D9F0 的 ⑫⑬⑭ 形制）----
+    // ★ 为什么必须有这一组：assets 档的两臂差分在回退之后由解释器**重放整个函数**，会把
+    //   "回退前写了 dst / 动了 x87" 修回去 ⇒ 那类错在差分里**结构上不可见**。
+    //   这里**直接调** `lift::nativeAffine4CCC60`（不经 dispatcher）+ 冻结快照。
+    // ★ 判据（每一条代表一个 `return false` 的**类别**）：返回 false；`dst` 逐字节不变；
+    //   `fpu.status / control / tag / top` 不变；`*result` 里不留非 0 的"半成品 EAX"。
+    {
+        lift_test::g_current_case = "affine/decline-no-write";
+        constexpr std::uint32_t kStateEa = 0x00420000u;
+        constexpr std::uint32_t kObjEa = 0x00430000u;
+        constexpr std::uint32_t kSrcEa = 0x00480000u;
+        constexpr std::uint32_t kDstEa = 0x00490000u;
+        constexpr std::uint32_t kScaleEa = 0x0052F1B0u;  // `flt_52F1B0`（guest `.data` 常量）
+        constexpr std::uint32_t kDstBytes = 64u;
+        auto bootRig = [&](lift::Machine& m, std::string& err) {
+            if (!m.initBare(&err) || !m.prepareStack(&err)) return false;
+            auto& mem = m.mem();
+            std::vector<std::uint8_t> state(0x28u, 0), obj(0x20u, 0);
+            const float radius = 1.234567f, angle = 17.0f, scale = 0.017453292f;
+            std::memcpy(state.data() + 0x10u, &radius, 4);
+            const std::uint32_t inner = kObjEa;
+            std::memcpy(state.data() + 0x20u, &inner, 4);  // `[state+0x24] ?: [state+0x20]`
+            const std::uint32_t angle_bits = [&] {
+                std::uint32_t v = 0;
+                std::memcpy(&v, &angle, 4);
+                return v;
+            }();
+            std::memcpy(obj.data() + 0x14u, &angle_bits, 4);
+            const std::uint32_t scale_bits = [&] {
+                std::uint32_t v = 0;
+                std::memcpy(&v, &scale, 4);
+                return v;
+            }();
+            if (!m.placeData(kStateEa, state.data(), state.size(), &err)) return false;
+            if (!m.placeData(kObjEa, obj.data(), obj.size(), &err)) return false;
+            if (!m.placeData(kScaleEa, &scale_bits, 4u, &err)) return false;
+            const std::vector<std::uint8_t> src(kDstBytes / 4u * 4u, 0);
+            std::vector<std::uint8_t> dst(kDstBytes, 0x5A);
+            if (!m.placeData(kSrcEa, src.data(), src.size(), &err)) return false;
+            if (!m.placeData(kDstEa, dst.data(), dst.size(), &err)) return false;
+            return true;
+        };
+        // 7 个栈参数（`__stdcall retn 1Ch` = 28 B）+ 哨兵返回地址；a1（`[ebp+8]`）guest 全程不读。
+        auto arm = [&](lift::Machine& m, std::uint32_t dst, std::uint32_t count, std::uint32_t i0,
+                       std::uint32_t stride) {
+            auto& cpu = m.cpu();
+            auto& mem = m.mem();
+            const std::uint32_t esp = m.layout().stack_top - 0x40u;
+            cpu.esp() = esp;
+            mem.wr32(esp, lift_fixture::kSentinel);
+            mem.wr32(esp + 4u, 0u);         // a1：guest 不读
+            mem.wr32(esp + 8u, kStateEa);   // a2 = state
+            mem.wr32(esp + 12u, kSrcEa);    // a3 = src
+            mem.wr32(esp + 16u, dst);       // a4 = dst
+            mem.wr32(esp + 20u, count);     // a5
+            mem.wr32(esp + 24u, i0);        // a6
+            mem.wr32(esp + 28u, stride);    // a7
+        };
+        auto dstBytes = [&](lift::Machine& m) {
+            std::vector<std::uint8_t> v(kDstBytes);
+            std::memcpy(v.data(), m.mem().host(kDstEa), v.size());
+            return v;
+        };
+        struct FpuSnap {
+            std::uint16_t status = 0, control = 0, tag = 0;
+            std::uint8_t top = 0;
+        };
+        auto fpuSnap = [&](lift::Machine& m) {
+            FpuSnap s;
+            s.status = m.cpu().fpu.status;
+            s.control = m.cpu().fpu.control;
+            s.tag = m.cpu().fpu.tag;
+            s.top = m.cpu().fpu.top;
+            return s;
+        };
+        const std::vector<std::uint8_t> frozen(kDstBytes, 0x5A);
+        auto expectDecline = [&](const char* what, std::uint32_t dst, std::uint32_t count, std::uint32_t i0,
+                                std::uint32_t stride) {
+            (void)what;  // 分支名只给读代码的人（断言消息里已经有表达式本身）
+            lift::Machine m;
+            std::string err;
+            const bool rig_ok = bootRig(m, err);
+            LIFT_CHECK(rig_ok);
+            if (!rig_ok) return;
+            arm(m, dst, count, i0, stride);
+            const FpuSnap before = fpuSnap(m);
+            std::uint32_t r = 0xDEADBEEFu;
+            LIFT_CHECK(!lift::nativeAffine4CCC60(m.cpu(), m.mem(), &r));
+            LIFT_CHECK(dstBytes(m) == frozen);
+            const FpuSnap after = fpuSnap(m);
+            LIFT_CHECK_EQ_U32(after.status, before.status);
+            LIFT_CHECK_EQ_U32(after.control, before.control);
+            LIFT_CHECK_EQ_U32(after.tag, before.tag);
+            LIFT_CHECK_EQ_U32(after.top, before.top);
+        };
+        // ① 负起点（`i0 < 0`，非空循环 ⇒ guest 会读写 src/dst 的负偏移）
+        expectDecline("i0<0", kDstEa, 2u, 0xFFFFFFFFu, 1u);
+        // ② `dst` 跨度未提交（那一段从没 `placeData` 过）
+        expectDecline("dst-uncommitted", 0x00B00000u, 2u, 0u, 2u);
+        // ③ x87 栈非空（guest 会走 push 上溢路径 ⇒ 无法复刻）
+        {
+            lift::Machine m;
+            std::string err;
+            const bool rig_ok = bootRig(m, err);
+            LIFT_CHECK(rig_ok);
+            if (rig_ok) {
+                arm(m, kDstEa, 2u, 0u, 2u);
+                m.cpu().fpu.setValid(0);  // 标记 ST(0) 非空（`fpuStackEmpty` 的判据是 tag）
+                const FpuSnap before = fpuSnap(m);
+                std::uint32_t r = 0xDEADBEEFu;
+                LIFT_CHECK(!lift::nativeAffine4CCC60(m.cpu(), m.mem(), &r));
+                LIFT_CHECK(dstBytes(m) == frozen);
+                const FpuSnap after = fpuSnap(m);
+                LIFT_CHECK_EQ_U32(after.status, before.status);
+                LIFT_CHECK_EQ_U32(after.control, before.control);
+                LIFT_CHECK_EQ_U32(after.tag, before.tag);
+                LIFT_CHECK_EQ_U32(after.top, before.top);
+            }
+        }
+    }
+
     // ---- ⑱ known 表：新项的默认分层（全部 debug=false ⇒ 都在 all 里）+ kMax 容得下 ----
     {
         LIFT_CHECK(lift::findKnownNative("sub_429020") != nullptr);
@@ -2322,11 +2449,11 @@ int main() {
         LIFT_CHECK(pool != nullptr && !pool->debug);
         LIFT_CHECK_EQ_U32(pool->entry_ea, 0x00415384u);
         LIFT_CHECK_EQ_U32(pool->resume_ea, 0x0041539Fu);
-        // ★ sub_4CCC60：stdcall `retn 1Ch` = 28 B；**debug 层**（不进 all ⇒ 必须显式点名）。
+        // ★ sub_4CCC60：stdcall `retn 1Ch` = 28 B；**稳定层**（2026-11-11 进 `all`）。
         const lift::KnownNative* affine = lift::findKnownNative("sub_4CCC60");
         LIFT_CHECK(affine != nullptr);
         if (affine != nullptr) {
-            LIFT_CHECK(affine->debug);
+            LIFT_CHECK(!affine->debug);
             LIFT_CHECK(affine->conv == lift::GuestConv::Stdcall);
             LIFT_CHECK_EQ_U32(affine->arg_bytes, 28u);
         }
@@ -2334,11 +2461,11 @@ int main() {
         //   否则 configureNativeOverrides 会硬失败（模拟器拒绝启动）。⛔ 不写死数字。
         LIFT_CHECK(lift::NativeOverrideTable::kMax >= lift::knownNativeCount());
         LIFT_CHECK(lift::NativeBlockTable::kMax >= lift::knownBlockNativeCount());
-        // ★ sub_4367B0：thiscall `retn 8` = 8 B；**debug 层**（不进 all ⇒ 必须显式点名）。
+        // ★ sub_4367B0：thiscall `retn 8` = 8 B；**稳定层**（2026-11-11 进 `all`）。
         const lift::KnownNative* lzss = lift::findKnownNative("sub_4367B0");
         LIFT_CHECK(lzss != nullptr);
         if (lzss != nullptr) {
-            LIFT_CHECK(lzss->debug);
+            LIFT_CHECK(!lzss->debug);
             LIFT_CHECK(lzss->conv == lift::GuestConv::Thiscall);
             LIFT_CHECK_EQ_U32(lzss->arg_bytes, 8u);
             LIFT_CHECK(lzss->fn == &lift::nativeLzss4367B0);
