@@ -780,6 +780,83 @@ FtolResult runFtol(const std::vector<std::uint8_t>& code, const FtolCase& c, boo
     return out;
 }
 
+// ---- `_memcpy`（`0x4E74B0`）的**重叠**差分：真字节两臂（解释器 vs override）----
+//
+// ★ 为什么这条只能放在 assets 档：`.lst` 把 `_memcpy` / `_memcpy_0` 记成 COLLAPSED
+//   （`; [00000361 BYTES: COLLAPSED FUNCTION _memcpy]`，**没有指令文本**）⇒ "重叠时 guest 到底往
+//   哪个方向搬"只有**真字节**能回答。`tests/native_override.cpp` 的 `kMemcpyRef` / `kMemcpyBackRef`
+//   只是同一形状的最小复述，不是 oracle。
+// ★ 真字节里的分流（EA 是锚）：
+//   · `0x4E74C4 cmp edi,esi` / `0x4E74C6 jbe 0x4E74F4` ⇒ `dst <= src`：前向（`0x4E7508 F3 A5 rep movsd`）；
+//   · `0x4E74C8 cmp edi,eax`（EAX = src+n）/ `0x4E74CA jb 0x4E7670` ⇒ `dst > src` 且重叠：
+//     后向（`0x4E768B FD std` / `0x4E768C F3 A5 rep movsd` / `0x4E768E FC cld`）。
+// ★ `[0x55F2E8]` 必须**置 0 且提交**：非 0 时 `0x4E74DF jz` 不跳，会走 `0x4E74EF jmp 0x4F1120`
+//   （SSE2 支，**不在**这 0x361 字节里）；本线 `shimIsProcessorFeaturePresent` 恒 0 ⇒ 生产里同样走
+//   通用支。两臂看到的是同一条 `0x55F2E8`，所以这条闸门不是"给测试开小灶"。
+struct MemcpyAssetsCase {
+    std::string name;
+    std::uint32_t n;
+    std::uint32_t dst_off;
+    std::uint32_t src_off;
+};
+
+struct MemcpyAssetsResult {
+    bool valid = false;
+    std::uint32_t eax = 0, esp = 0, esi = 0, edi = 0, ebp = 0, eip = 0;
+    std::vector<std::uint8_t> buf;
+    std::uint64_t hits = 0, fallbacks = 0;
+};
+
+constexpr std::uint32_t kMemcpyBufBytes = 4096u + 64u;
+constexpr std::uint32_t kMemcpyEa = 0x004E74B0u;
+constexpr std::uint32_t kMemcpyBufEa = 0x00450000u;
+
+MemcpyAssetsResult runMemcpyAssets(const std::vector<std::uint8_t>& code, const MemcpyAssetsCase& c,
+                                  bool with_override) {
+    MemcpyAssetsResult out;
+    lift_fixture::Fixture fx;
+    if (!fx.ok) return out;
+    constexpr std::uint32_t kSse2FlagEa = 0x0055F2E8u;  // CRT 的 SSE 选路开关（本线恒 0）
+    const std::uint32_t flag = 0u;
+    if (!fx.m.placeData(kSse2FlagEa, &flag, 4u, &fx.err)) return out;
+    std::vector<std::uint8_t> init(kMemcpyBufBytes);
+    for (std::uint32_t i = 0; i < kMemcpyBufBytes; ++i)
+        init[i] = static_cast<std::uint8_t>((i * 37u + (i >> 3) * 11u + 101u) & 0xFFu);
+    if (!fx.m.placeData(kMemcpyBufEa, init.data(), init.size(), &fx.err)) return out;
+    if (!fx.m.placeCode(kMemcpyEa, code.data(), code.size(), &fx.err)) return out;
+    if (with_override) {
+        std::string err;
+        if (!fx.m.overrides().add(kMemcpyEa, "ref_memcpy", lift::GuestConv::Cdecl, 12, lift::nativeMemcpy, &err))
+            return out;
+    }
+    lift_fixture::Asm a(0x00402000u);
+    a.pushImm(c.n);                                   // 第 3 个实参
+    a.pushImm(kMemcpyBufEa + c.src_off);              // 第 2 个
+    a.pushImm(kMemcpyBufEa + c.dst_off);              // 第 1 个
+    a.callRel(kMemcpyEa);
+    a.addEspImm8(12u);  // cdecl：调用方清栈（3 个 dword）
+    a.ret();
+    if (!fx.m.placeCode(0x00402000u, a.b.data(), a.b.size(), &fx.err)) return out;
+    fx.rearmStack();
+    fx.runCode(0x00402000u);
+    if (!fx.ok) return out;
+    out.valid = true;
+    out.eax = fx.m.cpu().eax();
+    out.esp = fx.m.cpu().esp();
+    out.esi = fx.m.cpu().esi();
+    out.edi = fx.m.cpu().edi();
+    out.ebp = fx.m.cpu().ebp();
+    out.eip = fx.m.cpu().eip;
+    const std::uint8_t* p = fx.m.mem().host(kMemcpyBufEa);
+    out.buf.assign(p, p + kMemcpyBufBytes);
+    if (with_override) {
+        const lift::NativeOverride* e = fx.m.overrides().at(0);
+        out.hits = e->hits;
+        out.fallbacks = e->fallbacks;
+    }
+    return out;
+}
+
 int main() {
     const std::string exe = envValue("LIFT_AGE_EXE");
     if (exe.empty()) LIFT_SKIP("没有 LIFT_AGE_EXE（CMake 的 assets 档会设它）");
@@ -788,6 +865,79 @@ int main() {
     const std::vector<std::uint8_t> code401000 = img.at(0x00401000u, 0x100u);
     const std::vector<std::uint8_t> code429020 = img.at(0x00429020u, 0x100u);
     const std::vector<std::uint8_t> code48AE90 = img.at(0x0048AE90u, 0x200u);
+    // `_memcpy`：长度 0x361 取自 `.lst` 对 EA 0x4E74B0 的折叠声明（`[00000361 BYTES: COLLAPSED FUNCTION _memcpy]`）。
+    const std::vector<std::uint8_t> code_memcpy = img.at(kMemcpyEa, 0x361u);
+
+    // ---- ①b `_memcpy` 的**重叠**：真字节两臂（判据见 `runMemcpyAssets` 上方）----
+    // ★ oracle 的方向由 guest 自己的判据决定（`0x4E74CA`），不在这里另写一份：两臂都是**同一份真字节**
+    //   跑出来的，所以"哪一类该后向"根本不进本测试的期望值 —— 这是把结论交给真字节。
+    // ★ 另一条断言（`want`）单独把**结论**钉住："重叠 ⇒ memmove 语义（等价于经临时缓冲中转）"。
+    //   没有它，两臂可能一起错（例如把 `std::memmove` 当成 oracle 的唯一实现）；差分只钉"两臂一致"。
+    {
+        auto mk = [](const std::string& name, std::uint32_t n, std::uint32_t d, std::uint32_t s) {
+            MemcpyAssetsCase c;
+            c.name = name;
+            c.n = n;
+            c.dst_off = d;
+            c.src_off = s;
+            return c;
+        };
+        std::vector<MemcpyAssetsCase> cases;
+        const std::uint32_t sizes[] = {0u, 1u, 3u, 4u, 7u, 8u, 64u, 4096u};
+        for (std::uint32_t n : sizes) {
+            const std::string tag = std::to_string(n);
+            cases.push_back(mk("memcpy-overlap/same-n" + tag, n, 0u, 0u));
+            cases.push_back(mk("memcpy-overlap/dst<src-n" + tag, n, 0u, 1u));
+            cases.push_back(mk("memcpy-overlap/dst>src-n" + tag, n, 1u, 0u));
+        }
+        cases.push_back(mk("memcpy-overlap/dst<src-d8-n64", 64u, 0u, 8u));
+        cases.push_back(mk("memcpy-overlap/dst>src-d8-n64", 64u, 8u, 0u));
+        // 对照：**不重叠**（dst = src+72 > src+n）—— 这一类走原来的 `std::memcpy` 快路径，判据是"仍然对"。
+        cases.push_back(mk("memcpy-overlap/no-overlap-n64", 64u, 72u, 0u));
+        std::vector<std::uint8_t> init(kMemcpyBufBytes);
+        for (std::uint32_t i = 0; i < kMemcpyBufBytes; ++i)
+            init[i] = static_cast<std::uint8_t>((i * 37u + (i >> 3) * 11u + 101u) & 0xFFu);
+        for (const MemcpyAssetsCase& c : cases) {
+            lift_test::g_current_case = c.name.c_str();
+            const MemcpyAssetsResult base = runMemcpyAssets(code_memcpy, c, false);
+            const MemcpyAssetsResult ovr = runMemcpyAssets(code_memcpy, c, true);
+            LIFT_CHECK(base.valid && ovr.valid);
+            if (!base.valid || !ovr.valid) continue;
+            LIFT_CHECK_EQ_U32(ovr.eax, base.eax);
+            LIFT_CHECK_EQ_U32(ovr.esp, base.esp);
+            LIFT_CHECK_EQ_U32(ovr.esi, base.esi);
+            LIFT_CHECK_EQ_U32(ovr.edi, base.edi);
+            LIFT_CHECK_EQ_U32(ovr.ebp, base.ebp);
+            LIFT_CHECK_EQ_U32(ovr.eip, base.eip);
+            LIFT_CHECK(base.buf.size() == ovr.buf.size());
+            bool same = base.buf.size() == ovr.buf.size() &&
+                        std::memcmp(base.buf.data(), ovr.buf.data(), base.buf.size()) == 0;
+            LIFT_CHECK(same);
+            if (!same && base.buf.size() == ovr.buf.size()) {
+                std::size_t first = 0;
+                while (first < base.buf.size() && base.buf[first] == ovr.buf[first]) ++first;
+                std::fprintf(stderr, "  [%s] 首个不同字节 off=%zu base=%02X ovr=%02X\n", c.name.c_str(), first,
+                             base.buf[first], ovr.buf[first]);
+            }
+            // ★ 本单的判据：这一类重叠**不再回退**
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.hits), 1u);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.fallbacks), 0u);
+            // ★ 结论：重叠 ⇒ memmove 语义（经临时缓冲中转的定义，与"哪个方向"无关）
+            std::vector<std::uint8_t> want = init;
+            if (c.n != 0u && c.dst_off != c.src_off) {
+                std::vector<std::uint8_t> tmp(c.n);
+                std::memcpy(tmp.data(), init.data() + c.src_off, c.n);
+                std::memcpy(want.data() + c.dst_off, tmp.data(), c.n);
+            }
+            LIFT_CHECK(want == base.buf);
+            if (want != base.buf) {
+                std::size_t first = 0;
+                while (first < want.size() && want[first] == base.buf[first]) ++first;
+                std::fprintf(stderr, "  [%s] guest 结果不是 memmove：首个不同 off=%zu want=%02X got=%02X\n",
+                             c.name.c_str(), first, want[first], base.buf[first]);
+            }
+        }
+    }
 
     // ---- ① sub_429020：真字节，解释器 vs override ----
     {

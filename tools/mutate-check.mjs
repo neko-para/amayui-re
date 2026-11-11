@@ -1022,6 +1022,29 @@ const MUTATIONS = [
   },
 
   {
+    // ★ 代表 "`_memcpy` 的重叠接管把**方向判据写反**"这一类错（本单）。
+    //   判据：`apps/emulator-lift/tests/native_override.cpp` 的 `memcpy-ovl/*` —— 三类重叠
+    //   （`dst<src` / `dst>src` / `dst==src`）× n ∈ {0,1,3,4,7,8,64,4096}，oracle = 解释器跑
+    //   **guest 真字节**（assets 档另有 `memcpy-overlap/*` 用 `0x4E74B0` 的真字节，同一批形状）。
+    //   guest 在 `dst > src` 且重叠时走**后向**（EA 0x4E7670：`std; rep movsd; cld`），
+    //   `dst <= src` 时走**前向**（EA 0x4E74F4 起）⇒ 把这一行改成 `>` 就是"两支互换"（= 一律后向），
+    //   `dst<src` 与 `dst>src` 两类当场红。
+    //   ★ 为什么挑"方向写反"而不是"重叠 ⇒ 回退"：后者的断言是 `fallbacks==0`，红了只说明"没接管"；
+    //     方向写反才是本项唯一真正难的那一半（见 `native_overrides.h` 的 `_memcpy` 契约段）。
+    //   ★ 为什么不用 `std::memmove` 当变异：它在**语义上**与 guest 一致（guest 重叠时就等价于 memmove），
+    //     换上去不会红 —— 那正说明"memmove 是对的"，但它不可复核（宿主 libc 的分块/方向不在语料里）。
+    file: 'apps/emulator-lift/src/runtime/native_crt.cpp',
+    from: '    if (dst < src) {\n        copyForwardBytes(d, s, n);',
+    to: '    if (dst > src) {\n        copyForwardBytes(d, s, n);',
+    guard: 'ctest:native-override',
+    ctest: 'native-override',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '重叠软实现的方向判据写反（`dst<src` 也走成后向循环）⇒ memcpy-ovl/dst<src-* 与 dst>src-* 的' +
+      '逐字节差分当场红（实测见 .tmp/audio-perf/memcpy.md 的变异表）',
+  },
+
+  {
     // ★ 代表 "x87 override 的运算顺序 / `fchs` 被弄丢" 这一类错（REQ-01M6NZSAAD0WCNBE3RKMFF84R5）。
     //   判据：`apps/emulator-lift/tests/native_override_assets.cpp` 的 ④ = `sub_4CCC60` 的**函数级真字节
     //   两臂**（同一份 guest 机器码跑解释器当 oracle，再跑 native 实现；比 dst / 寄存器 / x87 状态字）。

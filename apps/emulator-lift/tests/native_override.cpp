@@ -191,6 +191,99 @@ void compare(const Snapshot& a, const Snapshot& b, const char* what) {
     }
 }
 
+// ---------------------------------------------------------------------------------------
+// ①（补）`_memcpy` 的**重叠**差分：解释器 vs native
+//
+// ★ 为什么参考实现要**两条**而不是一条：真 `_memcpy` 在重叠时**分流**
+//   （EA 0x4E74B0，字节取自 PE —— `.lst` 里它是 COLLAPSED，没有指令文本）：
+//   · `dst <= src` ⇒ 前向（`0x4E74C6 jbe 0x4E74F4` 那支：`rep movsd` + 字节尾表）⇒ 参考用 `kMemcpyRef`；
+//   · `dst >  src` 且重叠 ⇒ 后向（`0x4E74CA jb 0x4E7670`，那里是 `0x4E768B FD std` /
+//     `0x4E768C F3 A5 rep movsd` / `0x4E768E FC cld`）⇒ 参考用 `kMemcpyBackRef`。
+//   ⇒ **oracle 是解释器**：每一类重叠都必须与"guest 在该类上真的会走的那条指令序列"逐字节相同。
+//   ⛔ 若把三类都拿前向参考去比，`dst > src` 的重叠会被判成"前向才对"——那是把 C 标准当 oracle。
+// ★ 真函数的**整体**（含它自己的分流）由 assets 档用真字节差分（`tests/native_override_assets.cpp`
+//   的 `memcpy-overlap/*`）；这里用等价的最小参考把同一批形状压进 pure 档。
+// ---------------------------------------------------------------------------------------
+
+// dst > src 且**重叠**时 guest 走的那支：从高地址往低地址搬（`std; rep movsb; cld`）。
+//   int __cdecl ref_memcpy_back(void *dst, const void *src, size_t n)
+//     push ebp; mov ebp,esp; push esi; push edi; mov edi,[ebp+8]; mov esi,[ebp+0Ch]; mov ecx,[ebp+10h];
+//     lea esi,[esi+ecx-1]; lea edi,[edi+ecx-1]; std; rep movsb; cld;
+//     mov eax,[ebp+8]; pop edi; pop esi; pop ebp; ret
+const std::uint8_t kMemcpyBackRef[] = {0x55, 0x8B, 0xEC, 0x56, 0x57, 0x8B, 0x7D, 0x08, 0x8B, 0x75,
+                                       0x0C, 0x8B, 0x4D, 0x10, 0x8D, 0x74, 0x0E, 0xFF, 0x8D,
+                                       0x7C, 0x0F, 0xFF, 0xFD, 0xF3, 0xA4, 0xFC, 0x8B, 0x45,
+                                       0x08, 0x5F, 0x5E, 0x5D, 0xC3};
+
+struct MemcpyOverlapCase {
+    std::string name;       // ★ `std::string`（不是 `const char*`）：用例名要在循环外存活
+    std::uint32_t n;
+    std::uint32_t dst_off;  // 相对缓冲区基址
+    std::uint32_t src_off;
+    bool backward_ref;      // true ⇒ 该类重叠上 guest 走后向支（oracle = `kMemcpyBackRef`）
+    bool straddle_page;     // true ⇒ 缓冲区基址让 [dst, dst+n) **跨 4 KiB 页**
+};
+
+struct MemcpyOverlapResult {
+    bool valid = false;
+    std::uint32_t eax = 0;
+    std::uint32_t esp = 0;
+    std::uint32_t esi = 0;
+    std::uint32_t edi = 0;
+    std::uint32_t ebp = 0;
+    std::uint32_t eip = 0;
+    std::vector<std::uint8_t> buf;
+    std::uint64_t hits = 0;
+    std::uint64_t fallbacks = 0;
+};
+
+constexpr std::uint32_t kOverlapBufBytes = 4096u + 64u;
+
+// 缓冲区初始图样：**非周期**（否则"前向搬成重复图样"与"后向搬对"可能碰巧相等）。
+std::vector<std::uint8_t> overlapPattern() {
+    std::vector<std::uint8_t> v(kOverlapBufBytes);
+    for (std::uint32_t i = 0; i < kOverlapBufBytes; ++i)
+        v[i] = static_cast<std::uint8_t>((i * 37u + (i >> 3) * 11u + 101u) & 0xFFu);
+    return v;
+}
+
+MemcpyOverlapResult runMemcpyOverlap(const MemcpyOverlapCase& c, bool with_override) {
+    MemcpyOverlapResult out;
+    lift_fixture::Fixture fx;
+    if (!fx.ok) return out;
+    const std::vector<std::uint8_t> init = overlapPattern();
+    // ★ `0x00450000 - 32`：让 [dst, dst+64) 跨过页边界 0x00450000（含两端都在同一块连续已提交区）
+    const std::uint32_t buf = c.straddle_page ? 0x0044FFE0u : 0x00450000u;
+    if (!fx.m.placeData(buf, init.data(), init.size(), &fx.err)) return out;
+    const std::uint8_t* ref = c.backward_ref ? kMemcpyBackRef : kMemcpyRef;
+    const std::size_t ref_len = c.backward_ref ? sizeof(kMemcpyBackRef) : sizeof(kMemcpyRef);
+    if (!fx.m.placeCode(kFnEa, ref, ref_len, &fx.err)) return out;
+    if (with_override) {
+        std::string err;
+        if (!fx.m.overrides().add(kFnEa, "ref_memcpy", lift::GuestConv::Cdecl, 12, lift::nativeMemcpy, &err))
+            return out;
+    }
+    const std::uint32_t dst = buf + c.dst_off;
+    const std::uint32_t src = buf + c.src_off;
+    const std::uint32_t ret = callCdecl(fx, kFnEa, {dst, src, c.n});
+    if (!fx.ok) return out;
+    out.valid = true;
+    out.eax = ret;
+    out.esp = fx.m.cpu().esp();
+    out.esi = fx.m.cpu().esi();
+    out.edi = fx.m.cpu().edi();
+    out.ebp = fx.m.cpu().ebp();
+    out.eip = fx.m.cpu().eip;
+    const std::uint8_t* p = fx.m.mem().host(buf);
+    out.buf.assign(p, p + kOverlapBufBytes);
+    if (with_override) {
+        const lift::NativeOverride* e = fx.m.overrides().at(0);
+        out.hits = e->hits;
+        out.fallbacks = e->fallbacks;
+    }
+    return out;
+}
+
 // 真纹理夹具：用 d3d9 自己的工厂建设备 / 纹理状态（⛔ 不在测试里复制 kTx* 偏移），
 // 再把状态块挂到 COM 对象上（`obj+8` = 状态块，与 boot 里 guest 看到的是同一条路径）。
 struct TextureRig {
@@ -432,6 +525,114 @@ int main() {
         const Snapshot base = runMemcpy(false);
         const Snapshot ovr = runMemcpy(true);
         compare(base, ovr, "memcpy");
+    }
+    // ---- ① memcpy **重叠**：三类（dst<src / dst>src / dst==src）× n 表 ----
+    // 判据：解释器臂与 native 臂的**整块内存**（含 dst/src 之外的两端哨兵）+ EAX/ESP/ESI/EDI/EBP/EIP
+    // 逐字节/逐位相同，且 native 臂 **hits==1 / fallbacks==0**（= 这一类重叠**不再回退**）。
+    // ★ oracle 的方向按 guest 自己的判据选（`mk()` 里那一行）；两类重叠用**不同**的参考实现 ——
+    //   见 `kMemcpyRef` / `kMemcpyBackRef` 上方的注释。
+    {
+        auto mk = [](const std::string& name, std::uint32_t n, std::uint32_t d, std::uint32_t s,
+                     bool straddle = false) {
+            MemcpyOverlapCase c;
+            c.name = name;
+            c.n = n;
+            c.dst_off = d;
+            c.src_off = s;
+            c.straddle_page = straddle;
+            // ★ 与 guest 的 `0x4E74CA jb 0x4E7670` 同一条判据：`dst > src` **且** `dst < src+n`。
+            const std::uint64_t dd = d;
+            const std::uint64_t ss = s;
+            c.backward_ref = dd > ss && dd < ss + static_cast<std::uint64_t>(n);
+            return c;
+        };
+        std::vector<MemcpyOverlapCase> cases;
+        const std::uint32_t sizes[] = {0u, 1u, 3u, 4u, 7u, 8u, 64u, 4096u};
+        for (std::uint32_t n : sizes) {
+            const std::string tag = std::to_string(n);
+            cases.push_back(mk("memcpy-ovl/same-n" + tag, n, 0u, 0u));
+            cases.push_back(mk("memcpy-ovl/dst<src-n" + tag, n, 0u, 1u));
+            cases.push_back(mk("memcpy-ovl/dst>src-n" + tag, n, 1u, 0u));
+        }
+        // 距离 8（不是只测"错开 1 字节"）+ **跨 4 KiB 页**的一条
+        cases.push_back(mk("memcpy-ovl/dst<src-d8-n64", 64u, 0u, 8u));
+        cases.push_back(mk("memcpy-ovl/dst>src-d8-n64", 64u, 8u, 0u));
+        cases.push_back(mk("memcpy-ovl/straddle-page-n64", 64u, 0u, 1u, true));
+        for (const MemcpyOverlapCase& c : cases) {
+            lift_test::g_current_case = c.name.c_str();
+            const MemcpyOverlapResult base = runMemcpyOverlap(c, false);
+            const MemcpyOverlapResult ovr = runMemcpyOverlap(c, true);
+            LIFT_CHECK(base.valid && ovr.valid);
+            if (!base.valid || !ovr.valid) continue;
+            LIFT_CHECK_EQ_U32(ovr.eax, base.eax);
+            LIFT_CHECK_EQ_U32(ovr.esp, base.esp);
+            LIFT_CHECK_EQ_U32(ovr.esi, base.esi);
+            LIFT_CHECK_EQ_U32(ovr.edi, base.edi);
+            LIFT_CHECK_EQ_U32(ovr.ebp, base.ebp);
+            LIFT_CHECK_EQ_U32(ovr.eip, base.eip);
+            LIFT_CHECK(base.buf.size() == ovr.buf.size());
+            bool same = base.buf.size() == ovr.buf.size() &&
+                        std::memcmp(base.buf.data(), ovr.buf.data(), base.buf.size()) == 0;
+            LIFT_CHECK(same);
+            if (!same && base.buf.size() == ovr.buf.size()) {
+                std::size_t first = 0;
+                while (first < base.buf.size() && base.buf[first] == ovr.buf[first]) ++first;
+                std::fprintf(stderr, "  [%s] 首个不同字节 off=%zu base=%02X ovr=%02X\n", c.name.c_str(), first,
+                             base.buf[first], ovr.buf[first]);
+            }
+            // ★ 这一类重叠**不再回退**（本单的判据）
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.hits), 1u);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.fallbacks), 0u);
+        }
+    }
+    // ---- ① memcpy 仍然回退的两条（本期**不动**；只是把原因钉住，别让它们被"顺手放宽"）----
+    {
+        // (a) 跨 4 GiB：`dst + n > 4 GiB` ⇒ 拒绝（宿主平坦映射只有 4 GiB，搬它就是读出界）
+        lift::Machine m;
+        std::string err;
+        LIFT_CHECK(m.initBare(&err));
+        LIFT_CHECK(m.prepareStack(&err));
+        lift::X86& cpu = m.cpu();
+        const std::uint32_t esp = m.layout().stack_top - 32u;
+        cpu.esp() = esp;
+        m.mem().wr32(esp, 0xFFFFFFFFu);   // 返回地址
+        m.mem().wr32(esp + 4, 0xFFFFF000u);  // dst
+        m.mem().wr32(esp + 8, 0x00410000u);  // src
+        m.mem().wr32(esp + 12, 0x00002000u); // n（dst+n 越过 4 GiB）
+        lift::NativeOverrideTable table;
+        LIFT_CHECK(table.add(0x00403000u, "ref_memcpy", lift::GuestConv::Cdecl, 12, lift::nativeMemcpy, &err));
+        const char* why = nullptr;
+        LIFT_CHECK(!table.invoke(*table.find(0x00403000u), cpu, m.mem(), &why));
+        LIFT_CHECK_EQ_U32(table.find(0x00403000u)->hits, 0u);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(table.find(0x00403000u)->fallbacks), 1u);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(
+                              table.find(0x00403000u)->declines[static_cast<std::size_t>(lift::MemcpyWhy::CrossBoundary)]),
+                          1u);
+    }
+    {
+        // (b) safe mode + 跨度不在已提交页 ⇒ 拒绝（guest 会 fault，替它搬就是掩盖 fault）
+        lift::Machine m;
+        std::string err;
+        LIFT_CHECK(m.initBare(&err));
+        LIFT_CHECK(m.prepareStack(&err));
+        m.mem().setSafeMode(true);
+        lift::X86& cpu = m.cpu();
+        const std::uint32_t esp = m.layout().stack_top - 32u;
+        cpu.esp() = esp;
+        m.mem().wr32(esp, 0xFFFFFFFFu);
+        m.mem().wr32(esp + 4, 0x00001000u);  // dst：未提交
+        m.mem().wr32(esp + 8, 0x00410000u);
+        m.mem().wr32(esp + 12, 16u);
+        lift::NativeOverrideTable table;
+        LIFT_CHECK(table.add(0x00403000u, "ref_memcpy", lift::GuestConv::Cdecl, 12, lift::nativeMemcpy, &err));
+        const char* why = nullptr;
+        LIFT_CHECK(!table.invoke(*table.find(0x00403000u), cpu, m.mem(), &why));
+        LIFT_CHECK_EQ_U32(table.find(0x00403000u)->hits, 0u);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(table.find(0x00403000u)->fallbacks), 1u);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(
+                              table.find(0x00403000u)->declines[static_cast<std::size_t>(lift::MemcpyWhy::Uncommitted)]),
+                          1u);
+        m.mem().setSafeMode(false);
     }
     // ---- ① memset：解释器（rep stosb） vs native ----
     {

@@ -15,23 +15,88 @@ namespace lift {
 // CRT 叶子实现（全部只经 GuestMemory 读写 guest；guest 指针保持 32 位）
 // ---------------------------------------------------------------------------------------
 
+namespace {
+
+// ★ 分块下界：与 guest 自己的分界同值（**dword 计数 8** = 32 B）。来处与"为什么它不参与语义"
+//   见 `native_overrides.h` 的 `_memcpy` 契约段（`0x4E7502 / 0x4E7506` 与 `0x4E7686 / 0x4E7689`）。
+constexpr std::uint32_t kMemcpyChunkMin = 32;
+
+// 4 字节**整体读进寄存器再整体写回**（⛔ 不是两次 `std::memcpy` 直接在 guest 的两个重叠区间上搬：
+// 那正是 UB）。等价性：块内被写到的源字节要么在本块内（本块已整体读过）、要么在**已经处理过**的
+// 那一侧 —— 前向看到的是 `< i` 的字节，后向看到的是 `> i` 的字节。
+inline void copyChunk4(std::uint8_t* d, const std::uint8_t* s) {
+    std::uint32_t w = 0;
+    std::memcpy(&w, s, 4);
+    std::memcpy(d, &w, 4);
+}
+
+// 严格**前向**（低 → 高）：对应 guest `0x4E74F4` 那支（`rep movsd` + 字节尾表）。
+// ★ 只有 `dst < src` 的重叠可以用它：写地址永远落后于**尚未读**的源地址。
+void copyForwardBytes(std::uint8_t* d, const std::uint8_t* s, std::uint32_t n) {
+    std::uint32_t i = 0;
+    if (n >= kMemcpyChunkMin) {
+        for (; n - i >= 4u; i += 4u) copyChunk4(d + i, s + i);  // `n - i` 不溢出（i <= n）
+    }
+    for (; i < n; ++i) d[i] = s[i];
+}
+
+// 严格**后向**（高 → 低）：对应 guest `0x4E7670` 那支（`std; rep movsd; cld`）。
+// ★ 只有 `dst > src` 的重叠可以用它：写地址永远领先于**尚未读**的源地址。
+void copyBackwardBytes(std::uint8_t* d, const std::uint8_t* s, std::uint32_t n) {
+    std::uint32_t i = n;
+    if (n >= kMemcpyChunkMin) {
+        while (i >= 4u) {
+            i -= 4u;
+            copyChunk4(d + i, s + i);
+        }
+    }
+    while (i > 0u) {
+        --i;
+        d[i] = s[i];
+    }
+}
+
+}  // namespace
+
 bool nativeMemcpy(X86& cpu, GuestMemory& mem, std::uint32_t* result) {
     const std::uint32_t dst = cpu.arg(0);
     const std::uint32_t src = cpu.arg(1);
     const std::uint32_t n = cpu.arg(2);
     *result = dst;
     if (n == 0) return true;
+    auto decline = [&cpu](MemcpyWhy why) {
+        if (cpu.current_override != nullptr) ++cpu.current_override->declines[static_cast<std::size_t>(why)];
+        return false;
+    };
+    // ★ 仍然回退（本期不动）：跨 4 GiB 的跨度 —— 宿主平坦映射只有 4 GiB，搬它就是读出界；
+    //   guest 在那里的行为是 fault，交给解释器表态。
     if (static_cast<std::uint64_t>(dst) + n > GuestMemory::kSpace ||
         static_cast<std::uint64_t>(src) + n > GuestMemory::kSpace)
-        return false;
-    // ★ `_memcpy` 的契约是不重叠；重叠时**回退解释器**，让 guest 的 `rep movsb` 给出它自己的
-    //   （确定性的）结果 —— 宿主 `std::memcpy` 对重叠是 UB，不能拿它冒充。
+        return decline(MemcpyWhy::CrossBoundary);
+    // ★ 仍然回退（本期不动）：safe mode 下任一跨度不在已提交页 —— guest 会 fault，
+    //   替它搬等于把 fault 掩盖掉。非 safe mode 下这条**照旧不查**（与既有实现一致）。
+    if (mem.safeMode() && (!mem.committed(dst, n) || !mem.committed(src, n))) return decline(MemcpyWhy::Uncommitted);
+
+    // —— 不重叠：原路径不变（`std::memcpy`，重叠 UB 的前提不成立）——
     const std::uint64_t d64 = dst;
     const std::uint64_t s64 = src;
     const std::uint64_t n64 = n;
-    if (d64 < s64 + n64 && s64 < d64 + n64) return false;
-    if (mem.safeMode() && (!mem.committed(dst, n) || !mem.committed(src, n))) return false;
-    std::memcpy(mem.host(dst), mem.host(src), n);
+    const bool overlap = d64 < s64 + n64 && s64 < d64 + n64;
+    if (!overlap) {
+        std::memcpy(mem.host(dst), mem.host(src), n);
+        return true;
+    }
+    // —— 重叠：按 guest 的两支分流（⛔ 不许合成一支，也 ⛔ 不许用 `std::memmove`）——
+    //   方向判据来自 `0x4E74C4`（`dst <= src` ⇒ 前向）与 `0x4E74CA jb 0x4E7670`（`dst > src` ⇒ 后向）；
+    //   两者**不含** `dst == src`（那支走 0x4E74F4 的前向逐字节自拷贝 ⇒ 内存不变，直接返回）。
+    if (dst == src) return true;
+    std::uint8_t* const d = mem.host(dst);
+    const std::uint8_t* const s = mem.host(src);
+    if (dst < src) {
+        copyForwardBytes(d, s, n);
+    } else {
+        copyBackwardBytes(d, s, n);
+    }
     return true;
 }
 

@@ -108,6 +108,17 @@ struct AudioStats {
     std::uint64_t fill_waits = 0;
     std::uint64_t fill_wait_timeouts = 0;
     std::uint64_t fill_overlapped = 0;
+    // ★ 只读诊断（本轮为"边界处重播 2 s"加的**观测**；⛔ 都不作为断言取值，⛔ 不参与任何判定）：
+    //   slot_reverify_fail = `feederEvent` **拿到槽 CS 之后**重验槽失败（`[Sound+0x654+4s]` 或
+    //     `[stream+0x40C]` 已被主线程换掉）⇒ 这一刀丢掉，不写环、不 +在飞。
+    //     ★ 它堵的是本函数原先**唯一没有账**的早退：notify 入队数 > fills 的差额在
+    //       `stale` / `dropped` / `slot_miss` 全 0 时只能落在这里（见 audio.cpp 里
+    //       `feederEvent` 的早退清单）。
+    //   fill_max_us / fill_slow = 单刀 fill 的**最大**墙钟（微秒）与"超过 1000 ms"的刀数。
+    //     ⛔ 只记账：慢刀是诊断线索（环长 2 s 而单刀 > 2 s ⇒ 会落后一整圈），不是错误判据。
+    std::uint64_t slot_reverify_fail = 0;
+    std::uint64_t fill_max_us = 0;
+    std::uint64_t fill_slow = 0;
     std::uint32_t max_buffers = 0;
 };
 
@@ -245,6 +256,15 @@ private:
     //   返回的指针只在同一次持锁里有效（`buffers_` 是 vector）。
     Buffer* findByObj(std::uint32_t obj_ea);
     bool findSlot(std::uint32_t obj_ea, std::uint32_t* slot, std::uint32_t* stream) const;
+    // ★ 只读诊断（`late_q` 用）：该缓冲此刻的设备游标（字节，落在 [0, bytes)）。
+    //   与 `playedCursor` **同一份算式**（后者现在只是"查表 + 本函数"）⇒ 两处不会漂。
+    //   ⛔ 纯读：不发通知、不改 `playing` / `initial_pos` / 任何计数。
+    std::uint32_t cursorOf(const Buffer& b) const;
+    // ★ 只读诊断（`LIFT_AUDIO_TRACE` 的 `late_q`）：**fill 开始**那一刻，该 quarter 的
+    //   **目标环位置**与**设备游标**的差，单位 = quarter（公式见 audio.cpp 的实现注释）。
+    //   返回 false = 找不到该 obj / 环长度太小 ⇒ 调用方打 `?`（⛔ 不要拿 0 冒充"读不到"）。
+    bool fillLagQuarter(std::uint32_t obj_ea, std::uint32_t quarter, std::uint32_t* ring_bytes,
+                        double* late_q) const;
     // 本函数是否跑在 feeder 线程上（EOF 路径 `0x4B6C58` 会在 fill 里调到 `stop()`）。
     bool isFeederThread() const;
     // 等"正在跑的那一刀 fill"结束（S1）。返回 true = 已结束；false = 3000 ms 超时。

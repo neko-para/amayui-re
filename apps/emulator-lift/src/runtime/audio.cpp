@@ -4,6 +4,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdarg>
+#include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -22,6 +24,13 @@
 #include "runtime/sync_guest.h"
 
 namespace lift {
+// ★ 只读计量（**定义在 `shims.cpp`**，只给 `LIFT_AUDIO_TRACE` 的 fill 时间分解用）：
+//   本线程在 **shim 边界**（`ShimRegistry::invoke` 的内层取令牌）上"真的被挡住"的累计墙钟（ns）
+//   与次数。`thread_local` ⇒ 只有**调用它自己线程**的那份会被累加/读出 —— feeder 的 fill
+//   收尾在**同一条线程**上读它，所以不会混进主线程的等待。
+//   ⛔ 不是契约、不参与任何判定；口径见 shims.cpp 里同名定义上的注释。
+extern thread_local std::uint64_t t_shim_token_wait_ns;
+extern thread_local std::uint64_t t_shim_token_wait_count;
 namespace {
 constexpr std::uint32_t kSampleRate = 48000u;
 constexpr std::uint32_t kBlockAlign = 4u;  // 16 bit / 2 ch
@@ -74,6 +83,17 @@ void putLe32(std::uint8_t* p, std::uint32_t v) {
     p[1] = static_cast<std::uint8_t>((v >> 8) & 0xFF);
     p[2] = static_cast<std::uint8_t>((v >> 16) & 0xFF);
     p[3] = static_cast<std::uint8_t>((v >> 24) & 0xFF);
+}
+
+// ★ 只读诊断（`LIFT_AUDIO_TRACE` 专用）：读 guest 的一个 4 字节字段，**没提交 / 读不到就打 `?`**。
+//   ⛔ 不要用 0 冒充"读不到" —— 那会把"没提交"读成"值是 0"，两条完全不同的结论就混了。
+//   ⛔ 纯读：`committed` + `rd32`，不写内存、不改任何状态。
+void traceDword(const GuestMemory* mem, std::uint32_t ea, char* out, std::size_t n) {
+    if (mem != nullptr && mem->committed(ea, 4)) {
+        std::snprintf(out, n, "0x%08X", mem->rd32(ea));
+    } else if (n > 0) {
+        std::snprintf(out, n, "?");
+    }
 }
 }  // namespace
 
@@ -568,8 +588,14 @@ void AudioEngine::stop(std::uint32_t state_ea) {
     // 冻结值是 Stop 这一刻的游标：之后设备继续走（以及被作废的那一刀 fill）都不影响它。
     b->initial_pos = b->bytes ? (frozen % b->bytes) : 0u;
     if (std::getenv("LIFT_AUDIO_TRACE") != nullptr) {
-        logAt(LogLevel::Info, "stop state=0x%08X obj=0x%08X cursor=%u gen=%llu", state_ea, obj,
-              b->initial_pos, static_cast<unsigned long long>(b->generation));
+        // ★ 只读诊断：除原有的 state/obj/cursor/gen 再补两栏 ——
+        //   `feeder=%d` = **本调用是不是跑在 feeder 线程上**（`isFeederThread()`；EOF 自停
+        //     `0x4B6C58` 就是这条路径：它会**跳过分层等待**，这正是"能不能等住"的分水岭）；
+        //   `bytes=` = 该 Buffer 的环长度（`initial_pos` 是 mod bytes 的 ⇒ 没有它读不出圈数）。
+        //   ⛔ 纯读：`isFeederThread()` 只读 atomic id、`bytes` 只读字段。
+        logAt(LogLevel::Info, "stop state=0x%08X obj=0x%08X cursor=%u gen=%llu feeder=%d bytes=%u", state_ea,
+              obj, b->initial_pos, static_cast<unsigned long long>(b->generation), isFeederThread() ? 1 : 0,
+              b->bytes);
     }
 }
 
@@ -596,6 +622,15 @@ void AudioEngine::setPosition(std::uint32_t state_ea, std::uint32_t pos) {
     b->initial_pos = b->bytes ? (pos % b->bytes) : 0u;
     const std::uint32_t align = b->fmt.block_align ? b->fmt.block_align : 4u;
     b->initial_pos -= b->initial_pos % align;  // 按**该缓冲**的帧对齐（mono 是 2，不是 4）
+    if (std::getenv("LIFT_AUDIO_TRACE") != nullptr) {
+        // ★ 只读诊断（原本这里**一行 trace 都没有**）：`setpos` 是 B2 的另一半 ——
+        //   `pos=` 是**请求**的位置，`initial=` 是对齐后真正写进 `initial_pos` 的值
+        //   （Play 把它当续读起点：`generateTo` 用 `initial_pos` 当源起点），`playing=` 说明
+        //   这次重定位有没有顺带重排 `start_mixed` 并补发通知。
+        //   ⛔ 纯读：只读字段，不写、不改判定。
+        logAt(LogLevel::Info, "setpos state=0x%08X obj=0x%08X pos=%u initial=%u bytes=%u playing=%d", state_ea,
+              obj, pos, b->initial_pos, b->bytes, b->playing ? 1 : 0);
+    }
     if (b->playing) {
         // 真机 SetCurrentPosition 会让游标跳到新位置；引擎只在 Play 前调它，这里按同一时间线重排。
         b->start_mixed = generated_;
@@ -618,16 +653,61 @@ void AudioEngine::setPan(std::uint32_t state_ea, std::int32_t pan) {
     if (b) b->pan = std::clamp<std::int32_t>(pan, -10000, 10000);
 }
 
+std::uint32_t AudioEngine::cursorOf(const Buffer& b) const {
+    // ⚠ 这是**唯一一份**"设备游标"算式：`playedCursor` 与 `late_q` 都走它（⛔ 不要各写一份）。
+    //   语义与原来的 `playedCursor` 逐字相同（只把 `b` 从指针换成引用）。
+    if (b.bytes == 0) return 0;
+    if (!b.playing) return b.initial_pos % b.bytes;
+    const std::uint64_t start_frame = b.start_mixed / kBlockAlign;
+    const std::uint64_t played_frame = played_ / kBlockAlign;
+    if (played_frame <= start_frame) return b.initial_pos % b.bytes;
+    const std::uint64_t src_elapsed = (played_frame - start_frame) * b.fmt.avg_bytes / kSampleRate;
+    return static_cast<std::uint32_t>((b.initial_pos + src_elapsed) % b.bytes);
+}
+
 std::uint32_t AudioEngine::playedCursor(std::uint32_t state_ea) const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     const Buffer* b = find(state_ea);
-    if (b == nullptr || b->bytes == 0) return 0;
-    if (!b->playing) return b->initial_pos % b->bytes;
-    const std::uint64_t start_frame = b->start_mixed / kBlockAlign;
-    const std::uint64_t played_frame = played_ / kBlockAlign;
-    if (played_frame <= start_frame) return b->initial_pos % b->bytes;
-    const std::uint64_t src_elapsed = (played_frame - start_frame) * b->fmt.avg_bytes / kSampleRate;
-    return static_cast<std::uint32_t>((b->initial_pos + src_elapsed) % b->bytes);
+    if (b == nullptr) return 0;
+    return cursorOf(*b);
+}
+
+// ★ 只读诊断（`LIFT_AUDIO_TRACE` 的 `late_q`）—— **定义**（写在这里，是为了公式只有一处）：
+//
+//     ring_bytes = 该 obj 在设备模型里的环长度（`Buffer::bytes`；= DSB 的 dwBytes）
+//     q_bytes    = ring_bytes / 4                      // 一个 quarter 的字节数
+//     target     = quarter 的**目标环位置**（字节）：
+//                    有 `notify_off[quarter]` 且 < ring_bytes ⇒ 用它（引擎真正用于点火的那个偏移）
+//                    ∈ [0, ring_bytes)          ⇒ 否则退回 quarter * q_bytes（引擎的 0/4、1/4、2/4、3/4）
+//     cursor     = `cursorOf(b)`                        // 此刻设备游标（字节，落在 [0, ring_bytes)）
+//     late_q     = (target - cursor) / q_bytes          // ★ **带符号**、**不取整**、**不做** mod 归一
+//
+//   ⇒ 单位是 quarter（浮点，打两位小数）：0 = 正好在目标上；+0.8 ≈ 落后 0.8 个 quarter（fill 提前的
+//     常态）；负数 = 游标**已经越过**这一刀的目标（fill **迟了**，越负越迟）；≥ 4 = 落后一整圈以上
+//     （目标已被上一圈越过）—— 这三种正是"重播 2 s"要区分的形状。
+//   ★ 为什么**不**用整数："迟了 0.96 个 quarter"整数除法会截成 **0**（C++ 向零截断），
+//     正好把"稍微迟了"抹成"正好"—— 而要看的正是这一档。⛔ 也不归一（mod ring_bytes）：
+//     归一会把"迟了"折成"提前"。
+//   ⛔ 纯读：只读 `buffers_` + `played_`；不发通知、不改 `playing` / `initial_pos` / 任何计数。
+bool AudioEngine::fillLagQuarter(std::uint32_t obj_ea, std::uint32_t quarter, std::uint32_t* ring_bytes,
+                                 double* late_q) const {
+    if (obj_ea == 0) return false;
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    for (const auto& b : buffers_) {
+        if (b.obj_ea != obj_ea) continue;
+        if (b.bytes < 4u) return false;  // 环小到一个 quarter 都没有 ⇒ 分母无意义
+        const std::uint64_t q_bytes = b.bytes / 4u;
+        std::uint64_t target = static_cast<std::uint64_t>(quarter) * q_bytes;
+        if (quarter < b.notify_count && b.notify_off[quarter] < b.bytes) {
+            target = b.notify_off[quarter];
+        }
+        const std::int64_t delta = static_cast<std::int64_t>(target) -
+                                   static_cast<std::int64_t>(cursorOf(b));
+        if (ring_bytes) *ring_bytes = b.bytes;
+        if (late_q) *late_q = static_cast<double>(delta) / static_cast<double>(q_bytes);
+        return true;
+    }
+    return false;
 }
 
 bool AudioEngine::findSlot(std::uint32_t obj_ea, std::uint32_t* slot, std::uint32_t* stream) const {
@@ -1110,10 +1190,16 @@ AudioPump AudioEngine::pump() {
         guestToken().check("audio.pump");
         const std::uint32_t quarter = ev.quarter;
         const auto fill_start = std::chrono::steady_clock::now();
+        // ★ 只读诊断（`late_q`）：**fill 开始**那一刻的滞后量。公式与"为什么带符号/不归一"见
+        //   `fillLagQuarter` 的定义注释。⚠ 必须在 `startNestedGuestCall` **之前**取（那才是 fill 开始）。
+        std::uint32_t lag_bytes = 0;
+        double lag_q = 0.0;
+        const std::uint32_t ev_obj = ev.obj;  // trace 用（捕获；`ev` 本身不捕，只捕需要的字段）
+        const bool lag_ok = fillLagQuarter(ev_obj, quarter, &lag_bytes, &lag_q);
         const bool started = startNestedGuestCall(
             *cpu_, kSub4B6C30, {quarter}, 0u, "audio:feeder",
-            [self, slot, quarter, stream, cs, inf_ea, fill_start](X86& c, std::uint32_t cb_result,
-                                                                  std::uint32_t* out) {
+            [self, slot, quarter, stream, cs, inf_ea, fill_start, lag_ok, lag_bytes, lag_q,
+             ev_obj](X86& c, std::uint32_t cb_result, std::uint32_t* out) {
                 if (c.mem->committed(inf_ea, 4)) {
                     const std::uint32_t cur = c.mem->rd32(inf_ea);
                     if (cur > 0) c.mem->wr32(inf_ea, cur - 1u);
@@ -1125,17 +1211,40 @@ AudioPump AudioEngine::pump() {
                 self->restore(self->snapshot_, out);
                 self->in_fill_ = false;
                 ++self->stats_.fills;
+                // ★ 只读诊断计数（dumpSummary 的 `fill_max_ms` / `fill_slow`）：⛔ 不参与判定。
+                const std::uint64_t fill_us = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                                                         fill_start)
+                        .count());
+                self->stats_.fill_max_us = std::max(self->stats_.fill_max_us, fill_us);
+                if (fill_us > 1000000ull) ++self->stats_.fill_slow;
                 if (std::getenv("LIFT_AUDIO_TRACE") != nullptr) {
-                    const double ms =
-                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fill_start)
-                            .count();
+                    const double ms = static_cast<double>(fill_us) / 1000.0;
+                    // ★ 只读诊断：`[stream+0x2450]`（循环重解码标志）/`+0x2458`/`+0x2470` 是 B1 的
+                    //   判据；**读不到就打 `?`**（⛔ 不打 0）。`bytes=` 与 `late_q` 的分母同一个值。
+                    char f2450[16];
+                    char f2458[16];
+                    char f2470[16];
+                    char bytes_txt[16];
+                    char late_txt[24];
+                    traceDword(c.mem, stream + 0x2450u, f2450, sizeof f2450);
+                    traceDword(c.mem, stream + 0x2458u, f2458, sizeof f2458);
+                    traceDword(c.mem, stream + 0x2470u, f2470, sizeof f2470);
+                    if (lag_ok) {
+                        std::snprintf(bytes_txt, sizeof bytes_txt, "%u", lag_bytes);
+                        std::snprintf(late_txt, sizeof late_txt, "%0.2f", lag_q);
+                    } else {
+                        std::snprintf(bytes_txt, sizeof bytes_txt, "?");
+                        std::snprintf(late_txt, sizeof late_txt, "?");
+                    }
                     std::fprintf(stderr,
-                                 "[audio] fill slot=%u quarter=%u ret=%u state=%u wrote=%u L=%u %.2f ms\n",
+                                 "[audio] fill slot=%u quarter=%u ret=%u state=%u wrote=%u L=%u "
+                                 "obj=0x%08X bytes=%s 2450=%s 2458=%s 2470=%s late_q=%s %.2f ms\n",
                                  slot, quarter, cb_result,
                                  c.mem->committed(stream + 0x2458, 4) ? c.mem->rd32(stream + 0x2458) : 0u,
                                  c.mem->committed(stream + 0x2468, 4) ? c.mem->rd32(stream + 0x2468) : 0u,
                                  c.mem->committed(stream + kStreamBytes, 4) ? c.mem->rd32(stream + kStreamBytes) : 0u,
-                                 ms);
+                                 ev_obj, bytes_txt, f2450, f2458, f2470, late_txt, ms);
                 }
                 return true;
             },
@@ -1361,7 +1470,37 @@ void AudioEngine::feederEvent(const AudioNotifyEvent& ev) {
     //   **每次 shim 调用**（`ShimRegistry::invoke`）与 **CS 字段**（本函数的 prologue/epilogue）。
     //   这里取令牌只覆盖"读槽 / 写 guest 可见的 CS 与在飞计数 / 建 feeder 上下文"这几段；
     //   中间整次 fill（`runFeederGuest`）**放开**令牌（否则 wall ≥ 两侧 CPU 之和，见报告）。
+    //
+    // ★★ "每条早退都有账"（本轮逐条点过；⛔ 以后改早退路径必须回来对账）：
+    //   ① `findSlot` 失败                    → `stats_.slot_miss`（D4：obj 反演不到槽）
+    //   ② `guestTryEnterCriticalSectionAs` 硬错 → `feeder_error_` + Warn 行（**致命**，不另设计数：
+    //      它不静默 —— feeder 主循环随即退出）
+    //   ③ 槽 CS 不在已提交内存                → 同 ②（致命、响亮）
+    //   ④ 抢 CS 的 1 ms 重试期间 `stop_requested_` → 不计数（这是**我们主动不填**，不是通知丢了；
+    //      `joinFeeder` 会打一行 Info）
+    //   ⑤ 拿到 CS 之后 `stop_requested_`        → 同 ④（第二个检查点）
+    //   ⑥ **槽重验失败**（下面 `rd32(...) != stream || rd32(stream+0x40C) != ev.obj`）
+    //                                          → `stats_.slot_reverify_fail` ★ 本轮新增
+    //   ⑦ 代次不符（Stop / 重定位抢先）          → `stats_.stale`
+    //   ⑧ fill 之后 LeaveCS 失败 / `runFeederGuest` 失败 → `feeder_error_` + Warn 行（致命、响亮）
+    //   ⇒ 除 ②③⑧ 三条**致命**路径（都会停下 feeder 并打日志）与 ④⑤（主动退出）外，每条早退都有计数。
+    //   ★ ⑥ 以前是**唯一没有账**的那条：硬账的证据是 `notify`（入队数）比 `fills` 多，而
+    //     `stale` / `dropped` / `slot_miss` 全 0 —— 那种差额只能落在这里。
+    //
+    // ★ 只读诊断（`LIFT_AUDIO_TRACE` 的 fill 时间分解；⛔ 不参与任何判定，只取墙钟）：
+    //   `wait_ms`  = 入口 → **外层** `token.acquire()` 返回（等主线程放令牌）。
+    //     ⚠ 口径上限：本函数是**已经 pop 之后**才进来的（`feederThreadMain` 先 pop 再调），
+    //       所以"通知在队列里排了多久"**不在这里** —— 那一段要给入队打时间戳，本轮**不做**
+    //       （只新增字段，不改 `AudioNotifyEvent`）。
+    //   `pre_ms`   = 拿到令牌 → `fill_start`（findSlot + 抢槽 CS 的 1 ms 重试 + 建上下文）。
+    //   `guest_ms` = `runFeederGuest()` 的墙钟（guest 指令 + 每次 shim 调用的**内层**取令牌等待）。
+    //   `shimtok_ms` = `guest_ms` 里卡在 **shim 边界**等令牌的那部分（`shims.cpp` 里
+    //     `t_shim_token_wait_ns` 的 thread_local 累计；本文件顶部有它的 extern 声明）。
+    //   `shimblk`  = 上面那段账里的次数（这一刀有几次 shim 取令牌**真的被挡住**）。
+    //   `total`    = 已有那个 `ms`（`fill_start` → trace 行；此时 guest 已跑完、环已写完、LeaveCS 之前）。
+    const auto t_enter = std::chrono::steady_clock::now();
     token.acquire();
+    const auto t_token = std::chrono::steady_clock::now();
     std::uint32_t slot = 0;
     std::uint32_t stream = 0;
     if (!findSlot(ev.obj, &slot, &stream)) {
@@ -1431,8 +1570,14 @@ void AudioEngine::feederEvent(const AudioNotifyEvent& ev) {
     }
     // ★ 上面的 findSlot 是**进 CS 之前**的扫描；主线程可能刚换了槽。拿到 CS 后必须重验，
     //   否则会填到已经换掉的 stream（真机上 feeder 是拿到 CS 后才读槽指针的）。
+    //   ★ 这一刀**丢掉**（不写环、不 +在飞）—— 判定与以前**逐字相同**，只是**补了一个计数**
+    //     `slot_reverify_fail`（见本函数开头的早退清单 ⑥：它是原先唯一没有账的早退）。
     if (mem_->rd32(feeder_.sound + kSoundSlots + 4u * slot) != stream ||
         mem_->rd32(stream + kStreamDsBuffer) != ev.obj) {
+        {
+            std::lock_guard<std::recursive_mutex> lk(mutex_);  // `stats_` 归 `mutex_`（dumpSummary 也读它）
+            ++stats_.slot_reverify_fail;
+        }
         std::string leave_err;
         guestLeaveCriticalSectionAs(audio_cpu_, cs, feeder_.thread_id, &leave_err);
         token.release();
@@ -1483,12 +1628,23 @@ void AudioEngine::feederEvent(const AudioNotifyEvent& ev) {
 
     std::string run_err;
     const auto fill_start = std::chrono::steady_clock::now();
+    // ★ 只读诊断（`late_q`）：**fill 开始**那一刻的滞后量（公式与"为什么带符号/不归一"见
+    //   `fillLagQuarter` 的定义注释）。⛔ 纯读：`buffers_` + `played_`，不发通知、不改状态。
+    std::uint32_t lag_bytes = 0;
+    double lag_q = 0.0;
+    const bool lag_ok = fillLagQuarter(ev.obj, ev.quarter, &lag_bytes, &lag_q);
+    // ★ 只读诊断：`guest_ms` 里"卡在 shim 边界等令牌"的基线（thread_local，本线程）。
+    const std::uint64_t shimtok_ns_begin = t_shim_token_wait_ns;
+    const std::uint64_t shimtok_n_begin = t_shim_token_wait_count;
     // ★ 并发契约（guest_token.h）：feeder 的**guest 指令执行**不持令牌（主线程同时跑自己的块）；
     //   它每次 **shim 调用**由 `ShimRegistry::invoke` 取令牌 —— 所有 guest 可见容器的访问都在
     //   那里，所以"容器临界区"仍然互斥。⛔ 整次 fill 持令牌 = 单核串行：实测 wall ≥ 两侧 CPU
     //   之和（主线程 13.8 s + feeder 19.0 s ≈ 32.8 s CPU），而并行基线 wall 15.1 s。
     token.release();
     const bool ok = runFeederGuest(&run_err);
+    const auto t_guest_done = std::chrono::steady_clock::now();
+    const std::uint64_t guest_shimtok_ns = t_shim_token_wait_ns - shimtok_ns_begin;
+    const std::uint64_t guest_shimtok_n = t_shim_token_wait_count - shimtok_n_begin;
     token.acquire();  // 回到令牌里再改 guest 可见状态（在飞计数 / CS 字段）
     // ★ 金丝雀（S1）：fill 结束后该 obj 的代次是不是还是当初那一代。**不一致 = 有一次 Stop /
     //   重定位与这一刀在时间上重叠**。★ 注意：`stop()` 是"先 `++generation` 再等" ⇒ 被第 3 层
@@ -1512,14 +1668,44 @@ void AudioEngine::feederEvent(const AudioNotifyEvent& ev) {
         filling_obj_.store(0);
     }
     pending_cv_.notify_all();
+    // ★ 只读诊断计数（dumpSummary 的 `fill_max_ms` / `fill_slow`）：在 `fill_start` → 这里
+    //   这一段上记账（与 trace 里那个 `total` 同一段）。⛔ 不参与判定；`fill_slow` 的门槛
+    //   固定 1000 ms（**环长 2 s、单刀 > 1 s ⇒ 已经在吃掉一圈的余量**，是诊断阈值不是判据）。
+    const auto t_trace = std::chrono::steady_clock::now();
+    const std::uint64_t fill_us = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(t_trace - fill_start).count());
     if (std::getenv("LIFT_AUDIO_TRACE") != nullptr) {
-        const double ms =
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fill_start).count();
+        const double total_ms = static_cast<double>(fill_us) / 1000.0;
+        const double wait_ms =
+            std::chrono::duration<double, std::milli>(t_token - t_enter).count();
+        const double pre_ms = std::chrono::duration<double, std::milli>(fill_start - t_token).count();
+        const double guest_ms = std::chrono::duration<double, std::milli>(t_guest_done - fill_start).count();
+        const double shimtok_ms = static_cast<double>(guest_shimtok_ns) / 1.0e6;
         std::uint64_t ov_hits = 0;
         for (std::size_t i = 0; i < audio_overrides_.size(); ++i) {
             if (const NativeOverride* ov = audio_overrides_.at(i)) ov_hits += ov->hits;
         }
-        std::fprintf(stderr, "[audio] feeder fill slot=%u quarter=%u %.2f ms ov=%llu%s\n", slot, ev.quarter, ms,
+        // ★ 只读诊断：`[stream+0x2450/0x2458/0x2470]` 是 B1 的判据；**读不到就打 `?`**（⛔ 不打 0）。
+        char f2450[16];
+        char f2458[16];
+        char f2470[16];
+        char bytes_txt[16];
+        char late_txt[24];
+        traceDword(mem_, stream + 0x2450u, f2450, sizeof f2450);
+        traceDword(mem_, stream + 0x2458u, f2458, sizeof f2458);
+        traceDword(mem_, stream + 0x2470u, f2470, sizeof f2470);
+        if (lag_ok) {
+            std::snprintf(bytes_txt, sizeof bytes_txt, "%u", lag_bytes);
+            std::snprintf(late_txt, sizeof late_txt, "%0.2f", lag_q);
+        } else {
+            std::snprintf(bytes_txt, sizeof bytes_txt, "?");
+            std::snprintf(late_txt, sizeof late_txt, "?");
+        }
+        std::fprintf(stderr,
+                     "[audio] feeder fill slot=%u quarter=%u obj=0x%08X bytes=%s 2450=%s 2458=%s 2470=%s "
+                     "late_q=%s wait=%.2f pre=%.2f guest=%.2f shimtok=%.2f shimblk=%llu total=%.2f ms ov=%llu%s\n",
+                     slot, ev.quarter, ev.obj, bytes_txt, f2450, f2458, f2470, late_txt, wait_ms, pre_ms, guest_ms,
+                     shimtok_ms, static_cast<unsigned long long>(guest_shimtok_n), total_ms,
                      static_cast<unsigned long long>(ov_hits), ok ? "" : " (FAILED)");
     }
     if (mem_->committed(inf_ea, 4)) {
@@ -1543,6 +1729,9 @@ void AudioEngine::feederEvent(const AudioNotifyEvent& ev) {
     {
         std::lock_guard<std::recursive_mutex> lk(mutex_);
         ++stats_.fills;
+        // ★ 只读诊断计数（与 `fills` 同一处、同一口径：**只统计跑完的这一刀**）。
+        stats_.fill_max_us = std::max(stats_.fill_max_us, fill_us);
+        if (fill_us > 1000000ull) ++stats_.fill_slow;
         if (mem_->committed(stream + kStreamBytes, 4)) stats_.fill_bytes += mem_->rd32(stream + kStreamBytes) / 4u;
     }
 }
@@ -1633,7 +1822,11 @@ void AudioEngine::dumpSummary(std::FILE* out) const {
                  "audio     : mode=%s device=%s muted=%d muted_bytes=%llu fills=%llu fill_bytes=%llu "
                  "mixed=%llu played=%llu notify=%llu deferred=%llu dropped=%llu underruns=%llu "
                  "stale=%llu slot_miss=%llu play_on_playing=%llu fill_waits=%llu "
-                 "fill_wait_timeouts=%llu fill_overlapped=%llu%s\n",
+                 "fill_wait_timeouts=%llu fill_overlapped=%llu"
+                 // ★ 本轮新增的三个**只读观测**（放在末尾；⛔ 原有字段顺序没动）：
+                 //   slot_reverify_fail = feeder 拿到槽 CS 后重验失败（见 audio.h 的说明）；
+                 //   fill_max_ms / fill_slow = 单刀 fill 的最大墙钟与 >1000 ms 的刀数。
+                 " slot_reverify_fail=%llu fill_max_ms=%.2f fill_slow=%llu%s\n",
                  audioModeName(mode_), device, mute_ ? 1 : 0,
                  static_cast<unsigned long long>(stats_.muted_bytes),
                  static_cast<unsigned long long>(stats_.fills),
@@ -1650,6 +1843,9 @@ void AudioEngine::dumpSummary(std::FILE* out) const {
                  static_cast<unsigned long long>(stats_.fill_waits),
                  static_cast<unsigned long long>(stats_.fill_wait_timeouts),
                  static_cast<unsigned long long>(stats_.fill_overlapped),
+                 static_cast<unsigned long long>(stats_.slot_reverify_fail),
+                 static_cast<double>(stats_.fill_max_us) / 1000.0,
+                 static_cast<unsigned long long>(stats_.fill_slow),
                  dump_path_.empty() ? "" : (" dump=" + dump_path_).c_str());
 }
 

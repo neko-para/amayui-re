@@ -235,6 +235,47 @@ struct ThisCallArgs {
 ThisCallArgs thisCall(const X86& cpu, std::size_t arg_count);
 
 // 具体实现（也直接给测试用）
+// ---------------------------------------------------------------------------------------
+// `_memcpy` / `_memcpy_0`（`0x4E74B0` / `0x4E78E0`，`__cdecl` 12 B，返回 EAX = dst）
+//
+// ★ 身份：`.lst` 把两条都记成 COLLAPSED（**没有指令文本**）—— 语义只能从 PE 原始字节取，
+//   取法见 `tools/disasm.mjs --at --ea 0x4E74B0 --bytes <n>`（EA → 节表 → 文件偏移）。
+//   `.lst` 只给出 EA 与长度：`; [00000361 BYTES: COLLAPSED FUNCTION _memcpy]`（两处同长 0x361）。
+// ★ **guest 侧不是纯前向** —— 这是本项最容易搞错的一点（见 0x4E74C4 / 0x4E74C8 的分流）：
+//   · `dst <= src`（含不重叠）⇒ **前向**：`0x4E74C4 cmp edi,esi` / `0x4E74C6 jbe 0x4E74F4`，
+//     那里是 `0x4E74F4 test edi,3` → `0x4E74FC shr ecx,2` → `0x4E7508 F3 A5 rep movsd`
+//     → 尾字节跳转表（`0x4E7531 ff 24 8d b4 75 4e 00` 起）；
+//   · `dst > src` 且 `dst < src+n`（**重叠**）⇒ **后向**：`0x4E74C8 cmp edi,eax`（EAX = src+n）/
+//     `0x4E74CA 0F 82 a0 01 00 00 jb 0x4E7670`，而 `0x4E7670` 是
+//     `8D 74 31 FC lea esi,[ecx+esi-4]` / `8D 7C 39 FC lea edi,[ecx+edi-4]` /
+//     `0x4E768B FD std` → `0x4E768C F3 A5 rep movsd` → `0x4E768E FC cld`
+//     （非对齐支 `0x4E76A4` 同样落到 `0x4E76E5 FD` / `0x4E76E6 F3 A5` / `0x4E76E8 FC`）。
+//   ⇒ 重叠时 guest 的语义 = **memmove**：低位**前向**、高位**后向**。⛔ **不是"一律前向"**，
+//     也 ⛔ 不是"一律后向"。谁把这两支合成一支，谁就在某一类重叠上与解释器臂分叉（差分守卫会红）。
+// ★ 所以"重叠 ⇒ 回退解释器"这条闸门**只该为"宿主 `std::memcpy` 对重叠是 UB"而存在**，
+//   不该成为"重叠就没人管"。现在：不重叠 ⇒ 仍 `std::memcpy`（原路径不变）；重叠 ⇒ 两条**显式方向**
+//   的软循环（前向 ↔ 0x4E74F4 那支，后向 ↔ 0x4E7670 那支）。
+//   ⛔ 不用 `std::memmove`：宿主 libc 的分块/方向不在语料里、不可复核；这里要的是"与解释器臂逐字节
+//   相同"，由我们自己的两条循环显式给出。⛔ 也不许只写前向（`dst > src` 重叠会给出"重复图样"）。
+// ★ 阈值 `kMemcpyChunkMin = 32` 的来处（不是拍脑袋）：guest 自己就以 **8 个 dword（= 32 B）**
+//   为 `rep movsd` 与逐字节尾表的分界 —— `0x4E7502 83 F9 08 cmp ecx,8` / `0x4E7506 72 29 jb`
+//   （前向）与 `0x4E7686 83 F9 08` / `0x4E7689 72 0D jb`（后向），其中 ECX 是 `shr ecx,2` 之后的
+//   **dword 计数**。⇒ 这里沿用同一条分界：< 32 B 逐字节，>= 32 B 先按 4 B 分块再收尾字节。
+//   ★ 阈值**不参与语义**（前向/后向各自单向推进 ⇒ 结果与分块方式无关），只影响常数因子
+//   ⇒ 差分用例必须**跨过**它（n = 8 / 64 / 4096 两档都测），否则"分块写错方向"测不出来。
+// ★ 已知边界（登记，不是缺陷）：① 函数级 override 只记 1 条指令 + 1 tick（时钟相位，见上面的准入门）；
+//   ② `ECX` / `EDX` / `EFLAGS` 是 call-clobbered，guest 实现会弄脏、native 不弄脏 ⇒ 差分只比
+//      EAX / ESP / EBX / ESI / EDI / EBP / EIP 与内存（与 `tests/native_override.cpp` 的 `compare()` 同一口径）。
+//
+// 回退原因（**枚举值就是 `NativeOverride::declines[]` 的下标**；0 = 未分类，不落桶）。
+// ★ 这两条本期**不动**（不是"图省事"，是真分歧）：
+enum class MemcpyWhy : std::uint8_t {
+    // `dst+n` / `src+n` 越过 4 GiB：宿主平坦映射只有 4 GiB，搬它就是读出界（真 UB），
+    // 而 guest 在那里的行为是 fault —— 让解释器自己表态。
+    CrossBoundary = 1,
+    // safe mode 下任一跨度不在已提交页：guest 会 fault，替它搬等于把 fault 掩盖掉。
+    Uncommitted = 2,
+};
 bool nativeMemcpy(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 bool nativeMemset(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 // `sub_401000` 的语义是**符号**（`.lst` 401066: `sar eax,1Fh; or eax,1` ⇒ -1/0/+1），

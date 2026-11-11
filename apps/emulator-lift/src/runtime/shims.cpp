@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 
 #include "runtime/exec.h"
@@ -18,6 +20,26 @@
 #include "runtime/x86.h"
 
 namespace lift {
+
+// ★ 只读计量（**只给 `LIFT_AUDIO_TRACE` 的 fill 时间分解**；⛔ 不是契约、⛔ 不参与任何判定）：
+//   `ShimRegistry::invoke` 在**内层**取令牌（`GuestToken::Guard`）时，如果这一取真的被挡住，
+//   把那段墙钟与次数累加到**调用线程**自己的账上。
+//   · `thread_local` 是有意的：feeder 的 fill 收尾**在同一条线程**上读它（audio.cpp 顶部有
+//     `extern` 声明）⇒ 读到的就是"这一刀在 shim 边界上等了多久"，**不会混进主线程的等待**。
+//   · 只有 `LIFT_AUDIO_TRACE` 打开时才累计（读一次缓存的静态 bool），否则热路径只多一次
+//     `lastAcquireWaitNs()`（那是 TLS 读，0 成本）之后的判断 —— ⛔ 不加时钟读。
+//   · 口径：`GuestToken::lastAcquireWaitNs()` 在"未竞争 / 重入"时是 0 ⇒ 只有真被挡的那次才计。
+//     ⛔ 它与 `defs_[id].ns` **不可相加**（`ns` 的计时起点在取到令牌之后，见下面 invoke 的注释）。
+thread_local std::uint64_t t_shim_token_wait_ns = 0;
+thread_local std::uint64_t t_shim_token_wait_count = 0;
+
+namespace {
+// `LIFT_AUDIO_TRACE` 只读一次（默认关 ⇒ 默认行为与读数都不变）。
+bool audioTraceEnabled() {
+    static const bool on = std::getenv("LIFT_AUDIO_TRACE") != nullptr;
+    return on;
+}
+}  // namespace
 
 const char* convName(Conv c) {
     switch (c) {
@@ -397,6 +419,15 @@ void ShimRegistry::invoke(X86& cpu, ShimDef& def) {
     std::chrono::steady_clock::time_point time_begin{};
     {
         GuestToken::Guard shim_token(guestToken());
+        // ★ 只读计量（见文件上方 `t_shim_token_wait_ns`）：**不改**这一取/放的任何语义，
+        //   只在本线程"真的被挡住"时把那段时间记到自己的账上（`lastAcquireWaitNs()` 是 TLS 读）。
+        if (audioTraceEnabled()) {
+            const std::uint64_t waited_ns = guestToken().lastAcquireWaitNs();
+            if (waited_ns != 0) {
+                t_shim_token_wait_ns += waited_ns;
+                ++t_shim_token_wait_count;
+            }
+        }
         // ★ 检查点：Guard 被删/短路时，**第一次 shim 调用**就计数（不依赖 heap 恰好被碰到）。
         guestToken().check("shim.invoke");
         // ★ M1：计时起点在**取到令牌之后**（等令牌的时间⛔ 不进 ns，见上方注释）。
