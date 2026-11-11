@@ -34,10 +34,13 @@ enum class GuestConv : std::uint8_t {
 
 const char* guestConvName(GuestConv c);
 
-// native 实现：读参数（cpu.arg(i) / cpu.ecx()），经 mem 访存，写 *result（= 返回 EAX）。
+// native 实现：读参数（cpu.arg(i) / cpu.ecx()），经 mem 访存，**按 ABI 写返回值**：
+//   `*result` = 返回 EAX；需要第二个返回寄存器（`EDX:EAX` 的 64 位返回）时 fn 自己写 `cpu.edx()`
+//   —— `Cdecl` 下 guest 侧的返回值通路就是 `EDX:EAX`（先例：`__ftol2_sse`，`0x4E8311/0x4E8334`）。
+//   ⚠ 写 `EDX`（或任何别的寄存器）**必须放在所有闸门之后**：回退前不留任何 guest 可见副作用
+//   （准入门 ②）；ECX/EBX/ESI/EDI/EBP/ST0 等 call-clobbered 寄存器仍然**不会**被框架改写。
+//   需要整组寄存器 / EFLAGS / EIP 的段级替换走 NativeBlockFn。
 // 返回 false ⇒ 本次**不做** override，由 dispatcher 回退解释器（例如 safe mode 下参数越界）。
-// ⚠ 只有 EAX 一条返回通路：EDX/ECX/ST0 等 call-clobbered 寄存器不会按 guest 语义被改写
-//   （调用方按 ABI 也不该依赖它们）；需要额外寄存器/EFLAGS 的段级替换走 NativeBlockFn。
 using NativeFn = bool (*)(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 
 struct NativeOverride {
@@ -71,9 +74,11 @@ public:
     // ★ 2026-11-11：13 → 14（`sub_4367B0` = 退出写存档的 LZSS Encode 整函数）。
     // ★ 2026-11-11：14 → 15（`sub_4E0B40` = libvorbis `mdct_backward`；**数值容忍档**，
     //   不满足"函数级字节等价"，已知偏差见 native_mdct.h）。
-    // ★ **15 = 表满，全部稳定项**（`debug` 机制保留，但当前**没有** debug 项 ⇒ `--native-overrides all`
+    // ★ 2026-11-12：15 → 16（`__ftol2_sse` = MSVC 的 x87 → int64 截断辅助，`0x4E82C0`；
+    //   本项是**唯一**写 `EDX` 的函数级项 —— 契约段已改成"按 ABI 写返回值"，见上面的 NativeFn）。
+    // ★ **16 = 表满，全部稳定项**（`debug` 机制保留，但当前**没有** debug 项 ⇒ `--native-overrides all`
     //   会把每一项都开）。再加项必须同时抬高 kMax（`kKnown[]` 的 static_assert 会先红，别等到 `all` 起不来）。
-    static constexpr std::size_t kMax = 15;
+    static constexpr std::size_t kMax = 16;
 
     bool add(std::uint32_t ea, const std::string& name, GuestConv conv, std::uint32_t arg_bytes, NativeFn fn,
              std::string* err);
@@ -236,6 +241,40 @@ bool nativeMemset(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 // 不是字节差。`_memcmp` 的 CRT 实现是 COLLAPSED（没有可观察字节）⇒ 暂不覆盖。
 bool nativeSignMemcmp(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 bool nativeStrlen(X86& cpu, GuestMemory& mem, std::uint32_t* result);
+
+// ---------------------------------------------------------------------------------------
+// `__ftol2_sse`（`0x4E82C0`，`__cdecl`、**0 个栈参**、返回 `EDX:EAX` = 64 位截断值）
+//
+// ★ 身份 / 形状（`.lst` 381874 的 COLLAPSED 行，28 B 入口 + `0x4E82F6` 起的 117 B 本体）：
+//   `0x4E82C0 cmp ds:dword_55F2E8,0 / jz 0x4E82F6`；另一支 `0x4E82C9..0x4E82DB` 是
+//   `fstp qword [esp]; cvttsd2si eax,[esp]`（本线走不到）。`0x4E82F6 = __ftol2` 是**函数内**的
+//   `jz` 目标 ⇒ 挂它 = hits 恒 0（本单的反面判据）。
+// ★ 实现（`native_crt.cpp`）：`x87ToI64(st0, truncate=true)` + 一次 `x87RegToMem(st0, scratch, 4)`
+//   （同时给出 PE/UE/OE 与 guest 可见的那 4 字节）+ 弹 1 层 + tag/状态字同步。
+//   纯核没有单独的 `.h`：本项就是"两次 softfloat 调用 + 弹栈"，抽出去只剩一个转调。
+// ★ 闸门 4+1 条（全部在**任何**副作用之前；不做窄档）：`[0x55F2E8] == 0` 且已提交 ·
+//   `st(0)` 非空（`empty(phys(0))`，⛔ 不是 `empty(0)`）· x87 空闲槽 ≥ 2 · 栈 scratch
+//   `[align16(esp-0x24), +0x20)` 已提交 · **越界边界**（`x ∈ (2^63−1, 2^63)` 上 guest 的
+//   "就近"与我们的"截断"不同 ⇒ 交解释器，见 `nativeFtol2Sse` 的 G-5）。
+// ★ 已知边界（登记，不是缺陷）：① 时钟相位（函数级 override 只记 1 条指令）；
+//   ② scratch 里另两段（`[E+10h,E+18h)` 的就近 int64、非零支的 `[E,E+4)`）**不复刻** ——
+//      它们是 caller 栈帧以下的死 scratch；③ 被消费掉的物理槽残留字节不同（tag 已 empty）；
+//   ④ `fpu.status` 的 oracle 是**解释器**（它的 `fistp` 不置 PE、`fld/fild` 不置 C1）⇒
+//    "逐位一致"指的是与解释器一致，⛔ 不是与 SDM/真机一致。
+// ★ 隔离：`all,-__ftol2_sse`（`-name` 是通用机制）。
+// ---------------------------------------------------------------------------------------
+//
+// 回退原因（**枚举值就是 `NativeOverride::declines[]` 的下标**；0 = 未分类，不落桶）：
+enum class FtolWhy : std::uint8_t {
+    FlagUnreadable = 1,     // `[0x55F2E8]` 不在已提交页 ⇒ 读不出"走哪条路"（非 safe mode 会静默给 0）
+    Sse2Path = 2,           // `[0x55F2E8] != 0` ⇒ 真机走 `cvttsd2si`（只写 EAX，越界语义不同）
+    StackEmpty = 3,         // `st(0)` 空（tag[phys(0)] == empty）⇒ 没有输入
+    StackFull = 4,          // 空闲槽 < 2 ⇒ guest 的 `fld st(0)` 可能走上溢支（不压栈 + C1/IE）
+    ScratchUnreadable = 5,  // `[align16(esp-0x24), +0x20)` 越界或未提交 ⇒ guest 会 fault，不替它决定
+    TruncRoundDiverge = 6,  // `x ∈ (2^63−1, 2^63)`：guest 的 `fistp`（就近）与我们的截断在越界边界上不同
+};
+bool nativeFtol2Sse(X86& cpu, GuestMemory& mem, std::uint32_t* result);
+
 // `sub_436A80`：S4IC / LZSS 解压（profile 选出的 boot 第一热点）。
 bool nativeLzss436A80(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 // `sub_48B090`（NormalTexture::UploadImage）：thiscall（ECX = NormalTexture），栈参数 (img, alpha, key)。

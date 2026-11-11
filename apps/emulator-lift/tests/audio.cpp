@@ -5,12 +5,15 @@
 //   ② 输出 48k/16/2；设备游标 %bytes；dump 的前 0.5s 与 guest 环的斜坡**逐字节**相等；
 //   ③ 44.1k **单声道**缓冲：正确重采样到 48k，左右声道相同（引擎真的会建 mono 流）；
 //   ④ 喂料线程身份：register/resume/quit/join 的状态机（不跑 guest 线程体）；
-//   ⑤ Stop 后游标冻结、SetCurrentPosition 重排、Release 清掉 pending；
+//   ⑤ Stop 后游标冻结（不 seek 直接 Play 从冻结处继续）、SetCurrentPosition 重排、
+//      Release 清掉 pending；
 //   ⑥ 静音门：缺省 `sound=false` 时 dump 全 0 但 fills / mixed / 通知照跑；`sound=true` 逐字节
 //      等于 guest 斜坡（见文件末尾的 runDelivery）。
 //
 // ★ 会红：把 `fireCrossings` 的 sort 去掉 ⇒ ① 的回绕 0 会排在 3 之前；
-//   把 `generateTo` 的声道/采样率转换去掉 ⇒ ③ 红；把 removeBuffer 的 pending 清理去掉 ⇒ ⑤ 红。
+//   把 `generateTo` 的声道/采样率转换去掉 ⇒ ③ 红；把 removeBuffer 的 pending 清理去掉 ⇒ ⑤ 红；
+//   把 `stop()` 的 `dropPending` 去掉 ⇒ `audio-device/stop-then-play-without-seek` 红
+//   （旧 q1 + 新 q1 ⇒ pending().size()==2）。
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -434,7 +437,10 @@ void testCrossingSort() {
 //   之后越过 1/2 圈必须仍是 `q2`（重锚了这里会变成 `q0` / `q1`）。
 //
 // ★ 会红（这是本守卫存在的理由）：
-//   - `stop()` 不 `dropPending` ⇒ G1 的 `pending().empty()` 红，且随后 `play()` 多出旧 `q1`；
+//   - `stop()` 不 `dropPending` ⇒ G1 的 `pending().empty()` 红。
+//     ★ 这一条是**内部机制**断言：删掉 `dropPending` 之后**对外次序其实不变**（下一步
+//     `setPosition(0)` 也会 drop）⇒ 它只靠这条内部断言变红。**对外行为**由
+//     `audio-device/stop-then-play-without-seek`（不 seek 直接 Play ⇒ 只剩 q1）守住。
 //   - `play()` 不在 `b->playing` 时 no-op ⇒ G2 的 `pending().empty()` 红（重锚 q0 ⇒ 后面变 q1）。
 void testRepositionAndReplay() {
     const std::uint32_t data_ea = 0x00440000u;
@@ -544,6 +550,69 @@ void testRepositionAndReplay() {
         if (a.pending().size() == 1) LIFT_CHECK_EQ_U32(a.pending().front().quarter, 2u);
         a.end();
     }
+}
+
+// ---- 对外行为：Stop 之后**不 seek** 直接 Play（`audio-device/stop-then-play-without-seek`）---
+//
+// ★ 判据（红了意味着什么）：真 DS 的 `Stop` 把播放位置**冻结**在当前游标（这条流是 96000 B），
+//   **不** `SetCurrentPosition` 直接 `Play` 会从 96000 继续 ⇒ 立刻命中 offset 96000 ⇒ 队列里
+//   只该有一条 `quarter=1`，⛔ **不许出现 `q0`**（出现 `q0` = 游标被当成回到了 0 / 重生成了）。
+//
+// ★ 会红（这是本守卫存在的理由）：把 `stop()` 里的 `dropPending(obj)` 删掉 ⇒ Stop 之前越过
+//   的那条旧 `q1`（旧代次）还留在队列里，随后 `Play` 又按冻结位置入队**新的** `q1`
+//   （`enqueue` 的去重比的是"obj + quarter + generation"，代次不同 ⇒ 不合并）
+//   ⇒ `pending().size() == 2`（旧 q1 + 新 q1）⇒ 上面那条 `size()==1` 当场红。
+//   ★ 这条是**对外行为**的守卫：`audio-device/stop-drops-stale-fill` 的 `pending().empty()`
+//   是内部机制断言（那一步之后没人看得见队列），删掉 `dropPending` 时它红、但**对外次序不变**
+//   （下一步 `setPosition(0)` 也会 drop）⇒ 真正"Stop 之后不带着旧通知继续播"由这一条守。
+void testStopThenPlayWithoutSeek() {
+    lift_test::g_current_case = "audio-device/stop-then-play-without-seek";
+    const std::uint32_t data_ea = 0x00440000u;
+    const std::uint32_t state_ea = 0x00430000u;
+    const std::uint32_t obj_ea = 0x00450000u;
+    const std::uint32_t bytes = 384000u;  // 48k / 16 / 2 ⇒ 2.0 s 一圈，4 个通知点每 0.5 s
+    const std::uint32_t offsets[4] = {0u, 96000u, 192000u, 288000u};
+
+    std::string err;
+    lift::Machine m;
+    if (!initMachine(m, &err)) {
+        LIFT_CHECK(false);
+        return;
+    }
+    if (!m.configureAudio(lift::AudioMode::Virtual, "", /*sound=*/true, &err) || !m.audio().begin(&err)) {
+        LIFT_CHECK(false);
+        return;
+    }
+    lift::AudioEngine& a = m.audio();
+    std::vector<std::uint8_t> pcm(bytes, 0);
+    std::vector<std::uint8_t> zeros(16, 0);
+    LIFT_CHECK(m.placeData(data_ea, pcm.data(), pcm.size(), &err));
+    LIFT_CHECK(m.placeData(state_ea, zeros.data(), zeros.size(), &err));
+    lift::AudioFormat fmt;
+    fmt.sample_rate = 48000;
+    fmt.channels = 2;
+    fmt.bits = 16;
+    fmt.block_align = 4;
+    fmt.avg_bytes = 192000;
+    a.addBuffer(state_ea, obj_ea, data_ea, bytes, 0x181C8u, fmt);
+    a.setNotify(state_ea, 4, offsets);
+    a.play(state_ea, true);
+    a.clearPendingForTest();  // 只看 stop → play 这一段的队列；Play 自带的 q0 不参与判据
+
+    // 0.5 s ⇒ 设备游标越过 offset 96000 ⇒ 一条 q1。
+    m.clock().advance100ns(5'000'000);
+    a.pump();
+    LIFT_CHECK(a.pending().size() == 1);
+    if (a.pending().size() == 1) LIFT_CHECK_EQ_U32(a.pending().front().quarter, 1u);
+
+    // ★ Stop 冻结在 96000 B。**不** Seek：直接 Play 从 96000 继续。
+    a.stop(state_ea);
+    LIFT_CHECK_EQ_U32(a.playedCursor(state_ea), 96000u);
+    a.play(state_ea, true);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(a.pending().size()), 1u);
+    if (a.pending().size() == 1) LIFT_CHECK_EQ_U32(a.pending().front().quarter, 1u);
+    for (const lift::AudioNotifyEvent& e : a.pending()) LIFT_CHECK_NE_U32(e.quarter, 0u);
+    a.end();
 }
 
 // ---- 静音门（缺省静音 / `--sound` 才出声）-------------------------------------------
@@ -739,6 +808,7 @@ int main() {
     testFeederContext();
     testCrossingSort();
     testRepositionAndReplay();
+    testStopThenPlayWithoutSeek();
     testDefaultMutedDelivery();
     testSoundOnDelivery();
     testMutedDeliveryParity();

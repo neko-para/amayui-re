@@ -94,16 +94,20 @@ struct AudioStats {
     //   slot_miss = feeder `findSlot` 失败（obj 反演不到槽；API 不定义"事件↔槽"）；
     //   play_on_playing = 对已在播的缓冲再 Play（真 DS 的 DS_OK + 继续播语义）；
     //   fill_waits / fill_wait_timeouts = `stop()` / `setPosition()` 等"正在跑的那一刀 fill"
-    //     的次数与超时次数（只计**真的等过**的）；fill_raced = 金丝雀：**fill 期间**该 obj 的
-    //     代次变了（= 有一次 Stop / 重定位与这一刀在时间上重叠）。★ 它不是错误计数：第 3 层
-    //     会等这一刀跑完再重锚，重叠是**被处理掉**的正常情形；真正"没兜住"的判据是
-    //     `fill_wait_timeouts > 0`（⛔ 只记账，不回滚已写进环的字节）。
+    //     的次数与超时次数（只计**真的等过**的，即 `filling_obj_ == obj` 那一刻）。
+    //   fill_overlapped（旧名 fill_raced）= **有 Stop / 重定位与这一刀在时间上重叠**（判据：
+    //     fill 结束后该 obj 的代次已经不是当初那一代）。★ 它**不是错误计数**：第 3 层会等这一刀
+    //     跑完再重锚，重叠是**被处理掉**的正常情形；而且它混了三种**良性**成因 ——
+    //     ① fill 里的 EOF 自停（`stop()` 在 fill 内被调，`0x4B6C58`）、② `removeBuffer`
+    //     （`Release` 把这条流删了 ⇒ 连 Buffer 都没了）、③ 同一 state 重建（`addBuffer` 的
+    //     `++generation`）。真正"没兜住"的判据是 `fill_wait_timeouts > 0`
+    //     （⛔ 只记账，不回滚已写进环的字节）。
     std::uint64_t stale = 0;
     std::uint64_t slot_miss = 0;
     std::uint64_t play_on_playing = 0;
     std::uint64_t fill_waits = 0;
     std::uint64_t fill_wait_timeouts = 0;
-    std::uint64_t fill_raced = 0;
+    std::uint64_t fill_overlapped = 0;
     std::uint32_t max_buffers = 0;
 };
 

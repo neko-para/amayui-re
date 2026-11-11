@@ -1,0 +1,17 @@
+# 复现：TITLE → 点 LoadData（用户给的客户区坐标 1070,480）
+#   期望：进入"加载存档"界面（列表为空也该出界面）
+#   实测（用户）：进程**正常退出**（exit 0）、无弹窗 ⇒ 用户判据：无论如何不该干净退出
+# 跑完看日志里的三样（判据）：
+#   ① `detail : shim 主动结束运行：kernel32!ExitProcess` —— 出现了就说明是**引擎自己**调的
+#   ② 那行的 `exit_code=` —— 0 还是非 0（0 可能只是被 emulator 压平了，见 REQ-01M75S724HE50D26EEMDNY3Z54）
+#   ③ `user32!MessageBoxA … text="…"` —— 引擎自己的错误串（默认 warn 级看不见，所以本跑必须 info）
+# ⛔ 不写帧号（见 docs/03-emulator/interaction-model.md）
+
+await script TITLE
+wait 5000 wall_ms
+timeout 30000
+
+click 1070 480
+
+wait 20000 wall_ms
+timeout 30000

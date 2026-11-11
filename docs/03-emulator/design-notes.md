@@ -158,3 +158,48 @@
 - **已知残余**：`EAX` 登记为 0（guest 结束时它是 `out` 派生指针的残留，Hex-Rays 因此猜成 `float *`；
   唯一调用点 0x4E2EAA 之后不读它）、不复刻 x87 的 PE/UE 粘性位、相位偏移照旧；
   可用 `--native-overrides all,-sub_4E0B40` 隔离。
+
+### L3-ftol-01 · `__ftol2_sse`：**小方案**（一次 softfloat 截断 + 一次 f32 转换），不逐条重放
+- **取舍**：`__ftol2_sse`（`0x4E82C0`，MSVC 的 x87 → int64 截断辅助）做成函数级 native override。
+  入口 28 B 是 `cmp ds:dword_55F2E8,0 / jz 0x4E82F6`；本线 `IsProcessorFeaturePresent` shim 恒 0
+  ⇒ guest 永远走 `0x4E82F6 = __ftol2`（117 B）。实现 = `x87ToI64(st0, truncate=true)` +
+  **一次** `x87RegToMem(st0, scratch, 4)`（那 4 字节 = guest 的 `0x4E8301 fst dword [esp+18h]`，
+  PE/UE/OE 也从这里出）+ 弹 1 层 + tag/状态字同步。
+- **为什么不需要"照 33 条指令重放"**：`0x4E8305 fistp` 按 CW 的 RC 就近取整，`0x4E8319..` 的修正环
+  （`add 7FFFFFFFh` + `sbb/adc 0`，借 `D9 1C 24 fstp dword [esp]` 的 f32 符号位）把它拉回**向零截断**
+  ⇒ **最终值对 RC 无关**。硬约束只剩两条：① 值必须走 **softfloat** 的 trunc（宿主 `(int64)(double)`
+  在 `|x| ≥ 2^53` 差一位，越界还会给 `0x80000000` 而不是 `0/0x80000000`）；② 复刻 `fst dword` 的副作用。
+- **闸门 4 + 1 条**（全部在任何副作用之前；不做窄档）：`[0x55F2E8] == 0` **且已提交**（非 safe mode 的
+  `rd32` 读未提交页会静默给 0）· `st(0)` 非空（判据是 `empty(phys(0))`，⛔ 不是 `empty(0)`）·
+  x87 空闲槽 ≥ 2（`8 − used ≥ 2`，方向别写反）· 栈 scratch `[align16(esp−0x24), +0x20)` 已提交 ·
+  **越界边界**（见下）。
+- **越界边界那一条为什么存在**：guest 的 `fistp` 只在**取整值**放不进 int64 时落不定值 + IE；
+  我们的 trunc 判据是"**截断值**放不进"。两者只在 `x ∈ (2^63−1, 2^63)` 上分叉，而该区间内唯一可表示的
+  ext80 值是 `2^63−0.5`（区间内 ulp = 0.5）：guest 就近成 2^63 ⇒ `0/0x80000000` + IE，trunc 给
+  `0xFFFFFFFF/0x7FFFFFFF`。⇒ 那一格交解释器（纯档用例 `ftol/decline-no-write` 的
+  `boundary-2^63-minus-half`；同一条边界上 `x = 2^63−1` **必须**接管，否则这条闸门就宽到挡正常值）。
+- **返回值通路**：本项是**唯一**写 `EDX` 的函数级 override（`EDX:EAX` = 64 位截断值，`2^31..2^63` 是
+  低位回绕、**不 clamp**；`|x| ≥ 2^63` / NaN / ±Inf ⇒ `EAX=0, EDX=0x80000000`，⛔ 不是 `0x80000000/0`）。
+  `native_overrides.h` 的契约文字因此从"只有 EAX 一条返回通路"改成"按 ABI 写返回值"，并写明
+  "写 EDX 必须在所有闸门之后"。
+- **oracle 是解释器，不是真机/SDM**：解释器的 `fistp` 走 `exact=false` ⇒ **不置 PE**，`fld`/`fild` 也
+  不置 C1 ⇒ 按 SDM 去"补"PE/C1 反而会把 `fpu.status` 逐位判据弄红。判据 = 与**解释器**逐位一致。
+- **已知偏差（登记，不是缺陷）**：① 时钟相位（函数级只记 1 条指令；`clock->tick` 在 thread 模式的
+  feeder 里是 no-op，pump 模式下设备与 guest 计时同源 ⇒ 跳 tick 是一致加速；本项**不补 k**）；
+  ② guest 那 20 B 栈 scratch 里我们只写 `[E+18h,E+1Ch)`：`[E+10h,E+18h)`（按 RC 就近的 int64）与
+  非零支的 `[E,E+4)`（`f32(x−n)`）不复刻 —— 它们是 caller 栈帧以下的死 scratch；③ 被消费掉的物理槽
+  残留字节不同（guest 留 `x−n`、native 留 `x`），tag 已置 empty ⇒ 不是 guest 可观察状态；
+  ④ 不复刻 C0..C3 以外的 **EFLAGS**（ABI 上 call-clobbered）与 x87 未屏蔽异常 trap（本线不投递）。
+- **已知不覆盖（登记，不修）**：`0x4B5545 jmp __ftol2_sse`（`sub_4B5500` 的 qsort 比较器尾跳）——
+  dispatcher 只在上一条是 `call` 时拦（`call_target`），所以这条**既不 `+hits` 也不 `+fallbacks`**；
+  另有 `0x4BC539` / `0x4BC680` 直连 `__ftol2`（真消费 `EDX:EAX`，不经 `0x4E82C0`）。
+  ⇒ "hits 与 385 个 call 站点吻合"只是**下界**（`0x4E82C0` 实际有 386 个入口）。
+- **收口读数（按 audio mode 分开读，⛔ 别混）**：两种模式下 hit 记在**两张不同的表**上 ——
+  ① `--audio off` / virtual（pump 模式：`sub_4B6C30` 从**主线程**被嵌套调用）⇒ 命中的是主表，
+     读启动摘要里的 `native-ovr:` 那一行（`__ftol2_sse` 的 hits / fallbacks）；
+  ② 真 SDL 设备（thread 模式）⇒ feeder 用的是 `audio_overrides_ = *cpu_->native_overrides` 的**表拷贝**
+     （`audio.cpp` 的 `runFeederGuest`）⇒ `native-ovr:` 里这一项**恒 0**，要看 feeder 自己的计数：
+     `LIFT_AUDIO_TRACE=1` 时它逐次打 `[audio] feeder fill … ov=<n>`（feeder 表里各项 hits 之和）。
+  ★ 两边的读数**不可互相印证**（同一份 hits 只会落在其中一张表上），所以收口必须先声明用的是哪个
+  mode；`dumpSummary` 目前**不**包含 override counts（那是音频线的落点，不在本项范围）。
+  ⚠ 读数不进 test（每台机器的数字都会变），这里只登记"怎么读"。

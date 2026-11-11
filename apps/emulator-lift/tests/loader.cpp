@@ -240,6 +240,33 @@ int main() {
         LIFT_CHECK_EQ_U32(m.mem().rd8(m.setup().cmdline_ea), static_cast<std::uint32_t>('"'));
     }
 
+    // ⑥ `--native-overrides` 的**名字解析 + 隔离臂**（`all` 装得进 / `all,-名字` 排得掉）
+    //
+    // 判据（红了意味着什么）：`configureNativeOverrides("all")` 之后表里**必须**有 `__ftol2_sse`
+    // 那一项（`0x4E82C0`）；`"all,-__ftol2_sse"` 之后必须没有，且其余项仍在。
+    // ★ 为什么这条必须有：`all` 走的是 `addName(name, /*required=*/false)`，而"`.lst` 里找不到
+    //   函数入口"那一条分支是**静默跳过**（不报错）⇒ 名字挂错（例如挂 `__ftol2` —— 它只是
+    //   `0x4E82E3 jz` 的**函数内**目标，没有 `proc near` / `COLLAPSED` 行）的表现是
+    //   "`all` 里没有这一项、hits 恒 0，而所有差分类测试都绿"（那些测试自己 `add()` 的是 EA）。
+    //   ⇒ 这条把"名字 → `.lst` 函数入口 → 表"整段钉住；`-名字` 那一半就是**隔离臂**。
+    // ★ 需要 `.lst`（`loadLst` 已在上面的 `prepare` 之前跑过）⇒ 只能落在这个 assets 档，
+    //   `tests/native_override.cpp`（pure、bare 机器）够不着。
+    {
+        g_current_case = "native-override-name-resolution";
+        const lift::LstFunction* ftol_fn = m.lst().findFunction("__ftol2_sse");
+        LIFT_CHECK(ftol_fn != nullptr);
+        if (ftol_fn != nullptr) LIFT_CHECK_EQ_U32(ftol_fn->ea, 0x004E82C0u);
+        std::string cerr;
+        m.overrides().clear();
+        LIFT_CHECK(m.configureNativeOverrides("all", &cerr));
+        LIFT_CHECK(m.overrides().find(0x004E82C0u) != nullptr);
+        m.overrides().clear();
+        LIFT_CHECK(m.configureNativeOverrides("all,-__ftol2_sse", &cerr));
+        LIFT_CHECK(m.overrides().find(0x004E82C0u) == nullptr);  // 隔离臂：排除项优先
+        LIFT_CHECK(!m.overrides().empty());                      // 不是"整张表都没了"的假绿
+        m.overrides().clear();
+    }
+
     std::printf("entry=%08X sections=%zu imports=%zu\n", m.image().entry_ea, m.image().sections.size(),
                 m.image().imports.size());
     m.reportBaseGaps(stdout);

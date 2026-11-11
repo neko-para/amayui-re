@@ -2433,6 +2433,229 @@ int main() {
         }
     }
 
+    // ---- ⑰d `__ftol2_sse`（`0x4E82C0`）：准入**零写** + ABI（`EDX:EAX`）+ 栈平衡 ----
+    //
+    // 判据（红了意味着什么）：
+    //   ① **准入零写**：每条闸门不成立时 `nativeFtol2Sse` 返回 false，且**直接调 fn**前后的冻结快照
+    //      逐项相同（`esp` / 8 个 x87 寄存器槽（16 B × 8）/ `status` / `control` / `tag` / `top` /
+    //      宿主 softfloat 的粘性位 / 栈 scratch 的 0x20 B / `[0x55F2E8]`），`*result` 不留半成品；
+    //      回退原因落进**对应**的 `declines[]` 桶（⛔ 不是"静默跳过"）。
+    //   ② ABI：成功路径 `invoke()` 之后 EIP = 返回地址、ESP = esp + 4（cdecl 只弹返回地址）、
+    //      EAX = 低 32 位、**EDX = 高 32 位**（两项都写才算 64 位返回；`-1` 那档 EDX 是 0xFFFFFFFF）。
+    //   ③ 栈平衡：连续 6 次调用各消费 1 层（TOP 每次 +1、被消费的物理槽置 empty、返回值逐次正确）。
+    // ★ 为什么这一组**不能**用 assets 档的两臂差分代替：回退之后解释器会把整个函数重放，
+    //   把"回退前写过的东西"修回去 ⇒ 那一类错在差分里**结构上不可见**（`affine/decline-no-write`
+    //   同口径）。
+    // ★ 宿主粘性位在快照前**人为置上**（`x87RaiseInvalid`）：这样"回退路径有没有偷偷 take 掉
+    //   异常位"也是可判的（`x87TakeExceptionFlags` 是**取走并清空**）。
+    {
+        lift_test::g_current_case = "ftol/decline-no-write";
+        constexpr std::uint32_t kFlagEa = 0x0055F2E8u;
+        constexpr std::uint32_t kUncommitted = 0x00B00000u;  // 从不 placeData ⇒ 未提交页
+        auto extFromF64 = [](double d, lift::Ext80 out) {
+            std::uint8_t b[8];
+            std::memcpy(b, &d, 8);
+            lift::x87MemToReg(b, out, 8);
+        };
+        // 夹具：bare 机 + `[0x55F2E8]`（可故意不铺）+ 表里那一项
+        auto bootFtol = [&](lift::Machine& m, std::string& err, bool with_flag) {
+            if (!m.initBare(&err) || !m.prepareStack(&err)) return false;
+            if (with_flag) {
+                const std::uint32_t zero = 0;
+                if (!m.placeData(kFlagEa, &zero, 4u, &err)) return false;
+            }
+            std::string e;
+            return m.overrides().add(0x004E82C0u, "ref_ftol", lift::GuestConv::Cdecl, 0, lift::nativeFtol2Sse, &e);
+        };
+        struct FtolSnap {
+            std::uint32_t esp = 0;
+            std::uint16_t status = 0, control = 0, tag = 0;
+            std::uint8_t top = 0;
+            std::uint8_t regs[8][16] = {};
+            std::uint8_t scratch[0x20] = {};
+            std::uint8_t exc = 0;
+            std::uint32_t flag = 0;
+        };
+        auto ftolSnap = [&](lift::Machine& m, std::uint32_t frame) {
+            FtolSnap s;
+            s.esp = m.cpu().esp();
+            s.status = m.cpu().fpu.status;
+            s.control = m.cpu().fpu.control;
+            s.tag = m.cpu().fpu.tag;
+            s.top = m.cpu().fpu.top;
+            std::memcpy(s.regs, m.cpu().fpu.regs, sizeof(s.regs));
+            // ★ 未提交页**不能读**（`host()` 返回的是保留地址空间里的裸指针，读它会 AV）⇒ 那一档
+            //   的 scratch 快照留全 0，两臂比较仍然是"相等"（真正要判的是 fn 没写 guest 内存）。
+            if (m.mem().committed(frame, 0x20u)) std::memcpy(s.scratch, m.mem().host(frame), 0x20u);
+            s.exc = lift::x87PeekExceptionFlags();
+            s.flag = m.mem().committed(kFlagEa, 4u) ? m.mem().rd32(kFlagEa) : 0xFFFFFFFFu;
+            return s;
+        };
+        auto sameFtolSnap = [](const FtolSnap& a, const FtolSnap& b) {
+            return a.esp == b.esp && a.status == b.status && a.control == b.control && a.tag == b.tag &&
+                   a.top == b.top && a.exc == b.exc && a.flag == b.flag &&
+                   std::memcmp(a.regs, b.regs, sizeof(a.regs)) == 0 &&
+                   std::memcmp(a.scratch, b.scratch, sizeof(a.scratch)) == 0;
+        };
+        auto checkDecline = [&](const char* what, lift::FtolWhy why, auto&& setup, bool with_flag) {
+            (void)what;  // 分支名只给读代码的人（断言消息里已有表达式本身）
+            lift::Machine m;
+            std::string err;
+            const bool rig = bootFtol(m, err, with_flag);
+            LIFT_CHECK(rig);
+            if (!rig) return;
+            // 缺省夹具：`st(0)` = 2.7（已置 valid）、esp 落在已提交栈上
+            lift::Ext80 v;
+            extFromF64(2.7, v);
+            std::memcpy(m.cpu().fpu.regs[m.cpu().fpu.phys(0)], v, 16);
+            m.cpu().fpu.setValid(m.cpu().fpu.phys(0));
+            m.cpu().esp() = m.layout().stack_top - 0x40u;
+            setup(m);
+            const std::uint32_t esp_before = m.cpu().esp();
+            const std::uint32_t frame = (esp_before - 0x24u) & ~15u;
+            // scratch 哨兵（只在已提交时铺：未提交页写不得 —— 那一档要的正是"没铺"）
+            if (m.mem().committed(frame, 0x20u))
+                for (std::uint32_t i = 0; i < 0x20u; ++i) m.mem().wr8(frame + i, 0x5Au);
+            lift::x87ApplyControlWord(0x037Fu);
+            lift::x87ClearExceptionFlags();
+            lift::x87RaiseInvalid();  // 宿主粘性位预置：回退路径不许把它 take 走
+            const FtolSnap before = ftolSnap(m, frame);
+            lift::NativeOverride* ov = m.overrides().at(0);
+            LIFT_CHECK(ov != nullptr);
+            if (ov == nullptr) return;
+            std::uint32_t r = 0xDEADBEEFu;
+            m.cpu().current_override = ov;
+            const bool took = lift::nativeFtol2Sse(m.cpu(), m.mem(), &r);
+            m.cpu().current_override = nullptr;
+            LIFT_CHECK(!took);
+            LIFT_CHECK_EQ_U32(r, 0u);  // ⛔ 不留"半成品 EAX"
+            LIFT_CHECK(sameFtolSnap(before, ftolSnap(m, frame)));
+            LIFT_CHECK_EQ_U32(m.cpu().esp(), esp_before);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ov->declines[static_cast<std::size_t>(why)]), 1u);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ov->fallbacks), 0u);  // fallbacks 是 invoke 记的
+        };
+        // ① `[0x55F2E8]` 未提交 ⇒ 读不出"走哪条路"（非 safe mode 的 rd32 会静默给 0）
+        checkDecline("flag-unreadable", lift::FtolWhy::FlagUnreadable, [](lift::Machine&) {}, false);
+        // ② `[0x55F2E8] != 0` ⇒ 真机走 `cvttsd2si`（只写 EAX、越界语义不同）⇒ 必须回退
+        checkDecline(
+            "sse2-path", lift::FtolWhy::Sse2Path, [&](lift::Machine& m) { m.mem().wr32(kFlagEa, 1u); }, true);
+        // ③ `st(0)` 空（tag 全 empty）
+        checkDecline(
+            "stack-empty", lift::FtolWhy::StackEmpty, [](lift::Machine& m) { m.cpu().fpu.tag = 0xFFFFu; }, true);
+        // ④ 空闲槽 < 2（8 个槽全 valid）
+        checkDecline(
+            "stack-full", lift::FtolWhy::StackFull,
+            [](lift::Machine& m) {
+                for (int i = 0; i < 8; ++i) m.cpu().fpu.setValid(i);
+            },
+            true);
+        // ⑤ 栈 scratch 未提交（esp 落在一个只提交了 4 B 的页首 ⇒ `[E,E+20h)` 跨进未提交页）
+        checkDecline(
+            "scratch-uncommitted", lift::FtolWhy::ScratchUnreadable,
+            [](lift::Machine& m) {
+                const std::uint32_t page = 0x00B00000u;
+                std::uint32_t zero = 0;
+                std::string e;
+                if (!m.placeData(page, &zero, 4u, &e)) return;
+                m.cpu().esp() = page;  // E = align16(page − 0x24) = page − 0x30 ⇒ 未提交
+            },
+            true);
+        // ⑥ `x ∈ (2^63−1, 2^63)`：唯一可表示点是 `2^63−0.5`（sig = 2^64−1、E = 62）
+        //   ⇒ guest 的 `fistp`（就近）给不定值，trunc 给 INT64_MAX ⇒ 两条语义在这一格分叉，必须交解释器
+        checkDecline(
+            "boundary-2^63-minus-half", lift::FtolWhy::TruncRoundDiverge,
+            [](lift::Machine& m) {
+                std::uint8_t t80[10] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x3D, 0x40};
+                std::memcpy(m.cpu().fpu.regs[m.cpu().fpu.phys(0)], t80, 10);
+            },
+            true);
+        // ⑦ 同一条边界但 `x = 2^63−1`（可表示、**不越界**）⇒ **不许**回退（否则 G-5 就宽到把正常值也挡了）
+        {
+            lift::Machine m;
+            std::string err;
+            const bool rig = bootFtol(m, err, true);
+            LIFT_CHECK(rig);
+            if (rig) {
+                std::uint8_t t80[10] = {0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x3D, 0x40};
+                std::memcpy(m.cpu().fpu.regs[m.cpu().fpu.phys(0)], t80, 10);
+                m.cpu().fpu.setValid(m.cpu().fpu.phys(0));
+                m.cpu().esp() = m.layout().stack_top - 0x40u;
+                lift::x87ApplyControlWord(0x037Fu);
+                lift::x87ClearExceptionFlags();
+                std::uint32_t r = 0;
+                lift_test::g_current_case = "ftol/boundary-2^63-minus-1";
+                LIFT_CHECK(lift::nativeFtol2Sse(m.cpu(), m.mem(), &r));
+                LIFT_CHECK_EQ_U32(r, 0xFFFFFFFFu);
+                LIFT_CHECK_EQ_U32(m.cpu().edx(), 0x7FFFFFFFu);
+            }
+        }
+
+        // ② ABI：`invoke()` 成功路径的 EIP / ESP / EAX / **EDX**
+        {
+            lift_test::g_current_case = "ftol/abi";
+            lift::Machine m;
+            std::string err;
+            const bool rig = bootFtol(m, err, true);
+            LIFT_CHECK(rig);
+            if (rig) {
+                lift::Ext80 v;
+                extFromF64(-2.7, v);
+                std::memcpy(m.cpu().fpu.regs[m.cpu().fpu.phys(0)], v, 16);
+                m.cpu().fpu.setValid(m.cpu().fpu.phys(0));
+                const std::uint32_t esp = m.layout().stack_top - 0x40u;
+                m.cpu().esp() = esp;
+                const std::uint32_t ret_ea = 0x00401000u;
+                m.mem().wr32(esp, ret_ea);
+                lift::x87ApplyControlWord(0x037Fu);
+                lift::x87ClearExceptionFlags();
+                lift::NativeOverride* ov = m.overrides().at(0);
+                LIFT_CHECK(ov != nullptr);
+                if (ov != nullptr) {
+                    const char* why = "";
+                    LIFT_CHECK(m.overrides().invoke(*ov, m.cpu(), m.mem(), &why));
+                    LIFT_CHECK_EQ_U32(m.cpu().eax(), 0xFFFFFFFEu);  // -2
+                    LIFT_CHECK_EQ_U32(m.cpu().edx(), 0xFFFFFFFFu);  // 高 32 位 = 符号扩展
+                    LIFT_CHECK_EQ_U32(m.cpu().eip, ret_ea);
+                    LIFT_CHECK_EQ_U32(m.cpu().esp(), esp + 4u);     // cdecl：只弹返回地址
+                    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ov->hits), 1u);
+                    LIFT_CHECK_EQ_U32(m.cpu().fpu.top, 1u);
+                    LIFT_CHECK(m.cpu().fpu.empty(0));               // 被消费的物理槽
+                }
+            }
+        }
+
+        // ③ 栈平衡：6 个活值各被消费 1 层（TOP 逐次 +1、槽逐次 empty、返回值逐次正确）
+        {
+            lift_test::g_current_case = "ftol/stack-balance";
+            lift::Machine m;
+            std::string err;
+            const bool rig = bootFtol(m, err, true);
+            LIFT_CHECK(rig);
+            if (rig) {
+                // 槽 0..5 = st(0)..st(5)（TOP = 0 ⇒ 前 6 次调用的 st(0) 都落在同一批槽上）
+                const double vals[6] = {2.7, -2.7, 1.5, -1.5, 0.5, -0.5};
+                const std::uint32_t want[6] = {2u, 0xFFFFFFFEu, 1u, 0xFFFFFFFFu, 0u, 0u};
+                for (int i = 0; i < 6; ++i) {
+                    lift::Ext80 v;
+                    extFromF64(vals[i], v);
+                    std::memcpy(m.cpu().fpu.regs[i], v, 16);
+                    m.cpu().fpu.setValid(i);
+                }
+                m.cpu().esp() = m.layout().stack_top - 0x40u;
+                for (int k = 0; k < 6; ++k) {
+                    lift::x87ApplyControlWord(0x037Fu);
+                    lift::x87ClearExceptionFlags();
+                    std::uint32_t r = 0;
+                    LIFT_CHECK(lift::nativeFtol2Sse(m.cpu(), m.mem(), &r));
+                    LIFT_CHECK_EQ_U32(r, want[k]);
+                    LIFT_CHECK_EQ_U32(m.cpu().fpu.top, static_cast<std::uint32_t>(k + 1));
+                    LIFT_CHECK(m.cpu().fpu.empty(k));
+                }
+                LIFT_CHECK_EQ_U32(m.cpu().fpu.tag, 0xFFFFu);  // 6 层全消费完 ⇒ 8 槽皆空
+            }
+        }
+    }
+
     // ---- sub_4E0B40（libvorbis `mdct_backward`，**数值容忍档**）：准入零写 + 纯核不变量 ----
     //
     // 判据（红了意味着什么）：
@@ -2696,6 +2919,7 @@ int main() {
 
     // ---- ⑱ known 表：新项的默认分层（全部 debug=false ⇒ 都在 all 里）+ kMax 容得下 ----
     {
+        lift_test::g_current_case = "known-table";  // 失败归因（下面几条都是"这一项在不在 all 里"）
         LIFT_CHECK(lift::findKnownNative("sub_4E0B40") != nullptr);
         LIFT_CHECK(!lift::findKnownNative("sub_4E0B40")->debug);
         LIFT_CHECK(lift::findKnownNative("sub_429020") != nullptr);
@@ -2721,6 +2945,24 @@ int main() {
             LIFT_CHECK(!affine->debug);
             LIFT_CHECK(affine->conv == lift::GuestConv::Stdcall);
             LIFT_CHECK_EQ_U32(affine->arg_bytes, 28u);
+        }
+        // ★ `__ftol2_sse`：cdecl、**0 个栈参**（两条 x87 路径都是裸 `retn`）、**稳定层**。
+        //   ★ 这条就是"它在 `all` 里"的判据：`all` 的定义是"每个 `debug == false` 的已知项都 add 一遍"
+        //     （`machine.cpp` 的 configureNativeOverrides）⇒ `debug == false` + 名字在 `kKnown[]` 里
+        //     等价于"`--native-overrides all` 会启用它"。
+        //   ★ 隔离臂（`all,-__ftol2_sse` 回到解释器）在 `tests/loader.cpp` 的
+        //     `native-override-name-resolution`（assets 档，有 `.lst`）：那里断言 `all` 装进
+        //     `0x4E82C0`、而 `all,-__ftol2_sse` 把它排掉。这里只能断言"名字表里那一项" ——
+        //     ⛔ 名字 → EA 的解析要 `.lst` 索引，pure 档（bare 机器）够不着。
+        //     ★ 为什么要单列这条：`all` 里"`.lst` 找不到函数入口"是**静默跳过**的
+        //     ⇒ 挂错名字（如 `__ftol2`）的表现是 hits 恒 0 而差分类测试全绿。
+        const lift::KnownNative* ftol = lift::findKnownNative("__ftol2_sse");
+        LIFT_CHECK(ftol != nullptr);
+        if (ftol != nullptr) {
+            LIFT_CHECK(!ftol->debug);
+            LIFT_CHECK(ftol->conv == lift::GuestConv::Cdecl);
+            LIFT_CHECK_EQ_U32(ftol->arg_bytes, 0u);
+            LIFT_CHECK(ftol->fn == &lift::nativeFtol2Sse);
         }
         // ★ 表容量：`all` 会把每个已知项都 add() 一遍 ⇒ kMax 必须装得下**所有**已知项，
         //   否则 configureNativeOverrides 会硬失败（模拟器拒绝启动）。⛔ 不写死数字。

@@ -1688,6 +1688,29 @@ const MUTATIONS = [
   },
 
 
+  {
+    // ★ 代表 "x87 float→int64 的**截断方向**被改掉" 这一类错（REQ-01M75PW4MXS06MN6FKGXB36ETH，`__ftol2_sse`）。
+    //   `__ftol2` 的修正环（`.lst` 0x4E8319..0x4E833B 的 `fstp dword` + `add 7FFFFFFFh` + `sbb/adc`）
+    //   把 `fistp` 的"按 RC 就近取整"拉回**向零截断** ⇒ 实现里的 `x87ToI64(x, truncate=true)`
+    //   是这一项语义的唯一落点；改成 `false`（就近）⇒ `±1.5` / `±2.7` 这类小数部分 ≥0.5 的输入
+    //   整数值差 1。
+    //   守卫：`apps/emulator-lift/tests/native_override_assets.cpp` 的 `ftol/*` 边界表
+    //   （解释器臂 = 真字节 oracle，逐值比 `EDX:EAX`）。
+    //   ★ 为什么挑这一条而不是"忘弹栈"：截断是**本项的核心语义**，而"忘弹栈"更多是框架 ABI 的
+    //     共性错；另外这条变异**只有在边界表带非整数/非 2 的幂时才红**（`±0.4` 那种两边都给 0）
+    //     ⇒ 它同时钉住"边界表必须有判别力"这件事。
+    file: 'apps/emulator-lift/src/runtime/native_crt.cpp',
+    from: '    const std::int64_t n = x87ToI64(x, /*truncate=*/true);',
+    to: '    const std::int64_t n = x87ToI64(x, /*truncate=*/false);',
+    guard: 'ctest:native-override-assets',
+    ctest: 'native-override-assets',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '`__ftol2_sse` 的截断改成"按 RC 就近取整"（`x87ToI64(x, false)`）⇒ `±1.5`/`±2.7` 差 1：' +
+      'native-override-assets 的 ftol 边界表逐值断言当场红',
+  },
+
+
 ];
 
 let mutationRunSeq = 0;

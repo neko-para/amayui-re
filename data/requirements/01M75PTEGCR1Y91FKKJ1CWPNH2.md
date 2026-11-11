@@ -6,64 +6,59 @@
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
 - tags: [emulator-lift audio performance decode]
 
-# 音频解码吞吐：ADV 每句 ~1.7 s（本机）/ ~0.75 s（参考机）的两个杠杆
-
 ## 目标
 
-降低 ADV 推进下一句的墙钟，同时抬高音频 feeder 的占空比余量
-（0.5 s 预算 / 一刀 fill 380–460 ms = **76–92%**；两条 Ogg 流就超 100% ⇒ 落后 ⇒ 听感上的重复/错位）。
+降低 ADV 推进下一句的墙钟，并抬高音频 feeder 的占空余量
+（一刀 fill 产出 0.5 s 音频、实测 381–462 ms ⇒ **占空 76–92%**；两条 Ogg 流同时跑就 >100% ⇒ 落后 ⇒
+听感上的重复/错位）。
 
-## 基线 A：参考机（macOS arm64，`REQ-01M75CWE5A5MV5847K2WHSFB17` 的 `click1` 3 s 窗口）
+## 基线（本机，`graphs/sn0000.graph` click1/click2，`--native-overrides all --audio off`）
 
-| 段 | 读数 |
+| 段 | click1 / click2 |
 |---|---|
-| `sub_420F70 -> sub_4BB840`（整条 VOICE） | 746.2 ms |
-| ├ `-> sub_4B6570`（重建解码器 + 建 DS 缓冲） | 219.7 ms |
-| └ `-> sub_4B6020`（起播预填 3 刀） | 515.6 ms |
-| 　└ `sub_4B6C30 -> sub_48D610` | 676.3 ms / 146 包 |
-| 　　└ `sub_4D90C0 -> sub_4E2A30` | 499.5 ms |
-| 　　　├ `-> sub_4E4370`（"Huffman/码本"边） | 251.7 ms |
-| 　　　└ `-> sub_4E0B40`（MDCT，已 override） | 163.3 ms |
+| `sub_420F70 -> sub_4BB840`（整条 VOICE） | 1728.4 / 1807.9 ms |
+| ├ `-> sub_4B6570`（起播重建解码器 + DS 缓冲） | 485.6 / 587.2 |
+| └ `-> sub_4B6020`（起播预填） | 1241.3 / 1219.4 |
+| 　└ `sub_4B6C30 -> sub_48D610`（**3 刀 fill 的聚合**，146/145 包） | 1237.0 / 1215.1 |
+| 　　├ `sub_4D90C0 -> sub_4E2A30` | 823.1 / 805.9 |
+| 　　│　├ `-> sub_4E4370 -> sub_4E3EE0`（Huffman/码本） | **600.7 / 587.3** |
+| 　　│　└ `-> sub_4E0B40`（MDCT，已 override） | 2.2 / 2.4 |
+| 　　└ `-> __ftol2_sse`（66 176 次） | 176.4 / 172.5 |
 
-## 基线 B：本机（Windows x64，`graphs/sn0000.graph`，`--native-overrides all --audio off --present window --raster gpu`）
+⇒ 单刀 fill ≈ 412 ms（1237/3）。**比例口径**：Huffman 48.6%、位读 28%、ftol 14%。
+（参考机同形、整体慢 ~2.3×，读数见 `REQ-01M75CWE5A5MV5847K2WHSFB17`。）
 
-两次点击窗口同形（不是噪声）：
+## 结论（取证后，三个候选各自的去向）
 
-| 段 | click1 | click2 |
+| 杠杆 | 去向 | 证据 |
 |---|---|---|
-| `sub_420F70 -> sub_4BB840` | **1728.4 ms** | **1807.9 ms** |
-| ├ `-> sub_4B6570` | **485.6 ms** | **587.2 ms** |
-| └ `-> sub_4B6020` | 1241.3 ms | 1219.4 ms |
-| 　└ `sub_4B73E0 -> sub_4B6C30` ×3 | 1241.2 | 1219.4 |
-| 　　└ `sub_4B6C30 -> sub_48D610` | 1237.0 / 146 | 1215.1 / 145 |
-| 　　　├ `sub_4D90C0 -> sub_4E2A30` | 823.1 | 805.9 |
-| 　　　│　├ `-> sub_4E4370 -> sub_4E3EE0` | **600.7** | **587.3** |
-| 　　　│　├ `-> sub_4E6480` / `-> sub_4E61E0` | 84.6 / 72.9 | 83.8 / 69.1 |
-| 　　　│　└ `-> sub_4E0B40` | **2.2** | **2.4** |
-| 　　　└ `-> __ftol2_sse`（66 176 次） | **176.4** | **172.5** |
-| 　　　└ `-> sub_4D81B0` | 42.0 | 40.8 |
+| ② 起播重建解码器（485–587 ms） | **不修：这是引擎语义（b 类）** | 非幂等：`0x4B661B` 取插槽 → `0x4B6626/28` 取 `[ecx]`/`[[ecx]]` → `0x4B662A push 1; 0x4B662C call eax`（对**上一任**发 scalar-deleting dtor）；`0x4B667F` 无条件覆盖插槽。重开：`0x4B6774 call eax`（槽 `[vtable+4]`；vtable `0x52917C` `??_7OggVorbis@@6B@`，`[1]=sub_48CF70` `[2]=sub_48D610`），而 `sub_48CF70` 在 `0x48CFB9` 用 `SetFilePointer(0,0,FILE_CURRENT)` 把**当时**的文件位置记成数据起点 ⇒ 复用 = 改引擎语义。**且它不在 fill 预算内** ⇒ 对占空零贡献 |
+| ① Huffman/码本（600 ms） | **收窄成取证**：入口要避开 `sub_4E3EE0` | `sub_4E3EE0` 在 codec arena 里分配（`0x4E3F4B call sub_4D7A60`，每包 `0x4D90E5 call sub_4D7AD0` reset），arena 偏移会进 guest 指针 ⇒ override 必须复刻"同 size 同序"。而**位读占这 600 ms 的 57%（345 ms）**，只换码表查找约 160 ms |
+| ③ `__ftol2_sse`（176 ms） | **另单**：`REQ-01M75PW4MXS06MN6FKGXB36ETH` | 锚 `0x4E82C0`（**不是** `0x4E82F6`＝`__ftol2`）；本线 shim 恒 0 ⇒ 执行 x87 那条体 |
 
-⇒ 形状与参考机一致、整体慢 ~2.3×。**两个杠杆没变**：重建解码器 **28%** + Huffman 树 **~48%**。
+## 下一步（只有一条）
 
-## 三个杠杆（按"归因是否已清"排）
+取证 `sub_513220` / `sub_5132D0`（`0x4E1586` 的 look、`0x4E15C2` 的 adv）：是不是 leaf、
+状态是否只落在 guest 数据里。若是 ⇒ 它是最优入口（不用复刻 arena 分配、调用面窄、可 bit-exact 判）。
+**收益口径**：只换位读 ⇒ 占空 **76–92% → 55–66%**；"39–48%"需要连 arena 分配一起换（本次不做）。
 
-1. **Huffman / 码本**（本机 ~600 ms/句）：入口**不是** `sub_4E4370`（只有 57 行、`__cdecl`、直调
-   `sub_4E3EE0`）；inclusive 全落在 **`sub_4E3EE0`**（599/585 ms）。同窗口同链上还有
-   `sub_4E1570`（self 93 ms / incl 438 ms / 38 482 次）与 `sub_4E1950`（incl 533 ms / 3 222 次），
-   大概率是 `sub_4E3EE0` 的下钻 ⇒ 下一步先用**调用边**把它们钉进同一棵子树再谈 override 入口。
-2. **每次起播重建解码器**（本机 ~486–587 ms/句）：不是单函数，是 `sub_4B6570`；先归因（码本初始化 /
-   堆分配 / `CreateSoundBuffer` 各占多少），再判"能不能缓存 / 能不能 native"。
-   ⛔ 不要预设能缓存：每条语音是不同文件。
-3. **`__ftol2_sse`**（本机 ~176 ms/句、66 k 次）：CRT 的 float→int 辅助，在 `sub_48D610` 底下。
-   语义面比 Huffman 小得多，可能是一刀就能拿掉的（先核取整语义与舍入模式、以及 x87 控制字）。
+## 不做
+
+- 通知位置 4→8：4 个 offset 是 **guest 传进来的**，feeder 的 `WaitForMultipleObjects` 与
+  `sub_4B6C30` 的 `(a2%4+3)%4` 都按 4 建索引 ⇒ 改 8 是改契约，不是改性能。
+- `sub_4D81B0`（42 ms，跨包窗口）/ `sub_48D610` 的 Ogg 分页（~196 ms，含 `ReadFile` 与 corrupt 恢复）/
+  `sub_4E2A30`、`sub_4D90C0`（各 62 ms self）。
+- 预热 / 早启动 feeder：占空 76–92%，没有空闲 CPU。
+- ② 的 instrumented 归因：只服务一个已结案的杠杆。
 
 ## 判据
 
-- 归因阶段：同一窗口（`graphs/sn0000.graph` 的 `click1`/`click2`）里目标函数的调用边 + inclusive 时间，
-  以及"无 override vs 有 override"的两臂差分（`hits>0 && fallbacks==0`，oracle = 解释器臂）。
-- 收口读数：同一窗口的 `sub_420F70 -> sub_4BB840` 与"一刀 fill"的墙钟同时下降。
+- 取证阶段（本单的交付物）：`sub_513220`/`sub_5132D0` 的 EA + 调用边 + 状态落点，
+  "能不能做 leaf override"一句话可判。
+- 若真做实施：两臂差分（`hits>0 && fallbacks==0`，oracle = 解释器臂）+ 同窗口
+  `sub_420F70 -> sub_4BB840` 与一刀 fill 的墙钟同时下降；比例读数进文档，不进 test。
 
 ## 未做
 
-- 参考机的 219/251 与本机 486/600 之间差的 2.3× 是否全是解释器速度（未拆）。
-- 第 2、3 个杠杆都还只是**候选**（未取证到可实现的入口）。
+- 参考机 219/251 vs 本机 486/600 的 2.3× 是否全为解释器速度（未拆）。
+- 22 个"直接进地址/尺寸"的 `__ftol2_sse` 站点最终消费者未追到底（记在 ③ 那张单里）。

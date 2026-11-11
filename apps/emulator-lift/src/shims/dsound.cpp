@@ -1401,7 +1401,8 @@ void shimDirectSoundCreate(X86& cpu, ShimCall& call) {
 //     +12  GetCaps              （引擎**没调**）
 //     +16  GetCurrentPosition   ★ **引擎会读**：`sub_418470@0x4184D0 call [DSBuffer+0x10]`，
 //                               与 `[+0x2468]`、`[+0x444]` 合成 **BGM 播放位置（ms）**
-//                               （调用链 `sub_415640 → sub_430990 → sub_418470`）
+//                               （`sub_430990` 调 `sub_418470`；`sub_430990` 在 `sub_415640`
+//                                里只被**取址**、没有直接调用边 ⇒ 谁真调到它**未证**）
 //     +20  GetFormat / +24 GetVolume / +28 GetPan / +32 GetFrequency / +36 GetStatus
 //     +40  Initialize           → **没实现槽**（loud trap）
 //     +44  Lock                 ★ 0x004B5F77（7 个参数；primary 与流式缓冲各一次）

@@ -269,6 +269,22 @@ const KnownNative kKnown[] = {
     //       PE/UE 粘性位。契约与判据见 native_mdct.h；差分守卫见 tests/native_override_assets.cpp。
     //     可用 `all,-sub_4E0B40` 隔离。
     {"sub_4E0B40", GuestConv::Cdecl, 12, nativeMdct4E0B40},
+    // ★ 2026-11-12：`__ftol2_sse` = MSVC 的 x87 → int64 截断辅助（`0x4E82C0`，28 B 入口；
+    //   本体 `0x4E82F6 = __ftol2` 117 B）。它在 `sub_48D610`（Ogg 解码）底下，本机单句占 VOICE 约 10%。
+    //   `arg_bytes = 0`：两条 x87 路径都是裸 `retn`（无栈参、无 `fstp st` 之外的栈动作）。
+    //   ★ 名字必须是 `.lst` 里的符号本身（`__ftol2_sse`；`COLLAPSED FUNCTION` 行也进函数表，
+    //     见 `lst_index.cpp`）⇒ `findFunction("__ftol2_sse")` 能命中 `0x4E82C0`。
+    //   ⛔ 不要写 `__ftol2`：那是**函数内** `0x4E82E3 jz` 的目标，385 个 `call __ftol2_sse`
+    //     一个都落不到它 ⇒ hits=0 却全绿（本单的反面判据）。
+    //   ★ 本项是**唯一**写 `EDX` 的函数级 override（返回 `EDX:EAX`）；契约段见 native_overrides.h。
+    //   判据：tests/native_override_assets.cpp 的 `ftol/*`（解释器 vs native 的边界表 + `fpu.status`
+    //   逐位 + scratch 的 4 字节）；回退零写 = tests/native_override.cpp 的 `ftol/decline-no-write`。
+    //   已知不覆盖（登记，不修）：`0x4B5545 jmp __ftol2_sse`（`sub_4B5500` 的 qsort 比较器尾跳）
+    //   —— dispatcher 只在上一条是 `call` 时拦（`machine.cpp` 的 `call_target`）⇒ 这条既不
+    //   `+hits` 也不 `+fallbacks`；另有 `0x4BC539` / `0x4BC680` 直连 `__ftol2`（不经 `0x4E82C0`）。
+    //   ⇒ "hits 与 385 个 call 站点吻合"只是**下界**（实际入口 386 个）。
+    //   可用 `all,-__ftol2_sse` 隔离。
+    {"__ftol2_sse", GuestConv::Cdecl, 0, nativeFtol2Sse},
 };
 constexpr std::size_t kKnownCount = sizeof(kKnown) / sizeof(kKnown[0]);
 // ★ 表容量是**硬约束**：`--native-overrides=all` 会把每个 `debug == false` 的项都 `add()` 一遍

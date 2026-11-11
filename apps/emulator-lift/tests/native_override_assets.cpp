@@ -677,6 +677,109 @@ LzssResult runLzss(const std::string& exe, const std::vector<std::uint8_t>& inpu
     return out;
 }
 
+// ---- `__ftol2_sse`（`0x4E82C0`）的夹具：x87 `st(0)` 由**夹具自己**用 `fld` 压进去 ----
+// ★ 为什么输入走 guest 指令（`fld qword` / `fld tbyte`）而不是直接写 `fpu.regs[]`：两臂必须从
+//   **同一条 guest 路径**进入被测函数（写 regs 会绕过 tag / TOP / `markValid` 的语义），
+//   而且 `fld tbyte` 是唯一能造出"double 表示不出"的 64 位有效位输入的通道。
+struct FtolCase {
+    const char* name = "";
+    bool ext80 = false;              // true ⇒ 用 `fld tbyte [kInEa]`（前 10 字节有效）
+    std::uint64_t f64 = 0;           // ext80 == false 时的输入位型（`fld qword`）
+    std::uint8_t t80[10] = {};       // ext80 == true 时的 10 字节
+    std::uint16_t entry_status = 0;  // 入口状态字（C0..C3 必须原样保留）
+    bool top_noise = false;          // 先垫一层活值 ⇒ 被测函数入口 TOP != 0
+    std::uint32_t flag = 0;          // `[0x55F2E8]` 的值（≠0 ⇒ 必须回退）
+    bool skip_base = false;          // 真机走 `cvttsd2si`（解释器解不出）⇒ 只跑 override 臂
+    bool want_decline = false;
+    std::uint32_t want_eax = 0, want_edx = 0;
+};
+
+struct FtolResult {
+    bool valid = false;
+    std::uint32_t eax = 0, edx = 0, esp = 0, eip = 0;
+    std::uint16_t fpu_status = 0, fpu_control = 0, fpu_tag = 0;
+    std::uint8_t fpu_top = 0;
+    std::uint8_t scratch[0x20] = {};  // `[E, E+0x20)`（E = align16(入口 esp − 0x24)），两臂都预填 0x5A
+    std::uint64_t hits = 0, fallbacks = 0;
+    std::uint64_t decline_sse2 = 0;   // `declines[FtolWhy::Sse2Path]`
+};
+
+FtolResult runFtol(const std::vector<std::uint8_t>& code, const FtolCase& c, bool with_override) {
+    FtolResult out;
+    lift_fixture::Fixture fx;
+    if (!fx.ok) return out;
+    constexpr std::uint32_t kFlagEa = 0x0055F2E8u;  // CRT 的 x87→SSE 选路开关
+    constexpr std::uint32_t kInEa = 0x00450000u;
+    constexpr std::uint32_t kCallEa = 0x00402000u;
+    std::vector<std::uint8_t> in(16u, 0);
+    std::memcpy(in.data(), &c.f64, 8);
+    if (c.ext80) std::memcpy(in.data(), c.t80, 10);
+    if (!fx.m.placeData(kFlagEa, &c.flag, 4u, &fx.err)) return out;
+    if (!fx.m.placeData(kInEa, in.data(), in.size(), &fx.err)) return out;
+    if (!fx.m.placeCode(0x004E82C0u, code.data(), code.size(), &fx.err)) return out;
+    if (with_override) {
+        std::string err;
+        if (!fx.m.overrides().add(0x004E82C0u, "ref_ftol", lift::GuestConv::Cdecl, 0, lift::nativeFtol2Sse, &err))
+            return out;
+    }
+    lift_fixture::Asm a(kCallEa);
+    if (c.top_noise) {
+        // ★ 只压不弹：两次 `fld1` 之后 `st(0)` 落在**物理槽 5**（TOP=5、tag[0] 是 empty）
+        //   ⇒ 若闸门写成 `empty(0)` 就会误判"st(0) 空"而回退（复审 H2）。⛔ 不用 `fstp st(i)`：
+        //   Zydis 把 `D9 D8+i` 报成 `fstpnce`，本线的助记符表里没有那一条。
+        a.u8(0xD9);
+        a.u8(0xE8);  // fld1
+        a.u8(0xD9);
+        a.u8(0xE8);  // fld1
+    }
+    if (c.ext80) {
+        a.u8(0xDB);
+        a.u8(0x2D);  // fld tbyte ptr [disp32]
+        a.u32(kInEa);
+    } else {
+        a.u8(0xDD);
+        a.u8(0x05);  // fld qword ptr [disp32]
+        a.u32(kInEa);
+    }
+    a.callRel(0x004E82C0u);
+    a.ret();
+    if (!fx.m.placeCode(kCallEa, a.b.data(), a.b.size(), &fx.err)) return out;
+    fx.rearmStack();
+    // 被测函数的栈 scratch：入口 esp = 调用前的 esp − 4（`call` 压了返回地址），
+    // 然后 `push ebp / sub esp,20h / and esp,-10h` ⇒ E = align16(入口 esp − 0x24)。
+    const std::uint32_t esp_entry = fx.m.cpu().esp() - 4u;
+    const std::uint32_t frame = (esp_entry - 0x24u) & ~15u;
+    for (std::uint32_t i = 0; i < 0x20u; ++i) fx.m.mem().wr8(frame + i, 0x5Au);
+    // 宿主的 softfloat 舍入模式 / 粘性异常位是**进程级全局** ⇒ 两臂都必须从同一份缺省出发，
+    // 否则"override 少 sync 一次"会继承上一臂的异常位而**静默相同**。
+    lift::x87ApplyControlWord(0x037Fu);
+    lift::x87ClearExceptionFlags();
+    fx.m.cpu().fpu.control = 0x037Fu;
+    fx.m.cpu().fpu.status = c.entry_status;
+    fx.runCode(kCallEa);
+    // ★ `skip_base` 档（`[0x55F2E8] != 0`）在回退之后由解释器重放 `cvttsd2si`，而本线的解码器
+    //   没有那一条 ⇒ `runCode` 会响亮失败。那一档只断言"必须回退"，所以只要 override 真的被调用过
+    //   就接受（计数器与 `declines[]` 仍然读得到）。
+    if (!fx.ok && !c.skip_base) return out;
+    out.valid = true;
+    out.eax = fx.m.cpu().eax();
+    out.edx = fx.m.cpu().edx();
+    out.esp = fx.m.cpu().esp();
+    out.eip = fx.m.cpu().eip;
+    out.fpu_status = fx.m.cpu().fpu.status;
+    out.fpu_control = fx.m.cpu().fpu.control;
+    out.fpu_tag = fx.m.cpu().fpu.tag;
+    out.fpu_top = fx.m.cpu().fpu.top;
+    std::memcpy(out.scratch, fx.m.mem().host(frame), 0x20u);
+    if (with_override) {
+        const lift::NativeOverride* e = fx.m.overrides().at(0);
+        out.hits = e->hits;
+        out.fallbacks = e->fallbacks;
+        out.decline_sse2 = e->declines[static_cast<std::size_t>(lift::FtolWhy::Sse2Path)];
+    }
+    return out;
+}
+
 int main() {
     const std::string exe = envValue("LIFT_AGE_EXE");
     if (exe.empty()) LIFT_SKIP("没有 LIFT_AGE_EXE（CMake 的 assets 档会设它）");
@@ -1345,6 +1448,295 @@ int main() {
             LIFT_CHECK_EQ_U32(ovr.fallbacks, 0u);
             // ① 数值档容差（这一档的契约；实测见上面那行打印）
             LIFT_CHECK(maxdiff <= 1e-6f * peak);
+        }
+    }
+
+    // ---- ⑥ `__ftol2_sse`（`0x4E82C0`）：真字节两臂差分（边界表 + `fpu.status` 逐位 + scratch 4 B）----
+    //
+    // 判据（红了意味着什么）：
+    //   ① 边界表每一格的 `EDX:EAX`：解释器臂 vs native 臂逐值相同，**并且**等于表里的 spec 值
+    //      （`want_eax` / `want_edx` 由 `.lst` 字节推出，⛔ 不是"跑一遍把 actual 抄成 expected"）；
+    //   ② `fpu.status` **逐位**相同（PE/UE/OE/IE 粘性位 + ES + TOP 字段），且**入口的 C0..C3
+    //      原样保留**（那一段 guest 里没有任何指令改 CC ⇒ 抄 `native_affine` 的清 CC 会当场红）；
+    //      `fpu.control` / `fpu.tag` / `fpu.top` 相同；
+    //   ③ guest scratch 的 `[E+18h,E+1Ch)`（= `0x4E8301 fst dword` 那 4 字节）逐字节相同；
+    //      另两段（`[E,E+4)` = `f32(x−n)`、`[E+10h,E+18h)` = 就近取整的 int64）是**登记的不复刻段**
+    //      ⇒ 只断言 native 臂里它们仍是预填哨兵（native 不许往那里写别的）；
+    //   ④ `hits == 1` / `fallbacks == 0`（排除"没接管"与"每次回退"两种假绿）。
+    // ★ 为什么边界表里**必须有非整数 / 非 2 的幂**：`±1.5` / `±2.7` 是"截断 vs 四舍五入"的唯一判别
+    //   点（`0.4` / `-0.4` 那种两边都给 0 ⇒ 恒绿）；`1.3`（f32 不可精确表示）与 `1e39`（f32 上溢）
+    //   才是"漏掉 `fst dword`"的判别点 —— 全是 2 的幂时 PE/OE 一位都不会置。
+    // ★ 为什么还要 `2^53+1` / `2^62+1.5` / `2^63−1` 这三个 **10 字节 ext80** 输入：宿主
+    //   `(int64)(double)` 在 `|x| ≥ 2^53` 上差一位（double 只有 53 位）⇒ 它们钉住"必须走 softfloat"。
+    // ★ 入口 `fpu.status` 带 C0..C3（`0x4700`）与 `top_noise`（TOP != 0）两档分别钉住
+    //   "清 CC" 与 `empty(0)`/`empty(phys(0))` 这两类硬错（复审 H2 / M4）。
+    // ★ 入口 EA 必须是 `0x4E82C0`（`.lst` 381874 的 `COLLAPSED FUNCTION __ftol2_sse`，28 B），
+    //   ⛔ 不是 `0x4E82F6`（`__ftol2`）：后者只是 `0x4E82E3 jz` 的**函数内**目标 ⇒ 挂它 hits 恒 0。
+    // ★ 已知不覆盖（登记，不修）：`0x4B5545 jmp __ftol2_sse`（`sub_4B5500` 的 qsort 比较器尾跳）——
+    //   dispatcher 只在上一条是 `call` 时拦 ⇒ 这条既不 `+hits` 也不 `+fallbacks`；另有
+    //   `0x4BC539` / `0x4BC680` 直连 `__ftol2`（不经 `0x4E82C0`）。⇒ hits 只是**下界**（386 个入口）。
+    {
+        const std::vector<std::uint8_t> code_ftol = img.at(0x004E82C0u, 0x004E836Bu - 0x004E82C0u);
+
+        auto f64bits = [](double d) {
+            std::uint64_t v = 0;
+            std::memcpy(&v, &d, 8);
+            return v;
+        };
+        // ext80 正规值：value = (−1)^neg × sig × 2^(e−63)，sig ∈ [2^63, 2^64)（e 是二进制指数）
+        auto mk80 = [](bool neg, int e, std::uint64_t sig, FtolCase* c) {
+            for (int i = 0; i < 8; ++i) c->t80[i] = static_cast<std::uint8_t>((sig >> (8 * i)) & 0xFFu);
+            const std::uint16_t se = static_cast<std::uint16_t>((e + 16383) | (neg ? 0x8000 : 0));
+            c->t80[8] = static_cast<std::uint8_t>(se & 0xFFu);
+            c->t80[9] = static_cast<std::uint8_t>(se >> 8);
+            c->ext80 = true;
+        };
+
+        std::vector<FtolCase> cases;
+        auto add = [&](const FtolCase& c) { cases.push_back(c); };
+
+        // ── 基本 / 符号 / 零 ──
+        {
+            FtolCase c;
+            c.name = "ftol/+0";
+            c.f64 = f64bits(0.0);
+            add(c);
+            c.name = "ftol/-0";
+            c.f64 = f64bits(-0.0);
+            add(c);
+            c.name = "ftol/+1";
+            c.f64 = f64bits(1.0);
+            c.want_eax = 1u;
+            add(c);
+            // -1 ⇒ EDX 也是 0xFFFFFFFF（高位是符号扩展的一部分，不是 0）
+            c.name = "ftol/-1";
+            c.f64 = f64bits(-1.0);
+            c.want_eax = 0xFFFFFFFFu;
+            c.want_edx = 0xFFFFFFFFu;
+            add(c);
+        }
+        // ── ★ 截断判别档：小数部分 ≥ 0.5（四舍五入会给另一个整数）──
+        {
+            FtolCase c;
+            c.name = "ftol/+1.5";
+            c.f64 = f64bits(1.5);
+            c.want_eax = 1u;
+            add(c);
+            c.name = "ftol/-1.5";
+            c.f64 = f64bits(-1.5);
+            c.want_eax = 0xFFFFFFFFu;  // -1
+            c.want_edx = 0xFFFFFFFFu;
+            add(c);
+            c.name = "ftol/+3.5";
+            c.f64 = f64bits(3.5);
+            c.want_eax = 3u;
+            c.want_edx = 0u;
+            add(c);
+            c.name = "ftol/+2.7";
+            c.f64 = f64bits(2.7);
+            c.want_eax = 2u;
+            add(c);
+            c.name = "ftol/-2.7";
+            c.f64 = f64bits(-2.7);
+            c.want_eax = 0xFFFFFFFEu;  // -2
+            c.want_edx = 0xFFFFFFFFu;
+            add(c);
+        }
+        // ── ±0.5 邻域（截断给 0；就近给 0 或 ±1）──
+        {
+            FtolCase c;
+            c.name = "ftol/+0.5";
+            c.f64 = f64bits(0.5);
+            add(c);
+            c.name = "ftol/-0.5";
+            c.f64 = f64bits(-0.5);
+            add(c);
+            c.name = "ftol/+0.6";
+            c.f64 = f64bits(0.6);
+            add(c);
+            c.name = "ftol/-0.6";
+            c.f64 = f64bits(-0.6);
+            add(c);
+        }
+        // ── ★ "漏掉 `fst dword`（f32 转换）" 的判别档：PE（不可精确表示）/ OE（溢出）──
+        {
+            FtolCase c;
+            c.name = "ftol/1.3-PE";
+            c.f64 = f64bits(1.3);
+            c.want_eax = 1u;
+            add(c);
+            c.name = "ftol/1e39-OE";
+            c.f64 = f64bits(1.0e39);  // > FLT_MAX ⇒ f32 上溢（OE+PE），同时 > 2^63 ⇒ IE
+            c.want_eax = 0u;
+            c.want_edx = 0x80000000u;
+            add(c);
+            c.name = "ftol/1e-42-UE";
+            c.f64 = f64bits(1.0e-42);  // f32 次正规/下溢 ⇒ UE+PE；截断 0
+            c.want_eax = 0u;
+            c.want_edx = 0u;
+            add(c);
+        }
+        // ── 32 位边界与 2^31..2^63 的"回绕"（⛔ 不是 clamp）──
+        {
+            FtolCase c;
+            c.name = "ftol/2^31-1";
+            c.f64 = f64bits(2147483647.0);
+            c.want_eax = 0x7FFFFFFFu;
+            add(c);
+            c.name = "ftol/2^31";
+            c.f64 = f64bits(2147483648.0);
+            c.want_eax = 0x80000000u;
+            add(c);
+            c.name = "ftol/3e9-wrap";
+            c.f64 = f64bits(3.0e9);
+            c.want_eax = 0xB2D05E00u;  // 3000000000 的低 32 位（符号变负）
+            c.want_edx = 0u;
+            add(c);
+        }
+        // ── 2^53 / 2^62 / 2^63 ──
+        {
+            FtolCase c;
+            c.name = "ftol/2^53";
+            c.f64 = f64bits(9007199254740992.0);
+            c.want_eax = 0u;         // 低 32 位为 0 ⇒ 走 `0x4E8355` 那一支
+            c.want_edx = 0x00200000u;
+            add(c);
+            c.name = "ftol/2^62";
+            c.f64 = f64bits(4611686018427387904.0);
+            c.want_eax = 0u;
+            c.want_edx = 0x40000000u;
+            add(c);
+            c.name = "ftol/2^63";
+            c.f64 = f64bits(9223372036854775808.0);
+            c.want_eax = 0u;
+            c.want_edx = 0x80000000u;  // fistp 越界 ⇒ int64 不定值
+            add(c);
+            c.name = "ftol/-2^63";
+            c.f64 = f64bits(-9223372036854775808.0);
+            c.want_eax = 0u;
+            c.want_edx = 0x80000000u;  // **恰好** −2^63：位型与不定值相同，但**不置 IE**
+            add(c);
+        }
+        // ── ★ 10 字节 ext80：宿主 double 截断会差一位的三档 ──
+        {
+            FtolCase c;  // 2^53 + 1（double 表示不出 ⇒ `(int64)(double)` 会给 2^53）
+            c.name = "ftol/2^53+1-ext80";
+            mk80(false, 53, 0x8000000000000400ull, &c);  // sig = (2^53+1) × 2^10 ⇒ 值 = sig × 2^-10
+            c.want_eax = 1u;
+            c.want_edx = 0x00200000u;
+            add(c);
+            FtolCase d;  // 2^62 + 1.5 ⇒ 截断 = 2^62+1；就近(-even) = 2^62+2 ⇒ 再修正 −1
+            d.name = "ftol/2^62+1.5-ext80";
+            mk80(false, 62, 0x8000000000000003ull, &d);
+            d.want_eax = 1u;
+            d.want_edx = 0x40000000u;
+            add(d);
+            FtolCase e;  // 2^63 − 1（64 位有效位全 1）⇒ INT64_MAX，**不置 IE**
+            e.name = "ftol/2^63-1-ext80";
+            mk80(false, 62, 0xFFFFFFFFFFFFFFFEull, &e);
+            e.want_eax = 0xFFFFFFFFu;
+            e.want_edx = 0x7FFFFFFFu;
+            add(e);
+        }
+        // ── ±Inf / NaN（都是 `EAX=0, EDX=0x80000000` + IE；⛔ 不是 `0x80000000/0`）──
+        {
+            FtolCase c;
+            c.name = "ftol/+Inf";
+            c.f64 = 0x7FF0000000000000ull;
+            c.want_edx = 0x80000000u;
+            add(c);
+            c.name = "ftol/-Inf";
+            c.f64 = 0xFFF0000000000000ull;
+            c.want_edx = 0x80000000u;
+            add(c);
+            c.name = "ftol/NaN";
+            c.f64 = 0x7FF8000000000000ull;
+            c.want_edx = 0x80000000u;
+            add(c);
+        }
+        // ── 入口 C0..C3 = 0x4700：那一段 guest 不改 CC ⇒ 两臂都必须**原样保留**（抓 M4）──
+        {
+            FtolCase c;
+            c.name = "ftol/status-cc-preserved";
+            c.f64 = f64bits(2.7);
+            c.entry_status = 0x4700u;
+            c.want_eax = 2u;
+            add(c);
+        }
+        // ── TOP != 0（栈里先垫一层活值）：抓 `empty(0)` vs `empty(phys(0))`（复审 H2）──
+        {
+            FtolCase c;
+            c.name = "ftol/top-nonzero";
+            c.f64 = f64bits(-2.7);
+            c.top_noise = true;
+            c.want_eax = 0xFFFFFFFEu;
+            c.want_edx = 0xFFFFFFFFu;
+            add(c);
+        }
+        // ── 闸门：`[0x55F2E8] != 0` ⇒ 必须回退（真机走 `cvttsd2si`，解释器解不出那一条 ⇒ 只跑 override 臂）
+        {
+            FtolCase c;
+            c.name = "ftol/decline-sse2-flag";
+            c.f64 = f64bits(2.7);
+            c.flag = 1u;
+            c.skip_base = true;
+            c.want_decline = true;
+            add(c);
+        }
+
+        for (const FtolCase& c : cases) {
+            lift_test::g_current_case = c.name;
+            const FtolResult b = c.skip_base ? FtolResult{} : runFtol(code_ftol, c, false);
+            const FtolResult o = runFtol(code_ftol, c, true);
+            if (!c.skip_base) {
+                LIFT_CHECK(b.valid && o.valid);
+                if (!b.valid || !o.valid) continue;
+            } else {
+                LIFT_CHECK(o.valid);
+                if (!o.valid) continue;
+            }
+            LIFT_CHECK_EQ_U32(o.eax, b.eax);
+            LIFT_CHECK_EQ_U32(o.edx, b.edx);
+            if (c.want_decline) {
+                LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(o.hits), 0u);
+                LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(o.fallbacks), 1u);
+                LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(o.decline_sse2), 1u);
+            } else {
+                // ① spec 值（解释器臂与 native 臂都必须命中它）
+                LIFT_CHECK_EQ_U32(b.eax, c.want_eax);
+                LIFT_CHECK_EQ_U32(b.edx, c.want_edx);
+                LIFT_CHECK_EQ_U32(o.eax, c.want_eax);
+                LIFT_CHECK_EQ_U32(o.edx, c.want_edx);
+                // ② x87 状态字逐位 + 控制字 / tag / top
+                LIFT_CHECK_EQ_U32(o.fpu_status, b.fpu_status);
+                LIFT_CHECK_EQ_U32(o.fpu_control, b.fpu_control);
+                LIFT_CHECK_EQ_U32(o.fpu_tag, b.fpu_tag);
+                LIFT_CHECK_EQ_U32(o.fpu_top, b.fpu_top);
+                // ③ scratch 的 4 字节（`fst dword [E+18h]`）+ 另两段必须是预填哨兵
+                LIFT_CHECK(std::memcmp(o.scratch + 0x18u, b.scratch + 0x18u, 4u) == 0);
+                bool sentinel_ok = true;
+                for (std::uint32_t i = 0u; i < 4u; ++i) sentinel_ok = sentinel_ok && o.scratch[i] == 0x5Au;
+                for (std::uint32_t i = 0x10u; i < 0x18u; ++i)
+                    sentinel_ok = sentinel_ok && o.scratch[i] == 0x5Au;
+                LIFT_CHECK(sentinel_ok);
+                // ④ 真的被接管了
+                LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(o.hits), 1u);
+                LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(o.fallbacks), 0u);
+            }
+            if (o.eax != b.eax || o.edx != b.edx) {
+                std::fprintf(stderr, "  [ftol %s] EDX:EAX base=%08X:%08X ovr=%08X:%08X\n", c.name, b.edx,
+                             b.eax, o.edx, o.eax);
+            }
+            if (o.fpu_status != b.fpu_status) {
+                std::fprintf(stderr, "  [ftol %s] fpu.status %04X vs %04X（tag %04X/%04X top %u/%u）\n", c.name,
+                             b.fpu_status, o.fpu_status, b.fpu_tag, o.fpu_tag,
+                             static_cast<unsigned>(b.fpu_top), static_cast<unsigned>(o.fpu_top));
+            }
+            if (std::memcmp(o.scratch + 0x18u, b.scratch + 0x18u, 4u) != 0) {
+                std::fprintf(stderr, "  [ftol %s] scratch[18h] %02X%02X%02X%02X vs %02X%02X%02X%02X\n", c.name,
+                             b.scratch[0x18], b.scratch[0x19], b.scratch[0x1A], b.scratch[0x1B],
+                             o.scratch[0x18], o.scratch[0x19], o.scratch[0x1A], o.scratch[0x1B]);
+            }
         }
     }
 

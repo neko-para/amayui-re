@@ -560,6 +560,10 @@ void AudioEngine::stop(std::uint32_t state_ea) {
         //    （它是 vector，旧指针已失效）。
         b = find(state_ea);
         if (b == nullptr) return;
+        // ★ 重校验**身份**（`obj` 见上）：`state_ea` 可能已被复用给**另一条 obj**
+        //    （`removeBuffer` + `addBuffer` 同一 state）⇒ 不重校验就会把**旧 obj 的** frozen
+        //    游标写进新 Buffer。⛔ 不要在这里"重做一遍 stop"（那是另一件事）。
+        if (b->obj_ea != obj) return;
     }
     // 冻结值是 Stop 这一刻的游标：之后设备继续走（以及被作废的那一刀 fill）都不影响它。
     b->initial_pos = b->bytes ? (frozen % b->bytes) : 0u;
@@ -585,6 +589,9 @@ void AudioEngine::setPosition(std::uint32_t state_ea, std::uint32_t pos) {
         // ★★ 同上：Yield 之后必须重新查表。
         b = find(state_ea);
         if (b == nullptr) return;
+        // ★ 重校验**身份**（`obj` 是本次等待之前那一代算出来的）：`state_ea` 可能已被复用给
+        //    另一条 obj ⇒ 不重校验就会把这条新位置写进**别人的** Buffer。⛔ 不要重做一遍重定位。
+        if (b->obj_ea != obj) return;
     }
     b->initial_pos = b->bytes ? (pos % b->bytes) : 0u;
     const std::uint32_t align = b->fmt.block_align ? b->fmt.block_align : 4u;
@@ -980,7 +987,14 @@ void AudioEngine::stopMixThread() {
 
 AudioPump AudioEngine::pump() {
     if (!enabled() || !begun_ || !cpu_ || !mem_) return AudioPump::Idle;
-    // ★ 真线程模式：主线程**不要**每块都去抢 audio mutex（那会和 mixer/feeder 形成
+    // ★★ 锁序前提 —— 下面这个早退**就是**它（⛔ 不要删、不要放宽、不要把 thread 模式放到它后面）：
+    //   `pump()` 是全文**唯一**一处 `mutex_ → 令牌` 的路径（本函数里 `std::lock_guard` 取
+    //   `mutex_`、`GuestToken::Guard` 取令牌），与全局锁序（**令牌 → `mutex_`**：每个 DS shim /
+    //   `feederEvent`）相反。它不成环靠的是一条不变量：**D 模式（`thread_mode_ == false`）
+    //   没有 feeder 线程、也没有 mixer 线程 ⇒ 除本线程外没有令牌持有者** ⇒ "持 `mutex_` 等令牌"
+    //   永远等不到一个"要拿 `mutex_` 才能放令牌"的线程 ⇒ 反向锁序不可能成环。
+    //   ⇒ thread 模式**必须**在这一块里返回：它既有 feeder 又有 mixer，正是可能持令牌的"别人"。
+    //   真线程模式：主线程也**不要**每块都去抢 audio mutex（那会和 mixer/feeder 形成
     //   cache-line ping-pong，实测把 fill 从 400ms 拖到 650ms）。直接无锁返回。
     if (thread_mode_) {
         if (feeder_error_.load()) {
@@ -1479,12 +1493,15 @@ void AudioEngine::feederEvent(const AudioNotifyEvent& ev) {
     // ★ 金丝雀（S1）：fill 结束后该 obj 的代次是不是还是当初那一代。**不一致 = 有一次 Stop /
     //   重定位与这一刀在时间上重叠**。★ 注意：`stop()` 是"先 `++generation` 再等" ⇒ 被第 3 层
     //   正常等住的那一次也会让它 +1，所以它**不是错误计数**（生产里可以是 > 0）。
+    //   ★ 它还混了三种**良性**成因（都不是"没兜住"）：① fill 里的 EOF 自停（`0x4B6C58`
+    //   会在 fill 内调 `stop()`）、② `removeBuffer`（Release 把这条流删了 ⇒ `findByObj` 为空）、
+    //   ③ 同一 state 重建（`addBuffer` 的 `++generation`）。所以**不要**按"它非 0 ⇒ 有错"去读。
     //   真正"没兜住"的判据是 `fill_wait_timeouts > 0`（那一次的 re-anchor 与 fill 真的并发）。
     //   ⛔ 只记账，不回滚已写进环的字节。
     {
         std::lock_guard<std::recursive_mutex> lk(mutex_);
-        const Buffer* raced = findByObj(ev.obj);  // 递归锁：这里已经持 `mutex_`
-        if (raced == nullptr || raced->generation != ev.generation) ++stats_.fill_raced;
+        const Buffer* overlapped = findByObj(ev.obj);  // 递归锁：这里已经持 `mutex_`
+        if (overlapped == nullptr || overlapped->generation != ev.generation) ++stats_.fill_overlapped;
     }
     // ★ 清"正在跑"标志：到这一行为止 guest 环的写入已经结束，剩下的 trace / `--在飞` /
     //   LeaveCS 属于收尾，不在 `stop()` 的等待范围内。存 0 与 notify 都在 `pending_mutex_` 下，
@@ -1616,7 +1633,7 @@ void AudioEngine::dumpSummary(std::FILE* out) const {
                  "audio     : mode=%s device=%s muted=%d muted_bytes=%llu fills=%llu fill_bytes=%llu "
                  "mixed=%llu played=%llu notify=%llu deferred=%llu dropped=%llu underruns=%llu "
                  "stale=%llu slot_miss=%llu play_on_playing=%llu fill_waits=%llu "
-                 "fill_wait_timeouts=%llu fill_raced=%llu%s\n",
+                 "fill_wait_timeouts=%llu fill_overlapped=%llu%s\n",
                  audioModeName(mode_), device, mute_ ? 1 : 0,
                  static_cast<unsigned long long>(stats_.muted_bytes),
                  static_cast<unsigned long long>(stats_.fills),
@@ -1632,7 +1649,7 @@ void AudioEngine::dumpSummary(std::FILE* out) const {
                  static_cast<unsigned long long>(stats_.play_on_playing),
                  static_cast<unsigned long long>(stats_.fill_waits),
                  static_cast<unsigned long long>(stats_.fill_wait_timeouts),
-                 static_cast<unsigned long long>(stats_.fill_raced),
+                 static_cast<unsigned long long>(stats_.fill_overlapped),
                  dump_path_.empty() ? "" : (" dump=" + dump_path_).c_str());
 }
 

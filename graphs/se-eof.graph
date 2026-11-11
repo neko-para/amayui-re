@@ -1,0 +1,22 @@
+# 复现：GAMESTART 界面点"下一步" ⇒ 播一个 SE（叠在 BGM 上）⇒ SE 播完后**混合的尾声被重复 2–3 次**
+#   坐标来自用户：TITLE 的「はじめから」= 1186,373；GAMESTART 的「下一步」= 830,592（与 sn0000.graph 同路）
+# 判据：`--audio-dump` 出来的 WAV 里，尾声那一截应当出现 2–3 次**完全相同的字节段**（用窗口哈希找重）
+# ⛔ 不写帧号（见 docs/03-emulator/interaction-model.md）
+
+await script TITLE
+wait 5000 wall_ms
+timeout 30000
+
+click 1186 373
+
+await script GAMESTART
+wait 3000 wall_ms
+timeout 30000
+
+click 830 592
+
+# 给 SE 播完 + 尾声重复留足时间。
+# ⚠ `wait` 这个动作节点自身受缺省 5000 ms 的 timeout 约束 ⇒ 单个 wait 不要超过 4000 ms（拆成多个节点）。
+wait 4000 wall_ms
+wait 4000 wall_ms
+wait 4000 wall_ms
