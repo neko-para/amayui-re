@@ -836,6 +836,178 @@ void caseGetBackBufferAndRenderTarget() {
 }
 
 // ---------------------------------------------------------------------------------------
+// ⑬ 离屏普通表面 + GetRenderTargetData（存档缩略图路径；`.lst` 0x4A0570 / 0x4A05D2）
+//
+// 判据（红了意味着什么）：
+//   ① `CreateOffscreenPlainSurface(+0x90)` 建出**可锁的** IDirect3DSurface9：GetDesc 的
+//      宽 / 高 / 格式 / 池（SYSTEMMEM=2）与入参一致；
+//   ② 纹理 RT（`GetSurfaceLevel` 的 surface）`Clear` ⇒ `GetRenderTargetData(+0x80)` ⇒ 离屏表面
+//      `LockRect(+0x34)` 读到的像素**逐像素等于 Clear 色**（含最后一行，行距按 Pitch）；
+//   ③ 尺寸 / 格式不匹配 ⇒ `D3DERR_INVALIDCALL`（⛔ 不隐式缩放 / 格式转换）；
+//   ④ 源不是本模块的 surface ⇒ `D3DERR_INVALIDCALL`；
+//   ⑤ 共享句柄（pSharedHandle != 0）⇒ `D3DERR_INVALIDCALL`（本线不支持共享表面）。
+// ★ 为什么这条是 assets 档之外的纯档判据：真机链里"纹理 RT → 离屏表面 → 锁读像素"就是
+//   `sub_4A0430` 的全部 D3D 调用；这里用 guest 代码经 vtable 走同一条，不跑游戏。
+std::uint32_t callD3DXCreateTexture(Fixture& f, std::uint32_t device, std::uint32_t w, std::uint32_t h,
+                                    std::uint32_t format, std::uint32_t out_ea);
+
+void caseOffscreenSurfaceRenderTargetData() {
+    lift_test::g_current_case = "d3d9/offscreen-surface-rt-data";
+    Fixture f;
+    LIFT_CHECK(f.boot());
+    lift::registerD3DX9Shims(f.m.shims());
+    lift::ShimDef* dx = f.m.shims().findMutable("d3dx9_43", "D3DXCreateTexture");
+    LIFT_CHECK(dx != nullptr);
+    if (!dx) return;
+    dx->stub_ea = kProcD3DXCreateTexture;
+    f.m.cache().installShim(kProcD3DXCreateTexture, dx->id);
+
+    const std::uint32_t d3d9 = f.createDirect3D();
+    LIFT_CHECK_NE_U32(d3d9, 0u);
+    if (d3d9 == 0) return;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(d3d9, 1u, 0x44u, 1280, 720, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+
+    // 源：64×32 的 RT 纹理（Usage=1 = D3DUSAGE_RENDERTARGET）→ level 0 surface
+    const std::uint32_t tex_out = f.placeU32(0);
+    LIFT_CHECK_EQ_U32(callD3DXCreateTexture(f, dev.object, 64u, 32u, lift::d3d9::kFmtX8R8G8B8, tex_out), 0u);
+    const std::uint32_t tex = f.m.mem().rd32(tex_out);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return;
+    const std::uint32_t src_out = f.placeU32(0);
+    LIFT_CHECK_EQ_U32(f.method(tex, 0x48u, {0u, src_out}), 0u);  // GetSurfaceLevel(0, ppSurface)
+    const std::uint32_t src = f.m.mem().rd32(src_out);
+    LIFT_CHECK_NE_U32(src, 0u);
+    if (src == 0) return;
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x94u, {src, 0u}), 0u);  // SetRenderTarget(src, 0)
+
+    // 清成已知颜色（TARGET 位）
+    const std::uint32_t color = 0x00123456u;
+    const std::uint32_t one_z = 0x3F800000u;  // 1.0f
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0xACu, {0u, 0u, 1u, color, one_z, 0u}), 0u);
+
+    // ① CreateOffscreenPlainSurface(Width, Height, Format, Pool=SYSTEMMEM(2), &ppSurface, NULL)
+    const std::uint32_t off_out = f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(
+        f.method(dev.object, 0x90u, {64u, 32u, lift::d3d9::kFmtX8R8G8B8, 2u, off_out, 0u}), 0u);
+    const std::uint32_t offs = f.m.mem().rd32(off_out);
+    LIFT_CHECK_NE_U32(offs, 0u);
+    LIFT_CHECK_NE_U32(offs, 0xDEADBEEFu);
+    if (offs == 0) return;
+    const std::uint32_t desc = f.placeBytes(std::vector<std::uint8_t>(32u, 0u));
+    LIFT_CHECK_EQ_U32(f.method(offs, 0x30u, {desc}), 0u);  // GetDesc
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(desc + 0x00u), lift::d3d9::kFmtX8R8G8B8);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(desc + 0x0Cu), 2u);  // D3DPOOL_SYSTEMMEM
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(desc + 0x18u), 64u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(desc + 0x1Cu), 32u);
+
+    // ② GetRenderTargetData(src, offs) ⇒ S_OK；锁离屏表面读像素
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x80u, {src, offs}), 0u);
+    const std::uint32_t lr = f.placeBytes(std::vector<std::uint8_t>(8u, 0xCC));
+    LIFT_CHECK_EQ_U32(f.method(offs, 0x34u, {lr, 0u, 0u}), 0u);  // LockRect(NULL, 0)
+    const std::uint32_t pitch = f.m.mem().rd32(lr + 0u);
+    const std::uint32_t bits = f.m.mem().rd32(lr + 4u);
+    LIFT_CHECK_EQ_U32(pitch, 64u * 4u);
+    LIFT_CHECK_NE_U32(bits, 0xCCCCCCCCu);
+    if (pitch == 64u * 4u && bits != 0xCCCCCCCCu) {
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(bits + 0u * pitch + 0u), color);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(bits + 0u * pitch + 63u * 4u), color);  // 最后一列
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(bits + 31u * pitch + 0u), color);       // 最后一行
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(bits + 31u * pitch + 63u * 4u), color);
+    }
+    LIFT_CHECK_EQ_U32(f.method(offs, 0x38u, {}), 0u);  // UnlockRect
+
+    // ②b UpdateSurface：整幅 + 子矩形→目标点（第二个颜色，证明"复制了哪块"）
+    const std::uint32_t off2_out = f.placeU32(0);
+    LIFT_CHECK_EQ_U32(
+        f.method(dev.object, 0x90u, {64u, 32u, lift::d3d9::kFmtX8R8G8B8, 2u, off2_out, 0u}), 0u);
+    const std::uint32_t off2 = f.m.mem().rd32(off2_out);
+    LIFT_CHECK_NE_U32(off2, 0u);
+    if (off2 != 0) {
+        LIFT_CHECK_EQ_U32(f.method(dev.object, 0x78u, {src, 0u, off2, 0u}), 0u);  // UpdateSurface(全幅)
+        const std::uint32_t lr2 = f.placeBytes(std::vector<std::uint8_t>(8u, 0xCC));
+        LIFT_CHECK_EQ_U32(f.method(off2, 0x34u, {lr2, 0u, 0u}), 0u);
+        const std::uint32_t p2 = f.m.mem().rd32(lr2 + 0u);
+        const std::uint32_t b2 = f.m.mem().rd32(lr2 + 4u);
+        if (p2 == 64u * 4u && b2 != 0xCCCCCCCCu) {
+            LIFT_CHECK_EQ_U32(f.m.mem().rd32(b2 + 31u * p2 + 63u * 4u), color);  // 全幅含最后一行
+        }
+        LIFT_CHECK_EQ_U32(f.method(off2, 0x38u, {}), 0u);
+
+        const std::uint32_t color2 = 0x00654321u;
+        LIFT_CHECK_EQ_U32(f.method(dev.object, 0xACu, {0u, 0u, 1u, color2, one_z, 0u}), 0u);
+        const std::uint32_t src_rect = f.placeRect(10u, 5u, 30u, 20u);  // 20×15
+        std::vector<std::uint8_t> pt(8u, 0u);
+        pt[0] = 2u;  // x = 2
+        pt[4] = 3u;  // y = 3
+        const std::uint32_t pt_ea = f.placeBytes(pt);
+        LIFT_CHECK_EQ_U32(f.method(dev.object, 0x78u, {src, src_rect, off2, pt_ea}), 0u);
+        LIFT_CHECK_EQ_U32(f.method(off2, 0x34u, {lr2, 0u, 0u}), 0u);
+        const std::uint32_t p3 = f.m.mem().rd32(lr2 + 0u);
+        const std::uint32_t b3 = f.m.mem().rd32(lr2 + 4u);
+        if (p3 == 64u * 4u && b3 != 0xCCCCCCCCu) {
+            LIFT_CHECK_EQ_U32(f.m.mem().rd32(b3 + 3u * p3 + 2u * 4u), color2);   // 目标左上
+            LIFT_CHECK_EQ_U32(f.m.mem().rd32(b3 + 17u * p3 + 21u * 4u), color2);  // 目标右下
+            LIFT_CHECK_EQ_U32(f.m.mem().rd32(b3 + 2u * p3 + 2u * 4u), color);     // 上一行仍是旧色
+            LIFT_CHECK_EQ_U32(f.m.mem().rd32(b3 + 17u * p3 + 22u * 4u), color);   // 右边一列仍是旧色
+        }
+        LIFT_CHECK_EQ_U32(f.method(off2, 0x38u, {}), 0u);
+
+        // 越界源矩形 / 目标放不下 ⇒ D3DERR_INVALIDCALL（⛔ 不隐式裁剪）
+        const std::uint32_t bad_src = f.placeRect(10u, 5u, 70u, 20u);
+        LIFT_CHECK_EQ_U32(f.method(dev.object, 0x78u, {src, bad_src, off2, 0u}), lift::d3d9::kInvalidCall);
+        std::vector<std::uint8_t> pt_far(8u, 0u);
+        pt_far[0] = 50u;  // x = 50 ⇒ 50 + 64 > 64
+        pt_far[4] = 30u;
+        LIFT_CHECK_EQ_U32(f.method(dev.object, 0x78u, {src, 0u, off2, f.placeBytes(pt_far)}),
+                          lift::d3d9::kInvalidCall);
+    }
+
+    // ③ 尺寸不匹配 ⇒ D3DERR_INVALIDCALL（不隐式缩放）
+    const std::uint32_t small_out = f.placeU32(0);
+    LIFT_CHECK_EQ_U32(
+        f.method(dev.object, 0x90u, {32u, 32u, lift::d3d9::kFmtX8R8G8B8, 2u, small_out, 0u}), 0u);
+    const std::uint32_t small_surf = f.m.mem().rd32(small_out);
+    if (small_surf != 0) {
+        LIFT_CHECK_EQ_U32(f.method(dev.object, 0x80u, {src, small_surf}), lift::d3d9::kInvalidCall);
+        // ③b 格式不匹配（同尺寸、16bpp）⇒ D3DERR_INVALIDCALL
+        const std::uint32_t fmt_out = f.placeU32(0);
+        LIFT_CHECK_EQ_U32(
+            f.method(dev.object, 0x90u, {64u, 32u, lift::d3d9::kFmtR5G6B5, 2u, fmt_out, 0u}), 0u);
+        const std::uint32_t fmt_surf = f.m.mem().rd32(fmt_out);
+        if (fmt_surf != 0) {
+            LIFT_CHECK_EQ_U32(f.method(dev.object, 0x80u, {src, fmt_surf}), lift::d3d9::kInvalidCall);
+            // UpdateSurface 的格式不同 / 源不是 surface ⇒ D3DERR_INVALIDCALL
+            LIFT_CHECK_EQ_U32(f.method(dev.object, 0x78u, {src, 0u, fmt_surf, 0u}),
+                              lift::d3d9::kInvalidCall);
+            LIFT_CHECK_EQ_U32(f.method(fmt_surf, 0x08u, {}), 0u);
+        }
+        LIFT_CHECK_EQ_U32(f.method(small_surf, 0x08u, {}), 0u);
+    }
+
+    // ④ 源不是本模块的 surface ⇒ D3DERR_INVALIDCALL
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x80u, {dev.object, offs}), lift::d3d9::kInvalidCall);
+
+    // ⑤ 共享表面句柄 ⇒ D3DERR_INVALIDCALL（⛔ 不假装共享成功）
+    const std::uint32_t shared_out = f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(
+        f.method(dev.object, 0x90u, {64u, 32u, lift::d3d9::kFmtX8R8G8B8, 2u, shared_out, 0x1234u}),
+        lift::d3d9::kInvalidCall);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(shared_out), 0xDEADBEEFu);  // 失败不写出参
+
+    // 收尾：解绑 RT，再按 refcount 逐份释放
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x94u, {0u, 0u}), 0u);
+    if (off2 != 0) LIFT_CHECK_EQ_U32(f.method(off2, 0x08u, {}), 0u);
+    LIFT_CHECK_EQ_U32(f.method(offs, 0x08u, {}), 0u);
+    LIFT_CHECK_EQ_U32(f.method(src, 0x08u, {}), 0u);
+    LIFT_CHECK_EQ_U32(f.method(tex, 0x08u, {}), 0u);
+    LIFT_CHECK(!f.m.cpu().com->find(offs));
+    LIFT_CHECK(!f.m.cpu().com->find(src));
+    LIFT_CHECK(!f.m.cpu().com->find(tex));
+}
+
+// ---------------------------------------------------------------------------------------
 // ⑨ 未实现的槽 ⇒ loud trap（机器停 + 报 iface/偏移），⛔ 不许返回 0 继续跑
 // ---------------------------------------------------------------------------------------
 void caseUnimplementedSlotTraps() {
@@ -2462,6 +2634,7 @@ int main() {
         caseVertexDeclaration();
         caseGetBackBufferAndRenderTarget();
         caseBackBufferLockRect();
+        caseOffscreenSurfaceRenderTargetData();
         caseTextureBoundThenGuestRelease();
         caseArenaReclaimUnderOtherMachine();
         caseUnimplementedSlotTraps();

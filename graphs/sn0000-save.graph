@@ -1,0 +1,38 @@
+await script TITLE
+wait 5000 wall_ms
+timeout 30000
+
+click 1186 373
+
+await script GAMESTART
+wait 2000 wall_ms
+
+click 830 592
+
+await script SN0000
+wait 25000 wall_ms
+timeout 35000
+
+click 500 500 right
+wait 10000 wall_ms
+timeout 20000
+
+await script FELLOW
+wait 2000 wall_ms
+
+click 100 140
+
+await script SAVE
+wait 2000 wall_ms
+
+click 300 100
+wait 1000 wall_ms
+click 650 320
+
+# 存档写入是同步的，但缩略图（STH）+ 1 MB DAT 在模拟器上要 ~7 s；单个 wait 的
+# 缺省 timeout = 5000 ms ⇒ 拆成 5 段给足收口时间（否则图先结束、文件停在 0 字节）。
+wait 5000 wall_ms
+wait 5000 wall_ms
+wait 5000 wall_ms
+wait 5000 wall_ms
+wait 5000 wall_ms

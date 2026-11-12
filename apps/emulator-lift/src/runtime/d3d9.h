@@ -536,6 +536,24 @@ bool lockBackBuffer(X86& cpu, std::uint32_t state, std::uint32_t locked_rect_ea,
                     std::uint32_t flags, bool* broken, std::string* why);
 bool unlockBackBuffer(X86& cpu, std::uint32_t state, bool* broken, std::string* why);
 
+// GetRenderTargetData：把 render target surface 的像素**复制**到一块 offscreen 普通表面
+// （`CreateOffscreenPlainSurface` 建的那种，池 = SYSTEMMEM/SCRATCH）。
+//   · 参数必须是本模块的两块 IDirect3DSurface9；尺寸 / 格式不同 ⇒ `kInvalidCall`（真机同形）；
+//   · 源是当前 GPU 镜像目标（纹理当 RT）⇒ 先 flush + 读回（与 `lockRect` 同一条屏障）；
+//   · 复制后目标的内容版本降级为"未知"（宿主写了像素，走 `markTextureContentUnknown`）；
+//   · 失败原因写 `why`（⛔ 不静默返回 0 当成功）。
+std::uint32_t getRenderTargetData(X86& cpu, std::uint32_t render_target, std::uint32_t dest_surface,
+                                  std::string* why);
+
+// UpdateSurface：把源 surface 的一块矩形**原样复制**到目标 surface 的某点（无缩放 / 无格式转换）。
+//   · 源 / 目标都必须是本模块的 IDirect3DSurface9；格式不同 ⇒ `kInvalidCall`（真机同形）；
+//   · `src_rect_ea == 0` ⇒ 整幅源；`dst_point_ea == 0` ⇒ 目标 (0,0)；
+//   · 目标放不下 / 源矩形越界 ⇒ `kInvalidCall`（⛔ 不隐式裁剪）；
+//   · 源是当前 GPU 镜像目标 ⇒ 先 flush + 读回（与 `lockRect` 同一条屏障）；
+//   · 复制后目标内容版本降级为"未知"。
+std::uint32_t updateSurface(X86& cpu, std::uint32_t src_surface, std::uint32_t src_rect_ea,
+                            std::uint32_t dst_surface, std::uint32_t dst_point_ea, std::string* why);
+
 // ★ 把一块状态块的**内容版本降级为"未知"**（0）：它被当成了 render target（`SetRenderTarget`
 //   绑到纹理表面），之后宿主可能经 Clear / CPU 光栅回退 / GPU 读回写它的像素 —— 这些路径不经过
 //   `unlockRect`，无法逐条归因。降级 = 退回"每次采样做内容哈希"（未优化前的行为）。

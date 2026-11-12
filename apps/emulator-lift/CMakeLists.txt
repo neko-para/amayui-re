@@ -477,6 +477,22 @@ if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN")
         SKIP_RETURN_CODE 77
         TIMEOUT 900)
 
+    # ---- assets：存档路径（`graphs/sn0000-save.graph`）----
+    # 判据见 tests/save_graph.cpp 文件头：图走完（task done）+ 没有 unimplemented +
+    # `SAVE00.DAT`（~1 MB）/ `SAVE00.STH`（缩略图）真的落盘。
+    # ★ 需要真窗口 + GPU（headless 的 wall 等待跑歪、CPU 光栅分钟级）⇒ 环境不可用自己 SKIP 77。
+    add_executable(lift-save-graph tests/save_graph.cpp)
+    target_link_libraries(lift-save-graph PRIVATE emulator-lift-runtime)
+    add_test(NAME save-graph COMMAND lift-save-graph
+        $<TARGET_FILE:emulator-lift>
+        "${LIFT_ASSETS_GAME_DIR}"
+        "${CMAKE_CURRENT_BINARY_DIR}/save-graph-work"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../graphs/sn0000-save.graph")
+    set_tests_properties(save-graph PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 1200)
+
     # ---- assets：**feeder 臂**的段级 override 读数守卫（`bov= / bovd= / bovf=`）----
     # REQ-01M75W6BB3PY3MF42ZTS23KTBS。判据见 tests/feeder_seg_e2e.cpp 文件头：
     # ① 子进程 exit 0；② 日志里 `feeder=host-thread` + `device=ok`（缺 ⇒ SKIP 77：量错了臂）；

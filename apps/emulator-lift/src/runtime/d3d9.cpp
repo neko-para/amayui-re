@@ -1661,6 +1661,198 @@ bool unlockBackBuffer(X86& cpu, std::uint32_t state, bool* broken, std::string* 
     return true;
 }
 
+std::uint32_t updateSurface(X86& cpu, std::uint32_t src_surface, std::uint32_t src_rect_ea,
+                            std::uint32_t dst_surface, std::uint32_t dst_point_ea, std::string* why) {
+    if (!cpu.com) {
+        if (why) *why = "D3D9：UpdateSurface 没有 ComRegistry";
+        return kFail;
+    }
+    auto surfaceInfo = [&](std::uint32_t obj, const char* name, TextureInfo* ti, std::uint32_t* state) -> bool {
+        const char* iface = cpu.com->ifaceOf(obj);
+        if (iface == nullptr || std::strcmp(iface, "IDirect3DSurface9") != 0) {
+            if (why) *why = std::string("D3D9：UpdateSurface 的 ") + name + " 不是本模块的 IDirect3DSurface9";
+            return false;
+        }
+        *state = cpu.com->userOf(obj);
+        if (*state == 0) {
+            if (why) *why = std::string("D3D9：UpdateSurface 的 ") + name + " 没有状态块";
+            return false;
+        }
+        return surfaceInfoOfState(cpu, *state, ti, why);
+    };
+    TextureInfo src;
+    TextureInfo dst;
+    std::uint32_t src_state = 0;
+    std::uint32_t dst_state = 0;
+    if (!surfaceInfo(src_surface, "pSourceSurface", &src, &src_state)) return kInvalidCall;
+    if (!surfaceInfo(dst_surface, "pDestinationSurface", &dst, &dst_state)) return kInvalidCall;
+    if (src.format != dst.format) {
+        char buf[200];
+        std::snprintf(buf, sizeof(buf),
+                      "D3D9：UpdateSurface 的源 / 目标格式不同（%u vs %u）⇒ D3DERR_INVALIDCALL", src.format,
+                      dst.format);
+        if (why) *why = buf;
+        return kInvalidCall;
+    }
+    // 源矩形：缺省 = 整幅；越界 / 空 ⇒ INVALIDCALL（真机不做隐式裁剪）。
+    std::int32_t sx = 0, sy = 0, sw = static_cast<std::int32_t>(src.width),
+                 sh = static_cast<std::int32_t>(src.height);
+    if (src_rect_ea != 0) {
+        if (!committedOut(cpu, src_rect_ea, 16u, "pSourceRect", why)) return kInvalidCall;
+        const std::int32_t l = static_cast<std::int32_t>(cpu.mem->rd32(src_rect_ea + 0));
+        const std::int32_t t = static_cast<std::int32_t>(cpu.mem->rd32(src_rect_ea + 4));
+        const std::int32_t r = static_cast<std::int32_t>(cpu.mem->rd32(src_rect_ea + 8));
+        const std::int32_t b = static_cast<std::int32_t>(cpu.mem->rd32(src_rect_ea + 12));
+        sx = l;
+        sy = t;
+        sw = r - l;
+        sh = b - t;
+        if (l < 0 || t < 0 || r > static_cast<std::int32_t>(src.width) ||
+            b > static_cast<std::int32_t>(src.height) || sw <= 0 || sh <= 0) {
+            if (why) *why = "D3D9：UpdateSurface 的 pSourceRect 越界 / 空（D3DERR_INVALIDCALL）";
+            return kInvalidCall;
+        }
+    }
+    std::int32_t dx = 0, dy = 0;
+    if (dst_point_ea != 0) {
+        if (!committedOut(cpu, dst_point_ea, 8u, "pDestPoint", why)) return kInvalidCall;
+        dx = static_cast<std::int32_t>(cpu.mem->rd32(dst_point_ea + 0));
+        dy = static_cast<std::int32_t>(cpu.mem->rd32(dst_point_ea + 4));
+    }
+    if (dx < 0 || dy < 0 || dx + sw > static_cast<std::int32_t>(dst.width) ||
+        dy + sh > static_cast<std::int32_t>(dst.height)) {
+        if (why) *why = "D3D9：UpdateSurface 的目标区域放不下（D3DERR_INVALIDCALL）";
+        return kInvalidCall;
+    }
+    Machine* m = machineOf(cpu);
+    if (m == nullptr) {
+        if (why) *why = "D3D9：UpdateSurface 拿不到 Machine";
+        return kFail;
+    }
+    GuestSurface* sg = m->surfaces().find(src.arena);
+    GuestSurface* dg = m->surfaces().find(dst.arena);
+    if (sg == nullptr || dg == nullptr) {
+        if (why) *why = "D3D9：UpdateSurface 的源 / 目标像素不在 arena 里（状态与 arena 不一致）";
+        return kFail;
+    }
+    // 屏障（与 lockRect / getRenderTargetData 同一形状）：源是当前 GPU 镜像目标 ⇒ 先读回。
+    if (GpuRaster* gpu = m->gpuRaster(); gpu != nullptr && gpu->rasterActive() && gpu->rasterDirty()) {
+        std::uint8_t* sbase = m->surfaces().pixels(*sg);
+        std::string gerr;
+        if (gpu->rasterTargetBase() != nullptr && gpu->rasterTargetBase() == sbase) {
+            if (!gpu->rasterSyncToGuest(sbase, sg->pitch, sg->width, sg->height, &gerr)) {
+                if (why) *why = "D3D9：UpdateSurface 前 GPU 像素读回失败：" + gerr;
+                return kFail;
+            }
+        } else if (!gpu->rasterFlush(&gerr)) {
+            if (why) *why = "D3D9：UpdateSurface 前 GPU 队列 flush 失败：" + gerr;
+            return kFail;
+        }
+    }
+    const std::uint32_t bpp = sg->format.bytesPerPixel();
+    const std::uint32_t row_bytes = static_cast<std::uint32_t>(sw) * bpp;
+    if (bpp == 0 || sg->pitch == 0 || dg->pitch == 0 || row_bytes > sg->pitch || row_bytes > dg->pitch) {
+        if (why) *why = "D3D9：UpdateSurface 的格式 / 行距非法（状态崩坏）";
+        return kFail;
+    }
+    const std::uint8_t* sbase = m->surfaces().pixels(*sg);
+    std::uint8_t* dbase = m->surfaces().pixels(*dg);
+    for (std::int32_t y = 0; y < sh; ++y) {
+        std::memcpy(dbase + static_cast<std::size_t>(dy + y) * dg->pitch +
+                        static_cast<std::size_t>(dx) * bpp,
+                    sbase + static_cast<std::size_t>(sy + y) * sg->pitch +
+                        static_cast<std::size_t>(sx) * bpp,
+                    row_bytes);
+    }
+    markTextureContentUnknown(cpu, dst_state);
+    d3d9Log("UpdateSurface", "surface 0x%08X (%d,%d %dx%d) → 0x%08X (%d,%d)：%d 行 × %u B", src_surface, sx, sy, sw,
+            sh, dst_surface, dx, dy, sh, row_bytes);
+    return kOk;
+}
+
+std::uint32_t getRenderTargetData(X86& cpu, std::uint32_t render_target, std::uint32_t dest_surface,
+                                  std::string* why) {
+    if (!cpu.com) {
+        if (why) *why = "D3D9：GetRenderTargetData 没有 ComRegistry";
+        return kFail;
+    }
+    auto surfaceInfo = [&](std::uint32_t obj, const char* name, TextureInfo* ti, std::uint32_t* state) -> bool {
+        const char* iface = cpu.com->ifaceOf(obj);
+        if (iface == nullptr || std::strcmp(iface, "IDirect3DSurface9") != 0) {
+            if (why) *why = std::string("D3D9：GetRenderTargetData 的 ") + name + " 不是本模块的 IDirect3DSurface9";
+            return false;
+        }
+        *state = cpu.com->userOf(obj);
+        if (*state == 0) {
+            if (why) *why = std::string("D3D9：GetRenderTargetData 的 ") + name + " 没有状态块";
+            return false;
+        }
+        return surfaceInfoOfState(cpu, *state, ti, why);
+    };
+    TextureInfo src;
+    TextureInfo dst;
+    std::uint32_t src_state = 0;
+    std::uint32_t dst_state = 0;
+    if (!surfaceInfo(render_target, "pRenderTarget", &src, &src_state)) return kInvalidCall;
+    if (!surfaceInfo(dest_surface, "pDestSurface", &dst, &dst_state)) return kInvalidCall;
+    // 真机：pRenderTarget 必须是 render target，pDestSurface 必须是 offscreen plain surface，
+    // 且两者尺寸 / 格式相同；不同 ⇒ D3DERR_INVALIDCALL（⛔ 不做隐式缩放 / 格式转换）。
+    if (src.width != dst.width || src.height != dst.height || src.format != dst.format) {
+        char buf[200];
+        std::snprintf(buf, sizeof(buf),
+                      "D3D9：GetRenderTargetData 的源 / 目标不一致（源 %ux%u fmt=%u，目标 %ux%u fmt=%u）"
+                      "⇒ D3DERR_INVALIDCALL",
+                      src.width, src.height, src.format, dst.width, dst.height, dst.format);
+        if (why) *why = buf;
+        return kInvalidCall;
+    }
+    Machine* m = machineOf(cpu);
+    if (m == nullptr) {
+        if (why) *why = "D3D9：GetRenderTargetData 拿不到 Machine";
+        return kFail;
+    }
+    GuestSurface* sg = m->surfaces().find(src.arena);
+    GuestSurface* dg = m->surfaces().find(dst.arena);
+    if (sg == nullptr || dg == nullptr) {
+        if (why) *why = "D3D9：GetRenderTargetData 的源 / 目标像素不在 arena 里（状态与 arena 不一致）";
+        return kFail;
+    }
+    // ★ 屏障（与 `lockRect` 同一形状）：源若是当前 GPU 镜像目标（纹理当 RT），guest 像素是过期的
+    //   ⇒ 先 flush + 读回；不是目标 ⇒ 只 flush（队列里的 draw 不写这块像素，⛔ 不把别的 target 读进来）。
+    if (GpuRaster* gpu = m->gpuRaster(); gpu != nullptr && gpu->rasterActive() && gpu->rasterDirty()) {
+        std::uint8_t* sbase = m->surfaces().pixels(*sg);
+        std::string gerr;
+        if (gpu->rasterTargetBase() != nullptr && gpu->rasterTargetBase() == sbase) {
+            if (!gpu->rasterSyncToGuest(sbase, sg->pitch, sg->width, sg->height, &gerr)) {
+                if (why) *why = "D3D9：GetRenderTargetData 前 GPU 像素读回失败：" + gerr;
+                return kFail;
+            }
+        } else if (!gpu->rasterFlush(&gerr)) {
+            if (why) *why = "D3D9：GetRenderTargetData 前 GPU 队列 flush 失败：" + gerr;
+            return kFail;
+        }
+    }
+    const std::uint32_t bpp = sg->format.bytesPerPixel();
+    const std::uint32_t row_bytes = src.width * bpp;
+    if (bpp == 0 || sg->pitch == 0 || dg->pitch == 0 || row_bytes > sg->pitch || row_bytes > dg->pitch) {
+        if (why) *why = "D3D9：GetRenderTargetData 的格式 / 行距非法（状态崩坏）";
+        return kFail;
+    }
+    const std::uint8_t* sbase = m->surfaces().pixels(*sg);
+    std::uint8_t* dbase = m->surfaces().pixels(*dg);
+    for (std::uint32_t y = 0; y < src.height; ++y) {
+        std::memcpy(dbase + static_cast<std::size_t>(y) * dg->pitch,
+                    sbase + static_cast<std::size_t>(y) * sg->pitch, row_bytes);
+    }
+    // ★ 宿主写了目标的像素 ⇒ 内容版本降级为"未知"（与 Clear / CPU 光栅回退同一口径）。
+    markTextureContentUnknown(cpu, dst_state);
+    d3d9Log("GetRenderTargetData",
+            "%ux%u fmt=%u：surface 0x%08X → 0x%08X（%u 行 × %u B；src pitch=%u / dst pitch=%u）",
+            src.width, src.height, src.format, render_target, dest_surface, src.height, row_bytes, sg->pitch,
+            dg->pitch);
+    return kOk;
+}
+
 void markTextureContentUnknown(X86& cpu, std::uint32_t state) {
     // ★ 判据必须是 `'TEX1'` magic（`textureInfoOfState`）：`surfaceInfoOfState` 对后缓冲的
     //   `'D9D1'` 设备状态也返回 true，按它写会踩坏设备状态块（+52 = Clear 计数、+56/60 = 设备字段）。

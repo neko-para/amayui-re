@@ -23,6 +23,11 @@ struct X86;
 //   ★ 还引用的地点是 `releaseImpl` 这一个收敛点（内部裸 release 也覆盖），⛔ 不是影子回收。
 //   `owner == 0`（后缓冲表面）⇒ 不加引用、对象布局与 refcount 一字不改。
 // 返回对象 EA；0 = 失败（已打 com / d3dx 日志；失败时刚加的那份引用已还回去）。
-std::uint32_t createD3dxSurfaceObject(X86& cpu, std::uint32_t user, std::uint32_t owner = 0);
+// ★ `on_zero` = 对象 refcount 到 0 时的回收钩子（`ComRegistry::createObject` 的 on_zero）：
+//   纹理表面 / 后缓冲表面传 nullptr（状态块 + 像素块的寿命挂在父纹理 / 设备上）；
+//   **独立的 offscreen 表面**（`CreateOffscreenPlainSurface`）必须传 `d3d9::destroyTextureState`
+//   —— 它没有父对象，状态块 + arena 只能随自己的 refcount 回收。
+std::uint32_t createD3dxSurfaceObject(X86& cpu, std::uint32_t user, std::uint32_t owner = 0,
+                                      void (*on_zero)(X86&, std::uint32_t) = nullptr);
 
 }  // namespace lift

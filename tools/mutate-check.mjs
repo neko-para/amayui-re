@@ -1067,6 +1067,22 @@ const MUTATIONS = [
   },
 
   {
+    // ★ 代表 "surface 复制不校验格式" 这一类错（REQ-01M77ZJYSPX5V21QEB89W51815，存档缩略图链）。
+    //   判据：`apps/emulator-lift/tests/d3d9.cpp` 的 `d3d9/offscreen-surface-rt-data` ③b ——
+    //   64×32 X8R8G8B8 的源 → 64×32 R5G6B5 的离屏表面必须 `D3DERR_INVALIDCALL`。去掉格式判据后
+    //   会掉进行距检查（E_FAIL 0x80004005）⇒ 断言当场红。
+    file: 'apps/emulator-lift/src/runtime/d3d9.cpp',
+    from: '    if (src.width != dst.width || src.height != dst.height || src.format != dst.format) {',
+    to: '    if (src.width != dst.width || src.height != dst.height) {',
+    guard: 'ctest:d3d9',
+    ctest: 'd3d9',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'GetRenderTargetData 不再校验源/目标格式一致 ⇒ 16bpp 目标的失败面变成 E_FAIL（不是 ' +
+      'D3DERR_INVALIDCALL）⇒ d3d9 的 offscreen-surface-rt-data ③b 当场红',
+  },
+
+  {
     // ★ 代表 "解码失败被折叠成成功"这一类错（REQ-01M77CMJGJ9EJVNPFS2TKMMHD1）。
     //   判据：`apps/emulator-lift/tests/native_override.cpp` 的 ④c —— 被截断的流（输入提前耗尽 /
     //   输出没填满，comp≠out 的四种形状）必须 `false`；assets 档的

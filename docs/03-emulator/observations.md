@@ -366,3 +366,21 @@
   --raster cpu --skip-logo --audio off --game-dir ../../links/install --appdata ../../.tmp/hover/appdata
   --until ea 0x4B92A5 --trace-shims --input-script ../../.tmp/hover/hover.txt --time-limit 300`
   （脚本两行：`at marker TITLE.BIN` + `mouse_move 640 1`）· 2026-11-12 · macOS arm64 / RelWithDebInfo
+
+### OBS-20261112-05 · 存档缩略图链：`CreateOffscreenPlainSurface`(+0x90) / `GetRenderTargetData`(+0x80) / `UpdateSurface`(+0x78)
+- **读数（修前）**：`graphs/sn0000-save.graph` 在 SAVE 写档时
+  `stop : unimplemented-slot @ eip=004A0572` / `detail : …IDirect3DDevice9::unsupported+0x90`；
+  `SAVE00.DAT` 已被建成 **0 字节**。补上 +0x90 后**前进一格**：`eip=004A479F` / `unsupported+0x78`。
+- **真机链（`.lst`）**：`sub_4A0430`（GetTextureSurface）= 源 surface `GetDesc`(+0x30) →
+  `CreateOffscreenPlainSurface(desc.Width, desc.Height, desc.Format, D3DPOOL_SYSTEMMEM=2,
+  &ppSurface, NULL)`（**0x4A0570**）→ `GetRenderTargetData(src, dst)`（**0x4A05D2**）；
+  随后缩略图写回纹理表面走 `UpdateSurface(src, NULL, dst, NULL)`（**0x4A479D**，4 参数）。
+- **读数（修后，同一 graph + 20 s 收口）**：`stop : stopped` / `detail : interaction: task done`；
+  `SAVE00.DAT` = **1,048,521 B**、`SAVE00.STH` = **172,854 B**（另 `SAVE.DAT` 48,832 B / `RT.DAT` 276 B）。
+- **时序读数**：存档（缩略图 + 1 MB DAT）在模拟器上要 **~7 s**；图原来的最后一段只有
+  `wait 5000 wall_ms`（且单 `wait` 的缺省 timeout = 5000 ms）⇒ 图先结束、文件停在 0 字节
+  （那是图的时间预算，不是判据红）。已把最后一段拆成 5×`wait 5000 wall_ms`。
+- **复现**：`./out/emulator-lift --present window --present-hidden --raster gpu --native-overrides all
+  --skip-logo --audio off --game-dir ../../links/install --appdata ../../.tmp/save/appdata
+  --interaction-graph ../../graphs/sn0000-save.graph --max-frames 6000 --time-limit 300` ·
+  2026-11-12 · macOS arm64 / RelWithDebInfo · CTest `save-graph`（79 s）

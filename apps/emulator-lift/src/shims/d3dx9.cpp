@@ -1583,7 +1583,8 @@ const std::vector<ComMethod>& spriteMethods() {
 
 }  // namespace
 
-std::uint32_t createD3dxSurfaceObject(X86& cpu, std::uint32_t user, std::uint32_t owner) {
+std::uint32_t createD3dxSurfaceObject(X86& cpu, std::uint32_t user, std::uint32_t owner,
+                                      void (*on_zero)(X86&, std::uint32_t)) {
     if (!cpu.com) return 0;
     // ★ A 方案（`REQ-01M6ZZZ6PEVSFB93C6VJPKC04C`）：`owner != 0` 的 surface **替父纹理持一份引用**。
     //   ① 加引用必须在"父纹理 refcount 归零"**之前**：`GetSurfaceLevel` 是在纹理对象的方法里被调到的，
@@ -1599,7 +1600,7 @@ std::uint32_t createD3dxSurfaceObject(X86& cpu, std::uint32_t user, std::uint32_
                  owner);
         return 0;
     }
-    const std::uint32_t obj = cpu.com->createObject(cpu, "IDirect3DSurface9", surfaceMethods(), user, nullptr,
+    const std::uint32_t obj = cpu.com->createObject(cpu, "IDirect3DSurface9", surfaceMethods(), user, on_zero,
                                                     owner, /*owns_owner=*/owner != 0);
     // 建对象失败 ⇒ 把刚加的那一份还回去（否则父纹理凭空多 1 个引用，谁都减不掉 = 静默泄漏）。
     if (obj == 0 && owner != 0) cpu.com->release(cpu, owner);

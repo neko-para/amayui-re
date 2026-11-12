@@ -478,6 +478,96 @@ void shimGetBackBuffer(X86& cpu, ShimCall& call) {
     call.result = d3d9::kOk;
 }
 
+// ---- 存档缩略图的离屏表面（REQ：sn0000-save.graph）----
+// 真机链（`.lst`）：
+//   `sub_4A0430`（GetTextureSurface）= 源 surface（纹理的 level 0）→ `GetDesc`（+0x30）
+//   → `CreateOffscreenPlainSurface(desc.Width, desc.Height, desc.Format, D3DPOOL_SYSTEMMEM=2,
+//      &ppSurface, NULL)`（+0x90，调用点 **0x4A0570**）
+//   → `GetRenderTargetData(src, dst)`（+0x80，调用点 **0x4A05D2**）→ 调用方 `LockRect` 读像素。
+// ★ 池 = SYSTEMMEM（2）：真机同样只能在 SYSTEM/SCRATCH 池的离屏表面上锁读。
+void shimCreateOffscreenPlainSurface(X86& cpu, ShimCall& call) {
+    const char* method = "IDirect3DDevice9::CreateOffscreenPlainSurface(+0x90)";
+    d3d9::DeviceInfo dev;
+    if (!requireDevice(cpu, call, method, &dev)) {
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    const std::uint32_t width = call.u32(1);
+    const std::uint32_t height = call.u32(2);
+    const std::uint32_t format = call.u32(3);
+    const std::uint32_t pool = call.u32(4);
+    const std::uint32_t out_ea = call.u32(5);
+    const std::uint32_t shared = call.u32(6);
+    if (out_ea == 0 || !cpu.mem->committed(out_ea, 4)) {
+        d3d9Trap(cpu, method, "ppSurface=0x%08X 为 NULL / 未提交", out_ea);
+        call.result = d3d9::kInvalidArg;
+        return;
+    }
+    if (shared != 0) {
+        // 真机：pSharedHandle 是 in/out；本线没有共享表面 ⇒ 如实拒绝（⛔ 不假装共享成功）。
+        // ★ 失败**不写** `ppSurface`（与别的创建接口的"先校验后写"一致）。
+        d3d9Warn(method, "pSharedHandle=0x%08X：本线不支持共享表面句柄 ⇒ D3DERR_INVALIDCALL", shared);
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    cpu.mem->wr32(out_ea, 0);
+    std::string why;
+    bool out_of_memory = false;
+    // 离屏表面 = **没有父纹理的纹理状态块**（'TEX1' + arena 像素块）⇒ 复用同一套 surface 方法表
+    // （GetDesc / LockRect / UnlockRect 都按 TextureInfo 工作）。
+    const std::uint32_t state = d3d9::createTextureState(cpu, call.u32(0), width, height, 1u, 0u, format, pool,
+                                                         &why, &out_of_memory);
+    if (state == 0) {
+        d3d9Trap(cpu, method, "%s", why.c_str());
+        call.result = out_of_memory ? d3d9::kOutOfMemory : d3d9::kInvalidCall;
+        return;
+    }
+    const std::uint32_t surface = createD3dxSurfaceObject(cpu, state, 0, &d3d9::destroyTextureState);
+    if (surface == 0) {
+        d3d9::destroyTextureState(cpu, state);
+        d3d9Trap(cpu, method, "在 guest 内存里建 IDirect3DSurface9 对象失败");
+        call.result = d3d9::kFail;
+        return;
+    }
+    cpu.mem->wr32(out_ea, surface);
+    d3d9Log("CreateOffscreenPlainSurface",
+            "%ux%u D3DFORMAT=%u Pool=%u ⇒ S_OK，IDirect3DSurface9 0x%08X（状态块 0x%08X）", width, height, format,
+            pool, surface, state);
+    call.result = d3d9::kOk;
+}
+
+void shimUpdateSurface(X86& cpu, ShimCall& call) {
+    const char* method = "IDirect3DDevice9::UpdateSurface(+0x78)";
+    d3d9::DeviceInfo dev;
+    if (!requireDevice(cpu, call, method, &dev)) {
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    std::string why;
+    const std::uint32_t hr = d3d9::updateSurface(cpu, call.u32(1), call.u32(2), call.u32(3), call.u32(4), &why);
+    if (hr != d3d9::kOk) {
+        // 契约级失败（格式 / 矩形 / 目标放不下）⇒ D3DERR_INVALIDCALL + warn；状态崩坏由 why 说出来。
+        d3d9Warn(method, "%s", why.empty() ? "失败（没有原因串）" : why.c_str());
+    }
+    call.result = hr;
+}
+
+void shimGetRenderTargetData(X86& cpu, ShimCall& call) {
+    const char* method = "IDirect3DDevice9::GetRenderTargetData(+0x80)";
+    d3d9::DeviceInfo dev;
+    if (!requireDevice(cpu, call, method, &dev)) {
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    std::string why;
+    const std::uint32_t hr = d3d9::getRenderTargetData(cpu, call.u32(1), call.u32(2), &why);
+    if (hr != d3d9::kOk) {
+        // 契约级失败（源/目标不匹配）⇒ D3DERR_INVALIDCALL + warn；本仓状态崩坏由 why 说出来。
+        d3d9Warn(method, "%s", why.empty() ? "失败（没有原因串）" : why.c_str());
+    }
+    call.result = hr;
+}
+
 void shimPresent(X86& cpu, ShimCall& call) {
     d3d9::DeviceInfo dev;
     if (!requireDevice(cpu, call, "IDirect3DDevice9::Present(+0x44)", &dev)) {
@@ -1781,6 +1871,9 @@ const std::vector<ComMethod>& indexBufferMethods() {
 //   #20 +0x50  SetDialogBoxMode           ★ 0x4990C5
 //   #26 +0x68  CreateVertexBuffer         ★ 0x4A35B4（Length=0x90 Usage=8 FVF=0x244 Pool=1）
 //   #27 +0x6C  CreateIndexBuffer          ← 未取证（SDK 顺序）
+//   #30 +0x78  UpdateSurface              ★ 0x4A479D（存档：复制到缩略图表面；4 个参数）
+//   #32 +0x80  GetRenderTargetData        ★ 0x4A05D2（存档缩略图：纹理 RT → 离屏表面）
+//   #36 +0x90  CreateOffscreenPlainSurface ★ 0x4A0570（同上；Pool=2 SYSTEMMEM）
 //   #41 +0xA4  BeginScene                 ★ 0x497F6F（0 参数）
 //   #42 +0xA8  EndScene                   ★ 0x497FC8（0 参数）
 //   #43 +0xAC  Clear                      ★ 0x498B6D（6 参数）
@@ -1822,9 +1915,13 @@ const std::vector<ComMethod>& device9Methods() {
         {0x44u, "Present", Conv::Stdcall, 4, &shimPresent},                       // #17 第一帧判据
         {0x48u, "GetBackBuffer", Conv::Stdcall, 4, &shimGetBackBuffer},           // #18 ★ 0x4A51DF
         {0x50u, "SetDialogBoxMode", Conv::Stdcall, 1, &shimSetDialogBoxMode},     // #20
-        {0x94u, "SetRenderTarget", Conv::Stdcall, 2, &shimSetRenderTarget},       // #37 ★ 0x4A778B
         {0x68u, "CreateVertexBuffer", Conv::Stdcall, 6, &shimCreateVertexBuffer},  // #26
         {0x6Cu, "CreateIndexBuffer", Conv::Stdcall, 6, &shimCreateIndexBuffer},    // #27
+        {0x78u, "UpdateSurface", Conv::Stdcall, 4, &shimUpdateSurface},           // #30 ★ 0x4A479D
+        {0x80u, "GetRenderTargetData", Conv::Stdcall, 2, &shimGetRenderTargetData},  // #32 ★ 0x4A05D2
+        {0x90u, "CreateOffscreenPlainSurface", Conv::Stdcall, 6,
+         &shimCreateOffscreenPlainSurface},                                       // #36 ★ 0x4A0570
+        {0x94u, "SetRenderTarget", Conv::Stdcall, 2, &shimSetRenderTarget},       // #37 ★ 0x4A778B
         {0xA4u, "BeginScene", Conv::Stdcall, 0, &shimBeginScene},                 // #41
         {0xA8u, "EndScene", Conv::Stdcall, 0, &shimEndScene},                     // #42
         {0xACu, "Clear", Conv::Stdcall, 6, &shimClear},                           // #43
