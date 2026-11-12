@@ -10,6 +10,7 @@
 
 #include "corpus/lst_index.h"
 #include "runtime/memory.h"
+#include "runtime/native_huffman.h"
 #include "runtime/x86.h"
 
 namespace lift {
@@ -285,6 +286,24 @@ const KnownNative kKnown[] = {
     //   ⇒ "hits 与 385 个 call 站点吻合"只是**下界**（实际入口 386 个）。
     //   可用 `all,-__ftol2_sse` 隔离。
     {"__ftol2_sse", GuestConv::Cdecl, 0, nativeFtol2Sse},
+    // ★ 2026-11-12：libvorbis 的 **Huffman 子树两片叶子**（REQ-01M75WED0VFTEYXX43KGHNPPP0 的 S2）。
+    //   为什么是这两片、为什么**不**换整块 `sub_4E3EE0`：窗口 profile 的 self 拆分
+    //   （`sub_4E2A30 -> sub_4E4370 incl = 599.0 ms / 3 刀`）里，`0x4E1570` 整棵 + `0x4E1950`
+    //   合计 ≈ 86%；剩下的 28 ms 才是循环 + arena 分配（`0x4D7A60` 本身 ≈ 0.3 ms/刀）。
+    //   ⇒ 只换叶子就**结构性绕开** arena：两项都零分配、零 guest 回调 ⇒ `sub_4E3EE0`（仍在 guest 里跑）
+    //     用同一批参数/顺序/尺寸调 `0x4D7A60`，arena 的 5 个字段与分配序列逐字节不变。
+    //   ★ 两项是**成对**的（见 kMax 的注释）：`0x4E1950` 每 entry 调一次 `0x4E1570`。
+    //   ★ 三处**别按"标准 Huffman"想当然**（逐字依据见 `native_huffman.h`）：
+    //     ① `0x4E1666 adv(codelengths[lo])` 与 `0x4E167C adv(read)` 两条分支的 adv 字节数不同；
+    //     ② `0x4E15A5 sar esi,0Fh`（算术右移，不是 `shr`）；
+    //     ③ 位读状态在 guest 内存（`+0/+4/+0xC` 三个 dword）⇒ override 读写同一份。
+    //   ★ `entry == 0` 必须 decline：直通支会读 `codelengths[-1]`（`0x4E15BB`），不复刻越界读。
+    //   ★ 失败是**静默的**：`0x4E40A9 xor eax,eax` 让成功与失败都返回 0
+    //     ⇒ 差 1 bit 引擎零信号。判据只能是"真字节两臂逐字节"
+    //     （tests/native_override_assets.cpp 的 `huff/*`），⛔ 不能拿 hits/fallbacks 当判据。
+    //   可用 `all,-sub_4E1570` / `all,-sub_4E1950` 各自隔离。
+    {"sub_4E1570", GuestConv::Cdecl, 8, nativeHuffDecode4E1570},
+    {"sub_4E1950", GuestConv::Cdecl, 16, nativeHuffVector4E1950},
 };
 constexpr std::size_t kKnownCount = sizeof(kKnown) / sizeof(kKnown[0]);
 // ★ 表容量是**硬约束**：`--native-overrides=all` 会把每个 `debug == false` 的项都 `add()` 一遍

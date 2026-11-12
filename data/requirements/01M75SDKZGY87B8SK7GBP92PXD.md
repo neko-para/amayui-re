@@ -2,67 +2,62 @@
 
 - id: REQ-01M75SDKZGY87B8SK7GBP92PXD
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/loader.cpp#agerc-exports
 - repro: graphs/title-loaddata.graph#click 1070 480
 - severity: S1
 - tags: [emulator-lift shim agerc]
 
-## 现象
+## 结果
 
-TITLE → 点 **LoadData**（客户区 `1070,480`）⇒ 进程**干净退出**（exit 0）、**无弹窗**。
-用户的判据：无论如何不该走到"正常退出"。
+**真实导出 21 条 / 旧白名单 3 条 ⇒ 差集 18**（`links/install/AGERC.DLL`，PE32 ImageBase `0x10000000`，export dir RVA `0xA8790`；
+18 个名字的清单见 `docs/03-emulator/platform-effort.md` §3.9，与那里记的 18+3 一致）。
 
-## 根因（已实测定位，`graph` + 日志）
+## `_SetNameLenMax@20` 的真实语义（已反汇编）
 
-**emulator 的 `AGERC.DLL` 导出表不全 ⇒ SAVE.BIN 脚本执行失败 ⇒ 引擎弹错误框 ⇒ 被 MessageBoxA 的恒 IDOK 压成"中止" ⇒ 干净退出。**
+`__stdcall`，5 dword，`ret 0x14`。RVA `0x32EF1` = `jmp 0x100367D0`（rel32 thunk，换基址后仍正确）；体在 `0x100367D0`：
+`mov eax,[ebp+0Ch]` / `mov ecx,[eax]` / `mov [0x100A9000],ecx` / `xor eax,eax` / `retn 14h`
+⇒ **把 `*(int*)arg1` 存进 AGERC 的 `.data` 全局 `g_nameLenMax`（VA `0x100A9000`，初值 `0x12`）**，**返回值恒 0**，
+其余 3 参不读，无导入、无调用。该全局只被 AGERC 自己的换行循环读，而那条路是 `_ShowDialog@12`（SCOPE §1 stub）⇒ 引擎观测不到。
 
-完整链（一行一行都能在 `.tmp/title-loaddata/run-A.log` 里 grep 到）：
+★ 原单"0 可能正是失败值"的担心**不成立**：0 就是真实返回值；失败是"**地址**取不到（127）"。
 
-1. 点 LoadData ⇒ 引擎执行 `SAVE.BIN` 脚本，走到 `COMMAND=332`（`ADDRESS=8`）。
-2. 该命令要 `GetProcAddress(AGERC, "_SetNameLenMax@20")`：
-   ```
-   [shim] kernel32!GetProcAddress: AGERC 没有导出 "_SetNameLenMax@20"
-          （只有 _GetInstance@0 / _ShowDialog@12 / _OperateMenu@16）⇒ 返回 0 + 错误 127
-   ```
-3. 引擎判定失败，弹错误框（`type=0x00000112`），正文是它自己写的：
-   ```
-   "_SetNameLenMax@20のアドレス取得に失敗しました．ERRORCODE = 127
-    デバック情報：FILE=SAVE.BIN ADDRESS=8 LINE=-1 COMMAND=-(332) DEPTH=2"
-   ```
-4. emulator 的 `MessageBoxA` **恒返回 IDOK(1)**（`src/shims/user32_menu.cpp:202`，且不看 `uType`）⇒
-   引擎把"中止"当成用户选择 ⇒ `SendMessageA(hwnd, WM_CLOSE, 1, 0)` ⇒ main 返回 ⇒ CRT `exit(0)`
-   ⇒ 日志里只剩 `kernel32!ExitProcess(00000000)` + `detail: shim 主动结束运行`。
-5. 框里的正文只有 **info** 级才打（`:193`）⇒ 默认 `warn` 下**完全不可见** ⇒ 现场表现就是"点一下就正常退出了"。
+## 为什么是 stub 而不是"路由到真实代码"（硬反证）
 
-## 修
+AGERC 的 ImageBase `0x10000000` 被 **guest 堆**占 ⇒ 总被换基址到 `0x30000000`；而 `image.cpp:4` 明写"固定 imageBase ⇒
+**不做重定位**"⇒ `.reloc` 从不应用；该函数唯一的绝对引用（`0x100367F9`）**正是 `.reloc` 里的 HIGHLOW**（RVA `0x367FB`）
+⇒ 在 `0x30000000` 跑它会把值写进 **`0x100A9000` = 堆区间**（**静默写坏 guest 数据**）。
+⇒ "给 RVA 就能跑"被证伪，必须 stub（读 `*(int*)arg1` 前先问 committed；记进宿主侧模型；返回 0）。
 
-1. **别再硬编码 3 个导出**：`AGERC.DLL` 是**真实模块**（已映射在 `0x30000000`，见
-   `src/shims/kernel32_agerc.cpp:6` 与 `kernel32_process.cpp:954`）⇒ 从它的 **PE 导出表**枚举，
-   而不是维护一张 3 行的白名单。先列出真实导出全集，与白名单做差集。
-2. `_SetNameLenMax@20`（`@20` = 5 个 dword 参数、`__stdcall`）：反汇编真实实现，定参数与**返回值**语义。
-3. 优先把这个导出**路由到真实代码**（模块已映射，理论上直接给 RVA 就能跑）；若它依赖别的未实现导入，
-   再退回"按语义实现 Stdcall stub"。⛔ 不要先写 `return 0` 的空实现——0 可能正是引擎判失败的值。
-4. **盘点同族风险**：这个 127 说明"引擎在运行期按名取 AGERC 导出"是常规做法 ⇒ 把真实导出全集里
-   其余未登记的名字一起评估（哪些会被 `GetProcAddress` 到、哪些真需要实现）。
+## 机制（替代白名单）
 
-## 判据
+`GetProcAddress(AGERC, name)` 三档：①**已登记实现**（4 个 stub）→ thunk；②**真实 PE 导出表里有但未实现** →
+`addRuntime` 的 **unimplemented thunk（非 0，调用即响亮失败**并打印名字+reason）；③**PE 里也没有** → 0 + 127（与真机同形）。
+导出表从**已映射镜像的字节**读（节表 RVA→offset）；读不出会 warn，⛔ 不当成"没有导出"。
 
-- 跑 `graphs/title-loaddata.graph`（`--interaction-graph`）⇒ 必须**进到加载界面**：
-  日志里是 `detail: interaction: task done` 而**不是** `shim 主动结束运行`；
-  且**不再出现** `_SetNameLenMax@20` 的 `返回 0 + 错误 127`。
-- 守卫：`GetProcAddress(AGERC, "_SetNameLenMax@20")` 必须返回真实入口（非 0），
-  且它与真实 PE 导出表的差集为空（一条"白名单 ⊇ 真实导出"的机械断言）。
+## 守卫与变异
 
-## 关联
+- `agerc-exports`（`tests/loader.cpp`）：先断言 `count > 0` 防真空绿；**每条真实导出都解析成非 0**；
+  `_SetNameLenMax@20` 必须解析到**已登记实现**（`fn != nullptr`）且**真返回值 0**。
+- 变异：注册名改成 `_SetNameLenMax@16` ⇒ **红**（`def->fn != nullptr` + `expected 0 got 0x7FFE0678`）。
+  ★ 只删注册时"非 0"**仍绿**（落到 unimplemented thunk）⇒ 这就是必须留第二条断言的原因。
 
-- `REQ-01M75S724HE50D26EEMDNY3Z54`：把这三处"折叠"修掉（尤其 MessageBoxA 正文默认可见），
-  否则下一次同类错误仍然是"点一下正常退出"。
-- 重启后那条 `前回正常終了しませんでした` 弹框（`type=0x34` = MB_YESNO）也被 IDOK 答成"非 NO"，
-  属于同一折叠；本单不处理，见上条。
+## ★ 新证据（改变共识，已写进 `platform-effort.md` §3.9）
 
-## 复现资产
+引擎按名取 AGERC 导出的**名字来自剧本数据**（`LoadLibraryA`@`0x42FF36` + `GetProcAddress`@`0x42FFB1` / `0x422AF0`，
+失败串 `%sのアドレス取得に失敗しました` @`0x42FFD2`）⇒ **任何一条导出都可能被运行期点名**，"静态 0 引用" ≠ "不会取"。
+这是"三档机制"（尤其第 2 档要**响亮失败**）的存在理由。
 
-- `graphs/title-loaddata.graph`（本单新增：`await script TITLE` → `click 1070 480`）
-- `.tmp/title-loaddata/run-A.log`（19 MB，`--log-level info --trace-shims`）
-- `.tmp/title-loaddata/fail-A.bmp`（退出前最后一帧）
+## e2e 复核（父级，合并构建 `out-merged`）
+
+`graphs/title-loaddata.graph` ⇒ **exit 0**，日志：
+`AGERC!_SetNameLenMax@20 ⇒ 已登记实现的 stub thunk` · `agerc!_SetNameLenMax@20: … *arg1 = 18 ⇒ 返回 0` ·
+`detail: interaction: task done`（不再是 `shim 主动结束运行`）。
+**截图取证** `.tmp/title-loaddata/loaddata-last.png`：**LOAD 界面正常打开**（`LOAD 000..009` / `保存情報なし` / 页码 / `戻る`）。
+⚠ 同跑仍会弹 `前回正常終了しませんでした`（另一张单 `REQ-01M75T14STFFK4BE6FXN5ERGN3`，与本单无关）。
+
+## 未做
+
+- 其余 17 条**不实现**：解析成 unimplemented thunk（保持非 0）。真跑它们需要**应用 `.reloc`**（另一条单，`image.cpp`）。
+- 两处过期注释不在边界内：`kernel32_process.cpp` 日志"三个导出仍走 stub thunk"、`register.cpp/h` 的"三个导出"字样。

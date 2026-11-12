@@ -76,9 +76,13 @@ public:
     //   不满足"函数级字节等价"，已知偏差见 native_mdct.h）。
     // ★ 2026-11-12：15 → 16（`__ftol2_sse` = MSVC 的 x87 → int64 截断辅助，`0x4E82C0`；
     //   本项是**唯一**写 `EDX` 的函数级项 —— 契约段已改成"按 ABI 写返回值"，见上面的 NativeFn）。
-    // ★ **16 = 表满，全部稳定项**（`debug` 机制保留，但当前**没有** debug 项 ⇒ `--native-overrides all`
+    // ★ 2026-11-12：16 → 18（Huffman 子树的两片叶子 `sub_4E1570` + `sub_4E1950`
+    //   = REQ-01M75WED0VFTEYXX43KGHNPPP0 的 S2 方案；契约与逐字依据见 `native_huffman.h`）。
+    //   ★ 这两项是**成对**的：`0x4E1950` 内部每 entry 调一次 `0x4E1570` ⇒ 只装后者时前者仍走解释器
+    //     （收益减半）；只装前者时后者整块仍在解释器里跑（收益同样减半）。
+    // ★ **18 = 表满，全部稳定项**（`debug` 机制保留，但当前**没有** debug 项 ⇒ `--native-overrides all`
     //   会把每一项都开）。再加项必须同时抬高 kMax（`kKnown[]` 的 static_assert 会先红，别等到 `all` 起不来）。
-    static constexpr std::size_t kMax = 16;
+    static constexpr std::size_t kMax = 18;
 
     bool add(std::uint32_t ea, const std::string& name, GuestConv conv, std::uint32_t arg_bytes, NativeFn fn,
              std::string* err);
@@ -335,6 +339,17 @@ bool nativeAffine4CCC60(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 // `sub_4E0B40`（libvorbis `mdct_backward`，`__cdecl` 12 B）：语音起播那一下的 FFT/MDCT 内核。
 // 纯核 + 已知偏差（**数值容忍档**，本仓第一项）+ 9 个回退原因都在 `native_mdct.h`。
 bool nativeMdct4E0B40(X86& cpu, GuestMemory& mem, std::uint32_t* result);
+// ---------------------------------------------------------------------------------------
+// Huffman 子树的两片叶子（REQ-01M75WED0VFTEYXX43KGHNPPP0 的 S2；契约在 `native_huffman.h`）
+//   · `sub_4E1570`（`0x4E1570..0x4E1692`，`__cdecl` 8 B）= look → 首表 → 二分 → adv 的整棵 decode；
+//   · `sub_4E1950`（`0x4E1950..0x4E1A65`，`__cdecl` 16 B）= 逐 entry decode + 分量累加。
+// ★ 两项都**只写 guest 内存**（位读结构的三/五个 dword + `dst`），零分配、零 guest 回调
+//   ⇒ `sub_4E3EE0`（仍在 guest 里跑）的 arena 分配次数/顺序/尺寸全不变。
+// ★ 判据：`tests/native_override_assets.cpp` 的**真字节两臂**（解释器 = 同一 EA 的 oracle，
+//   逐值比 EAX + 位读三个 dword + `dst` 逐字节 + `fpu.status`）；回退零写见
+//   `tests/native_override.cpp`；隔离臂（`all,-名字`）见 `tests/loader.cpp`。
+bool nativeHuffDecode4E1570(X86& cpu, GuestMemory& mem, std::uint32_t* result);
+bool nativeHuffVector4E1950(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 // `sub_487C60`（CMovieTextureRenderer::DoRenderSample，thiscall `retn 4`）：影片样本 → A8R8G8B8 纹理。
 // 只覆盖主路径（无 alpha 面 / 无 alpha 拷贝 / 3 或 4 字节源）；其余回退解释器。
 bool nativeRender487C60(X86& cpu, GuestMemory& mem, std::uint32_t* result);

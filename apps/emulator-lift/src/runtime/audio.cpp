@@ -443,8 +443,25 @@ bool AudioEngine::waitFill(std::uint32_t obj_ea, std::unique_lock<std::recursive
     return done;
 }
 
+// ★★ M0（REQ-01M75WWFGT8ZEBGEPENQHSYTB8）：**等 `mutex_` 不需要令牌 ⇒ 先让出令牌再等锁**。
+//   为什么现在要放：混音器（`mixLoop`）**跨整个 `mixStep`** 持 `mutex_`，而 mixer **从不取令牌**
+//   ⇒ 主线程若在令牌里等这把锁，就把"一次混音"（+ `generateTo`）算进了自己的持有时间，音频
+//   feeder 的每次交接都要陪着等。
+//   ⇒ 下面每个 DS 入口的第一句都是 `YieldGuard`（让出令牌），**然后**才取 `mutex_`；返回时
+//     `lock` 先析构（放 `mutex_`）、`yield` 后析构（取回令牌）⇒ **锁序仍是 令牌 → `mutex_`**，
+//     ⛔ 不会出现"持 `mutex_` 等令牌"的反向等待。
+//   为什么放令牌是安全的（三句）：
+//     ① 让出时**我们还没拿到 `mutex_`**，也不持有任何 audio 容器的引用（`state_ea` 是 guest 地址，
+//        `Buffer*` 一律在拿到 `mutex_` **之后**才 `find`）⇒ 手上没有"别人会改的引用"。
+//     ② 函数体碰的一切（`buffers_` / `pending_` / `stats_` / `generated_` / 句柄外状态）都由
+//        AudioEngine 自己的锁保护（`mutex_` / `pending_mutex_`）⇒ 与 feeder / 混音器照旧互斥；
+//        guest 内存是**数据面**，从不由令牌保护（guest_token.h 的星号注）。
+//     ③ 令牌只在 `mutex_` 放掉之后才取回，取回后函数即返回 ⇒ 不存在"沿用放令牌之前的查表结论"。
+//   ⛔ 不要给 `playedCursor` / `fillLagQuarter` 加 YieldGuard：它们会被**已持 `mutex_`** 的调用链
+//     调到（`stop` / `pump`），那时让出令牌 = 持 `mutex_` 等令牌（反向锁序）。
 void AudioEngine::addBuffer(std::uint32_t state_ea, std::uint32_t obj_ea, std::uint32_t data_ea,
                             std::uint32_t bytes, std::uint32_t flags, const AudioFormat& fmt) {
+    GuestToken::YieldGuard yield(guestToken());  // ★ M0（总口径见本函数上方那条注释）
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!enabled() || state_ea == 0) return;
     Buffer* b = find(state_ea);
@@ -475,12 +492,14 @@ void AudioEngine::addBuffer(std::uint32_t state_ea, std::uint32_t obj_ea, std::u
 }
 
 void AudioEngine::setFormat(std::uint32_t state_ea, const AudioFormat& fmt) {
+    GuestToken::YieldGuard yield(guestToken());  // ★ M0（总口径见 `addBuffer` 上方）
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     Buffer* b = find(state_ea);
     if (b) b->fmt = fmt;
 }
 
 void AudioEngine::removeBuffer(std::uint32_t state_ea) {
+    GuestToken::YieldGuard yield(guestToken());  // ★ M0（总口径见 `addBuffer` 上方）
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     for (auto it = buffers_.begin(); it != buffers_.end(); ++it) {
         if (it->state_ea != state_ea) continue;
@@ -498,6 +517,7 @@ void AudioEngine::removeBuffer(std::uint32_t state_ea) {
 }
 
 void AudioEngine::setNotify(std::uint32_t state_ea, std::uint32_t count, const std::uint32_t* offsets) {
+    GuestToken::YieldGuard yield(guestToken());  // ★ M0（总口径见 `addBuffer` 上方）
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     Buffer* b = find(state_ea);
     if (b == nullptr) return;
@@ -513,6 +533,7 @@ void AudioEngine::clearNotify(std::uint32_t state_ea) {
 }
 
 void AudioEngine::play(std::uint32_t state_ea, bool looping) {
+    GuestToken::YieldGuard yield(guestToken());  // ★ M0（总口径见 `addBuffer` 上方）
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     Buffer* b = find(state_ea);
     if (b == nullptr) return;
@@ -542,6 +563,7 @@ void AudioEngine::play(std::uint32_t state_ea, bool looping) {
 }
 
 void AudioEngine::stop(std::uint32_t state_ea) {
+    GuestToken::YieldGuard yield(guestToken());  // ★ M0（总口径见 `addBuffer` 上方）
     // ★ 需要 `unique_lock`：等"正在跑的那一刀 fill"时要放开 `mutex_`（见 `waitFill`）。
     std::unique_lock<std::recursive_mutex> lock(mutex_);
     Buffer* b = find(state_ea);
@@ -600,6 +622,7 @@ void AudioEngine::stop(std::uint32_t state_ea) {
 }
 
 void AudioEngine::setPosition(std::uint32_t state_ea, std::uint32_t pos) {
+    GuestToken::YieldGuard yield(guestToken());  // ★ M0（总口径见 `addBuffer` 上方）
     std::unique_lock<std::recursive_mutex> lock(mutex_);
     Buffer* b = find(state_ea);
     if (b == nullptr) return;
@@ -641,12 +664,14 @@ void AudioEngine::setPosition(std::uint32_t state_ea, std::uint32_t pos) {
 }
 
 void AudioEngine::setVolume(std::uint32_t state_ea, std::int32_t centibel) {
+    GuestToken::YieldGuard yield(guestToken());  // ★ M0（总口径见 `addBuffer` 上方）
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     Buffer* b = find(state_ea);
     if (b) b->volume = std::clamp<std::int32_t>(centibel, -10000, 0);
 }
 
 void AudioEngine::setPan(std::uint32_t state_ea, std::int32_t pan) {
+    GuestToken::YieldGuard yield(guestToken());  // ★ M0（总口径见 `addBuffer` 上方）
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     Buffer* b = find(state_ea);
     // DSBPAN_LEFT/RIGHT = ±10000（1/100 dB 的左右偏置）。

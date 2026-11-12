@@ -496,6 +496,11 @@ macOS 还要再经 MoltenVK，这条组合**没有官方背书**——所以本�
 `_InitRect@20`、`_SetChParams@20`、`_SetMapEvPN/PX/PY@20`、`_SetMapLandIdx/PN/PX/PY@20`、`_SetMapParams@20`、
 `_SetMapWallCr/PN/PX/PY@20`、`_SetNameLenMax@20`）+ **3 个 UI**（`_GetInstance@0`、`_ShowDialog@12`、`_OperateMenu@16`）。
 AGE 只 LoadLibrary + `GetProcAddress` 这 3 个（`sub_48E730`，EA 0x48E730），对 18 个地图名 **0 引用**。
+★ **但那不等于"引擎不会取那 18 个"**（2026-11-12 实测更正，REQ-01M75SDKZGY87B8SK7GBP92PXD）：引擎另有一条
+**由剧本数据指名**的通用动态解析命令 —— `LoadLibraryA(<剧本给的 DLL 名>)` + `GetProcAddress(h, <剧本给的导出名>)`
+（EA `0x42FF36` / `0x42FFB1`，失败即抛 `%sのアドレス取得に失敗しました` @ `0x42FFD2`；同形第二处 `0x422AF0` /
+`0x422B0D`）⇒ **任一导出都可能在运行期被点名**（实测 TITLE→LoadData 就点名了 `_SetNameLenMax@20`，
+名字来自 `SAVE.BIN`，exe 里没有这个字符串）。⇒ 导出表要按**真实 PE 的 export directory** 回答，⛔ 不要维护白名单。
 它自身的平台面是 **USER32 对话框族**：`DialogBoxParamA` 14、`CreateDialogParamA` 14、`SendDlgItemMessageA` 96、
 `GetDlgItem` 55、`CheckDlgButton`/`IsDlgButtonChecked` 各 27、`SetDlgItemTextA` 26、`CheckMenuItem` 80、
 `EnableMenuItem` 21、`ShowWindow` 23；另有 `SHBrowseForFolderA`、剪贴板 4 个、注册表 3 个、`Direct3DCreate9` 1 个

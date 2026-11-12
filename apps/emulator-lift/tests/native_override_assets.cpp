@@ -21,6 +21,7 @@
 #include "runtime/com.h"
 #include "runtime/d3d9.h"
 #include "runtime/native_affine.h"
+#include "runtime/native_huffman.h"
 #include "runtime/native_mdct.h"
 #include "runtime/native_overrides.h"
 #include "shims/register.h"
@@ -857,11 +858,288 @@ MemcpyAssetsResult runMemcpyAssets(const std::vector<std::uint8_t>& code, const 
     return out;
 }
 
+// =======================================================================================
+// Huffman 子树的两片叶子（`0x4E1570` look/首表/二分/adv + `0x4E1950` 码本向量）
+//
+// 判据（红了意味着什么）：把 **AGE.EXE 的真字节**（`0x4E1570..0x4E1692`、
+// `0x4E1950..0x4E1A88`（含 8 项跳表）、以及它们调用的 `0x513220` / `0x5132D0` / `0x4E1510`）
+// 放进 bare 机的**同一 EA**，同一份码本/位流夹具跑**解释器** vs **override**：
+//   `EAX` / 位读结构三个 dword（`endbyte` / `endbit` / `ptr`）/ `dst` 逐字节 / `fpu.status`
+//   必须逐位一致。
+// ★ 为什么 oracle 只能是同一 EA 的解释器臂：`0x4E40A9 xor eax,eax` 让**成功与失败都返回 0**
+//   ⇒ 差 1 bit 的表现是"这一段残差静音"，引擎侧零信号（评估 §2.4.1 第 1 条）。
+//   ⛔ hits / fallbacks 只是伴随断言（证明"这一项真的被接管/真的回退"），不能当判据。
+// ★ 夹具是**自洽**的：位流的位序是 libogg 的 **LSB-first**（`look` 是 `byte >> endbit`，
+//   见 `0x513262`），所以一个码 `b0 b1 …` 的 `read` 值是 `b0 | b1<<1 | …`，而 `dec_index[]`
+//   存的是 `bitrev32(read)` —— 与 `0x4E1638` 的 `cmp eax, dec_index[mid]` 同一个量。
+//   ⇒ 码本、位流、首表三者互相一致（⛔ 不是"填一堆随机数看两臂一样"：那样首表/二分/adv
+//   三条分支一条都不会被走到）。
+struct HuffCodes {
+    std::vector<std::uint8_t> c1570, c1510, c1950, c_look, c_adv, mask;
+};
+
+// 一份码本 + 位流的完整夹具（`vector` 决定跑 `0x4E1570` 还是 `0x4E1950`）。
+struct HuffCase {
+    const char* name = "";
+    bool vector = false;  // true ⇒ 跑 `sub_4E1950`（4 个参数），false ⇒ `sub_4E1570`（2 个）
+    std::int32_t used = 0;
+    std::int32_t firsttablen = 0;
+    std::int32_t maxlength = 0;
+    std::int32_t dim = 0;
+    std::vector<std::uint32_t> first_table;   // 2^firsttablen 项
+    std::vector<std::uint8_t> code_lengths;   // used 项（按 dec_index 的排序位置）
+    std::uint8_t len_minus_one = 0;           // 放在 `codelengths[-1]`（entry==0 时解释器会读它）
+    std::vector<std::uint32_t> dec_index;     // used 项（升序）
+    std::vector<std::uint8_t> stream;         // 位流字节
+    std::uint32_t endbyte = 0;
+    std::uint32_t endbit = 0;
+    std::uint32_t value_bits = 0;             // valuelist 点数（= used*dim）
+    std::vector<std::uint32_t> valuelist;     // float 位型（used*dim 项）
+    std::vector<std::uint32_t> dst;           // dst 初值（float 位型）
+    std::int32_t n = 0;                       // `sub_4E1950` 的 arg_C
+    // 期望（只钉"分支被走到"，语义仍以解释器臂为准）
+    std::uint32_t want_fallbacks = 0;
+    std::uint32_t want_hits = 1;
+};
+
+struct HuffResult {
+    bool valid = false;
+    std::uint32_t eax = 0, esp = 0, eip = 0;
+    std::uint32_t endbyte = 0, endbit = 0, ptr = 0;
+    std::vector<std::uint8_t> dst;
+    std::uint16_t fpu_status = 0, fpu_control = 0, fpu_tag = 0;
+    std::uint8_t fpu_top = 0;
+    std::uint64_t hits = 0, fallbacks = 0;
+    std::uint32_t why_entry_zero = 0, why_entry_range = 0;
+};
+
+constexpr std::uint32_t kHuffCbEa = 0x00430000u;
+constexpr std::uint32_t kHuffStreamEa = 0x00440000u;
+constexpr std::uint32_t kHuffValueEa = 0x00450000u;
+constexpr std::uint32_t kHuffDstEa = 0x00460000u;
+constexpr std::uint32_t kHuffLenEa = 0x00470000u;
+constexpr std::uint32_t kHuffDecEa = 0x00480000u;
+constexpr std::uint32_t kHuffTableEa = 0x00490000u;
+constexpr std::uint32_t kHuffReaderEa = 0x004A0000u;
+constexpr std::uint32_t kHuffCallEa = 0x00402000u;
+constexpr std::uint32_t kHuffMaskEa = 0x0055BED8u;  // `int dword_55BED8[34]`（真字节照搬）
+constexpr std::uint32_t kHuffStreamBytes = 64u;     // ≥ storage+5（`look` 最坏读 5 字节）
+constexpr std::uint32_t kHuffDstBytes = 256u;
+
+void putU32(std::vector<std::uint8_t>* v, std::uint32_t off, std::uint32_t x) {
+    std::memcpy(v->data() + off, &x, 4);
+}
+
+HuffResult runHuff(const HuffCase& c, const HuffCodes& code, bool with_override) {
+    HuffResult out;
+    lift_fixture::Fixture fx;
+    if (!fx.ok) return out;
+    // ---- 真字节：全部放回**同一 EA**（`call` 的相对位移只在同 EA 下成立）----
+    if (!fx.m.placeCode(0x004E1510u, code.c1510.data(), code.c1510.size(), &fx.err)) return out;
+    if (!fx.m.placeCode(0x004E1570u, code.c1570.data(), code.c1570.size(), &fx.err)) return out;
+    if (!fx.m.placeCode(0x004E1950u, code.c1950.data(), code.c1950.size(), &fx.err)) return out;
+    if (!fx.m.placeCode(0x00513220u, code.c_look.data(), code.c_look.size(), &fx.err)) return out;
+    if (!fx.m.placeCode(0x005132D0u, code.c_adv.data(), code.c_adv.size(), &fx.err)) return out;
+    if (!fx.m.placeData(kHuffMaskEa, code.mask.data(), code.mask.size(), &fx.err)) return out;
+    // ---- 码本 ----
+    std::vector<std::uint8_t> cb(0x40u, 0);
+    putU32(&cb, 0x00u, static_cast<std::uint32_t>(c.dim));
+    putU32(&cb, 0x08u, static_cast<std::uint32_t>(c.used));
+    putU32(&cb, 0x10u, kHuffValueEa);
+    putU32(&cb, 0x14u, kHuffDecEa);
+    putU32(&cb, 0x1Cu, kHuffLenEa);
+    putU32(&cb, 0x20u, kHuffTableEa);
+    putU32(&cb, 0x24u, static_cast<std::uint32_t>(c.firsttablen));
+    putU32(&cb, 0x28u, static_cast<std::uint32_t>(c.maxlength));
+    if (!fx.m.placeData(kHuffCbEa, cb.data(), cb.size(), &fx.err)) return out;
+    // ---- codelengths（`-1` 那一格给解释器读：entry==0 分支就是读它）----
+    {
+        std::vector<std::uint8_t> lens(c.code_lengths.size() + 8u, 0);
+        lens[0] = c.len_minus_one;
+        for (std::size_t i = 0; i < c.code_lengths.size(); ++i) lens[1 + i] = c.code_lengths[i];
+        if (!fx.m.placeData(kHuffLenEa - 1u, lens.data(), lens.size(), &fx.err)) return out;
+    }
+    // ---- dec_index / first_table ----
+    {
+        std::vector<std::uint8_t> idx(c.dec_index.size() * 4u + 4u, 0);
+        for (std::size_t i = 0; i < c.dec_index.size(); ++i) putU32(&idx, static_cast<std::uint32_t>(i * 4u), c.dec_index[i]);
+        if (!fx.m.placeData(kHuffDecEa, idx.data(), idx.size(), &fx.err)) return out;
+        std::vector<std::uint8_t> tbl(c.first_table.size() * 4u + 4u, 0);
+        for (std::size_t i = 0; i < c.first_table.size(); ++i)
+            putU32(&tbl, static_cast<std::uint32_t>(i * 4u), c.first_table[i]);
+        if (!fx.m.placeData(kHuffTableEa, tbl.data(), tbl.size(), &fx.err)) return out;
+    }
+    // ---- valuelist / dst / 位流 / 位读结构 ----
+    {
+        std::vector<std::uint8_t> vl(c.valuelist.size() * 4u + 4u, 0);
+        for (std::size_t i = 0; i < c.valuelist.size(); ++i)
+            putU32(&vl, static_cast<std::uint32_t>(i * 4u), c.valuelist[i]);
+        if (!fx.m.placeData(kHuffValueEa, vl.data(), vl.size(), &fx.err)) return out;
+        std::vector<std::uint8_t> dst(kHuffDstBytes, 0);
+        for (std::size_t i = 0; i < c.dst.size() && (i + 1u) * 4u <= dst.size(); ++i)
+            putU32(&dst, static_cast<std::uint32_t>(i * 4u), c.dst[i]);
+        if (!fx.m.placeData(kHuffDstEa, dst.data(), dst.size(), &fx.err)) return out;
+        std::vector<std::uint8_t> st(kHuffStreamBytes, 0);
+        for (std::size_t i = 0; i < c.stream.size() && i < st.size(); ++i) st[i] = c.stream[i];
+        if (!fx.m.placeData(kHuffStreamEa, st.data(), st.size(), &fx.err)) return out;
+        std::vector<std::uint8_t> br(0x20u, 0);
+        putU32(&br, 0x00u, c.endbyte);
+        putU32(&br, 0x04u, c.endbit);
+        putU32(&br, 0x08u, kHuffStreamEa);                 // buffer
+        putU32(&br, 0x0Cu, kHuffStreamEa + c.endbyte);     // ptr = buffer + endbyte（libogg 不变量）
+        putU32(&br, 0x10u, static_cast<std::uint32_t>(c.stream.size()));  // storage
+        if (!fx.m.placeData(kHuffReaderEa, br.data(), br.size(), &fx.err)) return out;
+    }
+    if (with_override) {
+        std::string err;
+        if (c.vector) {
+            // 与 `all` 一致：两项一起装（`0x4E1950` 内部每 entry 调一次 `0x4E1570`）
+            if (!fx.m.overrides().add(0x004E1950u, "ref_huffvec", lift::GuestConv::Cdecl, 16,
+                                      lift::nativeHuffVector4E1950, &err))
+                return out;
+            if (!fx.m.overrides().add(0x004E1570u, "ref_huffdec", lift::GuestConv::Cdecl, 8,
+                                      lift::nativeHuffDecode4E1570, &err))
+                return out;
+        } else {
+            if (!fx.m.overrides().add(0x004E1570u, "ref_huffdec", lift::GuestConv::Cdecl, 8,
+                                      lift::nativeHuffDecode4E1570, &err))
+                return out;
+        }
+    }
+    lift_fixture::Asm a(kHuffCallEa);
+    if (c.vector) {
+        a.pushImm(static_cast<std::uint32_t>(c.n));  // arg3
+        a.pushImm(kHuffReaderEa);                    // arg2
+        a.pushImm(kHuffDstEa);                       // arg1
+        a.pushImm(kHuffCbEa);                        // arg0
+        a.callRel(0x004E1950u);
+        a.addEspImm8(16u);
+    } else {
+        a.pushImm(kHuffReaderEa);  // arg1
+        a.pushImm(kHuffCbEa);      // arg0
+        a.callRel(0x004E1570u);
+        a.addEspImm8(8u);
+    }
+    a.ret();
+    if (!fx.m.placeCode(kHuffCallEa, a.b.data(), a.b.size(), &fx.err)) return out;
+    fx.rearmStack();
+    // 两臂从**同一份** x87 缺省出发（宿主 softfloat 的舍入模式 / 粘性位是进程级全局）
+    lift::x87ApplyControlWord(0x037Fu);
+    lift::x87ClearExceptionFlags();
+    fx.m.cpu().fpu.control = 0x037Fu;
+    fx.m.cpu().fpu.status = 0u;
+    fx.runCode(kHuffCallEa);
+    if (!fx.ok) return out;
+    out.valid = true;
+    out.eax = fx.m.cpu().eax();
+    out.esp = fx.m.cpu().esp();
+    out.eip = fx.m.cpu().eip;
+    out.endbyte = fx.m.mem().rd32(kHuffReaderEa + 0x00u);
+    out.endbit = fx.m.mem().rd32(kHuffReaderEa + 0x04u);
+    out.ptr = fx.m.mem().rd32(kHuffReaderEa + 0x0Cu);
+    const std::uint8_t* pd = fx.m.mem().host(kHuffDstEa);
+    out.dst.assign(pd, pd + kHuffDstBytes);
+    out.fpu_status = fx.m.cpu().fpu.status;
+    out.fpu_control = fx.m.cpu().fpu.control;
+    out.fpu_tag = fx.m.cpu().fpu.tag;
+    out.fpu_top = fx.m.cpu().fpu.top;
+    if (with_override) {
+        const lift::NativeOverride* e = fx.m.overrides().at(0);
+        out.hits = e->hits;
+        out.fallbacks = e->fallbacks;
+        if (c.vector && fx.m.overrides().at(1) != nullptr) {
+            out.why_entry_zero = static_cast<std::uint32_t>(
+                fx.m.overrides().at(1)->declines[static_cast<std::size_t>(lift::HuffWhy::EntryZero)]);
+            out.why_entry_range = static_cast<std::uint32_t>(
+                fx.m.overrides().at(1)->declines[static_cast<std::size_t>(lift::HuffWhy::EntryOutOfRange)]);
+        } else {
+            out.why_entry_zero =
+                static_cast<std::uint32_t>(e->declines[static_cast<std::size_t>(lift::HuffWhy::EntryZero)]);
+            out.why_entry_range =
+                static_cast<std::uint32_t>(e->declines[static_cast<std::size_t>(lift::HuffWhy::EntryOutOfRange)]);
+        }
+    }
+    return out;
+}
+
+// ---- 夹具里的三个码本（自洽：`dec_index[i] == bitrev32(read)`，见上面的位序说明）----
+// C1：长度 {1,2,3,4,4}（完整 Kraft 码）⇒ 首表 4 位**全部直通**（Path A）。
+HuffCase huffCodebookC1() {
+    HuffCase c;
+    c.used = 5;
+    c.firsttablen = 4;
+    c.maxlength = 4;
+    // 码（位序 b0..）：idx0='0' / idx1='10' / idx2='110' / idx3='1110' / idx4='1111'
+    // ⇒ read 值（LSB-first 填 4 位）= 0 / 1 / 3 / 7 / 15 ⇒ dec_index = bitrev32(read)
+    c.code_lengths = {1, 2, 3, 4, 4};
+    c.dec_index = {0x00000000u, 0x80000000u, 0xC0000000u, 0xE0000000u, 0xF0000000u};
+    c.first_table.assign(16u, 0u);
+    // bit0 == 0（8 个偶数）⇒ idx0；bit0=1,bit1=0（1/5/9/13）⇒ idx1；'110'（3/11）⇒ idx2；
+    // '1110'（7）⇒ idx3；'1111'（15）⇒ idx4
+    for (std::uint32_t v = 0; v < 16u; ++v) {
+        if ((v & 1u) == 0u)
+            c.first_table[v] = 1u;
+        else if ((v & 3u) == 1u)
+            c.first_table[v] = 2u;
+        else if ((v & 7u) == 3u)
+            c.first_table[v] = 3u;
+        else if (v == 7u)
+            c.first_table[v] = 4u;
+        else
+            c.first_table[v] = 5u;
+    }
+    return c;
+}
+
+// C2：长度 {1,2,3,3}，`firsttablen = 1` ⇒ 前缀 '1' 走**二分**（Path B）。
+HuffCase huffCodebookC2() {
+    HuffCase c;
+    c.used = 4;
+    c.firsttablen = 1;
+    c.maxlength = 3;
+    c.code_lengths = {1, 2, 3, 3};
+    c.dec_index = {0x00000000u, 0x80000000u, 0xC0000000u, 0xE0000000u};
+    c.first_table = {1u, 0x80008000u};  // 前缀 1 ⇒ [lo=1, hi=4)（`(lo<<15)|(used-hi)` + bit31）
+    return c;
+}
+
+// C3：长度 {1,2,3,4}，`maxlength = 4` ⇒ 用来走"降位重试后 len > read 的失败支"。
+HuffCase huffCodebookC3() {
+    HuffCase c;
+    c.used = 4;
+    c.firsttablen = 1;
+    c.maxlength = 4;
+    c.code_lengths = {1, 2, 3, 4};
+    c.dec_index = {0x00000000u, 0x80000000u, 0xC0000000u, 0xE0000000u};
+    c.first_table = {1u, 0x80008000u};
+    return c;
+}
+
+// C4：长度 {1,2}，`firsttablen = 3 > maxlength = 2` ⇒ 第一次 look 位不够、第二次够
+// （走 `0x4E15D4` 的 `lo = 0, span = used_entries` 那一支）。
+HuffCase huffCodebookC4() {
+    HuffCase c;
+    c.used = 2;
+    c.firsttablen = 3;
+    c.maxlength = 2;
+    c.code_lengths = {1, 2};
+    c.dec_index = {0x00000000u, 0x80000000u};
+    c.first_table.assign(8u, 0u);
+    for (std::uint32_t v = 0; v < 8u; ++v) {
+        if ((v & 1u) == 0u)
+            c.first_table[v] = 1u;      // 前缀 '0'
+        else if ((v & 3u) == 1u)
+            c.first_table[v] = 2u;      // 前缀 '10'
+        else
+            c.first_table[v] = 0x80008000u;  // 前缀 '11' ⇒ [lo=1, hi=2)
+    }
+    return c;
+}
+
 int main() {
     const std::string exe = envValue("LIFT_AGE_EXE");
     if (exe.empty()) LIFT_SKIP("没有 LIFT_AGE_EXE（CMake 的 assets 档会设它）");
-    ImageCode img;
-    if (!img.load(exe)) LIFT_SKIP("载入 AGE.EXE 失败（缺资产 ⇒ 不是红灯）");
+    ImageCode img;    if (!img.load(exe)) LIFT_SKIP("载入 AGE.EXE 失败（缺资产 ⇒ 不是红灯）");
     const std::vector<std::uint8_t> code401000 = img.at(0x00401000u, 0x100u);
     const std::vector<std::uint8_t> code429020 = img.at(0x00429020u, 0x100u);
     const std::vector<std::uint8_t> code48AE90 = img.at(0x0048AE90u, 0x200u);
@@ -1887,6 +2165,252 @@ int main() {
                              b.scratch[0x18], b.scratch[0x19], b.scratch[0x1A], b.scratch[0x1B],
                              o.scratch[0x18], o.scratch[0x19], o.scratch[0x1A], o.scratch[0x1B]);
             }
+        }
+    }
+
+    // ---- ⑨c Huffman 子树的两片叶子：**真字节两臂**（判据见 `runHuff` 上方）----
+    {
+        HuffCodes code;
+        code.c1510 = img.at(0x004E1510u, 0x60u);   // bitrev32（`0x4E1510..0x4E156C`）
+        // ★ 长度必须**含**最后那条 `retn`（离线一格就是"跑进 align 填充的 CC/00"）：
+        //   `0x4E1692 retn` ⇒ 0x123；`0x5132C2 retn` ⇒ 0xA3。
+        code.c1570 = img.at(0x004E1570u, 0x123u);  // `0x4E1570..0x4E1692`
+        code.c1950 = img.at(0x004E1950u, 0x138u);  // `0x4E1950..0x4E1A88`（含 8 项跳表）
+        code.c_look = img.at(0x00513220u, 0xA3u);  // `0x513220..0x5132C2`
+        code.c_adv = img.at(0x005132D0u, 0x28u);   // `0x5132D0..0x5132F8`
+        code.mask = img.at(kHuffMaskEa, 136u);     // `dword_55BED8[34]` 的真实字节
+
+        std::vector<HuffCase> cases;
+        // ---- ① Path A（首表直通）：adv 字节数 = `codelengths[entry-1]` ----
+        {
+            HuffCase c = huffCodebookC1();
+            c.name = "huff/direct-1bit";
+            c.stream = {0x00u};  // 位流第 1 位 = 0 ⇒ 码 '0'（1 位）
+            cases.push_back(c);
+            c.name = "huff/direct-2bit";
+            c.stream = {0x01u};  // '10'
+            cases.push_back(c);
+            c.name = "huff/direct-3bit";
+            c.stream = {0x03u};  // '110'
+            cases.push_back(c);
+            c.name = "huff/direct-4bit-e";
+            c.stream = {0x07u};  // '1110'
+            cases.push_back(c);
+            c.name = "huff/direct-4bit-f";
+            c.stream = {0x0Fu};  // '1111'
+            cases.push_back(c);
+            c.name = "huff/direct-endbit3";  // `endbit != 0`（`byte >> endbit` 那一支）
+            c.stream = {0x05u};
+            c.endbit = 3u;
+            cases.push_back(c);
+            c.name = "huff/direct-crossbyte";  // `bits + endbit > 8` ⇒ 取第 2 个字节并前进 ptr
+            c.stream = {0xC0u, 0x03u};
+            c.endbit = 6u;
+            cases.push_back(c);
+        }
+        // ---- ② Path B（首表负 entry ⇒ 二分）：`sar` / 无符号比较 / 两个方向 ----
+        {
+            HuffCase c = huffCodebookC2();
+            c.name = "huff/bsearch-110";
+            c.stream = {0x03u};
+            cases.push_back(c);
+            c.name = "huff/bsearch-111";
+            c.stream = {0x07u};
+            cases.push_back(c);
+            c.name = "huff/bsearch-left";  // 搜索往**左**收（`edi -= d`）
+            c.stream = {0x01u};
+            cases.push_back(c);
+        }
+        // ---- ③ 失败支：`0x4E167C adv(read)`（字节数与成功支**不同**）----
+        {
+            HuffCase c = huffCodebookC3();
+            c.name = "huff/fail-len-gt-read";
+            c.stream = {0xE0u};
+            c.endbit = 5u;  // look(maxlength=4) 位不够 ⇒ 降到 3 位，len=4 > read=3
+            cases.push_back(c);
+            c.name = "huff/fail-exhausted";  // 降到 1 位仍不够 ⇒ `-1` 且**不 adv**
+            c.stream = {0xE0u};
+            c.endbyte = 1u;
+            c.endbit = 7u;
+            cases.push_back(c);
+        }
+        // ---- ④ 第一次 look 位不够 ⇒ `lo=0, span=used`，第二次 look 够 ----
+        {
+            HuffCase c = huffCodebookC4();
+            c.name = "huff/firstlook-budget";
+            c.stream = {0x40u};
+            c.endbit = 6u;
+            cases.push_back(c);
+        }
+        // ---- ⑤ 两片必须 decline 的形态（`entry==0` / `entry > used`）----
+        {
+            HuffCase c = huffCodebookC1();
+            c.name = "huff/entry-zero";  // `0x4E15BB` 会读 `codelengths[-1]`（解释器臂读它）
+            c.stream = {0x00u};
+            c.len_minus_one = 3u;
+            c.first_table[0] = 0u;
+            c.want_hits = 0u;
+            c.want_fallbacks = 1u;
+            cases.push_back(c);
+            c.name = "huff/entry-out-of-range";
+            c.first_table[0] = 9u;  // > used_entries(=5) ⇒ `codelengths[8]` 越界
+            cases.push_back(c);
+        }
+        // ---- ⑥ `sub_4E1950`：dim<=8（跳表）/ dim>8（通用循环）/ n<=0 / 单符号码本 / EOF ----
+        {
+            HuffCase c = huffCodebookC1();
+            c.vector = true;
+            c.dim = 2;
+            c.name = "huff-vec/dim2";
+            c.stream = {0x1Au, 0x00u};  // 依次是 '0' '10' '110' ⇒ 三个 entry
+            c.n = 5;
+            c.want_hits = 1u;
+            for (std::int32_t i = 0; i < 5; ++i)
+                for (std::int32_t j = 0; j < 2; ++j)
+                    c.valuelist.push_back(0x3F000000u + static_cast<std::uint32_t>(i * 2 + j));  // 0.5f + eps
+            c.dst = {0x3F800000u, 0x40000000u, 0x40400000u, 0x40800000u, 0x40A00000u, 0x40C00000u};
+            cases.push_back(c);
+
+            c = huffCodebookC1();
+            c.vector = true;
+            c.dim = 9;  // > 8 ⇒ 走通用循环（`0x4E19C5`）
+            c.name = "huff-vec/dim9";
+            c.stream = {0x00u, 0x00u};
+            c.n = 10;
+            c.want_hits = 1u;
+            for (std::int32_t i = 0; i < 5 * 9; ++i)
+                c.valuelist.push_back(0x3E800000u + static_cast<std::uint32_t>(i));  // 0.25f + eps
+            c.dst.assign(20u, 0x3F000000u);
+            cases.push_back(c);
+
+            c = huffCodebookC1();
+            c.vector = true;
+            c.dim = 2;
+            c.name = "huff-vec/n0";
+            c.n = 0;  // `0x4E195C jle 0x4E1A5F` ⇒ 直接返回 0（一个 FP / 一个字节都不碰）
+            c.want_hits = 1u;
+            for (std::int32_t i = 0; i < 10; ++i) c.valuelist.push_back(0x3F800000u);
+            c.dst = {0x40000000u};
+            cases.push_back(c);
+
+            c = HuffCase{};
+            c.vector = true;
+            c.dim = 2;
+            c.used = 1;
+            c.firsttablen = 1;
+            c.maxlength = 1;
+            c.name = "huff-vec/single-symbol";  // used==1（`dec_index` 允许为 0）
+            c.first_table = {1u, 1u};
+            c.code_lengths = {1u};
+            c.dec_index = {0u};
+            c.dim = 2;
+            c.stream = {0x00u};
+            c.n = 3;
+            c.want_hits = 1u;
+            for (std::int32_t i = 0; i < 2; ++i) c.valuelist.push_back(0x3F800000u);
+            c.dst = {0x3F800000u, 0x3F800000u, 0x3F800000u, 0x3F800000u, 0x3F800000u, 0x3F800000u};
+            cases.push_back(c);
+
+            c = huffCodebookC1();
+            c.vector = true;
+            c.dim = 2;
+            c.name = "huff-vec/eof-fail";  // 位流耗尽 ⇒ decode 返回 -1，**已累加的部分留下**
+            c.stream = {0x00u};
+            c.n = 40;
+            c.want_hits = 1u;
+            for (std::int32_t i = 0; i < 10; ++i) c.valuelist.push_back(0x3F800000u + static_cast<std::uint32_t>(i));
+            c.dst.assign(60u, 0x00000000u);
+            cases.push_back(c);
+
+            c = huffCodebookC1();
+            c.vector = true;
+            c.dim = 2;
+            c.name = "huff-vec/entry-zero";  // 向量路径的 `entry==0`：第一遍 decode 就回退（**零写**）
+            c.stream = {0x00u};
+            c.n = 4;
+            c.len_minus_one = 3u;
+            c.first_table[0] = 0u;
+            c.want_hits = 0u;
+            c.want_fallbacks = 1u;
+            for (std::int32_t i = 0; i < 10; ++i) c.valuelist.push_back(0x3F800000u);
+            c.dst = {0x40000000u, 0x40400000u, 0x40800000u, 0x40A00000u};
+            cases.push_back(c);
+
+            c = huffCodebookC1();
+            c.vector = true;
+            c.dim = 5;
+            c.name = "huff-vec/float-edges";  // 1 ulp / -0 / denormal / 溢出**阈值以下**
+            c.stream = {0x07u};               // '1110' ⇒ entry idx3
+            c.n = 5;
+            c.want_hits = 1u;
+            for (std::int32_t i = 0; i < 5 * 5; ++i) c.valuelist.push_back(0x3F800000u);
+            // idx3 的五个分量（dst 初值也逐项给定）
+            c.valuelist[3 * 5 + 0] = 0x322BCC77u;  // 1e-8f
+            c.valuelist[3 * 5 + 1] = 0x80000000u;  // -0.0f
+            c.valuelist[3 * 5 + 2] = 0x00000001u;  // 1.4e-45f（最小 denormal）
+            c.valuelist[3 * 5 + 3] = 0x72800000u;  // 2^102 = 四分之一个 ulp(FLT_MAX)
+            c.valuelist[3 * 5 + 4] = 0x3E99999Au;  // 0.3f 附近的另一个不精确加（0.1+0.2）
+            c.dst = {0x3F800000u, 0x80000000u, 0x00000001u, 0x7F7FFFFFu, 0x3DCCCCCDu};
+            // ★ 第 4 个分量：FLT_MAX + 2^102 = 溢出**阈值以下**的"刚好超一点"
+            //   ⇒ **舍回 FLT_MAX**（只 PE、**不 OE**）。两种错法会在这里分叉：
+            //   ① 按 `|s| > FLT_MAX` 判上溢 ⇒ 会置 OE（本用例的 fpu.status 立刻不同）；
+            //   ② 用 double 中间值当结果 ⇒ 落盘值不同（dst 逐字节不同）。
+            cases.push_back(c);
+
+            c = huffCodebookC1();
+            c.vector = true;
+            c.dim = 1;
+            c.name = "huff-vec/float-overflow";  // 真上溢 ⇒ inf + PE|OE（单独一档：OE 是粘性的）
+            c.stream = {0x07u};
+            c.n = 1;
+            c.want_hits = 1u;
+            for (std::int32_t i = 0; i < 5; ++i) c.valuelist.push_back(0x3F800000u);
+            c.valuelist[3] = 0x7F7FFFFFu;  // FLT_MAX
+            c.dst = {0x7F7FFFFFu};         // FLT_MAX + FLT_MAX = 2*FLT_MAX
+            cases.push_back(c);
+        }
+
+        for (const HuffCase& c : cases) {
+            lift_test::g_current_case = c.name;
+            const HuffResult b = runHuff(c, code, false);
+            const HuffResult o = runHuff(c, code, true);
+            LIFT_CHECK(b.valid && o.valid);
+            if (!b.valid || !o.valid) continue;
+            // ① 返回值（`sub_4E1570` 的 entry index / `sub_4E1950` 的 0 / -1）
+            LIFT_CHECK_EQ_U32(o.eax, b.eax);
+            // ② 位读结构的三个 dword 逐值（`+0` / `+4` / `+0xC`；`+0x10` 不变）
+            LIFT_CHECK_EQ_U32(o.endbyte, b.endbyte);
+            LIFT_CHECK_EQ_U32(o.endbit, b.endbit);
+            LIFT_CHECK_EQ_U32(o.ptr, b.ptr);
+            // ③ `dst` 逐字节（`sub_4E1950` 的唯一 guest 写目标）
+            LIFT_CHECK(o.dst == b.dst);
+            // ④ x87 状态（`fld`/`fadd`/`fstp` 只置粘性位；C0..C3 / TOP 不动）
+            LIFT_CHECK_EQ_U32(o.fpu_status, b.fpu_status);
+            LIFT_CHECK_EQ_U32(o.fpu_control, b.fpu_control);
+            LIFT_CHECK_EQ_U32(o.fpu_tag, b.fpu_tag);
+            LIFT_CHECK_EQ_U32(o.fpu_top, b.fpu_top);
+            // ⑤ 伴随断言：真的被接管 / 真的回退（⛔ 不是判据）
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(o.hits), c.want_hits);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(o.fallbacks), c.want_fallbacks);
+            if (o.eax != b.eax) {
+                std::fprintf(stderr, "  [%s] EAX base=%08X ovr=%08X\n", c.name, b.eax, o.eax);
+            }
+            if (o.endbyte != b.endbyte || o.endbit != b.endbit || o.ptr != b.ptr) {
+                std::fprintf(stderr, "  [%s] reader base=(%u,%u,%08X) ovr=(%u,%u,%08X)\n", c.name, b.endbyte,
+                             b.endbit, b.ptr, o.endbyte, o.endbit, o.ptr);
+            }
+            if (!(o.dst == b.dst)) {
+                std::size_t at = 0;
+                while (at < b.dst.size() && b.dst[at] == o.dst[at]) ++at;
+                std::fprintf(stderr, "  [%s] dst 首个差异在 +%zu（base=%02X ovr=%02X）\n", c.name, at,
+                             at < b.dst.size() ? b.dst[at] : 0u, at < o.dst.size() ? o.dst[at] : 0u);
+            }
+            if (o.fpu_status != b.fpu_status) {
+                std::fprintf(stderr, "  [%s] fpu.status base=%04X ovr=%04X\n", c.name, b.fpu_status, o.fpu_status);
+            }
+            // ⑥ 回退要落进**对应**的桶（⛔ 不是"静默跳过"）
+            if (std::string(c.name) == "huff/entry-zero") LIFT_CHECK_EQ_U32(o.why_entry_zero, 1u);
+            if (std::string(c.name) == "huff/entry-out-of-range") LIFT_CHECK_EQ_U32(o.why_entry_range, 1u);
         }
     }
 

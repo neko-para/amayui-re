@@ -2,8 +2,9 @@
 
 - id: REQ-01M75WED0VFTEYXX43KGHNPPP0
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/native_override_assets.cpp#huff/bsearch-left
 - tags: [emulator-lift audio performance native-override]
 
 ## 目标
@@ -60,3 +61,14 @@
   ⇒ **与 memcpy 重叠单串行**（它也在改这几个文件）。
 - 与令牌尖峰（`REQ-01M75VZXV4SDMVVM1Z72G009XJ`）正交；与 PCM 转换段（`REQ-01M75W6BB3PY3MF42ZTS23KTBS`）互补：
   Huffman 拿走本块 86%，PCM 转换再拿 32.6 ms/刀，两者合起来才把 fill 压到 ~100 ms。
+
+## 修订 2026-11-12（父级裁决，覆盖上面"判据"里的变异清单）
+
+- **撤销 `sar`→`shr` 变异**：`0x4E15A5 sar esi,0Fh` 之后紧跟 `0x4E15AE and esi,7FFFh`，
+  掩码只保留原始 bit15..29；算术右移与逻辑右移的差别只在**被符号扩展填的 bit15..31**，而它们被掩码清掉
+  ⇒ **任何输入下同值**。这是**恒真项**，⛔ 不要再加（代数证明见实现者报告）。
+- **替代变异**：二分里的 `cmp eax, dec_index[mid]` 是**无符号**比较（`sbb`），改成**有符号**比较 ⇒ 必须红。
+- 保留：`adv` 字节数 ±1（`0x4E1666` 与 `0x4E167C` 两条分支不同）、`entry==0` 不 decline。
+- **门禁污染的处置**：实现期间工作树被 rep 快路径的在制品污染
+  （`exec_string.cpp` / `x86.h` / `native_crt.cpp` / `guest_copy.h` / `rep_bulk.h`），
+  `memcpy-overlap/*` 的 6 条红属于**那边的 WIP**，不是本单失败；合并后由父级建干净树复验。

@@ -175,3 +175,17 @@
   ⇒ 用 `guest_ms` 当墙钟前，先确认启动行有 `⚠ 窗口模式（自动 real-time）`。
 - **怎么量**：`pwsh .tmp/roomopt/run.ps1 -Mode enter -Label <名字> -Runs 3`（脚本里没有任何 `profile_*`，
   从 `[input-script]` 行取 `guest_ms` 采样）；两次动作之间取差，就是那段的宿主墙钟。
+
+### M-11 · 令牌 Phase-0 的四读数：**只读比例/分布**，且分母不是 run wall
+- **字段**：`tokenhold`（持有占空）· `holdhist`（一次不间断持有的五桶：<1/1–5/5–20/20–50/>50 ms）·
+  `waithist`（每次等待的五桶）· `shimmax`（每 shim 的最大墙钟 + **记账期内**调用数）。
+- **为什么要有**：M-04 说清"shim 墙钟含等"，但没回答"一次到底持了多久"。实测 SE 播完那次收尾：feeder 在 **355 次边界**上共等 **13.79 s**，
+  单次等待中位 **43.1 ms**、最大 440.8 ms，而那几刀的真活只有 **1.4–2.5 ms** ⇒ 1.3 s = **边界数 × 交接延迟**，
+  既不是锁开销、也不是解码慢。⇒ 修的是"**持有上界**"，不是"公平性"。
+- **口径（⛔ 三条不许混）**：
+  ① `tokenhold` 的分母是**令牌观测窗口**（首次持有 → 最后一次释放），**不是 run wall**（两者差 boot 前后一小段）；
+  ② `shimmax` 的 `calls` 是**记账期内**调用数，⛔ 不是总调用数；
+  ③ `shimmax` 的读时钟门比字面宽（`timing_on || audio_trace`，后者含 `LIFT_FRAME_TRACE` / window-prof / `--overlay`）。
+- **代价**：默认（无 `--profile` / `LIFT_AUDIO_TRACE`）零额外时钟、零原子写，摘要逐字节不变；
+  **打开时 ≈ +45–50 ns/块 ⇒ ≈ +5–6% 墙钟** ⇒ ⛔ **`--bench --profile` 的 MIPS 不能当性能基准**。
+- **怎么量**：`--profile` 或 `LIFT_AUDIO_TRACE=1` 后读摘要这四行，与 `tokenwait`（M-04）**并列看**，⛔ 不要相加。

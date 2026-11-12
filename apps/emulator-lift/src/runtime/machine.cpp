@@ -894,7 +894,10 @@ RunResult Machine::run(const RunOptions& opts) {
     // ★ 单令牌（guest_token.h）：本函数起的执行循环是 guest 指令的**唯一**主执行流；
     //   音频 feeder 真线程（thread_mode_）走同一把令牌。arm 打开违规计数（未持有令牌就
     //   改 GuestHeap / HandleTable 或执行 guest 代码 ⇒ ++），`--assert-guest-token` 读它。
-    guestToken().arm();
+    // ★ Phase-0 读数（REQ-01M75WWEDC20GEH7QVSHPHH4GP）：`--profile` 打开"持有占空 / 持有
+    //   直方图 / 等待直方图 / per-shim max_ns"的记账（`arm()` 里再或上 `LIFT_AUDIO_TRACE`）。
+    //   ⛔ 默认 false ⇒ 令牌热路径只多一次 bool 读（见 guest_token.h 的 Phase-0 那一组）。
+    guestToken().arm(opts.profile);
     // ★ GPU 覆盖账本按**这一轮**重算（`--gpu-strict` / dumpRunSummary 读的就是它）。
     d3d9::gpuCoverageReset();
     shims_.setTrace(opts.trace_shims, opts.trace_out ? opts.trace_out : stdout);
@@ -902,6 +905,9 @@ RunResult Machine::run(const RunOptions& opts) {
     //   只读、默认关；shim 计时只在打开时才有 steady_clock 开销。
     // ★ `--profile` 也要 shim 墙钟：`dumpProfile` 里的 shim 表读的就是这份累计（否则恒 0）。
     //   代价 = 每次 shim 调用多两次 steady_clock（`--bench --profile` 同用时 MIPS 不可当基准）。
+    // ★ 并且 `--profile` 还打开 Phase-0 的令牌记账（见上面 `guestToken().arm(opts.profile)`）：
+    //   每个块边界多两次 steady_clock + 若干原子 ⇒ `--bench --profile` 的 MIPS 更不能当基准；
+    //   它换来的是运行摘要里的 `tokenhold / holdhist / waithist / shimmax` 四行读数。
     frame_trace_ = std::getenv("LIFT_FRAME_TRACE") != nullptr;
     // ★ 诊断：`LIFT_LOG_MARKERS` ⇒ 身份**变化**时打一行 `[marker] …`（身份发现路径：
     //   "现在脚本名是什么"）。**存在即开**（`=0` 也算开 —— 与上面的 `LIFT_FRAME_TRACE` 同口径）；
@@ -1093,89 +1099,111 @@ RunResult Machine::run(const RunOptions& opts) {
         //   ⛔ 这一段**不能**放进下面 `input_script_.active()` 的块：只跑交互图 / 只开日志时
         //     时间线可能是空的（那时采样一次也不会发生 ⇒ 图等不到 / 日志为空）。
         //   四个都不需要时一次也不进（零成本）。
-        if (!guest_calls_.active() && !cpu_.shim.timer_firing && !seh_.busy()) {
-            if (input_script_.needsIdentitySamples() &&
-                (cpu_.eip == kMarkerLoopHeadEa || cpu_.eip == kMarkerPumpReturnEa)) {
-                sampleMarker();
-            } else if ((interaction_needs_identity || log_markers_ || overlay_on_) &&
-                       (cpu_.eip == kMarkerLoopHeadEa || cpu_.eip == kMarkerPumpReturnEa)) {
-                // ★ 时间线不需要、但图 / 日志 / 叠层需要：**同一次采样点只采一次**（`else if`
-                //   就是为了不重复喂 `noteMarker`）。
-                sampleMarker();
+        // ★★ M0（REQ-01M75WWFGT8ZEBGEPENQHSYTB8）：**harness 的每块 tick 移出令牌**。
+        //   这三件事（marker 采样 / 输入时间线 / 交互图）是**纯宿主簿记**：只碰 `InputScript` /
+        //   `InteractionGraph` / `WindowManager` / `presenter` / `marker_sampler_`（全是主线程独占的
+        //   宿主对象）与 guest **数据面**（`mem_` 的读 —— 从不由令牌保护，见 guest_token.h 的星号注），
+        //   ⛔ 不碰 GuestHeap / HandleTable / Vfs / SurfaceArena / ComRegistry 这类令牌保护的东西。
+        //   而它们每个块边界都要扫一遍动作表 + 读 `steady_clock`（实测 `host` 桶里 input-script
+        //   占墙钟 9–16%）⇒ 放在令牌里就成了"主线程一次不间断持有"的一格。
+        //   **为什么放令牌安全**：同一组三件事在 `GetMessageA` 的宿主事件泵里**已经**在令牌外跑
+        //   （`host_window.cpp` 的 `YieldGuard` + `main.cpp` 的 `setHostEventPump` 装的那三个回调）
+        //   ⇒ 本项只是把块边界的同一组调用统一到同一口径，⛔ 不新增任何"容器在令牌外被访问"的类别。
+        //   取回之后本迭代照旧执行 guest 块 ⇒ guest 执行仍在令牌里（YieldGuard 在下面那个 `if`
+        //   的作用域末尾析构 ⇒ 先取回令牌，再走块解码 / 执行）。
+        //   ★ 只在**真的要 tick** 时才让出：没有脚本、没到 marker 采样点时一分钱不花
+        //     （否则每个块边界白付一对 mutex）。三个内层 `if` 的条件保持原样 ⇒ 行为逐字不变。
+        const bool harness_nested = guest_calls_.active() || cpu_.shim.timer_firing || seh_.busy();
+        const bool harness_marker =
+            !harness_nested && (cpu_.eip == kMarkerLoopHeadEa || cpu_.eip == kMarkerPumpReturnEa) &&
+            (input_script_.needsIdentitySamples() || interaction_needs_identity || log_markers_ || overlay_on_);
+        const bool harness_script = !harness_nested && (input_script_.active() || interaction_.active());
+        if (harness_marker || harness_script) {
+            GuestToken::YieldGuard harness_yield(guestToken());
+            if (!guest_calls_.active() && !cpu_.shim.timer_firing && !seh_.busy()) {
+                if (input_script_.needsIdentitySamples() &&
+                    (cpu_.eip == kMarkerLoopHeadEa || cpu_.eip == kMarkerPumpReturnEa)) {
+                    sampleMarker();
+                } else if ((interaction_needs_identity || log_markers_ || overlay_on_) &&
+                           (cpu_.eip == kMarkerLoopHeadEa || cpu_.eip == kMarkerPumpReturnEa)) {
+                    // ★ 时间线不需要、但图 / 日志 / 叠层需要：**同一次采样点只采一次**（`else if`
+                    //   就是为了不重复喂 `noteMarker`）。
+                    sampleMarker();
+                }
             }
-        }
-        // ★ 指令式输入时间线（`--input-script`）：在**块边界**推进。不依赖窗口 sink / OS 焦点 /
-        //   真实光标：它只写 `cpu_.windows` 的那一份状态并发同组 WM_*（见 runtime/input.h）。
-        //   ⛔ 嵌套 guest 调用（WndProc / 音频 fill）与定时器回调进行中不注入：那些帧的 eip 不是
-        //   主循环的块边界，插进去会把"一帧内 down+up"这类节流语义搅乱。
-        //   ⛔ SEH 派发期间更不许（handler 是 guest 代码，插进去会改坏它仍活着的栈/寄存器）。
-        if (input_script_.active() && !guest_calls_.active() && !cpu_.shim.timer_firing && !seh_.busy()) {
-            const auto t_input = window_prof_.active() ? std::chrono::steady_clock::now()
-                                                       : std::chrono::steady_clock::time_point{};
-            tickInputScript(cpu_);
-            if (window_prof_.active())
-                window_prof_.addHost(WindowProfiler::HostInput,
-                                     static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                                                    std::chrono::steady_clock::now() - t_input)
-                                                                    .count()));
-            // ★ 时间线的效果级判据：失败**优先于** quit（同一 tick 里动作判死 + quit 到期时，
-            //   不能把"没生效"读成正常收口）。复用 `InteractionFailed`（⛔ 不新增枚举成员）；
-            //   `detail` 里写清是三种里的哪一种，`main` 走 exit 5。
-            if (expect_failed_) {
-                if (profile_begin_pending_ || profile_end_pending_) applyPendingProfileWindow();
-                r.reason = StopReason::InteractionFailed;
-                r.detail = expect_failure_;
-                cpu_.running = false;
-                break;
+            // ★ 指令式输入时间线（`--input-script`）：在**块边界**推进。不依赖窗口 sink / OS 焦点 /
+            //   真实光标：它只写 `cpu_.windows` 的那一份状态并发同组 WM_*（见 runtime/input.h）。
+            //   ⛔ 嵌套 guest 调用（WndProc / 音频 fill）与定时器回调进行中不注入：那些帧的 eip 不是
+            //   主循环的块边界，插进去会把"一帧内 down+up"这类节流语义搅乱。
+            //   ⛔ SEH 派发期间更不许（handler 是 guest 代码，插进去会改坏它仍活着的栈/寄存器）。
+            if (input_script_.active() && !guest_calls_.active() && !cpu_.shim.timer_firing && !seh_.busy()) {
+                const auto t_input = window_prof_.active() ? std::chrono::steady_clock::now()
+                                                           : std::chrono::steady_clock::time_point{};
+                tickInputScript(cpu_);
+                if (window_prof_.active())
+                    window_prof_.addHost(WindowProfiler::HostInput,
+                                         static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                                        std::chrono::steady_clock::now() - t_input)
+                                                                        .count()));
+                // ★ 时间线的效果级判据：失败**优先于** quit（同一 tick 里动作判死 + quit 到期时，
+                //   不能把"没生效"读成正常收口）。复用 `InteractionFailed`（⛔ 不新增枚举成员）；
+                //   `detail` 里写清是三种里的哪一种，`main` 走 exit 5。
+                if (expect_failed_) {
+                    if (profile_begin_pending_ || profile_end_pending_) applyPendingProfileWindow();
+                    r.reason = StopReason::InteractionFailed;
+                    r.detail = expect_failure_;
+                    cpu_.running = false;
+                    break;
+                }
+                // ★ marker 超时 ⇒ **响亮失败**（复用 `InteractionFailed` + 分流标志；⛔ 不新增枚举成员）。
+                //   `!quitRequested()`：同 tick 里用户显式 `quit` 赢 —— ⛔ 不把"脚本自己要走"报成超时。
+                if (input_script_.markerTimedOut() && !input_script_.quitRequested()) {
+                    if (profile_begin_pending_ || profile_end_pending_) applyPendingProfileWindow();
+                    r.reason = StopReason::InteractionFailed;
+                    r.detail = input_script_.markerTimeoutDetail();
+                    r.marker_timeout = true;
+                    std::fprintf(stderr, "[marker] FAIL %s\n", r.detail.c_str());
+                    cpu_.running = false;
+                    break;
+                }
+                if (input_script_.quitRequested()) {
+                    // ★ 先处理本 tick 登记的窗口边界：否则脚本最后一条 `profile_end` 会被 `quit`
+                    //   吞掉（那一段统计就静默丢了）。
+                    if (profile_begin_pending_ || profile_end_pending_) applyPendingProfileWindow();
+                    r.reason = StopReason::Stopped;
+                    r.detail = "input script: quit";
+                    cpu_.running = false;
+                    break;
+                }
             }
-            // ★ marker 超时 ⇒ **响亮失败**（复用 `InteractionFailed` + 分流标志；⛔ 不新增枚举成员）。
-            //   `!quitRequested()`：同 tick 里用户显式 `quit` 赢 —— ⛔ 不把"脚本自己要走"报成超时。
-            if (input_script_.markerTimedOut() && !input_script_.quitRequested()) {
-                if (profile_begin_pending_ || profile_end_pending_) applyPendingProfileWindow();
-                r.reason = StopReason::InteractionFailed;
-                r.detail = input_script_.markerTimeoutDetail();
-                r.marker_timeout = true;
-                std::fprintf(stderr, "[marker] FAIL %s\n", r.detail.c_str());
-                cpu_.running = false;
-                break;
-            }
-            if (input_script_.quitRequested()) {
-                // ★ 先处理本 tick 登记的窗口边界：否则脚本最后一条 `profile_end` 会被 `quit`
-                //   吞掉（那一段统计就静默丢了）。
-                if (profile_begin_pending_ || profile_end_pending_) applyPendingProfileWindow();
-                r.reason = StopReason::Stopped;
-                r.detail = "input script: quit";
-                cpu_.running = false;
-                break;
-            }
-        }
-        // ★ 识别驱动的交互任务（`--interaction-graph`）：同样的门控（嵌套 guest 调用 / 定时器回调
-        //   进行中不推进）。三种失败 = **非 0 退出**（StopReason::InteractionFailed 不进 `ok()`）；
-        //   任务走完（`next` 空）与时间线的 `quit` 一样收口成 `Stopped`（那是**成功**结束，
-        //   判据是 trace 最后的 `task done`，不是退出码）。
-        if (interaction_.active() && !guest_calls_.active() && !cpu_.shim.timer_firing && !seh_.busy()) {
-            const auto t_graph = window_prof_.active() ? std::chrono::steady_clock::now()
-                                                       : std::chrono::steady_clock::time_point{};
-            tickInteraction(cpu_);
-            if (window_prof_.active())
-                window_prof_.addHost(WindowProfiler::HostInput,
-                                     static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                                                    std::chrono::steady_clock::now() - t_graph)
-                                                                    .count()));
-            if (interaction_.failed()) {
-                if (profile_begin_pending_ || profile_end_pending_) applyPendingProfileWindow();
-                r.reason = StopReason::InteractionFailed;
-                r.detail = std::string("interaction: ") + graphFailureName(interaction_.failure()) + " · " +
-                           interaction_.failureDetail();
-                cpu_.running = false;
-                break;
-            }
-            if (interaction_.done() || interaction_.actuator().quitRequested()) {
-                if (profile_begin_pending_ || profile_end_pending_) applyPendingProfileWindow();
-                r.reason = StopReason::Stopped;
-                r.detail = interaction_.done() ? "interaction: task done" : "interaction: quit";
-                cpu_.running = false;
-                break;
+            // ★ 识别驱动的交互任务（`--interaction-graph`）：同样的门控（嵌套 guest 调用 / 定时器回调
+            //   进行中不推进）。三种失败 = **非 0 退出**（StopReason::InteractionFailed 不进 `ok()`）；
+            //   任务走完（`next` 空）与时间线的 `quit` 一样收口成 `Stopped`（那是**成功**结束，
+            //   判据是 trace 最后的 `task done`，不是退出码）。
+            if (interaction_.active() && !guest_calls_.active() && !cpu_.shim.timer_firing && !seh_.busy()) {
+                const auto t_graph = window_prof_.active() ? std::chrono::steady_clock::now()
+                                                           : std::chrono::steady_clock::time_point{};
+                tickInteraction(cpu_);
+                if (window_prof_.active())
+                    window_prof_.addHost(WindowProfiler::HostInput,
+                                         static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                                        std::chrono::steady_clock::now() - t_graph)
+                                                                        .count()));
+                if (interaction_.failed()) {
+                    if (profile_begin_pending_ || profile_end_pending_) applyPendingProfileWindow();
+                    r.reason = StopReason::InteractionFailed;
+                    r.detail = std::string("interaction: ") + graphFailureName(interaction_.failure()) + " · " +
+                               interaction_.failureDetail();
+                    cpu_.running = false;
+                    break;
+                }
+                if (interaction_.done() || interaction_.actuator().quitRequested()) {
+                    if (profile_begin_pending_ || profile_end_pending_) applyPendingProfileWindow();
+                    r.reason = StopReason::Stopped;
+                    r.detail = interaction_.done() ? "interaction: task done" : "interaction: quit";
+                    cpu_.running = false;
+                    break;
+                }
             }
         }
         // ★ 显示后端：块边界也要 pump（否则两次 Present 之间窗口假死）。无 sink ⇒ 零成本。
@@ -2316,6 +2344,14 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
     }
     std::fprintf(out, "blocks    : %zu (insns cached %zu, hits %zu, misses %zu)\n", cache_.blockCount(),
                  cache_.insnCount(), cache_.hits(), cache_.misses());
+    // ★ `rep movs*` / `rep stos*` 宿主快路径的**覆盖率读数**（REQ-01M75XK0XRTSWCZ4G8A5W2GW8）。
+    //   口径：按**整条 rep** 计（不是按元素）；`hits` = 走了快路径，`declines` = 本来够格但被闸门
+    //   拦下（方向×重叠 / 跨 4 GiB / safe-mode 未提交）而退回逐元素臂。⛔ 两者都不是时间读数：
+    //   `hits` 高只说明"快路径接住了"，快多少要靠 A/B 墙钟（本单的 op-count 估见报告）。
+    //   ⛔ 不要拿具体数值当判据（它随输入变）；判据是 `hits + declines` 与"语料里的 rep 流量"同阶。
+    std::fprintf(out, "rep-bulk  : hits=%llu declines=%llu (bulk=%s)\n",
+                 static_cast<unsigned long long>(cpu_.rep_bulk_hits),
+                 static_cast<unsigned long long>(cpu_.rep_bulk_declines), cpu_.rep_bulk ? "on" : "off");
     // ★ 单令牌不变式的**可观测**面（guest_token.h）：`violations` 非 0 ⇒ 有线程没拿令牌就
     //   执行 guest 代码 / 改 GuestHeap / HandleTable。`--assert-guest-token` 把它变成退出码。
     {
@@ -2339,6 +2375,82 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
         const double avg_us = waits ? static_cast<double>(token.waitNs()) / static_cast<double>(waits) / 1e3 : 0.0;
         std::fprintf(out, "tokenwait : waits %llu wait %.1f ms avg %.1f us\n", (unsigned long long)waits, wait_ms,
                      avg_us);
+    }
+    // ★ Phase-0 四读数（REQ-01M75WWEDC20GEH7QVSHPHH4GP）：**只在记账打开时打印**。
+    //   为什么按开关门：默认运行（无 `--profile`、无 `LIFT_AUDIO_TRACE`）的摘要必须与改动前
+    //   **逐字节一致** —— 这是"零行为改变"最强的一条证据；而记账本身要读时钟，所以那几行读数
+    //   也只在打开时才值得出现。口径（细节见 `guest_token.h` 的 Phase-0 那一组）：
+    //     · `hold` = 持令牌的累计墙钟；`span` = 本轮首个持有 → 最后一次释放；
+    //       `duty` = hold / span ⇒ 需求单第 1 项"持有占空"。⛔ 分母是**令牌观测窗口**，
+    //       不是 `run()` 的墙钟（后者在 `dumpProfile` 的窗口表里；两者差 boot 前后那一点点）。
+    //     · `max` = **最长一次不间断持有**（Yield 会把一段切成两段）⇒ 它回答"一次交接最坏等多久"。
+    //     · 五桶 = <1 / 1–5 / 5–20 / 20–50 / >50 **ms**（宿主墙钟）。
+    //     · 角色 0 = 主循环线程（`Machine::run` 的调用者），角色 1 = 其它执行流（音频 feeder）。
+    //   ⛔ 这些都是计量，不是判据（数值随机器 / 调度变；见 guest_token.h 的同一句）。
+    if (guestToken().phase0Enabled()) {
+        const GuestToken::Phase0Readings mainr = guestToken().phase0Readings(GuestToken::kPhase0RoleMain);
+        const GuestToken::Phase0Readings other = guestToken().phase0Readings(GuestToken::kPhase0RoleOther);
+        const std::uint64_t span_ns = guestToken().phase0SpanNs();
+        const double duty =
+            span_ns != 0 ? 100.0 * static_cast<double>(mainr.hold_ns) / static_cast<double>(span_ns) : 0.0;
+        std::fprintf(out,
+                     "tokenhold : main hold %.1f ms / span %.1f ms = %.1f%% max %.3f ms segs %llu | "
+                     "other hold %.1f ms max %.3f ms segs %llu\n",
+                     static_cast<double>(mainr.hold_ns) / 1e6, static_cast<double>(span_ns) / 1e6, duty,
+                     static_cast<double>(mainr.hold_max_ns) / 1e6, (unsigned long long)mainr.hold_count,
+                     static_cast<double>(other.hold_ns) / 1e6, static_cast<double>(other.hold_max_ns) / 1e6,
+                     (unsigned long long)other.hold_count);
+        std::fprintf(out,
+                     "holdhist  : main <1ms %llu | 1-5ms %llu | 5-20ms %llu | 20-50ms %llu | >50ms %llu\n",
+                     (unsigned long long)mainr.hold_hist[0], (unsigned long long)mainr.hold_hist[1],
+                     (unsigned long long)mainr.hold_hist[2], (unsigned long long)mainr.hold_hist[3],
+                     (unsigned long long)mainr.hold_hist[4]);
+        std::fprintf(out,
+                     "waithist  : main <1ms %llu | 1-5ms %llu | 5-20ms %llu | 20-50ms %llu | >50ms %llu | "
+                     "other <1ms %llu | 1-5ms %llu | 5-20ms %llu | 20-50ms %llu | >50ms %llu\n",
+                     (unsigned long long)mainr.wait_hist[0], (unsigned long long)mainr.wait_hist[1],
+                     (unsigned long long)mainr.wait_hist[2], (unsigned long long)mainr.wait_hist[3],
+                     (unsigned long long)mainr.wait_hist[4], (unsigned long long)other.wait_hist[0],
+                     (unsigned long long)other.wait_hist[1], (unsigned long long)other.wait_hist[2],
+                     (unsigned long long)other.wait_hist[3], (unsigned long long)other.wait_hist[4]);
+        // 第 4 项：每个 shim 的**最长一次**宿主墙钟（点出"哪一类 shim 是长活"）。
+        // 排序与 `--profile` 的 shim 表同口径（max desc → calls desc → module asc → name asc），
+        // 只列有读数的项（没被调用过的是 0，没有解释价值）。
+        struct ShimMaxRow {
+            const ShimDef* def = nullptr;
+            std::uint64_t max_ns = 0;
+            std::uint64_t calls = 0;
+        };
+        std::vector<ShimMaxRow> rows;
+        rows.reserve(shims_.all().size());
+        for (const ShimDef& d : shims_.all()) {
+            const std::uint64_t mx = guestToken().shimMaxNs(d.id);
+            if (mx == 0) continue;
+            rows.push_back(ShimMaxRow{&d, mx, guestToken().shimMaxCalls(d.id)});
+        }
+        std::sort(rows.begin(), rows.end(), [](const ShimMaxRow& a, const ShimMaxRow& b) {
+            if (a.max_ns != b.max_ns) return a.max_ns > b.max_ns;
+            if (a.calls != b.calls) return a.calls > b.calls;
+            if (a.def->module != b.def->module) return a.def->module < b.def->module;
+            return a.def->name < b.def->name;
+        });
+        constexpr std::size_t kShimMaxTop = 8;
+        const std::size_t shown = rows.size() < kShimMaxTop ? rows.size() : kShimMaxTop;
+        std::fprintf(out,
+                     "shimmax   : top %zu / %zu shims by max_ns（shim 实现自身；累计见 --profile 的 shims 表）\n",
+                     shown, rows.size());
+        for (std::size_t i = 0; i < shown; ++i) {
+            const ShimMaxRow& r = rows[i];
+            const std::string label = r.def->module + "!" + r.def->name;
+            std::fprintf(out, "            %2zu. %-46s max %9.3f ms calls=%llu\n", i + 1, label.c_str(),
+                         static_cast<double>(r.max_ns) / 1e6, (unsigned long long)r.calls);
+        }
+        const std::uint64_t overflow = guestToken().shimMaxOverflow();
+        if (overflow != 0) {
+            // ⛔ 不静默丢：超出记账表容量的 id 在这里点名（正常工况恒 0）。
+            std::fprintf(out, "            overflow %llu（shim id 超出记账表容量 ⇒ 这几条没记到 max）\n",
+                         (unsigned long long)overflow);
+        }
     }
     std::fprintf(out, "committed : %llu KiB\n", (unsigned long long)(mem_.committedBytes() / 1024));
     std::fprintf(out, "shims     : imported %zu / called-unimplemented %zu\n", shims_.importedCount(),

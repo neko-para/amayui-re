@@ -77,6 +77,14 @@
 #include "runtime/x86.h"
 #include "shims/register.h"
 
+// ★ AGERC 的导出问答（真实 PE export directory 是唯一真源）—— 实现与签名真源：
+//   `kernel32_agerc.cpp`。⚠ 声明**故意**写在这里（且必须在 `namespace lift {` 之外、不能在下面的
+//   匿名 namespace 里 —— 那会变成 internal linkage）：头文件不在本缺陷单的输入边界内
+//   （REQ-01M75SDKZGY87B8SK7GBP92PXD），签名改动要三处一起改（这里 / kernel32_agerc.cpp / tests/loader.cpp）。
+namespace lift {
+std::uint32_t agercResolveExport(X86& cpu, const char* name);
+}  // namespace lift
+
 namespace lift {
 namespace {
 
@@ -872,8 +880,11 @@ void shimTerminateProcess(X86& cpu, ShimCall& call) {
 // ★ 运行期添加的导出（DDraw 的 `DirectDrawCreate` 之类）走 `ShimRegistry::addRuntime`：
 //   它在 bind() 之后继续发唯一地址，所以**不需要**改 PE / 重跑 bind。
 // ★ AGERC 是**真实装载的 guest 模块**（2026-11-04 改口径）：句柄 = 真实模块基址
-//   （`cpu.shim.agerc_base`），模态 no-op 只覆盖它那 3 个导出（`addStub` 的 thunk，在通用路径里
-//   同样找得到）。额外保留"未 LoadLibrary 就没有句柄 / 没有镜像就装不上"这两条真机边界。
+//   （`cpu.shim.agerc_base`），**它有哪些导出**由那份镜像的 **PE export directory** 回答
+//   （`agercResolveExport`，见 kernel32_agerc.cpp）—— ⛔ 这里**不维护**任何 AGERC 白名单：
+//   本文件只负责"注册表里有登记的实现优先"（4 个），剩下的问 `agercResolveExport`（真实导出 ⇒
+//   非 0 地址；真 PE 里也没有 ⇒ 落到下面的 127）。额外保留"未 LoadLibrary 就没有句柄 /
+//   没有镜像就装不上"这两条真机边界。
 //
 // 模块句柄 → 模块 key（`GetProcAddress` 用）。空串 = **不认得这个句柄**。
 // ★ 判据是"这个句柄是本模拟器发出去的吗"：假句柄表 = `moduleKeyTable` 的去重序号（见上面"模块表"）；
@@ -923,14 +934,13 @@ void shimGetProcAddress(X86& cpu, ShimCall& call) {
         return;
     }
 
-    // ② 查 shim 注册表（导出的**唯一**真源）
+    // ② 查 shim 注册表（**已登记的实现**优先）
     const ShimDef* def = cpu.shims ? cpu.shims->find(key.c_str(), shown) : nullptr;
     if (def && def->stub_ea != 0) {
         if (key == "agerc") {
             shimLog("kernel32", "GetProcAddress",
-                    "AGERC!%s ⇒ stub thunk 0x%08X（真实 AGERC 镜像在 0x%08X；三个导出仍按 SCOPE §1 "
-                    "模态 no-op）",
-                    shown, def->stub_ea, cpu.shim.agerc_base);
+                    "AGERC!%s ⇒ 已登记实现的 stub thunk 0x%08X（真实 AGERC 镜像在 0x%08X）", shown,
+                    def->stub_ea, cpu.shim.agerc_base);
         } else {
             shimLog("kernel32", "GetProcAddress", "%s!%s ⇒ thunk 0x%08X（%s）", key.c_str(), shown,
                     def->stub_ea,
@@ -940,7 +950,19 @@ void shimGetProcAddress(X86& cpu, ShimCall& call) {
         return;
     }
 
-    // ③ 模块认得、但没有这个导出
+    // ③ 模块认得、但没有登记的实现
+    // ★ AGERC：**真实导出表**才是"它有没有这个导出"的真源（⛔ 不在这里维护白名单）。
+    //   · 真实 PE 里有 ⇒ 非 0 地址（已换基址 ⇒ 运行期 unimplemented thunk，调用即响亮失败；
+    //     就在 ImageBase ⇒ 真实代码 base+RVA）。判据与证据在 kernel32_agerc.cpp。
+    //   · 真实 PE 里也没有 ⇒ 落到下面的 0 + 127（与真机同形）。
+    if (key == "agerc") {
+        const std::uint32_t ea = agercResolveExport(cpu, shown);
+        if (ea != 0) {
+            call.result = ea;
+            return;
+        }
+    }
+
     cpu.shim.last_error = kErrProcNotFound;
     // ★ G1：动态解析点里的"**这个 OS 没有这个导出**"（P1；表见 dynamic_exports.cpp）——
     //   真机返回 NULL + 127，引擎据此走回退分支；这里把日志说清是"OS 没有"而不是"名字写错"。
@@ -951,9 +973,8 @@ void shimGetProcAddress(X86& cpu, ShimCall& call) {
     }
     if (key == "agerc") {
         shimLog("kernel32", "GetProcAddress",
-                "AGERC 没有导出 \"%s\"（只有 _GetInstance@0 / _ShowDialog@12 / _OperateMenu@16）⇒ "
-                "返回 0 + 错误 127",
-                shown);
+                "AGERC 的真实导出表里没有 \"%s\"（读自 0x%08X 的 PE export directory）⇒ 返回 0 + 错误 127",
+                shown, cpu.shim.agerc_base);
     } else {
         shimLog("kernel32", "GetProcAddress", "模块 \"%s\" 里没有导出 \"%s\" ⇒ 返回 0 + 错误 127",
                 key.c_str(), shown);

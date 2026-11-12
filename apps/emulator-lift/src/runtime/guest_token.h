@@ -59,7 +59,9 @@ public:
     // 开始一轮 run：清零本轮计数并打开违规计数（`Machine::run` 调；压力夹具也调）。
     // 未 arm 时 `check()` 恒真（不计数）—— 只用 `GuestHeap` 的纯单线程夹具（没有 guest 执行）
     // 不会被误报；Machine 销毁阶段（run 之后）也不会污染上一轮的账。
-    void arm();
+    // ★ `profile` = 本轮是否要 **Phase-0 读数**（`--profile`）；`arm()` 里再或上 `LIFT_AUDIO_TRACE`。
+    //   缺省 false ⇒ 默认运行**一分钱都不花**（热路径只多一次 bool 读，见下面 Phase-0 那一组）。
+    void arm(bool profile = false);
     void disarm() { armed_.store(false, std::memory_order_relaxed); }
     bool armed() const { return armed_.load(std::memory_order_relaxed); }
 
@@ -96,6 +98,43 @@ public:
     std::uint64_t waits() const { return waits_.load(std::memory_order_relaxed); }
     std::uint64_t waitNs() const { return wait_ns_.load(std::memory_order_relaxed); }
     std::uint64_t lastAcquireWaitNs() const;
+
+    // ---- ★ Phase-0 读数组（REQ-01M75WWEDC20GEH7QVSHPHH4GP）：**只读**、默认关 ----
+    //   为什么单开一组：上面的 `waits()/waitNs()` 只有**等待侧**；而"主线程一次不间断持有多久"
+    //   完全没有读数 —— 那 1.3 s 的分解是 `边界数 × 交接延迟`，所以"43 ms 是真的一次长持有，
+    //   还是抢不到（公平性）"决定了修法（M0 把阻塞等待移出令牌 vs 直接 M1 缩作用域）。
+    //   · 开关 = `arm(profile)` 的入参（`--profile`）∪ `LIFT_AUDIO_TRACE`（**唯一读点在 `arm()`**，
+    //     ⛔ 不在 acquire/release 里读环境变量）。默认关 ⇒ 热路径只多一次 bool 读、**不读时钟**。
+    //   · 角色：0 = 调 `arm()` 的那条线程（`Machine::run` 的主循环线程），1 = 其它执行流
+    //     （音频 feeder / 夹具线程）。为什么分角色：持有占空只对**主线程**有意义；
+    //     等待直方图的主体是 feeder —— 混在一起就把两个问题搅成一个。
+    //   · 五桶口径：<1 / 1–5 / 5–20 / 20–50 / >50 **ms**（宿主墙钟）。桶边界与需求单一致。
+    //   · ⛔ 这些都是**计量**，不是契约：它们随机器与调度变，⛔ 不要拿具体数值当判据。
+    static constexpr int kPhase0Buckets = 5;
+    static constexpr int kPhase0Roles = 2;
+    static constexpr int kPhase0RoleMain = 0;
+    static constexpr int kPhase0RoleOther = 1;
+    // 一"角色"的读数**快照**（`phase0Readings()` 拷出来；⛔ 不要把内部原子暴露出去）。
+    struct Phase0Readings {
+        std::uint64_t hold_ns = 0;                     // 累计**持令牌**的墙钟
+        std::uint64_t hold_max_ns = 0;                 // **最长一次不间断持有**（Yield 把一段切成两段）
+        std::uint64_t hold_count = 0;                  // 持有段数
+        std::uint64_t hold_hist[kPhase0Buckets] = {};  // 持有直方图（ms 桶，见上）
+        std::uint64_t waits = 0;                       // 真的被挡住的取令牌次数
+        std::uint64_t wait_ns = 0;                     // 这些等待的累计墙钟
+        std::uint64_t wait_hist[kPhase0Buckets] = {};  // 等待直方图（ms 桶）
+        std::uint64_t last_release_ns = 0;             // 该角色最后一次放令牌的 steady_clock（ns）
+    };
+    bool phase0Enabled() const { return phase0_enabled_; }
+    Phase0Readings phase0Readings(int role) const;
+    // "总墙钟" = 本轮**首个**持有 → 各角色**最后**一次释放（steady_clock 差；0 = 还没持有过）。
+    std::uint64_t phase0SpanNs() const;
+    // 每个 shim 的**最长一次**宿主墙钟（`ShimRegistry::invoke` 在 `fn` 之后调；只记 max + 次数，
+    // ⛔ 不记每次的分布）。`shim_id` 超出记账表容量 ⇒ 不静默丢：进 `shimMaxOverflow()`。
+    void noteShimSpan(std::uint32_t shim_id, std::uint64_t ns);
+    std::uint64_t shimMaxNs(std::uint32_t shim_id) const;
+    std::uint64_t shimMaxCalls(std::uint32_t shim_id) const;
+    std::uint64_t shimMaxOverflow() const;
 
     // 只给夹具（进程内的独立用例）：清计数。⛔ 运行期不许调。
     void resetForTest();
@@ -134,6 +173,11 @@ private:
     static void* threadMark();
     void noteTake();
     void noteDrop();
+    // ★ Phase-0 的记账点：全部自带 `phase0_enabled_` 门（⛔ 默认路径不进这些函数，见各调用点）。
+    void noteHoldBegin();                 // 最外层取到令牌：开一段持有
+    void noteHoldEnd();                   // 最外层放出令牌（或 Yield）：收一段持有
+    void noteWait(std::uint64_t waited_ns);  // 真的被挡住的一次等待（分桶）
+    void resetPhase0Stats();              // 每轮清零（只在打开时调 ⇒ 默认运行不扫表）
 
     std::mutex mutex_;
     std::atomic<void*> owner_{nullptr};
@@ -149,6 +193,9 @@ private:
     std::atomic<std::uint64_t> wait_ns_{0};
     // ★ 诊断开关（文件头）：`arm()` 每次 run 重读环境变量；热路径只读这个 bool。
     bool diag_skip_lock_ = false;
+    // ★ Phase-0 读数组（见上）：`arm()` 的**唯一**快照点。写者只有 `arm()`（run 起点、无线程持有时），
+    //   读者是同一线程的 acquire/release 与 feeder（feeder 在 `arm()` 之后才被创建 ⇒ 线程创建点同步）。
+    bool phase0_enabled_ = false;
 };
 
 // 一台 Machine 一份（进程级单例；本线的 Machine 也是进程级）。

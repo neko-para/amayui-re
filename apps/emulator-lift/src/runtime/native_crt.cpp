@@ -7,6 +7,10 @@
 #include <cstring>
 
 #include "runtime/fpu_bridge.h"
+// ★ 两条方向循环（`copyForwardBytes` / `copyBackwardBytes`）与分块下界搬到了共享头：
+//   `rep movs*` 的宿主快路径要用**同一份**（等价性论证只有一条，见该文件头）。
+//   ⛔ 语义一个字没变（纯搬运）；本函数体的分支与判据仍在本文件里。
+#include "runtime/guest_copy.h"
 #include "runtime/memory.h"
 #include "runtime/x86.h"
 
@@ -14,49 +18,6 @@ namespace lift {
 // ---------------------------------------------------------------------------------------
 // CRT 叶子实现（全部只经 GuestMemory 读写 guest；guest 指针保持 32 位）
 // ---------------------------------------------------------------------------------------
-
-namespace {
-
-// ★ 分块下界：与 guest 自己的分界同值（**dword 计数 8** = 32 B）。来处与"为什么它不参与语义"
-//   见 `native_overrides.h` 的 `_memcpy` 契约段（`0x4E7502 / 0x4E7506` 与 `0x4E7686 / 0x4E7689`）。
-constexpr std::uint32_t kMemcpyChunkMin = 32;
-
-// 4 字节**整体读进寄存器再整体写回**（⛔ 不是两次 `std::memcpy` 直接在 guest 的两个重叠区间上搬：
-// 那正是 UB）。等价性：块内被写到的源字节要么在本块内（本块已整体读过）、要么在**已经处理过**的
-// 那一侧 —— 前向看到的是 `< i` 的字节，后向看到的是 `> i` 的字节。
-inline void copyChunk4(std::uint8_t* d, const std::uint8_t* s) {
-    std::uint32_t w = 0;
-    std::memcpy(&w, s, 4);
-    std::memcpy(d, &w, 4);
-}
-
-// 严格**前向**（低 → 高）：对应 guest `0x4E74F4` 那支（`rep movsd` + 字节尾表）。
-// ★ 只有 `dst < src` 的重叠可以用它：写地址永远落后于**尚未读**的源地址。
-void copyForwardBytes(std::uint8_t* d, const std::uint8_t* s, std::uint32_t n) {
-    std::uint32_t i = 0;
-    if (n >= kMemcpyChunkMin) {
-        for (; n - i >= 4u; i += 4u) copyChunk4(d + i, s + i);  // `n - i` 不溢出（i <= n）
-    }
-    for (; i < n; ++i) d[i] = s[i];
-}
-
-// 严格**后向**（高 → 低）：对应 guest `0x4E7670` 那支（`std; rep movsd; cld`）。
-// ★ 只有 `dst > src` 的重叠可以用它：写地址永远领先于**尚未读**的源地址。
-void copyBackwardBytes(std::uint8_t* d, const std::uint8_t* s, std::uint32_t n) {
-    std::uint32_t i = n;
-    if (n >= kMemcpyChunkMin) {
-        while (i >= 4u) {
-            i -= 4u;
-            copyChunk4(d + i, s + i);
-        }
-    }
-    while (i > 0u) {
-        --i;
-        d[i] = s[i];
-    }
-}
-
-}  // namespace
 
 bool nativeMemcpy(X86& cpu, GuestMemory& mem, std::uint32_t* result) {
     const std::uint32_t dst = cpu.arg(0);

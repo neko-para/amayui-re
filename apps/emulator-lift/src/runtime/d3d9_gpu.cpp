@@ -52,10 +52,28 @@
 
 #include "runtime/gpu_raster.h"
 #include "runtime/d3d9.h"  // 派生 mip 的尺寸 / 偏移 / box filter（唯一一份实现，见 d3d9.cpp）
+#include "runtime/guest_token.h"  // ★ M0：GPU 的阻塞型宿主等待要放令牌（见下面那条总口径）
 #include "runtime/pixel_format.h"
 
 namespace lift {
 namespace {
+
+// ★★ M0（REQ-01M75WWFGT8ZEBGEPENQHSYTB8）：**GPU / 呈现的阻塞型宿主等待移出令牌**。
+//   `SDL_AcquireGPUCommandBuffer`（命令缓冲槽位满时会阻塞）· `SDL_WaitForGPUFences`（等 GPU）·
+//   `SDL_WaitAndAcquireGPUSwapchainTexture`（等 swapchain / vsync）都会阻塞；令牌只保护**宿主容器**
+//   （guest_token.h 的文件头），把"等 GPU"算进持有时间里，就把音频 feeder 的每次交接从 µs 拖到
+//   一帧（实测单次等待中位 43.1 ms，见需求单 / `.tmp/audio-perf/token-model.md`）。
+//   ⇒ 这些调用一律在 `GuestToken::YieldGuard` 里做（临时让出、回来取回）。**为什么放令牌安全**：
+//     ① **没有第二个线程会改这些后端对象**：`SdlGpuRaster` / `SdlWindow::Impl` / SDL 设备句柄按
+//        `present.h` 的**单线程契约**只在主线程（`Machine::run` / shim）被调用；音频 feeder 的
+//        guest 代码走的是 DS 流回调，不经过 d3d9 / present 的 shim（令牌之外没有第二条入口）。
+//     ② 让出那段里**不持有任何宿主容器引用**：只有局部的 SDL 句柄（command buffer / fence /
+//        transfer buffer）和 guest **平坦内存**指针 —— 后者是数据面，从来不由令牌保护
+//        （guest_token.h 的那条星号注）。
+//     ③ 取回之后**不沿用**让出之前查到的表结论 / 迭代器：需要容器的地方都重新读成员或重新查表
+//        （本文件的站点在让出后只碰局部句柄，成员读都在让出之后）。
+//   ⛔ 不要把"录一个 pass / 传一张纹理"这类**计算型**工作也搬出令牌（那是 M1/M2 的事）；
+//   ⛔ 也不要在这里加别的锁（令牌是唯一的容器锁）。
 
 // ★ 进程级诊断计数（理由见 gpu_raster.h 的 `GpuRasterStats`）：同一时刻只有一个 SDL_GPU 后端。
 GpuRasterStats g_stats;
@@ -418,7 +436,11 @@ public:
             if (err) *err = std::string("SDL_CreateGPUTransferBuffer(download) 失败：") + SDL_GetError();
             return false;
         }
-        SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+        SDL_GPUCommandBuffer* cmd = nullptr;
+        {   // ★ M0：取 command buffer 可能阻塞 ⇒ 放令牌（总口径见文件顶的那条注释）。
+            GuestToken::YieldGuard yield(guestToken());
+            cmd = SDL_AcquireGPUCommandBuffer(device_);
+        }
         SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
         SDL_GPUTextureRegion src{};
         src.texture = target_;
@@ -441,7 +463,12 @@ public:
             if (err) *err = "SDL_SubmitGPUCommandBufferAndAcquireFence 失败";
             return false;
         }
-        SDL_WaitForGPUFences(device_, true, &fence, 1);
+        {   // ★ M0：等 GPU 完成读回是**无界**的宿主等待 ⇒ 放令牌（总口径见文件顶）。
+            //   让出期间只持有局部句柄 `tb` / `fence` 与 guest 平坦指针 `pixels`（数据面，不由令牌
+            //   保护）；取回后不沿用任何放令牌之前的查表结论（`dirty_` 是成员，写在下面）。
+            GuestToken::YieldGuard yield(guestToken());
+            SDL_WaitForGPUFences(device_, true, &fence, 1);
+        }
         SDL_ReleaseGPUFence(device_, fence);
         const void* mapped = SDL_MapGPUTransferBuffer(device_, tb, false);
         if (mapped == nullptr) {
@@ -479,7 +506,11 @@ public:
         ti.size = static_cast<Uint32>(bytes);
         SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(device_, &ti);
         if (tb == nullptr) return false;
-        SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+        SDL_GPUCommandBuffer* cmd = nullptr;
+        {   // ★ M0：取 command buffer 可能阻塞 ⇒ 放令牌（总口径见文件顶）。
+            GuestToken::YieldGuard yield(guestToken());
+            cmd = SDL_AcquireGPUCommandBuffer(device_);
+        }
         if (cmd == nullptr) {
             SDL_ReleaseGPUTransferBuffer(device_, tb);
             return false;
@@ -502,7 +533,12 @@ public:
             SDL_ReleaseGPUTransferBuffer(device_, tb);
             return false;
         }
-        SDL_WaitForGPUFences(device_, true, &fence, 1);
+        {   // ★ M0：等 GPU 完成读回是无界宿主等待 ⇒ 放令牌（总口径见文件顶）。
+            //   本探针**只读**：让出期间只持有局部句柄 `tb`/`fence` 与调用方给的 `tex`；
+            //   取回后不查任何表（输出写进调用方的 `out`，与容器无关）。
+            GuestToken::YieldGuard yield(guestToken());
+            SDL_WaitForGPUFences(device_, true, &fence, 1);
+        }
         SDL_ReleaseGPUFence(device_, fence);
         bool ok = false;
         const void* mapped = SDL_MapGPUTransferBuffer(device_, tb, false);
@@ -1167,7 +1203,15 @@ public:
         SDL_GPUTexture* swap = nullptr;
         Uint32 sw = 0;
         Uint32 sh = 0;
-        if (!SDL_WaitAndAcquireGPUSwapchainTexture(cmd, window_, &swap, &sw, &sh)) {
+        bool swap_ok = false;
+        {   // ★ M0：**等 swapchain**（vsync / 呈现队列）是无界宿主等待 —— 每帧一次，
+            //   是本文件里最长的一格 ⇒ 放令牌（总口径见文件顶）。
+            //   让出期间只持有局部句柄 `cmd`（已取到的 command buffer）；`window_` 是设备句柄、
+            //   `target_` 等成员都在取回**之后**才读 ⇒ 没有持有任何"别人会改"的容器引用。
+            GuestToken::YieldGuard yield(guestToken());
+            swap_ok = SDL_WaitAndAcquireGPUSwapchainTexture(cmd, window_, &swap, &sw, &sh);
+        }
+        if (!swap_ok) {
             std::string why = std::string("SDL_WaitAndAcquireGPUSwapchainTexture 失败：") + SDL_GetError();
             if (SDL_SubmitGPUCommandBuffer(cmd)) {  // 不 Cancel：Cancel 与 swapchain 的状态机容易踩边界
                 ++g_stats.submits;
@@ -1558,7 +1602,12 @@ private:
             if (err) *err = "SDL_SubmitGPUCommandBufferAndAcquireFence 失败";
             return false;
         }
-        SDL_WaitForGPUFences(device_, true, &fence, 1);
+        {   // ★ M0：等 GPU 完成读回是无界宿主等待 ⇒ 放令牌（总口径见文件顶）。
+            //   让出期间只持有局部句柄 `tb`/`fence`；输出是调用方的 `std::vector`（宿主堆，
+            //   本函数独占）⇒ 没有第二个线程会改它。
+            GuestToken::YieldGuard yield(guestToken());
+            SDL_WaitForGPUFences(device_, true, &fence, 1);
+        }
         SDL_ReleaseGPUFence(device_, fence);
         const void* mapped = SDL_MapGPUTransferBuffer(device_, tb, false);
         if (mapped == nullptr) {

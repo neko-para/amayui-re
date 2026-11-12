@@ -13,5 +13,10 @@ timeout 30000
 
 click 1070 480
 
-wait 20000 wall_ms
-timeout 30000
+# 给"进加载界面 / 或干净退出"留足 20 s。
+# ⚠ 单个 wait 动作受缺省 5000 ms timeout 约束 ⇒ 拆成 5 段（否则节点会被判 timeout，掩盖真正的结局）。
+wait 4000 wall_ms
+wait 4000 wall_ms
+wait 4000 wall_ms
+wait 4000 wall_ms
+wait 4000 wall_ms

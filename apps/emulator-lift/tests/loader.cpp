@@ -17,12 +17,66 @@
 #include "runtime/machine.h"
 #include "runtime/sha256.h"
 
+// ★ AGERC 的真实导出表问答（实现与签名真源 = `src/shims/kernel32_agerc.cpp`）。
+//   声明**故意**写在这里而不是某个头文件：头文件不在本缺陷单
+//   （REQ-01M75SDKZGY87B8SK7GBP92PXD）的输入边界内。⚠ 改签名 ⇒ 三处一起改
+//   （kernel32_agerc.cpp / kernel32_process.cpp / 这里）。
+namespace lift {
+std::size_t agercExportCount(const PeImage& img);
+std::string agercExportName(const PeImage& img, std::size_t index);
+}  // namespace lift
+
 namespace {
 
 std::uint32_t readLe32(const std::vector<std::uint8_t>& b, std::size_t off) {
     std::uint32_t v = 0;
     std::memcpy(&v, b.data() + off, 4);
     return v;
+}
+
+// `LIFT_AGE_EXE` 的**上一级**目录下那份真实 AGERC.DLL（同一 corpus 资产树）。
+// 返回空串 = 没有这份可选资产（调用方按"不验"处理，⛔ 不让 assets 档因为可选文件而红）。
+std::string siblingAgercPath(const char* exe) {
+    if (!exe || !*exe) return {};
+    const std::string exe_path = exe;
+    const std::size_t last = exe_path.find_last_of("\\/");
+    if (last == std::string::npos || last == 0) return {};
+    const std::size_t prev = exe_path.find_last_of("\\/", last - 1);
+    if (prev == std::string::npos) return {};
+    const std::string agerc_path = exe_path.substr(0, prev) + "/agerc/AGERC.DLL";
+    std::FILE* probe = lift::openHostFileUtf8(agerc_path, "rb");
+    if (!probe) return {};
+    std::fclose(probe);
+    return agerc_path;
+}
+
+// 直接调一条**已注册**的 shim，不铺 guest 机器码：把 `[esp]` 放哨兵返回地址、`[esp+4…]` 放参数。
+// ★ loader 这条测试不执行 guest 代码 ⇒ 借用栈顶下面一段空白当临时帧是安全的。
+// ★ 走 `ShimRegistry::invoke` 而不是手搓参数：调用约定 / 弹参 / 返回值那条路径与真跑时**同一份**代码。
+std::uint32_t callShim(lift::Machine& m, const char* module, const char* name,
+                       const std::vector<std::uint32_t>& args) {
+    lift::ShimDef* def = m.shims().findMutable(module, name);
+    if (def == nullptr || def->stub_ea == 0) {
+        std::printf("SKIP: shim 没注册（%s!%s）⇒ 这个用例没验到东西\n", module, name);
+        return 0;
+    }
+    const std::uint32_t sp = m.setup().stack_top - 0x80u;
+    std::uint32_t cursor = sp;
+    m.mem().wr32(cursor, 0xFFFFFFFFu);  // 返回地址哨兵
+    cursor += 4u;
+    for (const std::uint32_t a : args) {
+        m.mem().wr32(cursor, a);
+        cursor += 4u;
+    }
+    m.cpu().esp() = sp;
+    m.shims().invoke(m.cpu(), *def);
+    return m.cpu().eax();
+}
+
+// 把一个 C 串写进 guest 的临时区（用同一块地址反复覆盖 ⇒ 不需要分配器）
+std::uint32_t guestScratchString(lift::Machine& m, std::uint32_t ea, const std::string& s) {
+    std::memcpy(m.mem().host(ea), s.c_str(), s.size() + 1u);
+    return ea;
 }
 
 }  // namespace
@@ -150,43 +204,35 @@ int main() {
     //   ★ 为什么需要它：`LIFT_AGE_EXE`（AGE.EXE）是 VC6 链接的 OFT=0 形态，单靠它无法断言"OFT 非 0"；
     //   而"字段是原始 RVA、不是文件偏移"必须同时钉住 0 与非 0 两种真实形态。找不到这份资产就只打印，
     //   ⛔ 不让 loader 的 assets 档因为一个未在 CMake 里声明的可选文件而红。
+    const std::string agerc_asset = siblingAgercPath(exe);  // ③b 也用它（同一份）⇒ 只剩一处路径口径
     {
-        const std::string exe_path = exe;
-        const std::size_t last = exe_path.find_last_of("\\/");
-        const std::size_t prev =
-            (last == std::string::npos || last == 0) ? std::string::npos : exe_path.find_last_of("\\/", last - 1);
-        if (prev != std::string::npos) {
-            const std::string agerc_path = exe_path.substr(0, prev) + "/agerc/AGERC.DLL";
-            std::FILE* probe = lift::openHostFileUtf8(agerc_path, "rb");
-            if (!probe) {
-                std::printf("SKIP: 没有 %s（可选的真实 OFT 非 0 镜像）\n", agerc_path.c_str());
-            } else {
-                std::fclose(probe);
-                g_current_case = "import-descriptor-identity-agerc";
-                lift::PeImage agerc;
-                const bool ok = lift::loadPeFile(agerc_path, &agerc, &err);
-                if (!ok) std::fprintf(stderr, "loadPeFile(%s): %s\n", agerc_path.c_str(), err.c_str());
-                LIFT_CHECK(ok);
-                if (ok) {
-                    bool any_oft = false;
-                    bool any_ft = false;
-                    std::uint32_t shown = 0xFFFFFFFFu;
-                    for (const lift::PeImportInfo& imp : agerc.imports) {
-                        if (imp.original_first_thunk != 0) any_oft = true;
-                        if (imp.first_thunk != 0) any_ft = true;
-                        LIFT_CHECK(!imp.module.empty());
-                        if (imp.descriptor_index != shown) {
-                            shown = imp.descriptor_index;
-                            std::printf("AGERC descriptor #%u (OFT=0x%08X FT=0x%08X module=%s)\n",
-                                        static_cast<unsigned>(imp.descriptor_index),
-                                        static_cast<unsigned>(imp.original_first_thunk),
-                                        static_cast<unsigned>(imp.first_thunk), imp.module.c_str());
-                        }
+        if (agerc_asset.empty()) {
+            std::printf("SKIP: 没有 <exe 上级>/agerc/AGERC.DLL（可选的真实 OFT 非 0 镜像）\n");
+        } else {
+            g_current_case = "import-descriptor-identity-agerc";
+            lift::PeImage agerc;
+            const bool ok = lift::loadPeFile(agerc_asset, &agerc, &err);
+            if (!ok) std::fprintf(stderr, "loadPeFile(%s): %s\n", agerc_asset.c_str(), err.c_str());
+            LIFT_CHECK(ok);
+            if (ok) {
+                bool any_oft = false;
+                bool any_ft = false;
+                std::uint32_t shown = 0xFFFFFFFFu;
+                for (const lift::PeImportInfo& imp : agerc.imports) {
+                    if (imp.original_first_thunk != 0) any_oft = true;
+                    if (imp.first_thunk != 0) any_ft = true;
+                    LIFT_CHECK(!imp.module.empty());
+                    if (imp.descriptor_index != shown) {
+                        shown = imp.descriptor_index;
+                        std::printf("AGERC descriptor #%u (OFT=0x%08X FT=0x%08X module=%s)\n",
+                                    static_cast<unsigned>(imp.descriptor_index),
+                                    static_cast<unsigned>(imp.original_first_thunk),
+                                    static_cast<unsigned>(imp.first_thunk), imp.module.c_str());
                     }
-                    LIFT_CHECK(!agerc.imports.empty());
-                    LIFT_CHECK(any_oft);  // 真镜像上 OFT 非 0（AGE.EXE 只覆盖了 OFT=0 的合法形态）
-                    LIFT_CHECK(any_ft);
                 }
+                LIFT_CHECK(!agerc.imports.empty());
+                LIFT_CHECK(any_oft);  // 真镜像上 OFT 非 0（AGE.EXE 只覆盖了 OFT=0 的合法形态）
+                LIFT_CHECK(any_ft);
             }
         }
     }
@@ -256,15 +302,104 @@ int main() {
         const lift::LstFunction* ftol_fn = m.lst().findFunction("__ftol2_sse");
         LIFT_CHECK(ftol_fn != nullptr);
         if (ftol_fn != nullptr) LIFT_CHECK_EQ_U32(ftol_fn->ea, 0x004E82C0u);
+        // ★ Huffman 两片叶子（REQ-01M75WED0VFTEYXX43KGHNPPP0）：名字必须解析到 `.lst` 的
+        //   `proc near` 行（`0x4E1570` / `0x4E1950`）—— 名字挂错的表现是"`all` 里没有这一项、
+        //   hits 恒 0，而所有差分类测试都绿"（那些测试自己 `add()` 的是 EA）。
+        const lift::LstFunction* huff_dec = m.lst().findFunction("sub_4E1570");
+        const lift::LstFunction* huff_vec = m.lst().findFunction("sub_4E1950");
+        LIFT_CHECK(huff_dec != nullptr);
+        LIFT_CHECK(huff_vec != nullptr);
+        if (huff_dec != nullptr) LIFT_CHECK_EQ_U32(huff_dec->ea, 0x004E1570u);
+        if (huff_vec != nullptr) LIFT_CHECK_EQ_U32(huff_vec->ea, 0x004E1950u);
         std::string cerr;
         m.overrides().clear();
         LIFT_CHECK(m.configureNativeOverrides("all", &cerr));
         LIFT_CHECK(m.overrides().find(0x004E82C0u) != nullptr);
+        LIFT_CHECK(m.overrides().find(0x004E1570u) != nullptr);
+        LIFT_CHECK(m.overrides().find(0x004E1950u) != nullptr);
+        // 隔离臂：两项各自能单独排掉（`all,-名字`），而且**另一项仍在**
+        m.overrides().clear();
+        LIFT_CHECK(m.configureNativeOverrides("all,-sub_4E1570", &cerr));
+        LIFT_CHECK(m.overrides().find(0x004E1570u) == nullptr);
+        LIFT_CHECK(m.overrides().find(0x004E1950u) != nullptr);
+        m.overrides().clear();
+        LIFT_CHECK(m.configureNativeOverrides("all,-sub_4E1950", &cerr));
+        LIFT_CHECK(m.overrides().find(0x004E1950u) == nullptr);
+        LIFT_CHECK(m.overrides().find(0x004E1570u) != nullptr);
         m.overrides().clear();
         LIFT_CHECK(m.configureNativeOverrides("all,-__ftol2_sse", &cerr));
         LIFT_CHECK(m.overrides().find(0x004E82C0u) == nullptr);  // 隔离臂：排除项优先
+        LIFT_CHECK(m.overrides().find(0x004E1570u) != nullptr);  // 别的项不受影响
         LIFT_CHECK(!m.overrides().empty());                      // 不是"整张表都没了"的假绿
         m.overrides().clear();
+    }
+
+    // ⑦ 真实 AGERC 的**导出表**（REQ-01M75SDKZGY87B8SK7GBP92PXD）
+    //
+    // 红了意味着什么：`GetProcAddress(AGERC, <真实导出名>)` 又变成 0 ⇒ 引擎按名取 AGERC 导出
+    // 会拿到 127 ⇒ 它弹「致命的错误」框（引擎自己的 `%sのアドレス取得に失敗しました`，
+    // AGE.EXE `0x42FFD2` / `0x422B0D`）⇒ 被 `MessageBoxA` 的恒 IDOK 压成"中止" ⇒
+    // 点一下 LoadData 就干净退出。★ 本单的实测就是 `_SetNameLenMax@20`（SAVE.BIN COMMAND=332）。
+    //
+    // 两条机械判据：
+    //   ① **白名单 ⊇ 真实 PE 导出表**：镜像 export directory 里的**每一条**按名导出都必须解析成非 0
+    //      （前提是 `agercExportCount > 0` —— 读不出导出表时这个循环会是**真空绿**，所以先断言它）；
+    //   ② 引擎真正取的那一条（`_SetNameLenMax@20`）必须解析到**已登记实现**的 stub thunk
+    //      （`fn != nullptr`），而不是"有地址但没实现"的运行期 thunk，且它的返回值 = 真实实现的 0。
+    {
+        g_current_case = "agerc-exports";
+        if (agerc_asset.empty()) {
+            std::printf("SKIP: 没有 <exe 上级>/agerc/AGERC.DLL ⇒ 不验真实 AGERC 导出表\n");
+        } else {
+            std::string aerr;
+            const bool mapped = m.loadAgercModule(agerc_asset, &aerr);
+            if (!mapped) std::fprintf(stderr, "loadAgercModule(%s): %s\n", agerc_asset.c_str(), aerr.c_str());
+            LIFT_CHECK(mapped);
+            const std::uint32_t base = m.agercBase();
+            LIFT_CHECK_NE_U32(base, 0u);
+            // guest 调 LoadLibraryA("AGERC.DLL") ⇒ 真实模块基址（GetProcAddress 的前提）
+            const std::uint32_t str_ea = m.setup().stack_top - 0x200u;  // 临时字符串区（不跑 guest 代码）
+            const std::uint32_t lib_ea =
+                callShim(m, "kernel32", "LoadLibraryA", {guestScratchString(m, str_ea, "AGERC.DLL")});
+            LIFT_CHECK_EQ_U32(lib_ea, base);
+
+            // ---- ① 白名单 ⊇ 真实导出表 ----
+            const std::size_t export_count = lift::agercExportCount(m.agercImage());
+            std::printf("AGERC real exports: %zu (base=%08X imageBase=%08X)\n", export_count,
+                        static_cast<unsigned>(base),
+                        static_cast<unsigned>(m.agercImage().image_base));
+            LIFT_CHECK(export_count > 0);  // 读不出 ⇒ 下面的循环没有意义（真空绿）
+            std::size_t resolved = 0;
+            for (std::size_t i = 0; i < export_count; ++i) {
+                const std::string proc = lift::agercExportName(m.agercImage(), i);
+                LIFT_CHECK(!proc.empty());
+                if (proc.empty()) continue;
+                const std::uint32_t name_ea = guestScratchString(m, str_ea + 0x40u, proc);
+                const std::uint32_t ea = callShim(m, "kernel32", "GetProcAddress", {base, name_ea});
+                // ★ 差集必须为空：真实导出一条都不许解析成 0
+                if (ea == 0) std::fprintf(stderr, "AGERC!%s 解析成 0（差集非空）\n", proc.c_str());
+                LIFT_CHECK_NE_U32(ea, 0u);
+                if (ea != 0) ++resolved;
+            }
+            LIFT_CHECK_EQ_I64(resolved, export_count);
+
+            // ---- ② 引擎实际取的那一条：**已登记的实现** + 真实返回值 0 ----
+            const std::string want = "_SetNameLenMax@20";
+            const std::uint32_t want_ea =
+                callShim(m, "kernel32", "GetProcAddress", {base, guestScratchString(m, str_ea + 0x40u, want)});
+            LIFT_CHECK_NE_U32(want_ea, 0u);
+            const lift::ShimDef* def = m.shims().find("agerc", want.c_str());
+            LIFT_CHECK(def != nullptr);
+            if (def != nullptr) {
+                // ⛔ 不是"有这个导出但还没实现"（那种 thunk 的 fn 是 nullptr，调用即响亮失败）
+                LIFT_CHECK(def->fn != nullptr);
+                LIFT_CHECK_EQ_U32(want_ea, def->stub_ea);
+            }
+            // 真实实现（AGERC export 20 → 体 0x100367D0）= 存 `*arg1` 进 g_nameLenMax、**返回 0**
+            const std::uint32_t value_ea = str_ea + 0x80u;
+            m.mem().wr32(value_ea, 24u);
+            LIFT_CHECK_EQ_U32(callShim(m, "agerc", want.c_str(), {0u, value_ea, 0u, 0u, 0u}), 0u);
+        }
     }
 
     std::printf("entry=%08X sections=%zu imports=%zu\n", m.image().entry_ea, m.image().sections.size(),

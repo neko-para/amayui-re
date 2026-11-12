@@ -1045,6 +1045,28 @@ const MUTATIONS = [
   },
 
   {
+    // ★ 代表 "`rep movs*` 快路径的**方向 × 重叠**闸门写反" 这一类错
+    //   （REQ-01M75XK0XRTSWCZ4G8A5W2GW8）。
+    //   判据：`apps/emulator-lift/tests/rep_bulk.cpp` 的 `diff/*` —— 同一份 guest 字节、`X86::rep_bulk`
+    //   开/关两臂，比目标区逐字节 + ECX/ESI/EDI/EAX/EFLAGS + insns + `g_access`。
+    //   闸门写反 ⇒ "逆向涂抹"（`DF=0 && dst>src` 重叠 / `DF=1 && dst<src` 重叠）也走 4 B 分块
+    //   ⇒ 位移 1..size-1 的那几档被涂抹（实测首个差异落在目标区中段），且 hits/declines 互换。
+    //   ★ 为什么挑这一条（而不是 committed / 64 位乘）：那两个闸门在 **guest 可见状态**上观察不到
+    //     （放过去就是 fault / 读出界），只能靠 `repBulkPlan` 的直接断言抓；而"方向 × 重叠"是本单
+    //     唯一会**静默改字节**的闸门，红的方向就是"两臂内存不同"。
+    //   ★ 编号/落点说明：判据在 `tests/rep_bulk.cpp`，注册在 lift 的 CMakeLists 顶层（pure ⇒ 默认跑）。
+    file: 'apps/emulator-lift/src/runtime/exec_string.cpp',
+    from: '            const bool reverse = df ? (dlo < slo) : (dlo > slo);',
+    to: '            const bool reverse = df ? (dlo > slo) : (dlo < slo);',
+    guard: 'ctest:rep-bulk',
+    ctest: 'rep-bulk',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '`rep movs*` 快路径的方向闸门写反（正/逆涂抹互换）⇒ 逆向重叠的 4 B 分块把源字节涂抹：' +
+      'rep-bulk 的 diff 矩阵逐字节差分（34 例）与 hits/declines 断言当场红',
+  },
+
+  {
     // ★ 代表 "x87 override 的运算顺序 / `fchs` 被弄丢" 这一类错（REQ-01M6NZSAAD0WCNBE3RKMFF84R5）。
     //   判据：`apps/emulator-lift/tests/native_override_assets.cpp` 的 ④ = `sub_4CCC60` 的**函数级真字节
     //   两臂**（同一份 guest 机器码跑解释器当 oracle，再跑 native 实现；比 dst / 寄存器 / x87 状态字）。
@@ -1731,6 +1753,29 @@ const MUTATIONS = [
     what:
       '`__ftol2_sse` 的截断改成"按 RC 就近取整"（`x87ToI64(x, false)`）⇒ `±1.5`/`±2.7` 差 1：' +
       'native-override-assets 的 ftol 边界表逐值断言当场红',
+  },
+
+
+  {
+    // ★ 代表 "Huffman 两条分支的 **adv 字节数**被写反" 这一类错
+    //   （REQ-01M75WED0VFTEYXX43KGHNPPP0，`sub_4E1570` 的 `0x4E1666` vs `0x4E167C`）。
+    //   `.lst` 里成功支 `adv(codelengths[lo])`、失败支 `adv(read)` —— 两个数**不同**；
+    //   谁按"标准 Huffman"想当然写成同一个，位游标就错 N bit ⇒ 整包之后全错位
+    //   （听得出、引擎零信号：`0x4E40A9 xor eax,eax` 让成功与失败都返回 0）。
+    //   守卫：`apps/emulator-lift/tests/native_override_assets.cpp` 的 `huff/fail-len-gt-read`
+    //   （解释器臂 = 真字节 oracle，逐值比位读三个 dword）与 `huff-vec/eof-fail`。
+    //   ★ 为什么挑这一条而不是"sar 写成 shr"：`sar`/`shr` 只在负 entry 的高位字段上分叉，
+    //     而 adv 字节数是**两片叶子的公共骨架**、也是本单的头号风险（评估 §2.4.1 第 2 条）。
+    file: 'apps/emulator-lift/src/runtime/native_huffman.cpp',
+    from: '        huffAdv(r, bits);  // `0x4E1681 adv(read)`  ← ★ 与成功支的字节数**不同**',
+    to: '        huffAdv(r, len);  // 变异：失败支也按码长前进（= adv 字节数写反）',
+    guard: 'ctest:native-override-assets',
+    ctest: 'native-override-assets',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '`sub_4E1570` 失败支的 `adv(read)` 改成 `adv(codelengths[lo])`（两条分支的字节数写成同一个）' +
+      '⇒ 位游标错位：native-override-assets 的 `huff/fail-len-gt-read` 当场红' +
+      '（位读三 dword 的 endbit / ptr 与解释器臂不同）',
   },
 
 

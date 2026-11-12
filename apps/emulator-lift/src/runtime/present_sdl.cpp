@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "runtime/frame_blit.h"
+#include "runtime/guest_token.h"  // ★ M0：SDL_RenderPresent 的宿主等待要放令牌（见 submitFrame）
 #include "runtime/host_window.h"
 #include "runtime/input.h"
 #include "runtime/overlay.h"
@@ -851,7 +852,18 @@ bool SdlWindow::submitFrame(const SurfaceArena& arena, const GuestSurface& surfa
         if (!shot_ok) return false;
     }
 
-    if (!SDL_RenderPresent(impl_->renderer)) {
+    // ★ M0（REQ-01M75WWFGT8ZEBGEPENQHSYTB8）：`SDL_RenderPresent` 会**等呈现队列 / vsync**
+    //   （阻塞型宿主等待），而令牌只保护宿主容器 ⇒ 在 `YieldGuard` 里做（临时让出、回来取回）。
+    //   **为什么放令牌安全**：① 这条 sink 按 `present.h` 的**单线程契约**只在主线程被调用，
+    //   `impl_`（`SdlWindow::Impl`：window / renderer / texture）没有第二个线程会改；
+    //   ② 让出这段里**不持有任何宿主容器引用** —— guest 像素早在上面 `SDL_UpdateTexture` 就
+    //   拷进纹理了（arena / surface 的指针没有跨过这里）；③ 取回后不沿用任何放令牌之前的查表结论。
+    bool presented = false;
+    {
+        GuestToken::YieldGuard yield(guestToken());
+        presented = SDL_RenderPresent(impl_->renderer);
+    }
+    if (!presented) {
         if (err) *err = std::string("SDL_RenderPresent 失败：") + SDL_GetError();
         return false;
     }

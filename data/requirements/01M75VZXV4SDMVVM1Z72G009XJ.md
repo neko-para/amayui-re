@@ -2,8 +2,9 @@
 
 - id: REQ-01M75VZXV4SDMVVM1Z72G009XJ
 - type: bug
-- status: open
+- status: blocked
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- blocked_by: [REQ-01M75WWFGT8ZEBGEPENQHSYTB8]
 - repro: graphs/se-eof.graph#click 830 592
 - severity: S1
 - tags: [emulator-lift audio token scheduler]
@@ -62,3 +63,14 @@ fills=32 notify=49 ... slot_reverify_fail=0 fill_max_ms=1743.79 fill_slow=4
 - 稳态占空（三流 120–150%）是另一件事 ⇒ `REQ-01M75PTEGCR1Y91FKKJ1CWPNH2`（Huffman/位读）。
   **本单解决尖峰，那张单解决稳态；两者都要，不能互相替代。**
 - 插桩字段的读法要补进 `apps/emulator-lift/docs/audio-implementation.md`（本轮没动该文件）。
+
+## 实测进展（2026-11-12，合并构建，`graphs/se-eof.graph`）
+
+| run | `fill_max_ms` | `fill_slow` | WAV 里 lag=2.000 s 的重复段 |
+|---|---|---|---|
+| 旧（仅三层补偿） | 1743.8 | 4 | **有**（9.92–11.37 s） |
+| 合并 #4 / #5 / #6 | 1687.7 / 1302.8 / 1045.9 | 3 / 1 / 1 | **0 组（3/3）** |
+
+★ **诚实读法**：Huffman + rep 把单刀从 1.74 s 压到 1.05–1.30 s ⇒ 静音能在一圈内到达 ⇒ 听感重复消失；
+但 `shimtok` 仍 **1.0–1.3 s**（令牌饥饿没动）⇒ 只是**掉到阈值以下**，不是根治。⇒ 本单保持 `blocked_by` M0/M1，
+判据不变：**`fill_slow = 0` 且 `fill_max_ms` ≈ 0.2 s 量级**。

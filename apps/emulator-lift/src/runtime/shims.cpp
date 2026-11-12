@@ -416,12 +416,21 @@ void ShimRegistry::invoke(X86& cpu, ShimDef& def) {
     //   它另记在 `GuestToken::waits()/waitNs()`（运行摘要的 `tokenwait` 行 + `--profile` 的
     //   token-wait 块）。★ 口径影响：同一场景下 `ns` 比旧读数**小**（少掉等待那段）——
     //   不是回归，是这条注释终于与事实一致（旧代码把等待记进了 shim 自己的墙钟）。
+    //
+    // ★ Phase-0 读数（REQ-01M75WWEDC20GEH7QVSHPHH4GP）：`per-shim max_ns` —— 「哪一类 shim
+    //   是长活」（Present / `fread` / DS 的 `mutex_` / harness tick）直接决定 M0 的靶子。
+    //   只在**已经打开**的诊断下读时钟：`timing_on`（`--profile` / 帧 trace / 窗口 profiler /
+    //   叠层，见 `Machine::run` 的 `setTiming`）∪ `LIFT_AUDIO_TRACE`。⛔ 默认两臂都假 ⇒ 与旧路径
+    //   逐字节相同（不读时钟、不进 `noteShimSpan`）。与 `ns` 的关系：**起点同一处**（取到令牌之后），
+    //   只是 `ns` 记累计、`max_ns` 只记**最大值**（⛔ 不存每次读数）。
+    const bool audio_trace = audioTraceEnabled();
+    const bool shim_max_wanted = timing_on || audio_trace;
     std::chrono::steady_clock::time_point time_begin{};
     {
         GuestToken::Guard shim_token(guestToken());
         // ★ 只读计量（见文件上方 `t_shim_token_wait_ns`）：**不改**这一取/放的任何语义，
         //   只在本线程"真的被挡住"时把那段时间记到自己的账上（`lastAcquireWaitNs()` 是 TLS 读）。
-        if (audioTraceEnabled()) {
+        if (audio_trace) {
             const std::uint64_t waited_ns = guestToken().lastAcquireWaitNs();
             if (waited_ns != 0) {
                 t_shim_token_wait_ns += waited_ns;
@@ -431,15 +440,20 @@ void ShimRegistry::invoke(X86& cpu, ShimDef& def) {
         // ★ 检查点：Guard 被删/短路时，**第一次 shim 调用**就计数（不依赖 heap 恰好被碰到）。
         guestToken().check("shim.invoke");
         // ★ M1：计时起点在**取到令牌之后**（等令牌的时间⛔ 不进 ns，见上方注释）。
-        if (timing_on) time_begin = std::chrono::steady_clock::now();
+        if (shim_max_wanted) time_begin = std::chrono::steady_clock::now();
         local.fn(cpu, call);
     }
-    if (timing_on) {
+    if (shim_max_wanted) {
         const std::uint64_t ns = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - time_begin)
                 .count());
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
-        if (trace_id < defs_.size()) defs_[trace_id].ns += ns;
+        if (timing_on) {
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            if (trace_id < defs_.size()) defs_[trace_id].ns += ns;
+        }
+        // ★ Phase-0：每个 shim 的**最长一次**宿主墙钟（只记 max + 次数；内部还有一道
+        //   `phase0_enabled_` 门 ⇒ 只开帧 trace / 叠层时不记）。
+        guestToken().noteShimSpan(trace_id, ns);
     }
     cpu.eax() = call.result;
 

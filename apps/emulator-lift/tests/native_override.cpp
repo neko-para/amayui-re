@@ -21,6 +21,7 @@
 #include "runtime/d3d9.h"
 #include "runtime/ddraw_surface.h"
 #include "runtime/native_affine.h"
+#include "runtime/native_huffman.h"
 #include "runtime/native_mdct.h"
 #include "runtime/native_overrides.h"
 #include "runtime/surface.h"
@@ -3536,6 +3537,381 @@ int main() {
             }
         }
 
+    }
+
+    // ---- ⑰e Huffman 两片叶子（`sub_4E1570` / `sub_4E1950`）：准入**零写** + `bitrev32` 纯核 ----
+    //
+    // 判据（红了意味着什么）：
+    //   ① `huffBitRev32` 与"逐位移位"的**独立参考实现**逐值相同（4096 个伪随机 + 边界）；
+    //   ② 每一条闸门不成立时 `fn` 返回 false，且**直接调 fn** 前后的冻结快照逐项相同
+    //      （码本 / 位读结构 / dst / valuelist / 位流 / `fpu.status·control·tag·top` /
+    //      宿主 softfloat 的粘性位），`*result` 不留半成品，回退原因落进**对应**的桶；
+    //   ③ 成功路径真的写了**该写的那几个 dword**（位读三个 + dst），且 `hits`/`fallbacks` 不涨
+    //      （直接调 fn 不过 `invoke`）。
+    // ★ 为什么这一组不能由 assets 档的两臂差分代替：回退之后解释器会把整个函数重放，
+    //   把"回退前写过的东西"修回去 ⇒ 那一类错在差分里**结构上不可见**（`affine/decline-no-write`
+    //   同口径）。★ 对 `sub_4E1950` 尤其硬：`dst` 是就地 `+=`，回退前写一格 = 解释器重放后加两次。
+    {
+        lift_test::g_current_case = "huff/decline-no-write";
+        constexpr std::uint32_t kCbEa = 0x00420000u;
+        constexpr std::uint32_t kBrEa = 0x00430000u;
+        constexpr std::uint32_t kVlEa = 0x00450000u;
+        constexpr std::uint32_t kDstEa = 0x00460000u;
+        constexpr std::uint32_t kStreamEa = 0x00470000u;
+        constexpr std::uint32_t kLenEa = 0x00480000u;
+        constexpr std::uint32_t kDecEa = 0x00490000u;
+        constexpr std::uint32_t kTblEa = 0x004A0000u;
+        constexpr std::uint32_t kMaskEa = 0x0055BED8u;  // `int dword_55BED8[34]`
+        constexpr std::uint32_t kUncommitted = 0x00B00000u;
+        constexpr std::uint32_t kHuffDecodeEa = 0x004E1570u;
+        constexpr std::uint32_t kHuffVectorEa = 0x004E1950u;
+        constexpr std::uint32_t kDstBytes = 0x40u;
+
+        // ① `sub_4E1510` 的纯核：与"逐位移位"的参考实现对账（⛔ 不是抄实现）
+        {
+            lift_test::g_current_case = "huff/bitrev32";
+            auto ref = [](std::uint32_t v) {
+                std::uint32_t r = 0;
+                for (int i = 0; i < 32; ++i)
+                    if ((v >> i) & 1u) r |= 1u << (31 - i);
+                return r;
+            };
+            const std::uint32_t fixed[] = {0u,          1u,          2u,          3u,          0x80000000u,
+                                           0xFFFFFFFFu, 0x12345678u, 0x00FF00FFu, 0xDEADBEEFu, 0x7FFFFFFFu};
+            for (std::uint32_t v : fixed) LIFT_CHECK_EQ_U32(lift::huffBitRev32(v), ref(v));
+            std::uint32_t x = 0x9E3779B9u;  // 伪随机扫一遍（覆盖每个位位置）
+            for (int i = 0; i < 4096; ++i) {
+                x = x * 1664525u + 1013904223u;
+                LIFT_CHECK_EQ_U32(lift::huffBitRev32(x), ref(x));
+                LIFT_CHECK_EQ_U32(lift::huffBitRev32(ref(x)), x);  // 对合
+            }
+        }
+
+        // 夹具：一份**自洽**的码本（长度 {1,2,3,4,4}、firsttablen=4、maxlength=4、dim=2）
+        // `dec_index[i] == bitrev32(read)`，与 `0x4E1638` 的 `cmp eax, dec_index[mid]` 同一个量。
+        auto boot = [&](lift::Machine& m, std::string& err, bool with_mask) {
+            if (!m.initBare(&err) || !m.prepareStack(&err)) return false;
+            m.cpu().fpu.control = 0x037Fu;  // 缺省 x87 控制字（`mutate` 可以故意改坏它）
+            auto& mem = m.mem();
+            if (with_mask) {
+                std::vector<std::uint8_t> mask(136u, 0);
+                for (int i = 0; i <= 32; ++i) {
+                    const std::uint32_t v = (i >= 32) ? 0xFFFFFFFFu : ((1u << static_cast<unsigned>(i)) - 1u);
+                    std::memcpy(mask.data() + 4 * i, &v, 4);
+                }
+                if (!m.placeData(kMaskEa, mask.data(), mask.size(), &err)) return false;
+            }
+            std::uint8_t stream[16] = {0};
+            stream[0] = 0x00u;  // 位流第 1 位 = 0 ⇒ 码 '0'（1 位）
+            if (!m.placeData(kStreamEa, stream, sizeof(stream), &err)) return false;
+            std::uint8_t lens[16] = {0};
+            const std::uint8_t cl[5] = {1u, 2u, 3u, 4u, 4u};
+            std::memcpy(lens, cl, 5);
+            if (!m.placeData(kLenEa, lens, sizeof(lens), &err)) return false;
+            const std::uint32_t dec[5] = {0x00000000u, 0x80000000u, 0xC0000000u, 0xE0000000u, 0xF0000000u};
+            if (!m.placeData(kDecEa, dec, sizeof(dec), &err)) return false;
+            std::uint32_t tbl[16] = {};
+            for (std::uint32_t v = 0; v < 16u; ++v) {
+                if ((v & 1u) == 0u)
+                    tbl[v] = 1u;
+                else if ((v & 3u) == 1u)
+                    tbl[v] = 2u;
+                else if ((v & 7u) == 3u)
+                    tbl[v] = 3u;
+                else if (v == 7u)
+                    tbl[v] = 4u;
+                else
+                    tbl[v] = 5u;
+            }
+            if (!m.placeData(kTblEa, tbl, sizeof(tbl), &err)) return false;
+            std::uint32_t vl[10];
+            for (int i = 0; i < 10; ++i) vl[i] = 0x3F800000u;  // 1.0f（累加精确 ⇒ 不置 PE）
+            if (!m.placeData(kVlEa, vl, sizeof(vl), &err)) return false;
+            std::vector<std::uint8_t> dst(kDstBytes, 0);
+            for (std::uint32_t i = 0; i < kDstBytes; i += 4u) {
+                const std::uint32_t zero = 0u;
+                std::memcpy(dst.data() + i, &zero, 4);
+            }
+            if (!m.placeData(kDstEa, dst.data(), dst.size(), &err)) return false;
+            std::uint8_t cb[0x40] = {0};
+            auto put = [&cb](std::uint32_t off, std::uint32_t v) { std::memcpy(cb + off, &v, 4); };
+            put(0x00u, 2u);       // dim
+            put(0x08u, 5u);       // used_entries
+            put(0x10u, kVlEa);    // valuelist
+            put(0x14u, kDecEa);   // dec_index
+            put(0x1Cu, kLenEa);   // codelengths
+            put(0x20u, kTblEa);   // firsttable
+            put(0x24u, 4u);       // firsttablen
+            put(0x28u, 4u);       // maxlength
+            if (!m.placeData(kCbEa, cb, sizeof(cb), &err)) return false;
+            std::uint8_t br[0x20] = {0};
+            auto putBr = [&br](std::uint32_t off, std::uint32_t v) { std::memcpy(br + off, &v, 4); };
+            putBr(0x00u, 0u);          // endbyte
+            putBr(0x04u, 0u);          // endbit
+            putBr(0x08u, kStreamEa);   // buffer
+            putBr(0x0Cu, kStreamEa);   // ptr = buffer + endbyte
+            putBr(0x10u, 16u);         // storage
+            return m.placeData(kBrEa, br, sizeof(br), &err);
+        };
+
+        struct HuffSnap {
+            std::uint16_t status = 0, control = 0, tag = 0;
+            std::uint8_t top = 0, exc = 0;
+            std::vector<std::uint8_t> regions;  // 依次拼接
+        };
+        auto snap = [&](lift::Machine& m) {
+            HuffSnap s;
+            s.status = m.cpu().fpu.status;
+            s.control = m.cpu().fpu.control;
+            s.tag = m.cpu().fpu.tag;
+            s.top = m.cpu().fpu.top;
+            s.exc = lift::x87PeekExceptionFlags();
+            const std::pair<std::uint32_t, std::uint32_t> regions[] = {
+                {kCbEa, 0x40u}, {kBrEa, 0x20u}, {kDstEa, kDstBytes}, {kVlEa, 40u}, {kStreamEa, 16u}, {kLenEa, 16u}};
+            for (const auto& r : regions) {
+                // 未提交页不能读（`host()` 是保留地址里的裸指针）⇒ 留全 0（两侧同样"读不到"）
+                if (!m.mem().committed(r.first, r.second)) {
+                    s.regions.insert(s.regions.end(), r.second, 0u);
+                    continue;
+                }
+                const std::uint8_t* p = m.mem().host(r.first);
+                s.regions.insert(s.regions.end(), p, p + r.second);
+            }
+            return s;
+        };
+        auto sameSnap = [](const HuffSnap& a, const HuffSnap& b) {
+            return a.status == b.status && a.control == b.control && a.tag == b.tag && a.top == b.top &&
+                   a.exc == b.exc && a.regions == b.regions;
+        };
+        // 一个 arm：铺栈参数 → 直接调 fn（不经 invoke）→ 判"必须回退且零写"。
+        // `mutate(m, &a1, &a2, &dst, &n)` 只改夹具（不改 guest 的其它字节）。
+        auto armAndDecline = [&](const char* tag, bool vector, lift::HuffWhy why, auto&& mutate, bool with_mask) {
+            lift_test::g_current_case = tag;  // 分支名进失败消息（每个 arm 一个类别）
+            lift::Machine m;
+            std::string err;
+            const bool rig_ok = boot(m, err, with_mask);
+            LIFT_CHECK(rig_ok);
+            if (!rig_ok) return;
+            std::uint32_t a1 = kCbEa;
+            std::uint32_t a2 = kBrEa;
+            std::uint32_t dst = kDstEa;
+            std::int32_t n = 8;
+            mutate(m, &a1, &a2, &dst, &n);
+            std::string e;
+            const std::uint32_t fn_ea = vector ? kHuffVectorEa : kHuffDecodeEa;
+            const std::uint32_t arg_bytes = vector ? 16u : 8u;
+            const bool add_ok =
+                m.overrides().add(fn_ea, "ref_huff", lift::GuestConv::Cdecl, arg_bytes,
+                                  vector ? lift::nativeHuffVector4E1950 : lift::nativeHuffDecode4E1570, &e);
+            LIFT_CHECK(add_ok);
+            if (!add_ok) return;
+            lift::NativeOverride* ov = m.overrides().at(0);
+            if (ov == nullptr) return;
+            const std::uint32_t esp = m.layout().stack_top - 0x40u;
+            m.cpu().esp() = esp;
+            m.mem().wr32(esp, 0xFFFFFFFFu);
+            if (vector) {
+                m.mem().wr32(esp + 4u, a1);
+                m.mem().wr32(esp + 8u, dst);
+                m.mem().wr32(esp + 12u, a2);
+                m.mem().wr32(esp + 16u, static_cast<std::uint32_t>(n));
+            } else {
+                m.mem().wr32(esp + 4u, a1);
+                m.mem().wr32(esp + 8u, a2);
+            }
+            lift::x87ApplyControlWord(0x037Fu);
+            lift::x87ClearExceptionFlags();
+            const HuffSnap before = snap(m);
+            std::uint32_t r = 0xDEADBEEFu;
+            m.cpu().current_override = ov;
+            const bool took = vector ? lift::nativeHuffVector4E1950(m.cpu(), m.mem(), &r)
+                                     : lift::nativeHuffDecode4E1570(m.cpu(), m.mem(), &r);
+            m.cpu().current_override = nullptr;
+            LIFT_CHECK(!took);
+            LIFT_CHECK_EQ_U32(r, 0u);  // 不留半成品 EAX
+            const HuffSnap after = snap(m);
+            LIFT_CHECK(sameSnap(before, after));
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ov->declines[static_cast<std::size_t>(why)]), 1u);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ov->hits), 0u);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ov->fallbacks), 0u);
+            if (!sameSnap(before, after)) {
+                std::fprintf(stderr, "  [huff %s] 回退路径写了 guest 字节（status %04X→%04X exc %02X→%02X）\n", tag,
+                             before.status, after.status, before.exc, after.exc);
+            }
+        };
+
+        // ② `sub_4E1570` 的每条闸门（一个 arm = 一个 `return false` 的类别）
+        armAndDecline("codebook-null", false, lift::HuffWhy::BadCodebook,
+                      [](lift::Machine&, std::uint32_t* a1, std::uint32_t*, std::uint32_t*, std::int32_t*) {
+                          *a1 = 0u;
+                      },
+                      true);
+        armAndDecline("codebook-uncommitted", false, lift::HuffWhy::BadCodebook,
+                      [&](lift::Machine&, std::uint32_t* a1, std::uint32_t*, std::uint32_t*, std::int32_t*) {
+                          *a1 = kUncommitted;
+                      },
+                      true);
+        armAndDecline("used-zero", false, lift::HuffWhy::BadCodebook,
+                      [&](lift::Machine& m, std::uint32_t*, std::uint32_t*, std::uint32_t*, std::int32_t*) {
+                          m.mem().wr32(kCbEa + 0x08u, 0u);
+                      },
+                      true);
+        armAndDecline("firsttablen-17", false, lift::HuffWhy::BadFirstTable,
+                      [&](lift::Machine& m, std::uint32_t*, std::uint32_t*, std::uint32_t*, std::int32_t*) {
+                          m.mem().wr32(kCbEa + 0x24u, 17u);
+                      },
+                      true);
+        armAndDecline("firsttable-null", false, lift::HuffWhy::BadFirstTable,
+                      [&](lift::Machine& m, std::uint32_t*, std::uint32_t*, std::uint32_t*, std::int32_t*) {
+                          m.mem().wr32(kCbEa + 0x20u, 0u);
+                      },
+                      true);
+        armAndDecline("codelengths-null", false, lift::HuffWhy::BadCodeLengths,
+                      [&](lift::Machine& m, std::uint32_t*, std::uint32_t*, std::uint32_t*, std::int32_t*) {
+                          m.mem().wr32(kCbEa + 0x1Cu, 0u);
+                      },
+                      true);
+        armAndDecline("decindex-null", false, lift::HuffWhy::BadDecIndex,
+                      [&](lift::Machine& m, std::uint32_t*, std::uint32_t*, std::uint32_t*, std::int32_t*) {
+                          m.mem().wr32(kCbEa + 0x14u, 0u);
+                      },
+                      true);
+        armAndDecline("mask-uncommitted", false, lift::HuffWhy::BadCodebook,
+                      [](lift::Machine&, std::uint32_t*, std::uint32_t*, std::uint32_t*, std::int32_t*) {},
+                      false);  // 不铺掩码表
+        armAndDecline("reader-null", false, lift::HuffWhy::BadReader,
+                      [](lift::Machine&, std::uint32_t*, std::uint32_t* a2, std::uint32_t*, std::int32_t*) {
+                          *a2 = 0u;
+                      },
+                      true);
+        armAndDecline("endbit-8", false, lift::HuffWhy::BadReader,
+                      [&](lift::Machine& m, std::uint32_t*, std::uint32_t*, std::uint32_t*, std::int32_t*) {
+                          m.mem().wr32(kBrEa + 0x04u, 8u);
+                      },
+                      true);
+        armAndDecline("ptr-mismatch", false, lift::HuffWhy::BadReader,
+                      [&](lift::Machine& m, std::uint32_t*, std::uint32_t*, std::uint32_t*, std::int32_t*) {
+                          m.mem().wr32(kBrEa + 0x0Cu, kStreamEa + 1u);
+                      },
+                      true);
+        armAndDecline("storage-huge", false, lift::HuffWhy::BadReader,
+                      [&](lift::Machine& m, std::uint32_t*, std::uint32_t*, std::uint32_t*, std::int32_t*) {
+                          m.mem().wr32(kBrEa + 0x10u, 0x20000000u);
+                      },
+                      true);
+        armAndDecline("stream-uncommitted", false, lift::HuffWhy::BadReaderWindow,
+                      [&](lift::Machine& m, std::uint32_t*, std::uint32_t*, std::uint32_t*, std::int32_t*) {
+                          m.mem().wr32(kBrEa + 0x08u, kUncommitted);
+                          m.mem().wr32(kBrEa + 0x0Cu, kUncommitted);
+                      },
+                      true);
+        // entry == 0 / entry 越界：**位流内容相关**，闸门判不出 ⇒ 只有真跑到才能发现（必须 zero-write）
+        armAndDecline("entry-zero", false, lift::HuffWhy::EntryZero,
+                      [&](lift::Machine& m, std::uint32_t*, std::uint32_t*, std::uint32_t*, std::int32_t*) {
+                          m.mem().wr32(kTblEa, 0u);
+                      },
+                      true);
+        armAndDecline("entry-out-of-range", false, lift::HuffWhy::EntryOutOfRange,
+                      [&](lift::Machine& m, std::uint32_t*, std::uint32_t*, std::uint32_t*, std::int32_t*) {
+                          m.mem().wr32(kTblEa, 9u);
+                      },
+                      true);
+        // 二分区间越界（`lo >= used_entries`）：负 entry 的两个 15 位字段被写坏
+        armAndDecline("search-range", false, lift::HuffWhy::BadSearchRange,
+                      [&](lift::Machine& m, std::uint32_t*, std::uint32_t*, std::uint32_t*, std::int32_t*) {
+                          m.mem().wr32(kTblEa, 0x80000000u | (0x7FFFu << 15));  // lo = 0x7FFF >= used
+                      },
+                      true);
+        // ③ `sub_4E1950` 的闸门（dim / n / 跨度 / x87）
+        armAndDecline("dim-zero", true, lift::HuffWhy::BadVector,
+                      [&](lift::Machine& m, std::uint32_t*, std::uint32_t*, std::uint32_t*, std::int32_t*) {
+                          m.mem().wr32(kCbEa + 0x00u, 0u);
+                      },
+                      true);
+        armAndDecline("valuelist-null", true, lift::HuffWhy::BadVector,
+                      [&](lift::Machine& m, std::uint32_t*, std::uint32_t*, std::uint32_t*, std::int32_t*) {
+                          m.mem().wr32(kCbEa + 0x10u, 0u);
+                      },
+                      true);
+        armAndDecline("dst-uncommitted", true, lift::HuffWhy::BadVector,
+                      [&](lift::Machine&, std::uint32_t*, std::uint32_t*, std::uint32_t* d, std::int32_t*) {
+                          *d = kUncommitted;
+                      },
+                      true);
+        armAndDecline("x87-stack-full", true, lift::HuffWhy::BadFpu,
+                      [&](lift::Machine& m, std::uint32_t*, std::uint32_t*, std::uint32_t*, std::int32_t*) {
+                          m.cpu().fpu.setValid(0);  // ST(0) 非空
+                      },
+                      true);
+        armAndDecline("x87-rc-down", true, lift::HuffWhy::BadFpu,
+                      [&](lift::Machine& m, std::uint32_t*, std::uint32_t*, std::uint32_t*, std::int32_t*) {
+                          m.cpu().fpu.control = 0x077Fu;  // RC = 11b（朝零）
+                      },
+                      true);
+        // ★ 向量路径的 `entry==0`：两遍结构里它发生在**第一遍**（还没累加一格）⇒ 必须零写。
+        //   这一条钉的正是"`dst` 是就地 `+=`，中途回退会被解释器重放成加两次"那件事。
+        armAndDecline("entry-zero-vector", true, lift::HuffWhy::EntryZero,
+                      [&](lift::Machine& m, std::uint32_t*, std::uint32_t*, std::uint32_t*, std::int32_t*) {
+                          m.mem().wr32(kTblEa, 0u);
+                      },
+                      true);
+
+        // ④ 成功路径：真的只写了**该写的**那几个 dword（位读三个 + dst），计数不涨
+        {
+            lift_test::g_current_case = "huff/take-over";
+            lift::Machine m;
+            std::string err;
+            LIFT_CHECK(boot(m, err, true));
+            std::string e;
+            LIFT_CHECK(m.overrides().add(kHuffDecodeEa, "ref_hdec", lift::GuestConv::Cdecl, 8,
+                                         lift::nativeHuffDecode4E1570, &e));
+            LIFT_CHECK(m.overrides().add(kHuffVectorEa, "ref_hvec", lift::GuestConv::Cdecl, 16,
+                                         lift::nativeHuffVector4E1950, &e));
+            const std::uint32_t esp = m.layout().stack_top - 0x40u;
+            m.cpu().esp() = esp;
+            m.mem().wr32(esp, 0xFFFFFFFFu);
+            m.mem().wr32(esp + 4u, kCbEa);
+            m.mem().wr32(esp + 8u, kBrEa);
+            lift::x87ApplyControlWord(0x037Fu);
+            lift::x87ClearExceptionFlags();
+            m.cpu().fpu.control = 0x037Fu;
+            std::uint32_t r = 0xDEADBEEFu;
+            m.cpu().current_override = m.overrides().at(0);
+            LIFT_CHECK(lift::nativeHuffDecode4E1570(m.cpu(), m.mem(), &r));
+            m.cpu().current_override = nullptr;
+            LIFT_CHECK_EQ_U32(r, 0u);  // 码 '0' ⇒ entry index 0
+            // 位读：adv(1) ⇒ endbit=1、endbyte/ptr 不动（其余字节一位没动）
+            LIFT_CHECK_EQ_U32(m.mem().rd32(kBrEa + 0x00u), 0u);
+            LIFT_CHECK_EQ_U32(m.mem().rd32(kBrEa + 0x04u), 1u);
+            LIFT_CHECK_EQ_U32(m.mem().rd32(kBrEa + 0x0Cu), kStreamEa);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.overrides().at(0)->hits), 0u);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.overrides().at(0)->fallbacks), 0u);
+            // 向量：n=4、dim=2 ⇒ 两次 entry 各累加 2 个分量（1.0f + 0.0f = 1.0f，精确 ⇒ 不置 PE）
+            m.mem().wr32(kBrEa + 0x04u, 0u);
+            m.mem().wr32(esp + 4u, kCbEa);
+            m.mem().wr32(esp + 8u, kDstEa);
+            m.mem().wr32(esp + 12u, kBrEa);
+            m.mem().wr32(esp + 16u, 4u);
+            r = 0xDEADBEEFu;
+            m.cpu().current_override = m.overrides().at(1);
+            LIFT_CHECK(lift::nativeHuffVector4E1950(m.cpu(), m.mem(), &r));
+            m.cpu().current_override = nullptr;
+            LIFT_CHECK_EQ_U32(r, 0u);
+            for (std::uint32_t i = 0; i < 4u; ++i) LIFT_CHECK_EQ_U32(m.mem().rd32(kDstEa + 4u * i), 0x3F800000u);
+            LIFT_CHECK_EQ_U32(m.mem().rd32(kDstEa + 16u), 0u);  // 第 5 个分量没被碰
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.overrides().at(1)->hits), 0u);
+            LIFT_CHECK_EQ_U32(m.cpu().fpu.status, 0u);  // 精确运算 ⇒ 一个粘性位都没置
+            // n <= 0 ⇒ 直接成功返回 0，**一个字节都不写**
+            const HuffSnap b4 = snap(m);
+            r = 0xDEADBEEFu;
+            m.mem().wr32(esp + 16u, 0u);
+            m.cpu().current_override = m.overrides().at(1);
+            LIFT_CHECK(lift::nativeHuffVector4E1950(m.cpu(), m.mem(), &r));
+            m.cpu().current_override = nullptr;
+            LIFT_CHECK_EQ_U32(r, 0u);
+            const HuffSnap af = snap(m);
+            LIFT_CHECK(sameSnap(b4, af));
+        }
     }
 
     return lift_test::finish("native-override");

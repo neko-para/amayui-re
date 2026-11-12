@@ -271,6 +271,19 @@ struct X86 {
     //   纯宿主状态，⛔ 不进 guest 内存 / 不改 guest 可见地址。
     HostStopKind stop_kind = HostStopKind::None;
 
+    // ---- `rep movs*` / `rep stos*` 的宿主快路径（REQ-01M75XK0XRTSWCZ4G8A5W2GW8）----
+    // ★ 纯宿主状态：⛔ 不进 guest 内存、不改 `Insn`、不改 guest 可见地址或寄存器语义。
+    //   `rep_bulk = false` ⇒ 走**逐元素臂**（就是加这份快路径之前的实现）⇒ 差分夹具的 oracle
+    //   不需要第二份语义。⛔ 不要改成环境变量：`static const bool` 在一个进程里翻不过来，
+    //   两臂就得分两个进程，pure 夹具也没法逐用例切（`.tmp/audio-perf/rep.md` §6.1 的裁决）。
+    bool rep_bulk = true;
+    // 诊断计数（只增；没有消费者时也不会影响行为）。
+    //   `rep_bulk_hits`     = 真的走了快路径的 `rep` 条数
+    //   `rep_bulk_declines` = 本来够格、被闸门拦下而退回逐元素臂的 `rep` 条数
+    // ★ 两者都按**整条 rep** 计（不是按元素），且 `ECX == 0` / 非 movs·stos 的形态两者都不计。
+    std::uint64_t rep_bulk_hits = 0;
+    std::uint64_t rep_bulk_declines = 0;
+
     // ---- 命名寄存器便捷访问 ----
     std::uint32_t& eax() { return r[kEax]; }
     std::uint32_t& ecx() { return r[kEcx]; }

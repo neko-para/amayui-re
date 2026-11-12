@@ -97,6 +97,9 @@ add_library(emulator-lift-runtime STATIC
     # ★ libvorbis `mdct_backward`（`sub_4E0B40`）= 语音起播那一下的 FFT/MDCT 内核
     #   （**数值容忍档**，契约与已知偏差见 native_mdct.h）
     src/runtime/native_mdct.cpp
+    # ★ Huffman 子树的两片叶子（`sub_4E1570` = look/首表/二分/adv、`sub_4E1950` = 码本向量）
+    #   —— REQ-01M75WED0VFTEYXX43KGHNPPP0 的 S2；契约与逐字依据见 native_huffman.h
+    src/runtime/native_huffman.cpp
     src/runtime/shims.cpp
     src/runtime/window_profile.cpp
     # ★ SEH / C++ EH 的两个 OS 原语（`RaiseException` / `RtlUnwind` 的派发状态机；
@@ -407,6 +410,16 @@ set_tests_properties(conformance-safe PROPERTIES ENVIRONMENT "LIFT_SAFE_MEMORY=1
 # ★ 顶层无条件注册 ⇒ **pure** 档（自造字节、不碰游戏 / LFS）。
 add_test(NAME conformance-rejects-hollow-case COMMAND lift-conformance)
 set_tests_properties(conformance-rejects-hollow-case PROPERTIES ENVIRONMENT "LIFT_CONFORMANCE_SELFCHECK=1")
+
+# ---- pure：`rep movs*` / `rep stos*` 宿主快路径的两臂差分 + 闸门 ----
+# ★ 判据（`tests/rep_bulk.cpp` 的头注）：同一份 guest 字节、`X86::rep_bulk` 开/关两臂 ⇒
+#   目标区逐字节 + ECX/ESI/EDI/EAX/EFLAGS + insns + `g_access` 全同；闸门逐条（跨 4 GiB 的
+#   64 位乘 / safe-mode committed / ECX==0 / 方向×重叠）另用 `repBulkPlan` 直接断言；
+#   命中计数保证"快路径真的被走到"（否则全绿也可能是快路径一直没生效）。
+# 规格：REQ-01M75XK0XRTSWCZ4G8A5W2GW8。
+add_executable(lift-rep-bulk tests/rep_bulk.cpp)
+target_link_libraries(lift-rep-bulk PRIVATE emulator-lift-runtime)
+add_test(NAME rep-bulk COMMAND lift-rep-bulk)
 
 add_executable(lift-dispatch tests/dispatch.cpp)
 target_link_libraries(lift-dispatch PRIVATE emulator-lift-runtime)

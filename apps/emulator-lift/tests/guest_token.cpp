@@ -17,6 +17,9 @@
 //      YieldGuard 窗口里另一条线程真的拿到令牌并改了容器（它 `destroy` 了 surface）；取回后
 //      重新 `check()` 通过、且**重新查表**得到"已经没了"（让出前读到的结论作废）。
 //      YieldGuard 不真的放开 ⇒ 另一条流在 2 s 窗口里拿不到令牌 ⇒ 这条红。
+//   ⑨ `guest-token/phase0-counters`：Phase-0 读数组**默认关、打开才记账**（只数计数，⛔ 不看墙钟数值）——
+//      默认 `arm()` 下一对 acquire/release 与 `noteShimSpan` 都不产生计数；`arm(true)` 下每对记 1 段
+//      持有、五桶之和 == 段数、per-shim max 记最大值。删掉热路径那道 `phase0_enabled_` 门 ⇒ 这条红。
 //
 // ★ 为什么这条必须存在：`0xC0000374`（宿主进程堆损坏、WER 无应用帧）的成因就是音频 feeder
 //   真线程与主线程并发改 `GuestHeap::blocks_`（`std::map`）。这条把"令牌 + 真实堆 + shim 边界"
@@ -303,6 +306,62 @@ int main() {
         token.release();
         LIFT_CHECK(!token.heldByCurrentThread());
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(token.violations()), 0u);
+    }
+
+    // ---- ⑨ Phase-0 读数组（REQ-01M75WWEDC20GEH7QVSHPHH4GP）：**打开才记账**、默认全零 ----
+    // 判据只数**计数**，⛔ 不断言任何墙钟数值（那随机器 / 调度变）：
+    //   ① 默认 `arm()` ⇒ `phase0Enabled() == false`：acquire/release 与 `noteShimSpan` 都不记账；
+    //   ② `arm(true)` ⇒ 每对 acquire/release 记 1 段持有、五桶之和 == 段数、per-shim max 记最大值。
+    // 把 `if (phase0_enabled_)` 从 acquire/release 里删掉 ⇒ ①红；把 arm 的开关写死 false ⇒ ②红。
+    g_current_case = "guest-token/phase0-counters";
+    {
+        // ★ 先把 `LIFT_AUDIO_TRACE` 从本进程环境里**去掉**：`arm()` 会把它或进开关（见 guest_token.h），
+        //   外部环境里恰好带着它时 ①"默认关"会红得没有意义。与 `dispatch_tax.cpp` 的 `setDiagEnv` 同口径。
+#ifdef _WIN32
+        _putenv_s("LIFT_AUDIO_TRACE", "");
+#else
+        unsetenv("LIFT_AUDIO_TRACE");
+#endif
+        token.resetForTest();
+        token.arm();  // 默认关
+        LIFT_CHECK(!token.phase0Enabled());
+        token.acquire();
+        token.release();
+        token.noteShimSpan(3, 123456789ull);  // 关着 ⇒ ⛔ 不许记
+        const GuestToken::Phase0Readings off = token.phase0Readings(GuestToken::kPhase0RoleMain);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(off.hold_count), 0);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(off.waits), 0);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(token.shimMaxNs(3)), 0);
+
+        token.arm(true);  // 打开
+        LIFT_CHECK(token.phase0Enabled());
+        token.acquire();
+        token.release();
+        token.acquire();
+        token.release();
+        token.noteShimSpan(3, 123456789ull);
+        const GuestToken::Phase0Readings on = token.phase0Readings(GuestToken::kPhase0RoleMain);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(on.hold_count), 2);
+        const std::uint64_t hold_hist_sum = on.hold_hist[0] + on.hold_hist[1] + on.hold_hist[2] +
+                                            on.hold_hist[3] + on.hold_hist[4];
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hold_hist_sum), 2);  // 每段必然落进某一桶
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(token.shimMaxNs(3)), 123456789);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(token.shimMaxCalls(3)), 1);
+
+        // 第 4 项的**端到端**接线：`ShimRegistry::invoke` 的派发点在"记账打开 + 派发处计时打开"
+        // 时把这一段记进令牌。⛔ 只断言**次数**（calls == 1），不断言 ns 的具体值。
+        ShimRegistry timed;
+        timed.setTiming(true);  // 与 `--profile` 打开的是同一条"派发处读时钟"路径
+        timed.add("test", "phase0-heap-roundtrip", Conv::Stdcall, 0, &shimHeapRoundtrip);
+        ShimDef* pdef = timed.findMutable("test", "phase0-heap-roundtrip");
+        LIFT_CHECK(pdef != nullptr);
+        const std::uint32_t pdef_id = pdef ? pdef->id : 0u;
+        X86 cpu_p;
+        cpu_p.mem = &mem;
+        cpu_p.heap = &heap;
+        cpu_p.esp() = kStackSlot;
+        timed.invoke(cpu_p, *pdef);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(token.shimMaxCalls(pdef_id)), 1);
     }
 
     std::printf("guest-token: threads=%d iters=%d allocs=%llu frees=%llu violations=%llu max-concurrent=%u "
