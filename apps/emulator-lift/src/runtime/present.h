@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "runtime/gpu_raster.h"
 #include "runtime/overlay.h"
@@ -22,6 +23,9 @@
 namespace lift {
 
 class FrameSampler;
+// ★ 宿主自绘模态框的呈现缝（定义在 `runtime/message_box.h`；本头只前向声明 ⇒ 保持 SDL-free，
+//   且不让所有 include present.h 的文件都被 FontEngine / ModalSpec 拖着走）。
+class ModalPresenter;
 
 class PresentSink {
 public:
@@ -42,6 +46,10 @@ public:
     //   ⛔ 本接口保持 SDL-free（`OverlayStatus` 来自 `runtime/overlay.h`，零 SDL 类型）。
     virtual void setOverlayStatus(const OverlayStatus& /*status*/) {}
     virtual bool overlayEnabled() const { return false; }
+    // ★ 宿主自绘模态框的**唯一**呈现缝（`runtime/message_box.h` 的 `ModalPresenter`）。
+    //   默认 `nullptr` ⇒ 所有既有 sink / 测试替身零改动；headless 与替身据此走"立即默认值"。
+    //   ⛔ 返回非空不代表"总能画"：`presentModal` 自己还要处理窗口/后端失败（只记账 + 返回 false）。
+    virtual ModalPresenter* modalPresenter() { return nullptr; }
 };
 
 // ---------------------------------------------------------------------------------------
@@ -121,6 +129,13 @@ public:
     //   所以 `hash_still_matches` 如实报告"这些像素还是不是被采样到的那一帧"（不一致也照样写，供诊断）。
     bool dumpLastFrame(const std::string& host_path, bool* hash_still_matches, std::string* err) const;
     bool hasLastFrame() const { return have_last_surface_; }
+
+    // ★ **拷贝型**末帧快照（`dumpLastFrame` 明确"只留描述符、不拷像素"——那是每帧零成本的代价）：
+    //   这条给宿主自绘模态框当"变暗的底"。只在**真的要弹框**时调一次，所以拷贝成本可接受。
+    //   输出 = 整幅 **RGBA8**（stride = w*4），按 guest 表面的掩码展开（16bpp 也支持）。
+    //   `hasLastFrame()==false`（boot 还没有任何 Present）⇒ 返回 false ⇒ 调用方用纯色底。
+    //   ⛔ 不修改 guest 像素、不改变 `last_hash_` / 帧号；返回的缓冲是宿主内存（跨 Yield 安全）。
+    bool snapshotLastFrame(std::vector<std::uint8_t>* rgba, int* w, int* h, std::uint32_t* pitch) const;
 
     // 诊断：sink 失败次数 / 最后一次错误 / sink 描述（latch 后仍保留）。
     std::uint64_t sinkFailures() const { return sink_failures_; }

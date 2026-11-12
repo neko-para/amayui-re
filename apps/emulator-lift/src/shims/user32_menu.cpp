@@ -8,14 +8,14 @@
 //   · `GetSystemMenu`→ **非空假句柄**（有 WS_SYSMENU 的窗口在真机上总有系统菜单）；
 //   · `RemoveMenu` / `DestroyMenu` / `DrawMenuBar` → TRUE；
 //   · `TrackPopupMenu` → 0（立即返回，不阻塞、不等待）；
-//   · `MessageBoxA`  → IDOK(1)（"用户没改 / 直接继续"）。
-//   ★ 2026-11-05 追加：`MessageBoxA` 的 **caption / text 要进日志**（CP932 → UTF-8）。
-//     理由：boot 上它是唯一能看见"引擎为什么停 / 为什么走错分支"的手段（真机上是弹给人看的）；
-//     `.lst` 0x00406D38 的「DSOUND.DLLの読み込みに失敗しました…」就是这么被看见的。
-//     ⛔ 返回语义不变（仍是 1 = IDOK）。转码走自带的 `runtime/cp932.cpp`（与 `vfs.cpp` 的
-//     `guestPathForLog` 同一条规则），⛔ 不借宿主的 MultiByteToWideChar。
-// ★ 每一条都打一行 `[shim]`（SCOPE §3 第 3 条：⛔ 不许静默 no-op），经 `addStub` 登记
-//   `data/lift/overrides.json`（`lift sync` 自动进清单）。
+//   · `MessageBoxA`  → ★ 2026-11-12 改判（用户口径）：**系统模态 + SDL 自行实现的窗口**。
+//     ⛔ 旧口径「恒 IDOK(1) / 不建窗口 / 不阻塞」是**历史**（`SCOPE.md` §1 已改）：
+//     窗口档进宿主模态循环并画一整幅自绘对话框；返回值按 `uType`（`MB_YESNO` 默认与 X/Esc
+//     一律 `IDNO(7)`，见 `runtime/message_box.h`）。headless / 无 sink / feeder / 非主线程
+//     ⇒ 立即默认值 + 一行 warn（CTest 因此不会挂）。正文/标题仍是 **warn** 级（默认可见）。
+// ★ 每一条都打一行 `[shim]`（SCOPE §3 第 3 条：⛔ 不许静默 no-op）。菜单族条目仍经 `addStub`
+//   登记 `data/lift/overrides.json`（`lift sync` 自动进清单）；`MessageBoxA` 已改成 `add`
+//   （真实现，不在 stub 清单里）。
 // ★ 它们**不属于** D6 七族（user32 窗口 / 消息族），所以不触发 `seven-family-no-stub`。
 //
 // ★ 实测调用点（`.lst`，锚 EA；都是"有菜单才做"的分支）：
@@ -30,8 +30,12 @@
 #include <cstdint>
 #include <string>
 
+#include "runtime/audio.h"
 #include "runtime/cp932.h"
 #include "runtime/host_window.h"
+#include "runtime/machine.h"
+#include "runtime/message_box.h"
+#include "runtime/present.h"
 #include "runtime/x86.h"
 #include "shims/register.h"
 
@@ -180,26 +184,69 @@ void shimMessageBoxA(X86& cpu, ShimCall& call) {
     // 参数：hWnd / lpText / lpCaption / uType
     // ★ 为什么要把文本打出来（2026-11-05 用户口径）：boot 上**唯一**能看见"引擎为什么停 / 为什么
     //   走错分支"的手段就是这个模态框的正文（真机上它是弹给人看的）⇒ 必须进日志。
-    //   ⛔ 返回语义一字不改：仍是模态 no-op ⇒ 立即 IDOK(1)、不建窗口、不阻塞（SCOPE §1）。
-    (void)cpu;
+    // ★ 2026-11-12（`REQ-01M75S724...` ②）：正文升 **warn** ⇒ 默认级别下可见。
+    // ★ **在第一次 Yield 之前**把两段 guest 文本读成宿主 `std::string`（设计 §1.2 的硬纪律：
+    //   让出令牌期间 feeder 有权改 guest 内存 ⇒ 跨 Yield 的 `call.str()` 一律作废）。
     const std::uint32_t hwnd = call.u32(0);
     const std::uint32_t text_ea = call.u32(1);
     const std::uint32_t cap_ea = call.u32(2);
     const std::uint32_t type = call.u32(3);
     std::size_t bad_text = 0;
     std::size_t bad_cap = 0;
-    const std::string text = escapeLogText(cp932TextToUtf8(call.str(1), &bad_text));
-    const std::string caption = escapeLogText(cp932TextToUtf8(call.str(2), &bad_cap));
-    shimLog("user32", "MessageBoxA",
-            "type=0x%08X caption=\"%s\" text=\"%s\" ⇒ 返回 IDOK(1)（headless 不建窗口）", type,
-            caption.c_str(), text.c_str());
-    if (bad_text != 0 || bad_cap != 0) {
-        shimLog("user32", "MessageBoxA",
-                "⚠ 文本里有非法 CP932（caption %u 字节 / text %u 字节）⇒ 已按 Windows 的宽松口径跳过；"
-                "上面那行可能少字符（text@0x%08X caption@0x%08X hwnd=0x%08X）",
-                static_cast<unsigned>(bad_cap), static_cast<unsigned>(bad_text), text_ea, cap_ea, hwnd);
+    const std::string text_utf8 = cp932TextToUtf8(call.str(1), &bad_text);
+    const std::string caption_utf8 = cp932TextToUtf8(call.str(2), &bad_cap);
+    const std::string text = escapeLogText(text_utf8);
+    const std::string caption = escapeLogText(caption_utf8);
+    const ModalSpec spec = makeMessageBoxSpec(type, caption_utf8, text_utf8);
+    const std::uint32_t fallback = modalDefaultResult(spec);
+    // 正文是**错误串**时默认级别必须能看见（这是本单判据②的落点；⛔ 不是 Info）。
+    shimLogWarn("user32", "MessageBoxA",
+                "type=0x%08X caption=\"%s\" text=\"%s\" ⇒ 默认键值 %u（窗口档进宿主模态；headless "
+                "立即返回）",
+                type, caption.c_str(), text.c_str(), fallback);
+    if (spec.unknown_type) {
+        shimLogWarn("user32", "MessageBoxA",
+                    "未知的 uType 低 4 位（0x%08X & 0x0F = 0x%X）⇒ 按 MB_OK 处理（⛔ 不静默）", type,
+                    type & 0x0Fu);
     }
-    call.result = 1;
+    if (spec.defbutton_overridden) {
+        shimLogDebug("user32", "MessageBoxA",
+                     "MB_YESNO 收到显式 DEFBUTTONn（0x%08X）⇒ 忽略、默认键强制 IDNO(7)"
+                     "（答 YES 会弹启动设置并退出；`0x4BA82B cmp eax,6`）",
+                     type);
+    }
+    if (bad_text != 0 || bad_cap != 0) {
+        shimLogWarn("user32", "MessageBoxA",
+                    "⚠ 文本里有非法 CP932（caption %u 字节 / text %u 字节）⇒ 已按 Windows 的宽松口径跳过；"
+                    "上面那行可能少字符（text@0x%08X caption@0x%08X hwnd=0x%08X）",
+                    static_cast<unsigned>(bad_cap), static_cast<unsigned>(bad_text), text_ea, cap_ea, hwnd);
+    }
+
+    // ★ 分支口径（设计 §1.3 / §4）：只有"主线程 + 有 sink + sink 给得出模态呈现缝"才进循环。
+    //   feeder / headless / 无 presenter / 非主线程 ⇒ 立即默认值 + **一次** warn（⛔ 不阻塞）。
+    Machine* machine = cpu.machine;
+    std::uint32_t result = fallback;
+    bool enter_modal = false;
+    if (machine != nullptr) {
+        if (cpu.audio != nullptr && cpu.audio->onFeederThread()) {
+            shimLogWarn("user32", "MessageBoxA",
+                        "在音频 feeder 线程上被调用 ⇒ headless 语义：立即返回默认值 %u（⛔ 不碰窗口）",
+                        fallback);
+        } else if (!machine->presenter().hasSink() ||
+                   machine->presenter().sink()->modalPresenter() == nullptr) {
+            shimLogWarn("user32", "MessageBoxA",
+                        "headless / 没有模态呈现后端 ⇒ 立即返回默认值 %u（⛔ 不建窗口、不阻塞）",
+                        fallback);
+        } else {
+            enter_modal = true;
+        }
+    } else {
+        shimLogWarn("user32", "MessageBoxA",
+                    "没有装配 Machine（纯夹具）⇒ 立即返回默认值 %u（⛔ 不阻塞）", fallback);
+    }
+    if (enter_modal) result = runModalDialog(*machine, cpu, spec);
+    noteMessageBoxCall(type, result);
+    call.result = result;
 }
 
 }  // namespace
@@ -212,8 +259,9 @@ void registerUser32MenuShims(ShimRegistry& s) {
               "SCOPE §1 菜单整体 no-op：SetMenu 返回 TRUE（没有 Win32 菜单栏）");
     s.addStub("user32", "TrackPopupMenu", Conv::Stdcall, 7, &shimTrackPopupMenu,
               "SCOPE §1 菜单整体 no-op：TrackPopupMenu 立即返回 0（不阻塞）");
-    s.addStub("user32", "MessageBoxA", Conv::Stdcall, 4, &shimMessageBoxA,
-              "SCOPE §1 模态 no-op：MessageBoxA 返回 IDOK(1)（关闭确认 / 存档命名直接继续）");
+    // ★ 2026-11-12（M3 复审）：MessageBoxA 已是**实现**（宿主自绘模态 + 按 uType 返回），
+    //   不是"按 SCOPE 偏差整体 stub"⇒ 用 `add` 登记（`data/lift/overrides.json` 不再是 stub 条目）。
+    s.add("user32", "MessageBoxA", Conv::Stdcall, 4, &shimMessageBoxA);
     // ★ 菜单族其余条目（`.lst` 里有调用点，见文件头）：同样按 SCOPE §1 的 no-op 口径。
     s.addStub("user32", "GetMenu", Conv::Stdcall, 1, &shimGetMenu,
               "SCOPE §1 菜单整体 no-op：GetMenu 返回窗口的菜单句柄（没有菜单 = 0，Win32 真值）");

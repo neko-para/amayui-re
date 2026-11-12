@@ -98,6 +98,9 @@ void usage() {
         "  --real-time         用宿主时钟（此时 A4 的逐字节断言自动跳过并明说）\n"
         "  --skip-logo         把引擎自己的 show-logo 标志置 0（根脚本 0x130 因而不 call LOGO；\n"
         "                      仍走完整 boot 到 TITLE，⛔ 不是直接跳到 TITLE 的宿主捷径）\n"
+        "  --accept-recovery-dialog  恢复引擎真实的「前回正常終了しませんでした」判定\n"
+        "                      （**默认绕过**：等价于「上次正常结束」= marker 不存在；传它才会走到\n"
+        "                      恢复框。⛔ 不是替用户答 NO；默认档 MessageBoxA **一次都不会被调**）\n"
         "  --trace-inputs      打印 trace 输入清单（exe 路径串 / guest 命令行 / 环境块 / 时钟起点）\n"
         "  --until shim        跑到第一次 shim 调用就停（L1）\n"
         "  --until ea <hex>    跑到指定 EA 就停（L2 = 0x4BA890）\n"
@@ -195,6 +198,7 @@ int main(int argc, char** argv) {
     bool report = false;
     bool real_time = false;
     bool skip_logo = false;
+    bool accept_recovery_dialog = false;
     bool trace_inputs = false;
     std::string log_level = "warn";
     std::string log_cats;
@@ -294,6 +298,8 @@ int main(int argc, char** argv) {
             real_time = true;
         } else if (std::strcmp(a, "--skip-logo") == 0) {
             skip_logo = true;
+        } else if (std::strcmp(a, "--accept-recovery-dialog") == 0) {
+            accept_recovery_dialog = true;
         } else if (std::strcmp(a, "--trace-inputs") == 0) {
             trace_inputs = true;
         } else if (std::strcmp(a, "--until") == 0 && i + 1 < arg_count) {
@@ -895,6 +901,8 @@ int main(int argc, char** argv) {
         return 1;
     }
     machine.setSkipLogo(skip_logo);
+    // ★ 默认**绕过**恢复判定（= "marker 不存在" = 上次正常结束）；传 flag 才走引擎真实判定。
+    machine.setAcceptRecoveryDialog(accept_recovery_dialog);
 
     // ★ 0 点的**配置**必须先于脚本解析：`before-anchor` / `after-anchor` 的解析期判据要问
     //   "有没有 `--anchor-script`"（没开却写段标记 ⇒ 解析期报错）。配置跨 `clear()` 存活

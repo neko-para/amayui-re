@@ -423,13 +423,6 @@
       "reason": "SCOPE §1 菜单整体 no-op：LoadMenuA 返回非空假句柄（不解析菜单资源）"
     },
     {
-      "target": "user32!MessageBoxA",
-      "kind": "stub",
-      "impl": "apps/emulator-lift/src/shims/user32_menu.cpp",
-      "boundary": "import",
-      "reason": "SCOPE §1 模态 no-op：MessageBoxA 返回 IDOK(1)（关闭确认 / 存档命名直接继续）"
-    },
-    {
       "target": "user32!RegisterClassA",
       "kind": "stub",
       "impl": "stub_trap",

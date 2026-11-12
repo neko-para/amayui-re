@@ -1524,6 +1524,26 @@ const MUTATIONS = [
   //   ★ 只短路 helper（不回退调用点）：调用点仍在，证明的正是"回写真的落到了 kPlViewport"，
   //     不是"某处少调了一次"这种形状。
   {
+    file: 'apps/emulator-lift/src/runtime/message_box.cpp',
+    from: '        index = spec.buttons.size() > 1 ? 1 : 0;',
+    to: '        index = 0;',
+    guard: 'ctest:messagebox',
+    ctest: 'messagebox',
+    buildDir: 'apps/emulator-lift/out',
+    what: 'MB_YESNO 的默认键从 IDNO(7) 改成 IDYES(6) ⇒ `0x4BA82B cmp eax,6` 会成立（删 marker + 弹启动设置并退出）⇒ messagebox 的返回值表当场红',
+  },
+
+  {
+    file: 'apps/emulator-lift/src/runtime/message_box.cpp',
+    from: 'constexpr int kDimAlpha = 160;           // 末帧变暗的 α（0..255）；余量 = 255-160 = 95',
+    to: 'constexpr int kDimAlpha = 0;           // 末帧变暗的 α（0..255）；余量 = 255-160 = 95',
+    guard: 'ctest:messagebox-window',
+    ctest: 'messagebox-window',
+    buildDir: 'apps/emulator-lift/out',
+    what: '末帧变暗的 α 从 160 改成 0（画面不做变暗）⇒ messagebox-window 的角像素 0x5F5F5F 变成 0xFFFFFF，当场红',
+  },
+
+  {
     file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
     from:
       'void writeViewportFullTarget(X86& cpu, std::uint32_t pe, std::uint32_t w, std::uint32_t h) {\n' +

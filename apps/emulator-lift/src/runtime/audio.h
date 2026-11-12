@@ -217,6 +217,11 @@ public:
     void setFillInFlightForTest(std::uint32_t obj_ea);
     // 仅夹具：读回 `filling_obj_`（断言"清 0 真的生效"；生产路径不要用）。
     std::uint32_t fillInFlightForTest() const { return filling_obj_.load(); }
+    // ★ 只读公开面：本线程是否是音频 feeder 线程（`isFeederThread()` 的公开转发）。
+    //   存在理由：feeder 也会调 shim（`sub_4B6C30` 的 fill 里），而 `MessageBoxA` 这类
+    //   "只能主线程进模态"的 shim 必须能在**不碰 wm/presenter** 的前提下先判自己在哪条线程上
+    //   （`runtime/message_box.cpp` / `shims/user32_menu.cpp`）。⛔ 不是新状态、不改任何行为。
+    bool onFeederThread() const { return isFeederThread(); }
 
 private:
     struct Buffer {

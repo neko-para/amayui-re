@@ -65,6 +65,9 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/present_sdl.cpp
     # ★ 窗口调试叠层（`--overlay`）：纯逻辑（5×7 位图字体 + 行格式化 + RGBA8 矩形绘制），无 SDL 类型。
     src/runtime/overlay.cpp
+    # ★ 宿主自绘模态框（MessageBox；`REQ-01M75S724...` / `REQ-01M75T14...`）：
+    #   纯逻辑（uType→spec / 布局 / 命中 / 状态机）+ 唯一一处模态循环 + CPU 合成一整幅 RGBA8。
+    src/runtime/message_box.cpp
     src/runtime/frame_blit.cpp
     src/runtime/d3d9_gpu.cpp
     src/runtime/ddraw_surface.cpp
@@ -412,6 +415,24 @@ if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN")
         SKIP_RETURN_CODE 77
         TIMEOUT 1200)
 
+    # ---- assets：恢复判定（`--accept-recovery-dialog`）的计数守卫 ----
+    # `REQ-01M75T14STFFK4BE6FXN5ERGN3`。判据见 tests/recovery_dialog.cpp 文件头：
+    # ① 同一 `--appdata` 跑两次（第一次写 `$$AGE.TMP`，第二次带 flag）；
+    # ② 默认档：`user32!MessageBoxA(...,00000034)` **0 行** + 摘要 `recovery  : bypassed`；
+    # ③ 带 flag：恰 1 行且 `-> 00000007`（IDNO —— 答 YES 是陷阱）。
+    # ★ 找不到 marker ⇒ 测试自己 `LIFT_SKIP`(77)（`set:RegFilePath` 未取证，不是判据红）。
+    # ★ 一律 `--present headless`：窗口档传 flag 后会**真的等人**（CTest 会挂到 TIMEOUT）。
+    add_executable(lift-recovery-dialog tests/recovery_dialog.cpp)
+    target_link_libraries(lift-recovery-dialog PRIVATE emulator-lift-runtime)
+    add_test(NAME recovery-dialog COMMAND lift-recovery-dialog
+        $<TARGET_FILE:emulator-lift>
+        "${LIFT_ASSETS_GAME_DIR}"
+        "${CMAKE_CURRENT_BINARY_DIR}/recovery-work")
+    set_tests_properties(recovery-dialog PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 1800)
+
     # ---- assets：**feeder 臂**的段级 override 读数守卫（`bov= / bovd= / bovf=`）----
     # REQ-01M75W6BB3PY3MF42ZTS23KTBS。判据见 tests/feeder_seg_e2e.cpp 文件头：
     # ① 子进程 exit 0；② 日志里 `feeder=host-thread` + `device=ok`（缺 ⇒ SKIP 77：量错了臂）；
@@ -700,6 +721,27 @@ add_test(NAME input-unfinished COMMAND lift-input-unfinished)
 add_executable(lift-skip-logo tests/skip_logo.cpp)
 target_link_libraries(lift-skip-logo PRIVATE emulator-lift-runtime)
 add_test(NAME skip-logo COMMAND lift-skip-logo)
+
+# ---- pure：MessageBox（uType→返回值表 / headless 不阻塞 / 模态状态机 / Yield 单令牌）----
+# ★ 判据见 `tests/messagebox.cpp` 文件头。顶层无条件注册 ⇒ **pure** 档（不需要安装 / 窗口 / LFS）：
+#   假 sink + 脚本化输入；**真窗口**的合成/贴图由下面的 `messagebox-window` 守卫（dummy + software）。
+add_executable(lift-messagebox tests/messagebox.cpp)
+target_link_libraries(lift-messagebox PRIVATE emulator-lift-runtime)
+add_test(NAME messagebox COMMAND lift-messagebox)
+
+# ---- pure：MessageBox 的**窗口像素**守卫（T3）+ 直出失败清理（M6 复审）----
+# ★ 判据见 `tests/messagebox_window.cpp` 文件头：`presentModal` 之后回读窗口像素（角变暗 / 面板 /
+#   按钮 / accent / 居中 / 正文色），并断言"directOverlay 成功 + directPresent 失败"时 endModal
+#   仍释放纹理与 target_current。顶层无条件注册 ⇒ **pure** 档（判据 = 注册位置）。
+# ★ 默认臂用 dummy + software（无窗口系统 ⇒ 测试自己 SKIP 77）；`-gpu` 臂**不**设 dummy
+#   （直出要真 claim 窗口），无 GPU ⇒ SKIP 77 —— 与 `overlay` / `overlay-gpu` 同一口径。
+add_executable(lift-messagebox-window tests/messagebox_window.cpp)
+target_link_libraries(lift-messagebox-window PRIVATE emulator-lift-runtime)
+add_test(NAME messagebox-window COMMAND lift-messagebox-window)
+set_tests_properties(messagebox-window PROPERTIES
+    ENVIRONMENT "SDL_VIDEODRIVER=dummy" SKIP_RETURN_CODE 77)
+add_test(NAME messagebox-window-gpu COMMAND lift-messagebox-window --gpu)
+set_tests_properties(messagebox-window-gpu PROPERTIES SKIP_RETURN_CODE 77)
 
 # ---- pure：guest 后缓冲格式选择（六种 masks，不按 bpp 猜）----
 add_executable(lift-frame-blit tests/frame_blit.cpp)

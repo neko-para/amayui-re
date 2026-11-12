@@ -15,7 +15,7 @@
 | 类别 | 偏差 | 做法 | 用户可见代价 | 仍必须保留 |
 |---|---|---|---|---|
 | **永久 no-op**（大概率一直不做） | **菜单** | 整体 no-op：`LoadMenuA` 返回非空假句柄、`SetMenu` 返回 TRUE、`TrackPopupMenu` 立即返回 0 | 无 Win32 菜单栏（游戏标题菜单不是它） | 窗口创建 / 消息泵 / 输入 / region / 计时器 |
-| 延后实现 | **模态**（有限） | 延后实现：只做**关闭窗口的二次确认**（`MessageBoxA` 的 OK / Cancel 语义）；⛔ 不做 AGERC 提供的复杂设置对话框。**AGERC.DLL 按真实 guest 模块装载**（PE 节映射进 guest / 真实 HINSTANCE=ImageBase / 资源与版本从该镜像解析）；它的三个导出（`_GetInstance@0` / `_ShowDialog@12` / `_OperateMenu@16`）仍按本文 §1 的模态 no-op stub；镜像不存在 ⇒ `LoadLibrary` 返回 0 + 126（⛔ 不造假句柄），未实现的 AGERC 代码被执行 = **loud failure**（未实现导入 / fault 诊断，⛔ 不静默）。**镜像来源只有两段：默认 `--game-dir/AGERC.DLL`（安装树里那份=汉化免壳件，40/40 资源可映射），`--agerc` 可显式覆盖；两段都拿不到 ⇒ `LoadLibrary` 0 + 126**（⛔ 不造假句柄、⛔ 不回退 `DATA1.ALF` 的条目 —— 引擎本身也不回退，那条约只作取证对照）。**不需要拆壳件** —— 加壳只发生在正版根件（AsProtect，26/40 条资源在文件里没有字节）。伪 HICON 只作 `.rsrc` 映射真的失败时的**应急**（loud log），⛔ 不是预期路径、⛔ 不 fake 资源内容 | 当前仍是 `IDOK` no-op；关闭确认直接继续；设置对话框不生效；窗口图标可能是伪 HICON（不显示在客户区） | 配置读写的**文件**路径（INI / SYS4REG.INI）、存档本身；`_GetInstance` 的返回值 = **真实模块基址**（可当 HINSTANCE 传给 `LoadIconA`） |
+| **已实现（自建模态对话框；headless 降级为默认返回值；2026-11-12 用户口径）** | **模态**（有限） | **系统模态 + SDL 自行实现的窗口**：`MessageBoxA` 在 shim 里进宿主模态循环；面板 / 正文 / 按钮由宿主 **CPU 合成一整幅不透明 RGBA8**（字体走 `FontEngine`，日文可见），经 `PresentSink::modalPresenter()` 一次性贴上（renderer 用逻辑坐标 letterbox，直出用 `directOverlay`+`directPresent`；★ **已知限制**：直出把模态图 **1:1** 贴到画面原点，窗口 resize / letterbox 后**不缩放、可能被裁**；renderer 路径自动 letterbox。窗口默认尺寸 == 后台缓冲 ⇒ 正常路径两条等价）；返回值按 `uType` 给合法值（**`MB_YESNO` 的默认键与 X/Esc 一律 `IDNO(7)`** —— 答 YES 会弹启动设置并退出）；headless / 无 sink / feeder ⇒ 立即默认值 + 一行 warn（⛔ 不阻塞）。⛔ 不做 AGERC 提供的复杂设置对话框（`_ShowDialog@12` 仍按 stub 口径，另一张单）。**AGERC.DLL 按真实 guest 模块装载**（PE 节映射进 guest / 真实 HINSTANCE=ImageBase / 资源与版本从该镜像解析）；它的三个导出（`_GetInstance@0` / `_ShowDialog@12` / `_OperateMenu@16`）仍按本文 §3 的 stub 口径；镜像不存在 ⇒ `LoadLibrary` 返回 0 + 126（⛔ 不造假句柄），未实现的 AGERC 代码被执行 = **loud failure**（未实现导入 / fault 诊断，⛔ 不静默）。**镜像来源只有两段：默认 `--game-dir/AGERC.DLL`（安装树里那份=汉化免壳件，40/40 资源可映射），`--agerc` 可显式覆盖；两段都拿不到 ⇒ `LoadLibrary` 0 + 126**（⛔ 不造假句柄、⛔ 不回退 `DATA1.ALF` 的条目 —— 引擎本身也不回退，那条约只作取证对照）。**不需要拆壳件** —— 加壳只发生在正版根件（AsProtect，26/40 条资源在文件里没有字节）。伪 HICON 只作 `.rsrc` 映射真的失败时的**应急**（loud log），⛔ 不是预期路径、⛔ 不 fake 资源内容 | 窗口档会真的弹宿主自绘框并**等用户回答**（对话框期间 guest 冻结；单线程泵 / `--audio virtual` / `--audio off` 档音频停，真 feeder 档是否继续取决于后端）；headless 档看不到框、立即返回默认值；AGERC 设置对话框不生效；窗口图标可能是伪 HICON（不显示在客户区） | 配置读写的**文件**路径（INI / SYS4REG.INI）、存档本身；`_GetInstance` 的返回值 = **真实模块基址**（可当 HINSTANCE 传给 `LoadIconA`） |
 | 永久 no-op | **注册表** | 整体 no-op：`RegOpenKeyExA` / `RegCreateKeyExA` 成功 + 非空假句柄；`RegQueryValueExA` 恒 `ERROR_FILE_NOT_FOUND(2)`（调用方回落默认值）；`RegSetValueExA` 成功但不落盘；`RegEnumValueA` 恒 `ERROR_NO_MORE_ITEMS(259)`；`RegCloseKey` 成功 | 注册表里的设置**不持久**；每次按默认值启动 | 句柄形态与错误码（成功 / 2 / 259）；配置读写的**文件**路径（INI / SYS4REG.INI）仍真写 |
 | 永久 no-op | **摇杆** | 无设备：`joyGetNumDevs` 返回 0、`joyGetPosEx` 返回 `JOYERR_UNPLUGGED(167)`、`joyGetDevCapsA` 返回 `MMSYSERR_NODRIVER(6)` | 游戏若必须用摇杆则不可用（键盘 / 鼠标不受影响） | 键盘 / 鼠标输入（M2）；摇杆枚举的返回码 |
 | **已实现（方案 C，2026-11-07）** | **音频** | **真 feeder 线程 + 独立 mixer 线程**：`AudioEngine` 实现游标 / 4 个位置通知 / 状态机 / 逐缓冲 `WAVEFORMATEX` 转换 / 混音 / SDL3 输出；`CreateThread(sub_4B5AA0)` 由 `ResumeThread` 启动真宿主线程，feeder 有自己的 `X86` / guest 栈 / 私有块缓存并执行 `sub_4B6C30`（PCM 仍由 guest 解码器产生）；guest 的每槽 `CRITICAL_SECTION` 映射到宿主递归锁。`--audio=virtual`/无 `--real-time` 时回退到方案 D 的主线程泵。**WAV 头 / 缓冲层是真的**（`REQ-01M6QSVR5NJDQVFHY6RX3934DN`）：`mmio*` 沿 guest 文件句柄真解析 RIFF；`IDirectSoundBuffer8` 的 `QI(IDirectSoundNotify)` / `SetNotificationPositions` 真存真投递。MCI / mixer 仍是成功 stub。默认 `--audio=sdl` + **静音**（`--sound` 才出声：设备 / 混音 / 喂料 / guest DS 调用照跑，只在交付前覆盖缓冲）；`--audio=off` 回到旧 silent。 | `--sound` 时能听到 BGM / SE / 语音；SE 延迟 ≈ 100 ms；主线程不再被 fill 卡住 | 设备游标 / 通知次序 / 逐缓冲格式 / 混音 PCM；`timeGetTime` / `timeSetEvent` / `timeKillEvent` / `timeGetDevCaps` 不变 |
@@ -57,7 +57,8 @@
 
 ## 2. 被跳过的 spec 条款（点名）
 
-- 菜单 / 模态：Win32 菜单与对话框族（`WM_COMMAND` 的菜单命令、`DialogBoxParamA` 等）。
+- 菜单 / AGERC 设置对话框：Win32 菜单与对话框族（`WM_COMMAND` 的菜单命令、`DialogBoxParamA` 等）。
+  ★ 例外：`MessageBoxA` 已实现为**宿主自绘模态**（见 §1 的模态行），不在本条被跳过之列。
 - 音频：MCI CD-DA / MIDI 仍是成功 stub；**DirectSound 设备语义已按方案 C 实现**（游标 / 通知 / 混音 /
   逐缓冲格式 / 真 feeder 线程），PCM 仍由 guest 解码器产生。
 - 视频：MF 的 session / topology / EVR / DXVA2 内部；只保留影片 opcode 的状态推进。
@@ -72,8 +73,10 @@
 
 每处 stub 必须：
 
-1. 返回**合理值**（`HMENU` 非空、`SetMenu` TRUE、`MessageBoxA` IDOK、`HRESULT` 成功）；
-2. **不阻塞、不等待**（`TrackPopupMenu` 立即返回；影片 opcode 推进）；
+1. 返回**合理值**（`HMENU` 非空、`SetMenu` TRUE、`HRESULT` 成功）；
+2. **仍为 stub 的菜单族不阻塞、不等待**（`TrackPopupMenu` 立即返回；影片 opcode 推进）。
+   ★ 例外：`MessageBoxA` 已不是 stub（`add` 登记）：窗口档按设计**故意阻塞等人**，headless / feeder /
+   无 sink ⇒ 立即返回默认值（`runtime/message_box.h`）；
 3. **留一条可回查的记录**（`runtime/log.h` 分级）：默认 `warn` 下 `Info` / `Debug` 可能不打印，
    但调用点必须存在，`--log-level info|debug` / `--log-cat` 可查；⛔ 不是"没有记录"。
 4. 在覆盖清单 `data/lift/overrides.json` 里登记 `kind: stub` + `reason`。

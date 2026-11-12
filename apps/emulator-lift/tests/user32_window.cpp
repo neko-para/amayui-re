@@ -1131,7 +1131,8 @@ int main() {
         //   ctest 只在失败时显示它，直接跑二进制时能当场看见转码结果。
         std::fputs(log.c_str(), stderr);
         LIFT_CHECK_EQ_U32(r4.ea, kSentinel);
-        // ① 语义不变
+        // ① 返回值：0x41 = MB_OKCANCEL | MB_ICONINFORMATION ⇒ 默认键 = OK(1)；headless（没有 sink）
+        //     ⇒ 立即返回默认值、不建窗口、不阻塞（`runtime/message_box.h` 的返回值表）。
         LIFT_CHECK_EQ_U32(m.mem().rd32(kMBResult), 1u);
         // ② 转码后的真实文本（UTF-8）+ 原始 type
         const std::string want_caption = std::string("caption=\"") + "エラー：DirectSound" + "\"";
@@ -1140,7 +1141,10 @@ int main() {
             std::string("text=\"") + "DirectSoundが使用できません\\r\\n音を出力出来ません" + "\"";
         LIFT_CHECK(log.find(want_text) != std::string::npos);
         LIFT_CHECK(log.find("type=0x00000041") != std::string::npos);
-        LIFT_CHECK(log.find("⇒ 返回 IDOK(1)（headless 不建窗口）") != std::string::npos);
+        // ★ 旧口径「⇒ 返回 IDOK(1)（headless 不建窗口）」是**历史**：现在按 uType 给值，
+        //   而且下一行会明说"没有模态呈现后端 ⇒ 立即默认值"（headless 不阻塞的机械证据）。
+        LIFT_CHECK(log.find("⇒ 默认键值 1（窗口档进宿主模态；headless 立即返回）") != std::string::npos);
+        LIFT_CHECK(log.find("headless / 没有模态呈现后端 ⇒ 立即返回默认值 1") != std::string::npos);
         // ③ 一行一条：正文里的 CRLF 被转义 ⇒ 日志里没有裸的 CRLF 跑进那行
         LIFT_CHECK(log.find("DirectSoundが使用できません\r\n") == std::string::npos);
     }

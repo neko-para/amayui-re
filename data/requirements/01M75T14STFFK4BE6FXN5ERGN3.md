@@ -2,8 +2,9 @@
 
 - id: REQ-01M75T14STFFK4BE6FXN5ERGN3
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/recovery_dialog.cpp#recovery-dialog
 - tags: [emulator-lift cli boot]
 
 ## 目标
@@ -40,8 +41,9 @@
 2. **默认跳过**；`--accept-recovery-dialog` 关掉绕过、走引擎真实判定路径。
 3. **默认跳过的语义** = "marker 文件不存在" = "上次正常结束"，**不是**"替用户答 NO"。
    机械判据：默认时 `MessageBoxA` **一次都不会被调**；传 flag 后会。
-4. **不实现"真弹窗"**：全仓没有 SDL 消息框，shim 恒 IDOK、不建窗口、不阻塞 ⇒ 传 flag 只能恢复"真实判定路径"，
-   弹框依旧是静默应答。⛔ 不要为此引新的 UI 依赖；若要做真弹窗，另开单。
+4. **真弹窗（2026-11-12 用户新口径，覆盖本条原裁决）**：已实现「系统模态 + SDL 自绘」对话框
+   （`runtime/message_box.*`；窗口档阻塞、可注入点击/键；headless/feeder 降级为默认返回值 + warn）。
+   `--accept-recovery-dialog` 时走真实判定并弹框；默认仍绕过。
 5. **与 `REQ-01M75S724HE50D26EEMDNY3Z54`（折叠三件套）的顺序**：本单可先落。但那单把 `MessageBoxA` 改成
    "按 `uType` 给合法值"时，**MB_YESNO 的默认答案必须定 `IDNO(7)`** —— 依据就是上面 `0x4BA82B cmp eax,6`
    （答 YES 会弹启动设置并退出）。本条写进那单的实现要求。
@@ -56,6 +58,14 @@
 
 ## 未做
 
-- 真弹窗（无 UI 依赖）。
+- 无（真弹窗已实现；旧"不实现真弹窗"的裁决已由 2026-11-12 用户口径覆盖）。
 - `set:UseAppDataFolder` / `set:RegFilePath` 的取值来源**未取证**（用户禁止从本地样本反推）——
   本方案不依赖路径，故不影响实现；将来要断言"marker 落在哪"时再补。
+
+## 收口（2026-11-12）
+- 默认绕过：`kRecoveryCheckEa=0x004BA718` 上 `cpu_.eax()=0`（不改 eip、不代答 NO）⇒ `MessageBoxA` **0 行**；
+  `--accept-recovery-dialog` 关掉绕过 ⇒ 走真实判定并弹**宿主自绘模态框**（窗口档阻塞、可注入点击/键；
+  headless/feeder 降级默认返回值 + warn），实测 `…,00000034) -> 00000007`、`messagebox: calls=1 last-result=7`。
+- 守卫：`tests/recovery_dialog.cpp#recovery-dialog`（assets，10 checks）· `tests/messagebox.cpp`（pure，118 checks）·
+  `tests/messagebox_window.cpp`（pure，27/8 checks，精确色）· 变异 `MB_YESNO→IDYES` 红 · 直出失败清理变异 5 条红。
+- 门禁：默认 ctest **89/89**（5 SKIP）· `LIFT_ASSETS=1` 95/95 · `pnpm test` 546 · `pnpm verify` 460 · `lift check` 绿 · requirements 6/6 · `git diff --check` 干净。

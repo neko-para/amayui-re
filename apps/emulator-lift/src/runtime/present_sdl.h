@@ -19,6 +19,7 @@
 #include <memory>
 #include <string>
 
+#include "runtime/message_box.h"
 #include "runtime/present.h"
 
 namespace lift {
@@ -43,7 +44,7 @@ struct SdlWindowOptions {
     std::uint64_t screenshot_frame = 0;
 };
 
-class SdlWindow final : public PresentSink, public GpuRaster {
+class SdlWindow final : public PresentSink, public GpuRaster, public ModalPresenter {
 public:
     SdlWindow();
     ~SdlWindow() override;
@@ -59,6 +60,15 @@ public:
     //   没有事件源时 PresentSink 的 0ms 轮询语义不变。
     void pumpHostEvents(int wait_ms);
     bool stopRequested() const override;
+    // ★ 宿主自绘模态框（`runtime/message_box.h`）。`modalPresenter()` 返回自己 ⇒ 只要窗口在，
+    //   模态就有呈现缝；headless 没有 sink ⇒ 走 `runModalDialog` 的"立即默认值"分支。
+    //   ⛔ `presentModal` **不** `++frame_no`、**不** 盖 present-tail 章、**不** 消耗关窗宽限帧。
+    ModalPresenter* modalPresenter() override { return this; }
+    bool presentModal(const std::uint8_t* rgba, int w, int h, std::string* err) override;
+    void waitHostEvents(int wait_ms) override;
+    bool closeRequested() const override;
+    bool modalActive() const override;
+    void endModal() override;
     // 把 SDL 事件翻译成 guest 的 Win32 消息（WM_CLOSE / 键鼠 / 滚轮）；窗口关掉后置 stop。
     void attachWindowManager(WindowManager* windows);
     // 测试用：拿 SDL 窗口 ID 构造 WINDOW_CLOSE_REQUESTED。
@@ -109,6 +119,13 @@ public:
     //   ⛔ 只许在 `init()` **之前**用（`init()` 之后生产路径手里就是这个壳 ⇒ 换后端会静默改行为；
     //   实现里有**运行时**检查：`init()` 之后调用直接忽略）。替身的生命周期归调用方，本类不持有。
     void setGpuRasterForTest(GpuRaster* raster);
+    // ★ 夹具缝：只替换**直出呈现器**（`ModalPresenter` 的直出路径），不 claim 窗口、不建 GPU 设备。
+    //   存在理由：`presentModal` 的直出失败清理（`directOverlay` 成功 / `directPresent` 失败，M6）
+    //   只在 resize / swapchain out-of-date / device lost 上才触发 —— 没有 GPU 的机器造不出来，
+    //   而"失败后把模态纹理留在 GPU 上"正是本缝要钉的回归点。`directAttachWindow` 不会被调
+    //   （本缝直接把 `directPresentActive()` 置真）。
+    //   ⛔ 只许在 `init()` **之前**用（之后调用直接忽略，与 `setGpuRasterForTest` 同口径）。替身生命周期归调用方。
+    void setDirectPresenterForTest(GpuDirectPresenter* direct);
 
     // 诊断 / 测试
     // ★ 「走的是不是 SDL_GPU」在两条路径上都成立：renderer 路径看 `SDL_GetGPURendererDevice()`，

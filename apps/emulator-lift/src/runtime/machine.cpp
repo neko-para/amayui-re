@@ -19,6 +19,7 @@
 #include "runtime/d3d9_pipeline.h"
 #include "runtime/exec.h"
 #include "runtime/guest_token.h"
+#include "runtime/message_box.h"
 #include "runtime/present.h"
 #include "runtime/sha256.h"
 #include "runtime/watch.h"
@@ -35,6 +36,14 @@ Machine* g_active = nullptr;
 //   ⛔ 这不是"跳过 boot"：root script 仍从 dword 0 执行，只是 0x130 读到 0，不走 call-script LOGO。
 constexpr std::uint32_t kShowLogoInitEa = 0x004BAA37u;
 constexpr std::uint32_t kShowLogoFieldOffset = 0x0005EB5Cu;
+
+// ★ `--accept-recovery-dialog` 的判定点（锚来自 `.lst`；机械读数见 `.tmp/audio-token/messagebox-design.md` §5）：
+//   `.text:004BA713 call sub_454730` / `.text:004BA718 cmp eax,1` / `.text:004BA71B jnz loc_4BA856`
+//   ⇒ `0x4BA718` = `call` 的**返回地址**。块在控制流指令处收尾（`decode.cpp`），dispatcher 下一
+//   迭代从返回地址取新块 ⇒ 它**必然是块起点**（不必回退到函数入口 0x4BA6B0）。
+//   EAX = `sub_454730()`（"能不能打开 $$AGE.TMP"）⇒ 置 0 = "打不开" = "上次正常结束"。
+//   ⛔ 只写 EAX：不改 eip、⛔ 不代答 NO（裁决 3；默认档 `MessageBoxA` 因此**一次都不会被调**）。
+constexpr std::uint32_t kRecoveryCheckEa = 0x004BA718u;
 }  // namespace
 
 Machine* activeMachine() { return g_active; }
@@ -1298,6 +1307,20 @@ RunResult Machine::run(const RunOptions& opts) {
             r.reason = StopReason::MaxInsns;
             break;
         }
+        // ★ `--accept-recovery-dialog`（默认**绕过**）：判定点在 `sub_454730` 的返回地址
+        //   `0x004BA718`（块起点），EAX = "$$AGE.TMP 能不能打开"。置 0 = "打不开" = 上次正常结束
+        //   ⇒ `cmp eax,1` 为假 ⇒ 走 0x4BA856 干净返回，**永不到 0x4BA825 的 MessageBoxA**。
+        //   ⛔ 不改 eip、⛔ 不代答 NO（裁决 3：默认档的机械判据就是"MessageBoxA 一次都不被调"）。
+        //   ★ 传了 flag 就完全不碰（`recovery_bypass_checked_` 保持 false ⇒ 摘要写"未绕过"）。
+        if (!accept_recovery_dialog_ && !recovery_bypass_checked_ && cpu_.eip == kRecoveryCheckEa) {
+            recovery_bypass_checked_ = true;
+            recovery_bypass_prior_eax_ = cpu_.eax();
+            cpu_.eax() = 0;
+            recovery_bypass_applied_ = true;
+            std::printf("[recovery] @ %08X EAX %u -> 0（跳过「前回正常終了しませんでした」判定；"
+                        "--accept-recovery-dialog 恢复真实判定）\n",
+                        kRecoveryCheckEa, recovery_bypass_prior_eax_);
+        }
         // ★ `--skip-logo`：T_Command 已构造、show-logo 已初始化为 1，且指针尚未发布。
         //   在这里把引擎自己的字段写 0 —— 之后 `mov ds:dword_55E1BC, eax` 发布的就是
         //   "show-logo=0" 的对象；root script 的 `0x130` 因而跳过 `call-script 5262`。
@@ -2213,6 +2236,7 @@ TraceInputs Machine::traceInputs() const {    TraceInputs t;
     t.clock_start_100ns = clock_.epoch100ns();
     t.real_time = clock_.realTime();
     t.skip_logo = skip_logo_;
+    t.accept_recovery_dialog = accept_recovery_dialog_;
     return t;
 }
 
@@ -2234,6 +2258,9 @@ void Machine::dumpTraceInputs(std::FILE* out) const {
                  t.real_time ? "REAL-TIME（⚠ 逐字节断言必须跳过）" : "virtual",
                  (unsigned long long)t.clock_start_100ns);
     if (t.skip_logo) std::fprintf(out, "trace-input skip-logo= 1（写引擎 show-logo 标志；不改 root script）\n");
+    if (t.accept_recovery_dialog) {
+        std::fprintf(out, "trace-input recovery= 1（**不**跳过前回判定：走引擎真实路径，会到 MessageBoxA）\n");
+    }
     std::fprintf(out, "trace-input hash     = %016llX\n", (unsigned long long)traceInputsHash());
 }
 
@@ -2266,6 +2293,11 @@ std::uint64_t Machine::traceInputsHash() const {
     if (t.skip_logo) {
         const std::uint8_t skip_logo = 1;
         mix(&skip_logo, 1);
+    }
+    // ★ 同理：只有真的传了 `--accept-recovery-dialog` 才混入（默认档的 hash 基线不变）。
+    if (t.accept_recovery_dialog) {
+        const std::uint8_t accept_recovery = 1;
+        mix(&accept_recovery, 1);
     }
     return h;
 }
@@ -2347,6 +2379,29 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
             std::fprintf(out, "skip-logo : NOT applied（钩子命中但对象/字段不可写）\n");
         } else {
             std::fprintf(out, "skip-logo : 未命中（run 在 T_Command 构造前结束）\n");
+        }
+    }
+    // ★ 恢复判定（默认**绕过**）：三种形态都要能机械区分（判据见 tests/recovery_dialog.cpp）。
+    //   ⛔ 这**不是**"靠不开窗"：绕过与 marker 在不在无关（EAX=0 ⇒ `cmp eax,1` 为假 ⇒ 干净返回）。
+    if (accept_recovery_dialog_) {
+        std::fprintf(out, "recovery  : 未绕过（--accept-recovery-dialog ⇒ 走引擎真实判定）\n");
+    } else if (recovery_bypass_applied_) {
+        std::fprintf(out, "recovery  : bypassed @ 0x%08X (EAX %u -> 0)\n", kRecoveryCheckEa,
+                     recovery_bypass_prior_eax_);
+    } else {
+        std::fprintf(out, "recovery  : 未命中（run 在判定前结束）\n");
+    }
+    // ★ MessageBox 调用账（`REQ-01M75S724HE50D26EEMDNY3Z54` 判据②的兄弟证据）：
+    //   `calls` 取自 `ShimDef::call_count`（`shims.cpp` 的**唯一** `++` 点），后两项记最后一次。
+    //   只在**有调用**或**显式传了恢复 flag** 时打（默认档不新增噪声行；判据仍可读 trace）。
+    //   ⛔ `calls=0` 时后两项没有意义（写 0 只是占位，别读成"上次返回了 0"）。
+    {
+        const ShimDef* mb = shims_.find("user32", "MessageBoxA");
+        const std::uint64_t mb_calls = mb != nullptr ? mb->call_count : 0;
+        if (mb_calls > 0 || accept_recovery_dialog_) {
+            std::fprintf(out, "messagebox: calls=%llu last-type=0x%08X last-result=%u\n",
+                         static_cast<unsigned long long>(mb_calls), messageBoxLastType(),
+                         messageBoxLastResult());
         }
     }
     std::fprintf(out, "blocks    : %zu (insns cached %zu, hits %zu, misses %zu)\n", cache_.blockCount(),

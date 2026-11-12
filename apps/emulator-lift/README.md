@@ -184,6 +184,7 @@ apps/emulator-lift/
   CMakePresets.json / vcpkg.json      ← windows-x64 / linux-x64 / macos-arm64；依赖 sdl3 + zydis + freetype + glm
   README.md / SCOPE.md / docs/        ← 口径 / 用户拍板的偏差 / 计划长文
   src/main.cpp                        ← CLI：--exe --lst --game-dir --appdata --agerc --skip-logo
+                                        --accept-recovery-dialog
                                         --until shim|ea --trace-shims --trace-blocks
                                         --max-insns --max-frames --dump-frame --time-limit
                                         --safe-memory --report --bench --smoke
@@ -197,6 +198,7 @@ apps/emulator-lift/
   src/runtime/native_overrides.{h,cpp}← guest 函数级 native override（试点；默认关）
   src/runtime/present.{h,cpp}         ← 唯一记录点（hash / frameCount / BMP）+ 可选 PresentSink
   src/runtime/present_sdl.{h,cpp}     ← 真实 SDL 窗口 + GPU API 呈现（pimpl；头文件不暴露 SDL 类型）
+  src/runtime/message_box.{h,cpp}     ← ★ MessageBox 宿主自绘模态框：uType→返回值表 / 布局 / 状态机 / 唯一模态循环 / CPU 合成
   src/runtime/input.{h,cpp}           ← ★ 输入应用层：SDL 真实事件与 `--input-script` 注入的**唯一**汇合点
   src/runtime/input_script.{h,cpp}    ← ★ 指令式输入时间线（at frame / at guest_ms / click / key ...）
   src/runtime/frame_blit.{h,cpp}      ← guest 后缓冲 masks → 宿主纹理格式（六种；纯函数）
@@ -366,6 +368,16 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
   （`GetAsyncKeyState`、`GetCursorPos`、`PeekMessageA`/`GetMessageA` → `DispatchMessageA` → WndProc）
   因此读的是同一份状态；⛔ 不存在"注入只发消息、`GetAsyncKeyState` 仍读 OS"的第二份状态。
 - 注入**不经过 SDL**、不读 OS 键鼠、不需要窗口焦点；`--present headless`（不初始化 SDL 视频）也能注入。
+- ⚠ **模态对话框期间时间线只剩 `at wall_ms`**：`MessageBoxA` 的宿主自绘模态框会阻塞 guest
+  （`runModalDialog` 每轮只推进 `at wall_ms`），`frame` / `insn` / `guest_ms` 全部冻住 ⇒ 给模态
+  写的注入脚本必须用 `at wall_ms`（该 run 因此不可 diff）；key 要保持按住，后面得再有一条
+  远期动作（否则脚本"结束即抬起"，模态可能看不到按下）。★ Enter / Esc 是**电平**判据：若该键
+  在框打开**之前**就已按下，框打开的第一帧就会回答（既定口径，不是缺陷）。
+- ⚠ **模态框的呈现有两条路径，直出有已知限制**：renderer 路径按逻辑坐标（LETTERBOX）自动缩放；
+  **GPU 直出把模态图 1:1 贴到画面原点** —— 窗口被 resize / 出现黑边后对话框**不缩放、可能被裁**。
+  窗口默认尺寸 == 后台缓冲时两者等价（正常路径）；这是有意的第一版限制（设计 §2.3），不是缺陷。
+  `--present-screenshot` 回读的是**窗口像素**：模态帧也走同一条回读（文件名里的 `{frame}` 仍是
+  最后一只 **guest** 帧的号 —— 模态帧不自增帧号）。
 - 坐标是 **guest 客户区坐标**（引擎的 1280×720 虚拟屏）。`client → screen` 只经过
   `WindowManager::setCursorClientPos`（+ 窗口原点），与 SDL 路径**同一处**；⛔ 注入侧没有第二套映射。
 - 时间线在**块边界**推进（`Machine::run`）；guest 阻塞在 `GetMessageA` 时由**窗口模式的宿主事件泵**

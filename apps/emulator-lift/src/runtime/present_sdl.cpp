@@ -167,6 +167,9 @@ struct SdlWindow::Impl {
     // ★ 夹具缝（`setGpuRasterForTest`）：非空时所有**转发**都到它，生命周期归夹具。
     //   ⛔ 生产路径永远是 nullptr；`init`/`shutdown` 只碰 `gpu_raster`（所有权那一份）。
     GpuRaster* raster_view = nullptr;
+    // ★ 夹具缝（`setDirectPresenterForTest`）：只替换直出呈现器，不经 `raster()`。
+    //   生命周期归夹具；`init` 时把它接到 `direct` 上并置 `direct_present = true`。
+    GpuDirectPresenter* direct_view = nullptr;
     // 转发壳的**唯一**取用点：所有 `SdlWindow::raster*` 都走它（⛔ 不许各处直接写 `gpu_raster`，
     // 否则夹具缝与"漏转发"两件事都会各自漏一条）。
     GpuRaster* raster() const { return raster_view != nullptr ? raster_view : gpu_raster.get(); }
@@ -187,6 +190,21 @@ struct SdlWindow::Impl {
     bool close_pending = false;
     int close_frames_left = 0;
     std::uint64_t close_deadline_ns = 0;
+    // ---- 宿主自绘模态框（`runtime/message_box.h`）----
+    // ★ 模态期间**不**走 `submitFrame` ⇒ 3 帧关窗宽限天然不动；但 `pumpEvents` 里那条
+    //   500 ms 硬截止会走 ⇒ 用 `modal_active` 挂起它（AGERC 单的建议 2，见设计 §7.2）。
+    //   X 在模态期间只置 `modal_close_requested`（⛔ 不 post WM_CLOSE、⛔ 不 stop）；
+    //   Esc 在 `handleEvent` 里直接跳过 `requestClose`（模态只答框）。
+    bool modal_active = false;
+    bool modal_close_requested = false;
+    SDL_Texture* modal_tex = nullptr;  // SDL_Renderer 路径：整幅模态图的纹理
+    int modal_tex_w = 0;
+    int modal_tex_h = 0;
+    // 直出路径：本模态在 `directOverlay` 上留过图 ⇒ 收口时必须**释放**它（否则窗口停在这张图）。
+    bool modal_direct_overlay = false;
+    // boot（还没有任何 guest 帧）时给直出 target 铺的那张黑底：一次模态里只传一次
+    // （悬停/按下会让模态多画几帧；⛔ 不必每帧重传 1280×720）。
+    bool modal_target_uploaded = false;
 
     // ---- 调试叠层（`--overlay`，默认关）----
     // ★ 两条呈现路径共用**同一份**行 / 尺寸（`overlayLines`），只有上传方式不同。
@@ -256,6 +274,11 @@ void SdlWindow::Impl::requestStop() {
 
 void SdlWindow::Impl::requestClose() {
     if (stop || close_pending) return;
+    // ★ 模态期间：X 只置位，不 post WM_CLOSE、不启动宽限（关窗要在答完框之后才发生）。
+    if (modal_active) {
+        modal_close_requested = true;
+        return;
+    }
     if (windows == nullptr || windows->primaryWindow() == 0) {
         // 还没有 guest 窗口（或没有消息泵）⇒ 没有可确认的对象，直接收口。
         requestStop();
@@ -268,7 +291,7 @@ void SdlWindow::Impl::requestClose() {
 }
 
 void SdlWindow::Impl::advanceCloseFrame() {
-    if (!close_pending || stop) return;
+    if (!close_pending || stop || modal_active) return;
     if (close_frames_left > 0) --close_frames_left;
     if (close_frames_left <= 0 || SDL_GetTicksNS() >= close_deadline_ns) requestStop();
 }
@@ -513,7 +536,9 @@ void SdlWindow::Impl::handleEvent(const SDL_Event& event) {
             const std::uint32_t scan = event.key.scancode ? static_cast<std::uint32_t>(event.key.scancode) : 0u;
             // ★ 注入路径与真人路径在**同一段代码**里：状态 + WM_* 一起落地（所有权判定在里面）。
             if (windows != nullptr) input::key(*windows, vk, down, scan, InputSource::Os, now_ms);
-            if (down && vk == 0x1B) requestClose();  // ESC = 用户要退出（与旧行为一致）
+            // ESC = 用户要退出（与旧行为一致）。★ 模态期间**只答框**：⛔ 不启动关窗宽限
+            //   （否则一次 Esc 既答了框、又让窗口开始关；见 `modal_active` 那一段）。
+            if (down && vk == 0x1B && !modal_active) requestClose();
             break;
         }
         case SDL_EVENT_MOUSE_MOTION: {
@@ -568,7 +593,8 @@ void SdlWindow::Impl::pumpEvents(int wait_ms) {
     } else {
         while (SDL_PollEvent(&event)) handleEvent(event);
     }
-    if (close_pending && !stop && SDL_GetTicksNS() >= close_deadline_ns) requestStop();
+    // ★ 500 ms 硬截止在模态期间必须挂起（模态就是等人；否则弹框会被"关窗"打断）。
+    if (!modal_active && close_pending && !stop && SDL_GetTicksNS() >= close_deadline_ns) requestStop();
 }
 
 SdlWindow::SdlWindow() : impl_(std::make_unique<Impl>()) {}
@@ -614,7 +640,14 @@ bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
     //   ★ 实测口径：窗口一旦 claim 给 GPU device，就不能再对它 `SDL_CreateRenderer`
     //   （同一窗口的 swapchain 只能有一个主人）——所以直出成立时**不建 renderer**；
     //   claim 失败（dummy 视频 / 驱动不支持）才回退 SDL_Renderer 上传路径，并把 SDL 的错误打出来。
-    if (impl_->gpu_raster != nullptr) {
+    // ★ 夹具缝优先：`setDirectPresenterForTest` 注入的替身**不 claim** 窗口（见头文件），
+    //   只用来在无 GPU 机器上钉 `presentModal` 的直出失败清理（M6）。
+    if (impl_->direct_view != nullptr) {
+        impl_->direct = impl_->direct_view;
+        impl_->direct_present = true;
+        impl_->renderer_name = "fake-direct";
+        impl_->gpu_driver = "fake";
+    } else if (impl_->gpu_raster != nullptr) {
         GpuDirectPresenter* dp = impl_->gpu_raster->directPresenter();
         if (dp != nullptr) {
             std::string derr;
@@ -682,6 +715,7 @@ void SdlWindow::shutdown() {
         impl_->direct = nullptr;
     }
     impl_->direct_present = false;
+    impl_->direct_view = nullptr;  // 夹具替身已 detach；⛔ 不要让同一个 SdlWindow 重新 init 时还挂着它
     impl_->direct_error.clear();
     impl_->direct_w = 0;
     impl_->direct_h = 0;
@@ -712,6 +746,17 @@ void SdlWindow::shutdown() {
         SDL_DestroyTexture(impl_->overlay_tex);
         impl_->overlay_tex = nullptr;
     }
+    // 模态纹理同理（它也只活在 renderer 上）。
+    if (impl_->modal_tex != nullptr) {
+        SDL_DestroyTexture(impl_->modal_tex);
+        impl_->modal_tex = nullptr;
+    }
+    impl_->modal_tex_w = 0;
+    impl_->modal_tex_h = 0;
+    impl_->modal_active = false;
+    impl_->modal_close_requested = false;
+    impl_->modal_direct_overlay = false;
+    impl_->modal_target_uploaded = false;
     if (impl_->renderer != nullptr) {
         SDL_DestroyRenderer(impl_->renderer);
         impl_->renderer = nullptr;
@@ -967,6 +1012,172 @@ void SdlWindow::pumpHostEvents(int wait_ms) {
     impl_->pumpEvents(wait_ms);
 }
 
+// =======================================================================================
+// 宿主自绘模态框（`runtime/message_box.h` 的 ModalPresenter）
+// ★ 一次贴一整幅**不透明 RGBA8**（CPU 已合成好）：两条呈现路径都只需要一次拷贝式 blit，
+//   不需要混合 ⇒ 同一个像素结果（软件渲染器上也能断言）。
+// ★ ⛔ `presentModal` **不** `++frame_no`、**不** 盖 present-tail 章、**不** 消耗关窗宽限帧：
+//   帧号 / 帧预算 / 运行摘要不被对话框污染（设计 §7.2 的裁决）。
+// =======================================================================================
+bool SdlWindow::presentModal(const std::uint8_t* rgba, int w, int h, std::string* err) {
+    if (rgba == nullptr || w <= 0 || h <= 0) {
+        if (err) *err = "模态帧为空 / 尺寸非法";
+        return false;
+    }
+    impl_->modal_active = true;
+    // ---- 路径 ①：GPU 直出（1:1 贴到画面原点；窗口默认 == 后台缓冲 ⇒ 正常路径恰好正确）----
+    if (impl_->direct_present && impl_->direct != nullptr) {
+        // boot（还没有任何 guest 帧）⇒ 直出的 target 可能还没建：先铺一张黑底当"画面"，
+        // 否则 `directPresent` 会以 "target 未准备" 失败（模态图本身已含变暗的底）。
+        if (!impl_->sized && !impl_->modal_target_uploaded) {
+            std::vector<std::uint8_t> black(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4u, 0u);
+            for (std::size_t i = 3; i < black.size(); i += 4) black[i] = 255;
+            const SurfaceFormat fmt{};  // 32bpp BGRA（直出 target 的固定格式）
+            if (!impl_->direct->directUploadGuest(fmt, black.data(), static_cast<std::uint32_t>(w) * 4u, w, h,
+                                                  err)) {
+                return false;
+            }
+            impl_->modal_target_uploaded = true;
+        }
+        if (!impl_->direct->directOverlay(rgba, w, h, err)) return false;
+        // ★ 只要 overlay 上传成功，就记下"本模态在直出叠层上留过图"——**即使下面 present 失败**
+        //   也必须在 `endModal` 里清掉（M6 复审：窗口 resize / swapchain out-of-date / device lost
+        //   都会让 `directPresent` 失败；不清理则模态纹理留在 GPU 上一直盖住后续帧）。
+        impl_->modal_direct_overlay = true;
+        // ★ 一帧用过就消费掉（成功 / 失败都算）：下一次 `submitFrame` 仍会先把 guest 上传
+        //   （boot 分支的 `directUploadGuest` 会把 `target_current_` 置 true；⛔ 不许停在模态那一帧）。
+        impl_->direct->directSetTargetCurrent(false);
+        if (!impl_->direct->directPresent(err)) return false;
+        // 可选像素证据（与 renderer 路径同一口径：`directReadback` 会合成叠层 = 模态图）。
+        if (impl_->shotWanted()) {
+            std::vector<std::uint8_t> xrgb;
+            int rw = 0;
+            int rh = 0;
+            if (!impl_->direct->directReadback(&xrgb, &rw, &rh, err)) return false;
+            SDL_Surface* shot = SDL_CreateSurfaceFrom(rw, rh, SDL_PIXELFORMAT_XRGB8888, xrgb.data(), rw * 4);
+            if (shot == nullptr) {
+                if (err) *err = std::string("SDL_CreateSurfaceFrom(modal) 失败：") + SDL_GetError();
+                return false;
+            }
+            const bool shot_ok = impl_->saveShot(shot, err);
+            SDL_DestroySurface(shot);
+            if (!shot_ok) return false;
+        }
+        return true;
+    }
+    // ---- 路径 ②：SDL_Renderer 上传（逻辑坐标 = 整幅画面；LETTERBOX 自动吞掉黑边）----
+    if (impl_->renderer == nullptr) {
+        if (err) *err = "SDL 窗口未初始化";
+        return false;
+    }
+    SDL_SetRenderTarget(impl_->renderer, nullptr);
+    SDL_SetRenderViewport(impl_->renderer, nullptr);
+    SDL_SetRenderClipRect(impl_->renderer, nullptr);
+    if (!SDL_SetRenderLogicalPresentation(impl_->renderer, w, h, SDL_LOGICAL_PRESENTATION_LETTERBOX)) {
+        if (err) *err = std::string("SDL_SetRenderLogicalPresentation(modal) 失败：") + SDL_GetError();
+        return false;
+    }
+    if (impl_->modal_tex == nullptr || impl_->modal_tex_w != w || impl_->modal_tex_h != h) {
+        if (impl_->modal_tex != nullptr) SDL_DestroyTexture(impl_->modal_tex);
+        // ★ 字节序：模态图是**内存序 RGBA8**（composeModalFrame 写 R,G,B,A）；SDL 的格式名按
+        //   u32 位序 ⇒ 内存序 R,G,B,A = `ABGR8888`（与叠层 / 主纹理同一条口径，见 drawOverlayRenderer）。
+        impl_->modal_tex = SDL_CreateTexture(impl_->renderer, SDL_PIXELFORMAT_ABGR8888,
+                                             SDL_TEXTUREACCESS_STREAMING, w, h);
+        if (impl_->modal_tex == nullptr) {
+            if (err) *err = std::string("SDL_CreateTexture(modal) 失败：") + SDL_GetError();
+            return false;
+        }
+        // 不透明：混合必须是 NONE（默认混合会按 alpha 混，面板就变半透明了）。
+        if (!SDL_SetTextureBlendMode(impl_->modal_tex, SDL_BLENDMODE_NONE) ||
+            !SDL_SetTextureScaleMode(impl_->modal_tex, SDL_SCALEMODE_NEAREST)) {
+            if (err) *err = std::string("SDL_SetTexture(modal) 状态失败：") + SDL_GetError();
+            return false;
+        }
+        impl_->modal_tex_w = w;
+        impl_->modal_tex_h = h;
+    }
+    if (!SDL_UpdateTexture(impl_->modal_tex, nullptr, rgba, w * 4)) {
+        if (err) *err = std::string("SDL_UpdateTexture(modal) 失败：") + SDL_GetError();
+        return false;
+    }
+    SDL_SetRenderDrawColor(impl_->renderer, 0, 0, 0, 255);
+    SDL_RenderClear(impl_->renderer);
+    if (!SDL_RenderTexture(impl_->renderer, impl_->modal_tex, nullptr, nullptr)) {
+        if (err) *err = std::string("SDL_RenderTexture(modal) 失败：") + SDL_GetError();
+        return false;
+    }
+    // ★ 可选：模态帧也走**同一份窗口像素回读**（`--present-screenshot` / 测试捕获）——
+    //   这是"框真的画上了"的唯一像素证据。⛔ 帧号**不自增**：文件名里的 {frame} 仍是最后一只
+    //   guest 帧的号（boot 还没 Present 过 ⇒ 0），与"present-tail 不被污染"是同一条裁决。
+    if (impl_->shotWanted()) {
+        SDL_Surface* shot = SDL_RenderReadPixels(impl_->renderer, nullptr);
+        if (shot == nullptr) {
+            if (err) *err = std::string("SDL_RenderReadPixels(modal) 失败：") + SDL_GetError();
+            return false;
+        }
+        const bool shot_ok = impl_->saveShot(shot, err);
+        SDL_DestroySurface(shot);
+        if (!shot_ok) return false;
+    }
+    // ★ 与 `submitFrame` 同一条 M0 口径：`SDL_RenderPresent` 是会等的宿主调用 ⇒ 放令牌。
+    bool presented = false;
+    {
+        GuestToken::YieldGuard yield(guestToken());
+        presented = SDL_RenderPresent(impl_->renderer);
+    }
+    if (!presented) {
+        if (err) *err = std::string("SDL_RenderPresent(modal) 失败：") + SDL_GetError();
+        return false;
+    }
+    return true;
+}
+
+void SdlWindow::waitHostEvents(int wait_ms) {
+    // 端到端等待（真实睡）；调用方（runModalDialog）已经把它套在 YieldGuard 里。
+    if (impl_->window == nullptr) return;
+    impl_->pumpEvents(wait_ms);
+}
+
+bool SdlWindow::closeRequested() const { return impl_->modal_close_requested; }
+bool SdlWindow::modalActive() const { return impl_->modal_active; }
+
+void SdlWindow::endModal() {
+    if (!impl_->modal_active) return;
+    impl_->modal_active = false;
+    const bool close_after = impl_->modal_close_requested;
+    impl_->modal_close_requested = false;
+    if (impl_->modal_tex != nullptr) {
+        SDL_DestroyTexture(impl_->modal_tex);
+        impl_->modal_tex = nullptr;
+    }
+    impl_->modal_tex_w = 0;
+    impl_->modal_tex_h = 0;
+    impl_->modal_target_uploaded = false;
+    // ★ 逻辑呈现尺寸恢复成**最后一只 guest 帧**的尺寸（模态帧每帧都设 (w,h)，而 `submitFrame`
+    //   只在纹理重建时设 ⇒ 不恢复的话，异常路径下可能把 guest 逻辑尺寸停在模态那一份上）。
+    if (impl_->renderer != nullptr && impl_->texture != nullptr && impl_->tex_w > 0 && impl_->tex_h > 0) {
+        SDL_SetRenderLogicalPresentation(impl_->renderer, impl_->tex_w, impl_->tex_h,
+                                         SDL_LOGICAL_PRESENTATION_LETTERBOX);
+    }
+    // 直出路径：模态图是**叠层纹理**，收口时必须显式释放（否则窗口永远停在框上）。
+    if (impl_->modal_direct_overlay) {
+        impl_->modal_direct_overlay = false;
+        if (impl_->direct != nullptr) {
+            std::string ignored;
+            impl_->direct->directOverlay(nullptr, 0, 0, &ignored);
+            // ★ 与 `presentModal` 同一口径：模态期间 target 的"最新像素"属于模态，不是 guest
+            //   ⇒ 收口时**无条件**消费掉（即使上一次 `directPresent` 失败，next submit 也要重新上传）。
+            impl_->direct->directSetTargetCurrent(false);
+        }
+        // 真·调试叠层（`--overlay`）下一帧要重传（它的尺寸/内容键已经不对了）。
+        impl_->overlay_w = 0;
+        impl_->overlay_h = 0;
+        impl_->overlay_text_key.clear();
+    }
+    // 用户真的点了 X（不是 Esc）⇒ 答完框之后才启动常规关窗宽限。
+    if (close_after) impl_->requestClose();
+}
+
 void SdlWindow::attachWindowManager(WindowManager* windows) { impl_->windows = windows; }
 
 std::uint32_t SdlWindow::windowIdForTest() const {
@@ -1139,6 +1350,14 @@ void SdlWindow::setGpuRasterForTest(GpuRaster* raster) {
     //   FLAGS 里有它）⇒ `assert` 会被编掉，等于没有约束。
     if (impl_->gpu_raster != nullptr) return;
     impl_->raster_view = raster;
+}
+
+void SdlWindow::setDirectPresenterForTest(GpuDirectPresenter* direct) {
+    // ⛔ 只许在 `init()` 之前用：`init()` 之后生产路径的 `direct` 已经接好，换掉会静默改呈现语义。
+    // ★ 运行时检查（RelWithDebInfo 会编掉 assert）：窗口已建 / 已有真直出后端 ⇒ 忽略。
+    if (impl_->window != nullptr) return;
+    if (impl_->gpu_raster != nullptr) return;
+    impl_->direct_view = direct;
 }
 
 }  // namespace lift

@@ -105,6 +105,9 @@ struct TraceInputs {
     std::string agerc_sha256;   // AGERC 镜像的 sha256（空 = 没有镜像）
     std::string native_overrides;  // 解析后的 override 集（name@EA/conv/argB；空 = 全关）
     bool skip_logo = false;        // `--skip-logo`（写引擎 show-logo 标志；不是输入路径变更）
+    // ★ `--accept-recovery-dialog`：**默认绕过**「前回正常終了しませんでした」判定；传它 =
+    //   恢复引擎真实判定路径（会走到 `MessageBoxA`）。与 `skip_logo` 同理：一开就是另一条执行路径。
+    bool accept_recovery_dialog = false;
     std::uint64_t clock_start_100ns = 0;
     bool real_time = false;
 };
@@ -235,6 +238,18 @@ public:
     void setSkipLogo(bool on) { skip_logo_ = on; }
     bool skipLogo() const { return skip_logo_; }
     bool skipLogoApplied() const { return skip_logo_applied_; }
+
+    // ★ `--accept-recovery-dialog`（`REQ-01M75T14STFFK4BE6FXN5ERGN3`）：**默认跳过**恢复判定。
+    //   语义 = "marker 文件打不开" = "上次正常结束" ⇒ 在 `kRecoveryCheckEa`（0x004BA718，块起点）
+    //   把 `EAX` 置 0。⛔ 不改 eip、⛔ 不代答 NO（裁决 3）；传这个开关就完全不碰判定
+    //   （`recoveryBypassApplied()` 保持 false，摘要写"未绕过"）。
+    void setAcceptRecoveryDialog(bool on) { accept_recovery_dialog_ = on; }
+    bool acceptRecoveryDialog() const { return accept_recovery_dialog_; }
+    // 钩子**命中并写过** EAX（默认档才有意义；传 flag 时恒 false）。
+    bool recoveryBypassApplied() const { return recovery_bypass_applied_; }
+    bool recoveryBypassChecked() const { return recovery_bypass_checked_; }
+    // 钩子写之前读到的 EAX（= `sub_454730` 的返回值；摘要 `EAX n -> 0` 用它）。
+    std::uint32_t recoveryBypassPriorEax() const { return recovery_bypass_prior_eax_; }
 
     // ★ 指令式输入时间线（`--input-script`）：见 `runtime/input_script.h`。
     //   加载失败 ⇒ false + err（带行号）；⛔ 不静默跳过。可以在 run 之前 / 两次 run 之间替换。
@@ -486,6 +501,11 @@ private:
     bool skip_logo_checked_ = false;  // 钩子点已过（成功 / 失败都算，避免反复尝试）
     bool skip_logo_applied_ = false;
     std::uint32_t skip_logo_object_ = 0;
+    // ★ 恢复判定（`--accept-recovery-dialog` / `kRecoveryCheckEa`）：见上面的 setter。
+    bool accept_recovery_dialog_ = false;
+    bool recovery_bypass_checked_ = false;  // 钩子点已过（只算一次，⛔ 不反复写 EAX）
+    bool recovery_bypass_applied_ = false;
+    std::uint32_t recovery_bypass_prior_eax_ = 0;
     std::string exe_path_;
     // ★ 诊断状态（`LIFT_FRAME_TRACE=1`）；默认全不参与执行。
     bool frame_trace_ = false;    std::chrono::steady_clock::time_point frame_trace_last_{};
