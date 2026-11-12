@@ -65,10 +65,24 @@ const isDerivedBuildDir = (name) => name === 'out' || name.startsWith('out-') ||
 /** 说明书必须覆盖的三件事（正是"只讲查询不讲编辑"的反面）；最后一项是"指向脚本自描述" */
 const REQUIRED = ['## 怎么查', '## 怎么改', 'describe'];
 
+/**
+ * **缓存目录**（标准 `CACHEDIR.TAG`，https://bford.info/cachedir/）：工具自己的派生缓存，
+ * 由工具解释、不是本仓的结构化数据。判据不写具体工具名 —— 实测 2026-11-12：`clice`（C++ LSP）
+ * 在仓根建了 `.clice/cache/v15/manifest.json` + `.clice/server.json`，它自带 `CACHEDIR.TAG`
+ * 与 `.gitignore`（`*`），但 `git status` 看不见 ⇒ 被这条守卫当成本仓自有 JSON 而红。
+ */
+const isCacheDir = (dir) => {
+  try {
+    return fs.existsSync(path.join(dir, 'CACHEDIR.TAG'));
+  } catch {
+    return false;
+  }
+};
+
 function walkJson(dir, out = []) {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
     if (e.isDirectory()) {
-      if (SKIP_DIRS.has(e.name) || isDerivedBuildDir(e.name)) continue;
+      if (SKIP_DIRS.has(e.name) || isDerivedBuildDir(e.name) || isCacheDir(path.join(dir, e.name))) continue;
       walkJson(path.join(dir, e.name), out);
     } else if (e.isFile() && e.name.endsWith('.json')) {
       out.push(path.join(dir, e.name));

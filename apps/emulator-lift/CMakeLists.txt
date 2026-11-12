@@ -461,6 +461,22 @@ if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN")
         SKIP_RETURN_CODE 77
         TIMEOUT 900)
 
+    # ---- assets：AGERC `_ShowDialog@12(-1)` = UI 状态查询（不是对话框）----
+    # 判据见 tests/agerc_ui_state.cpp 文件头：TITLE.BIN 后光标到客户区顶边 ⇒ 引擎悬停计时器
+    # 调到 `0x4B929F`；trace 必须是 `(FFFFFFFF,...) -> 00000001`（本线故意挡菜单栏路径），
+    # 且没有 `id=4294967295` warn / 没有 `id=4` 尝试 / 没有 `GetWindowRect` abort。
+    add_executable(lift-agerc-ui-state tests/agerc_ui_state.cpp)
+    target_link_libraries(lift-agerc-ui-state PRIVATE emulator-lift-runtime)
+    add_test(NAME agerc-ui-state COMMAND lift-agerc-ui-state
+        $<TARGET_FILE:emulator-lift>
+        "${LIFT_ASSETS_GAME_DIR}"
+        "${CMAKE_CURRENT_BINARY_DIR}/agerc-ui-state-work")
+    set_tests_properties(agerc-ui-state PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        ENVIRONMENT "SDL_VIDEODRIVER=dummy"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 900)
+
     # ---- assets：**feeder 臂**的段级 override 读数守卫（`bov= / bovd= / bovf=`）----
     # REQ-01M75W6BB3PY3MF42ZTS23KTBS。判据见 tests/feeder_seg_e2e.cpp 文件头：
     # ① 子进程 exit 0；② 日志里 `feeder=host-thread` + `device=ok`（缺 ⇒ SKIP 77：量错了臂）；

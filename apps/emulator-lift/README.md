@@ -323,6 +323,15 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
 - 自动化：`--input-script` 的 `close_window` 宿主动作可像点 X 一样请求关窗；
   CTest `close-confirm`（assets）用 `--close-confirm exit|title|cancel` 跑三臂。
 - trace 输入清单会记 `trace-input close-confirm= …`（非 `ask` 才混进 hash）。
+- **`_ShowDialog@12` 的 `id == -1` 不是对话框**：真实 AGERC 里它是**UI 状态查询**
+  （`0x100383CB`：`return dword_10150E70`，位图；没有 AGERC 框开着 = 0）。引擎在
+  **光标贴住客户区顶边**的 100 ms 悬停计时器里调它（EA `0x4B929F`；`test eax,eax` 非 0
+  就跳过 AGERC 顶边菜单栏 `_ShowDialog(4)`）。本线不实现那张菜单栏 ⇒ **故意回答 1**
+  （“已有 AGERC UI 开着”）：照真机回答 0 会让引擎立刻拿 `id==4` 的 stub 返回值去
+  `GetWindowRect`（不存在的句柄 ⇒ loud failure / abort）。trace 里会看到
+  `agerc!_ShowDialog@12(FFFFFFFF,…) -> 00000001` —— 这**不是** warn、也不是“缺一个对话框”。
+  CTest `agerc-ui-state`（assets）守这条：TITLE.BIN 后光标到顶边 ⇒ 停在 `0x4B92A5`，
+  返回值必须 1、且没有 `id=4` 尝试 / 没有 `GetWindowRect` abort。
 
 ## 4.2 可切换呈现后端（`--present`）
 

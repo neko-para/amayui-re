@@ -9,8 +9,10 @@
 //     ⇒ 被 `MessageBoxA` 的恒 IDOK 压成"中止" ⇒ `WM_CLOSE` ⇒ 干净退出。
 //   · 本文件登记**4 个实现**（它们优先于真实代码）：
 //       `_GetInstance@0`  → **真实模块基址**（= HINSTANCE；guest 拿它当令牌传给 LoadIconA）
-//       `_ShowDialog@12`  → ★ 2026-11-12 起**桥接成系统对话框**（`SDL_ShowMessageBox`）：只处理 `id==3`（关窗二次确认
-//                            「終了」），其余选择子返回 1 + 一次 warn。⛔ 不读 AGERC 的 RT_DIALOG 资源
+//       `_ShowDialog@12`  → ★ 2026-11-12 起**桥接成系统对话框**（`SDL_ShowMessageBox`）：`id==3`（关窗二次确认
+//                            「終了」）弹系统框；`id==-1` 是 **UI 状态查询**（不是对话框）⇒ 本线故意
+//                            回答 1 挡住未实现的 AGERC 顶边菜单栏（见 `shimAgercShowDialog` 的注释）；
+//                            其余选择子返回 1 + 一次 warn。⛔ 不读 AGERC 的 RT_DIALOG 资源
 //                            （汉化件那份文本是乱码），文案在 `runtime/message_box.cpp` 的
 //                            `makeCloseConfirmSpec()`。`REQ-01M72JFZ87DJNT52DW4HB8SEV6` stage 1+2。
 //       `_OperateMenu@16` → 0（SCOPE §1，仍是 stub）
@@ -246,6 +248,35 @@ void shimAgercShowDialog(X86& cpu, ShimCall& call) {
     PresentSink* sink = nullptr;
     if (machine != nullptr && machine->presenter().hasSink()) {
         sink = machine->presenter().sink();
+    }
+    // ★ `id == -1` **不是对话框选择子**，是 AGERC 的"UI 状态查询"：
+    //   真实实现（AGERC.DLL `_ShowDialog` 体 0x10038330，switch 按 `id+1` 索引）在 case -1 只做
+    //   `mov eax, dword_10150E70` —— 返回"当前有哪些 AGERC 对话框开着"的位图（无框 = 0），
+    //   ⛔ 不创建任何窗口、不阻塞。引擎的读点：`0x4B929F`（WM_MOUSEMOVE 顶边悬停 100 ms 计时器
+    //   `sub_4B9240` 里 `test eax,eax` ⇒ **非 0 就认为"已有 AGERC UI"**，不再走开菜单栏
+    //   `_ShowDialog(4)` 的路径 `sub_408620`）。锚：`AGERC.DLL.lst` 0x100383CB / 0x10038861；
+    //   AGE.EXE `0x4B9240` / `0x4B929F`。
+    //
+    //   ★ 本模拟器**故意回答非 0**（= 1），这是 SCOPE §1「菜单 / AGERC 设置对话框 = 永久 no-op」
+    //   的显式偏差，不是真机语义：真机此刻是 0，引擎会去开 AGERC 的顶边菜单栏（`id==4`，
+    //   CreateDialogParam 一张**真窗口**）。我们不建那张窗口，若照真机回答 0，引擎下一步
+    //   `sub_408620` 拿到我们 stub 的返回值后立刻 `GetWindowRect(返回的 hwnd)` ⇒
+    //   `user32!GetWindowRect` 对不存在的句柄 **loud failure**（实测 2026-11-12：
+    //   `窗口句柄 0x00000001 不存在` ⇒ abort）。⇒ 用"UI 已开着"把引擎挡在菜单栏路径之外，
+    //   行为 = 没有 AGERC 顶边菜单栏（与 SCOPE 一致），且**不崩**。
+    //   ⛔ 不要"顺手改成返回 0"——那会把上面那条 abort 打开（`tests/agerc_ui_state.cpp` 守着）。
+    //   这条查询会被顶边悬停的 100 ms 计时器反复调用 ⇒ 只记**一次** info（默认 warn 级看不到）。
+    if (id == 0xFFFFFFFFu) {
+        static bool logged_ui_state_query = false;
+        if (!logged_ui_state_query) {
+            logged_ui_state_query = true;
+            shimLog(kAgerc, "_ShowDialog@12",
+                    "-1 是 AGERC 的 **UI 状态查询**（真机：返回 dword_10150E70 的位图，无框=0）；"
+                    "本线不实现 AGERC 菜单栏/设置对话框 ⇒ 故意回答 1（=“已有 AGERC UI”），"
+                    "挡住引擎的 `id==4` 菜单栏路径（详见 kernel32_agerc.cpp 本函数注释）");
+        }
+        call.result = 1;
+        return;
     }
     if (id != 3) {
         // ⛔ 只桥接关窗确认；AGERC 的其它对话框（设置等）仍是 stub（今天的行为 = 返回 1）。

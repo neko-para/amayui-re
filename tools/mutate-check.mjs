@@ -1050,6 +1050,23 @@ const MUTATIONS = [
   },
 
   {
+    // ★ 代表 "把 `_ShowDialog(-1)`（UI **状态查询**）当普通对话框 / 照真机回答 0" 这一类错。
+    //   判据：`apps/emulator-lift/tests/agerc_ui_state.cpp` —— TITLE.BIN 后光标到客户区顶边，
+    //   引擎悬停计时器调 `_ShowDialog(-1)`（EA 0x4B929F），本线故意回 1 挡住未实现的 AGERC
+    //   菜单栏 `id==4`。改回 0 ⇒ 引擎立刻 `GetWindowRect(id==4 的 stub 返回值)`（loud
+    //   failure / abort），或 trace 变 `-> 00000000` ⇒ 当场红。
+    file: 'apps/emulator-lift/src/shims/kernel32_agerc.cpp',
+    from: '        call.result = 1;\n        return;\n    }\n    if (id != 3) {',
+    to: '        call.result = 0;\n        return;\n    }\n    if (id != 3) {',
+    guard: 'ctest:agerc-ui-state',
+    ctest: 'agerc-ui-state',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '`_ShowDialog(-1)` 的 UI 状态查询改回真机语义 0 ⇒ 引擎去开未实现的 AGERC 菜单栏 ' +
+      '(id==4)、拿 stub 返回值 GetWindowRect ⇒ abort；agerc-ui-state 当场红',
+  },
+
+  {
     // ★ 代表 "解码失败被折叠成成功"这一类错（REQ-01M77CMJGJ9EJVNPFS2TKMMHD1）。
     //   判据：`apps/emulator-lift/tests/native_override.cpp` 的 ④c —— 被截断的流（输入提前耗尽 /
     //   输出没填满，comp≠out 的四种形状）必须 `false`；assets 档的

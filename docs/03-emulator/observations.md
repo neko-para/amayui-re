@@ -343,3 +343,26 @@
   **只量谓词等待本身**（`t1` 取在重取 `mutex_` 之前）⇒ **不含**混音器占用（`mixStep` 跨
   `generateTo`）；⛔ 不要把它当"调用方总卡顿"。`fill_waits == 0` 的运行里 Stop 照样发生很多次、
   只是都落在 fill 间隙 ⇒ ⛔ 不要把 `fill_wait_ms == 0` 读成"Stop 很便宜"。
+
+### OBS-20261112-04 · `_ShowDialog(-1)` 是 AGERC 的 UI **状态查询**，顶边悬停时被 100 ms 计时器轮询
+- **读数（本线口径，2026-11-12）**：`at marker TITLE.BIN` 后 `mouse_move 640 1`（客户区顶边 y=1）⇒
+  `agerc!_ShowDialog@12(FFFFFFFF,00010000,00000000) -> 00000001  ret=004B92A5`；
+  同一脚本把 `--until ea` 设成 `0x4B92A5` 时 run 在 **17.98 s** 内收口（CTest `agerc-ui-state`）。
+- **对照读数（把 -1 分支改成真机 0）**：同一条脚本立刻多出
+  `agerc!_ShowDialog@12(00000004,00010000,00000000) -> 00000001`，随后
+  `user32!GetWindowRect(00000001)` 报 `窗口句柄 0x00000001 不存在` ⇒ 进程 abort（exit 134）。
+- **真机语义（`.lst`）**：AGERC.DLL 的 `_ShowDialog` 体 `0x10038330` 按 `id+1` 做 12 路 switch；
+  case -1（`0x100383CB`）只有 `mov eax, dword_10150E70` —— 返回"当前哪些 AGERC 对话框开着"的
+  位图（无框 = 0；bit 8 = 終了框、bit 0x10 = 顶边菜单栏、bit 0x100/0x200/0x400 = 其它框），
+  **不创建窗口、不阻塞**；case 0/1/5-7（未知 id）走 `or eax,-1` 返回 -1。
+- **调用点**：AGE.EXE `0x4B9240`（WM_TIMER(1) / 顶边悬停）在 `0x4B929F` 调它；
+  `test eax,eax` 非 0 ⇒ 跳过顶边菜单栏 `sub_408620`（后者先 `or [game+0AAB44h], 400000h`，
+  再 `_ShowDialog(4)`，然后对返回值 `GetWindowRect`）。
+- **本线口径（2026-11-12）**：**故意返回 1**（不是真机的 0）挡住未实现的 AGERC 菜单栏：
+  若返回 0，实测 2026-11-12 macOS arm64 会走到 `_ShowDialog(4) -> 1` ⇒
+  `user32!GetWindowRect(00000001)` 报 `窗口句柄 0x00000001 不存在` 并 abort。
+  这条偏差与 SCOPE §1「菜单 / AGERC 设置对话框 = 永久 no-op」一致；守卫 `tests/agerc_ui_state.cpp`。
+- **复现**：`./out/emulator-lift --present window --present-hidden --present-driver software
+  --raster cpu --skip-logo --audio off --game-dir ../../links/install --appdata ../../.tmp/hover/appdata
+  --until ea 0x4B92A5 --trace-shims --input-script ../../.tmp/hover/hover.txt --time-limit 300`
+  （脚本两行：`at marker TITLE.BIN` + `mouse_move 640 1`）· 2026-11-12 · macOS arm64 / RelWithDebInfo
