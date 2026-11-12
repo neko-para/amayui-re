@@ -1,0 +1,2 @@
+[[rules]]
+compile_commands = ["apps/emulator-lift/out"]
