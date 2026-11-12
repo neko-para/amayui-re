@@ -1,0 +1,35 @@
+await script TITLE
+wait 5000 wall_ms
+timeout 30000
+
+click 1186 373
+
+await script GAMESTART
+wait 2000 wall_ms
+
+click 830 592
+
+await script SN0000
+wait 25000 wall_ms
+timeout 35000
+
+click 500 500 right
+wait 10000 wall_ms
+timeout 20000
+
+await script FELLOW
+wait 2000 wall_ms
+
+click 100 270
+
+wait 1000 wall_ms
+
+click 650 320
+
+await script TITLE
+wait 5000 wall_ms
+timeout 20000
+
+click 1180 640
+
+wait 10000 wall_ms

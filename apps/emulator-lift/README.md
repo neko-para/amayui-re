@@ -184,7 +184,7 @@ apps/emulator-lift/
   CMakePresets.json / vcpkg.json      ← windows-x64 / linux-x64 / macos-arm64；依赖 sdl3 + zydis + freetype + glm
   README.md / SCOPE.md / docs/        ← 口径 / 用户拍板的偏差 / 计划长文
   src/main.cpp                        ← CLI：--exe --lst --game-dir --appdata --agerc --skip-logo
-                                        --accept-recovery-dialog
+                                        --accept-recovery-dialog --close-confirm ask|exit|title|cancel
                                         --until shim|ea --trace-shims --trace-blocks
                                         --max-insns --max-frames --dump-frame --time-limit
                                         --safe-memory --report --bench --smoke
@@ -198,7 +198,7 @@ apps/emulator-lift/
   src/runtime/native_overrides.{h,cpp}← guest 函数级 native override（试点；默认关）
   src/runtime/present.{h,cpp}         ← 唯一记录点（hash / frameCount / BMP）+ 可选 PresentSink
   src/runtime/present_sdl.{h,cpp}     ← 真实 SDL 窗口 + GPU API 呈现（pimpl；头文件不暴露 SDL 类型）
-  src/runtime/message_box.{h,cpp}     ← ★ MessageBox 宿主自绘模态框：uType→返回值表 / 布局 / 状态机 / 唯一模态循环 / CPU 合成
+  src/runtime/message_box.{h,cpp}     ← ★ MessageBox / AGERC「終了」的纯映射：uType/选择子→ModalSpec + 策略（系统框在 present 缝）
   src/runtime/input.{h,cpp}           ← ★ 输入应用层：SDL 真实事件与 `--input-script` 注入的**唯一**汇合点
   src/runtime/input_script.{h,cpp}    ← ★ 指令式输入时间线（at frame / at guest_ms / click / key ...）
   src/runtime/frame_blit.{h,cpp}      ← guest 后缓冲 masks → 宿主纹理格式（六种；纯函数）
@@ -310,6 +310,20 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
 - CTest `skip-logo` 只守**字段写 / 邻居字节 / 关闭时不写 / 空对象不崩**；它不跑 boot、
   不看 draw 签名。⛔ 不要把“CTest 绿”当成“TITLE 首帧已验证”。
 
+## 4.1c 关窗二次确认（`--close-confirm`）
+
+真机点窗口 X 会走 AGERC `_ShowDialog@12` 的「終了」框（1 = プログラムを終了する / 2 = タイトルに戻る /
+0 = キャンセル）。本线把它桥接成**系统对话框**（`SDL_ShowMessageBox`；⛔ 不读 AGERC 资源、不还原像素）：
+
+- `--close-confirm ask`（缺省）：窗口档弹系统框；Esc/X = **0（キャンセル）**。
+- `--close-confirm exit|title|cancel`：**不弹框**，直接返回 1/2/0（`exit` 与 2026-11-12 之前的行为一致）。
+- 无窗口 / headless / feeder / 系统框起不来 ⇒ 返回 1（今天的行为）+ 一行 warn。
+- 结果 **2/0** 会撤掉宿主那次关窗请求（清 `close_pending`/宽限/deadline ⇒ 窗口留着）；
+  结果 **1** 保留（guest 自己走关窗；宽限只作兜底）。
+- 自动化：`--input-script` 的 `close_window` 宿主动作可像点 X 一样请求关窗；
+  CTest `close-confirm`（assets）用 `--close-confirm exit|title|cancel` 跑三臂。
+- trace 输入清单会记 `trace-input close-confirm= …`（非 `ask` 才混进 hash）。
+
 ## 4.2 可切换呈现后端（`--present`）
 
 **缺省 `--present headless`**：与今天逐字节一致（hash / frameCount / `--dump-frame` / `--max-frames`；
@@ -368,16 +382,14 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
   （`GetAsyncKeyState`、`GetCursorPos`、`PeekMessageA`/`GetMessageA` → `DispatchMessageA` → WndProc）
   因此读的是同一份状态；⛔ 不存在"注入只发消息、`GetAsyncKeyState` 仍读 OS"的第二份状态。
 - 注入**不经过 SDL**、不读 OS 键鼠、不需要窗口焦点；`--present headless`（不初始化 SDL 视频）也能注入。
-- ⚠ **模态对话框期间时间线只剩 `at wall_ms`**：`MessageBoxA` 的宿主自绘模态框会阻塞 guest
-  （`runModalDialog` 每轮只推进 `at wall_ms`），`frame` / `insn` / `guest_ms` 全部冻住 ⇒ 给模态
-  写的注入脚本必须用 `at wall_ms`（该 run 因此不可 diff）；key 要保持按住，后面得再有一条
-  远期动作（否则脚本"结束即抬起"，模态可能看不到按下）。★ Enter / Esc 是**电平**判据：若该键
+- ⚠ **系统对话框期间时间线只剩 `at wall_ms`**：`MessageBoxA` / AGERC「終了」框会弹**系统对话框**
+  （`SDL_ShowMessageBox`）并阻塞 guest（宿主自己的等待循环不再推进 `frame` / `insn` / `guest_ms`）
+  ⇒ 给对话框写的注入脚本必须用 `at wall_ms`（该 run 因此不可 diff）；key 要保持按住，后面得再有一条
+  远期动作（否则脚本"结束即抬起"，框可能看不到按下）。★ Enter / Esc 是**电平**判据：若该键
   在框打开**之前**就已按下，框打开的第一帧就会回答（既定口径，不是缺陷）。
-- ⚠ **模态框的呈现有两条路径，直出有已知限制**：renderer 路径按逻辑坐标（LETTERBOX）自动缩放；
-  **GPU 直出把模态图 1:1 贴到画面原点** —— 窗口被 resize / 出现黑边后对话框**不缩放、可能被裁**。
-  窗口默认尺寸 == 后台缓冲时两者等价（正常路径）；这是有意的第一版限制（设计 §2.3），不是缺陷。
-  `--present-screenshot` 回读的是**窗口像素**：模态帧也走同一条回读（文件名里的 `{frame}` 仍是
-  最后一只 **guest** 帧的号 —— 模态帧不自增帧号）。
+- ★ **系统对话框不做像素级还原**：`MessageBoxA` 的按钮文字 / 「終了」框的三个选项由
+  `runtime/message_box.h` 的 `ModalSpec` 决定，图标不还原、位置/尺寸由系统决定。
+  无窗口 / headless / feeder ⇒ **不弹框**，立即返回默认值 + 一行 warn。
 - 坐标是 **guest 客户区坐标**（引擎的 1280×720 虚拟屏）。`client → screen` 只经过
   `WindowManager::setCursorClientPos`（+ 窗口原点），与 SDL 路径**同一处**；⛔ 注入侧没有第二套映射。
 - 时间线在**块边界**推进（`Machine::run`）；guest 阻塞在 `GetMessageA` 时由**窗口模式的宿主事件泵**
@@ -410,6 +422,7 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
 | `key_down VK` / `key_up VK` | Win32 虚拟键码（1..255，十进制或 `0x`）；`key_up` 与 `mouse_up` 走同一条"至少被采样一次"保证 |
 | `profile_begin <label>` / `profile_end <label>` | 打开 / 关闭一个**区间 profiler** 窗口（§4.3.2）；边界 = 本动作的触发条件 |
 | `quit` | 触发时结束本次运行（`StopReason::Stopped`） |
+| `close_window` | 宿主动作：像用户点了窗口 X 一样请求关窗（`PresentSink::requestClose`；headless no-op）。用于关窗二次确认的自动化 |
 
 动作前必须先给时间（`at` / `after` / `wait`），否则解析失败（带行号，exit 2）。
 

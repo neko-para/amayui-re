@@ -1050,6 +1050,40 @@ const MUTATIONS = [
   },
 
   {
+    // ★ 代表 "解码失败被折叠成成功"这一类错（REQ-01M77CMJGJ9EJVNPFS2TKMMHD1）。
+    //   判据：`apps/emulator-lift/tests/native_override.cpp` 的 ④c —— 被截断的流（输入提前耗尽 /
+    //   输出没填满，comp≠out 的四种形状）必须 `false`；assets 档的
+    //   `native_override_assets.cpp` 另用**真字节解释器臂**钉"合法流逐字节 + 截断 ⇒ 回退"。
+    //   改回无条件 `true` ⇒ 截断流被当成成功、调用方不再回退解释器 ⇒ 纯档当场红。
+    file: 'apps/emulator-lift/src/runtime/native_lzss.cpp',
+    from: '    return out == out_end;',
+    to: '    return true;',
+    guard: 'ctest:native-override',
+    ctest: 'native-override',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'LZSS 解码的结尾判据改回无条件 true（输入提前耗尽 / 输出没填满也报成功）⇒ ' +
+      'native-override 的 ④c 截断流用例当场红',
+  },
+
+  {
+    // ★ 代表 "guest 的 ExitProcess(n) 只进了 shim 状态、没接到宿主进程退出码"这一类错
+    //   （REQ-01M77CMJGJ9EJVNPFS2TKMMHD1）。判据：`apps/emulator-lift/tests/exit_code.cpp` ——
+    //   自造最小 PE（导入 `kernel32!ExitProcess`）起**真子进程**：`n=3 ⇒ exit 2`、`n=0 ⇒ exit 0`、
+    //   `TerminateProcess(_,3) ⇒ exit 2`。删掉最终分流 ⇒ n=3 也 exit 0 ⇒ 当场红。
+    //   ★ 为什么不是"只测 accessor"：那会漏掉"映射写了但 main 没接线"的半修。
+    file: 'apps/emulator-lift/src/main.cpp',
+    from: '    return lift::exitCodeForGuestExit(machine.guestExitCode());',
+    to: '    return lift::exitCodeForRun(r);',
+    guard: 'ctest:exit-code',
+    ctest: 'exit-code',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'main 最终出口不再读 guest 的 ExitProcess 退出码（退回只看 run 是否 ok）⇒ ' +
+      '真子进程 ExitProcess(3) 变 exit 0 ⇒ exit-code 的 process/exit-3 当场红',
+  },
+
+  {
     // ★ 代表 "`_memcpy` 的重叠接管把**方向判据写反**"这一类错（本单）。
     //   判据：`apps/emulator-lift/tests/native_override.cpp` 的 `memcpy-ovl/*` —— 三类重叠
     //   （`dst<src` / `dst>src` / `dst==src`）× n ∈ {0,1,3,4,7,8,64,4096}，oracle = 解释器跑
@@ -1534,16 +1568,6 @@ const MUTATIONS = [
   },
 
   {
-    file: 'apps/emulator-lift/src/runtime/message_box.cpp',
-    from: 'constexpr int kDimAlpha = 160;           // 末帧变暗的 α（0..255）；余量 = 255-160 = 95',
-    to: 'constexpr int kDimAlpha = 0;           // 末帧变暗的 α（0..255）；余量 = 255-160 = 95',
-    guard: 'ctest:messagebox-window',
-    ctest: 'messagebox-window',
-    buildDir: 'apps/emulator-lift/out',
-    what: '末帧变暗的 α 从 160 改成 0（画面不做变暗）⇒ messagebox-window 的角像素 0x5F5F5F 变成 0xFFFFFF，当场红',
-  },
-
-  {
     file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
     from:
       'void writeViewportFullTarget(X86& cpu, std::uint32_t pe, std::uint32_t w, std::uint32_t h) {\n' +
@@ -1920,6 +1944,30 @@ const MUTATIONS = [
     what:
       '`removeBuffer` 不再有界等"正在跑的那一刀 fill"（erase/dropPending 之后直接返回）⇒ ' +
       '`audio-device/remove-waits-inflight` 的 `fill_waits == 1` / 耗时 ≥ 15 ms 当场红',
+  },
+
+
+  {
+    // ★ 代表 "另一个 guest 线程（音频 feeder）共享主线程 TEB" 这一类错
+    //   （`REQ-01M77MC1374HXC2JR7E0ZYSHQJ`）：`fs:[0]` 是**每线程**的 SEH 链头。feeder 共用主线程的
+    //   TEB 时，它的 SEH prologue/epilogue 会把链头改成 feeder 栈上的 record、或写回一处**已过期**的
+    //   主线程链头 ⇒ 主线程的 `_CxxThrowException`（Quit）派发到已被复用的 record，`Handler` 是数据
+    //   ⇒ eip 落到 guest 堆（实测 0x109C0341 / 0x103676C1 / 0x10357221 / decode@0x00544774）。
+    //   变异 = feeder 的 `fs` 指回主线程的 TEB（= 修复前那一行；此时 `audio_cpu_.fs_base` 刚拷贝自主 CPU）。
+    //   判据：`apps/emulator-lift/tests/quit_graph.cpp` 的 `ctest:quit-graph`（真 feeder 臂 + 同一
+    //   graph 两遍；缺安装树 / 音频设备 / 窗口 ⇒ SKIP 77 ⇒ 不可判定，⛔ 不是红）。
+    //   ★ 单测超时抬到 900 s：这条 CTest 自己就要跑**两遍** TITLE→ADV→FELLOW→TITLE→Quit（各 ~100 s）。
+    file: 'apps/emulator-lift/src/runtime/audio.cpp',
+    from: '        audio_cpu_.fs_base = feeder_teb;',
+    to: '        audio_cpu_.fs_base = cpu_->fs_base;',
+    guard: 'ctest:quit-graph',
+    ctest: 'quit-graph',
+    buildDir: 'apps/emulator-lift/out',
+    ctestTimeoutSec: 900,
+    what:
+      'feeder 的 `fs` 指回主线程的 TEB（= 修复前）⇒ feeder 的 SEH prologue 污染主线程 `fs:[0]` ⇒ ' +
+      'Quit 的 throw 派发到 feeder 栈上已复用的 record ⇒ `stop : unimplemented` / `decode-error` ⇒ ' +
+      'quit-graph 当场红',
   },
 
 

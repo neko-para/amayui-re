@@ -263,6 +263,66 @@ void dumpGuestStack(const X86& cpu, std::FILE* out, int depth) {
     }
 }
 
+namespace {
+
+// 这个地址在 guest 地址空间的**哪个区域**里？（诊断唯一目的：把"数据地址被当 eip"与
+// "真代码里的语义缺口"分开。⛔ 不改 dispatch 语义，判据仍是 execInsn 的返回值。）
+void dumpRegionOf(const X86& cpu, std::uint32_t ea, std::FILE* out) {
+    if (!cpu.mem) return;
+    const Region* r = cpu.mem->regionOf(ea);
+    if (!r) {
+        std::fprintf(out, "  region : (未登记：%08X 不属于任何已声明的区域)  committed=%s\n", ea,
+                     cpu.mem->committed(ea, 1) ? "yes" : "no");
+        return;
+    }
+    std::fprintf(out, "  region : %s  [%08X,%08X)  name=\"%s\"\n", regionKindName(r->kind), r->begin, r->end,
+                 r->name);
+}
+
+// 区域种类 ⇒ 是不是**数据区**（把这里的字节当 eip/指令 = 控制流已经跑飞，不是缺 import）。
+bool isDataRegion(RegionKind kind) {
+    switch (kind) {
+        case RegionKind::Heap:
+        case RegionKind::Stack:
+        case RegionKind::StackGuard:
+        case RegionKind::Teb:
+        case RegionKind::Peb:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// 最近 24 条（`X86::noteInsn` 的环形缓冲 —— 每条指令都维护，零额外成本）。
+// ★ 前 8 条给带操作数的反汇编：只打助记符看不出"那条 call 的目标是谁 / 立即数是多少"。
+void dumpRecentInsns(const X86& cpu, std::FILE* out) {
+    // ★ feeder 线程的 CPU **不维护** ring：feeder 的块执行路径刻意不调 `noteInsn`
+    //   （Ogg 解码热路径；见 `audio.cpp` 的 `runFeederGuest`）⇒ 它里面的是**启动时从主 CPU 拷来的
+    //   快照**。⛔ 不要把这段当 feeder 的现场 —— feeder 侧的现场看 `[esp]` / `region` / guest stack。
+    //   判据用公开只读面 `AudioEngine::onFeederThread()`（本线程是不是 feeder），⛔ 不加新状态。
+    if (cpu.audio != nullptr && cpu.audio->onFeederThread()) {
+        std::fprintf(out,
+                     "  （feeder 线程的 CPU：feeder 不维护 noteInsn ring ⇒ 下面是启动时的快照，"
+                     "不是 feeder 现场）\n");
+    }
+    if (cpu.last_count <= 0) return;
+    std::fprintf(out, "  --- 最近执行的 %d 条指令（最近的在最上）---\n", cpu.last_count);
+    for (int i = 0; i < cpu.last_count; ++i) {
+        const int idx = (cpu.last_head - 1 - i + 2 * X86::kLastInsns) % X86::kLastInsns;
+        std::fprintf(out, "  %08X %s   (eflags=%08X)\n", cpu.last_eip[idx],
+                     cpu.last_mnemonic[idx] ? cpu.last_mnemonic[idx] : "?", cpu.last_flags[idx]);
+    }
+    Machine* m = activeMachine();
+    if (!m) return;
+    std::fprintf(out, "  --- 反汇编（含操作数，最近 %d 条）---\n", cpu.last_count < 8 ? cpu.last_count : 8);
+    for (int i = 0; i < 8 && i < cpu.last_count; ++i) {
+        const int idx = (cpu.last_head - 1 - i + 2 * X86::kLastInsns) % X86::kLastInsns;
+        std::fprintf(out, "  %08X %s\n", cpu.last_eip[idx], m->decoder().text(*cpu.mem, cpu.last_eip[idx]).c_str());
+    }
+}
+
+}  // namespace（三个诊断 helper 只在本文件用；⛔ 不给它们外部链接）
+
 void dumpAtEa(X86& cpu, std::uint32_t ea, std::FILE* out) {
     std::string text;
     if (cpu.lst) text = cpu.lst->textAt(ea);
@@ -278,6 +338,12 @@ bool unimplemented(X86& cpu, const Insn& in, const char* why) {
     std::fprintf(stderr, "  why    : %s\n", why ? why : "(unspecified)");
     std::fprintf(stderr, "  ea     : %08X  mnemonic=%s  op=%s  len=%u\n", in.ea,
                  in.mnemonic ? in.mnemonic : "?", opName(in.op), static_cast<unsigned>(in.length));
+    dumpRegionOf(cpu, in.ea, stderr);
+    bool data_eip = false;
+    if (cpu.mem) {
+        const Region* r = cpu.mem->regionOf(in.ea);
+        data_eip = r && isDataRegion(r->kind);
+    }
     if (cpu.mem && cpu.mem->committed(in.ea, in.length)) {
         std::fprintf(stderr, "  bytes  :");
         for (std::uint8_t i = 0; i < in.length; ++i) std::fprintf(stderr, " %02X", cpu.mem->rd8(in.ea + i));
@@ -286,6 +352,16 @@ bool unimplemented(X86& cpu, const Insn& in, const char* why) {
     dumpAtEa(cpu, in.ea, stderr);
     dumpRegisters(cpu, stderr);
     dumpGuestStack(cpu, stderr, 24);
+    // ★ 这一行是**诊断定性**，不是结论：eip 落在数据区 ⇒ 控制流已经被数据带跑，缺的**不是** import
+    //   （那一类会停在桩页 `0x7FFE…` 并打 `=== unimplemented import ===`）。调用点 = [esp]。
+    if (data_eip) {
+        std::fprintf(stderr,
+                     "\n  ⚠⚠ 数据地址当 eip：%08X 落在数据区（不是代码）⇒ 这是控制流被数据带跑，"
+                     "**不是缺 import**。\n     调用点 = 上面 guest stack 的 [esp]（那条 call 的返回地址）；"
+                     "上一条控制流指令见上面的 ring。\n",
+                     in.ea);
+    }
+    dumpRecentInsns(cpu, stderr);
     cpu.running = false;
     cpu.stop_why = why;
     return false;

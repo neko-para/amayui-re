@@ -1144,7 +1144,8 @@ int main() {
         // ★ 旧口径「⇒ 返回 IDOK(1)（headless 不建窗口）」是**历史**：现在按 uType 给值，
         //   而且下一行会明说"没有模态呈现后端 ⇒ 立即默认值"（headless 不阻塞的机械证据）。
         LIFT_CHECK(log.find("⇒ 默认键值 1（窗口档进宿主模态；headless 立即返回）") != std::string::npos);
-        LIFT_CHECK(log.find("headless / 没有模态呈现后端 ⇒ 立即返回默认值 1") != std::string::npos);
+        LIFT_CHECK(log.find("headless / 没有窗口 sink ⇒ 立即返回默认值 1（⛔ 不弹系统框、不阻塞）") !=
+                   std::string::npos);
         // ③ 一行一条：正文里的 CRLF 被转义 ⇒ 日志里没有裸的 CRLF 跑进那行
         LIFT_CHECK(log.find("DirectSoundが使用できません\r\n") == std::string::npos);
     }

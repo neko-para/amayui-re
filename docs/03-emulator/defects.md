@@ -383,3 +383,30 @@
 - **复现（历史）**：`apps/emulator-lift` 下 `./out/emulator-lift --game-dir ../../links/install --appdata <全新私有>
   --skip-logo --audio off --present headless --raster gpu --input-script <at frame 130 / click 1190 630>
   --time-limit 600` ⇒ boot 里点空、run 停在墙钟兜底。
+
+### BUG-22 · 音频 feeder 与主线程**共用 TEB** ⇒ `fs:[0]`（SEH 链头）被另一条线程改写 ⇒ Quit 的 C++ throw 派发到已复用的 record ⇒ `eip` 落到 guest 堆
+- **现象**：`graphs/sn0000-quit.graph`（TITLE→ADV→FELLOW→TITLE→Quit）在 Quit 处**不是正常退出**，而是
+  `stop : unimplemented @ eip=0x109A5A71`（用户实测）；同一命令重跑 EIP 每次都不同
+  （`0x109C0341` / `0x103676C1` / `0x10357221`），偶尔是 `decode-error @ 0x00544774`。玩家侧 = "点了退出，游戏没退"。
+- **根因**：音频 feeder 是**真宿主线程**、跑 guest 代码（`sub_4B6C30` 的 Ogg 解码链上有 SEH prologue），
+  而它的 `fs` 与主线程**同一份 TEB**（`audio_cpu_ = *cpu_` 只拷了寄存器，`fs_base` 仍指 `0x7FFD0000`）。
+  于是 feeder 的 `mov large fs:0, eax` / epilogue 会改写**主线程的 SEH 链头**：主线程在 Quit 的
+  `_CxxThrowException`（`0x418E74` → `call RaiseException` `0x4E8AB0`）读到的链头要么是 feeder 栈上的 record、
+  要么是一处**已过期**的主线程 record。两条路的 record 内存都已被复用 ⇒ `Handler` 是数据（堆 EA / ThrowInfo）
+  ⇒ 按数据当代码执行。读数：一次 run 里 feeder 改写共享 `fs:[0]` **173,755 次**；
+  `chain[0] record=0x6FDFFBA8 region=stack handler=0x109C0340 region=heap`。
+  真 Windows 的 `fs` 指向**每线程**的 TEB，这条通道不存在。
+- **修法**：`src/runtime/audio.cpp` 的 `setupFeederContext()` 给 feeder 建**自己的 TEB**（`GuestLayout::feeder_teb` = `0x7FFD6000`；提交前显式查占用 —— `commitZeroed` 对已占页是**静默清零**；
+  `0x7FFD3000` = guest-text、`0x7FFD5000` = 纯档 argv 已占），抄主 TEB 的通用字段后覆盖每线程字段
+  （`ExceptionList` / `StackBase` / `StackLimit` / `Self` / `UniqueThread`），再把 `audio_cpu_.fs_base` 指过去。
+  诊断落点：`src/runtime/exec.cpp` 的 `unimplemented()` 打印 `regionOf(eip)` + 最近 24 条 ring +
+  "数据地址当 eip"警告（⛔ 不改 dispatch 语义）。
+- **何时 / 谁发现**：2026-11-12，用户实测 → `.tmp/audio-token/quit-unimplemented-analysis.md` 静态取证 →
+  本轮流式取证（`LIFT_SEH_TRACE` 的 feeder `fs:[0]` 观察点 + 链头逐环区域归属）定因。
+- **代表守卫**：CTest `quit-graph`（`tests/quit_graph.cpp`，assets；真 feeder 臂 + 同一 graph 两遍）：
+  修后 `stop : stopped @ 004EE0EA` + `kernel32!ExitProcess`，链头 `0x6FFFFB74`（`region=stack`）、
+  handler `0x00513B90`（`region=image`）。变异 `tools/mutate-check.mjs` 的 `ctest:quit-graph`
+  （feeder `fs` 指回主 TEB）⇒ 当场红。
+- **复现**：`--appdata <私有 tmp> --game-dir ../../links/install --present window --present-hidden --raster gpu
+  --native-overrides all --skip-logo --interaction-graph ../../graphs/sn0000-quit.graph --max-frames 4000`
+  （⛔ headless 不是有效臂：本图会停在 step3 等 GAMESTART 超时；`--audio off` 没有 feeder）。

@@ -345,6 +345,17 @@ target_link_libraries(lift-cli-time-limit PRIVATE emulator-lift-runtime)
 add_test(NAME cli-time-limit COMMAND lift-cli-time-limit $<TARGET_FILE:emulator-lift>)
 set_tests_properties(cli-time-limit PROPERTIES SKIP_RETURN_CODE 77)
 
+# ---- pure：guest `ExitProcess(n)` / `TerminateProcess(_, n)` 的**宿主进程退出码**守卫 ----
+# 判据见 tests/exit_code.cpp 文件头：① 纯映射（0 ⇒ 0；非 0 ⇒ 2 且**不透传** n）；
+# ② **真子进程**（自造最小 PE32 导入 kernel32!ExitProcess，跑真实 emulator-lift）：
+#    ExitProcess(3) ⇒ 宿主 exit 2 + 默认 warn 日志含 exit_code=3；ExitProcess(0) ⇒ 0；
+# ③ TerminateProcess(_,3) 同一口径。
+# ★ 纯档（顶层无条件注册）：执行源是测试自己构造的 PE，不碰 LFS / 游戏安装。
+add_executable(lift-exit-code tests/exit_code.cpp)
+target_link_libraries(lift-exit-code PRIVATE emulator-lift-runtime)
+add_test(NAME exit-code COMMAND lift-exit-code $<TARGET_FILE:emulator-lift>)
+set_tests_properties(exit-code PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
 # ---- pure：guest 函数级 native override（差分 / 回退 / ABI）----
 add_executable(lift-native-override tests/native_override.cpp)
 target_link_libraries(lift-native-override PRIVATE emulator-lift-runtime)
@@ -432,6 +443,23 @@ if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN")
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         SKIP_RETURN_CODE 77
         TIMEOUT 1800)
+
+    # ---- assets：AGERC 关窗确认三臂（`--close-confirm exit|title|cancel` + `close_window` 注入）----
+    # `REQ-01M72JFZ87DJNT52DW4HB8SEV6` stage 1+2。判据见 tests/close_confirm.cpp 文件头：
+    # 三臂各自走到 `0x405B21` / `0x405A82` / `0x405A95`，trace 里 `_ShowDialog@12(id=3) -> 1/2/0`，
+    # 且 title/cancel 的 stop 是 `until-ea`（窗口没被宿主宽限关掉）。
+    # ★ dummy + software：真 boot 到 TITLE.BIN（约 14 s/臂），无窗口系统 ⇒ SKIP 77。
+    add_executable(lift-close-confirm tests/close_confirm.cpp)
+    target_link_libraries(lift-close-confirm PRIVATE emulator-lift-runtime)
+    add_test(NAME close-confirm COMMAND lift-close-confirm
+        $<TARGET_FILE:emulator-lift>
+        "${LIFT_ASSETS_GAME_DIR}"
+        "${CMAKE_CURRENT_BINARY_DIR}/close-confirm-work")
+    set_tests_properties(close-confirm PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        ENVIRONMENT "SDL_VIDEODRIVER=dummy"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 900)
 
     # ---- assets：**feeder 臂**的段级 override 读数守卫（`bov= / bovd= / bovf=`）----
     # REQ-01M75W6BB3PY3MF42ZTS23KTBS。判据见 tests/feeder_seg_e2e.cpp 文件头：
@@ -724,24 +752,10 @@ add_test(NAME skip-logo COMMAND lift-skip-logo)
 
 # ---- pure：MessageBox（uType→返回值表 / headless 不阻塞 / 模态状态机 / Yield 单令牌）----
 # ★ 判据见 `tests/messagebox.cpp` 文件头。顶层无条件注册 ⇒ **pure** 档（不需要安装 / 窗口 / LFS）：
-#   假 sink + 脚本化输入；**真窗口**的合成/贴图由下面的 `messagebox-window` 守卫（dummy + software）。
+#   假 sink 覆盖系统框缝（`showSystemMessageBox`）；真闭窗链由 assets 的 `close-confirm` 跑。
 add_executable(lift-messagebox tests/messagebox.cpp)
 target_link_libraries(lift-messagebox PRIVATE emulator-lift-runtime)
 add_test(NAME messagebox COMMAND lift-messagebox)
-
-# ---- pure：MessageBox 的**窗口像素**守卫（T3）+ 直出失败清理（M6 复审）----
-# ★ 判据见 `tests/messagebox_window.cpp` 文件头：`presentModal` 之后回读窗口像素（角变暗 / 面板 /
-#   按钮 / accent / 居中 / 正文色），并断言"directOverlay 成功 + directPresent 失败"时 endModal
-#   仍释放纹理与 target_current。顶层无条件注册 ⇒ **pure** 档（判据 = 注册位置）。
-# ★ 默认臂用 dummy + software（无窗口系统 ⇒ 测试自己 SKIP 77）；`-gpu` 臂**不**设 dummy
-#   （直出要真 claim 窗口），无 GPU ⇒ SKIP 77 —— 与 `overlay` / `overlay-gpu` 同一口径。
-add_executable(lift-messagebox-window tests/messagebox_window.cpp)
-target_link_libraries(lift-messagebox-window PRIVATE emulator-lift-runtime)
-add_test(NAME messagebox-window COMMAND lift-messagebox-window)
-set_tests_properties(messagebox-window PROPERTIES
-    ENVIRONMENT "SDL_VIDEODRIVER=dummy" SKIP_RETURN_CODE 77)
-add_test(NAME messagebox-window-gpu COMMAND lift-messagebox-window --gpu)
-set_tests_properties(messagebox-window-gpu PROPERTIES SKIP_RETURN_CODE 77)
 
 # ---- pure：guest 后缓冲格式选择（六种 masks，不按 bpp 猜）----
 add_executable(lift-frame-blit tests/frame_blit.cpp)
@@ -1176,5 +1190,31 @@ if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         SKIP_RETURN_CODE 77
         TIMEOUT 1200)
+endif()
+# =====================================================================================
+# assets（可 SKIP）· TITLE→Quit 的 SEH **每线程 TEB** 守卫（`sn0000-quit.graph`）
+# `REQ-01M77MC1374HXC2JR7E0ZYSHQJ`：Quit 的 C++ throw 派发到音频 feeder 栈上的 SEH record
+# ⇒ `Handler` 已被复用成数据 ⇒ `stop : unimplemented @ eip=<guest 堆>`。
+# 判据见 tests/quit_graph.cpp 文件头：①真 feeder 臂（`feeder=host-thread` + `device=ok`，缺 ⇒ SKIP 77）；
+# ②`stop : stopped` + `kernel32!ExitProcess`；③没有 `unimplemented`/`decode-error`/`数据地址当 eip`；
+# ④同一 graph 跑两遍（缺陷依赖并发窗口，修前 3/4 次红且 EIP 每次不同 ⇒ 单跑一次可能假绿）。
+# ★ 缺安装树 ⇒ 不注册（assets 档的判据 = 注册位置）；窗口 / GPU / 音频设备不可用 ⇒ 测试自己 SKIP 77。
+# ★ 必须 `--present window --present-hidden`：headless 会把 `wait … wall_ms` 跑歪，`--audio off`
+#   则没有 feeder 真线程 ⇒ 量不到这条通道（测试里已写明）。
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+# =====================================================================================
+if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN")
+    add_executable(lift-quit-graph tests/quit_graph.cpp)
+    target_link_libraries(lift-quit-graph PRIVATE emulator-lift-runtime)
+    add_test(NAME quit-graph COMMAND lift-quit-graph
+        $<TARGET_FILE:emulator-lift>
+        "${LIFT_ASSETS_GAME_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../graphs/sn0000-quit.graph"
+        "${CMAKE_CURRENT_BINARY_DIR}/quit-graph-work")
+    set_tests_properties(quit-graph PROPERTIES
+        # ★ 子进程继承这个 cwd：模拟器默认的执行源 / `.lst` 是按相对当前目录找的。
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 1800)
 endif()
 endif() # LIFT_BUILD_TESTS

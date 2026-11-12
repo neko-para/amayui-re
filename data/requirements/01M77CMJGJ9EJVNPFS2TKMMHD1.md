@@ -2,8 +2,9 @@
 
 - id: REQ-01M77CMJGJ9EJVNPFS2TKMMHD1
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M75S724HE50D26EEMDNY3Z54
+- verify: apps/emulator-lift/tests/exit_code.cpp#process/exit-3
 - repro: apps/emulator-lift/src/runtime/native_lzss.cpp#in >= in_end
 - severity: S1
 - tags: [emulator-lift, diagnosability]
@@ -32,3 +33,12 @@
 
 ## 不做
 - MessageBox（父单已收）；`FindFirstFile` / `GetSystemMetrics` / 菜单族等其它"折叠"另单。
+
+## 收口（2026-11-12）
+- `ExitProcess(n)`/`TerminateProcess(_,n)`：`n!=0` ⇒ warn（含 n）+ 宿主退出码 **2**；`n==0` ⇒ 0；`exitCodeForGuestExit` 纯映射（不透传 n）。
+  真子进程守卫：自造最小 PE 调 `ExitProcess(3)` ⇒ exit 2；`(0)` ⇒ 0；`TerminateProcess(_,3)` ⇒ 2。
+- LZSS：`lzssDecode` 末尾 `return out == out_end`；截断 ⇒ false ⇒ 既有 fallback 语义（不 disable）；合法流两臂逐字节相同；
+  真实 boot `sub_436A80 hits=23 fallbacks=0`。
+- 变异：`return true` ⇒ 纯档截断用例红；删 main 分流 ⇒ `process/exit-3` 红。
+- 门禁：默认 ctest **90/90**（5 SKIP）· `exit-code` 34 checks · `native-override` 288184 checks · assets 2250 checks ·
+  `pnpm test` 546 · `pnpm verify` 460 · requirements 6/6 · `git diff --check` 干净。

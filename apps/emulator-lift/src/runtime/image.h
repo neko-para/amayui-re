@@ -98,6 +98,14 @@ struct GuestLayout {
     std::uint32_t shim_page = 0x7FFE0000u;     // 导入桩页（每个导入一个唯一地址）
     std::uint32_t shim_slots = 0x2000u;        // 0x2000 = 8192 个槽（4 字节步进 = 32 KiB）
     std::uint32_t argv_block = 0x7FFD4000u;    // 命令行 / 环境块（CRT 启动读它）
+    // ★ 音频 feeder（第二个 guest 线程）**自己的** TEB：真 Windows 每线程一个 TEB，`fs:[0]` 是
+    //   **每线程**的 SEH 链头（`REQ-01M77MC1374HXC2JR7E0ZYSHQJ`：feeder 与主线程共用 TEB ⇒ Quit 的
+    //   C++ throw 派发到 feeder 栈上已复用的 record ⇒ eip 落到 guest 堆）。
+    //   **主进程布局不使用这一页**（TEB/PEB/TLS/argv/guest-text 的相对关系不变）⇒ 单独一个字段，
+    //   只由 `AudioEngine::setupFeederContext()` 提交。落点已核为空页：0x7FFD3000 = guest-text（懒提交）、
+    //   0x7FFD4000 = argv、0x7FFD5000 = 纯档夹具 argv、0x7FFFC000 = ddraw device、0x7FFFD000 = locale。
+    //   ⛔ 不要在别处再抄一份这个地址：布局常量只留这里。
+    std::uint32_t feeder_teb = 0x7FFD6000u;
 };
 
 struct ProcessSetup {

@@ -10,7 +10,7 @@
 //   · `TrackPopupMenu` → 0（立即返回，不阻塞、不等待）；
 //   · `MessageBoxA`  → ★ 2026-11-12 改判（用户口径）：**系统模态 + SDL 自行实现的窗口**。
 //     ⛔ 旧口径「恒 IDOK(1) / 不建窗口 / 不阻塞」是**历史**（`SCOPE.md` §1 已改）：
-//     窗口档进宿主模态循环并画一整幅自绘对话框；返回值按 `uType`（`MB_YESNO` 默认与 X/Esc
+//     窗口档弹**系统对话框**（`SDL_ShowMessageBox`，只要正文 + 按钮）；返回值按 `uType`（`MB_YESNO` 默认与 X/Esc
 //     一律 `IDNO(7)`，见 `runtime/message_box.h`）。headless / 无 sink / feeder / 非主线程
 //     ⇒ 立即默认值 + 一行 warn（CTest 因此不会挂）。正文/标题仍是 **warn** 级（默认可见）。
 // ★ 每一条都打一行 `[shim]`（SCOPE §3 第 3 条：⛔ 不许静默 no-op）。菜单族条目仍经 `addStub`
@@ -222,29 +222,35 @@ void shimMessageBoxA(X86& cpu, ShimCall& call) {
                     static_cast<unsigned>(bad_cap), static_cast<unsigned>(bad_text), text_ea, cap_ea, hwnd);
     }
 
-    // ★ 分支口径（设计 §1.3 / §4）：只有"主线程 + 有 sink + sink 给得出模态呈现缝"才进循环。
-    //   feeder / headless / 无 presenter / 非主线程 ⇒ 立即默认值 + **一次** warn（⛔ 不阻塞）。
+    // ★ 分支口径：只有"主线程 + 有窗口 sink"才弹**系统对话框**（`SDL_ShowMessageBox`）。
+    //   feeder / headless / 无 sink / 系统框起不来 ⇒ 立即默认值 + **一次** warn（⛔ 不阻塞）。
     Machine* machine = cpu.machine;
     std::uint32_t result = fallback;
-    bool enter_modal = false;
+    PresentSink* sink = nullptr;
     if (machine != nullptr) {
         if (cpu.audio != nullptr && cpu.audio->onFeederThread()) {
             shimLogWarn("user32", "MessageBoxA",
                         "在音频 feeder 线程上被调用 ⇒ headless 语义：立即返回默认值 %u（⛔ 不碰窗口）",
                         fallback);
-        } else if (!machine->presenter().hasSink() ||
-                   machine->presenter().sink()->modalPresenter() == nullptr) {
+        } else if (!machine->presenter().hasSink()) {
             shimLogWarn("user32", "MessageBoxA",
-                        "headless / 没有模态呈现后端 ⇒ 立即返回默认值 %u（⛔ 不建窗口、不阻塞）",
-                        fallback);
+                        "headless / 没有窗口 sink ⇒ 立即返回默认值 %u（⛔ 不弹系统框、不阻塞）", fallback);
         } else {
-            enter_modal = true;
+            sink = machine->presenter().sink();
         }
     } else {
         shimLogWarn("user32", "MessageBoxA",
                     "没有装配 Machine（纯夹具）⇒ 立即返回默认值 %u（⛔ 不阻塞）", fallback);
     }
-    if (enter_modal) result = runModalDialog(*machine, cpu, spec);
+    if (sink != nullptr) {
+        std::uint32_t shown = fallback;
+        if (sink->showSystemMessageBox(spec, &shown)) {
+            result = shown;
+        } else {
+            shimLogWarn("user32", "MessageBoxA",
+                        "系统对话框起不来（SDL_ShowMessageBox 失败）⇒ 用默认值 %u（⛔ 不挂死）", fallback);
+        }
+    }
     noteMessageBoxCall(type, result);
     call.result = result;
 }
@@ -259,7 +265,7 @@ void registerUser32MenuShims(ShimRegistry& s) {
               "SCOPE §1 菜单整体 no-op：SetMenu 返回 TRUE（没有 Win32 菜单栏）");
     s.addStub("user32", "TrackPopupMenu", Conv::Stdcall, 7, &shimTrackPopupMenu,
               "SCOPE §1 菜单整体 no-op：TrackPopupMenu 立即返回 0（不阻塞）");
-    // ★ 2026-11-12（M3 复审）：MessageBoxA 已是**实现**（宿主自绘模态 + 按 uType 返回），
+    // ★ 2026-11-12（M3 复审）：MessageBoxA 已是**实现**（系统对话框 + 按 uType 返回），
     //   不是"按 SCOPE 偏差整体 stub"⇒ 用 `add` 登记（`data/lift/overrides.json` 不再是 stub 条目）。
     s.add("user32", "MessageBoxA", Conv::Stdcall, 4, &shimMessageBoxA);
     // ★ 菜单族其余条目（`.lst` 里有调用点，见文件头）：同样按 SCOPE §1 的 no-op 口径。

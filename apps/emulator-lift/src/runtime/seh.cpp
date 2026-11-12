@@ -243,6 +243,25 @@ bool Seh::beginRaise(X86& cpu, GuestMemory& mem, std::uint32_t code, std::uint32
     emitStructures(mem, L);
     sehLog("RaiseException(code=0x%08X flags=0x%X nargs=%u) rec=0x%08X ctx=0x%08X 链头=0x%08X",
            code, flags, n, L.rec_ea, L.ctx_ea, head);
+    // ★ 诊断（只在 LIFT_SEH_TRACE）：把链头每一环的**区域归属**打出来。
+    //   判据：链头 / handler 落在 Heap / Stack / Teb 上 ⇒ 这条链不是"当前线程的代码栈链"
+    //   （真 Windows 的 fs:[0] 是**每线程**的；共用 TEB 会让另一个线程的 record 出现在这里）。
+    if (head != kSehChainEnd) {
+        std::uint32_t rn = head;
+        for (int i = 0; i < 8 && rn != 0 && rn != kSehChainEnd; ++i) {
+            if (!mem.committed(rn, 8)) {
+                sehLog("  链[%d] record=0x%08X 不可读 ⇒ 停", i, rn);
+                break;
+            }
+            const std::uint32_t handler = mem.rd32(rn + 4u);
+            const Region* rr = mem.regionOf(rn);
+            const Region* hr = mem.regionOf(handler);
+            sehLog("  链[%d] record=0x%08X region=%s handler=0x%08X region=%s", i, rn,
+                   rr ? regionKindName(rr->kind) : "(未登记)", handler,
+                   hr ? regionKindName(hr->kind) : "(未登记)");
+            rn = mem.rd32(rn);
+        }
+    }
     levels_.push_back(L);
     ++raises_;
     return true;

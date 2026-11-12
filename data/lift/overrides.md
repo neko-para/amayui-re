@@ -19,7 +19,8 @@
 ★ **M1 的 stub 不是"假装成功"**：`addUnimplemented` 的条目分到唯一 guest 桩地址，执行到就打印
 `module!name` + reason + 返回地址 + 寄存器 + guest 返回栈并**停下**（`SCOPE.md` §3）。
 `addStub` 的条目按 `SCOPE.md` §1 返回**合理值**并打一行日志，同时在这里登记 `kind: stub` + reason：
-当前共 **44 条** = AGERC 3（`_GetInstance@0` / `_ShowDialog@12` / `_OperateMenu@16`）+
+当前共 **43 条** = AGERC 2（`_GetInstance@0` / `_OperateMenu@16`；`_ShowDialog@12` 的 id==3 已改成实现
+（系统关窗确认），不在 stub 清单）+
 version 3（`GetFileVersionInfoSizeA` / `GetFileVersionInfoA` / `VerQueryValueA`）+
 user32_menu 3（`LoadMenuA` / `SetMenu` / `TrackPopupMenu`；`MessageBoxA` 2026-11-12 起改为实现
 （宿主自绘模态），已不在 stub 清单）+

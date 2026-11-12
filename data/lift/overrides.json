@@ -49,14 +49,14 @@
       "kind": "stub",
       "impl": "apps/emulator-lift/src/shims/kernel32_agerc.cpp",
       "boundary": "import",
-      "reason": "SCOPE §1 模态 no-op：AGERC 设置对话框整块不做；_GetInstance 返回**真实模块基址**（HINSTANCE）"
+      "reason": "AGERC 设置对话框仍属 SCOPE §1 的未做范围；_GetInstance 返回**真实模块基址**（HINSTANCE）"
     },
     {
       "target": "agerc!_OperateMenu@16",
       "kind": "stub",
       "impl": "apps/emulator-lift/src/shims/kernel32_agerc.cpp",
       "boundary": "import",
-      "reason": "SCOPE §1 模态 no-op：AGERC 菜单操作 ⇒ 返回 0"
+      "reason": "SCOPE §1：AGERC 菜单操作（_OperateMenu@16）仍是 stub ⇒ 返回 0"
     },
     {
       "target": "agerc!_SetNameLenMax@20",
@@ -64,13 +64,6 @@
       "impl": "apps/emulator-lift/src/shims/kernel32_agerc.cpp",
       "boundary": "import",
       "reason": "按真实实现（AGERC export 20 / RVA 0x32EF1 → 体 0x100367D0）的语义：存 *arg1 进 \"\n              \"g_nameLenMax、返回 0；镜像换基址且 .reloc 未应用 ⇒ 不跑真实代码（见 kernel32_agerc.cpp）"
-    },
-    {
-      "target": "agerc!_ShowDialog@12",
-      "kind": "stub",
-      "impl": "apps/emulator-lift/src/shims/kernel32_agerc.cpp",
-      "boundary": "import",
-      "reason": "SCOPE §1 模态 no-op：AGERC 设置对话框整块不做 ⇒ 返回 IDOK(1)（\"用户没改设置\"）"
     },
     {
       "target": "d3d9!Direct3DCreate9Ex",

@@ -53,6 +53,7 @@
 //     profile_begin <label>   打开一个**区间 profiler** 窗口（边界 = 本动作的触发条件）
 //     profile_end <label>     关闭窗口并打印一次表（label 只用于对齐/报错，必须是同一个词）
 //     quit                    本动作触发时结束这次运行（`RunResult.reason = Stopped`）
+//     close_window            ★ 宿主动作：像用户点了窗口 X 一样请求关窗（只作测试/自动化；headless no-op）
 //
 // ★ 触发条件是**一个条件**，不是"帧号"：`Trigger{kind, value, name}` 有多种 kind（帧 / guest_ms /
 //   insn / wall_ms / **marker**）。`tick()` 与 profiler 的窗口边界都只认"条件到期"。
@@ -160,6 +161,9 @@ public:
         ProfileBegin,
         ProfileEnd,
         Quit,
+        // ★ 宿主动作（`close_window`）：像用户点了窗口 X 一样请求关窗（`PresentSink::requestClose`）。
+        //   用途 = 关窗二次确认（AGERC `_ShowDialog@12`）的**可复现触发**；headless 无 sink ⇒ no-op。
+        CloseWindow,
     };
 
     struct Action {
@@ -267,6 +271,14 @@ public:
     // `quit` 的 WM_QUIT 只投一次（guest 可能正阻塞在 GetMessageA）。由 `Machine::tickInputScript` 消费。
     bool quitPostPending() const { return quit_requested_ && !quit_posted_; }
     void markQuitPosted() { quit_posted_ = true; }
+    // ★ `close_window` 动作的**交付位**：动作应用时只置位（`apply()` 不碰窗口），由 `Machine` 在
+    //   同一个块边界把它转成 `PresentSink::requestClose()`（与 quit 的 WM_QUIT 同一条形状）。
+    //   `take` = 读并清（一次动作只交付一次）。
+    bool takeCloseWindowPending() {
+        const bool pending = close_window_pending_;
+        close_window_pending_ = false;
+        return pending;
+    }
     // 换脚本 / 丢弃脚本：把仍按着的键 / 按钮按 WM_* 抬起、交还所有权，再清时间线
     //（⛔ 不静默留下"卡住的键"）。`clear()` 只清时间线，不发消息 —— 那是收口用的。
     void abandon(WindowManager& wm, std::uint32_t time_ms);
@@ -442,6 +454,7 @@ private:
     std::size_t applied_ = 0;
     bool quit_requested_ = false;
     bool quit_posted_ = false;
+    bool close_window_pending_ = false;
     bool finish_logged_ = false;
     // 解析期的相对基准（`after` / `wait` 用；`at` 会重置）
     std::uint64_t anchor_frame_ = 0;

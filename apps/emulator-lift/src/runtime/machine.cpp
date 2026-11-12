@@ -88,6 +88,11 @@ const char* stopReasonName(StopReason r) {
 //   在 `main.cpp` 里先于本函数返回，别把它们的码并进来。
 int exitCodeForRun(const RunResult& r) { return r.ok() ? 0 : 2; }
 
+// ★ 见 machine.h：guest 的退出码**只**回答"正常 / 非正常"这一位（⛔ 不透传 n）。
+//   非 0 与 decode-error 同档（2）：对调用方（shell / CI）来说两者的处置一样 —— 这次 run
+//   没有以"引擎正常收尾"结束；具体数值在 guest 的 `cpu.shim.exit_code` / warn 日志里。
+int exitCodeForGuestExit(std::uint32_t guest_exit_code) { return guest_exit_code == 0u ? 0 : 2; }
+
 // ---------------------------------------------------------------------------------------
 // 时间线的效果级判据（`--expect-change-after` / `--expect-change-window`）
 // ★ 真源口径：`docs/03-emulator/interaction-model.md` §2 的 `expect_change`（这里只换触发者：
@@ -822,6 +827,16 @@ void Machine::tickInputScript(X86& cpu) {
     //   静默通过（那正是本策略要抓的"发完不管"）。
     const std::size_t applied_before = input_script_.appliedCount();
     pumpScript(input_script_, cpu, wallMs());
+    // ★ `close_window`（宿主动作）：像用户点了 X 一样请求关窗。与 `quit` 的 WM_QUIT 同一条形状
+    //   —— 动作应用时只置位，交付点在这里（`apply()` 只有 WindowManager，拿不到呈现后端）。
+    //   headless（没有 sink）⇒ no-op + 一行提示（⛔ 不静默当成"关过了"）。
+    if (input_script_.takeCloseWindowPending()) {
+        if (PresentSink* sink = presenter_.sink()) {
+            sink->requestClose();
+        } else {
+            std::fprintf(stderr, "[input-script] close_window：没有 PresentSink（headless）⇒ 无效果\n");
+        }
+    }
     if (expect_policy_.enabled && !expect_failed_) {
         if (input_script_.appliedCount() > applied_before) openExpectWindows(applied_before);
         evaluateExpectWindows();
@@ -2237,6 +2252,7 @@ TraceInputs Machine::traceInputs() const {    TraceInputs t;
     t.real_time = clock_.realTime();
     t.skip_logo = skip_logo_;
     t.accept_recovery_dialog = accept_recovery_dialog_;
+    t.close_confirm = close_confirm_;
     return t;
 }
 
@@ -2261,6 +2277,8 @@ void Machine::dumpTraceInputs(std::FILE* out) const {
     if (t.accept_recovery_dialog) {
         std::fprintf(out, "trace-input recovery= 1（**不**跳过前回判定：走引擎真实路径，会到 MessageBoxA）\n");
     }
+    std::fprintf(out, "trace-input close-confirm= %s（X 的二次确认策略；ask = 弹系统「終了」框）\n",
+                 closeConfirmPolicyName(t.close_confirm));
     std::fprintf(out, "trace-input hash     = %016llX\n", (unsigned long long)traceInputsHash());
 }
 
@@ -2298,6 +2316,11 @@ std::uint64_t Machine::traceInputsHash() const {
     if (t.accept_recovery_dialog) {
         const std::uint8_t accept_recovery = 1;
         mix(&accept_recovery, 1);
+    }
+    // ★ 同理：`ask` 是缺省 ⇒ 只有显式换了策略才混入（默认档的 trace hash 基线不变）。
+    if (t.close_confirm != CloseConfirmPolicy::Ask) {
+        const std::uint8_t policy = static_cast<std::uint8_t>(t.close_confirm);
+        mix(&policy, 1);
     }
     return h;
 }

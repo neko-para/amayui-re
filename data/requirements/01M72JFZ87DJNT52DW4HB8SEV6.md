@@ -2,8 +2,9 @@
 
 - id: REQ-01M72JFZ87DJNT52DW4HB8SEV6
 - type: spike
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/close_confirm.cpp#close-confirm
 - tags: [emulator-lift, agerc, dialog, modal]
 
 ## 一句话
@@ -30,3 +31,22 @@
 ## 未做 / <待核>
 - 黑帧未逐 draw 归因；DLU→像素未换算；window 模式的 X 支与关窗宽限挂起未实测；真机是否也发 `WM_CLOSE(1)` 未闭合。
 - 本单只出设计，未改任何代码。
+
+## 2026-11-12 用户实测 → 实现中（stage 1+2）
+- 现象：开窗进 TITLE 后点 X**直接退出**，没有确认框。根因：`_ShowDialog@12` 仍是 `addStub` 恒返回 1。
+- 已派实现：id==3 用新自绘模态（1=終了 / 2=タイトル / 0=キャンセル；默认 1、Esc/X=0）；
+  `--close-confirm ask|exit|title|cancel`（缺省 ask）；**同时修宿主关窗宽限**：结果 2/0 必须取消 `close_pending`/deadline，
+  `endModal` 不再无条件重发 X（否则 cancel 会再次弹框/退出）。
+- 测试：`close_window` host 动作或 `WINDOW_CLOSE_REQUESTED` 注入；三臂 `--until ea 0x405B21 / 0x405A82 / 0x405A95`。
+
+## 收口（2026-11-12）· 系统对话框版（自绘已删）
+- `_ShowDialog@12`：只 `id==3` 桥接；1=終了 / 2=タイトル / 0=キャンセル；默认 1、Esc/X=0；
+  窗口档走 **`SDL_ShowMessageBox`**（无 icon、只正文+按钮），headless/feeder/无窗口/失败 ⇒ 1 + warn。
+- `--close-confirm ask|exit|title|cancel`（缺省 ask）；结果 2/0 取消宿主 `close_pending`+500 ms deadline（窗口留着），
+  1 保留（guest 自己关；宽限仅兜底）；不再"无条件重发 close"。
+- 三臂读数（dummy+software，`at marker TITLE.BIN` + `close_window`）：
+  `exit -> 1 stop@00405B21` · `title -> 2 stop@00405A82` · `cancel -> 0 stop@00405A95`；
+  `ask` 在 dummy 下系统框起不来 ⇒ 1 + warn（窗口档需人工点一次；原生模态 CTest 不可答）。
+- 门禁：默认 ctest **88/88**（5 SKIP）· `LIFT_ASSETS=1` 94/94 · `close-confirm` 18 checks · `pnpm test` 546 · `pnpm verify` 460 ·
+  `lift check` 绿 · requirements 6/6 · `git diff --check` 干净。
+- 未做：其它选择子 / `_OperateMenu` / AGERC 设置对话框仍是 stub；图标/位置不还原（用户 2026-11-12 新口径）。

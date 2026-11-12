@@ -23,9 +23,8 @@
 namespace lift {
 
 class FrameSampler;
-// ★ 宿主自绘模态框的呈现缝（定义在 `runtime/message_box.h`；本头只前向声明 ⇒ 保持 SDL-free，
-//   且不让所有 include present.h 的文件都被 FontEngine / ModalSpec 拖着走）。
-class ModalPresenter;
+// ★ 系统对话框的数据（定义在 `runtime/message_box.h`；本头只前向声明 ⇒ 保持 SDL-free）。
+struct ModalSpec;
 
 class PresentSink {
 public:
@@ -36,6 +35,10 @@ public:
     virtual void pumpHostEvents() {}
     // 用户关窗（或平台 quit）；false = 继续跑。
     virtual bool stopRequested() const { return false; }
+    // ★ 宿主侧"像点了 X 一样"请求关窗（`--input-script close_window` / 自动化测试用）。
+    //   默认 no-op（headless 没有窗口）；窗口 sink 走与 `SDL_EVENT_WINDOW_CLOSE_REQUESTED`
+    //   **同一条**路（`present_sdl.cpp` 的 `Impl::requestClose`），因此关窗宽限/二次确认语义一致。
+    virtual void requestClose() {}
     // 诊断一行（driver / video / gpu），可空。
     virtual std::string describe() const { return {}; }
     // 可选：同一 SDL_GPUDevice 上的 GPU 光栅化后端（--raster gpu 时才非空）。
@@ -46,10 +49,15 @@ public:
     //   ⛔ 本接口保持 SDL-free（`OverlayStatus` 来自 `runtime/overlay.h`，零 SDL 类型）。
     virtual void setOverlayStatus(const OverlayStatus& /*status*/) {}
     virtual bool overlayEnabled() const { return false; }
-    // ★ 宿主自绘模态框的**唯一**呈现缝（`runtime/message_box.h` 的 `ModalPresenter`）。
-    //   默认 `nullptr` ⇒ 所有既有 sink / 测试替身零改动；headless 与替身据此走"立即默认值"。
-    //   ⛔ 返回非空不代表"总能画"：`presentModal` 自己还要处理窗口/后端失败（只记账 + 返回 false）。
-    virtual ModalPresenter* modalPresenter() { return nullptr; }
+    // ★ **系统对话框**（`runtime/message_box.h` 的 `ModalSpec`）：唯一的宿主呈现缝。
+    //   窗口 sink 用 `SDL_ShowMessageBox` 实现（会阻塞；实现方负责把阻塞放进 `GuestToken::YieldGuard`），
+    //   默认 `false` = 没有系统框（headless / 测试替身）⇒ 调用方立即用默认值 + 一次 warn。
+    //   `result` 只在返回 true 时有效；`spec.buttons[i].id` 原样当 SDL 的 buttonid 交回。
+    virtual bool showSystemMessageBox(const ModalSpec& /*spec*/, std::uint32_t* /*result*/) { return false; }
+    // ★ 取消**已经发起**的那次关窗请求（清 close_pending / 宽限帧 / deadline；窗口留着）。
+    //   AGERC `_ShowDialog@12` 回答 2/0（タイトル / キャンセル）时调用；回答 1（終了）不调。
+    //   默认 no-op ⇒ headless / 测试替身零改动。
+    virtual void cancelCloseRequest() {}
 };
 
 // ---------------------------------------------------------------------------------------
@@ -129,13 +137,6 @@ public:
     //   所以 `hash_still_matches` 如实报告"这些像素还是不是被采样到的那一帧"（不一致也照样写，供诊断）。
     bool dumpLastFrame(const std::string& host_path, bool* hash_still_matches, std::string* err) const;
     bool hasLastFrame() const { return have_last_surface_; }
-
-    // ★ **拷贝型**末帧快照（`dumpLastFrame` 明确"只留描述符、不拷像素"——那是每帧零成本的代价）：
-    //   这条给宿主自绘模态框当"变暗的底"。只在**真的要弹框**时调一次，所以拷贝成本可接受。
-    //   输出 = 整幅 **RGBA8**（stride = w*4），按 guest 表面的掩码展开（16bpp 也支持）。
-    //   `hasLastFrame()==false`（boot 还没有任何 Present）⇒ 返回 false ⇒ 调用方用纯色底。
-    //   ⛔ 不修改 guest 像素、不改变 `last_hash_` / 帧号；返回的缓冲是宿主内存（跨 Yield 安全）。
-    bool snapshotLastFrame(std::vector<std::uint8_t>* rgba, int* w, int* h, std::uint32_t* pitch) const;
 
     // 诊断：sink 失败次数 / 最后一次错误 / sink 描述（latch 后仍保留）。
     std::uint64_t sinkFailures() const { return sink_failures_; }

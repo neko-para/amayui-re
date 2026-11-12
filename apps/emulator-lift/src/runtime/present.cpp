@@ -6,7 +6,6 @@
 #include <utility>
 
 #include "runtime/log.h"
-#include "runtime/pixel_format.h"
 #include "runtime/screen_sample.h"
 
 namespace lift {
@@ -162,37 +161,6 @@ bool HeadlessPresenter::dumpLastFrame(const std::string& host_path, bool* hash_s
     return last_arena_->dumpBmp(last_surface_, host_path, err);
 }
 
-bool HeadlessPresenter::snapshotLastFrame(std::vector<std::uint8_t>* rgba, int* w, int* h,
-                                          std::uint32_t* pitch) const {
-    if (rgba == nullptr || !have_last_surface_ || last_arena_ == nullptr) return false;
-    const GuestSurface& s = last_surface_;
-    if (s.width <= 0 || s.height <= 0) return false;
-    const std::uint8_t* pixels = last_arena_->pixels(s);
-    if (pixels == nullptr) return false;
-    const unsigned bpp = s.format.bytesPerPixel();
-    if (bpp != 2 && bpp != 4) return false;
-    const std::size_t out_pitch = static_cast<std::size_t>(s.width) * 4u;
-    rgba->assign(out_pitch * static_cast<std::size_t>(s.height), 0u);
-    for (std::int32_t y = 0; y < s.height; ++y) {
-        const std::uint8_t* row = pixels + static_cast<std::size_t>(y) * s.pitch;
-        std::uint8_t* out = rgba->data() + static_cast<std::size_t>(y) * out_pitch;
-        for (std::int32_t x = 0; x < s.width; ++x) {
-            const std::uint32_t raw =
-                pixel_format::loadPixel(row + static_cast<std::size_t>(x) * bpp, bpp);
-            out[static_cast<std::size_t>(x) * 4u + 0] =
-                static_cast<std::uint8_t>(pixel_format::expandChannel(raw, s.format.rmask));
-            out[static_cast<std::size_t>(x) * 4u + 1] =
-                static_cast<std::uint8_t>(pixel_format::expandChannel(raw, s.format.gmask));
-            out[static_cast<std::size_t>(x) * 4u + 2] =
-                static_cast<std::uint8_t>(pixel_format::expandChannel(raw, s.format.bmask));
-            out[static_cast<std::size_t>(x) * 4u + 3] = 255;
-        }
-    }
-    if (w != nullptr) *w = s.width;
-    if (h != nullptr) *h = s.height;
-    if (pitch != nullptr) *pitch = static_cast<std::uint32_t>(out_pitch);
-    return true;
-}
 
 
 }  // namespace lift

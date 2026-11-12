@@ -33,6 +33,7 @@
 #include "runtime/input_script.h"
 #include "runtime/interaction_graph.h"
 #include "runtime/memory.h"
+#include "runtime/message_box.h"
 #include "runtime/native_overrides.h"
 #include "runtime/seh.h"
 #include "runtime/shims.h"
@@ -108,6 +109,9 @@ struct TraceInputs {
     // ★ `--accept-recovery-dialog`：**默认绕过**「前回正常終了しませんでした」判定；传它 =
     //   恢复引擎真实判定路径（会走到 `MessageBoxA`）。与 `skip_logo` 同理：一开就是另一条执行路径。
     bool accept_recovery_dialog = false;
+    // ★ `--close-confirm`：X（关窗）的二次确认策略。缺省 `ask` = 弹系统「終了」框；
+    //   `exit`/`title`/`cancel` = 不弹框、直接按该选择返回（`REQ-01M72JFZ87DJNT52DW4HB8SEV6`）。
+    CloseConfirmPolicy close_confirm = CloseConfirmPolicy::Ask;
     std::uint64_t clock_start_100ns = 0;
     bool real_time = false;
 };
@@ -143,6 +147,15 @@ struct RunResult {
 //   抽成函数是为了让纯档用例能断言"新停机原因 ⇒ 非 0"（真正的黑盒进程退出码需要 CLI 造 OOM，
 //   而兄弟单已裁"⛔ 不把夹具造 OOM 做成产品参数"）。
 int exitCodeForRun(const RunResult& r);
+
+// ★ guest 自己调 `ExitProcess(n)` / `TerminateProcess(_, n)` 的 `n` → **宿主进程**退出码。
+//   n == 0 ⇒ 0（正常收尾）；n != 0 ⇒ 2（与 decode-error 同档：这是"引擎自己判定失败"）。
+//   ⛔ 不把 guest 的任意 n 直接当宿主退出码：主机的退出码语义是 0..255 的 shell 约定，
+//     直接透传会让 `exit(259)` 之类的值被截断 / 误读成别的状态（真机上 Windows 会截到 8 位、
+//     POSIX 一样只留低 8 位）⇒ 这里只回答"正常 / 非正常"这一位。
+//   ★ 抽成纯函数：`main` 的最终分流读它，`tests/exit_code.cpp` 同时用它做纯映射断言和
+//     **真子进程**的退出码断言（⛔ 只测 accessor 不叫"进程退出码"）。
+int exitCodeForGuestExit(std::uint32_t guest_exit_code);
 
 // ★ 时间线（`--input-script`）的**效果级判据**（`--expect-change-after` / `--expect-change-window`）：
 //   "动作发出去" ≠ "guest 看见了"（BUG-04 的点击被吞、BUG-16 的房间「戻る」无反应，都是它漏掉的）。
@@ -250,6 +263,12 @@ public:
     bool recoveryBypassChecked() const { return recovery_bypass_checked_; }
     // 钩子写之前读到的 EAX（= `sub_454730` 的返回值；摘要 `EAX n -> 0` 用它）。
     std::uint32_t recoveryBypassPriorEax() const { return recovery_bypass_prior_eax_; }
+
+    // ★ `--close-confirm ask|exit|title|cancel`（AGERC `_ShowDialog@12` id==3 的三臂策略）。
+    //   `ask`（缺省）= 窗口档弹系统「終了」框；`exit`/`title`/`cancel` = 不弹框直接返回
+    //   1/2/0（`exit` 与 2026-11-12 之前"恒返回 1"的行为逐位一致）。
+    void setCloseConfirmPolicy(CloseConfirmPolicy policy) { close_confirm_ = policy; }
+    CloseConfirmPolicy closeConfirmPolicy() const { return close_confirm_; }
 
     // ★ 指令式输入时间线（`--input-script`）：见 `runtime/input_script.h`。
     //   加载失败 ⇒ false + err（带行号）；⛔ 不静默跳过。可以在 run 之前 / 两次 run 之间替换。
@@ -360,6 +379,10 @@ public:
     GuestLayout& layout() { return layout_; }
     const GuestLayout& layout() const { return layout_; }
     bool imageLoaded() const { return image_loaded_; }
+    // ★ guest 自己调 `ExitProcess(n)` / `TerminateProcess(_, n)` 留下的**原值**（0 = 没调过 / 调了 0；
+    //   同一台 Machine 跑多轮时是最近一次的值 —— `main` 只跑一轮，所以宿主出口只读它一次）。
+    //   只读：`main` 的最终退出码由 `exitCodeForGuestExit()` 分流；⛔ 别的消费者闸门不读它。
+    std::uint32_t guestExitCode() const { return cpu_.shim.exit_code; }
 
     // 诊断
     void reportBaseGaps(std::FILE* out) const;
@@ -503,6 +526,7 @@ private:
     std::uint32_t skip_logo_object_ = 0;
     // ★ 恢复判定（`--accept-recovery-dialog` / `kRecoveryCheckEa`）：见上面的 setter。
     bool accept_recovery_dialog_ = false;
+    CloseConfirmPolicy close_confirm_ = CloseConfirmPolicy::Ask;  // `--close-confirm`（见 setter）
     bool recovery_bypass_checked_ = false;  // 钩子点已过（只算一次，⛔ 不反复写 EAX）
     bool recovery_bypass_applied_ = false;
     std::uint32_t recovery_bypass_prior_eax_ = 0;

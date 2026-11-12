@@ -850,11 +850,21 @@ void shimUnhandledExceptionFilter(X86& cpu, ShimCall& call) {
 }
 
 // ---- 退出 ----
+// ★ 退出码的**两级口径**（REQ-01M77CMJGJ9EJVNPFS2TKMMHD1）：
+//   · `exit_code` 原值留在 `cpu.shim.exit_code`（guest 可观测的那一份）；
+//   · **宿主进程**退出码只取 `main` 的最终分流（`exitCodeForGuestExit`：0 ⇒ 0，非 0 ⇒ 2）。
+//     ⛔ 不把 guest 的任意 n 直接当宿主退出码（shell 会截断到 8 位 / 把 259 读成 3 之类）。
+//   · 非 0 = "引擎自己判定失败后退出" ⇒ **warn 级**（默认可见）；0 = 正常收尾 ⇒ Info。
 void shimExitProcess(X86& cpu, ShimCall& call) {
     cpu.shim.exit_code = call.u32(0);
     cpu.running = false;
-    shimLog("kernel32", "ExitProcess", "guest 请求退出：exit_code=%u（cpu.running=false）",
-            cpu.shim.exit_code);
+    if (cpu.shim.exit_code != 0u) {
+        shimLogWarn("kernel32", "ExitProcess",
+                    "guest 请求退出：exit_code=%u（非 0 ⇒ 宿主进程退出码 2；cpu.running=false）",
+                    cpu.shim.exit_code);
+    } else {
+        shimLog("kernel32", "ExitProcess", "guest 请求退出：exit_code=0（正常收尾；cpu.running=false）");
+    }
     call.result = 0;
 }
 
@@ -863,8 +873,15 @@ void shimTerminateProcess(X86& cpu, ShimCall& call) {
     cpu.shim.exit_code = call.u32(1);
     cpu.running = false;
     // 偏差 6：只有一个进程 ⇒ 不看句柄内容
-    shimLog("kernel32", "TerminateProcess", "hProcess=0x%08X：本模拟器只有一个 guest 进程 ⇒ 停下，exit_code=%u",
-            h, cpu.shim.exit_code);
+    if (cpu.shim.exit_code != 0u) {
+        shimLogWarn("kernel32", "TerminateProcess",
+                    "hProcess=0x%08X：本模拟器只有一个 guest 进程 ⇒ 停下，exit_code=%u"
+                    "（非 0 ⇒ 宿主进程退出码 2）",
+                    h, cpu.shim.exit_code);
+    } else {
+        shimLog("kernel32", "TerminateProcess",
+                "hProcess=0x%08X：本模拟器只有一个 guest 进程 ⇒ 停下，exit_code=0", h);
+    }
     call.result = 1;
 }
 

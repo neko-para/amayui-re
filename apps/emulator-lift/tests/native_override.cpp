@@ -792,6 +792,9 @@ int main() {
     }
 
     // ---- ④ sub_436A80 的 LZSS 核：literal / match / 非压缩拷贝 ----
+    // ★ 结尾判据（REQ-01M77CMJGJ9EJVNPFS2TKMMHD1）：合法流必须 `true` 且输出逐字节正确；
+    //   **被截断**的流（输入提前耗尽、输出没填满）必须 `false` —— 调用方据此回退解释器。
+    //   ⛔ 不许"剩余填 0 再 true"：那会把"压缩流坏了 / comp_size 给错"折叠成成功。
     {
         std::uint8_t ring[4096] = {};
         const std::uint8_t lit[] = {0x07, 'A', 'B', 'C'};  // 3 个 literal 位（LSB first）
@@ -812,6 +815,36 @@ int main() {
         std::uint8_t copy[4] = {};
         LIFT_CHECK(lift::lzssDecode(raw, sizeof(raw), copy, sizeof(copy), ring));
         LIFT_CHECK(std::memcmp(copy, raw, 4) == 0);
+
+        // ---- ④b 合法流（literal + 一次真 match）：`0x07` 的低 4 位 = 1,1,1,0 ⇒ A B C + match(4078,3)
+        // ★ 末尾的 0x00 是让 `comp_size(7) != out_size(6)`：相等时 guest/native 都走 `memcpy` 直拷、
+        //   根本不解码（那样这条用例证明不了 match 分支）。填满 6 B 后 native 不再读输入，
+        //   guest 也在输入耗尽处返回。
+        const std::uint8_t flow[] = {0x07, 'A', 'B', 'C', 0xEE, 0xF0, 0x00};  // offset 0xFEE=4078 / count 3
+        std::uint8_t out6[6] = {};
+        std::uint8_t ring3[4096] = {};
+        LIFT_CHECK(lift::lzssDecode(flow, sizeof(flow), out6, sizeof(out6), ring3));
+        LIFT_CHECK(std::memcmp(out6, "ABCABC", 6) == 0);
+        LIFT_CHECK_EQ_U32(ring3[4078], 'A');  // 环形字典的写入位置（与 guest 的 r=4078 起点一致）
+        LIFT_CHECK_EQ_U32(ring3[4081], 'A');
+
+        // ---- ④c 被截断的流 ⇒ 必须 false（输入提前耗尽 / 输出没填满）----
+        // ① 只给到第一个 literal：flags + 'A' 就没了，out 还差 2 字节。
+        std::uint8_t t1[3] = {0, 0, 0};
+        LIFT_CHECK(!lift::lzssDecode(lit, 2u, t1, 3u, ring3));
+        // ② match 的两个字节只给了一个。
+        static const std::uint8_t truncated_match[] = {0x01, 'A', 0x00};
+        std::uint8_t t2[4] = {0, 0, 0, 0};
+        LIFT_CHECK(!lift::lzssDecode(truncated_match, sizeof(truncated_match), t2, 4u, ring3));
+        // ③ 只有 flag 字节、后面一个 token 都没有。
+        static const std::uint8_t flags_only[] = {0x00};
+        std::uint8_t t3[3] = {0, 0, 0};
+        LIFT_CHECK(!lift::lzssDecode(flags_only, sizeof(flags_only), t3, 3u, ring3));
+        // ④ 合法流砍掉**两个**字节（match 的 lo/hi 都没了）⇒ comp=5 ≠ out=6，输出只填到 3/6。
+        //   ★ ⛔ 不能只砍 1 字节：那会变成 comp==out（6==6）⇒ 走开头的 `memcpy` 直拷分支，
+        //   与「解码循环提前耗尽」是两件事（那个分支的语义另说，不是本条要守的东西）。
+        std::uint8_t t4[6] = {0, 0, 0, 0, 0, 0};
+        LIFT_CHECK(!lift::lzssDecode(flow, sizeof(flow) - 2u, t4, sizeof(t4), ring3));
     }
 
     // ---- ⑤ sub_48B090 的像素核：bottom-up 源 / top-down 目标 / alpha 按**目标行序** ----

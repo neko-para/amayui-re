@@ -7,10 +7,13 @@
 //     `cpu.shim.agerc_image` 的字节里在**宿主侧**解析）。⛔ 不再手写白名单 —— 那张 3 行的表漏了
 //     `_SetNameLenMax@20`，于是 SAVE.BIN 的 `COMMAND=332` 拿不到地址（127）⇒ 引擎弹"致命的错误"框
 //     ⇒ 被 `MessageBoxA` 的恒 IDOK 压成"中止" ⇒ `WM_CLOSE` ⇒ 干净退出。
-//   · 本文件登记**4 个实现**（stub thunk；它们优先于真实代码）：
+//   · 本文件登记**4 个实现**（它们优先于真实代码）：
 //       `_GetInstance@0`  → **真实模块基址**（= HINSTANCE；guest 拿它当令牌传给 LoadIconA）
-//       `_ShowDialog@12`  → 1（IDOK：用户没改设置，SCOPE §1 模态 no-op）
-//       `_OperateMenu@16` → 0（SCOPE §1）
+//       `_ShowDialog@12`  → ★ 2026-11-12 起**桥接成系统对话框**（`SDL_ShowMessageBox`）：只处理 `id==3`（关窗二次确认
+//                            「終了」），其余选择子返回 1 + 一次 warn。⛔ 不读 AGERC 的 RT_DIALOG 资源
+//                            （汉化件那份文本是乱码），文案在 `runtime/message_box.cpp` 的
+//                            `makeCloseConfirmSpec()`。`REQ-01M72JFZ87DJNT52DW4HB8SEV6` stage 1+2。
+//       `_OperateMenu@16` → 0（SCOPE §1，仍是 stub）
 //       `_SetNameLenMax@20` → **按真实实现**（见下面 `shimAgercSetNameLenMax` 的长注释）
 //   · **其余真实导出**（21 − 4 = 17 条，见 `data/requirements/01M75SDKZGY87B8SK7GBP92PXD.md`）
 //     由 `agercResolveExport` 交给**运行期 unimplemented thunk**：地址非 0（真机 loader 也这么说），
@@ -27,7 +30,11 @@
 #include <string>
 #include <vector>
 
+#include "runtime/audio.h"
 #include "runtime/image.h"
+#include "runtime/machine.h"
+#include "runtime/message_box.h"
+#include "runtime/present.h"
 #include "runtime/x86.h"
 #include "shims/register.h"
 
@@ -225,11 +232,67 @@ void shimAgercGetInstance(X86& cpu, ShimCall& call) {
     call.result = 0;
 }
 
+// ★ `_ShowDialog@12`：AGERC 的"选择子 → 对话框"入口（3 个参数 = 12 字节，stdcall）。
+//   实测调用参数 `(id=3, hWndOwner, 0)`（`.lst` 的 `0x405976/0x405978/0x405979 push 0/ecx/3` +
+//   运行期 trace；锚见 `REQ-01M72JFZ87DJNT52DW4HB8SEV6` §1/§2）。
+//   返回语义（真机三臂）：1 = プログラムを終了する（→ 0x405B21，继续关窗）、
+//   2 = タイトルに戻る（→ 0x405A82，返回 0 不关窗）、0 = キャンセル（→ 0x405A95，撤减光）。
+//   ⛔ 文案不从 AGERC 资源取；按钮/默认键/Esc/X 见 `makeCloseConfirmSpec()`。
 void shimAgercShowDialog(X86& cpu, ShimCall& call) {
-    (void)cpu;
-    // 参数：hwndOwner / lpTemplateName / hInstance（3 个 = 12 字节，stdcall）
-    shimLog(kAgerc, "_ShowDialog@12", "模态 no-op ⇒ 返回 1（IDOK，用户没改设置；SCOPE §1）");
-    call.result = 1;
+    const std::uint32_t id = call.u32(0);
+    const std::uint32_t owner = call.u32(1);
+    const std::uint32_t reserved = call.u32(2);
+    Machine* machine = cpu.machine;
+    PresentSink* sink = nullptr;
+    if (machine != nullptr && machine->presenter().hasSink()) {
+        sink = machine->presenter().sink();
+    }
+    if (id != 3) {
+        // ⛔ 只桥接关窗确认；AGERC 的其它对话框（设置等）仍是 stub（今天的行为 = 返回 1）。
+        shimLogWarn(kAgerc, "_ShowDialog@12",
+                    "id=%u（hwndOwner=0x%08X arg2=%u）不是关窗确认选择子 3 ⇒ 不弹框、返回 1（IDOK）"
+                    "（SCOPE §3 的 stub 口径；⛔ 不读 AGERC 资源）",
+                    id, owner, reserved);
+        call.result = 1;
+        return;
+    }
+    const CloseConfirmPolicy policy =
+        machine != nullptr ? machine->closeConfirmPolicy() : CloseConfirmPolicy::Ask;
+    if (const std::optional<std::uint32_t> forced = closeConfirmPolicyResult(policy)) {
+        shimLogWarn(kAgerc, "_ShowDialog@12",
+                    "id=3「終了」按 --close-confirm=%s ⇒ 不弹框、直接返回 %u（策略短路）",
+                    closeConfirmPolicyName(policy), *forced);
+        // ★ 2/0 = 不关窗 ⇒ 必须撤掉那次关窗请求（清 close_pending / 3 帧 / 500 ms deadline），
+        //   否则模态期间已过期的 deadline 会在下一帧把 run 收掉（用户看到的"点 X 直接退出"）。
+        if (*forced != 1 && sink != nullptr) sink->cancelCloseRequest();
+        call.result = *forced;
+        return;
+    }
+    const ModalSpec spec = makeCloseConfirmSpec();
+    std::uint32_t result = 1;  // headless / feeder / 无 sink / 系统框失败 ⇒ 今天的行为（= 退出程序）
+    if (cpu.audio != nullptr && cpu.audio->onFeederThread()) {
+        shimLogWarn(kAgerc, "_ShowDialog@12",
+                    "在音频 feeder 线程上被调用 ⇒ headless 语义：返回 1（⛔ 不碰窗口）");
+    } else if (sink == nullptr) {
+        shimLogWarn(kAgerc, "_ShowDialog@12",
+                    "headless / 没有窗口 sink ⇒ 返回 1（IDOK = 退出程序；⛔ 不弹系统框、不阻塞）");
+    } else {
+        std::uint32_t shown = 1;
+        if (sink->showSystemMessageBox(spec, &shown)) {
+            result = shown;
+            shimLogWarn(kAgerc, "_ShowDialog@12",
+                        "id=3「終了」系统对话框 ⇒ 用户选择 %u（1=プログラムを終了する / "
+                        "2=タイトルに戻る / 0=キャンセル）",
+                        result);
+        } else {
+            shimLogWarn(kAgerc, "_ShowDialog@12",
+                        "系统对话框起不来（SDL_ShowMessageBox 失败）⇒ 返回 1（今天的行为）");
+        }
+        // ★ 2/0 = 窗口留着：撤掉那次关窗请求（详见上面策略短路分支的注释）。
+        //   1 = 終了：**保留** close_pending，guest 自己走关窗；宽限只作兜底（⛔ 不提前 requestStop）。
+        if (result != 1) sink->cancelCloseRequest();
+    }
+    call.result = result;
 }
 
 void shimAgercOperateMenu(X86& cpu, ShimCall& call) {
@@ -250,7 +313,8 @@ void shimAgercOperateMenu(X86& cpu, ShimCall& call) {
 //   0x10036807  retn 14h                   ; @20 = 5 个 dword（__stdcall）
 // ⇒ 语义：**把 `*arg1` 存进 AGERC 的"名字最大长度"全局，返回 0**。其余 3 个参数没有被读。
 //   那个全局只被 AGERC 自己的换行循环读（`0x100378D1` / `0x100379C4`：`g_nameLenMax * 0x12` 与
-//   逐字宽度比较），而那条路径是 `_ShowDialog@12`（SCOPE §1 stub）⇒ 引擎观测不到这个副作用。
+//   逐字宽度比较），而那条路径是 `_ShowDialog@12`（设置对话框仍未做；只有关窗确认 id==3 被桥接）
+//   ⇒ 引擎观测不到这个副作用。
 //
 // ★ 为什么不把 RVA 交给 guest 跑真实代码（见文件头）：镜像总被换基址且 `.reloc` 未应用，
 //   这条函数里唯一的绝对引用（`0x100367F9`，`.reloc` 的 HIGHLOW 在 RVA `0x367FB`）会指到 **堆**
@@ -369,11 +433,12 @@ std::uint32_t agercResolveExport(X86& cpu, const char* name) {
 void registerAgercShims(ShimRegistry& s) {
     // ★ stdcall 的弹参字节数由 argc 算（0/3/4/5 ⇒ 0/12/16/20），与导出名里的 @N 一致。
     s.addStub("agerc", "_GetInstance@0", Conv::Stdcall, 0, &shimAgercGetInstance,
-              "SCOPE §1 模态 no-op：AGERC 设置对话框整块不做；_GetInstance 返回**真实模块基址**（HINSTANCE）");
-    s.addStub("agerc", "_ShowDialog@12", Conv::Stdcall, 3, &shimAgercShowDialog,
-              "SCOPE §1 模态 no-op：AGERC 设置对话框整块不做 ⇒ 返回 IDOK(1)（\"用户没改设置\"）");
+              "AGERC 设置对话框仍属 SCOPE §1 的未做范围；_GetInstance 返回**真实模块基址**（HINSTANCE）");
+    // ★ `_ShowDialog@12` 已不是 stub：id==3 桥接成系统「終了」对话框（REQ-01M72JFZ87DJNT52DW4HB8SEV6），
+    //   其余选择子返回 1 + warn（见 shimAgercShowDialog）。
+    s.add("agerc", "_ShowDialog@12", Conv::Stdcall, 3, &shimAgercShowDialog);
     s.addStub("agerc", "_OperateMenu@16", Conv::Stdcall, 4, &shimAgercOperateMenu,
-              "SCOPE §1 模态 no-op：AGERC 菜单操作 ⇒ 返回 0");
+              "SCOPE §1：AGERC 菜单操作（_OperateMenu@16）仍是 stub ⇒ 返回 0");
     // ★ REQ-01M75SDKZGY87B8SK7GBP92PXD：SAVE.BIN 的 COMMAND=332 取的就是这一条。真实实现的
     //   语义 = 存 `*arg1` 进 AGERC 的 g_nameLenMax、返回 0（见 shimAgercSetNameLenMax 的长注释）。
     s.addStub("agerc", "_SetNameLenMax@20", Conv::Stdcall, 5, &shimAgercSetNameLenMax,

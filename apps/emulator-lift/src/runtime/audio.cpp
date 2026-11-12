@@ -18,6 +18,7 @@
 #include "runtime/guest_call.h"
 #include "runtime/guest_token.h"
 #include "runtime/log.h"
+#include "runtime/machine.h"
 #include "runtime/memory.h"
 #include "runtime/native_overrides.h"
 #include "runtime/shims.h"
@@ -1548,6 +1549,55 @@ bool AudioEngine::setupFeederContext(std::string* err) {
     audio_cpu_.stop_why = nullptr;
     audio_cpu_.fpu.reset();
     std::memset(audio_cpu_.xmm, 0, sizeof(audio_cpu_.xmm));
+    // =====================================================================================
+    // ★★ **每个 guest 线程一个 TEB**：feeder 的 `fs` 不再指向主线程的 TEB。
+    //
+    //   真 Windows 的 `fs` 指向**本线程**的 TEB，而 SEH 链头就是 `fs:[0]`（`TEB.ExceptionList`）。
+    //   共用主线程的 TEB 时，feeder 的 guest 代码里任何一个 SEH prologue（`mov large fs:0, eax`；
+    //   `sub_4B6C30` 的调用链上确有）都会把**链头改成 feeder 栈上的 record**，epilogue 再写回一个
+    //   **已经过期的主线程链头**。主线程此刻 `_CxxThrowException` 就会沿这条被污染的链派发：
+    //    record 的内存早已被别的帧复用 ⇒ `Handler` 是数据 ⇒ 间接调用落到 guest 堆
+    //    （`REQ-01M77MC1374HXC2JR7E0ZYSHQJ`：`stop: unimplemented @ eip=0x109A5A71`；
+    //      实测另两次 `eip=0x103676C1` / 0x10357221 与 `decode-error @ 0x00544774`，链头分别是
+    //      feeder 栈 `0x6FDFFBA8` 与主栈上一处已被复用的 record）。
+    //   ⇒ 修法 = 给 feeder 一份自己的 TEB：**只拆 SEH 这一条共享通道**（链头 / 栈界 / Self / ThreadId
+    //      是每线程字段；TLS 数组 / PEB / ProcessId 从主 TEB 抄一份 —— ⛔ 本轮不做 per-thread TLS）。
+    //   落点 = **`GuestLayout::feeder_teb`**（布局常量的唯一真源；⛔ 这里不抄地址 —— 见
+    //   `kernel32_process.cpp` 的"别抄 GuestLayout 常量"）。主进程布局不使用这一页。
+    //   ⛔ 不许退回"在 fill 前后存/取 fs:[0]"：主线程与 feeder 是**真并行**的，存/取本身就是竞争。
+    // =====================================================================================
+    {
+        if (cpu_->machine == nullptr) {
+            if (err) *err = "feeder TEB：Machine 未装配（拿不到 GuestLayout）";
+            return false;
+        }
+        const std::uint32_t feeder_teb = cpu_->machine->layout().feeder_teb;
+        // ★ `commitZeroed` 对**已提交**的页是**静默清零**（`memory.cpp` 的 `commitZeroed`）⇒ 先把
+        //   "这一页被别人占了"变成响亮失败，⛔ 不静默覆盖（与 `guestTextPage` 的布局冲突判据同一口径）。
+        if (mem_->committed(feeder_teb, 0x1000)) {
+            const Region* r = mem_->regionOf(feeder_teb);
+            char buf[200];
+            std::snprintf(buf, sizeof(buf), "feeder TEB 页 0x%08X 已被占用（\"%s\"）⇒ 布局冲突",
+                          feeder_teb, r ? r->name : "(未登记)");
+            if (err) *err = buf;
+            return false;
+        }
+        if (!mem_->commitZeroed(feeder_teb, 0x1000, RegionKind::Teb, "feeder-teb")) {
+            if (err) *err = std::string("feeder TEB 提交失败：") + mem_->lastError();
+            return false;
+        }
+        if (audio_cpu_.fs_base != 0 && mem_->committed(audio_cpu_.fs_base, 0x1000)) {
+            for (std::uint32_t off = 0; off < 0x1000; off += 4u) {
+                mem_->wr32(feeder_teb + off, mem_->rd32(audio_cpu_.fs_base + off));
+            }
+        }
+        mem_->wr32(feeder_teb + 0x00, 0xFFFFFFFFu);                        // ExceptionList：末端（自己的链）
+        mem_->wr32(feeder_teb + 0x04, audio_stack_top_);                   // StackBase
+        mem_->wr32(feeder_teb + 0x08, audio_stack_top_ - kAudioStackSize); // StackLimit
+        mem_->wr32(feeder_teb + 0x18, feeder_teb);                         // Self
+        mem_->wr32(feeder_teb + 0x24, feeder_.thread_id);                  // UniqueThread
+        audio_cpu_.fs_base = feeder_teb;
+    }
     // 预装启动时已有的 shim 块；运行期新增的由 `installFeederShim` / 按需 range 检查补齐。
     for (const ShimDef& d : cpu_->shims->snapshot()) {
         if (d.stub_ea != 0) audio_cache_->installShim(d.stub_ea, d.id);
@@ -1896,6 +1946,31 @@ bool AudioEngine::runFeederGuest(std::string* err) {
         if (!audio_cpu_.running) {
             if (err) *err = audio_cpu_.stop_why ? audio_cpu_.stop_why : "guest 主动停止";
             return false;
+        }
+        // ★ 诊断（只在 LIFT_SEH_TRACE）：观察 feeder 执行期间 `fs:[0]` 的变化。
+        //   判据：feeder 的 guest 代码里有 SEH prologue（`mov large fs:0, eax`）。**修复前**它写的是
+        //   **主线程的** TEB（同一条链头）⇒ 主线程的 C++ throw 会派发到 feeder 栈上的 record
+        //   （REQ-01M77MC1374HXC2JR7E0ZYSHQJ 的根因取证：一次 run 里 173,755 次改写）。
+        //   `setupFeederContext` 给 feeder 建了自己的 TEB 之后，这些改写落在 feeder 私有的页上
+        //   （`audio_cpu_.fs_base`）⇒ 主线程的链头不再被碰。真 Windows 每个线程一个 TEB。
+        {
+            static const bool seh_watch = std::getenv("LIFT_SEH_TRACE") != nullptr;
+            static std::uint32_t last_head = 0;
+            static bool seeded = false;
+            if (seh_watch && audio_cpu_.fs_base != 0 && mem_->committed(audio_cpu_.fs_base, 4u)) {
+                const std::uint32_t head = mem_->rd32(audio_cpu_.fs_base);
+                if (!seeded) {
+                    last_head = head;
+                    seeded = true;
+                } else if (head != last_head) {
+                    std::fprintf(stderr,
+                                 "[seh] feeder 的 fs:[0]：0x%08X -> 0x%08X（feeder eip=0x%08X，"
+                                 "fs_base=0x%08X）\n",
+                                 last_head, head, audio_cpu_.eip, audio_cpu_.fs_base);
+                    std::fflush(stderr);
+                    last_head = head;
+                }
+            }
         }
         // 函数级 native override（feeder 有私有副本；_memcpy/_memset 是 Ogg 解码的热路径）。
         if (next_call_target != 0 && audio_cpu_.eip == next_call_target) {

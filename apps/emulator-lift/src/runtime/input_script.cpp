@@ -199,6 +199,7 @@ void InputScript::clear() {
     applied_ = 0;
     quit_requested_ = false;
     quit_posted_ = false;
+    close_window_pending_ = false;
     finish_logged_ = false;
     for (int i = 0; i < kTriggerKindCount; ++i) have_anchor_[i] = false;
     anchor_frame_ = 0;
@@ -528,6 +529,9 @@ bool InputScript::loadText(const std::string& text, const std::string& origin, s
             } else if (head == "quit" || head == "exit") {
                 if (tok.size() != 1) return fail(line_no, head + " 不带参数");
                 a.kind = Kind::Quit;
+            } else if (head == "close_window") {
+                if (tok.size() != 1) return fail(line_no, head + " 不带参数");
+                a.kind = Kind::CloseWindow;
             } else {
                 return fail(line_no, "未知指令：" + tok[0]);
             }
@@ -914,6 +918,11 @@ void InputScript::apply(WindowManager& wm, Action& a, std::uint64_t frame, std::
             break;
         case Kind::Quit:
             quit_requested_ = true;
+            break;
+        case Kind::CloseWindow:
+            // 只置位；真正的 `PresentSink::requestClose()` 由 `Machine` 在同一块边界交付
+            // （`apply()` 只拿得到 WindowManager，拿不到呈现后端）。
+            close_window_pending_ = true;
             break;
     }
 }

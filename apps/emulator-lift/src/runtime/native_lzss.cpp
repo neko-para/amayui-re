@@ -53,7 +53,11 @@ bool lzssDecode(const std::uint8_t* src, std::uint32_t comp_size, std::uint8_t* 
             }
         }
     }
-    return true;
+    // ★ 结尾判据（REQ-01M77CMJGJ9EJVNPFS2TKMMHD1）：循环只有两个出口 ——
+    //   `out == out_end`（正常填满）或 `break`（输入提前耗尽）。后者意味着"压缩流被截断 /
+    //   comp_size 给错" ⇒ **必须返回 false**，让 `NativeOverrideTable::invoke` 回退解释器，
+    //   ⛔ 不许把失败折叠成"成功"（也不许把剩余缓冲区填 0 再返回 true）。
+    return out == out_end;
 }
 
 bool nativeLzss436A80(X86& cpu, GuestMemory& mem, std::uint32_t* result) {    const std::uint32_t self = cpu.ecx();  // thiscall: this 在 ECX，栈上是 (Src, dst, info)

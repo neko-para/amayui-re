@@ -1312,6 +1312,87 @@ HuffCase huffCodebookC4() {
     return c;
 }
 
+// ---- sub_436A80（S4IC / LZSS 解压）：真字节两臂差分（REQ-01M77CMJGJ9EJVNPFS2TKMMHD1）----
+// 判据（红了意味着什么）：
+//   ① **合法流**：解释器臂与 override 臂的 `dst[0..out_size)` **逐字节相同**，且两臂都把
+//      `out_size` 填满；override 臂 `hits==1 && fallbacks==0`（真接管，不是"没启用 / 每次回退"）。
+//   ② **被截断的流**：override 臂 `hits==0 && fallbacks==1`（native 核返回 false ⇒ 走既有
+//      回退语义 ⇒ 解释器重放）；两臂 `dst` 仍逐字节相同。
+// ★ oracle = **解释器跑真字节**（`0x436A80` 从 AGE.EXE 取），⛔ 不在测试里手写参考解码器：
+//   压缩流只是**测试输入**；"解出来应该是什么"由 guest 自己的机器码回答。
+// ★ 为什么合法流要 `comp_size != out_size`：guest 在 `comp_size == *a4` 时走 `memcpy`（不解压）
+//   ⇒ 必须让合法流走 LZSS 路径，才能覆盖解码循环。
+struct LzssDecodeResult {
+    bool valid = false;
+    std::vector<std::uint8_t> dst;
+    std::uint32_t eip = 0, esp = 0;
+    std::uint64_t hits = 0, fallbacks = 0;
+};
+
+LzssDecodeResult runLzssDecode(const std::string& exe, const std::vector<std::uint8_t>& comp,
+                               std::uint32_t out_size, bool with_override, const char* tag) {
+    constexpr std::uint32_t kSelf = 0x08000000u;  // this（+4 起是 4096 B 环形字典）
+    constexpr std::uint32_t kInfo = 0x08100000u;  // a4：+0=out_size / +8=comp_size
+    constexpr std::uint32_t kIn = 0x08200000u;    // Src
+    constexpr std::uint32_t kDst = 0x08300000u;   // a3（另留松量：guest 不按 out_size 截断写）
+    constexpr std::uint32_t kCall = 0x08400000u;
+    constexpr std::uint32_t kDstSlack = 64u;
+    LzssDecodeResult out;
+    lift::Machine m;
+    std::string err;
+    if (!m.initBare(&err)) return out;
+    if (!m.loadImage(exe, &err)) return out;
+    if (!m.prepareStack(&err)) return out;
+    // this 对象 = 4 B 头 + 4096 B 环；预填 0xCC（guest 只清 this+4 起 0xFEE 字节）。
+    std::vector<std::uint8_t> self(4u + 4096u, 0xCC);
+    if (!m.placeData(kSelf, self.data(), self.size(), &err)) return out;
+    std::vector<std::uint8_t> info(12u, 0);
+    if (!m.placeData(kInfo, info.data(), info.size(), &err)) return out;
+    m.mem().wr32(kInfo + 0u, out_size);
+    m.mem().wr32(kInfo + 4u, 0xDEADBEEFu);
+    m.mem().wr32(kInfo + 8u, static_cast<std::uint32_t>(comp.size()));
+    if (!comp.empty() && !m.placeData(kIn, comp.data(), comp.size(), &err)) return out;
+    std::vector<std::uint8_t> dst(out_size + kDstSlack, 0x5A);
+    if (!m.placeData(kDst, dst.data(), dst.size(), &err)) return out;
+    if (with_override &&
+        !m.overrides().add(0x00436A80u, "refLzssDecode", lift::GuestConv::Thiscall, 12, lift::nativeLzss436A80,
+                           &err)) {
+        return out;
+    }
+    lift_fixture::Asm a(kCall);
+    a.u8(0xB9);  // mov ecx, self
+    a.u32(kSelf);
+    a.pushImm(kInfo);                     // a4
+    a.pushImm(kDst);                      // a3
+    a.pushImm(comp.empty() ? 0u : kIn);   // Src
+    a.callRel(0x00436A80u);
+    a.ret();
+    if (!m.placeCode(kCall, a.b.data(), a.b.size(), &err)) return out;
+    m.cpu().esp() = m.layout().stack_top - 4u;
+    m.mem().wr32(m.cpu().esp(), 0xFFFFFFFFu);
+    m.cpu().eip = kCall;
+    lift::RunOptions o;
+    o.until_ea = 0xFFFFFFFFu;
+    o.max_insns = 2000000ull;
+    const lift::RunResult r = m.run(o);
+    if (r.reason != lift::StopReason::UntilEa) {
+        std::fprintf(stderr, "  [lzss-decode %s] 运行停止：%s — %s\n", tag, lift::stopReasonName(r.reason),
+                     r.detail.c_str());
+        return out;
+    }
+    out.valid = true;
+    out.eip = m.cpu().eip;
+    out.esp = m.cpu().esp();
+    const std::uint8_t* pd = m.mem().host(kDst);
+    out.dst.assign(pd, pd + dst.size());
+    if (with_override) {
+        const lift::NativeOverride* e = m.overrides().at(0);
+        out.hits = e->hits;
+        out.fallbacks = e->fallbacks;
+    }
+    return out;
+}
+
 int main() {
     const std::string exe = envValue("LIFT_AGE_EXE");
     if (exe.empty()) LIFT_SKIP("没有 LIFT_AGE_EXE（CMake 的 assets 档会设它）");
@@ -1898,6 +1979,57 @@ int main() {
                 LIFT_CHECK(ovr.eax != 0u);
                 LIFT_CHECK_EQ_U32(ovr.info[0], static_cast<std::uint32_t>(input.size()));
                 LIFT_CHECK(ovr.info[2] != 0u);
+            }
+        }
+    }
+
+    // ---- ⑤c sub_436A80（LZSS 解压）：真字节两臂差分（判据见文件上方 `runLzssDecode`）----
+    // 合法流（comp_size != out_size，确保走解码循环而不是 `memcpy` 直拷）：
+    //   · `lit-3`   ：flags=0x07 + A B C ⇒ 3 B 输出（comp=4）；
+    //   · `match-6` ：再跟 match(offset=0xFEE=4078, count=3) ⇒ "ABCABC"（comp=7；末尾是让
+    //     comp≠out 的填充字节，native 填满 out 后不再读输入，guest 也在输入耗尽处返回）。
+    // 截断流：同一份合法流砍掉 match 的 hi 字节 ⇒ 只填 3/6 B。
+    {
+        struct DecCase {
+            const char* name;
+            std::vector<std::uint8_t> comp;
+            std::uint32_t out_size;
+            bool truncated;
+            std::string want;  // 这条流按字节**编码出来**的明文（sanity；主判据仍是解释器臂）
+        };
+        std::vector<DecCase> cases;
+        cases.push_back({"lit-3", {0x07, 'A', 'B', 'C'}, 3u, false, "ABC"});
+        cases.push_back({"match-6", {0x07, 'A', 'B', 'C', 0xEE, 0xF0, 0x00}, 6u, false, "ABCABC"});
+        cases.push_back({"truncated-3of6", {0x07, 'A', 'B', 'C', 0xEE}, 6u, true, "ABC"});
+        for (const DecCase& c : cases) {
+            lift_test::g_current_case = c.name;
+            const LzssDecodeResult base = runLzssDecode(exe, c.comp, c.out_size, false, c.name);
+            const LzssDecodeResult ovr = runLzssDecode(exe, c.comp, c.out_size, true, c.name);
+            LIFT_CHECK(base.valid && ovr.valid);
+            if (!base.valid || !ovr.valid) continue;
+            std::printf("  [lzss-decode %-14s] comp=%2zu out=%u hits=%llu fallbacks=%llu\n", c.name,
+                        c.comp.size(), c.out_size, (unsigned long long)ovr.hits,
+                        (unsigned long long)ovr.fallbacks);
+            LIFT_CHECK_EQ_U32(ovr.eip, base.eip);
+            LIFT_CHECK_EQ_U32(ovr.esp, base.esp);
+            // ① 主判据：输出**逐字节**相同。oracle = 解释器跑真字节。
+            LIFT_CHECK(ovr.dst == base.dst);
+            // ② sanity（不是第二份解码器）：解释器臂的输出必须等于这条流**按字面编码**的明文 ——
+            //   否则"两臂一起错"（例如环形字典起点写错）也能让 ① 绿。截断流只到前缀。
+            for (std::size_t i = 0; i < c.want.size(); ++i) {
+                LIFT_CHECK_EQ_U32(base.dst[i], static_cast<std::uint8_t>(c.want[i]));
+            }
+            if (!c.truncated) {
+                LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.hits), 1u);
+                LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.fallbacks), 0u);
+                // 两臂都真的填满了 out_size（排除"两边都只写了个前缀"的假绿）。
+                for (std::uint32_t i = 0; i < c.out_size; ++i) LIFT_CHECK(base.dst[i] != 0x5Au);
+            } else {
+                // ② 截断 ⇒ native 核返回 false ⇒ **走既有回退语义**（不是 disable 这一项）。
+                LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.hits), 0u);
+                LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.fallbacks), 1u);
+                // 输出没填满（否则这条用例证明不了"输入提前耗尽"）。
+                LIFT_CHECK_EQ_U32(base.dst[c.out_size - 1u], 0x5Au);
             }
         }
     }

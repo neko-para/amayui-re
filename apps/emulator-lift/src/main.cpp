@@ -101,6 +101,9 @@ void usage() {
         "  --accept-recovery-dialog  恢复引擎真实的「前回正常終了しませんでした」判定\n"
         "                      （**默认绕过**：等价于「上次正常结束」= marker 不存在；传它才会走到\n"
         "                      恢复框。⛔ 不是替用户答 NO；默认档 MessageBoxA **一次都不会被调**）\n"
+        "  --close-confirm <ask|exit|title|cancel>  X（关窗）的二次确认策略（缺省 ask）：\n"
+        "                      ask = 弹系统「終了」框（1=終了 / 2=タイトルに戻る / 0=キャンセル；\n"
+        "                      Esc/X=0）；exit/title/cancel = 不弹框，直接按该选择返回（exit 即旧行为）\n"
         "  --trace-inputs      打印 trace 输入清单（exe 路径串 / guest 命令行 / 环境块 / 时钟起点）\n"
         "  --until shim        跑到第一次 shim 调用就停（L1）\n"
         "  --until ea <hex>    跑到指定 EA 就停（L2 = 0x4BA890）\n"
@@ -199,6 +202,7 @@ int main(int argc, char** argv) {
     bool real_time = false;
     bool skip_logo = false;
     bool accept_recovery_dialog = false;
+    lift::CloseConfirmPolicy close_confirm = lift::CloseConfirmPolicy::Ask;
     bool trace_inputs = false;
     std::string log_level = "warn";
     std::string log_cats;
@@ -300,6 +304,12 @@ int main(int argc, char** argv) {
             skip_logo = true;
         } else if (std::strcmp(a, "--accept-recovery-dialog") == 0) {
             accept_recovery_dialog = true;
+        } else if (std::strcmp(a, "--close-confirm") == 0 && i + 1 < arg_count) {
+            if (!lift::parseCloseConfirmPolicy(args[++i], &close_confirm)) {
+                std::fprintf(stderr, "--close-confirm 需要 ask|exit|title|cancel（收到 \"%s\"）\n",
+                             args[i].c_str());
+                return 2;
+            }
         } else if (std::strcmp(a, "--trace-inputs") == 0) {
             trace_inputs = true;
         } else if (std::strcmp(a, "--until") == 0 && i + 1 < arg_count) {
@@ -903,6 +913,8 @@ int main(int argc, char** argv) {
     machine.setSkipLogo(skip_logo);
     // ★ 默认**绕过**恢复判定（= "marker 不存在" = 上次正常结束）；传 flag 才走引擎真实判定。
     machine.setAcceptRecoveryDialog(accept_recovery_dialog);
+    // ★ X 的二次确认策略（AGERC `_ShowDialog@12` id==3）：缺省 ask = 真弹系统「終了」框。
+    machine.setCloseConfirmPolicy(close_confirm);
 
     // ★ 0 点的**配置**必须先于脚本解析：`before-anchor` / `after-anchor` 的解析期判据要问
     //   "有没有 `--anchor-script`"（没开却写段标记 ⇒ 解析期报错）。配置跨 `clear()` 存活
@@ -1333,5 +1345,11 @@ int main(int argc, char** argv) {
     }
     // ★ 兜底退出码抽到 `lift::exitCodeForRun`（纯函数，tests/mechanism.cpp 直接断言）：
     //   上面几道消费者闸门（token / gpu-strict / 交互图）**优先**，它们没拦下才落到这里。
-    return lift::exitCodeForRun(r);
+    // ★ guest 自己 `ExitProcess(n)` / `TerminateProcess(_, n)`（REQ-01M77CMJGJ9EJVNPFS2TKMMHD1）：
+    //   n != 0 ⇒ 宿主退出码非 0（2，与 decode-error 同档）；n == 0 保持 0。
+    //   位置在**所有消费者闸门之后**（4/5/3 那些分流不动）；「run 本身失败 ⇒ 2」也先判，
+    //   于是这条只在"run 正常停下"时才有机会改变结果。
+    //   ⛔ 不把 guest 的任意 n 直接当宿主退出码（见 `exitCodeForGuestExit` 的注释）。
+    if (!r.ok()) return lift::exitCodeForRun(r);
+    return lift::exitCodeForGuestExit(machine.guestExitCode());
 }
