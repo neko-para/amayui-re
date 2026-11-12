@@ -1,0 +1,57 @@
+# 区间 profiler（README §4.3.2）量两处严重卡顿：
+#   ① fellow-enter  = SN0000 里右键 → FELLOW（转场 / 装载）
+#   ② save-confirm  = SAVE 里点“确认保存”（缩略图 + 1 MB DAT 写盘）
+# 边界 = 动作触发的 block 边界；每个 `profile_end` 打印一次
+# `=== profile window: <label> ===`（逐帧 / guest 函数 / shim 表）。
+#
+# 运行（与 sn0000-save.graph 同一套窗口 + GPU 参数）：
+#   cd apps/emulator-lift && ./out/emulator-lift --present window --present-hidden \
+#     --raster gpu --native-overrides all --skip-logo --audio off \
+#     --game-dir ../../links/install --appdata ../../.tmp/save-profile/appdata \
+#     --interaction-graph ../../graphs/sn0000-save-profile.graph \
+#     --max-frames 8000 --time-limit 400
+# 只想要“真实墙钟”的 A/B：把两对 profile_begin/end 去掉再跑一次（README §4.3.2 的口径）。
+# 单帧定位：同一张图加 `LIFT_FRAME_TRACE=1` ⇒ `[frame] n=… wall=… insns=…`，可直接看窗口内
+# 是哪一帧吃掉几秒（本图实测：fellow-enter 的 3031 帧 7.39 s、save-confirm 的 3369 帧 7.42 s）。
+
+await script TITLE
+wait 5000 wall_ms
+timeout 30000
+
+click 1186 373
+
+await script GAMESTART
+wait 2000 wall_ms
+
+click 830 592
+
+await script SN0000
+wait 25000 wall_ms
+timeout 35000
+
+# ① 右键进入 FELLOW：窗口覆盖点击 + 转场（现有 save 图给这段留 10 s；这里留 12 s）
+profile_begin fellow-enter
+click 500 500 right
+wait 12000 wall_ms
+timeout 20000
+profile_end fellow-enter
+
+await script FELLOW
+wait 2000 wall_ms
+
+click 100 140
+
+await script SAVE
+wait 2000 wall_ms
+
+click 300 100
+wait 1000 wall_ms
+
+# ② 确认保存：窗口覆盖点击 + 缩略图 + DAT 写盘（实测 ~7 s；留 15 s）
+profile_begin save-confirm
+click 650 320
+wait 15000 wall_ms
+timeout 30000
+profile_end save-confirm
+
+wait 2000 wall_ms

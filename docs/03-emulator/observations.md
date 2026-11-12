@@ -384,3 +384,28 @@
   --skip-logo --audio off --game-dir ../../links/install --appdata ../../.tmp/save/appdata
   --interaction-graph ../../graphs/sn0000-save.graph --max-frames 6000 --time-limit 300` ·
   2026-11-12 · macOS arm64 / RelWithDebInfo · CTest `save-graph`（79 s）
+
+### OBS-20261112-06 · 两处卡顿的区间 profile：右键进 FELLOW / SAVE 确认保存
+- **图**：`graphs/sn0000-save-profile.graph`（`profile_begin fellow-enter` 覆盖右键 + 12 s；
+  `profile_begin save-confirm` 覆盖确认保存 + 15 s；窗口表在 `profile_end` 打印）。
+- **命令**：`./out/emulator-lift --present window --present-hidden --raster gpu --native-overrides all
+  --skip-logo --audio off --game-dir ../../links/install --appdata ../../.tmp/save-profile/appdata
+  --interaction-graph ../../graphs/sn0000-save-profile.graph --max-frames 8000 --time-limit 400`
+  （macOS arm64 / RelWithDebInfo / 2026-11-12；本机 `--audio off`）。
+- **fellow-enter 读数**：wall **12,032 ms**；buckets guest 3,718 / shim 1,940 / interp 3,542 /
+  host 2,820（其中 **input-script 2,631**）/ native 10 ms。最大的 guest 项 = `sub_42F560`
+  self **1,899 ms** / incl 2,826 ms（**calls=5**，块 `0x42F5F0` 一条 128.8M insns）；`Present`
+  1,158 ms / 203 次。
+- **save-confirm 读数**：wall **15,039 ms**；guest 4,098 / shim 2,769 / interp 4,354 /
+  host 3,747（**input-script 3,548**）/ native 69 ms。存档链：`sub_42D980 → sub_40CD10`
+  incl **3,836 ms** → `sub_437480` incl **3,230 ms**；缩略图链 `sub_4A42C0`（ShrinkTexture）
+  incl **3,174 ms**（self 1,214 ms；`sub_49EE60` 410 ms）；`j_WriteFile` 仅 **2.5 ms**、
+  `sub_4A0430`（D3D 复制）**2.5 ms** ⇒ **卡的是 guest CPU（序列化 + 缩小），不是文件 IO / D3D 拷贝**。
+- **单帧读数（`LIFT_FRAME_TRACE=1`，同一张图）**：两处卡顿各是**一帧**：
+  `fellow-enter` = 第 **3031** 帧 `wall=7,388.2ms / 240.0M insns`（guest 3,043 / shim 127 /
+  other 4,218 ms）；`save-confirm` = 第 **3369** 帧 `wall=7,424.4ms / 220.4M insns`
+  （guest 2,926 / shim 87 / other 4,412 ms）。⇒ 不是"持续慢"，是**单帧 7.4 s**；
+  `other` 主要是 interpreter + 交互图 tick（手动游玩没有后者）。
+- **口径警告**：`host: input-script` 是**交互图自己的** `InputScript::tick`（每块边界一次，
+  2.6–3.5 s/窗）——手动游玩没有这一项，**不要把这条图的总墙钟当玩家读数**；要真实墙钟按
+  README §4.3.2 做去掉 `profile_*` 的 A/B。窗口 profiler 自身也有开销（每块计时）。
