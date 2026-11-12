@@ -268,11 +268,11 @@ $env:LIFT_STOP_AFTER_MOVIE = "1"
   它是**模拟器级**开关（不是测试专属）：手工玩时 export 了它，会在第一个影片放完后退出。
 - `movie-logo` 在 `ctest` 里**总是**带 `LIFT_STOP_AFTER_MOVIE=1`（`set_tests_properties(... ENVIRONMENT ...)`，
   分号分隔的列表），并由 `add_test` 传 `--expect-early-stop`。要验证"关掉时与旧行为逐字一致"，直接跑
-  `out/lift-movie-logo.exe`（参数见 `CMakeLists.txt` 的 `add_test`）而不设该变量、也不传那个开关。
+  `out/tests/lift-movie-logo.exe`（参数见 `CMakeLists.txt` 的 `add_test`）而不设该变量、也不传那个开关。
 - 测试据此断言钩子生效（两个子进程的 run summary 都得是 `stop      : stopped`）—— 钩子失效时它不会
   静默退回"变慢但仍绿"。判据挂在 CMake 传的那个参数上，**不挂在环境变量**上（env 被删掉时也要红）。
 - 另一条 assets 用例是 `option-roundtrip`（`tests/option_roundtrip.cpp`）：注册条件与其他 opt-in
-  资产用例相同（安装根 + `LIFT_ASSETS`）。它自己起三次模拟器（1 / 2 / 3 轮往返），判据与容差写在该
+  资产用例相同（安装根 + `LIFT_ASSETS`）。它自己起两次模拟器（1 / 2 轮往返；`kCycles = 2`），判据与容差写在该
   文件头注释里。
 
 ## 4.1 渲染产物导出

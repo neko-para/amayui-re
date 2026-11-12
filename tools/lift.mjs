@@ -200,8 +200,8 @@ export const FAMILY_STUB_APPROVED = [
   'kernel32!CreateTimerQueue',
   'kernel32!CreateTimerQueueTimer',
   'kernel32!DeleteTimerQueueTimer',
-  'kernel32!RaiseException',
-  'kernel32!RtlUnwind',
+  // ★ 2026-11-12：RaiseException / RtlUnwind 已从 stub 改为实现（REQ-01M72JFCB0W0924H3H6EQSGRK4）
+  //   ⇒ 从白名单移除；`pnpm tools lift sync --write` 已同时删掉 overrides.json 的两条 stub。
 ];
 
 const rel = (p) => path.relative(REPO_ROOT, p).split(path.sep).join('/');
@@ -1086,8 +1086,8 @@ export function reportCoverage({ exePath = EXE_FILE } = {}) {
 // bench（S8：吞吐 MIPS 进报告）
 // ---------------------------------------------------------------------------------------
 export const BENCH_BIN = process.platform === 'win32'
-  ? 'apps/emulator-lift/out/lift-bench.exe'
-  : 'apps/emulator-lift/out/lift-bench';
+  ? 'apps/emulator-lift/out/tests/lift-bench.exe'
+  : 'apps/emulator-lift/out/tests/lift-bench';
 
 /**
  * 跑一次 `--bench N` 取 MIPS。★ 不捕获管道（受限沙箱里会 EPERM）：用**文件描述符重定向**

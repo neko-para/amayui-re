@@ -148,7 +148,7 @@ bool NativeOverrideTable::invoke(NativeOverride& ov, X86& cpu, GuestMemory& mem,
 // ---------------------------------------------------------------------------------------
 
 bool NativeBlockTable::add(std::uint32_t entry_ea, std::uint32_t resume_ea, const std::string& name,
-                           NativeBlockFn fn, std::string* err) {
+                           NativeBlockFn fn, std::string* err, bool feeder_ok) {
     if (count_ >= kMax) {
         if (err) *err = "段级 native override 表已满（kMax=" + std::to_string(kMax) + "）";
         return false;
@@ -180,6 +180,7 @@ bool NativeBlockTable::add(std::uint32_t entry_ea, std::uint32_t resume_ea, cons
     e.declines = 0;
     e.fallbacks = 0;
     e.disabled = false;
+    e.feeder_ok = feeder_ok;
     return true;
 }
 
@@ -314,8 +315,18 @@ static_assert(kKnownCount <= NativeOverrideTable::kMax,
 
 // ★ 段级项（函数中段）：entry/resume 是固定的 `.lst` EA（中段没有符号），启用前用 `.lst` 校验锚。
 //   `name` 就是 `--native-overrides` 里写的名字（与函数级同名不会冲突：函数级表里没有 sub_414AC0）。
+//   `entry_insn / resume_insn` = 那两条指令的**期望文本**（`.lst` 指令列；`verifyKnownBlockAnchor`
+//   逐项校验）。⛔ 以前这两条是硬编码在校验函数里的 —— 加第二项时必然逐字不匹配、`all` 静默跳过。
+//   `feeder_ok` 见 `NativeBlockOverride::feeder_ok`。
 const KnownBlockNative kKnownBlocks[] = {
-    {"sub_414AC0", "sub_414AC0", 0x00415384u, 0x0041539Fu, nativeFillPool414AC0},
+    // SYS4INI 填池循环（boot 期主线程装载器的中段）。feeder 永远走不到 ⇒ `feeder_ok=false`
+    // （真走到了也只会 Declined 然后永久停用 + 一行 stderr 噪声，没有收益）。
+    {"sub_414AC0", "sub_414AC0", 0x00415384u, 0x0041539Fu, nativeFillPool414AC0,
+     "mov ecx, [esi-10h]", "mov eax, [ebx+5D7ECh]", /*feeder_ok=*/false},
+    // `sub_48D610`（Ogg 解码）的 PCM 转换段：feeder 是它的**主消费者**（Ogg 解码全在喂料线程里）
+    // ⇒ `feeder_ok=true`。段体内不含设备格式 / 分配 / guest 回调。
+    {"sub_48D610", "sub_48D610", 0x0048D767u, 0x0048D89Au, nativePcm48D767,
+     "mov eax, [ebp+var_118]", "mov eax, [ebp+var_114]", /*feeder_ok=*/true},
 };
 constexpr std::size_t kKnownBlockCount = sizeof(kKnownBlocks) / sizeof(kKnownBlocks[0]);
 }  // namespace
@@ -364,6 +375,13 @@ bool verifyKnownBlockAnchor(const LstIndex& lst, const KnownBlockNative& k, std:
         return false;
     };
     if (!lst.loaded()) return bad("没有 .lst（段级 EA 无法核验）");
+    // ★ 期望文本随项走（`KnownBlockNative::entry_insn / resume_insn`）。以前这里是两条硬编码字符串，
+    //   只对 `sub_414AC0` 成立 —— 加第二项时 entry/resume 必然逐字不匹配，而 `all` 的分支是
+    //   `required=false` ⇒ **静默跳过**（`machine.cpp` 的 addBlock），表现是"优化没生效"而不是红灯。
+    if (k.entry_insn == nullptr || k.entry_insn[0] == '\0')
+        return bad("已知表里没有登记 entry 指令的期望文本（entry_insn）");
+    if (k.resume_insn == nullptr || k.resume_insn[0] == '\0')
+        return bad("已知表里没有登记 resume 指令的期望文本（resume_insn）");
     const LstFunction* fn = lst.findFunction(k.enclosing_fn);
     if (fn == nullptr) return bad(std::string("`.lst` 里找不到函数 ") + k.enclosing_fn);
     const LstFunction* owner = lst.functionAt(k.entry_ea);
@@ -372,12 +390,24 @@ bool verifyKnownBlockAnchor(const LstIndex& lst, const KnownBlockNative& k, std:
     const LstEntry* entry = lst.find(k.entry_ea);
     if (entry == nullptr) return bad("entry EA 不是 `.lst` 里的一条指令");
     // 首指令必须是我们取证到的那条（换镜像 / 换 EA ⇒ 拒绝启用，⛔ 不静默换一个 EA）。
-    if (normalizeAsm(entry->text) != "mov ecx, [esi-10h]")
-        return bad("entry EA 的首指令不是 `mov ecx, [esi-10h]`（读到：" + normalizeAsm(entry->text) + "）");
+    if (normalizeAsm(entry->text) != normalizeAsm(k.entry_insn))
+        return bad("entry EA 的首指令不是 `" + std::string(k.entry_insn) + "`（读到：" +
+                   normalizeAsm(entry->text) + "）");
     const LstEntry* resume = lst.find(k.resume_ea);
     if (resume == nullptr) return bad("resume EA 不是 `.lst` 里的一条指令");
-    if (normalizeAsm(resume->text) != "mov eax, [ebx+5D7ECh]")
-        return bad("resume EA 的首指令不是 `mov eax, [ebx+5D7ECh]`（读到：" + normalizeAsm(resume->text) + "）");
+    if (normalizeAsm(resume->text) != normalizeAsm(k.resume_insn))
+        return bad("resume EA 的首指令不是 `" + std::string(k.resume_insn) + "`（读到：" +
+                   normalizeAsm(resume->text) + "）");
+    // ★ 段必须**单入口单出口**且落在同一个函数里：resume 的**最近函数入口**也必须是 `enclosing_fn`
+    //   （否则 fn 写的 EIP 会跳到别的函数、段级替换变成"跨函数跳转"）。这条也是防"把 entry 写成
+    //   函数入口"的那一类错（`resume_ea` 不是可以放行的范围，见头文件 `KnownBlockNative` 的注释）。
+    //   ⚠ `LstIndex::functionAt` 的语义是"**同段里最近的前一个函数入口**"，**不是区间检查**：
+    //     resume 落在函数末尾之后、下一个函数入口之前时，它仍会返回 enclosing_fn ⇒ 这一条会通过。
+    //     当前 `0x48D89A` 确实在 `sub_48D610` 内（且紧接段尾）⇒ 行为正确；要做成真正的区间检查，
+    //     得拿"下一个函数入口的 EA"当右界（索引没暴露它的顺序查找接口）—— 本单不做，登记在这里。
+    const LstFunction* resume_owner = lst.functionAt(k.resume_ea);
+    if (resume_owner == nullptr || resume_owner->ea != fn->ea)
+        return bad("resume EA 不在 " + std::string(k.enclosing_fn) + " 里");
     return true;
 }
 

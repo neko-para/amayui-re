@@ -141,14 +141,23 @@ struct NativeBlockOverride {
     //   （同一个 EA + 同一段代码），一次不匹配就说明这次运行的形状不是我们认得的那种；
     //   继续尝试只会在热路径上每迭代白付一次函数调用。
     bool disabled = false;
+    // ★ **feeder 是否也能跑这一项**（编译期 opt-in 的唯一真源 = `KnownBlockNative::feeder_ok`）。
+    //   `false` ⇒ `AudioEngine::setupFeederContext()` 不把它拷进 `audio_block_overrides_`
+    //   （feeder 走解释器）。★ 为什么需要这个字段：feeder 是**第二条 guest 执行流**，与主线程
+    //   共用同一份 `mem` / 堆 / COM 对象，但**不共用时钟**（feeder 不 tick 虚拟时钟）、也不共用
+    //   `window_prof_` ⇒ 一项段级 override 能不能在 feeder 里跑，与它能不能在主线程里跑是**两个**
+    //   判断；⛔ 不要用"fn 看起来是纯的"去推。
+    bool feeder_ok = false;
 };
 
 class NativeBlockTable {
 public:
     static constexpr std::size_t kMax = 4;
 
+    // `feeder_ok` 是**末位可选参数**（缺省 false ⇒ 现有调用点 / 纯夹具不受影响）：
+    // 见 `NativeBlockOverride::feeder_ok`。
     bool add(std::uint32_t entry_ea, std::uint32_t resume_ea, const std::string& name, NativeBlockFn fn,
-             std::string* err);
+             std::string* err, bool feeder_ok = false);
     void clear();
     bool empty() const { return count_ == 0; }
     std::size_t size() const { return count_; }
@@ -204,12 +213,23 @@ const KnownNative& knownNativeAt(std::size_t i);
 // ★ 段级项（函数中段）的已知表：`name` 同时是 `--native-overrides` 里写的名字。
 //   `enclosing_fn` 只用于**启用时的锚校验**（EA 必须落在这个函数里）——EA 是固定的 `.lst` 锚，
 //   ⛔ 不从名字推 EA（中段没有符号）；校验失败 ⇒ 拒绝启用（⛔ 不静默换一个 EA）。
+// ★ `entry_insn / resume_insn` = entry / resume 那两条指令的**期望文本**（`.lst` 指令列，列宽空白
+//   归一化后比较）。消费者 = `verifyKnownBlockAnchor`：它以前把唯一那一项的首/尾指令**硬编码**在
+//   校验函数里，加第二项时必然逐字不匹配 ⇒ `all` 会**静默跳过**新项。⇒ 锚的期望文本必须随项走。
+//   ⛔ 不要把它解释成"指令序号 / 条数"（那是没有消费者的读法：`replaced_insns` 由 fn 自己报，
+//   主线程也不需要序号）。⛔ 也不要把它当"放行范围"：`find` 只按 `entry_ea` 命中，`resume_ea`
+//   只是 Replaced 之后 EIP 的落点。
 struct KnownBlockNative {
     const char* name;
     const char* enclosing_fn;
     std::uint32_t entry_ea;
     std::uint32_t resume_ea;
     NativeBlockFn fn;
+    const char* entry_insn;   // entry_ea 处那条指令的期望文本（`verifyKnownBlockAnchor` 用）
+    const char* resume_insn;  // resume_ea 处那条指令的期望文本
+    // ★ 编译期 opt-in：`true` ⇒ 真 feeder（`--audio sdl` + 宿主时钟）启动时把它拷进私有段级表。
+    //   见 `NativeBlockOverride::feeder_ok`；`--native-overrides all` 与它**无关**。
+    bool feeder_ok = false;
     bool debug = false;
 };
 const KnownBlockNative* findKnownBlockNative(const std::string& name);
@@ -458,6 +478,32 @@ std::uint32_t blendGlyph46D9F0(const GlyphBlit& b);
 // count = `[ebx+0x5D7E8]+edi+1`、EAX 从 0 起每次写 `[ecx+eax*4]`。完成后 guest 状态：
 // EAX=EDX=count、ECX=[ebx+0x5D7E8]、EFLAGS = `cmp eax,edx` 相等的结果（ZF=1/PF=1，其余状态位 0）。
 BlockOverrideOutcome nativeFillPool414AC0(X86& cpu, GuestMemory& mem, std::uint64_t* replaced_insns);
+// ---------------------------------------------------------------------------------------
+// 段级：`sub_48D610`（Ogg 解码）里**每个通道的 PCM 转换循环**（entry `0x48D767` / resume `0x48D89A`）
+//
+// ★ 段体（`.lst` `0x48D767..0x48D894` + 出口 `0x48D89A`，**单入口单出口**：段内两个条件跳转都落在段内，
+//   唯一回边是 `0x48D894 jl 0x48D767`）：
+//     fld  dword [eax+edi*4]      ; 每样本一次（`eax` = `[ebp-118h]` = 本通道 f32 源缓冲）
+//     fmul st, st(1)              ; ST(1) = 32767.0 —— 段外 `0x48D738 fld dbl_5291B8`，`0x5291B8 dq 32767.0`
+//     call __ftol2_sse            ; EDX:EAX = 64 位**截断**
+//     cmp eax,7FFFh / jle         ; 低 32 位**有符号**上界 clamp（0xFFFF8000h 是下界，同样有符号）
+//     ...
+//     mov [ebx], ax               ; 每样本**只写 2 字节**（交错写：步长 = 2*ch）
+//     mov ecx,[esi+25C4h] / inc edi / lea ebx,[ebx+ecx*2] / cmp edi,[esi+26D8h] / jl
+// ★ `[ebp-108h]`：clamp 时 `mov dword ptr [ebp+var_108],1`（**不是** `or`；段内不重置 —— 清 0 在
+//   `0x48D70E`，每次**调用**一次）。它只被段外的 `0x48D8C2` 读来决定是否 `wsprintfA("Clipping in frame %ld")`
+//   ⇒ 对 PCM 字节**没有**影响，所以单列一条夹具（`pcm/clip-flag`）。
+// ★ `replaced_insns = 15*n + 1*n_clip_hi + 2*n_clip_lo`（**不是** `15*n + n_clip`）：
+//   无 clip 的一次迭代 = 14 条段内指令 + `__ftol2_sse` 的函数级 override 自己 `++cpu_.insns` 一次
+//   ⇒ 15（**依赖两臂都启用 `__ftol2_sse`**，见下面的 G10）；上界 clip = +1（`mov eax,7FFFh` / `jmp` /
+//   `mov [ebp-108h],1` 替掉 `cmp`+`jge` 两条尾巴）；下界 clip = +2（`mov eax,0FFFF8000h` +
+//   `mov [ebp-108h],1`）。
+// ★ 闸门 G1..G10 与"⛔ 不调 `nativeFtol2Sse`"的理由见 `native_pcm.cpp` 的头注。
+// ★ `feeder_ok = true`（`kKnownBlocks`）：段内不读设备格式、不分配、不调 guest 回调，只读写
+//   `[ebp-118h]` 指向的源 / `[ebx]` 目标 / `[ebp-108h]` 标志 / x87 状态 —— 全部是 feeder 自己那份
+//   guest 状态（`audio_cpu_` + 同一份 `GuestMemory`）。
+// ---------------------------------------------------------------------------------------
+BlockOverrideOutcome nativePcm48D767(X86& cpu, GuestMemory& mem, std::uint64_t* replaced_insns);
 // 纯解码核（测试直接用；src/comp = 输入，dst/out = 输出，ring = 4096 B 字典）。
 bool lzssDecode(const std::uint8_t* src, std::uint32_t comp_size, std::uint8_t* dst, std::uint32_t out_size,
                 std::uint8_t ring[4096]);

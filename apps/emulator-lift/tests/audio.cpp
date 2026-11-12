@@ -9,15 +9,21 @@
 //      Release 清掉 pending；
 //   ⑥ 静音门：缺省 `sound=false` 时 dump 全 0 但 fills / mixed / 通知照跑；`sound=true` 逐字节
 //      等于 guest 斜坡（见文件末尾的 runDelivery）。
+//   ⑦ 第 3 层补偿的覆盖面：`removeBuffer` / `addBuffer`（同一 state 换 obj）在
+//      `filling_obj_` 命中时**有界等**"正在跑的那一刀"（`removeBuffer` 挡在 guest 堆 free 之前；
+//      用夹具 seam 伪造在飞 fill，见文件后半的三条用例）。
 //
 // ★ 会红：把 `fireCrossings` 的 sort 去掉 ⇒ ① 的回绕 0 会排在 3 之前；
 //   把 `generateTo` 的声道/采样率转换去掉 ⇒ ③ 红；把 removeBuffer 的 pending 清理去掉 ⇒ ⑤ 红；
 //   把 `stop()` 的 `dropPending` 去掉 ⇒ `audio-device/stop-then-play-without-seek` 红
 //   （旧 q1 + 新 q1 ⇒ pending().size()==2）。
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "check.h"
@@ -615,6 +621,161 @@ void testStopThenPlayWithoutSeek() {
     a.end();
 }
 
+// ---- 第 3 层补偿的覆盖面：`removeBuffer` / `addBuffer` 也要等"正在跑的那一刀" --------------
+//
+// ★ 判据（红了意味着什么）：
+//   **G3**：`filling_obj_ == 该 obj` 时 `removeBuffer(state)` **必须真的等**它跑完。
+//   这条等待挡在 `destroyBufferBlocks`（`shims/dsound.cpp`）的 `heap->free` **之前** ——
+//   它先 `removeBuffer` 再 free guest 环与状态块，而设备模型读的正是 `b.data_ea`
+//   ⇒ 不等就会让在飞那一刀往已 free 的 guest 堆块里写（UAF / 串块），而不只是"写回旧相位"。
+//   **G4**（负数对照）：没有在飞 fill 时 `removeBuffer` **不许恒等**（`fill_waits` 不增），
+//   排除"每条 remove 都睡 20 ms"那种恒等待。
+//   **G5**：同一 `state_ea` 换成另一条 obj 时，旧 obj 的在飞那一刀也要等（`addBuffer`）；
+//   等完新 obj 必须在模型里生效（Play 入队的是新 obj，不是旧 obj）。
+//
+// ★ 怎么造"在飞 fill"：本测试是 `AudioMode::Virtual` ⇒ `thread_mode_ == false`、
+//   `filling_obj_` 恒 0（它只在 `feederEvent` 里置位，而 feeder 只在 `Sdl && realTime` 起）。
+//   ⇒ 用夹具 seam `setFillInFlightForTest(obj)` 伪造，**另一条线程** 20 ms 后清 0。
+//   ⛔ 它测的是"等待的接线"（真的进了 `waitFill` + 记账），**不**覆盖：
+//     ① feeder 自己调进来的自等早退（`isFeederThread()` 在纯档恒 false，走不到那条分支；
+//        漏了那句的后果是每刀 3 s、不是 assert，只能靠 `--audio sdl` 读数看 `fill_wait_timeouts`）；
+//     ② 真重叠时旧环被写坏（那要真线程 + 真设备）。
+//
+// ★ 会红：删掉 `removeBuffer` / `addBuffer` 里那句 `waitFill`（或把它挪到 `thread_mode_ &&`
+//   后面）⇒ `fill_waits` 保持 0、耗时 < 15 ms ⇒ G3/G5 当场红。
+//   ★ 读数只作**存在性**判据（"真的等了"）：`fill_wait_us > 0`；⛔ 不锁具体毫秒数
+//   （机器负载会让 20 ms 的睡变成 21 或 35）。
+constexpr std::uint32_t kCompDataEa = 0x00440000u;
+constexpr std::uint32_t kCompStateEa = 0x00430000u;
+constexpr std::uint32_t kCompObj1 = 0x00450000u;
+constexpr std::uint32_t kCompObj2 = 0x00451000u;
+constexpr std::uint32_t kCompBytes = 384000u;  // 48k / 16 / 2 ⇒ 2.0 s 一圈
+
+lift::AudioFormat stereo48k() {
+    lift::AudioFormat fmt;
+    fmt.sample_rate = 48000;
+    fmt.channels = 2;
+    fmt.bits = 16;
+    fmt.block_align = 4;
+    fmt.avg_bytes = 192000;
+    return fmt;
+}
+
+bool beginVirtualAudio(lift::Machine& m, std::string* err) {
+    if (!initMachine(m, err)) return false;
+    if (!m.configureAudio(lift::AudioMode::Virtual, "", /*sound=*/true, err)) return false;
+    return m.audio().begin(err);
+}
+
+bool placeCompRing(lift::Machine& m, std::string* err) {
+    std::vector<std::uint8_t> pcm(kCompBytes, 0);
+    std::vector<std::uint8_t> zeros(16, 0);
+    if (!m.placeData(kCompDataEa, pcm.data(), pcm.size(), err)) return false;
+    return m.placeData(kCompStateEa, zeros.data(), zeros.size(), err);
+}
+
+// 起一条"20 ms 后清掉在飞标志"的线程；返回时它已经在跑。
+struct FillClearer {
+    std::atomic<bool> cleared{false};
+    std::thread thread;
+    FillClearer(lift::AudioEngine& a, std::chrono::milliseconds delay)
+        : thread([&a, this, delay] {
+              std::this_thread::sleep_for(delay);
+              a.setFillInFlightForTest(0);
+              cleared.store(true);
+          }) {}
+    ~FillClearer() {
+        if (thread.joinable()) thread.join();
+    }
+    void join() {
+        if (thread.joinable()) thread.join();
+    }
+};
+
+void testRemoveWaitsForInFlight() {
+    lift_test::g_current_case = "audio-device/remove-waits-inflight";
+    std::string err;
+    lift::Machine m;
+    if (!beginVirtualAudio(m, &err) || !placeCompRing(m, &err)) {
+        LIFT_CHECK(false);
+        return;
+    }
+    lift::AudioEngine& a = m.audio();
+    a.addBuffer(kCompStateEa, kCompObj1, kCompDataEa, kCompBytes, 0x181C8u, stereo48k());
+    a.setFillInFlightForTest(kCompObj1);
+    FillClearer clearer(a, std::chrono::milliseconds(20));
+    const auto t0 = std::chrono::steady_clock::now();
+    a.removeBuffer(kCompStateEa);
+    const auto t1 = std::chrono::steady_clock::now();
+    clearer.join();
+    const auto waited_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    LIFT_CHECK(clearer.cleared.load());  // 先确认夹具真的动了，再谈"等了多久"
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(a.stats().fill_waits), 1u);
+    LIFT_CHECK(waited_ms >= 15);
+    LIFT_CHECK(a.stats().fill_wait_us > 0);
+    // 线程清 0 之后标志必须回 0（不是"等完还留着"）。
+    LIFT_CHECK_EQ_U32(a.fillInFlightForTest(), 0u);
+    // 条目真的删了：`play` 找不到 Buffer（`play` 在 `find() == nullptr` 时直接返回）⇒ 不入队。
+    a.play(kCompStateEa, true);
+    LIFT_CHECK(a.pending().empty());
+    a.end();
+}
+
+void testRemoveWithoutInFlightDoesNotWait() {
+    lift_test::g_current_case = "audio-device/remove-no-wait-without-inflight";
+    std::string err;
+    lift::Machine m;
+    if (!beginVirtualAudio(m, &err) || !placeCompRing(m, &err)) {
+        LIFT_CHECK(false);
+        return;
+    }
+    lift::AudioEngine& a = m.audio();
+    a.addBuffer(kCompStateEa, kCompObj1, kCompDataEa, kCompBytes, 0x181C8u, stereo48k());
+    // ⛔ 不设 seam：没有在飞 fill ⇒ 不许等。
+    LIFT_CHECK_EQ_U32(a.fillInFlightForTest(), 0u);
+    const auto t0 = std::chrono::steady_clock::now();
+    a.removeBuffer(kCompStateEa);
+    const auto t1 = std::chrono::steady_clock::now();
+    const auto waited_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(a.stats().fill_waits), 0u);
+    LIFT_CHECK(a.stats().fill_wait_us == 0);
+    // 真等待是 20 ms 量级 ⇒ 这里必须远小于它（排除"恒等待"）。
+    LIFT_CHECK(waited_ms < 15);
+    a.end();
+}
+
+void testAddBufferSwapWaitsForInFlight() {
+    lift_test::g_current_case = "audio-device/addbuffer-swap-waits-inflight";
+    std::string err;
+    lift::Machine m;
+    if (!beginVirtualAudio(m, &err) || !placeCompRing(m, &err)) {
+        LIFT_CHECK(false);
+        return;
+    }
+    lift::AudioEngine& a = m.audio();
+    a.addBuffer(kCompStateEa, kCompObj1, kCompDataEa, kCompBytes, 0x181C8u, stereo48k());
+    a.setFillInFlightForTest(kCompObj1);
+    FillClearer clearer(a, std::chrono::milliseconds(20));
+    const auto t0 = std::chrono::steady_clock::now();
+    a.addBuffer(kCompStateEa, kCompObj2, kCompDataEa, kCompBytes, 0x181C8u, stereo48k());
+    const auto t1 = std::chrono::steady_clock::now();
+    clearer.join();
+    const auto waited_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    LIFT_CHECK(clearer.cleared.load());
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(a.stats().fill_waits), 1u);
+    LIFT_CHECK(waited_ms >= 15);
+    LIFT_CHECK(a.stats().fill_wait_us > 0);
+    LIFT_CHECK_EQ_U32(a.fillInFlightForTest(), 0u);
+    // 新 obj 必须在模型里生效：Play 只按同一 state 的那条 Buffer 入队 offset 0。
+    const std::uint32_t offsets[4] = {0u, 96000u, 192000u, 288000u};
+    a.setNotify(kCompStateEa, 4, offsets);
+    a.clearPendingForTest();
+    a.play(kCompStateEa, true);
+    LIFT_CHECK(a.pending().size() == 1);
+    if (a.pending().size() == 1) LIFT_CHECK_EQ_U32(a.pending().front().obj, kCompObj2);
+    a.end();
+}
+
 // ---- 静音门（缺省静音 / `--sound` 才出声）-------------------------------------------
 //
 // ★ 判据（红了意味着什么）：
@@ -809,6 +970,9 @@ int main() {
     testCrossingSort();
     testRepositionAndReplay();
     testStopThenPlayWithoutSeek();
+    testRemoveWaitsForInFlight();
+    testRemoveWithoutInFlightDoesNotWait();
+    testAddBufferSwapWaitsForInFlight();
     testDefaultMutedDelivery();
     testSoundOnDelivery();
     testMutedDeliveryParity();

@@ -58,3 +58,8 @@ slot=11 q3  guest=1716.85 shimtok=1532.98 shimblk=7   total=1743.79
 - 守卫：`audio-device/stop-then-play-without-seek`（对外）· `stop-drops-stale-fill`（内部机制）· `replay-on-playing`。
 - ⛔ 第 2/3 层与 EOF 自停路径**都没有 CTest 覆盖**（`thread_mode_ = Sdl && realTime`，CTest 全是 Virtual）；
   运行时判据只有 `dumpSummary` 的 `fill_waits` / `fill_wait_timeouts` / `fill_overlapped` / `fill_slow` / `fill_max_ms`。
+
+## 2026-11-12 本机（macOS）复验
+`graphs/se-eof.graph` + `--audio sdl` + `--audio-dump`（`SDL_AUDIODRIVER=disk --sound` 取到非零 WAV）：
+在 lag=2.000 s 处**没有**重复段（8 s 之后逐块 max|diff| 都是 4–5 位数量级，没有匹配块）。
+⇒ 本机不复现"尾声重播"；根因单 `REQ-01M75VZXV4SDMVVM1Z72G009XJ` 与 Windows A/B 见 `REQ-01M770JFDPZKKJR7D0ZZ09FJJ7`。

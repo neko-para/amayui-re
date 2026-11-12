@@ -74,3 +74,6 @@ fills=32 notify=49 ... slot_reverify_fail=0 fill_max_ms=1743.79 fill_slow=4
 ★ **诚实读法**：Huffman + rep 把单刀从 1.74 s 压到 1.05–1.30 s ⇒ 静音能在一圈内到达 ⇒ 听感重复消失；
 但 `shimtok` 仍 **1.0–1.3 s**（令牌饥饿没动）⇒ 只是**掉到阈值以下**，不是根治。⇒ 本单保持 `blocked_by` M0/M1，
 判据不变：**`fill_slow = 0` 且 `fill_max_ms` ≈ 0.2 s 量级**。
+
+## 2026-11-12 本机（macOS）读数：不复现
+`fill_max 126.55 / fill_slow 0 / shimtok≈0–3 ms`，`--audio-dump` 的 WAV 在 lag=2.000 s 无重复段 ⇒ Windows 的 1.3–1.7 s 尖峰本机不复现；A/B 见 `REQ-01M770JFDPZKKJR7D0ZZ09FJJ7`。

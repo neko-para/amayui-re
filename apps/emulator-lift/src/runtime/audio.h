@@ -119,6 +119,13 @@ struct AudioStats {
     std::uint64_t slot_reverify_fail = 0;
     std::uint64_t fill_max_us = 0;
     std::uint64_t fill_slow = 0;
+    //   fill_wait_us / fill_wait_max_us = 第 3 层"等正在跑的那一刀"的**累计 / 单次最大**墙钟
+    //     （微秒；summary 里按毫秒打）。只统计**真的进过 wait** 的那几次（与 `fill_waits`
+    //     同一个集合 ⇒ 两者可除）。★ 口径 = **只量谓词等待本身**（`t1` 取在重取 `mutex_`
+    //     之前）⇒ 不含混音器占用，⛔ 不要当"调用方总卡顿"读。
+    //     ⛔ 只读诊断：不作为断言取值（读数进 docs/03-emulator/observations.md，不进 test）。
+    std::uint64_t fill_wait_us = 0;
+    std::uint64_t fill_wait_max_us = 0;
     std::uint32_t max_buffers = 0;
 };
 
@@ -200,6 +207,16 @@ public:
     std::uint64_t mixedBytes() const { return stats_.mixed_bytes; }
     // ⚠ 只给夹具 / 单线程：不取 `pending_mutex_`。
     void clearPendingForTest() { pending_.clear(); }
+    // ★ 仅夹具：伪造 / 清除"某一刀 fill 正在跑"（`filling_obj_`）。0 = 清。
+    //   存在理由：`filling_obj_` 只在 `feederEvent` 里置位，而 feeder 只在 thread 模式
+    //   （`Sdl && realTime`）起 ⇒ 纯档 CTest 造不出"在飞 fill"，`removeBuffer` / `addBuffer`
+    //   新增的等待分支在测试里永远走不到（守卫恒绿）。
+    //   实现在 audio.cpp：在 `pending_mutex_` 下 store 并 `notify_all`（与 fill 收尾同一纪律，
+    //   否则等的人会丢唤醒）。⛔ 不进生产路径；⛔ 不要改成无锁 check-then-set
+    //   （见 `filling_obj_` 成员上的注记）。
+    void setFillInFlightForTest(std::uint32_t obj_ea);
+    // 仅夹具：读回 `filling_obj_`（断言"清 0 真的生效"；生产路径不要用）。
+    std::uint32_t fillInFlightForTest() const { return filling_obj_.load(); }
 
 private:
     struct Buffer {
@@ -373,6 +390,15 @@ private:
     X86 audio_cpu_;
     GuestCallStack audio_calls_;
     NativeOverrideTable audio_overrides_;
+    // ★ 段级 override 的**私有副本**（`Machine::block_overrides_` 里 `feeder_ok == true` 的那些项）：
+    //   `setupFeederContext()` 在 `audio_cpu_ = *cpu_` 之后 filter + add 一份。
+    //   ★ 为什么必须是副本：`hits / declines / fallbacks / disabled` 全是**非原子**裸字段；
+    //     共享主表 = 数据竞争，且 feeder 的一次 `Declined` 会 `disabled = true` **永久停用主线程**
+    //     那一项（反之亦然）。⛔ dispatch 不许解引用 `audio_cpu_.native_blocks`（那是快照来源）。
+    //   ★ 两个执行流各自停用（副本是启动时快照）：主线程的 `disabled` 不会传给 feeder，反之亦然。
+    //   ★ 计数只在 feeder 线程上写、也在同一条线程（fill 收尾）上读 ⇒ 天然无竞争；
+    //     ⛔ 不要让主线程读它（`LIFT_AUDIO_TRACE` 的 `bov=` 就住在 fill 收尾那一行）。
+    NativeBlockTable audio_block_overrides_;
     std::unique_ptr<Decoder> audio_decoder_;
     std::unique_ptr<BlockCache> audio_cache_;
     // 只保护私有 cache 的装/取；⛔ 不要用设备模型的 mutex_（主线程混音会长时间持有它）。

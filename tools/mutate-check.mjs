@@ -1003,6 +1003,34 @@ const MUTATIONS = [
   },
 
   {
+    // ★ 代表 "每线程一份 softfloat 状态被退回**进程级共享**"这一类错
+    //   （`REQ-01M76ZHN9V2WNCYT1ACJDJ94CW`）：`THREAD_LOCAL` 空 ⇒ `softfloat_exceptionFlags` /
+    //   `softfloat_roundingMode` 是模块级变量，而 `x87TakeExceptionFlags()` 是"读 + 清"的读改写
+    //   ⇒ 音频 feeder（第二条 guest 执行流）与主线程互相偷 / 串 x87 状态字的 PE 位，
+    //   PCM 段的"逐位一致"不成立。判据：`apps/emulator-lift/tests/fpu_thread.cpp` ——
+    //   两条线程各 20000 轮，A 的 inexact 只许出现在 A、B 的 invalid 只许在 B（取到的标志里
+    //   既不许缺自己的位、也不许有对方的位；另有单线程 sanity 钉住两条臂各自真的置位）。
+    //   ★ 两条线程用 `std::barrier` **逐轮强制交错**（对齐开始 / 两边都已置位 / 两边都读完再进下一轮）
+    //     ⇒ 共享态下"两家的位同时在场"由同步边保证，第一个 take 必读到对方的位、第二个必读到 0
+    //     ⇒ **必然红**。⛔ 不要退回"只堆轮数"：复审实测旧版本在同一变异二进制上连跑 10 次有 1 次绿。
+    //   ★ 施加点用**整段三档定义**（不是只改 macOS 那档）：只把 `__thread` 改成空的话，
+    //     Windows（clang-cl 走 `_MSC_VER` 档）跑这条变异会「没红」——那会被读成"守卫坏了"，
+    //     而实际是"变异点在该平台根本没生效"。整段替换 ⇒ 三平台都退回 `#define THREAD_LOCAL`（空）。
+    file: 'apps/emulator-lift/third_party/berkeley-softfloat/platform.h',
+    from:
+      '#if defined(_MSC_VER)\n#define THREAD_LOCAL __declspec(thread)\n' +
+      '#elif defined(__GNUC__) || defined(__clang__)\n#define THREAD_LOCAL __thread\n' +
+      '#else\n#define THREAD_LOCAL _Thread_local\n#endif',
+    to: '#define THREAD_LOCAL',
+    guard: 'ctest:fpu-thread-flags',
+    ctest: 'fpu-thread-flags',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'THREAD_LOCAL 退回空（softfloat 状态进程级共享）⇒ barrier 强制交错下两条线程的异常位同时在场 ' +
+      '⇒ 一个 take 读到对方的位、另一个读到 0 ⇒ fpu-thread-flags 每次必红（实测 10/10）',
+  },
+
+  {
     // ★ 代表 "LZSS Encode 的**平局判据**被放宽"这一类错（REQ-01M7375DARF1QFZEFNWX3CAK6T）。
     //   判据：`apps/emulator-lift/tests/native_override.cpp` 的 `lzss/tie-strict-greater` ——
     //   8 字节定点输入（BABABBAB，对象预填 0xCC）下输出必须是 `03 42 41 EE F0 EE F0`：
@@ -1101,6 +1129,56 @@ const MUTATIONS = [
     what:
       '`mdct_backward` 第一段旋转的符号翻正 ⇒ 输出整段错（O(1) 量级）⇒ ' +
       'native-override-assets 的 mdct 两臂差分当场红',
+  },
+
+  // ★ 下面三条代表 PCM 段（`sub_48D610` 的 `0x48D767..0x48D89A`）的三类**静默错**
+  //   （REQ-01M75W6BB3PY3MF42ZTS23KTBS）。判据都在 `apps/emulator-lift/tests/native_override_assets.cpp`
+  //   的 `pcm/*`（真字节两臂：解释器 = 同一 EA 的 oracle ⇒ 逐字节比 dst + `[ebp-108h]` + 出口状态 + insns）。
+  //   ★ 三条都**只在值表含非满幅 / 负的非 clamp 样本时才红**：满幅值表会被 clamp 掩盖
+  //     （`0.5*32767` vs `0.5*32768` 都落在范围内；负数一律 clamp 就看不到有符号判据）。
+  {
+    // M1：乘数 32767.0 → 32768.0（`.lst` 0x5291B8 的 dq 是 32767.0）。
+    //   0.5 → 16383 (0x3FFF) vs 16384 (0x4000) ⇒ dst 逐字节差。
+    //   ★ G7 的**字面量**（校验 guest 的 ST(0)）故意不跟着变：否则变异会把闸门打掉、只看到 Declined。
+    file: 'apps/emulator-lift/src/runtime/native_pcm.cpp',
+    from: 'constexpr double kPcmScale = 32767.0;',
+    to: 'constexpr double kPcmScale = 32768.0;',
+    guard: 'ctest:native-override-assets',
+    ctest: 'native-override-assets',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'PCM 段的乘数从 32767.0 改成 32768.0 ⇒ 非满幅样本（±0.5 / 0.1）的 int16 逐字节差 ⇒ ' +
+      'native-override-assets 的 `pcm/value-table` 当场红（满幅值表会被 clamp 掩盖 ⇒ 假绿）',
+  },
+
+  {
+    // M2：clamp 判据改**无符号**（guest 是 `cmp eax,7FFFh/jle` + `cmp eax,0FFFF8000h/jge`，两条有符号）。
+    //   `-0.5` ⇒ 低 32 位 `0xFFFFC001`（有符号 −16383，**不该** clamp）；无符号比较把它当 >0x7FFF
+    //   ⇒ clamp 成 0x7FFF ⇒ dst 差。
+    file: 'apps/emulator-lift/src/runtime/native_pcm.cpp',
+    from: '        if (ax > 0x7FFF) {',
+    to: '        if (static_cast<std::uint32_t>(ax) > 0x7FFFu) {',
+    guard: 'ctest:native-override-assets',
+    ctest: 'native-override-assets',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'PCM 段的 clamp 判据从有符号改成无符号 ⇒ 负数样本被当成 >0x7FFF 上界 clamp ⇒ ' +
+      'native-override-assets 的 `pcm/value-table`（含 −0.5 / −131073）逐字节当场红',
+  },
+
+  {
+    // M3：不写 `[ebp-108h]`（`0x48D877 mov dword ptr [ebp-108h],1`）。
+    //   ★ 这个标志**不喂 PCM 字节**（只喂段外的 `wsprintfA("Clipping in frame %ld")`）⇒ 任何只看
+    //     dst / WAV 的断言都抓不到；必须显式把 `[ebp-108h]` 放进被比较的状态（`pcm/clip-flag/*`）。
+    file: 'apps/emulator-lift/src/runtime/native_pcm.cpp',
+    from: '        if (clipped) mem.wr32(ebp - 0x108u, 1u);',
+    to: '        if (clipped) { /* 变异：不写 [ebp-108h] */ }',
+    guard: 'ctest:native-override-assets',
+    ctest: 'native-override-assets',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'PCM 段不再写 `[ebp-108h]` 的 clip 标志 ⇒ 只喂调试打印的那个槽恒 0 ⇒ ' +
+      'native-override-assets 的 `pcm/clip-flag/*`（有 clip ⇒ 期望 1）当场红（dst 字节完全不变）',
   },
 
   {
@@ -1367,6 +1445,30 @@ const MUTATIONS = [
       '实际 0）⇒ 违规计数确实在数，而不是"恒 0 所以恒绿"（旧形态"acquire 空实现"会挂死，见上）',
   },
 
+
+  // ── `WindowManager` 的**主线程亲和性**（REQ-01M76SXW0Y3R8QX1F94AB85M9H 的 2026-11-12 裁决）──
+  //   这不是令牌：wm 按 M0 的口径是**主线程独占宿主对象** ⇒ 判据是"谁在碰"，⛔ 不是"持不持牌"。
+  //   破坏 = 删掉 `find`（非 const）入口的那一句检查点 ⇒ 非 owner 线程碰 wm 时不再记账。
+  //   ★ `from` 必须带上函数签名：`host_window.cpp` 里 `checkMainThread("window.find")` 有**两处**
+  //     （const / 非 const 两个 `find`），只拿那一行做锚会落在第一处、说不清删的是哪个入口。
+  {
+    file: 'apps/emulator-lift/src/runtime/host_window.cpp',
+    from:
+      'HostWindow* WindowManager::find(std::uint32_t hwnd) {\n' +
+      '    checkMainThread("window.find");\n' +
+      '    auto it = windows_.find(hwnd);',
+    to:
+      'HostWindow* WindowManager::find(std::uint32_t hwnd) {\n' +
+      '    // 变异：删掉 find 入口的主线程检查点（wm 被非主线程访问时不再记账）\n' +
+      '    auto it = windows_.find(hwnd);',
+    guard: 'ctest:window-manager-token',
+    ctest: 'window-manager-token',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '`WindowManager::find` 入口不再调 `checkMainThread("window.find")` ⇒ worker 线程碰 wm 时 ' +
+      '`offThread()` 不涨、`firstOffThreadSite()` 仍是 nullptr ⇒ window-manager-token 的 ' +
+      '`window-manager-token/off-thread-find` 红（`>=1` 与站点名两条同时失配）',
+  },
 
   {
     file: 'apps/emulator-lift/src/runtime/font.cpp',
@@ -1776,6 +1878,28 @@ const MUTATIONS = [
       '`sub_4E1570` 失败支的 `adv(read)` 改成 `adv(codelengths[lo])`（两条分支的字节数写成同一个）' +
       '⇒ 位游标错位：native-override-assets 的 `huff/fail-len-gt-read` 当场红' +
       '（位读三 dword 的 endbit / ptr 与解释器臂不同）',
+  },
+
+  {
+    // ★ 代表 "音频第 3 层补偿的**覆盖面**只挂在 stop/setPosition 上" 这一类错
+    //   （`REQ-01M75RD3WNA2GZQY32S34V00S7`）：`removeBuffer` 在模型里 erase 掉这条流就返回，
+    //   而 `destroyBufferBlocks`（`shims/dsound.cpp`）紧接着 `heap->free` 掉 guest 环与状态块
+    //   ⇒ 在飞那一刀 continues 往已 free 的 guest 堆块里写（不只是"写回旧相位"）。
+    //   变异 = 把新加的那句有界等待**删掉**（同形于"补丁没落上"）。
+    //   判据：`apps/emulator-lift/tests/audio.cpp` 的 `audio-device/remove-waits-inflight` ——
+    //   夹具 seam 伪造 `filling_obj_`，另一条线程 20 ms 后清 0；删掉等待 ⇒ `fill_waits` 保持 0、
+    //   耗时 < 15 ms ⇒ 当场红。★ 读数只作存在性判据（不锁具体毫秒数）。
+    //   ★ 为什么不用 `if (false && …)`：那会在 `/W4 /WX` 下定死一个常量条件（C4127 的风险），
+    //     而"整句替换成注释"精确表达"补丁没落上"，且 `obj` / `lock` 仍被别的语句使用（无未用告警）。
+    file: 'apps/emulator-lift/src/runtime/audio.cpp',
+    from: '        if (!isFeederThread() && filling_obj_.load() == obj) waitFill(obj, lock);',
+    to: '        // 变异：removeBuffer 不再等"正在跑的那一刀 fill"（挡在 heap->free 之前的判据消失）',
+    guard: 'ctest:audio-device',
+    ctest: 'audio-device',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '`removeBuffer` 不再有界等"正在跑的那一刀 fill"（erase/dropPending 之后直接返回）⇒ ' +
+      '`audio-device/remove-waits-inflight` 的 `fill_waits == 1` / 耗时 ≥ 15 ms 当场红',
   },
 
 

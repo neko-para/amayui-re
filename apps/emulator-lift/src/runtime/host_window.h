@@ -6,11 +6,13 @@
 // ★ 消息结构 = Win32 MSG 的 x86 布局（28 字节）：hwnd/message/wParam/lParam/time/pt.x/pt.y。
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <functional>
 #include <map>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -98,13 +100,44 @@ public:
     static constexpr int kCaption = 19;
     static constexpr int kMenu = 19;
 
+    // =====================================================================================
+    // ★ **主线程亲和性守卫**（REQ-01M76SXW0Y3R8QX1F94AB85M9H 的 2026-11-12 裁决）
+    //
+    // ⛔ 这**不是**令牌（`guest_token.h` 的那一套）。`WindowManager` 按 M0 的口径是**主线程独占
+    //   的宿主对象**（`machine.cpp` 里 harness tick 的原注释）：块边界的 harness tick 与
+    //   `GetMessageA` 的宿主事件泵都在**合法让出令牌**的窗口里写它 ⇒ 在这里补
+    //   `guestToken().check()` 会把 M0 的设计判成 bug。
+    // ★ 但"主线程独占"今天靠的是"feeder 的 `X86::windows == nullptr`"，没有任何断言钉住它
+    //   ⇒ M1 之后 feeder 侧只要拿到 wm 指针就会**静默**越界。这里守的正是这一类：
+    //   非 owner 线程碰**33 个状态入口 + 13 个 inline 读取器**（宿主事件泵的三个接线器
+    //   `setHostEventPump` / `clearHostEventPump` / `hasHostEventPump` 不在此列 —— 它们只动
+    //   宿主回调 `host_event_pump_`，不是 guest 可见状态）⇒ 计数 + 第一次在 stderr 喊一行；
+    //   ⛔ **返回值 / 行为一律不变**。
+    // ★ 站点名 = `window.<op>`（能一眼看出是哪一处，⛔ 不用一个 `window.manager` 糊全部）。
+    //   嵌套调用（`get` 里调 `pumpTimers`/`peek`、`setCursorClientPos` 里调 `find`）会多次计数
+    //   ⇒ 判据只能写 `>= 1` / `>= 2`，⛔ 不写死"每次恰好 +1"。
+    // =====================================================================================
+    // owner 线程 = **构造这个对象的线程**（成员初始值），`Machine::run` 起始处再显式确认一次
+    //   （同一线程会再设成自己；换线程跑同一台 Machine 时由它改口径）。
+    // ★ `owner_ == std::thread::id{}`（显式 `setOwnerThread(std::thread::id{})` 清空）⇒
+    //   **不计数**：没有 owner 的纯夹具不制造假红。
+    void setOwnerThread(std::thread::id id) { owner_ = id; }
+    // 非 owner 线程碰入口的累计次数 / 第一次的站点名（nullptr = 一次都没有）。
+    unsigned long long offThread() const { return off_thread_.load(std::memory_order_relaxed); }
+    const char* firstOffThreadSite() const { return first_off_site_.load(std::memory_order_relaxed); }
+    // 清账（夹具用）：计数归零 + first site 归 nullptr（⇒ 下一次违规会重新喊一行）。
+    void resetOffThread();
+
     std::uint32_t registerClass(const std::string& name, std::uint32_t proc, std::uint32_t style);
     std::uint32_t createWindow(const std::string& cls, std::uint32_t style, std::uint32_t exstyle, int x,
                                int y, int w, int h, std::uint32_t menu);
     HostWindow* find(std::uint32_t hwnd);
     const HostWindow* find(std::uint32_t hwnd) const;
     bool destroyWindow(std::uint32_t hwnd);
-    std::size_t windowCount() const { return windows_.size(); }
+    std::size_t windowCount() const {
+        checkMainThread("window.count");
+        return windows_.size();
+    }
 
     // 消息队列（不弹 SDL；P3 由后端往同一个队列里 post）
     void post(const WinMessage& msg);
@@ -133,18 +166,33 @@ public:
     // 脚本结束：释放脚本按下的键 / 按钮（置抬起）并把所有权交还 OS。
     void releaseScriptOwnership();
     // 鼠标按钮位图（WM_* 的 wParam / `mouse_buttons` 的**唯一**一份；SDL 与脚本共用）。
-    std::uint32_t mouseButtons() const { return mouse_buttons_; }
+    std::uint32_t mouseButtons() const {
+        checkMainThread("window.mouse");
+        return mouse_buttons_;
+    }
     bool setMouseButton(MouseButton b, bool down, InputSource src);  // 同时写 VK 电平
     bool mouseButtonOwnedByScript(MouseButton b) const;
     void postQuit(std::uint32_t code);
-    bool quitPosted() const { return quit_; }
-    std::uint32_t quitCode() const { return quit_code_; }
-    std::size_t queueSize() const { return queue_.size(); }
+    bool quitPosted() const {
+        checkMainThread("window.quit");
+        return quit_;
+    }
+    std::uint32_t quitCode() const {
+        checkMainThread("window.quit");
+        return quit_code_;
+    }
+    std::size_t queueSize() const {
+        checkMainThread("window.count");
+        return queue_.size();
+    }
 
     void pumpTimers(X86& cpu);
     std::uint32_t setTimer(X86& cpu, std::uint32_t hwnd, std::uint32_t id, std::uint32_t elapse_ms);
     bool killTimer(std::uint32_t hwnd, std::uint32_t id);
-    std::size_t timerCount() const { return timers_.size(); }
+    std::size_t timerCount() const {
+        checkMainThread("window.count");
+        return timers_.size();
+    }
 
     // 非客户区扣除（客户区 = 外层 - 边框 - 标题栏 - 菜单）；样式里没有 WS_CAPTION 就不扣标题栏。
     static void clientSizeFor(std::uint32_t style, int outer_w, int outer_h, int* client_w, int* client_h);
@@ -160,23 +208,33 @@ public:
     //   返回值 = **新计数**（不是布尔、不是旧值）。
     // =====================================================================================
     std::uint32_t setCursor(std::uint32_t hcursor);  // 返回**旧** HCURSOR（Win32 语义）
-    std::uint32_t cursor() const { return cursor_; }
+    std::uint32_t cursor() const {
+        checkMainThread("window.cursor");
+        return cursor_;
+    }
     // ★ 第 4 个参数是来源：`Script` 一旦写过位置就拥有光标，之后 `Os` 的移动被拒绝（见 InputSource）。
     void setCursorPos(int x, int y);  // guest 自己调 SetCursorPos（不改所有权）
     bool setCursorClientPos(std::uint32_t hwnd, int x, int y, InputSource src);
     void setCursorClientPos(std::uint32_t hwnd, int x, int y) {
         setCursorClientPos(hwnd, x, y, InputSource::Os);
     }
-    bool cursorOwnedByScript() const { return cursor_script_owned_; }
+    bool cursorOwnedByScript() const {
+        checkMainThread("window.cursor");
+        return cursor_script_owned_;
+    }
     // 屏幕坐标 → 客户区坐标（`SetCursorPos` / `GetCursorPos` 的反向；与 setCursorClientPos 同一份原点）。
     void cursorClientPos(std::uint32_t hwnd, int* x, int* y) const;
     void getCursorPos(int* x, int* y) const {
+        checkMainThread("window.cursor");
         if (x) *x = cursor_x_;
         if (y) *y = cursor_y_;
     }
     int showCursor(bool show);                     // 显示 +1 / 隐藏 -1，返回**新**显示计数
     std::uint32_t setCapture(std::uint32_t hwnd);  // 返回**旧**捕获窗口（0 = 没有）
-    std::uint32_t capture() const { return capture_; }
+    std::uint32_t capture() const {
+        checkMainThread("window.capture");
+        return capture_;
+    }
 
     // =====================================================================================
     // ★ 输入采样计数（2026-11-08；**注入层的判据**，不是 guest 语义）
@@ -197,12 +255,21 @@ public:
     //     提供 20 Hz 心跳的是 `GetCursorPos`（引擎每迭代的位置采样）。
     // ★ 计数**不改任何返回值**（⛔ 不是 guest 语义 / 不是采样率）；它只回答"注入层还要不要等"。
     // =====================================================================================
-    std::uint64_t inputSampleCount() const { return input_samples_; }
+    std::uint64_t inputSampleCount() const {
+        checkMainThread("window.sample");
+        return input_samples_;
+    }
     // 采样周期估计（guest ms；0 = 样本不足，还不知道）。自动 hold 的**安全下限**用它，
     // 规则 = **最近若干个采样间隔的最大值**（见 `noteInputSample` 的实现注释）。
-    std::uint64_t inputSamplePeriodMs() const { return input_sample_period_ms_; }
+    std::uint64_t inputSamplePeriodMs() const {
+        checkMainThread("window.sample");
+        return input_sample_period_ms_;
+    }
     // 最近一次采样的 guest 时刻（自动 hold 的"看到之后又等了一个周期"从它算）。
-    std::uint64_t lastInputSampleMs() const { return last_input_sample_ms_; }
+    std::uint64_t lastInputSampleMs() const {
+        checkMainThread("window.sample");
+        return last_input_sample_ms_;
+    }
     // guest 侧读点调用一次。返回**新**计数。`guest_ms` = guest 虚拟时钟（采样间隔估计用）。
     std::uint64_t noteInputSample(std::uint64_t guest_ms);
 
@@ -253,6 +320,20 @@ private:
     std::uint64_t input_intervals_[kInputIntervalRing] = {};
     std::uint32_t input_interval_count_ = 0;
     std::uint32_t input_interval_next_ = 0;
+
+    // =====================================================================================
+    // ★ 主线程亲和性账（**不是**令牌；见类头那一段与 `host_window.cpp` 的 `checkMainThread`）
+    //   `owner_` 的初值 = **构造这个对象的那个线程**（`Machine` 是在主线程构造的；
+    //   `Machine::run` 起始处再显式 `setOwnerThread(std::this_thread::get_id())` 确认）。
+    //   成员是三份**可变诊断账**：`checkMainThread` 是 const 成员（所有读取器都是 const）⇒ mutable。
+    // =====================================================================================
+    // 入口的主线程检查点：非 owner ⇒ `off_thread_++` + 第一次 stderr 喊一行。
+    // ⚠ 与 `GuestToken::check` / `SurfaceArena::checkToken` 同一条口径：**不改变返回值 / 行为**。
+    void checkMainThread(const char* site) const;
+
+    std::thread::id owner_ = std::this_thread::get_id();
+    mutable std::atomic<unsigned long long> off_thread_{0};
+    mutable std::atomic<const char*> first_off_site_{nullptr};
 };
 
 }  // namespace lift

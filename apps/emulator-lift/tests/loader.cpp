@@ -313,10 +313,30 @@ int main() {
         if (huff_vec != nullptr) LIFT_CHECK_EQ_U32(huff_vec->ea, 0x004E1950u);
         std::string cerr;
         m.overrides().clear();
+        m.blockOverrides().clear();
         LIFT_CHECK(m.configureNativeOverrides("all", &cerr));
         LIFT_CHECK(m.overrides().find(0x004E82C0u) != nullptr);
         LIFT_CHECK(m.overrides().find(0x004E1570u) != nullptr);
         LIFT_CHECK(m.overrides().find(0x004E1950u) != nullptr);
+        // ★ 段级（`REQ-01M75W6BB3PY3MF42ZTS23KTBS` 的**第 7 处落点**判据）：`all` 必须把 PCM 段
+        //   （entry `0x48D767`）**真的装进主表**。锚校验（`verifyKnownBlockAnchor`）一旦失败，
+        //   `addBlock` 的 `required=false` 分支是**静默跳过**（只打一行 stderr）⇒ 下面这两条是唯一
+        //   会红的判据。★ `feeder_ok` 也在这里读：它是 feeder 私有副本的唯一 opt-in 真源。
+        LIFT_CHECK(m.blockOverrides().find(0x0048D767u) != nullptr);
+        if (const lift::NativeBlockOverride* pcm_blk = m.blockOverrides().find(0x0048D767u)) {
+            LIFT_CHECK_EQ_U32(pcm_blk->resume_ea, 0x0048D89Au);
+            LIFT_CHECK(pcm_blk->feeder_ok);
+        }
+        // 旧段级项仍在，且 **feeder_ok=false**（opt-in 是一对一的：不是"段级一律 copy"）
+        LIFT_CHECK(m.blockOverrides().find(0x00415384u) != nullptr);
+        if (const lift::NativeBlockOverride* pool_blk = m.blockOverrides().find(0x00415384u))
+            LIFT_CHECK(!pool_blk->feeder_ok);
+        // 隔离臂：段级项也能被 `-名字` 单独排掉，且函数级不受影响
+        m.blockOverrides().clear();
+        LIFT_CHECK(m.configureNativeOverrides("all,-sub_48D610", &cerr));
+        LIFT_CHECK(m.blockOverrides().find(0x0048D767u) == nullptr);
+        LIFT_CHECK(m.overrides().find(0x004E82C0u) != nullptr);
+        m.blockOverrides().clear();
         // 隔离臂：两项各自能单独排掉（`all,-名字`），而且**另一项仍在**
         m.overrides().clear();
         LIFT_CHECK(m.configureNativeOverrides("all,-sub_4E1570", &cerr));

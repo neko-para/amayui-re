@@ -61,8 +61,8 @@
 - **怎么量（无安装，实验室）**：`tests/bench.cpp` 的 `lift-bench`（顶层 pure，自造字节，不建窗口）：
   ```
   cd apps/emulator-lift && mkdir -p ../../.tmp/profile-ab
-  for i in 1 2 3 4 5; do ./out/lift-bench 50000000          > ../../.tmp/profile-ab/bench-off-$i.log 2>&1; done
-  for i in 1 2 3 4 5; do ./out/lift-bench 50000000 --profile > ../../.tmp/profile-ab/bench-on-$i.log  2>&1; done
+  for i in 1 2 3 4 5; do ./out/tests/lift-bench 50000000          > ../../.tmp/profile-ab/bench-off-$i.log 2>&1; done
+  for i in 1 2 3 4 5; do ./out/tests/lift-bench 50000000 --profile > ../../.tmp/profile-ab/bench-on-$i.log  2>&1; done
   grep '^bench' ../../.tmp/profile-ab/bench-*.log   # 每臂 5 个 MIPS 读数 ⇒ 取中位数
   grep '^instr' ../../.tmp/profile-ab/bench-*.log   # 两臂的标签必须只差 profile=
   ```

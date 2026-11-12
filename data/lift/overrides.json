@@ -59,6 +59,13 @@
       "reason": "SCOPE §1 模态 no-op：AGERC 菜单操作 ⇒ 返回 0"
     },
     {
+      "target": "agerc!_SetNameLenMax@20",
+      "kind": "stub",
+      "impl": "apps/emulator-lift/src/shims/kernel32_agerc.cpp",
+      "boundary": "import",
+      "reason": "按真实实现（AGERC export 20 / RVA 0x32EF1 → 体 0x100367D0）的语义：存 *arg1 进 \"\n              \"g_nameLenMax、返回 0；镜像换基址且 .reloc 未应用 ⇒ 不跑真实代码（见 kernel32_agerc.cpp）"
+    },
+    {
       "target": "agerc!_ShowDialog@12",
       "kind": "stub",
       "impl": "apps/emulator-lift/src/shims/kernel32_agerc.cpp",
@@ -239,20 +246,6 @@
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "M2 资源族（用户 2026-11-04：资源等 M2；不属 M1）"
-    },
-    {
-      "target": "kernel32!RaiseException",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "SEH 展开不在 M1（plan §9 R1）"
-    },
-    {
-      "target": "kernel32!RtlUnwind",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "SEH 展开不在 M1（plan §9 R1）"
     },
     {
       "target": "kernel32!SizeofResource",

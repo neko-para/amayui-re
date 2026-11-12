@@ -5,6 +5,12 @@
     （自己的 `X86` / 专用 guest 栈 / 私有 `BlockCache`/`Decoder`，直接执行 `sub_4B6C30`）
     + 独立 mixer 线程；引擎每槽 `CRITICAL_SECTION` 映射到宿主递归锁。
   - `--audio=virtual` 或无 `--real-time` ⇒ **方案 D 回退**：主线程块边界的泵（确定性；CTest 用）。
+    ★ D **只**服务这几种情形：virtual（确定性设备时钟）/ 无 mixer 线程 / 确定性 dump / C 起不来
+    时的降级；判据只有 `thread_mode_ = Sdl && clock.realTime()`（见 `audio.cpp` 的 `begin()`）⇒
+    **窗口 + `--audio sdl`（自动 real-time）永远是 C**，而**窗口 + `--audio virtual` 仍是 D**
+    （那一档没有 SDL 设备，只产设备模型 / dump；`--audio sdl` 无 `--real-time` 也仍是 D）。
+    ⛔ `GetMessageA` 事件泵里从来**没有**第三条喂料路径
+    （审计见 `.tmp/audio-token/feed-paths-audit.md` §2）。
 - 代码落点：`src/runtime/audio.{h,cpp}` · `src/runtime/critical_sections.h` ·
   `src/runtime/sync_guest.h` · `src/shims/dsound.cpp` · `src/shims/kernel32_sync.cpp` ·
   `src/runtime/com.{h,cpp}` · `src/runtime/shims.{h,cpp}` · `src/runtime/machine.{h,cpp}` · `src/main.cpp`。
@@ -329,8 +335,10 @@ filled=21–23（虚拟时钟下泵会落后；dump 出现 2 s 环）
 
     真机上这个窗口是 µs/ms；emulator 单刀 fill **380–460 ms** 把偏置 0 的那一次放大成
     "常态可见"。补偿分三层：
-    1. **排队**（还没被 pop）的条目：`stop()` / `setPosition()` / `addBuffer()` 直接
-       `dropPending(obj)` 丢掉；
+    1. **排队**（还没被 pop）的条目：`stop()` / `setPosition()` 直接 `dropPending(obj)` 丢掉；
+       同一 `state_ea` 换 obj 时 `addBuffer()` 先丢**旧** obj 的排队条目、再丢新 obj 的；
+       `removeBuffer()` 也先 erase + `dropPending(obj)` —— 它挡在 `destroyBufferBlocks` 的
+       `heap->free` **之前**（见第 3 层的同一套有界等待）；
     2. **已 pop、还没跑**（还在令牌/CS 上打转）：`Buffer::generation` 代次校验 —— `stop()` 的
        `++generation` 让它在 `feederEvent` 拿到槽 CS、重验完槽之后自查代次 ⇒ **不跑**；
     3. **正在跑**（`runFeederGuest` 已开始，380–460 ms）：`stop()` / `setPosition()` 置完
@@ -371,6 +379,77 @@ filled=21–23（虚拟时钟下泵会落后；dump 出现 2 s 环）
 
 ---
 
+## 5b. 段级 native override 在 feeder 里的读数口径（`bov` vs `ov`）
+
+★ 段级 override（`NativeBlockTable`）的语义、闸门与真字节判据**不在这里**：见
+`src/runtime/native_pcm.cpp` 的头注（PCM 段 `0x48D767 → 0x48D89A`，REQ-01M75W6BB3PY3MF42ZTS23KTBS）
+与 `src/runtime/native_overrides.h`。这一节只写**怎么读**。
+
+**为什么 feeder 不能直接查主表**：`X86::native_blocks` 只是**快照来源**（`Machine::wire()` 装配）。
+`NativeBlockOverride` 的 `hits / declines / fallbacks / disabled` 全是非原子裸字段 ⇒ 两条执行流共享
+= 数据竞争；更糟的是 feeder 的一次 `Declined` 会把 `disabled = true`，**永久停用主线程**那一项。
+⇒ `AudioEngine::setupFeederContext()` 按 `feeder_ok` 过滤后拷一份私有表 `audio_block_overrides_`，
+feeder 的 dispatch 只查这一份。`feeder_ok` 是**编译期 opt-in**（`kKnownBlocks`），与
+`--native-overrides` 装不装主表无关（`all` 仍然包含它）。两个执行流**各自停用**。
+
+**`LIFT_AUDIO_TRACE=1` 的 fill 行**（**只有 feeder 线程**打这一行；主线程泵打的是另一行
+`[audio] fill slot=… ret=… state=… wrote=…`，没有 `ov`/`bov`）：
+
+```text
+[audio] feeder fill slot=… quarter=… obj=… bytes=… 2450=… 2458=… 2470=… late_q=… \
+  wait=… pre=… guest=<ms> shimtok=… shimblk=… total=<ms> ms ov=<函数级 hits> bov=<段级 hits> bovd=<declines> bovf=<fallbacks>
+```
+
+- `ov=` = **函数级**私有表的 `hits` 汇总（只含 `audio_overrides_`）。★ **含快照**：`audio_overrides_`
+  是 `*cpu_->native_overrides` 的**整表拷贝**（连 `NativeOverride::hits` 一起）⇒ feeder 起跑前主线程
+  已经跑出来的命中也在里面，⛔ 不要读成"feeder 自己跑了这么多 ftol2"。`bov` 没有这个问题：私有块表
+  是 `add()` 新建的、`hits` 从 0 起。
+- `bov=` / `bovd=` / `bovf=` = **段级**私有表的 `hits` / `declines` / `fallbacks` 汇总
+  （**累计**值；实测 `bov` **每刀约 48–55**（ch=2，随 ch / 每 quarter 的解码包数变）⇒ ⛔ 不是
+  "每样本一次"，也⛔ 不是"每刀 = ch"）。
+- `guest=` = 这一刀 `runFeederGuest()` 的墙钟（含 shim 取令牌的等待），是**性能读数**，不是判据。
+- 段级计数只在 feeder 线程上写、也在同一条线程（fill 收尾）上读 ⇒ 天然无竞争；
+  ⛔ 不要让主线程去读 `audio_block_overrides_`。
+
+**两个假绿陷阱（报数前必须排除）**：
+
+1. **量错臂**：`openSdl()` 失败会把 `mode_` 降成 `Virtual`（`audio.cpp`），`thread_mode_ = (Sdl &&
+   realTime)` ⇒ 于是跑的是**主线程泵**，而泵走**主线程 dispatcher** ⇒ 段级**本来**就生效。
+   ⇒ 报数前必须贴启动行的 `feeder=host-thread` 与摘要行的 `device=ok`（`--verbose` 才有启动行；
+   缺省 `warn` 会把它滤掉）。`tests/feeder_seg_e2e.cpp` 把这条做成了机械判据：缺任一条 ⇒ **SKIP 77**。
+2. **`ov=` 会下降**：PCM 段把每样本一次的 `__ftol2_sse` **函数级**命中吃掉了 ⇒ `ov=` 从 7 位数掉到
+   6 位数是**正常**的（同一次构建、同一条命令实测：`ov` 1,892,533 → 114,494，见下面的 A/B）。
+   反过来"`ov` 没降 ⇒ 段没生效"也是错的。
+   ⇒ **段级只看 `bov=`，函数级只看 `ov=`**。⛔ 不要用 `ov=` 判段级。
+
+**同口径 A/B（同一次构建、同一条命令，唯一差异是 `--native-overrides` 里的 `-sub_48D610`）**
+（2026-11-12，macOS arm64，RelWithDebInfo，`--raster gpu`）：
+
+```bash
+# 段级臂
+LIFT_AUDIO_TRACE=1 ./out/emulator-lift --verbose --appdata <fresh> --game-dir ../../links/install \
+  --present window --present-hidden --raster gpu --native-overrides all --skip-logo --audio sdl \
+  --interaction-graph ../../graphs/se-eof.graph
+# 基线臂：唯一差异 = --native-overrides all,-sub_48D610
+```
+
+两臂都是 `feeder=host-thread` + `device=ok`、都是 54 刀 `fills=54 / fill_bytes=4875000`；段级臂
+`bov` 86 → 2660、`bovd/bovf` 恒 0；`ov` 1,892,533 → 114,494（ftol2 的函数级命中被段吃掉，见陷阱 2）；
+`guest=` 的逐刀均值 84.38 ms → 78.78 ms（逐刀噪声很大，⛔ 别拿单刀比）。
+★ **收益随 raster / 负载，⛔ 不能当普遍结论**：复审实测 **CPU raster** 下 paired median 只有 0.02 ms
+（33/62 刀更快）、量不出收益；**GPU raster** 才复现（base 慢 39/54 刀，paired median +12.29 ms、
+总和 +18.6%）。⇒ "CPU raster 的 `guest=` 不可作吞吐判据"。
+⛔ 这些是读数（会随工况变、进文档不进 test）；test 只断言关系（见 `tests/feeder_seg_e2e.cpp` 文件头）。
+
+**pump 臂（阴性对照）**：`--audio virtual/off` 走主线程 dispatcher ⇒ 段级在**改动前就能生效**，
+所以它只能证明"输出没变"：`--audio virtual --sound --audio-dump` 的 WAV 在 `all` 与 `all,-sub_48D610`
+两臂**逐字节相同**（同 sha256、同 5,717,772 B）。★ 这一臂**没有** `bov` 读数通道 —— 泵打的是另一行
+`[audio] fill slot=… ret=… state=… wrote=…`（不含 `ov`/`bov`）；`audio_block_overrides_` 只在
+`setupFeederContext()` 里填，泵路径根本不走那段 ⇒ `bov` 由构造恒 0。要证明段在这一臂**真的被用**，
+看 `--profile` 的 `native-ovr:` 明细（实测 `sub_48D610 … 段级 hits=2682 declines=0 fallbacks=0`）。
+
+---
+
 ## 6. 怎么查 / 怎么改
 
 - **听不到**：先看 `[audio] mode=...` 与 `SDL 音频设备：...`；没有设备会退回 `virtual`（有日志）。
@@ -392,12 +471,22 @@ filled=21–23（虚拟时钟下泵会落后；dump 出现 2 s 环）
     ⛔ **不要反推**：`stale == 0` **不**等于"没有作废发生" —— D 模式是 eager drop（`dropPending`
     直接丢、不计 `stale`），P1 restart 块之后 `0x4B748E` 那一步（见 §5 第 16 条，**未证**）也可能
     让那一刀不经过这一层。
-  - `fill_waits` / `fill_wait_timeouts` = `stop()` / `setPosition()` 等"正在跑的那一刀"的次数 /
-    超时次数（第 3 层）。★ `fill_waits` **只在真重叠时计**（`filling_obj_ == obj` 那一刻），
-    ⛔ 不是"每首歌的 Stop/重定位次数"：没有 fill 在跑时 Stop 立即返回、**不计**。
+  - `fill_waits` / `fill_wait_timeouts` = 第 3 层"等正在跑的那一刀"的次数 / 超时次数。
+    ★ 会等的**不只** `stop()` / `setPosition()`：`removeBuffer()`（这条等待挡在
+    `destroyBufferBlocks` 的 `heap->free` 之前）与**同一 `state_ea` 换 obj 的 `addBuffer()`**
+    也会等；两处都以 `isFeederThread()` 早退（feeder 自己调进来不自等）。
+    `fill_waits` **只在真重叠时计**（`filling_obj_ == obj` 那一刻），
+    ⛔ 不是"每首歌的 Stop/重定位次数"：没有 fill 在跑时这些函数立即返回、**不计**。
     `fill_wait_timeouts > 0` 说明 3 s 内那一刀都没跑完 —— 要么有 fill 卡住
     （看 `LIFT_AUDIO_TRACE=1` 的 fill 墙钟），要么有新的长 shim 持锁；此时 Stop/重定位可能与
     fill 并发，BGM 相位可能只对到上一圈。
+  - `fill_wait_ms` / `fill_wait_max_ms` = 与 `fill_waits` **同一集合**（只统计真的等过的那几次）
+    的**累计 / 单次最大**墙钟（毫秒）⇒ `fill_waits > 0` 时 `fill_wait_ms / fill_waits` 可除。
+    口径 = **只量"等谓词成立"那一段**（`pending_cv_` 的 `wait_for`）：`t1` 取在重取 `mutex_`
+    **之前** ⇒ **不含**等混音器（`mixStep` 跨 `generateTo`）的时间，⛔ 不要当"调用方总卡顿"读。
+    `fill_wait_max_ms ≈ fill_max_ms` ⇒ 停一次几乎等满一整刀；`fill_wait_max_ms ≈ 3000` ⇒ 超时
+    （应与 `fill_wait_timeouts > 0` 同增）。读数本身不是断言，实测见
+    `docs/03-emulator/observations.md` 的 `OBS-20261112-03`。
   - `fill_overlapped`（旧名 `fill_raced`）= **有 Stop / 重定位与这一刀在时间上重叠**的金丝雀。
     ⛔ 它不是错误计数：`stop()` 先 `++generation` 再等 ⇒ 被第 3 层正常等住的那次也会 +1；
     而且它混了三种**良性**成因 —— EOF 自停（`0x4B6C58`）、`removeBuffer`（Release 删了这条流）、

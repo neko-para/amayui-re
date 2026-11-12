@@ -3140,6 +3140,25 @@ int main() {
         LIFT_CHECK(pool != nullptr && !pool->debug);
         LIFT_CHECK_EQ_U32(pool->entry_ea, 0x00415384u);
         LIFT_CHECK_EQ_U32(pool->resume_ea, 0x0041539Fu);
+        // ★ `feeder_ok` 是**编译期 opt-in**（`REQ-01M75W6BB3PY3MF42ZTS23KTBS`）：
+        //   `sub_414AC0` = boot 期主线程装载器的中段 ⇒ feeder 永远走不到 ⇒ **false**；
+        //   PCM 段（`sub_48D610` 的 `0x48D767`）= Ogg 解码在喂料线程里 ⇒ **true**。
+        //   ★ 这两条就是"私有副本只装该装的项"的**唯一真源**判据：`audio.cpp` 的 filter 读它。
+        LIFT_CHECK(!pool->feeder_ok);
+        const lift::KnownBlockNative* pcm = lift::findKnownBlockNative("sub_48D610");
+        LIFT_CHECK(pcm != nullptr && !pcm->debug);
+        if (pcm != nullptr) {
+            LIFT_CHECK_EQ_U32(pcm->entry_ea, 0x0048D767u);
+            LIFT_CHECK_EQ_U32(pcm->resume_ea, 0x0048D89Au);
+            LIFT_CHECK(pcm->feeder_ok);
+            LIFT_CHECK(pcm->fn == &lift::nativePcm48D767);
+            // ★ 锚的期望文本**随项走**（第 7 处落点：`verifyKnownBlockAnchor` 参数化）。
+            //   ⛔ 空串/null 会让校验直接失败 ⇒ `all` 静默跳过这一项（`required=false` 分支）。
+            LIFT_CHECK(pcm->entry_insn != nullptr && pcm->entry_insn[0] != '\0');
+            LIFT_CHECK(pcm->resume_insn != nullptr && pcm->resume_insn[0] != '\0');
+        }
+        LIFT_CHECK(pool->entry_insn != nullptr && pool->entry_insn[0] != '\0');
+        LIFT_CHECK(pool->resume_insn != nullptr && pool->resume_insn[0] != '\0');
         // ★ sub_4CCC60：stdcall `retn 1Ch` = 28 B；**稳定层**（2026-11-11 进 `all`）。
         const lift::KnownNative* affine = lift::findKnownNative("sub_4CCC60");
         LIFT_CHECK(affine != nullptr);

@@ -2,8 +2,9 @@
 
 - id: REQ-01M75W6BB3PY3MF42ZTS23KTBS
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/native_override_assets.cpp#pcm/value-table
 - tags: [emulator-lift audio performance]
 
 ## 目标
@@ -63,3 +64,16 @@ clamp 判据改无符号 · 不写 `[ebp-108h]`。
 ## 附带发现
 
 `platform.h` 的 `THREAD_LOCAL=空` 注释已因 feeder 成为**第二条 guest 执行流**而过期（本段对其鲁棒，但注释是错的）。
+
+## ★ 2026-11-12 设计分析订正（见 `.tmp/audio-token/feeder-seg-analysis.md`）
+- **前置**：先修 `REQ-01M76ZHN9V2WNCYT1ACJDJ94CW`（softfloat `THREAD_LOCAL` 为空 ⇒ feeder/主线程 PE 互相污染）。
+- **落点**：仍成立 `x86.h:234` / `machine.cpp:319` / `audio.h:375` / `native_overrides.h:132-144`；
+  漂移：`audio_cpu_ = *cpu_` 在 `audio.cpp:1432`、段级分支在 `machine.cpp:1392-1433`、feeder 插点在 `audio.cpp:1795-1810` 之间。
+  **漏的第 7 处**：`verifyKnownBlockAnchor`（`native_overrides.cpp:361-382`）硬编码 entry/resume 首指令 ⇒ 加段后锚校验失败、
+  `all` **静默跳过**（`machine.cpp:2940-2946`）；必须参数化（进 `KnownBlockNative`）。
+- **PCM 规格**：`replaced_insns = 15*n + n_clip_hi + 2*n_clip_lo`（不是 `+n_clip`）；`[ebp-108h]` 是 `mov …,1`
+  （不是 or，清 0 在 `0x48D70E`；不影响 PCM，只喂调试打印 ⇒ 要单列 `pcm/clip-flag`）；"出口寄存器"多为死值，
+  只留 dst / `[ebp-108h]` / `fpu.status`；段内**每样本还有一次 `fld dword`**（`0x48D76D`，G7 空闲槽≥2 就是为它）；
+  G9 用 `(esp_seg-0x28)&~15`（`__ftol2` 用的是它自己入口的 esp）；G4 建议写死 `edi==0`。
+  对得上：乘数 32767.0（`0x5291B8 dq`）、两条有符号 clamp、每样本 2 字节、`fst dword` 来源、G1/G2/G5/G6/G7/G8/G10。
+- **必须同单**：feeder 段级表除 PCM 段没有第二个消费者 ⇒ 单独落 dispatch 只有 `bov=0`，无产品级红/绿。

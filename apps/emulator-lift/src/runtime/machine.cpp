@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -317,6 +318,8 @@ void Machine::wire() {
     cpu_.audio = &audio_;
     cpu_.cs_table = &critical_sections_;
     cpu_.native_overrides = &overrides_;
+    // ★ 段级 override 的快照来源（⛔ 不是 feeder 的 dispatch 表 —— 见 x86.h 该字段的注释）。
+    cpu_.native_blocks = &block_overrides_;
     cpu_.fpu.reset();
 }
 
@@ -891,6 +894,10 @@ void Machine::tickInteraction(X86& cpu) {
 
 RunResult Machine::run(const RunOptions& opts) {
     RunResult r;
+    // ★ `WindowManager` 的 owner 线程 = **跑 `run()` 的这个线程**（REQ-01M76SXW0Y3R8QX1F94AB85M9H
+    //   的主线程亲和性守卫）。构造时记的是构造线程，这里再确认一次：同一线程跑同一台 Machine
+    //   时它是恒等操作；换线程跑时由这一句改口径。⛔ 这不是令牌 —— 见 host_window.h 类头那一段。
+    windows_.setOwnerThread(std::this_thread::get_id());
     // ★ 单令牌（guest_token.h）：本函数起的执行循环是 guest 指令的**唯一**主执行流；
     //   音频 feeder 真线程（thread_mode_）走同一把令牌。arm 打开违规计数（未持有令牌就
     //   改 GuestHeap / HandleTable 或执行 guest 代码 ⇒ ++），`--assert-guest-token` 读它。
@@ -2361,6 +2368,19 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                      token.violations() == 0 ? "" : " first=",
                      token.violations() == 0 ? "" : (token.firstViolationSite() ? token.firstViolationSite() : "?"));
     }
+    // ★ 主线程亲和性（REQ-01M76SXW0Y3R8QX1F94AB85M9H）：`WindowManager` 是**主线程独占宿主
+    //   对象**（M0 口径），⛔ 不进令牌容器清单 ⇒ 它需要自己的一栏。`off-thread` 非 0 = 某条
+    //   非 owner 线程碰过 wm 的入口（`host_window.cpp` 的 `checkMainThread`）；`--assert-guest-token`
+    //   把它变成退出码。⛔ 没有违规就只打 `off-thread=0`（不打 `first=?` —— 那会被读成"有一处 ?"）。
+    {
+        const unsigned long long off = windows_.offThread();
+        const char* first = windows_.firstOffThreadSite();
+        if (off == 0) {
+            std::fprintf(out, "window    : off-thread=0\n");
+        } else {
+            std::fprintf(out, "window    : off-thread=%llu first=%s\n", off, first ? first : "?");
+        }
+    }
     // ★ 诊断开关的**口径标签**（`guest_token.h` 文件头）：始终打一行，缺省 `skip-lock=0`。
     //   为什么无条件打：A/B 两臂的日志必须能**一眼分开**，而"没打这行"与"关着"在文本上一样。
     std::fprintf(out, "token-diag : skip-lock=%d\n", guestToken().diagSkipLock() ? 1 : 0);
@@ -2377,8 +2397,9 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                      avg_us);
     }
     // ★ Phase-0 四读数（REQ-01M75WWEDC20GEH7QVSHPHH4GP）：**只在记账打开时打印**。
-    //   为什么按开关门：默认运行（无 `--profile`、无 `LIFT_AUDIO_TRACE`）的摘要必须与改动前
-    //   **逐字节一致** —— 这是"零行为改变"最强的一条证据；而记账本身要读时钟，所以那几行读数
+    //   为什么按开关门：默认运行（无 `--profile`、无 `LIFT_AUDIO_TRACE`）的摘要，**除新增的
+    //   `window : off-thread=0` 这一行（常量行、不随运行变）外**，与改动前逐字节一致 —— 这是
+    //   "零行为改变"最强的一条证据；而记账本身要读时钟，所以那几行读数
     //   也只在打开时才值得出现。口径（细节见 `guest_token.h` 的 Phase-0 那一组）：
     //     · `hold` = 持令牌的累计墙钟；`span` = 本轮首个持有 → 最后一次释放；
     //       `duty` = hold / span ⇒ 需求单第 1 项"持有占空"。⛔ 分母是**令牌观测窗口**，
@@ -2946,7 +2967,9 @@ bool Machine::configureNativeOverrides(const std::string& list, std::string* err
             return true;
         }
         if (block_overrides_.find(k.entry_ea) != nullptr) return true;
-        return block_overrides_.add(k.entry_ea, k.resume_ea, k.name, k.fn, err);
+        // ★ `feeder_ok` 是**编译期 opt-in**（`KnownBlockNative`）：只决定"启动真 feeder 时要不要把这一项
+        //   拷进 `audio_block_overrides_`"，与 `--native-overrides` 装不装主表无关（`all` 仍然包含它）。
+        return block_overrides_.add(k.entry_ea, k.resume_ea, k.name, k.fn, err, k.feeder_ok);
     };
     auto addName = [&](const std::string& name, bool required) -> bool {
         if (isDisabled(name)) return true;

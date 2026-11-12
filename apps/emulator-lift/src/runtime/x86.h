@@ -38,6 +38,7 @@ class FontEngine;
 class AudioEngine;
 class CriticalSectionTable;
 class NativeOverrideTable;
+class NativeBlockTable;
 struct NativeOverride;
 
 // ★ SMC 钩子：`X86::writeMem` 在类定义之前，不能直接调 `BlockCache::noteWrite`（不完整类型）。
@@ -232,6 +233,14 @@ struct X86 {
     // ★ 方案 C：feeder 的私有 dispatcher 也要跑 `--native-overrides`（_memcpy/_memset 在
     //   Ogg 解码里是热路径）；指向 Machine 的只读表，AudioEngine 在启动线程时**拷贝**一份。
     const NativeOverrideTable* native_overrides = nullptr;
+    // ★ 段级 override 的**快照来源**（= `Machine::block_overrides_`；`Machine::wire()` 装配）。
+    //   ★ 只作快照来源：`AudioEngine::setupFeederContext()` 按 `feeder_ok` 过滤后**拷进私有表**
+    //     （`audio.h` 的 `audio_block_overrides_`），feeder 的 dispatch 只查私有副本。
+    //   ⛔ **不许**在 dispatcher 里解引用它跑段级项：`NativeBlockOverride` 的
+    //     `hits / declines / fallbacks / disabled` 全是非原子裸字段 ⇒ 两条执行流共享 = 数据竞争；
+    //     更糟的是 feeder 的一次 `Declined` 会把 `disabled = true`，**永久停用主线程**那一项
+    //     （反之亦然）。见 `audio.cpp` 的 `runFeederGuest` 与 `.tmp/audio-token/feeder-seg-analysis.md` §1.1。
+    const NativeBlockTable* native_blocks = nullptr;
     // ★ 宿主诊断（**不进 guest 状态**）：`NativeOverrideTable::invoke()` 在调 native 实现期间指向
     //   "正在执行的那一项"，返回后复位 nullptr。为什么需要这条通道：`NativeFn` 的签名是
     //   `(cpu, mem, result)`，条件式 override（例如 `sub_4BBAB0` 的 stateless 查询短路）没有别的位置

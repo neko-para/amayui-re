@@ -2,9 +2,10 @@
 
 - id: REQ-01M72JFCB0W0924H3H6EQSGRK4
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- repro: data/lift/overrides.json#kernel32!RaiseException
+- verify: tools/test/lift.test.mjs#overrides.json 的 stub 登记与 C++ 注册表双向一致（reason 逐字）
+- repro: tools/test/lift.test.mjs#overrides.json 的 stub 登记与 C++ 注册表双向一致（reason 逐字）
 - severity: S3
 - tags: [emulator-lift, lift-check, overrides]
 
@@ -27,3 +28,10 @@ lift check: 4 个问题（红）
 
 ## 未做
 - 未改 `data/lift/overrides.json`：属另一条线（平台清单），本轮只登记不改（"不顺手改无关文件"）。
+
+## 收口（2026-11-12，macOS arm64）
+
+- `node tools/lift.mjs --sync --write`：从 C++ 注册表派生，删掉 `overrides.json` 里 `kernel32!RaiseException` / `kernel32!RtlUnwind` 两条 stub（并补上漏登记的 `agerc!_SetNameLenMax@20`）。
+- `tools/lift.mjs` 的 `FAMILY_STUB_APPROVED` 删掉同两条（它们已是实现，不再是"允许继续是 stub"）。
+- 读数：`node tools/lift.mjs --check` ⇒ `lift check: 绿（0 个问题）`（修前 4 个）；`node --test tools/test/lift.test.mjs` ⇒ 4/4 pass。
+- 复跑命令：`pnpm tools lift check`（要 `corpus/` 的拆壳件，不进 pure 档）。

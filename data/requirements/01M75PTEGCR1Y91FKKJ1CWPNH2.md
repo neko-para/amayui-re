@@ -2,8 +2,9 @@
 
 - id: REQ-01M75PTEGCR1Y91FKKJ1CWPNH2
 - type: req
-- status: open
+- status: blocked
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- blocked_by: [REQ-01M770JFDPZKKJR7D0ZZ09FJJ7]
 - tags: [emulator-lift audio performance decode]
 
 ## 目标
@@ -56,3 +57,22 @@
 
 - 参考机与本机 2.3× 差距是否全为解释器速度（未拆）。
 - `sub_4E6480` / `sub_4E61E0` 两块（~13%）**未定性**。
+
+## 2026-11-12 预算订正与剩余杠杆（`.tmp/audio-token/throughput-analysis.md`）
+- 预算基数 = `sub_48D610` incl **522.787 ms / 3 刀**（不是单里的 412 ms/刀；比例仍可用，绝对 ms 必须重测）。
+- **PCM 段只有 4–7 ms/刀**（`0x48D881` 尾块 self 4.947 ms / 66,176×6 量出；整段 12–20 ms/3 刀）
+  ⇒ `guest=` 只会掉个位数 ms，别按 15–28 ms 判"没生效"。
+- 下一杠杆：`sub_4E6480` = floor1_inverse2 **12.5%**（干净，推荐先做）；`sub_4E61E0` = floor1_inverse1 **12.5%**
+  （有 arena / 位读，中等风险）；`sub_4DFE40` / `sub_4D81B0` 各 ≤3.3%，先 `--profile-top 120` 定性。
+- 起播重建 `sub_4BB840→sub_4B6570` = **218.9 ms / 1 call**，每条语音一次（`[this+0x414]` 分支），占该命令 guest 29.4%；
+  Huffman/floor/PCM 后会占 ~50% ⇒ 是"每句延迟"的真杠杆。
+- 2.3× 拆分：`all` / `all,-4E1570,-4E1950` / `all,-__ftol2_sse` / `all,-sub_48D610` 四臂测 native 墙钟，
+  再按 insn 份额外推（必须报区间）。`sub_4D9AC0`（vorbis_book_init_decode 126.5 ms/次）过不了"不碰 guest 容器" ⇒ 不 override。
+
+## 2026-11-12 PCM 段实测（feeder 臂，`REQ-01M75W6BB...` 落地后）
+- `bov` 86→2660（`bovd=bovf=0`）；`guest` 均值 **78.78 ms** vs `all,-sub_48D610` 基线 **84.38 ms**（−6.6%）；
+  pump 臂两臂 WAV 逐字节相同（段在 pump 不生效，符合设计）。
+- 与预算订正一致：PCM 段本身只值个位数 ms/刀；剩余杠杆排序 = `sub_4E6480`（floor1_inverse2 12.5%）>
+  `sub_4E61E0`（floor1_inverse1 12.5%，arena 风险）> 起播重建 218.9 ms/条（一次性）。
+- 绝对判据（Windows 200–250→50–100 ms）本机不复现（本机已 ~80 ms）⇒ 与 M0.1 共用 Windows A/B 读数单
+  `REQ-01M770JFDPZKKJR7D0ZZ09FJJ7`；该读数回来前本单保持 blocked。

@@ -2,8 +2,9 @@
 
 - id: REQ-01M7614GMRFD7DNE4DHNBEWZHW
 - type: req
-- status: open
+- status: blocked
 - parent: REQ-01M75WWFGT8ZEBGEPENQHSYTB8
+- blocked_by: [REQ-01M770JFDPZKKJR7D0ZZ09FJJ7]
 - tags: [emulator-lift audio token]
 
 ## 背景
@@ -65,3 +66,14 @@ DS shim 等 `mutex_` / harness tick；`fread` 按纪律不做）。实测收益�
   均早于失败时刻 03:34）⇒ **本单没有落地产出**，工作树仍等于 M0 完成时的状态（全量 `ctest` 已复验，见报告）。
 - 本单**未开工**，下一步就是原样重派：定位 `Present` 里仍持令牌的那 ~250 ms。
 - 判据不变：`holdhist >50ms` 从 36/30 → **个位数**；`fill_max_ms` 550 → **≤250 ms**；`fill_slow` 保持 **0**。
+
+## 2026-11-12 实现与复审（macOS 侧）
+- 7 处 `Acquire`/`Submit` 已包进 `YieldGuard`（`d3d9_gpu.cpp` 改动前站点 `:456/:816/:925/:1198/:1216/:1225/:1264`）。
+  `:1264` 是**唯一有后端源码依据**的站点（D3D12 `IDXGISwapChain_Present` 在该提交里），其余为同类覆盖。
+- 设计复审 + 变更复审均 `approve with conditions`（`.tmp/audio-token/m01-{analysis,design-review,change-review}.md`）；
+  两处注释事实错误已改；`ctest` 82/82（`overlay-window-smoke` 单跑 31.7 s Passed，属 flake）；`--assert-guest-token` violations=0。
+- 读数（macOS/Metal，**不是口径A**，共享负载 load 18–22）：`holdhist >50ms = 0`、`waithist main >50ms = 0`、
+  `Present` shim max **17–116 ms**（名次 #1–#6，随负载漂）、`fill_max 143–181 / fill_slow 0`。
+  **Windows 的 250 ms 本机不复现** ⇒ 判据只能由 `REQ-01M770JFDPZKKJR7D0ZZ09FJJ7`（Windows A/B）定。
+- 本变更**没有行为级守卫**（复审变异实测：删任一 yield / 计数挪前 / `:1225` 翻转都全套绿）⇒ 只能靠代码复审 + 读数。
+- 未做：`:1549/:1562`（acquire 不判空 / submit 失败被吞 = 行为变更，另单）、诊断/叠层/截图路径、`DS::Stop`（不同根因）。

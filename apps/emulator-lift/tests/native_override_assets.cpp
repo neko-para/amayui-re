@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -777,6 +778,181 @@ FtolResult runFtol(const std::vector<std::uint8_t>& code, const FtolCase& c, boo
         out.hits = e->hits;
         out.fallbacks = e->fallbacks;
         out.decline_sse2 = e->declines[static_cast<std::size_t>(lift::FtolWhy::Sse2Path)];
+    }
+    return out;
+}
+
+// ---- PCM 段（`sub_48D610` 的 `0x48D767..0x48D89A`）：真字节两臂（解释器 vs 段级 override）----
+//
+// 判据（红了意味着什么；缺一条都不算）：
+//   ① 同一份**真字节**（`0x48D74A..0x48D8C1` 的段外通道头/尾 + 段体 + `__ftol2_sse` 的 0xAB 字节）
+//      放进 bare 机的**同一 EA**，同一份夹具跑解释器臂 vs 段级 override 臂；
+//   ② `dst` 的**目标跨度**逐字节相同（`2*ch*(ns-1)+2`，⛔ 不是 `2*ch*ns`：最后一次 `lea` 之后不再写）；
+//   ③ `[ebp-108h]`（clip 标志）相同，且**分开两个用例**（有 clip ⇒ 1 / 无 clip ⇒ 0）——
+//      它不喂 PCM 字节，只喂段外的 `wsprintfA("Clipping in frame %ld")` ⇒ 任何只看 dst 的断言都抓不到；
+//   ④ 出口寄存器 / EFLAGS / `fpu.status` / tag / top 相同（**伴随断言**：它们是死值，见 `.tmp` 报告 §4.2；
+//      写全是为了钉住"出口状态契约"与 PE 的来源）；
+//   ⑤ `insns` 总量相同：这是 §4.3 的**机械判据**（`15*n + n_clip_hi + 2*n_clip_lo`）——
+//      它同时验"dispatcher 按 fn 报数补账"与"fn 报得对"，比直接比 `replaced_insns` 强；
+//   ⑥ `hits == 1` / `declines == 0` / `fallbacks == 0`（伴随：真的被接管、没有静默回退）。
+// ★ 为什么值表必须含**非满幅**样本（`±0.5` / `0.1`）与**负的非 clamp** 样本：只用 |x|≥1.0 的满幅表时，
+//   乘数 32767→32768 与"clamp 判据改无符号"这两个变异都会被 clamp 掩盖（假绿）。见 `mutate-check.mjs`。
+// ★ 值表里 `±131073.0f` 这一对专门钉"低 32 位**有符号**"的另一半：
+//   `+131073*32767 = 4,294,868,991 = 0xFFFE7FFF`（**不是** `2^32−1`/`0xFFFFFFFF`）⇒ 低 32 位有符号
+//   = **−98,305** ⇒ **下界 clamp（存 0x8000）**；`−131073` 的低 32 位 = `0x00018001` = **+98,305**
+//   ⇒ **上界 clamp（存 0x7FFF）**。任何"先看 int64 量级"或"无符号比较"的实现都会把 `+131073`
+//   落成**上界** `0x7FFF`（而不是 0x8000）⇒ 逐字节差。
+struct PcmCase {
+    std::string name;
+    std::uint32_t ch = 1;
+    std::uint32_t ns = 1;
+    std::vector<std::vector<float>> channels;  // ch 个通道，每个 ns 个样本
+    bool stop_at_resume = false;               // true ⇒ 停在 0x48D89A（比段出口状态）；否则跑完通道循环
+    std::uint32_t flag0 = 0;                   // `[ebp-108h]` 初值（清 0 在段外 0x48D70E）
+    bool compare_scratch = true;               // NaN 样本的 f32 载荷不保证逐位（double 中转）⇒ 那档关掉
+};
+
+struct PcmSnapshot {
+    bool valid = false;
+    std::uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0, esi = 0, edi = 0, ebp = 0, esp = 0, eip = 0, eflags = 0;
+    std::uint16_t fpu_status = 0, fpu_control = 0, fpu_tag = 0;
+    std::uint8_t fpu_top = 0;
+    std::vector<std::uint8_t> dst;
+    std::vector<std::uint8_t> scratch;  // `[frame, frame+0x20)`（frame = `(esp_seg-0x28)&~15`）
+    std::uint32_t flag = 0;
+    std::uint64_t insns = 0;
+    std::uint64_t hits = 0, declines = 0, fallbacks = 0;
+};
+
+// `code_range` = 从 `0x48D74A` 起、到 `0x48D8C1` 止的真字节（含通道头 `0x48D74A..0x48D767` 与
+// 段后通道尾 `0x48D89A..0x48D8C1`）⇒ 夹具跑的是**真函数的那一段控制流**，不是手抄的复述。
+PcmSnapshot runPcm(const std::vector<std::uint8_t>& code_range, const std::vector<std::uint8_t>& code_ftol2,
+                   const PcmCase& c, bool with_override) {
+    PcmSnapshot out;
+    lift_fixture::Fixture fx;
+    if (!fx.ok) return out;
+    if (c.ch == 0 || c.ns == 0 || c.channels.size() != c.ch) return out;
+    constexpr std::uint32_t kRangeEa = 0x0048D74Au;
+    constexpr std::uint32_t kEntryEa = 0x0048D767u;
+    constexpr std::uint32_t kResumeEa = 0x0048D89Au;
+    constexpr std::uint32_t kChannelTailEa = 0x0048D8C2u;  // `cmp [ebp-108h],0`（停在这里）
+    constexpr std::uint32_t kPreludeEa = 0x00402000u;
+    constexpr std::uint32_t kFlagEa = 0x0055F2E8u;
+    const std::uint32_t frame = 0x00430000u;   // ebp
+    const std::uint32_t stream = 0x00440000u;  // esi（[esi+25C4h] = ch / [esi+26D8h] = ns）
+    const std::uint32_t dst = 0x00450000u;     // ebx
+    const std::uint32_t src_base = 0x00460000u;
+    const std::uint32_t src_ptrs = 0x00470000u;  // `[ebp-11Ch]` = 每通道源指针数组
+    const std::uint32_t scale_ea = 0x00480000u;  // `dq 32767.0`（段外 0x48D738 fld dbl_5291B8 的等价）
+    const std::size_t dst_span = 2u * c.ch * (static_cast<std::size_t>(c.ns) - 1u) + 2u;
+    const std::vector<std::uint8_t> zeros(0x2800u, 0);
+    if (!fx.m.placeCode(kRangeEa, code_range.data(), code_range.size(), &fx.err)) return out;
+    if (!fx.m.placeCode(0x004E82C0u, code_ftol2.data(), code_ftol2.size(), &fx.err)) return out;
+    if (!fx.m.placeData(kFlagEa, zeros.data(), 4u, &fx.err)) return out;
+    // 假帧：`[ebp-11Ch, ebp+40h)`（`[ebp-11Ch]` = 每通道指针数组、`[ebp-118h]` = 当前通道源、
+    // `[ebp-114h]` = 通道下标、`[ebp-110h]` = 每通道目标、`[ebp-108h]` = clip 标志）。
+    if (!fx.m.placeData(frame - 0x11Cu, zeros.data(), 0x11Cu + 0x40u, &fx.err)) return out;
+    if (!fx.m.placeData(stream, zeros.data(), 0x2700u, &fx.err)) return out;
+    if (!fx.m.placeData(dst, zeros.data(), dst_span + 64u, &fx.err)) return out;
+    if (!fx.m.placeData(src_ptrs, zeros.data(), 4u * c.ch, &fx.err)) return out;
+    const double scale = 32767.0;
+    if (!fx.m.placeData(scale_ea, &scale, sizeof scale, &fx.err)) return out;
+    // 源缓冲：每通道一块 f32 数组（真机上 `[ebp-11Ch]` 是每通道指针的数组）。
+    for (std::uint32_t k = 0; k < c.ch; ++k) {
+        const std::uint32_t buf = src_base + k * 0x400u;
+        if (!fx.m.placeData(buf, zeros.data(), 4u * c.ns, &fx.err)) return out;
+        for (std::uint32_t i = 0; i < c.ns; ++i) {
+            const float v = c.channels[k][i];
+            std::uint32_t bits = 0;
+            std::memcpy(&bits, &v, 4);
+            fx.m.mem().wr32(buf + 4u * i, bits);
+        }
+        fx.m.mem().wr32(src_ptrs + 4u * k, buf);
+    }
+    fx.m.mem().wr32(stream + 0x25C4u, c.ch);
+    fx.m.mem().wr32(stream + 0x26D8u, c.ns);
+    fx.m.mem().wr32(frame - 0x11Cu, src_ptrs);
+    fx.m.mem().wr32(frame - 0x118u, src_base);  // 0x48D74A 会覆盖它；先放一个合法值
+    fx.m.mem().wr32(frame - 0x114u, 0u);        // 通道下标
+    fx.m.mem().wr32(frame - 0x110u, dst);       // 每通道目标基址
+    fx.m.mem().wr32(frame - 0x108u, c.flag0);
+    // 函数级：**两臂都装** `__ftol2_sse`（`15*n` 的前提；见 native_pcm.cpp 的 G10）。
+    {
+        std::string err;
+        if (!fx.m.overrides().add(0x004E82C0u, "ref_ftol", lift::GuestConv::Cdecl, 0, lift::nativeFtol2Sse, &err))
+            return out;
+    }
+    if (with_override) {
+        std::string err;
+        if (!fx.m.blockOverrides().add(kEntryEa, kResumeEa, "ref_pcm", lift::nativePcm48D767, &err,
+                                       /*feeder_ok=*/true))
+            return out;
+    }
+    // prelude：`fld qword [scale]`（= 段外 0x48D738）+ `jmp 0x48D74A`（从通道头进入，跑真控制流）。
+    lift_fixture::Asm pre(kPreludeEa);
+    pre.u8(0xDD);
+    pre.u8(0x05);  // fld qword ptr [disp32]
+    pre.u32(scale_ea);
+    pre.u8(0xE9);  // jmp rel32
+    pre.u32(kRangeEa - (pre.currentEa() + 4u));
+    if (!fx.m.placeCode(kPreludeEa, pre.b.data(), pre.b.size(), &fx.err)) return out;
+
+    lift::X86& cpu = fx.m.cpu();
+    fx.rearmStack();
+    cpu.eax() = 0u;
+    cpu.ebx() = dst;
+    cpu.ecx() = 0u;
+    cpu.edx() = 0u;
+    cpu.esi() = stream;
+    cpu.edi() = 0u;
+    cpu.ebp() = frame;
+    cpu.eflags = 0x202u;
+    cpu.eip = kPreludeEa;
+    // 段内那次 `call __ftol2_sse` 的栈 scratch：`(esp_seg-0x28)&~15`（G9）。两臂都预填 0x5A。
+    const std::uint32_t esp_seg = cpu.esp();
+    const std::uint32_t ftol_frame = (esp_seg - 0x28u) & ~15u;
+    for (std::uint32_t i = 0; i < 0x20u; ++i) fx.m.mem().wr8(ftol_frame + i, 0x5Au);
+    // 宿主的 softfloat 舍入模式 / 粘性异常位是**进程级（现在每线程）全局** ⇒ 两臂都从同一份缺省出发。
+    lift::x87ApplyControlWord(0x037Fu);
+    lift::x87ClearExceptionFlags();
+    cpu.fpu.control = 0x037Fu;
+    cpu.fpu.status = 0u;  // C0..C3 也从 0 出发（段内没有指令改它们 ⇒ 两臂都该保持 0）
+    cpu.fpu.tag = 0xFFFFu;
+    cpu.fpu.top = 0u;
+    lift::RunOptions o;
+    o.until_ea = c.stop_at_resume ? kResumeEa : kChannelTailEa;
+    o.max_insns = 4000000ull;
+    const lift::RunResult r = fx.m.run(o);
+    if (r.reason != lift::StopReason::UntilEa) {
+        fx.ok = false;
+        fx.err = std::string("意外停机：") + lift::stopReasonName(r.reason) + " — " + r.detail;
+    }
+    if (!fx.ok) return out;
+    out.valid = true;
+    out.eax = cpu.eax();
+    out.ebx = cpu.ebx();
+    out.ecx = cpu.ecx();
+    out.edx = cpu.edx();
+    out.esi = cpu.esi();
+    out.edi = cpu.edi();
+    out.ebp = cpu.ebp();
+    out.esp = cpu.esp();
+    out.eip = cpu.eip;
+    out.eflags = cpu.eflags;
+    out.fpu_status = cpu.fpu.status;
+    out.fpu_control = cpu.fpu.control;
+    out.fpu_tag = cpu.fpu.tag;
+    out.fpu_top = cpu.fpu.top;
+    out.insns = cpu.insns;
+    out.flag = fx.m.mem().rd32(frame - 0x108u);
+    const std::uint8_t* p = fx.m.mem().host(dst);
+    out.dst.assign(p, p + dst_span);
+    out.scratch.assign(fx.m.mem().host(ftol_frame), fx.m.mem().host(ftol_frame) + 0x20u);
+    if (with_override) {
+        const lift::NativeBlockOverride* e = fx.m.blockOverrides().at(0);
+        out.hits = e->hits;
+        out.declines = e->declines;
+        out.fallbacks = e->fallbacks;
     }
     return out;
 }
@@ -2411,6 +2587,157 @@ int main() {
             // ⑥ 回退要落进**对应**的桶（⛔ 不是"静默跳过"）
             if (std::string(c.name) == "huff/entry-zero") LIFT_CHECK_EQ_U32(o.why_entry_zero, 1u);
             if (std::string(c.name) == "huff/entry-out-of-range") LIFT_CHECK_EQ_U32(o.why_entry_range, 1u);
+        }
+    }
+
+    // ---- ⑥ PCM 段（`sub_48D610` 的 `0x48D767..0x48D89A`）：真字节两臂 ----
+    // 判据见 `runPcm` 上方。★ 这是 `REQ-01M75W6BB3PY3MF42ZTS23KTBS` 的语义证据：
+    //   feeder 臂只能看 `bov=` 读数（`tests/feeder_seg_e2e.cpp`），"段真的算对了"只能在这里证。
+    {
+        // 真字节：`0x48D74A..0x48D8C1`（通道头 + 段体 + 通道尾；通道头/尾让夹具跑**真控制流**，
+        // 手抄复述不算 oracle）+ `__ftol2_sse` 的 0xAB 字节（`0x4E82C0..0x4E836B`：
+        // 28 B 入口 + `__ftol2` 117 B；折叠函数只能从 PE 取字节）。
+        const std::vector<std::uint8_t> code_pcm = img.at(0x0048D74Au, 0x0048D8C2u - 0x0048D74Au);
+        const std::vector<std::uint8_t> code_ftol2 = img.at(0x004E82C0u, 0x4E836Bu - 0x4E82C0u);
+        LIFT_CHECK(code_pcm.size() == 0x178u);
+        LIFT_CHECK(code_ftol2.size() == 0xABu);
+        const float kInf = std::numeric_limits<float>::infinity();
+        const float kNaN = std::nanf("");
+        std::vector<PcmCase> cases;
+        auto gen = [](std::uint32_t n, std::uint32_t salt) {
+            std::vector<float> v;
+            v.reserve(n);
+            for (std::uint32_t i = 0; i < n; ++i) {
+                switch ((i * 7u + salt * 3u) % 10u) {
+                    case 0: v.push_back(0.0f); break;
+                    case 1: v.push_back(0.5f); break;
+                    case 2: v.push_back(-0.5f); break;
+                    case 3: v.push_back(1.5f); break;
+                    case 4: v.push_back(-1.5f); break;
+                    case 5: v.push_back(0.1f); break;
+                    case 6: v.push_back(-0.1f); break;
+                    case 7: v.push_back(1.0f); break;
+                    case 8: v.push_back(-1.0f); break;
+                    default: v.push_back(0.03125f); break;
+                }
+            }
+            return v;
+        };
+        // ① 值表：必须含**非满幅**（±0.5 / 0.1）与**负的非 clamp**（−0.5）与**低 32 位回绕**
+        //    （±131073：`+131073*32767 = 0xFFFE7FFF` ⇒ 低 32 位 = **−98,305** ⇒ **下界** clamp 存 0x8000；
+        //      `−131073` 的低 32 位 = `+98,305` ⇒ **上界** clamp 存 0x7FFF。按 int64 量级 / 无符号比较
+        //      会把 `+131073` 落成**上界** 0x7FFF ⇒ 逐字节差）。
+        {
+            PcmCase c;
+            c.name = "pcm/value-table";
+            c.ch = 1;
+            c.channels = {{0.0f, 0.5f, -0.5f, 1.0f, -1.0f, 1.5f, -1.5f, 1.25f, -1.25f, 0.1f, -0.1f,
+                           1e-40f, -1e-40f, 131073.0f, -131073.0f, kInf, -kInf, kNaN}};
+            c.ns = static_cast<std::uint32_t>(c.channels[0].size());
+            // NaN / ±INF 也逐字节比 scratch：本实现走的是解释器**同一条** softfloat 路
+            // （`x87MemToReg` / `x87Mul` / `x87ToI64` / `x87RegToMem`）⇒ 载荷不该分叉。
+            c.compare_scratch = true;
+            cases.push_back(std::move(c));
+        }
+        // ② clip 标志：第 0 通道 clip、第 1 通道**不** clip ⇒ 终值必须是 1（段内**不重置**；
+        //    清 0 在段外 0x48D70E，每次调用一次）。
+        {
+            PcmCase c;
+            c.name = "pcm/clip-flag/clip-then-no-clip";
+            c.ch = 2;
+            c.channels = {{2.0f, 1.0f, 0.0f, -1.0f, 0.5f, 1.5f, -1.5f, 0.25f},
+                          {0.0f, 0.5f, -0.5f, 1.0f, -1.0f, 0.25f, -0.25f, 0.75f}};
+            c.ns = static_cast<std::uint32_t>(c.channels[0].size());
+            cases.push_back(std::move(c));
+        }
+        // ③ clip 标志 = 0：两个通道都在范围内（钉"只有 clamp 才写 1"）。
+        {
+            PcmCase c;
+            c.name = "pcm/clip-flag/no-clip";
+            c.ch = 2;
+            c.channels = {{0.0f, 0.5f, -0.5f, 0.999f, -0.999f, 0.25f, -0.25f, 0.75f},
+                          {0.125f, -0.125f, 0.0f, 0.5f, -0.5f, 0.75f, -0.75f, 0.0625f}};
+            c.ns = static_cast<std::uint32_t>(c.channels[0].size());
+            cases.push_back(std::move(c));
+        }
+        // ④ 只上界 clip / 只下界 clip：分别钉 `n_clip_hi`(+1) 与 `n_clip_lo`(+2) 的 `insns` 记账。
+        {
+            PcmCase c;
+            c.name = "pcm/clip-flag/hi-only";
+            c.ch = 1;
+            c.channels = {{2.0f, 0.5f, 3.0f}};
+            c.ns = static_cast<std::uint32_t>(c.channels[0].size());
+            cases.push_back(std::move(c));
+            c.name = "pcm/clip-flag/lo-only";
+            c.channels = {{-2.0f, 0.5f, -3.0f}};
+            cases.push_back(std::move(c));
+        }
+        // ⑤ 出口状态（寄存器 / EFLAGS / fpu.status / tag / top / scratch）：停在段出口 0x48D89A。
+        //   ★ 出口寄存器是**死值**（见报告 §4.2）⇒ 这是"与解释器逐位对齐"的伴随断言，不是产品语义。
+        for (std::uint32_t ch : {1u, 2u, 6u, 8u}) {
+            for (std::uint32_t ns : {1u, 7u, 64u}) {
+                PcmCase c;
+                c.name = "pcm/regs-ch" + std::to_string(ch) + "-ns" + std::to_string(ns);
+                c.ch = ch;
+                c.ns = ns;
+                for (std::uint32_t k = 0; k < ch; ++k) c.channels.push_back(gen(ns, k + 1u));
+                c.stop_at_resume = true;  // 比段出口状态（EFLAGS 还没被通道尾的 inc/add 覆盖）
+                cases.push_back(std::move(c));
+            }
+        }
+
+        for (const PcmCase& c : cases) {
+            lift_test::g_current_case = c.name.c_str();
+            const PcmSnapshot base = runPcm(code_pcm, code_ftol2, c, false);
+            const PcmSnapshot ovr = runPcm(code_pcm, code_ftol2, c, true);
+            LIFT_CHECK(base.valid && ovr.valid);
+            if (!base.valid || !ovr.valid) continue;
+            // ② 目标跨度逐字节
+            const bool same_dst = base.dst == ovr.dst;
+            LIFT_CHECK(same_dst);
+            if (!same_dst && base.dst.size() == ovr.dst.size()) {
+                std::size_t at = 0;
+                while (at < base.dst.size() && base.dst[at] == ovr.dst[at]) ++at;
+                std::fprintf(stderr, "  [%s] dst 首个差异在 +%zu（base=%02X ovr=%02X，跨度 %zu B）\n",
+                             c.name.c_str(), at, base.dst[at], ovr.dst[at], base.dst.size());
+            }
+            // ③ clip 标志
+            LIFT_CHECK_EQ_U32(ovr.flag, base.flag);
+            // ④ 出口状态（伴随断言）
+            LIFT_CHECK_EQ_U32(ovr.eax, base.eax);
+            LIFT_CHECK_EQ_U32(ovr.ebx, base.ebx);
+            LIFT_CHECK_EQ_U32(ovr.ecx, base.ecx);
+            LIFT_CHECK_EQ_U32(ovr.edx, base.edx);
+            LIFT_CHECK_EQ_U32(ovr.esi, base.esi);
+            LIFT_CHECK_EQ_U32(ovr.edi, base.edi);
+            LIFT_CHECK_EQ_U32(ovr.ebp, base.ebp);
+            LIFT_CHECK_EQ_U32(ovr.esp, base.esp);
+            LIFT_CHECK_EQ_U32(ovr.eip, base.eip);
+            LIFT_CHECK_EQ_U32(ovr.eflags, base.eflags);
+            LIFT_CHECK_EQ_U32(ovr.fpu_status, base.fpu_status);
+            LIFT_CHECK_EQ_U32(ovr.fpu_control, base.fpu_control);
+            LIFT_CHECK_EQ_U32(ovr.fpu_tag, base.fpu_tag);
+            LIFT_CHECK_EQ_U32(ovr.fpu_top, base.fpu_top);
+            if (c.compare_scratch) LIFT_CHECK(base.scratch == ovr.scratch);
+            // ⑤ 指令总数（= §4.3 的机械判据：dispatcher 补账 + fn 报数）
+            LIFT_CHECK(base.insns == ovr.insns);
+            if (base.insns != ovr.insns) {
+                std::fprintf(stderr, "  [%s] insns base=%llu ovr=%llu\n", c.name.c_str(),
+                             (unsigned long long)base.insns, (unsigned long long)ovr.insns);
+            }
+            // ⑥ 真的被接管（每通道一次段入口；`stop_at_resume` 停在第一通道出口 ⇒ 只 1 次）/ 没有回退
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.hits), c.stop_at_resume ? 1u : c.ch);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.declines), 0u);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.fallbacks), 0u);
+            if (ovr.dst != base.dst || ovr.flag != base.flag || ovr.eax != base.eax || ovr.fpu_status != base.fpu_status ||
+                base.insns != ovr.insns) {
+                std::fprintf(stderr,
+                             "  [%s] base(flag=%u eax=%08X edx=%08X status=%04X insns=%llu) "
+                             "ovr(flag=%u eax=%08X edx=%08X status=%04X insns=%llu)\n",
+                             c.name.c_str(), base.flag, base.eax, base.edx, base.fpu_status,
+                             (unsigned long long)base.insns, ovr.flag, ovr.eax, ovr.edx, ovr.fpu_status,
+                             (unsigned long long)ovr.insns);
+            }
         }
     }
 

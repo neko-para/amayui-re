@@ -413,7 +413,15 @@ main-only  : WindowManager, D3D9 设备/GPU 光栅/SDL 呈现, FontEngine
 
 1. dispatcher 的**块边界**（照 `fireDueTimer` 的形状，`machine.cpp:551-554`）：`if (feeder.wants()) feeder.pump();`
 2. **`WaitForSingleObject(<feeder 线程句柄>)` 内部必须 pump 到退出**（见 D.4-⑤：否则 `Release pDS`（`0x4B6534`）之后泵还在写 = guest 侧 UAF）。
-3. 可选：长 shim（`Present` / `GetMessageA`）前后各一次（只为减少"该填了但还没到块边界"的延迟）。
+3. ~~可选：长 shim（`Present` / `GetMessageA`）前后各一次（只为减少"该填了但还没到块边界"的延迟）~~
+   **未实现 / 从未存在**（截至 2026-11-12）：`GetMessageA` 的宿主事件泵
+   （`host_window.cpp:165-182` → `main.cpp:1100-1110` 的回调）只有 `pumpHostEvents` /
+   `tickInputScript` / `tickInteraction`，**零** audio 调用；236 个提交与全部 unreachable
+   commit 里也从未出现过（`git log -S` / 逐版 `git grep`，审计见
+   `.tmp/audio-token/feed-paths-audit.md` §2）。
+   ⇒ **今天音频只有两条路径**：**C** = 真 feeder 线程（`Sdl && realTime`）；**D** = 主线程块边界
+   `pump()`（只服务 virtual / 无 mixer / 确定性 dump / C 起不来的降级）。⛔ 不要把本行当成
+   "曾经有第三条实现被删掉"的痕迹。
 
 **一次泵 tick（伪代码）**：
 

@@ -5,6 +5,10 @@ project(emulator-lift
     DESCRIPTION "Run AGE.EXE's real machine code on a guest-state x86 interpreter (SDL3 host)"
     LANGUAGES C CXX)
 
+# ---- 测试开关：`OFF` ⇒ 只构建产品二进制（不编测试 target / 不注册 CTest）----
+# ★ 默认 ON：现有门禁（`ctest --test-dir out`）不变。
+option(LIFT_BUILD_TESTS "Build emulator-lift tests / CTest suite" ON)
+
 # ★ **目录级** `/utf-8`：源码里有中日文注释 / 字面量；MSVC 默认按本地码页（中文 Windows = 936）
 #   读源文件并生成窄字符串字面量 ⇒ 输出双重乱码。放在 `project()` 之后、任何 target / 子目录之前，
 #   这样以后新增的 target（以及 vendored C）都不会漏；只加 `/utf-8`，不动 `/W4 /WX`。
@@ -90,6 +94,9 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/native_map.cpp
     src/runtime/native_movie.cpp
     src/runtime/native_block.cpp
+    # ★ 段级 · `sub_48D610` 的 PCM 转换循环（entry 0x48D767 / resume 0x48D89A；
+    #   REQ-01M75W6BB3PY3MF42ZTS23KTBS；契约与闸门 G1–G10 见 native_pcm.cpp 的头注）
+    src/runtime/native_pcm.cpp
     src/runtime/native_affine.cpp
     # ★ 每帧固定税 `sub_4BBAB0`（Voice::Tick）的 stateless 快路径
     #   （REQ-01M6XVZF3VDC5NSBJ20J2451VJ；契约见 native_overrides.h）
@@ -179,7 +186,135 @@ endif()
 add_executable(emulator-lift src/main.cpp)
 target_link_libraries(emulator-lift PRIVATE emulator-lift-runtime)
 
+# =====================================================================================
+# P2 · GDI 字体 / 文本（宿主 Amayui CN + 三档 GGO + 自洽）
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+# =====================================================================================
+find_package(Freetype REQUIRED)
+target_sources(emulator-lift-runtime PRIVATE
+    src/runtime/font.cpp
+    src/shims/gdi32_object.cpp
+    src/shims/gdi32_font.cpp)
+target_link_libraries(emulator-lift-runtime PRIVATE Freetype::Freetype)
+# 宿主字体路径由 CMake 注入（照 emulator-cxx 的 EMULATOR_CXX_FONT_PATH）：
+#   ⛔ 源码里不硬写相对路径；CLI 的 `--font` 是调试覆盖。
+set(LIFT_HOST_FONT_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/fonts/Amayui-CN_cnjp.ttf")
+target_compile_definitions(emulator-lift-runtime PRIVATE
+    LIFT_HOST_FONT_PATH="${LIFT_HOST_FONT_PATH}")
+# =====================================================================================
+# P4 · GDI region（矩形表 / 椭圆 / 多边形 + CombineRgn + RGNDATA）+ 窗口无效区
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+# =====================================================================================
+target_sources(emulator-lift-runtime PRIVATE
+    src/runtime/region.cpp
+    src/shims/gdi32_region.cpp)
+# =====================================================================================
+# M2 · D3D9 最小设备簇（用户 2026-11-05 裁决"确认需要实现 D3D 接口"）
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+#   `d3d9!Direct3DCreate9` 从 stub 变真实现（register.cpp 里的 addUnimplemented 已删）；
+#   IDirect3D9 / IDirect3DDevice9 只填**取证到的那几个槽**，其余 = comUnsupported 的 loud trap。
+# =====================================================================================
+target_sources(emulator-lift-runtime PRIVATE
+    src/runtime/d3d9.cpp
+    src/shims/d3d9.cpp)
+# =====================================================================================
+# M2 · D3DX9 Sprite 簇（D3DXCreateSprite → 第一帧；用户 2026-11-05 裁决"确认需要实现 D3D 接口"）
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+#   `d3dx9_43!D3DXCreateSprite` 从 stub 变真实现（register_import_gaps.cpp 里那一行随
+#   `pnpm tools lift sync --write` 消失）；ID3DXSprite 的 14 槽里 +0x18/+0x1C = loud trap。
+# =====================================================================================
+target_sources(emulator-lift-runtime PRIVATE
+    src/runtime/d3dx9_sprite.cpp
+    src/shims/d3dx9.cpp)
+# =====================================================================================
+# M2 · D3D9 fixed-function 流水线（设备状态机 + 软件光栅 → 第一帧）
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+#   `runtime/d3d9_pipeline.{h,cpp}` = 变换 / 渲染状态 / 顶点缓冲 / 光栅 / 深度 / 纹理采样；
+#   `shims/d3d9.cpp` 里补的槽见那边的注释（每条都带 `.lst` 站点 EA）。
+# =====================================================================================
+target_sources(emulator-lift-runtime PRIVATE
+    src/runtime/d3d9_pipeline.cpp)
+# =====================================================================================
+# M2 · 公共数学层（D3DX 行主序/行向量 ↔ GLM 列主序/列向量 的唯一适配点）
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+#   `runtime/math.h` 把 `<glm/glm.hpp>` 带进公开头，所以 include dir 必须 PUBLIC。
+# =====================================================================================
+find_package(glm CONFIG REQUIRED)
+target_sources(emulator-lift-runtime PRIVATE
+    src/runtime/math.cpp
+    src/runtime/pixel_format.cpp)
+target_link_libraries(emulator-lift-runtime PUBLIC glm::glm)
+# =====================================================================================
+# 宿主侧 MPEG-1 影片解码（vendor pl_mpeg；无 COM / 无 guest / 无 SDL / 无线程）
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+# ★ pl_mpeg 是单文件库：`third_party/pl_mpeg/pl_mpeg_impl.cpp` 是**唯一**定义
+#   PL_MPEG_IMPLEMENTATION 的 TU；其余代码只看见 `src/runtime/video/movie_decoder.h`
+#   （公共头不含 pl_mpeg.h，见那边注释）。
+# ★ 三处 pl_mpeg.h 必须逐字节相同（本处 + emulator-cxx + emulator-new），
+#   守卫：`tools/test/emulator-cxx-pl-mpeg-sync.test.mjs`。
+# =====================================================================================
+add_library(lift-pl-mpeg STATIC third_party/pl_mpeg/pl_mpeg_impl.cpp)
+target_include_directories(lift-pl-mpeg PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/pl_mpeg)
+# 解码是第三方代码、且是热点：Debug 构建也对它开优化（与 emulator-cxx 的 movie.cpp 同一口径）。
+if(MSVC)
+    target_compile_options(lift-pl-mpeg PRIVATE /O2)
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(lift-pl-mpeg PRIVATE -O2)
+endif()
+
+target_sources(emulator-lift-runtime PRIVATE
+    src/runtime/video/movie_decoder.cpp)
+target_link_libraries(emulator-lift-runtime PRIVATE lift-pl-mpeg)
+# =====================================================================================
+# M4 · 纹理影片 = 真 DirectShow 服务端的**协议核心**（契约：docs/movie-dshow-protocol.md）
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+# ★ 本段只落**新模块 + pure 测试**：⛔ 还没接 `src/shims/quartz_video.cpp`
+#   （下一段才把 IGraphBuilder / IMediaControl / IMediaPosition 的槽接过来）。
+#   `runtime/dshow/` = 图状态机（filter 表 / 接线 / 控制 / 位置 / 泵）+ 宿主侧
+#   IPin / IMemAllocator / IMediaSample 的 guest 可见 COM 对象 + AM_MEDIA_TYPE 构造。
+# =====================================================================================
+target_sources(emulator-lift-runtime PRIVATE
+    src/runtime/dshow/audio_render.cpp
+    src/runtime/dshow/graph.cpp
+    src/runtime/dshow/media_type.cpp
+    src/runtime/dshow/objects.cpp
+    src/runtime/dshow/guest_invoke.cpp
+    src/runtime/dshow/decoder_feed.cpp)
+# =====================================================================================
+# M2 · PNG 解码（`D3DXCreateTextureFromFileInMemory` 的真解码 + 上传）
+#   `REQ-01M738VYG0DP3TNJKYDSA49J7H` —— 三张 2048² Live2D 图集页（`texserial=21/22/23`）
+#   原先"只读文件头、像素全 0"。`runtime/png_decode.cpp` = libpng **简化 API** 的解码层，
+#   `shims/d3dx9.cpp` 把它解出来的 RGBA 经**既有** `d3d9::lockRect/unlockRect` 写进纹理 arena。
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+# ★ libpng 本来就躺在 vcpkg 安装树里（freetype 的传递依赖）—— 但那是**幽灵依赖**：
+#   不显式 find_package + 链接，换一次依赖树或去掉 freetype 就会在链接期炸。
+#   `vcpkg.json` 的 `dependencies` 里也已显式加 `libpng`（端口已装 ⇒ 不触发重建）。
+# ★ 判据见 `tests/d3dx9.cpp` 的 `d3dx9/texture-from-memory` / `d3dx9/texture-from-memory-png`
+#   （8×8 内嵌 PNG 的逐像素 + 脏区/版本不变量 + 坏输入不 trap）/ `d3dx9/png-decode`
+#   （模块级：RGBA / 调色板 / 灰度 + 坏输入矩阵）/ `d3dx9/texture-upload-rollback`
+#   （上传失败的失败面：arena + 状态块回滚）。
+# =====================================================================================
+find_package(PNG REQUIRED)
+target_sources(emulator-lift-runtime PRIVATE
+    src/runtime/png_decode.cpp)
+target_link_libraries(emulator-lift-runtime PRIVATE PNG::PNG)
+
 enable_testing()
+
+# =====================================================================================
+# 测试（`LIFT_BUILD_TESTS`，默认 ON；`-DLIFT_BUILD_TESTS=OFF` ⇒ 只构建产品二进制）
+# ★ 开关只包**测试 target 与 `add_test`**：产品二进制 `emulator-lift` / `emulator-lift-runtime`
+#   与依赖库 `lift-pl-mpeg` 在上面的产品区（OFF 时必须照样能编出 `emulator-lift`）。
+# ★ 测试可执行文件统一落到 `${CMAKE_BINARY_DIR}/tests`（= `out/tests/`）；产品仍在 `${CMAKE_BINARY_DIR}`。
+#   multi-config 生成器要为每个配置各设一次（Ninja 是单配置，用不带后缀那个）。
+# ★ 本块**不缩进**：整块缩进会把 diff 变成全文件重写；CMake 不要求缩进。
+# =====================================================================================
+if(LIFT_BUILD_TESTS)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/tests")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/tests")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/tests")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_BINARY_DIR}/tests")
 
 # ---- pure：宿主层 smoke（不建窗口、不需要游戏）----
 add_test(NAME emulator-lift-smoke COMMAND emulator-lift --smoke)
@@ -276,6 +411,25 @@ if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN")
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         SKIP_RETURN_CODE 77
         TIMEOUT 1200)
+
+    # ---- assets：**feeder 臂**的段级 override 读数守卫（`bov= / bovd= / bovf=`）----
+    # REQ-01M75W6BB3PY3MF42ZTS23KTBS。判据见 tests/feeder_seg_e2e.cpp 文件头：
+    # ① 子进程 exit 0；② 日志里 `feeder=host-thread` + `device=ok`（缺 ⇒ SKIP 77：量错了臂）；
+    # ③ 至少一行 `bov>0`；④ 所有行 `bovd==0 && bovf==0`；⑤ `bov>0` 之后不许回到 0。
+    # ⛔ 不断言 `bov` 的具体值（读数进文档），⛔ 不断言 `ov` 上升/下降（段会吃掉 ftol2 的函数级命中）。
+    # ★ 语义证据在 `native-override-assets` 的 `pcm/*` 真字节两臂；这条只回答"feeder 里有没有接管"。
+    # ★ 真音频设备 / 窗口不可用 ⇒ 测试自己 `LIFT_SKIP`(77)（那不是判据红）。
+    add_executable(lift-feeder-seg-e2e tests/feeder_seg_e2e.cpp)
+    target_link_libraries(lift-feeder-seg-e2e PRIVATE emulator-lift-runtime)
+    add_test(NAME feeder-seg-e2e COMMAND lift-feeder-seg-e2e
+        $<TARGET_FILE:emulator-lift>
+        "${LIFT_ASSETS_GAME_DIR}"
+        "${CMAKE_CURRENT_BINARY_DIR}/feeder-seg-e2e-work"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../graphs/se-eof.graph")
+    set_tests_properties(feeder-seg-e2e PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 900)
 endif()
 
 # ---- assets：真机安装上的 LOGO 影片必须"真的放完"（首帧 / completed / 堆平稳 / tex#1 差分）----
@@ -316,14 +470,19 @@ endif()
 
 # ---- assets：TITLE ⇄ OPTION 往返 2 轮 —— 纹理 arena 不许增长（第 2 次仍能进入）----
 # 判据见 tests/option_roundtrip.cpp 的头注释（红了意味着什么 / 容差从哪来）。
-# 缺游戏安装 ⇒ 不注册（assets 档的判据 = 注册位置）；
+# ★ 注册条件 = **安装树存在**（`LIFT_ASSETS_GAME_DIR`；两台设备上都是仓库根的 `links/install`，
+#   见上面那个变量的注释）+ `LIFT_ASSETS` opt-in。缺安装树 ⇒ 不注册（assets 档的判据 = 注册位置）。
 # GPU / 窗口不可用（raster 行不是 sdl-gpu）⇒ 测试自己 `LIFT_SKIP`(77)。
-# ★ **opt-in**：这条要真启模拟器、真跑 TITLE ⇄ OPTION（子进程按**墙钟秒**计，本测试 2 轮），
-#   是默认门禁里最贵的一条 ⇒ 默认门禁**不注册**它，必须显式打开（判据 = 条件里的 `DEFINED ENV{LIFT_ASSETS}`）：
+# ★ **opt-in 的理由是贵，不是缺资产、也不是平台**：这条要真启模拟器、真跑 TITLE ⇄ OPTION
+#   （子进程按**墙钟秒**计，本测试 2 轮），是默认门禁里最贵的几条之一
+#   ⇒ 默认门禁**不注册**它，必须显式打开（判据 = 条件里的 `DEFINED ENV{LIFT_ASSETS}`）：
 #     $env:LIFT_ASSETS=1; ctest --test-dir out -R option-roundtrip --output-on-failure
 #   ⛔ `DEFINED ENV{…}` 是**配置期**求值 ⇒ 改了环境变量必须重新 configure
-#   （`cmake --preset windows-x64`），`ctest -N` 才会跟着变。
-# ★ `add_executable` 也在同一个 if 里：纯构建环境（没有游戏安装 / 没开 LIFT_ASSETS）连这个 target 都不编。
+#   （`cmake --preset windows-x64` / `macos-arm64`），`ctest -N` 才会跟着变。
+# ★ **macOS 与 Windows 都跑**（这条不是 Windows 专有）：测试的宿主侧只做"起子进程 + 把
+#   stdout/stderr 重定向到同一份日志 + 等它退出"，Windows 走 `CreateProcessW`、macOS / Linux 走
+#   `posix_spawn`（两个分支见测试里的 `runChild`）。
+# ★ `add_executable` 也在同一个 if 里：纯构建环境（没开 LIFT_ASSETS）连这个 target 都不编。
 # ★ 子进程走 `--present window --present-hidden --raster gpu`：headless 的 CPU 光栅化实测
 #   490 帧要 10 分钟以上；窗口隐藏仍无焦点、无真实光标。
 if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
@@ -750,30 +909,6 @@ if(EXISTS "${AGE_LST}")
         ENVIRONMENT "LIFT_AGE_EXE=${AGE_SECTFIX_EXE};LIFT_AGE_LST=${AGE_LST}" SKIP_RETURN_CODE 77)
 endif()
 
-# =====================================================================================
-# P2 · GDI 字体 / 文本（宿主 Amayui CN + 三档 GGO + 自洽）
-# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
-# =====================================================================================
-find_package(Freetype REQUIRED)
-target_sources(emulator-lift-runtime PRIVATE
-    src/runtime/font.cpp
-    src/shims/gdi32_object.cpp
-    src/shims/gdi32_font.cpp)
-target_link_libraries(emulator-lift-runtime PRIVATE Freetype::Freetype)
-# 宿主字体路径由 CMake 注入（照 emulator-cxx 的 EMULATOR_CXX_FONT_PATH）：
-#   ⛔ 源码里不硬写相对路径；CLI 的 `--font` 是调试覆盖。
-set(LIFT_HOST_FONT_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/fonts/Amayui-CN_cnjp.ttf")
-target_compile_definitions(emulator-lift-runtime PRIVATE
-    LIFT_HOST_FONT_PATH="${LIFT_HOST_FONT_PATH}")
-
-# =====================================================================================
-# P4 · GDI region（矩形表 / 椭圆 / 多边形 + CombineRgn + RGNDATA）+ 窗口无效区
-# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
-# =====================================================================================
-target_sources(emulator-lift-runtime PRIVATE
-    src/runtime/region.cpp
-    src/shims/gdi32_region.cpp)
-
 # ---- pure：对象表 / DC 状态 / SelectObject 旧值恢复 / GGO 格式算术 / 自洽（合成字形源）----
 add_executable(lift-gdi tests/gdi.cpp)
 target_link_libraries(lift-gdi PRIVATE emulator-lift-runtime)
@@ -798,65 +933,42 @@ if(EXISTS "${LIFT_HOST_FONT_PATH}")
     set_tests_properties(text-baseline-lift PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
-# =====================================================================================
-# M2 · D3D9 最小设备簇（用户 2026-11-05 裁决"确认需要实现 D3D 接口"）
-# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
-#   `d3d9!Direct3DCreate9` 从 stub 变真实现（register.cpp 里的 addUnimplemented 已删）；
-#   IDirect3D9 / IDirect3DDevice9 只填**取证到的那几个槽**，其余 = comUnsupported 的 loud trap。
-# =====================================================================================
-target_sources(emulator-lift-runtime PRIVATE
-    src/runtime/d3d9.cpp
-    src/shims/d3d9.cpp)
-
 # ---- pure：D3D9 设备簇（自造 guest 代码经 vtable 调；不碰游戏 / LFS）----
 add_executable(lift-d3d9 tests/d3d9.cpp)
 target_link_libraries(lift-d3d9 PRIVATE emulator-lift-runtime)
 add_test(NAME d3d9 COMMAND lift-d3d9)
-
-# =====================================================================================
-# M2 · D3DX9 Sprite 簇（D3DXCreateSprite → 第一帧；用户 2026-11-05 裁决"确认需要实现 D3D 接口"）
-# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
-#   `d3dx9_43!D3DXCreateSprite` 从 stub 变真实现（register_import_gaps.cpp 里那一行随
-#   `pnpm tools lift sync --write` 消失）；ID3DXSprite 的 14 槽里 +0x18/+0x1C = loud trap。
-# =====================================================================================
-target_sources(emulator-lift-runtime PRIVATE
-    src/runtime/d3dx9_sprite.cpp
-    src/shims/d3dx9.cpp)
 
 # ---- pure：D3DX9 Sprite（像素级：调制色 / ALPHABLEND / 裁剪 / 变换 / End 幂等）----
 add_executable(lift-d3dx9 tests/d3dx9.cpp)
 target_link_libraries(lift-d3dx9 PRIVATE emulator-lift-runtime)
 add_test(NAME d3dx9 COMMAND lift-d3dx9)
 
-# =====================================================================================
-# M2 · D3D9 fixed-function 流水线（设备状态机 + 软件光栅 → 第一帧）
-# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
-#   `runtime/d3d9_pipeline.{h,cpp}` = 变换 / 渲染状态 / 顶点缓冲 / 光栅 / 深度 / 纹理采样；
-#   `shims/d3d9.cpp` 里补的槽见那边的注释（每条都带 `.lst` 站点 EA）。
-# =====================================================================================
-target_sources(emulator-lift-runtime PRIVATE
-    src/runtime/d3d9_pipeline.cpp)
-
 # ---- pure：fixed-function 流水线（像素精确：纯色三角形 / 纹理四边形 / Z / 混合 / 状态存取）----
 add_executable(lift-d3d9-pipeline tests/d3d9_pipeline.cpp)
 target_link_libraries(lift-d3d9-pipeline PRIVATE emulator-lift-runtime)
 add_test(NAME d3d9-pipeline COMMAND lift-d3d9-pipeline)
 
-# =====================================================================================
-# M2 · 公共数学层（D3DX 行主序/行向量 ↔ GLM 列主序/列向量 的唯一适配点）
-# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
-#   `runtime/math.h` 把 `<glm/glm.hpp>` 带进公开头，所以 include dir 必须 PUBLIC。
-# =====================================================================================
-find_package(glm CONFIG REQUIRED)
-target_sources(emulator-lift-runtime PRIVATE
-    src/runtime/math.cpp
-    src/runtime/pixel_format.cpp)
-target_link_libraries(emulator-lift-runtime PUBLIC glm::glm)
-
 # ---- pure：数学适配（行/列主序乘法顺序、LH 投影/视图、零向量归一化）----
 add_executable(lift-math tests/math.cpp)
 target_link_libraries(lift-math PRIVATE emulator-lift-runtime)
 add_test(NAME math COMMAND lift-math)
+
+# =====================================================================================
+# pure：SoftFloat 的 x87 异常位必须**每线程一份**（`REQ-01M76ZHN9V2WNCYT1ACJDJ94CW`）
+# ★ 判据（红了意味着什么，见 tests/fpu_thread.cpp 文件头）：两条宿主线程各 20000 轮，用
+#   `std::barrier`（C++20）**逐轮强制交错** —— A 触发 inexact、B 触发 invalid，各自
+#   `x87TakeExceptionFlags()` 取到的标志里**只能有自己的那一位**（既不被对方偷走、也不串进来）；
+#   另有单线程 sanity 钉住"两条臂各自真的置位"。
+# ★ 变异：把 `third_party/berkeley-softfloat/platform.h` 的 `THREAD_LOCAL` 改回空（进程级共享）
+#   ⇒ barrier ② 之后两家的位同时在场 ⇒ `tools/mutate-check.mjs` 的 `ctest:fpu-thread-flags`
+#   **每次必红**（⛔ 不是"堆 2 万轮碰运气"：那有 ~10% 假绿）。
+# ★ 顶层无条件注册 ⇒ **pure** 档（只调 `runtime/fpu_bridge.h`；不碰 guest / 游戏 / LFS）。
+#   链接 `berkeley-softfloat` 只为拿它的 include 目录与 PUBLIC 编译定义
+#   （`softfloat_flag_inexact` / `softfloat_flag_invalid` 常量在 `softfloat.h` 里）。
+# =====================================================================================
+add_executable(lift-fpu-thread tests/fpu_thread.cpp)
+target_link_libraries(lift-fpu-thread PRIVATE emulator-lift-runtime berkeley-softfloat)
+add_test(NAME fpu-thread-flags COMMAND lift-fpu-thread)
 
 # ---- pure：像素格式（掩码往返、16/32bpp load/store、颜色打包、min_filter 决策）----
 add_executable(lift-pixel-format tests/pixel_format.cpp)
@@ -875,28 +987,6 @@ add_executable(lift-profile-window tests/profile_window.cpp)
 target_link_libraries(lift-profile-window PRIVATE emulator-lift-runtime)
 add_test(NAME profile-window COMMAND lift-profile-window)
 
-# =====================================================================================
-# 宿主侧 MPEG-1 影片解码（vendor pl_mpeg；无 COM / 无 guest / 无 SDL / 无线程）
-# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
-# ★ pl_mpeg 是单文件库：`third_party/pl_mpeg/pl_mpeg_impl.cpp` 是**唯一**定义
-#   PL_MPEG_IMPLEMENTATION 的 TU；其余代码只看见 `src/runtime/video/movie_decoder.h`
-#   （公共头不含 pl_mpeg.h，见那边注释）。
-# ★ 三处 pl_mpeg.h 必须逐字节相同（本处 + emulator-cxx + emulator-new），
-#   守卫：`tools/test/emulator-cxx-pl-mpeg-sync.test.mjs`。
-# =====================================================================================
-add_library(lift-pl-mpeg STATIC third_party/pl_mpeg/pl_mpeg_impl.cpp)
-target_include_directories(lift-pl-mpeg PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/pl_mpeg)
-# 解码是第三方代码、且是热点：Debug 构建也对它开优化（与 emulator-cxx 的 movie.cpp 同一口径）。
-if(MSVC)
-    target_compile_options(lift-pl-mpeg PRIVATE /O2)
-elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    target_compile_options(lift-pl-mpeg PRIVATE -O2)
-endif()
-
-target_sources(emulator-lift-runtime PRIVATE
-    src/runtime/video/movie_decoder.cpp)
-target_link_libraries(emulator-lift-runtime PRIVATE lift-pl-mpeg)
-
 # ---- pure：影片解码器（自造字节 + fake 帧源；不碰游戏 / LFS）----
 # 判据见 tests/movie_decoder.cpp 文件头：坏输入不崩、时间推进单调/不重复、ended 只报一次、
 # Frame 指针在下一次 decode 前稳定、seek/rewind 后重新起解。
@@ -908,22 +998,6 @@ add_test(NAME movie-decoder COMMAND lift-movie-decoder)
 add_executable(lift-movie-audio tests/movie_audio.cpp)
 target_link_libraries(lift-movie-audio PRIVATE emulator-lift-runtime)
 add_test(NAME movie-audio COMMAND lift-movie-audio)
-
-# =====================================================================================
-# M4 · 纹理影片 = 真 DirectShow 服务端的**协议核心**（契约：docs/movie-dshow-protocol.md）
-# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
-# ★ 本段只落**新模块 + pure 测试**：⛔ 还没接 `src/shims/quartz_video.cpp`
-#   （下一段才把 IGraphBuilder / IMediaControl / IMediaPosition 的槽接过来）。
-#   `runtime/dshow/` = 图状态机（filter 表 / 接线 / 控制 / 位置 / 泵）+ 宿主侧
-#   IPin / IMemAllocator / IMediaSample 的 guest 可见 COM 对象 + AM_MEDIA_TYPE 构造。
-# =====================================================================================
-target_sources(emulator-lift-runtime PRIVATE
-    src/runtime/dshow/audio_render.cpp
-    src/runtime/dshow/graph.cpp
-    src/runtime/dshow/media_type.cpp
-    src/runtime/dshow/objects.cpp
-    src/runtime/dshow/guest_invoke.cpp
-    src/runtime/dshow/decoder_feed.cpp)
 
 # ---- pure：协议核心（假引擎 filter + 假帧源 + 假时钟；不碰游戏 / LFS）----
 # 判据见 tests/dshow_graph.cpp 文件头：D1 接线（含 QI/NotifyAllocator）、媒体类型逐字段、
@@ -947,6 +1021,22 @@ target_link_libraries(lift-guest-token PRIVATE emulator-lift-runtime)
 add_test(NAME guest-token-stress COMMAND lift-guest-token)
 
 # =====================================================================================
+# `WindowManager` 的**主线程亲和性**（`REQ-01M76SXW0Y3R8QX1F94AB85M9H` 的 2026-11-12 裁决）
+# ★ 这不是令牌：wm 按 M0 的口径是**主线程独占宿主对象**（⛔ 不进令牌容器清单）——
+#   块边界的 harness tick 与 `GetMessageA` 的宿主事件泵都在合法让出令牌的窗口里写它。
+# ★ 判据（红了意味着什么，见 tests/wm_token.cpp 文件头）：① 主线程正常用 ⇒ `offThread()==0`；
+#   ② worker 线程调 `find` ⇒ `offThread()>=1` 且 first site 含 `window.find`（且返回值不变）；
+#   ③ reset 之后两个不同入口 ⇒ `>=2`（站点粒度真的是 `window.<op>`）；④ 没有 owner 的实例
+#   ⇒ 不计数（不制造假红）。
+# ★ 顶层无条件注册 ⇒ **pure** 档（裸 `WindowManager` + `std::thread`；不碰游戏 / LFS / guest 内存）。
+# ★ `tools/mutate-check.mjs` 的 `ctest:window-manager-token` 指向它（删掉 `find` 入口的
+#   `checkMainThread("window.find")` ⇒ ② 当场红）。
+# =====================================================================================
+add_executable(lift-wm-token tests/wm_token.cpp)
+target_link_libraries(lift-wm-token PRIVATE emulator-lift-runtime)
+add_test(NAME window-manager-token COMMAND lift-wm-token)
+
+# =====================================================================================
 # 吞吐的**派发层固定税**（`REQ-01M70S2WR4S8MN2JDWJRJD6WFD`）+ 诊断开关守卫
 # ★ 判据见 `tests/dispatch_tax.cpp` 文件头：
 #   ① 微基准的**量级不变量**（未竞争 mutex lock+unlock / steady_clock::now；⛔ 不断言具体数字）；
@@ -959,25 +1049,6 @@ add_test(NAME guest-token-stress COMMAND lift-guest-token)
 add_executable(lift-dispatch-tax tests/dispatch_tax.cpp)
 target_link_libraries(lift-dispatch-tax PRIVATE emulator-lift-runtime)
 add_test(NAME dispatch-tax COMMAND lift-dispatch-tax)
-
-# =====================================================================================
-# M2 · PNG 解码（`D3DXCreateTextureFromFileInMemory` 的真解码 + 上传）
-#   `REQ-01M738VYG0DP3TNJKYDSA49J7H` —— 三张 2048² Live2D 图集页（`texserial=21/22/23`）
-#   原先"只读文件头、像素全 0"。`runtime/png_decode.cpp` = libpng **简化 API** 的解码层，
-#   `shims/d3dx9.cpp` 把它解出来的 RGBA 经**既有** `d3d9::lockRect/unlockRect` 写进纹理 arena。
-# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
-# ★ libpng 本来就躺在 vcpkg 安装树里（freetype 的传递依赖）—— 但那是**幽灵依赖**：
-#   不显式 find_package + 链接，换一次依赖树或去掉 freetype 就会在链接期炸。
-#   `vcpkg.json` 的 `dependencies` 里也已显式加 `libpng`（端口已装 ⇒ 不触发重建）。
-# ★ 判据见 `tests/d3dx9.cpp` 的 `d3dx9/texture-from-memory` / `d3dx9/texture-from-memory-png`
-#   （8×8 内嵌 PNG 的逐像素 + 脏区/版本不变量 + 坏输入不 trap）/ `d3dx9/png-decode`
-#   （模块级：RGBA / 调色板 / 灰度 + 坏输入矩阵）/ `d3dx9/texture-upload-rollback`
-#   （上传失败的失败面：arena + 状态块回滚）。
-# =====================================================================================
-find_package(PNG REQUIRED)
-target_sources(emulator-lift-runtime PRIVATE
-    src/runtime/png_decode.cpp)
-target_link_libraries(emulator-lift-runtime PRIVATE PNG::PNG)
 
 # =====================================================================================
 # M2 · 派生 mip 链（`REQ-01M73G2724479XAVS176WBZ65Q`：缩小采样必须有 mip，否则走样）
@@ -1064,3 +1135,4 @@ if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
         SKIP_RETURN_CODE 77
         TIMEOUT 1200)
 endif()
+endif() # LIFT_BUILD_TESTS

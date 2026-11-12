@@ -34,11 +34,22 @@
 //
 // ★ 为什么用 `--present window --present-hidden --raster gpu`：`--present headless` 是 CPU
 //   光栅化，实测 490 帧要 10 分钟以上（本测试 2 轮共约 37 s）；窗口隐藏仍无焦点、无真实光标。
+// ★ **macOS 与 Windows 都跑**（这条不是 Windows 专有）：宿主侧只用"把一个子进程的 stdout/stderr
+//   重定向到同一份日志、等它退出"这两件事 —— Windows 走 `CreateProcessW`，macOS / Linux 走
+//   `posix_spawn`（两个分支见下面的 `runChild`）。
+//   安装树在两台设备上都是仓库根的 `links/install`（本机 = 符号链接到 `../../amayui-cn/install`，
+//   含 `SYS4INI.BIN`）⇒ `LIFT_ASSETS=1` 重新 configure 之后 macOS 上同样会注册这条用例；
+//   opt-in 的理由是**贵**（本条一次 = 2 次真启动；本机 macOS 实测整条 ~24 s），
+//   不是缺资产、也不是缺平台能力。
 // ★ GPU / 窗口不可用 ⇒ `LIFT_SKIP`(77)（那是"环境不满足"，不是"判据红"）。
 // ★ 子进程输出走**文件重定向**（不走管道：受限沙箱里捕获管道会 EPERM）。
+#include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -56,6 +67,14 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+// `posix_spawn` 的 envp：POSIX 只保证 `environ` 是"可用的"，各平台声明位置不一。
+extern char** environ;
 #endif
 
 namespace {
@@ -93,7 +112,28 @@ std::string readAllBytes(const fs::path& p) {
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
+// 宿主 `fs::path` ⇄ 子进程 argv 里的一串字节。
+// ★ Windows 的 `fs::path` 原生是**宽字符**（子进程用 `CommandLineToArgvW` 把命令行重建成
+//   UTF-8 argv）⇒ 过 UTF-8；POSIX 上原生就是 UTF-8 字节 ⇒ 直通。
+std::string utf8ArgFromPath(const fs::path& p) {
+#if defined(_WIN32)
+    return lift::wideToUtf8(p.wstring().c_str());
+#else
+    return p.string();
+#endif
+}
+
+fs::path pathFromUtf8Arg(const std::string& s) {
+#if defined(_WIN32)
+    return fs::path(lift::utf8ToWide(s));
+#else
+    return fs::path(s);
+#endif
+}
+
+#if defined(_WIN32)
 std::wstring quoteArg(const std::wstring& s) { return L"\"" + s + L"\""; }
+#endif
 
 // 解析 `arena     : surfaces N in_use U peak P largest-free F`（最后一行生效）。
 struct ArenaStats {
@@ -142,14 +182,59 @@ bool contains(const std::string& hay, const char* needle) {
     return hay.find(needle) != std::string::npos;
 }
 
-#if defined(_WIN32)
+// 子进程的公共结果（两个平台**同一口径**）：`exit_code` = 进程自己的退出码；
+// 被信号杀掉 = `128 + signal`（并置 `signalled` ⇒ 测试输出里会写明"是信号"）。
+// ⛔ 超时不是 SKIP：240 s 还没跑完就是红（卡住必须让流水线看见）。
 struct ChildResult {
-    DWORD exit_code = 0xFFFFFFFFu;
+    unsigned long exit_code = 0xFFFFFFFFul;  // 没拿到状态时保持这个哨兵值（⇒ 断言会红）
     bool started = false;
+    bool timed_out = false;
+    bool signalled = false;
+    int signal_number = 0;
+    int spawn_error = 0;  // POSIX：`posix_spawn` 返回的 errno（0 = 没失败）；Windows 侧不用
 };
 
+// 超时上限（正常一轮 15~30 s；卡住时必须红，而不是挂死流水线）。
+constexpr int kTimeoutSeconds = 240;
+
+// 测试输出里那句"为什么不是 0"（正常退出返回空串）。
+std::string exitNote(const ChildResult& r) {
+    if (r.signalled) {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), " (被信号杀掉：signal=%d ⇒ 128+%d)", r.signal_number,
+                      r.signal_number);
+        return buf;
+    }
+    if (r.timed_out) return " (超时：宿主侧已杀掉)";
+    return {};
+}
+
+// 子进程的**逻辑 argv**（已分好 token、**不含引号**）：两个平台共用这一份。
+// ★ 为什么先建 argv 再拼命令行：POSIX 侧要的是 argv 数组（不经 shell ⇒ 没有引号/转义问题），
+//   Windows 侧才需要一条命令行（见 `runChild` 的 Windows 分支逐个 quote）。两平台共用同一份
+//   token ⇒ 命令行语义只有一处，不会漂；⛔ 不要在两个分支里各写一套参数。
+std::vector<std::string> makeChildArgs(const fs::path& appdata, const fs::path& game_dir,
+                                       const fs::path& script) {
+    return {
+        "--appdata", utf8ArgFromPath(appdata),
+        "--game-dir", utf8ArgFromPath(game_dir),
+        "--present", "window",
+        "--present-hidden",
+        "--raster", "gpu",
+        "--native-overrides", "all",
+        "--skip-logo",
+        "--input-script", utf8ArgFromPath(script),
+        "--max-frames", "700",
+        // ★ 单令牌契约（guest_token.h）：这条子进程跑的是**多线程**路径（音频 feeder 真线程），
+        //   必须证明"没有任何一次共享容器访问 / guest 执行发生在令牌之外"。
+        "--assert-guest-token",
+    };
+}
+
+#if defined(_WIN32)
 // stdout 与 stderr 都重定向到**同一个**日志文件；不捕获管道。
-ChildResult runChild(const fs::path& exe, const std::wstring& args, const fs::path& log_path) {
+ChildResult runChild(const fs::path& exe, const std::vector<std::string>& child_args,
+                     const fs::path& log_path) {
     ChildResult r;
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
@@ -163,21 +248,104 @@ ChildResult runChild(const fs::path& exe, const std::wstring& args, const fs::pa
     si.hStdOutput = h;
     si.hStdError = h;
     PROCESS_INFORMATION pi{};
-    std::wstring cmd = quoteArg(exe.wstring()) + L" " + args;
+    // 命令行由上面那份 argv 拼出来：token 逐个 quote（含空格的路径一个 token 不拆；纯 flag
+    // 加引号经 `CommandLineToArgvW` 解析后仍是同一个 token ⇒ 语义不变）。
+    std::wstring cmd = quoteArg(exe.wstring());
+    for (const std::string& a : child_args) cmd += L" " + quoteArg(lift::utf8ToWide(a));
     const BOOL ok = ::CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
                                      nullptr, &si, &pi);
     ::CloseHandle(h);
     if (!ok) return r;
     r.started = true;
     // 4 分钟上限（正常一轮 15~30 s；卡住时必须红，而不是挂死流水线）。
-    const DWORD waited = ::WaitForSingleObject(pi.hProcess, 240000u);
+    const DWORD waited = ::WaitForSingleObject(pi.hProcess, static_cast<DWORD>(kTimeoutSeconds) * 1000u);
     if (waited != WAIT_OBJECT_0) {
+        r.timed_out = true;
         ::TerminateProcess(pi.hProcess, 991u);
         ::WaitForSingleObject(pi.hProcess, 10000u);
     }
-    ::GetExitCodeProcess(pi.hProcess, &r.exit_code);
+    DWORD code = 0;
+    ::GetExitCodeProcess(pi.hProcess, &code);
+    r.exit_code = static_cast<unsigned long>(code);
     ::CloseHandle(pi.hThread);
     ::CloseHandle(pi.hProcess);
+    return r;
+}
+#else
+// stdout 与 stderr 都重定向到**同一个**日志文件；不捕获管道（受限沙箱里 app 捕获管道会 EPERM）。
+// ★ 顺序上必须"先 open 到 fd 1、再 `adddup2(1, 2)`"：这样 fd 1 / fd 2 共享**同一个** open file
+//   description（同一个写偏移）。⛔ 不要对同一路径做两次 `addopen` —— 那是两个独立偏移，
+//   stdout 与 stderr 会互相覆盖（日志会被截断成一团）。
+ChildResult runChild(const fs::path& exe, const std::vector<std::string>& child_args,
+                     const fs::path& log_path) {
+    ChildResult r;
+    posix_spawn_file_actions_t fa;
+    if (::posix_spawn_file_actions_init(&fa) != 0) return r;
+    int rc = ::posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, log_path.c_str(),
+                                                O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (rc == 0) rc = ::posix_spawn_file_actions_adddup2(&fa, STDOUT_FILENO, STDERR_FILENO);
+    if (rc != 0) {
+        ::posix_spawn_file_actions_destroy(&fa);
+        r.spawn_error = rc;
+        return r;
+    }
+    // argv = exe + child_args。`posix_spawn` 要可写的 `char* const[]` ⇒ 存一份可写副本。
+    std::vector<std::string> store;
+    store.reserve(child_args.size() + 1);
+    store.push_back(exe.string());
+    store.insert(store.end(), child_args.begin(), child_args.end());
+    std::vector<char*> argv;
+    argv.reserve(store.size() + 1);
+    for (std::string& a : store) argv.push_back(a.data());
+    argv.push_back(nullptr);
+
+    pid_t pid = -1;
+    rc = ::posix_spawn(&pid, exe.c_str(), &fa, nullptr, argv.data(), ::environ);
+    ::posix_spawn_file_actions_destroy(&fa);
+    if (rc != 0) {
+        r.spawn_error = rc;
+        return r;
+    }
+    r.started = true;
+    // 轮询 `waitpid(WNOHANG)` + 到点 `SIGKILL`：`posix_spawn` 没有超时参数（同 Windows 的
+    // `WaitForSingleObject` 那条路径一个意思）。
+    const auto t0 = std::chrono::steady_clock::now();
+    int status = 0;
+    bool reaped = false;
+    for (;;) {
+        const pid_t w = ::waitpid(pid, &status, WNOHANG);
+        if (w == pid) {
+            reaped = true;
+            break;
+        }
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            break;  // 理论上不会发生：拿不到状态 ⇒ exit_code 保持哨兵值（断言会红）
+        }
+        const auto el = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0);
+        if (el.count() >= static_cast<long long>(kTimeoutSeconds) * 1000) {
+            r.timed_out = true;
+            ::kill(pid, SIGKILL);
+            // SIGKILL 不可捕获 / 不可忽略 ⇒ 这次 waitpid 一定会返回（除 EINTR 外）。
+            while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+            }
+            reaped = true;
+            break;
+        }
+        const struct timespec nap{0, 20 * 1000 * 1000};  // 20 ms：一轮 15~30 s，这点开销可忽略
+        ::nanosleep(&nap, nullptr);
+    }
+    if (reaped) {
+        if (WIFEXITED(status)) {
+            r.exit_code = static_cast<unsigned long>(WEXITSTATUS(status));
+        } else if (WIFSIGNALED(status)) {
+            r.signalled = true;
+            r.signal_number = WTERMSIG(status);
+            // ★ 被信号杀掉要映射成**非 0**（128 + signal，与 shell 口径一致）⇒ 断言照旧会红。
+            r.exit_code = static_cast<unsigned long>(128 + r.signal_number);
+        }
+    }
     return r;
 }
 #endif
@@ -198,19 +366,15 @@ int main(int argc, char** argv) {
     //   `pnpm tools requirements validate` #3 红，而那两张单不在本次写权限内。
     //   实际轮数 = `kCycles`（= 2）；判据与变异都不依赖这个字符串。
     g_current_case = "option-roundtrip/3cycles";
-#if !defined(_WIN32)
-    (void)argc;
-    (void)argv;
-    LIFT_SKIP("本守卫用 CreateProcessW 起子进程（Windows 专有）；非 Windows 侧不跑");
-#else
+    // ★ 宿主侧只有"起子进程 / 等它退出 / 读同一份日志"三件事 —— Windows 与 POSIX 都跑。
     const std::vector<std::string> args = lift::argvUtf8(argc, argv);
     if (args.size() < 4) {
-        std::fprintf(stderr, "用法：lift-option-roundtrip <emulator-lift.exe> <game-dir> <work-dir>\n");
+        std::fprintf(stderr, "用法：lift-option-roundtrip <emulator-lift> <game-dir> <work-dir>\n");
         return 2;
     }
-    const fs::path exe = fs::path(lift::utf8ToWide(args[1]));
-    const fs::path game_dir = fs::path(lift::utf8ToWide(args[2]));
-    const fs::path work_dir = fs::path(lift::utf8ToWide(args[3]));
+    const fs::path exe = pathFromUtf8Arg(args[1]);
+    const fs::path game_dir = pathFromUtf8Arg(args[2]);
+    const fs::path work_dir = pathFromUtf8Arg(args[3]);
     std::error_code ec;
     fs::create_directories(work_dir, ec);
     const fs::path appdata = work_dir / "appdata";
@@ -226,22 +390,20 @@ int main(int argc, char** argv) {
             out << makeScript(cycles);
         }
         const fs::path log_path = work_dir / ("cycle" + std::to_string(cycles) + ".log");
-        std::wstring args;
-        args += L"--appdata " + quoteArg(appdata.wstring());
-        args += L" --game-dir " + quoteArg(game_dir.wstring());
-        args += L" --present window --present-hidden --raster gpu";
-        args += L" --native-overrides all --skip-logo";
-        args += L" --input-script " + quoteArg(script.wstring());
-        args += L" --max-frames 700";
-        // ★ 单令牌契约（guest_token.h）：这条子进程跑的是**多线程**路径（音频 feeder 真线程），
-        //   必须证明"没有任何一次共享容器访问 / guest 执行发生在令牌之外"。
-        args += L" --assert-guest-token";
-        const ChildResult r = runChild(exe, args, log_path);
-        if (!r.started) LIFT_SKIP("起不了 emulator-lift 子进程（exe 路径不对？）");
+        const std::vector<std::string> child_args = makeChildArgs(appdata, game_dir, script);
+        const ChildResult r = runChild(exe, child_args, log_path);
+        if (!r.started) {
+#if !defined(_WIN32)
+            std::fprintf(stderr, "option-roundtrip: posix_spawn 失败 errno=%d (%s)\n", r.spawn_error,
+                         std::strerror(r.spawn_error));
+#endif
+            LIFT_SKIP("起不了 emulator-lift 子进程（exe 路径不对 / 沙箱拒绝 spawn？）");
+        }
         const std::string log = readAllBytes(log_path);
         if (log.empty()) LIFT_SKIP("子进程没写日志（工作目录 / 权限问题）");
-        std::printf("option-roundtrip: cycles=%d exit=%lu log=%s (%zu 字节)\n", cycles,
-                    static_cast<unsigned long>(r.exit_code), log_path.string().c_str(), log.size());
+        std::printf("option-roundtrip: cycles=%d exit=%lu%s log=%s (%zu 字节)\n", cycles,
+                    static_cast<unsigned long>(r.exit_code), exitNote(r).c_str(),
+                    log_path.string().c_str(), log.size());
         if (r.exit_code != 0 && environmentUnavailable(log)) {
             LIFT_SKIP("GPU / 窗口 / 游戏安装不可用 ⇒ 这条不是判据红");
         }
@@ -279,5 +441,4 @@ int main(int argc, char** argv) {
         LIFT_CHECK(stats[2].surfaces <= stats[1].surfaces + 1ull);
     }
     return finish("option-roundtrip");
-#endif
 }

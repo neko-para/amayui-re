@@ -687,6 +687,12 @@ const CMK_BLOCK_OPEN = new Set(['if', 'foreach', 'function', 'macro', 'while', '
  *   而一个 `CMakeLists.txt` 里同时有 pure 与 assets 两档测试。位置是唯一**不可能说谎**的来源：
  *   把 `add_test` 挪进 `if(...)`，分级**自己**就变了。
  *
+ * ★ **唯一例外：`if(LIFT_BUILD_TESTS)` 透明**（`apps/emulator-lift` 的产品构建开关，默认 ON）。
+ *   它包住的是"整份测试套件"，**不是**"这台机器有没有资产" ⇒ 套件里的顶层 `add_test` 仍是 pure。
+ *   只认**唯一条件** `LIFT_BUILD_TESTS`：`if(NOT LIFT_BUILD_TESTS)` / `if(LIFT_BUILD_TESTS AND WIN32)`
+ *   仍是 tier 门（保守：反向分支 / 附加条件不是默认门禁的同一个问题）。嵌套用块栈处理：
+ *   透明 `if` 只压栈、不增 `depth`；`endif` 弹栈时**只有普通块**才 `depth--`。
+ *
  * @returns {'pure'|'assets'|null} `null` = 这个名字在文本里找不到 `add_test`
  */
 export function cmakeTestTier(text, name) {
@@ -696,6 +702,8 @@ export function cmakeTestTier(text, name) {
     `\\badd_test\\s*\\(\\s*NAME\\s+${wanted.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_.-])`,
   );
   let depth = 0;
+  // 未闭合块的栈：`true` = 透明的 `if(LIFT_BUILD_TESTS)`，`false` = 普通块（if / 循环 / 函数 / 非唯一条件）。
+  const blocks = [];
   for (const raw of String(text ?? '').split(/\r?\n/)) {
     const line = cmakeStructureLine(raw);
     const hit = at.exec(line);
@@ -706,8 +714,26 @@ export function cmakeTestTier(text, name) {
     while ((m = words.exec(line)) !== null) {
       if (m.index >= limit) break;
       const w = m[1].toLowerCase();
-      if (CMK_BLOCK_OPEN.has(w)) depth += 1;
-      else if (w === 'endif' || w === 'endforeach' || w === 'endfunction' || w === 'endmacro' || w === 'endwhile' || w === 'endblock') {
+      if (w === 'if') {
+        // ★ 只认**唯一条件** `LIFT_BUILD_TESTS`：`NOT …` / `… AND …` 都**不**透明（仍是 tier 门）。
+        const transparent = /^\s*LIFT_BUILD_TESTS\s*\)/.test(line.slice(m.index + m[0].length));
+        blocks.push(transparent);
+        if (!transparent) depth += 1;
+      } else if (w === 'elseif' || w === 'else') {
+        // ★ 透明 if 的 `else` / `elseif` 分支**不是**"LIFT_BUILD_TESTS 打开"的那一支 ⇒ 收回透明
+        //   （本仓没有这种形态；规则保守，免得把反向分支判成 pure）。
+        if (blocks.length > 0 && blocks[blocks.length - 1] === true) {
+          blocks[blocks.length - 1] = false;
+          depth += 1;
+        }
+      } else if (CMK_BLOCK_OPEN.has(w)) {
+        blocks.push(false);
+        depth += 1;
+      } else if (w === 'endif') {
+        // ★ 只有普通块才降 depth；透明块弹栈后 depth 不变（嵌套时两者都在栈上）。
+        if (blocks.pop() !== true) depth = Math.max(0, depth - 1);
+      } else if (w === 'endforeach' || w === 'endfunction' || w === 'endmacro' || w === 'endwhile' || w === 'endblock') {
+        blocks.pop();
         depth = Math.max(0, depth - 1);
       }
     }

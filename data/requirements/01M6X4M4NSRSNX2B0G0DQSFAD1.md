@@ -2,8 +2,9 @@
 
 - id: REQ-01M6X4M4NSRSNX2B0G0DQSFAD1
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/option_roundtrip.cpp#option-roundtrip/3cycles
 - repro: apps/emulator-lift/tests/option_roundtrip.cpp#option-roundtrip/3cycles
 - severity: S1
 - tags: [emulator-lift, concurrency, crash, audio, m2]
@@ -46,3 +47,21 @@
 
 - 崩在宿主堆（`0xC0000374`）⇒ 排查方向是宿主容器的并发写，不是 guest 内存越界。
 - 只在 real-time / 窗口组合下出现 ⇒ 与"是否真有第二条 guest 执行流"强相关。
+
+## 收口（2026-11-12，macOS arm64）
+
+- **守卫现在两平台都跑**：`apps/emulator-lift/tests/option_roundtrip.cpp` 的子进程启动加了 POSIX 分支
+  （`posix_spawn` + `addopen(fd1)` 再 `adddup2(1,2)` ⇒ stdout/stderr 同一份日志，无管道；`waitpid(WNOHANG)` + 240 s `SIGKILL`）。
+  删掉了非 Windows 的 `LIFT_SKIP("CreateProcessW 专有")`。安装树两台设备都是 `links/install`；
+  opt-in 的理由是**贵**（本机整条 ~24 s），不是缺资产 / 缺平台（`CMakeLists.txt` 注释已订正）。
+- **读数**（`apps/emulator-lift`，RelWithDebInfo）：
+  `LIFT_ASSETS=1 cmake --preset macos-arm64` → build → `ctest -R option-roundtrip --repeat until-fail:8` =
+  **8/8 Passed（178.47 s）**；另一组 8/8（186.90 s）+ 单跑 ⇒ **17 次 ctest / 33 次子进程全部 exit 0**，
+  每轮 `token : violations=0 max-concurrent=1`，arena 两轮逐字段相同
+  （`surfaces 23 in_use 109895008 peak 120693568 largest-free 22591536`）。
+  **0 次 `0xC0000374`、0 次信号、0 次超时。**
+- **为何判"已修"**：根因（feeder 与主线程并发改宿主容器）由令牌契约承接，`GuestHeap::alloc/free/realloc` /
+  `HandleTable::add` / `SurfaceArena::*` 都有 `check()`，本用例带 `--assert-guest-token` 且 33 次子进程
+  `violations=0`。**未做**：Windows 分支本机无 MSVC / clang-cl，没在本机编译；Windows 侧应再跑一次
+  `$env:LIFT_ASSETS=1; ctest --test-dir out -R option-roundtrip --repeat until-fail:8`。
+  若 Windows 上仍复现，按 `repro` 重开（本单不删）。

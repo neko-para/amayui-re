@@ -47,9 +47,15 @@
 
 ## 怎么用
 
-只有 `src/runtime/fpu_bridge.cpp` `#include "softfloat.h"`，其余代码只认 `fpu_bridge.h` 的
-`x87Add` / `x87Sub` / `x87Mul` / `x87Div` / `x87Sqrt` / `x87Compare` / … 这一层抽象。
-⛔ 不要把 `softfloat.h` include 进 `exec_fpu.cpp` 之外的任何地方。
+允许 `#include "softfloat.h"` 的**只有两处**：产品侧的 `src/runtime/fpu_bridge.cpp`（四则 / 开方 /
+取余 / 取整 / 比较都从那里转给 SoftFloat），以及守卫 `tests/fpu_thread.cpp`（要
+`softfloat_flag_inexact` / `softfloat_flag_invalid` 常量来断言"每线程一份异常位"）。
+其余代码只认 `fpu_bridge.h` 的 `x87Add` / `x87Sub` / `x87Mul` / `x87Div` / `x87Sqrt` /
+`x87Compare` / … 这一层抽象。
+⛔ 两处都必须**先** include `platform.h`、再 include `softfloat.h`（顺序见 `fpu_bridge.cpp` 的
+extern "C" 块）：`LITTLEENDIAN` 决定 `extFloat80_t` 的字段顺序；而 `softfloat.h` 自带的
+`#ifndef THREAD_LOCAL → 空` 兜底会让"漏 include `platform.h`"**编译 + 链接都通过**、运行时却把
+TLS 描述符当变量读（实测读到 248 这类垃圾值，没有任何报错）。
 
 ★ 一个省事的巧合（写在 `fpu_bridge.cpp` 文件头）：8086 特化的 `extFloat80_t` 布局是
 `{uint64 signif; uint16 signExp;}`（16 字节），**前 10 字节与 x86 的 80 位内存格式逐字节相同** ⇒

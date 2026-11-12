@@ -59,21 +59,40 @@ namespace lift {
 namespace {
 
 // ★★ M0（REQ-01M75WWFGT8ZEBGEPENQHSYTB8）：**GPU / 呈现的阻塞型宿主等待移出令牌**。
-//   `SDL_AcquireGPUCommandBuffer`（命令缓冲槽位满时会阻塞）· `SDL_WaitForGPUFences`（等 GPU）·
-//   `SDL_WaitAndAcquireGPUSwapchainTexture`（等 swapchain / vsync）都会阻塞；令牌只保护**宿主容器**
-//   （guest_token.h 的文件头），把"等 GPU"算进持有时间里，就把音频 feeder 的每次交接从 µs 拖到
-//   一帧（实测单次等待中位 43.1 ms，见需求单 / `.tmp/audio-perf/token-model.md`）。
+//   会阻塞的是"等 GPU / 等呈现引擎"这一类：`SDL_WaitForGPUFences`（等 GPU）·
+//   `SDL_WaitAndAcquireGPUSwapchainTexture`（等 swapchain / vsync）· 以及**带 swapchain 的提交**
+//   （D3D12 后端在 `D3D12_INTERNAL_Submit` 里调 `IDXGISwapChain_Present`）。
+//   ★ 更正（M0.1 复审 §5）：`SDL_AcquireGPUCommandBuffer` 在 SDL 3.4.18 里**没有**阻塞合同
+//   （D3D12 的 `D3D12_AcquireCommandBuffer` 池空就新建、`AcquireFence` 也不等）⇒ 本文件早先写的
+//   "槽位满时会阻塞"是**猜测**、不是依据；M0.1 仍把它一起让出，但那是**同类覆盖**（见下）。
+//   令牌只保护**宿主容器**（guest_token.h 的文件头），把"等 GPU"算进持有时间里，就把音频 feeder 的
+//   每次交接从 µs 拖到一帧（实测单次等待中位 43.1 ms，见需求单 / `.tmp/audio-perf/token-model.md`）。
 //   ⇒ 这些调用一律在 `GuestToken::YieldGuard` 里做（临时让出、回来取回）。**为什么放令牌安全**：
-//     ① **没有第二个线程会改这些后端对象**：`SdlGpuRaster` / `SdlWindow::Impl` / SDL 设备句柄按
-//        `present.h` 的**单线程契约**只在主线程（`Machine::run` / shim）被调用；音频 feeder 的
+//     ① **没有第二条执行流会改这些对象**：`SdlGpuRaster` / `SdlWindow::Impl` / SDL 设备句柄按
+//        `present.h:11` 的**单线程契约**只在主线程（`Machine::run` / shim）被调用；音频 feeder 的
 //        guest 代码走的是 DS 流回调，不经过 d3d9 / present 的 shim（令牌之外没有第二条入口）。
-//     ② 让出那段里**不持有任何宿主容器引用**：只有局部的 SDL 句柄（command buffer / fence /
-//        transfer buffer）和 guest **平坦内存**指针 —— 后者是数据面，从来不由令牌保护
-//        （guest_token.h 的那条星号注）。
-//     ③ 取回之后**不沿用**让出之前查到的表结论 / 迭代器：需要容器的地方都重新读成员或重新查表
-//        （本文件的站点在让出后只碰局部句柄，成员读都在让出之后）。
+//        ⇒ 让出期间没有第二条流会动它们（这是**契约**，不是类型系统保证）。
+//     ② 跨 yield 的**不是**"没有引用"，而是"**没有第二流会改的**引用"：后端成员（`queue_` /
+//        `segments_` / `staging_` / `textures_`）与调用方拥有的值/guest 平坦指针**都可能跨过去** ——
+//        `d3d9.cpp:705` 的 `gs` 跨本文件的等 fence 站点、到 `d3d9.cpp:805` 还在用；`had_draws`
+//        （flush 开头算的）跨 flush 的提交、到 flush 末尾还在用；`downloadInto` 的 `pixels`（arena 内
+//        指针）跨回读提交与等 fence。它们的安全性来自 ①，
+//        ⛔ 不是来自"重新查表"（也不许把这句写成"不持有任何容器引用"——字面不成立）。
+//     ③ ⇒ 通用规则只有一条：让出时手上**没有第二条流会改的东西**。需要容器的地方才重新读成员 /
+//        重新查表；今天这些站点在让出后只碰局部句柄与后端**成员**（也会**写** —— 例如 flush 提交
+//        取回后 `segments_.assign` / `queue_.clear` / `staging_used_=0`；按单线程契约安全），
+//        没有一个需要"重新查表"。
 //   ⛔ 不要把"录一个 pass / 传一张纹理"这类**计算型**工作也搬出令牌（那是 M1/M2 的事）；
 //   ⛔ 也不要在这里加别的锁（令牌是唯一的容器锁）。
+//
+// ★★ M0.1（REQ-01M7614GMRFD7DNE4DHNBEWZHW）：把 Present 路径上**仍未**让出的 `Acquire` / `Submit`
+//   也搬进来（7 处：`:456` / `:816` / `:925` / `:1198` / `:1216` / `:1225` / `:1264`；
+//   本文件的 `:NNN` 一律指 **2026-11-12 改动前**工作树的站点编号 —— 行号会随改动漂，站点不会）。
+//   ★ 其中 **`:1264` 是唯一有后端源码依据**的站点（`IDXGISwapChain_Present` 就在那次提交里）；
+//     其余 6 处是**同一类猜测的覆盖**（acquire 与非 swapchain 的 submit 在 3.4.18 里都没有阻塞合同）。
+//     ⛔ 不许把它们写成"已定位 / 已修好 250 ms"——本单只是"把这一类宿主调用移出令牌"。
+//   ★ 本单**不**碰 `:1549` / `:1562`（acquire 不判空、submit 失败被吞 ⇒ 修它属**行为变更**，另单）
+//     与 `:531` / `:1425` / `:1443` / `:1582`（诊断 / 叠层 / 截图专用路径）。
 
 // ★ 进程级诊断计数（理由见 gpu_raster.h 的 `GpuRasterStats`）：同一时刻只有一个 SDL_GPU 后端。
 GpuRasterStats g_stats;
@@ -453,7 +472,18 @@ public:
         dst.rows_per_layer = static_cast<Uint32>(height);
         SDL_DownloadFromGPUTexture(copy, &src, &dst);
         SDL_EndGPUCopyPass(copy);
-        SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+        // ★ M0.1：回读提交 = 宿主调用（**同类覆盖**：D3D12 的 `Present` 只在**带 swapchain** 的提交里，
+        //   这一句不带 ⇒ 没有源码级依据；依据与站点排序见 `.tmp/audio-token/m01-design-review.md` §5）。
+        //   让出安全：手上只有局部 `cmd`/`tb` 与 guest 平坦指针 `pixels`；`pixels` 是数据面（不由令牌
+        //   保护），且它跨 yield 是**既有** M0 等 fence 站点（`SDL_WaitForGPUFences`）已接受的口径
+        //   —— 不是本单新引入的；没有第二条流会碰它们（`present.h:11` 的单线程契约；feeder 的 guest
+        //   代码不经过 d3d9/present）。
+        //   取回后：只需判 `fence`，写回在下面（取回之后），不沿用任何让出前的查表结论。
+        SDL_GPUFence* fence = nullptr;
+        {   // ★ M0.1：只包 submit 这一句。
+            GuestToken::YieldGuard yield(guestToken());
+            fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+        }
         if (fence != nullptr) {
             ++g_stats.submits;
             ++g_stats.submits_readback;
@@ -813,7 +843,18 @@ public:
             SDL_UnmapGPUTransferBuffer(device_, vtx_tb);
         }
 
-        SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+        // ★ M0.1：取 command buffer 是宿主调用（**同类覆盖**：D3D12 上 acquire 只是从池里取/新建、
+        //   `AcquireFence` 也不等 ⇒ 3.4.18 没有阻塞合同，依据见 `.tmp/audio-token/m01-design-review.md` §5）。
+        //   让出安全：`tex_tb`/`vtx_tb` 已 map/unmap 完、`staging_` 内容已拷完；`queue_`/`segments_`/
+        //   `staging_` 是后端成员，按 `present.h:11` 的单线程契约只有主线程碰，feeder 的 guest 代码
+        //   不经过 d3d9/present ⇒ 让出期间没有第二条流会改它们。
+        //   取回后：段循环本来就在 acquire **之后**、逐段重新索引 `segments_` ⇒ 不沿用让出前的索引；
+        //   `had_draws`（取回前算的派生值）继续用，理由同上（不是"重新查了表"）。
+        SDL_GPUCommandBuffer* cmd = nullptr;
+        {   // ★ M0.1：只包 acquire 这一句；段遍历/录制全留在取回之后。
+            GuestToken::YieldGuard yield(guestToken());
+            cmd = SDL_AcquireGPUCommandBuffer(device_);
+        }
         if (cmd == nullptr) {
             release_tbs();
             if (err) *err = std::string("SDL_AcquireGPUCommandBuffer 失败：") + SDL_GetError();
@@ -922,7 +963,18 @@ public:
             first_render_pass = false;
             encoded_render_pass = true;
         }
-        if (!SDL_SubmitGPUCommandBuffer(cmd)) {
+        // ★ M0.1：flush 的绘制提交 = 宿主调用（**同类覆盖**：本句不带 swapchain，3.4.18 没有阻塞合同；
+        //   依据见 `.tmp/audio-token/m01-design-review.md` §5）。
+        //   让出安全：手上只有局部 `cmd`；清理段（`release_tbs` → 记账 → 探针 → 清队列）不保留跨 yield 的
+        //   迭代器 —— 它重新对 `queue_`/`textures_` 做 range-for、其余经成员，而这些后端成员只有主线程碰
+        //   （`present.h:11`；feeder 的 guest 代码不经过 d3d9/present）。
+        //   取回后：只判返回值/记账/清理；`had_draws`（取回前算的派生值，提交后仍在用）继续用，理由同上。
+        bool submitted = false;
+        {   // ★ M0.1：只包 submit 这一句 —— 清理/记账/探针全部留在取回之后。
+            GuestToken::YieldGuard yield(guestToken());
+            submitted = SDL_SubmitGPUCommandBuffer(cmd);
+        }
+        if (!submitted) {
             release_tbs();
             if (err) *err = std::string("SDL_SubmitGPUCommandBuffer 失败：") + SDL_GetError();
             return false;  // 队列/段保留（没提交成功 ⇒ 下次还能重试，⛔ 不静默丢像素）
@@ -1195,7 +1247,17 @@ public:
             if (err) *err = "SDL_GPU target 未准备";
             return false;
         }
-        SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_);
+        // ★ M0.1：取 command buffer 是宿主调用（**同类覆盖**：D3D12 的 acquire 不等；依据见
+        //   `.tmp/audio-token/m01-design-review.md` §5）。让出安全：让出窗口里手上没有别的引用；
+        //   **取回后照常读** `target_`/`width_`/`height_`（下面建 `SDL_GPUBlitInfo` 就用它们）——
+        //   这仍然安全，因为后端成员按 `present.h:11` 的单线程契约只有主线程会动，feeder 的 guest
+        //   代码不经过 d3d9/present ⇒ 让出期间没有第二条流会改它们（⛔ 不是"取回后不再读"）。
+        //   取回后先判 `cmd` 非空；无容器重校验。
+        SDL_GPUCommandBuffer* cmd = nullptr;
+        {   // ★ M0.1：只包 acquire 这一句。
+            GuestToken::YieldGuard yield(guestToken());
+            cmd = SDL_AcquireGPUCommandBuffer(device_);
+        }
         if (cmd == nullptr) {
             if (err) *err = std::string("SDL_AcquireGPUCommandBuffer 失败：") + SDL_GetError();
             return false;
@@ -1213,7 +1275,16 @@ public:
         }
         if (!swap_ok) {
             std::string why = std::string("SDL_WaitAndAcquireGPUSwapchainTexture 失败：") + SDL_GetError();
-            if (SDL_SubmitGPUCommandBuffer(cmd)) {  // 不 Cancel：Cancel 与 swapchain 的状态机容易踩边界
+            // ★ M0.1：swapchain 取得失败后的兜底提交 —— 与成功路径那个提交是同一句 host submit 的另一个出口
+            //   （**同类覆盖**：这一帧拿不到换帧纹理，不带 swapchain 呈现）。让出安全：只持有局部 `cmd`；
+            //   让出期间没有第二条流会碰设备/后端成员（`present.h:11` 的单线程契约；feeder 不经过 present）。
+            //   取回后：只判成功与否，`++g_stats.*` 必须在提交**之后**；失败语义（`return false`）不变。
+            bool submitted = false;
+            {   // ★ M0.1：只包 submit 这一句（不包记账与 return）。
+                GuestToken::YieldGuard yield(guestToken());
+                submitted = SDL_SubmitGPUCommandBuffer(cmd);  // 不 Cancel：Cancel 与 swapchain 的状态机容易踩边界
+            }
+            if (submitted) {
                 ++g_stats.submits;
                 ++g_stats.submits_present;
             }
@@ -1222,7 +1293,15 @@ public:
         }
         if (swap == nullptr || sw == 0 || sh == 0) {
             // 最小化 / 隐藏到零尺寸：这一帧没有可呈现的目标。⛔ 不算失败，也不冒充"画上去了"。
-            if (SDL_SubmitGPUCommandBuffer(cmd)) {
+            // ★ M0.1：仍要把已取到的 command buffer 交回去 —— 这也是 host submit（本帧的"present"）。
+            //   让出安全：只持有局部 `cmd`，没有容器引用；后端对象只有主线程碰（`present.h:11`）。
+            //   取回后：只判成功与否再 `++g_stats.*`；`++present_skipped_` 与 `return true` 语义保持原样。
+            bool submitted = false;
+            {   // ★ M0.1：只包 submit 这一句。
+                GuestToken::YieldGuard yield(guestToken());
+                submitted = SDL_SubmitGPUCommandBuffer(cmd);
+            }
+            if (submitted) {
                 ++g_stats.submits;
                 ++g_stats.submits_present;
             }
@@ -1261,7 +1340,19 @@ public:
         } else {
             overlay_dst_valid_ = false;
         }
-        if (!SDL_SubmitGPUCommandBuffer(cmd)) {
+        // ★ M0.1：**这一次 submit 就是真的 Present** —— swapchain 纹理已在上面的
+        //   `SDL_WaitAndAcquireGPUSwapchainTexture`（已让出）取得；SDL 的语义是"提交 command buffer
+        //   时自动呈现"，D3D12 后端在此调 `IDXGISwapChain_Present`
+        //   ⇒ 本句是本单**唯一有后端源码依据**的宿主阻塞点（其余站点是同类覆盖，见复审 §5）。
+        //   让出安全：手上只有局部 `cmd`，`SDL_GPUBlitInfo` 是值拷贝；后端对象按 `present.h:11` 的单线程
+        //   契约只有主线程碰，feeder 的 guest 代码不经过 d3d9/present ⇒ 让出期间没有第二条流会改它们。
+        //   取回后：只需返回值；`++g_stats.*` / `++presented_` 全在提交**之后**，无任何容器重校验。
+        bool submitted = false;
+        {   // ★ M0.1：只包 submit 这一句。
+            GuestToken::YieldGuard yield(guestToken());
+            submitted = SDL_SubmitGPUCommandBuffer(cmd);
+        }
+        if (!submitted) {
             if (err) *err = std::string("SDL_SubmitGPUCommandBuffer 失败：") + SDL_GetError();
             return false;
         }

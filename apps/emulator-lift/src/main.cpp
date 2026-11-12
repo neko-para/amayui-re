@@ -162,6 +162,8 @@ void usage() {
         "                      （先打印 summary；需要 GPU 光栅化模式，--raster cpu 会被拒绝）\n"
         "  --assert-guest-token  运行结束若单令牌违规计数 > 0（或有 >1 个令牌持有者）⇒ exit 4\n"
         "                      （判据 = summary 的 `token : violations=0`；见 runtime/guest_token.h）\n"
+        "                      或窗口状态被非主线程访问（summary 的 `window : off-thread=0`）⇒ exit 4\n"
+        "                      （WindowManager 是主线程独占宿主对象，见 runtime/host_window.h）\n"
         "  --raster-sprites 0|1      D3DXSprite 是否也走 GPU（缺省 1；A/B 用）\n"
         "  --font <path>       宿主字体（缺省：CMake 注入的 Amayui CN；调试覆盖）\n"
         "  --native-overrides <list>  逗号分隔的 guest 函数名 / 段级项名（如 sub_414AC0）；all = 已验证项；\n"
@@ -1201,11 +1203,18 @@ int main(int argc, char** argv) {
     //   并发改宿主容器**可能**这次没炸，但违规计数一定会留下证据。
     if (assert_guest_token) {
         const lift::GuestToken& token = lift::guestToken();
-        if (token.violations() != 0 || token.maxConcurrent() > 1) {
+        // ★ 第二条判据（REQ-01M76SXW0Y3R8QX1F94AB85M9H）：`WindowManager` 是**主线程独占宿主
+        //   对象**（M0 口径），⛔ 不在令牌容器清单里 ⇒ 令牌计数抓不到它。它有自己的账：
+        //   非 owner 线程碰任何 wm 入口 ⇒ `offThread() > 0`。真 feeder + 输入脚本的跑法
+        //   （`tests/option_roundtrip.cpp`）因此能端到端抓到"wm 越界"这一类。
+        const unsigned long long wm_off = machine.windowOffThread();
+        if (token.violations() != 0 || token.maxConcurrent() > 1 || wm_off != 0) {
             std::fprintf(stderr,
-                         "emulator-lift: --assert-guest-token FAIL：violations=%llu max-concurrent=%u first=%s\n",
+                         "emulator-lift: --assert-guest-token FAIL：violations=%llu max-concurrent=%u first=%s | "
+                         "window off-thread=%llu first=%s\n",
                          static_cast<unsigned long long>(token.violations()), token.maxConcurrent(),
-                         token.firstViolationSite() ? token.firstViolationSite() : "-");
+                         token.firstViolationSite() ? token.firstViolationSite() : "-", wm_off,
+                         machine.firstWindowOffThreadSite() ? machine.firstWindowOffThreadSite() : "-");
             return 4;
         }
     }

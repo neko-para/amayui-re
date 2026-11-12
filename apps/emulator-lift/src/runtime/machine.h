@@ -325,6 +325,11 @@ public:
     const FontEngine& fonts() const { return fonts_; }
     HeadlessPresenter& presenter() { return presenter_; }
     const HeadlessPresenter& presenter() const { return presenter_; }
+    // ★ 主线程亲和性账（REQ-01M76SXW0Y3R8QX1F94AB85M9H）：`WindowManager` 记住 owner 线程
+    //   （构造线程，`run()` 起始处再确认），非 owner 碰任何入口 ⇒ 计数（`--assert-guest-token` 判红）。
+    //   ⛔ 不是令牌：wm 按 M0 的口径是**主线程独占宿主对象**，见 `host_window.h` 类头那一段。
+    std::uint64_t windowOffThread() const { return windows_.offThread(); }
+    const char* firstWindowOffThreadSite() const { return windows_.firstOffThreadSite(); }
     // 可选 GPU 光栅化后端（由 PresentSink 或 main 的离屏 raster window 提供）。
     void setGpuRaster(GpuRaster* gpu) { gpu_raster_ = gpu; }
     GpuRaster* gpuRaster();

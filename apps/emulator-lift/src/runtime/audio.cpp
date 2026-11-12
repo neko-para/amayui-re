@@ -163,6 +163,11 @@ bool AudioEngine::begin(std::string* err) {
     stats_ = AudioStats{};
     in_fill_ = false;
     borrowed_ret_ = false;
+    // ★ 防残留：`filling_obj_` 只在 `feederEvent` 收尾清 0；`end()` 走 `joinFeeder()` 时 fill 会
+    //   自己收尾，所以这**今天**不是 bug —— 但 `removeBuffer` / `addBuffer` 新加的等待判据
+    //   直接以它为条件，留下一个非 0 的残值会让下一轮的重置路径等一个不存在的 fill
+    //   （最坏每次吃满 3 s）。同一 Machine 的第二次 run 在这里已被上面拒掉，所以清它无害。
+    filling_obj_.store(0);
     if (!cpu_ || !mem_ || !clock_) {
         if (err) *err = "AudioEngine 没有 attach（cpu/mem/clock）";
         return false;
@@ -405,6 +410,18 @@ bool AudioEngine::isFeederThread() const {
     return id != std::thread::id{} && id == std::this_thread::get_id();
 }
 
+void AudioEngine::setFillInFlightForTest(std::uint32_t obj_ea) {
+    // ★ 仅夹具（见 audio.h 的声明）：伪造"某一刀 fill 正在跑"。
+    //   在 `pending_mutex_` 下 store + notify_all —— 与 `feederEvent` 收尾清 0 同一纪律
+    //   （等的人用 `pending_cv_` 配这把锁 ⇒ 不会丢唤醒）。
+    //   ⛔ 不碰 `mutex_` / 令牌 / 任何生产状态；⛔ 不进生产路径。
+    {
+        std::lock_guard<std::mutex> lk(pending_mutex_);
+        filling_obj_.store(obj_ea);
+    }
+    pending_cv_.notify_all();
+}
+
 bool AudioEngine::waitFillDone(std::uint32_t obj_ea, std::uint32_t timeout_ms, bool* waited) {
     // ⛔ 不用 `mutex_`：等待期间必须放开它（fill 收尾要它）。
     //   `filling_obj_` 是 atomic，置/清都在别处；这里只作谓词。
@@ -427,12 +444,26 @@ bool AudioEngine::waitFill(std::uint32_t obj_ea, std::unique_lock<std::recursive
     lock.unlock();
     bool waited = false;
     bool done = true;
+    // ★ 只读读数：时钟夹住**谓词等待本身**（`t1` 取在 `lock.lock()` **之前**）。
+    //   为什么：`fill_wait_ms` 的语义是"阻塞在那一刀 fill 上"，与 `fill_max_ms` 同一把尺；
+    //   重取 `mutex_` 还要等混音器的 `mixStep`（跨整个 `generateTo`）⇒ 算进去会把两个量搅成
+    //   一个，A/B 就看不出补偿的收益。代价：**不含重取锁的时间**，⛔ 不要当"调用方总卡顿"读。
+    const auto t0 = std::chrono::steady_clock::now();
     {
         GuestToken::YieldGuard yield(guestToken());
         done = waitFillDone(obj_ea, kFillWaitTimeoutMs, &waited);
     }
+    const auto t1 = std::chrono::steady_clock::now();
     lock.lock();
-    if (waited) ++stats_.fill_waits;
+    if (waited) {
+        ++stats_.fill_waits;
+        // ★ 只读诊断（`fill_wait_ms` / `fill_wait_max_ms` 的唯一累计点）：与 `fill_waits`
+        //   同一个集合 ⇒ 前者可除以后者。⛔ 不参与任何判定，读数是读数。
+        const std::uint64_t wait_us = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+        stats_.fill_wait_us += wait_us;
+        stats_.fill_wait_max_us = std::max(stats_.fill_wait_max_us, wait_us);
+    }
     if (!done) {
         ++stats_.fill_wait_timeouts;
         logAt(LogLevel::Warn,
@@ -462,9 +493,31 @@ bool AudioEngine::waitFill(std::uint32_t obj_ea, std::unique_lock<std::recursive
 void AudioEngine::addBuffer(std::uint32_t state_ea, std::uint32_t obj_ea, std::uint32_t data_ea,
                             std::uint32_t bytes, std::uint32_t flags, const AudioFormat& fmt) {
     GuestToken::YieldGuard yield(guestToken());  // ★ M0（总口径见本函数上方那条注释）
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    // ★ 需要 `unique_lock`：同一 state 换 obj 时要等"正在跑的那一刀 fill"（见 `waitFill`）。
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
     if (!enabled() || state_ea == 0) return;
     Buffer* b = find(state_ea);
+    if (b != nullptr && b->obj_ea != obj_ea) {
+        // ★★ 同一 `state_ea` 换成另一条 obj（防御性：今天的 dsound 路径每次新分配 `st`，几乎
+        //   走不到；但堆复用 + 旧条目未删时会走到）。**先把旧代作废、再决定等不等**：
+        //   与 `stop()` 同序（阻断新 crossing → `++generation` → `dropPending(旧 obj)`）。
+        //   ⛔ 为什么必须显式 `dropPending(old_obj)`：下面原有的 `dropPending(obj_ea)` 丢的是
+        //   **新** obj，旧 obj 的排队条目本来只能靠代次懒丢 ⇒ 那一刀会继续往旧环写。
+        const std::uint32_t old_obj = b->obj_ea;
+        b->playing = false;
+        b->looping = false;
+        ++b->generation;
+        dropPending(old_obj);
+        // ★ 自等判据：feeder 自己（fill 内 Release / EOF 自停）⇒ 不等，直接往下写。
+        //   ⛔ 不要加 `thread_mode_ &&`（理由见 `removeBuffer` 同一条注记）。
+        if (!isFeederThread() && filling_obj_.load() == old_obj) {
+            waitFill(old_obj, lock);
+            // ★★ `waitFill` 放开了 `mutex_` ⇒ `buffers_`（vector）可能已被 erase / 重排，
+            //   `b` 指针必然失效 ⇒ 必须重查（`removeBuffer` 用"先 erase 后等"绕开了这一步）。
+            b = find(state_ea);
+        }
+    }
+    // ⛔ 新 state（没有旧 obj）不要为了"对称"去等一个不存在的 obj。
     if (b == nullptr) {
         buffers_.push_back(Buffer{});
         b = &buffers_.back();
@@ -500,10 +553,20 @@ void AudioEngine::setFormat(std::uint32_t state_ea, const AudioFormat& fmt) {
 
 void AudioEngine::removeBuffer(std::uint32_t state_ea) {
     GuestToken::YieldGuard yield(guestToken());  // ★ M0（总口径见 `addBuffer` 上方）
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    // ★ 需要 `unique_lock`：要等"正在跑的那一刀 fill"（见 `waitFill`）。
+    //   这条等待挡在 `destroyBufferBlocks`（`shims/dsound.cpp`）的 `heap->free` **之前** ——
+    //   它先 `removeBuffer` 再 free guest 环与状态块，而设备模型读的正是 `b.data_ea`
+    //   ⇒ 不等就会让在飞那一刀往已 free 的 guest 堆块里写。
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
     for (auto it = buffers_.begin(); it != buffers_.end(); ++it) {
         if (it->state_ea != state_ea) continue;
         const std::uint32_t obj = it->obj_ea;
+        // ★ 顺序：**先 erase、再 dropPending、最后才等**（与 `stop()` 的"先等后重查"相反）。
+        //   理由：erase 之后 `fireCrossings` 不再为它入队、fill 的代次校验也找不到它
+        //   （`findByObj` → null ⇒ `stale`）⇒ 这次等待只可能被**当前这一刀**唤醒一次，
+        //   不会被"下一刀"延长；也**不需要** `stop()` 那套 `find()` + obj 身份重校验
+        //   （这个 state 已经删了，等完直接返回）。
+        //   代价：金丝雀 `fill_overlapped` 仍会 +1 —— 那正是文档已列的良性成因 ②。
         buffers_.erase(it);
         // ★ D2：`pending_` 归 `pending_mutex_` 管；这里以前是唯一一处**在 `mutex_` 下裸动 deque**
         //   的地方（宿主 UB：feeder / `enqueue` 都在 `pending_mutex_` 下动它）。
@@ -512,6 +575,14 @@ void AudioEngine::removeBuffer(std::uint32_t state_ea) {
         //   （不能跨 fill 持锁：混音器每次 `enqueue` 都会被 fill 的 380–460 ms 堵住）。
         //   ⛔ 不要在 thread 模式里加任何无锁 `pending_` 路径。
         dropPending(obj);
+        // ★ 自等判据（与 `stop()` 的 :598 同文）：feeder **自己**调进来（fill 内的 DS `Release` /
+        //   EOF 自停 `0x4B6C58`）必须早退，否则它等的是自己 —— 不是永久挂死（`waitFillDone`
+        //   上限 = `kFillWaitTimeoutMs`），但那 3 s 会每刀都吃一次。
+        //   ⛔ 判据只写 `!isFeederThread()`，**不要**再加 `thread_mode_ &&`：`isFeederThread()`
+        //   自己已经含 `!thread_mode_ ⇒ false`；而 D 模式下 `filling_obj_` 恒 0，加门零收益，
+        //   却会让夹具（纯档只有 Virtual）永远走不进这个分支 ⇒ 守卫恒绿。
+        if (!isFeederThread() && filling_obj_.load() == obj) waitFill(obj, lock);
+        // 等完直接返回：这个 state 已经从模型里删了，没有"重查 / 重建"的必要。
         return;
     }
 }
@@ -1108,6 +1179,17 @@ AudioPump AudioEngine::pump() {
         }
         return AudioPump::Idle;
     }
+    // ★ 走到这里的**只有** `thread_mode_ == false`（上面那块已返回）⇒ 本引擎当前没有 feeder
+    //   线程、也没有 mixer 线程。这就是上面那条不变量的唯一来源：
+    //   `thread_mode_` 只在 `begin()` 由 `Sdl && clock_->realTime()` 置真；它从 true 变 false
+    //   的**唯一**路径是 `startFeederThread()` 里 `setupFeederContext()` 失败 —— 那一步发生在
+    //   **建线程之前**（失败时 `thread_mode_` 改回 false、`stopMixThread()`，日志"退回主线程泵"）
+    //   ⇒ **不存在"feeder 线程已经在跑、而 `pump()` 走 D"的状态**（复审
+    //     `.tmp/audio-token/compensation-change-review.md` §4 / `feed-paths-audit.md` §4 #2）。
+    //   ⛔ 因此这里**不再加**"是否曾经起过线程"的闩/断言位：它要防的状态今天不可达，删掉它
+    //     少一份过期保证。⚠ 但若将来给 `std::thread` 的构造加 catch 并继续运行、或加 feeder
+    //     restart，**先回来改这里**：那时 `pump()` 的反向锁序前提（"除本线程外没有令牌持有者"）
+    //     就不再成立，需要重新引入一道可判的硬门。
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     // ★ 单执行流纪律：任何嵌套 guest 调用进行中都不混音、不铺新帧。
     //   fill 自己会写 guest 环；此时读环 = 真机上"另一个线程正在写"的竞态，D 里必须避免。
@@ -1431,6 +1513,25 @@ bool AudioEngine::setupFeederContext(std::string* err) {
     //   （见 runtime/guest_token.h 的不变式）—— feeder 的 guest 指令执行本身不持令牌。
     audio_cpu_ = *cpu_;
     if (cpu_->native_overrides) audio_overrides_ = *cpu_->native_overrides;
+    // ★ 段级 override 的私有副本：**只装 `feeder_ok == true`** 的项（filter + add，不是整表 `operator=`）。
+    //   整表拷会把 `sub_414AC0`（boot 期主线程装载器的中段）也带进 feeder —— feeder 永远走不到它，
+    //   真走到了只会 Declined + 永久停用 + 一行 stderr 噪声。
+    //   ⛔ 必须在 `audio_cpu_ = *cpu_` **之后**：那段拷贝会一并继承快照来源指针 `native_blocks`。
+    //   ★ 这里只**读** Machine 的表（add 的源），写的是 `audio_block_overrides_`（本对象私有）。
+    audio_block_overrides_.clear();
+    if (cpu_->native_blocks != nullptr) {
+        for (std::size_t i = 0; i < cpu_->native_blocks->size(); ++i) {
+            const NativeBlockOverride* b = cpu_->native_blocks->at(i);
+            if (b == nullptr || !b->feeder_ok) continue;
+            std::string block_err;
+            if (!audio_block_overrides_.add(b->entry_ea, b->resume_ea, b->name, b->fn, &block_err,
+                                            /*feeder_ok=*/true)) {
+                // 不致命（penalty = 性能退化，不是正确性）：但要**响亮**，否则 `bov=0` 没人解释得了。
+                logAt(LogLevel::Warn, "feeder 段级 override 拷贝失败（%s）⇒ 这一项在 feeder 里走解释器",
+                      block_err.c_str());
+            }
+        }
+    }
     audio_cpu_.cache = audio_cache_.get();
     audio_cpu_.calls = &audio_calls_;
     audio_calls_.reset();
@@ -1710,6 +1811,25 @@ void AudioEngine::feederEvent(const AudioNotifyEvent& ev) {
         for (std::size_t i = 0; i < audio_overrides_.size(); ++i) {
             if (const NativeOverride* ov = audio_overrides_.at(i)) ov_hits += ov->hits;
         }
+        // ★ 段级 override 的**独立计数器**（`bov= / bovd= / bovf=`）：`audio_block_overrides_` 的
+        //   私有副本汇总，⛔ 不是主表（`native-ovr:` 只汇总主表；`ov=` 也只是函数级私有表的 hits）。
+        //   ★ 为什么两个读数必须分开（`docs/audio-implementation.md` 的"两个假绿陷阱"）：
+        //     ① `ov=` 会**下降** —— PCM 段把每样本一次的 `__ftol2_sse` 函数级命中吃掉了
+        //        ⇒ 盯 `ov=` 会得出"没生效"的反向结论；
+        //     ② 段级在 feeder 里没有别的读数通道 ⇒ `bov=0` 就是"没生效"（或 `feeder_ok` filter 漏了）。
+        //   ★ 计数在 feeder 线程上写、也在同一条线程（fill 收尾）上读 ⇒ 无竞争。
+        //   ★ 量级：每刀 fill 只跑一个 quarter 的一段解码 ⇒ 实测 `bov` **每刀约 48–55**
+        //     （ch=2；随 ch / 每 quarter 的解码包数变）⇒ ⛔ 不是"每样本一次"，也⛔ 不是"每刀 = ch"。
+        std::uint64_t bov_hits = 0;
+        std::uint64_t bov_declines = 0;
+        std::uint64_t bov_fallbacks = 0;
+        for (std::size_t i = 0; i < audio_block_overrides_.size(); ++i) {
+            if (const NativeBlockOverride* bo = audio_block_overrides_.at(i)) {
+                bov_hits += bo->hits;
+                bov_declines += bo->declines;
+                bov_fallbacks += bo->fallbacks;
+            }
+        }
         // ★ 只读诊断：`[stream+0x2450/0x2458/0x2470]` 是 B1 的判据；**读不到就打 `?`**（⛔ 不打 0）。
         char f2450[16];
         char f2458[16];
@@ -1728,10 +1848,13 @@ void AudioEngine::feederEvent(const AudioNotifyEvent& ev) {
         }
         std::fprintf(stderr,
                      "[audio] feeder fill slot=%u quarter=%u obj=0x%08X bytes=%s 2450=%s 2458=%s 2470=%s "
-                     "late_q=%s wait=%.2f pre=%.2f guest=%.2f shimtok=%.2f shimblk=%llu total=%.2f ms ov=%llu%s\n",
+                     "late_q=%s wait=%.2f pre=%.2f guest=%.2f shimtok=%.2f shimblk=%llu total=%.2f ms ov=%llu "
+                     "bov=%llu bovd=%llu bovf=%llu%s\n",
                      slot, ev.quarter, ev.obj, bytes_txt, f2450, f2458, f2470, late_txt, wait_ms, pre_ms, guest_ms,
                      shimtok_ms, static_cast<unsigned long long>(guest_shimtok_n), total_ms,
-                     static_cast<unsigned long long>(ov_hits), ok ? "" : " (FAILED)");
+                     static_cast<unsigned long long>(ov_hits), static_cast<unsigned long long>(bov_hits),
+                     static_cast<unsigned long long>(bov_declines), static_cast<unsigned long long>(bov_fallbacks),
+                     ok ? "" : " (FAILED)");
     }
     if (mem_->committed(inf_ea, 4)) {
         const std::uint32_t cur = mem_->rd32(inf_ea);
@@ -1786,6 +1909,53 @@ bool AudioEngine::runFeederGuest(std::string* err) {
                         return false;
                     }
                     continue;
+                }
+            }
+        }
+        // ★ 段级 native override（**函数中段**的固定 EA）：feeder 的**私有副本**。
+        //   插在函数级之后、`audio_cache_->get()` 之前（与主线程 dispatcher 同序：段级在块取之前）。
+        //   ⛔ 不解引用 `audio_cpu_.native_blocks` —— 那指向 Machine 的表（快照来源），
+        //      `hits / declines / fallbacks / disabled` 都是非原子裸字段：共享 = 数据竞争，且
+        //      feeder 的一次 `Declined` 会 `disabled = true` **永久停用主线程**那一项。
+        //   ⛔ 不 tick 时钟：`VirtualClock::now_100ns_` 非原子（`clock.h`），主线程在同一对象上
+        //      `tick(1)` ⇒ 无锁 RMW = UB；而 real-time 下 `now100ns()` 根本不读它 ⇒ 零收益。
+        //   ⛔ 不碰 `window_prof_`（主线程独占的非原子容器）、⛔ 不加 `noteInsn` / trace 打印
+        //      （feeder 的块执行路径本来就不做；那是热路径，不是语义差）。
+        //   ★ `audio_cpu_.insns += n` 保留：feeder 侧它今天没有读者（只对齐语义），读数看 `guest=`。
+        //
+        //   ★ `next_call_target` 的坑：命中段级的那一轮它**必须是 0**。段入口不是 call 目标
+        //      （`0x48D767` 是 fall-through + 回边进来的）。`Replaced` 之后 `continue` 不会再消费它；
+        //      若将来给"被 call 的段"做 override，`call_target` 会先在上面那个函数级 `if` 里被清 0
+        //      （那一支是无条件清），所以形状仍然成立 —— 但别把这段挪到那个 `if` 之前。
+        if (!audio_block_overrides_.empty()) {
+            if (NativeBlockOverride* blk = audio_block_overrides_.find(audio_cpu_.eip)) {
+                const std::uint32_t entry = audio_cpu_.eip;
+                std::uint64_t replaced = 0;
+                const BlockOverrideOutcome outcome = blk->fn(audio_cpu_, *mem_, &replaced);
+                if (outcome == BlockOverrideOutcome::Replaced) {
+                    ++blk->hits;
+                    // `replaced == 0` 视为"没报"⇒ 记 1 条（照抄主线程 dispatcher 的兜底；
+                    // PCM 段保证 replaced >= 15*n，见 native_pcm.cpp）。
+                    audio_cpu_.insns += (replaced != 0 ? replaced : 1ull);
+                    continue;
+                }
+                if (outcome == BlockOverrideOutcome::Declined) {
+                    // 与主线程同口径：**第一次** Declined ⇒ 计入 declines + 永久停用该项（私有副本上），
+                    // 打一行 stderr 后本次落回解释器。之后 `find` 不再返回它。
+                    if (!blk->disabled) {
+                        ++blk->declines;
+                        blk->disabled = true;
+                        std::fprintf(stderr,
+                                     "[audio] feeder 段级 %s @ %08X 前置条件不匹配 ⇒ 本次运行停用该项"
+                                     "（回退解释器，主线程那一项不受影响）\n",
+                                     blk->name.c_str(), entry);
+                    }
+                } else {
+                    // Failed：不 disable（下一次块入口还会重试；保正确性），stderr 只一行。
+                    if (blk->fallbacks == 0)
+                        std::fprintf(stderr, "[audio] feeder 段级 %s @ %08X 执行失败 ⇒ 回退解释器\n",
+                                     blk->name.c_str(), entry);
+                    ++blk->fallbacks;
                 }
             }
         }
@@ -1848,10 +2018,13 @@ void AudioEngine::dumpSummary(std::FILE* out) const {
                  "mixed=%llu played=%llu notify=%llu deferred=%llu dropped=%llu underruns=%llu "
                  "stale=%llu slot_miss=%llu play_on_playing=%llu fill_waits=%llu "
                  "fill_wait_timeouts=%llu fill_overlapped=%llu"
-                 // ★ 本轮新增的三个**只读观测**（放在末尾；⛔ 原有字段顺序没动）：
+                 // ★ 本轮新增的五个**只读观测**（放在末尾；⛔ 原有字段顺序没动）：
                  //   slot_reverify_fail = feeder 拿到槽 CS 后重验失败（见 audio.h 的说明）；
-                 //   fill_max_ms / fill_slow = 单刀 fill 的最大墙钟与 >1000 ms 的刀数。
-                 " slot_reverify_fail=%llu fill_max_ms=%.2f fill_slow=%llu%s\n",
+                 //   fill_max_ms / fill_slow = 单刀 fill 的最大墙钟与 >1000 ms 的刀数；
+                 //   fill_wait_ms / fill_wait_max_ms = 第 3 层"等正在跑的那一刀"的累计 / 单次
+                 //     最大墙钟（口径 = 只量谓词等待，不含重取 `mutex_`；见 `waitFill`）。
+                 " slot_reverify_fail=%llu fill_max_ms=%.2f fill_slow=%llu"
+                 " fill_wait_ms=%.2f fill_wait_max_ms=%.2f%s\n",
                  audioModeName(mode_), device, mute_ ? 1 : 0,
                  static_cast<unsigned long long>(stats_.muted_bytes),
                  static_cast<unsigned long long>(stats_.fills),
@@ -1871,6 +2044,8 @@ void AudioEngine::dumpSummary(std::FILE* out) const {
                  static_cast<unsigned long long>(stats_.slot_reverify_fail),
                  static_cast<double>(stats_.fill_max_us) / 1000.0,
                  static_cast<unsigned long long>(stats_.fill_slow),
+                 static_cast<double>(stats_.fill_wait_us) / 1000.0,
+                 static_cast<double>(stats_.fill_wait_max_us) / 1000.0,
                  dump_path_.empty() ? "" : (" dump=" + dump_path_).c_str());
 }
 

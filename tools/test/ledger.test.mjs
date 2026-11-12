@@ -377,6 +377,29 @@ test('★ CTest 分级：`add_test` 的**注册位置**决定 pure/assets（顶�
   assert.equal(isCmakeGuardFile('tools/test/ledger.test.mjs'), false);
 });
 
+test('★ CTest 分级：`if(LIFT_BUILD_TESTS)` 透明（唯一条件）；其它形态仍算 tier 门（保守）', () => {
+  const cm = [
+    'if(LIFT_BUILD_TESTS)',
+    '  add_test(NAME build-tests-on COMMAND x)',
+    'endif()',
+    'if(LIFT_BUILD_TESTS AND WIN32)',
+    '  add_test(NAME build-tests-and-win32 COMMAND y)',
+    'endif()',
+    'if(NOT LIFT_BUILD_TESTS)',
+    '  add_test(NAME build-tests-off COMMAND z)',
+    'endif()',
+    'add_test(NAME after-transparent COMMAND w)',
+  ].join('\n');
+  // ① 产品构建开关包住整份测试套件 ⇒ 套件里的顶层 add_test 仍是 pure（不是资产门）
+  assert.equal(cmakeTestTier(cm, 'build-tests-on'), 'pure', '`if(LIFT_BUILD_TESTS)` 是透明块');
+  // ② 带附加条件 ⇒ 不透明（默认门禁是否跑它取决于 `WIN32`，按 assets 保守处理）
+  assert.equal(cmakeTestTier(cm, 'build-tests-and-win32'), 'assets', '只认唯一条件');
+  // ③ 反向条件 ⇒ 不透明（不能把"关掉测试"的分支当无门）
+  assert.equal(cmakeTestTier(cm, 'build-tests-off'), 'assets', '`NOT LIFT_BUILD_TESTS` 仍是 tier 门');
+  // 透明 endif 不许把后面的顶层测试带歪（depth 没被少减）
+  assert.equal(cmakeTestTier(cm, 'after-transparent'), 'pure');
+});
+
 test('#4 观察可再校验：accepted 的 self 锚解析不了 ⇒ 红，且**投影自动降级 stale**（不删除）', () => {
   const dir = tmp();
   try {

@@ -234,3 +234,112 @@
 - **口径**：2026-11-11 · 副本二进制（`out/*` 复制到 `.tmp/quit-tail/bin/`，exe sha256 `3818CEB9…`）· 有安装树 · 无 override。
 - **用途**：`REQ-01M737M1PPHHXDN65RCTK6XTV6` 的第一条读数 —— "CPU 光栅慢"从此是读数而不是印象；
   也说明**长流程不能用 CPU 光栅跑**（这会反过来决定 oracle 的保留成本）。
+
+### OBS-20261112-01 · M0.1：Present 路径上 7 处 `Acquire`/`Submit` 移出令牌前后的读数（本机 Metal）
+- **口径**：**macOS arm64 / Metal（MSL）/ RelWithDebInfo**（`cmake --preset macos-arm64`）·
+  `--present window --present-vsync 0 --present-hidden --raster gpu`（启动行
+  `sink driver=gpu-direct video=cocoa gpu=metal present=direct/immediate`）· 有安装树 ·
+  `--native-overrides all --skip-logo` · **不是口径A**（口径A = Win10 x64 / D3D12 / DXBC）· 40 帧 · 2026-11-12 ·
+  工作树 `9378da7` + 本单改动（`d3d9_gpu.cpp` 的 `:456`/`:816`/`:925`/`:1198`/`:1216`/`:1225`/`:1264` 各加一个 `YieldGuard`）。
+- **命令 ①**（`pres :` 只在这里出；改前 `--appdata /tmp/m01/appdata`、改后 `/tmp/m01/appdata-after`）：
+  `LIFT_FRAME_TRACE=1 ./out/emulator-lift --appdata <…> --game-dir ../../links/install --present window
+  --present-vsync 0 --present-hidden --raster gpu --native-overrides all --skip-logo --max-frames 40`
+- **读数 ①**（40 帧，每栏取 max / 中位；`direct=1` 两次相同）：
+
+  | | readback | hash | stats | sink | Present shim max |
+  |---|---|---|---|---|---|
+  | 改前 | 17.0 / 3.4 ms | 0.9 / 0.8 | 0.0 / 0.0 | 1.4 / 0.2 | 4.8 ms（39 次 Present） |
+  | 改后 | 14.7 / 3.3 ms | 0.8 / 0.7 | 0.0 / 0.0 | 2.5 / 0.1 | 4.8 ms（39 次） |
+
+- **命令 ②**（`tokenhold`/`holdhist`/`waithist`/`shimmax` 只在 `--profile` 或 `LIFT_AUDIO_TRACE` 下出；
+  改前 `--appdata /tmp/m01/appdata2`、改后 `/tmp/m01/appdata2-after`）：
+  `LIFT_AUDIO_TRACE=1 ./out/emulator-lift --appdata <…> --game-dir ../../links/install --present window
+  --present-hidden --raster gpu --native-overrides all --skip-logo --audio sdl
+  --interaction-graph ../../graphs/se-eof.graph --profile`
+  （两条都跑到 `detail: interaction: task done`，exit 0）
+- **读数 ②**（改前 → 改后）：
+  - `tokenhold : main … max` **29.474 → 30.555 ms**；`main hold … = 56.5% → 56.0%`
+  - `holdhist : main … >50ms` **0 → 0**（`20-50ms` 7 → 7）
+  - `waithist : main … 20-50ms` **1 → 0**、`>50ms` **0 → 0**（`<1ms` 271 → 298）
+  - `tokenwait`：waits 519 / 126.7 ms → 542 / 91.5 ms（单次均值 244.1 → 168.9 µs）
+  - `shimmax` 前 5：改前 = `IDirectSoundBuffer8::Stop` 52.483 ms×9 / **`IDirect3DDevice9::Present` 32.342 ms×1421** /
+    `D3DXCreateTextureFromFileInMemory` 29.471×3 / `DrawIndexedPrimitive` 22.734×20940 / `ID3DXSprite::End` 20.800×10843；
+    改后 = `Stop` 61.970×9 / `D3DXCreateTexture…` 29.655×3 / `DrawIndexedPrimitive` 24.028 / `ID3DXSprite::End` 21.526 /
+    `Clear` 18.177；**`Present` 掉到第 6 位 17.025 ms×1421**
+  - `audio : mode=sdl device=ok …`：`fill_max_ms` **117.19 → 117.89**、`fill_slow` **0 → 0**、`fill_waits` **1 → 1**、
+    `fill_wait_timeouts=0`、`underruns=0`；`token : violations=0 max-concurrent=1` 两次相同
+  - `tokenhold : other` 的 max 29.202 → 0.723 ms（改后第二遍 0.714）—— 改前只跑一遍，**本单不据此下结论**（可能只是运行间抖动）。
+- **改后复跑一遍**（同一份源码、同一二进制；`--appdata /tmp/m01/appdata2-after2`，命令 ② 原文）：
+  `tokenhold main max 30.795 ms`、`holdhist main >50ms 0`（`20-50ms 5`）、`waithist main 20-50ms 0`、
+  `Present shim max 17.324 ms×1415`、`fill_max_ms=119.48 fill_slow=0 fill_waits=1`、
+  `token violations=0 max-concurrent=1`；命令 ① 复跑（`--appdata /tmp/m01/appdata-after2`）：
+  `pres : readback 15.5 / 3.3 ms、hash 0.8 / 0.7、stats 0.0、sink 1.5 / 0.1、direct=1`、Present shim `4.9 ms` max。
+  ⇒ 改后两遍的**形状一致**（`>50ms 0`、`20-50ms 0`、`Present` 两次都在 `shimmax` 前 5 之外），逐位数值不逐位相同。
+- **一句（平台差异，不是"修好了"）**：用户机 Windows 上 Present 内 ~250 ms 的持有**本机不复现** —— Metal 的提交是
+  异步 `[commandBuffer commit]`，D3D12 的 `IDXGISwapChain_Present` 才在提交里同步等（`.tmp/audio-token/m01-design-review.md` §5）。
+  上表只能说明"本机在这个工况下这一栏是多少"，不能说明 Windows 侧会掉多少；Windows 侧的定案命令见该复审 §6.2 的三臂
+  （A `--raster gpu` / B `--raster cpu --present-driver software` / C `--raster cpu`）。
+> ⚠ 2026-11-12 复审按同命令（load avg ~17.5）3 次未复现本条组合（`>50ms` 4–5、Present 38.6–65.3 ms、`fill_max` 157–211），见 `OBS-20261112-02`；本条是该时刻（负载较低）的读数，跨负载不可比。
+
+### OBS-20261112-02 · 同一命令在本机**共享负载**下的 3 次复跑（OBS-20261112-01 的范围复核）
+- **口径**：与 `OBS-20261112-01` 相同 —— **macOS arm64 / Metal（MSL）/ RelWithDebInfo**（`cmake --preset macos-arm64`）·
+  `--present window --present-hidden --raster gpu --native-overrides all --skip-logo --audio sdl` · 40 帧不需要（本命令跑到交互图收工）·
+  **不是口径A** · 2026-11-12 · **同一二进制**（工作树 `9378da7` + 本单改动，含仅注释修订后的重编译）·
+  三次各新开一个 `--appdata /tmp/m01/rerun3/appdata-{1,2,3}`。
+- **命令原文**（三条完全相同；`LIFT_AUDIO_TRACE=1` 是命令的一部分）：
+  `LIFT_AUDIO_TRACE=1 ./out/emulator-lift --appdata /tmp/m01/rerun3/appdata-<n> --game-dir ../../links/install
+  --present window --present-hidden --raster gpu --native-overrides all --skip-logo --audio sdl
+  --interaction-graph ../../graphs/se-eof.graph --profile`
+  ⇒ 三次都 `detail: interaction: task done`、exit 0。
+- **负载（`uptime` 原样记录；12 核）**：run1 起 `load 17.90 13.04 12.75` / 止 `21.98 14.50 13.29`；
+  run2 起 `21.98 14.50 13.29` / 止 `21.57 14.94 13.48`；run3 起 `21.57 14.94 13.48` / 止 `19.30 14.86 13.49`。
+  ⇒ **这三次不在低负载下**（复审时 ~17.5，本轮 17.9–22.0）—— 与 `OBS-20261112-01` 的绝对值不可横比。
+- **读数（逐次 + 范围）**：
+
+  | 指标 | run1 | run2 | run3 | 范围（min–max） |
+  |---|---|---|---|---|
+  | `tokenhold main max` | 47.886 ms（55.9%） | 33.187（54.8%） | 32.381（55.2%） | **32.4–47.9 ms** |
+  | `holdhist main >50ms` | 0（20–50ms 9） | 0（20–50ms 8） | 0（20–50ms 6） | **0–0**（20–50ms 6–9） |
+  | `waithist main 20–50ms / >50ms` | 0 / 0 | 0 / 0 | 0 / 0 | **0–0 / 0–0** |
+  | `tokenwait` | 575 次 / 119.9 ms | 556 / 95.9 ms | 486 / 69.6 ms | **486–575 次 / 69.6–119.9 ms** |
+  | `Present` max（`shimmax` 名次） | 61.782 ms（**#1**，1377 次） | 115.951（**#1**，1375 次） | 21.872（**#4**，1402 次） | **21.9–116.0 ms，名次 #1–#4** |
+  | `shimmax` #1 | `Present` 61.782 | `Present` 115.951 | `D3DXCreateTextureFromFileInMemory` 32.377 | — |
+  | `fill_max_ms` / `fill_slow` / `fill_waits` | 159.29 / 0 / 0 | 180.98 / 0 / 0 | 143.16 / 0 / 0 | **143.2–181.0 / 0 / 0** |
+  | `token violations` / `max-concurrent` | 0 / 1 | 0 / 1 | 0 / 1 | **0 / 1** |
+
+- **这三次里也没复现 `OBS-20261112-01` 的单次组合**（0 / Present 17.0 ms / `fill_max` 117.89）：
+  本轮的 `Present` 至少 21.9 ms、`fill_max` 至少 143.2 ms。⇒ 两处差异的**形状**是"`LIFT_AUDIO_TRACE=1` 这一臂在本机
+  随共享负载漂"，**不是**"某一次数字更对"。⛔ 本条不是断言，也不据此判定本单效果（`waithist`/`token` 两栏三次都稳定）。
+
+### OBS-20261112-03 · 第 3 层等待的时长读数：`fill_wait_ms` / `fill_wait_max_ms`（本机 sdl + virtual 两臂）
+- **口径**：**不是口径A** —— **macOS arm64 / Metal（MSL）/ RelWithDebInfo**（`cmake --preset macos-arm64`）·
+  2026-11-12 · **工作树 = `9378da7` + 本单改动（未提交）**，两条臂都在该工作树上跑（构建于收口前；
+  其后的收口只删了 `pump()` 里**不可达**的门与注释，音频路径未变）·
+  纯读数（⛔ 不是断言，不据此判定"事务化 fill 值不值"）。
+- **命令 ①（thread 臂，唯一可能 >0 的臂：窗口自动 real-time ⇒ 方案 C 真 feeder 线程）**：
+  `LIFT_AUDIO_TRACE=1 ./out/emulator-lift --appdata /tmp/req-audio/sdl2 --game-dir ../../links/install
+  --present window --present-hidden --raster gpu --native-overrides all --skip-logo --audio sdl
+  --interaction-graph ../../graphs/se-eof.graph --profile`
+  ⇒ `detail: interaction: task done`、exit 0、`token : violations=0 max-concurrent=1`。
+- **读数 ①**（`audio :` 行）：`fills=53 fill_waits=1 fill_wait_timeouts=0 fill_overlapped=5
+  fill_max_ms=138.21 fill_slow=0 fill_wait_ms=28.49 fill_wait_max_ms=28.49`。
+  自洽：只有 1 次等待 ⇒ 累计 == 单次最大；`fill_wait_timeouts=0` ⇒ 没有 3 s 超时混进时长；
+  `fill_wait_max_ms(28.49) < fill_max_ms(138.21)` ⇒ 等的是那一刀的**剩余部分**，不是"吃满一整刀"。
+- **同命令的第二次读数（独立实现复审，同日、共享负载）**：`fill_waits=1 fill_wait_timeouts=0
+  fill_overlapped=5 fill_max_ms=125.09 fill_wait_ms=78.87 fill_wait_max_ms=78.87`（exit 0，`task done`）。
+  ⇒ 两次**形状一致**（`fill_waits` / `fill_overlapped` / `fill_wait_timeouts` 相同），绝对值
+  **28.49 vs 78.87 ms** 随**共享负载**漂（本机 12 核，两跑负载不同）—— ⛔ 不可横比，也不取平均。
+- **命令 ②（D 臂阴性对照：`--audio virtual` + 窗口 40 帧）**：
+  `./out/emulator-lift --appdata /tmp/req-audio/virt3 --game-dir ../../links/install --present window
+  --present-hidden --raster gpu --native-overrides all --skip-logo --audio virtual --max-frames 40`
+  ⇒ exit 0、`detail: max-frames`。
+- **读数 ②**：`mode=virtual device=none fills=4 fill_waits=0 fill_wait_timeouts=0 fill_overlapped=0
+  fill_max_ms=113.80 fill_wait_ms=0.00 fill_wait_max_ms=0.00`。
+  ⇒ 与"D 模式（`thread_mode_ == false`）没有 feeder 线程、`filling_obj_` 恒 0"一致。
+- **边界读数（不当作阴性对照）**：同形状的 `--audio sdl` 40 帧臂（`--max-frames 40`）只跑了 boot
+  的 3 刀、没有 Stop 落进 fill ⇒ `fill_waits=0`、两栏 `0.00`、`fill_max_ms=145.59`。⇒ 短跑读不到
+  第 3 层的代价，读数要看跑到交互结束的那一臂。
+- **口径备注**：两新栏 = 第 3 层"等正在跑的那一刀 fill"的**累计 / 单次最大**墙钟，
+  **只量谓词等待本身**（`t1` 取在重取 `mutex_` 之前）⇒ **不含**混音器占用（`mixStep` 跨
+  `generateTo`）；⛔ 不要把它当"调用方总卡顿"。`fill_waits == 0` 的运行里 Stop 照样发生很多次、
+  只是都落在 fill 间隙 ⇒ ⛔ 不要把 `fill_wait_ms == 0` 读成"Stop 很便宜"。
