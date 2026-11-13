@@ -51,6 +51,35 @@ const char* convName(Conv c) {
 }
 
 // ---------------------------------------------------------------------------------------
+// 未实现导入 / 未实现形态的**唯一**响亮停机点（见 shims.h 的声明）。
+// ★ 抽出来的理由：缺口路径（`fn == nullptr`）与"已注册、但某个**形态**拒绝"的条件 trap
+//   （例：`imm32!ImmAssociateContext` 的 `hIMC != 0`）必须打印**同一份**现场，否则两处会
+//   各漂一套格式，`shims: called-unimplemented` 之类的读数也就对不上了。
+// ★ `stop_kind = Trap` 只对"已注册的 fn"那条路生效（`Machine::run` 先按 `!had_impl` 判
+//   `Unimplemented`，与旧行为逐字节相同）；否则 `had_impl == true` + 种类 None 会被当成
+//   `Stopped`（**正常结局**）—— 那正是"响亮停"要消掉的缝。
+// ---------------------------------------------------------------------------------------
+void trapUnimplemented(X86& cpu, const char* module, const char* name, const char* reason,
+                       std::uint32_t ret_ea, std::uint32_t stub_ea, Conv conv, int argc) {
+    std::fprintf(stderr, "\n=== unimplemented import (base gap) ===\n");
+    if (stub_ea != 0) {
+        std::fprintf(stderr, "  %s!%s  (stub 0x%08X, conv=%s, argc=%d)\n", module ? module : "?",
+                     name ? name : "?", stub_ea, convName(conv), argc);
+    } else {
+        std::fprintf(stderr, "  %s!%s  (conv=%s, argc=%d)\n", module ? module : "?", name ? name : "?",
+                     convName(conv), argc);
+    }
+    std::fprintf(stderr, "  reason: %s\n", reason ? reason : "(未登记理由)");
+    std::fprintf(stderr, "  返回地址 = 0x%08X\n", ret_ea);
+    dumpRegisters(cpu, stderr);
+    dumpGuestStack(cpu, stderr, 24);
+    cpu.running = false;
+    cpu.stop_why = "unimplemented import";
+    cpu.stop_kind = HostStopKind::Trap;
+    ++cpu.shim.unimplemented_calls;
+}
+
+// ---------------------------------------------------------------------------------------
 // ShimCall：参数都从 guest 栈上读（`[esp]` = 返回地址，`[esp+4+4i]` = 第 i 个参数）
 // ---------------------------------------------------------------------------------------
 std::uint32_t ShimCall::u32(int i) const {
@@ -390,17 +419,10 @@ void ShimRegistry::invoke(X86& cpu, ShimDef& def) {
     const int trace_argc = local.argc;
 
     if (!local.fn) {
-        // **响亮失败**：未实现的导入。这里是 A5 缺口的执行期落点。
-        std::fprintf(stderr, "\n=== unimplemented import (base gap) ===\n");
-        std::fprintf(stderr, "  %s!%s  (stub 0x%08X, conv=%s, argc=%d)\n", local.module.c_str(), local.name.c_str(),
-                     local.stub_ea, convName(local.conv), local.argc);
-        std::fprintf(stderr, "  reason: %s\n", local.reason ? local.reason : "(未登记理由)");
-        std::fprintf(stderr, "  返回地址 = 0x%08X\n", ret_ea);
-        dumpRegisters(cpu, stderr);
-        dumpGuestStack(cpu, stderr, 24);
-        cpu.running = false;
-        cpu.stop_why = "unimplemented import";
-        ++cpu.shim.unimplemented_calls;
+        // **响亮失败**：未实现的导入。这里是 A5 缺口的执行期落点（与条件 trap 共用停机点，
+        // 见上面的 `trapUnimplemented`）。
+        trapUnimplemented(cpu, local.module.c_str(), local.name.c_str(), local.reason, ret_ea, local.stub_ea,
+                          local.conv, local.argc);
         return;
     }
 

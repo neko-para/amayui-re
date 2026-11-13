@@ -79,6 +79,10 @@ constexpr std::uint32_t kMBCaption = 0x00407100u;    // CP932 字节的 caption�
 constexpr std::uint32_t kMBText = 0x00407200u;       // CP932 字节的 text（NUL 结尾）
 constexpr std::uint32_t kMBResult = 0x00407300u;     // 返回值槽
 
+// 第五阶段（2026-11-13 追加）：`imm32!ImmAssociateContext` 的 **hIMC != 0** 是条件 trap。
+// ★ 落点同样隔开（0x408000+），⛔ 不与前四段重叠。
+constexpr std::uint32_t kCode5 = 0x00408000u;        // 第五段 guest 代码（只有一条 ImmAssociateContext）
+
 struct Asm {
     // ★ `base` = 这段机器码的装载地址（第一段是 kCode；第二阶段是 kCode2）。    //   `callRel` 的位移必须相对**本段**的地址算 —— 早先写死 kCode 时，第二段的 call 全偏了 0x300。
     explicit Asm(std::uint32_t base = kCode) : base_(base) {}
@@ -187,7 +191,9 @@ int main() {
     // ★ M2 输入 / 光标 / 监控器 / 系统参数族 + 菜单族也在本夹具里（各自的断言见第二阶段）。
     lift::registerUser32InputShims(m.shims());
     lift::registerUser32MenuShims(m.shims());
-    // ★ P4：imm32!ImmAssociateContext（SCOPE §1「完整 IME 不做」⇒ 没有 IME）走 shell32.cpp 的注册入口
+    // ★ P4：imm32!ImmAssociateContext（SCOPE §1「IME 不做」）走 shell32.cpp 的注册入口。
+    //   ★ 2026-11-13 用户裁决：**条件 trap** —— `hIMC==0` 仍返回 NULL（启动路径每次都这样调），
+    //     `hIMC!=0` 响亮停 ⇒ 两臂分别在 `families-run`（hIMC=0）与 `imm-associate-context-himc-traps` 里验。
     lift::registerShell32Shims(m.shims());
     // ★ P4：GDI region 七条（CreateRectRgn / CreateEllipticRgnIndirect / CreatePolygonRgn / CombineRgn /
     //   GetRegionData / GetRgnBox / PtInRegion）。它们与 GetUpdateRgn / ValidateRgn 共用 `GdiRegion` 类型。
@@ -527,9 +533,11 @@ int main() {
     b.pushImm(0);  // SM_CXSCREEN
     b.callRel(stubOf(m, "GetSystemMetrics"));
     b.storeEax(kRes2 + R_SM0);
-    // ---- imm32!ImmAssociateContext：没有 IME ⇒ 返回 NULL（⛔ 不造假 HIMC） ----
-    b.pushImm(0x0000ABCDu);  // hIMC（任意值：没有 IME 时真机也返回 NULL）
-    b.pushMem(kHwndSlot);
+    // ---- imm32!ImmAssociateContext（hIMC == 0 = 摘除 IME）：真机没有 IME 时也返回 NULL ----
+    //   ★ 2026-11-13 用户裁决：**只有 hIMC != 0** 才 trap；启动路径 `0x4BB0C4` 传的就是 NULL，
+    //     所以这一臂必须**照跑**（它要是 trap，每次有窗口的 boot 都会停）。
+    b.pushImm(0);            // hIMC = NULL（摘除输入上下文）
+    b.pushMem(kHwndSlot);    // hwnd
     b.callRel(stubOfIn(m, "imm32", "ImmAssociateContext"));
     b.storeEax(kRes2 + R_IMM);
     b.ret();
@@ -612,8 +620,9 @@ int main() {
     LIFT_CHECK_EQ_U32(res(R_SM23), 0u);  // SM_SWAPBUTTON：0 = 没交换
     LIFT_CHECK_EQ_U32(res(R_SM0), 1280u);
 
-    // ★ P4 / SCOPE §1：完整 IME 不做 ⇒ 按"没有 IME"回答（NULL），⛔ 不是假成功
-    g_current_case = "imm-associate-context";
+    // ★ P4 / SCOPE §1：`hIMC == 0`（摘除 IME）⇒ 返回 NULL（真机没有 IME 时也是这个值），⛔ 不是假成功。
+    //   ⚠ `hIMC != 0` 是条件 trap（见文件末尾的 `imm-associate-context-himc-traps`）。
+    g_current_case = "imm-associate-context-null";
     LIFT_CHECK_EQ_U32(res(R_IMM), 0u);
 
     // =================================================================================
@@ -1148,6 +1157,44 @@ int main() {
                    std::string::npos);
         // ③ 一行一条：正文里的 CRLF 被转义 ⇒ 日志里没有裸的 CRLF 跑进那行
         LIFT_CHECK(log.find("DirectSoundが使用できません\r\n") == std::string::npos);
+    }
+
+    // =================================================================================
+    // 第五阶段（2026-11-13 用户裁决）：`imm32!ImmAssociateContext` 的 **hIMC != 0** 是条件 trap。
+    // ★ 形态照 `tests/dispatch.cpp` 的 `unimplemented-is-loud`：摆一段 guest 代码，必须**响亮停**
+    //   （`unimplemented_calls` 涨 1、`stop_why` = "unimplemented import"、⛔ 不跑到哨兵）。
+    // ★ 修前红：这一臂曾经也是"返回 NULL + 继续跑"（无条件 no-op）⇒ 这里会跑到哨兵、计数不涨。
+    // ★ 为什么 `reason` 是 `Trap` 而不是 `Unimplemented`：它是**已注册的 fn**（`addStub`）拒绝
+    //   某个形态 ⇒ `Machine::run` 按 `had_impl == true` + `stop_kind == Trap` 归类（machine.cpp
+    //   的三种停）；`Unimplemented` 只留给"注册表里根本没有 fn"的缺口。
+    // =================================================================================
+    g_current_case = "imm-associate-context-himc-traps";
+    {
+        const std::uint32_t imm_ea = stubOfIn(m, "imm32", "ImmAssociateContext");
+        LIFT_CHECK_NE_U32(imm_ea, 0u);
+        if (imm_ea != 0) {
+            Asm tc(kCode5);
+            tc.pushImm(0x0000ABCDu);  // hIMC != 0（真想把输入上下文装上去 ⇒ 本线不做 IME）
+            tc.pushImm(0x00020004u);  // hwnd
+            tc.callRel(imm_ea);
+            tc.ret();                 // ★ 修前会走到这里（返回 NULL 继续跑）
+            LIFT_CHECK(m.placeCode(kCode5, tc.b.data(), tc.b.size(), &err));
+            LIFT_CHECK(m.prepareStack(&err));
+            const std::uint32_t traps_before = m.cpu().shim.unimplemented_calls;
+            m.cpu().eip = kCode5;
+            lift::RunOptions o5;
+            o5.until_ea = kSentinel;
+            o5.max_insns = 1000;
+            const lift::RunResult r5 = m.run(o5);
+            LIFT_CHECK(r5.reason != lift::StopReason::UntilEa);  // ⛔ 不是"跑到哨兵"
+            LIFT_CHECK(r5.reason == lift::StopReason::Trap);
+            LIFT_CHECK(!r5.ok());
+            LIFT_CHECK(!m.cpu().running);
+            LIFT_CHECK(m.cpu().stop_kind == lift::HostStopKind::Trap);
+            LIFT_CHECK(std::string(m.cpu().stop_why ? m.cpu().stop_why : "") == "unimplemented import");
+            LIFT_CHECK_EQ_U32(m.cpu().shim.unimplemented_calls, traps_before + 1u);
+            LIFT_CHECK(r5.detail.find("imm32!ImmAssociateContext") != std::string::npos);
+        }
     }
 
     return finish("user32-window");

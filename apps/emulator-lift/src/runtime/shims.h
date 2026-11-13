@@ -27,6 +27,17 @@ enum class Conv : std::uint8_t { Stdcall = 0, Cdecl, Varargs };
 
 const char* convName(Conv c);
 
+// ★ 未实现导入 / 未实现形态的**唯一**响亮停机点（`ShimRegistry::invoke` 的缺口路径与
+//   "已注册的 fn 里拒绝某个形态"的条件 trap 共用）：打印 module!name + reason + 返回地址 +
+//   寄存器 + guest 栈，置 `running = false` / `stop_why = "unimplemented import"` /
+//   `stop_kind = HostStopKind::Trap` / `++unimplemented_calls`。
+//   `stub_ea == 0` ⇒ 打印里不写桩地址（条件 trap 不是"未实现的导入桩"）。
+//   ★ 条件 trap 走这里时 `had_impl == true` ⇒ `Machine::run` 落 `StopReason::Trap`（⛔ 不是
+//     正常结局）；无 fn 的缺口仍由 `!had_impl` 先判成 `Unimplemented`。
+void trapUnimplemented(X86& cpu, const char* module, const char* name, const char* reason,
+                       std::uint32_t ret_ea, std::uint32_t stub_ea = 0, Conv conv = Conv::Stdcall,
+                       int argc = 0);
+
 // 一次 shim 调用的现场。参数在 guest 栈上：`[esp]` = 返回地址，`[esp+4+4i]` = 第 i 个参数。
 struct ShimCall {
     X86* cpu = nullptr;

@@ -133,7 +133,7 @@
       "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/shell32.cpp",
       "boundary": "import",
-      "reason": "SCOPE §1：完整 IME 不做 ⇒ 没有 IME：返回 NULL（不造假句柄）+ 一行日志"
+      "reason": "SCOPE §1：IME 不做（真机可能在存档界面弹输入对话框）⇒ hIMC==0 摘除返回 NULL；hIMC!=0 硬 trap（2026-11-13 用户裁决：先拒绝，发现调用到了再说）"
     },
     {
       "target": "kernel32!_beginthreadex",

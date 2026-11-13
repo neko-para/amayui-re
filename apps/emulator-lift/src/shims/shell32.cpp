@@ -127,20 +127,31 @@ void shimSHGetFolderPathA(X86& cpu, ShimCall& call) {
 // ---------------------------------------------------------------------------------------
 // imm32 · `ImmAssociateContext`（P4 小族）
 //
-// ★ 裁决：`SCOPE.md` §1 —— **完整 IME 不做** ⇒ 按"这台机器没有 IME"回答：
-//   返回**前一个**输入上下文 = **NULL**（真机上没有 IME 时就是这个值）。
-//   ⛔ 不返回假 HIMC：那会让引擎以为输入上下文真的换过去了，IME 消息却永远不会来
-//   —— 那就是"假成功"，SCOPE §3 明令禁止。
-//   ⛔ 也不 trap：引擎在启动路径上必然会调它一次，trap 会把"没有 IME"变成"跑不下去"。
-//   参数（HWND / HIMC）一律只记进日志、不做校验：本模拟器没有 IME 状态可改，
-//   任何 hwnd / himc 的真机结果都是 NULL ⇒ 校验只会凭空造出真机没有的失败路径。
+// ★ 2026-11-13 用户裁决：**不再无条件返回 NULL**；改成**条件 trap**（仍是 `addStub`，
+//   所以覆盖清单里 kind = `noop`，reason 说清两臂）：
+//   · `hIMC == 0`（摘除输入上下文 / 没有 IME）⇒ 返回**前一个**上下文 = **NULL** + 一行日志。
+//     真机上"没有 IME"就是 NULL；启动路径 `0x4BB0C4` 每次有窗口都会这样调一次
+//     （`_WinMain@16`，`.lst 296455-296489`）⇒ 这一臂必须照跑，⛔ 不能 trap 把 boot 停掉。
+//   · `hIMC != 0`（真的想装一个输入上下文）⇒ **本线不实现** ⇒ **响亮停**（共用
+//     `trapUnimplemented`：reason + 返回地址 + 寄存器 + guest 栈）。
+//     理由：IME 不做；真机可能在存档界面弹输入对话框来编辑存档名，本线**不实现**那条路径。
+//     用户原话："无论如何先保持硬 trap 拒绝即可，发现调用到了再说。"
+//   ⛔ 不返回假 HIMC：那会让引擎以为输入上下文真的换过去了，IME 消息却永远不会来 ——
+//   "假成功"（SCOPE §3 明令禁止）。
 // ---------------------------------------------------------------------------------------
+constexpr const char* kImmAssociateContextReason =
+    "SCOPE §1：IME 不做（真机可能在存档界面弹输入对话框）⇒ hIMC==0 摘除返回 NULL；"
+    "hIMC!=0 硬 trap（2026-11-13 用户裁决：先拒绝，发现调用到了再说）";
+
 void shimImmAssociateContext(X86& cpu, ShimCall& call) {
     const std::uint32_t hwnd = call.u32(0);
     const std::uint32_t himc = call.u32(1);
-    (void)cpu;
-    shimLog("imm32", "ImmAssociateContext", "hwnd=0x%08X hIMC=0x%08X ⇒ NULL（没有 IME，SCOPE §1）",
-            hwnd, himc);
+    if (himc != 0) {
+        trapUnimplemented(cpu, "imm32", "ImmAssociateContext", kImmAssociateContextReason, call.ret_ea,
+                          call.def ? call.def->stub_ea : 0u, call.conv, call.argc);
+        return;
+    }
+    shimLog("imm32", "ImmAssociateContext", "hwnd=0x%08X hIMC=0 ⇒ NULL（摘除 IME；SCOPE §1 不做 IME）", hwnd);
     call.result = 0;
 }
 
@@ -150,9 +161,11 @@ void registerShell32Shims(ShimRegistry& s) {
     s.add("shell32", "SHGetSpecialFolderPathA", Conv::Stdcall, 4, &shimSHGetSpecialFolderPathA);
     // ★ 2026-11-05：XP 的 shell32 有 `SHGetFolderPathA`（引擎在 major>4 的路径上只走它）。
     s.add("shell32", "SHGetFolderPathA", Conv::Stdcall, 5, &shimSHGetFolderPathA);
-    // ★ 输入法：SCOPE §1 的显式偏差 ⇒ 走 addStub（覆盖清单里 kind=stub + reason 可回查）
+    // ★ 输入法：SCOPE §1 的显式偏差 ⇒ 走 addStub（覆盖清单里 kind=noop + reason 可回查）。
+    //   ★ 2026-11-13 用户裁决：hIMC==0 返回 NULL，hIMC!=0 **硬 trap**（见上面的说明）。仍然是
+    //   **一条**注册 —— ⛔ 不要为 trap 再加第二个同名条目。
     s.addStub("imm32", "ImmAssociateContext", Conv::Stdcall, 2, &shimImmAssociateContext,
-              "SCOPE §1：完整 IME 不做 ⇒ 没有 IME：返回 NULL（不造假句柄）+ 一行日志");
+              kImmAssociateContextReason);
 }
 
 }  // namespace lift
