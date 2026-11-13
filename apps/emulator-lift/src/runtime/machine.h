@@ -392,7 +392,16 @@ public:
     std::uint64_t traceInputsHash() const;  // 输入归一化后的指纹（两次运行必须相同）
     // 机器可读的缺口/覆盖快照（给 `tools/lift.mjs report` 用；⛔ 人读输出不要靠它）
     void reportCoverageJson(std::FILE* out) const;
-    void dumpRunSummary(const RunResult& r, std::FILE* out) const;
+    // ★ 运行摘要的**档位**（`REQ-01M7AG06MXS6PK2B53B29QM76Z`）：
+    //   `Normal`（缺省）= 只打"结论 / 异常 / 一行读数摘要"三段；
+    //   `Verbose` = `--profile` / `--report` / `--log-level info` 及以上 ⇒ 旧的逐项读数全打。
+    //   ★ 缺省参数保住直接调 `dumpRunSummary(r, out)` 的既有夹具（`tests/dispatch_tax.cpp` 等）。
+    enum class SummaryMode { Normal = 0, Verbose = 1 };
+    void dumpRunSummary(const RunResult& r, std::FILE* out,
+                        SummaryMode mode = SummaryMode::Normal) const;
+    // ★ 基座缺口的**条数**（默认档只打一行 `gap : N`；明细走 `--report` / Verbose 的
+    //   `reportBaseGaps`）。与 `reportBaseGaps` 同一份判据（`shims_.importedButUnimplemented()`）。
+    std::size_t baseGapCount() const;
     // guest 热点（块级 + 函数聚合）。没有 `.lst` 时函数列是 `?`（⛔ 不猜）。
     void dumpProfile(std::FILE* out, std::size_t top) const;
 

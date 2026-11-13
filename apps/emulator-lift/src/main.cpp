@@ -94,7 +94,8 @@ void usage() {
         "                      （安装树里的是**汉化免壳件**）；两段都拿不到 ⇒ LoadLibrary(\"AGERC.DLL\")\n"
         "                      返回 0 + 126。⛔ 不回退 DATA1.ALF 的条目（引擎本身也不回退；\n"
         "                      那条约仅供取证对照，不是装载来源）\n"
-        "  --real-time         用宿主时钟（此时 A4 的逐字节断言自动跳过并明说）\n"
+        "  --real-time         用宿主时钟（此时 A4 的逐字节断言自动跳过；trace 输入清单标\n"
+        "                      clock=REAL-TIME，⛔ 不再额外打印警告行）\n"
         "  --skip-logo         把引擎自己的 show-logo 标志置 0（根脚本 0x130 因而不 call LOGO；\n"
         "                      仍走完整 boot 到 TITLE，⛔ 不是直接跳到 TITLE 的宿主捷径）\n"
         "  --accept-recovery-dialog  恢复引擎真实的「前回正常終了しませんでした」判定\n"
@@ -620,6 +621,10 @@ int main(int argc, char** argv) {
             if (!lift::logSetCategories(log_cats.c_str())) return 2;
         }
     }
+    // ★ 输出档位（`REQ-01M7AG06MXS6PK2B53B29QM76Z`）：默认只打"结论 / 异常 / 一行读数摘要"；
+    //   `--profile` / `--report` / `--log-level info` 及以上（含 `--verbose` 与 `LIFT_LOG=info`）
+    //   才打全量启动回声与逐项读数。⛔ 这是**输出**档位，不参与任何 guest 语义 / trace hash。
+    const bool verbose_output = profile || report || lift::logConfig().level >= lift::LogLevel::Info;
     // ---- 呈现后端参数校验（缺省 headless；窗口参数给了就必须显式 --present window/auto）----
     if (present_mode != "headless" && present_mode != "window" && present_mode != "auto") {
         std::fprintf(stderr, "--present 只能是 headless / window / auto（收到 %s）\n", present_mode.c_str());
@@ -681,11 +686,15 @@ int main(int argc, char** argv) {
         font.baseline_lift = baseline_lift;
         font.use_engine_name = font_engine_name;
         lift::fontSetConfig(font);
-        std::printf("font      : %s（baseline-lift=%d%s）\n",
-                    lift::fontConfig().regular_path.empty() ? "(未配置 ⇒ 文本 API 会明确失败)"
-                                                           : lift::fontConfig().regular_path.c_str(),
-                    lift::fontConfig().baseline_lift,
-                    lift::fontConfig().use_engine_name ? "；A/B 对照档（只影响上报族名）" : "");
+        // ★ 启动回声默认不逐行刷（`REQ-01M7AG06MXS6PK2B53B29QM76Z`）：字体是**配置回显**，
+        //   不属于"结论 / 异常 / 一行读数"；`--profile` / `--report` / `--log-level info` 才打。
+        if (verbose_output) {
+            std::printf("font      : %s（baseline-lift=%d%s）\n",
+                        lift::fontConfig().regular_path.empty() ? "(未配置 ⇒ 文本 API 会明确失败)"
+                                                               : lift::fontConfig().regular_path.c_str(),
+                        lift::fontConfig().baseline_lift,
+                        lift::fontConfig().use_engine_name ? "；A/B 对照档（只影响上报族名）" : "");
+        }
     }
 
     // =====================================================================================
@@ -792,6 +801,8 @@ int main(int argc, char** argv) {
         }
     }
     const bool have_lst = !lst_path.empty() && fileExists(lst_path);
+    // ★ 执行源与 `.lst` 头部一致时置位：默认档把它折进 `image` 行的 `lst=ok`（⛔ 不再单独占一行）。
+    bool lst_sha_ok = false;
 
     lift::Machine machine;
     std::string err;
@@ -815,7 +826,8 @@ int main(int argc, char** argv) {
     }
     if (!game_dir.empty()) {
         machine.vfs().setGameDir(game_dir);
-        std::printf("game-dir  : %s\n", game_dir.c_str());
+        // ★ 配置回显只在 Verbose 打（默认档的启动回声只留"关键身份"：exe / image / agerc / raster / present）。
+        if (verbose_output) std::printf("game-dir  : %s\n", game_dir.c_str());
     } else {
         std::fprintf(stderr,
                      "emulator-lift: ⚠ 没有 --game-dir（也没有 AMAYUI_GAME_DIR）：文件与路径族会**响亮失败**\n"
@@ -823,7 +835,8 @@ int main(int argc, char** argv) {
     }
     if (!appdata_dir.empty()) {
         machine.vfs().setAppDataDir(appdata_dir);
-        std::printf("appdata   : %s（伪造 AppData；特殊目录映射到这里）\n", appdata_dir.c_str());
+        if (verbose_output)
+            std::printf("appdata   : %s（伪造 AppData；特殊目录映射到这里）\n", appdata_dir.c_str());
     }
     if (!guest_root.empty()) machine.vfs().setGuestRoot(guest_root);
     if (!machine.loadImage(exe_path, &err)) {
@@ -851,7 +864,9 @@ int main(int argc, char** argv) {
                          pe_sha.c_str(), exe_path.c_str(), lst_sha.c_str(), lst_path.c_str());
             return 1;
         }
-        std::printf("sha256 ok  : %s（与 .lst 头部一致）\n", pe_sha.c_str());
+        lst_sha_ok = true;
+        // ★ 默认档不再单独打 `sha256 ok`：同一份 sha 已经在 `image` 行上（并带 `lst=ok`）。
+        if (verbose_output) std::printf("sha256 ok  : %s（与 .lst 头部一致）\n", pe_sha.c_str());
     } else {
         std::fprintf(stderr,
                      "emulator-lift: ⚠ 没有找到 .lst —— 无法校验执行源与语料是否同一份（plan §4 D1）；"
@@ -865,13 +880,19 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "emulator-lift: --native-overrides 配置失败：%s\n", ov_err.c_str());
             return 2;
         }
+        // ★ 默认档**只打汇总行**；per-entry 只在 `--profile` / `--report` / `--log-level info`
+        //   及以上时打（摘要里的 per-entry 另有"异常条目必须留"的判据，见
+        //   `Machine::dumpRunSummary`）。启动时还没有 hits，所以这里没有"异常条目"可留。
+        //   ⛔ `[debug]` override 的 stderr 警告**保留**（它不在这条门控里）。
         std::printf("native-ovr: %zu 项 + %zu 段级（--native-overrides=%s）\n", machine.overrides().size(),
                     machine.blockOverrides().size(), native_overrides.c_str());
         for (std::size_t i = 0; i < machine.overrides().size(); ++i) {
             const lift::NativeOverride* e = machine.overrides().at(i);
             const lift::KnownNative* k = lift::findKnownNative(e->name);
-            std::printf("  %-12s @ %08X %s(%uB)%s\n", e->name.c_str(), e->ea, lift::guestConvName(e->conv),
-                        e->arg_bytes, (k != nullptr && k->debug) ? " [debug]" : "");
+            if (verbose_output)
+                std::printf("  %-12s @ %08X %s(%uB)%s\n", e->name.c_str(), e->ea,
+                            lift::guestConvName(e->conv), e->arg_bytes,
+                            (k != nullptr && k->debug) ? " [debug]" : "");
             if (k != nullptr && k->debug) {
                 std::fprintf(stderr,
                              "emulator-lift: ⚠ debug native override %s：已知未收口，仅用于复现/调试；"
@@ -881,8 +902,9 @@ int main(int argc, char** argv) {
         }
         for (std::size_t i = 0; i < machine.blockOverrides().size(); ++i) {
             const lift::NativeBlockOverride* e = machine.blockOverrides().at(i);
-            std::printf("  %-12s @ %08X..%08X 段级（函数中段；跳到出口）\n", e->name.c_str(), e->entry_ea,
-                        e->resume_ea);
+            if (verbose_output)
+                std::printf("  %-12s @ %08X..%08X 段级（函数中段；跳到出口）\n", e->name.c_str(),
+                            e->entry_ea, e->resume_ea);
         }
         if (until_ea != 0) {
             std::fprintf(stderr,
@@ -911,12 +933,18 @@ int main(int argc, char** argv) {
             }
         }
     }
-    std::printf("image      : %s\n  base=%08X entry=%08X sections=%zu imports=%zu sha256=%s\n", exe_path.c_str(),
-                machine.image().image_base, machine.image().entry_ea, machine.image().sections.size(),
-                machine.image().imports.size(), machine.image().sha256.c_str());
-    for (const lift::PeSectionInfo& s : machine.image().sections) {
-        std::printf("  %-8s va=%08X vsize=%8X raw=%8X flags=%08X\n", s.name, s.va, s.vsize, s.raw_size,
-                    s.characteristics);
+    // ★ 启动回声合并（`REQ-01M7AG06MXS6PK2B53B29QM76Z`）：exe / image base / entry / sha256 一行
+    //   （默认档还要把 agerc 并进**同一行**，见下面 AGERC 装载处）；节表 11 行只在 Verbose 展开
+    //   （默认档只留 `sections=N`）。机器可读字段一个不丢。
+    if (verbose_output) {
+        std::printf("image      : %s base=%08X entry=%08X sections=%zu imports=%zu sha256=%s%s\n",
+                    exe_path.c_str(), machine.image().image_base, machine.image().entry_ea,
+                    machine.image().sections.size(), machine.image().imports.size(),
+                    machine.image().sha256.c_str(), lst_sha_ok ? " lst=ok" : "");
+        for (const lift::PeSectionInfo& s : machine.image().sections) {
+            std::printf("  %-8s va=%08X vsize=%8X raw=%8X flags=%08X\n", s.name, s.va, s.vsize, s.raw_size,
+                        s.characteristics);
+        }
     }
 
     if (!machine.prepare(0, &err)) {
@@ -1029,8 +1057,11 @@ int main(int argc, char** argv) {
     }
     // ★ guest 眼里的主模块路径（用户 2026-11-05 口径）：`<guest 根>\AGE.EXE`，
     //   打开它拿到的是**我们真正在跑的那份字节**（拆壳件），不是 `--game-dir` 下的加壳原件。
-    std::printf("exe(guest): %s（VFS overlay ⇒ %s）\n", machine.vfs().overlayGuestPath().c_str(),
-                machine.vfs().overlayHostPath().c_str());
+    //   默认档的 `image` 行已经带 exe 路径 ⇒ 这条配置回显只在 Verbose 打。
+    if (verbose_output) {
+        std::printf("exe(guest): %s（VFS overlay ⇒ %s）\n", machine.vfs().overlayGuestPath().c_str(),
+                    machine.vfs().overlayHostPath().c_str());
+    }
 
     // ---- AGERC.DLL：作为**真实 guest 模块**装载（用户 2026-11-04 改口径）----
     //   显式 `--agerc <path>`；否则 `--game-dir` 下的 AGERC.DLL（走 VFS 解析，大小写不敏感）。
@@ -1055,16 +1086,32 @@ int main(int argc, char** argv) {
                          "\"没有 AGERC 镜像\"）\n  %s\n"
                          "  ⇒ LoadLibrary(\"AGERC.DLL\") 会返回 0 + 错误 126\n",
                          agerc_err.c_str());
-        } else {
+        } else if (verbose_output) {
+            // ★ Verbose 的独立一行（原来两行）；默认档见下面合并的 `image … | agerc=…` 一行。
             const lift::PeImage& ai = machine.agercImage();
-            std::printf(
-                "agerc     : %s\n  base=%08X size=%08X sections=%zu imports=%zu resources=%s sha256=%s\n",
-                ai.path.c_str(), machine.agercBase(), ai.size_of_image, ai.sections.size(),
-                ai.imports.size(), ai.resource_rva ? "yes" : "no", ai.sha256.c_str());
+            std::printf("agerc     : %s base=%08X size=%08X sections=%zu imports=%zu resources=%s sha256=%s\n",
+                        ai.path.c_str(), machine.agercBase(), ai.size_of_image, ai.sections.size(),
+                        ai.imports.size(), ai.resource_rva ? "yes" : "no", ai.sha256.c_str());
         }
-    } else {
+    } else if (verbose_output) {
         std::printf("agerc     : （没有 AGERC 镜像：--agerc 未给，且 --game-dir 下没有 AGERC.DLL）"
                     "⇒ LoadLibrary(\"AGERC.DLL\") 返回 0 + 错误 126\n");
+    }
+    // ★ 默认档启动回声 = **一行**（`REQ-01M7AG06MXS6PK2B53B29QM76Z`）：exe / image base / entry /
+    //   sha256 与 agerc base / sha256 都在这一行里，机器可读字段一个不丢；⛔ 不是"少打就少信息"。
+    if (!verbose_output) {
+        std::printf("image      : %s base=%08X entry=%08X sections=%zu imports=%zu sha256=%s%s",
+                    exe_path.c_str(), machine.image().image_base, machine.image().entry_ea,
+                    machine.image().sections.size(), machine.image().imports.size(),
+                    machine.image().sha256.c_str(), lst_sha_ok ? " lst=ok" : "");
+        if (machine.agercModuleLoaded()) {
+            const lift::PeImage& ai = machine.agercImage();
+            std::printf(" | agerc=%s base=%08X size=%08X sha256=%s", ai.path.c_str(), machine.agercBase(),
+                        ai.size_of_image, ai.sha256.c_str());
+        } else {
+            std::printf(" | agerc=none（LoadLibrary(\"AGERC.DLL\") 返回 0 + 错误 126）");
+        }
+        std::printf("\n");
     }
 
     if (report) {
@@ -1138,12 +1185,10 @@ int main(int argc, char** argv) {
     opt.trace_inputs = trace_inputs || trace_shims;
     opt.profile = profile;
     opt.profile_top = profile_top;
-    if (opt.real_time) {
-        std::fprintf(stderr,
-                     "emulator-lift: ⚠ %s：宿主时钟进 guest ⇒ **A4 的逐字节可复现断言自动跳过**"
-                     "（trace 输入清单里的 clock=REAL-TIME）\n",
-                     present_window_active ? "窗口模式（自动 real-time）" : "--real-time");
-    }
+    // ★ 这里**不打** "real-time ⇒ A4 的逐字节断言自动跳过" 那一行：A4 是 guest 执行 trace 的
+    //   **哈希可复现**（`tests/boot_trace.cpp`，headless + 虚拟时钟下仍成立），不是渲染像素固定复现；
+    //   正常游玩（window 自动 real-time）时那行没有任何信息量。真要用 real-time trace 的人看
+    //   trace 输入清单里的 `clock=REAL-TIME` 字段即可。⛔ 不要再加回来。
     if (bench && present_window_active) {
         std::fprintf(stderr,
                      "emulator-lift: ⚠ --bench + 窗口呈现：MIPS 含 SDL 上传/呈现开销，不是解释器绝对吞吐\n");
@@ -1178,7 +1223,8 @@ int main(int argc, char** argv) {
     const std::uint64_t t1 = SDL_GetTicksNS();
     if (present_window_active) machine.cpu().windows->clearHostEventPump();
 
-    machine.dumpRunSummary(r, stdout);
+    machine.dumpRunSummary(r, stdout, verbose_output ? lift::Machine::SummaryMode::Verbose
+                                                     : lift::Machine::SummaryMode::Normal);
     // ★ `dumpFailures=`：`--dump-frame` **每帧写文件失败的次数**（宿主诊断账）。
     //   只在这轮**要求了**帧导出时打；`0` = 一次都没失败。
     //   ⛔ 没有这行 = 本轮没要求帧导出，**不是** "0 次失败"（与 `present-tail` 同一口径）。
@@ -1193,7 +1239,14 @@ int main(int argc, char** argv) {
         std::printf("bench     : %llu insns in %.3f s = %.2f MIPS\n", (unsigned long long)r.insns, secs,
                     secs > 0 ? static_cast<double>(r.insns) / secs / 1e6 : 0.0);
     }
-    machine.reportBaseGaps(stdout);
+    // ★ 基座缺口（A5）：明细是**静态集合**（只随代码变），默认档只打一行条数；
+    //   明细（含 `  缺口 module!api —— 理由` 的理由文本）留在 `--report` / Verbose
+    //   （`--report` 的路径在上面已经 return）。⛔ 理由文本不删，只是不再每次 run 都刷 14 行。
+    if (verbose_output) {
+        machine.reportBaseGaps(stdout);
+    } else {
+        std::printf("gap       : %zu 条（--report 看明细）\n", machine.baseGapCount());
+    }
     // ★ 单令牌不变式的机械判据（guest_token.h）：summary 的 `token :` 行已经先打印，
     //   这里只把"违规 > 0"变成退出码（测试子进程用它判红）。⛔ 不是"跑完没崩就算对"：
     //   并发改宿主容器**可能**这次没炸，但违规计数一定会留下证据。

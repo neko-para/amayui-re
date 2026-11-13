@@ -2403,16 +2403,33 @@ bool pipelineInfoOfDevice(X86& cpu, std::uint32_t device_state, PipelineInfo* ou
     return pipelineInfoOfState(cpu, pe, out, why);
 }
 
-std::string unsupportedBitsOfRun() {
+// ★ "已知并接受的近似"位：照旧记录，但**默认不进异常段**（`unsupportedBitsOfRun(true)` 跳过它们）。
+//   只有 bit11 `MIPFILTER`：引擎设 `D3DSAMP_MIPFILTER=LINEAR`（见上面的 `kSampMipFilter` case），
+//   GPU sampler 把三线性按**最近级**近似 ⇒ 每个正常 2D 场景都会置位 ⇒ 它出现在 `=== 异常 ===`
+//   里等于恒真噪声。⛔ 不是"不记"：位照旧进位图 / `PipelineInfo`。
+bool unsupportedBitIsBenign(std::uint32_t bit) {
+    return bit == kUnMipFilter;  // 11
+}
+
+std::string unsupportedBitsText(const std::uint32_t* bits, bool non_benign_only) {
+    std::uint32_t mask[8];
+    for (std::size_t w = 0; w < 8u; ++w) mask[w] = bits[w];
+    if (non_benign_only) {
+        for (std::uint32_t bit = 0; bit < 256u; ++bit) {
+            if (!unsupportedBitIsBenign(bit)) continue;
+            mask[bit / 32u] &= ~(1u << (bit % 32u));
+        }
+        bool any = false;
+        for (std::size_t w = 0; w < 8u; ++w) any = any || mask[w] != 0;
+        if (!any) return std::string();  // 只有 benign 位 ⇒ 异常段不打
+    }
     char hex[96];
-    std::snprintf(hex, sizeof(hex), "0x%08X%08X%08X%08X%08X%08X%08X%08X", g_unsupported_mirror[7],
-                  g_unsupported_mirror[6], g_unsupported_mirror[5], g_unsupported_mirror[4],
-                  g_unsupported_mirror[3], g_unsupported_mirror[2], g_unsupported_mirror[1],
-                  g_unsupported_mirror[0]);
+    std::snprintf(hex, sizeof(hex), "0x%08X%08X%08X%08X%08X%08X%08X%08X", mask[7], mask[6], mask[5],
+                  mask[4], mask[3], mask[2], mask[1], mask[0]);
     std::string out(hex);
     std::string names;
     for (std::uint32_t bit = 0; bit < 256u; ++bit) {
-        if ((g_unsupported_mirror[bit / 32u] & (1u << (bit % 32u))) == 0) continue;
+        if ((mask[bit / 32u] & (1u << (bit % 32u))) == 0) continue;
         char one[96];
         std::snprintf(one, sizeof(one), "%sbit%u=%s", names.empty() ? "（" : " ", bit,
                       unsupportedBitName(bit));
@@ -2420,6 +2437,14 @@ std::string unsupportedBitsOfRun() {
     }
     if (!names.empty()) out += names + "）";
     return out;
+}
+
+bool unsupportedBitOfRun(std::uint32_t bit) {
+    return bit < 256u && (g_unsupported_mirror[bit / 32u] & (1u << (bit % 32u))) != 0;
+}
+
+std::string unsupportedBitsOfRun(bool non_benign_only) {
+    return unsupportedBitsText(g_unsupported_mirror, non_benign_only);
 }
 
 // =====================================================================================

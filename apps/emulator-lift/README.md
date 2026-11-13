@@ -1101,6 +1101,18 @@ emulator-lift --game-dir <install> --skip-logo --native-overrides all --present 
 
 每次运行结束打一份摘要（`Machine::dumpRunSummary`）。诊断按这个顺序看：
 
+★ **两档口径**（`REQ-01M7AG06MXS6PK2B53B29QM76Z`）：**默认档**（`--log-level` 缺省 `warn`、且无
+`--profile` / `--report`）只打三段 —— `=== run 结论 ===`（`stop` / `detail` / `insns` / `present-tail`）、
+`=== 异常 ===`（干净时**整段不出现**：非零 fallback / skipped / underrun / violation /
+未支持具名位（**只算 non-benign**；bit11 `MIPFILTER` 是**已知近似** —— 引擎设三线性、GPU sampler 按
+最近级画 ⇒ 默认**不算**异常，位照旧记，`read :` 里带 `mipfilter≈nearest`）/ 非预期停的最近 3 条 +
+native-override 的**真异常**条目（`fallbacks!=0` / `declines!=0`；`hits==0` 是"这一趟没走到"的正常情况））、
+`=== 读数摘要 ===`（`read :` 一行 +
+`token` / `arena` / `recovery` 等机器可读行）；基座缺口只留 `gap       : N 条（--report 看明细）`。
+`--profile` / `--report` / `--log-level info`（含 `--verbose`、`LIFT_LOG=info`）才是下面列的**逐项读数**
+与启动回声（`instr` / `trace-in` / `blocks` / `audio       :` 全表 / 节表 / native-override per-entry …）。
+守卫：CTest `stdout-quiet`（默认档行数 + 无缺口明细 / 无 per-entry，`--report` / `--profile` 两臂成对）。
+
 - `instr     : profile=<on/off> frame-trace=<on/off> window-prof=<on/off> expect=<n|off>`：**仪器口径标签**
   （`measurement.md` M-02）。读的是**本轮真实生效**的位（`window-prof` = `WindowProfiler::armed()`），
   ⛔ 不是 CLI 回显；`expect=` 是时间线效果级判据这一轮真的开了几个观测窗（`off` = 没启用）。

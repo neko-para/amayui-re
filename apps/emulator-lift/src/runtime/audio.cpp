@@ -2235,6 +2235,27 @@ bool AudioEngine::runFeederGuest(std::string* err) {
     }
 }
 
+AudioEngine::Snapshot AudioEngine::snapshot() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    Snapshot s;
+    // `device` 口径与 `dumpSummary` 逐字同源：ok = SDL 真设备；fallback = sdl 打不开退回 virtual；
+    // none = virtual / off（本来就没有宿主设备）。
+    s.mode = audioModeName(mode_);
+    s.device = sdl_device_opened_ ? "ok" : (sdl_fallback_ ? "fallback" : "none");
+    s.muted = mute_;
+    s.fill_max_ms = static_cast<double>(stats_.fill_max_us) / 1000.0;
+    s.fills = stats_.fills;
+    s.muted_bytes = stats_.muted_bytes;
+    s.underruns = stats_.underruns;
+    s.fill_slow = stats_.fill_slow;
+    s.fill_wait_timeouts = stats_.fill_wait_timeouts;
+    s.slot_reverify_fail = stats_.slot_reverify_fail;
+    s.underrun_silence_events = stats_.underrun_silence_events;
+    s.fill_overlapped = stats_.fill_overlapped;
+    s.fill_witnessed = stats_.fill_witnessed;
+    return s;
+}
+
 void AudioEngine::dumpSummary(std::FILE* out) const {
     if (!out) return;
     std::lock_guard<std::recursive_mutex> lock(mutex_);

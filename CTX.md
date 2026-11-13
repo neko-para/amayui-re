@@ -72,8 +72,10 @@
 ### P5 · 稳定性/理论债
 17. `REQ-01M72GAA7CV`（SEH 静默丢异常，S3，机制仍在）、`REQ-01M773EF…`（softfloat `THREAD_LOCAL`）、
     `REQ-01M78A0V0…` / `REQ-01M79NYY…`（两条偶发红）、`REQ-01M72GW902…`（退出期 SIGSEGV，**等 Windows 机器**）。
-18. **日志降噪**（`REQ-01M7AG06MXS6PK2B53B29QM76Z`，分析见 `.tmp/log-noise/analysis.md`）：默认 121 行 → **≤25 行**（结论 + 异常 + 一行摘要）；
-    缺口清单/native-ovr per-entry/启动回声进 `--verbose` / `--report` / `--profile`。关键：`stop`/`detail`/`insns`/`present-tail`/`token`/`native-ovr` 的列名与出现次数被 CTest 按字面消费，⛔ 不能动。
+18. ~~日志降噪~~（`REQ-01M7AG06MXS6PK2B53B29QM76Z`，✅ 2026-11-13）：默认 **121 → 25/26 行**，三段（结论 / 异常 / 一行摘要）；
+    缺口明细进 `--report`、native-ovr per-entry 进 `--profile`（异常项默认点名一行）；守卫 `stdout-quiet`。
+    follow-up（2026-11-13 已做）：`hits==0` 不再算异常、A4 警告整行删除（`boot-trace` 保留）、`bit11=MIPFILTER` 列已知良性（不进异常段，`read :` 带 `mipfilter≈nearest`）、AGERC 重定位信息降到 Info。
+    **未做**（有意留）：异常段 stderr 分流、打印点接 `LogCat::LogReport`、其它良性位登记、`--report` 纯清单模式。
 
 ### P6 · 延后（Windows 机器）
 19. `REQ-01M786CQ…`（慢机超时）、`REQ-01M7704NBZ…`（5 条 Windows 专有守卫搬 POSIX）。
@@ -82,7 +84,7 @@
 
 ```bash
 cd apps/emulator-lift && cmake --build --preset macos-arm64
-ctest --test-dir out --output-on-failure          # 95 注册 / 91 通过 / 4 SKIP（约 375 s）
+ctest --test-dir out --output-on-failure          # 96 注册 / 92 通过 / 4 SKIP（约 380 s）
 cd <repo>
 pnpm test                                         # 合同档 546/546
 pnpm verify                                       # 工具链档 494/494
@@ -90,7 +92,7 @@ pnpm typecheck                                    # 六个工程 exit 0
 pnpm tools requirements validate                  # 6/6
 pnpm tools corpus validate                        # 8 通过 / 0 失败 / 1 警告（允许的缺席）
 pnpm tools lift check                             # 绿
-node tools/mutate-check.mjs --list                # 103 条静态全过
+node tools/mutate-check.mjs --list                # 108 条静态全过
 git diff --check
 ```
 4 个 SKIP：`cli-time-limit` / `cli-dump-frame` / `frame-dump-failure`（Windows 专有）、`gpu-raster`（dummy 视频建不出 GPU device）。

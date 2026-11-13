@@ -393,11 +393,14 @@ Fit fitLine(const std::vector<std::pair<double, double>>& pts) {
     return f;
 }
 
-/** 运行摘要 → 字符串（`Machine::dumpRunSummary` 写 `std::FILE*`）。 */
+/** 运行摘要 → 字符串（`Machine::dumpRunSummary` 写 `std::FILE*`）。
+ *  ★ 取数方式（`REQ-01M7AG06MXS6PK2B53B29QM76Z`）：用 `Verbose` 档捕捉 —— `token-diag` / `tokenwait`
+ *    这类**逐项读数**默认档已折进 `read :` 一行（默认只留结论/异常/摘要）。**断言一条没删**：
+ *    下面仍然按字面找那三行，只是从"默认档的摘要"换成"Verbose 档的摘要"。 */
 std::string captureRunSummary(lift::Machine& m, const lift::RunResult& r) {
     std::FILE* tmp = std::tmpfile();
     if (tmp == nullptr) return {};
-    m.dumpRunSummary(r, tmp);
+    m.dumpRunSummary(r, tmp, lift::Machine::SummaryMode::Verbose);
     std::fflush(tmp);
     std::fseek(tmp, 0, SEEK_SET);
     std::string out;

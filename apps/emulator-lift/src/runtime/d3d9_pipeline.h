@@ -331,7 +331,17 @@ std::uint32_t pipelineOfDevice(X86& cpu, std::uint32_t device_state);
 bool pipelineInfoOfState(X86& cpu, std::uint32_t state, PipelineInfo* out, std::string* why);
 bool pipelineInfoOfDevice(X86& cpu, std::uint32_t device_state, PipelineInfo* out, std::string* why);
 // 运行摘要的一行 `unsupported : …`（进程级镜像；判据以 `PipelineInfo::unsupported` 为准）。
-std::string unsupportedBitsOfRun();
+//   ★ `non_benign_only=true` ⇒ 跳过"已知并接受"的近似位（见下）；**全被跳过 ⇒ 返回空串**
+//     （异常段据此不打这一行）。`false` ⇒ 全量位图（`--verbose` / `--profile` 用）。
+std::string unsupportedBitsOfRun(bool non_benign_only = false);
+// 纯函数形态（不读进程镜像）：同上的过滤 + 具名表，供守卫直接构造位图断言。
+std::string unsupportedBitsText(const std::uint32_t* bits, bool non_benign_only);
+// 该位是否属于"已知并接受的近似"：位照旧记录，只是**默认不当异常**。
+//   目前只有 bit11 `MIPFILTER`（引擎设 `D3DSAMP_MIPFILTER=LINEAR`，GPU sampler 三线性按最近级近似
+//   ⇒ 每个正常 2D 场景都置位；它进异常段等于恒真噪声）。
+bool unsupportedBitIsBenign(std::uint32_t bit);
+// 进程镜像里的某一位是否置位（`read :` 行的 `mipfilter≈nearest` 标记用）。
+bool unsupportedBitOfRun(std::uint32_t bit);
 
 // =====================================================================================
 // IDirect3DStateBlock9 的状态快照（`REQ-01M7372BPVGBD247KAGHB53YK7`）

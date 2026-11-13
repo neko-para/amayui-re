@@ -19,6 +19,7 @@
 #include "runtime/d3d9_pipeline.h"
 #include "runtime/exec.h"
 #include "runtime/guest_token.h"
+#include "runtime/log.h"
 #include "runtime/message_box.h"
 #include "runtime/present.h"
 #include "runtime/sha256.h"
@@ -438,9 +439,11 @@ bool Machine::loadAgercModule(const std::string& path, std::string* err) {
 
     std::uint32_t base = img.image_base;
     if (!fits(base)) {
-        std::fprintf(stderr,
-                     "[lift] AGERC 的 ImageBase 0x%08X（+0x%X）与现有 guest 布局冲突 ⇒ 改用 0x%08X\n",
-                     img.image_base, img.size_of_image, kFallbackBase);
+        // ★ 这是**预期内的重定位**（我们不打算改 guest 内存布局去消掉冲突）⇒ 属配置回声，不是告警：
+        //   默认 `--log-level warn` 静默；`--log-level info` / `-v` 时仍可查（⛔ 不删这个事实）。
+        logAt(LogLevel::Info, LogGeneral, "[lift] ",
+              "AGERC 的 ImageBase 0x%08X（+0x%X）与现有 guest 布局冲突 ⇒ 改用 0x%08X", img.image_base,
+              img.size_of_image, kFallbackBase);
         base = kFallbackBase;
         if (!fits(base)) {
             setErr("选基址", "PE 的 ImageBase 0x... 冲突，备选 0x30000000 也冲突（没有可用的 guest 基址）");
@@ -1332,9 +1335,8 @@ RunResult Machine::run(const RunOptions& opts) {
             recovery_bypass_prior_eax_ = cpu_.eax();
             cpu_.eax() = 0;
             recovery_bypass_applied_ = true;
-            std::printf("[recovery] @ %08X EAX %u -> 0（跳过「前回正常終了しませんでした」判定；"
-                        "--accept-recovery-dialog 恢复真实判定）\n",
-                        kRecoveryCheckEa, recovery_bypass_prior_eax_);
+            // ★ 这里**不再**打 `[recovery] …`：同一事实在运行摘要的 `recovery  : bypassed @ …` 里
+            //   已经有一行（默认档只留摘要一处；`--profile` / `--log-level info` 也一样，⛔ 不重复）。
         }
         // ★ `--skip-logo`：T_Command 已构造、show-logo 已初始化为 1，且指针尚未发布。
         //   在这里把引擎自己的字段写 0 —— 之后 `mov ds:dword_55E1BC, eax` 发布的就是
@@ -1348,8 +1350,8 @@ RunResult Machine::run(const RunOptions& opts) {
                 mem_.wr32(object + kShowLogoFieldOffset, 0);
                 skip_logo_applied_ = true;
                 skip_logo_object_ = object;
-                std::printf("[skip-logo] T_Command=0x%08X show-logo(+0x%05X): %u -> 0\n", object,
-                            kShowLogoFieldOffset, before);
+                // ★ 成功应用的那行钩子日志**已删**：摘要的 `skip-logo : applied @ …` 是同一事实
+                //   （默认档只留一处）。⚠ 初值异常 / 不可写这两条 stderr 警告**保留**（它们是异常）。
                 if (before != 1) {
                     std::fprintf(stderr,
                                  "[skip-logo] ⚠ 初值不是 1（读到 %u）：写 0 仍执行，但钩子/字段可能已漂\n",
@@ -2335,6 +2337,12 @@ void Machine::reportBaseGaps(std::FILE* out) const {
     }
 }
 
+std::size_t Machine::baseGapCount() const {
+    // ★ 与 `reportBaseGaps` 同一条判据（`imported && !fn`）：默认档只把条数打进 `gap :` 一行，
+    //   明细（含理由文本）留在 `--report` / Verbose —— 静态集合不再每次 run 都刷 14 行。
+    return shims_.importedButUnimplemented().size();
+}
+
 void Machine::reportCoverageJson(std::FILE* out) const {
     // 三类分开数（plan 的 A5 要能回答"缺口是什么"）：
     //   implemented  : 有实现（fn != nullptr）
@@ -2355,32 +2363,17 @@ void Machine::reportCoverageJson(std::FILE* out) const {
     std::fprintf(out, "\n  ]\n}\n");
 }
 
-void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
+void Machine::dumpRunSummary(const RunResult& r, std::FILE* out, SummaryMode mode) const {
+    const bool verbose = mode == SummaryMode::Verbose;
     const TraceInputs ti = traceInputs();
-    // ★ 仪器口径标签（M-02）：一行、字段顺序固定、机器可读。读的是**本轮真实生效**的位
-    //   （`window-prof` = `WindowProfiler::armed()`），⛔ 不是 CLI 参数回显 —— 所以
-    //   "脚本里写了 profile_begin 但没 arm" 这类缺陷会在这里被如实打出来。
-    {
-        char expect_field[32];
-        if (instrument_.expect_change) {
-            std::snprintf(expect_field, sizeof(expect_field), "%llu",
-                          (unsigned long long)instrument_.expect_windows);
-        } else {
-            std::snprintf(expect_field, sizeof(expect_field), "off");
-        }
-        std::fprintf(out, "instr     : profile=%s frame-trace=%s window-prof=%s expect=%s\n",
-                     instrument_.profile ? "on" : "off", instrument_.frame_trace ? "on" : "off",
-                     instrument_.window_prof ? "on" : "off", expect_field);
-    }
-    std::fprintf(out, "trace-in  : exe=%s | clock=%s | hash=%016llX\n", ti.exe_path.c_str(),
-                 ti.real_time ? "REAL-TIME" : "virtual", (unsigned long long)traceInputsHash());
-    if (r.reason != StopReason::UntilEa && r.reason != StopReason::MaxInsns && cpu_.last_count > 0) {
-        std::fprintf(out, "--- 最近执行的指令（最新在前）---\n");
-        for (int i = 0; i < cpu_.last_count && i < 12; ++i) {
-            const int idx = (cpu_.last_head - 1 - i + 2 * X86::kLastInsns) % X86::kLastInsns;
-            std::fprintf(out, "  %08X %s\n", cpu_.last_eip[idx], cpu_.last_mnemonic[idx] ? cpu_.last_mnemonic[idx] : "?");
-        }
-    }
+    // ★ 两档形状（`REQ-01M7AG06MXS6PK2B53B29QM76Z` 的裁决）：
+    //   `Normal`（默认）= `=== run 结论 ===` → `=== 异常 ===`（干净时不出现）→ `=== 读数摘要 ===`；
+    //   `Verbose`（`--profile` / `--report` / `--log-level info` 及以上）= 再加旧的逐项读数。
+    // ⛔ 按字面被 CTest 消费的列名 / 出现次数不要动：`stop      :` / `detail    :` / `insns     :` /
+    //   `present-tail: `（恰好 1 行）/ `token     :` / `arena     :` / `recovery  :` / `pipe-warn :`。
+
+    // ---- ① 结论：**永远第一段**（读日志的第一件事是"为什么停"）----
+    std::fprintf(out, "=== run 结论 ===\n");
     std::fprintf(out, "stop      : %s @ eip=%08X\n", stopReasonName(r.reason), r.ea);
     if (!r.detail.empty()) std::fprintf(out, "detail    : %s\n", r.detail.c_str());
     std::fprintf(out, "insns     : %llu\n", (unsigned long long)r.insns);
@@ -2394,6 +2387,305 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                      (unsigned long long)r.present_tail.insns_at_last_present,
                      (unsigned long long)r.present_tail.tail_insns, r.present_tail.tail_wall_ms);
     }
+
+    // ---- native-override 账：**汇总行永远打**；per-entry 只在 Verbose 或该条异常时打 ----
+    //   ★ 启动清单（`main.cpp`）与这里都按同一口径折叠：默认档不再把身份三元组逐字打两遍。
+    //   ★ 异常判据 = "回退过（fallbacks!=0）/ 有条件分支被拒（declines）"；这两类必须留 ——
+    //     它们是"override 没接上"的唯一线索。
+    //   ★ `hits==0` **不是**异常：native override 无命中是完全正常的情况（这一趟没走到它）。
+    std::uint64_t ovr_hits = 0;
+    std::uint64_t ovr_fallbacks = 0;
+    for (std::size_t i = 0; i < overrides_.size(); ++i) {
+        const NativeOverride* e = overrides_.at(i);
+        ovr_hits += e->hits;
+        ovr_fallbacks += e->fallbacks;
+    }
+    for (std::size_t i = 0; i < block_overrides_.size(); ++i) {
+        const NativeBlockOverride* e = block_overrides_.at(i);
+        ovr_hits += e->hits;
+        ovr_fallbacks += e->fallbacks;
+    }
+    const bool has_overrides = !overrides_.empty() || !block_overrides_.empty();
+    if (has_overrides) {
+        std::fprintf(out, "native-ovr: entries=%zu blocks=%zu hits=%llu fallbacks=%llu\n", overrides_.size(),
+                     block_overrides_.size(), (unsigned long long)ovr_hits, (unsigned long long)ovr_fallbacks);
+    }
+
+    // ---- ② 异常段（干净时整段不出现；⛔ 只读已有计数器，不新增状态）----
+    bool anomaly_open = false;
+    auto openAnomaly = [out, &anomaly_open]() {
+        if (!anomaly_open) {
+            std::fprintf(out, "=== 异常 ===\n");
+            anomaly_open = true;
+        }
+    };
+    // 单令牌不变式（`guest_token.h`）：`violations` 非 0 ⇒ 有线程没拿令牌就执行 guest 代码 / 改共享容器。
+    {
+        const GuestToken& token = guestToken();
+        if (token.violations() != 0) {
+            openAnomaly();
+            std::fprintf(out, "⚠ token     : violations=%llu max-concurrent=%u first=%s\n",
+                         static_cast<unsigned long long>(token.violations()), token.maxConcurrent(),
+                         token.firstViolationSite() ? token.firstViolationSite() : "?");
+        }
+        const unsigned long long off = windows_.offThread();
+        if (off != 0) {
+            openAnomaly();
+            std::fprintf(out, "⚠ window    : off-thread=%llu first=%s\n", off,
+                         windows_.firstOffThreadSite() ? windows_.firstOffThreadSite() : "?");
+        }
+    }
+    // 被 guest 调到、但没有实现的导入（正常档恒 0）。
+    {
+        const std::size_t called = shims_.calledUnimplemented().size();
+        if (called != 0) {
+            openAnomaly();
+            std::fprintf(out, "⚠ shims     : called-unimplemented=%zu（见 --profile / --verbose 的逐项）\n", called);
+        }
+    }
+    // 音频：正常档恒 0 的项只在非零时点名；`fill_max_ms` 到 500 ms（门槛 1000 ms 的一半）也点名 ——
+    // 它是"离 `fill_slow` 只差一步"的唯一读数（`audio.cpp` 的 `fill_us > 1000000` 才 ++fill_slow）。
+    const AudioEngine::Snapshot audio = audio_.snapshot();
+    {
+        const bool nonzero = audio.underruns != 0 || audio.fill_slow != 0 || audio.fill_wait_timeouts != 0 ||
+                             audio.slot_reverify_fail != 0 || audio.underrun_silence_events != 0;
+        if (nonzero) {
+            openAnomaly();
+            std::fprintf(out,
+                         "⚠ audio     : underruns=%llu fill_slow=%llu fill_wait_timeouts=%llu "
+                         "slot_reverify_fail=%llu underrun_silence_events=%llu\n",
+                         (unsigned long long)audio.underruns, (unsigned long long)audio.fill_slow,
+                         (unsigned long long)audio.fill_wait_timeouts,
+                         (unsigned long long)audio.slot_reverify_fail,
+                         (unsigned long long)audio.underrun_silence_events);
+        }
+        if (audio.fill_max_ms >= 500.0) {
+            openAnomaly();
+            std::fprintf(out, "⚠ audio.fill_max_ms=%.2f（门槛 1000 ms 的 %.0f%%；fill_slow=%llu 不会告警）\n",
+                         audio.fill_max_ms, audio.fill_max_ms / 10.0, (unsigned long long)audio.fill_slow);
+        }
+    }
+    // GPU：回退 / 跳过 / 后端失败非零 ⇒ 必须可见（⛔ 不静默）。
+    {
+        const d3d9::GpuCoverage& cov = d3d9::gpuCoverage();
+        if (cov.fallback_draws != 0 || cov.skipped_draws != 0 || cov.gpu_failures != 0 ||
+            !cov.fallback_reasons.empty()) {
+            openAnomaly();
+            std::fprintf(out, "⚠ gpu       : fallback=%llu skipped=%llu gpu_failures=%llu\n",
+                         (unsigned long long)cov.fallback_draws, (unsigned long long)cov.skipped_draws,
+                         (unsigned long long)cov.gpu_failures);
+            if (!cov.fallback_reasons.empty()) {
+                std::vector<std::pair<const std::string*, std::uint64_t>> rows;
+                rows.reserve(cov.fallback_reasons.size());
+                for (const auto& kv : cov.fallback_reasons) rows.emplace_back(&kv.first, kv.second);
+                std::stable_sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
+                    return a.second != b.second ? a.second > b.second : *a.first < *b.first;
+                });
+                std::fprintf(out, "            fallback top:");
+                const std::size_t top = rows.size() < 5 ? rows.size() : 5;
+                for (std::size_t i = 0; i < top; ++i) {
+                    std::fprintf(out, " [%llu×] %s ;", (unsigned long long)rows[i].second,
+                                 rows[i].first->c_str());
+                }
+                std::fprintf(out, "\n");
+            }
+            // ★ `skipped` 的按原因聚合（`REQ-01M7AAXVGY9SG75XCREHPX641Z`）：与 `fallback top`
+            //   **分开打印**（口径不同：这里是"GPU 没画"，那里是"CPU 画了"）。
+            {
+                const std::string skipped_top = d3d9::gpuSkippedTopLine();
+                if (!skipped_top.empty()) std::fputs(skipped_top.c_str(), out);
+            }
+        }
+        // ★ 未支持位（诊断）：`PipelineInfo::unsupported` 是同一份位图的逐设备视图。
+        //   默认档**只看 non-benign 位**（`unsupportedBitsOfRun(true)`）：bit11 `MIPFILTER` 是
+        //   "已知并接受的近似"（三线性→最近级，正常 2D 场景恒置位）⇒ ⛔ 不进 `=== 异常 ===`。
+        //   空 ⇒ 不打这一行（全量位图见 `--verbose` / `--profile` 的摘要段）。
+        const std::string bits = d3d9::unsupportedBitsOfRun(/*non_benign_only=*/true);
+        if (!verbose && !bits.empty()) {
+            openAnomaly();
+            std::fprintf(out, "unsupported : %s\n", bits.c_str());
+        }
+    }
+    // ★ 默认级别告警（`pipeWarn`）的**拒绝计数**：按 (调用点, 类别) 分桶后按类合计
+    //   （`REQ-01M70SHFT6RZA7RRY1R051Z2PB` #2）。与限流桶**同一份**（进程级）⇒ 第 5 次之后
+    //   只留 debug 的事件也在这里数得到；`other` = 顶点声明 / 设备销毁时的绑定释放等。
+    //   ★ 非零才打（它按字面被 `tests/d3d9_pipeline.cpp` 消费 ⇒ 默认档也必须出现）。
+    {
+        const d3d9::PipeWarnCounts& wc = d3d9::pipeWarnCounts();
+        if (wc.total() != 0) {
+            openAnomaly();
+            std::fprintf(out, "pipe-warn : vertex-stream=%llu index=%llu texture=%llu other=%llu\n",
+                         (unsigned long long)wc.of(d3d9::PipeWarnCategory::VertexStream),
+                         (unsigned long long)wc.of(d3d9::PipeWarnCategory::Index),
+                         (unsigned long long)wc.of(d3d9::PipeWarnCategory::Texture),
+                         (unsigned long long)wc.of(d3d9::PipeWarnCategory::Other));
+        }
+    }
+    // present sink 失败（写帧 / 呈现后端）。
+    if (presenter_.sinkFailures() != 0) {
+        openAnomaly();
+        std::fprintf(out, "⚠ present   : sink 失败 %llu 次（最后：%s）\n",
+                     (unsigned long long)presenter_.sinkFailures(),
+                     presenter_.lastSinkError().empty() ? "-" : presenter_.lastSinkError().c_str());
+    }
+    // 非预期停 ⇒ 最近 3 条（Verbose 保留旧的 12 条；`until-ea` / `max-insns` 是用户点名的停点，
+    // 只有 Normal 档按"非 Stopped 停因"的裁决也打 `max-insns`）。
+    {
+        const bool unexpected = r.reason != StopReason::Stopped && r.reason != StopReason::UntilEa;
+        const bool old_gate = r.reason != StopReason::UntilEa && r.reason != StopReason::MaxInsns;
+        const int limit = verbose ? 12 : 3;
+        if (cpu_.last_count > 0 && (verbose ? old_gate : unexpected)) {
+            openAnomaly();
+            std::fprintf(out, "--- 最近执行的指令（最新在前）---\n");
+            for (int i = 0; i < cpu_.last_count && i < limit; ++i) {
+                const int idx = (cpu_.last_head - 1 - i + 2 * X86::kLastInsns) % X86::kLastInsns;
+                std::fprintf(out, "  %08X %s\n", cpu_.last_eip[idx],
+                             cpu_.last_mnemonic[idx] ? cpu_.last_mnemonic[idx] : "?");
+            }
+        }
+    }
+    // native-override 的**异常条目**（fallbacks!=0 / declines）：默认档也必须留。
+    //   ★ 这一行是 `stdout-quiet` 的变异点：`show_all_overrides` 改成 `true` ⇒ 默认档又逐条打全表。
+    if (has_overrides) {
+        // ★ 这条是 `stdout-quiet` 的**变异点**：改成 `true` ⇒ 默认档又逐条打全表。
+        const bool show_all_overrides = verbose;
+        // ★ 默认档的异常条目**一行点名**（不是删掉）：`fallbacks!=0` / 条件分支被拒（declines）——
+        //   这两类必须留，但不必各占一行。⛔ `hits==0` 不是异常（无命中是正常情况）。
+        std::vector<std::string> anomaly_rows;
+        auto noteAnomalyRow = [&anomaly_rows](const NativeOverride* e, std::uint64_t declines) {
+            std::string row = e->name + " hits=" + std::to_string(e->hits);
+            if (e->fallbacks != 0) row += " fallbacks=" + std::to_string(e->fallbacks);
+            if (declines != 0) {
+                row += " declines=" + std::to_string(declines);
+                if (e->fast_hits != 0) row += " fast_hits=" + std::to_string(e->fast_hits);
+            }
+            anomaly_rows.push_back(std::move(row));
+        };
+        for (std::size_t i = 0; i < overrides_.size(); ++i) {
+            const NativeOverride* e = overrides_.at(i);
+            // ★ 异常判据：回退过 / **条件分支被拒**（declines）。
+            //   ⛔ `hits == 0` 不是异常 —— native override 无命中是完全正常的情况（这一趟没走到它）；
+            //      把它算进来会把每条本轮没走到的 override 都误报成"异常"。
+            //   ⛔ `fast_hits != 0` 也不是异常 —— 那是条件式 override 走通的正常计数
+            //   （把它算进来会让 `sub_4BBAB0` 这类每帧都在跑的项永远出现在异常清单里）。
+            std::uint64_t declines = 0;
+            for (std::size_t k = 0; k < NativeOverride::kDeclineSlots; ++k) declines += e->declines[k];
+            const bool anomaly = e->fallbacks != 0 || declines != 0;
+            if (!show_all_overrides) {
+                if (anomaly) noteAnomalyRow(e, declines);
+                continue;
+            }
+            const bool any = e->fast_hits != 0 || declines != 0;
+            std::fprintf(out, "  %-12s @ %08X %s(%uB) hits=%llu fallbacks=%llu\n", e->name.c_str(), e->ea,
+                         guestConvName(e->conv), e->arg_bytes, (unsigned long long)e->hits,
+                         (unsigned long long)e->fallbacks);
+            // ★ 条件式 override 的台账（`fast_hits` / `declines[]`，见 native_overrides.h）：
+            //   桶下标 → 原因名由该 override 自己的域解释（例如 `sub_4BBAB0` 的 `VoicePollWhy`）。
+            //   只在有数时多打一行：无条件项的这两项恒 0，不给日志加噪声。
+            if (any) {
+                std::fprintf(out, "    fast_hits=%llu declines=[", (unsigned long long)e->fast_hits);
+                bool first = true;
+                for (std::size_t k = 0; k < NativeOverride::kDeclineSlots; ++k) {
+                    if (e->declines[k] == 0) continue;
+                    std::fprintf(out, "%s#%zu=%llu", first ? "" : " ", k, (unsigned long long)e->declines[k]);
+                    first = false;
+                }
+                std::fprintf(out, "]\n");
+            }
+        }
+        for (std::size_t i = 0; i < block_overrides_.size(); ++i) {
+            const NativeBlockOverride* e = block_overrides_.at(i);
+            // ⛔ `hits == 0` 不是异常（同函数级口径：无命中是正常情况）。
+            const bool anomaly = e->fallbacks != 0 || e->declines != 0;
+            if (!show_all_overrides) {
+                if (!anomaly) continue;
+                std::string row = e->name + "(段级) hits=" + std::to_string(e->hits);
+                if (e->fallbacks != 0) row += " fallbacks=" + std::to_string(e->fallbacks);
+                if (e->declines != 0) row += " declines=" + std::to_string(e->declines);
+                if (e->disabled) row += "（已停用）";
+                anomaly_rows.push_back(std::move(row));
+                continue;
+            }
+            std::fprintf(out, "  %-12s @ %08X..%08X 段级 hits=%llu declines=%llu fallbacks=%llu%s\n",
+                         e->name.c_str(), e->entry_ea, e->resume_ea, (unsigned long long)e->hits,
+                         (unsigned long long)e->declines, (unsigned long long)e->fallbacks,
+                         e->disabled ? "（已停用）" : "");
+        }
+        if (!anomaly_rows.empty()) {
+            openAnomaly();
+            std::fprintf(out, "native-ovr: 异常 %zu 项：", anomaly_rows.size());
+            for (std::size_t i = 0; i < anomaly_rows.size(); ++i) {
+                std::fprintf(out, "%s%s", i == 0 ? "" : " / ", anomaly_rows[i].c_str());
+            }
+            std::fprintf(out, "（回退过 / 条件分支被拒；全表见 --profile）\n");
+        }
+    }
+
+    // ---- ③ 读数摘要（一把关键数字，1 行；默认档第一眼要看的就是这一行）----
+    std::fprintf(out, "=== 读数摘要 ===\n");
+    // ★ 仪器口径标签（M-02）：一行、字段顺序固定、机器可读。读的是**本轮真实生效**的位
+    //   （`window-prof` = `WindowProfiler::armed()`），⛔ 不是 CLI 参数回显。
+    //   ★ 两档都打：`expect=<n|off>` 按字面被 `tests/input_expect.cpp` 消费；`profile-window`
+    //     的 `instr     :` 也是同一行（它是"本轮开了哪些仪器"的唯一读点，不是逐项读数）。
+    {
+        char expect_field[32];
+        if (instrument_.expect_change) {
+            std::snprintf(expect_field, sizeof(expect_field), "%llu",
+                          (unsigned long long)instrument_.expect_windows);
+        } else {
+            std::snprintf(expect_field, sizeof(expect_field), "off");
+        }
+        std::fprintf(out, "instr     : profile=%s frame-trace=%s window-prof=%s expect=%s\n",
+                     instrument_.profile ? "on" : "off", instrument_.frame_trace ? "on" : "off",
+                     instrument_.window_prof ? "on" : "off", expect_field);
+    }
+    {
+        const GuestToken& token = guestToken();
+        const std::uint64_t waits = token.waits();
+        const double wait_ms = static_cast<double>(token.waitNs()) / 1e6;
+        const d3d9::GpuCoverage& cov = d3d9::gpuCoverage();
+        // ★ bit11 = `MIPFILTER`：引擎设 LINEAR（三线性），GPU sampler 按最近级近似 ⇒ 这是本线
+        //   **已知并接受的近似**（所以不进异常段）。这里留一个短标记，免得"三线性被近似"只存在于文档里。
+        const char* mip_mark = d3d9::unsupportedBitOfRun(11u) ? " mipfilter≈nearest" : "";
+        std::fprintf(out,
+                     "read      : blocks=%zu(cached %zu hits %zu misses %zu) rep-bulk=%llu/%llu "
+                     "tokenwait=%llu/%.1fms heap=%u/%uKiB allocs=%u arena=%u/%u shims=%zu/%zu "
+                     "audio=fills %llu/fill_max %.2fms/underruns %llu/muted %d "
+                     "gpu=draws %llu/tri %llu/fallback %llu/skipped %llu "
+                     "native-ovr=hits %llu/fallbacks %llu%s\n",
+                     cache_.blockCount(), cache_.insnCount(), cache_.hits(), cache_.misses(),
+                     (unsigned long long)cpu_.rep_bulk_hits, (unsigned long long)cpu_.rep_bulk_declines,
+                     (unsigned long long)waits, wait_ms, heap_.bytesInUse(), heap_.peak(), heap_.allocCount(),
+                     surfaces_.bytesInUse(), surfaces_.peak(), shims_.importedCount(),
+                     shims_.calledUnimplemented().size(), (unsigned long long)audio.fills, audio.fill_max_ms,
+                     (unsigned long long)audio.underruns, audio.muted ? 1 : 0,
+                     (unsigned long long)cov.draw_calls, (unsigned long long)d3d9::gpuTriangleCount(),
+                     (unsigned long long)cov.fallback_draws, (unsigned long long)cov.skipped_draws,
+                     (unsigned long long)ovr_hits, (unsigned long long)ovr_fallbacks, mip_mark);
+    }
+    // ★ `shims     : imported … / called-unimplemented …` 按字面被 `tests/save_graph.cpp` 消费
+    //   （辅助判据：被调到但没实现的导入必须 0）⇒ 两档都打。
+    std::fprintf(out, "shims     : imported %zu / called-unimplemented %zu\n", shims_.importedCount(),
+                 shims_.calledUnimplemented().size());
+    // ★ `token     : violations=… max-concurrent=…` 按字面被 `tests/option_roundtrip.cpp` 消费；
+    //   它是单令牌不变式的唯一可观测面（不是噪声）⇒ **两档都打**。
+    {
+        const GuestToken& token = guestToken();
+        std::fprintf(out, "token     : violations=%llu max-concurrent=%u%s%s\n",
+                     static_cast<unsigned long long>(token.violations()), token.maxConcurrent(),
+                     token.violations() == 0 ? "" : " first=",
+                     token.violations() == 0 ? "" : (token.firstViolationSite() ? token.firstViolationSite() : "?"));
+    }
+    // `recovery` / `skip-logo` / `messagebox`：**只在这里打一处**（钩子命中时的那行已删，见钩子处注释）。
+    //   口径不变：三种形态（绕过 / 未绕过 / 未命中）必须能机械区分（判据见 tests/recovery_dialog.cpp）。
+    if (accept_recovery_dialog_) {
+        std::fprintf(out, "recovery  : 未绕过（--accept-recovery-dialog ⇒ 走引擎真实判定）\n");
+    } else if (recovery_bypass_applied_) {
+        std::fprintf(out, "recovery  : bypassed @ 0x%08X (EAX %u -> 0)\n", kRecoveryCheckEa,
+                     recovery_bypass_prior_eax_);
+    } else {
+        std::fprintf(out, "recovery  : 未命中（run 在判定前结束）\n");
+    }
     if (skip_logo_) {
         if (skip_logo_applied_) {
             std::fprintf(out, "skip-logo : applied @ T_Command=0x%08X (+0x%05X=0)\n", skip_logo_object_,
@@ -2404,20 +2696,9 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
             std::fprintf(out, "skip-logo : 未命中（run 在 T_Command 构造前结束）\n");
         }
     }
-    // ★ 恢复判定（默认**绕过**）：三种形态都要能机械区分（判据见 tests/recovery_dialog.cpp）。
-    //   ⛔ 这**不是**"靠不开窗"：绕过与 marker 在不在无关（EAX=0 ⇒ `cmp eax,1` 为假 ⇒ 干净返回）。
-    if (accept_recovery_dialog_) {
-        std::fprintf(out, "recovery  : 未绕过（--accept-recovery-dialog ⇒ 走引擎真实判定）\n");
-    } else if (recovery_bypass_applied_) {
-        std::fprintf(out, "recovery  : bypassed @ 0x%08X (EAX %u -> 0)\n", kRecoveryCheckEa,
-                     recovery_bypass_prior_eax_);
-    } else {
-        std::fprintf(out, "recovery  : 未命中（run 在判定前结束）\n");
-    }
     // ★ MessageBox 调用账（`REQ-01M75S724HE50D26EEMDNY3Z54` 判据②的兄弟证据）：
     //   `calls` 取自 `ShimDef::call_count`（`shims.cpp` 的**唯一** `++` 点），后两项记最后一次。
-    //   只在**有调用**或**显式传了恢复 flag** 时打（默认档不新增噪声行；判据仍可读 trace）。
-    //   ⛔ `calls=0` 时后两项没有意义（写 0 只是占位，别读成"上次返回了 0"）。
+    //   只在**有调用**或**显式传了恢复 flag** 时打。
     {
         const ShimDef* mb = shims_.find("user32", "MessageBoxA");
         const std::uint64_t mb_calls = mb != nullptr ? mb->call_count : 0;
@@ -2427,29 +2708,61 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                          messageBoxLastResult());
         }
     }
+    // ★ 交互图（`--interaction-graph`）：状态 / 迁移次数 / 发出的动作数 / 采样量 / 失败类别。
+    //   失败类别单独一行（`FAIL`），因为它必须与"跑完了"（done）在读输出时一眼分开。
+    if (interaction_.active()) {
+        std::fprintf(out, "interaction: state=%s node=%s transitions=%llu actions=%llu samples=%llu changes=%llu\n",
+                     interaction_.stateName(),
+                     interaction_.current() != nullptr ? interaction_.current()->id.c_str() : "-",
+                     (unsigned long long)interaction_.stateChanges(),
+                     (unsigned long long)interaction_.actionsIssued(),
+                     (unsigned long long)sampler_.sampleCount(), (unsigned long long)sampler_.changeCount());
+        if (interaction_.failed()) {
+            std::fprintf(out, "FAIL      : %s（%s）\n", graphFailureName(interaction_.failure()),
+                         interaction_.failureDetail().c_str());
+        }
+    }
+    // ★ 时间线 **0 点**（`--anchor-script <id>`）的可观测面：闩锁了就**一定**打一行（四单位齐全）。
+    //   按字面被 `tests/input_anchor.cpp` 消费 ⇒ 两档都打。
+    if (input_script_.originRequested() && input_script_.originSet()) {
+        const TimelineOrigin& o = input_script_.origin();
+        std::fprintf(out, "origin    : script=0x%08X frame=%llu insns=%llu guest_ms=%llu wall_ms=%llu\n", o.id,
+                     static_cast<unsigned long long>(o.frame), static_cast<unsigned long long>(o.insns),
+                     static_cast<unsigned long long>(o.guest_ms), static_cast<unsigned long long>(o.wall_ms));
+    }
+    // ★ 时间线的**否定证据**（BUG-20 / `REQ-01M72QSNQCH3GHH3158A7YX96V`）：条件永不满足的动作在 run
+    //   结束时会被静默丢弃 —— 这一行把"没跑完"变成正面读数（口径见 `input_unfinished.cpp`）。
+    //   ⛔ 两档都打：它是"脚本没跑完"的唯一正面证据，不属于逐项读数。
+    if (input_script_.active() && !input_script_.finished() && !input_script_.quitRequested()) {
+        const std::size_t pending = input_script_.unfinishedActionCount();
+        const std::size_t rel = input_script_.pendingReleaseCount();
+        const std::string& raw = pending > 0 ? input_script_.firstUnfinishedActionText()
+                                             : input_script_.firstPendingReleaseText();
+        std::string first = raw;
+        for (char& c : first) {
+            if (c == '"') c = '\'';
+        }
+        std::fprintf(out, "input-script: unfinished pending=%zu releases=%zu first=\"%s\"\n", pending, rel,
+                     first.c_str());
+    }
+    // ★ arena 是**独立**的 GuestHeap（`init` 的 0x28000000..0x30000000，128 MiB），不并进上面那行：
+    //   纹理像素 / 后缓冲 / 深度块只在这里，主堆的 in_use 对"纹理没回收"完全不可见。
+    //   ★ 这一行的**逐字格式**被 `tests/option_roundtrip.cpp` 的 `parseArena` 消费 ⇒ 两档都打。
+    std::fprintf(out, "arena     : surfaces %zu in_use %u peak %u largest-free %u\n", surfaces_.surfaceCount(),
+                 surfaces_.bytesInUse(), surfaces_.peak(), surfaces_.largestFreeBlock());
+
+    if (!verbose) return;
+
+    // =================================================================================
+    // ---- ④ Verbose（`--profile` / `--report` / `--log-level info` 及以上）：旧的逐项读数
+    // =================================================================================
+    std::fprintf(out, "trace-in  : exe=%s | clock=%s | hash=%016llX\n", ti.exe_path.c_str(),
+                 ti.real_time ? "REAL-TIME" : "virtual", (unsigned long long)traceInputsHash());
     std::fprintf(out, "blocks    : %zu (insns cached %zu, hits %zu, misses %zu)\n", cache_.blockCount(),
                  cache_.insnCount(), cache_.hits(), cache_.misses());
-    // ★ `rep movs*` / `rep stos*` 宿主快路径的**覆盖率读数**（REQ-01M75XK0XRTSWCZ4G8A5W2GW8）。
-    //   口径：按**整条 rep** 计（不是按元素）；`hits` = 走了快路径，`declines` = 本来够格但被闸门
-    //   拦下（方向×重叠 / 跨 4 GiB / safe-mode 未提交）而退回逐元素臂。⛔ 两者都不是时间读数：
-    //   `hits` 高只说明"快路径接住了"，快多少要靠 A/B 墙钟（本单的 op-count 估见报告）。
-    //   ⛔ 不要拿具体数值当判据（它随输入变）；判据是 `hits + declines` 与"语料里的 rep 流量"同阶。
     std::fprintf(out, "rep-bulk  : hits=%llu declines=%llu (bulk=%s)\n",
                  static_cast<unsigned long long>(cpu_.rep_bulk_hits),
                  static_cast<unsigned long long>(cpu_.rep_bulk_declines), cpu_.rep_bulk ? "on" : "off");
-    // ★ 单令牌不变式的**可观测**面（guest_token.h）：`violations` 非 0 ⇒ 有线程没拿令牌就
-    //   执行 guest 代码 / 改 GuestHeap / HandleTable。`--assert-guest-token` 把它变成退出码。
-    {
-        const GuestToken& token = guestToken();
-        std::fprintf(out, "token     : violations=%llu max-concurrent=%u%s%s\n",
-                     static_cast<unsigned long long>(token.violations()), token.maxConcurrent(),
-                     token.violations() == 0 ? "" : " first=",
-                     token.violations() == 0 ? "" : (token.firstViolationSite() ? token.firstViolationSite() : "?"));
-    }
-    // ★ 主线程亲和性（REQ-01M76SXW0Y3R8QX1F94AB85M9H）：`WindowManager` 是**主线程独占宿主
-    //   对象**（M0 口径），⛔ 不进令牌容器清单 ⇒ 它需要自己的一栏。`off-thread` 非 0 = 某条
-    //   非 owner 线程碰过 wm 的入口（`host_window.cpp` 的 `checkMainThread`）；`--assert-guest-token`
-    //   把它变成退出码。⛔ 没有违规就只打 `off-thread=0`（不打 `first=?` —— 那会被读成"有一处 ?"）。
     {
         const unsigned long long off = windows_.offThread();
         const char* first = windows_.firstOffThreadSite();
@@ -2459,13 +2772,12 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
             std::fprintf(out, "window    : off-thread=%llu first=%s\n", off, first ? first : "?");
         }
     }
-    // ★ 诊断开关的**口径标签**（`guest_token.h` 文件头）：始终打一行，缺省 `skip-lock=0`。
-    //   为什么无条件打：A/B 两臂的日志必须能**一眼分开**，而"没打这行"与"关着"在文本上一样。
+    // ★ 诊断开关的**口径标签**（`guest_token.h` 文件头）：Verbose 档始终打一行，缺省 `skip-lock=0`。
+    //   为什么只在 Verbose 打：A/B 两臂的日志必须能**一眼分开**，而 A/B 分档本身就是 Verbose 的用途；
+    //   默认档的关键量（tokenwait）已经进了 `read` 行。
     std::fprintf(out, "token-diag : skip-lock=%d\n", guestToken().diagSkipLock() ? 1 : 0);
     // ★ M1（REQ-01M6XVZG4T9WY8SQ1WS7P8RNW9）：**等令牌**的独立一栏（⛔ 不是 `ns` 的一部分）。
     //   口径：`waits` = 真的被挡住的取令牌次数；`wait` = 这些等待的累计墙钟（steady_clock）。
-    //   重入 / 未竞争不计（未竞争路径不读时钟）⇒ 全 0 意味着"没有真的排队"，不是"没测"。
-    //   ⛔ 不要拿具体数值当判据（它随机器与调度变）；判据是"它 > 0 且 `ns` 里不再含它"。
     {
         const GuestToken& token = guestToken();
         const std::uint64_t waits = token.waits();
@@ -2475,10 +2787,7 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                      avg_us);
     }
     // ★ Phase-0 四读数（REQ-01M75WWEDC20GEH7QVSHPHH4GP）：**只在记账打开时打印**。
-    //   为什么按开关门：默认运行（无 `--profile`、无 `LIFT_AUDIO_TRACE`）的摘要，**除新增的
-    //   `window : off-thread=0` 这一行（常量行、不随运行变）外**，与改动前逐字节一致 —— 这是
-    //   "零行为改变"最强的一条证据；而记账本身要读时钟，所以那几行读数
-    //   也只在打开时才值得出现。口径（细节见 `guest_token.h` 的 Phase-0 那一组）：
+    //   口径（细节见 `guest_token.h` 的 Phase-0 那一组）：
     //     · `hold` = 持令牌的累计墙钟；`span` = 本轮首个持有 → 最后一次释放；
     //       `duty` = hold / span ⇒ 需求单第 1 项"持有占空"。⛔ 分母是**令牌观测窗口**，
     //       不是 `run()` 的墙钟（后者在 `dumpProfile` 的窗口表里；两者差 boot 前后那一点点）。
@@ -2539,10 +2848,10 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                      "shimmax   : top %zu / %zu shims by max_ns（shim 实现自身；累计见 --profile 的 shims 表）\n",
                      shown, rows.size());
         for (std::size_t i = 0; i < shown; ++i) {
-            const ShimMaxRow& r = rows[i];
-            const std::string label = r.def->module + "!" + r.def->name;
+            const ShimMaxRow& row = rows[i];
+            const std::string label = row.def->module + "!" + row.def->name;
             std::fprintf(out, "            %2zu. %-46s max %9.3f ms calls=%llu\n", i + 1, label.c_str(),
-                         static_cast<double>(r.max_ns) / 1e6, (unsigned long long)r.calls);
+                         static_cast<double>(row.max_ns) / 1e6, (unsigned long long)row.calls);
         }
         const std::uint64_t overflow = guestToken().shimMaxOverflow();
         if (overflow != 0) {
@@ -2552,8 +2861,6 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
         }
     }
     std::fprintf(out, "committed : %llu KiB\n", (unsigned long long)(mem_.committedBytes() / 1024));
-    std::fprintf(out, "shims     : imported %zu / called-unimplemented %zu\n", shims_.importedCount(),
-                 shims_.calledUnimplemented().size());
     std::fprintf(out, "heap      : in_use %u peak %u allocs %u\n", heap_.bytesInUse(), heap_.peak(),
                  heap_.allocCount());
     // ★ 分配器 / 内存账的**可观测计数**（不是墙钟）：
@@ -2605,81 +2912,15 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                          input_script_.lastMarkerId(), input_script_.lastMarkerName().c_str(),
                          input_script_.lastMarkerNameDegraded() ? "（降级）" : "");
         }
-        // ★ **否定证据**（BUG-20 / `REQ-01M72QSNQCH3GHH3158A7YX96V`）：条件永不满足的动作在 run
-        //   结束时会被静默丢弃 —— 旧口径下唯一的线索是"**没有** `[input-script] finished` 那行"，
-        //   而缺那行同时意味着"脚本跑完了 / 脚本没跑完 / run 提前停了"三件事，读输出的人分不开。
-        //   这一行把那份否定证据变成**正面**读数：`pending` = 几条动作没跑、`first` = 第一条是什么。
-        //   ★ 位置：`inputstat :` 那一组的缩进续行（`release :` / `marker :`）**之后**才打 —— 它自己是
-        //     行首锚定的新字段，夹在续行中间会把"一组读数"切开；⛔ 但仍留在 `active()` 这一段内
-        //     （没有脚本 ⇒ 一个字都不打）。
-        //   判据（⛔ 不要放宽）：
-        //   · 只在 `active() && !finished() && !quitRequested()` 时打 —— `quit` 之后剩下的动作是脚本
-        //     **有意**跳过的（`quit` 就是"到此为止"），报它会让正常脚本天天告警；全部已应用
-        //     （`finished()`）⇒ 没有可报的。
-        //   · 与 `[input-script] finished` 那行**并存、不互相替代**：那行在 `finished()` **或 `quit`**
-        //     时打，且 `quit` 路径写的是**总**动作数（⛔ 别当"应用数"读）。
-        //   · `first` = 第一条**未应用动作**的原文（`Action::text`；按 `applied` 标志扫 —— 动作按到期 /
-        //     边沿应用 ⇒ 应用顺序不一定是文件顺序）；`pending==0` 但还有没交付完的抬起时取第一条未完成
-        //     抬起的原文。含空格 ⇒ 双引号包住行首锚定的字段；内部的 `"` 换成 `'`（⛔ 不破可解析格式）。
-        //   · `releases` = 还没交付的抬起条数（`pendingReleaseCount()`）：自动 hold 等 guest 采样 / 显式
-        //     hold 没到期，都会让 `finished()` 为假 ⇒ 只报 `pending` 会把这类收口说成"动作没跑"。
-        if (!input_script_.finished() && !input_script_.quitRequested()) {
-            const std::size_t pending = input_script_.unfinishedActionCount();
-            const std::size_t rel = input_script_.pendingReleaseCount();
-            const std::string& raw = pending > 0 ? input_script_.firstUnfinishedActionText()
-                                                 : input_script_.firstPendingReleaseText();
-            std::string first = raw;
-            for (char& c : first) {
-                if (c == '"') c = '\'';
-            }
-            std::fprintf(out, "input-script: unfinished pending=%zu releases=%zu first=\"%s\"\n", pending, rel,
-                         first.c_str());
-        }
     }
-    // ★ 时间线 **0 点**（`--anchor-script <id>`）的可观测面：闩锁了就**一定**打一行（四单位齐全）。
-    //   为什么不能只靠闩锁那一刻的 `[input-script] origin` 行：那行在 stderr/stdout 的滚动日志里，
-    //   而"纯 anchor 运行"**没有** `marker :` 行（它只按 `hasMarkerActions()` 打）⇒ 跑完的输出里
-    //   "0 点定在哪"不可读。这一行是摘要的一部分，与 `marker :` 的 last 同处可比。
-    //   ★ 未闩锁 ⇒ **不打**（与 `marker :` 的"没有数就不打"同口径；失败走 `origin-missed:` detail）。
-    //   ★ 格式与需求单一致：`origin    : script=<id> frame=… insns=… guest_ms=… wall_ms=…`。
-    if (input_script_.originRequested() && input_script_.originSet()) {
-        const TimelineOrigin& o = input_script_.origin();
-        std::fprintf(out, "origin    : script=0x%08X frame=%llu insns=%llu guest_ms=%llu wall_ms=%llu\n",
-                     o.id, static_cast<unsigned long long>(o.frame),
-                     static_cast<unsigned long long>(o.insns), static_cast<unsigned long long>(o.guest_ms),
-                     static_cast<unsigned long long>(o.wall_ms));
-    }
-    // ★ 交互图（`--interaction-graph`）：状态 / 迁移次数 / 发出的动作数 / 采样量 / 失败类别。
-    //   失败类别单独一行（`FAIL`），因为它必须与"跑完了"（done）在读输出时一眼分开。
-    if (interaction_.active()) {
-        std::fprintf(out, "interaction: state=%s node=%s transitions=%llu actions=%llu samples=%llu changes=%llu\n",
-                     interaction_.stateName(),
-                     interaction_.current() != nullptr ? interaction_.current()->id.c_str() : "-",
-                     (unsigned long long)interaction_.stateChanges(),
-                     (unsigned long long)interaction_.actionsIssued(),
-                     (unsigned long long)sampler_.sampleCount(), (unsigned long long)sampler_.changeCount());
-        if (interaction_.failed()) {
-            std::fprintf(out, "FAIL      : %s（%s）\n", graphFailureName(interaction_.failure()),
-                         interaction_.failureDetail().c_str());
-        }
-    }
-    // ★ arena 是**独立**的 GuestHeap（`init` 的 0x28000000..0x30000000，128 MiB），不并进上面那行：
-    //   纹理像素 / 后缓冲 / 深度块只在这里，主堆的 in_use 对"纹理没回收"完全不可见。
-    std::fprintf(out, "arena     : surfaces %zu in_use %u peak %u largest-free %u\n", surfaces_.surfaceCount(),
-                 surfaces_.bytesInUse(), surfaces_.peak(), surfaces_.largestFreeBlock());
     // ★ 不按 `enabled()` 门：`--audio off` 也打一行，好让"没设备"与"静音"在同一处可读
     //   （`device=none muted=1 muted_bytes=0` ⇒ 确实没有交付，而不是被静音）。
     audio_.dumpSummary(out);
-    if (presenter_.sinkFailures() != 0) {
-        std::fprintf(out, "present   : sink 失败 %llu 次（最后：%s）\n",
-                     (unsigned long long)presenter_.sinkFailures(),
-                     presenter_.lastSinkError().empty() ? "-" : presenter_.lastSinkError().c_str());
-    }
     if (d3d9::gpuDrawCount() != 0) {
-        std::fprintf(out, "raster    : GPU Draw %llu / 三角形 %llu（sink %s）\n",
+        // ★ 不再复述 `present` 行的 sink 串（`main.cpp` 的 `present :` 已经逐字打过一次）。
+        std::fprintf(out, "raster    : GPU Draw %llu / 三角形 %llu\n",
                      (unsigned long long)d3d9::gpuDrawCount(),
-                     (unsigned long long)d3d9::gpuTriangleCount(),
-                     presenter_.sinkDescription().empty() ? "-" : presenter_.sinkDescription().c_str());
+                     (unsigned long long)d3d9::gpuTriangleCount());
     }
     // ★ 固定打印 GPU 覆盖账（GPU 启用后回退必须可见，⛔ 不静默）。
     {
@@ -2695,8 +2936,6 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                      (unsigned long long)cov.recorded, (unsigned long long)cov.queued,
                      (unsigned long long)cov.empty, (unsigned long long)cov.fragments,
                      (unsigned long long)cov.skipped_draws);
-        // ★ 未支持位（诊断）：`PipelineInfo::unsupported` 是同一份位图的逐设备视图；
-        //   这里打进程级镜像 + 置位名（#3/#6 的拒绝在摘要里必须看得见，⛔ 不静默）。
         std::fprintf(out, "unsupported : %s\n", d3d9::unsupportedBitsOfRun().c_str());
         if (cov.sprite_draws != 0 || cov.sprite_fallback_draws != 0 || cov.sprite_skipped != 0) {
             std::fprintf(out,
@@ -2705,87 +2944,6 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                          (unsigned long long)cov.sprite_fallback_draws,
                          (unsigned long long)cov.sprite_fallback_pixels,
                          (unsigned long long)cov.sprite_skipped);
-        }
-        if (!cov.fallback_reasons.empty()) {
-            std::vector<std::pair<const std::string*, std::uint64_t>> rows;
-            rows.reserve(cov.fallback_reasons.size());
-            for (const auto& kv : cov.fallback_reasons) rows.emplace_back(&kv.first, kv.second);
-            std::stable_sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
-                return a.second != b.second ? a.second > b.second : *a.first < *b.first;
-            });
-            std::fprintf(out, "            fallback top:");
-            const std::size_t top = rows.size() < 5 ? rows.size() : 5;
-            for (std::size_t i = 0; i < top; ++i) {
-                std::fprintf(out, " [%llu×] %s ;", (unsigned long long)rows[i].second, rows[i].first->c_str());
-            }
-            std::fprintf(out, "\n");
-        }
-        // ★ `skipped` 的按原因聚合（`REQ-01M7AAXVGY9SG75XCREHPX641Z`）：与 `fallback top`
-        //   **分开打印**（口径不同：这里是"GPU 没画"，那里是"CPU 画了"）。
-        {
-            const std::string skipped_top = d3d9::gpuSkippedTopLine();
-            if (!skipped_top.empty()) std::fputs(skipped_top.c_str(), out);
-        }
-        if (cov.gpu_failures != 0) {
-            std::fprintf(out, "            gpu_failures=%llu（准入通过但后端绘制失败，⛔ 不再 CPU 重放）\n",
-                         (unsigned long long)cov.gpu_failures);
-        }
-    }
-    // ★ 默认级别告警（`pipeWarn`）的**拒绝计数**：按 (调用点, 类别) 分桶后按类合计
-    //   （`REQ-01M70SHFT6RZA7RRY1R051Z2PB` #2）。与限流桶**同一份**（进程级）⇒ 第 5 次之后
-    //   只留 debug 的事件也在这里数得到；`other` = 顶点声明 / 设备销毁时的绑定释放等。
-    {
-        const d3d9::PipeWarnCounts& wc = d3d9::pipeWarnCounts();
-        if (wc.total() != 0) {
-            std::fprintf(out, "pipe-warn : vertex-stream=%llu index=%llu texture=%llu other=%llu\n",
-                         (unsigned long long)wc.of(d3d9::PipeWarnCategory::VertexStream),
-                         (unsigned long long)wc.of(d3d9::PipeWarnCategory::Index),
-                         (unsigned long long)wc.of(d3d9::PipeWarnCategory::Texture),
-                         (unsigned long long)wc.of(d3d9::PipeWarnCategory::Other));
-        }
-    }
-    if (!overrides_.empty() || !block_overrides_.empty()) {
-        std::uint64_t hits = 0;
-        std::uint64_t fallbacks = 0;
-        for (std::size_t i = 0; i < overrides_.size(); ++i) {
-            const NativeOverride* e = overrides_.at(i);
-            hits += e->hits;
-            fallbacks += e->fallbacks;
-        }
-        for (std::size_t i = 0; i < block_overrides_.size(); ++i) {
-            const NativeBlockOverride* e = block_overrides_.at(i);
-            hits += e->hits;
-            fallbacks += e->fallbacks;
-        }
-        std::fprintf(out, "native-ovr: entries=%zu blocks=%zu hits=%llu fallbacks=%llu\n", overrides_.size(),
-                     block_overrides_.size(), (unsigned long long)hits, (unsigned long long)fallbacks);
-        for (std::size_t i = 0; i < overrides_.size(); ++i) {
-            const NativeOverride* e = overrides_.at(i);
-            std::fprintf(out, "  %-12s @ %08X %s(%uB) hits=%llu fallbacks=%llu\n", e->name.c_str(), e->ea,
-                         guestConvName(e->conv), e->arg_bytes, (unsigned long long)e->hits,
-                         (unsigned long long)e->fallbacks);
-            // ★ 条件式 override 的台账（`fast_hits` / `declines[]`，见 native_overrides.h）：
-            //   桶下标 → 原因名由该 override 自己的域解释（例如 `sub_4BBAB0` 的 `VoicePollWhy`）。
-            //   只在有数时多打一行：无条件项的这两项恒 0，不给日志加噪声。
-            bool any = e->fast_hits != 0;
-            for (std::size_t k = 0; k < NativeOverride::kDeclineSlots; ++k) any = any || e->declines[k] != 0;
-            if (any) {
-                std::fprintf(out, "    fast_hits=%llu declines=[", (unsigned long long)e->fast_hits);
-                bool first = true;
-                for (std::size_t k = 0; k < NativeOverride::kDeclineSlots; ++k) {
-                    if (e->declines[k] == 0) continue;
-                    std::fprintf(out, "%s#%zu=%llu", first ? "" : " ", k, (unsigned long long)e->declines[k]);
-                    first = false;
-                }
-                std::fprintf(out, "]\n");
-            }
-        }
-        for (std::size_t i = 0; i < block_overrides_.size(); ++i) {
-            const NativeBlockOverride* e = block_overrides_.at(i);
-            std::fprintf(out, "  %-12s @ %08X..%08X 段级 hits=%llu declines=%llu fallbacks=%llu%s\n",
-                         e->name.c_str(), e->entry_ea, e->resume_ea, (unsigned long long)e->hits,
-                         (unsigned long long)e->declines, (unsigned long long)e->fallbacks,
-                         e->disabled ? "（已停用）" : "");
         }
     }
 }

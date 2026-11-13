@@ -2450,6 +2450,26 @@ void caseRenderStatePolicy() {
         return pi;
     };
 
+    // ---- (0) bit11 MIPFILTER = "已知并接受的近似"：位照旧记，但**默认不进异常段** ----
+    //   ★ 为什么在这里：`createForDevice` 刚把进程级镜像清零 ⇒ 现在镜像里只有本块写下的位。
+    //   ★ 变异：把 benign 集合清空（`unsupportedBitIsBenign` 恒 false）⇒ 下面 `non_benign.empty()`
+    //     与 `mixed` 不含 bit11 两条当场红。
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMipFilter, lift::d3d9::kTexfLinear), 0u);
+    {
+        const std::string full = lift::d3d9::unsupportedBitsOfRun(/*non_benign_only=*/false);
+        const std::string non_benign = lift::d3d9::unsupportedBitsOfRun(/*non_benign_only=*/true);
+        LIFT_CHECK(full.find("bit11=MIPFILTER") != std::string::npos);
+        LIFT_CHECK(non_benign.empty());  // 只有 benign 位 ⇒ 异常段不打这行
+        // 纯函数形态（不依赖进程镜像）：只有 benign 位 ⇒ 空；benign + 真异常位 ⇒ 只剩后者。
+        std::uint32_t bits[8] = {};
+        bits[11u / 32u] |= 1u << (11u % 32u);
+        LIFT_CHECK(lift::d3d9::unsupportedBitsText(bits, /*non_benign_only=*/true).empty());
+        bits[26u / 32u] |= 1u << (26u % 32u);
+        const std::string mixed = lift::d3d9::unsupportedBitsText(bits, /*non_benign_only=*/true);
+        LIFT_CHECK(mixed.find("bit26=") != std::string::npos);
+        LIFT_CHECK(mixed.find("bit11=") == std::string::npos);
+    }
+
     // ---- (1) 引擎实测的 16 个状态 + 取值逐个 Set：全部 S_OK，且 bit26 不被置位 ----
     const std::vector<EngineRenderState>& engine = engineRenderStates();
     LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(engine.size()), 16u);

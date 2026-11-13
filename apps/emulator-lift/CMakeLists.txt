@@ -873,6 +873,15 @@ add_test(NAME gpu-batch-barrier COMMAND lift-gpu-batch --gpu)
 set_tests_properties(gpu-batch-barrier PROPERTIES
     ENVIRONMENT "SDL_VIDEODRIVER=dummy" SKIP_RETURN_CODE 77)
 
+# ---- pure：**默认 stdout 降噪**（`REQ-01M7AG06MXS6PK2B53B29QM76Z`）----
+# 判据见 `tests/gpu_batch.cpp` 的 `caseStdoutQuiet` 头注释：默认档 ≤25 行 / 无 `  缺口 ` 明细 /
+# 无 native-override per-entry / `stop`·`detail` 在前 10 行；`--report` 臂保留缺口明细；
+# `--profile` 臂保留 per-entry。两臂成对 ⇒ "删掉"不能冒充"折叠"。
+# ★ 执行源是测试自造的最小 PE + 假 `.lst` ⇒ 不碰 LFS / 游戏安装 ⇒ 顶层注册 = pure 档。
+# ★ 默认 / `--profile` 臂要真 GPU（headless 也建隐藏窗口）⇒ 无 GPU 时 SKIP 77。
+add_test(NAME stdout-quiet COMMAND lift-gpu-batch --stdout-quiet $<TARGET_FILE:emulator-lift>)
+set_tests_properties(stdout-quiet PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
 add_executable(lift-mechanism tests/mechanism.cpp)
 target_link_libraries(lift-mechanism PRIVATE emulator-lift-runtime)
 add_test(NAME mechanism COMMAND lift-mechanism)

@@ -218,6 +218,25 @@ public:
     const std::deque<AudioNotifyEvent>& pending() const { return pending_; }
 
     void dumpSummary(std::FILE* out) const;
+    // ★ 默认档摘要（`REQ-01M7AG06MXS6PK2B53B29QM76Z`）要的**只读快照**：与 `dumpSummary` 同一份
+    //   `stats_`，但只在 `mutex_` 下拷几个字段 —— 默认档不再打 428 B 的 `audio :` 全表，
+    //   关键量进 `read :` 一行，异常项进 `=== 异常 ===`。⛔ 不新增状态、不改任何计数。
+    struct Snapshot {
+        const char* mode = "off";
+        const char* device = "none";
+        bool muted = false;
+        double fill_max_ms = 0.0;
+        std::uint64_t fills = 0;
+        std::uint64_t muted_bytes = 0;
+        std::uint64_t underruns = 0;
+        std::uint64_t fill_slow = 0;
+        std::uint64_t fill_wait_timeouts = 0;
+        std::uint64_t slot_reverify_fail = 0;
+        std::uint64_t underrun_silence_events = 0;
+        std::uint64_t fill_overlapped = 0;
+        std::uint64_t fill_witnessed = 0;
+    };
+    Snapshot snapshot() const;
     // 真线程 feeder 的 shim 块按需装进私有 cache（ComRegistry 新建 vtable 时会调）。
     void installFeederShim(std::uint32_t stub_ea, std::uint32_t shim_id);
 

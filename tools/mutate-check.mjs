@@ -2643,6 +2643,104 @@ const MUTATIONS = [
       ' ⇒ `audio-device/fill-witness-wiring` 的"恰好一个 quarter +1"当场红',
   },
 
+  // ── 默认 stdout 降噪（REQ-01M7AG06MXS6PK2B53B29QM76Z）──
+  {
+    // ★ 代表 "缺口清单又变回每次 run 无条件刷 14 行" 这一类错：
+    //   默认档只该打 `gap       : N 条（--report 看明细）`；把门控删掉（恢复无条件）⇒
+    //   `导入总数 = …` + 每条 `  缺口 module!api —— 理由` 全部回到默认输出。
+    //   守卫：`apps/emulator-lift/tests/gpu_batch.cpp` 的 `caseStdoutQuiet`（`stdout-quiet` CTest；
+    //   自造最小 PE + 假 `.lst`，默认档数行数 / 找 `  缺口 ` / `--report` 臂必须仍有明细）。
+    file: 'apps/emulator-lift/src/main.cpp',
+    from:
+      '    if (verbose_output) {\n' +
+      '        machine.reportBaseGaps(stdout);\n' +
+      '    } else {\n' +
+      '        std::printf("gap       : %zu 条（--report 看明细）\\n", machine.baseGapCount());\n' +
+      '    }',
+    to: '    machine.reportBaseGaps(stdout);',
+    guard: 'ctest:stdout-quiet',
+    ctest: 'stdout-quiet',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '删掉缺口明细的默认门控（恢复每次 run 无条件 `reportBaseGaps`）⇒ 默认 stdout 又出现' +
+      '`导入总数 = …` + `  缺口 ` 明细 ⇒ stdout-quiet 的"默认档无缺口明细 / ≤25 行"当场红',
+  },
+  {
+    // ★ 代表 "native-override per-entry 又回到默认档逐条刷" 这一类错：
+    //   `show_all_overrides` 只在 Verbose 为真；改成恒真 ⇒ 默认档又打全表（启动清单是另一处门控，
+    //   两处都按"默认只留汇总行"折叠）。守卫的默认臂里 `_memcpy` 恰好命中 1 次 ⇒ 全打时
+    //   `  _memcpy @ 00401010 … hits=1 …` 必然出现 ⇒ `stdout-quiet` 红。
+    file: 'apps/emulator-lift/src/runtime/machine.cpp',
+    from: '        const bool show_all_overrides = verbose;',
+    to: '        const bool show_all_overrides = true;  // 变异：默认档也逐条打',
+    guard: 'ctest:stdout-quiet',
+    ctest: 'stdout-quiet',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'per-entry 门控恒真（默认档也打全表）⇒ 默认 stdout 出现 `  _memcpy @ …` 逐条行 ⇒ ' +
+      'stdout-quiet 的"默认档无 per-entry"当场红',
+  },
+  {
+    // ★ 代表 "native-override 的异常判据又把 `hits==0` 算进来" 这一类错：
+    //   native override 无命中是**完全正常**的情况（这一趟没走到它）；把它算异常 ⇒ 每条本轮没走到
+    //   的 override 都被误报成"异常"（`=== 异常 ===` 里 `native-ovr: 异常 N 项：… hits=0 …`）。
+    //   守卫：`apps/emulator-lift/tests/gpu_batch.cpp` 的 `caseStdoutQuiet` 默认臂 —— 夹具同时开
+    //   `_memcpy`（命中 1 次）与 `_memset`（从不被调用 ⇒ hits=0）⇒ 新口径下 0 条异常。
+    //   变异 = 把 `hits == 0` 加回函数级判据 ⇒ `_memset hits=0` 进异常行 ⇒ 默认臂"没有
+    //   `native-ovr: 异常` 行"的断言当场红。
+    file: 'apps/emulator-lift/src/runtime/machine.cpp',
+    from: '            const bool anomaly = e->fallbacks != 0 || declines != 0;',
+    to:
+      '            const bool anomaly = e->hits == 0 || e->fallbacks != 0 || declines != 0;  ' +
+      '// 变异：hits==0 又算异常',
+    guard: 'ctest:stdout-quiet',
+    ctest: 'stdout-quiet',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'native-ovr 异常判据加回 `hits==0` ⇒ 本轮没走到的 override（夹具里的 `_memset`）被误报 ⇒ ' +
+      '默认 stdout 出现 `native-ovr: 异常 … hits=0 …` ⇒ stdout-quiet 的"默认臂无异常行"当场红',
+  },
+  {
+    // ★ 代表 "把删掉的 A4 real-time 警告行又打回正常游玩路径" 这一类错：
+    //   那行（窗口模式 ⇒ A4 的逐字节可复现断言自动跳过）在正常游玩时没有任何信息量 ——
+    //   A4 是 guest 执行 trace 的**哈希可复现**（`tests/boot_trace.cpp`，headless + 虚拟时钟下仍成立），
+    //   不是渲染像素固定复现；real-time trace 的人看输入清单里的 `clock=REAL-TIME` 字段即可。
+    //   守卫：`stdout-quiet` 默认臂断言合并流里**没有** `逐字节可复现断言自动跳过`。
+    //   变异 = 把该行无条件加回 ⇒ 默认臂 stderr 出现它 ⇒ 当场红。
+    file: 'apps/emulator-lift/src/main.cpp',
+    from: '    opt.profile_top = profile_top;',
+    to:
+      '    opt.profile_top = profile_top;\n' +
+      '    std::fprintf(stderr, "emulator-lift: ⚠ 窗口模式（自动 real-time）：宿主时钟进 guest ⇒ ' +
+      '**A4 的逐字节可复现断言自动跳过**（trace 输入清单里的 clock=REAL-TIME）\\n");  ' +
+      '// 变异：把删掉的 A4 警告加回（无条件）',
+    guard: 'ctest:stdout-quiet',
+    ctest: 'stdout-quiet',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '把已删除的 A4 警告行无条件加回（正常游玩也打）⇒ stdout-quiet 默认臂的' +
+      '"没有 `逐字节可复现断言自动跳过`"断言当场红',
+  },
+  {
+    // ★ 代表 "已知并接受的近似位又进了 `=== 异常 ===`" 这一类错：
+    //   bit11 `MIPFILTER`（引擎设三线性、GPU sampler 按**最近级**近似）在每个正常 2D 场景都置位
+    //   ⇒ 把它当异常等于恒真噪声。位照旧记录，只是 `unsupportedBitsOfRun(true)` 跳过 benign 集合。
+    //   守卫：`apps/emulator-lift/tests/d3d9_pipeline.cpp` 的 `d3d9p/render-state-policy`
+    //   （CTest `d3d9-pipeline`）：`setSampler(MIPFILTER=LINEAR)` 之后 `unsupportedBitsOfRun(true)`
+    //   必须为空、纯函数 `unsupportedBitsText({bit11}, true)` 也必须为空。
+    //   变异 = 清空 benign 集合 ⇒ 上面两条当场红。
+    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
+    from: '    return bit == kUnMipFilter;  // 11',
+    to: '    (void)bit;  // 变异：清空 benign 集合（bit11 又进异常段）\n    return false;',
+    guard: 'ctest:d3d9-pipeline',
+    ctest: 'd3d9-pipeline',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '把 benign（已知近似）集合清空 ⇒ bit11 MIPFILTER 又进异常段：' +
+      '`unsupportedBitsOfRun(true)` 非空 / `unsupportedBitsText({bit11}, true)` 非空 ⇒ ' +
+      '`d3d9p/render-state-policy` 当场红',
+  },
+
 ];
 
 let mutationRunSeq = 0;

@@ -50,6 +50,7 @@
 #include "runtime/host_encoding.h"
 #include "runtime/machine.h"
 #include "runtime/present_sdl.h"
+#include "runtime/sha256.h"
 #include "runtime/surface.h"
 #include "shims/register.h"
 #include "subprocess_skip.h"
@@ -3176,7 +3177,12 @@ int caseGpuLinesPoints() {
 struct ChildOutput {
     bool started = false;
     int exit_code = -1;
+    // ★ 三条流都留：`text` = 合并（既有调用方按子串判定，顺序不敏感）；`out` / `err` 分开 ——
+    //   `stdout-quiet` 的**行数**判据只数 stdout（macOS 框架自己的 stderr 噪声不是本仓打的，
+    //   见 `.tmp/log-noise/analysis.md` §7.2；逐行数它会让判据随宿主机器漂）。
     std::string text;  // stdout + stderr 合并
+    std::string out;   // 仅 stdout
+    std::string err;   // 仅 stderr
 };
 
 ChildOutput runCaptured(const std::filesystem::path& exe, const std::vector<std::string>& args) {
@@ -3185,29 +3191,34 @@ ChildOutput runCaptured(const std::filesystem::path& exe, const std::vector<std:
     std::error_code ec;
     fs::path dir = fs::temp_directory_path(ec);
     if (ec || dir.empty()) dir = fs::current_path(ec);
-    const fs::path out_path = dir / "lift-guard-child.log";
+    const fs::path out_path = dir / "lift-guard-child.out.log";
+    const fs::path err_path = dir / "lift-guard-child.err.log";
     std::error_code rmec;
     fs::remove(out_path, rmec);
+    fs::remove(err_path, rmec);
 
 #if defined(_WIN32)
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
-    const HANDLE h = ::CreateFileW(out_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS,
-                                   FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return r;
+    const HANDLE ho = ::CreateFileW(out_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS,
+                                    FILE_ATTRIBUTE_NORMAL, nullptr);
+    const HANDLE he = ::CreateFileW(err_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS,
+                                    FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (ho == INVALID_HANDLE_VALUE || he == INVALID_HANDLE_VALUE) return r;
     std::wstring joined;
     for (const std::string& a : args) joined += L" \"" + lift::utf8ToWide(a) + L"\"";
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdOutput = h;
-    si.hStdError = h;
+    si.hStdOutput = ho;
+    si.hStdError = he;
     PROCESS_INFORMATION pi{};
     std::wstring cmd = L"\"" + exe.wstring() + L"\"" + joined;
     const BOOL ok = ::CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
                                      nullptr, nullptr, &si, &pi);
-    ::CloseHandle(h);
+    ::CloseHandle(ho);
+    ::CloseHandle(he);
     if (!ok) return r;
     r.started = true;
     const DWORD waited = ::WaitForSingleObject(pi.hProcess, 120000u);
@@ -3225,12 +3236,12 @@ ChildOutput runCaptured(const std::filesystem::path& exe, const std::vector<std:
     const pid_t pid = ::fork();
     if (pid < 0) return r;
     if (pid == 0) {
-        const int fd = ::open(out_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
-        if (fd >= 0) {
-            ::dup2(fd, 1);
-            ::dup2(fd, 2);
-            if (fd > 2) ::close(fd);
-        }
+        const int fd_out = ::open(out_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        const int fd_err = ::open(err_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd_out >= 0) ::dup2(fd_out, 1);
+        if (fd_err >= 0) ::dup2(fd_err, 2);
+        if (fd_out > 2) ::close(fd_out);
+        if (fd_err > 2) ::close(fd_err);
         std::vector<char*> argv;
         argv.push_back(const_cast<char*>(exe.c_str()));
         for (const std::string& a : args) argv.push_back(const_cast<char*>(a.c_str()));
@@ -3244,9 +3255,17 @@ ChildOutput runCaptured(const std::filesystem::path& exe, const std::vector<std:
     r.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 #endif
 
-    std::ifstream in(out_path, std::ios::binary);
-    if (in) r.text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    {
+        std::ifstream in(out_path, std::ios::binary);
+        if (in) r.out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    {
+        std::ifstream in(err_path, std::ios::binary);
+        if (in) r.err.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    r.text = r.out + r.err;
     fs::remove(out_path, rmec);
+    fs::remove(err_path, rmec);
     return r;
 }
 
@@ -3372,6 +3391,323 @@ int caseHeadlessHiddenWindow(const std::filesystem::path& exe) {
     return 0;
 }
 
+// =====================================================================================
+// `stdout-quiet`（`REQ-01M7AG06MXS6PK2B53B29QM76Z`）：**默认 stdout 降噪**的唯一机械判据
+//
+// 红了意味着什么（三条判据各管一个回归方向）：
+//   ① **行数**：默认档（无 `--profile` / `--report` / `--log-level info`）跑一次真子进程，
+//      stdout+stderr 合并 **≤ 25 行**（改造前同一形状是 121 行）。多出来的行 ⇒ 又有逐项读数 /
+//      启动回声被塞回默认档。
+//   ② **缺口明细**：默认档**不许**出现 `  缺口 <module>!<api>` 行（那是静态集合，只随代码变；
+//      默认只留 `gap       : N 条（--report 看明细）`）。`--report` 臂必须**仍然**出现那行 —
+//      两臂成对，防止"把明细彻底删掉"冒充降噪。
+//   ③ **native-override per-entry**：默认档不许出现 `  _memcpy @ 00401010 …` 形态的逐条行
+//      （默认只留汇总行）；`--profile` 臂必须**仍然**有它。两臂成对，防止"折叠"变成"删掉"。
+//   ④ `stop      :` / `detail    :` 必须在**前 10 行**内（结论提前）。
+//   ⑤ **native-override 异常行**：默认档不许出现 `native-ovr: 异常 …` —— `hits==0` **不是**异常
+//      （native override 无命中是正常情况）；夹具里 `_memcpy` 恰好命中 1 次、0 回退 / 0 declines
+//      ⇒ 一条异常都没有。变异：把 `hits==0` 加回判据 ⇒ 这行出现 ⇒ 当场红。
+//   ⑥ **A4 real-time 警告行**：默认档不许出现 `逐字节可复现断言自动跳过`。A4 是 guest 执行 trace 的
+//      哈希可复现（`tests/boot_trace.cpp`，headless 虚拟时钟下仍成立），不是渲染像素复现 ⇒ 正常游玩
+//      不需要"断言跳过"的提示，那一行已删。变异：把它加回去 ⇒ 当场红。
+//
+// ★ 夹具：自造最小 PE32（一节 `.text` + 一节 `.rdata`），**不碰 LFS / 游戏安装**：
+//   · 导入表两项：`kernel32!ExitProcess`（让 run 以 `Stopped` + `detail … ExitProcess` 收口）
+//     与 `kernel32!CreateTimerQueue`（**已登记但未实现**的 gap ⇒ `--report` 臂有 `  缺口 ` 行）；
+//   · 入口先 `call 0x401010`（= 假 `.lst` 里登记的 `_memcpy proc near`）⇒ 默认档的
+//     `native-ovr` 有 **1 次命中**（`hits=1` ⇒ 不该被当异常条目打出来，折叠判据才可判）；
+//     再 `call [IAT ExitProcess]` 收口。
+//   · 假 `.lst` 另登记一条 `_memset proc near`，**从不被调用**（`hits=0`）⇒ 钉住
+//     "`hits==0` 不是异常"（变异把 `hits==0` 加回判据 ⇒ 默认臂出现 `native-ovr: 异常` 行）。
+//   · 假 `.lst` 头部的 `; Input SHA256 :` 由测试按 PE 字节现算（main 的 A3 ⓪ 会逐字比）。
+// ★ 需要真实 GPU（`--present headless` 也建隐藏窗口）：无 GPU ⇒ 子进程拒绝启动 ⇒ SKIP 77
+//   （理由进输出；⛔ 不把"没跑"记成"跑绿了"）。`--report` 臂不需要 GPU，先跑它。
+// ★ CTest 宿主：顶层注册的 `stdout-quiet`（pure）。
+namespace {
+
+std::size_t countNewlines(const std::string& text) {
+    std::size_t n = 0;
+    for (char c : text) n += (c == '\n') ? 1u : 0u;
+    return n;
+}
+
+std::vector<std::string> splitLines(const std::string& text) {
+    std::vector<std::string> out;
+    std::size_t at = 0;
+    while (at <= text.size()) {
+        const std::size_t eol = text.find('\n', at);
+        if (eol == std::string::npos) {
+            if (at < text.size()) out.push_back(text.substr(at));
+            break;
+        }
+        out.push_back(text.substr(at, eol - at));
+        at = eol + 1;
+    }
+    return out;
+}
+
+bool hasLineStartingWith(const std::string& text, const char* prefix) {
+    for (const std::string& line : splitLines(text)) {
+        if (line.rfind(prefix, 0) == 0) return true;
+    }
+    return false;
+}
+
+/** 第 1 条以 `prefix` 开头的行是第几行（1-based；没有 ⇒ 0）。 */
+std::size_t firstLineStartingWith(const std::string& text, const char* prefix) {
+    const std::vector<std::string> lines = splitLines(text);
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        if (lines[i].rfind(prefix, 0) == 0) return i + 1;
+    }
+    return 0;
+}
+
+/**
+ * 最小 PE32：`.text`（RVA 0x1000 / raw 0x400，0x200 B）+ `.rdata`（RVA 0x2000 / raw 0x600）。
+ * 导入表布局（RVA）：0x2000 描述符 → 0x2028 OFT → 0x2040 "kernel32.dll" → 0x2060 IAT
+ *                    → 0x2080 hint+"ExitProcess" → 0x2090 hint+"CreateTimerQueue"。
+ * 入口代码：
+ *   6A 00              push 0            ; _memcpy 的 n = 0（零写，⛔ 不读不写任何 guest 页）
+ *   68 00 11 40 00     push 0x401100     ; src
+ *   68 00 11 40 00     push 0x401100     ; dst
+ *   E8 FF FF FF FF     call 0x401010     ; 假 `.lst` 的 `_memcpy proc near` ⇒ native override 命中
+ *   6A 00              push 0            ; ExitProcess(0)
+ *   FF 15 60 20 40 00  call dword ptr [0x00402060]
+ * 其余 `.text` 填 `nop`（块边界收口前不会撞到未映射页）。
+ */
+std::vector<std::uint8_t> quietFixturePe() {
+    constexpr std::size_t kPeOff = 0x40;
+    constexpr std::size_t kOpt = kPeOff + 24;
+    constexpr std::size_t kOptSize = 0xE0;
+    constexpr std::size_t kSec = kOpt + kOptSize;
+    constexpr std::uint32_t kTextRva = 0x1000;
+    constexpr std::uint32_t kRdataRva = 0x2000;
+    constexpr std::size_t kTextRaw = 0x400;
+    constexpr std::size_t kRdataRaw = 0x600;
+    constexpr std::size_t kFileSize = 0x800;
+    std::vector<std::uint8_t> b(kFileSize, 0);
+    auto w16 = [&b](std::size_t off, std::uint16_t v) { std::memcpy(b.data() + off, &v, sizeof(v)); };
+    auto w32 = [&b](std::size_t off, std::uint32_t v) { std::memcpy(b.data() + off, &v, sizeof(v)); };
+    auto at = [](std::uint32_t rva) { return static_cast<std::size_t>(kRdataRaw + (rva - kRdataRva)); };
+
+    b[0] = 'M';
+    b[1] = 'Z';
+    w32(0x3C, static_cast<std::uint32_t>(kPeOff));
+    b[kPeOff + 0] = 'P';
+    b[kPeOff + 1] = 'E';
+    w16(kPeOff + 4, 0x014Cu);   // Machine = i386
+    w16(kPeOff + 6, 2u);        // NumberOfSections
+    w16(kPeOff + 20, static_cast<std::uint16_t>(kOptSize));
+    w16(kPeOff + 22, 0x0102u);  // EXECUTABLE_IMAGE | 32BIT_MACHINE
+    w16(kOpt + 0, 0x010Bu);     // Magic = PE32
+    w32(kOpt + 16, kTextRva);   // AddressOfEntryPoint
+    w32(kOpt + 28, 0x00400000u);
+    w32(kOpt + 32, 0x1000u);    // SectionAlignment
+    w32(kOpt + 36, 0x200u);     // FileAlignment
+    w32(kOpt + 56, 0x3000u);    // SizeOfImage
+    w32(kOpt + 60, 0x400u);     // SizeOfHeaders
+    w32(kOpt + 72, 0x100000u);  // SizeOfStackReserve
+    w32(kOpt + 92, 3u);         // Subsystem = CONSOLE
+    w32(kOpt + 96 + 8, kRdataRva);
+    w32(kOpt + 96 + 12, 0x100u);
+    // .text
+    std::memcpy(b.data() + kSec, ".text", 5);
+    w32(kSec + 8, 0x200u);      // VirtualSize
+    w32(kSec + 12, kTextRva);
+    w32(kSec + 16, 0x200u);
+    w32(kSec + 20, kTextRaw);
+    w32(kSec + 36, 0x60000020u);
+    // .rdata
+    std::memcpy(b.data() + kSec + 40, ".rdata", 6);
+    w32(kSec + 40 + 8, 0x200u);
+    w32(kSec + 40 + 12, kRdataRva);
+    w32(kSec + 40 + 16, 0x200u);
+    w32(kSec + 40 + 20, kRdataRaw);
+    w32(kSec + 40 + 36, 0x40000040u);
+    // 入口代码
+    const std::vector<std::uint8_t> code = {
+        0x6A, 0x00,                                            // push 0
+        0x68, 0x00, 0x11, 0x40, 0x00,                          // push 0x401100
+        0x68, 0x00, 0x11, 0x40, 0x00,                          // push 0x401100
+        0xE8, 0xFF, 0xFF, 0xFF, 0xFF,                          // call 0x401010
+        0x6A, 0x00,                                            // push 0
+        0xFF, 0x15, 0x60, 0x20, 0x40, 0x00,                    // call [0x00402060]
+    };
+    std::memcpy(b.data() + kTextRaw, code.data(), code.size());
+    for (std::size_t i = kTextRaw + code.size(); i < kTextRaw + 0x200u; ++i) b[i] = 0x90u;  // nop
+    // 导入描述符
+    w32(at(0x2000), 0x2028u);   // OriginalFirstThunk（OFT）
+    w32(at(0x2000) + 12, 0x2040u);  // Name
+    w32(at(0x2000) + 16, 0x2060u);  // FirstThunk（IAT）
+    w32(at(0x2028), 0x2080u);   // thunk[0] = ExitProcess 的 Hint/Name
+    w32(at(0x2028) + 4, 0x2090u);   // thunk[1] = CreateTimerQueue
+    std::memcpy(b.data() + at(0x2040), "kernel32.dll", 13);
+    b[at(0x2060)] = 0;          // IAT 初值（bind 会覆盖）
+    b[at(0x2080)] = 0;          // hint = 0
+    b[at(0x2081)] = 0;
+    std::memcpy(b.data() + at(0x2082), "ExitProcess", 12);
+    b[at(0x2090)] = 0;
+    b[at(0x2091)] = 0;
+    std::memcpy(b.data() + at(0x2092), "CreateTimerQueue", 17);
+    return b;
+}
+
+/** 假 `.lst`：头部 SHA256 必须等于 PE 字节的 sha256。
+ *  两条 `proc near`：`_memcpy`（入口会 `call` ⇒ hits=1）与 `_memset`（**从不被调用** ⇒ hits=0）。
+ *  ★ 后者是"`hits==0` 不是异常"的机械来源：把 `hits==0` 加回异常判据 ⇒ 默认臂出现
+ *    `native-ovr: 异常 … _memset hits=0 …` ⇒ `stdout-quiet` 当场红。 */
+std::string quietFixtureLst(const std::vector<std::uint8_t>& pe) {
+    const std::string sha = lift::toHex(lift::sha256(pe));
+    std::string lst;
+    lst += ".text:00401000 ; Input SHA256 : " + sha + "\n";
+    lst += ".text:00401010 _memcpy proc near\n";
+    lst += ".text:00401020 _memset proc near\n";
+    return lst;
+}
+
+/** 默认档的 `native-ovr` per-entry 形态（启动清单与摘要清单共用同一列宽）。 */
+bool hasPerEntryOverrideLine(const std::string& text) {
+    for (const std::string& line : splitLines(text)) {
+        if (line.rfind("  _memcpy", 0) == 0) return true;
+        if (line.find(" @ 00401010 ") != std::string::npos) return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+int caseStdoutQuiet(const std::filesystem::path& exe) {
+    namespace fs = std::filesystem;
+    lift_test::g_current_case = "stdout-quiet";
+#if defined(_WIN32)
+    _putenv_s("SDL_VIDEODRIVER", "");
+#else
+    ::unsetenv("SDL_VIDEODRIVER");
+#endif
+    std::error_code ec;
+    fs::path dir = fs::temp_directory_path(ec);
+    if (ec || dir.empty()) dir = fs::current_path(ec);
+    const fs::path pe = dir / "lift-stdout-quiet.exe";
+    const fs::path lst = dir / "lift-stdout-quiet.lst";
+    {
+        const std::vector<std::uint8_t> bytes = quietFixturePe();
+        std::ofstream out(pe, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        if (!out) {
+            lift_test::failf(__FILE__, __LINE__, "写不了临时 PE：%s", pe.string().c_str());
+            return 1;
+        }
+        std::ofstream lo(lst, std::ios::binary | std::ios::trunc);
+        const std::string text = quietFixtureLst(bytes);
+        lo.write(text.data(), static_cast<std::streamsize>(text.size()));
+        if (!lo) {
+            lift_test::failf(__FILE__, __LINE__, "写不了临时 .lst：%s", lst.string().c_str());
+            return 1;
+        }
+    }
+
+    // ---- ① `--report` 臂：`  缺口 ` 明细必须**仍然**在（不需要 GPU）----
+    lift_test::g_current_case = "stdout-quiet/report-has-gaps";
+    {
+        // ★ 传夹具的 `--lst`：否则 main 的候选会命中 `../../corpus/...` 的**真** `.lst`
+        //   （sha256 当然对不上）⇒ 启动前 exit 1。这条臂不需要 GPU。
+        const ChildOutput r = runCaptured(
+            exe, {"--exe", pe.string(), "--lst", lst.string(), "--game-dir", dir.string(), "--report"});
+        LIFT_CHECK(r.started);
+        if (!r.started) return 1;
+        LIFT_CHECK_EQ_I64(r.exit_code, 0);
+        const bool gap_line = [&] {
+            for (const std::string& line : splitLines(r.out)) {
+                if (line.rfind("  缺口 kernel32!CreateTimerQueue", 0) == 0) return true;
+            }
+            return false;
+        }();
+        if (!gap_line) {
+            std::fprintf(stderr, "--report 臂没有 `  缺口 ` 明细；日志：\n%s\n", r.text.c_str());
+        }
+        LIFT_CHECK(gap_line);
+        std::printf("stdout-quiet/report-has-gaps: %zu 行（--report 保留具名缺口明细）\n",
+                    countNewlines(r.out));
+    }
+
+    // ---- ② 默认臂：≤25 行 / 无缺口明细 / 无 per-entry / 结论在前 10 行 ----
+    lift_test::g_current_case = "stdout-quiet/default";
+    const std::vector<std::string> quiet_args = {
+        "--exe", pe.string(), "--game-dir", dir.string(), "--lst", lst.string(),
+        "--present", "headless", "--audio", "off", "--native-overrides", "_memcpy,_memset",
+        "--max-insns", "80"};
+    const ChildOutput def = runCaptured(exe, quiet_args);
+    LIFT_CHECK(def.started);
+    if (!def.started) return 1;
+    LIFT_SKIP_IF_NO_GPU(def.exit_code, def.text);
+    if (def.exit_code != 0) {
+        std::fprintf(stderr, "stdout-quiet: 默认臂 exit=%d；日志：\n%s\n", def.exit_code, def.text.c_str());
+    }
+    LIFT_CHECK_EQ_I64(def.exit_code, 0);
+    // ★ 行数 / 位置只数 **stdout**：`out` 是本仓打的（结论 + 摘要 + 异常）；
+    //   stderr 里混着宿主框架自己的噪声（本机实测 7 行：TISFileInterrogator / Keyboard Layouts /
+    //   `Metal API Validation Enabled`），它们既不是本仓打的、也随机器变（analysis §7.2）。
+    const std::size_t lines = countNewlines(def.out);
+    if (lines > 25) {
+        std::fprintf(stderr, "stdout-quiet: 默认档 %zu 行（上限 25）；stdout：\n%s\n", lines,
+                     def.out.c_str());
+    }
+    LIFT_CHECK(lines <= 25);
+    LIFT_CHECK(!hasLineStartingWith(def.out, "  缺口 "));
+    LIFT_CHECK(!hasPerEntryOverrideLine(def.out));
+    const std::size_t stop_line = firstLineStartingWith(def.out, "stop      : ");
+    const std::size_t detail_line = firstLineStartingWith(def.out, "detail    : ");
+    LIFT_CHECK(stop_line >= 1 && stop_line <= 10);
+    LIFT_CHECK(detail_line >= 1 && detail_line <= 10);
+    // 负控：`--native-overrides` 真的生效了（汇总行在、两条都装进来）—— 否则"没有 per-entry"是恒真的。
+    LIFT_CHECK(hasLineStartingWith(def.out, "native-ovr: entries=2 "));
+    // ★ 异常判据**不含** `hits==0`：native override 无命中是完全正常的情况。默认臂里 `_memcpy` 命中
+    //   1 次、`_memset` 一次没被调用（hits=0）⇒ 一条真异常都没有（0 回退 / 0 declines）⇒
+    //   `native-ovr: 异常 …` 这一行不许出现。（变异：把 `hits == 0` 加回判据 ⇒ `_memset hits=0`
+    //   被误报 ⇒ 这行出现 ⇒ 当场红，见 `tools/mutate-check.mjs`。）
+    LIFT_CHECK(!hasLineStartingWith(def.out, "native-ovr: 异常 "));
+    // ★ A4 real-time 警告那一行**已删除**（A4 是 guest 执行 trace 的哈希可复现，headless 下仍成立；
+    //   正常游玩不需要"断言跳过"的提示）。默认臂必须**没有**它 —— 变异：加回去 ⇒ 当场红。
+    //   判据用合并流（`text`）：该行原本打在 stderr 上。
+    LIFT_CHECK(def.text.find("逐字节可复现断言自动跳过") == std::string::npos);
+    if (lines > 25 || !hasLineStartingWith(def.out, "native-ovr: entries=2 ")) {
+        std::fprintf(stderr, "stdout-quiet: 默认臂日志：\n%s\n", def.text.c_str());
+    }
+    std::printf("stdout-quiet/default: %zu 行（stop 第 %zu 行 / detail 第 %zu 行）\n", lines, stop_line,
+                detail_line);
+
+    // ---- ③ `--profile` 臂：per-entry 必须**仍然**在（折叠的唯一不破测试挂法）----
+    lift_test::g_current_case = "stdout-quiet/profile-has-entries";
+    {
+        std::vector<std::string> args = quiet_args;
+        args.push_back("--profile");
+        const ChildOutput r = runCaptured(exe, args);
+        LIFT_CHECK(r.started);
+        if (!r.started) return 1;
+        LIFT_CHECK_EQ_I64(r.exit_code, 0);
+        // 摘要里的明细行（`… hits=…`）与启动清单里的身份行（`… cdecl(12B)`）任一在即算"全打"。
+        bool per_entry = false;
+        for (const std::string& line : splitLines(r.out)) {
+            if (line.rfind("  _memcpy", 0) != 0) continue;
+            if (line.find("hits=") != std::string::npos || line.find("cdecl(") != std::string::npos) {
+                per_entry = true;
+                break;
+            }
+        }
+        if (!per_entry) {
+            std::fprintf(stderr, "stdout-quiet: --profile 臂没有 per-entry 行；日志：\n%s\n", r.text.c_str());
+        }
+        LIFT_CHECK(per_entry);
+        std::printf("stdout-quiet/profile-has-entries: %zu 行（--profile 保留 per-entry）\n",
+                    countNewlines(r.out));
+    }
+
+    std::error_code rmec;
+    fs::remove(pe, rmec);
+    fs::remove(lst, rmec);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     // ★ 启动期守卫（pure）：CMake 把 `$<TARGET_FILE:emulator-lift>` 传成 argv[2]。
     if (argc > 2 && std::string(argv[1]) == "--no-gpu-refuses-start") {
@@ -3381,6 +3717,10 @@ int main(int argc, char** argv) {
     if (argc > 2 && std::string(argv[1]) == "--raster-flag-gone") {
         caseRasterFlagGone(std::filesystem::path(argv[2]));
         return lift_test::finish("lift/raster-flag-gone");
+    }
+    if (argc > 2 && std::string(argv[1]) == "--stdout-quiet") {
+        caseStdoutQuiet(std::filesystem::path(argv[2]));
+        return lift_test::finish("stdout-quiet");
     }
     const bool gpu = argc > 1 && std::string(argv[1]) == "--gpu";
     if (gpu) {

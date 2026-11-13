@@ -221,8 +221,12 @@ int main(int argc, char** argv) {
 
     // 公共尾巴：显式 `--exe` / `--game-dir`，`--audio off`（不碰真设备），`--max-insns 1`
     //   ⇒ 运行**必停**在一条指令之后；`--time-limit` 的读数正好落在摘要里可比。
+    // ★ `--verbose`（`REQ-01M7AG06MXS6PK2B53B29QM76Z` 的取数方式）：下面的"五行逐字相同"要读
+    //   `trace-in` / `instr` / `blocks` —— 这三行是**逐项读数**，默认档（`--log-level warn`）
+    //   已被收进 `read :` 一行。**断言一条没删**，只是让子进程用 Verbose 档把五行都打出来，
+    //   否则那三条比较会退化成"两边都是空串"的恒真。
     const std::wstring common = L"--exe " + quoteArg(fake_exe.wstring()) + L" --game-dir " +
-                                quoteArg(root.wstring()) + L" --audio off --max-insns 1";
+                                quoteArg(root.wstring()) + L" --verbose --audio off --max-insns 1";
 
     auto run = [&](const char* tag, const std::wstring& extra) {
         const fs::path o = root / (std::string(tag) + ".out");
