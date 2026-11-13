@@ -1,0 +1,10 @@
+# plugins/wait-job 的 bundle patch —— 本插件作为 profile 的**一个 patch 层**被组合进来。
+#
+# 形态与其他 bundle 一致（见 `@deepseek-ai/dsh-base` 的 `cordis.patch.yml`）：
+# 一次 `insert`，一条 loader entry；`name` 是**包名**，DSH 按它 import 本包的主入口（`index.mjs`）。
+#
+# 本插件没有配置面（工具名固定为 `wait_job`，参数与口径见 README）。
+# ★ `inject: ['tools', 'jobs']` 写在 `index.mjs` 里 —— 没有 `ctx.jobs` 的 profile 不该装它。
+- insert:
+    - id: amayui-wait-job
+      name: '@amayui/dsh-plugin-wait-job'
