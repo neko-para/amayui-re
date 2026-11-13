@@ -2,9 +2,9 @@
 
 - id: REQ-01M7614GMRFD7DNE4DHNBEWZHW
 - type: req
-- status: blocked
+- status: done
 - parent: REQ-01M75WWFGT8ZEBGEPENQHSYTB8
-- blocked_by: [REQ-01M770JFDPZKKJR7D0ZZ09FJJ7]
+- done_reason: 结构性修复已落（Present 路径 7 处让出）；Windows/D3D12 验收读数在 REQ-01M770JFDPZKKJR7D0ZZ09FJJ7：holdhist>50ms 36→2、持有 251→56ms、fill_max 550→214.74、fill_slow=0，且 waithist>50ms 仍为 0（没把持有换成等待）
 - tags: [emulator-lift audio token]
 
 ## 背景

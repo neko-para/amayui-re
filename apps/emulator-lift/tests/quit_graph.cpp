@@ -27,6 +27,9 @@
 //   那样任何别的停因（no-code / 资源耗尽 / 超时）都会假绿。
 // ★ 图的最后一个节点是 `wait 10000 wall_ms`，ExitProcess 会让它**永远等不到** ⇒ 主进程退出码是 5
 //   （交互任务"没走完"）；那是这张图的形状，不是判据。⛔ 不要断言 exit 0。
+// ★ step8（`await script FELLOW`）的 60 s 超时写在**图里**：它是给 SN0000 右键之后一次 ~7–17 s 的
+//   **同步长活**留的余量（窗口里一次 Present 都没有、指令照涨）。依据 = trace 的 `node step8 enter`
+//   → `node step9 enter` 的 guest_ms 差（本图实测 7.4 s；save 图同形状节点 8.8 s / 16.8 s）。
 // ★ 子进程输出走**文件重定向**（⛔ 不走管道：受限沙箱里捕获管道会 EPERM）。
 #include <cstdint>
 #include <cstdio>

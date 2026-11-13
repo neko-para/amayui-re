@@ -14,6 +14,7 @@
 //     查不到就 `std::out_of_range` ⇒ 崩。名字只是**标签**，字形仍一律来自 Amayui CN。
 //   · 字体文件缺失 / FreeType 起不来 ⇒ 这些 API **返回失败值 + 一行日志**（⛔ 不画空白冒充成功）。
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -54,6 +55,21 @@ std::string readAnsiText(X86& cpu, ShimCall& call, int ptr_index, int cch_index)
     if (cch == 0) return {};
     const std::vector<std::uint8_t> bytes = call.bytes(ptr_index, static_cast<std::size_t>(cch));
     return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+}
+
+// ★ 临时诊断（`LIFT_TEXT_TRACE=1`；默认不输出）：前 N 字节的 hex（只给取证用，别当产物）。
+std::string textTraceHex(const std::string& bytes, std::size_t max) {
+    const std::size_t n = max < bytes.size() ? max : bytes.size();
+    std::string out;
+    char buf[4];
+    for (std::size_t i = 0; i < n; ++i) {
+        std::snprintf(buf, sizeof(buf), "%02X",
+                      static_cast<unsigned>(static_cast<std::uint8_t>(bytes[i])));
+        if (!out.empty()) out.push_back(' ');
+        out += buf;
+    }
+    if (bytes.size() > n) out += " ...";
+    return out;
 }
 
 void writeTextMetricA(GuestMemory& mem, std::uint32_t ea, const HostTextMetrics& tm) {
@@ -218,11 +234,33 @@ void shimGetGlyphOutlineA(X86& cpu, ShimCall& call) {
     }
 
     const char32_t cp = gdiCp932Char(uchar);
+    if (textTraceEnabled()) {
+        // ★ 假设 ① 的判据：引擎每个字符**各调一次**，uChar 是"打包的双字节"。若标题 3 个字变 6 次调用，
+        //   这里会看到 6 行 0x00XX（单字节）而不是 3 行 0xXXXX。
+        if (uchar > 0xFFu) {
+            textTrace(
+                "GetGlyphOutlineA uChar=0x%04X lead=0x%02X trail=0x%02X cp=U+%04X format=%u "
+                "cbBuffer=%u ret=%08X",
+                uchar, (uchar >> 8) & 0xFFu, uchar & 0xFFu, static_cast<unsigned>(cp), format,
+                cb_buffer, call.ret_ea);
+        } else {
+            textTrace(
+                "GetGlyphOutlineA uChar=0x%02X (single byte) cp=U+%04X format=%u cbBuffer=%u "
+                "ret=%08X",
+                uchar, static_cast<unsigned>(cp), format, cb_buffer, call.ret_ea);
+        }
+    }
     GlyphMask mask;
     if (!gdiGlyph(fonts, gdiEffectiveFont(dc->state), cp, &mask)) {
         shimLog("gdi32", "GetGlyphOutlineA", "没有可用的宿主字体 ⇒ GDI_ERROR");
         call.result = kGdiError;
         return;
+    }
+    if (textTraceEnabled()) {
+        textTrace(
+            "GetGlyphOutlineA ⇒ cp=U+%04X blackbox=%dx%d advance=%d origin=(%d,%d) ret=%08X",
+            static_cast<unsigned>(cp), mask.black_box_x, mask.black_box_y, mask.advance,
+            mask.origin_x, mask.origin_y, call.ret_ea);
     }
     writeGlyphMetrics(*cpu.mem, gm_ea, mask);
     if (format == kGgoMetrics) {
@@ -279,6 +317,11 @@ void shimGetTextExtentPoint32A(X86& cpu, ShimCall& call) {
         return;
     }
     const std::string text = readAnsiText(cpu, call, 1, 2);
+    if (textTraceEnabled()) {
+        textTrace("GetTextExtentPoint32A cchString=%d (raw) bytes=%zu first32=[%s]", call.i32(2),
+                  text.size(), textTraceHex(text, 32).c_str());
+        traceCp932Walk("GetTextExtentPoint32A", text);
+    }
     std::int32_t width = 0;
     std::int32_t height = 0;
     if (!gdiTextExtent(fonts, gdiEffectiveFont(dc->state), text, &width, &height)) {
@@ -298,6 +341,13 @@ void shimTextOutA(X86& cpu, ShimCall& call) {
     GdiDcObject* dc = requireDc(cpu, hdc, "TextOutA");
     FontEngine& fonts = requireFonts(cpu, "TextOutA");
     const std::string text = readAnsiText(cpu, call, 3, 4);
+    if (textTraceEnabled()) {
+        // TextOutA 没有 cbString（只有 cchString）；ExtTextOutA 才有 cbString —— 本线**没有**实现
+        // ExtTextOutA / DrawTextA（见 registerGdiFontShims 的登记面）。
+        textTrace("TextOutA cchString=%d (raw) x=%d y=%d bytes=%zu first32=[%s]", call.i32(4), x, y,
+                  text.size(), textTraceHex(text, 32).c_str());
+        traceCp932Walk("TextOutA", text);
+    }
     const TextDrawResult result =
         gdiDrawText(fonts, gdiEffectiveFont(dc->state), dc->state, x, y, text);
     if (result.surface_missing) {

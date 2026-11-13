@@ -772,15 +772,46 @@ void shimGetTextureStageState(X86& cpu, ShimCall& call) {
     call.result = d3d9::getTextureStageState(cpu, dev.state, call.u32(1), call.u32(2), call.u32(3), &why);
 }
 
+// IDirect3DDevice9::SetRenderTarget（vtable +0x94 / 槽 #37）
+//
+// ★ **签名是 D3D9 的，两个实参、没有 `pNewZStencil`**（MSDN `d3d9.h`）：
+//     HRESULT SetRenderTarget(DWORD RenderTargetIndex, IDirect3DSurface9* pRenderTarget);
+//   ⛔ 不是 D3D8 的
+//     HRESULT SetRenderTarget(IDirect3DSurface8* pRenderTarget, IDirect3DSurface8* pNewZStencil);
+//   ——这正是 REQ-01M780VKKRFHJEX6VM74DRCYBM 的成因：按 D3D8 形读会把 `RenderTargetIndex`(0)
+//   当成 `pRenderTarget`、把**纹理表面**当成 `pNewZStencil` ⇒ 目标被读成 0（后缓冲），
+//   「渲染到纹理」的绑定**静默丢弃**（流水线走"目标是后缓冲"的早退并返回 S_OK，连告警都没有），
+//   后果是存档缩略图 `SAVE00.STH` 全黑 —— 而引擎自己的失败分支（`0x4A778D cmp eax,esi`）也没被触发。
+//   引擎三站压参约定相同（`0x4A778B` / `0x4A515E` / `0x4A521B`）：
+//   `push <surface>` / `push <index=0>` / `push <device>` ⇒ 右→左 ⇒ (this, RenderTargetIndex, pRenderTarget)。
 void shimSetRenderTarget(X86& cpu, ShimCall& call) {
     d3d9::DeviceInfo dev;
     if (!requireDevice(cpu, call, "IDirect3DDevice9::SetRenderTarget(+0x94)", &dev)) {
         call.result = d3d9::kInvalidCall;
         return;
     }
+    const std::uint32_t rt_index = call.u32(1);  // 第 2 实参 = DWORD RenderTargetIndex（⛔ 不是 surface）
+    const std::uint32_t target = call.u32(2);    // 第 3 实参 = IDirect3DSurface9* pRenderTarget
+    // ★ 本线只有 RT0 一个渲染目标槽位。`rt_index != 0` **出声**拒绝（真机在没建过 RT1 时也是
+    //   D3DERR_INVALIDCALL）—— ⛔ 不许静默当成 RT0 绑下去：那会把"N 张 RT 的绑定"悄悄折叠成一张。
+    if (rt_index != 0) {
+        d3d9Warn("SetRenderTarget",
+                 "RenderTargetIndex=%u ≠ 0 ⇒ D3DERR_INVALIDCALL（本线只支持 RT0；"
+                 "pRenderTarget=0x%08X，ret=%08X）",
+                 rt_index, target, call.ret_ea);
+        call.result = d3d9::kInvalidCall;
+        return;
+    }
+    // `zstencil` 恒 0：D3D9 的这个方法**没有**深度模板参数（D3D8 才有 `pNewZStencil`）。
+    // 深度缓冲只有 `IDirect3DDevice9::SetDepthStencilSurface(+0x98)` 一处会换。
     std::string why;
-    const std::uint32_t hr = d3d9::setRenderTarget(cpu, dev.state, call.u32(1), call.u32(2), &why);
-    if (hr != d3d9::kOk) d3d9Log("SetRenderTarget", "失败：%s", why.c_str());
+    const std::uint32_t hr = d3d9::setRenderTarget(cpu, dev.state, target, 0, &why);
+    if (hr != d3d9::kOk) {
+        d3d9Warn("SetRenderTarget", "失败：%s（RT%u ← 0x%08X，ret=%08X）", why.c_str(), rt_index, target,
+                 call.ret_ea);
+    } else {
+        d3d9Log("SetRenderTarget", "RT%u ← 0x%08X（ret=%08X）", rt_index, target, call.ret_ea);
+    }
     call.result = hr;
 }
 

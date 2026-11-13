@@ -2221,6 +2221,37 @@ std::uint32_t setRenderTarget(X86& cpu, std::uint32_t dev, std::uint32_t target,
     std::uint32_t pe = 0;
     if (!pipelineOf(cpu, dev, &pe, why)) return kInvalidCall;
     const std::uint32_t old_surface = plGet(cpu, pe, kPlColorSurface);
+    // ★ **规范化**：`SetRenderTarget(0, <GetBackBuffer 拿到的那个表面>)` 与"绑定隐式后缓冲"在 D3D9 里
+    //   **语义等价** —— 引擎从 `GetBackBuffer` 拿到的就是后缓冲本身，它在 `0x4A521B` 那一站绑的是
+    //   那个 surface **对象**（不是 NULL）。⇒ 这里把两种写法规范成**同一种表示**（`target = 0`）。
+    //   ⛔ 这不是"放宽 GPU 准入"：准入层（`gpuEligible`）不该知道"某个 surface 能否代表后缓冲"这条
+    //   D3D 语义 —— 那是本函数的职责。把这条知识塞进准入层，以后每加一条绑定路径都要再擦一次。
+    //   （缺陷史：`REQ-01M780VKKRFHJEX6VM74DRCYBM` 的连带 —— shim 修好签名之后这个 surface 真的被绑上，
+    //   `color_surface != 0` 从此恒成立 ⇒ **每一批 draw 都退回 CPU 光栅**：实测 `gpu=0 fallback=125`、
+    //   ≈3 s/帧（修前 9.3 s / 修后 102.0 s 跑 30 帧）、`save-graph` / `quit-graph` 在 5 s 窗口里只够 2 帧。）
+    //   判据是**身份相等**：非纹理表面 ∧ 它的像素块 == 设备后缓冲的 arena（指针相等）。
+    //   ⛔ 不许用"尺寸 / 格式相同"这类近似判据 —— 那会把另一张同尺寸表面当成后缓冲写。
+    //   纹理表面**不走**这条（它 `color_surface != 0`，按现状走准入层的回退）。
+    //   ★ 出声（⛔ 不静默规范化）：静默的等价变换是下一个 bug 的藏身处，日志里要能看见"被认成后缓冲"。
+    if (target != 0 && cpu.com != nullptr) {
+        if (const char* const t_iface = cpu.com->ifaceOf(target);
+            t_iface != nullptr && std::strcmp(t_iface, "IDirect3DSurface9") == 0) {
+            const std::uint32_t t_state = cpu.com->userOf(target);
+            TextureInfo t_surf;
+            TextureInfo t_tex;
+            DeviceInfo di;
+            if (surfaceInfoOfState(cpu, t_state, &t_surf, nullptr) &&
+                deviceInfoOfState(cpu, dev, &di, nullptr) &&
+                !textureInfoOfState(cpu, t_state, &t_tex, nullptr) && di.arena != 0 &&
+                t_surf.arena == di.arena) {
+                pipeLog("SetRenderTarget",
+                        "RT0 ← 后缓冲表面 0x%08X（像素块 0x%08X 与设备后缓冲同址 ⇒ 规范化为隐式后缓冲）",
+                        target, t_surf.arena);
+                target = 0;
+            }
+        }
+    }
+
     // ★ 屏障（屏障清单「换 target」）：切换前先把已入队的 draw 画进**旧**目标并回读旧目标的
     //   guest 像素。理由：D3D9 允许换成另一张同尺寸 surface，后端只看尺寸/格式认不出来；
     //   而且切完之后即使一条 draw 都没有，Present 也不能把旧镜像的内容读进新后缓冲。

@@ -19,6 +19,10 @@ timeout 20000
 
 await script FELLOW
 wait 2000 wall_ms
+# FELLOW（SN0000 右键之后那一屏）在本机要穿过一次 ~9–17 s 的同步长活（nested guest call：
+# 窗口里一次 Present 都没有、指令照涨；实测本节点全程 8.8 s / 16.8 s）。缺省 5000 ms 必红
+# ⇒ 60 s（≈3.6× 实测上限）是给那次长活留的余量，⛔ 不是"刚好够"。
+timeout 60000
 
 click 100 140
 

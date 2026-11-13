@@ -189,3 +189,7 @@
 - **代价**：默认（无 `--profile` / `LIFT_AUDIO_TRACE`）零额外时钟、零原子写，摘要逐字节不变；
   **打开时 ≈ +45–50 ns/块 ⇒ ≈ +5–6% 墙钟** ⇒ ⛔ **`--bench --profile` 的 MIPS 不能当性能基准**。
 - **怎么量**：`--profile` 或 `LIFT_AUDIO_TRACE=1` 后读摘要这四行，与 `tokenwait`（M-04）**并列看**，⛔ 不要相加。
+- **A/B 的判据（⛔ 别拿"第 N 帧的 insns"）**：窗口交互 = 实时时钟（`--present window` 自动开 real-time，见 M-10）
+  ⇒ 两臂的 guest 时钟**各自**跟宿主墙钟走，**帧号 / 逐帧 `insns` 不可比**（两臂跑到同一帧号时并不是同一 guest 状态；
+  实测两臂只到 1542 / 1463 帧，且同一帧号的 `insns` 早期吻合、后段分叉）。A/B 只能用：
+  ① `insns_unattributed == 0`（native override 补账与块级闭合的机械判据）② **确定性口径**下的逐帧比较 ③ assets 档的 `cpu.insns` 精确相等。

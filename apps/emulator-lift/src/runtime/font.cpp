@@ -10,8 +10,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdarg>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <tuple>
@@ -26,6 +28,44 @@
 #include "runtime/vfs.h"  // openHostFileUtf8（Windows 的 UTF-8 路径）
 
 namespace lift {
+
+// =======================================================================================
+// ★ 临时诊断层（`LIFT_TEXT_TRACE=1`；默认零输出）—— 只为「读档标题乱码」这一单取证。
+//   ⛔ 不改行为；取证结束后可整段删（调用点各 1 个 `if (textTraceEnabled())`）。
+// =======================================================================================
+bool textTraceEnabled() {
+    static const bool on = std::getenv("LIFT_TEXT_TRACE") != nullptr;
+    return on;
+}
+
+void textTrace(const char* fmt, ...) {
+    if (!textTraceEnabled()) return;
+    std::fputs("[text-trace] ", stderr);
+    va_list ap;
+    va_start(ap, fmt);
+    std::vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    std::fputc('\n', stderr);
+    std::fflush(stderr);
+}
+
+void traceCp932Walk(const char* who, std::string_view bytes) {
+    if (!textTraceEnabled()) return;
+    const std::uint8_t* p = reinterpret_cast<const std::uint8_t*>(bytes.data());
+    std::size_t off = 0;
+    int index = 0;
+    textTrace("%s: walk len=%zu", who, bytes.size());
+    while (off < bytes.size() && index < 96) {
+        char16_t wide = 0;
+        const int consumed = cp932Decode(p + off, bytes.size() - off, &wide);
+        textTrace("%s: cp[%d] off=+%zu consumed=%d cp=U+%04X", who, index, off, consumed,
+                  static_cast<unsigned>(wide));
+        if (consumed <= 0) break;  // 非法序列：真路径也是"按 Windows 口径跳过 1 字节"
+        off += static_cast<std::size_t>(consumed);
+        ++index;
+    }
+}
+
 namespace {
 
 // ---------------------------------------------------------------------------------------
@@ -192,8 +232,16 @@ FT_Library ensureLibrary(FontEngine::Impl& impl) {
     return impl.lib;
 }
 
-FT_Face faceFromPath(FontEngine::Impl& impl, const std::string& path) {
-    if (path.empty()) return nullptr;
+// ★ 临时诊断用：`face->charmap` 在 `face->charmaps[0..num_charmaps)` 里的下标（-1 = 没有）。
+int traceCharmapIndex(FT_Face face) {
+    if (face == nullptr || face->charmap == nullptr) return -1;
+    for (int i = 0; i < face->num_charmaps; ++i) {
+        if (face->charmaps[i] == face->charmap) return i;
+    }
+    return -1;
+}
+
+FT_Face faceFromPath(FontEngine::Impl& impl, const std::string& path) {    if (path.empty()) return nullptr;
     const auto it = impl.faces.find(path);
     if (it != impl.faces.end()) return it->second;
     if (ensureLibrary(impl) == nullptr) return nullptr;
@@ -204,6 +252,18 @@ FT_Face faceFromPath(FontEngine::Impl& impl, const std::string& path) {
         return nullptr;
     }
     impl.faces.emplace(path, face);
+    if (textTraceEnabled()) {
+        // 假设 ② 的判据：这个 face 里到底有几张 cmap 子表、各自 platform/encoding 是什么，
+        // FreeType 默认**选中**了哪一张（`face->charmap`）。平台 1 = Mac（cnjp 重写时被跳过的那张）。
+        textTrace("face %s: num_charmaps=%d selected=%d", path.c_str(), face->num_charmaps,
+                  traceCharmapIndex(face));
+        for (int i = 0; i < face->num_charmaps; ++i) {
+            const FT_CharMap c = face->charmaps[i];
+            textTrace("  charmap[%d] platformID=%u encodingID=%u ft_encoding=0x%08X", i,
+                      static_cast<unsigned>(c->platform_id), static_cast<unsigned>(c->encoding_id),
+                      static_cast<unsigned>(c->encoding));
+        }
+    }
     return face;
 }
 
@@ -343,6 +403,16 @@ bool FontEngine::glyph(char32_t cp, int pixel_size, bool bold, GlyphMask* out) {
                          "GetGlyphOutlineA / GetTextMetricsA / TextOutA 会返回失败\n");
         }
         return false;
+    }
+    if (textTraceEnabled()) {
+        // 假设 ② 的判据：**选中的那张 cmap 子表**（platformID / encodingID）+ 该码位查到的 glyph id。
+        const FT_CharMap cm = face->charmap;
+        textTrace("glyph cp=U+%04X size=%d bold=%d charmap[%d] platformID=%u encodingID=%u glyphID=%u",
+                  static_cast<unsigned>(cp), size, bold ? 1 : 0,
+                  cm ? traceCharmapIndex(face) : -1,
+                  cm ? static_cast<unsigned>(cm->platform_id) : 999u,
+                  cm ? static_cast<unsigned>(cm->encoding_id) : 999u,
+                  static_cast<unsigned>(FT_Get_Char_Index(face, static_cast<FT_ULong>(cp))));
     }
     if (FT_Load_Char(face, static_cast<FT_ULong>(cp), FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL) != 0) {
         return false;

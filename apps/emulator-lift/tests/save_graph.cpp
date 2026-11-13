@@ -15,6 +15,10 @@
 //   在本机要分钟级，图会先超时。窗口 / GPU 不可用 ⇒ 测试自己 SKIP 77（⛔ 不记成红）。
 // ★ 图的最后一段是 5×`wait 5000 wall_ms`（存档 + 缩略图收口；见 graph 里的注释）——
 //   图结束时 `interaction: task done` 就会停，主进程退出码 0。
+// ★ step8（`await script FELLOW`）的 60 s 超时写在**图里**（不是这里）：它是给 SN0000 右键之后
+//   一次 ~9–17 s 的**同步长活**留的余量（窗口里一次 Present 都没有、指令照涨）。依据 = trace 的
+//   `node step8 enter` → `node step9 enter` 的 guest_ms 差（实测 8.8 s / 16.8 s 两次）；缺省的
+//   5000 ms 在本机会在长活中途就判到期。⛔ 这个数不是断言，只是超时余量的出处。
 // ★ 子进程输出走**文件重定向**（⛔ 不走管道：受限沙箱里捕获管道会 EPERM）。
 #include <cstdint>
 #include <cstdio>
@@ -222,6 +226,30 @@ int main(int argc, char** argv) {
     LIFT_CHECK(sth_size > 1000u);    // 实测 ~173 KB
     std::printf("save-graph: SAVE00.DAT=%llu B, SAVE00.STH=%llu B\n", static_cast<unsigned long long>(dat_size),
                 static_cast<unsigned long long>(sth_size));
+
+    // ③ 缩略图内容 —— **本条用例不断言它**（`REQ-01M780VKKRFHJEX6VM74DRCYBM`）
+    //    `SAVE00.STH` 是 320×180 24bpp 的 BMP：**偏移 54** 之前是头（14 B `BITMAPFILEHEADER` +
+    //    40 B `BITMAPINFOHEADER` = `bfOffBits` 54），54 之后 172,800 B 才是像素。
+    //    ⛔ 本单**没有**把"payload 非零 > 0"留成断言：那条判据（修前红、修后绿）在这里达不成 ——
+    //    shim 的签名修好、`0x4A778B` 那条「渲染到纹理」**真的绑上了**（日志 `目标 = 纹理表面` /
+    //    `RT0 ← …（ret=004A778D）`）、GPU 也恢复了（`gpu=6999 fallback=2`），但 STH payload 仍全 0
+    //    ⇒ 缺口在**「纹理当渲染目标」这条路**（本线只有 CPU 光栅填它；GPU 侧还没做）与随后的读回。
+    //    这两件事由「GPU 支持纹理当渲染目标」那一单达成，本单不再用一个恒红的断言占位
+    //    （⛔ 也不写成 SKIP 或假绿）。
+    //    ★ 下面那行只是**读数**（不是断言）：后续那一单把它当基线，别在这里加 LIFT_CHECK。
+    if (!sth.empty()) {
+        constexpr std::size_t kBmpHeaderBytes = 54u;  // bfOffBits = BITMAPFILEHEADER(14) + BITMAPINFOHEADER(40)
+        const std::string st_bytes = readAll(sth);
+        std::size_t nonzero = 0;
+        for (std::size_t i = kBmpHeaderBytes; i < st_bytes.size(); ++i) {
+            if (st_bytes[i] != '\0') ++nonzero;
+        }
+        const std::size_t payload = st_bytes.size() > kBmpHeaderBytes ? st_bytes.size() - kBmpHeaderBytes : 0u;
+        std::printf("save-graph: SAVE00.STH payload 非零字节 = %llu（偏移 %llu 之后，共 %llu B；读数，非断言）\n",
+                    static_cast<unsigned long long>(nonzero),
+                    static_cast<unsigned long long>(kBmpHeaderBytes),
+                    static_cast<unsigned long long>(payload));
+    }
     if (lift_test::g_failures > 0) printFailureExcerpt(log);
     return finish("save-graph");
 }

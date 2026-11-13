@@ -957,6 +957,127 @@ PcmSnapshot runPcm(const std::vector<std::uint8_t>& code_range, const std::vecto
     return out;
 }
 
+// ---- `sub_42F560` 的**插入排序内层扫描**段：真字节两臂（解释器 vs 段级 override）----
+//
+// 执行区域 = `[0x42F5E0, 0x42F6EB)` ∪ `{0x42F783..0x42F793}`（落位块在 `0x42F782 retn` 之后，
+// 靠 `0x42F793 jmp 0x42F6EB` 回出口）⇒ 两臂都停在 `0x42F6EB`（resume）。
+//
+// 判据（红了意味着什么；缺一条都不算）：
+//   ① 同一份**真字节**（`0x42F560..0x42F798` = 整个 `sub_42F560`，跑的是真控制流而不是手抄复述）
+//      放进 bare 机的**同一 EA**，同一份夹具跑解释器臂 vs 段级 override 臂；
+//   ② `A[0..g_n]` 逐字节 + `g_j` + `g_n`（不许变）+ `seed`（不许变）+ `B` / `C`（不许变）+ `EIP`；
+//   ③ `ESP` / `EBP` / `ESI`（出口 `0x42F6F8 mov ecx,esi` 还要用 ESI）；
+//   ④ `cpu.insns` **精确相等** —— `replaced_insns` 闭式（`63c+1` / `63c+7`）的**唯一硬判据**。
+//      ★ 漏算落位块那 4 条只差 0.013%（窗口内 ~4795×4 条 / 145M）⇒ A/B 的 `|Δ| ≤ 1%` 抓不到。
+//   ⑤ `hits == 1` / `declines == 0` / `fallbacks == 0`（伴随：真的被接管、没有静默回退）。
+//   ⑥ 部分用例额外钉"**期望的** `A[0..i]`"（`want_a`）—— 防止夹具本身变成空转（两臂一致但根本没走到
+//      想测的那条分支，例如"等键 ⇒ 停"根本没被触发）。
+// ★ 比较集合**不含** `EAX EBX ECX EDX EDI EFLAGS`，也不含 `[ebp-0x14, ebp)` 那 5 个 scratch：
+//   它们是**登记的已知边界**（出口后全被重写 / 被 `pop` 恢复 ⇒ 不可观察；scratch 是本函数自己的死区）。
+//   ⛔ 比了必假红 —— 理由见 `native_overrides.h` 的"寄存器 / ABI"段落（与 `nativeFillPool414AC0`
+//   复刻 EAX/EDX/ECX/EFLAGS 的差别是**有意的**）。
+struct SortSegCase {
+    std::string name;
+    std::uint32_t i = 1;                  // = g_n（本轮插入位置；`A[0..i-1]` 是已排好的下标前缀）
+    std::uint32_t seed = 0;
+    std::vector<std::uint32_t> prefix;    // A[0..i-1] 的初值（必须都 < i：G7）
+    std::vector<std::uint32_t> b;         // B[0..i]
+    std::vector<std::uint32_t> c;         // C[0..i]
+    std::vector<std::uint32_t> want_a;    // 非空 ⇒ 额外钉期望的 A[0..i]（独立性断言）
+};
+
+struct SortSegSnapshot {
+    bool valid = false;
+    std::uint32_t eip = 0, esp = 0, ebp = 0, esi = 0, gj = 0, gn = 0, seed = 0;
+    std::vector<std::uint8_t> a, b, c;  // 各 `4*(g_n+1)` 字节
+    std::uint64_t insns = 0, hits = 0, declines = 0, fallbacks = 0;
+};
+
+SortSegSnapshot runSortSeg(const std::vector<std::uint8_t>& code, const SortSegCase& c, bool with_override) {
+    SortSegSnapshot out;
+    lift_fixture::Fixture fx;
+    if (!fx.ok) return out;
+    constexpr std::uint32_t kEntryEa = 0x0042F5E0u;
+    constexpr std::uint32_t kResumeEa = 0x0042F6EBu;
+    constexpr std::uint32_t kGlobals = 0x0055D598u;  // g_j / g_n / C / B / A（五个 dword）
+    constexpr std::uint32_t kAArr = 0x00450000u;
+    constexpr std::uint32_t kBArr = 0x00460000u;
+    constexpr std::uint32_t kCArr = 0x00470000u;
+    constexpr std::uint32_t kEsi = 0x00430000u;
+    constexpr std::uint32_t kSeedEa = 0x0048EC8Cu;  // = kEsi + 0x5EC8C
+    constexpr std::uint32_t kFrame = 0x00490020u;   // ebp（`[ebp-0x14, ebp)` 是本函数自己的 scratch）
+    if (c.i == 0u || static_cast<std::uint32_t>(c.prefix.size()) != c.i ||
+        static_cast<std::uint32_t>(c.b.size()) != c.i + 1u ||
+        static_cast<std::uint32_t>(c.c.size()) != c.i + 1u)
+        return out;
+    const std::size_t span = static_cast<std::size_t>(4ull * (static_cast<std::uint64_t>(c.i) + 1ull));
+    const std::size_t block = span + 64u;
+    if (!fx.m.placeCode(0x0042F560u, code.data(), code.size(), &fx.err)) return out;
+    const std::vector<std::uint8_t> zeros(block, 0);
+    if (!fx.m.placeData(kGlobals, zeros.data(), 20u, &fx.err)) return out;
+    if (!fx.m.placeData(kAArr, zeros.data(), block, &fx.err)) return out;
+    if (!fx.m.placeData(kBArr, zeros.data(), block, &fx.err)) return out;
+    if (!fx.m.placeData(kCArr, zeros.data(), block, &fx.err)) return out;
+    if (!fx.m.placeData(kSeedEa, &c.seed, 4u, &fx.err)) return out;
+    if (!fx.m.placeData(kFrame - 0x20u, zeros.data(), 0x40u, &fx.err)) return out;
+    lift::GuestMemory& mem = fx.m.mem();
+    for (std::uint32_t k = 0; k < c.i; ++k) mem.wr32(kAArr + 4u * k, c.prefix[k]);
+    for (std::uint32_t k = 0; k <= c.i; ++k) {
+        mem.wr32(kBArr + 4u * k, c.b[k]);
+        mem.wr32(kCArr + 4u * k, c.c[k]);
+    }
+    mem.wr32(kGlobals + 0u, 0xFFFFFFFFu);  // g_j 初值（段内会被重写）
+    mem.wr32(kGlobals + 4u, c.i);         // g_n
+    mem.wr32(kGlobals + 8u, kCArr);       // C
+    mem.wr32(kGlobals + 12u, kBArr);      // B
+    mem.wr32(kGlobals + 16u, kAArr);      // A
+    if (with_override) {
+        std::string err;
+        if (!fx.m.blockOverrides().add(kEntryEa, kResumeEa, "ref_sortseg", lift::nativeSortStep42F560, &err))
+            return out;
+    }
+    lift::X86& cpu = fx.m.cpu();
+    fx.rearmStack();
+    // 段内会被重写的"死寄存器"给一组可辨认的初值（它们**不进**比较集合，只用来保证夹具确定）。
+    cpu.eax() = 0x11111111u;
+    cpu.ebx() = 0x22222222u;
+    cpu.ecx() = c.i;
+    cpu.edx() = 0x33333333u;
+    cpu.esi() = kEsi;
+    cpu.edi() = 0x44444444u;
+    cpu.ebp() = kFrame;
+    cpu.eflags = 0x202u;
+    cpu.eip = kEntryEa;
+    lift::RunOptions o;
+    o.until_ea = kResumeEa;
+    o.max_insns = 4000000ull;  // i = 4096 时解释器臂 ≈ 258k 条
+    const lift::RunResult r = fx.m.run(o);
+    if (r.reason != lift::StopReason::UntilEa) {
+        fx.ok = false;
+        fx.err = std::string("意外停机：") + lift::stopReasonName(r.reason) + " — " + r.detail;
+    }
+    if (!fx.ok) return out;
+    out.valid = true;
+    out.eip = cpu.eip;
+    out.esp = cpu.esp();
+    out.ebp = cpu.ebp();
+    out.esi = cpu.esi();
+    out.gj = mem.rd32(kGlobals + 0u);
+    out.gn = mem.rd32(kGlobals + 4u);
+    out.seed = mem.rd32(kSeedEa);
+    out.a.assign(mem.host(kAArr), mem.host(kAArr) + span);
+    out.b.assign(mem.host(kBArr), mem.host(kBArr) + span);
+    out.c.assign(mem.host(kCArr), mem.host(kCArr) + span);
+    out.insns = cpu.insns;
+    if (with_override) {
+        const lift::NativeBlockOverride* e = fx.m.blockOverrides().at(0);
+        out.hits = e->hits;
+        out.declines = e->declines;
+        out.fallbacks = e->fallbacks;
+    }
+    return out;
+}
+
 // ---- `_memcpy`（`0x4E74B0`）的**重叠**差分：真字节两臂（解释器 vs override）----
 //
 // ★ 为什么这条只能放在 assets 档：`.lst` 把 `_memcpy` / `_memcpy_0` 记成 COLLAPSED
@@ -2869,6 +2990,139 @@ int main() {
                              c.name.c_str(), base.flag, base.eax, base.edx, base.fpu_status,
                              (unsigned long long)base.insns, ovr.flag, ovr.eax, ovr.edx, ovr.fpu_status,
                              (unsigned long long)ovr.insns);
+            }
+        }
+    }
+
+    // ---- ⑦ `sub_42F560` 的**插入排序扫描段**（`0x42F5E0..0x42F6EB` ∪ 落位块）：真字节两臂 ----
+    // 判据见 `runSortSeg` 上方。★ 这是候选 A（`fellow-enter` 卡顿主因）的语义证据：
+    //   `cpu.insns` **精确相等**是 `replaced_insns` 闭式的唯一硬判据（A/B 的 |Δ|≤1% 抓不到那 4 条）。
+    {
+        const std::vector<std::uint8_t> code_sort = img.at(0x0042F560u, 0x0042F798u - 0x0042F560u);
+        LIFT_CHECK(code_sort.size() == 0x238u);
+        auto u32At = [](const std::vector<std::uint8_t>& v, std::size_t off) {
+            std::uint32_t x = 0;
+            for (int k = 0; k < 4; ++k) x |= static_cast<std::uint32_t>(v[off + static_cast<std::size_t>(k)]) << (8 * k);
+            return x;
+        };
+        // 夹具用的键 —— **独立转写** `.lst` `0x42F60D..0x42F616` 的 `rol 0Bh` / `xor` / `ror 19h`。
+        // 只用来把 A 的前缀摆成"已排好"；⛔ 它不是 oracle（oracle = 解释器臂跑的那份真字节）。
+        auto keyOf = [](std::uint32_t seed, std::uint32_t v) {
+            const std::uint32_t rolled = (v << 11) | (v >> 21);
+            const std::uint32_t mixed = rolled ^ seed;
+            return (mixed >> 25) | (mixed << 7);
+        };
+        std::vector<SortSegCase> cases;
+        // ① 通用：前缀 = 用同一套键做**稳定插入**得到的 `0..i-1`；再插 `i`。
+        //    覆盖"Stopped 在任意位置"、`c` 从 1 到 `i`、以及键单调时的 RanOut；
+        //    `i = 4096` 是**预算闸门的上界本身**（`i > kSortSegMaxStep` 才拒绝 ⇒ 4096 必须接管）。
+        auto mkGeneral = [&](std::uint32_t i, std::uint32_t salt) {
+            SortSegCase c;
+            c.name = "sortseg/bytes-diff/i" + std::to_string(i) + "-salt" + std::to_string(salt);
+            c.i = i;
+            c.seed = 0x12345678u + salt * 0x9E3779B9u;
+            c.b.resize(static_cast<std::size_t>(i) + 1u);
+            c.c.resize(static_cast<std::size_t>(i) + 1u);
+            for (std::uint32_t k = 0; k <= i; ++k) {
+                c.b[k] = (k * 37u + 11u + salt * 101u) % 251u;
+                c.c[k] = (k * 53u + 7u + salt * 57u) % 241u;
+            }
+            auto key = [&](std::uint32_t x) { return keyOf(c.seed, c.b[x]) + keyOf(c.seed, c.c[x]); };
+            for (std::uint32_t k = 0; k < i; ++k) {
+                std::size_t p = c.prefix.size();
+                while (p > 0u && key(c.prefix[p - 1u]) > key(k)) --p;  // `<=` 停 ⇒ 稳定
+                c.prefix.insert(c.prefix.begin() + static_cast<std::vector<std::uint32_t>::difference_type>(p), k);
+            }
+            return c;
+        };
+        for (std::uint32_t i : {1u, 2u, 3u, 5u, 17u, 64u, 480u, 4096u}) cases.push_back(mkGeneral(i, 1u));
+        cases.push_back(mkGeneral(9u, 2u));
+        // ② 等键（**只有这条能抓"`<=` 改成 `<`"**）：`K(0) == K(2) != K(1)`。
+        //    `B = {0,5,0}` / `C = 0` / `seed = 0` ⇒ `K(0) = K(2) = 0`、`K(1) = rol(5,18)`。
+        //    `i = 2` + 前缀 `[0,1]` ⇒ 期望 `[0,2,1]`；停判据改成 `<` ⇒ `[2,0,1]`（等键元素被顶到前面）。
+        {
+            SortSegCase c;
+            c.name = "sortseg/stable-equal-keys";
+            c.i = 2u;
+            c.seed = 0u;
+            c.prefix = {0u, 1u};
+            c.b = {0u, 5u, 0u};
+            c.c = {0u, 0u, 0u};
+            c.want_a = {0u, 2u, 1u};
+            cases.push_back(std::move(c));
+        }
+        // ③ RanOut（一直插到表头）：键严格降序 ⇒ `p = -1`、`g_j = 0xFFFFFFFF`、闭式走 `63c+7`。
+        //    跑通它才可能抓"`+3` 写成 `+4`"。
+        {
+            SortSegCase c;
+            c.name = "sortseg/ranout";
+            c.i = 3u;
+            c.seed = 0u;
+            c.prefix = {0u, 1u, 2u};
+            c.b = {3u, 2u, 1u, 0u};
+            c.c = {0u, 0u, 0u, 0u};
+            c.want_a = {3u, 0u, 1u, 2u};
+            cases.push_back(std::move(c));
+        }
+        // ④ 第一次比较就停（`c == 1`）：`replaced = 4 + 56 + 4 = 64 = 63*1+1`；A 基本不动。
+        {
+            SortSegCase c;
+            c.name = "sortseg/stopped-first";
+            c.i = 5u;
+            c.seed = 0u;
+            c.prefix = {0u, 1u, 2u, 3u, 4u};
+            c.b = {0u, 1u, 2u, 3u, 4u, 5u};
+            c.c = {0u, 0u, 0u, 0u, 0u, 0u};
+            c.want_a = {0u, 1u, 2u, 3u, 4u, 5u};
+            cases.push_back(std::move(c));
+        }
+        for (const SortSegCase& c : cases) {
+            lift_test::g_current_case = c.name.c_str();
+            const SortSegSnapshot base = runSortSeg(code_sort, c, false);
+            const SortSegSnapshot ovr = runSortSeg(code_sort, c, true);
+            LIFT_CHECK(base.valid && ovr.valid);
+            if (!base.valid || !ovr.valid) continue;
+            // ② 内存：`A[0..g_n]` / `B` / `C` 逐字节；`g_j` / `g_n` / `seed` 逐值
+            LIFT_CHECK(base.a == ovr.a);
+            LIFT_CHECK(base.b == ovr.b);
+            LIFT_CHECK(base.c == ovr.c);
+            LIFT_CHECK_EQ_U32(ovr.gj, base.gj);
+            LIFT_CHECK_EQ_U32(ovr.gn, base.gn);
+            LIFT_CHECK_EQ_U32(ovr.seed, base.seed);
+            // ③ 出口（`ESP` / `EBP` / `ESI` 必须原样；`EIP` 必须是 resume）
+            LIFT_CHECK_EQ_U32(ovr.eip, base.eip);
+            LIFT_CHECK_EQ_U32(ovr.eip, 0x0042F6EBu);
+            LIFT_CHECK_EQ_U32(ovr.esp, base.esp);
+            LIFT_CHECK_EQ_U32(ovr.ebp, base.ebp);
+            LIFT_CHECK_EQ_U32(ovr.esi, base.esi);
+            // ④ 指令总数**精确相等**（闭式 + dispatcher 补账）
+            LIFT_CHECK(base.insns == ovr.insns);
+            // ⑤ 真的被接管 / 没有静默回退
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.hits), 1u);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.declines), 0u);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.fallbacks), 0u);
+            // ⑥ 独立性断言（只对给了期望值的用例）：防止夹具空转成"两臂一致但没走到那条分支"
+            if (!c.want_a.empty()) {
+                const std::size_t want_bytes = c.want_a.size() * 4u;
+                LIFT_CHECK(base.a.size() >= want_bytes);
+                LIFT_CHECK(ovr.a.size() >= want_bytes);
+                if (base.a.size() >= want_bytes && ovr.a.size() >= want_bytes) {
+                    for (std::size_t k = 0; k < c.want_a.size(); ++k) {
+                        LIFT_CHECK_EQ_U32(u32At(ovr.a, 4u * k), c.want_a[k]);
+                        LIFT_CHECK_EQ_U32(u32At(base.a, 4u * k), c.want_a[k]);
+                    }
+                }
+            }
+            if (base.a != ovr.a || base.insns != ovr.insns || base.gj != ovr.gj) {
+                const std::size_t max_at = base.a.size() < ovr.a.size() ? base.a.size() : ovr.a.size();
+                std::size_t at = 0;
+                while (at + 4u <= max_at && u32At(base.a, at) == u32At(ovr.a, at)) at += 4u;
+                std::fprintf(stderr,
+                             "  [%s] A 首个差异在 A[%zu]（base=%08X ovr=%08X）gj base=%08X ovr=%08X "
+                             "insns base=%llu ovr=%llu\n",
+                             c.name.c_str(), at / 4u, at + 4u <= max_at ? u32At(base.a, at) : 0u,
+                             at + 4u <= max_at ? u32At(ovr.a, at) : 0u, base.gj, ovr.gj,
+                             (unsigned long long)base.insns, (unsigned long long)ovr.insns);
             }
         }
     }

@@ -327,8 +327,26 @@ const KnownBlockNative kKnownBlocks[] = {
     // ⇒ `feeder_ok=true`。段体内不含设备格式 / 分配 / guest 回调。
     {"sub_48D610", "sub_48D610", 0x0048D767u, 0x0048D89Au, nativePcm48D767,
      "mov eax, [ebp+var_118]", "mov eax, [ebp+var_114]", /*feeder_ok=*/true},
+    // `sub_42F560` 的**插入排序内层扫描**段（`fellow-enter` 卡顿主因；契约见 `native_overrides.h`）。
+    // ★ 执行区域 = `[0x42F5E0, 0x42F6EB)` ∪ `{0x42F783..0x42F793}`（落位块在 `0x42F782 retn` **之后**，
+    //   靠 `0x42F793 jmp 0x42F6EB` 回出口）⇒ `resume_ea` 仍然唯一。
+    // ★ 两个锚的期望文本逐字取自 `.lst`（`entry` = `lea eax,[ecx-1]` / `resume` = `mov edi,1`）。
+    //   写成别的（例如 `loc_42F5E0`）⇒ `verifyKnownBlockAnchor` 失败 ⇒ `addBlock` 的 `required=false`
+    //   分支**静默跳过** ⇒ `all` 里没有这一项而所有差分类测试照样绿（那条路径只能靠 assets 的
+    //   `loader` 用例抓，本单不新增）。
+    // ★ `feeder_ok=false`：段级项与音频喂料线程无关（`true` 只会白付一次每迭代的函数调用）。
+    // ★ **`debug` 必须显式 `false`**：`all` 会跳过 `debug=true` 的项（`machine.cpp` 的 configure），
+    //   而 A 的 A/B 就是 `all` vs `all,-sub_42F560` ⇒ 没进 `all` 的表现是"两臂一模一样、全绿"。
+    {"sub_42F560", "sub_42F560", 0x0042F5E0u, 0x0042F6EBu, nativeSortStep42F560,
+     "lea eax, [ecx-1]", "mov edi, 1", /*feeder_ok=*/false, /*debug=*/false},
 };
 constexpr std::size_t kKnownBlockCount = sizeof(kKnownBlocks) / sizeof(kKnownBlocks[0]);
+// ★ 段表的容量同样是**硬约束**（A7-5）：`--native-overrides all` 会把每个 `debug == false` 的段级项都
+//   `add()` 一遍，装不下 ⇒ `configureNativeOverrides` 返回 false ⇒ **模拟器直接拒绝启动**。
+//   以前只有函数表有这条断言（`kKnown` 那条），段表没有 ⇒ 加第 5 个段级项时是"运行时起不来"
+//   而不是编译错。判据与函数表那条同形。
+static_assert(kKnownBlockCount <= NativeBlockTable::kMax,
+              "kKnownBlocks[] 的项数超过 NativeBlockTable::kMax：请同时抬高 kMax（见 native_overrides.h）");
 }  // namespace
 
 const KnownNative* findKnownNative(const std::string& name) {
@@ -737,6 +755,137 @@ bool nativeLzss4367B0(X86& cpu, GuestMemory& mem, std::uint32_t* result) {
     mem.wr32(info_ea + 8u, r.comp);      // a3[2] = comp
     *result = p;                         // EAX = [this+0xD42C] = p
     return true;
+}
+
+// =======================================================================================
+// `sub_42F560` · 插入排序内层扫描段（**段级**；契约 / 闸门 / 闭式见 `native_overrides.h` 的对应段落）
+//
+// ★ 为什么实现落在本文件（而文件头说"这里不放具体热点实现"）：本单的改动面被钉成
+//   "native_overrides.h / native_overrides.cpp / tests/native_override*.cpp"（与上面 `sub_4367B0`
+//   完全同一情形）⇒ 纯核 + 薄包装都放这里。⛔ 不要因为它在这里就把它当成机制的一部分去复用。
+// =======================================================================================
+namespace {
+
+// 五个 guest 全局：`.lst` 的**绝对 EA 是锚**（⛔ 不从 `this`/名字推）。
+//   `g_j` = 0x55D598（`0x42F5E3` 写 / `0x42F6BD` / `0x42F6CA` 读）、`g_n` = 0x55D59C（`0x42F651` / `0x42F682` 读）、
+//   `C` = 0x55D5A0（`0x42F62A`）、`B` = 0x55D5A4（`0x42F5F9` / `0x42F656`）、`A` = 0x55D5A8（`0x42F5F0` / `0x42F6B2`）。
+constexpr std::uint32_t kSortSegGj = 0x0055D598u;
+constexpr std::uint32_t kSortSegGlobalsEa = 0x0055D598u;
+constexpr std::uint32_t kSortSegGlobalsBytes = 5u * 4u;  // [0x55D598, 0x55D5AC) 五个 dword（G5）
+constexpr std::uint32_t kSortSegGn = 0x0055D59Cu;
+constexpr std::uint32_t kSortSegC = 0x0055D5A0u;
+constexpr std::uint32_t kSortSegB = 0x0055D5A4u;
+constexpr std::uint32_t kSortSegA = 0x0055D5A8u;
+constexpr std::uint32_t kSortSegSeedOff = 0x0005EC8Cu;   // seed = [esi + 0x5EC8C]（`0x42F601` 等 4 处）
+constexpr std::uint32_t kSortSegResumeEa = 0x0042F6EBu;  // 段出口（`.lst` 73323 `loc_42F6EB`）
+constexpr std::uint64_t kSortSegFallbackLimit = 4096u;   // A7-3：连败兜底的阈值
+
+// 半开区间相交（G6 的判据；⛔ 不用"近似"或"只比基点"）。
+bool sortSegSpansOverlap(std::uint64_t a0, std::uint64_t a1, std::uint64_t b0, std::uint64_t b1) {
+    return a0 < b1 && b0 < a1;
+}
+
+}  // namespace
+
+std::uint32_t sortKeyOf(std::uint32_t seed, std::uint32_t v) {
+    // 逐字：`0x42F610 rol eax,0Bh` → `0x42F613 xor eax,[ebp+var_14]` → `0x42F616 ror eax,19h`。
+    // ★ 每一步都是**32 位**：`v << 11` 与 `mixed << 7` 都在 uint32 上回绕，⛔ 不许先扩到 64 位再 `|`。
+    const std::uint32_t rolled = (v << 11) | (v >> 21);  // rol32(v, 11)
+    const std::uint32_t mixed = rolled ^ seed;
+    return (mixed >> 25) | (mixed << 7);                 // ror32(x, 25)
+}
+
+std::uint64_t sortSegReplacedInsns(std::uint32_t comparisons, bool stopped) {
+    // 见头文件的逐项归属：`4 + 63*(c-1) + 56 + 落位`，落位 = 4（Stopped，区间外那 4 条）/ 3（RanOut 直落）。
+    return 63ull * static_cast<std::uint64_t>(comparisons) + (stopped ? 1ull : 7ull);
+}
+
+BlockOverrideOutcome nativeSortStep42F560(X86& cpu, GuestMemory& mem, std::uint64_t* replaced_insns) {
+    *replaced_insns = 0;
+    // ---- A7-3：连败兜底。`fallbacks` 是**框架维护的**计数（`machine.cpp` 的段级台账），⛔ 不新增机制。
+    //   作用：G1 若恒不成立，就会"每个 block 边界都重试 + 6 次 committed 查询" ⇒ 这里一次性永久停用。
+    if (cpu.native_blocks != nullptr) {
+        if (const NativeBlockOverride* self = cpu.native_blocks->find(cpu.eip)) {
+            if (self->fallbacks > kSortSegFallbackLimit) return BlockOverrideOutcome::Declined;
+        }
+    }
+    // ===================== 阶段 1：**只读**（一个 guest 字节都不写） =====================
+    // G5 先做：safe mode 下裸 `rd32` 会 guestFault ⇒ `std::_Exit(3)`（`memory.cpp` 的 guestFault）。
+    if (!mem.committed(kSortSegGlobalsEa, kSortSegGlobalsBytes)) return BlockOverrideOutcome::Failed;
+    const std::uint32_t i = mem.rd32(kSortSegGn);  // g_n = 本轮插入位置（也是循环上界）
+    const std::uint32_t a_base = mem.rd32(kSortSegA);
+    const std::uint32_t b_base = mem.rd32(kSortSegB);
+    const std::uint32_t c_base = mem.rd32(kSortSegC);
+    // G1：`ECX == g_n`。★ 失败交 `Failed`（⛔ 不是 `Declined`：后者会永久停用 ⇒ "优化安静地没了"）。
+    if (cpu.ecx() != i) return BlockOverrideOutcome::Failed;
+    // G2：seed 的来源（段内唯一没被 G4/G5 覆盖的读）。
+    const std::uint32_t esi = cpu.esi();
+    if (esi == 0u) return BlockOverrideOutcome::Failed;
+    const std::uint64_t seed_ea = static_cast<std::uint64_t>(esi) + kSortSegSeedOff;
+    if (seed_ea + 4ull > GuestMemory::kSpace) return BlockOverrideOutcome::Failed;
+    if (!mem.committed(static_cast<std::uint32_t>(seed_ea), 4u)) return BlockOverrideOutcome::Failed;
+    // G3：`g_n >= 1`（`g_n == 0` 是 `0x42F5EA js` 直落那支；`0x42F5C0` 把 `g_i` 置 1 ⇒ 结构上不可达）。
+    if (i < 1u) return BlockOverrideOutcome::Failed;
+    // G8：预算闸门（见头文件的"单次持有时界"）。放在 G4 之前：它更便宜，且语义上"这一档不做"先于
+    // "这一段可不可读"。
+    if (i > kSortSegMaxStep) return BlockOverrideOutcome::Failed;
+    // G4：三个跨度 `[base, base + 4*(i+1))`。★ 端点用 uint64 算（A7-4），判完再窄回。
+    const std::uint64_t span = 4ull * (static_cast<std::uint64_t>(i) + 1ull);
+    const std::uint64_t a_begin = a_base;
+    const std::uint64_t a_end = a_begin + span;
+    const std::uint64_t b_begin = b_base;
+    const std::uint64_t b_end = b_begin + span;
+    const std::uint64_t c_begin = c_base;
+    const std::uint64_t c_end = c_begin + span;
+    if (a_end > GuestMemory::kSpace || b_end > GuestMemory::kSpace || c_end > GuestMemory::kSpace)
+        return BlockOverrideOutcome::Failed;
+    const std::size_t span_bytes = static_cast<std::size_t>(span);
+    if (!mem.committed(a_base, span_bytes) || !mem.committed(b_base, span_bytes) ||
+        !mem.committed(c_base, span_bytes))
+        return BlockOverrideOutcome::Failed;
+    // G6：写域 W(A) 与读域（B / C / seed / 五个全局）**区间不相交**。⛔ 用近似判据就会与 guest 分叉
+    //   （guest 每比较都重读 B[A[j]] / C[A[j]] / B[g_n] / C[g_n] 与 4 次 seed）。
+    const std::uint64_t globals_begin = kSortSegGlobalsEa;
+    const std::uint64_t globals_end = globals_begin + kSortSegGlobalsBytes;
+    if (sortSegSpansOverlap(a_begin, a_end, b_begin, b_end) ||
+        sortSegSpansOverlap(a_begin, a_end, c_begin, c_end) ||
+        sortSegSpansOverlap(a_begin, a_end, seed_ea, seed_ea + 4ull) ||
+        sortSegSpansOverlap(a_begin, a_end, globals_begin, globals_end))
+        return BlockOverrideOutcome::Failed;
+    const std::uint32_t seed = mem.rd32(static_cast<std::uint32_t>(seed_ea));
+    auto keyAt = [&](std::uint32_t k) {
+        // `K(k) = HB(k) + HC(k)`，两条 `add`（`0x42F6AC` / `0x42F6AE`）**32 位回绕**。
+        return sortKeyOf(seed, mem.rd32(b_base + 4u * k)) + sortKeyOf(seed, mem.rd32(c_base + 4u * k));
+    };
+    const std::uint32_t key_i = keyAt(i);  // `K(g_n)`：guest 每次比较都重算（这是 G6 存在的理由之一）
+    // ---- 扫描（G7 在这里顺带判；仍在阶段 1）----
+    std::int64_t p = -1;
+    std::uint32_t comparisons = 0;
+    bool stopped = false;
+    for (std::int64_t j = static_cast<std::int64_t>(i) - 1; j >= 0; --j) {
+        const std::uint32_t aj = mem.rd32(a_base + 4u * static_cast<std::uint32_t>(j));
+        if (aj >= i) return BlockOverrideOutcome::Failed;  // G7：越界读 B/C ⇒ 交解释器
+        ++comparisons;
+        if (keyAt(aj) <= key_i) {  // `0x42F6B7 jle`：**等号要停**（稳定性的唯一来源，见 `sortseg/stable-equal-keys`）
+            p = j;
+            stopped = true;
+            break;
+        }
+    }
+    // ===================== 阶段 2：写（此时不可能再失败） =====================
+    for (std::int64_t j = static_cast<std::int64_t>(i) - 1; j > p; --j) {
+        const std::uint32_t from = a_base + 4u * static_cast<std::uint32_t>(j);
+        const std::uint32_t to = a_base + 4u * static_cast<std::uint32_t>(j + 1);
+        mem.wr32(to, mem.rd32(from));  // `0x42F6C3` / `0x42F6C6`
+    }
+    mem.wr32(a_base + 4u * static_cast<std::uint32_t>(p + 1), i);  // `0x42F6E7` / `0x42F78F`
+    // `g_j` 的终值 = p：guest 在 `0x42F6D0`（RanOut）与 `0x42F6CF` 之后写的就是它；Stopped 时它已经是 p。
+    mem.wr32(kSortSegGj, static_cast<std::uint32_t>(p));
+    cpu.eip = kSortSegResumeEa;
+    // ★ `ESP` / `EBP` / `ESI` 一个字都不动（出口处还要用 ESI）；其余寄存器与 EFLAGS 是**登记的边界**，
+    //   见头文件"寄存器 / ABI"那段（⛔ 不要为了"更保险"去复刻它们 —— 那会把假红引进来）。
+    *replaced_insns = sortSegReplacedInsns(comparisons, stopped);
+    return BlockOverrideOutcome::Replaced;
 }
 
 }  // namespace lift

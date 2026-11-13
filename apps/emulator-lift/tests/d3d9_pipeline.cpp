@@ -189,6 +189,10 @@ constexpr std::uint32_t kOffTextureLockRect = 0x4Cu;
 constexpr std::uint32_t kOffTextureUnlockRect = 0x50u;
 constexpr std::uint32_t kOffSetViewport = 0xBCu;
 constexpr std::uint32_t kOffGetViewport = 0xC0u;             // SetViewport(+0xBC) 的下一个槽
+// ★ `SetRenderTarget(+0x94)` 的实参形态是 **D3D9** 的：`(RenderTargetIndex, pRenderTarget)`。
+//   ⛔ 不是 D3D8 的 `(pRenderTarget, pNewZStencil)` —— 按那个读会把索引 0 当成 target（= 后缓冲），
+//   「渲染到纹理」的绑定被静默丢弃（REQ-01M780VKKRFHJEX6VM74DRCYBM）。
+//   ⇒ 本文件的夹具一律写 `{0u, <surface>}`；`{0u, 0u}` 才是"回到后缓冲"。
 constexpr std::uint32_t kOffSetRenderTarget = 0x94u;         // ★ 0x4A778B
 constexpr std::uint32_t kOffGetBackBuffer = 0x48u;           // ★ 0x4A51DF（回程 0x4A521B 用它取后缓冲表面）
 constexpr std::uint32_t kOffTextureGetSurfaceLevel = 0x48u;  // ★ 0x4A7755
@@ -1339,7 +1343,7 @@ void caseRenderTargetLifetime() {
     const std::uint32_t surface = mem.rd32(surface_out);
     LIFT_CHECK_NE_U32(surface, 0u);
     if (surface == 0) return;
-    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {surface, 0u}), 0u);
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, surface}), 0u);
     lift::d3d9::PipelineInfo pi;
     LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &pi, nullptr));
     LIFT_CHECK_EQ_U32(pi.color_arena, a_arena);
@@ -1407,7 +1411,7 @@ void caseRenderTargetLifetime() {
     // ---- ④ 成对释放①：**换 target**（不经 0）⇒ 旧 owner + 旧 surface 一起放，A 的像素块回收 ----
     //   ★ 先让 guest 把 surface 的那份引用也放掉（绑定期间 surface 只剩流水线那一份）：
     //     "GPU 绑着、guest 两份引用都不在了" 是这条生命周期线最紧的时序。
-    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {surface, 0u}), 0u);  // 重复设同一 target
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, surface}), 0u);  // 重复设同一 target
     r.f.method(surface, kOffRelease, {});
     LIFT_CHECK(r.f.m.cpu().com->find(surface));  // surface 仍被流水线持有（对象还在）
     std::uint32_t tex_c = 0;
@@ -1420,7 +1424,7 @@ void caseRenderTargetLifetime() {
     const std::uint32_t c_surface = mem.rd32(c_surface_out);
     LIFT_CHECK_NE_U32(c_surface, 0u);
     // 直接 A 的表面 → C 的表面（不经后缓冲）：旧 owner（A 的纹理）与旧 surface 成对释放
-    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {c_surface, 0u}), 0u);
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, c_surface}), 0u);
     LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &pi, nullptr));
     LIFT_CHECK_EQ_U32(pi.color_arena, c_arena);
     LIFT_CHECK_EQ_U32(pi.color_surface, c_surface);
@@ -1458,10 +1462,10 @@ void caseRenderTargetLifetime() {
     LIFT_CHECK_NE_U32(e1, 0u);
     LIFT_CHECK_NE_U32(e2, 0u);
     LIFT_CHECK(e1 != e2);  // 每次 GetSurfaceLevel 都建一个新 surface 对象（同一 owner）
-    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {e1, 0u}), 0u);
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, e1}), 0u);
     r.f.method(tex_e, kOffRelease, {});  // ← 只剩流水线那一份 owner 引用
     r.f.method(e1, kOffRelease, {});     //   旧 surface 只剩流水线那一份
-    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {e2, 0u}), 0u);
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, e2}), 0u);
     LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &pi, nullptr));
     LIFT_CHECK_EQ_U32(pi.color_surface, e2);
     LIFT_CHECK_EQ_U32(pi.color_arena, e_arena);
@@ -1482,7 +1486,7 @@ void caseRenderTargetLifetime() {
     LIFT_CHECK_EQ_U32(r.f.method(tex_d, kOffTextureGetSurfaceLevel, {0u, d_surface_out}), 0u);
     const std::uint32_t d_surface = mem.rd32(d_surface_out);
     LIFT_CHECK_NE_U32(d_surface, 0u);
-    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {d_surface, 0u}), 0u);
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, d_surface}), 0u);
     // guest 把两份引用都放掉（纹理 + surface），只剩流水线那一份
     r.f.method(tex_d, kOffRelease, {});
     r.f.method(d_surface, kOffRelease, {});
@@ -1540,7 +1544,7 @@ void caseSetRenderTargetViewport() {
     LIFT_CHECK_EQ_U32(vp[3], 48u);
 
     // ② 绑定纹理表面 ⇒ viewport 必须是 (0,0,纹理宽,纹理高)　★ 修前这里读到 (8,8,48,48) ⇒ 红
-    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {surface, 0u}), 0u);
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, surface}), 0u);
     LIFT_CHECK_EQ_U32(r.f.getViewport(vp), 0u);
     LIFT_CHECK_EQ_U32(vp[0], 0u);
     LIFT_CHECK_EQ_U32(vp[1], 0u);
@@ -1549,7 +1553,7 @@ void caseSetRenderTargetViewport() {
 
     // ③ 重复设**同一个** target（不换目标）：这条副作用不依赖"目标换没换"
     LIFT_CHECK_EQ_U32(r.f.setViewport(4u, 4u, 8u, 8u), 0u);
-    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {surface, 0u}), 0u);
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, surface}), 0u);
     LIFT_CHECK_EQ_U32(r.f.getViewport(vp), 0u);
     LIFT_CHECK_EQ_U32(vp[2], kTexW);
     LIFT_CHECK_EQ_U32(vp[3], kTexH);
@@ -1566,13 +1570,13 @@ void caseSetRenderTargetViewport() {
 
     // ⑤ 引擎的真实回程（`0x4A521B`）：传的是 `GetBackBuffer` 的**后缓冲 surface 对象**（不是 NULL）
     //    ⇒ 尺寸走 `surfaceInfoOfState` 的 DeviceInfo 分支，仍然必须是后缓冲尺寸。
-    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {surface, 0u}), 0u);
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, surface}), 0u);
     const std::uint32_t bb_out = r.f.placeU32(0u);
     LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffGetBackBuffer, {0u, 0u, 0u, bb_out}), 0u);
     const std::uint32_t bb_surface = mem.rd32(bb_out);
     LIFT_CHECK_NE_U32(bb_surface, 0u);
     if (bb_surface == 0) return;
-    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {bb_surface, 0u}), 0u);
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, bb_surface}), 0u);
     LIFT_CHECK_EQ_U32(r.f.getViewport(vp), 0u);
     LIFT_CHECK_EQ_U32(vp[0], 0u);
     LIFT_CHECK_EQ_U32(vp[1], 0u);
@@ -1689,7 +1693,7 @@ void caseOwnerLifetimeAndStaleGeneration() {
     LIFT_CHECK_EQ_U32(com->generationOf(a.owner), a.owner_gen);  // 同一个对象、代际没变
     LIFT_CHECK(r.f.m.surfaces().find(a.owner_arena) != nullptr);  // 像素块没被回收 / 没被 T2 接手
 
-    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {a.surface, 0u}),
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, a.surface}),
                       lift::d3d9::kOk);
     lift::d3d9::PipelineInfo piA;
     LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &piA, nullptr));
@@ -1710,7 +1714,7 @@ void caseOwnerLifetimeAndStaleGeneration() {
     //   合法 guest 走不到这里：surface + 绑定期各持一份引用，owner 会在解绑时才到 0（见 ① 与 ⑩ ⑥）。
     StaleOwnerSet b;
     if (!prepare(&b)) return;
-    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {b.surface, 0u}), 0u);  // 这时代际匹配
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, b.surface}), 0u);  // 这时代际匹配
     // ⚠ `refCount == 3` 锁的是 **A 方案下**的三份引用：guest 的 + surface 的（04C）+ 设备的（RT 语义引用，
     //   `REQ-01M6X4N7C0PAF6XT7EAC172V85` 有意选择的 guest 可见差异）—— 不是引擎语义。
     LIFT_CHECK_EQ_U32(com->refCount(b.owner), 3u);
@@ -1733,7 +1737,7 @@ void caseOwnerLifetimeAndStaleGeneration() {
     // ②-b 陈旧 owner **不许绑**：surface 缓存的 owner EA 现在归 T4（代际不符）⇒ 必须 INVALIDCALL，
     //   且 T4 一个引用都不多、像素不被标记、流水线属性不动（⛔ 不许把 RT 静默绑到 T4 的像素上）。
     //   ⚠ 这段是那条"短路 SetRenderTarget 的 owner 代际校验"变异条目的**唯一**判据。
-    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {b.surface, 0u}),
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, b.surface}),
                       lift::d3d9::kInvalidCall);
     LIFT_CHECK(com->find(tex4));
     LIFT_CHECK_EQ_U32(com->refCount(tex4), 1u);

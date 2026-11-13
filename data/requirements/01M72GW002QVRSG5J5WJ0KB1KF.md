@@ -2,10 +2,11 @@
 
 - id: REQ-01M72GW002QVRSG5J5WJ0KB1KF
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
 - repro: apps/emulator-lift/src/runtime/present_sdl.cpp#postMessage
 - severity: S2
+- done_reason: 2026-11-13 用户确认已自然恢复（起因：修复了若干错误的 DX 实现），本单收口。(A) 4.1 s 无 Present：子单 REQ-01M7375DARF1QFZEFNWX3CAK6T（LZSS Encode native override）与 REQ-01M72QRX9X1BRE5CYNSZ18QS56（present-tail 计数）均已 done ⇒ 退出期不再是 40M 量级解释。(B) 退场 fade 层不可见：属「固定功能批次混合 α 恒 0」的症状，随 DX 实现修复而消失。⚠ 正文那处交叉引用 REQ-01M735AFW7WCG2RH89663M52D7 是笔误（该 id 不存在），正确 id 是 REQ-01M735AWXRDZKCDT4124BCFF27；后者当前仍 doing，若 (B) 确实恢复应由它自己的判据收口，不由本单代替。
 - tags: [emulator-lift, quit, teardown, fade]
 
 - tags: [emulator-lift, quit, teardown, fade]

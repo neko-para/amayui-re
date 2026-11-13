@@ -331,6 +331,18 @@ int main() {
         LIFT_CHECK(m.blockOverrides().find(0x00415384u) != nullptr);
         if (const lift::NativeBlockOverride* pool_blk = m.blockOverrides().find(0x00415384u))
             LIFT_CHECK(!pool_blk->feeder_ok);
+        // ★ `sub_42F560` 的**插入排序扫描段**（entry `0x42F5E0` / resume `0x42F6EB`）也必须在 `all` 里。
+        //   红了意味着什么：`verifyKnownBlockAnchor` 失败（entry/resume 的指令文本、或 entry 不属于
+        //   `sub_42F560`）是 `addBlock` 的 `required=false` **静默跳过** ⇒ 表现是"`--native-overrides all`
+        //   少了这一段、命中恒 0，而所有差分类测试都绿"（它们自己 `add()` 的是裸 EA）。
+        //   ⇒ 这条是"段级项真的装进 `all`"的**直接**断言（A/B 的 `all` vs `all,-sub_42F560` 也依赖它）。
+        g_current_case = "block-override-42F560";
+        LIFT_CHECK(m.blockOverrides().find(0x0042F5E0u) != nullptr);
+        if (const lift::NativeBlockOverride* sort_blk = m.blockOverrides().find(0x0042F5E0u)) {
+            LIFT_CHECK_EQ_U32(sort_blk->resume_ea, 0x0042F6EBu);
+            LIFT_CHECK(!sort_blk->feeder_ok);  // 与音频喂料线程无关
+        }
+        g_current_case = "native-override-name-resolution";  // 恢复：后面的断言仍归原名
         // 隔离臂：段级项也能被 `-名字` 单独排掉，且函数级不受影响
         m.blockOverrides().clear();
         LIFT_CHECK(m.configureNativeOverrides("all,-sub_48D610", &cerr));
@@ -352,6 +364,15 @@ int main() {
         LIFT_CHECK(m.overrides().find(0x004E1570u) != nullptr);  // 别的项不受影响
         LIFT_CHECK(!m.overrides().empty());                      // 不是"整张表都没了"的假绿
         m.overrides().clear();
+        // 隔离臂：`all,-sub_42F560` 必须真的把**段级**那一项排掉（A/B 的 B 臂就是这条命令）。
+        // ★ 名字写错时 `-名字` 会在解析已知表时**报错**（⛔ 不静默忽略）⇒ 这条同时钉住名字本身。
+        m.blockOverrides().clear();
+        g_current_case = "block-override-42F560";
+        LIFT_CHECK(m.configureNativeOverrides("all,-sub_42F560", &cerr));
+        LIFT_CHECK(m.blockOverrides().find(0x0042F5E0u) == nullptr);
+        LIFT_CHECK(m.blockOverrides().find(0x0048D767u) != nullptr);  // 别的段级项不受影响
+        m.blockOverrides().clear();
+        g_current_case = "native-override-name-resolution";
     }
 
     // ⑦ 真实 AGERC 的**导出表**（REQ-01M75SDKZGY87B8SK7GBP92PXD）

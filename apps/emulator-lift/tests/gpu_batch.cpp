@@ -352,8 +352,10 @@ struct Fixture {
 
     std::uint32_t present() { return method(device_info.object, kOffPresent, {0u, 0u, 0u, 0u}); }
 
+    // ★ 实参是 **D3D9** 的 `(RenderTargetIndex, pRenderTarget)`：RT0 + 表面；`surface == 0` ⇒ 后缓冲。
+    //   ⛔ 不是 D3D8 的 `(pRenderTarget, pNewZStencil)`（REQ-01M780VKKRFHJEX6VM74DRCYBM）。
     std::uint32_t setRenderTarget(std::uint32_t surface) {
-        return method(device_info.object, kOffSetRenderTarget, {surface, 0u});
+        return method(device_info.object, kOffSetRenderTarget, {0u, surface});
     }
 
     // 后缓冲 surface（GetBackBuffer(0,0,MONO,&out)）
@@ -865,6 +867,139 @@ void caseSamplerFilterEligibility() {
     std::printf("gpu-batch-sampler-filter-eligibility: queued=%llu fallback=%llu reason=\"%s\"\n",
                 static_cast<unsigned long long>(mock.queued_draws),
                 static_cast<unsigned long long>(fallback_a), why_a.c_str());
+}
+
+// ---------------------------------------------------------------------------------------
+// pure：`SetRenderTarget(0, <GetBackBuffer 得到的表面>)` 必须与"绑定隐式后缓冲"**等价**
+//       （`REQ-01M780VKKRFHJEX6VM74DRCYBM` 的连带缺陷）
+// ---------------------------------------------------------------------------------------
+// 为什么这条属于本文件：`gpuEligible` 的准入判定只有**这里**能在 pure 档观察（`MockRaster` +
+//   `gpuCoverage` 账本）；`tests/d3d9_pipeline.cpp` 没有 GPU 后端，只能看流水线属性。
+//
+// 判据（会红的情形）：
+//   ① 绑**后缓冲表面**（引擎 `0x4A521B` 那站就是这么传的 —— 一个 surface 对象，不是 NULL）
+//      ⇒ 流水线把它**规范化**成 `color_surface == 0`（`color_arena` = 设备后缓冲），
+//      且这一批**进 GPU**：`queued_draws` 1 / `gpu_draws` 1 / `fallback_draws` 0。
+//      ★ 修前（准入只看"目标是不是 surface"）：`color_surface != 0` 恒成立 ⇒ 每一批都退回 CPU 光栅
+//      （实测 `gpu=0 fallback=125`、≈3 s/帧、`save-graph` 在 5 s 窗口里只够 2 帧）⇒ ① 当场红。
+//   ② **同尺寸（64×64 = 设备的尺寸）的纹理表面** ⇒ `color_surface != 0` 且**仍**按准入层回退
+//      （纹理当渲染目标当前走的就是这条；⛔ 这条不许被 ① 顺手放宽）。
+//   ③ ② 同时钉住"判据是**身份**（像素块与后缓冲同址），不是**外观**（尺寸 / 格式相同）"：
+//      把 ① 的判据换成"尺寸相同" ⇒ ② 红（同尺寸纹理被当成后缓冲）。
+void caseRenderTargetBackBufferIdentity() {
+    lift_test::g_current_case = "gpu-batch/render-target-backbuffer-identity";
+    lift::d3d9::gpuCoverageReset();
+    Fixture f;
+    LIFT_CHECK(f.boot(true));
+    const std::uint32_t d3d = f.createDirect3D();
+    LIFT_CHECK_NE_U32(d3d, 0u);
+    if (d3d == 0) return;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(d3d, 64, 64, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+
+    MockRaster mock;
+    f.m.setGpuRaster(&mock);
+
+    // 纹理与后缓冲**同尺寸**（64×64）：② 才是"外观相同、身份不同"的最小对照。
+    std::uint32_t tex = 0;
+    LIFT_CHECK_EQ_U32(f.createTexture(dev.object, 64u, 64u, lift::d3d9::kFmtA8R8G8B8, &tex), 0u);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return;
+    std::uint32_t locked = 0;
+    LIFT_CHECK_EQ_U32(f.textureLockRect(tex, &locked), 0u);
+    const std::uint32_t tpitch = f.m.mem().rd32(locked + 0u);
+    const std::uint32_t tbits = f.m.mem().rd32(locked + 4u);
+    LIFT_CHECK_NE_U32(tbits, 0u);
+    if (tbits == 0) return;
+    for (int y = 0; y < 64; ++y) {
+        for (int x = 0; x < 64; ++x) {
+            f.m.mem().wr32(tbits + static_cast<std::uint32_t>(y) * tpitch + static_cast<std::uint32_t>(x) * 4u,
+                           0xFF808080u);
+        }
+    }
+    LIFT_CHECK_EQ_U32(f.textureUnlockRect(tex), 0u);
+
+    // 状态 = `gpu-batch/sampler-filter-eligibility` 的 (b)（MAG==MIN==POINT 的可画批次）。
+    // ★ 四边形铺满 64×64 视口、UV 0..1 对**同尺寸**（64×64）的纹理 ⇒ 1:1 采样（无缩小）
+    //   —— 否则会命中"`MIPFILTER=NONE` 且有缩小采样"那条**别的**准入项，① 就测不到目标身份了。
+    LIFT_CHECK_EQ_U32(f.beginScene(), 0u);
+    LIFT_CHECK_EQ_U32(f.setRs(lift::d3d9::kRsZEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(f.setRs(lift::d3d9::kRsCullMode, lift::d3d9::kCullNone), 0u);
+    LIFT_CHECK_EQ_U32(f.setRs(lift::d3d9::kRsAlphaBlendEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(f.setFvf(kFvfXyzRhwDiffuseTex1), 0u);
+    LIFT_CHECK_EQ_U32(f.setViewport(0u, 0u, 64u, 64u), 0u);
+    LIFT_CHECK_EQ_U32(f.setTexture(0u, tex), 0u);
+    LIFT_CHECK_EQ_U32(f.setSampler(0u, lift::d3d9::kSampAddressU, lift::d3d9::kAddressClamp), 0u);
+    LIFT_CHECK_EQ_U32(f.setSampler(0u, lift::d3d9::kSampAddressV, lift::d3d9::kAddressClamp), 0u);
+    LIFT_CHECK_EQ_U32(f.setSampler(0u, lift::d3d9::kSampMagFilter, lift::d3d9::kTexfPoint), 0u);
+    LIFT_CHECK_EQ_U32(f.setSampler(0u, lift::d3d9::kSampMinFilter, lift::d3d9::kTexfPoint), 0u);
+    const std::vector<Fixture::TexVertex> quad = {
+        {0.0f, 0.0f, 0.0f, 1.0f, 0xFFFFFFFFu, 0.0f, 0.0f},
+        {64.0f, 0.0f, 0.0f, 1.0f, 0xFFFFFFFFu, 1.0f, 0.0f},
+        {0.0f, 64.0f, 0.0f, 1.0f, 0xFFFFFFFFu, 0.0f, 1.0f},
+        {64.0f, 0.0f, 0.0f, 1.0f, 0xFFFFFFFFu, 1.0f, 0.0f},
+        {64.0f, 64.0f, 0.0f, 1.0f, 0xFFFFFFFFu, 1.0f, 1.0f},
+        {0.0f, 64.0f, 0.0f, 1.0f, 0xFFFFFFFFu, 0.0f, 1.0f},
+    };
+    const std::uint32_t data = f.placeTexVertices(quad);
+
+    // ---- ① 后缓冲**表面**（不是 NULL）⇒ 规范化成隐式后缓冲 + 这一批进 GPU ----
+    const std::uint32_t bb = f.backBufferSurface();
+    LIFT_CHECK_NE_U32(bb, 0u);
+    if (bb == 0) return;
+    LIFT_CHECK_EQ_U32(f.setRenderTarget(bb), 0u);
+    lift::d3d9::PipelineInfo pi;
+    LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(f.m.cpu(), dev.state, &pi, nullptr));
+    // ★ 规范化后的表示 = "隐式后缓冲"：`color_surface == 0` **且** `color_arena == 0`
+    //   （0 = 后缓冲 ⇒ 像素与尺寸由 `DeviceInfo` 解析，见 `prepareContext` / `renderTargetArena`）。
+    LIFT_CHECK_EQ_U32(pi.color_surface, 0u);
+    LIFT_CHECK_EQ_U32(pi.color_arena, 0u);
+    LIFT_CHECK_EQ_U32(f.drawTexturedQuad(data), 0u);
+    // ★ 账本按 `Machine::run` 重算 ⇒ 只能在紧接这次 Draw 之后读（后面任何一次 `method()` 都会清零）。
+    const std::uint64_t fallback_bb = lift::d3d9::gpuCoverage().fallback_draws;
+    const std::uint64_t gpu_bb = lift::d3d9::gpuCoverage().gpu_draws;
+    std::string why_bb;
+    for (const auto& [reason, count] : lift::d3d9::gpuCoverage().fallback_reasons) {
+        (void)count;
+        why_bb = reason;
+    }
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.queued_draws), 1);  // 真的入队 GPU
+    if (mock.queued_draws == 0 && !why_bb.empty()) lift_test::failf(__FILE__, __LINE__, "① 后缓冲表面这一批没进 GPU：%s", why_bb.c_str());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(gpu_bb), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(fallback_bb), 0);  // ⛔ 不许退回 CPU 光栅
+
+    // ---- ② 同尺寸的**纹理**表面 ⇒ 不规范化（`color_surface != 0`）且**仍**回退 CPU ----
+    const std::uint32_t tex_surface = f.textureSurface(tex);
+    LIFT_CHECK_NE_U32(tex_surface, 0u);
+    if (tex_surface == 0) return;
+    LIFT_CHECK_EQ_U32(f.setRenderTarget(tex_surface), 0u);
+    LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(f.m.cpu(), dev.state, &pi, nullptr));
+    LIFT_CHECK_EQ_U32(pi.color_surface, tex_surface);  // 纹理 RT 保持原样（⛔ 不被规范化）
+    LIFT_CHECK_EQ_U32(f.drawTexturedQuad(data), 0u);
+    const std::uint64_t fallback_tex = lift::d3d9::gpuCoverage().fallback_draws;
+    const std::uint64_t gpu_tex = lift::d3d9::gpuCoverage().gpu_draws;
+    std::string why_tex;
+    for (const auto& [reason, count] : lift::d3d9::gpuCoverage().fallback_reasons) {
+        (void)count;
+        why_tex = reason;
+    }
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.queued_draws), 1);  // 没有新增入队
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(gpu_tex), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(fallback_tex), 1);  // 记了 1 次回退
+    // ★ 回退原因必须是"目标不是默认后缓冲"这一条（不是别的准入项把它挡下来的巧合）
+    LIFT_CHECK(why_tex.find("只支持默认后缓冲") != std::string::npos);
+
+    LIFT_CHECK_EQ_U32(f.endScene(), 0u);
+    LIFT_CHECK_EQ_U32(f.setTexture(0u, 0u), 0u);
+    // 清理：先解绑（放掉流水线那两份引用）⇒ 再放 surface / 纹理（surface 替父纹理持一份，见 `owns_owner`）
+    LIFT_CHECK_EQ_U32(f.setRenderTarget(0u), 0u);
+    LIFT_CHECK_EQ_U32(f.method(tex_surface, 0x08u, {}), 0u);
+    LIFT_CHECK_EQ_U32(f.method(tex, 0x08u, {}), 0u);
+    f.m.setGpuRaster(nullptr);
+    std::printf("gpu-batch-render-target-backbuffer-identity: queued=%llu fallback_tex=%llu reason=\"%s\"\n",
+                static_cast<unsigned long long>(mock.queued_draws),
+                static_cast<unsigned long long>(fallback_tex), why_tex.c_str());
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1775,6 +1910,7 @@ int main(int argc, char** argv) {
     caseOrder();
     caseBackBufferLockBarrier();
     caseSamplerFilterEligibility();
+    caseRenderTargetBackBufferIdentity();
     caseFfTexProbe();
     caseDepthClearForwarded();
     caseLedgerQueuedVsRecorded();

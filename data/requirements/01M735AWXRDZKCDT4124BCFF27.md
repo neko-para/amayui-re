@@ -2,10 +2,12 @@
 
 - id: REQ-01M735AWXRDZKCDT4124BCFF27
 - type: bug
-- status: doing
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/d3dx9.cpp#d3dx9/texture-from-memory-png
 - repro: apps/emulator-lift/src/runtime/d3d9_pipeline.cpp#submitPrimitives
 - severity: S2
+- done_reason: 2026-11-13 收口（用户确认）。根因已于 2026-11-11 上移：三张 2048² 图集页是 Live2D 图集，由 D3DXCreateTextureFromFileInMemory 创建，而该导出当时是「只读文件头、不解码像素」的 stub ⇒ 纹理全 0（不是「α 通道为 0」，RGB 亦为 0）。修复落在子单 REQ-01M738VYG0DP3TNJKYDSA49J7H（PNG 解码 + 上传，done），本单 verify 沿用它的机械守卫（覆盖根因：解码后像素非全 0）。证据：用户 2026-11-13 确认 **Live2D 渲染正确** ⇒ 图集页确有像素、α 确实参与固定功能批次混合。两点保留：① 本单原拟守卫「stage0 纹理从未被写入 ⇒ 拒绝记成可见」未落地，机械守卫目前只覆盖根因（PNG 解码），不覆盖「未写入纹理仍被记成可见」这一面；② 本单判据依赖的 [draw] texa/fa 只在 CPU 光栅路径统计，按 REQ-01M78BF1FNNH6K8N8GEY6GQYXX 的裁决该诊断须迁到 GPU 路径，否则判据面会随 CPU 光栅退休一起消失。
 - tags: [emulator-lift d3d9 alpha texture]
 
 ## 一句话

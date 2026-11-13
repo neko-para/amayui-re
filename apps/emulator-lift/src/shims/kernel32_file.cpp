@@ -70,10 +70,13 @@
 //      ⚠ `createFile` 的"会新建"分支**按需建影子父目录**（engine 的形态见 vfs.h）：父目录在
 //      guest 世界里不存在也可能成功 —— 这是覆盖层的有意偏差，`CreateDirectoryA` 仍要求父目录存在。
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -138,6 +141,55 @@ constexpr std::uint32_t kErrDirectory = 267u;
 // 返回值
 constexpr std::uint32_t kInvalidHandleValue = 0xFFFFFFFFu;
 constexpr std::uint32_t kInvalidSetFilePointer = 0xFFFFFFFFu;
+
+// =======================================================================================
+// ★ 临时诊断层（`LIFT_SAVE_TRACE=1`；默认零输出）—— 只为「读档列表每槽摘要」这一单取证。
+//
+//   口径：
+//   · **默认零输出**（env 未设 ⇒ 一次 fputs 都不发生，不改任何行为）；
+//   · 只打 SAVE*.DAT / RT.DAT / RT.BAK 这类**存档文件**的每一次打开 / 读 / 写 / 定位；
+//   · 每条都带 **offset（读之前）/ len / 返回后的游标 / 前 32 字节 hex**；
+//   · ⛔ 不改返回值、不改游标、不改权限判定。取证结束后整段可删（调用点各 1 个 `if`）。
+// =======================================================================================
+bool saveTraceEnabled() {
+    static const bool on = std::getenv("LIFT_SAVE_TRACE") != nullptr;
+    return on;
+}
+
+void saveTrace(const char* fmt, ...) {
+    if (!saveTraceEnabled()) return;
+    std::fputs("[save-trace] ", stderr);
+    va_list ap;
+    va_start(ap, fmt);
+    std::vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    std::fputc('\n', stderr);
+    std::fflush(stderr);
+}
+
+// 只看文件名的 basename（guest 路径是 UTF-8；存档名是 ASCII）；大小写不敏感。
+bool isSaveTracePath(const std::string& guest_path) {
+    const std::size_t slash = guest_path.find_last_of("\\/");
+    std::string base = slash == std::string::npos ? guest_path : guest_path.substr(slash + 1);
+    for (char& c : base) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    if (base == "RT.DAT" || base == "RT.BAK") return true;
+    if (base.rfind("SAVE", 0) != 0) return false;
+    return base.size() >= 4 && base.compare(base.size() - 4, 4, ".DAT") == 0;
+}
+
+// 前 n 字节 hex（只诊断用）。
+std::string hexHead(const std::uint8_t* p, std::size_t n) {
+    static const char* kDigits = "0123456789abcdef";
+    const std::size_t k = n < 32 ? n : 32;
+    std::string s;
+    s.reserve(k * 3);
+    for (std::size_t i = 0; i < k; ++i) {
+        if (i) s.push_back(' ');
+        s.push_back(kDigits[p[i] >> 4]);
+        s.push_back(kDigits[p[i] & 0x0F]);
+    }
+    return s;
+}
 
 // 访问位 / disposition / seek method（Win32 常量）
 constexpr std::uint32_t kGenericRead = 0x80000000u;
@@ -589,6 +641,10 @@ void createFile(X86& cpu, ShimCall& call, bool wide) {
         resolved = resolveGuest(cpu, guest, &host, &why, must_exist, /*resolve_case=*/true);
     }
     if (!resolved) {
+        if (saveTraceEnabled() && isSaveTracePath(guest)) {
+            saveTrace("CreateFileA \"%s\" FAILED disp=%u why=%s", guest.c_str(), disposition,
+                      why.c_str());
+        }
         // ★ 这是**探测**（引擎先试外围文件，失败后再从 ALF 取）⇒ 只打一条 Debug。
         //   默认 `warn` 模式完全看不到；`--log-level debug` / `--log-cat file` 才看。
         //   真正的"所有回退都失败"由引擎后续的异常 / shimAbort 暴露，不靠这条。
@@ -723,6 +779,12 @@ void createFile(X86& cpu, ShimCall& call, bool wide) {
     }
     entry->destroy = &destroyFile;
     call.result = h;
+    if (saveTraceEnabled() && isSaveTracePath(st->guest_path)) {
+        saveTrace("CreateFileA \"%s\" access=0x%08X share=0x%08X disp=%u want(read=%d,write=%d) "
+                  "=> h=0x%08X host=\"%s\" mode=%s",
+                  st->guest_path.c_str(), access, share, disposition, st->readable ? 1 : 0,
+                  st->writable ? 1 : 0, h, host.c_str(), mode);
+    }
     // ★ 成功路径上**唯一**写 last_error 的地方：文档明写这两个 disposition 命中已存在文件时置 183。
     //   其余情况**不碰** `last_error`（Win32 成功时也不清零，guest 见到的仍是上一次的遗留值）。
     if (already_existed) cpu.shim.last_error = kErrAlreadyExists;
@@ -782,7 +844,14 @@ void readFile(X86& cpu, ShimCall& call) {
         return;
     }
     std::vector<std::uint8_t> tmp(n, 0);
+    const std::int64_t off_before = tellFile64(st->fp);
     const std::size_t got = std::fread(tmp.data(), 1, n, st->fp);
+    const std::int64_t off_after = tellFile64(st->fp);
+    if (saveTraceEnabled() && isSaveTracePath(st->guest_path)) {
+        saveTrace("ReadFile \"%s\" off=%lld len=%zu got=%zu cur=%lld hex=%s",
+                  st->guest_path.c_str(), static_cast<long long>(off_before), n, got,
+                  static_cast<long long>(off_after), hexHead(tmp.data(), got).c_str());
+    }
     if (got == 0 && std::ferror(st->fp)) {
         cpu.shim.last_error = kErrReadFault;
         shimLog("kernel32", api, "宿主读失败（%s）⇒ 失败", errnoText(errno).c_str());
@@ -837,7 +906,15 @@ void writeFile(X86& cpu, ShimCall& call) {
     }
     std::vector<std::uint8_t> tmp(n, 0);
     cpu.mem->readBytes(buf, tmp.data(), n);
+    const std::int64_t off_before = tellFile64(st->fp);
     const std::size_t put = std::fwrite(tmp.data(), 1, n, st->fp);
+    const std::int64_t off_after = tellFile64(st->fp);
+    if (saveTraceEnabled() && isSaveTracePath(st->guest_path)) {
+        saveTrace("WriteFile \"%s\" off=%lld len=%u put=%zu cur=%lld hex=%s",
+                  st->guest_path.c_str(), static_cast<long long>(off_before),
+                  static_cast<unsigned>(n), put, static_cast<long long>(off_after),
+                  hexHead(tmp.data(), n).c_str());
+    }
     if (put != n) {
         cpu.shim.last_error = kErrWriteFault;
         shimLog("kernel32", api, "宿主写失败（写入 %u/%u 字节，%s）⇒ 失败",
@@ -991,6 +1068,11 @@ void shimSetFilePointer(X86& cpu, ShimCall& call) {
     if (hi_ea != 0) {
         cpu.mem->wr32(hi_ea, static_cast<std::uint32_t>(static_cast<std::uint64_t>(pos) >> 32));
     }
+    if (saveTraceEnabled() && isSaveTracePath(st->guest_path)) {
+        saveTrace("SetFilePointer \"%s\" distance=%lld method=%u => pos=%lld",
+                  st->guest_path.c_str(), static_cast<long long>(distance), method,
+                  static_cast<long long>(pos));
+    }
     call.result = static_cast<std::uint32_t>(static_cast<std::uint64_t>(pos) & 0xFFFFFFFFull);
 }
 
@@ -1047,6 +1129,11 @@ void shimSetFilePointerEx(X86& cpu, ShimCall& call) {
         const auto u = static_cast<std::uint64_t>(pos);
         cpu.mem->wr32(new_ptr, static_cast<std::uint32_t>(u & 0xFFFFFFFFull));
         cpu.mem->wr32(new_ptr + 4u, static_cast<std::uint32_t>(u >> 32));
+    }
+    if (saveTraceEnabled() && isSaveTracePath(st->guest_path)) {
+        saveTrace("SetFilePointerEx \"%s\" distance=%lld method=%u => pos=%lld",
+                  st->guest_path.c_str(), static_cast<long long>(distance), method,
+                  static_cast<long long>(pos));
     }
     call.result = 1;
 }

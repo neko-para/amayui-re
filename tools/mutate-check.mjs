@@ -985,6 +985,59 @@ const MUTATIONS = [
 
 
   {
+    // ★ 代表 "shim 按**别的 API 版本的签名**读参" 这一类错（`REQ-01M780VKKRFHJEX6VM74DRCYBM`）：
+    //   `IDirect3DDevice9::SetRenderTarget(DWORD RenderTargetIndex, IDirect3DSurface9*)` 被当成
+    //   D3D8 的 `SetRenderTarget(IDirect3DSurface8* pRenderTarget, IDirect3DSurface8* pNewZStencil)`
+    //   ⇒ 第 1 个实参（索引，恒 0）被当成表面、纹理表面被当成 zstencil ⇒ 目标恒为"后缓冲"，
+    //   「渲染到纹理」的绑定**静默丢弃**（不报错：流水线早退 return S_OK；引擎的错误分支也没触发）
+    //   ⇒ 存档缩略图 `SAVE00.STH` 全黑。
+    //   守卫：`apps/emulator-lift/tests/d3d9.cpp` 的 `d3d9/offscreen-surface-rt-data`
+    //   （纹理 RT `Clear` ⇒ `GetRenderTargetData` ⇒ 锁离屏表面读到 Clear 色；绑不上就红）。
+    file: 'apps/emulator-lift/src/shims/d3d9.cpp',
+    from:
+      '    const std::uint32_t rt_index = call.u32(1);  // 第 2 实参 = DWORD RenderTargetIndex（⛔ 不是 surface）\n' +
+      '    const std::uint32_t target = call.u32(2);    // 第 3 实参 = IDirect3DSurface9* pRenderTarget',
+    to: '    const std::uint32_t rt_index = 0u;\n    const std::uint32_t target = call.u32(1);',
+    guard: 'ctest:d3d9',
+    ctest: 'd3d9',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'SetRenderTarget 按 D3D8 的签名读参（第 1 个实参当成 pRenderTarget）⇒ 纹理 RT 的绑定退化成' +
+      '"绑后缓冲"、像素仍为 0 ⇒ d3d9/offscreen-surface-rt-data 的逐像素断言当场红',
+  },
+
+  {
+    // ★ 代表 "把**身份**判据换成**外观**判据" 这一类错（`REQ-01M780VKKRFHJEX6VM74DRCYBM` 的连带）：
+    //   `setRenderTarget` 把 `SetRenderTarget(0, <GetBackBuffer 的表面>)` 规范化成隐式后缓冲，判据是
+    //   **像素块同址**（`t_surf.arena == di.arena`）。换成"尺寸相同"就会把**另一张同尺寸表面**
+    //   （纹理 RT —— 引擎 `0x4A778B` 那站绑的就是它）也当成后缓冲 ⇒ 往别人的像素上画。
+    //   守卫：`apps/emulator-lift/tests/gpu_batch.cpp` 的
+    //   `gpu-batch/render-target-backbuffer-identity` ②（同尺寸 64×64 纹理表面必须**不**被规范化、
+    //   且必须仍按"目标不是默认后缓冲"回退 CPU）。
+    //   ★ 这个 `to` 保留 `textureInfoOfState` 的调用（⛔ 不是为了让文本像原样）：`emulator-lift-runtime`
+    //     是 `/W4 /WX`，删出一个未使用变量会让**构建**失败 ⇒ 记成"不可判定"，而不是"守卫红了"。
+    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
+    from:
+      '            if (surfaceInfoOfState(cpu, t_state, &t_surf, nullptr) &&\n' +
+      '                deviceInfoOfState(cpu, dev, &di, nullptr) &&\n' +
+      '                !textureInfoOfState(cpu, t_state, &t_tex, nullptr) && di.arena != 0 &&\n' +
+      '                t_surf.arena == di.arena) {',
+    to:
+      '            if (surfaceInfoOfState(cpu, t_state, &t_surf, nullptr) &&\n' +
+      '                deviceInfoOfState(cpu, dev, &di, nullptr) &&\n' +
+      '                (textureInfoOfState(cpu, t_state, &t_tex, nullptr) || di.arena != 0) &&\n' +
+      '                t_surf.width == static_cast<std::uint32_t>(di.width) &&\n' +
+      '                t_surf.height == static_cast<std::uint32_t>(di.height)) {',
+    guard: 'ctest:gpu-batch-order',
+    ctest: 'gpu-batch-order',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '后缓冲规范化改用**外观**判据（尺寸相同）⇒ 同尺寸的**纹理**表面也被当成后缓冲规范化：' +
+      '`color_surface` 被清成 0（往别人的像素上画）且这一批不再按"目标不是默认后缓冲"回退 ⇒ ' +
+      'gpu-batch/render-target-backbuffer-identity ② 当场红',
+  },
+
+  {
     // ★ 代表 "stateless 判定被放宽" 这一类错。`active < 2u` ⇒ `slot[0] == 1`（已启动 / 在播）也被当成
     //   惰性 ⇒ **有写支**被短路：回退断言、零写断言、替身哨兵同时失守。
     //   ★ 这里不用 `if (false)` 的原因**不是编译**：本工程 `/W4 /WX` 下 `if (false)` **实测能编过**
@@ -1246,6 +1299,90 @@ const MUTATIONS = [
     what:
       'PCM 段不再写 `[ebp-108h]` 的 clip 标志 ⇒ 只喂调试打印的那个槽恒 0 ⇒ ' +
       'native-override-assets 的 `pcm/clip-flag/*`（有 clip ⇒ 期望 1）当场红（dst 字节完全不变）',
+  },
+
+  // ★ 下面五条代表 `sub_42F560` 的**插入排序扫描段**（`0x42F5E0..0x42F6EB` ∪ 落位块
+  //   `{0x42F783..0x42F793}`）的五类**静默错**。判据都在
+  //   `apps/emulator-lift/tests/native_override_assets.cpp` 的 `sortseg/*`（真字节两臂：解释器 = 同一 EA
+  //   的 oracle ⇒ 逐字节比 `A[]` + `cpu.insns` 精确相等 + `g_j`/`seed`/`ESP`/`EBP`/`ESI`），
+  //   pure 档的四条闸门在 `tests/native_override.cpp` 的 `sortseg/*`。
+  //   ★ 全部只让 **native 臂**分叉（解释器臂跑的是同一份真字节）⇒ 不依赖任何"当前数字"。
+  //   ★ ⛔ 不要加"`j > p` → `j >= p`"：多写的那一次紧接着被 `A[p+1] = i` 覆盖、G6 又保证无别名
+  //     ⇒ **结构上不可观察**（设计稿已立墓碑）。
+
+  {
+    // M1：阶段 2 的移位少一格（`j > p` → `j > p + 1`）⇒ 被跳过的 `A[p+2] = A[p+1]` 不再发生，
+    //   而后面只写 `A[p+1] = i` ⇒ `A[p+2]` 留着旧值。
+    file: 'apps/emulator-lift/src/runtime/native_overrides.cpp',
+    from: '    for (std::int64_t j = static_cast<std::int64_t>(i) - 1; j > p; --j) {',
+    to: '    for (std::int64_t j = static_cast<std::int64_t>(i) - 1; j > p + 1; --j) {',
+    guard: 'ctest:native-override-assets',
+    ctest: 'native-override-assets',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '插入排序段少移一格（`j > p` → `j > p+1`）⇒ `A[p+2]` 留着旧值 ⇒ ' +
+      'native-override-assets 的 `sortseg/bytes-diff/*` 两臂 `A[]` 逐字节当场红',
+  },
+
+  {
+    // M2：键函数把 `rol 11` 与 `ror 25` **互换**（`.lst` 0x42F610 `rol eax,0Bh` / 0x42F616 `ror eax,19h`）
+    //   ⇒ 排序顺序变 ⇒ `A[]` 变（`stable-equal-keys` 也可能红）。
+    file: 'apps/emulator-lift/src/runtime/native_overrides.cpp',
+    from:
+      '    const std::uint32_t rolled = (v << 11) | (v >> 21);  // rol32(v, 11)\n' +
+      '    const std::uint32_t mixed = rolled ^ seed;\n' +
+      '    return (mixed >> 25) | (mixed << 7);                 // ror32(x, 25)',
+    to:
+      '    const std::uint32_t rolled = (v << 25) | (v >> 7);  // rol32(v, 25)\n' +
+      '    const std::uint32_t mixed = rolled ^ seed;\n' +
+      '    return (mixed >> 11) | (mixed << 21);                // ror32(x, 11)',
+    guard: 'ctest:native-override-assets',
+    ctest: 'native-override-assets',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '键函数把 `rol 11` 与 `ror 25` 互换 ⇒ 键值全变 ⇒ 排序顺序变 ⇒ ' +
+      'native-override-assets 的 `sortseg/bytes-diff/*` 两臂 `A[]` 逐字节当场红',
+  },
+
+  {
+    // M3：扫描停止判据 `<=` → `<`（`.lst` 0x42F6B7 是 `jle`）。等键时从"停"变成"继续左移" ⇒
+    //   **稳定性**破坏。★ 只有重复键夹具能抓：普通夹具上这是等价变异。
+    file: 'apps/emulator-lift/src/runtime/native_overrides.cpp',
+    from: '        if (keyAt(aj) <= key_i) {',
+    to: '        if (keyAt(aj) < key_i) {',
+    guard: 'ctest:native-override-assets',
+    ctest: 'native-override-assets',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '扫描停止判据 `<=` → `<` ⇒ 等键元素被顶到前面（稳定性破坏）⇒ 只有 ' +
+      'native-override-assets 的 `sortseg/stable-equal-keys`（等键夹具 `K(0)==K(2)`）能抓',
+  },
+
+  {
+    // M4：落位下标 `p + 1` → `p`（`.lst` 0x42F6E7 / 0x42F78F 都是 `[A + (g_j+1)*4]`）⇒ 写错位置。
+    file: 'apps/emulator-lift/src/runtime/native_overrides.cpp',
+    from: '    mem.wr32(a_base + 4u * static_cast<std::uint32_t>(p + 1), i);',
+    to: '    mem.wr32(a_base + 4u * static_cast<std::uint32_t>(p), i);',
+    guard: 'ctest:native-override-assets',
+    ctest: 'native-override-assets',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '落位下标 `p+1` → `p` ⇒ `A[p]` 被覆盖、`A[p+1]` 留旧值 ⇒ ' +
+      'native-override-assets 的 `sortseg/bytes-diff/*` 两臂 `A[]` 逐字节当场红',
+  },
+
+  {
+    // M5：RanOut 的尾巴 `+3` → `+4`（`replaced_insns` 闭式）。虚钟少走一条 ⇒ `timeGetTime` 序列变。
+    //   ★ 这条只有 `cpu.insns` 的**逐条**比较能抓（A/B 的 |Δ|≤1% 抓不到，差 0.013%）。
+    file: 'apps/emulator-lift/src/runtime/native_overrides.cpp',
+    from: '    return 63ull * static_cast<std::uint64_t>(comparisons) + (stopped ? 1ull : 7ull);',
+    to: '    return 63ull * static_cast<std::uint64_t>(comparisons) + (stopped ? 1ull : 8ull);',
+    guard: 'ctest:native-override-assets',
+    ctest: 'native-override-assets',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '`replaced_insns` 的 RanOut 尾巴 `+3` → `+4`（`63c+7` → `63c+8`）⇒ 虚钟少走一条 ⇒ ' +
+      'native-override-assets 的 `sortseg/ranout` 两臂 `cpu.insns` 当场红',
   },
 
   {

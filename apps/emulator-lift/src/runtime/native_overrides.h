@@ -504,6 +504,110 @@ BlockOverrideOutcome nativeFillPool414AC0(X86& cpu, GuestMemory& mem, std::uint6
 //   guest 状态（`audio_cpu_` + 同一份 `GuestMemory`）。
 // ---------------------------------------------------------------------------------------
 BlockOverrideOutcome nativePcm48D767(X86& cpu, GuestMemory& mem, std::uint64_t* replaced_insns);
+// ---------------------------------------------------------------------------------------
+// 段级：`sub_42F560` 里的**插入排序内层扫描**（entry `0x42F5E0` / resume `0x42F6EB`）
+//
+// ★ 为什么是它：`fellow-enter` 那一帧的 128.8M 条 guest 指令全记在块入口 `0x42F5F0`
+//   （`OBS-20261112-06`），而该块**完全落在**本段里；`126 ms` 那一档之外，`sub_42F560` 的 self
+//   ≈ 1.85 s 是窗口内的**聚合量**（⛔ 不是一次调用的持有时长，见下面的"单次持有时界"）。
+//
+// ★ 执行区域（⛔ 别读成一个区间）：
+//     [0x42F5E0, 0x42F6EB)  ∪  {0x42F783, 0x42F789, 0x42F78F, 0x42F793}
+//       ↑ 段主体（每比较 63 条 + 每移位 7 条）    ↑ 落位块（4 条）
+//   落位块在 `0x42F782 retn` **之后** ⇒ **不在**上面那个区间里：`0x42F6B7 jle` 的目标是它，
+//   它靠 `0x42F793 jmp 0x42F6EB` 回到出口 ⇒ 对 dispatcher 而言出口仍然唯一（单个 `resume_ea`）。
+//   区间内**没有外部入边**：段内跳转只有 `0x42F5EA js` / `0x42F6B7 jle` / `0x42F6D5 jns`（唯一回边），
+//   全语料指向 `0x42F5E0` 的只有 `0x42F707 jl` 一条回边。
+//   ★ 推论（实现者一定会踩）：首轮那个块是 `0x42F5D9..0x42F5EA`，它**含** `0x42F5E0` 但**不从它开始**
+//     ⇒ 每次调用的第 1 次插入步走解释器 ⇒ 真跑里 `hits ≈ (N−1)×5`，**这不是 bug**。
+//
+// ★ 逐字依据（`.lst` 73246..73379，`pnpm tools disasm-at at --ea 0x42F5E0 --lines 140` 的窗口）：
+//   · 段首 4 条：`0x42F5E0 lea eax,[ecx-1]` / `0x42F5E3 mov ds:dword_55D598,eax` /
+//     `0x42F5E8 test eax,eax` / `0x42F5EA js 0x42F6E1`
+//   · 比较块 56 条（`0x42F5F0..0x42F6B7`）：键
+//       `K(k) = ror32(seed ^ rol32(B[k],11), 25) + ror32(seed ^ rol32(C[k],11), 25)`（**32 位回绕**）
+//     `seed = [esi+0x5EC8C]`；`rol 0Bh` = 11、`ror 19h` = 25（逐字核过，⛔ 不是 25/11 互换）；
+//     四次哈希在 `0x42F60D..0x42F616` / `0x42F642..0x42F64B` / `0x42F66E..0x42F677` / `0x42F69A..0x42F6A3`；
+//     两条 `add`（`0x42F6AC add eax,edi` / `0x42F6AE add edx,ecx`）；`0x42F6B0 cmp edx,eax` +
+//     `0x42F6B7 jle` ⇒ **`K(A[j]) <= K(i)` 就停**（等号要停 = 稳定性的唯一来源）。
+//   · 移位块 7 条（`0x42F6BD..0x42F6D5`）：`A[j+1]=A[j]` / `--j` / `jns`
+//   · 落位 3 条（`j` 走成 −1）：`0x42F6DB` / `0x42F6E1` / `0x42F6E7`（`A[0] = i`）
+//   · 落位块 4 条（`jle` 命中）：`0x42F783` / `0x42F789` / `0x42F78F` / `0x42F793`（`A[g_j+1] = i`）
+//   ⇒ 两条落位路径最终都是 `A[p+1] = i`，`g_j` 的终值 = `p`（RanOut ⇒ `0xFFFFFFFF`）。
+//
+// ★ 闸门（**顺序即实现顺序**；全部只读 ⇒ 任一不成立都 ⇒ `Failed`，回退解释器，**零写**）：
+//   G5  `[0x55D598, 0x55D5AC)`（`g_j` / `g_n` / C / B / A 五个 dword）committed。
+//       ★ 实现里**先做 G5 再读** —— safe mode 下裸 `rd32` 会 guestFault ⇒ `std::_Exit(3)`。
+//   G1  `cpu.ecx() == g_n`。★ **失败交 `Failed`，⛔ 不是 `Declined`**：`Declined` = 永久停用本项
+//       （`machine.cpp` 的 `disabled`），表现是"优化安静地没了"；而 `0x42F5E0` 的第二条入边不存在
+//       ⇒ `ECX != g_n` 意味着"我们的入口判据错了" ⇒ 必须红灯（A/B 把 `declines == 0` 当**断言**）。
+//   G2  `esi != 0` ∧ `esi+0x5EC8C` 不回绕 ∧ `committed(esi+0x5EC8C, 4)` —— 段内**唯一**没被 G4/G5
+//       覆盖的读就是 seed（guest 每比较读它 4 次）。
+//   G3  `g_n >= 1`（`g_n == 0` 是 `0x42F5EA js` 直落那支；`0x42F5C0` 把 `g_i` 置 1 ⇒ 结构上不可达）。
+//       ★ 它**不接管** `g_n == 0`：闭式的第三支 `Empty = 6`（`4 + 2`）留成**哨兵** ——
+//         接管一条结构上不可达的路径只会把"循环结构读错了"变成静默正确。
+//   G4  `A` / `B` / `C` 的跨度 `[base, base + 4*(g_n+1))` 全部 32 位不回绕且 committed。
+//       ★ 端点必须用 `uint64_t` 算（`(uint64_t)base + 4ull*(g_n+1)`），判完再窄回；
+//         ⛔ 不要"回绕后再比大小"—— `4*(g_n+1)` 自己会先溢出（`g_n` 是脚本给的数，不是常数）。
+//   G6  别名：写域 `W = [A, A+4*(g_n+1))` 与读域
+//       `[B, B+4*(g_n+1)) ∪ [C, C+4*(g_n+1)) ∪ [esi+0x5EC8C, +4) ∪ [0x55D598, 0x55D5AC)` **区间不相交**。
+//       理由：guest 每比较都**重读** `B[A[j]]` / `C[A[j]]` / `B[g_n]` / `C[g_n]` 与 4 次 seed
+//       ⇒ "先扫后移"两阶段只在写域不盖住任何读域时与 guest 等价（⛔ 用近似判据，要真做区间相交）。
+//   G7  扫描时每个 `A[j]` 必须 `< g_n`（否则 guest 会越界读 B/C ⇒ 交解释器）。**仍在阶段 1**。
+//   G8  `g_n <= kSortSegMaxStep`（4096）—— 一行整数比较，**可判定**；见下面的"单次持有时界"。
+//
+// ★ 两阶段（**回退零写的结构保证**）：阶段 1 只读（G1..G8 + 扫描），阶段 2 才移位 / 落位 / 写 `g_j`；
+//   进入阶段 2 之后不可能再失败。
+//
+// ★ `replaced_insns` 闭式（**判据，不是优化细节**：dispatcher 用它补 `cpu_.insns` 与 `clock_.tick(n)`）：
+//     Stopped（`c` 次比较，`c-1` 次移位）: `63*c + 1`
+//     RanOut （`c` 次比较，`c` 次移位）  : `63*c + 7`
+//     Empty  （`g_n == 0`）             : `6` = `4 + 2` ★ **不可达**：`g_n == 0` 由 G3 先判 `Failed`
+//                                         ⇒ 这一支只是闭式的**历史 / 哨兵**写法（记录"`js` 直落那支长什么样"），
+//                                         **不是活路径** —— 它的命中数必须恒 0（⛔ 别照它写测试）。
+//   逐项归属（⛔ 不能拿区间长度反推 `replaced`；也⛔ 不能把落位那 4 条当成"在区间里"）：
+//     `4` 段首（区间）+ `63*(c-1)`（每比较 56 + 每移位 7）+ `56` 最后一次比较
+//     + 落位：`4`（`jle` 那条，**区间外** `{0x42F783..0x42F793}`）/ `3`（`j<0` 直落）/ `2`（`js` 直落）。
+//   ★ 闭式对不对的**硬判据**是 `tests/native_override_assets.cpp` 的 `sortseg/*` 比 `cpu.insns`
+//     （**精确相等**）＋ E2E 的 `insns_unattributed == 0`。⛔ 别拿"第 N 帧的 `insns` |Δ| ≤ 1%"
+//     当判据：漏算落位那 4 条在窗口内只差 0.013%，而且窗口交互是实时时钟 ⇒ 同一个帧号在两臂里
+//     不是同一时刻（口径见 `docs/03-emulator/measurement.md` M-11 最后一条）。
+//
+// ★ 寄存器 / ABI：出口处**必须原样**的是 `ESP` / `EBP` / `ESI`
+//   （`0x42F6F8 mov ecx,esi` 下一轮段入口还要用 ESI）。其余 `EAX EBX ECX EDX EDI EFLAGS`
+//   **不复刻**：出口后它们全被重写 / 被 `pop` 恢复 ⇒ **不可观察**（逐条推导见设计稿 A.3 ① 的表）
+//   ⇒ 真字节两臂的比较集合**不含**它们（⛔ 比了必假红，这与 `nativeFillPool414AC0` 复刻 EAX/EDX/
+//   ECX/EFLAGS 的差别是**有意的**：那个段出口会被读，本段不会）。代价是这个比较集合更小 —— 明写的。
+//   同理不复刻 `[ebp-0x14, ebp)` 那 5 个 scratch dword（本函数自己的死 scratch：guest 每轮先写后读，
+//   出口后的续延与尾循环也先写后读）。
+//
+// ★ 已知边界（登记，不是缺陷；准入门 ⑤）：① 那 5 个 scratch；② 寄存器残留与 `EFLAGS`；
+//   ③ 虚拟时钟**无**相位偏移（闭式成立 ⇒ 与解释器臂逐条等价；⛔ 不要"补偿"，补了才是错）。
+//
+// ★ 单次持有时界（写在这里是为了不让后来人把"窗口聚合量"读成"一次持有"）：
+//   命中点 = block 入口按 EIP 查表（`NativeBlockTable::find` 只看 `entry_ea`；`resume_ea` 只是
+//   Replaced 之后 EIP 的落点，**不是放行范围**）⇒ **一次 `fn` 只替一次插入步**，
+//   单次 = `63 * g_n` 条 guest 指令。按设计稿推算 `N ≈ 960` ⇒ 典型 `63*480 ≈ 30k` 条 ≈ 10 µs、
+//   最坏 `63*959 ≈ 60k` 条 ≈ 24 µs（宿主）；G8 把上界钉在 `63*4096 ≈ 258k` 条 ≈ 103 µs ——
+//   落在 `holdhist main` 最小的 `<1 ms` 桶里（`docs/03-emulator/measurement.md` M-11：
+//   不变量 `>50 ms == 0`、实测 max 30.8–47.9 ms）⇒ 比现状好 1–2 个数量级。
+//   ⛔ 不需要分块 / 定期让出：先例 `nativeMemcpy` / `_memset` / LZSS / Huffman / rep-bulk / PCM 段
+//   全部一次跑完。命中之间隔着解释器块 `0x42F6EB..0x42F707` + 一次 guest `call sub_41BF50`
+//   ⇒ token / `--time-limit` / Present / 音频泵 / 图 tick 都在命中之间跑到（墙钟上更密）。
+//
+// ★ 兜底（A7-3）：`bo.fallbacks > 4096` 时 fn **自觉返回 `Declined`**（永久停用一次），
+//   避免"每个 block 边界都重试 + 6 次 committed 查询"把成本加回热路径。判据是框架已有的计数，⛔ 不新增机制。
+//
+// ★ 隔离：`all,-sub_42F560`。
+// ---------------------------------------------------------------------------------------
+// 单次持有的 guest 指令上界闸门（G8）；见上面"单次持有时界"的推导（N≈960 只用到 23%）。
+constexpr std::uint32_t kSortSegMaxStep = 4096;
+// 纯核：`ror32(seed ^ rol32(v, 11), 25)`（**每一步都是 32 位**，⛔ 中间结果不许留 64 位；
+// ⛔ 不要写 `uint64_t << 11` 之后再 `|`）。键的复合（两条 `add`）**按 32 位回绕**，由调用方做。
+std::uint32_t sortKeyOf(std::uint32_t seed, std::uint32_t v);
+// `replaced_insns` 闭式（见上面的逐项归属）：`stopped` ⇒ `63*c + 1`，否则 `63*c + 7`。
+std::uint64_t sortSegReplacedInsns(std::uint32_t comparisons, bool stopped);
+BlockOverrideOutcome nativeSortStep42F560(X86& cpu, GuestMemory& mem, std::uint64_t* replaced_insns);
 // 纯解码核（测试直接用；src/comp = 输入，dst/out = 输出，ring = 4096 B 字典）。
 bool lzssDecode(const std::uint8_t* src, std::uint32_t comp_size, std::uint8_t* dst, std::uint32_t out_size,
                 std::uint8_t ring[4096]);

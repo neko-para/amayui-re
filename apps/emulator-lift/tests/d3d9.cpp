@@ -819,18 +819,30 @@ void caseGetBackBufferAndRenderTarget() {
     LIFT_CHECK_EQ_U32(f.m.mem().rd32(desc + 0x18u), 1280u);
     LIFT_CHECK_EQ_U32(f.m.mem().rd32(desc + 0x1Cu), 720u);
 
-    // SetRenderTarget(backbuffer_surface, 0) 成功；再恢复到后缓冲（0,0）
-    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x94u, {surf, 0u}), 0u);
+    // SetRenderTarget(0, backbuffer_surface) 成功；再恢复到后缓冲（RT0 ← NULL）
+    // ★ 实参形态是 **D3D9** 的：`(RenderTargetIndex, pRenderTarget)`（`0x94` 槽只有这两个实参）；
+    //   ⛔ 不是 D3D8 的 `(pRenderTarget, pNewZStencil)`（REQ-01M780VKKRFHJEX6VM74DRCYBM）。
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x94u, {0u, surf}), 0u);
     lift::d3d9::PipelineInfo pi;
     LIFT_CHECK(lift::d3d9::pipelineInfoOfState(f.m.cpu(), dev.info.pipeline, &pi, nullptr));
-    LIFT_CHECK_EQ_U32(pi.color_arena, dev.info.arena);
+    // ★ 后缓冲**表面**与"隐式后缓冲"是同一种状态（流水线把前者规范化成后者）：
+    //   `color_surface == 0` 且 `color_arena == 0`（0 = 后缓冲 ⇒ 像素/尺寸由 `DeviceInfo` 解析）。
+    //   ⛔ 不要断言 `color_arena == dev.info.arena`：那是"表面被当成纹理 RT 绑着"的旧表示，
+    //   它会让 GPU 准入（`color_surface != 0` ⇒ CPU 回退）永远失守。
+    LIFT_CHECK_EQ_U32(pi.color_surface, 0u);
+    LIFT_CHECK_EQ_U32(pi.color_arena, 0u);
     LIFT_CHECK_EQ_U32(f.method(dev.object, 0x94u, {0u, 0u}), 0u);
     LIFT_CHECK(lift::d3d9::pipelineInfoOfState(f.m.cpu(), dev.info.pipeline, &pi, nullptr));
     LIFT_CHECK_EQ_U32(pi.color_arena, 0u);
     LIFT_CHECK_EQ_U32(pi.color_surface, 0u);
 
     // 不是 surface 的对象 ⇒ D3DERR_INVALIDCALL（⛔ 不静默接受）
-    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x94u, {dev.object, 0u}), 0x8876086Cu);
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x94u, {0u, dev.object}), 0x8876086Cu);
+    // ★ RT1（`RenderTargetIndex != 0`）⇒ D3DERR_INVALIDCALL：本线只实现 RT0，真机在没建过 RT1 时
+    //   同样返回这个码。⛔ 不许静默折叠成 RT0（那会再次变成"绑定被悄悄丢弃"）。
+    //   这条钉的是**索引闸门本身**；"第 1 个实参是索引、不是 surface"由上面 `{0u, surf}` 那两条正向
+    //   断言钉住（按 D3D8 形读参时它们红）。
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x94u, {1u, surf}), 0x8876086Cu);
     LIFT_CHECK_EQ_U32(f.method(surf, 0x08u, {}), 0u);  // Release
     LIFT_CHECK(!f.m.cpu().com->find(surf));
 }
@@ -880,7 +892,7 @@ void caseOffscreenSurfaceRenderTargetData() {
     const std::uint32_t src = f.m.mem().rd32(src_out);
     LIFT_CHECK_NE_U32(src, 0u);
     if (src == 0) return;
-    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x94u, {src, 0u}), 0u);  // SetRenderTarget(src, 0)
+    LIFT_CHECK_EQ_U32(f.method(dev.object, 0x94u, {0u, src}), 0u);  // SetRenderTarget(RT0, src)
 
     // 清成已知颜色（TARGET 位）
     const std::uint32_t color = 0x00123456u;

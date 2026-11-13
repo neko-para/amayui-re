@@ -1802,6 +1802,181 @@ int main() {
     }
 
     // =====================================================================================
+    // ⑭b 段级：`sub_42F560` 的**插入排序内层扫描**（entry `0x42F5E0` / resume `0x42F6EB`）
+    //
+    // 判据（红了意味着什么；缺一条都不算）：
+    //   ① `sortseg/alias-declined`：`A` 的**写域**与 `B`（读域）重叠 4 字节 ⇒ 必须 `Failed` 且**零写**。
+    //      删掉 G6（或把它写成"只比基点 / 用 || 而不是全区间"）⇒ 会 `Replaced` 并写 `A[]` ⇒ 两条同时红。
+    //      （四字节重叠时其它闸门都过得去 ⇒ 不会假红。）
+    //   ② `sortseg/entry-gate`：`ECX != g_n` ⇒ `Failed`、`fallbacks == 1`、**`disabled == false`**、零写。
+    //      把 G1 改回 `Declined` ⇒ `disabled` 变 `true`（永久停用：优化安静地没了）⇒ 红；
+    //      删掉 G1 ⇒ 拿错的 `i` 去算 ⇒ 会 `Replaced` ⇒ `hits == 0` / 零写 / `runCode` 都红。
+    //   ③ `sortseg/budget-gate`：`g_n = 5000 > kSortSegMaxStep`（4096）⇒ `Failed` 且零写。删 G8 ⇒ `Replaced` ⇒ 红。
+    //   ④ `sortseg/seed-uncommitted`：safe mode 下 `[esi+0x5EC8C]` 所在页未提交 ⇒ 必须 `Failed` 且
+    //      **不发生 fault**。删 G2 的 `committed` ⇒ 裸 `rd32` 走 `guestFault` ⇒ `std::_Exit(3)`
+    //      （进程直接死，连 FAIL 行都打不出来 —— 这就是"红"）。
+    // ★ 真正的语义判据（`A[]` 逐字节 + `cpu.insns` 精确相等）在 assets 档的 `sortseg/*`：
+    //   那里有 AGE.EXE 的**真字节**当 oracle，pure 档只有合成夹具（⛔ 不拿它冒充等价性证据）。
+    // =====================================================================================
+    {
+        constexpr std::uint32_t kSSEntry = 0x0042F5E0u;
+        constexpr std::uint32_t kSSResume = 0x0042F6EBu;
+        constexpr std::uint32_t kSSGlobals = 0x0055D598u;  // g_j / g_n / C / B / A 五个 dword
+        constexpr std::uint32_t kSSAArr = 0x00450000u;
+        constexpr std::uint32_t kSSBArr = 0x00460000u;
+        constexpr std::uint32_t kSSCArr = 0x00470000u;
+        constexpr std::uint32_t kSSEsi = 0x00430000u;
+        constexpr std::uint32_t kSSSeed = 0x0048EC8Cu;  // = kSSEsi + 0x5EC8C
+        struct SSState {
+            std::vector<std::uint8_t> a, b, c;  // A/B/C 各 `4*(g_n+1)` 字节
+            std::uint32_t gj = 0, gn = 0, seed = 0;
+        };
+        // 摆一份"其它闸门都过得去"的状态：五个全局（committed）+ A/B/C 三个跨度（committed）+ seed。
+        // `bytes` = `4*(i+1) + 64`（比 G4 要求的跨度多留一点，避免"恰好卡在页尾"这种偶然）。
+        auto place = [&](lift_fixture::Fixture& fx, std::uint32_t a_base, std::uint32_t b_base,
+                         std::uint32_t c_base, std::uint32_t i, std::uint32_t seed) {
+            const std::size_t bytes = static_cast<std::size_t>(4ull * (static_cast<std::uint64_t>(i) + 1ull)) + 64u;
+            const std::vector<std::uint8_t> zeros(bytes, 0);
+            LIFT_CHECK(fx.m.placeData(kSSGlobals, zeros.data(), 20u, &fx.err));
+            LIFT_CHECK(fx.m.placeData(a_base, zeros.data(), zeros.size(), &fx.err));
+            LIFT_CHECK(fx.m.placeData(b_base, zeros.data(), zeros.size(), &fx.err));
+            LIFT_CHECK(fx.m.placeData(c_base, zeros.data(), zeros.size(), &fx.err));
+            LIFT_CHECK(fx.m.placeData(kSSSeed, &seed, 4u, &fx.err));
+            fx.m.mem().wr32(kSSGlobals + 0u, 0xFFFFFFFFu);  // g_j 初值（Replaced 时会被重写）
+            fx.m.mem().wr32(kSSGlobals + 4u, i);            // g_n
+            fx.m.mem().wr32(kSSGlobals + 8u, c_base);       // C
+            fx.m.mem().wr32(kSSGlobals + 12u, b_base);      // B
+            fx.m.mem().wr32(kSSGlobals + 16u, a_base);      // A
+            fx.m.cpu().ecx() = i;                           // G1 的入口判据
+            fx.m.cpu().esi() = kSSEsi;                      // seed = [esi+0x5EC8C]
+        };
+        auto snap = [&](lift_fixture::Fixture& fx, std::uint32_t a_base, std::uint32_t b_base,
+                        std::uint32_t c_base, std::uint32_t i) {
+            SSState s;
+            const std::size_t bytes = static_cast<std::size_t>(i) * 4u + 4u;
+            s.a.assign(fx.m.mem().host(a_base), fx.m.mem().host(a_base) + bytes);
+            s.b.assign(fx.m.mem().host(b_base), fx.m.mem().host(b_base) + bytes);
+            s.c.assign(fx.m.mem().host(c_base), fx.m.mem().host(c_base) + bytes);
+            s.gj = fx.m.mem().rd32(kSSGlobals + 0u);
+            s.gn = fx.m.mem().rd32(kSSGlobals + 4u);
+            s.seed = fx.m.mem().rd32(kSSSeed);
+            return s;
+        };
+        auto sameState = [](const SSState& x, const SSState& y) {
+            return x.a == y.a && x.b == y.b && x.c == y.c && x.gj == y.gj && x.gn == y.gn && x.seed == y.seed;
+        };
+        auto fillArrays = [&](lift_fixture::Fixture& fx, std::uint32_t a_base, std::uint32_t b_base,
+                              std::uint32_t c_base, std::uint32_t i) {
+            for (std::uint32_t k = 0; k < i; ++k) fx.m.mem().wr32(a_base + 4u * k, k);  // 下标都 < i（过 G7）
+            for (std::uint32_t k = 0; k <= i; ++k) {
+                fx.m.mem().wr32(b_base + 4u * k, k * 7u + 1u);
+                fx.m.mem().wr32(c_base + 4u * k, k * 13u + 5u);
+            }
+        };
+
+        // ---- ① 别名：`A` 的写域盖住 `B` 的 4 字节 ⇒ Failed + 零写 ----
+        lift_test::g_current_case = "sortseg/alias-declined";
+        {
+            lift_fixture::Fixture fx;
+            LIFT_CHECK(fx.ok);
+            const std::uint32_t i = 4u;
+            const std::uint32_t a_base = kSSAArr;
+            const std::uint32_t b_base = kSSAArr + 4u * i;  // = A[i] ⇒ W(A)=[A,A+4*(i+1)) 与 B 的跨度重叠 4 字节
+            const std::uint32_t c_base = kSSCArr;
+            place(fx, a_base, b_base, c_base, i, 0x12345678u);
+            fillArrays(fx, a_base, b_base, c_base, i);
+            const SSState before = snap(fx, a_base, b_base, c_base, i);
+            std::uint64_t replaced = 99u;
+            const lift::BlockOverrideOutcome outcome = lift::nativeSortStep42F560(fx.m.cpu(), fx.m.mem(), &replaced);
+            LIFT_CHECK(outcome == lift::BlockOverrideOutcome::Failed);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(replaced), 0u);
+            LIFT_CHECK(sameState(before, snap(fx, a_base, b_base, c_base, i)));
+        }
+
+        // ---- ② 入口闸门：`ECX != g_n` ⇒ Failed（**不是 Declined**）+ 零写 ----
+        lift_test::g_current_case = "sortseg/entry-gate";
+        {
+            lift_fixture::Fixture fx;
+            LIFT_CHECK(fx.ok);
+            const std::uint32_t i = 3u;
+            place(fx, kSSAArr, kSSBArr, kSSCArr, i, 0x0BADF00Du);
+            fillArrays(fx, kSSAArr, kSSBArr, kSSCArr, i);
+            fx.m.cpu().ecx() = i + 1u;  // 入口判据不成立
+            const SSState before = snap(fx, kSSAArr, kSSBArr, kSSCArr, i);
+            std::uint64_t replaced = 77u;
+            LIFT_CHECK(lift::nativeSortStep42F560(fx.m.cpu(), fx.m.mem(), &replaced) ==
+                       lift::BlockOverrideOutcome::Failed);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(replaced), 0u);
+            LIFT_CHECK(sameState(before, snap(fx, kSSAArr, kSSBArr, kSSCArr, i)));
+            // 走 dispatcher：`Failed` 必须**不永久停用**（G1 写成 `Declined` 就会 disabled ⇒ 这条红）。
+            const std::uint8_t kRet = 0xC3;
+            LIFT_CHECK(fx.m.placeCode(kSSEntry, &kRet, 1u, &fx.err));
+            std::string err;
+            LIFT_CHECK(fx.m.blockOverrides().add(kSSEntry, kSSResume, "ref_sortseg",
+                                                 lift::nativeSortStep42F560, &err));
+            fx.rearmStack();
+            fx.m.cpu().ecx() = i + 1u;
+            fx.runCode(kSSEntry);
+            LIFT_CHECK(fx.ok);
+            const lift::NativeBlockOverride* e = fx.m.blockOverrides().at(0);
+            LIFT_CHECK(e != nullptr);
+            if (e != nullptr) {
+                LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(e->hits), 0u);
+                LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(e->declines), 0u);
+                LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(e->fallbacks), 1u);
+                LIFT_CHECK(!e->disabled);  // ★ 这条就是"G1 是 Failed 而不是 Declined"的判据
+            }
+        }
+
+        // ---- ③ 预算闸门 G8：`g_n > kSortSegMaxStep` ⇒ Failed + 零写 ----
+        lift_test::g_current_case = "sortseg/budget-gate";
+        {
+            lift_fixture::Fixture fx;
+            LIFT_CHECK(fx.ok);
+            const std::uint32_t i = 5000u;
+            LIFT_CHECK(i > lift::kSortSegMaxStep);  // 夹具前提（不是断言当前取值）
+            place(fx, kSSAArr, kSSBArr, kSSCArr, i, 0x00C0FFEEu);
+            fillArrays(fx, kSSAArr, kSSBArr, kSSCArr, i);
+            const SSState before = snap(fx, kSSAArr, kSSBArr, kSSCArr, i);
+            std::uint64_t replaced = 5u;
+            LIFT_CHECK(lift::nativeSortStep42F560(fx.m.cpu(), fx.m.mem(), &replaced) ==
+                       lift::BlockOverrideOutcome::Failed);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(replaced), 0u);
+            LIFT_CHECK(sameState(before, snap(fx, kSSAArr, kSSBArr, kSSCArr, i)));
+        }
+
+        // ---- ④ G2：safe mode 下 seed 未提交 ⇒ Failed 且**不 fault** ----
+        lift_test::g_current_case = "sortseg/seed-uncommitted";
+        {
+            lift_fixture::Fixture fx;
+            LIFT_CHECK(fx.ok);
+            const std::uint32_t i = 3u;
+            // ★ 故意**不**摆 `[esi+0x5EC8C]`（那个页保持未提交）；其余闸门全部满足。
+            const std::size_t bytes = static_cast<std::size_t>(4ull * (static_cast<std::uint64_t>(i) + 1ull)) + 64u;
+            const std::vector<std::uint8_t> zeros(bytes, 0);
+            LIFT_CHECK(fx.m.placeData(kSSGlobals, zeros.data(), 20u, &fx.err));
+            LIFT_CHECK(fx.m.placeData(kSSAArr, zeros.data(), zeros.size(), &fx.err));
+            LIFT_CHECK(fx.m.placeData(kSSBArr, zeros.data(), zeros.size(), &fx.err));
+            LIFT_CHECK(fx.m.placeData(kSSCArr, zeros.data(), zeros.size(), &fx.err));
+            fx.m.mem().wr32(kSSGlobals + 4u, i);
+            fx.m.mem().wr32(kSSGlobals + 8u, kSSCArr);
+            fx.m.mem().wr32(kSSGlobals + 12u, kSSBArr);
+            fx.m.mem().wr32(kSSGlobals + 16u, kSSAArr);
+            fx.m.cpu().ecx() = i;
+            fx.m.cpu().esi() = kSSEsi;
+            fillArrays(fx, kSSAArr, kSSBArr, kSSCArr, i);
+            LIFT_CHECK(!fx.m.mem().committed(kSSSeed, 4u));
+            fx.m.mem().setSafeMode(true);
+            std::uint64_t replaced = 42u;
+            // 删掉 G2 的 committed ⇒ 这里会 `std::_Exit(3)`（进程死）而不是返回 Failed。
+            LIFT_CHECK(lift::nativeSortStep42F560(fx.m.cpu(), fx.m.mem(), &replaced) ==
+                       lift::BlockOverrideOutcome::Failed);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(replaced), 0u);
+            fx.m.mem().setSafeMode(false);
+        }
+    }
+
+    // =====================================================================================
     // ⑯ `sub_46D9F0` 的字形混合核（**G1：纯算术**；不建机器、不碰游戏 / LFS）
     //
     // 判据（红了意味着什么）：
@@ -3192,6 +3367,20 @@ int main() {
         }
         LIFT_CHECK(pool->entry_insn != nullptr && pool->entry_insn[0] != '\0');
         LIFT_CHECK(pool->resume_insn != nullptr && pool->resume_insn[0] != '\0');
+        // ★ `sub_42F560` 的插入排序扫描段（段级）：anchor / 分层 / feeder 三条一起钉。
+        //   ⛔ `debug == true` 的项进不了 `all` ⇒ `all` vs `all,-sub_42F560` 的 A/B 会变成"两臂一样、全绿"。
+        const lift::KnownBlockNative* sortseg = lift::findKnownBlockNative("sub_42F560");
+        LIFT_CHECK(sortseg != nullptr);
+        if (sortseg != nullptr) {
+            LIFT_CHECK(!sortseg->debug);
+            LIFT_CHECK(!sortseg->feeder_ok);
+            LIFT_CHECK_EQ_U32(sortseg->entry_ea, 0x0042F5E0u);
+            LIFT_CHECK_EQ_U32(sortseg->resume_ea, 0x0042F6EBu);
+            LIFT_CHECK(sortseg->fn == &lift::nativeSortStep42F560);
+            // ★ 锚的期望文本随项走（空串 / null ⇒ `verifyKnownBlockAnchor` 直接失败 ⇒ `all` 静默跳过）。
+            LIFT_CHECK(sortseg->entry_insn != nullptr && sortseg->entry_insn[0] != '\0');
+            LIFT_CHECK(sortseg->resume_insn != nullptr && sortseg->resume_insn[0] != '\0');
+        }
         // ★ sub_4CCC60：stdcall `retn 1Ch` = 28 B；**稳定层**（2026-11-11 进 `all`）。
         const lift::KnownNative* affine = lift::findKnownNative("sub_4CCC60");
         LIFT_CHECK(affine != nullptr);
