@@ -2,9 +2,24 @@
 
 - id: REQ-01M78GAHK7TETS08H4CKAGJKN7
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- dropped_reason: 标题乱码已查明是老汉化 936/GBK 存档的预期结果（新汉化 fixtures 正常）；本单原计划的 save-summary-roundtrip 守卫经用户 2026-11-13 决定不做。手工已验证 存档→正常退出→SAVE.DAT 1110/2110 链路工作，证据见 OBS-20261113-01；重开条件见正文。
 - tags: [emulator-lift save summary guard]
+
+## 2026-11-13 复核（结论）
+
+「标题乱码」不是本链路失效，而是**跨汉化版本的数据编码不兼容**：
+
+- **新汉化（本仓）**：`corpus/fixtures/` 顶层的槽 76–79 + `SAVE.DAT` + `RT.DAT` 正常。
+  `1076–1079` = `8F988FCD`（CP932 `序章`）、`2076–2079` = `9168…905F`
+  （CP932 `蘇醒于刕世的女神`，AmayuiCN 渲染成 `苏醒于现世的女神`）；列表 / 缩略图 / 读取剧情都正确。
+- **老汉化（936/GBK）**：`corpus/fixtures/saves/` 的槽 00/01/03 摘要是 `A3B1D5C2`（GBK `１章`，
+  CP932 拆成 `｣ｱﾕﾂ`）、`B3C7…`（GBK `城砦与结缘之力共存`）⇒ 半角假名乱码。新汉化按 ACP=932 走。
+- 手工验证「退出写摘要」：fixtures appdata + `sn0000-save.graph` 存到槽 110 ⇒ `close_window`
+  （`--close-confirm exit`）正常退出：`SAVE.BAK` 的 `1110/2110` = `第六章` / `降臨的軍神使者`（旧摘要），
+  退出后 `SAVE.DAT` 同一对 = `序章` / `蘇醒于刕世的女神`；重进 LoadData 第 110 页显示正确。
+  证据：`docs/03-emulator/observations.md` 的 `OBS-20261113-01`。
 
 ## 现象（2026-13 取证副产物）
 
@@ -45,13 +60,17 @@
 - 写侧逐字节保真：我们的 `SAVE.DAT` 与真机 `corpus/fixtures/SAVE.DAT` 的 **257 条字符串变量逐条相同（diff = 0）**。
 - 不是"我们不写"：摘要由 guest 写（`0x40AAE0`），存档命令不碰它。
 - 不是字体/cmap：`Amayui-CN_cnjp.ttf` 只有 5 张 cmap 子表（无平台 1），选中 `3/10`，查表正常。
-- 不是 DBCS 拆字节：`EDCE/EBBD/E1D4` 在 walker 里**成对**消费；`A3/B1/D5/C2` 本来就是单字节半角片假名区
-  （那些是**未用槽的占位默认串**，不是乱码）。
+- **不是 DBCS 拆字节（2026-11-13 更正）**：`EDCE/EBBD/E1D4` 在 walker 里成对消费；
+  但 `A3/B1/D5/C2` **不是**未用槽的占位默认串 —— 它们是 `corpus/fixtures/saves/`（老汉化 936/GBK）
+  槽 0/1/3 的摘要：`A3B1D5C2` = GBK `１章`、`B3C7…` = GBK `城砦与结缘之力共存`。新汉化按 CP932 读时
+  `A3`/`B1` 是单字节半角假名 ⇒ `｣ｱﾕﾂ`，这是**老汉化存档**的预期结果。新汉化的占位是 `8F988FCD`（`序章`）
+  一类 CP932 码位，由 AmayuiCN 的 cmap 渲染成中文。
 
-## 判据
+## 决定（2026-11-13）
 
-- `save-summary-roundtrip` 在"删掉退出写摘要那一步"的变异下**必红**；
-- 用例跑一次不超过 ~3 分钟（含真存档 + 退出）。
+- 本单原计划的 `save-summary-roundtrip` assets 守卫**先不做**（用户决定）⇒ 按 `dropped` 关闭。
+- 重开条件：新汉化的「存档 → 正常退出 → 摘要」链路出现回归，或要把手工验证固化成自动守卫。
+- `corpus/fixtures/saves/`（老汉化 936）的显示不在本单范围；要兼容需做数据层迁移（GBK 摘要 → CP932 占位后重编码 `SAVE.DAT`），另立单。
 
 ## 未取证
 

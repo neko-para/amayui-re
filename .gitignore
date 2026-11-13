@@ -33,3 +33,5 @@ tmp/
 *.local.json
 
 /data/privileged-audit.log
+
+.DS_Store

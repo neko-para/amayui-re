@@ -2,10 +2,11 @@
 
 - id: REQ-01M78DH39S3EEEA4SEGECW3V2P
 - type: bug
-- status: open
+- status: dropped
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
 - repro: apps/emulator-lift/src/shims/gdi32_font.cpp#shimGetTextMetrics
 - severity: S3
+- dropped_reason: 本单是「读档标题乱码」调查的副产物；乱码已查明是老汉化 936/GBK 存档的预期结果（见 OBS-20261113-01）。三条合同缺条（tmCharSet / L1-GDI-01 / WideCharToMultiByte）本身仍成立，但按用户 2026-11-13「只处理台账修正、关闭相关单」的决定本轮不修；要修时按正文重开。
 - tags: [emulator-lift win32 contract gdi codepage]
 
 ## 现象（取证副产物，2026-11-13）

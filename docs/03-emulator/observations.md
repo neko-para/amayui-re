@@ -409,3 +409,41 @@
 - **口径警告**：`host: input-script` 是**交互图自己的** `InputScript::tick`（每块边界一次，
   2.6–3.5 s/窗）——手动游玩没有这一项，**不要把这条图的总墙钟当玩家读数**；要真实墙钟按
   README §4.3.2 做去掉 `profile_*` 的 A/B。窗口 profiler 自身也有开销（每块计时）。
+
+### OBS-20261113-01 · 读档标题乱码 = 老汉化 936/GBK 存档；新汉化 fixtures 正常
+
+- **数据面**：`corpus/fixtures/` 顶层 = **新汉化**（槽 76–79，摘要 `1076–1079`/`2076–2079`）；
+  `corpus/fixtures/saves/` = **老汉化 936/GBK**（槽 00/01/03，摘要 `1000–1003`/`2000–2003`）。
+  两份 `SAVE.DAT` 都是真机容器；老汉化的槽体只在 `saves/` 里，且与 `saves/SAVE.DAT` 的 0–3 摘要配套。
+- **读数（新汉化）**：`SAVE.DAT` 的 `1076–1079` = `8F 98 8F CD`（CP932 `序章`）；
+  `2076–2079` = `91 68 90 C1 98 B0 FA 84 90 A2 93 49 8F 97 90 5F`（CP932 `蘇醒于刕世的女神`；
+  AmayuiCN 渲染成 `苏醒于现世的女神`）。LoadData 第 70 页：槽 76–79 的标题 / 副标题 / 缩略图正确；
+  点槽 76 读取后进剧情，正文中文正确。
+- **读数（老汉化 936/GBK）**：`corpus/fixtures/saves/SAVE.DAT` 的 `1000`/`1001` = `A3 B1 D5 C2`
+  （GBK `１章`；CP932 拆成 `｣ｱﾕﾂ`）、`2000`/`2001` = `B3 C7 ED CE D3 EB BD E1 D4 B5 D6 AE C1 A6 B9 B2 B4 E6`
+  （GBK `城砦与结缘之力共存`）、`1003` = `A3 B2 D5 C2`（GBK `２章`）、
+  `2003` = `A3 B2 C8 CB A4 CE C3 A8 AA 95 C8 CB`（GBK `２人の猫獣人`）
+  ⇒ 用 `saves/` 的槽 00/01/03 进 LoadData 第 0 页是半角假名乱码；新汉化按 ACP=932 走
+  ⇒ **跨汉化版本的数据编码不兼容**。
+- **读数（退出写摘要链）**：用顶层 fixtures 构造 appdata + `graphs/sn0000-save.graph` 存到槽 110；
+  `close_window`（`--close-confirm exit`）正常退出前 `SAVE.BAK` 的 `1110`/`2110` = `第六章` /
+  `降臨的軍神使者`（旧摘要），退出后 `SAVE.DAT` 的同一对 = `8F 98 8F CD` / `91 68 … 90 5F`
+  （`序章` / `蘇醒于刕世的女神`）；重进 LoadData 第 110 页显示正确。
+- **复现（新汉化）**：把顶层 `SAVE.DAT` / `RT.DAT` / `SAVE7{6,7,8,9}.{DAT,STH}` 拷进
+  `<work>/appdata/Local/Eushully/天結いキャッスルマイスター/SAVE/`（无需 `SYS4REG.INI`）；
+  `./out/emulator-lift --present window --present-hidden --raster gpu --native-overrides all
+  --skip-logo --audio off --game-dir ../../links/install --appdata <work>/appdata
+  --input-script <work>/load70.txt --max-frames 700 --time-limit 120`，其中 `load70.txt` =
+  `at frame 130` / `click 1070 480` / `wait 60 frames` / `click 605 30` / `wait 20 frames` /
+  `click 530 30` / `wait 40 frames` / `click 893 30` / `wait 80 frames` / `quit`。
+- **复现（老汉化）**：同上，但 SAVE 文件换成 `corpus/fixtures/saves/` 的 `SAVE.DAT` / `RT.DAT` /
+  `SAVE0{0,1,3}.{DAT,STH}`；`load0.txt` = `at frame 130` / `click 1070 480` / `wait 60 frames` /
+  `click 605 30` / `wait 20 frames` / `click 530 30` / `wait 40 frames` / `click 612 30` /
+  `wait 80 frames` / `quit`。
+- **复现（退出写摘要）**：`graphs/sn0000-save.graph` 末尾追加 10×`wait 5000 wall_ms`；
+  输入脚本 `<work>/close.txt` = `at wall_ms 105000` / `close_window` / `at wall_ms 125000` / `quit`；
+  运行加 `--close-confirm exit`。
+- **口径**：macOS arm64 / `apps/emulator-lift`（HEAD `4f1bc7e`）/ 2026-11-13 / RelWithDebInfo /
+  `--present window --present-hidden --raster gpu` / `--skip-logo --audio off --native-overrides all`。
+- **用途**：修正 `REQ-01M78GAHK7TETS08H4CKAGJKN7` 里「`A3/B1/D5/C2` 是未用槽占位默认串」的误判；
+  `corpus/fixtures/saves/`（老汉化 936）的显示要另做数据层迁移（本观察**不**声称 lift 应改编码）。
