@@ -61,6 +61,7 @@ import {
   undecorate,
 } from './lst-format.mjs';
 import { pickDecompiled } from './disasm.mjs';
+import { parseCollapsedBlock } from './anchor-lst.mjs';
 
 // ─────────────────────────────────────────────────────────── 语料对（模块）解析
 
@@ -188,7 +189,7 @@ function dataElementCount(operands) {
  * （callee 一遍、全局一遍、参数一遍），而每一遍都会各自实现一份判据 ⇒ 判据分叉。
  *
  * @param {string[]} lines  `.lst` 的行数组（末尾通常有一个空串）
- * @returns {{functions:object[], data:object[], tableEdges:object[], dataEas:Set<number>, indirectCallSites:number}}
+ * @returns {{functions:object[], data:object[], tableEdges:object[], folded:object[], dataEas:Set<number>, indirectCallSites:number}}
  */
 export function scanListing(lines) {
   /** 非 `.text` 段里的行 EA（= 数据/全局的定义点）：锚落在这些地址上**不是**"归属失败" */
@@ -196,6 +197,8 @@ export function scanListing(lines) {
   const functions = [];
   const data = [];
   const tableEdges = [];
+  /** ★ 被 IDA **折叠成一行注释**的区间（`; [NNNN BYTES: COLLAPSED …]`）：listing 里一行指令都没有 */
+  const folded = [];
   let cur = null; // 当前函数
   let curData = null; // 当前数据 item
   let indirectCallSites = 0;
@@ -207,6 +210,28 @@ export function scanListing(lines) {
     const { seg, ea, body } = pl;
     // 段名不是 `.text` ⇒ 记下它的 EA
     if (seg !== '.text') dataEas.add(ea);
+
+    // ★ 折叠块：`; [NNNNNNNN BYTES: COLLAPSED FUNCTION|CHUNK OF FUNCTION <名>. …]`。
+    //   它在 listing 里**一行指令都没有** ⇒ 既不是函数体、也不是数据。只按 `proc near … endp` 切的话，
+    //   这块区间就**静默消失**：`findFunction` 把它报成"不落在任何函数里"，与"你给错了 EA"混成一句
+    //   （实测本语料 1805 块 / 17.5 万字节 ⇒ 这是"已知的折叠覆盖"，不是"无处可归"）。
+    //   判据只有一份：`anchor-lst.mjs` 的 `COLLAPSED_RE` + `parseCollapsedBlock`（这里不另写正则）。
+    if (body.startsWith(';')) {
+      const fold = parseCollapsedBlock(body);
+      if (fold?.folded) {
+        folded.push({
+          ea,
+          seg,
+          sym: fold.sym,
+          kind: fold.kind,
+          declaredBytes: fold.declaredBytes,
+          lastEa: ea + fold.declaredBytes - 1,
+          fromLine: i + 1,
+          toLine: i + 1,
+        });
+        continue;
+      }
+    }
 
     const p = PROC_EA_RE.exec(line);
     if (p) {
@@ -400,7 +425,7 @@ export function scanListing(lines) {
       })
       .sort((a, b) => (a.offset ?? 0) - (b.offset ?? 0));
   }
-  return { functions, data, tableEdges, dataEas, indirectCallSites };
+  return { functions, data, tableEdges, folded, dataEas, indirectCallSites };
 }
 
 /** 数据 item 里的函数指针：`dd offset sub_XXXXXX` / `dd offset ___onexitinit` */
@@ -606,6 +631,13 @@ export function buildCatalog({ lstFile, cFile = 'auto', moduleKey = null } = {})
   // ── 关联（名字 = 唯一钥匙；`.lst` 的修饰名要先去壳） ──
   const bySym = new Map();
   for (const f of lst.functions) if (!bySym.has(f.sym)) bySym.set(f.sym, f);
+  // ★ 折叠块也按**名字**索引（同一个名字可以是多个 CHUNK：实测 `_memset` 有 5 段）
+  const foldedBySym = new Map();
+  for (const b of lst.folded) {
+    if (!foldedBySym.has(b.sym)) foldedBySym.set(b.sym, []);
+    foldedBySym.get(b.sym).push(b);
+  }
+  const foldedBytes = lst.folded.reduce((n, b) => n + (b.declaredBytes ?? 0), 0);
   let withC = 0;
   const cMatched = new Set();
   for (const f of lst.functions) {
@@ -700,6 +732,8 @@ export function buildCatalog({ lstFile, cFile = 'auto', moduleKey = null } = {})
     functions: lst.functions,
     bySym,
     starts,
+    folded: lst.folded,
+    foldedBySym,
     data: lst.data,
     dataByName,
     dataByEa,
@@ -721,6 +755,8 @@ export function buildCatalog({ lstFile, cFile = 'auto', moduleKey = null } = {})
       callSitesTotal: lst.functions.reduce((n, f) => n + f.callSites, 0),
       callEdges: [...callers.values()].reduce((n, a) => n + a.length, 0),
       addrTakenTargets: addrTaken.size,
+      foldedBlocks: lst.folded.length,
+      foldedBytes,
       calleesNotInInventory,
       cDefs: c ? c.funcs.length : 0,
       cDefsUnmatched: cDefsUnmatched.length,
@@ -851,6 +887,27 @@ export function functionItemOfEa(cat, ea) {
 }
 
 /**
+ * EA → **折叠块**（区间 `[ea, ea+declaredBytes-1]`；不在任何折叠块里 ⇒ `null`）。
+ *
+ * ★ 与 `functionOfEa` 的 `null` 是**两条不同的答案**，不许混成一句：
+ *   折叠块在 listing 里只有一行 `; [NNNN BYTES: COLLAPSED …]` 注释 —— 它有名字、有声明长度、
+ *   能按 EA 取字节，但它**不属于任何函数**（没有 `proc near … endp`，也就没有函数体 / 调用边）；
+ *   而 `functionOfEa` 的 `null` 里还混着"这个 EA 真的无处可归"。两者要分开报。
+ */
+export function foldedBlockOfEa(cat, ea) {
+  const target = typeof ea === 'number' ? ea : Number.parseInt(String(ea).replace(/^0x/i, ''), 16);
+  for (const b of cat.folded ?? []) {
+    if (target >= b.ea && target <= b.lastEa) return b;
+  }
+  return null;
+}
+
+/** 折叠块的符号名 → 块列表（同一个名字可以是多段 CHUNK，实测 `_memset` 有 5 段；没有 ⇒ `[]`） */
+export function foldedBlocksOfSym(cat, sym) {
+  return cat.foldedBySym?.get(sym) ?? cat.foldedBySym?.get(undecorate(sym)) ?? [];
+}
+
+/**
  * 定位一个 item：给 `sym` 或 `ea`（二选一）。
  * ★ 定位不到**抛错**（`--ea` 在函数体内也照样定位到所属函数，并明说"你给的 EA 不是函数起点"）。
  */
@@ -859,6 +916,18 @@ export function findFunction(cat, { sym = null, ea = null } = {}) {
     const target = typeof ea === 'number' ? ea : Number.parseInt(String(ea).replace(/^0x/i, ''), 16);
     const f = functionItemOfEa(cat, target);
     if (!f) {
+      // ★ 先问"是不是落在**已知的折叠块**里"：那是语料**确实覆盖**到的区间（有名字、有声明长度），
+      //   与"这个 EA 真的无处可归"是两件事 —— 混成一句会让"折叠"看起来像用户给错了地址。
+      const fold = foldedBlockOfEa(cat, target);
+      if (fold) {
+        throw new Error(
+          `EA 0x${target.toString(16)} 落在**折叠块** ${fold.sym ?? '（未命名）'}` +
+            `（${fold.kind === 'chunk' ? 'COLLAPSED CHUNK OF FUNCTION' : 'COLLAPSED FUNCTION'}；` +
+            `起点 0x${fold.ea.toString(16)}，声明 ${fold.declaredBytes} 字节，.lst 行 ${fold.fromLine}）—— ` +
+            `导出的 listing 把它折叠成了一行注释，它不属于任何函数的 \`proc near … endp\`，所以没有函数体 / 调用边可给。` +
+            `取这段字节：\`pnpm tools disasm-at at --ea 0x${fold.ea.toString(16)} --bytes ${fold.declaredBytes}\`。`,
+        );
+      }
       const segs = [...new Set(cat.functions.map((x) => x.seg))].join(' / ');
       throw new Error(
         `EA 0x${target.toString(16)} 不落在任何函数里（本目录覆盖的段：${segs}；` +
@@ -870,6 +939,21 @@ export function findFunction(cat, { sym = null, ea = null } = {}) {
   if (sym) {
     const f = cat.bySym.get(sym) ?? cat.bySym.get(undecorate(sym));
     if (!f) {
+      // ★ 折叠块也是"有名字的东西"：报"折叠块（起点 / 声明长度）"，而不是"不在目录里"
+      const folds = foldedBlocksOfSym(cat, sym);
+      if (folds.length > 0) {
+        const b = folds[0];
+        const more =
+          folds.length > 1
+            ? `（同名的折叠块共 ${folds.length} 段：${folds.map((x) => `0x${x.ea.toString(16)}×${x.declaredBytes}B`).join(' / ')}）`
+            : '';
+        throw new Error(
+          `符号 ${JSON.stringify(sym)} 是**折叠块**，不是目录里的函数：起点 0x${b.ea.toString(16)}，` +
+            `声明 ${b.declaredBytes} 字节，.lst 行 ${b.fromLine}${more}。` +
+            `折叠块在 listing 里没有指令行 ⇒ 没有函数体，也没有可机械读出的调用边（★ 这不是"没有调用方"）。` +
+            `取这段字节：\`pnpm tools disasm-at at --ea 0x${b.ea.toString(16)} --bytes ${b.declaredBytes}\`。`,
+        );
+      }
       const near = [...cat.bySym.keys()].filter((k) => k.includes(String(sym).slice(0, 6))).slice(0, 5);
       throw new Error(
         `符号 ${JSON.stringify(sym)} 不在目录里（共 ${cat.bySym.size} 个函数）` +
@@ -1149,6 +1233,7 @@ export function describe() {
       '`indirectCallSites` —— 任何"调用闭包"都只是**下界**（含 `call ds:dword_X`，旧的 `INDIRECT_CALL_RE` 把这一整类**静默漏掉**，实测 69 处）',
       '`cDefsUnmatched` —— `.c` 里有定义、但名字对不上任何 `.lst` 符号（修饰名要 demangle；本模块不做）',
       '`calleesNotInInventory` —— `callee` 符号在本文件里找不到（跨模块 / 导入）',
+      '`foldedBlocks` / `foldedBytes` —— `.lst` 把库函数折成一行 `; [NNNN BYTES: COLLAPSED …]`：那些区间**一行指令都没有** ⇒ 不属于任何函数、调用边在语料里**根本不存在**（★ 不是"没有调用方"）。此计数与上面的跨模块 callee **分开**',
       '`addrTaken` —— 取址 + 函数指针表：这些是**可能调用方**，不是能机械确定的边',
       '`c` 与 `lst` 的调用集合不一致 —— Hex-Rays 内联 / 折叠会造出这种差；**报出来，不合并**',
     ],

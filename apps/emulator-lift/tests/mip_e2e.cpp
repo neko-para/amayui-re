@@ -29,6 +29,7 @@
 
 #include "check.h"
 #include "runtime/host_encoding.h"
+#include "subprocess_skip.h"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -378,8 +379,6 @@ int main(int argc, char** argv) {
         wargs_v.push_back(L"--skip-logo");
         wargs_v.push_back(L"--present");
         wargs_v.push_back(L"headless");
-        wargs_v.push_back(L"--raster");
-        wargs_v.push_back(L"cpu");
         wargs_v.push_back(L"--audio");
         wargs_v.push_back(L"off");
         wargs_v.push_back(L"--native-overrides");
@@ -397,7 +396,6 @@ int main(int argc, char** argv) {
         child.push_back("--appdata"), child.push_back(appdata.string());
         child.push_back("--skip-logo");
         child.push_back("--present"), child.push_back("headless");
-        child.push_back("--raster"), child.push_back("cpu");
         child.push_back("--audio"), child.push_back("off");
         child.push_back("--native-overrides"), child.push_back("all");
         child.push_back("--max-frames"), child.push_back("2");
@@ -412,6 +410,8 @@ int main(int argc, char** argv) {
         if (!r.started) LIFT_SKIP("起不了 emulator-lift 子进程（exe 路径 / 沙箱限制？）");
         logs[i] = readAllBytes(log_path);
         if (logs[i].empty()) LIFT_SKIP("子进程没写日志（工作目录 / 权限问题）");
+        // ★ 无 GPU（含 `SDL_VIDEODRIVER=dummy`）：子进程在跑 guest 之前就拒绝启动 ⇒ SKIP 77。
+        LIFT_SKIP_IF_NO_GPU(r.exit_code, logs[i]);
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(r.exit_code), 0);
         const fs::path frame2 = frames / "frame_0002.bmp";
         LIFT_CHECK(fs::exists(frame2));

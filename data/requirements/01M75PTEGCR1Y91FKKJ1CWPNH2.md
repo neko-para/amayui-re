@@ -2,9 +2,8 @@
 
 - id: REQ-01M75PTEGCR1Y91FKKJ1CWPNH2
 - type: req
-- status: blocked
+- status: open
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- blocked_by: [REQ-01M770JFDPZKKJR7D0ZZ09FJJ7]
 - tags: [emulator-lift audio performance decode]
 
 ## 目标
@@ -42,8 +41,7 @@
 
 ## 与"尖峰"不是同一件事
 
-- 用户听到的"SE 尾声重复 2–3 次"来自 **feeder 被令牌挡 1.3–1.7 s**（`shimtok` 占单刀 99%），**不是算力**
-  ⇒ 见 `REQ-01M75VZXV4SDMVVM1Z72G009XJ`（令牌）与令牌模型复盘。
+- 用户听到的"SE 尾声重复 2–3 次"来自 **feeder 被令牌挡 1.3–1.7 s**（`shimtok` 占单刀 99%），**不是算力** ⇒ 见 `REQ-01M75VZXV4SDMVVM1Z72G009XJ`。
 - 本单解决**稳态占空**；两者不能互相替代。
 
 ## 判据 / 读数
@@ -56,7 +54,6 @@
 ## 未做
 
 - 参考机与本机 2.3× 差距是否全为解释器速度（未拆）。
-- `sub_4E6480` / `sub_4E61E0` 两块（~13%）**未定性**。
 
 ## 2026-11-12 预算订正与剩余杠杆（`.tmp/audio-token/throughput-analysis.md`）
 - 预算基数 = `sub_48D610` incl **522.787 ms / 3 刀**（不是单里的 412 ms/刀；比例仍可用，绝对 ms 必须重测）。
@@ -74,5 +71,9 @@
   pump 臂两臂 WAV 逐字节相同（段在 pump 不生效，符合设计）。
 - 与预算订正一致：PCM 段本身只值个位数 ms/刀；剩余杠杆排序 = `sub_4E6480`（floor1_inverse2 12.5%）>
   `sub_4E61E0`（floor1_inverse1 12.5%，arena 风险）> 起播重建 218.9 ms/条（一次性）。
-- 绝对判据（Windows 200–250→50–100 ms）本机不复现（本机已 ~80 ms）⇒ 与 M0.1 共用 Windows A/B 读数单
-  `REQ-01M770JFDPZKKJR7D0ZZ09FJJ7`；该读数回来前本单保持 blocked。
+- 绝对判据在 Windows（本机已 ~80 ms）⇒ 读数见 `REQ-01M770JFDPZKKJR7D0ZZ09FJJ7`（已 done）。
+
+## 状态（2026-11-13）
+
+- `blocked_by` 已 done（`fill_max=214.74 ms / fill_slow=0`）⇒ 开单。新判据 = 「30 s 实时臂 `underruns=0` + `fill_max` 上界（文档口径 500 ms）」，`fill_max/fill_slow` 从只记账升为守卫。
+- 三杠杆：Huffman ✅ · `__ftol2_sse` ✅ · 起播重建（`sub_4B6570`，218.9 ms/条）未做 ⇒ 已另开单。

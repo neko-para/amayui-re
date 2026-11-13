@@ -27,7 +27,6 @@ fills=32 notify=49 ... slot_reverify_fail=0 fill_max_ms=1743.79 fill_slow=4
 | slot=1 q3 | 1342.25 | **1340.84** | 27 | 1578.03 |
 | slot=11 q3 | 1716.85 | **1532.98** | 7 | 1743.79 |
 | slot=11 q0 | 723.91 | **547.04** | 7 | 785.91 |
-| slot=1 q1 | 615.26 | **614.96** | 2 | 615.26 |
 | slot=11 q0 | 1511.91 | **1322.28** | 3 | 1551.57 |
 
 ⇒ **尖峰几乎全是 `shimtok`（feeder 在 shim 边界等 guest 令牌的时间）**，不是解码本身：
@@ -45,11 +44,8 @@ fills=32 notify=49 ... slot_reverify_fail=0 fill_max_ms=1743.79 fill_slow=4
 
 ## 修法候选（要评估，别照抄）
 
-- **(a) 主线程在块边界检查"feeder 正在等令牌" ⇒ 主动让出**（一个标志 + 一处边界检查，改动最小）；
-- **(b) 令牌加优先级/公平**（等待者优先、或按等待时长提升）——影响所有线程，风险最大；
-- **(c) 缩短主线程单次持令牌的时长**（时间片 / 批大小）；
-- **(d) 减少 feeder 取令牌的次数**（合并 shim 调用、或把 fill 里可脱离 guest 的段整体 native 化）——
-  和吞吐单方向一致，但**不能**指望它消掉尖峰：尖峰是"等"，不是"算"。
+- (a) 主线程在块边界发现"feeder 正在等令牌" ⇒ 主动让出（改动最小）；(b) 令牌加公平/优先级（风险最大）；
+- (c) 缩短单次持令牌时长；(d) 减少 feeder 取令牌次数（与吞吐单同向，但**消不掉尖峰**：尖峰是"等"不是"算"）。
 
 ## 判据
 
@@ -62,14 +58,11 @@ fills=32 notify=49 ... slot_reverify_fail=0 fill_max_ms=1743.79 fill_slow=4
 
 - 稳态占空（三流 120–150%）是另一件事 ⇒ `REQ-01M75PTEGCR1Y91FKKJ1CWPNH2`（Huffman/位读）。
   **本单解决尖峰，那张单解决稳态；两者都要，不能互相替代。**
-- 插桩字段的读法要补进 `apps/emulator-lift/docs/audio-implementation.md`（本轮没动该文件）。
 
 ## 实测进展（2026-11-12，合并构建，`graphs/se-eof.graph`）
 
-| run | `fill_max_ms` | `fill_slow` | WAV 里 lag=2.000 s 的重复段 |
-|---|---|---|---|
-| 旧（仅三层补偿） | 1743.8 | 4 | **有**（9.92–11.37 s） |
-| 合并 #4 / #5 / #6 | 1687.7 / 1302.8 / 1045.9 | 3 / 1 / 1 | **0 组（3/3）** |
+- 旧（仅三层补偿）：`fill_max=1743.8 / fill_slow=4`，WAV 里 lag=2.000 s 的重复段**有**（9.92–11.37 s）。
+- 合并 #4/#5/#6：`1687.7 / 1302.8 / 1045.9`、`3 / 1 / 1`，重复段 **0 组（3/3）**。
 
 ★ **诚实读法**：Huffman + rep 把单刀从 1.74 s 压到 1.05–1.30 s ⇒ 静音能在一圈内到达 ⇒ 听感重复消失；
 但 `shimtok` 仍 **1.0–1.3 s**（令牌饥饿没动）⇒ 只是**掉到阈值以下**，不是根治。⇒ 本单保持 `blocked_by` M0/M1，
@@ -77,3 +70,9 @@ fills=32 notify=49 ... slot_reverify_fail=0 fill_max_ms=1743.79 fill_slow=4
 
 ## 2026-11-12 本机（macOS）读数：不复现
 `fill_max 126.55 / fill_slow 0 / shimtok≈0–3 ms`，`--audio-dump` 的 WAV 在 lag=2.000 s 无重复段 ⇒ Windows 的 1.3–1.7 s 尖峰本机不复现；A/B 见 `REQ-01M770JFDPZKKJR7D0ZZ09FJJ7`。
+
+## 现状（2026-11-13 · 音频阶段设计复核）
+
+- M0 后根因结构性减轻未消除：Present / DS `mutex_` / harness tick 已落，**`fread` 未进 `YieldGuard`**（`src/shims/kernel32_file.cpp:848`）。
+- `fill_max=214.74/fill_slow=0` 是 **M1 前**的 Windows 读数，不是本单证据；复跑必须去掉已删的 `--raster cpu`（否则 exit 2 假绿）。
+- 收口形状：实时臂 `underrun_silence_events==0 ∧ fill_wait_timeouts==0 ∧ fill_max` 不超文档门槛，⛔ 不追逐位。

@@ -2630,6 +2630,208 @@ void caseLineTexturedLoudReject() {
     LIFT_CHECK_EQ_U32(r.f.method(tex, 0x08u, {}), 0u);  // guest 自己那份 Release
 }
 
+// =======================================================================================
+// `d3d9/caps-claims` —— `GetDeviceCaps` 的**声明**必须被 guest 可见的行为兑现
+// （`REQ-01M79PP97ZD65BJG9GMAJ08MJ3`）
+//
+// 判据（红了意味着什么）：caps 是**声明**，不是愿望清单。某位声明了，就必须有一个行为能兑现它；
+//   兑现不了 = 那一行是假话（真机会让引擎走进本线没实现的路径，而本线只能拒绝或无视）。
+//   ⇒ 每条见证都写成**双向蕴含 `声明 ⇔ 行为`**（⛔ 不抄 caps 的目标数字，改 caps 时不用改这里；
+//     `d3d9.h` 的 `kCaps*Claim` 只给实现与变异清单引用 —— 守卫若拿它当期望值，断言就退化成
+//     "实现 == 自己"的恒真式，改 caps 时两边一起变、永远绿）：
+//     ① `LineCaps.TEXTURE` ⇔ 带纹理的线 **S_OK**（同一行为由 `d3d9/line-textured-loud-reject` 盯）；
+//     ② `LineCaps.ZTEST` ⇔ `ZENABLE=1 + ZFUNC=NEVER` 的线 **0 像素**；
+//     ③ `LineCaps.BLEND` ⇔ 线在 `ALPHABLENDENABLE + SRCALPHA/INVSRCALPHA` 下**混合**（不是纯顶点色）；
+//     ④ `LineCaps.ALPHACMP` ⇔ `ALPHATESTENABLE=1 + ALPHAFUNC=NEVER` 的线 **0 像素**；
+//     ⑤ `StencilCaps` ⇔ `STENCILENABLE=1 + STENCILFUNC=NEVER` 的 draw **0 像素**
+//        （本线没有模板缓冲 ⇒ 声明非 0 就意味着这个 draw 必须被挡住）；
+//     ⑥ RasterCaps 的 FOG 位 / ShadeCaps 的三个 FOG 位 ⇔ `FOGENABLE=1 + FOGCOLOR` **改像素**；
+//     ⑦ `MaxUserClipPlanes != 0` ⇔ 用户裁剪面真的生效（本线只 `recordUnsupported(bit7)`）；
+//     ⑧ `ZCmpCaps/SrcBlendCaps/DestBlendCaps` **机械生成**：对 D3DCMP 1..8 / D3DBLEND 1..13
+//        逐个试探 `SetRenderState`，S_OK 的集合必须 == caps 位集合（⛔ 不抄 0xFF/0x3FF）；
+//     ⑨ 反向下界：`MaxTextureWidth/Height` 必须**仍非 0**（引擎只读这两个字段）；
+//        `Caps`/`Caps2` 恒 0 是真话（`Caps` 只有 READ_SCANLINE；那几位本线都没有）⇒ 断言保持 0。
+//   ★ 修前红（**缺陷复现**，不是防漂移）：LineCaps=0x1F 声明了 TEXTURE 而带纹理线 INVALIDCALL；
+//     StencilCaps=0x1FF 而 stencil 被无视；RasterCaps 实为 ZFOG 而雾不改像素；
+//     blend/ZCmp 位是从别处抄来的（不是试探出来的）。
+// =======================================================================================
+// D3D SDK 的位值（不是本线的声明值；只用来读 caps 的字段）
+constexpr std::uint32_t kD3dLineCapsTexture = 0x00000001u;   // D3DLINECAPS_TEXTURE
+constexpr std::uint32_t kD3dLineCapsZTest = 0x00000002u;     // D3DLINECAPS_ZTEST
+constexpr std::uint32_t kD3dLineCapsBlend = 0x00000004u;     // D3DLINECAPS_BLEND
+constexpr std::uint32_t kD3dLineCapsAlphaCmp = 0x00000008u;  // D3DLINECAPS_ALPHACMP
+constexpr std::uint32_t kD3dRasterCapsZFog = 0x00200000u;    // D3DPRASTERCAPS_ZFOG
+// FOGVERTEXGOURAUD(0x40000) | FOGTABLE(0x80000) | FOGRANGEGOURAUD(0x100000)
+constexpr std::uint32_t kD3dShadeCapsFog = 0x001C0000u;
+constexpr std::uint32_t kD3dStencilCapsAny = 0x000001FFu;  // D3DSTENCILCAPS_*（声明的"有模板"）
+// `recordUnsupported` 的位号（`d3d9_pipeline.cpp` 的 `enum UnsupportedBit`）
+constexpr std::uint32_t kUnBitFog = 2u;
+constexpr std::uint32_t kUnBitStencil = 3u;
+constexpr std::uint32_t kUnBitClipPlane = 7u;
+constexpr std::uint32_t kDevGetDeviceCaps = 0x1Cu;
+
+void caseCapsClaims() {
+    lift_test::g_current_case = "d3d9/caps-claims";
+    constexpr std::uint32_t kHrOk = lift::d3d9::kOk;
+    using lift::d3d9::kRsAlphaBlendEnable;
+    using lift::d3d9::kRsAlphaFunc;
+    using lift::d3d9::kRsAlphaTestEnable;
+    using lift::d3d9::kRsClipPlaneEnable;
+    using lift::d3d9::kRsDestBlend;
+    using lift::d3d9::kRsFogColor;
+    using lift::d3d9::kRsFogEnable;
+    using lift::d3d9::kRsSrcBlend;
+    using lift::d3d9::kRsStencilEnable;
+    using lift::d3d9::kRsZEnable;
+    using lift::d3d9::kRsZFunc;
+
+    LineRig r;
+    LIFT_CHECK(r.up());
+    if (r.dev.object == 0) return;
+
+    // caps 只读一次（状态机怎么改都不影响 caps）
+    const std::uint32_t caps_ea = r.f.placeBytes(std::vector<std::uint8_t>(lift::d3d9::kCapsBytes + 4u, 0x00u));
+    LIFT_CHECK_EQ_U32(r.f.method(r.dev.object, kDevGetDeviceCaps, {caps_ea}), kHrOk);
+    auto capsAt = [&r, caps_ea](std::uint32_t off) { return r.f.m.mem().rd32(caps_ea + off); };
+    const std::uint32_t line_caps = capsAt(lift::d3d9::kCapsLineCaps);
+    const std::uint32_t raster_caps = capsAt(lift::d3d9::kCapsRasterCaps);
+    const std::uint32_t shade_caps = capsAt(lift::d3d9::kCapsShadeCaps);
+    const std::uint32_t stencil_caps = capsAt(lift::d3d9::kCapsStencilCaps);
+    const std::uint32_t max_clip = capsAt(lift::d3d9::kCapsMaxUserClipPlanes);
+
+    auto unsupportedBit = [&r](std::uint32_t bit) {
+        lift::d3d9::PipelineInfo pi;
+        if (!lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.dev.state, &pi, nullptr)) return false;
+        return (pi.unsupported[bit / 32u] & (1u << (bit % 32u))) != 0u;
+    };
+    auto setState = [&r](std::uint32_t state, std::uint32_t value) {
+        return r.f.method(r.dev.object, 0xE4u, {state, value});
+    };
+    auto drawLine = [&r](int row, std::uint32_t color) {
+        const std::uint32_t data = placeXyzDiffuseVerts(
+            r.f, {clipFromScreen(8.5, static_cast<double>(row) + 0.5, 0.5),
+                  clipFromScreen(56.5, static_cast<double>(row) + 0.5, 0.5)},
+            {color, color}, 16u);
+        return r.drawUp(lift::d3d9::kPtLineList, 1u, data, 16u);
+    };
+    auto pixelNear = [&r](int x, int y, unsigned er, unsigned eg, unsigned eb) {
+        const std::uint32_t raw = r.f.pixelAt(r.dev.info, x, y);
+        const unsigned rr = (raw >> 16) & 0xFFu;
+        const unsigned gg = (raw >> 8) & 0xFFu;
+        const unsigned bb = raw & 0xFFu;
+        return rr <= er + 1u && rr + 1u >= er && gg <= eg + 1u && gg + 1u >= eg && bb <= eb + 1u &&
+               bb + 1u >= eb;
+    };
+
+    // ---- ① 带纹理的线：拒绝 ⇒ ⛔ 不许声明 LineCaps.TEXTURE ----
+    lift::registerD3DX9Shims(r.f.m.shims());
+    lift::ShimDef* dx = r.f.m.shims().findMutable("d3dx9_43", "D3DXCreateTexture");
+    LIFT_CHECK(dx != nullptr);
+    if (dx == nullptr) return;
+    dx->stub_ea = kProcD3DXCreateTexture;
+    r.f.m.cache().installShim(kProcD3DXCreateTexture, dx->id);
+    const std::uint32_t tex_out = r.f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(callD3DXCreateTexture(r.f, r.dev.object, 4u, 4u, lift::d3d9::kFmtA8R8G8B8, tex_out), kHrOk);
+    const std::uint32_t tex = r.f.m.mem().rd32(tex_out);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return;
+    LIFT_CHECK_EQ_U32(r.f.method(r.dev.object, kDevSetTexture, {0u, tex}), kHrOk);
+    const std::uint32_t hr_textured = drawLine(32, 0xFFFFFFFFu);
+    LIFT_CHECK_EQ_U32(r.f.method(r.dev.object, kDevSetTexture, {0u, 0u}), kHrOk);
+    LIFT_CHECK_EQ_U32((line_caps & kD3dLineCapsTexture) != 0u ? 1u : 0u,
+                      hr_textured == kHrOk ? 1u : 0u);
+
+    // ---- ② LineCaps.ZTEST：ZENABLE=1 + ZFUNC=NEVER ⇒ 一个像素都不许写 ----
+    {
+        const int before = r.countNonBackground();
+        LIFT_CHECK_EQ_U32(setState(kRsZEnable, 1u), kHrOk);
+        LIFT_CHECK_EQ_U32(setState(kRsZFunc, lift::d3d9::kCmpNever), kHrOk);
+        LIFT_CHECK_EQ_U32(drawLine(8, 0xFFFFFFFFu), kHrOk);
+        const bool suppressed = r.countNonBackground() == before;
+        LIFT_CHECK_EQ_U32((line_caps & kD3dLineCapsZTest) != 0u ? 1u : 0u, suppressed ? 1u : 0u);
+        LIFT_CHECK_EQ_U32(setState(kRsZFunc, lift::d3d9::kCmpLessEqual), kHrOk);
+    }
+
+    // ---- ③ LineCaps.BLEND：SRCALPHA/INVSRCALPHA ⇒ 顶点色 (200,100,0)@α128 混到 (108,66,24) ----
+    {
+        LIFT_CHECK_EQ_U32(setState(kRsAlphaBlendEnable, 1u), kHrOk);
+        LIFT_CHECK_EQ_U32(setState(kRsSrcBlend, lift::d3d9::kBlendSrcAlpha), kHrOk);
+        LIFT_CHECK_EQ_U32(setState(kRsDestBlend, lift::d3d9::kBlendInvSrcAlpha), kHrOk);
+        LIFT_CHECK_EQ_U32(drawLine(16, 0x80C86400u), kHrOk);
+        const bool blended = pixelNear(20, 16, 108u, 66u, 24u);
+        LIFT_CHECK_EQ_U32((line_caps & kD3dLineCapsBlend) != 0u ? 1u : 0u, blended ? 1u : 0u);
+        LIFT_CHECK_EQ_U32(setState(kRsAlphaBlendEnable, 0u), kHrOk);
+    }
+
+    // ---- ④ LineCaps.ALPHACMP：ALPHATESTENABLE=1 + ALPHAFUNC=NEVER ⇒ 0 像素 ----
+    {
+        const int before = r.countNonBackground();
+        LIFT_CHECK_EQ_U32(setState(kRsAlphaTestEnable, 1u), kHrOk);
+        LIFT_CHECK_EQ_U32(setState(kRsAlphaFunc, lift::d3d9::kCmpNever), kHrOk);
+        LIFT_CHECK_EQ_U32(drawLine(24, 0xFFFFFFFFu), kHrOk);
+        const bool suppressed = r.countNonBackground() == before;
+        LIFT_CHECK_EQ_U32((line_caps & kD3dLineCapsAlphaCmp) != 0u ? 1u : 0u, suppressed ? 1u : 0u);
+        LIFT_CHECK_EQ_U32(setState(kRsAlphaTestEnable, 0u), kHrOk);
+    }
+
+    // ---- ⑤ StencilCaps：STENCILENABLE=1 + STENCILFUNC=NEVER（真机会挡掉所有像素）----
+    {
+        const int before = r.countNonBackground();
+        LIFT_CHECK_EQ_U32(setState(kRsStencilEnable, 1u), kHrOk);
+        LIFT_CHECK_EQ_U32(setState(56u, lift::d3d9::kCmpNever), kHrOk);  // D3DRS_STENCILFUNC
+        LIFT_CHECK_EQ_U32(drawLine(32, 0xFFFFFFFFu), kHrOk);
+        const bool ignored = r.countNonBackground() > before;
+        // 本线没有模板缓冲 ⇒ 这个 draw 照画；这同时就是"不许声明 StencilCaps"的见证
+        LIFT_CHECK(ignored);
+        LIFT_CHECK(unsupportedBit(kUnBitStencil));
+        LIFT_CHECK_EQ_U32((stencil_caps & kD3dStencilCapsAny) != 0u ? 1u : 0u, ignored ? 0u : 1u);
+        LIFT_CHECK_EQ_U32(setState(kRsStencilEnable, 0u), kHrOk);
+    }
+
+    // ---- ⑥ FOG：FOGENABLE=1 + FOGCOLOR **不改像素** ⇒ RasterCaps/ShadeCaps 不许有 FOG 位 ----
+    {
+        LIFT_CHECK_EQ_U32(drawLine(40, 0xFFFFFFFFu), kHrOk);
+        const std::uint32_t before_px = r.f.pixelAt(r.dev.info, 20, 40);
+        const int before_count = r.countNonBackground();
+        LIFT_CHECK_EQ_U32(setState(kRsFogEnable, 1u), kHrOk);
+        LIFT_CHECK_EQ_U32(setState(kRsFogColor, 0x000000FFu), kHrOk);
+        LIFT_CHECK_EQ_U32(drawLine(40, 0xFFFFFFFFu), kHrOk);
+        const bool ignored = r.f.pixelAt(r.dev.info, 20, 40) == before_px && r.countNonBackground() == before_count;
+        LIFT_CHECK(ignored);
+        LIFT_CHECK(unsupportedBit(kUnBitFog));
+        const bool fog_declared = (raster_caps & kD3dRasterCapsZFog) != 0u || (shade_caps & kD3dShadeCapsFog) != 0u;
+        LIFT_CHECK_EQ_U32(fog_declared ? 1u : 0u, ignored ? 0u : 1u);
+        LIFT_CHECK_EQ_U32(setState(kRsFogEnable, 0u), kHrOk);
+    }
+
+    // ---- ⑦ MaxUserClipPlanes：申请裁剪面只命中 recordUnsupported(bit7) ⇒ 不许声明 > 0 ----
+    {
+        LIFT_CHECK_EQ_U32(setState(kRsClipPlaneEnable, 1u), kHrOk);
+        LIFT_CHECK(unsupportedBit(kUnBitClipPlane));
+        LIFT_CHECK_EQ_U32(max_clip != 0u ? 1u : 0u, 0u);
+    }
+
+    // ---- ⑧ 边界能力集**机械生成**：SetRenderState 认哪些值，caps 就必须报哪些位 ----
+    auto probeMask = [&r](std::uint32_t state, std::uint32_t lo, std::uint32_t hi) {
+        std::uint32_t mask = 0u;
+        for (std::uint32_t v = lo; v <= hi; ++v)
+            if (r.f.method(r.dev.object, 0xE4u, {state, v}) == lift::d3d9::kOk) mask |= 1u << (v - 1u);
+        return mask;
+    };
+    LIFT_CHECK_EQ_U32(probeMask(lift::d3d9::kRsZFunc, 1u, 8u), capsAt(lift::d3d9::kCapsZCmpCaps));
+    LIFT_CHECK_EQ_U32(probeMask(lift::d3d9::kRsSrcBlend, 1u, 13u), capsAt(lift::d3d9::kCapsSrcBlendCaps));
+    LIFT_CHECK_EQ_U32(probeMask(lift::d3d9::kRsDestBlend, 1u, 13u), capsAt(lift::d3d9::kCapsDestBlendCaps));
+
+    // ---- ⑨ 反向下界 + "0 是真话" ----
+    LIFT_CHECK_NE_U32(capsAt(lift::d3d9::kCapsMaxTextureWidth), 0u);
+    LIFT_CHECK_NE_U32(capsAt(lift::d3d9::kCapsMaxTextureHeight), 0u);
+    LIFT_CHECK_EQ_U32(capsAt(lift::d3d9::kCapsCaps), 0u);
+    LIFT_CHECK_EQ_U32(capsAt(lift::d3d9::kCapsCaps2), 0u);
+
+    LIFT_CHECK_EQ_U32(r.f.method(tex, 0x08u, {}), 0u);  // guest 自己那份 Release
+    LIFT_CHECK_EQ_U32(r.endScene(), kHrOk);
+}
+
 }  // namespace
 
 int main() {
@@ -2638,6 +2840,7 @@ int main() {
         caseCreateAndQueryInterface();
         caseAdapterDisplayMode();
         caseCreateDeviceAndCaps();
+        caseCapsClaims();
         caseCheckDeviceFormatTruthful();
         caseClear();
         casePresent();

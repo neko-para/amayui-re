@@ -17,7 +17,7 @@
 //      端到端判据，不是可选的诊断。
 //
 // ★ 容差 = 1 MiB（`kArenaTolerance`）。实测（RelWithDebInfo，`--present window --present-hidden
-//   --raster gpu`，本机）1/2 轮的三个数**完全相等**：in_use 109,895,008 / peak 126,672,232 /
+//   隐藏窗口 + GPU，本机）1/2 轮的三个数**完全相等**：in_use 109,895,008 / peak 126,672,232 /
 //   surfaces 23。给 1 MiB 是防 `--present window` 的 real-time 时钟让某一轮的过渡帧多带一张
 //   临时纹理。修前（2026-11-08 实测）一次往返泄漏 **18,077,080 B**（TITLE 108,595,152 →
 //   往返后 126,672,232，surfaces 21 → 24）⇒ 比容差大 17 倍，判据不会假绿。
@@ -32,7 +32,7 @@
 //   释放，第 2 次进 OPTION 又会把上一轮那两张清掉 ⇒ 终局恒 23 面。⛔ **不要把它"修成 0"**（那是改
 //   引擎的缓存策略，不是在修缺陷）。读数与四条可复跑命令：`.tmp/reveq/01M6WW9V9N863FDTMK6BRMDK1K/readings.md`。
 //
-// ★ 为什么用 `--present window --present-hidden --raster gpu`：`--present headless` 是 CPU
+// ★ 为什么用 `--present window --present-hidden`：`--present headless` 早先走的是 CPU
 //   光栅化，实测 490 帧要 10 分钟以上（本测试 2 轮共约 37 s）；窗口隐藏仍无焦点、无真实光标。
 // ★ **macOS 与 Windows 都跑**（这条不是 Windows 专有）：宿主侧只用"把一个子进程的 stdout/stderr
 //   重定向到同一份日志、等它退出"这两件事 —— Windows 走 `CreateProcessW`，macOS / Linux 走
@@ -58,6 +58,7 @@
 
 #include "check.h"
 #include "runtime/host_encoding.h"
+#include "subprocess_skip.h"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -220,7 +221,6 @@ std::vector<std::string> makeChildArgs(const fs::path& appdata, const fs::path& 
         "--game-dir", utf8ArgFromPath(game_dir),
         "--present", "window",
         "--present-hidden",
-        "--raster", "gpu",
         "--native-overrides", "all",
         "--skip-logo",
         "--input-script", utf8ArgFromPath(script),
@@ -352,9 +352,10 @@ ChildResult runChild(const fs::path& exe, const std::vector<std::string>& child_
 
 // 环境不可用（不是判据红）：GPU / 窗口 / 执行源。⚠ 不要匹配 `game-dir` —— 那行每个
 // 正常启动都会打印（会把任何非 0 退出都误判成环境问题）。
+// ★ "GPU 拒绝启动"**不在这里**：它由 `LIFT_SKIP_IF_NO_GPU` 单独判（要求本机实探无 GPU）。
 bool environmentUnavailable(const std::string& log) {
     return contains(log, "要求 GPU 光栅化") || contains(log, "窗口打开失败") ||
-           contains(log, "找不到执行源") || contains(log, "拒绝启动");
+           contains(log, "找不到执行源");
 }
 
 }  // namespace
@@ -404,6 +405,8 @@ int main(int argc, char** argv) {
         std::printf("option-roundtrip: cycles=%d exit=%lu%s log=%s (%zu 字节)\n", cycles,
                     static_cast<unsigned long>(r.exit_code), exitNote(r).c_str(),
                     log_path.string().c_str(), log.size());
+        // ★ 无 GPU：子进程在跑 guest 之前就拒绝启动 ⇒ 环境缺失，SKIP 77（原因进输出）。
+        LIFT_SKIP_IF_NO_GPU(r.exit_code, log);
         if (r.exit_code != 0 && environmentUnavailable(log)) {
             LIFT_SKIP("GPU / 窗口 / 游戏安装不可用 ⇒ 这条不是判据红");
         }

@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "check.h"
+#include "subprocess_skip.h"
 #include "runtime/host_encoding.h"
 #include "runtime/present_sdl.h"
 
@@ -183,9 +184,9 @@ std::string lineContaining2(const std::string& text, const std::string& a, const
 
 bool contains(const std::string& hay, const char* needle) { return hay.find(needle) != std::string::npos; }
 
+// ★ "GPU 拒绝启动"**不在这里**：它由 `LIFT_SKIP_IF_NO_GPU` 单独判（要求本机实探无 GPU）。
 bool environmentUnavailable(const std::string& log) {
-    return contains(log, "要求 GPU 光栅化") || contains(log, "--raster gpu（headless）失败")
-           || contains(log, "窗口打开失败") || contains(log, "找不到执行源") || contains(log, "拒绝启动");
+    return contains(log, "窗口打开失败") || contains(log, "找不到执行源");
 }
 
 bool readU64(const std::string& line, const char* key, std::uint64_t* out) {
@@ -301,7 +302,7 @@ int main(int argc, char** argv) {
     LIFT_CHECK(fs::exists(exe));
     if (!fs::exists(exe)) return finish("native-override-e2e");
 
-    // `--raster gpu` 需要 SDL_GPU 设备：按 `tests/gpu_raster.cpp` 的判据先探一次。
+    // GPU 是唯一光栅实现：按 `tests/gpu_raster.cpp` 的判据先探一次设备。
     {
         lift::SdlWindow probe;
         lift::SdlWindowOptions popt;
@@ -365,8 +366,6 @@ int main(int argc, char** argv) {
         wargs_v.push_back(L"off");
         wargs_v.push_back(L"--present");
         wargs_v.push_back(L"headless");
-        wargs_v.push_back(L"--raster");
-        wargs_v.push_back(L"gpu");
         wargs_v.push_back(L"--input-script");
         wargs_v.push_back(script.wstring());
         wargs_v.push_back(L"--input-stall-boot-ms");
@@ -392,7 +391,6 @@ int main(int argc, char** argv) {
         child.push_back("--skip-logo");
         child.push_back("--audio"), child.push_back("off");
         child.push_back("--present"), child.push_back("headless");
-        child.push_back("--raster"), child.push_back("gpu");
         child.push_back("--input-script"), child.push_back(script.string());
         child.push_back("--input-stall-boot-ms"), child.push_back("600000");
         child.push_back("--profile"), child.push_back("--profile-top"), child.push_back("200");
@@ -407,6 +405,8 @@ int main(int argc, char** argv) {
         if (logs[i].empty()) LIFT_SKIP("子进程没写日志（工作目录 / 权限问题）");
         std::printf("native-override-e2e: run=%s exit=%d log=%s (%zu 字节)\n", tag.c_str(), r.exit_code,
                     log_path.string().c_str(), logs[i].size());
+        // ★ 无 GPU：子进程在跑 guest 之前就拒绝启动 ⇒ 环境缺失，SKIP 77（原因进输出）。
+        LIFT_SKIP_IF_NO_GPU(r.exit_code, logs[i]);
         if (r.exit_code != 0 && environmentUnavailable(logs[i])) {
             LIFT_SKIP("GPU / 执行源不可用 ⇒ 这条不是判据红");
         }

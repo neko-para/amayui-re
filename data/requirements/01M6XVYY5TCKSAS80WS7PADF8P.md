@@ -2,9 +2,10 @@
 
 - id: REQ-01M6XVYY5TCKSAS80WS7PADF8P
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
 - order: 1
+- verify: apps/emulator-lift/tests/interaction_graph.cpp#script-cond-forms
 - tags: [emulator-lift, interaction, state-machine]
 
 ## 现在到哪了（2026-11-10：进 / 出 EU-ROOM 都跑通；只剩"脚本身份"识别源）
@@ -31,7 +32,7 @@
 | trace 可 diff | ✅ `trace-diff-stable`（逐字节相同）；`--present window` 首行 `# NON-DIFFABLE` |
 | ⛔ 不以"帧号到 X"当判据 | ✅ 三份脚本里 0 个帧号 |
 | **出** Eushully-chan Room（同一终态） | ✅ 真机 exit 0 + `task done` + TITLE hash `0x94CB492BF7F1AEEB`；左键 / 右键各一份图（`OBS-20261110-01/04`） |
-| 两种识别源（画面特征 / 脚本身份） | ⚠ 画面特征 ✅；**`when script` 仍解析期拒绝**（`interaction-model.md` §6）—— 本单剩余的唯一一条 |
+| 两种识别源（画面特征 / 脚本身份） | ✅ 画面特征 ✅；`when script` **已实现**（电平条件：解析 `interaction_graph.cpp:433-479`、判定 `:258`；用例 `script-cond-forms` / `script-cond-identity`；2026-11-11 `382e3c4`） |
 
 ## 卡住的（已清空，留记录）
 
@@ -51,3 +52,9 @@
   （三次读数逐位相同，`insns=2,120,728,564`）。
   ★ 观测窗必须盖住一次 TITLE 重载帧（今天单帧 **7.3e8 条** ≈73 s guest）——
   11-09 的误判就是这么来的（`OBS-20261110-02`）。
+
+## 收口（2026-11-13）
+
+- 判据全落地；最后一条（`when script` 电平条件）2026-11-11 `382e3c4` 已实现，纯档用例 `script-cond-forms` / `script-cond-identity`。
+- 正文里"`when script` 仍解析期拒绝"的说法是 2026-11-10 的旧读数，已按代码与用例改正。
+- 收口凭据：`apps/emulator-lift/tests/interaction_graph.cpp#script-cond-forms`（ctest `interaction-graph`）。

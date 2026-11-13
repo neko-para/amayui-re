@@ -4,7 +4,8 @@
 // ★ 本文件**不认 COM**：vtable / refcount / 派发在 `runtime/com.h` 与 `shims/d3dx9.cpp`。
 // ★ 一切"真的做"的部分都在 compositeBatch：
 //     Draw 时把变换应用到四角（与 D3DX 的"顶点当场生成"一致），End/Flush 时按像素合成：
-//     白色纹理源（pTexture=0 时的 D3D9 固定功能语义）× 调制色 → 后缓冲；ALPHABLEND 走
+//     白色纹理源（pTexture=0 时的 D3D9 固定功能语义）× 调制色 → **当前绑定的颜色目标**
+//     （未绑 RT = 后缓冲；绑了纹理 RT = 那张纹理的像素块）；ALPHABLEND 走
 //     SRCALPHA/INVSRCALPHA。⛔ 不是"只计数不写像素"。
 #include "runtime/d3dx9_sprite.h"
 
@@ -632,36 +633,42 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
         if (why) *why = std::string("D3DX9：合成时找不到 Sprite 的设备（设备已 Release？）：") + *why;
         return false;
     }
-    GuestSurface* gs = m->surfaces().find(dev.arena);
+    // ★ 合成目标 = **当前绑定的颜色目标**（`REQ-01M79V2TVJH98BKH0C0WQV2FET`）：
+    //   绑定纹理 RT 时，sprite 的像素必须写进那张 RT 的像素块，⛔ 不是设备的隐式后缓冲。
+    //   判据与 D3D9 的 `prepareContext` **同一个函数**（`d3d9::colorTargetOfState`）——
+    //   `ctx.color_base` / `color_is_texture` 就是它算出来的 ⇒ 不存在第二份判断逻辑。
+    //   ⛔ 不要退回 `dev.arena`：save 的 RT 窗口里 77 次 End/Flush 的合成全进后缓冲，
+    //   `SAVE00.STH` payload 因此全 0（实测）。
+    d3d9::ColorTarget target;
+    // ★ 没有流水线状态块（例如夹具里手工造的设备）⇒ 保持"目标 = 后缓冲"的旧口径，⛔ 不静默编一个目标。
+    if (dev.pipeline != 0) {
+        if (!d3d9::colorTargetOfState(cpu, dev.pipeline, &target, why)) {
+            if (why) *why = std::string("D3DX9：合成时取不到设备的渲染目标：") + *why;
+            return false;
+        }
+    }
+    const std::uint32_t target_arena = target.arena != 0 ? target.arena : dev.arena;
+    GuestSurface* gs = m->surfaces().find(target_arena);
     if (!gs) {
-        if (why) *why = "D3DX9：设备后缓冲像素不在 arena 里（设备状态与 arena 不一致）";
+        if (why) *why = target.arena != 0 ? "D3DX9：绑定纹理 RT 的像素不在 arena 里"
+                                          : "D3DX9：设备后缓冲像素不在 arena 里（设备状态与 arena 不一致）";
         return false;
     }
     std::uint8_t* base = m->surfaces().pixels(*gs);
     const std::uint32_t bpp = gs->format.bytesPerPixel();
     if (!base || bpp == 0) {
-        if (why) *why = "D3DX9：后缓冲像素指针为空";
+        if (why) *why = target.arena != 0 ? "D3DX9：绑定纹理 RT 的像素指针为空" : "D3DX9：后缓冲像素指针为空";
         return false;
     }
     const SurfaceFormat fmt = gs->format;
     const bool blend = (s.flags & kSpriteAlphaBlend) != 0;
-    // ★ 混合帧：如果 D3D9 的 GPU 光栅还有未读回的像素，先落回 guest；否则 CPU 精灵
-    //   会合成在**过期的**后缓冲上（这是 frame 2+ 背景大面积错的根因）。
-    if (GpuRaster* gpu = m->gpuRaster();
-        gpu != nullptr && gpu->rasterActive() && !gpu->rasterSpritesEnabled() && gpu->rasterDirty()) {
-        std::string sync_err;
-        if (!gpu->rasterSyncToGuest(base, gs->pitch, gs->width, gs->height, &sync_err)) {
-            if (why) *why = std::string("D3DX9：GPU 像素读回失败：") + sync_err;
-            return false;
-        }
-    }
+    // ★ 精灵合成与 D3D9 fixed-function 共用**同一个** GPU 光栅后端（那条 A/B 已删，
+    //   见 `REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：没有"先关掉 GPU 再 CPU 合成"的开关。
     std::uint64_t written = 0;
     std::uint32_t entries_done = 0;
     // ★ GPU 覆盖统计只统计"GPU 已启用、但这条 sprite 回退 CPU"的情况。
-    //   `--raster cpu`（没有后端）与 `--raster-sprites 0`（显式 A/B）都**不算 fallback**。
     GpuRaster* gpu_backend = m->gpuRaster();
-    const bool sprite_gpu_active =
-        gpu_backend != nullptr && gpu_backend->rasterActive() && gpu_backend->rasterSpritesEnabled();
+    const bool sprite_gpu_active = gpu_backend != nullptr && gpu_backend->rasterActive();
     // 条目级收尾：Draw 时 AddRef 过的纹理必须**每条路径**都还回去（含 continue 的早退分支）。
     // ★ 身份校验在这里（**所有出口之前**，不是只在合成主路径）：4 个早退分支（无 src rect /
     //   空矩形 / 退化 / 屏外）也走同一条 releaseEntry ⇒ 同 EA 的新纹理一个引用都不减。
@@ -709,7 +716,7 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
             releaseEntry(ea, i);
             continue;
         }
-        // 目标包围盒（四角 min/max；裁剪到后缓冲）
+        // 目标包围盒（四角 min/max；裁剪到渲染目标）
         double minx = q[0], maxx = q[0], miny = q[1], maxy = q[1];
         for (int k = 2; k < 8; k += 2) {
             if (q[k] < minx) minx = q[k];
@@ -819,7 +826,7 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
         GpuRaster* gpu = sprite_gpu_active ? gpu_backend : nullptr;
         if (gpu != nullptr) {
             if (fmt.bpp != 32) {
-                sprite_fallback_reason = "sprite: 后缓冲不是 32bpp";
+                sprite_fallback_reason = "sprite: 渲染目标不是 32bpp";
                 gpu = nullptr;
             } else if (has_texture && tbpp != 4) {
                 sprite_fallback_reason = "sprite: 纹理不是 32bpp";
@@ -832,7 +839,7 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
         }
         if (gpu != nullptr) {
             std::string gerr;
-            // ★ 目标身份带 guest 后缓冲像素基址（同尺寸换 surface 必须能判出来）。
+            // ★ 目标身份带 guest 渲染目标像素基址（同尺寸换 surface 必须能判出来）。
             bool ok = gpu->rasterPrepare(fmt, gs->width, gs->height, &gerr, base);
             if (ok && !gpu->rasterDirty()) {
                 ok = gpu->rasterSyncFromGuest(base, gs->pitch, gs->width, gs->height, &gerr);

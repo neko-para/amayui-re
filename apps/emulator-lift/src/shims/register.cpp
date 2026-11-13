@@ -59,16 +59,14 @@ void registerKernel32Shims(ShimRegistry& shims) {
     // ---- user32：窗口 / 消息 / 菜单 ----
     // ⚠ 菜单与模态是 SCOPE §1 点名的**可接受偏差**（将来落地时要按 stub 口径：返回合理值 + 不打桩的日志 +
     //   overrides.json 登记），但那是 M2 的窗口族，⛔ 不是本批"假装成功"。
-    const char* kUser32 = "M2 窗口 / 消息族（plan D4：L3；不属 M1）";
     // ★ P0 已实现：RegisterClassExA / CreateWindowExA / DestroyWindow / ShowWindow / UpdateWindow /
     //   PeekMessageA / GetMessageA / TranslateMessage / DispatchMessageA / DefWindowProcA /
     //   SendMessageA / PostMessageA / PostQuitMessage / SetTimer / KillTimer / GetSystemMetrics /
     //   GetClientRect / GetWindowRect / ...（见 user32_window.cpp）。
-    //   仍未实现（且当前导入表里没有直呼）：RegisterClassA / GetDC / ReleaseDC / SetFocus。
-    shims.addUnimplemented("user32", "RegisterClassA", kUser32);
-    shims.addUnimplemented("user32", "GetDC", kUser32);
-    shims.addUnimplemented("user32", "ReleaseDC", kUser32);
-    shims.addUnimplemented("user32", "SetFocus", kUser32);
+    // ★ 2026-11-13：这里原先登记的 4 条 user32 A 变体 / 消息族入口**已删**（用户裁决）——
+    //   它们不在任一 guest 模块的导入表里、名字也不在镜像字面量里（静态不可调用），
+    //   而能力由 Ex 变体（user32_window.cpp）与 DDraw surface 的 DC 槽（ddraw.cpp）提供。
+    //   ⛔ 不要再按里程碑口径"补回来"：真要登记，先证明有镜像导入它。
 
     // ---- gdi32：2D 图形 ----
     // ★ P2 已实现（见 gdi32_object.cpp / gdi32_font.cpp）：CreateICA / CreateFontIndirectA /
@@ -77,12 +75,9 @@ void registerKernel32Shims(ShimRegistry& shims) {
     //   EnumFontFamiliesExA / AddFontMemResourceEx / RemoveFontMemResourceEx。
     // ★ P4 已实现（见 gdi32_region.cpp）：CreateRectRgn / CreateEllipticRgnIndirect / CreatePolygonRgn /
     //   CombineRgn / GetRegionData / GetRgnBox / PtInRegion。
-    //   仍未实现（P1 / P4）：CreateCompatibleDC / CreateDIBSection / BitBlt / GetDeviceCaps。
-    const char* kGdi32 = "M2 GDI / 2D 图形族（P1 / P4：DC 位图 / Blt / 设备能力；不属本批）";
-    shims.addUnimplemented("gdi32", "CreateCompatibleDC", kGdi32);
-    shims.addUnimplemented("gdi32", "CreateDIBSection", kGdi32);
-    shims.addUnimplemented("gdi32", "BitBlt", kGdi32);
-    shims.addUnimplemented("gdi32", "GetDeviceCaps", kGdi32);
+    // ★ 2026-11-13：这里原先登记的 4 条 GDI DC / 位图入口**已删**（用户裁决）——不可调用
+    //   （不在任一 guest 模块导入表、镜像里无字面量）；DC 走 CreateICA / DeleteDC / SelectObject /
+    //   TextOutA，2D blt 走 DDraw 的 Blt / BltFast。
 
     // ---- d3d9：3D ----
     // ★ M2：`Direct3DCreate9` **已实现**（用户 2026-11-05 裁决"确认需要实现 D3D 接口"）

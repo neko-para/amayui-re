@@ -1112,11 +1112,10 @@ void registerBootstrapShims(ShimRegistry& s) {
     s.add("kernel32", "RaiseException", Conv::Stdcall, 4, &shimRaiseException);
     s.add("kernel32", "RtlUnwind", Conv::Stdcall, 4, &shimRtlUnwind);
 
-    // 明确登记为缺口（⛔ 不假装成功）
-    s.addUnimplemented("kernel32", "FindResourceA", "M2 资源族（用户 2026-11-04：资源等 M2；不属 M1）");
-    s.addUnimplemented("kernel32", "SizeofResource", "M2 资源族（用户 2026-11-04：资源等 M2；不属 M1）");
-    s.addUnimplemented("kernel32", "LoadResource", "M2 资源族（用户 2026-11-04：资源等 M2；不属 M1）");
-    s.addUnimplemented("kernel32", "LockResource", "M2 资源族（用户 2026-11-04：资源等 M2；不属 M1）");
+    // ★ 2026-11-13：这里原先登记的资源族 4 条入口**已删**（用户裁决）——不可调用
+    //   （不在任一 guest 模块导入表、镜像里也没有名字字面量）；资源能力由 `runtime/pe_resource.h`
+    //   的 `PeResources` 提供（消费者：LoadIconA / 版本信息 / message_box）。
+    //   ⛔ 不要再按"资源等 M2"的里程碑口径补回来。
 }
 
 }  // namespace lift

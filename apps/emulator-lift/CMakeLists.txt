@@ -322,15 +322,20 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_BINARY_DIR}/tests")
 # ---- pure：宿主层 smoke（不建窗口、不需要游戏）----
 add_test(NAME emulator-lift-smoke COMMAND emulator-lift --smoke)
 
-# ---- pure：`--gpu-strict` 的机械判据自检（不需要游戏）----
-# `--gpu-strict` 与显式 CPU 参考后端矛盾 ⇒ 必须在载入执行源之前就拒绝（非 0）。
-# 真正的 fallback>0 ⇒ exit 3 需要真实 boot，见 README §4.2b / 报告里的真机验收。
-add_test(NAME gpu-strict-requires-gpu COMMAND emulator-lift --raster cpu --gpu-strict)
-set_tests_properties(gpu-strict-requires-gpu PROPERTIES WILL_FAIL TRUE)
-# strict 要求 sprite 也走 GPU：显式 `--raster-sprites 0` 与 strict 自相矛盾 ⇒ 必须拒绝。
-add_test(NAME gpu-strict-rejects-no-sprites
-    COMMAND emulator-lift --present window --raster gpu --raster-sprites 0 --gpu-strict)
-set_tests_properties(gpu-strict-rejects-no-sprites PROPERTIES WILL_FAIL TRUE)
+# ---- pure：**GPU 是唯一光栅实现**（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）----
+# ① 无 GPU ⇒ **拒绝启动**（非 0 退出 + stderr 明确指路）。用 `SDL_VIDEODRIVER=dummy` 强制
+#    "建不出 GPU device"（⛔ 不靠真拔显卡）；后端在**执行源定位之前**建 ⇒ 这条不需要游戏资产。
+# ② 已删的 `--raster`（连同它的 `cpu` 值）⇒ 传进去必须是**未知参数**（exit 2），⛔ 不是静默忽略。
+# ★ 两条判据都落在进程边界（退出码 + stderr 文案）上 ⇒ 由 `tests/gpu_batch.cpp` 起真子进程收输出。
+#   子进程实参 = `$<TARGET_FILE:emulator-lift>`。
+add_test(NAME lift/no-gpu-refuses-start
+    COMMAND lift-gpu-batch --no-gpu-refuses-start $<TARGET_FILE:emulator-lift>)
+set_tests_properties(lift/no-gpu-refuses-start PROPERTIES
+    ENVIRONMENT "SDL_VIDEODRIVER=dummy"
+    TIMEOUT 120)
+add_test(NAME lift/raster-flag-gone
+    COMMAND lift-gpu-batch --raster-flag-gone $<TARGET_FILE:emulator-lift>)
+set_tests_properties(lift/raster-flag-gone PROPERTIES TIMEOUT 120)
 
 # ---- pure：`--time-limit` 的 CLI 契约（`REQ-01M711JN018QDSWK4726Y1A0KV`）----
 # 判据见 tests/cli_time_limit.cpp 的头注释：① `--time-limit 0` 与**省略该参数**行为等价
@@ -448,7 +453,9 @@ if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN")
     # `REQ-01M72JFZ87DJNT52DW4HB8SEV6` stage 1+2。判据见 tests/close_confirm.cpp 文件头：
     # 三臂各自走到 `0x405B21` / `0x405A82` / `0x405A95`，trace 里 `_ShowDialog@12(id=3) -> 1/2/0`，
     # 且 title/cancel 的 stop 是 `until-ea`（窗口没被宿主宽限关掉）。
-    # ★ dummy + software：真 boot 到 TITLE.BIN（约 14 s/臂），无窗口系统 ⇒ SKIP 77。
+    # ★ ⛔ 不再给 `SDL_VIDEODRIVER=dummy`：GPU 是唯一光栅实现，dummy 下建不出 GPU device
+    #   ⇒ 子进程会**拒绝启动**、整条用例退化成 SKIP（那是把产品路径藏起来）。
+    #   真 boot 到 TITLE.BIN（约 14 s/臂）；没有 GPU ⇒ 子进程拒绝启动 ⇒ SKIP 77（原因在 log 里）。
     add_executable(lift-close-confirm tests/close_confirm.cpp)
     target_link_libraries(lift-close-confirm PRIVATE emulator-lift-runtime)
     add_test(NAME close-confirm COMMAND lift-close-confirm
@@ -457,7 +464,6 @@ if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN")
         "${CMAKE_CURRENT_BINARY_DIR}/close-confirm-work")
     set_tests_properties(close-confirm PROPERTIES
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        ENVIRONMENT "SDL_VIDEODRIVER=dummy"
         SKIP_RETURN_CODE 77
         TIMEOUT 900)
 
@@ -473,7 +479,6 @@ if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN")
         "${CMAKE_CURRENT_BINARY_DIR}/agerc-ui-state-work")
     set_tests_properties(agerc-ui-state PROPERTIES
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        ENVIRONMENT "SDL_VIDEODRIVER=dummy"
         SKIP_RETURN_CODE 77
         TIMEOUT 900)
 
@@ -511,6 +516,20 @@ if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN")
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         SKIP_RETURN_CODE 77
         TIMEOUT 900)
+
+    # ---- assets：游戏自带 `AGE-EXTEND.TTF` 的 U+E010（`REQ-01M79N1ZV391BCM7MYSKK0GVV0`）----
+    # 判据见 tests/gdi_font_fallback.cpp 的 `runAssets`（同一个可执行文件的 `--assets` 臂；先例 =
+    # `lift-overlay` 的 pure / assets 两次注册）：从 `SYS4INI.BIN` 的 ALF 索引按名字取出
+    # `AGE-EXTEND.TTF`（族名 `AGE Extend`）⇒ ①`FT_Get_Char_Index(face, 0xE010) != 0` 且
+    # `FT_Load_Char` 位图非空；②宿主 Amayui CN 下 `glyph(0xE010)` = `.notdef`（notdef +1）；
+    # ③登记成缺字后备之后同一码位由 `AGE Extend` 提供（fallback +1、mask 有墨迹、advance>0）；
+    # ④移除后备 ⇒ 回到 `.notdef`（notdef +1）。
+    # ★ 缺安装 / 缺宿主字体 / 索引里没这一条 ⇒ 测试自己 `LIFT_SKIP`(77) + 原因（⛔ 不假绿）。
+    add_test(NAME gdi-font-fallback-assets COMMAND lift-gdi-font-fallback --assets
+        "${LIFT_ASSETS_GAME_DIR}")
+    set_tests_properties(gdi-font-fallback-assets PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 300)
 endif()
 
 # ---- assets：真机安装上的 LOGO 影片必须"真的放完"（首帧 / completed / 堆平稳 / tex#1 差分）----
@@ -564,7 +583,7 @@ endif()
 #   stdout/stderr 重定向到同一份日志 + 等它退出"，Windows 走 `CreateProcessW`、macOS / Linux 走
 #   `posix_spawn`（两个分支见测试里的 `runChild`）。
 # ★ `add_executable` 也在同一个 if 里：纯构建环境（没开 LIFT_ASSETS）连这个 target 都不编。
-# ★ 子进程走 `--present window --present-hidden --raster gpu`：headless 的 CPU 光栅化实测
+# ★ 子进程走 `--present window --present-hidden`：headless 的 GPU 光栅化实测
 #   490 帧要 10 分钟以上；窗口隐藏仍无焦点、无真实光标。
 if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
     add_executable(lift-option-roundtrip tests/option_roundtrip.cpp)
@@ -819,7 +838,7 @@ set_tests_properties(overlay PROPERTIES
 add_test(NAME overlay-gpu COMMAND lift-overlay --gpu)
 set_tests_properties(overlay-gpu PROPERTIES SKIP_RETURN_CODE 77)
 
-# ---- GPU 光栅化（--raster gpu）：独立 SDL_GPUDevice + 离屏 target + 读回 ----
+# ---- GPU 光栅化（唯一实现）：独立 SDL_GPUDevice + 离屏 target + 读回 ----
 # 两档都要求真的 GPU 设备：dummy 视频下建不出设备 ⇒ 返回 77（SKIP），⛔ 不是"跑绿"。
 add_executable(lift-gpu-raster tests/gpu_raster.cpp)
 target_link_libraries(lift-gpu-raster PRIVATE emulator-lift-runtime)
@@ -829,7 +848,7 @@ set_tests_properties(gpu-raster PROPERTIES
 add_test(NAME gpu-raster-gpu COMMAND lift-gpu-raster --gpu)
 set_tests_properties(gpu-raster-gpu PROPERTIES SKIP_RETURN_CODE 77)
 
-# ---- GPU 直出（`--present window --raster gpu`）：窗口 claim + target→swapchain ----
+# ---- GPU 直出（`--present window`）：窗口 claim + target→swapchain ----
 # 判据是**窗口像素 == 送进去的后缓冲**（含 16bpp 转换 / 尺寸变化 / 连续两帧）。
 # 窗口 claim 不成立（dummy 视频 / 无桌面）⇒ SKIP 77：⛔ 不拿 renderer 路径冒充直出。
 # ★ 顶层无条件注册（不需要游戏 / LFS）⇒ pure 档；缺窗口系统时按 SKIP 处理。
@@ -1006,6 +1025,17 @@ add_test(NAME gdi COMMAND lift-gdi)
 add_executable(lift-gdi-font-metrics-cache tests/gdi_font_metrics_cache.cpp)
 target_link_libraries(lift-gdi-font-metrics-cache PRIVATE emulator-lift-runtime)
 add_test(NAME gdi-font-metrics-cache COMMAND lift-gdi-font-metrics-cache)
+
+# ---- pure：缺字形 fallback（`REQ-01M79N1ZV391BCM7MYSKK0GVV0`；用假源，不读字体文件）----
+# 判据见 tests/gdi_font_fallback.cpp 文件头：①`gdiCp932Char(0xF050) == 0xE010`（⛔ 不是 U+2661）；
+# ②主 face 缺字 ⇒ 交给后备提供者、返回**后备的 mask**；③缓存命中不重复记账；④主 face 有字时
+# 不碰后备；⑤都缺 ⇒ 返回 true + `.notdef` 且 notdef 计数 +1；⑥重装后备来源 ⇒ 旧条目作废。
+# ★ 顶层无条件注册 ⇒ pure 档（判据 = 注册位置；见 AGENTS.md §5）。
+# ★ 同一个 exe 的 `--assets` 臂在下面的 assets 块里另注册一条（`LZSS` 解压复用生产实现
+#   `lift::lzssDecode`；链接 `Freetype::Freetype` 是为了直接问 FT 的断言 —— runtime 是 PRIVATE 链接）。
+add_executable(lift-gdi-font-fallback tests/gdi_font_fallback.cpp)
+target_link_libraries(lift-gdi-font-fallback PRIVATE emulator-lift-runtime Freetype::Freetype)
+add_test(NAME gdi-font-fallback COMMAND lift-gdi-font-fallback)
 
 # ---- assets：真 Amayui CN（缺字体文件时整个测试不注册 ⇒ ⛔ 不假绿）----
 if(EXISTS "${LIFT_HOST_FONT_PATH}")

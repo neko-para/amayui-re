@@ -160,9 +160,8 @@ struct SdlWindow::Impl {
     std::string direct_error;  // claim 失败的实测错误串（回退 renderer 时打出来，不吞）
     int direct_w = 0;          // 直出时上一次同步给窗口的后缓冲尺寸
     int direct_h = 0;
-    // GPU 光栅化镜像（与窗口 renderer 共用；--raster gpu）
+    // GPU 光栅化镜像（与窗口 renderer 共用）
     bool raster_gpu = false;
-    bool raster_sprites = true;
     std::unique_ptr<GpuRaster> gpu_raster;
     // ★ 夹具缝（`setGpuRasterForTest`）：非空时所有**转发**都到它，生命周期归夹具。
     //   ⛔ 生产路径永远是 nullptr；`init`/`shutdown` 只碰 `gpu_raster`（所有权那一份）。
@@ -579,7 +578,6 @@ bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
     impl_->screenshot_path = options.screenshot_path;
     impl_->screenshot_frame = options.screenshot_frame;
     impl_->raster_gpu = options.raster_gpu;
-    impl_->raster_sprites = options.raster_sprites;
     impl_->overlay = options.overlay;
     impl_->overlay_dirty = true;
 
@@ -588,7 +586,7 @@ bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
         return false;
     }
     impl_->sdl_inited = true;
-    // ★ GPU device 先建（不需要窗口）：`--raster gpu` 的后端失败必须在开窗之前就是硬失败。
+    // ★ GPU device 先建（不需要窗口）：后端失败必须在开窗之前就是硬失败。
     if (options.raster_gpu) {
         std::string gerr;
         impl_->gpu_raster = createSdlGpuRaster(&gerr);
@@ -627,7 +625,7 @@ bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
                 impl_->direct_error = derr;
                 std::fprintf(stderr,
                              "[present] GPU 直出不可用：%s\n"
-                             "  ⇒ 回退 SDL_Renderer 上传呈现路径（光栅化仍是 --raster gpu；"
+                             "  ⇒ 回退 SDL_Renderer 上传呈现路径（光栅化仍是 GPU；"
                              "只是每帧多一次 CPU→GPU 上传）\n",
                              derr.c_str());
             }
@@ -661,7 +659,7 @@ bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
         if (impl_->renderer_name == "gpu") gpu = SDL_GetGPURendererDevice(impl_->renderer);
         impl_->gpu_driver =
             (gpu != nullptr && SDL_GetGPUDeviceDriver(gpu) != nullptr) ? SDL_GetGPUDeviceDriver(gpu) : "";
-        // ⛔ 不要覆盖 GPU 光栅化后端的名字：`--raster gpu` 时它才是真正的执行者
+        // ⛔ 不要覆盖 GPU 光栅化后端的名字：它才是真正的执行者
         //   （`sdl-gpu/<driver>/<shader format>`），renderer 只是像素上传/呈现的 sink。
         if (!options.raster_gpu) impl_->raster_name = "sdl-renderer/" + impl_->renderer_name;
 
@@ -1036,9 +1034,15 @@ std::uint32_t SdlWindow::windowIdForTest() const {
 
 bool SdlWindow::stopRequested() const { return impl_->stop; }
 
+bool SdlWindow::windowHidden() const {
+    if (impl_->window == nullptr) return true;  // 没有窗口 ⇒ 当然没有"可见窗口"
+    return (SDL_GetWindowFlags(impl_->window) & SDL_WINDOW_HIDDEN) != 0;
+}
+
 std::string SdlWindow::describe() const {
     std::string out = "driver=" + impl_->renderer_name + " video=" + impl_->video_driver;
     out += " gpu=" + (impl_->gpu_driver.empty() ? std::string("-") : impl_->gpu_driver);
+    out += std::string(" window=") + (windowHidden() ? "hidden" : "visible");
     if (impl_->direct_present && impl_->direct != nullptr) {
         out += std::string(" present=direct/") + impl_->direct->directPresentMode();
     } else if (!impl_->direct_error.empty()) {
@@ -1106,10 +1110,9 @@ bool SdlWindow::readbackPixel(int x, int y, std::uint32_t* argb, std::string* er
 }
 
 // ---------------------------------------------------------------------------------------
-// GPU 光栅化（--raster gpu）：独立 SDL_GPUDevice 的离屏 target（后端在 d3d9_gpu.cpp）
-// ★ 本类是 `GpuRaster` 的**转发壳**：除 `rasterName`（缓存身份）与 `rasterSpritesEnabled`
-//   （壳级 A/B 与后端能力的合成）两条**有意的非纯转发**外，每一条虚函数都必须显式转发到
-//   `impl_->raster()`。漏一条 == 后端"实现了但永远收不到"（静默；不报错、不改像素、测试全绿）——
+// GPU 光栅化（唯一实现）：独立 SDL_GPUDevice 的离屏 target（后端在 d3d9_gpu.cpp）
+// ★ 本类是 `GpuRaster` 的**转发壳**：除 `rasterName`（缓存身份）这一条**有意的非纯转发**外，
+//   每一条虚函数都必须显式转发到 `impl_->raster()`。漏一条 == 后端"实现了但永远收不到"（静默；不报错、不改像素、测试全绿）——
 //   `rasterRequestDepthClear` 就这么漏过，代价是"GPU 臂整层丢 Live2D 角色"
 //   （`REQ-01M73P3GXW22Y467YGYPQSM571`）。守卫：`tests/gpu_batch.cpp::caseDepthClearForwarded`
 //   逐条断言"调用真的到后端了"（用 `setGpuRasterForTest` 注入替身，不需要 GPU 设备）。
@@ -1122,12 +1125,6 @@ bool SdlWindow::rasterActive() const {
 }
 
 const char* SdlWindow::rasterName() const { return impl_->raster_name.c_str(); }
-
-bool SdlWindow::rasterSpritesEnabled() const {
-    // `--raster-sprites 0` 是 A/B 开关：即使后端本身支持 sprite，也必须能退回 CPU 路径。
-    const GpuRaster* r = impl_->raster();
-    return impl_->raster_sprites && r != nullptr && r->rasterSpritesEnabled();
-}
 
 bool SdlWindow::rasterPrepare(const SurfaceFormat& format, int width, int height, std::string* err,
                               const std::uint8_t* color_base) {

@@ -175,6 +175,7 @@ constexpr std::uint32_t kOffGetRenderState = 0xE8u;
 constexpr std::uint32_t kOffSetTexture = 0x104u;
 constexpr std::uint32_t kOffSetTextureStageState = 0x10Cu;
 constexpr std::uint32_t kOffSetSamplerState = 0x114u;
+constexpr std::uint32_t kOffValidateDevice = 0x11Cu;  // ★ #71（`.lst` 无引擎站点；见 shims 方法表）
 constexpr std::uint32_t kOffDrawPrimitive = 0x144u;
 constexpr std::uint32_t kOffDrawPrimitiveUP = 0x14Cu;
 constexpr std::uint32_t kOffSetFVF = 0x164u;
@@ -447,11 +448,13 @@ struct Fixture {
     std::uint32_t drawPrimitive(std::uint32_t prim, std::uint32_t start_vertex, std::uint32_t prim_count) {
         return method(device.object, kOffDrawPrimitive, {prim, start_vertex, prim_count});
     }
-    std::uint32_t drawIndexed(std::uint32_t prim, std::uint32_t base_vertex, std::uint32_t min_index,
+    std::uint32_t drawIndexed(std::uint32_t prim, std::int32_t base_vertex, std::uint32_t min_index,
                               std::uint32_t num_vertices, std::uint32_t start_index,
                               std::uint32_t prim_count) {
+        // ★ BaseVertexIndex 的 guest ABI 是 INT：按位传给 shim，由 shim 做 int32 解释。
         return method(device.object, kOffDrawIndexedPrimitive,
-                      {prim, base_vertex, min_index, num_vertices, start_index, prim_count});
+                      {prim, static_cast<std::uint32_t>(base_vertex), min_index, num_vertices, start_index,
+                       prim_count});
     }
     // CreateVertexBuffer(this, Length, Usage, FVF, Pool, ppVB, pSharedHandle=0)（Usage=8 = WRITEONLY）
     std::uint32_t createVertexBuffer(std::uint32_t length, std::uint32_t fvf, std::uint32_t* out_obj) {
@@ -2282,6 +2285,322 @@ void casePipeWarnCategoriesAndSummary() {
     LIFT_CHECK(!com->find(tex_b));
 }
 
+// =======================================================================================
+// ⑲ `d3d9p/indexed-range`（`REQ-01M79PP9S4BFBPKDPBQBDN5GGR`）
+// =======================================================================================
+// 红了意味着什么：`BaseVertexIndex` 被当成 u32 / `MinVertexIndex` 被丢掉 ⇒
+//   (a)(b) 负 base 的合法调用被**假拒**（INVALIDCALL，一个像素都不画）；
+//   (c) 索引 < Min 的调用**静默画错**（按顶点 0/1/3 画出像素）；
+//   (d) `Base + idx` 回绕成 0xFFFFFFFF ⇒ 越界读（修前可能 SIGSEGV，红了不可读）。
+// ★ (d) 放在最后：修前它会先把进程打崩，前面的红证据必须已经打印。
+// =======================================================================================
+bool bitIsSet(const lift::d3d9::PipelineInfo& pi, std::uint32_t bit) {
+    return (pi.unsupported[bit / 32u] & (1u << (bit % 32u))) != 0;
+}
+
+void writeRhwPoints(std::uint32_t vb, const std::vector<std::array<float, 4>>& pts,
+                    const std::vector<std::uint32_t>& colors, Fixture& f) {
+    LIFT_CHECK(pts.size() == colors.size());
+    std::uint32_t base = 0;
+    LIFT_CHECK_EQ_U32(f.lockBuffer(vb, &base), 0u);
+    LIFT_CHECK_NE_U32(base, 0u);
+    if (base == 0) return;
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        const std::uint32_t at = base + static_cast<std::uint32_t>(i) * 20u;
+        for (int k = 0; k < 4; ++k) {
+            std::uint32_t bits = 0;
+            std::memcpy(&bits, &pts[i][static_cast<std::size_t>(k)], sizeof(bits));
+            f.m.mem().wr32(at + static_cast<std::uint32_t>(k) * 4u, bits);
+        }
+        f.m.mem().wr32(at + 16u, colors[i]);
+    }
+    LIFT_CHECK_EQ_U32(f.unlockBuffer(vb), 0u);
+}
+
+void writeIndex16(std::uint32_t ib, const std::vector<std::uint16_t>& indices, Fixture& f) {
+    std::uint32_t base = 0;
+    LIFT_CHECK_EQ_U32(f.lockBuffer(ib, &base), 0u);
+    LIFT_CHECK_NE_U32(base, 0u);
+    if (base == 0) return;
+    for (std::size_t i = 0; i < indices.size(); ++i)
+        f.m.mem().wr16(base + static_cast<std::uint32_t>(i) * 2u, indices[i]);
+    LIFT_CHECK_EQ_U32(f.unlockBuffer(ib), 0u);
+}
+
+void caseIndexedRange() {
+    lift_test::g_current_case = "d3d9p/indexed-range";
+    Rig r;
+    LIFT_CHECK(r.up());
+    if (r.f.device.object == 0) return;
+
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsZEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsCullMode, lift::d3d9::kCullNone), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsAlphaBlendEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setFvf(kFvfXyzRhwDiffuse), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setViewport(0u, 0u, 64u, 64u), 0u);
+
+    // 5 个点：x=10/20/30/40/50，y=10；颜色互不相同（点光栅 = 1px，顶点色**精确**写进像素）。
+    constexpr std::uint32_t kPoint0 = 0x00FF0000u;  // 红
+    constexpr std::uint32_t kPoint1 = 0x0000FF00u;  // 绿
+    constexpr std::uint32_t kPoint2 = 0x000000FFu;  // 蓝
+    constexpr std::uint32_t kPoint3 = 0x00FFFFFFu;  // 白（(c) 误画时会看见）
+    constexpr std::uint32_t kPoint4 = 0x00FFFF00u;  // 黄
+    std::uint32_t vb = 0;
+    LIFT_CHECK_EQ_U32(r.f.createVertexBuffer(5u * 20u, kFvfXyzRhwDiffuse, &vb), 0u);
+    LIFT_CHECK_NE_U32(vb, 0u);
+    if (vb == 0) return;
+    const std::vector<std::array<float, 4>> pts = {
+        {10.5f, 10.5f, 0.0f, 1.0f}, {20.5f, 10.5f, 0.0f, 1.0f}, {30.5f, 10.5f, 0.0f, 1.0f},
+        {40.5f, 10.5f, 0.0f, 1.0f}, {50.5f, 10.5f, 0.0f, 1.0f}};
+    writeRhwPoints(vb, pts, {kPoint0, kPoint1, kPoint2, kPoint3, kPoint4}, r.f);
+    LIFT_CHECK_EQ_U32(r.f.setStreamSource(0u, vb, 0u, 20u), 0u);
+
+    std::uint32_t ib = 0;
+    LIFT_CHECK_EQ_U32(r.f.createIndexBuffer(12u, 101u, &ib), 0u);
+    LIFT_CHECK_NE_U32(ib, 0u);
+    if (ib == 0) return;
+    LIFT_CHECK_EQ_U32(r.f.setIndices(ib), 0u);
+
+    auto expect_points012 = [&r](bool drawn) {
+        LIFT_CHECK_EQ_U32(r.f.pixelAt(10, 10), drawn ? kPoint0 : kClearPixel);
+        LIFT_CHECK_EQ_U32(r.f.pixelAt(20, 10), drawn ? kPoint1 : kClearPixel);
+        LIFT_CHECK_EQ_U32(r.f.pixelAt(30, 10), drawn ? kPoint2 : kClearPixel);
+    };
+    auto draw_case = [&](std::int32_t base, std::uint32_t min_index, std::uint32_t num_vertices,
+                         const std::vector<std::uint16_t>& indices) {
+        LIFT_CHECK_EQ_U32(r.f.clearTo(kClearColor), 0u);
+        writeIndex16(ib, indices, r.f);
+        return r.f.drawIndexed(lift::d3d9::kPtPointList, base, min_index, num_vertices, 0u, 3u);
+    };
+
+    LIFT_CHECK_EQ_U32(r.f.beginScene(), 0u);
+
+    // (a) base=-2, min=2, n=3, IB{2,3,4} ⇒ 顶点 0/1/2。修前：idx=4 >= n ⇒ 假 INVALIDCALL。
+    LIFT_CHECK_EQ_U32(draw_case(-2, 2u, 3u, {2u, 3u, 4u}), 0u);
+    expect_points012(true);
+
+    // (b) base=-1, min=1, n=3, IB{1,2,3} ⇒ 顶点 0/1/2。修前：idx=3 >= n ⇒ 假 INVALIDCALL。
+    LIFT_CHECK_EQ_U32(draw_case(-1, 1u, 3u, {1u, 2u, 3u}), 0u);
+    expect_points012(true);
+
+    // (c) base=0, min=2, n=4, IB{0,1,3} ⇒ idx=0/1 < min ⇒ INVALIDCALL（⛔ 不按 0/1/3 画）。
+    //     修前：S_OK 且像素 10/20/40 被画出来（静默画错）。
+    LIFT_CHECK_EQ_U32(draw_case(0, 2u, 4u, {0u, 1u, 3u}), lift::d3d9::kInvalidCall);
+    expect_points012(false);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(40, 10), kClearPixel);
+
+    // (d) base=-1, min=0, n=1, IB{0,1,2} ⇒ 首个索引 0 在 [0,1) 内，但 vi=-1 ⇒ INVALIDCALL。
+    //     修前：`vertex_index+1u` 回绕成 0 ⇒ 越过检查，随即按 0xFFFFFFFF*stride 做指针加（越界读）。
+    LIFT_CHECK_EQ_U32(draw_case(-1, 0u, 1u, {0u, 1u, 2u}), lift::d3d9::kInvalidCall);
+    expect_points012(false);
+
+    LIFT_CHECK_EQ_U32(r.f.endScene(), 0u);
+}
+
+// =======================================================================================
+// ⑳ `d3d9p/render-state-policy`（`REQ-01M79PPA10JCKG4C9HY6QMV6PT`）
+// =======================================================================================
+// 红了意味着什么：
+//   (1) 引擎实测的 16 个渲染状态 / 取值（AGE.EXE + AGERC.DLL 的 [reg+0E4h] 普查）有一个被拒 ⇒
+//       白名单漏项（或默认分支又把未知状态静默存下）；
+//   (2) C 档（值敏感）的有效值被接受 / 没记 bit26 / 写进了状态块 ⇒ sRGB 写这类静默通过；
+//   (3) 210..255 / 1 / 138 不是 D3DRS ⇒ INVALIDCALL 且**不写**（整块 guest 堆逐字节不变）；
+//   (4) B 档样本（FOGCOLOR）必须 S_OK + 可读回 + 不记 bit26（⛔ 把"只存"也拒掉）。
+// =======================================================================================
+// 引擎实测的 16 个 D3DRS 及其实测取值（`[reg+0E4h]` 普查；`REQ-01M79PPA10JCKG4C9HY6QMV6PT` §4）。
+// ★ 逐条必须是官方 `D3DRENDERSTATETYPE` 枚举里有的值（1/138 不是：1 是扫描伪值、138 不存在，
+//   ⛔ 不许因为"引擎好像设过"就收进白名单）。
+// ★ 两处用例共用这一份：`render-state-policy`（白名单漏项）与
+//   `validate-device-one-pass`（真实状态组合下必须仍 S_OK,1）—— ⛔ 不要各抄一份。
+struct EngineRenderState {
+    std::uint32_t state;
+    std::vector<std::uint32_t> values;
+};
+const std::vector<EngineRenderState>& engineRenderStates() {
+    static const std::vector<EngineRenderState> kStates = {
+        {7u, {0u, 1u}},
+        {14u, {0u, 1u}},
+        {15u, {0u}},
+        {19u, {2u, 5u, 9u}},
+        {20u, {1u, 2u, 6u}},
+        {22u, {3u}},
+        {27u, {1u}},
+        {137u, {1u}},
+        {139u, {0xFFFFFFFFu}},
+        {145u, {0u}},
+        {151u, {0u, 0x100u}},
+        {167u, {0u, 1u}},
+        {171u, {1u, 3u}},
+        {206u, {1u}},
+        {207u, {2u}},
+        {208u, {2u, 6u}},
+    };
+    return kStates;
+}
+
+void caseRenderStatePolicy() {
+    lift_test::g_current_case = "d3d9p/render-state-policy";
+    Rig r;
+    LIFT_CHECK(r.up());
+    if (r.f.device.object == 0) return;
+
+    auto info = [&r]() {
+        lift::d3d9::PipelineInfo pi;
+        LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &pi, nullptr));
+        return pi;
+    };
+
+    // ---- (1) 引擎实测的 16 个状态 + 取值逐个 Set：全部 S_OK，且 bit26 不被置位 ----
+    const std::vector<EngineRenderState>& engine = engineRenderStates();
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(engine.size()), 16u);
+    for (const EngineRenderState& s : engine)
+        for (std::uint32_t v : s.values) LIFT_CHECK_EQ_U32(r.f.setRs(s.state, v), lift::d3d9::kOk);
+    LIFT_CHECK(!bitIsSet(info(), 26));
+
+    // ---- (4) B 档样本：FOGCOLOR 合法且必须"只存"（S_OK + 可读回 + 不记 bit26）----
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsFogColor, 0xFF123456u), lift::d3d9::kOk);
+    LIFT_CHECK_EQ_U32(r.f.getRs(lift::d3d9::kRsFogColor), 0xFF123456u);
+    LIFT_CHECK(!bitIsSet(info(), 26));
+
+    // ---- (3) 210..255 不是 D3DRS、0..209 的空洞也不在白名单：INVALIDCALL + 不写 ----
+    //   ★ 两条分支都要覆盖：210..255 走上界；2 这种 0..209 的空洞走 `default`。
+    //     （只测 214 会漏掉"default 又静默存下"——上界先把它挡了。）
+    auto heapBytes = [&r]() {
+        const std::uint32_t base = r.f.m.layout().heap_base;
+        std::vector<std::uint8_t> out(kFixtureHeapBytes, 0u);
+        for (std::uint32_t i = 0; i < kFixtureHeapBytes; ++i) out[i] = r.f.m.mem().rd8(base + i);
+        return out;
+    };
+    const std::vector<std::uint8_t> heap_before = heapBytes();
+    LIFT_CHECK_EQ_U32(r.f.setRs(214u, 1u), lift::d3d9::kInvalidCall);
+    LIFT_CHECK_EQ_U32(r.f.setRs(210u, 1u), lift::d3d9::kInvalidCall);
+    LIFT_CHECK_EQ_U32(r.f.setRs(255u, 1u), lift::d3d9::kInvalidCall);
+    LIFT_CHECK_EQ_U32(r.f.setRs(2u, 1u), lift::d3d9::kInvalidCall);
+    // ★ **白名单不许收非 D3DRS 值**：1 与 138 都不在官方 `D3DRENDERSTATETYPE` 里
+    //   （枚举从 ZENABLE=7 起，138 这一段也不存在）。1 是扫描伪值 ——
+    //   `.lst 0x4C1ED2 push 3 / 0x4C1ED6 push 1 / 0x4C1ED8 push 16h` 实际是
+    //   state `0x16`(=22)、值 `1|3`，不是 state=1。⛔ 不记 bit26：它们不是"未分类的 D3DRS"，
+    //   而是根本不在 D3D9 枚举里（与 2 / 214 同类）。改回 `case 1`/`case 138` ⇒ 这两条红。
+    LIFT_CHECK_EQ_U32(r.f.setRs(1u, 3u), lift::d3d9::kInvalidCall);
+    LIFT_CHECK_EQ_U32(r.f.setRs(1u, 0u), lift::d3d9::kInvalidCall);
+    LIFT_CHECK_EQ_U32(r.f.setRs(138u, 1u), lift::d3d9::kInvalidCall);
+    LIFT_CHECK(heap_before == heapBytes());
+    LIFT_CHECK(!bitIsSet(info(), 26));  // 非 D3DRS / 白名单外 ⇒ ⛔ 不记 bit
+    // Get 的上界同步：210+ 读不到（也⛔ 不是"存了但读不到"的假成功）；空洞状态读回仍 0
+    LIFT_CHECK_EQ_U32(r.f.getRs(214u), 0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(r.f.getRs(2u), 0u);
+
+    // ---- (2) C 档 5 个状态：0 放行；有效值 ⇒ INVALIDCALL + bit26 + 状态块**仍是 0** ----
+    struct SensitiveState {
+        std::uint32_t state;
+        std::uint32_t effective;
+    };
+    const std::vector<SensitiveState> c_tier = {
+        {lift::d3d9::kRsSrgbWriteEnable, 1u},
+        {lift::d3d9::kRsSlopeScaleDepthBias, 0x3F800000u},  // 1.0f
+        {lift::d3d9::kRsAntiAliasedLineEnable, 1u},
+        {lift::d3d9::kRsEnableAdaptiveTessellation, 1u},
+        {lift::d3d9::kRsDepthBias, 0x3F800000u},  // 1.0f
+    };
+    for (const SensitiveState& s : c_tier) {
+        LIFT_CHECK_EQ_U32(r.f.setRs(s.state, 0u), lift::d3d9::kOk);
+        LIFT_CHECK_EQ_U32(r.f.getRs(s.state), 0u);
+        LIFT_CHECK_EQ_U32(r.f.setRs(s.state, s.effective), lift::d3d9::kInvalidCall);
+        LIFT_CHECK_EQ_U32(r.f.getRs(s.state), 0u);  // ⛔ 不能"记账但仍 setRs"
+        LIFT_CHECK(bitIsSet(info(), 26));
+    }
+
+    // ---- 记账必须**可读**：运行摘要里有一行 `unsupported : 0x…`，且带上置位名 ----
+    const std::string summary = captureRunSummary(r.f.m);
+    LIFT_CHECK(contains(summary, "unsupported : 0x"));
+    LIFT_CHECK(contains(summary, "bit26=未分类 D3DRS"));
+}
+
+// =======================================================================================
+// ㉑ `d3d9p/validate-device-one-pass`（`REQ-01M79PP9H5XZRWFJD4BGS19S54`）
+//
+// 红了意味着什么：`ValidateDevice` 偏离了**已裁决的声明**"恒 `S_OK, *pNumPasses=1`"：
+//   (i) 返回码不是 S_OK / `*pNumPasses != 1`（引擎侧若用它决定要不要重画，会直接错）；
+//   (ii) 它有**副作用**（256 项 `GetRenderState` 或 `PipelineInfo` 的
+//        `draws/draw_calls/begins/ends` 变了）—— `ValidateDevice` 只查不改；
+//   (iii) 引擎实测的 16 个状态组合下它仍必须 `S_OK,1`，且紧接着的探针 Draw 仍 `S_OK`
+//        （状态组合的变化不许把 ValidateDevice / draw 带坏）。
+//
+// ★ **这条用例是防漂移**（修前不会红）：`validateDevice` 今天就是恒 `S_OK,1` ⇒ ⛔ 不是缺陷复现，
+//   也⛔ 不许把它当成"修好了"的凭据。1 pass 的**依据**与**翻面条件**写在
+//   `d3d9_pipeline.cpp` 的 `validateDevice` 注释里（**翻面条件见实现注释**：CPU 兜底删除
+//   且需要覆盖"设备状态组合不能用"时才翻面；⛔ 不是"RTT 落地"）—— 这条用例只盯"声明不许悄悄变"。
+// =======================================================================================
+void caseValidateDeviceOnePass() {
+    lift_test::g_current_case = "d3d9p/validate-device-one-pass";
+    constexpr std::uint32_t kHrOk = lift::d3d9::kOk;
+    constexpr std::uint32_t kHrInvalid = lift::d3d9::kInvalidCall;
+    Rig r;
+    LIFT_CHECK(r.up());
+    if (r.f.device.object == 0) return;
+
+    auto validate = [&r](std::uint32_t passes_ea) {
+        return r.f.method(r.f.device.object, kOffValidateDevice, {passes_ea});
+    };
+    auto info = [&r]() {
+        lift::d3d9::PipelineInfo pi;
+        LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &pi, nullptr));
+        return pi;
+    };
+
+    // ---- (i) 恒 S_OK + `*pNumPasses == 1`（出参真的被写）----
+    {
+        const std::uint32_t passes_ea = r.f.placeU32(0xDEADBEEFu);
+        LIFT_CHECK_EQ_U32(validate(passes_ea), kHrOk);
+        LIFT_CHECK_EQ_U32(r.f.m.mem().rd32(passes_ea), 1u);
+    }
+    // 出参指针非法 ⇒ INVALIDCALL（"恒 1 pass"不等于"不校验指针"）
+    LIFT_CHECK_EQ_U32(validate(0u), kHrInvalid);
+
+    // 先让计数器/状态都非 0（否则"不变"退化成"全 0 对比全 0"）
+    LIFT_CHECK_EQ_U32(r.f.clearTo(kClearColor), kHrOk);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsZEnable, 0u), kHrOk);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsFillMode, 3u), kHrOk);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsColorWriteEnable, 0xFu), kHrOk);
+    LIFT_CHECK_EQ_U32(r.f.setFvf(kFvfXyzRhwDiffuse), kHrOk);
+    const std::uint32_t tri = r.f.placeRhwDiffuse(
+        {{0.0f, 0.0f, 0.0f, 1.0f}, {10.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 10.0f, 0.0f, 1.0f}},
+        {0xFFFF8000u, 0xFFFF8000u, 0xFFFF8000u});
+    LIFT_CHECK_EQ_U32(r.f.beginScene(), kHrOk);
+    LIFT_CHECK_EQ_U32(r.f.drawUp(lift::d3d9::kPtTriangleList, 1u, tri, 20u), kHrOk);
+
+    // ---- (ii) 无副作用：256 项 GetRenderState + 场景计数器 ----
+    std::vector<std::uint32_t> before_rs(256u, 0u);
+    for (std::uint32_t i = 0; i < 256u; ++i) before_rs[i] = r.f.getRs(i);
+    const lift::d3d9::PipelineInfo before = info();
+    LIFT_CHECK_NE_U32(before.draws, 0u);
+    LIFT_CHECK_NE_U32(before.draw_calls, 0u);
+    LIFT_CHECK_NE_U32(before.begins, 0u);
+
+    for (int k = 0; k < 3; ++k) {
+        const std::uint32_t passes_ea = r.f.placeU32(0xDEADBEEFu);
+        LIFT_CHECK_EQ_U32(validate(passes_ea), kHrOk);
+        LIFT_CHECK_EQ_U32(r.f.m.mem().rd32(passes_ea), 1u);
+    }
+
+    for (std::uint32_t i = 0; i < 256u; ++i) LIFT_CHECK_EQ_U32(r.f.getRs(i), before_rs[i]);
+    const lift::d3d9::PipelineInfo after = info();
+    LIFT_CHECK_EQ_U32(after.draws, before.draws);
+    LIFT_CHECK_EQ_U32(after.draw_calls, before.draw_calls);
+    LIFT_CHECK_EQ_U32(after.begins, before.begins);
+    LIFT_CHECK_EQ_U32(after.ends, before.ends);
+
+    // ---- (iii) 引擎实测的 16 个状态组合下仍 S_OK,1；紧接着的 Draw 也 S_OK ----
+    for (const EngineRenderState& s : engineRenderStates()) {
+        for (std::uint32_t v : s.values) LIFT_CHECK_EQ_U32(r.f.setRs(s.state, v), kHrOk);
+        const std::uint32_t passes_ea = r.f.placeU32(0xDEADBEEFu);
+        LIFT_CHECK_EQ_U32(validate(passes_ea), kHrOk);
+        LIFT_CHECK_EQ_U32(r.f.m.mem().rd32(passes_ea), 1u);
+    }
+    LIFT_CHECK_EQ_U32(r.f.drawUp(lift::d3d9::kPtTriangleList, 1u, tri, 20u), kHrOk);
+    LIFT_CHECK_EQ_U32(r.f.endScene(), kHrOk);
+}
+
 }  // namespace
 
 int main() {
@@ -2305,6 +2624,9 @@ int main() {
         caseStaleTextureBindingInDraw();
         casePipeWarnCategoriesAndSummary();
         caseBindingLifetime();
+        caseRenderStatePolicy();
+        caseIndexedRange();
+        caseValidateDeviceOnePass();
         return finish("d3d9-pipeline");
     } catch (const std::exception& e) {
         std::fprintf(stderr, "DIAG uncaught std::exception: %s\n", e.what());

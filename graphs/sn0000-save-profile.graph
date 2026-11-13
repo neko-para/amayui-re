@@ -6,7 +6,7 @@
 #
 # 运行（与 sn0000-save.graph 同一套窗口 + GPU 参数）：
 #   cd apps/emulator-lift && ./out/emulator-lift --present window --present-hidden \
-#     --raster gpu --native-overrides all --skip-logo --audio off \
+#     --native-overrides all --skip-logo --audio off \
 #     --game-dir ../../links/install --appdata ../../.tmp/save-profile/appdata \
 #     --interaction-graph ../../graphs/sn0000-save-profile.graph \
 #     --max-frames 8000 --time-limit 400

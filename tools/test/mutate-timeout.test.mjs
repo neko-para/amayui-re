@@ -16,7 +16,9 @@
  *      还原 + 全文比对仍执行，journal 清空。
  *   c. **超时值按守卫名分层**、`--ctest-timeout <秒>` 可覆盖（规则同时写在 `--help` 里）。
  *   d. **wrapper 崩了 ≠ 超时**：假守卫在写出退出码**之前**死（`process.kill(process.ppid,'SIGKILL')`）
- *      ⇒ 立刻返回 `{error}` 而不是熬到超时，**且它下面那棵树（含孙进程）必须被收掉**。
+ *      ⇒ 从 `gone` 出口返回带 `WRAPPER_GONE_TAG` 的 `{error}`（**结构性**判据：`timedOut !== true`
+ *      + error 的稳定标记，⛔ 不看墙钟 —— 机器被编译压住时不假红），而不是熬到 `{timedOut:true}`，
+ *      **且它下面那棵树（含孙进程）必须被收掉**。
  *
  * ★ **本用例自己不会挂死**：假守卫无论模式都最多睡 5 s 后自行退出（即使超时逻辑坏掉），
  *   而且它只写 `.tmp/mutate-timeout-test/`（gitignored）—— ⛔ 不碰真实工作树 / 不构建 C++。
@@ -31,6 +33,7 @@ import { spawnSync } from 'node:child_process';
 
 import {
   CTEST_TIMEOUT_SEC,
+  WRAPPER_GONE_TAG,
   ctestTimeoutTier,
   defaultCtestTimeoutSec,
   readMutationJournal,
@@ -339,20 +342,21 @@ test('d) wrapper 崩了（写出退出码之前就死）≠ 超时：立刻返�
   const pidFile = path.join(caseDir, 'fake.pid');
   const grandFile = path.join(caseDir, 'grand.pid');
   try {
-    const started = Date.now();
     const r = await runTimedCommand(process.execPath, [FAKE, 'crash', String(SLEEP_MS)], {
       root: caseDir,
       cwd: caseDir,
       timeoutSec: 1,
       env: { AMAYUI_FAKE_PID_FILE: pidFile, AMAYUI_FAKE_GRANDCHILD_FILE: grandFile },
     });
-    const elapsed = Date.now() - started;
 
     assert.notEqual(r.timedOut, true, `wrapper 崩了不许记成超时（实际：${JSON.stringify(r)}）`);
     assert.ok(r.error instanceof Error, `必须交回"子进程异常结束"的 Error（实际：${JSON.stringify(r)}）`);
+    // ★ **结构性判据**（`REQ-01M78A0Z5G7P7CGYRXPFEBJKCA`）：看的是**走的哪个出口** —— `gone` 分支交回的
+    //   error 带稳定标记 `WRAPPER_GONE_TAG`。⛔ 不看耗时：机器被编译压住时，"发现它没了之后立刻返回"
+    //   也会超过任何固定墙钟阈值 ⇒ 旧断言 `elapsed < 1000` 在负载下假红（重跑即绿）。
     assert.ok(
-      elapsed < 1000,
-      `必须在"发现它没了"之后立刻返回（实际 ${elapsed} ms ≥ 1000 ms —— 又熬到超时了）`,
+      r.error.message.startsWith(WRAPPER_GONE_TAG),
+      `error 必须以 ${WRAPPER_GONE_TAG} 开头 ⇒ 才有机械证据证明走的是 gone 出口（实际：${r.error.message}）`,
     );
 
     // ★ 树：wrapper 一死，ctest / 被守的可执行就被 launchd/init 收养 ⇒ 只有 `kill(-pgid)` 能收到它们。

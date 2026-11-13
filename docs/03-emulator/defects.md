@@ -323,6 +323,7 @@
   ★ 它**不替换** stdout 的 `[input-script] finished`：那条在 `finished()` **或 `quit`** 时打，而 `quit` 路径写的
   是**总**动作数（`actions_.size()`；实测 `at insn 10 / quit / at insn 20 / wait 1 insn` 打的是 `2 条动作全部应用`
   而实际只应用了 1 条）⇒ ⛔ 别当"应用数"读。
+  ★ 上面是本段当时的 v1 记录；**现行口径**见 `REQ-01M72WHFMCWQ0KEJDQG0XH21AH`（`quit` 提前结束也照实报「已应用 / 共」）。
   ★ `quit` 之后剩下的动作是脚本**有意**跳过的 ⇒ 不报（否则正常脚本会天天告警）；
   0 条未应用（且没有未交付的抬起）⇒ 不报。
 - **读数**（2026-11-10，macOS arm64 / RelWithDebInfo，`--present headless --raster gpu`；两轮只有 `--input-script`

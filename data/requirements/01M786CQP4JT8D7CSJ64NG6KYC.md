@@ -62,3 +62,12 @@
 - 本轮 `quit-graph` 的 A/B 双臂都正常（`stop : stopped @ eip=004EE0EA` + `ExitProcess`）⇒ 该单的语义没问题，是**超时**问题。
 - `feeder-seg-e2e` 的 `bov=` 已经在涨（`首条 bov=86 → 末条 bov=4576`）⇒ 段级 override **在 feeder 臂上确实生效**，
   失败点只是交互图的 30 s 窗口 —— 别把它误读成"段级没生效"。
+
+## 状态（2026-11-13 · 本机 macOS，按用户口径暂不投）
+- **诊断层过时**：本单写"三条都用 `--raster cpu`"；2026-11-13 复核：`tests/save_graph.cpp:184`、`tests/quit_graph.cpp:185-186`
+  已是 **gpu**；仍用 cpu 的是 `agerc_ui_state.cpp:155` / `close_confirm.cpp:168` / `feeder_seg_e2e.cpp:211`（另有 `mip_e2e.cpp` 两处）。
+- **根因归子单**：三条 cpu-raster 的红由 `REQ-01M78BF1FNNH6K8N8GEY6GQYXX`（退休 CPU 光栅、用例改 gpu）一并解决；
+  该子单 `REQ-01M786ZPJX7S8N5YC9Q9JWTAH3` 已 dropped 并入父单。
+- **4f1bc7e 把 step8 的 5 s 提到 60 s**：与本单"⛔ 不许调大超时"冲突 ⇒ 这条留给 Windows 机器上按实测帧率裁决
+  （自适应 or 承认 60 s 是余量），本机不复现。
+- **处置**：只在本机（macOS）不投；等 Windows 机器，届时按上面三条重写判据。

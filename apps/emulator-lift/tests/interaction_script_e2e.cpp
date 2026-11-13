@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "check.h"
+#include "subprocess_skip.h"
 #include "runtime/host_encoding.h"
 
 #if defined(_WIN32)
@@ -125,9 +126,9 @@ void setEnvVar(const char* name, const char* value) {
 }
 
 // 环境不满足（不是判据红）：GPU / 执行源 / 窗口。⛔ 不要匹配 `game-dir`（正常启动也打那行）。
+// ★ "GPU 拒绝启动"**不在这里**：它由 `LIFT_SKIP_IF_NO_GPU` 单独判（要求本机实探无 GPU）。
 bool environmentUnavailable(const std::string& log) {
-    return contains(log, "要求 GPU 光栅化") || contains(log, "--raster gpu（headless）失败") ||
-           contains(log, "窗口打开失败") || contains(log, "找不到执行源") || contains(log, "拒绝启动");
+    return contains(log, "窗口打开失败") || contains(log, "找不到执行源");
 }
 
 struct MarkerLineStats {
@@ -231,8 +232,6 @@ int main(int argc, char** argv) {
         child.push_back("off");
         child.push_back("--present");
         child.push_back("headless");
-        child.push_back("--raster");
-        child.push_back("gpu");
         child.push_back("--interaction-graph");
         child.push_back(arm.graph.string());
         child.push_back("--interaction-trace");
@@ -257,6 +256,8 @@ int main(int argc, char** argv) {
         if (log.empty()) LIFT_SKIP("子进程没写日志（工作目录 / 权限问题）");
         std::printf("interaction-script-e2e: arm=%s exit=%d trace=%s log=%s (%zu 字节)\n", arm.tag, r.exit_code,
                     trace_path.string().c_str(), log_path.string().c_str(), log.size());
+        // ★ 无 GPU：子进程在跑 guest 之前就拒绝启动 ⇒ 环境缺失，SKIP 77（原因进输出）。
+        LIFT_SKIP_IF_NO_GPU(r.exit_code, log);
         if (r.exit_code != 0 && environmentUnavailable(log)) {
             LIFT_SKIP("GPU / 执行源不可用 ⇒ 这条不是判据红");
         }

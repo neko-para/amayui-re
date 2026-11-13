@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "check.h"
+#include "subprocess_skip.h"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -198,7 +199,7 @@ int main(int argc, char** argv) {
     // 真 feeder = **真设备 + 宿主时钟** ⇒ 必须 `--audio sdl` 且 `--present window`（后者隐含 --real-time）。
     // `--verbose`（= log-level info）是为了让 `feeder=host-thread` 那行**真的出现**：缺省 `warn` 会把它滤掉，
     // 于是"有没有量错臂"在日志里看不出来（那正是本守卫要排除的假绿陷阱 1）。
-    // `--raster cpu`：这一段只关心音频；GPU 后端不是判据，别让没显卡的机器 SKIP。
+    // ★ GPU 是唯一光栅实现：没显卡的机器由 `environmentUnavailable` 判成 SKIP（⛔ 不退回 CPU）。
     const fs::path log_path = work / "feeder-seg.log";
     const fs::path appdata = work / "appdata";
     fs::create_directories(appdata, ec);
@@ -208,7 +209,6 @@ int main(int argc, char** argv) {
         "--game-dir", game_dir,
         "--present", "window",
         "--present-hidden",
-        "--raster", "cpu",
         "--native-overrides", "all",
         "--skip-logo",
         "--audio", "sdl",
@@ -228,6 +228,10 @@ int main(int argc, char** argv) {
 #endif
     if (!child.started) LIFT_SKIP("子进程没起来（环境不允许 spawn）");
     const std::string log = readAll(log_path);
+
+    // ★ 无 GPU（含 `SDL_VIDEODRIVER=dummy`）：子进程在跑 guest 之前就拒绝启动 ⇒ SKIP 77。
+    //   （下面 `feederArmUsable` 也会因缺 `device=ok` 而 SKIP，但这条把原因说得更准。）
+    LIFT_SKIP_IF_NO_GPU(child.exit_code, log);
 
     // ② 假绿陷阱 1 的机械版：先确认"这确实是真 feeder 臂"。
     if (!feederArmUsable(log)) {

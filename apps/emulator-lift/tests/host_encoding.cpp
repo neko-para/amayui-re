@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "check.h"
+#include "subprocess_skip.h"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -139,6 +140,11 @@ int main(int argc, char** argv) {
         const std::wstring args = L"--game-dir " + quoteArg(root.wstring()) + L" --max-insns 1";
         const ChildResult r = runChild(exe, args, out, err);
         LIFT_CHECK(r.started);
+        // ★ 无 GPU（含 `SDL_VIDEODRIVER=dummy`）：子进程在跑 guest 之前就拒绝启动 ⇒ SKIP 77。
+        if (r.started) {
+            const std::string err_bytes = readAllBytes(err);
+            LIFT_SKIP_IF_NO_GPU(r.exit_code, err_bytes);
+        }
         LIFT_CHECK_EQ_U32(r.exit_code, 0);
         const std::string bytes = readAllBytes(out);
         LIFT_CHECK(!bytes.empty());

@@ -84,7 +84,7 @@ const HELP = `tools/disasm-fn —— 语料 **item 目录与影响面**（逐函
 
 ★ 锚点锚 **EA**：两侧行区间（\`lst=\` / \`c=\`）是**派生值**，换一次导出就全变 —— **不许当锚**。
 ★ 任何"调用闭包"都只是**下界**：间接调用（\`call eax\` / \`call [esi+4]\` / \`call ds:dword_X\`）解不出目标。
-★ 缺事实**报出来**：没有 C 的函数、对不上的 C 定义、跨模块的 callee、只被引用没声明的栈槽 —— 都列出来。
+★ 缺事实**报出来**：没有 C 的函数、对不上的 C 定义、跨模块的 callee、被折叠的块（\`COLLAPSED\`，见 \`summary\` 的计数）、只被引用没声明的栈槽 —— 都列出来。
 `;
 
 function parseArgs(argv) {
@@ -295,6 +295,7 @@ export function main(argv = process.argv.slice(2)) {
       `调用点      ${s.callSitesTotal} 个；其中**解不出目标**的 ${s.indirectCallSites} 个（⇒ 闭包是下界）`,
       `边          ${s.callEdges} 条去重后的直接边；函数指针表项 ${s.tableEdges}；被取址目标 ${s.addrTakenTargets} 个`,
       `C 侧        ${s.cDefs} 个定义，对不上 .lst 的 ${s.cDefsUnmatched}；数据定义 ${s.cDataDefs}（挂上 ${s.cDataMatched}，对不上 ${s.cDataUnmatched}）`,
+      `折叠块      ${s.foldedBlocks} 个块 / 声明 ${s.foldedBytes} 字节（.lst 的 \`COLLAPSED\` 行：**没有指令行** ⇒ 不属于任何函数，调用边在语料里根本不存在 —— 不是"没有调用方"）`,
       `跨模块      callee 不在本文件里的 ${s.calleesNotInInventory.length} 个${s.calleesNotInInventory.length ? `：${s.calleesNotInInventory.slice(0, 6).join(' ')}…` : ''}`,
       '',
       `不变量自检  ${s.problems.length === 0 ? '✅ 全过' : `❌ ${s.problems.length} 条`}`,

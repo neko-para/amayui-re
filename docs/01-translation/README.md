@@ -44,6 +44,8 @@ data/translations/README.md   ← 本域的落点说明（本文件之外没有�
 * **字体已入位**：`corpus/assets/fonts/`（分发字体 `Amayui-CN_cnjp{,-Bold}.ttf` + 上游基底 Sarasa 7z）。
 * **简→日写法占位字典已入位**：`data/translations/subs-cn-jp.json`（旧仓 `res/subs_cn_jp.json`）。
   它决定"文本层写哪个码位"，与上面字体的 cmap 替换**成对**（见 `../../data/translations/README.md`）。
+  ★ 字体策略的完整口径（Amayui CN = CP932 码位映射字体、渲染链、cmap 自查、常见坑、换字体动哪里）
+  见 [`../03-emulator/fonts.md`](../03-emulator/fonts.md)；本节只登记资产落位。
 * **UI 图片已入位**（生效版 + 版本表）：`corpus/assets/ui-images/`；中文 UI 不落在这套数据模型里，
   它是**烘焙产物**（AGF overlay），见 `../02-engine/README.md` §6。
 

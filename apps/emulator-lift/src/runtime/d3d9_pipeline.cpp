@@ -34,6 +34,7 @@
 #include "runtime/d3d9_pipeline.h"
 
 #include <chrono>
+#include <bitset>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -41,6 +42,7 @@
 #include <cstring>
 
 #include "runtime/gpu_raster.h"
+#include <algorithm>
 #include <deque>
 #include <map>
 #include <new>  // std::bad_alloc（状态块快照的分配失败面）
@@ -175,6 +177,102 @@ constexpr std::uint32_t kPlColorArena = kPlDepthArena + 4u;    // 0 = 设备后�
 constexpr std::uint32_t kPlColorSurface = kPlColorArena + 4u;  // IDirect3DSurface9 对象 EA（0 = 后缓冲）
 constexpr std::uint32_t kPlStageSnapshots = kPlColorSurface + 4u;  // 纹理级/采样器状态快照次数（诊断）
 constexpr std::uint32_t kPlUnsupported = kPlStageSnapshots + 4u;  // 未支持状态的位图（诊断）
+// =====================================================================================
+// `kPlUnsupported` 的位名（0..25 = 既有语义，数值**保持不变**；26/27 为共享前置新增）
+// =====================================================================================
+// ★ 为什么先有具名枚举：位图原先散着 20 处裸整数，加新位时只能靠"26 没人用"的巧合。
+// ★ 26 = 未分类 D3DRS（`REQ-01M79PPA10JCKG4C9HY6QMV6PT`）；27 = ValidateDevice（`#3` 预留）。
+//   RTT 反馈环（`REQ-01M79MSMWGFEKF8J7C7VYWS4YP`）在共享前置落地前**临时**用了 26；
+//   现在挪到 28（只换诊断位，行为不变）—— 否则摘要里"未分类 D3DRS"与"反馈环"分不开。
+enum UnsupportedBit : std::uint32_t {
+    kUnZWBuffer = 0,
+    kUnFillMode = 1,
+    kUnFog = 2,
+    kUnStencil = 3,
+    kUnMultiSampleAntiAlias = 4,
+    kUnVertexBlend = 5,
+    kUnIndexedVertexBlend = 6,
+    kUnClipPlane = 7,
+    kUnTweenFactor = 8,
+    kUnDither = 9,
+    kUnAnisotropic = 10,
+    kUnMipFilter = 11,
+    kUnSamplerState = 12,
+    kUnTextureOp = 13,
+    kUnTextureTransform = 14,
+    kUnTexCoordIndex = 15,
+    kUnLinePointTextured = 16,
+    kUnTextureFilterNone = 17,
+    kUnClippingDisabled = 18,
+    kUnPointSize = 19,
+    kUnLastPixel = 20,
+    // ---- 21..23：退休 CPU 光栅的**显式拒绝**位（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）----
+    //   ★ 这三格原先只是"未分配（保留）"。现在它们有真实语义：GPU 路径下**不再**把这几种批次
+    //     塞回 CPU 光栅重放（那是第二实现），而是响亮拒绝 → 本批不进画面、但账上有具名痕迹。
+    //     ⛔ 不许把"没画"藏成"画了 0 个三角形"。
+    kUnGpuPerspective = 21,    // 顶点 invw!=1：GPU 的屏幕空间插值不能等价透视校正
+    kUnGpuMipDivergence = 22,  // MIPFILTER=NONE 且本批有缩小采样（sampler 的 max_lod 是一张纹理一档）
+    kUnGpuBackendFailure = 23, // GPU 后端绘制失败（⛔ 不再 CPU 重放该批）
+    kUnTextureOpLevel = 24,
+    kUnAlphaOpLevel = 25,
+    kUnRenderStateUnknown = 26,  // #6：合法 D3DRS / C 档值敏感拒绝（或未知状态）
+    kUnValidateDevice = 27,      // #3 预留（⛔ 不置位：ValidateDevice 恒 1 pass 是事实，不是"未实现"）
+    kUnRtFeedbackLoop = 28,      // 既有 RTT 闸（原临时占 26；共享前置挪到这里）
+    // ---- 29..40：`gpuEligible` 的**逐条拒批原因**（`REQ-01M7AAXVGY9SG75XCREHPX641Z`，M1 账本）----
+    //   ★ 为什么每个拒批点一格：以前它们只往 `why` 写一句文本、返回 `false`，而 `fallback` 只数
+    //     "CPU 真写了像素"的批 ⇒ 准入拒绝却 0 像素的批（设计 §A.3）**连账都没有**。
+    //     现在每格都同时进 `unsupported :`（具名位）与 `skipped`（原因聚合），⛔ 不合流进 fallback。
+    //   ★ 0..28 的语义**一格都没动**（只追加）。
+    kUnGpuTargetBpp = 29,     // 后缓冲/目标非 32bpp
+    kUnGpuAlphaTest = 30,     // ALPHATESTENABLE=1（GPU 不支持 alpha test）
+    kUnGpuShadeFlat = 31,     // 非 GOURAUD 着色
+    kUnGpuColorWrite = 32,    // color write mask 超出 0xF
+    kUnGpuMultiStage = 33,    // stage>=1 绑了纹理 / op 未 DISABLE
+    kUnGpuBlendMap = 34,      // `gpuBlendStateFor` 映射失败
+    kUnGpuTexMode = 35,       // `gpuTextureModeFor` 映射失败（片元置换无解）
+    kUnGpuTextureBpp = 36,    // stage 0 纹理非 32bpp（含像素/尺寸非法）
+    kUnGpuSamplerAddr = 37,   // 采样器寻址模式不支持
+    kUnGpuFilterSplit = 38,   // MAG != MIN / 过滤值无法映射
+    kUnGpuUntexturedOp = 39,  // 无纹理时 stage 0 的 op/arg 不等于顶点色
+    kUnGpuNoBackend = 40,     // 没有 GPU 后端（生产不可能 / 内部 plan 为空）
+};
+
+// ★ A 档（实现）/ B 档（只存）的**唯一**白名单（`REQ-01M79PPA10JCKG4C9HY6QMV6PT`）：
+//   A = 有读点 / 有 case；B = 合法且无可观察副作用（被已记账的 master 门控，或真机也不读）。
+//   C 档（175/176/184/194/195）**不在这里**：它们是"合法但值敏感"，由 `setRenderState` 单独判。
+//   ⛔ 不把"未知就存下"当兼容：默认分支必须拒绝（210..255 根本不是 D3DRS）。
+constexpr bool knownRenderState(std::uint32_t state) {
+    switch (state) {
+        // ---- A 档：实现 ----
+        // ★ 只收**官方 `D3DRENDERSTATETYPE` 枚举里有的值**：1 与 138 不在枚举里
+        //   （枚举从 ZENABLE=7 起；138 这段也不存在）⇒ ⛔ 不许当兼容收下。
+        //   1 是扫描伪值：`.lst 0x4C1ED2 push 3 / 0x4C1ED6 push 1 / 0x4C1ED8 push 16h`
+        //   实际是 state `0x16`(=22)、值 `1|3`（见 `REQ-01M79PPA10JCKG4C9HY6QMV6PT`）。
+        case 7: case 8: case 9:
+        case 14: case 15: case 16:
+        case 19: case 20:
+        case 22: case 23: case 24: case 25: case 26: case 27: case 28: case 29:
+        case 60:
+        case 136: case 137: case 139: case 141:
+        case 145:
+        case 151: case 152:
+        case 154: case 155: case 156: case 157: case 158: case 159: case 160:
+        case 161: case 162:
+        case 166: case 167: case 168:
+        case 170: case 171: case 174:
+        case 206: case 207: case 208: case 209:
+        // ---- B 档：只存 ----
+        case 34: case 35: case 36: case 37: case 38:                 // FOG*（FOGENABLE=28 记 bit2）
+        case 53: case 54: case 55: case 56: case 57: case 58: case 59:  // STENCIL*（记 bit3）
+        case 128: case 129: case 130: case 131: case 132: case 133: case 134: case 135:  // WRAPn
+        case 140: case 142: case 143:                                // FOGVERTEXMODE / LOCALVIEWER / NORMALIZENORMALS
+        case 185: case 186: case 187: case 188: case 189:            // CCW STENCIL*
+        case 190: case 191: case 192: case 193:                      // COLORWRITEENABLE1..3 / BLENDENABLE
+            return true;
+        default:
+            return false;
+    }
+}
 // ★ 顶点声明绑定时的代际（配对 `kPlVertexDecl`；追加在末尾 ⇒ 不挪任何既有偏移）。
 //   用途：`SetVertexDeclaration` / `SetFVF` 换绑 / 设备销毁时对**旧声明**做 `releaseIf(EA, 代际)`，
 //   代际不符（EA 已被复用）⇒ 只出声、⛔ 不减到当前占有者身上。
@@ -381,14 +479,100 @@ bool validTransformState(std::uint32_t state) {
 }
 
 // 未支持状态：记录位 + 只打一次日志（⛔ 不静默；也⛔ 不反复刷屏）
-void recordUnsupported(X86& cpu, std::uint32_t pe, std::uint32_t bit, const char* what, std::uint32_t value) {
-    const std::uint32_t word = bit / 32u;
-    const std::uint32_t mask = 1u << (bit % 32u);
+// ★ 进程级镜像：运行摘要（`machine.cpp` 的 `unsupported :` 行）没有设备 EA，只能读这里；
+//   **判据**仍以 `PipelineInfo::unsupported` 为准（同一份写入）。生命周期跟流水线状态块
+//   （`createForDevice` 清）—— ⛔ 不跟 `gpuCoverageReset`：后者每次 `Machine::run` 都跑。
+std::uint32_t g_unsupported_mirror[8] = {};
+// ★ 只影响**日志**：位已置位时默认不再出声（否则 C 档 5 个状态只有第一个能在日志里看见）。
+//   这里按"渲染状态号"记已打过日志的状态（256 位），`log_key` 用来让各状态各自可辨识。
+std::bitset<256> g_rs_unimplemented_seen;
+
+void recordUnsupported(X86& cpu, std::uint32_t pe, UnsupportedBit bit, const char* what, std::uint32_t value,
+                       int log_key = -1) {
+    const std::uint32_t index = static_cast<std::uint32_t>(bit);
+    const std::uint32_t word = index / 32u;
+    const std::uint32_t mask = 1u << (index % 32u);
     const std::uint32_t off = kPlUnsupported + word * 4u;
     const std::uint32_t cur = plGet(cpu, pe, off);
-    if ((cur & mask) != 0) return;
-    plSet(cpu, pe, off, cur | mask);
+    const bool bit_new = (cur & mask) == 0;
+    if (bit_new) plSet(cpu, pe, off, cur | mask);
+    g_unsupported_mirror[word] |= mask;
+    bool log_now = bit_new;
+    if (log_key >= 0) {
+        const std::size_t key = static_cast<std::size_t>(log_key) & 255u;
+        if (!g_rs_unimplemented_seen.test(key)) {
+            g_rs_unimplemented_seen.set(key);
+            log_now = true;
+        }
+    }
+    if (!log_now) return;
     pipeLog("unsupported", "%s（值 0x%X）——本线不实现，已记录（⛔ 不冒充真机）", what, value);
+}
+
+// =====================================================================================
+// 跳过账本（`REQ-01M7AAXVGY9SG75XCREHPX641Z`，M1）
+//
+// `skipped` 的**唯一**入口：一批 GPU 真的**没画**（准入拒绝 / 准入后拒绝 / 后端失败）。
+// ★ 与 `fallback` **不是**一回事：`fallback` = 这一批 CPU 真写了像素（`pixels_written > 0`）。
+//   本单只加账、不改像素行为 ⇒ 被 `gpuEligible` 拒的批今天仍由 CPU 画（两条账会同时 +1）；
+//   但 `invw!=1` / MIP 缩小 / 后端失败 / 带纹理点线这类**提前返回**的批 CPU 一像素都不写
+//   ⇒ 以前它们连 `fallback` 都不进（设计 §A.3 的盲区），现在一定有 `skipped`。
+// ★ "打通 recordUnsupported" = 同一份位图 + 同一套去重（同一位只在第一次出声）：
+//   这里不另外维护日志键，直接复用 `recordUnsupported` 的 `bit_new` 判据。
+// ★ 计数点：`submitPrimitives` 的**主路径在函数末尾**统一记（与 `draw_calls` 同一处判据，
+//   且**不依赖** `pixels_written`）；`admitLinePointDraw` / `invw` / MIP 这三条**早退**路径
+//   赶不到函数末尾 ⇒ 在各自的 `return false` 之前补一次（否则它们又回到无账状态）。
+// =====================================================================================
+void noteGpuSkip(X86& cpu, std::uint32_t pe, const std::string& reason, UnsupportedBit bit) {
+    ++g_gpu_coverage.skipped_draws;
+    ++g_gpu_coverage.skipped_reasons[reason];
+    recordUnsupported(cpu, pe, bit, reason.c_str(), 0u);
+}
+
+const char* unsupportedBitName(std::uint32_t bit) {
+    if (bit == kUnZWBuffer) return "ZENABLE=USEW";
+    if (bit == kUnFillMode) return "FILLMODE";
+    if (bit == kUnFog) return "FOG";
+    if (bit == kUnStencil) return "STENCIL";
+    if (bit == kUnMultiSampleAntiAlias) return "MSAA";
+    if (bit == kUnVertexBlend) return "VERTEXBLEND";
+    if (bit == kUnIndexedVertexBlend) return "INDEXEDVERTEXBLEND";
+    if (bit == kUnClipPlane) return "CLIPPLANE";
+    if (bit == kUnTweenFactor) return "TWEENFACTOR";
+    if (bit == kUnDither) return "DITHER";
+    if (bit == kUnAnisotropic) return "ANISOTROPIC";
+    if (bit == kUnMipFilter) return "MIPFILTER";
+    if (bit == kUnSamplerState) return "SAMPLERSTATE";
+    if (bit == kUnTextureOp) return "D3DTOP";
+    if (bit == kUnTextureTransform) return "TEXTURETRANSFORM";
+    if (bit == kUnTexCoordIndex) return "TEXCOORDINDEX";
+    if (bit == kUnLinePointTextured) return "带纹理点/线";
+    if (bit == kUnTextureFilterNone) return "TEXF_NONE";
+    if (bit == kUnClippingDisabled) return "CLIPPING=0";
+    if (bit == kUnPointSize) return "POINTSIZE";
+    if (bit == kUnLastPixel) return "LASTPIXEL=0";
+    if (bit == kUnGpuPerspective) return "invw!=1";
+    if (bit == kUnGpuMipDivergence) return "MIPFILTER=NONE 缩小";
+    if (bit == kUnGpuBackendFailure) return "GPU 后端失败";
+    if (bit == kUnTextureOpLevel) return "纹理级 OP";
+    if (bit == kUnAlphaOpLevel) return "纹理级 ALPHAOP";
+    if (bit == kUnRenderStateUnknown) return "未分类 D3DRS";
+    if (bit == kUnValidateDevice) return "ValidateDevice";
+    if (bit == kUnRtFeedbackLoop) return "渲染目标反馈环";
+    // ---- 29..40：`gpuEligible` 的逐条拒批原因（M1 账本；见 enum 上的注释）----
+    if (bit == kUnGpuTargetBpp) return "GPU 目标非 32bpp";
+    if (bit == kUnGpuAlphaTest) return "GPU 不支持 alpha test";
+    if (bit == kUnGpuShadeFlat) return "GPU 只支持 GOURAUD";
+    if (bit == kUnGpuColorWrite) return "GPU color write mask";
+    if (bit == kUnGpuMultiStage) return "GPU 只支持 stage 0";
+    if (bit == kUnGpuBlendMap) return "GPU blend 映射失败";
+    if (bit == kUnGpuTexMode) return "GPU 纹理级 op 映射失败";
+    if (bit == kUnGpuTextureBpp) return "GPU 纹理非 32bpp";
+    if (bit == kUnGpuSamplerAddr) return "GPU 采样寻址模式";
+    if (bit == kUnGpuFilterSplit) return "GPU MAG!=MIN";
+    if (bit == kUnGpuUntexturedOp) return "GPU 无纹理 op";
+    if (bit == kUnGpuNoBackend) return "GPU 无后端";
+    return "未分配";
 }
 
 // =====================================================================================
@@ -837,7 +1021,7 @@ struct SamplerSnapshot {
 struct DrawContext {
     X86* cpu = nullptr;
     Machine* machine = nullptr;
-    GpuRaster* gpu = nullptr;  // --raster gpu 且 sink 提供时非空
+    GpuRaster* gpu = nullptr;  // sink 提供 GPU 光栅化后端时非空（生产路径恒非空）
     std::uint32_t pe = 0;
     std::uint32_t fvf = 0;  // 当前 SetFVF（诊断用）
     std::uint8_t* color_base = nullptr;
@@ -846,6 +1030,13 @@ struct DrawContext {
     int color_height = 0;
     std::uint32_t color_pitch = 0;
     std::uint32_t color_surface = 0;  // 0 = 设备后缓冲
+    // ★ 渲染目标是不是**纹理表面**（`'TEX1'`），以及那条纹理的 `D3DUSAGE_*` 位。
+    //   只给 GPU 准入用（`REQ-01M79MSMWGFEKF8J7C7VYWS4YP`）：纹理 RT 缺
+    //   `D3DUSAGE_RENDERTARGET` 时**只记账**（引擎真值未取证 ⇒ 不新增静默回退）。
+    //   ⛔ 判据与 `setRenderTarget` 的 `is_texture_surface` 同源（`textureInfoOfState` 的 magic），
+    //   不要用 `surfaceInfoOfState` 的返回值（它对后缓冲的 `'D9D1'` 也返回 true）。
+    bool color_is_texture = false;
+    std::uint32_t color_usage = 0;
     float* depth_base = nullptr;  // 后缓冲尺寸的 float 深度
     std::uint32_t depth_pitch_floats = 0;
     // ★ 深度缓冲的**矩形**（来自 `createForDevice` 的分配尺寸 = 后缓冲尺寸）。
@@ -1221,7 +1412,7 @@ void applyTextureOp(X86& cpu, const DrawContext& ctx, std::uint32_t stage, const
         if (unsupported != 0) {
             char buf[96];
             std::snprintf(buf, sizeof(buf), "纹理级 OP 0x%X（级 %u）", unsupported, stage);
-            recordUnsupported(cpu, ctx.pe, 24u, buf, unsupported);
+            recordUnsupported(cpu, ctx.pe, kUnTextureOpLevel, buf, unsupported);
         }
         for (int i = 0; i < 3; ++i) {
             if (out[i] < 0.0) out[i] = 0.0;
@@ -1275,7 +1466,7 @@ void applyTextureOp(X86& cpu, const DrawContext& ctx, std::uint32_t stage, const
         if (unsupported != 0) {
             char buf[96];
             std::snprintf(buf, sizeof(buf), "纹理级 ALPHAOP 0x%X（级 %u）", unsupported, stage);
-            recordUnsupported(cpu, ctx.pe, 25u, buf, unsupported);
+            recordUnsupported(cpu, ctx.pe, kUnAlphaOpLevel, buf, unsupported);
         }
         if (alpha_val < 0.0) alpha_val = 0.0;
         if (alpha_val > 255.0) alpha_val = 255.0;
@@ -1294,6 +1485,15 @@ struct AlphaAgg {
     unsigned mx = 0;
 };
 static AlphaAgg g_alpha_agg;
+// ★ GPU 版的同一份聚合（`[draw] fa=`，`REQ-01M78BF1FNNH6K8N8GEY6GQYXX` 的判据面）：
+//   CPU 版是**逐像素**（在 `writeShadedPixel` 里，受 `LIFT_SLOW_DRAW` 门控 —— 那在热路径上）；
+//   GPU 版是**逐批**（一次 O(顶点数) 的循环，本来就已在读这批顶点）⇒ **不受门控**，
+//   免得"删掉 CPU 光栅 ⇒ α 语义失去唯一可观测面"（本单正是来补这个面的）。
+//   ★ 两边的 `n` 口径**故意不同**、且都写在 `[draw]` 的口径里：
+//     CPU 的 `n` = 真的写进后缓冲的**像素**数；GPU 的 `n` = 真的交给后端的**顶点**数。
+//     要问"这一批混了什么 α"两者等价；要问"混了多少片元"只有 CPU 版答得了（GPU 拿不到片元数）。
+static AlphaAgg g_gpu_alpha_agg;
+static bool g_alpha_agg_from_gpu = false;
 
 // ---------------------------------------------------------------------------------------
 // 一个三角形的**派生 mip 级号**（每三角形常量；`REQ-01M73G2724479XAVS176WBZ65Q`）
@@ -1450,6 +1650,18 @@ bool writeShadedPixel(DrawContext& ctx, int px, int py, double z, Shade&& shade)
     return true;
 }
 
+// =====================================================================================
+// ★★ **待删的测试 oracle** ★★（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX` 的后半）
+//
+//   `rasterTriangle` / `rasterizePoint` / `rasterizeLineSegment` / `writeShadedPixel` 这一族
+//   是**唯一还会写 guest 像素的 CPU 实现**。CLI **已经没有**任何入口能选它（无 GPU ⇒
+//   启动期拒绝启动），今天只剩两类调用方：
+//     ① 单元测试夹具没装 `GpuRaster`：`tests/d3d9.cpp` / `d3d9_pipeline.cpp` / `d3dx9.cpp` /
+//        `d3d9_mip.cpp` 的逐像素断言（≈ 全部挂在它上面）；
+//     ② 生产路径里被 `gpuEligible` 拒的批（能力缺口）与 GPU 后端失败后的回退。
+//   ⇒ 删它 = 先把 ① 迁到 GPU/账本断言（独立一单）+ 把 ② 的剩余类别改成显式拒绝 + 记账。
+//   ⛔ 不许为了"让用例变绿"放宽这 4 个文件的像素断言；⛔ 也不许把它当第二实现长期保留。
+// =====================================================================================
 void rasterTriangle(DrawContext& ctx, const SVertex& va, const SVertex& vb, const SVertex& vc) {
     X86& cpu = *ctx.cpu;
     const double area = (vb.x - va.x) * (vc.y - va.y) - (vb.y - va.y) * (vc.x - va.x);
@@ -2010,6 +2222,9 @@ std::uint32_t createForDevice(X86& cpu, std::uint32_t device_state, int width, i
         return 0;
     }
     initDefaults(cpu, pe, width, height);
+    // ★ 未支持位镜像 / RS 日志去重表跟**新状态块**一起从 0 开始（摘要读镜像；判据仍走状态块）。
+    std::memset(g_unsupported_mirror, 0, sizeof(g_unsupported_mirror));
+    g_rs_unimplemented_seen.reset();
     // 深度缓冲：SurfaceArena 里的 32bpp 表面（像素存 float 位模式）。清成 1.0f（远平面）。
     // ★ 格式走 pixel_format 的唯一一份（⛔ 不再在这里手抄 BGRA8888 的四个掩码）
     const SurfaceFormat depth_fmt = pixel_format::formatForBpp(32);
@@ -2172,6 +2387,8 @@ bool pipelineInfoOfState(X86& cpu, std::uint32_t state, PipelineInfo* out, std::
     i.rasterized = plGet(cpu, state, kPlRasterized);
     i.pixels = (static_cast<std::uint64_t>(plGet(cpu, state, kPlPixels + 4u)) << 32) |
                plGet(cpu, state, kPlPixels);
+    // ★ 未支持位图（只写不读 ⇒ 守卫只能断言"日志里出现过"；这里把它变成可观察状态）。
+    for (std::uint32_t w = 0; w < 8u; ++w) i.unsupported[w] = plGet(cpu, state, kPlUnsupported + w * 4u);
     i.viewport_x = plGet(cpu, state, kPlViewport + 0u);
     i.viewport_y = plGet(cpu, state, kPlViewport + 4u);
     i.viewport_w = plGet(cpu, state, kPlViewport + 8u);
@@ -2186,6 +2403,25 @@ bool pipelineInfoOfDevice(X86& cpu, std::uint32_t device_state, PipelineInfo* ou
     return pipelineInfoOfState(cpu, pe, out, why);
 }
 
+std::string unsupportedBitsOfRun() {
+    char hex[96];
+    std::snprintf(hex, sizeof(hex), "0x%08X%08X%08X%08X%08X%08X%08X%08X", g_unsupported_mirror[7],
+                  g_unsupported_mirror[6], g_unsupported_mirror[5], g_unsupported_mirror[4],
+                  g_unsupported_mirror[3], g_unsupported_mirror[2], g_unsupported_mirror[1],
+                  g_unsupported_mirror[0]);
+    std::string out(hex);
+    std::string names;
+    for (std::uint32_t bit = 0; bit < 256u; ++bit) {
+        if ((g_unsupported_mirror[bit / 32u] & (1u << (bit % 32u))) == 0) continue;
+        char one[96];
+        std::snprintf(one, sizeof(one), "%sbit%u=%s", names.empty() ? "（" : " ", bit,
+                      unsupportedBitName(bit));
+        names += one;
+    }
+    if (!names.empty()) out += names + "）";
+    return out;
+}
+
 // =====================================================================================
 // 渲染目标（SetRenderTarget）
 // =====================================================================================
@@ -2195,6 +2431,31 @@ std::uint32_t renderTargetArena(X86& cpu, std::uint32_t pipeline_state) {
         return 0;
     }
     return plGet(cpu, pipeline_state, kPlColorArena);
+}
+
+// ★ 颜色目标的唯一判据（声明与理由见 `d3d9_pipeline.h` 的 `ColorTarget`）：
+//   `prepareContext` 与 D3DXSprite 的 End/Flush 合成都调它 ⇒ 两者不可能对"目标是谁"有分歧。
+bool colorTargetOfState(X86& cpu, std::uint32_t pipeline_state, ColorTarget* out, std::string* why) {
+    if (out == nullptr) return false;
+    *out = ColorTarget{};
+    if (pipeline_state == 0 || !cpu.mem->committed(pipeline_state, kPlBytes) ||
+        cpu.mem->rd32(pipeline_state + kPlMagic) != kPlMagicValue) {
+        if (why) *why = "D3D9 流水线：颜色目标的状态块不是本模块的 'DL01'";
+        return false;
+    }
+    out->surface = plGet(cpu, pipeline_state, kPlColorSurface);
+    out->arena = plGet(cpu, pipeline_state, kPlColorArena);
+    // ★ 纹理 RT 的身份 + Usage：判据与 `setRenderTarget` 的 `is_texture_surface` 同源
+    //   （`textureInfoOfState` 的 `'TEX1'` magic）；取不到 ⇒ 保持"不是纹理"。
+    if (out->surface != 0 && cpu.com != nullptr) {
+        const std::uint32_t rt_state = cpu.com->userOf(out->surface);
+        TextureInfo rt_tex;
+        if (rt_state != 0 && textureInfoOfState(cpu, rt_state, &rt_tex, nullptr)) {
+            out->is_texture = true;
+            out->usage = rt_tex.usage;
+        }
+    }
+    return true;
 }
 
 namespace {
@@ -2474,10 +2735,20 @@ std::uint32_t setRenderState(X86& cpu, std::uint32_t dev, std::uint32_t state, s
     if (!pipelineOf(cpu, dev, &pe, why)) return kInvalidCall;
     // ★ 上界必须在**任何写**之前（`REQ-01M7372P560TMY51NJ3ARG4ENG`）：`setRs` 直接把 state 当索引算
     //   `kPlRenderStates + state*4`，越界的 state 会写穿状态块（state=0xFFFF ⇒ 写出 ≈256 KB）踩到
-    //   相邻 guest 堆。`GetRenderState` 早就对 256+ 返回 `D3DERR_INVALIDCALL` ⇒ Set/Get 必须对称。
-    if (state >= kPlRenderStateCount) {
-        if (why) *why = "D3D9 流水线：SetRenderState 的 State 越界（" + std::to_string(state) + " ≥ " +
-                        std::to_string(kPlRenderStateCount) + "）⇒ D3DERR_INVALIDCALL（⛔ 不写状态块）";
+    //   相邻 guest 堆。★ D3D9 的 `D3DRENDERSTATETYPE` 只到 209（210..255 **不是** D3DRS 值）⇒
+    //   这类拒绝**不记 bit26**（与"合法但未实现"区分；`REQ-01M79PPA10JCKG4C9HY6QMV6PT`）。
+    if (state > kLastD3dRenderState) {
+        char buf[192];
+        std::snprintf(buf, sizeof(buf),
+                      "SetRenderState 的 State=%u > %u（210..255 不是 D3DRS 值）⇒ D3DERR_INVALIDCALL"
+                      "（⛔ 不写状态块、不记 unsupported 位）",
+                      state, kLastD3dRenderState);
+        const std::size_t key = static_cast<std::size_t>(state) & 255u;
+        if (!g_rs_unimplemented_seen.test(key)) {
+            g_rs_unimplemented_seen.set(key);
+            pipeLog("SetRenderState", "%s", buf);
+        }
+        if (why) *why = buf;
         return kInvalidCall;
     }
     switch (state) {
@@ -2486,14 +2757,14 @@ std::uint32_t setRenderState(X86& cpu, std::uint32_t dev, std::uint32_t state, s
                 pipeLog("SetRenderState", "ZENABLE=%u 非法（D3DZB_FALSE/TRUE/USEW）⇒ D3DERR_INVALIDCALL", value);
                 return kInvalidCall;
             }
-            if (value == 2u) recordUnsupported(cpu, pe, 0u, "D3DRS_ZENABLE=D3DZB_USEW（w 缓冲）", value);
+            if (value == 2u) recordUnsupported(cpu, pe, kUnZWBuffer, "D3DRS_ZENABLE=D3DZB_USEW（w 缓冲）", value);
             break;
         case kRsFillMode:
             if (value != 1u && value != 2u && value != 3u) {
                 pipeLog("SetRenderState", "FILLMODE=%u 非法 ⇒ D3DERR_INVALIDCALL", value);
                 return kInvalidCall;
             }
-            if (value != 3u) recordUnsupported(cpu, pe, 1u, "D3DFILL_POINT/LINE（只做 SOLID）", value);
+            if (value != 3u) recordUnsupported(cpu, pe, kUnFillMode, "D3DFILL_POINT/LINE（只做 SOLID）", value);
             break;
         case kRsShadeMode:
             if (value != 1u && value != 2u) {
@@ -2538,35 +2809,60 @@ std::uint32_t setRenderState(X86& cpu, std::uint32_t dev, std::uint32_t state, s
             }
             break;
         case kRsFogEnable:
-            if (value != 0u) recordUnsupported(cpu, pe, 2u, "D3DRS_FOGENABLE（本线不做雾）", value);
+            if (value != 0u) recordUnsupported(cpu, pe, kUnFog, "D3DRS_FOGENABLE（本线不做雾）", value);
             break;
         case kRsStencilEnable:
-            if (value != 0u) recordUnsupported(cpu, pe, 3u, "D3DRS_STENCILENABLE（本线没有模板缓冲）", value);
+            if (value != 0u) recordUnsupported(cpu, pe, kUnStencil, "D3DRS_STENCILENABLE（本线没有模板缓冲）", value);
             break;
         case kRsMultiSampleAntiAlias:
-            if (value != 0u) recordUnsupported(cpu, pe, 4u, "D3DRS_MULTISAMPLEANTIALIAS", value);
+            if (value != 0u) recordUnsupported(cpu, pe, kUnMultiSampleAntiAlias, "D3DRS_MULTISAMPLEANTIALIAS", value);
             break;
         case kRsVertexBlend:
-            if (value != 0u) recordUnsupported(cpu, pe, 5u, "D3DRS_VERTEXBLEND（本线不做顶点混合）", value);
+            if (value != 0u) recordUnsupported(cpu, pe, kUnVertexBlend, "D3DRS_VERTEXBLEND（本线不做顶点混合）", value);
             break;
         case kRsIndexedVertexBlendEnable:
-            if (value != 0u) recordUnsupported(cpu, pe, 6u, "D3DRS_INDEXEDVERTEXBLENDENABLE", value);
+            if (value != 0u) recordUnsupported(cpu, pe, kUnIndexedVertexBlend, "D3DRS_INDEXEDVERTEXBLENDENABLE", value);
             break;
         case kRsClipPlaneEnable:
-            if (value != 0u) recordUnsupported(cpu, pe, 7u, "D3DRS_CLIPPLANEENABLE（本线不做用户裁剪面）", value);
+            if (value != 0u) recordUnsupported(cpu, pe, kUnClipPlane, "D3DRS_CLIPPLANEENABLE（本线不做用户裁剪面）", value);
             break;
         case kRsClipping:
             // 本线**总是**做裁剪（齐次 6 面 / 预变换视口矩形）。真机 CLIPPING=0 会关掉落屏外的裁剪，
             // ⛔ 不静默：记录，行为仍是"总是裁剪"（与既有近平面裁剪的口径一致）。
-            if (value == 0u) recordUnsupported(cpu, pe, 18u, "D3DRS_CLIPPING=0（本线总是裁剪）", value);
+            if (value == 0u) recordUnsupported(cpu, pe, kUnClippingDisabled, "D3DRS_CLIPPING=0（本线总是裁剪）", value);
             break;
         case kRsTweenFactor:
-            if (value != 0u) recordUnsupported(cpu, pe, 8u, "D3DRS_TWEENFACTOR", value);
+            if (value != 0u) recordUnsupported(cpu, pe, kUnTweenFactor, "D3DRS_TWEENFACTOR", value);
             break;
         case kRsDitherEnable:
-            if (value != 0u) recordUnsupported(cpu, pe, 9u, "D3DRS_DITHERENABLE", value);
+            if (value != 0u) recordUnsupported(cpu, pe, kUnDither, "D3DRS_DITHERENABLE", value);
+            break;
+        // ---- C 档（值敏感）：惰性值 0 放行；有效值 ⇒ 记账 + INVALIDCALL，⛔ **不写**状态块 ----
+        //   ★ 不能"记账但仍 setRs"（那还是静默通过）；`log_key=state` 让 5 个状态各自在日志里可辨识。
+        case kRsSlopeScaleDepthBias:
+        case kRsAntiAliasedLineEnable:
+        case kRsEnableAdaptiveTessellation:
+        case kRsSrgbWriteEnable:
+        case kRsDepthBias:
+            if (value != 0u) {
+                char buf[160];
+                std::snprintf(buf, sizeof(buf), "D3DRS %u（值敏感）", state);
+                recordUnsupported(cpu, pe, kUnRenderStateUnknown, buf, value, static_cast<int>(state));
+                if (why) *why = "D3D9 流水线：D3DRS " + std::to_string(state) +
+                                " 的有效值本线不实现 ⇒ D3DERR_INVALIDCALL（⛔ 不写状态块）";
+                return kInvalidCall;
+            }
             break;
         default:
+            // ★ 合法但**不在 A∪B 白名单**的状态（含 0..209 的空洞）⇒ 拒绝，⛔ 不静默存下。
+            if (!knownRenderState(state)) {
+                char buf[192];
+                std::snprintf(buf, sizeof(buf), "State=%u 不在本线的 D3DRS 白名单（A∪B）", state);
+                // ★ **不记 bit26**：bit26 只给 C 档（合法 D3DRS 的有效值）；这里的空洞 / 210..255
+                //   与"State 越界"同类（`REQ-01M79PPA10JCKG4C9HY6QMV6PT` 已裁决）。
+                if (why) *why = std::string("D3D9 流水线：") + buf + " ⇒ D3DERR_INVALIDCALL（⛔ 不写状态块）";
+                return kInvalidCall;
+            }
             break;
     }
     setRs(cpu, pe, state, value);
@@ -2577,8 +2873,8 @@ std::uint32_t getRenderState(X86& cpu, std::uint32_t dev, std::uint32_t state, s
                              std::string* why) {
     std::uint32_t pe = 0;
     if (!pipelineOf(cpu, dev, &pe, why)) return kInvalidCall;
-    if (state >= kPlRenderStateCount) {
-        if (why) *why = "D3D9 流水线：GetRenderState 的 State 越界";
+    if (state > kLastD3dRenderState) {
+        if (why) *why = "D3D9 流水线：GetRenderState 的 State 越界（210..255 不是 D3DRS 值）";
         return kInvalidCall;
     }
     if (!committed(cpu, out_ea, 4u, "GetRenderState 的 pValue", why)) return kInvalidCall;
@@ -2613,25 +2909,25 @@ std::uint32_t setSamplerState(X86& cpu, std::uint32_t dev, std::uint32_t stage, 
                 pipeLog("SetSamplerState", "过滤器=%u 非法 ⇒ D3DERR_INVALIDCALL", value);
                 return kInvalidCall;
             }
-            if (value == kTexfAnisotropic) recordUnsupported(cpu, pe, 10u, "各向异性过滤（按 LINEAR 近似）", value);
+            if (value == kTexfAnisotropic) recordUnsupported(cpu, pe, kUnAnisotropic, "各向异性过滤（按 LINEAR 近似）", value);
             if (value == kTexfNone)
-                recordUnsupported(cpu, pe, 17u, "D3DTEXF_NONE（MIN/MAG 无过滤；两侧都 NONE 时按透明黑）", value);
+                recordUnsupported(cpu, pe, kUnTextureFilterNone, "D3DTEXF_NONE（MIN/MAG 无过滤；两侧都 NONE 时按透明黑）", value);
             break;
         case kSampMipFilter:
             // ★ 语义（`REQ-01M73G2724479XAVS176WBZ65Q`）：NONE(0) = 关掉 mipmap ⇒ 只采 level 0；
             //   POINT(1) / LINEAR(2) 都允许按 LOD 选级。本线取**最近级** ⇒ LINEAR（三线性）按最近级近似，
             //   这一条要记账（⛔ 不要再说"本线没有 mip 链" —— 那是修前的状态）。
             if (value == kTexfLinear) {
-                recordUnsupported(cpu, pe, 11u, "MIPFILTER=LINEAR（三线性）按最近级近似", value);
+                recordUnsupported(cpu, pe, kUnMipFilter, "MIPFILTER=LINEAR（三线性）按最近级近似", value);
             } else if (value > kTexfLinear) {
-                recordUnsupported(cpu, pe, 11u, "MIPFILTER（不认识的值）", value);
+                recordUnsupported(cpu, pe, kUnMipFilter, "MIPFILTER（不认识的值）", value);
             }
             break;
         case kSampMaxMipLevel:
         case kSampMaxAnisotropy:
             break;
         default:
-            recordUnsupported(cpu, pe, 12u, "其它 sampler state", type);
+            recordUnsupported(cpu, pe, kUnSamplerState, "其它 sampler state", type);
             break;
     }
     plSet(cpu, pe, kPlSamplers + (stage * 16u + type) * 4u, value);
@@ -2671,14 +2967,14 @@ std::uint32_t setTextureStageState(X86& cpu, std::uint32_t dev, std::uint32_t st
         }
         if (value > kTopMultiplyAdd && value != kTopLerp && value != kTopModulateAlphaAddColor &&
             value != kTopModulateColorAddAlpha) {
-            recordUnsupported(cpu, pe, 13u, "D3DTOP", value);
+            recordUnsupported(cpu, pe, kUnTextureOp, "D3DTOP", value);
         }
     }
     if (type == kTssTextureTransformFlags && value != 0u) {
-        recordUnsupported(cpu, pe, 14u, "D3DTSS_TEXTURETRANSFORMFLAGS（本线不做纹理坐标变换）", value);
+        recordUnsupported(cpu, pe, kUnTextureTransform, "D3DTSS_TEXTURETRANSFORMFLAGS（本线不做纹理坐标变换）", value);
     }
     if (type == kTssTexCoordIndex && (value & 0x10000u) != 0u) {
-        recordUnsupported(cpu, pe, 15u, "D3DTSS_TEXCOORDINDEX 的相机空间生成标志", value);
+        recordUnsupported(cpu, pe, kUnTexCoordIndex, "D3DTSS_TEXCOORDINDEX 的相机空间生成标志", value);
     }
     plSet(cpu, pe, kPlTexStages + (stage * kPlTexStageTypes + type) * 4u, value);
     return kOk;
@@ -3006,6 +3302,22 @@ std::uint32_t validateDevice(X86& cpu, std::uint32_t dev, std::uint32_t passes_e
     std::uint32_t pe = 0;
     if (!pipelineOf(cpu, dev, &pe, why)) return kInvalidCall;
     if (!committed(cpu, passes_ea, 4u, "ValidateDevice 的 pNumPasses", why)) return kInvalidCall;
+    // ★ 恒 `S_OK, 1 pass`（`REQ-01M79PP9H5XZRWFJD4BGS19S54` 已裁决的**声明**，⛔ 不是"没实现"）：
+    //   依据 = 本线**没有多 pass 装备**（无 `Begin/End` 之外的分遍、无 shader、无多纹理级链重放）
+    //   ⇒ 任何状态组合在"能给几遍"这个问题上都只能答 1。
+    // ★ ValidateDevice 问的是**当前状态组合**能否被设备渲染 / 需要几遍，**与这条 draw 合不合法无关**
+    //   （`BeginScene` / FVF / 流绑定不属它）⇒ ⛔ 不复用 `drawPrecheck` / `gpuEligible`：
+    //   那会把"状态没问题但还没 `SetFVF`"的调用拒掉（真机不会），而今天 `gpuEligible` 拒绝的组合
+    //   仍有 CPU 兜底**真的能画** ⇒ 挂在它上面会对真机说谎。
+    // ★ **何时必须翻面**（把上面那条声明改成真校验）：**CPU 兜底删除
+    //   （`REQ-01M78BF1FNNH6K8N8GEY6GQYXX` 落地）且需要覆盖"设备状态组合不能用"时**才翻面。
+    //   翻面形态 = 复用 `gpuEligible` 的**状态侧**判据（⛔ 不含 FVF / 流 / BeginScene），
+    //   不通过时按 `D3DERR_CONFLICTINGRENDERSTATE` 拒绝并**不写** `pNumPasses`。
+    //   ★ 引擎无 `.lst` 站点（本线没有调用点消费这个答案）⇒ **恒 1 pass 不阻塞**。
+    //   ★ RTT 落地（`REQ-01M79MSMWGFEKF8J7C7VYWS4YP`）**不是**翻面条件：RTT/sprite→RT 已落地，
+    //     与"当前状态组合能否渲染"正交，恒 1 pass 仍与事实一致。
+    //   ⛔ 本轮不 `recordUnsupported`：这不是未实现的能力，是一条事实声明
+    //   （未置 bit27；`enum UnsupportedBit` 里那格只是预留）。
     wrU32(cpu, passes_ea, 1u);  // 本线的状态组合一律单 pass
     return kOk;
 }
@@ -3881,11 +4193,14 @@ bool prepareContext(X86& cpu, const char* what, std::uint32_t dev, std::uint32_t
     if (!requireMachine(cpu, &m, why)) return false;
     DeviceInfo dev_info;
     if (!deviceInfoOfState(cpu, dev, &dev_info, why)) return false;
-    const std::uint32_t color_arena = plGet(cpu, pe, kPlColorArena);
-    GuestSurface* gs = m->surfaces().find(color_arena != 0 ? color_arena : dev_info.arena);
+    // ★ 颜色目标走**唯一一份**判据（`colorTargetOfState`）—— D3DXSprite 的 End/Flush 合成也用
+    //   同一个函数（`d3dx9_sprite.cpp` 的 `compositeBatch`）⇒ 两者不会对"目标是谁"有分歧。
+    ColorTarget target;
+    if (!colorTargetOfState(cpu, pe, &target, why)) return false;
+    GuestSurface* gs = m->surfaces().find(target.arena != 0 ? target.arena : dev_info.arena);
     if (!gs) {
-        if (why) *why = color_arena != 0 ? "D3D9 流水线：渲染目标像素不在 arena 里"
-                                         : "D3D9 流水线：后缓冲像素不在 arena 里";
+        if (why) *why = target.arena != 0 ? "D3D9 流水线：渲染目标像素不在 arena 里"
+                                          : "D3D9 流水线：后缓冲像素不在 arena 里";
         return false;
     }
     const std::uint32_t depth = plGet(cpu, pe, kPlDepthArena);
@@ -3904,7 +4219,12 @@ bool prepareContext(X86& cpu, const char* what, std::uint32_t dev, std::uint32_t
     ctx->color_width = gs->width;
     ctx->color_height = gs->height;
     ctx->color_pitch = gs->pitch;
-    ctx->color_surface = plGet(cpu, pe, kPlColorSurface);
+    ctx->color_surface = target.surface;
+    // ★ 纹理 RT 的身份 + Usage：本批的渲染目标是不是一张纹理表面、以及那条纹理的 `D3DUSAGE_*`。
+    //   ⛔ 只读、只记账（准入用）；判据在 `colorTargetOfState` 里（与 `setRenderTarget` 的
+    //   `is_texture_surface` 同源：`textureInfoOfState` 的 `'TEX1'` magic）。
+    ctx->color_is_texture = target.is_texture;
+    ctx->color_usage = target.usage;
     ctx->depth_base = reinterpret_cast<float*>(m->surfaces().pixels(*dgs));
     ctx->depth_pitch_floats = dgs->pitch / 4u;
     ctx->depth_width = dgs->width;
@@ -4142,7 +4462,7 @@ bool admitLinePointDraw(X86& cpu, std::uint32_t pe, const DrawContext& ctx, std:
             char buf[224];
             std::snprintf(buf, sizeof(buf),
                           "点/线只做无纹理光栅：级 %u 绑定了纹理 ⇒ COLOROP/ALPHAOP 需要采样", s);
-            recordUnsupported(cpu, pe, 16u, buf, s);
+            recordUnsupported(cpu, pe, kUnLinePointTextured, buf, s);
             pipeWarn(PipeWarnCategory::Other, "点/线光栅", "%s", buf);
             if (why) *why = buf;
             return false;
@@ -4152,7 +4472,7 @@ bool admitLinePointDraw(X86& cpu, std::uint32_t pe, const DrawContext& ctx, std:
             std::snprintf(buf, sizeof(buf),
                           "点/线只做顶点色：级 %u 的 COLOROP=%u arg=%u/%u 需要纹理采样（无纹理时也不等于顶点色）",
                           s, ts.color_op, ts.color_arg1, ts.color_arg2);
-            recordUnsupported(cpu, pe, 16u, buf, s);
+            recordUnsupported(cpu, pe, kUnLinePointTextured, buf, s);
             pipeWarn(PipeWarnCategory::Other, "点/线光栅", "%s", buf);
             if (why) *why = buf;
             return false;
@@ -4162,7 +4482,7 @@ bool admitLinePointDraw(X86& cpu, std::uint32_t pe, const DrawContext& ctx, std:
             std::snprintf(buf, sizeof(buf),
                           "点/线只做顶点色：级 %u 的 ALPHAOP=%u arg=%u/%u 需要纹理采样（无纹理时也不等于顶点色）",
                           s, ts.alpha_op, ts.alpha_arg1, ts.alpha_arg2);
-            recordUnsupported(cpu, pe, 16u, buf, s);
+            recordUnsupported(cpu, pe, kUnLinePointTextured, buf, s);
             pipeWarn(PipeWarnCategory::Other, "点/线光栅", "%s", buf);
             if (why) *why = buf;
             return false;
@@ -4171,61 +4491,104 @@ bool admitLinePointDraw(X86& cpu, std::uint32_t pe, const DrawContext& ctx, std:
     return true;
 }
 
-// ★ 覆盖边界**默认级别可见**的一行（只打一次）：`LineCaps` 是 `d3d9.cpp` 的声明，本单不改那个
-//   文件 ⇒ 必须在日志里说清"哪些位名副其实"。用 `logAt` 而不是 `pipeWarn`：这不是一次"拒绝"，
-//   ⛔ 不进 `pipe-warn` 的分类计数（那份计数被 `tests/d3d9_pipeline.cpp` 的用例盯着）。
+// ★ 覆盖边界**默认级别可见**的一行（只打一次）：`LineCaps` 的声明现在与行为对齐
+//   （`d3d9.h` 的 `kCapsLineClaim` = 0x0E：只声明 ZTEST|BLEND|ALPHACMP）。用 `logAt` 而不是
+//   `pipeWarn`：这不是一次"拒绝"，⛔ 不进 `pipe-warn` 的分类计数（那份计数被
+//   `tests/d3d9_pipeline.cpp` 的用例盯着）。
 void noteLinePointCapsOnce() {
     static bool noted = false;
     if (noted) return;
     noted = true;
     logAt(LogLevel::Warn, LogD3d9, "[d3d9] 点/线: ",
-          "LineCaps=0x1F 是 d3d9.cpp 的 fillCaps(kCapsLineCaps) **声明**（本单不许改那个文件）；"
+          "LineCaps 声明 ZTEST|BLEND|ALPHACMP(0x0E)（d3d9.h 的 kCapsLineClaim）；TEXTURE/FOG 未声明。"
           "引擎实测只读 caps 的 MaxTextureWidth/Height（0x499128/0x49912E）⇒ LineCaps 不是引擎判据。"
-          "本线**名副其实**的位只有 ZTEST|BLEND|ALPHACMP(0x0E)：1px 无纹理点/线（顶点色 + z 插值，"
-          "深度/alpha test/混合/写掩码与三角形同一份）；TEXTURE(0x01) 的点/线**响亮拒绝**"
-          "（D3DERR_INVALIDCALL + recordUnsupported bit16）；FOG(0x10) 全局未做；"
-          "点尺寸（POINTSIZE/POINTSCALE/POINTSPRITE）未实现 ⇒ 点按 1px 并记账（bit19）。");
+          "本线做的是 1px 无纹理点/线（顶点色 + z 插值，深度/alpha test/混合/写掩码与三角形同一份）；"
+          "**点/线在 GPU 上走\"展开成三角形\"**（点 = 1px quad，线 = 每秒 1px 宽的 quad ⇒ 2 个三角形；"
+          "不受 CULLMODE 影响），与三角形共用同一条顶点/混合/深度/stage 路径；"
+          "带纹理的点/线**响亮拒绝**（D3DERR_INVALIDCALL + recordUnsupported bit16）；"
+          "雾全局未做；点尺寸（POINTSIZE/POINTSCALE/POINTSPRITE）未实现 ⇒ 点按 1px 并记账（bit19）。");
 }
 
 // ★ 准入条件精确到"能等价表达"的状态；其余全部**显式回退**（reason 会进 fallback 账本）。
 //   覆盖的 draw 类别（TITLE 的全屏渐变四边形就在里面）：
-//     32bpp 默认后缓冲、GOURAUD、无 alpha test、完整/部分 color write、
+//     32bpp **纹理或后缓冲**目标、GOURAUD、无 alpha test、完整/部分 color write、
 //     任意可在 SDL_GPU 表达的 blend（含 separate alpha，TITLE = color 5/6 + alpha 2/6）、
 //     stage 0 单级纹理（32bpp；SELECTARG1/MODULATE 的 TEXTURE/DIFFUSE 组合）、
 //     sampler = POINT/LINEAR × WRAP/CLAMP/MIRROR、纹理坐标取 stage 0 的 TEXCOORDINDEX。
-bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why) {
+// ★ RTT（`REQ-01M79MSMWGFEKF8J7C7VYWS4YP`，2026-11-13）：渲染目标是**纹理表面**时也放行 ——
+//   目标绑定 / 读回 / 屏障在下游早已按 guest 像素基址做好（见 `gpu_raster.h` 的
+//   `rasterTargetBase` 与 `d3d9.cpp` 的 `getRenderTargetData` / `lockRect` 屏障）。
+//   解禁配**两条新闸**（本线表达不了的组合 ⇒ 响亮拒绝 + 记账，⛔ 不静默）：
+//     ① **反馈环**：同一批把这张 RT 纹理当采样源 ⇒ 拒（本后端采样走 GPU 纹理缓存，
+//        同一批里读到的是**本批之前**的内容 ⇒ 静默出旧像素）；
+//     ② **Usage 只记账**：纹理缺 `D3DUSAGE_RENDERTARGET` ⇒ **放行** + 一行 warn
+//        （引擎真值未取证，⛔ 不在本单新增一条静默回退；D3D9 本身会拒，本线不据此判死）。
+//   ★ ⛔ 不另立"目标必须是纹理"这条闸：`setRenderTarget` 只让**纹理 level 0 / 后缓冲表面**绑上
+//     （后缓冲表面还会被规范化成 `color_surface == 0`），离屏 plain surface 绑不进来 ⇒
+//     这条闸永远为假、只是死代码。`color_is_texture` 因此只用来决定"要不要读 Usage 做那条 warn"。
+bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why, UnsupportedBit* skip_bit) {
+    // ★ 每个拒批点都**指名一个位**（29..40）：`submitPrimitives` 末尾按这位 + `why` 记 `skipped`。
+    //   ⛔ 不许再出现"返回 false 但不说是哪一类"的裸拒绝 —— 那正是设计 §A.3 的盲区。
+    const auto deny = [&](UnsupportedBit bit) {
+        if (skip_bit) *skip_bit = bit;
+        return false;
+    };
     if (plan == nullptr) {
         if (why) *why = "GPU 准入：plan 为空";
-        return false;
+        return deny(kUnGpuNoBackend);
     }
     if (ctx.gpu == nullptr || !ctx.gpu->rasterActive()) {
-        if (why) *why = "没有 GPU 光栅化后端（raster=cpu 或 GPU 设备创建失败）";
-        return false;
+        if (why) *why = "没有 GPU 光栅化后端（本进程没装 GpuRaster：只可能是单元测试夹具）";
+        return deny(kUnGpuNoBackend);
     }
+    // ★ 修前这里是 `if (ctx.color_surface != 0) return false;`（"GPU 只支持默认后缓冲"）。
+    //   变异的 `from` 就取下面这一行（改回无条件拒 ⇒ `d3d9p/render-to-texture` 当场红）。
     if (ctx.color_surface != 0) {
-        if (why) *why = "GPU 只支持默认后缓冲（当前渲染目标是 IDirect3DSurface9）";
-        return false;
+        // ① 反馈环：同批把 RT 当采样纹理 ⇒ 拒 + 记账（bit26 是这条闸专用的未占用位）。
+        for (std::uint32_t s = 0; s < kMaxTextureStages; ++s) {
+            const bool rt_sampled = ctx.textures[s].present && ctx.color_base != nullptr &&
+                                    ctx.textures[s].pixels == ctx.color_base;
+            if (rt_sampled) {
+                char buf[256];
+                std::snprintf(buf, sizeof(buf),
+                              "纹理当渲染目标的同时在 stage %u 被采样（同一批）：GPU 采样读的是上传缓存，"
+                              "读不到本批刚画的像素 ⇒ 不接受该批",
+                              s);
+                if (ctx.cpu != nullptr) recordUnsupported(*ctx.cpu, ctx.pe, kUnRtFeedbackLoop, buf, s);
+                pipeWarn(PipeWarnCategory::Other, "渲染到纹理", "%s", buf);
+                if (why) *why = buf;
+                return deny(kUnRtFeedbackLoop);
+            }
+        }
+        // ② Usage 只记账（放行）：引擎给 RT 纹理传的 Usage 未取证，⛔ 不据此回退。
+        //   ★ 取不到纹理状态块（`color_is_texture == false`）⇒ 没有 Usage 可读，跳过这条 warn。
+        if (ctx.color_is_texture && (ctx.color_usage & 0x1u) == 0u) {
+            pipeWarn(PipeWarnCategory::Other, "渲染到纹理",
+                     "目标纹理 Usage=0x%X 没有 D3DUSAGE_RENDERTARGET(0x1) ⇒ **仍放行**"
+                     "（D3D9 会拒；本线不据此回退，⛔ 不新增静默回退）",
+                     ctx.color_usage);
+        }
     }
     if (ctx.color_fmt.bpp != 32) {
         char buf[96];
         std::snprintf(buf, sizeof(buf), "GPU 只支持 32bpp 后缓冲（当前 %u bpp）",
                       static_cast<unsigned>(ctx.color_fmt.bpp));
         if (why) *why = buf;
-        return false;
+        return deny(kUnGpuTargetBpp);
     }
     if (ctx.alpha_test) {
         if (why) *why = "GPU 不支持 alpha test（ALPHATESTENABLE=1）";
-        return false;
+        return deny(kUnGpuAlphaTest);
     }
     if (ctx.shade != kShadeGouraud) {
         if (why) *why = "GPU 只支持 GOURAUD 着色（FLAT 会改变 provoking vertex 语义）";
-        return false;
+        return deny(kUnGpuShadeFlat);
     }
     if ((ctx.color_write & ~0xFu) != 0) {
         char buf[112];
         std::snprintf(buf, sizeof(buf), "GPU 不认识的 color write mask 0x%X", ctx.color_write);
         if (why) *why = buf;
-        return false;
+        return deny(kUnGpuColorWrite);
     }
     // ---- 纹理级：只接受 stage 0；其余级必须 DISABLE；不允许 stage 1.. 的纹理 ----
     for (std::uint32_t s = 1; s < kMaxTextureStages; ++s) {
@@ -4233,13 +4596,13 @@ bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why) {
             char buf[112];
             std::snprintf(buf, sizeof(buf), "GPU 只支持 stage 0 单级纹理（stage %u 绑定了纹理）", s);
             if (why) *why = buf;
-            return false;
+            return deny(kUnGpuMultiStage);
         }
         if (ctx.stages[s].color_op != kTopDisable || ctx.stages[s].alpha_op != kTopDisable) {
             char buf[144];
             std::snprintf(buf, sizeof(buf), "GPU 只支持 stage 0（stage %u 的 color/alpha op 未 DISABLE）", s);
             if (why) *why = buf;
-            return false;
+            return deny(kUnGpuMultiStage);
         }
     }
     GpuBatchPlan p;
@@ -4260,7 +4623,7 @@ bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why) {
     // ---- 混合（color + separate alpha；映射失败 ⇒ 回退，⛔ 不近似）----
     if (!gpuBlendStateFor(ctx.src_blend, ctx.dst_blend, ctx.blend_op, ctx.separate_alpha_blend, ctx.src_blend_a,
                           ctx.dst_blend_a, ctx.blend_op_a, ctx.blend, &p.state, why)) {
-        return false;
+        return deny(kUnGpuBlendMap);
     }
     // ---- stage 0 ----
     const TextureView& tv = ctx.textures[0];
@@ -4274,7 +4637,7 @@ bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why) {
         bool from_tfactor = false;
         if (!gpuTextureModeFor(ts.color_op, ts.color_arg1, ts.color_arg2, ts.alpha_op, ts.alpha_arg1,
                                ts.alpha_arg2, true, coord, &p.state.tex_mode, &from_tfactor, why)) {
-            return false;
+            return deny(kUnGpuTexMode);
         }
         p.tex_color_from_tfactor = from_tfactor;
         if (tv.format.bpp != 32) {
@@ -4282,11 +4645,13 @@ bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why) {
             std::snprintf(buf, sizeof(buf), "GPU 只支持 32bpp 纹理（stage 0 是 %u bpp）",
                           static_cast<unsigned>(tv.format.bpp));
             if (why) *why = buf;
-            return false;
+            return deny(kUnGpuTextureBpp);
         }
+        // ★ 像素/尺寸非法与"非 32bpp"同属"这张纹理 GPU 用不了"（生产不可达：CreateTexture 会先拒），
+        //   共用 bit36 —— 原因文本仍然分开进 `skipped top`。
         if (tv.width <= 0 || tv.height <= 0 || tv.pixels == nullptr) {
             if (why) *why = "GPU 准入：stage 0 纹理的像素/尺寸非法";
-            return false;
+            return deny(kUnGpuTextureBpp);
         }
         if (!gpuAddressFor(ss.address_u, &p.texture.sampler.address_u) ||
             !gpuAddressFor(ss.address_v, &p.texture.sampler.address_v)) {
@@ -4294,11 +4659,11 @@ bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why) {
             std::snprintf(buf, sizeof(buf), "GPU 不支持该采样器寻址模式（U=%u V=%u；只支持 WRAP/CLAMP/MIRROR）",
                           ss.address_u, ss.address_v);
             if (why) *why = buf;
-            return false;
+            return deny(kUnGpuSamplerAddr);
         }
         // ★ CPU 参考把两个过滤**合成一条**决策（`samplerUsesLinear`：任一 LINEAR ⇒ 双线性），
         //   而 SDL_GPU 的 sampler 把 MAG / MIN **分开存、分开用** ⇒ `MAG=POINT + MIN=LINEAR`
-        //   这种组合两边都"成功"、整批像素却不同，且 `--gpu-strict` 看不见（它不是 fallback）。
+        //   这种组合两边都"成功"、整批像素却不同，且 fallback 账看不见（它不是 fallback）。
         //   按 `docs/00-origin/decisions.md` §8.1（CPU=oracle / GPU=product）：**要么一致，要么
         //   不接受该批** ⇒ 这里只放行 `MAG == MIN`，其余显式回退并记账。
         //   ⛔ 不去改 CPU 的采样决策（那是另一条单的内容）。
@@ -4308,7 +4673,7 @@ bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why) {
                           "GPU 采样要求 MAG==MIN（CPU 参考按任一 LINEAR 取双线性；当前 MAG=%u MIN=%u）",
                           ss.mag_filter, ss.min_filter);
             if (why) *why = buf;
-            return false;
+            return deny(kUnGpuFilterSplit);
         }
         if (!gpuFilterFor(ss.mag_filter, &p.texture.sampler.mag_filter) ||
             !gpuFilterFor(ss.min_filter, &p.texture.sampler.min_filter)) {
@@ -4316,7 +4681,8 @@ bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why) {
             std::snprintf(buf, sizeof(buf), "GPU 不支持该采样过滤（MAG=%u MIN=%u）", ss.mag_filter,
                           ss.min_filter);
             if (why) *why = buf;
-            return false;
+            // ★ 过滤值映射失败与 MAG!=MIN 同属"过滤表达不了"，共用 bit38（原因文本分开）。
+            return deny(kUnGpuFilterSplit);
         }
         p.textured = true;
         p.texture.pixels = tv.pixels;
@@ -4346,7 +4712,7 @@ bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why) {
                           ts.color_op, ts.color_arg1, ts.color_arg2, ts.alpha_op, ts.alpha_arg1,
                           ts.alpha_arg2);
             if (why) *why = buf;
-            return false;
+            return deny(kUnGpuUntexturedOp);
         }
     }
     *plan = p;
@@ -4370,24 +4736,37 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
     // 顶点已经是**变换后**的 CVertex（由调用方喂），这里只做裁剪 + 屏幕映射 + 光栅
     std::uint32_t triangles = 0;
     std::uint32_t rasterized = 0;
-    // ★ `--raster cpu`（ctx.gpu == nullptr）是**显式参考后端**：⛔ 不计 fallback、⛔ 不打印
-    //   `[gpu] fallback`。只有 GPU 已启用、本批因能力/后端失败而回退 CPU 时才记账。
+    // ★ CPU 像素路径**仍在**，但只有两处可达（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX` 的**后半**，待删）：
+    //   ① `ctx.gpu == nullptr` = 单元测试夹具没装 `GpuRaster`（`tests/d3d9*.cpp` 的逐像素断言）；
+    //      ★ CLI 已经没有"选 CPU 后端"的入口（无 GPU ⇒ 启动期拒绝启动）⇒ 生产路径到不了这里。
+    //   ② GPU 已启用、但本批被 `gpuEligible` 拒（能力不足）或后端失败 ⇒ 回退 CPU 像素 + 记 fallback。
+    //   ⇒ 这就是**待删的测试 oracle + 残留回退**；删它要先把 4 个 d3d9* 用例迁到 GPU/账本断言
+    //     （独立一单）。⛔ 不要因为"删了这里测试红"就把断言放宽。
     const bool have_gpu_backend = ctx.gpu != nullptr && ctx.gpu->rasterActive();
-    // ★ 点 / 线**只走 CPU 软光栅**（GPU 后端只覆盖三角形；`gpuEligible` 的判据本身不改）。
-    //   ⇒ 显式 `gpu_ok=false` + 一句精确 reason：GPU 已启用时账本会记一次 fallback，
-    //   ⛔ 不会把"点/线没在 GPU 上画"藏成"画了 0 个三角形"。
-    //   ★ `--gpu-strict` 下这会让真实 boot 在引擎画线时 exit 3（诚实：GPU 确实没有线覆盖）。
-    //   ★ 下面的 `!gpu_ok && have_gpu_backend && rasterDirty()` 同步**照常**发生：更早的 GPU
-    //     批必须先落回 guest，否则 Present 读回时会盖掉 CPU 刚写出的线像素。
+    // ★ 点 / 线（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：**GPU 也画** —— 展开成三角形（点 = 1px quad，
+    //   线 = 每秒 1px 宽的 quad ⇒ 2 个三角形），走与三角形同一份顶点 / 混合 / 深度 / stage 路径。
+    //   ⇒ 不再有"点/线只走 CPU"这条旁路。
+    //   状态准入（`admitLinePointDraw`：需要纹理采样的点/线**响亮拒绝**）必须在 GPU 准入**之前**做，
+    //   否则这批会先进 GPU 队列、再在 switch 里被拒（半批入队 = 账对不上）。
     const bool line_or_point = prim == kPtPointList || prim == kPtLineList || prim == kPtLineStrip;
+    if (line_or_point) {
+        // ★ 覆盖边界先声明（默认级别可见、只打一次）：即使这批被拒绝，也要让人看到本线真的做了什么。
+        noteLinePointCapsOnce();
+        std::string lp_why;
+        if (!admitLinePointDraw(cpu, pe, ctx, &lp_why)) {
+            if (why) *why = lp_why;
+            // ★ 本单：这也是"GPU 没画"的一种（以前 CPU 也不画 ⇒ 连 fallback 都没有）。
+            if (have_gpu_backend) noteGpuSkip(cpu, pe, lp_why, kUnLinePointTextured);
+            return false;
+        }
+    }
     GpuBatchPlan plan;
     std::string gpu_why;
+    // ★ 本单：`gpuEligible` 拒批时**指名**是哪一类（29..40）。默认值只在"根本没后端"时用得上
+    //   （生产不可能：无 GPU 拒绝启动）。
+    UnsupportedBit gpu_skip_bit = kUnGpuNoBackend;
     bool gpu_ok = false;
-    if (line_or_point) {
-        gpu_why = "点/线图元只走 CPU 软光栅（GPU 后端只覆盖三角形）";
-    } else if (have_gpu_backend) {
-        gpu_ok = gpuEligible(ctx, &plan, &gpu_why);
-    }
+    if (have_gpu_backend) gpu_ok = gpuEligible(ctx, &plan, &gpu_why, &gpu_skip_bit);
     if (!gpu_ok && have_gpu_backend && ctx.gpu->rasterDirty()) {
         // 上一批走 GPU、这一批要回 CPU：先把 GPU 像素落回 guest，CPU 才能接着画。
         std::string sync_err;
@@ -4400,6 +4779,8 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
     };
     std::vector<SavedTri> saved_tris;
     g_alpha_agg = AlphaAgg{};  // ★ 诊断：本批的混合 α 聚合（见 `[draw] fa=`）
+    g_gpu_alpha_agg = AlphaAgg{};
+    g_alpha_agg_from_gpu = false;
     GpuRaster* gpu = gpu_ok ? ctx.gpu : nullptr;
     // 纹理坐标按 **stage 0 的 D3DTSS_TEXCOORDINDEX** 取（⛔ 不硬编码 TEXCOORD0）
     const std::uint32_t gpu_tex_coord = plan.textured ? (ctx.stages[0].tex_coord_index & 0xFFFFu) : 0u;
@@ -4414,13 +4795,18 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
         tf_a = static_cast<float>(ta / 255.0);
     }
 
+    // ★ 点 / 线展开出来的 quad **不受 CULLMODE 影响**：D3D9 的剔除只作用于三角形图元，
+    //   `DrawPrimitive(POINTLIST/LINELIST/LINESTRIP)` 没有"面"可剔。带上剔除会让一半朝向的线消失。
+    bool no_cull = false;
     auto push_tri = [&](const SVertex& a, const SVertex& b, const SVertex& c) {
         const double area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
         if (!finite(area) || std::fabs(area) < 1e-12) return;
-        if (area > 0.0) {
-            if (ctx.cull == kCullCw) return;
-        } else if (ctx.cull == kCullCcw) {
-            return;
+        if (!no_cull) {
+            if (area > 0.0) {
+                if (ctx.cull == kCullCw) return;
+            } else if (ctx.cull == kCullCcw) {
+                return;
+            }
         }
         if (gpu == nullptr) {
             rasterTriangle(ctx, a, b, c);
@@ -4474,6 +4860,84 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
         for (std::uint32_t i = 1; i + 1 < n; ++i) push_tri(sv[0], sv[i], sv[i + 1]);
     };
     const std::uint32_t n = static_cast<std::uint32_t>(verts.size());
+    // =====================================================================================
+    // 点 / 线 → 三角形展开（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）
+    //
+    // ★ 范围：**真的交给 GPU 的批**走这里（展开后的顶点 / 三角形与普通三角形同一个 `push_tri`
+    //   入口）；其余（没装 GpuRaster 的测试夹具 / 准入被拒的批）仍走既有的 `rasterizePoint` /
+    //   `rasterizeLineSegment` —— 那是**待删的测试 oracle**（同 `submitPrimitives` 顶部注释），
+    //   ⛔ 不在本批改它的像素规则（会连累它的像素守卫）。
+    //
+    // ★ 为什么展开而不是给后端加"画线"接口：本线的 GPU 后端只认屏幕空间三角形（SDL_GPU 也是），
+    //   展开后点/线自动继承**同一个**流水线管线：blend / separate-alpha / 深度测试 / 写掩码 /
+    //   viewport / scissor / stage 0 的 TFACTOR 替换。⛔ 不给线另建一条光栅路径（那就是第二实现）。
+    // ★ 像素口径（与 CPU 侧的观察对齐，⛔ 不做 diamond-exit）：
+    //   · 点 = 1px quad：`floor(x), floor(y)` 那一格（与 `rasterizePoint` 同一像素）；
+    //   · 线 = 每秒 1px 宽的 quad（2 个三角形）：端点先**对齐到像素中心格**（`floor(c)+0.5`），
+    //     这样轴线水平/竖直时 quad 的边界落在整数格线上、像素中心（`+0.5`）严格在内部 ⇒
+    //     不会因为"中心恰好压边"出现空行（实测：不对齐时 1px 线可能一行都不画）。
+    //     代价 = 端点最多偏 0.5px（可见性判据不要求像素级一致）。
+    //   · 退化线段（两端同点）= 一个 1px 点（与 CPU 的退化分支同口径）。
+    // ★ 宽度常量 `kExpandedLineHalfWidth` 是**变异锚点**：写成 0 ⇒ 所有线 quad 退化 ⇒
+    //   `gpu-batch/lines-points` 当场红（线一个像素都没有）。
+    // =====================================================================================
+    constexpr double kExpandedLineHalfWidth = 0.5;  // 1px 宽 ⇒ 半宽 0.5px
+    auto expanded_quad = [&](const SVertex& v0, const SVertex& v1, const SVertex& v2, const SVertex& v3) {
+        // 点/线没有"面"可剔 ⇒ 展开出来的两个三角形**绕过 CULLMODE**（否则一半朝向的线会消失）。
+        const bool saved = no_cull;
+        no_cull = true;
+        push_tri(v0, v1, v2);
+        push_tri(v0, v2, v3);
+        no_cull = saved;
+    };
+    auto expand_point = [&](const CVertex& cv) {
+        if (!clipPointVertex(ctx, cv)) return;
+        SVertex sv;
+        if (!toScreen(cv, ctx, &sv)) return;
+        const double x0 = std::floor(sv.x);
+        const double y0 = std::floor(sv.y);
+        SVertex p0 = sv, p1 = sv, p2 = sv, p3 = sv;
+        p0.x = x0;       p0.y = y0;
+        p1.x = x0 + 1.0; p1.y = y0;
+        p2.x = x0 + 1.0; p2.y = y0 + 1.0;
+        p3.x = x0;       p3.y = y0 + 1.0;
+        expanded_quad(p0, p1, p2, p3);
+    };
+    auto expand_line = [&](const CVertex& ca, const CVertex& cb) {
+        CVertex a, b;
+        if (!clipSegmentEndpoints(ctx, ca, cb, &a, &b)) return;
+        SVertex sa, sb;
+        if (!toScreen(a, ctx, &sa) || !toScreen(b, ctx, &sb)) return;
+        // 对齐到像素中心格（见上面的口径）。
+        sa.x = std::floor(sa.x) + 0.5;
+        sa.y = std::floor(sa.y) + 0.5;
+        sb.x = std::floor(sb.x) + 0.5;
+        sb.y = std::floor(sb.y) + 0.5;
+        const double dx = sb.x - sa.x;
+        const double dy = sb.y - sa.y;
+        const double len = std::sqrt(dx * dx + dy * dy);
+        if (!(len > 1e-12)) {
+            // 退化线段 ⇒ 单像素（与 CPU 的退化分支同口径：取裁剪后起点）
+            SVertex p0 = sa, p1 = sa, p2 = sa, p3 = sa;
+            const double x0 = sa.x - 0.5;
+            const double y0 = sa.y - 0.5;
+            p0.x = x0;       p0.y = y0;
+            p1.x = x0 + 1.0; p1.y = y0;
+            p2.x = x0 + 1.0; p2.y = y0 + 1.0;
+            p3.x = x0;       p3.y = y0 + 1.0;
+            expanded_quad(p0, p1, p2, p3);
+            return;
+        }
+        // 法向 = 方向的垂直方向 × 半宽 ⇒ 每秒一条 1px 宽的带子。
+        const double nx = -dy / len * kExpandedLineHalfWidth;
+        const double ny = dx / len * kExpandedLineHalfWidth;
+        SVertex a0 = sa, a1 = sa, b0 = sb, b1 = sb;
+        a0.x = sa.x - nx; a0.y = sa.y - ny;
+        a1.x = sa.x + nx; a1.y = sa.y + ny;
+        b0.x = sb.x - nx; b0.y = sb.y - ny;
+        b1.x = sb.x + nx; b1.y = sb.y + ny;
+        expanded_quad(a0, b0, b1, a1);
+    };
     switch (prim) {
         case kPtTriangleList:
             for (std::uint32_t i = 0; i + 2 < n; i += 3) emit(verts[i], verts[i + 1], verts[i + 2]);
@@ -4490,16 +4954,8 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
         case kPtPointList:
         case kPtLineList:
         case kPtLineStrip: {
-            // ★ 覆盖边界先声明（默认级别可见、只打一次）：即使这批被拒绝，也要让人看到
-            //   "LineCaps 的哪些位本线真的做了"。
-            noteLinePointCapsOnce();
-            // ★ 再抛状态准入：需要纹理采样的点 / 线**响亮拒绝**（⛔ 不画成纯色糊过去）。
-            //   `why` 由 Draw 侧变成 `D3DERR_INVALIDCALL`；`recordUnsupported(bit16)` 已记账。
-            std::string lp_why;
-            if (!admitLinePointDraw(cpu, pe, ctx, &lp_why)) {
-                if (why) *why = lp_why;
-                return false;
-            }
+            // ★ `noteLinePointCapsOnce()` 与 `admitLinePointDraw()` 已在 `gpuEligible` **之前**跑过
+            //   （见 `line_or_point` 那一段）：点 / 线现在与三角形同一条准入 + 同一条光栅路径。
             if (prim == kPtPointList) {
                 // ★ 点尺寸（POINTSIZE / POINTSCALE / POINTSPRITE / FVF PSIZE）**未实现** ⇒ 1px + 记账。
                 //   状态值 0 = 从没 Set 过（D3D 默认 POINTSIZE=1.0f）；只要被显式设置过就记账，
@@ -4517,26 +4973,37 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
                                   "未实现 ⇒ 点按 1px 画",
                                   static_cast<double>(psize), point_scale, point_sprite,
                                   (ctx.fvf & kFvfPSize) != 0u ? 1 : 0);
-                    recordUnsupported(cpu, pe, 19u, buf, psize_bits);
+                    recordUnsupported(cpu, pe, kUnPointSize, buf, psize_bits);
                 }
-                for (std::uint32_t i = 0; i < n; ++i) rasterizePoint(ctx, verts[i]);
+                for (std::uint32_t i = 0; i < n; ++i) {
+                    // ★ 判据是"这一批**真的**交给 GPU 了吗"（`gpu != nullptr`），⛔ 不是"有没有后端"：
+                    //   准入被拒的批仍走 CPU 的既有 1px 点（测试 oracle 的既有像素规则）；
+                    //   进 GPU 的批才展开成 quad。
+                    if (gpu == nullptr) rasterizePoint(ctx, verts[i]);
+                    else expand_point(verts[i]);
+                }
             } else {
                 // LASTPIXEL=0（真机不画最后一像素）：本线仍画 ⇒ 记账，⛔ 不静默。
                 if (rsOf(cpu, pe, kRsLastPixel) == 0u)
-                    recordUnsupported(cpu, pe, 20u, "D3DRS_LASTPIXEL=0（本线仍画每段最后一像素）", 0u);
+                    recordUnsupported(cpu, pe, kUnLastPixel, "D3DRS_LASTPIXEL=0（本线仍画每段最后一像素）", 0u);
                 if (prim == kPtLineList) {
                     if ((n & 1u) != 0u)
                         pipeLog("点/线", "LINELIST 顶点数为奇数（%u）⇒ 丢掉末尾 1 个顶点", n);
-                    for (std::uint32_t i = 0; i + 1u < n; i += 2u)
-                        rasterizeLineSegment(ctx, verts[i], verts[i + 1u]);
+                    for (std::uint32_t i = 0; i + 1u < n; i += 2u) {
+                        if (gpu == nullptr) rasterizeLineSegment(ctx, verts[i], verts[i + 1u]);
+                        else expand_line(verts[i], verts[i + 1u]);
+                    }
                 } else {
-                    for (std::uint32_t i = 0; i + 1u < n; ++i)
-                        rasterizeLineSegment(ctx, verts[i], verts[i + 1u]);
+                    for (std::uint32_t i = 0; i + 1u < n; ++i) {
+                        if (gpu == nullptr) rasterizeLineSegment(ctx, verts[i], verts[i + 1u]);
+                        else expand_line(verts[i], verts[i + 1u]);
+                    }
                 }
             }
-            // 诊断：点 / 线不计入 `kPlTriangles` / `kPlRasterized`（那两个数就是**三角形**计数）；
+            // 诊断：点 / 线不计入 `kPlTriangles` / `kPlRasterized`（那两个数就是**三角形**计数；
+            // 展开出来的三角形只是实现手段，⛔ 不让它们把"引擎画了几个三角形"这个数改掉）；
             // 像素数走 `ctx.pixels_written`（与三角形同一个账）。
-            pipeLog("点/线", "图元=%u：%u 个顶点 ⇒ 写 %llu 个像素", prim, n,
+            pipeLog("点/线", "图元=%u：%u 个顶点 ⇒ 写 %llu 个像素（GPU 批按展开后的三角形交付）", prim, n,
                     static_cast<unsigned long long>(ctx.pixels_written));
             break;
         }
@@ -4546,6 +5013,8 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
     }
 
     bool gpu_done = false;
+    // ★ GPU 后端失败 ⇒ 这一批**没画**（不再 CPU 重放）⇒ 函数末尾返回 `D3DERR_INVALIDCALL`。
+    bool gpu_failed = false;
     std::string fallback_reason;
     // ★ 本单：`gpu_queued`= 真的把 draw 交进了后端队列（⛔ 不是"准入通过"）；
     //   `gpu_batch_tag`= 这一批在账本里的批号（0 = 没入队）。
@@ -4569,22 +5038,31 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
         }
     }
     if (gpu != nullptr && (!gpu_invw_ok || gpu_mip_divergence)) {
-        // GPU 已启用，但这一批**不能等价**交给 GPU：
-        //   · invw != 1：屏幕空间插值会与 CPU 的透视校正产生像素差；
-        //   · MIPFILTER=NONE 且有缩小采样：GPU 的 sampler 关不掉 mip（见上）。
-        // ⇒ 明确回退（记账 + 首次打印），⛔ 不静默。
-        // ★ 合批屏障：这一批要由 CPU 直接写 guest，而**更早**的批可能还在 GPU 队列里 ⇒ 先 flush +
-        //   读回，否则它们在 Present 读回时会盖掉这些 CPU 像素。
-        if (gpu->rasterDirty()) {
-            std::string sync_err;
-            gpu->rasterSyncToGuest(ctx.color_base, ctx.color_pitch, ctx.color_width, ctx.color_height, &sync_err);
+        // ★ 这两条**不再回退 CPU 重放**（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：
+        //   · invw != 1：屏幕空间插值会与透视校正产生像素差（要补就得给着色器加 W 插值，
+        //     那是另一条单的活；本线**不做近似的透视校正**）；
+        //   · MIPFILTER=NONE 且有缩小采样：GPU 的 sampler 关不掉 mip（`max_lod` 是一张纹理一档）。
+        //   两者在 boot→TITLE 的实测命中都是 **0**（见 README 的口径行）⇒ 按裁决做
+        //   **显式拒绝 + 具名记账**：本批不进画面（`D3DERR_INVALIDCALL`），但 `unsupported` 位、
+        //   默认级别的 warn 都留得下痕迹。⛔ 不许"删完静默不画"，也⛔ 不许再往 CPU 光栅塞。
+        const UnsupportedBit bit = gpu_mip_divergence ? kUnGpuMipDivergence : kUnGpuPerspective;
+        char buf[320];
+        if (gpu_mip_divergence) {
+            std::snprintf(buf, sizeof(buf),
+                          "MIPFILTER=NONE 且本批有缩小采样（GPU sampler 的 max_lod 是一张纹理一档，"
+                          "表达不了\"关掉 mipmap\"）⇒ 拒绝该批（不再 CPU 重放）");
+        } else {
+            std::snprintf(buf, sizeof(buf),
+                          "顶点 invw!=1（GPU 的屏幕空间插值不能等价替代透视校正）⇒ 拒绝该批（不再 CPU 重放）");
         }
-        for (const SavedTri& t : saved_tris) rasterTriangle(ctx, t.a, t.b, t.c);
+        recordUnsupported(cpu, pe, bit, buf, 0u);
+        pipeWarn(PipeWarnCategory::Other, "GPU 光栅化", "%s", buf);
+        if (why) *why = buf;
         gpu_vertices.clear();
-        fallback_reason = gpu_mip_divergence
-                              ? "MIPFILTER=NONE 且这一批有缩小采样（GPU sampler 的 max_lod 是一张纹理一档，"
-                                "表达不了\"关掉 mipmap\"）"
-                              : "顶点 invw!=1（屏幕空间 GPU 插值不能等价替代透视校正）";
+        // ★ 本单：这条早退**必须**补上 `skipped` —— 它 CPU 一个像素都不写，`fallback` 永远看不见它
+        //   （设计 §A.3 的盲区）。计数放这里而不是函数末尾，是因为这里直接 return（拿不到末尾块）。
+        noteGpuSkip(cpu, pe, buf, bit);
+        return false;
     } else if (gpu != nullptr) {
         std::string gerr;
         // ★ 目标身份必须带 guest 像素基址：同尺寸换 surface 只看尺寸/格式判不出来（见 gpu_raster.h）。
@@ -4693,6 +5171,25 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
             gpu_done = true;
             ++g_gpu_draws;
             g_gpu_triangles += saved_tris.size();
+            // ★ `[draw] fa=` 的 **GPU 版**（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：这一批真的交给
+            //   后端的那批顶点，其 α（0..255）就是"真正参与混合"的 α 的端点值 —— 顶点着色器
+            //   输出 w=1 ⇒ 屏幕空间线性插值，故逐顶点 α 的 min/max/均值就是整批的 min/max/均值。
+            //   ★ `n` = **顶点数**（CPU 版是**像素**数）：两者口径写在 `[draw]` 行与 README 里。
+            //   ⛔ 不用逐像素统计：GPU 拿不到片元覆盖数，硬读回会把诊断变成一次全帧回读。
+            g_gpu_alpha_agg = AlphaAgg{};
+            for (const GpuRasterVertex& v : gpu_vertices) {
+                // `GpuRasterVertex` 的 α 是 **0..1**（`push_tri` 里由 SVertex 的 0..255 除 255 得到）
+                // ⇒ 统计口径（`[draw] fa=` 与 CPU 版一致）要的是 0..255 ⇒ 这里乘回去。
+                double a = static_cast<double>(v.a) * 255.0;
+                if (!(a >= 0.0)) a = 0.0;
+                if (a > 255.0) a = 255.0;
+                const unsigned q = static_cast<unsigned>(a + 0.5);
+                ++g_gpu_alpha_agg.n;
+                g_gpu_alpha_agg.sum += q;
+                if (q < g_gpu_alpha_agg.mn) g_gpu_alpha_agg.mn = q;
+                if (q > g_gpu_alpha_agg.mx) g_gpu_alpha_agg.mx = q;
+            }
+            g_alpha_agg_from_gpu = g_gpu_alpha_agg.n != 0;
             static bool logged = false;
             if (!logged && !saved_tris.empty()) {
                 logged = true;
@@ -4712,22 +5209,29 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
         }
         if (!ok) {
             ++g_gpu_coverage.gpu_failures;
-            // GPU 本批失败：先让 guest 看到已经画出的部分，再用 CPU 重放这一批。
-            std::string sync_err;
-            gpu->rasterSyncToGuest(ctx.color_base, ctx.color_pitch, ctx.color_width, ctx.color_height, &sync_err);
-            for (const SavedTri& t : saved_tris) rasterTriangle(ctx, t.a, t.b, t.c);
-            gpu->rasterSyncFromGuest(ctx.color_base, ctx.color_pitch, ctx.color_width, ctx.color_height, &sync_err);
+            // ★ **不再 CPU 重放**（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：GPU 后端失败时把这一批塞回
+            //   CPU 光栅 = 第二实现；裁决要求"删 CPU 前先把这条旁路改成显式拒绝 + 记账"。
+            //   这里仍然是**响亮**的：`gpu_failures` 计数 + `unsupported` 的 bit23 + 默认级别一行。
+            //   本批不进画面（Draw 返回 `D3DERR_INVALIDCALL`），但账上能指得出是哪一类失败。
             fallback_reason = "GPU 后端绘制失败：" + gerr;
+            recordUnsupported(cpu, pe, kUnGpuBackendFailure, fallback_reason.c_str(), 0u);
+            pipeWarn(PipeWarnCategory::Other, "GPU 光栅化", "后端绘制失败（⛔ 不再 CPU 重放）：%s",
+                     gerr.c_str());
             static bool logged = false;
             if (!logged) {
                 logged = true;
-                pipeLog("GPU", "光栅化失败，已回退 CPU：%s", gerr.c_str());
+                pipeLog("GPU", "光栅化失败（⛔ 不再 CPU 重放，见 unsupported bit23）：%s", gerr.c_str());
             }
+            gpu_failed = true;
         }
     }
     // GPU 已启用时的账：每一批 Draw* 都算一次；没画到 GPU 的一定有原因。
     // ★ 空批 / 全被裁掉（CPU 一个像素都没写）**不算 fallback**：它们不是"回退"，也没有像素差；
     //   `draw_calls` 照记（可见性），`fallback_pixels` 只在真的由 CPU 写了像素时加。
+    // ★ `REQ-01M7AAXVGY9SG75XCREHPX641Z`（M1）：`skipped` 与 `fallback` **分开**记 ——
+    //   · `fallback` 判据仍是"CPU 真写了像素"（`pixels_written > 0`），本单不改；
+    //   · `skipped` 判据是"GPU 没画"，**⛔ 不依赖 `pixels_written`**（GPU 模式下那是 CPU 计数，
+    //     准入后拒绝 / 后端失败 / 带纹理点线都写 0 个像素 ⇒ 会漏记，设计 §A.3）。
     if (have_gpu_backend) {
         ++g_gpu_coverage.draw_calls;
         if (gpu_done) {
@@ -4750,11 +5254,13 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
             } else {
                 noteCoverageEmpty();
             }
-        } else if (ctx.pixels_written > 0) {
-            gpuNoteFallback(fallback_reason.empty()
-                                ? (gpu_why.empty() ? std::string("GPU 不可用（原因未登记）") : gpu_why)
-                                : fallback_reason,
-                            ctx.pixels_written);
+        } else {
+            // 这一批 GPU **没画**：原因只有两种来源（后端失败 / 准入拒绝），文本与位都在上面定好了。
+            const std::string skip_why = gpu_failed ? fallback_reason
+                                                    : (gpu_why.empty() ? std::string("GPU 不可用（原因未登记）")
+                                                                       : gpu_why);
+            if (ctx.pixels_written > 0) gpuNoteFallback(skip_why, ctx.pixels_written);
+            noteGpuSkip(cpu, pe, skip_why, gpu_failed ? kUnGpuBackendFailure : gpu_skip_bit);
         }
     }
 
@@ -4832,6 +5338,11 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
             }
             const double texa_mean =
                 texa_n != 0 ? static_cast<double>(texa_sum) / static_cast<double>(texa_n) : 0.0;
+            // ★ `fa=` 的取数：GPU 批用**顶点 α** 聚合（逐批、不受 `LIFT_SLOW_DRAW` 门控），
+            //   其余批用 CPU 光栅的**像素 α** 聚合（逐像素、受门控）。口径见 `lastDrawAlphaAgg()`。
+            const AlphaAgg& fa_agg = g_alpha_agg_from_gpu ? g_gpu_alpha_agg : g_alpha_agg;
+            const double fa_mean = fa_agg.n != 0 ? static_cast<double>(fa_agg.sum) / static_cast<double>(fa_agg.n)
+                                                 : 0.0;
             // ★ 本单：`rec=` **不许**只打"入队成功"。正常合批路径此刻还没 flush（Present / Clear 才提交）
             //   ⇒ 这一行先挂起，由后端的回报点（命令缓冲提交成功之后）补打成 `rec=1`；
             //   只有"已经确定不会进 render pass"的批（CPU 路 / GPU 回退 / 空批）才当场打 `rec=0`。
@@ -4868,10 +5379,7 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
                 ctx.bbox_x1, ctx.bbox_y1,
                 static_cast<unsigned>(ctx.textures[0].format.bpp), ctx.textures[0].format.amask,
                 ctx.textures[0].width, ctx.textures[0].height, texa_n, texa_min, texa_max, texa_mean,
-                static_cast<long long>(g_alpha_agg.n),
-                g_alpha_agg.n != 0 ? static_cast<double>(g_alpha_agg.sum) / static_cast<double>(g_alpha_agg.n)
-                                   : 0.0,
-                g_alpha_agg.mn, g_alpha_agg.mx, ms);
+                static_cast<long long>(fa_agg.n), fa_mean, fa_agg.mn, fa_agg.mx, ms);
             // ★ `rec=` 的判据（本单）：后端**真的**把这条 draw 录进过 render pass（命令缓冲提交成功
             //   之后的回报），⛔ 不是 `rasterQueue` 的返回值。正常合批路径此刻还没 flush ⇒ 行挂进
             //   **提交顺序**队列，由回报点按序放出；`tag==0`（没入队）的行永远不会有回报 ⇒ 当场 rec=0。
@@ -4881,6 +5389,11 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
                 GpuPendingDrawLine{gpu_queued ? gpu_batch_tag : 0, std::string(draw_line)});
             drainPendingDrawLines(false);
         }
+    }
+    if (gpu_failed) {
+        // ★ 后端失败 = 这一批**没画**（⛔ 不再 CPU 重放）：如实返回失败码，别让调用方以为画了。
+        if (why && why->empty()) *why = "D3D9 流水线：GPU 后端绘制失败（本批已拒绝，不再 CPU 重放）";
+        return false;
     }
     return true;
 }
@@ -5303,7 +5816,7 @@ std::uint32_t drawPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t prim, std
     return kOk;
 }
 
-std::uint32_t drawIndexedPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t prim, std::uint32_t base_vertex,
+std::uint32_t drawIndexedPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t prim, std::int32_t base_vertex,
                                    std::uint32_t min_index, std::uint32_t num_vertices, std::uint32_t start_index,
                                    std::uint32_t prim_count, std::string* why) {
     FvfLayout fvf;
@@ -5347,14 +5860,32 @@ std::uint32_t drawIndexedPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t pr
                 start_index, index_count, ilength / index_size);
         return kInvalidCall;
     }
+    // ★ `BaseVertexIndex` 是 INT（可为负），合法**索引值**区间 = `[MinVertexIndex, MinVertexIndex+NumVertices)`
+    //   （`REQ-01M79PP9S4BFBPKDPBQBDN5GGR`）。先判区间/负顶点号，**再**碰指针；越界一律拒绝，⛔ 不 clamp。
+    const std::int64_t min64 = static_cast<std::int64_t>(min_index);
+    const std::int64_t num64 = static_cast<std::int64_t>(num_vertices);
+    const std::int64_t first = static_cast<std::int64_t>(base_vertex) + min64;
+    if (first < 0 || min64 + num64 > INT32_MAX) {
+        char buf[192];
+        std::snprintf(buf, sizeof(buf),
+                      "D3D9 流水线：BaseVertexIndex=%d MinVertexIndex=%u NumVertices=%u ⇒ "
+                      "首个顶点号 %lld / 上界 %lld 非法",
+                      static_cast<int>(base_vertex), min_index, num_vertices, static_cast<long long>(first),
+                      static_cast<long long>(min64 + num64));
+        pipeLog("DrawIndexedPrimitive", "%s ⇒ D3DERR_INVALIDCALL", buf);
+        if (why) *why = buf;
+        return kInvalidCall;
+    }
     Machine* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return kInvalidCall;
     DrawContext ctx;
     if (!prepareContext(cpu, "DrawIndexedPrimitive", dev, pe, &ctx, why)) return kInvalidCall;
-    // ★ 声明路：把两条流按声明去交错成一份 `num_vertices` 个顶点的临时缓冲，后面逐索引取顶点
-    //   就退化成"从这份交错缓冲里按 `synth_stride` 取"——与 FVF 路完全同一条。
+    // ★ 声明路：把两条流按声明去交错成一份 `num_vertices` 个顶点的临时缓冲（**从 `first` 起**），
+    //   后面逐索引取顶点就退化成"从这份交错缓冲里按 `idx-min` 取"——与 FVF 路完全同一条。
     std::vector<std::uint8_t> decl_buf;
-    if (decl.present && !buildDeclVertices(cpu, pe, "DrawIndexedPrimitive", decl, 0u, num_vertices, &decl_buf, why)) {
+    if (decl.present &&
+        !buildDeclVertices(cpu, pe, "DrawIndexedPrimitive", decl, static_cast<std::uint32_t>(first),
+                           num_vertices, &decl_buf, why)) {
         return kInvalidCall;
     }
     const std::uint8_t* vbase =
@@ -5381,22 +5912,38 @@ std::uint32_t drawIndexedPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t pr
         } else {
             std::memcpy(&idx, ibase + static_cast<std::size_t>(start_index + i) * 4u, 4u);
         }
-        if (idx >= num_vertices) {
-            pipeLog("DrawIndexedPrimitive", "索引 %u 超出 NumVertices=%u ⇒ D3DERR_INVALIDCALL", idx, num_vertices);
+        if (static_cast<std::int64_t>(idx) < min64 || static_cast<std::int64_t>(idx) >= min64 + num64) {
+            pipeLog("DrawIndexedPrimitive",
+                    "索引 %u 不在 [MinVertexIndex=%u, MinVertexIndex+NumVertices=%lld) ⇒ D3DERR_INVALIDCALL",
+                    idx, min_index, static_cast<long long>(min64 + num64));
             return kInvalidCall;
         }
-        const std::uint32_t vertex_index = idx + base_vertex;
-        if ((static_cast<std::uint64_t>(voffset) +
-             static_cast<std::uint64_t>(vertex_index + 1u) * vstride) > vlen_eff) {
-            pipeLog("DrawIndexedPrimitive", "顶点 %u 越过顶点缓冲 ⇒ D3DERR_INVALIDCALL", vertex_index);
+        // ★ 流内顶点号 = Base + idx（全程 int64；Base 可负 ⇒ 先判 <0，⛔ 不让它回绕成 u32）。
+        const std::int64_t vertex_index = static_cast<std::int64_t>(base_vertex) + static_cast<std::int64_t>(idx);
+        if (vertex_index < 0) {
+            pipeLog("DrawIndexedPrimitive", "顶点号 Base(%d)+索引(%u)=%lld < 0 ⇒ D3DERR_INVALIDCALL",
+                    static_cast<int>(base_vertex), idx, static_cast<long long>(vertex_index));
             return kInvalidCall;
         }
+        // ★ 缓冲上界也全程 int64 / 用除法回避 `(vi+1)*stride` 的回绕（修前 `vi+1u` 在 0xFFFFFFFF 处回绕成 0）。
+        if (!decl.present) {
+            const std::uint64_t available = voffset <= vlen_eff ? static_cast<std::uint64_t>(vlen_eff - voffset) : 0u;
+            const std::uint64_t need_vertices = static_cast<std::uint64_t>(vertex_index) + 1u;
+            if (vstride == 0 || need_vertices > available / vstride) {
+                pipeLog("DrawIndexedPrimitive", "顶点 %lld 越过顶点缓冲（available=%llu, stride=%u）⇒ D3DERR_INVALIDCALL",
+                        static_cast<long long>(vertex_index), static_cast<unsigned long long>(available), vstride);
+                return kInvalidCall;
+            }
+        }
+        const std::int64_t relative = static_cast<std::int64_t>(idx) - min64;
+        const std::size_t byte_offset =
+            decl.present ? static_cast<std::size_t>(relative) * vstride
+                         : static_cast<std::size_t>(voffset) + static_cast<std::size_t>(vertex_index) * vstride;
         CVertex v;
-        transformVertex(cpu, pe, fvf, vbase + voffset + static_cast<std::size_t>(vertex_index) * vstride,
-                        vertex_index, world, view, proj, &v);
+        transformVertex(cpu, pe, fvf, vbase + byte_offset, static_cast<std::uint32_t>(vertex_index), world, view,
+                        proj, &v);
         verts.push_back(v);
     }
-    (void)min_index;
     std::uint32_t tris = 0;
     std::uint32_t rast = 0;
     if (!submitPrimitives(cpu, pe, prim, verts, prim_count, ctx, &tris, &rast, why)) return kInvalidCall;
@@ -5499,8 +6046,19 @@ std::uint32_t drawIndexedPrimitiveUP(X86& cpu, std::uint32_t dev, std::uint32_t 
         pipeLog("DrawIndexedPrimitiveUP", "索引数据未提交 ⇒ D3DERR_INVALIDCALL");
         return kInvalidCall;
     }
-    if (!cpu.mem->committed(data_ea, static_cast<std::size_t>(num_vertices) * stride)) {
-        pipeLog("DrawIndexedPrimitiveUP", "顶点数据未提交 ⇒ D3DERR_INVALIDCALL");
+    // ★ UP 没有 Base，但 `MinVertexIndex` 仍是**索引下界**：合法区间 `[min, min+n)`。
+    //   顶点数据按 `min+n` 个顶点提交（⛔ 不能只按 n 个：min>0 时 idx 会读到 n 之外）。
+    const std::int64_t min64 = static_cast<std::int64_t>(min_index);
+    const std::int64_t up_num64 = static_cast<std::int64_t>(num_vertices);
+    if (min64 + up_num64 > INT32_MAX) {
+        pipeLog("DrawIndexedPrimitiveUP", "MinVertexIndex=%u + NumVertices=%u 超过 INT32_MAX ⇒ D3DERR_INVALIDCALL",
+                min_index, num_vertices);
+        return kInvalidCall;
+    }
+    const std::uint64_t up_span_bytes = static_cast<std::uint64_t>(min64 + up_num64) * stride;
+    if (!cpu.mem->committed(data_ea, static_cast<std::size_t>(up_span_bytes))) {
+        pipeLog("DrawIndexedPrimitiveUP", "顶点数据未提交（%llu B）⇒ D3DERR_INVALIDCALL",
+                static_cast<unsigned long long>(up_span_bytes));
         return kInvalidCall;
     }
     Machine* m = nullptr;
@@ -5527,12 +6085,16 @@ std::uint32_t drawIndexedPrimitiveUP(X86& cpu, std::uint32_t dev, std::uint32_t 
         } else {
             std::memcpy(&idx, ibase + static_cast<std::size_t>(i) * 4u, 4u);
         }
-        if (idx >= num_vertices) return kInvalidCall;
+        if (static_cast<std::int64_t>(idx) < min64 || static_cast<std::int64_t>(idx) >= min64 + up_num64) {
+            pipeLog("DrawIndexedPrimitiveUP",
+                    "索引 %u 不在 [MinVertexIndex=%u, MinVertexIndex+NumVertices=%lld) ⇒ D3DERR_INVALIDCALL",
+                    idx, min_index, static_cast<long long>(min64 + up_num64));
+            return kInvalidCall;
+        }
         CVertex v;
         transformVertex(cpu, pe, fvf, vbase + static_cast<std::size_t>(idx) * stride, idx, world, view, proj, &v);
         verts.push_back(v);
     }
-    (void)min_index;
     std::uint32_t tris = 0;
     std::uint32_t rast = 0;
     if (!submitPrimitives(cpu, pe, prim, verts, prim_count, ctx, &tris, &rast, why)) return kInvalidCall;
@@ -5611,10 +6173,41 @@ bool frameStats(const SurfaceFormat& fmt, const std::uint8_t* base, std::uint32_
 std::uint64_t gpuDrawCount() { return g_gpu_draws; }
 std::uint64_t gpuTriangleCount() { return g_gpu_triangles; }
 
+DrawAlphaAgg lastDrawAlphaAgg() {
+    const AlphaAgg& a = g_alpha_agg_from_gpu ? g_gpu_alpha_agg : g_alpha_agg;
+    DrawAlphaAgg out;
+    out.from_gpu = g_alpha_agg_from_gpu;
+    out.n = a.n;
+    out.mn = a.mn;
+    out.mx = a.mx;
+    out.mean = a.n != 0 ? static_cast<double>(a.sum) / static_cast<double>(a.n) : 0.0;
+    return out;
+}
+
 // =====================================================================================
 // GPU 覆盖账本
 // =====================================================================================
 const GpuCoverage& gpuCoverage() { return g_gpu_coverage; }
+
+// `skipped top:` 那一行（与 `fallback top:` 同形：次数降序、原因升序、最多 5 条）。
+// ★ 放在这里（而不是 `machine.cpp` 里内联）的原因：夹具要能断言"原因真的出现在摘要里"，
+//   而夹具不跑整个 `Machine::dumpRunSummary`。
+std::string gpuSkippedTopLine() {
+    if (g_gpu_coverage.skipped_reasons.empty()) return {};
+    std::vector<std::pair<const std::string*, std::uint64_t>> rows;
+    rows.reserve(g_gpu_coverage.skipped_reasons.size());
+    for (const auto& kv : g_gpu_coverage.skipped_reasons) rows.emplace_back(&kv.first, kv.second);
+    std::stable_sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
+        return a.second != b.second ? a.second > b.second : *a.first < *b.first;
+    });
+    std::string out = "            skipped top:";
+    const std::size_t top = rows.size() < 5 ? rows.size() : 5;
+    for (std::size_t i = 0; i < top; ++i) {
+        out += " [" + std::to_string(rows[i].second) + "×] " + *rows[i].first + " ;";
+    }
+    out += "\n";
+    return out;
+}
 
 void gpuCoverageReset() {
     // ★ 本单：上一轮永远没被回报的 `[draw]` 行在这里按提交顺序补打 `rec=0`
@@ -5625,6 +6218,9 @@ void gpuCoverageReset() {
     g_gpu_coverage = GpuCoverage{};
     g_gpu_draws = 0;
     g_gpu_triangles = 0;
+    // ★ 注意：**不要**在这里清 `g_unsupported_mirror` —— `Machine::run` 每次调用都会重置覆盖账，
+    //   而运行摘要是在最后一轮之后打的；按"每一次 run"清会把先前 Set 的记账擦掉。
+    //   它的生命周期跟**流水线状态块**走（`createForDevice` 清）。
 }
 
 // ★ 后端回报：一条 draw 真的被录进 render pass、且命令缓冲**提交成功之后**（见 `gpu_raster.h`）。

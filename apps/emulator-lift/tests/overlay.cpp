@@ -13,7 +13,7 @@
 //   ④ **renderer 路径**（`--present window`、SDL_Renderer 上传）：`SdlWindow` 用 software 渲染器
 //      提交一帧 ⇒ 窗口像素左上角出现叠层（深底 + 亮字），矩形外仍是 guest 后缓冲的颜色；
 //      关掉 `setOverlay(false)` ⇒ 恢复成纯画面；两种情况下 **guest 像素逐字节不变**。
-//   ⑤ **直出路径**（`--present window --raster gpu`）：claim 成功 ⇒ 同一组断言在 GPU 直出上成立
+//   ⑤ **直出路径**（`--present window`）：claim 成功 ⇒ 同一组断言在 GPU 直出上成立
 //      （窗口不可 claim / 没有 GPU ⇒ SKIP 77 + 实测原因，⛔ 不拿 renderer 假绿）。
 //   ⑤b **直出 letterbox**（B1 回归守卫）：把窗口强制成 1000×1000（target 320×240 ⇒ 画面居中、
 //      上下有黑边）⇒ 叠层 blit 的 dst 原点必须 == **画面**矩形的左上角，且窗口 (0,0) 是黑边。
@@ -40,6 +40,7 @@
 
 #include "check.h"
 #include "runtime/host_encoding.h"
+#include "subprocess_skip.h"
 #include "runtime/memory.h"
 #include "runtime/overlay.h"
 #include "runtime/present_sdl.h"
@@ -731,12 +732,14 @@ std::string readAllBytes(const fs::path& p) {
 bool contains(const std::string& hay, const char* needle) { return hay.find(needle) != std::string::npos; }
 
 // 环境不满足（不是判据红）：窗口系统 / GPU / 执行源。
+// ★ "GPU 拒绝启动"**不在这里**：它由 `subprocessRefusedForNoGpu` 单独判（要求本机实探无 GPU），
+//   ⛔ 别把 `拒绝启动` 加回来 —— GPU 可用时的一次启动回归会被静默吞成 SKIP。
 bool environmentUnavailable(const std::string& log) {
     return contains(log, "窗口打开失败") || contains(log, "要求 GPU 光栅化") ||
            contains(log, "GPU 光栅化后端创建失败") || contains(log, "SDL_CreateWindow 失败") ||
            contains(log, "SDL_CreateRenderer") || contains(log, "SDL_Init(VIDEO) 失败") ||
            // `--present window` 的 init 失败（窗口 / GPU / renderer 三选一）= 环境缺失。
-           contains(log, "--present window 失败") || contains(log, "找不到执行源") || contains(log, "拒绝启动");
+           contains(log, "--present window 失败") || contains(log, "找不到执行源");
 }
 
 // 从窗口 BMP 统计左上角一块里的叠层颜色（用 SDL 自己解，不手写 BMP 解析）。
@@ -817,6 +820,10 @@ bool runWindowSmoke(const std::vector<std::string>& args, std::string* skip_why)
         return false;
     }
     if (with.exit_code != 0) {
+        if (lift_test::subprocessRefusedForNoGpu(with.exit_code, log)) {
+            *skip_why = "无 GPU：子进程拒绝启动";
+            return false;
+        }
         if (environmentUnavailable(log)) {
             *skip_why = "窗口 / GPU 不可用（子进程 exit " + std::to_string(with.exit_code) + "）";
             return false;
@@ -854,6 +861,10 @@ bool runWindowSmoke(const std::vector<std::string>& args, std::string* skip_why)
         return true;
     }
     if (plain.exit_code != 0) {
+        if (lift_test::subprocessRefusedForNoGpu(plain.exit_code, plain_log)) {
+            *skip_why = "无 GPU：子进程拒绝启动";
+            return false;
+        }
         if (environmentUnavailable(plain_log)) {
             *skip_why = "窗口 / GPU 不可用（对照臂 exit " + std::to_string(plain.exit_code) + "）";
             return false;

@@ -1,26 +1,31 @@
-/** @env assets @kind gate @suite toolchain @why 语料的 EA→行号 映射/索引坏了，或 opcode 分派表的机械提取对不上 */
+/** @env assets @kind gate @suite toolchain @why 语料的 EA→行号 映射/索引坏了，或 opcode 分派表的机械提取对不上，或折叠块被报成"不落在任何函数里" */
 /**
  * tools/test/disasm.test.mjs —— **机械提取器的守卫**（语料在场时才有意义 ⇒ `@env assets`）
  *
- * 守的是三件"会坏且坏得有意义"的事：
+ * 守的是四件"会坏且坏得有意义"的事：
  *   ① **EA → 行号**：`pnpm tools disasm-at at --ea <EA>` 必须落在该段、且行内容前缀与 EA 一致；
  *   ② **索引可删可重建**：同一份语料建两次 ⇒ 同字节（它是**派生缓存**，不是真源）；
  *   ③ ★ **opcode → handler 分派表的静态提取**：引擎构造函数里那 544 行
  *      `*(_DWORD *)(_this + 67xxxx) = sub_XXXXXX;` 机械可数、且与 `analysis/opcodes.json` 的条数一致。
  *      ⇒ 这条把"handler 只在旧仓 JSON 里"变成"**从语料可再提取**"。
+ *   ④ ★ **折叠块可辨认**：`.lst` 把库函数折成一行 `COLLAPSED` 注释（没有 `proc near … endp`）
+ *      ⇒ `disasm-fn` 必须报"落在折叠块 <名字/起点>（声明 N 字节）"，而不是和"真的无处可归"混成一句
+ *      （这条用**合成夹具**，不需要语料）。
  *
  * ★ 为什么这一条是本轮的第一个点：它**不需要任何引擎语义**（纯定位 + 计数），
  *   因此**不可能把"旧实现的说法"当成"引擎的事实"**。它同时给出后续所有分析的入口。
  *
- * 运行：`pnpm test:assets`
+ * 运行：`pnpm test:assets`（④ 那条不需要语料，但同文件的其余几条要）
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 
 import { REPO_ROOT } from '../lib/paths.mjs';
+import { buildCatalog, catalogSummary, findFunction } from '../lib/catalog.mjs';
 import { buildIndex, contextAt, indexProblems, serializeIndex, withSegRanges } from '../lib/disasm.mjs';
 
 const FILES_DIR = path.join(REPO_ROOT, 'corpus', 'disasm', 'files');
@@ -106,4 +111,54 @@ test('★ opcode → handler 的**静态提取**：从语料机械数出全部 h
     (e) => e.id === 'knowledge/opcode-table-source',
   );
   assert.ok(src, '清单里必须有 knowledge/opcode-table-source（派生链的来源）');
+});
+
+// ─────────────────────────────────────────────────────────── 折叠块（COLLAPSED）
+
+/** 造一份最小 `.lst`（写进临时目录；用完即弃；这个用例**不需要**语料） */
+function miniListing(text) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'amayui-folded-'));
+  const lst = path.join(dir, 'synthetic.lst');
+  fs.writeFileSync(lst, text, 'utf8');
+  return lst;
+}
+
+/**
+ * ★ 折叠块在 `.lst` 里**只有一行注释**：没有 `proc near … endp` ⇒ 它不属于任何函数。
+ * 若"不落在任何函数里"把这件事和"真的无处可归"混成一句，用户就分不清
+ * "这一块在语料里被折叠了（有名字、有声明长度，可以按 EA 取字节）"与"你给错了 EA"。
+ */
+test('★ 折叠块：EA 落在 COLLAPSED 行声明的区间里 ⇒ 报折叠块，不报"不落在任何函数里"', () => {
+  const lst = miniListing(
+    [
+      '.text:00401000 sub_401000 proc near',
+      '.text:00401000 retn',
+      '.text:00401001 sub_401000 endp',
+      '.text:00401004 ; [00000006 BYTES: COLLAPSED FUNCTION j_RtlUnwind. PRESS CTRL-NUMPAD+ TO EXPAND]',
+      '.text:0040100A align 10h',
+    ].join('\n') + '\n',
+  );
+  const cat = buildCatalog({ lstFile: lst, cFile: null });
+  assert.deepEqual(cat.problems, [], `目录自检必须全过：${cat.problems.join('；')}`);
+  // 起点 / 中段 / 末字节都在声明区间 [0x401004, 0x40100A) 里
+  for (const ea of [0x401004, 0x401006, 0x401009]) {
+    assert.throws(
+      () => findFunction(cat, { ea }),
+      (err) => /折叠块/.test(err.message) && /j_RtlUnwind/.test(err.message) && /声明 6 字节/.test(err.message) && !/不落在任何函数里/.test(err.message),
+      `EA 0x${ea.toString(16)} 落在折叠块内 ⇒ 必须点名折叠块（不是"不落在任何函数里"）`,
+    );
+  }
+  // 符号名也一样：折叠块不是"目录里没有"（它有名字、有声明长度）
+  assert.throws(
+    () => findFunction(cat, { sym: 'j_RtlUnwind' }),
+    (err) => /折叠块/.test(err.message) && !/不在目录里/.test(err.message),
+    '折叠块的符号名必须给"折叠块"那句，而不是"不在目录里"',
+  );
+  // 折叠块之外的空隙仍走原判据（两件事不许合并）
+  assert.throws(() => findFunction(cat, { ea: 0x401002 }), /不落在任何函数里/);
+  // 计数与"跨模块 callee 不在本文件"**分开**
+  const s = catalogSummary(cat);
+  assert.equal(s.foldedBlocks, 1, '摘要必须给出折叠块个数');
+  assert.equal(s.foldedBytes, 6, '摘要必须给出声明字节数（不是元素数 / 不是 0）');
+  assert.deepEqual(s.calleesNotInInventory, [], '本样本没有跨模块 callee ⇒ 两个计数不许互相顶替');
 });

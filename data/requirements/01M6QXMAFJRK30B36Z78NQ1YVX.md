@@ -2,8 +2,9 @@
 
 - id: REQ-01M6QXMAFJRK30B36Z78NQ1YVX
 - type: req
-- status: doing
+- status: done
 - parent: REQ-01M6H6G7FN5BAAJPPQYQEB2M27
+- verify: apps/emulator-lift/tests/d3dx9.cpp#d3dx9/texture-from-memory-png
 - tags: [emulator-lift, m3, live2d, d3dx]
 
 ## 一句话
@@ -48,3 +49,13 @@
 `apps/emulator-lift/out/emulator-lift --exe ../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE --game-dir ../../.tmp/game-logo --appdata ../../.tmp/appdata-video1 --raster gpu --present headless --real-time --time-limit 45 --native-overrides all --log-level info --log-cat d3dx9,d3d9`
 - 文档冲突：`docs/03-emulator/platform-effort.md` §3.8 写 "`title` 0 次"（Live2D opcode 足迹），
   与本次实测（TITLE 3 张 PNG + 每帧 draw）冲突；不改该文档，另单复核。
+
+## 收口（2026-11-13 复核）
+
+- 判据两条都真跑在 `tests/d3dx9.cpp`：`d3dx9/texture-from-memory`、`d3dx9/texture-from-memory-png`；
+  `d3dx9/png-decode` 是解码层单测。
+- "没做 / 下一步"三项**全已落地**：
+  1. PNG 像素解码：`runtime/png_decode.cpp` + `D3DXCreateTextureFromFileInMemory` 的 PNG 分支；
+  2. 声明式 Draw：`d3d9_pipeline.cpp` 的 `declLayoutOf` / `buildDeclVertices`（按 stream 0 POSITION / stream 1 TEXCOORD 取值）；
+  3. 状态块 `Capture/Apply`：`REQ-01M7372BPVGBD247KAGHB53YK7` 已 done（不再为空）。
+- 遗留（**不在本单**）：声明路**画像素**没有守卫 ⇒ 已开单；`platform-effort.md` §3.8 的 "title 0 次" 与实测冲突 ⇒ 已开单。

@@ -2,8 +2,9 @@
 
 - id: REQ-01M737M1PPHHXDN65RCTK6XTV6
 - type: spike
-- status: open
+- status: dropped
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- dropped_reason: 裁决目标已达成：2026-11-13 用户裁决 GPU 唯一光栅、CPU 光栅整体退休（REQ-01M78BF1FNNH6K8N8GEY6GQYXX），CPU 臂将被删除 ⇒ 两臂读数不再有决策价值。
 - tags: [emulator-lift raster measurement]
 
 ## 一句话
@@ -30,3 +31,9 @@
 ## 不做
 - 不改任何代码；不做像素比较（那是 `REQ-01M737D3BHNMRY97T9A02DARCC` 的夹具层）。
 - 不测 `--present window` 的显示开销（那是呈现轴，不是光栅轴）。
+
+## 裁决（2026-11-13 · 关单理由）
+
+本 spike 的唯一用途是"裁决 CPU oracle 值不值得保留"。该裁决已由用户给出并落成
+`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`：**GPU 是唯一光栅实现，CPU 光栅整体退休，无 GPU ⇒ 拒绝启动**。
+⇒ 两臂读数不再有消费者（CPU 臂将被删除），本 spike 的剩余三样读数**没有决策价值**，不再跑。

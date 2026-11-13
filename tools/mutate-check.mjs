@@ -192,6 +192,15 @@ let timedCommandSeq = 0;
 let activeTimedPid = null;
 
 /**
+ * `gone` 出口（wrapper 在写出退出码**之前**就结束）的 error 上带的**稳定标记**。
+ * ★ 为什么要有它（`REQ-01M78A0Z5G7P7CGYRXPFEBJKCA`）：区分「wrapper 崩了」与「真超时」必须是
+ *   **结构性**判据 —— 看 `runTimedCommand` 走的是哪个出口（带本标记的 `{error}` vs `{timedOut:true}`），
+ *   ⛔ 不是看墙钟：机器被编译压住时"发现它没了之后立刻返回"也会超过任何固定阈值 ⇒ 假红。
+ *   守卫 `tools/test/mutate-timeout.test.mjs` 的 d) 断言「`timedOut !== true` + error 带本标记」。
+ */
+export const WRAPPER_GONE_TAG = '[wrapper-gone]';
+
+/**
  * 跑一条命令（**async**），带**单测超时**与**进程树收尾**。
  *
  * 为什么要一层 `node -e` wrapper（而不是 `spawnSync({timeout})`）：`spawnSync` 的 `timeout` 到点只
@@ -210,6 +219,8 @@ let activeTimedPid = null;
  * @param {string[]} args
  * @param {{cwd?:string, logFd?:number|null, timeoutSec?:number, root?:string, env?:object}} [opts]
  * @returns {Promise<{status:number}|{timedOut:true, timeoutSec:number, treeKilled:boolean, elapsedMs:number}|{error:Error}>}
+ *   ★ `gone`（wrapper 没写退出码就没了）的 `{error}` 的 message **以 `WRAPPER_GONE_TAG` 开头** ——
+ *     这是"崩了 ≠ 超时"的**结构性**判别式（⛔ 别用耗时判）。
  */
 export async function runTimedCommand(command, args, opts = {}) {
   const root = opts.root ?? ROOT;
@@ -314,7 +325,7 @@ export async function runTimedCommand(command, args, opts = {}) {
         ? { status }
         : { error: new Error(`退出码文件内容非法：${JSON.stringify(text)}`) };
     }
-    return { error: new Error(`子进程在写出退出码之前就结束了（${command}）`) };
+    return { error: new Error(`${WRAPPER_GONE_TAG} 子进程在写出退出码之前就结束了（${command}）`) };
   } finally {
     activeTimedPid = null;
     fs.rmSync(statusFile, { force: true });
@@ -948,6 +959,21 @@ const MUTATIONS = [
     what: '发布链的 AGF 缺省来源退回 `dist/ui-bake`（每次重烧）⇒ 又要 headless Chrome，且发出去的字节变成"这次烧出来的"',
   },
 
+  // ── 覆盖清单的**逐字节**闸门（`REQ-01M7A5TZ91V3MRNEFDHWKN20MY`）──
+  //   ★ 唯一写入口 = `lift sync --write`；手改一个字符（这里去掉 `_doc` 前的一个缩进空格）必须
+  //     被 `lift check` / `tools/test/lift.test.mjs` 的逐字节断言抓住。选缩进而不是字面内容的理由：
+  //     **字段级**断言（reason 逐字 / kind / schema）全都看不见它 —— 只有字节比较能红。
+  //   ★ 守卫用纯档（不读 PE）：它用「C++ 注册表 + 派生缺口文件」重算 `renderOverrides(...)`。
+  {
+    file: 'data/lift/overrides.json',
+    from: '{\n  "_doc": "由 tools/lift.mjs 拥有',
+    to: '{\n "_doc": "由 tools/lift.mjs 拥有',
+    guard: 'tools/test/lift.test.mjs',
+    what:
+      '手改 overrides.json 一个字符（`_doc` 前少一个缩进空格）⇒ 不再是 `lift sync --write` 的逐字节输出 ' +
+      '⇒ tools/test/lift.test.mjs 的逐字节断言红（字段级断言看不见这种漂移）',
+  },
+
   // ── emulator-lift（★ 新命令类型：`buildDir` 指到它自己的 out/；判据在它自己的 CTest 里）──
 
   {
@@ -967,7 +993,7 @@ const MUTATIONS = [
     // ★ 代表 "GPU 准入少了一项" 这一类错（REQ-01M737D3BHNMRY97T9A02DARCC）：
     //   `gpuEligible` 里 `MAG != MIN` 的准入被删（判据恒假）⇒ `MAG=POINT + MIN=LINEAR` 的批
     //   重新进入 GPU 队列，且回退账变空 —— CPU 参考按"任一 LINEAR ⇒ 双线性"、GPU 各用各的，
-    //   两边都"成功"、整批像素不同，而 `--gpu-strict` 看不见（不是 fallback）。
+    //   两边都"成功"、整批像素不同，而 fallback 账看不见（不是 fallback）。
     //   守卫：`apps/emulator-lift/tests/gpu_batch.cpp` 的
     //   `gpu-batch/sampler-filter-eligibility`（pure，`gpu-batch-order` 跑它）。
     file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
@@ -1120,6 +1146,57 @@ const MUTATIONS = [
   },
 
   {
+    // ★ 代表 "点/线的 GPU 展开退化成零宽" 这一类错（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：
+    //   把 1px 宽 quad 的**半宽**写成 0 ⇒ 每秒线展开出的两个三角形都退化成线（面积 0，被退化判据丢掉）
+    //   ⇒ 线上一个像素都不写。守卫：`apps/emulator-lift/tests/gpu_batch.cpp` 的
+    //   `gpu-batch/lines-points`（**真后端臂**，`--gpu`；没有 SDL_GPU 设备 ⇒ SKIP 77、记「不可判定」）。
+    //   ★ 为什么不能拿 pure 的 `gpu-batch/lines-points-admission` 当守卫：它只数入队/顶点数，
+    //     零宽的 quad 顶点数不变 ⇒ 它会**假绿**。像素才是这条的判据。
+    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
+    from: '    constexpr double kExpandedLineHalfWidth = 0.5;  // 1px 宽 ⇒ 半宽 0.5px',
+    to: '    constexpr double kExpandedLineHalfWidth = 0.0;  // 1px 宽 ⇒ 半宽 0.5px',
+    guard: 'ctest:gpu-batch-barrier',
+    ctest: 'gpu-batch-barrier',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '点/线展开的 quad 半宽写成 0 ⇒ 线上的三角形全部退化（0 像素）⇒ gpu-batch/lines-points 的' +
+      '"线上非背景像素 >= 8" 当场红',
+  },
+
+  {
+    // ★ 代表 "GPU 批的诊断聚合没接上" 这一类错（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX` 第 8 项）：
+    //   把逐批的 α 聚合写死 0 ⇒ `[draw] fa=` 的均值恒 0（修前正是这样：GPU 批恒 0）。
+    //   守卫：`apps/emulator-lift/tests/gpu_batch.cpp` 的 `gpu-batch/alpha-aggregation`（pure，Mock；
+    //   `gpu-batch-order` 跑它）—— α=128 的四边形必须算出 128±8、n>0。
+    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
+    from: '                g_gpu_alpha_agg.sum += q;',
+    to: '                g_gpu_alpha_agg.sum += 0;',
+    guard: 'ctest:gpu-batch-order',
+    ctest: 'gpu-batch-order',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '把 GPU 批的 α 聚合写死 0 ⇒ fa= 均值恒 0 ⇒ gpu-batch/alpha-aggregation 的"128±8"当场红',
+  },
+
+  {
+    // ★ 代表 "**没画**的批又回到无账状态" 这一类错（`REQ-01M7AAXVGY9SG75XCREHPX641Z`，M1 账本）：
+    //   删掉 `submitPrimitives` 末尾那一次 `noteGpuSkip` ⇒ 准入被拒的批不再进 `skipped`
+    //   （`skipped_draws` 恒 0、摘要里没有 `skipped top`），而 `fallback` 也未必看得见它
+    //   （CPU 0 像素的那类批）—— 正是设计 §A.3 的盲区。
+    //   守卫：`apps/emulator-lift/tests/gpu_batch.cpp` 的 `gpu-batch/skip-ledger`（pure，Mock；
+    //   `gpu-batch-order` 跑它）—— ALPHATESTENABLE=1 被拒 ⇒ skipped=1 + 原因进 top。
+    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
+    from: '            noteGpuSkip(cpu, pe, skip_why, gpu_failed ? kUnGpuBackendFailure : gpu_skip_bit);',
+    to: '            // MUTATION：删掉 noteGpuSkip（跳过账本不再记账）',
+    guard: 'ctest:gpu-batch-order',
+    ctest: 'gpu-batch-order',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '删掉 `submitPrimitives` 末尾的 noteGpuSkip ⇒ 被拒批的 skipped_draws 恒 0 / 摘要无 skipped top' +
+      ' ⇒ gpu-batch/skip-ledger 当场红',
+  },
+
+  {
     // ★ 代表 "surface 复制不校验格式" 这一类错（REQ-01M77ZJYSPX5V21QEB89W51815，存档缩略图链）。
     //   判据：`apps/emulator-lift/tests/d3d9.cpp` 的 `d3d9/offscreen-surface-rt-data` ③b ——
     //   64×32 X8R8G8B8 的源 → 64×32 R5G6B5 的离屏表面必须 `D3DERR_INVALIDCALL`。去掉格式判据后
@@ -1133,6 +1210,65 @@ const MUTATIONS = [
     what:
       'GetRenderTargetData 不再校验源/目标格式一致 ⇒ 16bpp 目标的失败面变成 E_FAIL（不是 ' +
       'D3DERR_INVALIDCALL）⇒ d3d9 的 offscreen-surface-rt-data ③b 当场红',
+  },
+
+  {
+    // ★ 代表 "caps 又声明了本线只能**响亮拒绝**的能力" 这一类错（REQ-01M79PP97ZD65BJG9GMAJ08MJ3）。
+    //   判据：`apps/emulator-lift/tests/d3d9.cpp` 的 `d3d9/caps-claims` ① —— LineCaps 声明 TEXTURE
+    //   时，带纹理的线必须是 S_OK；实际是 `D3DERR_INVALIDCALL`（bit16 记账）⇒ 声明与行为对不上。
+    file: 'apps/emulator-lift/src/runtime/d3d9.h',
+    from: 'constexpr std::uint32_t kCapsLineClaim = 0x0000000Eu;',
+    to: 'constexpr std::uint32_t kCapsLineClaim = 0x0000001Fu;',
+    guard: 'ctest:d3d9',
+    ctest: 'd3d9',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'LineCaps 声明改回 0x1F（多报 TEXTURE|FOG）⇒ 带纹理的线仍被 D3DERR_INVALIDCALL 拒绝 ⇒ ' +
+      'd3d9/caps-claims ① 当场红',
+  },
+
+  {
+    // ★ 同上：StencilCaps 声明非 0 ⇒ `STENCILENABLE=1 + STENCILFUNC=NEVER` 的 draw 必须 0 像素；
+    //   本线没有模板缓冲、像素照写 ⇒ `d3d9/caps-claims` ⑤ 红。
+    file: 'apps/emulator-lift/src/runtime/d3d9.h',
+    from: 'constexpr std::uint32_t kCapsStencilClaim = 0x00000000u;',
+    to: 'constexpr std::uint32_t kCapsStencilClaim = 0x000001FFu;',
+    guard: 'ctest:d3d9',
+    ctest: 'd3d9',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'StencilCaps 声明改回 0x1FF（本线没有模板缓冲）⇒ STENCILENABLE=1 + FUNC=NEVER 的 draw 仍然' +
+      '写像素 ⇒ d3d9/caps-claims ⑤ 当场红',
+  },
+
+  {
+    // ★ 同上：RasterCaps 声明 ZFOG ⇒ `FOGENABLE=1 + FOGCOLOR` 必须改像素；本线不做雾 ⇒
+    //   `d3d9/caps-claims` ⑥ 红。
+    file: 'apps/emulator-lift/src/runtime/d3d9.h',
+    from: 'constexpr std::uint32_t kCapsRasterClaim = 0x00000010u;',
+    to: 'constexpr std::uint32_t kCapsRasterClaim = 0x00200000u;',
+    guard: 'ctest:d3d9',
+    ctest: 'd3d9',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'RasterCaps 声明改回 ZFOG（本线不做雾）⇒ FOGENABLE=1 + FOGCOLOR 不改像素 ⇒ ' +
+      'd3d9/caps-claims ⑥ 当场红',
+  },
+
+  {
+    // ★ 代表 "ValidateDevice 的已裁决声明被悄悄改掉" 这一类错（REQ-01M79PP9H5XZRWFJD4BGS19S54）：
+    //   本线**没有多 pass 装备** ⇒ 恒 `S_OK,1`；写成 2 就与注释里的依据/翻面条件脱节。
+    //   判据：`apps/emulator-lift/tests/d3d9_pipeline.cpp` 的 `d3d9p/validate-device-one-pass` (i)。
+    //   ★ 这条守卫**修前不会红**（防漂移）—— 变异是它唯一会红的方向，正说明它盯的是"声明不许变"。
+    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
+    from: '    wrU32(cpu, passes_ea, 1u);  // 本线的状态组合一律单 pass',
+    to: '    wrU32(cpu, passes_ea, 2u);  // 本线的状态组合一律单 pass',
+    guard: 'ctest:d3d9-pipeline',
+    ctest: 'd3d9-pipeline',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'validateDevice 把 `*pNumPasses` 写成 2 ⇒ 与"本线无多 pass 装备"的声明矛盾 ⇒ ' +
+      'd3d9p/validate-device-one-pass 当场红',
   },
 
   {
@@ -1688,6 +1824,49 @@ const MUTATIONS = [
       'gdi-font-metrics-cache 的 `cache/size-change` 红（键里少一维正是这条守卫守的东西）',
   },
 
+  // ── 缺字形判据：`FT_Get_Char_Index != 0`，⛔ 不是 `FT_Load_Char` 的返回值 ──────────────
+  //   `REQ-01M79N1ZV391BCM7MYSKK0GVV0`：FreeType 对缺字**不报错** —— `FT_Get_Char_Index` 返回 0，
+  //   `FT_Load_Char` 仍返回 0 并加载 glyph 0（`.notdef`）。判据退回 load 的返回值 ⇒ 主字体缺的
+  //   U+E010（♡）被当成"有字形"，永远到不了游戏自带的 `AGE Extend` 后备 ⇒ 画 `.notdef` 实心块。
+  {
+    file: 'apps/emulator-lift/src/runtime/font.cpp',
+    from: '    const bool primary_has_glyph = glyphIndexFor(*impl_, primary, 0, cp) != 0;',
+    to:
+      '    // 变异：判据改回 `FT_Load_Char` 的返回值（缺字它也返回成功）\n' +
+      '    const bool primary_has_glyph = loadGlyphFor(*impl_, primary, 0, cp, size, bold, &m);',
+    guard: 'ctest:gdi-font-fallback',
+    ctest: 'gdi-font-fallback',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '缺字判据改成"load 成功" ⇒ 主 face 的 `.notdef` 被当成有字形（后备永远不被问）⇒ ' +
+      'gdi-font-fallback 的 `fallback/mask` 红（期望后备的 mask，实际是 `.notdef` 的 1×1 / advance=3）',
+  },
+
+  // ── 缺陷的另一半：shim 必须把 guest 字节**交给引擎**（⛔ 不是只记日志 / 传空 bytes）────────
+  //   `REQ-01M79N1ZV391BCM7MYSKK0GVV0`：`shimAddFontMemResourceEx` 若退回"只记日志 + 假句柄"，
+  //   则 `addMemoryFont` 永远不被调用 ⇒ 引擎里没有后备字体 ⇒ U+E010 仍画 `.notdef`。
+  //   ★ 这条必须由**经 shim** 的用例吃掉：pure 档与 assets「直接 `addMemoryFont`」两段都绕过
+  //     shim，它们对这条变异**全绿** —— 那正是原缺陷形态复发不可见的原因。
+  {
+    file: 'apps/emulator-lift/src/shims/gdi32_font.cpp',
+    from:
+      '    const std::vector<std::uint8_t> bytes = call.bytes(0, size);\n' +
+      '    std::string family;\n' +
+      '    const std::uint32_t font_id =\n' +
+      '        (cpu.fonts != nullptr) ? cpu.fonts->addMemoryFont(bytes.data(), bytes.size(), &family) : 0u;',
+    to:
+      '    // 变异：只记日志 + 假 id，**不把 guest 字节交给引擎**（原缺陷形态：丢字节）\n' +
+      '    (void)call.bytes(0, size);  // 读了但丢掉\n' +
+      '    std::string family = "AGE Extend";\n' +
+      '    const std::uint32_t font_id = 1u;  // 假 id：引擎里并没有多任何内存字体',
+    guard: 'ctest:gdi-font-fallback-assets',
+    ctest: 'gdi-font-fallback-assets',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'shim 不再把 guest 字节交给 `addMemoryFont`（只记日志 + 假句柄）⇒ 引擎 `memoryFontCount()` ' +
+      '仍是 0、U+E010 回 `.notdef` ⇒ gdi-font-fallback-assets 的 `shim/add-font-mem` 红',
+  },
+
   {
     file: 'apps/emulator-lift/src/runtime/audio.cpp',
     from: '        std::memset(out.data(), 0, out.size());',
@@ -2140,6 +2319,329 @@ const MUTATIONS = [
       'quit-graph 当场红',
   },
 
+  {
+    // ★ 代表"**纹理当渲染目标（RTT）的准入又被拒回去**"这一类错
+    //   （`REQ-01M79MSMWGFEKF8J7C7VYWS4YP`）：修前就是 `if (ctx.color_surface != 0) return false;`
+    //   ⇒ 每一批 RT 都退回 CPU 光栅（存档缩略图 `0x4A778B` / `0x4A5160` 那条路只剩 CPU 兜底）。
+    //   守卫：`apps/emulator-lift/tests/gpu_batch.cpp` 的 `d3d9p/render-to-texture`
+    //   （纯段：`queued_draws==1 ∧ rasterTargetBase()==纹理像素 ∧ fallback_draws==0`）。
+    //   ★ `/W4 /WX` 下不能写 `if (false)` / 不可达代码 ⇒ 用运行期表达式 `ctx.color_base != nullptr`
+    //     （RT 的目标基址恒非空 ⇒ 判据真的生效；编译器也不会把它折叠成常量条件告警）。
+    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
+    from: '    if (ctx.color_surface != 0) {\n        // ① 反馈环',
+    to:
+      '    if (ctx.color_surface != 0) {\n' +
+      '        const bool mutate_reject_rt = ctx.color_base != nullptr;  // 变异：把纹理 RT 重新拒掉\n' +
+      '        if (mutate_reject_rt) {\n' +
+      '            if (why) *why = "GPU 只支持默认后缓冲（变异：回到修前的准入）";\n' +
+      '            return false;\n' +
+      '        }\n' +
+      '        // ① 反馈环',
+    guard: 'ctest:gpu-batch-order',
+    ctest: 'gpu-batch-order',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'RTT 准入被重新拒掉（回到"GPU 只支持默认后缓冲"）⇒ `d3d9p/render-to-texture` 的 ' +
+      '`queued_draws==1` / `fallback_draws==0` 当场红（修前读数就是 queued=0 / fallback=1）',
+  },
+
+  {
+    // ★ 代表"**反馈环闸被删掉**"这一类错（`REQ-01M79MSMWGFEKF8J7C7VYWS4YP` 的新闸）：
+    //   同一批把 RT 纹理当采样源时，本后端采样走**上传缓存**（不是 target 自己）⇒ 读到的是本批
+    //   之前的内容：不挂死、不报错、像素是旧帧（**静默**）。删掉这条闸 ⇒ 该批照样进 GPU。
+    //   守卫：`apps/emulator-lift/tests/gpu_batch.cpp` 的 `d3d9p/render-to-texture-feedback`
+    //   （`queued_a==0 ∧ fallback_a==1 ∧ reason 含"被采样"`；控制组解绑采样后必须进 GPU）。
+    //   ★ 变异 = 闸的条件再 `&& color_base == nullptr`（RT 分支里 `color_base` 恒非空 ⇒ 闸永不触发）；
+    //     ⛔ 不写 `&& false`（`/W4 /WX` 的常量条件告警）。
+    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
+    from: '            if (rt_sampled) {',
+    to: '            if (rt_sampled && ctx.color_base == nullptr) {',
+    guard: 'ctest:gpu-batch-order',
+    ctest: 'gpu-batch-order',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '反馈环闸失效（同批把 RT 当采样纹理不再被拒）⇒ `d3d9p/render-to-texture-feedback` 的 ' +
+      '`queued_a==0` / `fallback_a==1` / reason 断言当场红',
+  },
+
+  {
+    // ★ 代表"**每次换 target 都清深度**"这一类错（RTT 复审的"必须改 ②"）
+    //   （`REQ-01M79MSMWGFEKF8J7C7VYWS4YP` 的新语义）：D3D9 的深度缓冲**属设备**、不随 color target
+    //   变；旧行为在 `rasterPrepare` 换 target 时顺手把 `need_depth_clear_` 置位 ⇒ 同尺寸切 RT 也会
+    //   把 A 写的深度清成 1.0：之后 z 更远的片元被错误接受（像素静默错，且三套旧 GPU 用例全绿）。
+    //   守卫：`apps/emulator-lift/tests/gpu_batch.cpp` 的
+    //   `d3d9p/depth-retained-across-target-switch`（A 写 z=0.5 ⇒ 切 B ⇒ z=0.7 必须被拒：B 仍是蓝；
+    //   反向：显式 Clear(ZBUFFER) 后同一笔 z=0.7 必须画出来 ⇒ 排除"永远拒绝"的假绿）。
+    //   ★ 变异 = 在 `destroyColorTarget()` 之后无条件置位（正是修前那一行的位置）。
+    //     守卫在 `--gpu` 臂（`ctest:gpu-batch-barrier`）；无 GPU ⇒ SKIP 77 = 不可判定，⛔ 不是红。
+    file: 'apps/emulator-lift/src/runtime/d3d9_gpu.cpp',
+    from: '        destroyColorTarget();\n        width_ = width;',
+    to:
+      '        destroyColorTarget();\n' +
+      '        need_depth_clear_ = true;  // 变异：换 target 就清深度（修前行为）\n' +
+      '        width_ = width;',
+    guard: 'ctest:gpu-batch-barrier',
+    ctest: 'gpu-batch-barrier',
+    buildDir: 'apps/emulator-lift/out',
+    ctestTimeoutSec: 300,
+    what:
+      '换 target 无条件清深度 ⇒ A 写的 z=0.5 在切到 B 后被清成 1.0，B 上 z=0.7 的片元被错误接受 ' +
+      '⇒ `d3d9p/depth-retained-across-target-switch` 的第一条断言（B 仍是清屏蓝）当场红',
+  },
+
+  {
+    // ★ 代表"**sprite 合成目标硬取后缓冲**"这一类错（`REQ-01M79V2TVJH98BKH0C0WQV2FET`）：
+    //   修前 `compositeBatch` 用 `dev.arena` 当前目标 ⇒ 绑纹理 RT 时 sprite 像素全进后缓冲，
+    //   RT 读回全 0（存档缩略图 `SAVE00.STH` 全黑的最后一环），且没有任何报错。
+    //   守卫：`apps/emulator-lift/tests/gpu_batch.cpp` 的 `d3d9p/sprite-render-target`
+    //   （纯段：`rasterTargetBase()==纹理像素 ∧ queued==1 ∧ sprite_gpu_draws==1`；
+    //   绑回后缓冲的控制组 `rasterTargetBase()==后缓冲像素`）。
+    //   ★ 变异 = 目标退回 `dev.arena`（保留 `target` 的其它用途 ⇒ 不产生未使用变量）。
+    file: 'apps/emulator-lift/src/runtime/d3dx9_sprite.cpp',
+    from: '    const std::uint32_t target_arena = target.arena != 0 ? target.arena : dev.arena;',
+    to: '    const std::uint32_t target_arena = dev.arena;  // 变异：退回修前（硬取设备后缓冲）',
+    guard: 'ctest:gpu-batch-order',
+    ctest: 'gpu-batch-order',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'sprite 合成目标硬取 `dev.arena` ⇒ 绑 RT 时 `rasterTargetBase()` 是后缓冲、不是纹理像素 ' +
+      '⇒ `d3d9p/sprite-render-target` 的身份断言当场红',
+  },
+
+  {
+    // ★ **端到端**的那条代表（`REQ-01M79V2TVJH98BKH0C0WQV2FET` 的落点判据）：同一处破坏
+    //   （`compositeBatch` 的合成目标退回 `dev.arena`），但守的是 `save-graph` —— 真窗口 + GPU +
+    //   `graphs/sn0000-save.graph` 走完存档路径，读 `SAVE00.STH` 的像素段。
+    //   ★ 上面那条 `gpu-batch-order` 是**纯段**证据（`rasterTargetBase()` 的身份）；这一条证明
+    //     "这处破坏真的会把存档缩略图打回全黑" —— 即 `save_graph.cpp` ③ `LIFT_CHECK(nonzero > 0)`
+    //     会红。两条都留着：纯段快、天天跑；assets 档慢，但它才是用户可见的后果。
+    //   ★ `save-graph` 是 **assets 档**（注册在 `if(EXISTS .../SYS4INI.BIN)` 里，见 CMakeLists）⇒
+    //     本机没有安装树时它**不注册**，`guardMissing` 会报「CTest 未注册」而不是假绿。
+    //   ★ 单测超时按用例自身的 CTest `TIMEOUT 1200` 留余量（缺省 120 s 会把它冤枉成"超时"）。
+    file: 'apps/emulator-lift/src/runtime/d3dx9_sprite.cpp',
+    from: '    const std::uint32_t target_arena = target.arena != 0 ? target.arena : dev.arena;',
+    to: '    const std::uint32_t target_arena = dev.arena;  // 变异：合成回到设备后缓冲（存档缩略图应全黑）',
+    guard: 'ctest:save-graph',
+    ctest: 'save-graph',
+    buildDir: 'apps/emulator-lift/out',
+    ctestTimeoutSec: 1200,
+    what:
+      'save-graph · sprite 合成目标退回 `dev.arena`（修前形态）⇒ 绑纹理 RT 时像素全进后缓冲、' +
+      'RT 读回全 0 ⇒ `SAVE00.STH` 的 payload 非零字节 = 0（缩略图全黑）⇒ save-graph 红',
+  },
+
+  {
+    // ★ 代表"**SetRenderState 的 default 又把未知状态静默存下**"这一类错
+    //   （`REQ-01M79PPA10JCKG4C9HY6QMV6PT`）：default 不拒 ⇒ 214 这种非 D3DRS 值被 setRs 写进
+    //   状态块（`Get(214)` 也能读回）⇒ 参数校验退化成"什么都收"。
+    //   守卫：`apps/emulator-lift/tests/d3d9_pipeline.cpp` 的 `d3d9p/render-state-policy` (3)
+    //   （`Set(214/210/255,1)` INVALIDCALL + guest 堆逐字节不变 + `Get(214)` INVALIDCALL）。
+    //   ★ `/W4 /WX` 下不能写 `if (false)` ⇒ 用运行期表达式 `state == 0xFFFFFFFFu`
+    //     （上界已先拒 210..255 ⇒ 这个合取恒假，但编译器不会报常量条件）。
+    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
+    from: '            if (!knownRenderState(state)) {\n                char buf[192];',
+    to: '            if (!knownRenderState(state) && state == 0xFFFFFFFFu) {\n                char buf[192];',
+    guard: 'ctest:d3d9-pipeline',
+    ctest: 'd3d9-pipeline',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'default 不再拒绝白名单外状态 ⇒ `Set(2,1)` 被存下（guest 堆变了 / Get(2)==1）' +
+      '⇒ `d3d9p/render-state-policy` (3) 当场红',
+  },
+
+  {
+    // ★ 代表"**白名单又收了一个非 D3DRS 值**"这一类错（`REQ-01M79PPA10JCKG4C9HY6QMV6PT`）：
+    //   `knownRenderState` 只许收官方 `D3DRENDERSTATETYPE` 枚举里有的值；1 是扫描伪值
+    //   （`.lst 0x4C1ED2 push 3 / 0x4C1ED6 push 1 / 0x4C1ED8 push 16h` 实际是 state 0x16=22、
+    //   值 1|3），138 在枚举里根本不存在。
+    //   守卫：`d3d9p/render-state-policy` (3) 新增的 `Set(1,*)` / `Set(138,*)` ⇒ INVALIDCALL
+    //   （且不记 bit26、guest 堆逐字节不变）—— 这条钉子就是"白名单不许收非 D3DRS 值"。
+    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
+    from: '        case 7: case 8: case 9:\n        case 14: case 15: case 16:',
+    to: '        case 1:\n        case 7: case 8: case 9:\n        case 14: case 15: case 16:',
+    guard: 'ctest:d3d9-pipeline',
+    ctest: 'd3d9-pipeline',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '白名单把非 D3DRS 的 state=1 收回来 ⇒ `Set(1,3)` 返回 S_OK（扫描伪值又被静默存下）' +
+      '⇒ `d3d9p/render-state-policy` (3) 当场红',
+  },
+
+
+  {
+    // ★ 代表"**C 档值敏感拒绝被绕过**"这一类错（`REQ-01M79PPA10JCKG4C9HY6QMV6PT`）：
+    //   C 档（175/176/184/194/195）的有效值必须 INVALIDCALL + 记 bit26，⛔ 不写状态块；
+    //   放行任何非 0 值 ⇒ sRGB 写（194）这类能力静默通过（真机行为不同，且摘要里也没有痕迹）。
+    //   守卫：同一个 `d3d9p/render-state-policy` (2)（`Set(194,1)` INVALIDCALL + bit26 + `Get(194)==0`）。
+    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
+    from:
+      '        case kRsSrgbWriteEnable:\n' +
+      '        case kRsDepthBias:\n' +
+      '            if (value != 0u) {',
+    to:
+      '        case kRsSrgbWriteEnable:\n' +
+      '        case kRsDepthBias:\n' +
+      '            if (value != 0u && state == 0xFFFFFFFFu) {',
+    guard: 'ctest:d3d9-pipeline',
+    ctest: 'd3d9-pipeline',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'C 档值敏感拒绝失效（非 0 值被接受并 setRs）⇒ `Set(194,1)` 返回 S_OK / `Get(194)==1` / ' +
+      'bit26 不置位 ⇒ `d3d9p/render-state-policy` (2) 当场红',
+  },
+
+  {
+    // ★ 代表"**未支持位的位号漂移**"这一类错：bit26（未分类 D3DRS）与 bit25（纹理级 ALPHAOP）
+    //   在摘要/守卫里必须分得开；挪到 25 ⇒ 同一个拒绝被记进别人的位。
+    //   守卫：`d3d9p/render-state-policy` (2) 的 `PipelineInfo::unsupported` 位断言。
+    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
+    from: '    kUnRenderStateUnknown = 26,  // #6：合法 D3DRS / C 档值敏感拒绝（或未知状态）',
+    to: '    kUnRenderStateUnknown = 25,  // 变异：与 kUnAlphaOpLevel 同位（守卫必须查 26）',
+    guard: 'ctest:d3d9-pipeline',
+    ctest: 'd3d9-pipeline',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'bit26 改成 25 ⇒ `Set(194,1)` 的拒绝记到 bit25（bit26 不置位）' +
+      '⇒ `d3d9p/render-state-policy` (2) 的位图断言当场红',
+  },
+
+  {
+    // ★ 代表"**BaseVertexIndex 被忽略 / 只按 idx 取顶点**"这一类错
+    //   （`REQ-01M79PP9S4BFBPKDPBQBDN5GGR`）：`vi = base + idx - min` 等价于旧的"忽略 min"，
+    //   负 base 的合法索引区间 [min,min+n) 会被算成负顶点号 ⇒ 合法调用被假拒。
+    //   守卫：`d3d9p/indexed-range` (a)(b)（base=-2/min=2、base=-1/min=1 必须 S_OK 且像素正确）。
+    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
+    from:
+      '        const std::int64_t vertex_index = static_cast<std::int64_t>(base_vertex) + static_cast<std::int64_t>(idx);',
+    to:
+      '        const std::int64_t vertex_index = static_cast<std::int64_t>(base_vertex) + static_cast<std::int64_t>(idx) - min64;',
+    guard: 'ctest:d3d9-pipeline',
+    ctest: 'd3d9-pipeline',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '`vi = base + idx` 改回忽略 min（减去 min64）⇒ (a)(b) 的负 base 合法调用变成 vi<0 假拒 ' +
+      '⇒ `d3d9p/indexed-range` (a)(b) 当场红',
+  },
+
+  {
+    // ★ 代表"**MinVertexIndex 的下界被删**"这一类错（`REQ-01M79PP9S4BFBPKDPBQBDN5GGR`）：
+    //   只留 `idx >= min+n` 就放过了 `idx < min` ⇒ 按顶点 0/1/3 静默画出错误的像素。
+    //   守卫：`d3d9p/indexed-range` (c)（base=0/min=2/n=4、IB{0,1,3} 必须 INVALIDCALL + 像素不变）。
+    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
+    from:
+      '        if (static_cast<std::int64_t>(idx) < min64 || static_cast<std::int64_t>(idx) >= min64 + num64) {',
+    to:
+      '        if (idx == 0xFFFFFFFFu || static_cast<std::int64_t>(idx) >= min64 + num64) {',
+    guard: 'ctest:d3d9-pipeline',
+    ctest: 'd3d9-pipeline',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '删掉 `idx < min64` 的下界判断 ⇒ (c) 的 IB{0,1,3} 被放行、按顶点 0/1/3 画出像素 ' +
+      '⇒ `d3d9p/indexed-range` (c) 当场红',
+  },
+
+  {
+    // ★ 代表"**无 GPU 时又静默降级**"这一类错（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：
+    //   把启动期那道"没有 GPU ⇒ 退出 2 + 指路"改成恒不触发 ⇒ 子进程会继续走到"找不到执行源"
+    //   （或真的开跑），stderr 里没有那句 GPU 拒绝文案。
+    //   守卫：`lift/no-gpu-refuses-start`（`tests/gpu_batch.cpp` 的子进程臂；`SDL_VIDEODRIVER=dummy`
+    //   强制"建不出 GPU device"，⛔ 不靠真拔显卡；后端在**执行源定位之前**建 ⇒ 不需要游戏资产）。
+    file: 'apps/emulator-lift/src/main.cpp',
+    from: '        if (!ok || !sdl->rasterActive()) {',
+    to: '        if (false) {',
+    guard: 'ctest:lift/no-gpu-refuses-start',
+    ctest: 'lift/no-gpu-refuses-start',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '无 GPU 时不再拒绝启动（改回静默继续）⇒ 子进程 exit 2 的原因是"找不到执行源"而不是 GPU ' +
+      '⇒ `lift/no-gpu-refuses-start` 当场红',
+  },
+
+  {
+    // ★ 代表"**`--raster` 的解析被加回来**"这一类错（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：
+    //   那个"显式 CPU 后端"开关又活了 ⇒ `--raster cpu` 不再被当成未知参数（exit 2），
+    //   而是静默吞掉、继续跑。
+    //   守卫：`lift/raster-flag-gone`（子进程臂：exit 必须是 2 且 stderr 含"未知参数"）。
+    file: 'apps/emulator-lift/src/main.cpp',
+    from: '        } else if (std::strcmp(a, "--assert-guest-token") == 0) {',
+    to: '        } else if (std::strcmp(a, "--raster") == 0 && i + 1 < arg_count) {\n            (void)args[++i];\n        } else if (std::strcmp(a, "--assert-guest-token") == 0) {',
+    guard: 'ctest:lift/raster-flag-gone',
+    ctest: 'lift/raster-flag-gone',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '把已删的 `--raster` 解析加回来 ⇒ 传进去的 `--raster cpu` 被静默接受、不再 exit 2 ' +
+      '⇒ `lift/raster-flag-gone` 当场红',
+  },
+
+  {
+    // ★ 代表"**headless 不打印 `present : … window=hidden`**"这一类错（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：
+    //   那一行被塞回 `if (present_mode != "headless")` ⇒ `--present headless` 的日志里没有 present 行，
+    //   `window=hidden` / 实际 driver 这两项观测点消失（headless 的隐藏窗口不再是可断言的事实）。
+    //   守卫：`gpu-batch/headless-hidden-window`（`tests/gpu_batch.cpp` 起真子进程跑
+    //   `--present headless --max-frames 2 --skip-logo --audio off`，断言 stdout 含 `window=hidden`
+    //   与 driver/gpu/present 三栏；宿主 = CTest `gpu-batch-barrier`，无 GPU ⇒ SKIP 77）。
+    file: 'apps/emulator-lift/src/main.cpp',
+    from:
+      '    std::printf("present   : %s\\n", display->describe().c_str());\n\n' +
+      '    bool present_window_active = false;\n' +
+      '    if (present_mode != "headless") {',
+    to:
+      '    bool present_window_active = false;\n' +
+      '    if (present_mode != "headless") {\n' +
+      '        std::printf("present   : %s\\n", display->describe().c_str());',
+    guard: 'ctest:gpu-batch-barrier',
+    ctest: 'gpu-batch-barrier',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '把 headless-hidden-window 的 present 行改回"只在非 headless 打" ⇒ `--present headless` 的日志里' +
+      '没有 `present : … window=hidden` ⇒ `gpu-batch/headless-hidden-window` 当场红',
+  },
+
+  {
+    // ★ 代表"**underrun 插静音的判据被改回照读环**"这一类错（`REQ-01M75PTAC1JJ3G4QGQDRB1G4V8`
+    //   的实时口径，设计 `.tmp/audio-phase/design.md` §1.4 / §1.6）：
+    //   判据 = 写见证 `[stream+0x2468]`（fill 前后变了 = 这一刀写了环）；读指针第 n 次进入
+    //   quarter q 时 `witness[q] == consumed[q]` ⇒ 这一圈 q 区没被重写过 ⇒ 该区交付 0。
+    //   变异 = 把它改成恒 fresh（`false`）⇒ 第 2 圈照读上一圈的旧内容 = **重播**（正是本单的
+    //   产品现象），且 `underrun_silence_events/bytes` 归零。
+    //   守卫：`apps/emulator-lift/tests/audio.cpp` 的 `audio-device/underrun-silence-stale`
+    //   （Virtual + `sound=true`，不注册 feeder ⇒ 天然 0 刀，恰好 2 圈）。
+    //   ⛔ 不用内容比对当判据：guest 自己"放完 + memset 0"也是全 0（`guest-zeros` 用例钉住）。
+    file: 'apps/emulator-lift/src/runtime/audio.cpp',
+    from: '                    b.read_stale = (b.witness[quarter] == b.consumed[quarter]);',
+    to: '                    b.read_stale = false;  // 变异：恒 fresh（环陈旧时照读上一圈的内容 = 重播）',
+    guard: 'ctest:audio-device',
+    ctest: 'audio-device',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '把"环陈旧 ⇒ 交付静音"的判据改成恒 fresh（照读环）⇒ 第 2 圈是斜坡重播、' +
+      'underrun_silence_events/bytes 归零 ⇒ `audio-device/underrun-silence-stale` 当场红',
+  },
+
+  {
+    // ★ 代表"真 fill 跑完不落写见证"这一类错（`REQ-01M75PTAC1JJ3G4QGQDRB1G4V8` 的复审 M1）：
+    //   `noteFillWitness` 的 `++witness[quarter]` 是"这一刀写了环 ⇒ 下个圈进该 quarter 不判陈旧"
+    //   的**唯一**机械来源；而 stats 的 `fill_witnessed` 是同一个 `if` 里的**另一行** ⇒ 只断言
+    //   stats 钉不住它（复审实测：删掉这行时 audio-device 全部用例仍绿、旧 206 checks 全绿 =
+    //   本轮的 M1 空洞；本用例就是补上的那条守卫）。
+    //   变异 = 删掉那句 `++witness[quarter]` ⇒ `witness[]` 只剩 `markRingFresh` / 夹具 seam 的值。
+    //   守卫：`apps/emulator-lift/tests/audio.cpp` 的 `audio-device/fill-witness-wiring` ——
+    //   照 `runDelivery` 跑一刀**真 fill**（D 臂），断言"真 fill 前后恰好一个 quarter 的
+    //   `witness` +1"（② 反方向：没写环 ⇒ 0）。
+    file: 'apps/emulator-lift/src/runtime/audio.cpp',
+    from:
+      '    if (read_ok && pre == post) return;  // 没写 ⇒ witness 不动\n' +
+      '    ++b->witness[quarter];',
+    to:
+      '    if (read_ok && pre == post) return;  // 没写 ⇒ witness 不动\n' +
+      '    // 变异：真 fill 不再落写见证（`witness[]` 只剩 `markRingFresh` / 夹具 seam 喂的值）',
+    guard: 'ctest:audio-device',
+    ctest: 'audio-device',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '真 fill 跑完不再 `++witness[quarter]` ⇒ 该 quarter 的写见证不涨（stats 的 `fill_witnessed` 照涨）' +
+      ' ⇒ `audio-device/fill-witness-wiring` 的"恰好一个 quarter +1"当场红',
+  },
 
 ];
 

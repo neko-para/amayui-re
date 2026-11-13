@@ -23,7 +23,7 @@
 //   修前也是 exit 0）。加了 wait 之后修前**必然红**（A：`=== guest memory fault ===` +
 //   exit 3；B：`stop: unimplemented @ eip=004E6E3F` + `软件中断` + exit 2）。
 //
-// ★ 为什么用 `--present window --present-hidden --raster gpu`：`--present headless` 是 CPU
+// ★ 为什么用 `--present window --present-hidden`：`--present headless` 早先走的是 CPU
 //   光栅化（实测 490 帧要 10 分钟以上）；窗口隐藏仍无焦点、无真实光标。
 // ★ GPU / 窗口 / 安装不可用 ⇒ `LIFT_SKIP`(77)（那是"环境不满足"，不是"判据红"）。
 // ★ 子进程输出走**文件重定向**（不走管道：受限沙箱里捕获管道会 EPERM）。
@@ -38,6 +38,7 @@
 
 #include "check.h"
 #include "runtime/host_encoding.h"
+#include "subprocess_skip.h"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -134,9 +135,10 @@ ChildResult runChild(const fs::path& exe, const std::wstring& args, const fs::pa
 
 // 环境不可用（不是判据红）：GPU / 窗口 / 执行源。⚠ 不要匹配 `game-dir` —— 那行每个
 // 正常启动都会打印（会把任何非 0 退出都误判成环境问题）。
+// ★ "GPU 拒绝启动"**不在这里**：它由 `LIFT_SKIP_IF_NO_GPU` 单独判（要求本机实探无 GPU）。
 bool environmentUnavailable(const std::string& log) {
     return contains(log, "要求 GPU 光栅化") || contains(log, "窗口打开失败") ||
-           contains(log, "找不到执行源") || contains(log, "拒绝启动");
+           contains(log, "找不到执行源");
 }
 
 // 崩溃 / 停机痕迹（判据 ③）。分组注释写清每条来自哪次实测。
@@ -186,7 +188,7 @@ int main(int argc, char** argv) {
         std::wstring child_args;
         child_args += L"--appdata " + quoteArg(appdata.wstring());
         child_args += L" --game-dir " + quoteArg(game_dir.wstring());
-        child_args += L" --skip-logo --present window --present-hidden --raster gpu";
+        child_args += L" --skip-logo --present window --present-hidden";
         child_args += L" --input-script " + quoteArg(script.wstring());
         child_args += L" --max-frames 400 --time-limit 300";
         const ChildResult r = runChild(exe, child_args, log_path);
@@ -195,6 +197,8 @@ int main(int argc, char** argv) {
         if (log.empty()) LIFT_SKIP("子进程没写日志（工作目录 / 权限问题）");
         std::printf("title-entry-paths: path=%s exit=%lu log=%s (%zu 字节)\n", id.c_str(),
                     static_cast<unsigned long>(r.exit_code), log_path.string().c_str(), log.size());
+        // ★ 无 GPU：子进程在跑 guest 之前就拒绝启动 ⇒ 环境缺失，SKIP 77（原因进输出）。
+        LIFT_SKIP_IF_NO_GPU(r.exit_code, log);
         if (r.exit_code != 0 && environmentUnavailable(log)) {
             LIFT_SKIP("GPU / 窗口 / 游戏安装不可用 ⇒ 这条不是判据红");
         }

@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "check.h"
+#include "subprocess_skip.h"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -235,6 +236,9 @@ int main(int argc, char** argv) {
     const ChildRun omit = run("omit", L"");
     LIFT_CHECK(omit.started);
     LIFT_CHECK(!omit.timed_out);
+    // ★ 无 GPU（含 `SDL_VIDEODRIVER=dummy`）：子进程在跑 guest 之前就拒绝启动 ⇒ SKIP 77。
+    //   真正的参数错误 / 回归仍然红（判据见 `tests/subprocess_skip.h`）。
+    LIFT_SKIP_IF_NO_GPU(omit.exit_code, omit.err);
     LIFT_CHECK_EQ_U32(omit.exit_code, 0u);
     LIFT_CHECK(hasLineStartingWith(omit.out, "stop"));
     LIFT_CHECK(hasLineStartingWith(omit.out, "insns"));

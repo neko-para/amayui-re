@@ -88,7 +88,26 @@ struct AudioStats {
     std::uint64_t fill_bytes = 0;
     std::uint64_t deferred = 0;
     std::uint64_t dropped = 0;
+    // ★ `underruns` = **episode** 计数：设备队列空 **∪ 环陈旧**（宿主替 guest 补静音，见下面四个
+    //   字段）。★ 口径已从"只在 SDL 队列 == 0 时计"扩一档（2026-11-13，`M-07` 同步改）⇒
+    //   "`underruns == 0` 才算健康"的口径继续成立，分项看 `underrun_silence_*`。
     std::uint64_t underruns = 0;
+    // ★ underrun 插静音（`.tmp/audio-phase/design.md` §1.5；判据 = **写见证**，⛔ 不是内容比对）：
+    //   underrun_silence_bytes = 宿主替 guest 填的静音**输出字节**（48k/16/2 ⇒ 每帧 +4；同一
+    //     输出帧多条流都陈旧只 +4 一次）—— "不可听的部分有多少"；
+    //   underrun_silence_events = "过圈发现环陈旧"的次数（每 quarter 每圈最多 1 次）= episode；
+    //   fill_witnessed = `[stream+0x2468]` 前后**变了**的 fill 数（= 真写了环的刀）；
+    //     `fills - fill_witnessed` = 引擎早退（`[+0x2458]==0` 的 Stop 分支，那条不 inc）
+    //     **或**那一刀 `[+0x2468]` 读不到（按"写了"处理但不算见证）。
+    //   guest_silence_fills = 收尾时 `[+0x2458] >= 2` **且被见证**的 fill 数（引擎"放完 + 填 0"）
+    //     ⇒ 它 > 0 而 `underrun_silence_bytes == 0` 就是"guest 自己写的静音"，不是宿主插的。
+    //   不变式：① `underrun_silence_bytes <= mixed_bytes`（静音也是内容，照常进 mixed）；
+    //     ② `guest_silence_fills <= fill_witnessed <= fills`；③ `underruns >= underrun_silence_events`。
+    //   ★ 只进 summary 的观测口径不变（读数进 docs，不进 test 的绝对值断言）。
+    std::uint64_t underrun_silence_bytes = 0;
+    std::uint64_t underrun_silence_events = 0;
+    std::uint64_t fill_witnessed = 0;
+    std::uint64_t guest_silence_fills = 0;
     // ★ D1/D4 的诊断（只进 summary，不作为断言取值；见 docs/audio-implementation.md §5）：
     //   stale = 被 Stop / SetCurrentPosition 作废掉的通知条目（generation 不符）；
     //   slot_miss = feeder `findSlot` 失败（obj 反演不到槽；API 不定义"事件↔槽"）；
@@ -215,6 +234,17 @@ public:
     //   否则等的人会丢唤醒）。⛔ 不进生产路径；⛔ 不要改成无锁 check-then-set
     //   （见 `filling_obj_` 成员上的注记）。
     void setFillInFlightForTest(std::uint32_t obj_ea);
+    // ★ 仅夹具：等价于"某一刀 fill 跑完并写了环"（`witness[quarter]++`）。
+    //   存在理由：纯档一次 `Machine::run` 只能铺/跑一帧（`machine.cpp` 收尾会 `audio_.end()`），
+    //   而"过圈陈旧"最早出现在第 2 圈 ⇒ 一条 pure 用例里跑不完两圈真 fill。
+    //   ⛔ 只喂 witness，不写 guest 内存、不改 `playing` / 游标 / 统计 / 不假装见过 guest 的静音。
+    void noteFillForTest(std::uint32_t obj_ea, std::uint32_t quarter);
+    // ★ 仅夹具：读回某 quarter 的写见证计数（`Buffer::witness[quarter]`，见该成员的注记）。
+    //   存在理由：`noteFillWitness` 的 `++witness[quarter]` 是"真 fill 写完环 ⇒ 下个圈进该
+    //   quarter 不判陈旧"的**唯一**机械来源，而它是**内部状态**（stats 里只有 `fill_witnessed`，
+    //   挂在同一个 `if` 的**另一行**）⇒ 只断言 stats 钉不住它（实测：删掉那行全部旧用例仍绿）。
+    //   ⛔ 只读（取 `mutex_`、不做任何判定）；⛔ 不进生产路径。
+    std::uint64_t fillWitnessForTest(std::uint32_t obj_ea, std::uint32_t quarter);
     // 仅夹具：读回 `filling_obj_`（断言"清 0 真的生效"；生产路径不要用）。
     std::uint32_t fillInFlightForTest() const { return filling_obj_.load(); }
     // ★ 只读公开面：本线程是否是音频 feeder 线程（`isFeederThread()` 的公开转发）。
@@ -241,6 +271,21 @@ private:
         std::uint64_t start_mixed = 0;   // 这条流在全局混音时间线上的起点
         std::uint32_t notify_count = 0;
         std::uint32_t notify_off[4] = {};
+        // ★ 写见证（`.tmp/audio-phase/design.md` §1.2 / §1.3；全部在 `mutex_` 下）：
+        //   `witness[q]` = 该 quarter 区"跑完并写了环"的 fill 计数（宿主侧账，来源 = `[+0x2468]`
+        //     在 fill 前后变了）；`consumed[q]` = 上一次**开始读**这个 quarter 时的 `witness` 值。
+        //   ⇒ 读指针进入 quarter q 时 `witness[q] == consumed[q]` = 这一圈 q 区**没有被任何跑完的
+        //     fill 重写过** ⇒ 该区交付静音（⛔ 不是重播上一圈）。
+        //   ⛔ 判据是**写见证**，不是内容比对：guest 自己"放完 + memset 0"也是全 0
+        //     （`[+0x2458]==2` 走的是同一条 inc 路径 ⇒ 记见证 ⇒ 不会被判陈旧）。
+        std::uint64_t witness[4] = {};
+        std::uint64_t consumed[4] = {};
+        std::uint32_t read_quarter = 0;  // 读指针当前所在 quarter（过圈检测）
+        bool read_started = false;       // 起播 / 复位后第一次判定还没做
+        // ★ 当前 `read_quarter` 是否已判陈旧（**跨 `generateTo` 调用**保持：一次混音往往只
+        //   覆盖 quarter 的一部分，不能每帧重判 —— 转换时 `consumed` 已被更新成 `witness`，
+        //   重判会把健康 quarter 判成陈旧）。只在 quarter 切换时（重新）赋值。
+        bool read_stale = false;
         // 增益按 SetVolume/SetPan 缓存（guest 状态块仍是权威；这里只是混音快路径）。
         std::int32_t volume = 0;
         std::int32_t pan = 0;
@@ -274,6 +319,21 @@ private:
 
     Buffer* find(std::uint32_t state_ea);
     const Buffer* find(std::uint32_t state_ea) const;
+    // ★ 写见证的复位（design §1.3 的表）：把整圈视为**已预填** —— `consumed[q] = witness[q];
+    //   ++witness[q]`，然后 `read_started = false`。锚：P1 预填 q=1,2,3 是主线程 guest 调用
+    //   （不经 `feederEvent` ⇒ 宿主无账），q0 由 offset-0 通知补（design §1.7 假设 A1）。
+    //   调用方持有 `mutex_`；`addBuffer` / `setNotify` / `play`（false→true）/ `setPosition`
+    //   （playing 时）各调一次。
+    void markRingFresh(Buffer& b);
+    // ring 偏移 → quarter：first i with `notify_off[i] > ring_off`，否则 0。要求 `notify_count==4`
+    //   且 off 升序（调用方先判；off0==0 时与 guest 的 `[off[q-1], off[q])` 同构）。
+    static std::uint32_t quarterOfRingOffset(const Buffer& b, std::uint32_t ring_off);
+    // 一刀 fill **跑完**后的写见证记账（design §1.2 事实 2 / §1.5）。`read_ok` = fill 前后两次
+    //   `[+0x2468]` 都读得到；`pre`/`post` 是那两次的值；`guest_silence` = 收尾时 `[+0x2458]>=2`。
+    //   读不到 ⇒ **按"写了"处理**（宁可不插静音，也不误插）+ 不计见证。
+    //   调用方持有 `mutex_`（`feederEvent` 的收尾块 / `pump` 的 continuation 里各一处）。
+    void noteFillWitness(std::uint32_t obj_ea, std::uint32_t quarter, bool read_ok, std::uint32_t pre,
+                         std::uint32_t post, bool guest_silence);
     // 按 guest 的 IDirectSoundBuffer8 EA 反查（feeder 只有 obj）。★ 内部取递归 `mutex_`，
     //   返回的指针只在同一次持锁里有效（`buffers_` 是 vector）。
     Buffer* findByObj(std::uint32_t obj_ea);
@@ -334,6 +394,8 @@ private:
     bool warned_slot_mismatch_ = false;
     // feeder 的 `findSlot` 失败（D4）首次一行 Warn；之后只 `stats_.slot_miss` 计数。
     bool warned_slot_miss_ = false;
+    // 环陈旧（宿主插静音）首次一行 Warn；之后只 `underrun_silence_bytes/events` 计数。
+    bool warned_underrun_ = false;
     bool underrun_active_ = false;
 
     std::vector<Buffer> buffers_;

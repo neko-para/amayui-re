@@ -98,7 +98,7 @@ click 100 100
 而 guest 侧硬停（`unimplemented-slot` = 已注册的槽 / 形态没实现、`resource-exhausted` = 我方容量不够、
 `ExitProcess`）会让任务停在半路。⇒ 判据只有一条：**没有到达 `task done` 就不是成功**（同一个非 0 退出码 + 同样的现场输出）。
 ★ 退出码口径（`REQ-01M6WW9R6SJ7P8XA4522XCR48A` 落地后）：`unimplemented-slot` / `resource-exhausted`
-**不是**正常结局 ⇒ 没有交互图时 exit 2（`--gpu-strict` 也先判 2）；`ExitProcess` 仍是正常结局
+**不是**正常结局 ⇒ 没有交互图时 exit 2；`ExitProcess` 仍是正常结局
 （`Stopped` ⇒ `ok()` 真 ⇒ 0）。所以这条必须**自己判**：只看退出码时，`ExitProcess` 停在任务半路仍然看起来成功。
 
 三种一律：**非 0 退出** + 存最后画面（`--interaction-fail-dump`，缺省 `<graph>.fail.bmp`；⛔ 不是

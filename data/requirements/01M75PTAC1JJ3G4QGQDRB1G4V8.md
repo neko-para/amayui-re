@@ -63,3 +63,10 @@ slot=11 q3  guest=1716.85 shimtok=1532.98 shimblk=7   total=1743.79
 `graphs/se-eof.graph` + `--audio sdl` + `--audio-dump`（`SDL_AUDIODRIVER=disk --sound` 取到非零 WAV）：
 在 lag=2.000 s 处**没有**重复段（8 s 之后逐块 max|diff| 都是 4–5 位数量级，没有匹配块）。
 ⇒ 本机不复现"尾声重播"；根因单 `REQ-01M75VZXV4SDMVVM1Z72G009XJ` 与 Windows A/B 见 `REQ-01M770JFDPZKKJR7D0ZZ09FJJ7`。
+
+## 判据订正（2026-11-13 · 实时口径，设计见 `.tmp/audio-phase/design.md` §3.1）
+
+- 阻塞者仍是 `REQ-01M75VZXV4SDMVVM1Z72G009XJ`（状态不变）；本单**只改判据**，不提前收口。
+- 新判据（不追 PCM 逐位）：实时臂 30 s 内 `fill_wait_timeouts == 0` 且 `underrun_silence_events == 0`（宿主没插过静音 ⇒ 没有"旧位置重播"的窗口），
+  再加上通知账（`notify <= fills + stale + slot_miss + slot_reverify_fail + dropped`）。
+- 旧的"pump 臂两臂 WAV 逐字节相同"降为**阴性对照**（不是产品证据）。

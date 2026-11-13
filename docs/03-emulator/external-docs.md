@@ -59,6 +59,6 @@
 | 8 | `CreateThread` 是**伪线程**：只发线程句柄，**不执行 start routine**（音频 feeder 例外，走真宿主线程） | 游戏 VM 必须确定性地单线程；只有音频是被明确拆出去的两条宿主线程 | 玩家：可复现；开发：没有 TSO 全局软模拟 | `apps/emulator-lift/README.md` §2.5 |
 | 9 | **没有真 swap chain**：`Present` / `Flip` 只把当前后缓冲（/ primary）送给呈现汇点，**不交换**前后台 | guest 从来没有写过第二块后缓冲；建真交换链只会多一份要同步的状态 | 开发：`--dump-frame` 与窗口像素 1:1 可对照 | `runtime/d3d9.cpp:632-691`、`runtime/ddraw_surface.cpp:757-793` |
 | 10 | surface arena 容量**自定**：`0x28000000` 起 128 MiB（`SurfaceArena` 不模拟显存上限） | 真机的上限由驱动/显存决定，不可知；按"这个 EXE 用得到"给固定区 | 开发：分配失败是**确定性**的（容量不够 ⇒ `E_OUTOFMEMORY` + 见 #1） | `runtime/machine.cpp:107`、`runtime/surface.h:39` |
-| 11 | GPU 后端的深度的口径：D32 target 从 1.0 起，**不镜像 guest 深度缓冲**；sprite 路径直接关深度 | CPU 参考后端才是像素真源；GPU 只加速"能等价表达"的那批 | 开发：GPU/CPU 的差异面被限定在"非 1.0 的 `Clear(ZBUFFER)` / 交替写深度" | `apps/emulator-lift/README.md` §4.2b |
+| 11 | GPU 后端的深度的口径：D32 target 从 1.0 起，**不镜像 guest 深度缓冲**；sprite 路径直接关深度 | **GPU 是唯一光栅实现**（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`：无 GPU ⇒ 拒绝启动）；这是 GPU 覆盖面还没补上的一块，**不是**「另有一条更权威的实现」 | 开发：差异面被限定在「非 1.0 的 `Clear(ZBUFFER)` / 交替写深度」，属待补的 GPU 覆盖 | `apps/emulator-lift/README.md` §4.2b |
 | 12 | `VirtualProtect` **不真的改保护**：所有已提交页恒 `PAGE_READWRITE`，旧保护恒写回 4；请求别的保护时打一行日志 | 本线只有 RW 页；真的 `mprotect` 会让"读已释放页"这类 bug 变成 SIGSEGV（而我们要的是可诊断的 guest fault） | 排障的人：越界读有可读诊断 | `shims/kernel32_mem.cpp:587-600` |
 | 13 | DirectSound 静音档的 `GetCurrentPosition` **两个出参同值**（`play == write`），游标 = 累计 `Unlock` 字节 | 没有真设备消费；分成两个游标只会让"引擎认为还差多少"失真 | 玩家：音频不推进时不会误判为"播完了" | `shims/dsound.cpp:884-893` |

@@ -59,9 +59,11 @@ export function isRealInsnLine(body) {
  *   只认前一种的代价（本单实测，`REQ-01M71BT8GMBMMYQNA8FGWWJB`）：后者 **122 行**整类漏掉 ⇒ 那些 EA 的
  *   `collapsed` 是 `false`，被当成"函数体只有一行注释"的普通站点（`bodies` 只有一条注释放不进真正的指令），
  *   依赖它的判定在这一类站点上**绿而错**。所以这里只看词根 `COLLAPSED`（两种说法都含它）；
- *   形态差异留给 `disasm.mjs` 的 `parseCollapsedLine`（那里要**读出长度**）。
+ *   形态差异留给 `parseCollapsedBlock`（本模块；读名字 / 声明长度）与 `disasm.mjs` 的
+ *   `parseCollapsedLine`（`disasm-at` 取字节那条路径只关心长度）。
  *   第三种是 `; START OF FUNCTION CHUNK FOR sub_XXXXXX`（孤立 CHUNK，没有 `[NNNN BYTES:`）—— 它**不含** `COLLAPSED`，
- *   单独保留：它也是折叠块的位置（不是函数体），语义与前两者同一类。
+ *   单独保留：它同样是**站点**（不是函数体）；但它只是**分块起点**，后面通常紧跟着真指令
+ *   ⇒ `parseCollapsedBlock` 对它给 `folded: false`（不能当成"被折叠掉的区间"报）。
  *
  * ★ 裸 `COLLAPSED` 不会吸进别的东西：`parseListingText` 在调用处先过 `isCommentLine`，
  *   而这个词只会出现在 IDA 的折叠注释里（指令行没有 `;` 正文）。
@@ -69,6 +71,38 @@ export function isRealInsnLine(body) {
  *   要求"含 `COLLAPSED` ⇒ 必须命中"，不许只看一个样例。
  */
 export const COLLAPSED_RE = /COLLAPSED|START OF FUNCTION CHUNK/i;
+
+/**
+ * 一条注释行如果是**折叠块**，读出它的**名字与声明长度**（`parseListingText` 只判布尔，这里要读数）。
+ *
+ * ★ 门是**同一份** `COLLAPSED_RE` —— 这里**不另立**"什么算折叠"的判据，只负责从命中的行里取字段。
+ * ★ 只有 `; [NNNNNNNN BYTES: COLLAPSED FUNCTION|CHUNK OF FUNCTION <名>. …]` 才是 **`folded: true`**：
+ *   那种区间在 listing 里**一行指令都没有**（`tools/lib/catalog.mjs` 用它回答"这个 EA 落在被折叠的块里"）。
+ * ★ `; START OF FUNCTION CHUNK FOR <名>` **不含** `[NNNN BYTES:`，而且后面通常紧跟着**真指令**
+ *   （实测 `0x401C90` 那一块就是展开的）⇒ `declaredBytes: null`、`folded: false`：
+ *   它是**分块起点**，不是"被折叠掉的区间"，不能当折叠块报。
+ *
+ * @param {string} body 一行 `.lst` 的正文列（`; ...`）
+ * @returns {{sym:string, declaredBytes:number|null, kind:'function'|'chunk'|'start-of-chunk', folded:boolean}|null}
+ *   不是折叠行 ⇒ `null`（不猜）
+ */
+export function parseCollapsedBlock(body) {
+  if (typeof body !== 'string' || !isCommentLine(body) || !COLLAPSED_RE.test(body)) return null;
+  const m = /\[([0-9A-Fa-f]{8})\s+BYTES:\s*COLLAPSED\s+(FUNCTION|CHUNK OF FUNCTION)\s+([^\]]+)\]/i.exec(body);
+  if (m) {
+    // `j_RtlUnwind. PRESS CTRL-NUMPAD+ TO EXPAND` ⇒ `j_RtlUnwind`（名字里可以有 `(x,x)` / `::` / `*`，只去掉尾部的 PRESS 与句点）
+    const sym = m[3].replace(/\s*PRESS\b[\s\S]*$/i, '').replace(/\s*\.\s*$/, '').trim();
+    return {
+      sym: sym || null,
+      declaredBytes: Number.parseInt(m[1], 16),
+      kind: /CHUNK OF FUNCTION/i.test(m[2]) ? 'chunk' : 'function',
+      folded: true,
+    };
+  }
+  const chunk = /START OF FUNCTION CHUNK FOR\s+([^\s]+)/i.exec(body);
+  if (chunk) return { sym: chunk[1], declaredBytes: null, kind: 'start-of-chunk', folded: false };
+  return null;
+}
 
 /**
  * 解析 listing 文本 ⇒ 索引。

@@ -28,6 +28,7 @@
 
 #include "check.h"
 #include "runtime/machine.h"
+#include "subprocess_skip.h"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -349,6 +350,9 @@ int main(int argc, char** argv) {
         const ChildRun r = runArm(emulator, root, "exit3", "ExitProcess", callOneArgImport(3u));
         LIFT_CHECK(r.started);
         LIFT_CHECK(!r.timed_out);
+        // ★ 无 GPU 的机器 / `SDL_VIDEODRIVER=dummy`：子进程在**跑 guest 之前**就拒绝启动
+        //   ⇒ 这条不是判据红，是环境缺失（原因写进输出）。真正参数错误仍红。
+        LIFT_SKIP_IF_NO_GPU(r.exit_code, r.err);
         std::printf("exit-process(3): exit=%d\n", r.exit_code);
         LIFT_CHECK_EQ_I64(r.exit_code, 2);                    // ★ 宿主进程退出码（⛔ 不是 accessor）
         // 默认日志级别（warn）就能看见 n 本身（诊断所需），且证明走的是 ExitProcess。
@@ -362,6 +366,7 @@ int main(int argc, char** argv) {
         const ChildRun r = runArm(emulator, root, "exit0", "ExitProcess", callOneArgImport(0u));
         LIFT_CHECK(r.started);
         LIFT_CHECK(!r.timed_out);
+        LIFT_SKIP_IF_NO_GPU(r.exit_code, r.err);
         std::printf("exit-process(0): exit=%d\n", r.exit_code);
         LIFT_CHECK_EQ_I64(r.exit_code, 0);                    // ★ n == 0 保持 0
         LIFT_CHECK(contains(lineStartingWith(r.out, "detail"), "ExitProcess"));
@@ -374,6 +379,7 @@ int main(int argc, char** argv) {
         const ChildRun r = runArm(emulator, root, "term3", "TerminateProcess", callTwoArgImport(3u, 0u));
         LIFT_CHECK(r.started);
         LIFT_CHECK(!r.timed_out);
+        LIFT_SKIP_IF_NO_GPU(r.exit_code, r.err);
         std::printf("terminate-process(3): exit=%d\n", r.exit_code);
         LIFT_CHECK_EQ_I64(r.exit_code, 2);
         LIFT_CHECK(contains(r.err, "kernel32!TerminateProcess"));

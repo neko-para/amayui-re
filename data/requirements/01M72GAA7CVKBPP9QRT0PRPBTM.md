@@ -5,7 +5,7 @@
 - status: open
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
 - repro: apps/emulator-lift/src/runtime/seh.cpp#Seh::step
-- severity: S2
+- severity: S3
 - tags: [emulator-lift, seh, seh-dispatch]
 
 ## 一句话
@@ -28,7 +28,9 @@ guest 的 C++ 异常（`0xE06D7363`，`ExceptionFlags=0x1` NONCONTINUABLE）派�
 
 ## 判据（修好后必须成立）
 1. `handler 返回 1 ∧ (ExceptionFlags & 1) ∧ CONTEXT 未被改` ⇒ **响亮停**（独立 stop 原因 / 明确 detail），⛔ 不再报"软件中断"。
-2. 有 `catch(...)` 可接时，异常必须**转到 catch pad**（观测点 = CONTEXT.eip 落到 FuncInfo 里那个 catch 块的 EA `0x4137B7` 附近，或 `_CallCatchBlock2` 被调用）。
+2. 有 `catch(...)` 可接时，异常必须**被它接住**（观测点 = eip 落到 FuncInfo 里那个 catch 块 EA `0x4137B7` 附近，或 `_CallCatchBlock2` 被调用）。
+   ★ 机制**不必**是"handler 返回 1 并改 CONTEXT"：`REQ-01M708DF24KY0QZNEHY66S0HYW` 已把 C++ EH 的展开更正为走 `_JumpToContinuation`；
+   ⛔ 判据只写观测点，不写实现路径。
 3. 守卫：新的 pure CTest（`tests/seh.cpp` 一族）能红：构造"handler 返回 1 且不改 CONTEXT 且 flags=NONCONTINUABLE"的形状 ⇒ 必须停成响亮原因（修前是静默继续）。
 
 ## 边界
@@ -37,3 +39,8 @@ guest 的 C++ 异常（`0xE06D7363`，`ExceptionFlags=0x1` NONCONTINUABLE）派�
 
 ## 未做
 - 未加诊断、未定位 handler 返回 1 的真实原因（本轮只读取证）。
+
+## 状态（2026-11-13）
+- **现象的触发路径已修**（字体名表 `REQ-01M72G8JY1Y989H9H8M02DJ2PX`，2026-11-13 又改过 `font.cpp` / `gdi32_font.cpp`）⇒ 今天跑不出 S2 的那条崩溃，**降 S3**。
+- 机制本身原样在 `src/runtime/seh.cpp`（handler 返回 `ContinueExecution` 且 CONTEXT 未改 ⇒ 静默继续）；判据 1/3 仍有效。
+- 代码注释里引用的"需求单的裁决"在 `data/requirements/` 里查不到（悬空引用）⇒ 以本单判据为准。

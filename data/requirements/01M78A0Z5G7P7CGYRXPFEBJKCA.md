@@ -2,8 +2,9 @@
 
 - id: REQ-01M78A0Z5G7P7CGYRXPFEBJKCA
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: tools/test/mutate-timeout.test.mjs#d) wrapper 崩了（写出退出码之前就死）≠ 超时
 - repro: tools/test/mutate-timeout.test.mjs#wrapper 崩了 ≠ 超时
 - tags: [toolchain test flaky]
 

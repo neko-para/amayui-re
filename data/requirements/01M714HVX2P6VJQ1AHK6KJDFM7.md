@@ -2,8 +2,9 @@
 
 - id: REQ-01M714HVX2P6VJQ1AHK6KJDFM7
 - type: req
-- status: doing
+- status: done
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
+- verify: tools/test/disasm.test.mjs#折叠块可辨认
 - tags: [tooling, disasm, corpus]
 
 ## 判据（存在性 + 观察）

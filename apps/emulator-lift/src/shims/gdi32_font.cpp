@@ -1,8 +1,10 @@
 // emulator-lift · GDI32 字体 / 度量 / 字形 / 文本（P2）
 //
 // ★ 口径（plan §3 F4 / §5 B3 / §6 P2；`apps/emulator-cxx/SCOPE.md` §0 第 1 条）：
-//   · 字形**一律**来自宿主 Amayui CN（`CreateFontIndirectA` 的字面名 / `AddFontMemResourceEx`
-//     送进来的内存都不改变来源）；`--font-engine-name` 是显式 A/B 档（本平台只影响上报的族名）。
+//   · 字形**主来源**一律是宿主 Amayui CN（`CreateFontIndirectA` 的字面名不改变来源；
+//     `--font-engine-name` 是显式 A/B 档，本平台只影响上报的族名）。
+//     `AddFontMemResourceEx` 送进来的内存**只当缺字后备**（`REQ-01M79N1ZV391BCM7MYSKK0GVV0`）：
+//     主字体有该码位的字形时永不使用；两处都缺才画 `.notdef`，并记账 + 首次 warn（见 `runtime/font.h`）。
 //   · `GetGlyphOutlineA` 支持 `GGO_METRICS(0)` / `GGO_BITMAP(1)` / `GGO_GRAY4(5)` / `GGO_GRAY8(6)`；
 //     其它格式**如实拒绝**（`GDI_ERROR` + 一行日志），⛔ 不猜布局。
 //   · `lpmat2` 只接受单位矩阵（16.16 的 eM11 = eM22 = 1、其余 0）；其它如实拒绝。
@@ -602,6 +604,12 @@ void shimEnumFontFamiliesExA(X86& cpu, ShimCall& call) {
 
 // =====================================================================================
 // AddFontMemResourceEx / RemoveFontMemResourceEx
+//
+// ★ `REQ-01M79N1ZV391BCM7MYSKK0GVV0`（真机 ♡ / 我们画 .notdef）的修点：引擎在 `0x417AC3` 把游戏
+//   自带的 `AGE-EXTEND.TTF`（`SYS4INI.BIN` 的 ALF 索引里，len=0x4F090）经这里交给宿主。它的
+//   cmap 有 `U+E010 → glyph 15568`（空心心形），而宿主 Amayui CN **整段没有 PUA 映射**。
+//   ⇒ 这里**不再丢字节**：拷出来（guest 内存随时会释放）→ `FT_New_Memory_Face` → 登记成
+//   **缺字后备**（`FontEngine::addMemoryFont`）。主字体仍是 Amayui CN；⛔ 不按 `lfFaceName` 路由。
 // =====================================================================================
 void shimAddFontMemResourceEx(X86& cpu, ShimCall& call) {
     const std::uint32_t memory = call.u32(0);
@@ -617,16 +625,41 @@ void shimAddFontMemResourceEx(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
+    if (!cpu.mem->committed(memory, size)) {
+        shimLog("gdi32", "AddFontMemResourceEx",
+                "内存字体区间不可读（0x%08X, %u 字节）⇒ 0（⛔ 不按半段猜字体）", memory, size);
+        call.result = 0;
+        return;
+    }
     if (cpu.handles == nullptr) shimAbort("gdi32", "AddFontMemResourceEx", "cpu.handles 为空");
-    // ★ 宿主替换（cxx §1.1）：**不解析**送进来的内存，字体来源恒为 Amayui CN。
-    //   真机合同是"成功 ⇒ 返回非 0 + *pNumFonts = 加入的字体数"；这里如实按 1 报（宿主字体已可用），
-    //   但**明确记一行**"内存字体被忽略"（SCOPE 登记）。
-    cpu.mem->wr32(count_out, 1u);
+    // ★ 字节**拷贝**：`memory` 是 guest 的堆/映射，函数返回后随时会被释放或复用；FT 的 memory face
+    //   不拷贝数据 ⇒ 必须由宿主留一份（`FontEngine::addMemoryFont` 负责生命周期）。
+    const std::vector<std::uint8_t> bytes = call.bytes(0, size);
+    std::string family;
+    const std::uint32_t font_id =
+        (cpu.fonts != nullptr) ? cpu.fonts->addMemoryFont(bytes.data(), bytes.size(), &family) : 0u;
+    if (font_id == 0) {
+        // 真机合同：失败 ⇒ 返回 0 且 `*pNumFonts` 不被信任（这里显式写 0，⛔ 不假装成功）。
+        cpu.mem->wr32(count_out, 0u);
+        shimLog("gdi32", "AddFontMemResourceEx",
+                "内存字体（%u 字节 @0x%08X）解析失败 / 没有字体层 ⇒ 0（字形来源仍是宿主 Amayui CN）",
+                size, memory);
+        call.result = 0;
+        return;
+    }
+    // ★ 句柄的 `aux` = 后备字体的稳定 id（`RemoveFontMemResourceEx` 用它精确摘掉这一份）。
     const std::uint32_t handle =
-        cpu.handles->add(HandleKind::GdiFontMem, "fontmem", nullptr, size);
+        cpu.handles->add(HandleKind::GdiFontMem, "fontmem", nullptr, font_id);
+    cpu.mem->wr32(count_out, 1u);
+    if (textTraceEnabled()) {
+        // 「这条字号到底进了几个 face」的可判读一行（取证：引擎那一次是 0x4F090 = AGE-EXTEND.TTF）。
+        textTrace("AddFontMemResourceEx size=%u family=\"%s\" id=%u handle=0x%08X", size,
+                  family.c_str(), font_id, handle);
+    }
     shimLog("gdi32", "AddFontMemResourceEx",
-            "内存字体（%u 字节 @0x%08X）**被忽略**（宿主替换：Amayui CN）⇒ 句柄 0x%08X, *pNumFonts=1",
-            size, memory, handle);
+            "内存字体（%u 字节 @0x%08X）已登记为**缺字后备**（族名 \"%s\"，id=%u）：主字体仍是宿主 "
+            "Amayui CN，只有主字体缺该码位时才用它 ⇒ 句柄 0x%08X, *pNumFonts=1",
+            size, memory, family.c_str(), font_id, handle);
     call.result = handle;
 }
 
@@ -640,10 +673,14 @@ void shimRemoveFontMemResourceEx(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
+    const std::uint32_t font_id = entry->aux;
+    const bool removed =
+        (cpu.fonts != nullptr) ? cpu.fonts->removeMemoryFont(font_id) : false;
     releasePayload(*cpu.handles, handle);
     cpu.handles->close(handle);
-    shimLog("gdi32", "RemoveFontMemResourceEx", "移除内存字体句柄 0x%08X（字形来源不变：Amayui CN）",
-            handle);
+    shimLog("gdi32", "RemoveFontMemResourceEx",
+            "移除内存字体句柄 0x%08X（后备字体 id=%u %s；字形主来源仍是 Amayui CN）", handle, font_id,
+            removed ? "已释放" : "早已不在（找不到）");
     call.result = 1;
 }
 

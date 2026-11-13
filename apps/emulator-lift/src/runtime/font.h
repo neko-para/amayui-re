@@ -1,9 +1,11 @@
 // emulator-lift · 宿主 GDI 字体 / 文本层（P2）
 //
 // ★ 口径（用户 2026-11-04 D3 / 真源 `apps/emulator-cxx/SCOPE.md` §0 第 1 条 / §1.1 / §1.2）：
-//   · **总是 Amayui CN**（`corpus/assets/fonts/Amayui-CN_cnjp.ttf`，粗体同目录 `-Bold.ttf`）；
-//     `CreateFontIndirectA` 里的字面名与 `AddFontMemResourceEx` 送进来的内存**都不改变字形来源**
-//     （`--font-engine-name` 是显式 A/B 对照档，默认关）。
+//   · **主字体总是 Amayui CN**（`corpus/assets/fonts/Amayui-CN_cnjp.ttf`，粗体同目录 `-Bold.ttf`）；
+//     `CreateFontIndirectA` 里的字面名**不改变字形来源**（`--font-engine-name` 是显式 A/B 对照档，默认关）。
+//   · `AddFontMemResourceEx` 送进来的内存**只当缺字后备**（`REQ-01M79N1ZV391BCM7MYSKK0GVV0`）：
+//     主字体有该码位的字形时**永不**用到它 —— ⛔ 不按 `lfFaceName` 路由（引擎把 `AGE Extend`
+//     硬编码给所有文本，按名字路由会把全部中文切回日文字形，那是倒退）。
 //   · **基线补偿 +2px** 是**宿主视觉策略**（⛔ 不是引擎语义，登记在 `SCOPE.md`），0 = 关。
 //   · GGO 的**格式**（1 位 / 17 级 / 65 级）与行对齐是**引擎合同**；1px 级栅格差按平台 discard。
 // ★ 本文件 = "宿主字体 + GDI 对象状态"的叶子层；`src/shims/gdi32_*.cpp` 只做 Win32 形状与参数解包。
@@ -12,6 +14,7 @@
 //   三者都从它派生，⛔ 不许各算一遍。
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -126,6 +129,47 @@ public:
     //   `user` 原样回传（测试用它数"真算了几次"）。
     using MetricsSourceForTest = bool (*)(void* user, int pixel_size, bool bold, HostTextMetrics* out);
     void setMetricsSourceForTest(MetricsSourceForTest fn, void* user);
+
+    // -----------------------------------------------------------------------------------
+    // ★ 缺字形 fallback（`REQ-01M79N1ZV391BCM7MYSKK0GVV0`）
+    //   主字体仍是宿主 Amayui CN（中文译文靠它）；`AddFontMemResourceEx` 送进来的游戏字体
+    //   （`AGE-EXTEND.TTF` 的族名 = `AGE Extend`）**只当主字体缺该码位时的后备**，按登记顺序试。
+    //   ⛔ 不按 `lfFaceName` 路由：引擎把 `AGE Extend` 硬编码给所有文本，按名字路由会把全部中文
+    //   切回日文字形（那是倒退）。
+    // -----------------------------------------------------------------------------------
+    // 登记一份内存字体。字节**会被拷贝**（guest 内存随时释放 / 复用；FT 的 memory face 指向这份拷贝）。
+    //   `family_out`（可空）= face 的族名（日志 / 诊断用）。返回稳定 id（> 0）；0 = 解析失败
+    //   （已记一行日志 ⇒ 调用方按 Win32 失败返回，⛔ 不假装成功）。
+    //   ★ 登记 / 移除都会清**字形**缓存：之前缓存的 `.notdef`（或后备字形）不能继续命中。
+    std::uint32_t addMemoryFont(const void* data, std::size_t size, std::string* family_out = nullptr);
+    bool removeMemoryFont(std::uint32_t id);
+    std::size_t memoryFontCount() const;
+    std::string memoryFontFamily(std::size_t index) const;  // 第 index 个后备的族名（空 = 没加载）
+
+    // 缺字形记账（`--profile` 的摘要行 + 守卫）：**按解析计**（缓存未命中时一次），不是按调用计。
+    //   `fallback_uses` = 该字形最终由某个后备字体提供；
+    //   `notdefs` = 主 face 与**全部**后备都没有 ⇒ 只好画 `.notdef`（诚实：返回 true + 计数 + 首次 warn，
+    //   ⛔ 不是"缺字当成功静默画出去"，也不是"失败"）。
+    struct GlyphFallbackStats {
+        std::uint64_t fallback_uses = 0;
+        std::uint64_t notdefs = 0;
+    };
+    GlyphFallbackStats glyphFallbackStats() const;
+
+    // ★ 纯档接缝（形状对照 `MetricsSourceForTest`）：替身 **FT 的取字原语**（不读字体文件）。
+    //   `face_slot`：0 = 主 face，1..N = 后备（按登记顺序）。
+    //   · `char_index` = `FT_Get_Char_Index`：返回 0 = **该 face 没有这个码位的字形**。
+    //   · `load` = `FT_Load_Char` + 位图拷贝：★ 缺字时它也**返回 true 并给出 `.notdef` 位图**
+    //     （FreeType 的真实语义 —— 正是它让"load 成功"不能当成"有字形"）。
+    //   `face_count` = 1（只有主 face）+ 后备个数。安装 / 重装会清字形缓存。生产路径恒不安装。
+    struct GlyphSourceForTest {
+        int face_count = 0;
+        std::uint32_t (*char_index)(void* user, int face_slot, char32_t cp) = nullptr;
+        bool (*load)(void* user, int face_slot, char32_t cp, int pixel_size, bool bold,
+                     GlyphMask* out) = nullptr;
+        void* user = nullptr;
+    };
+    void setGlyphSourceForTest(const GlyphSourceForTest& src);
 
     void clearCache();
 

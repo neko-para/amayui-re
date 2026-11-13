@@ -4,8 +4,8 @@
 - type: bug
 - status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- verify: tools/test/lift.test.mjs#overrides.json 的 stub 登记与 C++ 注册表双向一致（reason 逐字）
-- repro: tools/test/lift.test.mjs#overrides.json 的 stub 登记与 C++ 注册表双向一致（reason 逐字）
+- verify: tools/test/lift.test.mjs#① overrides.json 逐字节等于 lift sync 的派生结果（手改一个字符就红）
+- repro: tools/test/lift.test.mjs#① overrides.json 逐字节等于 lift sync 的派生结果（手改一个字符就红）
 - severity: S3
 - tags: [emulator-lift, lift-check, overrides]
 

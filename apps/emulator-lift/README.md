@@ -4,6 +4,8 @@
 > 进度看 `pnpm tools requirements plan`（本线 `REQ-01M6GJMENJ8XEK4ZPTA768YBPW`）；
 > 数据与方法看 `docs/03-emulator/platform-effort.md` §4.1、§5.5–§5.7。
 > ★ 本文件只钉口径与落点；实现范围 / 进度看需求树。
+> ★ **字体策略**（Amayui CN = CP932 码位映射字体、`subs-cn-jp.json`、渲染链、cmap 自查、常见坑、改哪里）
+> 见 [`../../docs/03-emulator/fonts.md`](../../docs/03-emulator/fonts.md)；本文件不复述。
 
 ## 1. 它是什么 / 不是什么
 
@@ -335,8 +337,9 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
 
 ## 4.2 可切换呈现后端（`--present`）
 
-**缺省 `--present headless`**：与今天逐字节一致（hash / frameCount / `--dump-frame` / `--max-frames`；
-不初始化 SDL 视频）。**`--present window`** 打开真实 SDL 窗口，呈现路径按**实测**二选一
+**缺省 `--present headless`**：guest 侧的 hash / frameCount / `--dump-frame` / `--max-frames` 与窗口档
+同一套口径；它**仍建一个隐藏的离屏窗口**（GPU 是唯一光栅实现，见 §4.2b —— 不出现可见窗口，
+不是"不碰 SDL 视频"）。**`--present window`** 打开真实 SDL 窗口，呈现路径按**实测**二选一
 （见 §4.2b 的"直出"）：
 
 ```bash
@@ -390,7 +393,7 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
   状态（影子键电平 / 鼠标按钮位图 / 虚拟光标）并 post **同一组** `WM_*`。guest 的全部读点
   （`GetAsyncKeyState`、`GetCursorPos`、`PeekMessageA`/`GetMessageA` → `DispatchMessageA` → WndProc）
   因此读的是同一份状态；⛔ 不存在"注入只发消息、`GetAsyncKeyState` 仍读 OS"的第二份状态。
-- 注入**不经过 SDL**、不读 OS 键鼠、不需要窗口焦点；`--present headless`（不初始化 SDL 视频）也能注入。
+- 注入**不经过 SDL**、不读 OS 键鼠、不需要窗口焦点；`--present headless`（不出现可见窗口）也能注入。
 - ⚠ **系统对话框期间时间线只剩 `at wall_ms`**：`MessageBoxA` / AGERC「終了」框会弹**系统对话框**
   （`SDL_ShowMessageBox`）并阻塞 guest（宿主自己的等待循环不再推进 `frame` / `insn` / `guest_ms`）
   ⇒ 给对话框写的注入脚本必须用 `at wall_ms`（该 run 因此不可 diff）；key 要保持按住，后面得再有一条
@@ -410,8 +413,8 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
   仍按着的键 / 按钮会**按同一组 WM_* 抬起**（WndProc 收得到 `WM_KEYUP` / `WM_LBUTTONUP`）再把所有权
   交还 —— 真人接着玩不会撞上"卡住的键"。
 - ⚠ `--present window` 走 real-time 时钟 ⇒ **毫秒**触发不可复现，用**帧**；`--present headless`
-  两档都确定性。headless 的帧是纯 CPU 光栅（比 GPU 路径慢一个量级以上）⇒ 要跑长脚本 / 看画面用
-  `--present window --present-hidden --raster gpu`（仍然无焦点、无光标，仍可脚本化）。
+  的时钟档确定性。两档的光栅化是**同一套 GPU**（差别只在呈现）⇒ 帧内容一致；要跑长脚本 / 看画面用
+  `--present window --present-hidden`（仍然无焦点、无光标，仍可脚本化）。
 
 **语法**（一行一条；`#` 起注释；换行或 `;` 分隔）
 
@@ -492,14 +495,14 @@ cd apps/emulator-lift
 #   wait 30 frames
 #   quit
 ./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-dir ../../links/install \
-  --present window --present-hidden --raster gpu --native-overrides all --skip-logo \
+  --present window --present-hidden --native-overrides all --skip-logo \
   --input-script ../../.tmp/input/click-option.txt --max-frames 200 \
   --present-screenshot ../../.tmp/option-window.bmp --present-screenshot-frame 155
 ```
 
 产物 `option-window.bmp` 就是 OPTION（系统设定）界面。`--max-frames 200` / `quit` 二者都只是兜底；
-`--present-screenshot-frame` 让截图只写一张。把 `--present window --present-hidden --raster gpu` 换成
-`--present headless` 就得到**不建任何窗口**的同一条时间线（CPU 光栅，慢，但确定性）。
+`--present-screenshot-frame` 让截图只写一张。把 `--present window --present-hidden` 换成
+`--present headless` 就得到**不出现可见窗口**的同一条时间线（GPU 光栅化照旧）。
 
 **退出 EU-ROOM 的一行命令**（回归"点一次就能回 TITLE"；不需要任何 hold）：
 
@@ -517,7 +520,7 @@ cd apps/emulator-lift
 #   at insn 600000000
 #   quit
 LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-dir ../../links/install \
-  --present window --present-hidden --raster gpu --native-overrides all --skip-logo \
+  --present window --present-hidden --native-overrides all --skip-logo \
   --input-script ../../.tmp/clickfix/exit-click.txt --time-limit 200
 ```
 
@@ -553,7 +556,7 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-d
 - **启动期拒绝**（exit 2，⛔ 不静默开局）：没给 `--input-script`；脚本里**没有匹配的动作**
   （否则一个观测窗都开不了 = 静默绿）；只给 `--expect-change-window` 而不给 `--expect-change-after`；
   类别 / 数字非法（窗口只收十进制正整数）。
-- **其它消费者闸门**（`--gpu-strict` / `--assert-guest-token`）仍**先判**：它们的退出码优先于这里的 5
+- **其它消费者闸门**（`--assert-guest-token`）仍**先判**：它们的退出码优先于这里的 5
   （既有优先级，未因本策略改变）。
 - **与自动 hold 的关系**：`click` 的抬起由自动 hold 决定（等 guest 的输入采样点，上限 `--input-max-hold`）。
   窗口在**按下**那一刻开，但在这次动作的抬起发出之前**不判失败** —— 否则一次合法点击会在 up 之前被窗口判死。
@@ -590,7 +593,7 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-d
 | `2` | 参数 / 解析失败（带 `文件:行`），或运行期**非 ok 的停因**（`unimplemented-slot` = 已注册但槽/形态没实现、`resource-exhausted` = 我方 arena / guest 堆不够、`unimplemented` / `decode-error` / `no-code` …） | 启动阶段就拒绝，⛔ 不跑一半；运行期停因看摘要 `stop` / `detail` 行 |
 
 - ★ 退出码的**兜底口径**只有一条：`lift::exitCodeForRun(r)`（`RunResult::ok()` ⇒ 0，否则 2）。
-  `--gpu-strict` 在它之前也判 2（并可能给 3），交互图的"任务没走完 / 三种失败"仍是 5 —— 那些**优先**。
+  交互图的"任务没走完 / 三种失败"仍是 5 —— 那些**优先**。
   两个新停因 `resource-exhausted` / `unimplemented-slot` **不在 `ok()` 里** ⇒ 没有别的闸门时退出码是 2。
 
 - **与 `--input-script` 并存**（真源 §7 第 3 期才把时间线并入节点图）。两条通道都只写
@@ -625,26 +628,30 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-d
   （`pnpm tools requirements show REQ-01M6XVYY5TCKSAS80WS7PADF8P`）。
 
 
-## 4.2b GPU 光栅化（`--raster auto|cpu|gpu`）
+## 4.2b GPU 光栅化（GPU 是**唯一**的光栅实现；无 GPU ⇒ 拒绝启动）
 
-缺省 `--raster auto`：**`--present headless` ⇒ CPU**（保持 headless 逐字节确定性 / CTest 口径），
-**`--present window` ⇒ GPU**。显式 `--raster cpu` 是参考/测试后端；显式 `--raster gpu` 仍可用
-（headless 时建一个隐藏的离屏 raster 窗口）。`--present window` 下 GPU 后端初始化失败 ⇒ **exit 2**
-（⛔ 不静默退回 CPU）。`--present auto` 窗口打不开会回退 headless，此时 GPU 光栅化也随之不可用，
-日志会明说"本轮是 CPU 光栅化"。
+★ 光栅化只有一条实现：宿主 GPU（独立 `SDL_GPUDevice`，Windows DXBC / macOS MSL）。
+**没有** `--raster` 开关，也没有可选的 CPU 后端（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）。
 
-后端 = 独立 `SDL_GPUDevice`（Windows DXBC / macOS MSL），把 D3D9 的屏幕空间三角形与 D3DXSprite
-纹理四边形画到 1280×720 BGRA8 + D32 离屏 target；T&L / 裁剪 / 状态机 / 失败码仍全在 CPU。
+- `--present window` / `auto`：可见窗口 + 同一台 device 上的光栅化。
+- `--present headless`：**也建一个隐藏的离屏窗口**（`SdlWindowOptions::hidden`）。SDL 必须先初始化
+  视频子系统才拿得到 GPU device ⇒ headless 的含义是"**不出现可见窗口**"，不是"不碰 SDL 视频"。
+- **建不出 GPU device ⇒ 拒绝启动**：exit 2 + 一句指路（缺驱动 / 没有桌面 / `SDL_VIDEODRIVER=dummy`）。
+  ⛔ 不存在"这一轮先用另一套光栅"的静默降级。守卫 `lift/no-gpu-refuses-start`（环境强制无 GPU）。
+- `--present auto`：可见窗口打不开（无桌面）⇒ 退到**隐藏**的离屏窗口；GPU 仍必须成立，否则同样拒绝启动。
 
-### 直出（`--present window` + `--raster gpu`）：target → swapchain，不走 CPU 上传
+后端把 D3D9 的屏幕空间三角形与 D3DXSprite 纹理四边形画到 1280×720 BGRA8 + D32 离屏 target；
+T&L / 裁剪 / 状态机 / 失败码仍全在 CPU（三角形顶点已经是屏幕空间 + `invw`）。
+
+### 直出（`--present window`）：target → swapchain，不走 CPU 上传
 
 窗口创建**之后**把窗口 claim 给同一台 device（`SDL_ClaimWindowForGPUDevice`），每帧
 `SDL_WaitAndAcquireGPUSwapchainTexture` + `SDL_BlitGPUTexture`（source = 同一份 target）+
 `SDL_SubmitGPUCommandBuffer`。要点与边界：
 
 - **同一个窗口不能既 claim 给 GPU device 又 `SDL_CreateRenderer`** ⇒ 直出成立时**不建 SDL_Renderer**；
-  事件泵 / 截图 / capture / 关窗语义都在 `SdlWindow` 上，不依赖 renderer。CPU 光栅化
-  （`--raster cpu`）与直出不可用时仍走 renderer 路径，行为不变。
+  事件泵 / 截图 / capture / 关窗语义都在 `SdlWindow` 上，不依赖 renderer。直出不可用时仍走
+  renderer 上传路径（光栅化不变），行为不变。
 - claim 失败（dummy 视频 / 没有 HWND / 驱动不支持）⇒ **打印 SDL 的实测错误并回退 SDL_Renderer
   上传路径**，⛔ 不假装直出。判据是 `describe()` 里的 `present=direct/<mode>`。
 - `--present-vsync 1` ⇒ `SDL_GPU_PRESENTMODE_VSYNC`；`0` ⇒ 优先 `IMMEDIATE`，不支持退 `MAILBOX`
@@ -657,34 +664,78 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-d
 - 直出只换**呈现**：`d3d9::Present` 的 guest 回读（hash / frameCount / `--dump-frame` / 后缓冲语义）
   照旧每帧做，`--present-screenshot` 从 target 回读（swapchain 是 write-only）。
 
-### 能力范围（准入在 `d3d9::gpuEligible`；守卫 `tests/gpu_batch.cpp` 的 `gpu-batch/sampler-filter-eligibility`）
+### 能力范围（准入在 `d3d9::gpuEligible`；守卫 `tests/gpu_batch.cpp` 的 `gpu-batch/sampler-filter-eligibility` / `d3d9p/render-to-texture` / `d3d9p/render-to-texture-feedback`）
 
 ★ 准入的其余条件**没有**逐条纯档用例（原 `tests/gpu_mapping.cpp` 已随 `5e4fca3 refactor: clean tests` 删除）；
-只有"采样器 mag≠min ⇒ 不接受"这一条被端到端钉住（回退 + 记账）。
+端到端钉住的只有三条：「采样器 mag≠min ⇒ 不接受」、「纹理当 RT ⇒ 进 GPU 且目标 = 该纹理像素」、
+以及「同批把 RT 当采样纹理 ⇒ 拒绝 + 记账」。
 
 明确支持（TITLE 的黑场渐变全屏四边形就在这一类）：
 - 32bpp 默认后缓冲、GOURAUD、无 alpha test；color write mask 任意 4 位组合；
+- **纹理表面作渲染目标（RTT）**：`SetRenderTarget(0, <纹理 level 0 surface>)` 之后这一批照旧走 GPU，
+  目标 = 该纹理的 guest 像素（`GetRenderTargetData` / `LockRect` 的既有屏障先把镜像读回去）。
+  两条新闸（其余行为不变）：
+  ① **同一批里把这张 RT 纹理当采样源** ⇒ **拒绝**并记账（`recordUnsupported` bit26）—— 本后端采样走
+     纹理上传缓存，同一批里读到的是**本批之前**的内容（不挂死、不报错、像素是旧的）；
+  ② 纹理**缺 `D3DUSAGE_RENDERTARGET`** ⇒ 只打一行 warn、**仍放行**（引擎真值未取证，⛔ 不新增静默回退）。
+  ★ D3DXSprite 的 End/Flush 合成目标 = **当前绑定的颜色目标**（与 D3D9 Draw 同一份判据）：绑 RT 时
+    sprite 像素写进该纹理，未绑时仍是后缓冲（`d3d9p/sprite-render-target` 钉住）。
+  ⛔ 不做：MRT / 多 RT、depth-stencil 纹理当 RT、mip level > 0 的 RT、16bpp / 非 BGRA /
+  sRGB 的 RT、"RT 内容跨帧保留"；
 - 任意可映射的 blend，**含 separate alpha**：color/alpha 两段各自的 factor/op 映射到
-  `SDL_GPUColorTargetBlendState`；不能表达（如 `D3DBLEND_BOTHSRCALPHA`）⇒ 回退并记账；
+  `SDL_GPUColorTargetBlendState`；不能表达（如 `D3DBLEND_BOTHSRCALPHA`）⇒ 拒绝该批并记账；
 - stage 0 **单级** 32bpp 纹理；color/alpha op 限 `SELECTARG1` / `SELECTARG2` / `MODULATE` /
-  `DISABLE`（`DISABLE` 按 CPU 的语义取 **arg1**；两个 op 都 `DISABLE` 时 CPU 直接 break ⇒ 顶点色），
+  `DISABLE`（`DISABLE` 按 CPU 的语义取 **arg1**；两个 op 都 `DISABLE` 时取顶点色），
   操作数限 `TEXTURE` / `DIFFUSE`（stage 0 的 `CURRENT` 等价于 `DIFFUSE`）/ `TFACTOR`。
   `TFACTOR` 是每批 Draw 的常量色，GPU 路径把它整批写进顶点色（⛔ 不逐像素读状态）；
 - sampler：POINT/LINEAR × WRAP/CLAMP/MIRROR；
 - 纹理坐标取 stage 0 的 `D3DTSS_TEXCOORDINDEX`（⛔ 不硬编码 TEXCOORD0）；
 - 顶点已由 CPU 做完 T&L / 裁剪 / 屏幕映射，且 `invw==1`（屏幕空间线性插值与 CPU 的透视校正等价）。
+- **点 / 线图元**（`POINTLIST` / `LINELIST` / `LINESTRIP`）：与三角形走**同一条** GPU 批路径 ——
+  点展开成 1px quad（`floor(x), floor(y)` 那一格），线**每秒**展开成 1px 宽的 quad（2 个三角形），
+  端点先吸附到像素中心格（`floor(c)+0.5`）。展开出来的三角形**不受 CULLMODE 影响**（线/点没有面）。
+  ⛔ 不做 diamond-exit 的像素级规则（裁决：不追求像素一致）；要的是"看得见的线/点" +
+  与三角形**同一份** blend / 深度 / 写掩码 / stage 状态。守卫 `gpu-batch/lines-points`
+  （真后端像素）与 `gpu-batch/lines-points-admission`（pure，Mock：没有 CPU 旁路）。
+  点尺寸（POINTSIZE / POINTSCALE / POINTSPRITE / FVF PSIZE）仍未实现 ⇒ 点按 1px 并记账（bit19）；
+  需要纹理采样的点/线（stage 级活跃且绑了纹理）**响亮拒绝**（`D3DERR_INVALIDCALL` + bit16）。
 
-仍回退 CPU（每次记账；首次出现打印 `[gpu] fallback ...`）：多 stage / 纹理非 32bpp / alpha test /
-FLAT / 16bpp / BORDER 或 MIRROR_ONCE / `BOTH*` blend / 渲染目标是纹理 / `invw!=1` /
-D3DXSprite 源矩形越界 / GPU 后端绘制失败。D3DXSprite 的纹理上传按
-`(纹理 serial, 尺寸, alpha 语义, UnlockRect 版本)` 缓存：像素没变就不重传
+**不再回退 CPU，改成"显式拒绝 + 具名记账"**（已改完的三条；`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：
+"回退 CPU 重放"等于保留第二实现 ⇒ 三条旁路改为**拒绝该批**（Draw 返回 `D3DERR_INVALIDCALL`，
+本批不进画面），但**记账不静默**：
+
+| 旁路 | 条件 | 记的位 |
+|---|---|---|
+| `invw != 1` | 顶点 w≠1（如 XYZRHW 的 rhw≠1）：GPU 的屏幕空间插值不能等价透视校正 | bit21 `invw!=1` |
+| `MIPFILTER=NONE` + 缩小采样 | GPU sampler 的 `max_lod` 是一张纹理一档，关不掉 mipmap | bit22 `MIPFILTER=NONE 缩小` |
+| GPU 后端失败 | 准入通过但后端绘制/入队失败（⛔ 不再 CPU 重放该批） | bit23 `GPU 后端失败` |
+
+三者的痕迹：运行摘要的 `unsupported :` 行（具名位）+ 默认级别一行 warn（`pipe-warn` 的 `other` 桶）
++ 后端失败的 `gpu_failures` 计数。守卫 `gpu-batch/reject-accounting`（pure，Mock）。
+★ 这三条**也**进 `skipped` 账（GPU 没画；`gpu :` 行的 `skipped=` 与 `skipped top:`），
+  与 `fallback`（CPU 真写了像素）**分两个数** —— 守卫 `gpu-batch/skip-ledger`（pure，Mock）。
+
+★ **仍未退休的那一块**（同一张单的后半，待删）：`submitPrimitives` 里还有一条 CPU 像素路径
+（`rasterTriangle` / `rasterizePoint` / `rasterizeLineSegment`），它今天只剩两类调用方 ——
+① 单元测试夹具没装 `GpuRaster`（`tests/d3d9*.cpp` 的逐像素断言）；② GPU 准入**能力不足**的批
+（多 stage / 纹理非 32bpp / alpha test / FLAT / 16bpp / BORDER 或 MIRROR_ONCE / `BOTH*` blend /
+D3DXSprite 源矩形越界）。② 仍进 `fallback` 账（每次记账；首次出现打印 `[gpu] fallback ...`），
+**并**进 `skipped` 账（GPU 没画；同一批两条账会同时 +1，本单不改像素行为）。
+CLI **没有**入口能选 CPU 后端 ⇒ 这不是"第二个后端"，是**待删的测试 oracle + 残留回退**；
+删它要先把 `tests/d3d9*` 的逐像素用例迁走（`d3d9` / `d3dx9` / `d3d9-pipeline` 三条 CTest；
+`d3d9-mip` 只测 mip 链、不画像素），独立一单。⛔ 不要把它读成"CPU 在兜底"。
+
+D3DXSprite 的纹理上传按 `(纹理 serial, 尺寸, alpha 语义, UnlockRect 版本)` 缓存：像素没变就不重传
 （⛔ 不再每次 draw 完整 upload）。键用 `createTextureState` 分配的**进程级单调 serial**，
 ⛔ 不用 guest 像素指针 / 状态块 EA —— 二者都会被 arena / guest 堆复用，会把新纹理读成旧像素。
-空批 / 全被裁掉的批（CPU 一个像素都没写）**不计 fallback**（`draw_calls` 照记）。
+空批 / 全被裁掉的批**不计 fallback**（`draw_calls` 照记）。
 
 深度口径：GPU 的 D32 target 从 1.0 起，**不镜像 guest 深度缓冲**；D3DXSprite 的 GPU 路径直接关掉
-深度测试/写（与 CPU sprite 一致）。因此非 1.0 的 `Clear(ZBUFFER)`、或 CPU/GPU 交替写同一块深度的
-场景，像素结果可能与 CPU 参考不一致 —— 判据仍以 `--dump-frame` 的逐像素对照为准。
+深度测试/写。因此非 1.0 的 `Clear(ZBUFFER)`、或 GPU/CPU 像素交替写同一块深度的场景，像素结果
+可能有偏差 —— 诊断仍以 `--dump-frame` 的逐像素对照为准。
+换 target 时**只有尺寸变才重建** depth 并清成 1.0（D3D9 的深度属设备、不随 color target 变）；
+同尺寸换 target **复用** depth（内容保留）且**不清** graphics pipeline 缓存。
+诊断读数：`gpuRasterStats()` 的 `targets_created` / `depths_created` / `pipelines_created` 三个计数。
 
 ### 顶点声明（`SetVertexDeclaration` + 两条流）
 
@@ -704,45 +755,48 @@ D3DXSprite 源矩形越界 / GPU 后端绘制失败。D3DXSprite 的纹理上传
 `Machine::dumpRunSummary` 固定打印：
 
 ```text
-gpu       : draws=N gpu=N fallback=N fallback_pixels=N
+gpu       : draws=N gpu=N fallback=N fallback_pixels=N recorded=N queued=N empty=N fragments=N skipped=N
             sprite: draws=N gpu=N fallback=N fallback_pixels=N skipped=N
             fallback top: [N×] <原因> ; ...
+            skipped top: [N×] <原因> ; ...
 ```
 
-`--raster cpu` 时这些计数全 0 —— CPU 是**显式参考后端**，不算 fallback。GPU 启用后：
 - 默认（不设环境变量）第一次出现每种回退原因就打印一行
   `[gpu] fallback: <原因>（该原因只打印一次）` 到 stderr；
-- `--gpu-strict`：运行结束后若 `fallback Draw + sprite 回退 > 0` ⇒ 打印错误 + 原因清单并 **exit 3**
-  （summary 仍先打印）。它需要 GPU 光栅化模式（`--present window`，或 `--raster gpu`）；
-  与 `--raster cpu` 或 `--raster-sprites 0` 矛盾 ⇒ exit 2；后端根本没启用也按 FAIL
-  （⛔ 不能把 CPU 当覆盖）。sprite 的 `skipped=`（源矩形空 / 屏外 / 退化）是裁剪，不是回退，
-  不计入 strict。
+- ★ **`fallback` 与 `skipped` 是两个口径，⛔ 不许合流**（`REQ-01M7AAXVGY9SG75XCREHPX641Z`）：
+  - `fallback` = 这一批 **CPU 真写了像素**（`fallback_pixels > 0`）。它不是"CPU 在兜底"的许可，
+    而是"GPU 准入还差一块"的账；`REQ-01M78BF1FNNH6K8N8GEY6GQYXX` 的方向是把它清零。
+    **本单后真实场景应恒 0**。
+  - `skipped` = 这一批 **GPU 没画**（`gpuEligible` 准入拒绝 / `invw!=1` / `MIPFILTER=NONE` 缩小 /
+    后端失败 / 带纹理点线）。判据**不依赖** `pixels_written`：GPU 模式下的"写 0 个像素"是 CPU 计数，
+    拿它当判据会漏记（设计 `.tmp/cpu-migration/design.md` §A.3）。**真实场景应恒 0**；
+    `skipped>0` ≠ "回退"（回退是 CPU 画了，见上一条）。
+  - `skipped top:` 与 `fallback top:` 同形（次数降序、原因升序、最多 5 条）。拒批的具名位
+    （`unsupported` 的 bit29..40）在 `unsupported :` 行里；`skipped` 是"没画"的机械判据，
+    ⛔ 不是靠翻日志猜。
+- sprite 的 `skipped=`（源矩形空 / 屏外 / 退化）是裁剪，不是回退（与上面的 `skipped` 是**不同**
+  账：那条是 sprite 条目数，这条是 `Draw*` 批数）。
 - `LIFT_SLOW_DRAW=1`（可选 `LIFT_SLOW_DRAW_MS`）的 `[draw]` 行扩了
   `fvf= / coord= / stage0= / samp= / texfmt=`：`why=` 是"这批为什么没走 GPU"，其余是当时的状态值。
+  `[draw] fa=` / `[draw] texa=` 是**这一批真正参与混合**的 α / 纹理 α 聚合：GPU 批在提交前按顶点
+  统计（`n` = 顶点数），已有守卫 `gpu-batch/alpha-aggregation`。
 - `LIFT_GPU_VERIFY=1`（诊断，默认关）：对每个 GPU 走纹理的 `Draw*` 批，在**同一批 / 同一状态**上
-  先对后缓冲副本跑一次 CPU 参考光栅（不影响 guest 结果），再读回 GPU 结果逐像素对照，打印
+  先用待删的 CPU 像素路径跑一遍参考（不影响 guest 结果），再读回 GPU 结果逐像素对照，打印
   `[gpu-verify] textured batch tris=… diff_pixels=… max_channel_diff=…`。它不依赖两次运行的时间轴，
-  是"同一帧"的 GPU ↔ CPU 对照；代价是这批 CPU 软光栅的墙钟（只在排障时开）。
+  是"同一帧"的 GPU ↔ CPU 对照；代价是这批 CPU 软光栅的墙钟（只在排障时开）。那是**诊断**，
+  不是第二个可用后端。
 
 ```bash
-# 离屏 GPU 光栅（不建可见窗口；A/B 用）
-./out/emulator-lift ... --max-frames 4 --raster gpu
-# 可见窗口 + GPU 光栅（auto 的缺省行为，显式写出来便于对照）
-./out/emulator-lift ... --max-frames 300 --present window --raster auto
-# 同一条命令的"直出"正证据：日志里 present=direct/<mode>（VSYNC/IMMEDIATE/MAILBOX）
-./out/emulator-lift ... --max-frames 300 --present window --present-hidden --raster gpu
-# 对照：同一帧的 CPU 输出
-./out/emulator-lift ... --max-frames 4 --raster cpu --dump-frame ...
-# 机械判据：GPU 覆盖必须 100%（TITLE 段也一样）
-./out/emulator-lift ... --max-frames 80 --present window --present-hidden --gpu-strict
+# 离屏 GPU 光栅（不建可见窗口；headless 也走 GPU）
+./out/emulator-lift ... --max-frames 4 --dump-frame ...
+# 可见窗口 + GPU 光栅（缺省就是这条）；日志里 present=direct/<mode> 是直出的正证据
+./out/emulator-lift ... --max-frames 300 --present window --present-hidden
 ```
 
-评估口径：GPU 与 CPU 的 blend / 采样舍入允许**每通道 ≤1 LSB**，不拿单一 hash 当唯一判据；
+评估口径：GPU blend / 采样舍入与 CPU 参考允许**每通道 ≤1 LSB**，不拿单一 hash 当唯一判据；
 用 `--dump-frame`（guest 后缓冲）或 `--present-screenshot`（窗口像素）做逐像素 max-diff。
-直出成立时这两者 1:1 下应当**逐像素相等**（窗口像素 = target = 读过回的 guest）；
+直出成立时两者 1:1 下应当**逐像素相等**（窗口像素 = target = 读过回的 guest）；
 CTest `gpu-direct-present` 把这条做成守卫（含 16bpp 转换 / 尺寸变化 / 连续两帧）。
-CPU 缺省仍逐字节可复现；`--raster gpu` 的 `--present headless` 会初始化 SDL 视频
-（否则 `SDL_CreateGPUDevice` 失败），这不影响 `--raster cpu` 的"headless 不碰 SDL 视频"承诺。
 
 现状口径：TITLE 段**仍未达 33 ms**（也不把验收阈值改绿）。直出去掉了"GPU→guest 读回之外的
 两次全帧搬运"之后，Present 的大头是 `d3d9::Present` 里那条 Info 日志的**全帧像素直方图**
@@ -848,7 +902,7 @@ native override / 事件泵；它与 guest 块表**不可相加**（两表各自
 
 ```bash
 LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
-  --present window --raster auto --native-overrides all --profile
+  --present window --native-overrides all --profile
 ```
 
 每次 `Present` 打五行：
@@ -879,6 +933,10 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
   这一行才是"缓存到底有没有用"；它不是墙钟、**不进**上面那张表（两表不可相加）。
   命中率低 ⇒ 调用方在字号 / 字体之间来回跳，先查 guest 的 `CreateFontIndirectA` + `SelectObject`
   分布，别先改缓存。
+- 同一张表里还有一行 `font!glyph-fallback fallback=… notdef=… memory-fonts=…`（**缺字记账**）：
+  `fallback` = 由 `AddFontMemResourceEx` 送进来的游戏字体（`AGE-EXTEND.TTF` / `AGE Extend`）提供的
+  字形数，`notdef` = 主字体与全部后备都没有、只好画 `.notdef` 的次数 —— **游戏字体只当缺字后备，
+  主字体仍是 Amayui CN**（⛔ 不按 `lfFaceName` 路由）；`notdef>0` 是"有字没画出来"的机械判据，别靠截图。
 - 只有 shim 慢、guest 不慢 ⇒ 先看 `--profile` 的 `=== profile: shims` 表（哪一项、调用几次、平均多少），
   不要再到 guest 函数表里找热点；`shim :` 行仍用于"这一帧"的归因。
 - `LIFT_SLOW_DRAW=1`（可选 `LIFT_SLOW_DRAW_MS=<ms>`，缺省 20）会为每次慢 `Draw*` 打一行
@@ -894,9 +952,19 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
   "同一张纹理"与"同尺寸的另一张"。
   ⚠ `tfactor=` 是 `D3DRS_TEXTUREFACTOR`（0xAARRGGBB）：**stage0 的 arg 是 3(TFACTOR) 时，顶点色
   根本不参与** ⇒ 顶点 alpha 推进也不会有任何像素变化。
-  ★ `fa=` 是**真正参与混合的 α**（CPU 光栅逐像素统计：n / 均值 / min / max；GPU 批不打——CPU 那条
-  不跑）。"这一笔到底有没有画上去"只能看它：`fa=…:0/0/0` = 整笔全透明（α 取自纹理 / 顶点色没参与 /
+  ★ `fa=` 是**真正参与混合的 α**（n / 均值 / min / max）。**两种批都有读数**（口径不同、都写在行里）：
+  · CPU 批 ⇒ 逐**像素**统计真的写进后缓冲的 α（`n` = 像素数；受 `LIFT_SLOW_DRAW` 门控）；
+  · **GPU 批** ⇒ 交进后端的那批**顶点** α 的聚合（`n` = 顶点数；逐批统计、**不**受门控）。
+  两者都能回答"这一笔的 α 是多少"，⛔ 都不能回答"混了多少片元"（GPU 拿不到片元数）。
+  取数口：`d3d9::lastDrawAlphaAgg()`（`from_gpu` 区分两种口径）；守门 `gpu-batch/alpha-aggregation`
+  （GPU 批画一个 α=128 的四边形 ⇒ 均值落在 128±8、n>0）。
+  ⚠ **纹理带 α 的批两者可以不等**：GPU 版数的是**顶点 α**（不含纹理 α），CPU 版数的是**着色后**的
+  像素 α（= 顶点 α 经 stage 运算后的值）⇒ 要判断"是不是纹理 α 把它压到 0"必须**同时**看 `texa=`，
+  ⛔ 不要拿两条 `fa=` 的 min 直接对比不同后端。
+  "这一笔到底有没有画上去"只能看它：`fa=…:0/0/0` = 整笔全透明（α 取自纹理 / 顶点色没参与 /
   alpha test 全灭，三者表现相同，要接着看 `stage0=` 与 `texserial=`）。
+  ★ `texa=` 是**绑定的纹理自身**的 α（16×16 网格采样 min..max/均值）—— 与光栅后端无关，
+  GPU 批也照打；它和 `fa=` 一起才能分辨"纹理 α=0"与"stage 数学算错"。
 - `LIFT_DRAW_CALLSITE=1`（诊断，默认关）：每次 `IDirect3DDevice9::DrawPrimitive` 打一行
   `[draw-call] prim=… ret=<shim 返回地址> chain=<ebp 链上的返回地址…>` —— `ret=`/`chain=` 拿去 `.lst`
   就能回答"谁画了这一批"（最近的调用点 = `ret-5`），不用猜。
@@ -906,7 +974,9 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
   同一个开关还会为 stage 0/1 的 op/arg 写打 `[sts] stage=… type=… value=… ret=…` ——
   **"这一批用的到底是 DIFFUSE 还是 TFACTOR"只能看这个**（`ret=` 定位写它的 guest EA）。
 - 回退原因还按字符串聚合进 `dumpRunSummary` 的 `gpu       :` / `fallback top:` 行
-  （见 §4.2b）；`--gpu-strict` 把"还有回退"变成 exit 3，而不是靠读日志判断。
+  （见 §4.2b）；`fallback=` 是"CPU 真写了像素"的机械判据，⛔ 不是靠读日志判断。
+  ★ **`skipped=` 是另一条账**（GPU 没画：准入拒绝 / `invw!=1` / MIP 缩小 / 后端失败），
+  按原因聚合进 `skipped top:`；真实场景两个数都应 0（口径见 §4.2b）。
 - `LIFT_LOG_MARKERS=1`（诊断，默认关）：引擎帧身份（marker 源）**变化**时往 stdout 打一行
   `[marker] frame=… insn=… cur=… id=0x%08X name=…`（名字读不到时标 `（降级）`，稳态不刷屏）。
   它是"`script <名字>` 该写什么"的**发现路径**；只开它、不写任何脚本动作也会打开身份采样。
@@ -1053,8 +1123,8 @@ emulator-lift --game-dir <install> --skip-logo --native-overrides all --present 
   （`click` 的自动 hold 在等 guest 采样 / 显式 hold 没到期）；`first` = 第一条未应用动作的原文
   （`pending==0` 时取第一条未完成的抬起），含空格 ⇒ 双引号包住，内部 `"` 显示成 `'`。
   ★ 0 条未应用**且没有未交付的抬起** ⇒ 不打；`quit` 提前结束 ⇒ 不打（剩下的动作是脚本有意跳过的）。
-  它**不替代** stdout 的 `[input-script] finished`：那条在 `finished()` **或 `quit`** 时打，而 `quit` 路径
-  写的是**总**动作数（⛔ 别当"应用数"读）。
+  它**不替代** stdout 的收口行：全部应用 ⇒ `[input-script] finished：<N> 条动作全部应用`；`quit` 提前
+  结束 ⇒ `[input-script] quit：已应用 <X> / 共 <N> 条动作（quit 提前结束，剩 <N−X> 条未应用…）`（照实报数）。
 - `heap      : in_use … peak … allocs …`：**主 guest 堆**（Win32 / CRT 分配走它）。
 - `arena     : surfaces N in_use U peak P largest-free F`：**surface arena**（D3D9 纹理 / 后缓冲 /
   深度的独立 GuestHeap）。★ 它不与主堆共享 ⇒"纹理没回收"在主堆那行**完全看不见**。
@@ -1083,7 +1153,7 @@ D3DX 建纹理失败的 reason 里带 `w×h / D3DFORMAT / 像素字节`，与 `s
 | 块寻址 / chunk / 跳转表 | 同文件 §5.7 + `src/runtime/x86.h` |
 | 宿主层 / 不依赖 AppKit 的口径 | 同文件 §5.5 |
 | 可接受偏差（菜单 / 视频 / Live2D / 3D；音频已实现，见 §4.4） | `SCOPE.md` + 同文件 §4.1 |
-| 可切换呈现后端（headless/CPU ↔ SDL/GPU） | 本文件 §4.2 + `src/runtime/present_sdl.h` |
+| 可切换呈现后端（headless 隐藏窗口 ↔ 可见窗口；光栅化恒为 GPU） | 本文件 §4.2 + `src/runtime/present_sdl.h` |
 | 覆盖清单格式 | 同文件 §5.7 |
 | 实现计划（切片 / 判据 / 决策点） | M1 `docs/plan-m1-cpu-base.md` · M2 `docs/plan-m2-2d-text.md`（索引 `docs/README.md`） |
 | 热点 profile / native override 的开关与 ABI | 本文件 §4.3 + `src/runtime/native_overrides.h` |

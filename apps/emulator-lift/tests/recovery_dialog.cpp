@@ -26,6 +26,7 @@
 
 #include "check.h"
 #include "runtime/host_encoding.h"
+#include "subprocess_skip.h"
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -159,9 +160,10 @@ bool findMarker(const fs::path& root, fs::path* out) {
     return false;
 }
 
-// 环境不可用（不是判据红）：没有执行源 / 安装树不对 / 拒绝启动。
+// 环境不可用（不是判据红）：没有执行源 / 安装树不对。
+// ★ GPU 拒绝启动**不在这里**：它由 `LIFT_SKIP_IF_NO_GPU` 单独判（要求本机实探无 GPU）。
 bool environmentUnavailable(const std::string& log) {
-    return contains(log, "找不到执行源") || contains(log, "拒绝启动") || contains(log, "SDL_Init(VIDEO)") ||
+    return contains(log, "找不到执行源") || contains(log, "SDL_Init(VIDEO)") ||
            contains(log, "--game-dir") || contains(log, "没有 SYS4INI.BIN");
 }
 
@@ -208,6 +210,8 @@ int main(int argc, char** argv) {
         LIFT_SKIP("起不了子进程（emulator-lift 路径不对？）");
     }
     if (first.exit_code != 0) {
+        // ★ 无 GPU：子进程在跑 guest 之前就拒绝启动 ⇒ 环境缺失，SKIP 77（原因进输出）。
+        LIFT_SKIP_IF_NO_GPU(first.exit_code, log_default);
         if (environmentUnavailable(log_default)) LIFT_SKIP("环境不可用（没有执行源 / 安装树）");
         std::fprintf(stderr, "默认档子进程 exit %d；log 前 4000 字节：\n%.4000s\n", first.exit_code,
                      log_default.c_str());
@@ -240,6 +244,7 @@ int main(int argc, char** argv) {
         return finish("recovery-dialog");
     }
     if (second.exit_code != 0) {
+        LIFT_SKIP_IF_NO_GPU(second.exit_code, log_accepted);
         if (environmentUnavailable(log_accepted)) LIFT_SKIP("环境不可用（没有执行源 / 安装树）");
         std::fprintf(stderr, "带 flag 子进程 exit %d；log 前 4000 字节：\n%.4000s\n", second.exit_code,
                      log_accepted.c_str());

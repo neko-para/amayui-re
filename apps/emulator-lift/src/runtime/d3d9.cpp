@@ -466,41 +466,43 @@ std::uint32_t fillCaps(X86& cpu, std::uint32_t caps_ea, std::string* why) {
     // ① 先整块清零：引擎按 352 B 栈缓冲读，残留字节会变成随机能力（⛔ 不留未初始化）
     cpu.mem->fillBytes(caps_ea, 0, kCapsBytes);
     // ② 再把**有意义的**字段写成确定值
+    // ★ 声明位一律取 `d3d9.h` 的 `kCaps*Claim`（实现/守卫共用一份；判据见 `d3d9/caps-claims`）：
+    //   本线只能**响亮拒绝**的能力必须清位 —— caps 没有"拒绝"动作（`REQ-01M79PP97ZD65BJG9GMAJ08MJ3`）。
     cpu.mem->wr32(caps_ea + kCapsDeviceType, kDevTypeHal);
     cpu.mem->wr32(caps_ea + kCapsAdapterOrdinal, 0u);
-    cpu.mem->wr32(caps_ea + kCapsPresentationIntervals, 0x80000001u);  // IMMEDIATE | ONE
-    cpu.mem->wr32(caps_ea + kCapsCursorCaps, 0x00000001u);             // D3DCURSORCAPS_COLOR
+    cpu.mem->wr32(caps_ea + kCapsPresentationIntervals, kCapsPresentationIntervalsClaim);
+    cpu.mem->wr32(caps_ea + kCapsCursorCaps, kCapsCursorClaim);
     // 固定功能流水线可用（本线不实现绘制，但**能力**这层不谎称没有硬件光栅化）
     cpu.mem->wr32(caps_ea + kCapsDevCaps, 0x00080250u);
-    cpu.mem->wr32(caps_ea + kCapsRasterCaps, 0x00200000u);  // D3DPRASTERCAPS_ZTEST
-    cpu.mem->wr32(caps_ea + kCapsZCmpCaps, 0x000000FFu);
-    cpu.mem->wr32(caps_ea + kCapsSrcBlendCaps, 0x000003FFu);
-    cpu.mem->wr32(caps_ea + kCapsDestBlendCaps, 0x000003FFu);
-    cpu.mem->wr32(caps_ea + kCapsAlphaCmpCaps, 0x000000FFu);
-    cpu.mem->wr32(caps_ea + kCapsShadeCaps, 0x00084208u);
-    cpu.mem->wr32(caps_ea + kCapsTextureCaps, 0x00010000u);
+    cpu.mem->wr32(caps_ea + kCapsRasterCaps, kCapsRasterClaim);  // 只有 ZTEST（⛔ 不是 ZFOG）
+    cpu.mem->wr32(caps_ea + kCapsZCmpCaps, kCapsZCmpClaim);
+    cpu.mem->wr32(caps_ea + kCapsSrcBlendCaps, kCapsSrcBlendClaim);
+    cpu.mem->wr32(caps_ea + kCapsDestBlendCaps, kCapsDestBlendClaim);
+    cpu.mem->wr32(caps_ea + kCapsAlphaCmpCaps, kCapsZCmpClaim);
+    cpu.mem->wr32(caps_ea + kCapsShadeCaps, kCapsShadeClaim);
+    cpu.mem->wr32(caps_ea + kCapsTextureCaps, kCapsTextureClaim);
     cpu.mem->wr32(caps_ea + kCapsTextureFilterCaps, 0x03030303u);
     cpu.mem->wr32(caps_ea + kCapsTextureAddressCaps, 0x0000001Fu);
-    cpu.mem->wr32(caps_ea + kCapsLineCaps, 0x0000001Fu);
+    cpu.mem->wr32(caps_ea + kCapsLineCaps, kCapsLineClaim);
     // ★ 引擎唯一读的两个字段（0x499128 / 0x49912E）
     cpu.mem->wr32(caps_ea + kCapsMaxTextureWidth, kMaxTextureWidth);
     cpu.mem->wr32(caps_ea + kCapsMaxTextureHeight, kMaxTextureHeight);
-    cpu.mem->wr32(caps_ea + kCapsMaxVolumeExtent, 256u);
+    cpu.mem->wr32(caps_ea + kCapsMaxVolumeExtent, kCapsMaxVolumeExtentClaim);
     cpu.mem->wr32(caps_ea + kCapsMaxTextureRepeat, 8192u);
     cpu.mem->wr32(caps_ea + kCapsMaxTextureAspectRatio, kMaxTextureWidth);
-    cpu.mem->wr32(caps_ea + kCapsMaxAnisotropy, 4u);
+    cpu.mem->wr32(caps_ea + kCapsMaxAnisotropy, kCapsMaxAnisotropyClaim);
     wrFloat(cpu, caps_ea + kCapsMaxVertexW, 1.0e10f);
-    cpu.mem->wr32(caps_ea + kCapsStencilCaps, 0x000001FFu);
+    cpu.mem->wr32(caps_ea + kCapsStencilCaps, kCapsStencilClaim);
     cpu.mem->wr32(caps_ea + kCapsFVFCaps, 0x00000008u);   // 8 个纹理坐标
     cpu.mem->wr32(caps_ea + kCapsTextureOpCaps, 0x02000000u);
     cpu.mem->wr32(caps_ea + kCapsMaxTextureBlendStages, 8u);
     cpu.mem->wr32(caps_ea + kCapsMaxSimultaneousTextures, 8u);
-    cpu.mem->wr32(caps_ea + kCapsVertexProcessingCaps, 0x0000003Fu);
+    cpu.mem->wr32(caps_ea + kCapsVertexProcessingCaps, kCapsVertexProcessingClaim);
     cpu.mem->wr32(caps_ea + kCapsMaxActiveLights, 8u);
-    cpu.mem->wr32(caps_ea + kCapsMaxUserClipPlanes, 6u);
-    cpu.mem->wr32(caps_ea + kCapsMaxVertexBlendMatrices, 4u);
+    cpu.mem->wr32(caps_ea + kCapsMaxUserClipPlanes, kCapsMaxUserClipPlanesClaim);
+    cpu.mem->wr32(caps_ea + kCapsMaxVertexBlendMatrices, kCapsMaxVertexBlendMatricesClaim);
     cpu.mem->wr32(caps_ea + kCapsMaxVertexBlendMatrixIndex, 0u);
-    wrFloat(cpu, caps_ea + kCapsMaxPointSize, 64.0f);
+    wrFloat(cpu, caps_ea + kCapsMaxPointSize, kCapsMaxPointSizeClaim);
     cpu.mem->wr32(caps_ea + kCapsMaxPrimitiveCount, 0xFFFFFu);
     cpu.mem->wr32(caps_ea + kCapsMaxVertexIndex, 0xFFFFFu);
     cpu.mem->wr32(caps_ea + kCapsMaxStreams, 16u);

@@ -1294,9 +1294,21 @@ bool InputScript::tick(WindowManager& wm, std::uint64_t frame, std::uint64_t gue
         presses_.clear();
         releaseOwnedInputs(wm, time_ms);
         wm.releaseScriptOwnership();
-        std::printf("[input-script] finished：%zu 条动作全部应用（脚本按下的键 / 按钮已抬起；"
-                    "键 / 按钮 / 光标所有权交还 OS）\n",
-                    actions_.size());
+        // ★ 收口行必须**与事实一致**（`REQ-01M72WHFMCWQ0KEJDQG0XH21AH`）：`quit` 提前结束时
+        //   只剩 `quit` 之前到期的动作被应用，旧文案打的是**总**动作数、说的是"全部应用"
+        //   ⇒ 与摘要里的 `input-script: unfinished pending=…` 正好相反。这里按 `applied_` / 总数分支。
+        //   ⚠ `finished()` 的语义不变（`applied_ == size && releases_.empty()`）；收口条件也不变。
+        const std::size_t total = actions_.size();
+        if (applied_ == total) {
+            std::printf("[input-script] finished：%zu 条动作全部应用（脚本按下的键 / 按钮已抬起；"
+                        "键 / 按钮 / 光标所有权交还 OS）\n",
+                        total);
+        } else {
+            // 走这里只可能是 `quit`（`finished()` ⇒ `applied_ == total`）；仍写全"已应用 / 共 / 剩"三数。
+            std::printf("[input-script] quit：已应用 %zu / 共 %zu 条动作（quit 提前结束，剩 %zu 条未应用；"
+                        "脚本按下的键 / 按钮已抬起；键 / 按钮 / 光标所有权交还 OS）\n",
+                        applied_, total, total - applied_);
+        }
         // ★ 可观测账（见 `ReleaseStats`）：这是判断"这次点击到底有没有跨过采样"的入口。
         std::printf("[input-script] release  : total=%llu auto=%llu explicit=%llu deferred-ups=%llu "
                     "bounded-no-sample=%llu waited-samples-max=%llu hold-ms-max=%llu\n",

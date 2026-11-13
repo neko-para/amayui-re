@@ -2,8 +2,9 @@
 
 - id: REQ-01M6H6G7FN5BAAJPPQYQEB2M27
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M3TC7BK0J9TBQKGGWQ35A3NR
+- done_reason: 两半都已落地：① Live2D（TITLE 三张 PNG + 声明式 Draw + 状态块）已能渲染，用户 2026-11 背书"渲染正确"；入口单 REQ-01M6QXMAFJRK30B36Z78NQ1YVX 已 done（verify = d3dx9/texture-from-memory-png）。② 3D 网格（D3DXLoadMeshHierarchy / 3D 设备 / 顶点着色器）按 SCOPE §1 明确拒绝（stub + 记账）；2026-11-13 口径「D3D9 除明确拒绝外都可补」沿用它作拒绝清单。遗留风险（声明路无像素守卫 / platform-effort 读数冲突）已拆单到 M2，不阻塞本里程碑。重开条件：出现用户可见的 Live2D 缺陷且归因到缺 D3D9/D3DX 接口。
 - tags: [emulator-lift m3]
 
 ## 一句话

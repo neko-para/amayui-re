@@ -1063,8 +1063,11 @@ void shimDrawIndexedPrimitive(X86& cpu, ShimCall& call) {
         return;
     }
     std::string why;
-    const std::uint32_t hr = d3d9::drawIndexedPrimitive(cpu, dev.state, call.u32(1), call.u32(2), call.u32(3),
-                                                        call.u32(4), call.u32(5), call.u32(6), &why);
+    // ★ `BaseVertexIndex` 是 **INT**（SDK 签名）⇒ 必须按有符号读；按 `u32` 收会把负 base
+    //   变成 2^32−x（`REQ-01M79PP9S4BFBPKDPBQBDN5GGR`）。
+    const std::uint32_t hr = d3d9::drawIndexedPrimitive(
+        cpu, dev.state, call.u32(1), static_cast<std::int32_t>(call.u32(2)), call.u32(3), call.u32(4),
+        call.u32(5), call.u32(6), &why);
     if (hr != d3d9::kOk) d3d9Log("DrawIndexedPrimitive", "失败：%s", why.c_str());
     call.result = hr;
 }

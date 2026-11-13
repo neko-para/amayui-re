@@ -2,7 +2,7 @@
 
 - id: REQ-01M78BF1FNNH6K8N8GEY6GQYXX
 - type: req
-- status: open
+- status: doing
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
 - tags: [emulator-lift d3d9 raster architecture]
 
@@ -20,14 +20,12 @@
 
 ## 前置依赖（必须先做，否则"删了就坏"）
 
-`0x4A778B` 是**渲染到纹理**（当前帧 → 1280×720 纹理 → `GetRenderTargetData` 读出 → 缩略图）。
-GPU 准入今天拒绝 `color_surface != 0`（`src/runtime/d3d9_pipeline.cpp:4205`）⇒ 缩略图只能靠 CPU 光栅。
-⇒ **GPU 必须支持"纹理当渲染目标"**（SDL_GPU 原生支持；GPU→guest 读回侧 `rasterSyncToGuest` 已有）。
+渲染到纹理已**单独拆单**：`REQ-01M79MSMWGFEKF8J7C7VYWS4YP`（GPU 纹理作 RT + 读回）。
+本单在它落地后开工；STH 的非零断言挂在 `REQ-01M780VKKRFHJEX6VM74DRCYBM`，⛔ 不重复计入本单判据。
 
 ## 要做
 
-1. **GPU 支持渲染到纹理**：纹理作 RT0 + 读回 guest arena。
-   守卫 = `save-graph` 的「`SAVE00.STH` payload（偏移 54 之后）非零字节 > 0」。
+1. ~~GPU 支持渲染到纹理~~ → 已拆到 `REQ-01M79MSMWGFEKF8J7C7VYWS4YP`（本单只做"删第二实现"）。
 2. **删 `--raster cpu`**：`main.cpp` 的参数与拒绝分支、`d3d9_pipeline.cpp` 里 `ctx.gpu == nullptr` 的分支与
    "显式参考后端"注释（`:4373`）、README 里"参考/测试后端"的表述（`:631`/`:712`）。
 3. **删 `--raster-sprites 0` A/B**：`main.cpp:173`、`present_sdl.cpp:1127`、`gpu_raster.h:353`。
@@ -54,11 +52,28 @@ GPU 准入今天拒绝 `color_surface != 0`（`src/runtime/d3d9_pipeline.cpp:420
 
 - `rg -n -- '--raster cpu|raster-sprites|参考后端|像素真源' apps/emulator-lift` 为空（注释与文档也算）；
 - 无 GPU 环境启动 ⇒ 非 0 退出 + 明确文案（用注入/环境变量模拟，⛔ 不要靠真拔显卡）；
-- `save-graph` 的 STH 断言绿（纹理 RT 真的画出来了）；
 - ⛔ 不许为过门禁保留任何"第二实现"分支，包括"空光栅/no-op 光栅"。
+- **删 CPU 前必须先把四处"靠 CPU 兜底"的旁路改成显式拒绝 + 记账**（否则删掉后静默不画）：
+  点/线只走 CPU、`invw != 1`、`MIPFILTER=NONE` 的缩小、GPU 失败后的 CPU 重放。
+  守卫 = 各自一条 `recordUnsupported` 的用例，而不是"删完看不出来"。
+- `[draw] fa=` / `[draw] texa=` 移到 GPU 批（计划阶段或提交时统计），并有守卫保证非 0 参与 α 统计可见。
 
 ## 反证条件
 
 - 若删完发现某处**产品可见**画面只能靠 CPU 光栅才画得对 ⇒ **停下报告**：那说明 GPU 覆盖还差一块，
   按覆盖面扩 GPU，⛔ 不恢复第二实现。
 - 若"纹理 RT 在 GPU 上根本拿不到像素"（读回路径缺失）⇒ 先补读回，不要把纹理 RT 改回 CPU。
+
+## 与其它单的交界（2026-11-13）
+
+- **`ValidateDevice` 的翻面条件就是本单**：现在恒 `S_OK,1`（本线无多 pass 装备、引擎无 `.lst` 站点）是事实；
+  本单（CPU 兜底删除）落地后，若要让 `ValidateDevice` 变成真的校验，用状态侧判据 + `D3DERR_CONFLICTINGRENDERSTATE` 且不写出参。
+  RTT 落地**不是**翻面条件（那条已在 `REQ-01M79MSMWGFEKF8J7C7VYWS4YP` 完成）。
+- 本单删除 CPU 兜底时，**点/线、`invw != 1`、`MIPFILTER=NONE` 缩小、GPU 失败 CPU 重放** 四处必须逐条处置：
+  命中率 > 0（boot→TITLE 实测）⇒ 在 GPU 上补；否则显式拒绝 + 记账。⛔ 不许"删完静默不画"。
+
+## 进展（2026-11-13 · 后半已落地，剩最后一环）
+- CLI `--raster` / `--raster-sprites` / `--gpu-strict` 已删；无 GPU ⇒ 拒绝启动（exit 2 + 文案 + 指路）；`--present headless` 走隐藏窗口（日志 `window=hidden`）。
+- 守卫：`lift/no-gpu-refuses-start`、`lift/raster-flag-gone`（各带变异）；`rg` 判据为空；ctest 95/91/4 SKIP 不变。
+- ⚠ **未做**：`rasterTriangle` 一族 + `ctx.gpu == nullptr` 仍保留（**测试 + `gpuEligible` 拒批时的生产回退**（复审 2026-11-13 否证了「只有测试」：`d3d9_pipeline.cpp:4719` ⇒ `:4747/:4917/:4928`，`LIFT_GPU_VERIFY` 走 `:5028`）），因为 3 条 pure CTest（`d3d9`/`d3dx9`/`d3d9-pipeline`）的逐像素断言全挂在它上面。
+  ⇒ 迁移与删除已拆单：`REQ-01M7A74YG08R65NJBFXF7DEJDK`。本单在它落地前**不算收口**（判据 4"不许第二实现"未满足）。

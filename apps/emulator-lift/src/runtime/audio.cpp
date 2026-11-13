@@ -63,6 +63,11 @@ constexpr std::uint32_t kSoundQuitEvent = 0x514u;   // 事件 #60
 constexpr std::uint32_t kSlotCount = 15u;
 constexpr std::uint32_t kStreamDsBuffer = 0x40Cu;   // SoundBuffer +0x40C = IDirectSoundBuffer8
 constexpr std::uint32_t kStreamBytes = 0x444u;      // SoundBuffer +0x444 = 环长度 L
+// ★ 写见证（`.tmp/audio-phase/design.md` §1.2 事实 2；用途见 docs/thread-model-feasibility.md）：
+//   [+0x2468] = 已写圈数（每次 Unlock 前 `inc`）；fill 前后各读一次，**变了 = 这一刀写了环**。
+//   [+0x2458] = "播完"标志（>=2 ⇒ 引擎 memset 0；那条也走同一条 inc ⇒ **guest 静音 ≠ underrun**）。
+constexpr std::uint32_t kStreamWrittenLaps = 0x2468u;
+constexpr std::uint32_t kStreamDone = 0x2458u;
 constexpr std::uint32_t kSub4B6C30 = 0x004B6C30u;
 // feeder 真线程的"返回哨兵"：sub_4B6C30 的 `retn 4` 会弹到这里，循环随即结束。
 // 与 GuestCallStack 的 0x7FFEF008 / winmm 的 0x7FFEF004 错开。
@@ -423,6 +428,62 @@ void AudioEngine::setFillInFlightForTest(std::uint32_t obj_ea) {
     pending_cv_.notify_all();
 }
 
+void AudioEngine::noteFillForTest(std::uint32_t obj_ea, std::uint32_t quarter) {
+    // ★ 仅夹具（见 audio.h 的声明）：等价于"某一刀 fill 跑完并写了环"。
+    //   ⛔ 只喂 `witness[quarter]`：不写 guest 内存、不改 `playing` / 游标 / 统计 / 不假装见过
+    //   guest 的静音 ⇒ 它**不能**替代 `audio-device/fill-witness-wiring` 那条真 fill 用例。
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    Buffer* b = findByObj(obj_ea);
+    if (b == nullptr || quarter >= 4u) return;
+    ++b->witness[quarter];
+}
+
+std::uint64_t AudioEngine::fillWitnessForTest(std::uint32_t obj_ea, std::uint32_t quarter) {
+    // ★ 仅夹具（见 audio.h 的声明）：只读回 `witness[quarter]` —— 真 fill 的 `++witness` 在
+    //   `noteFillWitness` 里，而它的唯一可观察后果就是这个数组（stats 的 `fill_witnessed` 是
+    //   同一 `if` 里的另一行）⇒ 断言"真 fill 前后恰好一个 quarter 的 witness +1"才钉得住它。
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const Buffer* b = findByObj(obj_ea);  // 递归 `mutex_`（本函数已持有）
+    if (b == nullptr || quarter >= 4u) return 0u;
+    return b->witness[quarter];
+}
+
+void AudioEngine::markRingFresh(Buffer& b) {
+    // design §1.3：起播 / 复位"整圈视为已预填"。`++witness` 是那句语义的机械形式 ——
+    // `consumed = 旧 witness`，`witness = 旧+1` ⇒ 第一次读该 quarter 时 `witness != consumed`
+    // ⇒ 判 fresh；下一次进这个 quarter 若没有新的 fill，两者相等 ⇒ 判陈旧。
+    for (std::uint32_t q = 0; q < 4u; ++q) {
+        b.consumed[q] = b.witness[q];
+        ++b.witness[q];
+    }
+    b.read_started = false;
+}
+
+std::uint32_t AudioEngine::quarterOfRingOffset(const Buffer& b, std::uint32_t ring_off) {
+    // ⛔ 不要用绝对 lap / 绝对字节位置推 quarter：那会引入 `start_mixed` / `initial_pos` 的
+    //    第二份算式，与 `cursorOf()` 漂。这里只依赖 `notify_off[]`（宿主侧来自 `setNotify`）。
+    for (std::uint32_t i = 0; i < 4u; ++i) {
+        if (b.notify_off[i] > ring_off) return i;
+    }
+    return 0u;
+}
+
+void AudioEngine::noteFillWitness(std::uint32_t obj_ea, std::uint32_t quarter, bool read_ok,
+                                  std::uint32_t pre, std::uint32_t post, bool guest_silence) {
+    // design §1.2 事实 2：`[+0x2468]` **前后不同** = 这一刀真的写了环（不是内容比对）。
+    //   早退分支（`[+0x2458]==0` ⇒ Stop）不 inc ⇒ 自动不计见证。
+    //   读不到（未提交页）⇒ 按"写了"处理，但**不计见证**（宁可不插静音，也不误插）。
+    if (quarter >= 4u) return;
+    if (read_ok && pre != post) {
+        ++stats_.fill_witnessed;
+        if (guest_silence) ++stats_.guest_silence_fills;
+    }
+    Buffer* b = findByObj(obj_ea);  // 递归 `mutex_`（调用方已持有）
+    if (b == nullptr || b->notify_count != 4u) return;
+    if (read_ok && pre == post) return;  // 没写 ⇒ witness 不动
+    ++b->witness[quarter];
+}
+
 bool AudioEngine::waitFillDone(std::uint32_t obj_ea, std::uint32_t timeout_ms, bool* waited) {
     // ⛔ 不用 `mutex_`：等待期间必须放开它（fill 收尾要它）。
     //   `filling_obj_` 是 atomic，置/清都在别处；这里只作谓词。
@@ -542,6 +603,8 @@ void AudioEngine::addBuffer(std::uint32_t state_ea, std::uint32_t obj_ea, std::u
     b->notify_count = 0;
     b->volume = 0;
     b->pan = 0;
+    // ★ design §1.3：新缓冲 / 重建 ⇒ 整圈视为已预填（写见证从这一代重新起算）。
+    markRingFresh(*b);
     stats_.max_buffers = std::max(stats_.max_buffers, static_cast<std::uint32_t>(buffers_.size()));
 }
 
@@ -596,6 +659,8 @@ void AudioEngine::setNotify(std::uint32_t state_ea, std::uint32_t count, const s
     b->notify_count = std::min<std::uint32_t>(count, 4u);
     for (std::uint32_t i = 0; i < b->notify_count; ++i) b->notify_off[i] = offsets ? offsets[i] : 0u;
     for (std::uint32_t i = b->notify_count; i < 4u; ++i) b->notify_off[i] = 0u;
+    // ★ design §1.3：通知点换了 ⇒ quarter 划分换了 ⇒ 写见证重新起算（整圈视为已预填）。
+    markRingFresh(*b);
 }
 
 void AudioEngine::clearNotify(std::uint32_t state_ea) {
@@ -622,6 +687,9 @@ void AudioEngine::play(std::uint32_t state_ea, bool looping) {
     b->playing = true;
     b->looping = looping;
     b->start_mixed = generated_;
+    // ★ design §1.3：`playing` false→true ⇒ 起播整圈视为已预填（⛔ 已在播的 no-op 分支不重置：
+    //   真 DS 的"再 Play"不重锚，写见证也不该跟着回滚）。
+    markRingFresh(*b);
     if (std::getenv("LIFT_AUDIO_TRACE") != nullptr) {
         logAt(LogLevel::Info, "play state=0x%08X obj=0x%08X bytes=%u %uch/%uHz/%ubit loop=%d",
               state_ea, b->obj_ea, b->bytes, b->fmt.channels, b->fmt.sample_rate, b->fmt.bits,
@@ -729,6 +797,8 @@ void AudioEngine::setPosition(std::uint32_t state_ea, std::uint32_t pos) {
     if (b->playing) {
         // 真机 SetCurrentPosition 会让游标跳到新位置；引擎只在 Play 前调它，这里按同一时间线重排。
         b->start_mixed = generated_;
+        // ★ design §1.3：播放中重定位 ⇒ 新位置所在的整圈视为已预填（旧圈的见证不算数）。
+        markRingFresh(*b);
         for (std::uint32_t i = 0; i < b->notify_count; ++i) {
             if (b->notify_off[i] == b->initial_pos) enqueue(b->obj_ea, i, b->generation);
         }
@@ -954,9 +1024,14 @@ void AudioEngine::generateTo(std::uint64_t target) {
     if (out_frames64 > 0xFFFFFFFFull) return;
     const std::uint32_t out_frames = static_cast<std::uint32_t>(out_frames64);
     std::vector<std::int64_t> acc(static_cast<std::size_t>(out_frames) * 2u, 0);
+    // ★ 宿主替 guest 插的静音按**输出帧**记一次（同帧多条流陈旧只算一帧），最后 × 4 B。
+    //   用位图标"这一输出帧至少一条流判了陈旧"。
+    std::vector<std::uint8_t> stale_frame(out_frames, 0);
     const std::uint64_t out_start_frame = generated_ / kBlockAlign;
 
-    for (const auto& b : buffers_) {
+    // ★ `auto&` 而不是 `const auto&`：写见证要写 `consumed[]` / `read_quarter`（design §1.4）。
+    //   `generateTo` 的调用者（`mixStep` / `pump` / `mixLoop`）都持 `mutex_`，不需要另加锁。
+    for (auto& b : buffers_) {
         if (!b.playing || b.bytes < b.fmt.block_align || b.fmt.block_align == 0) continue;
         if (b.fmt.bits != 16 && b.fmt.bits != 8) continue;
         if (b.fmt.channels == 0 || b.fmt.sample_rate == 0) continue;
@@ -1003,20 +1078,70 @@ void AudioEngine::generateTo(std::uint64_t target) {
             }
         };
 
+        // ★ 写见证的启用条件（design §1.4）：`notify_count == 4` 且 `notify_off` **严格升序**。
+        //   不满足 ⇒ 这条 buffer **关闭检测**（⛔ 不许猜 offset；`fillLagQuarter` 的兜底只用于诊断）。
+        bool witness_supported = (b.notify_count == 4u);
+        for (std::uint32_t i = 1; witness_supported && i < 4u; ++i) {
+            if (b.notify_off[i] <= b.notify_off[i - 1]) witness_supported = false;
+        }
         std::uint64_t pos = pos_q16;
         for (std::uint32_t o = 0; o < out_frames; ++o) {
             const std::uint32_t idx = static_cast<std::uint32_t>((pos >> 16) % total_frames);
             const std::uint32_t frac = static_cast<std::uint32_t>(pos & 0xFFFFu);
             const std::uint32_t idx2 = (idx + 1u) % total_frames;
-            std::int32_t l0 = 0, r0 = 0, l1 = 0, r1 = 0;
-            readFrame(idx, &l0, &r0);
-            if (frac != 0) readFrame(idx2, &l1, &r1);
-            const std::int32_t l = l0 + static_cast<std::int32_t>((static_cast<std::int64_t>(l1 - l0) * frac) >> 16);
-            const std::int32_t r = r0 + static_cast<std::int32_t>((static_cast<std::int64_t>(r1 - r0) * frac) >> 16);
-            acc[static_cast<std::size_t>(o) * 2u + 0] += (static_cast<std::int64_t>(l) * gl) >> 16;
-            acc[static_cast<std::size_t>(o) * 2u + 1] += (static_cast<std::int64_t>(r) * gr) >> 16;
+            // ★ 写见证（design §1.2 / §1.4）：读指针进入 quarter q 时，若 `witness[q]` 自上次进入
+            //   q 以来没有增加 ⇒ 这一圈 q 区没有被任何跑完的 fill 重写过 ⇒ 该区交付 0。
+            //   ⚠ `read_stale` 必须**挂在 Buffer 上跨 `generateTo` 调用保持**（一次混音只覆盖一部分
+            //   quarter；每帧重判会把已更新 `consumed` 的健康 quarter 判成陈旧）。
+            if (witness_supported) {
+                const std::uint32_t quarter = quarterOfRingOffset(b, idx * bpf);
+                if (!b.read_started || quarter != b.read_quarter) {
+                    b.read_quarter = quarter;
+                    b.read_started = true;
+                    b.read_stale = (b.witness[quarter] == b.consumed[quarter]);
+                    b.consumed[quarter] = b.witness[quarter];
+                    if (b.read_stale) {
+                        ++stats_.underrun_silence_events;
+                        ++stats_.underruns;  // design §1.5：episode 合流（队列空 ∪ 环陈旧）
+                        if (!warned_underrun_) {
+                            warned_underrun_ = true;
+                            logAt(LogLevel::Warn,
+                                  "underrun：obj=0x%08X quarter=%u 环未被重写（上一圈之后没有跑完的 fill）"
+                                  "⇒ 交付静音；之后同类只计 underrun_silence_bytes/events",
+                                  b.obj_ea, quarter);
+                        }
+                    }
+                }
+                if (b.read_stale) stale_frame[o] = 1;
+            }
+            if (!witness_supported || !b.read_stale) {
+                std::int32_t l0 = 0, r0 = 0;
+                readFrame(idx, &l0, &r0);
+                // ★ design §1.4 第 2 条：`idx2` 跨到**未见证 / 别的** quarter 时不跨边界插值
+                //   （令 `l1=l0, r1=r0`）—— 边界上 1/65536 权重的旧样本不值得整帧静音，
+                //   也不会把旧内容带进来。
+                std::int32_t l1 = l0, r1 = r0;
+                if (frac != 0) {
+                    const bool same_quarter =
+                        !witness_supported || quarterOfRingOffset(b, idx2 * bpf) == b.read_quarter;
+                    if (same_quarter) readFrame(idx2, &l1, &r1);
+                }
+                const std::int32_t l =
+                    l0 + static_cast<std::int32_t>((static_cast<std::int64_t>(l1 - l0) * frac) >> 16);
+                const std::int32_t r =
+                    r0 + static_cast<std::int32_t>((static_cast<std::int64_t>(r1 - r0) * frac) >> 16);
+                acc[static_cast<std::size_t>(o) * 2u + 0] += (static_cast<std::int64_t>(l) * gl) >> 16;
+                acc[static_cast<std::size_t>(o) * 2u + 1] += (static_cast<std::int64_t>(r) * gr) >> 16;
+            }
             pos += step_q16;
         }
+    }
+    // design §1.5：`underrun_silence_bytes` = 宿主替 guest 填的**输出字节**（48k/16/2 ⇒ 每帧 +4；
+    //   同一输出帧多条流陈旧只 +4 一次）。静音也是内容 ⇒ 照常进 `mixed`（⛔ 不动 muted_bytes 语义）。
+    {
+        std::uint64_t stale_out_frames = 0;
+        for (std::uint8_t s : stale_frame) stale_out_frames += s;
+        if (stale_out_frames != 0) stats_.underrun_silence_bytes += stale_out_frames * kBlockAlign;
     }
 
     // ★ 影片音频（宿主 PCM 源）：按输出帧序号从 `host_pcm_` 混入（48k/S16/2ch，已含音量）。
@@ -1304,10 +1429,14 @@ AudioPump AudioEngine::pump() {
         double lag_q = 0.0;
         const std::uint32_t ev_obj = ev.obj;  // trace 用（捕获；`ev` 本身不捕，只捕需要的字段）
         const bool lag_ok = fillLagQuarter(ev_obj, quarter, &lag_bytes, &lag_q);
+        // ★ 写见证的前一次读（design §1.2 事实 3 的 D 臂）：在 fill **开始**之前读 `[+0x2468]`，
+        //   与 continuation 里的后一次读比较；变了 = 这一刀写了环。guest 内存是数据面，不需要令牌。
+        const bool witness_pre_ok = mem_->committed(stream + kStreamWrittenLaps, 4);
+        const std::uint32_t witness_pre = witness_pre_ok ? mem_->rd32(stream + kStreamWrittenLaps) : 0u;
         const bool started = startNestedGuestCall(
             *cpu_, kSub4B6C30, {quarter}, 0u, "audio:feeder",
-            [self, slot, quarter, stream, cs, inf_ea, fill_start, lag_ok, lag_bytes, lag_q,
-             ev_obj](X86& c, std::uint32_t cb_result, std::uint32_t* out) {
+            [self, slot, quarter, stream, cs, inf_ea, fill_start, lag_ok, lag_bytes, lag_q, ev_obj,
+             witness_pre_ok, witness_pre](X86& c, std::uint32_t cb_result, std::uint32_t* out) {
                 if (c.mem->committed(inf_ea, 4)) {
                     const std::uint32_t cur = c.mem->rd32(inf_ea);
                     if (cur > 0) c.mem->wr32(inf_ea, cur - 1u);
@@ -1319,6 +1448,18 @@ AudioPump AudioEngine::pump() {
                 self->restore(self->snapshot_, out);
                 self->in_fill_ = false;
                 ++self->stats_.fills;
+                {
+                    // ★ 写见证的后一次读（design §1.2 事实 3）：fill 已跑完，`[+0x2468]` 的前后
+                    //   比较 = "这一刀到底写没写环"（⛔ 不是内容比对）。`guest_silence` = 收尾时
+                    //   `[+0x2458] >= 2`（引擎"放完 + memset 0"⇒ 记见证 ⇒ 不判陈旧）。
+                    const bool post_ok = c.mem->committed(stream + kStreamWrittenLaps, 4);
+                    const std::uint32_t post = post_ok ? c.mem->rd32(stream + kStreamWrittenLaps) : 0u;
+                    const bool guest_silence = c.mem->committed(stream + kStreamDone, 4) &&
+                                               c.mem->rd32(stream + kStreamDone) >= 2u;
+                    std::lock_guard<std::recursive_mutex> lk(self->mutex_);
+                    self->noteFillWitness(ev_obj, quarter, witness_pre_ok && post_ok, witness_pre, post,
+                                          guest_silence);
+                }
                 // ★ 只读诊断计数（dumpSummary 的 `fill_max_ms` / `fill_slow`）：⛔ 不参与判定。
                 const std::uint64_t fill_us = static_cast<std::uint64_t>(
                     std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
@@ -1816,8 +1957,17 @@ void AudioEngine::feederEvent(const AudioNotifyEvent& ev) {
     //   它每次 **shim 调用**由 `ShimRegistry::invoke` 取令牌 —— 所有 guest 可见容器的访问都在
     //   那里，所以"容器临界区"仍然互斥。⛔ 整次 fill 持令牌 = 单核串行：实测 wall ≥ 两侧 CPU
     //   之和（主线程 13.8 s + feeder 19.0 s ≈ 32.8 s CPU），而并行基线 wall 15.1 s。
+    // ★ 写见证的**前一次读**（design §1.2 事实 3 的 C 臂）：在 fill 开始之前读 `[+0x2468]`。
+    //   guest 内存是数据面、不需要令牌（`guest_token.h` 的星号注）⇒ 就在 `token.release()` 之前读。
+    const bool witness_pre_ok = mem_->committed(stream + kStreamWrittenLaps, 4);
+    const std::uint32_t witness_pre = witness_pre_ok ? mem_->rd32(stream + kStreamWrittenLaps) : 0u;
     token.release();
     const bool ok = runFeederGuest(&run_err);
+    // ★ 写见证的**后一次读**：`runFeederGuest` 一返回就读（⛔ 不要等到 LeaveCS 之后 —— 那之间
+    //   主线程可能已经跑过别的 guest 代码）。读不到（未提交页）⇒ 下面按"写了"处理、不计见证。
+    const bool witness_post_ok = mem_->committed(stream + kStreamWrittenLaps, 4);
+    const std::uint32_t witness_post = witness_post_ok ? mem_->rd32(stream + kStreamWrittenLaps) : 0u;
+    const bool guest_silence = mem_->committed(stream + kStreamDone, 4) && mem_->rd32(stream + kStreamDone) >= 2u;
     const auto t_guest_done = std::chrono::steady_clock::now();
     const std::uint64_t guest_shimtok_ns = t_shim_token_wait_ns - shimtok_ns_begin;
     const std::uint64_t guest_shimtok_n = t_shim_token_wait_count - shimtok_n_begin;
@@ -1931,6 +2081,9 @@ void AudioEngine::feederEvent(const AudioNotifyEvent& ev) {
         stats_.fill_max_us = std::max(stats_.fill_max_us, fill_us);
         if (fill_us > 1000000ull) ++stats_.fill_slow;
         if (mem_->committed(stream + kStreamBytes, 4)) stats_.fill_bytes += mem_->rd32(stream + kStreamBytes) / 4u;
+        // ★ 写见证（design §1.2 事实 2）：`[+0x2468]` 前后变了 = 这一刀写了环 ⇒ witness++。
+        noteFillWitness(ev.obj, ev.quarter, witness_pre_ok && witness_post_ok, witness_pre, witness_post,
+                        guest_silence);
     }
 }
 
@@ -2099,7 +2252,11 @@ void AudioEngine::dumpSummary(std::FILE* out) const {
                  //   fill_wait_ms / fill_wait_max_ms = 第 3 层"等正在跑的那一刀"的累计 / 单次
                  //     最大墙钟（口径 = 只量谓词等待，不含重取 `mutex_`；见 `waitFill`）。
                  " slot_reverify_fail=%llu fill_max_ms=%.2f fill_slow=%llu"
-                 " fill_wait_ms=%.2f fill_wait_max_ms=%.2f%s\n",
+                 " fill_wait_ms=%.2f fill_wait_max_ms=%.2f"
+                 // ★ underrun 插静音（`.tmp/audio-phase/design.md` §1.5）：`underruns` 的分项 +
+                 //   写见证链路读数（⛔ 只读观测，绝对值不当断言；口径见 docs/03-emulator/measurement.md M-07）。
+                 " underrun_silence_bytes=%llu underrun_silence_events=%llu fill_witnessed=%llu"
+                 " guest_silence_fills=%llu%s\n",
                  audioModeName(mode_), device, mute_ ? 1 : 0,
                  static_cast<unsigned long long>(stats_.muted_bytes),
                  static_cast<unsigned long long>(stats_.fills),
@@ -2121,6 +2278,10 @@ void AudioEngine::dumpSummary(std::FILE* out) const {
                  static_cast<unsigned long long>(stats_.fill_slow),
                  static_cast<double>(stats_.fill_wait_us) / 1000.0,
                  static_cast<double>(stats_.fill_wait_max_us) / 1000.0,
+                 static_cast<unsigned long long>(stats_.underrun_silence_bytes),
+                 static_cast<unsigned long long>(stats_.underrun_silence_events),
+                 static_cast<unsigned long long>(stats_.fill_witnessed),
+                 static_cast<unsigned long long>(stats_.guest_silence_fills),
                  dump_path_.empty() ? "" : (" dump=" + dump_path_).c_str());
 }
 

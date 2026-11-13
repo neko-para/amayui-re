@@ -300,7 +300,7 @@ main-only  : WindowManager, D3D9 设备/GPU 光栅/SDL 呈现, FontEngine
 | 判据 | 位置 | 要求 |
 |---|---|---|
 | **A4** boot trace | `tests/boot_trace.cpp`（assets 档，`CMakeLists.txt:402-404`） | 同一条命令跑两次：`reason`/`eip`/`insns`/`hash` 相同；**shim trace 逐字节相同**（`boot_trace.cpp:218-264`）；并且 `LIFT_CHECK(!a.real_time)`（`:198`）——**虚拟时钟是判据的一部分** |
-| headless / CPU 光栅 | `main.cpp:351-356`（`--present headless` ⇒ `--raster auto` 选 CPU） | 像素逐字节（`SCOPE.md:33` 的 GPU 偏差只对 `--raster gpu` 开口） |
+| headless 的像素读数 | `main.cpp` 的 GPU 后端启动段（`--present headless` 也建**隐藏**的离屏 GPU 窗口；无 GPU ⇒ 拒绝启动） | 同一台机器、同一驱动下像素逐字节；跨驱动的 blend 舍入按 `SCOPE.md` §1 的偏差（≤1 LSB） |
 | `--max-frames` / `--dump-frame` | `x86.h:150-153`（`ShimState::frame_dump` / `max_frames`）、`d3d9.cpp:674-678` | 帧号 → 文件名的对应必须稳定 |
 | 全部 pure CTest | `CMakeLists.txt:145-378` | 不接宿主时钟；`RunOptions::real_time` 默认 false（`machine.h:58`） |
 | trace 输入清单 | `TraceInputs`（`machine.h:69-84`）、`traceInputsHash()`（`machine.cpp`，快照 `:852-874`） | 输入变了必须换 hash |

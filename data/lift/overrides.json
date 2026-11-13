@@ -4,518 +4,434 @@
   "entries": [
     {
       "target": "advapi32!RegCloseKey",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/advapi32_registry.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 注册表整体 no-op：RegCloseKey 返回成功"
     },
     {
       "target": "advapi32!RegCreateKeyExA",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/advapi32_registry.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 注册表整体 no-op：RegCreateKeyExA 返回成功 + 假句柄（不写真实注册表）"
     },
     {
       "target": "advapi32!RegEnumValueA",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/advapi32_registry.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 注册表整体 no-op：RegEnumValueA 恒返回 ERROR_NO_MORE_ITEMS(259)（空枚举）"
     },
     {
       "target": "advapi32!RegOpenKeyExA",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/advapi32_registry.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 注册表整体 no-op：RegOpenKeyExA 返回 ERROR_SUCCESS + 非空假句柄（不读真实注册表）"
     },
     {
       "target": "advapi32!RegQueryValueExA",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/advapi32_registry.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 注册表整体 no-op：RegQueryValueExA 恒返回 ERROR_FILE_NOT_FOUND(2)，调用方回落默认值"
     },
     {
       "target": "advapi32!RegSetValueExA",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/advapi32_registry.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 注册表整体 no-op：RegSetValueExA 返回成功但不落盘"
     },
     {
       "target": "agerc!_GetInstance@0",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/kernel32_agerc.cpp",
       "boundary": "import",
       "reason": "AGERC 设置对话框仍属 SCOPE §1 的未做范围；_GetInstance 返回**真实模块基址**（HINSTANCE）"
     },
     {
       "target": "agerc!_OperateMenu@16",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/kernel32_agerc.cpp",
       "boundary": "import",
       "reason": "SCOPE §1：AGERC 菜单操作（_OperateMenu@16）仍是 stub ⇒ 返回 0"
     },
     {
       "target": "agerc!_SetNameLenMax@20",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/kernel32_agerc.cpp",
       "boundary": "import",
-      "reason": "按真实实现（AGERC export 20 / RVA 0x32EF1 → 体 0x100367D0）的语义：存 *arg1 进 \"\n              \"g_nameLenMax、返回 0；镜像换基址且 .reloc 未应用 ⇒ 不跑真实代码（见 kernel32_agerc.cpp）"
+      "reason": "按真实实现（AGERC export 20 / RVA 0x32EF1 → 体 0x100367D0）的语义：存 *arg1 进 g_nameLenMax、返回 0；镜像换基址且 .reloc 未应用 ⇒ 不跑真实代码（见 kernel32_agerc.cpp）"
     },
     {
       "target": "d3d9!Direct3DCreate9Ex",
-      "kind": "stub",
+      "kind": "trap",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "M3 D3D9 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXComputeNormals",
-      "kind": "stub",
+      "kind": "trap",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXCreateEffectFromResourceA",
-      "kind": "stub",
+      "kind": "trap",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXFrameFind",
-      "kind": "stub",
+      "kind": "trap",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXLoadMeshHierarchyFromXInMemory",
-      "kind": "stub",
+      "kind": "trap",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXLoadSurfaceFromSurface",
-      "kind": "stub",
+      "kind": "trap",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "d3dx9_43!D3DXMatrixDecompose",
-      "kind": "stub",
+      "kind": "trap",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "M3 D3DX 簇（SCOPE §1：3D 不做 / 走 stub；不属 M1）"
     },
     {
       "target": "dxva2!DXVA2CreateDirect3DDeviceManager9",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 视频延期：DXVA2CreateDirect3DDeviceManager9 返回 E_FAIL + 空输出"
     },
     {
       "target": "evr!MFCreateVideoSampleFromSurface",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 视频延期：MFCreateVideoSampleFromSurface 返回 E_FAIL + 空输出"
     },
     {
-      "target": "gdi32!BitBlt",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 GDI / 2D 图形族（P1 / P4：DC 位图 / Blt / 设备能力；不属本批）"
-    },
-    {
-      "target": "gdi32!CreateCompatibleDC",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 GDI / 2D 图形族（P1 / P4：DC 位图 / Blt / 设备能力；不属本批）"
-    },
-    {
-      "target": "gdi32!CreateDIBSection",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 GDI / 2D 图形族（P1 / P4：DC 位图 / Blt / 设备能力；不属本批）"
-    },
-    {
-      "target": "gdi32!GetDeviceCaps",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 GDI / 2D 图形族（P1 / P4：DC 位图 / Blt / 设备能力；不属本批）"
-    },
-    {
       "target": "imm32!ImmAssociateContext",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/shell32.cpp",
       "boundary": "import",
       "reason": "SCOPE §1：完整 IME 不做 ⇒ 没有 IME：返回 NULL（不造假句柄）+ 一行日志"
     },
     {
       "target": "kernel32!_beginthreadex",
-      "kind": "stub",
+      "kind": "trap",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "CRT 线程入口（伪线程不执行 start routine；触发 = 有代码依赖线程体）"
     },
     {
       "target": "kernel32!CreateProcessA",
-      "kind": "stub",
+      "kind": "trap",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "不属 M1（自替换 / 重启路径；3 处调用，执行源已是拆壳后 exe）⇒ 本线不实现，命中即 trap"
     },
     {
       "target": "kernel32!CreateRemoteThread",
-      "kind": "stub",
+      "kind": "trap",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "伪线程只覆盖本进程的 CreateThread；远程线程不做"
     },
     {
       "target": "kernel32!CreateTimerQueue",
-      "kind": "stub",
+      "kind": "trap",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "定时器队列 = 服务线程（README §2.5 / D5）；M1 不做"
     },
     {
       "target": "kernel32!CreateTimerQueueTimer",
-      "kind": "stub",
+      "kind": "trap",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "定时器队列 = 服务线程（README §2.5 / D5）；M1 不做"
     },
     {
       "target": "kernel32!DeleteTimerQueueTimer",
-      "kind": "stub",
+      "kind": "trap",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "定时器队列 = 服务线程（README §2.5 / D5）；M1 不做"
     },
     {
       "target": "kernel32!ExitThread",
-      "kind": "stub",
+      "kind": "trap",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "伪线程不执行 start routine；主线程 ExitThread 需单独裁决"
     },
     {
-      "target": "kernel32!FindResourceA",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 资源族（用户 2026-11-04：资源等 M2；不属 M1）"
-    },
-    {
       "target": "kernel32!FreeLibraryAndExitThread",
-      "kind": "stub",
+      "kind": "trap",
       "impl": "stub_trap",
       "boundary": "import",
       "reason": "CRT 卸载并退出线程（伪线程不执行 start routine）"
     },
     {
-      "target": "kernel32!LoadResource",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 资源族（用户 2026-11-04：资源等 M2；不属 M1）"
-    },
-    {
-      "target": "kernel32!LockResource",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 资源族（用户 2026-11-04：资源等 M2；不属 M1）"
-    },
-    {
-      "target": "kernel32!SizeofResource",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 资源族（用户 2026-11-04：资源等 M2；不属 M1）"
-    },
-    {
       "target": "mf!MFCreateAudioRendererActivate",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 音频 / 视频延期：MFCreateAudioRendererActivate 返回 E_FAIL + 空输出"
     },
     {
       "target": "mf!MFCreateMediaSession",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 视频延期：MFCreateMediaSession 返回 E_FAIL + 空输出"
     },
     {
       "target": "mf!MFCreateSourceResolver",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 视频延期：MFCreateSourceResolver 返回 E_FAIL + 空输出"
     },
     {
       "target": "mf!MFCreateTopology",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 视频延期：MFCreateTopology 返回 E_FAIL + 空输出"
     },
     {
       "target": "mf!MFCreateTopologyNode",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 视频延期：MFCreateTopologyNode 返回 E_FAIL + 空输出"
     },
     {
       "target": "mf!MFCreateVideoRendererActivate",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 视频延期：MFCreateVideoRendererActivate 返回 E_FAIL + 空输出"
     },
     {
       "target": "mf!MFGetService",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 视频延期：MFGetService 返回 E_FAIL + 空输出"
     },
     {
       "target": "mfplat!MFCreateAsyncResult",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 视频 / 媒体延期：MFCreateAsyncResult 返回 E_FAIL + 空输出"
     },
     {
       "target": "mfplat!MFCreateAttributes",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 视频 / 媒体延期：MFCreateAttributes 返回 E_FAIL + 空输出（⛔ 不返回假 COM 对象）"
     },
     {
       "target": "mfplat!MFCreateMediaType",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 视频 / 媒体延期：MFCreateMediaType 返回 E_FAIL + 空输出"
     },
     {
       "target": "mfplat!MFInvokeCallback",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 视频 / 媒体延期：MFInvokeCallback 返回 S_OK（没有异步结果）"
     },
     {
       "target": "mfplat!MFShutdown",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 视频 / 媒体延期：MFShutdown 返回 S_OK"
     },
     {
       "target": "mfplat!MFStartup",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/mf_video.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 视频 / 媒体延期：MFStartup 返回 S_OK（不初始化真实媒体栈）"
     },
     {
       "target": "ole32!PropVariantClear",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/quartz_video.cpp",
       "boundary": "import",
       "reason": "M2/M4：PROPVARIANT 清零（复杂类型只记一行，不冒充释放）"
     },
     {
       "target": "oleaut32!#7",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/quartz_video.cpp",
       "boundary": "import",
       "reason": "M2/M4：oleaut32 序号 7 = SysStringLen（按 BSTR 头读长度）"
     },
     {
       "target": "oleaut32!#8",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/quartz_video.cpp",
       "boundary": "import",
       "reason": "M2/M4：oleaut32 序号 8 = VariantInit（16 字节清零）"
     },
     {
       "target": "oleaut32!#9",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/quartz_video.cpp",
       "boundary": "import",
       "reason": "M2/M4：oleaut32 序号 9 = VariantClear（简单清零；复杂类型留日志）"
     },
     {
       "target": "user32!DestroyMenu",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/user32_menu.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 菜单整体 no-op：DestroyMenu 返回 TRUE（假句柄，没有资源要释放）"
     },
     {
       "target": "user32!DrawMenuBar",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/user32_menu.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 菜单整体 no-op：DrawMenuBar 返回 TRUE（没有菜单栏可重画）"
     },
     {
-      "target": "user32!GetDC",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
-    },
-    {
       "target": "user32!GetMenu",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/user32_menu.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 菜单整体 no-op：GetMenu 返回窗口的菜单句柄（没有菜单 = 0，Win32 真值）"
     },
     {
       "target": "user32!GetSubMenu",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/user32_menu.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 菜单整体 no-op：GetSubMenu 返回 NULL（假菜单没有子菜单项）"
     },
     {
       "target": "user32!GetSystemMenu",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/user32_menu.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 菜单整体 no-op：GetSystemMenu 返回非空假句柄（不建真系统菜单）"
     },
     {
       "target": "user32!LoadMenuA",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/user32_menu.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 菜单整体 no-op：LoadMenuA 返回非空假句柄（不解析菜单资源）"
     },
     {
-      "target": "user32!RegisterClassA",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
-    },
-    {
-      "target": "user32!ReleaseDC",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
-    },
-    {
       "target": "user32!RemoveMenu",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/user32_menu.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 菜单整体 no-op：RemoveMenu 返回 TRUE（假菜单没有项可删）"
     },
     {
-      "target": "user32!SetFocus",
-      "kind": "stub",
-      "impl": "stub_trap",
-      "boundary": "import",
-      "reason": "M2 窗口 / 消息族（plan D4：L3；不属 M1）"
-    },
-    {
       "target": "user32!SetMenu",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/user32_menu.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 菜单整体 no-op：SetMenu 返回 TRUE（没有 Win32 菜单栏）"
     },
     {
       "target": "user32!TrackPopupMenu",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/user32_menu.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 菜单整体 no-op：TrackPopupMenu 立即返回 0（不阻塞）"
     },
     {
       "target": "winmm!joyGetDevCapsA",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/winmm_joystick.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 摇杆永久不做：joyGetDevCapsA 返回 MMSYSERR_NODRIVER(6)"
     },
     {
       "target": "winmm!joyGetNumDevs",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/winmm_joystick.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 摇杆永久不做：joyGetNumDevs 返回 0（系统里没有摇杆）"
     },
     {
       "target": "winmm!joyGetPosEx",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/winmm_joystick.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 摇杆永久不做：joyGetPosEx 返回 JOYERR_UNPLUGGED(167)"
     },
     {
       "target": "winmm!mciGetErrorStringA",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 音频 no-op：mciGetErrorStringA 返回 FALSE（没有错误串）"
     },
     {
       "target": "winmm!mciSendCommandA",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 音频 no-op：mciSendCommandA 接受命令并返回成功（不打开设备、不播放）"
     },
     {
       "target": "winmm!mciSendStringA",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 音频 no-op：mciSendStringA 接受命令并返回成功、返回串为空"
     },
     {
       "target": "winmm!mixerClose",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 音频 no-op：mixerClose 返回成功"
     },
     {
       "target": "winmm!mixerOpen",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 音频 no-op：mixerOpen 返回成功 + 非空假句柄"
     },
     {
       "target": "winmm!mixerSetControlDetails",
-      "kind": "stub",
+      "kind": "noop",
       "impl": "apps/emulator-lift/src/shims/winmm_audio.cpp",
       "boundary": "import",
       "reason": "SCOPE §1 音频 no-op：mixerSetControlDetails 接受音量 / 控制设置但不作用于宿主"

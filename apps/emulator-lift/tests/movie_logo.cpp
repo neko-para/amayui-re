@@ -32,6 +32,7 @@
 
 #include "check.h"
 #include "runtime/host_encoding.h"
+#include "subprocess_skip.h"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -185,7 +186,6 @@ int main(int argc, char** argv) {
     add(L"--appdata");
     cmd += L" " + quoteArg(appdata.wstring());
     for (const wchar_t* f : {L"--present", L"headless"}) add(f);
-    for (const wchar_t* f : {L"--raster", L"gpu"}) add(f);
     for (const wchar_t* f : {L"--real-time"}) add(f);
     for (const wchar_t* f : {L"--native-overrides", L"all"}) add(f);
     for (const wchar_t* f : {L"--max-insns", L"4000000000"}) add(f);
@@ -210,7 +210,11 @@ int main(int argc, char** argv) {
         LIFT_SKIP("子进程没写日志（工作目录 / 权限问题）");
     }
 
-    // GPU 不可用 ⇒ 这条测试不是"影片红"，是"环境红" ⇒ SKIP 77 并打印原因。
+    // ★ 无 GPU：子进程在跑 guest 之前就拒绝启动 ⇒ 这不是"影片红"，是环境红 ⇒ SKIP 77。
+    //   （先判这条：拒绝启动时日志里**没有** raster 行，旧逻辑会漏到 exit==0 断言上变红。）
+    LIFT_SKIP_IF_NO_GPU(r.exit_code, log);
+
+    // GPU 不可用（另外的形态：起了步但 raster 不是 sdl-gpu）⇒ SKIP 77 并打印原因。
     const std::size_t raster_pos = log.find("raster    :");
     if (raster_pos != std::string::npos) {
         const std::string raster_line = log.substr(raster_pos, 120);

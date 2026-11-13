@@ -143,7 +143,7 @@ struct RunResult {
 
 // ★ `main` 最后那道兜底退出码（**只**回答"这次 run 本身成不成功"：ok ⇒ 0，否则 2）。
 //   ⛔ 不是完整映射：`main.cpp` 先跑几道消费者策略闸门（--assert-guest-token ⇒ 4、
-//   --gpu-strict ⇒ 2/3、--interaction-graph 没走完 / 三种失败 ⇒ 5），它们**优先于**本函数。
+//   --interaction-graph 没走完 / 三种失败 ⇒ 5），它们**优先于**本函数。
 //   抽成函数是为了让纯档用例能断言"新停机原因 ⇒ 非 0"（真正的黑盒进程退出码需要 CLI 造 OOM，
 //   而兄弟单已裁"⛔ 不把夹具造 OOM 做成产品参数"）。
 int exitCodeForRun(const RunResult& r);

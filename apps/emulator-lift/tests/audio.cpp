@@ -12,6 +12,9 @@
 //   ⑦ 第 3 层补偿的覆盖面：`removeBuffer` / `addBuffer`（同一 state 换 obj）在
 //      `filling_obj_` 命中时**有界等**"正在跑的那一刀"（`removeBuffer` 挡在 guest 堆 free 之前；
 //      用夹具 seam 伪造在飞 fill，见文件后半的三条用例）。
+//   ⑧ underrun 插静音（判据 = 写见证 `[stream+0x2468]`，⛔ 不是内容比对）：环陈旧 ⇒ 该区交付 0
+//      + 计数；健康驱动不误判；guest 自己的全 0 静音不算 underrun；一刀真 fill 的见证接线
+//      （`fill_witnessed` / `guest_silence_fills`）。见文件末尾的四条用例。
 //
 // ★ 会红：把 `fireCrossings` 的 sort 去掉 ⇒ ① 的回绕 0 会排在 3 之前；
 //   把 `generateTo` 的声道/采样率转换去掉 ⇒ ③ 红；把 removeBuffer 的 pending 清理去掉 ⇒ ⑤ 红；
@@ -960,6 +963,300 @@ void testMutedDeliveryParity() {
     LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(sound.muted), 0u);
 }
 
+// ---- underrun 插静音（判据 = 写见证，⛔ 不是内容比对）：design §1.6 的 pure 档夹具 ----------
+//
+// ★ 判据（红了意味着什么）：
+//   **S1** `underrun-silence-stale`（正控制，**不注册 feeder** ⇒ 天然 0 刀）：第 2 圈没有任何
+//     跑完的 fill ⇒ 环陈旧 ⇒ 宿主交付**静音**（⛔ 不是重播第 1 圈的斜坡），并计 episode。
+//   **S2** `underrun-silence-not-triggered`（负控制）：夹具 seam `noteFillForTest` 每圈 4 刀
+//     ⇒ 每圈都 fresh ⇒ 3 圈逐字节 = 斜坡重复 3 次，零静音字节、零 episode（排除"恒陈旧"）。
+//   **S3** `underrun-silence-guest-zeros`：环内容全 0（= 引擎"放完 + memset 0"的产物）+ 每圈
+//     4 刀 ⇒ dump 全 0，但 `underrun_silence_*` 都是 0 ⇒ 专门钉"⛔ 不许用内容判陈旧"。
+//
+// ★ 会红：
+//   - 删掉 `generateTo` 里的陈旧分支（恒 fresh）⇒ S1 红（第 2 圈是斜坡旧内容，events=0）；
+//   - 把判据改成"内容全 0 ⇒ 陈旧"或"恒陈旧"⇒ S2 / S3 红；
+//   - 删掉 fill 收尾的 `witness++`（`noteFillWitness`）⇒ **S1/S2/S3 全绿**（实测）：本夹具的
+//     "刀"走 `noteFillForTest` seam、**不经过** `noteFillWitness` ⇒ 它由 `fill-witness-wiring`
+//     的"真 fill 前后恰好一个 quarter 的 `witness` +1"钉住（见该用例的 ★）。
+//   - 复位表写错（`markRingFresh` 少 `++witness`）⇒ `sound-on-delivery` / S1 等红，**S2 不红**
+//     （实测；`noteFillForTest` 每圈仍把 witness 喂到 consumed 之上）。
+constexpr std::uint32_t kRingLapBytes = 384000u;  // 48k / 16 / 2 ⇒ 2.0 s 一圈
+constexpr std::uint32_t kLapSteps = 40u;          // 0.05 s × 40 = 2.0 s
+
+struct RingRun {
+    bool begun = false;
+    std::uint64_t declared = 0;  // WAV 头里声明的 data 区长度
+    std::vector<std::uint8_t> data;
+    lift::AudioStats stats;
+};
+
+// `seam_fills` = 每圈开始前调 `noteFillForTest(obj, 0..3)`（模拟健康 feeder 的每圈 4 刀）。
+RingRun runRing(const std::vector<std::int16_t>& pcm, std::uint32_t laps, bool seam_fills, const char* tag) {
+    RingRun r;
+    std::string err;
+    lift::Machine m;
+    if (!initMachine(m, &err)) return r;
+    const std::string dump = std::string("lift-audio-underrun-") + tag + ".wav";
+    std::remove(dump.c_str());
+    if (!m.configureAudio(lift::AudioMode::Virtual, dump, /*sound=*/true, &err)) return r;
+    lift::AudioEngine& a = m.audio();
+    if (!a.begin(&err)) return r;
+    r.begun = true;
+
+    const std::uint32_t data_ea = 0x00440000u;
+    const std::uint32_t state_ea = 0x00430000u;
+    const std::uint32_t obj_ea = 0x00450000u;
+    std::vector<std::uint8_t> zeros(16, 0);
+    if (!m.placeData(data_ea, pcm.data(), kRingLapBytes, &err)) return r;
+    if (!m.placeData(state_ea, zeros.data(), zeros.size(), &err)) return r;
+
+    lift::AudioFormat fmt;
+    fmt.sample_rate = 48000;
+    fmt.channels = 2;
+    fmt.bits = 16;
+    fmt.block_align = 4;
+    fmt.avg_bytes = 192000;
+    a.addBuffer(state_ea, obj_ea, data_ea, kRingLapBytes, 0x181C8u, fmt);
+    const std::uint32_t offsets[4] = {0u, 96000u, 192000u, 288000u};
+    a.setNotify(state_ea, 4, offsets);
+    a.play(state_ea, true);
+
+    for (std::uint32_t lap = 0; lap < laps; ++lap) {
+        if (seam_fills) {
+            for (std::uint32_t q = 0; q < 4u; ++q) a.noteFillForTest(obj_ea, q);
+        }
+        for (std::uint32_t s = 0; s < kLapSteps; ++s) {
+            m.clock().advance100ns(500'000);  // 0.05 s
+            a.pump();                          // Virtual 档：mixStep 只 generateTo(played_)
+        }
+    }
+    a.end();  // 回填 WAV 头
+    r.stats = a.stats();
+    std::FILE* f = std::fopen(dump.c_str(), "rb");
+    if (f) {
+        std::uint8_t hdr[44] = {};
+        if (std::fread(hdr, 1, sizeof(hdr), f) == sizeof(hdr) && std::memcmp(hdr, "RIFF", 4) == 0 &&
+            std::memcmp(hdr + 8, "WAVEfmt ", 8) == 0 && std::memcmp(hdr + 36, "data", 4) == 0) {
+            r.declared = static_cast<std::uint64_t>(hdr[40]) | (static_cast<std::uint64_t>(hdr[41]) << 8) |
+                         (static_cast<std::uint64_t>(hdr[42]) << 16) | (static_cast<std::uint64_t>(hdr[43]) << 24);
+            r.data.resize(static_cast<std::size_t>(r.declared));
+            if (std::fread(r.data.data(), 1, r.data.size(), f) != r.data.size()) r.data.clear();
+        }
+        std::fclose(f);
+    }
+    std::remove(dump.c_str());
+    return r;
+}
+
+void testUnderrunSilenceStale() {
+    lift_test::g_current_case = "audio-device/underrun-silence-stale";
+    const std::vector<std::int16_t> ramp = makeRamp(kRingLapBytes);
+    const RingRun r = runRing(ramp, /*laps=*/2, /*seam_fills=*/false, "stale");
+    LIFT_CHECK(r.begun);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.declared), 2u * kRingLapBytes);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.data.size()), 2u * kRingLapBytes);
+    if (r.data.size() == 2u * kRingLapBytes) {
+        // 第 1 圈：逐字节 = 斜坡（起播整圈视为已预填 ⇒ 不误判）。
+        LIFT_CHECK(std::memcmp(r.data.data(), ramp.data(), kRingLapBytes) == 0);
+        // 第 2 圈：**没有**任何跑完的 fill ⇒ 全 0（⛔ 不许是第 1 圈的重播）。
+        const std::vector<std::uint8_t> second(r.data.begin() + kRingLapBytes, r.data.end());
+        LIFT_CHECK(allZero(second));
+    }
+    LIFT_CHECK_EQ_U32(r.stats.fills, 0u);
+    LIFT_CHECK_EQ_U32(r.stats.fill_witnessed, 0u);
+    LIFT_CHECK_EQ_U32(r.stats.underrun_silence_events, 4u);
+    LIFT_CHECK_EQ_U32(r.stats.underrun_silence_bytes, kRingLapBytes);
+    // design §1.5：`underruns` 语义扩档 = 设备队列空 ∪ 环陈旧（Virtual 档没有队列，所以相等）。
+    LIFT_CHECK_EQ_U32(r.stats.underruns, r.stats.underrun_silence_events);
+    LIFT_CHECK(r.stats.underrun_silence_bytes <= r.stats.mixed_bytes);
+}
+
+void testUnderrunSilenceNotTriggered() {
+    lift_test::g_current_case = "audio-device/underrun-silence-not-triggered";
+    const std::vector<std::int16_t> ramp = makeRamp(kRingLapBytes);
+    const RingRun r = runRing(ramp, /*laps=*/3, /*seam_fills=*/true, "fresh");
+    LIFT_CHECK(r.begun);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.data.size()), 3u * kRingLapBytes);
+    if (r.data.size() == 3u * kRingLapBytes) {
+        for (std::uint32_t lap = 0; lap < 3u; ++lap) {
+            LIFT_CHECK(std::memcmp(r.data.data() + lap * kRingLapBytes, ramp.data(), kRingLapBytes) == 0);
+        }
+    }
+    LIFT_CHECK_EQ_U32(r.stats.underrun_silence_bytes, 0u);
+    LIFT_CHECK_EQ_U32(r.stats.underrun_silence_events, 0u);
+    LIFT_CHECK_EQ_U32(r.stats.underruns, 0u);
+    // seam 只喂 witness，不碰真 fill 的账。
+    LIFT_CHECK_EQ_U32(r.stats.fills, 0u);
+    LIFT_CHECK_EQ_U32(r.stats.fill_witnessed, 0u);
+}
+
+void testUnderrunSilenceGuestZeros() {
+    lift_test::g_current_case = "audio-device/underrun-silence-guest-zeros";
+    // 环内容全 0 = 引擎"放完 + memset 0"（`[+0x2458]==2`）的产物；健康 feeder 每圈 4 刀。
+    const std::vector<std::int16_t> zeros(kRingLapBytes / 2, 0);
+    const RingRun r = runRing(zeros, /*laps=*/3, /*seam_fills=*/true, "guest-zeros");
+    LIFT_CHECK(r.begun);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.data.size()), 3u * kRingLapBytes);
+    LIFT_CHECK(allZero(r.data));
+    // ★ 这一条就是"⛔ 不许用内容判陈旧"的守卫：换成内容判据 ⇒ 这里会被判成满圈 underrun。
+    LIFT_CHECK_EQ_U32(r.stats.underrun_silence_bytes, 0u);
+    LIFT_CHECK_EQ_U32(r.stats.underrun_silence_events, 0u);
+    LIFT_CHECK_EQ_U32(r.stats.underruns, 0u);
+}
+
+// ---- 写见证链路：一刀**真 fill** → `[+0x2468]` 前后比较 → `fill_witnessed` ------------------
+//
+// ★ 判据（design §1.6 的 `fill-witness-wiring`）：照 `runDelivery` 跑一刀真 fill，把
+//   `[stream+0x2458]` / `[+0x2468]` 预置成三档 ⇒
+//     ① 写（`[+0x2468]` 被 inc）：`fill_witnessed==1`、`guest_silence_fills==0`；
+//     ② 0 = Stop 早退（不 inc）：`fill_witnessed==0`；
+//     ③ 2 = 放完（inc + `[+0x2458]>=2`）：`fill_witnessed==1`、`guest_silence_fills==1`
+//        ⇒ 这就是"guest 自己的静音 ≠ underrun"的机械来源。
+// ★ 会红：把 `noteFillWitness` 的 `pre != post` 判据去掉（或改成只看 `[+0x2458]`）⇒ ②/③ 红；
+//   ★ 删掉 `noteFillWitness` 的 `++witness` ⇒ **本用例**红（①/③ 的"恰好一个 quarter 的
+//   `witness` +1"不成立）；`underrun-silence-*` 全绿 —— 它们走 `noteFillForTest` seam。
+constexpr std::uint32_t kWitnessStreamBytes = 0x3000u;  // 必须覆盖 [stream+0x2468]
+
+struct WitnessRun {
+    bool begun = false;
+    bool filled = false;
+    std::uint64_t fills = 0;
+    std::uint64_t witnessed = 0;
+    std::uint64_t guest_silence = 0;
+    // ★ 真 fill 前后 `witness[0..3]` 的快照：前 = `play()` 之后（`markRingFresh` 已跑完）、
+    //   `registerFeeder()` 之前；后 = `m.run()` 返回之后。下面对差值的断言 ≡
+    //   `noteFillWitness` 里那句 `++witness[quarter]`（stats 的 `fill_witnessed` 钉不住它）。
+    std::uint64_t witness_before[4] = {};
+    std::uint64_t witness_after[4] = {};
+};
+
+// 真 fill 前后 `witness[]` 的变化：涨了的 quarter 数 / 增量总和。真写了一刀 ⇒ 恰好 1 / 1。
+std::uint32_t witnessDeltaQuarters(const WitnessRun& w) {
+    std::uint32_t n = 0;
+    for (std::uint32_t q = 0; q < 4u; ++q)
+        if (w.witness_after[q] > w.witness_before[q]) ++n;
+    return n;
+}
+
+std::uint64_t witnessDeltaSum(const WitnessRun& w) {
+    std::uint64_t sum = 0;
+    for (std::uint32_t q = 0; q < 4u; ++q) sum += w.witness_after[q] - w.witness_before[q];
+    return sum;
+}
+
+WitnessRun runOneFillWitness(const std::vector<std::uint8_t>& stub, std::uint32_t stub_insns,
+                             std::uint32_t f2458, std::uint32_t f2468, const char* tag) {
+    WitnessRun r;
+    std::string err;
+    lift::Machine m;
+    if (!initMachine(m, &err)) return r;
+    const std::string dump = std::string("lift-audio-witness-") + tag + ".wav";
+    std::remove(dump.c_str());
+    if (!m.configureAudio(lift::AudioMode::Virtual, dump, /*sound=*/true, &err)) return r;
+    lift::AudioEngine& a = m.audio();
+    if (!a.begin(&err)) return r;
+    r.begun = true;
+
+    const std::uint32_t code_ea = 0x004B6C30u;
+    const std::uint32_t sound_obj = 0x00460000u;
+    const std::uint32_t stream = 0x00461000u;
+    const std::uint32_t state = 0x00462000u;
+    const std::uint32_t data = 0x00400000u;
+    const std::uint32_t obj = 0x00463000u;
+    const std::uint32_t bytes = kRingLapBytes;
+    const std::uint32_t slot = 11u;
+    const std::uint32_t quit = 0x00001234u;
+    if (!m.placeCode(code_ea, stub.data(), stub.size(), &err)) return r;
+    std::vector<std::uint8_t> zeros(0x1000, 0);
+    std::vector<std::uint8_t> stream_mem(kWitnessStreamBytes, 0);
+    if (!m.placeData(sound_obj, zeros.data(), zeros.size(), &err)) return r;
+    if (!m.placeData(stream, stream_mem.data(), stream_mem.size(), &err)) return r;
+    if (!m.placeData(state, zeros.data(), 16, &err)) return r;
+    const std::vector<std::int16_t> pcm = makeRamp(bytes);
+    if (!m.placeData(data, pcm.data(), bytes, &err)) return r;
+    m.mem().wr32(sound_obj + 0x514u, quit);
+    m.mem().wr32(sound_obj + 0x654u + 4u * slot, stream);
+    m.mem().wr32(stream + 0x40Cu, obj);
+    m.mem().wr32(stream + 0x444u, bytes);
+    m.mem().wr32(stream + 0x2458u, f2458);  // "放完"标志（>=2 = 填静音）
+    m.mem().wr32(stream + 0x2468u, f2468);  // 已写圈数（fill 前后比较的写见证）
+
+    lift::AudioFormat fmt;
+    fmt.sample_rate = 48000;
+    fmt.channels = 2;
+    fmt.bits = 16;
+    fmt.block_align = 4;
+    fmt.avg_bytes = 192000;
+    a.addBuffer(state, obj, data, bytes, 0x181C8u, fmt);
+    const std::uint32_t offsets[4] = {0u, 96000u, 192000u, 288000u};
+    a.setNotify(state, 4, offsets);
+    a.play(state, true);
+    for (std::uint32_t q = 0; q < 4u; ++q) r.witness_before[q] = a.fillWitnessForTest(obj, q);
+    if (!a.registerFeeder(0x004B5AA0u, sound_obj, 0x00001008u, 0x000002D0u)) return r;
+    a.resumeFeeder();
+
+    m.clock().advance100ns(2'500'000);  // 0.25 s ⇒ 不跨通知点 ⇒ 恰好一刀
+    if (a.pump() != lift::AudioPump::Suspended) return r;
+    lift::RunOptions opt;
+    opt.max_insns = stub_insns;
+    const lift::RunResult rr = m.run(opt);
+    if (rr.reason != lift::StopReason::MaxInsns) return r;
+    r.filled = true;
+
+    const lift::AudioStats& st = a.stats();
+    r.fills = st.fills;
+    r.witnessed = st.fill_witnessed;
+    r.guest_silence = st.guest_silence_fills;
+    for (std::uint32_t q = 0; q < 4u; ++q) r.witness_after[q] = a.fillWitnessForTest(obj, q);
+    std::remove(dump.c_str());
+    return r;
+}
+
+void testFillWitnessWiring() {
+    lift_test::g_current_case = "audio-device/fill-witness-wiring";
+    // `inc dword ptr [ecx+2468h]` + `ret 4`（两条指令）：模拟"真写了环"的 fill。
+    const std::vector<std::uint8_t> write_stub = {0xFF, 0x81, 0x68, 0x24, 0x00, 0x00, 0xC2, 0x04, 0x00};
+    // 只有 `ret 4`：模拟 `[+0x2458]==0` 的 Stop 早退（不 inc ⇒ 不计见证）。
+    const std::vector<std::uint8_t> stop_stub = {0xC2, 0x04, 0x00};
+
+    // ① 写了环；[+0x2458]=1（没放完）⇒ 见证 1、guest 静音 0。
+    {
+        const WitnessRun w = runOneFillWitness(write_stub, 2, /*f2458=*/1u, /*f2468=*/0u, "write");
+        LIFT_CHECK(w.begun && w.filled);
+        LIFT_CHECK_EQ_U32(w.fills, 1u);
+        LIFT_CHECK_EQ_U32(w.witnessed, 1u);
+        LIFT_CHECK_EQ_U32(w.guest_silence, 0u);
+        // ★ 本用例的**核心**：`noteFillWitness` 真的把"这一刀写了环"落到 `witness[quarter]` 上
+        //   （stats 的 `fill_witnessed` 是另一行 ⇒ 只断言它钉不住 `++witness`）。
+        LIFT_CHECK_EQ_U32(witnessDeltaQuarters(w), 1u);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(witnessDeltaSum(w)), 1u);
+    }
+    // ② Stop 早退（不 inc）⇒ fills=1 但见证 0。
+    {
+        const WitnessRun w = runOneFillWitness(stop_stub, 1, /*f2458=*/0u, /*f2468=*/0u, "stop");
+        LIFT_CHECK(w.begun && w.filled);
+        LIFT_CHECK_EQ_U32(w.fills, 1u);
+        LIFT_CHECK_EQ_U32(w.witnessed, 0u);
+        LIFT_CHECK_EQ_U32(w.guest_silence, 0u);
+        // 没写环 ⇒ 写见证也不动（反方向；钉住 `pre == post ⇒ return` 与 `++witness` 的因果）。
+        LIFT_CHECK_EQ_U32(witnessDeltaQuarters(w), 0u);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(witnessDeltaSum(w)), 0u);
+    }
+    // ③ 放完 + memset 0：**同一条 inc 路径** ⇒ 记见证，但同时记 guest 静音（≠ underrun）。
+    {
+        const WitnessRun w = runOneFillWitness(write_stub, 2, /*f2458=*/2u, /*f2468=*/0u, "done");
+        LIFT_CHECK(w.begun && w.filled);
+        LIFT_CHECK_EQ_U32(w.fills, 1u);
+        LIFT_CHECK_EQ_U32(w.witnessed, 1u);
+        LIFT_CHECK_EQ_U32(w.guest_silence, 1u);
+        LIFT_CHECK(w.guest_silence <= w.witnessed && w.witnessed <= w.fills);
+        // guest 自己"放完 + memset 0"也经同一条 `++witness` ⇒ 该 quarter 同样不判陈旧。
+        LIFT_CHECK_EQ_U32(witnessDeltaQuarters(w), 1u);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(witnessDeltaSum(w)), 1u);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -976,5 +1273,9 @@ int main() {
     testDefaultMutedDelivery();
     testSoundOnDelivery();
     testMutedDeliveryParity();
+    testUnderrunSilenceStale();
+    testUnderrunSilenceNotTriggered();
+    testUnderrunSilenceGuestZeros();
+    testFillWitnessWiring();
     return lift_test::finish("audio-device");
 }

@@ -32,10 +32,11 @@ export const DOMAIN = {
   id: 'lift',
   title: 'emulator-lift · **覆盖清单**（`data/lift/overrides.json`）与 `.lst` 语料报告',
   data: [
-    '`data/lift/overrides.json`（覆盖清单：每条 stub 必须对应 C++ 注册表里的一条登记）',
+    '`data/lift/overrides.json`（覆盖清单：每条 gap 必须对应 C++ 注册表里的一条登记）',
     '`apps/emulator-lift/src/shims/*.cpp`（**注册表真源**：`add` / `addStub` / `addUnimplemented`）',
     '`apps/emulator-lift/src/shims/register_import_gaps.cpp`（**派生、入库**：导入表缺口的显式登记，`sync --write` 生成）',
-    '`corpus/assets/age/AGE.EXE__dumped.sectfix.EXE`（PE 导入表 / sha256，只读）',
+    '`corpus/assets/age/AGE.EXE__dumped.sectfix.EXE`（guest 模块 ①，executed=true；PE 导入表 / sha256，只读）',
+    '`corpus/assets/agerc/AGERC.DLL`（guest 模块 ②，executed=false；PE 导入表，只读 —— 裸导入只报告）',
     '`corpus/disasm/files/AGE.EXE__dumped.sectfix.EXE.lst`（语料：指令行 / 段 / collapsed，只读）',
     '`apps/emulator-lift/scripts/bench/*.txt`（`bench` 的工况脚本 = `--input-script` 时间线，**入库**）',
     '`.cache/lift-bench/*.json`（`bench` 的读数：N 遍原始值 + 中位数 + build / 二进制 / 工作树指纹；**派生、gitignored**）',
@@ -47,7 +48,7 @@ export const DOMAIN = {
 export const OPERATIONS = [
   { name: 'describe', argv: ['--describe'], mutates: false, summary: '自描述：字段 / 枚举 / 不变量（含谁在守）/ 操作（schema 真源）' },
   { name: 'check', argv: ['--check'], mutates: false, summary: '全量校验：JSON ↔ C++ 注册表 ↔ PE 导入表 ↔ 派生缺口文件（红 ⇒ 退出码 1）' },
-  { name: 'report', argv: ['--report'], mutates: false, summary: '覆盖报告：implemented / stub / bare / never-imported 四类计数 + 逐条清单；`--bench N` 顺带把 MIPS 写进报告（S8）' },
+  { name: 'report', argv: ['--report'], mutates: false, summary: '覆盖报告：implemented / noop / trap / bare / bareUnexecuted / not-referenced 计数 + 逐条清单；`--bench N` 顺带把 MIPS 写进报告（S8）' },
   { name: 'bench', argv: ['--bench'], mutates: true, summary: '吞吐基线（一条命令 + 落文件）：同一 `--input-script` 工况独立子进程跑 N 遍，取中位数 ms/百万条指令 + MIPS，落 `.cache/lift-bench/*.json`（⛔ 不重建、不跑 ctest；与 `report --bench` 的合成循环单样本**不是**一回事）' },
   { name: 'sync', argv: ['--sync'], mutates: true, summary: '把 C++ 注册表与 PE 导入表派生到 `overrides.json` + `register_import_gaps.cpp`（缺省 dry-run，`--write` 落盘）' },
   { name: 'corpus-report', argv: ['--corpus-report'], mutates: false, summary: '`.lst` 语料报告：指令行 / 助记符形态 / 段 / collapsed / x87·MMX·SSE 计数' },
@@ -59,10 +60,31 @@ export const OVERRIDES_DOC = 'data/lift/overrides.md';
 export const SHIM_DIR = 'apps/emulator-lift/src/shims';
 export const GAP_FILE = 'apps/emulator-lift/src/shims/register_import_gaps.cpp';
 export const EXE_FILE = 'corpus/assets/age/AGE.EXE__dumped.sectfix.EXE';
+export const AGERC_FILE = 'corpus/assets/agerc/AGERC.DLL';
 export const LST_FILE = 'corpus/disasm/files/AGE.EXE__dumped.sectfix.EXE.lst';
 
+/**
+ * **guest 模块集**（扫导入表的扫集合）。
+ * ★ `executed=false` 的模块：镜像会被装载（`main.cpp` 的 `--game-dir/AGERC.DLL`），但它的**代码今天
+ *   从不执行** —— 导出全被 shim 拦截（`kernel32_agerc.cpp` 明写"有地址但不把真实代码地址交出去"）。
+ *   ⇒ 它的**裸导入**只报告（`bareUnexecuted`），⛔ 不登记进派生缺口文件、也⛔ 不判 `check` 红；
+ *   哪天它的代码真的执行了，把这些条目按导入登记即可（`check` 会点名）。
+ * ★ 用 `corpus/assets/agerc/AGERC.DLL`（发布用免壳件），⛔ 不是 `install/AGERC.DLL`（带壳原件）。
+ */
+export const GUEST_MODULES = [
+  { path: EXE_FILE, executed: true },
+  { path: AGERC_FILE, executed: false },
+];
+
 export const SCHEMA = 1;
-export const KINDS = ['replace', 'stub', 'hook'];
+/**
+ * `kind` 三值（按 **C++ 注册来源**决定，不是手选）：
+ *   `replace` = `add`（有实现）· `noop` = `addStub`（有 fn、按 SCOPE 偏差返回合理值）·
+ *   `trap` = `addUnimplemented` / 派生缺口（无 fn、执行到就响亮失败）。
+ * ⛔ 不再有 `stub`（它同时吞掉 noop 与 trap，用户 2026-11-13 裁决三值化）；
+ *   ⛔ 也没有 `hook`（guest-code hook 是本线尚未出现的形态，等真出现再立值，别留空档）。
+ */
+export const KINDS = ['replace', 'noop', 'trap'];
 export const BOUNDARY_KINDS = ['import', 'function', 'subsystem'];
 export const DOC_POINTER =
   '由 tools/lift.mjs 拥有：字段语义 / 不变量 / 操作看 `pnpm tools lift describe`（tools/lift.mjs 的自描述）。';
@@ -181,9 +203,10 @@ export const EXTRA_FAMILIES = [
     'kernel32!CreateTimerQueue','kernel32!CreateTimerQueueTimer','kernel32!DeleteTimerQueueTimer',
   ] },
   { id: 'seh', title: 'SEH', names: ['kernel32!RaiseException','kernel32!RtlUnwind'] },
-  { id: 'resource', title: '资源', names: [
-    'kernel32!FindResourceA','kernel32!LoadResource','kernel32!LockResource','kernel32!SizeofResource',
-  ] },
+  // ★ 2026-11-13：`resource` 族已删 —— 它的 4 个名字是**不可调用**的登记（不在任一 guest 模块
+  //   导入表、镜像里也没有字面量），资源能力由 `runtime/pe_resource.h` 的 `PeResources` 提供
+  //   （用户裁决：删登记）。
+  //   ⛔ 不为它留一个空族：空 names 会让"族是划分"的守卫红（`tools/test/lift.test.mjs`）。
 ];
 
 /**
@@ -301,11 +324,44 @@ function parseStringConsts(text) {
   return consts;
 }
 
-function reasonOf(expr, consts) {
-  const e = expr.trim();
-  if (e.startsWith('"') && e.endsWith('"')) return unescapeCpp(e.slice(1, -1));
+/**
+ * 把一个 C++ 实参表达式解成字符串：`const char* X = "…"` 的常量名，或**一串相邻字符串字面量**。
+ *
+ * ★ 相邻字面量必须按序拼接（C++ 的常规语义）：调用点写
+ *   `s.addStub(…, "…存 *arg1 进 " "g_nameLenMax、返回 0…")` 时，旧实现只做
+ *   `slice(1, -1)` ⇒ 落成 `…进 "\n              "g_nameLenMax…`（引号 + 换行 + 缩进被当内容），
+ *   而 `check` 拿它与 C++ 的同一份错值比 ⇒ **绿**（派生器是有损解码器）。见审计 §3.1。
+ * ★ 只接受"纯字面量序列"：后面跟 `+` / 标识符 / 别的 token ⇒ 返回 null（⛔ 不猜）。
+ * @param {string} expr 实参原文（`findCalls` 给出的那一段）
+ * @param {Map<string,string>} [consts] `parseStringConsts` 的结果
+ * @returns {string|null} 解不出来 ⇒ null（调用方报 problem，⛔ 不落成 "(无法解析 reason)" 的假值）
+ */
+export function reasonOf(expr, consts = new Map()) {
+  const e = String(expr ?? '').trim();
   if (consts.has(e)) return consts.get(e);
-  return null;
+  const parts = [];
+  let i = 0;
+  for (;;) {
+    while (i < e.length && /\s/.test(e[i])) ++i;
+    if (i >= e.length) break;
+    if (e[i] !== '"') return null; // 不是字面量（算术 / 变量 / 宏……）：不猜
+    let j = i + 1;
+    let cur = '';
+    for (; j < e.length; ++j) {
+      if (e[j] === '\\') {
+        cur += e[j] + (e[j + 1] ?? '');
+        ++j;
+      } else if (e[j] === '"') {
+        break;
+      } else {
+        cur += e[j];
+      }
+    }
+    if (j >= e.length) return null; // 引号没闭合
+    parts.push(cur);
+    i = j + 1;
+  }
+  return parts.length ? unescapeCpp(parts.join('')) : null;
 }
 
 function normModule(m) {
@@ -424,7 +480,55 @@ export function readPeImports(exePath = EXE_FILE) {
     }
     d += 20;
   }
-  return { imports, sizeOfImage, entryRva, imageBase, sha256: sha256File(exePath) };
+  return { path: exePath, imports, sizeOfImage, entryRva, imageBase, sha256: sha256File(exePath) };
+}
+
+/**
+ * 读**整份 guest 模块集**的导入表，并合并成一张 `key → { module, name, byOrdinal, modules[] }` 表。
+ *
+ * ★ `modules[]` 保留**归属**（哪个镜像导入的）—— 没有它就无法区分"AGE 导入"（executed=true，
+ *   裸缺口必须为 0）与"只有 AGERC 导入"（executed=false，裸缺口只报告）。
+ * ★ 每个 `modules[]` 都是**绝对仓库相对路径**（与 `GUEST_MODULES[].path` 同一口径）。
+ * @param {Array<{path:string, executed:boolean}>} [modules]
+ * @returns {{imports: Map<string, object>, modules: Array<{path:string, executed:boolean, pe:object}>}}
+ */
+export function readGuestImports(modules = GUEST_MODULES) {
+  const loaded = [];
+  const imports = new Map();
+  for (const m of modules) {
+    const pe = readPeImports(m.path);
+    loaded.push({ path: m.path, executed: !!m.executed, pe });
+    for (const [key, imp] of pe.imports) {
+      const hit = imports.get(key);
+      if (hit) hit.modules.push(m.path);
+      else imports.set(key, { ...imp, modules: [m.path] });
+    }
+  }
+  return { imports, modules: loaded };
+}
+
+/** 按"实现 / 显式登记 / 派生缺口文件"给一个镜像的导入表分类（`check` 与 `report` 共用同一口径）。 */
+export function classifyImports(imports, regs, gapFileKeys) {
+  const implemented = [];
+  const stubs = [];
+  const bare = [];
+  for (const [key] of imports) {
+    if (regs.implemented.has(key)) implemented.push(key);
+    else if (regs.stubs.has(key) || gapFileKeys.has(key)) stubs.push(key);
+    else bare.push(key);
+  }
+  return { implemented, stubs, bare };
+}
+
+/** 被拦截的 AGERC 导出（`agerc!_*`）：它们**不是导入**，但经 `GetProcAddress` 可达 ⇒ 不算 not-referenced。 */
+const isInterceptedExport = (key) => key.startsWith('agerc!');
+
+/**
+ * `not-referenced`：C++ 里登记了 stub、但**不在任一 guest 模块的导入表里**，且**不是被拦截的导出**。
+ * ★ 它们可以是**显式裁决**的（例 `SCOPE.md` 点名的线程族）⇒ 只进报告，⛔ 不判红。
+ */
+export function notReferencedKeys(regs, imports) {
+  return [...regs.stubs.keys()].filter((k) => !imports.has(k) && !isInterceptedExport(k)).sort();
 }
 
 export function gapReasonFor(module) {
@@ -522,14 +626,41 @@ export function validateOverrides(data) {
   return problems;
 }
 
-/** 由「C++ 注册表 + 导入表」派生期望的 overrides 条目（保持 replace/hook 等手写条目） */
+/**
+ * C++ 注册来源 → `kind`（**唯一映射**；`expectedEntries` 与 `check` 都走它，⛔ 不各写一份）。
+ * `add` → `replace` · `addStub` → `noop` · `addUnimplemented` → `trap` · 派生缺口 → `trap`。
+ * @returns {'replace'|'noop'|'trap'|null} 未知来源 ⇒ null（判据坏了，调用方负责报红）
+ */
+export function kindForOrigin(origin) {
+  switch (origin) {
+    case 'add': return 'replace';
+    case 'addStub': return 'noop';
+    case 'addUnimplemented': return 'trap';
+    case 'gap': return 'trap';
+    default: return null;
+  }
+}
+
+/**
+ * 由「C++ 注册表 + 导入表」派生期望的 overrides 条目。
+ *
+ * @param {{imports: Map, regs: object, existing: object|null}} args
+ *   ★ `imports` **只传 executed=true 的模块**：派生缺口（`register_import_gaps.cpp`）只对**会执行**的
+ *     镜像强制；把 AGERC 的裸导入也塞进来会凭空多出 30 条 trap，并把它们写进 C++ 注册链
+ *     （用户 2026-11-13 裁决：AGERC 不登记为 gap，单列 `bareUnexecuted`）。
+ */
 export function expectedEntries({ imports, regs, existing }) {
   const entries = [];
-  const keep = (existing?.entries ?? []).filter((e) => e.kind !== 'stub' || !e.target);
+  // 派生条目（noop / trap）由注册表与导入表重新生成；`stub` 是 2026-11-13 前的旧值，
+  // 读旧文件时同样按"派生项"丢弃（`sync --write` 会重写成三值）。
+  const derivedKinds = new Set(['noop', 'trap', 'stub']);
+  const keep = (existing?.entries ?? []).filter((e) => !(e.target && derivedKinds.has(e.kind)));
   for (const [key, s] of [...regs.stubs].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const kind = kindForOrigin(s.origin);
+    if (kind === null) continue; // 判据坏了由 check 报；这里不制造未知值
     entries.push({
       target: key,
-      kind: 'stub',
+      kind,
       impl: s.origin === 'addStub' ? s.file : 'stub_trap',
       boundary: 'import',
       reason: s.reason,
@@ -538,13 +669,13 @@ export function expectedEntries({ imports, regs, existing }) {
   for (const g of expectedGapKeys(imports, regs)) {
     entries.push({
       target: g.key,
-      kind: 'stub',
+      kind: kindForOrigin('gap'),
       impl: 'stub_trap',
       boundary: 'import',
       reason: gapReasonFor(g.module),
     });
   }
-  // 手写的 guest-code 覆盖项（replace / hook，或没有 target 的 EA 条目）原样保留
+  // 手写的 guest-code 覆盖项（replace，或没有 target 的 EA 条目）原样保留
   const derivedKeys = new Set(entries.map((e) => e.target));
   for (const e of keep) {
     if (e.target && derivedKeys.has(e.target)) continue;
@@ -858,46 +989,61 @@ export function check({ exePath = EXE_FILE, lstPath = LST_FILE, quiet = false } 
   if (error) problems.push(error);
   else problems.push(...validateOverrides(data));
 
-  let pe = null;
+  // ★ 模块集是**声明**（`GUEST_MODULES`）：`executed=false` 的镜像也被读，但它的裸导入只报告。
+  //   `exePath` 只为兼容旧签名 / 测试注入；不等于缺省 EXE_FILE 时退化成单模块。
+  const modules = exePath === EXE_FILE ? GUEST_MODULES : [{ path: exePath, executed: true }];
+  let guest = null;
   try {
-    pe = readPeImports(exePath);
+    guest = readGuestImports(modules);
   } catch (e) {
-    problems.push(`读 PE 导入表失败（${exePath}）：${e.message}`);
+    problems.push(`读 guest 模块导入表失败：${e.message}`);
   }
 
-  if (pe && data) {
+  if (guest && data) {
     const entries = data.entries ?? [];
     const byTarget = new Map();
     for (const e of entries) if (typeof e.target === 'string') byTarget.set(e.target, e);
 
-    // ① C++ 里每条 addUnimplemented / addStub 都必须在 JSON 里（reason 逐字相等）
+    // executed=true 的导入（派生缺口 / 裸缺口 / 覆盖率的**唯一**口径）
+    const executed = new Map();
+    for (const m of guest.modules) {
+      if (!m.executed) continue;
+      for (const [k, imp] of m.pe.imports) executed.set(k, imp);
+    }
+    const executedPe = guest.modules.find((m) => m.executed)?.pe ?? null;
+    const pe = executedPe;
+
+    // ① kind 由**注册来源**决定（add → replace / addStub → noop / addUnimplemented → trap），reason 逐字相等
     for (const [key, s] of regs.stubs) {
+      const want = kindForOrigin(s.origin);
       const e = byTarget.get(key);
       if (!e) {
         problems.push(`C++ 登记了 ${key}（${s.origin}），但 ${OVERRIDES_FILE} 里没有对应条目`);
-      } else if (e.kind !== 'stub') {
-        problems.push(`${key} 在 C++ 是 ${s.origin}，JSON 里 kind=${e.kind}（应为 stub）`);
+      } else if (e.kind !== want) {
+        problems.push(`${key} 在 C++ 是 ${s.origin}，JSON 里 kind=${e.kind}（应为 ${want}）`);
       } else if (e.reason !== s.reason) {
         problems.push(`${key} 的 reason 两边不一致：\n    C++  : ${s.reason}\n    JSON : ${e.reason}`);
       }
     }
 
-    // ② JSON 的每条 stub 必须能落到 C++（实现 / 登记 / 派生缺口）
-    const gaps = expectedGapKeys(pe.imports, regs);
+    // ② JSON 的每条 gap 条目（noop / trap）必须能落到 C++（登记 / 派生缺口）
+    const gaps = expectedGapKeys(executed, regs);
     const gapByKey = new Map(gaps.map((g) => [g.key, g]));
     for (const e of entries) {
-      if (e.kind !== 'stub') continue;
+      if (e.kind !== 'noop' && e.kind !== 'trap') continue;
       if (typeof e.target !== 'string') {
-        problems.push(`${entryKey(e)}：M1 只有平台 shim 覆盖项，stub 必须用 target（module!name）`);
+        problems.push(`${entryKey(e)}：M1 只有平台 shim 覆盖项，${e.kind} 必须用 target（module!name）`);
         continue;
       }
       const inRegs = regs.stubs.has(e.target);
       const gap = gapByKey.get(e.target);
       if (!inRegs && !gap) {
         if (regs.implemented.has(e.target)) {
-          problems.push(`${e.target}：C++ 里是**实现**（add），JSON 却写成 stub —— 要么删条目，要么在 C++ 用 addStub`);
+          problems.push(`${e.target}：C++ 里是**实现**（add），JSON 却写成 ${e.kind} —— 要么删条目，要么在 C++ 改登记`);
+        } else if (guest.imports.has(e.target)) {
+          problems.push(`${e.target}：JSON 里有 ${e.kind} 条目，但 C++ 没登记（该导入只存在于未执行模块，或登记漏了）`);
         } else {
-          problems.push(`${e.target}：JSON 里有 stub 条目，但 C++ 没登记、导入表里也没有这个导入`);
+          problems.push(`${e.target}：JSON 里有 ${e.kind} 条目，但 C++ 没登记、导入表里也没有这个导入`);
         }
       }
       if (gap && e.reason !== gapReasonFor(gap.module)) {
@@ -905,7 +1051,7 @@ export function check({ exePath = EXE_FILE, lstPath = LST_FILE, quiet = false } 
       }
     }
 
-    // ③ 派生缺口文件必须与"导入表 − 实现 − 登记"逐字节一致
+    // ③ 派生缺口文件必须与"（executed=true 的）导入表 − 实现 − 登记"逐字节一致
     // ★ ④ 的 "裸缺口" 必须相对**盘上的派生文件**算：`gapByKey`（期望缺口）覆盖所有未实现导入，
     //   拿它算 bare 会构造上恒为 0（审计 C1）。盘上缺文件 / 过期 ⇒ gapFileKeys 为空 ⇒ bare 真的 >0。
     const gapFileKeys = new Set();
@@ -921,38 +1067,59 @@ export function check({ exePath = EXE_FILE, lstPath = LST_FILE, quiet = false } 
       problems.push(`缺派生缺口文件 ${GAP_FILE}（有 ${gaps.length} 条未登记导入）—— 跑 \`pnpm tools lift sync --write\``);
     }
 
-    // ④ bare gap 必须是 0（实现 / 显式 stub / 派生缺口文件三者必居其一）
-    let implementedImported = 0;
-    let stubImported = 0;
-    let bare = 0;
-    for (const [key, imp] of pe.imports) {
-      if (regs.implemented.has(key)) ++implementedImported;
-      else if (regs.stubs.has(key) || gapFileKeys.has(key)) ++stubImported;
-      else {
-        ++bare;
-        problems.push(`裸缺口（导入表里有、既没实现也没登记，且派生缺口文件里也没有）：${key}`);
-      }
-      void imp;
+    // ④ bare gap：**只对 executed=true 判红**；executed=false 的裸导入单列 bareUnexecuted（只报告）
+    const covered = classifyImports(executed, regs, gapFileKeys);
+    for (const key of covered.bare) {
+      problems.push(`裸缺口（导入表里有、既没实现也没登记，且派生缺口文件里也没有）：${key}`);
     }
-    const neverImported = [...regs.stubs.keys()].filter((k) => !pe.imports.has(k));
+    let bareUnexecuted = 0;
+    const unexecutedModules = [];
+    for (const m of guest.modules) {
+      if (m.executed) continue;
+      const c = classifyImports(m.pe.imports, regs, gapFileKeys);
+      bareUnexecuted += c.bare.length;
+      unexecutedModules.push({
+        path: m.path,
+        imports: m.pe.imports.size,
+        implemented: c.implemented.length,
+        stub: c.stubs.length,
+        bareUnexecuted: c.bare.length,
+        bareKeys: c.bare.sort(),
+      });
+    }
+    const notReferenced = notReferencedKeys(regs, guest.imports);
     const counts = {
-      imported: pe.imports.size,
-      implementedImported,
-      stubImported,
-      bare,
-      staticGap: pe.imports.size - implementedImported,
+      imported: executed.size,
+      importedAll: guest.imports.size,
+      implementedImported: covered.implemented.length,
+      stubImported: covered.stubs.length,
+      bare: covered.bare.length,
+      bareUnexecuted,
+      unexecutedModules,
+      staticGap: executed.size - covered.implemented.length,
       registeredStubTotal: regs.stubs.size,
-      neverImported,
+      notReferenced,
       gapFileEntries: gapFileKeys.size,
     };
-    // 静态缺口的恒等式：static = stub + bare；stub 总数 = 导入的 stub + 从未被引用的
+    // 静态缺口的恒等式（executed=true 的镜像）：static = stub + bare
     if (counts.staticGap !== counts.stubImported + counts.bare) {
       problems.push(`静态缺口恒等式不成立：${counts.staticGap} != ${counts.stubImported} + ${counts.bare}`);
     }
 
+    // ④b **逐字节**断言：`overrides.json` 必须等于 `renderOverrides(expectedEntries(...))`。
+    // ★ 唯一写入口 = `lift sync --write`；手改一个字符（哪怕只是缩进）就在这里红。
+    //   `expectedEntries` 只吃 executed=true 的导入 —— AGERC 的裸导入⛔ 不进清单。
+    const expectedOverrides = renderOverrides(expectedEntries({ imports: executed, regs, existing: data }));
+    if (readText(OVERRIDES_FILE) !== expectedOverrides) {
+      problems.push(
+        `${OVERRIDES_FILE} 与 \`lift sync\` 的派生结果不一致（逐字节）—— ` +
+          '唯一写入口是 `pnpm tools lift sync --write`（手改会被这条断言打回）',
+      );
+    }
+
     // ⑤ sha256：PE = .lst 头部（与 A3 ⓪ 同一条锚）
     let lstSha = null;
-    if (exists(lstPath)) {
+    if (pe && exists(lstPath)) {
       const head = fs.readFileSync(abs(lstPath), 'utf8').slice(0, 20000);
       const m = head.match(/;\s*Input SHA256\s*:\s*([0-9A-Fa-f]{64})/);
       lstSha = m ? m[1].toLowerCase() : null;
@@ -962,8 +1129,8 @@ export function check({ exePath = EXE_FILE, lstPath = LST_FILE, quiet = false } 
       problems.push(`找不到 .lst（${lstPath}）—— 无法校验字节与语料同源`);
     }
 
-    // ⑥ D6 七族（A5）：七族内的导入不许是 stub，除非键在 FAMILY_STUB_APPROVED（= SCOPE 偏差表已批准）。
-    // ★ 只对**导入表里 status=stub** 的键归类（= counts.stubImported 那一批）；实现的不需要族别。
+    // ⑥ D6 七族（A5）：七族内的导入不许是 gap，除非键在 FAMILY_STUB_APPROVED（= SCOPE 偏差表已批准）。
+    // ★ 只对 executed=true 的**导入表里 status=gap** 的键归类；实现的不需要族别。
     // ★ 七族外（EXTRA_FAMILIES）与未归类只计数、不判红 —— 它们不在 A5 的七族范围内。
     const familyOf = new Map();
     for (const f of D6_FAMILIES) for (const n of f.names) familyOf.set(n, { kind: 'seven', id: f.id, title: f.title });
@@ -976,7 +1143,7 @@ export function check({ exePath = EXE_FILE, lstPath = LST_FILE, quiet = false } 
     let extraStubTotal = 0;
     let extraApproved = 0;
     let unclassified = 0;
-    for (const [key] of pe.imports) {
+    for (const [key] of executed) {
       if (regs.implemented.has(key)) continue;
       if (!regs.stubs.has(key) && !gapByKey.has(key)) continue; // 裸缺口已由 ④ 报过
       const fam = familyOf.get(key);
@@ -991,7 +1158,7 @@ export function check({ exePath = EXE_FILE, lstPath = LST_FILE, quiet = false } 
         else {
           ++sevenStubTotal;
           problems.push(
-            `七族内 stub 未获 SCOPE 批准：${key}（${fam.title}）—— 实现它，或写进 SCOPE.md 的偏差表` +
+            `七族内 gap 未获 SCOPE 批准：${key}（${fam.title}）—— 实现它，或写进 SCOPE.md 的偏差表` +
               '并把键加进 tools/lift.mjs 的 FAMILY_STUB_APPROVED',
           );
         }
@@ -1001,39 +1168,49 @@ export function check({ exePath = EXE_FILE, lstPath = LST_FILE, quiet = false } 
         if (ok) ++extraApproved;
       }
     }
-    // 白名单漂了：用「pe.imports × regs」判定，⛔ 不能只看字符串（实现掉的 / 从未被导入的都不能留在白名单里）
+    // 白名单漂了：用「executed × regs」判定，⛔ 不能只看字符串（实现掉的 / 从未被导入的都不能留在白名单里）
     for (const key of FAMILY_STUB_APPROVED) {
       const isImportedStub =
-        pe.imports.has(key) && !regs.implemented.has(key) && (regs.stubs.has(key) || gapByKey.has(key));
+        executed.has(key) && !regs.implemented.has(key) && (regs.stubs.has(key) || gapByKey.has(key));
       if (!isImportedStub) {
-        problems.push(`FAMILY_STUB_APPROVED 里的 ${key} 不是（导入的）stub —— 白名单漂了（删掉它或说明）`);
+        problems.push(`FAMILY_STUB_APPROVED 里的 ${key} 不是（导入的）gap —— 白名单漂了（删掉它或说明）`);
       }
     }
     counts.families = {
-      seven: sevenCounts, // 每族的 stub 数（含已批准；族内 stub 总和 = sevenStubTotal + sevenApproved）
-      sevenStubTotal, // 未批准的七族 stub 数（判据；必须是 0）
+      seven: sevenCounts, // 每族的 gap 数（含已批准；族内 gap 总和 = sevenStubTotal + sevenApproved）
+      sevenStubTotal, // 未批准的七族 gap 数（判据；必须是 0）
       sevenApproved, // 落在七族但已白名单的
-      extra: extraCounts, // 每族的 stub 数（含已批准；不判红）
+      extra: extraCounts, // 每族的 gap 数（含已批准；不判红）
       extraStubTotal,
       extraApproved,
-      unclassified, // 不在任何族里的 stub（user32 / gdi32 / d3d9 / kernel32!CreateProcessA …）；不判红
+      unclassified, // 不在任何族里的 gap（user32 / gdi32 / d3d9 / kernel32!CreateProcessA …）；不判红
     };
 
     if (!quiet) {
       console.log(`lift check · ${OVERRIDES_FILE}`);
-      console.log(`  PE        : ${exePath}  (sha256 ${pe.sha256.slice(0, 16)}…)`);
-      console.log(`  导入      : ${counts.imported}（实现 ${counts.implementedImported} · 显式 stub ${counts.stubImported} · 裸缺口 ${counts.bare}）`);
-      console.log(`  静态缺口  : ${counts.staticGap} = 已登记 stub ${counts.stubImported} + 未登记 ${counts.bare}`);
+      if (pe) console.log(`  PE        : ${modules.find((m) => m.executed).path}  (sha256 ${pe.sha256.slice(0, 16)}…)`);
+      console.log(`  导入      : ${counts.imported}（实现 ${counts.implementedImported} · 显式 gap ${counts.stubImported} · 裸缺口 ${counts.bare}）`);
+      console.log(`  静态缺口  : ${counts.staticGap} = 已登记 gap ${counts.stubImported} + 未登记 ${counts.bare}`);
+      for (const m of unexecutedModules) {
+        console.log(
+          `  未执行模块: ${m.path} ${m.imports} 导入（实现 ${m.implemented} · 显式 gap ${m.stub} · ` +
+            `bareUnexecuted ${m.bareUnexecuted}，不判红）`,
+        );
+      }
       console.log(
         `  C++ 登记  : add ${regs.implemented.size} · addUnimplemented/addStub ${counts.registeredStubTotal}；` +
-          `其中**从未被导入引用** ${counts.neverImported.length}`,
+          `其中 not-referenced ${counts.notReferenced.length}（不在任一模块导入表 ∧ 不是 AGERC 拦截导出）`,
       );
-      if (counts.neverImported.length) console.log(`             ${counts.neverImported.join(' ')}`);
-      console.log(`  overrides : ${(data.entries ?? []).length} 条（stub ${(data.entries ?? []).filter((e) => e.kind === 'stub').length}）`);
+      if (counts.notReferenced.length) console.log(`             ${counts.notReferenced.join(' ')}`);
+      const kindCount = (k) => (data.entries ?? []).filter((e) => e.kind === k).length;
+      console.log(
+        `  overrides : ${(data.entries ?? []).length} 条（noop ${kindCount('noop')} · trap ${kindCount('trap')}）` +
+          ` ← 与 sync 输出逐字节一致`,
+      );
       // ⑥ D6 七族（A5）：族标题一律取数据里的 title，⛔ 不另写一份汉字表
       const fam = counts.families;
       console.log(
-        `  D6 七族   : stub ${fam.sevenStubTotal + fam.sevenApproved}（未批准 ${fam.sevenStubTotal} · 已批准 ${fam.sevenApproved}）`,
+        `  D6 七族   : gap ${fam.sevenStubTotal + fam.sevenApproved}（未批准 ${fam.sevenStubTotal} · 已批准 ${fam.sevenApproved}）`,
       );
       console.log(`             ${D6_FAMILIES.map((f) => `${f.title} ${fam.seven[f.id]}`).join(' · ')}`);
       console.log(
@@ -1041,7 +1218,7 @@ export function check({ exePath = EXE_FILE, lstPath = LST_FILE, quiet = false } 
           ` · 未归类 ${fam.unclassified}（待 SCOPE 批准 ${fam.extraStubTotal - fam.extraApproved} 条）`,
       );
     }
-    return { problems, counts, regs, pe, data };
+    return { problems, counts, regs, pe, data, guest };
   }
 
   if (!quiet) {
@@ -1053,33 +1230,87 @@ export function check({ exePath = EXE_FILE, lstPath = LST_FILE, quiet = false } 
 
 export function reportCoverage({ exePath = EXE_FILE } = {}) {
   const regs = readRegistrations({ skipGapFile: true });
-  const pe = readPeImports(exePath);
-  const gaps = expectedGapKeys(pe.imports, regs);
+  const modules = exePath === EXE_FILE ? GUEST_MODULES : [{ path: exePath, executed: true }];
+  const guest = readGuestImports(modules);
+  const executed = new Map();
+  for (const m of guest.modules) {
+    if (!m.executed) continue;
+    for (const [k, imp] of m.pe.imports) executed.set(k, imp);
+  }
+  const gaps = expectedGapKeys(executed, regs);
   // ★ 与 check ④ 同一口径：只有**盘上的派生文件**与期望一致时，缺口才算"已登记"；
   //   否则报告里的 bare 会像旧实现那样恒为 0（审计 C1）。
   const gapByKey = new Set();
-  if (exists(GAP_FILE) && readText(GAP_FILE) === renderGapFile(gaps)) {
+  const gapFileOk = exists(GAP_FILE) && readText(GAP_FILE) === renderGapFile(gaps);
+  if (gapFileOk) {
     for (const g of gaps) gapByKey.add(g.key);
   }
+  const statusOf = (key) => {
+    if (regs.implemented.has(key)) return 'implemented';
+    const s = regs.stubs.get(key);
+    if (s) return kindForOrigin(s.origin) ?? 'trap';
+    if (gapByKey.has(key)) return 'trap';
+    return 'bare';
+  };
   const rows = [];
-  for (const [key, imp] of pe.imports) {
-    let status;
-    if (regs.implemented.has(key)) status = 'implemented';
-    else if (regs.stubs.has(key) || gapByKey.has(key)) status = 'stub';
-    else status = 'bare';
-    rows.push({ target: key, module: imp.module, name: imp.name, status });
+  for (const [key, imp] of executed) {
+    rows.push({ target: key, module: imp.module, name: imp.name, status: statusOf(key) });
   }
-  const never = [...regs.stubs.keys()].filter((k) => !pe.imports.has(k)).map((k) => ({ target: k, status: 'never-imported' }));
   rows.sort((a, b) => a.target.localeCompare(b.target));
+
+  // executed=false 的模块：只报告裸导入（⛔ 不判红、⛔ 不进 overrides / 派生缺口文件）
+  const unexecutedRows = [];
+  const unexecutedModules = [];
+  for (const m of guest.modules) {
+    if (m.executed) continue;
+    const bare = [];
+    let implemented = 0;
+    let stub = 0;
+    for (const key of m.pe.imports.keys()) {
+      const st = statusOf(key);
+      if (st === 'implemented') ++implemented;
+      else if (st === 'bare') {
+        bare.push(key);
+        unexecutedRows.push({ target: key, module: m.pe.imports.get(key).module, status: 'bareUnexecuted' });
+      } else ++stub;
+    }
+    bare.sort();
+    unexecutedRows.sort((a, b) => a.target.localeCompare(b.target));
+    unexecutedModules.push({
+      path: m.path,
+      executed: false,
+      imports: m.pe.imports.size,
+      implemented,
+      stub,
+      bareUnexecuted: bare.length,
+      bareKeys: bare,
+    });
+  }
+
+  const notReferenced = notReferencedKeys(regs, guest.imports).map((k) => ({ target: k, status: 'not-referenced' }));
+  const countStatus = (s) => rows.filter((r) => r.status === s).length;
   const counts = {
-    imports: pe.imports.size,
-    implemented: rows.filter((r) => r.status === 'implemented').length,
-    stub: rows.filter((r) => r.status === 'stub').length,
-    bare: rows.filter((r) => r.status === 'bare').length,
-    neverImported: never.length,
+    imports: executed.size,
+    importedAll: guest.imports.size,
+    implemented: countStatus('implemented'),
+    noop: countStatus('noop'),
+    trap: countStatus('trap'),
+    // `stub` = 显式 gap 的合计（noop + trap）；保留这个名字是为了与旧读数对得上
+    stub: rows.filter((r) => r.status === 'noop' || r.status === 'trap').length,
+    bare: countStatus('bare'),
+    bareUnexecuted: unexecutedModules.reduce((n, m) => n + m.bareUnexecuted, 0),
+    unexecutedModules,
+    notReferenced: notReferenced.length,
+    gapFileOk,
   };
   const covered = counts.implemented + counts.stub;
-  return { rows, never, counts, coverage: counts.imports ? covered / counts.imports : 0 };
+  return {
+    rows,
+    notReferenced,
+    unexecutedRows,
+    counts,
+    coverage: counts.imports ? covered / counts.imports : 0,
+  };
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1304,8 +1535,9 @@ export function resolveBenchScript(scenario) {
 }
 
 const BENCH_BASE_ARGS = [
-  // ★ 口径A（docs/03-emulator/observations.md 顶部）：window + hidden + gpu + native-overrides all + skip-logo
-  '--present', 'window', '--present-vsync', '0', '--present-hidden', '--raster', 'gpu',
+  // ★ 口径A（docs/03-emulator/observations.md 顶部）：window + hidden + native-overrides all + skip-logo。
+  //   光栅化只有 GPU 一条实现（没有 `--raster` 开关）⇒ 口径A 里不再有它。
+  '--present', 'window', '--present-vsync', '0', '--present-hidden',
   '--native-overrides', 'all', '--skip-logo',
 ];
 
@@ -1525,32 +1757,36 @@ export function describe() {
     file: OVERRIDES_FILE,
     doc: OVERRIDES_DOC,
     derivedGapFile: GAP_FILE,
-    registry: `${SHIM_DIR}/*.cpp（add / addStub / addUnimplemented 是 stub 的真源）`,
+    registry: `${SHIM_DIR}/*.cpp（add / addStub / addUnimplemented 是 kind 与 reason 的真源）`,
     schema: SCHEMA,
     entries: {
       fields: [
         { name: 'target', type: 'string "module!name"', note: '平台 shim 的键（M1 只有这一种）；与 ea / range 三选一' },
         { name: 'ea', type: 'hex string "0x00401234"', note: '函数级覆盖的 guest EA（三选一）' },
         { name: 'range', type: '[start, end] hex/数字', note: '子系统级覆盖的 EA 范围（三选一）' },
-        { name: 'kind', type: 'replace | stub | hook', note: 'stub = 不实现、trap 并打 reason；replace = 有实现；hook = 挂在 shim 上' },
-        { name: 'impl', type: 'string', note: 'stub 用 "stub_trap"；有实现用 "路径:符号"' },
+        { name: 'kind', type: 'replace | noop | trap', note: '由 C++ 注册来源决定：add ⇒ replace（有实现）· addStub ⇒ noop（有 fn，按 SCOPE 偏差返回合理值）· addUnimplemented / 派生缺口 ⇒ trap（无 fn，执行到就响亮失败）' },
+        { name: 'impl', type: 'string', note: 'trap 用 "stub_trap"；有 fn 的条目用源文件路径' },
         { name: 'boundary', type: 'import | function | subsystem | 说明串', note: '粒度；kind=replace 时必须说明保住的返回码 / 共享数据' },
-        { name: 'reason', type: '非空 string', note: 'SCOPE §3 硬要求：每个 stub 都要有理由' },
+        { name: 'reason', type: '非空 string', note: 'SCOPE §3 硬要求：每条 gap（noop/trap）都要有理由' },
       ],
       oneOfKeys: ['target', 'ea', 'range'],
       kinds: KINDS,
       boundaryKinds: BOUNDARY_KINDS,
+      kindSource: 'kind 不是手选的：noop = C++ 的 addStub，trap = addUnimplemented 或派生缺口，replace = add（手写 guest-code 覆盖也是 replace）',
     },
     invariants: [
       { id: 'json-md', text: 'overrides.json 旁边必须有 overrides.md，含「怎么查 / 怎么改」并指向 describe', enforcedBy: 'tools/test/json-docs.test.mjs' },
-      { id: 'schema', text: 'schema=1；entries[].kind ∈ replace|stub|hook；reason 非空', enforcedBy: 'tools/lift.mjs check（也由 tools/test/lift.test.mjs 纯档复跑）' },
-      { id: 'registry-sync', text: 'C++ 的每条 addUnimplemented/addStub 在 JSON 里恰好一条，reason 逐字相等；反向也成立', enforcedBy: 'tools/lift.mjs check' },
-      { id: 'no-bare-gap', text: 'PE 导入表里每条导入要么有实现、要么有显式 stub 登记（裸缺口 = 0）', enforcedBy: 'tools/lift.mjs check' },
-      { id: 'gap-file', text: 'register_import_gaps.cpp 必须逐字节等于「导入表 − 实现 − 登记」的派生结果', enforcedBy: 'tools/lift.mjs check' },
+      { id: 'schema', text: 'schema=1；entries[].kind ∈ replace|noop|trap；reason 非空', enforcedBy: 'tools/lift.mjs check（也由 tools/test/lift.test.mjs 纯档复跑）' },
+      { id: 'registry-sync', text: 'C++ 的每条 addUnimplemented/addStub 在 JSON 里恰好一条，且 kind 由注册来源决定（addStub ⇒ noop / addUnimplemented ⇒ trap），reason 逐字相等；反向也成立', enforcedBy: 'tools/lift.mjs check' },
+      { id: 'byte-identical', text: 'overrides.json 必须**逐字节**等于 renderOverrides(expectedEntries(...))（唯一写入口 = pnpm tools lift sync --write；手改一个字符就红）', enforcedBy: 'tools/lift.mjs check · tools/test/lift.test.mjs（纯档：用 C++ 注册表 + 派生缺口文件重算，不读 PE）· tools/mutate-check.mjs' },
+      { id: 'guest-modules', text: 'guest 模块集是声明的（GUEST_MODULES：AGE.EXE executed=true、corpus/assets/agerc/AGERC.DLL executed=false）；导入表按模块集合并，并保留"哪个模块导入"的归属', enforcedBy: 'tools/lift.mjs check · tools/test/lift.test.mjs' },
+      { id: 'no-bare-gap', text: 'executed=true 的模块导入表里每条导入要么有实现、要么有显式 gap 登记（裸缺口 = 0）；executed=false 的模块（AGERC）的裸导入单列 bareUnexecuted，不判红、不登记', enforcedBy: 'tools/lift.mjs check' },
+      { id: 'not-referenced', text: 'not-referenced = C++ 登记了 gap 但不在任一模块导入表 ∧ 不是被拦截的 AGERC 导出（agerc!_*）；只进报告，不判红', enforcedBy: 'tools/lift.mjs check / report' },
+      { id: 'gap-file', text: 'register_import_gaps.cpp 必须逐字节等于「（executed=true 的）导入表 − 实现 − 登记」的派生结果', enforcedBy: 'tools/lift.mjs check' },
       { id: 'sha-anchor', text: 'PE sha256 == .lst 头部 Input SHA256（与 A3 ⓪ 同一条锚）', enforcedBy: 'tools/lift.mjs check · tests/decode_crosscheck.cpp' },
       { id: 'no-dup-registration', text: '同一个 module!name 不许在 C++ 里注册两次（实现与未实现并存会让 find() 命中的那条不可预期）', enforcedBy: 'tools/lift.mjs check（实测曾遮蔽 GetEnvironmentVariableA）' },
       { id: 'seven-family-no-stub',
-        text: 'D6 七族（同步 / 内存 / 文件与路径 / 计时 / 错误码与TLS / 码页与字符串 / 进程·模块信息）里的导入不许是 stub，除非键在 tools/lift.mjs 的 FAMILY_STUB_APPROVED（= SCOPE.md 偏差表已批准）；未批准 = check 红（A5）',
+        text: 'D6 七族（同步 / 内存 / 文件与路径 / 计时 / 错误码与TLS / 码页与字符串 / 进程·模块信息）里的导入不许是 gap，除非键在 tools/lift.mjs 的 FAMILY_STUB_APPROVED（= SCOPE.md 偏差表已批准）；未批准 = check 红（A5）',
         enforcedBy: 'tools/lift.mjs check（分组数据见 D6_FAMILIES / EXTRA_FAMILIES）' },
     ],
     operations: OPERATIONS,
@@ -1588,10 +1824,18 @@ function writeFileVerified(relPath, content) {
 
 export function sync({ write = false, exePath = EXE_FILE } = {}) {
   const regs = readRegistrations({ skipGapFile: true });
-  const pe = readPeImports(exePath);
-  const gaps = expectedGapKeys(pe.imports, regs);
+  const modules = exePath === EXE_FILE ? GUEST_MODULES : [{ path: exePath, executed: true }];
+  const guest = readGuestImports(modules);
+  // ★ 派生缺口只对 executed=true 的镜像：AGERC 的裸导入⛔ 不进 `register_import_gaps.cpp`
+  //   （它的代码今天从不执行；用户 2026-11-13 裁决：单列 bareUnexecuted，不登记）。
+  const executed = new Map();
+  for (const m of guest.modules) {
+    if (!m.executed) continue;
+    for (const [k, imp] of m.pe.imports) executed.set(k, imp);
+  }
+  const gaps = expectedGapKeys(executed, regs);
   const { data } = readOverrides();
-  const entries = expectedEntries({ imports: pe.imports, regs, existing: data });
+  const entries = expectedEntries({ imports: executed, regs, existing: data });
   const gapText = renderGapFile(gaps);
   const overridesText = renderOverrides(entries);
   const gapOld = exists(GAP_FILE) ? readText(GAP_FILE) : '';
@@ -1611,14 +1855,14 @@ const HELP = `tools/lift.mjs — emulator-lift 覆盖清单（describe / check /
 
   pnpm tools lift describe       字段 / 不变量 / 操作（schema 真源）
   pnpm tools lift check          全量校验（红 ⇒ 退出码 1）
-  pnpm tools lift report         覆盖报告（实现 / stub / 裸缺口 / 从未被引用；--bench N 出 MIPS）
+  pnpm tools lift report         覆盖报告（实现 / noop / trap / 裸缺口 / bareUnexecuted / not-referenced；--bench N 出 MIPS）
   pnpm tools lift bench <工况|脚本> [--n N] [--out DIR] [--install DIR] [--appdata DIR]
                      [--arg TOKEN]... [--label NAME] [--timeout S] [--no-write] [--json]
                                  吞吐基线（一条命令 + 落文件）：同一 --input-script 工况**独立子进程**跑 N 遍
                                  （缺省 5），取中位数 ms/百万条 + MIPS，落 .cache/lift-bench/*.json
                                  （含 exe sha256+mtime / CMAKE_BUILD_TYPE 回读 / 工作树指纹 / 命令行原文）。
-                                 口径A：--present window --present-vsync 0 --present-hidden --raster gpu
-                                 --native-overrides all --skip-logo。⛔ 不重建、不跑 ctest。
+                                 口径A：--present window --present-vsync 0 --present-hidden
+                                 --native-overrides all --skip-logo（光栅化恒为 GPU）。⛔ 不重建、不跑 ctest。
                                  ⛔ 与 report --bench（合成循环、单样本）不是一回事
   pnpm tools lift corpus-report  .lst 语料报告
   pnpm tools lift sync [--write] 派生 overrides.json + register_import_gaps.cpp（缺省 dry-run）
@@ -1730,15 +1974,28 @@ export async function main(argv = process.argv.slice(2)) {
       return 0;
     }
     console.log('lift report —— 导入级覆盖（平台 shim）');
-    console.log(`  导入 ${r.counts.imports} = 实现 ${r.counts.implemented} + 显式 stub ${r.counts.stub} + 裸缺口 ${r.counts.bare}`);
-    console.log(`  覆盖率 = ${(r.coverage * 100).toFixed(1)}%（(实现+stub)/导入；裸缺口必须 0）`);
-    console.log(`  从未被导入引用 ${r.counts.neverImported} 条（仍是显式 stub，不会静默）`);
+    console.log(
+      `  导入 ${r.counts.imports} = 实现 ${r.counts.implemented} + 显式 gap ${r.counts.stub}` +
+        `（noop ${r.counts.noop} · trap ${r.counts.trap}）+ 裸缺口 ${r.counts.bare}`,
+    );
+    console.log(`  覆盖率 = ${(r.coverage * 100).toFixed(1)}%（(实现+显式 gap)/导入；executed=true 的裸缺口必须 0）`);
+    console.log(
+      `  bareUnexecuted ${r.counts.bareUnexecuted} 条（executed=false 模块的裸导入；不判红、不登记）` +
+        (r.counts.unexecutedModules.length
+          ? `：${r.counts.unexecutedModules.map((m) => `${m.path} ${m.bareUnexecuted}/${m.imports}`).join(' · ')}`
+          : ''),
+    );
+    console.log(`  not-referenced ${r.counts.notReferenced} 条（不在任一 guest 模块导入表 ∧ 不是 AGERC 拦截导出；只报告）`);
     if (bench) {
       if (bench.unavailable) console.log(`  bench   : 无法测量（${bench.unavailable}）`);
       else console.log(`  bench   : ${bench.insns} insns in ${bench.seconds} s = ${bench.mips} MIPS`);
     }
-    for (const row of r.rows) console.log(`  ${row.status.padEnd(11)} ${row.target}`);
-    for (const n of r.never) console.log(`  ${n.status.padEnd(11)} ${n.target}`);
+    for (const row of r.rows) console.log(`  ${row.status.padEnd(15)} ${row.target}`);
+    for (const n of r.notReferenced) console.log(`  ${n.status.padEnd(15)} ${n.target}`);
+    if (r.unexecutedRows.length) {
+      console.log('  ── bareUnexecuted（executed=false 的模块：裸导入只报告，⛔ 不登记为 gap）──');
+      for (const row of r.unexecutedRows) console.log(`  ${row.status.padEnd(15)} ${row.target}`);
+    }
     return r.counts.bare === 0 ? 0 : 1;
   }
   if (has('--corpus-report')) {

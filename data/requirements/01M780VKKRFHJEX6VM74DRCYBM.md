@@ -2,9 +2,9 @@
 
 - id: REQ-01M780VKKRFHJEX6VM74DRCYBM
 - type: bug
-- status: blocked
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- blocked_by: [REQ-01M78BF1FNNH6K8N8GEY6GQYXX]
+- verify: apps/emulator-lift/tests/save_graph.cpp#save-graph
 - repro: graphs/sn0000-save.graph#click 650 320
 - tags: [emulator-lift, d3d9, save, thumbnail, black]
 
@@ -69,4 +69,11 @@
 3. **缩略图仍全黑**（payload 非零字节 = 0）⇒ 缺口在「**纹理当渲染目标 + 读回**」，不是签名、不是绑定、不是文件 IO。
    那 2 批纹理 RT 现由 CPU 光栅回退接手，**而回退也没把像素写进纹理** ⇒ "回退是安全网"不成立（第二例）。
 4. 判据"修前红、修后绿"本单**达不成**：`tests/save_graph.cpp` 那条断言已按裁决撤下（只留注释 + 单号 + 读数 printf，
-   ⛔ 不 SKIP、不假绿）。落点移到 `REQ-01M78BF1FNNH6K8N8GEY6GQYXX` 的「GPU 支持渲染到纹理」。
+   ⛔ 不 SKIP、不假绿）。落点移到 `REQ-01M79MSMWGFEKF8J7C7VYWS4YP`（GPU 纹理作渲染目标 + 读回；2026-11-13 从 `REQ-01M78BF1FNNH6K8N8GEY6GQYXX` 拆出）。
+
+## 进展（2026-11-13 · RTT 落地后的新诊断）
+
+- 纹理 RT 能力已落地（`REQ-01M79MSMWGFEKF8J7C7VYWS4YP`）：准入放行、绑定、读回都通；`save-graph` 的 `fallback=0`。
+- 但 STH payload **仍 0**，且源 arena 就是绑定 RT、`src_nz = 0 / 3,686,400`；RT 窗口内只有 2×`Clear(black)`、Draw* 0–2 条，
+  却有 798 条 `SetRenderState` + 225 条 `SetSamplerState` ⇒ **内容是 sprite 画的，而 sprite 硬取后缓冲**（`d3dx9_sprite.cpp`）。
+- ⇒ 本单的阻塞者改为 `REQ-01M79V2TVJH98BKH0C0WQV2FET`（sprite→RT）；非零断言仍在本单，⛔ 不在能力单里写。

@@ -330,7 +330,6 @@ public:
 
     bool rasterActive() const override { return device_ != nullptr && vertex_shader_ != nullptr; }
     const char* rasterName() const override { return name_.c_str(); }
-    bool rasterSpritesEnabled() const override { return true; }
 
     bool rasterPrepare(const SurfaceFormat& format, int width, int height, std::string* err,
                        const std::uint8_t* color_base = nullptr) override {
@@ -366,13 +365,19 @@ public:
                 dirty_ = false;
             }
         }
-        destroyTargets();
+        // ★ 只毁**颜色目标**：`REQ-01M79MSMWGFEKF8J7C7VYWS4YP` 起"换 target"从偶发变成每帧 ≥2 次
+        //   （RT 与后缓冲常不同尺寸/格式）⇒ 顺手毁 depth + 全部 pipeline 会直接撞实时预算。
+        //   · depth：D3D9 的深度缓冲属**设备**、不随 color target 变 ⇒ 尺寸相同就**复用**
+        //     （`depth_w_/depth_h_` 是它的身份；只有尺寸变才重建，且只有重建才置 `need_depth_clear_`）；
+        //   · `pipelines_`：`pipelineFor` 的 color/depth 格式是**常量**（B8G8R8A8_UNORM / D32_FLOAT），
+        //     与 target 身份无关 ⇒ ⛔ 不随换 target 清（清了就是每帧重建全部 graphics pipeline）。
+        destroyColorTarget();
         width_ = width;
         height_ = height;
         alpha_ = alpha;
         target_format_ = format;
         target_base_ = color_base;
-        // ★ 注意：这里先记身份；下面建纹理失败时 destroyTargets() 会把 target_ 清掉 ⇒ 必须同时
+        // ★ 注意：这里先记身份；下面建纹理失败时销毁会把 target_ 清掉 ⇒ 必须同时
         //   把 target_base_ 清回去，否则 rasterTargetBase() 会指向一块**不存在**的镜像。
         target_pitch_ = static_cast<std::uint32_t>(width) * 4u;
         SDL_GPUTextureCreateInfo ci{};
@@ -385,18 +390,40 @@ public:
         ci.num_levels = 1;
         ci.sample_count = SDL_GPU_SAMPLECOUNT_1;
         target_ = SDL_CreateGPUTexture(device_, &ci);
-        ci.format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
-        ci.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
-        depth_ = SDL_CreateGPUTexture(device_, &ci);
-        if (target_ == nullptr || depth_ == nullptr) {
-            if (err) *err = std::string("SDL_CreateGPUTexture 失败：") + SDL_GetError();
-            destroyTargets();
+        if (target_ == nullptr) {
+            if (err) *err = std::string("SDL_CreateGPUTexture(color) 失败：") + SDL_GetError();
+            destroyColorTarget();
             target_base_ = nullptr;
             width_ = 0;
             height_ = 0;
             return false;
         }
-        need_depth_clear_ = true;
+        ++g_stats.targets_created;
+        // ★ 深度：尺寸不变 ⇒ **复用**（内容也保留：D3D9 只有 `Clear(ZBUFFER)` 会清深度）。
+        //   ⛔ 不要在这里无条件 `need_depth_clear_ = true` —— 今天每换一次 target 都会把深度清成
+        //   1.0，而 D3D9 的深度不随 color target 变（切回后缓冲后同帧深度从 1.0 重来 ≠ 真机）。
+        if (depth_ == nullptr || depth_w_ != width || depth_h_ != height) {
+            if (depth_ != nullptr) {
+                SDL_ReleaseGPUTexture(device_, depth_);
+                depth_ = nullptr;
+            }
+            ci.format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+            ci.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
+            depth_ = SDL_CreateGPUTexture(device_, &ci);
+            if (depth_ == nullptr) {
+                if (err) *err = std::string("SDL_CreateGPUTexture(depth) 失败：") + SDL_GetError();
+                destroyColorTarget();
+                target_base_ = nullptr;
+                width_ = 0;
+                height_ = 0;
+                return false;
+            }
+            ++g_stats.depths_created;
+            depth_w_ = width;
+            depth_h_ = height;
+            // 新建的 depth 内容是未定义的 ⇒ 必须清（这是唯一"换 target 会清深度"的情形）
+            need_depth_clear_ = true;
+        }
         dirty_ = false;
         // 新 target 的内容是未定义的 ⇒ 不能声称"本帧已经在 target 里"
         target_current_ = false;
@@ -2140,11 +2167,23 @@ private:
         return samp;
     }
 
-    void destroyTargets() {
+    // ★ 只毁**颜色镜像**（换 target 走这条）：depth 与 `pipelines_` 的存活期与 color target **无关** ——
+    //   D3D9 的深度缓冲属设备（`Clear(ZBUFFER)` 之外不清），而 pipeline 的 color/depth 格式是常量
+    //   （`pipelineFor`：B8G8R8A8_UNORM / D32_FLOAT）。RTT 让换 target 变成每帧 ≥2 次
+    //   （`REQ-01M79MSMWGFEKF8J7C7VYWS4YP`）⇒ 这里顺手毁 depth / 清 pipeline 就是每帧重建。
+    void destroyColorTarget() {
         if (target_ != nullptr) SDL_ReleaseGPUTexture(device_, target_);
-        if (depth_ != nullptr) SDL_ReleaseGPUTexture(device_, depth_);
         target_ = nullptr;
+    }
+
+    // ★ 全毁（设备销毁 / `rasterDiscardTarget`）：颜色 + 深度 + 全部 graphics pipeline。
+    //   ⛔ 不要拿它做"换 target"（见 `destroyColorTarget` 的注释）。
+    void destroyTargets() {
+        destroyColorTarget();
+        if (depth_ != nullptr) SDL_ReleaseGPUTexture(device_, depth_);
         depth_ = nullptr;
+        depth_w_ = 0;
+        depth_h_ = 0;
         for (auto& [k, p] : pipelines_) SDL_ReleaseGPUGraphicsPipeline(device_, p);
         pipelines_.clear();
     }
@@ -2250,6 +2289,7 @@ private:
             return nullptr;
         }
         pipelines_[key] = p;
+        ++g_stats.pipelines_created;
         return p;
     }
 
@@ -2257,7 +2297,7 @@ private:
     // 诊断（`LIFT_GPU_ZTEST=always`）：把深度比较强制成 ALWAYS —— **下一层判据**，不是修复
     // -----------------------------------------------------------------------------------
     // ★ 用途（`REQ-01M73P3GXW22Y467YGYPQSM571` 的 D1 被否掉之后的判别实验）：
-    //   `--raster gpu` 臂整层丢 FF 纹理批；纹理副本已用 `LIFT_GPU_FF_TEX` 证明与 guest 逐字节相同
+    //   GPU 光栅化臂整层丢 FF 纹理批；纹理副本已用 `LIFT_GPU_FF_TEX` 证明与 guest 逐字节相同
     //   ⇒ 下一次要分的是"**片元被深度判掉**"还是"片元根本没到 target / 采样错"。
     //   ALWAYS 让深度测试**完全不拒片元**：角色区从 0 变非 0 ⇒ 深度是机制；仍 0 ⇒ 深度被否掉。
     // ★ ⛔ 不是修复：缺省关闭、env 不设时与原行为逐指令相同（只是多读一次 static bool）。
@@ -2452,6 +2492,11 @@ private:
     int width_ = 0;
     int height_ = 0;
     bool alpha_ = false;
+    // ★ 深度附件的身份 = **尺寸**（格式恒 D32_FLOAT）。与 `width_/height_` 分开记：
+    //   color target 换尺寸/格式时才需要重建 depth；同尺寸换 target 复用同一份 depth
+    //   （D3D9 的深度属设备、不随 color target 变，见 `REQ-01M79MSMWGFEKF8J7C7VYWS4YP`）。
+    int depth_w_ = 0;
+    int depth_h_ = 0;
     // ★ 镜像身份：这块 target 对应的 guest 像素基址（nullptr = 不知道/不参与判断）。
     //   基址 / 尺寸 / 格式任一变化 ⇒ 换 target（先 flush + 回读旧目标，见 rasterPrepare）。
     const std::uint8_t* target_base_ = nullptr;

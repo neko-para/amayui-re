@@ -2,7 +2,7 @@
 //
 // ★ 头文件不暴露任何 SDL 类型（pimpl）：main / 测试只看见普通 C++。
 // ★ 两条呈现路径，`--present window` 时按**实测**选择（⛔ 不猜）：
-//   ① **GPU 直出**（`--raster gpu` 且窗口被 claim 给光栅化的 SDL_GPUDevice）：
+//   ① **GPU 直出**（窗口被 claim 给光栅化的 SDL_GPUDevice）：
 //      `SDL_ClaimWindowForGPUDevice` → target 用 `SDL_BlitGPUTexture` 直接拷到 swapchain
 //      （letterbox 用 `load_op=CLEAR` 画黑边）。**没有** `SDL_UpdateTexture` / `SDL_RenderTexture`。
 //      这条路径下**不创建 SDL_Renderer**（同一个窗口不能既 claim 给 GPU device 又建 renderer）。
@@ -31,8 +31,7 @@ struct SdlWindowOptions {
     std::string driver_list = "gpu,direct3d12,direct3d11,vulkan,metal,opengl";
     bool vsync = false;
     bool hidden = false;
-    bool raster_gpu = false;  // 同一 SDL_GPUDevice 上的 GPU 光栅化（`--raster gpu`）
-    bool raster_sprites = true;  // D3DXSprite 也走 GPU（A/B 可关）
+    bool raster_gpu = false;  // 同一 SDL_GPUDevice 上的 GPU 光栅化（GPU 是唯一光栅实现）
     // ★ 左上角调试叠层（`--overlay`，默认关）：鼠标 guest 客户区坐标 / fps / frame / raster / present。
     //   只改**宿主送显的那一份像素** —— ⛔ 不写 guest 内存、⛔ 不进 `--dump-frame`。
     //   两条呈现路径各自绘制（见 present_sdl.cpp）：SDL_Renderer 用小纹理；GPU 直出在
@@ -73,14 +72,16 @@ public:
     std::uint32_t windowIdForTest() const;
     std::string describe() const override;
     GpuRaster* gpuRaster() override;
+    // ★ 诊断 / 判据：SDL 的窗口 flag 里有没有 `SDL_WINDOW_HIDDEN`。
+    //   `--present headless` 的承诺是"**不出现可见窗口**"（不是"不建窗口"——建不出窗口/GPU
+    //   device 就直接拒绝启动），这条给日志一个可读的机械证据。
+    bool windowHidden() const;
 
     // GpuRaster
-    // ★ 除下面两条**有意的非纯转发**，其余每一条都必须显式转发到 `impl_->raster()`：
-    //   · `rasterName()` = init 时缓存的那个后端的名字（生产只有一个后端 ⇒ 与转发观测等价）；
-    //   · `rasterSpritesEnabled()` = **壳级** `--raster-sprites` A/B 与后端能力的**合成**。
+    // ★ 除 `rasterName()`（init 时缓存的那个后端的名字；生产只有一个后端 ⇒ 与转发观测等价）
+    //   这一条**有意的非纯转发**，其余每一条都必须显式转发到 `impl_->raster()`。
     bool rasterActive() const override;
     const char* rasterName() const override;
-    bool rasterSpritesEnabled() const override;
     bool rasterPrepare(const SurfaceFormat& format, int width, int height, std::string* err,
                        const std::uint8_t* color_base = nullptr) override;
     bool rasterSyncFromGuest(const std::uint8_t* pixels, std::uint32_t pitch, int width, int height,
@@ -104,11 +105,11 @@ public:
     // ★ 深度清（D3D9 `Clear(..., D3DCLEAR_ZBUFFER)`）的转发。
     //   ⛔ 少了这一行，后端的 D32 就只在"建 target"时清过一次：上一帧末尾那张全屏 **z=0** 的
     //   quad 会把整屏深度写成 0，下一帧所有 `z>0` 的批都 `z <= 0` 判假 ⇒ 整层消失，而且
-    //   `fallback` 仍是 0（`REQ-01M73P3GXW22Y467YGYPQSM571` 的实测根因：`--raster gpu` 的
+    //   `fallback` 仍是 0（`REQ-01M73P3GXW22Y467YGYPQSM571` 的实测根因：GPU 光栅化臂的
     //   Live2D 角色整层丢失就是这个）。★ 它属于"转发壳漏一个虚函数"这一类错 —— 不改像素、
     //   不报错、测试全绿 ⇒ 守卫必须是"逐条转发"的（`tests/gpu_batch.cpp::caseDepthClearForwarded`）。
     void rasterRequestDepthClear() override;
-    // GPU 直出接口转发到真正的后端（`--raster gpu` 的后端在 d3d9_gpu.cpp）。
+    // GPU 直出接口转发到真正的后端（后端在 d3d9_gpu.cpp）。
     GpuDirectPresenter* directPresenter() override;
 
     // ★ 夹具缝：把 GPU 后端换成**替身**（不建 device、不 claim 窗口）。`nullptr` = 恢复自己那份。

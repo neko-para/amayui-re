@@ -111,7 +111,7 @@
 - **怎么量**（在 `apps/emulator-lift` 下）：
   ```
   LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-dir ../../links/install \
-    --present window --present-hidden --raster gpu --native-overrides all --skip-logo \
+    --present window --present-hidden --native-overrides all --skip-logo \
     --input-script ../../.tmp/room/enter-prof.txt
   ```
   窗口表在 `profile_end` 时打一次（`=== profile window: <label> ===`）。守卫只剩"未闭合必须告警照打"一条（CTest `profile-window`）。
@@ -144,7 +144,10 @@
 
 ### M-07 · 音频：`underruns` 是**弱指标**，`fill` 墙钟才是；Debug 一律不许用
 - **能比**：同一构建下 `fills` / `fill_bytes` / `mixed` / `muted_bytes` 与**每次 fill 的墙钟**；`--sound` 开/关的交付字节数应**相等**。
-- **不能比**：`underruns` 跨版本（它只在 SDL 队列 == 0 时计）；Debug 构建的任何音频结论
+- **不能比**：`underruns` 跨版本（2026-11-13 起它 = **设备队列空 ∪ 环陈旧** 的 episode 计数；
+  "环陈旧" = 宿主替 guest 插静音，判据是**写见证** `[stream+0x2468]` 在那一刀前后变了，
+  ⛔ 不是内容比对。分项看 `underrun_silence_events`（episode）与 `underrun_silence_bytes`（输出字节）；
+  `guest_silence_fills` 是**guest 自己**"放完 + memset 0"的静音，⛔ 不要和宿主插的静音混读）；Debug 构建的任何音频结论
   （AGENTS §5：Debug 下解释器慢到 boot skip-logo > 30 s，fill 必然 underrun）。
 - **怎么量**：`LIFT_AUDIO_TRACE=1` 打每次 `[audio] feeder fill slot=N quarter=Q <ms> ms`（实测 BGM 环 **309.7–448.9 ms**，OBS-14）；
   摘要 `audio :` 行给 `fills/mixed/played/notify/dropped/underruns/muted_bytes`。

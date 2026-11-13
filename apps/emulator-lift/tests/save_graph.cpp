@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "check.h"
+#include "subprocess_skip.h"
 #include "runtime/host_encoding.h"
 
 #if defined(_WIN32)
@@ -121,8 +122,9 @@ std::string readAll(const fs::path& p) {
 
 bool contains(const std::string& hay, const char* needle) { return hay.find(needle) != std::string::npos; }
 
+// ★ GPU 拒绝启动**不在这里**：它由 `LIFT_SKIP_IF_NO_GPU` 单独判（要求本机实探无 GPU）。
 bool environmentUnavailable(const std::string& log) {
-    return contains(log, "找不到执行源") || contains(log, "拒绝启动") || contains(log, "SDL_Init(VIDEO)") ||
+    return contains(log, "找不到执行源") || contains(log, "SDL_Init(VIDEO)") ||
            contains(log, "--game-dir") || contains(log, "--present window 失败") ||
            contains(log, "GPU 不可用");
 }
@@ -181,7 +183,6 @@ int main(int argc, char** argv) {
     const std::vector<std::string> child_args = {
         "--present", "window",
         "--present-hidden",
-        "--raster", "gpu",
         "--native-overrides", "all",
         "--skip-logo",
         "--audio", "off",
@@ -197,6 +198,8 @@ int main(int argc, char** argv) {
     const std::string log = readAll(log_path);
     if (log.empty()) LIFT_SKIP("子进程没写日志（工作目录 / 权限）");
     if (child.exit_code != 0) {
+        // ★ 无 GPU：子进程在跑 guest 之前就拒绝启动 ⇒ 环境缺失，SKIP 77（原因进输出）。
+        LIFT_SKIP_IF_NO_GPU(child.exit_code, log);
         if (environmentUnavailable(log)) LIFT_SKIP("环境不可用（没有执行源 / 安装树 / 窗口 / GPU）");
         std::fprintf(stderr, "exit %d；日志：%s\n", child.exit_code, log_path.string().c_str());
         printFailureExcerpt(log);
@@ -227,29 +230,27 @@ int main(int argc, char** argv) {
     std::printf("save-graph: SAVE00.DAT=%llu B, SAVE00.STH=%llu B\n", static_cast<unsigned long long>(dat_size),
                 static_cast<unsigned long long>(sth_size));
 
-    // ③ 缩略图内容 —— **本条用例不断言它**（`REQ-01M780VKKRFHJEX6VM74DRCYBM`）
+    // ③ 缩略图内容 —— **断言在此**（能力单见 `REQ-01M79MSMWGFEKF8J7C7VYWS4YP` /
+    //    `REQ-01M79V2TVJH98BKH0C0WQV2FET`）
     //    `SAVE00.STH` 是 320×180 24bpp 的 BMP：**偏移 54** 之前是头（14 B `BITMAPFILEHEADER` +
     //    40 B `BITMAPINFOHEADER` = `bfOffBits` 54），54 之后 172,800 B 才是像素。
-    //    ⛔ 本单**没有**把"payload 非零 > 0"留成断言：那条判据（修前红、修后绿）在这里达不成 ——
-    //    shim 的签名修好、`0x4A778B` 那条「渲染到纹理」**真的绑上了**（日志 `目标 = 纹理表面` /
-    //    `RT0 ← …（ret=004A778D）`）、GPU 也恢复了（`gpu=6999 fallback=2`），但 STH payload 仍全 0
-    //    ⇒ 缺口在**「纹理当渲染目标」这条路**（本线只有 CPU 光栅填它；GPU 侧还没做）与随后的读回。
-    //    这两件事由「GPU 支持纹理当渲染目标」那一单达成，本单不再用一个恒红的断言占位
-    //    （⛔ 也不写成 SKIP 或假绿）。
-    //    ★ 下面那行只是**读数**（不是断言）：后续那一单把它当基线，别在这里加 LIFT_CHECK。
+    //    ★ 判据只有"**非零**"（⛔ 不断言具体字节数：那是读数，会随 BMP 内容变）：payload 全 0 =
+    //      缩略图全黑，玩家侧就是"存档图没了"。修前两处能力缺口（纹理 RT / sprite 合成目标）时
+    //      这里实测就是 0；修后实测满（172,800 B）。
+    constexpr std::size_t kBmpHeaderBytes = 54u;  // bfOffBits = BITMAPFILEHEADER(14) + BITMAPINFOHEADER(40)
+    std::size_t nonzero = 0;
     if (!sth.empty()) {
-        constexpr std::size_t kBmpHeaderBytes = 54u;  // bfOffBits = BITMAPFILEHEADER(14) + BITMAPINFOHEADER(40)
         const std::string st_bytes = readAll(sth);
-        std::size_t nonzero = 0;
         for (std::size_t i = kBmpHeaderBytes; i < st_bytes.size(); ++i) {
             if (st_bytes[i] != '\0') ++nonzero;
         }
         const std::size_t payload = st_bytes.size() > kBmpHeaderBytes ? st_bytes.size() - kBmpHeaderBytes : 0u;
-        std::printf("save-graph: SAVE00.STH payload 非零字节 = %llu（偏移 %llu 之后，共 %llu B；读数，非断言）\n",
+        std::printf("save-graph: SAVE00.STH payload 非零字节 = %llu（偏移 %llu 之后，共 %llu B）\n",
                     static_cast<unsigned long long>(nonzero),
                     static_cast<unsigned long long>(kBmpHeaderBytes),
                     static_cast<unsigned long long>(payload));
     }
+    LIFT_CHECK(nonzero > 0);
     if (lift_test::g_failures > 0) printFailureExcerpt(log);
     return finish("save-graph");
 }

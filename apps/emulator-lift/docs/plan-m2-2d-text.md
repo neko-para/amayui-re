@@ -1,5 +1,7 @@
 # M2 · 2D 画面与文本（实现计划）
 
+> ★ 字体策略（Amayui CN = CP932 码位映射字体、`subs-cn-jp.json`、渲染链、cmap 自查、常见坑）见 [`../../../docs/03-emulator/fonts.md`](../../../docs/03-emulator/fonts.md)；本计划不再复述。
+
 > **本文件是计划与判据，不是进度。** 做到哪一步看 `pnpm tools requirements plan`
 > （本线 `REQ-01M6GJMENJ8XEK4ZPTA768YBPW`；M2 节点 `REQ-01M6H6G6DSRG1ZRD810Z0HTH8V`）。
 > 上游： [`../README.md`](../README.md)（口径）· [`../SCOPE.md`](../SCOPE.md)（用户拍板的偏差）·

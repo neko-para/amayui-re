@@ -41,7 +41,7 @@ public:
     virtual void requestClose() {}
     // 诊断一行（driver / video / gpu），可空。
     virtual std::string describe() const { return {}; }
-    // 可选：同一 SDL_GPUDevice 上的 GPU 光栅化后端（--raster gpu 时才非空）。
+    // 可选：同一 SDL_GPUDevice 上的 GPU 光栅化后端（生产路径恒非空：无 GPU ⇒ 拒绝启动）。
     virtual GpuRaster* gpuRaster() { return nullptr; }
     // ★ 调试叠层（`--overlay`）的两行数据（`script` 身份 / `worst` 3 s 最大值）。
     //   **默认 no-op**：headless / 测试替身不画叠层，⛔ 不给它们加负担。

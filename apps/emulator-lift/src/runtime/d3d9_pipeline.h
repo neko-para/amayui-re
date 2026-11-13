@@ -123,10 +123,20 @@ constexpr std::uint32_t kRsColorWriteEnable = 168;
 constexpr std::uint32_t kRsTweenFactor = 170;
 constexpr std::uint32_t kRsBlendOp = 171;
 constexpr std::uint32_t kRsScissorTestEnable = 174;
+// ★ C 档（**值敏感**）：状态本身是合法 D3DRS，但本线不实现它的**有效值**；
+//   惰性值 0 放行，非 0 ⇒ `D3DERR_INVALIDCALL` + `recordUnsupported(bit26)`，⛔ 不写状态块。
+constexpr std::uint32_t kRsSlopeScaleDepthBias = 175;
+constexpr std::uint32_t kRsAntiAliasedLineEnable = 176;
+constexpr std::uint32_t kRsEnableAdaptiveTessellation = 184;
+constexpr std::uint32_t kRsSrgbWriteEnable = 194;
+constexpr std::uint32_t kRsDepthBias = 195;
 constexpr std::uint32_t kRsSeparateAlphaBlendEnable = 206;
 constexpr std::uint32_t kRsSrcBlendAlpha = 207;
 constexpr std::uint32_t kRsDestBlendAlpha = 208;
 constexpr std::uint32_t kRsBlendOpAlpha = 209;
+// ★ D3D9 的 `D3DRENDERSTATETYPE` 最大合法值（210..255 **不是** D3DRS 值）：
+//   Set/Get 的上界都用它；状态数组本身仍保留 256 槽（快照/Apply 按 256 项走，⛔ 不缩）。
+constexpr std::uint32_t kLastD3dRenderState = kRsBlendOpAlpha;
 
 // D3DBLEND
 constexpr std::uint32_t kBlendZero = 1;
@@ -276,6 +286,10 @@ struct PipelineInfo {
     std::uint32_t viewport_y = 0;
     std::uint32_t viewport_w = 0;
     std::uint32_t viewport_h = 0;
+    // ★ 未支持状态的位图（8 × 32 = 256 位；诊断，不是设备状态）。
+    //   ★ 为什么必须在 `PipelineInfo` 里：位图以前**只写不读** ⇒ 守卫只能断言"日志里出现过"。
+    //   位名见 `d3d9_pipeline.cpp` 的 `enum UnsupportedBit`。
+    std::uint32_t unsupported[8] = {};
 };
 
 // =====================================================================================
@@ -316,6 +330,8 @@ void destroyForDevice(X86& cpu, std::uint32_t device_state);
 std::uint32_t pipelineOfDevice(X86& cpu, std::uint32_t device_state);
 bool pipelineInfoOfState(X86& cpu, std::uint32_t state, PipelineInfo* out, std::string* why);
 bool pipelineInfoOfDevice(X86& cpu, std::uint32_t device_state, PipelineInfo* out, std::string* why);
+// 运行摘要的一行 `unsupported : …`（进程级镜像；判据以 `PipelineInfo::unsupported` 为准）。
+std::string unsupportedBitsOfRun();
 
 // =====================================================================================
 // IDirect3DStateBlock9 的状态快照（`REQ-01M7372BPVGBD247KAGHB53YK7`）
@@ -359,6 +375,21 @@ void destroyStateBlockSnapshot(X86& cpu, std::uint32_t handle);
 // =====================================================================================
 // 当前渲染目标像素块（0 = 设备后缓冲）。Clear / Draw / 夹具都读这一份。
 std::uint32_t renderTargetArena(X86& cpu, std::uint32_t pipeline_state);
+
+// ★ 当前颜色目标的**唯一一份**判据（`prepareContext` 与 D3DXSprite 合成共用）：
+//   Sprite 的 End/Flush 合成目标必须与 D3D9 的 Draw 目标同源 —— 绑定纹理 RT 时两者都要写进
+//   那张纹理的像素块（`REQ-01M79V2TVJH98BKH0C0WQV2FET`），⛔ 不要各读一遍状态块、
+//   更不要复制一份"是不是纹理"的判断。
+//   · `arena`   = `kPlColorArena`（0 = 设备后缓冲；非 0 = 绑定的 surface 像素块）；
+//   · `surface` = `kPlColorSurface`（0 = 后缓冲）；
+//   · `is_texture` / `usage` = surface 是纹理表面（`'TEX1'` magic）及其 `D3DUSAGE_*` 位。
+struct ColorTarget {
+    std::uint32_t arena = 0;
+    std::uint32_t surface = 0;
+    bool is_texture = false;
+    std::uint32_t usage = 0;
+};
+bool colorTargetOfState(X86& cpu, std::uint32_t pipeline_state, ColorTarget* out, std::string* why);
 // SetRenderTarget：target=0 ⇒ 后缓冲；否则必须是本模块的 IDirect3DSurface9。
 std::uint32_t setRenderTarget(X86& cpu, std::uint32_t dev, std::uint32_t target, std::uint32_t zstencil,
                               std::string* why);
@@ -447,7 +478,7 @@ std::uint32_t setIndices(X86& cpu, std::uint32_t dev, std::uint32_t ib, std::str
 // Draw*：真的做顶点处理 + 光栅。**未 BeginScene ⇒ D3DERR_INVALIDCALL**（真机语义）。
 std::uint32_t drawPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t prim, std::uint32_t start_vertex,
                             std::uint32_t prim_count, std::string* why);
-std::uint32_t drawIndexedPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t prim, std::uint32_t base_vertex,
+std::uint32_t drawIndexedPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t prim, std::int32_t base_vertex,
                                    std::uint32_t min_index, std::uint32_t num_vertices, std::uint32_t start_index,
                                    std::uint32_t prim_count, std::string* why);
 std::uint32_t drawPrimitiveUP(X86& cpu, std::uint32_t dev, std::uint32_t prim, std::uint32_t prim_count,
@@ -463,6 +494,20 @@ bool clearDepth(X86& cpu, std::uint32_t pipeline_ea, float z, std::string* why);
 // GPU 光栅化诊断（static 计数；CPU 模式恒为 0）。供 dumpRunSummary / CTest 断言。
 std::uint64_t gpuDrawCount();
 std::uint64_t gpuTriangleCount();
+
+// `[draw] fa=` 的**取数口**（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：上一批 Draw 的"真正参与混合的 α"。
+// · `from_gpu == false` ⇒ 数的是 CPU 光栅**真的写下去的像素**（`n` = 像素数，受 `LIFT_SLOW_DRAW` 门控）；
+// · `from_gpu == true`  ⇒ 数的是交给 GPU 后端的**顶点** α（`n` = 顶点数，逐批、不受门控）。
+//   ⛔ 两者都**不是**粗略估计：CPU 走像素收尾的唯一一处，GPU 走真的入队的那批顶点。
+// · `mn/mx/mean` 全是 0..255 的整数语义（`mean` 是 double 但由整数和算）。
+struct DrawAlphaAgg {
+    std::uint64_t n = 0;
+    double mean = 0.0;
+    unsigned mn = 255;
+    unsigned mx = 0;
+    bool from_gpu = false;
+};
+DrawAlphaAgg lastDrawAlphaAgg();
 
 // =====================================================================================
 // GPU 准入 / 状态映射（**纯函数**；夹具直接调，⛔ 不建机器）
@@ -516,9 +561,15 @@ bool gpuUntexturedIsIdentity(std::uint32_t op, std::uint32_t arg1, std::uint32_t
 struct GpuCoverage {
     std::uint64_t draw_calls = 0;
     std::uint64_t gpu_draws = 0;
+    // ★ `REQ-01M7AAXVGY9SG75XCREHPX641Z`（M1 账本）：两个数**分开**，⛔ 不许合流。
+    //   · `fallback_draws` = 这一批 **CPU 真写了像素**（`fallback_pixels > 0`）—— "回退"的口径；
+    //   · `skipped_draws`  = 这一批 **GPU 没画**（准入拒绝 / 准入后拒绝 / 后端失败）—— "没画"的口径。
+    //   本单之前只有前者 ⇒ `gpuEligible` 拒批且 CPU 一个像素都没写时**连账都没有**（设计 §A.3 的盲区）。
+    //   真实场景（TITLE / ADV / OPTION / SAVE）两者都应 0。
     std::uint64_t fallback_draws = 0;
     std::uint64_t fallback_pixels = 0;
-    std::uint64_t gpu_failures = 0;  // 准入通过、但 GPU 后端真的画失败了（已 CPU 重放）
+    std::uint64_t skipped_draws = 0;
+    std::uint64_t gpu_failures = 0;  // 准入通过、但 GPU 后端真的画失败了（⛔ 不再 CPU 重放该批）
     // ---- 本单：入队 / 录进 pass / 顶点数（口径见上）----
     std::uint64_t queued = 0;     // 入队成功的批数
     std::uint64_t recorded = 0;   // 真的进过 render pass 的批数
@@ -532,9 +583,15 @@ struct GpuCoverage {
     // 但覆盖账要可见（否则"没画"与"没走 GPU"分不清）。
     std::uint64_t sprite_skipped = 0;
     std::map<std::string, std::uint64_t> fallback_reasons;
+    // `skipped` 的按原因聚合（与 `fallback_reasons` **不同一张表**：口径不同，⛔ 不合流）。
+    std::map<std::string, std::uint64_t> skipped_reasons;
 };
 const GpuCoverage& gpuCoverage();
 void gpuCoverageReset();
+// `skipped top:` 那一行（与 `fallback top:` 同形；最多 5 条，按次数降序、再按原因升序）。
+// ★ 返回**整行**（含换行）；没有跳过时返回空串。`machine.cpp` 直接 fputs 它；
+//   夹具（`tests/gpu_batch.cpp` 的 `gpu-batch/skip-ledger`）断言原因真的出现在这里。
+std::string gpuSkippedTopLine();
 // 记一次 CPU 回退（reason 是稳定文本；pixels 是这一批 CPU 写出的像素数）。
 void gpuNoteFallback(const std::string& reason, std::uint64_t pixels);
 // 记一次 D3DXSprite 条目的 GPU / CPU 结果（CPU 时 reason 必填）。

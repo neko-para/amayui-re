@@ -412,6 +412,9 @@ offset 直方图里 `+228`（84）、`+268`（60）、`+276`（27）与 `IDirect
 ★ **`.x` 复杂模型不在 ADV 主路径**：`0x329`（handler `sub_426EB0`，调 `D3DXLoadMeshHierarchyFromXInMemory`）
 在 `title` / `option` / `sn0000` 三条足迹里**执行 0 次**（只有 1 条 static-op）⇒ 它属于战斗/独立 3D 场景；
 ADV 上执行的是 `0x320`（6）/ `0x322`（7）/ `0x32a`（3）这类**简单网格/特效**，不是 `.x` 模型。
+  ⚠ **这条足迹读数待重测**（2026-11 实测 TITLE 有 3 张 PNG + 每帧声明式 Draw ⇒ 同批足迹读数可疑；
+  本条主语是 `0x329` 的 `.x` 网格，⛔ 不是 Live2D）。重测口径要写清四件事：**build 类型 / 平台 / 有无安装 / 日期**；
+  真值回写由 `REQ-01M79P033W150Z107FZZJ5NX1Q` 跟踪，⛔ 别先改上面的数字。
 
 **复杂度档：T2.** 状态机 + 资源生命周期 + 着色器。
 
@@ -461,6 +464,9 @@ macOS 还要再经 MoltenVK，这条组合**没有官方背书**——所以本�
 - **在 ADV 主路径上**：`0x341`/`0x345`/`0x34e`/`0x352` 在 `sn0000` 与 `option` 足迹里分别执行
   **1 / 3 / 1 / 1** 次（`title` 0 次）⇒ Live2D 是 ADV 上唯一的**复杂模型**；但它的**画**走游戏 renderer，
   不是 Live2D 自己的平台调用（§6-2 的 D3D vs DDraw 后端仍待核）。
+  ⚠ **`title` 的 0 次待重测**（2026-11 实测 TITLE 有 3 张 PNG + 每帧声明式 Draw ⇒ 原读数可疑）；
+  重测口径要写清四件事：**build 类型 / 平台 / 有无安装 / 日期**；真值回写由
+  `REQ-01M79P033W150Z107FZZJ5NX1Q` 跟踪，⛔ 别先改上面的数字。
 - 切片里的 4 个导入（`wsprintfA`/`GetCurrentThreadId`/`mmioRead`/`OutputDebugStringA`）**不在**这 182 个函数里；
   它们在 `0x4BBC00–0x4BC280` 区间里有 14 个站点（点名两支 12 + `sub_4BBDF0` 2；§1.3 #2），其余 94 个站点散布在别处。
 - **纹理由游戏侧建**：`sub_478370`（EA 0x478370）先 `D3DXCreateTextureFromFileInMemory`，再 `sub_4BD070(*this, i, tex)`
@@ -804,6 +810,9 @@ lifted C（原逻辑）
     来确认菜单资源是从哪读的（`LoadMenuA` 的参数是资源 id 还是文件）。
 12. **ADV 主线是否用 Live2D**：需要看 `0x478330`/`0x478370`/`0x4783D0` 的调用者是否在 ADV 路径上；
     若是，则「砍掉 D3D9 + Live2D」的最小组合不成立（模型不显示）。
+    ⚠ 判断依据里的 TITLE 足迹读数**待重测**（见 §3.8 与 `REQ-01M79P033W150Z107FZZJ5NX1Q`）：
+    2026-11 实测 TITLE 有 3 张 PNG + 每帧声明式 Draw，原读数可疑；重测口径四件事
+    （build 类型 / 平台 / 有无安装 / 日期）写清前，⛔ 别把"TITLE 不碰 Live2D"当结论。
 13. **关闭窗口 / 存档命名是否走 Win32 模态**：AGE **没有** `DialogBoxParamA`/`CreateDialogParamA` 导入，
     只有 `MessageBoxA`（28 站点）；需要确认这两条是 `MessageBoxA` 还是游戏自绘 UI。若走 `MessageBoxA`，
     按 §4.1 的 stub 返回 `IDOK` 即可；若走自绘，则本来就不需要 Win32 对话框。

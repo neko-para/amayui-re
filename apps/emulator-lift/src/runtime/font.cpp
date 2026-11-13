@@ -15,7 +15,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <map>
+#include <optional>
 #include <tuple>
 #include <utility>
 
@@ -195,7 +197,11 @@ struct FontEngine::Impl {
     bool lib_tried = false;
     std::map<std::string, FT_Face> faces;   // host path → face（生命周期 = 本对象）
     std::map<std::string, int> face_size;   // host path → 当前 pixel size
-    std::map<std::tuple<std::uint32_t, int, int>, GlyphMask> cache;  // (cp, size, bold) → mask
+    // ★ 字形缓存键 = `(cp, size, bold, provider)`。`provider` = 这个字形**最终由谁提供**
+    //   （0 = 主 face、1+i = 第 i 个后备、-1 = 都缺 ⇒ `.notdef`）。⛔ 少这一维时，同一码位今天
+    //   由后备提供、明天由主 face 提供（换字体 / 后备增减）就会拿到另一条来源的位图。
+    //   当前后备增减 / 配置换代都会清表，这一维是"清表之外还有一层"（键自描述，便于 trace）。
+    std::map<std::tuple<std::uint32_t, int, int, int>, GlyphMask> cache;  // (cp, size, bold, provider)
     // ★ `metrics()` 的缓存：键 = `metrics` 的**输入集** `(clamp 后像素字号, bold, 字体路径)`。
     //   ⛔ 不用 HDC 做键 —— 同一个屏幕 DC 上会被换字体量不同字号（`gdi32_object.cpp` 的 SelectObject
     //   路径），键里少一维就把小字号的 ascent 复用给大字号（差 8px，见 `.tmp/task3-report.md` §2）。
@@ -206,6 +212,21 @@ struct FontEngine::Impl {
     std::uint64_t config_epoch = 0;  // 与 `g_config_epoch` 不一致 ⇒ 清表（见 `syncConfigEpoch`）
     FontEngine::MetricsSourceForTest metrics_source = nullptr;  // 纯档接缝（生产恒 nullptr）
     void* metrics_source_user = nullptr;
+    // ★ 内存字体（`AddFontMemResourceEx` 送进来的游戏字体）：**只当缺字后备**。
+    //   键 = 稳定 id（单调递增 ⇒ map 的遍历顺序 = 登记顺序）。`bytes` 必须活到 `FT_Done_Face`：
+    //   `FT_New_Memory_Face` **不拷贝**数据（face 直接指向这块缓冲）。
+    struct MemoryFont {
+        std::vector<std::uint8_t> bytes;
+        FT_Face face = nullptr;
+        int pixel_size = 0;  // 已经 `FT_Set_Pixel_Sizes` 设过的字号（0 = 还没设）
+        std::string family;
+    };
+    std::map<std::uint32_t, MemoryFont> memory_fonts;
+    std::uint32_t next_memory_font_id = 1;
+    std::optional<FontEngine::GlyphSourceForTest> glyph_source;  // 纯档接缝（生产恒 nullopt）
+    std::uint64_t fallback_glyphs = 0;  // 由后备字体提供的字形（按解析计）
+    std::uint64_t notdef_glyphs = 0;    // 主 face + 全部后备都缺 ⇒ 画 `.notdef`（按解析计）
+    bool warned_missing_glyph = false;
     bool warned_missing = false;
     bool warned_bold = false;
 };
@@ -333,6 +354,72 @@ GlyphMask syntheticMask(char32_t cp, int pixel_size) {
     return m;
 }
 
+// 把一个已渲染的 FT glyph slot 拷成 `GlyphMask`（连续覆盖率 + 黑框/origin/advance）。
+// ★ 真字体档的**唯一**位移点在这里（基线补偿 `kBaselineLift` / `--baseline-lift`）：主 face 与
+//   后备 face 都走同一个位移，否则同一行里的 ♡ 会比相邻汉字低 N px（"位移只在一处"这条口径不变）。
+bool buildMaskFromSlot(const FT_GlyphSlot slot, GlyphMask* out) {
+    if (slot == nullptr || out == nullptr) return false;
+    const FT_Bitmap& bitmap = slot->bitmap;
+    GlyphMask m;
+    m.black_box_x = static_cast<int>(bitmap.width);
+    m.black_box_y = static_cast<int>(bitmap.rows);
+    m.origin_x = slot->bitmap_left;
+    m.origin_y = slot->bitmap_top + fontConfig().baseline_lift;
+    // ★ 推进 = **floor**(26.6)：`>> 6`（不是四舍五入）。extent / GGO / TextOut 共用它。
+    m.advance = advancePixels(slot->advance.x);
+    const std::size_t count =
+        static_cast<std::size_t>(m.black_box_x) * static_cast<std::size_t>(m.black_box_y);
+    m.coverage.assign(count, 0);
+    if (count != 0 && bitmap.buffer != nullptr) {
+        for (int row = 0; row < m.black_box_y; ++row) {
+            const std::uint8_t* src = bitmap.buffer + static_cast<std::ptrdiff_t>(row) * bitmap.pitch;
+            for (int col = 0; col < m.black_box_x; ++col) {
+                std::uint8_t value = 0;
+                if (bitmap.pixel_mode == FT_PIXEL_MODE_MONO) {
+                    value = ((src[col >> 3] >> (7 - (col & 7))) & 1u) != 0 ? 255 : 0;
+                } else if (bitmap.pixel_mode == FT_PIXEL_MODE_BGRA) {
+                    value = src[static_cast<std::size_t>(col) * 4 + 3];
+                } else {
+                    value = src[col];
+                }
+                m.coverage[static_cast<std::size_t>(row) * m.black_box_x + col] = value;
+            }
+        }
+    }
+    *out = std::move(m);
+    return true;
+}
+
+// 一个来源（主 face = slot 0；后备 = slot 1+i）**有没有**这个码位的字形。
+// ★ 判据只能是 `FT_Get_Char_Index != 0`：`FT_Load_Char` 对缺字**不报错**（加载 glyph 0 = `.notdef`
+//   并返回 0）⇒ 拿 load 的返回值判"有字形"会把 `.notdef` 当成功画出去（`docs/03-emulator/fonts.md` §4.3）。
+std::uint32_t glyphIndexFor(FontEngine::Impl& impl, FT_Face face, int slot, char32_t cp) {
+    if (impl.glyph_source.has_value()) {
+        const FontEngine::GlyphSourceForTest& src = *impl.glyph_source;
+        return src.char_index != nullptr ? src.char_index(src.user, slot, cp) : 0u;
+    }
+    if (face == nullptr) return 0;
+    return static_cast<std::uint32_t>(FT_Get_Char_Index(face, static_cast<FT_ULong>(cp)));
+}
+
+// 从**指定来源**载入字形。false = FT 载入失败（⛔ 与"缺字"是两回事：缺字由 `glyphIndexFor` 判）。
+//   ★ 缺字时 `FT_Load_Char` 仍成功并给出 glyph 0（`.notdef`）—— 这条路径只在"都缺 ⇒ 诚实画
+//   `.notdef`"时被调用（那里已记账 + warn），⛔ 不是它的判据。
+bool loadGlyphFor(FontEngine::Impl& impl, FT_Face face, int slot, char32_t cp, int size,
+                  bool bold, GlyphMask* out) {
+    if (impl.glyph_source.has_value()) {
+        const FontEngine::GlyphSourceForTest& src = *impl.glyph_source;
+        return src.load != nullptr && src.load(src.user, slot, cp, size, bold, out);
+    }
+    if (face == nullptr) return false;
+    (void)size;  // 真字体档的字号已在 `faceForSize` / 后备登记时设好
+    (void)bold;  // 粗体是"用哪份 face"的选择，不是单次 load 的参数
+    if (FT_Load_Char(face, static_cast<FT_ULong>(cp), FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL) != 0) {
+        return false;
+    }
+    return buildMaskFromSlot(face->glyph, out);
+}
+
 }  // namespace
 
 FontEngine::FontEngine() : impl_(new Impl()) {}
@@ -342,6 +429,11 @@ FontEngine::~FontEngine() {
         if (entry.second != nullptr) FT_Done_Face(entry.second);
     }
     impl_->faces.clear();
+    // ★ 内存字体：先 `FT_Done_Face` 再放掉字节（face 指向 `bytes` 的缓冲）。
+    for (auto& entry : impl_->memory_fonts) {
+        if (entry.second.face != nullptr) FT_Done_Face(entry.second.face);
+    }
+    impl_->memory_fonts.clear();
     if (impl_->lib != nullptr) FT_Done_FreeType(impl_->lib);
 }
 
@@ -367,6 +459,80 @@ void FontEngine::setMetricsSourceForTest(MetricsSourceForTest fn, void* user) {
     impl_->metrics_cache.clear();  // 换源 ⇒ 旧结果作废（否则守卫会先命中旧条目）
 }
 
+std::uint32_t FontEngine::addMemoryFont(const void* data, std::size_t size, std::string* family_out) {
+    if (family_out != nullptr) family_out->clear();
+    if (!impl_) return 0;
+    if (data == nullptr || size == 0) {
+        std::fprintf(stderr, "[font] AddFontMemResourceEx：内存字体字节为空（%zu）⇒ 不登记\n", size);
+        return 0;
+    }
+    if (ensureLibrary(*impl_) == nullptr) {
+        std::fprintf(stderr, "[font] AddFontMemResourceEx：FreeType 起不来 ⇒ 内存字体不登记\n");
+        return 0;
+    }
+    const std::uint8_t* first = static_cast<const std::uint8_t*>(data);
+    Impl::MemoryFont font;
+    // ★ **拷贝**：guest 的内存在 `AddFontMemResourceEx` 返回后随时会被释放 / 复用；`FT_New_Memory_Face`
+    //   不拷贝数据，所以 face 指向的必须是我们自己的这份缓冲。
+    font.bytes.assign(first, first + size);
+    FT_Face face = nullptr;
+    if (FT_New_Memory_Face(impl_->lib, font.bytes.data(), static_cast<FT_Long>(font.bytes.size()), 0,
+                           &face) != 0 ||
+        face == nullptr) {
+        std::fprintf(stderr, "[font] AddFontMemResourceEx：%zu 字节的内存字体解析失败 ⇒ 不登记\n",
+                     size);
+        return 0;
+    }
+    font.face = face;
+    font.family = (face->family_name != nullptr) ? face->family_name : std::string();
+    const std::uint32_t id = impl_->next_memory_font_id++;
+    const std::string family = font.family;
+    impl_->memory_fonts.emplace(id, std::move(font));
+    // ★ 之前缓存下来的 `.notdef`（或"由别的后备提供"）不能继续命中：新后备可能正好能提供这些字形。
+    impl_->cache.clear();
+    if (family_out != nullptr) *family_out = family;
+    return id;
+}
+
+bool FontEngine::removeMemoryFont(std::uint32_t id) {
+    if (!impl_) return false;
+    const auto it = impl_->memory_fonts.find(id);
+    if (it == impl_->memory_fonts.end()) return false;
+    if (it->second.face != nullptr) FT_Done_Face(it->second.face);
+    impl_->memory_fonts.erase(it);
+    impl_->cache.clear();  // 后备集合变了 ⇒ 旧字形（可能是它提供的）作废
+    return true;
+}
+
+std::size_t FontEngine::memoryFontCount() const { return impl_ ? impl_->memory_fonts.size() : 0; }
+
+std::string FontEngine::memoryFontFamily(std::size_t index) const {
+    if (!impl_ || index >= impl_->memory_fonts.size()) return {};
+    auto it = impl_->memory_fonts.begin();
+    std::advance(it, static_cast<std::ptrdiff_t>(index));
+    return it->second.family;
+}
+
+FontEngine::GlyphFallbackStats FontEngine::glyphFallbackStats() const {
+    GlyphFallbackStats stats;
+    if (!impl_) return stats;
+    stats.fallback_uses = impl_->fallback_glyphs;
+    stats.notdefs = impl_->notdef_glyphs;
+    return stats;
+}
+
+void FontEngine::setGlyphSourceForTest(const GlyphSourceForTest& src) {
+    if (!impl_) return;
+    if (src.char_index == nullptr && src.load == nullptr) {
+        impl_->glyph_source.reset();  // 两个原语都空 = 卸下替身（回到真字体路径）
+    } else {
+        impl_->glyph_source = src;
+    }
+    // ★ 换源 ⇒ 旧字形（可能来自真 face 或另一份替身）作废。
+    impl_->cache.clear();
+    impl_->warned_missing_glyph = false;
+}
+
 std::uint64_t FontEngine::metricsHits() const { return impl_ ? impl_->metrics_hits : 0; }
 std::uint64_t FontEngine::metricsMisses() const { return impl_ ? impl_->metrics_misses : 0; }
 
@@ -388,65 +554,110 @@ bool FontEngine::glyph(char32_t cp, int pixel_size, bool bold, GlyphMask* out) {
     }
     if (!impl_) return false;
     syncConfigEpoch(*impl_);
-    const std::tuple<std::uint32_t, int, int> key{static_cast<std::uint32_t>(cp), size, bold ? 1 : 0};
+    // 主 face：真字体档必须有（纯档接缝用替身，不需要字体文件 —— 否则 pure 档没法守 fallback）。
+    FT_Face primary = nullptr;
+    if (!impl_->glyph_source.has_value()) {
+        primary = faceForSize(*impl_, bold, size);
+        if (primary == nullptr) {
+            if (!impl_->warned_missing) {
+                impl_->warned_missing = true;
+                std::fprintf(stderr,
+                             "[font] 没有可用的宿主字体（LIFT_HOST_FONT_PATH / --font）⇒ "
+                             "GetGlyphOutlineA / GetTextMetricsA / TextOutA 会返回失败\n");
+            }
+            return false;
+        }
+    }
+    // 后备来源：真字体档 = 登记的内存字体（按登记顺序）；纯档接缝 = 替身声明的槽 1..face_count-1。
+    std::vector<FT_Face> fallback_faces;
+    int fallback_count = 0;
+    if (impl_->glyph_source.has_value()) {
+        fallback_count = std::max(0, impl_->glyph_source->face_count - 1);
+        fallback_faces.assign(static_cast<std::size_t>(fallback_count), nullptr);  // 替身没有 FT_Face
+    } else {
+        for (auto& entry : impl_->memory_fonts) {
+            Impl::MemoryFont& font = entry.second;
+            // ★ 每个登记项都占一个槽（即使这次字号设不上）—— 槽号 = `memory_fonts` 的遍历顺序，
+            //   这样 trace 里的 `family` 与缓存键的 `provider` 不会因为某个字号失败而错位。
+            if (font.face == nullptr) {
+                fallback_faces.push_back(nullptr);
+                continue;
+            }
+            if (font.pixel_size != size) {
+                if (FT_Set_Pixel_Sizes(font.face, 0, static_cast<FT_UInt>(size)) != 0) {
+                    fallback_faces.push_back(nullptr);
+                    continue;
+                }
+                font.pixel_size = size;
+            }
+            fallback_faces.push_back(font.face);
+        }
+        fallback_count = static_cast<int>(fallback_faces.size());
+    }
+
+    // ★★ 缺字判据（⛔ 不是 `FT_Load_Char` 的返回值）：glyph index == 0 就是**没有**这个字形。
+    //    FreeType 对缺字不报错（加载 glyph 0 = `.notdef` 并返回 0）⇒ 用"load 成功"判会把
+    //    `.notdef` 当成功画出去（`docs/03-emulator/fonts.md` §4.3）。
+    GlyphMask m;
+    const bool primary_has_glyph = glyphIndexFor(*impl_, primary, 0, cp) != 0;
+    int provider = primary_has_glyph ? 0 : -1;  // 0 = 主 face；1+i = 第 i 个后备；-1 = 都缺
+    for (int i = 0; provider < 0 && i < fallback_count; ++i) {
+        FT_Face face = (i < static_cast<int>(fallback_faces.size())) ? fallback_faces[i] : nullptr;
+        if (glyphIndexFor(*impl_, face, i + 1, cp) != 0) provider = i + 1;
+    }
+    // 缓存键带"最终由谁提供"（见 `Impl::cache`）。
+    const std::tuple<std::uint32_t, int, int, int> key{static_cast<std::uint32_t>(cp), size,
+                                                       bold ? 1 : 0, provider};
     const auto cached = impl_->cache.find(key);
     if (cached != impl_->cache.end()) {
         *out = cached->second;
         return true;
     }
-    FT_Face face = faceForSize(*impl_, bold, size);
-    if (face == nullptr) {
-        if (!impl_->warned_missing) {
-            impl_->warned_missing = true;
-            std::fprintf(stderr,
-                         "[font] 没有可用的宿主字体（LIFT_HOST_FONT_PATH / --font）⇒ "
-                         "GetGlyphOutlineA / GetTextMetricsA / TextOutA 会返回失败\n");
-        }
-        return false;
-    }
-    if (textTraceEnabled()) {
+    if (textTraceEnabled() && primary != nullptr) {
         // 假设 ② 的判据：**选中的那张 cmap 子表**（platformID / encodingID）+ 该码位查到的 glyph id。
-        const FT_CharMap cm = face->charmap;
+        const FT_CharMap cm = primary->charmap;
         textTrace("glyph cp=U+%04X size=%d bold=%d charmap[%d] platformID=%u encodingID=%u glyphID=%u",
                   static_cast<unsigned>(cp), size, bold ? 1 : 0,
-                  cm ? traceCharmapIndex(face) : -1,
+                  cm ? traceCharmapIndex(primary) : -1,
                   cm ? static_cast<unsigned>(cm->platform_id) : 999u,
                   cm ? static_cast<unsigned>(cm->encoding_id) : 999u,
-                  static_cast<unsigned>(FT_Get_Char_Index(face, static_cast<FT_ULong>(cp))));
+                  static_cast<unsigned>(FT_Get_Char_Index(primary, static_cast<FT_ULong>(cp))));
     }
-    if (FT_Load_Char(face, static_cast<FT_ULong>(cp), FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL) != 0) {
-        return false;
+    if (provider >= 0) {
+        FT_Face face =
+            provider == 0 ? primary : fallback_faces[static_cast<std::size_t>(provider - 1)];
+        if (!loadGlyphFor(*impl_, face, provider, cp, size, bold, &m)) return false;
+        if (provider > 0) ++impl_->fallback_glyphs;
+    } else {
+        // ★ 主 face 与**全部**后备都没有这个字形：诚实画 `.notdef`（FT 的 glyph 0）——
+        //   记账 + 首次 warn，⛔ 不静默把 `.notdef` 当成功字形（也⛔ 不当作"没有字体"失败）。
+        ++impl_->notdef_glyphs;
+        if (!impl_->warned_missing_glyph) {
+            impl_->warned_missing_glyph = true;
+            std::fprintf(stderr,
+                         "[font] 缺字形：U+%04X（%dpx%s）—— 主字体与 %d 个后备字体都没有 ⇒ 画 "
+                         ".notdef（已计数；⛔ 这不是成功字形）\n",
+                         static_cast<unsigned>(cp), size, bold ? " bold" : "", fallback_count);
+        }
+        if (!loadGlyphFor(*impl_, primary, 0, cp, size, bold, &m)) return false;
     }
-    const FT_GlyphSlot slot = face->glyph;
-    const FT_Bitmap& bitmap = slot->bitmap;
-    GlyphMask m;
-    m.black_box_x = static_cast<int>(bitmap.width);
-    m.black_box_y = static_cast<int>(bitmap.rows);
-    m.origin_x = slot->bitmap_left;
-    // ★ 宿主基线补偿的**唯一位移点**（`kBaselineLift` / `--baseline-lift`）：把 `gmptGlyphOrigin.y`
-    //   抬 N px ⇒ guest 用它算的"字形顶 = 基线 − origin.y"整体上移 N px。等价于 cxx 在
-    //   `text_raster.cpp:675` 的 `baseline = ... - lift`（那边减基线、这边加 origin，屏幕位置同一），
-    //   但**不改度量**：`tmAscent` / `tmHeight` 保持 FT 真值 ⇒ guest 的行距 / 排版不变。
-    m.origin_y = slot->bitmap_top + fontConfig().baseline_lift;
-    // ★ 推进 = **floor**(26.6)：`>> 6`（不是四舍五入）。extent / GGO / TextOut 共用它。
-    m.advance = advancePixels(slot->advance.x);
-    const std::size_t count =
-        static_cast<std::size_t>(m.black_box_x) * static_cast<std::size_t>(m.black_box_y);
-    m.coverage.assign(count, 0);
-    if (count != 0 && bitmap.buffer != nullptr) {
-        for (int row = 0; row < m.black_box_y; ++row) {
-            const std::uint8_t* src = bitmap.buffer + static_cast<std::ptrdiff_t>(row) * bitmap.pitch;
-            for (int col = 0; col < m.black_box_x; ++col) {
-                std::uint8_t value = 0;
-                if (bitmap.pixel_mode == FT_PIXEL_MODE_MONO) {
-                    value = ((src[col >> 3] >> (7 - (col & 7))) & 1u) != 0 ? 255 : 0;
-                } else if (bitmap.pixel_mode == FT_PIXEL_MODE_BGRA) {
-                    value = src[static_cast<std::size_t>(col) * 4 + 3];
-                } else {
-                    value = src[col];
-                }
-                m.coverage[static_cast<std::size_t>(row) * m.black_box_x + col] = value;
-            }
+    if (textTraceEnabled()) {
+        // ★ 「这条走了 fallback（哪个族名）/ notdef」—— 让"♡ 有没有出现"可被判读（⛔ 不靠截图猜）。
+        if (provider > 0) {
+            const std::string family =
+                impl_->glyph_source.has_value()
+                    ? std::string("test-source")
+                    : memoryFontFamily(static_cast<std::size_t>(provider - 1));
+            textTrace("glyph source cp=U+%04X %dpx bold=%d ⇒ fallback[%d] family=\"%s\" "
+                      "blackbox=%dx%d advance=%d",
+                      static_cast<unsigned>(cp), size, bold ? 1 : 0, provider, family.c_str(),
+                      m.black_box_x, m.black_box_y, m.advance);
+        } else if (provider < 0) {
+            textTrace("glyph source cp=U+%04X %dpx bold=%d ⇒ NOTDEF（主 face + %d 个后备都没有该字形）",
+                      static_cast<unsigned>(cp), size, bold ? 1 : 0, fallback_count);
+        } else {
+            textTrace("glyph source cp=U+%04X %dpx bold=%d ⇒ 主 face", static_cast<unsigned>(cp), size,
+                      bold ? 1 : 0);
         }
     }
     impl_->cache.emplace(key, m);

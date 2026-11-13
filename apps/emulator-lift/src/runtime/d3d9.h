@@ -205,6 +205,50 @@ enum CapsOff : std::uint32_t {
     kCapsMaxPixelShaderValue = 0xD0,
 };
 
+// =====================================================================================
+// `fillCaps` 的**声明值**（实现与守卫共用一份；⛔ 测试里不另抄数字）
+//
+// ★ 口径（`REQ-01M79PP97ZD65BJG9GMAJ08MJ3`，已裁决）：caps 是**声明**，不是"实现集"；
+//   本线只能**响亮拒绝**的能力必须清位 —— caps 没有"拒绝"动作 ⇒ **不能表达就清 0**
+//   （⛔ 不"补"`Caps`/`Caps2`：`Caps` 只有 READ_SCANLINE 一位、`Caps2` 那几位本线都没有，
+//   恒 0 是真话）。每个置位的行为见证在 `tests/d3d9.cpp` 的 `d3d9/caps-claims`。
+// ★ `MaxTextureWidth/Height` **保留**：那是引擎唯一读的两个字段（`0x499128/0x49912E`）。
+// =====================================================================================
+// LineCaps：ZTEST(0x02) | BLEND(0x04) | ALPHACMP(0x08)；
+//   ⛔ TEXTURE(0x01)（带纹理的线响亮拒绝，bit16）与 FOG(0x10)（全局不做雾）都不许声明。
+constexpr std::uint32_t kCapsLineClaim = 0x0000000Eu;
+// RasterCaps：只有 D3DPRASTERCAPS_ZTEST(0x10)。⛔ ZFOG(0x200000)（不做雾）。
+constexpr std::uint32_t kCapsRasterClaim = 0x00000010u;
+// ShadeCaps：COLORGOURAUDRGB(0x8) | SPECULARGOURAUDRGB(0x200) | ALPHAGOURAUDBLEND(0x4000)。
+//   ⛔ FOGTABLE(0x80000) / FOGVERTEXGOURAUD(0x40000) / FOGRANGEGOURAUD(0x100000)。
+constexpr std::uint32_t kCapsShadeClaim = 0x00004208u;
+// TextureCaps：⛔ MIPCUBEMAP(0x10000) —— 本线没有 `CreateCubeTexture`。
+constexpr std::uint32_t kCapsTextureClaim = 0x00000000u;
+// 比较 / 混合位是**机械生成**的（`d3d9/caps-claims` 对 D3DCMP 1..8 / D3DBLEND 1..13 试探
+//   `SetRenderState` 的返回）：本线 8 个比较函数 / 13 个 D3DBLEND 全部接受 ⇒ 位 = 1<<(v-1)。
+constexpr std::uint32_t kCapsZCmpClaim = 0x000000FFu;
+constexpr std::uint32_t kCapsSrcBlendClaim = 0x00001FFFu;
+constexpr std::uint32_t kCapsDestBlendClaim = 0x00001FFFu;
+// StencilCaps：本线没有模板缓冲（`STENCILENABLE=1` 记 bit3、像素照写）⇒ 0。
+constexpr std::uint32_t kCapsStencilClaim = 0x00000000u;
+// MaxUserClipPlanes：不做用户裁剪面（`CLIPPLANEENABLE` 记 bit7）⇒ 0。
+constexpr std::uint32_t kCapsMaxUserClipPlanesClaim = 0u;
+// MaxVertexBlendMatrices：不做顶点混合（记 bit5）⇒ 0。
+constexpr std::uint32_t kCapsMaxVertexBlendMatricesClaim = 0u;
+// MaxVolumeExtent：没有体积纹理 ⇒ 0。
+constexpr std::uint32_t kCapsMaxVolumeExtentClaim = 0u;
+// MaxAnisotropy：各向异性按 LINEAR 近似（记 bit10）⇒ 1（= 无各向异性）。
+constexpr std::uint32_t kCapsMaxAnisotropyClaim = 1u;
+// MaxPointSize：点尺寸未实现（按 1px 画，记 bit19）⇒ 1.0f。
+constexpr float kCapsMaxPointSizeClaim = 1.0f;
+// PresentationIntervals：只认 IMMEDIATE(0x80000000)；ONE(0x1) 无人消费 ⇒ 清掉。
+constexpr std::uint32_t kCapsPresentationIntervalsClaim = 0x80000000u;
+// CursorCaps：没有光标 API（`SetCursorProperties` 未实现）⇒ 0。
+constexpr std::uint32_t kCapsCursorClaim = 0x00000000u;
+// VertexProcessingCaps：DIRECTIONALLIGHTS(0x08) | POSITIONALLIGHTS(0x10)；
+//   ⛔ TEXGEN(0x1) / MATERIALSOURCE7(0x2) / LOCALVIEWER(0x20) / TWEENING(0x40)。
+constexpr std::uint32_t kCapsVertexProcessingClaim = 0x00000018u;
+
 // ---- 适配器（虚拟显示器）----
 struct AdapterMode {
     int width = 0;

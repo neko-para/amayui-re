@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "check.h"
+#include "subprocess_skip.h"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -220,6 +221,8 @@ int main(int argc, char** argv) {
     const ChildRun created = run("created", L"--dump-frame " + quoteArg(created_pattern.wstring()));
     LIFT_CHECK(created.started);
     LIFT_CHECK(!created.timed_out);  // ★ 30 s 内结束
+    // ★ 无 GPU（含 `SDL_VIDEODRIVER=dummy`）：子进程在跑 guest 之前就拒绝启动 ⇒ SKIP 77。
+    LIFT_SKIP_IF_NO_GPU(created.exit_code, created.err);
     LIFT_CHECK_EQ_U32(created.exit_code, 0u);
     // 判据：目录真的建出来了（去掉 create_directories ⇒ 这一条当场红）。
     LIFT_CHECK(fs::is_directory(created_dir));

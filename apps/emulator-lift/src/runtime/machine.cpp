@@ -84,7 +84,7 @@ const char* stopReasonName(StopReason r) {
     return "?";
 }
 
-// ★ 见 machine.h：**只**是 `main` 最后那道兜底。消费者闸门（token / gpu-strict / 交互图）
+// ★ 见 machine.h：**只**是 `main` 最后那道兜底。消费者闸门（token / 交互图）
 //   在 `main.cpp` 里先于本函数返回，别把它们的码并进来。
 int exitCodeForRun(const RunResult& r) { return r.ok() ? 0 : 2; }
 
@@ -929,7 +929,7 @@ RunResult Machine::run(const RunOptions& opts) {
     //   直方图 / 等待直方图 / per-shim max_ns"的记账（`arm()` 里再或上 `LIFT_AUDIO_TRACE`）。
     //   ⛔ 默认 false ⇒ 令牌热路径只多一次 bool 读（见 guest_token.h 的 Phase-0 那一组）。
     guestToken().arm(opts.profile);
-    // ★ GPU 覆盖账本按**这一轮**重算（`--gpu-strict` / dumpRunSummary 读的就是它）。
+    // ★ GPU 覆盖账本按**这一轮**重算（dumpRunSummary 读的就是它）。
     d3d9::gpuCoverageReset();
     shims_.setTrace(opts.trace_shims, opts.trace_out ? opts.trace_out : stdout);
     // ★ 诊断：`LIFT_FRAME_TRACE=1` ⇒ 每次 Present 后打"这一帧墙钟去哪了"。
@@ -2681,7 +2681,7 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
                      (unsigned long long)d3d9::gpuTriangleCount(),
                      presenter_.sinkDescription().empty() ? "-" : presenter_.sinkDescription().c_str());
     }
-    // ★ 固定打印 GPU 覆盖账（`--raster cpu` 时全 0；GPU 启用后回退必须可见，⛔ 不静默）。
+    // ★ 固定打印 GPU 覆盖账（GPU 启用后回退必须可见，⛔ 不静默）。
     {
         const d3d9::GpuCoverage& cov = d3d9::gpuCoverage();
         // ★ `queued/recorded/empty/fragments` = 本单（REQ-01M73PZN6R3AC3RCQ8WZEA0Y0M）拆开的账：
@@ -2689,11 +2689,15 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
         //   （`gpu>0` 却一个 pass 都没进 ⇒ 这批不可能有像素）。
         std::fprintf(out,
                      "gpu       : draws=%llu gpu=%llu fallback=%llu fallback_pixels=%llu "
-                     "recorded=%llu queued=%llu empty=%llu fragments=%llu\n",
+                     "recorded=%llu queued=%llu empty=%llu fragments=%llu skipped=%llu\n",
                      (unsigned long long)cov.draw_calls, (unsigned long long)cov.gpu_draws,
                      (unsigned long long)cov.fallback_draws, (unsigned long long)cov.fallback_pixels,
                      (unsigned long long)cov.recorded, (unsigned long long)cov.queued,
-                     (unsigned long long)cov.empty, (unsigned long long)cov.fragments);
+                     (unsigned long long)cov.empty, (unsigned long long)cov.fragments,
+                     (unsigned long long)cov.skipped_draws);
+        // ★ 未支持位（诊断）：`PipelineInfo::unsupported` 是同一份位图的逐设备视图；
+        //   这里打进程级镜像 + 置位名（#3/#6 的拒绝在摘要里必须看得见，⛔ 不静默）。
+        std::fprintf(out, "unsupported : %s\n", d3d9::unsupportedBitsOfRun().c_str());
         if (cov.sprite_draws != 0 || cov.sprite_fallback_draws != 0 || cov.sprite_skipped != 0) {
             std::fprintf(out,
                          "            sprite: draws=%llu gpu=%llu fallback=%llu fallback_pixels=%llu skipped=%llu\n",
@@ -2716,8 +2720,14 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out) const {
             }
             std::fprintf(out, "\n");
         }
+        // ★ `skipped` 的按原因聚合（`REQ-01M7AAXVGY9SG75XCREHPX641Z`）：与 `fallback top`
+        //   **分开打印**（口径不同：这里是"GPU 没画"，那里是"CPU 画了"）。
+        {
+            const std::string skipped_top = d3d9::gpuSkippedTopLine();
+            if (!skipped_top.empty()) std::fputs(skipped_top.c_str(), out);
+        }
         if (cov.gpu_failures != 0) {
-            std::fprintf(out, "            gpu_failures=%llu（准入通过但后端绘制失败，已 CPU 重放）\n",
+            std::fprintf(out, "            gpu_failures=%llu（准入通过但后端绘制失败，⛔ 不再 CPU 重放）\n",
                          (unsigned long long)cov.gpu_failures);
         }
     }
@@ -2946,6 +2956,16 @@ void Machine::dumpProfile(std::FILE* out, std::size_t top) const {
         const double rate = total ? 100.0 * static_cast<double>(hits) / static_cast<double>(total) : 0.0;
         std::fprintf(out, "  font!TEXTMETRIC-cache hits=%llu misses=%llu hit=%5.1f%%\n",
                      (unsigned long long)hits, (unsigned long long)misses, rate);
+    }
+    // ★ 缺字形记账（`FontEngine::glyphFallbackStats`）：`fallback` = 由内存字体（游戏自带
+    //   `AGE-EXTEND.TTF`）提供的字形数，`notdef` = 主字体 + 全部后备都没有、只好画 `.notdef` 的次数。
+    //   两者都是**按解析计**（缓存命中不计）；`notdef>0` 就是"有字没画出来"的机械判据（⛔ 看截图不算）。
+    {
+        const FontEngine::GlyphFallbackStats fb = fonts_.glyphFallbackStats();
+        std::fprintf(out,
+                     "  font!glyph-fallback fallback=%llu notdef=%llu memory-fonts=%zu\n",
+                     (unsigned long long)fb.fallback_uses, (unsigned long long)fb.notdefs,
+                     fonts_.memoryFontCount());
     }
 
     // ★ override 的函数体**不会**进块 profile（被宿主实现整段替代）⇒ 显式说明，否则 profile 会误导

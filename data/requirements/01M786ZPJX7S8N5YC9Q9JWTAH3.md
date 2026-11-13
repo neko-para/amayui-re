@@ -2,8 +2,9 @@
 
 - id: REQ-01M786ZPJX7S8N5YC9Q9JWTAH3
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M786CQP4JT8D7CSJ64NG6KYC
+- dropped_reason: 被 2026-11-13 的 REQ-01M78BF1FNNH6K8N8GEY6GQYXX 取代：不留 --allow-slow-cpu-raster 逃生口、直接删整条 CPU 光栅；三条 CTest 改 gpu 并入该单动作 7。本条不再是独立工作。
 - tags: [emulator-lift present raster]
 
 ## 用户裁决（2026-11-12）
@@ -51,3 +52,12 @@
 
 - `REQ-01M786CQP4JT8D7CSJ64NG6KYC`：只剩 `save-graph`（gpu、同步长活）与 `quit-graph`（偶发）两件事；
   三条 cpu-raster 的红的**根因在本单**。
+
+## 裁决（2026-11-13 · 被取代）
+
+本单（2026-11-12）的方案是"拒绝 + 留 `--allow-slow-cpu-raster` 逃生口，观察一周再删"。
+2026-11-13 的裁决进一步：**删掉整条 CPU 光栅、不留逃生口、不留空光栅**（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）。
+⇒ 本单的三件事分别落到：
+- "拒绝而不是静默变慢" → 直接删除（父单动作 2/5）；
+- "三条 CTest 改 `--raster gpu`" → 父单动作 7（`close-confirm` / `agerc-ui-state` / `feeder-seg-e2e`，另有 `mip-e2e` 两处）；
+- "清临时构建树" → 已由 `.gitignore` 的 `out-*/` 覆盖，属环境杂务，不占单据。

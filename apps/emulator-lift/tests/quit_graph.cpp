@@ -43,6 +43,7 @@
 
 #include "check.h"
 #include "runtime/host_encoding.h"  // `lift::utf8ToWide`（Windows 的命令行构造）
+#include "subprocess_skip.h"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -182,8 +183,6 @@ bool runArm(const fs::path& exe, const fs::path& game_dir, const fs::path& graph
     child.push_back("--present");
     child.push_back("window");
     child.push_back("--present-hidden");
-    child.push_back("--raster");
-    child.push_back("gpu");
     child.push_back("--native-overrides");
     child.push_back("all");
     child.push_back("--skip-logo");
@@ -223,6 +222,13 @@ bool runArm(const fs::path& exe, const fs::path& game_dir, const fs::path& graph
                 log.size());
     if (log.empty()) {
         std::printf("quit-graph[%s]: 子进程没写日志（工作目录 / 权限）\n", tag);
+        *environment_unavailable = true;
+        return false;
+    }
+    // ★ 无 GPU（含 `SDL_VIDEODRIVER=dummy`）：子进程在跑 guest 之前就拒绝启动 ⇒ 环境缺失。
+    //   （走不到下面 `feeder=host-thread` 的判据，所以先单独判；原因写进输出。）
+    if (lift_test::subprocessRefusedForNoGpu(r.exit_code, log)) {
+        std::printf("quit-graph[%s]: 无 GPU：子进程拒绝启动 ⇒ 这条不是判据红\n", tag);
         *environment_unavailable = true;
         return false;
     }

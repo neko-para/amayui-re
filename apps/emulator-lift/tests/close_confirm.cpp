@@ -24,6 +24,7 @@
 
 #include "check.h"
 #include "runtime/host_encoding.h"
+#include "subprocess_skip.h"
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -118,9 +119,11 @@ std::string readAllBytes(const fs::path& p) {
 
 bool contains(const std::string& hay, const char* needle) { return hay.find(needle) != std::string::npos; }
 
+// ★ GPU 拒绝启动**不在这里**：它由 `LIFT_SKIP_IF_NO_GPU` 单独判（要求本机实探无 GPU）。
+//   ⛔ 别把 `拒绝启动` 加回泛词表 —— GPU 可用时的一次启动回归会被静默吞成 SKIP。
 bool environmentUnavailable(const std::string& log) {
-    return contains(log, "找不到执行源") || contains(log, "拒绝启动") || contains(log, "SDL_Init(VIDEO)") ||
-           contains(log, "--game-dir") || contains(log, "--present window 失败");
+    return contains(log, "找不到执行源") || contains(log, "SDL_Init(VIDEO)") || contains(log, "--game-dir") ||
+           contains(log, "--present window 失败");
 }
 
 struct Arm {
@@ -165,7 +168,6 @@ int main(int argc, char** argv) {
             "--present", "window",
             "--present-hidden",
             "--present-driver", "software",
-            "--raster", "cpu",
             "--skip-logo",
             "--audio", "off",
             "--game-dir", game_dir,
@@ -182,6 +184,8 @@ int main(int argc, char** argv) {
             LIFT_SKIP("起不了子进程（emulator-lift 路径不对？）");
         }
         if (child.exit_code != 0) {
+            // ★ 无 GPU：子进程在跑 guest 之前就拒绝启动 ⇒ 环境缺失，SKIP 77（原因进输出）。
+            LIFT_SKIP_IF_NO_GPU(child.exit_code, log);
             if (environmentUnavailable(log)) LIFT_SKIP("环境不可用（没有执行源 / 安装树 / 窗口）");
             std::fprintf(stderr, "%s 臂 exit %d；log 前 4000 字节：\n%.4000s\n", arm.policy, child.exit_code,
                          log.c_str());

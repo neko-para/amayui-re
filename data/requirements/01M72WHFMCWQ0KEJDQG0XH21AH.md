@@ -2,8 +2,9 @@
 
 - id: REQ-01M72WHFMCWQ0KEJDQG0XH21AH
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
+- verify: apps/emulator-lift/tests/input_unfinished.cpp#unfinished-quit-negative-control
 - repro: apps/emulator-lift/src/runtime/input_script.cpp#finish_pending
 - tags: [emulator-lift, input-script, diagnostics]
 

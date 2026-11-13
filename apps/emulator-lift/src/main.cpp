@@ -21,7 +21,6 @@
 #include <vector>
 
 #include "corpus/lst_index.h"
-#include "runtime/d3d9_pipeline.h"  // GPU 覆盖账本（--gpu-strict 的机械判据）
 #include "runtime/font.h"
 #include "runtime/guest_token.h"  // --assert-guest-token（单令牌违规计数）
 #include "runtime/host_encoding.h"
@@ -162,15 +161,10 @@ void usage() {
         "  --audio off|sdl|virtual  音频后端（缺省 sdl = 真设备；virtual = 确定性设备时钟；off = silent）\n"
         "  --audio-dump <path>  把混音结果写成 WAV（44.1k/16/2；与 sdl 同时用 = tee）\n"
         "  --sound              允许出声（缺省静音：设备/混音/喂料/guest DS 调用照跑，只在交付前置 0）\n"
-        "  --raster <mode>    auto（缺省）/ cpu / gpu：D3D9 fixed-function 光栅化后端\n"
-        "                      auto = headless⇒cpu、window⇒gpu；window 下 GPU 初始化失败 ⇒ exit 2\n"
-        "  --gpu-strict       GPU 启用时，运行结束若仍有 Draw/ sprite 回退 CPU ⇒ 打印错误并 exit 3\n"
-        "                      （先打印 summary；需要 GPU 光栅化模式，--raster cpu 会被拒绝）\n"
         "  --assert-guest-token  运行结束若单令牌违规计数 > 0（或有 >1 个令牌持有者）⇒ exit 4\n"
         "                      （判据 = summary 的 `token : violations=0`；见 runtime/guest_token.h）\n"
         "                      或窗口状态被非主线程访问（summary 的 `window : off-thread=0`）⇒ exit 4\n"
         "                      （WindowManager 是主线程独占宿主对象，见 runtime/host_window.h）\n"
-        "  --raster-sprites 0|1      D3DXSprite 是否也走 GPU（缺省 1；A/B 用）\n"
         "  --font <path>       宿主字体（缺省：CMake 注入的 Amayui CN；调试覆盖）\n"
         "  --native-overrides <list>  逗号分隔的 guest 函数名 / 段级项名（如 sub_414AC0）；all = 已验证项；\n"
         "                             -名字 = 排除该项；也可显式叠加调试项（缺省关）\n"
@@ -271,9 +265,6 @@ int main(int argc, char** argv) {
     bool present_driver_set = false;
     bool present_vsync_set = false;
     bool present_screenshot_set = false;
-    std::string raster_mode = "auto";
-    bool raster_sprites = true;
-    bool gpu_strict = false;
     bool assert_guest_token = false;
     int baseline_lift = lift::kBaselineLift;  // 宿主视觉策略；单一常量在 font.h（对齐 cxx 的 text_raster.cpp:647）
     bool font_engine_name = false;
@@ -517,12 +508,6 @@ int main(int argc, char** argv) {
             }
         } else if (std::strcmp(a, "--sound") == 0) {
             sound = true;
-        } else if (std::strcmp(a, "--raster") == 0 && i + 1 < arg_count) {
-            raster_mode = args[++i];
-        } else if (std::strcmp(a, "--raster-sprites") == 0 && i + 1 < arg_count) {
-            raster_sprites = std::atoi(args[++i].c_str()) != 0;
-        } else if (std::strcmp(a, "--gpu-strict") == 0) {
-            gpu_strict = true;
         } else if (std::strcmp(a, "--assert-guest-token") == 0) {
             assert_guest_token = true;
         } else if (std::strcmp(a, "--trace-shims") == 0) {
@@ -664,37 +649,6 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "--report 只打印基座缺口；不要同时给 --present window/auto\n");
         return 2;
     }
-    if (raster_mode != "auto" && raster_mode != "cpu" && raster_mode != "gpu") {
-        std::fprintf(stderr, "--raster 只能是 auto / cpu / gpu（收到 %s）\n", raster_mode.c_str());
-        return 2;
-    }
-    // ★ auto（缺省）：headless ⇒ CPU（保持 headless 确定性 / CTest 口径）；
-    //   window / auto ⇒ GPU。显式 cpu 是参考后端；显式 gpu 仍可配 headless 离屏。
-    const bool raster_wants_gpu = raster_mode == "gpu" || (raster_mode == "auto" && present_mode != "headless");
-    if (raster_mode == "auto") {
-        std::printf("raster    : auto ⇒ %s（present=%s）\n", raster_wants_gpu ? "gpu" : "cpu",
-                    present_mode.c_str());
-    }
-    if (gpu_strict) {
-        if (raster_mode == "cpu") {
-            std::fprintf(stderr, "--gpu-strict 与 --raster cpu 矛盾（CPU 是参考后端，没有 GPU 覆盖可判）\n");
-            return 2;
-        }
-        if (!raster_wants_gpu) {
-            std::fprintf(stderr, "--gpu-strict 需要 GPU 光栅化（--present window，或 --raster gpu）\n");
-            return 2;
-        }
-        if (raster_mode == "auto" && present_mode != "window") {
-            std::fprintf(stderr, "--gpu-strict + --raster auto 需要 --present window（否则 auto 会选 CPU）\n");
-            return 2;
-        }
-        if (!raster_sprites) {
-            // sprite 是覆盖的一部分；显式关掉然后再声称 strict 通过 = 自欺。
-            std::fprintf(stderr,
-                         "--gpu-strict 与 --raster-sprites 0 矛盾（sprite 全部走 CPU，GPU 覆盖不完整）\n");
-            return 2;
-        }
-    }
 
     if (smoke) {
         if (!SDL_Init(0)) {
@@ -732,6 +686,65 @@ int main(int argc, char** argv) {
                                                            : lift::fontConfig().regular_path.c_str(),
                     lift::fontConfig().baseline_lift,
                     lift::fontConfig().use_engine_name ? "；A/B 对照档（只影响上报族名）" : "");
+    }
+
+    // =====================================================================================
+    // GPU 光栅化后端：**唯一的光栅实现**（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）
+    //
+    // ★ 无 GPU ⇒ **拒绝启动**（非 0 退出 + 指路），⛔ 不再有"这一轮先用另一套光栅"的静默降级。
+    // ★ `--present headless` 也建一个**隐藏**的离屏窗口：SDL 要先初始化视频子系统才拿得到
+    //   GPU device（`SDL_VIDEODRIVER=dummy` 下 `SDL_CreateGPUDevice` 必然失败 ⇒ 那台机器按
+    //   "无 GPU"处理）。⛔ 不出现可见窗口（`SdlWindowOptions::hidden`）。
+    // ★ 放在执行源定位**之前**：没有 GPU 是**启动期**硬失败，不需要先载入游戏才知道
+    //   （守卫 `lift/no-gpu-refuses-start` 因此可以在没有任何游戏资产的机器上跑）。
+    //   `--report` / `--smoke` 是纯宿主诊断（不需要窗口），仍不要求 GPU。
+    // =====================================================================================
+    std::unique_ptr<lift::SdlWindow> display;
+    if (!report) {
+        lift::SdlWindowOptions wopt;
+        wopt.title = "emulator-lift";
+        wopt.driver_list = present_driver;
+        wopt.vsync = present_vsync != 0;
+        // headless / --present-hidden ⇒ 隐藏窗口（`--present headless` 不出现可见窗口）。
+        wopt.hidden = present_mode == "headless" || present_hidden;
+        wopt.screenshot_path = present_screenshot;
+        wopt.screenshot_frame = present_screenshot_frame;
+        wopt.overlay = overlay;
+        wopt.raster_gpu = true;
+        auto sdl = std::make_unique<lift::SdlWindow>();
+        std::string werr;
+        bool ok = sdl->init(wopt, &werr);
+        if (!ok && present_mode == "auto") {
+            // `--present auto`：可见窗口打不开（无桌面）⇒ 退到**隐藏**的离屏窗口。
+            // ⛔ 这不是"退回另一套光栅"：GPU 仍必须成立，建不出 device 就在下面拒绝启动。
+            std::fprintf(stderr,
+                         "emulator-lift: --present auto：可见窗口打不开（%s）⇒ 改用隐藏的离屏窗口\n",
+                         werr.c_str());
+            if (!present_screenshot.empty()) {
+                std::fprintf(stderr, "  ⚠ --present-screenshot 不会产出（没有可见窗口可抓）\n");
+            }
+            wopt.hidden = true;
+            wopt.overlay = false;
+            werr.clear();
+            ok = sdl->init(wopt, &werr);
+        }
+        if (ok && !sdl->rasterActive()) {
+            werr = "GPU device 建出来了，但光栅化后端未激活（`rasterActive()==false`）";
+        }
+        if (!ok || !sdl->rasterActive()) {
+            std::fprintf(stderr,
+                         "emulator-lift: 拒绝启动 —— 没有可用的 GPU 光栅化后端\n"
+                         "  原因：%s\n"
+                         "  本线只有 GPU 一个光栅实现（CPU 光栅已退休）；没有 GPU 就不启动。\n"
+                         "  请检查：\n"
+                         "    · 图形后端 / 驱动是否可用（macOS: Metal；Windows: D3D12 / Vulkan；Linux: Vulkan）；\n"
+                         "    · 是否在**没有桌面**的环境里跑（远程会话 / 服务 / `SDL_VIDEODRIVER=dummy`）：\n"
+                         "      SDL 必须先初始化视频子系统才能建 GPU device ⇒ 这种环境请换到有桌面的会话里跑。\n"
+                         "  ⛔ 本线不提供无 GPU 时的降级路径（`--present headless` 也要 GPU）。\n",
+                         werr.empty() ? "GPU 后端创建失败（SDL 没有给出原因）" : werr.c_str());
+            return 2;
+        }
+        display = std::move(sdl);
     }
 
     // ---- 定位执行源（四处，顺序固定；都不在 ⇒ 拒绝启动）----
@@ -1072,83 +1085,46 @@ int main(int argc, char** argv) {
     }
     if (max_frames != 0) std::printf("max-frames: %u（D3D9 Present 到达后停）\n", max_frames);
 
-    // ---- 可选显示后端（缺省 headless：不初始化 SDL 视频，行为与今天逐字节一致）----
+    // ---- 显示 / 光栅后端：**GPU 是唯一的光栅实现**；headless 也走同一个隐藏窗口 ----
+    // ★ 后端在参数解析之后、执行源定位之前就建好了（见上面）。这里只做"接到 Machine 上"。
+    if (display == nullptr) {
+        // 只有 `--report` / `--smoke` 会走到这里（它们不需要光栅化）。
+        std::fprintf(stderr, "emulator-lift: 内部错误：没有创建 GPU 光栅化后端（--report/--smoke 之外）\n");
+        return 2;
+    }
+    machine.setGpuRaster(display->gpuRaster());
+    std::printf("raster    : %s%s\n", display->rasterName(),
+                present_mode == "headless"
+                    ? "（headless 离屏；**隐藏**窗口，不出现可见窗口）"
+                    : "");
+
+    // ★ `present :` 行 **headless 也打**：headless 用的是同一个 **隐藏**窗口（`SDL_WINDOW_HIDDEN`），
+    //   `window=hidden` 就是这件事的判据。值取自 `windowHidden()`（读 `SDL_GetWindowFlags`）/
+    //   实际 driver，⛔ 不写死。守卫：`tests/gpu_batch.cpp` 的 `gpu-batch/headless-hidden-window`
+    //   （CTest `gpu-batch-barrier`，子进程真跑 `--present headless`）。
+    std::printf("present   : %s\n", display->describe().c_str());
+
     bool present_window_active = false;
     if (present_mode != "headless") {
-        lift::SdlWindowOptions wopt;
-        wopt.title = "emulator-lift";
-        wopt.driver_list = present_driver;
-        wopt.vsync = present_vsync != 0;
-        wopt.hidden = present_hidden;
-        wopt.screenshot_path = present_screenshot;
-        wopt.screenshot_frame = present_screenshot_frame;
-        wopt.overlay = overlay;
-        wopt.raster_gpu = raster_wants_gpu;
-        wopt.raster_sprites = raster_sprites;
-        auto sdl = std::make_unique<lift::SdlWindow>();
-        std::string werr;
-        if (!sdl->init(wopt, &werr)) {
-            if (present_mode == "auto") {
-                std::fprintf(stderr, "emulator-lift: --present auto：窗口打开失败，回退 headless：%s\n",
-                             werr.c_str());
-                if (!present_screenshot.empty()) {
-                    std::fprintf(stderr, "  ⚠ --present-screenshot 不会产出（headless 没有窗口像素）\n");
-                }
-                if (raster_wants_gpu) {
-                    std::fprintf(stderr,
-                                 "  ⚠ --raster auto/gpu：GPU 光栅化后端也随之不可用 ⇒ 本轮是 CPU 光栅化\n");
-                }
-            } else {
-                std::fprintf(stderr, "emulator-lift: --present window 失败：%s\n", werr.c_str());
-                return 2;
-            }
-        } else {
-            std::printf("present   : %s\n", sdl->describe().c_str());
-            if (raster_wants_gpu) std::printf("raster    : %s\n", sdl->rasterName());
-            if (raster_wants_gpu && !sdl->rasterActive()) {
-                // `--present window` 下 GPU 光栅化是 first-class 路径：不能静默退回 CPU。
-                std::fprintf(stderr, "emulator-lift: --present window 要求 GPU 光栅化，但后端未激活（拒绝退回 CPU）\n");
-                return 2;
-            }
-            if (!sdl->isGpuRenderer()) {
-                std::printf("present   : 注意：driver=%s 是 GPU API 路径，但不是 SDL_GPU（gpu driver）\n",
-                            sdl->rendererName());
-            }
-            // ★ P3：把 SDL 事件源接到 WindowManager。GetMessageA 在空队列时会调用它
-            //   （SDL_PollEvent → SDL_WaitEventTimeout(5ms)），把键鼠/关窗翻译成 guest 消息。
-            lift::SdlWindow* sdl_raw = sdl.get();
-            machine.presenter().setSink(std::move(sdl));
-            sdl_raw->attachWindowManager(machine.cpu().windows);
-            // ★ 注入脚本也要在这里推进：guest 可能阻塞在 `GetMessageA`（等消息）——那时
-            //   `Machine::run` 的块边界循环不在跑，只有宿主事件泵会被调用。
-            machine.cpu().windows->setHostEventPump([sdl_raw, &machine](lift::X86& cpu) {
-                sdl_raw->pumpHostEvents(5);
-                machine.tickInputScript(cpu);
-                // ★ 交互图也要在这里推进：理由与时间线同一条 —— guest 阻塞在 `GetMessageA` 时
-                //   没有块边界，只有宿主的这个泵会被调用。
-                machine.tickInteraction(cpu);
-            });
-            present_window_active = true;
+        if (!display->isGpuRenderer()) {
+            std::printf("present   : 注意：driver=%s 是 GPU API 路径，但不是 SDL_GPU（gpu driver）\n",
+                        display->rendererName());
         }
-    }
-
-    std::unique_ptr<lift::SdlWindow> raster_only;
-    if (raster_mode == "gpu" && present_mode == "headless") {
-        auto win = std::make_unique<lift::SdlWindow>();
-        lift::SdlWindowOptions ropt;
-        ropt.title = "emulator-lift raster (offscreen)";
-        ropt.driver_list = present_driver;
-        ropt.hidden = true;
-        ropt.raster_gpu = true;
-        ropt.raster_sprites = raster_sprites;
-        std::string rerr;
-        if (!win->init(ropt, &rerr)) {
-            std::fprintf(stderr, "emulator-lift: --raster gpu（headless）失败：%s\n", rerr.c_str());
-            return 2;
-        }
-        std::printf("raster    : %s（headless 离屏；SDL 视频已初始化）\n", win->rasterName());
-        machine.setGpuRaster(win->gpuRaster());
-        raster_only = std::move(win);
+        // ★ P3：把 SDL 事件源接到 WindowManager。GetMessageA 在空队列时会调用它
+        //   （SDL_PollEvent → SDL_WaitEventTimeout(5ms)），把键鼠/关窗翻译成 guest 消息。
+        lift::SdlWindow* sdl_raw = display.get();
+        machine.presenter().setSink(std::move(display));
+        sdl_raw->attachWindowManager(machine.cpu().windows);
+        // ★ 注入脚本也要在这里推进：guest 可能阻塞在 `GetMessageA`（等消息）——那时
+        //   `Machine::run` 的块边界循环不在跑，只有宿主事件泵会被调用。
+        machine.cpu().windows->setHostEventPump([sdl_raw, &machine](lift::X86& cpu) {
+            sdl_raw->pumpHostEvents(5);
+            machine.tickInputScript(cpu);
+            // ★ 交互图也要在这里推进：理由与时间线同一条 —— guest 阻塞在 `GetMessageA` 时
+            //   没有块边界，只有宿主的这个泵会被调用。
+            machine.tickInteraction(cpu);
+        });
+        present_window_active = true;
     }
 
     lift::RunOptions opt;
@@ -1238,34 +1214,6 @@ int main(int argc, char** argv) {
             return 4;
         }
     }
-    if (gpu_strict) {
-        // ★ `--gpu-strict`：给 CTest / 真实 boot 用的**机械判据**（summary 已先打印）。
-        if (!r.ok()) return 2;
-        lift::GpuRaster* gpu = machine.gpuRaster();
-        const lift::d3d9::GpuCoverage& cov = lift::d3d9::gpuCoverage();
-        const std::uint64_t fallback = cov.fallback_draws + cov.sprite_fallback_draws;
-        if (gpu == nullptr || !gpu->rasterActive()) {
-            std::fprintf(stderr,
-                         "emulator-lift: --gpu-strict FAIL：GPU 光栅化后端没有启用（不能把 CPU 路径当成覆盖）\n");
-            return 3;
-        }
-        if (fallback != 0) {
-            std::fprintf(stderr,
-                         "emulator-lift: --gpu-strict FAIL：%llu 批 Draw 回退 CPU"
-                         "（draw=%llu, sprite=%llu；fallback_pixels=%llu；gpu_failures=%llu）\n",
-                         (unsigned long long)fallback, (unsigned long long)cov.fallback_draws,
-                         (unsigned long long)cov.sprite_fallback_draws,
-                         (unsigned long long)cov.fallback_pixels,
-                         (unsigned long long)cov.gpu_failures);
-            for (const auto& kv : cov.fallback_reasons) {
-                std::fprintf(stderr, "  [%llu×] %s\n", (unsigned long long)kv.second, kv.first.c_str());
-            }
-            return 3;
-        }
-        std::printf("gpu-strict: OK（draws=%llu gpu=%llu fallback=0 sprite=%llu/%llu）\n",
-                    (unsigned long long)cov.draw_calls, (unsigned long long)cov.gpu_draws,
-                    (unsigned long long)cov.sprite_gpu_draws, (unsigned long long)cov.sprite_draws);
-    }
     // ★ 交互任务**没走完**就必须响亮：`Stopped` 是"实现里主动停"（`ok()` 为真，退出 0），
     //   但任务图只认自己的 `done()` —— guest 侧硬停（d3dxTrap 的"未实现方法槽" / 资源耗尽 /
     //   ExitProcess）会让运行"看起来成功"而任务其实停在半路。实测：EU-ROOM 里按 ESC ⇒
@@ -1344,7 +1292,7 @@ int main(int argc, char** argv) {
         return 5;
     }
     // ★ 兜底退出码抽到 `lift::exitCodeForRun`（纯函数，tests/mechanism.cpp 直接断言）：
-    //   上面几道消费者闸门（token / gpu-strict / 交互图）**优先**，它们没拦下才落到这里。
+    //   上面几道消费者闸门（token / 交互图）**优先**，它们没拦下才落到这里。
     // ★ guest 自己 `ExitProcess(n)` / `TerminateProcess(_, n)`（REQ-01M77CMJGJ9EJVNPFS2TKMMHD1）：
     //   n != 0 ⇒ 宿主退出码非 0（2，与 decode-error 同档）；n == 0 保持 0。
     //   位置在**所有消费者闸门之后**（4/5/3 那些分流不动）；「run 本身失败 ⇒ 2」也先判，

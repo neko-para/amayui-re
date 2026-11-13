@@ -1,4 +1,4 @@
-// emulator-lift · GPU 直出（`--present window --raster gpu`）的机械守卫
+// emulator-lift · GPU 直出（`--present window`）的机械守卫
 //
 // 判据（⛔ 不是"看了一眼窗口"）：
 //   · 窗口被 claim 给 GPU device（`directPresentActive()`）⇒ `submitFrame` 之后从**窗口**

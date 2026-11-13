@@ -7,14 +7,15 @@
 //      与脚本原文逐字对得上；
 //   ② 动作**全部应用** ⇒ 这一行**不许**出现（`[input-script] finished` 那条照旧有）；
 //   ③ 脚本中间 `quit`、后面还有动作 ⇒ 这一行**不许**出现（`quit` 之后剩下的动作是脚本**有意**跳过的）；
+//      收口行也必须照实报 `quit：已应用 <applied> / 共 <total> 条动作（…剩 <n> 条未应用…）`，
+//      ⛔ 不许声称"全部应用"（`REQ-01M72WHFMCWQ0KEJDQG0XH21AH`）；
 //   ④ **乱序应用**（前一条的条件不满足、后一条先到期）⇒ `first` 必须是**真正没跑的那条**
 //      （⛔ 不能靠 `applied_` 当下标 —— 应用顺序不一定等于文件顺序）；
 //   ⑤ 原文含 `"` ⇒ 字段内换成 `'`（否则字段提前闭合、行不可解析），且整行**仍是一行**；
 //   ⑥ **一份脚本都没装** ⇒ 摘要里连 `inputstat :` 都不该有，更没有这一行（整段在 `active()` 里）。
-//   ★ 为什么值得一条守卫：`finished` 那条日志在 `finished()` **或 `quit`** 时打（`quit` 路径报的是**总**动作数
-//     ⇒ ⛔ 别当"应用数"读），而"没打那行"同时意味着"脚本跑完了 / 条件写错了 / run 提前停了"——这三件事在
-//     旧输出里**分不开**（缺陷单里就是这么把读数算错一帧的）。这一行把否定证据变成正面读数（几条没跑 +
-//     第一条是什么）。
+//   ★ 为什么值得一条守卫：`finished` 那条日志在 `finished()` **或 `quit`** 时打，而"没打那行"同时意味着
+//     "脚本跑完了 / 条件写错了 / run 提前停了"——这三件事在旧输出里**分不开**（缺陷单里就是这么把读数
+//     算错一帧的）。这一行把否定证据变成正面读数（几条没跑 + 第一条是什么）。
 // ★ 夹具形状（照 `tests/input_expect.cpp`）：裸 `Machine` + 自造 guest 循环 + 捕获 stdout。
 //   **一次 Present 都不发生** ⇒ `frame` 恒 0 ⇒ `at frame 50` 永远不满足（要的正是这个）。
 // ⛔ 不依赖游戏安装 / LFS / 真实窗口；⛔ 不断言任何墙钟数字，只断言摘要行的**逐字内容**。
@@ -182,6 +183,9 @@ bool runFixture(lift::Machine& m, const char* script, std::string* log, lift::Ru
 }
 
 const char* kFinishedLog = "[input-script] finished";
+// `quit` **提前**结束时的收口行（`REQ-01M72WHFMCWQ0KEJDQG0XH21AH`）：必须是"已应用 X / 共 N 条"，
+// ⛔ 不是 `finished：<总数> 条动作全部应用`（那与 `input-script: unfinished pending=…` 互相矛盾）。
+const char* kQuitLog = "[input-script] quit：";
 
 }  // namespace
 
@@ -220,9 +224,10 @@ int main() {
         LIFT_CHECK(r.ok());
         printLine(log, kFinishedLog);
         LIFT_CHECK(!contains(log, "input-script: unfinished"));
-        // 旧口径的那条日志照旧在（★ 本单**不替换**它）。⚠ 但它在 `finished()` **或 `quit`** 时打，
-        // `quit` 路径写的是**总**动作数（`actions_.size()`）⇒ ⛔ 别把它当"应用数"读。
-        LIFT_CHECK(contains(log, kFinishedLog));
+        // ★ 正例（本单翻面判据的另一半）：真正"全部应用"时**仍**必须打"全部应用" + 逐字报数，
+        //   ⛔ 不是把这句话删掉或改成一句含糊的话（`REQ-01M72WHFMCWQ0KEJDQG0XH21AH`）。
+        LIFT_CHECK(contains(log, "[input-script] finished：1 条动作全部应用"));
+        LIFT_CHECK(!contains(log, kQuitLog));
     }
 
     // =================================================================================
@@ -237,9 +242,15 @@ int main() {
         lift::RunResult r;
         LIFT_CHECK(runFixture(m, "at insn 10\nquit\nat insn 20\nwait 1 insn\n", &log, &r));
         LIFT_CHECK(r.reason == lift::StopReason::Stopped);  // 真的是 `quit` 停的（不是程序跑完）
-        printLine(log, "input-script: unfinished");
+        printLine(log, kQuitLog);
         LIFT_CHECK(!contains(log, "input-script: unfinished"));
-        LIFT_CHECK(contains(log, kFinishedLog));
+        // ★ **翻面**（`REQ-01M72WHFMCWQ0KEJDQG0XH21AH`）：`quit` 提前结束 ⇒ 收口行必须**照实**报
+        //   "已应用 1 / 共 2 条 + 剩 1 条未应用"（脚本里共 2 条动作：`quit` 与应用不到的 `wait`），
+        //   ⛔ 不许声称"全部应用"—— 旧文案打的是**总**动作数、说的是全部应用。
+        LIFT_CHECK(
+            contains(log, "[input-script] quit：已应用 1 / 共 2 条动作（quit 提前结束，剩 1 条未应用；"));
+        LIFT_CHECK(!contains(log, "全部应用"));
+        LIFT_CHECK(!contains(log, kFinishedLog));
     }
 
     // =================================================================================

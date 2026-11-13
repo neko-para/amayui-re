@@ -2,9 +2,10 @@
 //
 // ★ 只做 **光栅化**：顶点已经由 CPU 做完 T&L / 裁剪 / 屏幕映射（d3d9_pipeline.cpp），
 //   这里接收屏幕空间三角形 + 状态，由宿主 GPU 画到 guest 后缓冲的镜像纹理。
-// ★ 缺省是 CPU 后端；`--raster auto` 在窗口模式下选 GPU，`--raster gpu` 强制 GPU。
+// ★ **GPU 是唯一的光栅实现**（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：没有 `--raster` 开关，
+//   建不出 GPU device 就拒绝启动。
 // ★ 后端实现负责：镜像纹理、绘制、把像素读回 guest（Present / 回退时）。
-// ★ 另外可选地暴露 `GpuDirectPresenter`（`--present window` + `--raster gpu`）：
+// ★ 另外可选地暴露 `GpuDirectPresenter`（`--present window`）：
 //   把**同一份** target blit 到窗口 swapchain，呈现不再经过 `SDL_UpdateTexture`。
 //   光栅化与呈现仍是两件事：`directPresenter()==nullptr` 时呈现走 SDL_Renderer / headless。
 //
@@ -273,7 +274,7 @@ inline GpuDirtyRegion gpuContentDirtyRegion(const GpuRasterTexture& t, std::uint
 }
 
 // ---------------------------------------------------------------------------------------
-// GPU 直出（`--present window --raster gpu`）：把 GPU target 直接 blit 到窗口 swapchain
+// GPU 直出（`--present window`）：把 GPU target 直接 blit 到窗口 swapchain
 // ---------------------------------------------------------------------------------------
 // ★ 只有真的拿到 `SDL_ClaimWindowForGPUDevice` 的后端才提供本接口；CPU 后端 / headless /
 //   直出不可用而回退 SDL_Renderer 上传路径时，`GpuRaster::directPresenter()` 返回 nullptr
@@ -350,8 +351,8 @@ public:
 
     virtual bool rasterActive() const = 0;
     virtual const char* rasterName() const = 0;
-    // D3DXSprite 纹理四边形是否也走 GPU（可用 `--raster-sprites 0` 做 A/B）。
-    virtual bool rasterSpritesEnabled() const { return true; }
+    // ★ D3DXSprite 的纹理四边形**也走这里**：没有"退回 CPU 合成"的开关
+    //   （`REQ-01M78BF1FNNH6K8N8GEY6GQYXX` 删掉了那条 A/B）。
 
     // 目标纹理（尺寸/格式变化时重建）。
     // ★ `color_base` = 这块 GPU 镜像对应的 guest 像素基址（后缓冲 / 渲染目标 surface 的像素）。
@@ -426,7 +427,7 @@ public:
     //     有序屏障（另一单）；⛔ 在那之前别在"队列非空时 arm"的路径上加**写深度**的批。
     //   · 不绑 target 身份：换 target 由 `rasterPrepare` 自己 arm（最坏多清一次，无害）；
     //   · ⛔ **转发壳**（`present_sdl.cpp::SdlWindow`）必须显式转发 —— 这一条曾经整条漏掉，症状是
-    //     "`--raster gpu` 整层丢 Live2D 角色而 `fallback=0`"（静默、不改像素、所有既有测试全绿）。
+    //     "GPU 光栅化臂整层丢 Live2D 角色而 `fallback=0`"（静默、不改像素、所有既有测试全绿）。
     virtual void rasterRequestDepthClear() {}
     // 设备 / target 销毁前丢掉队列与镜像（⛔ 不要往即将释放的 guest 像素回读）。默认 no-op。
     virtual void rasterDiscardTarget() {}
@@ -458,6 +459,14 @@ struct GpuRasterStats {
     std::uint64_t cuts = 0;          // 内容变更边界切段次数（切段 ≠ 提交）
     std::uint64_t uploads = 0;       // 纹理上传块数（方案 C 后 = 脏矩形块数）
     std::uint64_t full_uploads = 0;  // 其中"整幅"上传数（写区未知 ⇒ 退化）
+    // ★ 目标/深度/pipeline 的**重建次数**（`REQ-01M79MSMWGFEKF8J7C7VYWS4YP`）：RTT 让"换 target"
+    //   从偶发变成每帧 ≥2 次 ⇒ 尺寸不变时 depth 必须复用、`pipelines_` 不许随换 target 清。
+    //   ⛔ 这三个是**诊断读数**（不是行为断言的目标值）：守卫用**前后差值**判"换 target 没有重建"，
+    //   差值不依赖任何绝对数。`depths_created` 也顺手是"换 target 清没清深度"的机械判据
+    //   （只有新建 depth 才置 `need_depth_clear_`）。
+    std::uint64_t targets_created = 0;    // 建了几个 color target（= 换了几次 target）
+    std::uint64_t depths_created = 0;     // 其中新建了几个 depth（尺寸不变 ⇒ 复用，不增）
+    std::uint64_t pipelines_created = 0;  // 建了几个 graphics pipeline（换 target 不清缓存 ⇒ 只按状态建）
 };
 GpuRasterStats gpuRasterStats();
 
