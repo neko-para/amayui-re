@@ -9,6 +9,8 @@
 //   ③ `--time-limit -1` 与 `--time-limit abc` **仍然 exit 2**，stderr 里有 `--time-limit`
 //      （用户得知道是哪个 flag 错了），且 stdout 里**没有** `stop` 行 ⇒ 是启动前就拒绝，
 //      不是"跑了一半才停"。
+//   ④ **`--report` 仍然打印具名缺口明细**（`  缺口 kernel32!CreateTimerQueue`）：这条是从旧
+//      `stdout-quiet` 里保留下来的**唯一**真合同（其余判据是输出形状，按测试模型删了）。
 //
 // ★ 为什么是 CLI 级 + 真子进程：缺陷的形态是"usage 说 0 = 不限，代码却 exit 2"——
 //   判据必须穿过**参数解析 → 运行 → 摘要 → 退出码**这条完整链路，单测某个解析函数抓不到
@@ -30,6 +32,8 @@
 #include <vector>
 
 #include "check.h"
+#include "cmdline.h"
+#include "runtime/sha256.h"
 #include "subprocess_skip.h"
 
 #if defined(_WIN32)
@@ -65,7 +69,8 @@ std::string readAllBytes(const fs::path& p) {
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
-std::wstring quoteArg(const std::wstring& s) { return L"\"" + s + L"\""; }
+// ★ 命令行拼装只有一份实现（tests/cmdline.h）：结尾反斜杠 / 内嵌引号 / 空串都按 MSVC 规则转义。
+using lift_test::quoteArg;
 
 ChildRun runChild(const fs::path& exe, const std::wstring& args, const fs::path& cwd, const fs::path& out_path,
                   const fs::path& err_path) {
@@ -184,6 +189,110 @@ std::wstring widen(const std::string& s) {
     return w;
 }
 
+// ---------------------------------------------------------------------------------------
+// `--report` 的**具名缺口明细**（唯一从旧 `stdout-quiet` 保留下来的真合同）
+//
+// 为什么搬到这里：`stdout-quiet`（默认 stdout ≤25 行 / 无 per-entry / 无 A4 警告行…）判的是
+// **输出形状**，`AGENTS.md` §10 的 ❌（"那是我方读数"）⇒ 整条 CTest 删了。剩下唯一是
+// **对外 CLI 行为**的那一条：`--report` 必须仍把具名的 `  缺口 <module>!<api>` 打出来
+// （否则"默认降噪"会悄悄变成"缺口明细彻底没了"，用户再也看不到哪条 API 没实现）。
+// ⛔ 只断言"有那一行 + exit 0"：不断言行数、不断言无 per-entry、不跑 `--profile` 两臂。
+//
+// 夹具：最小 PE32（`.text` + `.rdata`，RVA 0x1000/0x2000），导入表两项
+//   `kernel32!ExitProcess`（已实现）与 `kernel32!CreateTimerQueue`（**已登记但未实现**的 gap）
+//   ⇒ `--report` 必然打出 `  缺口 kernel32!CreateTimerQueue`。
+//   ★ 入口代码（`push 0; push src; push dst; call 0x401020; push 0; call [IAT]`）只为让这份 PE
+//     在别的臂里也干净收口；本用例的 `--report` 臂**不执行** guest（载入后打印即退）。
+//   ★ `0x401020` 处放 `C3`（ret），`--lst` 只登记 EA 供核对，不参与执行。
+std::vector<std::uint8_t> quietFixturePe() {
+    constexpr std::size_t kPeOff = 0x40;
+    constexpr std::size_t kOpt = kPeOff + 24;
+    constexpr std::size_t kOptSize = 0xE0;
+    constexpr std::size_t kSec = kOpt + kOptSize;
+    constexpr std::uint32_t kTextRva = 0x1000;
+    constexpr std::uint32_t kRdataRva = 0x2000;
+    constexpr std::size_t kTextRaw = 0x400;
+    constexpr std::size_t kRdataRaw = 0x600;
+    constexpr std::size_t kFileSize = 0x800;
+    std::vector<std::uint8_t> b(kFileSize, 0);
+    auto w16 = [&b](std::size_t off, std::uint16_t v) { std::memcpy(b.data() + off, &v, sizeof(v)); };
+    auto w32 = [&b](std::size_t off, std::uint32_t v) { std::memcpy(b.data() + off, &v, sizeof(v)); };
+    auto at = [](std::uint32_t rva) { return static_cast<std::size_t>(kRdataRaw + (rva - kRdataRva)); };
+
+    b[0] = 'M';
+    b[1] = 'Z';
+    w32(0x3C, static_cast<std::uint32_t>(kPeOff));
+    b[kPeOff + 0] = 'P';
+    b[kPeOff + 1] = 'E';
+    w16(kPeOff + 4, 0x014Cu);   // Machine = i386
+    w16(kPeOff + 6, 2u);        // NumberOfSections
+    w16(kPeOff + 20, static_cast<std::uint16_t>(kOptSize));
+    w16(kPeOff + 22, 0x0102u);  // EXECUTABLE_IMAGE | 32BIT_MACHINE
+    w16(kOpt + 0, 0x010Bu);     // Magic = PE32
+    w32(kOpt + 16, kTextRva);   // AddressOfEntryPoint
+    w32(kOpt + 28, 0x00400000u);
+    w32(kOpt + 32, 0x1000u);    // SectionAlignment
+    w32(kOpt + 36, 0x200u);     // FileAlignment
+    w32(kOpt + 56, 0x3000u);    // SizeOfImage
+    w32(kOpt + 60, 0x400u);     // SizeOfHeaders
+    w32(kOpt + 72, 0x100000u);  // SizeOfStackReserve
+    w32(kOpt + 92, 3u);         // Subsystem = CONSOLE
+    w32(kOpt + 96 + 8, kRdataRva);
+    w32(kOpt + 96 + 12, 0x100u);
+    // .text
+    std::memcpy(b.data() + kSec, ".text", 5);
+    w32(kSec + 8, 0x200u);      // VirtualSize
+    w32(kSec + 12, kTextRva);
+    w32(kSec + 16, 0x200u);
+    w32(kSec + 20, kTextRaw);
+    w32(kSec + 36, 0x60000020u);
+    // .rdata
+    std::memcpy(b.data() + kSec + 40, ".rdata", 6);
+    w32(kSec + 40 + 8, 0x200u);
+    w32(kSec + 40 + 12, kRdataRva);
+    w32(kSec + 40 + 16, 0x200u);
+    w32(kSec + 40 + 20, kRdataRaw);
+    w32(kSec + 40 + 36, 0x40000040u);
+    // 入口代码
+    const std::vector<std::uint8_t> code = {
+        0x6A, 0x00,                          // push 0
+        0x68, 0x00, 0x11, 0x40, 0x00,        // push 0x401100
+        0x68, 0x00, 0x11, 0x40, 0x00,        // push 0x401100
+        0xE8, 0x0F, 0x00, 0x00, 0x00,        // call 0x401020
+        0x6A, 0x00,                          // push 0
+        0xFF, 0x15, 0x60, 0x20, 0x40, 0x00,  // call [0x00402060]
+    };
+    std::memcpy(b.data() + kTextRaw, code.data(), code.size());
+    for (std::size_t i = kTextRaw + code.size(); i < kTextRaw + 0x200u; ++i) b[i] = 0x90u;  // nop
+    b[kTextRaw + 0x20] = 0xC3u;  // 0x401020: ret
+    b[kTextRaw + 0x30] = 0xC3u;  // 0x401030: ret
+    // 导入描述符
+    w32(at(0x2000), 0x2028u);       // OriginalFirstThunk（OFT）
+    w32(at(0x2000) + 12, 0x2040u);  // Name
+    w32(at(0x2000) + 16, 0x2060u);  // FirstThunk（IAT）
+    w32(at(0x2028), 0x2080u);       // thunk[0] = ExitProcess 的 Hint/Name
+    w32(at(0x2028) + 4, 0x2090u);   // thunk[1] = CreateTimerQueue
+    std::memcpy(b.data() + at(0x2040), "kernel32.dll", 13);
+    b[at(0x2060)] = 0;              // IAT 初值（bind 会覆盖）
+    b[at(0x2080)] = 0;              // hint = 0
+    b[at(0x2081)] = 0;
+    std::memcpy(b.data() + at(0x2082), "ExitProcess", 12);
+    b[at(0x2090)] = 0;
+    b[at(0x2091)] = 0;
+    std::memcpy(b.data() + at(0x2092), "CreateTimerQueue", 17);
+    return b;
+}
+
+/** 假 `.lst`：头部 SHA256 必须等于 PE 字节的 sha256（CLI 的 A3 ⓪ 会逐字比）。 */
+std::string quietFixtureLst(const std::vector<std::uint8_t>& pe) {
+    const std::string sha = lift::toHex(lift::sha256(pe));
+    std::string lst;
+    lst += ".text:00401000 ; Input SHA256 : " + sha + "\n";
+    lst += ".text:00401020 _memcpy proc near\n";
+    lst += ".text:00401030 _memset proc near\n";
+    return lst;
+}
+
 #endif  // _WIN32
 
 }  // namespace
@@ -292,6 +401,42 @@ int main(int argc, char** argv) {
         LIFT_CHECK(r.err.find("--time-limit") != std::string::npos);
         // 启动前拒绝 ⇒ 一行运行摘要都不该有（不是"跑了一部分才停"）
         LIFT_CHECK(!hasLineStartingWith(r.out, "stop"));
+    }
+
+    // ---- ④ `--report` 仍然打印**具名缺口明细**（从旧 `stdout-quiet` 保留下来的唯一真合同）----
+    //   ★ 只断言 exit 0 且 stdout 里有一行 `  缺口 kernel32!CreateTimerQueue`。
+    //   ⛔ 不断言行数 / 不断言"无 per-entry" / 不跑 `--profile` / `--report` 两臂成对
+    //     —— 那些是输出形状（我方读数），已随 `stdout-quiet` 整条删掉。
+    g_current_case = "report-has-gaps";
+    {
+        const fs::path rep_exe = root / "lift-gap-report.exe";
+        const fs::path rep_lst = root / "lift-gap-report.lst";
+        {
+            const std::vector<std::uint8_t> pe = quietFixturePe();
+            std::ofstream out(rep_exe, std::ios::binary | std::ios::trunc);
+            out.write(reinterpret_cast<const char*>(pe.data()), static_cast<std::streamsize>(pe.size()));
+            out.close();
+            const std::string text = quietFixtureLst(pe);
+            std::ofstream lo(rep_lst, std::ios::binary | std::ios::trunc);
+            lo.write(text.data(), static_cast<std::streamsize>(text.size()));
+            lo.close();
+            LIFT_CHECK(fs::exists(rep_exe));
+            LIFT_CHECK(fs::exists(rep_lst));
+        }
+        const ChildRun r = runChild(
+            exe,
+            L"--exe " + quoteArg(rep_exe.wstring()) + L" --lst " + quoteArg(rep_lst.wstring()) +
+                L" --game-dir " + quoteArg(root.wstring()) + L" --report",
+            root, root / "report.out", root / "report.err");
+        LIFT_CHECK(r.started);
+        LIFT_CHECK(!r.timed_out);
+        LIFT_CHECK_EQ_U32(r.exit_code, 0u);
+        const std::string want = "  缺口 kernel32!CreateTimerQueue";
+        if (!hasLineStartingWith(r.out, want)) {
+            std::fprintf(stderr, "--report 臂没有 `%s` 行；stdout 前 2000 字节：\n%.2000s\n", want.c_str(),
+                         r.out.c_str());
+        }
+        LIFT_CHECK(hasLineStartingWith(r.out, want));
     }
 
     fs::remove_all(root, ec);

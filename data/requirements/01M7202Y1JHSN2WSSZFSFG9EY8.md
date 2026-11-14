@@ -4,7 +4,7 @@
 - type: req
 - status: done
 - parent: REQ-01M6XVYY5TCKSAS80WS7PADF8P
-- verify: apps/emulator-lift/tests/interaction_graph.cpp#parse-errors
+- done_reason: 该 CTest 已按测试模型删除（REQ-01M7ATAB5A18W7XBCKFBEQS7HB）：解析错误臂随交互图 DSL 一起取消、不再有门禁；复现命令见 defects.md#BUG-16。
 - tags: [emulator-lift, interaction, refactor]
 
 ## 为什么要它

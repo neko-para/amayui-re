@@ -683,23 +683,19 @@ void Machine::flushFrameTrace() {
         }
         std::fputc('\n', stdout);
     }
-    // ★ 逐帧 GPU 覆盖增量：一眼看出"这一帧有没有回退"，不必等 summary。
+    // ★ 逐帧 GPU 覆盖增量：一眼看出"这一帧 GPU 画了多少、跳过了多少"，不必等 summary。
     {
         const d3d9::GpuCoverage& cov = d3d9::gpuCoverage();
         auto delta = [](std::uint64_t now, std::uint64_t prev) { return now >= prev ? now - prev : 0ull; };
         const std::uint64_t gd = delta(cov.gpu_draws, frame_trace_prev_gpu_draws_);
-        const std::uint64_t fb = delta(cov.fallback_draws, frame_trace_prev_gpu_fallback_);
-        const std::uint64_t fbp = delta(cov.fallback_pixels, frame_trace_prev_gpu_fallback_px_);
         const std::uint64_t sp = delta(cov.sprite_gpu_draws, frame_trace_prev_sprite_total_);
-        const std::uint64_t sf = delta(cov.sprite_fallback_draws, frame_trace_prev_sprite_fallback_);
+        const std::uint64_t ss = delta(cov.sprite_skipped, frame_trace_prev_sprite_skipped_);
         frame_trace_prev_gpu_draws_ = cov.gpu_draws;
-        frame_trace_prev_gpu_fallback_ = cov.fallback_draws;
-        frame_trace_prev_gpu_fallback_px_ = cov.fallback_pixels;
         frame_trace_prev_sprite_total_ = cov.sprite_gpu_draws;
-        frame_trace_prev_sprite_fallback_ = cov.sprite_fallback_draws;
-        std::fprintf(stdout, "        gpu  : draws=%llu fallback=%llu fallback_pixels=%llu sprite_gpu=%llu sprite_fallback=%llu\n",
-                     (unsigned long long)gd, (unsigned long long)fb, (unsigned long long)fbp,
-                     (unsigned long long)sp, (unsigned long long)sf);
+        frame_trace_prev_sprite_skipped_ = cov.sprite_skipped;
+        std::fprintf(stdout,
+                     "        gpu  : draws=%llu sprite_gpu=%llu sprite_skipped=%llu\n",
+                     (unsigned long long)gd, (unsigned long long)sp, (unsigned long long)ss);
     }
     // ★ Present 拆解（§4.3.1）：4 段加起来 ≈ shim 里的 `com!IDirect3DDevice9::Present`。
     //   `direct=1` = 本帧呈现走 GPU 直出（target → swapchain，没有 SDL_UpdateTexture）。
@@ -1034,10 +1030,8 @@ RunResult Machine::run(const RunOptions& opts) {
         frame_trace_prev_block_ns_.clear();
         const d3d9::GpuCoverage& cov = d3d9::gpuCoverage();
         frame_trace_prev_gpu_draws_ = cov.gpu_draws;
-        frame_trace_prev_gpu_fallback_ = cov.fallback_draws;
-        frame_trace_prev_gpu_fallback_px_ = cov.fallback_pixels;
         frame_trace_prev_sprite_total_ = cov.sprite_gpu_draws;
-        frame_trace_prev_sprite_fallback_ = cov.sprite_fallback_draws;
+        frame_trace_prev_sprite_skipped_ = cov.sprite_skipped;
     }
     if (opts.real_time) clock_.setRealTime(true);
     if (opts.trace_inputs) dumpTraceInputs(stdout);
@@ -2465,32 +2459,15 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out, SummaryMode mod
                          audio.fill_max_ms, audio.fill_max_ms / 10.0, (unsigned long long)audio.fill_slow);
         }
     }
-    // GPU：回退 / 跳过 / 后端失败非零 ⇒ 必须可见（⛔ 不静默）。
+    // GPU：跳过 / 后端失败非零 ⇒ 必须可见（⛔ 不静默）。
     {
         const d3d9::GpuCoverage& cov = d3d9::gpuCoverage();
-        if (cov.fallback_draws != 0 || cov.skipped_draws != 0 || cov.gpu_failures != 0 ||
-            !cov.fallback_reasons.empty()) {
+        if (cov.skipped_draws != 0 || cov.gpu_failures != 0) {
             openAnomaly();
-            std::fprintf(out, "⚠ gpu       : fallback=%llu skipped=%llu gpu_failures=%llu\n",
-                         (unsigned long long)cov.fallback_draws, (unsigned long long)cov.skipped_draws,
+            std::fprintf(out, "⚠ gpu       : skipped=%llu gpu_failures=%llu\n",
+                         (unsigned long long)cov.skipped_draws,
                          (unsigned long long)cov.gpu_failures);
-            if (!cov.fallback_reasons.empty()) {
-                std::vector<std::pair<const std::string*, std::uint64_t>> rows;
-                rows.reserve(cov.fallback_reasons.size());
-                for (const auto& kv : cov.fallback_reasons) rows.emplace_back(&kv.first, kv.second);
-                std::stable_sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
-                    return a.second != b.second ? a.second > b.second : *a.first < *b.first;
-                });
-                std::fprintf(out, "            fallback top:");
-                const std::size_t top = rows.size() < 5 ? rows.size() : 5;
-                for (std::size_t i = 0; i < top; ++i) {
-                    std::fprintf(out, " [%llu×] %s ;", (unsigned long long)rows[i].second,
-                                 rows[i].first->c_str());
-                }
-                std::fprintf(out, "\n");
-            }
-            // ★ `skipped` 的按原因聚合（`REQ-01M7AAXVGY9SG75XCREHPX641Z`）：与 `fallback top`
-            //   **分开打印**（口径不同：这里是"GPU 没画"，那里是"CPU 画了"）。
+            // ★ `skipped` 的按原因聚合（`REQ-01M7AAXVGY9SG75XCREHPX641Z`）。
             {
                 const std::string skipped_top = d3d9::gpuSkippedTopLine();
                 if (!skipped_top.empty()) std::fputs(skipped_top.c_str(), out);
@@ -2651,7 +2628,7 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out, SummaryMode mod
                      "read      : blocks=%zu(cached %zu hits %zu misses %zu) rep-bulk=%llu/%llu "
                      "tokenwait=%llu/%.1fms heap=%u/%uKiB allocs=%u arena=%u/%u shims=%zu/%zu "
                      "audio=fills %llu/fill_max %.2fms/underruns %llu/muted %d "
-                     "gpu=draws %llu/tri %llu/fallback %llu/skipped %llu "
+                     "gpu=draws %llu/tri %llu/skipped %llu "
                      "native-ovr=hits %llu/fallbacks %llu%s\n",
                      cache_.blockCount(), cache_.insnCount(), cache_.hits(), cache_.misses(),
                      (unsigned long long)cpu_.rep_bulk_hits, (unsigned long long)cpu_.rep_bulk_declines,
@@ -2660,7 +2637,7 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out, SummaryMode mod
                      shims_.calledUnimplemented().size(), (unsigned long long)audio.fills, audio.fill_max_ms,
                      (unsigned long long)audio.underruns, audio.muted ? 1 : 0,
                      (unsigned long long)cov.draw_calls, (unsigned long long)d3d9::gpuTriangleCount(),
-                     (unsigned long long)cov.fallback_draws, (unsigned long long)cov.skipped_draws,
+                     (unsigned long long)cov.skipped_draws,
                      (unsigned long long)ovr_hits, (unsigned long long)ovr_fallbacks, mip_mark);
     }
     // ★ `shims     : imported … / called-unimplemented …` 按字面被 `tests/save_graph.cpp` 消费
@@ -2677,7 +2654,8 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out, SummaryMode mod
                      token.violations() == 0 ? "" : (token.firstViolationSite() ? token.firstViolationSite() : "?"));
     }
     // `recovery` / `skip-logo` / `messagebox`：**只在这里打一处**（钩子命中时的那行已删，见钩子处注释）。
-    //   口径不变：三种形态（绕过 / 未绕过 / 未命中）必须能机械区分（判据见 tests/recovery_dialog.cpp）。
+    //   口径不变：三种形态（绕过 / 未绕过 / 未命中）必须能机械区分（原用例已删 ⇒ 口径与复现命令见
+    //   `docs/03-emulator/defects.md`）。
     if (accept_recovery_dialog_) {
         std::fprintf(out, "recovery  : 未绕过（--accept-recovery-dialog ⇒ 走引擎真实判定）\n");
     } else if (recovery_bypass_applied_) {
@@ -2922,27 +2900,23 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out, SummaryMode mod
                      (unsigned long long)d3d9::gpuDrawCount(),
                      (unsigned long long)d3d9::gpuTriangleCount());
     }
-    // ★ 固定打印 GPU 覆盖账（GPU 启用后回退必须可见，⛔ 不静默）。
+    // ★ 固定打印 GPU 覆盖账（GPU 启用后跳过必须可见，⛔ 不静默）。
     {
         const d3d9::GpuCoverage& cov = d3d9::gpuCoverage();
         // ★ `queued/recorded/empty/fragments` = 本单（REQ-01M73PZN6R3AC3RCQ8WZEA0Y0M）拆开的账：
         //   `gpu` 记的是"入队成功"，`recorded` 才是"真的进过 render pass"，`empty` = 两者之差
         //   （`gpu>0` 却一个 pass 都没进 ⇒ 这批不可能有像素）。
         std::fprintf(out,
-                     "gpu       : draws=%llu gpu=%llu fallback=%llu fallback_pixels=%llu "
+                     "gpu       : draws=%llu gpu=%llu "
                      "recorded=%llu queued=%llu empty=%llu fragments=%llu skipped=%llu\n",
                      (unsigned long long)cov.draw_calls, (unsigned long long)cov.gpu_draws,
-                     (unsigned long long)cov.fallback_draws, (unsigned long long)cov.fallback_pixels,
                      (unsigned long long)cov.recorded, (unsigned long long)cov.queued,
                      (unsigned long long)cov.empty, (unsigned long long)cov.fragments,
                      (unsigned long long)cov.skipped_draws);
         std::fprintf(out, "unsupported : %s\n", d3d9::unsupportedBitsOfRun().c_str());
-        if (cov.sprite_draws != 0 || cov.sprite_fallback_draws != 0 || cov.sprite_skipped != 0) {
-            std::fprintf(out,
-                         "            sprite: draws=%llu gpu=%llu fallback=%llu fallback_pixels=%llu skipped=%llu\n",
+        if (cov.sprite_draws != 0 || cov.sprite_skipped != 0) {
+            std::fprintf(out, "            sprite: draws=%llu gpu=%llu skipped=%llu\n",
                          (unsigned long long)cov.sprite_draws, (unsigned long long)cov.sprite_gpu_draws,
-                         (unsigned long long)cov.sprite_fallback_draws,
-                         (unsigned long long)cov.sprite_fallback_pixels,
                          (unsigned long long)cov.sprite_skipped);
         }
     }

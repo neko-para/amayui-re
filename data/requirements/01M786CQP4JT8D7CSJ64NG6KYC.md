@@ -4,7 +4,7 @@
 - type: bug
 - status: open
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- repro: apps/emulator-lift/tests/save_graph.cpp#save-graph
+- repro: docs/03-emulator/observations.md#OBS-20261112-05
 - severity: S2
 - tags: [emulator-lift windows test-timeout]
 

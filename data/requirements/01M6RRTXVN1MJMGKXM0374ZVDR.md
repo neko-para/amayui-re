@@ -4,7 +4,7 @@
 - type: req
 - status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- verify: apps/emulator-lift/tests/skip_logo.cpp#skip-logo
+- done_reason: 该 CTest 已按测试模型删除（REQ-01M7ATAB5A18W7XBCKFBEQS7HB）：skip-logo 属缺陷复现件的钩子形态，不进测试；口径与复现命令见 observations.md#OBS-20261114-02 与 README §4.1b。
 - tags: [emulator-lift boot cli]
 
 ## 原理（来自 emulator-cxx）

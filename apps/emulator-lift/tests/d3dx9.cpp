@@ -1,13 +1,23 @@
-// emulator-lift · M2 夹具：D3DX9 Sprite 簇（pure 档：不碰游戏 / LFS）
+// emulator-lift · M2 夹具：D3DX9 Sprite 簇
 //
-// 判据（对照任务单「M2 · D3DX9 Sprite 簇（D3DXCreateSprite → 第一帧）」）：
+// ★ **两条臂**（`REQ-01M7AAXNJY2PACYJHYVRV620Q5`：sprite 的 CPU 逐像素合成已删，光栅只有 GPU 一条实现）：
+//   · 缺省（`d3dx9`，pure）：对象 / 状态 / 批次协议 / 句柄生命周期 / trap / 纹理上传 —— **不判像素**。
+//     sprite 在"没有 GPU 后端"时是**记账 + 跳过**（一像素都不写；`lift-gpu-batch` 的
+//     `d3d9p/sprite-no-cpu-composite` 是那条判据的专档）；
+//   · `--gpu`（`d3dx9-gpu`，隐藏窗口 + SDL_GPU）：**像素**断言 —— ALPHABLEND / 覆盖 / 变换 /
+//     纹理 × 调制色 / 纹理身份跳过。读像素前必须 `syncPixels()`（GPU 只入队）；
+//     没有 GPU 设备 ⇒ `SKIP 77`（⛔ 不假绿）。容差 **每通道 ≤1 LSB**（GPU 的 float blend /
+//     unorm 舍入 vs D3D9 的 8-bit 参考 —— ⛔ 不是把期望改小）。
+//
+// 判据：
 //   ① `D3DXCreateSprite(device, &ppSprite)` 返回 S_OK(0) + 非 0 的 guest 可见 ID3DXSprite；
 //      `QueryInterface(IID_ID3DXSprite)` / `QueryInterface(IID_IUnknown)` 成功；`GetDevice` 返回**同一台**
 //      device；`Release` 到 0 ⇒ 对象 + 状态块 + 批次数组全部回收（guest 堆用量回到建之前）。
-//   ② `Begin`/`Draw`/`End` 的**像素级**语义：
-//      · ALPHABLEND：目标像素 = (源 × Color.alpha + 目标 × (1-alpha))，按 8 位通道逐个算（精确值断言）；
+//   ② `Begin`/`Draw`/`End` 的语义（**像素断言只在 `--gpu` 臂**）：
+//      · ALPHABLEND：目标像素 = (源 × Color.alpha + 目标 × (1-alpha))；
 //      · 无 ALPHABLEND：调制色**覆盖**（不混合）；
-//      · 裁剪：四边形越过后缓冲边界时只写可见部分（越界不写 / 不崩）；
+//      · 裁剪：四边形越过后缓冲边界时只画可见部分；**源矩形部分越出纹理** ⇒ GPU 路径不做逐像素
+//        裁剪 ⇒ 记账 + 跳过（一像素不写），完全越界 ⇒ 跳过；
 //      · `SetTransform` 真的作用在**Draw 时**生成的四角上（2×3 缩放 ⇒ 4×4 的源矩形变成 8×12 像素）；
 //      · `Flush` 合成后**保持** Begin 状态（后续 Draw 仍能进同一批次），`End` 关闭批次；
 //      · `End` 幂等：第二次 End（空批次）**逐字节不改**后缓冲（整块 arena 哈希相等）。
@@ -26,7 +36,7 @@
 //      arena + 状态块，`E_FAIL`，机器不停。
 //   ⑤ 纹理簇（`D3DXCreateTexture` → IDirect3DTexture9）：GetLevelDesc 的 D3DSURFACE_DESC 字段
 //      与 `.lst` 0x48AD2A/0x48AD2D 的读法一致；LockRect 给出 guest 指针；**纹理 × 调制色**
-//      的像素级断言；源矩形越界裁剪；纹理在批次里 AddRef / 合成后对称 Release。
+//      的像素级断言（`--gpu` 臂）；纹理在批次里 AddRef / 合成后对称 Release。
 //   ⑥ D3DX math：Multiply/Scaling/Translation/RotationAxis/RotationYawPitchRoll/OrthoLH/
 //      PerspectiveFovLH/LookAtLH/Vec4Transform/Vec3Normalize 的**手算值**断言。
 //   ⑦ 资源耗尽 **≠** unimplemented：把夹具自己那 1 MiB guest 堆占满到
@@ -35,12 +45,8 @@
 //
 // ★ 所有方法调用都从 **guest 代码** 经 vtable 调（`mov eax,[vtbl]; push …; call [eax+off]`），
 //   测的是"guest 可见的对象"，不是宿主直接调函数。
-// ★ 变异验证（本次实测过，见交付说明）：
-//   · 把 End 的合成改成"只计数不写像素" ⇒ ② 全红；
-//   · 调制色不乘（直接用白色 / 直接用 texel） ⇒ ② 与 ②b 的精确颜色断言红；
-//   · ALPHABLEND 退化成覆盖 ⇒ ② 的半透明用例红；
-//   · 变换不在 Draw 时应用 ⇒ ② 的 8×12 缩放用例红；
-//   · 纹理源矩形不裁（越界采样） ⇒ ②b 的 (22,20)/(20,22) 断言红。
+// ★ 变异验证（`--gpu` 臂）：把 sprite 的 GPU 批提交改坏（不入队 / 不 flush / 不读回）⇒
+//   `d3dx9-gpu` 与 `gpu-batch-barrier` 的 `d3d9p/sprite-render-target` 立刻红（见交付读数）。
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -50,6 +56,7 @@
 #include <vector>
 
 #include "check.h"
+#include "gpu_arm.h"
 #include "runtime/d3d9.h"
 #include "runtime/d3dx9_sprite.h"
 #include "runtime/machine.h"
@@ -419,11 +426,15 @@ struct Fixture {
 };
 
 // 一次"建 d3d9 + device + sprite"的公共前半段
+// ★ `--gpu` 臂才 attach 真后端（`g_gpu_arm`）；缺省臂**没有**光栅 ⇒ sprite 记账 + 跳过。
+bool g_gpu_arm = false;
+
 struct Rig {
     Fixture f;
     std::uint32_t d3d9 = 0;
     Fixture::Device dev;
     std::uint32_t sprite = 0;
+    lift_test::GpuArm arm;
     bool up() {
         if (!f.boot()) return false;
         d3d9 = f.createDirect3D();
@@ -435,6 +446,11 @@ struct Rig {
         if (!up()) return false;
         return f.createSprite(dev.object, &sprite) == 0u && sprite != 0;
     }
+    // 真 GPU 臂：把光栅接到本夹具的后缓冲（隐藏窗口 + SDL_GPU）。缺省臂 no-op。
+    // ★ 失败 = 环境缺失（无窗口系统 / 建不出 device）⇒ 调用方 `LIFT_SKIP`。
+    bool pixelArm(std::string* why) { return !g_gpu_arm || arm.attach(f.m, dev.info.arena, why); }
+    // flush 队列 + 读回 guest 像素（读像素前的**唯一**入口）。缺省臂 no-op。
+    bool syncPixels(std::string* why) { return !g_gpu_arm || arm.sync(f.m, why); }
     std::uint32_t begin(std::uint32_t flags) { return f.method(sprite, 0x20u, {flags}); }
     std::uint32_t draw(std::uint32_t rect_ea, std::uint32_t center_ea, std::uint32_t pos_ea,
                        std::uint32_t color) {
@@ -546,15 +562,33 @@ void caseCreateQueryRelease() {
 }
 
 // ---------------------------------------------------------------------------------------
-// ② Begin / Draw / End 的像素语义
+// ② Begin / Draw / End 的协议 +（`--gpu` 臂）像素语义
+//
+// ★ 缺省臂没有光栅（`REQ-01M7AAXNJY2PACYJHYVRV620Q5`：CPU 合成已删）⇒ 同一条批次照走一遍，
+//   但**只判协议**（返回值 / 批次计数 / 幂等哈希）；像素断言只在 `--gpu` 臂跑。
 // ---------------------------------------------------------------------------------------
-void caseDrawEndPixels() {
-    lift_test::g_current_case = "d3dx9/draw+end-pixels";
+// `--gpu` 臂的像素断言：每通道 **≤1 LSB**（GPU 的 float blend / unorm 舍入 vs D3D9 的 8-bit 参考）。
+void checkPixel(lift::Machine& m, const lift::d3d9::DeviceInfo& d, int x, int y, unsigned want,
+                const char* note = "") {
+    const std::uint32_t got = m.mem().rd32(d.arena + static_cast<std::uint32_t>(y) * d.pitch +
+                                          static_cast<std::uint32_t>(x) * 4u);
+    ++lift_test::g_checks;
+    if (!lift_test::pxNear(got, want, 1))
+        lift_test::failf(__FILE__, __LINE__, "pixel(%d,%d) expected≈0x%08X got 0x%08X %s", x, y, want, got,
+                         note);
+}
+
+int caseDrawEndPixels(bool gpu) {
+    lift_test::g_current_case = gpu ? "d3dx9/draw+end-pixels" : "d3dx9/draw+end-protocol";
     Rig r;
     LIFT_CHECK(r.withSprite());
-    if (r.sprite == 0) return;
+    if (r.sprite == 0) return 0;
     const lift::d3d9::DeviceInfo& d = r.dev.info;
+    std::string why;
+    // ★ `--gpu` 臂：把光栅接到本夹具的后缓冲（缺省臂 no-op）。没有 GPU 设备 ⇒ SKIP 77。
+    if (gpu && !r.pixelArm(&why)) LIFT_SKIP(why.c_str());
     // 基准背景：0x004080C0（r=64 g=128 b=192；X 格式 ⇒ alpha 无意义）
+    // ★ `Clear` 直写 guest（不经过 GPU 队列）⇒ 这条在两条臂上都成立。
     LIFT_CHECK_EQ_U32(r.f.clearTo(r.dev, 0x004080C0u), 0u);
     LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 0, 0), 0x004080C0u);
 
@@ -566,32 +600,40 @@ void caseDrawEndPixels() {
     const std::uint32_t pos = r.f.placeVec3(10.0f, 20.0f, 0.0f);
     LIFT_CHECK_EQ_U32(r.draw(src4, zero3, pos, 0x80FF0000u), 0u);
     LIFT_CHECK_EQ_U32(r.end(), 0u);
-    // 期望：r=(255*128+64*127+127)/255=160(0xA0)；g=(0*128+128*127+127)/255=64(0x40)；
-    //       b=(0*128+192*127+127)/255=96(0x60)。4×4 全部命中，右/下开区间。
-    for (int y = 20; y < 24; ++y)
-        for (int x = 10; x < 14; ++x) LIFT_CHECK_EQ_U32(r.f.pixelAt(d, x, y), 0x00A04060u);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 9, 20), 0x004080C0u);   // 左边界外
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 14, 20), 0x004080C0u);  // 右边界开区间
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 10, 24), 0x004080C0u);  // 下边界开区间
+    if (gpu) {
+        if (!r.syncPixels(&why)) LIFT_SKIP(why.c_str());
+        // 期望：r≈(255*128+64*127)/255=160(0xA0)；g≈64(0x40)；b≈96(0x60)。4×4 全部命中，右/下开区间。
+        for (int y = 20; y < 24; ++y)
+            for (int x = 10; x < 14; ++x) checkPixel(r.f.m, d, x, y, 0x00A04060u);
+        checkPixel(r.f.m, d, 9, 20, 0x004080C0u, "左边界外");
+        checkPixel(r.f.m, d, 14, 20, 0x004080C0u, "右边界开区间");
+        checkPixel(r.f.m, d, 10, 24, 0x004080C0u, "下边界开区间");
+    }
 
     // ---- 无 ALPHABLEND：调制色**覆盖**（X8R8G8B8 丢掉 alpha） ----
     LIFT_CHECK_EQ_U32(r.begin(0u), 0u);
     const std::uint32_t pos2 = r.f.placeVec3(20.0f, 20.0f, 0.0f);
     LIFT_CHECK_EQ_U32(r.draw(src4, zero3, pos2, 0xFF00FF00u), 0u);
     LIFT_CHECK_EQ_U32(r.end(), 0u);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 20, 20), 0x0000FF00u);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 23, 23), 0x0000FF00u);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 24, 20), 0x004080C0u);
+    if (gpu) {
+        if (!r.syncPixels(&why)) LIFT_SKIP(why.c_str());
+        checkPixel(r.f.m, d, 20, 20, 0x0000FF00u);
+        checkPixel(r.f.m, d, 23, 23, 0x0000FF00u);
+        checkPixel(r.f.m, d, 24, 20, 0x004080C0u);
+    }
 
     // ---- 裁剪：四边形 (-2,-2)..(2,2)，只该写 (0,0)..(1,1) ----
     LIFT_CHECK_EQ_U32(r.begin(0u), 0u);
     const std::uint32_t pos3 = r.f.placeVec3(-2.0f, -2.0f, 0.0f);
     LIFT_CHECK_EQ_U32(r.draw(src4, zero3, pos3, 0xFF0000FFu), 0u);
     LIFT_CHECK_EQ_U32(r.end(), 0u);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 0, 0), 0x000000FFu);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 1, 1), 0x000000FFu);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 2, 2), 0x004080C0u);  // 四边形外（u=4 已经越界）
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 2, 0), 0x004080C0u);
+    if (gpu) {
+        if (!r.syncPixels(&why)) LIFT_SKIP(why.c_str());
+        checkPixel(r.f.m, d, 0, 0, 0x000000FFu);
+        checkPixel(r.f.m, d, 1, 1, 0x000000FFu);
+        checkPixel(r.f.m, d, 2, 2, 0x004080C0u, "四边形外（u=4 已经越界）");
+        checkPixel(r.f.m, d, 2, 0, 0x004080C0u);
+    }
 
     // ---- 变换：SetTransform(缩放 2×3 + 平移 100,50) ⇒ 4×4 的源矩形变成 8×12 像素 ----
     // ★ 注意 D3DX 的语义：变换作用于**顶点**，所以 position 也在矩阵里（这里 position=0，
@@ -609,10 +651,13 @@ void caseDrawEndPixels() {
     const std::uint32_t pos4 = r.f.placeVec3(0.0f, 0.0f, 0.0f);
     LIFT_CHECK_EQ_U32(r.draw(src4, zero3, pos4, 0xFF00FFFFu), 0u);
     LIFT_CHECK_EQ_U32(r.end(), 0u);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 100, 50), 0x0000FFFFu);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 107, 61), 0x0000FFFFu);  // 8×12 的右下角（开区间内）
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 108, 50), 0x004080C0u);  // 右边越界
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 100, 62), 0x004080C0u);  // 下边越界
+    if (gpu) {
+        if (!r.syncPixels(&why)) LIFT_SKIP(why.c_str());
+        checkPixel(r.f.m, d, 100, 50, 0x0000FFFFu);
+        checkPixel(r.f.m, d, 107, 61, 0x0000FFFFu, "8×12 的右下角（开区间内）");
+        checkPixel(r.f.m, d, 108, 50, 0x004080C0u, "右边越界");
+        checkPixel(r.f.m, d, 100, 62, 0x004080C0u, "下边越界");
+    }
     LIFT_CHECK_EQ_U32(r.f.method(r.sprite, 0x14u, {0u}), 0u);  // 恢复单位阵
 
     // ---- Flush：合成但**保持** Begin；后续 Draw 仍进同一批次 ----
@@ -620,7 +665,10 @@ void caseDrawEndPixels() {
     const std::uint32_t pos5 = r.f.placeVec3(200.0f, 10.0f, 0.0f);
     LIFT_CHECK_EQ_U32(r.draw(src4, zero3, pos5, 0xFFFFFFFFu), 0u);
     LIFT_CHECK_EQ_U32(r.f.method(r.sprite, 0x28u, {}), 0u);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 200, 10), 0x00FFFFFFu);
+    if (gpu) {
+        if (!r.syncPixels(&why)) LIFT_SKIP(why.c_str());
+        checkPixel(r.f.m, d, 200, 10, 0x00FFFFFFu);
+    }
     lift::d3dx9::SpriteInfo info;
     LIFT_CHECK(lift::d3dx9::spriteInfo(r.f.m.cpu(), r.sprite, &info, nullptr));
     LIFT_CHECK(info.drawing);
@@ -628,13 +676,20 @@ void caseDrawEndPixels() {
     const std::uint32_t pos6 = r.f.placeVec3(210.0f, 10.0f, 0.0f);
     LIFT_CHECK_EQ_U32(r.draw(src4, zero3, pos6, 0xFFFFFFFFu), 0u);
     LIFT_CHECK_EQ_U32(r.end(), 0u);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 210, 10), 0x00FFFFFFu);
+    if (gpu) {
+        if (!r.syncPixels(&why)) LIFT_SKIP(why.c_str());
+        checkPixel(r.f.m, d, 210, 10, 0x00FFFFFFu);
+    }
     LIFT_CHECK(lift::d3dx9::spriteInfo(r.f.m.cpu(), r.sprite, &info, nullptr));
     LIFT_CHECK(!info.drawing);
     LIFT_CHECK_EQ_U32(info.flushes, 1u);
     LIFT_CHECK_EQ_U32(info.ends, 5u);
 
     // ---- End 幂等：第二次 End 逐字节不改后缓冲 ----
+    // ★ `--gpu` 臂先把队列读回 guest，否则下面的 hash 比的是"上一批还没落回来"的旧像素（假绿）。
+    if (gpu) {
+        if (!r.syncPixels(&why)) LIFT_SKIP(why.c_str());
+    }
     const std::uint64_t before = r.f.surfaceHash(d);
     LIFT_CHECK_EQ_U32(r.end(), 0u);
     LIFT_CHECK(r.f.surfaceHash(d) == before);
@@ -652,7 +707,9 @@ void caseDrawEndPixels() {
     LIFT_CHECK_EQ_U32(r.begin(0u), lift::d3dx9::kInvalidCall);
     LIFT_CHECK_EQ_U32(r.end(), 0u);
 
-    // ---- 16bpp 后缓冲：合成按 R5G6B5 换算（复用同一台设备簇的第二种格式） ----
+    // ---- 16bpp 后缓冲：sprite 的 GPU 路径只表达 32bpp ⇒ **记账 + 跳过**（一像素不写）----
+    // ★ 修前这条由 CPU 合成器按 R5G6B5 换算写出 0xF81F；CPU 合成删掉之后
+    //   "sprite 到非 32bpp 目标"没有实现 ⇒ 判据变成"像素保持清屏值 + 账上 skipped"。
     Fixture::Device dev16;
     LIFT_CHECK(r.f.createDevice(r.d3d9, 640, 480, lift::d3d9::kFmtR5G6B5, &dev16));
     if (dev16.object != 0) {
@@ -661,14 +718,14 @@ void caseDrawEndPixels() {
         if (sprite16 != 0) {
             LIFT_CHECK_EQ_U32(r.f.method(dev16.object, 0xACu, {0u, 0u, 1u, 0x00000000u, 0x3F800000u, 0u}), 0u);
             LIFT_CHECK_EQ_U32(r.f.method(sprite16, 0x20u, {0u}), 0u);
-            const std::uint32_t pos = r.f.placeVec3(3.0f, 4.0f, 0.0f);
-            LIFT_CHECK_EQ_U32(r.f.method(sprite16, 0x24u, {0u, src4, zero3, pos, 0x00F800F8u}), 0u);
+            const std::uint32_t pos16 = r.f.placeVec3(3.0f, 4.0f, 0.0f);
+            LIFT_CHECK_EQ_U32(r.f.method(sprite16, 0x24u, {0u, src4, zero3, pos16, 0x00F800F8u}), 0u);
             LIFT_CHECK_EQ_U32(r.f.method(sprite16, 0x2Cu, {}), 0u);
             const std::uint32_t px = r.f.m.mem().rd16(dev16.info.arena + 4u * dev16.info.pitch + 3u * 2u);
-            // 品红 0xF800F8 落在 R5G6B5 的 R=31 / G=0 / B=31 ⇒ 0xF81F
-            LIFT_CHECK_EQ_U32(px, 0xF81Fu);
+            LIFT_CHECK_EQ_U32(px, 0x0000u);  // 清屏值原样（⛔ 不再是 0xF81F）
         }
     }
+    return 0;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1038,19 +1095,24 @@ void caseTextureUploadRollback() {
 // ---------------------------------------------------------------------------------------
 // ②b 纹理簇：D3DXCreateTexture + GetLevelDesc + LockRect/UnlockRect + 纹理 × 调制色
 // ---------------------------------------------------------------------------------------
-void caseTextureDraw() {
+// ---------------------------------------------------------------------------------------
+// ⑤ 纹理簇的像素语义（`--gpu` 臂）：**纹理 × 调制色** / ALPHABLEND / 源矩形越出纹理
+// ---------------------------------------------------------------------------------------
+int caseTextureDraw(bool gpu) {
     lift_test::g_current_case = "d3dx9/texture+draw";
     Rig r;
     LIFT_CHECK(r.withSprite());
-    if (r.sprite == 0) return;
+    if (r.sprite == 0) return 0;
     const lift::d3d9::DeviceInfo& d = r.dev.info;
+    std::string why;
+    if (gpu && !r.pixelArm(&why)) LIFT_SKIP(why.c_str());
     LIFT_CHECK_EQ_U32(r.f.clearTo(r.dev, 0x004080C0u), 0u);
 
     const std::size_t surfaces_before = r.f.m.surfaces().surfaceCount();
     std::uint32_t tex = 0;
     LIFT_CHECK_EQ_U32(r.f.createTexture(r.dev.object, 4, 4, 1, 0, lift::d3d9::kFmtA8R8G8B8, 1, &tex), 0u);
     LIFT_CHECK_NE_U32(tex, 0u);
-    if (tex == 0) return;
+    if (tex == 0) return 0;
     LIFT_CHECK_EQ_U32(r.f.m.surfaces().surfaceCount(), surfaces_before + 1);
     LIFT_CHECK_EQ_U32(r.f.m.cpu().com->refCount(tex), 1u);
     lift::d3d9::TextureInfo ti;
@@ -1105,10 +1167,13 @@ void caseTextureDraw() {
     const std::uint32_t pos0 = r.f.placeVec3(0.0f, 0.0f, 0.0f);
     LIFT_CHECK_EQ_U32(r.drawTex(tex, 0u, 0u, pos0, 0xFFFFFFFFu), 0u);
     LIFT_CHECK_EQ_U32(r.end(), 0u);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 0, 0), 0x00804020u);  // 不透明 texel 原样
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 1, 0), 0x00A04060u);  // 半透明红叠在 0x004080C0 上
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 2, 0), 0x00000000u);  // 不透明黑
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 3, 3), 0x00000000u);
+    if (gpu) {
+        if (!r.syncPixels(&why)) LIFT_SKIP(why.c_str());
+        checkPixel(r.f.m, d, 0, 0, 0x00804020u, "不透明 texel 原样");
+        checkPixel(r.f.m, d, 1, 0, 0x00A04060u, "半透明红叠在 0x004080C0 上");
+        checkPixel(r.f.m, d, 2, 0, 0x00000000u, "不透明黑");
+        checkPixel(r.f.m, d, 3, 3, 0x00000000u);
+    }
     // 批次里 AddRef 的纹理已对称 Release
     LIFT_CHECK_EQ_U32(r.f.m.cpu().com->refCount(tex), 2u);
 
@@ -1118,27 +1183,38 @@ void caseTextureDraw() {
     const std::uint32_t pos1 = r.f.placeVec3(10.0f, 10.0f, 0.0f);
     LIFT_CHECK_EQ_U32(r.drawTex(tex, src1, 0u, pos1, 0x80808080u), 0u);
     LIFT_CHECK_EQ_U32(r.end(), 0u);
-    // mul255(0x80,0x80)=64(0x40)；mul255(0x40,0x80)=32(0x20)；mul255(0x20,0x80)=16(0x10)
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 10, 10), 0x00402010u);
+    if (gpu) {
+        if (!r.syncPixels(&why)) LIFT_SKIP(why.c_str());
+        // (0x80*0x80)/255≈64(0x40)；(0x40*0x80)/255≈32(0x20)；(0x20*0x80)/255≈16(0x10)
+        checkPixel(r.f.m, d, 10, 10, 0x00402010u);
+    }
 
-    // ---- 源矩形越界裁剪：src=(2,2,6,6) 在 4×4 纹理上只剩 (2,2)-(4,4) 那一截 ----
+    // ---- 源矩形**部分**越出纹理：GPU 路径不做逐像素裁剪 ⇒ 记账 + 跳过（一像素不写）----
+    // ★ 修前 CPU 合成器把越界那一截裁掉再画（(2,2)-(4,4) 那一块是黑）；删除 CPU 路径后
+    //   这条没有实现 ⇒ 判据变成"四个采样点都保持清屏色"（⛔ 不是静默画错）。
     LIFT_CHECK_EQ_U32(r.begin(0u), 0u);
     const std::uint32_t src2 = r.f.placeRect(2, 2, 6, 6);
     const std::uint32_t pos2 = r.f.placeVec3(20.0f, 20.0f, 0.0f);
     LIFT_CHECK_EQ_U32(r.drawTex(tex, src2, 0u, pos2, 0xFFFFFFFFu), 0u);
     LIFT_CHECK_EQ_U32(r.end(), 0u);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 20, 20), 0x00000000u);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 21, 21), 0x00000000u);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 22, 20), 0x004080C0u);  // 被裁掉（texel 越界）
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 20, 22), 0x004080C0u);
+    if (gpu) {
+        if (!r.syncPixels(&why)) LIFT_SKIP(why.c_str());
+        checkPixel(r.f.m, d, 20, 20, 0x004080C0u, "越界 ⇒ 整条跳过");
+        checkPixel(r.f.m, d, 21, 21, 0x004080C0u);
+        checkPixel(r.f.m, d, 22, 20, 0x004080C0u);
+        checkPixel(r.f.m, d, 20, 22, 0x004080C0u);
+    }
 
     // ---- 无 ALPHABLEND：X8R8G8B8 目标把 alpha 丢掉，颜色原样 ----
     LIFT_CHECK_EQ_U32(r.begin(0u), 0u);
     const std::uint32_t pos3 = r.f.placeVec3(30.0f, 30.0f, 0.0f);
     LIFT_CHECK_EQ_U32(r.drawTex(tex, 0u, 0u, pos3, 0xFFFFFFFFu), 0u);
     LIFT_CHECK_EQ_U32(r.end(), 0u);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 30, 30), 0x00804020u);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 31, 30), 0x00FF0000u);
+    if (gpu) {
+        if (!r.syncPixels(&why)) LIFT_SKIP(why.c_str());
+        checkPixel(r.f.m, d, 30, 30, 0x00804020u);
+        checkPixel(r.f.m, d, 31, 30, 0x00FF0000u);
+    }
 
     // ---- +0x48 GetSurfaceLevel：返回 IDirect3DSurface9；GetDesc 复用纹理的 level 0 描述 ----
     const std::uint32_t surf_out = r.f.placeU32(0xDEADBEEFu);
@@ -1159,6 +1235,7 @@ void caseTextureDraw() {
     LIFT_CHECK_EQ_U32(r.f.method(tex, 0x08u, {}), 0u);
     LIFT_CHECK(!r.f.m.cpu().com->find(tex));
     LIFT_CHECK_EQ_U32(r.f.m.surfaces().surfaceCount(), surfaces_before);
+    return 0;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1844,16 +1921,18 @@ void caseSpriteEarlyExitStaleTexture() {
 // ★ EA 复用的**前提**硬断言（对象 EA + 状态块 EA 都要落回原址）；不成立就红 —— ⛔ 不是删断言，
 //   先按 `runtime/heap.cpp` 的分块 / `min_split` 重造夹具（同 `caseSurfaceKeepsParentAlive` 的口径）。
 // ---------------------------------------------------------------------------------------
-void caseDoNotAddRefStaleTexture() {
+int caseDoNotAddRefStaleTexture(bool gpu) {
     lift_test::g_current_case = "d3dx9/sprite-donotaddref-stale-texture";
     Rig r;
     LIFT_CHECK(r.withSprite());
-    if (r.sprite == 0) return;
+    if (r.sprite == 0) return 0;
     const lift::d3d9::DeviceInfo& d = r.dev.info;
+    std::string why;
+    if (gpu && !r.pixelArm(&why)) LIFT_SKIP(why.c_str());
     LIFT_CHECK_EQ_U32(r.f.clearTo(r.dev, 0x004080C0u), 0u);
     lift::ComRegistry* com = r.f.m.cpu().com;
     LIFT_CHECK(com != nullptr);
-    if (com == nullptr) return;
+    if (com == nullptr) return 0;
 
     auto fillTexture = [&](std::uint32_t tex, std::uint32_t value) {
         const std::uint32_t lr = r.f.placeBytes(std::vector<std::uint8_t>(8u, 0xEE));
@@ -1878,14 +1957,14 @@ void caseDoNotAddRefStaleTexture() {
     std::uint32_t t0 = 0;
     std::uint32_t t1 = 0;
     makeTexture(&t1);
-    if (t1 == 0) return;
+    if (t1 == 0) return 0;
     fillTexture(t1, 0xFF0000FFu);  // 不透明蓝（A8R8G8B8 的 D3DCOLOR 位序：A R G B）
     const std::uint32_t t1_state = com->userOf(t1);
     const std::uint32_t t1_gen = com->generationOf(t1);
     LIFT_CHECK_NE_U32(t1_state, 0u);
     LIFT_CHECK_NE_U32(t1_gen, 0u);
     makeTexture(&t0);  // 哑纹理：同尺寸 ⇒ 一起释放后空洞连成一片（EA 复用的前提）
-    if (t0 == 0) return;
+    if (t0 == 0) return 0;
 
     const std::uint32_t flags = lift::d3dx9::kSpriteAlphaBlend | lift::d3dx9::kSpriteDoNotAddRefTexture;
     LIFT_CHECK_EQ_U32(r.begin(flags), 0u);
@@ -1900,7 +1979,7 @@ void caseDoNotAddRefStaleTexture() {
 
     std::uint32_t t2 = 0;
     makeTexture(&t2);
-    if (t2 == 0) return;
+    if (t2 == 0) return 0;
     LIFT_CHECK_EQ_U32(t2, t1);                       // 前提 1：对象 EA 复用
     LIFT_CHECK_EQ_U32(com->userOf(t2), t1_state);     // 前提 2：`'TEX1'` 状态块 EA 也复用 ⇒ magic 校验必过
     LIFT_CHECK_NE_U32(com->generationOf(t2), t1_gen);
@@ -1908,6 +1987,7 @@ void caseDoNotAddRefStaleTexture() {
 
     // ② 合成：身份不符 ⇒ 跳过这个精灵（⛔ 不采 T2 的像素）
     LIFT_CHECK_EQ_U32(r.end(), 0u);
+    // ★ 这条在两条臂上都成立：缺省臂没有光栅（不写像素），`--gpu` 臂里这条精灵根本没入队。
     LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 10, 10), 0x004080C0u);  // 清屏色原样（修前 = 0x00FF0000）
     LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 11, 11), 0x004080C0u);
     LIFT_CHECK_EQ_U32(com->refCount(t2), 1u);  // ⛔ 新占有者一个引用都不被减
@@ -1919,30 +1999,54 @@ void caseDoNotAddRefStaleTexture() {
     LIFT_CHECK_EQ_U32(r.drawTex(t2, 0u, 0u, pos1, 0xFFFFFFFFu), 0u);
     LIFT_CHECK_EQ_U32(com->refCount(t2), 1u);  // 仍然不 AddRef（文档语义没变）
     LIFT_CHECK_EQ_U32(r.end(), 0u);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 20, 20), 0x00FF0000u);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 23, 23), 0x00FF0000u);
+    if (gpu) {
+        if (!r.syncPixels(&why)) LIFT_SKIP(why.c_str());
+        checkPixel(r.f.m, d, 20, 20, 0x00FF0000u);
+        checkPixel(r.f.m, d, 23, 23, 0x00FF0000u);
+    }
     LIFT_CHECK_EQ_U32(com->refCount(t2), 1u);
 
     // 收尾：guest 那份释放 ⇒ 对象 + 状态块 + 像素块一起回收
     LIFT_CHECK_EQ_U32(r.f.method(t2, 0x08u, {}), 0u);
     LIFT_CHECK(!com->find(t2));
+    return 0;
 }
 
-int main() {
+int main(int argc, char** argv) {
     using namespace lift_test;
+    const bool gpu_arm = argc > 1 && std::string(argv[1]) == "--gpu";
     try {
+        if (gpu_arm) {
+            // ★ `REQ-01M7AAXNJY2PACYJHYVRV620Q5`：sprite 的 CPU 合成已删 ⇒ 像素断言必须装真 GPU。
+            //   CTest 给 `d3dx9-gpu` 设了 `SDL_VIDEODRIVER=dummy`（无显示器的机器上别去建窗口），
+            //   但 dummy 视频下建不出 SDL_GPU 设备 ⇒ 这里让开，让真实视频驱动建隐藏窗口与 GPU 设备。
+            g_gpu_arm = true;
+#if defined(_WIN32)
+            _putenv_s("SDL_VIDEODRIVER", "");
+#else
+            ::unsetenv("SDL_VIDEODRIVER");
+#endif
+            int rc = caseDrawEndPixels(true);
+            if (rc != 0) return rc;  // 77 = 没有 GPU 设备（SKIP），⛔ 不假绿
+            rc = caseTextureDraw(true);
+            if (rc != 0) return rc;
+            rc = caseDoNotAddRefStaleTexture(true);
+            if (rc != 0) return rc;
+            return finish("d3dx9-gpu");
+        }
+        // ---- 缺省臂（pure）：对象 / 状态 / 协议 / 生命周期 / trap；**不判像素** ----
         caseCreateQueryRelease();
-        caseDrawEndPixels();
+        if (caseDrawEndPixels(false) != 0) return 1;
         caseTextureFromMemory();
         caseTextureFromMemoryPng();
         casePngDecode();
         caseTextureUploadRollback();
-        caseTextureDraw();
+        if (caseTextureDraw(false) != 0) return 1;
         caseSurfaceKeepsParentAlive();
         caseSurfaceGetDeviceRefcount();
         caseSpriteReleaseQueuedStaleTexture();
         caseSpriteEarlyExitStaleTexture();
-        caseDoNotAddRefStaleTexture();
+        if (caseDoNotAddRefStaleTexture(false) != 0) return 1;
         caseMatrix();
         caseTraps();
         caseCreateSpriteOom();

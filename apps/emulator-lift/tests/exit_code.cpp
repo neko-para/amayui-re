@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "check.h"
+#include "cmdline.h"
 #include "runtime/machine.h"
 #include "subprocess_skip.h"
 
@@ -210,15 +211,17 @@ ChildRun runChild(const fs::path& exe, const std::vector<std::string>& args, con
         if (h_err != INVALID_HANDLE_VALUE) ::CloseHandle(h_err);
         return r;
     }
-    std::wstring joined;
-    for (const std::string& a : args) joined += L" \"" + lift::utf8ToWide(a) + L"\"";
+    std::vector<std::wstring> cmd_args;
+    cmd_args.reserve(args.size() + 1);
+    cmd_args.push_back(exe.wstring());
+    for (const std::string& a : args) cmd_args.push_back(lift::utf8ToWide(a));
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdOutput = h_out;
     si.hStdError = h_err;
     PROCESS_INFORMATION pi{};
-    std::wstring cmd = L"\"" + exe.wstring() + L"\"" + joined;
+    std::wstring cmd = lift_test::joinCommandLine(cmd_args);
     const BOOL ok = ::CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
                                      cwd.c_str(), &si, &pi);
     ::CloseHandle(h_out);

@@ -423,12 +423,13 @@ feeder 的 dispatch 只查这一份。`feeder_ok` 是**编译期 opt-in**（`kKn
    ⇒ **段级只看 `bov=`，函数级只看 `ov=`**。⛔ 不要用 `ov=` 判段级。
 
 **同口径 A/B（同一次构建、同一条命令，唯一差异是 `--native-overrides` 里的 `-sub_48D610`）**
-（2026-11-12，macOS arm64，RelWithDebInfo，`--raster gpu`）：
+（2026-11-12，macOS arm64，RelWithDebInfo；★ 当时命令行里还有 `--raster gpu` —— **该 flag 已删**，
+今天照敲会 `exit 2`（未知参数）；光栅只有 GPU 一条实现，下面给的就是今天真能跑的等价命令）：
 
 ```bash
-# 段级臂
+# 段级臂（`--raster gpu` 已删：光栅只有 GPU 一条实现，去掉该 flag 即等价）
 LIFT_AUDIO_TRACE=1 ./out/emulator-lift --verbose --appdata <fresh> --game-dir ../../links/install \
-  --present window --present-hidden --raster gpu --native-overrides all --skip-logo --audio sdl \
+  --present window --present-hidden --native-overrides all --skip-logo --audio sdl \
   --interaction-graph ../../graphs/se-eof.graph
 # 基线臂：唯一差异 = --native-overrides all,-sub_48D610
 ```

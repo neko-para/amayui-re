@@ -4,7 +4,7 @@
 - type: req
 - status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- verify: apps/emulator-lift/tests/recovery_dialog.cpp#recovery-dialog
+- verify: apps/emulator-lift/tests/messagebox.cpp#messagebox/system-box-seam
 - tags: [emulator-lift cli boot]
 
 ## 目标
@@ -66,6 +66,9 @@
 - 默认绕过：`kRecoveryCheckEa=0x004BA718` 上 `cpu_.eax()=0`（不改 eip、不代答 NO）⇒ `MessageBoxA` **0 行**；
   `--accept-recovery-dialog` 关掉绕过 ⇒ 走真实判定并弹**宿主自绘模态框**（窗口档阻塞、可注入点击/键；
   headless/feeder 降级默认返回值 + warn），实测 `…,00000034) -> 00000007`、`messagebox: calls=1 last-result=7`。
-- 守卫：`tests/recovery_dialog.cpp#recovery-dialog`（assets，10 checks）· `tests/messagebox.cpp`（pure，118 checks）·
+- 守卫（2026-11-13 更新）：`tests/messagebox.cpp` 的 `messagebox/system-box-seam`（pure）—— 只覆盖
+  "`uType=0x34 ⇒ IDNO`" 这一半；**"默认档 0 次 MessageBoxA / 带 flag 恰好 1 次"两半现在没有守卫**
+  （原 e2e `recovery-dialog` 已按测试瘦身整条删除）。缺口登记：`REQ-01M7AQ5QKKPC8YJTQA9DNRG2XA` §未做。
+- 旧守卫（已删）：`tests/recovery_dialog.cpp#recovery-dialog`（assets，10 checks）· `tests/messagebox.cpp`（pure，118 checks）·
   `tests/messagebox_window.cpp`（pure，27/8 checks，精确色）· 变异 `MB_YESNO→IDYES` 红 · 直出失败清理变异 5 条红。
 - 门禁：默认 ctest **89/89**（5 SKIP）· `LIFT_ASSETS=1` 95/95 · `pnpm test` 546 · `pnpm verify` 460 · `lift check` 绿 · requirements 6/6 · `git diff --check` 干净。

@@ -30,7 +30,7 @@ hover 会换高亮、点 CG 鑑賞 有效、ESC 有效，而同一位置的 clic
   （删掉"退回 ESC"的临时行与错误注记）；新增 `repo:apps/emulator-lift/scripts/interaction/room-exit-right.graph`
   （右键 = 引擎取消位 bit5，同一终态）。
 - 判据：两份图真机 `exit 0 + task done + TITLE hash`；pure 守卫
-  `repo:apps/emulator-lift/tests/interaction_graph.cpp` 的 `graph-scripts-parse`（两份图必须能解析）
+  `repo:docs/03-emulator/defects.md` 的 `graph-scripts-parse`（两份图必须能解析）
   与 `parse-button-right` / `emit-button-carried`。
 - 文档：`repo:docs/03-emulator/defects.md` 的 BUG-16 已改写为"不是缺陷"；读数进 `OBS-20261110-01..04`。
 

@@ -4,7 +4,7 @@
 - type: req
 - status: done
 - parent: REQ-01M3TC7BK0J9TBQKGGWQ35A3NR
-- verify: apps/emulator-lift/CMakeLists.txt#conformance-rejects-hollow-case
+- verify: apps/emulator-lift/tests/conformance.cpp#LIFT_CONFORMANCE_SELFCHECK
 - tags: [emulator-lift, debt]
 
 ## 一句话
@@ -16,7 +16,8 @@
 
 | # | 债 | 现状 | 守卫 / 落点 |
 |---|---|---|---|
-| ① | conformance 的"恒等夹具"判据几乎恒假 | **修好** | 判别式换成 `sameStateIgnoringSentinelRet`（除 `esp` 外逐位相等，且 `esp` 恰好 +4）；负控 CTest `conformance-rejects-hollow-case`（`LIFT_CONFORMANCE_SELFCHECK=1`：空心夹具必须**只**因这条判据红） |
+| ① | conformance 的"恒等夹具"判据几乎恒假 | **修好** | 判别式换成 `sameStateIgnoringSentinelRet`（除 `esp` 外逐位相等，且 `esp` 恰好 +4）；负控自检 `LIFT_CONFORMANCE_SELFCHECK=1`（空心夹具必须**只**因这条判据红）；★ 该 CTest 已于 2026-11-13 删除
+（为跑 1 条元判据把 239 例再跑一遍不划算），自检代码保留、手动命令见 `CMakeLists.txt` 注释 |
 | ② | `movsd` 助记符碰撞（`F2 0F 10` vs `A5`） | **修好** | `SseOp::Movsd` + 解码按**操作数形态**分派（`A5` 仍是 `Op::Movs`）；用例 `sse-movsd-reg-keep-high` / `sse-movsd-load-zero-high` / `sse-movsd-store-8bytes` |
 | ③ | SSE 对齐违例没有守卫 | **修好** | `tests/dispatch.cpp`：`unaligned-movaps-is-loud` / `unaligned-movdqa-store-is-loud`（实现本来就在，缺的只是守卫） |
 | ④ | MXCSR 只建模 IE | **只记账** | `repo:docs/03-emulator/design-notes.md` 的 `L3-sse-01`（读数 + 重写必须保持不变 + 三条重开条件） |

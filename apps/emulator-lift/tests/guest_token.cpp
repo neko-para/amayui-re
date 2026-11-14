@@ -10,9 +10,9 @@
 //   ⑥ `guest-token/wait-split`：**等令牌**的墙钟从 shim 的 `ns` 里分出来了 —— 真竞争（两条线程争
 //      同一个令牌，主线程在窗口里进 shim）下 `waits() > 0` 且 `waitNs()` 很大，而同一个 shim 的
 //      `ns`（实现自身）**不跟着变大**。把计时起点挪回 Guard 之前 ⇒ 这条当场红。
-//   ⑦ `guest-token/arena-outside`：`SurfaceArena` 的簿记（create/find/destroy/…）也进了令牌检查点 ——
-//      持令牌访问**不**计数（负控），令牌之外 `find` ⇒ `violations` ++ 且 first-site = `arena.find`，
-//      同时真的往 stderr 喊过一次（一次运行只喊一次）。删掉 `checkToken` ⇒ 这条红。
+//   ⑦ (已删) `guest-token/arena-outside`：原先钉 `SurfaceArena` 簿记的令牌检查点计数
+//      （`violations` / `firstViolationSite()=="arena.find"` / `violationReports()`）——
+//      那是**诊断面的计数自证**（`AGENTS.md` §10），guest 行为与用户零感知 ⇒ 删。
 //   ⑧ `guest-token/yield-revalidate`：Yield 之后**必须重新校验**（`guest_token.h` 的取/放规则）——
 //      YieldGuard 窗口里另一条线程真的拿到令牌并改了容器（它 `destroy` 了 surface）；取回后
 //      重新 `check()` 通过、且**重新查表**得到"已经没了"（让出前读到的结论作废）。
@@ -226,44 +226,6 @@ int main() {
                     tdone ? static_cast<double>(tdone->ns) / 1e6 : 0.0);
     }
 
-    // ---- ⑦ SurfaceArena 的簿记也进令牌检查点（`SurfaceArena::checkToken`）----
-    // 负控在前：**持令牌**访问簿记必须 0 违规（否则这条守卫只会恒红、谁也证明不了）。
-    // 正控在后：令牌之外 `find` ⇒ violations ++、first-site 点名 `arena.find`、且真的喊过。
-    g_current_case = "guest-token/arena-outside";
-    {
-        token.arm();  // 清上一案例的 wait / violations 账
-        SurfaceArena arena;
-        LIFT_CHECK(arena.init(&mem, 0x28000000u, 0x00400000u));
-        std::uint32_t ea = 0;
-        {
-            GuestToken::Guard g(token);
-            ea = arena.create(8, 8, SurfaceFormat{});
-            LIFT_CHECK(ea != 0);
-            LIFT_CHECK(arena.find(ea) != nullptr);
-        }
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(token.violations()), 0u);  // 负控
-        token.arm();                                                          // 清零再开正控
-        // 下面这一次**故意**在令牌之外访问簿记：紧跟其后的那行 stderr `[guest-token] 违规…`
-        // 是**正控的产物**，不是本条用例失败（进程最终退出码仍看 `finish()`）。
-        std::printf("guest-token/arena-outside: 接下来那条 stderr 违规是故意触发的（正控）\n");
-        std::fflush(stdout);  // stderr 不缓冲 ⇒ 不先刷一下，这行会排到违规行后面
-        (void)arena.find(ea);  // ← 令牌之外查表：这一次就是被守的坏行为
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(token.violations()), 1u);
-        LIFT_CHECK(token.firstViolationSite() != nullptr);
-        LIFT_CHECK(token.firstViolationSite() != nullptr &&
-                   std::strcmp(token.firstViolationSite(), "arena.find") == 0);
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(arena.violationReports()), 1u);  // 响亮：真的喊过
-        // 计数继续累加，但 stderr 只喊一次（热路径不刷屏）
-        (void)arena.find(ea);
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(token.violations()), 2u);
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(arena.violationReports()), 1u);
-        {
-            GuestToken::Guard g(token);
-            LIFT_CHECK(arena.destroy(ea));  // 收尾（持令牌，不污染计数）
-        }
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(token.violations()), 2u);
-    }
-
     // ---- ⑧ Yield 之后必须**重新校验**（guest_token.h 的取/放规则）----
     // 规则：让出期间令牌可能被别人拿走，而别人有权改容器 ⇒ 让出前读到的结论/指针一律作废。
     // 用例把这条规则变成机械判据：窗口里另一条线程（用 `tryAcquire`，拿不到就超时 ⇒ 不挂死）
@@ -272,7 +234,7 @@ int main() {
     {
         token.arm();
         SurfaceArena arena;
-        LIFT_CHECK(arena.init(&mem, 0x28400000u, 0x00400000u));  // 与 ⑦ 的区间错开
+        LIFT_CHECK(arena.init(&mem, 0x28400000u, 0x00400000u));  // 独立区间（⛔ 与别的用例共用 arena）
         token.acquire();  // ★ 让出**之前**必须先拿着（YieldGuard 未持有时是无操作，那是另一种路径）
         std::uint32_t ea = 0;
         ea = arena.create(16, 16, SurfaceFormat{});

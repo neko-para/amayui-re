@@ -4,7 +4,7 @@
 - type: bug
 - status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- verify: apps/emulator-lift/tests/d3d9.cpp#d3d9/linelist-writes-pixels
+- verify: apps/emulator-lift/tests/gpu_batch.cpp#gpu-batch/lines-points
 - repro: apps/emulator-lift/src/runtime/d3d9_pipeline.cpp#submitPrimitives
 - severity: S3
 - tags: [emulator-lift d3d9 raster]
@@ -26,10 +26,17 @@
 2. `LineCaps` 与"线真的会画"同真同假（做不到就把 caps 位撤掉，⛔ 不许继续宣称）。
 
 ## 守卫（修前必须红）
-`apps/emulator-lift/tests/d3d9.cpp#d3d9/linelist-writes-pixels`：
-`SetFVF(XYZ|DIFFUSE)` + `DrawPrimitiveUP(LINELIST, 1, 两顶点)`，断言后缓冲上出现 ≥L 个非背景像素；
-把 line 分支短路回 `break` ⇒ 红。
+`apps/emulator-lift/tests/gpu_batch.cpp#gpu-batch/lines-points`（真 GPU 臂）：后缓冲上线的非背景像素
+`>= 8`、点那一格非背景，且 `fallback_draws == 0` / `queued >= 1`；把线/点分支短路回 `break`
+（或让展开的 quad 退化）⇒ 红。另见 `apps/emulator-lift/tests/d3d9.cpp#d3d9/linestrip-16`
+（`--gpu` 臂：16 段阶梯真的落成像素）。
+
+★ 2026-11-14（`REQ-01M7A74YG08R65NJBFXF7DEJDK`）：CPU 光栅整族删除后，原来那条
+`d3d9/linelist-writes-pixels` 的逐像素断言（49 px / t=0.25 插值 / x=7,57 列归属）**不再是本线的合同**
+—— 点/线在 GPU 上展开成 1px quad，端点吸附到像素中心格（最多偏 0.5px），⛔ 不承诺 diamond-exit
+的逐像素覆盖。那条用例与 `d3d9/line-axes-and-direction` 一并删除（"线真的会画"由上面的 GPU 臂守）。
 
 ## 未做
 - 点尺寸（`D3DRS_POINTSIZE`）与抗锯齿线（`D3DRS_ANTIALIASEDLINEENABLE`）不在本单。
-- 线在 GPU 后端仍回退 CPU（`gpuEligible` 不改）。
+- ~~线在 GPU 后端仍回退 CPU（`gpuEligible` 不改）~~ —— 已过时：CPU 光栅已删，准入不足的批
+  一律"记账 + 跳过"（`D3DERR_INVALIDCALL`），⛔ 没有回退。

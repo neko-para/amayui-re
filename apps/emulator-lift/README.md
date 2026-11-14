@@ -222,8 +222,7 @@ apps/emulator-lift/
   src/shims/kernel32_*.cpp            ← 七族（一文件一族）+ bootstrap（启动路径补的）+ register.cpp
   tests/*.cpp                         ← conformance(A1) / dispatch / shim-abi / mnemonics /
                                         loader / decode-crosscheck(A3) / corpus-mnemonics(A2) /
-                                        boot-trace(A4) / base-coverage(A5) / native-override /
-                                        present-sink / frame-blit / present-window
+                                        native-override / present-sink / frame-blit / present-window
   third_party/berkeley-softfloat/     ← vendor 的 SoftFloat 3e（8086 特化）+ 清单哈希 README
 ```
 
@@ -237,31 +236,56 @@ apps/emulator-lift/
   cmake --build --preset windows-x64
   ctest --test-dir out --output-on-failure
   ```
-- ★ **CTest 的分级判据是"注册位置"**（`AGENTS.md` §5）：顶层无条件注册 ⇒ `pure`（不需要游戏/LFS）；
-  落在 `if(...)` 里 ⇒ `assets`。默认 `ctest` 只跑前者；后者在资产在场时自动注册
-  （`movie-logo` 例外，见 §4.0：它要真放影片，是 opt-in）。
-  缺资产时这些用例**不注册**（`ctest` 的用例数会变少，不是"跑绿了"）；已注册但 env 缺失时测试返回 **77**
-  （`SKIP_RETURN_CODE`），⛔ 不是"什么都不做然后 return 0"。
+- ★ **CTest 的档位判据是"注册位置"**（`AGENTS.md` §5），**两档** —— **判据是用途，⛔ 不是"资产在不在"**：
+  ① **接口合同（默认档）** —— 顶层无条件注册：**按我们 shim 出去的接口设计的合同**，判据 = **微软文档 /
+     公开规范**（返回值、错误码、边界、引用计数、所有权、pitch/stride、caps、状态机）⇒ 默认 `ctest` 就跑，
+     **不需要游戏安装**；
+  ② **压力/效率（`LIFT_STRESS`）** —— 注册在 `if(DEFINED ENV{LIFT_STRESS})` 里：**唯一允许跑真游戏的
+     一档**，判据 = **读数 + 阈值**（fps / 帧时间 p95 / 堆峰值 / 音频 underrun / 启动耗时 / 长跑稳定），
+     `LIFT_STRESS=1` 才注册（见 §4.0）。
+  ★ **规则**：新增一条 CTest 前先回答"这是**按 shim 接口的合同**，还是**压力/效率**"；
+  ⛔ **业务正确性不作判据**（"到达某界面 / 存档链走通 / 播完了"是游戏的事）；
+  **缺陷复现件不进测试** —— `repro` 档**已取消**（2026-11-14，`REQ-01M7ATAB5A18W7XBCKFBEQS7HB` 测试模型单），
+  复现命令只留在 `docs/03-emulator/defects.md` / `observations.md`。
+  ★ **输入假定在场**（`links/install` 的安装树、LFS 语料、两份宿主字体）：档位不因输入缺失而变。
+  配置期**总是**打一行 STATUS 盘点（每个输入 `present` / `MISSING` + 全路径）；**显式**开
+  `LIFT_STRESS` 而它要的输入 MISSING ⇒ configure 当场 `FATAL_ERROR`（带路径与怎么补）。
+  默认档缺输入**不** FATAL：那条用例自己红，或返回 **77**（`SKIP_RETURN_CODE`）—— ⛔ 不是"什么都不做
+  然后 return 0"，也 ⛔ 不是"这条用例不存在"。
 - ★ `LIFT_SAFE_MEMORY=1`：每次 guest 访存都查提交位图（慢）。判据 A1 要求**再跑一遍这一档**。
 - 生成物（`out/`、`vcpkg_installed/`）由本目录 `.gitignore` 排除。
 
-## 4.0 需要真机安装的用例：`LIFT_ASSETS` / `LIFT_STOP_AFTER_MOVIE`
+## 4.0 压力/效率档（`LIFT_STRESS`）/ `LIFT_STOP_AFTER_MOVIE`
 
-`assets` 档里有一条**不跟默认门禁走**：`movie-logo`（`tests/movie_logo.cpp`）。它真启模拟器、真放
-LOGO 影片（子进程按**墙钟秒**计），默认**不注册**（`add_executable` 也在同一个 `if` 里 ⇒ 纯构建环境
-连这个 target 都不编）。注册条件是**两条同时成立**：安装根下存在 `SYS4INI.BIN`，且设了 `LIFT_ASSETS`。
-安装根只有一处 —— 仓库根的 `links/install`（Windows / macOS 都指向真实安装树；见根 `.gitignore`），
-换机器时用 `-DLIFT_ASSETS_GAME_DIR=<目录>` 覆盖（CMake 缓存变量，缺省 = `links/install`）。
+`LIFT_STRESS` 档**只有一个判据**：**用途是压力 / 效率**（真启模拟器、量**模拟器自身**的读数）⇒ 注册在
+`if(DEFINED ENV{LIFT_STRESS})` 里，`LIFT_STRESS=1` 才注册。**它是唯一允许跑真游戏的一档**；
+判据 = **读数 + 阈值**（fps / 帧时间 p95 / 堆峰值 / 音频 underrun / 启动耗时 / 长跑稳定），
+⛔ **不是业务结果**（"到达某界面 / 不崩 / 某 marker 出现 / 播完了"这类业务断言不作判据；
+稳定性例外：长跑不崩、guest fault 计数 = 0 属效率/稳定指标）。成员看 `ctest --test-dir out -N`
+（⛔ 不在这里列清单 —— 清单会随下一次改动变错）。下面以 `movie-logo` 为例。
+
+★ **⛔ 不要把它理解成"资产在不在"**：资产（安装树 / LFS 语料 / 宿主字体）是**输入，假定在场**。
+需要语料 / 安装根的**接口合同**（`loader` / `gdi-font` / `gdi-font-fallback-assets` /
+`native-override-assets` / `decode-crosscheck` / `corpus-mnemonics` ……）一律在**默认档**
+（顶层无条件注册）；缺输入时由它们自己判（红 / SKIP 77），configure 的盘点行会把 `MISSING` 写全路径。
+
+`movie-logo`（`tests/movie_logo.cpp`）真启模拟器、真放 LOGO 影片（子进程按**墙钟秒**计），默认
+**不注册**（`add_executable` 也在同一个 `if` 里 ⇒ 没开 `LIFT_STRESS` 连这个 target 都不编）。注册条件是
+**一条**：设了 `LIFT_STRESS`。安装根只有一处 —— 仓库根的
+`links/install`（Windows / macOS 都指向真实安装树；见根 `.gitignore`），换机器时用
+`-DLIFT_STRESS_GAME_DIR=<目录>` 覆盖（CMake 缓存变量，缺省 = `links/install`）。
+★ 安装树是**输入、假定在场**：显式开了 `LIFT_STRESS` 而它（或 LFS 语料）MISSING ⇒ configure 直接
+`FATAL_ERROR`，⛔ 不是"少注册几条"。
 判据见 `tests/movie_logo.cpp` 的文件头。
 
 ```powershell
-# ① 显式注册 / 跑这条 assets 用例（macOS / Linux 把 preset 换成对应的那个）
-$env:LIFT_ASSETS = "1"                # POSIX：export LIFT_ASSETS=1
+# ① 显式注册 / 跑这条压力用例（macOS / Linux 把 preset 换成对应的那个）
+$env:LIFT_STRESS = "1"                 # POSIX：export LIFT_STRESS=1
 cmake --preset windows-x64            # ★ DEFINED ENV{...} 是**配置期**求值 ⇒ 必须重新 configure
 cmake --build --preset windows-x64
-ctest --test-dir out -N               # 这时才会列出 movie-logo
+ctest --test-dir out -N               # 这时才会列出这一档的用例
 ctest --test-dir out -R movie-logo --output-on-failure
-Remove-Item Env:LIFT_ASSETS           # 想回到默认门禁：取消变量后再 configure 一次
+Remove-Item Env:LIFT_STRESS            # 想回到默认门禁：取消变量后再 configure 一次
 
 # ② 手工跑（不经 CTest）时让"影片放完即停" —— CTest 已自动注入这一条
 $env:LIFT_STOP_AFTER_MOVIE = "1"
@@ -275,9 +299,10 @@ $env:LIFT_STOP_AFTER_MOVIE = "1"
   `out/tests/lift-movie-logo.exe`（参数见 `CMakeLists.txt` 的 `add_test`）而不设该变量、也不传那个开关。
 - 测试据此断言钩子生效（两个子进程的 run summary 都得是 `stop      : stopped`）—— 钩子失效时它不会
   静默退回"变慢但仍绿"。判据挂在 CMake 传的那个参数上，**不挂在环境变量**上（env 被删掉时也要红）。
-- 另一条 assets 用例是 `option-roundtrip`（`tests/option_roundtrip.cpp`）：注册条件与其他 opt-in
-  资产用例相同（安装根 + `LIFT_ASSETS`）。它自己起两次模拟器（1 / 2 轮往返；`kCycles = 2`），判据与容差写在该
-  文件头注释里。
+- ★ 同一档里 `boot-trace` 是**确定性读数**（同一条命令跑两次，停因 / eip / 指令数 / 状态摘要哈希逐字节
+  相同；`--trace-shims` 的 trace 字节也相同），不是"能到 L2 就算业务做对了"。
+- ★ `conformance-safe` **不在**这一档：它是同一批用例在 `LIFT_SAFE_MEMORY=1` 下的第二遍，
+  **实测 0.53 s（2026-11-13，本机 RelWithDebInfo）** ⇒ 顶层注册（默认档），默认门禁就跑。
 
 ## 4.1 渲染产物导出
 D3D9 `Present` 可以把**后缓冲的 guest 像素**写成 BMP（`SurfaceArena::dumpBmp`，支持 16/32bpp）：
@@ -309,8 +334,10 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
 - `--skip-logo` 会进 trace 输入清单（同一个 exe + 不同开关 = 另一条执行路径）。
 - **真实 boot 观测**（未自动化，需人看）：带 `--skip-logo` 的首帧 draw 签名是 TITLE
   （`sep_alpha=1 tex=1`）；不带是 LOGO（`sep_alpha=0 tex=0`）。
-- CTest `skip-logo` 只守**字段写 / 邻居字节 / 关闭时不写 / 空对象不崩**；它不跑 boot、
-  不看 draw 签名。⛔ 不要把“CTest 绿”当成“TITLE 首帧已验证”。
+- 原来的 CTest `skip-logo` 守的是**字段写 / 邻居字节 / 关闭时不写 / 空对象不崩** —— 那是**我方钩子的
+  内部形态**（属 `docs/03-emulator/defects.md` 的 BUG-14 反模式），已按测试模型（2026-11-14）**删除**；
+  它也不跑 boot、不看 draw 签名。⛔ 不要把某次人工观测当成"TITLE 首帧已验证"。
+  复现命令见 `docs/03-emulator/observations.md`。
 
 ## 4.1c 关窗二次确认（`--close-confirm`）
 
@@ -323,7 +350,8 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
 - 结果 **2/0** 会撤掉宿主那次关窗请求（清 `close_pending`/宽限/deadline ⇒ 窗口留着）；
   结果 **1** 保留（guest 自己走关窗；宽限只作兜底）。
 - 自动化：`--input-script` 的 `close_window` 宿主动作可像点 X 一样请求关窗；
-  CTest `close-confirm`（assets）用 `--close-confirm exit|title|cancel` 跑三臂。
+  三臂（`--close-confirm exit|title|cancel`）的复现命令见 `docs/03-emulator/observations.md`
+  （原 CTest `close-confirm` 是**缺陷复现件**，已按测试模型于 2026-11-14 删除，⛔ 不进测试）。
 - trace 输入清单会记 `trace-input close-confirm= …`（非 `ask` 才混进 hash）。
 - **`_ShowDialog@12` 的 `id == -1` 不是对话框**：真实 AGERC 里它是**UI 状态查询**
   （`0x100383CB`：`return dword_10150E70`，位图；没有 AGERC 框开着 = 0）。引擎在
@@ -332,8 +360,8 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
   （“已有 AGERC UI 开着”）：照真机回答 0 会让引擎立刻拿 `id==4` 的 stub 返回值去
   `GetWindowRect`（不存在的句柄 ⇒ loud failure / abort）。trace 里会看到
   `agerc!_ShowDialog@12(FFFFFFFF,…) -> 00000001` —— 这**不是** warn、也不是“缺一个对话框”。
-  CTest `agerc-ui-state`（assets）守这条：TITLE.BIN 后光标到顶边 ⇒ 停在 `0x4B92A5`，
-  返回值必须 1、且没有 `id=4` 尝试 / 没有 `GetWindowRect` abort。
+  ★ 2026-11-13：原来守这条的 CTest `agerc-ui-state`（assets）**已删** —— 它断言的是**我们 stub 的
+  返回值**（属 `docs/03-emulator/defects.md` 的 BUG-14 反模式），删后这条取舍就只记在这里，不再有门禁。
 
 ## 4.2 可切换呈现后端（`--present`）
 
@@ -700,39 +728,45 @@ T&L / 裁剪 / 状态机 / 失败码仍全在 CPU（三角形顶点已经是屏�
   点尺寸（POINTSIZE / POINTSCALE / POINTSPRITE / FVF PSIZE）仍未实现 ⇒ 点按 1px 并记账（bit19）；
   需要纹理采样的点/线（stage 级活跃且绑了纹理）**响亮拒绝**（`D3DERR_INVALIDCALL` + bit16）。
 
-**不再回退 CPU，改成"显式拒绝 + 具名记账"**（已改完的三条；`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：
-"回退 CPU 重放"等于保留第二实现 ⇒ 三条旁路改为**拒绝该批**（Draw 返回 `D3DERR_INVALIDCALL`，
+**不再回退 CPU，改成"显式拒绝 + 具名记账"**（已改完的两条；`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：
+"回退 CPU 重放"等于保留第二实现 ⇒ 两条旁路改为**拒绝该批**（Draw 返回 `D3DERR_INVALIDCALL`，
 本批不进画面），但**记账不静默**：
 
 | 旁路 | 条件 | 记的位 |
 |---|---|---|
 | `invw != 1` | 顶点 w≠1（如 XYZRHW 的 rhw≠1）：GPU 的屏幕空间插值不能等价透视校正 | bit21 `invw!=1` |
-| `MIPFILTER=NONE` + 缩小采样 | GPU sampler 的 `max_lod` 是一张纹理一档，关不掉 mipmap | bit22 `MIPFILTER=NONE 缩小` |
 | GPU 后端失败 | 准入通过但后端绘制/入队失败（⛔ 不再 CPU 重放该批） | bit23 `GPU 后端失败` |
 
-三者的痕迹：运行摘要的 `unsupported :` 行（具名位）+ 默认级别一行 warn（`pipe-warn` 的 `other` 桶）
+两者的痕迹：运行摘要的 `unsupported :` 行（具名位）+ 默认级别一行 warn（`pipe-warn` 的 `other` 桶）
 + 后端失败的 `gpu_failures` 计数。守卫 `gpu-batch/reject-accounting`（pure，Mock）。
-★ 这三条**也**进 `skipped` 账（GPU 没画；`gpu :` 行的 `skipped=` 与 `skipped top:`），
-  与 `fallback`（CPU 真写了像素）**分两个数** —— 守卫 `gpu-batch/skip-ledger`（pure，Mock）。
+★ 这两条**也**进 `skipped` 账（GPU 没画；`gpu :` 行的 `skipped=` 与 `skipped top:`）——
+  守卫 `gpu-batch/skip-ledger`（pure，Mock）。
+★ `MIPFILTER=NONE` + 缩小采样**不再是拒批理由**：`max_lod` 是 sampler 的 per-sampler 字段 ⇒
+  "只采 level 0" = 第二个 sampler（`mipmap` 位进缓存键）；`MAG != MIN` 同理（sampler 本来就分开存
+  `min_filter` / `mag_filter`）。判据是像素：`d3d9p/min-filter`（放大用 MAG、缩小用 MIN，两档必须不同）
+  + `d3d9p/mip-levels`（`MIPFILTER=NONE` ⇒ level 0 的像素，而不是 level 2）。
 
-★ **仍未退休的那一块**（同一张单的后半，待删）：`submitPrimitives` 里还有一条 CPU 像素路径
-（`rasterTriangle` / `rasterizePoint` / `rasterizeLineSegment`），它今天只剩两类调用方 ——
-① 单元测试夹具没装 `GpuRaster`（`tests/d3d9*.cpp` 的逐像素断言）；② GPU 准入**能力不足**的批
-（多 stage / 纹理非 32bpp / alpha test / FLAT / 16bpp / BORDER 或 MIRROR_ONCE / `BOTH*` blend /
-D3DXSprite 源矩形越界）。② 仍进 `fallback` 账（每次记账；首次出现打印 `[gpu] fallback ...`），
-**并**进 `skipped` 账（GPU 没画；同一批两条账会同时 +1，本单不改像素行为）。
-CLI **没有**入口能选 CPU 后端 ⇒ 这不是"第二个后端"，是**待删的测试 oracle + 残留回退**；
-删它要先把 `tests/d3d9*` 的逐像素用例迁走（`d3d9` / `d3dx9` / `d3d9-pipeline` 三条 CTest；
-`d3d9-mip` 只测 mip 链、不画像素），独立一单。⛔ 不要把它读成"CPU 在兜底"。
+★ **CPU 光栅已删**（`REQ-01M7A74YG08R65NJBFXF7DEJDK`）：`submitPrimitives` 里**没有**任何一条
+CPU 像素路径（三角形 / 点 / 线 / 逐像素收尾那一族函数整族删掉了，见该单的删除清单）。
+GPU 准入**能力不足**的批（多 stage / 纹理非 32bpp / alpha test / FLAT / 16bpp /
+BORDER 或 MIRROR_ONCE / `BOTH*` blend / 帧内反馈环 / 过滤值映射不了 / **没装后端** …）在准入处
+`noteGpuSkip` 后**跳过该批**（`D3DERR_INVALIDCALL` + `unsupported` 具名位 29..40 + `skipped` 账），
+⛔ 不画、也不回退。
+★ **D3DXSprite 的 CPU 逐像素合成也已删**（`REQ-01M7AAXNJY2PACYJHYVRV620Q5`）：`compositeBatch`
+里**没有**任何写目标像素的代码 —— 每一条 sprite 要么交给 GPU 队列，要么**记账 + 跳过**
+（`sprite_skipped` + 原因进 `skipped top:`）。⛔ 没有"先去 CPU 混一混"的第三条路。
+CLI **没有**入口能选 CPU 后端 ⇒ **光栅只有 GPU 一条实现**（三角形 / 点 / 线 / sprite 都是）。
+像素断言走**真 GPU 臂**（隐藏窗口 + `rasterSyncToGuest` 读回；`d3d9-gpu` / `d3d9-pipeline-gpu` /
+`d3dx9-gpu`）；没有 GPU 设备时那些用例 `SKIP 77`（⛔ 不假绿）。
 
 D3DXSprite 的纹理上传按 `(纹理 serial, 尺寸, alpha 语义, UnlockRect 版本)` 缓存：像素没变就不重传
 （⛔ 不再每次 draw 完整 upload）。键用 `createTextureState` 分配的**进程级单调 serial**，
 ⛔ 不用 guest 像素指针 / 状态块 EA —— 二者都会被 arena / guest 堆复用，会把新纹理读成旧像素。
-空批 / 全被裁掉的批**不计 fallback**（`draw_calls` 照记）。
+空批 / 全被裁掉的批只记 `sprite_skipped`（`draw_calls` 照记）。
 
 深度口径：GPU 的 D32 target 从 1.0 起，**不镜像 guest 深度缓冲**；D3DXSprite 的 GPU 路径直接关掉
-深度测试/写。因此非 1.0 的 `Clear(ZBUFFER)`、或 GPU/CPU 像素交替写同一块深度的场景，像素结果
-可能有偏差 —— 诊断仍以 `--dump-frame` 的逐像素对照为准。
+深度测试/写。因此非 1.0 的 `Clear(ZBUFFER)` 之类场景，像素结果可能有偏差 —— 诊断仍以
+`--dump-frame` 的逐像素对照为准。
 换 target 时**只有尺寸变才重建** depth 并清成 1.0（D3D9 的深度属设备、不随 color target 变）；
 同尺寸换 target **复用** depth（内容保留）且**不清** graphics pipeline 缓存。
 诊断读数：`gpuRasterStats()` 的 `targets_created` / `depths_created` / `pipelines_created` 三个计数。
@@ -746,45 +780,56 @@ D3DXSprite 的纹理上传按 `(纹理 serial, 尺寸, alpha 语义, UnlockRect 
 `buildDeclVertices`）。
 - 其它元素（法线 / 混合权 / 第二套 UV / 非 32 位分量）、`stream≥2`、以及 `*UP` 变体 —— **响亮失败**并
   在 `[d3d9] DrawIndexedPrimitive: 顶点声明（0x…）不支持：…` 里给出**具体是哪一项**（⛔ 不猜布局）。
-- 怎么查：`--log-cat d3d9 --log-level info` 的 `DrawIndexedPrimitive: PrimitiveType=… ⇒ 三角形 …（光栅化 …），
-  写 N 个像素`；被拒时是同一行换成 `顶点声明（0x…）不支持：…`。⚠ 顶点声明的**对象**在创建那一刻
+- 怎么查：`--log-cat d3d9 --log-level info` 的 `DrawIndexedPrimitive: PrimitiveType=… ⇒ 三角形 …（光栅化 …）`
+  （⛔ **没有**"写了多少像素"这个读数：CPU 光栅删掉之后没人能给出片元覆盖数，见 `[draw]` 段的 ⚠）；
+  被拒时是同一行换成 `顶点声明（0x…）不支持：…`。⚠ 顶点声明的**对象**在创建那一刻
   把元素表复制进 guest 堆（`'VDCL'` 状态块，常量见 `runtime/d3d9.h`）—— 光栅侧读的就是这份副本。
 
 ### 怎么查（口径，不是进度）
 
-`Machine::dumpRunSummary` 固定打印：
+`Machine::dumpRunSummary` 分**两档**打（档位 = `main.cpp` 的 `verbose_output`）：
+
+- **默认档**（没有 `--profile` / `--report`，且 `--log-level` 低于 `info`）：**只有 `read :` 一行**，
+  GPU 的"没画"读数是那一行里的 `gpu=draws N/tri N/skipped N`（`skipped` 就是"未画"的总数）。
+- **Verbose 档**（`--profile` / `--report` / `--log-level info` 及以上）才多出下面这三行
+  —— ⛔ 它们**不是**默认档的固定打印：
 
 ```text
-gpu       : draws=N gpu=N fallback=N fallback_pixels=N recorded=N queued=N empty=N fragments=N skipped=N
-            sprite: draws=N gpu=N fallback=N fallback_pixels=N skipped=N
-            fallback top: [N×] <原因> ; ...
+gpu       : draws=N gpu=N recorded=N queued=N empty=N fragments=N skipped=N
+            sprite: draws=N gpu=N skipped=N
             skipped top: [N×] <原因> ; ...
 ```
 
-- 默认（不设环境变量）第一次出现每种回退原因就打印一行
-  `[gpu] fallback: <原因>（该原因只打印一次）` 到 stderr；
-- ★ **`fallback` 与 `skipped` 是两个口径，⛔ 不许合流**（`REQ-01M7AAXVGY9SG75XCREHPX641Z`）：
-  - `fallback` = 这一批 **CPU 真写了像素**（`fallback_pixels > 0`）。它不是"CPU 在兜底"的许可，
-    而是"GPU 准入还差一块"的账；`REQ-01M78BF1FNNH6K8N8GEY6GQYXX` 的方向是把它清零。
-    **本单后真实场景应恒 0**。
-  - `skipped` = 这一批 **GPU 没画**（`gpuEligible` 准入拒绝 / `invw!=1` / `MIPFILTER=NONE` 缩小 /
-    后端失败 / 带纹理点线）。判据**不依赖** `pixels_written`：GPU 模式下的"写 0 个像素"是 CPU 计数，
-    拿它当判据会漏记（设计 `.tmp/cpu-migration/design.md` §A.3）。**真实场景应恒 0**；
-    `skipped>0` ≠ "回退"（回退是 CPU 画了，见上一条）。
-  - `skipped top:` 与 `fallback top:` 同形（次数降序、原因升序、最多 5 条）。拒批的具名位
+★ **要读 `gpu       :` / `sprite:` 这两行（以及按原因的 `skipped top:`）就读 Verbose 档**
+（`--profile` / `--log-level info` 等）；默认档里它们**不在输出里**，⛔ 不要拿"没看到它们"当成"全 0"。
+另外，`sprite:` 与 `skipped top:` 各有自己的打印条件（Verbose 档内）：`skipped top:` 只在
+`skipped_reasons` 非空时出现，`sprite:` 只在 sprite 有 draws / skipped 时出现；`unsupported :`
+在 Verbose 档恒打，默认档只打 non-benign 位（非空时）。
+
+- ★ **`skipped` 是"未画"的唯一口径**（`REQ-01M7AAXVGY9SG75XCREHPX641Z`）：
+  - `skipped` = 这一批 **GPU 没画**（`gpuEligible` 准入拒绝 / 没装后端 / `invw!=1` /
+    后端失败 / 带纹理点线）—— **"未画"只看这个数**。
+    **真实场景应恒 0**；`skipped>0` 意味着这一批**没有进画面**。
+  - `skipped top:` 是 `skipped` 的按原因聚合（次数降序、原因升序、最多 5 条）。拒批的具名位
     （`unsupported` 的 bit29..40）在 `unsupported :` 行里；`skipped` 是"没画"的机械判据，
     ⛔ 不是靠翻日志猜。
-- sprite 的 `skipped=`（源矩形空 / 屏外 / 退化）是裁剪，不是回退（与上面的 `skipped` 是**不同**
-  账：那条是 sprite 条目数，这条是 `Draw*` 批数）。
+- sprite 的 `skipped=` 也是"**没画**"，但与上面那个 `skipped` 是**不同**的账（这条数的是 sprite
+  条目，上面那条数的是 `Draw*` 批）。它是 sprite 侧唯一的"未画"信号：
+  源矩形空 / 屏外 / 退化 / 完全在纹理外（裁剪类），以及**没有 GPU 后端 / 目标或纹理非 32bpp /
+  源矩形部分越界 / 后端失败**（表达不了类，原因进 `skipped top:`）。sprite 的 `gpu=` 才是
+  "真的交给 GPU 队列"的条目数。
 - `LIFT_SLOW_DRAW=1`（可选 `LIFT_SLOW_DRAW_MS`）的 `[draw]` 行扩了
   `fvf= / coord= / stage0= / samp= / texfmt=`：`why=` 是"这批为什么没走 GPU"，其余是当时的状态值。
-  `[draw] fa=` / `[draw] texa=` 是**这一批真正参与混合**的 α / 纹理 α 聚合：GPU 批在提交前按顶点
-  统计（`n` = 顶点数），已有守卫 `gpu-batch/alpha-aggregation`。
-- `LIFT_GPU_VERIFY=1`（诊断，默认关）：对每个 GPU 走纹理的 `Draw*` 批，在**同一批 / 同一状态**上
-  先用待删的 CPU 像素路径跑一遍参考（不影响 guest 结果），再读回 GPU 结果逐像素对照，打印
-  `[gpu-verify] textured batch tris=… diff_pixels=… max_channel_diff=…`。它不依赖两次运行的时间轴，
-  是"同一帧"的 GPU ↔ CPU 对照；代价是这批 CPU 软光栅的墙钟（只在排障时开）。那是**诊断**，
-  不是第二个可用后端。
+  `[draw] fa=` / `[draw] texa=` 是**这一批顶点 diffuse α** / 纹理 α 的聚合：`fa=` 按交进后端的
+  顶点统计（`n` = 顶点数；**名字沿用历史，口径是顶点 α**，⛔ 不是逐片元混合 α —— 见
+  `REQ-01M7B7591WHEVZMYFZ1Q2D8SHQ`），已有守卫 `gpu-batch/alpha-aggregation`。
+  ⚠ `[draw]` 的 `pixels=` / `lvl=` / `miprb=` / `bbox=` 是**CPU 光栅时代的残留**：唯一的写入者
+  随那一族删掉了 ⇒ 这四项**恒为 0 / 0..0 / 0 / 0,0..0,0**。⛔ 不要拿它们当判据。
+- ★ 曾经的 `LIFT_GPU_VERIFY=1`（CPU 参考光栅 vs GPU 读回的逐像素对照）**已删**
+  （`REQ-01M7A74YG08R65NJBFXF7DEJDK`）：`gpuEligible` 拒批改成"记账 + 跳过"之后，
+  CPU 光栅不再是"生产可走的第二条路"，留一个 `getenv` 分支只会让人以为它还在。
+  历史读数（`docs/03-emulator/defects.md`）**不可再复现**；现在的像素对照走 `--dump-frame` /
+  `--present-screenshot`（见 §4.2b 末）。
 
 ```bash
 # 离屏 GPU 光栅（不建可见窗口；headless 也走 GPU）
@@ -793,7 +838,7 @@ gpu       : draws=N gpu=N fallback=N fallback_pixels=N recorded=N queued=N empty
 ./out/emulator-lift ... --max-frames 300 --present window --present-hidden
 ```
 
-评估口径：GPU blend / 采样舍入与 CPU 参考允许**每通道 ≤1 LSB**，不拿单一 hash 当唯一判据；
+评估口径：GPU blend / 采样舍入与 D3D9 参考允许**每通道 ≤1 LSB**，不拿单一 hash 当唯一判据；
 用 `--dump-frame`（guest 后缓冲）或 `--present-screenshot`（窗口像素）做逐像素 max-diff。
 直出成立时两者 1:1 下应当**逐像素相等**（窗口像素 = target = 读过回的 guest）；
 CTest `gpu-direct-present` 把这条做成守卫（含 16bpp 转换 / 尺寸变化 / 连续两帧）。
@@ -891,7 +936,7 @@ sprite 合批与那条直方图的算法。⛔ 不把逐帧数字写进 README�
 叠层只在**窗口**与 `--present-screenshot`（窗口像素）里可见；`--interaction-fail-dump` /
 `--dump-frame` 是 **guest 帧**（`arena.dumpBmp`），不含叠层 —— 与"guest 像素 / 整帧 hash 零改动"同口径。
 两条呈现路径（GPU 直出 / SDL_Renderer 上传）都画；守卫 = `tests/overlay.cpp`（CTest `overlay` /
-`overlay-gpu` / `overlay-window-smoke`）。
+`overlay-gpu`）。
 
 ### 4.3.1 一帧的墙钟去哪了（逐帧诊断）
 
@@ -911,12 +956,12 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
 [frame] n=NNN wall=…ms insns=… guest=…ms shim=…ms other=…ms
         guest: sub_XXXXXX=…ms ...
         shim : com!IDirect3DDevice9::Present=…ms×… …
-        gpu  : draws=… fallback=… fallback_pixels=… sprite_gpu=… sprite_fallback=…
+        gpu  : draws=… sprite_gpu=… sprite_skipped=…
         pres : readback=…ms hash=…ms stats=…ms sink=…ms direct=0/1
 ```
 
 - `wall` = 两次 Present 之间的宿主墙钟；`guest` = `--profile` 的块执行时间之和；
-  `shim` = shim 实现自身的时间（**含** Present / D3DXSprite / 固定功能流水线的软件光栅）；
+  `shim` = shim 实现自身的时间（**含** Present / D3DXSprite / 固定功能流水线的顶点装配与批提交）；
   `other` = `wall - guest - shim`（dispatcher / native override / 事件泵等）。
 - `shim :` 每项带 **`×调用次数`**：同样的墙钟可能是"一次很慢"或"很多次很快"，
   这两者的下一步完全不同（前者查实现，后者查 guest 调用点）。
@@ -941,7 +986,8 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
   不要再到 guest 函数表里找热点；`shim :` 行仍用于"这一帧"的归因。
 - `LIFT_SLOW_DRAW=1`（可选 `LIFT_SLOW_DRAW_MS=<ms>`，缺省 20）会为每次慢 `Draw*` 打一行
   `[draw] frame=… prim=… pixels=… gpu=… why=… sep_alpha=… tex=… texserial=… tfactor=… alpha=… d0=… uv=… blend=<0/1>/…/… op=… cw=… fvf=… coord=… stage0=… samp=… texfmt=… fa=<n>:<均值>/<min>/<max> submit=…ms`：
-  `gpu=0` 与 `why=` 就是"这一批为什么回退 CPU"的**第一原因**（不是猜测）；`stage0=` 是
+  `gpu=0` 与 `why=` 是"这一批为什么**没能进 GPU 批**"的第一原因（不是猜测；翻"跳过"之后
+  **不存在 CPU 回退**，`gpu=0` 只会出现在"后端绘制/入队失败"那一支）；`stage0=` 是
   color/alpha op 与 arg1/arg2（颜色与 alpha 各一对），`samp=` 是 address U/V 与 MAG/MIN，
   `texfmt=` 是 bpp/amask 与尺寸。
   ★ `frame=` = **清过后缓冲的次数**（`Clear(TARGET)` 是"新的一帧开始"的机械判据，见 `d3d9::frameSeq()`）——
@@ -952,19 +998,20 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
   "同一张纹理"与"同尺寸的另一张"。
   ⚠ `tfactor=` 是 `D3DRS_TEXTUREFACTOR`（0xAARRGGBB）：**stage0 的 arg 是 3(TFACTOR) 时，顶点色
   根本不参与** ⇒ 顶点 alpha 推进也不会有任何像素变化。
-  ★ `fa=` 是**真正参与混合的 α**（n / 均值 / min / max）。**两种批都有读数**（口径不同、都写在行里）：
-  · CPU 批 ⇒ 逐**像素**统计真的写进后缓冲的 α（`n` = 像素数；受 `LIFT_SLOW_DRAW` 门控）；
-  · **GPU 批** ⇒ 交进后端的那批**顶点** α 的聚合（`n` = 顶点数；逐批统计、**不**受门控）。
-  两者都能回答"这一笔的 α 是多少"，⛔ 都不能回答"混了多少片元"（GPU 拿不到片元数）。
-  取数口：`d3d9::lastDrawAlphaAgg()`（`from_gpu` 区分两种口径）；守门 `gpu-batch/alpha-aggregation`
-  （GPU 批画一个 α=128 的四边形 ⇒ 均值落在 128±8、n>0）。
-  ⚠ **纹理带 α 的批两者可以不等**：GPU 版数的是**顶点 α**（不含纹理 α），CPU 版数的是**着色后**的
-  像素 α（= 顶点 α 经 stage 运算后的值）⇒ 要判断"是不是纹理 α 把它压到 0"必须**同时**看 `texa=`，
-  ⛔ 不要拿两条 `fa=` 的 min 直接对比不同后端。
-  "这一笔到底有没有画上去"只能看它：`fa=…:0/0/0` = 整笔全透明（α 取自纹理 / 顶点色没参与 /
-  alpha test 全灭，三者表现相同，要接着看 `stage0=` 与 `texserial=`）。
+  ★ `fa=` 是**顶点 diffuse α** 的聚合（n / 均值 / min / max）：只有**一份口径** —— 交进后端的那批
+  **顶点** α（`n` = 顶点数；逐批统计、**不**受 `LIFT_SLOW_DRAW` 门控）。
+  ⚠ **名字沿用历史（`fa=`），但口径是顶点 α**：旧 CPU 光栅统计的是逐像素、stage 数学之后的混合 α，
+  那条实现已随 CPU 光栅一起删了 ⇒ 今天的 `fa=` ⛔ 不是"真正参与混合的 α"（见
+  `REQ-01M7B7591WHEVZMYFZ1Q2D8SHQ`）。它能回答"这一笔的顶点 α 是多少"，⛔ 不能回答"混了多少片元"
+  （GPU 拿不到片元数）。
+  取数口：`d3d9::lastDrawAlphaAgg()`；守门 `gpu-batch/alpha-aggregation`
+  （画一个 α=128 的四边形 ⇒ 均值落在 128±8、n>0）。
+  ⚠ **纹理带 α 的批 `fa=` 不反映纹理 α**（它数的是**顶点 α**）⇒ 要判断"是不是纹理 α 把它压到 0"
+  必须看 `texa=`，⛔ 不要把 `fa=` 的 min 当成像素 α。
+  "这一笔的顶点 α 是多少"只能看它：`fa=…:0/0/0` = 这一批的**顶点** α 恒 0（像素是否透明还要看
+  `stage0=`：顶点色没参与时顶点 α=0 也可能照画；alpha test 全灭是另一回事）。
   ★ `texa=` 是**绑定的纹理自身**的 α（16×16 网格采样 min..max/均值）—— 与光栅后端无关，
-  GPU 批也照打；它和 `fa=` 一起才能分辨"纹理 α=0"与"stage 数学算错"。
+  GPU 批也照打；它和 `fa=` 一起才能分辨"纹理 α=0"与"顶点 α 没参与"。
 - `LIFT_DRAW_CALLSITE=1`（诊断，默认关）：每次 `IDirect3DDevice9::DrawPrimitive` 打一行
   `[draw-call] prim=… ret=<shim 返回地址> chain=<ebp 链上的返回地址…>` —— `ret=`/`chain=` 拿去 `.lst`
   就能回答"谁画了这一批"（最近的调用点 = `ret-5`），不用猜。
@@ -973,10 +1020,9 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
   `[ebp-0x24]`/`[ebp-0x20]` 是它传给 `sub_49E390` 的纹理 id 数组，`-1` = 这一批**没有纹理**）。
   同一个开关还会为 stage 0/1 的 op/arg 写打 `[sts] stage=… type=… value=… ret=…` ——
   **"这一批用的到底是 DIFFUSE 还是 TFACTOR"只能看这个**（`ret=` 定位写它的 guest EA）。
-- 回退原因还按字符串聚合进 `dumpRunSummary` 的 `gpu       :` / `fallback top:` 行
-  （见 §4.2b）；`fallback=` 是"CPU 真写了像素"的机械判据，⛔ 不是靠读日志判断。
-  ★ **`skipped=` 是另一条账**（GPU 没画：准入拒绝 / `invw!=1` / MIP 缩小 / 后端失败），
-  按原因聚合进 `skipped top:`；真实场景两个数都应 0（口径见 §4.2b）。
+- **`skipped=` 才是"GPU 没画"的账**（准入拒绝 / 没装后端 / `invw!=1` / MIP 缩小 /
+  后端失败；sprite 那一行是 `sprite_skipped=`），按原因聚合进 `skipped top:`。
+  真实场景的判据是 `skipped=0` 且 `sprite_skipped=0`（口径见 §4.2b）。
 - `LIFT_LOG_MARKERS=1`（诊断，默认关）：引擎帧身份（marker 源）**变化**时往 stdout 打一行
   `[marker] frame=… insn=… cur=… id=0x%08X name=…`（名字读不到时标 `（降级）`，稳态不刷屏）。
   它是"`script <名字>` 该写什么"的**发现路径**；只开它、不写任何脚本动作也会打开身份采样。
@@ -1103,7 +1149,7 @@ emulator-lift --game-dir <install> --skip-logo --native-overrides all --present 
 
 ★ **两档口径**（`REQ-01M7AG06MXS6PK2B53B29QM76Z`）：**默认档**（`--log-level` 缺省 `warn`、且无
 `--profile` / `--report`）只打三段 —— `=== run 结论 ===`（`stop` / `detail` / `insns` / `present-tail`）、
-`=== 异常 ===`（干净时**整段不出现**：非零 fallback / skipped / underrun / violation /
+`=== 异常 ===`（干净时**整段不出现**：非零 skipped / underrun / violation /
 未支持具名位（**只算 non-benign**；bit11 `MIPFILTER` 是**已知近似** —— 引擎设三线性、GPU sampler 按
 最近级画 ⇒ 默认**不算**异常，位照旧记，`read :` 里带 `mipfilter≈nearest`）/ 非预期停的最近 3 条 +
 native-override 的**真异常**条目（`fallbacks!=0` / `declines!=0`；`hits==0` 是"这一趟没走到"的正常情况））、

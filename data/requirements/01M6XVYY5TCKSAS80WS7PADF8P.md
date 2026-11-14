@@ -5,7 +5,7 @@
 - status: done
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
 - order: 1
-- verify: apps/emulator-lift/tests/interaction_graph.cpp#script-cond-forms
+- done_reason: 该 CTest 已按测试模型删除（REQ-01M7ATAB5A18W7XBCKFBEQS7HB）：交互图 DSL 的解析/状态机只作驱动、不再有门禁；复现命令见 defects.md#BUG-16。
 - tags: [emulator-lift, interaction, state-machine]
 
 ## 现在到哪了（2026-11-10：进 / 出 EU-ROOM 都跑通；只剩"脚本身份"识别源）
@@ -18,7 +18,7 @@
   "任务没走完"（guest 侧硬停）也 **exit 5** —— 见 `repo:apps/emulator-lift/README.md` §4.2d。
 - **动作仍走时间线那套注入**：图把动作**追加**进 `InputScript`，自动 hold / 延迟抬起 / profiler 窗口 / `quit` 只有一份实现
   （⛔ 不另写一套按下抬起）。可选按钮词（`click … [left|right]`，缺省 left）也走同一条路。
-- **守卫**：`repo:apps/emulator-lift/tests/interaction_graph.cpp`（19 条 pure 用例）+ 变异条目 `ctest:interaction-graph`。
+- **守卫**：`repo:docs/03-emulator/defects.md`（19 条 pure 用例）+ 变异条目 `ctest:interaction-graph`。
 - **脚本**：`repo:apps/emulator-lift/scripts/interaction/` 三份（进房间 / 出房间·左键 / 出房间·右键），全部**零帧号**。
 
 ## 判据对照

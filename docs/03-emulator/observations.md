@@ -82,6 +82,16 @@
 - **读数**（`w3` = 700M 条 / 78.9 s）：`0x412290`（WinMain 主循环）self **9.8%** / incl 27.5%；`0x4BBAB0`（DirectSound 流槽管理）**2,766,573 次 / 78.9 s（35k/秒）**、self 7.1% / incl 18.9%；`0x41BF50`（VM 取操作数）**4,612,006 次**、self 6.5% / incl 14.9%。shim 侧几乎无开销（每 700M 条 `HeapAlloc` 606 次 / `EnterCriticalSection` 308 次）。
 - **复现**：`.tmp/exitstall/exit-3win.txt`（`--time-limit 175`，窗口 `[800M,1.5e9]`）· 口径A + `--profile` 窗口表 · 2026-11-08 · `[.tmp/exitstall/report.md:33-38,48-49]`
 
+### OBS-20261114-01 · 派发层固定税 b / 每条 c（`dispatch-tax` 的读数面 —— 判据已移出默认档）
+- **读数**（RelWithDebInfo · `windows-x64` · 2026-11-14）：`dispatch-tax: b=66.86 ns/块 c=19.18 ns/条
+  lock+unlock=8.25 ns clock=19.88 ns Δb(diag)=10.16 ns dt1=9.91 ns/块`；
+  同轮 `microbench` 的 `lock+unlock=8.25 ns` / `steady_clock::now=19.88 ns` / `GuestToken acq+rel=23.35 ns`
+  （N=1,000,000 × 7 样本取最小）。
+- **复现**：`apps/emulator-lift$ ./out/tests/lift-dispatch-tax.exe`（或 `ctest --test-dir out -R dispatch-tax`）·
+  本机 `LIFT_STRESS` **未**开也照跑（当时还在默认档；此后按终裁 3 移档）。
+- **口径**：这些是**读数**，⛔ 不是断言；断言面（`kDeltaBTolNs` / `kLockCostFloorRatio` 之类的阈值）随整条
+  CTest 移入 `LIFT_STRESS`（效率档），默认 `ctest` 里不再跑它 —— 理由：计时的量级带是效率读数，不是对外合同。
+
 ## 测量自身的开销与结构
 
 ### OBS-20261108-09 · profiler 的膨胀量级
@@ -103,6 +113,16 @@
 ### OBS-20261108-13 · 堆首次适配 / 收口合并的优化前后（同一过渡帧）
 - **读数**：块比较 **47,572,524 → 516,482**（≈92×）；收口合并 **45,812,143 → 2,773**（≈16.5k×）；而 `allocs`（17,808→17,804）、`blocks`（7131→7130）、`zero`（36,519,320 B）**几乎没变** ⇒ 结果面没动，只是扫的量少了。
 - **复现**：`.tmp/roomopt/heapmeas3.log:593`（前）对 `heapmeas4.log:581`（后）· 实现 `src/runtime/heap.h:76-82` · 取舍见 L3-heap-01 · 2026-11-08
+
+### OBS-20261114-02 · 同一输入两次 `--trace-out` 的 trace **逐字节相同**（读数；`LIFT_STRESS` 档）
+- **读数**（RelWithDebInfo · `windows-x64` · 2026-11-14）：`run1: reason=until-ea eip=004BA890 insns=33499
+  hash=BFEBB70095383669 inputs=C7CD139C4714F22A` / `run2:` 同一组数（逐字段相同）；
+  `trace: run1=41596 bytes run2=41596 bytes` ⇒ 两次 trace 的**字节数相等且逐字节相同**（断言体就是这个）。
+- **复现**：`$env:LIFT_STRESS=1; cmake --preset windows-x64; cmake --build --preset windows-x64;
+  ctest --test-dir out -R "^boot-trace$" -V`（要 `links/install` + LFS 拆壳件在场）。
+- **口径**：这是**可复现性读数**（同输入两次运行 trace 相同），⛔ 不是"某次 trace 长得对"的断言 ——
+  断言仍留在 `tests/boot_trace.cpp`（`LIFT_STRESS` 档，注册在 `if(DEFINED ENV{LIFT_STRESS})` 里）；
+  变异清单**不再覆盖**它（终裁 1：默认机器上恒为占位，删条目、读数进本文件）。
 
 ## 音频与输入
 
@@ -197,6 +217,7 @@
 - **新读数（决定性）**：`[draw] fa=` = 本批真正参与混合的 α（n/均值/最小/最大）——两笔分别
   `894575/0/0/0` 与 `919601/0/0/0` ⇒ **α 恒 0、整笔全透明**。stage0 两段都是 `MODULATE(TEXTURE, TFACTOR)`：
   α 取自**纹理**（当前绑的是几万条指令前留下的 `texserial=22`，α=0），**顶点 α 不参与**。
+  ★ 该口径随 CPU 光栅退休已变（今天的 `fa=` 数**顶点 diffuse α**，不再是逐像素混合 α），见 `REQ-01M7B7591WHEVZMYFZ1Q2D8SHQ`。
 - **引擎侧**：`sub_49E390` 只在 `edi==1/2`（绑到 1~2 张纹理）时设 `COLORARG2/ALPHAARG2=DIFFUSE`（`0x49E608–0x49E660`）；
   这两笔的纹理 id 是 payload 里的 `-1/-1` ⇒ `edi==0` ⇒ **一条不设**。而 `sub_4C19E0` 是
   `COLORARG2=DIFFUSE(0x4C1A29)` → `ALPHAARG2=TFACTOR(0x4C1A57)` → `COLORARG2=TFACTOR(0x4C1A9C)`（中间无 Draw）⇒ 最终 TFACTOR。
@@ -347,7 +368,8 @@
 ### OBS-20261112-04 · `_ShowDialog(-1)` 是 AGERC 的 UI **状态查询**，顶边悬停时被 100 ms 计时器轮询
 - **读数（本线口径，2026-11-12）**：`at marker TITLE.BIN` 后 `mouse_move 640 1`（客户区顶边 y=1）⇒
   `agerc!_ShowDialog@12(FFFFFFFF,00010000,00000000) -> 00000001  ret=004B92A5`；
-  同一脚本把 `--until ea` 设成 `0x4B92A5` 时 run 在 **17.98 s** 内收口（CTest `agerc-ui-state`）。
+  同一脚本把 `--until ea` 设成 `0x4B92A5` 时 run 在 **17.98 s** 内收口（CTest `agerc-ui-state`；
+  该 CTest 已于 2026-11-13 随 CTest 瘦身删除 —— 读数仍是当天的实测值）。
 - **对照读数（把 -1 分支改成真机 0）**：同一条脚本立刻多出
   `agerc!_ShowDialog@12(00000004,00010000,00000000) -> 00000001`，随后
   `user32!GetWindowRect(00000001)` 报 `窗口句柄 0x00000001 不存在` ⇒ 进程 abort（exit 134）。
@@ -361,7 +383,9 @@
 - **本线口径（2026-11-12）**：**故意返回 1**（不是真机的 0）挡住未实现的 AGERC 菜单栏：
   若返回 0，实测 2026-11-12 macOS arm64 会走到 `_ShowDialog(4) -> 1` ⇒
   `user32!GetWindowRect(00000001)` 报 `窗口句柄 0x00000001 不存在` 并 abort。
-  这条偏差与 SCOPE §1「菜单 / AGERC 设置对话框 = 永久 no-op」一致；守卫 `tests/agerc_ui_state.cpp`。
+  这条偏差与 SCOPE §1「菜单 / AGERC 设置对话框 = 永久 no-op」一致；原来守它的 `tests/agerc_ui_state.cpp`
+  （CTest `agerc-ui-state`）已于 2026-11-13 删除（它断言的是我们 stub 的返回值，属 BUG-14 反模式；
+  这条取舍现在只记录在本条与 `apps/emulator-lift/README.md` §4.1）。
 - **复现**：`./out/emulator-lift --present window --present-hidden --present-driver software
   --raster cpu --skip-logo --audio off --game-dir ../../links/install --appdata ../../.tmp/hover/appdata
   --until ea 0x4B92A5 --trace-shims --input-script ../../.tmp/hover/hover.txt --time-limit 300`
@@ -383,7 +407,9 @@
 - **复现**：`./out/emulator-lift --present window --present-hidden --raster gpu --native-overrides all
   --skip-logo --audio off --game-dir ../../links/install --appdata ../../.tmp/save/appdata
   --interaction-graph ../../graphs/sn0000-save.graph --max-frames 6000 --time-limit 300` ·
-  2026-11-12 · macOS arm64 / RelWithDebInfo · CTest `save-graph`（79 s）
+  2026-11-12 · macOS arm64 / RelWithDebInfo · 原 CTest `save-graph`（79 s）已按测试模型删除（2026-11-14，
+  业务正确性不作判据；它原来在 `repro` 档，现在只留这条命令）。
+- `save-graph`：`./out/emulator-lift --present window --present-hidden --native-overrides all --skip-logo --audio off --game-dir ../../links/install --appdata <每次全新私有 tmp> --interaction-graph ../../graphs/sn0000-save.graph --interaction-fail-dump <save.fail.bmp> --max-frames 8000 --time-limit 400` ⇒ 人读判据：`stop : stopped` / `detail : interaction: task done`、`SAVE00.DAT` ≈ 1 MB、`SAVE00.STH` 偏移 54 之后非零字节 > 0（★ 原 CTest 已删，不进测试）。
 
 ### OBS-20261112-06 · 两处卡顿的区间 profile：右键进 FELLOW / SAVE 确认保存
 - **图**：`graphs/sn0000-save-profile.graph`（`profile_begin fellow-enter` 覆盖右键 + 12 s；
@@ -447,3 +473,159 @@
   `--present window --present-hidden --raster gpu` / `--skip-logo --audio off --native-overrides all`。
 - **用途**：修正 `REQ-01M78GAHK7TETS08H4CKAGJKN7` 里「`A3/B1/D5/C2` 是未用槽占位默认串」的误判；
   `corpus/fixtures/saves/`（老汉化 936）的显示要另做数据层迁移（本观察**不**声称 lift 应改编码）。
+
+### OBS-20261113-02 · `--present-screenshot` 的 BMP 导出路径**全仓无守卫**（已知缺口，不补用例）
+
+- **读数**（2026-11-13 / Windows / `apps/emulator-lift` / RelWithDebInfo）：
+  `rg -n 'present-screenshot' apps/emulator-lift/tests/` = **0 命中** —— 没有任何测试引用它。
+  它仍被 `src/main.cpp`（CLI 解析）与 README / SCOPE 的**人工命令**引用 ⇒ **没有任何自动路径会执行到它**。
+- **曾经唯一的真 boot 覆盖**：`overlay-window-smoke`（`tests/overlay.cpp` 的 `--window-smoke` 臂：
+  子进程带 `--present window --present-hidden --overlay --max-frames 2 --present-screenshot …`，
+  断言 BMP 左上角被叠层精确覆盖；`git show 382e3c4` 可见）。
+  ★ 该 CTest 与那条臂已随 2026-11-13 的测试瘦身**删除**（见 `CMakeLists.txt` 的同名注释、
+  `docs/03-emulator/defects.md` BUG-14 的"现状"行）。
+- **缺口形态**：窗口回读 → BMP 落盘 → `{frame}` 替换 / `--present-screenshot-frame` 这一整条**导出路径**
+  现在没有守卫；它坏了不会被任何 `ctest` / `pnpm test` 发现，只能靠人工按 README §4.1 的命令跑。
+  叠层的**像素判据**仍由 pure 的 `overlay` ③④ 覆盖；缺的是"真 boot + 真窗口回读 + 真落盘"那一段。
+- **口径**：按 `AGENTS.md` §10 这是**已知缺口**（观察 / 缺陷史，不是"变了就是 bug 的静默错误"）
+  ⇒ 登记在此，⛔ **不为它新加用例**（原用例正是"用 test 记住当年那次排查"的形态，删掉是对的；
+  将来要补的是**设计的合同**，不是把旧 smoke 搬回来）。
+
+### OBS-20261114-01 · 关窗确认三档的复现命令（原 CTest `close-confirm` 已删）
+
+- **读数（2026-11-12，源 = `REQ-01M72JFZ87DJNT52DW4HB8SEV6` 的"收口"段；不是我这次重测的）**：
+  三臂各自 `exit -> 1 stop@00405B21` · `title -> 2 stop@00405A82` · `cancel -> 0 stop@00405A95`，
+  原 CTest `close-confirm` 18 checks；`ask` 在 dummy 视频下系统框起不来 ⇒ 1 + warn。
+- **处置**：按测试模型（`REQ-01M7ATAB5A18W7XBCKFBEQS7HB`）**业务正确性不作判据** ⇒ CTest 与
+  `tests/close_confirm.cpp` **已删**（2026-11-14）；纯映射 / 系统框缝 / 2/0 取消关窗那几条**合同**仍由
+  pure 的 `tests/messagebox.cpp` 钉住。
+- `close-confirm`：`./out/emulator-lift --present window --present-hidden --present-driver software --skip-logo --audio off --game-dir ../../links/install --appdata <每次全新私有 tmp> --close-confirm <exit|title|cancel> --until ea <0x405B21|0x405A82|0x405A95> --trace-shims --input-script <close.txt> --time-limit 600`（`close.txt` = `at marker TITLE.BIN` + `close_window`）⇒ 人读判据：`stop      : until-ea` @ 对应 EA、trace 里 `agerc!_ShowDialog@12(00000003,00010000,00000000) -> 0000000{1|2|0}`、日志有"不弹框、直接返回"（★ 原 CTest 已删，不进测试）。
+
+### OBS-20261114-02 · `--skip-logo` 的钩子点 / 字段（原 CTest `skip-logo` 已删）
+
+- **口径**（`apps/emulator-lift/README.md` §4.1b）：`--skip-logo` **不跳过 boot**，只在 `T_Command` 构造完成、
+  指针发布之前（EA `0x004BAA37`，EAX = 新对象）把引擎自己的 show-logo 字段 `T_Command + 0x5EB5C` 写 0；
+  字段初值由构造器 `sub_415640` 在 `0x00415AE0` 写成 1。**只写这一格**，⛔ 不按帧号猜 LOGO。
+- **处置**：原 CTest `skip-logo`（`tests/skip_logo.cpp`）断的是**我方钩子的内部形态**（只写这一格、邻居不动）
+  ⇒ BUG-14 反模式，**已删**（2026-11-14）。钩子万一改坏，boot/TITLE 会当场炸（`README.md` §0.1 的 (b)）。
+- `skip-logo`：`./out/emulator-lift --game-dir ../../links/install --appdata <每次全新私有 tmp> --skip-logo --audio off --present headless --max-frames 1` ⇒ run summary 应有 `skip-logo : applied @ T_Command=0x… (+0x5EB5C=0)`；**不带**该开关时整行不出现（★ 原 CTest 已删，不进测试）。
+
+### OBS-20261114-03 · 退出写存档尾段的 LZSS Encode override（原 CTest `native-override-e2e` 已删）
+
+- **读数（2026-11-10，OBS-20261110-05 的同一段 tail）**：`sub_4367B0`（LZSS Encode）
+  `incl=3328.082ms` / `self=60.235ms` / `calls=1` ⇒ 它吃掉了退出尾段的大头。
+- **处置**：原 CTest `native-override-e2e`（`tests/native_override_e2e.cpp`，assets 档）是**业务 + 效率混装**
+  （`hits==1` 是效率读数，`SAVE.DAT` 字段语义 / `stop=stopped` 是业务）⇒ 按测试模型**整条已删**（2026-11-14）。
+  override 的语义 / 回退由 `native-override-assets`（真字节两臂）与 `native-override`（pure）继续守；
+  效率读数按 `REQ-01M7ATAB…` 的口径归 `LIFT_STRESS`（本批未新写用例）。
+- `native-override-e2e`：`./out/emulator-lift --game-dir ../../links/install --appdata <每次全新私有 tmp> --skip-logo --audio off --present headless --input-script <script-quit.txt> --input-stall-boot-ms 600000 --profile --profile-top 200 --time-limit 300`，另跑一臂加 `--native-overrides sub_4367B0`（`script-quit.txt` = `at frame 130` / `click 1190 630` / `at frame 150` / `profile_begin tail`）⇒ 人读判据：`sub_4367B0` 明细行 `hits==1 && fallbacks==0`、`present-tail` 的 `tail_insns` 两臂差、`stop=stopped` + `detail` 含 `ExitProcess`（★ 原 CTest 已删，不进测试）。
+
+### OBS-20261114-04 · 导入覆盖普查的现行入口（原 CTest `base-coverage` 已删）
+
+- **口径**：A5 的判据是"trace 里**执行到的**导入 ⊆ 实现 ∪ `stub`（带 reason）"，原
+  `tests/base_coverage.cpp` 还要先钉"真的跑到 L2"（`0x004BA890`）⇒ 那是**跑真镜像的业务结论**，
+  按测试模型不作判据（2026-11-14 删）。**缺口普查**本身的价值是清单，不是断言 —— 它现在由
+  `emulator-lift --report` 的缺口清单承担（⛔ 不新写工具；静态缺口与动态足迹是两个口径，⛔ 不混）。
+- `base-coverage`：`./out/emulator-lift --exe ../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE --lst ../../corpus/disasm/files/AGE.EXE__dumped.sectfix.EXE.lst --game-dir ../../links/install --appdata <每次全新私有 tmp> --skip-logo --audio off --present headless --until ea 0x004BA890 --max-insns 200000000 --report` ⇒ 看 `--report` 的缺口明细与 `shims : imported … / called-unimplemented …`（原测试用 `LIFT_AGE_EXE` / `LIFT_AGE_LST` 指同一对文件；★ 原 CTest 已删，不进测试）。
+
+### OBS-20261114-05 · 删 `GpuCoverage::fallback_*` 死账的真实场景 GPU 覆盖读数（130 / 200 / 600 帧）
+
+- **口径**：Windows x64 / `apps/emulator-lift` / **RelWithDebInfo**（`windows-x64` 预设）/ 2026-11-14 ·
+  真游戏安装 `../../links/install` · 每次**全新**私有 `--appdata` · `--skip-logo --audio off
+  --present headless --native-overrides all`。
+- **命令原文**：`./out/emulator-lift --game-dir ..\..\links\install --appdata <全新 tmp> --skip-logo
+  --audio off --present headless --native-overrides all --max-frames N`（N = 130 / 200 / 600）。
+  ★ 要读 `gpu       :` / `sprite:` 两行时，同一条命令再加 `--profile` —— 它们只在 Verbose 档打印；
+  默认档只有 `read :` 那一行（两次跑都在同一台机器、同一 build）。
+- **读数（130 帧）**：`read : … gpu=draws 7969/tri 358551/skipped 0 native-ovr=hits 302756/fallbacks 0 …`；
+  Verbose 档的固定账 = `gpu       : draws=7969 gpu=7969 recorded=7862 queued=7862 empty=107
+  fragments=1075653 skipped=0`、`sprite: draws=3121 gpu=3121 skipped=0`。
+- **读数（200 / 600 帧）**：200 帧 = `12239 / 552888 / 4801`、600 帧 = `36639 / 1656958 / 14401`
+  （三元组 = `gpu draws` / `tri` / `sprite draws`，顺序同上面 130 帧那两条读数）。
+- **逐帧后缓冲 hash**：同一 `--max-frames` 下**改前改后逐帧 hash 完全相同**（130/130、600/600 帧）
+  ⇒ 删掉那三个字段没有改变任何一帧的 guest 后缓冲像素。hash 取自 `d3d9!Present` 的 Info 行
+  （要 `--log-level info` 才计算/打印），比对的是两次跑**全部帧**的 hash 序列，不是抽样。
+- ★ **这是读数，不是断言**：上面每个数字都只是"这条命令在这台机器上跑出多少"，
+  ⛔ 不把其中任何一个写成"应该等于"。
+- **未测**：① **更靠后的存档 / 战斗**场景（600 帧只到 ADV，存档链与战斗没覆盖）；
+  ② 「**源矩形部分越界**」与「**目标 / 纹理非 32bpp**」这两处改行为（从 `fallback` 口径挪进
+  `skipped`）之后的**命中情况** —— 这轮没有专门构造能命中它们的场景，只有上面这些真实场景读数。
+
+### OBS-20261114-06 · `LIFT_STRESS` 四场景（S1 / S2 / S3 / S9）的实测读数
+
+- **口径**：Windows x64 / `apps/emulator-lift` / **RelWithDebInfo**（`windows-x64` 预设）/ 2026-11-14 ·
+  真游戏安装 `../../links/install` · 每次 run **全新**私有 `--appdata` · `--skip-logo --native-overrides all`。
+  **口径 W** = `--present window --present-hidden --present-vsync 0`（real-time ⇒ `guest_ms` = 宿主毫秒）；
+  **口径 H** = `--present headless`（虚拟时钟 ⇒ 计数确定性）。⛔ 两套参数不混写（`headless` 拒绝窗口参数）。
+- **命令**：`$env:LIFT_STRESS=1; ctest --test-dir out -R "^stress-(boot|title-steady|adv-audio|gpu-coverage)$"
+  --output-on-failure`（每条 N=3 遍；逐遍原始值 + 中位落 `.cache/lift-stress/<场景>-<UTC>.json`）。
+- **S1 boot→TITLE 首帧**（口径 H，`--max-frames 1`，宿主墙钟）：**4957.98 / 4988.10 / 4918.05 ms**
+  ⇒ 中位 **4958.0 ms**；`insns=157,120,091`（三遍逐字相同 ⇒ 读数可比）；`read :` 的
+  `heap=11,166,608/15,456,208`；`arena : surfaces 21 in_use 108,595,152 peak 108,595,152 largest-free 22,591,536`。
+- **S2 TITLE 稳态**（口径 W + `LIFT_FRAME_TRACE=1`，驱动 = 现成的 `scripts/bench/idle.txt`，
+  稳态样本 = `[frame]` 里 **n≥100** 的行）：帧时间中位 **31.3 / 31.5 / 32.0 ms** ⇒ 中位 **31.5 ms**；
+  p95 **39.3 / 40.4 / 42.7** ⇒ **40.4 ms**；每帧 `insns` 中位 **221,690**（1208–1212 帧/遍）；
+  空转窗口（`at insn 250M` → `450M`）**143.90 / 145.78 / 145.60 ms/M** ⇒ 中位 **145.6**（含帧跟踪开销）。
+  ★ 与 OBS-20261108-02 的 28.5k 条/帧**不是同一场景**（那是 EU-ROOM 稳态，这里是 TITLE）⇒ ⛔ 不要横比。
+- **S3 ADV 一段 + 真音频**（口径 W + `--audio sdl` + `--log-level info`，驱动 = 现成的 `graphs/sn0000.graph`）：
+  帧时间中位 **25.95 / 21.8 / 21.5 ms** ⇒ **21.8 ms**；p95 **87.0 / 87.3 / 86.3** ⇒ **87.0 ms**
+  （含 ADV 场景切换帧，单帧最慢 1116 ms；⛔ 不剔除大帧）；
+  `audio : mode=sdl device=ok fills=136–138 … fill_slow=0 underruns=0 underrun_silence_events=0
+  fill_wait_timeouts=0 slot_reverify_fail=0`；
+  **`fill_max_ms` = 441.56 / 428.30 / 431.73**（标定阶段另有一次 **678.60** —— 那一次越过了
+  `machine.cpp:2456` 的 500 ms 告警门槛，日志里有 `⚠ audio.fill_max_ms=678.60` 那一行）。
+  ★ **裁决（2026-11-14 收尾）：`fill_max_ms` 是读数，⛔ 不进判据（R1）**；`audio :` 行自带
+  500 ms 告警门槛（`machine.cpp:2456`），越线时由**产品**自己报警（那行 `⚠ audio.fill_max_ms=…`），
+  测试**不重复判**它。为什么：它是**单次最大值**，而 R1 明说墙钟类量只钉中位 / p95、⛔ 不钉单次
+  最大值；用一条 R1 不允许的判据去重复产品已经报过的警，只会把"产品报过的那一次"变成第二条红。
+- **S9 GPU 覆盖**（口径 H，`--max-frames 600`，`--log-level info`）：三遍全同（虚拟时钟 ⇒ 计数确定性）——
+  `skipped_draws = 0`、`sprite_skipped = 0`、`skipped top:` **不打印**（原因表为空）、`⚠ gpu` 行**不出现**
+  （⇒ `gpu_failures = 0`）；`read : … gpu=draws 36639/tri 1656958/skipped 0`；
+  `gpu : draws=36639 gpu=36639 recorded=36172 queued=36172 empty=467 fragments=4970874 skipped=0`；
+  `sprite: draws=14401 gpu=14401 skipped=0`；`unsupported : 0x…0800（bit11=MIPFILTER）`（已知并接受的近似）。
+  标定（同一构建、同一命令）：130 帧 = `draws 7969/tri 358551/skipped 0` + `sprite 3121/skipped 0`；
+  200 帧 = `12239/552888/skipped 0` + `sprite 4801/skipped 0` —— 与 OBS-20261114-05 的数逐字相同。
+- **S9 的"红时逐条列原因"有了机械证据（2026-11-14 收尾）**：把"从一段 stdout 文本里提取 skip 原因
+  并按格式报错"抽成纯函数 `tests/stress_skip_report.h` 的 `judgeSkipReport()`（输入 = 子进程 stdout
+  文本 + 阈值，输出 = 通过/失败 + 失败消息）；`stress-gpu-coverage` 的红分支只把**真日志**喂给它。
+  默认档的 `dispatch-tax`（顶层无条件注册 ⇒ 每次 `ctest` 都跑）里加了 `stress/skip-report`：
+  用**合成文本**三组断言 —— ① `skipped=0` 且无 `skipped top:` ⇒ 通过；② `skipped=3` + 三行
+  `skipped top:` ⇒ 失败且失败消息里**逐条原样**含那三行；③ `skipped=1` 但 `skipped top:` 缺失
+  ⇒ 失败且消息明确说"原因缺失"。⛔ 不开 `LIFT_STRESS`、⛔ 不跑真游戏（真红一次 ~6 min）。
+- **阈值怎么来的**（`§0.2` 的规则 + 上面哪条读数；逐条推导也写在 `tests/stress_*.cpp` 的文件头）：
+  S1 墙钟中位 ≤**7290 ms**（R1：标定中位 4860 ×1.5）· S1 三遍 `insns` 极差 **0**（R2）·
+  S1 `heap in_use` ≤**12,215,184 B**（R4：11,166,608 + 1 MiB）·
+  S2 帧中位 ≤**46.95 ms**（R1：31.3 ×1.5）· S2 p95 ≤**57.9 ms**（R1：38.6 ×1.5）·
+  S2 吞吐 ≤**178.74 ms/M**（**R3 偏离 ×1.25**：标定中位 142.99 ×1.25 ⇒ 178.7375 取 178.74；
+  ⛔ 不是 R3 的 ×1.10，偏离理由见下面"薄余量"那一段与 `tests/stress_title_steady.cpp` 文件头 ④）·
+  S3 帧中位 ≤**31.875 ms**（R1：21.25 ×1.5）· S3 p95 ≤**130.05 ms**（R1：86.7 ×1.5）·
+  S3 音频四个计数 = **0**（R2：`fill_slow` / `underrun_silence_events` / `fill_wait_timeouts` / `slot_reverify_fail`）·
+  S9 `skipped_draws` / `sprite_skipped` / `skipped top:` / `⚠ gpu` 四项 = **0**（R2）。
+- ★ **这是读数，不是断言**：上面每个数字都只是"这条命令在这台机器上跑出多少"；
+  阈值（断言）在 `tests/stress_*.cpp` 里，每条都注明了规则编号 + 依据读数。⛔ 不把任何一个数写成"应该等于"。
+- **同一命令的第二次真跑（`-R "lift-stress|stress"` 整条 gate；**共享负载** 17.76% → 19.38% 忙）**：
+  S1 **5486.7 / 5522.1 / 5455.9** ms ⇒ 中位 5486.7（比低负载那轮 +10.6%）；
+  S2 帧中位 **40.8 / 32.7 / 31.7** ⇒ 32.7、p95 **47.7 / 46.0 / 39.0** ⇒ 46.0、吞吐 **184.37 / 148.71 / 144.91** ⇒ 148.71；
+  S3 帧中位 **21.95 / 21.3 / 21.8** ⇒ 21.8、p95 **86.1 / 87.5 / 85.6** ⇒ 86.1、`fill_max_ms` 446.57 / 468.05 / 429.53；
+  S9 与上一轮**逐字节相同**（36639 draws / skipped 0 / sprite skipped 0 / 帧 600）。
+  ★ 值得记住的一条：S2 第 1 遍的吞吐 **184.37 ms/M 单遍越门（当时的门槛 157.29）**，而 **N=3 中位 148.71 在门内** ——
+  这正是 `§0.2 R1`"只钉中位 / p95、⛔ 不钉单次"的用途；反过来说，**单遍读数不许当基线**。
+  ⚠ 同时它暴露一个**薄余量**：门槛由低负载（~7.5%）的读数派生，负载 18% 时中位离门槛只剩 5.5%。
+  ⇒ **2026-11-14 收尾裁决：把吞吐门从 R3 的 ×1.10 放宽到 ×1.25（= 178.74 ms/M）**。理由：R3 的
+  ×1.10 派生自**空闲机**的 1.2–1.4% 噪声，而本档在**共享负载**下观测到的批间 + 遍间离散远大于此；
+  ×1.25 仍能抓住真正的回归（真实回归通常是 2× 量级，不是 5%），同时不会让"机器忙"伪装成回归。
+  判据仍落在 **N=3 的中位**上（⛔ 没有改成"挑最好一遍"）；JSON 的 `load.cpuBusyPctAtStart/End`
+  与红时的失败消息都带着负载档 —— 红了**先看负载**。
+  ★ 收尾轮的 S2 单跑（2026-11-14；按裁决只跑这一条，其余三条阈值没动所以不重跑）：
+  吞吐 **157.17 / 143.53 / 143.31 ms/M** ⇒ 中位 **143.53**（门槛 **178.74**，余 24.5%；最慢一遍
+  157.17 也在门内）；帧时间中位 **31.4 / 31.4 / 32.2** ⇒ 31.4、p95 **38.3**；
+  负载 **9.06% → 6.35%**（**低负载**）⇒ 这一轮没有复现上面 18–19% 的共享负载情形，
+  它证明的是"新门槛真的被读进 JSON 且判定通过"，不是"新门槛在 18–19% 下也够"。
+- **未落（留给下一批）**：S4（OPTION 往返）/ S5（存档读档）/ S6（EU-ROOM 进出）/ S8（30 min 长跑）——
+  理由 = 与已落的四类量**同质且贵**（墙钟 / 内存字节 / 音频计数 / 稳定性），不是"做不出来"。
+- **判不准**：① `fill_max_ms` 的归属**已裁决**（2026-11-14 收尾）：只当读数、⛔ 不进判据（R1）；
+  理由见上面 S3 那条（它是单次最大值；500 ms 由**产品**自己报警，测试不重复判）⇒ 不再"待裁决"；
+  ② S2/S3 的读数**含** `LIFT_FRAME_TRACE` 与 `--log-level info` 的开销 ⇒ ⛔ 不与
+  `pnpm tools lift bench idle` 的 105.87 ms/M（无帧跟踪）混表（`measurement.md` M-02）；
+  ③ 本机没有 loadavg，负载档记的是 `GetSystemTimes` 忙占比的采样值（S2 那轮 7.5% → 6.9%）；
+  ④ `[frame] wall` 只覆盖到"相邻两次 Present"，⛔ 不含首次 Present 之前的 boot（那一帧在 S1 里）。

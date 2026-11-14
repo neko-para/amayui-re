@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "check.h"
+#include "cmdline.h"
 #include "subprocess_skip.h"
 
 #if defined(_WIN32)
@@ -54,7 +55,8 @@ struct ChildResult {
 };
 
 #if defined(_WIN32)
-std::wstring quoteArg(const std::wstring& s) { return L"\"" + s + L"\""; }
+// ★ 命令行拼装只有一份实现（tests/cmdline.h）：`--game-dir` / `--appdata` 都可能带尾反斜杠。
+using lift_test::quoteArg;
 
 ChildResult runChild(const fs::path& exe, const std::wstring& args, const fs::path& log_path) {
     ChildResult r;

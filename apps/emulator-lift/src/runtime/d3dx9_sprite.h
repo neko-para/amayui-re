@@ -1,6 +1,6 @@
 // emulator-lift · D3DX9 Sprite 簇的**状态 / 批次 / 合成层**（M2 · 第一帧的直接缺口）
 //
-// ★ 分工（与 D3D9 同形）：本文件只做"guest 内存里的状态 + 批次表 + 像素合成"，
+// ★ 分工（与 D3D9 同形）：本文件只做"guest 内存里的状态 + 批次表 + 把批次交给 GPU 光栅"，
 //   **不认 COM** —— 对象 / vtable / refcount 在 `runtime/com.h`，方法 shim 在 `shims/d3dx9.cpp`。
 // ★ 现状（2026-11-05，实测 boot）：`d3dx9_43!D3DXCreateSprite` 是**第一个** d3dx 调用
 //   （`.lst` 0x4A2BD0 在 sub_4A2BA0；返回地址 0x4A2BD5）。⇒ 本簇先落地：
@@ -34,14 +34,16 @@
 //     未定义位也记录并忽略 —— 见 begin() 的注释）。
 //   · `Draw(...)` 在**Draw 时**就把变换应用到四个角点（与 D3DX 的"顶点当场生成、Flush 才提交"一致），
 //     把一次绘制压进 guest 堆上的批次表；⛔ 不在 Draw 里写像素。
-//   · `End()` / `Flush()` 把批次**一次性合成到设备的 guest 后缓冲**（与 `d3d9::clear` 同一块
-//     `SurfaceArena` 表面）：源 × 调制色（Color 的 A/R/G/B）→ 目标；按目标边界裁剪；
-//     ALPHABLEND ⇒ SRCALPHA/INVSRCALPHA；⛔ 不是"只计数不写像素"。
+//   · `End()` / `Flush()` 把批次交给**当前绑定的颜色目标**（与 `d3d9::Draw*` 同一个 GPU 后端）：
+//     源 × 调制色（Color 的 A/R/G/B）→ 目标；ALPHABLEND ⇒ SRCALPHA/INVSRCALPHA。
+//     ★ **光栅只有 GPU 一条实现**（`REQ-01M7AAXNJY2PACYJHYVRV620Q5` 删掉了 CPU 逐像素兜底）：
+//     GPU 不可用 / 表达不了这一条 ⇒ **记账（`skipped`）+ 跳过**，一像素都不写；⛔ 没有第二实现。
 //   · 纹理：`Draw` 支持两种源 ——
 //     ① `pTexture == NULL`：D3D9 固定功能"没有绑定纹理 ⇒ 采样白色"（几何尺寸来自 pSrcRect；
 //        pSrcRect 也为 NULL ⇒ 没有尺寸来源 ⇒ loud trap，⛔ 不猜 1×1）；
 //     ② `pTexture` 是**本模块建的** `IDirect3DTexture9`（`d3d9::createTextureState` /
-//        `D3DXCreateTexture`，像素在 `SurfaceArena`）：按源矩形采样纹理，越界源矩形**裁剪**，
+//        `D3DXCreateTexture`，像素在 `SurfaceArena`）：按源矩形采样纹理；**完全**落在纹理外 ⇒
+//        这一条什么也不画，**部分**越界 ⇒ GPU 路径表达不了（不做逐像素裁剪）⇒ 记账 + 跳过，
 //        Draw 时对纹理 AddRef（除非 Begin 给了 D3DXSPRITE_DO_NOT_ADDREF_TEXTURE）、End/Flush 对称
 //        Release。⛔ 不是本模块的纹理对象 ⇒ loud trap（不猜像素）。
 //     ③ `pTexture != 0` 且 `pSrcRect == NULL` ⇒ 用整张纹理（D3DX 语义）。
@@ -122,7 +124,7 @@ struct SpriteInfo {
     std::uint32_t resets = 0;
     std::uint32_t batch_count = 0;
     std::uint32_t batch_capacity = 0;
-    std::uint32_t composed_pixels = 0;  // 累计合成过的像素数（诊断；⛔ 不是"画面判据"）
+    std::uint32_t composed_pixels = 0;  // 累计**覆盖格数**（四边形包围盒；GPU 不回报片元数；诊断用）
     float matrix[16] = {0};             // SetTransform 的当前值（默认单位阵）
 };
 
@@ -166,7 +168,8 @@ std::uint32_t onResetDevice(X86& cpu, std::uint32_t state, std::string* why);
 // ---------------------------------------------------------------------------------------
 // 合成（导出给夹具 / 日志；正常路径只经 end()/flush()）
 // ---------------------------------------------------------------------------------------
-// 把当前批次合成到设备后缓冲；返回合成条目数 / 像素数，失败 ⇒ false + why。
+// 把当前批次交给 GPU 光栅（目标 = 当前绑定的颜色目标）；返回合成条目数 / 覆盖格数，
+// 失败 ⇒ false + why。★ "覆盖格数" = 真的入队的那些四边形包围盒之和（⛔ 不是 CPU 数出来的像素）。
 // ★ `pixels_written` 可以是 nullptr。
 bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries, std::uint64_t* pixels_written,
                     std::string* why);

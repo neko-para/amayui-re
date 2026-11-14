@@ -4,7 +4,7 @@
 - type: req
 - status: done
 - parent: REQ-01M72GW002QVRSG5J5WJ0KB1KF
-- verify: apps/emulator-lift/tests/native_override_e2e.cpp#native-override-e2e
+- verify: apps/emulator-lift/tests/native_override_assets.cpp#150068-pattern
 - tags: [emulator-lift profile native-override lzss save]
 
 ## 一句话

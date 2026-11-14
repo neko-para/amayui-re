@@ -13,6 +13,7 @@
 #include "runtime/guest_token.h"  // ★ M0：SDL_RenderPresent 的宿主等待要放令牌（见 submitFrame）
 #include "runtime/host_window.h"
 #include "runtime/input.h"
+#include "runtime/log.h"
 #include "runtime/overlay.h"
 
 namespace lift {
@@ -221,7 +222,9 @@ struct SdlWindow::Impl {
     void disableOverlay(const char* why);
 
     void postMessage(std::uint32_t message, std::uint32_t wparam, std::uint32_t lparam);
-    void requestStop();
+    // ★ `why` 是"这次为什么收 run"的**唯一指纹**（info 档一行）：`sdl-quit` / `grace-expired` /
+    //   `close-deadline` / `no-guest-window`。⛔ 默认档（warn）不打印，别把普通游玩弄吵。
+    void requestStop(const char* why);
     void requestClose();
     void advanceCloseFrame();
     void handleEvent(const SDL_Event& event);
@@ -246,8 +249,10 @@ void SdlWindow::Impl::postMessage(std::uint32_t message, std::uint32_t wparam, s
     windows->post(m);
 }
 
-void SdlWindow::Impl::requestStop() {
+void SdlWindow::Impl::requestStop(const char* why) {
     if (stop) return;
+    // ★ 诊断（info 档）：这条是"宿主为什么收口"的唯一指纹。判读表见 .tmp/close-path/wm-close.md §5.4。
+    lift::logAt(lift::LogLevel::Info, lift::LogGeneral, "[present] ", "stop: %s", why ? why : "(unknown)");
     stop = true;
     // 唤醒可能正阻塞在 GetMessageA 里的 guest：WM_QUIT 是队列尾的虚拟项。
     if (windows != nullptr) windows->postQuit(0);
@@ -257,19 +262,24 @@ void SdlWindow::Impl::requestClose() {
     if (stop || close_pending) return;
     if (windows == nullptr || windows->primaryWindow() == 0) {
         // 还没有 guest 窗口（或没有消息泵）⇒ 没有可确认的对象，直接收口。
-        requestStop();
+        requestStop("no-guest-window");
         return;
     }
     close_pending = true;
     close_frames_left = kCloseGraceFrames;
     close_deadline_ns = SDL_GetTicksNS() + kCloseGraceNs;
+    // ★ 诊断（info 档）：投递是与"guest 真的派发了"配对的那一半（另一半见 user32_window.cpp
+    //   的 `[msg] dispatch …`）。判读表见 .tmp/close-path/wm-close.md §5.4。
+    lift::logAt(lift::LogLevel::Info, lift::LogGeneral, "[present] ",
+                "post WM_CLOSE hwnd=%08X（宽限 %d 帧 / %llu ms）", windows->primaryWindow(),
+                kCloseGraceFrames, static_cast<unsigned long long>(kCloseGraceNs / 1000000ull));
     postMessage(kWmClose, 0, 0);
 }
 
 void SdlWindow::Impl::advanceCloseFrame() {
     if (!close_pending || stop) return;
     if (close_frames_left > 0) --close_frames_left;
-    if (close_frames_left <= 0 || SDL_GetTicksNS() >= close_deadline_ns) requestStop();
+    if (close_frames_left <= 0 || SDL_GetTicksNS() >= close_deadline_ns) requestStop("grace-expired");
 }
 
 bool SdlWindow::Impl::shotWanted() const {
@@ -492,12 +502,22 @@ void SdlWindow::Impl::mapMouse(float mx, float my, std::int32_t* gx, std::int32_
 void SdlWindow::Impl::handleEvent(const SDL_Event& event) {
     const std::uint32_t now_ms = static_cast<std::uint32_t>(SDL_GetTicks());
     switch (event.type) {
-        case SDL_EVENT_QUIT:
-            // 应用级退出：直接 post WM_QUIT（不再走 guest 的 WM_CLOSE 确认）。
-            requestStop();
+        case SDL_EVENT_QUIT: {
+            // ★ SDL 3.4.18 在**最后一个窗口**收到关闭请求时会无条件再推一条 QUIT（hint 缺省 "1"）。
+            //   那条不是"用户要退出应用" —— 已有关窗请求在途时必须给它让路，由 guest 的 WndProc
+            //   决定要不要退（否则 guest 一条指令都跑不到，确认框永远建不出来）。
+            //   纯映射见 `runtime/present.h` 的 `hostQuitAction`（判据在 tests/messagebox.cpp）。
+            if (hostQuitAction(HostQuitSource::AppQuit, close_pending) == HostQuitAction::StopRun) {
+                requestStop("sdl-quit");
+            }
             break;
+        }
         case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
-            if (window != nullptr && event.window.windowID == SDL_GetWindowID(window)) requestClose();
+            if (window != nullptr && event.window.windowID == SDL_GetWindowID(window) &&
+                hostQuitAction(HostQuitSource::WindowCloseRequested, close_pending) ==
+                    HostQuitAction::PostWmClose) {
+                requestClose();
+            }
             break;
         case SDL_EVENT_WINDOW_FOCUS_LOST:
             // ★ 焦点丢失只清 **OS 拥有** 的键 / 按钮（见 host_window.h 的 InputSource）：
@@ -567,7 +587,7 @@ void SdlWindow::Impl::pumpEvents(int wait_ms) {
     } else {
         while (SDL_PollEvent(&event)) handleEvent(event);
     }
-    if (close_pending && !stop && SDL_GetTicksNS() >= close_deadline_ns) requestStop();
+    if (close_pending && !stop && SDL_GetTicksNS() >= close_deadline_ns) requestStop("close-deadline");
 }
 
 SdlWindow::SdlWindow() : impl_(std::make_unique<Impl>()) {}
@@ -586,6 +606,20 @@ bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
         return false;
     }
     impl_->sdl_inited = true;
+    // ★ 关窗语义（本修复的一半）：SDL3 缺省会在**最后一个窗口**收到关闭请求时**再推一条**
+    //   `SDL_EVENT_QUIT` —— 那条 QUIT 不是"用户要退出应用"，只是"最后一个窗口在请求关闭"的
+    //   同义反复；它会把关窗请求抢跑成"宿主直接收 run"，guest 的 `WM_CLOSE`（与确认框）永远
+    //   来不及建立。显式设 "0"：关窗只走 guest 自己的 WndProc。
+    //   ★ 宏/字符串名与缺省值都是**在本机 vcpkg 的 SDL 3.4.18 头里核过的**（不是凭记忆）：
+    //     `out/vcpkg_installed/x64-windows/include/SDL3/SDL_hints.h:3211`
+    //       `#define SDL_HINT_QUIT_ON_LAST_WINDOW_CLOSE "SDL_QUIT_ON_LAST_WINDOW_CLOSE"`
+    //     同处文档块："- \"1\": SDL will send a quit event when the last window is requesting to
+    //     close. (default)"（`\since` SDL 3.2.0）。发源：SDL_windowevents.c 的 `SDL_SendQuit()`。
+    if (!SDL_SetHint(SDL_HINT_QUIT_ON_LAST_WINDOW_CLOSE, "0")) {
+        lift::logAt(lift::LogLevel::Warn, lift::LogVideo, "[present] ",
+                    "SDL_SetHint(SDL_HINT_QUIT_ON_LAST_WINDOW_CLOSE,\"0\") 失败 ⇒ 按缺省 \"1\" 继续"
+                    "（× 会被 SDL_EVENT_QUIT 抢跑）");
+    }
     // ★ GPU device 先建（不需要窗口）：后端失败必须在开窗之前就是硬失败。
     if (options.raster_gpu) {
         std::string gerr;

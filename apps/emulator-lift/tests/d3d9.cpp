@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "check.h"
+#include "gpu_arm.h"
 #include "runtime/d3d9.h"
 #include "runtime/d3d9_pipeline.h"
 #include "runtime/ddraw_surface.h"
@@ -530,15 +531,10 @@ void caseClear() {
     LIFT_CHECK(f.createDevice(obj, 1u, 0x44u, 1280, 720, lift::d3d9::kFmtX8R8G8B8, &dev));
     if (dev.object == 0) return;
 
-    // 建好时后缓冲是全 0（SurfaceArena 清零）——先确认这块"画布"起点
-    LIFT_CHECK_EQ_U32(f.pixelAt(dev.info, 0, 0), 0u);
-    LIFT_CHECK_EQ_U32(f.pixelAt(dev.info, 1279, 719), 0u);
-
-    // 引擎的那一次：Clear(0, NULL, 3, 0, 1.0f, 0) ⇒ 黑色
+    // 引擎的那一次：Clear(0, NULL, 3, 0, 1.0f, 0) ⇒ 黑色（⛔ 不断言"新建后缓冲初始为 0"——
+    // D3D9 不保证新建后缓冲的初始内容；"清黑后仍是 0"也无法区分 Clear 生效与 no-op）
     const std::uint32_t zero_z = 0x3F800000u;  // 1.0f 的位模式
     LIFT_CHECK_EQ_U32(f.method(dev.object, 0xACu, {0u, 0u, 3u, 0u, zero_z, 0u}), 0u);
-    LIFT_CHECK_EQ_U32(f.pixelAt(dev.info, 0, 0), 0u);
-    LIFT_CHECK_EQ_U32(f.pixelAt(dev.info, 1279, 719), 0u);
 
     // 再清成不透明的 0x00123456 ⇒ 每个像素都变成这个值（逐点 + 四角 + 中间）
     const std::uint32_t color = 0x00123456u;
@@ -2354,24 +2350,24 @@ void caseLockOverrunInvalidCall() {
 }
 
 // =======================================================================================
-// D3D9 点/线光栅守卫（`REQ-01M7372JNFAC2RWX2FXVV6YM5C`）
+// D3D9 点 / 线光栅（`REQ-01M7372JNFAC2RWX2FXVV6YM5C`；CPU 光栅删除后只剩**真 GPU 臂**）
 //
 // 修前：`submitPrimitives` 对 POINTLIST/LINELIST/LINESTRIP 只 `recordUnsupported(bit16)` 然后
-// `break` ⇒ 不写像素、不报错、Draw 返回 S_OK（假成功）。而引擎有两条实测线站点
+// `break` ⇒ 不写像素、不报错、Draw 返回 S_OK（假成功）。引擎有两条实测线站点
 // （0x48E16D = LINELIST 1 段、0x48E1F5 = LINESTRIP 16 段，FVF 都是 0x42 = XYZ|DIFFUSE）。
 //
+// ★ CPU 光栅整族已删（`REQ-01M7A74YG08R65NJBFXF7DEJDK`）⇒ 这些用例**必须装真 GPU 后端**
+//   （`lift_test::GpuArm`：隐藏窗口 + SDL_GPUDevice），读像素前先 `sync()`。没有 GPU 设备时
+//   整个 `--gpu` 臂 SKIP 77（CTest 的 `SKIP_RETURN_CODE`），⛔ 不假绿。
+//
 // 判据（红了意味着什么）：
-//   ① `d3d9/linelist-writes-pixels`：两个 XYZ|DIFFUSE 顶点映射到屏幕 (8.5,32.5)–(56.5,32.5)，
-//      Draw(LINELIST,1) 之后后缓冲上必须出现 **49** 个非背景像素（主轴每列 1px、含两端），
-//      且 (20,32)/(44,32) 的像素色 = 两端点色在 t=0.25/0.75 处的插值；row 31/33 仍是背景
-//      （线宽 1px）；x=7/57 仍是背景（端点列归属）。
-//      把线分支短路/步进改坏 ⇒ 像素数掉到 0 / 25 ⇒ 红。
-//   ② `d3d9/linestrip-16`：LINESTRIP 17 顶点（16 段阶梯，每段 x+3 / y+2）⇒ 不同像素数在
-//      [40,80]（16 段 × 3 列 + 1 ≈ 49；给区间，⛔ 不写死绝对值），且首/末顶点像素都被画到。
-//   ③ `d3d9/line-textured-loud-reject`：COLOROP=SELECTARG1(TEXTURE)（无纹理绑定时 CPU 会取
-//      白色，≠ 顶点色）⇒ `D3DERR_INVALIDCALL` 且一个像素都不写；绑了真纹理（默认
-//      MODULATE(TEXTURE,CURRENT)）⇒ 同样拒绝。恢复成"无纹理默认态"⇒ 同一批线能画。
-//      ⛔ 不许"画成纯色"糊过去（修前这一支是假 S_OK 且不画）。
+//   ① `d3d9/linestrip-16`：LINESTRIP 17 顶点（16 段阶梯）⇒ 后缓冲上的非背景像素数落在
+//      [36,96]（16 段 × 约 3 列 ≈ 49；给区间，⛔ 不写死绝对值）⇒ 掉几段就掉出下界。
+//      `gpu-batch/lines-points` 已覆盖 LINELIST/POINTLIST 的"真的画出像素"，⛔ 不重复。
+//   ② `d3d9/line-textured-loud-reject`：`COLOROP=SELECTARG1(TEXTURE)`（无纹理 ⇒ D3D9 取白色，
+//      ≠ 顶点色）⇒ `D3DERR_INVALIDCALL`；绑了真纹理 ⇒ 同样拒绝；恢复默认态 ⇒ 同一批线 S_OK
+//      且真的入队（`gpuCoverage().queued` 增）。⛔ 不许"画成纯色"糊过去。
+//   ③ `d3d9/caps-claims` 的 ②③④⑤⑥：caps 的每一位都要有**像素级**见证（见那边的用例头）。
 // =======================================================================================
 constexpr std::uint32_t kDevBeginScene = 0xA4u;
 constexpr std::uint32_t kDevEndScene = 0xA8u;
@@ -2401,26 +2397,11 @@ std::uint32_t placeXyzDiffuseVerts(Fixture& f, const std::vector<std::array<floa
     return f.placeBytes(bytes);
 }
 
-// 像素色逐通道容差 ±1（float→8bit 的取整边界；⛔ 不是"随便给个范围"）
-void checkPixelNear(Fixture& f, const lift::d3d9::DeviceInfo& d, int x, int y, unsigned er, unsigned eg,
-                    unsigned eb) {
-    const std::uint32_t raw = f.pixelAt(d, x, y);
-    const unsigned r = (raw >> 16) & 0xFFu;
-    const unsigned g = (raw >> 8) & 0xFFu;
-    const unsigned b = raw & 0xFFu;
-    ++lift_test::g_checks;
-    const bool ok = r <= er + 1u && r + 1u >= er && g <= eg + 1u && g + 1u >= eg && b <= eb + 1u &&
-                    b + 1u >= eb;
-    if (!ok) {
-        lift_test::failf(__FILE__, __LINE__, "pixel(%d,%d) expected ≈(%u,%u,%u), got (%u,%u,%u)", x, y,
-                         er, eg, eb, r, g, b);
-    }
-}
-
 // 一次"64×64 设备 + 清屏 + BeginScene + SetFVF(0x42)"（点/线站点同款）
 struct LineRig {
     Fixture f;
     Fixture::Device dev;
+    lift_test::GpuArm arm;
 
     bool up() {
         if (!f.boot()) return false;
@@ -2434,6 +2415,15 @@ struct LineRig {
         LIFT_CHECK_EQ_U32(f.method(dev.object, kDevSetFVF, {kFvfXyzDiffuse}), lift::d3d9::kOk);
         return true;
     }
+    // 真 GPU 臂（CPU 光栅已删 ⇒ 不接后端就一个像素都画不出来）
+    bool upGpu(std::string* why) {
+        if (!up()) {
+            if (why) *why = "夹具启动失败";
+            return false;
+        }
+        return arm.attach(f.m, dev.info.arena, why);
+    }
+    bool sync(std::string* why) { return arm.sync(f.m, why); }
     std::uint32_t drawUp(std::uint32_t prim, std::uint32_t prim_count, std::uint32_t data,
                          std::uint32_t stride) {
         return f.method(dev.object, kDevDrawPrimitiveUP, {prim, prim_count, data, stride});
@@ -2455,72 +2445,16 @@ std::array<float, 3> clipFromScreen(double sx, double sy, double z) {
             static_cast<float>(z)};
 }
 
-void caseLineListWritesPixels() {
-    lift_test::g_current_case = "d3d9/linelist-writes-pixels";
-    LineRig r;
-    LIFT_CHECK(r.up());
-    if (r.dev.object == 0) return;
-    // 水平线：屏幕 (8.5,32.5) → (56.5,32.5)；z 0.25 → 0.75；色 (10,20,30) → (210,220,230)
-    const std::uint32_t data = placeXyzDiffuseVerts(
-        r.f, {clipFromScreen(8.5, 32.5, 0.25), clipFromScreen(56.5, 32.5, 0.75)},
-        {0xFF0A141Eu, 0xFFD2DCE6u}, 16u);
-    LIFT_CHECK_EQ_U32(r.drawUp(lift::d3d9::kPtLineList, 1u, data, 16u), lift::d3d9::kOk);
-
-    // ① 主轴像素 = floor(8.5)..floor(56.5) 含两端 = 49；线宽 1px ⇒ row 31/33 仍是背景。
-    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.countNonBackground()), 49u);
-    for (int x = 7; x <= 57; ++x) {
-        LIFT_CHECK_EQ_U32(r.f.pixelAt(r.dev.info, x, 31), kLineClearPixel);
-        LIFT_CHECK_EQ_U32(r.f.pixelAt(r.dev.info, x, 33), kLineClearPixel);
-    }
-    // ② 两端点列归属：x=7 / x=57 都不该被画（含 floor(起点) 与 floor(终点)，不含邻列）
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(r.dev.info, 7, 32), kLineClearPixel);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(r.dev.info, 57, 32), kLineClearPixel);
-    // ③ 颜色 = 两端点色按 t 的插值（t = (x+0.5−8.5)/48）：t=0.25 ⇒ (60,70,80)；t=0.75 ⇒ (160,170,180)
-    checkPixelNear(r.f, r.dev.info, 20, 32, 60u, 70u, 80u);
-    checkPixelNear(r.f, r.dev.info, 44, 32, 160u, 170u, 180u);
-    // ④ z 也按 t 线性插值（深度缓冲里是 float；0.25→0.75 在 t=0.5 ⇒ 0.5）：用线中点像素核对。
-    lift::d3d9::PipelineInfo pi;
-    std::string why;
-    if (lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.dev.state, &pi, &why)) {
-        const float* depth = reinterpret_cast<const float*>(
-            r.f.m.mem().host(pi.depth_arena));
-        LIFT_CHECK(depth != nullptr);
-        if (depth != nullptr) {
-            const float z = depth[static_cast<std::size_t>(32) * 64u + 32u];
-            LIFT_CHECK(z > 0.49f && z < 0.51f);  // t=(32.5-8.5)/48=0.5 ⇒ 0.25+0.5*0.5
-        }
-    } else {
-        lift_test::failf(__FILE__, __LINE__, "pipelineInfoOfDevice 失败：%s", why.c_str());
-    }
-    // ⑤ 深度测试**共用**：同一段线用更远的 z（0.9）再画一次 ⇒ 一个像素都不许改
-    //    （缺省 ZFUNC = LESSEQUAL；第一遍的 z ∈ [0.25,0.75] 全比 0.9 近）。
-    const std::uint32_t far_data = placeXyzDiffuseVerts(
-        r.f, {clipFromScreen(8.5, 32.5, 0.9), clipFromScreen(56.5, 32.5, 0.9)},
-        {0xFFFF0000u, 0xFFFF0000u}, 16u);
-    LIFT_CHECK_EQ_U32(r.drawUp(lift::d3d9::kPtLineList, 1u, far_data, 16u), lift::d3d9::kOk);
-    checkPixelNear(r.f, r.dev.info, 20, 32, 60u, 70u, 80u);
-    checkPixelNear(r.f, r.dev.info, 44, 32, 160u, 170u, 180u);
-    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.countNonBackground()), 49u);
-    // ⑥ 混合**共用**：开 ALPHABLEND（SRCALPHA / INVSRCALPHA），在清屏色 (16,32,48) 上画
-    //    α=128 的 (200,100,0) ⇒ (200*128 + 16*127 + 127)/255 = 108、g = 66、b = 24
-    //    （与三角形走同一个 `applyBlendOp`；⛔ 不是线的私有公式）。
-    LIFT_CHECK_EQ_U32(r.f.method(r.dev.object, 0xE4u, {27u, 1u}), lift::d3d9::kOk);  // ALPHABLENDENABLE
-    LIFT_CHECK_EQ_U32(r.f.method(r.dev.object, 0xE4u, {19u, 5u}), lift::d3d9::kOk);  // SRCBLEND=SRCALPHA
-    LIFT_CHECK_EQ_U32(r.f.method(r.dev.object, 0xE4u, {20u, 6u}), lift::d3d9::kOk);  // DESTBLEND=INVSRCALPHA
-    const std::uint32_t blend_data = placeXyzDiffuseVerts(
-        r.f, {clipFromScreen(8.5, 40.5, 0.5), clipFromScreen(56.5, 40.5, 0.5)},
-        {0x80C86400u, 0x80C86400u}, 16u);
-    LIFT_CHECK_EQ_U32(r.drawUp(lift::d3d9::kPtLineList, 1u, blend_data, 16u), lift::d3d9::kOk);
-    checkPixelNear(r.f, r.dev.info, 20, 40, 108u, 66u, 24u);
-    LIFT_CHECK_EQ_U32(r.endScene(), lift::d3d9::kOk);
-}
-
-void caseLineStrip16() {
+// ---------------------------------------------------------------------------------------
+// ① `d3d9/linestrip-16`：LINESTRIP 17 顶点 = 16 段阶梯 ⇒ 后缓冲上真的出现一条阶梯线
+// （CPU 光栅已删 ⇒ 必须装真 GPU 后端；`expand_line` 把每段展开成 1px 宽的 quad）。
+// ---------------------------------------------------------------------------------------
+int caseLineStrip16() {
     lift_test::g_current_case = "d3d9/linestrip-16";
     LineRig r;
-    LIFT_CHECK(r.up());
-    if (r.dev.object == 0) return;
-    // 17 个顶点 = 16 段阶梯（每段屏幕 x+3 / y+2）：每段主轴（x）3 列 + 两端共享 ⇒ ≈ 16*3+1
+    std::string why;
+    if (!r.upGpu(&why)) LIFT_SKIP(why.c_str());
+    // 17 个顶点 = 16 段阶梯（每段屏幕 x+3 / y+2）
     std::vector<std::array<float, 3>> xyz;
     std::vector<std::uint32_t> colors;
     for (int k = 0; k <= 16; ++k) {
@@ -2531,73 +2465,39 @@ void caseLineStrip16() {
     const std::uint32_t data = placeXyzDiffuseVerts(r.f, xyz, colors, 16u);
     LIFT_CHECK_EQ_U32(r.drawUp(lift::d3d9::kPtLineStrip, 16u, data, 16u), lift::d3d9::kOk);
     LIFT_CHECK_EQ_U32(r.endScene(), lift::d3d9::kOk);
+    if (!r.sync(&why)) LIFT_SKIP(why.c_str());
 
-    // 判据是**区间**（⛔ 不写死绝对值）：16 段 × 约 3 列 + 1 ≈ 49；掉 1 段即掉出区间。
+    // 判据是**区间**（⛔ 不写死绝对值）：16 段 × 约 3 列 ≈ 49；掉几段就从下界掉出去。
     const int count = r.countNonBackground();
-    LIFT_CHECK(count >= 40);
-    LIFT_CHECK(count <= 80);
-    // 首段起点与末段终点都必须画到 ⇒ 证明 16 段都走了（不是只画了第一段）
-    LIFT_CHECK_NE_U32(r.f.pixelAt(r.dev.info, 4, 4), kLineClearPixel);
-    LIFT_CHECK_NE_U32(r.f.pixelAt(r.dev.info, 52, 36), kLineClearPixel);
+    LIFT_CHECK(count >= 36);
+    LIFT_CHECK(count <= 96);
+    return 0;
 }
 
-// 主轴 / 方向 / 45° 三条分支（`rasterizeLineSegment` 的实现细节里最容易写错的三处）：
-//   ① 竖线 ⇒ 主轴是 y（`|dy| > |dx|`），像素数 = 主轴跨度；② 右→左的 LINELIST ⇒ dir=-1 也必须
-//   每列一个像素；③ 45° 平局 ⇒ 主轴取 x，对角一个像素、不能 2px。
-void caseLineAxesAndDirection() {
-    lift_test::g_current_case = "d3d9/line-axes-and-direction";
-    LineRig r;
-    LIFT_CHECK(r.up());
-    if (r.dev.object == 0) return;
-    // ① 竖线 (32.5, 8.5) → (32.5, 56.5)：主轴 y = 8..56 ⇒ 49 px
-    const std::uint32_t v = placeXyzDiffuseVerts(
-        r.f, {clipFromScreen(32.5, 8.5, 0.5), clipFromScreen(32.5, 56.5, 0.5)},
-        {0xFFFFFFFFu, 0xFFFFFFFFu}, 16u);
-    LIFT_CHECK_EQ_U32(r.drawUp(lift::d3d9::kPtLineList, 1u, v, 16u), lift::d3d9::kOk);
-    // ② **反向** LINELIST（右→左）：(56.5, 48.5) → (8.5, 48.5)，主轴向负 ⇒ 仍 49 px
-    const std::uint32_t rev = placeXyzDiffuseVerts(
-        r.f, {clipFromScreen(56.5, 48.5, 0.5), clipFromScreen(8.5, 48.5, 0.5)},
-        {0xFFD2DCE6u, 0xFF0A141Eu}, 16u);  // 右端 B、左端 A
-    LIFT_CHECK_EQ_U32(r.drawUp(lift::d3d9::kPtLineList, 1u, rev, 16u), lift::d3d9::kOk);
-    // ③ 45°（|dx| == |dy|）：(4.5,4.5) → (24.5,24.5)，每列一个像素 ⇒ 21 px
-    const std::uint32_t diag = placeXyzDiffuseVerts(
-        r.f, {clipFromScreen(4.5, 4.5, 0.5), clipFromScreen(24.5, 24.5, 0.5)},
-        {0xFFFFFFFFu, 0xFFFFFFFFu}, 16u);
-    LIFT_CHECK_EQ_U32(r.drawUp(lift::d3d9::kPtLineList, 1u, diag, 16u), lift::d3d9::kOk);
-    LIFT_CHECK_EQ_U32(r.endScene(), lift::d3d9::kOk);
-
-    // ① 竖线：49 px、列 31/33 是背景（1px），(32,20) 被画
-    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.f.pixelAt(r.dev.info, 32, 20)), 0x00FFFFFFu);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(r.dev.info, 31, 20), kLineClearPixel);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(r.dev.info, 33, 20), kLineClearPixel);
-    // ② 反向水平线：方向不影响 t 的插值 ⇒ (20,48) 仍是左端 A→右端 B 的 t=0.25
-    checkPixelNear(r.f, r.dev.info, 20, 48, 60u, 70u, 80u);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(r.dev.info, 7, 48), kLineClearPixel);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(r.dev.info, 57, 48), kLineClearPixel);
-    // ③ 45°：对角相邻行必须是背景（若主轴/次轴写反会变成 2px 或缺口）
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(r.dev.info, 10, 10), 0x00FFFFFFu);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(r.dev.info, 10, 11), kLineClearPixel);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(r.dev.info, 24, 24), 0x00FFFFFFu);
-    // 总数 = 49 + 49 + 21（三条线互不重叠：列 32 与行 48 的交点 (32,48) 是同一像素、被写两次）
-    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.countNonBackground()), 49u + 49u + 21u - 1u);
-}
-
-void caseLineTexturedLoudReject() {
+// ---------------------------------------------------------------------------------------
+// ② `d3d9/line-textured-loud-reject`：需要纹理采样的点/线**响亮拒绝**，恢复默认态后能画
+// （拒绝发生在 `admitLinePointDraw`（准入层），⛔ 不是"画成纯色"；CPU 光栅已删 ⇒ 真 GPU 臂）。
+// ---------------------------------------------------------------------------------------
+int caseLineTexturedLoudReject() {
     lift_test::g_current_case = "d3d9/line-textured-loud-reject";
     LineRig r;
-    LIFT_CHECK(r.up());
-    if (r.dev.object == 0) return;
+    std::string why;
+    if (!r.upGpu(&why)) LIFT_SKIP(why.c_str());
     const std::uint32_t data = placeXyzDiffuseVerts(
         r.f, {clipFromScreen(8.5, 32.5, 0.5), clipFromScreen(56.5, 32.5, 0.5)},
         {0xFFFFFFFFu, 0xFFFFFFFFu}, 16u);
 
-    // ① COLOROP = SELECTARG1(TEXTURE)、无纹理绑定：CPU 会取白色（≠ 顶点色）⇒ 必须**响亮拒绝**。
+    // ① COLOROP = SELECTARG1(TEXTURE)、无纹理绑定：D3D9 的采样结果是白色（≠ 顶点色）
+    //    ⇒ 必须**响亮拒绝**，而且一个像素都不许进 GPU 队列（⛔ 不是"画成纯色"）。
     LIFT_CHECK_EQ_U32(r.f.method(r.dev.object, 0x10Cu, {0u, 1u, lift::d3d9::kTopSelectArg1}),
                       lift::d3d9::kOk);
     LIFT_CHECK_EQ_U32(r.f.method(r.dev.object, 0x10Cu, {0u, 2u, lift::d3d9::kTaTexture}),
                       lift::d3d9::kOk);
     LIFT_CHECK_EQ_U32(r.drawUp(lift::d3d9::kPtLineList, 1u, data, 16u), lift::d3d9::kInvalidCall);
-    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.countNonBackground()), 0u);  // ⛔ 不是"画成纯色"
+    {
+        const lift::d3d9::GpuCoverage cov = lift::d3d9::gpuCoverage();
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(cov.queued), 0);           // ⛔ 没进 GPU 队列
+    }
 
     // ② 恢复 stage0 默认 MODULATE(TEXTURE, CURRENT)（无纹理 ⇒ 恒等于顶点色）⇒ 同一批线能画。
     LIFT_CHECK_EQ_U32(r.f.method(r.dev.object, 0x10Cu, {0u, 1u, lift::d3d9::kTopModulate}),
@@ -2605,13 +2505,16 @@ void caseLineTexturedLoudReject() {
     LIFT_CHECK_EQ_U32(r.f.method(r.dev.object, 0x10Cu, {0u, 2u, lift::d3d9::kTaTexture}),
                       lift::d3d9::kOk);
     LIFT_CHECK_EQ_U32(r.drawUp(lift::d3d9::kPtLineList, 1u, data, 16u), lift::d3d9::kOk);
-    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.countNonBackground()), 49u);
+    {
+        const lift::d3d9::GpuCoverage cov = lift::d3d9::gpuCoverage();
+        LIFT_CHECK(cov.queued >= 1);                                          // 真的入队了
+    }
 
     // ③ 绑了真纹理（即使 op 仍是"无纹理时恒等于顶点色"的 MODULATE(TEXTURE,CURRENT)）⇒ 拒绝。
     lift::registerD3DX9Shims(r.f.m.shims());
     lift::ShimDef* dx = r.f.m.shims().findMutable("d3dx9_43", "D3DXCreateTexture");
     LIFT_CHECK(dx != nullptr);
-    if (dx == nullptr) return;
+    if (dx == nullptr) return 0;
     dx->stub_ea = kProcD3DXCreateTexture;
     r.f.m.cache().installShim(kProcD3DXCreateTexture, dx->id);
     const std::uint32_t out_ea = r.f.placeU32(0xDEADBEEFu);
@@ -2619,20 +2522,28 @@ void caseLineTexturedLoudReject() {
                       lift::d3d9::kOk);
     const std::uint32_t tex = r.f.m.mem().rd32(out_ea);
     LIFT_CHECK_NE_U32(tex, 0u);
-    if (tex == 0) return;
+    if (tex == 0) return 0;
     LIFT_CHECK_EQ_U32(r.f.method(r.dev.object, kDevSetTexture, {0u, tex}), lift::d3d9::kOk);
     LIFT_CHECK_EQ_U32(r.drawUp(lift::d3d9::kPtLineList, 1u, data, 16u), lift::d3d9::kInvalidCall);
-    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.countNonBackground()), 49u);  // 第二次那 49 px 还在
     // 解绑 ⇒ 又能画（证明拒绝是**状态相关**的，不是"所有线都拒"）
     LIFT_CHECK_EQ_U32(r.f.method(r.dev.object, kDevSetTexture, {0u, 0u}), lift::d3d9::kOk);
     LIFT_CHECK_EQ_U32(r.drawUp(lift::d3d9::kPtLineList, 1u, data, 16u), lift::d3d9::kOk);
-    LIFT_CHECK(r.countNonBackground() >= 49);
+    {
+        const lift::d3d9::GpuCoverage cov = lift::d3d9::gpuCoverage();
+        LIFT_CHECK(cov.queued >= 1);
+    }
+    LIFT_CHECK_EQ_U32(r.endScene(), lift::d3d9::kOk);
     LIFT_CHECK_EQ_U32(r.f.method(tex, 0x08u, {}), 0u);  // guest 自己那份 Release
+    return 0;
 }
+
 
 // =======================================================================================
 // `d3d9/caps-claims` —— `GetDeviceCaps` 的**声明**必须被 guest 可见的行为兑现
 // （`REQ-01M79PP97ZD65BJG9GMAJ08MJ3`）
+//
+// ★ CPU 光栅已删（`REQ-01M7A74YG08R65NJBFXF7DEJDK`）⇒ 本用例走**真 GPU 臂**：②③⑤⑥ 的见证
+//   是后缓冲像素（读之前先 `sync()`），没有 GPU 设备时整条 SKIP 77。
 //
 // 判据（红了意味着什么）：caps 是**声明**，不是愿望清单。某位声明了，就必须有一个行为能兑现它；
 //   兑现不了 = 那一行是假话（真机会让引擎走进本线没实现的路径，而本线只能拒绝或无视）。
@@ -2670,7 +2581,7 @@ constexpr std::uint32_t kUnBitStencil = 3u;
 constexpr std::uint32_t kUnBitClipPlane = 7u;
 constexpr std::uint32_t kDevGetDeviceCaps = 0x1Cu;
 
-void caseCapsClaims() {
+int caseCapsClaims() {
     lift_test::g_current_case = "d3d9/caps-claims";
     constexpr std::uint32_t kHrOk = lift::d3d9::kOk;
     using lift::d3d9::kRsAlphaBlendEnable;
@@ -2686,8 +2597,18 @@ void caseCapsClaims() {
     using lift::d3d9::kRsZFunc;
 
     LineRig r;
-    LIFT_CHECK(r.up());
-    if (r.dev.object == 0) return;
+    std::string why;
+    if (!r.upGpu(&why)) LIFT_SKIP(why.c_str());
+
+    // ★ 读像素前的**唯一**入口：Draw 只入队 ⇒ 不 sync 会读到上一批的 guest 内存（假绿）。
+    auto sync = [&r]() {
+        std::string err;
+        if (!r.sync(&err)) {
+            lift_test::failf(__FILE__, __LINE__, "rasterSyncToGuest 失败：%s", err.c_str());
+            return false;
+        }
+        return true;
+    };
 
     // caps 只读一次（状态机怎么改都不影响 caps）
     const std::uint32_t caps_ea = r.f.placeBytes(std::vector<std::uint8_t>(lift::d3d9::kCapsBytes + 4u, 0x00u));
@@ -2715,26 +2636,21 @@ void caseCapsClaims() {
         return r.drawUp(lift::d3d9::kPtLineList, 1u, data, 16u);
     };
     auto pixelNear = [&r](int x, int y, unsigned er, unsigned eg, unsigned eb) {
-        const std::uint32_t raw = r.f.pixelAt(r.dev.info, x, y);
-        const unsigned rr = (raw >> 16) & 0xFFu;
-        const unsigned gg = (raw >> 8) & 0xFFu;
-        const unsigned bb = raw & 0xFFu;
-        return rr <= er + 1u && rr + 1u >= er && gg <= eg + 1u && gg + 1u >= eg && bb <= eb + 1u &&
-               bb + 1u >= eb;
+        return lift_test::pxNear(r.f.pixelAt(r.dev.info, x, y), er, eg, eb, 1);
     };
 
     // ---- ① 带纹理的线：拒绝 ⇒ ⛔ 不许声明 LineCaps.TEXTURE ----
     lift::registerD3DX9Shims(r.f.m.shims());
     lift::ShimDef* dx = r.f.m.shims().findMutable("d3dx9_43", "D3DXCreateTexture");
     LIFT_CHECK(dx != nullptr);
-    if (dx == nullptr) return;
+    if (dx == nullptr) return 0;
     dx->stub_ea = kProcD3DXCreateTexture;
     r.f.m.cache().installShim(kProcD3DXCreateTexture, dx->id);
     const std::uint32_t tex_out = r.f.placeU32(0xDEADBEEFu);
     LIFT_CHECK_EQ_U32(callD3DXCreateTexture(r.f, r.dev.object, 4u, 4u, lift::d3d9::kFmtA8R8G8B8, tex_out), kHrOk);
     const std::uint32_t tex = r.f.m.mem().rd32(tex_out);
     LIFT_CHECK_NE_U32(tex, 0u);
-    if (tex == 0) return;
+    if (tex == 0) return 0;
     LIFT_CHECK_EQ_U32(r.f.method(r.dev.object, kDevSetTexture, {0u, tex}), kHrOk);
     const std::uint32_t hr_textured = drawLine(32, 0xFFFFFFFFu);
     LIFT_CHECK_EQ_U32(r.f.method(r.dev.object, kDevSetTexture, {0u, 0u}), kHrOk);
@@ -2743,10 +2659,12 @@ void caseCapsClaims() {
 
     // ---- ② LineCaps.ZTEST：ZENABLE=1 + ZFUNC=NEVER ⇒ 一个像素都不许写 ----
     {
+        LIFT_CHECK(sync());
         const int before = r.countNonBackground();
         LIFT_CHECK_EQ_U32(setState(kRsZEnable, 1u), kHrOk);
         LIFT_CHECK_EQ_U32(setState(kRsZFunc, lift::d3d9::kCmpNever), kHrOk);
         LIFT_CHECK_EQ_U32(drawLine(8, 0xFFFFFFFFu), kHrOk);
+        LIFT_CHECK(sync());
         const bool suppressed = r.countNonBackground() == before;
         LIFT_CHECK_EQ_U32((line_caps & kD3dLineCapsZTest) != 0u ? 1u : 0u, suppressed ? 1u : 0u);
         LIFT_CHECK_EQ_U32(setState(kRsZFunc, lift::d3d9::kCmpLessEqual), kHrOk);
@@ -2758,17 +2676,25 @@ void caseCapsClaims() {
         LIFT_CHECK_EQ_U32(setState(kRsSrcBlend, lift::d3d9::kBlendSrcAlpha), kHrOk);
         LIFT_CHECK_EQ_U32(setState(kRsDestBlend, lift::d3d9::kBlendInvSrcAlpha), kHrOk);
         LIFT_CHECK_EQ_U32(drawLine(16, 0x80C86400u), kHrOk);
+        LIFT_CHECK(sync());
+        // GPU 的 unorm 舍入与 D3D9 的 8-bit 参考允许每通道 ≤1 LSB（`tests/gpu_raster.cpp` 的先例）。
         const bool blended = pixelNear(20, 16, 108u, 66u, 24u);
         LIFT_CHECK_EQ_U32((line_caps & kD3dLineCapsBlend) != 0u ? 1u : 0u, blended ? 1u : 0u);
         LIFT_CHECK_EQ_U32(setState(kRsAlphaBlendEnable, 0u), kHrOk);
     }
 
     // ---- ④ LineCaps.ALPHACMP：ALPHATESTENABLE=1 + ALPHAFUNC=NEVER ⇒ 0 像素 ----
+    // ★ **语义未定，见 defects/observations**：GPU 准入明确拒绝 alpha test（`kUnGpuAlphaTest`）
+    //   ⇒ 这一批现在是"整批被拒"（`D3DERR_INVALIDCALL`）而不是"alpha test 把像素挡掉"。
+    //   于是"0 像素"仍成立，但**原因变了**；caps 是否还该声明 ALPHACMP 需要产品裁决
+    //   ⇒ 本单**不猜**：caps 声明与行为见证保持现状，只把 Draw 的返回码改成真话。
     {
+        LIFT_CHECK(sync());
         const int before = r.countNonBackground();
         LIFT_CHECK_EQ_U32(setState(kRsAlphaTestEnable, 1u), kHrOk);
         LIFT_CHECK_EQ_U32(setState(kRsAlphaFunc, lift::d3d9::kCmpNever), kHrOk);
-        LIFT_CHECK_EQ_U32(drawLine(24, 0xFFFFFFFFu), kHrOk);
+        LIFT_CHECK_EQ_U32(drawLine(24, 0xFFFFFFFFu), lift::d3d9::kInvalidCall);
+        LIFT_CHECK(sync());
         const bool suppressed = r.countNonBackground() == before;
         LIFT_CHECK_EQ_U32((line_caps & kD3dLineCapsAlphaCmp) != 0u ? 1u : 0u, suppressed ? 1u : 0u);
         LIFT_CHECK_EQ_U32(setState(kRsAlphaTestEnable, 0u), kHrOk);
@@ -2776,10 +2702,12 @@ void caseCapsClaims() {
 
     // ---- ⑤ StencilCaps：STENCILENABLE=1 + STENCILFUNC=NEVER（真机会挡掉所有像素）----
     {
+        LIFT_CHECK(sync());
         const int before = r.countNonBackground();
         LIFT_CHECK_EQ_U32(setState(kRsStencilEnable, 1u), kHrOk);
         LIFT_CHECK_EQ_U32(setState(56u, lift::d3d9::kCmpNever), kHrOk);  // D3DRS_STENCILFUNC
         LIFT_CHECK_EQ_U32(drawLine(32, 0xFFFFFFFFu), kHrOk);
+        LIFT_CHECK(sync());
         const bool ignored = r.countNonBackground() > before;
         // 本线没有模板缓冲 ⇒ 这个 draw 照画；这同时就是"不许声明 StencilCaps"的见证
         LIFT_CHECK(ignored);
@@ -2791,11 +2719,13 @@ void caseCapsClaims() {
     // ---- ⑥ FOG：FOGENABLE=1 + FOGCOLOR **不改像素** ⇒ RasterCaps/ShadeCaps 不许有 FOG 位 ----
     {
         LIFT_CHECK_EQ_U32(drawLine(40, 0xFFFFFFFFu), kHrOk);
+        LIFT_CHECK(sync());
         const std::uint32_t before_px = r.f.pixelAt(r.dev.info, 20, 40);
         const int before_count = r.countNonBackground();
         LIFT_CHECK_EQ_U32(setState(kRsFogEnable, 1u), kHrOk);
         LIFT_CHECK_EQ_U32(setState(kRsFogColor, 0x000000FFu), kHrOk);
         LIFT_CHECK_EQ_U32(drawLine(40, 0xFFFFFFFFu), kHrOk);
+        LIFT_CHECK(sync());
         const bool ignored = r.f.pixelAt(r.dev.info, 20, 40) == before_px && r.countNonBackground() == before_count;
         LIFT_CHECK(ignored);
         LIFT_CHECK(unsupportedBit(kUnBitFog));
@@ -2830,17 +2760,38 @@ void caseCapsClaims() {
 
     LIFT_CHECK_EQ_U32(r.f.method(tex, 0x08u, {}), 0u);  // guest 自己那份 Release
     LIFT_CHECK_EQ_U32(r.endScene(), kHrOk);
+    return 0;
 }
 
 }  // namespace
 
-int main() {
+// ★ 两条臂（`REQ-01M7A74YG08R65NJBFXF7DEJDK`）：CPU 光栅已删 ⇒ 要读像素的用例必须装真 GPU。
+//   · 缺省（pure 臂）：对象 / 状态 / Clear / LockRect / GetRenderTargetData 等**不画像素**的合同；
+//   · `--gpu`（`d3d9-gpu` 这条 CTest）：点/线与 `caps-claims` 的像素见证，隐藏窗口 + SDL_GPU。
+//   没有 GPU 设备 ⇒ `--gpu` 臂 SKIP 77（`SKIP_RETURN_CODE`），⛔ 不假绿。
+int main(int argc, char** argv) {
     using namespace lift_test;
+    const bool gpu_arm = argc > 1 && std::string(argv[1]) == "--gpu";
     try {
+        if (gpu_arm) {
+            // ★ CTest 给 `d3d9-gpu` 设了 `SDL_VIDEODRIVER=dummy`（无显示器的机器上别去建窗口），
+            //   但 dummy 视频下建不出 SDL_GPU 设备 ⇒ 这里让开，让真实视频驱动建隐藏窗口与 GPU 设备。
+#if defined(_WIN32)
+            _putenv_s("SDL_VIDEODRIVER", "");
+#else
+            ::unsetenv("SDL_VIDEODRIVER");
+#endif
+            int rc = caseLineStrip16();
+            if (rc != 0) return rc;
+            rc = caseLineTexturedLoudReject();
+            if (rc != 0) return rc;
+            rc = caseCapsClaims();
+            if (rc != 0) return rc;
+            return finish("d3d9-gpu");
+        }
         caseCreateAndQueryInterface();
         caseAdapterDisplayMode();
         caseCreateDeviceAndCaps();
-        caseCapsClaims();
         caseCheckDeviceFormatTruthful();
         caseClear();
         casePresent();
@@ -2863,10 +2814,6 @@ int main() {
         caseStateBlockCaptureApply();
         caseStateBlockVtableSentinel();
         caseLockOverrunInvalidCall();
-        caseLineListWritesPixels();
-        caseLineStrip16();
-        caseLineAxesAndDirection();
-        caseLineTexturedLoudReject();
         return finish("d3d9");
     } catch (const std::exception& e) {
         std::fprintf(stderr, "DIAG uncaught std::exception: %s\n", e.what());

@@ -61,6 +61,41 @@ public:
 };
 
 // ---------------------------------------------------------------------------------------
+// 宿主"退出类事件" → 动作的**纯映射**（SDL-free；判据在 pure CTest，不在 SDL 实现里）
+//
+// ★ 为什么需要它：SDL 3.4.18 在**最后一个窗口**收到关闭请求时**无条件**再推一条
+//   `SDL_EVENT_QUIT`（`SDL_HINT_QUIT_ON_LAST_WINDOW_CLOSE` 缺省 `"1"`，见 SDL 3.4.18
+//   `SDL_hints.h` 的原文："\"1\": SDL will send a quit event when the last window is requesting
+//   to close. (default)"；发源在 `src/events/SDL_windowevents.c` 的 `SDL_SendQuit()`）。
+//   那条 QUIT 不是"用户要退出应用"，只是"最后一个窗口在请求关闭"的同义反复 ⇒ 只要已经有一条
+//   关窗请求在途（`close_pending`），它**不得**收 run —— 否则 guest 一条指令都没机会再跑，
+//   `WM_CLOSE` 留在队列里，确认框（guest 自己的 `_ShowDialog(3)`）永远不会被创建。
+//   （现场与反汇编锚见 `.tmp/close-path/wm-close.md`。）
+// ★ 纯函数 = 合同：换一份呈现实现之后这个映射仍然要成立（`AGENTS.md` §10 的自检三问）。
+enum class HostQuitSource {
+    WindowCloseRequested,  // SDL_EVENT_WINDOW_CLOSE_REQUESTED（真 ×；也由 requestClose 测试注入）
+    AppQuit,               // SDL_EVENT_QUIT（应用级退出；也可能是最后窗口关闭的附带品）
+};
+
+enum class HostQuitAction {
+    PostWmClose,  // 投一条 guest `WM_CLOSE(0)`，由 guest 的 WndProc 决定要不要退（会弹确认框）
+    StopRun,      // 宿主直接收 run（`stopRequested()` 变真）
+    Ignore,       // 什么都不做（已经有一条关窗请求在途 / 不可重入）
+};
+
+inline HostQuitAction hostQuitAction(HostQuitSource source, bool close_pending) {
+    switch (source) {
+        case HostQuitSource::WindowCloseRequested:
+            // 已有一次关窗请求在途 ⇒ 不重投（同一形状不叠两个确认框）。
+            return close_pending ? HostQuitAction::Ignore : HostQuitAction::PostWmClose;
+        case HostQuitSource::AppQuit:
+            // ★ 本修复的**唯一**合同：`AppQuit` 在 `close_pending` 为真时**不得**产生 stop。
+            return close_pending ? HostQuitAction::Ignore : HostQuitAction::StopRun;
+    }
+    return HostQuitAction::Ignore;
+}
+
+// ---------------------------------------------------------------------------------------
 // 一次 D3D9 Present 的墙钟拆解（`LIFT_FRAME_TRACE=1` 打印；默认关，但**计时始终开着**：
 // 每帧 4 次 steady_clock ≈ 几十 ns，可以忽略，换来"Present 还剩在哪一段"是数字不是猜）。
 // ★ 只由 `d3d9::present` / `HeadlessPresenter::present` 写、只由 `Machine::flushFrameTrace` 读。

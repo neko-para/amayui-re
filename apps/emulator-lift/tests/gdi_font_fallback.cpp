@@ -686,7 +686,7 @@ int main(int argc, char** argv) {
         // assets 臂（`--assets <安装根>`）：CTest 只在安装树存在时注册这条（档位 = 注册位置）。
         if (std::strcmp(argv[1], "--assets") == 0) {
             if (argc < 3) {
-                std::printf("SKIP: --assets 需要安装根参数（CTest 传入 ${LIFT_ASSETS_GAME_DIR}）\n");
+                std::printf("SKIP: --assets 需要安装根参数（CTest 传入 ${LIFT_STRESS_GAME_DIR}）\n");
                 return 77;
             }
             return runAssets(argv[2]);

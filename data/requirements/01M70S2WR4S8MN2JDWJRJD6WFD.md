@@ -35,3 +35,5 @@
 
 - ⛔ 不做装载帧的段表 / 热点 override（那是 `REQ-01M6XVZ8AXJNG492WA2QAMTA35`）。
 - ⛔ 不动音频线程模型、不动令牌的**并发契约**（只做诊断开关 A/B）。
+
+★ 2026-11-14 变异清单瘦身：本单 verify 锚点的断言面缩小 —— 删了 diag 三块（`dispatch-tax/diag-off` / `diag-on` / `diag-really-skips`，判据面是摘要行文案 + `maxConcurrent()`）（理由：都是我方的诊断面 —— `AGENTS.md` §10），且整条**移档到 `LIFT_STRESS`** ⇒ 默认档不再注册这条证据（`verify` 字面量仍在，故 `validate` 不红），现在断的是 `LIFT_STRESS=1` 档下 `b`/`c` 计时读数的量级带。

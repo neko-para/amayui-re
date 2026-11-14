@@ -30,3 +30,5 @@ GPU 的纹理 RT 已经能工作（准入放行 + 绑定 + 读回，守卫 `d3d9
 ## 非目标
 
 - 不做多 RT / MRT / 跨帧保留；不改 sprite 的合批/顺序语义；不回退到 CPU 路径。
+
+★ 2026-11-14 变异清单瘦身：本单 verify 锚点的断言面缩小 —— 删了 pure 段（MockRaster 断言 sprite 的合成目标基址 = RT 像素块）（理由：那是 MockRaster 的内部结构、不是外部可观测面，`AGENTS.md` §10），现在断的是 GPU 臂「sprite 画出的像素落在绑定的 RT 上」（(20,20) 在红块内 + 后缓冲不变），**需要 GPU**（无 GPU ⇒ SKIP 77）。

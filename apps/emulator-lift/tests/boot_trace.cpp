@@ -1,4 +1,4 @@
-// emulator-lift · boot trace（A4；assets 档）
+// emulator-lift · boot trace（A4；`LIFT_STRESS` 档：跑真游戏，判据 = 确定性读数）
 //
 // ★ 判据（plan §5 A4）：跑到 L2（`--until ea 0x4BA890`）成功；**同一条命令跑两次，trace 逐字节相同**。
 //   这里不打印整条 trace（30 万条会淹掉输出），而是把"可复现"折成三个机械可比的量：
@@ -6,6 +6,9 @@
 //     ② 执行过的指令数；
 //     ③ 最终寄存器 / 标志 / x87 元信息 + 已提交内存摘要的哈希。
 //   三个量两次完全相同 ⇒ 虚拟时钟与"宿主侧不许引入随机源"（plan §8.3）这两条成立。
+// ★ 2026-11-13 瘦身：4 次 run → 2 次（两次都带 shim trace，同一对 run 上比 hash **与** trace 字节）；
+//   删掉"安装树已知写入点"探针 —— 它自己承认近乎恒真（boot_trace 没给 VFS 设 `--game-dir`），
+//   等 boot 真接上 VFS 根时再写。
 // ★ 如果没到 L2，本测试**红**并打印卡在哪个 EA —— 那是诚实的结果，不是"跳过"。
 #include <cstdio>
 #include <cstdlib>
@@ -95,66 +98,6 @@ Outcome runOnce(const char* exe, const char* lst_path, std::uint32_t target, std
     return out;
 }
 
-// ---------------------------------------------------------------------------------------
-// ★ 安装树红线（2026-11-05 缩减）：跑完整个 boot（含两遍 trace 运行）之后，`links/install`
-//   根上那几个**已知会被写**的条目必须没变。
-//   ★ 为什么不再做递归快照：安装树是 7.5 GB 量级（旧实现对 `links/install` 递归枚举，
-//     实测 542 项，每项要尺寸 + mtime，再排序逐项比）—— 成本高、信息量低。而"引擎往安装树里
-//     写"只可能落到下面这几个固定名字上（plan-m2-2d-text.md §3 F6 / §4 D5）：
-//       `SYS4REG.INI`（退出时保存的玩家配置）· `SAVE`（存档目录）·
-//       `$$AGE.TMP`（版本自检探针）· `_.exe`（自检 / `/FIX` 岔路的替换可执行件）。
-//   ⇒ 每个名字只做一次 `fs::exists` + 一次 `last_write_time`（不存在 ⇒ false / 0），
-//     boot 前后各取一遍逐项比：出现 / 消失 / mtime 变了都算"被写了"。
-//   ★ boot_trace 直接跑 `Machine`，没有给 VFS 设 `--game-dir`（文件族会响亮失败）⇒ 这条断言
-//     现在近乎恒真；它守的是"将来给 boot 接上 VFS 根之后不许往安装树里写"这条回归。
-//   ⛔ 不要改回递归快照，也不要改成对安装树算 hash —— 那正是这次删掉的复杂度。
-// ---------------------------------------------------------------------------------------
-std::filesystem::path pathFromUtf8(const std::string& s) {
-    const std::u8string u(reinterpret_cast<const char8_t*>(s.data()), s.size());
-    return std::filesystem::path(u);
-}
-
-std::string pathToUtf8(const std::filesystem::path& p) {
-    const std::u8string u = p.u8string();
-    return std::string(reinterpret_cast<const char*>(u.data()), u.size());
-}
-
-// `LIFT_AGE_EXE = <repo>/corpus/assets/age/AGE.EXE__dumped.sectfix.EXE` → `<repo>`
-std::filesystem::path repoRootOf(const char* exe) {
-    std::filesystem::path p = pathFromUtf8(exe);
-    for (int i = 0; i < 4 && p.has_parent_path(); ++i) p = p.parent_path();
-    return p;
-}
-
-// `--game-dir` 根上的已知写入点（相对路径；见上面的说明）
-constexpr const char* kInstallWriteTargets[] = {"SYS4REG.INI", "$$AGE.TMP", "SAVE", "_.exe"};
-
-struct PathState {
-    std::string rel;
-    bool exists = false;
-    long long mtime = 0;  // `last_write_time` 的计数；不存在时 0（"从无到有"也会在这里变）
-    bool operator==(const PathState&) const = default;
-};
-
-std::vector<PathState> probeInstallWriteTargets(const std::filesystem::path& root) {
-    namespace fs = std::filesystem;
-    std::vector<PathState> out;
-    for (const char* rel : kInstallWriteTargets) {
-        PathState st;
-        st.rel = rel;
-        std::error_code ec;
-        const fs::path p = root / pathFromUtf8(rel);
-        st.exists = fs::exists(p, ec) && !ec;
-        if (st.exists) {
-            ec.clear();
-            const auto wt = fs::last_write_time(p, ec);
-            if (!ec) st.mtime = static_cast<long long>(wt.time_since_epoch().count());
-        }
-        out.push_back(st);
-    }
-    return out;
-}
-
 }  // namespace
 
 int main() {
@@ -168,27 +111,50 @@ int main() {
     const std::uint32_t kWinMain = 0x004BA890u;  // plan §6 S7 的 L2
     const std::uint64_t kMaxInsns = 200000000ull;
 
-    // ★ 安装树红线：跑之前先给「已知写入点」拍一次照（见 probeInstallWriteTargets 的说明）
-    const std::filesystem::path install_dir = repoRootOf(exe) / "links" / "install";
-    const std::vector<PathState> install_before = probeInstallWriteTargets(install_dir);
-    std::error_code install_ec;
-    const bool install_is_dir = std::filesystem::is_directory(install_dir, install_ec) && !install_ec;
-    std::printf("install-tree: %s（只查 %zu 个已知写入点%s）\n", pathToUtf8(install_dir).c_str(),
-                install_before.size(),
-                install_is_dir ? "" : "；目录不存在 ⇒ 全部按\"不存在\"比");
+    // ★ 2 次 run（两次**都带** shim trace）。2026-11-13：原来还有两次不带 trace 的 run，判据完全相同
+    //   —— 那是把同一件事做两遍（4 run → 2 run）；trace 字节与 hash 在这一对 run 上一起比。
+    // ★ 文件名必须带进程号（2026-11-04 实测）：固定名 `lift-boot-trace-a.log` 在两份 ctest
+    //   （并行构建目录 / 两个代理同时跑）**互相撞名** ⇒ 一个 `fopen` 失败 ⇒ 假红。
+    //   `file_io.cpp` 早就是这么做的（`-<pid>`），这里跟上。
+#ifdef _WIN32
+    const unsigned long pid = static_cast<unsigned long>(::GetCurrentProcessId());
+#else
+    const unsigned long pid = static_cast<unsigned long>(::getpid());
+#endif
+    const std::string suffix = "-" + std::to_string(pid) + ".log";
+    const std::filesystem::path ta =
+        std::filesystem::temp_directory_path() / ("lift-boot-trace-a" + suffix);
+    const std::filesystem::path tb =
+        std::filesystem::temp_directory_path() / ("lift-boot-trace-b" + suffix);
+    auto utf8 = [](const std::filesystem::path& p) {
+        const std::u8string s = p.u8string();
+        return std::string(reinterpret_cast<const char*>(s.data()), s.size());
+    };
+    std::FILE* fa = lift::openHostFileUtf8(utf8(ta), "wb");
+    std::FILE* fb = lift::openHostFileUtf8(utf8(tb), "wb");
+    LIFT_CHECK(fa != nullptr);
+    LIFT_CHECK(fb != nullptr);
+    if (fa == nullptr || fb == nullptr) {
+        if (fa != nullptr) std::fclose(fa);
+        if (fb != nullptr) std::fclose(fb);
+        return 1;
+    }
 
     g_current_case = "run1";
-    const Outcome a = runOnce(exe, lst_path, kWinMain, kMaxInsns);
-    if (!a.ok) {
-        std::fprintf(stderr, "setup 失败：%s\n", a.detail.c_str());
+    const Outcome a = runOnce(exe, lst_path, kWinMain, kMaxInsns, fa);
+    std::fclose(fa);
+    g_current_case = "run2";
+    const Outcome b = runOnce(exe, lst_path, kWinMain, kMaxInsns, fb);
+    std::fclose(fb);
+    if (!a.ok || !b.ok) {
+        std::fprintf(stderr, "setup 失败：run1=%s run2=%s\n", a.detail.c_str(), b.detail.c_str());
+        std::remove(utf8(ta).c_str());
+        std::remove(utf8(tb).c_str());
         return 1;
     }
     std::printf("run1: reason=%s eip=%08X insns=%llu hash=%016llX inputs=%016llX\n", lift::stopReasonName(a.reason),
                 a.ea, (unsigned long long)a.insns, (unsigned long long)a.hash, (unsigned long long)a.inputs_hash);
     if (!a.detail.empty()) std::printf("run1: detail=%s\n", a.detail.c_str());
-
-    g_current_case = "run2";
-    const Outcome b = runOnce(exe, lst_path, kWinMain, kMaxInsns);
     std::printf("run2: reason=%s eip=%08X insns=%llu hash=%016llX inputs=%016llX\n", lift::stopReasonName(b.reason),
                 b.ea, (unsigned long long)b.insns, (unsigned long long)b.hash, (unsigned long long)b.inputs_hash);
 
@@ -218,36 +184,7 @@ int main() {
     // ③ A4 的**逐字节**判据：同一次初始化的 shim trace 写两份文件后逐字节比较。
     //   旧实现只哈希寄存器 / FPU 元信息 / heap 计数 —— trace 本身一条都没比过（M1a 审计 T2）。
     g_current_case = "trace-bytes-identical";
-    // ★ 文件名必须带进程号（2026-11-04 实测）：固定名 `lift-boot-trace-a.log` 在两份 ctest
-    //   （并行构建目录 / 两个代理同时跑）**互相撞名** ⇒ 一个 `fopen` 失败 ⇒ 假红。
-    //   `file_io.cpp` 早就是这么做的（`-<pid>`），这里跟上。
-#ifdef _WIN32
-    const unsigned long pid = static_cast<unsigned long>(::GetCurrentProcessId());
-#else
-    const unsigned long pid = static_cast<unsigned long>(::getpid());
-#endif
-    const std::string suffix = "-" + std::to_string(pid) + ".log";
-    const std::filesystem::path ta =
-        std::filesystem::temp_directory_path() / ("lift-boot-trace-a" + suffix);
-    const std::filesystem::path tb =
-        std::filesystem::temp_directory_path() / ("lift-boot-trace-b" + suffix);
-    auto utf8 = [](const std::filesystem::path& p) {
-        const std::u8string s = p.u8string();
-        return std::string(reinterpret_cast<const char*>(s.data()), s.size());
-    };
-    std::FILE* fa = lift::openHostFileUtf8(utf8(ta), "wb");
-    std::FILE* fb = lift::openHostFileUtf8(utf8(tb), "wb");
-    LIFT_CHECK(fa != nullptr);
-    LIFT_CHECK(fb != nullptr);
-    Outcome t1;
-    Outcome t2;
-    if (fa && fb) {
-        t1 = runOnce(exe, lst_path, kWinMain, kMaxInsns, fa);
-        std::fclose(fa);
-        t2 = runOnce(exe, lst_path, kWinMain, kMaxInsns, fb);
-        std::fclose(fb);
-        LIFT_CHECK(t1.ok && t1.reason == lift::StopReason::UntilEa && t1.ea == kWinMain);
-        LIFT_CHECK(t2.ok && t2.reason == lift::StopReason::UntilEa && t2.ea == kWinMain);
+    {
         std::ifstream in_a(ta, std::ios::binary);
         std::ifstream in_b(tb, std::ios::binary);
         const std::string sa((std::istreambuf_iterator<char>(in_a)), std::istreambuf_iterator<char>());
@@ -264,23 +201,6 @@ int main() {
     }
     std::remove(utf8(ta).c_str());
     std::remove(utf8(tb).c_str());
-
-    // ④ 安装树红线：整个 boot（4 次运行）之后，`links/install` 根上那几个已知写入点必须没变。
-    g_current_case = "install-tree-untouched";
-    const std::vector<PathState> install_after = probeInstallWriteTargets(install_dir);
-    LIFT_CHECK(install_after == install_before);
-    if (install_after != install_before) {
-        for (std::size_t i = 0; i < install_before.size() && i < install_after.size(); ++i) {
-            if (install_before[i] == install_after[i]) continue;
-            std::fprintf(stderr,
-                         "红线：`links/install/%s` 被写了 —— exists: %s → %s，mtime: %lld → %lld\n",
-                         install_before[i].rel.c_str(), install_before[i].exists ? "yes" : "no",
-                         install_after[i].exists ? "yes" : "no", install_before[i].mtime,
-                         install_after[i].mtime);
-        }
-    } else {
-        std::printf("install-tree: %zu 个已知写入点，跑完 boot 后未变\n", install_after.size());
-    }
 
     return finish("boot-trace");
 }

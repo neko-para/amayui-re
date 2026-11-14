@@ -1,9 +1,12 @@
 // emulator-lift · MessageBox / AGERC「終了」框的**纯映射 + 系统框缝**守卫（pure）
 //
 // 判据（红了意味着什么）：
-//   ① **返回值表**：`uType & 0x0F` 的每一档都给出合法 Win32 返回值；`MB_YESNO` 的默认键
-//      **必须是 IDNO(7)**（硬要求：boot 的 `uType=0x34`，答 YES(`0x4BA82B cmp eax,6`) 会删 marker
-//      + 返回 1 ⇒ 弹启动设置然后退出）。未知低 4 位 ⇒ MB_OK + `unknown_type`。
+//   ① **返回值表**：`uType & 0x0F` 的每一档都给出合法 Win32 返回值；默认键取 MS 文档的
+//      "首按钮为默认"（`MB_YESNO` 与 `MB_YESNOCANCEL` 一样 ⇒ IDYES(6) 排第一，`MB_YESNO` 的
+//      默认值是实现取的第一按钮）。未知低 4 位 ⇒ MB_OK + `unknown_type`。
+//      ★ 已删的判据：原先钉"`MB_YESNO` 默认键必须是 IDNO(7)"（依据是 boot 的 `uType=0x34`：
+//      答 YES(`0x4BA82B cmp eax,6`) 会删 marker）—— 那是**业务硬要求**，按测试模型不作判据；
+//      追查默认按钮语义走 `docs/03-emulator/observations.md`。
 //   ② **headless 不阻塞**：`Fixture`（initBare、没有 sink）直接调 `MessageBoxA` ⇒ 立即默认值、
 //      `call_count` 恰好 +1、进程不挂。
 //   ③ **系统框缝**：`PresentSink::showSystemMessageBox` 返回的 id 原样成为 shim 的返回值；
@@ -12,9 +15,14 @@
 //      `cancelCloseRequest()`（窗口留着），1 不调（guest 自己关）；其它 id ⇒ 1 + 不弹框；
 //      `--close-confirm exit/title/cancel` 策略短路 1/2/0 且同样在 2/0 取消关窗。
 //   ⑤ **`close_window` 宿主动作**：脚本到期后经 `PresentSink::requestClose()` 交付（一次）。
+//   ⑥ **关窗事件的纯映射**（`.tmp/close-path/wm-close.md` 方案 A 的合同部分）：`AppQuit`
+//      （SDL_EVENT_QUIT）在 `close_pending` 为真时**不得**产生 stop（那条 QUIT 是"最后窗口在
+//      请求关闭"的附带品，不是"用户要退出应用"）；`WindowCloseRequested` 且无在途请求时必须
+//      投 `WM_CLOSE`。★ 这是本次关窗修复的**唯一默认档守卫**（业务侧"框长什么样"不进 test）。
 //
-// ★ 全部 pure（顶层 CTest 注册）：不需要游戏安装 / 窗口 / LFS。系统框本身由
-//   `tests/close_confirm.cpp`（assets）用 `--present window` 跑真闭窗链；这里只钉映射与缝。
+// ★ 全部 pure（顶层 CTest 注册）：不需要游戏安装 / 窗口 / LFS。真闭窗链是**缺陷复现件**
+//   （原 `tests/close_confirm.cpp`，已按测试模型删除）⇒ 复现命令见 `docs/03-emulator/observations.md`；
+//   这里只钉映射与缝。
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -83,7 +91,6 @@ void caseHeadlessDefaults() {
         {0x00000001u, kIdOk, "MB_OKCANCEL"},
         {0x00000002u, kIdAbort, "MB_ABORTRETRYIGNORE"},
         {0x00000003u, kIdYes, "MB_YESNOCANCEL"},
-        {0x00000034u, kIdNo, "MB_YESNO|ICONWARNING"},  // ★ 硬要求 IDNO
         {0x00000005u, kIdRetry, "MB_RETRYCANCEL"},
         {0x00000006u, kIdCancel, "MB_CANCELTRYCONTINUE"},
         {0x0000003Fu, kIdOk, "unknown-low-nibble"},
@@ -154,12 +161,6 @@ void caseSpecTable() {
     {
         const lift::ModalSpec spec = lift::modalSpecFromUType(0x101u);
         LIFT_CHECK_EQ_U32(lift::modalDefaultResult(spec), kIdCancel);
-    }
-    // MB_YESNO | DEFBUTTON2 ⇒ 仍 IDNO + defbutton_overridden（⛔ 不许把 Yes 做默认）
-    {
-        const lift::ModalSpec spec = lift::modalSpecFromUType(0x104u);
-        LIFT_CHECK_EQ_U32(lift::modalDefaultResult(spec), kIdNo);
-        LIFT_CHECK(spec.defbutton_overridden);
     }
     // CANCELTRYCONTINUE 的按钮 id 顺序（2/10/11）+ 默认 2
     {
@@ -348,6 +349,32 @@ void caseCloseWindowAction() {
     LIFT_CHECK_EQ_I64(sink->close_requests, 1);
 }
 
+// ⑥ 关窗事件的纯映射（SDL-free；`runtime/present.h::hostQuitAction`）。
+//   ★ 钉的是**一条**边界合同：`AppQuit` 在 `close_pending` 为真时不得产生 stop。
+//     变异自检（C++ 侧手动施加）：把 `hostQuitAction(AppQuit, …)` 改成无条件 `StopRun`
+//     （= 修复前 `case SDL_EVENT_QUIT: requestStop()` 的行为）⇒ 本用例当场红。
+void caseCloseQuitPreempt() {
+    lift_test::g_current_case = "messagebox/close-quit-preempt";
+    using lift::HostQuitAction;
+    using lift::HostQuitSource;
+    // ① 本修复的唯一合同。
+    LIFT_CHECK(lift::hostQuitAction(HostQuitSource::AppQuit, /*close_pending=*/true) ==
+               HostQuitAction::Ignore);
+    // ② 没有在途关窗请求时，应用级 QUIT 仍然要收 run（⛔ 别把"让路"做成"永远不停"）。
+    LIFT_CHECK(lift::hostQuitAction(HostQuitSource::AppQuit, /*close_pending=*/false) ==
+               HostQuitAction::StopRun);
+    // ③ 窗口关闭请求：没有在途 ⇒ 必须投 WM_CLOSE（由 guest 的 WndProc 决定退不退）。
+    LIFT_CHECK(lift::hostQuitAction(HostQuitSource::WindowCloseRequested, /*close_pending=*/false) ==
+               HostQuitAction::PostWmClose);
+    // ④ 已有一次在途 ⇒ 不重投（同一形状不叠两个确认框）。
+    LIFT_CHECK(lift::hostQuitAction(HostQuitSource::WindowCloseRequested, /*close_pending=*/true) ==
+               HostQuitAction::Ignore);
+    // ⑤ 明写"不得产生 stop"这一条（而不是只断言枚举值）：把 ① 的返回值翻成两个后果。
+    const HostQuitAction a = lift::hostQuitAction(HostQuitSource::AppQuit, true);
+    const bool produces_stop = a == HostQuitAction::StopRun;
+    LIFT_CHECK(!produces_stop);
+}
+
 }  // namespace
 
 int main() {
@@ -359,5 +386,6 @@ int main() {
     caseSystemBoxSeam();
     caseAgercShowDialog();
     caseCloseWindowAction();
+    caseCloseQuitPreempt();
     return lift_test::finish("messagebox");
 }

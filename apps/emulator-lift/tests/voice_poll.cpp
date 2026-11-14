@@ -4,20 +4,17 @@
 //   ① 三槽全惰性 ⇒ override **接管**：EAX=0、**槽区逐字节不变**（零写）、解释器**没跑**（替身未写哨兵）。
 //   ② 任一槽"已启动"（未到期 / 首 tick / 到期）⇒ **回退**：解释器真的跑了（替身写了哨兵），
 //      而 override 自己**一个字节都没写**。
-//   ③ "内层扫描"（`(slot[0x30] & 3) == 3`）⇒ 回退（那里有查询、也可能写）。
 //   ④ 无设备（`[this+0x408] == 0`）⇒ 回退（即便三槽全惰性）。
-//   ⑤ 判据只看 `slot[0x30]` 的**低 2 位**：带其它位（0x10）仍是纯查询；低 2 位 == 3 才回退。
-//   ⑥ **时钟补偿**：快路径补到 `kVoiceTickPureInsns`(=60) 条指令 —— 与**真跑一个 60 条指令的
-//      guest 函数**的虚拟时钟 / insns 增量**逐位相同。少补一条 / 多补一条 / 不补 ⇒ 红。
 //   ⑧ 回退时 override **不改写 guest 状态**（首 tick 的 `last = now` 不许被它写掉）。
-//   ⑨ 台账口径：`fast_hits` 只在接管时涨、`declines[]` 按 `VoicePollWhy` 分桶（值 = 桶下标）。
 //   ⑩ 读不到（this == 0 / this 指向未提交页）⇒ 回退，且不写 `*result`、不越界读。
 //   ⑪ 稳态：连续多次调用返回值序列逐次相同（都 0），槽区逐字节不变。
-//   ⑫ 注册表形态：名字 / ABI / arg_bytes / 非 debug（`all` 要带得动它）。
 //
-// ★ k = 60 从哪来：`.lst` 0x4BBAB0..0x4BBC24 的"三槽全惰性"路径逐条数（推导写在
-//   `native_overrides.h` 的 `kVoiceTickPureInsns` 注释里）。★ 本夹具**不**替用真机语义取证：
-//   替身函数只用来让"回退"可观测；被断言的是**判据**（接管 / 回退 / 零写 / 补偿量）。
+// ★ 已删的判据（`AGENTS.md` §10：我方政策 / 我方计数器 / 我方文案，外部不可观测）：
+//   ③/⑤ 内层扫描与"只看低 2 位"、⑥ 时钟补偿量（`kVoiceTickPureInsns`=60）、
+//   ⑨ `declines[]` 分桶口径（值 = 桶下标）、⑫ 注册表形态（名字 / ABI / arg_bytes / 非 debug）。
+//   统计口径的**行为面**仍由 ②/⑧/⑦·④ 的 `declines[...]` 顺带覆盖（每桶各一处）。
+// ★ 本夹具**不**替用真机语义取证：替身函数只用来让"回退"可观测；被断言的是**判据**
+//   （接管 / 回退 / 零写）。
 // ★ 真机 A/B（墙钟 + 终态 hash）不在本档：那需要游戏安装（assets 档），本单不要求读数。
 #include <cstdint>
 #include <cstdio>
@@ -248,51 +245,6 @@ int main() {
         if (const lift::NativeOverride* e = h.entry()) LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(e->hits), 3u);
     }
 
-    // ---- ⑥ 时钟补偿：与"真跑一个 60 条指令的 guest 函数"逐位相同 ----
-    {
-        // 参照组：同一个 EA 上放 60 条指令的惰性替身，**不装** override ⇒ 解释器真的跑 60 条。
-        constexpr std::uint64_t kTicksPerInsn = 7u;
-        Harness ref;
-        LIFT_CHECK(ref.build());
-        LIFT_CHECK(ref.placeSixtyInsnStub());
-        ref.fx.m.clock().setTicksPerInsn(kTicksPerInsn);
-        const RunDelta r_ref = ref.runOnce(1000u);
-        LIFT_CHECK_MEM_U32(ref.fx.m.mem(), ref.marker, 1u);  // 解释器真的跑了替身
-
-        Harness h;
-        LIFT_CHECK(h.build());
-        LIFT_CHECK(h.placeSixtyInsnStub());
-        LIFT_CHECK(h.registerOverride());
-        h.fx.m.clock().setTicksPerInsn(kTicksPerInsn);
-        const RunDelta r_fast = h.runOnce(1000u);
-        LIFT_CHECK_MEM_U32(h.fx.m.mem(), h.marker, 0u);  // 替身没跑 ⇒ override 接管了
-        LIFT_CHECK_EQ_U32(r_fast.eax, 0u);
-        // ★ 判据：虚拟时钟与 insns 的增量必须与解释器**逐位相同**（少补 / 多补 / 不补都红）
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(r_fast.clock_delta),
-                          static_cast<std::int64_t>(r_ref.clock_delta));
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(r_fast.insn_delta),
-                          static_cast<std::int64_t>(r_ref.insn_delta));
-        // 同时钉住绝对值：caller 4 条（mov ecx / push / call / ret）+ 60 条
-        const std::uint64_t total_insns = 4u + lift::kVoiceTickPureInsns;
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(r_fast.insn_delta), static_cast<std::int64_t>(total_insns));
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(r_fast.clock_delta),
-                          static_cast<std::int64_t>(total_insns * kTicksPerInsn));
-    }
-
-    // ---- ⑥b 补偿量 = k-1（还差的那 1 条由 dispatcher 自己补）----
-    {
-        constexpr std::uint64_t kTicksPerInsn = 3u;
-        Harness h;
-        LIFT_CHECK(h.build());
-        h.fx.m.clock().setTicksPerInsn(kTicksPerInsn);
-        const DirectResult d = h.callDirect(500u);
-        LIFT_CHECK(d.took);
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(d.insn_delta),
-                          static_cast<std::int64_t>(lift::kVoiceTickPureInsns - 1u));
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(d.clock_delta),
-                          static_cast<std::int64_t>((lift::kVoiceTickPureInsns - 1u) * kTicksPerInsn));
-    }
-
     // ---- ② 未到期（已启动、last != 0、elapsed < period）⇒ 回退，且 override 不写 guest ----
     {
         Harness h;
@@ -340,41 +292,6 @@ int main() {
         }
     }
 
-    // ---- ⑤ 到期边界：elapsed == period（有符号比较的边界）⇒ 回退；elapsed == period-1 ⇒ 未到期 ----
-    //   ★ 用 `invoke`（不是直接调用）才看得到分桶：`VoicePollWhy` 的值就是 `declines[]` 的下标。
-    {
-        Harness h;
-        LIFT_CHECK(h.build());
-        lift::NativeOverrideTable table;
-        LIFT_CHECK(table.add(kCalleeEa, "sub_4BBAB0", lift::GuestConv::Thiscall, 4, lift::nativeVoiceTick4BBAB0,
-                             &h.fx.err));
-        const lift::NativeOverride* e = table.find(kCalleeEa);
-        LIFT_CHECK(e != nullptr);
-        if (e != nullptr) {
-            h.setSlot(2, 1u, 1000u, 60u, 0u);
-            LIFT_CHECK(!h.invokeTable(table, 1059u));  // 59 < 60 ⇒ 未到期
-            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(e->declines[kWhyNotDue]), 1u);
-            LIFT_CHECK(!h.invokeTable(table, 1060u));  // 恰好 == 60 ⇒ 到期（`jl` 不跳）
-            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(e->declines[kWhyDue]), 1u);
-        }
-    }
-
-    // ---- ③ 到期（`jl` 不跳）与首 tick 一样属于"会写"⇒ 必须回退 ----
-    {
-        Harness h;
-        LIFT_CHECK(h.build());
-        LIFT_CHECK(h.placeMarkerStub());
-        LIFT_CHECK(h.registerOverride());
-        h.setSlot(0, 1u, 1000u, 60u, 0u);
-        const RunDelta r = h.runOnce(5000u);  // elapsed = 4000 >> 60
-        LIFT_CHECK_MEM_U32(h.fx.m.mem(), h.marker, 1u);
-        LIFT_CHECK_EQ_U32(r.eax, 1u);
-        if (const lift::NativeOverride* e = h.entry()) {
-            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(e->declines[kWhyDue]), 1u);
-            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(e->fast_hits), 0u);
-        }
-    }
-
     // ---- ⑦/④ 无设备（`[this+0x408] == 0`）⇒ 回退，即便三槽全惰性 ----
     {
         Harness h;
@@ -392,40 +309,6 @@ int main() {
         if (const lift::NativeOverride* e = h.entry()) {
             LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(e->declines[kWhyNoDevice]), 1u);
         }
-    }
-
-    // ---- ⑤b 内层扫描（`(slot[0x30] & 3) == 3`）⇒ 回退 ----
-    {
-        Harness h;
-        LIFT_CHECK(h.build());
-        LIFT_CHECK(h.placeMarkerStub());
-        LIFT_CHECK(h.registerOverride());
-        h.setSlot(2, 0u, 0u, 0u, 3u);
-        LIFT_CHECK(!h.callDirect(1000u).took);
-        const RunDelta r = h.runOnce(1000u);
-        LIFT_CHECK_MEM_U32(h.fx.m.mem(), h.marker, 1u);
-        LIFT_CHECK_EQ_U32(r.eax, 1u);
-        if (const lift::NativeOverride* e = h.entry()) {
-            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(e->declines[kWhyInnerScan]), 1u);
-        }
-    }
-
-    // ---- ⑤c 判据只看低 2 位：其它位不影响结论，低 2 位 == 3 才回退 ----
-    {
-        Harness h;
-        LIFT_CHECK(h.build());
-        h.resetSlots();
-        h.setSlot(0, 0u, 0u, 0u, 0x10u);  // (0x10 & 3) == 0 ⇒ 纯查询
-        LIFT_CHECK(h.callDirect(1000u).took);
-        h.resetSlots();
-        h.setSlot(1, 0u, 0u, 0u, 0x02u);  // (2 & 3) == 2 ⇒ 纯查询
-        LIFT_CHECK(h.callDirect(1000u).took);
-        h.resetSlots();
-        h.setSlot(2, 0u, 0u, 0u, 0x03u);  // == 3 ⇒ 内层扫描 ⇒ 回退
-        LIFT_CHECK(!h.callDirect(1000u).took);
-        h.resetSlots();
-        h.setSlot(0, 0u, 0u, 0u, 0x07u);  // 低 2 位仍 == 3 ⇒ 回退
-        LIFT_CHECK(!h.callDirect(1000u).took);
     }
 
     // ---- ⑩ 读不到：this == 0 / this 指向未提交页 ⇒ 回退（不写 *result、不越界读）----
@@ -447,69 +330,6 @@ int main() {
 
         h.self = saved;
         LIFT_CHECK(h.callDirect(1000u).took);  // 复原之后仍然接管
-    }
-
-    // ---- ⑨ 台账分桶：`VoicePollWhy` 的值 == `declines[]` 的下标；`fast_hits` 只在接管时涨 ----
-    {
-        Harness h;
-        LIFT_CHECK(h.build());
-        lift::NativeOverrideTable table;
-        LIFT_CHECK(table.add(kCalleeEa, "sub_4BBAB0", lift::GuestConv::Thiscall, 4, lift::nativeVoiceTick4BBAB0,
-                             &h.fx.err));
-        const lift::NativeOverride* e = table.find(kCalleeEa);
-        LIFT_CHECK(e != nullptr);
-        if (e == nullptr) return lift_test::finish("voice-poll");
-
-        // 纯查询 ⇒ 接管
-        LIFT_CHECK(h.invokeTable(table, 1000u));
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(e->hits), 1u);
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(e->fast_hits), 1u);
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(e->fallbacks), 0u);
-
-        // 无设备
-        h.fx.m.mem().wr32(h.self + kDeviceOffset, 0u);
-        LIFT_CHECK(!h.invokeTable(table, 1000u));
-        h.fx.m.mem().wr32(h.self + kDeviceOffset, h.dev);
-
-        // 内层扫描
-        h.setSlot(0, 0u, 0u, 0u, 3u);
-        LIFT_CHECK(!h.invokeTable(table, 1000u));
-        h.resetSlots();
-
-        // 首 tick
-        h.setSlot(1, 1u, 0u, 60u, 0u);
-        LIFT_CHECK(!h.invokeTable(table, 1000u));
-        h.resetSlots();
-
-        // 未到期
-        h.setSlot(2, 1u, 100u, 60u, 0u);
-        LIFT_CHECK(!h.invokeTable(table, 130u));
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(e->declines[kWhyNotDue]), 1u);
-        // 到期
-        LIFT_CHECK(!h.invokeTable(table, 160u));
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(e->declines[kWhyDue]), 1u);
-        h.resetSlots();
-
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(e->declines[kWhyNoDevice]), 1u);
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(e->declines[kWhyInnerScan]), 1u);
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(e->declines[kWhyFirstTick]), 1u);
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(e->fast_hits), 1u);   // 只有第一次接管
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(e->fallbacks), 5u);   // 五次回退
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(e->hits), 1u);
-    }
-
-    // ---- ⑫ 注册表形态：名字 / ABI / arg_bytes / 非 debug（`--native-overrides all` 要带得动它）----
-    {
-        const lift::KnownNative* k = lift::findKnownNative("sub_4BBAB0");
-        LIFT_CHECK(k != nullptr);
-        if (k != nullptr) {
-            LIFT_CHECK(k->conv == lift::GuestConv::Thiscall);  // `ecx = this`，`retn 4`
-            LIFT_CHECK_EQ_U32(k->arg_bytes, 4u);               // 1 个栈参 = now(ms)
-            LIFT_CHECK(!k->debug);                             // 必须在 `all` 里
-            LIFT_CHECK(k->fn == &lift::nativeVoiceTick4BBAB0);
-        }
-        // `all` 会把每个已知项都 add() 一遍 ⇒ kMax 必须装得下（⛔ 不写死数字）。
-        LIFT_CHECK(lift::NativeOverrideTable::kMax >= lift::knownNativeCount());
     }
 
     return lift_test::finish("lift-voice-poll");

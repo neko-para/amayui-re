@@ -1,4 +1,4 @@
-// emulator-lift · **assets 档**守卫：真机安装上的 LOGO 影片必须"真的放完"
+// emulator-lift · **LIFT_STRESS 档**守卫（压力/效率面）：真机安装上的 LOGO 影片必须"真的放完"
 //
 // 判据（红了意味着什么）：
 //   ① 子进程退出码 0（不是 guest fault / decode-error / unimplemented）；
@@ -17,7 +17,7 @@
 //   boot 到影片就要几分钟，`--time-limit` 会把影片截断 ⇒ 这条会假红）。测试用
 //   `$<TARGET_FILE:emulator-lift>`，跟着所在构建树走。
 //   ★ Debug 树里本测试**自己 `LIFT_SKIP`(77)**（`LIFT_MOVIE_LOGO_IS_DEBUG`）—— 不跑，免得白等。
-// ★ CMake 侧是 **opt-in**：默认不注册，`LIFT_ASSETS=1` 才注册（`add_executable` 也在同一个 `if`
+// ★ CMake 侧是 **opt-in**：默认不注册，`LIFT_STRESS=1` 才注册（`add_executable` 也在同一个 `if`
 //   里）。CTest 给它注入 `LIFT_STOP_AFTER_MOVIE=1`（影片放完即停，不再空转到 `--time-limit`），
 //   并传第 5 个参数 `--expect-early-stop`；本测试据此**断言钩子真的生效**（判据不挂在环境变量上：
 //   否则钩子失效时只会变慢、仍然绿）。
@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "check.h"
+#include "cmdline.h"
 #include "runtime/host_encoding.h"
 #include "subprocess_skip.h"
 
@@ -54,10 +55,8 @@ std::string readAllBytes(const fs::path& p) {
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
-std::wstring quoteArg(const std::wstring& s) {
-    // 路径不含引号；包一层双引号即可（本测试自己控制参数，不做通用 quoting）。
-    return L"\"" + s + L"\"";
-}
+// ★ 命令行拼装只有一份实现（tests/cmdline.h）：game-dir / appdata 都可能带尾反斜杠。
+using lift_test::quoteArg;
 
 #if defined(_WIN32)
 struct ChildResult {

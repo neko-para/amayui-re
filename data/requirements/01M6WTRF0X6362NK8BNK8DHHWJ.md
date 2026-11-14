@@ -5,7 +5,7 @@
 - status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
 - verify: apps/emulator-lift/tests/d3d9.cpp#d3d9/texture-bound-then-guest-release
-- repro: apps/emulator-lift/tests/option_roundtrip.cpp#option-roundtrip/3cycles
+- repro: docs/03-emulator/defects.md#BUG-01
 - severity: S1
 
 ## 2026-11-08 订正（只加注，不改下面的历史记录）

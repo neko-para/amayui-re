@@ -2,9 +2,9 @@
 
 - id: REQ-01M79NYYPXSMS3QR796M4VW704
 - type: bug
-- status: open
+- status: dropped
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- repro: apps/emulator-lift/tests/close_confirm.cpp#marker edge: cur=1 id=0x00005264 name=TITLE.BIN
+- dropped_reason: 不是产品缺陷：该 repro 就是 `close_confirm.cpp` 里那条 `marker edge: … name=TITLE.BIN` 整串断言本身，而它等的是一个日志边沿（噪声）。2026-11-13 按测试瘦身裁决（REQ-01M7AQ5QKKPC8YJTQA9DNRG2XA）删除该断言，`close-confirm` 改用 `stop : until-ea` + trace + "不弹框、直接返回" 钉住"真的走到"。产品侧无可观测分歧。
 - severity: S3
 - tags: [emulator-lift, test-flake, interaction]
 

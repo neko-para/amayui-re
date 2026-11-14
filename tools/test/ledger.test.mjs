@@ -966,19 +966,40 @@ test('★ schema 只有一份真源：describe() 的枚举与校验器用的是�
 });
 
 test('★ 锚点用 EA 不用行号：EA → 文件偏移由 PE 节表现算（同 EA 在任何一次反汇编里都成立）', () => {
-  const buf = Buffer.alloc(0x600);
+  // ★ 三节合成 PE（判据面要看**节的边界**，只造一节分不出"偏移算错了 0x1000"）：
+  //   节 1 `VA 0x1000 / raw 0x400` · 节 2 `VA 0x3000 / raw 0x800` · 节 3 `VA 0x5000 / raw 0xC00`，
+  //   每节 `SizeOfRawData = 0x400`（⇒ 每节的 RVA 区间都是 `[VA, VA+0x400)`，节间留空洞）。
+  const buf = Buffer.alloc(0x1000);
   buf.write('MZ', 0, 'latin1');
   buf.writeUInt32LE(0x80, 0x3c);
   buf.write('PE\0\0', 0x80, 'latin1');
-  buf.writeUInt16LE(1, 0x80 + 6);
-  buf.writeUInt16LE(0, 0x80 + 20);
-  const s = 0x80 + 24;
-  buf.writeUInt32LE(0x1000, s + 12);
-  buf.writeUInt32LE(0x200, s + 16);
-  buf.writeUInt32LE(0x400, s + 20);
+  buf.writeUInt16LE(3, 0x80 + 6); // NumberOfSections
+  buf.writeUInt16LE(0, 0x80 + 20); // SizeOfOptionalHeader = 0 ⇒ 节表紧跟 0x98
+  const table = 0x80 + 24;
+  const sections = [
+    { va: 0x1000, raw: 0x400 },
+    { va: 0x3000, raw: 0x800 },
+    { va: 0x5000, raw: 0xc00 },
+  ];
+  sections.forEach((sec, i) => {
+    const s = table + i * 40;
+    buf.write(`.s${i}`, s, 'latin1');
+    buf.writeUInt32LE(sec.va, s + 12); // VirtualAddress（= RVA）
+    buf.writeUInt32LE(0x400, s + 16); // SizeOfRawData：每节都是 0x400
+    buf.writeUInt32LE(sec.raw, s + 20); // PointerToRawData
+  });
+  // 每节的**起点**（VirtualAddress 边界）都映射到该节的 raw
   assert.equal(peOffsetOf(buf, 0x1000), 0x400);
+  assert.equal(peOffsetOf(buf, 0x3000), 0x800);
+  assert.equal(peOffsetOf(buf, 0x5000), 0xc00);
   assert.equal(peOffsetOf(buf, 0x1010), 0x410, '★ 偏移 = raw + (EA - VA)，不是 EA 本身');
-  assert.equal(peOffsetOf(buf, 0x2000), null, '不在任何节里 ⇒ null（不许瞎猜）');
+  // 前一节**尾部最后一字节**仍在这一节里（边界是闭-开区间 ⇒ 0x13FF 在、0x1400 不在）
+  assert.equal(peOffsetOf(buf, 0x13ff), 0x7ff);
+  // 节尾之后的**空洞** ⇒ null（错一页就落进前一个函数体，这正是要挡的那类静默错）
+  assert.equal(peOffsetOf(buf, 0x1400), null, '节 1 尾之后是空洞 ⇒ null（不许瞎猜）');
+  assert.equal(peOffsetOf(buf, 0x3400), null, '节 2 尾之后是空洞 ⇒ null');
+  // 首节之前同样不映射
+  assert.equal(peOffsetOf(buf, 0x0fff), null, '首节之前 ⇒ null');
   assert.equal(peOffsetOf(Buffer.from('not a pe'), 0x1000), null);
 });
 

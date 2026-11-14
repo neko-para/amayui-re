@@ -1,4 +1,4 @@
-// emulator-lift · assets 档：**真 guest 字节**的 native override 差分（解释器 vs override）
+// emulator-lift · **真 guest 字节**的 native override 差分（解释器 vs override）—— 默认档（缺件 SKIP 77）
 //
 // 判据（红了意味着什么）：
 //   ① 从 `AGE.EXE` 里取出 `sub_429020` / `sub_48AE90` / `sub_401000` / `sub_4CCC60` / `sub_4E0B40` 的**真字节**，放进 bare 机
@@ -7,7 +7,9 @@
 //   ② 48AE90 还要比**整张纹理逐字节** + 锁记账（locks / version / locked）。
 // ★ 为什么不用手写的参考 asm：手抄错时"两边都错"看不出来；真字节是唯一的外部 oracle
 //   （`.lst` 只用来确定 EA，不参与执行）。
-// ★ 缺资产 ⇒ SKIP 77（CMake 侧 `SKIP_RETURN_CODE 77`，注册在 `if(EXISTS ... .lst)` 里 = assets 档）。
+// ★ 缺资产 ⇒ SKIP 77（CMake 侧 `SKIP_RETURN_CODE 77`）★ **档位 = 默认档**：本用例在顶层
+//   **无条件**注册（`add_test` 不在任何 `if` 里）—— 缺 LFS 拆壳件只让**测试体**报 SKIP 77，
+//   ⛔ 不改变档位（`AGENTS.md` §5：输入假定在场，缺了不改变档位）。
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>

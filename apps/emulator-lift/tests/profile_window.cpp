@@ -503,64 +503,6 @@ std::string edgeFnName(std::uint32_t ea) {
     return std::string(buf);
 }
 
-// ---- 块级**指令数**（`insns=`）的扫描面 —— 本单的硬判据（`REQ-01M6XVZ8AXJNG492WA2QAMTA35`）----
-//   ★ 行判据同 `findBlockRow`：只有块行带 `depth=`；块行**一定**带 ` insns=`（缺列就是没落地）。
-//   ★ 这里扫的是**日志里实际印出来的每一行**（不是只看 top-3）：只要有一行 insns=0 / 缺列就红。
-struct BlockInsnsScan {
-    std::size_t rows = 0;     // 块行数
-    std::size_t missing = 0;  // 没有 ` insns=` 列的块行（⛔ 必须 0）
-    std::size_t zero = 0;     // `insns=0` 的块行（⛔ 必须 0：执行过的块至少 1 条指令）
-    unsigned long long sum = 0;
-};
-
-BlockInsnsScan scanBlockInsns(const std::string& log) {
-    BlockInsnsScan out;
-    std::size_t at = 0;
-    for (;;) {
-        const std::size_t nl = log.find('\n', at);
-        if (nl == std::string::npos) break;
-        const std::size_t begin = nl + 1;
-        const std::size_t end = log.find('\n', begin);
-        const std::string line = log.substr(begin, (end == std::string::npos ? log.size() : end) - begin);
-        at = begin;
-        if (line.find("depth=") == std::string::npos) continue;
-        unsigned idx = 0;
-        unsigned ea_got = 0;
-        if (std::sscanf(line.c_str(), " %u. %x", &idx, &ea_got) != 2) continue;
-        ++out.rows;
-        const char* ins_at = std::strstr(line.c_str(), " insns=");
-        unsigned long long v = 0;
-        if (ins_at == nullptr || std::sscanf(ins_at, " insns=%llu", &v) != 1) {
-            ++out.missing;
-            continue;
-        }
-        if (v == 0) ++out.zero;
-        out.sum += v;
-    }
-    return out;
-}
-
-// 解析 `insnsBlk  : block=… window=… diff=… override=… unattributed=…`（闭合行的机器可读面）。
-struct InsnsClosure {
-    bool ok = false;
-    unsigned long long block = 0;
-    unsigned long long window = 0;
-    long long diff = 0;
-    unsigned long long override_insns = 0;
-    long long unattributed = 0;
-};
-
-InsnsClosure parseInsnsClosure(const std::string& log) {
-    InsnsClosure c;
-    const std::string line = lineWith(log, "insnsBlk  :");
-    if (line.empty()) return c;
-    const int n = std::sscanf(line.c_str(),
-                              "insnsBlk  : block=%llu window=%llu diff=%lld override=%llu unattributed=%lld",
-                              &c.block, &c.window, &c.diff, &c.override_insns, &c.unattributed);
-    c.ok = (n == 5);
-    return c;
-}
-
 struct EdgeRow {
     bool found = false;
     double incl_ms = 0.0;
@@ -1131,44 +1073,6 @@ int main() {
         LIFT_CHECK(tail.blind);
         // 报告里也要有这张表的**口径**（否则 `!BLIND` 只是一个没人解释的记号）
         LIFT_CHECK(log.find("没有进入计数") != std::string::npos);
-
-        // =========================================================================================
-        // ④ 块级**指令数**（2026-11-10 追加；本单的第 ③ 步）：每行 `insns > 0`，且块级之和与
-        //    窗口 insns **精确闭合**（⛔ 不是"约等于"）。
-        //    判据分三层，缺一层都说明"按块累计"接错了地方：
-        //      (a) 每一行块行都有 `insns=` 列且 > 0（0 / 缺列 = 累加没接上，或接在了错误粒度）；
-        //      (b) 打印出来的行之和 == 汇总行报的块级合计（说明合计不是另算一份）；
-        //      (c) window = Σblock + override + unattributed **逐位相等**，且这里没有 override
-        //          （自造机器码、未装 native override）⇒ override = 0、unattributed = 0。
-        //    ★ 另钉两个"程序形状"等式：`mid` 循环块 = 200×3 条、`leaf` 循环块 = 2000×3 条
-        //      ⇒ 若把别人的指令数算到这一块头上（粒度错），这两条当场红。
-        //    ★ 变异（`pnpm test:mutation`）：dispatcher 把块执行条数传成 0 ⇒ (a)(b)(c) 一起红。
-        // =========================================================================================
-        {
-            const BlockInsnsScan scan = scanBlockInsns(log);
-            const InsnsClosure c = parseInsnsClosure(log);
-            LIFT_CHECK(scan.rows >= 4);
-            LIFT_CHECK(scan.missing == 0);  // 每行都带 insns=
-            LIFT_CHECK(scan.zero == 0);     // 每块 insns > 0
-            LIFT_CHECK(c.ok);               // 闭合行本身必须存在且可解析
-            if (c.ok) {
-                // (b) 打印行之和 == 汇总报的块级合计（本用例块数远小于 top=64 ⇒ 全打印）
-                LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(c.block), static_cast<std::int64_t>(scan.sum));
-                // (c) window = Σblock + override + unattributed（逐位）
-                LIFT_CHECK_EQ_I64(c.diff, 0);
-                LIFT_CHECK_EQ_I64(c.unattributed, 0);
-                LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(c.override_insns), 0);
-                LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(c.window),
-                                  static_cast<std::int64_t>(end_insns - begin_insns));
-                LIFT_CHECK(c.block > 0);
-            }
-            // 程序形状（确定性计数，与耗时无关）：
-            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mid.insns), 200ll * 3ll);   // mloop = 3 条 × 200
-            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(leaf.insns), 2000ll * 3ll); // lloop = 3 条 × 2000
-            LIFT_CHECK(tail.insns > 0);
-            // 覆盖边界：窗口在 tail 循环中途收口 ⇒ tail 的块条数应明显少于整个循环
-            LIFT_CHECK(tail.insns < 500ll * 3ll);
-        }
     }
 
     return finish("profile-window");

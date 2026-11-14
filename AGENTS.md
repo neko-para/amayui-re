@@ -223,6 +223,20 @@ skip-logo > 30 s，音频 fill 会必然 underrun。⛔ 不要用 Debug 的墙�
 解析在同一处（`tools/lib/ledger.mjs` 的 `cmakeTestTier()`，判据不建清单），两侧守卫见
 `tools/test/ledger.test.mjs` 与 `tools/test/spec.test.mjs`。⇒ **想让一条 CTest 成为 spec 的 reviewed 级证据，就把它注册在最外层。**
 
+★ **删/改任何 CTest 名或 `g_current_case` 之前**：先 `rg '<名字>' data/requirements`；命中任一 `verify:`/`repro:` ⇒ **不删**，报告裁决（删了等于让一个已收口的结论失去凭据，而 `requirements validate` 会因为锚点解析不了而红 —— 那是它唯一能拦的一步）。同理：删/改 `add_test` 的 `--flag` 之前先确认目标源文件里有对应分派（空壳用例 `ctest` 照样绿）。
+
+★ **`apps/emulator-lift` 的 CTest 档位按「用途」分，⛔ 不按"资产在不在"**（`if(EXISTS …)` 不许当档位开关）：
+**默认（顶层无条件）= 按 shim 接口设计的合同**（判据 = 微软文档 / 公开规范）·
+**`LIFT_STRESS` = 压力/效率档**（判据 = 读数 + 阈值；**唯一**允许跑真游戏的一档）·
+**`repro` 档已取消**（缺陷复现件不进测试，只作复现命令留在 `defects.md` / `observations.md` —— 见
+`REQ-01M7ATAB5A18W7XBCKFBEQS7HB` 测试模型单）。
+判据：新增一条用例先回答"这是**按 shim 接口的合同**还是**压力/效率**"；⛔ **业务正确性不作判据**
+（"到达某界面 / 存档链走通 / 播完了"是游戏的事），⛔ 也不许把"再回归一遍历史缺陷"的用例放进默认门禁
+（§10：不要用 test 记住发生过的事）。
+输入（`links/install`、LFS 语料、两份宿主字体）**假定在场**：缺了不改变档位，configure 期的 STATUS 盘点逐个
+打印 present / MISSING（显式开档而缺 ⇒ `FATAL_ERROR`）；`cmakeTestTier()` 仍只分 pure / assets。
+口径与起因见 `REQ-01M7AQ5QKKPC8YJTQA9DNRG2XA` 与其子单 `REQ-01M7ATAB…`。
+
 ★ 为什么要有分级（实测）：旧形态一条命令跑全部 = 23 文件 / 220 用例 / **~28.7 s**，其中
 `inventory` 13.8 s + `corpus-manifest` 9.8 s 占了 **82%**；而且 **13/23 个文件依赖仓库外的东西**，
 "这台机器上没跑"与"跑了且绿"在输出里长得一样。选择器是 `tools/test-run.mjs`。

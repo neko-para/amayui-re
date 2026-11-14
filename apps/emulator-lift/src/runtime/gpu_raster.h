@@ -165,6 +165,10 @@ struct GpuSampler {
     GpuAddress address_v = GpuAddress::Clamp;
     GpuFilter mag_filter = GpuFilter::Point;
     GpuFilter min_filter = GpuFilter::Point;
+    // `D3DSAMP_MIPFILTER != D3DTEXF_NONE`。false ⇒ 后端用 `max_lod = 0` 的 sampler
+    //   （D3D9 的 D3DTEXF_NONE = "关掉 mipmap" ⇒ 只采 level 0）。
+    //   ★ `max_lod` 是 **per-sampler** 字段（不是纹理属性）⇒ 同一张纹理的两批可以各用一档。
+    bool mipmap = true;
 };
 
 struct GpuRasterState {
@@ -379,7 +383,7 @@ public:
     // 合批：入队 + 一次 flush（「一次 draw = 一次提交」→「一帧的 draw 合到一次提交」）
     // -----------------------------------------------------------------------------------
     // ★ 旧接口（rasterDraw / rasterDrawTextured）语义**不变** = 入队 + **立即** flush：
-    //   夹具、`--gpu-verify`（判据要求"画完立刻能读"）都还走它。
+    //   夹具（判据要求"画完立刻能读"）还走它。
     // ★ `rasterQueue` 的契约：
     //   · 顶点由后端**拷贝**（调用方返回后可以释放自己的数组）；
     //   · 纹理必须在**入队时**就交给后端：`GpuRasterTexture::pixels` 是 guest 指针，
@@ -427,7 +431,7 @@ public:
     //     有序屏障（另一单）；⛔ 在那之前别在"队列非空时 arm"的路径上加**写深度**的批。
     //   · 不绑 target 身份：换 target 由 `rasterPrepare` 自己 arm（最坏多清一次，无害）；
     //   · ⛔ **转发壳**（`present_sdl.cpp::SdlWindow`）必须显式转发 —— 这一条曾经整条漏掉，症状是
-    //     "GPU 光栅化臂整层丢 Live2D 角色而 `fallback=0`"（静默、不改像素、所有既有测试全绿）。
+    //     "GPU 光栅化臂整层丢 Live2D 角色而账上一切正常"（静默、不改像素、所有既有测试全绿）。
     virtual void rasterRequestDepthClear() {}
     // 设备 / target 销毁前丢掉队列与镜像（⛔ 不要往即将释放的 guest 像素回读）。默认 no-op。
     virtual void rasterDiscardTarget() {}

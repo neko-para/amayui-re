@@ -311,6 +311,25 @@ enable_testing()
 # ★ 测试可执行文件统一落到 `${CMAKE_BINARY_DIR}/tests`（= `out/tests/`）；产品仍在 `${CMAKE_BINARY_DIR}`。
 #   multi-config 生成器要为每个配置各设一次（Ninja 是单配置，用不带后缀那个）。
 # ★ 本块**不缩进**：整块缩进会把 diff 变成全文件重写；CMake 不要求缩进。
+# ★ **档位口径（2026-11-14 测试模型重做；判据 = 注册位置，⛔ 不建清单文件）**：
+#   ① **接口合同 / 默认档**：顶层无条件 `add_test` ⇒ 默认 `ctest` 就跑；
+#      判据 = **微软文档 / 公开规范**（返回值、错误码、边界、引用计数、所有权、pitch/stride、caps、
+#      状态机）。⛔ 业务正确性不作判据（"到达某界面 / 存档链走通 / 播完了"是游戏的事）。
+#   ② **压力/效率档（`LIFT_STRESS`）**：`if(DEFINED ENV{LIFT_STRESS})` ⇒ 只在 `LIFT_STRESS=1` 时注册；
+#      判据 = **读数 + 阈值**（fps / 帧时间 p95 / 堆峰值 / 音频 underrun / 启动耗时 / 长跑稳定）。
+#      **它是唯一允许跑真游戏的一档**；⛔ 判据里不许出现业务断言（稳定性除外：长跑不崩、guest fault = 0）。
+#   ★ `repro` 档**已取消**（2026-11-14）：缺陷复现件**不进测试**，只作复现命令留在
+#     `docs/03-emulator/defects.md` / `observations.md`（口径见 `REQ-01M7ATAB5A18W7XBCKFBEQS7HB`）。
+# ★ **档位按用途，⛔ 不按"资产在不在"**（2026-11-13 用户裁决：「资产总是在场，总是用 `links/install`」）：
+#   `if(EXISTS …)` 当**档位开关**是错的轴 —— 在我们的机器上它恒真，唯一效果是让"哪条用例存在"
+#   随机器漂移（并让 README 变成假话）。⇒ `add_executable` / `add_test` 的注册位置**只**由
+#   "这是合同 / 压力与效率"决定。**本文件里剩下的 `if(EXISTS …)` 只有"打印 STATUS
+#   盘点"这一类，⛔ 不决定注册**。
+# ★ **输入假定在场**：`LIFT_STRESS_GAME_DIR`（缺省 `links/install`）、LFS 语料（执行源 + `.lst`）、
+#   两份宿主字体（`corpus/assets/fonts/Amayui-CN_cnjp{, -Bold}.ttf`）。
+#   configure 期**总是**打一行 STATUS 盘点（每个输入 present / MISSING + 全路径）；
+#   `LIFT_STRESS` **被显式打开**而它要的输入 MISSING ⇒ `message(FATAL_ERROR …)`；
+#   默认档**不** FATAL —— 缺了就是那条用例自己红 / `LIFT_SKIP`(77)（由测试体自己判，⛔ 不缩水）。
 # =====================================================================================
 if(LIFT_BUILD_TESTS)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
@@ -319,23 +338,18 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/tests")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/tests")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_BINARY_DIR}/tests")
 
-# ---- pure：宿主层 smoke（不建窗口、不需要游戏）----
-add_test(NAME emulator-lift-smoke COMMAND emulator-lift --smoke)
-
 # ---- pure：**GPU 是唯一光栅实现**（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）----
 # ① 无 GPU ⇒ **拒绝启动**（非 0 退出 + stderr 明确指路）。用 `SDL_VIDEODRIVER=dummy` 强制
 #    "建不出 GPU device"（⛔ 不靠真拔显卡）；后端在**执行源定位之前**建 ⇒ 这条不需要游戏资产。
-# ② 已删的 `--raster`（连同它的 `cpu` 值）⇒ 传进去必须是**未知参数**（exit 2），⛔ 不是静默忽略。
-# ★ 两条判据都落在进程边界（退出码 + stderr 文案）上 ⇒ 由 `tests/gpu_batch.cpp` 起真子进程收输出。
+# ★ 判据落在进程边界（退出码 + stderr 文案）上 ⇒ 由 `tests/gpu_batch.cpp` 起真子进程收输出；
 #   子进程实参 = `$<TARGET_FILE:emulator-lift>`。
+# ★ 原 `lift/raster-flag-gone`（"`--raster` 必须继续不存在"）**已摘注册**：那条判的是**设计冻结**
+#   （flag 已从代码里消失、没有静默失败路径；有人加回来 `git diff` 看得见）⇒ 按测试模型不配守卫。
 add_test(NAME lift/no-gpu-refuses-start
     COMMAND lift-gpu-batch --no-gpu-refuses-start $<TARGET_FILE:emulator-lift>)
 set_tests_properties(lift/no-gpu-refuses-start PROPERTIES
     ENVIRONMENT "SDL_VIDEODRIVER=dummy"
     TIMEOUT 120)
-add_test(NAME lift/raster-flag-gone
-    COMMAND lift-gpu-batch --raster-flag-gone $<TARGET_FILE:emulator-lift>)
-set_tests_properties(lift/raster-flag-gone PROPERTIES TIMEOUT 120)
 
 # ---- pure：`--time-limit` 的 CLI 契约（`REQ-01M711JN018QDSWK4726Y1A0KV`）----
 # 判据见 tests/cli_time_limit.cpp 的头注释：① `--time-limit 0` 与**省略该参数**行为等价
@@ -383,133 +397,126 @@ add_executable(lift-seh tests/seh.cpp)
 target_link_libraries(lift-seh PRIVATE emulator-lift-runtime)
 add_test(NAME seh COMMAND lift-seh)
 
-# ---- Windows 宿主编码契约（argv = UTF-8 / 输出字节 = UTF-8）----
+# ---- 默认：Windows 宿主编码契约（argv = UTF-8 / 输出字节 = UTF-8）----
 # ★ 子进程用**文件**重定向（不走管道：受限沙箱里捕获管道会 EPERM）。
 # ★ 起子进程时 cwd = 源码目录 ⇒ 默认的 `../../corpus/...` 执行源 / `.lst` 能按相对路径找到。
-# ★ 测试要真的启动 emulator-lift（它会载入执行源）⇒ 属于 **assets** 档：缺 LFS 资产时
-#   **不注册**（与 loader / boot-trace 同一判据；⛔ 不能让它挂成"pure 却红"）。
+# ★ 它是**设计的合同** ⇒ **默认档（顶层无条件）**；⛔ 不要再用 `if(EXISTS …)` 决定它注册与否
+#   （那会让"这条用例存不存在"随机器漂）。它要真启动 emulator-lift（会载入执行源）⇒ 缺 LFS 资产时
+#   由测试体自己判（无 GPU ⇒ `LIFT_SKIP` 77；执行源缺失 ⇒ 它自己红）。
 add_executable(lift-host-encoding tests/host_encoding.cpp)
 target_link_libraries(lift-host-encoding PRIVATE emulator-lift-runtime)
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE")
-    add_test(NAME host-encoding COMMAND lift-host-encoding $<TARGET_FILE:emulator-lift>)
-    set_tests_properties(host-encoding PROPERTIES
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        SKIP_RETURN_CODE 77)
-endif()
+add_test(NAME host-encoding COMMAND lift-host-encoding $<TARGET_FILE:emulator-lift>)
+set_tests_properties(host-encoding PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    SKIP_RETURN_CODE 77)
 
-# ---- assets 档的"真机安装根"：仓库根的 `links/install`（本机符号链接，总指向真实安装树）----
-# ★ 为什么是变量而不是字面量：本仓在 macOS 上也要跑 assets 档（`tests/title_entry_paths.cpp`
-#   等 e2e 的 POSIX 分支就是为它写的）。安装根写死成某个盘符会让 macOS / 换机器的资产用例**永远不注册**
-#   —— 而"没跑"与"跑绿了"在 `ctest` 输出里长得一样（AGENTS.md §5 的分级判据正是防这个）。
+# =====================================================================================
+# 输入（C）：**路径只在这里定义一次**，下面的 STATUS 盘点与各 `add_test` 都引用它们。
+# ★ 存在性**不**决定档位（见上面的档位口径）——它只进"盘点行"与"显式开档而缺 ⇒ FATAL"。
+# =====================================================================================
+# 真机安装根：仓库根的 `links/install`（本机符号链接，总指向真实安装树）。
+# ★ 为什么是变量而不是字面量：本仓在 macOS 上也要跑要真机安装的那些用例（`tests/option_roundtrip.cpp`
+#   等 e2e 的 POSIX 分支就是为它写的）。安装根写死成某个盘符会让 macOS / 换机器的用例**指着不存在的
+#   路径** —— 而"没跑"与"跑绿了"在 `ctest` 输出里长得一样（AGENTS.md §5 的分级判据正是防这个）。
 # ★ 落点只有一处：仓库根的 `links/install`（Windows / macOS 都是它，见 `.gitignore` 的 `/raw`、`/install`）。
-#   ⛔ 它只决定"去哪找安装树"，**不决定档位**：CTest 仍只在 `DEFINED ENV{LIFT_ASSETS}` 下注册。
-#   显式覆盖：`cmake --preset <preset> -DLIFT_ASSETS_GAME_DIR=<含 SYS4INI.BIN 的目录>`。
-set(LIFT_ASSETS_GAME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../links/install"
-    CACHE PATH "assets 档的安装根（含 SYS4INI.BIN）")
-if(NOT EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN")
-    message(STATUS "assets 档：${LIFT_ASSETS_GAME_DIR} 下没有 SYS4INI.BIN ⇒ 资产用例不注册")
+#   ⛔ 它只决定"去哪找安装树"，**不决定档位**：档位只由用途（接口合同 / 压力与效率）决定。
+#   显式覆盖：`cmake --preset <preset> -DLIFT_STRESS_GAME_DIR=<含 SYS4INI.BIN 的目录>`。
+set(LIFT_STRESS_GAME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../links/install"
+    CACHE PATH "LIFT_STRESS 档的安装根（含 SYS4INI.BIN）")
+# LFS 语料：执行源（拆壳件）+ 反汇编 `.lst`（符号 / 对照 / 覆盖真源）。
+set(AGE_SECTFIX_EXE "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE")
+set(AGE_LST "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/disasm/files/AGE.EXE__dumped.sectfix.EXE.lst")
+# 两份宿主字体：常规字体的路径在产品区已由 `LIFT_HOST_FONT_PATH` 注入；粗体走同一条派生规则
+# （`src/runtime/font.cpp` 的 `boldPathFor`：换掉 `.ttf` 后缀为 `-Bold.ttf`）——⛔ 不要写第二份字面量。
+string(REGEX REPLACE "\\.ttf$" "-Bold.ttf" LIFT_HOST_FONT_BOLD_PATH "${LIFT_HOST_FONT_PATH}")
+set(LIFT_INSTALL_SYS4INI "${LIFT_STRESS_GAME_DIR}/SYS4INI.BIN")
+
+# ---- C：configure 期**总是**打这几行盘点（每个输入 present / MISSING + 全路径）----
+foreach(_lift_input
+        "${LIFT_INSTALL_SYS4INI}"
+        "${AGE_SECTFIX_EXE}"
+        "${AGE_LST}"
+        "${LIFT_HOST_FONT_PATH}"
+        "${LIFT_HOST_FONT_BOLD_PATH}")
+    # 盘点行要写**全路径**（`..` 也归一化掉）：出问题时能直接复制去查。
+    get_filename_component(_lift_abs "${_lift_input}" ABSOLUTE)
+    if(EXISTS "${_lift_abs}")
+        message(STATUS "输入盘点：present  ${_lift_abs}")
+    else()
+        message(STATUS "输入盘点：MISSING  ${_lift_abs}")
+    endif()
+endforeach()
+
+# ---- C：**显式**开了 LIFT_STRESS 而它要的输入 MISSING ⇒ 响亮地失败 ----
+# ★ 默认档**不** FATAL：缺输入时那条用例自己红 / SKIP 77（⛔ 不静默缩水成"没这条用例"）。
+if(DEFINED ENV{LIFT_STRESS})
+    foreach(_lift_required
+            "${LIFT_INSTALL_SYS4INI}"
+            "${AGE_SECTFIX_EXE}"
+            "${AGE_LST}")
+        if(NOT EXISTS "${_lift_required}")
+            message(FATAL_ERROR
+                "按用途显式打开了 LIFT_STRESS（它要真跑一遍安装树），但输入缺失：\n"
+                "  MISSING  ${_lift_required}\n"
+                "怎么补：\n"
+                "  · 安装树：把真实游戏安装目录链到仓库根的 `links/install`（该目录含 SYS4INI.BIN），或\n"
+                "    `cmake --preset <preset> -DLIFT_STRESS_GAME_DIR=<含 SYS4INI.BIN 的目录>`；\n"
+                "  · LFS 语料：`git lfs install && git lfs pull`（清单见 `corpus/assets.json`）。\n"
+                "⛔ 不要靠关掉输入让 configure 过：档位按用途，输入是假定在场的。")
+        endif()
+    endforeach()
 endif()
 
 # =====================================================================================
-# assets：窗口调试叠层（`--overlay`）的 CLI smoke（`REQ-01M74Z3E0K9QXP93T881KRQ1B2`）
-# ★ 判据见 `tests/overlay.cpp` 文件头 ⑥：`--present window --present-hidden --overlay
-#   --max-frames 2` exit 0，且 `--present-screenshot` 的 BMP 左上角真的被叠层覆盖（精确颜色）；
-#   同一配置去掉 `--overlay` 也 exit 0。
-# ★ 注册条件按需求单的口径 = **安装树存在**（不另加 `LIFT_ASSETS` opt-in：这条要证明的正是
-#   "真机窗口路径能带着叠层跑完两帧"）。窗口 / GPU 不可用 ⇒ 测试自己 `LIFT_SKIP`(77) + 原因。
-# ★ `add_executable` 在上面的 pure 块里（`lift-overlay`）；这里只加 CTest 项。
+# 默认档：**真机安装根**上的设计合同（安装树**假定在场**；缺 ⇒ 用例自己 SKIP 77 / 红）
+# ★ 2026-11-13 用户裁决：档位按**用途**，⛔ 不按"资产在不在" —— 这条是设计的合同（游戏自带字体的
+#   缺字后备），就注册在**默认档**；⛔ 不要再用 `if(EXISTS …/SYS4INI.BIN)` 让它随机器漂。
+# ★ 2026-11-13 CTest 瘦身：`overlay-window-smoke` 已删（叠层的像素判据由 pure 的 `overlay` ③④
+#   覆盖；"带 `--overlay` 的真 boot 不崩"由其它起子进程的 CTest 覆盖）。
 # =====================================================================================
-if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN")
-    add_test(NAME overlay-window-smoke COMMAND lift-overlay --window-smoke
-        $<TARGET_FILE:emulator-lift>
-        "${LIFT_ASSETS_GAME_DIR}"
-        "${CMAKE_CURRENT_BINARY_DIR}/overlay-work")
-    set_tests_properties(overlay-window-smoke PROPERTIES
-        # ★ 子进程继承这个 cwd：模拟器默认的执行源是按相对当前目录找的
-        #   （`../../corpus/assets/age/…sectfix.EXE`）⇒ 停在 `out/` 会找不到执行源、被测试 SKIP。
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        SKIP_RETURN_CODE 77
-        TIMEOUT 1200)
 
-    # ---- assets：恢复判定（`--accept-recovery-dialog`）的计数守卫 ----
-    # `REQ-01M75T14STFFK4BE6FXN5ERGN3`。判据见 tests/recovery_dialog.cpp 文件头：
-    # ① 同一 `--appdata` 跑两次（第一次写 `$$AGE.TMP`，第二次带 flag）；
-    # ② 默认档：`user32!MessageBoxA(...,00000034)` **0 行** + 摘要 `recovery  : bypassed`；
-    # ③ 带 flag：恰 1 行且 `-> 00000007`（IDNO —— 答 YES 是陷阱）。
-    # ★ 找不到 marker ⇒ 测试自己 `LIFT_SKIP`(77)（`set:RegFilePath` 未取证，不是判据红）。
-    # ★ 一律 `--present headless`：窗口档传 flag 后会**真的等人**（CTest 会挂到 TIMEOUT）。
-    add_executable(lift-recovery-dialog tests/recovery_dialog.cpp)
-    target_link_libraries(lift-recovery-dialog PRIVATE emulator-lift-runtime)
-    add_test(NAME recovery-dialog COMMAND lift-recovery-dialog
-        $<TARGET_FILE:emulator-lift>
-        "${LIFT_ASSETS_GAME_DIR}"
-        "${CMAKE_CURRENT_BINARY_DIR}/recovery-work")
-    set_tests_properties(recovery-dialog PROPERTIES
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        SKIP_RETURN_CODE 77
-        TIMEOUT 1800)
+# ---- 默认：游戏自带 `AGE-EXTEND.TTF` 的 U+E010（`REQ-01M79N1ZV391BCM7MYSKK0GVV0`）----
+# 判据见 tests/gdi_font_fallback.cpp 的 `runAssets`（同一个可执行文件的 `--assets` 臂；先例 =
+# `lift-overlay` 的 pure / assets 两次注册）：从 `SYS4INI.BIN` 的 ALF 索引按名字取出
+# `AGE-EXTEND.TTF`（族名 `AGE Extend`）⇒ ①`FT_Get_Char_Index(face, 0xE010) != 0` 且
+# `FT_Load_Char` 位图非空；②宿主 Amayui CN 下 `glyph(0xE010)` = `.notdef`（notdef +1）；
+# ③登记成缺字后备之后同一码位由 `AGE Extend` 提供（fallback +1、mask 有墨迹、advance>0）；
+# ④移除后备 ⇒ 回到 `.notdef`（notdef +1）。
+# ★ 缺安装 / 缺宿主字体 / 索引里没这一条 ⇒ 测试自己 `LIFT_SKIP`(77) + 原因（⛔ 不假绿）；
+#   ⛔ 不要为它加存在性闸（那就又回到"档位按资产在不在"的老路）。
+add_test(NAME gdi-font-fallback-assets COMMAND lift-gdi-font-fallback --assets
+    "${LIFT_STRESS_GAME_DIR}")
+set_tests_properties(gdi-font-fallback-assets PROPERTIES
+    SKIP_RETURN_CODE 77
+    TIMEOUT 300)
 
-    # ---- assets：AGERC 关窗确认三臂（`--close-confirm exit|title|cancel` + `close_window` 注入）----
-    # `REQ-01M72JFZ87DJNT52DW4HB8SEV6` stage 1+2。判据见 tests/close_confirm.cpp 文件头：
-    # 三臂各自走到 `0x405B21` / `0x405A82` / `0x405A95`，trace 里 `_ShowDialog@12(id=3) -> 1/2/0`，
-    # 且 title/cancel 的 stop 是 `until-ea`（窗口没被宿主宽限关掉）。
-    # ★ ⛔ 不再给 `SDL_VIDEODRIVER=dummy`：GPU 是唯一光栅实现，dummy 下建不出 GPU device
-    #   ⇒ 子进程会**拒绝启动**、整条用例退化成 SKIP（那是把产品路径藏起来）。
-    #   真 boot 到 TITLE.BIN（约 14 s/臂）；没有 GPU ⇒ 子进程拒绝启动 ⇒ SKIP 77（原因在 log 里）。
-    add_executable(lift-close-confirm tests/close_confirm.cpp)
-    target_link_libraries(lift-close-confirm PRIVATE emulator-lift-runtime)
-    add_test(NAME close-confirm COMMAND lift-close-confirm
-        $<TARGET_FILE:emulator-lift>
-        "${LIFT_ASSETS_GAME_DIR}"
-        "${CMAKE_CURRENT_BINARY_DIR}/close-confirm-work")
-    set_tests_properties(close-confirm PROPERTIES
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        SKIP_RETURN_CODE 77
-        TIMEOUT 900)
+# =====================================================================================
+# 压力/效率档（`LIFT_STRESS=1`）：**唯一允许跑真游戏的一档**；判据 = **读数 + 阈值**
+# ★ 判据口径（2026-11-14，测试模型单 `REQ-01M7ATAB5A18W7XBCKFBEQS7HB`）：
+#   ⛔ 业务正确性不作判据（"到达某界面 / 存档链走通 / 播完了"是游戏的事）；
+#   压力档只回答"模拟器自身"的量：fps / 帧时间 p95 / 堆峰值 / 音频 underrun / 启动耗时 / 长跑稳定。
+# ★ `repro` 档**已取消**：缺陷复现件不进测试，只作复现命令留在
+#   `docs/03-emulator/defects.md` / `observations.md`。
+# ★ `DEFINED ENV{…}` 是**配置期**求值 ⇒ 改了环境变量必须重新 configure（`cmake --preset windows-x64`），
+#   `ctest -N` 才会跟着变；`add_executable` 也在同一个 `if` 里 ⇒ 没开这档连 target 都不编。
+# =====================================================================================
 
-    # ---- assets：AGERC `_ShowDialog@12(-1)` = UI 状态查询（不是对话框）----
-    # 判据见 tests/agerc_ui_state.cpp 文件头：TITLE.BIN 后光标到客户区顶边 ⇒ 引擎悬停计时器
-    # 调到 `0x4B929F`；trace 必须是 `(FFFFFFFF,...) -> 00000001`（本线故意挡菜单栏路径），
-    # 且没有 `id=4294967295` warn / 没有 `id=4` 尝试 / 没有 `GetWindowRect` abort。
-    add_executable(lift-agerc-ui-state tests/agerc_ui_state.cpp)
-    target_link_libraries(lift-agerc-ui-state PRIVATE emulator-lift-runtime)
-    add_test(NAME agerc-ui-state COMMAND lift-agerc-ui-state
-        $<TARGET_FILE:emulator-lift>
-        "${LIFT_ASSETS_GAME_DIR}"
-        "${CMAKE_CURRENT_BINARY_DIR}/agerc-ui-state-work")
-    set_tests_properties(agerc-ui-state PROPERTIES
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        SKIP_RETURN_CODE 77
-        TIMEOUT 900)
-
-    # ---- assets：存档路径（`graphs/sn0000-save.graph`）----
-    # 判据见 tests/save_graph.cpp 文件头：图走完（task done）+ 没有 unimplemented +
-    # `SAVE00.DAT`（~1 MB）/ `SAVE00.STH`（缩略图）真的落盘。
-    # ★ 需要真窗口 + GPU（headless 的 wall 等待跑歪、CPU 光栅分钟级）⇒ 环境不可用自己 SKIP 77。
-    add_executable(lift-save-graph tests/save_graph.cpp)
-    target_link_libraries(lift-save-graph PRIVATE emulator-lift-runtime)
-    add_test(NAME save-graph COMMAND lift-save-graph
-        $<TARGET_FILE:emulator-lift>
-        "${LIFT_ASSETS_GAME_DIR}"
-        "${CMAKE_CURRENT_BINARY_DIR}/save-graph-work"
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../graphs/sn0000-save.graph")
-    set_tests_properties(save-graph PROPERTIES
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        SKIP_RETURN_CODE 77
-        TIMEOUT 1200)
-
-    # ---- assets：**feeder 臂**的段级 override 读数守卫（`bov= / bovd= / bovf=`）----
-    # REQ-01M75W6BB3PY3MF42ZTS23KTBS。判据见 tests/feeder_seg_e2e.cpp 文件头：
-    # ① 子进程 exit 0；② 日志里 `feeder=host-thread` + `device=ok`（缺 ⇒ SKIP 77：量错了臂）；
-    # ③ 至少一行 `bov>0`；④ 所有行 `bovd==0 && bovf==0`；⑤ `bov>0` 之后不许回到 0。
-    # ⛔ 不断言 `bov` 的具体值（读数进文档），⛔ 不断言 `ov` 上升/下降（段会吃掉 ftol2 的函数级命中）。
-    # ★ 语义证据在 `native-override-assets` 的 `pcm/*` 真字节两臂；这条只回答"feeder 里有没有接管"。
-    # ★ 真音频设备 / 窗口不可用 ⇒ 测试自己 `LIFT_SKIP`(77)（那不是判据红）。
+# ---- LIFT_STRESS：**feeder 臂**的段级 override 读数守卫（`bov= / bovd= / bovf=`；2026-11-13 降档）----
+# REQ-01M75W6BB3PY3MF42ZTS23KTBS。判据见 tests/feeder_seg_e2e.cpp 文件头：
+# ① 子进程 exit 0；② 日志里 `feeder=host-thread` + `device=ok`（缺 ⇒ SKIP 77：量错了臂）；
+# ③ 至少一行 `bov>0`；④ 所有行 `bovd==0 && bovf==0`；⑤ `bov>0` 之后不许回到 0。
+# ⛔ 不断言 `bov` 的具体值（读数进文档），⛔ 不断言 `ov` 上升/下降（段会吃掉 ftol2 的函数级命中）。
+# ★ 语义证据在 `native-override-assets` 的 `pcm/*` 真字节两臂；这条只回答"feeder 里有没有接管"。
+# ★ 真音频设备 / 窗口不可用 ⇒ 测试自己 `LIFT_SKIP`(77)（那不是判据红）。
+# ★ **降档的理由是贵**：实测 30 s（`docs/03-emulator/observations.md`）⇒ 走 `LIFT_STRESS` opt-in
+#   （判据 = **用途**：压力/效率面；⛔ 不是"资产在不在"）：
+#     $env:LIFT_STRESS=1; ctest --test-dir out -R feeder-seg-e2e --output-on-failure
+if(DEFINED ENV{LIFT_STRESS})
     add_executable(lift-feeder-seg-e2e tests/feeder_seg_e2e.cpp)
     target_link_libraries(lift-feeder-seg-e2e PRIVATE emulator-lift-runtime)
     add_test(NAME feeder-seg-e2e COMMAND lift-feeder-seg-e2e
         $<TARGET_FILE:emulator-lift>
-        "${LIFT_ASSETS_GAME_DIR}"
+        "${LIFT_STRESS_GAME_DIR}"
         "${CMAKE_CURRENT_BINARY_DIR}/feeder-seg-e2e-work"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../graphs/se-eof.graph")
     set_tests_properties(feeder-seg-e2e PROPERTIES
@@ -517,32 +524,43 @@ if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN")
         SKIP_RETURN_CODE 77
         TIMEOUT 900)
 
-    # ---- assets：游戏自带 `AGE-EXTEND.TTF` 的 U+E010（`REQ-01M79N1ZV391BCM7MYSKK0GVV0`）----
-    # 判据见 tests/gdi_font_fallback.cpp 的 `runAssets`（同一个可执行文件的 `--assets` 臂；先例 =
-    # `lift-overlay` 的 pure / assets 两次注册）：从 `SYS4INI.BIN` 的 ALF 索引按名字取出
-    # `AGE-EXTEND.TTF`（族名 `AGE Extend`）⇒ ①`FT_Get_Char_Index(face, 0xE010) != 0` 且
-    # `FT_Load_Char` 位图非空；②宿主 Amayui CN 下 `glyph(0xE010)` = `.notdef`（notdef +1）；
-    # ③登记成缺字后备之后同一码位由 `AGE Extend` 提供（fallback +1、mask 有墨迹、advance>0）；
-    # ④移除后备 ⇒ 回到 `.notdef`（notdef +1）。
-    # ★ 缺安装 / 缺宿主字体 / 索引里没这一条 ⇒ 测试自己 `LIFT_SKIP`(77) + 原因（⛔ 不假绿）。
-    add_test(NAME gdi-font-fallback-assets COMMAND lift-gdi-font-fallback --assets
-        "${LIFT_ASSETS_GAME_DIR}")
-    set_tests_properties(gdi-font-fallback-assets PROPERTIES
-        SKIP_RETURN_CODE 77
-        TIMEOUT 300)
+    # ---- LIFT_STRESS：boot trace（A4）的**读数 + 阈值**面（2026-11-14 从默认档移入）----
+    # ★ 为什么不在默认档：它跑**真游戏**（真镜像 + `.lst` + 真 boot 到 L2），按测试模型不属于
+    #   "要真游戏"的接口合同档（默认档只测 shim 合同 + 执行器核心，不需要游戏安装）。
+    # ★ 判据（tests/boot_trace.cpp 文件头）：同一条命令跑两次 ⇒ 停因 / eip / 指令数 / 状态摘要哈希
+    #   三组读数逐字节相同（虚拟时钟与"宿主侧不许引入随机源"），另比 `--trace-shims` 的 trace 字节。
+    #   ⇒ 是**稳定性读数**（确定性），不是"能到 L2 就算业务做对了"。
+    # ★ 缺语料 ⇒ 测试自己 `LIFT_SKIP` 77（⛔ 不假绿）。
+    add_executable(lift-boot-trace tests/boot_trace.cpp)
+    target_link_libraries(lift-boot-trace PRIVATE emulator-lift-runtime)
+    add_test(NAME boot-trace COMMAND lift-boot-trace)
+    set_tests_properties(boot-trace PROPERTIES
+        ENVIRONMENT "LIFT_AGE_EXE=${AGE_SECTFIX_EXE};LIFT_AGE_LST=${AGE_LST}" SKIP_RETURN_CODE 77)
+
+    # ---- LIFT_STRESS：派发层固定税（b / c 的**计时读数**；2026-11-14 从默认档移入）----
+    # ★ 移档理由（终裁 3）：①/② 的判据是**计时的量级带**（`kDeltaBTolNs` / `kLockCostFloorRatio`）
+    #   = 效率读数，不是对外合同 ⇒ 默认门禁不跑它；③④⑤ 诊断开关三块已删（我方摘要文案 + 计数器）。
+    # ★ 读数进 `docs/03-emulator/observations.md`（OBS-20261114-01）：
+    #     $env:LIFT_STRESS=1; ctest --test-dir out -R dispatch-tax --output-on-failure
+    # ★ ⛔ 默认档不留"也跑一遍"的壳：`add_executable` 与 `add_test` 都在这个 `if` 里。
+    # ★ 需求单 `REQ-01M70S2WR4S8MN2JDWJRJD6WFD` 的 verify 仍是 `dispatch_tax.cpp#dispatch-tax`
+    #   （字面量在文件里），只是它现在只在开档时跑（档位变化由台账注记说明）。
+    add_executable(lift-dispatch-tax tests/dispatch_tax.cpp)
+    target_link_libraries(lift-dispatch-tax PRIVATE emulator-lift-runtime)
+    add_test(NAME dispatch-tax COMMAND lift-dispatch-tax)
 endif()
 
-# ---- assets：真机安装上的 LOGO 影片必须"真的放完"（首帧 / completed / 堆平稳 / tex#1 差分）----
-# 判据见 tests/movie_logo.cpp 的头注释。缺游戏安装 ⇒ 不注册（assets 档的判据 = 注册位置）；
+# ---- LIFT_STRESS 档：真机安装上的 LOGO 影片压力面（首帧 / completed / 堆平稳 / tex#1 差分）----
+# 判据见 tests/movie_logo.cpp 的头注释。它要真机安装根（输入假定在场；缺 ⇒ 测试自己 SKIP 77）；
 # GPU 不可用（raster 行不是 sdl-gpu）⇒ 测试自己 `LIFT_SKIP`(77)。
-# ★ **opt-in**：这条要真启模拟器、真放 LOGO 影片（子进程按**墙钟秒**计），是**全部用例里最贵**的
-#   一条 ⇒ 默认门禁**不注册**它，必须显式打开（判据 = 条件里的 `DEFINED ENV{LIFT_ASSETS}`）：
-#     $env:LIFT_ASSETS=1; ctest --test-dir out -R movie-logo --output-on-failure
+# ★ **opt-in 的理由是用途**：这条要真启模拟器、真放 LOGO 影片（子进程按**墙钟秒**计），是**全部用例里最贵**的
+#   一条 ⇒ 默认门禁**不注册**它，必须显式打开（判据 = 条件里的 `DEFINED ENV{LIFT_STRESS}`）：
+#     $env:LIFT_STRESS=1; ctest --test-dir out -R movie-logo --output-on-failure
 #   ⛔ `DEFINED ENV{…}` 是**配置期**求值 ⇒ 改了环境变量必须重新 configure
 #   （`cmake --preset windows-x64`），`ctest -N` 才会跟着变。
-# ★ `add_executable` 也在同一个 if 里：纯构建环境（没有游戏安装 / 没开 LIFT_ASSETS）连这个 target 都不编。
+# ★ `add_executable` 也在同一个 if 里：没开 `LIFT_STRESS` 时连这个 target 都不编。
 # ★ 不改测试名与文件路径（需求单 `01M6T07SC0XN81G1MZJYJXXGV9` 的 verify 指向它们）。
-if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
+if(DEFINED ENV{LIFT_STRESS})
     add_executable(lift-movie-logo tests/movie_logo.cpp)
     target_link_libraries(lift-movie-logo PRIVATE emulator-lift-runtime)
     # ★ 真机影片只在 RelWithDebInfo 树里跑（用户口径：Debug 解释器慢到无法使用；
@@ -553,7 +571,7 @@ if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
     #   成对）—— 若只让测试拿 env 变量自证，将来删掉 ENVIRONMENT 就会静默退回 45 s 仍然绿。
     add_test(NAME movie-logo COMMAND lift-movie-logo $<TARGET_FILE:emulator-lift>
         "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE"
-        "${LIFT_ASSETS_GAME_DIR}"
+        "${LIFT_STRESS_GAME_DIR}"
         "${CMAKE_CURRENT_BINARY_DIR}/movie-logo-work"
         --expect-early-stop)
     set_tests_properties(movie-logo PROPERTIES
@@ -568,87 +586,105 @@ if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
         TIMEOUT 180)
 endif()
 
-# ---- assets：TITLE ⇄ OPTION 往返 2 轮 —— 纹理 arena 不许增长（第 2 次仍能进入）----
-# 判据见 tests/option_roundtrip.cpp 的头注释（红了意味着什么 / 容差从哪来）。
-# ★ 注册条件 = **安装树存在**（`LIFT_ASSETS_GAME_DIR`；两台设备上都是仓库根的 `links/install`，
-#   见上面那个变量的注释）+ `LIFT_ASSETS` opt-in。缺安装树 ⇒ 不注册（assets 档的判据 = 注册位置）。
-# GPU / 窗口不可用（raster 行不是 sdl-gpu）⇒ 测试自己 `LIFT_SKIP`(77)。
-# ★ **opt-in 的理由是贵，不是缺资产、也不是平台**：这条要真启模拟器、真跑 TITLE ⇄ OPTION
-#   （子进程按**墙钟秒**计，本测试 2 轮），是默认门禁里最贵的几条之一
-#   ⇒ 默认门禁**不注册**它，必须显式打开（判据 = 条件里的 `DEFINED ENV{LIFT_ASSETS}`）：
-#     $env:LIFT_ASSETS=1; ctest --test-dir out -R option-roundtrip --output-on-failure
-#   ⛔ `DEFINED ENV{…}` 是**配置期**求值 ⇒ 改了环境变量必须重新 configure
-#   （`cmake --preset windows-x64` / `macos-arm64`），`ctest -N` 才会跟着变。
-# ★ **macOS 与 Windows 都跑**（这条不是 Windows 专有）：测试的宿主侧只做"起子进程 + 把
-#   stdout/stderr 重定向到同一份日志 + 等它退出"，Windows 走 `CreateProcessW`、macOS / Linux 走
-#   `posix_spawn`（两个分支见测试里的 `runChild`）。
-# ★ `add_executable` 也在同一个 if 里：纯构建环境（没开 LIFT_ASSETS）连这个 target 都不编。
-# ★ 子进程走 `--present window --present-hidden`：headless 的 GPU 光栅化实测
-#   490 帧要 10 分钟以上；窗口隐藏仍无焦点、无真实光标。
-if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
-    add_executable(lift-option-roundtrip tests/option_roundtrip.cpp)
-    target_link_libraries(lift-option-roundtrip PRIVATE emulator-lift-runtime)
-    add_test(NAME option-roundtrip COMMAND lift-option-roundtrip
-        $<TARGET_FILE:emulator-lift>
-        "${LIFT_ASSETS_GAME_DIR}"
-        "${CMAKE_CURRENT_BINARY_DIR}/option-roundtrip-work")
-    set_tests_properties(option-roundtrip PROPERTIES
-        # ★ 子进程继承这个 cwd：模拟器默认的执行源是按**相对当前目录**找的
-        #   （`../../corpus/assets/age/…sectfix.EXE`）⇒ 停在 `out/` 会找不到执行源、被测试 SKIP。
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        SKIP_RETURN_CODE 77
-        TIMEOUT 420)
-endif()
+# =====================================================================================
+# LIFT_STRESS：**压力/效率四场景（MVP，2026-11-14）** —— S1 / S2 / S3 / S9
+# ★ 判据 = **读数 + 阈值**（帧时间 / 指令吞吐 / 堆字节 / 音频计数 / GPU 准入拒批计数）；
+#   ⛔ 没有一条业务断言（"到了某界面 / 某 marker 出现 / 某帧 hash 等于 X" 一律不进判据）。
+#   设计依据 `.tmp/test-model/stress-design.md` 的 §0.1（判据纪律）· §0.2（R1–R5 派生规则）·
+#   §A1.0（口径 W / H · N 遍取中位 · 每次全新 `--appdata`）· §A2（场景）。
+# ★ **每条阈值的推导写在对应 `tests/stress_*.cpp` 的文件头**：规则编号 + 依据读数 + 算出来的值。
+#   ⛔ 不许先写一个好看的数字再让实现去凑（先测 — 再钉）。
+# ★ 口径分两套、参数**不许混写**：`S1`/`S9` = **口径 H**（`--present headless`，虚拟时钟、确定性）；
+#   `S2`/`S3` = **口径 W**（`--present window --present-hidden --present-vsync 0`，real-time 墙钟）。
+#   `--present headless` 拒绝窗口参数（`src/main.cpp:639`）⇒ 混写会 exit 2。
+# ★ 驱动 ≠ 判据：`scripts/bench/idle.txt` / `graphs/sn0000.graph` 只把画面推着走；
+#   驱动失败（exit 5 / `FAIL :`）**不进判据**，只记进 JSON 的 `driver` 段。
+# ★ 落盘：仓库根 `.cache/lift-stress/<场景>-<UTC 时间戳>.json`（逐遍原始值 + 中位 + exe sha256 +
+#   `CMAKE_BUILD_TYPE` + 工作树指纹 + 负载档）。⛔ 不进 git（`.cache/` 已 gitignore）。
+# ★ 为什么这四条只在 `LIFT_STRESS`：它们都跑**真游戏**（唯一允许跑真游戏的一档，`AGENTS.md` §5），
+#   且每条 N=3 遍（S1 ~15 s / S2 ~150 s / S3 ~160 s / S9 ~470 s）。
+# ★ 输入假定在场：显式开档而输入 MISSING ⇒ 上面的 `FATAL_ERROR` 已经挡过；测试自己也会 `LIFT_SKIP`(77)
+#   （没有 GPU / 没有真音频设备 / 非 Windows 或非 RelWithDebInfo 树）—— ⛔ 不假绿、也⛔ 不静默缩水。
+# =====================================================================================
+if(DEFINED ENV{LIFT_STRESS})
+    # 读数落点（仓库根，`out/` 之外 ⇒ 不进 git、也不会被 `cmake --build` 清掉）。
+    set(LIFT_STRESS_JSON_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../.cache/lift-stress")
 
-# ---- assets：TITLE 之后两条入口路径（OPTION→ADV设定 / GameStart）不许崩 ----
-# 判据见 tests/title_entry_paths.cpp 的头注释（红了意味着什么 / 为什么脚本里有 `wait`）。
-# 缺游戏安装 ⇒ 不注册（assets 档的判据 = 注册位置）；
-# GPU / 窗口不可用 ⇒ 测试自己 `LIFT_SKIP`(77)。
-# ★ **opt-in**（与 option-roundtrip 同一判据）：这条真启模拟器跑两次子进程（各 ≥ 15 s），
-#   默认门禁**不注册**它，必须显式打开（判据 = 条件里的 `DEFINED ENV{LIFT_ASSETS}`）：
-#     $env:LIFT_ASSETS=1; ctest --test-dir out -R title-entry-paths --output-on-failure
-#   ⛔ `DEFINED ENV{…}` 是**配置期**求值 ⇒ 改了环境变量必须重新 configure
-#   （`cmake --preset windows-x64`），`ctest -N` 才会跟着变。
-# ★ `add_executable` 也在这个 if 里：纯构建环境（没有游戏安装 / 没开 LIFT_ASSETS）连 target 都不编。
-if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
-    add_executable(lift-title-entry-paths tests/title_entry_paths.cpp)
-    target_link_libraries(lift-title-entry-paths PRIVATE emulator-lift-runtime)
-    add_test(NAME title-entry-paths COMMAND lift-title-entry-paths
-        $<TARGET_FILE:emulator-lift>
-        "${LIFT_ASSETS_GAME_DIR}"
-        "${CMAKE_CURRENT_BINARY_DIR}/title-entry-paths-work")
-    set_tests_properties(title-entry-paths PROPERTIES
-        # ★ 子进程继承这个 cwd：模拟器默认的执行源是按**相对当前目录**找的
-        #   （`../../corpus/assets/age/…sectfix.EXE`）⇒ 停在 `out/` 会找不到执行源、被测试 SKIP。
+    # ---- S1：boot → TITLE 首帧（口径 H）。判据见 tests/stress_boot.cpp 文件头 ①②③④⑤ ----
+    add_executable(lift-stress-boot tests/stress_boot.cpp)
+    target_link_libraries(lift-stress-boot PRIVATE emulator-lift-runtime)
+    add_test(NAME stress-boot COMMAND lift-stress-boot $<TARGET_FILE:emulator-lift>
+        "${LIFT_STRESS_GAME_DIR}"
+        "${CMAKE_CURRENT_BINARY_DIR}/stress-boot-work"
+        "${LIFT_STRESS_JSON_DIR}"
+        "$<CONFIG>")
+    set_tests_properties(stress-boot PROPERTIES
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         SKIP_RETURN_CODE 77
+        # 3 遍 × 实测 ~5 s + 进程启停余量（⛔ 不要压到接近实测值：超时会变成假红）。
+        TIMEOUT 300)
+
+    # ---- S2：TITLE 稳态帧时间（口径 W）。判据见 tests/stress_title_steady.cpp 文件头 ①②③④⑤ ----
+    # ★ `LIFT_FRAME_TRACE=1` 由 **CTest 的 ENVIRONMENT** 注入（同 movie-logo 的 `LIFT_STOP_AFTER_MOVIE`）：
+    #   测试自己再断言"真跑出 ≥2 条 n≥100 的 `[frame]` 行"⇒ 环境变量被删掉时**变红**，⛔ 不会静默变绿。
+    add_executable(lift-stress-title-steady tests/stress_title_steady.cpp)
+    target_link_libraries(lift-stress-title-steady PRIVATE emulator-lift-runtime)
+    add_test(NAME stress-title-steady COMMAND lift-stress-title-steady $<TARGET_FILE:emulator-lift>
+        "${LIFT_STRESS_GAME_DIR}"
+        "${CMAKE_CURRENT_BINARY_DIR}/stress-title-steady-work"
+        "${LIFT_STRESS_JSON_DIR}"
+        "$<CONFIG>"
+        "${CMAKE_CURRENT_SOURCE_DIR}/scripts/bench/idle.txt")
+    set_tests_properties(stress-title-steady PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        SKIP_RETURN_CODE 77
+        ENVIRONMENT "LIFT_FRAME_TRACE=1"
+        # 3 遍 × 实测 ~49 s（脚本窗口 200M 条 + boot）⇒ 留 ~4× 余量。
         TIMEOUT 600)
 
-    # ---- assets：退出写存档尾段的 LZSS Encode native override 端到端守卫 ----
-    # 判据见 `tests/native_override_e2e.cpp` 文件头：三份 run（a1 空 / b 开 / a2 空，唯一差异
-    # `--native-overrides sub_4367B0`）—— ①各自 exit 0 + 脚本跑完 + 各 1 行 `present-tail`
-    # ②`b` 的 `sub_4367B0` 明细行 `hits==1 && fallbacks==0`、`a*` 里没有 `native-ovr` 行
-    # ③`tail_insns(b) < tail_insns(a1)/2` ④`stop=stopped` / `detail` 含 `ExitProcess`
-    # ⑤`tail_wall_ms(b) < tail_wall_ms(a1)`（只比更低，⛔ 无绝对阈值）⑥存档差分：同臂两次逐字节相同、
-    # 两臂差异必须落在**虚拟时钟区**（具名常量；由第一次两臂实测回填）且打印实测区间。
-    # ⛔ 不断言任何当前数字（那是 `.tmp/reveq/…/report.md` 的读数）。三份 run 各 ~1–2 min。
-    add_executable(lift-native-override-e2e tests/native_override_e2e.cpp)
-    target_link_libraries(lift-native-override-e2e PRIVATE emulator-lift-runtime)
-    add_test(NAME native-override-e2e COMMAND lift-native-override-e2e
-        $<TARGET_FILE:emulator-lift>
-        "${LIFT_ASSETS_GAME_DIR}"
-        "${CMAKE_CURRENT_BINARY_DIR}/native-override-e2e-work")
-    set_tests_properties(native-override-e2e PROPERTIES
-        # ★ 同 title-entry-paths：子进程继承这个 cwd（执行源 / `.lst` 按相对当前目录找）。
+    # ---- S3：ADV 一段 + 真音频（口径 W + `--audio sdl`）。判据见 tests/stress_adv_audio.cpp ①②③④⑤ ----
+    # ★ 驱动 = 仓里**现成**的 `graphs/sn0000.graph`（⛔ 不新编坐标；图的判定结果不进判据）。
+    add_executable(lift-stress-adv-audio tests/stress_adv_audio.cpp)
+    target_link_libraries(lift-stress-adv-audio PRIVATE emulator-lift-runtime)
+    add_test(NAME stress-adv-audio COMMAND lift-stress-adv-audio $<TARGET_FILE:emulator-lift>
+        "${LIFT_STRESS_GAME_DIR}"
+        "${CMAKE_CURRENT_BINARY_DIR}/stress-adv-audio-work"
+        "${LIFT_STRESS_JSON_DIR}"
+        "$<CONFIG>"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../graphs/sn0000.graph")
+    set_tests_properties(stress-adv-audio PROPERTIES
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         SKIP_RETURN_CODE 77
-        TIMEOUT 2400)
+        ENVIRONMENT "LIFT_FRAME_TRACE=1"
+        # 3 遍 × 实测 ~52 s（图的时间线 ~44 s + boot）⇒ 留 ~5× 余量。
+        TIMEOUT 900)
+
+    # ---- S9：GPU 覆盖读数（口径 H，600 帧）。判据见 tests/stress_gpu_coverage.cpp 文件头 ①②③④⑤⑥ ----
+    # ★ 这一条最贵（单遍实测 ~155 s）但最重要：GPU-only 之后每一处准入拒批都是**潜在缺画**。
+    add_executable(lift-stress-gpu-coverage tests/stress_gpu_coverage.cpp)
+    target_link_libraries(lift-stress-gpu-coverage PRIVATE emulator-lift-runtime)
+    add_test(NAME stress-gpu-coverage COMMAND lift-stress-gpu-coverage $<TARGET_FILE:emulator-lift>
+        "${LIFT_STRESS_GAME_DIR}"
+        "${CMAKE_CURRENT_BINARY_DIR}/stress-gpu-coverage-work"
+        "${LIFT_STRESS_JSON_DIR}"
+        "$<CONFIG>")
+    set_tests_properties(stress-gpu-coverage PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        SKIP_RETURN_CODE 77
+        # 3 遍 × 实测 124–155 s（本批两次真跑：373.8 s / 381.0 s 整条）⇒ 留 ~3× 余量
+        #（这条最容易在慢机上超时，⛔ 不要压小）。
+        TIMEOUT 1200)
 endif()
 
 # =====================================================================================
-# 测试分级（AGENTS.md §5「CTest 那一档不写 pragma，判据是注册位置」）：#   - **顶层无条件注册** ⇒ 默认 ctest 就跑（不需要游戏 / LFS）⇒ pure
-#   - 落在 if(...) / foreach / function 里 ⇒ 需要 LFS 资产或游戏安装 ⇒ assets
-# ⛔ 不要把 pure 的测试塞进 if()：那会让"没跑"与"跑绿了"在输出里长得一样。
+# 测试分级（AGENTS.md §5「CTest 那一档不写 pragma，判据是注册位置」）：
+#   - **顶层无条件注册** ⇒ 默认 ctest 就跑（**按 shim 接口设计的接口合同**）⇒ pure
+#   - `if(DEFINED ENV{LIFT_STRESS})` 里 ⇒ **压力/效率档**（判据 = 读数 + 阈值；唯一允许跑真游戏的一档）
+# ★ 档位只看**用途**，⛔ 不看"资产在不在"（见文件顶部的档位口径）；输入假定在场。
+# ⛔ 不要用 `if(EXISTS …)` 决定 `add_executable` / `add_test` 注册：那会让"哪条用例存在"随机器漂，
+#   并让"没跑"与"跑绿了"在输出里长得一样。
+# ★ `repro` 档已取消（2026-11-14）：缺陷复现件不进测试，只作复现命令留在
+#   `docs/03-emulator/defects.md` / `observations.md`（口径见 `REQ-01M7ATAB5A18W7XBCKFBEQS7HB`）。
 # =====================================================================================
 
 # ---- pure：自造机器码字节，不碰游戏 / LFS ----
@@ -658,17 +694,25 @@ add_test(NAME conformance COMMAND lift-conformance)
 
 # ---- pure：A1 的第二遍 —— 同一批语义夹具在 LIFT_SAFE_MEMORY=1（逐页提交检查）下重跑 ----
 # ★ 以前只有 README 里一句人工命令 ⇒ 这一档没有门禁（plan §5 A1 要求"复跑全绿"）。
+# ★ 2026-11-13 回到 **pure**（顶层无条件注册）：**实测 0.53 s（2026-11-13，本机 RelWithDebInfo）**
+#   ⇒ 它不是"贵用例"，没有理由走 `LIFT_STRESS` opt-in（那会让"没跑"与"跑绿了"长得一样）。
+#   判据 = 注册位置（`AGENTS.md` §5）：顶层 ⇒ 默认 `ctest` 就跑。
+#     ctest --test-dir out -R conformance-safe --output-on-failure
 add_test(NAME conformance-safe COMMAND lift-conformance)
 set_tests_properties(conformance-safe PROPERTIES ENVIRONMENT "LIFT_SAFE_MEMORY=1")
 
-# ---- pure：恒等判据的负控 —— 空心夹具必须被 conformance 判红 ----
+# ---- pure（默认档）：恒等判据的**负控** —— 空心夹具必须被 conformance 判红 ----
 # ★ 判据（红了意味着什么）：`LIFT_CONFORMANCE_SELFCHECK=1` 先要求真用例表 **0 红**，再要求一条
 #   "能到哨兵但什么都没改"的夹具**只**因恒等判据失败（总失败恰好 +1、identity 恰好 +1）。
 #   ⇒ 把 `sameStateIgnoringSentinelRet` 的 `esp+4` 规范化退回 `== before`，这条当场红 ——
 #   那是"恒等判据真的会红"的机械证据（⛔ 不是"判据恒假但一直绿"）。
-# ★ 顶层无条件注册 ⇒ **pure** 档（自造字节、不碰游戏 / LFS）。
+# ★ 2026-11-13 用户裁决：它是**身份判据的负控**、**实测 0.5 s**、**不需要安装树**（conformance 是
+#   自造字节）⇒ 按**用途**回**默认档**（顶层无条件注册）：它回答的是"整张用例表的恒等判据还有效吗"
+#   —— 判据失效时**每一条 conformance 用例**都在假绿，所以它必须每次提交都跑。
+#   ⛔ 不要拿 `if(EXISTS …)` / `if(DEFINED ENV{LIFT_STRESS})` 把它藏起来（那正是"档位按错轴"）。
 add_test(NAME conformance-rejects-hollow-case COMMAND lift-conformance)
-set_tests_properties(conformance-rejects-hollow-case PROPERTIES ENVIRONMENT "LIFT_CONFORMANCE_SELFCHECK=1")
+set_tests_properties(conformance-rejects-hollow-case PROPERTIES
+    ENVIRONMENT "LIFT_CONFORMANCE_SELFCHECK=1")
 
 # ---- pure：`rep movs*` / `rep stos*` 宿主快路径的两臂差分 + 闸门 ----
 # ★ 判据（`tests/rep_bulk.cpp` 的头注）：同一份 guest 字节、`X86::rep_bulk` 开/关两臂 ⇒
@@ -683,11 +727,6 @@ add_test(NAME rep-bulk COMMAND lift-rep-bulk)
 add_executable(lift-dispatch tests/dispatch.cpp)
 target_link_libraries(lift-dispatch PRIVATE emulator-lift-runtime)
 add_test(NAME dispatch COMMAND lift-dispatch)
-
-# ---- pure：guest 页提交 / 退回（宿主页可能大于 guest 页；Apple Silicon = 16 KiB）----
-add_executable(lift-heap-layout tests/heap_layout.cpp)
-target_link_libraries(lift-heap-layout PRIVATE emulator-lift-runtime)
-add_test(NAME heap-layout COMMAND lift-heap-layout)
 
 add_executable(lift-input-tick tests/input_tick.cpp)
 target_link_libraries(lift-input-tick PRIVATE emulator-lift-runtime)
@@ -710,15 +749,10 @@ add_executable(lift-input-anchor tests/input_anchor.cpp)
 target_link_libraries(lift-input-anchor PRIVATE emulator-lift-runtime)
 add_test(NAME input-anchor COMMAND lift-input-anchor)
 
-# ---- pure：识别驱动的交互状态机（节点图解析 / 三种失败 / trace 可 diff）----
-# ★ 顶层无条件注册 ⇒ pure 档：判定是观测值的纯函数，测试自己给 frame / guest_ms / wall_ms
-#   （⛔ 不靠真实墙钟推进），采样用 `FrameSampler::observeValues()` 注入。
-# ★ `LIFT_SOURCE_DIR` 只给 `graph-scripts-parse` 用：它要去源码树里找 `scripts/interaction/*.graph`
-#   （cwd 找不到时的备用路径；⛔ 不拿它当唯一来源）。
-add_executable(lift-interaction-graph tests/interaction_graph.cpp)
-target_link_libraries(lift-interaction-graph PRIVATE emulator-lift-runtime)
-target_compile_definitions(lift-interaction-graph PRIVATE LIFT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
-add_test(NAME interaction-graph COMMAND lift-interaction-graph)
+# ---- 2026-11-14：`interaction-graph`（`tests/interaction_graph.cpp`）已按测试模型删除 ----
+# 判据是"交互图走通 / 等一屏 → 点一下"这类**业务正确性**（测试模型单
+# `REQ-01M7ATAB5A18W7XBCKFBEQS7HB` 点名取消）；它**不进测试**。复现命令见
+# `docs/03-emulator/defects.md` BUG-16。
 
 add_executable(lift-memory-pages tests/memory_pages.cpp)
 target_link_libraries(lift-memory-pages PRIVATE emulator-lift-runtime)
@@ -796,14 +830,15 @@ add_executable(lift-input-unfinished tests/input_unfinished.cpp)
 target_link_libraries(lift-input-unfinished PRIVATE emulator-lift-runtime)
 add_test(NAME input-unfinished COMMAND lift-input-unfinished)
 
-# ---- pure：`--skip-logo` 的字段写入（T_Command+0x5EB5C；锚 0x004BAA37）----
-add_executable(lift-skip-logo tests/skip_logo.cpp)
-target_link_libraries(lift-skip-logo PRIVATE emulator-lift-runtime)
-add_test(NAME skip-logo COMMAND lift-skip-logo)
+# ---- 2026-11-14：`skip-logo`（`tests/skip_logo.cpp`）已按测试模型删除 ----
+# 它断的是**我方钩子的内部形态**（只写 `T_Command+0x5EB5C` 这一格、邻居不动）⇒ BUG-14 反模式；
+# 口径留在 `apps/emulator-lift/README.md` §4.1b 与 `docs/03-emulator/defects.md`，
+# 复现命令见 `docs/03-emulator/observations.md`。
 
 # ---- pure：MessageBox（uType→返回值表 / headless 不阻塞 / 模态状态机 / Yield 单令牌）----
 # ★ 判据见 `tests/messagebox.cpp` 文件头。顶层无条件注册 ⇒ **pure** 档（不需要安装 / 窗口 / LFS）：
-#   假 sink 覆盖系统框缝（`showSystemMessageBox`）；真闭窗链由 assets 的 `close-confirm` 跑。
+#   假 sink 覆盖系统框缝（`showSystemMessageBox`）；真闭窗链是**缺陷复现件**，不进测试
+#   （复现命令见 `docs/03-emulator/observations.md`；测试模型单 `REQ-01M7ATAB5A18W7XBCKFBEQS7HB`）。
 add_executable(lift-messagebox tests/messagebox.cpp)
 target_link_libraries(lift-messagebox PRIVATE emulator-lift-runtime)
 add_test(NAME messagebox COMMAND lift-messagebox)
@@ -904,10 +939,14 @@ add_executable(lift-audio tests/audio.cpp)
 target_link_libraries(lift-audio PRIVATE emulator-lift-runtime)
 add_test(NAME audio-device COMMAND lift-audio)
 
+# ---- pure 的机械部分总是跑；`LIFT_AGE_EXE` **无条件**注入（语料假定在场）----
+# ★ 2026-11-13：以前这条 injection 只在 `if(EXISTS …sectfix.EXE)` 里做（存在性闸）⇒ 去掉：
+#   资产部分由测试自己判（`LIFT_AGE_EXE` 指向的文件缺失 ⇒ 它自己红；变量缺失 ⇒ SKIP 77）。
 add_executable(lift-pe-resource tests/pe_resource.cpp)
 target_link_libraries(lift-pe-resource PRIVATE emulator-lift-runtime)
 add_test(NAME pe-resource COMMAND lift-pe-resource)
-set_tests_properties(pe-resource PROPERTIES SKIP_RETURN_CODE 77)
+set_tests_properties(pe-resource PROPERTIES
+    ENVIRONMENT "LIFT_AGE_EXE=${AGE_SECTFIX_EXE}" SKIP_RETURN_CODE 77)
 
 add_executable(lift-agerc-module tests/agerc_module.cpp)
 target_link_libraries(lift-agerc-module PRIVATE emulator-lift-runtime)
@@ -974,106 +1013,124 @@ add_test(NAME shims-core COMMAND lift-shims-core)
 add_executable(lift-bench tests/bench.cpp)
 target_link_libraries(lift-bench PRIVATE emulator-lift-runtime)
 
-# ---- assets：要 corpus 里的二进制 / `.lst`（不在仓库里，见 .gitignore）----
-set(AGE_SECTFIX_EXE "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE")
-set(AGE_LST "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/disasm/files/AGE.EXE__dumped.sectfix.EXE.lst")
+# =====================================================================================
+# 默认档：要 **LFS 语料**（执行源 / `.lst`，不在仓库里，见 `.gitignore`）的**接口合同**
+# ★ 2026-11-13 用户裁决：档位按**用途**，⛔ 不按"语料在不在" —— 下面这些都是接口合同，
+#   一律**顶层无条件注册**：`loader` / `native-override-assets` /
+#   `decode-crosscheck` / `corpus-mnemonics`。
+# ★ 缺语料时**不缩水**：这些用例自己判（`LIFT_SKIP` 77 / 红），configure 期的盘点行会把
+#   MISSING 与全路径写出来。⛔ 不要再用 `if(EXISTS …)` 决定它们注册与否（那就又回到老路）。
+# ★ 语料路径（`AGE_SECTFIX_EXE` / `AGE_LST`）已在测试区开头定义一次，这里只引用。
+# ★ `boot-trace` 已移进 `LIFT_STRESS`（它跑真游戏，按测试模型不属于合同档）；它是**读数档**
+#   （同输入两次 trace 逐字节相同 + 稳定 hash），**变异清单不覆盖它**（2026-11-14 摘条目：
+#   默认机器上它恒为占位，⛔ 留一条永远不跑的变异条目只会让清单显得"覆盖了"）。
+#   `base-coverage`（导入覆盖普查）已删 —— 改由 `emulator-lift --report` 的缺口清单承担。
+# =====================================================================================
 
-if(EXISTS "${AGE_SECTFIX_EXE}" OR DEFINED ENV{AMAYUI_AGE_EXE})
-    add_executable(lift-loader tests/loader.cpp)
-    target_link_libraries(lift-loader PRIVATE emulator-lift-runtime)
-    add_test(NAME loader COMMAND lift-loader)
-    set_tests_properties(loader PROPERTIES
-        ENVIRONMENT "LIFT_AGE_EXE=${AGE_SECTFIX_EXE};LIFT_AGE_LST=${AGE_LST}" SKIP_RETURN_CODE 77)
+# ---- 默认：执行源（拆壳件）的真实 PE 载入 ----
+add_executable(lift-loader tests/loader.cpp)
+target_link_libraries(lift-loader PRIVATE emulator-lift-runtime)
+add_test(NAME loader COMMAND lift-loader)
+set_tests_properties(loader PROPERTIES
+    ENVIRONMENT "LIFT_AGE_EXE=${AGE_SECTFIX_EXE};LIFT_AGE_LST=${AGE_LST}" SKIP_RETURN_CODE 77)
 
-    # pe-resource 的 pure 部分总是跑；有资产时补 assets 部分（否则整个测试 SKIP 77）。
-    set_tests_properties(pe-resource PROPERTIES
-        ENVIRONMENT "LIFT_AGE_EXE=${AGE_SECTFIX_EXE}" SKIP_RETURN_CODE 77)
+# ---- 2026-11-14：`base-coverage`（`tests/base_coverage.cpp`，A5 导入覆盖普查）已按测试模型删除 ----
+# 判据是"跑到 L2 + 动态缺口为空"的业务结论；缺口**普查**改由 `emulator-lift --report` 的
+# 缺口清单承担（⛔ 不新写工具），复现命令见 `docs/03-emulator/observations.md`。
 
-    add_executable(lift-boot-trace tests/boot_trace.cpp)
-    target_link_libraries(lift-boot-trace PRIVATE emulator-lift-runtime)
-    add_test(NAME boot-trace COMMAND lift-boot-trace)
-    set_tests_properties(boot-trace PROPERTIES
-        ENVIRONMENT "LIFT_AGE_EXE=${AGE_SECTFIX_EXE};LIFT_AGE_LST=${AGE_LST}" SKIP_RETURN_CODE 77)
-endif()
+# ---- 默认：**真 guest 字节**的 native override 差分（解释器 vs override；缺资产 ⇒ SKIP 77）----
+# 判据见 tests/native_override_assets.cpp 文件头：同一份夹具，真字节跑解释器 vs native 实现，
+# 比较内存 / EAX / ESP / 标号寄存器 / EIP（48AE90 还比整张纹理逐字节 + 锁记账）。
+add_executable(lift-native-override-assets tests/native_override_assets.cpp)
+target_link_libraries(lift-native-override-assets PRIVATE emulator-lift-runtime)
+add_test(NAME native-override-assets COMMAND lift-native-override-assets)
+set_tests_properties(native-override-assets PROPERTIES
+    ENVIRONMENT "LIFT_AGE_EXE=${AGE_SECTFIX_EXE}" SKIP_RETURN_CODE 77)
 
-if(EXISTS "${AGE_LST}")
-    # ---- assets：**真 guest 字节**的 native override 差分（解释器 vs override；缺资产 ⇒ SKIP 77）----
-    # 判据见 tests/native_override_assets.cpp 文件头：同一份夹具，真字节跑解释器 vs native 实现，
-    # 比较内存 / EAX / ESP / 标号寄存器 / EIP（48AE90 还比整张纹理逐字节 + 锁记账）。
-    add_executable(lift-native-override-assets tests/native_override_assets.cpp)
-    target_link_libraries(lift-native-override-assets PRIVATE emulator-lift-runtime)
-    add_test(NAME native-override-assets COMMAND lift-native-override-assets)
-    set_tests_properties(native-override-assets PROPERTIES
-        ENVIRONMENT "LIFT_AGE_EXE=${AGE_SECTFIX_EXE}" SKIP_RETURN_CODE 77)
+add_executable(lift-decode-crosscheck tests/decode_crosscheck.cpp)
+target_link_libraries(lift-decode-crosscheck PRIVATE emulator-lift-runtime)
+add_test(NAME decode-crosscheck COMMAND lift-decode-crosscheck)
+set_tests_properties(decode-crosscheck PROPERTIES
+    ENVIRONMENT "LIFT_AGE_EXE=${AGE_SECTFIX_EXE};LIFT_AGE_LST=${AGE_LST}" SKIP_RETURN_CODE 77)
 
-    add_executable(lift-decode-crosscheck tests/decode_crosscheck.cpp)
-    target_link_libraries(lift-decode-crosscheck PRIVATE emulator-lift-runtime)
-    add_test(NAME decode-crosscheck COMMAND lift-decode-crosscheck)
-    set_tests_properties(decode-crosscheck PROPERTIES
-        ENVIRONMENT "LIFT_AGE_EXE=${AGE_SECTFIX_EXE};LIFT_AGE_LST=${AGE_LST}" SKIP_RETURN_CODE 77)
-
-    add_executable(lift-corpus-mnemonics tests/corpus_mnemonics.cpp)
-    target_link_libraries(lift-corpus-mnemonics PRIVATE emulator-lift-runtime)
-    add_test(NAME corpus-mnemonics COMMAND lift-corpus-mnemonics)
-    set_tests_properties(corpus-mnemonics PROPERTIES
-        ENVIRONMENT "LIFT_AGE_EXE=${AGE_SECTFIX_EXE};LIFT_AGE_LST=${AGE_LST}" SKIP_RETURN_CODE 77)
-
-    add_executable(lift-base-coverage tests/base_coverage.cpp)
-    target_link_libraries(lift-base-coverage PRIVATE emulator-lift-runtime)
-    add_test(NAME base-coverage COMMAND lift-base-coverage)
-    set_tests_properties(base-coverage PROPERTIES
-        ENVIRONMENT "LIFT_AGE_EXE=${AGE_SECTFIX_EXE};LIFT_AGE_LST=${AGE_LST}" SKIP_RETURN_CODE 77)
-endif()
+add_executable(lift-corpus-mnemonics tests/corpus_mnemonics.cpp)
+target_link_libraries(lift-corpus-mnemonics PRIVATE emulator-lift-runtime)
+add_test(NAME corpus-mnemonics COMMAND lift-corpus-mnemonics)
+set_tests_properties(corpus-mnemonics PROPERTIES
+    ENVIRONMENT "LIFT_AGE_EXE=${AGE_SECTFIX_EXE};LIFT_AGE_LST=${AGE_LST}" SKIP_RETURN_CODE 77)
 
 # ---- pure：对象表 / DC 状态 / SelectObject 旧值恢复 / GGO 格式算术 / 自洽（合成字形源）----
 add_executable(lift-gdi tests/gdi.cpp)
 target_link_libraries(lift-gdi PRIVATE emulator-lift-runtime)
 add_test(NAME gdi COMMAND lift-gdi)
 
-# ---- pure：`FontEngine::metrics` 的度量缓存（键 / 失效 / 命中率；用假源，不读字体文件）----
-add_executable(lift-gdi-font-metrics-cache tests/gdi_font_metrics_cache.cpp)
-target_link_libraries(lift-gdi-font-metrics-cache PRIVATE emulator-lift-runtime)
-add_test(NAME gdi-font-metrics-cache COMMAND lift-gdi-font-metrics-cache)
+# ---- pure：`FontEngine::metrics` 的度量缓存 —— **已删（2026-11-13，BUG-14）** ----
+# ★ 原来整条在钉"缓存键 / 失效 / hit-miss 计数"（`tests/gdi_font_metrics_cache.cpp`），那是**内部实现
+#   取舍**（键 = 字号 / bold / 字体路径；见 `docs/03-emulator/design-notes.md` 的 L3-gdi-01），
+#   换一份实现就不需要成立 ⇒ 按 BUG-14 的裁决删除（含 `tools/mutate-check.mjs` 的对应变异条目）。
+# ★ 它的**真 GDI 合同**（换字号后字度量必须变）已搬进上面的 `gdi-font`：用例 `metrics-size-change`。
 
 # ---- pure：缺字形 fallback（`REQ-01M79N1ZV391BCM7MYSKK0GVV0`；用假源，不读字体文件）----
 # 判据见 tests/gdi_font_fallback.cpp 文件头：①`gdiCp932Char(0xF050) == 0xE010`（⛔ 不是 U+2661）；
 # ②主 face 缺字 ⇒ 交给后备提供者、返回**后备的 mask**；③缓存命中不重复记账；④主 face 有字时
 # 不碰后备；⑤都缺 ⇒ 返回 true + `.notdef` 且 notdef 计数 +1；⑥重装后备来源 ⇒ 旧条目作废。
 # ★ 顶层无条件注册 ⇒ pure 档（判据 = 注册位置；见 AGENTS.md §5）。
-# ★ 同一个 exe 的 `--assets` 臂在下面的 assets 块里另注册一条（`LZSS` 解压复用生产实现
+# ★ 同一个 exe 的 `--assets` 臂在下面的**默认档**块里另注册一条（`LZSS` 解压复用生产实现
 #   `lift::lzssDecode`；链接 `Freetype::Freetype` 是为了直接问 FT 的断言 —— runtime 是 PRIVATE 链接）。
 add_executable(lift-gdi-font-fallback tests/gdi_font_fallback.cpp)
 target_link_libraries(lift-gdi-font-fallback PRIVATE emulator-lift-runtime Freetype::Freetype)
 add_test(NAME gdi-font-fallback COMMAND lift-gdi-font-fallback)
 
-# ---- assets：真 Amayui CN（缺字体文件时整个测试不注册 ⇒ ⛔ 不假绿）----
-if(EXISTS "${LIFT_HOST_FONT_PATH}")
-    add_executable(lift-gdi-font tests/gdi_font.cpp)
-    target_link_libraries(lift-gdi-font PRIVATE emulator-lift-runtime)
-    add_test(NAME gdi-font COMMAND lift-gdi-font)
-    set_tests_properties(gdi-font PROPERTIES SKIP_RETURN_CODE 77)
-
-    # 宿主基线补偿：位移在 `gmptGlyphOrigin.y`（2px 方向 + 度量不动 + 墨迹像素数/质心）
-    add_executable(lift-text-baseline-lift tests/text_baseline_lift.cpp)
-    target_link_libraries(lift-text-baseline-lift PRIVATE emulator-lift-runtime)
-    add_test(NAME text-baseline-lift COMMAND lift-text-baseline-lift)
-    set_tests_properties(text-baseline-lift PROPERTIES SKIP_RETURN_CODE 77)
-endif()
+# ---- 默认档：真 Amayui CN（**宿主字体假定在场**；缺 ⇒ 测试自己 SKIP 77，⛔ 不缩水）----
+# ★ 2026-11-13 用户裁决：档位按**用途**，⛔ 不按"资产在不在" —— `gdi-font` 是**接口合同**
+#   （真 GDI 度量）⇒ **顶层无条件注册**，⛔ 不要再包 `if(EXISTS …)`
+#   （那会让"这条用例存不存在"随机器漂、并让 README 变成假话）。
+# ★ 缺字体时由测试体自己判（`fontFileAvailable()` 失败 ⇒ `LIFT_SKIP` 77，见各自文件头）。
+# ★ `gdi-font` 走的是**生产** `FontEngine::metrics` 缓存（换字号 / 换 bold 都必须给出不同度量）——
+#   它是这条真 GDI 合同的守卫，`tools/mutate-check.mjs` 的 `ctest:gdi-font` 指向它。
+# ★ `text-baseline-lift`（宿主基线补偿 = 我方视觉策略 `baseline_lift==2`）**已按测试模型删除**
+#   （2026-11-14；⛔ 业务/策略正确性不作判据）⇒ 口径留在 `docs/03-emulator/fonts.md`，
+#   复现命令见 `docs/03-emulator/defects.md` BUG-08。
+add_executable(lift-gdi-font tests/gdi_font.cpp)
+target_link_libraries(lift-gdi-font PRIVATE emulator-lift-runtime)
+add_test(NAME gdi-font COMMAND lift-gdi-font)
+set_tests_properties(gdi-font PROPERTIES SKIP_RETURN_CODE 77)
 
 # ---- pure：D3D9 设备簇（自造 guest 代码经 vtable 调；不碰游戏 / LFS）----
 add_executable(lift-d3d9 tests/d3d9.cpp)
 target_link_libraries(lift-d3d9 PRIVATE emulator-lift-runtime)
 add_test(NAME d3d9 COMMAND lift-d3d9)
 
-# ---- pure：D3DX9 Sprite（像素级：调制色 / ALPHABLEND / 裁剪 / 变换 / End 幂等）----
+# ---- 真 GPU 臂：点/线与 caps 的**像素见证**（CPU 光栅已删 ⇒ 必须装隐藏窗口的 SDL_GPU 后端）----
+# ★ 顶层无条件注册 ⇒ pure 档（判据是**注册位置**，见 `AGENTS.md` §5）；没有 GPU 设备 ⇒ SKIP 77
+#   （`--gpu` 臂里让开 CTest 给的 `SDL_VIDEODRIVER=dummy`：dummy 视频下建不出 SDL_GPU 设备）。
+add_test(NAME d3d9-gpu COMMAND lift-d3d9 --gpu)
+set_tests_properties(d3d9-gpu PROPERTIES
+    ENVIRONMENT "SDL_VIDEODRIVER=dummy" SKIP_RETURN_CODE 77)
+
+# ---- pure：D3DX9 Sprite（对象 / 状态 / 批次协议 / 纹理上传 / trap；**不判像素**）----
+# ★ 像素断言在下面的 `d3dx9-gpu` 真 GPU 臂（`REQ-01M7AAXNJY2PACYJHYVRV620Q5`：sprite 的 CPU
+#   逐像素合成已删 ⇒ 缺省臂里 sprite 是"记账 + 跳过"，一个像素都不写）。
 add_executable(lift-d3dx9 tests/d3dx9.cpp)
 target_link_libraries(lift-d3dx9 PRIVATE emulator-lift-runtime)
 add_test(NAME d3dx9 COMMAND lift-d3dx9)
 
-# ---- pure：fixed-function 流水线（像素精确：纯色三角形 / 纹理四边形 / Z / 混合 / 状态存取）----
+# ---- 真 GPU 臂：sprite 的**像素断言**（隐藏窗口 + SDL_GPU；无 GPU 设备 ⇒ SKIP 77）----
+# ★ 顶层无条件注册 ⇒ pure 档（判据 = 注册位置）；⛔ 不把"没跑"记成"跑绿了"。
+add_test(NAME d3dx9-gpu COMMAND lift-d3dx9 --gpu)
+set_tests_properties(d3dx9-gpu PROPERTIES
+    ENVIRONMENT "SDL_VIDEODRIVER=dummy" SKIP_RETURN_CODE 77)
+
+# ---- pure：fixed-function 流水线（状态机 / 变换 / 绑定生命周期 / 拒绝类合同）----
 add_executable(lift-d3d9-pipeline tests/d3d9_pipeline.cpp)
 target_link_libraries(lift-d3d9-pipeline PRIVATE emulator-lift-runtime)
 add_test(NAME d3d9-pipeline COMMAND lift-d3d9-pipeline)
+
+# ---- 真 GPU 臂：保留的**像素断言**（纯色三角形 / 纹理采样 / 深度 / 混合 / 裁剪）----
+# ★ 同上：顶层无条件注册 ⇒ pure 档；没有 GPU 设备 ⇒ SKIP 77（⛔ 不假绿）。
+add_test(NAME d3d9-pipeline-gpu COMMAND lift-d3d9-pipeline --gpu)
+set_tests_properties(d3d9-pipeline-gpu PROPERTIES
+    ENVIRONMENT "SDL_VIDEODRIVER=dummy" SKIP_RETURN_CODE 77)
 
 # ---- pure：数学适配（行/列主序乘法顺序、LH 投影/视图、零向量归一化）----
 add_executable(lift-math tests/math.cpp)
@@ -1168,14 +1225,22 @@ add_test(NAME window-manager-token COMMAND lift-wm-token)
 # ★ 判据见 `tests/dispatch_tax.cpp` 文件头：
 #   ① 微基准的**量级不变量**（未竞争 mutex lock+unlock / steady_clock::now；⛔ 不断言具体数字）；
 #   ② 块长扫描 k=1/3/8 条/块（自造字节 ⇒ 不改 `tests/bench.cpp` 的合成体）拟合 `t=b+c·k`；
-#   ③④ `LIFT_TOKEN_DIAG_SKIP_LOCK` 默认关 / 打开时摘要行 `token-diag : skip-lock=` 与 `waits 0`；
-#   ⑤ 不靠计时地证明诊断臂**真的绕过**了 mutex（另一条线程能同时拿到令牌）；
-#   ⑥ 诊断臂里 `check()` 的违规计数照旧 ⇒ `--assert-guest-token` 的可信度不变。
-# ★ 顶层无条件注册 ⇒ **pure** 档（裸 `Machine` + 自造字节；不碰游戏 / LFS / GPU / 音频设备）。
+#   ⑥ 诊断臂里 `check()` 的违规计数照旧 ⇒ `--assert-guest-token` 的可信度不变；
+#   ⑦ 运行摘要 `present-tail` 行的**打印门** + 逐字格式；
+#   ⑧ `stress/skip-report`：**S9 的 skip 报表**（纯函数 `tests/stress_skip_report.h`）三组合成文本
+#      负控 —— `skipped=0` ⇒ 通过 · `skipped=3` + 三行 `skipped top:` ⇒ 失败且**逐条原样**含那三行 ·
+#      `skipped=1` 但原因表缺失 ⇒ 失败且消息说"原因缺失"。这就是"红的时候真的会列原因"的机械证据。
+# ★ ③④⑤（`LIFT_TOKEN_DIAG_SKIP_LOCK` 的默认关 / 打开 / "真的绕过 mutex"）**已删**：判据面是
+#   `token-diag : skip-lock=` 摘要文案 + `maxConcurrent()`，属我方诊断面（`AGENTS.md` §10）。
+# ★ **档位 = `LIFT_STRESS`（效率读数）**：①/② 是计时量级带（`kDeltaBTolNs` / `kLockCostFloorRatio`），
+#   终裁 3 判定"计时的量级带是效率读数、不是对外合同"⇒ `add_executable` / `add_test` 整块移入
+#   `if(DEFINED ENV{LIFT_STRESS})`，默认档**不留**"也跑一遍"的壳。读数（`b=… c=… lock+unlock=…`）
+#   进 `docs/03-emulator/observations.md`（OBS-20261114-01）。⚠ 需求单 `REQ-01M70S2WR4S8MN2JDWJRJD6WFD`
+#   的 verify 锚点仍是 `dispatch_tax.cpp#dispatch-tax`（字面量在），但它现在只在开档时跑。
+# ★ ⑧ 也随之只在 `LIFT_STRESS=1` 时跑（它断言的是解析 + 报错格式，与真游戏无关，但同在一个 exe 里）。
+# ★ 顶层注册时曾是 **pure** 档（裸 `Machine` + 自造字节；不碰游戏 / LFS / GPU / 音频设备），移档后
+#   仍是"不需要游戏安装"——移它的理由是**用途**（效率读数），⛔ 不是"资产在不在"。
 # =====================================================================================
-add_executable(lift-dispatch-tax tests/dispatch_tax.cpp)
-target_link_libraries(lift-dispatch-tax PRIVATE emulator-lift-runtime)
-add_test(NAME dispatch-tax COMMAND lift-dispatch-tax)
 
 # =====================================================================================
 # M2 · 派生 mip 链（`REQ-01M73G2724479XAVS176WBZ65Q`：缩小采样必须有 mip，否则走样）
@@ -1189,29 +1254,6 @@ add_test(NAME dispatch-tax COMMAND lift-dispatch-tax)
 add_executable(lift-d3d9-mip tests/d3d9_mip.cpp)
 target_link_libraries(lift-d3d9-mip PRIVATE emulator-lift-runtime)
 add_test(NAME d3d9-mip COMMAND lift-d3d9-mip)
-
-# =====================================================================================
-# assets（可 SKIP）· 派生 mip 的端到端守卫（`REQ-01M73G2724479XAVS176WBZ65Q`）
-# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
-# ★ 判据见 tests/mip_e2e.cpp 文件头：①两臂 exit 0；②开臂真有缩小批取到 level ≥ 1 且派生链
-#   真的被算过（`[draw] lvl=` / `miprb=`）；③关臂（`LIFT_NO_MIP=1`）必须全 level 0；
-#   ④全屏 2048² 背景层（本 repro 是放大采样）仍必须 level 0；⑤右侧区域点密度/逐行高频能量
-#   只打印、**不断言**（那是读数）。
-# ★ 缺游戏安装 ⇒ 不注册（assets 档的判据 = 注册位置）；与其它 e2e 同一条 opt-in 判据。
-# =====================================================================================
-if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
-    add_executable(lift-mip-e2e tests/mip_e2e.cpp)
-    target_link_libraries(lift-mip-e2e PRIVATE emulator-lift-runtime)
-    add_test(NAME mip-e2e COMMAND lift-mip-e2e
-        $<TARGET_FILE:emulator-lift>
-        "${LIFT_ASSETS_GAME_DIR}"
-        "${CMAKE_CURRENT_BINARY_DIR}/mip-e2e-work")
-    set_tests_properties(mip-e2e PROPERTIES
-        # ★ 子进程继承这个 cwd：模拟器默认的执行源是按相对当前目录找的。
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        SKIP_RETURN_CODE 77
-        TIMEOUT 1200)
-endif()
 
 # =====================================================================================
 # `--dump-frame` 的目录必须在开跑前建好（`REQ-01M73YBCC3DZ05Y9NSDTRKTMMY`）
@@ -1238,54 +1280,8 @@ add_test(NAME frame-dump-failure COMMAND lift-frame-dump-failure)
 set_tests_properties(frame-dump-failure PROPERTIES SKIP_RETURN_CODE 77)
 
 # =====================================================================================
-# assets（可 SKIP）· 线性 `await script TITLE` + `LIFT_LOG_MARKERS` 的端到端守卫
-# （`REQ-01M74Z3DBK8K5MQVHZPCEX2SXP`）
-# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
-# ★ 判据见 tests/interaction_script_e2e.cpp 文件头：①`await script TITLE` + `quit` 的子进程
-#   exit 0；②它的 trace 有 `node step1 enter` / `when script TITLE` / `task done`（`script` 是电平）；
-#   ③不带 `LIFT_LOG_MARKERS` 那次**没有** `[marker] frame=` 行（默认关）；
-#   ④带 `LIFT_LOG_MARKERS=1` 那次 ≥ 1 行 `[marker] … name=` 且名字非空、至少一行不是降级名；
-#   ⑤④那次用的图**没有** `script` 条件 ⇒ 采样只因环境变量而开（门控的机械判据）。
-# ★ 缺游戏安装 ⇒ 不注册（assets 档的判据 = 注册位置）；与其它 e2e 同一条 opt-in 判据。
+# 2026-11-14：`interaction-script-e2e`（`tests/interaction_script_e2e.cpp`）已按测试模型删除
+# （`REQ-01M7ATAB5A18W7XBCKFBEQS7HB`）—— 判据是"等一屏 → 点一下"这类**业务正确性**；
+# ⛔ 不进测试。复现命令见 `docs/03-emulator/defects.md` BUG-16。
 # =====================================================================================
-if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN" AND DEFINED ENV{LIFT_ASSETS})
-    add_executable(lift-interaction-script-e2e tests/interaction_script_e2e.cpp)
-    target_link_libraries(lift-interaction-script-e2e PRIVATE emulator-lift-runtime)
-    add_test(NAME interaction-script-e2e COMMAND lift-interaction-script-e2e
-        $<TARGET_FILE:emulator-lift>
-        "${LIFT_ASSETS_GAME_DIR}"
-        "${CMAKE_CURRENT_BINARY_DIR}/interaction-script-e2e-work")
-    set_tests_properties(interaction-script-e2e PROPERTIES
-        # ★ 子进程继承这个 cwd：模拟器默认的执行源是按相对当前目录找的
-        #   （`../../corpus/assets/age/…sectfix.EXE`）⇒ 停在 `out/` 会找不到执行源、被测试 SKIP。
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        SKIP_RETURN_CODE 77
-        TIMEOUT 1200)
-endif()
-# =====================================================================================
-# assets（可 SKIP）· TITLE→Quit 的 SEH **每线程 TEB** 守卫（`sn0000-quit.graph`）
-# `REQ-01M77MC1374HXC2JR7E0ZYSHQJ`：Quit 的 C++ throw 派发到音频 feeder 栈上的 SEH record
-# ⇒ `Handler` 已被复用成数据 ⇒ `stop : unimplemented @ eip=<guest 堆>`。
-# 判据见 tests/quit_graph.cpp 文件头：①真 feeder 臂（`feeder=host-thread` + `device=ok`，缺 ⇒ SKIP 77）；
-# ②`stop : stopped` + `kernel32!ExitProcess`；③没有 `unimplemented`/`decode-error`/`数据地址当 eip`；
-# ④同一 graph 跑两遍（缺陷依赖并发窗口，修前 3/4 次红且 EIP 每次不同 ⇒ 单跑一次可能假绿）。
-# ★ 缺安装树 ⇒ 不注册（assets 档的判据 = 注册位置）；窗口 / GPU / 音频设备不可用 ⇒ 测试自己 SKIP 77。
-# ★ 必须 `--present window --present-hidden`：headless 会把 `wait … wall_ms` 跑歪，`--audio off`
-#   则没有 feeder 真线程 ⇒ 量不到这条通道（测试里已写明）。
-# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
-# =====================================================================================
-if(EXISTS "${LIFT_ASSETS_GAME_DIR}/SYS4INI.BIN")
-    add_executable(lift-quit-graph tests/quit_graph.cpp)
-    target_link_libraries(lift-quit-graph PRIVATE emulator-lift-runtime)
-    add_test(NAME quit-graph COMMAND lift-quit-graph
-        $<TARGET_FILE:emulator-lift>
-        "${LIFT_ASSETS_GAME_DIR}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../graphs/sn0000-quit.graph"
-        "${CMAKE_CURRENT_BINARY_DIR}/quit-graph-work")
-    set_tests_properties(quit-graph PROPERTIES
-        # ★ 子进程继承这个 cwd：模拟器默认的执行源 / `.lst` 是按相对当前目录找的。
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        SKIP_RETURN_CODE 77
-        TIMEOUT 1800)
-endif()
 endif() # LIFT_BUILD_TESTS

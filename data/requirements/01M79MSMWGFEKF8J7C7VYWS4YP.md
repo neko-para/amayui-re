@@ -55,3 +55,5 @@
   （首条 921600 px = 满屏）；这些像素全进**后缓冲**（sprite 两条路径硬取 `dev.arena`）⇒ 改判方向
   `REQ-01M79V2TVJH98BKH0C0WQV2FET`（sprite→RT），本单不扩大范围。
   ⚠ 设计 §4 原写"sprite End/Flush 次数 = 0"作判据，**实测不成立**（是 77 次），不要再用那句当证据。
+
+★ 2026-11-14 变异清单瘦身：本单 verify 锚点的断言面缩小 —— 删了 `queued_draws==1` / `fallback_draws==0` / `gpu_draws==1` 三条计数断言（理由：计数是我方内部计数器当效率代理，且 `fallback` 字段已从产品删 —— `AGENTS.md` §10），现在断的是 `rasterTargetBase() == tex_pixels`（目标身份）+ Draw 返回 S_OK。

@@ -4,7 +4,7 @@
 - type: req
 - status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- verify: apps/emulator-lift/tests/interaction_graph.cpp#interaction-graph
+- done_reason: 该 CTest 已按测试模型删除（REQ-01M7ATAB5A18W7XBCKFBEQS7HB）：交互图 DSL 的解析/状态机只作驱动、不再有门禁；复现命令见 defects.md#BUG-16。
 - tags: [emulator-lift, interaction-graph]
 
 ## 一句话

@@ -627,7 +627,7 @@ public:
         return on;
     }
 
-    // ★ 旧接口 = 入队 + 立即 flush（语义不变；fixtures / `--gpu-verify` 靠它"画完立刻能读"）。
+    // ★ 旧接口 = 入队 + 立即 flush（语义不变；fixtures 靠它"画完立刻能读"）。
     bool rasterDraw(const GpuRasterVertex* vertices, std::size_t count, const GpuRasterState& state,
                     std::string* err) override {
         if (!rasterQueue(vertices, count, nullptr, state, err)) return false;
@@ -738,8 +738,19 @@ public:
                 // 整幅哈希：**这一条**才是"GPU 上的副本与 guest 是同一份吗"的判据（单 texel 只是定位）。
                 draw.probe.guest_hash = hashPixels(texture->pixels, texture->pitch, tex_w, tex_h);
                 const GpuRasterVertex& v0 = draw.vertices[0];
-                const float nx = v0.x / static_cast<float>(width_) * 2.0f - 1.0f;
-                const float ny = 1.0f - v0.y / static_cast<float>(height_) * 2.0f;
+                // ★ 与真提交同一份换算：屏幕→NDC **用视口矩形**（`flush` 里那两行同源）。
+                //   ⛔ 不要在这里继续用 target 尺寸 —— `vp != tgt` 时读数会与真正交给 GPU 的
+                //   NDC 不一致（读数骗人）。视口为 0 ⇒ 回落整幅 target。
+                const float diag_vp_x = static_cast<float>(draw.state.viewport_x);
+                const float diag_vp_y = static_cast<float>(draw.state.viewport_y);
+                const float diag_vp_w = draw.state.viewport_w > 0
+                                            ? static_cast<float>(draw.state.viewport_w)
+                                            : static_cast<float>(width_);
+                const float diag_vp_h = draw.state.viewport_h > 0
+                                            ? static_cast<float>(draw.state.viewport_h)
+                                            : static_cast<float>(height_);
+                const float nx = (v0.x - diag_vp_x) / diag_vp_w * 2.0f - 1.0f;
+                const float ny = 1.0f - (v0.y - diag_vp_y) / diag_vp_h * 2.0f;
                 // 整批 z 的范围：只打 `v0.z` 会把"深度被谁判掉"这条线索藏起来
                 //   （`a12` §5 的 `<待核>` #1：`[draw]` 的 `z=` 是状态位，不是顶点 z 范围）。
                 float zmin = v0.z;
@@ -853,10 +864,20 @@ public:
             }
             Vertex* dst = mapped;
             for (const QueuedDraw& d : queue_) {
+                // ★ 屏幕空间 → NDC 必须用**这一批的视口矩形**换算（与下面 render pass 的
+                //   `SDL_SetGPUViewport`（NDC→窗口）互逆）。⛔ 不能用 target 尺寸：
+                //   那只在 `viewport == target` 时才是它的逆，否则视口被施加**两次** ——
+                //   非全幅视口下几何整体缩放/偏移（真 D3D9 的分屏 / RT 子矩形 / letterbox 很常见）。
+                //   视口宽高为 0（未设 / 夹具）⇒ 回落整幅 target（等价于"没有视口"）。
+                const float vp_x = static_cast<float>(d.state.viewport_x);
+                const float vp_y = static_cast<float>(d.state.viewport_y);
+                const float vp_w = d.state.viewport_w > 0 ? static_cast<float>(d.state.viewport_w)
+                                                          : static_cast<float>(width_);
+                const float vp_h = d.state.viewport_h > 0 ? static_cast<float>(d.state.viewport_h)
+                                                          : static_cast<float>(height_);
                 for (const GpuRasterVertex& v : d.vertices) {
-                    // 屏幕空间 → NDC（尺寸取**这一帧**的 target；换 target 前已经 flush，不会串）
-                    dst->x = v.x / static_cast<float>(width_) * 2.0f - 1.0f;
-                    dst->y = 1.0f - v.y / static_cast<float>(height_) * 2.0f;
+                    dst->x = (v.x - vp_x) / vp_w * 2.0f - 1.0f;
+                    dst->y = 1.0f - (v.y - vp_y) / vp_h * 2.0f;
                     dst->z = v.z;
                     dst->r = v.r;
                     dst->g = v.g;
@@ -2129,10 +2150,14 @@ private:
     }
 
     SDL_GPUSampler* samplerFor(const GpuSampler& s, std::string* err) {
+        // ★ `mipmap` 也进键：`MIPFILTER=NONE`（D3DTEXF_NONE）与启用 mip 的批用**两个**
+        //   sampler（`max_lod = 0` vs 1000）。⛔ 它不能靠"一张纹理一档"表达 —— 那是纹理属性，
+        //   而 `max_lod` 是 **per-sampler** 字段（见 `SDL_GPUSamplerCreateInfo`）。
         const std::uint32_t key = static_cast<std::uint32_t>(s.address_u) |
                                   (static_cast<std::uint32_t>(s.address_v) << 3) |
                                   (static_cast<std::uint32_t>(s.mag_filter) << 6) |
-                                  (static_cast<std::uint32_t>(s.min_filter) << 7);
+                                  (static_cast<std::uint32_t>(s.min_filter) << 7) |
+                                  (static_cast<std::uint32_t>(s.mipmap ? 1u : 0u) << 8);
         auto it = samplers_.find(key);
         if (it != samplers_.end()) return it->second;
         auto addr = [](GpuAddress a) {
@@ -2150,11 +2175,23 @@ private:
         si.min_filter = filt(s.min_filter);
         si.mag_filter = filt(s.mag_filter);
         si.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
-        // ★ `max_lod` 的缺省值在 SDL_GPU 里是 **0**（= LOD 被钳到 0 ⇒ 只采 level 0）。
-        //   不显式放开，就是"CPU 修好、GPU 静默走样"（`REQ-01M73G2724479XAVS176WBZ65Q`）。
-        //   采样器缓存键不用带它：这里是个常量（1 级纹理由 API 自己钳住）。
+        // ★ 两档 sampler（缓存键带 `mipmap` 位）：
+        //   · `MIPFILTER != NONE` ⇒ `max_lod = 1000`（按 LOD 选级；`mipmap_mode = NEAREST` = 最近级）；
+        //   · `MIPFILTER == NONE`（`D3DTEXF_NONE` = "disables mipmapping"）⇒ **只采 level 0**。
+        //   ⛔ 不要再写"表达不了"：`max_lod` 是 per-sampler 字段，sampler 按批建。
+        //
+        // ★ 为什么"只采 level 0"写 `max_lod = 0.49`（而不是 0）：Vulkan / D3D12 的采样先算
+        //   `λ' = clamp(λ, min_lod, max_lod)`，再按 `λ' <= 0` 选 **MAG** 过滤、否则选 **MIN**。
+        //   · `max_lod = 0` ⇒ 连缩小采样也被钳成 λ'=0 ⇒ 走 MAG 过滤（**MINFILTER 整个失效**）。
+        //     实测（4:1 缩小、MAG=POINT + MIN=LINEAR）：`max_lod=0` 与 MIN=POINT 像素相同。
+        //   · `max_lod = 0.49` ∈ (0, 0.5) ⇒ λ<=0（放大 / 1:1）时 λ'=λ ⇒ 仍选 MAG（正确）；
+        //     λ>0（缩小）时 λ'∈(0,0.49] ⇒ 选 MIN，且最近级 round(λ') = 0（只采 level 0）。
+        //   这是"只关选级、不关 MINFILTER"的最小表达 —— D3D9 的 `MIPFILTER=NONE` 正是这个语义。
+        //   守卫：`d3d9p/min-filter` 的缩小臂（MIN=POINT 20 vs LINEAR 17 必须不同）+
+        //   `d3d9p/mip-levels` 的 `MIPFILTER=NONE` 臂（4:1 ⇒ level 0 的 0，而不是 level 2 的 33）。
+        constexpr float kNoMipMaxLod = 0.49f;
         si.min_lod = 0.0f;
-        si.max_lod = 1000.0f;
+        si.max_lod = s.mipmap ? 1000.0f : kNoMipMaxLod;
         si.address_mode_u = addr(s.address_u);
         si.address_mode_v = addr(s.address_v);
         si.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;

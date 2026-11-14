@@ -4,7 +4,7 @@
 - type: req
 - status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- verify: apps/emulator-lift/CMakeLists.txt#DEFINED ENV{LIFT_ASSETS}
+- verify: apps/emulator-lift/CMakeLists.txt#DEFINED ENV{LIFT_STRESS}
 - done_reason: 档位判据 = add_test 的注册位置（顶层无条件 ⇒ 默认档；落在 if() 里 ⇒ assets 档，解析只在 tools/lib/ledger.mjs 的 cmakeTestTier 一处）。可观测面 = ctest -N 的条数与名字：默认档不含 option-roundtrip / movie-logo；$env:LIFT_ASSETS=1 重新 configure 后它们出现，去掉变量再 configure 又消失。没有能红的自动守卫（拆掉闸只会让默认门禁变慢，不会让任何断言失败）⇒ 判据写在本字段；verify 挂 CMakeLists.txt 的 DEFINED ENV{LIFT_ASSETS} 锚 = 那两处 if 的闸（配置期求值）。不丢回归的替代证据 = 同案 pure 回归 d3d9/texture-bound-then-guest-release 仍在默认档。
 - tags: [emulator-lift, ctest]
 

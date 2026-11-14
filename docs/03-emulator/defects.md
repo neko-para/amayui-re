@@ -11,15 +11,16 @@
 - **修法**：`src/runtime/com.cpp:282-286`（到 0 的唯一收敛点先跑 `on_zero` 再 free）+ `src/runtime/com.h:94,125`；纹理在 `src/shims/d3dx9.cpp:1031,1092` 登记 `d3d9::destroyTextureState`；回收见 `src/runtime/d3d9.cpp:936-943`。★ `IDirect3DSurface9` **不登记**（`GetSurfaceLevel` 的表面复用纹理状态块，登记会提前释放像素）。
 - **读数（修前，实测非推断）**：三时刻 arena `in_use` = 108,595,152 → 120,693,568 → 126,672,232 B ⇒ 一次往返 **+18,077,080 B**；退回 TITLE 后最大连续空闲块 **5,814,312 B** < 这张纹理要的 5,898,248 B ⇒ 第二次必失败。
 - **何时 / 谁发现**：2026-11-08，静态诊断（`.tmp/task2-report.md` §0-§5）→ 端到端实测定量（`.tmp/req-option-leak-body.md` §"真因"）。
-- **代表守卫**：CTest `option-roundtrip/3cycles`（1/2/3 轮往返的 `in_use`/`peak` 不随轮数增长，容差 1 MiB）；回收面单点由 `tests/d3d9.cpp#d3d9/texture-bound-then-guest-release` 钉。两者都做过"短路 `onZero` ⇒ 当场红"的变异。
+- **代表守卫**：原 CTest `option-roundtrip/3cycles`（1/2/3 轮往返的 `in_use`/`peak` 不随轮数增长，容差 1 MiB；**已删**，2026-11-14）；回收面单点由 `tests/d3d9.cpp#d3d9/texture-bound-then-guest-release` 钉。两者都做过"短路 `onZero` ⇒ 当场红"的变异。
 - **复现**：`--input-script <TITLE→OPTION→右键→再进 OPTION>`（`.tmp/input/opt-cycle2.txt`；帧 120 点入、172 右键回、234 再进、`--max-frames 400`）。
+- `option-roundtrip`：`./out/emulator-lift --appdata <每次全新私有 tmp> --game-dir ../../links/install --present window --present-hidden --native-overrides all --skip-logo --input-script <脚本> --max-frames 700 --assert-guest-token`（脚本 = `at frame 130` + 两轮 `click 812 622` / `wait 50 frames` / `click 640 360 right` / `wait 70 frames`，末尾 `quit`；看 run summary 的 `arena :` / `token :` 与有没有 `guest 堆耗尽` / `unimplemented` 字样。★ 原 CTest 2026-11-14 按测试模型删除 —— 业务正确性不作判据，这不是门禁）。
 
 ### BUG-02 · 同一个失败被记成"guest 用了没实现的导出"（误诊链）
 - **现象**：摘要与 stderr 都是 `=== unimplemented D3DX9 call === D3DXCreateTexture` 并进 `called-unimplemented` 计数 —— 看起来"缺一个导出"，实际是**我们自己**的容量问题。
 - **根因**：`d3dxTrap` 是唯一出口：`createTextureState` 的任何失败（含 arena 耗尽）都送进去，它固定打 `"unimplemented D3DX9 call"` + 写 `cpu.stop_why` + `++cpu.shim.unimplemented_calls` ⇒ 两种完全不同的停因在账上长得一样。
 - **修法**：`src/shims/d3dx9.cpp:104-125` 新增 `d3dxResourceStop`（独立标题 `=== D3DX 资源耗尽（不是 unimplemented）===`、独立 `stop_why = "D3DX 资源耗尽"`、**不** `++unimplemented_calls`）；`d3dxTrap`（`:90`）只留真缺口；同处补 `w×h / D3DFORMAT / 像素字节`。
 - **何时 / 谁发现**：2026-11-08，`.tmp/task2-report.md` §6（归因链逐行取证）。
-- **代表守卫**：`option-roundtrip/3cycles` 断言全程**无** `guest 堆耗尽` / `unimplemented` / `D3DX 资源耗尽` 字样。
+- **代表守卫**：原 `option-roundtrip/3cycles` 断言全程**无** `guest 堆耗尽` / `unimplemented` / `D3DX 资源耗尽` 字样（该 CTest **已删**，2026-11-14；复现命令见 BUG-01）。
 - **复现**：`.tmp/task2-report.md` §6 的 `d3dx9.cpp:1011-1016` 调用链；stderr 原文见 `.tmp/req-option-leak-body.md` §"症状"。
 
 ### BUG-03 · 音频 feeder 与主线程并发跑 guest 代码 ⇒ 宿主堆损坏（0xC0000374）
@@ -28,7 +29,7 @@
 - **修法**：`GuestToken`（`src/runtime/guest_token.h`）＝任一时刻最多一个宿主线程持有令牌，互斥点在**每次 shim 调用**（`ShimRegistry::invoke`）：feeder 的整次 fill **不**持，只有它的 shim 调用持（`audio.cpp:1068-1071,1179-1185,1223,1271`）。`--assert-guest-token` ⇒ `token : violations=0 max-concurrent=1`，违规退出码 4。
 - **排除项（省得再查）**：`metrics()` 悬垂、`GuestHeap` double free（`heap.cpp:116-121` 是 `abort()` 不是静默）、`SurfaceArena` 指针相撞、`on_zero` 写坏宿主堆 —— 四条都被逐条否证（`.tmp/heapbug3/report.md` §2-§5）。
 - **何时 / 谁发现**：2026-11-08；两轮 ASAN 未拿到栈（`.tmp/heapbug2/report-round3.md` §2-§3），第三轮静态审计定到并发（`.tmp/heapbug3/report.md` §1），A/B 见 `.tmp/audiord/*-summary.txt`。
-- **代表守卫**：CTest `guest-token-stress`（`tests/guest_token.cpp`，2 线程 × 200 000 次真实 `GuestHeap` alloc/free；把 `acquire/release` 短路成空操作 ⇒ 红）。
+- **代表守卫**：CTest `guest-token-stress`（`tests/guest_token.cpp`，2 线程 × 200 000 次真实 `GuestHeap` alloc/free；把 `acquire/release` 短路成空操作 ⇒ 红）。原端到端复现件 `option-roundtrip` 已删（2026-11-14；复现命令见 BUG-01）。
 - **复现**：`.tmp/heapbug3/report.md` §1 的判据链；无令牌形态的整轮墙钟见 OBS-15。
 
 ### BUG-04 · `click` 的按下短于 guest 采样周期 ⇒ 被**静默吞掉**
@@ -69,7 +70,8 @@
 - **根因**：`baseline_lift` 的唯一应用点在宿主绘制路径 `src/runtime/font.cpp:356-360`（`gmptGlyphOrigin.y = slot->bitmap_top + baseline_lift`，只被 `src/shims/gdi32_font.cpp:299` 的 `TextOutA` 用到）；引擎正文走 **GGO + guest 自己合成**（`TextOutA` 只 10 站点 / 2 caller）⇒ 补偿对正文无效。cxx 从**每次绘制的最终基线**减（它自己栅格化）⇒ "同常量"≠"同效果"。
 - **修法**：**先别改**。要常量一致 ⇒ 已一致（零改动）；要正文墨迹对齐 ⇒ 只能动 guest 可见的 ascent，而那会破 `tests/gdi_font.cpp:228`（`tm_height == tm_ascent + tm_descent`）、`tests/gdi.cpp:432-434`（合成 22/20/2）与 `apps/emulator-lift/SCOPE.md:111`（"补偿**不**写进度量"）⇒ 两条案都要人裁决（`.tmp/task3-report.md` §6）。
 - **何时 / 谁发现**：2026-11-08，`.tmp/task3-report.md` §4（常量来源 `apps/emulator-cxx/src/core/text_raster.cpp:647` 的 `lift = 2`）。
-- **代表守卫**：CTest `text-baseline-lift`（`assets` 档，需安装树；断言"关掉补偿后墨迹顶正好低 2px"）+ `SCOPE.md:111` 的声明本身。
+- **代表守卫**：原 CTest `text-baseline-lift`（`assets` 档，需安装树；断言"关掉补偿后墨迹顶正好低 2px"）**已删**（2026-11-14，测试模型：断的是我方视觉策略 `baseline_lift==2`，不作判据）—— 口径留在 `fonts.md`，复现命令见下行；`SCOPE.md:111` 的声明本身仍在。
+- `text-baseline-lift`：`./out/emulator-lift --game-dir ../../links/install --appdata <全新私有 tmp> --skip-logo --audio off --font corpus/assets/fonts/Amayui-CN_cnjp.ttf --baseline-lift 2 --present headless --max-frames 1 --dump-frame <lift2.bmp>`，再用 `--baseline-lift 0` 跑同一条命令得 `<lift0.bmp>` ⇒ 两幅逐像素比：`baseline_lift==2` 的墨迹顶比 `0` 高 2 px，且两次 `TEXTMETRICA` 逐字段相同（⛔ 业务 / 策略正确性不作判据，这是复现命令，不是门禁）。
 - **复现**：`.tmp/task3-report.md` §4 的 4 条路径对照；`--baseline-lift 0` 与缺省各跑一次逐帧 BMP 比对。
 
 ### BUG-09 · GPU 合批在"纹理内容变化"时退化成**逐条提交**（136 次/帧）
@@ -119,6 +121,9 @@
 - **代表守卫**：这一条**故意没有守卫** —— 它是"不该写守卫"的判据本身（自检三问见 `README.md` §0.1）。
 - **复现**：`node tools/mutate-check.mjs --list`（看清单里有多少条改的是内部常量）；逐单元分类见 `.tmp/test-audit/inventory.tsv`（`label=DROP-L3` 那批）。
 - **现状（2026-11-09 复核，以仓为准）**：上面点名的四件事**都还在仓里** —— `tests/input_tick.cpp:43`（`actionScans() <= 16` 仍在）、`tests/gpu_batch.cpp:923`（`cuts - s0.cuts == 1` 仍在），`tests/{heap_layout,gdi_font_metrics_cache,profile_window}.cpp` 三个文件也都在、且都注册在默认门禁里。⇒ 这条审计的**知识侧**（落 `L3-*` / `measurement.md`）已落地，**测试侧的删除还没做**；要删是单独一条单，⛔ 不顺手删证据（`AGENTS.md` §11）。
+- **现状（2026-11-13，测试侧第一批删除已做）**：`heap_layout` / `gdi_font_metrics_cache` 两条 CTest 与源文件**已删**（连带 `tools/mutate-check.mjs` 的对应条目）；`heap_layout` 的真不变量（提交后未写页读 0）搬进 `tests/memory_pages.cpp` 的 `commit-unwritten-zero`，度量缓存的真 GDI 合同（换字号 ⇒ 度量必须变）搬进 `tests/gdi_font.cpp` 的 `metrics-size-change`。同批按同类判据删掉 `agerc_ui_state` / `recovery_dialog` / `title_entry_paths` / `mip_e2e` / `overlay-window-smoke` / `emulator-lift-smoke`。`conformance-rejects-hollow-case` 不在删除集内（它是身份判据的负控，0.5 s，现在默认档）。
+- **现状补遗（2026-11-13 晚，测试模型重做）**：`quit-graph` / `save-graph` / `close-confirm` / `option-roundtrip` 这类**缺陷复现件**按新模型**不进测试**（业务正确性不作判据）⇒ `repro` 档取消，它们的复现命令留在本文件 / `observations.md`。口径见 `REQ-01M7ATAB5A18W7XBCKFBEQS7HB`。⇒ **待处理**：`input_tick` 的 `actionScans()`、`gpu_batch` 的 `cuts==1`/`submits==2`、`profile_window` 的 `calls=` / 分项和（不在本批）。
+- **现状（2026-11-14，本批落地）**：这四条 CTest 与源文件**已删**；复现命令 = BUG-01（`option-roundtrip`）· BUG-22（`quit-graph`）· `observations.md` OBS-20261112-05（`save-graph`）与 OBS-20261114-01（`close-confirm`）。同批删除的其它业务 e2e：`interaction-graph` / `interaction-script-e2e`（BUG-16）· `skip-logo`（OBS-20261114-02）· `native-override-e2e`（OBS-20261114-03）· `base-coverage`（OBS-20261114-04）· `text-baseline-lift`（BUG-08）。
 
 ### BUG-15 · 出 EU-ROOM 的路径停在后缓冲 surface 的 `LockRect`（未实现），且**退出码 0**（**LockRect 一跳已修 + 有守卫**；端到端仍被新的 SEH gap 挡住）
 - **★ 归属更正（2026-11-10，spike `REQ-01M71P87BMTZK4MHT8468BMC3G`）**：这里按 ESC 走的是**退出游戏（关窗）**，
@@ -200,9 +205,12 @@
   （`0x411CFE test byte ptr [ebx],20h`）。实测 `room-exit-right.graph`（`click center right`）⇒ exit 0 +
   `task done` + 同一个 TITLE hash（`OBS-20261110-04`）⇒ 任务图已覆盖它
   （⛔ 取消目标由脚本登记的取消标签决定，别把右键图当模板套到别的屏）。
-- **代表守卫**：`apps/emulator-lift/tests/interaction_graph.cpp` 的 `graph-scripts-parse`（两份出房间图必须能解析）
-  + `parse-button-right` / `emit-button-carried`；**终态级判据仍是 assets 档真机 run**（要安装树）。
+- **代表守卫**：原 `apps/emulator-lift/tests/interaction_graph.cpp` 的 `graph-scripts-parse` / `parse-button-right` /
+  `emit-button-carried` 与真机交互图 run **都已删除**（2026-11-14，测试模型：业务正确性不作判据）⇒ 只留复现命令
+  （见下两行）；终态级判据现在靠人读 trace。
 - **复现（成功路径）**：`--interaction-graph scripts/interaction/room-exit.graph` ⇒ exit 0 + trace 末 `task done`。
+- `interaction-graph`：`./out/emulator-lift --game-dir ../../links/install --appdata <每次全新私有 tmp> --skip-logo --audio off --present headless --interaction-graph scripts/interaction/room-exit.graph --interaction-trace <room.trace> --time-limit 900` ⇒ 人读 trace：`node … enter` / `when script …` / `task done`，退出码 0/5 只作读数（★ 原 CTest 已删，不进测试）。
+- `interaction-script-e2e`：`./out/emulator-lift --game-dir ../../links/install --appdata <每次全新私有 tmp> --skip-logo --audio off --present headless --interaction-graph <await-title.graph> --interaction-trace <e2e.trace> --time-limit 300`（图 = `await script TITLE` / `timeout 180000` / `quit`）；`LIFT_LOG_MARKERS=1` 再跑一次同一形状的 `await screen changed` 图 ⇒ 日志里应有 `[marker] frame=… name=` 行（★ 原 CTest 已删，2026-11-14）。
 - **重开条件**：若再出现"点了没反应"，先确认观测窗盖住了一次 TITLE 重载帧 —— ⛔ 别再用 `--input-script` 里
   `at insn` 的硬锚点当终点（11-09 就是那么误判的）。
 
@@ -211,6 +219,7 @@
 - **不是哪次提交引入的（已用重建证伪）**：在 `2bd8eaf`（`5e4fca3` / `8141659` 之前）重建后跑同一路径，得到**逐字节相同**的撕裂帧（sha256 `d0e0af01…`）。⇒ 这是 `--raster gpu` 的**既有**缺陷，与那两次提交无关。
 - **已排除（每条都实测）**：
   - **不是 CPU/GPU 光栅不等价**：`LIFT_GPU_VERIFY=1` 的逐批 CPU 参考 vs GPU 读回对照，42 批**全部 `diff_pixels=0`**。
+    ★ **该开关已删**（`REQ-01M7A74YG08R65NJBFXF7DEJDK`：`gpuEligible` 拒批翻"跳过"后 CPU 参考光栅不再是可走的一条路）⇒ 这条读数是**历史**，不可按原样复现；现在的像素对照用 `--dump-frame` / `--present-screenshot` 的逐像素 max-diff。
   - **不是这几张纹理的上传错**：把 1280x720 / 1664x1536 / 1280x1664 / 2048x2048 的 GPU 纹理**从 GPU 读回成 BMP**，与 guest 源像素**逐字节相同**（sha256 相同）。⚠ 这四张的 `w*4` **恰好都是 256 的倍数** ⇒ 它们本来就走不出下面那个行距 bug（真正的坏样本是 1120x672，读回时才发现被削成横条）。
   - **不是脏区 / 版本缓存**：强制整幅重传（`content_change_known=false`、`generation=0`）结果不变。
   - **不是合批 / 屏障**：每条 sprite 后立即 flush 结果不变；每帧先 flush + 读回再从 guest 上传结果也不变。
@@ -263,8 +272,10 @@
   `软件中断`（insns 898,729,338）；修后 A/B 都 `exit 0` + `detail: input script: quit`（A insns 1,176,455,637 /
   B 1,008,053,822）。日志新增 `EnumFontFamiliesExA: 回调 16 条族名 …` + `枚举完成：16 条族名`。
 - **代表守卫**：`apps/emulator-lift/tests/gdi.cpp` 的 `enum-font-families`（pure：枚举条数 > 1、5 条查表目标
-  逐字节命中、每条 `lfCharSet` = 请求值）与 `enum-font-families-stop`（回调返回 0 ⇒ 只 1 条）；
-  端到端 `apps/emulator-lift/tests/title_entry_paths.cpp`（assets，安装根 `links/install` + `LIFT_ASSETS` 才注册）。
+  逐字节命中、每条 `lfCharSet` = 请求值）与 `enum-font-families-stop`（回调返回 0 ⇒ 只 1 条）。
+  ★ 原来的端到端复现件 `apps/emulator-lift/tests/title_entry_paths.cpp`（assets + `LIFT_ASSETS`）已于
+  2026-11-13 删除 —— 它的根因就是上面这两条，而它自己是"固定帧号 + 点像素"的**缺陷复现件**、不是设计
+  的合同（同批裁决把这类整体移出测试；`repro` 档已于 2026-11-14 取消，复现命令只留在本文件 / `observations.md`）。
   变异实测：名单缩回一条 ⇒ `lift-gdi` 6 failures + 同一二进制 A/B 端到端都 exit 2 且回到 `0x4E6E3F`。
 - **复现**（`apps/emulator-lift`）：`--game-dir ../../links/install --skip-logo --present window --present-hidden
   --raster gpu --max-frames 400 --time-limit 150 --input-script <A|B>`；A = `at frame 130 / click 812 622 /
@@ -367,17 +378,17 @@
 - **修法（2026-11-11 裁决）**：**删掉整个夹具**（`tests/quit_tail.cpp` + CTest `quit-tail` + 两条测试侧变异），
   两张相关需求单按"夹具已删"drop。理由（`README.md` §0.1 三问）：
   ① `present-tail` 字段接错由纯档 `tests/input_injection.cpp#present-tail-stamp` 守；
-  ② 端到端那半（各 1 行 `present-tail` + `stop=stopped` + `detail` 含 `kernel32!ExitProcess`）由
-     `tests/native_override_e2e.cpp` 断言；
+  ② 端到端那半（各 1 行 `present-tail` + `stop=stopped` + `detail` 含 `kernel32!ExitProcess`）原由
+     `tests/native_override_e2e.cpp` 断言 —— 该 CTest **已于 2026-11-14 按测试模型删除**（复现命令见 BUG-22 与本条末尾）；
   ③ 剩下的"锚命中 / 两次逐字相同"是**测试自己**的结论，属观察 → 文档，不配守卫。
 - **留下的规则**：e2e 夹具的触发锚用 **`at guest_ms` / `at insn`**（guest 时间跨机器确定），⛔ 不用 `at frame`；
   `--appdata` **每次 `remove_all`**（退出路径会写 `SAVE.DAT`：同一二进制、同一锚，空 appdata 的
   `tail_insns=131104827`，带上一轮存档的 `143751706` ⇒ 两臂会差一帧）。
   Windows 子进程命令行**只用 UTF-16**（`CreateProcessW` + `path::wstring()`），
   `path::string()` 走 ANSI 代码页会把 `天結` 转成 GBK 字节、`utf8ToWide()` 严格解码失败 ⇒ 子进程丢 game-dir；
-  仍在用的样例见 `tests/title_entry_paths.cpp`。
+  仍在用的样例见 `tests/host_encoding.cpp` 的 `runChild`（Windows 分支拼 `std::wstring` 命令行）。
 - **代表守卫**：无（夹具已删）。"夹具写错要能看见"这一类由 `tests/input_unfinished.cpp` 的未应用动作摘要承担。
-- **读数**（2026-11-11，macOS arm64 / RelWithDebInfo / `LIFT_ASSETS=1`，删前最后一跑）：
+- **读数**（2026-11-11，macOS arm64 / RelWithDebInfo / `LIFT_ASSETS=1`〔历史档名；现为 `LIFT_STRESS`〕，删前最后一跑）：
   `ctest -R '^quit-tail$'` = **Passed 87.91 s**；直接跑夹具 = **43 checks / 0 failures**，
   两臂逐字相同：`last_frame=1493 insns_at_last_present=1191989436 tail_insns=131104827`、
   `click frame=1472 guest_ms=120038 waited_samples=3`、`stop=stopped`。`tail_insns` 与 Windows 实测相同。
@@ -404,10 +415,14 @@
   "数据地址当 eip"警告（⛔ 不改 dispatch 语义）。
 - **何时 / 谁发现**：2026-11-12，用户实测 → `.tmp/audio-token/quit-unimplemented-analysis.md` 静态取证 →
   本轮流式取证（`LIFT_SEH_TRACE` 的 feeder `fs:[0]` 观察点 + 链头逐环区域归属）定因。
-- **代表守卫**：CTest `quit-graph`（`tests/quit_graph.cpp`，assets；真 feeder 臂 + 同一 graph 两遍）：
-  修后 `stop : stopped @ 004EE0EA` + `kernel32!ExitProcess`，链头 `0x6FFFFB74`（`region=stack`）、
+- **代表守卫**：原 CTest `quit-graph`（`tests/quit_graph.cpp`，**repro 档**：`LIFT_REPRO=1` 才注册；
+  真 feeder 臂、单臂）：修后 `stop : stopped @ 004EE0EA` + `kernel32!ExitProcess`，链头 `0x6FFFFB74`（`region=stack`）、
   handler `0x00513B90`（`region=image`）。变异 `tools/mutate-check.mjs` 的 `ctest:quit-graph`
-  （feeder `fs` 指回主 TEB）⇒ 当场红。
-- **复现**：`--appdata <私有 tmp> --game-dir ../../links/install --present window --present-hidden --raster gpu
-  --native-overrides all --skip-logo --interaction-graph ../../graphs/sn0000-quit.graph --max-frames 4000`
-  （⛔ headless 不是有效臂：本图会停在 step3 等 GAMESTART 超时；`--audio off` 没有 feeder）。
+  （feeder `fs` 指回主 TEB）⇒ 当场红。★ 2026-11-13：这条是**缺陷复现件**，与 `save-graph` /
+  `close-confirm` / `option-roundtrip` 一起移进 `repro` 档（默认门禁与 `LIFT_ASSETS=1` 都不注册）；
+  原来的"同一 graph 两遍"同时删成单臂。★ **2026-11-14：整条 CTest + 源文件 + 变异条目已删**（测试模型：
+  业务正确性不作判据）；只剩下面的复现命令。
+- **复现**：`--appdata <私有 tmp> --game-dir ../../links/install --present window --present-hidden
+  --raster gpu --native-overrides all --skip-logo --interaction-graph ../../graphs/sn0000-quit.graph
+  --max-frames 4000`（⛔ headless 不是有效臂：本图会停在 step3 等 GAMESTART 超时；`--audio off` 没有 feeder）。
+- `quit-graph`：`./out/emulator-lift --appdata <每次全新私有 tmp> --game-dir ../../links/install --present window --present-hidden --native-overrides all --skip-logo --interaction-graph ../../graphs/sn0000-quit.graph --interaction-fail-dump <quit.fail.bmp> --max-frames 4000 --time-limit 300 --verbose --log-cat dsound,general` ⇒ 人读判据：`stop : stopped` + `kernel32!ExitProcess`，且**没有** `unimplemented` / `decode-error` / "数据地址当 eip"（★ 原 CTest 已删，不进测试）。

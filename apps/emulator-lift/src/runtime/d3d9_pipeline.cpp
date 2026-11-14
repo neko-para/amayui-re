@@ -27,9 +27,10 @@
 //     非 32 位分量）与 `*UP` 变体仍**响亮失败**（`declLayoutOf` 给原因）。
 //   · 纹理级运算：支持 DISABLE/SELECTARG1/2/MODULATE(2X/4X)/ADD/ADDSIGNED(2X)/SUBTRACT/
 //     ADDSMOOTH/BLEND*ALPHA/MULTIPLYADD/LERP；其余 ⇒ 记录一次 + 退回 SELECTARG1。
-//   · 光栅：像素中心采样 + 左上填充规则（顶点顺序 = 屏幕空间顺时针 = D3D 正面）。
-//   · 点 / 线：**只做无纹理**（顶点色 + z 按段参数 t 插值），走与三角形**同一份**像素收尾
-//     （`writeShadedPixel`：深度 / alpha test / 混合 / 写掩码）；线宽恒 1px（diamond-exit 主轴步进）。
+//   · 光栅：**只有 GPU 一条实现**（本仓没有 CPU 光栅）。本文件只把顶点/状态装配成 GPU 批；
+//     像素由后端画（⛔ 不再有"CPU 像素收尾"这一层）。
+//   · 点 / 线：**只做无纹理**（顶点色 + z 按段参数 t 插值），展开成 1px 宽的三角形交给同一个 GPU
+//     管线（深度 / alpha test / 混合 / 写掩码都映射成 GPU 状态）；线宽恒 1px（⛔ 不做 diamond-exit）。
 //     带纹理或 COLOROP/ALPHAOP 需要采样的点 / 线**响亮拒绝**（见 `admitLinePointDraw`）。
 #include "runtime/d3d9_pipeline.h"
 
@@ -67,8 +68,10 @@ namespace lift {
 // ★ 放在 `lift` 而不是 `lift::d3d9` 里：回报入口是 `lift::gpuLedgerNoteRecordedDraw`
 //   （声明在 `gpu_raster.h`，后端 `d3d9_gpu.cpp` 调），而写账的 `GpuCoverage` 在 `lift::d3d9` ——
 //   两边都要看得见，所以表放外层、计数留原处。
-// ★ 每个 tag 两个布尔（为什么不是"一个 recorded"）：`LIFT_GPU_VERIFY` 的旧接口会在
-//   `++empty` **之前**就 flush 并回报 ⇒ 回报时还不知道这笔"该不该从 empty 里减"。
+// ★ 每个 tag 两个布尔（为什么不是"一个 recorded"）：曾经那条"画完立刻 flush"的诊断路径
+//   （`LIFT_GPU_VERIFY`，**已删**）会在 `++empty` **之前**就 flush 并回报 ⇒ 回报时还不知道这笔
+//   "该不该从 empty 里减"。两个布尔仍然留着：`rasterDraw` / `rasterDrawTextured` 旧接口照样会立刻
+//   flush（夹具在用），回报顺序不保证。
 //   · `recorded`      = 后端回报过"这条 draw 真的进了 render pass"；
 //   · `counted_empty` = 这批已经被记进 `GpuCoverage::empty`（⇒ 回报时要把它挪出去）。
 namespace {
@@ -120,16 +123,6 @@ GpuCoverage g_gpu_coverage;
 //   两个调用点（"入队成功但还没回报" / "连队都没入"）共用 ⇒ 要验"empty 恒 0 会被抓住"只需改这一行。
 void noteCoverageEmpty() { ++g_gpu_coverage.empty; }
 
-void noteFallbackReason(const std::string& reason) {
-    std::uint64_t& n = g_gpu_coverage.fallback_reasons[reason];
-    ++n;
-    if (n == 1) {
-        // ★ 默认（不设环境变量）也打印：第一次出现每种回退原因就明说，⛔ 不"悄悄 fallback"。
-        std::fprintf(stderr, "[gpu] fallback: %s（该原因只打印一次）\n", reason.c_str());
-        std::fflush(stderr);
-    }
-}
-
 // =====================================================================================
 // 状态块布局（**我们自己的**；⛔ 不是 Win32 结构体）
 // =====================================================================================
@@ -169,7 +162,8 @@ constexpr std::uint32_t kPlDraws = kPlLightEnabled + kMaxLights * 4u;
 constexpr std::uint32_t kPlDrawCalls = kPlDraws + 4u;
 constexpr std::uint32_t kPlTriangles = kPlDrawCalls + 4u;
 constexpr std::uint32_t kPlRasterized = kPlTriangles + 4u;
-constexpr std::uint32_t kPlPixels = kPlRasterized + 8u;   // uint64
+constexpr std::uint32_t kPlPixels = kPlRasterized + 8u;   // uint64；⛔ **恒 0**：唯一写入者是 CPU 光栅的
+                                                          //   `pixels_written`（那一族已删），后端起不到片元计数
 constexpr std::uint32_t kPlBegins = kPlPixels + 8u;
 constexpr std::uint32_t kPlEnds = kPlBegins + 4u;
 constexpr std::uint32_t kPlDepthArena = kPlEnds + 4u;
@@ -207,11 +201,13 @@ enum UnsupportedBit : std::uint32_t {
     kUnPointSize = 19,
     kUnLastPixel = 20,
     // ---- 21..23：退休 CPU 光栅的**显式拒绝**位（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）----
-    //   ★ 这三格原先只是"未分配（保留）"。现在它们有真实语义：GPU 路径下**不再**把这几种批次
+    //   ★ 这两格原先只是"未分配（保留）"。现在它们有真实语义：GPU 路径下**不再**把这几种批次
     //     塞回 CPU 光栅重放（那是第二实现），而是响亮拒绝 → 本批不进画面、但账上有具名痕迹。
     //     ⛔ 不许把"没画"藏成"画了 0 个三角形"。
+    //   ★ **22 是空号**：它原来的语义（`MIPFILTER=NONE` + 缩小采样 ⇒ 拒绝该批）已由**真实现**
+    //     取代（per-sampler `max_lod = 0.49`，见 `d3d9_gpu.cpp` 的 `kNoMipMaxLod`）⇒ 该拒绝不复存在，位删除。
+    //     ⛔ 不要把 22 复用给别的语义（那会让历史读数产生歧义）。
     kUnGpuPerspective = 21,    // 顶点 invw!=1：GPU 的屏幕空间插值不能等价透视校正
-    kUnGpuMipDivergence = 22,  // MIPFILTER=NONE 且本批有缩小采样（sampler 的 max_lod 是一张纹理一档）
     kUnGpuBackendFailure = 23, // GPU 后端绘制失败（⛔ 不再 CPU 重放该批）
     kUnTextureOpLevel = 24,
     kUnAlphaOpLevel = 25,
@@ -219,9 +215,9 @@ enum UnsupportedBit : std::uint32_t {
     kUnValidateDevice = 27,      // #3 预留（⛔ 不置位：ValidateDevice 恒 1 pass 是事实，不是"未实现"）
     kUnRtFeedbackLoop = 28,      // 既有 RTT 闸（原临时占 26；共享前置挪到这里）
     // ---- 29..40：`gpuEligible` 的**逐条拒批原因**（`REQ-01M7AAXVGY9SG75XCREHPX641Z`，M1 账本）----
-    //   ★ 为什么每个拒批点一格：以前它们只往 `why` 写一句文本、返回 `false`，而 `fallback` 只数
-    //     "CPU 真写了像素"的批 ⇒ 准入拒绝却 0 像素的批（设计 §A.3）**连账都没有**。
-    //     现在每格都同时进 `unsupported :`（具名位）与 `skipped`（原因聚合），⛔ 不合流进 fallback。
+    //   ★ 为什么每个拒批点一格：以前它们只往 `why` 写一句文本、返回 `false`
+    //     ⇒ 准入拒绝却 0 像素的批（设计 §A.3）**连账都没有**。
+    //     现在每格都同时进 `unsupported :`（具名位）与 `skipped`（原因聚合）。
     //   ★ 0..28 的语义**一格都没动**（只追加）。
     kUnGpuTargetBpp = 29,     // 后缓冲/目标非 32bpp
     kUnGpuAlphaTest = 30,     // ALPHATESTENABLE=1（GPU 不支持 alpha test）
@@ -232,7 +228,7 @@ enum UnsupportedBit : std::uint32_t {
     kUnGpuTexMode = 35,       // `gpuTextureModeFor` 映射失败（片元置换无解）
     kUnGpuTextureBpp = 36,    // stage 0 纹理非 32bpp（含像素/尺寸非法）
     kUnGpuSamplerAddr = 37,   // 采样器寻址模式不支持
-    kUnGpuFilterSplit = 38,   // MAG != MIN / 过滤值无法映射
+    kUnGpuFilterUnmapped = 38, // MIN/MAG 的过滤值无法映射（如 `D3DTEXF_NONE`）—— 语义只剩这一条
     kUnGpuUntexturedOp = 39,  // 无纹理时 stage 0 的 op/arg 不等于顶点色
     kUnGpuNoBackend = 40,     // 没有 GPU 后端（生产不可能 / 内部 plan 为空）
 };
@@ -513,15 +509,14 @@ void recordUnsupported(X86& cpu, std::uint32_t pe, UnsupportedBit bit, const cha
 // 跳过账本（`REQ-01M7AAXVGY9SG75XCREHPX641Z`，M1）
 //
 // `skipped` 的**唯一**入口：一批 GPU 真的**没画**（准入拒绝 / 准入后拒绝 / 后端失败）。
-// ★ 与 `fallback` **不是**一回事：`fallback` = 这一批 CPU 真写了像素（`pixels_written > 0`）。
-//   本单只加账、不改像素行为 ⇒ 被 `gpuEligible` 拒的批今天仍由 CPU 画（两条账会同时 +1）；
-//   但 `invw!=1` / MIP 缩小 / 后端失败 / 带纹理点线这类**提前返回**的批 CPU 一像素都不写
-//   ⇒ 以前它们连 `fallback` 都不进（设计 §A.3 的盲区），现在一定有 `skipped`。
+// ★ 这是 draw 路径上**唯一**的"未画"信号（⛔ 不合流成一个数）。
+//   提前返回的批（`invw!=1` / MIP 缩小 / 后端失败 / 带纹理点线）同样一像素都不写
+//   ⇒ 以前它们连账都没有（设计 §A.3 的盲区），现在一定有 `skipped`。
 // ★ "打通 recordUnsupported" = 同一份位图 + 同一套去重（同一位只在第一次出声）：
 //   这里不另外维护日志键，直接复用 `recordUnsupported` 的 `bit_new` 判据。
-// ★ 计数点：`submitPrimitives` 的**主路径在函数末尾**统一记（与 `draw_calls` 同一处判据，
-//   且**不依赖** `pixels_written`）；`admitLinePointDraw` / `invw` / MIP 这三条**早退**路径
-//   赶不到函数末尾 ⇒ 在各自的 `return false` 之前补一次（否则它们又回到无账状态）。
+// ★ 计数点：`submitPrimitives` 的**主路径在函数末尾**统一记（与 `draw_calls` 同一处判据）；
+//   `admitLinePointDraw` / `invw` / MIP 这三条**早退**路径赶不到函数末尾 ⇒ 在各自的
+//   `return false` 之前补一次（否则它们又回到无账状态）。
 // =====================================================================================
 void noteGpuSkip(X86& cpu, std::uint32_t pe, const std::string& reason, UnsupportedBit bit) {
     ++g_gpu_coverage.skipped_draws;
@@ -552,7 +547,6 @@ const char* unsupportedBitName(std::uint32_t bit) {
     if (bit == kUnPointSize) return "POINTSIZE";
     if (bit == kUnLastPixel) return "LASTPIXEL=0";
     if (bit == kUnGpuPerspective) return "invw!=1";
-    if (bit == kUnGpuMipDivergence) return "MIPFILTER=NONE 缩小";
     if (bit == kUnGpuBackendFailure) return "GPU 后端失败";
     if (bit == kUnTextureOpLevel) return "纹理级 OP";
     if (bit == kUnAlphaOpLevel) return "纹理级 ALPHAOP";
@@ -569,7 +563,7 @@ const char* unsupportedBitName(std::uint32_t bit) {
     if (bit == kUnGpuTexMode) return "GPU 纹理级 op 映射失败";
     if (bit == kUnGpuTextureBpp) return "GPU 纹理非 32bpp";
     if (bit == kUnGpuSamplerAddr) return "GPU 采样寻址模式";
-    if (bit == kUnGpuFilterSplit) return "GPU MAG!=MIN";
+    if (bit == kUnGpuFilterUnmapped) return "GPU 过滤值无法映射";
     if (bit == kUnGpuUntexturedOp) return "GPU 无纹理 op";
     if (bit == kUnGpuNoBackend) return "GPU 无后端";
     return "未分配";
@@ -1069,6 +1063,10 @@ struct DrawContext {
     // ★ 每次 Draw 的快照（prepareContext 里一次读完；像素循环只读这里）
     TextureStageSnapshot stages[kMaxTextureStages];
     SamplerSnapshot samplers[kMaxTextureStages];
+    // ★ 这里的 `pixels_written` / `mip_*` / `bbox_*` 是**CPU 光栅时代的诊断残留**
+    //   （`REQ-01M7A74YG08R65NJBFXF7DEJDK` 删掉了那唯一的写入者）⇒ 它们恒为 0 / 0,0..0,0。
+    //   仍留着是因为 `[draw]` 的诊断格式与 `tests/` 的历史读数按这四项读；⛔ 不要拿它们当判据
+    //   （"这一批写了多少像素"今天只有后端知道，而 GPU 拿不到片元覆盖数）。
     std::uint64_t pixels_written = 0;
     int serial = 0;
     // ---- 派生 mip 的诊断 / 记账（`REQ-01M73G2724479XAVS176WBZ65Q`）----
@@ -1084,777 +1082,25 @@ struct DrawContext {
     int bbox_x0 = 0x7FFFFFFF, bbox_y0 = 0x7FFFFFFF, bbox_x1 = 0, bbox_y1 = 0;
 };
 
-// 8 位通道的混合因子
-// ★ 这一族（blendFactors8 / applyBlendOp）是**设备混合状态**（D3DBLEND / D3DBLENDOP）的语义，
-//   ⛔ 与 pixel_format 的 mask/expand 或 Sprite 的 ALPHABLEND `mul255` 不是同一件事
-//   （公式不同；合并会改像素结果）—— 审计结论：只保留各自一份，不强行收敛。
-void blendFactors8(std::uint32_t factor, unsigned sr, unsigned sg, unsigned sb, unsigned sa, unsigned dr,
-                   unsigned dg, unsigned db, unsigned da, unsigned* fr, unsigned* fg, unsigned* fb,
-                   unsigned* fa) {
-    switch (factor) {
-        case kBlendZero: *fr = *fg = *fb = *fa = 0u; break;
-        case kBlendOne: *fr = *fg = *fb = *fa = 255u; break;
-        case kBlendSrcColor: *fr = sr; *fg = sg; *fb = sb; *fa = sa; break;
-        case kBlendInvSrcColor: *fr = 255u - sr; *fg = 255u - sg; *fb = 255u - sb; *fa = 255u - sa; break;
-        case kBlendSrcAlpha: *fr = *fg = *fb = *fa = sa; break;
-        case kBlendInvSrcAlpha: *fr = *fg = *fb = *fa = 255u - sa; break;
-        case kBlendDestAlpha: *fr = *fg = *fb = *fa = da; break;
-        case kBlendInvDestAlpha: *fr = *fg = *fb = *fa = 255u - da; break;
-        case kBlendDestColor: *fr = dr; *fg = dg; *fb = db; *fa = da; break;
-        case kBlendInvDestColor: *fr = 255u - dr; *fg = 255u - dg; *fb = 255u - db; *fa = 255u - da; break;
-        case kBlendSrcAlphaSat: {
-            const unsigned f = sa < (255u - da) ? sa : (255u - da);
-            *fr = *fg = *fb = f;
-            *fa = 255u;
-            break;
-        }
-        case kBlendBothSrcAlpha: *fr = sr; *fg = sg; *fb = sb; *fa = sa; break;
-        case kBlendBothInvSrcAlpha: *fr = 255u - sr; *fg = 255u - sg; *fb = 255u - sb; *fa = 255u - sa; break;
-        default: *fr = *fg = *fb = *fa = 0u; break;
-    }
-}
-
-unsigned applyBlendOp(std::uint32_t op, unsigned s, unsigned d) {
-    switch (op) {
-        case kBlendOpAdd: return (s + d + 127u) / 255u > 255u ? 255u : (s + d + 127u) / 255u;
-        case kBlendOpSubtract: return s >= d ? (s - d + 127u) / 255u : 0u;
-        case kBlendOpRevSubtract: return d >= s ? (d - s + 127u) / 255u : 0u;
-        case kBlendOpMin: return s < d ? s : d;
-        case kBlendOpMax: return s > d ? s : d;
-        default: return (s + d + 127u) / 255u > 255u ? 255u : (s + d + 127u) / 255u;
-    }
-}
-
-unsigned clamp255(double v) {
-    if (v <= 0.0) return 0u;
-    if (v >= 255.0) return 255u;
-    return static_cast<unsigned>(v + 0.5);
-}
-
-// ★ 诊断开关（默认 = 开）：`LIFT_NO_MIP=1` 关掉 mip 选级 ⇒ 恒 level 0。
-//   唯一用途 = e2e 守卫的**对照臂**（同一份 repro、同一份二进制，只差这一步）——
-//   ⛔ 不是"画质开关"，也不改变任何其它语义（TEXF_*/寻址/混合都不动）。
-bool mipSamplingEnabled() {
-    static const bool enabled = std::getenv("LIFT_NO_MIP") == nullptr;
-    return enabled;
-}
-
-// 采样**一个 mip 级**：寻址 + 过滤的唯一实现（level 0 与派生各级都走这里，
-// 只是 `pixels/pitch/w/h` 换成该级的）。⛔ 不要再写第二份双线性。
-void sampleTextureLevel(const std::uint8_t* pixels, std::uint32_t pitch, int width, int height,
-                        const SurfaceFormat& fmt, const std::uint32_t address_u, const std::uint32_t address_v,
-                        const std::uint32_t mag_filter, const std::uint32_t min_filter, double u, double v,
-                        unsigned out[4]) {
-    out[0] = 255u;
-    out[1] = 255u;
-    out[2] = 255u;
-    out[3] = 255u;
-    if (pixels == nullptr || width <= 0 || height <= 0) return;
-    const std::uint32_t bpp = fmt.bytesPerPixel();
-    if (bpp == 0) return;
-    auto applyAddress = [](std::uint32_t mode, double coord, int size) -> int {
-        double c = coord;
-        switch (mode) {
-            case kAddressWrap:
-                c = c - std::floor(c);
-                break;
-            case kAddressMirror: {
-                // 镜像：周期 2（0..1 正序、1..2 逆序）
-                double m = c - std::floor(c / 2.0) * 2.0;
-                c = m > 1.0 ? 2.0 - m : m;
-                break;
-            }
-            case kAddressClamp:
-            case kAddressMirrorOnce:
-                if (c < 0.0) c = 0.0;
-                if (c > 1.0) c = 1.0;
-                break;
-            case kAddressBorder:
-                if (c < 0.0 || c > 1.0) return -1;
-                break;
-            default:
-                c = c - std::floor(c);
-                break;
-        }
-        int i = static_cast<int>(std::floor(c * static_cast<double>(size)));
-        if (i < 0) i = 0;
-        if (i >= size) i = size - 1;
-        return i;
-    };
-    auto load = [&](int x, int y, unsigned rgba[4]) {
-        if (x < 0 || y < 0 || x >= width || y >= height) {
-            rgba[0] = rgba[1] = rgba[2] = rgba[3] = 0u;
-            return;
-        }
-        const std::uint8_t* p = pixels + static_cast<std::size_t>(y) * pitch + static_cast<std::size_t>(x) * bpp;
-        const std::uint32_t raw = pixel_format::loadPixel(p, fmt.bpp);
-        rgba[0] = pixel_format::expandChannel(raw, fmt.rmask);
-        rgba[1] = pixel_format::expandChannel(raw, fmt.gmask);
-        rgba[2] = pixel_format::expandChannel(raw, fmt.bmask);
-        // ★ mask==0（无 alpha 通道）⇒ expandChannel 返回 255（= 不透明）；这份语义只在 pixel_format 里
-        rgba[3] = pixel_format::expandChannel(raw, fmt.amask);
-    };
-    // ★ MIN 与 MAG 都参与（MIN 不再被忽略）；mip 选级在调用方（按 LOD），这里只管单级过滤。
-    const bool linear = samplerUsesLinear(mag_filter, min_filter);
-    if (mag_filter == kTexfNone && min_filter == kTexfNone) {
-        // 不可见组合（D3D 不会这样用）：不猜像素 ⇒ 透明黑；SetSamplerState 已 recordUnsupported。
-        out[0] = out[1] = out[2] = out[3] = 0u;
-        return;
-    }
-    if (!linear) {
-        const int x = applyAddress(address_u, u, width);
-        const int y = applyAddress(address_v, v, height);
-        if (x < 0 || y < 0) {
-            out[0] = out[1] = out[2] = out[3] = 0u;
-            return;
-        }
-        unsigned rgba[4];
-        load(x, y, rgba);
-        out[0] = rgba[0];
-        out[1] = rgba[1];
-        out[2] = rgba[2];
-        out[3] = rgba[3];
-        return;
-    }
-    // LINEAR：双线性（texel 中心对齐；D3D 的 -0.5 偏移）
-    const double fx = u * static_cast<double>(width) - 0.5;
-    const double fy = v * static_cast<double>(height) - 0.5;
-    const double x0f = std::floor(fx);
-    const double y0f = std::floor(fy);
-    const double tx = fx - x0f;
-    const double ty = fy - y0f;
-    const int x0 = applyAddress(address_u, (x0f + 0.5) / static_cast<double>(width), width);
-    const int x1 = applyAddress(address_u, (x0f + 1.5) / static_cast<double>(width), width);
-    const int y0 = applyAddress(address_v, (y0f + 0.5) / static_cast<double>(height), height);
-    const int y1 = applyAddress(address_v, (y0f + 1.5) / static_cast<double>(height), height);
-    unsigned c00[4], c10[4], c01[4], c11[4];
-    load(x0, y0, c00);
-    load(x1, y0, c10);
-    load(x0, y1, c01);
-    load(x1, y1, c11);
-    for (int i = 0; i < 4; ++i) {
-        const double a = static_cast<double>(c00[i]) * (1.0 - tx) + static_cast<double>(c10[i]) * tx;
-        const double b = static_cast<double>(c01[i]) * (1.0 - tx) + static_cast<double>(c11[i]) * tx;
-        out[i] = clamp255(a * (1.0 - ty) + b * ty);
-    }
-}
-
-// 按**级号**采样：`level == 0` ⇒ arena 里的 level 0；`level > 0` ⇒ 派生链里的第 level 级。
-// ★ 链不可用（没算出来 / 级号越界）⇒ **退回 level 0**（调用方必须已经记过账，⛔ 不在这里静默）。
-void sampleTexture(const TextureView& t, const std::uint32_t address_u, const std::uint32_t address_v,
-                   const std::uint32_t mag_filter, const std::uint32_t min_filter, std::uint32_t level, double u,
-                   double v, unsigned out[4]) {
-    if (!t.present || t.width <= 0 || t.height <= 0) {
-        out[0] = out[1] = out[2] = out[3] = 255u;
-        return;
-    }
-    if (level > 0 && (t.mips == nullptr || level >= t.mips->levels || t.mips->bytes.empty())) level = 0;
-    if (level == 0) {
-        sampleTextureLevel(t.pixels, t.pitch, t.width, t.height, t.format, address_u, address_v, mag_filter,
-                           min_filter, u, v, out);
-        return;
-    }
-    const std::uint32_t w0 = static_cast<std::uint32_t>(t.width);
-    const std::uint32_t h0 = static_cast<std::uint32_t>(t.height);
-    const std::uint32_t offset = mipLevelOffset(w0, h0, t.format.bpp, level);
-    const std::uint32_t pitch = mipLevelPitch(w0, t.format.bpp, level);
-    const std::uint8_t* pixels = t.mips->bytes.data() + offset;
-    sampleTextureLevel(pixels, pitch, static_cast<int>(mipLevelWidth(w0, level)),
-                       static_cast<int>(mipLevelHeight(h0, level)), t.format, address_u, address_v, mag_filter,
-                       min_filter, u, v, out);
-}
-
-struct StageColor {
-    double c[4] = {1.0, 1.0, 1.0, 1.0};  // 0..255
-};
-
-// 取一个 stage 的源操作数（D3DTA_*）
-void stageArg(X86& cpu, const DrawContext& ctx, std::uint32_t arg, const StageColor& current,
-              const StageColor& diffuse, const StageColor& specular, const StageColor& texture,
-              const StageColor& temp, const StageColor& constant, double out[4]) {
-    (void)cpu;
-    const std::uint32_t sel = arg & kTaSelectMask;
-    const StageColor* src = &diffuse;
-    switch (sel) {
-        case kTaDiffuse: src = &diffuse; break;
-        case kTaCurrent: src = &current; break;
-        case kTaTexture: src = &texture; break;
-        case kTaTFactor: {
-            double a = 1.0, r = 1.0, g = 1.0, b = 1.0;
-            splitColor(ctx.texture_factor, &a, &r, &g, &b);
-            out[0] = r;
-            out[1] = g;
-            out[2] = b;
-            out[3] = a;
-            if ((arg & kTaAlphaReplicate) != 0) out[0] = out[1] = out[2] = out[3];
-            if ((arg & kTaComplement) != 0)
-                for (int i = 0; i < 4; ++i) out[i] = 255.0 - out[i];
-            return;
-        }
-        case kTaSpecular: src = &specular; break;
-        case kTaTemp: src = &temp; break;
-        case kTaConstant: src = &constant; break;
-        default: src = &diffuse; break;
-    }
-    for (int i = 0; i < 4; ++i) out[i] = src->c[i];
-    if ((arg & kTaAlphaReplicate) != 0) out[0] = out[1] = out[2] = out[3];
-    if ((arg & kTaComplement) != 0)
-        for (int i = 0; i < 4; ++i) out[i] = 255.0 - out[i];
-}
-
-void applyTextureOp(X86& cpu, const DrawContext& ctx, std::uint32_t stage, const StageColor& diffuse,
-                    const StageColor& specular, const StageColor& texture, const StageColor& current_in,
-                    StageColor* color_out, StageColor* alpha_out) {
-    // ★ 状态全部来自 Draw 入口的快照（⛔ 不在像素循环里 texStageOf）
-    //   唯一还会碰 guest 的是"不支持的纹理级 OP"的 `recordUnsupported`（幂等、只在真出现时）；
-    //   本线支持的 OP 集合内，像素循环零 guest 读。
-    const TextureStageSnapshot& ts = ctx.stages[stage];
-    const StageColor temp;  // 本线没有 TEMP 寄存器：全 0（记录见下）
-    StageColor constant;
-    {
-        double a = 1.0, r = 1.0, g = 1.0, b = 1.0;
-        splitColor(ts.constant, &a, &r, &g, &b);
-        constant.c[0] = r;
-        constant.c[1] = g;
-        constant.c[2] = b;
-        constant.c[3] = a;
-    }
-    const std::uint32_t color_op = ts.color_op;
-    const std::uint32_t alpha_op = ts.alpha_op;
-    const std::uint32_t arg0 = ts.color_arg0;
-    double a1[4], a2[4], a0[4];
-    stageArg(cpu, ctx, ts.color_arg1, current_in, diffuse, specular, texture, temp, constant, a1);
-    stageArg(cpu, ctx, ts.color_arg2, current_in, diffuse, specular, texture, temp, constant, a2);
-    stageArg(cpu, ctx, arg0, current_in, diffuse, specular, texture, temp, constant, a0);
-    double aa1[4], aa2[4];
-    stageArg(cpu, ctx, ts.alpha_arg1, current_in, diffuse, specular, texture, temp, constant, aa1);
-    stageArg(cpu, ctx, ts.alpha_arg2, current_in, diffuse, specular, texture, temp, constant, aa2);
-    // 颜色通道的 op（alpha 通道单独走下面那段：D3D 的 alpha op 只作用在 alpha 分量上）
-    auto run = [&](std::uint32_t code, const double x[4], const double y[4], const double z[4], double out[3]) {
-        std::uint32_t unsupported = 0;
-        switch (code) {
-            case kTopSelectArg1: out[0] = x[0]; out[1] = x[1]; out[2] = x[2]; break;
-            case kTopSelectArg2: out[0] = y[0]; out[1] = y[1]; out[2] = y[2]; break;
-            case kTopModulate: out[0] = x[0] * y[0] / 255.0; out[1] = x[1] * y[1] / 255.0; out[2] = x[2] * y[2] / 255.0; break;
-            case kTopModulate2x:
-                out[0] = x[0] * y[0] / 255.0 * 2.0;
-                out[1] = x[1] * y[1] / 255.0 * 2.0;
-                out[2] = x[2] * y[2] / 255.0 * 2.0;
-                break;
-            case kTopModulate4x:
-                out[0] = x[0] * y[0] / 255.0 * 4.0;
-                out[1] = x[1] * y[1] / 255.0 * 4.0;
-                out[2] = x[2] * y[2] / 255.0 * 4.0;
-                break;
-            case kTopAdd: out[0] = x[0] + y[0]; out[1] = x[1] + y[1]; out[2] = x[2] + y[2]; break;
-            case kTopAddSigned:
-                out[0] = x[0] + y[0] - 127.5;
-                out[1] = x[1] + y[1] - 127.5;
-                out[2] = x[2] + y[2] - 127.5;
-                break;
-            case kTopAddSigned2x:
-                out[0] = (x[0] + y[0] - 127.5) * 2.0;
-                out[1] = (x[1] + y[1] - 127.5) * 2.0;
-                out[2] = (x[2] + y[2] - 127.5) * 2.0;
-                break;
-            case kTopSubtract: out[0] = x[0] - y[0]; out[1] = x[1] - y[1]; out[2] = x[2] - y[2]; break;
-            case kTopAddSmooth:
-                out[0] = x[0] + y[0] - x[0] * y[0] / 255.0;
-                out[1] = x[1] + y[1] - x[1] * y[1] / 255.0;
-                out[2] = x[2] + y[2] - x[2] * y[2] / 255.0;
-                break;
-            case kTopBlendDiffuseAlpha:
-            case kTopBlendTextureAlpha:
-            case kTopBlendFactorAlpha:
-            case kTopBlendCurrentAlpha:
-            case kTopBlendTextureAlphaPM: {
-                double t = 0.0;
-                if (code == kTopBlendDiffuseAlpha) t = x[3];
-                else if (code == kTopBlendTextureAlpha) t = y[3];
-                else if (code == kTopBlendFactorAlpha) t = 255.0;
-                else if (code == kTopBlendCurrentAlpha) t = x[3];
-                else t = y[3];
-                t /= 255.0;
-                out[0] = x[0] * t + y[0] * (1.0 - t);
-                out[1] = x[1] * t + y[1] * (1.0 - t);
-                out[2] = x[2] * t + y[2] * (1.0 - t);
-                break;
-            }
-            case kTopMultiplyAdd:
-                out[0] = z[0] + x[0] * y[0] / 255.0;
-                out[1] = z[1] + x[1] * y[1] / 255.0;
-                out[2] = z[2] + x[2] * y[2] / 255.0;
-                break;
-            case kTopLerp: {
-                const double t = z[0] / 255.0;
-                out[0] = x[0] * t + y[0] * (1.0 - t);
-                out[1] = x[1] * t + y[1] * (1.0 - t);
-                out[2] = x[2] * t + y[2] * (1.0 - t);
-                break;
-            }
-            case kTopModulateAlphaAddColor:
-                out[0] = x[0] + y[0] * x[3] / 255.0;
-                out[1] = x[1] + y[1] * x[3] / 255.0;
-                out[2] = x[2] + y[2] * x[3] / 255.0;
-                break;
-            case kTopModulateColorAddAlpha:
-                out[0] = x[3] + y[0] * x[0] / 255.0;
-                out[1] = x[3] + y[1] * x[1] / 255.0;
-                out[2] = x[3] + y[2] * x[2] / 255.0;
-                break;
-            default:
-                unsupported = code;
-                out[0] = x[0];
-                out[1] = x[1];
-                out[2] = x[2];
-                break;
-        }
-        if (unsupported != 0) {
-            char buf[96];
-            std::snprintf(buf, sizeof(buf), "纹理级 OP 0x%X（级 %u）", unsupported, stage);
-            recordUnsupported(cpu, ctx.pe, kUnTextureOpLevel, buf, unsupported);
-        }
-        for (int i = 0; i < 3; ++i) {
-            if (out[i] < 0.0) out[i] = 0.0;
-            if (out[i] > 255.0) out[i] = 255.0;
-        }
-    };
-    double rgb[3];
-    run(color_op, a1, a2, a0, rgb);
-    color_out->c[0] = rgb[0];
-    color_out->c[1] = rgb[1];
-    color_out->c[2] = rgb[2];
-    color_out->c[3] = current_in.c[3];
-    // alpha 级（D3D 的 alpha op 只作用在 alpha 分量上）
-    alpha_out->c[0] = current_in.c[0];
-    alpha_out->c[1] = current_in.c[1];
-    alpha_out->c[2] = current_in.c[2];
-    double alpha_val = 0.0;
-    {
-        std::uint32_t unsupported = 0;
-        switch (alpha_op) {
-            case kTopSelectArg1: alpha_val = aa1[3]; break;
-            case kTopSelectArg2: alpha_val = aa2[3]; break;
-            case kTopModulate: alpha_val = aa1[3] * aa2[3] / 255.0; break;
-            case kTopModulate2x: alpha_val = aa1[3] * aa2[3] / 255.0 * 2.0; break;
-            case kTopModulate4x: alpha_val = aa1[3] * aa2[3] / 255.0 * 4.0; break;
-            case kTopAdd: alpha_val = aa1[3] + aa2[3]; break;
-            case kTopAddSigned: alpha_val = aa1[3] + aa2[3] - 127.5; break;
-            case kTopAddSigned2x: alpha_val = (aa1[3] + aa2[3] - 127.5) * 2.0; break;
-            case kTopSubtract: alpha_val = aa1[3] - aa2[3]; break;
-            case kTopAddSmooth: alpha_val = aa1[3] + aa2[3] - aa1[3] * aa2[3] / 255.0; break;
-            case kTopBlendDiffuseAlpha:
-            case kTopBlendTextureAlpha:
-            case kTopBlendFactorAlpha:
-            case kTopBlendCurrentAlpha:
-            case kTopBlendTextureAlphaPM: {
-                double t = 0.0;
-                if (alpha_op == kTopBlendDiffuseAlpha) t = aa1[3];
-                else if (alpha_op == kTopBlendTextureAlpha) t = aa2[3];
-                else if (alpha_op == kTopBlendFactorAlpha) t = 255.0;
-                else if (alpha_op == kTopBlendCurrentAlpha) t = aa1[3];
-                else t = aa2[3];
-                t /= 255.0;
-                alpha_val = aa1[3] * t + aa2[3] * (1.0 - t);
-                break;
-            }
-            default:
-                unsupported = alpha_op;
-                alpha_val = aa1[3];
-                break;
-        }
-        if (unsupported != 0) {
-            char buf[96];
-            std::snprintf(buf, sizeof(buf), "纹理级 ALPHAOP 0x%X（级 %u）", unsupported, stage);
-            recordUnsupported(cpu, ctx.pe, kUnAlphaOpLevel, buf, unsupported);
-        }
-        if (alpha_val < 0.0) alpha_val = 0.0;
-        if (alpha_val > 255.0) alpha_val = 255.0;
-        alpha_out->c[3] = alpha_val;
-    }
-}
-
-// ---------------------------------------------------------------------------------------
-// 光栅化一个屏幕空间三角形
-// ---------------------------------------------------------------------------------------
-// ★ 诊断聚合：这一批 CPU 光栅**真正用来混合**的 α（均值/最小/最大）。只读、不影响像素。
+// ★ 诊断聚合：这一批**真正交给 GPU 的顶点**的 α（均值/最小/最大）。只读、不影响像素。
 struct AlphaAgg {
     unsigned long long n = 0;
     unsigned long long sum = 0;
     unsigned mn = 255;
     unsigned mx = 0;
 };
-static AlphaAgg g_alpha_agg;
-// ★ GPU 版的同一份聚合（`[draw] fa=`，`REQ-01M78BF1FNNH6K8N8GEY6GQYXX` 的判据面）：
-//   CPU 版是**逐像素**（在 `writeShadedPixel` 里，受 `LIFT_SLOW_DRAW` 门控 —— 那在热路径上）；
-//   GPU 版是**逐批**（一次 O(顶点数) 的循环，本来就已在读这批顶点）⇒ **不受门控**，
-//   免得"删掉 CPU 光栅 ⇒ α 语义失去唯一可观测面"（本单正是来补这个面的）。
-//   ★ 两边的 `n` 口径**故意不同**、且都写在 `[draw]` 的口径里：
-//     CPU 的 `n` = 真的写进后缓冲的**像素**数；GPU 的 `n` = 真的交给后端的**顶点**数。
-//     要问"这一批混了什么 α"两者等价；要问"混了多少片元"只有 CPU 版答得了（GPU 拿不到片元数）。
+// ★ `[draw] fa=` 的取数面（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：**逐批**一次 O(顶点数) 的循环，
+//   本来就已在读这批顶点 ⇒ 不受 `LIFT_SLOW_DRAW` 门控（那是逐像素的 CPU 时代开关）。
+//   `n` = 真的交给后端的**顶点**数（GPU 拿不到片元覆盖数；要问"这一笔的顶点 α 是多少"顶点集够用，
+//   但逐片元混合 α 今天不可观测 —— 见 `REQ-01M7B7591WHEVZMYFZ1Q2D8SHQ`）。
 static AlphaAgg g_gpu_alpha_agg;
 static bool g_alpha_agg_from_gpu = false;
 
-// ---------------------------------------------------------------------------------------
-// 一个三角形的**派生 mip 级号**（每三角形常量；`REQ-01M73G2724479XAVS176WBZ65Q`）
-//   · LOD = log2(纹理足迹)，足迹 = 屏幕空间 UV 导数 × **该 stage 自己**的纹理尺寸；
-//   · UV 导数用**透视校正后的 u（U/W）** —— 与采样器同一个插值式子；
-//   · 退化三角形 / 尺寸非法 / 只有一级 ⇒ 0。
-// ★ 这一个函数同时服务三条路：CPU 选级（`rasterTriangle`）、GPU 的 MIPFILTER 分叉判据
-//   （`submitPrimitives`：`MIPFILTER=NONE` 但这一批有缩小采样 ⇒ GPU 的 sampler 表达不了
-//   "关掉 mip"，必须回退 CPU），以及"1:1 / 放大必须仍是 level 0"这条判据。
-// ---------------------------------------------------------------------------------------
-std::uint32_t triangleMipLevel(const SVertex& a, const SVertex& b, const SVertex& c, std::uint32_t coord,
-                               int tex_width, int tex_height) {
-    if (tex_width <= 0 || tex_height <= 0 || coord >= kMaxTexCoords) return 0u;
-    const std::uint32_t levels =
-        mipLevelCount(static_cast<std::uint32_t>(tex_width), static_cast<std::uint32_t>(tex_height));
-    if (levels <= 1u) return 0u;
-    const double vx[3] = {a.x, b.x, c.x};
-    const double vy[3] = {a.y, b.y, c.y};
-    const double invw[3] = {a.invw, b.invw, c.invw};
-    const double uw[3] = {a.u[coord], b.u[coord], c.u[coord]};
-    const double vw[3] = {a.v[coord], b.v[coord], c.v[coord]};
-    double dux = 0.0, dvx = 0.0, duy = 0.0, dvy = 0.0;
-    if (!screenUvDerivatives(vx, vy, invw, uw, vw, &dux, &dvx, &duy, &dvy)) return 0u;
-    const double lod = lodFromUvDerivatives(dux, dvx, duy, dvy, static_cast<double>(tex_width),
-                                            static_cast<double>(tex_height));
-    return mipLevelForLod(lod, levels);
-}
-
-// =====================================================================================
-// 像素收尾（**唯一一份**）：深度测试 → 着色 → alpha test → 混合 → 颜色写掩码 → 深度写。
-//
-// ★ 为什么抽出来（`REQ-01M7372JNFAC2RWX2FXVV6YM5C`）：点 / 线光栅必须走与三角形**同一套**
-//   深度测试 / alpha test / 混合 / 写掩码语义 —— 再抄一份公式，就会在"线的 α 怎么混"这类
-//   地方与三角形分叉。
-// ★ `shade` 在深度测试**之后**才调用：顺序照原像素循环（被深度挡住的像素既不采样、也不算
-//   纹理级 / 插值）。它返回最终像素色（0..255，已 clamp）。
-// ★ 返回 false = 这个像素没写（越界 / 深度测试 / alpha test 没过）；调用方据此跳过。
-// ★ **越界检查在这里是唯一的兜底**：三角形外面还有 bbox∩scissor，而点 / 线的像素是 floor
-//   出来的 —— 不查就会写穿 arena（静默损坏）。
-// =====================================================================================
-struct PixelRGBA {
-    unsigned r = 0, g = 0, b = 0, a = 0;
-};
-
-template <typename Shade>
-bool writeShadedPixel(DrawContext& ctx, int px, int py, double z, Shade&& shade) {
-    if (px < ctx.scissor_x0 || px >= ctx.scissor_x1 || py < ctx.scissor_y0 || py >= ctx.scissor_y1)
-        return false;
-    std::size_t depth_off = static_cast<std::size_t>(py) * ctx.depth_pitch_floats +
-                            static_cast<std::size_t>(px);
-    // ★ 深度缓冲只有**后缓冲尺寸**（`createForDevice` 分配），而像素循环的上界是**渲染目标**
-    //   尺寸（scissor 夹到 color 表面）⇒ RT > 后缓冲时 py/px 会越出深度缓冲的行/末尾，越界写
-    //   会踩进 SurfaceArena 的相邻表面（静默损坏）。⇒ z 的读/写只在深度缓冲矩形内生效
-    //   （**颜色照写**）。本线"共用一张设备深度缓冲"是明写的偏离（`setRenderTarget` 的
-    //   pNewZStencil 分支）；RT 与深度尺寸不符时真机也没有可依赖的语义。
-    const bool depth_in_range =
-        ctx.z_enable && px >= 0 && py >= 0 && px < ctx.depth_width && py < ctx.depth_height;
-    if (depth_in_range) {
-        const float old = ctx.depth_base[depth_off];
-        bool pass = false;
-        switch (ctx.z_func) {
-            case kCmpNever: pass = false; break;
-            case kCmpLess: pass = z < static_cast<double>(old); break;
-            case kCmpEqual: pass = z == static_cast<double>(old); break;
-            case kCmpLessEqual: pass = z <= static_cast<double>(old); break;
-            case kCmpGreater: pass = z > static_cast<double>(old); break;
-            case kCmpNotEqual: pass = z != static_cast<double>(old); break;
-            case kCmpGreaterEqual: pass = z >= static_cast<double>(old); break;
-            case kCmpAlways: pass = true; break;
-            default: pass = false; break;
-        }
-        if (!pass) return false;
-    }
-    const PixelRGBA c = shade();
-    // ★ 诊断聚合（`[draw] fa=`）：这一批**真正参与混合**的 α 的均值/最小/最大。
-    //   用途 = 分辨"α 是 0 / 是 TFACTOR 的 α / 是顶点 α"。只在 `LIFT_SLOW_DRAW=1` 时累积
-    //   （静态缓存 ⇒ 每像素只是一次可预测分支），⛔ 不影响像素。
-    static const bool alpha_agg_on = std::getenv("LIFT_SLOW_DRAW") != nullptr;
-    if (alpha_agg_on) {
-        ++g_alpha_agg.n;
-        g_alpha_agg.sum += c.a;
-        if (c.a < g_alpha_agg.mn) g_alpha_agg.mn = c.a;
-        if (c.a > g_alpha_agg.mx) g_alpha_agg.mx = c.a;
-    }
-    // alpha test
-    if (ctx.alpha_test) {
-        const std::uint32_t ref = ctx.alpha_ref & 0xFFu;
-        bool pass = false;
-        switch (ctx.alpha_func) {
-            case kCmpNever: pass = false; break;
-            case kCmpLess: pass = c.a < ref; break;
-            case kCmpEqual: pass = c.a == ref; break;
-            case kCmpLessEqual: pass = c.a <= ref; break;
-            case kCmpGreater: pass = c.a > ref; break;
-            case kCmpNotEqual: pass = c.a != ref; break;
-            case kCmpGreaterEqual: pass = c.a >= ref; break;
-            case kCmpAlways: pass = true; break;
-            default: pass = false; break;
-        }
-        if (!pass) return false;
-    }
-    std::uint8_t* dst = ctx.color_base + static_cast<std::size_t>(py) * ctx.color_pitch +
-                        static_cast<std::size_t>(px) * ctx.color_fmt.bytesPerPixel();
-    std::uint32_t out_r = c.r, out_g = c.g, out_b = c.b, out_a = c.a;
-    if (ctx.blend) {
-        const std::uint32_t dst_raw = pixel_format::loadPixel(dst, ctx.color_fmt.bpp);
-        const unsigned dr = pixel_format::expandChannel(dst_raw, ctx.color_fmt.rmask);
-        const unsigned dg = pixel_format::expandChannel(dst_raw, ctx.color_fmt.gmask);
-        const unsigned db = pixel_format::expandChannel(dst_raw, ctx.color_fmt.bmask);
-        const unsigned da = pixel_format::expandChannel(dst_raw, ctx.color_fmt.amask);
-        unsigned sr_f = 0, sg_f = 0, sb_f = 0, sa_f = 0;
-        blendFactors8(ctx.src_blend, c.r, c.g, c.b, c.a, dr, dg, db, da, &sr_f, &sg_f, &sb_f, &sa_f);
-        unsigned dr_f = 0, dg_f = 0, db_f = 0, da_f = 0;
-        blendFactors8(ctx.dst_blend, c.r, c.g, c.b, c.a, dr, dg, db, da, &dr_f, &dg_f, &db_f, &da_f);
-        out_r = applyBlendOp(ctx.blend_op, c.r * sr_f, dr * dr_f);
-        out_g = applyBlendOp(ctx.blend_op, c.g * sg_f, dg * dg_f);
-        out_b = applyBlendOp(ctx.blend_op, c.b * sb_f, db * db_f);
-        if (ctx.separate_alpha_blend) {
-            unsigned sa2 = 0, da2 = 0, dummy1 = 0, dummy2 = 0;
-            blendFactors8(ctx.src_blend_a, c.r, c.g, c.b, c.a, dr, dg, db, da, &sa2, &dummy1, &dummy2,
-                          &dummy1);
-            unsigned ds2 = 0;
-            blendFactors8(ctx.dst_blend_a, c.r, c.g, c.b, c.a, dr, dg, db, da, &ds2, &dummy1, &dummy2,
-                          &dummy1);
-            out_a = applyBlendOp(ctx.blend_op_a, c.a * sa2, da * ds2);
-        } else {
-            out_a = applyBlendOp(ctx.blend_op, c.a * sa_f, da * da_f);
-        }
-    }
-    const std::uint32_t mask = ctx.color_write & 0xFu;
-    if ((mask & 0x1u) == 0) out_r = pixel_format::expandChannel(pixel_format::loadPixel(dst, ctx.color_fmt.bpp), ctx.color_fmt.rmask);
-    if ((mask & 0x2u) == 0) out_g = pixel_format::expandChannel(pixel_format::loadPixel(dst, ctx.color_fmt.bpp), ctx.color_fmt.gmask);
-    if ((mask & 0x4u) == 0) out_b = pixel_format::expandChannel(pixel_format::loadPixel(dst, ctx.color_fmt.bpp), ctx.color_fmt.bmask);
-    if ((mask & 0x8u) == 0)
-        out_a = pixel_format::expandChannel(pixel_format::loadPixel(dst, ctx.color_fmt.bpp),
-                                            ctx.color_fmt.amask);
-    if (mask != 0u) {
-        pixel_format::storePixel(dst, ctx.color_fmt.bpp,
-                                 pixel_format::packColor(ctx.color_fmt, out_r, out_g, out_b, out_a));
-        // ★ 诊断（`[draw] bbox=`）：这一批**真的写进屏幕**的像素范围 —— 用来分辨
-        //   "哪笔贡献了屏幕上的哪一段"（此前 `[draw]` 没有 bbox，A5-2 指出的诊断缺口）。
-        //   只在 `LIFT_SLOW_DRAW=1` 时统计（与 `[draw] fa=` 同一个开关 ⇒ 热路径上只多一个
-        //   可预测分支），⛔ 不改变任何像素。
-        static const bool bbox_on = std::getenv("LIFT_SLOW_DRAW") != nullptr;
-        if (bbox_on) {
-            if (px < ctx.bbox_x0) ctx.bbox_x0 = px;
-            if (py < ctx.bbox_y0) ctx.bbox_y0 = py;
-            if (px + 1 > ctx.bbox_x1) ctx.bbox_x1 = px + 1;
-            if (py + 1 > ctx.bbox_y1) ctx.bbox_y1 = py + 1;
-        }
-    }
-    if (depth_in_range && ctx.z_write) ctx.depth_base[depth_off] = static_cast<float>(z);
-    ++ctx.pixels_written;
-    return true;
-}
-
-// =====================================================================================
-// ★★ **待删的测试 oracle** ★★（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX` 的后半）
-//
-//   `rasterTriangle` / `rasterizePoint` / `rasterizeLineSegment` / `writeShadedPixel` 这一族
-//   是**唯一还会写 guest 像素的 CPU 实现**。CLI **已经没有**任何入口能选它（无 GPU ⇒
-//   启动期拒绝启动），今天只剩两类调用方：
-//     ① 单元测试夹具没装 `GpuRaster`：`tests/d3d9.cpp` / `d3d9_pipeline.cpp` / `d3dx9.cpp` /
-//        `d3d9_mip.cpp` 的逐像素断言（≈ 全部挂在它上面）；
-//     ② 生产路径里被 `gpuEligible` 拒的批（能力缺口）与 GPU 后端失败后的回退。
-//   ⇒ 删它 = 先把 ① 迁到 GPU/账本断言（独立一单）+ 把 ② 的剩余类别改成显式拒绝 + 记账。
-//   ⛔ 不许为了"让用例变绿"放宽这 4 个文件的像素断言；⛔ 也不许把它当第二实现长期保留。
-// =====================================================================================
-void rasterTriangle(DrawContext& ctx, const SVertex& va, const SVertex& vb, const SVertex& vc) {
-    X86& cpu = *ctx.cpu;
-    const double area = (vb.x - va.x) * (vc.y - va.y) - (vb.y - va.y) * (vc.x - va.x);
-    if (!finite(area) || std::fabs(area) < 1e-12) return;
-    // 正面 = 屏幕空间顺时针（y 向下时 area > 0）；CULLMODE 决定丢哪一侧
-    if (area > 0.0) {
-        if (ctx.cull == kCullCw) return;  // 剔除正面
-    } else {
-        if (ctx.cull == kCullCcw) return;  // 剔除背面
-    }
-    // 统一成 area > 0 的绕序（只影响插值符号，不影响可见性）
-    const SVertex* p0 = &va;
-    const SVertex* p1 = &vb;
-    const SVertex* p2 = &vc;
-    double a2 = area;
-    if (a2 < 0.0) {
-        p1 = &vc;
-        p2 = &vb;
-        a2 = -a2;
-    }
-    // 包围盒 ∩ 视口 ∩ 裁剪矩形
-    double minx = p0->x < p1->x ? p0->x : p1->x;
-    if (p2->x < minx) minx = p2->x;
-    double maxx = p0->x > p1->x ? p0->x : p1->x;
-    if (p2->x > maxx) maxx = p2->x;
-    double miny = p0->y < p1->y ? p0->y : p1->y;
-    if (p2->y < miny) miny = p2->y;
-    double maxy = p0->y > p1->y ? p0->y : p1->y;
-    if (p2->y > maxy) maxy = p2->y;
-    int x0 = static_cast<int>(std::floor(minx));
-    int x1 = static_cast<int>(std::ceil(maxx));
-    int y0 = static_cast<int>(std::floor(miny));
-    int y1 = static_cast<int>(std::ceil(maxy));
-    if (x0 < ctx.scissor_x0) x0 = ctx.scissor_x0;
-    if (y0 < ctx.scissor_y0) y0 = ctx.scissor_y0;
-    if (x1 > ctx.scissor_x1) x1 = ctx.scissor_x1;
-    if (y1 > ctx.scissor_y1) y1 = ctx.scissor_y1;
-    if (x1 <= x0 || y1 <= y0) return;
-    // 边函数（p0→p1→p2，area>0 ⇒ 内部为正）
-    auto edge = [](const SVertex& a, const SVertex& b, double px, double py) {
-        return (b.x - a.x) * (py - a.y) - (b.y - a.y) * (px - a.x);
-    };
-    // 左上规则：top = 水平边且 dx > 0；left = dy < 0（y 向下、area>0 的顺时针绕序）
-    auto topLeft = [](const SVertex& a, const SVertex& b) {
-        const double dx = b.x - a.x;
-        const double dy = b.y - a.y;
-        if (dy < 0.0) return true;                 // left edge
-        if (dy == 0.0 && dx > 0.0) return true;    // top edge
-        return false;
-    };
-    const bool tl0 = topLeft(*p0, *p1);
-    const bool tl1 = topLeft(*p1, *p2);
-    const bool tl2 = topLeft(*p2, *p0);
-    // =====================================================================================
-    // ★ 派生 mip 的级号（每三角形常量；`REQ-01M73G2724479XAVS176WBZ65Q`）
-    //   · LOD = log2(纹理足迹)，足迹 = 屏幕空间 UV 导数 × 该 **stage 自己**的纹理尺寸；
-    //   · UV 导数用**透视校正后的 u（U/W）** —— 与像素循环里的插值同一个式子；
-    //   · `MIPFILTER = NONE` ⇒ 只 level 0（D3D9 语义：mipmap 关掉）；`LIFT_NO_MIP=1` 同理（诊断对照臂）；
-    //   · 链失效 / 算不出来 ⇒ 退回 level 0 并**记账**（`ctx.mip_level0_fallback`），⛔ 不静默。
-    // =====================================================================================
-    std::uint32_t stage_level[kMaxTextureStages] = {0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u};
-    const bool mip_ok = mipSamplingEnabled();
-    for (std::uint32_t s = 0; mip_ok && s < kMaxTextureStages; ++s) {
-        const TextureStageSnapshot& ts = ctx.stages[s];
-        if (ts.color_op == kTopDisable && ts.alpha_op == kTopDisable) break;
-        TextureView& tv = ctx.textures[s];
-        if (!tv.present || tv.width <= 0 || tv.height <= 0) continue;
-        if (ctx.samplers[s].mip_filter == kTexfNone) continue;  // 关掉 mipmap ⇒ 只 level 0
-        const std::uint32_t coord = (ts.tex_coord_index & 0xFFFFu) < kMaxTexCoords ? (ts.tex_coord_index & 0xFFFFu) : 0u;
-        // ★ 级号只由"这一三角形的屏幕足迹 × 该 stage 的纹理尺寸"决定（`triangleMipLevel` 一处实现）。
-        std::uint32_t level = triangleMipLevel(*p0, *p1, *p2, coord, tv.width, tv.height);
-        if (level == 0u) continue;
-        // 需要用 mip：本批第一次（内容版本未知时每次取链都要全量重算 ⇒ 每级每批只试一次）
-        if (!ctx.mip_attempted[s]) {
-            ctx.mip_attempted[s] = true;
-            TextureInfo ti;
-            std::string mip_why;
-            if (!textureInfoOfState(cpu, tv.state, &ti, &mip_why)) {
-                pipeWarn(PipeWarnCategory::Texture, "mip",
-                         "纹理级 %u 的状态块读不出来（%s）⇒ 本批按 level 0 采样并记账", s, mip_why.c_str());
-                ctx.mip_level0_fallback = true;
-                continue;
-            }
-            bool rebuilt = false;
-            const TextureMipChain* chain = ensureTextureMipChain(cpu, ti, &rebuilt, &mip_why);
-            if (chain == nullptr) {
-                pipeWarn(PipeWarnCategory::Texture, "mip",
-                         "纹理级 %u（serial=%u，%dx%d）的派生 mip 链不可用：%s ⇒ 本批按 level 0 采样并记账", s,
-                         tv.serial, tv.width, tv.height, mip_why.c_str());
-                ctx.mip_level0_fallback = true;
-                continue;
-            }
-            tv.mips = chain;
-            if (rebuilt) ctx.mip_bytes_built += chain->bytes.size();
-        }
-        if (tv.mips == nullptr || level >= tv.mips->levels || tv.mips->bytes.empty()) {
-            ctx.mip_level0_fallback = true;
-            continue;
-        }
-        stage_level[s] = level;
-        if (level < ctx.mip_level_min) ctx.mip_level_min = level;
-        if (level > ctx.mip_level_max) ctx.mip_level_max = level;
-    }
-    for (int py = y0; py < y1; ++py) {
-        const double cy = static_cast<double>(py) + 0.5;
-        for (int px = x0; px < x1; ++px) {
-            const double cx = static_cast<double>(px) + 0.5;
-            double e0 = edge(*p0, *p1, cx, cy);
-            double e1 = edge(*p1, *p2, cx, cy);
-            double e2 = edge(*p2, *p0, cx, cy);
-            // 填充规则
-            if (!(e0 > 0.0 || (e0 == 0.0 && tl0))) continue;
-            if (!(e1 > 0.0 || (e1 == 0.0 && tl1))) continue;
-            if (!(e2 > 0.0 || (e2 == 0.0 && tl2))) continue;
-            // ★ 边函数 E_i 是"边 i→i+1 对第三个顶点"的面积 ⇒ 权重是**轮换**的：
-            //   w0 = e1/a2（v0 对面是边 v1→v2）、w1 = e2/a2、w2 = e0/a2。
-            const double l0 = e1 / a2;
-            const double l1 = e2 / a2;
-            const double l2 = e0 / a2;
-            const double wsum = l0 * p0->invw + l1 * p1->invw + l2 * p2->invw;
-            const double invw_sum = wsum;
-            if (invw_sum == 0.0) continue;
-            const double z = l0 * p0->z + l1 * p1->z + l2 * p2->z;
-            // ★ 深度测试 / alpha test / 混合 / 写掩码只在 `writeShadedPixel` 一处（点 / 线与
-            //   三角形共用）；顶点属性 + 纹理级链放在 `shade` 里 ⇒ 被深度挡住的像素不采样
-            //   （与抽取前的顺序一致：深度测试在插值 / 采样之前）。
-            writeShadedPixel(ctx, px, py, z, [&]() -> PixelRGBA {
-                // 顶点属性（透视校正）
-                double u[kMaxTexCoords];
-                double v[kMaxTexCoords];
-                for (std::uint32_t t = 0; t < kMaxTexCoords; ++t) {
-                    u[t] = (l0 * p0->u[t] + l1 * p1->u[t] + l2 * p2->u[t]) / invw_sum;
-                    v[t] = (l0 * p0->v[t] + l1 * p1->v[t] + l2 * p2->v[t]) / invw_sum;
-                }
-                StageColor diffuse;
-                diffuse.c[0] = (l0 * p0->r + l1 * p1->r + l2 * p2->r) / invw_sum;
-                diffuse.c[1] = (l0 * p0->g + l1 * p1->g + l2 * p2->g) / invw_sum;
-                diffuse.c[2] = (l0 * p0->b + l1 * p1->b + l2 * p2->b) / invw_sum;
-                diffuse.c[3] = (l0 * p0->a + l1 * p1->a + l2 * p2->a) / invw_sum;
-                StageColor specular;
-                specular.c[0] = (l0 * p0->sr + l1 * p1->sr + l2 * p2->sr) / invw_sum;
-                specular.c[1] = (l0 * p0->sg + l1 * p1->sg + l2 * p2->sg) / invw_sum;
-                specular.c[2] = (l0 * p0->sb + l1 * p1->sb + l2 * p2->sb) / invw_sum;
-                specular.c[3] = (l0 * p0->sa + l1 * p1->sa + l2 * p2->sa) / invw_sum;
-                if (ctx.shade == kShadeFlat) {
-                    // FLAT：用 p0（D3D 的 provoking vertex 是第 0 个顶点；本线按此实现）
-                    diffuse.c[0] = p0->r;
-                    diffuse.c[1] = p0->g;
-                    diffuse.c[2] = p0->b;
-                    diffuse.c[3] = p0->a;
-                    specular.c[0] = p0->sr;
-                    specular.c[1] = p0->sg;
-                    specular.c[2] = p0->sb;
-                    specular.c[3] = p0->sa;
-                    for (std::uint32_t t = 0; t < kMaxTexCoords; ++t) {
-                        u[t] = p0->u[t] / (p0->invw != 0.0 ? p0->invw : 1.0);
-                        v[t] = p0->v[t] / (p0->invw != 0.0 ? p0->invw : 1.0);
-                    }
-                }
-                // 纹理级链（★ 状态全来自 Draw 快照；⛔ 不再每像素读 guest）
-                StageColor current = diffuse;
-                for (std::uint32_t stage = 0; stage < kMaxTextureStages; ++stage) {
-                    const TextureStageSnapshot& ts = ctx.stages[stage];
-                    if (ts.color_op == kTopDisable && ts.alpha_op == kTopDisable) break;
-                    StageColor texture;
-                    texture.c[0] = texture.c[1] = texture.c[2] = texture.c[3] = 255.0;
-                    std::uint32_t coord = ts.tex_coord_index & 0xFFFFu;
-                    if (coord >= kMaxTexCoords) coord = 0;
-                    const TextureView& tv = ctx.textures[stage];
-                    if (tv.present) {
-                        const SamplerSnapshot& ss = ctx.samplers[stage];
-                        unsigned rgba[4];
-                        sampleTexture(tv, ss.address_u, ss.address_v, ss.mag_filter, ss.min_filter,
-                                      stage_level[stage], u[coord], v[coord], rgba);
-                        texture.c[0] = static_cast<double>(rgba[0]);
-                        texture.c[1] = static_cast<double>(rgba[1]);
-                        texture.c[2] = static_cast<double>(rgba[2]);
-                        texture.c[3] = static_cast<double>(rgba[3]);
-                    }
-                    StageColor c_out;
-                    StageColor a_out;
-                    applyTextureOp(cpu, ctx, stage, diffuse, specular, texture, current, &c_out, &a_out);
-                    current.c[0] = c_out.c[0];
-                    current.c[1] = c_out.c[1];
-                    current.c[2] = c_out.c[2];
-                    current.c[3] = a_out.c[3];
-                }
-                return PixelRGBA{clamp255(current.c[0]), clamp255(current.c[1]), clamp255(current.c[2]),
-                                 clamp255(current.c[3])};
-            });
-        }
-    }
-}
+// ★ 这里原先有 `triangleMipLevel`（每三角形的派生级号）：它只服务 `submitPrimitives` 的
+//   `MIPFILTER=NONE` 分叉判据（"这一批有缩小采样 ⇒ 拒绝该批"）。那条闸已由**真实现**取代
+//   （per-sampler `max_lod = 0.49`，见 `d3d9_gpu.cpp` 的 `kNoMipMaxLod`）⇒ 函数失去唯一调用者，删除。
+//   ★ 级号/几何的**纯函数**判据仍在：`mipLevelForLod` / `lodFromUvDerivatives` /
+//   `mipDownsampleBox`（`tests/d3d9_mip.cpp`，CTest `d3d9-mip`）—— 它们不依赖这条死路。
 
 // =====================================================================================
 // 顶点读取 / 装配
@@ -2137,67 +1383,6 @@ bool clipPointVertex(const DrawContext& ctx, const CVertex& v) {
     }
     return v.z >= 0.0 && v.w - v.z >= 0.0 && v.x + v.w >= 0.0 && v.w - v.x >= 0.0 &&
            v.y + v.w >= 0.0 && v.w - v.y >= 0.0;
-}
-
-// 点：1px（顶点色 + 屏幕 z），像素收尾走与三角形同一份助手。
-void rasterizePoint(DrawContext& ctx, const CVertex& v) {
-    if (!clipPointVertex(ctx, v)) return;
-    SVertex sv;
-    if (!toScreen(v, ctx, &sv)) return;
-    const PixelRGBA c{clamp255(v.r), clamp255(v.g), clamp255(v.b), clamp255(v.a)};
-    const int px = static_cast<int>(std::floor(sv.x));
-    const int py = static_cast<int>(std::floor(sv.y));
-    writeShadedPixel(ctx, px, py, sv.z, [c]() { return c; });
-}
-
-void rasterizeLineSegment(DrawContext& ctx, const CVertex& ca, const CVertex& cb) {
-    CVertex a;
-    CVertex b;
-    if (!clipSegmentEndpoints(ctx, ca, cb, &a, &b)) return;
-    SVertex sa;
-    SVertex sb;
-    // w≈0 与三角形同口径：整段丢（⛔ 不拿坏坐标继续）
-    if (!toScreen(a, ctx, &sa) || !toScreen(b, ctx, &sb)) return;
-    const double dx = sb.x - sa.x;
-    const double dy = sb.y - sa.y;
-    if (std::fabs(dx) < 1e-12 && std::fabs(dy) < 1e-12) {
-        // 退化线段 ⇒ 单像素（与点同口径：取裁剪后起点的顶点色）
-        const PixelRGBA c{clamp255(a.r), clamp255(a.g), clamp255(a.b), clamp255(a.a)};
-        writeShadedPixel(ctx, static_cast<int>(std::floor(sa.x)), static_cast<int>(std::floor(sa.y)), sa.z,
-                         [c]() { return c; });
-        return;
-    }
-    const bool major_x = std::fabs(dx) >= std::fabs(dy);
-    const double m0 = major_x ? sa.x : sa.y;
-    const double m1 = major_x ? sb.x : sb.y;
-    const int first = static_cast<int>(std::floor(m0));
-    const int last = static_cast<int>(std::floor(m1));
-    // ★ 方向：顶点顺序可能右→左 / 下→上 ⇒ 步进按符号；否则 `p <= last` 一个像素都不画。
-    const int dir = (last >= first) ? 1 : -1;
-    for (int p = first;; p += dir) {
-        const double major_center = static_cast<double>(p) + 0.5;
-        double t = (m1 != m0) ? (major_center - m0) / (m1 - m0) : 0.0;
-        if (t < 0.0) t = 0.0;
-        if (t > 1.0) t = 1.0;
-        const double minor_center =
-            (major_x ? sa.y : sa.x) + t * (major_x ? (sb.y - sa.y) : (sb.x - sa.x));
-        const int q = static_cast<int>(std::floor(minor_center));  // 最近像素中心
-        const int px = major_x ? p : q;
-        const int py = major_x ? q : p;
-        const double wsum = (1.0 - t) * sa.invw + t * sb.invw;
-        if (finite(wsum) && wsum != 0.0) {
-            // z：屏幕空间线性（真机对线段的深度就是屏幕线性）；颜色：与三角形同一个透视校正式。
-            const double z = (1.0 - t) * sa.z + t * sb.z;
-            const PixelRGBA c{
-                clamp255(((1.0 - t) * sa.r + t * sb.r) / wsum),
-                clamp255(((1.0 - t) * sa.g + t * sb.g) / wsum),
-                clamp255(((1.0 - t) * sa.b + t * sb.b) / wsum),
-                clamp255(((1.0 - t) * sa.a + t * sb.a) / wsum),
-            };
-            writeShadedPixel(ctx, px, py, z, [c]() { return c; });
-        }
-        if (p == last) break;
-    }
 }
 
 }  // namespace
@@ -2513,8 +1698,8 @@ std::uint32_t setRenderTarget(X86& cpu, std::uint32_t dev, std::uint32_t target,
     //   ⛔ 这不是"放宽 GPU 准入"：准入层（`gpuEligible`）不该知道"某个 surface 能否代表后缓冲"这条
     //   D3D 语义 —— 那是本函数的职责。把这条知识塞进准入层，以后每加一条绑定路径都要再擦一次。
     //   （缺陷史：`REQ-01M780VKKRFHJEX6VM74DRCYBM` 的连带 —— shim 修好签名之后这个 surface 真的被绑上，
-    //   `color_surface != 0` 从此恒成立 ⇒ **每一批 draw 都退回 CPU 光栅**：实测 `gpu=0 fallback=125`、
-    //   ≈3 s/帧（修前 9.3 s / 修后 102.0 s 跑 30 帧）、`save-graph` / `quit-graph` 在 5 s 窗口里只够 2 帧。）
+    //   `color_surface != 0` 从此恒成立 ⇒ **每一批 draw 都退回 CPU 光栅**：实测 `gpu=0`（125 批全部
+    //   由 CPU 兜底）、≈3 s/帧（修前 9.3 s / 修后 102.0 s 跑 30 帧）、`save-graph` / `quit-graph` 在 5 s 窗口里只够 2 帧。）
     //   判据是**身份相等**：非纹理表面 ∧ 它的像素块 == 设备后缓冲的 arena（指针相等）。
     //   ⛔ 不许用"尺寸 / 格式相同"这类近似判据 —— 那会把另一张同尺寸表面当成后缓冲写。
     //   纹理表面**不走**这条（它 `color_surface != 0`，按现状走准入层的回退）。
@@ -2700,10 +1885,8 @@ std::uint32_t endScene(X86& cpu, std::uint32_t dev, std::string* why) {
     }
     plSet(cpu, pe, kPlInScene, 0u);
     plSet(cpu, pe, kPlEnds, plGet(cpu, pe, kPlEnds) + 1u);
-    const std::uint64_t pixels = (static_cast<std::uint64_t>(plGet(cpu, pe, kPlPixels + 4u)) << 32) |
-                                 plGet(cpu, pe, kPlPixels);
-    pipeLog("EndScene", "场景结束（累计 Draw %u / 三角形 %u / 像素 %llu）", plGet(cpu, pe, kPlDraws),
-            plGet(cpu, pe, kPlTriangles), static_cast<unsigned long long>(pixels));
+    pipeLog("EndScene", "场景结束（累计 Draw %u / 三角形 %u）", plGet(cpu, pe, kPlDraws),
+            plGet(cpu, pe, kPlTriangles));
     return kOk;
 }
 
@@ -3332,10 +2515,11 @@ std::uint32_t validateDevice(X86& cpu, std::uint32_t dev, std::uint32_t passes_e
     //   ⇒ 任何状态组合在"能给几遍"这个问题上都只能答 1。
     // ★ ValidateDevice 问的是**当前状态组合**能否被设备渲染 / 需要几遍，**与这条 draw 合不合法无关**
     //   （`BeginScene` / FVF / 流绑定不属它）⇒ ⛔ 不复用 `drawPrecheck` / `gpuEligible`：
-    //   那会把"状态没问题但还没 `SetFVF`"的调用拒掉（真机不会），而今天 `gpuEligible` 拒绝的组合
-    //   仍有 CPU 兜底**真的能画** ⇒ 挂在它上面会对真机说谎。
-    // ★ **何时必须翻面**（把上面那条声明改成真校验）：**CPU 兜底删除
-    //   （`REQ-01M78BF1FNNH6K8N8GEY6GQYXX` 落地）且需要覆盖"设备状态组合不能用"时**才翻面。
+    //   那会把"状态没问题但还没 `SetFVF`"的调用拒掉（真机不会）；而今天 `gpuEligible` 拒绝
+    //   = 这一批**没画**（只记账 + 跳过，**没有第二实现兜底**，`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）
+    //   ⇒ 把它的拒绝当成"设备状态组合不能用"仍会对真机说谎。
+    // ★ **何时必须翻面**（把上面那条声明改成真校验）：需要覆盖"设备状态组合不能用"时才翻面
+    //   （"CPU 兜底还在不在"不再是条件 —— 它已经删了）。
     //   翻面形态 = 复用 `gpuEligible` 的**状态侧**判据（⛔ 不含 FVF / 流 / BeginScene），
     //   不通过时按 `D3DERR_CONFLICTINGRENDERSTATE` 拒绝并**不写** `pNumPasses`。
     //   ★ 引擎无 `.lst` 站点（本线没有调用点消费这个答案）⇒ **恒 1 pass 不阻塞**。
@@ -4429,7 +3613,7 @@ bool gpuAddressFor(std::uint32_t mode, GpuAddress* out) {
         case kAddressClamp: *out = GpuAddress::Clamp; return true;
         case kAddressMirror: *out = GpuAddress::Mirror; return true;
         // BORDER / MIRROR_ONCE：SDL_GPU 的 sampler address mode 没有对应（BORDER 要 border color，
-        // MIRROR_ONCE 语义不同）⇒ 回退 CPU 并记账。
+        // MIRROR_ONCE 语义不同）⇒ 准入拒绝该批（记账 + 跳过，⛔ 不回退 CPU）。
         default: return false;
     }
 }
@@ -4444,14 +3628,14 @@ bool gpuFilterFor(std::uint32_t f, GpuFilter* out) {
     }
 }
 
-// 无纹理时 CPU 的采样结果是白色 (255,255,255,255)：只有"结果恒等于顶点色"的 op 组合能由
+// 无纹理时 D3D9 的采样结果是白色 (255,255,255,255)：只有"结果恒等于顶点色"的 op 组合能由
 // 无纹理 GPU 着色器（输出顶点色）等价表达。⛔ 不把 SELECTARG1(TEXTURE)=white 当成顶点色。
 bool untexturedResolvesToDiffuse(std::uint32_t op, std::uint32_t arg1, std::uint32_t arg2) {
     auto diffuse = [](std::uint32_t a) { return a == kTaDiffuse || a == kTaCurrent; };
     auto texture = [](std::uint32_t a) { return a == kTaTexture; };
     switch (op) {
-        // ★ CPU 的 applyTextureOp 对 DISABLE 落 default 分支、取 **arg1**；⛔ 不是无条件 DIFFUSE。
-        //   无纹理 + DISABLE(arg1=TEXTURE) 时 CPU 得到白色，不能用"顶点色"冒充 ⇒ 必须 false。
+        // ★ D3DTOP_DISABLE 的语义 = 等价于 SELECTARG1(arg1)；⛔ 不是无条件取 DIFFUSE。
+        //   无纹理 + DISABLE(arg1=TEXTURE) 时结果是白色，不能用"顶点色"冒充 ⇒ 必须 false。
         case kTopDisable: return untexturedResolvesToDiffuse(kTopSelectArg1, arg1, arg2);
         case kTopSelectArg1: return diffuse(arg1);
         case kTopSelectArg2: return diffuse(arg2);
@@ -4465,8 +3649,8 @@ bool untexturedResolvesToDiffuse(std::uint32_t op, std::uint32_t arg1, std::uint
 // =====================================================================================
 // 点 / 线的状态准入（`REQ-01M7372JNFAC2RWX2FXVV6YM5C`）
 //
-// ★ 结构刻意与三角形的**像素循环同构**（`rasterTriangle` 的 stage 循环）：两边必须在同一批
-//   状态上得出同一个"取顶点色 / 取纹理色"的结论，否则点 / 线与三角形在相邻几何上分叉。
+// ★ 结构刻意与三角形的 stage 判定**同构**（同一份 `TextureStageSnapshot` / `untexturedResolvesToDiffuse`）：
+//   两边必须在同一批状态上得出同一个"取顶点色 / 取纹理色"的结论，否则点 / 线与三角形在相邻几何上分叉。
 // ★ 只放行"结果恒等于顶点色"的组合：级活跃（`color_op`/`alpha_op` 不全 DISABLE）时
 //   · 绑了纹理 ⇒ 需要采样 ⇒ **拒绝**（⛔ 不画成纯色糊过去）；
 //   · 没绑纹理 ⇒ 复用 `untexturedResolvesToDiffuse`（与 GPU 准入同一个判据）。
@@ -4534,7 +3718,8 @@ void noteLinePointCapsOnce() {
           "雾全局未做；点尺寸（POINTSIZE/POINTSCALE/POINTSPRITE）未实现 ⇒ 点按 1px 并记账（bit19）。");
 }
 
-// ★ 准入条件精确到"能等价表达"的状态；其余全部**显式回退**（reason 会进 fallback 账本）。
+// ★ 准入条件精确到"能等价表达"的状态；其余全部**拒绝该批**（`noteGpuSkip`：`skipped` + 具名位 29..40，
+//   ⛔ 不 CPU 渲染；`REQ-01M7A74YG08R65NJBFXF7DEJDK`）。
 //   覆盖的 draw 类别（TITLE 的全屏渐变四边形就在里面）：
 //     32bpp **纹理或后缓冲**目标、GOURAUD、无 alpha test、完整/部分 color write、
 //     任意可在 SDL_GPU 表达的 blend（含 separate alpha，TITLE = color 5/6 + alpha 2/6）、
@@ -4686,29 +3871,25 @@ bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why, U
             if (why) *why = buf;
             return deny(kUnGpuSamplerAddr);
         }
-        // ★ CPU 参考把两个过滤**合成一条**决策（`samplerUsesLinear`：任一 LINEAR ⇒ 双线性），
-        //   而 SDL_GPU 的 sampler 把 MAG / MIN **分开存、分开用** ⇒ `MAG=POINT + MIN=LINEAR`
-        //   这种组合两边都"成功"、整批像素却不同，且 fallback 账看不见（它不是 fallback）。
-        //   按 `docs/00-origin/decisions.md` §8.1（CPU=oracle / GPU=product）：**要么一致，要么
-        //   不接受该批** ⇒ 这里只放行 `MAG == MIN`，其余显式回退并记账。
-        //   ⛔ 不去改 CPU 的采样决策（那是另一条单的内容）。
-        if (ss.mag_filter != ss.min_filter) {
-            char buf[192];
-            std::snprintf(buf, sizeof(buf),
-                          "GPU 采样要求 MAG==MIN（CPU 参考按任一 LINEAR 取双线性；当前 MAG=%u MIN=%u）",
-                          ss.mag_filter, ss.min_filter);
-            if (why) *why = buf;
-            return deny(kUnGpuFilterSplit);
-        }
+        // ★ `MAG` / `MIN` 在 sampler 里是**两个独立字段**（`GpuSampler` 分开存；落到 SDL 也是
+        //   `si.min_filter` / `si.mag_filter` 分开写）⇒ `MAG=POINT + MIN=LINEAR` 直接表达。
+        //   ⛔ 不再以"MAG == MIN"整批拒绝：那条闸的正当性来自"CPU 参考把两个过滤合成一条决策"，
+        //   随 CPU 光栅删除已失效（`REQ-01M7AZ68J05PMVWVY7A589TQ6Y`）。
         if (!gpuFilterFor(ss.mag_filter, &p.texture.sampler.mag_filter) ||
             !gpuFilterFor(ss.min_filter, &p.texture.sampler.min_filter)) {
             char buf[144];
             std::snprintf(buf, sizeof(buf), "GPU 不支持该采样过滤（MAG=%u MIN=%u）", ss.mag_filter,
                           ss.min_filter);
             if (why) *why = buf;
-            // ★ 过滤值映射失败与 MAG!=MIN 同属"过滤表达不了"，共用 bit38（原因文本分开）。
-            return deny(kUnGpuFilterSplit);
+            // 过滤值本身表达不了（目前只有 MIN/MAG = `D3DTEXF_NONE`；★ 不再是 "MAG!=MIN"）。
+            return deny(kUnGpuFilterUnmapped);
         }
+        // ★ `MIPFILTER=NONE`（`D3DTEXF_NONE` = "disables mipmapping"）⇔ **只采 level 0**：
+        //   由 sampler 的 per-sampler `max_lod` 收紧表达（后端按 `mipmap` 位建第二个 sampler；
+        //   为什么不是 `max_lod = 0` 见 `d3d9_gpu.cpp` 的 `kNoMipMaxLod` 注释 —— 0 会把缩小
+        //   也钳成放大、让 MINFILTER 失效）。
+        //   ⛔ 不再拒绝该批 —— "`max_lod` 是一张纹理一档"是事实错误（它是 sampler 字段）。
+        p.texture.sampler.mipmap = ss.mip_filter != kTexfNone;
         p.textured = true;
         p.texture.pixels = tv.pixels;
         p.texture.pitch = tv.pitch;
@@ -4750,8 +3931,6 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
                       std::uint32_t* rasterized_out, std::string* why) {
     // ★ 诊断（`LIFT_SLOW_DRAW=1`）：只在这一批**慢**时打一行；默认零输出。
     static const bool slow_draw_trace = std::getenv("LIFT_SLOW_DRAW") != nullptr;
-    // ★ 诊断（默认关）：GPU 与 CPU 参考在同一批/同一状态上逐像素对照（见下面 `[gpu-verify]`）。
-    static const bool gpu_verify = std::getenv("LIFT_GPU_VERIFY") != nullptr;
     static const double slow_draw_ms = [] {
         const char* text = std::getenv("LIFT_SLOW_DRAW_MS");
         return text ? std::atof(text) : 20.0;
@@ -4761,12 +3940,12 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
     // 顶点已经是**变换后**的 CVertex（由调用方喂），这里只做裁剪 + 屏幕映射 + 光栅
     std::uint32_t triangles = 0;
     std::uint32_t rasterized = 0;
-    // ★ CPU 像素路径**仍在**，但只有两处可达（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX` 的**后半**，待删）：
-    //   ① `ctx.gpu == nullptr` = 单元测试夹具没装 `GpuRaster`（`tests/d3d9*.cpp` 的逐像素断言）；
-    //      ★ CLI 已经没有"选 CPU 后端"的入口（无 GPU ⇒ 启动期拒绝启动）⇒ 生产路径到不了这里。
-    //   ② GPU 已启用、但本批被 `gpuEligible` 拒（能力不足）或后端失败 ⇒ 回退 CPU 像素 + 记 fallback。
-    //   ⇒ 这就是**待删的测试 oracle + 残留回退**；删它要先把 4 个 d3d9* 用例迁到 GPU/账本断言
-    //     （独立一单）。⛔ 不要因为"删了这里测试红"就把断言放宽。
+    // ★ 口径（`REQ-01M7A74YG08R65NJBFXF7DEJDK`，2026-11-13 裁决）：**GPU 是唯一光栅**。
+    //   · `gpuEligible` 拒批 ⇒ `noteGpuSkip`（`skipped` + 具名位）+ **本批直接 return**，⛔ 不写像素、
+    //     ⛔ 不入队（见下面准入处）；
+    //   · "本进程没装 GPU 光栅化后端"也是拒批的一种（`kUnGpuNoBackend`）⇒ 走**同一条**早退，
+    //     ⛔ 不存在"绕过准入去走 CPU 光栅"的旁路（CPU 光栅已删）。
+    //     ⚠ 生产路径不可达：无 GPU ⇒ 启动期拒绝启动（本文件外）。
     const bool have_gpu_backend = ctx.gpu != nullptr && ctx.gpu->rasterActive();
     // ★ 点 / 线（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：**GPU 也画** —— 展开成三角形（点 = 1px quad，
     //   线 = 每秒 1px 宽的 quad ⇒ 2 个三角形），走与三角形同一份顶点 / 混合 / 深度 / stage 路径。
@@ -4780,22 +3959,32 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
         std::string lp_why;
         if (!admitLinePointDraw(cpu, pe, ctx, &lp_why)) {
             if (why) *why = lp_why;
-            // ★ 本单：这也是"GPU 没画"的一种（以前 CPU 也不画 ⇒ 连 fallback 都没有）。
+            // ★ 本单：这也是"GPU 没画"的一种（以前 CPU 也不画 ⇒ 连账都没有）。
             if (have_gpu_backend) noteGpuSkip(cpu, pe, lp_why, kUnLinePointTextured);
             return false;
         }
     }
     GpuBatchPlan plan;
     std::string gpu_why;
-    // ★ 本单：`gpuEligible` 拒批时**指名**是哪一类（29..40）。默认值只在"根本没后端"时用得上
-    //   （生产不可能：无 GPU 拒绝启动）。
+    // ★ `gpuEligible` 拒批时**指名**是哪一类（29..40）。默认值 = `kUnGpuNoBackend`：
+    //   `gpuEligible` 内部对 `ctx.gpu == nullptr` / `!rasterActive()` 也写这个位，保留默认值只是让
+    //   "压根没进准入"的那条路也有名字。
     UnsupportedBit gpu_skip_bit = kUnGpuNoBackend;
-    bool gpu_ok = false;
-    if (have_gpu_backend) gpu_ok = gpuEligible(ctx, &plan, &gpu_why, &gpu_skip_bit);
-    if (!gpu_ok && have_gpu_backend && ctx.gpu->rasterDirty()) {
-        // 上一批走 GPU、这一批要回 CPU：先把 GPU 像素落回 guest，CPU 才能接着画。
-        std::string sync_err;
-        ctx.gpu->rasterSyncToGuest(ctx.color_base, ctx.color_pitch, ctx.color_width, ctx.color_height, &sync_err);
+    // ★ 准入**无条件**跑（`REQ-01M7A74YG08R65NJBFXF7DEJDK`，P1）：以前它被 `have_gpu_backend` 守卫，
+    //   于是"没装后端"的夹具**绕过**准入、落到 CPU 光栅（⛔ 那条路已删）。现在"没后端"也是拒批。
+    const bool gpu_ok = gpuEligible(ctx, &plan, &gpu_why, &gpu_skip_bit);
+    // ★ 裁决（`REQ-01M7A74YG08R65NJBFXF7DEJDK`，2026-11-13）：`gpuEligible` **拒批 ⇒ 记账 + 跳过该批**。
+    //   以前这里把 `gpu` 置空、后面由 CPU 光栅**静默画出来**（`--gpu-strict` 已删 ⇒ 连账都没有）。
+    //   `noteGpuSkip`（`:512-530`）一次做完三件事：`skipped_draws` + `skipped_reasons[原因]` +
+    //   `recordUnsupported(具名位 29..40)`（具名位进 `unsupported :`、原因进 `skipped top:`）。
+    //   ⇒ 本批返回 `false` ⇒ Draw 回 `D3DERR_INVALIDCALL`（**响亮**）。
+    if (!gpu_ok) {
+        if (why) *why = gpu_why;
+        // 一次 Draw* 就是一次调用（`d3d9_pipeline.h` 的 `GpuCoverage::draw_calls` 口径）；早退后
+        // 函数末尾那个统一记账点走不到，所以在这里补上 —— 否则拒批的 Draw 会从调用账里消失。
+        ++g_gpu_coverage.draw_calls;
+        noteGpuSkip(cpu, pe, gpu_why, gpu_skip_bit);
+        return false;
     }
     std::vector<GpuRasterVertex> gpu_vertices;
     bool gpu_invw_ok = true;
@@ -4803,10 +3992,11 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
         SVertex a, b, c;
     };
     std::vector<SavedTri> saved_tris;
-    g_alpha_agg = AlphaAgg{};  // ★ 诊断：本批的混合 α 聚合（见 `[draw] fa=`）
     g_gpu_alpha_agg = AlphaAgg{};
     g_alpha_agg_from_gpu = false;
-    GpuRaster* gpu = gpu_ok ? ctx.gpu : nullptr;
+    // ★ 准入已通过 ⇒ 后端一定非空（`gpuEligible` 的第一条拒批就是 `ctx.gpu == nullptr`）。
+    GpuRaster* gpu = ctx.gpu;
+
     // 纹理坐标按 **stage 0 的 D3DTSS_TEXCOORDINDEX** 取（⛔ 不硬编码 TEXCOORD0）
     const std::uint32_t gpu_tex_coord = plan.textured ? (ctx.stages[0].tex_coord_index & 0xFFFFu) : 0u;
     // TFACTOR（D3DRS_TEXTUREFACTOR）是每批 Draw 的常量色：GPU 顶点色整批替换成它。
@@ -4833,12 +4023,8 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
                 return;
             }
         }
-        if (gpu == nullptr) {
-            rasterTriangle(ctx, a, b, c);
-            return;
-        }
         // SVertex 的颜色/uv 已经乘过 invw；GPU 的顶点着色器输出 w=1 ⇒ 屏幕空间线性插值，
-        // 只有 invw==1 才与 CPU 的透视校正插值等价。
+        // 只有 invw==1 才与 D3D9 的透视校正等价。
         if (std::fabs(a.invw - 1.0) > 1e-9 || std::fabs(b.invw - 1.0) > 1e-9 ||
             std::fabs(c.invw - 1.0) > 1e-9) {
             gpu_invw_ok = false;
@@ -4888,21 +4074,20 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
     // =====================================================================================
     // 点 / 线 → 三角形展开（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）
     //
-    // ★ 范围：**真的交给 GPU 的批**走这里（展开后的顶点 / 三角形与普通三角形同一个 `push_tri`
-    //   入口）；其余（没装 GpuRaster 的测试夹具 / 准入被拒的批）仍走既有的 `rasterizePoint` /
-    //   `rasterizeLineSegment` —— 那是**待删的测试 oracle**（同 `submitPrimitives` 顶部注释），
-    //   ⛔ 不在本批改它的像素规则（会连累它的像素守卫）。
+    // ★ 范围：准入通过的批都走这里（展开后的顶点 / 三角形与普通三角形同一个 `push_tri` 入口）。
+    //   `gpuEligible` 拒批的批在准入处就 return 了，⛔ 走不到这里
+    //   （`REQ-01M7A74YG08R65NJBFXF7DEJDK`：没有"退回 CPU 光栅"那条旁路 —— CPU 光栅已删）。
     //
     // ★ 为什么展开而不是给后端加"画线"接口：本线的 GPU 后端只认屏幕空间三角形（SDL_GPU 也是），
     //   展开后点/线自动继承**同一个**流水线管线：blend / separate-alpha / 深度测试 / 写掩码 /
     //   viewport / scissor / stage 0 的 TFACTOR 替换。⛔ 不给线另建一条光栅路径（那就是第二实现）。
-    // ★ 像素口径（与 CPU 侧的观察对齐，⛔ 不做 diamond-exit）：
-    //   · 点 = 1px quad：`floor(x), floor(y)` 那一格（与 `rasterizePoint` 同一像素）；
+    // ★ 像素口径（D3D9 的线宽恒 1px；⛔ 不做 diamond-exit —— 那是已删的 CPU 实现细节）：
+    //   · 点 = 1px quad：`floor(x), floor(y)` 那一格（D3D9：点覆盖包含该点的那个像素）；
     //   · 线 = 每秒 1px 宽的 quad（2 个三角形）：端点先**对齐到像素中心格**（`floor(c)+0.5`），
     //     这样轴线水平/竖直时 quad 的边界落在整数格线上、像素中心（`+0.5`）严格在内部 ⇒
     //     不会因为"中心恰好压边"出现空行（实测：不对齐时 1px 线可能一行都不画）。
     //     代价 = 端点最多偏 0.5px（可见性判据不要求像素级一致）。
-    //   · 退化线段（两端同点）= 一个 1px 点（与 CPU 的退化分支同口径）。
+    //   · 退化线段（两端同点）= 一个 1px 点。
     // ★ 宽度常量 `kExpandedLineHalfWidth` 是**变异锚点**：写成 0 ⇒ 所有线 quad 退化 ⇒
     //   `gpu-batch/lines-points` 当场红（线一个像素都没有）。
     // =====================================================================================
@@ -4953,7 +4138,7 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
             expanded_quad(p0, p1, p2, p3);
             return;
         }
-        // 法向 = 方向的垂直方向 × 半宽 ⇒ 每秒一条 1px 宽的带子。
+        // 法向 = 方向的垂直方向 × 半宽 ⇒ 每段一条 1px 宽的带子。
         const double nx = -dy / len * kExpandedLineHalfWidth;
         const double ny = dx / len * kExpandedLineHalfWidth;
         SVertex a0 = sa, a1 = sa, b0 = sb, b1 = sb;
@@ -5000,13 +4185,7 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
                                   (ctx.fvf & kFvfPSize) != 0u ? 1 : 0);
                     recordUnsupported(cpu, pe, kUnPointSize, buf, psize_bits);
                 }
-                for (std::uint32_t i = 0; i < n; ++i) {
-                    // ★ 判据是"这一批**真的**交给 GPU 了吗"（`gpu != nullptr`），⛔ 不是"有没有后端"：
-                    //   准入被拒的批仍走 CPU 的既有 1px 点（测试 oracle 的既有像素规则）；
-                    //   进 GPU 的批才展开成 quad。
-                    if (gpu == nullptr) rasterizePoint(ctx, verts[i]);
-                    else expand_point(verts[i]);
-                }
+                for (std::uint32_t i = 0; i < n; ++i) expand_point(verts[i]);
             } else {
                 // LASTPIXEL=0（真机不画最后一像素）：本线仍画 ⇒ 记账，⛔ 不静默。
                 if (rsOf(cpu, pe, kRsLastPixel) == 0u)
@@ -5014,22 +4193,15 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
                 if (prim == kPtLineList) {
                     if ((n & 1u) != 0u)
                         pipeLog("点/线", "LINELIST 顶点数为奇数（%u）⇒ 丢掉末尾 1 个顶点", n);
-                    for (std::uint32_t i = 0; i + 1u < n; i += 2u) {
-                        if (gpu == nullptr) rasterizeLineSegment(ctx, verts[i], verts[i + 1u]);
-                        else expand_line(verts[i], verts[i + 1u]);
-                    }
+                    for (std::uint32_t i = 0; i + 1u < n; i += 2u) expand_line(verts[i], verts[i + 1u]);
                 } else {
-                    for (std::uint32_t i = 0; i + 1u < n; ++i) {
-                        if (gpu == nullptr) rasterizeLineSegment(ctx, verts[i], verts[i + 1u]);
-                        else expand_line(verts[i], verts[i + 1u]);
-                    }
+                    for (std::uint32_t i = 0; i + 1u < n; ++i) expand_line(verts[i], verts[i + 1u]);
                 }
             }
             // 诊断：点 / 线不计入 `kPlTriangles` / `kPlRasterized`（那两个数就是**三角形**计数；
-            // 展开出来的三角形只是实现手段，⛔ 不让它们把"引擎画了几个三角形"这个数改掉）；
-            // 像素数走 `ctx.pixels_written`（与三角形同一个账）。
-            pipeLog("点/线", "图元=%u：%u 个顶点 ⇒ 写 %llu 个像素（GPU 批按展开后的三角形交付）", prim, n,
-                    static_cast<unsigned long long>(ctx.pixels_written));
+            // 展开出来的三角形只是实现手段，⛔ 不让它们把"引擎画了几个三角形"这个数改掉）。
+            // ★ `pixels` 在 GPU 模式恒 0（本进程没有 CPU 像素计数 —— 后端拿不到片元覆盖数）。
+            pipeLog("点/线", "图元=%u：%u 个顶点（GPU 批按展开后的三角形交付）", prim, n);
             break;
         }
         default:
@@ -5040,88 +4212,40 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
     bool gpu_done = false;
     // ★ GPU 后端失败 ⇒ 这一批**没画**（不再 CPU 重放）⇒ 函数末尾返回 `D3DERR_INVALIDCALL`。
     bool gpu_failed = false;
-    std::string fallback_reason;
+    std::string backend_failure_reason;
     // ★ 本单：`gpu_queued`= 真的把 draw 交进了后端队列（⛔ 不是"准入通过"）；
     //   `gpu_batch_tag`= 这一批在账本里的批号（0 = 没入队）。
     bool gpu_queued = false;
     std::uint64_t gpu_batch_tag = 0;
-    // ★ GPU 的 sampler **表达不了** `MIPFILTER = NONE`（`GpuSampler` 只有 address/filter；`max_lod`
-    //   是**整张纹理一档**，见 `d3d9_gpu.cpp` 的 `samplerFor`）⇒ 若这一批**真的**有缩小采样，
-    //   CPU（关掉 mipmap ⇒ 只 level 0）与 GPU（会采 mip）必然出不同的像素。按
-    //   `docs/00-origin/decisions.md` §8.1（CPU=oracle，"要么一致、要么不接受该批"）**显式回退并记账**。
-    //   ⛔ 不是"把 GPU 的 max_lod 设回 0"—— 那会让 `MIPFILTER != NONE` 的正常批次在 GPU 上静默走样。
-    bool gpu_mip_divergence = false;
-    if (gpu != nullptr && plan.textured && !plan.tex_color_from_tfactor && ctx.samplers[0].mip_filter == kTexfNone &&
-        ctx.textures[0].present) {
-        const std::uint32_t coord =
-            (ctx.stages[0].tex_coord_index & 0xFFFFu) < kMaxTexCoords ? (ctx.stages[0].tex_coord_index & 0xFFFFu) : 0u;
-        for (const SavedTri& t : saved_tris) {
-            if (triangleMipLevel(t.a, t.b, t.c, coord, ctx.textures[0].width, ctx.textures[0].height) >= 1u) {
-                gpu_mip_divergence = true;
-                break;
-            }
-        }
-    }
-    if (gpu != nullptr && (!gpu_invw_ok || gpu_mip_divergence)) {
-        // ★ 这两条**不再回退 CPU 重放**（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：
-        //   · invw != 1：屏幕空间插值会与透视校正产生像素差（要补就得给着色器加 W 插值，
-        //     那是另一条单的活；本线**不做近似的透视校正**）；
-        //   · MIPFILTER=NONE 且有缩小采样：GPU 的 sampler 关不掉 mip（`max_lod` 是一张纹理一档）。
-        //   两者在 boot→TITLE 的实测命中都是 **0**（见 README 的口径行）⇒ 按裁决做
-        //   **显式拒绝 + 具名记账**：本批不进画面（`D3DERR_INVALIDCALL`），但 `unsupported` 位、
-        //   默认级别的 warn 都留得下痕迹。⛔ 不许"删完静默不画"，也⛔ 不许再往 CPU 光栅塞。
-        const UnsupportedBit bit = gpu_mip_divergence ? kUnGpuMipDivergence : kUnGpuPerspective;
+    // ★ `MIPFILTER = NONE` **不再是**拒批理由：`max_lod` 是 **per-sampler** 字段，
+    //   `D3DTEXF_NONE`（"disables mipmapping"）⇔ sampler 的 `max_lod = 0.49`（只采 level 0，
+    //   且不把缩小的 MAG 选中 —— 为什么不是 0 见 `d3d9_gpu.cpp` 的 `kNoMipMaxLod`）。
+    //   `gpuEligible` 已把 `mip_filter != NONE` 写进 `plan.texture.sampler.mipmap`，
+    //   后端按缓存键建**第二个** sampler ⇒ 这一批照画（`REQ-01M7AZ68J05PMVWVY7A589TQ6Y`）。
+    if (!gpu_invw_ok) {
+        // ★ 这条**不回退 CPU 重放**（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：
+        //   invw != 1：屏幕空间插值会与透视校正产生像素差（要补就得给着色器加 W 插值，
+        //   那是另一条单的活；本线**不做近似的透视校正**）。
+        //   按裁决做**显式拒绝 + 具名记账**：本批不进画面（`D3DERR_INVALIDCALL`），但
+        //   `unsupported` 位、默认级别的 warn 都留得下痕迹。⛔ 不许"删完静默不画"。
+        const UnsupportedBit bit = kUnGpuPerspective;
         char buf[320];
-        if (gpu_mip_divergence) {
-            std::snprintf(buf, sizeof(buf),
-                          "MIPFILTER=NONE 且本批有缩小采样（GPU sampler 的 max_lod 是一张纹理一档，"
-                          "表达不了\"关掉 mipmap\"）⇒ 拒绝该批（不再 CPU 重放）");
-        } else {
-            std::snprintf(buf, sizeof(buf),
-                          "顶点 invw!=1（GPU 的屏幕空间插值不能等价替代透视校正）⇒ 拒绝该批（不再 CPU 重放）");
-        }
+        std::snprintf(buf, sizeof(buf),
+                      "顶点 invw!=1（GPU 的屏幕空间插值不能等价替代透视校正）⇒ 拒绝该批");
         recordUnsupported(cpu, pe, bit, buf, 0u);
         pipeWarn(PipeWarnCategory::Other, "GPU 光栅化", "%s", buf);
         if (why) *why = buf;
         gpu_vertices.clear();
-        // ★ 本单：这条早退**必须**补上 `skipped` —— 它 CPU 一个像素都不写，`fallback` 永远看不见它
+        // ★ 本单：这条早退**必须**补上 `skipped` —— 它一个像素都不写，不补就完全没有账
         //   （设计 §A.3 的盲区）。计数放这里而不是函数末尾，是因为这里直接 return（拿不到末尾块）。
         noteGpuSkip(cpu, pe, buf, bit);
         return false;
-    } else if (gpu != nullptr) {
+    } else {
         std::string gerr;
         // ★ 目标身份必须带 guest 像素基址：同尺寸换 surface 只看尺寸/格式判不出来（见 gpu_raster.h）。
         bool ok = gpu->rasterPrepare(ctx.color_fmt, ctx.color_width, ctx.color_height, &gerr, ctx.color_base);
         if (ok && !gpu->rasterDirty()) {
             ok = gpu->rasterSyncFromGuest(ctx.color_base, ctx.color_pitch, ctx.color_width, ctx.color_height, &gerr);
-        }
-        // ★ 诊断（`LIFT_GPU_VERIFY=1`）：同一批、同一状态，CPU 参考光栅 vs GPU 读回逐像素对照。
-        //   只在 GPU 镜像与 guest 同步干净（!dirty）时做 —— 否则 CPU 起点会比 GPU 少一批像素。
-        std::vector<std::uint8_t> ref_color;
-        std::vector<float> ref_depth;
-        bool ref_valid = false;
-        if (gpu_verify && plan.textured && !saved_tris.empty() && ok && !gpu->rasterDirty()) {
-            const std::uint32_t bpp = ctx.color_fmt.bytesPerPixel();
-            const std::size_t cw = static_cast<std::size_t>(ctx.color_width);
-            const std::size_t ch = static_cast<std::size_t>(ctx.color_height);
-            ref_color.resize(cw * ch * bpp);
-            for (std::size_t y = 0; y < ch; ++y) {
-                std::memcpy(ref_color.data() + y * cw * bpp, ctx.color_base + y * ctx.color_pitch, cw * bpp);
-            }
-            ref_depth.resize(static_cast<std::size_t>(ctx.depth_pitch_floats) * ch);
-            for (std::size_t y = 0; y < ch; ++y) {
-                std::memcpy(ref_depth.data() + y * ctx.depth_pitch_floats,
-                            ctx.depth_base + y * ctx.depth_pitch_floats,
-                            static_cast<std::size_t>(ctx.depth_pitch_floats) * sizeof(float));
-            }
-            DrawContext ref = ctx;
-            ref.gpu = nullptr;  // ⛔ CPU 参考不碰 GPU 后端
-            ref.color_base = ref_color.data();
-            ref.color_pitch = static_cast<std::uint32_t>(cw * bpp);
-            ref.depth_base = ref_depth.data();
-            ref.pixels_written = 0;
-            for (const SavedTri& t : saved_tris) rasterTriangle(ref, t.a, t.b, t.c);
-            ref_valid = true;
         }
         if (ok && !gpu_vertices.empty()) {
             // ★ 账本批号（本单）：**入队前**设、入队后立刻清 0 —— 后端在命令缓冲**提交成功之后**
@@ -5130,16 +4254,9 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
             gpu_batch_tag = ++g_gpu_batch_seq;
             g_gpu_batch_ledger[gpu_batch_tag] = GpuBatchLedgerEntry{};
             gpuRasterSetBatchTag(gpu_batch_tag);
-            // ★ 合批：正常路径**只入队**（End/Present/Clear 才 flush）。`LIFT_GPU_VERIFY=1` 的判据
-            //   要求"画完立刻能读"，所以诊断模式仍走会立即 flush 的旧接口（⛔ 不改判据）。
-            if (gpu_verify) {
-                if (plan.textured) {
-                    ok = gpu->rasterDrawTextured(gpu_vertices.data(), gpu_vertices.size(), plan.texture, plan.state,
-                                                 &gerr);
-                } else {
-                    ok = gpu->rasterDraw(gpu_vertices.data(), gpu_vertices.size(), plan.state, &gerr);
-                }
-            } else if (plan.textured) {
+            // ★ 合批：**只入队**（End/Present/Clear 才 flush）。⛔ 不再有"诊断模式立刻 flush"的分支
+            //   （`LIFT_GPU_VERIFY` 的 CPU oracle 已删，见 `REQ-01M7A74YG08R65NJBFXF7DEJDK`）。
+            if (plan.textured) {
                 ok = gpu->rasterQueue(gpu_vertices.data(), gpu_vertices.size(), &plan.texture, plan.state, &gerr);
             } else {
                 ok = gpu->rasterQueue(gpu_vertices.data(), gpu_vertices.size(), nullptr, plan.state, &gerr);
@@ -5147,64 +4264,21 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
             gpuRasterSetBatchTag(0);
             gpu_queued = ok;
         }
-        if (ok && ref_valid) {
-            std::string verr;
-            if (!gpu->rasterSyncToGuest(ctx.color_base, ctx.color_pitch, ctx.color_width, ctx.color_height, &verr)) {
-                std::fprintf(stderr, "[gpu-verify] 读回失败：%s\n", verr.c_str());
-            } else {
-                const std::uint32_t bpp = ctx.color_fmt.bytesPerPixel();
-                const bool alpha = ctx.color_fmt.amask != 0;
-                std::uint64_t diff_pixels = 0;
-                unsigned max_diff = 0;
-                for (int y = 0; y < ctx.color_height; ++y) {
-                    const std::uint8_t* pa = ref_color.data() + static_cast<std::size_t>(y) * ctx.color_width * bpp;
-                    const std::uint8_t* pb = ctx.color_base + static_cast<std::size_t>(y) * ctx.color_pitch;
-                    for (int x = 0; x < ctx.color_width; ++x) {
-                        const std::uint32_t ra = pixel_format::loadPixel(pa + static_cast<std::size_t>(x) * bpp,
-                                                                         ctx.color_fmt.bpp);
-                        const std::uint32_t rb = pixel_format::loadPixel(pb + static_cast<std::size_t>(x) * bpp,
-                                                                         ctx.color_fmt.bpp);
-                        const unsigned va[4] = {pixel_format::expandChannel(ra, ctx.color_fmt.rmask),
-                                                pixel_format::expandChannel(ra, ctx.color_fmt.gmask),
-                                                pixel_format::expandChannel(ra, ctx.color_fmt.bmask),
-                                                pixel_format::expandChannel(ra, ctx.color_fmt.amask)};
-                        const unsigned vb[4] = {pixel_format::expandChannel(rb, ctx.color_fmt.rmask),
-                                                pixel_format::expandChannel(rb, ctx.color_fmt.gmask),
-                                                pixel_format::expandChannel(rb, ctx.color_fmt.bmask),
-                                                pixel_format::expandChannel(rb, ctx.color_fmt.amask)};
-                        unsigned d = 0;
-                        const int channels = alpha ? 4 : 3;
-                        for (int c = 0; c < channels; ++c) {
-                            const unsigned diff = va[c] > vb[c] ? va[c] - vb[c] : vb[c] - va[c];
-                            if (diff > d) d = diff;
-                        }
-                        if (d != 0) {
-                            ++diff_pixels;
-                            if (d > max_diff) max_diff = d;
-                        }
-                    }
-                }
-                std::fprintf(stderr,
-                             "[gpu-verify] textured batch tris=%zu pixels=%dx%d diff_pixels=%llu max_channel_diff=%u%s\n",
-                             saved_tris.size(), ctx.color_width, ctx.color_height,
-                             (unsigned long long)diff_pixels, max_diff,
-                             alpha ? "" : "（X8 后缓冲：只比 RGB）");
-                std::fflush(stderr);
-            }
-        }
         if (ok) {
             gpu_done = true;
             ++g_gpu_draws;
             g_gpu_triangles += saved_tris.size();
-            // ★ `[draw] fa=` 的 **GPU 版**（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：这一批真的交给
-            //   后端的那批顶点，其 α（0..255）就是"真正参与混合"的 α 的端点值 —— 顶点着色器
-            //   输出 w=1 ⇒ 屏幕空间线性插值，故逐顶点 α 的 min/max/均值就是整批的 min/max/均值。
-            //   ★ `n` = **顶点数**（CPU 版是**像素**数）：两者口径写在 `[draw]` 行与 README 里。
+            // ★ `[draw] fa=` 的 **GPU 版**（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：统计这一批真的交给
+            //   后端的**顶点 diffuse α**（0..255）的 min/max/均值。顶点着色器输出 w=1 ⇒ 屏幕空间
+            //   线性插值，故逐顶点 α 的 min/max/均值就是整批的 min/max/均值。
+            //   ★ `n` = **顶点数**（旧 CPU 版是**像素**数，那条实现已随 CPU 光栅删除）。
+            //   ★ **名字沿用历史（`fa=`），但口径是顶点 α**：⛔ 不是"真正参与混合的 α" ——
+            //     逐片元、stage 数学之后的 α 今天不可观测（见 `REQ-01M7B7591WHEVZMYFZ1Q2D8SHQ`）。
             //   ⛔ 不用逐像素统计：GPU 拿不到片元覆盖数，硬读回会把诊断变成一次全帧回读。
             g_gpu_alpha_agg = AlphaAgg{};
             for (const GpuRasterVertex& v : gpu_vertices) {
                 // `GpuRasterVertex` 的 α 是 **0..1**（`push_tri` 里由 SVertex 的 0..255 除 255 得到）
-                // ⇒ 统计口径（`[draw] fa=` 与 CPU 版一致）要的是 0..255 ⇒ 这里乘回去。
+                // ⇒ `fa=` 的打印口径要的是 0..255 ⇒ 这里乘回去。
                 double a = static_cast<double>(v.a) * 255.0;
                 if (!(a >= 0.0)) a = 0.0;
                 if (a > 255.0) a = 255.0;
@@ -5238,8 +4312,8 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
             //   CPU 光栅 = 第二实现；裁决要求"删 CPU 前先把这条旁路改成显式拒绝 + 记账"。
             //   这里仍然是**响亮**的：`gpu_failures` 计数 + `unsupported` 的 bit23 + 默认级别一行。
             //   本批不进画面（Draw 返回 `D3DERR_INVALIDCALL`），但账上能指得出是哪一类失败。
-            fallback_reason = "GPU 后端绘制失败：" + gerr;
-            recordUnsupported(cpu, pe, kUnGpuBackendFailure, fallback_reason.c_str(), 0u);
+            backend_failure_reason = "GPU 后端绘制失败：" + gerr;
+            recordUnsupported(cpu, pe, kUnGpuBackendFailure, backend_failure_reason.c_str(), 0u);
             pipeWarn(PipeWarnCategory::Other, "GPU 光栅化", "后端绘制失败（⛔ 不再 CPU 重放）：%s",
                      gerr.c_str());
             static bool logged = false;
@@ -5251,12 +4325,10 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
         }
     }
     // GPU 已启用时的账：每一批 Draw* 都算一次；没画到 GPU 的一定有原因。
-    // ★ 空批 / 全被裁掉（CPU 一个像素都没写）**不算 fallback**：它们不是"回退"，也没有像素差；
-    //   `draw_calls` 照记（可见性），`fallback_pixels` 只在真的由 CPU 写了像素时加。
-    // ★ `REQ-01M7AAXVGY9SG75XCREHPX641Z`（M1）：`skipped` 与 `fallback` **分开**记 ——
-    //   · `fallback` 判据仍是"CPU 真写了像素"（`pixels_written > 0`），本单不改；
-    //   · `skipped` 判据是"GPU 没画"，**⛔ 不依赖 `pixels_written`**（GPU 模式下那是 CPU 计数，
-    //     准入后拒绝 / 后端失败 / 带纹理点线都写 0 个像素 ⇒ 会漏记，设计 §A.3）。
+    // ★ 口径（`REQ-01M7A74YG08R65NJBFXF7DEJDK` 翻"跳过"之后）：
+    //   · `gpuEligible` 拒批已在**准入处早退**（那里 `noteGpuSkip` + `++draw_calls`）⇒ 走不到这里；
+    //   · 空批 / 全被裁掉（CPU 一个像素都没写）**不算"没画"**：它们本来就没有像素；
+    //   · `skipped` 判据是"GPU 没画"，**⛔ 不依赖 `pixels_written`**（设计 §A.3 的盲区）。
     if (have_gpu_backend) {
         ++g_gpu_coverage.draw_calls;
         if (gpu_done) {
@@ -5280,11 +4352,11 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
                 noteCoverageEmpty();
             }
         } else {
-            // 这一批 GPU **没画**：原因只有两种来源（后端失败 / 准入拒绝），文本与位都在上面定好了。
-            const std::string skip_why = gpu_failed ? fallback_reason
+            // 这一批 GPU **没画**：早退的那几类（准入拒绝 / `invw!=1` / MIP 缩小）都已经在自己那里记过
+            // `skipped`，走到这里的只有"准入通过、后端绘制/入队失败"（`gpu_failed`，上面已记 bit23）。
+            const std::string skip_why = gpu_failed ? backend_failure_reason
                                                     : (gpu_why.empty() ? std::string("GPU 不可用（原因未登记）")
                                                                        : gpu_why);
-            if (ctx.pixels_written > 0) gpuNoteFallback(skip_why, ctx.pixels_written);
             noteGpuSkip(cpu, pe, skip_why, gpu_failed ? kUnGpuBackendFailure : gpu_skip_bit);
         }
     }
@@ -5363,16 +4435,21 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
             }
             const double texa_mean =
                 texa_n != 0 ? static_cast<double>(texa_sum) / static_cast<double>(texa_n) : 0.0;
-            // ★ `fa=` 的取数：GPU 批用**顶点 α** 聚合（逐批、不受 `LIFT_SLOW_DRAW` 门控），
-            //   其余批用 CPU 光栅的**像素 α** 聚合（逐像素、受门控）。口径见 `lastDrawAlphaAgg()`。
-            const AlphaAgg& fa_agg = g_alpha_agg_from_gpu ? g_gpu_alpha_agg : g_alpha_agg;
+            // ★ `fa=` 的取数：**只**统计这一批真的交给 GPU 的**顶点 diffuse α**（逐批、不受门控）。
+            //   ★ **名字沿用历史（`fa=`），但口径是顶点 α**：旧 CPU 光栅的逐像素混合 α 已随那条
+            //     实现删除 ⇒ 这个字段 ⛔ 不再代表"真正参与混合的 α"（`REQ-01M7B7591WHEVZMYFZ1Q2D8SHQ`）。
+            //   口径见 `lastDrawAlphaAgg()`。
+            const AlphaAgg& fa_agg = g_gpu_alpha_agg;
             const double fa_mean = fa_agg.n != 0 ? static_cast<double>(fa_agg.sum) / static_cast<double>(fa_agg.n)
                                                  : 0.0;
             // ★ 本单：`rec=` **不许**只打"入队成功"。正常合批路径此刻还没 flush（Present / Clear 才提交）
             //   ⇒ 这一行先挂起，由后端的回报点（命令缓冲提交成功之后）补打成 `rec=1`；
             //   只有"已经确定不会进 render pass"的批（CPU 路 / GPU 回退 / 空批）才当场打 `rec=0`。
             //   ★ `vp` / `tgt` / `sc` / `z` 是**本批入队时**的状态（`A9` 分诊缺的就是这四个读数）：
-            //     `vp` 与 `tgt` 不等 ⇒ `toScreen` 的视口映射会被 GPU 的 NDC→viewport 再乘一次。
+            //     `vp != tgt` 是**正常**的（分屏 / RT 子矩形 / letterbox）：屏幕→NDC 用**视口矩形**
+            //     （`d3d9_gpu.cpp` 的 flush），与 GPU 的 NDC→viewport 互逆 ⇒ 视口只施加一次。
+            //     这两个读数仍有用：它告诉你"这一批不是全幅"，而不是"几何会被再乘一次"。
+            //     判据：`tests/d3d9_pipeline.cpp` 的 `d3d9p/clip-planes`（32×32 视口 + 全幅视口两臂）。
             char draw_line[2048];
             std::snprintf(
                 draw_line, sizeof(draw_line),
@@ -5836,8 +4913,8 @@ std::uint32_t drawPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t prim, std
     if (!submitPrimitives(cpu, pe, prim, verts, prim_count, ctx, &tris, &rast, why)) return kInvalidCall;
     plSet(cpu, pe, kPlDraws, plGet(cpu, pe, kPlDraws) + 1u);
     pipeLog("DrawPrimitive",
-            "PrimitiveType=%u StartVertex=%u PrimitiveCount=%u ⇒ 三角形 %u 个（光栅化 %u），写 %llu 个像素", prim,
-            start_vertex, prim_count, tris, rast, static_cast<unsigned long long>(ctx.pixels_written));
+            "PrimitiveType=%u StartVertex=%u PrimitiveCount=%u ⇒ 三角形 %u 个（光栅化 %u）", prim,
+            start_vertex, prim_count, tris, rast);
     return kOk;
 }
 
@@ -5974,9 +5051,8 @@ std::uint32_t drawIndexedPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t pr
     if (!submitPrimitives(cpu, pe, prim, verts, prim_count, ctx, &tris, &rast, why)) return kInvalidCall;
     plSet(cpu, pe, kPlDraws, plGet(cpu, pe, kPlDraws) + 1u);
     pipeLog("DrawIndexedPrimitive",
-            "PrimitiveType=%u BaseVertexIndex=%d PrimitiveCount=%u ⇒ 三角形 %u（光栅化 %u），写 %llu 个像素", prim,
-            static_cast<int>(base_vertex), prim_count, tris, rast,
-            static_cast<unsigned long long>(ctx.pixels_written));
+            "PrimitiveType=%u BaseVertexIndex=%d PrimitiveCount=%u ⇒ 三角形 %u（光栅化 %u）", prim,
+            static_cast<int>(base_vertex), prim_count, tris, rast);
     return kOk;
 }
 
@@ -6033,8 +5109,8 @@ std::uint32_t drawPrimitiveUP(X86& cpu, std::uint32_t dev, std::uint32_t prim, s
     if (!submitPrimitives(cpu, pe, prim, verts, prim_count, ctx, &tris, &rast, why)) return kInvalidCall;
     plSet(cpu, pe, kPlDraws, plGet(cpu, pe, kPlDraws) + 1u);
     pipeLog("DrawPrimitiveUP",
-            "PrimitiveType=%u PrimitiveCount=%u Stride=%u ⇒ 三角形 %u（光栅化 %u），写 %llu 个像素", prim,
-            prim_count, stride, tris, rast, static_cast<unsigned long long>(ctx.pixels_written));
+            "PrimitiveType=%u PrimitiveCount=%u Stride=%u ⇒ 三角形 %u（光栅化 %u）", prim,
+            prim_count, stride, tris, rast);
     return kOk;
 }
 
@@ -6125,8 +5201,8 @@ std::uint32_t drawIndexedPrimitiveUP(X86& cpu, std::uint32_t dev, std::uint32_t 
     if (!submitPrimitives(cpu, pe, prim, verts, prim_count, ctx, &tris, &rast, why)) return kInvalidCall;
     plSet(cpu, pe, kPlDraws, plGet(cpu, pe, kPlDraws) + 1u);
     pipeLog("DrawIndexedPrimitiveUP",
-            "PrimitiveType=%u PrimitiveCount=%u Stride=%u ⇒ 三角形 %u（光栅化 %u），写 %llu 个像素", prim,
-            prim_count, stride, tris, rast, static_cast<unsigned long long>(ctx.pixels_written));
+            "PrimitiveType=%u PrimitiveCount=%u Stride=%u ⇒ 三角形 %u（光栅化 %u）", prim,
+            prim_count, stride, tris, rast);
     return kOk;
 }
 
@@ -6199,7 +5275,8 @@ std::uint64_t gpuDrawCount() { return g_gpu_draws; }
 std::uint64_t gpuTriangleCount() { return g_gpu_triangles; }
 
 DrawAlphaAgg lastDrawAlphaAgg() {
-    const AlphaAgg& a = g_alpha_agg_from_gpu ? g_gpu_alpha_agg : g_alpha_agg;
+    // ★ 只有一份聚合：这一批**真的交给 GPU 的顶点** α（没有"CPU 像素 α"那一路了）。
+    const AlphaAgg& a = g_gpu_alpha_agg;
     DrawAlphaAgg out;
     out.from_gpu = g_alpha_agg_from_gpu;
     out.n = a.n;
@@ -6214,7 +5291,7 @@ DrawAlphaAgg lastDrawAlphaAgg() {
 // =====================================================================================
 const GpuCoverage& gpuCoverage() { return g_gpu_coverage; }
 
-// `skipped top:` 那一行（与 `fallback top:` 同形：次数降序、原因升序、最多 5 条）。
+// `skipped top:` 那一行（次数降序、原因升序、最多 5 条）。
 // ★ 放在这里（而不是 `machine.cpp` 里内联）的原因：夹具要能断言"原因真的出现在摘要里"，
 //   而夹具不跑整个 `Machine::dumpRunSummary`。
 std::string gpuSkippedTopLine() {
@@ -6261,21 +5338,15 @@ void gpuLedgerNoteRecorded(std::uint64_t tag) {
     drainPendingDrawLines(false);
 }
 
-void gpuNoteFallback(const std::string& reason, std::uint64_t pixels) {
-    ++g_gpu_coverage.fallback_draws;
-    g_gpu_coverage.fallback_pixels += pixels;
-    noteFallbackReason(reason);
+void gpuNoteSpriteDrawn() {
+    ++g_gpu_coverage.sprite_draws;
+    ++g_gpu_coverage.sprite_gpu_draws;
 }
 
-void gpuNoteSpriteResult(bool gpu, std::uint64_t pixels, const std::string& reason) {
+void gpuNoteSpriteNotDrawn(const std::string& reason) {
     ++g_gpu_coverage.sprite_draws;
-    if (gpu) {
-        ++g_gpu_coverage.sprite_gpu_draws;
-        return;
-    }
-    ++g_gpu_coverage.sprite_fallback_draws;
-    g_gpu_coverage.sprite_fallback_pixels += pixels;
-    noteFallbackReason(reason.empty() ? std::string("sprite: 未知原因") : reason);
+    ++g_gpu_coverage.sprite_skipped;
+    ++g_gpu_coverage.skipped_reasons[reason];
 }
 
 void gpuNoteSpriteSkipped() { ++g_gpu_coverage.sprite_skipped; }
@@ -6405,8 +5476,8 @@ StageExpr stageExprFor(std::uint32_t op, std::uint32_t arg1, std::uint32_t arg2)
     ConstSrc ck = ConstSrc::None;
     switch (op) {
         case kTopDisable:
-            // ★ CPU 的 applyTextureOp 对 DISABLE 落到 default 分支：取 **arg1**（不是“恒等于 DIFFUSE”）。
-            //   所以这里按 SELECTARG1(arg1) 判 —— 有纹理 + arg1=TEXTURE 时 CPU 取的是纹理。
+            // ★ D3DTOP_DISABLE 的语义 = 等价于 SELECTARG1(arg1)（不是"恒等于 DIFFUSE"）。
+            //   所以这里按 SELECTARG1(arg1) 判 —— arg1=TEXTURE 时取的是纹理色。
             return stageExprFor(kTopSelectArg1, arg1, 0u);
         case kTopSelectArg1:
             if (argIsTexture(arg1)) { e.kind = ExprKind::Texture; return e; }

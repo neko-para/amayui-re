@@ -4,7 +4,7 @@
 - type: bug
 - status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- verify: apps/emulator-lift/tests/save_graph.cpp#save-graph
+- verify: docs/03-emulator/observations.md#OBS-20261112-05
 - repro: graphs/sn0000-save.graph#click 650 320
 - tags: [emulator-lift, d3d9, save, thumbnail, black]
 

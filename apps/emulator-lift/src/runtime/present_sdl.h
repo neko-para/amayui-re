@@ -105,7 +105,7 @@ public:
     // ★ 深度清（D3D9 `Clear(..., D3DCLEAR_ZBUFFER)`）的转发。
     //   ⛔ 少了这一行，后端的 D32 就只在"建 target"时清过一次：上一帧末尾那张全屏 **z=0** 的
     //   quad 会把整屏深度写成 0，下一帧所有 `z>0` 的批都 `z <= 0` 判假 ⇒ 整层消失，而且
-    //   `fallback` 仍是 0（`REQ-01M73P3GXW22Y467YGYPQSM571` 的实测根因：GPU 光栅化臂的
+    //   账上一切正常（`REQ-01M73P3GXW22Y467YGYPQSM571` 的实测根因：GPU 光栅化臂的
     //   Live2D 角色整层丢失就是这个）。★ 它属于"转发壳漏一个虚函数"这一类错 —— 不改像素、
     //   不报错、测试全绿 ⇒ 守卫必须是"逐条转发"的（`tests/gpu_batch.cpp::caseDepthClearForwarded`）。
     void rasterRequestDepthClear() override;

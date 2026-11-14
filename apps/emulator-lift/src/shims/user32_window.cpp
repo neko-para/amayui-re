@@ -601,6 +601,11 @@ void shimDispatchMessageA(X86& cpu, ShimCall& call) {
         return;
     }
     HostWindow* w = cpu.windows->find(m.hwnd);
+    // ★ 诊断（info 档；⛔ 默认 warn 不打印）：这条是"guest 真的把消息交给了 WndProc"的唯一证据。
+    //   与 `[present] post WM_CLOSE …` 配对判读：只投递、不派发 ⇒ guest 的确认框没机会建
+    //   （判读表见 .tmp/close-path/wm-close.md §5.4）。
+    lift::logAt(lift::LogLevel::Info, lift::LogShim, "[msg] ", "dispatch msg=0x%04X hwnd=%08X",
+                m.message, m.hwnd);
     if (!w || w->proc == 0) {
         call.result = defWindowProcHost(m.hwnd, m.message, m.wparam, m.lparam);
         return;

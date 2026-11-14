@@ -4,7 +4,7 @@
 - type: req
 - status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- verify: apps/emulator-lift/tests/gdi_font_metrics_cache.cpp#cache/size-change
+- verify: apps/emulator-lift/tests/gdi_font.cpp#metrics-size-change
 - tags: [emulator-lift m2 font perf]
 
 ## 一句话
@@ -36,18 +36,15 @@
   18 ⇒ 字比 cxx 低 2px。等价性：cxx 的 `baseline − top = y+20−2−top`，lift 的 `(y+20) − (top+2)` 同一式。
 - 度量不动（`tmAscent` 仍是 FT 真值、行距 / extent 不变），修订说明见 `repo:apps/emulator-lift/SCOPE.md` §5.1。
 
-## 判据（守卫，都会红；文件 = `tests/gdi_font_metrics_cache.cpp` / `tests/text_baseline_lift.cpp`）
+## 判据（守卫，都会红；文件 = `tests/gdi_font.cpp` / `tests/text_baseline_lift.cpp`）
+
+★ 2026-11-13（`REQ-01M7AQ5QKKPC8YJTQA9DNRG2XA` 测试瘦身）：原 `gdi-font-metrics-cache` 整条删除
+（它锁的是缓存键 + hit/miss 计数，属 BUG-14 反模式）；"换字号必须给出对应字号度量"这条**真合同**
+搬进 `tests/gdi_font.cpp` 的 `metrics-size-change`（28 号的 ascent/height > 20 号，且 56 B 度量不同）。
 
 | 断言 | 用例 |
 |---|---|
-| 同字体同字号连测两次 ⇒ 第二次命中（FT 段只算一次） | `cache/hit` |
-| `-20`→`-28`：28 的 ascent/height **大于** 20、`misses == 2`（没串键） | `cache/size-change` |
-| 20→28→20：回选小字号命中且值不变 | `cache/size-back` |
-| `weight` 不进键、但 `tmWeight` 永远是本次 desc 的 | `cache/weight-not-in-key` |
-| 同字号换 bold（weight 700）必须是另一条（不许复用常规 face 的度量） | `cache/bold-not-aliased` |
-| `setSyntheticForTest` 之后必须 miss | `cache/synthetic-off-miss` |
-| `fontSetConfig`（同路径只改 lift）之后必须 miss | `cache/config-miss` |
-| 命中率那行真的打出来且数字与存取器一致 | `cache/profile-line` |
+| 换字号（`-20`→`-28`）⇒ 度量必须变：28 的 ascent/height **大于** 20，且 56 B 度量不同 | `metrics-size-change` |
 | `--baseline-lift 0` 与缺省：`gmptGlyphOrigin.y` 差正好 2、方向正确 | `lift/origin-delta` |
 | 两次 `TEXTMETRICA` 56B 逐字节相同、extent 宽高不变 | `lift/metrics-unchanged` |
 | 开关设 5 ⇒ origin 差正好 5（不是硬编码） | `lift/knob` |

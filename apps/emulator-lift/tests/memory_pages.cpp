@@ -6,7 +6,9 @@
 //   ③ 退掉之后能重新提交并再次使用；
 //   ④ `commitZeroed` 真的清零（PE 节 / 栈首次提交依赖它）；
 //   ⑤ 提交的**排他上界 = 4 GiB**（最后一页）不被 uint32 截断；
-//   ⑥ 堆的 `bytes + 块头` 溢出请求必须返回 0（⛔ 不许切出 size=0 的块再 4 GiB memset）。
+//   ⑥ 堆的 `bytes + 块头` 溢出请求必须返回 0（⛔ 不许切出 size=0 的块再 4 GiB memset）；
+//   ⑦ **提交（不清零）之后未写页仍读 0**：批量提交一整段，段内每页读 0、段外仍未提交
+//      （这条从已删的 `heap-layout` ① 搬来 —— 它是那条里"换一份实现仍需成立"的真不变量）。
 // ⚠ 判据里**不写**"退掉一页必须立刻不可访问"：16 KiB 宿主上退不掉半页，那是平台事实，不是缺陷
 //   （见 src/runtime/memory.cpp 的 GuestMemory::decommit）。
 #include "check.h"
@@ -57,7 +59,28 @@ int main() {
     g_current_case = "committed-bytes";
     LIFT_CHECK(m.committedBytes() >= 3ull * GuestMemory::kPage);
 
-    // ⑦ 跨宿主页的"整页 decommit"：kA/kB/kC 同属一个 16 KiB 宿主页 ⇒ 单页 decommit 在 16 KiB 上
+    // ⑦ 提交（**不清零**）之后，未写页必须读 0（模拟器的基本契约），且**段外仍未提交**
+    //   （越界不能"悄悄变成可读"）。从已删的 `heap-layout` ① 搬来：批量提交一整段，
+    //   段内每页的头尾都要读 0；写过的页照旧可读写。
+    g_current_case = "commit-unwritten-zero";
+    {
+        constexpr std::uint32_t kBatch = 0x00600000u;  // 4 KiB 对齐
+        constexpr std::uint32_t kPages = 64;           // 一次提交 256 KiB（"批量"而不是一页一页）
+        constexpr std::uint32_t kBatchBytes = kPages * GuestMemory::kPage;
+        LIFT_CHECK(m.commit(kBatch, kBatchBytes, RegionKind::Heap, "batch"));
+        for (std::uint32_t i = 0; i < kPages; ++i) {
+            const std::uint32_t ea = kBatch + i * GuestMemory::kPage;
+            LIFT_CHECK(m.committed(ea, 4));
+            LIFT_CHECK_EQ_U32(m.rd32(ea), 0u);
+            LIFT_CHECK_EQ_U32(m.rd32(ea + GuestMemory::kPage - 4u), 0u);
+        }
+        LIFT_CHECK(!m.committed(kBatch + kBatchBytes, 1));
+        LIFT_CHECK(!m.committed(kBatch - 1u, 1));
+        m.wr32(kBatch + 3u * GuestMemory::kPage, 0x11223344u);  // 批量提交不许把写路径弄坏
+        LIFT_CHECK_EQ_U32(m.rd32(kBatch + 3u * GuestMemory::kPage), 0x11223344u);
+    }
+
+    // ⑧ 跨宿主页的"整页 decommit"：kA/kB/kC 同属一个 16 KiB 宿主页 ⇒ 单页 decommit 在 16 KiB 上
     //   本来就是 no-op（保守口径）。这里用两个宿主页，让 decommit 真的发生：
     //   退掉 [0x400000,0x404000) 后，下一页 0x404000 必须还活着（且内容不变）。
     g_current_case = "decommit-whole-host-page";

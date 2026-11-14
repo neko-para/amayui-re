@@ -18,13 +18,12 @@
 //   ⑤b **直出 letterbox**（B1 回归守卫）：把窗口强制成 1000×1000（target 320×240 ⇒ 画面居中、
 //      上下有黑边）⇒ 叠层 blit 的 dst 原点必须 == **画面**矩形的左上角，且窗口 (0,0) 是黑边。
 //      ⛔ 不是"窗口 (0,0)"；⛔ 不依赖真实鼠标 / 真实分辨率。
-//   ⑥ **CLI smoke**（assets 档）：`--present window --present-hidden --overlay --max-frames 2`
-//      exit 0，且 `--present-screenshot` 的 BMP 左上角真的被叠层覆盖（精确颜色）；同一配置去掉
-//      `--overlay` 也 exit 0。窗口/GPU 不可用 ⇒ SKIP 77 + 原因。
+// ★ 原来的 ⑥「CLI smoke（assets 档：两次真 boot + BMP 左上角色块）」已于 2026-11-13 随 CTest
+//   瘦身删除（CTest `overlay-window-smoke`）：叠层是否被画出来由本文件的 ③④ 逐像素覆盖，
+//   而"带 `--overlay` 的真 boot 不崩"在起子进程的其它 CTest 里已经覆盖。
 //
-// ★ 本文件的断言只写**不变量**（行格式 / 矩形边界 / 颜色精确值 / exit 0），⛔ 不断言 fps 或帧号
+// ★ 本文件的断言只写**不变量**（行格式 / 矩形边界 / 颜色精确值），⛔ 不断言 fps 或帧号
 //   的具体数值（那是读数，不是契约）。
-// ★ 子进程输出走**文件重定向**（⛔ 不走管道：受限沙箱里捕获管道会 EPERM）。
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -32,15 +31,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
-#include <filesystem>
-#include <fstream>
-#include <iterator>
 #include <string>
 #include <vector>
 
 #include "check.h"
 #include "runtime/host_encoding.h"
-#include "subprocess_skip.h"
 #include "runtime/memory.h"
 #include "runtime/overlay.h"
 #include "runtime/present_sdl.h"
@@ -48,21 +43,7 @@
 
 #include <SDL3/SDL.h>
 
-#if defined(_WIN32)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#else
-#include <sys/wait.h>
-#endif
-
 namespace {
-
-namespace fs = std::filesystem;
 
 // =======================================================================================
 // ① 字体逐字栅格化
@@ -657,241 +638,12 @@ bool caseDirectWindow(std::string* skip_why) {
     return true;
 }
 
-// =======================================================================================
-// ⑥ CLI smoke（assets 档）：起子进程跑真游戏到第 2 帧
-// =======================================================================================
-struct ChildResult {
-    int exit_code = -1;
-    bool started = false;
-};
-
-#if defined(_WIN32)
-std::wstring quoteArg(const std::wstring& s) { return L"\"" + s + L"\""; }
-
-ChildResult runChild(const fs::path& exe, const std::vector<std::string>& args, const fs::path& log_path) {
-    ChildResult r;
-    std::wstring joined;
-    for (const std::string& a : args) joined += L" " + quoteArg(lift::utf8ToWide(a));
-    SECURITY_ATTRIBUTES sa{};
-    sa.nLength = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-    const HANDLE h = ::CreateFileW(log_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS,
-                                   FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return r;
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdOutput = h;
-    si.hStdError = h;
-    PROCESS_INFORMATION pi{};
-    std::wstring cmd = quoteArg(exe.wstring()) + joined;
-    const BOOL ok = ::CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
-                                     nullptr, &si, &pi);
-    ::CloseHandle(h);
-    if (!ok) return r;
-    r.started = true;
-    const DWORD waited = ::WaitForSingleObject(pi.hProcess, 480000u);
-    if (waited != WAIT_OBJECT_0) {
-        ::TerminateProcess(pi.hProcess, 991u);
-        ::WaitForSingleObject(pi.hProcess, 10000u);
-    }
-    DWORD code = 0xFFFFFFFFu;
-    ::GetExitCodeProcess(pi.hProcess, &code);
-    r.exit_code = static_cast<int>(code);
-    ::CloseHandle(pi.hThread);
-    ::CloseHandle(pi.hProcess);
-    return r;
-}
-#else
-std::string shellQuote(const std::string& s) {
-    std::string out = "'";
-    for (const char c : s) out += (c == '\'') ? std::string("'\\''") : std::string(1, c);
-    out += "'";
-    return out;
-}
-
-ChildResult runChild(const fs::path& exe, const std::vector<std::string>& args, const fs::path& log_path) {
-    ChildResult r;
-    std::string cmd = shellQuote(exe.string());
-    for (const std::string& a : args) cmd += " " + shellQuote(a);
-    cmd += " > " + shellQuote(log_path.string()) + " 2>&1";
-    const int rc = std::system(cmd.c_str());
-    if (rc == -1 || !fs::exists(log_path)) return r;
-    r.started = true;
-    r.exit_code = WIFEXITED(rc) ? WEXITSTATUS(rc) : (WIFSIGNALED(rc) ? 128 + WTERMSIG(rc) : 1);
-    return r;
-}
-#endif
-
-std::string readAllBytes(const fs::path& p) {
-    std::ifstream in(p, std::ios::binary);
-    if (!in) return {};
-    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-}
-
-bool contains(const std::string& hay, const char* needle) { return hay.find(needle) != std::string::npos; }
-
-// 环境不满足（不是判据红）：窗口系统 / GPU / 执行源。
-// ★ "GPU 拒绝启动"**不在这里**：它由 `subprocessRefusedForNoGpu` 单独判（要求本机实探无 GPU），
-//   ⛔ 别把 `拒绝启动` 加回来 —— GPU 可用时的一次启动回归会被静默吞成 SKIP。
-bool environmentUnavailable(const std::string& log) {
-    return contains(log, "窗口打开失败") || contains(log, "要求 GPU 光栅化") ||
-           contains(log, "GPU 光栅化后端创建失败") || contains(log, "SDL_CreateWindow 失败") ||
-           contains(log, "SDL_CreateRenderer") || contains(log, "SDL_Init(VIDEO) 失败") ||
-           // `--present window` 的 init 失败（窗口 / GPU / renderer 三选一）= 环境缺失。
-           contains(log, "--present window 失败") || contains(log, "找不到执行源");
-}
-
-// 从窗口 BMP 统计左上角一块里的叠层颜色（用 SDL 自己解，不手写 BMP 解析）。
-bool scanBmpTopLeft(const fs::path& bmp, long* bg, long* fg, std::string* why) {
-    *bg = 0;
-    *fg = 0;
-    SDL_Surface* loaded = SDL_LoadBMP(bmp.string().c_str());
-    if (loaded == nullptr) {
-        *why = std::string("SDL_LoadBMP 失败：") + SDL_GetError();
-        return false;
-    }
-    SDL_Surface* argb = SDL_ConvertSurface(loaded, SDL_PIXELFORMAT_ARGB8888);
-    SDL_DestroySurface(loaded);
-    if (argb == nullptr) {
-        *why = std::string("SDL_ConvertSurface 失败：") + SDL_GetError();
-        return false;
-    }
-    const auto bg_rgb = (static_cast<std::uint32_t>(lift::kOverlayBg[0]) << 16) |
-                        (static_cast<std::uint32_t>(lift::kOverlayBg[1]) << 8) | lift::kOverlayBg[2];
-    const auto fg_rgb = (static_cast<std::uint32_t>(lift::kOverlayFg[0]) << 16) |
-                        (static_cast<std::uint32_t>(lift::kOverlayFg[1]) << 8) | lift::kOverlayFg[2];
-    const int w = argb->w < 160 ? argb->w : 160;
-    const int h = argb->h < 64 ? argb->h : 64;
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            std::uint32_t px = 0;
-            std::memcpy(&px, static_cast<const std::uint8_t*>(argb->pixels) + static_cast<std::size_t>(y) * argb->pitch +
-                                 static_cast<std::size_t>(x) * 4u,
-                        4u);
-            const std::uint32_t rgb = px & 0x00FFFFFFu;
-            if (rgb == bg_rgb) ++*bg;
-            if (rgb == fg_rgb) ++*fg;
-        }
-    }
-    SDL_DestroySurface(argb);
-    return true;
-}
-
-// 返回 false 只表示环境不可用；真实回归用 LIFT_CHECK 记红。
-bool runWindowSmoke(const std::vector<std::string>& args, std::string* skip_why) {
-    lift_test::g_current_case = "overlay/window-smoke";
-    if (args.size() < 5) {
-        std::fprintf(stderr, "用法：lift-overlay --window-smoke <emulator-lift> <game-dir> <work-dir>\n");
-        LIFT_CHECK(false);
-        return true;
-    }
-    const fs::path exe = args[2];
-    const std::string game_dir = args[3];
-    const fs::path work = args[4];
-    std::error_code ec;
-    fs::create_directories(work, ec);
-    fs::create_directories(work / "appdata-overlay", ec);
-    fs::create_directories(work / "appdata-plain", ec);
-
-    auto childArgs = [&](bool with_overlay, const fs::path& shot, const fs::path& appdata) {
-        std::vector<std::string> a = {
-            "--present", "window",
-            "--present-hidden",
-            "--max-frames", "2",
-            "--skip-logo",
-            "--audio", "off",
-            "--game-dir", game_dir,
-            "--appdata", appdata.string(),
-            "--present-screenshot", shot.string(),
-            "--present-screenshot-frame", "2",
-            "--time-limit", "300",
-        };
-        if (with_overlay) a.push_back("--overlay");
-        return a;
-    };
-
-    const fs::path log_overlay = work / "overlay.log";
-    const fs::path shot_overlay = work / "overlay.bmp";
-    const ChildResult with = runChild(exe, childArgs(true, shot_overlay, work / "appdata-overlay"), log_overlay);
-    const std::string log = readAllBytes(log_overlay);
-    if (!with.started) {
-        *skip_why = "起不了子进程（emulator-lift 路径不对？）";
-        return false;
-    }
-    if (with.exit_code != 0) {
-        if (lift_test::subprocessRefusedForNoGpu(with.exit_code, log)) {
-            *skip_why = "无 GPU：子进程拒绝启动";
-            return false;
-        }
-        if (environmentUnavailable(log)) {
-            *skip_why = "窗口 / GPU 不可用（子进程 exit " + std::to_string(with.exit_code) + "）";
-            return false;
-        }
-        std::fprintf(stderr, "子进程 log（前 4000 字节）：\n%.4000s\n", log.c_str());
-        LIFT_CHECK(false);
-        return true;
-    }
-    // 报告实际走的是哪条路（不是断言：两条都必须能跑）
-    if (contains(log, "present=direct/")) {
-        std::printf("overlay smoke: 路径 = GPU 直出（present=direct）\n");
-    } else {
-        std::printf("overlay smoke: 路径 = SDL_Renderer 上传（没有 present=direct）\n");
-    }
-    LIFT_CHECK(fs::exists(shot_overlay));
-    long bg = 0;
-    long fg = 0;
-    std::string why;
-    if (!scanBmpTopLeft(shot_overlay, &bg, &fg, &why)) {
-        std::fprintf(stderr, "%s\n", why.c_str());
-        LIFT_CHECK(false);
-    } else {
-        // 精确颜色 ≠ 猜：深底一块 + 亮字。阈值很宽（只防"没画"），不是"断言当前读数"。
-        LIFT_CHECK(bg >= 500);
-        LIFT_CHECK(fg >= 50);
-        std::printf("overlay smoke: 左上角 160×64 里 bg=%ld fg=%ld\n", bg, fg);
-    }
-
-    // 同一配置去掉 --overlay：必须照样 exit 0（开关不改变执行）
-    const fs::path log_plain = work / "plain.log";
-    const ChildResult plain = runChild(exe, childArgs(false, work / "plain.bmp", work / "appdata-plain"), log_plain);
-    const std::string plain_log = readAllBytes(log_plain);
-    if (!plain.started) {
-        LIFT_CHECK(false);
-        return true;
-    }
-    if (plain.exit_code != 0) {
-        if (lift_test::subprocessRefusedForNoGpu(plain.exit_code, plain_log)) {
-            *skip_why = "无 GPU：子进程拒绝启动";
-            return false;
-        }
-        if (environmentUnavailable(plain_log)) {
-            *skip_why = "窗口 / GPU 不可用（对照臂 exit " + std::to_string(plain.exit_code) + "）";
-            return false;
-        }
-        std::fprintf(stderr, "对照臂 log（前 4000 字节）：\n%.4000s\n", plain_log.c_str());
-        LIFT_CHECK(false);
-        return true;
-    }
-    // 开关只在窗口像素上：两臂都必须真的跑到 max-frames 停机（⛔ 不断言帧号数值）
-    LIFT_CHECK(contains(log, "detail    : max-frames"));
-    LIFT_CHECK(contains(plain_log, "detail    : max-frames"));
-    return true;
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
     using namespace lift_test;
     const std::vector<std::string> args = lift::argvUtf8(argc, argv);
     const bool gpu = args.size() >= 2 && args[1] == "--gpu";
-    const bool smoke = args.size() >= 2 && args[1] == "--window-smoke";
-
-    if (smoke) {
-        std::string skip_why;
-        if (!runWindowSmoke(args, &skip_why)) LIFT_SKIP(skip_why.c_str());
-        return finish("overlay-window-smoke");
-    }
 
     caseGlyphBitmaps();
     caseFormatLines();

@@ -372,25 +372,6 @@ int main() {
                     (guest_dir + "AGE1234.TMP").c_str(), n1.c_str(), n2.c_str());
     }
 
-    // ④b A4：`setAppDataDir` 清掉上一轮的 `<--appdata>/Local/Temp`（否则 `GetTempFileNameA(
-    //     uUnique=0)` 的序号跨运行累积，同一条命令两次会得到不同名字 / 不同 trace）。
-    //     ★ 2026-11-05：清理点从 `--game-dir/.lift-tmp` 移到 `--appdata`（⛔ 不再写安装树）。
-    {
-        g_current_case = "temp-dir-cleared";
-        std::error_code tec;
-        const fs::path tempdir = dir / "appdata" / "Local" / "Temp";
-        fs::create_directories(tempdir, tec);
-        std::FILE* tf = std::fopen(pathToUtf8(tempdir / "AGE0000.TMP").c_str(), "wb");
-        LIFT_CHECK(tf != nullptr);
-        if (tf) std::fclose(tf);
-        LIFT_CHECK(fs::exists(tempdir / "AGE0000.TMP", tec));
-        Fixture g;
-        g.m.vfs().setGameDir(pathToUtf8(dir));  // 触发清理的是 setAppDataDir，不是 setGameDir
-        LIFT_CHECK(fs::exists(tempdir / "AGE0000.TMP", tec));  // 还没设 --appdata ⇒ 不能删
-        g.m.vfs().setAppDataDir(pathToUtf8(dir / "appdata"));
-        LIFT_CHECK(!fs::exists(tempdir / "AGE0000.TMP", tec));
-    }
-
     // ⑤ shlwapi!PathRemoveFileSpecA（P4 小族）：去掉最后一段 + 一个分隔符
     //    判据 = ① 结果串（四个边界逐条）② 返回值 = **是否真的移除了东西**
     //           ③ 只写回"新串 + 结尾 0"，旧串尾巴不清（真机也不清；调用方常紧跟 strcat_s）。

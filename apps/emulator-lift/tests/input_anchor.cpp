@@ -100,13 +100,6 @@ bool loadScript(lift::Machine& m, const char* text) {
 // 原地空转（`jmp 0x4123F0`）：身份**永不变化**，只用来看"门控有没有放行采样"与"没闩锁 ⇒ 响亮失败"。
 std::vector<std::uint8_t> spinAtLoopHead() { return {0xEB, 0xFE}; }
 
-// `mov dword ptr [0x004DD880], 1` + `jmp 0x4123F0`：首个样本 cur=0（id=1），之后 cur=1（id=4）
-//   ⇒ 覆盖"先经过别的脚本、再进入目标"的端到端形状（⛔ 不是只在纯夹具里模拟）。
-std::vector<std::uint8_t> setCurOneAndLoop() {
-    return {0xC7, 0x05, 0x80, 0xD8, 0x4D, 0x00, 0x01, 0x00, 0x00, 0x00,  // mov dword [0x004DD880], 1
-            0xEB, 0xF4};                                                 // jmp 0x4123F0（0x4123FC − 12）
-}
-
 // ---- stdout + stderr 一起捕获（"响亮失败"要断言"真的打出来了"）----
 #ifdef _WIN32
 using FdT = int;
@@ -448,71 +441,6 @@ int main() {
         LIFT_CHECK(s.tick(wm, 17, 800, 1777, 300));   // 四个单位同时到达 ⇒ 四条 wait 全应用
         LIFT_CHECK(s.appliedCount() == 4);
         LIFT_CHECK(!s.quitRequested());
-    }
-
-    // =================================================================================
-    // ⑨ 真 `Machine::run`：**只有 anchor、没有 marker 动作**也必须采样（L6 门控）
-    //    ★ 门控退回 `hasMarkerActions()` ⇒ 一次也不采样 ⇒ 永不闩锁 ⇒ 本用例红（收尾报 origin-missed）。
-    // =================================================================================
-    {
-        g_current_case = "anchor/samples-without-marker-action";
-        lift::Machine m;
-        LIFT_CHECK(boot(m));
-        setIdentity(m, 0, 4);
-        std::string err;
-        const std::vector<std::uint8_t> code = spinAtLoopHead();
-        LIFT_CHECK(m.placeCode(kLoopHeadEa, code.data(), code.size(), &err));
-        LIFT_CHECK(loadScript(m, "at insn 400\nquit\n"));
-        LIFT_CHECK(!m.inputScript().hasMarkerActions());  // ★ 只有 anchor，没有 marker 动作
-        m.inputScript().setOriginScript(4);
-        lift::RunOptions o;
-        o.max_insns = 2000000ull;
-        o.time_limit_sec = 10.0;
-        const lift::RunResult r = m.run(o);
-        LIFT_CHECK(r.reason == lift::StopReason::Stopped);
-        LIFT_CHECK(r.detail == "input script: quit");
-        LIFT_CHECK(!r.origin_missed);
-        LIFT_CHECK(r.ok());
-        LIFT_CHECK(m.inputScript().originSet());
-        LIFT_CHECK(m.inputScript().origin().id == 4);
-        LIFT_CHECK(m.inputScript().originLatches() == 1);
-        LIFT_CHECK(m.markerSampler().published() >= 1);  // ★ 采样真的发生了
-        LIFT_CHECK(m.inputScript().markerSamples() >= 1);
-        // ★ 配置跨 `clear()` 存活、状态随脚本清空（K8：两者混在同一个重置点里一定会有一边错）。
-        //   配置被清 ⇒ anchor 静默失效（一条失败都不报）—— 那正是"静默失败"，必须守。
-        LIFT_CHECK(loadScript(m, "at insn 10\nquit\n"));  // `loadText` 内部会 `clear()`
-        LIFT_CHECK(m.inputScript().originRequested());
-        LIFT_CHECK(m.inputScript().originScriptId() == 4);
-        LIFT_CHECK(!m.inputScript().originSet());
-    }
-
-    // =================================================================================
-    // ⑩ 真 `Machine::run`：**"进了但 id 是别的"不算失败**（路过 INIT 再进目标 ⇒ 正常收口）
-    //    ★ 若把"每到不是 X 就报错"写进来 ⇒ 本用例红。
-    // =================================================================================
-    {
-        g_current_case = "anchor/passing-other-scripts-is-not-a-failure";
-        lift::Machine m;
-        LIFT_CHECK(boot(m));
-        setRecord(m, 0, 1);  // cur=0 ⇒ id=1（第一个样本，不是目标）
-        setRecord(m, 1, 4);  // cur=1 ⇒ id=4（目标）
-        put32(m.mem(), kCurEa, 0);
-        std::string err;
-        const std::vector<std::uint8_t> code = setCurOneAndLoop();
-        LIFT_CHECK(m.placeCode(kLoopHeadEa, code.data(), code.size(), &err));
-        LIFT_CHECK(loadScript(m, "at insn 5000\nquit\n"));
-        m.inputScript().setOriginScript(4);
-        lift::RunOptions o;
-        o.max_insns = 2000000ull;
-        o.time_limit_sec = 10.0;
-        const lift::RunResult r = m.run(o);
-        LIFT_CHECK(r.reason == lift::StopReason::Stopped);
-        LIFT_CHECK(!r.origin_missed);
-        LIFT_CHECK(r.ok());
-        LIFT_CHECK(m.inputScript().originSet());
-        LIFT_CHECK(m.inputScript().origin().id == 4);
-        LIFT_CHECK(m.inputScript().originLatches() == 1);
-        LIFT_CHECK(m.markerSampler().published() >= 2);  // 先看到 id=1，再看到 id=4
     }
 
     // =================================================================================

@@ -4,7 +4,7 @@
 - type: bug
 - status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- verify: apps/emulator-lift/tests/quit_graph.cpp#quit-graph
+- verify: docs/03-emulator/defects.md#BUG-22
 - repro: graphs/sn0000-quit.graph#click 1180 640
 - severity: S2
 - tags: [emulator-lift, quit, title, unimplemented]

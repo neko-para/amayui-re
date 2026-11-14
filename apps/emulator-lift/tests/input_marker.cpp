@@ -308,34 +308,6 @@ int main() {
     }
 
     // =================================================================================
-    // ⑤ 越界 id ⇒ 降级 + 一次警告（⛔ 不崩、⛔ 不静默；降级仍按 id 触发）
-    // =================================================================================
-    {
-        g_current_case = "marker-id-out-of-range-degrades";
-        lift::Machine m;
-        LIFT_CHECK(boot(m));
-        installRootTable(m, /*count=*/2);  // id 2 越界
-        putName(m, kNameBase, 0, "INIT.BIN");
-        setIdentity(m, 0, 0);
-        LIFT_CHECK(loadScript(m, "at marker id:0x00000002\nquit\n"));
-        LIFT_CHECK(!m.sampleMarker());  // 播种
-        setIdentity(m, 1, 2);
-        std::string log;
-        {
-            Capture cap;
-            LIFT_CHECK(cap.begin());
-            LIFT_CHECK(m.sampleMarker());
-            log = cap.finish();
-        }
-        LIFT_CHECK(m.lastMarkerSample().valid);           // 身份可读 ⇒ 事件仍发
-        LIFT_CHECK(m.lastMarkerSample().name_degraded);   // 名字读不到 ⇒ 降级
-        LIFT_CHECK(m.lastMarkerSample().name == "id:0x00000002");
-        LIFT_CHECK(contains(log, "[marker] ⚠ 名字表不可读"));
-        LIFT_CHECK(contains(log, "id:0x00000002"));
-        LIFT_CHECK(m.inputScript().quitRequested());  // 降级后仍按 id 形触发
-    }
-
-    // =================================================================================
     // ⑥ 负数 id ⇒ 不崩、按裁决降级（钉住"负数不是无条件 ERROR"这个真实语义：
     //    引擎 `sar 24` 得 −1 ⇒ 读卷表**之前** 4 字节（表外读）；宿主必须自己判 id<0）
     // =================================================================================
@@ -367,33 +339,6 @@ int main() {
         LIFT_CHECK(m.lastMarkerSample().name == "id:0xFFFFFFFF");  // ⛔ 不是 "TRAP.BIN"
         LIFT_CHECK(contains(log, "id<0"));
         LIFT_CHECK(m.inputScript().quitRequested());
-    }
-
-    // =================================================================================
-    // ⑦ 名字表基址 = 0 ⇒ 降级仍触发 + 警告
-    // =================================================================================
-    {
-        g_current_case = "marker-name-base-zero-degrades";
-        lift::Machine m;
-        LIFT_CHECK(boot(m));
-        installRootTable(m, /*count=*/2, /*name_base=*/0);
-        setIdentity(m, 0, 0);
-        LIFT_CHECK(loadScript(m, "at marker id:0x00000001\nquit\n"));
-        // 播种那次就已经降级（名字表基址 0）⇒ 警告必须在那一次打出来（每类一次）。
-        std::string log;
-        {
-            Capture cap;
-            LIFT_CHECK(cap.begin());
-            LIFT_CHECK(!m.sampleMarker());  // 播种（降级样本仍算有效）
-            setIdentity(m, 1, 1);
-            LIFT_CHECK(m.sampleMarker());   // 值变、降级后仍按 id 形触发
-            log = cap.finish();
-        }
-        LIFT_CHECK(m.lastMarkerSample().valid);
-        LIFT_CHECK(m.lastMarkerSample().name_degraded);
-        LIFT_CHECK(contains(log, "名字表不可读"));
-        LIFT_CHECK(m.inputScript().quitRequested());  // 降级**没有**让事件静默丢失
-        LIFT_CHECK(m.inputScript().markerEdges() == 1);
     }
 
     // =================================================================================

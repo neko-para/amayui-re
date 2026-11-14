@@ -9,12 +9,14 @@
 //      Release 清掉 pending；
 //   ⑥ 静音门：缺省 `sound=false` 时 dump 全 0 但 fills / mixed / 通知照跑；`sound=true` 逐字节
 //      等于 guest 斜坡（见文件末尾的 runDelivery）。
-//   ⑦ 第 3 层补偿的覆盖面：`removeBuffer` / `addBuffer`（同一 state 换 obj）在
-//      `filling_obj_` 命中时**有界等**"正在跑的那一刀"（`removeBuffer` 挡在 guest 堆 free 之前；
-//      用夹具 seam 伪造在飞 fill，见文件后半的三条用例）。
+//   ⑦ (已删) 第 3 层补偿的覆盖面：`removeBuffer` / `addBuffer`（同一 state 换 obj）在
+//      `filling_obj_` 命中时"有界等"那一刀 —— 判据是夹具 seam 计数 `fill_waits` + `≥15 ms`
+//      墙钟阈值（seam 计数 + 毫秒阈值，`AGENTS.md` §10）⇒ 删（连 seam 夹具一起）。
+//      要守 UAF 就改成"erase 之后不许再写 guest 环"的字节判据（另立单）。
 //   ⑧ underrun 插静音（判据 = 写见证 `[stream+0x2468]`，⛔ 不是内容比对）：环陈旧 ⇒ 该区交付 0
-//      + 计数；健康驱动不误判；guest 自己的全 0 静音不算 underrun；一刀真 fill 的见证接线
-//      （`fill_witnessed` / `guest_silence_fills`）。见文件末尾的四条用例。
+//      + 计数；健康驱动不误判；guest 自己的全 0 静音不算 underrun。
+//      ★ 已删的判据：`fill-witness-wiring`（真 fill 前后 `witness[quarter]` 恰好 +1）—— 那是
+//      "我的计数器加一了"的接线证明，被上面三条的**交付字节**判据覆盖且更弱 ⇒ 删。
 //
 // ★ 会红：把 `fireCrossings` 的 sort 去掉 ⇒ ① 的回绕 0 会排在 3 之前；
 //   把 `generateTo` 的声道/采样率转换去掉 ⇒ ③ 红；把 removeBuffer 的 pending 清理去掉 ⇒ ⑤ 红；
@@ -977,8 +979,8 @@ void testMutedDeliveryParity() {
 //   - 删掉 `generateTo` 里的陈旧分支（恒 fresh）⇒ S1 红（第 2 圈是斜坡旧内容，events=0）；
 //   - 把判据改成"内容全 0 ⇒ 陈旧"或"恒陈旧"⇒ S2 / S3 红；
 //   - 删掉 fill 收尾的 `witness++`（`noteFillWitness`）⇒ **S1/S2/S3 全绿**（实测）：本夹具的
-//     "刀"走 `noteFillForTest` seam、**不经过** `noteFillWitness` ⇒ 它由 `fill-witness-wiring`
-//     的"真 fill 前后恰好一个 quarter 的 `witness` +1"钉住（见该用例的 ★）。
+//     "刀"走 `noteFillForTest` seam、**不经过** `noteFillWitness` ⇒ 这一处的接线**已无守卫**
+//     （原 `fill-witness-wiring` 判据按测试模型删了：它只证明"我的计数器加一了"）。
 //   - 复位表写错（`markRingFresh` 少 `++witness`）⇒ `sound-on-delivery` / S1 等红，**S2 不红**
 //     （实测；`noteFillForTest` 每圈仍把 witness 喂到 consumed 之上）。
 constexpr std::uint32_t kRingLapBytes = 384000u;  // 48k / 16 / 2 ⇒ 2.0 s 一圈
@@ -1105,158 +1107,6 @@ void testUnderrunSilenceGuestZeros() {
     LIFT_CHECK_EQ_U32(r.stats.underruns, 0u);
 }
 
-// ---- 写见证链路：一刀**真 fill** → `[+0x2468]` 前后比较 → `fill_witnessed` ------------------
-//
-// ★ 判据（design §1.6 的 `fill-witness-wiring`）：照 `runDelivery` 跑一刀真 fill，把
-//   `[stream+0x2458]` / `[+0x2468]` 预置成三档 ⇒
-//     ① 写（`[+0x2468]` 被 inc）：`fill_witnessed==1`、`guest_silence_fills==0`；
-//     ② 0 = Stop 早退（不 inc）：`fill_witnessed==0`；
-//     ③ 2 = 放完（inc + `[+0x2458]>=2`）：`fill_witnessed==1`、`guest_silence_fills==1`
-//        ⇒ 这就是"guest 自己的静音 ≠ underrun"的机械来源。
-// ★ 会红：把 `noteFillWitness` 的 `pre != post` 判据去掉（或改成只看 `[+0x2458]`）⇒ ②/③ 红；
-//   ★ 删掉 `noteFillWitness` 的 `++witness` ⇒ **本用例**红（①/③ 的"恰好一个 quarter 的
-//   `witness` +1"不成立）；`underrun-silence-*` 全绿 —— 它们走 `noteFillForTest` seam。
-constexpr std::uint32_t kWitnessStreamBytes = 0x3000u;  // 必须覆盖 [stream+0x2468]
-
-struct WitnessRun {
-    bool begun = false;
-    bool filled = false;
-    std::uint64_t fills = 0;
-    std::uint64_t witnessed = 0;
-    std::uint64_t guest_silence = 0;
-    // ★ 真 fill 前后 `witness[0..3]` 的快照：前 = `play()` 之后（`markRingFresh` 已跑完）、
-    //   `registerFeeder()` 之前；后 = `m.run()` 返回之后。下面对差值的断言 ≡
-    //   `noteFillWitness` 里那句 `++witness[quarter]`（stats 的 `fill_witnessed` 钉不住它）。
-    std::uint64_t witness_before[4] = {};
-    std::uint64_t witness_after[4] = {};
-};
-
-// 真 fill 前后 `witness[]` 的变化：涨了的 quarter 数 / 增量总和。真写了一刀 ⇒ 恰好 1 / 1。
-std::uint32_t witnessDeltaQuarters(const WitnessRun& w) {
-    std::uint32_t n = 0;
-    for (std::uint32_t q = 0; q < 4u; ++q)
-        if (w.witness_after[q] > w.witness_before[q]) ++n;
-    return n;
-}
-
-std::uint64_t witnessDeltaSum(const WitnessRun& w) {
-    std::uint64_t sum = 0;
-    for (std::uint32_t q = 0; q < 4u; ++q) sum += w.witness_after[q] - w.witness_before[q];
-    return sum;
-}
-
-WitnessRun runOneFillWitness(const std::vector<std::uint8_t>& stub, std::uint32_t stub_insns,
-                             std::uint32_t f2458, std::uint32_t f2468, const char* tag) {
-    WitnessRun r;
-    std::string err;
-    lift::Machine m;
-    if (!initMachine(m, &err)) return r;
-    const std::string dump = std::string("lift-audio-witness-") + tag + ".wav";
-    std::remove(dump.c_str());
-    if (!m.configureAudio(lift::AudioMode::Virtual, dump, /*sound=*/true, &err)) return r;
-    lift::AudioEngine& a = m.audio();
-    if (!a.begin(&err)) return r;
-    r.begun = true;
-
-    const std::uint32_t code_ea = 0x004B6C30u;
-    const std::uint32_t sound_obj = 0x00460000u;
-    const std::uint32_t stream = 0x00461000u;
-    const std::uint32_t state = 0x00462000u;
-    const std::uint32_t data = 0x00400000u;
-    const std::uint32_t obj = 0x00463000u;
-    const std::uint32_t bytes = kRingLapBytes;
-    const std::uint32_t slot = 11u;
-    const std::uint32_t quit = 0x00001234u;
-    if (!m.placeCode(code_ea, stub.data(), stub.size(), &err)) return r;
-    std::vector<std::uint8_t> zeros(0x1000, 0);
-    std::vector<std::uint8_t> stream_mem(kWitnessStreamBytes, 0);
-    if (!m.placeData(sound_obj, zeros.data(), zeros.size(), &err)) return r;
-    if (!m.placeData(stream, stream_mem.data(), stream_mem.size(), &err)) return r;
-    if (!m.placeData(state, zeros.data(), 16, &err)) return r;
-    const std::vector<std::int16_t> pcm = makeRamp(bytes);
-    if (!m.placeData(data, pcm.data(), bytes, &err)) return r;
-    m.mem().wr32(sound_obj + 0x514u, quit);
-    m.mem().wr32(sound_obj + 0x654u + 4u * slot, stream);
-    m.mem().wr32(stream + 0x40Cu, obj);
-    m.mem().wr32(stream + 0x444u, bytes);
-    m.mem().wr32(stream + 0x2458u, f2458);  // "放完"标志（>=2 = 填静音）
-    m.mem().wr32(stream + 0x2468u, f2468);  // 已写圈数（fill 前后比较的写见证）
-
-    lift::AudioFormat fmt;
-    fmt.sample_rate = 48000;
-    fmt.channels = 2;
-    fmt.bits = 16;
-    fmt.block_align = 4;
-    fmt.avg_bytes = 192000;
-    a.addBuffer(state, obj, data, bytes, 0x181C8u, fmt);
-    const std::uint32_t offsets[4] = {0u, 96000u, 192000u, 288000u};
-    a.setNotify(state, 4, offsets);
-    a.play(state, true);
-    for (std::uint32_t q = 0; q < 4u; ++q) r.witness_before[q] = a.fillWitnessForTest(obj, q);
-    if (!a.registerFeeder(0x004B5AA0u, sound_obj, 0x00001008u, 0x000002D0u)) return r;
-    a.resumeFeeder();
-
-    m.clock().advance100ns(2'500'000);  // 0.25 s ⇒ 不跨通知点 ⇒ 恰好一刀
-    if (a.pump() != lift::AudioPump::Suspended) return r;
-    lift::RunOptions opt;
-    opt.max_insns = stub_insns;
-    const lift::RunResult rr = m.run(opt);
-    if (rr.reason != lift::StopReason::MaxInsns) return r;
-    r.filled = true;
-
-    const lift::AudioStats& st = a.stats();
-    r.fills = st.fills;
-    r.witnessed = st.fill_witnessed;
-    r.guest_silence = st.guest_silence_fills;
-    for (std::uint32_t q = 0; q < 4u; ++q) r.witness_after[q] = a.fillWitnessForTest(obj, q);
-    std::remove(dump.c_str());
-    return r;
-}
-
-void testFillWitnessWiring() {
-    lift_test::g_current_case = "audio-device/fill-witness-wiring";
-    // `inc dword ptr [ecx+2468h]` + `ret 4`（两条指令）：模拟"真写了环"的 fill。
-    const std::vector<std::uint8_t> write_stub = {0xFF, 0x81, 0x68, 0x24, 0x00, 0x00, 0xC2, 0x04, 0x00};
-    // 只有 `ret 4`：模拟 `[+0x2458]==0` 的 Stop 早退（不 inc ⇒ 不计见证）。
-    const std::vector<std::uint8_t> stop_stub = {0xC2, 0x04, 0x00};
-
-    // ① 写了环；[+0x2458]=1（没放完）⇒ 见证 1、guest 静音 0。
-    {
-        const WitnessRun w = runOneFillWitness(write_stub, 2, /*f2458=*/1u, /*f2468=*/0u, "write");
-        LIFT_CHECK(w.begun && w.filled);
-        LIFT_CHECK_EQ_U32(w.fills, 1u);
-        LIFT_CHECK_EQ_U32(w.witnessed, 1u);
-        LIFT_CHECK_EQ_U32(w.guest_silence, 0u);
-        // ★ 本用例的**核心**：`noteFillWitness` 真的把"这一刀写了环"落到 `witness[quarter]` 上
-        //   （stats 的 `fill_witnessed` 是另一行 ⇒ 只断言它钉不住 `++witness`）。
-        LIFT_CHECK_EQ_U32(witnessDeltaQuarters(w), 1u);
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(witnessDeltaSum(w)), 1u);
-    }
-    // ② Stop 早退（不 inc）⇒ fills=1 但见证 0。
-    {
-        const WitnessRun w = runOneFillWitness(stop_stub, 1, /*f2458=*/0u, /*f2468=*/0u, "stop");
-        LIFT_CHECK(w.begun && w.filled);
-        LIFT_CHECK_EQ_U32(w.fills, 1u);
-        LIFT_CHECK_EQ_U32(w.witnessed, 0u);
-        LIFT_CHECK_EQ_U32(w.guest_silence, 0u);
-        // 没写环 ⇒ 写见证也不动（反方向；钉住 `pre == post ⇒ return` 与 `++witness` 的因果）。
-        LIFT_CHECK_EQ_U32(witnessDeltaQuarters(w), 0u);
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(witnessDeltaSum(w)), 0u);
-    }
-    // ③ 放完 + memset 0：**同一条 inc 路径** ⇒ 记见证，但同时记 guest 静音（≠ underrun）。
-    {
-        const WitnessRun w = runOneFillWitness(write_stub, 2, /*f2458=*/2u, /*f2468=*/0u, "done");
-        LIFT_CHECK(w.begun && w.filled);
-        LIFT_CHECK_EQ_U32(w.fills, 1u);
-        LIFT_CHECK_EQ_U32(w.witnessed, 1u);
-        LIFT_CHECK_EQ_U32(w.guest_silence, 1u);
-        LIFT_CHECK(w.guest_silence <= w.witnessed && w.witnessed <= w.fills);
-        // guest 自己"放完 + memset 0"也经同一条 `++witness` ⇒ 该 quarter 同样不判陈旧。
-        LIFT_CHECK_EQ_U32(witnessDeltaQuarters(w), 1u);
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(witnessDeltaSum(w)), 1u);
-    }
-}
-
 }  // namespace
 
 int main() {
@@ -1276,6 +1126,5 @@ int main() {
     testUnderrunSilenceStale();
     testUnderrunSilenceNotTriggered();
     testUnderrunSilenceGuestZeros();
-    testFillWitnessWiring();
     return lift_test::finish("audio-device");
 }

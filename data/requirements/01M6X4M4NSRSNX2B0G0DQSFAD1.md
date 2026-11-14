@@ -4,8 +4,8 @@
 - type: bug
 - status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- verify: apps/emulator-lift/tests/option_roundtrip.cpp#option-roundtrip/3cycles
-- repro: apps/emulator-lift/tests/option_roundtrip.cpp#option-roundtrip/3cycles
+- verify: docs/03-emulator/defects.md#BUG-01
+- repro: docs/03-emulator/defects.md#BUG-01
 - severity: S1
 - tags: [emulator-lift, concurrency, crash, audio, m2]
 

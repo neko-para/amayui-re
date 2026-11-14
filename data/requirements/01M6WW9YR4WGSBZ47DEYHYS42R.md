@@ -27,7 +27,7 @@
 ## 现在绕到了哪里
 
 - 分支的正确性目前靠**同口径的兄弟路径**：纹理分配失败那条有单元 + 端到端实测（见
-  `repo:apps/emulator-lift/tests/d3d9.cpp` 的纹理用例与 `repo:apps/emulator-lift/tests/option_roundtrip.cpp`），
+  `repo:apps/emulator-lift/tests/d3d9.cpp` 的纹理用例与 `repo:docs/03-emulator/defects.md`），
   sprite 只是复用同一套结构化出参协议。
 - 真出 OOM 时 stderr 有独立标题、运行摘要 `detail` 会带标签 —— 但那是**人工看日志**，
   没有任何 CTest 会在它坏掉时红。

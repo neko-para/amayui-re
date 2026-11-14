@@ -281,7 +281,9 @@ struct PipelineInfo {
     std::uint32_t stage_snapshots = 0;  // 纹理级/采样器状态快照次数（每次 Draw 一次；见文件头）
     std::uint32_t triangles = 0;  // 进入光栅的三角形数（含被裁掉的）
     std::uint32_t rasterized = 0; // 真正光栅化（过了背面剔除）的三角形数
-    std::uint64_t pixels = 0;     // 通过深度/alpha 测试并写进后缓冲的像素数
+    std::uint64_t pixels = 0;     // ⛔ **恒 0**：唯一的写入者是 `kPlPixels`，它在 CPU 光栅删掉后只累加
+                                  //    `pixels_written`（恒 0）。后端起不到片元计数（GPU 拿不到覆盖数）
+                                  //    ⇒ 不要拿它当"画了多少像素"。
     std::uint32_t viewport_x = 0;
     std::uint32_t viewport_y = 0;
     std::uint32_t viewport_w = 0;
@@ -505,10 +507,11 @@ bool clearDepth(X86& cpu, std::uint32_t pipeline_ea, float z, std::string* why);
 std::uint64_t gpuDrawCount();
 std::uint64_t gpuTriangleCount();
 
-// `[draw] fa=` 的**取数口**（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：上一批 Draw 的"真正参与混合的 α"。
-// · `from_gpu == false` ⇒ 数的是 CPU 光栅**真的写下去的像素**（`n` = 像素数，受 `LIFT_SLOW_DRAW` 门控）；
-// · `from_gpu == true`  ⇒ 数的是交给 GPU 后端的**顶点** α（`n` = 顶点数，逐批、不受门控）。
-//   ⛔ 两者都**不是**粗略估计：CPU 走像素收尾的唯一一处，GPU 走真的入队的那批顶点。
+// `[draw] fa=` 的**取数口**（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：上一批 Draw 的**顶点 diffuse α**。
+// · 只有一份口径：这一批**真的交给 GPU 后端**的顶点 α（`n` = 顶点数，逐批、不受 `LIFT_SLOW_DRAW` 门控）。
+//   ★ **名字沿用历史（`fa=`），但口径是顶点 α**：旧 CPU 光栅数的是逐像素、stage 数学之后的混合 α，
+//   那条实现已删 ⇒ 今天 ⛔ 不把它当"真正参与混合的 α"（见 `REQ-01M7B7591WHEVZMYFZ1Q2D8SHQ`）。
+//   `from_gpu` 保留原字段语义 = "这一批真的交给了 GPU"（CPU 像素那一路随光栅族一起删了）。
 // · `mn/mx/mean` 全是 0..255 的整数语义（`mean` 是 double 但由整数和算）。
 struct DrawAlphaAgg {
     std::uint64_t n = 0;
@@ -550,15 +553,16 @@ bool gpuTextureModeFor(std::uint32_t color_op, std::uint32_t color_arg1, std::ui
 bool gpuUntexturedIsIdentity(std::uint32_t op, std::uint32_t arg1, std::uint32_t arg2);
 
 // =====================================================================================
-// GPU 覆盖账本（每帧 / 每次 Draw；⛔ 不把回退清零冒充覆盖）
+// GPU 覆盖账本（每帧 / 每次 Draw；⛔ 不把"没画"清零冒充覆盖）
 //
-// · `draw_calls` / `gpu_draws` / `fallback_draws` = D3D9 `Draw*` 的**批次数**
-//   （一次 Draw* 可能产生多个三角形/多批，仍算一次调用）。
-// · `fallback_pixels` = 这一批真的由 CPU 软光栅写进后缓冲的像素数（不是包围盒估计）。
-// · `sprite_*` = D3DXSprite 的每个批次条目（TITLE 的 Sprite 路径单独可见）；
-//   `sprite_skipped` = 被裁剪掉的条目（空源矩形 / 屏外 / 退化），**不是** fallback。
-// · `fallback_reasons` 按**原因字符串**聚合；`gpuNoteFallback` 在进程内首次出现某原因时
-//   打印一行 `[gpu] fallback ...` 到 stderr（同原因不刷屏）。
+// · `draw_calls` / `gpu_draws` = D3D9 `Draw*` 的**批次数**
+//   （一次 Draw* 可能产生多个三角形/多批，仍算一次调用）。★ 被 `gpuEligible` 拒的批也 +1
+//   （它是一次 Draw*，只是没画）。
+// · `sprite_*` = D3DXSprite 的每个批次条目（TITLE 的 Sprite 路径单独可见）：
+//   `sprite_draws` = 走到合成那一步的条目数；`sprite_gpu_draws` = 真的交给 GPU 队列的条目数；
+//   `sprite_skipped` = GPU **没画**的条目。两种来路：① 纯裁剪（源矩形空 / 屏外 / 退化 / 完全在
+//   纹理外）只加这个计数；②"表达不了"（没有后端 / 目标或纹理非 32bpp / 源矩形部分越界 / 后端失败）
+//   另把原因串记进 `skipped_reasons`（`skipped top:` 可见）。
 // ★ 本单（`REQ-01M73PZN6R3AC3RCQ8WZEA0Y0M`）把"入队成功"与"真的覆盖"拆成三个数：
 //   · `queued`    = 至少成功入队 1 条 draw 的**批数**（`rasterQueue` 返回 true 且顶点非空）；
 //   · `recorded`  = 其中后端真的把它们录进过 render pass 的批数 —— 判据在后端**命令缓冲提交
@@ -571,13 +575,8 @@ bool gpuUntexturedIsIdentity(std::uint32_t op, std::uint32_t arg1, std::uint32_t
 struct GpuCoverage {
     std::uint64_t draw_calls = 0;
     std::uint64_t gpu_draws = 0;
-    // ★ `REQ-01M7AAXVGY9SG75XCREHPX641Z`（M1 账本）：两个数**分开**，⛔ 不许合流。
-    //   · `fallback_draws` = 这一批 **CPU 真写了像素**（`fallback_pixels > 0`）—— "回退"的口径；
-    //   · `skipped_draws`  = 这一批 **GPU 没画**（准入拒绝 / 准入后拒绝 / 后端失败）—— "没画"的口径。
-    //   本单之前只有前者 ⇒ `gpuEligible` 拒批且 CPU 一个像素都没写时**连账都没有**（设计 §A.3 的盲区）。
-    //   真实场景（TITLE / ADV / OPTION / SAVE）两者都应 0。
-    std::uint64_t fallback_draws = 0;
-    std::uint64_t fallback_pixels = 0;
+    // ★ `skipped_draws` = 这一批 **GPU 没画**（准入拒绝 / 准入后拒绝 / 后端失败）—— "没画"的
+    //   口径，也是**唯一**的"未画"信号。真实场景（TITLE / ADV / OPTION / SAVE）应为 0。
     std::uint64_t skipped_draws = 0;
     std::uint64_t gpu_failures = 0;  // 准入通过、但 GPU 后端真的画失败了（⛔ 不再 CPU 重放该批）
     // ---- 本单：入队 / 录进 pass / 顶点数（口径见上）----
@@ -587,26 +586,26 @@ struct GpuCoverage {
     std::uint64_t fragments = 0;  // 入队的 GPU 顶点数
     std::uint64_t sprite_draws = 0;
     std::uint64_t sprite_gpu_draws = 0;
-    std::uint64_t sprite_fallback_draws = 0;
-    std::uint64_t sprite_fallback_pixels = 0;
-    // sprite 条目被**裁剪掉**（空源矩形 / 退化 / 完全屏外 / 源矩形在纹理外）而没画：不是回退，
-    // 但覆盖账要可见（否则"没画"与"没走 GPU"分不清）。
+    // sprite 条目**没画**（空源矩形 / 屏外 / 退化 / 源矩形在纹理外 / 没有后端 / 非 32bpp /
+    // 后端失败）：覆盖账要可见（否则"没画"与"没走 GPU"分不清）。
     std::uint64_t sprite_skipped = 0;
-    std::map<std::string, std::uint64_t> fallback_reasons;
-    // `skipped` 的按原因聚合（与 `fallback_reasons` **不同一张表**：口径不同，⛔ 不合流）。
+    // `skipped` 的按原因聚合（`skipped top:` 最多 5 条，按次数降序、再按原因升序）。
     std::map<std::string, std::uint64_t> skipped_reasons;
 };
 const GpuCoverage& gpuCoverage();
 void gpuCoverageReset();
-// `skipped top:` 那一行（与 `fallback top:` 同形；最多 5 条，按次数降序、再按原因升序）。
+// `skipped top:` 那一行（最多 5 条，按次数降序、再按原因升序）。
 // ★ 返回**整行**（含换行）；没有跳过时返回空串。`machine.cpp` 直接 fputs 它；
 //   夹具（`tests/gpu_batch.cpp` 的 `gpu-batch/skip-ledger`）断言原因真的出现在这里。
 std::string gpuSkippedTopLine();
-// 记一次 CPU 回退（reason 是稳定文本；pixels 是这一批 CPU 写出的像素数）。
-void gpuNoteFallback(const std::string& reason, std::uint64_t pixels);
-// 记一次 D3DXSprite 条目的 GPU / CPU 结果（CPU 时 reason 必填）。
-void gpuNoteSpriteResult(bool gpu, std::uint64_t pixels, const std::string& reason);
-// 记一次 D3DXSprite 条目被裁剪（不计 fallback、不计 GPU）。
+// 记一次 D3DXSprite 条目**真的交给 GPU 队列**（`sprite_draws` + `sprite_gpu_draws`）。
+void gpuNoteSpriteDrawn();
+// 记一次 D3DXSprite 条目**没画**（`sprite_draws` + `sprite_skipped` + 原因进 `skipped_reasons`）。
+// ★ 这是 sprite 侧唯一的"未画"入口（`REQ-01M7AAXNJY2PACYJHYVRV620Q5` 删掉 CPU 合成后的口径）：
+//   GPU 不可用 / 目标或纹理非 32bpp / 源矩形部分越界 / 后端失败都走它。
+void gpuNoteSpriteNotDrawn(const std::string& reason);
+// 记一次 D3DXSprite 条目被裁剪（空源矩形 / 屏外 / 退化 / 完全在纹理外）：只加 `sprite_skipped`，
+// ⛔ 不计 `sprite_draws`（它没走到合成那一步）、⛔ 不计 GPU。
 void gpuNoteSpriteSkipped();
 
 // =====================================================================================

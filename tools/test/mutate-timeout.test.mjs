@@ -8,8 +8,9 @@
  *      `{timedOut:true}`，**不**等它自己结束（墙钟预算 `TIMEOUT_SEC*1000 + 1000`）；且
  *      `ctest` 与被守可执行组成的**进程树**（含孙进程）被收掉（Windows `taskkill /T`；只杀直接子进程
  *      会留下孤儿继续烧 CPU）。
- *   a2. **对照**：`ok` / `red` 两条假命令照常交回退出码（`timedOut` 不是恒真），且**不许白等**
- *      —— 两次调用合计的墙钟必须 < `TIMEOUT_SEC*1000`（旧实现每次在退出码之后再等 2 s zombie）。
+ *   a2. **对照**：`ok` / `red` 两条假命令照常交回退出码（`timedOut` 不是恒真）。
+ *      ★ 已删的断言："两次调用合计的墙钟必须 < `TIMEOUT_SEC*1000`（不许白等）"—— 它在 win32 上
+ *        **恒绿**（没有 zombie 可等），而本仓没有 POSIX CI ⇒ 永远无法判定（终裁 4）。
  *   b. **超时 ≠ 红**：`runMutationEntry` 把它记成
  *      `unverifiableKind:'timeout'` + `⏭ **无法判定（超时）**`，⛔ 不是 `✅ 守卫红了`；
  *      同一次运行里**下一条**假条目照跑（两条 `ctest` 各被调用两次：基线 + 施加后），
@@ -150,22 +151,16 @@ test('a) 超时真的触发：假守卫睡 5 s、超时 2 s ⇒ 立刻返回 tim
   assert.ok(waitDead(grandPid), `孙进程 ${grandPid} 还活着 ⇒ 没做到"收掉进程树"（它会继续烧 CPU）`);
 });
 
-test('a2) 对照：没超时的命令照常返回退出码（证明 timedOut 不是恒真），且**不许白等**', async () => {
-  const started = Date.now();
+test('a2) 对照：没超时的命令照常返回退出码（证明 timedOut 不是恒真）', async () => {
   const ok = await runTimedCommand(process.execPath, [FAKE, 'ok'], { root: SCRATCH, timeoutSec: TIMEOUT_SEC });
   assert.deepEqual(ok, { status: 0 }, `正常结束要交回退出码 0（实际：${JSON.stringify(ok)}）`);
   const red = await runTimedCommand(process.execPath, [FAKE, 'red'], { root: SCRATCH, timeoutSec: TIMEOUT_SEC });
   assert.deepEqual(red, { status: 1 }, `正常结束要交回退出码 1（实际：${JSON.stringify(red)}）`);
-  const elapsed = Date.now() - started;
-  // ★ 关系式（⛔ 不写实测常数）：两条"立刻退 0/1"的命令合计**不许**花到一次超时的时间。
-  //   坏实现（主循环也是阻塞的）每次在退出码之后再等 2 s zombie ⇒ ≈4216 ms（2.1× 预算）；修好 ≈190 ms。
-  //   ⚠ 这条守的是**整体**（主循环 + 两段收尾都 async）。**单独**把正常结束那条 10 ms 回退成
-  //     `sleepSync(10)` 是**不可观测**的（复审实测：5/5 仍绿）—— 主循环的 `await` 已经把尸收完了。
-  //     ⇒ 别据此以为"10 ms 那条有守卫"（那里不需要、也不值得一条断言）。
-  assert.ok(
-    elapsed < TIMEOUT_SEC * 1000,
-    `普通结束不许白等（实际 ${elapsed} ms ≥ ${TIMEOUT_SEC * 1000} ms —— 退出码写完之后还在等它消失？）`,
-  );
+  // ★ **已删的断言**："两次调用合计墙钟 < `TIMEOUT_SEC*1000`"（原判据：不许白等）。
+  //   它在 win32 上**恒绿**（没有 zombie 可等 ⇒ 假绿），而本仓没有 POSIX CI ⇒ 永远无法判定；
+  //   回退成 `sleepSync` 在 win32 上不可观测（复审实测 5/5 仍绿）。⇒ 按终裁 4 删（`AGENTS.md` §10
+  //   "不用 test 记住发生过的事"；只在新平台上才响的报警器不许留）。
+  //   要守这条语义就把"等待策略"抽成 pure 单测（与 #3 同手法），或挂 `LIFT_STRESS` 读数。
 });
 
 test('b) 假守卫超时 ⇒ 记「不可判定（超时）」而不是「守卫红了」；继续跑下一条；还原 + 全文比对仍执行', async () => {

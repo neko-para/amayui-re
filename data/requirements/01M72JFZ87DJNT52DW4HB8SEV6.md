@@ -4,7 +4,7 @@
 - type: spike
 - status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- verify: apps/emulator-lift/tests/close_confirm.cpp#close-confirm
+- verify: apps/emulator-lift/tests/messagebox.cpp#messagebox/close-confirm-spec
 - tags: [emulator-lift, agerc, dialog, modal]
 
 ## 一句话

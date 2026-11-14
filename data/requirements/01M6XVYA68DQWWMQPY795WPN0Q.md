@@ -17,7 +17,7 @@
 |---|---|---|
 | 1 | **输入注入**：`--input-script` 指令式时间线（`at frame/insn/guest_ms/wall_ms`、`click`、停滞兜底）+ `--present-screenshot-frame` | 单 `REQ-01M6WSBJXVEN3E63J2P3H41QRP`（done）；落点 `repo:apps/emulator-lift/src/runtime/input_script.h`、`repo:apps/emulator-lift/src/runtime/input.h`；守卫 `repo:apps/emulator-lift/tests/input_injection.cpp` |
 | 2 | **区间 profiler**：脚本里 `profile_begin` / `profile_end` 定界，`at insn` 可在**帧内**切窗口 | 落点 `repo:apps/emulator-lift/src/runtime/window_profile.h`；守卫 `repo:apps/emulator-lift/tests/profile_window.cpp`（闭式残差 ≤3.3 ms 的口径在该守卫与 `show 1QRP` 的正文） |
-| 3 | **三条快路径**：input-script tick 逐条比较、`GuestHeap` 首次适配 / 收口、GPU 合批脏矩形 + 切段、`GetTextMetricsA` 度量缓存 | 单 `REQ-01M6X4KST5FJ3R4W06TRFZYCGR`、`REQ-01M6WXEDGGJY1Q1YDEM07S1YR3`（done）；守卫 `repo:apps/emulator-lift/tests/input_tick.cpp`、`repo:apps/emulator-lift/tests/heap_layout.cpp`、`repo:apps/emulator-lift/tests/gpu_batch.cpp`、`repo:apps/emulator-lift/tests/gdi_font_metrics_cache.cpp` |
+| 3 | **三条快路径**：input-script tick 逐条比较、`GuestHeap` 首次适配 / 收口、GPU 合批脏矩形 + 切段、`GetTextMetricsA` 度量缓存 | 单 `REQ-01M6X4KST5FJ3R4W06TRFZYCGR`、`REQ-01M6WXEDGGJY1Q1YDEM07S1YR3`（done）；守卫 `repo:apps/emulator-lift/tests/input_tick.cpp`、`repo:apps/emulator-lift/tests/memory_pages.cpp`、`repo:apps/emulator-lift/tests/gpu_batch.cpp`、`repo:apps/emulator-lift/tests/gdi_font.cpp`（2026-11-13：`heap_layout` / `gdi-font-metrics-cache` 两条已删，真不变量分别留在 `memory-pages` 的 `commit-unwritten-zero` 与 `gdi-font` 的 `metrics-size-change`） |
 | 4 | **测量口径**：RelWithDebInfo + 窗口 real-time 时钟 ⇒ `guest_ms` 差 = 宿主墙钟（A/B 与 N 遍中位数都靠它） | 跑法 `.tmp/roomopt/run.ps1`（参数即口径）、解析 `.tmp/roomopt/parse.ps1`；**`.tmp/` 不入库、脚本随会话消失** ⇒ 要长期用就落 `repo:tools/lift.mjs`（子单 E） |
 
 ★ 四件都**不靠本单自证**：上表的单号与守卫文件自己会说话；本单不写会过时的门禁数字。

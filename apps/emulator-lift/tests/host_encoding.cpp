@@ -4,7 +4,8 @@
 //   ① **源码 / 执行字符集**：`emulator-lift --help` 的字节里必须出现 main.cpp 那条中文说明的
 //      **UTF-8** 编码。MSVC 少了目录级 `/utf-8` 时，窄字面量会按本地码页（936）落盘 ⇒ 这条红。
 //   ② **argv**：带**日文**目录的 `--game-dir` 必须能正常启动（旧实现把 CRT 的 ANSI argv 当
-//      UTF-8 解析 ⇒ `fs::path` 抛异常 ⇒ 退出码 3）。这里只跑 `--max-insns 1`，不需要游戏。
+//      UTF-8 解析 ⇒ `fs::path` 抛异常 ⇒ 退出码 3）。这里只跑 `--report`（打印 `game-dir :`
+//      后就收口，不需要游戏、也不需要 GPU；`--max-insns` 在这里没有意义）。
 //   ③ **输出字节**：子进程输出（重定向到文件）必须是合法 UTF-8，且包含 `--game-dir` 的
 //      UTF-8 回显 —— 保证"重定向时不做任何转码"的口径没有被破坏。
 //
@@ -19,6 +20,7 @@
 #include <vector>
 
 #include "check.h"
+#include "cmdline.h"
 #include "subprocess_skip.h"
 
 #if defined(_WIN32)
@@ -41,10 +43,8 @@ std::string readAllBytes(const fs::path& p) {
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
-std::wstring quoteArg(const std::wstring& s) {
-    // 只给本测试用的最小 quoting：路径不含引号；包一层双引号即可。
-    return L"\"" + s + L"\"";
-}
+// ★ 命令行拼装只有一份实现（tests/cmdline.h）：结尾反斜杠 / 内嵌引号 / 空串都按 MSVC 规则转义。
+using lift_test::quoteArg;
 
 #if defined(_WIN32)
 struct ChildResult {
@@ -134,17 +134,18 @@ int main(int argc, char** argv) {
     }
 
     // ---- ③ argv：日文 --game-dir 必须能启动（旧实现 exit 3）----
+    //   ★ `--report` 是**可见性**开关（不是"跳过测试"）：`game-dir :` 那行只在 `verbose_output`
+    //     打（`main.cpp:627` / `:830`），默认档已按降噪口径收掉 ⇒ 不带它这条断言只能等红。
+    //     `--report` 同时让 main 在**跑 guest 之前** `return 0`（`main.cpp:1117-1124`）——
+    //     argv 解析 / VFS 装配 / 执行源定位都已经走完，只是不建窗口。
+    //   ★ 因此这条臂不需要 GPU，也**不要**再加 `LIFT_SKIP_IF_NO_GPU`：那会让"argv 又被吞掉
+    //     ⇒ 子进程走到 GPU 拒绝启动"伪装成 SKIP，而它正是本用例要抓的回归。
     {
         const fs::path out = root / "run.out";
         const fs::path err = root / "run.err";
-        const std::wstring args = L"--game-dir " + quoteArg(root.wstring()) + L" --max-insns 1";
+        const std::wstring args = L"--game-dir " + quoteArg(root.wstring()) + L" --report";
         const ChildResult r = runChild(exe, args, out, err);
         LIFT_CHECK(r.started);
-        // ★ 无 GPU（含 `SDL_VIDEODRIVER=dummy`）：子进程在跑 guest 之前就拒绝启动 ⇒ SKIP 77。
-        if (r.started) {
-            const std::string err_bytes = readAllBytes(err);
-            LIFT_SKIP_IF_NO_GPU(r.exit_code, err_bytes);
-        }
         LIFT_CHECK_EQ_U32(r.exit_code, 0);
         const std::string bytes = readAllBytes(out);
         LIFT_CHECK(!bytes.empty());

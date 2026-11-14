@@ -17,8 +17,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include "check.h"
+#include "cmdline.h"
 #include "runtime/memory.h"
 
 #if defined(_WIN32)
@@ -110,15 +112,18 @@ ChildRun runChild(const wchar_t* mode) {
     si.hStdOutput = out;  // 子进程正常路径不写 stdout；一并收进来不影响判据
     si.hStdError = out;
 
-    wchar_t cmd[2 * MAX_PATH + 32] = {};
-    std::swprintf(cmd, sizeof(cmd) / sizeof(cmd[0]), L"\"%ls\" --child-%ls", exe, mode);
+    // ★ 命令行拼装与其余夹具同一份实现（tests/cmdline.h）：exe 路径按 MSVC 规则加引号
+    //   （本 exe 在构建树里，文件名不含引号；统一走一份实现，免得哪天路径变成以 `\` 结尾）。
+    const std::wstring cmd_w = lift_test::quoteArg(exe) + L" --child-" + mode;
+    std::vector<wchar_t> cmd(cmd_w.begin(), cmd_w.end());
+    cmd.push_back(L'\0');
 
     PROCESS_INFORMATION pi{};
-    const BOOL ok = ::CreateProcessW(exe, cmd, nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi);
+    const BOOL ok = ::CreateProcessW(exe, cmd.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi);
     ::CloseHandle(out);  // 子进程已继承一份
     if (!ok) {
         lift_test::failf(__FILE__, __LINE__, "CreateProcessW 失败（err=%lu，cmd=%ls）",
-                         static_cast<unsigned long>(::GetLastError()), cmd);
+                         static_cast<unsigned long>(::GetLastError()), cmd_w.c_str());
         ::DeleteFileW(tmp_file);
         return r;
     }

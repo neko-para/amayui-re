@@ -16,13 +16,10 @@
 //      ★ 另有两条成对的判据（意图：**跳过令牌锁的那一臂，每块的边际成本 b 不低于正常臂** =
 //      "那一次锁的成本非负"），抗噪口径与实测读数见后面「②的抗噪口径」一节。
 //
-//   ③ `dispatch-tax/diag-off`：**默认关**（环境变量不存在）⇒ 运行摘要里是 `token-diag : skip-lock=0`。
-//   ④ `dispatch-tax/diag-on`：`LIFT_TOKEN_DIAG_SKIP_LOCK=1` ⇒ 摘要里是 `token-diag : skip-lock=1`，
-//      且 `tokenwait : waits 0`（诊断臂里**一次都不取锁**，所以不可能有"等锁"）·
-//      `token : violations=0 max-concurrent=1`（单线程工况下不变式照旧成立）。
-//   ⑤ `dispatch-tax/diag-really-skips`：**不靠计时**地证明"真的绕过了 mutex" —— 局部令牌持有时，
-//      另一条线程的 `tryAcquire()` 在诊断臂里**成功**（`maxConcurrent()==2`），正常臂里**失败**
-//      （`maxConcurrent()==1`）。把环境变量读点改成恒假 / 让 skip 分支其实仍取锁 ⇒ 这两半之一当场红。
+//   ③–⑤ (已删) 诊断开关：`dispatch-tax/diag-off`（默认 `token-diag : skip-lock=0`）·
+//      `diag-on`（`LIFT_TOKEN_DIAG_SKIP_LOCK=1` ⇒ `skip-lock=1` + `tokenwait : waits 0`）·
+//      `diag-really-skips`（另一条线程在诊断臂里 `tryAcquire` 成功、正常臂里失败）。
+//      判据面 = **摘要行文案** + `maxConcurrent()`，都是我方诊断面（`AGENTS.md` §10）⇒ 删。
 //   ⑥ `dispatch-tax/diag-keeps-assert-token`：诊断臂里 `check()` 的违规计数照旧 —— 令牌之外 check
 //      ⇒ `violations==1` 且 first-site 点名；持令牌 check ⇒ 不计数。⇒ `--assert-guest-token` 的
 //      可信度不因这个开关而下降（`violations` / `max_concurrent` 与 mutex 无关）。
@@ -34,6 +31,15 @@
 //      ★ 这条是**跨平台**的：`cli-time-limit` 那条同判据的子进程守卫是 Windows 专有（非 Windows 上 SKIP），
 //      这里直接调 `Machine::dumpRunSummary`（吃 `RunResult` + Machine 状态）⇒ 不需要 guest / 安装 / 子进程，
 //      于是"删掉 `if (any)` 门"在 macOS 上也当场红。
+//
+//   ⑧ `stress/skip-report`：**S9 的"红的时候逐条列原因"负控**（纯函数：`tests/stress_skip_report.h`
+//      的 `judgeSkipReport()`）—— 喂**合成文本**三组，⛔ 不跑游戏、⛔ 不建子进程：
+//      ① `skipped=0` 且无 `skipped top:` ⇒ 通过；② `skipped=3` + 三行 `skipped top:` ⇒ 失败，
+//      且失败消息里**逐条原样**含那三行；③ `skipped=1` 但原因表缺失 ⇒ 失败，且消息明确说
+//      "原因缺失"（⛔ 不许静默通过 —— 这条比 ② 重要：没有原因表时只说得出"少了 3 批"）。
+//      ★ 为什么挂在这里而不是另开 exe：它断言的是**解析 + 报错格式**，与真游戏无关。
+//        ⚠ 本 exe 的注册已整体移入 `if(DEFINED ENV{LIFT_STRESS})`（效率读数一档：`microbench` /
+//        `block-scan` 的时间阈值；`diag-*` 三条已删）⇒ ⑧ 也随之只在 `LIFT_STRESS=1` 时跑。
 //
 // ②的抗噪口径（为什么不是 `fit_off.b >= fit_on.b` 一条了事）：
 //   ① **旧写法会自己抖红**（实测，macOS arm64 / RelWithDebInfo）：两臂各跑一次拟合时，
@@ -88,6 +94,7 @@
 #include "check.h"
 #include "runtime/guest_token.h"
 #include "runtime/machine.h"
+#include "stress_skip_report.h"
 
 namespace {
 
@@ -394,9 +401,10 @@ Fit fitLine(const std::vector<std::pair<double, double>>& pts) {
 }
 
 /** 运行摘要 → 字符串（`Machine::dumpRunSummary` 写 `std::FILE*`）。
- *  ★ 取数方式（`REQ-01M7AG06MXS6PK2B53B29QM76Z`）：用 `Verbose` 档捕捉 —— `token-diag` / `tokenwait`
- *    这类**逐项读数**默认档已折进 `read :` 一行（默认只留结论/异常/摘要）。**断言一条没删**：
- *    下面仍然按字面找那三行，只是从"默认档的摘要"换成"Verbose 档的摘要"。 */
+ *  ★ 取数方式（`REQ-01M7AG06MXS6PK2B53B29QM76Z`）：用 `Verbose` 档捕捉 —— `present-tail`
+ *    这类**逐项读数**默认档已折进 `read :` 一行（默认只留结论/异常/摘要）。
+ *    ★ 已删的判据：`token-diag : skip-lock=…` / `tokenwait : waits 0` 三行（诊断开关的文案面，
+ *      外部不可观测，`AGENTS.md` §10）—— 摘要在本用例里只剩 ⑦ 的 `present-tail` 门。 */
 std::string captureRunSummary(lift::Machine& m, const lift::RunResult& r) {
     std::FILE* tmp = std::tmpfile();
     if (tmp == nullptr) return {};
@@ -413,28 +421,6 @@ std::string captureRunSummary(lift::Machine& m, const lift::RunResult& r) {
 
 bool contains(const std::string& hay, const char* needle) {
     return hay.find(needle) != std::string::npos;
-}
-
-/** 诊断臂 / 正常臂各跑一段裸循环，返回运行摘要文本。 */
-std::string runArmSummary(bool skip_lock, lift::RunResult* out) {
-    setDiagEnv(skip_lock ? "1" : nullptr);
-    lift::Machine m;
-    std::string err;
-    if (!m.initBare(&err) || !m.prepareStack(&err)) {
-        std::fprintf(stderr, "dispatch-tax: 裸 Machine 初始化失败：%s\n", err.c_str());
-        return {};
-    }
-    const std::vector<std::uint8_t> code = makeBlockLoop(4, kCodeEa);
-    if (!m.placeCode(kCodeEa, code.data(), code.size(), &err)) {
-        std::fprintf(stderr, "dispatch-tax: placeCode 失败：%s\n", err.c_str());
-        return {};
-    }
-    m.cpu().eip = kCodeEa;
-    lift::RunOptions o;
-    o.max_insns = 200000ull;  // 5 万块 × 4 条
-    const lift::RunResult r = m.run(o);
-    *out = r;
-    return captureRunSummary(m, r);
 }
 
 }  // namespace
@@ -557,65 +543,6 @@ int main() {
     //   零假设（skip-lock 变 no-op ⇒ 两臂代码相同）⇒ 这条红。
     LIFT_CHECK(dt1 >= dt1_floor);
 
-    // ---- ③④ 诊断开关的默认关 / 打开（**摘要行**是唯一可观测口径）----
-    g_current_case = "dispatch-tax/diag-off";
-    lift::RunResult r_off;
-    const std::string sum_off = runArmSummary(false, &r_off);
-    LIFT_CHECK(!sum_off.empty());
-    LIFT_CHECK(r_off.reason == lift::StopReason::MaxInsns);
-    LIFT_CHECK(contains(sum_off, "token-diag : skip-lock=0"));
-    LIFT_CHECK(contains(sum_off, "token     : violations=0 max-concurrent=1"));
-    LIFT_CHECK(contains(sum_off, "tokenwait : waits 0 "));
-
-    g_current_case = "dispatch-tax/diag-on";
-    lift::RunResult r_on;
-    const std::string sum_on = runArmSummary(true, &r_on);
-    LIFT_CHECK(!sum_on.empty());
-    LIFT_CHECK(r_on.reason == lift::StopReason::MaxInsns);
-    LIFT_CHECK(contains(sum_on, "token-diag : skip-lock=1"));
-    LIFT_CHECK(contains(sum_on, "token     : violations=0 max-concurrent=1"));
-    // 诊断臂里一次都不取锁 ⇒ 不可能有"等锁"（这条同时证明"没有偷偷走 blockWaitNs"）
-    LIFT_CHECK(contains(sum_on, "tokenwait : waits 0 "));
-    std::printf("dispatch-tax/diag: 默认 skip-lock=0 / 打开 skip-lock=1，两臂都是 waits 0、"
-                "violations=0、max-concurrent=1\n");
-
-    // ---- ⑤ 不靠计时：诊断臂真的**绕过**了 mutex（另一条线程能同时拿到令牌）----
-    g_current_case = "dispatch-tax/diag-really-skips";
-    {
-        setDiagEnv("1");
-        lift::GuestToken probe;
-        probe.arm();
-        probe.acquire();
-        std::atomic<int> other_got{0};
-        std::thread t([&] {
-            if (probe.tryAcquire()) {
-                other_got.store(1, std::memory_order_release);
-                probe.release();
-            }
-        });
-        t.join();
-        LIFT_CHECK_EQ_I64(other_got.load(), 1);  // ← 诊断臂：锁被绕过 ⇒ 另一条线程也拿得到
-        LIFT_CHECK_EQ_U32(probe.maxConcurrent(), 2u);
-        probe.release();  // 本局部令牌到此作废（owner 已被另一线程改过，可能计一次违规；不再使用）
-    }
-    {
-        setDiagEnv(nullptr);
-        lift::GuestToken probe;  // 全新实例：正常取锁
-        probe.arm();
-        probe.acquire();
-        std::atomic<int> other_got{0};
-        std::thread t([&] {
-            if (probe.tryAcquire()) {
-                other_got.store(1, std::memory_order_release);
-                probe.release();
-            }
-        });
-        t.join();
-        LIFT_CHECK_EQ_I64(other_got.load(), 0);  // ← 正常臂：锁真的在，另一条线程拿不到
-        LIFT_CHECK_EQ_U32(probe.maxConcurrent(), 1u);
-        probe.release();
-    }
-
     // ---- ⑥ 诊断臂里 `--assert-guest-token` 的可信度不变：违规计数照旧 ----
     g_current_case = "dispatch-tax/diag-keeps-assert-token";
     {
@@ -679,6 +606,74 @@ int main() {
             LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(std::stod(caps[4].str()) * 10.0 + 0.5), 15u);
         }
         std::printf("dispatch-tax/present-tail-line: any=false ⇒ 无该行；any=true ⇒ %s\n", line.c_str());
+    }
+
+    // ---- ⑧ S9 的 skip 报表：**纯函数负控**（合成文本；⛔ 不跑游戏 / ⛔ 不建子进程）----
+    //  判据：喂进去的三组文本，判定与失败消息必须逐条对得上（理由见文件头 ⑧）。
+    //  ★ 这条就是"红的时候真的会列原因"的机械证据 —— 真红要 ~6 min，这里 0 ms。
+    g_current_case = "stress/skip-report";
+    {
+        const lift_stress::SkipThresholds th{};  // 全 0（R2：计数类阈值取 0）
+
+        // ① `skipped=0` 且无 `skipped top:` ⇒ 通过。行形态照抄真摘要（`read :` / `gpu :` /
+        //    `unsupported :` / `sprite:`），只把数字换成这一组要的值。
+        const std::string clean =
+            "read      : frame=600 gpu=draws 36639/tri 1656958/skipped 0 native-ovr=hits 0/fallbacks 0\n"
+            "gpu       : draws=36639 gpu=36639 recorded=36172 queued=36172 empty=467 fragments=4970874 "
+            "skipped=0\n"
+            "unsupported : 0x00000800（bits 11）\n"
+            "            sprite: draws=14401 gpu=14401 skipped=0\n";
+        const lift_stress::SkipVerdict clean_v = lift_stress::judgeSkipReport(clean, th);
+        LIFT_CHECK(clean_v.ok);
+        LIFT_CHECK(clean_v.failed_faces.empty());
+        LIFT_CHECK(clean_v.readings.skipped_top_lines.empty());
+        LIFT_CHECK(contains(clean_v.message, "通过"));
+
+        // ② `skipped=3` + 三行 `skipped top:` ⇒ 失败，且失败消息里**逐条原样**含那三行。
+        const std::string r1 = "            skipped top: [2×] 纹理非 32bpp ;";
+        const std::string r2 = "            skipped top: [1×] 源矩形部分越界 ;";
+        const std::string r3 = "            skipped top: [1×] GPU 后端失败 ;";
+        const std::string dirty =
+            "read      : frame=600 gpu=draws 36639/tri 1656958/skipped 3 native-ovr=hits 0/fallbacks 0\n"
+            "⚠ gpu       : skipped=3 gpu_failures=0\n" + r1 + "\n" + r2 + "\n" + r3 + "\n" +
+            "gpu       : draws=36639 gpu=36636 recorded=36172 queued=36172 empty=467 fragments=4970874 "
+            "skipped=3\n"
+            "unsupported : 0x00000800（bits 11, 29）\n"
+            "            sprite: draws=14401 gpu=14401 skipped=0\n";
+        const lift_stress::SkipVerdict dirty_v = lift_stress::judgeSkipReport(dirty, th);
+        LIFT_CHECK(!dirty_v.ok);
+        // ★ 逐条原文（`find` 整行，⛔ 不放宽成"含 `skipped top:` 就算过"）
+        LIFT_CHECK(dirty_v.message.find(r1) != std::string::npos);
+        LIFT_CHECK(dirty_v.message.find(r2) != std::string::npos);
+        LIFT_CHECK(dirty_v.message.find(r3) != std::string::npos);
+        // 面名也点名（否则"列了原因"可能只是把整段日志倒出来）
+        bool has_gpu_face = false;
+        bool has_top_face = false;
+        for (const std::string& f : dirty_v.failed_faces) {
+            has_gpu_face = has_gpu_face || f == "gpu_skipped";
+            has_top_face = has_top_face || f == "skipped_top_lines";
+        }
+        LIFT_CHECK(has_gpu_face);
+        LIFT_CHECK(has_top_face);
+        LIFT_CHECK(contains(dirty_v.message, "skipped=3"));
+        // ★ 负控的负控：原因其实在的时候**不许**说"原因缺失"（否则 ③ 那条断言是恒真的）
+        LIFT_CHECK(!contains(dirty_v.message, "原因缺失"));
+
+        // ③ `skipped=1` 但 `skipped top:` 缺失 ⇒ 失败，且消息明确说"原因缺失"（⛔ 不许静默通过）。
+        const std::string missing =
+            "read      : frame=600 gpu=draws 36639/tri 1656958/skipped 1 native-ovr=hits 0/fallbacks 0\n"
+            "⚠ gpu       : skipped=1 gpu_failures=0\n"
+            "gpu       : draws=36639 gpu=36638 recorded=36172 queued=36172 empty=467 fragments=4970874 "
+            "skipped=1\n"
+            "            sprite: draws=14401 gpu=14401 skipped=0\n";
+        const lift_stress::SkipVerdict missing_v = lift_stress::judgeSkipReport(missing, th);
+        LIFT_CHECK(!missing_v.ok);
+        LIFT_CHECK(contains(missing_v.message, "原因缺失"));
+        LIFT_CHECK(contains(missing_v.message, "skipped=1"));
+
+        std::printf("stress/skip-report ①通过：%s\n", clean_v.message.c_str());
+        std::printf("stress/skip-report ②失败（skipped=3 + 三行原因）：\n%s\n", dirty_v.message.c_str());
+        std::printf("stress/skip-report ③失败（skipped=1 但原因表缺失）：\n%s\n", missing_v.message.c_str());
     }
 
     std::printf("dispatch-tax: b=%.2f ns/块 c=%.2f ns/条 lock+unlock=%.2f ns clock=%.2f ns "

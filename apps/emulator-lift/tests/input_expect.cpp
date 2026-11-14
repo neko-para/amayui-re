@@ -5,7 +5,7 @@
 //   到点没变 / 一次采样都没有 / 跑完仍未判定 ⇒ **非 0 结局**（`StopReason::InteractionFailed`），
 //   `RunResult.detail` 写清是哪一种。⛔ 不许"发完不管却 exit 0"（BUG-16 就是这么漏掉的）。
 // ★ 7 例（kebab-case，需求单拿 `<文件>#<用例名>` 当 verify 锚）：
-//   ① `expect-change-satisfied`   变 ⇒ 不失败、`windows_satisfied == 1`、日志有 `[expect-change] ok`
+//   ① `expect-change-satisfied`   变 ⇒ 不失败、`windows_satisfied == 1`（⛔ 不再断言 ok 日志文案）
 //   ② `expect-change-not-changed` 不变（采样在增长）⇒ detail 含 `not-changed`（且非 ok）
 //   ③ `expect-change-blind`       一次采样都不喂 ⇒ detail 含 `no-sample`，⛔ 不是 `not-changed`
 //   ④ `expect-change-default-off` 策略关 ⇒ 同一份"没变化"夹具**不失败**（旧脚本行为不变）
@@ -14,7 +14,7 @@
 //      **脚本里没有匹配动作** ⇒ 一律拒绝（⛔ 不静默退化、⛔ 不静默开局）
 //   ⑦ `expect-change-no-action` 配置之后换了一份"没有匹配动作"的脚本 ⇒ 运行期也**不许静默绿**
 //      （防御性：`instr :` 的 `expect=0` 只是一个读数，不是"通过"）
-// ★ 夹具形状（照 `tests/profile_window.cpp` + `tests/interaction_graph.cpp`）：裸 `Machine` +
+// ★ 夹具形状（照 `tests/profile_window.cpp`）：裸 `Machine` +
 //   自造 guest 循环 + 一个"采样注入" shim。采样走 `FrameSampler::observeValues()`（生产路径
 //   `observe()` 的被调者 —— 同一条计数路径）；**接线**单独断言
 //   （`presenter().frameSampler() == &sampler()`），因为"采样器没接上"会让 `sampleCount` 恒 0、
@@ -146,7 +146,7 @@ bool boot(lift::Machine& m, std::uint32_t iterations, std::uint32_t flip_at) {
     return true;
 }
 
-// ---- stdout + stderr 一起捕获（`[expect-change]` 的 ok / FAIL 都要断言"响亮"）----
+// ---- stdout + stderr 一起捕获（`[expect-change]` 的 FAIL 要断言"响亮"）----
 #ifdef _WIN32
 using FdT = int;
 int dupFd(int fd) { return _dup(fd); }
@@ -288,7 +288,8 @@ int main() {
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(o.opened), 1);  // 只看这个 click
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(o.satisfied), 1);
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(o.failed), 0);
-        LIFT_CHECK(contains(o.log, "[expect-change] ok"));
+        // ★ 已删的判据：`contains(o.log, "[expect-change] ok")` —— 那是日志文案（DSL 细节），
+        //   按测试模型不作判据；"动作后真的变了 ⇒ 判定为满足"由上面 `satisfied == 1 / failed == 0` 守。
         LIFT_CHECK(contains(o.log, "expect=1"));  // 运行摘要的 `instr :` 行
     }
 
@@ -379,10 +380,10 @@ int main() {
         LIFT_CHECK(contains(err, "重复"));
         LIFT_CHECK(lift::parseExpectChangeActions("click,key,mouse", &p, &err));
         LIFT_CHECK(p.enabled && p.click && p.key && p.mouse);
-        LIFT_CHECK(p.text == "click,key,mouse");
+        // ★ 已删的判据：`p.text == "click,key,mouse"` / `p.text == "click,mouse"`（规范化回显的
+        //   **字面形状**）—— 那是 DSL 细节（我方文案），按测试模型不作判据。行为分类仍在下面断言。
         LIFT_CHECK(lift::parseExpectChangeActions(" CLICK , Mouse ", &p, &err));
         LIFT_CHECK(p.click && p.mouse && !p.key);
-        LIFT_CHECK(p.text == "click,mouse");
         // 窗口 0 ⇒ 配置期拒绝。
         {
             lift::Machine m;

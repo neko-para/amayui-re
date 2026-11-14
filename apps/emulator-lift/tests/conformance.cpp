@@ -5,7 +5,10 @@
 //   ② `verify` 里必须至少有一次断言（否则"什么都没验"也是红）；
 //   ③ 汇总失败数并给出可复现的用例名。
 // ★ `LIFT_CONFORMANCE_SELFCHECK=1` 时额外跑一条**负控**（空心夹具必须只因①红）——
-//   那是本判据"会红"的机械证据（CTest：`conformance-rejects-hollow-case`）。
+//   那是本判据"会红"的机械证据。⛔ 不要把某个 CTest 名当唯一入口：注册与否随档位变；
+//   负控 CTest `conformance-rejects-hollow-case` 现在是**默认档注册**（2026-11-14 起；
+//   `repro` 档已取消，见 `REQ-01M7ATAB5A18W7XBCKFBEQS7HB`）。手动命令见
+//   `CMakeLists.txt` 里 `LIFT_CONFORMANCE_SELFCHECK` 那段注释。
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>

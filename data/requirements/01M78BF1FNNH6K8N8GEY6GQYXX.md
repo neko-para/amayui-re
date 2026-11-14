@@ -2,8 +2,10 @@
 
 - id: REQ-01M78BF1FNNH6K8N8GEY6GQYXX
 - type: req
-- status: doing
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/gpu_batch.cpp#lift/no-gpu-refuses-start
+- done_reason: 2026-11-14 收口（八条逐条核，只读核查见 .tmp/cpu-migration/m78bf1-audit.md）：①删 --raster cpu 已落地（src/main.cpp:556-559 未知参数 ⇒ exit 2；守卫 lift/raster-flag-gone 顶层注册）；②删 --raster-sprites 已落地（零命中；sprite 的 CPU 逐像素合成已删，见 REQ-01M7AAXNJY2PACYJHYVRV620Q5 已 done）；③删 --gpu-strict 已落地（只剩一句"已删"历史注释）；④无 GPU ⇒ 拒绝启动已落地（main.cpp:743-755 明确文案 + return 2；守卫 lift/no-gpu-refuses-start 默认档、有变异条目；例外 --report / --smoke 不建光栅已文档化）；⑤文档口径已落地（README / SCOPE / external-docs.md:62 三处"参考后端 / 像素真源"全清）；⑥feeder_seg_e2e 的 --raster cpu 已落地（走"改成要求 GPU"这条，LIFT_SKIP_IF_NO_GPU）；⑦按单的措辞已满足（原文允许"在批的计划阶段算、或在批提交时统计"，实现是后者：d3d9_pipeline.cpp:4275-4286 在 rasterQueue 之后按 gpu_vertices 统计），但口径从"逐像素混合 α"降级为"逐顶点 diffuse α" ⇒ 欠账移交 REQ-01M7B7591WHEVZMYFZ1Q2D8SHQ（本批已改挂 M2）；⑧external-docs.md:62 已落地。关键反证：整族删除后 rg "rasterTriangle|rasterizePoint|rasterizeLineSegment|writeShadedPixel" apps/emulator-lift 零命中；真实场景 130 帧 draws 7969 / tri 358551 / skipped 0，逐帧后缓冲 hash 与改前完全相同（130/130、600/600）。判据①按字面即满足：2026-11-14 复核 rg -n -- "--raster cpu|raster-sprites|参考后端|像素真源" apps/emulator-lift 零命中（审计曾预警负向夹具 tests/gpu_batch.cpp 必须含 --raster cpu 字面量、会让该条按字面永远红；该字面量已在 2026-11-14 03:46 的测试重构中消失，故按语义与按字面今天都满足）。裁决口径：允许功能回退（逐步实现中的工程，不要求"保持可用"）；若删完发现产品可见画面只能靠 CPU 光栅才画得对 ⇒ 停下报告、扩 GPU 覆盖，⛔ 不恢复第二实现 —— 本次无此情形。
 - tags: [emulator-lift d3d9 raster architecture]
 
 ## 决定（2026-11-13 · 用户裁决）
@@ -72,8 +74,6 @@
 - 本单删除 CPU 兜底时，**点/线、`invw != 1`、`MIPFILTER=NONE` 缩小、GPU 失败 CPU 重放** 四处必须逐条处置：
   命中率 > 0（boot→TITLE 实测）⇒ 在 GPU 上补；否则显式拒绝 + 记账。⛔ 不许"删完静默不画"。
 
-## 进展（2026-11-13 · 后半已落地，剩最后一环）
-- CLI `--raster` / `--raster-sprites` / `--gpu-strict` 已删；无 GPU ⇒ 拒绝启动（exit 2 + 文案 + 指路）；`--present headless` 走隐藏窗口（日志 `window=hidden`）。
-- 守卫：`lift/no-gpu-refuses-start`、`lift/raster-flag-gone`（各带变异）；`rg` 判据为空；ctest 95/91/4 SKIP 不变。
-- ⚠ **未做**：`rasterTriangle` 一族 + `ctx.gpu == nullptr` 仍保留（**测试 + `gpuEligible` 拒批时的生产回退**（复审 2026-11-13 否证了「只有测试」：`d3d9_pipeline.cpp:4719` ⇒ `:4747/:4917/:4928`，`LIFT_GPU_VERIFY` 走 `:5028`）），因为 3 条 pure CTest（`d3d9`/`d3dx9`/`d3d9-pipeline`）的逐像素断言全挂在它上面。
-  ⇒ 迁移与删除已拆单：`REQ-01M7A74YG08R65NJBFXF7DEJDK`。本单在它落地前**不算收口**（判据 4"不许第二实现"未满足）。
+## 进展（2026-11-13 初版 · 2026-11-14 收口）
+- 已落地：CLI `--raster` / `--raster-sprites` / `--gpu-strict` 已删；无 GPU ⇒ 拒绝启动（exit 2 + 文案 + 指路）；`rasterTriangle` 一族随 `REQ-01M7A74YG08R65NJBFXF7DEJDK` 全族删除（4 个符号 `rg` 零命中）；守卫 `lift/no-gpu-refuses-start` / `lift/raster-flag-gone`（各带变异）。
+- ⚠ 第 7 条：诊断已挪到 GPU 批提交阶段，但 `fa=` 口径从「逐像素混合 α」降级为「逐顶点 diffuse α」且该字段没有守卫 ⇒ 欠账移交 `REQ-01M7B7591WHEVZMYFZ1Q2D8SHQ`。

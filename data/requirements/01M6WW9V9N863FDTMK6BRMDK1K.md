@@ -4,7 +4,7 @@
 - type: spike
 - status: done
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
-- verify: apps/emulator-lift/tests/option_roundtrip.cpp#option-roundtrip/3cycles
+- verify: docs/03-emulator/defects.md#BUG-01
 - done_reason: 结局 A（预期的一次性工作集，不是残留）：0 轮基线 21 面 / 108,595,152 B；1=2=3 轮 23 面 / 109,895,008 B，四字段逐字段相同；0→1 = +2 面 / +1,299,856 B，1→2 与 2→3 = +0。两张 surface 点名 = 824×120 与 628×360（首次 OPTION 装载 6 张里回 TITLE 时留下的两张）。结论已写进 tests/option_roundtrip.cpp 文件头；⛔ 不要修成 0。
 - tags: [emulator-lift d3d9]
 
@@ -25,7 +25,7 @@
 
 - 比的是 run summary 的 `arena     : surfaces N in_use U peak P largest-free F` 行，逐字段。
   基线 → 1 轮 = 那 +2 / +1.3 MB；1 → 2 → 3 = 增长项。
-- ★ 现在**没有 0 轮基线**：既有用例 `repo:apps/emulator-lift/tests/option_roundtrip.cpp` 只让 1/2/3 轮互比，
+- ★ 现在**没有 0 轮基线**：既有用例 `repo:docs/03-emulator/defects.md` 只让 1/2/3 轮互比，
   所以它证明的是"不增长"，**证明不了**"第一轮的 +2 是一次性缓存"。这两句话必须分开说。
 - **结局 A（一次性缓存 / 惰性装载）**：若 2 轮 == 3 轮 == 1 轮，且能点名那两张 surface 属于哪个对象 /
   哪次装载（候选：TITLE 惰性装载、跨屏缓存）⇒ 把它写成**预期行为**，落点 = 那条用例的文件头
@@ -69,7 +69,7 @@
   `712×256` / `300×404` / `628×360`，含 8 B 块头合计 **12,098,416** = 实测 OPTION−TITLE）；回 TITLE 时释放其中 4 张
   （10,798,560）⇒ 留下 `824×120` + `628×360` = **1,299,856**（= 实测增量）。2 轮日志里这 6 张**每次进 OPTION 各重建一次**、
   终局仍 23 面 ⇒ 上一轮留下的两张在下次进 OPTION 时被清掉（否则 25 面）⇒ **每屏工作集**，不是"引用归零却没回收"。
-- ⛔ **不要把它修成 0**（那是改引擎的缓存策略）。结论已写进 `repo:apps/emulator-lift/tests/option_roundtrip.cpp` 文件头。
+- ⛔ **不要把它修成 0**（那是改引擎的缓存策略）。结论已写进 `repo:docs/03-emulator/defects.md` 文件头。
 - **回归哨（若日后复发 = 结局 B）**：`arena` 行 `surfaces > 23`、或 `in_use > 109,895,008`（0 字节超出，非容差）、或 2 轮 ≠ 3 轮任一字段。
 - **没做到**：那两张的 **guest 侧引用计数**没有直接读数（无 per-surface dump、`Release` 只在失败时记日志、`--trace-shims`
   不按 `--log-cat` 过滤），也没点名持它们的引擎对象。复跑：`.tmp/reveq/01M6WW9V9N863FDTMK6BRMDK1K/run-cycle.ps1 -Cycles N`（不入库）。

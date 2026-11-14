@@ -315,13 +315,13 @@ cp=U+2661 glyphID=1815 load_err=0 bitmap=18x16 advance26.6=1280
 | 只比 `GetTextExtentPoint32A` 的宽，不与 GGO / `TextOutA` 交叉核对 | CJK 等宽下 extent 对但字形可能全错；advance 的 floor/round 也会漂 | `font.cpp:688` / `:803`；`gdi.cpp / extent-advance-self-consistency` |
 | 把 PUA（`U+E000` 区）当普通字 | CP932 用户定义区 → PUA；Amayui CN 无 cmap ⇒ 交给缺字后备（若已登记游戏字体），主字体与后备都缺才画 `.notdef`，且 `FT_Load_Char` 不报错 | `cp932_table.h`；bug `REQ-01M79N1ZV391BCM7MYSKK0GVV0` |
 | 只看 `FT_Load_Char` 返回值判断「字形存在」 | glyph 0 / `.notdef` 也返回 0；缺字被缓存成正常字形 | `font.cpp` 的 `glyphIndexFor()` / `glyph()`；同上 bug 单 |
-| 把基线补偿写进 `tmAscent`，或在 `gdiDrawText` 里再减一次 | 行距变 / 墨迹抬 2N px；`TEXTMETRICA` 不再逐字节稳定 | `font.h:35`、`font.cpp:430`；`text-baseline-lift / lift/metrics-unchanged` |
+| 把基线补偿写进 `tmAscent`，或在 `gdiDrawText` 里再减一次 | 行距变 / 墨迹抬 2N px；`TEXTMETRICA` 不再逐字节稳定 | `font.h:35`、`font.cpp:430`；口径见 `docs/03-emulator/defects.md` BUG-08（原 CTest `text-baseline-lift` 已删，复现命令见该条） |
 | 把 `tmCharSet` 恒 0 当成「引擎请求的 charset」 | 枚举路径若回 0，引擎回调过滤掉所有族名 ⇒ 字体名表空 ⇒ `std::out_of_range` | `gdi32_font.cpp:96` vs `:503`；`gdi.cpp / enum-font-families` |
 | `EnumFontFamiliesExA` 回调极性写成「非 0 = 停止」 | 只报 1 条族名；引擎查 `ＭＳ ゴシック` 返回 -1 ⇒ 崩 | `gdi32_font.cpp:464`；`gdi.cpp / enum-font-families-stop` |
 | 直接手改 / 覆盖 `corpus/assets/fonts/Amayui-CN_cnjp*.ttf` | 校验基准被破坏；`pnpm tools fonts verify` 红；无法从「基底 + 字典」复现 | `tools/fonts.md`；`tools/test/fonts.test.mjs` |
-| 换 `--font` / 改配置后不失效缓存 | 旧字形 / 度量继续命中；字面与字号串 | `font.cpp:182` / `:220`；`gdi-font-metrics-cache / cache/config-miss` |
+| 换 `--font` / 改配置后不失效缓存 | 旧字形 / 度量继续命中；字面与字号串 | `font.cpp:182` / `:220`；键与失效口径记在 `design-notes.md` 的 L3-gdi-01（原 CTest `gdi-font-metrics-cache` 已删，见 §6 末） |
 | 想让 `AddFontMemResourceEx` 的字体当主字体（或按 `lfFaceName` 路由） | 内存字体**只当缺字后备**：主 face 有该码位时永不使用；按名字路由会把全部中文切回日文字形 | `gdi32_font.cpp:606`、`runtime/font.h`；`SCOPE.md` §5 |
-| 缓存键去掉 bold / 字体路径 | 常规与粗体、或两次 `--font` 之间串度量 | `font.cpp:512`；`gdi-font-metrics-cache / cache/bold-not-aliased` |
+| 缓存键去掉 bold / 字体路径 | 常规与粗体、或两次 `--font` 之间串度量 | `font.cpp:512`；键的定义在 `design-notes.md` 的 L3-gdi-01（真 GDI 合同 = `gdi-font / metrics-size-change`） |
 | 绕过 `gdiGlyph` 自己 `FT_Load_Char` | GGO / extent / `TextOutA` 不再自洽（三套推进） | `font.cpp:379`；`gdi.cpp / extent-advance-self-consistency` |
 
 ## 6. 改字体 / 换字体
@@ -384,23 +384,27 @@ pnpm tools fonts build --write   # 只写 dist/fonts/（生成物）；不覆盖
 | 想改 | 文件 | 跑什么 |
 |---|---|---|
 | 取字 / 度量 / GGO / 绘制 | `apps/emulator-lift/src/runtime/font.cpp` | 见本节末的命令 |
-| Win32 形状 / 参数解包 | `apps/emulator-lift/src/shims/gdi32_font.cpp` | 同上（`gdi` 是 pure；`gdi-font` / `text-baseline-lift` 是 assets，缺字体时 SKIP 77） |
+| Win32 形状 / 参数解包 | `apps/emulator-lift/src/shims/gdi32_font.cpp` | 同上（`gdi` 是 pure；`gdi-font` 要宿主字体，缺字体时 SKIP 77） |
 | CP932 表 | `apps/emulator-lift/src/runtime/cp932_table.h` + 生成器 `tools/lift-cp932-gen.mjs` | 按生成器头注释重生成（⛔ 不手改派生表）；CTest `codepage` / `strfmt` |
-| 字体路径 / 基线常量 | `apps/emulator-lift/CMakeLists.txt:204`、`font.h:35` | 重新 configure + build；`text-baseline-lift` |
+| 字体路径 / 基线常量 | `apps/emulator-lift/CMakeLists.txt:204`、`font.h:35` | 重新 configure + build；基线补偿的复现命令见 `docs/03-emulator/defects.md` BUG-08 |
 
 守卫用例名（**CTest 测试名** + 测试内部的用例名；`-R` 只能匹配前者，内部用例名要跑整个
 CTest 才会打印）：
 
 - CTest `gdi`（pure）：`enum-font-families`、`enum-font-families-stop`、
   `extent-advance-self-consistency`、`pack-mono-row-align` / `pack-gray4-range` / `pack-gray8-range`；
-- CTest `gdi-font`（assets）：`ggo-formats`、`extent-advance`、`metrics-stable`；
-- CTest `gdi-font-metrics-cache`（pure）：`cache/size-change`、`cache/bold-not-aliased`、
-  `cache/config-miss`、`cache/profile-line`；
-- CTest `text-baseline-lift`（assets）：`lift/origin-delta`、`lift/metrics-unchanged`、
-  `lift/pixels`。
+- CTest `gdi-font`（assets）：`ggo-formats`、`extent-advance`、`metrics-stable`、
+  `metrics-size-change`（★ 换字号后度量必须变 —— 2026-11-13 从已删的 `gdi-font-metrics-cache` 搬来
+  的**真 GDI 合同**）；缓存键 / hit-miss 计数那一类断言已按 `defects.md` BUG-14 删除（内部取舍），
+  知识落在 `design-notes.md` 的 L3-gdi-01。
+- **基线补偿（`baseline_lift == 2`）没有 CTest 了**：它是**我方视觉策略**，不是引擎语义、也不是接口合同
+  ⇒ 原 CTest `text-baseline-lift`（`lift/origin-delta` / `lift/metrics-unchanged` / `lift/pixels`）
+  已按测试模型于 2026-11-14 **删除**（业务/策略正确性不作判据）。**判据留在这里**：补偿只加在
+  `gmptGlyphOrigin.y`、**不改度量**（`TEXTMETRICA` 逐字段稳定）、方向是墨迹**上**移 2 px；
+  复现命令见 `docs/03-emulator/defects.md` BUG-08（`--baseline-lift 0` 与 `2` 两臂逐帧 BMP 比）。
 
 ```bash
-ctest --test-dir apps/emulator-lift/out -R '^(gdi|gdi-font-metrics-cache|gdi-font|text-baseline-lift)$' --output-on-failure
+ctest --test-dir apps/emulator-lift/out -R '^(gdi|gdi-font)$' --output-on-failure
 ```
 
 ## 7. 相关单与待核

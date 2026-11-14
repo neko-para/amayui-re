@@ -3,10 +3,14 @@
 // ★ 读 `runtime/d3dx9_sprite.h` 的文件头先：vtable 取证的槽表、语义决定、纹理的现状与 loud trap 口径。
 // ★ 本文件**不认 COM**：vtable / refcount / 派发在 `runtime/com.h` 与 `shims/d3dx9.cpp`。
 // ★ 一切"真的做"的部分都在 compositeBatch：
-//     Draw 时把变换应用到四角（与 D3DX 的"顶点当场生成"一致），End/Flush 时按像素合成：
-//     白色纹理源（pTexture=0 时的 D3D9 固定功能语义）× 调制色 → **当前绑定的颜色目标**
-//     （未绑 RT = 后缓冲；绑了纹理 RT = 那张纹理的像素块）；ALPHABLEND 走
-//     SRCALPHA/INVSRCALPHA。⛔ 不是"只计数不写像素"。
+//     Draw 时把变换应用到四角（与 D3DX 的"顶点当场生成"一致），End/Flush 时把纹理四边形交给
+//     **GPU 光栅后端**：白色纹理源（pTexture=0 时的 D3D9 固定功能语义）× 调制色 → **当前绑定的
+//     颜色目标**（未绑 RT = 后缓冲；绑了纹理 RT = 那张纹理的像素块）；ALPHABLEND 走
+//     SRCALPHA/INVSRCALPHA。
+// ★ **光栅只有 GPU 一条实现**（`REQ-01M7AAXNJY2PACYJHYVRV620Q5`）：原来那份"CPU 逐像素写后缓冲"
+//   的兜底已删 —— GPU 不可用 / 表达不了这一条 ⇒ **记账（`skipped`）+ 跳过**，⛔ 不静默画。
+//   本文件**没有**任何写 `dev.arena` / 目标像素的代码；"写了多少像素"这个数只为状态块的
+//   `composed_pixels` 服务（= 交给 GPU 的那条四边形的覆盖格数，⛔ 不是 CPU 数出来的）。
 #include "runtime/d3dx9_sprite.h"
 
 #include <cmath>
@@ -298,14 +302,6 @@ bool reserveBatch(X86& cpu, const State& s, std::uint32_t need, std::string* why
     cpu.mem->wr32(s.state + kSpBatch, np);
     cpu.mem->wr32(s.state + kSpCapacity, cap);
     return true;
-}
-
-// 8 位通道的舍入乘法（只此一处；掩码换算 / load·store 走 runtime/pixel_format.h）
-// ★ 它**不是** pixel_format 的 mask/expand 助手：这是 ALPHABLEND 的 8 位舍入乘法；流水线的
-//   `blendFactors8`/`applyBlendOp` 是 D3DBLEND/D3DBLENDOP 的设备混合状态语义（另一套公式）。
-//   ⛔ 不把它们并成一份 —— 并了会改像素结果（口径不同，不是"看起来重复"）。
-std::uint8_t mul255(unsigned a, unsigned b) {
-    return static_cast<std::uint8_t>((a * b + 127u) / 255u);
 }
 
 // 一次 Draw 的输入（读出来就定型；⛔ 不在 End 时重读 guest 指针 —— D3DX 在 Draw 时就生成顶点）
@@ -704,7 +700,8 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
         }
         double q[8];
         for (int k = 0; k < 8; ++k) q[k] = static_cast<double>(rdFloat(cpu, ea + kBeQuad + static_cast<std::uint32_t>(k) * 4u));
-        // 仿射逆映射：X = x0 + u*(x1-x0)/w + v*(x2-x0)/h ；Y 同理。
+        // 四边形两条边向量 ⇒ 行列式 = 面积的两倍（只为下面那条"退化"判据服务；
+        // ★ 不再有逐像素逆映射 —— CPU 合成已删，光栅在 GPU）。
         const double ux = (q[2] - q[0]) / w;  // dX/du
         const double uy = (q[3] - q[1]) / w;  // dY/du
         const double vx = (q[4] - q[0]) / h;  // dX/dv
@@ -803,14 +800,12 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
                 return false;
             }
         }
-        // 源矩形按纹理边界裁剪（D3DX 的"越界源矩形"会裁掉画不出来的那一截）
-        double u0 = 0.0, u1 = w, v0 = 0.0, v1 = h;
+        // 源矩形**完全**落在纹理外 ⇒ 这一条什么也不画（真机语义，不是错误）。
+        // ★ 与"越界裁掉一截"分开：**部分**越界由下面的 GPU 守卫按"表达不了 ⇒ 跳过"处理
+        //   （GPU 路径不做逐像素裁剪；见那条注释）。⛔ 这里不写像素。
         if (texture != 0) {
-            if (left < 0) u0 = static_cast<double>(-left);
-            if (right > static_cast<std::int32_t>(tw)) u1 = static_cast<double>(static_cast<std::int32_t>(tw) - left);
-            if (top < 0) v0 = static_cast<double>(-top);
-            if (bottom > static_cast<std::int32_t>(th)) v1 = static_cast<double>(static_cast<std::int32_t>(th) - top);
-            if (u1 <= u0 || v1 <= v0) {
+            if (right <= 0 || bottom <= 0 || left >= static_cast<std::int32_t>(tw) ||
+                top >= static_cast<std::int32_t>(th)) {
                 spriteLog("End", "第 %u 条 Draw 的源矩形完全在纹理外 ⇒ 跳过", i);
                 if (sprite_gpu_active) d3d9::gpuNoteSpriteSkipped();
                 releaseEntry(ea, i);
@@ -819,23 +814,26 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
             }
         }
         // ---- GPU 光栅化：D3DXSprite 纹理四边形（sampler 用 stage 默认 NEAREST+CLAMP，⛔ 不改）----
+        // ★ **这条就是唯一实现**（`REQ-01M7AAXNJY2PACYJHYVRV620Q5` 删掉了 CPU 逐像素兜底）：
+        //   GPU 不可用 / 表达不了这一条 ⇒ `skip_reason` 记账 + 跳过，⛔ 不写目标像素。
         bool gpu_done = false;
-        std::string sprite_fallback_reason;
-        const std::uint64_t written_before = written;
+        std::string skip_reason;
         const bool has_texture = texture != 0;
         GpuRaster* gpu = sprite_gpu_active ? gpu_backend : nullptr;
-        if (gpu != nullptr) {
-            if (fmt.bpp != 32) {
-                sprite_fallback_reason = "sprite: 渲染目标不是 32bpp";
-                gpu = nullptr;
-            } else if (has_texture && tbpp != 4) {
-                sprite_fallback_reason = "sprite: 纹理不是 32bpp";
-                gpu = nullptr;
-            } else if (has_texture && (left < 0 || top < 0 || right > static_cast<std::int32_t>(tw) ||
-                                       bottom > static_cast<std::int32_t>(th))) {
-                sprite_fallback_reason = "sprite: 源矩形越界（GPU 路径不做逐像素裁剪）";
-                gpu = nullptr;
-            }
+        if (gpu == nullptr) {
+            skip_reason = "sprite: 没有已激活的 GPU 光栅后端";
+        } else if (fmt.bpp != 32) {
+            skip_reason = "sprite: 渲染目标不是 32bpp";
+            gpu = nullptr;
+        } else if (has_texture && tbpp != 4) {
+            skip_reason = "sprite: 纹理不是 32bpp";
+            gpu = nullptr;
+        } else if (has_texture && (left < 0 || top < 0 || right > static_cast<std::int32_t>(tw) ||
+                                   bottom > static_cast<std::int32_t>(th))) {
+            // ★ GPU 路径不做逐像素裁剪（UV 会采到纹理边界外）⇒ 这一条整个跳过并记账。
+            //   实测（TITLE/ADV/SAVE，130/200/600 帧）这个分支命中 0 次；⛔ 不为了它留 CPU 兜底。
+            skip_reason = "sprite: 源矩形部分越界（GPU 路径不做逐像素裁剪）";
+            gpu = nullptr;
         }
         if (gpu != nullptr) {
             std::string gerr;
@@ -922,85 +920,18 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
                               ix1 - ix0, iy1 - iy0);
                 }
             } else {
-                // GPU 失败：把已经画出的部分落回 guest，本条回退 CPU（记账 + 首次打印）。
-                spriteLog("End", "第 %u 条 Draw 的 GPU 纹理路径失败：%s ⇒ 回退 CPU", i, gerr.c_str());
-                sprite_fallback_reason = "sprite: GPU 后端失败：" + gerr;
-                std::string sync_err;
-                gpu->rasterSyncToGuest(base, gs->pitch, gs->width, gs->height, &sync_err);
+                // GPU 失败 ⇒ 这一条**没画**（⛔ 不 CPU 重放）。队列里更早的 sprite 不受影响：
+                // 它们按提交顺序留在后端队列里，Present / Clear / 换 target 时照旧 flush + 读回。
+                spriteLog("End", "第 %u 条 Draw 的 GPU 纹理路径失败：%s ⇒ 跳过这一条", i, gerr.c_str());
+                skip_reason = "sprite: GPU 后端失败：" + gerr;
             }
         }
-        if (!gpu_done) {
-        // ★ 合批后的新屏障：这条 sprite 要由 CPU 直接写 guest，而队列里可能还有**更早**的 sprite
-        //   没提交。必须先把它们画进镜像并回读 guest，否则 Present 读回时会把这条 CPU 像素盖掉。
-        // ★ 用 `gpu_backend` 而不是局部 `gpu`：上面已因本条的回退原因把局部 `gpu` 置空，但队列
-        //   在 `gpu_backend` 里 —— 这条屏障不能随"本条为什么回退"一起失效。
-        if (sprite_gpu_active && gpu_backend != nullptr && gpu_backend->rasterDirty()) {
-            std::string sync_err;
-            if (!gpu_backend->rasterSyncToGuest(base, gs->pitch, gs->width, gs->height, &sync_err)) {
-                if (why) *why = std::string("D3DX9：CPU 回退前 GPU 像素读回失败：") + sync_err;
-                releaseEntry(ea, i);
-                return false;
-            }
-        }
-        for (int y = iy0; y < iy1; ++y) {
-            for (int x = ix0; x < ix1; ++x) {
-                // 像素中心采样（D3D 的光栅化规则）
-                const double px = static_cast<double>(x) + 0.5;
-                const double py = static_cast<double>(y) + 0.5;
-                const double dx = px - q[0];
-                const double dy = py - q[1];
-                const double u = (dx * vy - dy * vx) / det;
-                const double v = (dy * ux - dx * uy) / det;
-                if (u < u0 || u >= u1 || v < v0 || v >= v1) continue;  // 四边形外 / 纹理外（裁剪）
-                unsigned tex_r = 255u;
-                unsigned tex_g = 255u;
-                unsigned tex_b = 255u;
-                unsigned tex_a = 255u;
-                if (tbase) {
-                    const int srcx = left + static_cast<int>(std::floor(u));
-                    const int srcy = top + static_cast<int>(std::floor(v));
-                    const std::uint8_t* tp = tbase + static_cast<std::size_t>(srcy) * tpitch +
-                                             static_cast<std::size_t>(srcx) * tbpp;
-                    const std::uint32_t raw = pixel_format::loadPixel(tp, tfmt.bpp);
-                    tex_r = pixel_format::expandChannel(raw, tfmt.rmask);
-                    tex_g = pixel_format::expandChannel(raw, tfmt.gmask);
-                    tex_b = pixel_format::expandChannel(raw, tfmt.bmask);
-                    // mask==0（无 alpha 通道）⇒ expandChannel 返回 255（不透明），语义见 pixel_format.h
-                    tex_a = pixel_format::expandChannel(raw, tfmt.amask);
-                }
-                const unsigned src_r = mul255(tex_r, sr);
-                const unsigned src_g = mul255(tex_g, sg);
-                const unsigned src_b = mul255(tex_b, sb);
-                const unsigned src_a = mul255(tex_a, sa);
-                std::uint8_t* p = base + static_cast<std::size_t>(y) * gs->pitch +
-                                  static_cast<std::size_t>(x) * bpp;
-                std::uint32_t argb = 0;
-                if (!blend) {
-                    // 无 ALPHABLEND：真机的默认渲染状态是"不混合" ⇒ 覆盖（含 alpha 通道）
-                    argb = (src_a << 24) | (src_r << 16) | (src_g << 8) | src_b;
-                } else {
-                    const std::uint32_t dst_raw = pixel_format::loadPixel(p, fmt.bpp);
-                    const unsigned dr = pixel_format::expandChannel(dst_raw, fmt.rmask);
-                    const unsigned dg = pixel_format::expandChannel(dst_raw, fmt.gmask);
-                    const unsigned db = pixel_format::expandChannel(dst_raw, fmt.bmask);
-                    const unsigned da = pixel_format::expandChannel(dst_raw, fmt.amask);
-                    // SRCALPHA / INVSRCALPHA（D3DXSPRITE_ALPHABLEND 的固定功能状态）
-                    const unsigned ia = 255u - src_a;
-                    const unsigned r = (src_r * src_a + dr * ia + 127u) / 255u;
-                    const unsigned g = (src_g * src_a + dg * ia + 127u) / 255u;
-                    const unsigned b = (src_b * src_a + db * ia + 127u) / 255u;
-                    // alpha 通道用同一对因子（SEPARATEALPHABLEND 默认关）
-                    const unsigned a = (src_a * src_a + da * ia + 127u) / 255u;
-                    argb = (a << 24) | (r << 16) | (g << 8) | b;
-                }
-                pixel_format::storePixel(p, fmt.bpp, pixel_format::pixelFromColor(fmt, argb));
-                ++written;
-            }
-        }
-        }  // !gpu_done
-        // ★ sprite 的 GPU 覆盖账：只有在 GPU 已启用（且 sprite 路径开着）时才记。
-        if (sprite_gpu_active) {
-            d3d9::gpuNoteSpriteResult(gpu_done, written - written_before, sprite_fallback_reason);
+        // ★ 账本：GPU 真的入队 ⇒ `sprite_gpu_draws`；否则这一条**没画** ⇒ `sprite_skipped`
+        //   （原因进 `skipped top:`）。⛔ 没有"CPU 补画"这个第三态 —— 那正是本单删掉的东西。
+        if (gpu_done) {
+            d3d9::gpuNoteSpriteDrawn();
+        } else {
+            d3d9::gpuNoteSpriteNotDrawn(skip_reason.empty() ? std::string("sprite: 未知原因") : skip_reason);
         }
         // Draw 时 AddRef 的纹理在这里对称 Release（与 D3DX 的批次生命周期一致）
         releaseEntry(ea, i);
@@ -1025,8 +956,8 @@ std::uint32_t flush(X86& cpu, std::uint32_t state, std::string* why) {
     std::uint64_t pixels = 0;
     if (!compositeBatch(cpu, state, &entries, &pixels, why)) return kFail;
     cpu.mem->wr32(state + kSpFlushes, s.flushes + 1u);
-    spriteLog("Flush", "合成 %u 条 Draw / %llu 个像素（批次保留，Begin 状态不变）", entries,
-              static_cast<unsigned long long>(pixels));
+    spriteLog("Flush", "合成 %u 条 Draw / %llu 个覆盖格（四边形包围盒；GPU ⛔ 不回报片元数；批次保留）",
+              entries, static_cast<unsigned long long>(pixels));
     return kOk;
 }
 
@@ -1043,7 +974,7 @@ std::uint32_t end(X86& cpu, std::uint32_t state, std::string* why) {
     if (!compositeBatch(cpu, state, &entries, &pixels, why)) return kFail;
     cpu.mem->wr32(state + kSpDrawing, 0u);
     cpu.mem->wr32(state + kSpEnds, s.ends + 1u);
-    spriteLog("End", "合成 %u 条 Draw / %llu 个像素 ⇒ 批次关闭", entries,
+    spriteLog("End", "合成 %u 条 Draw / %llu 个覆盖格（四边形包围盒）⇒ 批次关闭", entries,
               static_cast<unsigned long long>(pixels));
     return kOk;
 }

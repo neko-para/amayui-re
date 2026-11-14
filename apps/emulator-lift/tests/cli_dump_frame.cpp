@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "check.h"
+#include "cmdline.h"
 #include "subprocess_skip.h"
 
 #if defined(_WIN32)
@@ -67,7 +68,8 @@ std::string readAllBytes(const fs::path& p) {
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
-std::wstring quoteArg(const std::wstring& s) { return L"\"" + s + L"\""; }
+// ★ 命令行拼装只有一份实现（tests/cmdline.h）：`--dump-frame` 的模式串可能以 `\` 结尾。
+using lift_test::quoteArg;
 
 ChildRun runChild(const fs::path& exe, const std::wstring& args, const fs::path& cwd, const fs::path& out_path,
                   const fs::path& err_path) {
