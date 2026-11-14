@@ -346,6 +346,14 @@ enable_testing()
 #   `LIFT_STRESS` **被显式打开**而它要的输入 MISSING ⇒ `message(FATAL_ERROR …)`；
 #   默认档**不** FATAL —— 缺了就是那条用例自己红 / `LIFT_SKIP`(77)（由测试体自己判，⛔ 不缩水）。
 # =====================================================================================
+# Shape A 原型阶段 A · IR ↔ runtime 的 ABI 薄层（只追加源文件：⛔ 不改上面的源列表）
+# ★ 落点 `src/runtime/lift_abi.{h,cpp}`：唯一一份 `extern "C"` 面（LiftRegs / 搬运函数 /
+#   lift_note_write）；契约见 `.tmp/irshape/runtime-contract.md` §7 与 `src/runtime/lift_abi.h`。
+# ★ 它**不属于**任何测试：产品二进制也要链它（将来 lifted 代码是产品的一部分）。
+# =====================================================================================
+target_sources(emulator-lift-runtime PRIVATE src/runtime/lift_abi.cpp)
+
+# =====================================================================================
 if(LIFT_BUILD_TESTS)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/tests")
@@ -1362,4 +1370,86 @@ set_tests_properties(frame-dump-failure PROPERTIES SKIP_RETURN_CODE 77)
 # （`REQ-01M7ATAB5A18W7XBCKFBEQS7HB`）—— 判据是"等一屏 → 点一下"这类**业务正确性**；
 # ⛔ 不进测试。复现命令见 `docs/03-emulator/defects.md` BUG-16。
 # =====================================================================================
+
+# =====================================================================================
+# Shape A 原型阶段 A（`.tmp/irshape/design-review.md` §6 的最小版）：
+#   ① `lift-abi-probe`：**只钉 ABI**（sizeof / offsetof / 逐字段搬运 / lift_note_write → SMC），
+#      ⛔ 不碰 clang / `.ll` ⇒ 没有 clang 的机器也照样绿（顶层无条件注册 = pure）。
+#   ② `lift-ir-proto`：`tests/ir/lift_436D00.ll` 由 clang 编成 obj，与 runtime **链进同一个 exe**；
+#      trampoline 按 resume EA 调它，冷路径把两个建表器**交给解释器**（混合模式），
+#      再与解释器臂逐位差分；`--lifted-only` 子进程是"解释器不在执行路径上"的负控（exit 9）。
+# ★ **缺 clang 的处置**（复审 §3.4）：`add_custom_command` 只放在 `if(LIFT_IR_CLANG)` 里，
+#   否则改用 `tests/ir/lift_stub.cpp`（同名符号返回哨兵）⇒ configure / 链接**永不断**；
+#   测试体自己 `LIFT_SKIP(77)`。⛔ `add_test` 在**最外层**（不嵌进任何 `if`）—— 档位 = pure。
+# ★ 编译用 `clang` 驱动（不是 clang-cl）：`.ll` 输入只有 clang 认；obj 与 clang-cl 编的 TU
+#   是同一份 LLVM / 同一套 COFF ABI，链接实测可行（`runtime-contract.md` §6.3）。
+# ★ `-Wno-override-module`：clang 22 对"IR 没写 target triple、命令行给了 --target"会 warn；
+#   这个 IR 是**目标无关**的（只做 i32 运算），triple 交给驱动。
+# =====================================================================================
+add_executable(lift-abi-probe tests/lift_abi_probe.cpp)
+target_link_libraries(lift-abi-probe PRIVATE emulator-lift-runtime)
+add_test(NAME lift-abi-probe COMMAND lift-abi-probe)
+
+find_program(LIFT_IR_CLANG NAMES clang clang.exe)
+if(LIFT_IR_CLANG)
+    set(LIFT_IR_OBJ "${CMAKE_CURRENT_BINARY_DIR}/lift_436D00.obj")
+    set(LIFT_IR_TARGET_FLAGS "")
+    if(WIN32)
+        # 与预设 `windows-x64` 的 clang-cl 一致
+        set(LIFT_IR_TARGET_FLAGS --target=x86_64-pc-windows-msvc)
+    endif()
+    add_custom_command(OUTPUT "${LIFT_IR_OBJ}"
+        COMMAND ${LIFT_IR_CLANG} -c -O2 ${LIFT_IR_TARGET_FLAGS} -Wno-override-module
+                -o "${LIFT_IR_OBJ}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/ir/lift_436D00.ll"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/ir/lift_436D00.ll"
+        COMMENT "lift-ir-proto: tests/ir/lift_436D00.ll -> .obj（clang -c -O2，无 llc）")
+    set(LIFT_IR_SRC "${LIFT_IR_OBJ}")
+else()
+    message(STATUS "lift-ir-proto: 没找到 clang ⇒ 链 tests/ir/lift_stub.cpp（测试体 SKIP 77）")
+    set(LIFT_IR_SRC "${CMAKE_CURRENT_SOURCE_DIR}/tests/ir/lift_stub.cpp")
+endif()
+add_executable(lift-ir-proto tests/lift_ir_proto.cpp ${LIFT_IR_SRC})
+target_link_libraries(lift-ir-proto PRIVATE emulator-lift-runtime)
+if(LIFT_IR_CLANG)
+    target_compile_definitions(lift-ir-proto PRIVATE LIFT_IR_CLANG=1)
+endif()
+target_compile_definitions(lift-ir-proto PRIVATE LIFT_IR_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
+# `getenv`（读 PROCESSOR_IDENTIFIER 打 CPU 读数）在 MSVC 口径里是 deprecated 警告，不是问题
+target_compile_definitions(lift-ir-proto PRIVATE _CRT_SECURE_NO_WARNINGS)
+add_test(NAME lift-ir-proto COMMAND lift-ir-proto $<TARGET_FILE:lift-ir-proto>)
+set_tests_properties(lift-ir-proto PROPERTIES SKIP_RETURN_CODE 77)
+
+# =====================================================================================
+# Shape A 原型阶段 B（`.tmp/irshape/impl-stage-b.md`）：**shim 的利用方式**
+#   `lift-ir-shim`：`tests/ir/lift_4D4B40.ll` + `tests/ir/lift_436D00.ll` 两份 obj 与 runtime
+#   链进**同一个** exe。载荷 `sub_4D4B40` 里 ③ 是 `call eax`（槽值 = 一条 lifted EA 0x436D00）、
+#   ④ 是 `call ds:[0051D450]`（真 IAT 槽 → shim 桩）⇒ 两条分派路都被真 guest 代码走到。
+#   探针把 `timeGetTime` 换成固定返回（⛔ 不用真虚拟时钟：那会让"比 [E+0xFC]"退化成比记账）。
+# ★ 缺 clang 的处置与阶段 A 同一套（复审 §3.4）：`add_custom_command` 只放在 `if(LIFT_IR_CLANG)`
+#   里；否则链 `tests/ir/lift_stub.cpp`（提供 436D00 替身），4D4B40 的替身由测试体内联提供
+#   （`#ifndef LIFT_IR_CLANG`）⇒ configure / 链接**永不断**，测试体自己 `LIFT_SKIP(77)`。
+# ⛔ `add_test` 在**最外层**（不嵌进任何 `if`）—— 档位 = pure。
+# =====================================================================================
+if(LIFT_IR_CLANG)
+    set(LIFT_IR_SHIM_OBJ "${CMAKE_CURRENT_BINARY_DIR}/lift_4D4B40.obj")
+    add_custom_command(OUTPUT "${LIFT_IR_SHIM_OBJ}"
+        COMMAND ${LIFT_IR_CLANG} -c -O2 ${LIFT_IR_TARGET_FLAGS} -Wno-override-module
+                -o "${LIFT_IR_SHIM_OBJ}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/ir/lift_4D4B40.ll"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/ir/lift_4D4B40.ll"
+        COMMENT "lift-ir-shim: tests/ir/lift_4D4B40.ll -> .obj（clang -c -O2，无 llc）")
+    set(LIFT_IR_SHIM_SRC "${LIFT_IR_OBJ}" "${LIFT_IR_SHIM_OBJ}")
+else()
+    message(STATUS "lift-ir-shim: 没找到 clang ⇒ 链 tests/ir/lift_stub.cpp + 测试体内的 4D4B40 替身（SKIP 77）")
+    set(LIFT_IR_SHIM_SRC "${CMAKE_CURRENT_SOURCE_DIR}/tests/ir/lift_stub.cpp")
+endif()
+add_executable(lift-ir-shim tests/lift_ir_shim.cpp ${LIFT_IR_SHIM_SRC})
+target_link_libraries(lift-ir-shim PRIVATE emulator-lift-runtime)
+if(LIFT_IR_CLANG)
+    target_compile_definitions(lift-ir-shim PRIVATE LIFT_IR_CLANG=1)
+endif()
+target_compile_definitions(lift-ir-shim PRIVATE LIFT_IR_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
+target_compile_definitions(lift-ir-shim PRIVATE _CRT_SECURE_NO_WARNINGS)
+add_test(NAME lift-ir-shim COMMAND lift-ir-shim)
+set_tests_properties(lift-ir-shim PROPERTIES SKIP_RETURN_CODE 77)
+
 endif() # LIFT_BUILD_TESTS

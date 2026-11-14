@@ -258,7 +258,11 @@ struct X86 {
     Machine* machine = nullptr;
 
     // ---- 最近执行过的指令（诊断用环形缓冲；停在 eip=0 这类地方时能看见"从哪来"）----
-    static constexpr int kLastInsns = 24;
+    // ★ 2026-11-14（阶段 B 复审判 P2-1）：24 → 64。原因不是"诊断想多看几条"，而是
+    //   `tests/lift_ir_shim.cpp` 现在**真的**从这个缓冲拼解释器臂的控制流序列（28 条）：
+    //   24 时前 4 条（含函数入口自己）已经滚出窗口，"三个目标 EA 都在窗口里"只是**载荷长度**
+    //   的巧合，不是机制。64 让 28 条完整可见；测试另断言 `last_count == insns`（截断即红）。
+    static constexpr int kLastInsns = 64;
     std::uint32_t last_eip[kLastInsns] = {};
     const char* last_mnemonic[kLastInsns] = {};
     std::uint32_t last_flags[kLastInsns] = {};

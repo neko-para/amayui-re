@@ -862,3 +862,98 @@
   ⛔ 不要把它算成"命中兜底路径"。
 - **未测**：OPTION 界面与战斗场景（仓库里**没有**对应交互图）；fp 那次 `exit 5` 之前只走到 SAVE 之后。
 - **复现**：上面两条命令 + `Select-String -Pattern 'unsupported :'`；原始日志 `.tmp/lift-tickets/fallback-census-{fp,lp}.log`。
+
+### OBS-20261114-14 · x87 退化成 `double` 会不会有可见差异：CW 的 PC=53 是决定项
+
+- **口径**：Windows x64 · 2026-11-14 · 只读语料 `corpus/disasm/files/AGE.EXE__dumped.sectfix.EXE.lst` + 二进制
+  `corpus/assets/age/AGE.EXE__dumped.sectfix.EXE`（sha256 与 `.lst` 头部一致）· 数值实验 = 本机 MSVC 19.51 编的
+  **x86（32 位）** 小 harness（真 x87 指令 + 真 `fldcw`；`double` 参照走 SSE2），**不链接模拟器**。产物 `.tmp/irshape/x87/`。
+- **决定项：这个二进制把 x87 的 precision control 固定成 53 位，此后从不改。** 唯一路径：
+  `_cinit(1)` @`0x4EE154`（唯一调用点 `0x4EDB59`，前一条 `6A 01` = `push 1`）→ 间接 `call ds:[0x52FDA0]`
+  （= `0x4E7F38` = `__fpmath`）→ `__setdefaultprecision`(`0x4F2525`) 压 `0x30000`(_MCW_PC) / `0x10000`(_PC_53)
+  → `__controlfp_s`(`0x506F28`) → `__control87`(`0x510D62`)；`__control87` 自己的解码证明 `_PC_53 ⇔ CW bits8-9 = 10`。
+  全 `.text` 的 CW 站点 = **142 站 / 17 个函数**（`fldcw` 94 + `fnstcw`/`fstcw` 48），其中 47 站是 `or reg,0C00h`
+  （**只改 RC=向零**）+ 47 站原样还原；`or …,300h` / `and …,0F3FFh` / `fldcw 立即数` / `fldenv`/`frstor`/`finit`
+  全 **0 站** ⇒ **没有任何站点碰 PC 位**。同族 MSVC x86 CRT 的入口 CW 实测 = `0x027F`（PC=53 / RC=就近）。
+  - 复现：`node .tmp/irshape/x87/cw-sites.mjs`（142 站逐站上下文）· `node .tmp/irshape/x87/callscan.mjs 0x4F2525 0x506F28 0x510D62`
+    （得 `0x4E7F48 → 0x4F2525 → 0x506F28 → 0x510D62`。★ 这些 CRT 函数在 `.lst` 里是 **COLLAPSED**，
+    按文本 grep 找不到调用者，必须字节扫 `E8 rel32`）。
+  - ⇒ **推论**：在真机上 x87 的 `+ - * /` 本来就每次舍入到 53 位 ⇒ lift 时用 `double` 对四则是**保真**，不是退化。
+- **读数**（只翻 CW 的 PC 位；每行 200,000 组随机输入里"结果位型不同"的组数）：
+
+  | 实验 | PC=53 | PC=64 | PC=24 |
+  |---|---:|---:|---:|
+  | 链式 `(a*b+c*d)/(e-f)` | **0** | 73,640 | 200,000 |
+  | (a) `(a/b+0.5)` 再截断成整数 | **0** | 构造 `13-0.75·2⁻⁶⁰` ⇒ trunc=**12**（53 位 ⇒ 13） | 200,000 |
+  | (c) 128 项点积 | **0/200** | 173/200 | — |
+  | (e) `fstp qword` 再参与运算 | **0** | — | — |
+  | (d) `fild qword` | 二进制里 **0 站**（`fistp qword` 6 站，输入已是 53 位 ⇒ 空类） | | |
+
+- **三档**：(i) **保真** = 四则 / 有序与无序比较 / `(int)` 转换 / 长累加 / `fstp` 32·64 位；
+  (ii) **不可见** = `+0.5` 再截断的惯用法（`0x467798`/`0x46F71C`/`0x47144E`）、饱和夹紧（`0x4046B8` 起）、NaN 守卫；
+  (iii) **可能可见** = 超越函数站点 + **80 位指数值域带**（`1e200*1e200` 在 80 位有限、`double` = inf；
+  随机 `(x*y)/z` **16,344/200,000** 不同）+ NaN payload。
+- **超越函数本来就不同**（与 fp80→double 决策无关，属既有偏差）：`fsin(1.0)` x87 = `3FFED76A…` / libm = `3FEAED54…`；
+  2000 组里 fsin 4 / fcos 2 / fyl2x 150 位不同。二进制里实际用到的站点：`fsin`@`0x4CCC80`/`0x4CCC84`、
+  `fcos`@`0x4C8D2E`、`fpatan`@`0x4CF1A1`/`0x4CF1AC`。
+- **浮点比较是空类**：全 `.text` 的 `fnstsw` 掩码只有 `41h`×161 / `44h`×46 ⇒ **0 处相等比较**、0 处读 PE 位。
+- **给 lift 的四条硬约束**：① 那 47 个站点的 RC=向零必须复现（`fptosi`/`(int)` 天然满足）；
+  ② ⛔ 绝不能把 PC 当 64 位（否则四则的"保真"全部失效，36.8% 位差）；③ 内存里的 `REAL4` 槽位按 `float` 建模
+  （`fstp dword` 1209 站；统一升 `double` 的差异比 fp80→double **大得多**）；④ 超越函数站点单列。
+- **未测**：arm64（软浮点路径）· 真实场景 A/B（只有离线序列，没有跑游戏比存档字节）。
+  **唯一能推翻 (i) 的量**：有消费者读 `fistp` 之前的 80 位中间值并靠 **64 位指数**区分（语料里 `tbyte` 只出现在 CRT 自己）。
+
+### OBS-20261114-15 · Shape A 原型（阶段 A+B）：IR 与 shim 链成单一二进制、解释器不在执行路径上
+
+- **口径**：Windows x64 · RelWithDebInfo · AMD64 Family 25 Model 68 · 2026-11-14 ·
+  载荷 = `AGE.EXE` 的**真字节**（`sub_436D00` 80 B + `sub_4D4B40` 45 B，`placeCode` 进 guest，**不加载 PE**）·
+  `.ll` 由 `clang -c -O2` 编成 obj、与 `emulator-lift-runtime` **链进同一个测试 exe** ·
+  门禁 `ctest --test-dir apps/emulator-lift/out -R "lift-abi-probe|lift-ir-proto|lift-ir-shim"`（三条都 pure 档）。
+- **形态（本原型证到的）**：入口 `i32 fn(LiftRegs*, u8* mem, u32 resume_ea, void* cpu)`；trampoline 只做
+  `EA → 宿主函数` 表查 + 间接调用；**分量内分支直接跳**；`call rel32` = 压 guest 返回地址 + 返回被调方 EA；
+  `retn imm16` = 弹返回 EA（`esp += 4 + imm16`）+ 返回它；shim 调用 = `lift_shim(桩 EA)` 薄包装 → `invokeById`。
+  解释器**只**在混合模式（阶段 A 的两个建表器）与差分 oracle 里出现。
+- **差分 0 不一致**：阶段 A **240 组**（冷 120 / 热 120，`n ∈ {0,1,3,31,4096}` × 随机 buffer，比 8 GPR +
+  `EFLAGS & 0x8D5` + 三片内存哈希 + 出口 EIP + ESP）· 阶段 B **80 组**（比 8 GPR + ESP + EIP + `[E,E+0x804)` /
+  `[V,V+0x100)` / `[esp-0x100,esp+0x40)`）。外部锚两臂都过：`n=9`、`"123456789"` ⇒ `0xCBF43926`。
+- **控制流实测（阶段 B 两臂相同）**：`0x4D4B40 → 0x436D00 → 0x4D4B5D → 7FFE2000 → 0x4D4B63 → 0xFFFFFFFF`；
+  `0x436D00` 与桩 EA 各恰好 1 次 ⇒ ③（`call eax` 槽 → 表查）与 ④（IAT → shim 蹦床）走的是**两条不同的路**。
+  ★ **两臂是各自独立取的**：lifted 臂 = trampoline 的 dispatch 记录；解释器臂 = `cpu.last_eip` 的真轨迹
+  （断言窗口完整 `last_count == insns`、四个 EA 各**恰好 1 次**、顺序递增）。`kLastInsns` 由 24 提到 **64** ——
+  本载荷 28 条 > 24，首版只是靠"那三个 EA 恰好在窗口内"侥幸。
+  ★ **首版踩过的坑**：解释器臂的序列是拿"期望序列"**合成**出来、再和同一个函数比 ⇒ 240 个 check 恒真、
+  打印行也是合成的（复审用"跳过全部观测"的变异证明它**全绿**）。与 `AGENTS.md` §10 同一条：
+  **打印出来的"证据"必须先能红**；现在改成真轨迹 + 数次数，`kLastInsns` 改回 24 就该红（实测红）。
+- **③ 的实参是单独观测的**（不靠差分）：`[esp]` / `[esp+4]` / `[esp+8]` = 返回地址 / `n` / `buf`，`buf` 用
+  `0xA5A51234` 这种非零标记；把 `push ecx` 改压 `0xDEADBEEF` ⇒ **只有这一条红**（差分仍绿）。
+  同理 shim 的"整块回读"由探针写 `EDX = 0xABCD0001` 守住（回读只留 EAX+ESP ⇒ 红）——
+  这两条都是"差分看不见、必须单独观测"的面。⚠ 这套"从 `last_eip` 拼轨迹"的上限是 `kLastInsns = 64`
+  （24→64 是为这一条改的：28 条 > 24 会让前 4 条滚出窗口，而"三个 EA 恰好在窗口里"只是载荷长度的巧合）；
+  载荷 > 64 条时会**假红** ⇒ 只能当原型证据，整 `.text` 阶段要把 trace 从 `X86` 拆出去（dispatcher 钩子或可配置）。
+- **shim 独立性**：探针（换掉 `timeGetTime` 的 `fn`，返回 `0x5EED1234`）每臂 `calls == 1`、
+  `[E+0xFC] == 0x5EED1234`；负控（探针不写 `call.result`）⇒ `[E+0xFC] == 0`。
+  ⛔ 不能用真 `timeGetTime` 做差分：它读虚拟时钟 = 累计指令数/10000，两臂指令数不同 ⇒ 那是在比记账。
+- **读数**（同进程、3 遍中位）：
+
+  | 量 | 值 |
+  |---|---:|
+  | 端到端 `n=4096` 热路径：lifted vs 解释器 | **99.6×**（阶段 A 首测 ≈101×，多轮 101–107×） |
+  | 每次 trampoline 边界 | **≈0.2 ns**（短载荷控制 6.3 vs 6.1 ns/迭代；`n=4096` 口径 +47.7 ns 被 ±50 ns 噪声淹没 ⇒ **分辨不出**） |
+  | `lift_shim` 往返（含物化/回读） | **87.3 ns** vs 直接 `invokeById` 79.1 ns ⇒ 包装开销 **8.2 ns** |
+  | `sub_4D4B40` 全链（28 条 guest） | ≈2.25×（`Machine::run` 空跑固定开销 **8.2 µs** 主导；原始 22.75× ⛔ 不可引用） |
+  | 冷路径（建表器留解释器） | 解释器 19,333 条；lifted 臂解释器增量 = 19,333（冷）/ **0**（热） |
+
+- **一条会咬人的接口事实（推翻 `.tmp/irshape/runtime-contract.md` §7.2 的建议）**：桩 EA → shim **不能**用
+  `(ea - kStubBase) >> 2` 算 id。`shim_id` 是**注册序**（`ShimRegistry` 里的下标），桩 EA 的槽号是**发号序**
+  （导入表绑定 / `use()` 分配）；两者只在"注册顺序恰好等于发号顺序"时一致 —— 实测夹具 `kStubBase = 0x7FFE2000`
+  下那个公式给出 `0x800`，是一个**不存在的 id**。正确做法：走块缓存 `BlockCache::peek(ea)->shim_id`
+  （与 dispatcher 的 `is_shim` 同源），缺块时回退 `idForStub`。
+  同理 **桩页范围是 32 KiB**（`GuestLayout`），不是 256 B ⇒ `isShimEa` 用 `[shim_page, shim_page + slots*4)`。
+- **SMC**：lifted 代码的 data 写（`mov [esi+800h],1`）调 `lift_note_write` ⇒ `BlockCache` 的 misses/失效 +1，
+  与解释器 `writeMem` 同一路径（探针实测）。`push` 不调（解释器 `push32` 也不调）—— 这是**复刻解释器的真实行为**，
+  不是遗漏。
+- **未测**：lifted 侧的 x87 / SSE / SMC 写自身代码 / 跳表 · arm64 实跑 · 整 `.text`（`.ll` 仍是手写的，
+  生成器未做）· 真实负载（本原型是 hermetic 真字节，不是整机 boot）。
+- **复现**：上面那条 `ctest -R`（或单跑 `lift-ir-proto` / `lift-ir-shim` 看打印的读数行）；`--lifted-only`
+  负控：`apps/emulator-lift/out/lift-ir-shim --lifted-only`（需回解释器 ⇒ exit 9）。报告
+  `.tmp/irshape/{impl-stage-a,impl-stage-b,change-review-stage-a,change-review-stage-b}.md`。

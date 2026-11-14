@@ -1,4 +1,4 @@
-# lift overrides 台账：从「结构同步」升级到「语义可失效」（kind 三值 + scope_ref + 模块集与 AGERC 单列 + 删 12 条不可达）
+# 导入桩台账（data/lift/overrides.json；lift 是工具名，不属 L 支）：从「结构同步」升级到「语义可失效」（kind 三值 + scope_ref + 模块集与 AGERC 单列 + 删 12 条不可达）
 
 - id: REQ-01M7A5CDZC1HGDB3F2KNPJBJ16
 - type: req

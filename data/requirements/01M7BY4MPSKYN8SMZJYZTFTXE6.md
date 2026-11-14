@@ -3,7 +3,7 @@
 - id: REQ-01M7BY4MPSKYN8SMZJYZTFTXE6
 - type: req
 - status: open
-- parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- parent: REQ-01M7CZQZK3QQJBP5XCX88B4CTE
 - tags: [emulator-lift, native-override, profile]
 
 # emulator-lift · 写档 / 读档 / FELLOW 三处 >1s 阻塞段：能否 native override（评估）

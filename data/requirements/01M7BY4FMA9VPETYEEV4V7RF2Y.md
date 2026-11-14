@@ -3,7 +3,7 @@
 - id: REQ-01M7BY4FMA9VPETYEEV4V7RF2Y
 - type: req
 - status: open
-- parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- parent: REQ-01M7CZQZK3QQJBP5XCX88B4CTE
 - tags: [emulator-lift, native-override, save-load]
 
 # emulator-lift · 存档缩略图 `sub_4A42C0`（ShrinkTexture）函数级 native override

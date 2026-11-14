@@ -3,7 +3,7 @@
 - id: REQ-01M79MW8EVX0B2Y287EFRN5QJS
 - type: req
 - status: open
-- parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- parent: REQ-01M7CZQZK3QQJBP5XCX88B4CTE
 - tags: [emulator-lift, audio, native-override]
 
 ## 订正（2026-11-13 · 音频阶段设计，`.tmp/audio-phase/design.md` §4）

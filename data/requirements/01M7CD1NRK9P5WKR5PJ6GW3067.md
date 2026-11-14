@@ -1,9 +1,9 @@
-# emulator-lift · 整 .text 静态 lift（x86-32 → LLVM IR，构建期 AOT）：可行性读数与立项判据
+# A0 · 整 .text lift 立项：按执行指令数加权的可 lift 覆盖率 + 立项判据（M-lift-1 是第一条落地线）
 
 - id: REQ-01M7CD1NRK9P5WKR5PJ6GW3067
 - type: req
 - status: open
-- parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- parent: REQ-01M7CZQZ5RR0WV8CQE2ZEKJHHQ
 - tags: [emulator-lift, llvm, performance, aot]
 
 ## 一句话
