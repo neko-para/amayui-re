@@ -41,6 +41,10 @@ struct SdlWindowOptions {
     // ★ 只回读**这一帧**（1 起；0 = 每帧都写）。配合 `--max-frames N` 就是"定帧截图"：
     //   `--present-screenshot out.bmp --present-screenshot-frame N --max-frames N` 只产出一张。
     std::uint64_t screenshot_frame = 0;
+    // ★ 宿主真光标（`--cursor-warp`，**默认关**）：只加**宿主副作用**，⛔ 不改变 guest 可见状态
+    //   （虚拟光标 / `GetCursorPos` / `WM_MOUSEMOVE` 的 lParam 一律不变）。
+    //   实际生效还要求窗口可见（运行时 `windowHidden()` 判据）——见 `hostCursorWarpEnabled`。
+    bool cursor_warp = false;
 };
 
 class SdlWindow final : public PresentSink, public GpuRaster {
@@ -76,6 +80,15 @@ public:
     //   `--present headless` 的承诺是"**不出现可见窗口**"（不是"不建窗口"——建不出窗口/GPU
     //   device 就直接拒绝启动），这条给日志一个可读的机械证据。
     bool windowHidden() const;
+    // ★ `PresentSink`：宿主光标 warp（`--cursor-warp`，缺省关）。
+    //   `hostCursorWarpEnabled()` = 开关打开 **且** 窗口**当前可见**（运行时 `windowHidden()`，
+    //   ⛔ 不是"有没有窗口"：`--present headless` 也建隐藏窗口）。
+    //   `hostCursorWarp(cx,cy)` 的入参是 **guest 客户区像素**（见 `runtime/present.h`）；
+    //   实现 = letterbox（`runtime/cursor_map.h` 的**同一份**公式，image 尺寸取最近一次 Present
+    //   的帧尺寸）+ `SDL_GetWindowPosition` 的客户区原点 + 平台原语（`runtime/host_cursor.h`）。
+    //   false = 没挪（隐藏窗口 / 几何不可用 / 系统拒绝）；⛔ 不假装成功。
+    bool hostCursorWarpEnabled() const override;
+    bool hostCursorWarp(int guest_client_x, int guest_client_y) override;
 
     // GpuRaster
     // ★ 除 `rasterName()`（init 时缓存的那个后端的名字；生产只有一个后端 ⇒ 与转发观测等价）

@@ -9,12 +9,15 @@
 #include <cstring>
 #include <vector>
 
+#include "runtime/cursor_map.h"
 #include "runtime/frame_blit.h"
 #include "runtime/guest_token.h"  // ★ M0：SDL_RenderPresent 的宿主等待要放令牌（见 submitFrame）
+#include "runtime/host_cursor.h"
 #include "runtime/host_window.h"
 #include "runtime/input.h"
 #include "runtime/log.h"
 #include "runtime/overlay.h"
+#include "runtime/warp_echo.h"
 
 namespace lift {
 namespace {
@@ -210,6 +213,21 @@ struct SdlWindow::Impl {
     std::vector<std::uint64_t> present_times_ns;
     // ★ `Machine` 推来的两行数据（`script` 身份 / `worst` 3 s 最大值）；不画叠层时也只是几个字节。
     OverlayStatus overlay_status;
+    // ★ 宿主真光标（`--cursor-warp`，默认关）：只加宿主副作用，⛔ 不改 guest 可见状态。
+    bool cursor_warp = false;
+    // ★ `--cursor-warp` 的回灌抑制队列（**窗口客户区像素**的 FIFO；判据与为什么见
+    //   `runtime/warp_echo.h`）。登记点 = `hostCursorWarp` 成功之后；消费点 = `handleEvent` 的
+    //   `SDL_EVENT_MOUSE_MOTION` **最先**（命中 ⇒ 整条丢弃，连 `WM_MOUSEMOVE` 都不发）。
+    //   ⛔ 它**只**吞 motion：按键 / 滚轮 / 键盘一律放行，并 `clear()`（真人动作 ⇒ 旧期望作废）。
+    WarpEchoQueue warp_echo;
+    // 一次性读回自检（第一次**成功** warp 之后查一次；此后不再查）。
+    bool warp_selfcheck_done = false;
+
+    // ★ 最近一次 Present 的**帧尺寸**（letterbox 的 image 尺寸；⛔ 不是常数 1280×720）。
+    //   renderer 路径写在 `tex_w/tex_h`，GPU 直出路径写在 `direct_w/direct_h`；还没有帧 ⇒
+    //   `WindowManager::kScreenW/H`（与 guest 虚拟屏同尺寸，是与"未呈现"最不坏的一致假设）。
+    int frameImageW() const { return tex_w > 0 ? tex_w : (direct_w > 0 ? direct_w : WindowManager::kScreenW); }
+    int frameImageH() const { return tex_h > 0 ? tex_h : (direct_h > 0 ? direct_h : WindowManager::kScreenH); }
 
     void notePresentTime();
     bool overlayMousePos(int* x, int* y) const;
@@ -480,21 +498,20 @@ void SdlWindow::Impl::mapMouse(float mx, float my, std::int32_t* gx, std::int32_
     if (window != nullptr) SDL_GetWindowSize(window, &ww, &wh);
     if (ww <= 0) ww = 1280;
     if (wh <= 0) wh = 720;
-    // 与 present 的 SDL_LOGICAL_PRESENTATION_LETTERBOX 同一套映射：窗口像素 → 虚拟 1280x720。
-    const float scale = std::min(static_cast<float>(ww) / 1280.0f, static_cast<float>(wh) / 720.0f);
-    if (scale <= 0.0f) {
+    // ★ 公式的**唯一一份**在 `runtime/cursor_map.h`（与宿主光标 warp 共用）：
+    //   窗口客户区像素 → 画面像素（letterbox 反算；0..image-1 clamp 是既有口径）。
+    //   image 尺寸取**最近一次 Present 的帧尺寸**（⛔ 不再是硬编码 1280×720 —— 后缓冲可以是
+    //   15 种适配器模式之一，硬编码会让非 1280×720 的鼠标映射系统性偏移）。
+    //   `mapWindowPixelToImage` 同时构造 letterbox 与反算 ⇒ 调用点只有这一处，不会再"构造用帧尺寸、
+    //   反算用常数"地静默漂移（守卫：`tests/cursor_warp.cpp` 的 `cursor-map/window-pixel-to-image`）。
+    int x = 0;
+    int y = 0;
+    if (!mapWindowPixelToImage(ww, wh, frameImageW(), frameImageH(), mx, my, &x, &y)) {
+        // 几何不可用（窗口 / 帧尺寸非正）：保持旧行为（原样截断），⛔ 不返回野值。
         *gx = static_cast<std::int32_t>(mx);
         *gy = static_cast<std::int32_t>(my);
         return;
     }
-    const float dw = 1280.0f * scale;
-    const float dh = 720.0f * scale;
-    const float ox = (static_cast<float>(ww) - dw) * 0.5f;
-    const float oy = (static_cast<float>(wh) - dh) * 0.5f;
-    int x = static_cast<int>(std::lround((mx - ox) / scale));
-    int y = static_cast<int>(std::lround((my - oy) / scale));
-    x = std::clamp(x, 0, 1279);
-    y = std::clamp(y, 0, 719);
     *gx = x;
     *gy = y;
 }
@@ -526,6 +543,9 @@ void SdlWindow::Impl::handleEvent(const SDL_Event& event) {
             break;
         case SDL_EVENT_KEY_DOWN:
         case SDL_EVENT_KEY_UP: {
+            // ⛔ 这里**不清** `warp_echo`：一条在 warp **之前**入队、warp 之后才排空的键事件，
+            //   会抹掉刚登记的期望 ⇒ 它那条回灌随即被当成真人移动接受（反写虚拟光标）。
+            //   旧期望的老化只靠"每条只消费一次 + 容量 8"，理由见 `runtime/warp_echo.h`。
             const bool down = event.type == SDL_EVENT_KEY_DOWN;
             const std::uint32_t vk = vkFromSdlKey(event.key.key);
             if (vk == 0) break;
@@ -536,6 +556,15 @@ void SdlWindow::Impl::handleEvent(const SDL_Event& event) {
             break;
         }
         case SDL_EVENT_MOUSE_MOTION: {
+            // ★ `--cursor-warp` 的回灌抑制**在这里、且最先**：warp 之后 OS 会把同一次移动回灌成
+            //   一条 motion（窗口客户区像素）。命中 `warp_echo` 的一条登记 ⇒ 整条丢弃：⛔ 不调
+            //   `mapMouse`（它会 clamp 越界值）、⛔ 不调 `input::mouseMove`（连 `WM_MOUSEMOVE`
+            //   都不发）⇒ guest 可见状态逐位不变。判据与在窗口像素空间匹配的理由见
+            //   `runtime/warp_echo.h`。
+            if (window != nullptr && event.motion.windowID == SDL_GetWindowID(window) &&
+                warp_echo.consume(event.motion.x, event.motion.y)) {
+                break;
+            }
             std::int32_t x = 0;
             std::int32_t y = 0;
             mapMouse(event.motion.x, event.motion.y, &x, &y);
@@ -548,6 +577,7 @@ void SdlWindow::Impl::handleEvent(const SDL_Event& event) {
         }
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
         case SDL_EVENT_MOUSE_BUTTON_UP: {
+            // ⛔ 同上：按键**不**清期望（清掉会让"按键先入队、warp 后排空"的那条回灌漏进 guest）。
             const bool down = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
             MouseButton b = MouseButton::Left;
             if (!mouseButtonFromSdl(event.button.button, &b)) break;
@@ -558,6 +588,7 @@ void SdlWindow::Impl::handleEvent(const SDL_Event& event) {
             break;
         }
         case SDL_EVENT_MOUSE_WHEEL: {
+            // ⛔ 同上：滚轮**不**清期望。
             const int delta = static_cast<int>(std::lround(event.wheel.y * 120.0f));
             std::int32_t x = 0;
             std::int32_t y = 0;
@@ -600,6 +631,9 @@ bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
     impl_->raster_gpu = options.raster_gpu;
     impl_->overlay = options.overlay;
     impl_->overlay_dirty = true;
+    // ★ `--cursor-warp`：开关归 sink（实际生效还要看窗口是否可见，见 `hostCursorWarpEnabled`）。
+    impl_->cursor_warp = options.cursor_warp;
+    impl_->warp_selfcheck_done = false;
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         if (err) *err = std::string("SDL_Init(VIDEO) 失败：") + SDL_GetError();
@@ -788,6 +822,10 @@ void SdlWindow::shutdown() {
     impl_->overlay_text_key.clear();
     impl_->present_times_ns.clear();
     impl_->overlay_status = OverlayStatus{};
+    // 宿主光标开关 / 一次性自检（下一轮 init 会按新 options 重设）。
+    impl_->cursor_warp = false;
+    impl_->warp_selfcheck_done = false;
+    impl_->warp_echo.clear();
 }
 
 bool SdlWindow::submitFrame(const SurfaceArena& arena, const GuestSurface& surface, std::string* err) {
@@ -1073,10 +1111,62 @@ bool SdlWindow::windowHidden() const {
     return (SDL_GetWindowFlags(impl_->window) & SDL_WINDOW_HIDDEN) != 0;
 }
 
+// ★ 宿主真光标（`--cursor-warp`，缺省关）。
+//   生效判据是**运行时**的窗口可见性：`--present headless` 也建隐藏窗口 ⇒ `window != nullptr`
+//   恒真、证明不了"看得见"；`windowHidden()` 读 `SDL_GetWindowFlags`，与 `describe()` 报出的
+//   `window=hidden|visible` 是**同一份**判据（报出来的就是据以决定的）。
+bool SdlWindow::hostCursorWarpEnabled() const { return impl_->cursor_warp && !windowHidden(); }
+
+bool SdlWindow::hostCursorWarp(int guest_client_x, int guest_client_y) {
+    if (!hostCursorWarpEnabled() || impl_->window == nullptr) return false;
+    int ww = 0;
+    int wh = 0;
+    if (!SDL_GetWindowSize(impl_->window, &ww, &wh)) return false;
+    // ② guest 客户区像素 → 宿主窗口客户区像素（与 `mapMouse` **同一份** letterbox 公式）。
+    const LetterboxMap map = letterboxFor(ww, wh, impl_->frameImageW(), impl_->frameImageH());
+    int wx = 0;
+    int wy = 0;
+    if (!imageToWindowPixel(map, guest_client_x, guest_client_y, &wx, &wy)) return false;
+    // ③ 宿主窗口客户区 → 宿主屏幕坐标。`SDL_GetWindowPosition` 给的是**客户区原点**
+    //    （SDL3 Win32 实现 = `ClientToScreen(hwnd,{0,0})`）；⛔ 不乘 `SDL_GetWindowPixelDensity`
+    //    （窗口坐标与 SetCursorPos / CGWarp 都是同一套物理像素 / point 空间）。
+    int win_x = 0;
+    int win_y = 0;
+    if (!SDL_GetWindowPosition(impl_->window, &win_x, &win_y)) return false;
+    const int screen_x = win_x + wx;
+    const int screen_y = win_y + wy;
+    // ④ 平台原语（`runtime/host_cursor.h`）：false = 系统拒绝 / 平台不支持 ⇒ 调用方据此返回 FALSE。
+    if (!hostCursorWarpToScreen(screen_x, screen_y)) return false;
+    // ⑤ 登记回灌期望：记的是 **窗口客户区像素**（`wx/wy`）—— 也就是 SDL 之后会在
+    //    `event.motion` 里报的那一对，**clamp 之前**。⛔ 不记 guest 坐标：`mapMouse` 的 clamp
+    //    已经把越界信息丢了（`runtime/warp_echo.h` 的类注释）。
+    impl_->warp_echo.note(wx, wy);
+    // ★ 一次性读回自检（design §7.1）：第一次 warp 成功后读回实际位置；与目标差 >1 px 才 warn
+    //   一行（含目标/实际/scale/off/window 位置），此后不再查。⛔ 不自动纠正（那会把映射 bug
+    //   掩盖成"能跑"；Windows 的 RDP 上 SetCursorPos 可能"成功但没动"）。
+    if (!impl_->warp_selfcheck_done) {
+        impl_->warp_selfcheck_done = true;
+        int qx = 0;
+        int qy = 0;
+        if (hostCursorQueryScreen(&qx, &qy) && (std::abs(qx - screen_x) > 1 || std::abs(qy - screen_y) > 1)) {
+            lift::logAt(lift::LogLevel::Warn, lift::LogGeneral, "[present] ",
+                        "--cursor-warp 读回自检：目标 (%d,%d) 实际 (%d,%d) 偏差 >1 px"
+                        "（scale=%.3f off=%.1f,%.1f window=(%d,%d) guest_client=(%d,%d)）"
+                        " ⇒ 映射可疑；⛔ 不自动纠正（design §2.3 查窗口原点 / DPI / letterbox）",
+                        screen_x, screen_y, qx, qy, map.scale, map.off_x, map.off_y, win_x, win_y,
+                        guest_client_x, guest_client_y);
+        }
+    }
+    return true;
+}
+
 std::string SdlWindow::describe() const {
     std::string out = "driver=" + impl_->renderer_name + " video=" + impl_->video_driver;
     out += " gpu=" + (impl_->gpu_driver.empty() ? std::string("-") : impl_->gpu_driver);
     out += std::string(" window=") + (windowHidden() ? "hidden" : "visible");
+    // ★ `--cursor-warp` 的**开关**状态（缺省关）。有效状态（on / on-but-hidden / unsupported）
+    //   由 `main` 的另一行给：`describe` 只报 sink 自己知道的那一份。
+    out += impl_->cursor_warp ? " cursor-warp=on" : " cursor-warp=off";
     if (impl_->direct_present && impl_->direct != nullptr) {
         out += std::string(" present=direct/") + impl_->direct->directPresentMode();
     } else if (!impl_->direct_error.empty()) {

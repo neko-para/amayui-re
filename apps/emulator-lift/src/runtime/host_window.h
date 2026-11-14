@@ -229,6 +229,9 @@ public:
         if (x) *x = cursor_x_;
         if (y) *y = cursor_y_;
     }
+    // ★ `--cursor-warp` 的回灌抑制**不在这一层**：`WindowManager` 只保存 guest 虚拟状态；
+    //   回灌抑制需要**窗口客户区像素**（warp 落点那一对，clamp 之前），那一层拿不到 ⇒ 它在
+    //   `runtime/present_sdl.cpp` 的 SDL motion 入口（`runtime/warp_echo.h` 的 FIFO）。
     int showCursor(bool show);                     // 显示 +1 / 隐藏 -1，返回**新**显示计数
     std::uint32_t setCapture(std::uint32_t hwnd);  // 返回**旧**捕获窗口（0 = 没有）
     std::uint32_t capture() const {

@@ -194,7 +194,8 @@ apps/emulator-lift/
                                         --profile --profile-top --native-overrides
                                         --present headless|window|auto --present-driver
                                         --present-vsync --present-hidden --present-screenshot
-                                        --present-screenshot-frame --input-script
+                                        --present-screenshot-frame --overlay --cursor-warp
+                                        --input-script
   src/runtime/log.h                   ← 日志分级 / 分类 / 模式（默认 warn；Error 永远显示）
   src/runtime/host_encoding.{h,cpp}   ← 进程入口编码契约：UTF-8 argv（GetCommandLineW）/ 控制台码页
   src/runtime/native_overrides.{h,cpp}← guest 函数级 native override（试点；默认关）
@@ -401,7 +402,29 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
 - 窗口模式把 SDL 事件接到 guest 消息队列：键盘 / 鼠标移动与按键 / 滚轮 → `WM_KEY*` / `WM_MOUSE*`；
   鼠标移动 / 按键 / 滚轮同时更新 guest 的**虚拟光标位置**（屏幕坐标 = 客户区 + 窗口原点）——
   `GetCursorPos` / `0x109` 读到的是当前位置，不是常量；⛔ 不建 OS 光标。
-  调试：`LIFT_TRACE_INPUT=1` 打印每个 SDL 鼠标 motion 的窗口坐标与换算后的 guest 坐标。
+  ★ **例外（唯一的宿主真实光标副作用，缺省关）= `--cursor-warp`**：打开后 guest 的 `SetCursorPos`
+  除了改虚拟光标，还会经系统接口（Win32 `::SetCursorPos` / macOS `CGWarpMouseCursorPosition`）
+  **真实移动你机器的光标**。全链**不 clamp**（Win32 屏幕坐标可负 / 越界），只在 `--present window/auto`
+  且窗口**当前可见**时生效（`--present-hidden` / `--present auto` 回退隐藏窗口 ⇒ `on-but-hidden`，
+  启动时有一行有效状态 + 一行 **stderr** warn —— 显式 `--present-hidden` 与 auto 回退走同一句）。
+  返回值裁决：① 开关关 / 没有 guest 窗口 / 窗口隐藏 ⇒ 只改虚拟光标并返回 **TRUE**；② 开着且真的
+  挪成功 ⇒ **TRUE**；③ 开着但**挪不动**（系统拒绝 / 平台不支持）⇒ **FALSE** + 一行 warn（⛔ 不假装成功）。
+  ★ **guest 可见状态**：**前两种情况逐位不变**（虚拟光标 / `GetCursorPos` / `WM_MOUSEMOVE` 的 lParam
+  都与开关无关）；**③ 是裁决的例外** —— 返回值本身就是 guest 可见状态，`FALSE` 就是那个例外。它值得：
+  若"开了却挪不动"报成功，调用方与日志就再也分不出"开关没开"与"开了没生效"，而这个开关的全部意义
+  就是把宿主动作变得可观测。Linux / 其它平台没有实现 ⇒ 启动即 **exit 2**。
+  回灌抑制在 **SDL motion 入口**（`runtime/warp_echo.h` 的 `WarpEchoQueue`）：按**窗口客户区像素**
+  记录 warp 落点（clamp 之前的 `wx/wy`），FIFO 容量 8、±2 px、每条只消费一次；命中 ⇒ 整条 motion
+  丢弃（不 `mapMouse`、连 `WM_MOUSEMOVE` 都不发）；按键 / 滚轮 / 键盘一律放行、**不清期望**
+  （清掉会让"按键先入队、warp 后排空"的那条回灌漏进 guest）；老化只靠"每条只消费一次 + 容量 8"。
+  ⇒ 同一帧连续两次 warp、以及越界值经 `mapMouse` clamp 之后都不会反写
+  虚拟光标；⛔ 不做长期去抖（真人的移动照旧生效）。第一次成功 warp 后做一次**读回自检**，偏差
+  >1 px 只 warn 一行、不自动纠正。几何（画面 ↔ 窗口客户区）与鼠标事件共用同一份
+  `runtime/cursor_map.h`（image 尺寸取最近一次 Present 的帧尺寸）：**在 guest 客户区尺寸 == 帧尺寸
+  时**不再偏移；两者不等的情形（guest 建 1280×720 窗口、后缓冲换别的适配器模式）没有观测到，
+  见 `docs/03-emulator/design-notes.md` 的 L3-cursor-warp-01。⚠ 打开它 = 游戏会把你的光标抢走
+  （引擎本身就有"每帧钉光标"的用法），这是这个开关的定义，不是缺陷。调试：`LIFT_TRACE_INPUT=1`
+  打印每个 SDL 鼠标 motion 的窗口坐标与换算后的 guest 坐标。
   关窗（或 ESC）先发 `WM_CLOSE`，宽限 3 帧 / 500ms 后 `StopReason::Stopped`（`detail="present: 窗口关闭"`）。
   headless 没有事件源时，空队列 `GetMessageA` 仍按旧语义 abort。看画面用 `--real-time` / `--max-frames`；
   `--bench + window` 的 MIPS 含 SDL 上传/呈现开销，不是解释器绝对吞吐。
@@ -413,7 +436,8 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
 **为什么有它**：要"点一下 OPTION"曾经必须 `SetForegroundWindow` → 把真实光标挪进窗口 →
 `SendInput` → 等几百毫秒。那套动作的前提全是**OS 侧条件**：SDL 只把键盘事件给**有焦点**的窗口、
 鼠标事件给**光标下面**的窗口，而且 `WINDOW_FOCUS_LOST` 会把键电平清掉。下面这条通道把这些前提全去掉：
-**注入不需要焦点、不移动真实光标、可一条命令复现**。
+**注入不需要焦点、不移动真实光标、可一条命令复现**（唯一例外：同时开 `--cursor-warp` 时，
+guest 自己的 `SetCursorPos` 会让宿主光标真的动 —— 那是 guest 的行为，不是注入通道的行为）。
 
 **机制（判据：注入路径不依赖任何只有 OS 能提供的条件）**
 
@@ -738,7 +762,9 @@ T&L / 裁剪 / 状态机 / 失败码仍全在 CPU（三角形顶点已经是屏�
 | GPU 后端失败 | 准入通过但后端绘制/入队失败（⛔ 不再 CPU 重放该批） | bit23 `GPU 后端失败` |
 
 两者的痕迹：运行摘要的 `unsupported :` 行（具名位）+ 默认级别一行 warn（`pipe-warn` 的 `other` 桶）
-+ 后端失败的 `gpu_failures` 计数。守卫 `gpu-batch/reject-accounting`（pure，Mock）。
++ 后端失败的 `gpu_failures` 计数。⚠ 曾经点名的守卫 `gpu-batch/reject-accounting` 在 2026-11-14
+的测试重构里被删了（`rg reject-accounting tests/` 零命中）⇒ 这几项**今天没有默认档守卫**，
+`skipped` 那一半由下面那条 `gpu-batch/skip-ledger` 覆盖。
 ★ 这两条**也**进 `skipped` 账（GPU 没画；`gpu :` 行的 `skipped=` 与 `skipped top:`）——
   守卫 `gpu-batch/skip-ledger`（pure，Mock）。
 ★ `MIPFILTER=NONE` + 缩小采样**不再是拒批理由**：`max_lod` 是 sampler 的 per-sampler 字段 ⇒
@@ -822,7 +848,8 @@ gpu       : draws=N gpu=N recorded=N queued=N empty=N fragments=N skipped=N
   `fvf= / coord= / stage0= / samp= / texfmt=`：`why=` 是"这批为什么没走 GPU"，其余是当时的状态值。
   `[draw] fa=` / `[draw] texa=` 是**这一批顶点 diffuse α** / 纹理 α 的聚合：`fa=` 按交进后端的
   顶点统计（`n` = 顶点数；**名字沿用历史，口径是顶点 α**，⛔ 不是逐片元混合 α —— 见
-  `REQ-01M7B7591WHEVZMYFZ1Q2D8SHQ`），已有守卫 `gpu-batch/alpha-aggregation`。
+  `REQ-01M7B7591WHEVZMYFZ1Q2D8SHQ`）。⚠ 原守卫 `gpu-batch/alpha-aggregation` 在 2026-11-14 的
+  测试重构里被删 ⇒ **这个口径今天没有守卫**（欠账记在该单里，⛔ 不要以为有）。
   ⚠ `[draw]` 的 `pixels=` / `lvl=` / `miprb=` / `bbox=` 是**CPU 光栅时代的残留**：唯一的写入者
   随那一族删掉了 ⇒ 这四项**恒为 0 / 0..0 / 0 / 0,0..0,0**。⛔ 不要拿它们当判据。
 - ★ 曾经的 `LIFT_GPU_VERIFY=1`（CPU 参考光栅 vs GPU 读回的逐像素对照）**已删**
@@ -1004,8 +1031,8 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
   那条实现已随 CPU 光栅一起删了 ⇒ 今天的 `fa=` ⛔ 不是"真正参与混合的 α"（见
   `REQ-01M7B7591WHEVZMYFZ1Q2D8SHQ`）。它能回答"这一笔的顶点 α 是多少"，⛔ 不能回答"混了多少片元"
   （GPU 拿不到片元数）。
-  取数口：`d3d9::lastDrawAlphaAgg()`；守门 `gpu-batch/alpha-aggregation`
-  （画一个 α=128 的四边形 ⇒ 均值落在 128±8、n>0）。
+  取数口：`d3d9::lastDrawAlphaAgg()`；⚠ 原守门 `gpu-batch/alpha-aggregation`（画一个 α=128 的
+  四边形 ⇒ 均值 128±8、n>0）在 2026-11-14 的测试重构里被删 ⇒ 今天没有守卫。
   ⚠ **纹理带 α 的批 `fa=` 不反映纹理 α**（它数的是**顶点 α**）⇒ 要判断"是不是纹理 α 把它压到 0"
   必须看 `texa=`，⛔ 不要把 `fa=` 的 min 当成像素 α。
   "这一笔的顶点 α 是多少"只能看它：`fa=…:0/0/0` = 这一批的**顶点** α 恒 0（像素是否透明还要看

@@ -484,6 +484,48 @@ int main(int argc, char** argv) {
             LIFT_CHECK_EQ_I64(cx, static_cast<std::int64_t>(w->x) + 400);
             LIFT_CHECK_EQ_I64(cy, static_cast<std::int64_t>(w->y) + 500);
         }
+
+        // ---- P3：**帧尺寸**必须进 `mapMouse`（⛔ 不是常数 1280×720）----
+        //   提交一张 640×480 的帧 ⇒ `present` 用 `SDL_SetWindowSize` 把窗口设成帧尺寸
+        //   （实测 dummy 后端跟随：`SDL_GetWindowSize` = 640x480）。随后窗口像素 motion (320,240)
+        //   必须按 letterbox(640×480 窗口 + 640×480 image ⇒ 恒等) 映射到 guest 客户区 (320,240)。
+        //   ★ 若 `mapMouse` 把 image 写回常数 1280×720：scale=min(640/1280, 480/720)=0.5、
+        //     off_y=(480-720*0.5)/2=60 ⇒ 窗口 (320,240) 映射成画面 (640,360)（x 还在 0..1279 内，
+        //     不被 clamp）⇒ guest 屏幕偏成 (w.x+640, w.y+360)，实测红在 expected 420/290 got 740/410。
+        {
+            const std::uint32_t fea = m.surfaces().create(640, 480, format32(0u));
+            lift::GuestSurface* fs = m.surfaces().find(fea);
+            LIFT_CHECK_NE_U32(fea, 0u);
+            LIFT_CHECK(fs != nullptr);
+            if (fs != nullptr) {
+                std::string ferr;
+                LIFT_CHECK(win->submitFrame(m.surfaces(), *fs, &ferr));
+                int ww = -1;
+                int wh = -1;
+                SDL_Window* sw = SDL_GetWindowFromID(win->windowIdForTest());
+                LIFT_CHECK(sw != nullptr);
+                if (sw != nullptr) SDL_GetWindowSize(sw, &ww, &wh);
+                LIFT_CHECK_EQ_I64(ww, 640);  // 前提：窗口跟随帧尺寸（不成立则本用例无意义）
+                LIFT_CHECK_EQ_I64(wh, 480);
+                SDL_Event m2{};
+                m2.type = SDL_EVENT_MOUSE_MOTION;
+                m2.motion.windowID = win->windowIdForTest();
+                m2.motion.x = 320.0f;
+                m2.motion.y = 240.0f;
+                LIFT_CHECK(SDL_PushEvent(&m2));
+                win->pumpHostEvents(0);
+                int gx = -1;
+                int gy = -1;
+                m.cpu().windows->getCursorPos(&gx, &gy);
+                if (w != nullptr) {
+                    LIFT_CHECK_EQ_I64(gx, static_cast<std::int64_t>(w->x) + 320);
+                    LIFT_CHECK_EQ_I64(gy, static_cast<std::int64_t>(w->y) + 240);
+                    // 落在 640×480 帧内（guest 客户区坐标）。
+                    LIFT_CHECK(gx - w->x >= 0 && gx - w->x < 640);
+                    LIFT_CHECK(gy - w->y >= 0 && gy - w->y < 480);
+                }
+            }
+        }
         win->shutdown();
     }
 

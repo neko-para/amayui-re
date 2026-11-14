@@ -4,11 +4,13 @@
 > ⛔ 不写"所以要优化 X"（那是需求单的事）；⛔ 读数不是断言（断言在 `contracts-win32.md` 的守卫里）。
 > 编号 `OBS-<yyyymmdd>-NN`；**过期不删**，同一条再测出不同读数时新开编号并写"取代 OBS-…"。
 >
-> **口径A** = RelWithDebInfo（`cmake --preset windows-x64`）/ Win10 x64 / `--present window --present-hidden --raster gpu`
+> **口径A** = RelWithDebInfo（`cmake --preset windows-x64`）/ Win10 x64 / `--present window --present-hidden`
 > （启动行 `present : driver=gpu-direct`、`raster : sdl-gpu/direct3d12/DXBC`）/ 有安装树
 > （`--game-dir ../../links/install --appdata ../../.tmp/appdata`）/ `--native-overrides all --skip-logo` /
 > 输入脚本驱动 / **无** `--profile`、**无** `LIFT_FRAME_TRACE`。命令骨架（`apps/emulator-lift` 下）：
-> `./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-dir ../../links/install --present window --present-hidden --raster gpu --native-overrides all --skip-logo --input-script <脚本>`
+> `./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-dir ../../links/install --present window --present-hidden --native-overrides all --skip-logo --input-script <脚本>`
+> ★ **2026-11-13 起 `--raster` 已删除**（GPU 是唯一光栅实现）：本文早于那天的条目里出现的 `--raster cpu|gpu`
+> 是**当时的命令原文**，照抄今天会 `未知参数：--raster` 退出 2 —— 复现那些条目时把它删掉。
 > 读数属于哪个工作树：`git log -1 --format=%h`（本文取自 2026-11-08 `2bd8eaf` 附近）；换构建后不要混表（`measurement.md` M-01）。
 
 ## 过渡（进出 EU-ROOM）
@@ -629,3 +631,84 @@
   `pnpm tools lift bench idle` 的 105.87 ms/M（无帧跟踪）混表（`measurement.md` M-02）；
   ③ 本机没有 loadavg，负载档记的是 `GetSystemTimes` 忙占比的采样值（S2 那轮 7.5% → 6.9%）；
   ④ `[frame] wall` 只覆盖到"相邻两次 Present"，⛔ 不含首次 Present 之前的 boot（那一帧在 S1 里）。
+
+### OBS-20261114-07 · 三场景耗时结构（Windows）：进入 FELLOW 10.29 s 单帧 / 确认保存 ≥12.6 s 阻塞 / 读档 ≥10.3 s 阻塞
+
+- **口径**：Windows x64 / **RelWithDebInfo**（`windows-x64` 预设）/ HEAD `aeed0d7` /
+  `apps/emulator-lift/out/emulator-lift.exe`（mtime 2026-11-14 04:03:26）/ 2026-11-14 ·
+  `--present window --present-hidden --native-overrides all --skip-logo --audio off
+  --game-dir ../../links/install` · `LIFT_FRAME_TRACE=1` · `--profile --profile-top 40` ·
+  每次 run 用 `.tmp/appdata` 的独立副本（9 文件 / 3,203,018 B，基准 mtime 见 `.tmp/profile/readings.md` §5.9）。
+- **进入 FELLOW**（`graphs/sn0000-save-profile.graph` 的 `fellow-enter` 窗，右键 `click 500 500 right` + 12 s）：
+  窗 wall **12,079.0 ms**；buckets guest 2,607.4 / shim 1,026.8 / **interp 5,878.3** / host 2,488.3
+  （其中 input-script 2,454.7）/ native 75.1 / unattributed 3.0。
+  **窗内只有 1 帧 > 500 ms**：`[frame] n=1387 wall=10,290.3 ms insns=231,522,324`（`guest=2,394.1 shim=229.3 other=7,666.9`）
+  ⇒ 12 s 的 85% 是**一帧之内的转场/装载**。guest self 最大两项：`sub_412290` **756.4 ms**（`calls=0` + `!BLIND`，
+  VM 循环头）· `sub_41BF50` **635.8 ms**（612,500 calls，incl 1,749.7）。
+  `OBS-20261112-06` 里这一窗的最大 guest 项 `sub_42F560`（self 1,899 ms）已被段级 override 接管 ⇒ 本轮 `native=75.1 ms`。
+- **确认保存**（`save-confirm` 窗，`click 650 320` + 15 s）：
+  - `--profile` 臂：窗 wall **15,134.8 ms**，guest 5,711.1 / shim 366.5 / native 31.9 / **interp 6,081.7** / host 2,941.9；
+    **但这次保存没写完** —— 日志 `stop @ eip=00436D81` + `present-tail tail_insns=197,647,566 tail_wall_ms=15,465.4`，
+    落盘 `SAVE00.DAT` = **0 字节**（`SAVE.DAT` 未变）⇒ 15.5 s 只是**下界**。
+  - **同一张图去掉 `profile_*` 的臂**（`save-noprof`）：保存**完整跑完**（`SAVE00.DAT`=1,043,873 B、`SAVE.DAT` 49,216→49,288），
+    阻塞段是**一帧** `[frame] n=1756 wall=12,626.3 ms insns=220,071,152`。
+    ⇒ `--profile` 在保存段至少 **1.225×**（15,465.4 / 12,626.3，且那一臂还没跑完）。
+  - guest 工作分布（profile 臂，self / incl / calls）：`sub_4A42C0` **2,767.7 / 7,599.4 / 1** ·
+    `sub_436D50` **1,013.6 / 2,822.6 / 1** · `sub_436D00` **679.2 / 2,061.1 / 1** ·
+    `sub_49EE60` 496.1 / 960.7 / **921,600**（= 640×480×3，数量级与"逐像素"一致，未证语义）· `sub_40CD10` 435.3 / 5,801.7 / 1。
+- **加载存档**（`TITLE → click 1070 480` 进 LoadData）：
+  - **点「最新ロード」只弹二次确认框**（脚本身份 `SAVE.BIN` → `SBUNKI.BIN` / `SBUNKIMOVE.BIN`，marker 与截图两路证据）。
+    确认框 `是` 的客户区坐标 = **(640, 323)**（青绿 bbox x=[537..742] y=[304..342] 的中心；`否` ≈ (640, 386)）。
+    ⇒ **"进 LoadData + 点最新ロード + 等 12 s"这个窗口不是读档**：wall 12,124.9 ms，guest 2,175.1 / shim 3,447.7 /
+    interp 4,653.8 / host 1,751.9；142 帧、**max 257.2 ms、没有 >500 ms 的帧**；shim 里**没有 `Sleep`**
+    （前 12 项全是 D3D：Present 1,241.8 / DrawIndexedPrimitive 558.9 / Clear 522.7 / DrawPrimitive 318.3，
+    `SetRenderState` 35.2 万次 188.3；前 12 项合计 3,106.6 ms vs shim 桶 3,447.7 ⇒ 余下摊在 ≥13 项、每项 ≤26.6 ms；
+    `grep -i sleep` = 0 命中）。
+  - **点「是」之后才是读档**：窗 wall 12,165.6 ms，但**最后一帧之后 10.32 s / 0 次 Present**
+    （`present-tail tail_insns=168,898,371 tail_wall_ms=10,316.4`，进程停在 `eip=0042DEE0`）；
+    同一窗口不开 `--profile` 复跑 = 10,336.7 ms ⇒ **读档 ≥10.3 s，且 12 s 窗口没跑完（下界）**。
+    guest：`sub_42DDE0` self 1,545.4（无 `--profile` 臂 2,372.6）/ **incl 10,303.3 / calls=1** ·
+    `sub_436D50` 1,163.5 / 3,310.3 / 2 · `sub_436D00` 1,039.4 / 3,204.4 / 2。
+- **两条读法（不是结论）**：
+  ① **`[frame]` 表看不见阻塞段**：保存/读档尾段 **0 次 Present**，墙钟只能从 `present-tail` 读；
+  同一件事的侧证是 `[input-script] ⚠ 帧停滞 13386ms/10224ms` 这行告警。只看 `[frame] wall=` 会得出"没有慢帧"的错结论。
+  ② `--profile` 的代价**按路径不同**：保存段 ≥1.225×（压缩密集），读档段落在噪声内（12,165.6 vs 12,137.2 ms，+0.23%）。
+- **顺带测到（不是本条的判据）**：凡进过 LOAD 界面的 run 都写了 `SAVE.BAK`（= `SAVE.DAT` 的内容）⇒ **"加载存档"不是纯读**；
+  进 LOAD 界面 / 点最新ロード / 退出三件事挨在一起，**没辨开**是哪一步写的。
+- **复现**：四臂命令 + exit code 见 `.tmp/profile/readings.md` §0（四臂全 exit 0、`detail : interaction: task done`）；
+  原始日志 `.tmp/profile/run-{fp,fn,lp,ln,lc,le,lx,ls}.log`；图 `graphs/sn0000-save-profile.graph` 与
+  `.tmp/profile/{load,load-confirm,load-noprof,save-noprof}.graph`。
+- **单次读数**：每臂 1 次，**没有 N=3 中位数**（`--time-limit 400/200` 一次都没碰到）。⛔ 不与其他会话的数横比。
+
+### OBS-20261114-08 · `--cursor-warp` 在真游戏里的那一次调用（加载存档界面的自动移光标）
+
+- **口径**：Windows x64 / RelWithDebInfo / `--present window`（**可见**，不加 `--present-hidden`）/ `--log-level info` /
+  `--native-overrides all --skip-logo --audio off --game-dir ../../links/install` / `--appdata` = `.tmp/appdata` 的独立副本 /
+  图 `.tmp/cursor/load-warp.graph`（`await script TITLE` → `click 1070 480` 进 LoadData → `click 475 697` 最新ロード → 等 5 s）。
+- **读数（`--cursor-warp` 开）**：启动行 `present : … window=visible cursor-warp=on present=direct/immediate` +
+  `cursor-warp: on`；随后**恰好一次**
+  `[shim] user32!SetCursorPos: (640,325) 虚拟光标 + 宿主光标（客户区 640,325）`；
+  进程 exit 0 / **21.76 s**；**一次性读回自检没有 warn** ⇒ 系统光标真的落到了目标（偏差 ≤1 px，`present_sdl.cpp` 的
+  `hostCursorQueryScreen` 自检）。
+- **读数（控制臂：同一条命令去掉 `--cursor-warp`）**：同一调用点的日志是
+  `[shim] user32!SetCursorPos: (640,325)（虚拟光标位置 / 屏幕坐标；--cursor-warp 未开或没有可见窗口）`、
+  `cursor-warp=off`；exit 0 / **21.86 s**。
+- **两臂的 `SetCursorPos` 实参逐字相同（都是 `(640,325)`）** ⇒ 开关没有改变 guest 可见调用（这是
+  `REQ-01M7BXM46NVYY3QHYW2ZKJZKZN` 判据 4 的现场证据）。
+- ★ 那个坐标就是**二次确认框「是」**的位置：`OBS-20261114-07` 用截图量出的 `是` 中心是 `(640,323)`（bbox 高 38 px）。
+  两者测量方法不同（引擎实参 vs 像素 bbox），差 2 px ⛔ 不要当矛盾 —— 它证明的是"引擎在加载存档界面把光标
+  **自动移到二次确认**上"，与用户描述一致。
+- **复现**（`apps/emulator-lift` 下；两份 appdata 副本互不共用）：
+  ```powershell
+  # 开
+  ./out/emulator-lift.exe --present window --cursor-warp --native-overrides all --skip-logo --audio off `
+    --game-dir ../../links/install --appdata ../../.tmp/cursor/appdata-warp `
+    --interaction-graph ../../.tmp/cursor/load-warp.graph --max-frames 3000 --time-limit 120 --log-level info
+  # 关（控制臂）
+  ./out/emulator-lift.exe --present window --native-overrides all --skip-logo --audio off `
+    --game-dir ../../links/install --appdata ../../.tmp/cursor/appdata-warp2 `
+    --interaction-graph ../../.tmp/cursor/load-warp.graph --max-frames 3000 --time-limit 120 --log-level info
+  ```
+  原始日志 `.tmp/cursor/run-warp-{on,off}.log`。
+- **没测到的**：未聚焦时（光标会落到别的 app 上）与多显示器 / 非全屏窗口（`win.x/win.y ≠ 0`）的观感没实测；
+  macOS 分支本机没有。

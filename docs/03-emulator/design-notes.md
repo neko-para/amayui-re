@@ -203,3 +203,55 @@
   ★ 两边的读数**不可互相印证**（同一份 hits 只会落在其中一张表上），所以收口必须先声明用的是哪个
   mode；`dumpSummary` 目前**不**包含 override counts（那是音频线的落点，不在本项范围）。
   ⚠ 读数不进 test（每台机器的数字都会变），这里只登记"怎么读"。
+
+### L3-cursor-warp-01 · 宿主光标 warp：**减 guest 窗口原点、不乘 pixel density**；OS 回灌在 motion 入口按窗口像素 FIFO 吞掉
+- **取舍**：`--cursor-warp`（缺省关）让 guest 的 `SetCursorPos` 除了改虚拟光标，还经系统接口
+  （Win32 `::SetCursorPos` / macOS `CGWarpMouseCursorPosition`）真实移动宿主光标。它只加宿主副作用：
+  **除 ③ 的返回值外**（开着但挪不动 ⇒ `FALSE`）guest 可见状态逐位不变 —— ①关 / ②挪成功 两种情况
+  都不变，③ 是裁决的例外（返回值本身就是 guest 可见状态；⛔ 不假装成功）。契约见
+  `contracts-win32.md` 的 L1-MSG-05。平台原语在 `runtime/host_cursor.cpp`
+  （单 TU 按 `#ifdef` 选实现），几何在 `runtime/cursor_map.cpp`（与鼠标事件入**同一份** letterbox）。
+- **为什么必须减 guest 窗口原点**：本线有三套空间 —— G：guest 屏幕（1280×720，`SetCursorPos` 吃这个）、
+  C：guest 客户区（`C = G − (win.x, win.y)`，`ClientToScreen` / `WM_MOUSE*` 的 lParam 用这个）、
+  H：宿主窗口客户区（letterbox 后的画面）→ 宿主屏幕。呈现的画面只对应 **C**，而 guest 把客户区原点
+  放在屏幕 `(win.x, win.y)`（`HostWindow.x/y`，`CreateWindow` 给的 guest 坐标）。所以 G → H 必须先经
+  `WindowManager::cursorClientPos`（`host_window.cpp` 里 `cursor_x_ − w->x` 的**现成反函数**，与
+  `setCursorClientPos` 严格互逆），⛔ 不要自己写 `- w->x`、⛔ 不要新增字段。
+  ★ 漏掉它的后果会被 OS 回灌放大成可观测 bug：warp 之后 Win32 回灌一条 motion ⇒ `mapMouse` 再
+  **加一次** `win.x/win.y` ⇒ `GetCursorPos` 比 `SetCursorPos` 偏一整个窗口原点。引擎那两处"屏幕中心"
+  调用点后面紧接 `SetWindowPos(hwnd,-1,0,0,0,0,3)`（win=(0,0)）⇒ 真机上**看不见**，只能靠非零原点的
+  守卫（`tests/cursor_warp.cpp` 的 `on-calls-once-with-client-coords` / `no-clamp`）抓。
+- **为什么⛔ 不乘 `SDL_GetWindowPixelDensity()`**：`SDL_GetWindowSize` 给的是**窗口坐标**里的客户区
+  尺寸，鼠标事件的 `x/y` 明说 "relative to window"，`SDL_GetWindowPosition` 也在同一空间（Win32 实现 =
+  `ClientToScreen(hwnd,{0,0})`）⇒ 三者同空间，天然不需要 DPI 换算。Win32 侧 SDL 缺省声明 permonitorv2
+  ⇒ 窗口坐标与 `::SetCursorPos` 的物理像素虚拟屏是**同一空间**；macOS 侧 SDL 窗口坐标是 **point**，
+  `CGWarpMouseCursorPosition` 也吃 point ⇒ 再乘 pixel density 就是**双重换算**（Retina 上偏 2×）。
+  ⇒ 全链只缩放 `scale`（画面→窗口客户区），它与 DPI / Retina 无关。
+- **为什么 letterbox 的 image 尺寸必须进签名**：present 的 letterbox 跟的是**当前帧**尺寸
+  （`SDL_SetRenderLogicalPresentation(…, w, h, LETTERBOX)` / `SDL_SetWindowSize(w,h)`），后缓冲可以是
+  15 种适配器模式之一；原先反向的 `mapMouse` 硬编码 1280×720 ⇒ 非 1280×720 时鼠标映射系统性偏移。
+  现在 `letterboxFor(window_w, window_h, image_w, image_h)` 是唯一一份，`mapMouse` 与 warp 共用；
+  image 取最近一次 Present 的帧尺寸（renderer 路径 `tex_w/tex_h`、直出 `direct_w/direct_h`，还没有帧 ⇒
+  `1280×720`）。★ **措辞降级**："修掉了既有的非 720p 偏移"只在 **guest 客户区尺寸 == 帧尺寸** 时成立；
+  guest 建 1280×720 窗口、后缓冲却换成别的适配器模式（两者不等）时没观测到过 —— 那时这里把窗口像素
+  当帧坐标系，会从"修正"变成"回归"（已知风险，`OBS-20261114-08` 的唯一真机观测是两者相等）。
+  不是 720p 的偏移在 `present` 用 `SDL_SetWindowSize` 把窗口设成帧尺寸时本来就不可见。
+- **为什么回灌抑制搬到 SDL motion 入口、且是窗口像素 FIFO**：warp 之后 Win32 会把同一次移动回灌成
+  SDL motion ⇒ `mapMouse` 把它映射回 guest 客户区 ⇒ `input::mouseMove(Os)` 会反写虚拟位置，还会多 post
+  一条带**宿主墙钟**时间的 `WM_MOUSEMOVE`。抑制点原先在 `WindowManager::setCursorClientPos`（单槽 +
+  guest 坐标 ±1），复审实测两个洞：① **单槽被后一条 warp 覆盖** —— 同一帧两次 `SetCursorPos` 时第一条
+  回灌无人认领，被当成真人移动接受；② **guest 坐标里比挡不住越界值** —— warp 落点经 `mapMouse` 的
+  `windowPixelToImage` clamp 到 0..image-1（复审反例 B：1600×720 窗口 + image 1280×720、
+  `SetCursorPos(1300,300)` ⇒ 回灌被 clamp 成 1279，差 21 px）。而 `WindowManager` 拿不到 **clamp 之前**
+  的窗口像素 ⇒ 抑制点搬到 `present_sdl.cpp` 的 `SDL_EVENT_MOUSE_MOTION` 入口（`runtime/warp_echo.h` 的
+  `WarpEchoQueue`）：`hostCursorWarp` 成功后按 `imageToWindowPixel` 的 `wx/wy` 登记（窗口客户区像素），
+  motion 到达时 FIFO 匹配（±2 px）、命中即整条丢弃（不 `mapMouse`、连消息也不发）、每条只消费一次；
+  **只吞 motion** —— 按键 / 滚轮 / 键盘一律放行，且**不**清期望：第二轮复审又抓到一个同型的窄洞
+  （一条在 warp **之前**入队、warp 之后才排空的键事件会把刚登记的期望抹掉 ⇒ 回灌被当真人移动接受），
+  所以老化只靠"每条只消费一次 + 容量 8（满丢最旧）"；代价是一条陈旧登记可能吞掉一次 ±2 px 内的真人
+  移动（只吞一次，且只在开关开着时存在）。⛔ 不做长期去抖
+  （真人的移动必须照旧生效；`tests/present_window.cpp` 的 P3 仍断言真人移动产生消息）。`WindowManager`
+  因此回归纯 guest 状态（回灌抑制的字段 / 方法与 `setCursorPos` 里的清理全部删掉）。
+- **为什么第一次成功 warp 后读回一次**：Windows 的 RDP / 锁屏等场景 `SetCursorPos` 可能"成功但没动"，
+  返回值得不到真相 ⇒ 第一次成功之后 `hostCursorQueryScreen` 读回，与目标差 >1 px 只 warn 一行
+  （含目标 / 实际 / scale / off / window 位置），此后不再查。⛔ 不自动纠正 —— 那会把映射 bug 掩盖成"能跑"。

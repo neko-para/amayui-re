@@ -2115,6 +2115,27 @@ const MUTATIONS = [
       '给 `gpu-batch-order` 的 add_test 加一个不存在的 `--gpu-bogus`（目标源文件没有字符串字面量）⇒ ' +
       'cmake-test-entry 必须点名 "add_test gpu-batch-order / flag --gpu-bogus / tests/gpu_batch.cpp 找不到" 并红',
   },
+
+  // ── `--cursor-warp`：宿主映射**忘了减 guest 窗口原点** ────────────────────────────────────
+  //   代表这一类错：warp 的落点用 guest **屏幕**坐标当客户区坐标（少减 `primaryWindow()` 的 x/y）。
+  //   ★ 这种错在 `win.x == win.y == 0` 的全屏式窗口上**完全看不见**（引擎那两处"屏幕中心"调用点后面
+  //     紧接 `SetWindowPos(hwnd,-1,0,0,0,0,3)`）⇒ 只能靠非零窗口原点的守卫抓。
+  //   判据：`apps/emulator-lift/tests/cursor_warp.cpp` 的
+  //     · `cursor-warp/on-calls-once-with-client-coords`（窗口 (100,50)，期望 warp 收到 (220,190)）
+  //     · `cursor-warp/no-clamp`（期望 (-105,850)）
+  //   两处都会红。★ `from` 是**落地后实际的代码字节**（4 空格缩进）。
+  {
+    file: 'apps/emulator-lift/src/shims/user32_input.cpp',
+    from: '    wm->cursorClientPos(hwnd, &cx, &cy);',
+    to: '    wm->getCursorPos(&cx, &cy);  // 变异：忘了减 guest 窗口原点',
+    guard: 'ctest:cursor-warp',
+    ctest: 'cursor-warp',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'SetCursorPos 的宿主映射忘了减 guest 窗口原点（把屏幕坐标当客户区坐标送进 warp）⇒ ' +
+      'cursor-warp/on-calls-once-with-client-coords 期望 (220,190) 实际 (320,240)、no-clamp 期望 ' +
+      '(-105,850) 实际 (-5,900) ⇒ 当场红',
+  },
 ];
 
 let mutationRunSeq = 0;

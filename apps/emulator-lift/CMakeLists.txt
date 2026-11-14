@@ -63,6 +63,11 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/interaction_graph.cpp
     src/runtime/present.cpp
     src/runtime/present_sdl.cpp
+    # ★ 画面 ↔ 窗口客户区的 letterbox 映射的**唯一一份**（鼠标事件入 + 宿主光标 warp 出共用；
+    #   `--cursor-warp` 的几何判据在 `tests/cursor_warp.cpp` 的 `cursor-map/*`）。
+    src/runtime/cursor_map.cpp
+    # ★ 宿主光标原语（`--cursor-warp` 的唯一 OS 出口；单 TU 按 `#ifdef` 选平台实现）。
+    src/runtime/host_cursor.cpp
     # ★ 窗口调试叠层（`--overlay`）：纯逻辑（5×7 位图字体 + 行格式化 + RGBA8 矩形绘制），无 SDL 类型。
     src/runtime/overlay.cpp
     # ★ 宿主自绘模态框（MessageBox；`REQ-01M75S724...` / `REQ-01M75T14...`）：
@@ -158,6 +163,12 @@ if(WIN32)
     target_link_libraries(emulator-lift-runtime PRIVATE shell32)
     # d3d9_gpu.cpp 用 D3DCompile 在运行时把 HLSL 编成 DXBC
     target_link_libraries(emulator-lift-runtime PRIVATE d3dcompiler)
+endif()
+if(APPLE)
+    # host_cursor.cpp：CGWarpMouseCursorPosition / CGAssociateMouseAndMouseCursorPosition /
+    # CGEventCreate+CGEventGetLocation（CoreGraphics）都在 ApplicationServices 里。
+    # ★ 只有 macOS 需要；Windows 走 user32 的 SetCursorPos（本文件不需要额外库）。
+    target_link_libraries(emulator-lift-runtime PRIVATE "-framework ApplicationServices")
 endif()
 target_compile_features(emulator-lift-runtime PUBLIC cxx_std_20)
 
@@ -363,6 +374,26 @@ add_executable(lift-cli-time-limit tests/cli_time_limit.cpp)
 target_link_libraries(lift-cli-time-limit PRIVATE emulator-lift-runtime)
 add_test(NAME cli-time-limit COMMAND lift-cli-time-limit $<TARGET_FILE:emulator-lift>)
 set_tests_properties(cli-time-limit PROPERTIES SKIP_RETURN_CODE 77)
+
+# ---- pure：`SetCursorPos` 的宿主光标 warp（`--cursor-warp`，缺省关）----
+# 判据见 tests/cursor_warp.cpp 的头注释：① 缺省档一次也不挪；② 开着时用**guest 客户区坐标**
+# 调一次（非零窗口原点 ⇒ 忘掉"减窗口原点"当场红）；③ 挪不动 ⇒ FALSE；④ 没有 guest 窗口 ⇒
+# 只改虚拟位置、TRUE；⑤ 全链不 clamp（负坐标 / 越界原样送进 warp）。
+# ★ 夹具 = 裸 Machine + 假 PresentSink（**不建窗口、不碰真光标**）⇒ 顶层无条件注册 = pure 档。
+add_executable(lift-cursor-warp tests/cursor_warp.cpp)
+target_link_libraries(lift-cursor-warp PRIVATE emulator-lift-runtime)
+add_test(NAME cursor-warp COMMAND lift-cursor-warp)
+
+# ---- pure：`--cursor-warp` 的参数闸门（CLI 级 + 真子进程）----
+# 判据见 tests/cli_cursor_warp.cpp：① 缺省呈现档（headless）+ 该 flag ⇒ 宿主 **exit 2**，
+# stderr 点名 flag 与 `--present headless`，stdout 没有运行摘要；⛔ 不用 `WILL_FAIL TRUE`
+# （那会让 abort / exit 3 也算过）；② 缺省档启动回声两处都报 `off`；③ 可见窗口下报 `on`
+# （guest 只跑一条 `nop` ⇒ **不会**调 SetCursorPos，不挪任何人的光标）。
+# ★ 顶层无条件注册 ⇒ pure 档；②③ 需要呈现后端，无 GPU 时由测试体自己 SKIP 77。
+add_executable(lift-cli-cursor-warp tests/cli_cursor_warp.cpp)
+target_link_libraries(lift-cli-cursor-warp PRIVATE emulator-lift-runtime)
+add_test(NAME cli-cursor-warp COMMAND lift-cli-cursor-warp $<TARGET_FILE:emulator-lift>)
+set_tests_properties(cli-cursor-warp PROPERTIES SKIP_RETURN_CODE 77)
 
 # ---- pure：guest `ExitProcess(n)` / `TerminateProcess(_, n)` 的**宿主进程退出码**守卫 ----
 # 判据见 tests/exit_code.cpp 文件头：① 纯映射（0 ⇒ 0；非 0 ⇒ 2 且**不透传** n）；

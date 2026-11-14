@@ -12,6 +12,14 @@
 //   · `UnhookWindowsHookEx`：本线没有 `SetWindowsHookEx` 导入 ⇒ 没有可解的钩子；返回 TRUE + 日志。
 //   · ⛔ 不建 OS 光标；P3 起由 SDL 事件源更新**虚拟光标位置**（`present_sdl` 的
 //     `setCursorClientPos`，客户区 + 窗口原点 = 屏幕坐标）；headless 没有事件源 ⇒ 保持确定性初值。
+//   · ★ **唯一例外（缺省关）= `--cursor-warp`**：打开后 `SetCursorPos` 在改完虚拟光标之后，
+//     还会经 `runtime/host_cursor` 的系统接口**真实移动宿主光标**。它只加宿主副作用：
+//     **除 ③ 的返回值外**（开着但挪不动 ⇒ `FALSE`，见下）guest 可见状态逐位不变 ——
+//     虚拟位置 / `WM_*` 的 lParam 与开关无关。口径与返回值裁决见 README §4.2 与
+//     `docs/03-emulator/contracts-win32.md` 的 L1-MSG-05。
+//     ★ OS 回灌的抑制**不在这里**：warp 落点的窗口客户区像素由 sink 自己登记，`SDL_EVENT_MOUSE_MOTION`
+//       入口按它吞掉那一条（`runtime/present_sdl.cpp` / `runtime/warp_echo.h`）—— `WindowManager`
+//       拿不到 clamp 之前的坐标。
 //
 // ★ 实现落点：光标 / 捕获状态在 `WindowManager`（host_window.h/.cpp 的"光标 / 捕获"段）。
 // ★ 实测调用点（`.lst`，锚 EA）：
@@ -31,8 +39,11 @@
 #include <cstdint>
 #include <string>
 
+#include "runtime/audio.h"
 #include "runtime/clock.h"
 #include "runtime/host_window.h"
+#include "runtime/machine.h"
+#include "runtime/present.h"
 #include "runtime/x86.h"
 #include "shims/register.h"
 
@@ -107,14 +118,54 @@ void shimGetCursorPos(X86& cpu, ShimCall& call) {
 }
 
 // ---- SetCursorPos(int x, int y) → BOOL ----
-// ★ Win32：只有"当前桌面不允许写光标位置"才 FALSE；headless 恒 TRUE，但**必须真的改状态**
-//   （后续 GetCursorPos 读到的就是它）。
+// ★ Win32：只有"当前桌面不允许写光标位置"才 FALSE。本线**两条腿**：
+//   ① **永远**改虚拟光标（`GetCursorPos` 立刻读到它）⇒ 未开 `--cursor-warp` 时返回 TRUE 的依据；
+//   ② 开了 `--cursor-warp` ⇒ 再把**宿主**真光标挪过去；挪不动 ⇒ FALSE（⛔ 不假装成功）。
+//   ★ **除 ③ 的返回值外**两条腿都不改 guest 可见状态：开关只加宿主副作用（虚拟位置 / `WM_*`
+//     的 lParam 逐位不变）。③ 是裁决的例外 —— 返回值本身就是 guest 可见状态（见 L1-MSG-05）。
 void shimSetCursorPos(X86& cpu, ShimCall& call) {
     WindowManager* wm = requireWindows(cpu, "SetCursorPos");
     const int x = call.i32(0);
     const int y = call.i32(1);
-    wm->setCursorPos(x, y);
-    shimLog("user32", "SetCursorPos", "(%d,%d)（虚拟光标位置 / 屏幕坐标）", x, y);
+    wm->setCursorPos(x, y);  // ① guest 可见状态（屏幕坐标）—— 开关开不开都先落地
+    // ② 宿主副作用。判据照 `user32_menu.cpp` 的 MessageBoxA：Machine + 有 sink + 不在音频 feeder 线程
+    //    （WindowManager 是主线程独占宿主对象；feeder 上碰它本身就在既有违规账里）。
+    Machine* machine = cpu.machine;
+    if (machine != nullptr && cpu.audio != nullptr && cpu.audio->onFeederThread()) {
+        shimLogWarn("user32", "SetCursorPos",
+                    "(%d,%d) 在音频 feeder 线程上被调用 ⇒ 只改虚拟光标（⛔ 不碰宿主窗口 / 光标）", x, y);
+        call.result = 1;
+        return;
+    }
+    PresentSink* sink = (machine != nullptr && machine->presenter().hasSink()) ? machine->presenter().sink()
+                                                                              : nullptr;
+    if (sink == nullptr || !sink->hostCursorWarpEnabled()) {
+        // 缺省档（以及"开关开着但没有可见窗口"——sink 的 enabled 已经含 `windowHidden()`）。
+        shimLog("user32", "SetCursorPos",
+                "(%d,%d)（虚拟光标位置 / 屏幕坐标；--cursor-warp 未开或没有可见窗口）", x, y);
+        call.result = 1;  // ★ 只改虚拟状态也是"做了事"（§3.3 的裁决）
+        return;
+    }
+    const std::uint32_t hwnd = wm->primaryWindow();
+    if (hwnd == 0) {
+        // 没有可挪的对象 ⇒ 只改虚拟位置、TRUE（不尝试 warp ⇒ 不算失败）。
+        shimLog("user32", "SetCursorPos", "(%d,%d) 没有 guest 窗口 ⇒ 只改虚拟光标（不挪宿主）", x, y);
+        call.result = 1;
+        return;
+    }
+    int cx = 0;
+    int cy = 0;
+    // ① guest 屏幕坐标 → guest **客户区**坐标（与鼠标读点同一个反函数；⛔ 不要自己写 -w->x）。
+    wm->cursorClientPos(hwnd, &cx, &cy);
+    if (!sink->hostCursorWarp(cx, cy)) {
+        shimLogWarn("user32", "SetCursorPos",
+                    "(%d,%d) 虚拟光标已改，但宿主光标挪不动 ⇒ FALSE（--cursor-warp）", x, y);
+        call.result = 0;  // ★ 开了却做不到 ⇒ 响亮
+        return;
+    }
+    // ★ OS 回灌由 sink 在 SDL motion 入口吞掉（`runtime/warp_echo.h`）—— 这里**不登记**任何
+    //   guest 坐标期望：那个坐标是 clamp 之后的，挡不住越界 warp（复审阻 1 反例 B）。
+    shimLog("user32", "SetCursorPos", "(%d,%d) 虚拟光标 + 宿主光标（客户区 %d,%d）", x, y, cx, cy);
     call.result = 1;
 }
 

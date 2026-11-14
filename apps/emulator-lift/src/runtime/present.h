@@ -58,6 +58,15 @@ public:
     //   AGERC `_ShowDialog@12` 回答 2/0（タイトル / キャンセル）时调用；回答 1（終了）不调。
     //   默认 no-op ⇒ headless / 测试替身零改动。
     virtual void cancelCloseRequest() {}
+    // ★ `--cursor-warp`（宿主真光标，**缺省关**）：严格是**宿主副作用**，⛔ 不改变 guest 可见状态。
+    //   `hostCursorWarpEnabled()` = 这个 sink 现在愿不愿意挪：开关关着 / 没有可见窗口 / 平台不支持 ⇒ false。
+    //   `hostCursorWarp(cx,cy)` 的入参是 **guest 客户区像素**（0..image_w-1 的逻辑空间），
+    //   ⛔ 不是屏幕坐标 —— 减 guest 窗口原点那一步在 `WindowManager::cursorClientPos`，
+    //   加宿主窗口原点与 letterbox 在窗口 sink（两边共用 `runtime/cursor_map.h` 的那一份公式）。
+    //   返回 false = 没挪（没有窗口 / 窗口隐藏 / 系统拒绝）；调用方据此决定 `SetCursorPos` 的返回值。
+    //   默认 false/false ⇒ headless / 测试替身零改动。
+    virtual bool hostCursorWarpEnabled() const { return false; }
+    virtual bool hostCursorWarp(int /*guest_client_x*/, int /*guest_client_y*/) { return false; }
 };
 
 // ---------------------------------------------------------------------------------------
