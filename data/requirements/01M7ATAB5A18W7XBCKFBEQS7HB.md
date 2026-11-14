@@ -2,8 +2,10 @@
 
 - id: REQ-01M7ATAB5A18W7XBCKFBEQS7HB
 - type: req
-- status: doing
+- status: done
 - parent: REQ-01M7AQ5QKKPC8YJTQA9DNRG2XA
+- verify: tools/test/ledger.test.mjs#CTest 分级
+- done_reason: 模型已落地并由机械判据守住：① 默认档 ctest -N 现在 86 条，名单里**没有** quit-graph / save-graph / close-confirm / option-roundtrip / interaction-graph / interaction-script-e2e / movie-logo / boot-trace / title-entry-paths / agerc-ui-state / recovery-dialog（2026-11-14 逐个核过 ctest -N 输出）⇒ '跑游戏并断言业务结果'的用例清零；② 默认档 86/86 全绿、总时长 38-47 s、单条最长 ~1.3 s（d3d9-gpu）⇒ 满足 ≤90 s / 单条 ≤30 s；③ LIFT_STRESS 档存在且四条（stress-boot / title-steady / adv-audio / gpu-coverage）判据全是读数+阈值，阈值推导写在 tests/stress_*.cpp 文件头 + OBS-20261114-06；④ 档位判据 = CMake 注册位置（顶层 pure / 落在块里 assets），由 tools/lib/ledger.mjs#cmakeTestTier() 实现、tools/test/ledger.test.mjs 的'CTest 分级'用例守住 ⇒ 不建清单文件、也不会退化成'按资产在不在分档'；⑤ 普查产出的 shim 缺口已按缺口开单（9TVJ40WN / S0EX4512 / KNQ1VNV7 / 7NSN7GQ7 / 5KYPR9J4 / EBFMNFPJ / 37CJB0V6 / 5VHXVE3H / S0ZNXGM4 / P6MX9WG9 / ZXTPQW3V / AHQKNSA2），本轮已收 8 张。⚠ 判据 4 只做到能做的部分：真缺陷的复现命令进了 defects.md（BUG-1..BUG-23），但我**不声称**被删的每条业务断言都有一句'失去哪个用户可见的保护'—— 多数本身就是业务正确性断言，按本模型不需要保护线。
 - tags: [emulator-lift, ctest, test-model]
 
 ## 一句话

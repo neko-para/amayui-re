@@ -723,7 +723,14 @@ T&L / 裁剪 / 状态机 / 失败码仍全在 CPU（三角形顶点已经是屏�
 以及「同批把 RT 当采样纹理 ⇒ 拒绝 + 记账」。
 
 明确支持（TITLE 的黑场渐变全屏四边形就在这一类）：
-- 32bpp 默认后缓冲、GOURAUD、无 alpha test；color write mask 任意 4 位组合；
+- 32bpp 默认后缓冲、GOURAUD；color write mask 任意 4 位组合；
+- **⛔ 不支持 alpha test（`ALPHATESTENABLE=1`）**：带它的 Draw 被准入**整批拒绝**
+  （`D3DERR_INVALIDCALL` + `recordUnsupported` bit30）⇒ 这一批几何**一个像素都不出现**。
+  玩家侧看到的是**该图层整块消失**（colorkey 贴图整张不见 / 镂空树叶与发丝整个四边形不见 /
+  UI 边框与文字块成片不见），**不是**变半透明、也不是边缘不对。
+  ⚠ 排障先查 `unsupported :` 的 `bit30` 与 `skipped top:` 的 `GPU 不支持 alpha test`
+  （默认级别各只出一次），别先怀疑混合参数；`LineCaps.ALPHACMP` 因此**不声明**
+  （`GetDeviceCaps` 只报 ZTEST|BLEND）。详见 `docs/03-emulator/defects.md` 的 BUG-23。
 - **纹理表面作渲染目标（RTT）**：`SetRenderTarget(0, <纹理 level 0 surface>)` 之后这一批照旧走 GPU，
   目标 = 该纹理的 guest 像素（`GetRenderTargetData` / `LockRect` 的既有屏障先把镜像读回去）。
   两条新闸（其余行为不变）：

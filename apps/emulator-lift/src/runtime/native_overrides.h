@@ -68,8 +68,9 @@ struct NativeOverride {
 class NativeOverrideTable {
 public:
     // ★ 2026-11-07：8 → 12（BOOT profile 选出的 sub_429020 / sub_48AE90 两项 + 给后续留坑）。
-    // ★ 2026-11-08：sub_4CCC60 用掉最后一格 ⇒ **表已满**；再加项必须同时抬高 kMax
-    //   （下面的 static_assert 会先红，别等到 `all` 起不来）。
+    // ★ 2026-11-08：`sub_4CCC60` 那一批把当时 12 格用满（**当时**是"表已满"；原注释就写在这里）。
+    //   ★ 那句"表已满"**今天已不是事实**：kMax 此后被抬过 6 次（13 / 14 / 15 / 16 / 18 / 20，见下面
+    //     各条），`sub_4CCC60` 早已不在最后一格。留这条只为保留"谁在什么时候用掉过最后一格"。
     // ★ 2026-11-10：12 → 13（`sub_4BBAB0` = Voice::Tick 的 stateless 快路径）。
     // ★ 2026-11-11：13 → 14（`sub_4367B0` = 退出写存档的 LZSS Encode 整函数）。
     // ★ 2026-11-11：14 → 15（`sub_4E0B40` = libvorbis `mdct_backward`；**数值容忍档**，
@@ -80,9 +81,15 @@ public:
     //   = REQ-01M75WED0VFTEYXX43KGHNPPP0 的 S2 方案；契约与逐字依据见 `native_huffman.h`）。
     //   ★ 这两项是**成对**的：`0x4E1950` 内部每 entry 调一次 `0x4E1570` ⇒ 只装后者时前者仍走解释器
     //     （收益减半）；只装前者时后者整块仍在解释器里跑（收益同样减半）。
-    // ★ **18 = 表满，全部稳定项**（`debug` 机制保留，但当前**没有** debug 项 ⇒ `--native-overrides all`
+    // ★ 2026-11-14：18 → 20（`sub_436D00` + `sub_436D50` = 存档 CRC-32 的两个变体，
+    //   REQ-01M7BY4D1ZWA4HB97T8M8TVEYQ；**成对**用掉最后两格 —— 两者只差三处，但各自是独立的
+    //   `call` 目标，只装一项仍是一半收益）。★ 两条都是**稳定项**（`debug == false`）⇒ 进 `all`。
+    // ★ **20 = 表满，全部稳定项**（`debug` 机制保留，但当前**没有** debug 项 ⇒ `--native-overrides all`
     //   会把每一项都开）。再加项必须同时抬高 kMax（`kKnown[]` 的 static_assert 会先红，别等到 `all` 起不来）。
-    static constexpr std::size_t kMax = 18;
+    //   ★ 抬 kMax 的代价只有 `NativeOverrideTable` 的 `std::array` 多两格（`entries_` 是
+    //   `std::array<NativeOverride, kMax>`，`NativeOverride` ≈ 200 B ⇒ +400 B/表，无运行时代价）：
+    //   `find()` 是线性扫描，但比较的是 EA，与 kMax 无关的那部分不变。
+    static constexpr std::size_t kMax = 20;
 
     bool add(std::uint32_t ea, const std::string& name, GuestConv conv, std::uint32_t arg_bytes, NativeFn fn,
              std::string* err);
@@ -696,6 +703,55 @@ struct LzssEncodeOutcome {
 LzssEncodeOutcome lzssEncodeObject(std::uint8_t* obj, std::uint32_t in_ea, const std::uint8_t* in,
                                    std::uint32_t in_size, std::uint8_t* out);
 bool nativeLzss4367B0(X86& cpu, GuestMemory& mem, std::uint32_t* result);
+
+// ---------------------------------------------------------------------------------------
+// 存档 CRC-32 的**两个变体**（`sub_436D00` 反射 / `sub_436D50` 非反射）
+// （REQ-01M7BY4D1ZWA4HB97T8M8TVEYQ；纯核与"为什么读 guest 表"见 `native_crc32.h`）
+//
+// ★ 形状（`.lst` 0x436D00..0x436D4D / 0x436D50..0x436D9B，两条都是 `__thiscall` + `retn 8`）：
+//   `ECX = this` = 表对象（同一个 `0x804` 字节对象里放着两张表：`+0x000` 非反射 / `+0x400` 反射，
+//   惰性初始化标志在 `+0x800`）；栈参 = `(n, buf)`；`n` 是**有符号 32 位**。
+//   入口 `or eax,-1`，收尾 `not eax` ⇒ 返回 `~crc`；`n <= 0`（`dec/js` 直落）⇒ 返回 0。
+// ★ 两个变体**只差三处**：查哪张表（`+0` / `+0x400`）、索引用低字节还是高字节（`al` / `crc>>24`）、
+//   `crc` 右移还是左移。⇒ 纯核只有一个 `crc32Bytes(..., reflected)`。
+// ★ **⛔ 不硬编码多项式**（`0x4C11DB7` / `0xEDB88320`）：表必须从 guest 的 `[this, this+0x800)` 读
+//   （512 个 dword）。硬编码在"表被别的路径重建"时会静默分叉，而 CRC 分叉**没有报错**，
+//   表现是"存档写出去、读回来对不上"。
+// ★ 闸门（**顺序即实现顺序**；全部只读 ⇒ 任一不成立都零写回退，⛔ 不许"顺手替 guest 建表"）：
+//   G1 `[this+0x800] == 1`（两张表已建；否则回退，由解释器调 `sub_436BD0` / `sub_436C60` 建表）
+//   G2 `[this, this+0x800)` 已提交（512 个 dword）；★ 实现里一次判 `[this, this+0x804)`：
+//      标志自己那 4 字节也在 G2 的跨度**之外**，不覆盖就轮到 `rd32` 去 fault（safe mode ⇒ `_Exit(3)`）
+//   G3 `n <= 0`（除 INT32_MIN，见下）⇒ **接管并返回 0**（guest 的循环 0 次、`~0xFFFFFFFF == 0`），
+//      ⛔ **不是**回退：那一支除了 `or/dec/js/not` 什么都没有，回退只会白付一次整函数重放
+//   G4 `n > 0` ⇒ `[buf, buf+n)` 不跨 4 GiB 且已提交（理由同 `nativeMemcpy` 的 CrossBoundary / Uncommitted：
+//      宿主平坦映射只有 4 GiB；未提交页上 guest 会 fault，替它算等于把 fault 掩盖掉）
+//   ★ **`n == 0x80000000`（INT32_MIN）不是"循环 0 次"**：`0x436D29 dec edx` 把 `0x80000000` 变成
+//     `0x7FFFFFFF`（SF=0）⇒ `0x436D2A js` **不跳** ⇒ guest 真的跑 2^31 次（`0x436D44 dec edx` /
+//     `0x436D45 jns` 是同一个计数器的另一半）。本实现按机器走：它落到 G4（`[buf, buf+2^31)` 几乎
+//     必然跨 4 GiB 或未提交 ⇒ 回退解释器），⛔ 绝不"返回 0"假装等价。
+//     需求单正文的"`n <= 0` ⇒ 循环 0 次"在这一格上不成立 —— 见 `tests/native_override.cpp` 的
+//     `crc/int-min-declines` 与 `native_override_assets.cpp` 的 `crc/int-min-enters-loop`。
+// ★ 零写 / 别名：本项只读输入缓冲、只写 `EAX` ⇒ 即使 `buf` 与 `[this, this+0x800)` 重叠也无害
+//   （两边读的是同一份内存）。唯一需要 `committed` 的理由就是"别把 guest 的 fault 掩盖掉"。
+// ★ feeder：函数级表**没有** `feeder_ok`（`AudioEngine` 把整张表拷进 `audio_overrides_`）。本项在
+//   feeder 里同样安全（纯读、零写、零分配、零 guest 回调），但 save/load 只走主线程 ⇒ 实际不会在
+//   feeder 命中。⛔ 不要为它加一条函数级的 feeder 开关。
+// ★ 已知边界（登记，不是缺陷）：① 函数级 override 只记 1 条指令 + 1 tick ⇒ 虚拟时钟相位移动
+//   （准入门 ①–⑤ 的统一口径）；② 省掉的 guest 指令数**随数据长度变**（`8n` / `9n` 条）⇒ 没有定值 k
+//   可补；③ `ECX` / `EDX` / `EBX` / `EDI` / `EFLAGS` 是 call-clobbered ⇒ 不复刻（差分只比
+//   EAX / ESP / EBX / ESI / EDI / EBP / EIP 与内存，与 `tests/native_override.cpp` 的 `compare()` 同口径）。
+// ★ 隔离：`all,-sub_436D00` / `all,-sub_436D50`（两项各自独立；只装一项也是一半收益）。
+// ---------------------------------------------------------------------------------------
+
+// 回退原因（**枚举值就是 `NativeOverride::declines[]` 的下标**；0 = 接管，不落桶）：
+enum class CrcWhy : std::uint8_t {
+    Ok = 0,            // 接管（不落桶）
+    BadThis = 1,       // `this == 0` / `this+0x804` 回绕 / 不在已提交页
+    TableNotBuilt = 2, // `[this+0x800] != 1`（表还没建）⇒ 回退，让解释器建完再算
+    BufUnreadable = 3, // `[buf, buf+n)` 跨 4 GiB 或不在已提交页
+};
+bool nativeCrc436D00(X86& cpu, GuestMemory& mem, std::uint32_t* result);  // 反射（表在 +0x400）
+bool nativeCrc436D50(X86& cpu, GuestMemory& mem, std::uint32_t* result);  // 非反射（表在 +0）
 
 // 从 native override 里铺一个 guest 回调帧（必须由 NativeOverrideTable::invoke 的 suspended 机制接住）。
 // `callee_ecx` = 进入 callee 前要写进 ECX 的 `this`（thiscall）；0 = 不动。

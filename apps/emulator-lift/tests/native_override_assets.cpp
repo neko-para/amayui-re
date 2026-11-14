@@ -3129,5 +3129,239 @@ int main() {
         }
     }
 
+    // ---- ⑦ `sub_436D00` / `sub_436D50`（存档 CRC-32 的两个变体）：真字节两臂 ----
+    //
+    // 判据（红了意味着什么）：
+    //   ① **两臂逐位一致**：解释器臂 = **同一 EA 的真字节**（唯一外部 oracle），override 臂 = native；
+    //      比 `EAX` 逐位 + **表里 512 个 dword（0x800 字节）逐字节** + 输入缓冲逐字节 + 出口寄存器。
+    //   ② **真的被接管**：`hits == 1 && fallbacks == 0 && declines == 0`（排除"没启用"/"每次回退"两种假绿）。
+    //   ③ **指令数**：两臂的 `cpu.insns` 差 = guest 那个函数体省掉/补上的条数（闭式见下面的注释）。
+    //   ④ 两个变体**不是同一个 CRC**（实测：两者对同一输入给出不同值 —— 见下面的检查值）：
+    //      反射变体 = **CRC-32/ISO-HDLC**（a.k.a. 常说的 "CRC-32"），非反射变体 = **CRC-32/BZIP2**。
+    //      ⇒ ⛔ 不许"两个变体应当一致"这类断言（那会把一个真结论测成假红）。它们的共同点只有
+    //      "表在同一个对象里 + 初值 0xFFFFFFFF + 收尾 `not`"。
+    //   ⑤ 已知取值（外部锚，不是"当前实现的取值"）：`"123456789"` 的检查值 ——
+    //      d00 ⇒ `0xCBF43926`（CRC-32/ISO-HDLC）· d50 ⇒ `0xFC891918`（CRC-32/BZIP2）。
+    //      ★ 这两条**同时**说明"夹具用 guest 建表器填出来的确实是那两张标准表"，
+    //        并且把"两个 fn 查了同一张表"这一类错钉死（查同一张表 ⇒ 两个值会相等）。
+    //   ⑤ 已知取值（只钉标准 CRC 的检查值，不钉"当前实现"）：`"123456789"` ⇒
+    //      d00（反射）= `0xCBF43926`（CRC-32/ISO-HDLC）· d50（非反射）= `0xFC891918`（CRC-32/BZIP2）。
+    //      ★ 这条**只对解释器臂**成立为前提；它同时说明"夹具由 guest 建表器填出来的确实是标准表"。
+    //   ⑥ `[this+0x800] == 0`（表还没建）⇒ override 臂**回退**、由解释器重放建表 + 计算；
+    //      两臂的 EAX / 512 dword 表 / 标志 / 缓冲**全部相同**，且 override 臂 `hits == 0 &&
+    //      fallbacks == 1`。★ 这是唯一能验"回退之后 guest 自己走完初始化"的形状。
+    // ★ 表从哪来：**guest 自己的建表器**（`sub_436BD0` = `+0` 非反射、`sub_436C60` = `+0x400` 反射，
+    //   `.lst` 都是 `__thiscall` 无栈参）跑一遍真字节填的 ⇒ ⛔ 本测试里没有任何多项式常量。
+    {
+        const std::vector<std::uint8_t> code_bd0 = img.at(0x00436BD0u, 0x90u);  // 0x436BD0..0x436C5F
+        const std::vector<std::uint8_t> code_c60 = img.at(0x00436C60u, 0x92u);  // 0x436C60..0x436CF0
+        const std::vector<std::uint8_t> code_d00 = img.at(0x00436D00u, 0x50u);  // 0x436D00..0x436D4D
+        const std::vector<std::uint8_t> code_d50 = img.at(0x00436D50u, 0x50u);  // 0x436D50..0x436D9B
+        constexpr std::uint32_t kCrcSelf = 0x00420000u;   // 表对象（0x804 字节）
+        constexpr std::uint32_t kCrcBuf = 0x0044FFE0u;    // 让 [buf, buf+0x1000) **跨 4 KiB 页**
+        constexpr std::uint32_t kCrcBufBytes = 0x1000u;
+        constexpr std::uint32_t kD00Ea = 0x00436D00u;
+        constexpr std::uint32_t kD50Ea = 0x00436D50u;
+        constexpr std::uint32_t kCrc32IsoHdlc = 0xCBF43926u;  // "123456789"（反射变体 d00）
+        constexpr std::uint32_t kCrc32Bzip2 = 0xFC891918u;    // "123456789"（非反射变体 d50）
+
+        struct CrcAssetsCase {
+            std::string name;
+            std::uint32_t n;
+            bool reflected;  // true ⇒ sub_436D00（查 +0x400）；false ⇒ sub_436D50（查 +0）
+            bool prebuilt;   // true ⇒ 夹具先建表并置标志（走接管路径）；false ⇒ 留 flag=0（走回退重放）
+            bool known_text; // true ⇒ 缓冲前 9 字节 = "123456789"
+            std::uint32_t want_eax;  // 0 = 不钉已知取值
+        };
+        struct CrcAssetsResult {
+            bool valid = false;
+            std::uint32_t eax = 0, esp = 0, ebx = 0, esi = 0, edi = 0, ebp = 0, eip = 0;
+            std::uint64_t insns = 0;
+            std::vector<std::uint8_t> table;  // 0x800（两张表）
+            std::vector<std::uint8_t> buf;    // 0x1000
+            std::uint32_t flag = 0;
+            std::uint64_t hits = 0, fallbacks = 0, declines = 0;
+        };
+        auto runCrc = [&](const CrcAssetsCase& c, bool with_override) {
+            CrcAssetsResult out;
+            lift_fixture::Fixture fx;
+            if (!fx.ok) return out;
+            const std::vector<std::uint8_t> zeros(0x804u, 0);
+            if (!fx.m.placeData(kCrcSelf, zeros.data(), zeros.size(), &fx.err)) return out;
+            std::vector<std::uint8_t> bufvec(kCrcBufBytes, 0);
+            if (c.known_text) {
+                const char txt[] = "123456789";
+                for (std::uint32_t i = 0; i < 9u; ++i) bufvec[i] = static_cast<std::uint8_t>(txt[i]);
+            } else {
+                for (std::uint32_t i = 0; i < kCrcBufBytes; ++i)
+                    bufvec[i] = static_cast<std::uint8_t>((i * 37u + (i >> 3) * 11u + 101u) & 0xFFu);
+            }
+            if (!fx.m.placeData(kCrcBuf, bufvec.data(), bufvec.size(), &fx.err)) return out;
+            if (!fx.m.placeCode(0x00436BD0u, code_bd0.data(), code_bd0.size(), &fx.err)) return out;
+            if (!fx.m.placeCode(0x00436C60u, code_c60.data(), code_c60.size(), &fx.err)) return out;
+            const std::uint32_t fn_ea = c.reflected ? kD00Ea : kD50Ea;
+            const std::vector<std::uint8_t>& code_fn = c.reflected ? code_d00 : code_d50;
+            if (!fx.m.placeCode(fn_ea, code_fn.data(), code_fn.size(), &fx.err)) return out;
+            if (c.prebuilt) {
+                // 两张表由 **guest 自己的**建表器跑真字节填 ⇒ 本测试里没有多项式常量。
+                // 这两条 call + 一次置标志就是 `0x436D0F` / `0x436D14` / `0x436D19` 那三行。
+                lift_fixture::Asm b(0x00402000u);
+                b.u8(0xB9);  // mov ecx, self
+                b.u32(kCrcSelf);
+                b.callRel(0x00436BD0u);
+                b.u8(0xB9);
+                b.u32(kCrcSelf);
+                b.callRel(0x00436C60u);
+                b.ret();
+                if (!fx.m.placeCode(0x00402000u, b.b.data(), b.b.size(), &fx.err)) return out;
+                fx.rearmStack();
+                fx.runCode(0x00402000u);
+                if (!fx.ok) return out;
+                fx.m.mem().wr32(kCrcSelf + 0x800u, 1u);
+            }
+            if (with_override) {
+                std::string e;
+                if (!fx.m.overrides().add(fn_ea, c.reflected ? "ref_crc_d00" : "ref_crc_d50",
+                                          lift::GuestConv::Thiscall, 8,
+                                          c.reflected ? lift::nativeCrc436D00 : lift::nativeCrc436D50, &e))
+                    return out;
+            }
+            // `mov ecx,self; push buf; push n; call fn; ret`
+            // ★ 参数顺序：`.lst` 的 `arg_0` = `n`（循环计数器）、`arg_4` = `buf` ⇒ **先压 buf**
+            //   （最后一个参数先入栈），否则 `n` / `buf` 会对调（实测症状：guest 把 1 当地址读 ⇒ fault）。
+            //   `__thiscall retn 8` 由被调方清栈。
+            lift_fixture::Asm a(0x00403000u);
+            a.u8(0xB9);
+            a.u32(kCrcSelf);
+            a.pushImm(kCrcBuf);
+            a.pushImm(c.n);
+            a.callRel(fn_ea);
+            a.ret();
+            if (!fx.m.placeCode(0x00403000u, a.b.data(), a.b.size(), &fx.err)) return out;
+            fx.rearmStack();
+            fx.runCode(0x00403000u);
+            if (!fx.ok) return out;
+            out.valid = true;
+            out.eax = fx.m.cpu().eax();
+            out.esp = fx.m.cpu().esp();
+            out.ebx = fx.m.cpu().ebx();
+            out.esi = fx.m.cpu().esi();
+            out.edi = fx.m.cpu().edi();
+            out.ebp = fx.m.cpu().ebp();
+            out.eip = fx.m.cpu().eip;
+            out.insns = fx.m.cpu().insns;
+            out.flag = fx.m.mem().rd32(kCrcSelf + 0x800u);
+            const std::uint8_t* tp = fx.m.mem().host(kCrcSelf);
+            out.table.assign(tp, tp + 0x800u);
+            const std::uint8_t* bp = fx.m.mem().host(kCrcBuf);
+            out.buf.assign(bp, bp + kCrcBufBytes);
+            if (with_override) {
+                const lift::NativeOverride* e = fx.m.overrides().at(0);
+                out.hits = e->hits;
+                out.fallbacks = e->fallbacks;
+                for (std::size_t i = 0; i < lift::NativeOverride::kDeclineSlots; ++i) out.declines += e->declines[i];
+            }
+            return out;
+        };
+
+        // n 表：0（跨 0）/ 1 / 3（短于一个 dword）/ 31 / 4096（跨页）
+        std::vector<CrcAssetsCase> cases;
+        for (std::uint32_t n : {0u, 1u, 3u, 31u, 4096u}) {
+            const std::string tag = "-n" + std::to_string(n);
+            for (int variant = 0; variant < 2; ++variant) {
+                CrcAssetsCase c;
+                c.reflected = variant == 0;
+                c.n = n;
+                c.prebuilt = true;
+                c.known_text = false;
+                c.want_eax = 0u;
+                c.name = (c.reflected ? "crc/d00-reflected" : "crc/d50-msb") + tag;
+                cases.push_back(std::move(c));
+            }
+        }
+        // 已知取值：`"123456789"` ⇒ 两条**不同的**标准 CRC 检查值（见文件头的 ④⑤）
+        for (int variant = 0; variant < 2; ++variant) {
+            CrcAssetsCase c;
+            c.reflected = variant == 0;
+            c.n = 9u;
+            c.prebuilt = true;
+            c.known_text = true;
+            c.want_eax = c.reflected ? kCrc32IsoHdlc : kCrc32Bzip2;
+            c.name = c.reflected ? "crc/d00-standard-value" : "crc/d50-standard-value";
+            cases.push_back(std::move(c));
+        }
+        // 标志为 0（表还没建）⇒ 接管失败、解释器重放建表；两臂的**表 / 标志 / 结果**仍然全同
+        for (int variant = 0; variant < 2; ++variant) {
+            CrcAssetsCase c;
+            c.reflected = variant == 0;
+            c.n = 31u;
+            c.prebuilt = false;
+            c.known_text = false;
+            c.want_eax = 0u;
+            c.name = c.reflected ? "crc/d00-flag-zero-decline" : "crc/d50-flag-zero-decline";
+            cases.push_back(std::move(c));
+        }
+
+        // ★ 这里**没有**"两个变体必须给同一个值"的断言：实测它们给的是**两个不同的标准 CRC**
+        //   （`crc/d00-standard-value` = 0xCBF43926 / `crc/d50-standard-value` = 0xFC891918）。
+        //   设计稿说两者"只差三处"是对的，但那三处正好把 ISO-HDLC 换成 BZIP2 ⇒ 结果必然不同。
+        //   "两个 fn 查了同一张表"这一类错由上面两条检查值 + 每条用例的两臂比较一起抓。
+
+        for (const CrcAssetsCase& c : cases) {
+            lift_test::g_current_case = c.name.c_str();
+            const CrcAssetsResult base = runCrc(c, false);
+            const CrcAssetsResult ovr = runCrc(c, true);
+            LIFT_CHECK(base.valid && ovr.valid);
+            if (!base.valid || !ovr.valid) continue;
+            std::printf("  [%-30s] n=%4u eax=%08X/%08X insns=%llu/%llu hits=%llu fb=%llu decl=%llu\n",
+                        c.name.c_str(), c.n, base.eax, ovr.eax, (unsigned long long)base.insns,
+                        (unsigned long long)ovr.insns, (unsigned long long)ovr.hits,
+                        (unsigned long long)ovr.fallbacks, (unsigned long long)ovr.declines);
+            // ① EAX + 出口寄存器
+            LIFT_CHECK_EQ_U32(ovr.eax, base.eax);
+            LIFT_CHECK_EQ_U32(ovr.esp, base.esp);
+            LIFT_CHECK_EQ_U32(ovr.ebx, base.ebx);
+            LIFT_CHECK_EQ_U32(ovr.esi, base.esi);
+            LIFT_CHECK_EQ_U32(ovr.edi, base.edi);
+            LIFT_CHECK_EQ_U32(ovr.ebp, base.ebp);
+            LIFT_CHECK_EQ_U32(ovr.eip, base.eip);
+            // ② 表（512 个 dword 逐字节）+ 标志 + 输入缓冲逐字节
+            LIFT_CHECK(ovr.table == base.table);
+            LIFT_CHECK_EQ_U32(ovr.flag, base.flag);
+            LIFT_CHECK(ovr.buf == base.buf);
+            // ③ 已知取值（外部锚：标准 CRC-32，不是"当前实现的取值"）
+            if (c.want_eax != 0u) {
+                LIFT_CHECK_EQ_U32(base.eax, c.want_eax);  // 解释器臂先过这一关（否则下面的相等没意义）
+                LIFT_CHECK_EQ_U32(ovr.eax, c.want_eax);
+            }
+            if (c.prebuilt) {
+                // ④ 真的被接管、没有静默回退
+                LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.hits), 1u);
+                LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.fallbacks), 0u);
+                LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.declines), 0u);
+                LIFT_CHECK_EQ_U32(ovr.flag, 1u);  // 接管路径**不写**标志（等于进来时的 1）
+                // ⑤ 指令数：省掉的就是 guest 的函数体（闭式见下）
+                //   d00（`n > 0`）：序 13（到 `js` 为止的 10 + `mov ecx` + `push ebx` + `push edi`）
+                //                   + 8n（每字节 8 条）+ 尾 6（`pop edi`/`pop ebx`/`not`/`pop esi`/
+                //                   `pop ebp`/`retn 8`）= 8n + 19；
+                //   d50（`n > 0`）：同形、每字节 9 条 = 9n + 19；
+                //   `n == 0`：`dec/js` 直落 ⇒ 10（到 `js`）+ 尾 4（`not`/`pop esi`/`pop ebp`/`retn 8`）= 14。
+                //   override 只记 1 条指令 ⇒ 两臂差值 = 函数体 - 1。
+                const std::uint64_t body = c.n == 0u ? 14u
+                                                     : (c.reflected ? 8u : 9u) * c.n + 19u;
+                LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(base.insns - ovr.insns),
+                                  static_cast<std::int64_t>(body - 1u));
+            } else {
+                // ⑥ 回退重放：真的回退（hits=0 / fallbacks=1），且解释器把表建好、标志置 1
+                LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.hits), 0u);
+                LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ovr.fallbacks), 1u);
+                LIFT_CHECK(ovr.declines > 0u);
+                LIFT_CHECK_EQ_U32(base.flag, 1u);
+                LIFT_CHECK_EQ_U32(ovr.flag, 1u);
+                LIFT_CHECK_EQ_U32(base.insns, ovr.insns);  // 两臂跑的是同一段解释器代码
+            }
+        }
+    }
+
     return lift_test::finish("native-override-assets");
 }

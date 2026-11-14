@@ -24,8 +24,10 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -452,8 +454,22 @@ struct Fixture {
     }
 
     // 只清深度（D3DCLEAR_ZBUFFER）——D3D9 里这是**唯一**会清 GPU 深度附件的那条路。
-    std::uint32_t clearDepthOnly() {
-        return method(device_info.object, kOffClear, {0u, 0u, 2u, 0u, 0x3F800000u, 0u});
+    // ★ z 由调用方给（`REQ-01M6RMVJTTM8PDNXB39TVJ40WN`）：`Clear` 的第 5 实参就是 float 的位模式 ⇒
+    //   这里逐位传，⛔ 不经过十进制文本（0.1 之类的值也能断言"一位没丢"）。
+    std::uint32_t clearDepthTo(float z) {
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &z, sizeof(bits));
+        return method(device_info.object, kOffClear, {0u, 0u, 2u, 0u, bits, 0u});
+    }
+    // 缺省那条（z=1.0）——今天引擎实际走的形态（TITLE 路径不许退化）。
+    std::uint32_t clearDepthOnly() { return clearDepthTo(1.0f); }
+    // TARGET|ZBUFFER 一起清、z 由调用方给（`Clear(0,NULL,3,color,z,0)`）。
+    // ★ 为什么"z 也到 CPU 深度镜像"的断言必须走这条：`d3d9::clear` 里写镜像的 `clearDepth`
+    //   在 **TARGET 分支**（ZBUFFER-only 在更早的早退里返回 ⇒ 镜像不动，这是**既有**行为，本单不改）。
+    std::uint32_t clearTargetAndDepthTo(std::uint32_t color, float z) {
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &z, sizeof(bits));
+        return method(device_info.object, kOffClear, {0u, 0u, 3u, color, bits, 0u});
     }
 
     // 只清一块矩形（D3DRECT = 4 个 LONG）
@@ -670,6 +686,13 @@ public:
                     if (tag != 0) lift::gpuLedgerNoteRecordedDraw(tag);
                 }
             }
+            // ★ 深度清除的交付契约（与真后端**同一条**）：一次 arm 只清一次，落在本 flush 的
+            //   **第一个真的录了 draw 的 render pass** 上 ⇒ 这个 pass 的 `load_op = CLEAR`、
+            //   清除值 = arm 带下来的 z。只录 copy pass 的 flush（mock 里 = 队列空）不消费它。
+            //   ★ 观测点是"计划层/记账"（`REQ-01M6RMVJTTM8PDNXB39TVJ40WN` 的判据不要求像素）。
+            passes.push_back(PassRecord{recorded_draws, queue_.size(), pending_clear, pending_clear_z});
+            recorded_draws += queue_.size();
+            pending_clear = false;  // 一次 arm 只清一次
             queue_.clear();
             dirty_ = true;
         }
@@ -688,13 +711,35 @@ public:
     }
     // ★ `REQ-01M73P3GXW22Y467YGYPQSM571`：这条就是 `Clear(...,D3DCLEAR_ZBUFFER)` 的落点。
     //   转发壳（`SdlWindow`）曾经**整条没转发**，于是本计数恒 0、D32 永不再清、GPU 臂整层丢角色。
-    void rasterRequestDepthClear() override { ++depth_clear_count; }
+    //   ★ 两单合并后的契约（`REQ-01M6RMVJTTM8PDNXB39TVJ40WN` / `REQ-01M73XEB594ZY8TA76S0EX4512`）：
+    //     ① 它带 **z**（`Clear` 的深度清除值）⇒ 记 `depth_clear_z`；
+    //     ② 调用方必须**先 flush 再 arm** ⇒ `arm_queue` 记的队列长度必须是 0
+    //        （否则那条 CLEAR 会落到"含更早 draw 的 pass 开头"）。
+    // 【已修】接口带 z：与真后端同口径 —— pass 的清除值就是 arm 带下来的那个 float（逐位）。
+    void rasterRequestDepthClear(float z) override {
+        ++depth_clear_count;
+        depth_clear_z = z;
+        arm_queue.push_back(queue_.size());
+        pending_clear = true;
+        pending_clear_z = z;
+    }
     std::size_t flush_count = 0;
     std::size_t sync_to_count = 0;
     std::size_t sync_from_count = 0;
     std::size_t prepare_count = 0;
     std::size_t discard_count = 0;
     std::size_t depth_clear_count = 0;
+    float depth_clear_z = 0.0f;      // 最近一次 arm 带下来的 z（逐位，不是"近似 1.0"）
+    std::vector<std::size_t> arm_queue;  // 每次 arm 时队列里还有几条 draw（契约要求 0）
+    // 深度清除的**计划层**观测：本 flush 录出的那个 render pass 的深度 load_op / 清除值。
+    struct PassRecord {
+        std::size_t first_draw = 0;   // 这个 pass 里第一条 draw 的全局序号
+        std::size_t draw_count = 0;
+        bool load_clear = false;      // 深度 load_op == CLEAR
+        float clear_z = 0.0f;         // 只有 load_clear 时有意义
+    };
+    std::vector<PassRecord> passes;
+    std::size_t recorded_draws = 0;  // 已录进 pass 的 draw 累计（全局序号）
     std::size_t cut_count = 0;      // 方案 C：内容变更边界切段次数
     std::size_t upload_count = 0;   // 方案 C：纹理上传块数
     std::size_t queued_draws = 0;   // 累计入队 draw 条数
@@ -713,6 +758,8 @@ private:
         std::uint64_t tag = 0;
         std::size_t vertices = 0;
     };
+    bool pending_clear = false;   // 已 arm、还没被 render pass 消费
+    float pending_clear_z = 0.0f;
     std::vector<std::uint64_t> queue_;  // 每个条目的批号（与真后端的 `QueuedDraw::batch_tag` 同义）
     std::vector<Queued> queued_;
     std::size_t segment_first_ = 0;
@@ -1253,6 +1300,130 @@ void caseSpriteNoCpuComposite() {
     LIFT_CHECK_EQ_U32(f.method(sprite, 0x08u, {}), 0u);
     std::printf("d3d9p/sprite-no-cpu-composite: skipped=%llu reasons=%zu\n",
                 (unsigned long long)cov.sprite_skipped, cov.skipped_reasons.size());
+}
+
+// ---------------------------------------------------------------------------------------
+// pure：**sprite 侧的反馈环闸** —— sprite 采样**自己正在写的 RT** ⇒ 跳过这一条 + 记账
+//       （`REQ-01M79ZRTHWWD296XRY5KYPR9J4`）
+// ---------------------------------------------------------------------------------------
+// 红了意味着什么：
+//   · sprite 合成路径**没有**这条闸 ⇒ 同一批 sprite 采自己正在渲染的 RT（`tbase == base`）：
+//     GPU 采样读的是**上传缓存**、guest 内存也可能还没读回本批像素 ⇒ 采到的是**旧像素**，
+//     画面静默错、没有任何报错（sprite 路径不经 `gpuEligible`，draw 那条 `kUnRtFeedbackLoop`
+//     管不到它）；
+//   · 或者闸响了但**没账**：`sprite_skipped` 不涨 / 原因不进 `skipped_reasons` / 具名位不在
+//     `unsupported :` ⇒ 下一次只能靠"看起来不对"去发现（本单要消除的正是这种沉默）；
+//   · **反向条款**：采样的是**别的**纹理时也被拒 ⇒ 台面收紧过度（正常 sprite 静默消失）。
+//   ★ 判据是机械的：**没有排队**（`mock.queued_draws` 不涨）+ 账命中 + 像素没被写。
+//   ★ 纯段（Mock）：无 GPU 的机器上也跑得动。Mock 不真的光栅化 ⇒ "像素没被写"在这里是
+//     控制项（挡住"退回把 sprite 合成进后缓冲"的旧口径）；真像素那条在 `--gpu` 的
+//     `d3d9p/sprite-render-target`。
+void caseSpriteFeedbackLoop() {
+    lift_test::g_current_case = "d3d9p/sprite-feedback-loop";
+    lift::d3d9::gpuCoverageReset();
+    Fixture f;
+    LIFT_CHECK(f.boot(true));
+    const std::uint32_t d3d = f.createDirect3D();
+    LIFT_CHECK_NE_U32(d3d, 0u);
+    if (d3d == 0) return;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(d3d, 64, 64, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+
+    MockRaster mock;
+    f.m.setGpuRaster(&mock);
+
+    // 后缓冲先清成蓝：对照 —— sprite 绝不许回到"写后缓冲"的旧口径。
+    LIFT_CHECK_EQ_U32(f.clearTo(0x000000FFu), 0u);
+    LIFT_CHECK_EQ_U32(f.pixelAt(10, 20), 0x000000FFu);
+
+    std::uint32_t tex = 0;
+    LIFT_CHECK_EQ_U32(f.createTexture(dev.object, 64u, 64u, lift::d3d9::kFmtA8R8G8B8, &tex, 0x1u), 0u);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return;
+    lift::d3d9::TextureInfo ti;
+    LIFT_CHECK(lift::d3d9::textureInfo(f.m.cpu(), tex, &ti, nullptr));
+    lift::GuestSurface* tgs = f.m.surfaces().find(ti.arena);
+    LIFT_CHECK(tgs != nullptr);
+    if (tgs == nullptr) return;
+    const std::uint32_t tex_pitch = tgs->pitch;
+    const std::uint32_t tex_surface = f.textureSurface(tex);
+    LIFT_CHECK_NE_U32(tex_surface, 0u);
+    if (tex_surface == 0) return;
+
+    // 绑成 RT，并把它清成黑（= 目标像素的初值；被跳过的 sprite 不许动它）。
+    LIFT_CHECK_EQ_U32(f.setRenderTarget(tex_surface), 0u);
+    LIFT_CHECK_EQ_U32(f.clearTo(0x00000000u), 0u);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(ti.arena + 20u * tex_pitch + 10u * 4u), 0u);
+
+    std::uint32_t sprite = 0;
+    LIFT_CHECK_EQ_U32(f.createSprite(dev.object, &sprite), 0u);
+    LIFT_CHECK_NE_U32(sprite, 0u);
+    if (sprite == 0) return;
+    const std::uint32_t src8 = f.placeRect(0, 0, 8, 8);
+    const std::uint32_t zero3 = f.placeVec3(0.0f, 0.0f, 0.0f);
+    const std::uint32_t pos = f.placeVec3(10.0f, 20.0f, 0.0f);
+
+    // ---- ① 反馈环：采样的纹理**就是**本批写的 RT ----
+    const std::uint64_t queued_before = mock.queued_draws;
+    LIFT_CHECK_EQ_U32(f.spriteBegin(sprite, 0u), 0u);
+    LIFT_CHECK_EQ_U32(f.spriteDraw(sprite, tex, src8, zero3, pos, 0xFFFF0000u), 0u);
+    LIFT_CHECK_EQ_U32(f.spriteEnd(sprite), 0u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.queued_draws - queued_before), 0);  // ★ 一条都没入队
+
+    // 账：走到合成那一步、GPU 没画、原因以 `sprite:` 开头且点名反馈环。
+    {
+        const lift::d3d9::GpuCoverage cov = lift::d3d9::gpuCoverage();
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(cov.sprite_draws), 1);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(cov.sprite_gpu_draws), 0);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(cov.sprite_skipped), 1);
+        bool reason_seen = false;
+        for (const auto& kv : cov.skipped_reasons)
+            if (kv.first.rfind("sprite:", 0) == 0 && kv.first.find("反馈环") != std::string::npos)
+                reason_seen = true;
+        LIFT_CHECK(reason_seen);
+        if (!reason_seen)
+            lift_test::failf(__FILE__, __LINE__,
+                             "sprite 反馈环没画，但 `skipped top:` 里没有点名它的原因（%zu 条）",
+                             cov.skipped_reasons.size());
+    }
+    // 具名位：`unsupported :` 必须能看见"这是 sprite 路的反馈环"（与 draw 路的 bit 分得开）。
+    {
+        const std::string bits = lift::d3d9::unsupportedBitsOfRun();
+        LIFT_CHECK(bits.find("sprite 反馈环") != std::string::npos);
+        if (bits.find("sprite 反馈环") == std::string::npos)
+            lift_test::failf(__FILE__, __LINE__, "unsupported 里没有 sprite 反馈环的具名位：%s",
+                             bits.c_str());
+    }
+    // 像素：RT 与后缓冲都还是清屏值（⛔ 不静默读旧像素、也⛔ 不退回去写后缓冲）。
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(ti.arena + 20u * tex_pitch + 10u * 4u), 0u);
+    LIFT_CHECK_EQ_U32(f.pixelAt(10, 20), 0x000000FFu);
+
+    // ---- ② 反向条款：采样**别的**纹理 ⇒ 正常排队（防过度收紧）----
+    std::uint32_t tex2 = 0;
+    LIFT_CHECK_EQ_U32(f.createTexture(dev.object, 64u, 64u, lift::d3d9::kFmtA8R8G8B8, &tex2, 0u), 0u);
+    LIFT_CHECK_NE_U32(tex2, 0u);
+    if (tex2 == 0) return;
+    LIFT_CHECK_EQ_U32(f.spriteBegin(sprite, 0u), 0u);
+    LIFT_CHECK_EQ_U32(f.spriteDraw(sprite, tex2, src8, zero3, pos, 0xFFFF0000u), 0u);
+    LIFT_CHECK_EQ_U32(f.spriteEnd(sprite), 0u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.queued_draws - queued_before), 1);  // ★ 别的纹理照常入队
+    {
+        const lift::d3d9::GpuCoverage cov = lift::d3d9::gpuCoverage();
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(cov.sprite_draws), 1);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(cov.sprite_gpu_draws), 1);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(cov.sprite_skipped), 0);
+    }
+    LIFT_CHECK_EQ_U32(f.pixelAt(10, 20), 0x000000FFu);  // 目标仍是 RT ⇒ 后缓冲仍不变
+
+    LIFT_CHECK_EQ_U32(f.method(sprite, 0x08u, {}), 0u);
+    LIFT_CHECK_EQ_U32(f.setRenderTarget(0u), 0u);
+    LIFT_CHECK_EQ_U32(f.method(tex_surface, 0x08u, {}), 0u);
+    LIFT_CHECK_EQ_U32(f.method(tex, 0x08u, {}), 0u);
+    LIFT_CHECK_EQ_U32(f.method(tex2, 0x08u, {}), 0u);
+    f.m.setGpuRaster(nullptr);
+    std::printf("d3d9p/sprite-feedback-loop: queued=%llu\n",
+                static_cast<unsigned long long>(mock.queued_draws - queued_before));
 }
 
 // ---------------------------------------------------------------------------------------
@@ -2398,7 +2569,7 @@ void caseFfTexProbe() {
 //
 // 红了意味着什么：
 //   `IDirect3DDevice9::Clear(..., D3DCLEAR_ZBUFFER, ...)` 之后，**后端**（`GpuRaster`）必须收到
-//   一次 `rasterRequestDepthClear()`。少了它，D32 只在"建 target"时清过一次 ⇒ 上一帧末尾那张
+//   一次 `rasterRequestDepthClear(z)`。少了它，D32 只在"建 target"时清过一次 ⇒ 上一帧末尾那张
 //   全屏 **z=0** 的 quad 把整屏深度写成 0 ⇒ 下一帧所有 `z>0` 的批（角色整层）都被 LESSEQUAL 判掉，
 //   而账上一切为 0、画面只是"少一层"（**静默**）。
 //   ★ 这条错就出在**转发壳**（`SdlWindow` 没 override ⇒ 调到基类空实现），所以断言必须**穿过壳**：
@@ -2485,6 +2656,220 @@ void caseDepthClearForwarded() {
     window.setGpuRasterForTest(nullptr);
     std::printf("gpu-batch/depth-clear-forwarded: ZBUFFER=%llu 次转发、TARGET-only 未转发\n",
                 static_cast<unsigned long long>(mock.depth_clear_count));
+}
+
+// ---------------------------------------------------------------------------------------
+// 夹具助手：深度清的两单（`REQ-01M6RMVJTTM8PDNXB39TVJ40WN` / `REQ-01M73XEB…`）共用
+// ---------------------------------------------------------------------------------------
+// float 的**位模式**：`Clear` 的 z 是逐位传的 ⇒ 断言也逐位做（⛔ 不写 `== 0.25f` 这种"看起来一样"）。
+std::uint32_t floatBits(float v) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &v, sizeof(bits));
+    return bits;
+}
+
+// 深度**镜像**的左上角像素（float 位模式）：`clearDepth` 真的写进去了没有。
+//   取法 = `PipelineInfo::depth_arena`（深度缓冲的 SurfaceArena）⇒ 第一个 4 字节。
+//   ★ 第二个参数是**设备状态块** EA（`Fixture::Device::state`），⛔ 不是 COM 对象 EA
+//     （实测：传 COM 对象时 `pipelineInfoOfDevice` 直接失败 ⇒ 读数是 0xDEADBEEF 哨兵）。
+std::uint32_t depthMirrorBits(Fixture& f, std::uint32_t device_state) {
+    lift::d3d9::PipelineInfo info;
+    std::string why;
+    if (!lift::d3d9::pipelineInfoOfDevice(f.m.cpu(), device_state, &info, &why)) return 0xDEADBEEFu;
+    if (info.depth_arena == 0) return 0xDEADBEEFu;
+    lift::GuestSurface* d = f.m.surfaces().find(info.depth_arena);
+    if (d == nullptr) return 0xDEADBEEFu;
+    const std::uint8_t* p = f.m.surfaces().pixels(*d);
+    if (p == nullptr) return 0xDEADBEEFu;
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, p, sizeof(bits));
+    return bits;
+}
+
+// 第 `index` 条**已录进 pass** 的 draw 落在哪个 pass 里（按 mock 的 flush 顺序）。
+// ★ 返回**值拷贝**而不是指针：`MockRaster::passes` 是 `std::vector`，下一次 flush 的 `push_back`
+//   可能重分配 ⇒ 拿着旧指针读到的是悬空内存（实测：printf 打出来是 0x00000000）。
+std::optional<MockRaster::PassRecord> passOfDraw(const MockRaster& m, std::size_t index) {
+    for (const MockRaster::PassRecord& p : m.passes) {
+        if (index >= p.first_draw && index < p.first_draw + p.draw_count) return p;
+    }
+    return std::nullopt;
+}
+
+// ---------------------------------------------------------------------------------------
+// pure：**`Clear(ZBUFFER)` 的 z 值要一路走到 pass 的清除值**
+// （`REQ-01M6RMVJTTM8PDNXB39TVJ40WN`；`gpu-batch/depth-clear-value`）
+// 红了意味着什么：
+//   ① 接口 / shim / pass 三层里**任一层**把 z 丢了（修前的最坏形态：后端写死 1.0f）⇒ guest 清
+//      `z=0.25` 时 GPU 的深度从 1.0 起步，后续 `z_enable` 的批按错的初值判深度 —— 画面只"少一层"
+//      或"多一层"，不崩、不报错；
+//   ② `Clear(ZBUFFER, 1.0)` 与修前**等价**（引擎实际走的就是这条；⛔ 不许为了改 z 把 1.0 改坏）；
+//   ③ `z ∉ [0,1]`（含 NaN / ±inf）被**静默 clamp 或静默丢弃**（修前这两种都发生不了 —— 修前的形态是
+//      "反正也传不下去"，所以这一条是**新立的**口径）；
+//   ④ 具名位 42 没进 `unsupported :` ⇒ `unsupportedBitsOfRun()` 里找不到 `bit42=…`。
+//
+// ★ 观测点 = **计划层/记账**（MockRaster 收到的 z + 它记下的 pass 清除值 + CPU 镜像的 float 位模式），
+//   ⛔ 不要求像素：像素臂在 `--gpu` 的 `gpu-batch/depth-segments`（那条只看 1.0 的既有语义）。
+void caseDepthClearValue() {
+    lift_test::g_current_case = "gpu-batch/depth-clear-value";
+
+    // ---- ① 纯判据：z 的接受域 = [0,1]（NaN / ±inf / 越界一律假）----
+    LIFT_CHECK(lift::d3d9::depthClearZInRange(0.0f));
+    LIFT_CHECK(lift::d3d9::depthClearZInRange(0.25f));
+    LIFT_CHECK(lift::d3d9::depthClearZInRange(1.0f));
+    LIFT_CHECK(!lift::d3d9::depthClearZInRange(1.0001f));
+    LIFT_CHECK(!lift::d3d9::depthClearZInRange(-0.0001f));
+    LIFT_CHECK(!lift::d3d9::depthClearZInRange(std::numeric_limits<float>::quiet_NaN()));
+    LIFT_CHECK(!lift::d3d9::depthClearZInRange(std::numeric_limits<float>::infinity()));
+    LIFT_CHECK(!lift::d3d9::depthClearZInRange(-std::numeric_limits<float>::infinity()));
+
+    Fixture f;
+    LIFT_CHECK(f.boot(false));
+    const std::uint32_t d3d = f.createDirect3D();
+    LIFT_CHECK_NE_U32(d3d, 0u);
+    if (d3d == 0) return;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(d3d, 64, 64, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+
+    MockRaster mock;
+    f.m.setGpuRaster(&mock);
+    LIFT_CHECK_EQ_U32(f.beginScene(), 0u);
+    LIFT_CHECK_EQ_U32(f.setFvf(kFvfXyzRhwDiffuse), 0u);
+    LIFT_CHECK_EQ_U32(f.setViewport(0, 0, 64, 64), 0u);
+
+    // ---- ② Clear(TARGET|ZBUFFER, z=0.25) ⇒ 之后入队的 draw 所在 pass 的清除值 = 0.25 ----
+    LIFT_CHECK_EQ_U32(f.clearTargetAndDepthTo(0xFF000000u, 0.25f), 0u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.depth_clear_count), 1);
+    LIFT_CHECK_EQ_U32(floatBits(mock.depth_clear_z), 0x3E800000u);  // 0.25f 的位模式
+    // CPU 镜像也吃同一个 z（三处一致：接口 / shim / GPU pass + 镜像）
+    LIFT_CHECK_EQ_U32(depthMirrorBits(f, dev.state), 0x3E800000u);
+    LIFT_CHECK_EQ_U32(f.drawQuadZ(0.0f, 0.0f, 32.0f, 32.0f, 0.5f, 0xFFFF0000u), 0u);
+    LIFT_CHECK_EQ_U32(f.present(), 0u);
+    const std::optional<MockRaster::PassRecord> p25 = passOfDraw(mock, 0);
+    LIFT_CHECK(p25.has_value());
+    if (p25.has_value()) {
+        LIFT_CHECK(p25->load_clear);
+        LIFT_CHECK_EQ_U32(floatBits(p25->clear_z), 0x3E800000u);
+    }
+
+    // ---- ③ Clear(TARGET|ZBUFFER, z=1.0) 与修前**等价**（TITLE 路径不许退化）----
+    LIFT_CHECK_EQ_U32(f.clearTargetAndDepthTo(0xFF000000u, 1.0f), 0u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.depth_clear_count), 2);
+    LIFT_CHECK_EQ_U32(floatBits(mock.depth_clear_z), 0x3F800000u);
+    LIFT_CHECK_EQ_U32(depthMirrorBits(f, dev.state), 0x3F800000u);
+    LIFT_CHECK_EQ_U32(f.drawQuadZ(0.0f, 0.0f, 32.0f, 32.0f, 0.5f, 0xFF00FF00u), 0u);
+    LIFT_CHECK_EQ_U32(f.present(), 0u);
+    const std::optional<MockRaster::PassRecord> p10 = passOfDraw(mock, 1);
+    LIFT_CHECK(p10.has_value());
+    if (p10.has_value()) {
+        LIFT_CHECK(p10->load_clear);
+        LIFT_CHECK_EQ_U32(floatBits(p10->clear_z), 0x3F800000u);
+    }
+
+    // ---- ④ z 越界（含 NaN / ±inf）⇒ 显式拒绝 + 记账：不 arm、不改镜像、位图有位 ----
+    const std::size_t arms_before = mock.depth_clear_count;
+    const std::uint32_t mirror_before = depthMirrorBits(f, dev.state);
+    LIFT_CHECK_EQ_U32(mirror_before, 0x3F800000u);
+    const float bad_z[] = {1.5f, -0.5f, 2.0f, std::numeric_limits<float>::quiet_NaN(),
+                           std::numeric_limits<float>::infinity()};
+    for (const float bad : bad_z) {
+        // 调用本身仍然被接受（TARGET 位照旧；被拒的是**深度**这一半 —— D3D9 的其它掩码语义不动）
+        LIFT_CHECK_EQ_U32(f.clearTargetAndDepthTo(0xFF101010u, bad), 0u);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.depth_clear_count),
+                          static_cast<std::int64_t>(arms_before));  // 一次都没有 arm
+        LIFT_CHECK_EQ_U32(depthMirrorBits(f, dev.state), mirror_before);  // 镜像一位没改
+        // 只清深度那条也一样：z 越界 ⇒ 不 arm（⛔ 不是"悄悄按 1.0 清"）
+        LIFT_CHECK_EQ_U32(f.clearDepthTo(bad), 0u);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.depth_clear_count),
+                          static_cast<std::int64_t>(arms_before));
+    }
+    // 具名位 42（"Clear(ZBUFFER) 的 z 越界"）：判据在 `PipelineInfo::unsupported`，可读名字在 `unsupported :`
+    lift::d3d9::PipelineInfo info;
+    std::string why;
+    LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(f.m.cpu(), dev.state, &info, &why));
+    LIFT_CHECK((info.unsupported[42u / 32u] & (1u << (42u % 32u))) != 0);
+    const std::string bits = lift::d3d9::unsupportedBitsText(info.unsupported, /*non_benign_only=*/false);
+    LIFT_CHECK(bits.find("bit42=Clear(ZBUFFER) 的 z 越界") != std::string::npos);
+
+    LIFT_CHECK_EQ_U32(f.endScene(), 0u);
+    f.m.setGpuRaster(nullptr);
+    std::printf("gpu-batch/depth-clear-value: z=0.25→0x%08X z=1.0→0x%08X（越界 %d 次全部拒绝）\n",
+                floatBits(p25.has_value() ? p25->clear_z : -1.0f),
+                floatBits(p10.has_value() ? p10->clear_z : -1.0f),
+                static_cast<int>(sizeof(bad_z) / sizeof(bad_z[0])));
+}
+
+// ---------------------------------------------------------------------------------------
+// pure：**`Clear(ZBUFFER)` 必须"先 flush 再 arm"**（`REQ-01M73XEB594ZY8TA76S0EX4512`；
+// `gpu-batch/depth-clear-order`）
+//
+// 红了意味着什么：
+//   队列里**已经有更早的 draw** 时 `Clear(ZBUFFER)`，那条 CLEAR 会落到**包含那些 draw 的 pass 的
+//   开头** ⇒ 它们已经写下的深度被清掉，而之后的段用 `LOAD` 读旧深度 ⇒ GPU 的深度时间线与 CPU 镜像
+//   （`clearDepth` 在那些 draw **之后**才刷）**不对称**。修前实测第一帧就命中（`arm=clear seq=0 queue=1`）。
+//   ★ 守卫的三条机械判据（任一为假即红）：
+//     ① arm 那一刻后端队列必须是 **0** 条（= 调用方先 flush 了）；
+//     ② 含更早 draw 的那一段的深度 `load_op != CLEAR`；
+//     ③ 之后录的 draw 才进 CLEAR 段（且清值仍是 1.0 —— 这条与 z 单的等价性互相独立）。
+void caseDepthClearOrder() {
+    lift_test::g_current_case = "gpu-batch/depth-clear-order";
+    Fixture f;
+    LIFT_CHECK(f.boot(false));
+    const std::uint32_t d3d = f.createDirect3D();
+    LIFT_CHECK_NE_U32(d3d, 0u);
+    if (d3d == 0) return;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(d3d, 64, 64, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+
+    MockRaster mock;
+    f.m.setGpuRaster(&mock);
+    LIFT_CHECK_EQ_U32(f.beginScene(), 0u);
+    LIFT_CHECK_EQ_U32(f.setFvf(kFvfXyzRhwDiffuse), 0u);
+    LIFT_CHECK_EQ_U32(f.setViewport(0, 0, 64, 64), 0u);
+
+    // ---- ① 队列**非空**时 Clear(ZBUFFER) ⇒ 必须先 flush，再 arm ----
+    LIFT_CHECK_EQ_U32(f.drawQuadZ(0.0f, 0.0f, 8.0f, 8.0f, 0.5f, 0xFFFF0000u), 0u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.rasterQueuedDraws()), 1);
+    const std::size_t flushes_before = mock.flush_count;
+    LIFT_CHECK_EQ_U32(f.clearDepthOnly(), 0u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.depth_clear_count), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.flush_count - flushes_before), 1);  // 修前 0
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.rasterQueuedDraws()), 0);           // 修前 1
+    LIFT_CHECK(!mock.arm_queue.empty());
+    if (!mock.arm_queue.empty()) LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.arm_queue.back()), 0);  // 修前 1
+
+    // ---- ② 含**更早** draw 的那一段：深度 load_op 必须**不是** CLEAR ----
+    const std::optional<MockRaster::PassRecord> early = passOfDraw(mock, 0);
+    LIFT_CHECK(early.has_value());
+    if (early.has_value()) {
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(early->draw_count), 1);
+        LIFT_CHECK(!early->load_clear);  // ← 修前：整段（含这条 draw）从 CLEAR 开头 ⇒ 红
+    }
+
+    // ---- ③ 之后录的 draw 才在 CLEAR 段里（清值 = 1.0，与今天等价）----
+    LIFT_CHECK_EQ_U32(f.drawQuadZ(0.0f, 0.0f, 8.0f, 8.0f, 0.5f, 0xFF00FF00u), 0u);
+    LIFT_CHECK_EQ_U32(f.present(), 0u);
+    const std::optional<MockRaster::PassRecord> late = passOfDraw(mock, 1);
+    LIFT_CHECK(late.has_value());
+    if (late.has_value()) {
+        LIFT_CHECK(late->load_clear);
+        LIFT_CHECK_EQ_U32(floatBits(late->clear_z), 0x3F800000u);
+    }
+
+    LIFT_CHECK_EQ_U32(f.endScene(), 0u);
+
+    // ---- ④ 终态复核（这条是缺陷单的**字面判据**）：含更早 draw 的那一段 load_op != CLEAR ----
+    //   修前：这里只有一个 pass（draws 0..2）且 `load_clear = true` ⇒ 下面这条当场红。
+    const std::optional<MockRaster::PassRecord> early_final = passOfDraw(mock, 0);
+    LIFT_CHECK(early_final.has_value());
+    if (early_final.has_value()) LIFT_CHECK(!early_final->load_clear);
+
+    f.m.setGpuRaster(nullptr);
+    std::printf("gpu-batch/depth-clear-order: 早段 load_op=%s、后段 load_op=%s\n",
+                (early.has_value() && early->load_clear) ? "CLEAR" : "LOAD",
+                (late.has_value() && late->load_clear) ? "CLEAR" : "LOAD");
 }
 
 // ---------------------------------------------------------------------------------------
@@ -3504,8 +3889,16 @@ int main(int argc, char** argv) {
     caseRenderToTextureFeedback();
     // ★ `REQ-01M7AAXNJY2PACYJHYVRV620Q5`：sprite 没有 CPU 兜底（GPU 不可用 ⇒ 记账 + 跳过）。
     caseSpriteNoCpuComposite();
+    // ★ `REQ-01M79ZRTHWWD296XRY5KYPR9J4`：sprite 采样自己正在写的 RT ⇒ 跳过 + 记账（sprite 自己的闸）。
+    caseSpriteFeedbackLoop();
     caseFfTexProbe();
     caseDepthClearForwarded();
+    // ★ `REQ-01M6RMVJTTM8PDNXB39TVJ40WN`：Clear(ZBUFFER, z) 的 z 必须走到 pass 的清除值；
+    //   `REQ-01M73XEB594ZY8TA76S0EX4512`：Clear(ZBUFFER) 必须**先 flush 再 arm**。
+    //   ★ 两条都挂在既有注册 `gpu-batch-order` 下（`REQ-01M7ATAB5A18W7XBCKFBEQS7HB` 的口径：
+    //     不新增 `add_test` 也能加 case；用例名看 `lift_test::g_current_case`）。
+    caseDepthClearValue();
+    caseDepthClearOrder();
     caseDirtyRect();
     caseGpuSkipLedger();
     caseLedgerQueuedVsRecorded();

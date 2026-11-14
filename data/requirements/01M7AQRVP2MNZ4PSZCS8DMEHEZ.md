@@ -2,10 +2,11 @@
 
 - id: REQ-01M7AQRVP2MNZ4PSZCS8DMEHEZ
 - type: bug
-- status: open
+- status: dropped
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
 - repro: docs/03-emulator/observations.md#OBS-20261114-01
 - severity: S2
+- dropped_reason: 同上（测试模型改造 REQ-01M7ATAB…）：两条自愿传 --present-driver software 的 assets e2e 已删除 —— rg 'present-driver' 全仓零命中（2026-11-14 核）；那个驱动的 0.4 fps 前提也随 CPU 光栅退休消失（--raster 已删）⇒ 载体与根因都不存在。
 - tags: [emulator-lift, ctest, e2e]
 
 ## 现象

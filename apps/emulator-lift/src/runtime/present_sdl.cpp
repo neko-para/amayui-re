@@ -1300,9 +1300,9 @@ void SdlWindow::rasterDiscardTarget() {
 // ★ 这一条曾经**整条漏掉**（`REQ-01M73P3GXW22Y467YGYPQSM571`）：`d3d9::clear` 在
 //   `D3DCLEAR_ZBUFFER` 上就是调它 ⇒ 后端 D32 永不再清，上一帧的 z=0 全屏 quad 把深度写成 0，
 //   下一帧 z=0.5 的 FF 批全被 LESSEQUAL 判掉。
-void SdlWindow::rasterRequestDepthClear() {
+void SdlWindow::rasterRequestDepthClear(float z) {
     GpuRaster* r = impl_->raster();
-    if (r != nullptr) r->rasterRequestDepthClear();
+    if (r != nullptr) r->rasterRequestDepthClear(z);
 }
 bool SdlWindow::rasterDirty() const {
     const GpuRaster* r = impl_->raster();

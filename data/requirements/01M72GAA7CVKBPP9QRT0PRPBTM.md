@@ -2,10 +2,12 @@
 
 - id: REQ-01M72GAA7CVKBPP9QRT0PRPBTM
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/seh.cpp#E-noncontinuable-continue-is-loud
 - repro: apps/emulator-lift/src/runtime/seh.cpp#Seh::step
 - severity: S3
+- done_reason: 判据 1/3 达成、判据 2 未达成且**没有放宽**（如实记录）：disposition=1 的分岔改成**先判旗标** —— ExceptionFlags & EXCEPTION_NONCONTINUABLE ⇒ 不装载 CONTEXT，响亮停在新停因 StopReason::NonContinuableException（stop : noncontinuable-exception），detail 点名 0xC0000025 + 原 record 的 code/flags + 'CONTEXT 改了几个字/一个字节没改'；⛔ 不再报'软件中断'。依据是本机 x86-32 原生探针四臂（__try/__except filter 返回 CONTINUE_EXECUTION）：flags=0x1 不改 CONTEXT ⇒ 改抛 0xC0000025；flags=0x1 **且改了** CONTEXT ⇒ **照样改抛**（⇒ 判据是旗标不是 CONTEXT）；flags=0x0 改 ⇒ 落在新 Eip；flags=0x0 不改 ⇒ RaiseException 正常返回。⇒ 既有 A 组用例把 flags=1 + 改 CONTEXT 当成合法形状是错的（真机不可能），已改成 flags=0，contracts/断言不变，flags=1 归新的 E 组。判据 2（catch(...) 接住）停在'没有现场'：触发路径已被字体单修掉，boot 臂 843M 条 [seh] 0 条、路线臂两次没走到 TITLE ⇒ 不算取证；机制上只能是 _JumpToContinuation（本线已有 handler 弃帧 ⇒ Transfer 通路），缺的是现场不是实现。刻意偏离一处并写进 L1-SEH-01 + L3-seh-01：不建模'改抛 0xC0000025 之后的第二次派发'（真机会把新 record 再走一遍 fs:[0] 链），重开条件 = 出现消费者。守卫 seh 的 E 组（78 checks，修前 5 条 FAIL + 00401119 mov [0x410080],0xA11CE 来回跑的指纹），变异把旗标判据短路 ⇒ 该用例红（父级复跑 1/1 红）。
 - tags: [emulator-lift, seh, seh-dispatch]
 
 ## 一句话

@@ -2,11 +2,11 @@
 
 - id: REQ-01M7AZ65EAE7Q6STW2S0ZNXGM4
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/d3d9.cpp#d3d9/caps-claims
+- done_reason: 按 2026-11-14 的裁决走备选路（清位 + 说清后果），⛔ 未实现 alpha test：kCapsLineClaim 0x0E → 0x06（不再声明 ALPHACMP，依据是 d3d9.h 已裁决的'不能表达就清 0'）；d3d9/caps-claims ④ 从 caps_bit ⇔ suppressed 的双向锁死改成两件独立事实（caps 里没有 ALPHACMP + ALPHATESTENABLE=1 的 Draw 返回 D3DERR_INVALIDCALL、skipped_draws+1、原因进 skipped_reasons、具名位 bit30），修前红实测：caps 临时改回 0x0E ⇒ expected 0x0, got 0x1（108 checks / 1 failure），改回 0x06 后 0 failures；noteLinePointCapsOnce() 的'声明与行为对齐'改成实话（打印 ZTEST|BLEND(0x06)）；后果写清：docs/03-emulator/defects.md 的 BUG-23 + README 能力表（'整批拒绝 ⇒ 该图层整块消失，不是变半透明'，排障看 unsupported bit30 / skipped top:）。读数依据 OBS-20261114-09：boot→TITLE 600 帧里 GPU 不支持 alpha test 0 次命中；重开实现的条件写在正文（任何真场景出现 bit30 或该原因 ⇒ 改回 bug 并按首选路的两臂判据实现）。
 - tags: [emulator-lift, d3d9, gpu, alpha-test, contract]
-
-来历：`REQ-01M7A74YG08R65NJBFXF7DEJDK` 删 CPU 光栅后暴露的能力缺口（该父单已收口，本单是**新增能力**、不是它的子项）。
 
 ## 判据（首选：把 alpha test 做出来）
 
@@ -70,3 +70,8 @@ grep 'unsupported :' ../../.tmp/alphatest/replay.log              # 应有 bit30
 - **引擎是否读 `LineCaps`**：未证（已有读数只到"只读 `caps+0x58/0x5C`"）。查法：对 `caps+0x54`（`kCapsLineCaps`，`d3d9.h:179`）在 guest 侧找 `mov ...,[reg+54h]`（`--trace-blocks` + `--profile`），或看 AGE.EXE / AGERC.DLL 的 IAT 有无 `GetDeviceCaps`。
 - **boot→TITLE 里 alpha test 批的命中次数**：未测（用上面 `grep -c`；读数为 0 ⇒ 本局不触发，仍是潜在雷）。
 - 正文里的 `文件:行` 取自 `.tmp/cpu-migration/tickets.md`（2026-11-14 当前工作树），并发改动会让行号漂。
+## 2026-11-14 读数与裁决（父级）
+- **读数**：boot→TITLE 600 帧 `GPU 不支持 alpha test` **0 次**、`unsupported :` 只有 bit11（`OBS-20261114-09`）；ADV 段没量到（`sn0000.graph` 停在 GAMESTART 前）⇒ 游戏内命中面未知。
+- **裁决：先走备选路（清位 + 说清后果）；实现 alpha test 以"有命中证据"为条件。** 理由：唯一量到的 600 帧里没有可观测后果，而实现它要给片元着色器加变体、扩缓存键、改 pipeline 变体键 —— 为假想需求加复杂度；caps 的 `ALPHACMP` 则是**已经裁决过的假话**（`d3d9.h:211-215`），那一行必须先改。
+- **备选路收口**：① `kCapsLineClaim` 去 bit3（`0x0E→0x06`）；② `d3d9/caps-claims` ④ 改成"没有 ALPHACMP + 带 alpha test 的批返回 `D3DERR_INVALIDCALL`"（不再双向锁死假话）；③ `noteLinePointCapsOnce()` 的"声明与行为对齐"改成实话；④ `defects.md` + README 能力表点名"整批不画 ⇒ 该图层整块消失"。
+- **重开实现的条件**：任何真场景日志出现 `GPU 不支持 alpha test` 或 `unsupported :` 的 bit30 ⇒ 按"首选"那节的两臂判据实现，并把本单改回 bug。

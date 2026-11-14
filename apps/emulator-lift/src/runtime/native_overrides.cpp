@@ -305,6 +305,23 @@ const KnownNative kKnown[] = {
     //   可用 `all,-sub_4E1570` / `all,-sub_4E1950` 各自隔离。
     {"sub_4E1570", GuestConv::Cdecl, 8, nativeHuffDecode4E1570},
     {"sub_4E1950", GuestConv::Cdecl, 16, nativeHuffVector4E1950},
+    // ★ 2026-11-14：存档 CRC-32 的**两个变体**（`sub_436D00` 反射 / `sub_436D50` 非反射；
+    //   REQ-01M7BY4D1ZWA4HB97T8M8TVEYQ；thiscall `retn 8`，ECX = 表对象）。
+    //   为什么是它们：`sub_437480`（写一条存档记录）在 `.lst` 0x43758A / 0x4375A6 / 0x437842 /
+    //   0x437858 四处调这两个函数 ⇒ 每次存档 ≈ 6 倍 payload 的逐字节 CRC；窗口读数里两段循环体
+    //   合计 77.7M 条指令（该轮执行指令的 16.8%），外层 `sub_436D50` 1324.1 ms + `sub_436D00`
+    //   1148.3 ms = 2,472 ms（整轮 17.9 s 的 13.8%）。
+    //   ★ 表**从 guest 的 `[this, this+0x800)` 读**（512 个 dword）⇒ ⛔ 不许硬编码多项式
+    //     （`0x4C11DB7` / `0xEDB88320`）：表被别的路径重建时硬编码会静默分叉，而 CRC 分叉没有报错。
+    //   ★ 闸门 G1..G4 / 回退桶 `CrcWhy` / 两条已知边界（时钟相位、无定值 k）见 `native_overrides.h`。
+    //   ★ `n == INT32_MIN` **不是**"循环 0 次"（`0x436D29 dec edx` ⇒ SF=0 ⇒ `js` 不跳 ⇒ 2^31 次）：
+    //     那一格落到 G4 回退解释器，⛔ 不"返回 0"假装等价。`crc/int-min-declines` 钉住这件事。
+    //   ★ 判据：tests/native_override.cpp 的 `crc/decline-no-write`（回退零写）与 `crc/nonpositive`
+    //     （n <= 0 接管 + 返回 0）；tests/native_override_assets.cpp 的 `crc/d00-reflected` /
+    //     `crc/d50-msb`（解释器 = 同一 EA 的 oracle，比 EAX + 512 个 dword 表 + 缓冲 + `cpu.insns`）。
+    //   可用 `all,-sub_436D00` / `all,-sub_436D50` 各自隔离。
+    {"sub_436D00", GuestConv::Thiscall, 8, nativeCrc436D00},
+    {"sub_436D50", GuestConv::Thiscall, 8, nativeCrc436D50},
 };
 constexpr std::size_t kKnownCount = sizeof(kKnown) / sizeof(kKnown[0]);
 // ★ 表容量是**硬约束**：`--native-overrides=all` 会把每个 `debug == false` 的项都 `add()` 一遍

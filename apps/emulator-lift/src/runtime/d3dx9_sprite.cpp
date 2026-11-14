@@ -800,6 +800,36 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
                 return false;
             }
         }
+        // ---- 反馈环闸（sprite 路**自己的**一条；`REQ-01M79ZRTHWWD296XRY5KYPR9J4`）----
+        // ★ 为什么 sprite 需要一个自己的闸：sprite 的合成**不经** `gpuEligible`（本文件直接调
+        //   `GpuRaster::rasterQueue`）⇒ draw 路那条 `recordUnsupported(kUnRtFeedbackLoop)` 管不到
+        //   这里。`REQ-01M79V2TVJH98BKH0C0WQV2FET`（sprite→RT）之后，sprite 可以把像素写进绑定的
+        //   纹理 RT ⇒ "同一批 sprite 采样**自己正在写的**RT"（`tbase == base`）变成**新可达**。
+        // ★ 判据 = 要采样的纹理像素基址 == 本批要写的颜色目标像素基址（`tbase == base`）：
+        //   GPU 采样读的是**上传缓存**（本批像素还没进缓存）、guest 像素也可能还没读回
+        //   ⇒ 两个来源都可能是**旧像素**，而且画面看不出来（静默错）。
+        // ★ 语义选择（写死）：**跳过这一条 sprite + 具名位 43 + 一行 warn**，⛔ 不静默读旧像素、
+        //   ⛔ 不把整帧扔掉。**为什么是"这一条"而不是"整批 / 整帧"**：
+        //   ① 一批里各条目采的是各自的纹理，`tbase == base` 是**逐条目**的属性 ⇒ 只有构成环的
+        //      那几条不能画，其余条目本来能画对，丢掉整批等于把正确的像素一起丢掉；
+        //   ② 整帧丢弃会把"一帧里一条坏 sprite"放大成"整帧黑/空"，与
+        //      `REQ-01M7A74YG08R65NJBFXF7DEJDK` 的"跳过而不是回退/整帧重来"口径冲突；
+        //   ③ 三害（静默旧像素 / 丢整帧 / 少画一条）相权，取"少画一条 + 账上加一行"。
+        // ★ 记账**不复用** draw 路的 bit28：复用会让"draw 路命中"与"sprite 路命中"分不开
+        //   （见 `d3d9_pipeline.cpp` 的 `enum UnsupportedBit` 43 那一格）。
+        if (texture != 0 && tbase != nullptr && tbase == base) {
+            d3d9::noteSpriteRtFeedbackLoop(cpu, dev.pipeline, texture);
+            spriteWarn("End",
+                       "第 %u 条 Draw 采样的纹理 0x%08X 就是本批正在写入的渲染目标（像素同址）⇒ "
+                       "跳过这一条 sprite（⛔ 不静默读旧像素）",
+                       i, texture);
+            // ★ 账本：这一条**没画**（与其它"表达不了"分支同一个入口：`sprite_skipped` +
+            //   `skipped_reasons`）。⛔ 不 fallthrough 到后面的 GPU 分支。
+            d3d9::gpuNoteSpriteNotDrawn("sprite: 采样纹理是正在渲染的 RT（反馈环）");
+            releaseEntry(ea, i);
+            ++entries_done;
+            continue;
+        }
         // 源矩形**完全**落在纹理外 ⇒ 这一条什么也不画（真机语义，不是错误）。
         // ★ 与"越界裁掉一截"分开：**部分**越界由下面的 GPU 守卫按"表达不了 ⇒ 跳过"处理
         //   （GPU 路径不做逐像素裁剪；见那条注释）。⛔ 这里不写像素。

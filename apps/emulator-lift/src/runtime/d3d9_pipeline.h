@@ -114,6 +114,11 @@ constexpr std::uint32_t kRsDiffuseMaterialSource = 145;
 constexpr std::uint32_t kRsSpecularMaterialSource = 146;
 constexpr std::uint32_t kRsAmbientMaterialSource = 147;
 constexpr std::uint32_t kRsEmissiveMaterialSource = 148;
+// D3DMCS（`D3DRS_*MATERIALSOURCE` 的取值）：材质 / 第一顶点色（diffuse）/ 第二顶点色（specular）。
+// ★ 唯一消费点是 `materialSourceColor`；`D3DRS_COLORVERTEX=0` 时三个取值全部退化成 MATERIAL。
+constexpr std::uint32_t kDmcsMaterial = 0;
+constexpr std::uint32_t kDmcsColor1 = 1;
+constexpr std::uint32_t kDmcsColor2 = 2;
 constexpr std::uint32_t kRsVertexBlend = 151;
 constexpr std::uint32_t kRsClipPlaneEnable = 152;
 constexpr std::uint32_t kRsMultiSampleAntiAlias = 161;
@@ -137,6 +142,15 @@ constexpr std::uint32_t kRsBlendOpAlpha = 209;
 // ★ D3D9 的 `D3DRENDERSTATETYPE` 最大合法值（210..255 **不是** D3DRS 值）：
 //   Set/Get 的上界都用它；状态数组本身仍保留 256 槽（快照/Apply 按 256 项走，⛔ 不缩）。
 constexpr std::uint32_t kLastD3dRenderState = kRsBlendOpAlpha;
+// ★ **接受域**（`REQ-01M7A3M73R3XYMM7J4KNQ1VNV7`）：`SetRenderState` / `GetRenderState` 只接受
+//   **官方 `D3DRENDERSTATETYPE` 枚举成员**（判定的唯一一份在 `d3d9_pipeline.cpp` 的
+//   `renderStateTier` / `knownRenderState`）。合法但本线不实现的一批（本单新收：
+//   48 / 163 / 165 / 172–173 / 178–183 / 198–205）⇒ B 档：
+//   **接受 + 原样存下 + `recordUnsupported(bit41)` 记账**（⛔ 不冒充"未实现"、也⛔ 不静默）。
+//   枚举里不存在的值（1 / 138 / 0..209 的空洞 / 210..255）⇒ `D3DERR_INVALIDCALL` 且**不记账**。
+//   ⛔ 不要再用 `state <= kLastD3dRenderState` 当"合法"判据：7..209 不是连续区间。
+//   ★ 141 / 145–148（`COLORVERTEX` 与四个 `*MATERIALSOURCE`）是 A 档：本线真的读它们
+//     （`materialSourceColor` 的唯一选择逻辑，见 `applyLighting` / `transformVertex`）。
 
 // D3DBLEND
 constexpr std::uint32_t kBlendZero = 1;
@@ -346,6 +360,33 @@ bool unsupportedBitIsBenign(std::uint32_t bit);
 bool unsupportedBitOfRun(std::uint32_t bit);
 
 // =====================================================================================
+// `Clear(..., D3DCLEAR_ZBUFFER, ..., z, ...)` 的 z 接受域（`REQ-01M6RMVJTTM8PDNXB39TVJ40WN`）
+// =====================================================================================
+// ★ 为什么单独一条：D3D9 的深度清除值 ∈ [0,1]；越界（含 NaN / ±inf）在本线是**显式拒绝 + 记账**，
+//   ⛔ 既不 clamp 也不静默丢弃。判据写成 `z >= 0 && z <= 1`（NaN 天然为假）⇒ 一条覆盖全部越界形态。
+// ★ 为什么它在这里而不是 `d3d9.cpp`：位图（`enum UnsupportedBit`）是 `d3d9_pipeline.cpp` 的私有物，
+//   Clear 的 shim 不该知道 0..42 的全部取值 ⇒ 只暴露"判域 + 记这一位"两个窄入口。
+bool depthClearZInRange(float z);
+// 越界 ⇒ 记账（具名位 42 = "Clear(ZBUFFER) 的 z 越界"）+ 默认级别可见的 `pipeWarn` 一行；
+//   `pipeline_state` 为 0 / 不是本模块的状态块 ⇒ 没有位图可写，仍然出声（⛔ 不静默）。
+//   ⛔ 调用方拿到 false 之后**不许**再写深度（CPU 镜像与 GPU arm 都要停下）。
+void noteDepthClearZRejected(X86& cpu, std::uint32_t pipeline_state, float z);
+
+// =====================================================================================
+// sprite 采样自己正在写的 RT（`REQ-01M79ZRTHWWD296XRY5KYPR9J4`）
+// =====================================================================================
+// ★ 为什么需要这一条：sprite 的合成（`d3dx9::compositeBatch`）**不经** `gpuEligible`，
+//   所以 draw 路那条反馈环闸（`kUnRtFeedbackLoop`）管不到它。同一批 sprite 采自己正在写的
+//   RT（`tbase == base`）时，GPU 采样读的是**上传缓存**、guest 像素也可能还没读回 ⇒ 采到旧像素
+//   且看不出来。判据只有一份（`compositeBatch`），本函数只负责**记账 + 出声**。
+// ★ 为什么不复用 bit28：复用会让"draw 路命中"与"sprite 路命中"在台账里分不开，两条守卫
+//   会互成恒真（见 `enum UnsupportedBit` 的 43 那一格）。
+//   · 具名位 43 照样进 `unsupported :`（`PipelineInfo::unsupported` 与进程镜像同一份写入）；
+//   · 同时 `pipeWarn` 打一行（默认级别可见；按 (调用点, 类别) 限流，⛔ 不刷屏）。
+//   `pipeline_state` 为 0 / 不是本模块的状态块 ⇒ 没有位图可写，仍然出声（⛔ 不静默）。
+void noteSpriteRtFeedbackLoop(X86& cpu, std::uint32_t pipeline_state, std::uint32_t texture);
+
+// =====================================================================================
 // IDirect3DStateBlock9 的状态快照（`REQ-01M7372BPVGBD247KAGHB53YK7`）
 //
 // ★ 为什么要它：引擎每帧 Live2D 都走 `CreateStateBlock(D3DSBT_ALL=1) → draw → Apply → Release`
@@ -385,13 +426,24 @@ void destroyStateBlockSnapshot(X86& cpu, std::uint32_t handle);
 // 方法语义（返回 HRESULT；`dev` 是设备状态块 EA）
 // ⚠ 每个函数都先自己校验参数（真机的失败码），失败**不**改状态。
 // =====================================================================================
-// 当前渲染目标像素块（0 = 设备后缓冲）。Clear / Draw / 夹具都读这一份。
-std::uint32_t renderTargetArena(X86& cpu, std::uint32_t pipeline_state);
+// ★ `D3DRS_COLORVERTEX` + `D3DMCS_*` 的**唯一**选择逻辑（`applyLighting` 的四个材质来源与
+//   `transformVertex` 的顶点色调制共用这一份）。**纯函数**：不读 guest、不碰 SDL。
+//   · `color_vertex == 0` ⇒ 顶点色**不参与光照**（D3D9 语义：`*MATERIALSOURCE` 被忽略、恒用材质）
+//     —— 这正是修前缺的那一半：状态只存不读 ⇒ 顶点色仍然乘进光照结果。
+//   · `color_vertex != 0` ⇒ 按 `material_source`：`MATERIAL` / `COLOR1`（顶点 diffuse）/
+//     `COLOR2`（顶点 specular）；对应顶点色**不存在**（`color1_rgba` / `color2_rgba` 为 nullptr）
+//     ⇒ 回退材质（⛔ 不把"没有这一项"当成白色 / 黑色）。
+//   输入 / 输出都是 RGBA `double[4]`，单位由调用方保证（材质 0..1、顶点色 /255）。
+void materialSourceColor(std::uint32_t color_vertex, std::uint32_t material_source,
+                         const double material_rgba[4], const double* color1_rgba,
+                         const double* color2_rgba, double out_rgba[4]);
 
-// ★ 当前颜色目标的**唯一一份**判据（`prepareContext` 与 D3DXSprite 合成共用）：
+// ★ 当前颜色目标的**唯一一份**判据（`prepareContext` / `Clear` / `unlockRect` / D3DXSprite
+//   的 End/Flush 合成都调它）：
 //   Sprite 的 End/Flush 合成目标必须与 D3D9 的 Draw 目标同源 —— 绑定纹理 RT 时两者都要写进
 //   那张纹理的像素块（`REQ-01M79V2TVJH98BKH0C0WQV2FET`），⛔ 不要各读一遍状态块、
-//   更不要复制一份"是不是纹理"的判断。
+//   更不要复制一份"是不是纹理"的判断。`Clear` / `unlockRect` 修前各写一遍
+//   `renderTargetArena != 0 ? … : dev.arena` ⇒ 已收口到这里（`REQ-01M79ZRTXJCG303FKVEBFMNFPJ`）。
 //   · `arena`   = `kPlColorArena`（0 = 设备后缓冲；非 0 = 绑定的 surface 像素块）；
 //   · `surface` = `kPlColorSurface`（0 = 后缓冲）；
 //   · `is_texture` / `usage` = surface 是纹理表面（`'TEX1'` magic）及其 `D3DUSAGE_*` 位。

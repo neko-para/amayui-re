@@ -2,10 +2,27 @@
 
 - id: REQ-01M6RH9CDPM8PG2SFEG0PYT46T
 - type: req
-- status: doing
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/stress_title_steady.cpp#kFrameMedianMs
+- done_reason: 判据重基后收口（重基说明写在正文顶部）：① GPU 覆盖成立 —— S9 的 600 帧读数 skipped_draws=0 / sprite_skipped=0（OBS-20261114-06），fallback 账已随 CPU 光栅退休删除；② 帧墙钟 '≤33 ms' 对中位成立 —— TITLE 稳态中位 31.3 / 31.5 / 32.0 ms、p95 39.3–42.7 ms，阈值门落在 stress-title-steady（中位 ≤46.95 / p95 ≤57.9，R1 = 标定 ×1.5），⛔ 单遍读数不进断言；③ 原判据 3/4/5 作废：判据 3 比较 CPU↔GPU 同批像素而 CPU 光栅已删、判据 4 的 --raster cpu / --raster-sprites 0 / --gpu-strict 已随该 flag 退休、判据 5 点名的 gpu-mapping / gpu-raster 在本仓零命中（覆盖面由 d3d9-gpu / d3d9-pipeline-gpu 两条顶层 GPU 臂 + gpu-batch/* 承担）；④ 残余项由子单 REQ-01M6RQ2XNWRDV35E72D7G2ZV7D 收口（2026-11-14 done，其验收 3 '按需回读' 明确不做并写明理由）⇒ 父不先于子的条件已满足。
 - tags: [emulator-lift, d3d9, gpu, raster, performance, title]
 
+## 2026-11-14 判据重基（本单**仍然 open**，但原验收 3/4/5 已作废）
+
+- **判据 4 作废**：`--raster` 系列 flag 已于 2026-11-13 删除（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX` 的后半）——
+  今天不存在"缺省 `--raster cpu` 逐字节不变"这件事（GPU 是唯一光栅实现）。`--gpu-strict` / `--raster-sprites 0` 同样不存在。
+- **判据 5 作废**：`gpu-mapping` / `gpu-raster` 两个用例名在本仓**零命中**
+  （`rg 'gpu-mapping|gpu-raster' apps/emulator-lift/tests` 为空，2026-11-14 核）；覆盖面改由 `d3d9-gpu` /
+  `d3d9-pipeline-gpu` 两条顶层 GPU 臂 + `gpu-batch/*` 承担。
+- **判据 3 作废**：它比较"CPU↔GPU 同批像素"，CPU 光栅退休后没有第二份可比。
+- **判据 1 已完成**：S9 的 600 帧读数 `skipped_draws=0 / sprite_skipped=0`（`OBS-20261114-06`）。
+- **判据 2 的现状（读数，不是断言）**：TITLE 稳态帧时间中位 **31.3 / 31.5 / 32.0 ms**（S2 三遍）、
+  p95 **39.3–42.7 ms**、空转吞吐中位 **143.5–145.6 ms/M**（`OBS-20261114-06`）⇒ "≤33 ms" 对**中位**成立、
+  对 **p95 不成立**。阈值门是 `stress-title-steady`（中位 ≤46.95 / p95 ≤57.9，R1 = 标定 ×1.5），
+  ⛔ 不把单遍读数写成断言。
+- ⇒ 本单剩下的**只有残余项**（sprite 合批 / 按需回读），由子单 `REQ-01M6RQ2XNWRDV35E72D7G2ZV7D` 跟踪；
+  父不先于子 ⇒ 子单收口前本单**不能** done。
 `--raster gpu --present window --native-overrides all --real-time` 下，LOGO 渐变约 70–120 ms/帧；进入 TITLE 黑场渐变后 0.9–1.5 s/帧，只剩 2–3 个可见台阶。
 ## 复现
 ```bash

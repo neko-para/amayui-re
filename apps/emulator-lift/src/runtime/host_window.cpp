@@ -145,6 +145,32 @@ bool WindowManager::peek(WinMessage* out, bool remove) {
     return true;
 }
 
+bool WindowManager::peekMatching(const std::function<bool(const WinMessage&)>& pred, WinMessage* out,
+                                 bool remove) {
+    checkMainThread("window.peekMatching");
+    // ★ FIFO 语义：从**队首**起线性找第一条匹配的。匹配只决定"看哪一条" ——
+    //   不匹配的消息**原地保留**（⛔ 不许学旧实现那样 `peek(true)` 逐条取走：那是静默丢消息）。
+    //   `queue_.erase(it)` 只摘掉命中的那一条，其余消息（含它前面的）相对顺序不变。
+    for (auto it = queue_.begin(); it != queue_.end(); ++it) {
+        if (pred && !pred(*it)) continue;
+        if (out) *out = *it;
+        if (remove) queue_.erase(it);
+        return true;
+    }
+    // 队列之外：`WM_QUIT` 是"队列里的一条虚拟消息"（与 `peekAt` / `peek` 同形，排在队尾）。
+    // ★ 它也参与 `pred`：`PeekMessage(hwnd=A)` 不该取走 hwnd=0 的 WM_QUIT（它不匹配）。
+    if (quit_) {
+        WinMessage q;
+        q.message = kWmQuit;
+        q.wparam = quit_code_;
+        if (pred && !pred(q)) return false;
+        if (out) *out = q;
+        if (remove) quit_ = false;
+        return true;
+    }
+    return false;
+}
+
 bool WindowManager::peekAt(std::size_t index, WinMessage* out) const {
     checkMainThread("window.peekAt");
     if (index < queue_.size()) {

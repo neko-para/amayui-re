@@ -606,10 +606,40 @@ std::uint32_t clear(X86& cpu, const DeviceInfo& dev, std::uint32_t count, std::u
     //   （`clearDepth` 写它），宿主的 D32 是另一块纹理。这里把"清深度"的请求交给后端，
     //   由它在下一个 render pass 用 CLEAR 落地 —— ⛔ 不要指望"颜色同步顺带清"。
     //   ★ 放在 TARGET 位的早退之前：`Clear(0,NULL,D3DCLEAR_ZBUFFER,..)` 也要生效。
-    if ((flags & kClearZBuffer) != 0) {
-        if (GpuRaster* gpu = m->gpuRaster(); gpu != nullptr && gpu->rasterActive()) gpu->rasterRequestDepthClear();
-    }
-    const std::uint32_t color_arena = dev.pipeline != 0 ? renderTargetArena(cpu, dev.pipeline) : 0u;
+    //
+    // ★ 两单合并后的口径（`REQ-01M6RMVJTTM8PDNXB39TVJ40WN` + `REQ-01M73XEB594ZY8TA76S0EX4512`）：
+    //   ① **z 全链传值**：arm 带 guest 给的 z（逐位），GPU pass 的 `clear_depth` 就用它；
+    //      修前这里不带参数、`d3d9_gpu.cpp` 写死 1.0f ⇒ guest 清 0.25 时 GPU 从 1.0 起步。
+    //   ② **先 flush 再 arm（有序屏障）**：修前是"先 arm 后 flush"，队列非空时那条 CLEAR 会落到
+    //      **包含更早 draw 的那一个 pass 的开头**（第一帧实测 `arm=clear seq=0 queue=1`）。
+    //      ⇒ arm 现在一律排在"队列已经落成 pass"**之后**：TARGET 分支在既有屏障之后 arm，
+    //      ZBUFFER-only 分支自己先 flush-only 一次再 arm（不动颜色 ⇒ 不需要回读）。
+    //   ③ z ∉ [0,1]（含 NaN）⇒ 显式拒绝 + 记账（⛔ 不 clamp、⛔ 不静默丢弃）：CPU 镜像与 GPU arm
+    //      都不写，具名位 42 进 `unsupported :`，另有一行默认可见的 warn。
+    const bool z_mask = (flags & kClearZBuffer) != 0;
+    const bool z_ok = !z_mask || depthClearZInRange(z);
+    if (z_mask && !z_ok) noteDepthClearZRejected(cpu, dev.pipeline, z);
+    // ★ "队列里还有更早的 draw 就先落成 pass"——⛔ 队列非空时 arm 会把它们已经写下的深度一起清掉。
+    auto flushForDepthClear = [&]() {
+        GpuRaster* gpu = m->gpuRaster();
+        if (gpu == nullptr || !gpu->rasterActive() || !gpu->rasterDirty()) return;
+        std::string gerr;
+        if (!gpu->rasterFlush(&gerr)) d3d9Warn("Clear", "清深度前的队列 flush 失败：%s", gerr.c_str());
+    };
+    // arm（调用点必须保证队列已经空 / 已经 flush 过）
+    auto armDepthClear = [&]() {
+        if (!z_mask || !z_ok) return;
+        GpuRaster* gpu = m->gpuRaster();
+        if (gpu == nullptr || !gpu->rasterActive()) return;
+        gpu->rasterRequestDepthClear(z);
+    };
+    // ★ 当前颜色目标走**唯一一份**判据（`colorTargetOfState`）：修前这里直读
+    //   `renderTargetArena(cpu, dev.pipeline)` 再 `!=0 ? … : dev.arena`，与 `unlockRect` 各写一遍
+    //   "目标是哪一块" ⇒ 两份判据一份规则（`REQ-01M79ZRTXJCG303FKVEBFMNFPJ`）。
+    //   `colorTargetOfState` 失败时 `*out` 是零值（arena=0）⇒ 行为与修前的 `?: dev.arena` 逐位相同。
+    ColorTarget target;
+    colorTargetOfState(cpu, dev.pipeline, &target, nullptr);
+    const std::uint32_t color_arena = target.arena;
     GuestSurface* gs = m->surfaces().find(color_arena != 0 ? color_arena : dev.arena);
     if (!gs) {
         if (why) *why = color_arena != 0 ? "D3D9：Clear 的渲染目标像素不在 arena 里"
@@ -617,6 +647,10 @@ std::uint32_t clear(X86& cpu, const DeviceInfo& dev, std::uint32_t count, std::u
         return kInvalidCall;
     }
     if ((flags & kClearTarget) == 0) {
+        // ★ 有序屏障（`REQ-01M73XEB594ZY8TA76S0EX4512`）：这条路径**不动颜色** ⇒ 不需要回读，
+        //   但必须先把队列落成 pass，再 arm —— 否则 CLEAR 会盖到"含更早 draw 的那个 pass 的开头"。
+        flushForDepthClear();
+        armDepthClear();
         // 真机：没有 TARGET 位 ⇒ 不动颜色（S_OK）。也要出声，否则"什么都没清"会被当成清了。
         d3d9Log("Clear", "Flags=0x%08X 没有 D3DCLEAR_TARGET ⇒ 颜色保持不变（z=%.3f stencil=%u）", flags,
                 static_cast<double>(z), stencil);
@@ -636,6 +670,9 @@ std::uint32_t clear(X86& cpu, const DeviceInfo& dev, std::uint32_t count, std::u
             d3d9Log("Clear", "GPU 光栅化读回失败：%s", gerr.c_str());
         }
     }
+    // ★ 有序屏障的第二半：上面的屏障已经把队列落成 pass（队列空 / 本就没有队列）⇒ 现在 arm 才安全。
+    //   ⛔ 不要把它挪回函数开头：那正是 `REQ-01M73XEB594ZY8TA76S0EX4512` 的缺陷形态。
+    armDepthClear();
     const std::uint32_t pixel = pixelFromColor(gs->format, color);
     const std::uint32_t bytes_per_pixel = gs->format.bytesPerPixel();
     std::uint8_t* base = m->surfaces().pixels(*gs);
@@ -680,8 +717,12 @@ std::uint32_t clear(X86& cpu, const DeviceInfo& dev, std::uint32_t count, std::u
     }
     cpu.mem->wr32(dev.state + kDvClears, dev.clears + 1u);
     if ((flags & kClearZBuffer) != 0) {
-        // ★ 2026-11-05：fixed-function 流水线落地后**有**深度缓冲了 ⇒ 真的清（不再是"只记录"）
-        if (dev.pipeline != 0) {
+        // ★ z 越界 ⇒ **两处都不写**（CPU 镜像与 GPU arm 同一判据）：已经由 `noteDepthClearZRejected`
+        //   记账 + 出声（⛔ 不 clamp、⛔ 不静默丢弃、⛔ 不谎称清了）。
+        if (!z_ok) {
+            // 这里不再打第二行（上面那条 warn 已经说清"深度缓冲未改"）⇒ 日志不重复。
+        } else if (dev.pipeline != 0) {
+            // ★ 2026-11-05：fixed-function 流水线落地后**有**深度缓冲了 ⇒ 真的清（不再是"只记录"）
             std::string zwhy;
             if (!clearDepth(cpu, dev.pipeline, z, &zwhy)) {
                 d3d9Log("Clear", "ZBUFFER 位在，但深度清失败：%s", zwhy.c_str());
@@ -1213,10 +1254,14 @@ bool unlockRect(X86& cpu, const TextureInfo& tex, std::uint32_t level, std::stri
     std::uint32_t version = 0;  // 0 = 保持"未知"
     // 判"这块纹理是不是当前 render target"。判不出来（设备状态块不在了）也按"未知"处理：
     // 宁可多哈希（慢），也不要发一个可能错的"已知"号（静默旧图）。
+    //   ★ 判据与 Clear / `prepareContext` **同一个函数**（`colorTargetOfState`）：
+    //     修前这里直读 `renderTargetArena`（`REQ-01M79ZRTXJCG303FKVEBFMNFPJ`）。
+    //     判不出状态块（magic / committed 不对）⇒ 与修前逐位相同地当作"不是 RT"（`arena=0`）。
     const bool is_render_target = [&] {
         DeviceInfo dev;
         if (!deviceInfo(cpu, tex.device, &dev, nullptr)) return true;
-        return dev.pipeline != 0 && renderTargetArena(cpu, dev.pipeline) == tex.arena;
+        ColorTarget target;
+        return colorTargetOfState(cpu, dev.pipeline, &target, nullptr) && target.arena == tex.arena;
     }();
     if (!is_render_target) {
         std::uint32_t seq = cpu.mem->rd32(tex.state + kTxVersionSeq);

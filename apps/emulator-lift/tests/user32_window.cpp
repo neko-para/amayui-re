@@ -1197,5 +1197,391 @@ int main() {
         }
     }
 
+    // =================================================================================
+    // 第六阶段（2026-11-14，`REQ-01M7ATQ4XWSKPW1CKXAHQKNSA2`）：PeekMessage 过滤语义 + TranslateMessage
+    //
+    // ① `PeekMessageA` 的 `hWnd` / `wMsgFilterMin` / `wMsgFilterMax` **只影响"看哪一条"**：
+    //    文档（<https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-peekmessagea>）
+    //    的语义是"只取一条**匹配**的消息"，不匹配的消息**必须留在队列里**（FIFO / 不过滤掉）。
+    //    修前：实现把不匹配的消息 `peek(&m, true)` **真取走** ⇒ 下面 `peek-filter-*` 三条当场红。
+    // ② `TranslateMessage` 把 `WM_KEYDOWN` / `WM_SYSKEYDOWN` 翻成 `WM_CHAR` / `WM_SYSCHAR`
+    //    （字符表 / 依据见 `shims/user32_window.cpp` 的 `charForVirtualKey` 注释）。
+    //    修前：恒返回 1、不投字符消息 ⇒ 下面 `translate-keydown-char` 当场红。
+    // ★ 判据全部走 **guest 代码调 shim 的公开接口**（⛔ 不调内部函数）：调用方看得见的结果才算合同。
+    // ★ 每条用例之间**只经 `WindowManager` 的公开状态**（`queueSize` / `peek`）检查，⛔ 不假设内部实现。
+    // =================================================================================
+    // ★ 每段 guest 代码用一个**不同**的装载地址：`placeCode` 是宿主直写内存，**不经过 SMC 失效**
+    //   ⇒ 在同一 EA 上换一段代码会命中上一次的解码块（实测：每段都在重跑第一段）。
+    //   代码槽 0x400 一个，数据从 0x40B000 起，⛔ 互不重叠。
+    constexpr std::uint32_t kCode6 = 0x00409000u;   // ① hwnd 过滤
+    constexpr std::uint32_t kCode6b = 0x00409400u;  // ② min/max 过滤
+    constexpr std::uint32_t kCode6c = 0x00409800u;  // ③ PM_NOREMOVE（两次窥视）
+    constexpr std::uint32_t kCode6d = 0x00409C00u;  // ③ PM_NOREMOVE 之后的 PM_REMOVE
+    constexpr std::uint32_t kCode6e = 0x0040A000u;  // ④ TranslateMessage 主臂
+    constexpr std::uint32_t kCode6f = 0x0040A400u;  // ④ Shift
+    constexpr std::uint32_t kCode6g = 0x0040A800u;  // ④ CapsLock
+    constexpr std::uint32_t kCode6h = 0x0040AC00u;  // ④ CapsLock + Shift
+    constexpr std::uint32_t kRes6 = 0x0040B000u;    // 结果槽（0x100 = 64 个 dword）
+    constexpr std::uint32_t kMsg6A = 0x0040B100u;   // MSG（28 字节）
+    constexpr std::uint32_t kMsg6B = 0x0040B140u;
+    constexpr std::uint32_t kMsg6C = 0x0040B180u;
+    constexpr std::uint32_t kMsg6D = 0x0040B1C0u;
+    constexpr std::uint32_t kMsg6E = 0x0040B200u;
+    constexpr std::uint32_t kMsg6F = 0x0040B240u;
+    constexpr std::uint32_t kHwnd2Slot = 0x0040B280u;  // 第二个窗口的 HWND
+
+    g_current_case = "peek-setup";
+    {
+        // 前几阶段留下过 `WM_QUIT` 虚拟项（`PostQuitMessage`）⇒ 先清空，过滤用例的起点必须是空队列。
+        lift::WinMessage drained;
+        while (m.cpu().windows->peek(&drained, true)) {
+        }
+        std::vector<std::uint8_t> z6(0x40, 0);
+        LIFT_CHECK(m.placeData(kRes6, z6.data(), 0x100, &err));
+        const std::uint32_t msg_slots[] = {kMsg6A, kMsg6B, kMsg6C, kMsg6D, kMsg6E, kMsg6F};
+        for (const std::uint32_t slot : msg_slots) {
+            LIFT_CHECK(m.placeData(slot, z6.data(), z6.size(), &err));
+        }
+        LIFT_CHECK(m.placeData(kHwnd2Slot, z6.data(), 4, &err));
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.cpu().windows->queueSize()), 0u);
+    }
+
+    // ---- ① hwnd 过滤：队列里只有 B 的消息 ⇒ `PeekMessageA(hwnd=A)` 返回 0，且 B 的消息**仍在队列** ----
+    g_current_case = "peek-filter-keeps-messages";
+    {
+        Asm c6(kCode6);
+        // 第二个窗口 B（同一个窗口类 / 同一个 WndProc；CreateWindowExA 只同步发 WM_CREATE，不进队列）
+        c6.pushImm(0);            // lpParam
+        c6.pushImm(0);            // hInstance
+        c6.pushImm(0);            // hMenu
+        c6.pushImm(0);            // parent
+        c6.pushImm(764);          // height
+        c6.pushImm(1286);         // width
+        c6.pushImm(0);            // y
+        c6.pushImm(0);            // x
+        c6.pushImm(0x90CB0000u);  // style（与主窗口同形）
+        c6.pushImm(kTitle);
+        c6.pushImm(kClassName);
+        c6.pushImm(0);            // exstyle
+        c6.callRel(stubOf(m, "CreateWindowExA"));
+        c6.storeEax(kHwnd2Slot);
+        // PostMessageA(B, 0x0402, 0x55, 0)
+        c6.pushImm(0);
+        c6.pushImm(0x55u);
+        c6.pushImm(0x0402u);
+        c6.pushMem(kHwnd2Slot);
+        c6.callRel(stubOf(m, "PostMessageA"));
+        // PeekMessageA(&msgA, A, 0, 0, PM_REMOVE) ⇒ **0**（不匹配的那条不许被取走）
+        c6.pushImm(1);
+        c6.pushImm(0);
+        c6.pushImm(0);
+        c6.pushMem(kHwndSlot);
+        c6.pushImm(kMsg6A);
+        c6.callRel(stubOf(m, "PeekMessageA"));
+        c6.storeEax(kRes6);
+        // 随后 PeekMessageA(&msgB, B, 0, 0, PM_REMOVE) ⇒ 1，内容是**同一条**
+        c6.pushImm(1);
+        c6.pushImm(0);
+        c6.pushImm(0);
+        c6.pushMem(kHwnd2Slot);
+        c6.pushImm(kMsg6B);
+        c6.callRel(stubOf(m, "PeekMessageA"));
+        c6.storeEax(kRes6 + 4);
+        c6.ret();
+        LIFT_CHECK(m.placeCode(kCode6, c6.b.data(), c6.b.size(), &err));
+        LIFT_CHECK(m.prepareStack(&err));
+        m.cpu().eip = kCode6;
+        lift::RunOptions o6;
+        o6.until_ea = kSentinel;
+        o6.max_insns = 20000;
+        const lift::RunResult r6 = m.run(o6);
+        LIFT_CHECK_EQ_U32(r6.ea, kSentinel);
+
+        auto res6 = [&](std::uint32_t off) { return m.mem().rd32(kRes6 + off); };
+        const std::uint32_t hwnd2 = m.mem().rd32(kHwnd2Slot);
+        LIFT_CHECK(hwnd2 != 0);
+        LIFT_CHECK(hwnd2 != hwnd);
+        // ★ 修前的实现会把 B 的那条在 `PeekMessageA(A)` 里取走 ⇒ res6(0) 仍是 0（骗过第一条断言），
+        //   但 res6(4) 会变 0 ⇒ "消息还在队列"这件事由第二条断言当场证伪。
+        LIFT_CHECK_EQ_U32(res6(0), 0u);
+        LIFT_CHECK_EQ_U32(res6(4), 1u);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kMsg6B + 0), hwnd2);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kMsg6B + 4), 0x0402u);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kMsg6B + 8), 0x55u);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.cpu().windows->queueSize()), 0u);
+    }
+
+    // ---- ② min/max 过滤：队首在范围外、第二条在范围内 ⇒ 只取范围内那条，范围外的**仍在队首** ----
+    g_current_case = "peek-filter-range";
+    {
+        Asm c6(kCode6b);
+        // PostMessageA(A, 0x0401, 0x66, 0)：**队首**，不在 [0x0400, 0x0400]
+        c6.pushImm(0);
+        c6.pushImm(0x66u);
+        c6.pushImm(0x0401u);
+        c6.pushMem(kHwndSlot);
+        c6.callRel(stubOf(m, "PostMessageA"));
+        // PostMessageA(A, 0x0400, 0x77, 0)：在范围内，排在第二条
+        c6.pushImm(0);
+        c6.pushImm(0x77u);
+        c6.pushImm(0x0400u);
+        c6.pushMem(kHwndSlot);
+        c6.callRel(stubOf(m, "PostMessageA"));
+        // PeekMessageA(&msgA, A, 0x0400, 0x0400, PM_REMOVE) ⇒ 1 + 0x0400（**跳过**队首的那条）
+        c6.pushImm(1);
+        c6.pushImm(0x0400u);
+        c6.pushImm(0x0400u);
+        c6.pushMem(kHwndSlot);
+        c6.pushImm(kMsg6A);
+        c6.callRel(stubOf(m, "PeekMessageA"));
+        c6.storeEax(kRes6);
+        // 无过滤 PeekMessageA(&msgB, A, 0, 0, PM_REMOVE) ⇒ 1 + 0x0401（队首那条**没被吞**、顺序不变）
+        c6.pushImm(1);
+        c6.pushImm(0);
+        c6.pushImm(0);
+        c6.pushMem(kHwndSlot);
+        c6.pushImm(kMsg6B);
+        c6.callRel(stubOf(m, "PeekMessageA"));
+        c6.storeEax(kRes6 + 4);
+        c6.ret();
+        LIFT_CHECK(m.placeCode(kCode6b, c6.b.data(), c6.b.size(), &err));
+        LIFT_CHECK(m.prepareStack(&err));
+        m.cpu().eip = kCode6b;
+        lift::RunOptions o6;
+        o6.until_ea = kSentinel;
+        o6.max_insns = 20000;
+        const lift::RunResult r6 = m.run(o6);
+        LIFT_CHECK_EQ_U32(r6.ea, kSentinel);
+
+        auto res6 = [&](std::uint32_t off) { return m.mem().rd32(kRes6 + off); };
+        LIFT_CHECK_EQ_U32(res6(0), 1u);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kMsg6A + 4), 0x0400u);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kMsg6A + 8), 0x77u);
+        // ★ 修前的实现会先把队首那条 `peek(true)` 取走 ⇒ 这里拿到 0（队列里已经没有了）。
+        LIFT_CHECK_EQ_U32(res6(4), 1u);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kMsg6B + 4), 0x0401u);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kMsg6B + 8), 0x66u);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.cpu().windows->queueSize()), 0u);
+    }
+
+    // ---- ③ PM_NOREMOVE 只窥视：同一队列项可以被**连续两次**看到，真正取走才少一条 ----
+    g_current_case = "peek-noremove-keeps";
+    {
+        Asm c6(kCode6c);
+        c6.pushImm(0);
+        c6.pushImm(0x88u);
+        c6.pushImm(0x0403u);
+        c6.pushMem(kHwndSlot);
+        c6.callRel(stubOf(m, "PostMessageA"));
+        // 两次 PM_NOREMOVE 都要返回 1（同一项，没被第一次取走）
+        c6.pushImm(0);  // PM_NOREMOVE
+        c6.pushImm(0);
+        c6.pushImm(0);
+        c6.pushMem(kHwndSlot);
+        c6.pushImm(kMsg6A);
+        c6.callRel(stubOf(m, "PeekMessageA"));
+        c6.storeEax(kRes6);
+        c6.pushImm(0);  // PM_NOREMOVE
+        c6.pushImm(0);
+        c6.pushImm(0);
+        c6.pushMem(kHwndSlot);
+        c6.pushImm(kMsg6B);
+        c6.callRel(stubOf(m, "PeekMessageA"));
+        c6.storeEax(kRes6 + 4);
+        c6.ret();
+        LIFT_CHECK(m.placeCode(kCode6c, c6.b.data(), c6.b.size(), &err));
+        LIFT_CHECK(m.prepareStack(&err));
+        m.cpu().eip = kCode6c;
+        lift::RunOptions o6;
+        o6.until_ea = kSentinel;
+        o6.max_insns = 20000;
+        const lift::RunResult r6 = m.run(o6);
+        LIFT_CHECK_EQ_U32(r6.ea, kSentinel);
+
+        auto res6 = [&](std::uint32_t off) { return m.mem().rd32(kRes6 + off); };
+        LIFT_CHECK_EQ_U32(res6(0), 1u);
+        LIFT_CHECK_EQ_U32(res6(4), 1u);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.cpu().windows->queueSize()), 1u);  // ⛔ 没被 pop
+
+        // 第二次：PM_REMOVE 才真的取走
+        Asm c7(kCode6d);
+        c7.pushImm(1);  // PM_REMOVE
+        c7.pushImm(0);
+        c7.pushImm(0);
+        c7.pushMem(kHwndSlot);
+        c7.pushImm(kMsg6A);
+        c7.callRel(stubOf(m, "PeekMessageA"));
+        c7.storeEax(kRes6 + 8);
+        c7.ret();
+        LIFT_CHECK(m.placeCode(kCode6d, c7.b.data(), c7.b.size(), &err));
+        LIFT_CHECK(m.prepareStack(&err));
+        m.cpu().eip = kCode6d;
+        lift::RunOptions o7;
+        o7.until_ea = kSentinel;
+        o7.max_insns = 2000;
+        const lift::RunResult r7 = m.run(o7);
+        LIFT_CHECK_EQ_U32(r7.ea, kSentinel);
+        LIFT_CHECK_EQ_U32(res6(8), 1u);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kMsg6A + 4), 0x0403u);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kMsg6A + 8), 0x88u);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.cpu().windows->queueSize()), 0u);
+    }
+
+    // ---- ④ TranslateMessage：WM_KEYDOWN ⇒ WM_CHAR（wParam = 字符、lParam 沿用按键消息的位） ----
+    //
+    // 覆盖：`VK_A`（Shift / CapsLock 两种大小写来源）· `VK_RETURN` ⇒ `\r` · `WM_SYSKEYDOWN` ⇒ `WM_SYSCHAR`
+    // · **未覆盖的键**（`VK_ESCAPE`）不投字符消息（`TranslateMessage` 仍按文档返回非零）。
+    // ★ 真机泵的顺序：先 `PeekMessage(PM_REMOVE)` 把按键消息取出来，再 `TranslateMessage(&msg)`。
+    g_current_case = "translate-keydown-char";
+    {
+        auto emitKeyToChar = [&](Asm& c8, std::uint32_t key_msg, std::uint32_t vk, std::uint32_t scancode,
+                                 std::uint32_t in_ea, std::uint32_t out_ea, std::uint32_t res_off,
+                                 std::uint32_t char_msg) {
+            c8.pushImm(1u | (scancode << 16));  // lParam：repeat=1 | scancode<<16
+            c8.pushImm(vk);
+            c8.pushImm(key_msg);
+            c8.pushMem(kHwndSlot);
+            c8.callRel(stubOf(m, "PostMessageA"));
+            // PeekMessageA(&in, A, 0, 0, PM_REMOVE) ⇒ 1
+            c8.pushImm(1);
+            c8.pushImm(0);
+            c8.pushImm(0);
+            c8.pushMem(kHwndSlot);
+            c8.pushImm(in_ea);
+            c8.callRel(stubOf(m, "PeekMessageA"));
+            c8.storeEax(kRes6 + res_off);
+            // TranslateMessage(&in) ⇒ 文档：按键消息无论翻译与否都返回非零
+            c8.pushImm(in_ea);
+            c8.callRel(stubOf(m, "TranslateMessage"));
+            c8.storeEax(kRes6 + res_off + 4);
+            // PeekMessageA(&out, A, char_msg, char_msg, PM_REMOVE) ⇒ 1（只查字符消息）
+            c8.pushImm(1);
+            c8.pushImm(char_msg);
+            c8.pushImm(char_msg);
+            c8.pushMem(kHwndSlot);
+            c8.pushImm(out_ea);
+            c8.callRel(stubOf(m, "PeekMessageA"));
+            c8.storeEax(kRes6 + res_off + 8);
+        };
+
+        // Shift / CapsLock 从**已有按键状态表**读（`WindowManager::setKeyDown` —— 与 GetAsyncKeyState 同源）
+        m.cpu().windows->setKeyDown(0x10u, false);  // VK_SHIFT
+        m.cpu().windows->setKeyDown(0x14u, false);  // VK_CAPITAL
+
+        Asm c8(kCode6e);
+        emitKeyToChar(c8, 0x0100u, 0x41u, 0x1Eu, kMsg6A, kMsg6B, 0, 0x0102u);          // VK_A ⇒ 'a'
+        emitKeyToChar(c8, 0x0100u, 0x0Du, 0x1Cu, kMsg6C, kMsg6D, 12, 0x0102u);         // VK_RETURN ⇒ '\r'
+        emitKeyToChar(c8, 0x0104u, 0x41u, 0x1Eu, kMsg6E, kMsg6F, 24, 0x0106u);         // WM_SYSKEYDOWN ⇒ WM_SYSCHAR
+        // 未覆盖的键（VK_ESCAPE）：TranslateMessage 返回非零，但**不投** WM_CHAR
+        c8.pushImm(1u | (0x01u << 16));
+        c8.pushImm(0x1Bu);
+        c8.pushImm(0x0100u);
+        c8.pushMem(kHwndSlot);
+        c8.callRel(stubOf(m, "PostMessageA"));
+        c8.pushImm(1);
+        c8.pushImm(0);
+        c8.pushImm(0);
+        c8.pushMem(kHwndSlot);
+        c8.pushImm(kMsg6A);
+        c8.callRel(stubOf(m, "PeekMessageA"));  // 取走 ESC 的 keydown（结果不重要）
+        c8.pushImm(kMsg6A);
+        c8.callRel(stubOf(m, "TranslateMessage"));
+        c8.storeEax(kRes6 + 36);
+        c8.pushImm(1);  // PM_REMOVE：队列里应**没有** WM_CHAR ⇒ 0
+        c8.pushImm(0);
+        c8.pushImm(0);
+        c8.pushMem(kHwndSlot);
+        c8.pushImm(kMsg6A);
+        c8.callRel(stubOf(m, "PeekMessageA"));
+        c8.storeEax(kRes6 + 40);
+        c8.ret();
+        LIFT_CHECK(m.placeCode(kCode6e, c8.b.data(), c8.b.size(), &err));
+        LIFT_CHECK(m.prepareStack(&err));
+        m.cpu().eip = kCode6e;
+        lift::RunOptions o8;
+        o8.until_ea = kSentinel;
+        o8.max_insns = 20000;
+        const lift::RunResult r8 = m.run(o8);
+        LIFT_CHECK_EQ_U32(r8.ea, kSentinel);
+
+        auto res6 = [&](std::uint32_t off) { return m.mem().rd32(kRes6 + off); };
+        // VK_A ⇒ 'a'
+        LIFT_CHECK_EQ_U32(res6(0), 1u);
+        LIFT_CHECK_EQ_U32(res6(4), 1u);
+        LIFT_CHECK_EQ_U32(res6(8), 1u);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kMsg6B + 0), hwnd);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kMsg6B + 4), 0x0102u);  // WM_CHAR
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kMsg6B + 8), 0x61u);    // 'a'
+        // lParam：重复计数 / scancode 位沿用按键消息（0x001E0001）
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kMsg6B + 12), 0x001E0001u);
+
+        // VK_RETURN ⇒ '\r'
+        LIFT_CHECK_EQ_U32(res6(12), 1u);
+        LIFT_CHECK_EQ_U32(res6(16), 1u);
+        LIFT_CHECK_EQ_U32(res6(20), 1u);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kMsg6D + 4), 0x0102u);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kMsg6D + 8), 0x0Du);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kMsg6D + 12), 0x001C0001u);
+
+        // WM_SYSKEYDOWN ⇒ WM_SYSCHAR（同一张表、同一个字符）
+        LIFT_CHECK_EQ_U32(res6(24), 1u);
+        LIFT_CHECK_EQ_U32(res6(28), 1u);
+        LIFT_CHECK_EQ_U32(res6(32), 1u);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kMsg6F + 4), 0x0106u);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kMsg6F + 8), 0x61u);
+
+        // 未覆盖的键：不投 WM_CHAR（保持修前的"没有字符消息"行为），但返回值仍按文档非零
+        LIFT_CHECK_EQ_U32(res6(36), 1u);
+        LIFT_CHECK_EQ_U32(res6(40), 0u);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.cpu().windows->queueSize()), 0u);
+
+        // ★ 每段代码的 `callRel` 位移是**相对装载地址**的 ⇒ 同一份字节搬到另一个 EA 会指向别的桩
+        //   （实测：搬到 +0x400 之后 call 到了不存在的桩 EA ⇒ decode-error）。每个槽都按自己的 base 重编。
+        auto buildOneKeyAsm = [&](std::uint32_t base) {
+            Asm a(base);
+            emitKeyToChar(a, 0x0100u, 0x41u, 0x1Eu, kMsg6A, kMsg6B, 0, 0x0102u);
+            a.ret();
+            return a;
+        };
+
+        // Shift 按下 ⇒ 'A'（状态从**同一份**按键表读；⛔ 不新开一份）
+        m.cpu().windows->setKeyDown(0x10u, true);
+        Asm cs = buildOneKeyAsm(kCode6f);
+        LIFT_CHECK(m.placeCode(kCode6f, cs.b.data(), cs.b.size(), &err));
+        LIFT_CHECK(m.prepareStack(&err));
+        m.cpu().eip = kCode6f;
+        lift::RunOptions os;
+        os.until_ea = kSentinel;
+        os.max_insns = 20000;
+        const lift::RunResult rs = m.run(os);
+        LIFT_CHECK_EQ_U32(rs.ea, kSentinel);
+        LIFT_CHECK_EQ_U32(res6(8), 1u);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kMsg6B + 8), 0x41u);  // 'A'
+        m.cpu().windows->setKeyDown(0x10u, false);
+
+        // CapsLock 按下 ⇒ 'A'；CapsLock + Shift ⇒ 'a'（XOR，与 Windows 的 WM_CHAR 一致）
+        m.cpu().windows->setKeyDown(0x14u, true);
+        Asm cg = buildOneKeyAsm(kCode6g);
+        LIFT_CHECK(m.placeCode(kCode6g, cg.b.data(), cg.b.size(), &err));
+        LIFT_CHECK(m.prepareStack(&err));
+        m.cpu().eip = kCode6g;
+        const lift::RunResult rc = m.run(os);
+        LIFT_CHECK_EQ_U32(rc.ea, kSentinel);
+        LIFT_CHECK_EQ_U32(res6(8), 1u);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kMsg6B + 8), 0x41u);  // CapsLock ⇒ 'A'
+
+        m.cpu().windows->setKeyDown(0x10u, true);
+        Asm ch = buildOneKeyAsm(kCode6h);
+        LIFT_CHECK(m.placeCode(kCode6h, ch.b.data(), ch.b.size(), &err));
+        LIFT_CHECK(m.prepareStack(&err));
+        m.cpu().eip = kCode6h;
+        const lift::RunResult rcs = m.run(os);
+        LIFT_CHECK_EQ_U32(rcs.ea, kSentinel);
+        LIFT_CHECK_EQ_U32(res6(8), 1u);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kMsg6B + 8), 0x61u);  // CapsLock + Shift ⇒ 'a'
+        m.cpu().windows->setKeyDown(0x10u, false);
+        m.cpu().windows->setKeyDown(0x14u, false);
+    }
+
     return finish("user32-window");
 }

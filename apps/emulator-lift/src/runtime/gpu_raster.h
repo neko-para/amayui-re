@@ -415,24 +415,27 @@ public:
     virtual const void* rasterTargetBase() const { return nullptr; }
     // 诊断：尚未 flush 的 draw 条数（默认 0 = 没有队列）。测试用它证明合批真的生效。
     virtual std::size_t rasterQueuedDraws() const { return 0; }
-    // ★ 请后端在**下一个** render pass 把深度清成 1.0（D3D9 `Clear(...,D3DCLEAR_ZBUFFER)` 的语义）。
+    // ★ 请后端在**下一个** render pass 把深度清成 `z`（D3D9 `Clear(...,D3DCLEAR_ZBUFFER, ..., z, ...)`
+    //   的语义；`z` 由 guest 逐位给，绝大概率是 1.0）。
     //   只由 `d3d9::clear` 在 ZBUFFER 位上调用；颜色定向的同步 / 整块上传**不许**顺带清深度
     //   （D3D9 里 Clear(TARGET) 不动深度，而"每帧清一次"会掩盖这个差异）。默认 no-op。
-    // ★ **交付契约**（`REQ-01M73P3GXW22Y467YGYPQSM571` 定案；实现 = `d3d9_gpu.cpp` 的同名 override）：
+    // ★ **交付契约**（`REQ-01M73P3GXW22Y467YGYPQSM571` 定案 + 本单两处修正；实现 = `d3d9_gpu.cpp`
+    //   的同名 override）：
     //   · 生效点 = **下一次真的录到 render pass 的 flush** 的**第一个** render pass
-    //     （`LOADOP_CLEAR`，清值恒 1.0，⛔ 不取 guest 的 z）；只录 copy pass 的 flush 不消费它；
-    //   · **一次 arm 只清一次**；一帧内多次 arm 合并成一次（⇒ "先画后清 / 一帧多次 Clear(Z)" 是
-    //     **已知窄窗**：中间那些 draw 的深度写不会被第二次清。根治要把清深度做成有序屏障 = 另一单）；
-    //   · ⛔ 调用方**必须先 flush 队列再 arm**（样板 = `d3d9_gpu.cpp::rasterPrepare`：先 flush/回读
-    //     旧 target，再建新 target 并 arm）。`d3d9::clear` 现在把 arm 放在它自己的 flush **之前** ⇒
-    //     队列非空时就是**窄窗**（"先画后清"）。本场景**已命中一次**（实测第一帧 `arm=clear seq=0
-    //     queue=1`）：队列里那条是**不带批号**的 sprite，而 sprite 路径的 `depth_test/depth_write`
-    //     都是 false（`d3dx9_sprite.cpp` 的 `gs_state`）⇒ 无深度后果。根治 = 把清深度做成队列里的
-    //     有序屏障（另一单）；⛔ 在那之前别在"队列非空时 arm"的路径上加**写深度**的批。
-    //   · 不绑 target 身份：换 target 由 `rasterPrepare` 自己 arm（最坏多清一次，无害）；
+    //     （`LOADOP_CLEAR`，清值 = **调用方给的 z**，逐位不丢精度）；只录 copy pass 的 flush 不消费它；
+    //   · **一次 arm 只清一次**；一帧内多次 arm 合并成一次；
+    //   · ★ `z` 的接受域 = [0,1]（含端点；NaN / ±inf 越界）。越界**不由后端处理**：调用方
+    //     （`d3d9::clear`）在 arm 之前就显式拒绝 + 记账（⛔ 不 clamp、⛔ 不静默丢弃），后端收到的
+    //     z 一定在域内 ⇒ 它只负责**逐位**把 z 交到 `SDL_GPUDepthStencilTargetInfo::clear_depth`。
+    //   · ★ **调用方必须先 flush 队列再 arm**：`d3d9::clear` 已经把 arm 放在它自己的 flush **之后**
+    //     （`REQ-01M73XEB594ZY8TA76S0EX4512`：先 arm 后 flush 会让 CLEAR 落到"含更早 draw 的
+    //     pass 的开头"）。样板同样见 `d3d9_gpu.cpp::rasterPrepare`（先 flush/回读旧 target 再 arm）。
+    //     ⛔ 队列非空时 arm = 让一条 CLEAR 覆盖掉它之前的深度写；这条约定由
+    //     `tests/gpu_batch.cpp` 的 `gpu-batch/depth-clear-order` 守着（MockRaster 断言 arm 时队列为空）。
+    //   · 不绑 target 身份：换 target 由 `rasterPrepare` 自己 arm（新建 depth 时清 1.0，最坏多清一次，无害）；
     //   · ⛔ **转发壳**（`present_sdl.cpp::SdlWindow`）必须显式转发 —— 这一条曾经整条漏掉，症状是
     //     "GPU 光栅化臂整层丢 Live2D 角色而账上一切正常"（静默、不改像素、所有既有测试全绿）。
-    virtual void rasterRequestDepthClear() {}
+    virtual void rasterRequestDepthClear(float z) { (void)z; }
     // 设备 / target 销毁前丢掉队列与镜像（⛔ 不要往即将释放的 guest 像素回读）。默认 no-op。
     virtual void rasterDiscardTarget() {}
 

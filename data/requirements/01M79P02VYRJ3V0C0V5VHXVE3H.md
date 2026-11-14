@@ -2,8 +2,10 @@
 
 - id: REQ-01M79P02VYRJ3V0C0V5VHXVE3H
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/d3d9_pipeline.cpp#d3d9p/vertex-decl-draw
+- done_reason: 声明式 Draw（Live2D 路）现在有像素级守卫：d3d9p/vertex-decl-draw —— 两条 stream + 2x2 四色纹理的全幅 quad，断言 Draw OK + countNonBackground()>=4000（像素真的出现，不是只看返回值）+ 四角 texel 精确 + vertex_decl != 0。单里写的 fallback_draws==0 在本线不存在（CPU 光栅已删）⇒ 用'像素真的出现'等价替代并写进用例头。修前红：在旧 drawPrecheck 行为下 15 failures（0x8876086C=INVALIDCALL + 像素全 0，日志留档）；变异（stream1 偏移 +1）⇒ 四角 texel 断言红。用例在 --gpu 臂（无 GPU 的机器 SKIP 77）。
 - tags: [emulator-lift, d3d9, guard, live2d]
 
 ## 缺口

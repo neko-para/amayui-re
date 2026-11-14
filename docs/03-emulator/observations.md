@@ -712,3 +712,153 @@
   原始日志 `.tmp/cursor/run-warp-{on,off}.log`。
 - **没测到的**：未聚焦时（光标会落到别的 app 上）与多显示器 / 非全屏窗口（`win.x/win.y ≠ 0`）的观感没实测；
   macOS 分支本机没有。
+
+### OBS-20261114-09 · alpha test 拒批的命中面（600 帧 boot→TITLE = 0 次）与 `sn0000.graph` 的首次点击丢帧
+
+- **口径**：Windows x64 / RelWithDebInfo / HEAD `aeed0d7` 之后的当前构建 / 2026-11-14 ·
+  `--present headless --native-overrides all --skip-logo --audio off --log-level info --log-cat d3d9` ·
+  `--game-dir ../../links/install` · 每次 run 用空的 `--appdata`。
+- **读数（alpha test 命中面）**：`--max-frames 600` 跑 boot→TITLE，
+  `GPU 不支持 alpha test` **0 次命中**；`unsupported :` 只有 `…0800（bit11=MIPFILTER）`（bit30 不出现）。
+  ⇒ 至少在这 600 帧里，**没有任何一批被 alpha test 拒**；这个能力缺口在 boot→TITLE 段**没有可观测后果**。
+  ⚠ 但 ADV / 游戏内没有量到（见下条：这次 ADV 跑没走出 GAMESTART）⇒ ⛔ 不许把这条读成"游戏里从不会踩到"。
+- **读数（`sn0000.graph` 的首帧点击丢失，`REQ-01M78A0V0X1X1PCK7MP71Q1J81` 的同一症状）**：
+  `--present headless --interaction-graph ../../graphs/sn0000.graph --max-frames 1200 --time-limit 200` ⇒ **exit 5**：
+  ```text
+  stop      : interaction-failed @ eip=004CADE2
+  detail    : interaction: timeout · 节点 `step3` 等 `script GAMESTART` 超过 5000 ms
+              （frame 8..224，insn 158584410..206610013，guest_ms 15858..20859）；窗口内采样 216（累计 224）；
+              条件在窗口内一次都没成立；samples=224 changes=223 last_frame_hash=0xB658DA99AC8E9FDF at frame=224
+  ```
+  ⇒ **一次就复现**（原单记的是 3 次手工 1 次）。差别只在档位：这里是 `--present headless` + 空 appdata，
+  原单是 window/ctest。⚠ 这也让"ADV 段有没有 alpha test 批"这个问题**这次没答上**（画面停在 TITLE→GAMESTART 之间）。
+- **复现**（`apps/emulator-lift` 下）：
+  ```powershell
+  # ① alpha test 命中面（应输出 0）
+  ./out/emulator-lift.exe --appdata ../../.tmp/alphatest/appdata --game-dir ../../links/install `
+    --present headless --native-overrides all --skip-logo --max-frames 600 `
+    --log-level info --log-cat d3d9 2>&1 | Tee-Object ../../.tmp/alphatest/replay.log
+  Select-String -Path ../../.tmp/alphatest/replay.log -Pattern 'GPU 不支持 alpha test'
+  # ② 首帧点击丢失（应 exit 5 + 上面那段 detail）
+  ./out/emulator-lift.exe --appdata ../../.tmp/alphatest/appdata2 --game-dir ../../links/install `
+    --present headless --native-overrides all --skip-logo --audio off `
+    --interaction-graph ../../graphs/sn0000.graph --max-frames 1200 --time-limit 200 `
+    --log-level info --log-cat d3d9
+  ```
+  原始日志 `.tmp/alphatest/replay.log` / `.tmp/alphatest/adv.log`。
+
+### OBS-20261114-10 · 解释器每条指令的成本（微基准）＋ "25 ns/条" 这个数的重新解释
+
+- **口径**：Windows x64 / RelWithDebInfo / `apps/emulator-lift` / 2026-11-14 · 新增 `tests/insn_cost.cpp`
+  （CTest `insn-cost`，顶层 pure；附加臂用 `LIFT_INSN_COST_EXTRA=1` 门控）。
+  ⚠ **本机当时有后台游戏在跑**：同一二进制的整轮 `alu-loop` 在 45.5–57.4 ns/条 之间摆，校准 `imul` 链
+  ⇒ 有效 **2.26 GHz**（标称 3.2）、`steady_clock::now()` = **27–29 ns/次**（`dispatch-tax` 历史记录 4.8–10）
+  ⇒ **下面的绝对 ns 偏大 1.5–2×**，只可用于"形状之间的比值"与"量级判定"。
+- **读数**（每遍 1e7 条、3 遍轮转、中位 / 极差）：
+
+  | 形状 | ns/条 | 极差 | ns/轮 |
+  |---|---:|---|---:|
+  | `alu-loop`（4 条/块，无访存无调用） | **55.74** | [35.86, 56.97] | 222.97 |
+  | `mem-loop`（+ 每轮 1 读 1 写） | **63.51** | [42.83, 65.63] | 254.06 |
+  | `call-loop`（+ 每轮 1 对 call/ret，跨 3 块） | **99.69** | [69.65, 99.91] | 498.43 |
+  | `x87-loop`（+ 每轮 1 条 x87） | **64.20** | [44.96, 68.27] | 321.00 |
+  | `shim-tick`（+ 每轮 1 次最轻 shim） | **66.89** | [43.57, 69.86] | 668.86 |
+
+  两点拟合（`alu` 4 条/块 vs `alu-wide` 10 条/块）：**每块 b = 107.0 ns、每条 c = 29.0 ns**；
+  残差单价：访存 **+15.6 ns/次**、call+ret **+32.5 ns/对**、x87 **+23.0 ns/条**、shim **+165–208 ns/次**。
+- **真实负载对照**（`--present headless --skip-logo --audio off --max-frames 600`，同一构建）：
+  `insns = 1,012,065,649`、块执行 **156,820,530** ⇒ **k = 6.45 条/块**；整进程 **70.7 / 81.4 ns/条**；
+  另跑一遍 `--profile`（`insns` 逐字相同）：guest-block **43.454 s = 42.94 ns/条**、shim（Present+API）21.924 s、
+  其余（块间派发 / 宿主 / 进程）32.78 s。模型外推到 k=6.45 ⇒ 45.6 ns/条，与实测 guest-block 42.94 **差 ~6%**。
+- **★ "25 ns/条" 的口径更正**：`interp` 桶按定义 = **每次 dispatcher 迭代里剩下的全部、不含块执行**
+  （`runtime/window_profile.h`）⇒ `interp / insns = (每块记账) / k`，**它不是"每条指令的派发底价"**。
+  `OBS-20261114-07` 的 FELLOW 窗（`interp 5,878.3 ms` / 236.7M 条 / **16,762,215 次迭代** ⇒ k = **14.1**）
+  应读成 **每块 interp ≈ 350 ns**，而不是"每条 25 ns"。装窗口 profiler 时同机实测每块 interp = **250.3 ns**；
+  **装 / 不装仪器同循环 480 vs 223 ns/块（+257 ns/块）** ⇒ 窗口 profiler 自己的税也是每块量级。
+- **由此得到的成本形状**：解释器 ≈ **每块 ~107 ns + 每条 ~29 ns**（未做仪器时、本机偏大 1.5–2×）。
+  真实负载的块间开销实测 **209 ns/块**（是本文件 b 的 2×），最可能是**代码足迹**（本文件永远命中同一个块）。
+- **未解释**：整进程墙钟里 **56% 不在 guest 指令上**（shim 21.9 s + 其余 32.8 s）；真实指令混合**没有 opcode 直方图**
+  ⇒ ⛔ 给不出"派发 / 解码 / flags / 访存"的百分比分解。**要百分比就得补直方图**，不是靠这五个形状推。
+- **复现**：`ctest --test-dir out -R insn-cost --output-on-failure`（默认 9.6 s）；
+  `LIFT_INSN_COST_EXTRA=1 ./out/tests/lift-insn-cost.exe`（附加臂）；完整报告 `.tmp/perf/insn-cost-report.md`。
+  macOS 臂（未跑）：`cmake --preset macos-arm64 && ctest --test-dir out -R insn-cost`。
+
+### OBS-20261114-11 · `.text` 能不能被静态 lift：间接控制流普查 + 按执行指令数加权的可 lift 覆盖率
+
+- **口径**：语料 `corpus/disasm/files/AGE.EXE__dumped.sectfix.EXE.lst`（只读）· 读数日志
+  `.tmp/perf/run-{fp,lp}-top4000.log`（同一构建 / `--profile-top 4000`）· 2026-11-14 · 全部数字由脚本产出
+  （`.tmp/perf/lift-census.mjs` → `lift-report.mjs` / `coverage-top4000.mjs`；⚠ 脚本在 `.tmp/`，不入库）。
+- **规模**：`.text` VirtualSize **1,163,264 B**；`proc near` **3,810** + IDA **折叠函数 1,397**（168,727 B，正文不在语料）
+  ⇒ 函数入口 **5,207**；指令字节 947,271（81.4%）；函数大小 min 3 / **median 96 B** / p90 497 / max 14,552。
+- **间接控制流（lift 的生死判据）**：
+
+  | 形态 | 站点 | 能否 lift |
+  |---|---:|---|
+  | `call reg` | **3,028** | 能 —— 机械 lift 即"间接调用"，被调方按 `EA → lifted 函数指针` 查表（dynarec 常规做法） |
+  | `call dword ptr [mem]` | 15 | 能（同一套查表） |
+  | `jmp reg` / `jmp dword ptr [mem]` | **26 + 6 = 32** | **不能静态解析**（真·函数指针跳转） |
+  | 跳转表 | **62 张 / 663 case**（表长中位 8） | 能；`disasm --cases` 与语料 **41/41** 逐张对账一致 |
+
+  ⇒ 真正"透镜不可靠"的只有 **32 个站点 / 31 个函数 / 788 字节 = 指令字节的 0.08%**，且这 31 个函数**一次都没进过任何 profile 表**。
+  尾跳：`jmp <函数入口>` **1,671** 个（其中 521 指向折叠函数）；跳函数中段 113 个；**目标不可解析的 jmp/call = 0**（全部由 PE rel32 算出，不靠符号名）。
+- **按执行指令数加权的覆盖率**（分母 = 日志自己的 `total weight`，即"块内执行过的指令数"之和；
+  ⛔ 不用 `insns` 当分母——它与 `total weight` 的差是 override/SMC 造成的，override 那部分根本不在块表里）：
+
+  | 场景（日志） | A（直路+直接调用） | B（有界 switch） | C（间接调用） | D（不可解析） | E（语料无正文） | **A+B** | **A+B+C** |
+  |---|---:|---:|---:|---:|---:|---:|---:|
+  | fellow/save（`run-fp-top4000.log`，total weight 462,531,915） | 51.930% | 11.958% | 32.235% | 0.002% | 3.874% | **63.889%** | **96.124%** |
+  | load（`run-lp-top4000.log`，total weight 160,536,535） | 56.435% | 8.489% | 28.485% | 0.005% | 6.586% | **64.924%** | **93.409%** |
+
+  ⇒ 该两个场景里 **lift : fallback ≈ 14–25 : 1**；`ΔC = 28.5–32.2 pp` ⇒ **只做 A+B 的省事方案不成立**（63.9% < 90%）。
+- **旧读数的区间被收窄**（不是被推翻）：top-40 口径给的是 `A+B+C = 84.5%` + 表外未知 14.8% ⇒ 区间 **[84.5%, 99.3%]**；
+  本轮把表外权重收进来后落在 **96.1%**，在区间内。表外未知桶以 **A 为主**（A 64.7% / C 12.8% / E 20.6% / B 2.0% / D 0.01%）。
+- **未测 / 缺口**：① 只有这两段采样（`sn0000-save-profile` 与 load 图），**ADV/战斗/立绘等场景没量**；
+  ② **E 类 3.9–6.6% 权重是"语料里没有正文"（1,397 个折叠函数）** —— 不是"lift 做不到"，而是"要用我们自己的解码器补语料"；
+  ③ 块级灵敏度（三份日志 top-40 热块里含不可解析间接转移的权重 = **0**）说明 D 类也没进过热点。
+- **复现**：`--profile-top 4000` 重跑（`--present window --present-hidden --native-overrides all --skip-logo --audio off`
+  + `graphs/sn0000-save-profile.graph` 或 `.tmp/profile/load.graph`），再 `node .tmp/perf/coverage-top4000.mjs`
+  （load 场景用 `coverage-lp.mjs`，只换了日志与输出路径）。完整报告 `.tmp/perf/{lift-census,coverage-top4000,coverage-lp-top4000}.md`。
+
+### OBS-20261114-12 · 单块 IR spike：手写 `.ll` + `clang -O2` 与解释器的逐位差分，以及速度比
+
+- **口径**：Windows x64 / `C:\Program Files\LLVM\bin\clang.exe`（22.1.2，与 CMakeCache 的 clang-cl/lld-link 同目录）· 2026-11-14 ·
+  两块从真实热点里挑的块（`--profile-top 4000` 表）：**A = `0x436D81`**（`sub_436D50+0x31`，9 条 CRC 内层自环，
+  hits 4,570,461 / w 41,134,149 = 8.89%）、**B = `0x4A44D4`**（`sub_4A42C0+0x214`，16 条，末条 `call sub_49EE60`，
+  hits 921,600 / w 14,745,600 = 3.19%）。产物与脚本都在 `.tmp/irspike/`（不入库）。
+- **差分（判决点）**：同一份初始状态喂「解释器（`Machine` + `placeCode`，`max_insns` 精确停在块边界）」与「lifted 机器码」，
+  比较 **8 个 GPR + EFLAGS 的 6 位 + 64 KiB 内存 + 出口 EIP**：块 A **2000 组**、块 B **1200 组**、块 A 长跑 5000 轮
+  ⇒ **不一致 0**（含 `edx=0/0x80000000` 的借位/溢出边界、`jns` 两个出口、非对齐访存）。
+  另验：lifted 码读**未提交页**走既有 VEH ⇒ `_Exit(3)`，与解释器一致（**无 landing pad**）。
+- **速度（同进程、同块、4.45 GHz、3 遍中位 + 每遍内比值）**：
+
+  | | ns/块 | ns/条 | 倍数 |
+  |---|---:|---:|---:|
+  | 解释器 `0x436D81`（9 条） | 218.0 | 24.22 | 1× |
+  | lifted A，一块一次（含 call + 状态往返） | 3.77 | 0.419 | **57×** |
+  | lifted A，自环融成一个 IR 循环 | 1.85 | 0.206 | **118×** |
+  | lifted B（16 条，含 1 个直接 call） | 5.20 | 0.325 | 110×（k=16 模型折算，无法同进程直测解释器） |
+
+  拆解：**纯执行 1.85 ns/块 + 块边界 1.92 ns/块**（call/ret + 9 load + 9 store）；8.2 周期/轮 = 该 CRC 依赖链的 CPU 下界
+  ⇒ 自环那档已经**跑满**。`OBS-20261114-10` 的 ~209 ns/块是**解释器的性质**，不是 lift 的成本。
+  ⚠ 用 `OBS-20261114-10` 的 b/c 模型折算会得 k=1 → 325×、k=9 → 97.6×，**比同进程实测高 1.7×**（那是更慢机器状态的读数）
+  ⇒ 报结论时**取同进程实测的 57–118×**。
+- **工程形态**：IR **零新 runtime 原语**（一个 guest 基址指针 + 9×i32 状态 + 纯 IR flags：`ctpop` / `sadd|ssub.with.overflow` /
+  `lshr` / `icmp`）。要新写的是**lift 引擎**（EA→函数派发 / native 代码缓存与 SMC 失效 / 块边界的定时器与输入检查 /
+  call-ret 与解释器·shim 的互操作）。体量：`blockA.ll` 305 行、`blockB.ll` 163 行 ⇒ 平均 **13.3 / 6.7 条 IR 行每条 guest 指令**；
+  naive 全发 flags 会被 LLVM 的 DCE 掉，**不需要**额外做 liveness。
+- **两条必须写进 lowering 约定的坑**：① **EA 必须零扩展到 i64 再接 GEP**（`i32` 下标会符号扩展 ⇒ EA ≥ 0x80000000 全错）；
+  ② `fs:`/`gs:` 段覆盖要把 `fs_base` 作为参数传进来。
+- **未测**：arm64 实跑、SMC、跨块 CFG（只做了单块）、x87（完全没碰）、真实负载整段墙钟 A/B。
+  **唯一能推翻结论的量**：真实块间派发如果是 **20–50 ns/块**（而不是本 spike 的 1.9 ns），那 57× 会掉到个位数。
+### OBS-20261114-13 · 三处"CPU 兜底路径"的现行命中面：两个场景里 bit21/22/23 都是 0
+
+- **口径**：Windows x64 / RelWithDebInfo / 2026-11-14 · `--present window --present-hidden --native-overrides all
+  --skip-logo --audio off --game-dir ../../links/install` · `--log-level info --log-cat d3d9` · 每次 run 用
+  `.tmp/appdata` 的独立副本 · 图 = `graphs/sn0000-save-profile.graph`（TITLE→GAMESTART→ADV→FELLOW→SAVE，**exit 5**：
+  后段 `step18 no-sample`，与本节无关）与 `.tmp/profile/load.graph`（TITLE→LoadData→读档，exit 0）。
+- **读数**：两次 run 的 `unsupported :` 行**都只有 bit11**：
+  `0x…0800（bit11=MIPFILTER）` ⇒ **bit21（透视 invw≠1）/ bit22（mip 缩小）/ bit23（GPU 后端失败）在两段里一次都没置位**。
+- **口径说明**：bit11 是**已知并接受**的近似（`MIPFILTER` 的 `max_lod` 处理），不在本条的三个关注位里；
+  ⛔ 不要把它算成"命中兜底路径"。
+- **未测**：OPTION 界面与战斗场景（仓库里**没有**对应交互图）；fp 那次 `exit 5` 之前只走到 SAVE 之后。
+- **复现**：上面两条命令 + `Select-String -Pattern 'unsupported :'`；原始日志 `.tmp/lift-tickets/fallback-census-{fp,lp}.log`。

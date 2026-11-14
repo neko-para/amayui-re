@@ -8,6 +8,22 @@
 - severity: S2
 - tags: [emulator-lift d3d9 texture alpha artifact]
 
+## 2026-11-14 取证工具已随 CPU 光栅退休（本单仍 open）
+
+正文里的取证链有两处**已经不存在**，⛔ 不要再照抄：
+- `LIFT_MIPDBG=1` 与 `rasterTriangle` 的取点诊断 —— CPU 光栅一族已删（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`），
+  今天没有任何"在三角形那一刻取 p0/p1/p2"的钩子；
+- `.tmp/d3d9/a5-artifact.md` / `art-*.log` 是本地临时件（`.tmp` 不入库，可能已丢）。
+
+**现行可用的取证面**（都在 GPU 侧）：
+1. `--present-screenshot <bmp> --present-screenshot-frame <N>` 在 TITLE 落一张 1280×720；
+2. `--log-level info --log-cat d3d9`（`[draw]` 行：`tex= / stage0= / blend= / samp= / cw=` 与 `gpu=` 计数）；
+3. `unsupported :` 行（bit11 = MIPFILTER 是已知并接受的近似）；
+4. `--overlay`（画面上叠 `script` 身份与 worst 帧）用于定位"这一帧是不是 TITLE 稳态"。
+
+⇒ 下一步取证必须是：**在 GPU-only 的今天重截一张图 + 抓那一帧的 `[draw]` 列表**，再判断条纹是"页内容 1:1 细点栅格"
+还是"混合/alpha 的产物"。⛔ 不要把旧的 CPU 侧结论（`0.89–1.0 texel/px`、`LIFT_NO_MIP` A/B）当成今天仍然成立 ——
+它们证明的是"与 mip 无关"，那个结论仍然有效，但**取证手段**已失效。
 ## 现象（2026-11-11 更新：**矩形块已修，条纹仍在**）
 原现象 = frame 2/8 上有 ① 屏幕中部的矩形贴图块 ② 右侧与左下的逐行条纹/散点噪声 ③ 角色正确。
 

@@ -255,3 +255,105 @@
 - **为什么第一次成功 warp 后读回一次**：Windows 的 RDP / 锁屏等场景 `SetCursorPos` 可能"成功但没动"，
   返回值得不到真相 ⇒ 第一次成功之后 `hostCursorQueryScreen` 读回，与目标差 >1 px 只 warn 一行
   （含目标 / 实际 / scale / off / window 位置），此后不再查。⛔ 不自动纠正 —— 那会把映射 bug 掩盖成"能跑"。
+
+### L3-tls-01 · SoftFloat 的消费方必须**强制前置** `platform.h`（漏了是**静默**错）
+- **取舍**：`third_party/berkeley-softfloat/CMakeLists.txt` 给**消费者**挂
+  `target_compile_options(berkeley-softfloat INTERFACE /FIplatform.h)`（非 MSVC 臂 `-include platform.h`；
+  用**相对名**，消费者在别的目录编译）。⛔ 不动 vendored `.h` / `.c` 一个字节，⛔ 不把 `THREAD_LOCAL` 退回空。
+- **漏了会怎样（这是它必须被守住的原因）**：`source/include/softfloat.h:53-54`（与
+  `source/softfloat_state.c:43-44`）有 `#ifndef THREAD_LOCAL ⇒ #define THREAD_LOCAL`（**空**）的兜底 ⇒
+  任何 TU 若**先** include `softfloat.h`、没先 include `platform.h`，`extern uint_fast8_t
+  softfloat_exceptionFlags;` 被当成**普通静态变量**：**编译 + 链接都过**，运行时读的却是 TLS **模板**
+  （库写的是**每线程 TLS 块**）⇒ 库置的位在消费方**看不见**，读到的是垃圾/陈旧字节。
+  复审在 macOS 上实测读到 `flags=248`（`REQ-01M773EFSYYE97YKEA6TQEQ53J` 正文）。今天没有这样的 TU，
+  但"下一处 include"就会中 —— 没有编译错误、没有链接错误、没有崩溃。
+- **实测读数**（2026-11-14，`windows-x64` 预设 = Ninja + clang-cl 22.1.2 + RelWithDebInfo；
+  `cmake --build --preset windows-x64` + `ctest --test-dir out -R "softfloat|fpu" --output-on-failure`）：
+  - **无**前置 include（本次改动之前 / 把 `INTERFACE` 改成 `PRIVATE`）：链接**成功**；
+    `softfloat_raiseFlags(softfloat_flag_inexact)` 之后消费方读 `flags=0`（期望 1）；
+    两条宿主线程各写 `0xA1` / `0x5C`，barrier 之后**两边都读到 0x5C**，且
+    `&softfloat_exceptionFlags` **同一个地址** `0x00007FF6F5668003`；`softfloat-tls` 11 条断言 7 条红。
+  - **有** `/FIplatform.h`：任何 include 之前就看得见 `THREAD_LOCAL = __declspec(thread)` 与
+    `LITTLEENDIAN`；`softfloat_raiseFlags` 置的位在本 TU 读得到（`via-library=1`）；两条线程分别读回
+    `0xA1` / `0x5C`、地址 `…92C3` / `…8FA3` **不同**；11 条断言 0 条红。
+- **备选**：① 在 `softfloat.h` 的空兜底处改 `#error "include platform.h before softfloat.h"`（编译期就炸）。
+  **没选**：要动 vendored 字节（本仓纪律：`third_party/**` 只允许改 `CMakeLists.txt`），而且它会**惩罚**
+  所有现存 TU 的 include 顺序、把"排序约定"变成编译错误 —— 前置 include 是同一判据的**零侵入**版本。
+  ② 靠 code review / 约定"每个 TU 先 include `platform.h`"。**没选**：那是"没有守卫的清单 = 一份 Markdown"，
+  漏了是**静默**的（编译、链接、单线程自检全绿）。
+- **怎么被守住**：CTest `softfloat-tls`（`tests/softfloat_tls.cpp`，顶层无条件注册 ⇒ pure 档）——
+  它的**第一条 include 就是 `<softfloat.h>`**、⛔ 不 include `platform.h`（= 正是要守的那条路径），
+  断言三件：① 任何 include 之前 `THREAD_LOCAL` / `LITTLEENDIAN` 已在场；② 库写的位本 TU 读得到；
+  ③ 两条线程各写不同值、barrier 之后各读各的、且两个 `&` 不同。变异 = `INTERFACE` → `PRIVATE`
+  （`tools/mutate-check.mjs` 的 `ctest:softfloat-tls`）⇒ 当场红。另有 CTest `fpu-thread-flags` 守
+  "`THREAD_LOCAL` 本身必须是真的 TLS"（把 `platform.h` 的三档定义改回空 ⇒ 红）。
+- **重写必须保持不变**：① vendored 字节不动（要么 vendored，要么改 `CMakeLists.txt`）；
+  ② **所有** softfloat 消费者都拿到前置 include（含新加的测试 TU 与将来任何 `-include` 之外的新目标）；
+  ③ 前置 include 用**相对名**（绝对路径会把构建绑死在某一台机器上）；
+  ④ 带 `<softfloat.h>` 的 TU 一律先看见 `platform.h` 的 `LITTLEENDIAN`（它参与 `extFloat80_t` 的字段顺序，
+  漏了不只是 TLS 问题）。
+
+### L3-seh-01 · 非连续异常 + `disposition=1`：**响亮停**，不建模"改抛后的第二次派发"
+- **取舍**：`Seh::step` 在 `Level::Kind::Raise` 上读到 `disposition == ExceptionContinueExecution` 且
+  **原 record** 的 `ExceptionFlags & EXCEPTION_NONCONTINUABLE` ⇒ **不装载 CONTEXT**，
+  直接停成独立停因 `StopReason::NonContinuableException`（`machine.cpp` 的 `pumpSeh`），detail 逐字点名
+  `EXCEPTION_NONCONTINUABLE_EXCEPTION / 0xC0000025`、原 record 的 `code/flags`、以及"CONTEXT 有没有被
+  handler 改（改了几个字）"（`REQ-01M72GAA7CVKBPP9QRT0PRPBTM`）。
+- **为什么不能照字面"装载 CONTEXT"**：`CONTEXT` 是**抛出瞬间**的快照（`Eip` = `call RaiseException` 的
+  下一条）⇒ 装载它 = 从 raise 的下一条接着跑 = **异常被静默丢弃**。本单的现场就是这样一路 `leave;ret`
+  落进 `_Xout_of_range` 尾部 padding 的 `int3`，摘要写成误导性的"软件中断（M1 不建模中断表）"。
+  ★ 判据是**旗标**不是"CONTEXT 改没改"：本机 x86-32 原生探针（2026-11-14）里，`flags=0x1` 且 filter
+  **改了** CONTEXT，系统**照样**改抛 0xC0000025；`flags=0x0` 才允许"改 CONTEXT + 返回 1"继续跑。
+  这同时解释了 MSVC 的 `catch` 为什么走 `_JumpToContinuation`（0x4E7007，**不返回**）而不是返回 1。
+- **备选**：① 照字面装载 CONTEXT（= 修前，缺陷单的病因）；② **建模改抛**：造一条
+  `code=0xC0000025 / flags=1 / ExceptionRecord→原 record / nargs=0` 的新 record，再从 `fs:[0]` 链头
+  走一遍完整派发；③ 只记一行日志然后继续往下找 handler。
+  **没选** ①：静默丢异常，且把"没人接"伪装成"跑到别处崩了"。**没选** ③：`disposition=1` 的语义
+  是"接管了"，继续找等于把**已接管**的异常再派发一次（guest 可能已经拷过 catch 对象 / 改过状态）。
+  **没选** ②（本单）：它要把状态机推进到"宿主发起的新 raise"（第二层 record、`ExceptionAddress`、
+  `fs:[0]` 不变、以及 guest 那侧 `__CxxFrameHandler3` 对**非 C++ 异常**的 `__except` 搜索 / 可能的
+  `_UnwindNestedFrames`）—— 那是**另一条**判据面（判据 2 的观测点：`0x4137B7` 附近 / `_CallCatchBlock2`），
+  而且今天**没有可复现的现场**（触发路径已被字体单修掉）⇒ 先修判据 1，把它单列。
+- **重写必须保持不变**：① 任何 `NONCONTINUABLE + disposition=1` 的路径都**不许**落到"装载 CONTEXT
+  继续跑"（判据是旗标，⛔ 不要加"CONTEXT 没改才算"的补丁）；② 停因必须与"链上没人接"
+  （`unhandled-exception`）**分开**，detail 必须能指名道姓到 `0xC0000025`；③ 宿主只读 guest 登记节点的
+  `[pRN]` / `[pRN+4]`，⛔ 不写 `[pRN-4]` / `[pRN+8]` / `[pRN+0xC]`（`_JumpToContinuation` 读 `[pRN-4]`、
+  handler 读 `[pRN+8]` 的 try 状态字）—— E 组逐字守着这三个字；④ 重开"建模第二次派发"的条件 =
+  出现消费者（可复现的真机现场，或需要让 guest 的 `__except` 接住 0xC0000025）。
+
+### L3-crc-01 · CRC-32 两变体：表**从 guest 读**；`n <= 0` **接管**、`INT32_MIN` **回退**
+- **取舍**（`REQ-01M7BY4D1ZWA4HB97T8M8TVEYQ`，实现 `src/runtime/native_crc32.{h,cpp}`）：`sub_436D00`（反射，
+  表在 `this+0x400`）与 `sub_436D50`（非反射，表在 `this+0`）挂成两项**函数级** override。纯核只有一个
+  `crc32Bytes(table, buf, n, reflected)`；**两张表都从 guest 的 `[this, this+0x800)` 读**（512 个 dword），
+  实现里**一个多项式常量都没有**。`[this+0x800] != 1`（表还没建）⇒ 回退，由解释器跑 `sub_436BD0` /
+  `sub_436C60` 建表 —— ⛔ 不在 native 里"顺手建表"。
+- **为什么不硬编码多项式**（`0x4C11DB7` / `0xEDB88320`）：表是**引擎状态**，不是常量。硬编码只在"`this`
+  永远是刚建好的那两张标准表"时才对；一旦哪天有第三条路径重建表（或第三个变体出现），native 与 guest
+  就会**静默分叉**，而 CRC 分叉的症状是"存档写出去、读回来对不上"—— 没有异常、没有日志、没有断言会红。
+  读 guest 那份内存的代价是每次命中一次 1 KiB `memcpy`（payload 是 KB～MB 级 ⇒ 常数项可忽略），
+  换来的是"表怎么变都对"。
+- **为什么 `n <= 0` 是接管而不是回退**：`n <= 0` 时 guest 只做 `or eax,-1 / dec edx / js / not eax` ——
+  一个字节都不读、一个字节都不写、没有 fault 的可能 ⇒ 没有任何"只能由解释器表态"的东西；
+  回退只会白付一次整函数重放（`.lst` 0x43758A / 0x4375A6 / 0x437842 / 0x437858 四个调用点，
+  `save-confirm` 窗口实测 d50 4 刀 / d00 4 刀）。
+  ★ **但 `n == 0x80000000`（INT32_MIN）不在这条规则里**：`0x436D29 dec edx` 把它变成 `0x7FFFFFFF`
+  （SF=0）⇒ `0x436D2A js` **不跳** ⇒ guest 真的跑 2^31 次。所以实现把 `n` 先折成"循环次数"
+  （负 ⇒ 0，**除了 INT_MIN ⇒ 0x80000000**），0 才接管；INT_MIN 落到 G4（`[buf, buf+2^31)` 跨 4 GiB /
+  未提交 ⇒ 回退）。需求单正文的"`n <= 0` ⇒ 循环 0 次"在这一格上不成立，**按机器走**。
+- **备选**：① 硬编码两张标准表（快一点、少一次读）；② `n <= 0` 一律回退（最简单）；③ 连"建表"也在 native
+  里做（一次接管整段）。**没选** ①：上面那条静默分叉。**没选** ②：白付热路径上的整函数重放，且
+  "接管 0 次循环"是个**可判定**的语义（不是近似）。**没选** ③：建表 = 重新引入多项式，正是 ① 的错，
+  而且建表那两支要写 512 个 dword + 一个标志（多一类零写风险）。
+- **重写必须保持不变**：① 表**只能**从 guest 读，⛔ 不许出现多项式字面量；② `[this+0x800] == 1` 是接管
+  的**必要条件**（失败必须回退，且回退前**零写** —— 差分会把"回退前写过的标志"修回去，所以那条守卫
+  只能在 `tests/native_override.cpp` 的 `crc/decline-no-write` 里，不能靠两臂差分）；③ `n == INT_MIN`
+  ⛔ 不许当成 0（`dec/js` 的 SF 语义，`crc/int-min-declines` 钉住）；④ 两个变体**不是同一个 CRC**
+  （`"123456789"`：反射 = `0xCBF43926` = CRC-32/ISO-HDLC，非反射 = `0xFC891918` = CRC-32/BZIP2）
+  ⇒ ⛔ 不要写"两个变体应当给同一个值"的断言；⑤ 守卫 = `native-override-assets` 的 `crc/*`（解释器臂 =
+  同一 EA 的真字节 oracle）+ 变异条目（`crc >> 8` → `crc << 8`）。
+
+### L3-sprite-01 · sprite 采样自己正在写的 RT：**跳过这一条 + 记账**（不是整批 / 整帧）
+- **取舍**：`d3dx9::compositeBatch` 在逐条目合成前判"要采样的纹理像素基址 == 本批要写的颜色目标像素基址"（`tbase == base`）⇒ **跳过这一条 sprite**、记具名位 43（`kUnSpriteRtFeedbackLoop`，进 `unsupported :`）、`skipped_reasons` 记 `sprite: 采样纹理是正在渲染的 RT（反馈环）`、默认级别一行 `spriteWarn`。⛔ 不读旧像素、⛔ 不丢整帧。
+- **为什么 sprite 需要自己的一条闸**：sprite 的合成**不经** `gpuEligible`（`d3dx9_sprite.cpp` 直接调 `GpuRaster::rasterQueue`）⇒ draw 路那条 `kUnRtFeedbackLoop`（bit28）管不到它；而 `REQ-01M79V2TVJH98BKH0C0WQV2FET`（sprite→RT）之后，"同一批 sprite 采样自己正在写的 RT"变成**新可达** ⇒ GPU 读上传缓存 / guest 未读回，两个来源都可能是旧像素，且看不出来。
+- **备选**：① 放过去（继续画）；② 整批跳过；③ 整帧丢弃；④ 复用 draw 路的 bit28。**没选** ①：静默旧像素正是本单要消除的那类错。**没选** ②③：一批里各条目采各自的纹理，`tbase == base` 是**逐条目**属性 ⇒ 丢掉正确条目（②）或把"一条坏 sprite"放大成"整帧空/黑"（③），与 `REQ-01M7A74YG08R65NJBFXF7DEJDK` 的"跳过而不是回退/整帧重来"口径冲突。**没选** ④：复用会让"draw 路命中"与"sprite 路命中"在位图 / 摘要里分不开，两条守卫互成恒真。
+- **重写必须保持不变**：① 判据只有一份（`compositeBatch` 的 `tbase == base`），⛔ 不在 `gpuEligible` 里再判一遍 sprite；② 触发时**像素零写入** + 账上一定看得见（具名位 + `sprite_skipped` + 原因），⛔ 不许静默；③ 采**别的**纹理必须照常入队（反向条款，防过度收紧）；④ 位号 43 不与 28 合并（合并 = 两条守卫互成恒真）；⑤ 守卫 = `gpu_batch.cpp` 的 `d3d9p/sprite-feedback-loop`（CTest `gpu-batch-order`），变异 = 判据换成永不成立（`tools/mutate-check.mjs`）。

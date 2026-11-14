@@ -2,8 +2,10 @@
 
 - id: REQ-01M773EFSYYE97YKEA6TQEQ53J
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/softfloat_tls.cpp#platform-h-force-included
+- done_reason: 走 A 路线（⛔ 未动 vendored 字节、⛔ 未把 THREAD_LOCAL 退回空）：third_party/berkeley-softfloat 的 CMakeLists 给消费者 INTERFACE /FIplatform.h（非 MSVC 走 -include platform.h），相对名、不绑目录。守卫 tests/softfloat_tls.cpp 的第一条 include 就是 <softfloat.h>（全文无 platform.h），两线程各写 flags/rounding 并断言互不影响 + TLS 地址不同 ⇒ 能从测试侧证伪。修前红实测（不合并 CMake 改动）：编译链接都过（正是静默危险），11 checks/7 failures —— via-library=0、两线程 flags 都 92、flags-addr 相同；修后 via-library=1、flags=161/92、地址不同、11 checks 0 failures。变异把 INTERFACE 整段换成 PRIVATE（连 if/else 一起）⇒ 该用例红（父级复跑 1/1 红）。新 CTest softfloat-tls 顶层无条件 ⇒ pure。边界：非 MSVC 臂本机没有（只有 clang-cl），未实测。顺带发现：tests/fpu_thread.cpp 的 extern C include platform.h 与 /FI 并存（#pragma once ⇒ 行为不变），口径将来可统一。
 - tags: [emulator-lift, softfloat, build]
 
 ## 一句话

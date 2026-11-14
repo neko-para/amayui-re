@@ -121,7 +121,7 @@ public:
     //   账上一切正常（`REQ-01M73P3GXW22Y467YGYPQSM571` 的实测根因：GPU 光栅化臂的
     //   Live2D 角色整层丢失就是这个）。★ 它属于"转发壳漏一个虚函数"这一类错 —— 不改像素、
     //   不报错、测试全绿 ⇒ 守卫必须是"逐条转发"的（`tests/gpu_batch.cpp::caseDepthClearForwarded`）。
-    void rasterRequestDepthClear() override;
+    void rasterRequestDepthClear(float z) override;
     // GPU 直出接口转发到真正的后端（后端在 d3d9_gpu.cpp）。
     GpuDirectPresenter* directPresenter() override;
 

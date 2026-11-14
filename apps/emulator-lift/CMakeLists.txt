@@ -115,6 +115,10 @@ add_library(emulator-lift-runtime STATIC
     # ★ Huffman 子树的两片叶子（`sub_4E1570` = look/首表/二分/adv、`sub_4E1950` = 码本向量）
     #   —— REQ-01M75WED0VFTEYXX43KGHNPPP0 的 S2；契约与逐字依据见 native_huffman.h
     src/runtime/native_huffman.cpp
+    # ★ 存档 CRC-32 的两个变体（`sub_436D00` 反射 / `sub_436D50` 非反射）：表从 guest 的
+    #   `[this, this+0x800)` 读，⛔ 不硬编码多项式。契约见 native_overrides.h 的 `CrcWhy` 段
+    #   （REQ-01M7BY4D1ZWA4HB97T8M8TVEYQ）
+    src/runtime/native_crc32.cpp
     src/runtime/shims.cpp
     src/runtime/window_profile.cpp
     # ★ SEH / C++ EH 的两个 OS 原语（`RaiseException` / `RtlUnwind` 的派发状态机；
@@ -1040,6 +1044,13 @@ add_executable(lift-shims-core tests/shims_core.cpp)
 target_link_libraries(lift-shims-core PRIVATE emulator-lift-runtime)
 add_test(NAME shims-core COMMAND lift-shims-core)
 
+# ---- pure：advapi32 注册表 no-op 的**参数校验**（API 合同，REQ-01M7ATN3WPB14TVZJWZXTPQW3V）----
+# ★ 只锁"参数非法 ⇒ 87 / 合法路径逐字不变"；⛔ 不锁取值口径（注册表整体 no-op，SCOPE §1）。
+#   依据 = 本机实测（Win11 x64 / P/Invoke），见 tests/advapi32_registry.cpp 的文件头。
+add_executable(lift-advapi32-registry tests/advapi32_registry.cpp)
+target_link_libraries(lift-advapi32-registry PRIVATE emulator-lift-runtime)
+add_test(NAME advapi32-registry COMMAND lift-advapi32-registry)
+
 # ---- pure：吞吐基准（S8；只测解释器分发，不设性能门槛 ⇒ 数字进 tools/lift.mjs report）----
 add_executable(lift-bench tests/bench.cpp)
 target_link_libraries(lift-bench PRIVATE emulator-lift-runtime)
@@ -1185,6 +1196,26 @@ add_executable(lift-fpu-thread tests/fpu_thread.cpp)
 target_link_libraries(lift-fpu-thread PRIVATE emulator-lift-runtime berkeley-softfloat)
 add_test(NAME fpu-thread-flags COMMAND lift-fpu-thread)
 
+# =====================================================================================
+# pure：消费方 TU 必须拿到**真 TLS** 的 SoftFloat 状态（`REQ-01M773EFSYYE97YKEA6TQEQ53J`）
+# ★ 判据（见 tests/softfloat_tls.cpp 文件头）：本 TU 的**第一条 include** 就是 `<softfloat.h>`、
+#   ⛔ 不 include platform.h —— 正是要守的那条路径（"下一个 include 就会中"）。三条断言：
+#   ① 任何 include 之前就看得见 `THREAD_LOCAL` / `LITTLEENDIAN`（= 前置 include 真的先跑了）；
+#   ② 库的 `softfloat_raiseFlags()` 置的位在**本 TU** 里读得到（= 同一个 TLS 对象）；
+#   ③ 两条线程各写不同值、barrier 之后各读各的，且 `&softfloat_exceptionFlags` 不同
+#      （= 每线程一份；共享态下"最后写入者赢"⇒ 至少一条断言必红）。
+# ★ 它守的是 `third_party/berkeley-softfloat/CMakeLists.txt` 里那条
+#   `target_compile_options(berkeley-softfloat INTERFACE /FIplatform.h)`（非 MSVC：`-include platform.h`）
+#   ⇒ 把 `INTERFACE` 改成 `PRIVATE`（消费者拿不到）⇒ 本用例红
+#   （`tools/mutate-check.mjs` 的 `ctest:softfloat-tls` 施加这一处）。
+# ★ 顶层无条件注册 ⇒ **pure** 档（只调 SoftFloat 公开面；不碰 guest / 游戏 / LFS）。
+#   链接 `berkeley-softfloat` 既拿 include 目录 / PUBLIC 定义，也拿那条 **INTERFACE** 编译选项
+#   （= 本用例的被测对象本身）。
+# =====================================================================================
+add_executable(lift-softfloat-tls tests/softfloat_tls.cpp)
+target_link_libraries(lift-softfloat-tls PRIVATE emulator-lift-runtime berkeley-softfloat)
+add_test(NAME softfloat-tls COMMAND lift-softfloat-tls)
+
 # ---- pure：像素格式（掩码往返、16/32bpp load/store、颜色打包、min_filter 决策）----
 add_executable(lift-pixel-format tests/pixel_format.cpp)
 target_link_libraries(lift-pixel-format PRIVATE emulator-lift-runtime)
@@ -1272,6 +1303,22 @@ add_test(NAME window-manager-token COMMAND lift-wm-token)
 # ★ 顶层注册时曾是 **pure** 档（裸 `Machine` + 自造字节；不碰游戏 / LFS / GPU / 音频设备），移档后
 #   仍是"不需要游戏安装"——移它的理由是**用途**（效率读数），⛔ 不是"资产在不在"。
 # =====================================================================================
+
+# =====================================================================================
+# **读数**：五类 guest 指令形状的「每条指令墙钟（ns/条）」（不是合同、是测量）
+# ★ 判据见 `tests/insn_cost.cpp` 的文件头：只断言**测量前提**（每遍 `cpu.insns` 实测 == 请求的
+#   12,000,000 条、停因 `MaxInsns`、每轮条数整除 N），⛔ **不断言任何 ns 数值**。
+#   用途：回答「真实负载 ~25 ns/条 里派发 / 访存 / 调用 / x87 / shim 各占多少」——所以它必须
+#   每次门禁都跑（读数变了要看得见），并且读数进 `docs/03-emulator/observations.md`，不进断言。
+# ★ 顶层无条件注册 ⇒ **pure** 档（`AGENTS.md` §5：判据 = 注册位置）：裸 `Machine` + `placeCode`
+#   自造字节 + `std::chrono`（可移植；Windows x64 与 macOS arm64 同一份代码，无 arch 专属指令）。
+#   不碰游戏 / LFS / GPU / 音频设备；实测 ~3 s（7 形状 × 3 遍 × 12M 条）。
+# ★ 为什么不用 `LIFT_STRESS` 门控：压/效率档的判据是"读数 + 阈值"；这里没有阈值，若藏进 opt-in，
+#   "没跑"与"跑过了"在 ctest 输出里就长得一样（那正是分级要消灭的东西）。
+# =====================================================================================
+add_executable(lift-insn-cost tests/insn_cost.cpp)
+target_link_libraries(lift-insn-cost PRIVATE emulator-lift-runtime)
+add_test(NAME insn-cost COMMAND lift-insn-cost)
 
 # =====================================================================================
 # M2 · 派生 mip 链（`REQ-01M73G2724479XAVS176WBZ65Q`：缩小采样必须有 mip，否则走样）

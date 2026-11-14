@@ -14,6 +14,10 @@
 //      A5 初始 CONTEXT 的 Eip/Esp = **抛出瞬间**（Eip=调用下一条、Esp=进入 shim 时的 esp）；
 //         改成"派发中途的 esp"就红
 //      A6 disposition=1 真的整份装载 CONTEXT（真跳到 catch 标记）
+//         ★ A 组的 record **必须**是**可继续**的（`flags=0`）：`EXCEPTION_NONCONTINUABLE` 上
+//           "返回 1 继续执行"**不成立** —— 文档说任何继续尝试都会改抛
+//           `EXCEPTION_NONCONTINUABLE_EXCEPTION`(0xC0000025)（`REQ-01M72GAA7CVKBPP9QRT0PRPBTM`，
+//           实测：旗标为 1 时**即使 handler 改了 CONTEXT 也照样改抛**）⇒ 那一形状由 E 组守。
 //      A7 catch 之前 `fs:[0]` **没变**（宿主提前清链头 ⇒ 真机 catch 体 0x4138C8 会写出错的值）
 //      A8 同帧 catch **不依赖** RtlUnwind（本用例一次也没调它）
 //   B 两层 record 都返 0 ⇒ **必须非 ok 停机**（`UnhandledException`）
@@ -21,6 +25,15 @@
 //   C `RtlUnwind`：`ExceptionFlags |= 2` · `fs:[0] == TargetFrame`（不含端点）·
 //      TargetIp==0 正常返回（`esp == call 前 + 0x10`）· TargetIp!=0 停在目标且同一 esp 口径
 //   D 影子栈：展开落地按 esp 丢"被跳过的帧"（`WindowProfiler` 直接断言；⛔ 不许静默偏大）
+//   E **非连续异常 + disposition=1 ⇒ 响亮停**（`REQ-01M72GAA7CVKBPP9QRT0PRPBTM` 的判据 1/3）：
+//      record 的 `flags & EXCEPTION_NONCONTINUABLE` 且 handler 返回 1、且 CONTEXT 一个字都没改
+//      ⇒ `StopReason::NonContinuableException` + detail 必须点名 `0xC0000025` /
+//      `EXCEPTION_NONCONTINUABLE_EXCEPTION`；⛔ 不许装载 CONTEXT 继续跑（那会落到 raise 的下一条
+//      = 异常被静默丢弃，最后报成误导性的"软件中断"）。★ 顺带钉住"宿主不写 guest 的登记节点"
+//      （`[pRN-4]` / `[pRN+8]` / `[pRN+0xC]` 都是 guest 的：`_JumpToContinuation` 读 `[pRN-4]`、
+//      handler 读 `[pRN+8]` 的 try 状态字）。
+//      ★ 修前这里是"整份装载 CONTEXT"⇒ 本用例**当场红**（理由变成 decode-error/no-code，
+//      `after_ea` 也被写成了坏标记）。
 //
 // ⛔ 不要拿这些当守卫："跑一遍 room-exit.graph 没崩"（那是 assets/真机验收）·
 //    "handler 的 EA == 0x413551"（游戏数据常量，换导出就废）· 真实 CRT 的 CONTEXT 布局
@@ -70,9 +83,20 @@ constexpr std::uint32_t kCatchMarker = 0x000CA057u;
 constexpr std::uint32_t kBadReturn = 0x000A11CEu;
 constexpr std::uint32_t kThrowCode = 0xE06D7363u;  // 取证：_CxxThrowException 的 code
 constexpr std::uint32_t kThrowFlags = 0x1u;        // 取证：EXCEPTION_NONCONTINUABLE
+// ★ "可继续"的异常（`dwExceptionFlags = 0`）。A 组用它：只有可继续的异常上，
+//   "handler 改 CONTEXT + 返回 1 ⇒ 从新 CONTEXT 继续跑"才是**文档允许**的形状
+//   （<https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-raiseexception>：
+//   `dwExceptionFlags` 的 0 = continuable；`EXCEPTION_NONCONTINUABLE` 上**任何**继续尝试都会
+//   改抛 `EXCEPTION_NONCONTINUABLE_EXCEPTION`(0xC0000025)）。E 组守那一形状。
+constexpr std::uint32_t kContinuableFlags = 0x0u;
 constexpr std::uint32_t kInfo0 = 0x19930520u;      // 取证：Info[0]（EH magic，**不许**被宿主合成）
 constexpr std::uint32_t kThrowInfo = 0x00544774u;  // 取证：pThrowInfo（_TI1?AVCommand_Exit_Exception@@）
 constexpr std::uint32_t kObjectPtr = 0x0022FF10u;  // 夹具的"异常对象"指针（只断言透传）
+// E：guest 的登记节点尾巴（`_JumpToContinuation` 读 `[pRN-4]`、handler 读 `[pRN+8]`）——
+// 宿主只许读 `[pRN]` / `[pRN+4]`，这三个字必须原样不动。
+constexpr std::uint32_t kGuestSavedEsp = 0x0007FFE00u;
+constexpr std::uint32_t kGuestTryState = 0x00000002u;
+constexpr std::uint32_t kGuestFrameEbp = 0x0007FFE0Cu;
 
 // ---- 最小指令发射器（只收本文件用到的形态；位移/立即数一律显式给）----
 void movEaxEspDisp8(Asm& a, std::uint8_t d) {
@@ -140,13 +164,16 @@ bool initTeb(Fixture& fx, std::uint32_t chain_head) {
 }
 
 // 一次 throw 的 driver：压 4 个实参 → `call RaiseException` → （正常返回才会走到的）坏标记。
+// `flags` = `dwExceptionFlags`：A 组传 `kContinuableFlags`（ContinueExecution 只有在那里合法）、
+// B/E 组传 `kThrowFlags`（= 真机 `_CxxThrowException` 的形状，NONCONTINUABLE）。
 // 返回 driver 的入口 EA；`ret_ea_out` = `call` 的下一条（= 期望的 ExceptionAddress / 初始 CONTEXT.Eip）。
 std::uint32_t emitRaiseDriver(Fixture& fx, std::uint32_t stub_ea, std::uint32_t args_ea,
-                              std::uint32_t after_ea, std::uint32_t* ret_ea_out) {
+                              std::uint32_t after_ea, std::uint32_t flags,
+                              std::uint32_t* ret_ea_out) {
     Asm a(nextCode(fx));
     a.pushImm(args_ea);    // 第 4 参 lpArguments
     a.pushImm(3);          // 第 3 参 nNumberOfArguments
-    a.pushImm(kThrowFlags);  // 第 2 参 dwExceptionFlags
+    a.pushImm(flags);      // 第 2 参 dwExceptionFlags
     a.pushImm(kThrowCode);   // 第 1 参 dwExceptionCode
     a.callRel(stub_ea);
     if (ret_ea_out) *ret_ea_out = a.currentEa();
@@ -210,6 +237,34 @@ std::uint32_t emitHandlerB(Fixture& fx, std::uint32_t log_ea, std::uint32_t orde
     return place(fx, a);
 }
 
+// handler E：真机现场那个形状 —— handler 被调（记下 pRN / pExcRec / pCtx / flags），
+// **一个字都不改 CONTEXT**，直接返回 1（ExceptionContinueExecution）。
+// ⛔ 特意不写 `[pRN±]`：宿主不写、handler 也不写，E 组才能拿这三个字判"谁动了 guest 的节点"。
+std::uint32_t emitHandlerContinueNoContext(Fixture& fx, std::uint32_t log_ea) {
+    Asm a(nextCode(fx));
+    movEaxEspDisp8(a, 4);   // pExcRec
+    movMemEax(a, log_ea + kLogExcRec);
+    movEaxEspDisp8(a, 8);   // pRN
+    movMemEax(a, log_ea + kLogRN);
+    movEaxEspDisp8(a, 0x0C);  // pCtx
+    movMemEax(a, log_ea + kLogCtx);
+    // pExcRec->ExceptionCode / ExceptionFlags（判"非连续"靠的就是 flags）
+    movEaxEspDisp8(a, 4);
+    movEcxEaxDisp(a, 0x00);
+    movMemEcx(a, log_ea + kLogCode);
+    movEaxEspDisp8(a, 4);
+    movEcxEaxDisp(a, 0x04);
+    movMemEcx(a, log_ea + kLogFlags);
+    // pCtx->Eip（宿主该给对：= raise 的下一条）
+    movEaxEspDisp8(a, 0x0C);
+    movEcxEaxDisp(a, 0xB8);
+    movMemEcx(a, log_ea + kLogCtxEip);
+    a.incDword(log_ea + kLogCalled);
+    a.movEaxImm(1);  // ExceptionContinueExecution（**不改 CONTEXT**）
+    a.retImm16(16);
+    return place(fx, a);
+}
+
 // handler C：记 pExcRec->ExceptionFlags（展开相位判据）+ 计数，返 0。
 std::uint32_t emitUnwindHandler(Fixture& fx, std::uint32_t log_ea, std::uint32_t counter_slot) {
     Asm a(nextCode(fx));
@@ -261,7 +316,9 @@ void caseA() {
     if (!initTeb(fx, rec_ea)) return;
 
     std::uint32_t ret_ea = 0;
-    const std::uint32_t driver_ea = emitRaiseDriver(fx, stub, info_ea, after_ea, &ret_ea);
+    // ★ flags = 0（可继续）：只有这种 record 上"改 CONTEXT + 返回 1"才是文档允许的形状。
+    const std::uint32_t driver_ea =
+        emitRaiseDriver(fx, stub, info_ea, after_ea, kContinuableFlags, &ret_ea);
     fx.rearmStack();  // esp = stack_top-4，[esp] = 哨兵
     const lift::RunResult r = fx.runCode(driver_ea);
 
@@ -271,7 +328,7 @@ void caseA() {
     LIFT_CHECK(rd(fx, log_ea + kLogExcRec) != 0);            // pExcRec = 宿主铺在 guest 栈上的 record
     LIFT_CHECK(rd(fx, log_ea + kLogDC) != 0);
     LIFT_CHECK_EQ_U32(rd(fx, log_ea + kLogCode), kThrowCode);   // A3：逐位透传
-    LIFT_CHECK_EQ_U32(rd(fx, log_ea + kLogFlags), kThrowFlags);
+    LIFT_CHECK_EQ_U32(rd(fx, log_ea + kLogFlags), kContinuableFlags);
     LIFT_CHECK_EQ_U32(rd(fx, log_ea + kLogNargs), 3);
     LIFT_CHECK_EQ_U32(rd(fx, log_ea + kLogInfo0), kInfo0);      // ⛔ 不许合成 0x1994000
     LIFT_CHECK_EQ_U32(rd(fx, log_ea + kLogAddr), ret_ea);        // A4
@@ -315,7 +372,7 @@ void caseB() {
     if (!initTeb(fx, rec_inner)) return;
 
     std::uint32_t ret_ea = 0;
-    const std::uint32_t driver_ea = emitRaiseDriver(fx, stub, info_ea, after_ea, &ret_ea);
+    const std::uint32_t driver_ea = emitRaiseDriver(fx, stub, info_ea, after_ea, kThrowFlags, &ret_ea);
     fx.rearmStack();
     const lift::RunResult r = fx.runCode(driver_ea);
 
@@ -456,6 +513,75 @@ void caseD() {
     p.end(0, 0, 0);
 }
 
+// =====================================================================================
+// E：**非连续异常 + disposition=1 ⇒ 响亮停**（⛔ 不许装载 CONTEXT = 静默丢弃异常）
+//
+// 形状（`REQ-01M72GAA7CVKBPP9QRT0PRPBTM` 的现场，合成版更可控）：
+//   record code=0xE06D7363（= `_CxxThrowException`）· `ExceptionFlags=0x1`（NONCONTINUABLE）·
+//   handler 被调、**一个字都不改 CONTEXT**、返回 `disposition=1`（ExceptionContinueExecution）。
+// 真机在这里**改抛** `EXCEPTION_NONCONTINUABLE_EXCEPTION`(0xC0000025)（本机 x86-32 原生探针实测：
+//   flags=0x1 ⇒ 第二次进 filter 的 code 就是 0xC0000025；且 handler 改了 CONTEXT 也照样改抛）。
+// 本线不建模那次第二次派发 ⇒ 停成独立停因，detail 必须点名 0xC0000025。
+// ★ 修前（照字面装载 CONTEXT）本用例红：落到 raise 的下一条 ⇒ `after_ea` 被写成坏标记、
+//   最后 eip 落进数据区 ⇒ 理由变成 `decode-error`/`no-code`（正是缺陷单里"报成软件中断"的前一步）。
+// =====================================================================================
+void caseE() {
+    lift_test::g_current_case = "seh/E-noncontinuable-continue-is-loud";
+    Fixture fx;
+    LIFT_CHECK(fx.ok);
+    if (!fx.ok) return;
+    lift::registerBootstrapShims(fx.m.shims());
+    const std::uint32_t stub = fx.use("kernel32", "RaiseException");
+    LIFT_CHECK(stub != 0);
+    if (stub == 0) return;
+
+    const std::uint32_t log_ea = fx.zeroData(kLogBytes);
+    const std::uint32_t after_ea = fx.u32data(0);
+    const std::uint32_t info[3] = {kInfo0, kObjectPtr, kThrowInfo};
+    const std::uint32_t info_ea = fx.data(info, sizeof(info));
+
+    const std::uint32_t handler_ea = emitHandlerContinueNoContext(fx, log_ea);
+
+    // 登记节点的**整块**：`[pRN-4]` / `[pRN]` / `[pRN+4]` / `[pRN+8]` / `[pRN+0xC]` 都是 guest 的。
+    // 宿主只许读 `[pRN]`（Next）与 `[pRN+4]`（Handler）—— 其余三个字跑完必须逐字不变。
+    const std::uint32_t block = fx.zeroData(32);
+    fx.m.mem().wr32(block + 0x0, 0xAAAAAAAAu);       // 填充（若被写就有痕迹）
+    const std::uint32_t rec_ea = block + 8u;         // 让 [pRN-4] 也落在块内
+    fx.m.mem().wr32(rec_ea - 4u, kGuestSavedEsp);    // `_JumpToContinuation` 读它当 esp
+    fx.m.mem().wr32(rec_ea + 0u, lift::kSehChainEnd);
+    fx.m.mem().wr32(rec_ea + 4u, handler_ea);
+    fx.m.mem().wr32(rec_ea + 8u, kGuestTryState);    // handler 读它当 try 状态字
+    fx.m.mem().wr32(rec_ea + 0xCu, kGuestFrameEbp);  // `_JumpToContinuation` 写 ebp = pRN+0xC
+    if (!initTeb(fx, rec_ea)) return;
+
+    std::uint32_t ret_ea = 0;
+    const std::uint32_t driver_ea = emitRaiseDriver(fx, stub, info_ea, after_ea, kThrowFlags, &ret_ea);
+    fx.rearmStack();
+    const lift::RunResult r = fx.runCode(driver_ea);
+
+    // ---- ① 不许静默继续：独立停因 + 点名 0xC0000025 ----
+    LIFT_CHECK(!r.ok());
+    LIFT_CHECK(r.reason == lift::StopReason::NonContinuableException);
+    LIFT_CHECK(std::strstr(r.detail.c_str(), "0xC0000025") != nullptr);
+    LIFT_CHECK(std::strstr(r.detail.c_str(), "NONCONTINUABLE") != nullptr);
+    // ---- ② 没有落到 raise 的下一条（= 没有静默丢弃异常）----
+    LIFT_CHECK_EQ_U32(rd(fx, after_ea), 0);
+    // ---- ③ handler 真的被调过（判据不是"根本没派发"），且拿到的是 NONCONTINUABLE 的 record ----
+    LIFT_CHECK(rd(fx, log_ea + kLogCalled) >= 1);
+    LIFT_CHECK_EQ_U32(rd(fx, log_ea + kLogRN), rec_ea);
+    LIFT_CHECK_EQ_U32(rd(fx, log_ea + kLogFlags), kThrowFlags);
+    LIFT_CHECK_EQ_U32(rd(fx, log_ea + kLogCode), kThrowCode);   // pExcRec->ExceptionCode
+    LIFT_CHECK_EQ_U32(rd(fx, log_ea + kLogCtxEip), ret_ea);     // 初始 CONTEXT 仍是"抛出瞬间"
+    // ---- ④ 宿主不写 guest 的登记节点（[pRN-4] / [pRN+8] / [pRN+0xC] 逐字不变）----
+    LIFT_CHECK_EQ_U32(rd(fx, rec_ea - 4u), kGuestSavedEsp);
+    LIFT_CHECK_EQ_U32(rd(fx, rec_ea + 8u), kGuestTryState);
+    LIFT_CHECK_EQ_U32(rd(fx, rec_ea + 0xCu), kGuestFrameEbp);
+    LIFT_CHECK_EQ_U32(rd(fx, block + 0x0), 0xAAAAAAAAu);
+    LIFT_CHECK_EQ_I64(fx.m.seh().raiseCount(), 1);
+    LIFT_CHECK_EQ_I64(fx.m.seh().unhandledCount(), 1);
+    LIFT_CHECK(!fx.m.seh().busy());
+}
+
 }  // namespace
 
 int main() {
@@ -463,5 +589,6 @@ int main() {
     caseB();
     caseC();
     caseD();
+    caseE();
     return lift_test::finish("seh");
 }

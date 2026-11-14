@@ -214,9 +214,15 @@ enum CapsOff : std::uint32_t {
 //   恒 0 是真话）。每个置位的行为见证在 `tests/d3d9.cpp` 的 `d3d9/caps-claims`。
 // ★ `MaxTextureWidth/Height` **保留**：那是引擎唯一读的两个字段（`0x499128/0x49912E`）。
 // =====================================================================================
-// LineCaps：ZTEST(0x02) | BLEND(0x04) | ALPHACMP(0x08)；
+// LineCaps：ZTEST(0x02) | BLEND(0x04)。
+//   ⛔ **ALPHACMP(0x08) 不声明**：alpha test 未实现（片元着色器没有 alpha 比较）⇒ GPU 准入把
+//      `ALPHATESTENABLE=1` 的批**整批拒绝**（`D3DERR_INVALIDCALL` + 具名位 bit30）；caps 没有"拒绝"
+//      动作 ⇒ 不能表达就清 0 —— 这就是上面那条已裁决口径（caps 是**声明**，不是实现集）。
+//      ★ 证据：`REQ-01M7AZ65EAE7Q6STW2S0ZNXGM4`（备选路）与
+//      `docs/03-emulator/observations.md` 的 `OBS-20261114-09`（boot→TITLE 600 帧命中 0 次）；
+//      玩家可见后果（该批整块不画）见 `docs/03-emulator/defects.md` 的 `BUG-23`。
 //   ⛔ TEXTURE(0x01)（带纹理的线响亮拒绝，bit16）与 FOG(0x10)（全局不做雾）都不许声明。
-constexpr std::uint32_t kCapsLineClaim = 0x0000000Eu;
+constexpr std::uint32_t kCapsLineClaim = 0x00000006u;
 // RasterCaps：只有 D3DPRASTERCAPS_ZTEST(0x10)。⛔ ZFOG(0x200000)（不做雾）。
 constexpr std::uint32_t kCapsRasterClaim = 0x00000010u;
 // ShadeCaps：COLORGOURAUDRGB(0x8) | SPECULARGOURAUDRGB(0x200) | ALPHAGOURAUDBLEND(0x4000)。

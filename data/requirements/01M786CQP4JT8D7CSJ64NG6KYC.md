@@ -2,10 +2,11 @@
 
 - id: REQ-01M786CQP4JT8D7CSJ64NG6KYC
 - type: bug
-- status: open
+- status: dropped
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
 - repro: docs/03-emulator/observations.md#OBS-20261112-05
 - severity: S2
+- dropped_reason: 根因（--raster cpu 软件光栅 ≈0.4 fps + 固定 30 s marker 窗口）随 CPU 光栅退休删除（2026-11-13，--raster 系列 flag 已删）；点名的 save-graph / agerc-ui-state / close-confirm / quit-graph 四个用例已删，feeder-seg-e2e 已移入 LIFT_STRESS（GPU 档，判据是阈值而不是固定超时）⇒ 无载体。若真慢机上再出现同类超时，按 LIFT_STRESS 的阈值口径新开单，不复用本单。
 - tags: [emulator-lift windows test-timeout]
 
 ## 现象

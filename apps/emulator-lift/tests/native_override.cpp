@@ -4155,5 +4155,243 @@ int main() {
         }
     }
 
+    // ---- ⑰f `sub_436D00` / `sub_436D50`（存档 CRC-32 的两个变体）----
+    //
+    // 判据（红了意味着什么）：
+    //   ① **回退零写**（`crc/decline-no-write`）：G1（`[this+0x800] == 1`）/ G2（两张表已提交）/
+    //      G4（`[buf, buf+n)` 已提交且不跨 4 GiB）任一不成立 ⇒ `fn` 返回 false，且**直接调 fn** 前后
+    //      那个 `0x804` 字节的表对象**逐字节不变**、输入缓冲**逐字节不变**、`*result` 不留半成品、
+    //      回退原因落进**对应**的桶（⛔ 不是"静默跳过"）。
+    //      ★ 这一条不能省：assets 档的两臂差分在回退之后由解释器**重放整个函数**，会把"回退前写过的
+    //      `[this+0x800]`"修回去 ⇒ 那一类错在差分里**结构上不可见**（`affine/decline-no-write` /
+    //      `ftol/decline-no-write` / `huff/decline-no-write` 完全同一个理由）。
+    //   ② **`n <= 0` 是接管不是回退**（G3）：0 / −1 / −2 / 0x80000001 ⇒ 返回 true + EAX = 0，
+    //      且**一个字节都没写**（那一支 guest 只做 `or/dec/js/not`，回退只会白付一次整函数重放）。
+    //   ③ **`n == 0x80000000`（INT32_MIN）不是"循环 0 次"**：`.lst` 0x436D29 `dec edx` 把它变成
+    //      `0x7FFFFFFF`（SF=0）⇒ 0x436D2A `js` **不跳** ⇒ guest 真的跑 2^31 次 ⇒ 必须回退
+    //      （⛔ 不许"返回 0"假装等价）。需求单正文写的"`n <= 0` ⇒ 循环 0 次"在这一格上不成立。
+    //   ④ **纯核查的是给它的那张表**：两张表用**不同**的合成内容，且期望值由测试里**第二次转写**的
+    //      公式算出（不是抄实现）⇒ 硬编码多项式 / 两个 fn 查同一张表 / 移位方向写错都会当场红。
+    //      ★ 它不是独立 oracle（可能是同一份误读）；真 oracle 是 assets 档的真字节两臂。
+    {
+        lift_test::g_current_case = "crc/decline-no-write";
+        constexpr std::uint32_t kSelfEa = 0x00420000u;
+        constexpr std::uint32_t kBufEa = 0x00450000u;
+        constexpr std::uint32_t kUncommitted = 0x00B00000u;
+        constexpr std::uint32_t kCrossEa = 0xFFFFFFF0u;  // +0x804 / +n 越过 4 GiB
+        constexpr std::uint32_t kObjBytes = 0x804u;
+        constexpr std::uint32_t kBufBytes = 0x1000u;
+        constexpr std::uint32_t kD00Ea = 0x00436D00u;
+        constexpr std::uint32_t kD50Ea = 0x00436D50u;
+
+        // 两张**合成**表（+0x000 = A、+0x400 = B，内容不同 ⇒ "查错表"可观测）。
+        // ★ 这里刻意**不**用 `0x4C11DB7` / `0xEDB88320`：多项式常量在本项任何一处出现都是坏味道，
+        //   真实的表在 assets 档由 guest 自己的 `sub_436BD0` / `sub_436C60` 建（见那里）。
+        auto makeObject = [](std::uint32_t flag) {
+            std::vector<std::uint8_t> obj(kObjBytes, 0);
+            std::uint32_t a = 0x12345678u;
+            for (std::uint32_t t = 0; t < 2u; ++t) {
+                for (std::uint32_t i = 0; i < 256u; ++i) {
+                    a = a * 1664525u + 1013904223u;
+                    const std::uint32_t v = (a ^ (a >> 13)) + 0x9E3779B9u * (i + 1u) + t * 0x5BD1E995u;
+                    std::memcpy(obj.data() + t * 0x400u + 4u * i, &v, 4);
+                }
+            }
+            std::memcpy(obj.data() + 0x800u, &flag, 4);
+            return obj;
+        };
+        // 期望值的**第二次转写**（操作数顺序不同、结构相同；⛔ 不是从实现里抄的）
+        auto refCrc = [](const std::uint8_t* obj, std::uint32_t table_off, const std::uint8_t* buf, std::uint32_t n,
+                         bool reflected) {
+            std::uint32_t crc = 0xFFFFFFFFu;
+            for (std::uint32_t k = 0; k < n; ++k) {
+                std::uint32_t idx = 0;
+                if (reflected) {
+                    idx = (crc ^ static_cast<std::uint32_t>(buf[k])) & 0xFFu;
+                    crc = static_cast<std::uint32_t>(crc >> 8);
+                } else {
+                    idx = ((crc >> 24) ^ static_cast<std::uint32_t>(buf[k])) & 0xFFu;
+                    crc = static_cast<std::uint32_t>(crc << 8);
+                }
+                std::uint32_t tv = 0;
+                std::memcpy(&tv, obj + table_off + 4u * idx, 4);
+                crc ^= tv;
+            }
+            return ~crc;
+        };
+        auto bufBytesOf = [&](lift::Machine& m) {
+            std::vector<std::uint8_t> v(kBufBytes);
+            std::memcpy(v.data(), m.mem().host(kBufEa), v.size());
+            return v;
+        };
+        auto objBytesOf = [&](lift::Machine& m) {
+            std::vector<std::uint8_t> v(kObjBytes);
+            std::memcpy(v.data(), m.mem().host(kSelfEa), v.size());
+            return v;
+        };
+        // 夹具：`0x804` 对象（两张合成表 + 标志）+ `0x1000` 输入缓冲 + 表里那一项。
+        auto boot = [&](lift::Machine& m, std::string& err, std::uint32_t flag) {
+            if (!m.initBare(&err) || !m.prepareStack(&err)) return false;
+            const std::vector<std::uint8_t> obj = makeObject(flag);
+            std::vector<std::uint8_t> buf(kBufBytes);
+            for (std::uint32_t i = 0; i < kBufBytes; ++i)
+                buf[i] = static_cast<std::uint8_t>((i * 37u + (i >> 3) * 11u + 101u) & 0xFFu);
+            if (!m.placeData(kSelfEa, obj.data(), obj.size(), &err)) return false;
+            if (!m.placeData(kBufEa, buf.data(), buf.size(), &err)) return false;
+            std::string e;
+            if (!m.overrides().add(kD00Ea, "ref_crc_d00", lift::GuestConv::Thiscall, 8, lift::nativeCrc436D00, &e))
+                return false;
+            return m.overrides().add(kD50Ea, "ref_crc_d50", lift::GuestConv::Thiscall, 8, lift::nativeCrc436D50, &e);
+        };
+        // 铺一帧（ECX = this；栈上是 `retn 8` 的两个参数），然后**直接调 fn**（不经 dispatcher）。
+        auto arm = [&](lift::Machine& m, std::uint32_t self, std::uint32_t n, std::uint32_t buf) {
+            const std::uint32_t esp = m.layout().stack_top - 0x40u;
+            m.cpu().esp() = esp;
+            m.cpu().ecx() = self;
+            m.mem().wr32(esp, lift_fixture::kSentinel);  // 返回地址（哨兵）
+            m.mem().wr32(esp + 4u, n);
+            m.mem().wr32(esp + 8u, buf);
+        };
+        auto sawDecline = [](const lift::NativeOverride& ov) {
+            for (std::size_t i = 0; i < lift::NativeOverride::kDeclineSlots; ++i)
+                if (ov.declines[i] != 0) return true;
+            return false;
+        };
+        // 一个 arm = 一个 `return false` 的类别：必须 false + 零写（对象 / 缓冲）+ 桶命中 + 计数不动。
+        auto armDecline = [&](const char* tag, lift::CrcWhy why, auto&& mutate) {
+            lift_test::g_current_case = tag;
+            lift::Machine m;
+            std::string err;
+            const bool rig = boot(m, err, 1u);
+            LIFT_CHECK(rig);
+            if (!rig) return;
+            std::uint32_t self = kSelfEa;
+            std::uint32_t n = 64u;
+            std::uint32_t buf = kBufEa;
+            mutate(m, &self, &n, &buf);
+            arm(m, self, n, buf);
+            const std::vector<std::uint8_t> obj_before = objBytesOf(m);
+            const std::vector<std::uint8_t> buf_before = bufBytesOf(m);
+            std::uint32_t r = 0xDEADBEEFu;
+            m.cpu().current_override = m.overrides().at(0);
+            const bool took = lift::nativeCrc436D00(m.cpu(), m.mem(), &r);
+            m.cpu().current_override = nullptr;
+            LIFT_CHECK(!took);
+            LIFT_CHECK_EQ_U32(r, 0u);  // ⛔ 不留"半成品 EAX"
+            LIFT_CHECK(objBytesOf(m) == obj_before);
+            LIFT_CHECK(bufBytesOf(m) == buf_before);
+            const lift::NativeOverride* ov = m.overrides().at(0);
+            LIFT_CHECK(ov != nullptr);
+            if (ov == nullptr) return;
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ov->declines[static_cast<std::size_t>(why)]), 1u);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ov->hits), 0u);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ov->fallbacks), 0u);  // fallbacks 是 invoke 记的
+        };
+
+        // ① G1：标志不是 1（0 = 表还没建；2 = 别的路径写过的怪值）⇒ 回退，交给解释器建表
+        armDecline("table-flag-zero", lift::CrcWhy::TableNotBuilt,
+                   [&](lift::Machine& m, std::uint32_t*, std::uint32_t*, std::uint32_t*) {
+                       m.mem().wr32(kSelfEa + 0x800u, 0u);
+                   });
+        armDecline("table-flag-two", lift::CrcWhy::TableNotBuilt,
+                   [&](lift::Machine& m, std::uint32_t*, std::uint32_t*, std::uint32_t*) {
+                       m.mem().wr32(kSelfEa + 0x800u, 2u);
+                   });
+        // ② G2：`this == 0` / 跨度越过 4 GiB / 未提交
+        armDecline("self-null", lift::CrcWhy::BadThis,
+                   [](lift::Machine&, std::uint32_t* self, std::uint32_t*, std::uint32_t*) { *self = 0u; });
+        armDecline("self-cross-boundary", lift::CrcWhy::BadThis,
+                   [](lift::Machine&, std::uint32_t* self, std::uint32_t*, std::uint32_t*) { *self = kCrossEa; });
+        armDecline("self-uncommitted", lift::CrcWhy::BadThis,
+                   [](lift::Machine&, std::uint32_t* self, std::uint32_t*, std::uint32_t*) {
+                       *self = kUncommitted;
+                   });
+        // ③ G4：输入跨度未提交 / 跨 4 GiB
+        armDecline("buf-uncommitted", lift::CrcWhy::BufUnreadable,
+                   [](lift::Machine&, std::uint32_t*, std::uint32_t*, std::uint32_t* buf) {
+                       *buf = kUncommitted;
+                   });
+        armDecline("buf-cross-boundary", lift::CrcWhy::BufUnreadable,
+                   [](lift::Machine&, std::uint32_t*, std::uint32_t*, std::uint32_t* buf) { *buf = kCrossEa; });
+        // ④ n == INT32_MIN：guest 会跑 2^31 次 ⇒ 必须回退（G4 判 `[buf, buf+2^31)`），⛔ 不是返回 0
+        armDecline("int-min-declines", lift::CrcWhy::BufUnreadable,
+                   [](lift::Machine&, std::uint32_t*, std::uint32_t* n, std::uint32_t*) { *n = 0x80000000u; });
+
+        // ⑤ G3：`n <= 0` ⇒ **接管**并返回 0（不是回退），且零写、不涨任何计数
+        {
+            lift_test::g_current_case = "crc/nonpositive";
+            const std::uint32_t negatives[] = {0u, 0xFFFFFFFFu, 0xFFFFFFFEu, 0x80000001u, 0xFFFF0000u};
+            for (std::uint32_t n : negatives) {
+                lift::Machine m;
+                std::string err;
+                const bool rig = boot(m, err, 1u);
+                LIFT_CHECK(rig);
+                if (!rig) continue;
+                arm(m, kSelfEa, n, kBufEa);
+                const std::vector<std::uint8_t> obj_before = objBytesOf(m);
+                const std::vector<std::uint8_t> buf_before = bufBytesOf(m);
+                for (std::size_t idx = 0; idx < m.overrides().size(); ++idx) {
+                    lift::NativeOverride* ov = m.overrides().at(idx);
+                    const bool d00 = ov->ea == kD00Ea;
+                    std::uint32_t r = 0xDEADBEEFu;
+                    m.cpu().current_override = ov;
+                    const bool took = d00 ? lift::nativeCrc436D00(m.cpu(), m.mem(), &r)
+                                          : lift::nativeCrc436D50(m.cpu(), m.mem(), &r);
+                    m.cpu().current_override = nullptr;
+                    LIFT_CHECK(took);           // ★ 接管，**不是**回退
+                    LIFT_CHECK_EQ_U32(r, 0u);   // `~0xFFFFFFFF == 0`
+                    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ov->hits), 0u);       // 直接调不过 invoke
+                    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ov->fallbacks), 0u);
+                    LIFT_CHECK(!sawDecline(*ov));
+                }
+                LIFT_CHECK(objBytesOf(m) == obj_before);
+                LIFT_CHECK(bufBytesOf(m) == buf_before);
+            }
+        }
+
+        // ⑥ 接管路径：纯核在两个变体上都与"第二次转写的公式"逐值相同（两条表内容不同 ⇒ 查错表会红）
+        {
+            lift_test::g_current_case = "crc/take-over";
+            lift::Machine m;
+            std::string err;
+            const bool rig = boot(m, err, 1u);
+            LIFT_CHECK(rig);
+            if (rig) {
+                const std::vector<std::uint8_t> obj = makeObject(1u);
+                const std::vector<std::uint8_t> buf = bufBytesOf(m);
+                std::vector<std::uint8_t> keep = buf;
+                keep.resize(4096u, 0u);
+                const std::uint32_t sizes[] = {1u, 2u, 3u, 4u, 31u, 64u, 4095u, 4096u};
+                for (std::uint32_t n : sizes) {
+                    for (int variant = 0; variant < 2; ++variant) {
+                        const bool reflected = variant == 0;
+                        const std::uint32_t want =
+                            refCrc(obj.data(), reflected ? 0x400u : 0u, keep.data(), n, reflected);
+                        arm(m, kSelfEa, n, kBufEa);
+                        std::uint32_t r = 0xDEADBEEFu;
+                        m.cpu().current_override = m.overrides().at(static_cast<std::size_t>(variant));
+                        const bool took = reflected ? lift::nativeCrc436D00(m.cpu(), m.mem(), &r)
+                                                    : lift::nativeCrc436D50(m.cpu(), m.mem(), &r);
+                        m.cpu().current_override = nullptr;
+                        LIFT_CHECK(took);
+                        LIFT_CHECK_EQ_U32(r, want);
+                    }
+                }
+                // 两张表的内容**不同**（否则"两个 fn 查同一张表"看不出来）
+                const std::uint32_t a0 = [&] {
+                    std::uint32_t v = 0;
+                    std::memcpy(&v, obj.data() + 0x000u, 4);
+                    return v;
+                }();
+                const std::uint32_t b0 = [&] {
+                    std::uint32_t v = 0;
+                    std::memcpy(&v, obj.data() + 0x400u, 4);
+                    return v;
+                }();
+                LIFT_CHECK(a0 != b0);
+            }
+        }
+    }
+
     return lift_test::finish("native-override");
 }

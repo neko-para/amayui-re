@@ -71,6 +71,14 @@ enum class StopReason : std::uint8_t {
     //   ⛔ 不是正常结局、不进 `ok()`：它**必须**与"跑完了"区分开（旧形态 `unimplemented` 只说明
     //   "宿主缺导入"，而这里导入已经有了，缺的是"这条异常没人接"）。detail 里写清是哪一种。
     UnhandledException,
+    // ★ 非连续异常（`EXCEPTION_NONCONTINUABLE`）被 handler 要求"继续执行"
+    //   （`REQ-01M72GAA7CVKBPP9QRT0PRPBTM`）：文档说这种情况系统**改抛**
+    //   `EXCEPTION_NONCONTINUABLE_EXCEPTION`（`0xC0000025`），⛔ 不是装载 CONTEXT 继续跑。
+    //   本线不建模改抛后的第二次派发 ⇒ 停在这里，停因**指名道姓**。
+    //   ⛔ 不并进 `UnhandledException`：那条是"链上没人接"，这条是"有人接了却要求一个不许
+    //   继续的异常继续" —— 修法/研判完全不同（前者查 guest 的 handler 链，后者查 handler 的
+    //   disposition 与 record 的 flags）。⛔ 也不是正常结局、不进 `ok()`。
+    NonContinuableException,
 };
 const char* stopReasonName(StopReason r);
 

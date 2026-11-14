@@ -2,10 +2,12 @@
 
 - id: REQ-01M7ATN3WPB14TVZJWZXTPQW3V
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/advapi32_registry.cpp#reg-open-null-phkresult
 - repro: apps/emulator-lift/src/shims/advapi32_registry.cpp#void shimRegOpenKeyExA(X86& cpu, ShimCall& call)
 - severity: S2
+- done_reason: 两条参数校验落地：RegOpenKeyExA(phkResult=NULL) ⇒ 87 + last_error=87 + warn，且不写任何内存；RegQueryValueExA(lpData!=NULL 且 lpcbData==NULL) ⇒ 87，而 lpData==NULL 时 lpcbData==NULL 仍合法（走既有取值路径）。依据从'文档要求'改成**本机实测**（Win11 x64 / P/Invoke 探针 / 2026-11-14：RegOpenKeyExA(NULL)=87、RegQueryValueExA(lpData!=NULL,lpcbData=NULL)=87、(NULL,NULL)=2），文档只作约束（GetRenderState 式的误引不再出现）。守卫新 CTest advapi32-registry（顶层 pure，13 checks；修前 4 failures：expected 0x57 got 0x0），变异把两段校验换回写 NULL ⇒ 该用例红（父级复跑 1/1 红）。已知残留：非法路径连 lpType 也不写是我们的裁决（实测只给了返回码），要更贴近真机得补带 lpType 哨兵的探针。
 - tags: [emulator-lift, shim, contract]
 
 ## 现象（2026-11-13 分析时读代码发现，父级已复核）

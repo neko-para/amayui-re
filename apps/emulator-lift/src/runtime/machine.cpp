@@ -81,6 +81,9 @@ const char* stopReasonName(StopReason r) {
         case StopReason::Trap: return "unimplemented-slot";
         // ★ guest 的 SEH / C++ EH 走不完（未处理异常 / 派发做不下去）。⛔ 不是正常结局。
         case StopReason::UnhandledException: return "unhandled-exception";
+        // ★ 非连续异常被 handler 要求 "继续执行" ⇒ 真机改抛 EXCEPTION_NONCONTINUABLE_EXCEPTION
+        //   （0xC0000025）；本线响亮停在这条独立停因上（见 machine.h 的注释）。
+        case StopReason::NonContinuableException: return "noncontinuable-exception";
     }
     return "?";
 }
@@ -1077,6 +1080,23 @@ RunResult Machine::run(const RunOptions& opts) {
     // ★ 图要不要身份采样：图在 `run()` 之前就加载完、运行时不变 ⇒ 在循环外算**一次**
     //   （块入口钩子是每条主循环指令都会经过的热路径，⛔ 不要在那里扫节点表）。
     const bool interaction_needs_identity = interaction_.needsIdentitySamples();
+    // ★ 块计时闸门（REQ-01M7CAJHYHWCVF3XQ7NM3X428Y）：默认档（没有 `--profile`、没有窗口 profiler）
+    //   块循环里**一次 `steady_clock::now()` 都不调**。两个 `now()`（块首 / 块尾）都收进这个闸门，
+    //   ⛔ 不许只门控 `b->ns +=`（那正是本单之前的形态：累加被门控、取时钟没有 ⇒ 白付 ~40–58 ns/块）。
+    //   ★ 消费者清单（漏一个 = 那个消费者拿到恒 0 的 `b->ns`，静默）：
+    //     ① `opts.profile` —— `dumpProfile` 的 guest-block wall / `[profile]` 函数表（读 `b.ns`）；
+    //     ② `window_prof_.armed()` —— 窗口 profiler 的 `guest` 桶（`addGuest` 在**窗口外**是 no-op，
+    //        但窗口只可能在 armed 之后开；窗口块级 self 也是 `b.ns` 的前后差值）⇒ armed 覆盖它；
+    //     ③ 逐帧 trace 的 `guest=`（`LIFT_FRAME_TRACE`）—— 它读的就是 ①/② 累计的**同一份** `b.ns`
+    //        （README §4.3.1：`guest` = `--profile` 的块执行时间；单独开 trace 时它一直是 0.0ms，
+    //        那是**既有口径**，⛔ 不改）⇒ 它**不是**独立判据；把它加进闸门只会为没人读的 `b.ns`
+    //        白调两次时钟（`b->ns +=` 仍按 ①/② 门控）。
+    //   ★ 只把**运行期不变**的那一项折到循环外：`window_prof_` 能被**运行中**追加的 `profile_begin`
+    //     重新 arm（`pumpScript`，缺陷 REQ-01M701PEB38VDQJD4QR2JEBA74；守卫 `profile-window` ⑥ 断言
+    //     那个窗口的 guest 桶 > 0）⇒ 若把 `armed()` 也冻成循环外的常量，那个窗口的 guest 桶会静默恒 0。
+    //     `armed()` 是内联 bool 读（**不取时钟**）：每块读一次与原来 `b->ns +=` 的条件同价，
+    //     profile 打开时短路、连这次读也不做。
+    const bool block_ns_always = opts.profile;
 
     while (cpu_.running) {
         // ★ 区间 profiler 的**窗口边界只在这里**开/关：上一个 block 边界的脚本 tick 只登记请求
@@ -1624,7 +1644,11 @@ RunResult Machine::run(const RunOptions& opts) {
         }
 
         bool left_block = false;
-        const auto block_start = std::chrono::steady_clock::now();
+        // ★ 闸门（见循环外那段注释）：不需要计时时 `block_start` **不取时钟**（保持默认构造的
+        //   零值），块尾也不取第二次 ⇒ 默认档块循环里 0 次 `steady_clock::now()`。
+        const bool need_block_ns = block_ns_always || window_prof_.armed();
+        const auto block_start = need_block_ns ? std::chrono::steady_clock::now()
+                                               : std::chrono::steady_clock::time_point{};
         // ★ 块级**指令数**的基线（REQ-01M6XVZ8AXJNG492WA2QAMTA35）：块内每执行成功一条就
         //   `++cpu_.insns` ⇒ "这一块执行了几条" = 前后差值（⛔ 不在热循环里再加一个自增；
         //   中途 break 掉的剩余指令本来就没进 `cpu_.insns`，差值天然只数执行过的）。
@@ -1683,11 +1707,16 @@ RunResult Machine::run(const RunOptions& opts) {
         }
         // ★ 区间 profiler 的 `guest` 桶 = **块执行**墙钟（与 shim / native / host 互斥）。
         //   `b->ns` 复用同一份计时（就是 `--profile` 与逐帧 trace 用的那一份，⛔ 不造第二套）。
-        {
+        //   ★ 闸门**就是** `b->ns` 的累加条件（`opts.profile || window_prof_.armed()`，同一份判据）
+        //     ⇒ 闸门里累加不需要再判一次；⛔ 两处判据一旦分叉，某一侧就会静默拿到恒 0 / 白付时钟。
+        //   ★ 两次 `steady_clock::now()` 都在闸门里（REQ-01M7CAJHYHWCVF3XQ7NM3X428Y）：闸门关 =
+        //     一次都不取。`addGuest` / `addBlockInsns` 在窗口外本来就是 no-op，而闸门关时必然没有
+        //     窗口（窗口只可能在 armed 之后开）⇒ 一起收进闸门不改它们的口径。
+        if (need_block_ns) {
             const std::uint64_t block_ns = static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - block_start)
                     .count());
-            if (opts.profile || window_prof_.armed()) b->ns += block_ns;
+            b->ns += block_ns;
             window_prof_.addGuest(block_ns);
             // ★ 块级指令数（同一窗口口径；窗口外 no-op）。差值的另一类来源 —— native override
             //   直接补进 `cpu_.insns` 的条数 —— 在下面两个 override 分支里单独记（`addOverrideInsns`）。
@@ -2205,7 +2234,10 @@ bool Machine::pumpSeh(RunResult& r) {
             cpu_.noteInsn(s.eip, "[seh]");
             return true;
         case SehStep::Kind::Stop:
-            r.reason = StopReason::UnhandledException;
+            // ★ 独立停因：非连续异常被要求继续执行 ⇒ 真机会改抛 0xC0000025（⛔ 不是继续跑）。
+            //   与"链上没人接"分开报（`machine.h` 的 `NonContinuableException` 注释）。
+            r.reason = s.noncontinuable_violation ? StopReason::NonContinuableException
+                                                 : StopReason::UnhandledException;
             r.detail = why.empty() ? std::string("SEH 派发失败（无 detail）") : why;
             seh_guest_boundary_ = 0;
             cpu_.running = false;

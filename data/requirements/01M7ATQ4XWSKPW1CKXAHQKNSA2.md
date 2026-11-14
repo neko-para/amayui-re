@@ -2,10 +2,12 @@
 
 - id: REQ-01M7ATQ4XWSKPW1CKXAHQKNSA2
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/user32_window.cpp#peek-filter-keeps-messages
 - repro: apps/emulator-lift/src/shims/user32_window.cpp#void shimPeekMessageA(X86& cpu, ShimCall& call)
 - severity: S2
+- done_reason: 两条都落地：① PeekMessageA 的 hwnd/min/max 过滤改成'从队首起找第一条匹配'（新原语 WindowManager::peekMatching(pred,out,remove)，不匹配的原地保留、FIFO 不变、PM_NOREMOVE 不取走、WM_QUIT 也参与 pred），删掉旧的两处'过滤即 peek(true)'；② TranslateMessage 真投 WM_CHAR/WM_SYSCHAR（字符表 + Shift/CapsLock 只读既有 keyDown 影子表、lParam 沿用按键消息的重复计数/scancode、未覆盖键不投并写明理由与文档 URL）。守卫 4 条合同（keeps-messages / range / noremove-keeps / translate-keydown-char），修前红 306 checks 24 failures（第二步 Peek(B) 拿到 0、字符 Peek 全 0）；变异把 peekMatching 改成不匹配也 pop_front ⇒ 当场红（父级复跑 1/1 红）。合同表新增 L1-MSG-06 并把 L1-MSG-01 的'URL 待补'与过期行号修正。已知未建模：PeekMessageA(hWnd=-1) 的线程消息特例（此前就没有，建议单开）；数字+Shift 与 VK_OEM_102/ABNT/假名/IME 不投（不臆造布局）。
 - tags: [emulator-lift, shim, contract, user32]
 
 ## 现象（2026-11-13，分析时读代码发现；父级已逐行复核）

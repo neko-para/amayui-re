@@ -38,6 +38,11 @@
 //     源 × 调制色（Color 的 A/R/G/B）→ 目标；ALPHABLEND ⇒ SRCALPHA/INVSRCALPHA。
 //     ★ **光栅只有 GPU 一条实现**（`REQ-01M7AAXNJY2PACYJHYVRV620Q5` 删掉了 CPU 逐像素兜底）：
 //     GPU 不可用 / 表达不了这一条 ⇒ **记账（`skipped`）+ 跳过**，一像素都不写；⛔ 没有第二实现。
+//   · **反馈环**（`REQ-01M79ZRTHWWD296XRY5KYPR9J4`）：sprite 可以把像素写进绑定的纹理 RT（见上条），
+//     于是"同一批 sprite 采样**自己正在写的** RT"（`tbase == base`）变成新可达；而 sprite 路径
+//     **不经** `gpuEligible` ⇒ draw 路那条 `kUnRtFeedbackLoop` 管不到它。合成时逐条目判这个条件：
+//     **跳过这一条 sprite + 记具名位 43（`kUnSpriteRtFeedbackLoop`）+ warn**，⛔ 不静默读旧像素、
+//     ⛔ 不丢整帧。为什么选"这一条"而不是"整批/整帧"见 `compositeBatch` 里那段注释。
 //   · 纹理：`Draw` 支持两种源 ——
 //     ① `pTexture == NULL`：D3D9 固定功能"没有绑定纹理 ⇒ 采样白色"（几何尺寸来自 pSrcRect；
 //        pSrcRect 也为 NULL ⇒ 没有尺寸来源 ⇒ loud trap，⛔ 不猜 1×1）；

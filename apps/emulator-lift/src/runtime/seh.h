@@ -14,10 +14,15 @@
 //     - `RaiseException`：在 guest 栈上铺 `EXCEPTION_RECORD`(0x50) / `CONTEXT`(x86, 0x2CC) /
 //       `DISPATCHER_CONTEXT`(0x40, 全 0)，沿 `fs:[0]` 链逐帧调 `handler(pExcRec, pRN, pCtx, pDC)`，
 //       读 EAX（disposition）：0 = 继续找、1 = 装载 CONTEXT 继续执行、2 = 嵌套（只记一行）。
+//       ★ **disposition=1 有一个文档化的例外**（本文件的硬口径 5）：原 record 的
+//       `ExceptionFlags & EXCEPTION_NONCONTINUABLE` 时，"继续执行"**不成立** —— 真机在这一点上
+//       **改抛** `EXCEPTION_NONCONTINUABLE_EXCEPTION`（`0xC0000025`），**不是**装载 CONTEXT。
+//       判据不是"CONTEXT 有没有被改"：实测（见 seh.cpp 的 `kExceptionNonContinuable` 注释）**改了 CONTEXT
+//       也照样改抛** ⇒ 本线在那里**响亮停**（`SehStep::noncontinuable_violation`），⛔ 不再静默继续。
 //     - `RtlUnwind`：`ExceptionFlags |= 2`（EXCEPTION_UNWINDING）、逐帧调 handler、
 //       收尾把 `fs:[0]` 落到 `TargetFrame`；`TargetIp != 0` ⇒ **不返回**（跳 TargetIp）。
 //
-// ★ 四条硬口径（每条都有取证，⛔ 不要凭 x86 常识改）：
+// ★ 五条硬口径（每条都有取证，⛔ 不要凭 x86 常识改）：
 //   1. **参数原样透传**：guest 的 `CallCatchBlock` 自己按 `EXCEPTION_RECORD` 的
 //      `code@+0x00` / `NumberParameters@+0x10` / `ExceptionInformation[0]@+0x14` 校验
 //      （0x4F00F8 / 0x4F0100 / 0x4F0109：`Info[0] ∈ {0x19930520,21,22}`）⇒ 宿主**不许**合成 0x1994000。
@@ -30,6 +35,15 @@
 //   4. **`TargetFrame` 的值语义**：不含端点（handler 只为"比它更内层"的 record 调）+
 //      收尾 `fs:[0] = TargetFrame`（`__global_unwind2` 自己**不**恢复 `fs:[0]`，那是 RtlUnwind 的责任；
 //      `_UnwindNestedFrames` 的续点会自己再链一次）。端点判据在夹具 C 里钉住。
+//   5. **`EXCEPTION_NONCONTINUABLE` + `disposition=1` ⇒ 不许继续执行**（`REQ-01M72GAA7CVKBPP9QRT0PRPBTM`）：
+//      文档：`dwExceptionFlags` = `EXCEPTION_NONCONTINUABLE` 时"**任何**继续执行的尝试都会导致
+//      `EXCEPTION_NONCONTINUABLE_EXCEPTION`"（`0xC0000025`）——
+//      <https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-raiseexception>
+//      该异常码的默认文本是"{EXCEPTION} Cannot Continue Windows cannot continue from this exception."
+//      （`STATUS_NONCONTINUABLE_EXCEPTION`）——
+//      <https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/596a1078-e883-4972-9bbc-49e60bebca55>
+//      ★ 判据是**旗标**，不是"CONTEXT 有没有被改"（实测见 seh.cpp 的 `kExceptionNonContinuable` 注）。
+//      ⇒ 本线在那里**响亮停**（独立停因 `StopReason::NonContinuableException`）。
 //
 // ★ 派发期间的两条**宿主侧**不变量（见 machine.cpp 的接线）：
 //   · 影子栈（`WindowProfiler`）：展开是"不经 `ret` 的跳转" ⇒ 落地时按"新 esp"丢帧
@@ -39,7 +53,9 @@
 //
 // ⛔ 明确不做（本单的边界）：`_global_unwind2` / `_local_unwind2`（它们是 guest 代码）·
 //   RTTI / catch 对象拷贝 / `__finally` · VEH / 未处理异常过滤器 / `RtlUnwindEx` / `NtContinue` ·
-//   x64 `.pdata` 表驱动展开 · 把宿主 fault 变成 guest SEH。
+//   x64 `.pdata` 表驱动展开 · 把宿主 fault 变成 guest SEH ·
+//   **改抛 `0xC0000025` 之后的第二次派发**（真机把新 record 再走一遍 `fs:[0]` 链；本线在
+//   `noncontinuable_violation` 处响亮停 —— 见 `design-notes.md` 的 L3-seh-01，重开条件 = 出现消费者）。
 #pragma once
 
 #include <cstdint>
@@ -76,6 +92,10 @@ struct SehStep {
     //   （"进入时 esp 落在这个值之下"的帧就是被跳过的帧）。
     std::uint32_t eip = 0;
     std::uint32_t esp = 0;
+    // Stop：这一次停是不是"非连续异常被 handler 要求继续执行"（= 真机会改抛 0xC0000025 的那一处）。
+    //   ★ 独立停因（`StopReason::NonContinuableException`），⛔ 不并进 `UnhandledException`：
+    //     "没人接这个异常"与"有人接了却要求继续一个不许继续的异常"是两件事，处置也不同。
+    bool noncontinuable_violation = false;
 };
 
 // 派发状态机。一台 `Machine` 一份；**跨块迭代存活**（状态里只有 guest EA 与整数，⛔ 不持宿主指针）。
@@ -124,6 +144,12 @@ private:
         std::uint32_t frame_base = 0;   // 结构区底（对齐后）；合成帧从它往下铺
         std::uint32_t rec[0x50 / 4] = {};
         std::uint32_t ctx[0x2CC / 4] = {};
+        // 调 handler **之前**那一份 CONTEXT（宿主发出前的深拷贝）。用途只有一个：
+        // 判"handler 到底有没有改 CONTEXT"，好让 `disposition=1` 的日志/停因说清是
+        // "改了（真机也会改抛 0xC0000025）"还是"一个字都没改（照字面装载 = 回到 raise 的下一条
+        // ⇒ 异常被静默丢弃，正是 `REQ-01M72GAA7CVKBPP9QRT0PRPBTM` 的现场）"。
+        // ⛔ 它**不参与**判定（判据是旗标，见硬口径 5）。
+        std::uint32_t ctx_at_call[0x2CC / 4] = {};
         // record 是**我们自己造的**（Raise / RtlUnwind 传 NULL 时的本地 record）⇒ 每次调 handler 前重铺；
         // 借来的（`RtlUnwind` 的 arg3 = 外层 record）⇒ ⛔ 不回写，只读 flags。
         bool owns_record = true;

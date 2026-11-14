@@ -2547,13 +2547,19 @@ int caseLineTexturedLoudReject() {
 //
 // 判据（红了意味着什么）：caps 是**声明**，不是愿望清单。某位声明了，就必须有一个行为能兑现它；
 //   兑现不了 = 那一行是假话（真机会让引擎走进本线没实现的路径，而本线只能拒绝或无视）。
-//   ⇒ 每条见证都写成**双向蕴含 `声明 ⇔ 行为`**（⛔ 不抄 caps 的目标数字，改 caps 时不用改这里；
+//   ⇒ 见证分成两种写法（⛔ 不抄 caps 的目标数字，改 caps 时不用改这里；
 //     `d3d9.h` 的 `kCaps*Claim` 只给实现与变异清单引用 —— 守卫若拿它当期望值，断言就退化成
 //     "实现 == 自己"的恒真式，改 caps 时两边一起变、永远绿）：
+//     · 声明了的位 ⇒ **双向蕴含 `声明 ⇔ 行为`**（①②③⑤⑥⑦⑧）；
+//     · 没声明（兑现不了）的位 ⇒ **显式断言两件独立的事**：caps 里**没有**这一位 + 对应行为是
+//       **响亮拒绝**（④）。⛔ 这里**不**写 `caps_bit ⇔ suppressed`：那个式子的另一半恰好把
+//       "撤掉假位"判成红 —— 等于用测试把假话钉死（`REQ-01M7AZ65EAE7Q6STW2S0ZNXGM4`）。
 //     ① `LineCaps.TEXTURE` ⇔ 带纹理的线 **S_OK**（同一行为由 `d3d9/line-textured-loud-reject` 盯）；
 //     ② `LineCaps.ZTEST` ⇔ `ZENABLE=1 + ZFUNC=NEVER` 的线 **0 像素**；
 //     ③ `LineCaps.BLEND` ⇔ 线在 `ALPHABLENDENABLE + SRCALPHA/INVSRCALPHA` 下**混合**（不是纯顶点色）；
-//     ④ `LineCaps.ALPHACMP` ⇔ `ALPHATESTENABLE=1 + ALPHAFUNC=NEVER` 的线 **0 像素**；
+//     ④ `LineCaps.ALPHACMP` 在 caps 里**没有**（alpha test 未实现 ⇒ 不能表达就清 0），而带
+//        `ALPHATESTENABLE=1` 的 Draw **整批被拒**：`D3DERR_INVALIDCALL` + `skipped_draws +1` +
+//        具名位 bit30（⛔ 不是"alpha test 逐片元把像素挡掉"）；
 //     ⑤ `StencilCaps` ⇔ `STENCILENABLE=1 + STENCILFUNC=NEVER` 的 draw **0 像素**
 //        （本线没有模板缓冲 ⇒ 声明非 0 就意味着这个 draw 必须被挡住）；
 //     ⑥ RasterCaps 的 FOG 位 / ShadeCaps 的三个 FOG 位 ⇔ `FOGENABLE=1 + FOGCOLOR` **改像素**；
@@ -2565,6 +2571,9 @@ int caseLineTexturedLoudReject() {
 //   ★ 修前红（**缺陷复现**，不是防漂移）：LineCaps=0x1F 声明了 TEXTURE 而带纹理线 INVALIDCALL；
 //     StencilCaps=0x1FF 而 stencil 被无视；RasterCaps 实为 ZFOG 而雾不改像素；
 //     blend/ZCmp 位是从别处抄来的（不是试探出来的）。
+//   ★ ④ 的修前红方向与上面**相反**：caps 还声明 `ALPHACMP(0x08)`（旧值 0x0E）时"caps 里没有这一位"
+//     当场红 —— 这正是撤位的理由；旧写法 `caps_bit ⇔ suppressed` 在撤位**之前**是绿的（假话被锁住），
+//     撤位之后才红。
 // =======================================================================================
 // D3D SDK 的位值（不是本线的声明值；只用来读 caps 的字段）
 constexpr std::uint32_t kD3dLineCapsTexture = 0x00000001u;   // D3DLINECAPS_TEXTURE
@@ -2579,6 +2588,7 @@ constexpr std::uint32_t kD3dStencilCapsAny = 0x000001FFu;  // D3DSTENCILCAPS_*�
 constexpr std::uint32_t kUnBitFog = 2u;
 constexpr std::uint32_t kUnBitStencil = 3u;
 constexpr std::uint32_t kUnBitClipPlane = 7u;
+constexpr std::uint32_t kUnBitAlphaTest = 30u;  // kUnGpuAlphaTest（ALPHATESTENABLE=1 整批拒绝）
 constexpr std::uint32_t kDevGetDeviceCaps = 0x1Cu;
 
 int caseCapsClaims() {
@@ -2683,20 +2693,38 @@ int caseCapsClaims() {
         LIFT_CHECK_EQ_U32(setState(kRsAlphaBlendEnable, 0u), kHrOk);
     }
 
-    // ---- ④ LineCaps.ALPHACMP：ALPHATESTENABLE=1 + ALPHAFUNC=NEVER ⇒ 0 像素 ----
-    // ★ **语义未定，见 defects/observations**：GPU 准入明确拒绝 alpha test（`kUnGpuAlphaTest`）
-    //   ⇒ 这一批现在是"整批被拒"（`D3DERR_INVALIDCALL`）而不是"alpha test 把像素挡掉"。
-    //   于是"0 像素"仍成立，但**原因变了**；caps 是否还该声明 ALPHACMP 需要产品裁决
-    //   ⇒ 本单**不猜**：caps 声明与行为见证保持现状，只把 Draw 的返回码改成真话。
+    // ---- ④ LineCaps.ALPHACMP：caps **不声明**它，而带 alpha test 的 Draw **整批被拒** ----
+    // ★ 两件**独立**的事（`REQ-01M7AZ65EAE7Q6STW2S0ZNXGM4` 备选路；理由见 `d3d9.h` 的
+    //   `kCapsLineClaim` 与 `OBS-20261114-09`）：
+    //   ① alpha test 未实现（片元着色器没有 alpha 比较）⇒ caps 没有"拒绝"动作 ⇒ **不能表达就清 0**；
+    //   ② 行为是**响亮拒绝**（`D3DERR_INVALIDCALL` + `skipped_draws +1` + 具名位 bit30），
+    //      不是"alpha test 逐片元把像素挡掉"。⛔ 不再写 `caps_bit ⇔ suppressed`：那个式子在撤位
+    //      之后会红，等于把"caps 还在说谎"钉死。
     {
         LIFT_CHECK(sync());
         const int before = r.countNonBackground();
         LIFT_CHECK_EQ_U32(setState(kRsAlphaTestEnable, 1u), kHrOk);
         LIFT_CHECK_EQ_U32(setState(kRsAlphaFunc, lift::d3d9::kCmpNever), kHrOk);
+        // ① caps 这位**必须没有**（声明了就是假话：本线只会拒绝这个状态，不会执行它）。
+        LIFT_CHECK_EQ_U32((line_caps & kD3dLineCapsAlphaCmp) != 0u ? 1u : 0u, 0u);
+        // ② 带 alpha test 的批：拒批的账要对得上。`skipped` 是"GPU 没画"的唯一口径。
+        const lift::d3d9::GpuCoverage cov_before = lift::d3d9::gpuCoverage();
         LIFT_CHECK_EQ_U32(drawLine(24, 0xFFFFFFFFu), lift::d3d9::kInvalidCall);
+        const lift::d3d9::GpuCoverage cov = lift::d3d9::gpuCoverage();
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(cov.skipped_draws),
+                          static_cast<std::int64_t>(cov_before.skipped_draws + 1u));
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(cov.queued),
+                          static_cast<std::int64_t>(cov_before.queued));  // ⛔ 没入队
+        const std::string kAlphaTestWhy = "GPU 不支持 alpha test（ALPHATESTENABLE=1）";
+        const auto why_it = cov.skipped_reasons.find(kAlphaTestWhy);
+        LIFT_CHECK(why_it != cov.skipped_reasons.end());
+        if (why_it != cov.skipped_reasons.end())
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(why_it->second), 1);
+        // 具名位也进了 `unsupported`（bit30）—— 默认级别只有这一行与 `skipped top:` 两条线索。
+        LIFT_CHECK(unsupportedBit(kUnBitAlphaTest));
         LIFT_CHECK(sync());
-        const bool suppressed = r.countNonBackground() == before;
-        LIFT_CHECK_EQ_U32((line_caps & kD3dLineCapsAlphaCmp) != 0u ? 1u : 0u, suppressed ? 1u : 0u);
+        // 整批不画 ⇒ 后缓冲**没有新像素**（这是玩家可见后果，⛔ 不是 caps 的见证）。
+        LIFT_CHECK_EQ_U32(r.countNonBackground() == before ? 1u : 0u, 1u);
         LIFT_CHECK_EQ_U32(setState(kRsAlphaTestEnable, 0u), kHrOk);
     }
 

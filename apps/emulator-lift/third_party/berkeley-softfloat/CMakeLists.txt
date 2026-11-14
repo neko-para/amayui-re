@@ -42,3 +42,24 @@ set_target_properties(berkeley-softfloat PROPERTIES
 if (WIN32)
     target_compile_options(berkeley-softfloat PRIVATE /w)
 endif()
+
+# ★ 给**消费者**强制前置 include `platform.h`（`REQ-01M773EFSYYE97YKEA6TQEQ53J`）。
+#   为什么需要：`source/include/softfloat.h:53-54`（与 `source/softfloat_state.c:43-44`）有
+#   `#ifndef THREAD_LOCAL ⇒ #define THREAD_LOCAL`（**空**）的兜底 ⇒ 任何 TU 若**先** include
+#   `softfloat.h`、没先 include `platform.h`，编译 + 链接都过，运行时却把 **TLS 模板**当变量访问
+#   （库写的是每线程 TLS 块）：实测库置的位在消费方读回 `0`，复审在 macOS 上读到过 `248`。
+#   **静默**错误 —— 今天没有这样的 TU，但下一处 include 就会中。前置 include 把这条路从结构上关掉。
+#   ★ 为什么是 `INTERFACE`：本目录的 `.c` 自己都先 include `platform.h`（那也是 `#pragma once`
+#     的同一个文件，重复 include 无害）；要救的是**消费者**，所以只能挂在 INTERFACE 上
+#     （改成 `PRIVATE` ⇒ 消费者拿不到 ⇒ CTest `softfloat-tls` 红，见 `tools/mutate-check.mjs`）。
+#   ★ 为什么用相对名 `platform.h` 而不是绝对路径：消费者在**别的目录**里编译，绝对路径会把
+#     构建目录绑死在这台机器上。`platform.h` 所在的 vendor 根已在上面
+#     `target_include_directories(... PUBLIC ...)` 里 ⇒ 两种驱动的 include 路径搜索都能找到它。
+#   ★ `/FI` 已在 windows-x64（clang-cl）实测：加了它，消费方 TU 在**任何 include 之前**就看得见
+#     `THREAD_LOCAL` / `LITTLEENDIAN`（两个宏只有 `platform.h` 定义）。
+if (MSVC)
+    # clang-cl 也走这一支（CMake 对 MSVC ABI 的 clang 同样置 MSVC=1）
+    target_compile_options(berkeley-softfloat INTERFACE /FIplatform.h)
+else()
+    target_compile_options(berkeley-softfloat INTERFACE -include platform.h)
+endif()

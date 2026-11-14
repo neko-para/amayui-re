@@ -422,7 +422,9 @@ public:
             depth_w_ = width;
             depth_h_ = height;
             // 新建的 depth 内容是未定义的 ⇒ 必须清（这是唯一"换 target 会清深度"的情形）
+            // ★ 清值 = 1.0（D3D9 新建深度附件的初值）：这条路不是 guest 的 `Clear` ⇒ 不带 z。
             need_depth_clear_ = true;
+            need_depth_clear_z_ = 1.0f;
         }
         dirty_ = false;
         // 新 target 的内容是未定义的 ⇒ 不能声称"本帧已经在 target 里"
@@ -952,12 +954,12 @@ public:
             if (!seg_has_draws) continue;
             if (gpuTraceEnabled()) {
                 std::fprintf(stderr,
-                             "[gpu-pass] seg=%zu/%zu draws=%zu..%zu first=%d need_clear=%d load=%d queue=%zu\n",
+                             "[gpu-pass] seg=%zu/%zu draws=%zu..%zu first=%d need_clear=%d load=%d z=%g queue=%zu\n",
                              seg_index, segments_.size(), seg.first_draw, draw_end, first_render_pass ? 1 : 0,
                              need_depth_clear_ ? 1 : 0,
                              static_cast<int>((need_depth_clear_ && first_render_pass) ? SDL_GPU_LOADOP_CLEAR
                                                                                         : SDL_GPU_LOADOP_LOAD),
-                             queue_.size());
+                             static_cast<double>(need_depth_clear_ ? need_depth_clear_z_ : 1.0f), queue_.size());
             }
             // render pass：color 始终 LOAD（第二段起必须保留前面画的内容）
             SDL_GPUColorTargetInfo color{};
@@ -968,7 +970,12 @@ public:
             //   ⛔ 每段都 CLEAR 会把先画进去的深度清掉（后画的内容就会被错误接受）。
             SDL_GPUDepthStencilTargetInfo depth{};
             depth.texture = depth_;
-            depth.clear_depth = 1.0f;
+            // ★ 清值 = **guest 给的那个 z**（`REQ-01M6RMVJTTM8PDNXB39TVJ40WN`）：`d3d9::clear` 把
+            //   `Clear(...,D3DCLEAR_ZBUFFER, ..., z, ...)` 的 z 一路带到这里。⛔ 不许写死 1.0 ——
+            //   那样 guest 清 0.25 时 GPU 从 1.0 起步，后续 `z_enable` 批按错的初值判深度。
+            //   ★ 走"新建 depth 附件"那条路（`rasterPrepare`）时 `need_depth_clear_z_` 已被置回 1.0。
+            //   ★ 诊断臂（`LIFT_GPU_DEPTH_CLEAR=frame`）没有 z 可带 ⇒ 用 D3D9 的初值 1.0。
+            depth.clear_depth = need_depth_clear_ ? need_depth_clear_z_ : 1.0f;
             // ★ 诊断（`LIFT_GPU_DEPTH_CLEAR=frame`）：把"每个 flush 的第一段"当成需要清 —— 用来
             //   **验证**"深度附件自创建后没再清过"这条根因（`LIFT_GPU_FF_TEX` 的 `[gpu-depth]` 显示
             //   `arm=clear` 一次都没有）。语义上它就是"每帧清一次深度"，⛔ 缺省关闭、不是修复。
@@ -1108,18 +1115,23 @@ public:
         return false;
     }
 
-    void rasterRequestDepthClear() override {
+    void rasterRequestDepthClear(float z) override {
         // ★ 交付契约（与 `gpu_raster.h` 的同名注释同口径）：一次 arm ⇒ **下一次真的录到 render pass
-        //   的 flush** 的第一个 render pass 用 `LOADOP_CLEAR` 清成 1.0；多次 arm 合并；不绑 target 身份。
-        //   ⛔ 调用方必须**先 flush 队列再 arm**；本场景实测第一帧 `arm=clear seq=0 queue=1`
-        //   （窄窗**已命中**，但那条是不带批号的 sprite ⇒ 它关深度测试/写 ⇒ 无后果；见 gpu_raster.h）。
+        //   的 flush** 的第一个 render pass 用 `LOADOP_CLEAR` 清成 **z**（逐位，⛔ 不写死 1.0；见
+        //   `REQ-01M6RMVJTTM8PDNXB39TVJ40WN`）；多次 arm 合并成一次；不绑 target 身份。
+        //   ★ z 的接受域由**调用方**保证（`d3d9::clear` 在 arm 之前拒绝 [0,1] 之外的值 + 记账）
+        //     ⇒ 这里收到的 z 一定在域内，后端只负责原样交给 `clear_depth`。
+        //   ★ 调用方必须**先 flush 队列再 arm**（`REQ-01M73XEB594ZY8TA76S0EX4512` 已修）；
+        //     `queue=0` 是本契约的可观测判据 ⇒ 打进诊断行。
         //   ★ 诊断（`LIFT_GPU_FF_TEX` 或 `LIFT_GPU_DEPTH_TRACE`）：`seq` = 到目前为止入队的带批号
         //   draw 数 ⇒ 能判 arm 落在哪两批之间。
         if (gpuTraceEnabled()) {
-            std::fprintf(stderr, "[gpu-depth] arm=clear seq=%llu queue=%zu\n",
-                         static_cast<unsigned long long>(g_ff_tag_seq), queue_.size());
+            std::fprintf(stderr, "[gpu-depth] arm=clear seq=%llu queue=%zu z=%g\n",
+                         static_cast<unsigned long long>(g_ff_tag_seq), queue_.size(),
+                         static_cast<double>(z));
         }
         need_depth_clear_ = true;
+        need_depth_clear_z_ = z;
     }
 
     void rasterDiscardTarget() override {
@@ -1144,6 +1156,7 @@ public:
         target_pitch_ = 0;
         target_format_ = SurfaceFormat{};
         need_depth_clear_ = true;
+        need_depth_clear_z_ = 1.0f;  // 重建的 depth 内容未定义 ⇒ 回到 D3D9 的初值 1.0
         dirty_ = false;
         target_current_ = false;
     }
@@ -2340,9 +2353,10 @@ private:
     // ★ ⛔ 不是修复：缺省关闭、env 不设时与原行为逐指令相同（只是多读一次 static bool）。
     // ★ 诊断（`LIFT_GPU_DEPTH_CLEAR=frame`）：每个 flush 的第一段都把深度清成 1.0。
     //   用途 = 验证"深度附件只在 `rasterPrepare` 建 target 时清过一次"这条根因：
-    //   `d3d9::clear(ZBUFFER)` 的 arm 走的是 `m->gpuRaster()->rasterRequestDepthClear()`，而
-    //   `SdlWindow`（present_sdl）**没有转发**这个虚函数 ⇒ 后端拿到的一直是基类 no-op。
-    //   ⛔ 缺省关闭、不是修复（真修法是把转发补到 SdlWindow，那不在本单的允许改动面里）。
+    //   `d3d9::clear(ZBUFFER)` 的 arm 走的是 `m->gpuRaster()->rasterRequestDepthClear(z)`，而
+    //   `SdlWindow`（present_sdl）曾经**没有转发**这个虚函数 ⇒ 后端拿到的一直是基类 no-op
+    //   （`REQ-01M73P3GXW22Y467YGYPQSM571` 已修；本单又给转发补上了 z）。
+    //   ⛔ 缺省关闭、不是修复（真修法已落地：转发补在 SdlWindow + z 全链传值）。
     static bool depthClearEveryFlush() {
         static const bool on = [] {
             const char* v = std::getenv("LIFT_GPU_DEPTH_CLEAR");
@@ -2552,6 +2566,10 @@ private:
     std::vector<std::uint8_t> mip_scratch_;
     std::size_t queued_vertices_ = 0;
     bool need_depth_clear_ = true;
+    // ★ 清深度用的 z（`REQ-01M6RMVJTTM8PDNXB39TVJ40WN`）：由 `rasterRequestDepthClear(z)` 逐位存下，
+    //   flush 时**原样**进第一个 render pass 的 `clear_depth`。缺省 1.0 = D3D9 / 新建深度附件的初值
+    //   （`rasterPrepare` 建/重建 depth 时回到 1.0，那条路不是 guest 的 Clear）。
+    float need_depth_clear_z_ = 1.0f;
     // ★ dirty_ = 「**已提交**但尚未读回 guest」；队列/未提交上传也算脏 —— 对外只暴露
     //   `rasterDirty() = dirty_ || !queue_.empty() || hasPendingUploads()`（见 gpu_raster.h 的语义）。
     bool dirty_ = false;

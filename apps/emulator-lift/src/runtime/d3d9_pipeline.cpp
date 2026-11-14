@@ -231,13 +231,63 @@ enum UnsupportedBit : std::uint32_t {
     kUnGpuFilterUnmapped = 38, // MIN/MAG 的过滤值无法映射（如 `D3DTEXF_NONE`）—— 语义只剩这一条
     kUnGpuUntexturedOp = 39,  // 无纹理时 stage 0 的 op/arg 不等于顶点色
     kUnGpuNoBackend = 40,     // 没有 GPU 后端（生产不可能 / 内部 plan 为空）
+    // ---- 41：`REQ-01M7A3M73R3XYMM7J4KNQ1VNV7`（合法 D3DRS 的"只存"档）----
+    //   语义：**合法**（官方 `D3DRENDERSTATETYPE` 枚举成员）、本线不实现它的行为 ⇒
+    //   接受并原样存下，但⛔ 不静默：记这一位（"从响亮拒绝变成接受"本身就该留痕）。
+    //   ⛔ 不复用 26：26 是 C 档"值敏感拒绝"的判据，混用会让"拒绝"与"只存"在守卫里分不开
+    //     （守卫要断言 C 档有 26、B 档有 41；共用一个位时第二条恒真 = vacuous）。
+    kUnRenderStateStored = 41,
+    // ---- 42：`REQ-01M6RMVJTTM8PDNXB39TVJ40WN`（`Clear(ZBUFFER)` 的 z 越界）----
+    //   ★ 为什么**必须**新加一格、不能复用既有位：
+    //     · bit26 `kUnRenderStateUnknown` 是"C 档 D3DRS 值敏感拒绝"的判据（守卫断言 C 档有 26、
+    //       B 档有 41），复用会让"渲染状态被拒"与"Clear 参数被拒"在账上分不开 ⇒ 两条断言互成恒真；
+    //     · bit16 是"带纹理点/线被拒"、22 是**空号**（历史语义已删，注释明令不许复用）、
+    //       27 是 `ValidateDevice` 的预留格（明文"⛔ 不置位"）；
+    //     · 29..40 是 `gpuEligible` 的**逐条拒批原因**（每格一个 draw 准入理由），Clear 不是 draw；
+    //     · 0..20 全是**渲染状态 / 纹理状态**的名字。⇒ "`Clear` 的深度清除值越界"是**新的一类**：
+    //       API 参数接受域拒绝，且它同时挡掉"CPU 镜像 + GPU 附件"两处写入。
+    kUnDepthClearZ = 42,
+    // ---- 43：`REQ-01M79ZRTHWWD296XRY5KYPR9J4`（sprite 采样自己正在写的 RT）----
+    //   ★ 为什么**必须**新加一格、不能复用 28 `kUnRtFeedbackLoop`：
+    //     · 28 是 **draw 路径**（`gpuEligible`）的"同一批把 RT 当采样源"判据，守卫
+    //       `d3d9p/render-to-texture-feedback` 断言的是**它**。sprite 路径**不经**
+    //       `gpuEligible`（sprite 的合成在 `d3dx9_sprite.cpp` 里直接调 GPU 后端）⇒ 复用 28
+    //       会让"draw 路命中"与"sprite 路命中"在位图 / 计数上**分不开**，两条守卫也就互成
+    //       恒真（任一路置位都能让两边绿）。
+    //     · 0..42 的语义一格都没动（只追加）。
+    //   ★ 触发点（唯一）：`d3dx9::compositeBatch` 判定"这一条 sprite 要采样的纹理像素基址
+    //     == 本批要写的颜色目标像素基址" ⇒ 跳过这一条 + 记这一位。⛔ 不是"未实现"，
+    //     是**表达不了**（GPU 采样读上传缓存）⇒ 与 draw 路同一种拒绝语义。
+    kUnSpriteRtFeedbackLoop = 43,
 };
 
-// ★ A 档（实现）/ B 档（只存）的**唯一**白名单（`REQ-01M79PPA10JCKG4C9HY6QMV6PT`）：
-//   A = 有读点 / 有 case；B = 合法且无可观察副作用（被已记账的 master 门控，或真机也不读）。
-//   C 档（175/176/184/194/195）**不在这里**：它们是"合法但值敏感"，由 `setRenderState` 单独判。
-//   ⛔ 不把"未知就存下"当兼容：默认分支必须拒绝（210..255 根本不是 D3DRS）。
-constexpr bool knownRenderState(std::uint32_t state) {
+// ★ 合法 D3DRS 的**唯一**判据（`REQ-01M7A3M73R3XYMM7J4KNQ1VNV7`）：
+//   `SetRenderState` / `GetRenderState` 的**接受域**都只由这里决定 ⇒ 两处不可能再漂。
+//   判据 = 官方 `D3DRENDERSTATETYPE` 枚举成员（逐值核对；全集见
+//   <https://learn.microsoft.com/en-us/windows/win32/direct3d9/d3drenderstatetype>）。
+//   ★ 该枚举 **7..209 不是连续区间**：0..6 / 10..13 / 17..18 / 21 / 30..33 / 39..47 / 49..51 /
+//     61..127 / 144 / 149..150 / 153 / 164 / 169 / 177 / 196..197 都**不是** D3DRS 值；
+//     `D3DRS_FORCE_DWORD(0x7FFFFFFF)` 只用来钉枚举宽度，不是状态。
+//   ⛔ 不把"未知就存下"当兼容：非枚举值一律拒绝（210..255 也根本不是 D3DRS）。
+//
+// 四档（**都**是合法 D3DRS；⛔ 不要把"本线没实现"当成"非法"）：
+//   · Implemented         A 档：有 case / 有读点，行为已实现；
+//   · Stored              B 档（既有）：只存；副作用被**已记账**的 master 门控（雾 / 模板…），
+//                         或真机也不读（如 WRAP8..15 对应的坐标集 D3D9 用不到）⇒ 不记账；
+//   · StoredUnimplemented B 档（本单新增）：合法、本线不实现 ⇒ 存下 + `recordUnsupported(bit41)`。
+//                          ★ 本单新收的一批**统一记账**（不逐个论证 master 门控）：
+//                            "从响亮拒绝变成接受"这件事本身就该留痕，否则就是本单要消除的那种静默。
+//   · ValueSensitive      C 档：合法但**值敏感**（惰性值 0 放行；有效值 ⇒ INVALIDCALL + bit26）。
+//                         值判断在 `setRenderState` 的 case 里，**先于** default 命中。
+enum class RenderStateTier : std::uint8_t {
+    Invalid,  // 不在官方枚举里 ⇒ INVALIDCALL 且**不记账**
+    Implemented,
+    Stored,
+    StoredUnimplemented,
+    ValueSensitive,
+};
+
+constexpr RenderStateTier renderStateTier(std::uint32_t state) {
     switch (state) {
         // ---- A 档：实现 ----
         // ★ 只收**官方 `D3DRENDERSTATETYPE` 枚举里有的值**：1 与 138 不在枚举里
@@ -248,26 +298,55 @@ constexpr bool knownRenderState(std::uint32_t state) {
         case 14: case 15: case 16:
         case 19: case 20:
         case 22: case 23: case 24: case 25: case 26: case 27: case 28: case 29:
+        case 52:  // STENCILENABLE：case 里有（value!=0 ⇒ 记 bit3）
         case 60:
         case 136: case 137: case 139: case 141:
-        case 145:
+        // ★ 四个材质来源（145–148）由 `materialSourceColor` 真读；146–148 是本单从 B 档升上来的。
+        case 145: case 146: case 147: case 148:
         case 151: case 152:
         case 154: case 155: case 156: case 157: case 158: case 159: case 160:
         case 161: case 162:
         case 166: case 167: case 168:
         case 170: case 171: case 174:
         case 206: case 207: case 208: case 209:
-        // ---- B 档：只存 ----
+            return RenderStateTier::Implemented;
+        // ---- B 档（既有）：只存 ----
         case 34: case 35: case 36: case 37: case 38:                 // FOG*（FOGENABLE=28 记 bit2）
         case 53: case 54: case 55: case 56: case 57: case 58: case 59:  // STENCIL*（记 bit3）
-        case 128: case 129: case 130: case 131: case 132: case 133: case 134: case 135:  // WRAPn
+        case 128: case 129: case 130: case 131: case 132: case 133: case 134: case 135:  // WRAP0..7
+        // ★ LOCALVIEWER(142) / NORMALIZENORMALS(143) 仍是**只存不读**：本单未实现它们的
+        //   `0` 一侧（`REQ-01M7460MRJ6D82PWG6P6MX9WG9` 的"未做"）。⛔ 不记 bit41 的原因写在这里
+        //   （⛔ 不是静默项）：本线的光照数学**恒按两者为 TRUE** 做 —— `applyLighting` 的
+        //   `vdir` 是"顶点 → 眼"（= LOCALVIEWER=TRUE），法线在进光照方程前**总是**归一化
+        //   （= NORMALIZENORMALS=TRUE）⇒ 这是**已声明的近似**，不是"没实现的能力"；
+        //   而记账面（bit41）的语义是"合法但本线不实现"，把它们记进去会把已声明的近似
+        //   误报成缺口，也会让默认值（两者默认都是 0）在每次 Set 时都响一次。
         case 140: case 142: case 143:                                // FOGVERTEXMODE / LOCALVIEWER / NORMALIZENORMALS
         case 185: case 186: case 187: case 188: case 189:            // CCW STENCIL*
-        case 190: case 191: case 192: case 193:                      // COLORWRITEENABLE1..3 / BLENDENABLE
-            return true;
+        case 190: case 191: case 192: case 193:                      // COLORWRITEENABLE1..3 / BLENDFACTOR
+            return RenderStateTier::Stored;
+        // ---- B 档（本单新增）：合法、本线不实现 ⇒ 存下 + 记 bit41（新收的一批统一记账）----
+        //   ★ 修前这一批落进 default 的 "不在白名单" ⇒ 被当成**非 D3DRS** 拒绝（是错的：
+        //     它们在官方枚举里）。本单只补接受域与记账，⛔ 不实现它们的行为。
+        case 48:                                                     // RANGEFOGENABLE
+        case 163:                                                    // PATCHEDGESTYLE
+        case 165:                                                    // DEBUGMONITORTOKEN
+        case 172: case 173:                                          // POSITIONDEGREE / NORMALDEGREE
+        case 178: case 179: case 180: case 181: case 182: case 183:  // *TESSELLATIONLEVEL / ADAPTIVETESS_X..W
+        case 198: case 199: case 200: case 201: case 202: case 203: case 204: case 205:  // WRAP8..15
+            return RenderStateTier::StoredUnimplemented;
+        // ---- C 档：合法但值敏感（值判断在 `setRenderState` 的 case 里）----
+        case 175: case 176: case 184: case 194: case 195:
+            return RenderStateTier::ValueSensitive;
         default:
-            return false;
+            return RenderStateTier::Invalid;
     }
+}
+
+// ★ 名字里的 known = **官方枚举里存在**（= 合法），⛔ 不是"本线实现了"。
+//   Set / Get 都只用它 ⇒ "Set 拒、Get 收"那类不对称在同一处消失。
+constexpr bool knownRenderState(std::uint32_t state) {
+    return renderStateTier(state) != RenderStateTier::Invalid;
 }
 // ★ 顶点声明绑定时的代际（配对 `kPlVertexDecl`；追加在末尾 ⇒ 不挪任何既有偏移）。
 //   用途：`SetVertexDeclaration` / `SetFVF` 换绑 / 设备销毁时对**旧声明**做 `releaseIf(EA, 代际)`，
@@ -566,6 +645,9 @@ const char* unsupportedBitName(std::uint32_t bit) {
     if (bit == kUnGpuFilterUnmapped) return "GPU 过滤值无法映射";
     if (bit == kUnGpuUntexturedOp) return "GPU 无纹理 op";
     if (bit == kUnGpuNoBackend) return "GPU 无后端";
+    if (bit == kUnRenderStateStored) return "合法 D3DRS（只存）";
+    if (bit == kUnDepthClearZ) return "Clear(ZBUFFER) 的 z 越界";
+    if (bit == kUnSpriteRtFeedbackLoop) return "sprite 反馈环";
     return "未分配";
 }
 
@@ -915,20 +997,41 @@ void splitColor(std::uint32_t color, double* a, double* r, double* g, double* b)
 }
 
 // 固定功能光照（Gouraud；只在 LIGHTING=1 且顶点有法线时做）
-void applyLighting(X86& cpu, std::uint32_t pe, const math::Vec3d& world_pos,
-                   const math::Vec3d& world_normal, const math::Mat4d& view, double lit[4]) {
+void applyLighting(X86& cpu, std::uint32_t pe, const FvfLayout& fvf, const CVertex& v,
+                   const math::Vec3d& world_pos, const math::Vec3d& world_normal, const math::Mat4d& view,
+                   double lit[4]) {
     MaterialState mat;
     readMaterial(cpu, pe, &mat);
-    // 材质来源（diffuse/ambient）——COLORVERTEX 为真有顶点色时用顶点色（在 Draw 里覆盖）
+    // ★ 四个材质来源走**同一份**选择逻辑（`materialSourceColor`）：`D3DRS_COLORVERTEX=0` ⇒ 顶点色
+    //   不参与光照（恒用材质）；=1 ⇒ 按各自的 `*MATERIALSOURCE` 选 MATERIAL/COLOR1/COLOR2。
+    //   ⛔ 不要在这里各写一遍 `if (source == 1)`：那正是修前"diffuse 一处特判、其余三个状态静默"的形状。
+    //   `COLOR1` = 顶点 diffuse（FVF_DIFFUSE）、`COLOR2` = 顶点 specular（FVF_SPECULAR）；
+    //   对应顶点色不在 FVF 里 ⇒ 传 nullptr（选择函数回退材质）。
+    const double vertex_diffuse[4] = {v.r / 255.0, v.g / 255.0, v.b / 255.0, v.a / 255.0};
+    const double vertex_specular[4] = {v.sr / 255.0, v.sg / 255.0, v.sb / 255.0, v.sa / 255.0};
+    const double* color1 = fvf.has_diffuse ? vertex_diffuse : nullptr;
+    const double* color2 = fvf.has_specular ? vertex_specular : nullptr;
+    const std::uint32_t color_vertex = rsOf(cpu, pe, kRsColorVertex);
+    double diffuse[4], ambient[4], specular[4], emissive[4];
+    materialSourceColor(color_vertex, rsOf(cpu, pe, kRsDiffuseMaterialSource), mat.diffuse, color1, color2,
+                        diffuse);
+    materialSourceColor(color_vertex, rsOf(cpu, pe, kRsAmbientMaterialSource), mat.ambient, color1, color2,
+                        ambient);
+    materialSourceColor(color_vertex, rsOf(cpu, pe, kRsSpecularMaterialSource), mat.specular, color1, color2,
+                        specular);
+    materialSourceColor(color_vertex, rsOf(cpu, pe, kRsEmissiveMaterialSource), mat.emissive, color1, color2,
+                        emissive);
     const math::Vec3d cam_pos = math::transformPoint3D3D(view, world_pos);
     const math::Vec3d n =
         math::normalized3D3D(math::transformVector3D3D(view, math::normalized3D3D(world_normal)));
     const std::uint32_t ambient_argb = rsOf(cpu, pe, kRsAmbient);
     double ga = 0, gr = 0, gg = 0, gb = 0;
     splitColor(ambient_argb, &ga, &gr, &gg, &gb);
-    double r = mat.emissive[0] + mat.ambient[0] * (gr / 255.0);
-    double g = mat.emissive[1] + mat.ambient[1] * (gg / 255.0);
-    double b = mat.emissive[2] + mat.ambient[2] * (gb / 255.0);
+    double r = emissive[0] + ambient[0] * (gr / 255.0);
+    double g = emissive[1] + ambient[1] * (gg / 255.0);
+    double b = emissive[2] + ambient[2] * (gb / 255.0);
+    // ★ alpha 不参与材质来源选择（本线口径：顶点色的 alpha 不在这里替换材质 alpha；见单
+    //   `REQ-01M7460MRJ6D82PWG6P6MX9WG9` 的"最小语义"）。
     const double alpha = mat.diffuse[3];
     for (std::uint32_t i = 0; i < kMaxLights; ++i) {
         if (plGet(cpu, pe, kPlLightEnabled + i * 4u) == 0) continue;
@@ -963,9 +1066,9 @@ void applyLighting(X86& cpu, std::uint32_t pe, const math::Vec3d& world_pos,
         double ndl = glm::dot(n, ldir);
         if (ndl < 0.0) ndl = 0.0;
         if (ndl > 0.0) {
-            r += ls.diffuse[0] * mat.diffuse[0] * ndl * atten;
-            g += ls.diffuse[1] * mat.diffuse[1] * ndl * atten;
-            b += ls.diffuse[2] * mat.diffuse[2] * ndl * atten;
+            r += ls.diffuse[0] * diffuse[0] * ndl * atten;
+            g += ls.diffuse[1] * diffuse[1] * ndl * atten;
+            b += ls.diffuse[2] * diffuse[2] * ndl * atten;
         }
         // 镜面：LOCALVIEWER=FALSE 时 D3D 用 (0,0,-1)；这里统一用"顶点 → 眼"（更接近 LOCALVIEWER=TRUE）
         if (mat.power > 0.0 && rsOf(cpu, pe, kRsSpecularEnable) != 0) {
@@ -974,9 +1077,9 @@ void applyLighting(X86& cpu, std::uint32_t pe, const math::Vec3d& world_pos,
             double ndh = glm::dot(n, h);
             if (ndh < 0.0) ndh = 0.0;
             const double spec = std::pow(ndh, mat.power) * atten;
-            r += ls.specular[0] * mat.specular[0] * spec;
-            g += ls.specular[1] * mat.specular[1] * spec;
-            b += ls.specular[2] * mat.specular[2] * spec;
+            r += ls.specular[0] * specular[0] * spec;
+            g += ls.specular[1] * specular[1] * spec;
+            b += ls.specular[2] * specular[2] * spec;
         }
     }
     lit[0] = r > 1.0 ? 1.0 : (r < 0.0 ? 0.0 : r);
@@ -1388,6 +1491,62 @@ bool clipPointVertex(const DrawContext& ctx, const CVertex& v) {
 }  // namespace
 
 // =====================================================================================
+// `Clear(..., D3DCLEAR_ZBUFFER, ..., z, ...)` 的 z 接受域（`REQ-01M6RMVJTTM8PDNXB39TVJ40WN`）
+// =====================================================================================
+// ★ 为什么放在匿名命名空间**外面**：它要被 `d3d9.cpp::clear`（另一个 TU）调用 ⇒ 必须有外部链接。
+//   `recordUnsupported` / `kUnDepthClearZ` 在同一 TU 的匿名命名空间里，本文件能看见 ⇒ 不用外泄位图。
+// ★ 判据写成 `z >= 0 && z <= 1` 而**不是** `isfinite` 检查：NaN 与两个无穷在这个式子里**天然为假**
+//   ⇒ 一条判据覆盖全部越界形态（⛔ 不靠额外分支）。
+bool depthClearZInRange(float z) {
+    return z >= 0.0f && z <= 1.0f;
+}
+
+// 越界 ⇒ **显式拒绝 + 记账**（⛔ 不 clamp、⛔ 不静默丢弃）：
+//   · 账 = 具名位 42（进 `unsupported :`；`PipelineInfo::unsupported` 与进程镜像同一份写入）；
+//   · 声 = `pipeWarn`（默认 `warn` 级别可见；按 (调用点, 类别) 限流 ⇒ guest 每帧越界也不会刷屏）；
+//   · ⛔ 不复用 26 / 22 / 27（理由见 `enum UnsupportedBit` 的 42 那一格）。
+void noteDepthClearZRejected(X86& cpu, std::uint32_t pipeline_state, float z) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &z, sizeof(bits));
+    char what[192];
+    std::snprintf(what, sizeof(what),
+                  "Clear(ZBUFFER) 的 z=%g（0x%08X）不在 [0,1] ⇒ 拒绝清深度（⛔ 不 clamp、⛔ 不静默丢弃；"
+                  "深度缓冲未改）",
+                  static_cast<double>(z), bits);
+    if (pipeline_state != 0 && cpu.mem != nullptr && cpu.mem->committed(pipeline_state, kPlBytes) &&
+        cpu.mem->rd32(pipeline_state + kPlMagic) == kPlMagicValue) {
+        recordUnsupported(cpu, pipeline_state, kUnDepthClearZ, what, bits);
+        return;
+    }
+    // 没有流水线状态块 ⇒ 没有可记账的位图；仍然**出声**（⛔ 不静默：这一条是"没有位图就没账"的兜底）。
+    pipeWarn(PipeWarnCategory::Other, "Clear(ZBUFFER) 的 z", "%s（无流水线状态块 ⇒ 无法记账）", what);
+}
+
+// =====================================================================================
+// sprite 采样自己正在写的 RT（`REQ-01M79ZRTHWWD296XRY5KYPR9J4`）
+// =====================================================================================
+// ★ 为什么放在匿名命名空间**外面**：调用方是另一个 TU（`d3dx9_sprite.cpp` 的 `compositeBatch`）
+//   ⇒ 必须有外部链接。`recordUnsupported` / `kUnSpriteRtFeedbackLoop` 仍留在本 TU 的匿名命名
+//   空间里 ⇒ 位图不用外泄（只需要这一个窄入口）。
+// ★ 判据在调用方（"采样纹理像素基址 == 目标像素基址"）；这里只管记账 + 出声，⛔ 不做第二次判断
+//   （两份判断迟早会漂）。
+void noteSpriteRtFeedbackLoop(X86& cpu, std::uint32_t pipeline_state, std::uint32_t texture) {
+    char what[224];
+    std::snprintf(what, sizeof(what),
+                  "sprite 第 0x%08X 号纹理就是本批正在写入的渲染目标（像素同址）：GPU 采样读的是上传"
+                  "缓存、读不到本批像素 ⇒ 跳过这一条 sprite（⛔ 不静默读旧像素）",
+                  texture);
+    if (pipeline_state != 0 && cpu.mem != nullptr && cpu.mem->committed(pipeline_state, kPlBytes) &&
+        cpu.mem->rd32(pipeline_state + kPlMagic) == kPlMagicValue) {
+        recordUnsupported(cpu, pipeline_state, kUnSpriteRtFeedbackLoop, what, texture);
+    }
+    // ★ 记账之后**仍然**打这一行，而不是只靠 `recordUnsupported` 的"同一位只出声一次"：
+    //   sprite 的反馈环是**逐条目**事件（同一位第一次之后就被去重），而"这一条 sprite 被跳过"
+    //   本身必须每次可见 —— 与 `compositeBatch` 里其它跳过分支的口径一致。
+    pipeWarn(PipeWarnCategory::Other, "sprite 反馈环", "%s", what);
+}
+
+// =====================================================================================
 // 状态块生命周期
 // =====================================================================================
 std::uint32_t createForDevice(X86& cpu, std::uint32_t device_state, int width, int height, std::string* why) {
@@ -1633,18 +1792,32 @@ std::string unsupportedBitsOfRun(bool non_benign_only) {
 }
 
 // =====================================================================================
-// 渲染目标（SetRenderTarget）
+// 光照材质来源（`D3DRS_COLORVERTEX` + `D3DMCS_*`）
 // =====================================================================================
-std::uint32_t renderTargetArena(X86& cpu, std::uint32_t pipeline_state) {
-    if (pipeline_state == 0 || !cpu.mem->committed(pipeline_state, kPlBytes) ||
-        cpu.mem->rd32(pipeline_state + kPlMagic) != kPlMagicValue) {
-        return 0;
+// ★ 唯一一份选择逻辑（声明与语义见头文件）：`applyLighting` 的四个材质来源与
+//   `transformVertex` 的顶点 diffuse 调制都调它 ⇒ 不会出现"diffuse 一处特判、其余静默"。
+void materialSourceColor(std::uint32_t color_vertex, std::uint32_t material_source,
+                         const double material_rgba[4], const double* color1_rgba,
+                         const double* color2_rgba, double out_rgba[4]) {
+    const double* src = material_rgba;
+    // `COLORVERTEX=0` ⇒ 顶点色**不参与**光照：`*MATERIALSOURCE` 被忽略、恒用材质。
+    // （这是修前缺的那一半：状态只存不读 ⇒ 顶点色仍然乘进光照结果。）
+    if (color_vertex != 0u) {
+        if (material_source == kDmcsColor1 && color1_rgba != nullptr) {
+            src = color1_rgba;
+        } else if (material_source == kDmcsColor2 && color2_rgba != nullptr) {
+            src = color2_rgba;
+        }
     }
-    return plGet(cpu, pipeline_state, kPlColorArena);
+    for (int i = 0; i < 4; ++i) out_rgba[i] = src[i];
 }
 
-// ★ 颜色目标的唯一判据（声明与理由见 `d3d9_pipeline.h` 的 `ColorTarget`）：
-//   `prepareContext` 与 D3DXSprite 的 End/Flush 合成都调它 ⇒ 两者不可能对"目标是谁"有分歧。
+// =====================================================================================
+// 渲染目标（SetRenderTarget）
+// =====================================================================================
+// ★ 颜色目标的**唯一一份**判据（声明与理由见 `d3d9_pipeline.h` 的 `ColorTarget`）：
+//   `prepareContext` / `Clear` / `unlockRect` / D3DXSprite 的 End/Flush 合成都调它 ⇒
+//   不可能再对"目标是谁"有分歧。⛔ 不要再加一条直接读 `kPlColorArena` 的旁路。
 bool colorTargetOfState(X86& cpu, std::uint32_t pipeline_state, ColorTarget* out, std::string* why) {
     if (out == nullptr) return false;
     *out = ColorTarget{};
@@ -1995,8 +2168,21 @@ std::uint32_t setRenderState(X86& cpu, std::uint32_t dev, std::uint32_t state, s
             break;
         case kRsAlphaBlendEnable:
         case kRsAlphaTestEnable:
+        case kRsColorVertex:
             if (value > 1u) {
                 pipeLog("SetRenderState", "布尔状态=%u 非法 ⇒ D3DERR_INVALIDCALL", value);
+                return kInvalidCall;
+            }
+            break;
+        // ★ D3DMCS：`D3DRS_{DIFFUSE,SPECULAR,AMBIENT,EMISSIVE}MATERIALSOURCE`（145–148）的合法值域。
+        //   145 既有实现没做值校验（本单⛔ 不改它）；146–148 本单开始**真的读** ⇒ 与 145 同域收口
+        //   （0=MATERIAL / 1=COLOR1 / 2=COLOR2，其它值 ⇒ INVALIDCALL 且不写状态块）。
+        case kRsSpecularMaterialSource:
+        case kRsAmbientMaterialSource:
+        case kRsEmissiveMaterialSource:
+            if (value > kDmcsColor2) {
+                pipeLog("SetRenderState", "D3DMCS=%u 非法（只认 MATERIAL/COLOR1/COLOR2）⇒ D3DERR_INVALIDCALL",
+                        value);
                 return kInvalidCall;
             }
             break;
@@ -2062,14 +2248,25 @@ std::uint32_t setRenderState(X86& cpu, std::uint32_t dev, std::uint32_t state, s
             }
             break;
         default:
-            // ★ 合法但**不在 A∪B 白名单**的状态（含 0..209 的空洞）⇒ 拒绝，⛔ 不静默存下。
+            // ★ 合法但**没有 case** 的状态：白名单（= 官方枚举）外的值一律拒绝，⛔ 不静默存下。
+            //   ⛔ 不记 bit26：bit26 只给 C 档（合法 D3DRS 的**值敏感拒绝**）；"根本不是 D3DRS"
+            //   与"State 越界"同类（`REQ-01M79PPA10JCKG4C9HY6QMV6PT` 已裁决），⛔ 不冒充"未实现"。
             if (!knownRenderState(state)) {
                 char buf[192];
-                std::snprintf(buf, sizeof(buf), "State=%u 不在本线的 D3DRS 白名单（A∪B）", state);
-                // ★ **不记 bit26**：bit26 只给 C 档（合法 D3DRS 的有效值）；这里的空洞 / 210..255
-                //   与"State 越界"同类（`REQ-01M79PPA10JCKG4C9HY6QMV6PT` 已裁决）。
+                std::snprintf(buf, sizeof(buf),
+                              "State=%u 不是 D3DRENDERSTATETYPE 的枚举成员（1 / 138 / 0..209 的空洞都"
+                              "不是 D3DRS 值）",
+                              state);
                 if (why) *why = std::string("D3D9 流水线：") + buf + " ⇒ D3DERR_INVALIDCALL（⛔ 不写状态块）";
                 return kInvalidCall;
+            }
+            // ★ 合法、本线不实现、且没有 master 门控 ⇒ **接受并存下**，但一声不响不行：
+            //   记具名位 41（⛔ 不是 bit26：26 留给 C 档的"值敏感拒绝"，守卫靠它区分两档）。
+            //   这一批是 `REQ-01M7A3M73R3XYMM7J4KNQ1VNV7` 新收的（修前它们被误当"非 D3DRS"拒绝）。
+            if (renderStateTier(state) == RenderStateTier::StoredUnimplemented) {
+                char buf[96];
+                std::snprintf(buf, sizeof(buf), "D3DRS %u（合法、本线不实现：只存）", state);
+                recordUnsupported(cpu, pe, kUnRenderStateStored, buf, value, static_cast<int>(state));
             }
             break;
     }
@@ -2081,8 +2278,23 @@ std::uint32_t getRenderState(X86& cpu, std::uint32_t dev, std::uint32_t state, s
                              std::string* why) {
     std::uint32_t pe = 0;
     if (!pipelineOf(cpu, dev, &pe, why)) return kInvalidCall;
+    // ★ 接受域与 `setRenderState` **同一份判据**（`REQ-01M7A3M73R3XYMM7J4KNQ1VNV7`）：
+    //   官方 `D3DRENDERSTATETYPE` 成员才读得到；0..209 的空洞 / 210..255 / 回绕值 ⇒ INVALIDCALL。
+    //   依据：GetRenderState 的 `State` 文档写"can be any member of the D3DRENDERSTATETYPE
+    //   enumerated type"，返回值"D3DERR_INVALIDCALL if one of the arguments is invalid"
+    //   <https://learn.microsoft.com/en-us/windows/win32/api/d3d9/nf-d3d9-idirect3ddevice9-getrenderstate>
+    //   ⇒ 以前"按数组下标直接读、任何 0..209 都回 0"是**没有文档依据**的宽松。
     if (state > kLastD3dRenderState) {
         if (why) *why = "D3D9 流水线：GetRenderState 的 State 越界（210..255 不是 D3DRS 值）";
+        return kInvalidCall;
+    }
+    if (!knownRenderState(state)) {
+        if (why) {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf),
+                          "D3D9 流水线：GetRenderState 的 State=%u 不是 D3DRENDERSTATETYPE 的枚举成员", state);
+            *why = buf;
+        }
         return kInvalidCall;
     }
     if (!committed(cpu, out_ea, 4u, "GetRenderState 的 pValue", why)) return kInvalidCall;
@@ -2974,12 +3186,17 @@ const std::uint32_t kSbPixelRenderStates[] = {
     kRsBlendOp,               kRsSeparateAlphaBlendEnable, kRsSrcBlendAlpha,
     kRsDestBlendAlpha,        kRsBlendOpAlpha,  kRsColorWriteEnable,    kRsTextureFactor,
 };
-// 顶点 / 光照阶段：`applyLighting`（环境光 / 镜面开关）与 `transformVertex`（光照开关 / 材质来源）。
+// 顶点 / 光照阶段：`applyLighting`（环境光 / 镜面开关 / 四个材质来源）与 `transformVertex`
+// （光照开关 / `COLORVERTEX` 门控 / diffuse 来源）。
 const std::uint32_t kSbVertexRenderStates[] = {
     kRsLighting,
     kRsAmbient,
     kRsSpecularEnable,
+    kRsColorVertex,
     kRsDiffuseMaterialSource,
+    kRsSpecularMaterialSource,
+    kRsAmbientMaterialSource,
+    kRsEmissiveMaterialSource,
 };
 constexpr std::uint32_t kSbPixelRenderStateCount =
     static_cast<std::uint32_t>(sizeof(kSbPixelRenderStates) / sizeof(kSbPixelRenderStates[0]));
@@ -3567,14 +3784,21 @@ void transformVertex(X86& cpu, std::uint32_t pe, const FvfLayout& fvf, const std
         // ⚠ 近似：真机用 world 的逆转置（非等比缩放下会偏）
         const math::Vec3d n = math::transformVector3D3D(world, localn);
         double lit[4];
-        applyLighting(cpu, pe, wpos, n, view, lit);
-        const std::uint32_t diffuse_src = rsOf(cpu, pe, kRsDiffuseMaterialSource);
-        if (diffuse_src == 1u && fvf.has_diffuse) {
-            // D3DMCS_COLOR1：顶点色参与
-            lit[0] *= out->r / 255.0;
-            lit[1] *= out->g / 255.0;
-            lit[2] *= out->b / 255.0;
-        }
+        applyLighting(cpu, pe, fvf, *out, wpos, n, view, lit);
+        // ★ 顶点色对**顶点 diffuse** 的调制走同一份选择逻辑：`COLORVERTEX=0` ⇒ 选择函数恒回基色
+        //   （这里给白 ⇒ 不调制）；=1 ⇒ 按 `DIFFUSEMATERIALSOURCE` 选 COLOR1（顶点 diffuse）/
+        //   COLOR2（顶点 specular）；MATERIAL ⇒ 白。修前这里直接 `diffuse_src == 1` 就乘，
+        //   完全不看 `COLORVERTEX`（本单的缺陷形态）。
+        const double vertex_diffuse[4] = {out->r / 255.0, out->g / 255.0, out->b / 255.0, out->a / 255.0};
+        const double vertex_specular[4] = {out->sr / 255.0, out->sg / 255.0, out->sb / 255.0, out->sa / 255.0};
+        const double white[4] = {1.0, 1.0, 1.0, 1.0};
+        double modulation[4];
+        materialSourceColor(rsOf(cpu, pe, kRsColorVertex), rsOf(cpu, pe, kRsDiffuseMaterialSource), white,
+                            fvf.has_diffuse ? vertex_diffuse : nullptr,
+                            fvf.has_specular ? vertex_specular : nullptr, modulation);
+        lit[0] *= modulation[0];
+        lit[1] *= modulation[1];
+        lit[2] *= modulation[2];
         out->r = lit[0] * 255.0;
         out->g = lit[1] * 255.0;
         out->b = lit[2] * 255.0;
@@ -3700,8 +3924,9 @@ bool admitLinePointDraw(X86& cpu, std::uint32_t pe, const DrawContext& ctx, std:
     return true;
 }
 
-// ★ 覆盖边界**默认级别可见**的一行（只打一次）：`LineCaps` 的声明现在与行为对齐
-//   （`d3d9.h` 的 `kCapsLineClaim` = 0x0E：只声明 ZTEST|BLEND|ALPHACMP）。用 `logAt` 而不是
+// ★ 覆盖边界**默认级别可见**的一行（只打一次）：`LineCaps` 的声明只写本线**兑现得了**的位
+//   （`d3d9.h` 的 `kCapsLineClaim` = 0x06：只声明 ZTEST|BLEND；ALPHACMP **不声明** ——
+//   alpha test 未实现，带它的批整批拒绝）。用 `logAt` 而不是
 //   `pipeWarn`：这不是一次"拒绝"，⛔ 不进 `pipe-warn` 的分类计数（那份计数被
 //   `tests/d3d9_pipeline.cpp` 的用例盯着）。
 void noteLinePointCapsOnce() {
@@ -3709,9 +3934,11 @@ void noteLinePointCapsOnce() {
     if (noted) return;
     noted = true;
     logAt(LogLevel::Warn, LogD3d9, "[d3d9] 点/线: ",
-          "LineCaps 声明 ZTEST|BLEND|ALPHACMP(0x0E)（d3d9.h 的 kCapsLineClaim）；TEXTURE/FOG 未声明。"
+          "LineCaps 声明 ZTEST|BLEND(0x06)（d3d9.h 的 kCapsLineClaim）；ALPHACMP 未声明"
+          "（alpha test 未实现 ⇒ `ALPHATESTENABLE=1` 的批整批拒绝，D3DERR_INVALIDCALL + bit30），"
+          "TEXTURE/FOG 也未声明。"
           "引擎实测只读 caps 的 MaxTextureWidth/Height（0x499128/0x49912E）⇒ LineCaps 不是引擎判据。"
-          "本线做的是 1px 无纹理点/线（顶点色 + z 插值，深度/alpha test/混合/写掩码与三角形同一份）；"
+          "本线做的是 1px 无纹理点/线（顶点色 + z 插值，深度/混合/写掩码与三角形同一份）；"
           "**点/线在 GPU 上走\"展开成三角形\"**（点 = 1px quad，线 = 每秒 1px 宽的 quad ⇒ 2 个三角形；"
           "不受 CULLMODE 影响），与三角形共用同一条顶点/混合/深度/stage 路径；"
           "带纹理的点/线**响亮拒绝**（D3DERR_INVALIDCALL + recordUnsupported bit16）；"
@@ -3736,6 +3963,11 @@ void noteLinePointCapsOnce() {
 //   ★ ⛔ 不另立"目标必须是纹理"这条闸：`setRenderTarget` 只让**纹理 level 0 / 后缓冲表面**绑上
 //     （后缓冲表面还会被规范化成 `color_surface == 0`），离屏 plain surface 绑不进来 ⇒
 //     这条闸永远为假、只是死代码。`color_is_texture` 因此只用来决定"要不要读 Usage 做那条 warn"。
+//   ★ "离屏 plain surface 绑不进来"这件事**有守卫**（`REQ-01M79WE8JA7V92RNS537CJB0V6`）：
+//     `d3d9p/set-render-target-offscreen-refused` —— 它的 surface 是 `'TEX1'` 状态块但 owner == 0
+//     ⇒ 被 `setRenderTarget` 的 ownerless 判据拒成 `D3DERR_INVALIDCALL`。删掉那条判据（或放宽
+//     ownerless 的绑定）⇒ 该用例当场红：离屏 plain surface 会被**静默**绑成 RT，而它正是
+//     `GetRenderTargetData` 的读回目标（坏了不可见）。
 bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why, UnsupportedBit* skip_bit) {
     // ★ 每个拒批点都**指名一个位**（29..40）：`submitPrimitives` 末尾按这位 + `why` 记 `skipped`。
     //   ⛔ 不许再出现"返回 false 但不说是哪一类"的裸拒绝 —— 那正是设计 §A.3 的盲区。
@@ -4957,9 +5189,16 @@ std::uint32_t drawIndexedPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t pr
         case kPtLineStrip: index_count = prim_count + 1u; break;
         default: index_count = prim_count; break;
     }
-    if (start_index + index_count > ilength / index_size) {
-        pipeLog("DrawIndexedPrimitive", "索引越界（start=%u count=%u，缓冲 %u 个索引）⇒ D3DERR_INVALIDCALL",
-                start_index, index_count, ilength / index_size);
+    // ★ `start_index + index_count` **全程 int64**（`REQ-01M7A3M7E59JX74G897Q7W2RVD`）：两者都是 u32，
+    //   加起来在 0xFFFFFFxx 一带会回绕成一个**小**数 ⇒ 越过这条上界检查，随后按 `start_index * index_size`
+    //   做指针加（0xFFFFFFF0 * 2 ≈ 8.6 GB ⇒ 越界读）。⛔ 不许退回 u32 加法：判据两端都必须是 int64。
+    const std::int64_t index_sum =
+        static_cast<std::int64_t>(start_index) + static_cast<std::int64_t>(index_count);
+    const std::int64_t index_avail = static_cast<std::int64_t>(ilength / index_size);
+    if (index_sum > index_avail) {
+        pipeLog("DrawIndexedPrimitive",
+                "索引越界（start=%u count=%u，和 %lld，缓冲 %lld 个索引）⇒ D3DERR_INVALIDCALL", start_index,
+                index_count, static_cast<long long>(index_sum), static_cast<long long>(index_avail));
         return kInvalidCall;
     }
     // ★ `BaseVertexIndex` 是 INT（可为负），合法**索引值**区间 = `[MinVertexIndex, MinVertexIndex+NumVertices)`

@@ -2,8 +2,10 @@
 
 - id: REQ-01M6RMVJTTM8PDNXB39TVJ40WN
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/gpu_batch.cpp#gpu-batch/depth-clear-value
+- done_reason: z 全链传值落地：rasterRequestDepthClear(float z) → present_sdl 转发 → d3d9::clear → d3d9_gpu 的 need_depth_clear_z_ → pass 的 depth.clear_depth（不再写死 1.0；新建 depth / discardTarget 两处复位 1.0）。越界（z<0 / >1 / NaN / ±inf）⇒ 新具名位 42 kUnDepthClearZ + 默认 warn，CPU 镜像与 GPU arm 都不写（⛔ 不静默 clamp）；不复用 26/22/27/29..40 的理由写在源码注释。守卫 gpu-batch/depth-clear-value（z=0.25 → 0x3E800000、z=1.0 → 0x3F800000、越界 5 种全拒）与 depth-clear-forwarded（ZBUFFER 转发一次、TARGET-only 不转发）；Clear(ZBUFFER,1.0) 与今天等价。变异把 z 在 shim→后端写死 1.0 ⇒ 该用例红（父级复跑 1/1 红）。已知取舍：越界时整调用仍答 S_OK（只拒深度那一半，MSDN 失败条件不含 Z），要改成 INVALIDCALL 只需一处 + 一条断言。
 - tags: [emulator-lift, gpu, d3d9, depth]
 
 ## 现象（2026-11-13 收窄为「接口保真」）

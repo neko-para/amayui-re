@@ -2,8 +2,10 @@
 
 - id: REQ-01M6RQ2XNWRDV35E72D7G2ZV7D
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6RH9CDPM8PG2SFEG0PYT46T
+- verify: apps/emulator-lift/tests/stress_title_steady.cpp#kFrameMedianMs
+- done_reason: 验收 1 达标（先测再判的路径）：TITLE 稳态帧时间中位 31.3 / 31.5 / 32.0 ms、p95 39.3–42.7 ms（OBS-20261114-06 的 S2 三遍），已 ≤33 ms；阈值门 = stress-title-steady 的中位 ≤46.95 / p95 ≤57.9（R1 = 标定 ×1.5），⛔ 不把读数写进 test。sprite 合批已于 2026-11-08 落地并带结构守卫 gpu-batch/order。验收 3（按需回读）**明确不做**：33 ms 已达标，而无条件回读的 1.7 ms readback + 4.8 ms guest hash 同时是 '  !dirty ⇒ guest 后缓冲即最新' 这条公理与交互图 screen 采样的基础，去掉它必须先设计 stale 标记，否则会静默上传上一帧 —— 用 6.5 ms 换这个风险不值得。验收 2/4 随 CPU 光栅退休作废。验收 5 里 '按需回读的 stale 标记用例' 随验收 3 一起不做。
 - tags: [emulator-lift, gpu, title, performance, sprite]
 
 ## 现状（2026-11-06 直出后实测；★ 2026-11-13 复核：下表已过时）

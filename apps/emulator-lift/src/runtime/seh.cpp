@@ -58,6 +58,37 @@ constexpr std::uint32_t kExceptionNestedException = 2;    // handler 里又抛�
 
 constexpr std::uint32_t kExceptionUnwinding = 0x2u;  // EXCEPTION_UNWINDING
 
+// ---- 「非连续异常不许继续执行」-----------------------------------------------
+// `winnt.h`：`EXCEPTION_NONCONTINUABLE = 0x01`；`EXCEPTION_NONCONTINUABLE_EXCEPTION = 0xC0000025`。
+//
+// ★ 文档口径（⛔ 不要按"handler 改了 CONTEXT 就可以继续"的直觉改；实测见下）：
+//   · `RaiseException` 的 `dwExceptionFlags`：`EXCEPTION_NONCONTINUABLE` = 非连续异常，
+//     "Any attempt to continue execution after a noncontinuable exception causes the
+//      EXCEPTION_NONCONTINUABLE_EXCEPTION exception."
+//     <https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-raiseexception>
+//   · `0xC0000025` = `STATUS_NONCONTINUABLE_EXCEPTION`，默认文本
+//     "{EXCEPTION} Cannot Continue Windows cannot continue from this exception."
+//     <https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/596a1078-e883-4972-9bbc-49e60bebca55>
+//
+// ★ 判据是**旗标**、不是"CONTEXT 有没有被改"（实测 2026-11-14，本机 x86-32 原生探针：
+//   `__try/__except` 的 filter 返回 `EXCEPTION_CONTINUE_EXECUTION`，即 handler 侧
+//   `ExceptionContinueExecution`）：
+//     flags=0x1 + CONTEXT 未改 ⇒ 第二次进 filter：`code=0xC0000025 flags=0x1 nargs=0`（改抛）；
+//     flags=0x1 + filter **改了** CONTEXT（Eip/Esp 指向落点）⇒ **同样**改抛 0xC0000025；
+//     flags=0x0 + 改了 CONTEXT ⇒ 落在 filter 给的 Eip（合法：这是 continuable 的文档行为）；
+//     flags=0x0 + 未改 CONTEXT ⇒ `RaiseException` 正常返回（合法：continuable 可以"吞"）。
+//   ⇒ 所以 MSVC 的 C++ `catch` **不能**靠"返回 1 + 改 CONTEXT"实现（`_CxxThrowException` 抛的
+//     全是 `flags=1`）—— 它走 `_JumpToContinuation`（0x4E7007：`ebp=pRN+0xC` / `esp=[pRN-4]` /
+//     `jmp continuation`，**不返回**）。本线的"handler 弃帧"路径接的就是它。
+//
+// ★ 本线的处置：**响亮停**（`SehStep::noncontinuable_violation`），⛔ 不装载 CONTEXT。
+//   真机在这一点上会**改抛** 0xC0000025 并把新 record 再走一遍 `fs:[0]` 链；本线不建模那次
+//   第二次派发（边界见 `seh.h` 的"明确不做"与 `docs/03-emulator/design-notes.md` 的 L3-seh-01）。
+//   停因要**指名道姓**（`0xC0000025` / `EXCEPTION_NONCONTINUABLE_EXCEPTION`），
+//   ⛔ 不许退化成"装载 CONTEXT 继续跑"再落进不知哪里的 `int3`（`REQ-01M72GAA7CVKBPP9QRT0PRPBTM`）。
+constexpr std::uint32_t kExceptionNonContinuable = 0x1u;
+constexpr std::uint32_t kExceptionNonContinuableException = 0xC0000025u;
+
 // 合成 handler 帧：4 个参数 + 返回地址（stdcall；handler 自己 `ret 16`）。
 constexpr std::uint32_t kHandlerArgBytes = 4u * 4u;
 constexpr std::uint32_t kHandlerFrameBytes = kHandlerArgBytes + 4u;
@@ -69,9 +100,13 @@ inline std::uint32_t wordAt(const std::uint32_t* w, std::uint32_t off) { return 
 inline void setWord(std::uint32_t* w, std::uint32_t off, std::uint32_t v) { w[off >> 2] = v; }
 
 // `LIFT_SEH_TRACE=1` ⇒ 把派发过程打到 stderr（诊断；缺省关 ⇒ 确定性输出不受影响）。
-void sehLog(const char* fmt, ...) {
+bool sehTraceEnabled() {
     static const bool on = std::getenv("LIFT_SEH_TRACE") != nullptr;
-    if (!on) return;
+    return on;
+}
+
+void sehLog(const char* fmt, ...) {
+    if (!sehTraceEnabled()) return;
     std::fprintf(stderr, "[seh] ");
     va_list ap;
     va_start(ap, fmt);
@@ -79,6 +114,27 @@ void sehLog(const char* fmt, ...) {
     va_end(ap);
     std::fprintf(stderr, "\n");
     std::fflush(stderr);
+}
+
+// 取证用：逐字节打一块 `size` 字节（`LIFT_SEH_TRACE` 关时一行都不打、也不算）。
+// ★ 只在 `disposition=1` 的**非连续**分支调用（罕见）：`REQ-01M72GAA7CVKBPP9QRT0PRPBTM`
+//   要的"handler 前后 ctx_ea 字节对比"就靠它，省得下次再造一次临时诊断。
+void sehDumpBytes(const char* tag, std::uint32_t base_ea, const std::uint32_t* words,
+                  std::uint32_t bytes) {
+    if (!sehTraceEnabled()) return;
+    for (std::uint32_t off = 0; off < bytes; off += 16u) {
+        char line[16 * 3 + 1];
+        char* p = line;
+        const std::uint32_t n = bytes - off < 16u ? bytes - off : 16u;
+        for (std::uint32_t i = 0; i < n; ++i) {
+            const std::uint32_t byte_off = off + i;  // 字内小端：byte = (word >> 8*(off&3)) & 0xFF
+            const std::uint32_t byte = (words[byte_off >> 2] >> (8u * (byte_off & 3u))) & 0xFFu;
+            p += std::snprintf(p, 4, "%02X ", byte);
+        }
+        *p = '\0';
+        sehLog("  %s ctx_ea+0x%03X: %s", tag, off, line);
+    }
+    sehLog("  %s ctx_ea=0x%08X（共 0x%X 字节）", tag, base_ea, bytes);
 }
 
 }  // namespace
@@ -360,6 +416,8 @@ void Seh::dispatchHandler(X86& cpu, GuestMemory& mem, Level& L, SehStep& out) {
         if (!L.owns_record) mem.wr32(L.rec_ea + kRecFlags, wordAt(L.rec, kRecFlags));
     }
     emitStructures(mem, L);  // 展开期的 push 可能踩到结构区 ⇒ 每次调用前从宿主深拷贝重铺
+    // 发出前留一份 CONTEXT：handler 返回后要比"它到底有没有改"（只进日志/停因，⛔ 不参与判定）。
+    for (std::uint32_t off = 0; off < kCtxBytes; off += 4) setWord(L.ctx_at_call, off, wordAt(L.ctx, off));
     const std::uint32_t handler = mem.rd32(L.pRN + 4u);
     const std::uint32_t frame = L.frame_base - kHandlerFrameBytes;
     mem.wr32(frame + 0x00, kSehHandlerReturnEa);
@@ -422,13 +480,74 @@ SehStep Seh::step(X86& cpu, GuestMemory& mem, std::string* why) {
             sehLog("handler 0x%08X 返回 disposition=%u", L.handler_ea, disposition);
             if (L.kind == Level::Kind::Raise) {
                 if (disposition == kExceptionContinueExecution) {
-                    // ★ NONCONTINUABLE 上照样照做（需求单的裁决；真机会合成 0xC0000025，那是另一条死路）。
+                    // ★ 硬口径 5（取证见本文件 `kExceptionNonContinuable` 的注释与 seh.h）：
+                    //   `EXCEPTION_NONCONTINUABLE` 上"继续执行"**不成立** —— 真机在这一步**改抛**
+                    //   `EXCEPTION_NONCONTINUABLE_EXCEPTION`(0xC0000025)，⛔ 不是装载 CONTEXT。
+                    //   判据是**旗标**（CONTEXT 改没改都一样，实测改了也照抛）。
+                    //   ⇒ 本线响亮停（独立停因），⛔ 不许静默继续：装载 CONTEXT 会把异常丢在
+                    //   raise 的下一条上（`REQ-01M72GAA7CVKBPP9QRT0PRPBTM` 的现场）。
+                    const std::uint32_t rec_flags = wordAt(L.rec, kRecFlags);
+                    if ((rec_flags & kExceptionNonContinuable) != 0) {
+                        std::uint32_t changed = 0;
+                        std::uint32_t first_off = 0;
+                        std::uint32_t first_old = 0;
+                        std::uint32_t first_new = 0;
+                        for (std::uint32_t off = 0; off < kCtxBytes; off += 4) {
+                            const std::uint32_t now = wordAt(L.ctx, off);
+                            if (now == wordAt(L.ctx_at_call, off)) continue;
+                            if (changed == 0) {
+                                first_off = off;
+                                first_old = wordAt(L.ctx_at_call, off);
+                                first_new = now;
+                            }
+                            ++changed;
+                        }
+                        // 取证（`LIFT_SEH_TRACE=1` 才打）：handler 前后 `ctx_ea` 的逐字节原文。
+                        sehDumpBytes("调用前", L.ctx_ea, L.ctx_at_call, kCtxBytes);
+                        sehDumpBytes("返回后", L.ctx_ea, L.ctx, kCtxBytes);
+                        sehLog("  [pRN+8]=0x%08X（guest 的 try 状态字）；宿主只读 [pRN] / [pRN+4]",
+                               mem.rd32(L.pRN + 8u));
+                        char buf[1024];
+                        if (changed == 0) {
+                            std::snprintf(
+                                buf, sizeof(buf),
+                                "非连续异常被要求继续执行（EXCEPTION_NONCONTINUABLE_EXCEPTION / "
+                                "0xC0000025）：record code=0x%08X flags=0x%X 含 EXCEPTION_NONCONTINUABLE，"
+                                "而 handler 0x%08X 返回 disposition=1（ExceptionContinueExecution）⇒ "
+                                "文档：**任何**继续执行的尝试都会改抛 "
+                                "EXCEPTION_NONCONTINUABLE_EXCEPTION(0xC0000025)（⛔ 不是装载 CONTEXT "
+                                "继续跑）。★ 现场：CONTEXT **一个字节都没被改**（0x%X 字节逐字比对全等），"
+                                "它的 eip=0x%08X 就是 raise 的下一条 ⇒ 照字面装载 = 让异常被静默丢弃。"
+                                "本线不建模改抛后的第二次派发 ⇒ 在这里响亮停。",
+                                wordAt(L.rec, kRecCode), rec_flags, L.handler_ea, kCtxBytes,
+                                wordAt(L.ctx, kCtxEip));
+                        } else {
+                            std::snprintf(
+                                buf, sizeof(buf),
+                                "非连续异常被要求继续执行（EXCEPTION_NONCONTINUABLE_EXCEPTION / "
+                                "0xC0000025）：record code=0x%08X flags=0x%X 含 EXCEPTION_NONCONTINUABLE，"
+                                "而 handler 0x%08X 返回 disposition=1（ExceptionContinueExecution）⇒ "
+                                "文档：**任何**继续执行的尝试都会改抛 "
+                                "EXCEPTION_NONCONTINUABLE_EXCEPTION(0xC0000025)（⛔ 不是装载 CONTEXT "
+                                "继续跑）。★ handler 改了 CONTEXT（%u 字，首处 +0x%X：0x%08X → 0x%08X）"
+                                "也**照样**改抛（判据是旗标）。本线不建模改抛后的第二次派发 ⇒ "
+                                "在这里响亮停。",
+                                wordAt(L.rec, kRecCode), rec_flags, L.handler_ea, changed, first_off,
+                                first_old, first_new);
+                        }
+                        levels_.clear();
+                        pending_dispatch_ = false;
+                        ++unhandled_;
+                        out.noncontinuable_violation = true;
+                        return stop(out, why, buf);
+                    }
                     loadContext(cpu, L);
                     out.kind = SehStep::Kind::Transfer;
                     out.eip = cpu.eip;
                     out.esp = cpu.esp();
                     levels_.pop_back();
-                    sehLog("disposition=1 ⇒ 整份装载 CONTEXT：eip=0x%08X esp=0x%08X", out.eip, out.esp);
+                    sehLog("disposition=1（可继续的异常）⇒ 整份装载 CONTEXT：eip=0x%08X esp=0x%08X",
+                           out.eip, out.esp);
                     return out;
                 }
                 if (disposition == kExceptionNestedException) {

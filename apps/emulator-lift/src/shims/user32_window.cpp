@@ -37,7 +37,11 @@ constexpr std::uint32_t kWmGetMinMaxInfo = 0x0024;
 constexpr std::uint32_t kWmNcCreate = 0x0081;
 constexpr std::uint32_t kWmTimer = 0x0113;
 constexpr std::uint32_t kWmKeyDown = 0x0100;
+constexpr std::uint32_t kWmKeyUp = 0x0101;
+constexpr std::uint32_t kWmChar = 0x0102;
 constexpr std::uint32_t kWmSysKeyDown = 0x0104;
+constexpr std::uint32_t kWmSysKeyUp = 0x0105;
+constexpr std::uint32_t kWmSysChar = 0x0106;
 
 constexpr std::uint32_t kPmNoRemove = 0x0000u;
 constexpr std::uint32_t kPmRemove = 0x0001u;
@@ -542,34 +546,41 @@ bool readMsg(X86& cpu, std::uint32_t ea, WinMessage* m) {
     return true;
 }
 
+// =====================================================================================
+// `PeekMessageA` 的过滤原语 —— **只挑"看哪一条"，不匹配的留在队列里**
+//
+// 文档（<https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-peekmessagea>）：
+// "PeekMessage ... checks the thread message queue for a posted message ... and examines the
+//  message (if any exist) that matches the window handle and the message filter range."
+// ⇒ 过滤是**选择条件**：不匹配的消息不是"已经看过的"，⛔ 不许从队列里删除。
+// ★ 本线旧实现在这里对每条不匹配的消息 `peek(&m, true)`（注释写着"留在队列里会死循环"）——
+//   那是**静默丢消息**：一条消息被取走 = guest 永远看不到它。返回 0 是合法结果（调用方自己的循环
+//   负责处理），死循环是实现缺陷、不是吞消息的许可。
+// ★ 实现：`WindowManager::peekMatching` 从**队首**起找第一条匹配的（FIFO 不变）；
+//   `PM_NOREMOVE` 只窥视，`PM_REMOVE` 只取走**命中那一条**。
+// =====================================================================================
 void shimPeekMessageA(X86& cpu, ShimCall& call) {
     const std::uint32_t msg_ea = call.u32(0);
     const std::uint32_t hwnd_filter = call.u32(1);
     const std::uint32_t min_filter = call.u32(2);
     const std::uint32_t max_filter = call.u32(3);
-    const std::uint32_t remove = call.u32(4);
+    const bool do_remove = (call.u32(4) & kPmRemove) != 0;
     cpu.windows->pumpTimers(cpu);
+    // 过滤条件（与文档一致）：hWnd != 0 ⇒ 只匹配该窗口（0 = 调用线程任意窗口）；
+    // wMsgFilterMin / wMsgFilterMax != 0 ⇒ 只匹配 [min, max] 里的 message（0 = 该侧不限）。
+    const auto pred = [hwnd_filter, min_filter, max_filter](const WinMessage& m) {
+        if (hwnd_filter != 0 && m.hwnd != hwnd_filter) return false;
+        if (min_filter != 0 && m.message < min_filter) return false;
+        if (max_filter != 0 && m.message > max_filter) return false;
+        return true;
+    };
     WinMessage m;
-    for (;;) {
-        if (!cpu.windows->peek(&m, false)) {
-            call.result = 0;
-            return;
-        }
-        if (hwnd_filter && m.hwnd != hwnd_filter) {
-            // 简化：本作只有主窗口；过滤不匹配时把它留在队列里会死循环 ⇒ 直接取走（P0 只支持单窗口）
-            cpu.windows->peek(&m, true);
-            continue;
-        }
-        if (min_filter || max_filter) {
-            if ((min_filter && m.message < min_filter) || (max_filter && m.message > max_filter)) {
-                cpu.windows->peek(&m, true);
-                continue;
-            }
-        }
-        break;
+    if (!cpu.windows->peekMatching(pred, &m, do_remove)) {
+        // ★ 没有匹配的消息 ⇒ 返回 0，**队列原样保留**（不匹配的消息仍然在那里，下次还能看到）。
+        call.result = 0;
+        return;
     }
     writeMsg(cpu, msg_ea, m);
-    if (remove & kPmRemove) cpu.windows->peek(&m, true);
     call.result = 1;
 }
 
@@ -587,10 +598,109 @@ void shimGetMessageA(X86& cpu, ShimCall& call) {
     call.result = 1;
 }
 
+// =====================================================================================
+// `TranslateMessage` 的字符映射表（★ 只覆盖**明确有据**的键；⛔ 不臆造完整键盘布局）
+//
+// 文档：
+//  · `TranslateMessage` —— 收到 `WM_KEYDOWN` 把它翻译成 `WM_CHAR`（`WM_SYSKEYDOWN` ⇒ `WM_SYSCHAR`）
+//    投回线程消息队列。返回值：翻译出字符消息 ⇒ 非零；消息是 `WM_KEYDOWN` / `WM_KEYUP` /
+//    `WM_SYSKEYDOWN` / `WM_SYSKEYUP` ⇒ **无论是否翻译**都非零；其它消息没被翻译 ⇒ 0。
+//    <https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-translatemessage>
+//  · `WM_CHAR`：`wParam` = 字符（UTF-16 码元；本线是 CP932/ASCII 的窗口消息语境，表里全是 <= 0xFF）；
+//    `lParam` 的位：0-15 重复计数 · 16-23 扫描码 · 24 扩展键 · 29 上下文（ALT）· 30 前一键态 ·
+//    31 转换态（WM_CHAR 恒 0）。TranslateMessage 投出的字符消息**沿用那条按键消息的位**。
+//    <https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-char>
+//    <https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-syschar>
+//  · 虚拟键码（VK_*）与 US 标准键盘上的名字：
+//    <https://learn.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes>
+//  · Shift / CapsLock 的当前态：文档口径是"键盘状态"（`GetKeyState`），本线从**已有的影子按键表**
+//    （`WindowManager::keyDown`，与 `GetAsyncKeyState` / WM_KEYDOWN 同一份）读，⛔ 不新开一份状态。
+//    <https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getkeystate>
+//
+// ★ 表的选择（有据才映射）：
+//   · 字母 `VK_A`..`VK_Z`：大小写 = **Shift XOR CapsLock**（Windows 的 WM_CHAR 就是这个规则；
+//     CapsLock 只影响字母，不影响数字 / 标点）。
+//   · 数字 `'0'..'9'`：无 Shift ⇒ 数字本身；**Shift 按下 ⇒ 不投** —— US 布局 Shift+数字 是标点
+//     （! @ # $ % ^ & * ( )），本线不臆造标点映射（那些字符属于布局数据，不在 VK 表里）。
+//   · `VK_BACK` / `VK_TAB` / `VK_RETURN` / `VK_SPACE`：控制字符 / 空格（窗口消息语义固定）。
+//   · `VK_OEM_*`：文档给的 **US 标准键盘**字符（VK 值布局无关，字符来自布局）。只收这一批
+//     引擎输入框大概率会用的键；⛔ 不做 VK_OEM_102 / ABNT / 假名 / IME 键，也不做 Ctrl/Alt 组合
+//     （`WM_CHAR` 里的控制字符另有来源；完整键盘布局状态机不在本线范围）。
+//   ⇒ **本表没列出的键不投 `WM_CHAR`**（保持修前"没有字符消息"的行为）。理由：宁可少投一个字符，
+//     也不要把猜出来的字符塞给 guest —— 猜错会静默走错输入路径，比缺失更难发现。
+// =====================================================================================
+bool charForVirtualKey(std::uint32_t vk, bool shift, bool caps, std::uint32_t* out) {
+    auto set = [out](std::uint32_t ch) {
+        if (out) *out = ch;
+        return true;
+    };
+    if (vk >= 'A' && vk <= 'Z') return set((shift != caps) ? vk : (vk - 'A' + 'a'));
+    if (vk >= '0' && vk <= '9') return shift ? false : set(vk);
+    switch (vk) {
+        case 0x08: return set('\b');      // VK_BACK
+        case 0x09: return set('\t');      // VK_TAB
+        case 0x0D: return set('\r');      // VK_RETURN
+        case 0x20: return set(' ');       // VK_SPACE
+        // VK_OEM_*（US 标准键盘；Shift 给上档字符）
+        case 0xBA: return set(shift ? ':' : ';');   // VK_OEM_1      ;:
+        case 0xBB: return set(shift ? '+' : '=');   // VK_OEM_PLUS   =+
+        case 0xBC: return set(shift ? '<' : ',');   // VK_OEM_COMMA  ,<
+        case 0xBD: return set(shift ? '_' : '-');   // VK_OEM_MINUS  -_
+        case 0xBE: return set(shift ? '>' : '.');   // VK_OEM_PERIOD .>
+        case 0xBF: return set(shift ? '?' : '/');   // VK_OEM_2      /?
+        case 0xC0: return set(shift ? '~' : '`');   // VK_OEM_3      `~
+        case 0xDB: return set(shift ? '{' : '[');   // VK_OEM_4      [{
+        case 0xDC: return set(shift ? '|' : '\\');  // VK_OEM_5      \|
+        case 0xDD: return set(shift ? '}' : ']');   // VK_OEM_6      ]}
+        case 0xDE: return set(shift ? '"' : '\'');  // VK_OEM_7      '"
+        default: return false;                       // 未覆盖 ⇒ 不投 WM_CHAR
+    }
+}
+
 void shimTranslateMessage(X86& cpu, ShimCall& call) {
-    (void)cpu;
-    (void)call;
-    call.result = 1;  // P0 不生成 WM_CHAR（P3 接键盘后补）
+    if (!cpu.windows) {
+        call.result = 0;
+        return;
+    }
+    WinMessage m;
+    if (!readMsg(cpu, call.u32(0), &m)) {
+        // lpMsg 不可读 ⇒ 没有可翻译的消息（真机是未定义行为；本线按"没有"处理，⛔ 不假装翻译成功）
+        call.result = 0;
+        return;
+    }
+    // 文档：四种按键消息的返回值一律非零（无论是否投出了字符消息）；其它消息 ⇒ 0。
+    const bool is_key_down = (m.message == kWmKeyDown || m.message == kWmSysKeyDown);
+    const bool is_key_msg = is_key_down || m.message == kWmKeyUp || m.message == kWmSysKeyUp;
+    if (!is_key_msg) {
+        call.result = 0;
+        return;
+    }
+    if (is_key_down) {
+        // ★ 修饰键状态从**已有的按键状态表**读（见 `charForVirtualKey` 的文档引用）。
+        //   `VK_SHIFT` 之外也读左右 Shift 的 VK：`GetKeyState(VK_SHIFT)` 的语义是把左右合并；
+        //   本线的 SDL 映射只写 0x10，但脚本注入可以按 0xA0/0xA1 写。
+        const bool shift = cpu.windows->keyDown(0x10u) || cpu.windows->keyDown(0xA0u) ||
+                           cpu.windows->keyDown(0xA1u);   // VK_SHIFT / VK_LSHIFT / VK_RSHIFT
+        const bool caps = cpu.windows->keyDown(0x14u);    // VK_CAPITAL
+        std::uint32_t ch = 0;
+        if (charForVirtualKey(m.wparam & 0xFFu, shift, caps, &ch)) {
+            WinMessage cm;
+            cm.hwnd = m.hwnd;
+            cm.message = (m.message == kWmSysKeyDown) ? kWmSysChar : kWmChar;
+            cm.wparam = ch;
+            // 文档：WM_CHAR 的位（重复计数 / 扫描码 / 扩展键 / 上下文 / 前一键态）沿用那条按键消息；
+            // bit31（转换态）WM_CHAR 恒 0，而 WM_KEYDOWN 的 bit31 本来就是 0 ⇒ 整份复制即可。
+            cm.lparam = m.lparam;
+            cm.time = cpu.clock ? cpu.clock->nowMs() : m.time;
+            cm.pt_x = m.pt_x;
+            cm.pt_y = m.pt_y;
+            cpu.windows->post(cm);
+            shimLog("user32", "TranslateMessage", "msg=0x%04X vk=0x%02X ⇒ 投 %s wParam=0x%02X（shift=%d caps=%d）",
+                    m.message, m.wparam & 0xFFu, cm.message == kWmSysChar ? "WM_SYSCHAR" : "WM_CHAR", ch,
+                    shift ? 1 : 0, caps ? 1 : 0);
+        }
+    }
+    call.result = 1;  // 按键消息：文档规定无论翻译与否都返回非零
 }
 
 void shimDispatchMessageA(X86& cpu, ShimCall& call) {

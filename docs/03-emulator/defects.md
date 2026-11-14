@@ -426,3 +426,50 @@
   --raster gpu --native-overrides all --skip-logo --interaction-graph ../../graphs/sn0000-quit.graph
   --max-frames 4000`（⛔ headless 不是有效臂：本图会停在 step3 等 GAMESTART 超时；`--audio off` 没有 feeder）。
 - `quit-graph`：`./out/emulator-lift --appdata <每次全新私有 tmp> --game-dir ../../links/install --present window --present-hidden --native-overrides all --skip-logo --interaction-graph ../../graphs/sn0000-quit.graph --interaction-fail-dump <quit.fail.bmp> --max-frames 4000 --time-limit 300 --verbose --log-cat dsound,general` ⇒ 人读判据：`stop : stopped` + `kernel32!ExitProcess`，且**没有** `unimplemented` / `decode-error` / "数据地址当 eip"（★ 原 CTest 已删，不进测试）。
+
+### BUG-23 · alpha test 的批**整块不画** ⇒ 该图层整块消失（不是变半透明）；而 `LineCaps.ALPHACMP` 还在声明（假话）
+- **现象**：带 `ALPHATESTENABLE=1` 的 Draw 被 GPU 准入**整批拒绝** ⇒ **这一批几何一个像素都不出现**。
+  玩家侧 = **该图层整块消失**：colorkey 贴图**整张**不见、镂空树叶 / 发丝**整个四边形**不见、
+  UI 边框与文字块成片不见。⚠ 与"混合参数配错"完全不同（不是变半透明、也不是边缘不对）——
+  形状 / 位置 / 深度都对，只是**没有像素**。
+- **根因（一行）**：`src/runtime/d3d9_pipeline.cpp` 的 `gpuEligible` 里
+  `if (ctx.alpha_test) { *why = "GPU 不支持 alpha test（ALPHATESTENABLE=1）"; return deny(kUnGpuAlphaTest); }`
+  （具名位 bit30）。CPU 光栅删掉之前这条状态是**逐片元**正确执行的（8 个 D3DCMP + `ALPHAREF`），
+  删掉之后变成"整批消失" ⇒ **能力回退**，不是范围裁剪。同时 `src/runtime/d3d9.h` 的
+  `kCapsLineClaim` 当时仍是 `0x0E`（声明了 `ALPHACMP(0x08)`），而 caps 的已裁决口径是
+  "caps 是**声明**、不是实现集；本线只能响亮拒绝的能力**不能表达就清 0**" ⇒ 那一行是**已经裁决过的假话**。
+- **修法（2026-11-14，备选路：清位 + 说清后果）**：`src/runtime/d3d9.h` 的 `kCapsLineClaim`
+  `0x0E` → `0x06`（去掉 `ALPHACMP`）；`tests/d3d9.cpp#d3d9/caps-claims` ④ 从
+  `caps_bit ⇔ suppressed` 的双向蕴含改成**两件独立事实**（caps 里没有该位；带 alpha test 的批
+  `D3DERR_INVALIDCALL` + `skipped_draws +1` + bit30）；`src/runtime/d3d9_pipeline.cpp` 的
+  `noteLinePointCapsOnce()` 文案与打印同步成 `0x06` / "ALPHACMP 未声明（alpha test 整批拒绝）"。
+  ⛔ **没修"整批不画"本身**：实现 alpha test 要给片元着色器加变体 + 扩缓存键（pipeline 变体），
+  以"真场景有命中证据"为条件 —— 本条的读数（下面）不满足该条件。
+- **读数（2026-11-14，Windows x64 / RelWithDebInfo / 当前工作树）**：boot→TITLE `--max-frames 600`，
+  `GPU 不支持 alpha test` **0 次命中**、`unsupported :` 里**没有 bit30**（只有 `…0800` 的 bit11）。
+  ⇒ 这 600 帧里没有可观测后果；⚠ **ADV / 游戏内没量到**（`sn0000.graph` 停在 GAMESTART 之前）
+  ⇒ 这是**潜在雷**，不是"已排掉"。原始读数见 `docs/03-emulator/observations.md` 的 `OBS-20261114-09`。
+- **何时 / 谁发现**：2026-11-14，需求单 `REQ-01M7AZ65EAE7Q6STW2S0ZNXGM4` 复核
+  （`git show HEAD:apps/emulator-lift/src/runtime/d3d9_pipeline.cpp` 里删掉的 CPU alpha test 19 行
+  vs 今天的 `deny(kUnGpuAlphaTest)`）；父级裁决走备选路（清位 + 说清后果），
+  实现 alpha test 以"有命中证据"为条件。
+- **代表守卫**：`apps/emulator-lift/tests/d3d9.cpp` 的 `d3d9/caps-claims` ④（CTest `d3d9-gpu`，顶层 pure 档，
+  没有 GPU 设备时 SKIP 77）—— 断言 caps 无 `ALPHACMP` **且** 该批 `INVALIDCALL` + `skipped_draws +1` + bit30；
+  无 GPU 环境用 `apps/emulator-lift/tests/gpu_batch.cpp` 的 `gpu-batch/skip-ledger` ②（CTest `gpu-batch-order`，
+  pure：原因文本仍进 `skipped top:`、具名位仍进 `unsupported :` 的 `bit30=…`）。
+  ★ 重开实现的条件：任何真场景日志出现 `GPU 不支持 alpha test` 或 `unsupported :` 的 bit30
+  ⇒ 按需求单"首选"那节的两臂判据（`ALPHAFUNC=NEVER` ⇒ 0 像素、`ALWAYS` ⇒ 像素出现）实现，并把本单改回 bug。
+- **复现 / 排障（`apps/emulator-lift` 下）**：
+  ```powershell
+  # ① 命中面：这条命令在 boot→TITLE 600 帧里应输出 0 次命中（= 没有可观测后果）
+  ./out/emulator-lift.exe --appdata ../../.tmp/alphatest/appdata --game-dir ../../links/install `
+    --present headless --native-overrides all --skip-logo --max-frames 600 `
+    --log-level info --log-cat d3d9 2>&1 | Tee-Object ../../.tmp/alphatest/replay.log
+  Select-String -Path ../../.tmp/alphatest/replay.log -Pattern 'GPU 不支持 alpha test'   # 命中批数
+  Select-String -Path ../../.tmp/alphatest/replay.log -Pattern 'unsupported :'           # 看有没有 bit30
+  # ② 合同（清位后的 caps + 拒批的账）
+  ctest --test-dir out -R 'd3d9-gpu|gpu-batch-order' -V
+  ```
+  看到"某个图层整块不见"时：先查 `unsupported :` 有没有 `bit30=GPU 不支持 alpha test`、
+  `skipped top:` 有没有 `GPU 不支持 alpha test（ALPHATESTENABLE=1）`（**默认级别各只出一次**）——
+  有就是本条，不是混合参数配错。

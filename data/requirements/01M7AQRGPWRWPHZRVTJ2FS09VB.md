@@ -2,10 +2,11 @@
 
 - id: REQ-01M7AQRGPWRWPHZRVTJ2FS09VB
 - type: bug
-- status: open
+- status: dropped
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
 - repro: docs/03-emulator/observations.md#OBS-20261114-01
 - severity: S2
+- dropped_reason: 被测试模型改造（REQ-01M7ATAB5A18W7XBCKFBEQS7HB：缺陷复现件不进测试）消解：那批 assets e2e 连同它的 SKIP 词表已整体删除 —— rg 'present-driver|环境不可用|game-dir' apps/emulator-lift/tests 零命中（2026-11-14 核）⇒ 缺陷的载体不存在；不是'修好了'，也不是'不该修'。
 - tags: [emulator-lift, ctest, false-green]
 
 ## 现象

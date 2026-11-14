@@ -142,6 +142,15 @@ public:
     // 消息队列（不弹 SDL；P3 由后端往同一个队列里 post）
     void post(const WinMessage& msg);
     bool peek(WinMessage* out, bool remove);
+    // ★ 从**队首**起找**第一条匹配 `pred`** 的消息：匹配只决定"看哪一条"，不匹配的**原地保留**（FIFO）。
+    //   这一条是 `PeekMessageA` 的 hWnd / wMsgFilterMin / wMsgFilterMax 过滤的实现原语
+    //   （文档：PeekMessage 只取一条**匹配**的消息；不匹配的留在队列里）。
+    //   · `remove == false`（`PM_NOREMOVE`）⇒ 什么都不取走；
+    //   · `remove == true`（`PM_REMOVE`）⇒ 只取走**那一条**，其余消息（含它前面的）相对顺序不变；
+    //   · 队列空且 `postQuitMessage` 过 ⇒ `WM_QUIT` 是**队尾**的一条虚拟消息（与 `peekAt` 同形），
+    //     它也参与 `pred` 匹配；`remove == true` 时消费掉它。
+    //   ⛔ 不实现成"逐条取走不匹配的"：那条路会静默丢消息（本单修的正是它）。
+    bool peekMatching(const std::function<bool(const WinMessage&)>& pred, WinMessage* out, bool remove);
     // 只看第 index 条（0 = 队首），**不取走**。`MsgWaitForMultipleObjects` 要"扫描整个队列找匹配
     // 唤醒掩码的消息"，只看队首会让"不匹配的消息挡在前面"时误报 WAIT_TIMEOUT。
     bool peekAt(std::size_t index, WinMessage* out) const;

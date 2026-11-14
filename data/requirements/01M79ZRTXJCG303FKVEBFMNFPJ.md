@@ -2,8 +2,9 @@
 
 - id: REQ-01M79ZRTXJCG303FKVEBFMNFPJ
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- done_reason: Clear 与 unlockRect 都收口到 colorTargetOfState 这个唯一判据；收口后 renderTargetArena 全仓零调用点 ⇒ 已从 .h/.cpp 删除（死代码不留旁路）。行为不变的论证：colorTargetOfState 先零值初始化、再用同样的 magic/committed 校验读同一个 kPlColorArena，失败时 arena==0 与旧 renderTargetArena/dev.pipeline==0?0 一致；textureInfoOfState 只读无副作用。按单里'不要求新用例'的口径没有加断言 —— 证据 = 既有 ctest 85/85 全绿（父级复跑）。变异把 arena 恒置 0 ⇒ 守卫生红（父级复跑 1/1 红）。已知小遗留：tests/gpu_batch.cpp:1126 的注释仍提到已删的 renderTargetArena（不在允许改动面，未动；rg 确认无代码引用）。
 - tags: [emulator-lift, d3d9, refactor]
 
 ## 缺口

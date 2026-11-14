@@ -2,78 +2,67 @@
 
 - id: REQ-01M7AQ5QKKPC8YJTQA9DNRG2XA
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- done_reason: 收敛完成，裁决表进正文（12 行：删/合/降档各带一句'为什么正常团队不会为它写用例'）。读数：默认档注册 96 → 86，期间新增 4 条合同（cursor-warp / cli-cursor-warp / advapi32-registry / softfloat-tls）⇒ 实际删/并 14 条；全量 86/86 passed、空载 38 s（有并发负载 55 s）、单条最长 ~10 s（门槛 30 s）；旧'卡住 ≥10 分钟'的 overlay-window-smoke（TIMEOUT 1200 s）已删。ctest -N 名单里已无任何'跑游戏并断言业务结果'的用例。引用不断链：requirements validate 6/6、pnpm verify 500/0（子单 FBEQS7HB 的 verify 锚挂在 tools/test/ledger.test.mjs#CTest 分级）。⚠ 本单旧的 LIFT_ASSETS / LIFT_REPRO 两档**已在正文里改成现行口径**（repro 档取消）—— 那两档的原文与子单的模型冲突，属于过期描述，不是这次新删的。
 - tags: [emulator-lift, ctest, tests]
 
 ## 一句话
 
-默认 `ctest` 这一档**偏高、偏碎、偏慢**：判据被用成了"只要能静默坏掉就该有一条用例"，
-结果是 96 条注册用例里有一批是正常项目不会写的东西。本单按**比例**（正常项目的流程）审计并
-收敛用例集，**先砍无意义用例，再谈 CPU 光栅迁移**（迁移量取决于先砍掉多少条像素断言）。
+默认 `ctest` 曾**偏高、偏碎、偏慢**：判据被用成"只要能静默坏掉就该有一条用例"。本单按"正常项目的比例"审计并收敛；
+**测试模型**本身（只留 shim 合同 + 压力/效率、取消 repro 档）由子单 `REQ-01M7ATAB5A18W7XBCKFBEQS7HB` 定案，本单负责**收敛与引用迁移**。
 
-## 用户口径（2026-11-13，本单的裁决，⛔ 不要重新裁决）
+## 用户口径（2026-11-13，⛔ 不重新裁决）
 
-1. **「测试有价值」≠「应该加/留着测试用例」。** 不要因为"这里可能会被破坏、且静默"就判"必须加"。
-2. 判据按**正常开发项目**的比例：一个正常团队**会不会真的写这条**、**留着它**。
-3. 优先**合并**：同一子系统的碎用例（每个状态位一条 / 每个参数组合一条）应合成一条有信号的。
-4. 旧口径 `AGENTS.md` §10 的三问（"删掉会不会让错误静默通过"）**不再单独构成留的理由** ——
-   它只说明"这条断言有意义"，不说明"它值得占一条用例"。本仓历史上的过度守卫正是从这里长出来的。
+1. **「测试有价值」≠「应该加/留着测试用例」。**
+2. 判据按**正常开发项目**的比例：一个正常团队会不会真的写这条、留着它。
+3. 优先**合并**：同一子系统的碎用例（每个状态位一条 / 每个参数组合一条）合成一条有信号的。
+4. `AGENTS.md` §10 的三问（"删掉会不会让错误静默通过"）**不再单独构成留的理由**。
 
-## 判据（本单收口时要能贴读数）
+## 判据
 
-- 默认档（pure，注册位置在顶层）的 `ctest` 总时长与条数**显著下降**，且：
-- **不丢真信号**：用户可见的坏画面 / 起不来 / 崩溃 / 存档坏 这几类仍各有一条能红的；
-- 每个被删/被合的条目，都有一句「**为什么正常团队不会为它写用例**」（写在提交正文或本单的裁决表里）；
-- 引用不断链：被删条目若是某张需求单的 `verify:` / `repo:`、或 `data/spec` 的证据锚、或 `docs/` 里的可复跑命令，
-  **同批**改指向留下的那条（或降级为 `done_reason` / 残差），⛔ 不许留悬空锚（`pnpm tools spec validate` /
-  `requirements validate` 必须绿）；
-- 收口证据：`ctest --test-dir out --output-on-failure` 逐条时间表 + 条数 + 失败数。
+- 默认档（顶层注册 ⇒ pure）的条数与总时长**显著下降**；
+- **不丢真信号**：用户可见的坏画面 / 起不来 / 崩溃 / 存档坏 各留一条能红的；
+- 每个被删/被合的条目都有一句「为什么正常团队不会为它写用例」（见下面裁决表）；
+- 引用不断链（`requirements validate` / `pnpm verify` 绿，⛔ 不留悬空锚）；
+- 收口证据：`ctest --test-dir out` 的条数 + 时长 + 失败数。
+
+## 2026-11-14 收口读数（重跑：`cd apps/emulator-lift && ctest --test-dir out`）
+
+- 注册条数 **96 → 86**；期间**新增** 4 条合同（`cursor-warp` / `cli-cursor-warp` / `advapi32-registry` /
+  `softfloat-tls`）⇒ 实际**删/并 14 条**。
+- 全量：**86/86 passed**，空载 **38 s** / 有并发负载时 55 s；单条最长 `d3d9-pipeline-gpu` ≈10 s（门槛 30 s）。
+- 旧"卡住 ≥10 分钟"的那条（`overlay-window-smoke`，`TIMEOUT 1200 s`）已随资产档重组删除。
+- 默认档 `ctest -N` 名单里**已无**任何"跑游戏并断言业务结果"的用例（逐名核过，见子单 done_reason）。
+
+## 裁决表（删 / 合 / 降档，一行一条）
+
+| 条目 | 处置 | 为什么正常团队不会为它写用例 |
+|---|---|---|
+| `quit-graph` / `save-graph` / `close-confirm` / `option-roundtrip` | 删 | 缺陷复现件：为某个已修缺陷临时写的 UI 路径，不是 shim 合同；复现命令进 `defects.md` |
+| `interaction-graph` / `interaction-script-e2e` | 删 | 判据是"走通某段交互"= 游戏的业务，不是我们的接口 |
+| `movie-logo` 的**正确性**判据 | 删 | "播完了 / 1280×720 / samples≥20" 是业务；其 shim 合同部分（`IMediaSample2` 属性对称）下沉到 `dshow-graph` |
+| `boot-trace`（"能到 L2"） | 删 | 启动进度不是合同；启动**耗时**改由 `stress-boot` 的读数 + 阈值承担 |
+| `title-entry-paths` / `agerc-ui-state` / `recovery-dialog` | 删 | 界面状态与弹窗路径 = 业务；真缺陷的复现命令进 `defects.md` |
+| `mip-e2e` | 删 | CPU 光栅的逐像素 oracle；随 CPU 光栅退休一起消失 |
+| `native-override-e2e` / `skip-logo` / `base-coverage` | 删 | 被测物或判据随 CPU 光栅 / flag 变化失效；读数迁 `observations.md` |
+| `lift/raster-flag-gone` | 摘注册 | `--raster` 删除后是**空壳**：注册了但没有分派分支 ⇒ 恒绿、什么都不验 |
+| `dispatch-tax` | 降档 → `LIFT_STRESS` | 它是吞吐测量，不是接口合同；判据是读数 + 阈值 |
+| `overlay-window-smoke` | 删 | 真窗口 smoke，`TIMEOUT 1200 s` 本机挂 ≥10 min；覆盖由 `overlay` / `overlay-gpu` 两条纯用例承担 |
+| 像素断言（`d3d9` / `d3d9_pipeline`） | 合/删 **139 → 54** | "每个 blend / 采样组合一条"那类；留少量能红的代表 + GPU 臂 |
+
+## 档位（现行；⛔ 旧的 `LIFT_ASSETS` / `LIFT_REPRO` 两档已取消）
+
+| 档 | 内容 | 怎么开 |
+|---|---|---|
+| 默认（pure） | **设计的合同**（快、确定性；单条 ≤30 s） | 无条件顶层注册 |
+| `LIFT_STRESS` | **压力 / 效率**（判据 = 读数 + 阈值；唯一允许跑真游戏的一档） | `$env:LIFT_STRESS=1` 重新 configure |
+
+复现件**不进测试**：只作复现命令留在 `docs/03-emulator/defects.md` / `observations.md`。
+判据 = CMake **注册位置**（`tools/lib/ledger.mjs#cmakeTestTier()`），不建清单文件。
 
 ## 非目标
 
 - ⛔ 不为变快而**放宽断言** / 把 SKIP 当 pass / 调大容差（那是拿绿换绿）。
 - ⛔ 不删掉"真的会把引擎跑坏"的那几条（起不来、黑屏、存档坏、崩）。
 - ⛔ 不动 `apps/emulator-lift/tests/` 以外的东西来凑时长。
-
-## 已测的现状（读数，不是断言；重跑命令见下）
-
-- `ctest --test-dir out -N`：**96 条注册**（本机 Windows x64 + 安装树存在 ⇒ assets 档也注册）。
-  CMake 里共 **102** 个 `add_test`，按注册位置分档：**pure 79 / assets 23**。
-- `overlay-window-smoke` 的 `TIMEOUT` 是 **1200 s**；本机实测它**挂住 ≥10 分钟**（子进程 `emulator-lift.exe`
-  在跑、几乎不吃 CPU）⇒ 全量 `ctest` 的墙钟不由"多数用例"决定，而由少数几条决定。
-- 开工前就存在的红（与本单无关，另行开单/已开）：`host-encoding`（19 checks / 1 failure）、
-  `gpu-batch-barrier`（367 checks / 1 failure，`gpu-batch/headless-hidden-window` 子进程 exit 3）。
-- 逐条墙钟表：`.tmp/suite-audit/timings.tsv`（`pwsh -File .tmp/suite-audit/time-all.ps1` 生成，
-  ★ `.tmp/` 是本地临时区 ⇒ 本单收口前要把结论（不是脚本产物）写成本节的读数）。
-
-## 步骤
-
-1. **普查（5 面，只读并行）**：核心语义 / Win32 面 / D3D-GPU 面 / 音频-影片 / CLI-e2e。落 `.tmp/suite-audit/g*.md`。
-2. **父级裁决**：合并成一张「删 / 合 / 降档」表，冲突的留待核（⛔ 不选一个了事）。
-3. **落地（串行，每批一层复审）**：合并 → 删 → 引用迁移 → 门禁。
-4. 回头再把 `REQ-01M7A74YG08R65NJBFXF7DEJDK`（CPU 光栅迁移）按"先砍完"的新规模重排。
-
-
-## 裁决补遗（2026-11-13，用户指出病根）：**缺陷复现件不是守卫**
-
-`quit-graph` / `save-graph` / `close-confirm` / `option-roundtrip` 这类 e2e，是**发现某个缺陷时临时加的复现路径**，
-没有经过设计，后来被直接搬进测试用例 ⇒ 等于"每次测试都回归历史上发现过的所有 UI 缺陷"。这不 make sense，
-也正撞 `AGENTS.md` §10 的红线（❌ 不要用 test 记住发生过的事 —— 那是 `defects.md` / `observations.md`）。
-
-⇒ **档位（判据 = CMake 注册位置，不建清单文件）**：
-
-| 档 | 内容 | 怎么开 |
-|---|---|---|
-| 默认（pure） | **设计的合同**（快、确定性；单条 ≤30 s） | 无条件顶层注册 |
-| 验收（`LIFT_ASSETS`） | **贵 / 要真跑一遍**的验收面 | `LIFT_ASSETS=1` 重新 configure |
-| 复现（`LIFT_REPRO`） | **缺陷复现件** | `LIFT_REPRO=1` 重新 configure |
-
-★ **档位按用途，⛔ 不按"资产在不在"**（用户 2026-11-13）：资产 / 语料 / 字体**都在场**（`links/install` + LFS）。
-旧的 `if(EXISTS …)` 当开关在本机**恒真**，唯一效果是让"哪条用例存在"随机器漂移、并把 README 逼成假话
-（第 1 批复审抓到的就是它）。现在输入**假定在场**，缺了在 configure 的 STATUS 盘点里可见；
-**显式打开某档而输入缺失 ⇒ `FATAL_ERROR`**（响亮，不静默缩水）。
-
-规则：新增一条用例，先回答"这是**设计的合同**还是**某个缺陷的复现**"；复现件一律进 `LIFT_REPRO` 档，
-并在 `docs/03-emulator/defects.md` 或 `observations.md` 有对应条目 + 头注释写明"这是谁的复现"。
-⛔ 不许再把"再回归一遍历史缺陷"的用例加进默认门禁。

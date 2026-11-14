@@ -2,8 +2,10 @@
 
 - id: REQ-01M7A3M73R3XYMM7J4KNQ1VNV7
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- verify: apps/emulator-lift/tests/d3d9_pipeline.cpp#d3d9p/render-state-domain
+- done_reason: 接受域收成一份判据 renderStateTier()（Set 的 default 与 Get 共用）并按官方 D3DRENDERSTATETYPE 枚举逐值核对（103 个成员、7..209 不连续）：合法未实现的 22 个值（48 / 146-148 / 163 / 165 / 172-173 / 178-183 / 198-205，其中 48 与 146-148 原单漏列）归 B 档 —— 接受 + 原样存下 + Get 逐位读回 + 记新具名位 41；非枚举值（1 / 138 / 0..209 空洞 / 210..255）Set 与 Get 都 INVALIDCALL 且不记账。判据变更一处并给依据：Get(2) 由 0 改为 INVALIDCALL（GetRenderState 文档说 State 必须是枚举成员、非法参数返回 D3DERR_INVALIDCALL）⇒ 既有 d3d9p/render-state-policy 的 Get(2)==0 同步改成 INVALIDCALL 并补 Get(1)/Get(138)；⛔ 没有采用'让 Set(2) 也接受'那种为了不动测试的备选。守卫 d3d9p/render-state-domain 表驱动（107+46 个非法值 + 103 个合法值逐值），修前 1418 checks / 177 failures → 修后 0；变异条目把 163 挪回拒绝档 ⇒ 该用例红（父级复跑 1/1 红）。引擎实测写的 16 个状态全在 A 档 ⇒ 行为与日志不变。
 - tags: [emulator-lift, d3d9, render-state]
 
 ## 缺口（D3D9 四条复审的"可另开单"）

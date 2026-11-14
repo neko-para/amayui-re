@@ -203,6 +203,14 @@ constexpr std::uint32_t kOffSetRenderTarget = 0x94u;         // ★ 0x4A778B
 constexpr std::uint32_t kOffGetBackBuffer = 0x48u;           // ★ 0x4A51DF（回程 0x4A521B 用它取后缓冲表面）
 constexpr std::uint32_t kOffTextureGetSurfaceLevel = 0x48u;  // ★ 0x4A7755
 constexpr std::uint32_t kOffRelease = 0x08u;                 // IUnknown::Release（所有 COM 对象同槽）
+// ★ 声明路（Live2D 在 `sub_4C1BE5` 用 +0x158 建、随后 +0x15C 绑定；见 shims/d3d9.cpp 方法表 #86/#87）
+constexpr std::uint32_t kOffCreateVertexDeclaration = 0x158u;
+constexpr std::uint32_t kOffSetVertexDeclaration = 0x15Cu;
+constexpr std::uint32_t kOffCreateOffscreenPlainSurface = 0x90u;  // ★ 0x4A0570
+// ★ IDirect3DSurface9 的 LockRect / UnlockRect 是 **+0x34 / +0x38**（3 参 / 0 参）——
+//   ⛔ 不是纹理的 +0x4C / +0x50（4 参 / 1 参，带 Level）；见 `shims/d3dx9.cpp` 的 `surfaceMethods`。
+constexpr std::uint32_t kOffSurfaceLockRect = 0x34u;
+constexpr std::uint32_t kOffSurfaceUnlockRect = 0x38u;
 
 constexpr std::uint32_t kFvfXyzDiffuse = 0x0042u;              // D3DFVF_XYZ | D3DFVF_DIFFUSE
 constexpr std::uint32_t kFvfXyzRhwDiffuse = 0x0044u;           // D3DFVF_XYZRHW | D3DFVF_DIFFUSE
@@ -661,6 +669,9 @@ void caseRenderStateBound() {
     LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsColorWriteEnable, 0xFu), 0u);
 
     // ① 256 项基线（全部走 guest 可见的 GetRenderState）
+    //   ★ 2026-11-14 起 Get 的接受域 = 官方 `D3DRENDERSTATETYPE`（`REQ-01M7A3M73R3XYMM7J4KNQ1VNV7`）：
+    //     0..255 里**不是** D3DRS 的那些项读回 `getRs` 的失败哨兵 0xDEADBEEF（= INVALIDCALL）。
+    //     本用例的判据是"越界 Set 之后**逐项**相同"，所以哨兵项照样是基线的一部分。
     std::vector<std::uint32_t> before(256u, 0xDEADBEEFu);
     for (std::uint32_t i = 0; i < 256u; ++i) before[i] = r.f.getRs(i);
     LIFT_CHECK_NE_U32(before[lift::d3d9::kRsColorWriteEnable], 0xDEADBEEFu);
@@ -2507,6 +2518,74 @@ void writeIndex16(std::uint32_t ib, const std::vector<std::uint16_t>& indices, F
     LIFT_CHECK_EQ_U32(f.unlockBuffer(ib), 0u);
 }
 
+// ---- 声明路（`D3DVERTEXELEMENT9`）夹具 ----
+// 8 B/项：Stream u16 / Offset u16 / Type u8 / Method u8 / Usage u8 / UsageIndex u8；`D3DDECL_END` = Stream 0xFF。
+// ★ 只造本线支持集里的元素（POSITION/FLOAT3、TEXCOORD0/FLOAT2、COLOR0/D3DCOLOR，见 `declLayoutOf`）。
+struct DeclElement {
+    std::uint16_t stream = 0;
+    std::uint16_t offset = 0;
+    std::uint8_t type = 0;   // D3DDECLTYPE
+    std::uint8_t usage = 0;  // D3DDECLUSAGE
+};
+constexpr std::uint8_t kDeclTypeFloat2 = 1;
+constexpr std::uint8_t kDeclTypeFloat3 = 2;
+constexpr std::uint8_t kDeclTypeD3dColor = 4;
+constexpr std::uint8_t kDeclUsagePosition = 0;
+constexpr std::uint8_t kDeclUsageTexCoord = 5;
+constexpr std::uint8_t kDeclUsageColor = 10;
+
+std::vector<std::uint8_t> declElementBytes(const std::vector<DeclElement>& elems) {
+    std::vector<std::uint8_t> out;
+    auto push16 = [&out](std::uint16_t v) {
+        out.push_back(static_cast<std::uint8_t>(v & 0xFFu));
+        out.push_back(static_cast<std::uint8_t>((v >> 8) & 0xFFu));
+    };
+    for (const DeclElement& e : elems) {
+        push16(e.stream);
+        push16(e.offset);
+        out.push_back(e.type);
+        out.push_back(0u);  // Method（缺省 = 0）
+        out.push_back(e.usage);
+        out.push_back(0u);  // UsageIndex
+    }
+    push16(0x00FFu);  // D3DDECL_END().Stream = 0xFF
+    push16(0u);
+    out.push_back(0u);
+    out.push_back(0u);
+    out.push_back(0u);
+    out.push_back(0u);
+    return out;
+}
+
+// CreateVertexDeclaration(+0x158) ⇒ 对象 EA（0 = 失败；失败原因由 shim 打日志）。
+std::uint32_t createVertexDeclaration(Fixture& f, const std::vector<DeclElement>& elems) {
+    const std::uint32_t elems_ea = f.placeBytes(declElementBytes(elems));
+    const std::uint32_t out_ea = f.placeU32(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(f.method(f.device.object, kOffCreateVertexDeclaration, {elems_ea, out_ea}), 0u);
+    return f.m.mem().rd32(out_ea);
+}
+
+void pushF32(std::vector<std::uint8_t>* out, float v) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &v, sizeof(bits));
+    for (int i = 0; i < 4; ++i) out->push_back(static_cast<std::uint8_t>((bits >> (8 * i)) & 0xFFu));
+}
+void pushU32(std::vector<std::uint8_t>* out, std::uint32_t v) {
+    for (int i = 0; i < 4; ++i) out->push_back(static_cast<std::uint8_t>((v >> (8 * i)) & 0xFFu));
+}
+
+// 把一段字节写进缓冲（Lock → 宿主映射 → memcpy → Unlock）
+void writeBufferBytes(std::uint32_t buf, const std::vector<std::uint8_t>& bytes, Fixture& f) {
+    std::uint32_t base = 0;
+    LIFT_CHECK_EQ_U32(f.lockBuffer(buf, &base), 0u);
+    LIFT_CHECK_NE_U32(base, 0u);
+    if (base == 0) return;
+    std::uint8_t* dst = f.m.mem().host(base);
+    LIFT_CHECK(dst != nullptr);
+    if (dst != nullptr && !bytes.empty()) std::memcpy(dst, bytes.data(), bytes.size());
+    LIFT_CHECK_EQ_U32(f.unlockBuffer(buf), 0u);
+}
+
 int caseIndexedRange() {
     lift_test::g_current_case = "d3d9p/indexed-range";
     Rig r;
@@ -2580,6 +2659,408 @@ int caseIndexedRange() {
 }
 
 // =======================================================================================
+// ⑲b `d3d9p/indexed-range-decl`（`REQ-01M7A3M7E59JX74G897Q7W2RVD` 的第 1 条判据）
+// =======================================================================================
+// 红了意味着什么：声明路（`kPlVertexDecl` + 两条 stream）的顶点区间映射与 FVF 路**不一致** ——
+//   (a)(b) 负 `BaseVertexIndex` 的合法调用被假拒（INVALIDCALL，一个像素都不画）或映射错位
+//     （点画到别的 x 上）；
+//   (c) 索引 < `MinVertexIndex` 的调用**静默画错**（顶点 3 的白点被画出来）。
+//
+// ★ 声明：stream0 = POSITION FLOAT3 @0 + COLOR0 D3DCOLOR @12（stride 16）·
+//          stream1 = TEXCOORD0 FLOAT2 @0（stride 8）⇒ 走的就是 Live2D 那套
+//          `declLayoutOf` / `buildDeclVertices` + `relative = idx - min` 映射（没绑纹理，UV 只为凑第二条流）。
+// ★ 每段 `NumVertices` = 5（FVF 路是 3）：声明缓冲按 `[first, first+NumVertices)` 建，
+//   "变异点 `relative` 不减 min" 因此读到的是**已建出来的**顶点 2/3/4（蓝/白/黄，x=30/40/50），
+//   ⛔ 不越界读 ⇒ 变异红得可复现（不是悬空的 UB）。
+// =======================================================================================
+int caseIndexedRangeDecl() {
+    lift_test::g_current_case = "d3d9p/indexed-range-decl";
+    Rig r;
+    std::string why;
+    if (!r.upGpu(&why)) LIFT_SKIP(why.c_str());
+
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsZEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsCullMode, lift::d3d9::kCullNone), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsAlphaBlendEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setViewport(0u, 0u, 64u, 64u), 0u);
+
+    // 5 个点：x = 10/20/30/40/50 的**像素中心**（NDC：x = (px+0.5)/32 - 1；y = 1 - (10.5/32)）。
+    // 颜色互不相同（点光栅 = 1px，顶点色**精确**写进像素）。
+    constexpr std::uint32_t kPoint0 = 0x00FF0000u;  // 红
+    constexpr std::uint32_t kPoint1 = 0x0000FF00u;  // 绿
+    constexpr std::uint32_t kPoint2 = 0x000000FFu;  // 蓝
+    constexpr std::uint32_t kPoint3 = 0x00FFFFFFu;  // 白（(c) 误画时会看见）
+    constexpr std::uint32_t kPoint4 = 0x00FFFF00u;  // 黄
+    constexpr std::uint32_t kVertices = 7u;         // 前 5 个有数据；(c) 要读到顶点 5 也不越界
+
+    const std::uint32_t decl = createVertexDeclaration(
+        r.f, {{0u, 0u, kDeclTypeFloat3, kDeclUsagePosition},
+              {0u, 12u, kDeclTypeD3dColor, kDeclUsageColor},
+              {1u, 0u, kDeclTypeFloat2, kDeclUsageTexCoord}});
+    LIFT_CHECK_NE_U32(decl, 0u);
+    if (decl == 0) return 0;
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetVertexDeclaration, {decl}), 0u);
+
+    std::uint32_t vb0 = 0;
+    std::uint32_t vb1 = 0;
+    LIFT_CHECK_EQ_U32(r.f.createVertexBuffer(kVertices * 16u, 0u, &vb0), 0u);
+    LIFT_CHECK_NE_U32(vb0, 0u);
+    LIFT_CHECK_EQ_U32(r.f.createVertexBuffer(kVertices * 8u, 0u, &vb1), 0u);
+    LIFT_CHECK_NE_U32(vb1, 0u);
+    if (vb0 == 0 || vb1 == 0) return 0;
+
+    const std::vector<float> xs = {-0.671875f, -0.359375f, -0.046875f, 0.265625f, 0.578125f};
+    const std::vector<std::uint32_t> colors = {kPoint0, kPoint1, kPoint2, kPoint3, kPoint4};
+    std::vector<std::uint8_t> stream0;
+    std::vector<std::uint8_t> stream1;
+    for (std::uint32_t i = 0; i < kVertices; ++i) {
+        const float px = i < xs.size() ? xs[i] : 0.0f;
+        const std::uint32_t color = i < colors.size() ? colors[i] : 0u;
+        pushF32(&stream0, px);   // x
+        pushF32(&stream0, 0.671875f);  // y（屏幕 y=10 那一行的像素中心）
+        pushF32(&stream0, 0.0f);       // z
+        pushU32(&stream0, color);      // COLOR0
+        pushF32(&stream1, 0.0f);       // u
+        pushF32(&stream1, 0.0f);       // v
+    }
+    writeBufferBytes(vb0, stream0, r.f);
+    writeBufferBytes(vb1, stream1, r.f);
+    LIFT_CHECK_EQ_U32(r.f.setStreamSource(0u, vb0, 0u, 16u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setStreamSource(1u, vb1, 0u, 8u), 0u);
+
+    std::uint32_t ib = 0;
+    LIFT_CHECK_EQ_U32(r.f.createIndexBuffer(12u, 101u, &ib), 0u);
+    LIFT_CHECK_NE_U32(ib, 0u);
+    if (ib == 0) return 0;
+    LIFT_CHECK_EQ_U32(r.f.setIndices(ib), 0u);
+
+    auto draw_case = [&](std::int32_t base, std::uint32_t min_index, std::uint32_t num_vertices,
+                         const std::vector<std::uint16_t>& indices) {
+        LIFT_CHECK_EQ_U32(r.f.clearTo(kClearColor), 0u);
+        writeIndex16(ib, indices, r.f);
+        return r.f.drawIndexed(lift::d3d9::kPtPointList, base, min_index, num_vertices, 0u, 3u);
+    };
+
+    LIFT_CHECK_EQ_U32(r.f.beginScene(), 0u);
+
+    // (a) base=-2, min=2, n=5, IB{2,3,4} ⇒ 顶点 0/1/2 的红/绿/蓝点。
+    //     修前（`relative` 不减 min）：读到顶点 2/3/4 ⇒ 像素落在 30/40/50（或越界）⇒ 下面三条红。
+    LIFT_CHECK_EQ_U32(draw_case(-2, 2u, 5u, {2u, 3u, 4u}), 0u);
+    if (!r.syncPixel(&why)) LIFT_SKIP(why.c_str());
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(10, 10), kPoint0);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(20, 10), kPoint1);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(30, 10), kPoint2);
+
+    // (b) base=-1, min=1, n=5, IB{1,2,3} ⇒ 同样是顶点 0/1/2（first 仍为 0）。
+    LIFT_CHECK_EQ_U32(draw_case(-1, 1u, 5u, {1u, 2u, 3u}), 0u);
+    if (!r.syncPixel(&why)) LIFT_SKIP(why.c_str());
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(10, 10), kPoint0);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(20, 10), kPoint1);
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(30, 10), kPoint2);
+
+    // (c) base=0, min=2, n=4, IB{0,1,3} ⇒ idx=0/1 < min ⇒ INVALIDCALL（⛔ 不按 0/1/3 画）。
+    LIFT_CHECK_EQ_U32(draw_case(0, 2u, 4u, {0u, 1u, 3u}), lift::d3d9::kInvalidCall);
+    if (!r.syncPixel(&why)) LIFT_SKIP(why.c_str());
+    // 违约索引对应的顶点（顶点 3 的白点，x=40）**不许**被画出来（错位杂点 = 用户可见）
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(40, 10), kClearPixel);
+
+    LIFT_CHECK_EQ_U32(r.f.endScene(), 0u);
+    return 0;
+}
+
+// =======================================================================================
+// ⑲c `d3d9p/indexed-range-start-wrap`（`REQ-01M7A3M7E59JX74G897Q7W2RVD` 的第 2 条判据）
+// =======================================================================================
+// 红了意味着什么：`start_index + index_count` 退回 **u32 加法** ⇒ `0xFFFFFFF0 + 0x20` 回绕成 `0x10`，
+//   恰好 **≤** 16 个索引的缓冲（`16 > 16` 为假）⇒ 越过上界检查，随后按 `0xFFFFFFF0 * 2 ≈ 8.6 GB`
+//   的偏移读索引 ⇒ **越界读**（修前实测：进程崩在那次 memcpy 上，⛔ 不是 INVALIDCALL）。
+// ★ 正控（同一条用例内）：同一批缓冲、`start_index=0` 的 Draw 必须 S_OK 且真的画出点 ——
+//   否则"INVALIDCALL"会因为"pure 臂里任何 Draw 都 INVALIDCALL"而假绿 ⇒ 这条必须在 GPU 臂。
+// =======================================================================================
+int caseIndexedRangeStartWrap() {
+    lift_test::g_current_case = "d3d9p/indexed-range-start-wrap";
+    Rig r;
+    std::string why;
+    if (!r.upGpu(&why)) LIFT_SKIP(why.c_str());
+
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsZEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsCullMode, lift::d3d9::kCullNone), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsAlphaBlendEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setFvf(kFvfXyzRhwDiffuse), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setViewport(0u, 0u, 64u, 64u), 0u);
+
+    constexpr std::uint32_t kPoint0 = 0x00FF0000u;
+    std::uint32_t vb = 0;
+    LIFT_CHECK_EQ_U32(r.f.createVertexBuffer(5u * 20u, kFvfXyzRhwDiffuse, &vb), 0u);
+    LIFT_CHECK_NE_U32(vb, 0u);
+    if (vb == 0) return 0;
+    const std::vector<std::array<float, 4>> pts = {
+        {10.5f, 10.5f, 0.0f, 1.0f}, {20.5f, 10.5f, 0.0f, 1.0f}, {30.5f, 10.5f, 0.0f, 1.0f},
+        {40.5f, 10.5f, 0.0f, 1.0f}, {50.5f, 10.5f, 0.0f, 1.0f}};
+    writeRhwPoints(vb, pts, {kPoint0, kPoint0, kPoint0, kPoint0, kPoint0}, r.f);
+    LIFT_CHECK_EQ_U32(r.f.setStreamSource(0u, vb, 0u, 20u), 0u);
+
+    // 16 个索引（32 B）—— 上界 = 16。"回绕后恰好等于上界"才是旧加法真的**越过**检查的那一格：
+    //   0xFFFFFFF0 + 0x20 = 0x10（u32）= 16 ⇒ `16 > 16` 为假。
+    std::uint32_t ib = 0;
+    LIFT_CHECK_EQ_U32(r.f.createIndexBuffer(32u, 101u, &ib), 0u);
+    LIFT_CHECK_NE_U32(ib, 0u);
+    if (ib == 0) return 0;
+    std::vector<std::uint16_t> indices(16u, 0u);
+    indices[0] = 0u;
+    indices[1] = 1u;
+    indices[2] = 2u;
+    writeIndex16(ib, indices, r.f);
+    LIFT_CHECK_EQ_U32(r.f.setIndices(ib), 0u);
+
+    LIFT_CHECK_EQ_U32(r.f.clearTo(kClearColor), 0u);
+    LIFT_CHECK_EQ_U32(r.f.beginScene(), 0u);
+
+    // ★ 正控：start_index=0、同一批缓冲 ⇒ S_OK 且真的画出第一个点（LIFT_SKIP 里的 syncPixel 之后断言）
+    LIFT_CHECK_EQ_U32(r.f.drawIndexed(lift::d3d9::kPtPointList, 0, 0u, 5u, 0u, 3u), 0u);
+    if (!r.syncPixel(&why)) LIFT_SKIP(why.c_str());
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(10, 10), kPoint0);
+
+    // 越界：`start_index + index_count` = 0xFFFFFFF0 + 0x20（int64 = 4294967312 > 16）⇒ INVALIDCALL。
+    // 修前（u32 回绕）这条会走进去读 8.6 GB 之外的索引 ⇒ 进程崩（红）。
+    LIFT_CHECK_EQ_U32(r.f.drawIndexed(lift::d3d9::kPtPointList, 0, 0u, 5u, 0xFFFFFFF0u, 0x20u),
+                      lift::d3d9::kInvalidCall);
+    LIFT_CHECK_EQ_U32(r.f.endScene(), 0u);
+    return 0;
+}
+
+// 后缓冲里"非清屏色"的像素个数（粗粒度：证明这一批 draw 真的写了像素，⛔ 不是只看返回码）。
+int countNonBackground(Fixture& f, std::uint32_t background) {
+    int n = 0;
+    for (int y = 0; y < 64; ++y)
+        for (int x = 0; x < 64; ++x)
+            if (f.pixelAt(x, y) != background) ++n;
+    return n;
+}
+
+// =======================================================================================
+// ⑲d `d3d9p/vertex-decl-draw`（`REQ-01M79P02VYRJ3V0C0V5VHXVE3H`）
+// =======================================================================================
+// 红了意味着什么（声明式 Draw = Live2D 那条路，一旦回归表现是"模型整层消失"）：
+//   ① `DrawIndexedPrimitive` 返回 `D3DERR_INVALIDCALL`（`drawPrecheck` 把 `kPlVertexDecl != 0`
+//     当成"这一条 Draw 不支持声明"的旧行为）⇒ 后缓冲一个像素都没有 ⇒ `painted >= 4000` 红；
+//   ② 顶点取错 / 流布局错（`buildDeclVertices` 的 stream1 偏移差 1 字节 = UV 采样错）⇒
+//      四角 texel 的颜色对不上（红/绿/蓝/白各错位）⇒ 四条颜色断言红；
+//   ③ 声明没真的绑上（FVF 路偷偷接住）⇒ `vertex_decl == 0` 红。
+// ★ 判据里没有 `fallback_draws`：CPU 光栅整族已删（`REQ-01M7A74YG08R65NJBFXF7DEJDK`）⇒
+//   "像素出现"本身就等价于"GPU 准入层收下了这一批"，不存在 CPU 回退把用例刷绿的可能。
+// =======================================================================================
+int caseVertexDeclDraw() {
+    lift_test::g_current_case = "d3d9p/vertex-decl-draw";
+    Rig r;
+    std::string why;
+    if (!r.upGpu(&why)) LIFT_SKIP(why.c_str());
+
+    LIFT_CHECK_EQ_U32(r.f.clearTo(kClearColor), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsZEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsCullMode, lift::d3d9::kCullNone), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsAlphaBlendEnable, 0u), 0u);
+
+    // 2×2 纹理（A8R8G8B8）：四角四色 ⇒ 采样错会**换颜色**（不是"少画几个像素"）
+    std::uint32_t tex = 0;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, 2u, 2u, lift::d3d9::kFmtA8R8G8B8, &tex), 0u);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return 0;
+    const std::uint32_t locked = r.f.placeBytes(std::vector<std::uint8_t>(8u, 0u));
+    LIFT_CHECK_EQ_U32(r.f.method(tex, kOffTextureLockRect, {0u, locked, 0u, 0u}), 0u);
+    const std::uint32_t pitch = r.f.m.mem().rd32(locked + 0u);
+    const std::uint32_t bits = r.f.m.mem().rd32(locked + 4u);
+    LIFT_CHECK_NE_U32(bits, 0u);
+    const std::uint32_t texels[4] = {0xFFFF0000u, 0xFF00FF00u, 0xFF0000FFu, 0xFFFFFFFFu};  // (0,0)(1,0)(0,1)(1,1)
+    for (int y = 0; y < 2; ++y) {
+        for (int x = 0; x < 2; ++x) {
+            r.f.m.mem().wr32(bits + static_cast<std::uint32_t>(y) * pitch + static_cast<std::uint32_t>(x) * 4u,
+                             texels[y * 2 + x]);
+        }
+    }
+    LIFT_CHECK_EQ_U32(r.f.method(tex, kOffTextureUnlockRect, {0u}), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setTexture(0u, tex), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMagFilter, lift::d3d9::kTexfPoint), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMinFilter, lift::d3d9::kTexfPoint), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampAddressU, lift::d3d9::kAddressClamp), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampAddressV, lift::d3d9::kAddressClamp), 0u);
+
+    // 声明：stream0 = POSITION FLOAT3 @0 + COLOR0 D3DCOLOR @12（stride 16）·
+    //       stream1 = TEXCOORD0 FLOAT2 @0（stride 8）—— 与 Live2D 同形（两条流、UV 在第二条流上）
+    const std::uint32_t decl = createVertexDeclaration(
+        r.f, {{0u, 0u, kDeclTypeFloat3, kDeclUsagePosition},
+              {0u, 12u, kDeclTypeD3dColor, kDeclUsageColor},
+              {1u, 0u, kDeclTypeFloat2, kDeclUsageTexCoord}});
+    LIFT_CHECK_NE_U32(decl, 0u);
+    if (decl == 0) return 0;
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetVertexDeclaration, {decl}), 0u);
+
+    // 全幅 quad（两个三角形）。NDC(-1,+1) = 屏幕 (0,0)（上左）⇒ 该顶点 UV = (0,0)。
+    const std::uint32_t kWhite = 0xFFFFFFFFu;
+    const std::vector<std::array<float, 3>> pos = {{-1.0f, 1.0f, 0.0f},
+                                                   {1.0f, 1.0f, 0.0f},
+                                                   {-1.0f, -1.0f, 0.0f},
+                                                   {1.0f, -1.0f, 0.0f}};
+    const std::vector<std::array<float, 2>> uv = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}, {1.0f, 1.0f}};
+    std::vector<std::uint8_t> stream0;
+    std::vector<std::uint8_t> stream1;
+    for (std::size_t i = 0; i < pos.size(); ++i) {
+        pushF32(&stream0, pos[i][0]);
+        pushF32(&stream0, pos[i][1]);
+        pushF32(&stream0, pos[i][2]);
+        pushU32(&stream0, kWhite);
+        pushF32(&stream1, uv[i][0]);
+        pushF32(&stream1, uv[i][1]);
+    }
+    std::uint32_t vb0 = 0;
+    std::uint32_t vb1 = 0;
+    LIFT_CHECK_EQ_U32(r.f.createVertexBuffer(4u * 16u, 0u, &vb0), 0u);
+    LIFT_CHECK_EQ_U32(r.f.createVertexBuffer(4u * 8u, 0u, &vb1), 0u);
+    LIFT_CHECK_NE_U32(vb0, 0u);
+    LIFT_CHECK_NE_U32(vb1, 0u);
+    if (vb0 == 0 || vb1 == 0) return 0;
+    writeBufferBytes(vb0, stream0, r.f);
+    writeBufferBytes(vb1, stream1, r.f);
+    LIFT_CHECK_EQ_U32(r.f.setStreamSource(0u, vb0, 0u, 16u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setStreamSource(1u, vb1, 0u, 8u), 0u);
+
+    std::uint32_t ib = 0;
+    LIFT_CHECK_EQ_U32(r.f.createIndexBuffer(12u, 101u, &ib), 0u);
+    LIFT_CHECK_NE_U32(ib, 0u);
+    if (ib == 0) return 0;
+    writeIndex16(ib, {0u, 1u, 2u, 1u, 3u, 2u}, r.f);
+    LIFT_CHECK_EQ_U32(r.f.setIndices(ib), 0u);
+
+    LIFT_CHECK_EQ_U32(r.f.beginScene(), 0u);
+    LIFT_CHECK_EQ_U32(r.f.drawIndexed(lift::d3d9::kPtTriangleList, 0, 0u, 4u, 0u, 2u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.endScene(), 0u);
+    if (!r.syncPixel(&why)) LIFT_SKIP(why.c_str());
+
+    // ① 真的画了像素（整幅 quad ⇒ 几乎全部非清屏色）
+    const int painted = countNonBackground(r.f, kClearPixel);
+    LIFT_CHECK(painted >= 4000);
+
+    // ② 四角 = 纹理四个角 texel（UV 来自 stream1；偏移错 1 字节 ⇒ 颜色当场换掉）
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(2, 2), 0x00FF0000u);    // (0,0) 红
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(61, 2), 0x0000FF00u);   // (1,0) 绿
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(2, 61), 0x000000FFu);   // (0,1) 蓝
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(61, 61), 0x00FFFFFFu);  // (1,1) 白
+
+    // ③ 声明真的绑在设备上（这一批不是被 FVF 路接住的）
+    lift::d3d9::PipelineInfo pi;
+    LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &pi, nullptr));
+    LIFT_CHECK_NE_U32(pi.vertex_decl, 0u);
+    LIFT_CHECK_NE_U32(pi.draws, 0u);
+    return 0;
+}
+
+// =======================================================================================
+// ⑲e `d3d9p/set-render-target-offscreen-refused`（`REQ-01M79WE8JA7V92RNS537CJB0V6`）
+// =======================================================================================
+// 红了意味着什么：`CreateOffscreenPlainSurface` 的 surface 被**静默**绑成 RT0 ——
+//   ① `SetRenderTarget` 不再 `D3DERR_INVALIDCALL`；② 流水线的渲染目标变成那块离屏表面
+//   （`color_surface / color_arena` 不再指后缓冲）；③ 随后一批 draw 落进离屏表面、后缓冲一个像素都没有
+//   （或离屏表面被写坏）—— 而它正是 `GetRenderTargetData` 的**读回目标**，坏了不可见。
+// ★ 反向断言（同一用例内，防过度收紧）：**纹理** level 0 仍可绑成 RT（否则"拒绝"退化成"什么都绑不上"）。
+// ★ 修前绿是正常的：今天这条拒绝是 `setRenderTarget` 的 ownerless 判据的**副产物**
+//   （离屏表面有 `'TEX1'` 状态块、但建 surface 时 owner 传 0）⇒ 本用例守的是**将来**
+//   （有人放宽 ownerless 绑定 / 删掉那条判据时，GPU 准入层已经不再有 `color_is_texture` 闸）。
+// =======================================================================================
+int caseSetRenderTargetOffscreenRefused() {
+    lift_test::g_current_case = "d3d9p/set-render-target-offscreen-refused";
+    Rig r;
+    std::string why;
+    if (!r.upGpu(&why)) LIFT_SKIP(why.c_str());
+    auto& mem = r.f.m.mem();
+
+    // ① 建**离屏 plain surface**（`CreateOffscreenPlainSurface`，池 = SYSTEMMEM = 2）
+    const std::uint32_t out_ea = r.f.placeU32(0u);
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffCreateOffscreenPlainSurface,
+                                 {64u, 64u, lift::d3d9::kFmtX8R8G8B8, 2u, out_ea, 0u}),
+                      0u);
+    const std::uint32_t off_surf = mem.rd32(out_ea);
+    LIFT_CHECK_NE_U32(off_surf, 0u);
+    if (off_surf == 0) return 0;
+
+    // 像素预填哨兵（走 guest 的 LockRect / UnlockRect —— 与 GetRenderTargetData 的读回目标同一条路）
+    constexpr std::uint32_t kSentinel = 0x5A5A5A5Au;
+    const std::uint32_t locked = r.f.placeBytes(std::vector<std::uint8_t>(8u, 0u));
+    LIFT_CHECK_EQ_U32(r.f.method(off_surf, kOffSurfaceLockRect, {locked, 0u, 0u}), 0u);
+    const std::uint32_t off_pitch = mem.rd32(locked + 0u);
+    const std::uint32_t off_bits = mem.rd32(locked + 4u);
+    LIFT_CHECK_NE_U32(off_bits, 0u);
+    if (off_bits == 0) return 0;
+    for (int y = 0; y < 64; ++y) {
+        for (int x = 0; x < 64; ++x) {
+            mem.wr32(off_bits + static_cast<std::uint32_t>(y) * off_pitch + static_cast<std::uint32_t>(x) * 4u,
+                     kSentinel);
+        }
+    }
+    LIFT_CHECK_EQ_U32(r.f.method(off_surf, kOffSurfaceUnlockRect, {}), 0u);
+    // 哨兵真的落在像素里（否则"没被写"会退化成"读的是空内存"）
+    LIFT_CHECK_EQ_U32(mem.rd32(off_bits), kSentinel);
+
+    auto surfaceBytes = [&]() {
+        std::vector<std::uint8_t> out;
+        for (int y = 0; y < 64; ++y) {
+            for (int x = 0; x < 64; ++x) {
+                const std::uint32_t at = off_bits + static_cast<std::uint32_t>(y) * off_pitch +
+                                         static_cast<std::uint32_t>(x) * 4u;
+                for (int b = 0; b < 4; ++b) out.push_back(mem.rd8(at + static_cast<std::uint32_t>(b)));
+            }
+        }
+        return out;
+    };
+
+    // ② 绑到 RT0 ⇒ D3DERR_INVALIDCALL（D3D9：离屏 plain surface 不能当 render target）
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, off_surf}),
+                      lift::d3d9::kInvalidCall);
+
+    // ③ 渲染目标**不变**：仍是（隐式）后缓冲
+    lift::d3d9::PipelineInfo pi;
+    LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &pi, nullptr));
+    LIFT_CHECK_EQ_U32(pi.color_surface, 0u);
+    LIFT_CHECK_EQ_U32(pi.color_arena, 0u);
+
+    // ④ 随后一批 draw 仍进后缓冲：清 → 画一个点 → 读回后缓冲 / 离屏表面逐字节比对
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsZEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsCullMode, lift::d3d9::kCullNone), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsAlphaBlendEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setFvf(kFvfXyzRhwDiffuse), 0u);
+    LIFT_CHECK_EQ_U32(r.f.clearTo(kClearColor), 0u);
+    const std::vector<std::uint8_t> off_before = surfaceBytes();
+    constexpr std::uint32_t kDot = 0x00FF8000u;
+    const std::uint32_t dot = r.f.placeRhwDiffuse({{30.5f, 40.5f, 0.0f, 1.0f}}, {kDot});
+    LIFT_CHECK_EQ_U32(r.f.beginScene(), 0u);
+    LIFT_CHECK_EQ_U32(r.f.drawUp(lift::d3d9::kPtPointList, 1u, dot, 20u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.endScene(), 0u);
+    if (!r.syncPixel(&why)) LIFT_SKIP(why.c_str());
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(30, 40), kDot);       // 后缓冲真的被画了
+    LIFT_CHECK_EQ_U32(r.f.pixelAt(10, 10), kClearPixel);  // 只有那一个点
+    LIFT_CHECK(surfaceBytes() == off_before);           // 离屏表面一个字节都没动
+
+    // ⑤ 反向断言（防过度收紧）：**纹理** level 0 仍可绑成 RT
+    std::uint32_t tex = 0;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, 64u, 64u, lift::d3d9::kFmtA8R8G8B8, &tex), 0u);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex != 0) {
+        const std::uint32_t ts_out = r.f.placeU32(0u);
+        LIFT_CHECK_EQ_U32(r.f.method(tex, kOffTextureGetSurfaceLevel, {0u, ts_out}), 0u);
+        const std::uint32_t ts = mem.rd32(ts_out);
+        LIFT_CHECK_NE_U32(ts, 0u);
+        if (ts != 0) {
+            LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, ts}), 0u);
+            LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &pi, nullptr));
+            LIFT_CHECK_EQ_U32(pi.color_surface, ts);
+            LIFT_CHECK_NE_U32(pi.color_arena, 0u);
+            // 回到后缓冲（设备销毁时不留绑定）
+            LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, 0u}), 0u);
+        }
+    }
+    return 0;
+}
+
+// =======================================================================================
 // ⑳ `d3d9p/render-state-policy`（`REQ-01M79PPA10JCKG4C9HY6QMV6PT`）
 // =======================================================================================
 // 红了意味着什么：
@@ -2592,6 +3073,9 @@ int caseIndexedRange() {
 //   benign（bit11 MIPFILTER = 已知近似）集合、`unsupported : 0x…` / `bit26=未分类 D3DRS` 摘要 ——
 //   它们都是**我方政策 / 我方记账位 / 我方摘要文案**，外部不可观测（`AGENTS.md` §10）。
 //   非 D3DRS 的拒绝面（下面 (3)）就是这一族留下的代表。
+// ★ 修 2026-11-14（`REQ-01M7A3M73R3XYMM7J4KNQ1VNV7`）：记账位（bit26 / bit41）的"命中"判据
+//   **另有**用例守 —— `d3d9p/render-state-domain` 的"显式拒绝档 / B 档"两条，那是需求单明确要求的
+//   **接受域**判据（不是本用例的合同）。本用例只管上面三条。摘要文案仍然没人断言。
 // =======================================================================================
 // 引擎实测的 16 个 D3DRS 及其实测取值（`[reg+0E4h]` 普查；`REQ-01M79PPA10JCKG4C9HY6QMV6PT` §4）。
 // ★ 逐条必须是官方 `D3DRENDERSTATETYPE` 枚举里有的值（1/138 不是：1 是扫描伪值、138 不存在，
@@ -2638,7 +3122,7 @@ void caseRenderStatePolicy() {
     LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsFogColor, 0xFF123456u), lift::d3d9::kOk);
     LIFT_CHECK_EQ_U32(r.f.getRs(lift::d3d9::kRsFogColor), 0xFF123456u);
 
-    // ---- (3) 210..255 不是 D3DRS、0..209 的空洞也不在白名单：INVALIDCALL + 不写 ----
+    // ---- (3) 210..255 / 1 / 138 / 2 不是 D3DRS：INVALIDCALL + 不写 ----
     //   ★ 两条分支都要覆盖：210..255 走上界；2 这种 0..209 的空洞走 `default`。
     //     （只测 214 会漏掉"default 又静默存下"——上界先把它挡了。）
     auto heapBytes = [&r]() {
@@ -2661,13 +3145,242 @@ void caseRenderStatePolicy() {
     LIFT_CHECK_EQ_U32(r.f.setRs(1u, 0u), lift::d3d9::kInvalidCall);
     LIFT_CHECK_EQ_U32(r.f.setRs(138u, 1u), lift::d3d9::kInvalidCall);
     LIFT_CHECK(heap_before == heapBytes());
-    // Get 的上界同步：210+ 读不到（也⛔ 不是"存了但读不到"的假成功）；空洞状态读回仍 0
+    // Get 与 Set **同域**（`REQ-01M7A3M73R3XYMM7J4KNQ1VNV7`）：210+ 与 0..209 的空洞都读不到
+    //   （也⛔ 不是"存了但读不到"的假成功）。
+    //   ⚠ 改判据：修前这里钉的是 `Get(2) == 0`（"按数组下标直接读、任何 0..209 都回 0"）——
+    //   那条**没有文档依据**：`State` 文档写"can be any member of the D3DRENDERSTATETYPE
+    //   enumerated type"、返回值"D3DERR_INVALIDCALL if one of the arguments is invalid"
+    //   <https://learn.microsoft.com/en-us/windows/win32/api/d3d9/nf-d3d9-idirect3ddevice9-getrenderstate>
+    //   ⇒ 2 不是枚举成员 ⇒ 与 Set 同判 INVALIDCALL（理由写在交付报告里）。
     LIFT_CHECK_EQ_U32(r.f.getRs(214u), 0xDEADBEEFu);
-    LIFT_CHECK_EQ_U32(r.f.getRs(2u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.getRs(2u), 0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(r.f.getRs(1u), 0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(r.f.getRs(138u), 0xDEADBEEFu);
 }
 
 // =======================================================================================
-// ㉑ `d3d9p/validate-device-one-pass`（`REQ-01M79PP9H5XZRWFJD4BGS19S54`）
+// ㉑ `d3d9p/render-state-domain`（`REQ-01M7A3M73R3XYMM7J4KNQ1VNV7`）
+//
+// 红了意味着什么（= 接受域不再等于"官方 `D3DRENDERSTATETYPE` 枚举成员"）：
+//   (1) 某个**合法 D3DRS** 被 `Set` 拒（白名单漏项 / 又把"本线没实现"当成"非法"）；
+//   (2) 某个**非 D3DRS** 值被 `Set` 接受（default 又静默存下）或给 `Set` 记了账；
+//   (3) `Get` 的接受域与 `Set` 不一致（0..209 的空洞 / 越界值能读回，或合法值读不到）；
+//   (4) B 档（合法、本线不实现 ⇒ 应当"只存 + 记账"）不再进 `recordUnsupported` 的具名位 41；
+//   (5) C 档（值敏感）的"有效值 ⇒ INVALIDCALL + 记 bit26"退化。
+//
+// 逐值依据（⛔ 不是"本线收了多少个"）：
+//   · 官方枚举（Syntax 段是**全集**；7..209 **不是**连续区间，`D3DRS_FORCE_DWORD` 不是状态）：
+//     <https://learn.microsoft.com/en-us/windows/win32/direct3d9/d3drenderstatetype>
+//   · `GetRenderState` 的 `State`："can be any member of the D3DRENDERSTATETYPE enumerated type"、
+//     返回值："D3DERR_INVALIDCALL if one of the arguments is invalid" ⇒ `Set` / `Get` **同域**：
+//     <https://learn.microsoft.com/en-us/windows/win32/api/d3d9/nf-d3d9-idirect3ddevice9-getrenderstate>
+//
+// ⛔ 本用例**不**写"209 个值里只有 X 个"这类取值断言（换实现就红、红得没意义）：
+//   它只断两条**全域**命题 —— 每个枚举成员 ⇒ 接受（或显式拒绝并记账）；每个非成员 ⇒ 拒绝且不记账。
+// =======================================================================================
+enum class RsTier {
+    Implemented,          // A 档：有 case / 有读点
+    Stored,               // B 档（既有）：合法、只存（副作用被已记账的 master 门控，或真机不读）
+    StoredUnimplemented,  // B 档（本单新增）：合法、只存 **+** `recordUnsupported(bit41)` 记账
+    ValueSensitive,       // C 档：合法但值敏感（有效值 ⇒ INVALIDCALL + bit26）
+};
+struct RsDomain {
+    std::uint32_t state;
+    RsTier tier;
+    std::uint32_t value;  // 用来 Set 的值（C 档给一个"有效值"，用来验显式拒绝）
+};
+constexpr std::uint32_t kStoredRsValue = 0x5A5A5A5Au;  // ⛔ 不等于 `getRs` 的失败哨兵 0xDEADBEEF
+
+// ★ 这张表**就是**判据（逐值对照上面的官方枚举页）：表里没写的 0..255 值一律当"非 D3DRS"。
+const std::vector<RsDomain>& d3dRsDomain() {
+    static const std::vector<RsDomain> kDomain = {
+        // ---- A 档：有读点 / 有 case（取值必须是该状态**合法**的值，否则红在本线自己的值域上）----
+        {7u, RsTier::Implemented, 1u},           // ZENABLE = D3DZB_TRUE
+        {8u, RsTier::Implemented, 3u},           // FILLMODE = D3DFILL_SOLID
+        {9u, RsTier::Implemented, 2u},           // SHADEMODE = D3DSHADE_GOURAUD
+        {14u, RsTier::Implemented, 1u},          // ZWRITEENABLE
+        {15u, RsTier::Implemented, 0u},          // ALPHATESTENABLE
+        {16u, RsTier::Implemented, 1u},          // LASTPIXEL
+        {19u, RsTier::Implemented, 2u},          // SRCBLEND = D3DBLEND_ONE
+        {20u, RsTier::Implemented, 1u},          // DESTBLEND = D3DBLEND_ZERO
+        {22u, RsTier::Implemented, 3u},          // CULLMODE = D3DCULL_CCW
+        {23u, RsTier::Implemented, 4u},          // ZFUNC = D3DCMP_LESSEQUAL
+        {24u, RsTier::Implemented, 0x7Fu},       // ALPHAREF（文档：低 8 位）
+        {25u, RsTier::Implemented, 8u},          // ALPHAFUNC = D3DCMP_ALWAYS
+        {26u, RsTier::Implemented, 0u},          // DITHERENABLE
+        {27u, RsTier::Implemented, 1u},          // ALPHABLENDENABLE
+        {28u, RsTier::Implemented, 0u},          // FOGENABLE
+        {29u, RsTier::Implemented, 0u},          // SPECULARENABLE
+        {52u, RsTier::Implemented, 0u},          // STENCILENABLE（case 里有）
+        {60u, RsTier::Implemented, 0xFFFFFFFFu}, // TEXTUREFACTOR
+        {136u, RsTier::Implemented, 1u},         // CLIPPING
+        {137u, RsTier::Implemented, 1u},         // LIGHTING
+        {139u, RsTier::Implemented, 0u},         // AMBIENT
+        {141u, RsTier::Implemented, 0u},         // COLORVERTEX
+        {145u, RsTier::Implemented, 0u},         // DIFFUSEMATERIALSOURCE
+        {146u, RsTier::Implemented, 0u},         // SPECULARMATERIALSOURCE（本单开始真的读）
+        {147u, RsTier::Implemented, 0u},         // AMBIENTMATERIALSOURCE
+        {148u, RsTier::Implemented, 0u},         // EMISSIVEMATERIALSOURCE
+        {151u, RsTier::Implemented, 0u},         // VERTEXBLEND
+        {152u, RsTier::Implemented, 0u},         // CLIPPLANEENABLE
+        {154u, RsTier::Implemented, 0x3F800000u},  // POINTSIZE = 1.0f
+        {155u, RsTier::Implemented, 0x3F800000u},  // POINTSIZE_MIN = 1.0f
+        {156u, RsTier::Implemented, 0u},         // POINTSPRITEENABLE
+        {157u, RsTier::Implemented, 0u},         // POINTSCALEENABLE
+        {158u, RsTier::Implemented, 0x3F800000u},  // POINTSCALE_A
+        {159u, RsTier::Implemented, 0u},         // POINTSCALE_B
+        {160u, RsTier::Implemented, 0u},         // POINTSCALE_C
+        {161u, RsTier::Implemented, 0u},         // MULTISAMPLEANTIALIAS
+        {162u, RsTier::Implemented, 0xFFFFFFFFu}, // MULTISAMPLEMASK
+        {166u, RsTier::Implemented, 0x42800000u},  // POINTSIZE_MAX = 64.0f
+        {167u, RsTier::Implemented, 0u},         // INDEXEDVERTEXBLENDENABLE
+        {168u, RsTier::Implemented, 0xFu},       // COLORWRITEENABLE
+        {170u, RsTier::Implemented, 0u},         // TWEENFACTOR = 0.0f
+        {171u, RsTier::Implemented, 1u},         // BLENDOP = D3DBLENDOP_ADD
+        {174u, RsTier::Implemented, 0u},         // SCISSORTESTENABLE
+        {206u, RsTier::Implemented, 1u},         // SEPARATEALPHABLENDENABLE
+        {207u, RsTier::Implemented, 2u},         // SRCBLENDALPHA = D3DBLEND_ONE
+        {208u, RsTier::Implemented, 1u},         // DESTBLENDALPHA = D3DBLEND_ZERO
+        {209u, RsTier::Implemented, 1u},         // BLENDOPALPHA = D3DBLENDOP_ADD
+        // ---- B 档（既有）：合法、只存（不记账：master 已记账 / 真机不读）----
+        {34u, RsTier::Stored, kStoredRsValue},   // FOGCOLOR
+        {35u, RsTier::Stored, kStoredRsValue},   // FOGTABLEMODE
+        {36u, RsTier::Stored, kStoredRsValue},   // FOGSTART
+        {37u, RsTier::Stored, kStoredRsValue},   // FOGEND
+        {38u, RsTier::Stored, kStoredRsValue},   // FOGDENSITY
+        {53u, RsTier::Stored, kStoredRsValue},   // STENCILFAIL
+        {54u, RsTier::Stored, kStoredRsValue},   // STENCILZFAIL
+        {55u, RsTier::Stored, kStoredRsValue},   // STENCILPASS
+        {56u, RsTier::Stored, kStoredRsValue},   // STENCILFUNC
+        {57u, RsTier::Stored, kStoredRsValue},   // STENCILREF
+        {58u, RsTier::Stored, kStoredRsValue},   // STENCILMASK
+        {59u, RsTier::Stored, kStoredRsValue},   // STENCILWRITEMASK
+        {128u, RsTier::Stored, kStoredRsValue},  // WRAP0
+        {129u, RsTier::Stored, kStoredRsValue},  // WRAP1
+        {130u, RsTier::Stored, kStoredRsValue},  // WRAP2
+        {131u, RsTier::Stored, kStoredRsValue},  // WRAP3
+        {132u, RsTier::Stored, kStoredRsValue},  // WRAP4
+        {133u, RsTier::Stored, kStoredRsValue},  // WRAP5
+        {134u, RsTier::Stored, kStoredRsValue},  // WRAP6
+        {135u, RsTier::Stored, kStoredRsValue},  // WRAP7
+        {140u, RsTier::Stored, kStoredRsValue},  // FOGVERTEXMODE
+        {142u, RsTier::Stored, kStoredRsValue},  // LOCALVIEWER
+        {143u, RsTier::Stored, kStoredRsValue},  // NORMALIZENORMALS
+        {185u, RsTier::Stored, kStoredRsValue},  // TWOSIDEDSTENCILMODE
+        {186u, RsTier::Stored, kStoredRsValue},  // CCW_STENCILFAIL
+        {187u, RsTier::Stored, kStoredRsValue},  // CCW_STENCILZFAIL
+        {188u, RsTier::Stored, kStoredRsValue},  // CCW_STENCILPASS
+        {189u, RsTier::Stored, kStoredRsValue},  // CCW_STENCILFUNC
+        {190u, RsTier::Stored, kStoredRsValue},  // COLORWRITEENABLE1
+        {191u, RsTier::Stored, kStoredRsValue},  // COLORWRITEENABLE2
+        {192u, RsTier::Stored, kStoredRsValue},  // COLORWRITEENABLE3
+        {193u, RsTier::Stored, kStoredRsValue},  // BLENDFACTOR
+        // ---- B 档（本单新增，`REQ-01M7A3M73R3XYMM7J4KNQ1VNV7`）：合法、本线不实现 ⇒
+        //      存下 + bit41 记账（**新收的一批统一记账**；修前它们落进 default 的 INVALIDCALL）----
+        {48u, RsTier::StoredUnimplemented, kStoredRsValue},   // RANGEFOGENABLE
+        {163u, RsTier::StoredUnimplemented, kStoredRsValue},  // PATCHEDGESTYLE
+        {165u, RsTier::StoredUnimplemented, kStoredRsValue},  // DEBUGMONITORTOKEN
+        {172u, RsTier::StoredUnimplemented, kStoredRsValue},  // POSITIONDEGREE
+        {173u, RsTier::StoredUnimplemented, kStoredRsValue},  // NORMALDEGREE
+        {178u, RsTier::StoredUnimplemented, kStoredRsValue},  // MINTESSELLATIONLEVEL
+        {179u, RsTier::StoredUnimplemented, kStoredRsValue},  // MAXTESSELLATIONLEVEL
+        {180u, RsTier::StoredUnimplemented, kStoredRsValue},  // ADAPTIVETESS_X
+        {181u, RsTier::StoredUnimplemented, kStoredRsValue},  // ADAPTIVETESS_Y
+        {182u, RsTier::StoredUnimplemented, kStoredRsValue},  // ADAPTIVETESS_Z
+        {183u, RsTier::StoredUnimplemented, kStoredRsValue},  // ADAPTIVETESS_W
+        {198u, RsTier::StoredUnimplemented, kStoredRsValue},  // WRAP8
+        {199u, RsTier::StoredUnimplemented, kStoredRsValue},  // WRAP9
+        {200u, RsTier::StoredUnimplemented, kStoredRsValue},  // WRAP10
+        {201u, RsTier::StoredUnimplemented, kStoredRsValue},  // WRAP11
+        {202u, RsTier::StoredUnimplemented, kStoredRsValue},  // WRAP12
+        {203u, RsTier::StoredUnimplemented, kStoredRsValue},  // WRAP13
+        {204u, RsTier::StoredUnimplemented, kStoredRsValue},  // WRAP14
+        {205u, RsTier::StoredUnimplemented, kStoredRsValue},  // WRAP15
+        // ---- C 档：合法但值敏感（有效值 ⇒ INVALIDCALL + bit26；值判断在实现里的 case）----
+        {175u, RsTier::ValueSensitive, 1u},  // SLOPESCALEDEPTHBIAS
+        {176u, RsTier::ValueSensitive, 1u},  // ANTIALIASEDLINEENABLE
+        {184u, RsTier::ValueSensitive, 1u},  // ENABLEADAPTIVETESSELLATION
+        {194u, RsTier::ValueSensitive, 1u},  // SRGBWRITEENABLE
+        {195u, RsTier::ValueSensitive, 1u},  // DEPTHBIAS
+    };
+    return kDomain;
+}
+
+void caseRenderStateDomain() {
+    lift_test::g_current_case = "d3d9p/render-state-domain";
+    Rig r;
+    LIFT_CHECK(r.up());
+    if (r.f.device.object == 0) return;
+
+    // ★ 本用例要 ~5 百次 guest 调用（每次一块 4 KiB 的 code 页），而 Set 调用只推 `code_ea`、
+    //   不推 `data_ea`（两者起点只差 31 页）⇒ 跑下去 data/code 会落进同一页，出参缓冲被当指令写掉。
+    //   于是把数据区挪到 code 区够不到的地方（本用例 code 顶 ≈ 0x00600000）。
+    r.f.data_ea = 0x00A00000u;
+    const std::uint32_t out_ea = r.f.placeU32(0xDEADBEEFu);
+    auto getHr = [&r, out_ea](std::uint32_t state) {
+        r.f.m.mem().wr32(out_ea, 0xDEADBEEFu);
+        return r.f.method(r.f.device.object, kOffGetRenderState, {state, out_ea});
+    };
+    auto getValue = [&r, out_ea](std::uint32_t state) {
+        const std::uint32_t hr = r.f.method(r.f.device.object, kOffGetRenderState, {state, out_ea});
+        return hr == lift::d3d9::kOk ? r.f.m.mem().rd32(out_ea) : 0xDEADBEEFu;
+    };
+    const std::vector<RsDomain>& domain = d3dRsDomain();
+    auto isLegal = [&domain](std::uint32_t state) {
+        for (const RsDomain& e : domain)
+            if (e.state == state) return true;
+        return false;
+    };
+
+    // ---- (1) 先做**非 D3DRS**：此刻 bit26 / bit41 都还是 0 ⇒ "记了账"一定会被抓 ----
+    LIFT_CHECK(!deviceInfoBit(r.f, 26));  // 前置：kUnRenderStateUnknown（C 档）
+    LIFT_CHECK(!deviceInfoBit(r.f, 41));  // 前置：kUnRenderStateStored（B 档新增）
+    std::uint32_t illegal_seen = 0;
+    for (std::uint32_t v = 0; v <= 255u; ++v) {
+        if (isLegal(v)) continue;
+        ++illegal_seen;
+        LIFT_CHECK_EQ_U32(r.f.setRs(v, 1u), lift::d3d9::kInvalidCall);
+        LIFT_CHECK_EQ_U32(getHr(v), lift::d3d9::kInvalidCall);
+    }
+    // 越界 / 回绕：>209 与 0xFFFFFFFF 同样**不是** D3DRS 值 ⇒ Set / Get 都拒。
+    LIFT_CHECK_EQ_U32(r.f.setRs(256u, 1u), lift::d3d9::kInvalidCall);
+    LIFT_CHECK_EQ_U32(getHr(256u), lift::d3d9::kInvalidCall);
+    LIFT_CHECK_EQ_U32(r.f.setRs(0xFFFFu, 1u), lift::d3d9::kInvalidCall);
+    LIFT_CHECK_EQ_U32(getHr(0xFFFFu), lift::d3d9::kInvalidCall);
+    LIFT_CHECK_EQ_U32(r.f.setRs(0xFFFFFFFFu, 1u), lift::d3d9::kInvalidCall);
+    LIFT_CHECK_EQ_U32(getHr(0xFFFFFFFFu), lift::d3d9::kInvalidCall);
+    LIFT_CHECK(illegal_seen != 0u);  // 全域判据别退化成空循环
+    LIFT_CHECK(!deviceInfoBit(r.f, 26));  // "非法"**不记账**
+    LIFT_CHECK(!deviceInfoBit(r.f, 41));
+
+    // ---- (2) 合法 D3DRS：逐值验"接受（或显式拒绝并记账）+ Get 同域 + 原样读回" ----
+    for (const RsDomain& e : domain) {
+        switch (e.tier) {
+            case RsTier::ValueSensitive:
+                // C 档：有效值 ⇒ 显式拒绝（⛔ 不静默存下）+ 记账 bit26
+                LIFT_CHECK_EQ_U32(r.f.setRs(e.state, e.value), lift::d3d9::kInvalidCall);
+                LIFT_CHECK(deviceInfoBit(r.f, 26));
+                break;
+            case RsTier::Implemented:
+            case RsTier::Stored:
+            case RsTier::StoredUnimplemented:
+                // A / B 档：**不许**返回 INVALIDCALL（B 档的判据就是"接受并存下"）
+                LIFT_CHECK_EQ_U32(r.f.setRs(e.state, e.value), lift::d3d9::kOk);
+                if (e.tier == RsTier::StoredUnimplemented) LIFT_CHECK(deviceInfoBit(r.f, 41));
+                break;
+        }
+        // Get 与 Set **同域**：合法 D3DRS 一定读得到（C 档读回的是默认 0）
+        LIFT_CHECK_EQ_U32(getHr(e.state), lift::d3d9::kOk);
+        // "原样存下"：A / B 档的 Set 值必须逐位读回（C 档没存，不参与）
+        if (e.tier != RsTier::ValueSensitive) LIFT_CHECK_EQ_U32(getValue(e.state), e.value);
+    }
+    // 两档记账各至少出现过一次（⛔ 不接受"静默收下"）
+    LIFT_CHECK(deviceInfoBit(r.f, 26));  // C 档的"值敏感 ⇒ 拒绝"有痕迹
+    LIFT_CHECK(deviceInfoBit(r.f, 41));  // B 档新增的"合法但没实现"有痕迹
+}
+
+// =======================================================================================
+// ㉒ `d3d9p/validate-device-one-pass`（`REQ-01M79PP9H5XZRWFJD4BGS19S54`）
 //
 // 红了意味着什么：`ValidateDevice` 偏离了**已裁决的声明**"恒 `S_OK, *pNumPasses=1`"：
 //   (i) 返回码不是 S_OK / `*pNumPasses != 1`（引擎侧若用它决定要不要重画，会直接错）；
@@ -2753,6 +3466,46 @@ int caseValidateDeviceOnePass() {
     return 0;
 }
 
+// =======================================================================================
+// ㉓ `d3d9p/material-source`（`REQ-01M7460MRJ6D82PWG6P6MX9WG9`）
+//
+// 红了意味着什么：`D3DRS_COLORVERTEX(141)` 不再门控材质来源 ⇒ `COLORVERTEX=0` 时顶点色
+// **仍然**参与光照（本单的缺陷形态：顶点色红 + 材质 diffuse 蓝 ⇒ 输出偏红而不是材质蓝）。
+//
+// ★ 判据为什么是**纯函数**级：CPU 光栅已删，pure 臂没有 GPU 后端 ⇒ 任何 Draw 都是
+//   `D3DERR_INVALIDCALL`，读不到像素。这里断的是 `applyLighting` 与 `transformVertex`
+//   **共用的唯一一份**选择逻辑（`materialSourceColor`）—— 它决定的正是"哪一份颜色进光照方程"，
+//   ⛔ 不是复述实现：换一份实现后"COLORVERTEX=0 ⇒ 材质 / =1 ⇒ 顶点色"仍然必须成立。
+//   `D3DMCS_COLOR1` = 顶点 diffuse、`D3DMCS_COLOR2` = 顶点 specular（FVF 的第二颜色）。
+// =======================================================================================
+void caseMaterialSource() {
+    lift_test::g_current_case = "d3d9p/material-source";
+    // 单位与调用方一致：材质 0..1，顶点色 /255。
+    const double material_blue[4] = {0.0, 0.0, 1.0, 1.0};  // 材质 diffuse = 蓝
+    const double vertex_red[4] = {1.0, 0.0, 0.0, 1.0};     // 顶点 diffuse（COLOR1）= 红
+    const double vertex_green[4] = {0.0, 1.0, 0.0, 1.0};   // 顶点 specular（COLOR2）= 绿
+    double out[4] = {0.0, 0.0, 0.0, 0.0};
+
+    // ① COLORVERTEX=0 ⇒ 顶点色不参与：即使 DIFFUSEMATERIALSOURCE=COLOR1，输出仍是材质蓝。
+    //   ★ 修前（读法短路）这里会拿到红 ⇒ 本单的第一条判据当场红。
+    lift::d3d9::materialSourceColor(0u, lift::d3d9::kDmcsColor1, material_blue, vertex_red, vertex_green, out);
+    LIFT_CHECK(out[0] == 0.0 && out[1] == 0.0 && out[2] == 1.0 && out[3] == 1.0);
+
+    // ② COLORVERTEX=1 + DIFFUSEMATERIALSOURCE=D3DMCS_COLOR1 ⇒ 输出受顶点色影响（红）。
+    lift::d3d9::materialSourceColor(1u, lift::d3d9::kDmcsColor1, material_blue, vertex_red, vertex_green, out);
+    LIFT_CHECK(out[0] == 1.0 && out[1] == 0.0 && out[2] == 0.0 && out[3] == 1.0);
+
+    // ③ COLOR2 取**第二颜色**（顶点 specular），而不是顶点 diffuse。
+    lift::d3d9::materialSourceColor(1u, lift::d3d9::kDmcsColor2, material_blue, vertex_red, vertex_green, out);
+    LIFT_CHECK(out[0] == 0.0 && out[1] == 1.0 && out[2] == 0.0 && out[3] == 1.0);
+
+    // ④ MATERIAL / 顶点色缺失 ⇒ 回退材质（⛔ 不把"没有 COLOR1"当成白色或黑色）。
+    lift::d3d9::materialSourceColor(1u, lift::d3d9::kDmcsMaterial, material_blue, vertex_red, vertex_green, out);
+    LIFT_CHECK(out[2] == 1.0 && out[0] == 0.0 && out[1] == 0.0);
+    lift::d3d9::materialSourceColor(1u, lift::d3d9::kDmcsColor1, material_blue, nullptr, vertex_green, out);
+    LIFT_CHECK(out[2] == 1.0 && out[0] == 0.0 && out[1] == 0.0);
+}
+
 }  // namespace
 
 // ★ 两条臂（`REQ-01M7A74YG08R65NJBFXF7DEJDK`）：CPU 光栅已删 ⇒ 要**画像素**的用例必须装真 GPU。
@@ -2795,6 +3548,17 @@ int main(int argc, char** argv) {
             if (rc != 0) return rc;
             rc = caseIndexedRange();
             if (rc != 0) return rc;
+            // ★ 声明路（Live2D）× 两 stream：区间映射 / start_index int64 / 真的画出像素
+            //   （`REQ-01M7A3M7E59JX74G897Q7W2RVD` · `REQ-01M79P02VYRJ3V0C0V5VHXVE3H`）
+            rc = caseIndexedRangeDecl();
+            if (rc != 0) return rc;
+            rc = caseIndexedRangeStartWrap();
+            if (rc != 0) return rc;
+            rc = caseVertexDeclDraw();
+            if (rc != 0) return rc;
+            // ★ 离屏 plain surface 不能当 RT（拒绝 + 渲染目标不变 + 纹理 RT 仍可绑）
+            rc = caseSetRenderTargetOffscreenRefused();
+            if (rc != 0) return rc;
             rc = caseValidateDeviceOnePass();
             if (rc != 0) return rc;
             return finish("d3d9-pipeline-gpu");
@@ -2808,6 +3572,8 @@ int main(int argc, char** argv) {
         casePipeWarnCategoriesAndSummary();
         caseBindingLifetime();
         caseRenderStatePolicy();
+        caseRenderStateDomain();
+        caseMaterialSource();
         return finish("d3d9-pipeline");
     } catch (const std::exception& e) {
         std::fprintf(stderr, "DIAG uncaught std::exception: %s\n", e.what());
