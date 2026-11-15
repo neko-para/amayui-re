@@ -26,16 +26,9 @@
 //   `ea → 派发表 → lift_cc_<根>(regs, mem, ea, cpu)`；shim 桩 EA → `lift_shim`；两者都不是 ⇒ 响亮停。
 //   块边界：定时器泵 / SEH 派发 / 两个合成 EA / `--until` / `--max-insns` / `--time-limit` / 帧数闸门。
 //
-// ★ **native override（D25 第 1 项，2026-11-15 接上）**：函数级 + 段级两张表在**本宿主**上装配，
-//   判据与解释器 `machine.cpp:1420-1533` 逐条对齐：
-//     · 函数级只在**函数入口 + 真有 call 帧**时拦（`call_target` 的 AOT 等价判据见 `overrideCallFrame`）；
-//     · 接管后 `insns += 1 + override 自己的补偿`（`machine.cpp:1456-1459` 的同一笔账）；
-//     · fn 返回 false 但置了 `running=false` ⇒ **停机**（⛔ 不是回退）；
-//     · 段级只有 `Replaced` 才补 `replaced_insns`（`machine.cpp:1504-1514`）。
-//   ★ 开关 = `--native-overrides <list>`（缺省**关**，与解释器缺省同口径 ⇒ 同一个二进制能做 A/B）。
-//   ★ `sub_48B090`（`native_image_upload`）**本轮不装**：它要 `startNestedGuestCall()` 重入解释器，
-//     而 AOT 的 `hasNestedGuestExecutor()` 恒 false（见上）⇒ 装了就是启动后第一次调用即响亮停机。
-//     这一项**只计数**（`override : … skipped-nested=`），⛔ 不为了它去开嵌套执行器。
+// ★ **执行来源只有两个**：构建期 lift 出来的 IR，与 shim。⛔ 没有"按 EA 把 guest 函数体交给宿主 C++
+//   重实现"的第三条路（那套机制已于 2026-11-16 删除：它替换的是**执行来源**而不是 IR，
+//   留着就等于给"跑通"开口子 —— 跑通的可能是手写 C++，不是被 pin 住的那份 lifted 代码）。
 #pragma once
 
 #include <array>
@@ -47,7 +40,6 @@
 #include <vector>
 
 #include "aot/aot_hook_ea.h"
-#include "corpus/lst_index.h"
 #include "runtime/audio.h"
 #include "runtime/clock.h"
 #include "runtime/com.h"
@@ -61,7 +53,6 @@
 #include "runtime/image.h"
 #include "runtime/lift_abi.h"
 #include "runtime/memory.h"
-#include "runtime/native_overrides.h"
 #include "runtime/present.h"
 #include "runtime/seh.h"
 #include "runtime/shims.h"
@@ -118,6 +109,11 @@ struct AotRunOptions {
     // ★ `--profile`：**缺省关**。关着时执行循环里连一个计数器都不加（见 `AotProfile` 的三条硬口径）。
     //   开着的全部产物都落在 stdout 末尾的 `=== profile (sampling: …) ===` 块 + 每帧一行 `frame-ms:`。
     bool profile = false;
+    // ★ `--frame-log`：**缺省关**。开档才打逐帧 `[frame] n=<帧号> hash=<guest 后缓冲哈希>`。
+    //   为什么缺省关：行数 = 帧数（300 帧 ⇒ 300 行，占默认 stdout 的 78%），而它只是**画面序列**读数
+    //   （"在动 / 卡住同一帧"），不是判据；末帧 hash 另有一份（摘要的 `present : … lastHash=`）。
+    //   ★ 闸门 = `frame_log || prof_.on`：`--profile` 档**逐字不变**（那是已有存档的可比面）。
+    bool frame_log = false;
 };
 
 struct AotRunResult {
@@ -129,16 +125,6 @@ struct AotRunResult {
     std::uint64_t dispatches = 0; // 本轮的 lift / shim 分派次数
     std::uint64_t lifted_calls = 0;
     std::uint64_t shim_calls = 0;
-    // ---- native override 的账（D25 第 1 项；字段口径 = 解释器 `machine.cpp:1436-1513`）----
-    // ★ `ov_insns` = override **折算成多少条 guest 指令**（= 每次接管 `++insns` 一条 + override
-    //   自己补的条数 + 段级的 `replaced_insns`）。⛔ 漏掉它，本臂的 `insns` 与解释器臂就不可比。
-    std::uint64_t ov_insns = 0;
-    // 到达"需要嵌套 guest 执行器"的 override 入口（且有 call 帧）但本宿主没有嵌套执行器 ⇒ 跳过。
-    // ★ 0 也要打（"没跳过"与"根本没走到"是两件事）。
-    std::uint64_t ov_skipped_nested = 0;
-    // 到达 override 入口但**不是 call 帧** ⇒ 不许弹返回地址，走 lifted 代码。
-    // （解释器同一条判据：`call_target != 0 && cpu_.eip == call_target`，`machine.cpp:1431`）
-    std::uint64_t ov_not_call = 0;
     bool ok() const { return aotStopOk(reason); }
 };
 
@@ -257,24 +243,6 @@ public:
     // ④ 执行循环（T2 §1.4 的五件 guest 语义；见 cpp 的函数头注）。
     AotRunResult run(const AotRunOptions& opts);
 
-    // ③'' `--lst`：**只为 native override 的 EA 解析 / 段级锚校验**（口径同解释器 `main.cpp:882-896`：
-    //    执行源与语料不是同一份 ⇒ 拒绝装配）。⛔ 执行不需要它：`cpu_.lst` 只作诊断文本框
-    //    （与解释器同口径 —— fault 报告能看见指令文本）。
-    bool loadLst(const std::string& path, std::string* err);
-    bool lstLoaded() const { return lst_loaded_; }
-    const LstIndex& lst() const { return lst_; }
-
-    // ③''' native override 两张表的装配（真源 `Machine::configureNativeOverrides`，`machine.cpp:3190-3309`）。
-    //    `list` 的语法与解释器**逐字相同**：逗号分隔的名字 / `all` / `-name` 排除。
-    //    ★ 与解释器的**唯一**差别（登记在这里，⛔ 不藏）：需要嵌套 guest 执行器的项（`sub_48B090`）
-    //      本轮**不装**，只按到达次数记 `AotRunResult::ov_skipped_nested`；理由见文件头注。
-    bool configureNativeOverrides(const std::string& list, std::string* err);
-    const NativeOverrideTable& overrides() const { return overrides_; }
-    const NativeBlockTable& blockOverrides() const { return block_overrides_; }
-    const std::string& overridesSpec() const { return overrides_spec_; }
-    // 因缺嵌套执行器而**没装**的那些项（名字；读数用）。
-    const std::vector<std::string>& nestedOnlyNames() const { return nested_only_name_; }
-
     // ④' 显示 / GPU 后端：**在第一条 guest 指令之前**接到宿主服务上（真源 `Machine::setGpuRaster`）。
     //    ★ 语义与 `Machine::gpuRaster()` 逐字相同（`machine.cpp:3311-3315`）：显式设置的指针优先，
     //      否则取 presenter 的 sink。`nullptr` = 没有 GPU 光栅后端（3D 一个像素都不画 —— 那是
@@ -377,25 +345,6 @@ private:
     void syncCpuFromRegs();
     void syncRegsFromCpu();
 
-    // ---- native override 的派发前置判据（跑在**每一次派发**上，所以必须便宜）----
-    // ★ `overrideCandidate(ea)` = 位图**前置过滤**：位=1 才做线性查找（≤20 项），位=0 一定没有。
-    //   `ea >> 2` 直接索引 512 Kbit = 64 KiB（`.text` 1.79 MB ⇒ 448K 个槽，全部落在表内）。
-    //   ⛔ 位图不是"命中表"：同一位可能被别的 EA 共享 ⇒ 只会多查一次，**不会漏**
-    //   （这是它敢当过滤器的唯一理由）。
-    void rebuildOverrideFilter();
-    bool overrideCandidate(std::uint32_t ea) const;
-    // ★ "这真的是一个 call 帧吗"的判据 —— 解释器用 `call_target != 0 && cpu_.eip == call_target`
-    //   （`machine.cpp:1431`）。AOT 的 trampoline 只知道"下一个 EA"，**不知道**上一个块是怎么离开的
-    //   （`emitCall` 与 `emitEdge` 都发 `ret i32 <EA>`，见 `lift_gen_emit.cpp:540-559`），所以按
-    //   **guest 栈上的返回地址**反查：`[esp]` 必须是某个 `call rel32`（`E8 rel32`，5 字节）的
-    //   下一条指令地址，且那个 call 的目标正好是本 EA。
-    //   ★ 为什么这条等价于解释器的判据：只有真 call 才会把"本站点的下一条 EA"压进 `[esp]`；
-    //     尾跳 `jmp` 的 `[esp]` 是**调用者的**返回地址（那个 call 的目标不是本 EA）⇒ 一定不匹配。
-    //   ★ 代价：一次命中 EA 才做（`overrideCandidate` 之后），5 字节读 + 4 字节比较。
-    //   ★ 已知不覆盖（登记，⛔ 不猜着补）：`call reg/mem`（`FF /2`）到达的 override 入口 ——
-    //     那种 call 的返回地址不在 `[esp]-5` 上 ⇒ 走 lifted 代码（**性能**缺口，不是语义缺口）。
-    bool overrideCallFrame(std::uint32_t callee) const;
-
     // ★ 顺序 = 依赖顺序（`cpu_` 里的服务指针指向下面这些对象 ⇒ 它们必须先存在）。
     GuestMemory mem_;
     GuestHeap heap_;
@@ -450,25 +399,9 @@ private:
     // 三个合成 EA 的命中数（读数用：0 = 本轮根本没撞到 —— ⛔ 不拿"实现了"冒充"跑过了"）。
     std::uint64_t timerFires_ = 0;   // 定时器回调铺帧次数
     std::uint64_t callResumes_ = 0;  // guest 回调续延次数
-
-    // ---- native override（D25 第 1 项）----
-    // ★ 三份真源：`overrides_` / `block_overrides_`（与解释器**同一份类型、同一份实现**），
-    //   `lst_` 只用来"名字 → EA"与段级锚校验（⛔ 不硬编码 EA）。
-    LstIndex lst_;
-    bool lst_loaded_ = false;
-    NativeOverrideTable overrides_;
-    NativeBlockTable block_overrides_;
-    std::string overrides_spec_;
-    // 需要嵌套 guest 执行器 ⇒ 本轮**不装**、只计数的项（EA 同样由 `.lst` 解析）。
-    std::vector<std::uint32_t> nested_only_ea_;
-    std::vector<std::string> nested_only_name_;
-    // 派发前置过滤位图（见 `overrideCandidate`）。空 = 没有 override ⇒ 每次派发只判一次 `empty()`。
-    static constexpr std::size_t kOverrideFilterBits = std::size_t{1} << 19;  // 512 Kbit = 64 KiB
-    std::vector<std::uint64_t> override_filter_;
-    // "到达 override 入口但不是 call 帧"的 EA 名单（每个 EA 只打一行诊断用）。
-    // ★ 为什么值得记：`call reg/mem`（虚表调用）的返回地址不在 `[esp]-5` 上 ⇒ 那些到达会被判据
-    //   拒掉。**这是性能缺口不是语义缺口**，但"到底有多少、落在哪些 EA"必须看得见。
-    std::vector<std::uint32_t> not_call_logged_;
+    // ★ `[aot] 定时器 … NULL ⇒ 丢弃` 的**节流到第一次**（按轮重置；口径同 `present.cpp:43` 的
+    //   `[present] sink 失败`）：周期定时器的回调为 NULL 时每次到期都会走到那条分支 ⇒ 不节流就是刷屏。
+    bool timer_null_warned_ = false;
 
     // ---- 采样式内部 profile（`--profile`；`on == false` 时所有字段恒为初值、零成本）----
     AotProfile prof_;

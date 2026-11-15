@@ -13,10 +13,6 @@
 //   · `--present` 只有 headless（presenter 没有 sink，`gpuRaster()` = nullptr）；
 //   · 没有 profiler / 影子栈 / guest token / 输入脚本 / 交互图 / 声音语义 —— 它们默认全关，
 //     本来就是宿主控制面（T2 §7.4）；
-//   · **有** native override（D25 第 1 项，2026-11-15）：函数级 + 段级两张表的**派发点**就在
-//     定时器泵之后、shim / 派发表之前（下面 ⑤'），判据与解释器 `machine.cpp:1420-1533` 逐条对齐
-//     （含 `insns` 折算 / `!running` 三分类 / 段级 `replaced_insns`）。开关 = `--native-overrides`
-//     （缺省关，与解释器缺省同口径 ⇒ 同一个二进制能做 A/B）；`sub_48B090` 因为要嵌套执行器**没装**；
 //   · 边界→`cpu.eip` 的"块缓存"这一层不存在：EA 要么在派发表里、要么是 shim 桩，否则响亮停
 //     （D10 P4：⛔ 不设"返回哨兵 = 结束"的约定）。
 // ★ 本文件的诊断开关读 getenv（`LIFT_AOT_SHIM_TRACE`）；MSVC 口径里那是 deprecated 警告，不是问题。
@@ -284,7 +280,12 @@ bool AotHost::fireDueTimer(AotRunResult& r) {
         timers[best].due_100ns += static_cast<std::uint64_t>(t.period_ms) * 10000ull;
     }
     if (t.callback == 0) {
-        std::fprintf(stderr, "[aot] 定时器 %u 的回调为 NULL ⇒ 丢弃\n", t.id);
+        // ★ 节流到第一次（照 `present.cpp:43` 的 `[present] sink 失败`）：周期定时器的回调为 NULL 时
+        //   每次到期都会走到这里 ⇒ 不节流就是"一行/到期"。丢弃语义不变（⛔ 只是不再刷屏）。
+        if (!timer_null_warned_) {
+            timer_null_warned_ = true;
+            std::fprintf(stderr, "[aot] 定时器 %u 的回调为 NULL ⇒ 丢弃\n", t.id);
+        }
         return false;
     }
     // 回调帧：TimeProc(uID, uMsg, dwUser, dw1, dw2)（stdcall，5 个参数 = 20 字节 + 返回地址）
@@ -354,6 +355,7 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     resetDispatchStats();
     timerFires_ = 0;
     callResumes_ = 0;
+    timer_null_warned_ = false;  // 节流按轮重置（一次 run 最多一行）
     // ★ `--profile`（缺省关）：清空上一轮的账 + **启动时**跑一次已知长度的忙循环校准机器频率。
     //   ⛔ 关档时这一行都不执行（`beginProfile` 不被调用 ⇒ `prof_.on == false` ⇒ 采样点全是死代码分支）。
     //   ★ 代价：开档时多花 ~60 ms（校准忙循环）；它发生在 `wall_start` 之前，**不进** `run()` 的墙钟，
@@ -372,16 +374,22 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     skip_logo_applied_ = false;
     skip_logo_object_ = 0;
     skip_logo_prior_value_ = 0;
-    // ★ 逐帧 `lastHash` 读数（D）：每发生一次 Present 就打一行。Present 只可能由**shim** 触发
-    //   （生成物里没有 inline 的 `lift_shim` 调用；`rg lift_shim src/aot/lift_gen_emit.cpp` = 0）
-    //   ⇒ 打点在下面 shim 分支里、`lift_shim` 返回之后（在 `!cpu_.running` 之前）。
+    // ★ 逐帧 `lastHash` 读数（D）：**opt-in**（`--frame-log`；`--profile` 档顺带保留 ⇒ 存档逐字不变）。
+    //   Present 只可能由**shim** 触发（生成物里没有 inline 的 `lift_shim` 调用；
+    //   `rg lift_shim src/aot/lift_gen_emit.cpp` = 0）⇒ 打点在下面 shim 分支里、`lift_shim` 返回之后
+    //   （在 `!cpu_.running` 之前 —— `--max-frames` 恰好在 Present 里置停时那一帧不能丢）。
+    //   ★ 为什么缺省关：行数 = 帧数（300 帧 ⇒ 300 行，占默认 stdout 的 78%），而它只是**画面序列**读数；
+    //     末帧 hash 另有出口（摘要 `present : … lastHash=0x…`）。
+    const bool frame_log_on = opts.frame_log || prof_.on;  // ★ `|| prof_.on`：已有 profile 存档的可比面
     std::uint64_t logged_frames = presenter_.frameCount();
     auto logPresentedFrames = [&]() {
         const std::uint64_t n = presenter_.frameCount();
         if (n == logged_frames) return;
         if (n == logged_frames + 1) {
-            std::printf("[frame] n=%llu hash=0x%016llX\n", static_cast<unsigned long long>(n),
-                        static_cast<unsigned long long>(presenter_.lastHash()));
+            if (frame_log_on) {
+                std::printf("[frame] n=%llu hash=0x%016llX\n", static_cast<unsigned long long>(n),
+                            static_cast<unsigned long long>(presenter_.lastHash()));
+            }
             // ★ `--profile` 的**每帧时间戳**（1 行/帧，开销 = 一次 `GetSystemTimeAsFileTime`）。
             //   `t_ms` = 自**进程启动**到该帧 present 完成的毫秒（Windows 用 `GetProcessTimes` 的
             //   creation 时间当基准，⛔ 不用"程序跑到这里"近似）；`insns` = 当时的 `cpu_.insns`。
@@ -392,11 +400,13 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
             }
         } else {
             // 一次 shim 里发生了多次 Present（正常是 1 次）：hash 只有最后一帧那一份，⛔ 不冒充逐帧。
-            std::printf("[frame] n=%llu..%llu（一次 shim 里 %llu 次 Present）hash=0x%016llX（只有最后一帧）\n",
-                        static_cast<unsigned long long>(logged_frames + 1),
-                        static_cast<unsigned long long>(n),
-                        static_cast<unsigned long long>(n - logged_frames),
-                        static_cast<unsigned long long>(presenter_.lastHash()));
+            if (frame_log_on) {
+                std::printf("[frame] n=%llu..%llu（一次 shim 里 %llu 次 Present）hash=0x%016llX（只有最后一帧）\n",
+                            static_cast<unsigned long long>(logged_frames + 1),
+                            static_cast<unsigned long long>(n),
+                            static_cast<unsigned long long>(n - logged_frames),
+                            static_cast<unsigned long long>(presenter_.lastHash()));
+            }
             if (prof_.on) {
                 // 这一格里发生了多次 Present ⇒ 只有一个时刻（它们同一趟 shim 里跑完的）。
                 // ⛔ 不伪造 K 个时间戳：那会变成"看起来逐帧、其实只有一次取样"。
@@ -501,7 +511,12 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
             }
         }
 
-        // ---- ② 三个合成 EA（必须在"桩 EA ⇒ lift_shim"之前：它们都落在桩页范围内）----
+        // ---- ② 三个合成 EA（必须在"桩 EA ⇒ lift_shim"之前）----
+        //   ★ 顺序的真正理由：它们**不在派发表里**（是宿主合成的返回点，不是镜像里的代码），
+        //     晚于 ③ 的查表就会落 `DecodeError`（`aot_run.cpp:800-814` 的响亮停）。
+        //   ⛔ 旧注释写的「它们都落在桩页范围内」是**假的**：`0x7FFEF004/008/010/014` 全在桩页
+        //     上界 `0x7FFE8000` **之上**（桩页 = `[0x7FFE0000, 0x7FFE8000)`，`image.h:98-99`）；
+        //     页内判定（`stub_off < stub_span`）对它们恒假 ⇒ 它们从来不是"桩 EA"。
         const Pump pumped = pumpSyntheticEas(r);
         if (pumped == Pump::Stop) break;
         if (pumped == Pump::Handled) {
@@ -590,127 +605,6 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
                 // `fireDueTimer` 报"没有到期的"（拿到更新的一次 now 之后）⇒ 把缓存刷新成事实。
                 timer_due_hint = earliestTimerDue();
                 if (r.reason != AotStop::None) break;
-            }
-        }
-
-        // ---- ⑤' guest native override（真源 `machine.cpp:1420-1533`；D25 第 1 项）----
-        //   ★ 判据顺序与解释器**逐条一致**：定时器泵 → 函数级 → 段级 → shim / 派发表。
-        //   ★ 两张表都空（缺省档）⇒ 这一段只多一次 `empty()`；`overrideCandidate` 是一张
-        //     位图前置过滤（见 `aot_host.h`），所以"开着 override"的代价是每次派发一次位测试。
-        if (overrideCandidate(ea)) {
-            // ★ 每个 EA 只打一行："到达了 override 入口，但**不是 call 帧**" ⇒ 走 lifted。
-            //   为什么必须看得见：`call reg/mem`（虚表调用）的返回地址不在 `[esp]-5` 上，判据会拒掉它
-            //   ⇒ 那是**性能**缺口（不是语义缺口），但"落到哪些 EA、有多少"不能是隐形的。
-            auto noteNotCall = [&](std::uint32_t at, const char* name) {
-                ++r.ov_not_call;
-                if (std::find(not_call_logged_.begin(), not_call_logged_.end(), at) !=
-                    not_call_logged_.end()) {
-                    return;
-                }
-                not_call_logged_.push_back(at);
-                const std::uint32_t top = mem_.committed(cpu_.esp(), 4u) ? mem_.rd32(cpu_.esp()) : 0u;
-                std::fprintf(stderr,
-                             "[aot][native] %s @ %08X 到达时**不是 call 帧**（[esp]=%08X 处不是指向它的 "
-                             "`call rel32`）⇒ 走 lifted 代码（每个 EA 只报第一次）\n",
-                             name, at, top);
-            };
-            // ① 需要嵌套 guest 执行器 ⇒ 本轮**没装**的那些项：只计数（⛔ 不假装接上了）。
-            for (const std::uint32_t nested_ea : nested_only_ea_) {
-                if (nested_ea != ea) continue;
-                if (overrideCallFrame(ea)) {
-                    ++r.ov_skipped_nested;
-                } else {
-                    noteNotCall(ea, "(需要嵌套执行器的项)");
-                }
-                break;
-            }
-            // ② 函数级：只在**函数入口 + 真有 call 帧**时拦（解释器的 `call_target` 判据）。
-            if (NativeOverride* ov = overrides_.find(ea)) {
-                if (!overrideCallFrame(ea)) {
-                    // 不是 call 帧 ⇒ 不许弹一个不存在的返回地址（解释器同样回退解释器）。
-                    noteNotCall(ea, ov->name.c_str());
-                } else {
-                    const std::uint64_t insns_before = cpu_.insns;
-                    const std::uint64_t fallbacks_before = ov->fallbacks;
-                    const char* why = nullptr;
-                    bool suspended = false;
-                    const bool took = overrides_.invoke(*ov, cpu_, mem_, &why, &suspended);
-                    if (took) {
-                        if (suspended) {
-                            // override 自己铺了 guest 回调帧（EIP/ESP 由 GuestCallStack 设好）⇒
-                            // 按 cpu_.eip 继续（⛔ 不回退 lifted）。按实际增量补账。
-                            r.ov_insns += cpu_.insns - insns_before;
-                            syncRegsFromCpu();
-                            ea = cpu_.eip;
-                            continue;
-                        }
-                        // ★ 复刻解释器的 `insns` 记账（`machine.cpp:1454-1459`）：override 替代了
-                        //   **整个函数体**（没有 ret 指令）⇒ 记 **1 条** + override 自己补的条数
-                        //   （`insns_before` 基线，⛔ 不硬编码 "+1" —— 那会把补偿漏成闭合差）。
-                        cpu_.noteInsn(ov->ea, "[native]");
-                        ++cpu_.insns;
-                        clock_.tick();
-                        r.ov_insns += cpu_.insns - insns_before;
-                        syncRegsFromCpu();
-                        ea = cpu_.eip;
-                        continue;
-                    }
-                    // ★ **停机**与"回退 lifted"是两条语义（`machine.cpp:1469-1478`）：先看 running。
-                    if (!cpu_.running) {
-                        r.reason = hostStopReason(cpu_);
-                        char ea_text[16];
-                        std::snprintf(ea_text, sizeof(ea_text), "%08X", ov->ea);
-                        r.detail =
-                            cpu_.stop_why
-                                ? std::string(cpu_.stop_why) + "（native " + ov->name + " @ " + ea_text + "）"
-                                : std::string("native override 主动结束运行：") + ov->name + " @ " + ea_text;
-                        r.ov_insns += cpu_.insns - insns_before;
-                        break;
-                    }
-                    // 第一次回退就打一行（与解释器同一个闸门：`fallbacks` 从 0 变 1）。
-                    if (fallbacks_before == 0 && ov->fallbacks == 1 && why != nullptr) {
-                        std::fprintf(stderr, "[native] %s @ %08X 回退解释器：%s\n", ov->name.c_str(), ov->ea,
-                                     why);
-                    }
-                    // 回退路径也按**实际增量**补账，并把 cpu_ 的状态同步回 `regs_`（lifted 侧的状态
-                    // 真源是 `regs_`；fn 在回退前可能已经改过 cpu_ —— 解释器那边 cpu_ 就是真源）。
-                    r.ov_insns += cpu_.insns - insns_before;
-                    syncRegsFromCpu();
-                }
-            }
-            // ③ 段级：函数中段的固定 EA（`machine.cpp:1488-1533`）—— **没有** call 帧语义：
-            //   fn 自己写 EIP（段出口）/ 寄存器 / EFLAGS，并按 `replaced_insns` 报被替代的条数。
-            if (NativeBlockOverride* bo = block_overrides_.find(ea)) {
-                const std::uint32_t entry = ea;
-                std::uint64_t replaced = 0;
-                const BlockOverrideOutcome outcome = bo->fn(cpu_, mem_, &replaced);
-                if (outcome == BlockOverrideOutcome::Replaced) {
-                    cpu_.noteInsn(entry, "[native-block]");
-                    ++bo->hits;
-                    const std::uint64_t n = replaced != 0 ? replaced : 1ull;
-                    cpu_.insns += n;
-                    clock_.tick(n);
-                    r.ov_insns += n;
-                    syncRegsFromCpu();
-                    ea = cpu_.eip;
-                    continue;
-                }
-                if (outcome == BlockOverrideOutcome::Declined) {
-                    // 前置条件不匹配 ⇒ 一次就够（段级项的前提是静态的）⇒ 本次运行停用该项。
-                    if (!bo->disabled) {
-                        ++bo->declines;
-                        bo->disabled = true;
-                        std::fprintf(stderr,
-                                     "[native] 段级 %s @ %08X 前置条件不匹配 ⇒ 本次运行停用该项（回退 lifted）\n",
-                                     bo->name.c_str(), entry);
-                    }
-                } else {
-                    if (bo->fallbacks == 0) {
-                        std::fprintf(stderr, "[native] 段级 %s @ %08X 执行失败 ⇒ 回退 lifted\n",
-                                     bo->name.c_str(), entry);
-                    }
-                    ++bo->fallbacks;
-                }
             }
         }
 

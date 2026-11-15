@@ -246,5 +246,20 @@ bool emitModule(const std::vector<GenComponent>& components,
                 const GenStructure& structure, std::string* out, GenEmitStats* stats,
                 std::vector<GenUnsupported>* unsupported);
 
+// ★ 拆分输出（`lift-gen --split N`）：**全局分析一次**，只把"输出"按分量分桶。
+//   红线的机械形态（design.md §3.2-3）：`entry_owner` / `block_flags` / `structure.structured_roots`
+//   全部由**全集**算一次，且走的是与 `emitModule` **同一个** `emitBodies`（⛔ 不许每份重算 ——
+//   按份重算会让跨份 `call` 静默退化成 `ret i32`、并改变 flags 物化）。
+//   `parts[i]` = 第 i 份的完整 `.ll` 文本（头部注释 + `declare` + 该份 body）；
+//   `part_roots[i]` = 该份里的分量根（升序；各份两两不交、并集 = 全部根）。
+//   分桶规则（确定性）：按分量根 EA 升序、贪心填到 `Σbody/N`。
+//   `split == 1` ⇒ `parts[0]` 与 `emitModule` 的 `out` **逐字节相同**（同一份实现拼出来的）。
+bool emitModuleSplit(const std::vector<GenComponent>& components,
+                     const std::set<std::uint32_t>& entry_set,
+                     const std::set<std::uint32_t>& dropped_blocks, const GenClosureStats& closure,
+                     const GenStructure& structure, std::size_t split, GenEmitStats* stats,
+                     std::vector<GenUnsupported>* unsupported, std::vector<std::string>* parts,
+                     std::vector<std::vector<std::uint32_t>>* part_roots);
+
 }  // namespace aot
 }  // namespace lift

@@ -56,11 +56,6 @@ void usage() {
         "  --time-limit SEC    墙钟上限（每 4096 条查一次；0 = 不限）\n"
         "  --skip-logo         一次性 latch：T_Command + 0x5EB5C 写 0（口径同 emulator-lift；\n"
         "                      钩子点 AOT 用 0x004BAA33；⛔ 不跳过 boot、不改 eip/寄存器）\n"
-        "  --lst <path>        .lst 语料（**只**给 native override 用：名字→EA / 段级锚校验；\n"
-        "                      缺省自动找 corpus/disasm/files/…；口径同 emulator-lift）\n"
-        "  --native-overrides <list>  逗号分隔的 guest 函数名 / 段级项名（如 _memcpy）；all = 已验证项；\n"
-        "                      `-name` 排除。**缺省关**（与 emulator-lift 同口径；同一个二进制做 A/B）。\n"
-        "                      ★ `sub_48B090` 需要嵌套 guest 执行器 ⇒ 本臂**不装**它（只计数）\n"
         "  --audio off|virtual|sdl  音频后端（本臂**只实现 off**：没有音频设备 / 喂料线程）\n"
         "  --dump-frame <path> 每次 Present 导出一份 guest 后缓冲 BMP（{frame} = 4 位帧号）\n"
         "  --profile           采样式内部 profile（**缺省关**）：每帧时间戳 + 派发 / lift_one / shim\n"
@@ -68,6 +63,9 @@ void usage() {
         "                      shim 1/64（每个 shim 各自的调用序号；也写在输出头）。★ 采样本身会\n"
         "                      轻微影响时序 ⇒ 性能结论请用**关档**跑（⛔ 不拿 --profile 的墙钟当结论）；\n"
         "                      六项判据开/关一致\n"
+        "  --frame-log         每次 Present 打一行 `[frame] n=<帧号> hash=<guest 后缓冲哈希>`（**缺省关**）：\n"
+        "                      逐帧 hash 是画面序列读数（在动 / 卡住同一帧），不是判据；末帧 hash 看摘要\n"
+        "                      `present :` 行。`--profile` 档也会打这一条（已有 profile 存档的可比面）\n"
         "\n"
         "★ 呈现档位（口径与 emulator-lift 相同；缺省 headless）：\n"
         "  --present headless|window|auto\n"
@@ -152,9 +150,6 @@ int main(int argc, char** argv) {
     bool present_screenshot_set = false;
     std::uint64_t present_screenshot_frame = 0;
     std::string frame_dump;  // --dump-frame（guest 后缓冲 BMP；`cpu.shim.frame_dump`）
-    // ---- native override（D25 第 1 项）：`.lst` 与名字表，口径同解释器 `main.cpp:285/546` ----
-    std::string lst_path;
-    std::string native_overrides;  // 缺省空 = 两张表都空（与解释器缺省同口径）
 
     for (std::size_t i = 1; i < args.size(); ++i) {
         const std::string& a = args[i];
@@ -216,23 +211,15 @@ int main(int argc, char** argv) {
         } else if (a == "--skip-logo") {
             // ★ 与 `src/main.cpp:301-302` 同一条：只置一个 bool（一次性 latch，语义在 aot_run.cpp）。
             run_opts.skip_logo = true;
-        } else if (a == "--lst") {
-            if (!needValue("--lst", &lst_path)) return 2;
-        } else if (a == "--native-overrides") {
-            // ★ 与 `src/main.cpp:546-550` 同一条：空列表是用法错误（"关掉" = 整个参数都不给）。
-            std::string v;
-            if (!needValue("--native-overrides", &v)) return 2;
-            if (v.empty()) {
-                std::fprintf(stderr, "--native-overrides 需要非空列表（关掉就整个参数都不要给）\n");
-                return 2;
-            }
-            native_overrides = v;
         } else if (a == "--dump-frame") {
             // ★ 与 `src/main.cpp:1157` 同一个字段（`cpu.shim.frame_dump`）；D3D9 Present 消费。
             if (!needValue("--dump-frame", &frame_dump)) return 2;
         } else if (a == "--profile") {
             // ★ 采样式内部 profile（缺省关；采样率与三条硬口径见 `aot_host.h` 的 `AotProfile`）。
             run_opts.profile = true;
+        } else if (a == "--frame-log") {
+            // ★ 逐帧 `[frame] n=… hash=…`（**缺省关**；理由见 `AotRunOptions::frame_log`）。
+            run_opts.frame_log = true;
         } else if (a == "--present") {
             if (!needValue("--present", &present_mode)) return 2;
         } else if (a == "--present-driver") {
@@ -412,44 +399,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // ---- ②' native override（D25 第 1 项）：`.lst` + 两张表（口径照 `src/main.cpp:819-917`）----
-    //   ★ 判据：**只在给了 `--native-overrides` 时才需要 `.lst`**（与解释器同一条：
-    //     "`--native-overrides` 需要 `--lst`"——EA 按名字解析，⛔ 不硬编码 EA）。
-    //   ★ 顺序：必须在 `loadImage` 之后（`.lst` 的 sha 要与镜像的 sha 比对）、`run` 之前。
-    if (!native_overrides.empty()) {
-        if (lst_path.empty()) {
-            const char* candidates[] = {
-                "corpus/disasm/files/AGE.EXE__dumped.sectfix.EXE.lst",
-                "../../corpus/disasm/files/AGE.EXE__dumped.sectfix.EXE.lst",
-            };
-            for (const char* c : candidates) {
-                if (fileExists(c)) {
-                    lst_path = c;
-                    break;
-                }
-            }
-        }
-        if (lst_path.empty() || !fileExists(lst_path)) {
-            if (!lst_path.empty()) {
-                std::fprintf(stderr, "emulator-lift-aot: --lst 指向的文件不存在：%s\n", lst_path.c_str());
-                return 2;
-            }
-            std::fprintf(stderr,
-                         "emulator-lift-aot: --native-overrides 需要 --lst（函数级按名字解析 EA、段级按 `.lst` "
-                         "锚校验；⛔ 不硬编码 EA）\n  找过：corpus/disasm/files/AGE.EXE__dumped.sectfix.EXE.lst / "
-                         "../../corpus/disasm/files/AGE.EXE__dumped.sectfix.EXE.lst\n");
-            return 2;
-        }
-        if (!host.loadLst(lst_path, &err)) {
-            std::fprintf(stderr, "emulator-lift-aot: 载入 .lst 失败（%s）：%s\n", lst_path.c_str(), err.c_str());
-            return 2;
-        }
-        if (!host.configureNativeOverrides(native_overrides, &err)) {
-            std::fprintf(stderr, "emulator-lift-aot: --native-overrides 配置失败：%s\n", err.c_str());
-            return 2;
-        }
-    }
-
     // ---- ③ 装配 guest 进程结构 + shim + cpu 初始寄存器 ----
     if (!host.prepare(&err)) {
         std::fprintf(stderr, "emulator-lift-aot: 平台 bring-up 失败：%s\n", err.c_str());
@@ -491,6 +440,19 @@ int main(int argc, char** argv) {
         host.printReadout(stdout);
         std::fflush(stdout);
         return 1;
+    }
+
+    // ---- ④' AOT **形状**进二进制 + 启动第一屏一行（设计 §4.1-4）----
+    //   `LIFT_AOT_SHAPE` 由 CMake 从 `LIFT_AOT_SPLIT` + `-O2` 派生：判据档只允许
+    //   `single-O2` / `splitN-O2` 两种写法；将来真有 dev 档，它的值必须带 `-NOT-A-JUDGE`
+    //   ⇒ 这里同时打警示，让人**无法**在 dev 档上得出性能结论。
+    {
+        const char* shape = LIFT_AOT_SHAPE;
+        std::printf("emulator-lift-aot: AOT 形状 LIFT_AOT_SHAPE=\"%s\"（split=%d · -O2）\n", shape,
+                    static_cast<int>(LIFT_AOT_SPLIT));
+        if (std::strstr(shape, "-NOT-A-JUDGE") != nullptr) {
+            std::printf("⚠ 非判据档（⛔ 性能结论不可用）\n");
+        }
     }
 
     // ---- 宿主诊断配置：帧导出 / 帧数上限（口径同 `src/main.cpp:1156-1162`；不进 guest 语义）----

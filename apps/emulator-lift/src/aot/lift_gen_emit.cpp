@@ -5579,12 +5579,18 @@ std::vector<GenEdge> genBlockEdges(const GenBlock& block) {
     return out;
 }
 
-bool emitModule(const std::vector<GenComponent>& components,
+namespace {
+
+// ★ 所有 body 发射的**唯一**入口（`emitModule` 与 `emitModuleSplit` 都只经这里）。
+//   ★★ 红线（design.md §3.2-3）：`entry_owner` 与 `block_flags` 都在这里按 **全集** 算一次。
+//   拆分的每一份**复用**这一份结论；按份重算会让跨份静态 `call` 静默退化成 `ret i32`
+//   （`ownerOf` 查不到目标 ⇒ 走派发），并改变 `call` 边的 flags 物化 —— 语义还"等价"，
+//   但产物形状与 `s7_*` 读数全变，而且**没有任何东西会喊**。
+bool emitBodies(const std::vector<GenComponent>& components,
                 const std::set<std::uint32_t>& entry_set,
-                const std::set<std::uint32_t>& dropped_blocks, const GenClosureStats& closure,
-                const GenStructure& structure, std::string* out, GenEmitStats* stats,
-                std::vector<GenUnsupported>* unsupported) {
-    if (out == nullptr || stats == nullptr || unsupported == nullptr) return false;
+                const std::set<std::uint32_t>& dropped_blocks, const GenStructure& structure,
+                GenEmitStats* stats, std::vector<GenUnsupported>* unsupported,
+                std::vector<std::string>* chunks) {
     // ★ S7：入口 EA → 单元根（调用目标的归属）。**用 components 自己的 entries**（含 D21 跳表加进来的），
     //   与派发表同一份来源 ⇒ 不会出现"表里有、这里没有"。
     std::map<std::uint32_t, std::uint32_t> entry_owner;
@@ -5612,11 +5618,10 @@ bool emitModule(const std::vector<GenComponent>& components,
             return false;
         }
     }
-    std::string body;
     for (const GenComponent& comp : components) {
         FnEmit emit(comp, entry_set, dropped_blocks, block_flags, structure, entry_owner, stats,
                     unsupported);
-        body += emit.run();
+        std::string one = emit.run();
         if (emit.failed()) {
             // ★ S3-a：生成期硬错（"读了/要物化一个 Poison 位"= flags 活性自相矛盾）。
             //   ⛔ 不降级成警告：产物一旦带着错的 flags 状态出去，就是**静默**错。
@@ -5624,8 +5629,15 @@ bool emitModule(const std::vector<GenComponent>& components,
                          emit.failWhy().c_str(), comp.root);
             return false;
         }
-        body += "\n";
+        one += "\n";
+        chunks->push_back(std::move(one));
     }
+    return true;
+}
+
+// 模块头 + `declare` 清单（**全局读数**；拆分时每份重复这一段 ⇒ 每份都是独立可编译模块）。
+// ★ `stats` 是**全部** body 发射之后的累计值 ⇒ 头部读数与单份模块完全一致（同输入同字节）。
+std::string emitPrologue(const GenClosureStats& closure, const GenEmitStats* stats) {
     std::string text;
     text += "; emulator-lift · Shape A / T1c —— 由 `emulator-lift-gen` 生成，⛔ 不手改、不 commit。\n";
     text += "; 契约：%st = LiftRegs*（r[0..7] + eflags@+32）；%mem = guest EA 0 的宿主基址；\n";
@@ -5863,8 +5875,112 @@ bool emitModule(const std::vector<GenComponent>& components,
     if (stats->used_cttz) text += "declare i32 @llvm.cttz.i32(i32, i1)\n";
     if (stats->used_ctlz) text += "declare i32 @llvm.ctlz.i32(i32, i1)\n";
     text += "\n";
-    text += body;
+    return text;
+}
+
+}  // namespace
+
+bool emitModule(const std::vector<GenComponent>& components,
+                const std::set<std::uint32_t>& entry_set,
+                const std::set<std::uint32_t>& dropped_blocks, const GenClosureStats& closure,
+                const GenStructure& structure, std::string* out, GenEmitStats* stats,
+                std::vector<GenUnsupported>* unsupported) {
+    if (out == nullptr || stats == nullptr || unsupported == nullptr) return false;
+    std::vector<std::string> chunks;
+    if (!emitBodies(components, entry_set, dropped_blocks, structure, stats, unsupported, &chunks))
+        return false;
+    std::string text = emitPrologue(closure, stats);
+    for (const std::string& c : chunks) text += c;
     *out = std::move(text);
+    return true;
+}
+
+bool emitModuleSplit(const std::vector<GenComponent>& components,
+                     const std::set<std::uint32_t>& entry_set,
+                     const std::set<std::uint32_t>& dropped_blocks, const GenClosureStats& closure,
+                     const GenStructure& structure, std::size_t split, GenEmitStats* stats,
+                     std::vector<GenUnsupported>* unsupported, std::vector<std::string>* parts,
+                     std::vector<std::vector<std::uint32_t>>* part_roots) {
+    if (stats == nullptr || unsupported == nullptr || parts == nullptr || part_roots == nullptr)
+        return false;
+    if (split == 0) split = 1;
+    if (components.empty()) {
+        parts->assign(split, std::string());
+        part_roots->assign(split, std::vector<std::uint32_t>());
+        return true;
+    }
+    if (split > components.size()) split = components.size();
+    // ★ 全局分析一次（entry_owner / block_flags / body 全部在这里；⛔ 不按份重算）。
+    std::vector<std::string> chunks;
+    if (!emitBodies(components, entry_set, dropped_blocks, structure, stats, unsupported, &chunks))
+        return false;
+    // ★ 分桶（确定性纯函数）：分量根 EA 升序、贪心填到 `Σbody/split`。
+    //   `components` 本身已按根升序 ⇒ 用下标顺序即可；这里仍显式排序，防上游顺序变动改变产物。
+    std::vector<std::size_t> order(components.size());
+    for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        return components[a].root < components[b].root;
+    });
+    std::uint64_t total = 0;
+    for (const std::string& c : chunks) total += static_cast<std::uint64_t>(c.size());
+    const std::uint64_t target = (total + split - 1) / split;
+    std::vector<std::vector<std::size_t>> buckets(split);
+    std::size_t bi = 0;
+    std::uint64_t acc = 0;
+    for (const std::size_t idx : order) {
+        const std::uint64_t sz = static_cast<std::uint64_t>(chunks[idx].size());
+        if (!buckets[bi].empty() && acc + sz > target && bi + 1 < split) {
+            ++bi;
+            acc = 0;
+        }
+        buckets[bi].push_back(idx);
+        acc += sz;
+    }
+    const std::string prologue = emitPrologue(closure, stats);
+    parts->clear();
+    part_roots->clear();
+    for (std::size_t b = 0; b < split; ++b) {
+        std::vector<std::size_t> idxs = buckets[b];
+        // 桶内按**原始分量顺序**拼接（与单份文件的字节顺序一致；`std::sort` 稳定化不需要）。
+        std::sort(idxs.begin(), idxs.end());
+        std::string body;
+        std::set<std::string> defined;
+        for (const std::size_t idx : idxs) {
+            body += chunks[idx];
+            defined.insert(genFunctionName(components[idx].root));
+        }
+        // ★ 跨份静态 `call` / `tail call` 的目标在本份里**只有声明**（定义在别的份里）：LLVM 要求
+        //   使用前可见 ⇒ 每份为自己的"外部 callee"补 `declare i32 @lift_cc_<root>(ptr, ptr, i32, ptr)`。
+        //   签名与定义**逐字相同**（`FnEmit::run` 的 `define` 那一行）；名字集合 = body 里出现过的
+        //   `@lift_cc_*` 减掉本份自己的定义（`std::set` ⇒ 升序 ⇒ 确定性）。
+        //   ⚠ 单份（`split == 1`）时差集恒空 ⇒ 产物与今天的 `.ll` **逐字节相同**。
+        std::set<std::string> referenced;
+        for (std::size_t pos = body.find("@lift_cc_"); pos != std::string::npos;
+             pos = body.find("@lift_cc_", pos + 1)) {
+            std::size_t end = pos + 9;  // skip "@lift_cc_"（9 字符）
+            while (end < body.size() &&
+                   std::isxdigit(static_cast<unsigned char>(body[end])) != 0) {
+                ++end;
+            }
+            referenced.insert(body.substr(pos + 1, end - pos - 1));  // 去掉 '@'
+        }
+        std::string extra;
+        for (const std::string& name : referenced) {
+            if (defined.count(name) != 0) continue;
+            extra += "declare i32 @" + name + "(ptr, ptr, i32, ptr)\n";
+        }
+        std::string text = prologue;
+        if (!extra.empty()) {
+            // 插在 prologue 末尾那个空行**之前**（declare 与 body 之间仍隔一空行）。
+            text = prologue.substr(0, prologue.size() - 1) + extra + "\n";
+        }
+        std::vector<std::uint32_t> roots;
+        roots.reserve(idxs.size());
+        for (const std::size_t idx : idxs) roots.push_back(components[idx].root);
+        text += body;
+        parts->push_back(std::move(text));
+        part_roots->push_back(std::move(roots));
+    }
     return true;
 }
 

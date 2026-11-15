@@ -1021,6 +1021,22 @@ const MUTATIONS = [
 
 
   {
+    // ★ 代表"把续延桩 EA 写成字面量"这一类错（AOT 臂 `EnumSystemLocalesA` 的"续延桩不可调用"）：
+    //   铺进 guest 栈的 EA 必须是**注册表发过号的桩 EA**（`ShimDef::stub_ea`，形状 = 桩页基 + 槽号*4）。
+    //   写回字面量 `0x7FFEF000`（它在桩页 `[0x7FFE0000, 0x7FFE8000)` 之外）⇒ 解释器仍靠块缓存跑得通，
+    //   而 AOT 臂没有块缓存、桩表又查不到它 ⇒ `locale_ext.cpp` 的 `enum-locales-no-cache` 当场红。
+    file: 'apps/emulator-lift/src/shims/kernel32_string.cpp',
+    from: '    const std::uint32_t cont_ea = cont != nullptr ? cont->stub_ea : 0u;',
+    to: '    const std::uint32_t cont_ea = kCallbackContinuationEa;  // 变异：字面量（桩页外）',
+    guard: 'ctest:locale-ext',
+    ctest: 'locale-ext',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '续延桩 EA 改回字面量 0x7FFEF000（在桩页之外）⇒ 无块缓存时桩表路由不到它 ⇒ locale-ext 的 ' +
+      'enum-locales-no-cache（`cpu.cache == nullptr`）当场红；⛔ 解释器臂不会红（块缓存能装任意 EA）',
+  },
+
+  {
     // ★ 代表 "shim 按**别的 API 版本的签名**读参" 这一类错（`REQ-01M780VKKRFHJEX6VM74DRCYBM`）：
     //   `IDirect3DDevice9::SetRenderTarget(DWORD RenderTargetIndex, IDirect3DSurface9*)` 被当成
     //   D3D8 的 `SetRenderTarget(IDirect3DSurface8* pRenderTarget, IDirect3DSurface8* pNewZStencil)`

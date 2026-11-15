@@ -108,6 +108,7 @@
 #include "runtime/host_encoding.h"
 #include "runtime/image.h"
 #include "runtime/memory.h"
+#include "runtime/sha256.h"  // `--split` 清单里每份的 sha256（与 PE pin 同一份实现）
 
 namespace {
 
@@ -116,6 +117,9 @@ using lift::aot::GenComponent;
 using lift::aot::GenEdge;
 using lift::aot::GenEmitStats;
 using lift::aot::GenUnsupported;
+
+// 8 位大写 hex（定义在下面"⑤ --pin / --table"块里；识别 / 审计的 EA 打印要先用到它）
+std::string hexEa(std::uint32_t ea);
 
 // =====================================================================================
 // ★ 尺寸护栏的**唯一落点**（D17 / D18）：第三类软根（非可执行节里静态初始化的代码指针）的
@@ -163,6 +167,24 @@ struct Options {
     //   缺省值同样由**尺寸护栏**决定（见 `kCloseJmptabByDefault`）：`.ll` > 320 MB 或
     //   `clang -c -O2` > 400 s ⇒ false（`--close-jmptab` 才开），否则 true。
     bool close_jmptab = kCloseJmptabByDefault;
+    // =================================================================================
+    // ★ BUG-24（S1/S2/S3）：跳表识别与两条消费。**四个开关各自独立**（与 D14/D15/D17/D26
+    //   同族，⛔ 不合成总开关）。
+    //   · `jmptab_exclude`（P1 / S2）：把识别出的表区间从**解码**里排除（表首不再是 leader、
+    //     直线扫描撞到区间就停、`call` 的返回 EA 落在区间里就不进入口集）。`--no-jmptab-exclude` 关。
+    //   · `close_jmptab_items`（P2 / S3）：表项在**建块之前**就成 leader/入口（`SoftKind::JumpTableItem`）。
+    //     `--no-close-jmptab-items` 关。
+    //   · `jmptab_audit`（P0）：只读审计模式（只吃 `--exe` + `--roots`；跑 ①–③ + 分区 + D21 到
+    //     `dispatch_entries` 定型后**提前返回**，不发射 IR、不写 `.ll`/派发表）。退出码 = P-1..P-4。
+    //   · `jmptab_max_passes`：两趟重启的轮数上限（缺省 4；撞到上限 = 识别器不收敛 ⇒ exit 1）。
+    //   ★ 前两个都是**默认开**：P1/P2 是修 BUG-24 的正路，关掉只是为了做"改前/改后"的对照档。
+    //   ★ 尺寸护栏沿用 `kCloseJmptabByDefault` 那一式（唯一落点常量 + 注释）：本轮的实测读数见
+    //     `.tmp/aot/bug24/impl-report.md`（`.ll` 字节 / `clang -c -O2` 墙钟 / obj 字节）。
+    // =================================================================================
+    bool jmptab_exclude = true;
+    bool close_jmptab_items = true;
+    bool jmptab_audit = false;
+    unsigned long jmptab_max_passes = 4;
     // ★ D18：只读覆盖率读数（块清单；⛔ 不参与 `.ll` / 派发表）。
     std::string dump_blocks;
     unsigned long max_components = 0;
@@ -173,6 +195,24 @@ struct Options {
     //     断言的是"派发序列 / call 后 esp 与 [esp]"—— 那是 S7 **故意改变**的形状。让那些夹具
     //     继续跑旧形状（它们自己的判据一字不改），S7 的形状由 `lift-s7-structured` + AOT 臂覆盖。
     bool s7 = true;
+    // =================================================================================
+    // ★ AOT 拆分（`.tmp/aot/irsplit/design.md`）：`--split N` + `--out-dir DIR`。
+    //   · 缺省 **1** = 今天的单份路径，`--out` 一字不变（逐字节同产物）。
+    //   · N > 1 时把**同一个全局分析**的结果按分量根 EA 升序、贪心分桶写成 N 份 `.ll`
+    //     （`<prefix>.part00.ll` …）+ 一份清单 `<prefix>.split.txt`。
+    //   ★★ 红线：`entry_owner` / `block_flags` / `structure.structured_roots` 一律**全局算一次**
+    //     （`emitModuleSplit` 只做输出分区）。⛔ 不许每份重算 —— 那会让跨份静态 `call` 静默
+    //     退化成 `ret i32`、并改变 flags 物化（语义还"等价"，但**没人会喊**）。
+    std::size_t split = 1;
+    // `--out-dir`：N > 1 时的落点目录；分片名 = `lift_aot.part<NN>.ll`（NN = 00..N-1）。
+    std::string out_dir;
+    // `--split-prefix`：分片文件名的前缀（缺省 `lift_aot`）⇒ `<dir>/<prefix>.part00.ll`。
+    std::string split_prefix = "lift_aot";
+    // ★ 入库件硬闸（`--closure-gate`）：**生成这一趟同时**做 `--check` 的五条校验并打同一行汇总。
+    //   CMake 的 AOT 生成命令带它 ⇒ 坏闭包在**构建期**硬红，且只分析一次（省 48.6 s）。
+    //   ⛔ 缺省关：测试夹具的 roots 文件不是 `0x`+8 位严格文法（`tests/ir/*_roots.txt`），
+    //   无条件开会把它们误红 —— 那是**另一件事**（fixture 输入，不是入库件）。
+    bool closure_gate = false;
 };
 
 void usage() {
@@ -182,6 +222,9 @@ void usage() {
         "  --roots <file>        一行一个 hex EA（`#` 起注释）\n"
         "  --out <file.ll>       产物（建议 out/aot/lift_aot.ll；⛔ 不入库）\n"
         "  --check <file>        只校验 closure.txt（格式/升序/可解码/在 .text/entry 必在）⇒ 一行汇总；⛔ 不发射\n"
+        "  --closure-gate        生成这一趟**同时**做 --check 的五条硬闸（同一行汇总；CMake 的 AOT 生成命令带它）\n"
+        "  --split N             把输出分成 N 份 `.ll`（缺省 1 = 今天的单份路径；分桶 = 根 EA 升序贪心）\n"
+        "  --out-dir <dir>       --split N>1 时的落点目录（分片名 `lift_aot.partNN.ll` + 清单 `lift_aot.split.txt`）\n"
         "  --pin <file.h>        额外写 exe 的 sha256 + entry（AOT 启动核对，D1；⛔ 不入库）\n"
         "  --table <file.inc>    额外写派发表 `EA → lift_cc_<根>`（AOT 的 EA→LiftFn 查找面；⛔ 不入库）\n"
         "  --no-close-calls      关掉静态调用闭包（D14 默认开；对照档 = 只按 --roots 展开）\n"
@@ -190,6 +233,11 @@ void usage() {
         "  --no-close-data       关掉第三类软根（缺省 %s：见 kCloseDataByDefault 与 .tmp/aot/g3/readings.md）\n"
         "  --close-jmptab        打开第五类软根（D26：可执行节跳表 dword → **尚未解码**的代码；会新增块）\n"
         "  --no-close-jmptab     关掉第五类软根（缺省 %s：见 kCloseJmptabByDefault 与 .tmp/aot/c2/readings.md）\n"
+        "  --no-jmptab-exclude   关掉 P1（S2）：不把识别出的跳表区间从解码里排除（对照档；缺省开）\n"
+        "  --no-close-jmptab-items  关掉 P2（S3）：表项不在建块之前立成 leader（对照档；缺省开）\n"
+        "  --jmptab-audit        只读审计（P0）：只吃 --exe + --roots，跑到 dispatch 定型后提前返回；\n"
+        "                        ⛔ 不发射 IR / 不写 .ll / 派发表；退出码 = P-1..P-4 全过 0 / 任一不过 1\n"
+        "  --jmptab-max-passes N 两趟重启的轮数上限（缺省 4；不收敛 ⇒ exit 1，⛔ 不静默截断）\n"
         "  --dump-blocks <file>  只读覆盖率读数：最终块的 `start EA / 字节长度 / 指令数`（升序文本；⛔ 不改 .ll / 派发表）\n"
         "  --no-s7               关掉 S7 的一对一结构翻译（默认开）：回到 D55 之前的形状\n"
         "                        （每个 call/ret 都回 trampoline；协议形状夹具用它）\n"
@@ -242,12 +290,61 @@ struct SoftStats {
     std::set<std::uint32_t> undecodable;   // 丢弃：软根解不出
     std::set<std::uint32_t> overlap;       // 丢弃：软根落在已发射块的字节区间内（D10 P3 ②）
     std::set<std::uint32_t> shim_targets;  // 跳过：目标是 shim 桩页里的 EA（不是 guest 单元）
+    // ★ BUG-24 / P1（S2）：跳过：目标落在**被排除的跳表区间**内（那是数据，不是代码）。
+    //   ★ 这一档**不写** `rejected_targets_`：表区间是"当前这趟的识别结果"，下一趟可能变；
+    //     写成"判过就永不重判"会把 BUG-24 的放大器（`rejected_targets_` 单调永久）复制一份。
+    std::set<std::uint32_t> table_range;
 };
 
 // 软根的**来源**（= 哪一条判据收的它）。丢弃时必须能回答"这是哪一类的账"。
 // ★ 新增类**只许追加在末尾**（⛔ 不重排既有值：`SoftKind` 的值进不了产物，但重排会让
 //   "哪一类"的判读随版本漂）。
-enum class SoftKind : std::uint8_t { None = 0, Call = 1, StoreImm = 2, DataPtr = 3, JumpTab = 4 };
+// ★ BUG-24 / P2（S3）：`JumpTableItem = 5` 追加在**末尾**。它与 D26（`JumpTab = 4`）的区别是
+//   **顺序**：表项在 `Explorer::run()` 之前就进 `entries_/leaders_/pending`（建块之前），
+//   于是 `buildBlocks` 在表项处**断块**而不是"事后发现它落在别人块里再丢"。
+enum class SoftKind : std::uint8_t {
+    None = 0,
+    Call = 1,
+    StoreImm = 2,
+    DataPtr = 3,
+    JumpTab = 4,
+    JumpTableItem = 5,
+};
+
+// 一个 EA **怎么变成 leader 的**（审计模式的 `boundary=` 字段：回答"表首是怎么进去的"）。
+// ★ 优先级 = 枚举顺序（数值小的赢）：一个 EA 多半同时来自几处（例如表项 + call 返回），
+//   报"最自然的那一个"——根 > call 返回 > call 目标 > jcc > jmp > data-ptr > store-imm > 表项。
+enum class LeaderBoundary : std::uint8_t {
+    None = 0,
+    Root = 1,
+    CallRet = 2,
+    Call = 3,
+    Jcc = 4,
+    Jmp = 5,
+    DataPtr = 6,
+    StoreImm = 7,
+    JumpTabItem = 8,
+};
+
+// 五类软根的账**各一份**（⛔ 不合并：读数要能回答"是哪一类出的问题"）。
+struct SoftAccounts {
+    SoftStats* call = nullptr;
+    SoftStats* store = nullptr;
+    SoftStats* data = nullptr;
+    SoftStats* jumptab = nullptr;
+    SoftStats* item = nullptr;  // ★ BUG-24 / P2：表项（`SoftKind::JumpTableItem`）的账
+
+    SoftStats* of(SoftKind kind) const {
+        switch (kind) {
+            case SoftKind::Call: return call;
+            case SoftKind::StoreImm: return store;
+            case SoftKind::DataPtr: return data;
+            case SoftKind::JumpTab: return jumptab;
+            case SoftKind::JumpTableItem: return item;
+            default: return nullptr;
+        }
+    }
+};
 
 // 已发射块的**字节区间索引**：`spans` = [start, end) 升序，`prefix_max[i]` = 前 i+1 个 span 的
 // 最大 end。判据"EA 落在**某个**已发射块的字节区间内"**只此一份** —— 两处共用：
@@ -264,6 +361,30 @@ struct BlockSpans {
         const std::size_t idx = static_cast<std::size_t>(it - spans.begin()) - 1;
         return spans[idx].first < ea && prefix_max[idx] > ea;
     }
+
+    // ★ BUG-24 / P1（S2）：**同一套判据**的第二个边界口径。数据区间是**闭开** `[start, end)`
+    //   而`inside` 是"严格在区间内部"（块首 EA 自己不算在块里）——表首本身恰好是第一个要排除的
+    //   字节，所以这里必须把起点算进来。⛔ 不要写第二份区间判定：`spans` / `prefix_max` /
+    //   `finalize()` 只有一份，两个谓词只差一个 `<=`。
+    bool covers(std::uint32_t ea) const {
+        // 第一个 start > ea 的位置；前一个就是"start <= ea"的最后一个 span（按 start 升序）。
+        const auto it = std::upper_bound(spans.begin(), spans.end(), ea,
+                                         [](std::uint32_t v, const std::pair<std::uint32_t, std::uint32_t>& s) {
+                                             return v < s.first;
+                                         });
+        if (it == spans.begin()) return false;
+        const std::size_t idx = static_cast<std::size_t>(it - spans.begin()) - 1;
+        return prefix_max[idx] > ea;
+    }
+
+    // spans 必须已按 (start, end) 升序排好；prefix_max 是"前 i+1 个 span 的最大 end"。
+    void finalize() {
+        prefix_max.assign(spans.size(), 0);
+        for (std::size_t i = 0; i < spans.size(); ++i) {
+            prefix_max[i] = (i == 0) ? spans[i].second
+                                     : std::max(prefix_max[i - 1], spans[i].second);
+        }
+    }
 };
 
 inline BlockSpans buildBlockSpans(const std::map<std::uint32_t, GenBlock>& blocks) {
@@ -275,10 +396,7 @@ inline BlockSpans buildBlockSpans(const std::map<std::uint32_t, GenBlock>& block
         out.spans.emplace_back(kv.first, last.ea + last.length);
     }
     std::sort(out.spans.begin(), out.spans.end());
-    out.prefix_max.resize(out.spans.size(), 0);
-    for (std::size_t i = 0; i < out.spans.size(); ++i) {
-        out.prefix_max[i] = (i == 0) ? out.spans[i].second : std::max(out.prefix_max[i - 1], out.spans[i].second);
-    }
+    out.finalize();
     return out;
 }
 
@@ -325,6 +443,524 @@ JumpTabScan scanExecCodeDwords(const lift::PeImage& image,
     return out;
 }
 
+// =====================================================================================
+// ★ BUG-24 / S1：**跳表识别**（两趟重启的 `recognizeJumpTables`；只读、不发射）
+//
+// 识别单元 = **上一趟解码流里**的一条间接 `jmp`（`Op::Jmp && op0().kind == Mem &&
+// mem.index != None && mem.scale == 4 && mem.base == None`）—— 本语料 56/56 都是绝对 disp32。
+// `disp32` 即表地址，且**必须在可执行节内**。⛔ 不用字节模式预扫（`FF 24 SIB disp32`）当站点来源：
+// 实测 94 个命中里至少 6 个是假表，且它的错误是**哑的**（设计准备 §4 的裁决）。
+//
+// 表长（三选一，A 优先 / B 兜底，**必须记账是哪个策略定的长度**）：
+//   · **A**：从 jmp 往回（≤ 4 个基本块）找最近一条定义同一索引寄存器的 `cmp <idx>, imm`，
+//            且它之后同块内的第一条控制流是无符号 `ja` ⇒ 项数 = `imm + 1`。
+//   · **B**：从表地址**逐项向后读**，直到某个 dword 不像代码指针（值不在可执行节 / 解不出 /
+//            自指 / 离表 > 64 KiB）。
+//   · ~~C：用 `.lst` 的 `jpt_*` 标签~~ —— ⛔ **产品路径不许**（`.lst` 是外部语料，不是可执行真源）。
+//
+// 交叉验证（缺一不认；**③ 用 ③′**，设计单的 ③ 在本语料上只过 16/42、已证坏）：
+//   ① `[ea, ea+4n)` 落在**同一个可执行节**内；
+//   ② 每个表项值在可执行节内**且**能解码；
+//   ③′ `ja` 的目标在可执行节内 ∧ 能解码 ∧ **不在表自身区间内**（`src=B` 没有 `ja` ⇒ 不适用）；
+//   ④ 表项不落在表自身区间内（防自指）。
+//   ★ ⑤（父级加的**安全不变量**）：若区间覆盖了任何 `closure.txt` 的根 EA，或任何 D14 收下的
+//     `call` 目标软根 ⇒ **响亮拒绝**（单独计数 + 打 EA + ⛔ 不进 `data_ranges_`）。理由：这是
+//     "假表把真代码从解码里排除 ⇒ 静默丢覆盖"的唯一硬闸。
+//     ★ `call` 的**返回** EA 落在区间内是 BUG-24 本来要的形状（那 2 条）⇒ **不算**违反 ⑤。
+// =====================================================================================
+struct JmpTab {
+    std::uint32_t ea = 0;        // 表地址 = `jmp` 的 disp32
+    std::uint32_t n = 0;         // 项数（`A` = imm+1；`B` = 逐项读到的个数）
+    bool src_b = false;          // true = 策略 B（逐项读）；false = 策略 A（bounds check 反推）
+    std::uint32_t site = 0;      // 认下它的 `jmp` 站点 EA（同表多站点时取最小的）
+    std::uint32_t cmp_ea = 0;    // 策略 A 用的 `cmp <idx>, imm`（`src_b` ⇒ 0）
+    std::uint32_t ja_ea = 0;     // 策略 A 用的 `ja`（`src_b` ⇒ 0）
+    std::uint32_t ja_target = 0; // `ja` 的目标 EA（`src_b` ⇒ 0）
+    std::vector<std::uint32_t> items;
+    std::uint32_t items_in_exec = 0;  // 判据 ② 的第一半
+    std::uint32_t items_decode = 0;   // 判据 ② 的第二半（Zydis 能解出）
+    std::uint32_t items_bad = 0;      // 在可执行节内但 `decode()` 失败（⛔ 不许静默：审计单独列）
+    std::uint32_t items_selfref = 0;  // 判据 ④
+    bool v1 = false, v2 = false, v3 = false, v4 = false;
+    bool covers_protected = false;              // 判据 ⑤
+    std::vector<std::uint32_t> protected_hits;  // ⑤ 命中的根 / D14 call 目标软根（升序）
+
+    std::uint32_t range_end() const { return ea + 4u * n; }
+};
+
+// 被拒的候选（审计要**响亮**列出来，⛔ 不许只计数）。
+struct JmpTabReject {
+    std::uint32_t ea = 0;
+    std::uint32_t site = 0;
+    std::uint32_t n = 0;
+    bool src_b = false;
+    std::string why;
+};
+
+struct JmpTabRecognition {
+    std::uint64_t sites = 0;                    // 解码流里的间接 jmp 站点数
+    std::set<std::uint32_t> candidates;         // 不同 disp32（识别面）
+    std::map<std::uint32_t, JmpTab> tables;     // 通过 ①②③′④ 且未触发 ⑤（按 ea 升序）
+    std::vector<JmpTabReject> rejects;          // 其余候选（按 ea 升序）
+    std::uint64_t rejected_covers_protected = 0;  // ⑤ 单独计数
+    std::set<std::uint32_t> items() const {
+        std::set<std::uint32_t> out;
+        for (const auto& kv : tables) out.insert(kv.second.items.begin(), kv.second.items.end());
+        return out;
+    }
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> ranges() const {
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> out;
+        out.reserve(tables.size());
+        for (const auto& kv : tables) out.emplace_back(kv.first, kv.second.range_end());
+        return out;
+    }
+};
+
+// 从 PE 文件 raw 字节读一个 dword（**真源**；与 `scanExecCodeDwords` / `scanDataPointers` 同一式）。
+// 返回 false = 这个 EA 不在任何"文件真有字节"的节区间内（`.bss` 尾巴 / 节外）。
+bool peDword(const lift::PeImage& image, std::uint32_t ea, std::uint32_t* out) {
+    for (const lift::PeSectionInfo& sec : image.sections) {
+        const std::uint64_t vsize = sec.vsize != 0 ? sec.vsize : sec.raw_size;
+        const std::uint64_t n = std::min<std::uint64_t>(sec.raw_size, vsize);
+        if (n < 4) continue;
+        const std::uint64_t begin = static_cast<std::uint64_t>(image.image_base) + sec.va;
+        const std::uint64_t end = begin + n;
+        if (static_cast<std::uint64_t>(ea) < begin || static_cast<std::uint64_t>(ea) + 4 > end) continue;
+        const std::uint8_t* p = image.bytes.data() + sec.raw_offset + (ea - begin);
+        *out = static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) |
+               (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24);
+        return true;
+    }
+    return false;
+}
+
+// 这条指令是否**重定义**了 `r` 所在的 32 位 GPR（目的操作数是 op0 的那些形态；子寄存器按 GPR
+// 下标算同一只）。用途只有一个：策略 A 往回扫时，"cmp 之前索引寄存器被改过" ⇒ A 失败
+// （本语料 13 个两级 switch 的形态是 `movzx reg, ds:byte_表[reg]`）。⛔ 不是完整的写集分析。
+bool writesGpr32(const lift::Insn& in, lift::Reg r) {
+    if (r == lift::Reg::None) return false;
+    if (!lift::isGpr32(r)) return false;
+    switch (in.op) {
+        case lift::Op::Mov:
+        case lift::Op::Movzx:
+        case lift::Op::Movsx:
+        case lift::Op::Lea:
+        case lift::Op::Add:
+        case lift::Op::Sub:
+        case lift::Op::And:
+        case lift::Op::Or:
+        case lift::Op::Xor:
+        case lift::Op::Adc:
+        case lift::Op::Sbb:
+        case lift::Op::Imul:
+        case lift::Op::Mul:
+        case lift::Op::Div:
+        case lift::Op::Idiv:
+        case lift::Op::Shl:
+        case lift::Op::Shr:
+        case lift::Op::Sar:
+        case lift::Op::Rol:
+        case lift::Op::Ror:
+        case lift::Op::Rcl:
+        case lift::Op::Rcr:
+        case lift::Op::Shld:
+        case lift::Op::Shrd:
+        case lift::Op::Inc:
+        case lift::Op::Dec:
+        case lift::Op::Neg:
+        case lift::Op::Not:
+        case lift::Op::Bswap:
+        case lift::Op::Xchg:
+        case lift::Op::Pop:
+        case lift::Op::Cmovcc:
+        case lift::Op::Setcc:
+        case lift::Op::Xadd:
+        case lift::Op::Cmpxchg:
+        case lift::Op::Bts:
+        case lift::Op::Btr:
+        case lift::Op::Btc:
+            break;
+        default:
+            return false;
+    }
+    const lift::Operand& d = in.op0();
+    if (d.kind != lift::OpKind::Reg) return false;
+    if (!lift::isGpr(d.reg)) return false;
+    return lift::regSpec(d.reg).index == lift::regSpec(r).index;
+}
+
+// 这条指令是不是 `cmp <idx>, imm`（策略 A 的锚点）。
+bool isCmpIdxImm(const lift::Insn& in, lift::Reg r, std::uint32_t* imm) {
+    if (in.op != lift::Op::Cmp) return false;
+    if (in.op0().kind != lift::OpKind::Reg || in.op1().kind != lift::OpKind::Imm) return false;
+    if (!lift::isGpr(in.op0().reg) || !lift::isGpr32(r)) return false;
+    if (lift::regSpec(in.op0().reg).index != lift::regSpec(r).index) return false;
+    *imm = static_cast<std::uint32_t>(in.op1().imm);
+    return true;
+}
+
+// 指令级 CFG（**只读**；不进 `blocks`）。切块判据与 `.lst` 的 CFG 同一式：
+//   块首 = 分支目标 / 终结指令之后 / 断链处；块在**终结指令**（不含 `call`，它线性落穿）后结束。
+// 用途只有一个：策略 A 要"从 jmp 所在块往回，最多 4 个块"找 `cmp <idx>, imm` + `ja`。
+struct InsnCfg {
+    struct Block {
+        std::vector<std::uint32_t> eas;
+        std::uint32_t start = 0;
+        std::uint32_t end = 0;
+    };
+    std::vector<Block> blocks;
+    std::map<std::uint32_t, std::size_t> block_of;
+    // 前驱：每项 = (前驱块下标, 是否 fallthrough 边)
+    std::vector<std::vector<std::pair<std::size_t, bool>>> preds;
+};
+
+InsnCfg buildInsnCfg(const std::map<std::uint32_t, lift::Insn>& insns) {
+    InsnCfg out;
+    std::set<std::uint32_t> starts;
+    // 断链：EA 到 EA+length 之间没有指令 ⇒ 后面那个 EA 是块首（数据洞 / 别人块的中间）。
+    if (!insns.empty()) starts.insert(insns.begin()->first);
+    std::map<std::uint32_t, std::vector<std::uint32_t>> ends_at;  // 结束 EA → 指令 EA
+    for (const auto& kv : insns) {
+        const lift::Insn& in = kv.second;
+        ends_at[in.ea + in.length].push_back(in.ea);
+        if (in.op != lift::Op::Call && lift::opIsControl(in.op)) starts.insert(in.ea + in.length);
+        if ((in.op == lift::Op::Jmp || in.op == lift::Op::Jcc) &&
+            in.op0().kind == lift::OpKind::Imm) {
+            starts.insert(lift::aot::genBranchTarget(in));
+        }
+    }
+    for (const auto& kv : insns) {
+        if (starts.count(kv.first) != 0) continue;
+        // 有一条"会落穿到它"的前驱指令吗？（`jmp`/`ret`/... 不落穿）
+        bool has_fall = false;
+        const auto it = ends_at.find(kv.first);
+        if (it != ends_at.end()) {
+            for (const std::uint32_t prev : it->second) {
+                const auto pit = insns.find(prev);
+                if (pit == insns.end()) continue;
+                const lift::Op op = pit->second.op;
+                if (op != lift::Op::Jmp && op != lift::Op::Ret && op != lift::Op::Hlt &&
+                    op != lift::Op::Int3 && op != lift::Op::Int) {
+                    has_fall = true;
+                    break;
+                }
+            }
+        }
+        if (!has_fall) starts.insert(kv.first);
+    }
+    // 建块（块首升序 ⇒ 确定性）
+    for (const std::uint32_t start : starts) {
+        const auto first = insns.find(start);
+        if (first == insns.end()) continue;  // 目标落在没有解码的字节上（表区间 / 数据）
+        InsnCfg::Block b;
+        b.start = start;
+        std::uint32_t cur = start;
+        for (int guard = 0; guard < 1000000; ++guard) {
+            const auto it = insns.find(cur);
+            if (it == insns.end()) break;
+            b.eas.push_back(cur);
+            const lift::Insn& in = it->second;
+            b.end = cur + in.length;
+            if (in.op != lift::Op::Call && lift::opIsControl(in.op)) break;
+            cur = in.ea + in.length;
+            if (starts.count(cur) != 0) break;
+        }
+        if (b.eas.empty()) continue;
+        const std::size_t bi = out.blocks.size();
+        for (const std::uint32_t ea : b.eas) out.block_of.emplace(ea, bi);
+        out.blocks.push_back(std::move(b));
+    }
+    // 前驱（只用静态边：jmp/jcc 的 target、jcc/call 的 fallthrough）
+    out.preds.resize(out.blocks.size());
+    for (std::size_t bi = 0; bi < out.blocks.size(); ++bi) {
+        const InsnCfg::Block& b = out.blocks[bi];
+        if (b.eas.empty()) continue;
+        const lift::Insn& last = insns.at(b.eas.back());
+        auto add = [&](std::uint32_t target, bool fall) {
+            const auto it = out.block_of.find(target);
+            if (it == out.block_of.end() || it->second == bi) return;
+            out.preds[it->second].emplace_back(bi, fall);
+        };
+        if ((last.op == lift::Op::Jmp || last.op == lift::Op::Jcc) &&
+            last.op0().kind == lift::OpKind::Imm) {
+            add(lift::aot::genBranchTarget(last), false);
+        }
+        if (last.op == lift::Op::Jcc || last.op == lift::Op::Call) {
+            add(last.ea + last.length, true);
+        }
+    }
+    return out;
+}
+
+// 策略 A 的逐站点结果（`found == false` 时 `why` 必须能读懂"为什么"）。
+struct StrategyA {
+    bool found = false;
+    std::uint32_t cmp_ea = 0;
+    std::uint32_t ja_ea = 0;
+    std::uint32_t ja_target = 0;
+    std::uint32_t imm = 0;
+    std::uint32_t n = 0;
+    unsigned hops = 0;
+    std::string why;
+};
+
+StrategyA strategyA(const InsnCfg& cfg, const std::map<std::uint32_t, lift::Insn>& insns,
+                     std::uint32_t site, lift::Reg idx) {
+    StrategyA out;
+    const auto site_it = cfg.block_of.find(site);
+    if (site_it == cfg.block_of.end()) {
+        out.why = "站点不在任何基本块里";
+        return out;
+    }
+    std::set<std::size_t> visited;
+    std::size_t cur = site_it->second;
+    for (unsigned hop = 0; hop <= 3; ++hop) {
+        const InsnCfg::Block& b = cfg.blocks[cur];
+        std::size_t hit = b.eas.size();
+        for (std::size_t k = b.eas.size(); k-- > 0;) {
+            const lift::Insn& in = insns.at(b.eas[k]);
+            std::uint32_t imm = 0;
+            if (isCmpIdxImm(in, idx, &imm)) {
+                hit = k;
+                break;
+            }
+            if (writesGpr32(in, idx)) {
+                out.why = std::string("索引寄存器在 cmp 之前被重定义（") + lift::opName(in.op) + "）";
+                out.hops = hop;
+                return out;
+            }
+        }
+        if (hit < b.eas.size()) {
+            const lift::Insn& cmp = insns.at(b.eas[hit]);
+            std::uint32_t imm = 0;
+            isCmpIdxImm(cmp, idx, &imm);
+            // cmp 之后同块内的第一条控制流（`call` 也算：与 `.lst` 的 CFG 同一口径）
+            const lift::Insn* cf = nullptr;
+            for (std::size_t k = hit; k < b.eas.size(); ++k) {
+                const lift::Insn& in = insns.at(b.eas[k]);
+                if (lift::opIsControl(in.op)) {
+                    cf = &in;
+                    break;
+                }
+            }
+            out.cmp_ea = cmp.ea;
+            out.hops = hop;
+            if (cf == nullptr) {
+                out.why = "cmp 之后同块内没有控制流";
+                return out;
+            }
+            out.ja_ea = cf->ea;
+            if (cf->op != lift::Op::Jcc || cf->cc != lift::Cond::A) {
+                out.why = std::string("cmp 之后的第一条控制流不是 ja（是 ") + lift::opName(cf->op) + "）";
+                return out;
+            }
+            if (imm >= 0x100000u) {
+                out.why = "cmp 的立即数大得不像项数";
+                return out;
+            }
+            out.ja_target = lift::aot::genBranchTarget(*cf);
+            out.imm = imm;
+            out.n = imm + 1;
+            out.found = true;
+            return out;
+        }
+        // 本块没有 cmp ⇒ 往回退一个块（与 `.lst` 的分析同一套选前驱规则）
+        const auto& pr = cfg.preds[cur];
+        std::size_t pick = pr.size();
+        for (std::size_t k = 0; k < pr.size(); ++k) {
+            if (pr[k].second && cfg.blocks[pr[k].first].end == b.start) {
+                pick = k;
+                break;
+            }
+        }
+        if (pick == pr.size()) {
+            std::uint32_t best_end = 0;
+            for (std::size_t k = 0; k < pr.size(); ++k) {
+                const std::uint32_t e = cfg.blocks[pr[k].first].end;
+                if (e <= b.start && (pick == pr.size() || e > best_end)) {
+                    best_end = e;
+                    pick = k;
+                }
+            }
+        }
+        if (pick == pr.size() && !pr.empty()) pick = 0;
+        if (pick == pr.size()) {
+            out.why = "回溯 " + std::to_string(hop) + " 个块仍没有定义索引寄存器的 cmp";
+            out.hops = hop;
+            return out;
+        }
+        const std::size_t next = pr[pick].first;
+        if (!visited.insert(next).second) {
+            out.why = "前驱链成环";
+            out.hops = hop;
+            return out;
+        }
+        cur = next;
+    }
+    out.why = "回溯 3 个块仍没有定义索引寄存器的 cmp";
+    out.hops = 3;
+    return out;
+}
+
+// 策略 B：从表地址**逐项向后读**，直到某个 dword 不像代码指针。
+//   像 = ① 落在这个可执行节内 ② 能解码 ③ 不指向表自身 ④ 离表 ≤ 64 KiB。⛔ 不读 `.lst`。
+std::uint32_t strategyB(const lift::PeImage& image,
+                        const std::vector<lift::aot::ExecRange>& exec_ranges,
+                        const lift::Decoder& decoder, const lift::GuestMemory& mem,
+                        std::uint32_t disp) {
+    const lift::aot::ExecRange* const sec = lift::aot::execRangeOf(exec_ranges, disp);
+    if (sec == nullptr) return 0;  // 表地址不在可执行节 ⇒ 不认
+    std::uint32_t n = 0;
+    for (std::uint32_t k = 0; k < 4096; ++k) {
+        const std::uint64_t ea = static_cast<std::uint64_t>(disp) + 4ull * k;
+        if (ea + 4 > sec->end) break;  // 越过节尾
+        std::uint32_t v = 0;
+        if (!peDword(image, static_cast<std::uint32_t>(ea), &v)) break;
+        if (lift::aot::execRangeOf(exec_ranges, v) == nullptr) break;  // ① 值必须在可执行节内
+        if (k > 0 && v >= disp && v < disp + 4u * k) break;            // ③ 自指
+        if (v > disp ? (v - disp > 0x10000u) : (disp - v > 0x10000u)) break;  // ④ ±64 KiB 窗口
+        lift::Insn probe;
+        std::string why;
+        if (!decoder.decode(mem, v, &probe, &why)) break;  // ② 能解码
+        ++n;
+    }
+    return n;
+}
+
+// ★ S1 的唯一落点。`protected_eas` = `closure.txt` 的根 ∪ 本趟 D14 收下的 `call` 目标软根
+//   （判据 ⑤ 的输入）。⛔ 不读 `.lst`、⛔ 不看 `.ll`、⛔ 不为任何 EA 开特例。
+JmpTabRecognition recognizeJumpTables(const std::map<std::uint32_t, lift::Insn>& insns,
+                                      const lift::PeImage& image,
+                                      const std::vector<lift::aot::ExecRange>& exec_ranges,
+                                      const lift::Decoder& decoder, const lift::GuestMemory& mem,
+                                      const std::set<std::uint32_t>& protected_eas) {
+    JmpTabRecognition out;
+    // ---- 站点：解码流里的间接 jmp（`scale == 4` / `base == None` / 有 index）----
+    std::map<std::uint32_t, std::vector<std::uint32_t>> sites_of_table;  // 表地址 → 站点（升序）
+    for (const auto& kv : insns) {
+        const lift::Insn& in = kv.second;
+        if (in.op != lift::Op::Jmp) continue;
+        const lift::Operand& o = in.op0();
+        if (o.kind != lift::OpKind::Mem) continue;
+        if (o.mem.index == lift::Reg::None) continue;
+        if (o.mem.scale != 4) continue;
+        if (o.mem.base != lift::Reg::None) continue;
+        ++out.sites;
+        if (lift::aot::execRangeOf(exec_ranges, o.mem.disp) == nullptr) continue;  // 表必须在可执行节内
+        out.candidates.insert(o.mem.disp);
+        sites_of_table[o.mem.disp].push_back(in.ea);
+    }
+    // ---- 逐张候选表：A 优先、A 失败才 B ----
+    const InsnCfg cfg = buildInsnCfg(insns);
+    for (auto& kv : sites_of_table) {
+        const std::uint32_t ea = kv.first;
+        JmpTab tab;
+        tab.ea = ea;
+        tab.site = kv.second.front();
+        StrategyA a;
+        for (const std::uint32_t site : kv.second) {
+            const lift::Insn& jmp = insns.at(site);
+            const lift::Reg idx = jmp.op0().mem.index;
+            const StrategyA probe = strategyA(cfg, insns, site, idx);
+            if (probe.found) {
+                a = probe;
+                tab.site = site;
+                break;
+            }
+        }
+        if (a.found) {
+            tab.n = a.n;
+            tab.cmp_ea = a.cmp_ea;
+            tab.ja_ea = a.ja_ea;
+            tab.ja_target = a.ja_target;
+            tab.src_b = false;
+        } else {
+            tab.n = strategyB(image, exec_ranges, decoder, mem, ea);
+            tab.src_b = true;
+        }
+        // ---- 交叉验证 ①②③′④ ----
+        const lift::aot::ExecRange* const sec = lift::aot::execRangeOf(exec_ranges, ea);
+        tab.v1 = (sec != nullptr) &&
+                 (static_cast<std::uint64_t>(ea) + 4ull * tab.n <= sec->end);
+        tab.items.reserve(tab.n);
+        for (std::uint32_t k = 0; k < tab.n; ++k) {
+            std::uint32_t v = 0;
+            if (!peDword(image, ea + 4u * k, &v)) {
+                tab.items.push_back(0);
+                continue;
+            }
+            tab.items.push_back(v);
+        }
+        for (const std::uint32_t v : tab.items) {
+            if (lift::aot::execRangeOf(exec_ranges, v) != nullptr) ++tab.items_in_exec;
+            lift::Insn probe;
+            std::string why;
+            if (decoder.decode(mem, v, &probe, &why)) {
+                ++tab.items_decode;
+            } else {
+                ++tab.items_bad;
+            }
+            if (v >= ea && v < ea + 4u * tab.n) ++tab.items_selfref;
+        }
+        tab.v2 = (tab.n != 0 && tab.items_in_exec == tab.n && tab.items_bad == 0);
+        if (tab.src_b) {
+            tab.v3 = true;  // 策略 B 没有 `ja` ⇒ ③′ 不适用（但 `src=B` 必须记账）
+        } else {
+            const bool ja_in_exec = lift::aot::execRangeOf(exec_ranges, tab.ja_target) != nullptr;
+            lift::Insn probe;
+            std::string why;
+            const bool ja_decodes = ja_in_exec && decoder.decode(mem, tab.ja_target, &probe, &why);
+            const bool ja_in_self = tab.ja_target >= ea && tab.ja_target < ea + 4u * tab.n;
+            tab.v3 = ja_in_exec && ja_decodes && !ja_in_self;
+        }
+        tab.v4 = (tab.items_selfref == 0);
+        // ---- ⑤ 安全不变量：区间覆盖了根 / D14 call 目标软根 ⇒ 响亮拒绝 ----
+        if (tab.n != 0) {
+            for (const std::uint32_t p : protected_eas) {
+                if (p >= ea && p < ea + 4u * tab.n) tab.protected_hits.push_back(p);
+            }
+        }
+        tab.covers_protected = !tab.protected_hits.empty();
+        const bool accepted = tab.v1 && tab.v2 && tab.v3 && tab.v4 && !tab.covers_protected;
+        if (accepted) {
+            out.tables.emplace(ea, std::move(tab));
+        } else {
+            JmpTabReject r;
+            r.ea = ea;
+            r.site = tab.site;
+            r.n = tab.n;
+            r.src_b = tab.src_b;
+            if (tab.covers_protected) {
+                ++out.rejected_covers_protected;
+                r.why = "⑤ 区间覆盖了根 / D14 call 目标软根（";
+                for (std::size_t i = 0; i < tab.protected_hits.size() && i < 3; ++i) {
+                    if (i != 0) r.why += ",";
+                    r.why += hexEa(tab.protected_hits[i]);
+                }
+                if (tab.protected_hits.size() > 3) r.why += ",…";
+                r.why += "）";
+            } else if (tab.n == 0) {
+                r.why = "策略 A 失败且策略 B 读到 0 项（不是表）";
+            } else if (!tab.v1) {
+                r.why = "判据 ①：区间越出可执行节";
+            } else if (!tab.v2) {
+                r.why = "判据 ②：表项不在可执行节内 / 解不出（in_exec=" +
+                        std::to_string(tab.items_in_exec) + " decode=" +
+                        std::to_string(tab.items_decode) + " bad=" +
+                        std::to_string(tab.items_bad) + " n=" + std::to_string(tab.n) + "）";
+            } else if (!tab.v3) {
+                r.why = "判据 ③′：ja 目标不在可执行节 / 解不出 / 落在表自身区间内";
+            } else {
+                r.why = "判据 ④：表项自指";
+            }
+            out.rejects.push_back(std::move(r));
+        }
+    }
+    std::sort(out.rejects.begin(), out.rejects.end(),
+              [](const JmpTabReject& a, const JmpTabReject& b) { return a.ea < b.ea; });
+    return out;
+}
+
 // ★ D26 的**候选面**（"先量后收"的那一半）：每个候选**只归一类**，五档相加 = `distinct`。
 //   过滤顺序就是判据的书写顺序（先越界由扫描保证、再入口集、再 shim、再块首、再重叠、再可解码）：
 //     · `in_entries`    已在入口集（含前三类软根 / 提升出来的根）⇒ 不需要收（D14 等已覆盖）；
@@ -353,13 +989,11 @@ public:
     // `exec_ranges` = 可执行节（`call rel32` 目标 / 立即数代码指针的"在不在 `.text`/`poly`"判据）；
     // `shim_begin/end` = shim 桩页（`GuestLayout::shim_page` + `shim_slots * 4`）——桩 EA 由
     // trampoline 派发，⛔ 不是 guest 单元，所以既不收成软根、也不算丢弃。
-    // `soft_call` / `soft_store` / `soft_data` / `soft_jumptab` = 四类软根**各自的账**
-    // （⛔ 不合并：D14 / D15 / D17 / D26 分开报）。
+    // `accounts` = 五类软根**各自的账**（⛔ 不合并：D14 / D15 / D17 / D26 / 表项 分开报）。
     Explorer(const lift::Decoder& decoder, const lift::GuestMemory& mem,
              const std::vector<lift::aot::ExecRange>& exec_ranges, std::uint32_t shim_begin,
              std::uint32_t shim_end, bool close_calls, bool close_stores, bool close_data,
-             bool close_jmptab, SoftStats* soft_call, SoftStats* soft_store, SoftStats* soft_data,
-             SoftStats* soft_jumptab)
+             bool close_jmptab, bool close_jmptab_items, const SoftAccounts& accounts)
         : decoder_(decoder),
           mem_(mem),
           exec_ranges_(exec_ranges),
@@ -369,19 +1003,20 @@ public:
           close_stores_(close_stores),
           close_data_(close_data),
           close_jmptab_(close_jmptab),
-          soft_call_(soft_call),
-          soft_store_(soft_store),
-          soft_data_(soft_data),
-          soft_jumptab_(soft_jumptab) {}
+          close_jmptab_items_(close_jmptab_items),
+          accounts_(accounts) {}
 
-    // 第一阶段：只展开 D14 / D15 两类软根（`call rel32` 目标 / 写内存 mov 的 imm32）到不动点。
+    // 第一阶段：先注入 P2 的跳表项（建块之前成 leader），再只展开 D14 / D15 两类软根
+    // （`call rel32` 目标 / 写内存 mov 的 imm32）到不动点。
     // ★ D17 的第三类候选**故意不在这里**：它的判据要用"已发射块"（见 `seedDataPointerRoots`），
     //   而块是在这一阶段收敛之后才建的 ⇒ 由 `buildUnits` 在两阶段之间调用。
     bool run(const std::set<std::uint32_t>& roots, DropStats* drops, std::string* err,
              std::uint32_t* err_ea) {
         entries_ = roots;
         leaders_ = roots;
+        for (const std::uint32_t ea : roots) noteBoundary(ea, LeaderBoundary::Root);
         std::set<std::uint32_t> pending(roots.begin(), roots.end());
+        seedJumpTableItems(&pending);  // ★ P2：表项在**建块之前**成 leader（BUG-24 的根治点）
         return explore(&pending, roots, drops, err, err_ea);
     }
 
@@ -394,6 +1029,20 @@ public:
             const std::uint32_t leader = *pending.begin();
             pending.erase(pending.begin());
             if (!scanned_.insert(leader).second) continue;
+            // ★ BUG-24 / P1（S2）①：弹出的 leader 落在**被排除的跳表区间**内 ⇒ 不解码、不产块。
+            //   ★ 根例外：⑤ 保证任何被接受表的区间不覆盖根；真发生了也宁可解（覆盖比整齐重要）
+            //     并**响亮记账**，⛔ 不静默丢一个根。
+            if (inDataRange(leader)) {
+                if (roots.count(leader) != 0) {
+                    ++data_range_root_hits_;
+                } else {
+                    ++data_range_leaders_;
+                    table_range_leaders_.insert(leader);
+                    leaders_.erase(leader);
+                    entries_.erase(leader);
+                    continue;
+                }
+            }
             std::uint32_t cur = leader;
             bool reached_end = false;
             for (int guard = 0; guard < 1000000; ++guard) {
@@ -435,10 +1084,20 @@ public:
                     switch (in.op) {
                         case lift::Op::Call: {
                             // 入口 = 每条 call 的下一条 EA（父级裁决 1）
+                            // ★ BUG-24 / P1（S2）③：返回 EA 落在**被排除的跳表区间**内 ⇒ 不入
+                            //   entries/leaders/pending（那是 noreturn 调用紧邻表首的形状，本语料
+                            //   实测 2 条：`0x418DFB→0x418E00` / `0x41B96F→0x41B974`）。
+                            //   判据是"形态 + 区间"两条同时成立 ⇒ 不破坏"每条**会返回**的 call 的
+                            //   返回 EA 是入口"这条不变量（20,491 条 call 里没有一条正常返回落进区间）。
                             const std::uint32_t ret = in.ea + in.length;
-                            entries_.insert(ret);
-                            leaders_.insert(ret);
-                            pending.insert(ret);
+                            if (inDataRange(ret)) {
+                                ++call_ret_in_data_range_;
+                            } else {
+                                entries_.insert(ret);
+                                leaders_.insert(ret);
+                                pending.insert(ret);
+                                noteBoundary(ret, LeaderBoundary::CallRet);
+                            }
                             // ★ D14：`call rel32` 的目标若不在入口集 / 不是 shim 桩 / 在可执行节
                             //   内 ⇒ 收成软根（新的 unit 根）。`call reg/mem` 的目标运行期才知道。
                             if (in.op0().kind == lift::OpKind::Imm)
@@ -450,6 +1109,7 @@ public:
                                 const std::uint32_t target = lift::aot::genBranchTarget(in);
                                 leaders_.insert(target);
                                 pending.insert(target);
+                                noteBoundary(target, LeaderBoundary::Jmp);
                             }
                             break;  // `jmp reg/mem` 的目标运行期才知道，静态无后继
                         case lift::Op::Jcc: {
@@ -457,8 +1117,10 @@ public:
                             const std::uint32_t fall = in.ea + in.length;
                             leaders_.insert(target);
                             pending.insert(target);
+                            noteBoundary(target, LeaderBoundary::Jcc);
                             leaders_.insert(fall);
                             pending.insert(fall);
+                            noteBoundary(fall, LeaderBoundary::Jcc);
                             break;
                         }
                         default:
@@ -469,6 +1131,12 @@ public:
                     break;
                 }
                 cur = in.ea + in.length;
+                // ★ BUG-24 / P1（S2）②：直线扫描撞到**被排除的跳表区间**的边界 ⇒ 停。
+                //   （表后第一字节不是代码：继续线性爬就会把表/数据当指令。）
+                if (inDataRange(cur)) {
+                    reached_end = true;
+                    break;
+                }
                 // 这条直线段的后缀已经被别的 leader 扫过 ⇒ 它的控制流后继也登记过了
                 if (insns_.find(cur) != insns_.end()) {
                     reached_end = true;
@@ -495,8 +1163,27 @@ public:
         if (soft_roots_store_.count(ea) != 0) return SoftKind::StoreImm;
         if (soft_roots_data_.count(ea) != 0) return SoftKind::DataPtr;
         if (soft_roots_jumptab_.count(ea) != 0) return SoftKind::JumpTab;
+        if (soft_roots_item_.count(ea) != 0) return SoftKind::JumpTableItem;
         return SoftKind::None;
     }
+    // ★ BUG-24 / P0：这个 EA **是怎么变成 leader 的**（审计模式的 `boundary=` 字段）。
+    LeaderBoundary boundaryOf(std::uint32_t ea) const {
+        const auto it = boundary_.find(ea);
+        return it == boundary_.end() ? LeaderBoundary::None : it->second;
+    }
+    const std::map<std::uint32_t, LeaderBoundary>& boundaries() const { return boundary_; }
+    // ★ P1（S2）的读数：被"跳表区间"挡下的 leader 数 / 其中根（应为 0，⑤ 的兜底）/ `call` 返回 EA
+    //   被挡下的数 / 被挡下的 leader 集合（报告里逐 EA 点名）。
+    std::uint64_t dataRangeLeaders() const { return data_range_leaders_; }
+    std::uint64_t dataRangeRootHits() const { return data_range_root_hits_; }
+    std::uint64_t callRetInDataRange() const { return call_ret_in_data_range_; }
+    const std::set<std::uint32_t>& tableRangeLeaders() const { return table_range_leaders_; }
+    // ★ P2（S3）的读数：表项种子被接受 / 已是入口 / 越界 / shim / 落在别的表区间。
+    std::uint64_t jumpTableItemSeeds() const { return item_seeds_; }
+    std::uint64_t jumpTableItemAlreadyEntry() const { return item_already_; }
+    std::uint64_t jumpTableItemOutside() const { return item_outside_; }
+    std::uint64_t jumpTableItemShim() const { return item_shim_; }
+    std::uint64_t jumpTableItemInRange() const { return item_in_range_; }
     // D15 的读数（判据的输入面）：解出来的 `mov [mem], imm32` 站点数 / 其中 imm 落在可执行节内的。
     // ⛔ 不是判据：只是让"越界=多少"这个数能读（站点 − 可执行节内 = 数据常量那一类）。
     std::uint64_t storeImmSites() const { return store_imm_sites_; }
@@ -514,6 +1201,18 @@ public:
     std::uint64_t dataPtrInExec() const { return data_ptr_in_exec_; }    // 其中值落在可执行节内的站点数
     std::uint64_t dataPtrDistinct() const { return data_seeds_.size(); } // 不同候选目标数（升序集合）
     std::uint64_t dataPtrSkipped() const { return data_ptr_skipped_; }   // 已在入口集 / 已判过 ⇒ 不收
+
+    // ★ BUG-24 / P1（S2）：把识别出的表区间装进 Explorer。判据本身**只有 `BlockSpans` 一份**
+    //   （升序 spans + prefix_max；`covers` 是闭开区间口径），这里只负责装配 + 排序。
+    void setDataRanges(std::vector<std::pair<std::uint32_t, std::uint32_t>> ranges) {
+        std::sort(ranges.begin(), ranges.end());
+        data_ranges_.spans = std::move(ranges);
+        data_ranges_.finalize();
+    }
+    // ★ BUG-24 / P2（S3）：表项候选（上一趟的识别结果）。
+    //   ⛔ 它们**不走 `offerSoftRoot`**：那里会写 `rejected_targets_`（"判过就永不重判"），
+    //   而那正是 BUG-24 从"一条垃圾块"升级成"永久缺块"的放大器。四档在自己的注入路径里记账。
+    void setJumpTableItems(std::set<std::uint32_t> items) { jmptab_items_ = std::move(items); }
 
     // ★ D17：把第三类候选**收成软根**并塞进工作集。
     //   `emitted` = **当前已建好的块**的字节区间索引（判据输入）。调用点在 `buildUnits`：
@@ -535,7 +1234,7 @@ public:
             }
             if (emitted.inside(ea)) {
                 rejected_targets_.insert(ea);
-                if (soft_data_ != nullptr) soft_data_->overlap.insert(ea);
+                if (accounts_.data != nullptr) accounts_.data->overlap.insert(ea);
                 ++data_ptr_overlap_pre_;
                 continue;
             }
@@ -620,7 +1319,7 @@ public:
             if (emitted.inside(ea)) {
                 // D10 P3 ② 的判据前移（理由见 `measureJumpTableSurface`）：收之前挡下并记账。
                 rejected_targets_.insert(ea);
-                if (soft_jumptab_ != nullptr) soft_jumptab_->overlap.insert(ea);
+                if (accounts_.jumptab != nullptr) accounts_.jumptab->overlap.insert(ea);
                 continue;
             }
             offerSoftRoot(ea, SoftKind::JumpTab, pending);
@@ -641,25 +1340,77 @@ public:
     // 软根被丢弃（解不出 / 与已发射块重叠）⇒ 同时退出 entries：它**没有块**，
     // ⛔ 不许留在派发表 / `all_entries` 里 —— 那会让 trampoline 派发到一个 switch 里没有 label
     //   的函数（落 `bad:` = trap）。它要么是"数据当代码"，要么运行期根本到不了。
+    // ★ BUG-24 / P2：**表项类**（`SoftKind::JumpTableItem`）**不写 `rejected_targets_`**：
+    //   那个集合是"判过就永不重判"（见 `rejected_targets_` 的注释），而表项是否可解码 / 是否被
+    //   别的块盖住是**这一趟**的事实，下一趟由识别结果重新决定。写进去就等于把 BUG-24 的放大器
+    //   复制到 P2 类上（那正是它从"一条垃圾块"升级成"永久缺块"的机制）。
     void rejectSoftRoot(std::uint32_t ea) {
+        const SoftKind kind = softKindOf(ea);
         soft_roots_.erase(ea);
         soft_roots_call_.erase(ea);
         soft_roots_store_.erase(ea);
         soft_roots_data_.erase(ea);
         soft_roots_jumptab_.erase(ea);
+        soft_roots_item_.erase(ea);
         entries_.erase(ea);
         leaders_.erase(ea);
-        rejected_targets_.insert(ea);
+        boundary_.erase(ea);
+        if (kind != SoftKind::JumpTableItem) rejected_targets_.insert(ea);
     }
 
 private:
-    SoftStats* statsOf(SoftKind kind) const {
-        switch (kind) {
-            case SoftKind::Call: return soft_call_;
-            case SoftKind::StoreImm: return soft_store_;
-            case SoftKind::DataPtr: return soft_data_;
-            case SoftKind::JumpTab: return soft_jumptab_;
-            default: return nullptr;
+    SoftStats* statsOf(SoftKind kind) const { return accounts_.of(kind); }
+
+    // P1（S2）的唯一谓词：这个 EA 落在**被排除的跳表区间**内吗？（`covers` 是闭开区间）
+    bool inDataRange(std::uint32_t ea) const {
+        return !data_ranges_.spans.empty() && data_ranges_.covers(ea);
+    }
+    // 记下"这个 EA 是怎么变成 leader 的"（先到先得，但优先级按 `LeaderBoundary` 的枚举顺序）。
+    void noteBoundary(std::uint32_t ea, LeaderBoundary b) {
+        auto it = boundary_.find(ea);
+        if (it == boundary_.end()) {
+            boundary_.emplace(ea, b);
+            return;
+        }
+        if (static_cast<std::uint8_t>(b) < static_cast<std::uint8_t>(it->second)) it->second = b;
+    }
+
+    // ★ BUG-24 / P2（S3）：表项在**建块之前**成 leader/入口。
+    //   ⛔ 不走 `offerSoftRoot`（那里写 `rejected_targets_`）；四档各记各的账：
+    //     ① 已是入口（= 根，或同趟里 D14/D15 先收的）⇒ `item_already_`；
+    //     ② shim 桩页 ⇒ `item_shim_`；
+    //     ③ 不在可执行节 ⇒ `item_outside_`；
+    //     ④ 落在**被排除的表区间**内 ⇒ `item_in_range_`（那是数据，不是代码）。
+    //     其余 ⇒ 收成 `SoftKind::JumpTableItem` 软根（同时进 entries/leaders/pending）。
+    //   ★ "解不出" 不在这里判：由 `explore` / `buildBlocksDropping` 在实际解码时记进
+    //     `accounts_.item->undecodable`，且**不写** `rejected_targets_`。
+    void seedJumpTableItems(std::set<std::uint32_t>* pending) {
+        item_seeds_ = jmptab_items_.size();
+        if (!close_jmptab_items_) return;
+        for (const std::uint32_t ea : jmptab_items_) {
+            if (entries_.count(ea) != 0) {
+                ++item_already_;
+                continue;
+            }
+            if (ea >= shim_begin_ && ea < shim_end_) {
+                ++item_shim_;
+                continue;
+            }
+            if (lift::aot::execRangeOf(exec_ranges_, ea) == nullptr) {
+                ++item_outside_;
+                continue;
+            }
+            if (inDataRange(ea)) {
+                ++item_in_range_;
+                continue;
+            }
+            entries_.insert(ea);
+            leaders_.insert(ea);
+            pending->insert(ea);
+            soft_roots_.insert(ea);
+            soft_roots_item_.insert(ea);
+            if (accounts_.item != nullptr) accounts_.item->added.insert(ea);
+            noteBoundary(ea, LeaderBoundary::JumpTabItem);
         }
     }
 
@@ -684,10 +1435,12 @@ private:
         offerSoftRoot(value, SoftKind::StoreImm, pending);
     }
 
-    // ★ D14 / D15 / D17 的**唯一**收/丢判据：一个软根候选（`call rel32` 目标 / 写内存 mov 的 imm32 /
-    //   `.data` 静态代码指针）怎么处理（收到入口集 / 跳过 / 丢弃）只在这里写一次。`kind` 决定记到
-    //   哪一类的账上。★ 三类的开关**各自独立**（`--no-close-calls` / `--no-close-stores` /
-    //   `--close-data`·`--no-close-data`），⛔ 不要合成一个"总开关"。
+    // ★ D14 / D15 / D17 / D26 的**唯一**收/丢判据：一个软根候选（`call rel32` 目标 / 写内存 mov 的
+    //   imm32 / `.data` 静态代码指针 / 可执行节 dword）怎么处理（收到入口集 / 跳过 / 丢弃）只在这里
+    //   写一次。`kind` 决定记到哪一类的账上。★ 四类的开关**各自独立**（`--no-close-calls` /
+    //   `--no-close-stores` / `--close-data`·`--no-close-data` / `--close-jmptab`），⛔ 不合成一个总开关。
+    //   ★ P2 的 `SoftKind::JumpTableItem` **故意不走这里**（它有自己的 `seedJumpTableItems`：
+    //     这里会写 `rejected_targets_`，而表项不许写）。
     void offerSoftRoot(std::uint32_t target, SoftKind kind, std::set<std::uint32_t>* pending) {
         switch (kind) {
             case SoftKind::Call: if (!close_calls_) return; break;
@@ -699,6 +1452,13 @@ private:
         if (rejected_targets_.count(target) != 0) return;  // 已经判过（⛔ 不重复收/计数）
         if (entries_.count(target) != 0) return;           // ① 已在当前入口集（含另一类已收的软根）
         SoftStats* const stats = statsOf(kind);
+        // ★ BUG-24 / P1（S2）：目标落在**被排除的跳表区间**内 ⇒ 单独一档、跳过。
+        //   ⛔ 不写 `rejected_targets_`：区间是"这一趟的识别结果"，下一趟可能不一样；
+        //   写成"判过就永不重判"会把 BUG-24 的放大器复制过来。
+        if (inDataRange(target)) {
+            if (stats != nullptr) stats->table_range.insert(target);
+            return;
+        }
         if (target >= shim_begin_ && target < shim_end_) {  // shim 桩 EA：由 trampoline 派发
             rejected_targets_.insert(target);
             if (stats != nullptr) stats->shim_targets.insert(target);
@@ -715,12 +1475,19 @@ private:
             case SoftKind::StoreImm: soft_roots_store_.insert(target); break;
             case SoftKind::DataPtr: soft_roots_data_.insert(target); break;
             case SoftKind::JumpTab: soft_roots_jumptab_.insert(target); break;
+            case SoftKind::JumpTableItem: soft_roots_item_.insert(target); break;
             default: break;
         }
         entries_.insert(target);
         leaders_.insert(target);
         pending->insert(target);
         if (stats != nullptr) stats->added.insert(target);
+        switch (kind) {
+            case SoftKind::Call: noteBoundary(target, LeaderBoundary::Call); break;
+            case SoftKind::StoreImm: noteBoundary(target, LeaderBoundary::StoreImm); break;
+            case SoftKind::DataPtr: noteBoundary(target, LeaderBoundary::DataPtr); break;
+            default: break;
+        }
     }
 
     const lift::Insn* get(std::uint32_t ea, std::string* err, std::uint32_t* err_ea) {
@@ -745,18 +1512,29 @@ private:
     bool close_stores_ = true;
     bool close_data_ = kCloseDataByDefault;
     bool close_jmptab_ = kCloseJmptabByDefault;
-    SoftStats* soft_call_ = nullptr;   // D14 类（call 目标）的账
-    SoftStats* soft_store_ = nullptr;  // D15 类（写内存 mov 的 imm32）的账
-    SoftStats* soft_data_ = nullptr;   // D17 类（`.data` 静态代码指针）的账
-    SoftStats* soft_jumptab_ = nullptr;  // D26 类（可执行节跳表 dword → 尚未解码的代码）的账
+    bool close_jmptab_items_ = true;   // ★ P2（S3）：表项在建块之前成 leader
+    SoftAccounts accounts_;            // 五类软根的账（D14 / D15 / D17 / D26 / 表项）
     std::map<std::uint32_t, lift::Insn> insns_;
     std::set<std::uint32_t> leaders_;
     std::set<std::uint32_t> entries_;
-    std::set<std::uint32_t> soft_roots_;        // 四类软根的**并集**（closure.txt 之外的 unit 根）
+    std::set<std::uint32_t> soft_roots_;        // 五类软根的**并集**（closure.txt 之外的 unit 根）
     std::set<std::uint32_t> soft_roots_call_;   // 其中由 D14（call rel32 目标）收的
     std::set<std::uint32_t> soft_roots_store_;  // 其中由 D15（写内存 mov 的 imm32）收的
     std::set<std::uint32_t> soft_roots_data_;   // 其中由 D17（`.data` 静态代码指针）收的
     std::set<std::uint32_t> soft_roots_jumptab_;  // 其中由 D26（可执行节跳表 dword）收的
+    std::set<std::uint32_t> soft_roots_item_;   // 其中由 P2（识别出的跳表项）收的
+    std::set<std::uint32_t> jmptab_items_;       // P2 候选（上一趟识别出的表项，去重升序）
+    BlockSpans data_ranges_;                     // ★ P1：被排除的跳表区间（升序 + prefix_max）
+    std::map<std::uint32_t, LeaderBoundary> boundary_;  // ★ P0：leader 的来源（审计的 boundary=）
+    std::uint64_t data_range_leaders_ = 0;       // P1 读数：被区间挡下的 leader 数
+    std::uint64_t data_range_root_hits_ = 0;     // P1 读数：其中是根（应为 0；⑤ 的兜底）
+    std::uint64_t call_ret_in_data_range_ = 0;   // P1 读数：`call` 返回 EA 落在区间 ⇒ 不进入口集
+    std::set<std::uint32_t> table_range_leaders_;  // P1 读数：被挡下的 leader 集合（报告里点名）
+    std::uint64_t item_seeds_ = 0;               // P2 读数：表项候选数（去重）
+    std::uint64_t item_already_ = 0;             // P2 读数：已是入口（根 / 先到的软根）
+    std::uint64_t item_shim_ = 0;                // P2 读数：shim 桩页
+    std::uint64_t item_outside_ = 0;             // P2 读数：不在可执行节
+    std::uint64_t item_in_range_ = 0;            // P2 读数：落在被排除的表区间内
     std::set<std::uint32_t> rejected_targets_;  // 已判过（越界 / shim / 解不出）：⛔ 不重复收/计数
     std::uint64_t store_imm_sites_ = 0;         // D15 读数：`mov [mem], imm32` 站点数
     std::uint64_t store_imm_in_exec_ = 0;       // 其中 imm 落在可执行节内的
@@ -816,23 +1594,13 @@ bool buildBlocks(const std::map<std::uint32_t, lift::Insn>& insns,
     return true;
 }
 
-// 四类软根的账**选一份**（按 `kind`）。⛔ 不要把四类的丢弃合成一个数。
-SoftStats* softStatsOf(SoftKind kind, SoftStats* soft_call, SoftStats* soft_store,
-                       SoftStats* soft_data, SoftStats* soft_jumptab) {
-    switch (kind) {
-        case SoftKind::Call: return soft_call;
-        case SoftKind::StoreImm: return soft_store;
-        case SoftKind::DataPtr: return soft_data;
-        case SoftKind::JumpTab: return soft_jumptab;
-        default: return nullptr;
-    }
-}
+// 五类软根的账**选一份**（按 `kind`）。⛔ 不要把五类的丢弃合成一个数。
+//（唯一实现在 `SoftAccounts::of`；这一段只是把它按值传下去，⛔ 不写第二份 switch。）
 
-// 建块，并按 D10 P3 ① / D14 / D15 / D17 / D26 丢弃"派生 leader 或软根的字节流里有一段解不出"的块（根 ⇒ 硬红）。
-// ★ 软根的账**按类**记（`explorer->softKindOf`）：call / store-imm / data-ptr / jmptab 四类的"解不出"分开计数。
+// 建块，并按 D10 P3 ① / D14 / D15 / D17 / D26 / P2 丢弃"派生 leader 或软根的字节流里有一段解不出"的块（根 ⇒ 硬红）。
+// ★ 软根的账**按类**记（`explorer->softKindOf`）：call / store-imm / data-ptr / jmptab / 表项 五类的"解不出"分开计数。
 bool buildBlocksDropping(Explorer* explorer, std::set<std::uint32_t>* leaders,
-                         const std::set<std::uint32_t>& roots, SoftStats* soft_call,
-                         SoftStats* soft_store, SoftStats* soft_data, SoftStats* soft_jumptab,
+                         const std::set<std::uint32_t>& roots, const SoftAccounts& accounts,
                          std::map<std::uint32_t, GenBlock>* blocks, DropStats* drops,
                          std::string* err, std::uint32_t* err_ea) {
     for (;;) {
@@ -846,11 +1614,11 @@ bool buildBlocksDropping(Explorer* explorer, std::set<std::uint32_t>* leaders,
             return false;  // 根 ⇒ 硬红
         }
         if (explorer->isSoftRoot(bad)) {
-            // ★ D14 / D15 / D17 / D26：软根解不出 ⇒ 丢弃 + 计数（⛔ 不硬红），记到**自己那一类**的账上。
+            // ★ D14 / D15 / D17 / D26 / P2：软根解不出 ⇒ 丢弃 + 计数（⛔ 不硬红），记到**自己那一类**的账上。
             const SoftKind kind = explorer->softKindOf(bad);
             explorer->rejectSoftRoot(bad);
             drops->dropped.insert(bad);
-            SoftStats* const st = softStatsOf(kind, soft_call, soft_store, soft_data, soft_jumptab);
+            SoftStats* const st = accounts.of(kind);
             if (st != nullptr) st->undecodable.insert(bad);
         } else if (!drops->add_undecodable(bad)) {
             if (err != nullptr) *err = why + "（同一个派生 leader 反复失败）";
@@ -861,13 +1629,13 @@ bool buildBlocksDropping(Explorer* explorer, std::set<std::uint32_t>* leaders,
     }
 }
 
-// D10 P3 ②：派生 leader（以及四类软根）落在**已发射块的字节区间内** ⇒ 丢弃（根永不丢；
+// D10 P3 ②：派生 leader（以及五类软根）落在**已发射块的字节区间内** ⇒ 丢弃（根永不丢；
 // 返回 true = 有新的丢弃）。★ 软根的重叠与"解不出"**分开计数**，且**按类分开**（要求：不要混成一个数）。
 // ★ 用"按起点排序 + 前缀最大 end"判定，允许块**任意重叠/嵌套**（T1a §4.3：块互不重叠并不成立）。
 bool dropLeadersInsideBlocks(const std::map<std::uint32_t, GenBlock>& blocks,
                              const std::set<std::uint32_t>& roots, Explorer* explorer,
-                             std::set<std::uint32_t>* leaders, DropStats* drops, SoftStats* soft_call,
-                             SoftStats* soft_store, SoftStats* soft_data, SoftStats* soft_jumptab) {
+                             std::set<std::uint32_t>* leaders, DropStats* drops,
+                             const SoftAccounts& accounts) {
     // ★ 判据只有一份：`buildBlockSpans` + `BlockSpans::inside`（与 D17 的"收之前"那条共用）。
     const BlockSpans spans = buildBlockSpans(blocks);
     std::vector<std::uint32_t> junk;
@@ -878,9 +1646,9 @@ bool dropLeadersInsideBlocks(const std::map<std::uint32_t, GenBlock>& blocks,
     bool changed = false;
     for (const std::uint32_t ea : junk) {
         if (explorer->isSoftRoot(ea)) {
-            // ★ D14 / D15 / D17 / D26：软根与已发射块重叠 ⇒ 丢弃（与"解不出"分开计数，且**按类**分开）
+            // ★ D14 / D15 / D17 / D26 / P2：软根与已发射块重叠 ⇒ 丢弃（与"解不出"分开计数，且**按类**分开）
             const SoftKind kind = explorer->softKindOf(ea);
-            SoftStats* const st = softStatsOf(kind, soft_call, soft_store, soft_data, soft_jumptab);
+            SoftStats* const st = accounts.of(kind);
             if (st != nullptr && st->overlap.insert(ea).second) changed = true;
             explorer->rejectSoftRoot(ea);
             drops->dropped.insert(ea);
@@ -893,22 +1661,19 @@ bool dropLeadersInsideBlocks(const std::map<std::uint32_t, GenBlock>& blocks,
 }
 
 // ①+② 的唯一入口：leader 发现（含 D14 静态调用闭包 + D15 代码指针立即数 + D17 `.data` 静态代码指针
-// + D26 可执行节跳表 dword）+ 建块 + 派生/软根丢弃（主路径与 `--check` **共用同一份判据**，
-// ⛔ 不许两处各写一套展开 / 丢弃规则 —— 那样 `--check` 的绿就不再说明主路径的绿）。
-bool buildUnits(const std::set<std::uint32_t>& roots, Explorer* explorer, SoftStats* soft_call,
-                SoftStats* soft_store, SoftStats* soft_data, SoftStats* soft_jumptab,
+// + D26 可执行节跳表 dword + P2 识别出的跳表项）+ 建块 + 派生/软根丢弃（主路径 / `--check` /
+// `--jmptab-audit` **共用同一份判据**，⛔ 不许几处各写一套展开 / 丢弃规则 —— 那样一处的绿就不再
+// 说明另一处的绿）。
+bool buildUnits(const std::set<std::uint32_t>& roots, Explorer* explorer, const SoftAccounts& accounts,
                 std::map<std::uint32_t, GenBlock>* blocks, DropStats* drops, std::string* err,
                 std::uint32_t* err_ea) {
     // 建块 + 派生/软根丢弃到不动点（丢弃是单调的 ⇒ 必然收敛）。
     auto blocksToFixpoint = [&](std::set<std::uint32_t>* leaders) -> bool {
         for (;;) {
-            if (!buildBlocksDropping(explorer, leaders, roots, soft_call, soft_store, soft_data,
-                                     soft_jumptab, blocks, drops, err, err_ea))
+            if (!buildBlocksDropping(explorer, leaders, roots, accounts, blocks, drops, err, err_ea))
                 return false;
             // 丢弃后块边界会变 ⇒ 重建到不动点。
-            if (!dropLeadersInsideBlocks(*blocks, roots, explorer, leaders, drops, soft_call,
-                                         soft_store, soft_data, soft_jumptab))
-                break;
+            if (!dropLeadersInsideBlocks(*blocks, roots, explorer, leaders, drops, accounts)) break;
         }
         return true;
     };
@@ -1186,6 +1951,602 @@ bool addJumpTableEntries(const lift::PeImage& image, const std::map<std::uint32_
 }
 
 // =====================================================================================
+// ★ BUG-24（S1/S2/S3）：**两趟重启**的唯一实现 + 分区 + D21
+//
+// 为什么是两趟（父级裁决 (A)，设计准备 §4）：S1 的识别单元是"**一条已解码的**间接 jmp"，而
+// P2 要求表项"在阶段①**之前**"就进 leader —— 阶段①之前什么都还没解码。解开这个循环的唯一办法
+// 是把 S1 的定位改成"上一趟的产物"：
+//     S1(pass k) 的输入 = pass k-1 的 `Explorer::insns_`；输出（表区间 + 表项）喂给 pass k。
+// ⛔ 不用"字节模式预扫"（`FF 24 SIB disp32`）当站点来源：实测 94 个命中里至少 6 个是假表，
+//    而且它的错误是**哑的**（假表区间会把真代码从解码里排除 ⇒ 静默丢覆盖）。
+//
+// 收敛判据（**硬红**，不是 warning）：
+//   · `tables_pass ⊄ tables_{pass-1}` ⇒ exit 1 并**点名 EA**（识别器或区间错了）；
+//   · `tables_pass == tables_{pass-1}` ⇒ 收敛，break；
+//   · 到 `--jmptab-max-passes` 还没收敛 ⇒ exit 1（生成器内部不一致）。
+//   ⊆ 的比较键 = `(ea, n)`（表长变了也算"不单调"）。
+//
+// ★ 主路径 / `--check` / `--jmptab-audit` **三处共用这一份**（⛔ 不许各写一套 —— 那样一处的绿
+//   就不再说明另一处的绿）。
+// =====================================================================================
+struct PartitionResult {
+    std::vector<GenComponent> components;
+    std::set<std::uint32_t> all_entries;
+    std::set<std::uint32_t> dispatch_entries;  // = all_entries ∪ D21 added（派发表的口径）
+    std::set<std::uint32_t> promoted;
+    std::set<std::uint32_t> unbuildable;
+    JumpTableStats jump_table;
+    std::size_t promo_events = 0;
+};
+
+// 分区（③）+ D21（第四类）：从"已建块 + 入口集"跑到 `dispatch_entries` 定型。
+// 与原 `main` 内联的那一段**逐字同顺序**（块冲突 ⇒ 提升 ⇒ 重跑；D21 在收敛后只加 entries）。
+bool partitionComponents(const std::set<std::uint32_t>& roots, Explorer* explorer,
+                         const std::map<std::uint32_t, GenBlock>& blocks, DropStats* drops,
+                         const lift::PeImage& image, PartitionResult* out, std::string* err) {
+    std::set<std::uint32_t> promoted;
+    // ★ G3：入口 EA 里"**没有块**"的那些（落在别人的块字节里 / 解不出）—— 提升它们只会让分区
+    //   永远收敛不了（G3 首跑实测 `00404046`）⇒ 单独记账、不提升。
+    std::set<std::uint32_t> unbuildable;
+    std::vector<GenComponent> components;
+    std::set<std::uint32_t> all_entries;
+    // ★ D21（第四类）：跳表 dword 指向的已发射块首 —— 只进 switch / 派发表，⛔ 不新增块 / 指令。
+    JumpTableStats jump_table;
+    std::size_t promo_events = 0;
+    for (;;) {
+        const std::set<std::uint32_t>& resume_entries = explorer->entries();
+        std::set<std::uint32_t> root_set = roots;
+        // ★ D14：静态闭包收来的软根也是 **unit 根**（一个软根 = 一个 `.ll` 函数）。
+        root_set.insert(explorer->softRoots().begin(), explorer->softRoots().end());
+        root_set.insert(promoted.begin(), promoted.end());
+        all_entries = resume_entries;
+        all_entries.insert(promoted.begin(), promoted.end());
+
+        std::map<std::uint32_t, std::uint32_t> block_owner;
+        std::map<std::uint32_t, std::uint32_t> entry_owner;
+        std::vector<GenComponent> comps;
+        std::uint32_t conflict = 0;
+
+        for (const std::uint32_t root : root_set) {
+            GenComponent comp;
+            comp.root = root;
+            comp.entries.push_back(root);
+            std::set<std::uint32_t> pending;
+            pending.insert(root);
+            // ★ 块图里有环（`jns` 回自身 / 互跳）。`pending` 会被回边反复插入 ⇒ 必须另记"已展开过"，
+            //   否则这一轮永远不结束（T1a 首次跑就踩到：`0x436D31` 的 jns 目标是它自己）。
+            std::set<std::uint32_t> processed;
+            auto claim = [&](std::uint32_t ea) -> bool {
+                const auto it = block_owner.find(ea);
+                if (it != block_owner.end() && it->second != root) return false;
+                const auto bit = blocks.find(ea);
+                if (bit == blocks.end()) return false;
+                block_owner[ea] = root;
+                comp.blocks[ea] = bit->second;
+                return true;
+            };
+            if (!claim(root)) {
+                conflict = root;
+                break;
+            }
+            while (!pending.empty() && conflict == 0) {
+                const std::uint32_t ea = *pending.begin();
+                pending.erase(pending.begin());
+                if (!processed.insert(ea).second) continue;  // 环上的回边：已经展开过
+                const GenBlock& block = blocks.at(ea);
+                for (const GenEdge& edge : lift::aot::genBlockEdges(block)) {
+                    if (edge.dynamic) continue;
+                    // ★ 目标是被丢弃的派生 leader ⇒ **不建块、不 claim**：生成器把它发成
+                    //   `ret i32 <EA>`（交回 trampoline），运行期由解释器裁决（T2b 的口径：
+                    //   未知 EA ⇒ 交回解释器）。⛔ 不要把它塞进 `all_entries` —— 那会让
+                    //   trampoline 派发到一个 switch 里没有它的函数（落 `bad:` = trap）。
+                    if (drops->dropped.count(edge.ea) != 0) continue;
+                    if (edge.call_ret) {
+                        const std::uint32_t ret = edge.ea;
+                        if (root_set.count(ret) != 0) continue;  // 它自己是另一个分量的根
+                        const auto eo = entry_owner.find(ret);
+                        if (eo == entry_owner.end()) {
+                            entry_owner[ret] = root;
+                            comp.entries.push_back(ret);
+                        } else if (eo->second != root) {
+                            conflict = ret;
+                            break;
+                        }
+                        if (!claim(ret)) {
+                            conflict = ret;
+                            break;
+                        }
+                        pending.insert(ret);
+                    } else {
+                        if (all_entries.count(edge.ea) != 0) continue;  // 目标是入口 EA ⇒ ret
+                        if (!claim(edge.ea)) {
+                            conflict = edge.ea;
+                            break;
+                        }
+                        pending.insert(edge.ea);
+                    }
+                }
+            }
+            if (conflict != 0) break;
+            components.push_back(std::move(comp));
+        }
+
+        if (conflict == 0) {
+            // ★ 哨兵（D15 落地时暴露的一个**既有**漏洞，与 D14/D15 的判据无关）：
+            //   `entries_` 里有、但**没有任何分量声明**的入口 EA。两类的来源都是"复用了别人的
+            //   resume EA"：某条 `call` 的返回 EA 恰好又是一条真 `call` 的目标 —— 而那条返回 EA
+            //   所在的段只经由一个**被拒的软根**才可达（软根重叠 / 解不出），那段的分量不发射，
+            //   于是谁都不 claim 它。后果：`.ll` 里发 `ret i32 <EA>`，而该 EA 不在派发表里
+            //   ⇒ 运行期在**解释器能跑**的地址上响亮停机（不是语义问题，是覆盖缺口）。
+            //   ⇒ 与"块冲突"同一套单调提升：把它提升成 unit 根，整轮重跑。
+            // ★ G3 补的**护栏**（D17 之后的必然缺陷）：提升的前提是"这个 EA **能有自己的块**"。
+            //   第三类软根（`.data` 静态指针）量级上千，会派生出大量假 `call` 的返回 EA，其中一部分
+            //   **落在别人的块字节里**（或根本解不出）⇒ 提升成一个没有块的根 ⇒ `claim(root)` 失败
+            //   ⇒ 同一个 EA 再次冲突 ⇒ **不收敛**（G3 首次跑就撞上：`00404046`）。
+            //   ⇒ 没有块的那些**不提升**：从入口集里退出来 + 记进 `drops.dropped`（语义 = "没有块，
+            //   指向它的边发 `ret i32`"，与其他被丢弃的 leader 完全一致）+ 计数 + 样例（⛔ 不静默）。
+            std::set<std::uint32_t> covered;
+            for (const GenComponent& c : components) covered.insert(c.entries.begin(), c.entries.end());
+            std::vector<std::uint32_t> uncovered;
+            for (const std::uint32_t ea : all_entries) {
+                if (covered.count(ea) == 0 && promoted.count(ea) == 0) uncovered.push_back(ea);
+            }
+            if (uncovered.empty()) {
+                // ★ D21（第四类）：分区收敛、块集定型之后 —— **只加 entries、不加块**。
+                //   判据与理由见 `addJumpTableEntries` 的头注（`.text` 里的跳表 dword 指向已发射
+                //   块首，但那个 EA 不在入口集 ⇒ 运行期经 trampoline 回来查不到）。
+                if (addJumpTableEntries(image, blocks, all_entries, &components, &jump_table)) break;
+                // 有"块首但没有任何分量 claim"的候选（G3 的孤儿形状）⇒ 走**既有**孤儿提升机制：
+                //   提升成新入口 EA + 整轮重跑（`addJumpTableEntries` 此时**没改** components）。
+                std::size_t n_jump_promoted = 0;
+                for (const std::uint32_t ea : jump_table.unclaimed) {
+                    if (promoted.insert(ea).second) {
+                        ++n_jump_promoted;
+                        std::fprintf(stderr,
+                                     "lift-gen: 跳表目标 %08X 是块首但没有任何分量声明"
+                                     "⇒ 提升为新入口 EA 并重跑\n",
+                                     ea);
+                    }
+                }
+                if (n_jump_promoted == 0) {
+                    // 已经在 promoted 里却仍没有分量 claim ⇒ 与"块冲突提升不收敛"同一类内部不一致。
+                    if (err != nullptr) *err = "跳表目标的孤儿提升不收敛";
+                    return false;
+                }
+                ++promo_events;
+                components.clear();
+                continue;
+            }
+            std::size_t n_unbuildable = 0;
+            for (const std::uint32_t ea : uncovered) {
+                if (blocks.count(ea) == 0) {
+                    // 没有块 ⇒ 不可能成为 unit 根（提升只会让分区永远收敛不了）。
+                    unbuildable.insert(ea);
+                    drops->dropped.insert(ea);
+                    explorer->dropEntry(ea);
+                    ++n_unbuildable;
+                    continue;
+                }
+                if (promoted.insert(ea).second) {
+                    std::fprintf(stderr,
+                                 "lift-gen: 入口 %08X 没有任何分量声明（只在被拒绝的软根段之后可达）"
+                                 "⇒ 提升为新入口 EA 并重跑\n",
+                                 ea);
+                }
+            }
+            if (n_unbuildable != 0) {
+                std::fprintf(stderr,
+                             "lift-gen: 入口里有 %zu 个**没有块**（落在已发射块的字节区间内 / 解不出）"
+                             "⇒ 不提升、退出入口集（指向它们的边发 ret i32）\n",
+                             n_unbuildable);
+            }
+            ++promo_events;
+            components.clear();
+            continue;
+        }
+        // ★ 一个块被两个入口函数同时声明 ⇒ **响亮**报错（⛔ 不静默选一个）：
+        //   把它提升成新的入口 EA，然后整轮重跑（提升是单调的 ⇒ 必然收敛）。
+        if (blocks.count(conflict) == 0) {
+            // 冲突的 EA 根本没有块（落在别人的字节里 / 解不出）⇒ 提升它也拿不到块 ⇒ 退出入口集。
+            unbuildable.insert(conflict);
+            drops->dropped.insert(conflict);
+            explorer->dropEntry(conflict);
+            std::fprintf(stderr,
+                         "lift-gen: 块冲突 EA %08X 没有块（落在已发射块字节区间内 / 解不出）"
+                         "⇒ 退出入口集（指向它的边发 ret i32）\n",
+                         conflict);
+            ++promo_events;
+            components.clear();
+            continue;
+        }
+        std::fprintf(stderr, "lift-gen: 块 %08X 被两个入口函数同时声明 ⇒ 提升为新入口 EA 并重跑\n",
+                     conflict);
+        if (!promoted.insert(conflict).second) {
+            if (err != nullptr) *err = "分区提升不收敛（EA " + hexEa(conflict) + " 重复冲突）";
+            return false;
+        }
+        ++promo_events;
+        components.clear();
+    }
+
+    // 收敛后按 root 升序（std::set 已经保证；这里再按 root 排一次以防未来改动）。
+    std::sort(components.begin(), components.end(),
+              [](const GenComponent& a, const GenComponent& b) { return a.root < b.root; });
+
+    out->components = std::move(components);
+    out->all_entries = std::move(all_entries);
+    out->promoted = std::move(promoted);
+    out->unbuildable = std::move(unbuildable);
+    out->jump_table = jump_table;
+    out->promo_events = promo_events;
+    // ★ D21（第四类）：**派发表的入口集** = 原入口集 ∪ 跳表加进来的 EA。
+    //   ⛔ 与传给发射器的 `all_entries` 刻意分开：后者是"边目标算不算入口"的判据 ⇒ 若把跳表目标
+    //   也放进去，原本在同一分量内 `br` 直跳的静态边会平白变成 `ret i32`（多一次派发）。
+    //   两者的关系是机械的：`dispatch_entries.size() == all_entries.size() + jump_table.added.size()`
+    //   （`addJumpTableEntries` 只加不在入口集里的）⇒ 派发表行数 = pin 的 entries 读数。
+    out->dispatch_entries = out->all_entries;
+    out->dispatch_entries.insert(jump_table.added.begin(), jump_table.added.end());
+    return true;
+}
+
+// 一次完整构建的产物（每趟的账都换成**最后一趟**的；⛔ 不要跨趟累加）。
+struct BuildRun {
+    std::map<std::uint32_t, GenBlock> blocks;
+    DropStats drops;
+    SoftStats soft_call;
+    SoftStats soft_store;
+    SoftStats soft_data;
+    SoftStats soft_jumptab;
+    SoftStats soft_item;  // ★ P2：表项
+    JmpTabRecognition jmptab;
+    std::map<std::uint32_t, LeaderBoundary> boundaries;
+    unsigned passes = 0;
+    bool jmptab_on = false;
+    // 最终一趟的读数（Explorer 出循环就销毁 ⇒ 必须在这里抄出来）
+    std::uint64_t store_imm_sites = 0;
+    std::uint64_t store_imm_in_exec = 0;
+    std::uint64_t data_ptr_sites = 0;
+    std::uint64_t data_ptr_in_exec = 0;
+    std::uint64_t data_ptr_distinct = 0;
+    std::uint64_t data_ptr_skipped = 0;
+    std::uint64_t data_ptr_overlap_pre = 0;
+    JumpTabSurface jumptab_surface;
+    std::uint64_t jumptab_rounds = 0;
+    std::uint64_t jumptab_live_roots = 0;
+    // ★ P1（S2）的读数
+    std::uint64_t data_range_leaders = 0;
+    std::uint64_t data_range_root_hits = 0;
+    std::uint64_t call_ret_in_data_range = 0;
+    std::set<std::uint32_t> table_range_leaders;
+    // ★ P2（S3）的读数
+    std::uint64_t item_seeds = 0;
+    std::uint64_t item_already = 0;
+    std::uint64_t item_shim = 0;
+    std::uint64_t item_outside = 0;
+    std::uint64_t item_in_range = 0;
+    PartitionResult part;
+};
+
+// ★ BUG-24：**唯一**的 pass 循环。`err_code` 区分两类失败：4 = 解码/建块失败（输入问题），
+//   1 = 收敛判据红（生成器内部不一致）。
+bool buildAll(const std::set<std::uint32_t>& roots, const lift::PeImage& image,
+              const std::vector<lift::aot::ExecRange>& exec_ranges, const lift::Decoder& decoder,
+              const lift::GuestMemory& mem, const Options& opt, BuildRun* out, std::string* err,
+              std::uint32_t* err_ea, int* err_code) {
+    *err_code = 0;
+    const lift::GuestLayout layout;
+    const std::uint32_t shim_end = layout.shim_page + layout.shim_slots * 4u;
+    // D17 / D26 的候选面是**静态**的（扫一遍 PE 就有）⇒ 每趟重建 Explorer 时复用同一份扫描结果。
+    const DataPtrScan data_scan = scanDataPointers(image, exec_ranges);
+    const JumpTabScan jumptab_scan = scanExecCodeDwords(image, exec_ranges);
+    // ★ 审计模式**总是**跑 S1（它的用途就是"只看识别 / 只读审计"）：两个消费开关都关时，
+    //   `ranges` / `items` 都是空 ⇒ 识别结果不改变任何东西 ⇒ 这就是"只加 P0、没上 P1/P2"的
+    //   改前状态（守卫在那一档必须红）。
+    out->jmptab_on = opt.jmptab_exclude || opt.close_jmptab_items || opt.jmptab_audit;
+
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> ranges;
+    std::set<std::uint32_t> items;
+    std::set<std::pair<std::uint32_t, std::uint32_t>> prev_keys;
+    for (unsigned pass = 1;; ++pass) {
+        out->passes = pass;
+        // 每趟**全新**：块 / 丢弃 / 五类软根的账（⛔ 不要跨趟累加：读数必须只描述最终那一趟）。
+        out->blocks.clear();
+        out->drops = DropStats{};
+        out->soft_call = SoftStats{};
+        out->soft_store = SoftStats{};
+        out->soft_data = SoftStats{};
+        out->soft_jumptab = SoftStats{};
+        out->soft_item = SoftStats{};
+        SoftAccounts accounts;
+        accounts.call = &out->soft_call;
+        accounts.store = &out->soft_store;
+        accounts.data = &out->soft_data;
+        accounts.jumptab = &out->soft_jumptab;
+        accounts.item = &out->soft_item;
+        out->boundaries.clear();
+
+        Explorer explorer(decoder, mem, exec_ranges, layout.shim_page, shim_end, opt.close_calls,
+                          opt.close_stores, opt.close_data, opt.close_jmptab,
+                          opt.close_jmptab_items, accounts);
+        explorer.setDataPointerSeeds(data_scan.targets, data_scan.sites, data_scan.in_exec);
+        explorer.setJumpTableSeeds(jumptab_scan.targets, jumptab_scan.sites, jumptab_scan.in_exec);
+        if (opt.jmptab_exclude) explorer.setDataRanges(ranges);
+        if (opt.close_jmptab_items) explorer.setJumpTableItems(items);
+        if (!buildUnits(roots, &explorer, accounts, &out->blocks, &out->drops, err, err_ea)) {
+            *err_code = 4;
+            return false;
+        }
+        // ---- 读数（最终一趟的；每趟都覆盖，⛔ 不累加）----
+        out->boundaries = explorer.boundaries();
+        out->store_imm_sites = explorer.storeImmSites();
+        out->store_imm_in_exec = explorer.storeImmInExec();
+        out->data_ptr_sites = explorer.dataPtrSites();
+        out->data_ptr_in_exec = explorer.dataPtrInExec();
+        out->data_ptr_distinct = explorer.dataPtrDistinct();
+        out->data_ptr_skipped = explorer.dataPtrSkipped();
+        out->data_ptr_overlap_pre = explorer.dataPtrOverlapPre();
+        out->jumptab_surface = explorer.jumpTabSurface();
+        out->jumptab_rounds = explorer.jumpTabRounds();
+        out->jumptab_live_roots = explorer.liveJumpTabRoots();
+        out->data_range_leaders = explorer.dataRangeLeaders();
+        out->data_range_root_hits = explorer.dataRangeRootHits();
+        out->call_ret_in_data_range = explorer.callRetInDataRange();
+        out->table_range_leaders = explorer.tableRangeLeaders();
+        out->item_seeds = explorer.jumpTableItemSeeds();
+        out->item_already = explorer.jumpTableItemAlreadyEntry();
+        out->item_shim = explorer.jumpTableItemShim();
+        out->item_outside = explorer.jumpTableItemOutside();
+        out->item_in_range = explorer.jumpTableItemInRange();
+
+        bool converged = true;
+        if (out->jmptab_on) {
+            // ---- S1：在**这一趟的解码流**上识别（⑤ 的保护集 = 根 ∪ 本趟 D14 收下的 call 目标）----
+            std::set<std::uint32_t> protected_eas = roots;
+            protected_eas.insert(out->soft_call.added.begin(), out->soft_call.added.end());
+            out->jmptab = recognizeJumpTables(explorer.insns(), image, exec_ranges, decoder, mem,
+                                              protected_eas);
+            // ---- 收敛判据（硬红）----
+            std::set<std::pair<std::uint32_t, std::uint32_t>> keys;
+            for (const auto& kv : out->jmptab.tables) keys.emplace(kv.first, kv.second.n);
+            if (pass == 1 && keys.empty()) {
+                // 一张都没认出来 ⇒ 区间 / 表项都是空，下一趟必然同结果（等价于不动点）。
+                converged = true;
+            } else if (pass >= 2) {
+                if (!std::includes(prev_keys.begin(), prev_keys.end(), keys.begin(), keys.end())) {
+                    std::string bad;
+                    for (const auto& k : keys) {
+                        if (prev_keys.count(k) == 0) {
+                            if (!bad.empty()) bad += " ";
+                            bad += hexEa(k.first) + "(n=" + std::to_string(k.second) + ")";
+                        }
+                    }
+                    if (err != nullptr)
+                        *err = "跳表识别面非单调（tables_pass ⊄ tables_{pass-1}）：新增/变长 " + bad +
+                               " ⇒ 识别器或表区间错了";
+                    *err_code = 1;
+                    if (err_ea != nullptr && !keys.empty()) *err_ea = keys.begin()->first;
+                    return false;
+                }
+                converged = (keys == prev_keys);  // 不动点
+            } else {
+                converged = false;
+            }
+            if (!converged) {
+                if (pass >= opt.jmptab_max_passes) {
+                    if (err != nullptr)
+                        *err = "跳表识别的两趟重启在 " + std::to_string(opt.jmptab_max_passes) +
+                               " 趟内没有收敛 ⇒ 生成器内部不一致";
+                    *err_code = 1;
+                    return false;
+                }
+                prev_keys = keys;
+                ranges = out->jmptab.ranges();
+                items = out->jmptab.items();
+                continue;
+            }
+        }
+        // ---- ③ 分区 + D21：用**这一趟的** Explorer（`dropEntry` 要落在同一份状态上）----
+        if (!partitionComponents(roots, &explorer, out->blocks, &out->drops, image, &out->part, err)) {
+            *err_code = 1;
+            return false;
+        }
+        return true;
+    }
+}
+
+// =====================================================================================
+// ★ BUG-24 / P0：`--jmptab-audit`（**只读**：不发射 IR、不写 `.ll` / 派发表 / pin）
+//
+// 逐张表一行 `[jmptab]`（字段与 design-prep §5.1 同一列）+ 一行 `[jmptab/summary]`；
+// 被拒的候选 / 解码失败的表项 / 不过的性质都**响亮**打到 stderr（失败必须能只靠日志定位到 EA）。
+//
+// 退出码 = P-1..P-4 的合取（**全过 0 / 任一不过 1**；CTest 直接拿它当判据）：
+//   P-1（结构）`[ea, ea+4n)` ⊆ **同一个可执行节**；
+//   P-2（结构）`[ea, ea+4n)` 内**不存在任何已发射块的首 EA**（闭区间 ⇒ 表首本身也不许是块首）；
+//   P-3（覆盖）每个表项 v：若 `in_exec(v) ∧ decodes(v)` ⇒ `v ∈ dispatch`；
+//   P-4（识别）`items_selfref == 0` ∧ `in_section == 1`。
+//   ★ P-3 必须**收窄**：`decode()` 失败的项不进判据（否则守卫会被 0.2% 量级的不可解码项吊死），
+//     但必须**响亮列出**（`[jmptab/bad-item]`）—— ⛔ 不许静默跳过。
+// =====================================================================================
+const char* boundaryName(LeaderBoundary b) {
+    switch (b) {
+        case LeaderBoundary::Root: return "root";
+        case LeaderBoundary::CallRet: return "call-ret";
+        case LeaderBoundary::Call: return "call";
+        case LeaderBoundary::Jcc: return "jcc";
+        case LeaderBoundary::Jmp: return "jmp";
+        case LeaderBoundary::DataPtr: return "data-ptr";
+        case LeaderBoundary::StoreImm: return "store-imm";
+        case LeaderBoundary::JumpTabItem: return "jumptab-item";
+        default: return "none";
+    }
+}
+
+int auditJumpTables(const BuildRun& run, const lift::PeImage& image,
+                    const std::vector<lift::aot::ExecRange>& exec_ranges,
+                    const lift::Decoder& decoder, const lift::GuestMemory& mem,
+                    const std::set<std::uint32_t>& roots) {
+    (void)image;
+    const BlockSpans emitted = buildBlockSpans(run.blocks);
+    std::set<std::uint32_t> block_starts;
+    for (const auto& kv : run.blocks) block_starts.insert(kv.first);
+
+    std::uint64_t p1_bad = 0, p2_bad = 0, p3_bad = 0, p4_bad = 0;
+    std::uint64_t item_rows = 0, item_distinct = 0, items_in_exec = 0, items_decode = 0;
+    std::uint64_t items_bad = 0, items_selfref = 0, items_nondispatch = 0, items_overlap = 0;
+    std::uint64_t block_starts_in_range_total = 0;
+    std::uint64_t src_a = 0, src_b = 0;
+    std::set<std::uint32_t> distinct_items;
+    // ★ ② 的响亮化先跑一遍：在可执行节内、但 `decode()` 失败的表项（`items_undet` 的 C++ 口径）。
+    for (const auto& kv : run.jmptab.tables) {
+        const JmpTab& t = kv.second;
+        for (const std::uint32_t v : t.items) {
+            if (lift::aot::execRangeOf(exec_ranges, v) == nullptr) continue;
+            lift::Insn probe;
+            std::string why;
+            if (decoder.decode(mem, v, &probe, &why)) continue;
+            std::fprintf(stderr, "[jmptab/bad-item] ea=0x%08X item=0x%08X why=%s\n", t.ea, v,
+                         why.c_str());
+        }
+    }
+    for (const auto& kv : run.jmptab.tables) {
+        const JmpTab& t = kv.second;
+        ++(t.src_b ? src_b : src_a);
+        std::size_t bsir = 0;
+        for (auto it = block_starts.lower_bound(t.ea);
+             it != block_starts.end() && *it < t.range_end(); ++it) {
+            ++bsir;
+        }
+        std::size_t overlap = 0, nondispatch = 0, missing = 0;
+        std::vector<std::uint32_t> missing_sample;
+        for (const std::uint32_t v : t.items) {
+            ++item_rows;
+            distinct_items.insert(v);
+            if (lift::aot::execRangeOf(exec_ranges, v) != nullptr) ++items_in_exec;
+            if (emitted.inside(v)) ++overlap;
+            if (run.part.dispatch_entries.count(v) == 0) {
+                ++nondispatch;
+                // P-3 的判据面：只对"在可执行节内 ∧ 能解码"的项要求可派发。
+                lift::Insn probe;
+                std::string why;
+                if (lift::aot::execRangeOf(exec_ranges, v) != nullptr &&
+                    decoder.decode(mem, v, &probe, &why)) {
+                    ++missing;
+                    if (missing_sample.size() < 3) missing_sample.push_back(v);
+                }
+            }
+        }
+        items_decode += t.items_decode;
+        items_bad += t.items_bad;
+        items_selfref += t.items_selfref;
+        items_nondispatch += nondispatch;
+        items_overlap += overlap;
+        block_starts_in_range_total += bsir;
+
+        const bool p1 = t.v1;
+        const bool p2 = (bsir == 0);
+        const bool p3 = (missing == 0);
+        const bool p4 = (t.items_selfref == 0 && t.v1);
+        if (!p1) ++p1_bad;
+        if (!p2) ++p2_bad;
+        if (!p3) ++p3_bad;
+        if (!p4) ++p4_bad;
+
+        // ---- 逐张表一行（§5.1 的字段）----
+        const auto bit = run.boundaries.find(t.ea);
+        const std::string cmp_str = t.src_b ? "-" : hexEa(t.cmp_ea);
+        const std::string ja_str = t.src_b ? "-" : hexEa(t.ja_ea);
+        std::printf("[jmptab] ea=0x%08X n=%u src=%s cmp=%s ja=%s site=0x%08X "
+                    "range=[0x%08X,0x%08X) in_section=%d items=%zu items_in_exec=%u "
+                    "items_decode=%u items_undet=%u items_overlap=%zu items_nondispatch=%zu "
+                    "items_selfref=%u block_starts_in_range=%zu v1=%d v2=%d v3=%d v4=%d "
+                    "boundary=%s\n",
+                    t.ea, t.n, t.src_b ? "B" : "A", cmp_str.c_str(), ja_str.c_str(), t.site, t.ea,
+                    t.range_end(), t.v1 ? 1 : 0, t.items.size(), t.items_in_exec, t.items_decode,
+                    t.items_bad, overlap, nondispatch, t.items_selfref, bsir, t.v1 ? 1 : 0,
+                    t.v2 ? 1 : 0, t.v3 ? 1 : 0, t.v4 ? 1 : 0,
+                    boundaryName(bit == run.boundaries.end() ? LeaderBoundary::None : bit->second));
+        // ---- 不过的性质逐条打到 stderr（必须能只靠日志定位到 EA）----
+        if (!p1) {
+            std::fprintf(stderr, "[jmptab/P-1] ea=0x%08X range=[0x%08X,0x%08X) 越出可执行节\n", t.ea,
+                         t.ea, t.range_end());
+        }
+        if (!p2) {
+            for (auto it = block_starts.lower_bound(t.ea);
+                 it != block_starts.end() && *it < t.range_end(); ++it) {
+                const auto bnd = run.boundaries.find(*it);
+                std::fprintf(stderr,
+                             "[jmptab/P-2] ea=0x%08X 表区间 [0x%08X,0x%08X) 内有块首 0x%08X "
+                             "boundary=%s\n",
+                             t.ea, t.ea, t.range_end(), *it,
+                             boundaryName(bnd == run.boundaries.end() ? LeaderBoundary::None
+                                                                     : bnd->second));
+            }
+        }
+        if (!p3) {
+            std::fprintf(stderr, "[jmptab/P-3] ea=0x%08X 有 %zu 个表项在可执行节内且能解码却不可派发：",
+                         t.ea, missing);
+            for (const std::uint32_t v : missing_sample) std::fprintf(stderr, " 0x%08X", v);
+            std::fprintf(stderr, "%s\n", missing > missing_sample.size() ? " …" : "");
+        }
+        if (!p4) {
+            std::fprintf(stderr, "[jmptab/P-4] ea=0x%08X items_selfref=%u in_section=%d\n", t.ea,
+                         t.items_selfref, t.v1 ? 1 : 0);
+        }
+    }
+    item_distinct = distinct_items.size();
+    // ---- 被拒的候选（响亮；`[jmptab/reject]` 每张一行）----
+    for (const JmpTabReject& r : run.jmptab.rejects) {
+        std::fprintf(stderr, "[jmptab/reject] ea=0x%08X site=0x%08X n=%u src=%s why=%s\n", r.ea,
+                     r.site, r.n, r.src_b ? "B" : "A", r.why.c_str());
+    }
+    // ---- 汇总（靠它做对账；⚠ 这些数是**读数**，⛔ 不是断言值）----
+    std::printf(
+        "[jmptab/summary] candidates=%zu tables=%zu rejected=%zu covers_protected=%llu srcA=%llu "
+        "srcB=%llu items=%llu distinct=%llu items_in_exec=%llu items_decode=%llu items_undet=%llu "
+        "items_selfref=%llu items_nondispatch=%llu items_overlap=%llu "
+        "block_starts_in_range=%llu passes=%u jmptab_on=%d roots=%zu\n",
+        run.jmptab.candidates.size(), run.jmptab.tables.size(), run.jmptab.rejects.size(),
+        static_cast<unsigned long long>(run.jmptab.rejected_covers_protected),
+        static_cast<unsigned long long>(src_a), static_cast<unsigned long long>(src_b),
+        static_cast<unsigned long long>(item_rows), static_cast<unsigned long long>(item_distinct),
+        static_cast<unsigned long long>(items_in_exec),
+        static_cast<unsigned long long>(items_decode), static_cast<unsigned long long>(items_bad),
+        static_cast<unsigned long long>(items_selfref),
+        static_cast<unsigned long long>(items_nondispatch),
+        static_cast<unsigned long long>(items_overlap),
+        static_cast<unsigned long long>(block_starts_in_range_total), run.passes,
+        run.jmptab_on ? 1 : 0, roots.size());
+    // ---- P1 / P2 的读数（与"改前/改后"的对照直接相关）----
+    std::printf(
+        "[jmptab/exclude] leaders_in_range=%llu（被区间挡下的 leader）· root_hits=%llu（应为 0）· "
+        "call_ret_in_range=%llu（noreturn call 紧邻表首的形状）\n",
+        static_cast<unsigned long long>(run.data_range_leaders),
+        static_cast<unsigned long long>(run.data_range_root_hits),
+        static_cast<unsigned long long>(run.call_ret_in_data_range));
+    std::printf(
+        "[jmptab/items] seeds=%llu added=%zu already=%llu shim=%llu outside=%llu in_range=%llu · "
+        "undecodable=%zu overlap=%zu\n",
+        static_cast<unsigned long long>(run.item_seeds), run.soft_item.added.size(),
+        static_cast<unsigned long long>(run.item_already),
+        static_cast<unsigned long long>(run.item_shim),
+        static_cast<unsigned long long>(run.item_outside),
+        static_cast<unsigned long long>(run.item_in_range), run.soft_item.undecodable.size(),
+        run.soft_item.overlap.size());
+    // ---- 守卫判据（P-1..P-4）----
+    const bool ok = (p1_bad == 0 && p2_bad == 0 && p3_bad == 0 && p4_bad == 0);
+    std::printf(
+        "[jmptab/guard] P-1 区间在可执行节内=%llu 红 · P-2 区间内无块首=%llu 红 · "
+        "P-3 表项可派发=%llu 红 · P-4 识别自洽=%llu 红 => %s\n",
+        static_cast<unsigned long long>(p1_bad), static_cast<unsigned long long>(p2_bad),
+        static_cast<unsigned long long>(p3_bad), static_cast<unsigned long long>(p4_bad),
+        ok ? "PASS" : "FAIL");
+    std::fflush(stdout);
+    return ok ? 0 : 1;
+}
+
+
+// =====================================================================================
 // ⑤ `--check <closure.txt>`：入库件的**红判据**（供 CI 与手工复核；不发射 IR）
 // ★ 判据（父级 D5 / T1 §4 候选 A）：
 //   1. 格式：非空行必须是 `0x` + **恰好 8 位**十六进制（`#` 起注释；⛔ 不认 6 位 / 无前缀）；
@@ -1196,46 +2557,105 @@ bool addJumpTableEntries(const lift::PeImage& image, const std::map<std::uint32_
 // ★ 汇总**一行**：根数 / 覆盖块数 / 越界根 / 不可解码根 —— 前两项是读数，后两项是红判据的量化。
 // ★ 退出码：0 = 全绿；2 = 任一判据红（与"参数/输入错"同一档：这是**输入文件**的问题，不是 guest 代码）。
 // =====================================================================================
-int checkClosure(const std::string& exe, const std::string& path, bool close_calls, bool close_stores,
-                 bool close_data, bool close_jmptab) {
-    std::vector<std::string> violations;
+// ★ 入库件五条硬闸的**唯一实现**（`--check` 独立模式与 `--closure-gate`（生成那一趟）共用）。
+//   拆成"解析 + 文法/升序"（只要文件）与"逐根在可执行节 + 可解码 + entry 必在"（要已加载的
+//   PE / 解码器）两步：生成那一趟两样都早就有 ⇒ 不必第二遍加载 PE、也不必第二遍 `buildAll`。
+//   ★ 五条判据一条不少：① 格式 ② 严格升序 ③ 可解码 ④ 在可执行节 ⑤ `entry` 必在。
+struct ClosureGate {
+    std::vector<std::uint32_t> eas;  // 文件里的 EA（重复/乱序也原样留着：读数要如实）
     std::size_t format_bad = 0;
     std::size_t order_bad = 0;
-    std::vector<std::uint32_t> eas;
-    {
-        std::ifstream in(path, std::ios::binary);
-        if (!in) {
-            std::fprintf(stderr, "emulator-lift-gen: --check 打不开 `%s`\n", path.c_str());
-            return 2;
-        }
-        std::string line;
-        int lineno = 0;
-        while (std::getline(in, line)) {
-            ++lineno;
-            const std::string token = lift::aot::stripCommentAndTrim(line);
-            if (token.empty()) continue;
-            std::uint32_t ea = 0;
-            if (!lift::aot::strictParseEa(token, &ea)) {
-                ++format_bad;
-                violations.push_back("第 " + std::to_string(lineno) + " 行不是 `0x` + 8 位十六进制：`" +
-                                     token + "`");
-                continue;
-            }
-            if (!eas.empty() && ea <= eas.back()) {
-                ++order_bad;
-                char buf[128];
-                std::snprintf(buf, sizeof(buf), "第 %d 行不是严格升序（%08X 在 %08X 之后 / 重复）", lineno, ea,
-                              eas.back());
-                violations.push_back(buf);
-            }
-            eas.push_back(ea);
-        }
+    std::size_t out_of_text = 0;
+    std::size_t undecodable = 0;
+    std::vector<std::string> violations;
+};
+
+// ① + ②：文件可读、非空、每行 `0x` + 恰好 8 位十六进制、严格递增。false = 文件都读不了（退出码 2）。
+bool parseClosureFile(const std::string& path, ClosureGate* gate) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        std::fprintf(stderr, "emulator-lift-gen: --check 打不开 `%s`\n", path.c_str());
+        return false;
     }
-    std::set<std::uint32_t> roots(eas.begin(), eas.end());
-    if (roots.empty()) {
+    std::string line;
+    int lineno = 0;
+    while (std::getline(in, line)) {
+        ++lineno;
+        const std::string token = lift::aot::stripCommentAndTrim(line);
+        if (token.empty()) continue;
+        std::uint32_t ea = 0;
+        if (!lift::aot::strictParseEa(token, &ea)) {
+            ++gate->format_bad;
+            gate->violations.push_back("第 " + std::to_string(lineno) + " 行不是 `0x` + 8 位十六进制：`" +
+                                       token + "`");
+            continue;
+        }
+        if (!gate->eas.empty() && ea <= gate->eas.back()) {
+            ++gate->order_bad;
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "第 %d 行不是严格升序（%08X 在 %08X 之后 / 重复）", lineno, ea,
+                          gate->eas.back());
+            gate->violations.push_back(buf);
+        }
+        gate->eas.push_back(ea);
+    }
+    if (gate->eas.empty()) {
         std::fprintf(stderr, "emulator-lift-gen: --check `%s` 里一个 EA 都没有\n", path.c_str());
-        return 2;
+        return false;
     }
+    return true;
+}
+
+// ③ + ④ + ⑤：逐根"在可执行节 + 可解码"，外加 `entry` 必在。
+void checkClosureRoots(const lift::PeImage& image, const std::vector<lift::aot::ExecRange>& ranges,
+                       const lift::GuestMemory& mem, const lift::Decoder& decoder,
+                       const std::set<std::uint32_t>& roots, ClosureGate* gate) {
+    for (const std::uint32_t ea : roots) {
+        if (lift::aot::execRangeOf(ranges, ea) == nullptr) {
+            ++gate->out_of_text;
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "EA %08X 不在任何可执行节（越界根）", ea);
+            gate->violations.push_back(buf);
+            continue;
+        }
+        lift::Insn in;
+        std::string why;
+        if (!decoder.decode(mem, ea, &in, &why)) {
+            ++gate->undecodable;
+            char buf[160];
+            std::snprintf(buf, sizeof(buf), "EA %08X 不可解码：%s", ea, why.c_str());
+            gate->violations.push_back(buf);
+        }
+    }
+    if (roots.count(image.entry_ea) == 0) {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "PE entry %08X 不在闭包里（起跑线口径）", image.entry_ea);
+        gate->violations.push_back(buf);
+    }
+}
+
+// 汇总**一行**：措辞 / 字段顺序**逐字保留**（`--check` 与 `--closure-gate` 打的是同一行）。
+void printClosureSummary(const ClosureGate& gate, const std::set<std::uint32_t>& roots,
+                         const lift::PeImage& image, std::size_t soft_call, std::size_t soft_store,
+                         std::size_t soft_data, std::size_t soft_jumptab, std::size_t soft_item,
+                         std::size_t blocks, std::size_t tables, unsigned passes, bool expand_ok) {
+    const bool pass = gate.violations.empty() && expand_ok;
+    std::printf(
+        "lift-gen --check: roots=%zu soft-roots=%zu(call=%zu store-imm=%zu data-ptr=%zu jmptab=%zu "
+        "jmptab-item=%zu) blocks=%zu tables=%zu passes=%u out-of-text=%zu undecodable=%zu order=%s "
+        "entry=%s => %s\n",
+        roots.size(), soft_call + soft_store + soft_data + soft_jumptab + soft_item, soft_call,
+        soft_store, soft_data, soft_jumptab, soft_item, blocks, tables, passes, gate.out_of_text,
+        gate.undecodable, gate.order_bad == 0 ? "ok" : "bad",
+        roots.count(image.entry_ea) == 0 ? "missing" : "present", pass ? "PASS" : "FAIL");
+}
+
+int checkClosure(const std::string& exe, const std::string& path, bool close_calls, bool close_stores,
+                 bool close_data, bool close_jmptab, bool jmptab_exclude,
+                 bool close_jmptab_items, unsigned long jmptab_max_passes) {
+    ClosureGate gate;
+    if (!parseClosureFile(path, &gate)) return 2;
+    const std::set<std::uint32_t> roots(gate.eas.begin(), gate.eas.end());
 
     // ---- PE 字节（与主路径同一套：mem.reserve → loadPeFile → mapPeImage → Decoder）----
     lift::GuestMemory mem;
@@ -1262,89 +2682,61 @@ int checkClosure(const std::string& exe, const std::string& path, bool close_cal
     }
     const std::vector<lift::aot::ExecRange> ranges = lift::aot::execRanges(image);
 
-    // ---- 逐根：在可执行节 + 可解码 ----
-    std::size_t out_of_text = 0;
-    std::size_t undecodable = 0;
-    for (const std::uint32_t ea : roots) {
-        if (lift::aot::execRangeOf(ranges, ea) == nullptr) {
-            ++out_of_text;
-            char buf[128];
-            std::snprintf(buf, sizeof(buf), "EA %08X 不在任何可执行节（越界根）", ea);
-            violations.push_back(buf);
-            continue;
-        }
-        lift::Insn in;
-        std::string why;
-        if (!decoder.decode(mem, ea, &in, &why)) {
-            ++undecodable;
-            char buf[160];
-            std::snprintf(buf, sizeof(buf), "EA %08X 不可解码：%s", ea, why.c_str());
-            violations.push_back(buf);
-        }
-    }
-    if (roots.count(image.entry_ea) == 0) {
-        char buf[128];
-        std::snprintf(buf, sizeof(buf), "PE entry %08X 不在闭包里（起跑线口径）", image.entry_ea);
-        violations.push_back(buf);
-    }
+    // ---- 逐根：在可执行节 + 可解码 + `entry` 必在（唯一实现在 `checkClosureRoots`）----
+    checkClosureRoots(image, ranges, mem, decoder, roots, &gate);
 
-    // ---- 覆盖块数：静态可达性用主路径**同一份** Explorer（⛔ 不另写一份展开规则）----
+    // ---- 覆盖块数：静态可达性用主路径**同一份** `buildAll`（⛔ 不另写一份展开规则）----
     // ★ T1c：派生 leader 的丢弃规则也走**同一份**（`buildUnits`）⇒ `blocks` 读数与 `lift-gen`
     //   的 `blocks=` 严格一致（D10 P3 的账差收口就靠这条）。
+    // ★ BUG-24：两趟重启 / S1 / 分区 / D21 也**只走 `buildAll`**（与主路径逐字节同一条路径）。
     std::size_t covered_blocks = 0;
     std::size_t covered_soft_roots_call = 0;
     std::size_t covered_soft_roots_store = 0;
     std::size_t covered_soft_roots_data = 0;
     std::size_t covered_soft_roots_jumptab = 0;
+    std::size_t covered_soft_roots_item = 0;
+    std::size_t covered_tables = 0;
+    unsigned covered_passes = 0;
     bool expand_ok = false;
-    if (violations.empty()) {
-        const lift::GuestLayout layout;
-        const std::uint32_t shim_end = layout.shim_page + layout.shim_slots * 4u;
-        SoftStats soft_call;
-        SoftStats soft_store;
-        SoftStats soft_data;
-        SoftStats soft_jumptab;
-        Explorer explorer(decoder, mem, ranges, layout.shim_page, shim_end, close_calls,
-                          close_stores, close_data, close_jmptab, &soft_call, &soft_store, &soft_data,
-                          &soft_jumptab);
-        // ★ D17：第三类软根的候选集（非可执行节里静态初始化的代码指针）—— 与主路径同一份扫描。
-        const DataPtrScan data_scan = scanDataPointers(image, ranges);
-        explorer.setDataPointerSeeds(data_scan.targets, data_scan.sites, data_scan.in_exec);
-        // ★ D26：第五类软根的候选集（可执行节里值指向可执行节内的 dword）—— 与主路径同一份扫描。
-        const JumpTabScan jumptab_scan = scanExecCodeDwords(image, ranges);
-        explorer.setJumpTableSeeds(jumptab_scan.targets, jumptab_scan.sites, jumptab_scan.in_exec);
-        std::map<std::uint32_t, GenBlock> blocks;
-        DropStats drops;
+    if (gate.violations.empty()) {
+        Options expand_opt;  // 只用到这几项；其余取缺省（与主路径同一套缺省值）
+        expand_opt.close_calls = close_calls;
+        expand_opt.close_stores = close_stores;
+        expand_opt.close_data = close_data;
+        expand_opt.close_jmptab = close_jmptab;
+        expand_opt.jmptab_exclude = jmptab_exclude;
+        expand_opt.close_jmptab_items = close_jmptab_items;
+        expand_opt.jmptab_max_passes = jmptab_max_passes;
+        BuildRun run;
         std::string err;
         std::uint32_t err_ea = 0;
-        if (buildUnits(roots, &explorer, &soft_call, &soft_store, &soft_data, &soft_jumptab, &blocks,
-                       &drops, &err, &err_ea)) {
-            covered_blocks = blocks.size();
-            covered_soft_roots_call = soft_call.added.size();
-            covered_soft_roots_store = soft_store.added.size();
-            covered_soft_roots_data = soft_data.added.size();
-            covered_soft_roots_jumptab = soft_jumptab.added.size();
+        int err_code = 0;
+        if (buildAll(roots, image, ranges, decoder, mem, expand_opt, &run, &err, &err_ea,
+                     &err_code)) {
+            covered_blocks = run.blocks.size();
+            covered_soft_roots_call = run.soft_call.added.size();
+            covered_soft_roots_store = run.soft_store.added.size();
+            covered_soft_roots_data = run.soft_data.added.size();
+            covered_soft_roots_jumptab = run.soft_jumptab.added.size();
+            covered_soft_roots_item = run.soft_item.added.size();
+            covered_tables = run.jmptab.tables.size();
+            covered_passes = run.passes;
             expand_ok = true;
         } else {
-            char buf[160];
-            std::snprintf(buf, sizeof(buf), "静态展开解码失败 @ %08X：%s", err_ea, err.c_str());
-            violations.push_back(buf);
+            char buf[192];
+            std::snprintf(buf, sizeof(buf), "静态展开%s @ %08X：%s",
+                          err_code == 4 ? "解码失败" : "收敛/分区失败", err_ea, err.c_str());
+            gate.violations.push_back(buf);
         }
     }
 
-    for (const std::string& v : violations) std::fprintf(stderr, "emulator-lift-gen --check: %s\n", v.c_str());
-    // ★ D15 / D17 / D26：四类软根**分开报**（`soft-roots` 仍是并集，后面括号里是拆分）。
-    std::printf(
-        "lift-gen --check: roots=%zu soft-roots=%zu(call=%zu store-imm=%zu data-ptr=%zu jmptab=%zu) "
-        "blocks=%zu out-of-text=%zu undecodable=%zu order=%s entry=%s => %s\n",
-        roots.size(),
-        covered_soft_roots_call + covered_soft_roots_store + covered_soft_roots_data +
-            covered_soft_roots_jumptab,
-        covered_soft_roots_call, covered_soft_roots_store, covered_soft_roots_data,
-        covered_soft_roots_jumptab, covered_blocks, out_of_text, undecodable,
-        order_bad == 0 ? "ok" : "bad", roots.count(image.entry_ea) == 0 ? "missing" : "present",
-        (violations.empty() && expand_ok) ? "PASS" : "FAIL");
-    return (violations.empty() && expand_ok) ? 0 : 2;
+    for (const std::string& v : gate.violations)
+        std::fprintf(stderr, "emulator-lift-gen --check: %s\n", v.c_str());
+    // ★ D15 / D17 / D26 / P2：五类软根**分开报**（`soft-roots` 仍是并集，后面括号里是拆分）。
+    printClosureSummary(gate, roots, image, covered_soft_roots_call, covered_soft_roots_store,
+                        covered_soft_roots_data, covered_soft_roots_jumptab, covered_soft_roots_item,
+                        covered_blocks, covered_tables, covered_passes, expand_ok);
+    return (gate.violations.empty() && expand_ok) ? 0 : 2;
 }
 
 // =====================================================================================
@@ -1531,6 +2923,22 @@ int main(int argc, char** argv) {
             if (!needValue("--out", &opt.out)) return 2;
         } else if (a == "--check") {
             if (!needValue("--check", &opt.check)) return 2;
+        } else if (a == "--closure-gate") {
+            opt.closure_gate = true;
+        } else if (a == "--split") {
+            std::string v;
+            if (!needValue("--split", &v)) return 2;
+            char* endp = nullptr;
+            const unsigned long n = std::strtoul(v.c_str(), &endp, 10);
+            if (endp == v.c_str() || *endp != '\0' || n == 0) {
+                std::fprintf(stderr, "emulator-lift-gen: --split 需要正整数：`%s`\n", v.c_str());
+                return 2;
+            }
+            opt.split = static_cast<std::size_t>(n);
+        } else if (a == "--out-dir") {
+            if (!needValue("--out-dir", &opt.out_dir)) return 2;
+        } else if (a == "--split-prefix") {
+            if (!needValue("--split-prefix", &opt.split_prefix)) return 2;
         } else if (a == "--pin") {
             if (!needValue("--pin", &opt.pin)) return 2;
         } else if (a == "--table") {
@@ -1559,6 +2967,23 @@ int main(int argc, char** argv) {
             opt.close_jmptab = true;
         } else if (a == "--no-close-jmptab") {
             opt.close_jmptab = false;
+        } else if (a == "--no-jmptab-exclude") {
+            opt.jmptab_exclude = false;
+        } else if (a == "--no-close-jmptab-items") {
+            opt.close_jmptab_items = false;
+        } else if (a == "--jmptab-audit") {
+            opt.jmptab_audit = true;
+        } else if (a == "--jmptab-max-passes") {
+            std::string v;
+            if (!needValue("--jmptab-max-passes", &v)) return 2;
+            char* endp = nullptr;
+            const unsigned long n = std::strtoul(v.c_str(), &endp, 10);
+            if (endp == v.c_str() || *endp != '\0' || n == 0) {
+                std::fprintf(stderr, "emulator-lift-gen: --jmptab-max-passes 需要正整数：`%s`\n",
+                             v.c_str());
+                return 2;
+            }
+            opt.jmptab_max_passes = n;
         } else if (a == "--dump-blocks") {
             if (!needValue("--dump-blocks", &opt.dump_blocks)) return 2;
         } else if (a == "--verbose") {
@@ -1579,11 +3004,27 @@ int main(int argc, char** argv) {
             return 2;
         }
         return checkClosure(opt.exe, opt.check, opt.close_calls, opt.close_stores, opt.close_data,
-                            opt.close_jmptab);
+                            opt.close_jmptab, opt.jmptab_exclude, opt.close_jmptab_items,
+                            opt.jmptab_max_passes);
     }
-    if (opt.exe.empty() || opt.roots.empty() || opt.out.empty()) {
-        std::fprintf(stderr, "emulator-lift-gen: --exe / --roots / --out 都是必需的\n");
+    // ★ `--jmptab-audit` 是**独立模式**（与 `--check` 同族：只吃 `--exe` + `--roots`，⛔ 不需要
+    //   `--out` / `--pin` / `--table`；跑 ①–③ + 分区 + D21 到 `dispatch_entries` 定型后提前返回）。
+    if (opt.jmptab_audit) {
+        if (opt.exe.empty() || opt.roots.empty()) {
+            std::fprintf(stderr, "emulator-lift-gen: --jmptab-audit 需要 --exe 与 --roots\n");
+            return 2;
+        }
+    } else if (opt.exe.empty() || opt.roots.empty() ||
+               (opt.split <= 1 ? opt.out.empty() : opt.out_dir.empty())) {
+        std::fprintf(stderr,
+                     "emulator-lift-gen: --exe / --roots 必需；--split 1 要 --out，--split N>1 要 "
+                     "--out-dir\n");
         usage();
+        return 2;
+    }
+    if (opt.split > 1 && !opt.out.empty()) {
+        // ⛔ 两个落点同时给 = 谁生效说不清 ⇒ 直接拒绝（不猜）。
+        std::fprintf(stderr, "emulator-lift-gen: --split N>1 与 --out 互斥（多份用 --out-dir）\n");
         return 2;
     }
 
@@ -1634,245 +3075,79 @@ int main(int argc, char** argv) {
             return 4;
         }
     }
-    DropStats drops;
-    // ★ D14 / D15 / D17 / D26：四类软根**各一份账**（⛔ 不合并：读数要能回答"是哪一类出的问题"）。
-    SoftStats soft_call;
-    SoftStats soft_store;
-    SoftStats soft_data;
-    SoftStats soft_jumptab;
-    // ★ D14：shim 桩页 = `GuestLayout::shim_page` 起 `shim_slots * 4` 字节（与 `aot_run.cpp` /
-    //   `aot_host.cpp` 同一份判据）。桩 EA 由 trampoline 派发 ⇒ ⛔ 不收成软根、也不算丢弃。
-    const lift::GuestLayout layout;
-    const std::uint32_t shim_end = layout.shim_page + layout.shim_slots * 4u;
-    Explorer explorer(decoder, mem, exec_ranges, layout.shim_page, shim_end, opt.close_calls,
-                      opt.close_stores, opt.close_data, opt.close_jmptab, &soft_call, &soft_store,
-                      &soft_data, &soft_jumptab);
-    // ★ D17：第三类软根的候选集（**非可执行节**里 4 字节对齐、值落在可执行节内的 dword）。
-    //   扫描总是做（它是读数：站点数 / 落在可执行节内的站点数），是否**收**由 `offerSoftRoot` 按
-    //   `close_data_` 决定 ⇒ 关掉时读数仍在，`.ll` / 派发表一个字节都不多。
-    const DataPtrScan data_scan = scanDataPointers(image, exec_ranges);
-    explorer.setDataPointerSeeds(data_scan.targets, data_scan.sites, data_scan.in_exec);
-    // ★ D26：第五类软根的候选集（**可执行节**里 4 字节对齐、值也落在可执行节内的 dword）。
-    //   同样"扫描总是做"（它给出候选面读数），是否**收**由 `seedJumpTableCodeRoots` 按 `close_jmptab_` 决定。
-    const JumpTabScan jumptab_scan = scanExecCodeDwords(image, exec_ranges);
-    explorer.setJumpTableSeeds(jumptab_scan.targets, jumptab_scan.sites, jumptab_scan.in_exec);
-
-    // ---- ② 基本块（派生 leader / 软根可丢、根不可丢；D10 P3 ①② + D14 + D15 + D17 + D26）----
-    std::map<std::uint32_t, GenBlock> blocks;
+    // ★ 入库件硬闸（`--closure-gate`）：**生成这一趟自己**做 `--check` 的五条校验 ——
+    //   与 `--check` 共用 `parseClosureFile` / `checkClosureRoots`（唯一实现），汇总打**同一行**。
+    //   CMake 的 AOT 生成命令带这个开关 ⇒ 坏闭包仍在**构建期**硬红，但**不再**有第二趟 `buildAll`
+    //   （省 48.6 s：那两趟调的是同一个 `buildAll`）。
+    ClosureGate gate;
+    std::set<std::uint32_t> gate_roots;
+    if (opt.closure_gate) {
+        if (!parseClosureFile(opt.roots, &gate)) return 2;
+        gate_roots.insert(gate.eas.begin(), gate.eas.end());
+        checkClosureRoots(image, exec_ranges, mem, decoder, gate_roots, &gate);
+        if (!gate.violations.empty()) {
+            for (const std::string& v : gate.violations)
+                std::fprintf(stderr, "emulator-lift-gen --check: %s\n", v.c_str());
+            printClosureSummary(gate, gate_roots, image, 0, 0, 0, 0, 0, 0, 0, 0, false);
+            return 2;
+        }
+        if (gate_roots != roots) {
+            // ⛔ 不静默：**文法全绿**之后两条解析路径还读出不同集合 = 生成器内部不一致
+            //   （文法红的情形已经在上面按"五条判据红"处理，⛔ 不在这里混成"内部错误"）。
+            std::fprintf(stderr,
+                         "emulator-lift-gen: --closure-gate 的根集（%zu）与 --roots 的根集（%zu）不一致\n",
+                         gate_roots.size(), roots.size());
+            return 1;
+        }
+    }    // ★ BUG-24：①（leader 发现 / 建块）+ ②（两趟重启 / S1 识别）+ ③（分区）+ D21 —— **一份实现**，
+    //   主路径 / `--check` / `--jmptab-audit` 三处共用（见 `buildAll` 的头注）。
+    BuildRun run;
     {
         std::string err;
         std::uint32_t err_ea = 0;
-        if (!buildUnits(roots, &explorer, &soft_call, &soft_store, &soft_data, &soft_jumptab, &blocks,
-                        &drops, &err, &err_ea)) {
-            std::fprintf(stderr, "emulator-lift-gen: 建块/解码失败 @ %08X：%s\n", err_ea, err.c_str());
-            return 4;
+        int err_code = 0;
+        if (!buildAll(roots, image, exec_ranges, decoder, mem, opt, &run, &err, &err_ea, &err_code)) {
+            std::fprintf(stderr, "emulator-lift-gen: %s @ %08X：%s\n",
+                         err_code == 4 ? "建块/解码失败" : "跳表识别/分区失败", err_ea, err.c_str());
+            return err_code == 0 ? 1 : err_code;
         }
     }
-
-    // ---- ③ 分区（入口 = 根 ∪ 软根 ∪ 全部 call 的下一条 EA；冲突 ⇒ 提升成新根重跑）----
-    std::set<std::uint32_t> promoted;
-    // ★ G3：入口 EA 里"**没有块**"的那些（落在别人的块字节里 / 解不出）—— 提升它们只会让分区
-    //   永远收敛不了（G3 首跑实测 `00404046`）⇒ 单独记账、不提升（见下面哨兵那一段）。
-    std::set<std::uint32_t> unbuildable;
-    std::vector<GenComponent> components;
-    std::set<std::uint32_t> all_entries;
-    // ★ D21（第四类）：跳表 dword 指向的已发射块首 —— 只进 switch / 派发表，⛔ 不新增块 / 指令。
-    JumpTableStats jump_table;
-    std::size_t promo_events = 0;
-    for (;;) {
-        const std::set<std::uint32_t>& resume_entries = explorer.entries();
-        std::set<std::uint32_t> root_set = roots;
-        // ★ D14：静态闭包收来的软根也是 **unit 根**（一个软根 = 一个 `.ll` 函数）。
-        root_set.insert(explorer.softRoots().begin(), explorer.softRoots().end());
-        root_set.insert(promoted.begin(), promoted.end());
-        all_entries = resume_entries;
-        all_entries.insert(promoted.begin(), promoted.end());
-
-        std::map<std::uint32_t, std::uint32_t> block_owner;
-        std::map<std::uint32_t, std::uint32_t> entry_owner;
-        std::vector<GenComponent> comps;
-        std::uint32_t conflict = 0;
-
-        for (const std::uint32_t root : root_set) {
-            GenComponent comp;
-            comp.root = root;
-            comp.entries.push_back(root);
-            std::set<std::uint32_t> pending;
-            pending.insert(root);
-            // ★ 块图里有环（`jns` 回自身 / 互跳）。`pending` 会被回边反复插入 ⇒ 必须另记"已展开过"，
-            //   否则这一轮永远不结束（T1a 首次跑就踩到：`0x436D31` 的 jns 目标是它自己）。
-            std::set<std::uint32_t> processed;
-            auto claim = [&](std::uint32_t ea) -> bool {
-                const auto it = block_owner.find(ea);
-                if (it != block_owner.end() && it->second != root) return false;
-                const auto bit = blocks.find(ea);
-                if (bit == blocks.end()) return false;
-                block_owner[ea] = root;
-                comp.blocks[ea] = bit->second;
-                return true;
-            };
-            if (!claim(root)) {
-                conflict = root;
-                break;
-            }
-            while (!pending.empty() && conflict == 0) {
-                const std::uint32_t ea = *pending.begin();
-                pending.erase(pending.begin());
-                if (!processed.insert(ea).second) continue;  // 环上的回边：已经展开过
-                const GenBlock& block = blocks.at(ea);
-                for (const GenEdge& edge : lift::aot::genBlockEdges(block)) {
-                    if (edge.dynamic) continue;
-                    // ★ 目标是被丢弃的派生 leader ⇒ **不建块、不 claim**：生成器把它发成
-                    //   `ret i32 <EA>`（交回 trampoline），运行期由解释器裁决（T2b 的口径：
-                    //   未知 EA ⇒ 交回解释器）。⛔ 不要把它塞进 `all_entries` —— 那会让
-                    //   trampoline 派发到一个 switch 里没有它的函数（落 `bad:` = trap）。
-                    if (drops.dropped.count(edge.ea) != 0) continue;
-                    if (edge.call_ret) {
-                        const std::uint32_t ret = edge.ea;
-                        if (root_set.count(ret) != 0) continue;  // 它自己是另一个分量的根
-                        const auto eo = entry_owner.find(ret);
-                        if (eo == entry_owner.end()) {
-                            entry_owner[ret] = root;
-                            comp.entries.push_back(ret);
-                        } else if (eo->second != root) {
-                            conflict = ret;
-                            break;
-                        }
-                        if (!claim(ret)) {
-                            conflict = ret;
-                            break;
-                        }
-                        pending.insert(ret);
-                    } else {
-                        if (all_entries.count(edge.ea) != 0) continue;  // 目标是入口 EA ⇒ ret
-                        if (!claim(edge.ea)) {
-                            conflict = edge.ea;
-                            break;
-                        }
-                        pending.insert(edge.ea);
-                    }
-                }
-            }
-            if (conflict != 0) break;
-            components.push_back(std::move(comp));
-        }
-
-        if (conflict == 0) {
-            // ★ 哨兵（D15 落地时暴露的一个**既有**漏洞，与 D14/D15 的判据无关）：
-            //   `entries_` 里有、但**没有任何分量声明**的入口 EA。两类的来源都是"复用了别人的
-            //   resume EA"：某条 `call` 的返回 EA 恰好又是一条真 `call` 的目标 —— 而那条返回 EA
-            //   所在的段只经由一个**被拒的软根**才可达（软根重叠 / 解不出），那段的分量不发射，
-            //   于是谁都不 claim 它。后果：`.ll` 里发 `ret i32 <EA>`，而该 EA 不在派发表里
-            //   ⇒ 运行期在**解释器能跑**的地址上响亮停机（不是语义问题，是覆盖缺口）。
-            //   ⇒ 与"块冲突"同一套单调提升：把它提升成 unit 根，整轮重跑。
-            // ★ G3 补的**护栏**（D17 之后的必然缺陷）：提升的前提是"这个 EA **能有自己的块**"。
-            //   第三类软根（`.data` 静态指针）量级上千，会派生出大量假 `call` 的返回 EA，其中一部分
-            //   **落在别人的块字节里**（或根本解不出）⇒ 提升成一个没有块的根 ⇒ `claim(root)` 失败
-            //   ⇒ 同一个 EA 再次冲突 ⇒ **不收敛**（G3 首次跑就撞上：`00404046`）。
-            //   ⇒ 没有块的那些**不提升**：从入口集里退出来 + 记进 `drops.dropped`（语义 = "没有块，
-            //   指向它的边发 `ret i32`"，与其他被丢弃的 leader 完全一致）+ 计数 + 样例（⛔ 不静默）。
-            std::set<std::uint32_t> covered;
-            for (const GenComponent& c : components) covered.insert(c.entries.begin(), c.entries.end());
-            std::vector<std::uint32_t> uncovered;
-            for (const std::uint32_t ea : all_entries) {
-                if (covered.count(ea) == 0 && promoted.count(ea) == 0) uncovered.push_back(ea);
-            }
-            if (uncovered.empty()) {
-                // ★ D21（第四类）：分区收敛、块集定型之后 —— **只加 entries、不加块**。
-                //   判据与理由见 `addJumpTableEntries` 的头注（`.text` 里的跳表 dword 指向已发射
-                //   块首，但那个 EA 不在入口集 ⇒ 运行期经 trampoline 回来查不到）。
-                if (addJumpTableEntries(image, blocks, all_entries, &components, &jump_table)) break;
-                // 有"块首但没有任何分量 claim"的候选（G3 的孤儿形状）⇒ 走**既有**孤儿提升机制：
-                //   提升成新入口 EA + 整轮重跑（`addJumpTableEntries` 此时**没改** components）。
-                std::size_t n_jump_promoted = 0;
-                for (const std::uint32_t ea : jump_table.unclaimed) {
-                    if (promoted.insert(ea).second) {
-                        ++n_jump_promoted;
-                        std::fprintf(stderr,
-                                     "lift-gen: 跳表目标 %08X 是块首但没有任何分量声明"
-                                     "⇒ 提升为新入口 EA 并重跑\n",
-                                     ea);
-                    }
-                }
-                if (n_jump_promoted == 0) {
-                    // 已经在 promoted 里却仍没有分量 claim ⇒ 与"块冲突提升不收敛"同一类内部不一致。
-                    std::fprintf(stderr, "emulator-lift-gen: 跳表目标的孤儿提升不收敛\n");
-                    return 1;
-                }
-                ++promo_events;
-                components.clear();
-                continue;
-            }
-            std::size_t n_unbuildable = 0;
-            for (const std::uint32_t ea : uncovered) {
-                if (blocks.count(ea) == 0) {
-                    // 没有块 ⇒ 不可能成为 unit 根（提升只会让分区永远收敛不了）。
-                    unbuildable.insert(ea);
-                    drops.dropped.insert(ea);
-                    explorer.dropEntry(ea);
-                    ++n_unbuildable;
-                    continue;
-                }
-                if (promoted.insert(ea).second) {
-                    std::fprintf(stderr,
-                                 "lift-gen: 入口 %08X 没有任何分量声明（只在被拒绝的软根段之后可达）"
-                                 "⇒ 提升为新入口 EA 并重跑\n",
-                                 ea);
-                }
-            }
-            if (n_unbuildable != 0) {
-                std::fprintf(stderr,
-                             "lift-gen: 入口里有 %zu 个**没有块**（落在已发射块的字节区间内 / 解不出）"
-                             "⇒ 不提升、退出入口集（指向它们的边发 ret i32）\n",
-                             n_unbuildable);
-            }
-            ++promo_events;
-            components.clear();
-            continue;
-        }
-        // ★ 一个块被两个入口函数同时声明 ⇒ **响亮**报错（⛔ 不静默选一个）：
-        //   把它提升成新的入口 EA，然后整轮重跑（提升是单调的 ⇒ 必然收敛）。
-        if (blocks.count(conflict) == 0) {
-            // 冲突的 EA 根本没有块（落在别人的字节里 / 解不出）⇒ 提升它也拿不到块 ⇒ 退出入口集。
-            unbuildable.insert(conflict);
-            drops.dropped.insert(conflict);
-            explorer.dropEntry(conflict);
-            std::fprintf(stderr,
-                         "lift-gen: 块冲突 EA %08X 没有块（落在已发射块字节区间内 / 解不出）"
-                         "⇒ 退出入口集（指向它的边发 ret i32）\n",
-                         conflict);
-            ++promo_events;
-            components.clear();
-            continue;
-        }
-        std::fprintf(stderr,
-                     "lift-gen: 块 %08X 被两个入口函数同时声明 ⇒ 提升为新入口 EA 并重跑\n", conflict);
-        if (!promoted.insert(conflict).second) {
-            std::fprintf(stderr, "emulator-lift-gen: 分区提升不收敛（EA %08X 重复冲突）\n", conflict);
-            return 1;
-        }
-        ++promo_events;
-        components.clear();
+    // ---- ③ 分区的结果（构造完成后就是常量：只读）----
+    // ★ `--closure-gate`：到这里 `buildAll` 已经成功 ⇒ 汇总行用**同一份** run 的读数
+    //   （与 `--check` 那一趟的字段逐字相同，只是不再跑第二遍）。
+    if (opt.closure_gate) {
+        printClosureSummary(gate, gate_roots, image, run.soft_call.added.size(),
+                            run.soft_store.added.size(), run.soft_data.added.size(),
+                            run.soft_jumptab.added.size(), run.soft_item.added.size(),
+                            run.blocks.size(), run.jmptab.tables.size(), run.passes, true);
     }
+    const std::vector<GenComponent>& components = run.part.components;
+    const std::set<std::uint32_t>& all_entries = run.part.all_entries;
+    const std::set<std::uint32_t>& dispatch_entries = run.part.dispatch_entries;
+    const std::map<std::uint32_t, GenBlock>& blocks = run.blocks;
+    const DropStats& drops = run.drops;
+    const std::set<std::uint32_t>& promoted = run.part.promoted;
+    const std::set<std::uint32_t>& unbuildable = run.part.unbuildable;
+    const JumpTableStats& jump_table = run.part.jump_table;
+    const std::size_t promo_events = run.part.promo_events;
+    const SoftStats& soft_call = run.soft_call;
+    const SoftStats& soft_store = run.soft_store;
+    const SoftStats& soft_data = run.soft_data;
+    const SoftStats& soft_jumptab = run.soft_jumptab;
+    const SoftStats& soft_item = run.soft_item;
+    // ★ D14：shim 桩页 = `GuestLayout::shim_page` 起 `shim_slots * 4` 字节（与 `aot_run.cpp` /
+    //   `aot_host.cpp` 同一份判据）。桩 EA 由 trampoline 派发 ⇒ ⛔ 不收成软根、也不算丢弃。
+    const lift::GuestLayout layout;
 
-    // 收敛后按 root 升序（std::set 已经保证；这里再按 root 排一次以防未来改动）。
-    std::sort(components.begin(), components.end(),
-              [](const GenComponent& a, const GenComponent& b) { return a.root < b.root; });
-
+    // ★ P0：审计模式 —— 跑到 `dispatch_entries` 定型后**提前返回**（⛔ 不发射 IR、不写 .ll）。
+    if (opt.jmptab_audit) {
+        return auditJumpTables(run, image, exec_ranges, decoder, mem, roots);
+    }
     if (opt.max_components != 0 && components.size() > opt.max_components) {
         std::fprintf(stderr, "emulator-lift-gen: 分量数 %zu 超过 --max-components %lu\n",
                      components.size(), opt.max_components);
         return 2;
     }
-
-    // ★ D21（第四类）：**派发表的入口集** = 原入口集 ∪ 跳表加进来的 EA。
-    //   ⛔ 与传给发射器的 `all_entries` 刻意分开：后者是"边目标算不算入口"的判据 ⇒ 若把跳表目标
-    //   也放进去，原本在同一分量内 `br` 直跳的静态边会平白变成 `ret i32`（多一次派发）。
-    //   两者的关系是机械的：`dispatch_entries.size() == all_entries.size() + jump_table.added.size()`
-    //   （`addJumpTableEntries` 只加不在入口集里的）⇒ 派发表行数 = pin 的 entries 读数。
-    std::set<std::uint32_t> dispatch_entries = all_entries;
-    dispatch_entries.insert(jump_table.added.begin(), jump_table.added.end());
-
     // ---- ④ 发射 ----
     // ★ S7（D53）：先按函数判"能不能一对一结构翻译"（判据在 `aot/lift_struct.*`，跑在本进程
     //   **自己的 Zydis 解码结果**上；⛔ 不搬 `.lst` 的那套普查）。
@@ -1909,6 +3184,10 @@ int main(int argc, char** argv) {
     std::string ir;
     GenEmitStats stats;
     std::vector<GenUnsupported> unsupported;
+    // ★ `--split N>1`：每份一个完整 `.ll` 文本 + 该份的分量根（升序、两两不交、并集 = 全部根）。
+    std::vector<std::string> parts;
+    std::vector<std::vector<std::uint32_t>> part_roots;
+    const bool split_out = opt.split > 1;
     lift::aot::GenClosureStats closure;
     closure.close_calls = opt.close_calls;
     closure.soft_roots = soft_call.added.size();
@@ -1923,20 +3202,20 @@ int main(int argc, char** argv) {
     closure.store_undecodable = soft_store.undecodable.size();
     closure.store_overlap = soft_store.overlap.size();
     closure.store_shim_targets = soft_store.shim_targets.size();
-    closure.store_imm_sites = explorer.storeImmSites();
-    closure.store_imm_in_exec = explorer.storeImmInExec();
+    closure.store_imm_sites = run.store_imm_sites;
+    closure.store_imm_in_exec = run.store_imm_in_exec;
     // ★ D17：第三类软根（`.data` 静态代码指针）—— 与上面两组**分开**，⛔ 不合并。
     closure.close_data = opt.close_data;
     closure.data_soft_roots = soft_data.added.size();
     closure.data_outside = soft_data.outside.size();
     closure.data_undecodable = soft_data.undecodable.size();
     closure.data_overlap = soft_data.overlap.size();
-    closure.data_overlap_pre = explorer.dataPtrOverlapPre();
+    closure.data_overlap_pre = run.data_ptr_overlap_pre;
     closure.data_shim_targets = soft_data.shim_targets.size();
-    closure.data_ptr_sites = explorer.dataPtrSites();
-    closure.data_ptr_in_exec = explorer.dataPtrInExec();
-    closure.data_ptr_distinct = explorer.dataPtrDistinct();
-    closure.data_ptr_skipped = explorer.dataPtrSkipped();
+    closure.data_ptr_sites = run.data_ptr_sites;
+    closure.data_ptr_in_exec = run.data_ptr_in_exec;
+    closure.data_ptr_distinct = run.data_ptr_distinct;
+    closure.data_ptr_skipped = run.data_ptr_skipped;
     closure.unbuildable_entries = unbuildable.size();
     // ★ D26：第五类软根（可执行节跳表 dword → 尚未解码的代码）—— 与上面三组**分开**，⛔ 不合并。
     closure.close_jmptab = opt.close_jmptab;
@@ -1945,10 +3224,10 @@ int main(int argc, char** argv) {
     closure.jumptab_undecodable = soft_jumptab.undecodable.size();
     closure.jumptab_overlap = soft_jumptab.overlap.size();
     closure.jumptab_shim_targets = soft_jumptab.shim_targets.size();
-    closure.jumptab_rounds = explorer.jumpTabRounds();
-    closure.jumptab_live_roots = explorer.liveJumpTabRoots();
+    closure.jumptab_rounds = run.jumptab_rounds;
+    closure.jumptab_live_roots = run.jumptab_live_roots;
     {
-        const JumpTabSurface& s = explorer.jumpTabSurface();
+        const JumpTabSurface& s = run.jumptab_surface;
         closure.jumptab_sites = s.sites;
         closure.jumptab_in_exec = s.in_exec;
         closure.jumptab_distinct = s.distinct;
@@ -1966,8 +3245,21 @@ int main(int argc, char** argv) {
     closure.jump_table_added = jump_table.added.size();
     closure.jump_table_skipped = jump_table.skipped.size();
     closure.jump_table_unclaimed = jump_table.unclaimed.size();
-    if (!lift::aot::emitModule(components, all_entries, drops.dropped, closure, gen_structure, &ir,
-                               &stats, &unsupported)) {
+    if (split_out) {
+        if (opt.split > components.size()) {
+            std::fprintf(stderr, "emulator-lift-gen: --split %zu 超过分量数 %zu（⛔ 不静默截断）\n",
+                         opt.split, components.size());
+            return 2;
+        }
+        // ★★ 一次全局分析（`emitModuleSplit` 内部走 `emitBodies`：entry_owner / block_flags /
+        //    structured_roots 全部按**全集**算一次）⇒ 拆分只是**输出的分区**。
+        if (!lift::aot::emitModuleSplit(components, all_entries, drops.dropped, closure, gen_structure,
+                                        opt.split, &stats, &unsupported, &parts, &part_roots)) {
+            std::fprintf(stderr, "emulator-lift-gen: 发射器内部错误\n");
+            return 1;
+        }
+    } else if (!lift::aot::emitModule(components, all_entries, drops.dropped, closure, gen_structure,
+                                      &ir, &stats, &unsupported)) {
         std::fprintf(stderr, "emulator-lift-gen: 发射器内部错误\n");
         return 1;
     }
@@ -2028,12 +3320,77 @@ int main(int argc, char** argv) {
     }
 
     // ---- ⑤ 落盘（`.ll` 不 commit：落点由调用方指定，通常 out/aot/）----
-    const std::filesystem::path out_path(opt.out);
-    const std::filesystem::path out_dir =
-        out_path.has_parent_path() ? out_path.parent_path() : std::filesystem::path(".");
     std::error_code ec;
-    std::filesystem::create_directories(out_dir, ec);
-    {
+    if (split_out) {
+        // ★ N 份 `.ll`：文件名 = `<prefix>.part<NN>.ll`（序号，**不是**内容哈希 ⇒ 名字确定）。
+        //   清单 = `<prefix>.split.txt`（每份 序号 / 文件名 / sha256 / 字节 / functions / 首末根 EA
+        //   + 一行汇总）。同输入两次生成 ⇒ 逐字节相同（发射文本确定性 + 分桶是纯函数）。
+        const std::filesystem::path parts_dir(opt.out_dir);
+        std::filesystem::create_directories(parts_dir, ec);
+        std::vector<std::string> names;
+        std::vector<std::string> shas;
+        std::vector<std::uint64_t> bytes;
+        for (std::size_t i = 0; i < parts.size(); ++i) {
+            char name[96];
+            std::snprintf(name, sizeof(name), "%s.part%02zu.ll", opt.split_prefix.c_str(), i);
+            names.push_back(name);
+            const std::filesystem::path p = parts_dir / name;
+            std::ofstream file(p, std::ios::binary | std::ios::trunc);
+            if (!file) {
+                std::fprintf(stderr, "emulator-lift-gen: 写不了 `%s`\n", p.string().c_str());
+                return 2;
+            }
+            file.write(parts[i].data(), static_cast<std::streamsize>(parts[i].size()));
+            file.close();
+            if (!file) {
+                std::fprintf(stderr, "emulator-lift-gen: 写 `%s` 失败\n", p.string().c_str());
+                return 2;
+            }
+            const std::vector<std::uint8_t> raw(parts[i].begin(), parts[i].end());
+            shas.push_back(lift::toLower(lift::toHex(lift::sha256(raw))));
+            bytes.push_back(static_cast<std::uint64_t>(parts[i].size()));
+        }
+        const std::filesystem::path manifest = parts_dir / (opt.split_prefix + ".split.txt");
+        std::ofstream file(manifest, std::ios::binary | std::ios::trunc);
+        if (!file) {
+            std::fprintf(stderr, "emulator-lift-gen: 写不了 `%s`\n", manifest.string().c_str());
+            return 2;
+        }
+        file << "# 生成物（emulator-lift-gen --split " << parts.size()
+             << "）—— ⛔ 不手改、⛔ 不入库。\n";
+        file << "# 一行一份：`part <index> <file> <sha256> <bytes> <functions> <first-root> "
+                "<last-root>`；末行 `split=… functions=… bytes=… max-bytes=…`。\n";
+        file << "# 分桶规则（确定性纯函数）：分量根 EA 升序、贪心填到 Σbody/N。\n";
+        std::uint64_t total_bytes = 0;
+        std::uint64_t total_functions = 0;
+        std::uint64_t max_bytes = 0;
+        for (std::size_t i = 0; i < parts.size(); ++i) {
+            total_bytes += bytes[i];
+            total_functions += part_roots[i].size();
+            if (bytes[i] > max_bytes) max_bytes = bytes[i];
+            file << "part " << i << " " << names[i] << " " << shas[i] << " " << bytes[i] << " "
+                 << part_roots[i].size() << " "
+                 << "0x" << hexEa(part_roots[i].front()) << " " << "0x" << hexEa(part_roots[i].back())
+                 << "\n";
+        }
+        file << "split=" << parts.size() << " functions=" << total_functions << " bytes=" << total_bytes
+             << " max-bytes=" << max_bytes << "\n";
+        file.close();
+        if (!file) {
+            std::fprintf(stderr, "emulator-lift-gen: 写 `%s` 失败\n", manifest.string().c_str());
+            return 2;
+        }
+        std::printf("lift-gen: 分片 %zu 份（%s/%s.part*.ll · 清单 %s · 函数合计 %llu · 字节合计 %llu · "
+                    "最大份 %llu）\n",
+                    parts.size(), opt.out_dir.c_str(), opt.split_prefix.c_str(), manifest.string().c_str(),
+                    static_cast<unsigned long long>(total_functions),
+                    static_cast<unsigned long long>(total_bytes),
+                    static_cast<unsigned long long>(max_bytes));
+    } else {
+        const std::filesystem::path out_path(opt.out);
+        const std::filesystem::path out_dir =
+            out_path.has_parent_path() ? out_path.parent_path() : std::filesystem::path(".");
+        std::filesystem::create_directories(out_dir, ec);
         std::ofstream file(out_path, std::ios::binary | std::ios::trunc);
         if (!file) {
             std::fprintf(stderr, "emulator-lift-gen: 写不了 `%s`\n", out_path.string().c_str());
@@ -2100,7 +3457,13 @@ int main(int argc, char** argv) {
                                              a.reason == b.reason;
                                   }),
                       unsupported.end());
-    const std::filesystem::path unsupported_path = out_dir / "unsupported.txt";
+    // ★ `unsupported.txt` 与 `.ll` 同目录（单份 = `--out` 的父目录；多份 = `--out-dir`）。
+    const std::filesystem::path unsupported_dir =
+        split_out ? std::filesystem::path(opt.out_dir)
+                  : (std::filesystem::path(opt.out).has_parent_path()
+                         ? std::filesystem::path(opt.out).parent_path()
+                         : std::filesystem::path("."));
+    const std::filesystem::path unsupported_path = unsupported_dir / "unsupported.txt";
     {
         std::ofstream file(unsupported_path, std::ios::binary | std::ios::trunc);
         if (!file) {
@@ -2167,16 +3530,16 @@ int main(int argc, char** argv) {
         opt.close_stores ? "on" : "off", soft_store.added.size(), soft_store.outside.size(),
         soft_store.undecodable.size(), soft_store.overlap.size(), soft_store.shim_targets.size());
     std::printf("lift-gen: 写内存 mov 的 imm32：站点=%llu（其中 imm 落在可执行节内=%llu）\n",
-                static_cast<unsigned long long>(explorer.storeImmSites()),
-                static_cast<unsigned long long>(explorer.storeImmInExec()));
+                static_cast<unsigned long long>(run.store_imm_sites),
+                static_cast<unsigned long long>(run.store_imm_in_exec));
     std::fprintf(stderr,
                  "lift-gen: [代码指针立即数 D15/%s] soft-roots=%zu 丢弃：越界=%zu 解不出=%zu 重叠=%zu "
                  "· shim 目标跳过=%zu · 站点=%llu（imm 落在可执行节内=%llu）\n",
                  opt.close_stores ? "on" : "off", soft_store.added.size(), soft_store.outside.size(),
                  soft_store.undecodable.size(), soft_store.overlap.size(),
                  soft_store.shim_targets.size(),
-                 static_cast<unsigned long long>(explorer.storeImmSites()),
-                 static_cast<unsigned long long>(explorer.storeImmInExec()));
+                 static_cast<unsigned long long>(run.store_imm_sites),
+                 static_cast<unsigned long long>(run.store_imm_in_exec));
     // ★ D17：第三类软根（`.data` 静态代码指针）—— **独立一行**，三档丢弃同样各一个数。
     //   两条读数（判据的**输入面**，⛔ 不是判据）：扫过的 dword 站点 / 其中值落在可执行节内的站点；
     //   再去重才是候选数（`distinct`），候选里"已在入口集 / 已判过"的不重复收（`skipped`）。
@@ -2190,26 +3553,26 @@ int main(int argc, char** argv) {
     std::printf(
         "lift-gen: 非可执行节的 4 字节对齐 dword：站点=%llu（值落在可执行节内=%llu）· 不同候选=%llu "
         "· 已在入口集/已判过=%llu\n",
-        static_cast<unsigned long long>(explorer.dataPtrSites()),
-        static_cast<unsigned long long>(explorer.dataPtrInExec()),
-        static_cast<unsigned long long>(explorer.dataPtrDistinct()),
-        static_cast<unsigned long long>(explorer.dataPtrSkipped()));
+        static_cast<unsigned long long>(run.data_ptr_sites),
+        static_cast<unsigned long long>(run.data_ptr_in_exec),
+        static_cast<unsigned long long>(run.data_ptr_distinct),
+        static_cast<unsigned long long>(run.data_ptr_skipped));
     // ★ 恒等式（可手工核）：`不同候选 = 新增 + 重叠 + 已在入口集/已判过`，
     //   其中"重叠"的**收之前挡下**那部分（`data_overlap_pre`）是判据前移挡的，其余是收进来之后
     //   由 `dropLeadersInsideBlocks` 事后判的（那一部分同时也在 `新增` 里 —— `added` 记的是
     //   "被接受为软根"，与 D14/D15 同一口径）。
     std::printf("lift-gen: 其中收之前就挡下（落在已发射块字节区间内）= %llu\n",
-                static_cast<unsigned long long>(explorer.dataPtrOverlapPre()));
+                static_cast<unsigned long long>(run.data_ptr_overlap_pre));
     std::fprintf(stderr,
                  "lift-gen: [静态代码指针 D17/%s] soft-roots=%zu 丢弃：越界=%zu 解不出=%zu 重叠=%zu "
                  "· shim 目标跳过=%zu · 站点=%llu（值落在可执行节内=%llu）· 不同候选=%llu · 已在入口集/已判过=%llu\n",
                  opt.close_data ? "on" : "off", soft_data.added.size(), soft_data.outside.size(),
                  soft_data.undecodable.size(), soft_data.overlap.size(),
                  soft_data.shim_targets.size(),
-                 static_cast<unsigned long long>(explorer.dataPtrSites()),
-                 static_cast<unsigned long long>(explorer.dataPtrInExec()),
-                 static_cast<unsigned long long>(explorer.dataPtrDistinct()),
-                 static_cast<unsigned long long>(explorer.dataPtrSkipped()));
+                 static_cast<unsigned long long>(run.data_ptr_sites),
+                 static_cast<unsigned long long>(run.data_ptr_in_exec),
+                 static_cast<unsigned long long>(run.data_ptr_distinct),
+                 static_cast<unsigned long long>(run.data_ptr_skipped));
     // ★ D26：第五类软根（可执行节跳表 dword → **尚未解码**的代码）—— **独立一行**，三档丢弃各一个数；
     //   再一行是**候选面**（"先量后收"：每一档只归一类，五档相加 = `不同候选`）。
     //   ★ 与 D17 的本质区别：这里的 `added` 是**新增 unit 根 = 新增块 / 新增指令**（D17 那行不是）。
@@ -2219,10 +3582,10 @@ int main(int argc, char** argv) {
         opt.close_jmptab ? "on" : "off", soft_jumptab.added.size(), soft_jumptab.outside.size(),
         soft_jumptab.undecodable.size(), soft_jumptab.overlap.size(),
         soft_jumptab.shim_targets.size(),
-        static_cast<unsigned long long>(explorer.jumpTabRounds()),
-        explorer.liveJumpTabRoots());
+        static_cast<unsigned long long>(run.jumptab_rounds),
+        run.jumptab_live_roots);
     {
-        const JumpTabSurface& s = explorer.jumpTabSurface();
+        const JumpTabSurface& s = run.jumptab_surface;
         std::printf(
             "lift-gen: 可执行节的 4 字节对齐 dword 候选面：站点=%llu · 值在可执行节内=%llu · 不同候选=%llu "
             "· 已在入口集/已判过=%llu · 已是块首（第四类 D21 处理）=%llu · 可解码=%llu · 解不出=%llu "
@@ -2241,10 +3604,10 @@ int main(int argc, char** argv) {
                      " · 不同候选=%llu · 已在入口集/已判过=%llu · 已是块首=%llu · 可解码=%llu · 解不出=%llu"
                      " · 被重叠挡下=%llu\n",
                      opt.close_jmptab ? "on" : "off", soft_jumptab.added.size(),
-                     explorer.liveJumpTabRoots(), soft_jumptab.outside.size(),
+                     run.jumptab_live_roots, soft_jumptab.outside.size(),
                      soft_jumptab.undecodable.size(), soft_jumptab.overlap.size(),
                      soft_jumptab.shim_targets.size(),
-                     static_cast<unsigned long long>(explorer.jumpTabRounds()),
+                     static_cast<unsigned long long>(run.jumptab_rounds),
                      static_cast<unsigned long long>(s.sites),
                      static_cast<unsigned long long>(s.in_exec),
                      static_cast<unsigned long long>(s.distinct),
@@ -2296,6 +3659,52 @@ int main(int argc, char** argv) {
     printSoftSamples("soft-root/解不出（jmptab）", soft_jumptab.undecodable);
     printSoftSamples("soft-root/重叠（jmptab）", soft_jumptab.overlap);
     printSoftSamples("soft-root/已收（jmptab）", soft_jumptab.added);
+    // ★ BUG-24 / P2（S3）：**表项**的账 —— 独立一行（⛔ 不与 D26 合并：两类来源不同）。
+    std::printf(
+        "lift-gen: 跳表表项（S3/P2）%s 候选=%llu · 收成 leader（建块前）= %zu · 已是入口=%llu · "
+        "越界=%llu · shim=%llu · 落在表区间=%llu · 解不出=%zu · 与已发射块重叠=%zu\n",
+        opt.close_jmptab_items ? "on" : "off",
+        static_cast<unsigned long long>(run.item_seeds), soft_item.added.size(),
+        static_cast<unsigned long long>(run.item_already),
+        static_cast<unsigned long long>(run.item_outside),
+        static_cast<unsigned long long>(run.item_shim),
+        static_cast<unsigned long long>(run.item_in_range), soft_item.undecodable.size(),
+        soft_item.overlap.size());
+    printSoftSamples("soft-root/解不出（jmptab-item）", soft_item.undecodable);
+    printSoftSamples("soft-root/重叠（jmptab-item）", soft_item.overlap);
+    // ★ BUG-24 / S1：**跳表识别**的账（逐表细节走 `--jmptab-audit`；这里只报能对账的汇总）。
+    std::printf(
+        "lift-gen: 跳表识别（S1）%s · 站点=%llu · 候选表=%zu · 认出=%zu（srcA=%zu srcB=%zu）· "
+        "被拒=%zu（其中 ⑤ 区间覆盖根/call目标=%llu）· 表项=%zu · 趟数=%u · 开关 exclude=%d items=%d\n",
+        run.jmptab_on ? "on" : "off", static_cast<unsigned long long>(run.jmptab.sites),
+        run.jmptab.candidates.size(), run.jmptab.tables.size(),
+        [&] {
+            std::size_t a = 0;
+            for (const auto& kv : run.jmptab.tables) if (!kv.second.src_b) ++a;
+            return a;
+        }(),
+        [&] {
+            std::size_t b = 0;
+            for (const auto& kv : run.jmptab.tables) if (kv.second.src_b) ++b;
+            return b;
+        }(),
+        run.jmptab.rejects.size(),
+        static_cast<unsigned long long>(run.jmptab.rejected_covers_protected),
+        run.jmptab.items().size(), run.passes, opt.jmptab_exclude ? 1 : 0,
+        opt.close_jmptab_items ? 1 : 0);
+    // ★ BUG-24 / P1（S2）的读数：被表区间挡下的 leader / `call` 返回 EA。
+    std::printf("lift-gen: 跳表区间不参与解码（S2/P1）%s · 被区间挡下的 leader=%llu（根例外=%llu）· "
+                "call 返回 EA 落在区间=%llu\n",
+                opt.jmptab_exclude ? "on" : "off",
+                static_cast<unsigned long long>(run.data_range_leaders),
+                static_cast<unsigned long long>(run.data_range_root_hits),
+                static_cast<unsigned long long>(run.call_ret_in_data_range));
+    printSoftSamples("跳表区间/挡下的 leader", run.table_range_leaders);
+    // 五类软根的"落在表区间"这一档（P1 新增；⛔ 不写 rejected_targets_）
+    printSoftSamples("soft-root/落在表区间（call）", soft_call.table_range);
+    printSoftSamples("soft-root/落在表区间（store-imm）", soft_store.table_range);
+    printSoftSamples("soft-root/落在表区间（data-ptr）", soft_data.table_range);
+    printSoftSamples("soft-root/落在表区间（jmptab）", soft_jumptab.table_range);
     // ★ D21（第四类）：**跳表入口**的账 —— 独立一行，且必须能读出"只加 entry、0 新块"这一点。
     //   判据的输入面是"可执行节里 4 字节对齐的 dword"站点数；强过滤器是"值必须已经是块首"。
     std::printf(

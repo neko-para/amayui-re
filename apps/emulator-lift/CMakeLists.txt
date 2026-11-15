@@ -265,39 +265,125 @@ set(LIFT_AOT_DIR "${CMAKE_CURRENT_BINARY_DIR}/aot")
 set(LIFT_AOT_CLOSURE "${CMAKE_CURRENT_SOURCE_DIR}/aot/closure.txt")
 set(LIFT_AOT_AGE_EXE "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE")
 find_program(LIFT_AOT_IR_CLANG NAMES clang clang.exe)
+# =====================================================================================
+# ★ AOT IR 的**形状**（唯一一处）：N 份 `.ll` + 每份 `clang -c -O2`。
+#
+#   · `LIFT_AOT_SPLIT=1` ⇒ **今天的单份路径**（`--out out/aot/lift_aot.ll`，产物路径一字不变，
+#     逐字节同产物）。回退只需要 `-DLIFT_AOT_SPLIT=1`，⛔ 不用回滚源码。
+#   · `LIFT_AOT_SPLIT=N>1` ⇒ `lift-gen --split N --out-dir out/aot` 一次全局分析、输出分 N 份
+#     （按分量根 EA 升序贪心分桶），每份一条 `clang -c -O2`，N 个 `.obj` 全链进 AOT。
+#   · **只有一份形状**：release 与 dev 都是这一个形状（⛔ 不搞两套 preset、⛔ 不搞 `-O1`/`-O0` 档）。
+#     依据与读数：`.tmp/aot/irsplit/design.md` §3.3 / `.tmp/aot/irsplit/impl-report.md`。
+# =====================================================================================
+set(LIFT_AOT_SPLIT 8 CACHE STRING
+    "AOT IR 拆成几份：1 = 单份路径（今天的形状）；N>1 = 按分量根 EA 升序贪心分桶（N = 8 是裁决值）")
+# ★ IR 的编译参数**唯一落点**（configure 期断言盯的就是这一行）。
+set(LIFT_AOT_CLANG_FLAGS -c -O2)
 if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLOSURE}")
     set(LIFT_AOT_TARGET_FLAGS "")
     if(WIN32)
         # 与预设 `windows-x64` 的 clang-cl 一致（`-c` 产出 COFF，链接器与 clang-cl 编的 TU 同源）
         set(LIFT_AOT_TARGET_FLAGS --target=x86_64-pc-windows-msvc)
     endif()
-    # ① 生成物：一次 custom command 写三份（`.ll` / pin / 派发表）。
-    #    ★ 第一条命令是**构建期硬闸**：`--check` 红 ⇒ 这个 custom command 失败 ⇒ 构建当场红。
+
+    # =================================================================================
+    # ★ configure 期断言（守卫 3，⛔ 只断言**不相容**，不断言任何墙钟 / 字节数）：
+    #   ① `LIFT_AOT_SPLIT > 1` 时 IR 的参数必须仍是 `-c -O2`；
+    #   ② 出现 `-O1` / `-O0` / `-Os` / `-Oz` / `-flto` / `llc` ⇒ 直接失败；
+    #   ③ `.obj` 的个数必须 == `LIFT_AOT_SPLIT`（下面 `target_sources` 之前复核）；
+    #   ④ `LIFT_AOT_SINGLE_TU`（如将来有人加）与 `LIFT_AOT_SPLIT > 1` 互斥。
+    #   为什么是 configure 期：把 `-O2` 降级 / 换 LTO 是**唯一**能让"拆分构建"在墙钟上
+    #   好看却在运行期变慢的自欺路径；这类改动必须**当场**失败，而不是构建出来再比读数。
+    # =================================================================================
+    if(LIFT_AOT_SINGLE_TU AND LIFT_AOT_SPLIT GREATER 1)
+        message(FATAL_ERROR "LIFT_AOT_SINGLE_TU 与 LIFT_AOT_SPLIT=${LIFT_AOT_SPLIT} 互斥")
+    endif()
+    if(LIFT_AOT_SPLIT GREATER 100)
+        message(FATAL_ERROR "LIFT_AOT_SPLIT=${LIFT_AOT_SPLIT} 超出口令范围（≤ 100）")
+    endif()
+    if(LIFT_AOT_SPLIT GREATER 1)
+        if(NOT "${LIFT_AOT_CLANG_FLAGS}" STREQUAL "-c;-O2")
+            message(FATAL_ERROR
+                "LIFT_AOT_SPLIT=${LIFT_AOT_SPLIT} 时 AOT IR 的参数必须仍是 `-c -O2`，"
+                "实际 = `${LIFT_AOT_CLANG_FLAGS}`（⛔ 不许降 -O1/-O0、⛔ 不许 LTO）")
+        endif()
+        foreach(_bad IN ITEMS -O0 -O1 -Os -Oz -flto -flto=thin llc)
+            if("${LIFT_AOT_CLANG_FLAGS}" MATCHES "(^|;)${_bad}(;|$)")
+                message(FATAL_ERROR
+                    "LIFT_AOT_SPLIT=${LIFT_AOT_SPLIT} 时 AOT IR 的参数里出现 `${_bad}`（⛔ 禁止）")
+            endif()
+        endforeach()
+    endif()
+
+    # ① 生成物：一次 custom command 写全部 `.ll`（N=1 = 一份）+ 分片清单（N>1）+ pin + 派发表。
+    #    ★ `--closure-gate` = **构建期硬闸**（`--check` 的五条校验、同一行汇总）在**生成这一趟**
+    #      里做 —— 不再有第二条独立的 `--check` 命令（那会把同一个 `buildAll` 跑两遍，省 48.6 s）。
+    set(LIFT_AOT_IR_OUTPUTS "")
+    set(LIFT_AOT_OBJS "")
+    set(LIFT_AOT_OBJ_INPUTS "")
+    if(LIFT_AOT_SPLIT GREATER 1)
+        set(LIFT_AOT_GEN_OUTS "")
+        foreach(_i RANGE 0 99)
+            if(_i LESS ${LIFT_AOT_SPLIT})
+                if(_i LESS 10)
+                    set(_idx "0${_i}")
+                else()
+                    set(_idx "${_i}")
+                endif()
+                list(APPEND LIFT_AOT_GEN_OUTS "${LIFT_AOT_DIR}/lift_aot.part${_idx}.ll")
+                list(APPEND LIFT_AOT_OBJS "${LIFT_AOT_DIR}/lift_aot.part${_idx}.obj")
+            endif()
+        endforeach()
+        list(APPEND LIFT_AOT_GEN_OUTS "${LIFT_AOT_DIR}/lift_aot.split.txt")
+        set(LIFT_AOT_SPLIT_MANIFEST "${LIFT_AOT_DIR}/lift_aot.split.txt")
+        set(LIFT_AOT_GEN_STEP2
+            --exe "${LIFT_AOT_AGE_EXE}" --roots "${LIFT_AOT_CLOSURE}"
+            --closure-gate --split ${LIFT_AOT_SPLIT} --split-prefix lift_aot
+            --out-dir "${LIFT_AOT_DIR}"
+            --pin "${LIFT_AOT_DIR}/lift_pin.h"
+            --table "${LIFT_AOT_DIR}/lift_table.inc")
+    else()
+        set(LIFT_AOT_GEN_OUTS "${LIFT_AOT_DIR}/lift_aot.ll")
+        set(LIFT_AOT_OBJS "${LIFT_AOT_DIR}/lift_aot.obj")
+        set(LIFT_AOT_SPLIT_MANIFEST "")
+        set(LIFT_AOT_GEN_STEP2
+            --exe "${LIFT_AOT_AGE_EXE}" --roots "${LIFT_AOT_CLOSURE}"
+            --closure-gate
+            --out "${LIFT_AOT_DIR}/lift_aot.ll"
+            --pin "${LIFT_AOT_DIR}/lift_pin.h"
+            --table "${LIFT_AOT_DIR}/lift_table.inc")
+    endif()
     add_custom_command(
-        OUTPUT "${LIFT_AOT_DIR}/lift_aot.ll" "${LIFT_AOT_DIR}/lift_pin.h"
+        OUTPUT ${LIFT_AOT_GEN_OUTS} "${LIFT_AOT_DIR}/lift_pin.h"
                "${LIFT_AOT_DIR}/lift_table.inc"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${LIFT_AOT_DIR}"
-        COMMAND $<TARGET_FILE:emulator-lift-gen> --check "${LIFT_AOT_CLOSURE}" --exe "${LIFT_AOT_AGE_EXE}"
-        COMMAND $<TARGET_FILE:emulator-lift-gen>
-                --exe "${LIFT_AOT_AGE_EXE}" --roots "${LIFT_AOT_CLOSURE}"
-                --out "${LIFT_AOT_DIR}/lift_aot.ll"
-                --pin "${LIFT_AOT_DIR}/lift_pin.h"
-                --table "${LIFT_AOT_DIR}/lift_table.inc"
+        # ★ 一条命令做完"硬闸 + 生成"：`--closure-gate` 与 `--check` 共用同一份五条校验实现。
+        COMMAND $<TARGET_FILE:emulator-lift-gen> ${LIFT_AOT_GEN_STEP2}
         DEPENDS emulator-lift-gen "${LIFT_AOT_CLOSURE}" "${LIFT_AOT_AGE_EXE}"
-        COMMENT "lift-aot: closure --check + roots/PE -> out/aot/lift_aot.ll + lift_pin.h + lift_table.inc"
+        COMMENT "lift-aot: closure-gate + roots/PE -> out/aot/lift_aot*.ll（split=${LIFT_AOT_SPLIT}）+ lift_pin.h + lift_table.inc"
         VERBATIM)
-    # ② `clang -c -O2`（无 llc；`-Wno-override-module` = 这份 IR 是目标无关的，triple 交给驱动）
-    add_custom_command(
-        OUTPUT "${LIFT_AOT_DIR}/lift_aot.obj"
-        COMMAND ${LIFT_AOT_IR_CLANG} -c -O2 ${LIFT_AOT_TARGET_FLAGS} -Wno-override-module
-                -o "${LIFT_AOT_DIR}/lift_aot.obj" "${LIFT_AOT_DIR}/lift_aot.ll"
-        DEPENDS "${LIFT_AOT_DIR}/lift_aot.ll"
-        COMMENT "lift-aot: lift_aot.ll -> lift_aot.obj（clang -c -O2，无 llc）")
-    set_source_files_properties("${LIFT_AOT_DIR}/lift_aot.obj" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+    # ② `clang -c -O2` 每份一条（无 llc；`-Wno-override-module` = 这份 IR 是目标无关的，triple 交给驱动）
+    #    ★ 这些 custom command **互不依赖**（只依赖自己的 `.ll`）⇒ ninja 天然并行、没有假串行。
+    foreach(_obj ${LIFT_AOT_OBJS})
+        string(REGEX REPLACE "\\.obj$" ".ll" _ll "${_obj}")
+        add_custom_command(
+            OUTPUT "${_obj}"
+            COMMAND ${LIFT_AOT_IR_CLANG} ${LIFT_AOT_CLANG_FLAGS} ${LIFT_AOT_TARGET_FLAGS}
+                    -Wno-override-module -o "${_obj}" "${_ll}"
+            DEPENDS "${_ll}"
+            COMMENT "lift-aot: ${_ll} -> ${_obj}（clang ${LIFT_AOT_CLANG_FLAGS}，无 llc）")
+        set_source_files_properties("${_obj}" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+    endforeach()
+    list(LENGTH LIFT_AOT_OBJS LIFT_AOT_OBJ_COUNT)
+    if(LIFT_AOT_SPLIT GREATER 1 AND NOT LIFT_AOT_OBJ_COUNT EQUAL LIFT_AOT_SPLIT)
+        # 守卫 3-③：obj 数 != 份数 ⇒ 链接期缺符号 / 多一份孤儿（⛔ 不许静默）。
+        message(FATAL_ERROR
+            "AOT 形状自相矛盾：LIFT_AOT_SPLIT=${LIFT_AOT_SPLIT} 但 obj 数=${LIFT_AOT_OBJ_COUNT}")
+    endif()
     target_sources(emulator-lift-aot PRIVATE
         src/aot/aot_dispatch.cpp
         src/aot/aot_run.cpp
-        "${LIFT_AOT_DIR}/lift_aot.obj")
+        ${LIFT_AOT_OBJS})
     # ★ `aot_dispatch.cpp` `#include "lift_table.inc"`（生成物）⇒ 必须显式声明文件级依赖，
     #   否则并行构建可能在生成之前就编译它（clean build 才显形的那种红）。
     set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/aot/aot_dispatch.cpp"
@@ -305,8 +391,17 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
     target_include_directories(emulator-lift-aot PRIVATE "${LIFT_AOT_DIR}")
     # ★ 这个宏是"生成物在场"的唯一判据（`aot_dispatch.cpp` 用它决定表有没有内容；
     #   `aot_main.cpp` 用它决定"没有生成物"的响亮报告）。
-    target_compile_definitions(emulator-lift-aot PRIVATE LIFT_AOT_HAS_GENERATED=1)
-    message(STATUS "emulator-lift-aot: 执行源 = ${LIFT_AOT_DIR}/lift_aot.obj（clang = ${LIFT_AOT_IR_CLANG}）")
+    # ★ `LIFT_AOT_SHAPE` = 形状进二进制 + 启动横幅一行（判据档只能是 `single-O2` / `splitN-O2` 之一）。
+    if(LIFT_AOT_SPLIT GREATER 1)
+        set(LIFT_AOT_SHAPE "split${LIFT_AOT_SPLIT}-O2")
+    else()
+        set(LIFT_AOT_SHAPE "single-O2")
+    endif()
+    target_compile_definitions(emulator-lift-aot PRIVATE
+        LIFT_AOT_HAS_GENERATED=1
+        LIFT_AOT_SHAPE="${LIFT_AOT_SHAPE}"
+        LIFT_AOT_SPLIT=${LIFT_AOT_SPLIT})
+    message(STATUS "emulator-lift-aot: 执行源 = ${LIFT_AOT_OBJS}（shape=${LIFT_AOT_SHAPE}；clang = ${LIFT_AOT_IR_CLANG}）")
 else()
     message(STATUS
         "emulator-lift-aot: 缺 clang / 执行源（${LIFT_AOT_AGE_EXE}）/ closure.txt ⇒ 替身 TU："
@@ -443,6 +538,19 @@ target_sources(emulator-lift-runtime PRIVATE
 target_link_libraries(emulator-lift-runtime PRIVATE PNG::PNG)
 
 enable_testing()
+
+# =====================================================================================
+# ★ AOT 形状守卫 ①：**分片清单自洽**（顶层无条件 ⇒ `pure` 档，默认 `ctest` 就跑）
+#   判据在 `tests/cmake/lift_aot_split.cmake`（Σfunctions == PIN_FUNCTIONS / 符号集合两两不交且
+#   并集 == 派发表 / 每份 ≤ 20 MB / 份数 == LIFT_AOT_SPLIT / 清单 sha256 与文件一致）。
+#   ⛔ 不断言任何"当前数字"：全部由 `out/aot/` 的产物自己算。
+#   没有生成物（缺 clang / 执行源 / closure.txt）时脚本自己 skip（不红）。
+# =====================================================================================
+add_test(NAME lift-aot-split-manifest
+         COMMAND ${CMAKE_COMMAND}
+                 -DLIFT_AOT_DIR=${LIFT_AOT_DIR}
+                 -DLIFT_AOT_SPLIT=${LIFT_AOT_SPLIT}
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/lift_aot_split.cmake)
 
 # =====================================================================================
 # 测试（`LIFT_BUILD_TESTS`，默认 ON；`-DLIFT_BUILD_TESTS=OFF` ⇒ 只构建产品二进制）
@@ -1836,5 +1944,33 @@ endif()
 target_link_libraries(lift-s7-structured PRIVATE emulator-lift-runtime)
 add_test(NAME lift-s7-structured COMMAND lift-s7-structured)
 set_tests_properties(lift-s7-structured PROPERTIES SKIP_RETURN_CODE 77)
+
+# =====================================================================================
+# BUG-24 / `REQ-01M7FS59VTS7X4TGVK6Z7MTKJG`：**跳表项必须可派发 + 表区间内不许有块首**
+# （`lift-jmptab-dispatch`）
+# ★ 判据（红了意味着什么）：`emulator-lift-gen --jmptab-audit` 的**退出码非 0** —— 审计模式把
+#   P-1..P-4 四条**性质**逐张表当场判掉：
+#     P-1 `[ea, ea+4n)` 落在同一个可执行节内；
+#     P-2 `[ea, ea+4n)` 内**不存在任何已发射块的首 EA**（⇒ 表字节没有被当指令解码）；
+#     P-3 每个"在可执行节内 ∧ 能解码"的表项都**可派发**（`dispatch.has(item)`）；
+#     P-4 表项无自指（`items_selfref == 0` ∧ `in_section == 1`）。
+#   失败时必须能**只靠日志定位到 EA**：不过的性质逐条打到 stderr
+#   （`[jmptab/P-2] ea=… 表区间 […] 内有块首 0x…` / `[jmptab/P-3] ea=… 有 N 个表项…不可派发`）。
+# ★ 为什么是 `pure` 档：`add_test` 在**最外层**（不嵌进 `if` / `foreach` / `function`）⇒ 默认
+#   `ctest` 就跑（AGENTS.md §12.4：档位判据 = 注册位置，⛔ 不建清单文件）。
+# ★ 输入只有 `--exe <AGE.EXE>` + `--roots aot/closure.txt`：⛔ 不需要 `--out` / `--pin` / `--table`
+#   （审计模式跑 ①–③ + 分区 + D21 到 `dispatch_entries` 定型后**提前返回**，不发射 IR、不写 `.ll`）；
+#   ⛔ **不依赖 `LIFT_AGE_LST`**（产品路径不许读 `.lst`，守卫也不许）。
+# ★ `COMMAND` 用**裸 target 名**（`emulator-lift-gen`，CMake 会替换成可执行路径）而不是
+#   `$<TARGET_FILE:…>`：`tools/test/cmake-test-entry.test.mjs` 的解析器要求 COMMAND 的首 token
+#   能映射到 `add_executable` 的源文件（否则"每个 --flag 都在源文件里有字面量"这条守卫判不了）。
+# ★ ⛔ 不断言任何当前数字（不写 `tables == 62` / `items == 663`）：判据只有性质 + 退出码。
+#   BUG-24 修复前的实测（`--no-jmptab-exclude --no-close-jmptab-items`）：P-2 红在 15 张表
+#   （34 个块首）、P-3 红在 5 张表（30 项）—— 这些是**读数**，不是断言（见
+#   `.tmp/aot/bug24/impl-report.md`）。
+# =====================================================================================
+add_test(NAME lift-jmptab-dispatch
+    COMMAND emulator-lift-gen --jmptab-audit
+            --exe "${LIFT_AOT_AGE_EXE}" --roots "${LIFT_AOT_CLOSURE}")
 
 endif() # LIFT_BUILD_TESTS

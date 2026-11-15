@@ -77,7 +77,8 @@ struct X87State {
 //   代码。所以把控制权交回去：
 //     ① shim 把 guest 栈铺成回调帧（`[esp]` = 续延桩地址，`[esp+4..]` = 参数），把 `cpu.eip`
 //        指向 guest 回调，并置 `ShimCall::take_control` ⇒ `invoke()` 不再改写 esp/eip；
-//     ② 回调 `ret` 落到**续延桩**（一块 `BlockCache::installShim` 出来的块），它的 shim 读这份状态，
+//     ② 回调 `ret` 落到**续延桩**（一条**注册表发过号的真桩 EA** —— 两条臂都认它：
+//        解释器用 `BlockCache::installShim` 装块，AOT 用桩页内的 `byStubEa`），它的 shim 读这份状态，
 //        决定"下一个回调"还是"恢复原始 esp/eip 返回调用点"。
 //   ⛔ 不要用它做"通用异步"：本模拟器没有线程 / APC，这里只是"同步枚举回调"的一条受控通道。
 struct GuestCallbackState {
@@ -88,6 +89,12 @@ struct GuestCallbackState {
     std::uint32_t callback_ea = 0;   // guest 回调地址
     std::uint32_t scratch_ea = 0;    // 参数缓冲区（guest 堆；由发起方分配）
     std::uint32_t scratch_len = 0;
+    // ★ 续延桩的 guest 地址 = 注册表发给 `lift!__guest_callback_return` 的那条 `ShimDef::stub_ea`
+    //   （形状 = 桩页基 + 槽号*4）。⛔ 不是字面量：解释器与 AOT **都**只认这种真桩 EA
+    //   （AOT 的识别集合 = 派发表 ∪ 桩页内 `byStubEa`）。由发起方在 `startGuestCallback` 之前填。
+    //   ★ 加这个字段不动任何被钉住的偏移：`lift_abi.cpp` 的 18 条 static_assert 只钉 `shim`
+    //     **之前**的字段（r / eip / eflags / fpu / xmm / mxcsr / seg / fs_base / gs_base）。
+    std::uint32_t cont_ea = 0;
     std::vector<std::uint32_t> args; // 每次回调的第 0 个参数（指向 scratch 里的一个串）
     std::size_t next = 0;            // 下一个要传的参数下标
     const char* api = nullptr;       // 诊断用（"EnumSystemLocalesA"）

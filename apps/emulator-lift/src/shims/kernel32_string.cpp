@@ -693,8 +693,15 @@ void shimGetLocaleInfoA(X86& cpu, ShimCall& call) {
 // ---------------------------------------------------------------------------------------
 // guest 回调的续延桩（`EnumSystemLocalesA` 用；机制见 x86.h 的 GuestCallbackState）
 // ---------------------------------------------------------------------------------------
-// ★ 固定落点：桩页是 0x7FFE0000..0x7FFE7FFF（0x2000 槽 × 4 字节），栈顶在 0x70000000
-//   ⇒ 0x7FFEF000 不被任何区占用，也不会与 guest 的镜像 / 堆 / 栈重叠。
+// ★ 续延桩的 guest 地址**不是一个常量**：它是注册表发给 `lift!__guest_callback_return` 的那条
+//   `ShimDef::stub_ea`（形状 = `桩页基 + 槽号*4`，发号点见 `shims.cpp:352-367`）。生产路径上由
+//   `ShimRegistry::bind` 的 extras 循环发号（`shims.cpp:421-433`），裸夹具上由调用期 `addRuntime`
+//   现发（见 `shimEnumSystemLocalesA`）⇒ **两条臂都认得它**：
+//     解释器：`BlockCache::installShim(cont_ea, id)`（dispatcher 先查 shim 表，`x86.cpp`）；
+//     AOT   ：桩页内 + `byStubEa` 命中（`aot_run.cpp:729-731`）。
+// ★ 下面这个常量**只是历史 / 诊断用**：它曾经就是"续延桩地址"，但那是个**在桩页之外**的字面量
+//   （桩页 = `[0x7FFE0000, 0x7FFE8000)` = 0x2000 槽 × 4 字节，`image.h:98-99`）⇒ AOT 的识别集合
+//   永远不认它，只有解释器的块缓存认得。⛔ 不要再把它铺进 guest 栈。
 constexpr std::uint32_t kCallbackContinuationEa = 0x7FFEF000u;
 // locale 串的**固定**暂存页（1 页；不借 guest 堆 —— 那样纯档夹具还必须先初始化堆，
 // 而这里要的只是"一块确定的 guest 内存"）。0x7FFFD000 在 TEB/PEB/TLS/argv/env 之外、桩页之下。
@@ -704,7 +711,7 @@ constexpr std::uint32_t kLocaleScratchSize = 0x1000u;
 constexpr const char* kCallbackContinuationName = "__guest_callback_return";
 
 // 在 guest 栈上铺一帧"回调调用"，把 eip 交给 guest 回调：
-//   [esp]   = 续延桩地址（回调的返回地址）
+//   [esp]   = 续延桩地址（回调的返回地址 = `st.cont_ea`，**注册表发的真桩 EA**，⛔ 不是字面量）
 //   [esp+4] = 第 0 个参数
 void startGuestCallback(X86& cpu, ShimCall& call) {
     GuestCallbackState& st = cpu.shim.callback;
@@ -712,13 +719,19 @@ void startGuestCallback(X86& cpu, ShimCall& call) {
         shimAbort("lift", kCallbackContinuationName, "续延状态非法（active=%d next=%zu size=%zu）",
                   st.active ? 1 : 0, st.next, st.args.size());
     }
+    // ★ 铺出去的 EA 必须是真桩 EA：它是 guest `ret` 之后**两条臂唯一的落点**。发起方
+    //   （`shimEnumSystemLocalesA`）已经证过"它可被路由"，这里再兜一道 —— 静默铺 0 会让 guest
+    //   `ret` 到 0，归因跑到很远的地方去。
+    if (st.cont_ea == 0) {
+        shimAbort("lift", kCallbackContinuationName, "续延桩 EA 为空（发起方没填 st.cont_ea）");
+    }
     // 回调的 stdcall 帧必须落在已提交的栈里（base = 原始调用点的 esp）
     if (st.saved_esp < 8u || !cpu.mem->committed(st.saved_esp - 8u, 8u)) {
         shimAbort("lift", st.api ? st.api : "callback", "guest 栈不够铺回调帧：saved_esp=0x%08X",
                   st.saved_esp);
     }
     cpu.esp() = st.saved_esp - 8u;
-    cpu.mem->wr32(st.saved_esp - 8u, kCallbackContinuationEa);
+    cpu.mem->wr32(st.saved_esp - 8u, st.cont_ea);
     cpu.mem->wr32(st.saved_esp - 4u, st.args[st.next]);
     cpu.eip = st.callback_ea;
     call.take_control = true;  // ⛔ 别让 invoke() 再弹参 / 改 eip
@@ -734,6 +747,7 @@ void finishGuestCallback(X86& cpu, ShimCall& call, std::uint32_t result) {
     st.next = 0;
     st.scratch_ea = 0;
     st.scratch_len = 0;
+    st.cont_ea = 0;
     call.take_control = true;
     call.result = result;
 }
@@ -742,8 +756,7 @@ void shimGuestCallbackReturn(X86& cpu, ShimCall& call) {
     GuestCallbackState& st = cpu.shim.callback;
     if (!st.active) {
         shimAbort("lift", kCallbackContinuationName,
-                  "续延桩被调到，但没有活动的 guest 回调 —— guest 跳到了 0x%08X？",
-                  kCallbackContinuationEa);
+                  "续延桩被调到，但没有活动的 guest 回调 —— guest 跳到了 0x%08X？", cpu.eip);
     }
     // 回调的返回值就是 EAX（BOOL CALLBACK EnumLocalesProcA(LPSTR)）
     const std::uint32_t callback_result = cpu.eax();
@@ -798,43 +811,78 @@ void shimEnumSystemLocalesA(X86& cpu, ShimCall& call) {
                   "上一次 guest 回调没有返回（active=true, api=%s）—— 不允许重入枚举",
                   st.api ? st.api : "?");
     }
-    // ★ 续延桩的"EA → 可调用"机制：**唯一**的机制是把它装进块缓存（`installShim`，下一行）。
-    //   ⛔ 事实核查（复审 T2a P1-1，别再把这里解释成"没关系"）：
-    //     · `kCallbackContinuationEa` 是**字面量** 0x7FFEF000，不是桩页发出来的地址；
-    //     · 这个 shim 由 `registerStringShims` 的 `s.add(...)` 注册，而 `ShimRegistry::add`
-    //       **不分配 `stub_ea`**（保持 0，见 shims.cpp），`byStubEa` / `idForStub` 又都要求
-    //       `ea != 0` ⇒ 宿主的桩表里**没有** `0x7FFEF000 → id` 这条，AOT 也接不住它。
-    //   ⇒ 没有块缓存时（AOT 臂 / 手搓 X86）"交给宿主的桩表"是不成立的：继续往下走会先写
-    //     locale 暂存页、再把 `0x7FFEF000` 写进 guest 栈并把 eip 交给 guest 回调，最后在**返回点**
-    //     因为"那个 EA 解不出来"失败 —— 归因不指向真因（缺的是续延执行能力，不是 guest 的错）。
-    //   ★ 判据放在**任何 guest 可见动作之前**（写暂存页 / 铺回调帧都在下面），停法与
-    //     `RaiseException` / `native_image_upload` 同一套：置停 + `stop_kind = Trap` + 说明真因，
-    //     由 `Machine::run` 的 shim 路径收口成 `RunResult`（`Trap` ⇒ 非 0 退出）。
-    //   ★ 写成 `!cache && !byStubEa(...)` 而不是只判 `!cache`：如果将来续延桩改成 `addRuntime`
-    //     发的**真**桩 EA（复审建议 (a)），这条守卫会自动放宽，不必回来改。
+    // ★ 续延桩的"EA → 可调用"机制：**只有一条**，而且与臂无关 —— 铺进 guest 栈的那个地址必须是
+    //   **注册表真的发过号的桩 EA**（`ShimDef::stub_ea`）。于是两条臂都认得它：
+    //     解释器：`cpu.cache->installShim(cont_ea, cont->id)`（下面那行；块缓存能装任意 EA，
+    //             但**桩表**才是唯一真源，这里只是替它装块）；
+    //     AOT   ：识别集合 = 派发表 ∪ 桩页内 `byStubEa`（`aot_run.cpp:729-731`）⇒ 真桩 EA 命中。
+    //   ⛔ 事实核查（这一段的历史必须留着，但结论要写对 —— 上一版把它写错了两处）：
+    //     · 旧实现在这里铺的是**字面量** `0x7FFEF000`（`kCallbackContinuationEa`）。它**在桩页外**
+    //       （桩页 = `[0x7FFE0000, 0x7FFE8000)`，`image.h:98-99`）⇒ AOT 的识别集合永远不认它；
+    //       解释器能跑只因为 `installShim` 把那个字面量塞进了 `BlockCache`（`x86.cpp` 的
+    //       `shim_blocks_`，dispatcher 先查这张表）⇒ "解释器能跑"**不等于**"这条路对"。
+    //     · 这个 shim 由 `registerStringShims` 的 `s.add(...)` 登记：`add` 只置 `declared = true`、
+    //       **不发票**；桩 EA 由 `ShimRegistry::bind` 的 **extras 循环**补发（`shims.cpp:421-433`）
+    //       ⇒ **生产路径上它一直有一条真桩 EA**。"桩表里没有这个 EA"是把"没有**那个字面量**"
+    //       说成了"没有 EA"（所以旧注释那句"缺的是续延执行能力"是错的：缺的是用对地址）。
+    //     · 旧守卫读的是**字面量**（`byStubEa(0x7FFEF000)`）⇒ 它**永远不会放宽**：桩 EA 的形状是
+    //       `page + slot*4`，slot 由登记序决定 ⇒ 没有任何常量能等于它。旧注释「将来改成
+    //       `addRuntime` 就会自动放宽、不必回来改」是**假的**；而且把注册点换成 `addRuntime`
+    //       在注册期会因 `shim_slots_ == 0` 直接失败（`shims.cpp:211-216`）⇒ 必须改**铺出去的 EA**。
+    //   ★ 唯一不变量（与臂无关）：铺进 guest 栈的 EA 必须能被 dispatcher 路由回本 shim ——
+    //     `cpu.cache != nullptr`（解释器：块缓存能装任意 EA）**或** `byStubEa(cont_ea)` 命中
+    //     （AOT：没有块缓存，只有桩表）。判据放在**任何 guest 可见动作之前**（写暂存页 / 铺回调帧
+    //     都在下面），停法与 `RaiseException` / `native_image_upload` 同一套：置停 + `stop_kind =
+    //     Trap` + 说明真因，由 `Machine::run` 的 shim 路径收口成 `RunResult`（`Trap` ⇒ 非 0 退出）。
     ShimDef* cont = cpu.shims ? cpu.shims->findMutable("lift", kCallbackContinuationName) : nullptr;
     if (!cont) {
         shimAbort("kernel32", api,
                   "内部续延 shim `lift!%s` 没注册（registerStringShims 未跑？）",
                   kCallbackContinuationName);
     }
-    // ★ 为什么 `cont` 查到了也还要判可达性：`findMutable` 只证明"注册表里有这项"，
-    //   不证明"那个固定 EA 调得动"（上面那段事实核查）。
-    const bool callable_through_stub = cpu.shims->byStubEa(kCallbackContinuationEa) != nullptr;
-    if (cpu.cache == nullptr && !callable_through_stub) {
+    // ★ `cont->stub_ea`：生产路径由 `bind` 的 extras 循环发号（⇒ 这里恒非 0、**消耗 0 个新槽**、
+    //   `registered` / `bound-stub-ea` / `next-slot` 三个读数都不动）。
+    //   0 只出现在"没有 bind 的手搓夹具"：桩页若由 `configureStubPage` 给过，就在调用期现发一个
+    //   （`addRuntime` 是幂等的：复用同一条登记、**不改 id**）；仍然拿不到 ⇒ 下面响亮停。
+    //   ⚠ `addRuntime` 可能 `defs_.push_back` ⇒ 必须用**它返回的**指针，不能再用上面 `findMutable` 那条。
+    if (cont->stub_ea == 0) {
+        cont = cpu.shims->addRuntime("lift", kCallbackContinuationName, Conv::Stdcall, 0,
+                                     &shimGuestCallbackReturn);
+    }
+    const std::uint32_t cont_ea = cont != nullptr ? cont->stub_ea : 0u;
+    if (cont_ea == 0) {
+        // 连"真实地址"都不存在（既没 bind、也没有可用桩页）⇒ 响亮停。
+        // ⛔ 不退回字面量 kCallbackContinuationEa：它在桩页外，只有解释器的块缓存认得（本 bug 的成因）。
         std::fprintf(stderr,
-                     "[kernel32] %s：续延桩 0x%08X 不可调用 —— 这台 cpu 没有块缓存"
-                     "（`X86::cache == nullptr`，AOT 臂 / 手搓夹具），而宿主的桩表里也没有这个 EA"
-                     "（`ShimRegistry::add` 不发 `stub_ea`）⇒ 无法执行 guest 回调的续延。\n"
-                     "  ⛔ 这里**在任何 guest 可见动作之前**停：不写 locale 暂存页、不铺回调帧。\n",
-                     api, kCallbackContinuationEa);
+                     "[kernel32] %s：续延 shim `lift!%s` 没有桩 EA —— 注册表还没给它发号"
+                     "（`bind()` 没跑过，这台 cpu 也没有可用桩页 `configureStubPage`）⇒ 铺不进 guest 栈。\n"
+                     "  ⛔ 这里**在任何 guest 可见动作之前**停；⛔ 不退回字面量 0x%08X"
+                     "（它落在桩页 [0x%08X, 0x%08X) 之外，AOT 臂永远接不住它）。\n",
+                     api, kCallbackContinuationName, kCallbackContinuationEa, cpu.shims->stubPage(),
+                     cpu.shims->stubPage() + cpu.shims->stubSlots() * 4u);
         cpu.running = false;
-        cpu.stop_why = "kernel32!EnumSystemLocalesA：缺少续延执行能力（没有块缓存、桩表也没有续延桩 EA）";
+        cpu.stop_why = "kernel32!EnumSystemLocalesA：续延 shim 没有桩 EA（bind 没跑过 / 没有桩页）";
         cpu.stop_kind = HostStopKind::Trap;
         call.result = 0;  // 停机路径上的返回值不重要；⛔ 但别留未初始化
         return;
     }
-    if (cpu.cache) cpu.cache->installShim(kCallbackContinuationEa, cont->id);
+    // ★ 唯一不变量：这个 EA 必须能被**两个** dispatcher 之一路由回本 shim。
+    //   解释器臂靠块缓存（`installShim` 下一行），AOT 臂没有块缓存 ⇒ 只有桩表能接住。
+    const bool routable = cpu.shims->byStubEa(cont_ea) != nullptr;
+    if (!routable && cpu.cache == nullptr) {
+        std::fprintf(stderr,
+                     "[kernel32] %s：续延桩 EA 0x%08X 不可调用 —— 这台 cpu 没有块缓存"
+                     "（`X86::cache == nullptr`，AOT 臂 / 手搓夹具），而宿主的桩表里也查不到这个 EA"
+                     "（`ShimRegistry::byStubEa` 没命中）⇒ 无法执行 guest 回调的续延。\n"
+                     "  ⛔ 这里**在任何 guest 可见动作之前**停：不写 locale 暂存页、不铺回调帧。\n",
+                     api, cont_ea);
+        cpu.running = false;
+        cpu.stop_why = "kernel32!EnumSystemLocalesA：续延桩 EA 不能被桩表路由（没有块缓存、桩表也没有它）";
+        cpu.stop_kind = HostStopKind::Trap;
+        call.result = 0;  // 停机路径上的返回值不重要；⛔ 但别留未初始化
+        return;
+    }
+    if (cpu.cache) cpu.cache->installShim(cont_ea, cont->id);
 
     // locale 串放进**固定暂存页**（每条 16 字节对齐；8 位十六进制 + 结尾 0 = 9 字节）
     const std::uint32_t count = static_cast<std::uint32_t>(sizeof(kLocales) / sizeof(kLocales[0]));
@@ -861,6 +909,8 @@ void shimEnumSystemLocalesA(X86& cpu, ShimCall& call) {
     st.callback_ea = callback;
     st.scratch_ea = scratch;
     st.scratch_len = count * stride;
+    // ★ 续延桩 EA（真桩页地址）：`startGuestCallback` 把它铺成回调的返回地址，两条臂都认它。
+    st.cont_ea = cont_ea;
     st.args.clear();
     st.next = 0;
     st.api = api;

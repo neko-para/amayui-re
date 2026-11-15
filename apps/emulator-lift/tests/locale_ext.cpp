@@ -9,6 +9,9 @@
 //      参数是 8 位十六进制 LCID 串、顺序确定、回调返回 FALSE 时**停止**后续回调。
 //      ★ 这条同时是**框架能力**的判据：shim 里把控制权交回 guest（`ShimCall::take_control` +
 //      续延桩）这条路只有这里跑得到 —— 它坏了，这里一定红。
+//   ②' **无块缓存**（`X86::cache == nullptr` = AOT 臂的形状）：续延桩**只能**由桩表（`byStubEa`）
+//      路由 ⇒ 铺进 guest 栈的那个 EA 必须是注册表发的真桩 EA（不是桩页外的字面量）、2 次回调都发生、
+//      停因不是 `Trap`。★ 这条是"解释器能跑 ≠ AOT 能跑"的缺口守卫（AOT 走"加载存档"时撞到）。
 //   ③ `GetStringTypeW`（CT_CTYPE1 的位值 + dwInfoType 不被丢弃）与 `LCMapStringW`
 //      （cchSrc=-1 映射整串 / cchDest=0 问大小 / 未实现的 dwMapFlags ⇒ ERROR_INVALID_FLAGS）：
 //      REQ-01M6K69JNGE7EP8ZNRDAXNSYZZ / REQ-01M6K69K28AT5VNKZAJXT6PZJ4。
@@ -25,6 +28,7 @@
 #include "check.h"
 #include "fixture.h"
 #include "runtime/cp932.h"
+#include "runtime/lift_abi.h"  // `::lift_shim` = AOT 臂唯一的 shim 入口（②' 用同一条）
 #include "runtime/machine.h"
 #include "shims/register.h"
 
@@ -218,6 +222,10 @@ int main() {
         g_current_case = "enum-system-locales-callback";
         Fixture f;
         lift::registerStringShims(f.m.shims());
+        // ★ 桩页：bare 夹具没有 `bind()`，而续延 shim（`lift!__guest_callback_return`）的桩 EA
+        //   只能由注册表发号（生产路径 = `bind` 的 extras 循环，夹具 = 调用期 `addRuntime`）
+        //   ⇒ 先显式给一页，否则 shim 拿不到"真实、两臂都认得"的 EA（它会响亮停，不退回字面量）。
+        f.m.shims().configureStubPage(f.m.layout().shim_page, f.m.layout().shim_slots);
         LIFT_CHECK(f.ok);
         const std::uint32_t enum_loc = f.use("EnumSystemLocalesA");
 
@@ -263,11 +271,139 @@ int main() {
         LIFT_CHECK(f.ok);
     }
 
+    // ②' ★ **无块缓存**（= AOT 臂的形状）：`X86::cache == nullptr` 时续延桩**只能**由桩表路由。
+    //
+    // 判据（红了意味着什么）：
+    //   ① 修前**必红**：铺进 guest 栈的续延桩 EA 是字面量 `0x7FFEF000`，它**在桩页之外**
+    //      （桩页 = `[0x7FFE0000, 0x7FFE8000)`）⇒ `byStubEa` 查不到 ⇒ 这一次 `EnumSystemLocalesA`
+    //      在任何 guest 可见动作之前 `Trap`（用户看到的那条"续延桩不可调用"）；
+    //   ② 2 个 locale 的回调**都真的发生**（计数 = 2、记录 = 表序）——"真的被调用"不是"登记了就算"；
+    //   ③ 停因**不是** `Trap`（`stop_kind != Trap`、`stop_why == nullptr`、`running` 仍为真）；
+    //   ④ 铺在 guest 栈上的那个 EA **能被 `byStubEa` 查到**，且它 == 注册表发给
+    //      `lift!__guest_callback_return` 的那条 `stub_ea`、恰好被派发 2 次。
+    //
+    // ★ 为什么"无缓存"还能用解释器代跑 guest 代码：`Machine::run` 解块读的是**它自己的**
+    //   `cache_`（`machine.cpp:1600` 的 `cache_.get`），`X86::cache` 只被 shim 自己与 SMC 钩子读
+    //   （见 `runtime/decode_cache.h` 的头注释）⇒ 置空 `cpu.cache` 后解释器照常解码，而**每一次
+    //   shim 决策**都发生在 AOT 臂的条件里（这正是本用例要测的那一个判断）。
+    //   AOT 臂里 guest 回调由 **lifted 代码**执行；夹具没有 lifted 产物，这里用解释器跑同一段字节
+    //   —— 差别只在"谁执行回调"，不在"shim 看到什么"。
+    // ★ 派发形状照抄 AOT：`while (eip 是桩 EA) lift_shim(...)` ↔ 否则解释器代跑到栈顶返回地址
+    //   （`aot_run.cpp:717-796` 的 shim 分支 + 派发表分支）。
+    {
+        g_current_case = "enum-locales-no-cache";
+        Fixture f;
+        lift::registerStringShims(f.m.shims());
+        f.m.shims().configureStubPage(f.m.layout().shim_page, f.m.layout().shim_slots);
+        LIFT_CHECK(f.ok);
+        const std::uint32_t enum_loc = f.use("EnumSystemLocalesA");
+        const std::uint32_t count_ea = f.zeroData(4);
+        const std::uint32_t record_ea = f.zeroData(8);
+        const std::uint32_t main_ea = lift_fixture::kCodeBase;
+        const std::uint32_t cb_ea = 0x00408000u;
+        {
+            Asm a(main_ea);
+            a.pushImm(0u);     // dwFlags = 0（等价 LCID_SUPPORTED）
+            a.pushImm(cb_ea);  // lpLocaleEnumProc
+            a.callRel(enum_loc);
+            a.ret();
+            LIFT_CHECK(f.m.placeCode(main_ea, a.b.data(), a.b.size(), &f.err));
+        }
+        {
+            // 与 ② 同一个回调：读 8 位十六进制串的第 4..7 个字符 → 记录 → 计数 +1 → 返回 1（继续）
+            Asm a(cb_ea);
+            a.u8(0x8B); a.u8(0x0D); a.u32(count_ea);              // mov ecx,[count]
+            a.u8(0x8B); a.u8(0x54); a.u8(0x24); a.u8(0x04);       // mov edx,[esp+4]
+            a.u8(0x8B); a.u8(0x52); a.u8(0x04);                   // mov edx,[edx+4]
+            a.u8(0x89); a.u8(0x14); a.u8(0x8D); a.u32(record_ea);  // mov [record+ecx*4],edx
+            a.u8(0xFF); a.u8(0x05); a.u32(count_ea);              // inc dword [count]
+            a.movEaxImm(1u);                                      // 继续枚举
+            a.retImm16(4u);                                       // stdcall 弹 1 个参数
+            LIFT_CHECK(f.m.placeCode(cb_ea, a.b.data(), a.b.size(), &f.err));
+        }
+        f.rearmStack();
+        lift::X86& cpu = f.m.cpu();
+        cpu.cache = nullptr;  // ← AOT 臂的条件（`AotHost::prepare` 也是这么置的：`aot_host.cpp:80`）
+        cpu.eip = main_ea;
+
+        // ★ 续延 shim 的 EA 是**调用期**才发出来的（bare 夹具：`bind` 没跑过 ⇒ `stub_ea == 0`
+        //   直到 `shimEnumSystemLocalesA` 里那次 `addRuntime`）⇒ 现在只取登记项，EA 跑完再读。
+        const lift::ShimDef* cont_def = cpu.shims->find("lift", "__guest_callback_return");
+        LIFT_CHECK(cont_def != nullptr);
+
+        int cont_dispatches = 0;
+        std::uint32_t cont_ea_seen = 0;
+        std::string loop_problem;
+        for (int step = 0; step < 64 && loop_problem.empty(); ++step) {
+            const std::uint32_t ea = cpu.eip;
+            if (ea == lift_fixture::kSentinel) break;  // 回到主程序栈哨兵 ⇒ 正常结束
+            const lift::ShimDef* via_stub = cpu.shims->byStubEa(ea);
+            if (via_stub != nullptr) {
+                // ---- ① 桩 EA：走 AOT 的同一条入口（`aot_run.cpp:761` 的 `lift_shim_id`）----
+                if (via_stub == cont_def) {
+                    ++cont_dispatches;
+                    cont_ea_seen = ea;
+                }
+                LiftRegs regs{};
+                lift::liftCpuToRegs(cpu, regs);
+                const std::uint32_t next = ::lift_shim(ea, &regs, &cpu);
+                lift::liftRegsToCpu(regs, cpu);
+                if (!cpu.running || next == ::kLiftHalt) break;  // 停机（下面按 stop_kind 判红）
+                cpu.eip = next;
+                continue;
+            }
+            // ---- ② guest 代码（AOT 里是 lifted 代码）⇒ 解释器代跑到**栈顶那个返回地址**为止 ----
+            const std::uint32_t ret_on_stack = f.m.mem().rd32(cpu.esp());
+            lift::RunOptions o;
+            o.until_ea = ret_on_stack;
+            o.stop_on_first_shim = true;  // 主程序段：`call` 落到桩 EA 时**不**让解释器自己执行 shim
+            o.max_insns = cpu.insns + 1000u;
+            const lift::RunResult r = f.m.run(o);
+            if (r.reason == lift::StopReason::UntilEa && cpu.eip == lift_fixture::kSentinel) break;
+            if (r.reason == lift::StopReason::FirstShim) continue;  // eip 已是桩 EA ⇒ 回 ①
+            if (r.reason != lift::StopReason::UntilEa) {
+                loop_problem = std::string("解释器代跑 guest 代码时意外停：") + lift::stopReasonName(r.reason) +
+                               " — " + r.detail;
+                break;
+            }
+            // ★ 判据 ④：刚停下的那个"回调返回地址"必须能被桩表路由（修前它是桩页外的字面量）
+            if (cpu.shims->byStubEa(cpu.eip) == nullptr) {
+                char buf[160];
+                std::snprintf(buf, sizeof(buf),
+                              "guest 回调的返回地址 0x%08X 在桩表里查不到（铺出去的不是真桩 EA？）",
+                              cpu.eip);
+                loop_problem = buf;
+            }
+        }
+        LIFT_CHECK(loop_problem.empty());
+        if (!loop_problem.empty()) std::fprintf(stderr, "  [enum-locales-no-cache] %s\n", loop_problem.c_str());
+        // ③ 停因不是 Trap：shim 不许把"没有块缓存"当成不可执行的理由
+        LIFT_CHECK(cpu.running);
+        LIFT_CHECK(cpu.stop_kind != lift::HostStopKind::Trap);
+        LIFT_CHECK(cpu.stop_why == nullptr);
+        LIFT_CHECK(cpu.eip == lift_fixture::kSentinel);
+        // ④ 栈上那个 EA == 注册表发的真桩 EA，且被派发 2 次（locale 表 2 条）
+        const std::uint32_t cont_ea = cont_def != nullptr ? cont_def->stub_ea : 0u;
+        LIFT_CHECK(cont_ea != 0u);
+        LIFT_CHECK(cont_ea_seen == cont_ea);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(cont_dispatches), 2u);
+        LIFT_CHECK(cpu.shims->byStubEa(cont_ea) == cont_def);
+        LIFT_CHECK(cont_ea >= f.m.layout().shim_page);
+        LIFT_CHECK(cont_ea < f.m.layout().shim_page + f.m.layout().shim_slots * 4u);
+        // ① 回调真的发生了（与 ② 同一组读数）
+        LIFT_CHECK_EQ_U32(cpu.eax(), 1u);  // 枚举完成 ⇒ TRUE
+        LIFT_CHECK_MEM_U32(f.m.mem(), count_ea, 2u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(record_ea), 0x39303430u);      // "0409"
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(record_ea + 4u), 0x31313430u);  // "0411"
+        LIFT_CHECK(f.ok);
+    }
+
     // ③ 回调返回 FALSE ⇒ 停止枚举（只回调一次）
     {
         g_current_case = "enum-locales-stop-on-false";
         Fixture f;
         lift::registerStringShims(f.m.shims());
+        f.m.shims().configureStubPage(f.m.layout().shim_page, f.m.layout().shim_slots);
         LIFT_CHECK(f.ok);
         const std::uint32_t enum_loc = f.use("EnumSystemLocalesA");
         const std::uint32_t count_ea = f.zeroData(4);
