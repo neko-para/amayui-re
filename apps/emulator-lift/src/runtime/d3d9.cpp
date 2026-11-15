@@ -23,7 +23,7 @@
 #include "runtime/gpu_raster.h"
 #include "runtime/heap.h"
 #include "runtime/pixel_format.h"
-#include "runtime/machine.h"
+#include "runtime/host_services.h"
 #include "runtime/memory.h"
 #include "runtime/present.h"
 #include "runtime/surface.h"
@@ -104,11 +104,12 @@ void d3d9Warn(const char* what, const char* fmt, ...) {
     va_end(ap);
 }
 
-// 与 DDraw 的 requireMachine 同形（同一条装配口径：activeMachine 必须是这台 cpu 的 Machine）
-bool requireMachine(X86& cpu, Machine** out, std::string* why) {
-    Machine* m = activeMachine();
-    if (!m || &m->cpu() != &cpu) {
-        if (why) *why = "D3D9：activeMachine() 不是这台 cpu 的 Machine（装配问题）";
+// 与 DDraw 的 requireMachine 同形（同一条装配口径：这台 cpu 必须被**本**宿主装配了服务）
+bool requireMachine(X86& cpu, HostServices** out, std::string* why) {
+    HostServices* m = hostOf(cpu);
+    // ★ 归属判据（`ownsCpu`）：宿主非空**且**这台 cpu 就是它装配的那一份（见 host_services.h）。
+    if (m == nullptr || !m->ownsCpu(cpu)) {
+        if (why) *why = "D3D9：这台 cpu 没有可用的宿主服务（hostOf(cpu) 为空，或不是该宿主装配的那份 X86）";
         return false;
     }
     if (!m->surfaces().ready()) {
@@ -297,7 +298,7 @@ bool readPresentParams(X86& cpu, std::uint32_t ea, PresentParams* out, std::stri
 // 设备状态
 // ---------------------------------------------------------------------------------------
 std::uint32_t createDeviceState(X86& cpu, const CreateRequest& req, std::string* why) {
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return 0;
     if (!cpu.mem) {
         if (why) *why = "D3D9：cpu.mem 为空";
@@ -443,8 +444,8 @@ void destroyDeviceState(X86& cpu, std::uint32_t state) {
     if (state == 0 || !cpu.mem || !cpu.mem->committed(state, kDvBytes)) return;
     if (cpu.mem->rd32(state + kDvMagic) != kDvMagicValue) return;
     // ★ 先取 owner 再动 magic（本单）：清 magic 与 free 状态块都是不可逆的，判据只能在此之前成立。
-    //   用 `machineOf`（装配时捕获的归属）而不是 `activeMachine()`（会被别的 Machine / 析构改写）。
-    Machine* m = machineOf(cpu);
+    //   用 `hostOf(cpu)`（`X86::host`，装配时接上的服务视图）而不是 `activeMachine()`（会被别的 Machine / 析构改写）。
+    HostServices* m = hostOf(cpu);
     // ★ 设备销毁：GPU 队列与镜像指向即将释放的 guest 像素 ⇒ 丢掉（⛔ 不回读到已释放/复用的 arena）。
     //   放在 destroyForDevice 之前：它可能 release 掉"当 RT 用的纹理"（其像素与镜像目标相关）。
     //   `rasterDiscardTarget()` 只碰宿主态（队列 / staging / 缓存），不读 guest ⇒ 顺序安全。
@@ -592,7 +593,7 @@ std::uint32_t clear(X86& cpu, const DeviceInfo& dev, std::uint32_t count, std::u
                     std::string* why) {
     // ★ 诊断计数：清后缓冲 = 新的一帧（见 `frameSeq()` 的注释）。只读、不参与语义、不进基线。
     if ((flags & kClearTarget) != 0) ++g_frame_seq;
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return kFail;
     const std::uint32_t allowed = kClearTarget | kClearZBuffer | kClearStencil;
     if ((flags & ~allowed) != 0) {
@@ -743,7 +744,7 @@ std::uint32_t clear(X86& cpu, const DeviceInfo& dev, std::uint32_t count, std::u
 }
 
 std::uint32_t present(X86& cpu, const DeviceInfo& dev, std::string* why) {
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return kFail;
     GuestSurface* gs = m->surfaces().find(dev.arena);
     if (!gs) {
@@ -937,7 +938,7 @@ std::uint32_t createTextureState(X86& cpu, std::uint32_t device_object, std::uin
                                  std::uint32_t format, std::uint32_t pool, std::string* why,
                                  bool* out_of_memory) {
     if (out_of_memory) *out_of_memory = false;
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return 0;
     if (!cpu.heap || !cpu.heap->ready()) {
         if (why) *why = "D3D9：guest 堆未就绪（纹理状态块要放在 guest 堆上）";
@@ -1126,8 +1127,8 @@ void destroyTextureState(X86& cpu, std::uint32_t state) {
     const std::uint32_t serial = cpu.mem->rd32(state + kTxSerial);
     // ★ 先取 owner，**再**清 magic / free 状态块（本单 REQ-01M6X4MSCMMFEXYXCSK6V61QR2）：
     //   这两步不可逆（magic 清了就再进不了本函数、状态块会随堆复用），所以"该不该回收"的判据
-    //   必须在它们之前成立。owner 来自 `Machine::wire()`，不受 `activeMachine()` 被改写的影响。
-    Machine* m = machineOf(cpu);
+    //   必须在它们之前成立。服务视图来自 `Machine::wire()`（`X86::host`），不受 `activeMachine()` 被改写的影响。
+    HostServices* m = hostOf(cpu);
     cpu.mem->wr32(state + kTxMagic, 0);
     if (serial != 0u) g_mip_chains.erase(serial);
     if (m != nullptr && arena != 0) m->surfaces().destroy(arena);
@@ -1168,7 +1169,7 @@ bool lockRect(X86& cpu, const TextureInfo& tex, std::uint32_t level, std::uint32
         return false;
     }
     if (!committedOut(cpu, locked_rect_ea, 8u, "D3DLOCKED_RECT", why)) return false;
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return false;
     GuestSurface* gs = m->surfaces().find(tex.arena);
     if (!gs) {
@@ -1426,9 +1427,9 @@ const TextureMipChain* ensureTextureMipChain(X86& cpu, const TextureInfo& tex, b
             return &c;
         }
     }
-    Machine* m = machineOf(cpu);
+    HostServices* m = hostOf(cpu);
     if (m == nullptr) {
-        if (why) *why = "D3D9：派生 mip 拿不到 Machine（纹理像素在 SurfaceArena 里）";
+        if (why) *why = "D3D9：派生 mip 拿不到宿主服务（纹理像素在 SurfaceArena 里）";
         return nullptr;
     }
     GuestSurface* gs = m->surfaces().find(tex.arena);
@@ -1535,12 +1536,12 @@ namespace {
 
 // 状态块 → 像素块。判据不成立 = **本仓状态崩坏**（`*broken=true`），不是 guest 违约。
 // ★ 这个判据必须在 `deviceInfoOfState` 之后：调用方（shim）已经用它区分了纹理路（'TEX1'）与后缓冲路。
-bool backBufferSurface(X86& cpu, std::uint32_t state, Machine** m_out, GuestSurface** gs_out, bool* broken,
+bool backBufferSurface(X86& cpu, std::uint32_t state, HostServices** m_out, GuestSurface** gs_out, bool* broken,
                        std::string* why) {
     if (broken) *broken = false;
     if (m_out) *m_out = nullptr;
     if (gs_out) *gs_out = nullptr;
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) {
         if (broken) *broken = true;
         return false;
@@ -1571,7 +1572,7 @@ bool backBufferSurface(X86& cpu, std::uint32_t state, Machine** m_out, GuestSurf
 bool lockBackBuffer(X86& cpu, std::uint32_t state, std::uint32_t locked_rect_ea, std::uint32_t rect_ea,
                     std::uint32_t flags, bool* broken, std::string* why) {
     if (broken) *broken = false;
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     GuestSurface* gs = nullptr;
     if (!backBufferSurface(cpu, state, &m, &gs, broken, why)) return false;
 
@@ -1682,7 +1683,7 @@ bool lockBackBuffer(X86& cpu, std::uint32_t state, std::uint32_t locked_rect_ea,
 
 bool unlockBackBuffer(X86& cpu, std::uint32_t state, bool* broken, std::string* why) {
     if (broken) *broken = false;
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     GuestSurface* gs = nullptr;
     if (!backBufferSurface(cpu, state, &m, &gs, broken, why)) return false;
     if (!gs->d3d9_locked) {
@@ -1771,9 +1772,9 @@ std::uint32_t updateSurface(X86& cpu, std::uint32_t src_surface, std::uint32_t s
         if (why) *why = "D3D9：UpdateSurface 的目标区域放不下（D3DERR_INVALIDCALL）";
         return kInvalidCall;
     }
-    Machine* m = machineOf(cpu);
+    HostServices* m = hostOf(cpu);
     if (m == nullptr) {
-        if (why) *why = "D3D9：UpdateSurface 拿不到 Machine";
+        if (why) *why = "D3D9：UpdateSurface 拿不到宿主服务";
         return kFail;
     }
     GuestSurface* sg = m->surfaces().find(src.arena);
@@ -1853,9 +1854,9 @@ std::uint32_t getRenderTargetData(X86& cpu, std::uint32_t render_target, std::ui
         if (why) *why = buf;
         return kInvalidCall;
     }
-    Machine* m = machineOf(cpu);
+    HostServices* m = hostOf(cpu);
     if (m == nullptr) {
-        if (why) *why = "D3D9：GetRenderTargetData 拿不到 Machine";
+        if (why) *why = "D3D9：GetRenderTargetData 拿不到宿主服务";
         return kFail;
     }
     GuestSurface* sg = m->surfaces().find(src.arena);

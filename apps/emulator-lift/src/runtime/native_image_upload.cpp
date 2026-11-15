@@ -11,7 +11,7 @@
 #include "corpus/lst_index.h"
 #include "runtime/d3d9.h"
 #include "runtime/ddraw_surface.h"
-#include "runtime/machine.h"
+#include "runtime/host_services.h"
 #include "runtime/memory.h"
 #include "runtime/x86.h"
 
@@ -233,9 +233,25 @@ bool nativeUpload48B090(X86& cpu, GuestMemory& mem, std::uint32_t* result) {
     if (vtbl == 0 || !mem.committed(vtbl + 0x0C, 4)) return false;
     const std::uint32_t create_ea = mem.rd32(vtbl + 0x0C);
     if (create_ea == 0 || !mem.committed(create_ea, 1)) return false;
-    Machine* machine = activeMachine();
-    if (machine == nullptr || !machine->lst().loaded()) return false;
-    const LstFunction* create_fn = machine->lst().functionAt(create_ea);
+    // ★ 唯一一处**真架构绑定**（评估 §6 第 3 行）：本函数要 `startNestedGuestCall()` **重入解释器** ——
+    //   铺一个 guest 回调帧，等 run 循环在块边界认领它。AOT 臂没有解释器循环 ⇒ 铺了帧就再也回不来。
+    //   判据**不是**"我是不是解释器"，而是"这台宿主能不能执行嵌套 guest 调用"（`HostServices` 的能力位）：
+    //     · 解释器（`Machine`）⇒ true ⇒ 行为与今天逐字相同；
+    //     · AOT 宿主 ⇒ false ⇒ **响亮停机 + 明确日志**（⛔ 不静默落回解释器：那等于跑错执行模型）。
+    HostServices* host = hostOf(cpu);
+    if (host == nullptr || !host->hasNestedGuestExecutor()) {
+        std::fprintf(stderr,
+                     "[native] sub_48B090（NormalTexture::UploadImage）：这台宿主没有嵌套执行器"
+                     "（HostServices::hasNestedGuestExecutor() == false）⇒ 不能重入解释器，"
+                     "响亮停机（⛔ 不静默回退）\n");
+        cpu.running = false;
+        cpu.stop_why = "native sub_48B090 需要嵌套 guest 调用，但这台宿主没有嵌套执行器（AOT）";
+        cpu.stop_kind = HostStopKind::Trap;
+        return false;
+    }
+    // `.lst` 与函数入口判据：`cpu.lst` 已经在 X86 上（⛔ 不再经 `Machine`）。
+    if (cpu.lst == nullptr || !cpu.lst->loaded()) return false;
+    const LstFunction* create_fn = cpu.lst->functionAt(create_ea);
     if (create_fn == nullptr || create_fn->ea != create_ea) return false;
 
     GuestMemory* m = &mem;

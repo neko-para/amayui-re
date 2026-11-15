@@ -52,9 +52,10 @@ void setActiveMachine(Machine* m) { g_active = m; }
 
 // ★ 这台 cpu 的**归属**（不是"最近 init 的那台"）：`Machine::wire()` 在装配时把 owner 写进
 //   `X86::machine`，所以另建一台 Machine（或 `~Machine` 清空 g_active）都不会改变它。
-//   ⇒ 销毁路径（`d3d9::destroyTextureState` / `destroyDeviceState` / 流水线 `destroyForDevice`）
-//     用它回收 arena，而不是拿可被合法改写的 `activeMachine()` 当判据
-//     （REQ-01M6X4MSCMMFEXYXCSK6V61QR2：判据失败一次，arena 就永远没有回收入口）。
+//   ⚠ **生产代码已无调用者**（2026-11-14 解耦后生产路径用 `hostOf` / `HostServices::ownsCpu`；
+//     只剩 `tests/input_injection.cpp` 读它）。2026-11-14 之前那 4 处销毁路径
+//     （`d3d9::destroyTextureState` / `destroyDeviceState` / 流水线 `destroyForDevice` /
+//     ddraw 的 surface 回收）**已改用 `hostOf(cpu)`** —— ⛔ 别再按"回收靠 machineOf"的旧注释拆回去。
 //   兜底：没 wire 的 X86（直接构造的纯夹具）只有"全局那台且真是这台 cpu"才算数；否则 nullptr
 //   ⇒ 调用方只能清状态块 / 不猜 arena 归属（生产路径不存在这种 X86）。
 Machine* machineOf(const X86& cpu) {
@@ -62,6 +63,21 @@ Machine* machineOf(const X86& cpu) {
     Machine* m = g_active;
     return (m != nullptr && &m->cpu() == &cpu) ? m : nullptr;
 }
+
+namespace {
+// ★ 宿主置停的**三分类**（shim 路径与 native override 路径**共用**，⛔ 不各写一份）：
+//   ① `ResourceExhausted` ⇒ 我方 arena / guest 堆不够；
+//   ② `Trap` ⇒ 已注册的槽 / 形态没实现（含"缺少执行能力"那类硬缺口）；
+//   ③ 其余（`HostStopKind::None`）⇒ 实现里**主动停**（`ExitProcess` / `--max-frames` /
+//      影片放完 / 窗口关闭 …）⇒ `Stopped`（**正常结局**）。
+//   ★ 顺序固定：`!had_impl` 那道判据在调用方、必须先于本分类（未实现的导入也带 `stop_why`，
+//     但它是 `Unimplemented`，不是 `Trap`）。
+StopReason hostStopReason(const X86& cpu) {
+    if (cpu.stop_kind == HostStopKind::ResourceExhausted) return StopReason::ResourceExhausted;
+    if (cpu.stop_kind == HostStopKind::Trap) return StopReason::Trap;
+    return StopReason::Stopped;
+}
+}  // namespace
 
 const char* stopReasonName(StopReason r) {
     switch (r) {
@@ -309,6 +325,8 @@ Machine::~Machine() {
     //   ★ `AudioEngine::audio_cpu_` 那份 X86 副本**有意保留** owner（见 audio.cpp）：
     //   `~AudioEngine` 早于 `surfaces_` / `presenter_` 执行，那时按 owner 回收仍是安全的。
     cpu_.machine = nullptr;
+    // ★ 同时摘掉服务视图（同一条防御口径）：`host` 指向 this，悬垂指针比 nullptr 更糟。
+    cpu_.host = nullptr;
     if (g_active == this) g_active = nullptr;
 }
 
@@ -327,6 +345,10 @@ void Machine::wire() {
     cpu_.com = &com_;
     cpu_.fonts = &fonts_;
     cpu_.machine = this;  // ★ 宿主侧归属（销毁路径的可回收判据；见 machineOf）
+    // ★ 宿主服务视图（`runtime/host_services.h`）：`Machine` 自己就是那份接口的实现 ⇒
+    //   shim 侧从 `hostOf(cpu)` 取 surfaces / presenter / gpuRaster / seh / decoder / 关窗策略。
+    //   ⛔ 这里只接一个指针：访问器与 `Machine` 的成员访问器**同名同形** ⇒ 116 处 `m->xxx()` 不动。
+    cpu_.host = this;
     // ★ `present-tail` 的 insns 源：**唯一**注入点就在这里（init / initBare / 纯夹具的 Fixture 全过 wire()）。
     //   只读指针，指向 `cpu_.insns`（同一台 Machine 的成员 ⇒ 与 run 收口读的 `r.insns = cpu_.insns` 同源）。
     //   ⚠ `cpu_` 声明在 `presenter_` **之后** ⇒ 先析构；但 presenter 只在 `present()` 里解引用，
@@ -1437,6 +1459,23 @@ RunResult Machine::run(const RunOptions& opts) {
                     window_prof_.addOverrideInsns(cpu_.insns - insns_before_override);
                     continue;
                 }
+                // ★ **停机收口**（复审 T2a P1-2）：fn 可以在返回 false 的同时置停
+                //   （`native_image_upload.cpp` 的"这台宿主没有嵌套执行器"分支就是唯一一例）。
+                //   `NativeOverrideTable::invoke()` 已把"停机"与"回退解释器"分开（置停时不改写
+                //   `why`、不计 `fallbacks`），这里必须**按停机处理**：否则会继续解释一个 basic block，
+                //   `while (cpu_.running)` 才静默退出、`r.reason` 仍是 `None`
+                //   ⇒ `RunResult::ok() == true`（exit 0），而 stderr 在喊"响亮停机" = 假响亮。
+                //   ★ 与 shim 路径（`stop_kind` 那一段）同一套三分类、同一份 `stop_why`。
+                if (!cpu_.running) {
+                    r.reason = hostStopReason(cpu_);
+                    char ea_text[16];
+                    std::snprintf(ea_text, sizeof(ea_text), "%08X", ov->ea);
+                    r.detail = cpu_.stop_why
+                                   ? std::string(cpu_.stop_why) + "（native " + ov->name + " @ " + ea_text + "）"
+                                   : std::string("native override 主动结束运行：") + ov->name + " @ " + ea_text;
+                    window_prof_.addOverrideInsns(cpu_.insns - insns_before_override);
+                    break;
+                }
                 if (ov->fallbacks != before && ov->fallbacks == 1 && why) {
                     std::fprintf(stderr, "[native] %s @ %08X 回退解释器：%s\n", ov->name.c_str(), ov->ea, why);
                 }
@@ -1625,13 +1664,8 @@ RunResult Machine::run(const RunOptions& opts) {
                     r.reason = StopReason::Unimplemented;
                     r.detail = std::string("未实现的导入 ") + def->module + "!" + def->name;
                 } else {
-                    if (cpu_.stop_kind == HostStopKind::ResourceExhausted) {
-                        r.reason = StopReason::ResourceExhausted;
-                    } else if (cpu_.stop_kind == HostStopKind::Trap) {
-                        r.reason = StopReason::Trap;
-                    } else {
-                        r.reason = StopReason::Stopped;
-                    }
+                    // ★ 三分类见 `hostStopReason`（native override 路径用的是**同一个**函数）。
+                    r.reason = hostStopReason(cpu_);
                     // ★ `stop_why` 非空时**优先用它**：否则"资源耗尽"与"未实现"在运行摘要里
                     //   都长成"shim 主动结束运行"，误诊只是从 stderr 挪到了 stdout。
                     r.detail = cpu_.stop_why

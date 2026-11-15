@@ -29,6 +29,7 @@
 #include "runtime/host_window.h"
 #include "runtime/handles.h"
 #include "runtime/heap.h"
+#include "runtime/host_services.h"
 #include "runtime/image.h"
 #include "runtime/input_script.h"
 #include "runtime/interaction_graph.h"
@@ -202,7 +203,10 @@ struct InstrumentationState {
     std::uint64_t expect_windows = 0;  // 本轮真的开了几个观测窗（0 = 没有一个匹配的动作）
 };
 
-class Machine {
+// ★ `Machine` **就是**一份 `HostServices`（`runtime/host_services.h`）：shim 依赖的是接口，
+//   不依赖解释模型 ⇒ AOT 臂不构造 Machine 也能跑同一批 shim（父级裁决 D4）。
+//   `wire()` 把 `cpu_.host` 指向 this；`~Machine` 开头摘掉（⛔ 别让悬垂指针看起来像装配好了）。
+class Machine : public HostServices {
 public:
     Machine();
     ~Machine();
@@ -276,7 +280,18 @@ public:
     //   `ask`（缺省）= 窗口档弹系统「終了」框；`exit`/`title`/`cancel` = 不弹框直接返回
     //   1/2/0（`exit` 与 2026-11-12 之前"恒返回 1"的行为逐位一致）。
     void setCloseConfirmPolicy(CloseConfirmPolicy policy) { close_confirm_ = policy; }
-    CloseConfirmPolicy closeConfirmPolicy() const { return close_confirm_; }
+    CloseConfirmPolicy closeConfirmPolicy() const override { return close_confirm_; }
+
+    // ★ `HostServices::hasNestedGuestExecutor()`：解释器有 run 循环 ⇒ 认领 `GuestCallStack` 铺的帧。
+    //   ⛔ 不要把它当成"跨臂分叉开关"：唯一消费者是 native override 的嵌套调用
+    //     （`native_image_upload.cpp` 的响亮停机分支），见 `runtime/host_services.h`。
+    bool hasNestedGuestExecutor() const override { return true; }
+
+    // ★ `HostServices::ownsCpu()`：**本机**就是这台 cpu 的装配者（归属判据，见
+    //   `runtime/host_services.h`）。
+    //   ⛔ 不要改成 `cpu.host == this`：feeder 的 `audio_cpu_` 是 `X86` 的整份拷贝，`host`
+    //     被一并复制 ⇒ 那条判据对一个**非主线程的私有副本**也成立。
+    bool ownsCpu(const X86& cpu) const override { return &cpu_ == &cpu; }
 
     // ★ 指令式输入时间线（`--input-script`）：见 `runtime/input_script.h`。
     //   加载失败 ⇒ false + err（带行号）；⛔ 不静默跳过。可以在 run 之前 / 两次 run 之间替换。
@@ -343,15 +358,15 @@ public:
 
     // ★ SEH 派发状态机（`RaiseException` / `RtlUnwind`）：shim 只把参数搬进来，真正的
     //   "铺 handler 帧 → 跑 guest → 收 disposition"在**块边界**（`pumpSeh`）。
-    Seh& seh() { return seh_; }
-    const Seh& seh() const { return seh_; }
+    Seh& seh() override { return seh_; }
+    const Seh& seh() const override { return seh_; }
 
     // ---- 访问器 ----
     GuestMemory& mem() { return mem_; }
     const GuestMemory& mem() const { return mem_; }
     X86& cpu() { return cpu_; }
     const X86& cpu() const { return cpu_; }
-    Decoder& decoder() { return decoder_; }
+    Decoder& decoder() override { return decoder_; }
     BlockCache& cache() { return cache_; }
     ShimRegistry& shims() { return shims_; }
     const ShimRegistry& shims() const { return shims_; }
@@ -360,13 +375,13 @@ public:
     HandleTable& handles() { return handles_; }
     Vfs& vfs() { return vfs_; }
     const Vfs& vfs() const { return vfs_; }
-    SurfaceArena& surfaces() { return surfaces_; }
-    const SurfaceArena& surfaces() const { return surfaces_; }
+    SurfaceArena& surfaces() override { return surfaces_; }
+    const SurfaceArena& surfaces() const override { return surfaces_; }
     // ★ P2：宿主字体层（FreeType 桥 / 合成字形接缝）；gdi32 的字体 shim 与夹具都从这里取。
     FontEngine& fonts() { return fonts_; }
     const FontEngine& fonts() const { return fonts_; }
-    HeadlessPresenter& presenter() { return presenter_; }
-    const HeadlessPresenter& presenter() const { return presenter_; }
+    HeadlessPresenter& presenter() override { return presenter_; }
+    const HeadlessPresenter& presenter() const override { return presenter_; }
     // ★ 主线程亲和性账（REQ-01M76SXW0Y3R8QX1F94AB85M9H）：`WindowManager` 记住 owner 线程
     //   （构造线程，`run()` 起始处再确认），非 owner 碰任何入口 ⇒ 计数（`--assert-guest-token` 判红）。
     //   ⛔ 不是令牌：wm 按 M0 的口径是**主线程独占宿主对象**，见 `host_window.h` 类头那一段。
@@ -374,8 +389,8 @@ public:
     const char* firstWindowOffThreadSite() const { return windows_.firstOffThreadSite(); }
     // 可选 GPU 光栅化后端（由 PresentSink 或 main 的离屏 raster window 提供）。
     void setGpuRaster(GpuRaster* gpu) { gpu_raster_ = gpu; }
-    GpuRaster* gpuRaster();
-    const GpuRaster* gpuRaster() const;
+    GpuRaster* gpuRaster() override;
+    const GpuRaster* gpuRaster() const override;
     LstIndex& lst() { return lst_; }
     const LstIndex& lst() const { return lst_; }
     const PeImage& image() const { return image_; }
@@ -580,10 +595,16 @@ private:
 Machine* activeMachine();
 void setActiveMachine(Machine* m);
 
-// 这台 cpu **所属的** Machine（宿主侧归属，`Machine::wire()` 捕获的 `X86::machine`）。
-//   ★ 与 `activeMachine()` 的区别：那是"最后 init 的那台"的进程级全局，可被别的 Machine 合法改写
-//     （`~Machine` 也会清空）；本函数回答的是"**谁装配了这台 cpu**"，因此销毁路径可以靠它回收
-//     arena —— 哪怕此刻 `activeMachine()` 是另一台（REQ-01M6X4MSCMMFEXYXCSK6V61QR2）。
+// 这台 cpu **所属的** Machine（`Machine::wire()` 捕获的 `X86::machine`）。
+//   ★ **生产代码已无调用者**（2026-11-14 的 shim/Machine 解耦之后）：生产路径问的是
+//     `hostOf(cpu)`（+ `HostServices::ownsCpu(cpu)` 做归属判定），不再需要 `Machine` 具体类型。
+//     今天只剩 `tests/input_injection.cpp` 在读它。
+//   ⛔ **不要照着旧注释把销毁路径再拆回来**：那 4 处（`d3d9::destroyTextureState` /
+//     `destroyDeviceState` / 流水线 `destroyForDevice` / `ddraw` 的 surface 回收）现在用的是
+//     `hostOf(cpu)`，与 `activeMachine()` / 本函数都无关；回收必须落在**同一张** arena 上，
+//     feeder 的私有副本也因此能正确回收（见 `audio.cpp` 的 `audio_cpu_` 注释）。
+//   ★ 与 `activeMachine()` 的区别仍然成立：那是"最后 init 的那台"的进程级全局，可被别的 Machine
+//     合法改写（`~Machine` 也会清空）；本函数回答的是"**谁装配了这台 cpu**"。
 //   ★ 兜底：没走 `Machine::wire()` 的 X86（直接构造的纯夹具）只有"全局那台且真是这台 cpu"才算数；
 //     否则返回 nullptr（宿主不知道 arena 归谁 ⇒ 调用方只能清状态块，⛔ 不许猜）。
 Machine* machineOf(const X86& cpu);

@@ -14,7 +14,9 @@
 #include <vector>
 
 #include "runtime/cp932.h"
-#include "runtime/machine.h"
+#include "runtime/host_services.h"
+#include "runtime/seh.h"
+#include "runtime/vfs.h"
 #include "runtime/sha256.h"
 #include "runtime/x86.h"
 #include "shims/register.h"
@@ -1014,34 +1016,36 @@ void shimCoAddRefServerProcess(X86&, ShimCall& call) { call.result = 1; }
 //   下一次块边界由 `Machine::pumpSeh` 认领。失败（结构铺不下等）也已写进 pending stop ⇒ 响亮停。
 // ---------------------------------------------------------------------------------------
 void shimRaiseException(X86& cpu, ShimCall& call) {
-    Machine* machine = cpu.machine;
-    if (machine == nullptr) {
+    // ★ 语义原样保留：没装配 SEH 状态机 ⇒ **响亮停**（⛔ 不静默 no-op）。
+    HostServices* host = hostOf(cpu);
+    if (host == nullptr) {
         // ⛔ 不许静默 no-op：没有状态机就只能响亮停（`Trap` ⇒ 非 0 退出）。
-        std::fprintf(stderr, "[seh] RaiseException 无法派发：这台 cpu 没有 Machine 归属\n");
+        std::fprintf(stderr, "[seh] RaiseException 无法派发：这台 cpu 没有宿主服务（X86::host == nullptr）\n");
         cpu.running = false;
-        cpu.stop_why = "kernel32!RaiseException：cpu 没有 Machine 归属（无法派发）";
+        cpu.stop_why = "kernel32!RaiseException：cpu 没有宿主服务（无法派发 SEH）";
         cpu.stop_kind = HostStopKind::Trap;
         return;
     }
-    (void)machine->seh().beginRaise(cpu, *cpu.mem, call.u32(0), call.u32(1), call.u32(2), call.u32(3),
-                                    cpu.esp(), call.ret_ea);
+    (void)host->seh().beginRaise(cpu, *cpu.mem, call.u32(0), call.u32(1), call.u32(2), call.u32(3),
+                                 cpu.esp(), call.ret_ea);
     call.take_control = true;
     cpu.esp() += 4u + call.stdcall_bytes;
     cpu.eip = kSehDispatchEa;
 }
 
 void shimRtlUnwind(X86& cpu, ShimCall& call) {
-    Machine* machine = cpu.machine;
-    if (machine == nullptr) {
-        std::fprintf(stderr, "[seh] RtlUnwind 无法派发：这台 cpu 没有 Machine 归属\n");
+    // ★ 语义原样保留：没装配 SEH 状态机 ⇒ **响亮停**（与 RaiseException 同一档）。
+    HostServices* host = hostOf(cpu);
+    if (host == nullptr) {
+        std::fprintf(stderr, "[seh] RtlUnwind 无法派发：这台 cpu 没有宿主服务（X86::host == nullptr）\n");
         cpu.running = false;
-        cpu.stop_why = "kernel32!RtlUnwind：cpu 没有 Machine 归属（无法派发）";
+        cpu.stop_why = "kernel32!RtlUnwind：cpu 没有宿主服务（无法派发 SEH）";
         cpu.stop_kind = HostStopKind::Trap;
         return;
     }
     // (TargetFrame, TargetIp, ExceptionRecord, ReturnValue)（stdcall 4 参，右到左压栈）
-    (void)machine->seh().beginUnwind(cpu, *cpu.mem, call.u32(0), call.u32(1), call.u32(2), call.u32(3),
-                                     cpu.esp(), call.ret_ea);
+    (void)host->seh().beginUnwind(cpu, *cpu.mem, call.u32(0), call.u32(1), call.u32(2), call.u32(3),
+                                  cpu.esp(), call.ret_ea);
     call.take_control = true;
     cpu.esp() += 4u + call.stdcall_bytes;
     cpu.eip = kSehDispatchEa;

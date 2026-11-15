@@ -316,12 +316,16 @@ TextDrawResult gdiDrawText(FontEngine& fonts, const GdiFontDesc& desc, const Gdi
 // =======================================================================================
 // ★ 与 P1（DDraw GetDC/ReleaseDC）的接缝
 //
-//   `bool fontAttachDcSurface(std::uint32_t hdc, std::uint32_t surface_ea, SurfaceArena* arena);`
+//   `bool fontAttachDcSurface(HandleTable& handles, std::uint32_t hdc, std::uint32_t surface_ea,
+//                             SurfaceArena* arena);`
 //   P1 在 **DDraw `IDirectDrawSurface::GetDC`（vtable +68，十进制）返回 HDC 之前**调用它，
 //   把自己的 `surface_ea` 与 `SurfaceArena*` 绑到这个 HDC；`ReleaseDC`（vtable +104）
-//   里调 `fontDetachDc(hdc)`。找不到活动 Machine / hdc 不是 DC ⇒ false + 一行日志（⛔ 静默成功）。
+//   里调 `fontDetachDc(handles, hdc)`。hdc 不是 DC ⇒ false + 一行日志（⛔ 静默成功）。
+//   ★ 句柄表由调用方给（`cpu.handles`）：这两个接缝**不再**去解析"哪台 Machine 是活动的" ——
+//     句柄表本来就在 `X86` 上，AOT 臂也有（父级裁决 D4）。
 // =======================================================================================
-bool fontAttachDcSurface(std::uint32_t hdc, std::uint32_t surface_ea, SurfaceArena* arena);
-bool fontDetachDc(std::uint32_t hdc);
+bool fontAttachDcSurface(HandleTable& handles, std::uint32_t hdc, std::uint32_t surface_ea,
+                         SurfaceArena* arena);
+bool fontDetachDc(HandleTable& handles, std::uint32_t hdc);
 
 }  // namespace lift

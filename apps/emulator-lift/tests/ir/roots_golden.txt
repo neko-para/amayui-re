@@ -1,0 +1,11 @@
+# T1a · `emulator-lift-gen` 的输入样例（一行一个 hex EA；`#` 起注释）
+#
+# 这两个 EA 是**手写 golden** 的函数入口（tests/ir/lift_436D00.ll / lift_4D4B40.ll）：
+#   0x436D00 = 存档 CRC-32（反射变体）的冷/热路径根
+#   0x4D4B40 = Shape A 阶段 B 的 shim/vtable 合规件
+# ⇒ `lift-ir-gen-proto` / `lift-ir-gen-shim` 用**同一份测试体**跑"生成物 vs 解释器"的逐位差分。
+#
+# ★ 格式口径：只认"一行一个 EA"（`0x` 前缀可省；大小写不敏感）；⛔ 不写派生值
+#   （函数名 / 字节范围 / 指令数都能从 PE 重算）。T1c 换 `closure.txt` 格式时只改解析。
+0x436D00
+0x4D4B40

@@ -111,12 +111,23 @@ std::uint32_t ComRegistry::registerSlot(X86& cpu, const std::string& iface, cons
         methods_.emplace(stub, std::move(e));
     }
 
-    // ★ 必须装进块缓存：不装的话 guest `call [vtbl+off]` 会去**解码桩页字节**而不是走 shim。
-    if (!cpu.cache) {
-        comLog(iface.c_str(), "createObject 需要 cpu.cache（BlockCache）来把 stub 装成 shim 块");
+    // ★ 必须有"桩 EA → 可调用"的机制。解释器用 BlockCache（`installShim`）；AOT 臂**没有块缓存**
+    //   ⇒ 靠宿主的桩表承接（`lift_shim` 里就是靠 `idForStub` / `byStubEa` 反查的，
+    //   见 `lift_abi.cpp:46-58`）。⛔ 这不是语义需要，是解释器时代的实现约束：不放开它，
+    //   AOT 连一个 COM 对象都建不出来（D3D9 / DDraw / D3DX / DSound / DShow / AGERC 全走这里）。
+    if (cpu.cache) {
+        cpu.cache->installShim(stub, def_id);
+    } else if (cpu.shims->byStubEa(stub) == nullptr) {
+        // ⚠ **这个分支今天不可达**（复审 T2a P3-1）：`byStubEa` 就是扫 `defs_` 里
+        //   `stub_ea == ea`，而 `stub` 正是上面刚 `addRuntime` 出来的那个 `def->stub_ea`
+        //   （且 90 行已保证非 0）⇒ 反查必然命中。它**不是**一道有效的护栏，别指望它拦。
+        //   ⛔ **也不要删**：它描述的是"既没有块缓存、桩表也接不住该 EA"这个**结构**上的拒绝
+        //   条件 —— 将来任何"发得出桩 EA、注册表却接不住"的注册形态都会落到这里；删掉就等于
+        //   悄悄退化成"返回一个调不动的桩 EA"，而那正是要防的静默错误。
+        comLog(iface.c_str(),
+               "没有 BlockCache 且宿主桩表里反查不到 stub 0x%08X ⇒ 拒绝（桩 EA 不可调用）", stub);
         return 0;
     }
-    cpu.cache->installShim(stub, def_id);
     // ★ 方案 C：feeder 的私有 BlockCache 也要有这条 vtable stub（它会在自己的线程里 call 它）。
     if (cpu.audio) cpu.audio->installFeederShim(stub, def_id);
     return stub;

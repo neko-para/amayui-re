@@ -191,11 +191,24 @@ void verify_neg_not(Fixture& f) {
 }
 
 // ---------- 移位 ----------
+// ★ 2026-11-14（D10 P1）：这 11 条移位用例各补一条 **PF 断言**。修之前解释器的 `parityFromLow`
+//   是**奇**校验（少了一次取反）⇒ 下面每条 PF 断言都会红；修成 SDM 的偶校验（`exec.h` 的
+//   `parityEven`，唯一一份）之后才绿。
+//   ★ `shl` 这条就是**最小反例**：`shl eax,1` + `eax=3` ⇒ 结果 6（低字节 0b0000_0110 = 2 个 1
+//     ⇒ 偶 ⇒ PF=1），旧的奇校验会给 PF=0。T1a 复审 §2.2 用的就是这个形状。
 void setup_shl(Fixture& f) {
-    f.cpu().eax() = 1u;
-    f.codeHex(kCodeEa, "C1 E0 04 C3");  // shl eax,4
+    f.cpu().eax() = 3u;
+    f.codeHex(kCodeEa, "D1 E0 C3");  // shl eax,1（最小反例）
 }
-void verify_shl(Fixture& f) { LIFT_CHECK_EQ_U32(f.cpu().eax(), 16u); }
+void verify_shl(Fixture& f) {
+    LIFT_CHECK_EQ_U32(f.cpu().eax(), 6u);
+    LIFT_CHECK(!f.cpu().cf());  // CF = 原值的 bit31 = 0
+    LIFT_CHECK(!f.cpu().of());  // OF = MSB(结果) XOR CF = 0
+    LIFT_CHECK(!f.cpu().zf());
+    LIFT_CHECK(!f.cpu().sf());
+    // 结果 0x06 ⇒ 低字节 2 个 1（偶）⇒ PF=1
+    LIFT_CHECK(f.cpu().pf());
+}
 
 void setup_shr(Fixture& f) {
     f.cpu().eax() = 0x80000000u;
@@ -204,6 +217,8 @@ void setup_shr(Fixture& f) {
 void verify_shr(Fixture& f) {
     LIFT_CHECK_EQ_U32(f.cpu().eax(), 1u);
     LIFT_CHECK(!f.cpu().cf());  // CF = 最后被移出的那一位 = 原值的 bit30 = 0
+    // 结果 0x01 ⇒ 1 个 1（奇）⇒ PF=0
+    LIFT_CHECK(!f.cpu().pf());
 }
 
 void setup_sar(Fixture& f) {
@@ -213,6 +228,8 @@ void setup_sar(Fixture& f) {
 void verify_sar(Fixture& f) {
     LIFT_CHECK_EQ_U32(f.cpu().eax(), 0xFFFFFFFFu);
     LIFT_CHECK(f.cpu().cf());
+    // 结果 0xFF ⇒ 8 个 1（偶）⇒ PF=1
+    LIFT_CHECK(f.cpu().pf());
 }
 
 void setup_rol(Fixture& f) {
@@ -556,6 +573,9 @@ void verify_shift_count_0(Fixture& f) {
     LIFT_CHECK_EQ_U32(f.cpu().eax(), 0x12345678u);  // 值不变
     LIFT_CHECK(f.cpu().cf());                       // CF 不被重算成别的
     LIFT_CHECK(f.cpu().zf());                       // ZF 不被重算成别的
+    // ★ PF 同样**不许**重算（D10 P1）：初值 PF=0，而结果 0x12345678 的低字节 0x78 有 4 个 1
+    //   （偶 ⇒ 若重算就会是 1）⇒ 这条断言正好把"计数 0 却重算了 PF"钉成红。
+    LIFT_CHECK(!f.cpu().pf());
     LIFT_CHECK_EQ_U32(f.cpu().ebx(), 0x0BADF00Du);  // 代码确实执行到了后面
 }
 
@@ -570,6 +590,8 @@ void verify_shl_count_31(Fixture& f) {
     LIFT_CHECK(f.cpu().sf());
     LIFT_CHECK(!f.cpu().zf());
     LIFT_CHECK(!f.cpu().of());
+    // 结果低字节 0x00 ⇒ 0 个 1（偶）⇒ PF=1
+    LIFT_CHECK(f.cpu().pf());
 }
 
 void setup_shl_count_33(Fixture& f) {
@@ -582,6 +604,8 @@ void verify_shl_count_33(Fixture& f) {
     LIFT_CHECK_EQ_U32(f.cpu().eax(), 0x00000002u);
     LIFT_CHECK(f.cpu().cf());
     LIFT_CHECK(!f.cpu().sf());
+    // 结果低字节 0x02 ⇒ 1 个 1（奇）⇒ PF=0
+    LIFT_CHECK(!f.cpu().pf());
 }
 
 void setup_shr_count_33(Fixture& f) {
@@ -594,6 +618,8 @@ void verify_shr_count_33(Fixture& f) {
     LIFT_CHECK_EQ_U32(f.cpu().eax(), 0x20000000u);
     LIFT_CHECK(f.cpu().cf());
     LIFT_CHECK(!f.cpu().zf());
+    // 结果低字节 0x00 ⇒ 0 个 1（偶）⇒ PF=1
+    LIFT_CHECK(f.cpu().pf());
 }
 
 void setup_sar_count_31(Fixture& f) {
@@ -605,6 +631,8 @@ void verify_sar_count_31(Fixture& f) {
     LIFT_CHECK_EQ_U32(f.cpu().eax(), 0xFFFFFFFFu);
     LIFT_CHECK(!f.cpu().cf());
     LIFT_CHECK(f.cpu().sf());
+    // 结果 0xFF ⇒ 8 个 1（偶）⇒ PF=1
+    LIFT_CHECK(f.cpu().pf());
 }
 
 void setup_sar_count_33(Fixture& f) {
@@ -617,6 +645,8 @@ void verify_sar_count_33(Fixture& f) {
     LIFT_CHECK_EQ_U32(f.cpu().eax(), 0xFFFFFFFFu);
     LIFT_CHECK(!f.cpu().cf());
     LIFT_CHECK(f.cpu().sf());
+    // 结果 0xFF ⇒ 8 个 1（偶）⇒ PF=1
+    LIFT_CHECK(f.cpu().pf());
 }
 
 // ---------- ② 乘除 ----------

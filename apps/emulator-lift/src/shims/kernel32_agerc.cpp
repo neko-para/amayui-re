@@ -34,7 +34,7 @@
 
 #include "runtime/audio.h"
 #include "runtime/image.h"
-#include "runtime/machine.h"
+#include "runtime/host_services.h"
 #include "runtime/message_box.h"
 #include "runtime/present.h"
 #include "runtime/x86.h"
@@ -244,10 +244,11 @@ void shimAgercShowDialog(X86& cpu, ShimCall& call) {
     const std::uint32_t id = call.u32(0);
     const std::uint32_t owner = call.u32(1);
     const std::uint32_t reserved = call.u32(2);
-    Machine* machine = cpu.machine;
+    // ★ 空指针**降级**（语义原样保留）：没有宿主服务 ⇒ 不弹框、按 `Ask`（= 今天的行为）。
+    HostServices* host = hostOf(cpu);
     PresentSink* sink = nullptr;
-    if (machine != nullptr && machine->presenter().hasSink()) {
-        sink = machine->presenter().sink();
+    if (host != nullptr && host->presenter().hasSink()) {
+        sink = host->presenter().sink();
     }
     // ★ `id == -1` **不是对话框选择子**，是 AGERC 的"UI 状态查询"：
     //   真实实现（AGERC.DLL `_ShowDialog` 体 0x10038330，switch 按 `id+1` 索引）在 case -1 只做
@@ -288,7 +289,7 @@ void shimAgercShowDialog(X86& cpu, ShimCall& call) {
         return;
     }
     const CloseConfirmPolicy policy =
-        machine != nullptr ? machine->closeConfirmPolicy() : CloseConfirmPolicy::Ask;
+        host != nullptr ? host->closeConfirmPolicy() : CloseConfirmPolicy::Ask;
     if (const std::optional<std::uint32_t> forced = closeConfirmPolicyResult(policy)) {
         shimLogWarn(kAgerc, "_ShowDialog@12",
                     "id=3「終了」按 --close-confirm=%s ⇒ 不弹框、直接返回 %u（策略短路）",

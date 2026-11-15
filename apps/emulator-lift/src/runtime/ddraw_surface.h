@@ -242,8 +242,10 @@ std::uint32_t availableVidMem(X86& cpu, std::uint32_t caps_ea, std::uint32_t tot
 // 给定一个 HDC：是 surface DC ⇒ 填 out 并返回 true。
 bool dcInfo(X86& cpu, std::uint32_t hdc, DcInfo* out);
 // ★ `GetDC` / `ReleaseDC` 直接与字体层对接（runtime/font.h）：
-//   GetDC 用 `gdiCreateDc` 建一个**真正的 GDI DC**，再 `fontAttachDcSurface(hdc, surface_ea, arena)`
-//   把它的目标绑到这块 surface 像素；ReleaseDC 里 `fontDetachDc(hdc)` + 回收句柄。
+//   GetDC 用 `gdiCreateDc` 建一个**真正的 GDI DC**，再
+//   `fontAttachDcSurface(handles, hdc, surface_ea, arena)` 把它的目标绑到这块 surface 像素；
+//   ReleaseDC 里 `fontDetachDc(handles, hdc)` + 回收句柄。
+//   ★ `handles` 由**调用方**给（生产路径就是 `*cpu.handles`）：字体层不再从全局 Machine 反查表。
 //   ⇒ P2 的 `TextOutA` 拿到的 HDC 既能查到 DC 状态，也能查到 surface 像素（同一块 guest 内存）。
 
 // 像素读写（宿主侧直接改 guest 像素；bpp 只支持 16 / 32）

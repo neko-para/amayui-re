@@ -24,12 +24,9 @@ inline std::uint8_t opSize(const Operand& op, std::uint8_t fallback = 4) {
     return op.size ? op.size : fallback;
 }
 
-inline bool parityFromLow(std::uint32_t v) {
-    std::uint8_t x = static_cast<std::uint8_t>(v & 0xFFu);
-    x ^= static_cast<std::uint8_t>(x >> 4);
-    x &= 0x0Fu;
-    return ((0x6996u >> x) & 1u) != 0;
-}
+// ★ 2026-11-14（D10 P1）：这里原来有一份 `parityFromLow`（同一张 0x6996 表但**没取反** ⇒ 奇校验），
+//   被 `doShift`（shl/shr/sar）与 `doShxd`（shld/shrd）用来写 PF ⇒ 与生成器相反。
+//   现在统一走 `exec.h` 的 `parityEven`（SDM 偶校验，唯一一份）。⛔ 不要再抄回一份。
 
 bool cpuFault(X86& cpu, const Insn& in, const char* why) {
     std::fprintf(stderr, "\n=== guest CPU exception ===\n  why : %s\n  ea  : %08X (%s)\n", why, in.ea,
@@ -151,7 +148,7 @@ bool doShift(X86& cpu, const Insn& in) {
     if (in.op == Op::Shl || in.op == Op::Shr || in.op == Op::Sar) {
         cpu.setZf((r & mask) == 0);
         cpu.setSf(msbOf(r, size));
-        cpu.setPf(parityFromLow(r));
+        cpu.setPf(parityEven(static_cast<std::uint8_t>(r & 0xFFu)));
     }
     wr(cpu, in.op0(), r);
     return true;
@@ -180,7 +177,7 @@ bool doShxd(X86& cpu, const Insn& in) {
     cpu.setOf(msbOf(dst, size) != msbOf(r, size));
     cpu.setZf(r == 0);
     cpu.setSf(msbOf(r, size));
-    cpu.setPf(parityFromLow(r));
+    cpu.setPf(parityEven(static_cast<std::uint8_t>(r & 0xFFu)));
     wr(cpu, in.op0(), r);
     return true;
 }

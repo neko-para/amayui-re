@@ -650,7 +650,19 @@ int runMain(const std::filesystem::path& self_exe) {
                 const std::uint64_t builder = hot ? 0u : builders_dynamic;
                 LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(in.stats.insns),
                                   static_cast<std::int64_t>(closure + cold_extra + builder));
+#ifdef LIFT_GEN_TICKS
+                // ★ T1c：**生成物**（`lift-gen` 的输出）在块边界发 `@lift_tick` ⇒ lifted 臂也按
+                //   解释器的同一口径记账 ⇒ 它必须等于"这条载荷执行过的**全部** guest 指令"：
+                //   根函数的闭式 + 冷路径那 3 条 + 建表器的动态条数（后者是 handoff 给解释器跑的，
+                //   本来就在解释器的 `cpu.insns` 里）。⇒ 两臂条数**逐条相等**。
+                //   ★ 这比原来断言 `== builder`（= 只有 handoff 那部分）**更强**：它同时证明
+                //   `lift_tick` 的条数精确（多记一条/少记一条都会红）。
+                LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(li.stats.insns),
+                                  static_cast<std::int64_t>(in.stats.insns));
+#else
+                // 手写 golden（`tests/ir/lift_*.ll`）没有 tick ⇒ lifted 臂只有 handoff 那部分。
                 LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(li.stats.insns), static_cast<std::int64_t>(builder));
+#endif
                 if (hot) {
                     LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(li.stats.dispatches), 1u);
                     LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(li.stats.boundary_checks), 2u);
@@ -827,7 +839,19 @@ int runMain(const std::filesystem::path& self_exe) {
                     static_cast<unsigned long long>(builders_dynamic));
     }
 
+    // ★ 同一份测试体被**两条** CTest 复用（`lift-ir-proto` 链手写 golden、`lift-ir-gen-proto`
+    //   链 `emulator-lift-gen` 的生成物，见 CMakeLists 的 `lift-ir-gen` 段）⇒ 用例名必须跟着
+    //   target 走：`lift-ir-gen-proto` 由 CMake 传 `LIFT_IR_CASE_GEN=1`。⛔ 不复制测试体 /
+    //   不建第二份源文件；断言与判据一条没变。
+    //   ⚠ 为什么写成 `#if` 两份字面量、而不是一个 `LIFT_IR_CASE_NAME` 宏：`tools/test/
+    //     cmake-test-entry.test.mjs` 的静态判据只认**调用点的字面量**
+    //   （`finish("…")` / `g_current_case = "…"`）—— 宏在那里看不见，会让这两条 CTest 重新变成
+    //   "注册名与用例名对不上"。
+#ifdef LIFT_IR_CASE_GEN
+    return lift_test::finish("lift-ir-gen-proto");
+#else
     return lift_test::finish("lift-ir-proto");
+#endif
 }
 
 }  // namespace

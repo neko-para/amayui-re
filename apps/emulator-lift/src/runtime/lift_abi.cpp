@@ -8,7 +8,12 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 
+#include "runtime/decode.h"
+#include "runtime/exec.h"
+#include "runtime/host_services.h"
+#include "runtime/shims.h"
 #include "runtime/x86.h"
 
 // `.ll` 里硬编码的偏移假设（`tests/ir/lift_436D00.ll` 只用 LiftRegs，不用 X86；
@@ -22,6 +27,106 @@ static_assert(sizeof(lift::X86::r) == 32, "X86.r 必须是 8 个 dword");
 extern "C" void lift_note_write(void* cpu, std::uint32_t ea, std::uint32_t n) {
     if (!cpu) return;  // 与 noteGuestWrite 的 cache==nullptr 同口径（no-op）
     lift::noteGuestWrite(static_cast<lift::X86*>(cpu)->cache, ea, n);
+}
+
+// ---------------------------------------------------------------------------------------
+// ① lift_tick —— 只记条数（D2b：时钟 = wall clock ⇒ 不推进虚拟时间）
+// ---------------------------------------------------------------------------------------
+extern "C" void lift_tick(void* cpu_ptr, std::uint32_t n) {
+    if (!cpu_ptr) {
+        // 与 `lift_shim` 的空指针同一档：调用方（生成物 / trampoline）的编程错误，⛔ 不静默。
+        std::fprintf(stderr, "[lift_tick] 调用方传了空 cpu（n=%u）\n", n);
+        std::fflush(stderr);
+        std::_Exit(4);
+    }
+    static_cast<lift::X86*>(cpu_ptr)->insns += n;
+}
+
+// ---------------------------------------------------------------------------------------
+// ② lift_one —— 单指令执行（语义全部在 Decoder + execInsn，这里只做搬运与 eip 保护）
+// ---------------------------------------------------------------------------------------
+extern "C" bool lift_one(void* cpu_ptr, LiftRegs* st, std::uint32_t ea) {
+    if (!cpu_ptr || !st) {
+        std::fprintf(stderr, "[lift_one] 调用方传了空指针（cpu=%p st=%p ea=%08X）\n", cpu_ptr,
+                     static_cast<void*>(st), ea);
+        std::fflush(stderr);
+        std::_Exit(4);
+    }
+    lift::X86& cpu = *static_cast<lift::X86*>(cpu_ptr);
+    // ★ 宿主必须先装配好"解码 + 执行"这两份服务：`HostServices`（D4）提供 `decoder()`，
+    //   `cpu.mem` 提供 guest 字节。缺任何一份都**响亮停**（⛔ 不返回 true 假装执行过）。
+    lift::HostServices* host = lift::hostOf(cpu);
+    if (host == nullptr || cpu.mem == nullptr) {
+        std::fprintf(stderr,
+                     "[lift_one] 宿主没装配解码器 / guest 内存（cpu.host=%p cpu.mem=%p）@ %08X ⇒ 响亮停\n",
+                     static_cast<void*>(host), static_cast<void*>(cpu.mem), ea);
+        std::fflush(stderr);
+        cpu.running = false;
+        cpu.stop_why = "lift_one: 宿主没有 decoder / guest 内存（hostOf 为 null）";
+        return false;
+    }
+    lift::Decoder& decoder = host->decoder();
+
+    // ① 状态进 X86（与 `lift_shim` 的第 ① 步同口径；lifted 侧的状态在 `*st` 里）。
+    lift::liftRegsToCpu(*st, cpu);
+    // ② eip：**单条执行**不许打乱生成器的块内推进 ⇒ 执行前设成这一条的 EA、执行后复原。
+    const std::uint32_t saved_eip = cpu.eip;
+    cpu.eip = ea;
+
+    lift::Insn in;
+    std::string why;
+    bool ok = false;
+    if (!decoder.decode(*cpu.mem, ea, &in, &why)) {
+        // 生成器是从同一份 PE 解出来的，所以走到这里说明"生成物与字节真源不一致"——
+        // 仍然只是**响亮停**（不是宿主 bug）：真机到此也会取指失败。
+        std::fprintf(stderr, "[lift_one] 解码失败 @ %08X：%s ⇒ 响亮停\n", ea, why.c_str());
+        std::fflush(stderr);
+        cpu.running = false;
+        cpu.stop_why = "lift_one: 解码失败（生成物与 PE 字节不一致）";
+    } else {
+        // 诊断面与解释器 dispatcher 同一份（`machine.cpp:1715`）：停机现场能看见"从哪来"。
+        cpu.noteInsn(in.ea, in.mnemonic);
+        ok = lift::execInsn(cpu, in);
+        if (!ok) {
+            // ★ 五类 + `#DE`：`execInsn` 自己已经把 `running=false` / `stop_why` 置好
+            //   （`exec_control.cpp` 的 Hlt/Int3/Int、`exec_integer.cpp` 的 `cpuFault`、
+            //   `exec.cpp` 的 `unimplemented`）。这里只补一行**点名 EA + op**，并把"它没置停"
+            //   这种内部不一致也收回到停机（⛔ 不许让调用方以为还能继续跑）。
+            if (cpu.running) {
+                cpu.running = false;
+                cpu.stop_why = "lift_one: execInsn 返回 false 但没有置停";
+            }
+            std::fprintf(stderr, "[lift_one] 单指令停机 @ %08X (%s, op=%s) ⇒ %s\n", ea,
+                         in.mnemonic != nullptr ? in.mnemonic : "?", lift::opName(in.op),
+                         cpu.stop_why != nullptr ? cpu.stop_why : "(未登记理由)");
+            std::fflush(stderr);
+        }
+    }
+    cpu.eip = saved_eip;
+    // ③ 整块回读（⛔ 不按"这条只写 eax"精简：execInsn 可能改任何 GPR / EFLAGS）。
+    lift::liftCpuToRegs(cpu, *st);
+    return ok;
+}
+
+// ---------------------------------------------------------------------------------------
+// ③ 段基址（`fs:` / `gs:` 的 EA 计算；本轮生成器走 `lift_one`，不用这两条 —— 见头注）
+// ---------------------------------------------------------------------------------------
+extern "C" std::uint32_t lift_fs_base(void* cpu_ptr) {
+    if (!cpu_ptr) {
+        std::fprintf(stderr, "[lift_fs_base] 调用方传了空 cpu\n");
+        std::fflush(stderr);
+        std::_Exit(4);
+    }
+    return static_cast<lift::X86*>(cpu_ptr)->fs_base;
+}
+
+extern "C" std::uint32_t lift_gs_base(void* cpu_ptr) {
+    if (!cpu_ptr) {
+        std::fprintf(stderr, "[lift_gs_base] 调用方传了空 cpu\n");
+        std::fflush(stderr);
+        std::_Exit(4);
+    }
+    return static_cast<lift::X86*>(cpu_ptr)->gs_base;
 }
 
 extern "C" std::uint32_t lift_shim(std::uint32_t stub_ea, LiftRegs* st, void* cpu_ptr) {

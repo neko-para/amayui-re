@@ -126,6 +126,19 @@ bool NativeOverrideTable::invoke(NativeOverride& ov, X86& cpu, GuestMemory& mem,
     const bool ran = ov.fn(cpu, mem, &result);
     cpu.current_override = nullptr;
     if (!ran) {
+        // ★ **"停机" 与 "回退解释器" 是两条不同的语义**（复审 T2a P1-2，⛔ 别混成一条）：
+        //   · fn 置了 `cpu.running = false`（+ `stop_kind` / `stop_why`）= **停机请求**：
+        //     这不是"我不干，你继续解释原字节"，而是"这一轮到此为止"。
+        //     ⇒ ⛔ 不计 `fallbacks`（它不是一次回退）、⛔ 不把 `why` 改写成"参数越界 / safe mode"
+        //       （那会把真因盖掉），只把 `running == false` 留给调用方当停机信号；
+        //       收口在 `Machine::run` 的 native 分支（与 shim 路径同一套三分类）。
+        //   · 否则才是真的"回退解释器"：`false` + 通用理由 + 计一次 `fallbacks`。
+        //   ★ 为什么必须分开：`Machine::run` 的 native 分支只从返回值看到"没接管"，
+        //     它靠 `cpu.running` 区分这两条；若这里把 `why` 覆盖掉，stderr 就只剩通用理由。
+        if (!cpu.running) {
+            if (suspended) *suspended = false;
+            return false;
+        }
         if (g_nested_started) {
             // native 已经铺好 guest 回调帧；EIP/ESP 由 GuestCallStack 设置，不要回退。
             if (suspended) *suspended = true;

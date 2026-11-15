@@ -53,7 +53,7 @@
 #include "runtime/com.h"
 #include "runtime/d3d9.h"
 #include "runtime/heap.h"
-#include "runtime/machine.h"
+#include "runtime/host_services.h"
 #include "runtime/math.h"
 #include "runtime/memory.h"
 #include "runtime/pixel_format.h"
@@ -439,10 +439,11 @@ void pipeWarn(PipeWarnCategory cat, const char* what, const char* fmt, ...) {
     logAt(LogLevel::Debug, LogD3d9, prefix, "%s", msg);
 }
 
-bool requireMachine(X86& cpu, Machine** out, std::string* why) {
-    Machine* m = activeMachine();
-    if (!m || &m->cpu() != &cpu) {
-        if (why) *why = "D3D9 流水线：activeMachine() 不是这台 cpu 的 Machine（装配问题）";
+bool requireMachine(X86& cpu, HostServices** out, std::string* why) {
+    HostServices* m = hostOf(cpu);
+    // ★ 归属判据（`ownsCpu`）：宿主非空**且**这台 cpu 就是它装配的那一份（见 host_services.h）。
+    if (m == nullptr || !m->ownsCpu(cpu)) {
+        if (why) *why = "D3D9 流水线：这台 cpu 没有可用的宿主服务（hostOf(cpu) 为空，或不是该宿主装配的那份 X86）";
         return false;
     }
     if (!m->surfaces().ready()) {
@@ -770,7 +771,7 @@ struct TextureView {
     std::int32_t write_rect[4] = {0, 0, 0, 0};
 };
 
-bool resolveTexture(X86& cpu, Machine* m, std::uint32_t object_ea, TextureView* out, std::string* why) {
+bool resolveTexture(X86& cpu, HostServices* m, std::uint32_t object_ea, TextureView* out, std::string* why) {
     out->present = false;
     if (object_ea == 0) return true;
     TextureInfo ti;
@@ -1117,7 +1118,6 @@ struct SamplerSnapshot {
 
 struct DrawContext {
     X86* cpu = nullptr;
-    Machine* machine = nullptr;
     GpuRaster* gpu = nullptr;  // sink 提供 GPU 光栅化后端时非空（生产路径恒非空）
     std::uint32_t pe = 0;
     std::uint32_t fvf = 0;  // 当前 SetFVF（诊断用）
@@ -1550,7 +1550,7 @@ void noteSpriteRtFeedbackLoop(X86& cpu, std::uint32_t pipeline_state, std::uint3
 // 状态块生命周期
 // =====================================================================================
 std::uint32_t createForDevice(X86& cpu, std::uint32_t device_state, int width, int height, std::string* why) {
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return 0;
     if (!cpu.heap || !cpu.heap->ready()) {
         if (why) *why = "D3D9 流水线：guest 堆未就绪（流水线状态块要放在 guest 堆上）";
@@ -1662,8 +1662,8 @@ void destroyForDevice(X86& cpu, std::uint32_t device_state) {
     if (pe == 0 || !cpu.mem->committed(pe, kPlBytes)) return;
     if (cpu.mem->rd32(pe + kPlMagic) != kPlMagicValue) return;
     // ★ 先取 owner，再清 magic（REQ-01M6X4MSCMMFEXYXCSK6V61QR2）：清完 magic 就不会有第二次
-    //   回收机会；owner 来自装配（`machineOf`），不是"最近 init 的那台"。
-    Machine* m = machineOf(cpu);
+    //   回收机会；服务视图来自装配（`hostOf(cpu)`，`X86::host`），不是"最近 init 的那台"。
+    HostServices* m = hostOf(cpu);
     // 绑定的纹理在 SetTexture 时 AddRef 过 ⇒ 这里对称释放；渲染目标同理（surface 对象 + 像素块 owner）。
     // ★ 顺序（`REQ-01M701NYF2B3YV1YFSZBMPQZ41` 段 2）：**先**声明 / 流 / 索引，**再**纹理，**最后** RT。
     //   前一组是"设备替 guest 持的绑定引用"（段 2 新增），与后两组不相交；全部走 `releaseBound`
@@ -1903,7 +1903,9 @@ std::uint32_t setRenderTarget(X86& cpu, std::uint32_t dev, std::uint32_t target,
     //   surface（例如纹理 RT 走了 CPU 回退、镜像仍是后缓冲），这里**不能**整帧往回读。
     //   `target == old_surface`（重复设同一个目标）也不是换 target，⛔ 不做整帧读回。
     if (target != old_surface) {
-        if (Machine* m = activeMachine(); m != nullptr && &m->cpu() == &cpu) {
+        // ★ 归属判据（`ownsCpu`）：`GpuRaster` 无锁，feeder 的私有 `X86` 副本不能走到这里
+        //   （它继承了 `host`，但 `&Machine::cpu() != &audio_cpu_`；复审 T2a P2-1）。
+        if (HostServices* m = hostOf(cpu); m != nullptr && m->ownsCpu(cpu)) {
             if (GpuRaster* gpu = m->gpuRaster(); gpu != nullptr && gpu->rasterActive() && gpu->rasterDirty()) {
                 DeviceInfo di;
                 if (deviceInfoOfState(cpu, dev, &di, nullptr)) {
@@ -3615,7 +3617,7 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
                       std::uint32_t* rasterized_out, std::string* why);
 bool prepareContext(X86& cpu, const char* what, std::uint32_t dev, std::uint32_t pe, DrawContext* ctx,
                     std::string* why) {
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return false;
     DeviceInfo dev_info;
     if (!deviceInfoOfState(cpu, dev, &dev_info, why)) return false;
@@ -3636,7 +3638,6 @@ bool prepareContext(X86& cpu, const char* what, std::uint32_t dev, std::uint32_t
         return false;
     }
     ctx->cpu = &cpu;
-    ctx->machine = m;
     ctx->gpu = m->gpuRaster();
     ctx->pe = pe;
     ctx->fvf = plGet(cpu, pe, kPlFvf);
@@ -5110,7 +5111,7 @@ std::uint32_t drawPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t prim, std
             return kInvalidCall;
         }
     }
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return kInvalidCall;
     DrawContext ctx;
     if (!prepareContext(cpu, "DrawPrimitive", dev, pe, &ctx, why)) return kInvalidCall;
@@ -5217,7 +5218,7 @@ std::uint32_t drawIndexedPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t pr
         if (why) *why = buf;
         return kInvalidCall;
     }
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return kInvalidCall;
     DrawContext ctx;
     if (!prepareContext(cpu, "DrawIndexedPrimitive", dev, pe, &ctx, why)) return kInvalidCall;
@@ -5327,7 +5328,7 @@ std::uint32_t drawPrimitiveUP(X86& cpu, std::uint32_t dev, std::uint32_t prim, s
                 static_cast<unsigned long long>(need));
         return kInvalidCall;
     }
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return kInvalidCall;
     DrawContext ctx;
     if (!prepareContext(cpu, "DrawPrimitiveUP", dev, pe, &ctx, why)) return kInvalidCall;
@@ -5401,7 +5402,7 @@ std::uint32_t drawIndexedPrimitiveUP(X86& cpu, std::uint32_t dev, std::uint32_t 
                 static_cast<unsigned long long>(up_span_bytes));
         return kInvalidCall;
     }
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return kInvalidCall;
     DrawContext ctx;
     if (!prepareContext(cpu, "DrawIndexedPrimitiveUP", dev, pe, &ctx, why)) return kInvalidCall;
@@ -5454,7 +5455,7 @@ bool clearDepth(X86& cpu, std::uint32_t pipeline_ea, float z, std::string* why) 
         if (why) *why = "D3D9 流水线：清深度时没有流水线状态块";
         return false;
     }
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return false;
     GuestSurface* dgs = m->surfaces().find(plGet(cpu, pipeline_ea, kPlDepthArena));
     if (!dgs) {

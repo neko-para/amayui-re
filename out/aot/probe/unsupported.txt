@@ -1,0 +1,4 @@
+# emulator-lift-gen（Shape A / T1c）：**仍然 trap** 的 guest 指令
+# 格式：0x<EA> <op> <原因>；这些位置在 .ll 里是 llvm.trap + unreachable
+# ★ T1c 起「未实现的 op」不再落这里（走单指令宿主原语 @lift_one）；这里为空是正常态，
+#   有内容 ⇒ 控制转移掉进了默认路径 = 生成器内部不一致（退出码 3）。

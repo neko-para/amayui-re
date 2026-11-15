@@ -105,6 +105,14 @@ public:
     // 执行一次命中：成功 ⇒ 设好 EAX / EIP / ESP 并返回 true；false ⇒ 原因写进 *why（调用方回退解释器）。
     // suspended=true ⇒ native 实现已经用 startNestedGuestCall() 铺了一个 guest 回调帧，
     //   EIP/ESP 已由 GuestCallStack 设置，调用方必须直接 continue（⛔ 不要回退解释器）。
+    // ★ **第三种出口：停机**（2026-11-14，复审 T2a P1-2）。fn 可以**在返回 false 的同时**
+    //   `cpu.running = false`（+ `stop_kind` / `stop_why`）—— 那**不是**"回退解释器"，而是
+    //   "这一轮到此为止"。此时本函数仍然返回 false（调用方看不出区别），但：
+    //     · ⛔ **不**改写 `*why`（真因在 `stop_why` 里，别用"参数越界 / safe mode"盖掉）；
+    //     · ⛔ **不**计 `fallbacks`（它不是一次回退）；
+    //     · 调用方必须按 `!cpu.running` 分流到**停机收口**（`Machine::run` 的 native 分支，
+    //       与 shim 路径同一套 `stop_kind` 三分类），⛔ 不许继续解释原字节。
+    //   ⇒ 判据一句话：**先看 `cpu.running`，再看返回值**。
     bool invoke(NativeOverride& ov, X86& cpu, GuestMemory& mem, const char** why, bool* suspended = nullptr);
 
 private:

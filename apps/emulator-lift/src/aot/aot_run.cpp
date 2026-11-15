@@ -1,0 +1,718 @@
+// emulator-lift · Shape A / T2b：**AOT 执行循环**（`AotHost::run` + 块边界的宿主泵）
+//
+// ★ 复刻范围 = T2 §1.4 的**五件 guest 语义**（⛔ 不复刻 profiler / token / trace / watch / 块计时）：
+//   ① `eip → 派发表项`（lifted）、`eip → lift_shim`（shim 桩）、两者都不是 ⇒ **响亮停**；
+//   ② 三个合成 EA（`0x7FFEF008` 续延 / `0x7FFEF004` 定时器返回 / SEH 派发）+ 块边界定时器触发；
+//   ③ 按**与解释器同一张表**（T2 §2.2）归类停因；
+//   ④ `insns` 由 `lift_tick` 记账（`X86::insns`，与解释器同一份语义；D2）；
+//   ⑤ 时钟 = **wall clock**（D2b：`clock_.setRealTime(true)`；⛔ 不引入虚拟时钟档）。
+//   ★ 另有两条**默认档就改写 guest 状态**的 EA 钩子（T2 §1.2 #14）：`0x4BA718` 把 EAX 置 0
+//     （`--accept-recovery-dialog` 的默认"绕过"）—— 不实现它 boot 会弹 MessageBoxA 并挂住。
+//
+// ★ 与解释器的**已知偏差**（都记在这里，⛔ 不装作没有）：
+//   · `--present` 只有 headless（presenter 没有 sink，`gpuRaster()` = nullptr）；
+//   · 没有 profiler / 影子栈 / guest token / 输入脚本 / 交互图 / 声音语义 —— 它们默认全关，
+//     本来就是宿主控制面（T2 §7.4）；
+//   · **有** native override（D25 第 1 项，2026-11-15）：函数级 + 段级两张表的**派发点**就在
+//     定时器泵之后、shim / 派发表之前（下面 ⑤'），判据与解释器 `machine.cpp:1420-1533` 逐条对齐
+//     （含 `insns` 折算 / `!running` 三分类 / 段级 `replaced_insns`）。开关 = `--native-overrides`
+//     （缺省关，与解释器缺省同口径 ⇒ 同一个二进制能做 A/B）；`sub_48B090` 因为要嵌套执行器**没装**；
+//   · 边界→`cpu.eip` 的"块缓存"这一层不存在：EA 要么在派发表里、要么是 shim 桩，否则响亮停
+//     （D10 P4：⛔ 不设"返回哨兵 = 结束"的约定）。
+// ★ 本文件的诊断开关读 getenv（`LIFT_AOT_SHIM_TRACE`）；MSVC 口径里那是 deprecated 警告，不是问题。
+#define _CRT_SECURE_NO_WARNINGS
+#include "aot/aot_host.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+
+#include "aot/aot_dispatch.h"
+
+namespace lift {
+namespace aot {
+namespace {
+
+// ★ `--accept-recovery-dialog` 的默认"绕过"判定点（真源 `machine.cpp:47` 的 `kRecoveryCheckEa`）。
+//   它是 `sub_454730` 的返回地址（块起点）：EAX = "$$AGE.TMP 能不能打开" ⇒ 置 0 = "打不开" = 上次
+//   正常结束 ⇒ `cmp eax,1` 为假 ⇒ 走 0x4BA856 干净返回，**永不到 0x4BA825 的 MessageBoxA**。
+//   ★ 这个常量**只对 D1 pin 住的那一份 exe** 成立 —— 换 exe 会在 `loadImage` 就被 pin 拦下。
+constexpr std::uint32_t kRecoveryCheckEa = 0x004BA718u;
+
+// 每 4096 条查一次墙钟（与解释器 `machine.cpp:1148-1157` 同粒度）。
+constexpr std::uint64_t kCheckStride = 4096u;
+
+// ★ 诊断开关（**默认关、零成本**；存在即开，与 `LIFT_FRAME_TRACE` 同口径）：
+//   `LIFT_AOT_SHIM_TRACE=1` ⇒ 每次走 `lift_shim` 打一行 `[aot-shim] …`（module!name / 桩 EA / insns）。
+//   为什么需要它：与解释器臂的 `--trace-shims` **同一种行**，两条臂的 shim 序列可以直接对齐
+//   ⇒ "在哪一次导入调用上分叉"是**读数**，不是猜。
+bool shimTraceOn() {
+    static const bool on = std::getenv("LIFT_AOT_SHIM_TRACE") != nullptr;
+    return on;
+}
+
+}  // namespace
+
+// =====================================================================================
+// 停因名字 / ok 口径（对照 `machine.h:46-82` 的 `StopReason` + `machine.cpp:82-107` 的名字表）
+// =====================================================================================
+const char* aotStopName(AotStop r) {
+    switch (r) {
+        case AotStop::None: return "none";
+        case AotStop::Stopped: return "stopped";
+        case AotStop::MaxInsns: return "max-insns";
+        case AotStop::UntilEa: return "until-ea";
+        case AotStop::TimeLimit: return "time-limit";
+        case AotStop::Unimplemented: return "unimplemented";
+        case AotStop::DecodeError: return "decode-error";
+        case AotStop::NoCode: return "no-code";
+        case AotStop::ResourceExhausted: return "resource-exhausted";
+        case AotStop::Trap: return "unimplemented-slot";
+        case AotStop::UnhandledException: return "unhandled-exception";
+        case AotStop::NonContinuableException: return "noncontinuable-exception";
+    }
+    return "?";
+}
+
+bool aotStopOk(AotStop r) {
+    // 与 `machine.h:147-149` 的 `RunResult::ok()` 同一组（本臂没有 FirstShim）。
+    return r == AotStop::UntilEa || r == AotStop::MaxInsns || r == AotStop::Stopped ||
+           r == AotStop::TimeLimit;
+}
+
+AotStop AotHost::hostStopReason(const X86& cpu) {
+    // 判据的真源是 `machine.cpp:75-80`（那份在匿名 namespace 里，跨 TU 拿不到）⇒ 抄**判据**：
+    // ① ResourceExhausted = 我方 arena / guest 堆不够；② Trap = 已注册的槽 / 形态没实现；
+    // ③ 其余（None）= 实现里主动停 ⇒ Stopped（**正常结局**）。
+    if (cpu.stop_kind == HostStopKind::ResourceExhausted) return AotStop::ResourceExhausted;
+    if (cpu.stop_kind == HostStopKind::Trap) return AotStop::Trap;
+    return AotStop::Stopped;
+}
+
+void AotHost::syncCpuFromRegs() { liftRegsToCpu(regs_, cpu_); }
+
+void AotHost::syncRegsFromCpu() { liftCpuToRegs(cpu_, regs_); }
+
+// =====================================================================================
+// 宿主置停的归类（shim 路径）
+// =====================================================================================
+void AotHost::classifyShimStop(const ShimDef* def, AotRunResult& r) {
+    // ★ 真源 `machine.cpp:1651-1675`。三种"停"要分清，顺序固定：
+    //   ① 注册表里没有 fn（或桩 EA 根本不在注册表里）= 缺口（Unimplemented，红）；
+    //   ② 有 fn + 宿主停机种类非 None = 不是正常结局（Trap / ResourceExhausted）；
+    //   ③ 有 fn + 种类 None = 实现里主动停（ExitProcess / --max-frames / 影片放完 …）⇒ Stopped（正常）。
+    //   ⚠ `had_impl` 对 ② 与 ③ **都是真** —— 这就是要 `X86::stop_kind` 的原因。
+    if (def == nullptr) {
+        // `lift_shim` 在"桩 EA 不在注册表"时会走 `trapUnimplemented`（置 Trap + stop_why）。
+        r.reason = hostStopReason(cpu_);
+        r.detail = cpu_.stop_why != nullptr
+                       ? std::string(cpu_.stop_why) + "（桩 EA 不在 shim 注册表里）"
+                       : std::string("桩 EA 不在 shim 注册表里（stop_why 为空）");
+        return;
+    }
+    const bool had_impl = def->fn != nullptr;
+    if (!had_impl) {
+        r.reason = AotStop::Unimplemented;
+        r.detail = std::string("未实现的导入 ") + def->module + "!" + def->name;
+        return;
+    }
+    r.reason = hostStopReason(cpu_);
+    r.detail = cpu_.stop_why != nullptr
+                   ? std::string(cpu_.stop_why) + "（shim " + def->module + "!" + def->name + "）"
+                   : std::string("shim 主动结束运行：") + def->module + "!" + def->name;
+}
+
+// =====================================================================================
+// 块边界的三个合成 EA
+// =====================================================================================
+AotHost::Pump AotHost::pumpSyntheticEas(AotRunResult& r) {
+    // ---- ① 嵌套 guest 回调的续延点（`guest_call.h`；真源 `machine.cpp:1301-1321`）----
+    if (cpu_.eip == GuestCallStack::kContinuationEa) {
+        std::string call_err;
+        ++callResumes_;
+        if (!calls_.resume(cpu_, &call_err)) {
+            r.reason = AotStop::Unimplemented;
+            r.detail = call_err.empty() ? std::string("guest 回调续延失败") : call_err;
+            return Pump::Stop;
+        }
+        // 音频泵借用 `[esp]` 作为 `sub_4B6C30` 的返回点；续延完成后必须还回原返回地址。
+        // `--audio off` 下恒等，但顺序与解释器一致（`machine.cpp:1309`）。
+        audio_.afterGuestCall();
+        // 续延里也可能**主动结束运行**（例如影片停机链）：那时 `while (running)` 会直接退出，
+        // 不给原因就成了静默缝 ⇒ 这里补 StopReason::Stopped（与解释器同口径）。
+        if (!cpu_.running) {
+            r.reason = AotStop::Stopped;
+            r.detail = cpu_.stop_why != nullptr ? cpu_.stop_why : "guest 调用续延里主动结束运行";
+            return Pump::Stop;
+        }
+        return Pump::Handled;
+    }
+
+    // ---- ② winmm 定时器回调的返回点（`x86.h:98`；真源 `machine.cpp:1322-1345`）----
+    if (cpu_.eip == kTimerCallbackReturnEa) {
+        if (!cpu_.shim.timer_firing) {
+            r.reason = AotStop::Unimplemented;
+            r.detail = "定时器续延点被调到，但没有正在跑的定时器回调";
+            return Pump::Stop;
+        }
+        cpu_.esp() = cpu_.shim.timer_saved_esp;
+        cpu_.eip = cpu_.shim.timer_resume_ea;
+        // ★ 整份通用寄存器都要还回去：真机上回调在另一个线程，被打断线程的寄存器组由 OS 保住。
+        //   只还 EIP/ESP 的话，回调随手改掉的 EAX/ECX/EDX 会漏进被插入点的后续指令。
+        const TimerSavedRegs& sr = cpu_.shim.timer_saved_regs;
+        cpu_.eax() = sr.eax;
+        cpu_.ebx() = sr.ebx;
+        cpu_.ecx() = sr.ecx;
+        cpu_.edx() = sr.edx;
+        cpu_.esi() = sr.esi;
+        cpu_.edi() = sr.edi;
+        cpu_.ebp() = sr.ebp;
+        cpu_.eflags = sr.eflags;
+        cpu_.shim.timer_firing = false;
+        return Pump::Handled;
+    }
+
+    // ---- ③ SEH / C++ EH 派发（**只在块边界推进**；真源 `machine.cpp:1346-1355`）----
+    if (seh_.busy()) return pumpSeh(r);
+
+    return Pump::NotHandled;
+}
+
+AotHost::Pump AotHost::pumpSeh(AotRunResult& r) {
+    // ★ 拆自 `Machine::pumpSeh`（`machine.cpp:2208-2280`）；去掉的部分只有影子栈（profiler）。
+    //   handler 的合成返回点（`kSehHandlerReturnEa`）不是可解码地址 ⇒ 本泵必须在"派发表查找"之前，
+    //   否则"异常没人接"会被误报成"EA 不在表里"。
+    if (cpu_.eip == kSehDispatchEa) {
+        seh_.setDispatchPending(false);
+        // ★ "展开不许跨过宿主 guest 回调帧"的判据（真机上是 UB）。0 = 不在任何回调里。
+        seh_guest_boundary_ = 0;
+        const std::uint32_t stack_top = setup_.stack_top != 0 ? setup_.stack_top : layout_.stack_top;
+        if (calls_.active()) {
+            // 从当前 esp 往上找最内层回调帧：`GuestCallStack::start()` 在那一格写 `kContinuationEa`。
+            for (std::uint32_t ea = cpu_.esp(); ea + 4u <= stack_top; ea += 4u) {
+                if (mem_.rd32(ea) == GuestCallStack::kContinuationEa) {
+                    seh_guest_boundary_ = ea;
+                    break;
+                }
+            }
+            if (seh_guest_boundary_ == 0) {
+                r.reason = AotStop::UnhandledException;
+                r.detail = std::string("guest 异常发生在 GuestCallStack 回调里，但栈上找不到回调帧的"
+                                       "返回槽（") +
+                           (calls_.currentApi() ? calls_.currentApi() : "?") +
+                           "）⇒ 无法证明展开不跨宿主帧 ⇒ 本线不支持";
+                seh_.reset();
+                cpu_.running = false;
+                return Pump::Stop;
+            }
+        } else if (cpu_.shim.timer_firing) {
+            // `fireDueTimer` 的帧：`[timer_saved_esp-24] = kTimerCallbackReturnEa`（5 参 + 返回地址）。
+            seh_guest_boundary_ = cpu_.shim.timer_saved_esp - 24u;
+        }
+    }
+    std::string why;
+    const SehStep s = seh_.step(cpu_, mem_, &why);
+    switch (s.kind) {
+        case SehStep::Kind::None:
+            return Pump::NotHandled;
+        case SehStep::Kind::CallHandler:
+            // 合成 handler 调用也是一帧（它的 `ret N` 会正常弹）。`step` 已写好 eip / esp。
+            cpu_.noteInsn(s.handler_ea, "[seh]");
+            return Pump::Handled;
+        case SehStep::Kind::Transfer:
+            // ★ 跨宿主 guest 回调帧 ⇒ 响亮停（真机上异常会穿过宿主 C++ 栈 = UB）。
+            if (seh_guest_boundary_ != 0 && s.esp >= seh_guest_boundary_) {
+                char buf[320];
+                std::snprintf(buf, sizeof(buf),
+                              "guest 异常要展开跨过宿主 guest 回调帧（落地 esp=0x%08X >= 回调帧返回槽 "
+                              "0x%08X；%s）⇒ 本线不支持（⛔ 不静默清栈继续跑）",
+                              s.esp, seh_guest_boundary_,
+                              calls_.active() ? "GuestCallStack" : "winmm 定时器回调");
+                r.reason = AotStop::UnhandledException;
+                r.detail = buf;
+                seh_.reset();
+                seh_guest_boundary_ = 0;
+                cpu_.running = false;
+                return Pump::Stop;
+            }
+            cpu_.noteInsn(s.eip, "[seh]");
+            return Pump::Handled;
+        case SehStep::Kind::Stop:
+            r.reason = s.noncontinuable_violation ? AotStop::NonContinuableException
+                                                  : AotStop::UnhandledException;
+            r.detail = why.empty() ? std::string("SEH 派发失败（无 detail）") : why;
+            seh_guest_boundary_ = 0;
+            cpu_.running = false;
+            return Pump::Stop;
+    }
+    return Pump::NotHandled;
+}
+
+bool AotHost::fireDueTimer(AotRunResult& r) {
+    // ★ 拆自 `Machine::fireDueTimer`（`machine.cpp:2140-2199`）：协作式定时器，**只在块边界**触发。
+    //   到期判定用 `clock_`（D2b：wall clock）⇒ 与解释器同一份时钟语义。
+    const std::uint64_t now = clock_.now100ns();
+    std::vector<GuestTimer>& timers = cpu_.shim.timers;
+    std::size_t best = timers.size();
+    for (std::size_t i = 0; i < timers.size(); ++i) {
+        if (timers[i].due_100ns > now) continue;
+        // 确定性：同刻到期时取 id 最小的（⛔ 不依赖 vector 的插入顺序）
+        if (best == timers.size() || timers[i].due_100ns < timers[best].due_100ns ||
+            (timers[i].due_100ns == timers[best].due_100ns && timers[i].id < timers[best].id)) {
+            best = i;
+        }
+    }
+    if (best == timers.size()) return false;
+
+    const GuestTimer t = timers[best];
+    if (t.oneshot) {
+        timers.erase(timers.begin() + static_cast<std::ptrdiff_t>(best));
+    } else {
+        // 周期定时器先续约（回调里 timeKillEvent 仍能按 id 杀掉它）
+        timers[best].due_100ns += static_cast<std::uint64_t>(t.period_ms) * 10000ull;
+    }
+    if (t.callback == 0) {
+        std::fprintf(stderr, "[aot] 定时器 %u 的回调为 NULL ⇒ 丢弃\n", t.id);
+        return false;
+    }
+    // 回调帧：TimeProc(uID, uMsg, dwUser, dw1, dw2)（stdcall，5 个参数 = 20 字节 + 返回地址）
+    constexpr std::uint32_t kFrame = 4u + 5u * 4u;
+    const std::uint32_t base = cpu_.esp();
+    if (base < kFrame || !mem_.committed(base - kFrame, kFrame)) {
+        r.reason = AotStop::Unimplemented;
+        r.detail = "guest 栈不够铺定时器回调帧（esp=" + std::to_string(base) + "）";
+        return false;
+    }
+    cpu_.shim.timer_resume_ea = cpu_.eip;
+    cpu_.shim.timer_saved_esp = base;
+    cpu_.shim.timer_firing = true;
+    cpu_.shim.timer_firing_id = t.id;
+    {
+        TimerSavedRegs& sr = cpu_.shim.timer_saved_regs;
+        sr.eax = cpu_.eax();
+        sr.ebx = cpu_.ebx();
+        sr.ecx = cpu_.ecx();
+        sr.edx = cpu_.edx();
+        sr.esi = cpu_.esi();
+        sr.edi = cpu_.edi();
+        sr.ebp = cpu_.ebp();
+        sr.eflags = cpu_.eflags;
+    }
+    cpu_.esp() = base - kFrame;
+    mem_.wr32(base - 24u, kTimerCallbackReturnEa);
+    mem_.wr32(base - 20u, t.id);
+    mem_.wr32(base - 16u, 0u);  // uMsg（文档：保留，不用）
+    mem_.wr32(base - 12u, t.user);
+    mem_.wr32(base - 8u, 0u);   // dw1（保留）
+    mem_.wr32(base - 4u, 0u);   // dw2（保留）
+    cpu_.eip = t.callback;
+    ++timerFires_;
+    return true;
+}
+
+// =====================================================================================
+// 执行循环
+// =====================================================================================
+AotRunResult AotHost::run(const AotRunOptions& opts) {
+    AotRunResult r;
+    if (!prepared_) {
+        r.reason = AotStop::NoCode;
+        r.detail = "AotHost 还没 prepare（没有 guest 进程结构 / shim 桩）⇒ 不能执行";
+        return r;
+    }
+    if (!generatedPresent()) {
+        // ★ 响亮：**不许**把"没有生成物"静默跑成空壳（构建期缺 clang / 执行源 / closure.txt）。
+        r.reason = AotStop::NoCode;
+        r.detail = "没有生成物（构建期缺 clang / 执行源 / closure.txt）⇒ 派发表为空，无法执行任何 guest 指令";
+        return r;
+    }
+
+    // ---- 每轮开头（只留 guest 语义那几条；真源 `machine.cpp:943-1094`）----
+    windows_.setOwnerThread(std::this_thread::get_id());
+    seh_.reset();  // ★ 状态机**跨块存活、只跨 run 清**（machine.cpp:1007）
+    calls_.reset();  // 与 seh 同口径：一次 run 的嵌套回调状态不跨 run
+    cpu_.running = true;
+    cpu_.stop_kind = HostStopKind::None;  // ★ 按轮重置（machine.cpp:1094）
+    cpu_.shim.max_frames = opts.max_frames;
+    if (!clock_.realTime()) clock_.setRealTime(true);  // D2b：wall clock（⛔ 没有 --clock= 开关）
+    resetDispatchStats();
+    timerFires_ = 0;
+    callResumes_ = 0;
+    // ★ `--skip-logo`：一次性 latch 的**按轮**状态（语义 = `AotRunOptions::skip_logo`）。
+    //   解释器那四个成员是 Machine 的（`machine.h:555-558`，进程只跑一轮）；本宿主的 `run()` 可以
+    //   被调多次 ⇒ 在这里按轮重置，保证"同一台宿主第二轮不会假装命中过"。
+    skip_logo_ = opts.skip_logo;
+    skip_logo_checked_ = false;
+    skip_logo_applied_ = false;
+    skip_logo_object_ = 0;
+    skip_logo_prior_value_ = 0;
+    // ★ 逐帧 `lastHash` 读数（D）：每发生一次 Present 就打一行。Present 只可能由**shim** 触发
+    //   （生成物里没有 inline 的 `lift_shim` 调用；`rg lift_shim src/aot/lift_gen_emit.cpp` = 0）
+    //   ⇒ 打点在下面 shim 分支里、`lift_shim` 返回之后（在 `!cpu_.running` 之前）。
+    std::uint64_t logged_frames = presenter_.frameCount();
+    auto logPresentedFrames = [&]() {
+        const std::uint64_t n = presenter_.frameCount();
+        if (n == logged_frames) return;
+        if (n == logged_frames + 1) {
+            std::printf("[frame] n=%llu hash=0x%016llX\n", static_cast<unsigned long long>(n),
+                        static_cast<unsigned long long>(presenter_.lastHash()));
+        } else {
+            // 一次 shim 里发生了多次 Present（正常是 1 次）：hash 只有最后一帧那一份，⛔ 不冒充逐帧。
+            std::printf("[frame] n=%llu..%llu（一次 shim 里 %llu 次 Present）hash=0x%016llX（只有最后一帧）\n",
+                        static_cast<unsigned long long>(logged_frames + 1),
+                        static_cast<unsigned long long>(n),
+                        static_cast<unsigned long long>(n - logged_frames),
+                        static_cast<unsigned long long>(presenter_.lastHash()));
+        }
+        logged_frames = n;
+    };
+    // ★ 起点：`cpu_.eip` 已经是 PE entry（`prepare` 设的）⇒ lifted 侧现场由它派生。
+    syncRegsFromCpu();
+    const auto wall_start = std::chrono::steady_clock::now();
+    std::uint64_t next_time_check = 0;
+    // ★ 块边界事件泵的节流（与解释器 `machine.cpp:1097` / `:1298` 同粒度：每 4096 条一次）。
+    std::uint64_t next_present_check = 0;
+    std::uint32_t ea = cpu_.eip;
+
+    for (;;) {
+        // ★ 块边界的第一件事：把 lifted 侧的寄存器现场同步进 `cpu_`（宿主侧逻辑读 cpu）。
+        //   ⛔ 反方向的同步只在宿主侧真的改过 cpu 之后做（下面 Pump::Handled 的三处）。
+        syncCpuFromRegs();
+        cpu_.eip = ea;
+
+        // ---- ① `--time-limit`（每 4096 条查一次墙钟；machine.cpp:1148-1157）----
+        if (opts.time_limit_sec > 0.0 && cpu_.insns >= next_time_check) {
+            const auto now = std::chrono::steady_clock::now();
+            const double elapsed = std::chrono::duration<double>(now - wall_start).count();
+            if (elapsed >= opts.time_limit_sec) {
+                r.reason = AotStop::TimeLimit;
+                r.detail = "达到 --time-limit（墙钟上限）";
+                break;
+            }
+            next_time_check = cpu_.insns + kCheckStride;
+        }
+
+        // ---- ①' 显示后端：块边界也要泵（真源 `machine.cpp:1279-1299`）----
+        //   ⛔ 不泵的后果是**窗口假死 / 关窗不停**：boot→TITLE 有单帧 ~7.3 亿条指令，而 Present
+        //   内部的泵只在两帧之间跑 ⇒ 那一段窗口不响应，`stopRequested()` 也没人问。
+        //   ⛔ 嵌套 guest 调用（或 SEH 派发）进行中不泵：那一刻正在跑另一段 guest 代码，插一个
+        //   WndProc 帧会改坏它仍活着的上下文（真机上它们是两个线程）。
+        {
+            const bool nested_guest_active = calls_.active() || seh_.busy();
+            if (!nested_guest_active && presenter_.hasSink() && cpu_.insns >= next_present_check) {
+                presenter_.pumpHostEvents();
+                if (presenter_.stopRequested()) {
+                    r.reason = AotStop::Stopped;
+                    r.detail = "present: 窗口关闭";
+                    cpu_.running = false;
+                    break;
+                }
+                next_present_check = cpu_.insns + kCheckStride;
+            }
+        }
+
+        // ---- ② 三个合成 EA（必须在"桩 EA ⇒ lift_shim"之前：它们都落在桩页范围内）----
+        const Pump pumped = pumpSyntheticEas(r);
+        if (pumped == Pump::Stop) break;
+        if (pumped == Pump::Handled) {
+            // 泵可能改了 esp / eip / 寄存器（铺帧 / 恢复现场 / SEH 转移）⇒ 反向同步一次。
+            syncRegsFromCpu();
+            ea = cpu_.eip;
+            continue;
+        }
+
+        // ---- ③ `--until` / `--max-insns`（块边界；machine.cpp:1356-1363）----
+        if (opts.until_ea != 0 && ea == opts.until_ea) {
+            r.reason = AotStop::UntilEa;
+            break;
+        }
+        if (opts.max_insns != 0 && cpu_.insns >= opts.max_insns) {
+            r.reason = AotStop::MaxInsns;
+            break;
+        }
+
+        // ---- ④ `--accept-recovery-dialog` 的默认"绕过"（EAX := 0；machine.cpp:1369-1376）----
+        //   ★ 这是默认档就改写 guest 寄存器的钩子（T2 §1.2 #14）：不实现它 boot 会弹系统框并挂住。
+        //   只应用一次；`regs_` 是寄存器真源 ⇒ 两个都写。
+        if (!recovery_bypass_checked_ && ea == kRecoveryCheckEa) {
+            recovery_bypass_checked_ = true;
+            recovery_bypass_prior_eax_ = cpu_.eax();
+            cpu_.eax() = 0;
+            regs_.r[0] = 0;  // EAX 在 LiftRegs 的 +0（`lift_abi.h:28` 的 GprIndex 顺序）
+            recovery_bypass_applied_ = true;
+        }
+
+        // ---- ④' `--skip-logo`：一次性 latch，与解释器**同一格内存**（真源 `machine.cpp:1377-1401`）----
+        //   ★ 钩子点是 `0x004BAA33`，不是解释器的 `0x004BAA37`（理由见 `aot_host.h` 的常量注释：
+        //     0x4BAA37 只是同函数内部块，派发表里没有它 ⇒ 挂那里**永不命中**）。
+        //   ★ 此刻 `syncCpuFromRegs()`（循环头）已把 lifted 侧寄存器同步进 `cpu_` ⇒ `cpu_.eax()` 就是
+        //     `sub_415640`（`T_Command` 构造）的返回值；`0x4BAA33` → `0x4BAA37` 之间只有一条
+        //     `jmp short`（无语义）⇒ 在这里写 `+0x5EB5C` 与解释器在 `0x4BAA37` 写**逐位等价**，
+        //     而且同样发生在 `0x4BAA3A` 的 `mov ds:dword_55E1BC, eax`（指针发布）之前。
+        //   ★ 只写 **guest 内存**：不改 eip / 不改任何寄存器 ⇒ 不需要反向同步 `regs_`。
+        //   ★ "初值不是 1" / "对象不可写"两条异常分支照解释器保留（⛔ 不静默）。
+        if (skip_logo_ && !skip_logo_checked_ && ea == kSkipLogoHookEa) {
+            skip_logo_checked_ = true;
+            const std::uint32_t object = cpu_.eax();
+            skip_logo_object_ = object;
+            if (object != 0 && mem_.committed(object + kSkipLogoFieldOffset, 4)) {
+                skip_logo_prior_value_ = mem_.rd32(object + kSkipLogoFieldOffset);
+                mem_.wr32(object + kSkipLogoFieldOffset, 0);
+                skip_logo_applied_ = true;
+                // ★ latch 命中读数（A 的判据就是这一行）：命中 EA / 写入的 guest EA / 写入的值。
+                std::printf("[skip-logo] hit @ %08X：T_Command=0x%08X ⇒ 写 [0x%08X] = 0（写前 %u）\n",
+                            kSkipLogoHookEa, object, object + kSkipLogoFieldOffset, skip_logo_prior_value_);
+                if (skip_logo_prior_value_ != 1) {
+                    std::fprintf(stderr,
+                                 "[skip-logo] ⚠ 初值不是 1（读到 %u）：写 0 仍执行，但钩子/字段可能已漂\n",
+                                 skip_logo_prior_value_);
+                }
+            } else {
+                std::fprintf(stderr,
+                             "[skip-logo] 钩子 @ %08X 命中，但对象指针 0x%08X 不可写（+0x%05X）⇒ 未应用\n",
+                             kSkipLogoHookEa, object, kSkipLogoFieldOffset);
+            }
+        }
+
+        // ---- ⑤ 到期的 winmm 定时器在**块边界**触发（machine.cpp:1402-1418）----
+        //   ⛔ 不嵌套：一个回调没跑完就不再触发下一个；嵌套 guest 调用 / SEH 期间也不触发。
+        if (!calls_.active() && !cpu_.shim.timer_firing && !cpu_.shim.timers.empty() &&
+            !cpu_.shim.callback.active && !seh_.busy()) {
+            if (fireDueTimer(r)) {
+                syncRegsFromCpu();
+                ea = cpu_.eip;
+                continue;
+            }
+            if (r.reason != AotStop::None) break;
+        }
+
+        // ---- ⑤' guest native override（真源 `machine.cpp:1420-1533`；D25 第 1 项）----
+        //   ★ 判据顺序与解释器**逐条一致**：定时器泵 → 函数级 → 段级 → shim / 派发表。
+        //   ★ 两张表都空（缺省档）⇒ 这一段只多一次 `empty()`；`overrideCandidate` 是一张
+        //     位图前置过滤（见 `aot_host.h`），所以"开着 override"的代价是每次派发一次位测试。
+        if (overrideCandidate(ea)) {
+            // ★ 每个 EA 只打一行："到达了 override 入口，但**不是 call 帧**" ⇒ 走 lifted。
+            //   为什么必须看得见：`call reg/mem`（虚表调用）的返回地址不在 `[esp]-5` 上，判据会拒掉它
+            //   ⇒ 那是**性能**缺口（不是语义缺口），但"落到哪些 EA、有多少"不能是隐形的。
+            auto noteNotCall = [&](std::uint32_t at, const char* name) {
+                ++r.ov_not_call;
+                if (std::find(not_call_logged_.begin(), not_call_logged_.end(), at) !=
+                    not_call_logged_.end()) {
+                    return;
+                }
+                not_call_logged_.push_back(at);
+                const std::uint32_t top = mem_.committed(cpu_.esp(), 4u) ? mem_.rd32(cpu_.esp()) : 0u;
+                std::fprintf(stderr,
+                             "[aot][native] %s @ %08X 到达时**不是 call 帧**（[esp]=%08X 处不是指向它的 "
+                             "`call rel32`）⇒ 走 lifted 代码（每个 EA 只报第一次）\n",
+                             name, at, top);
+            };
+            // ① 需要嵌套 guest 执行器 ⇒ 本轮**没装**的那些项：只计数（⛔ 不假装接上了）。
+            for (const std::uint32_t nested_ea : nested_only_ea_) {
+                if (nested_ea != ea) continue;
+                if (overrideCallFrame(ea)) {
+                    ++r.ov_skipped_nested;
+                } else {
+                    noteNotCall(ea, "(需要嵌套执行器的项)");
+                }
+                break;
+            }
+            // ② 函数级：只在**函数入口 + 真有 call 帧**时拦（解释器的 `call_target` 判据）。
+            if (NativeOverride* ov = overrides_.find(ea)) {
+                if (!overrideCallFrame(ea)) {
+                    // 不是 call 帧 ⇒ 不许弹一个不存在的返回地址（解释器同样回退解释器）。
+                    noteNotCall(ea, ov->name.c_str());
+                } else {
+                    const std::uint64_t insns_before = cpu_.insns;
+                    const std::uint64_t fallbacks_before = ov->fallbacks;
+                    const char* why = nullptr;
+                    bool suspended = false;
+                    const bool took = overrides_.invoke(*ov, cpu_, mem_, &why, &suspended);
+                    if (took) {
+                        if (suspended) {
+                            // override 自己铺了 guest 回调帧（EIP/ESP 由 GuestCallStack 设好）⇒
+                            // 按 cpu_.eip 继续（⛔ 不回退 lifted）。按实际增量补账。
+                            r.ov_insns += cpu_.insns - insns_before;
+                            syncRegsFromCpu();
+                            ea = cpu_.eip;
+                            continue;
+                        }
+                        // ★ 复刻解释器的 `insns` 记账（`machine.cpp:1454-1459`）：override 替代了
+                        //   **整个函数体**（没有 ret 指令）⇒ 记 **1 条** + override 自己补的条数
+                        //   （`insns_before` 基线，⛔ 不硬编码 "+1" —— 那会把补偿漏成闭合差）。
+                        cpu_.noteInsn(ov->ea, "[native]");
+                        ++cpu_.insns;
+                        clock_.tick();
+                        r.ov_insns += cpu_.insns - insns_before;
+                        syncRegsFromCpu();
+                        ea = cpu_.eip;
+                        continue;
+                    }
+                    // ★ **停机**与"回退 lifted"是两条语义（`machine.cpp:1469-1478`）：先看 running。
+                    if (!cpu_.running) {
+                        r.reason = hostStopReason(cpu_);
+                        char ea_text[16];
+                        std::snprintf(ea_text, sizeof(ea_text), "%08X", ov->ea);
+                        r.detail =
+                            cpu_.stop_why
+                                ? std::string(cpu_.stop_why) + "（native " + ov->name + " @ " + ea_text + "）"
+                                : std::string("native override 主动结束运行：") + ov->name + " @ " + ea_text;
+                        r.ov_insns += cpu_.insns - insns_before;
+                        break;
+                    }
+                    // 第一次回退就打一行（与解释器同一个闸门：`fallbacks` 从 0 变 1）。
+                    if (fallbacks_before == 0 && ov->fallbacks == 1 && why != nullptr) {
+                        std::fprintf(stderr, "[native] %s @ %08X 回退解释器：%s\n", ov->name.c_str(), ov->ea,
+                                     why);
+                    }
+                    // 回退路径也按**实际增量**补账，并把 cpu_ 的状态同步回 `regs_`（lifted 侧的状态
+                    // 真源是 `regs_`；fn 在回退前可能已经改过 cpu_ —— 解释器那边 cpu_ 就是真源）。
+                    r.ov_insns += cpu_.insns - insns_before;
+                    syncRegsFromCpu();
+                }
+            }
+            // ③ 段级：函数中段的固定 EA（`machine.cpp:1488-1533`）—— **没有** call 帧语义：
+            //   fn 自己写 EIP（段出口）/ 寄存器 / EFLAGS，并按 `replaced_insns` 报被替代的条数。
+            if (NativeBlockOverride* bo = block_overrides_.find(ea)) {
+                const std::uint32_t entry = ea;
+                std::uint64_t replaced = 0;
+                const BlockOverrideOutcome outcome = bo->fn(cpu_, mem_, &replaced);
+                if (outcome == BlockOverrideOutcome::Replaced) {
+                    cpu_.noteInsn(entry, "[native-block]");
+                    ++bo->hits;
+                    const std::uint64_t n = replaced != 0 ? replaced : 1ull;
+                    cpu_.insns += n;
+                    clock_.tick(n);
+                    r.ov_insns += n;
+                    syncRegsFromCpu();
+                    ea = cpu_.eip;
+                    continue;
+                }
+                if (outcome == BlockOverrideOutcome::Declined) {
+                    // 前置条件不匹配 ⇒ 一次就够（段级项的前提是静态的）⇒ 本次运行停用该项。
+                    if (!bo->disabled) {
+                        ++bo->declines;
+                        bo->disabled = true;
+                        std::fprintf(stderr,
+                                     "[native] 段级 %s @ %08X 前置条件不匹配 ⇒ 本次运行停用该项（回退 lifted）\n",
+                                     bo->name.c_str(), entry);
+                    }
+                } else {
+                    if (bo->fallbacks == 0) {
+                        std::fprintf(stderr, "[native] 段级 %s @ %08X 执行失败 ⇒ 回退 lifted\n",
+                                     bo->name.c_str(), entry);
+                    }
+                    ++bo->fallbacks;
+                }
+            }
+        }
+
+        // ---- ⑥ 分派：shim 桩 EA → `lift_shim`；否则派发表 → `lift_cc_<根>`；都不是 ⇒ 响亮停 ----
+        //   ★ 桩 EA 的判据与解释器同一份来源：`ShimRegistry::byStubEa`（注册表反查；AOT 没有块缓存）。
+        //     另外把"落在桩页范围内的 4 字节对齐地址"也算桩 EA —— 那是 bind 发号的形状，
+        //     未实现的导入也占一个槽（执行到就由 `lift_shim` 的 trap 路径响亮停）。
+        const ShimDef* def = shims_.byStubEa(ea);
+        const bool in_stub_page = ea >= layout_.shim_page &&
+                                  ea < layout_.shim_page + layout_.shim_slots * 4u && (ea & 3u) == 0u;
+        if (def != nullptr || in_stub_page) {
+            ++r.dispatches;
+            ++r.shim_calls;
+            if (shimTraceOn()) {
+                std::fprintf(stderr, "[aot-shim] %llu ins=%-9llu %s!%s stub=%08X ret=%08X\n",
+                             static_cast<unsigned long long>(r.shim_calls),
+                             static_cast<unsigned long long>(cpu_.insns),
+                             def != nullptr ? def->module.c_str() : "(?)",
+                             def != nullptr ? def->name.c_str() : "(unknown-stub)", ea,
+                             mem_.rd32(cpu_.esp()));
+            }
+            const std::uint32_t next = ::lift_shim(ea, &regs_, &cpu_);
+            // ★ 每帧 `lastHash` 读数（D）：Present 只在 shim 路径上发生；必须在 `!cpu_.running` 与
+            //   帧数闸门**之前**打 —— `--max-frames` 恰好是 D3D9 自己在 Present 里置停的那条路，
+            //   晚一步就会丢掉最后一帧的读数。
+            logPresentedFrames();
+            // `lift_shim` 自己把整块状态回读进了 `*st`；`cpu_` 与它一致（同一次调用里同步过）。
+            if (!cpu_.running) {
+                classifyShimStop(def, r);
+                break;
+            }
+            if (next == ::kLiftHalt) {
+                // `lift_shim` 只有 `running == false` 才返回哨兵 ⇒ 走到这里是内部不一致，仍然响亮停。
+                r.reason = AotStop::Unimplemented;
+                r.detail = "lift_shim 返回了 kLiftHalt 但 cpu.running 仍为 true（宿主内部不一致）";
+                break;
+            }
+            ea = next;
+            // ---- 帧数闸门：present 计数到了 --max-frames ⇒ 停（与 D3D9 内部那条同口径）----
+            //   ★ D3D9 的 Present 自己会在 `frameCount() >= max_frames` 时置停（`d3d9.cpp:865-870`），
+            //     所以正常情况下上面那条 `!cpu_.running` 先命中；这里兜住 **DDraw Flip 不判**
+            //     那条缝（`ddraw_surface.cpp:812` 只 present、不比对）—— 让两条呈现路径都能停。
+            if (opts.max_frames != 0 && presenter_.frameCount() >= opts.max_frames) {
+                r.reason = AotStop::Stopped;
+                r.detail = "max-frames（present 计数达到 --max-frames）";
+                break;
+            }
+            continue;
+        }
+
+        std::uint64_t comparisons = 0;
+        const LiftFn fn = lookup(ea, &comparisons);
+        if (fn == nullptr) {
+            // ★ **响亮停**并点名 EA（D10 P4）：⛔ 不设"返回哨兵 = 结束"的约定，也⛔ 不静默当普通 EA。
+            r.reason = AotStop::DecodeError;
+            if (ea == 0xFFFFFFFFu) {
+                r.detail = "EA 0xFFFFFFFF = 栈底返回地址哨兵：guest 一路 `ret` 到了栈哨兵，派发表里没有它"
+                           "（⛔ 不当成\"正常结束\"）";
+            } else {
+                char buf[256];
+                std::snprintf(buf, sizeof(buf),
+                              "EA %08X 既不在派发表里（closure 缺这一行？）也不是 shim 桩 EA ⇒ 响亮停"
+                              "（查找 %llu 次比较；表 %zu 项）",
+                              ea, static_cast<unsigned long long>(comparisons), tableSize());
+                r.detail = buf;
+            }
+            break;
+        }
+        ++r.dispatches;
+        ++r.lifted_calls;
+        const std::uint32_t next = fn(&regs_, mem_.host(0), ea, &cpu_);
+        if (next == ::kLiftHalt) {
+            // 生成物里的停机出口：`lift_one` 的 false / `lift_stop`（T1c 的口径）。
+            // 解释器把这一类归成 `Unimplemented` + `detail = cpu.stop_why`（T2 §2.2）。
+            r.reason = cpu_.running ? AotStop::Unimplemented : hostStopReason(cpu_);
+            std::string why = cpu_.stop_why != nullptr ? cpu_.stop_why : "（stop_why 为空）";
+            char buf[192];
+            std::snprintf(buf, sizeof(buf), "%s（lifted 停机出口 @ %08X）", why.c_str(), ea);
+            r.detail = buf;
+            break;
+        }
+        if (!cpu_.running) {
+            // 防御：生成物只该通过 `kLiftHalt` 停；真出现"置停但没有哨兵"也要收口（⛔ 不许静默继续）。
+            r.reason = hostStopReason(cpu_);
+            r.detail = cpu_.stop_why != nullptr ? cpu_.stop_why : "lifted 代码置停但没有返回停机哨兵";
+            break;
+        }
+        ea = next;
+    }
+
+    // ---- 收口（只留 guest 语义的读数；真源 machine.cpp:1806-1826）----
+    syncCpuFromRegs();
+    r.ea = cpu_.eip;
+    r.insns = cpu_.insns;
+    r.frames = presenter_.frameCount();
+    // ---- D28 的新增读数：派发表（开放寻址）的**探测分布**（probes avg / max / cap / load factor）----
+    // ★ 为什么落在这里：既有那行 `table : …` 在 `aot_host.cpp`（本轮改动面不含它）⇒ 新读数由
+    //   `aot_dispatch.cpp` 自己出、在这里打；`printProbeLine` 只读计数器，⛔ 不影响停机判据。
+    printProbeLine(stdout);
+    if (r.reason == AotStop::None) {
+        // ★ 解释器里这一档是**静默缝**（`RunResult::ok()` 为假 ⇒ 退出码 2 但摘要写 `stop: none`）；
+        //   本臂把它变成一条点名的响亮错（⛔ 不给"没原因"留门）。
+        r.reason = AotStop::Unimplemented;
+        if (r.detail.empty()) r.detail = "执行循环退出但没有停因（宿主内部不一致）";
+    }
+    return r;
+}
+
+}  // namespace aot
+}  // namespace lift

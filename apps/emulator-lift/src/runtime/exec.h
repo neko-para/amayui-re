@@ -38,6 +38,13 @@ void setLogicFlags(X86& cpu, std::uint32_t result, std::uint8_t size);
 void setAddFlags(X86& cpu, std::uint32_t a, std::uint32_t b, std::uint32_t result, std::uint8_t size, bool with_carry);
 void setSubFlags(X86& cpu, std::uint32_t a, std::uint32_t b, std::uint32_t result, std::uint8_t size, bool with_borrow);
 
+// PF 的**唯一一份**判据（SDM：低 8 位的 popcount 为偶 ⇒ true）。
+// ★ 为什么提到这里（D10 P1）：原先仓里有三份 `0x6996` 表，其中两份（`exec_integer.cpp` 的
+//   `parityFromLow` / `exec_string.cpp` 的 `par`)少了取反 ⇒ 移位 / `scas`·`cmps` 之后的 PF
+//   是**奇**校验，与生成器（`lift_gen_emit.cpp` 的 `parity()`，SDM 偶校验）**相反**。
+//   ⛔ 不要再在任何 `exec_*.cpp` 里另写一份。
+bool parityEven(std::uint8_t v);
+
 // 打印寄存器 + guest 返回栈（fault 诊断 / 未实现诊断共用；`depth` 是栈上回看的字数量）
 void dumpRegisters(const X86& cpu, std::FILE* out);
 void dumpGuestStack(const X86& cpu, std::FILE* out, int depth);

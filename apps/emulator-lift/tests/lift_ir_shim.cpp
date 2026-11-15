@@ -826,7 +826,16 @@ int runMain() {
         // ⑥ 没早退：解释器闭式 + lifted 臂零回退
         checkU32(name, "interp insns", static_cast<std::uint32_t>(in.stats.insns),
                  static_cast<std::uint32_t>(kInsnsInterpN0));
+#ifdef LIFT_GEN_TICKS
+        // ★ T1c：**生成物**在块边界发 `@lift_tick` ⇒ lifted 臂也按解释器口径记账 ⇒ 它必须等于
+        //   解释器的条数（这条载荷 100% inline，没有 lift_one）。⛔ 原来的 `== 0`（= 解释器那部分
+        //   为零）在 tick 之后不再成立；这一版更强：**两臂条数逐条相等**。
+        checkU32(name, "lifted insns(与 interp 同口径)", static_cast<std::uint32_t>(li.stats.insns),
+                 static_cast<std::uint32_t>(kInsnsInterpN0));
+#else
+        // 手写 golden（`tests/ir/lift_*.ll`）没有 tick ⇒ lifted 臂只有 handoff 那部分（本载荷 0）。
         checkU32(name, "lifted insns(解释器部分)", static_cast<std::uint32_t>(li.stats.insns), 0u);
+#endif
         checkU32(name, "lifted handoffs", static_cast<std::uint32_t>(li.stats.handoffs), 0u);
 
         // ② 控制流序列（lifted 臂：trampoline 自己记的；解释器臂：直接观测拼出来的同一条）
@@ -1358,7 +1367,15 @@ int runMain() {
         }
     }
 
+    // ★ 与 `lift_ir_proto.cpp` 同一条口径：同一份测试体在 `lift-ir-gen-shim`（生成物）下
+    //   报**自己的**用例名，CMake 传 `LIFT_IR_CASE_GEN=1`；缺省仍是 `lift-ir-shim`。
+    //   ⚠ 两份字面量而不是 `LIFT_IR_CASE_NAME` 宏：静态判据（`tools/test/
+    //     cmake-test-entry.test.mjs`）只认调用点字面量。
+#ifdef LIFT_IR_CASE_GEN
+    return lift_test::finish("lift-ir-gen-shim");
+#else
     return lift_test::finish("lift-ir-shim");
+#endif
 }
 
 }  // namespace

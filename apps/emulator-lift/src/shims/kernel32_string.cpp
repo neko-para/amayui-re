@@ -798,14 +798,43 @@ void shimEnumSystemLocalesA(X86& cpu, ShimCall& call) {
                   "上一次 guest 回调没有返回（active=true, api=%s）—— 不允许重入枚举",
                   st.api ? st.api : "?");
     }
-    if (!cpu.cache) shimAbort("kernel32", api, "cpu.cache 为空（Machine 没装配块缓存）");
+    // ★ 续延桩的"EA → 可调用"机制：**唯一**的机制是把它装进块缓存（`installShim`，下一行）。
+    //   ⛔ 事实核查（复审 T2a P1-1，别再把这里解释成"没关系"）：
+    //     · `kCallbackContinuationEa` 是**字面量** 0x7FFEF000，不是桩页发出来的地址；
+    //     · 这个 shim 由 `registerStringShims` 的 `s.add(...)` 注册，而 `ShimRegistry::add`
+    //       **不分配 `stub_ea`**（保持 0，见 shims.cpp），`byStubEa` / `idForStub` 又都要求
+    //       `ea != 0` ⇒ 宿主的桩表里**没有** `0x7FFEF000 → id` 这条，AOT 也接不住它。
+    //   ⇒ 没有块缓存时（AOT 臂 / 手搓 X86）"交给宿主的桩表"是不成立的：继续往下走会先写
+    //     locale 暂存页、再把 `0x7FFEF000` 写进 guest 栈并把 eip 交给 guest 回调，最后在**返回点**
+    //     因为"那个 EA 解不出来"失败 —— 归因不指向真因（缺的是续延执行能力，不是 guest 的错）。
+    //   ★ 判据放在**任何 guest 可见动作之前**（写暂存页 / 铺回调帧都在下面），停法与
+    //     `RaiseException` / `native_image_upload` 同一套：置停 + `stop_kind = Trap` + 说明真因，
+    //     由 `Machine::run` 的 shim 路径收口成 `RunResult`（`Trap` ⇒ 非 0 退出）。
+    //   ★ 写成 `!cache && !byStubEa(...)` 而不是只判 `!cache`：如果将来续延桩改成 `addRuntime`
+    //     发的**真**桩 EA（复审建议 (a)），这条守卫会自动放宽，不必回来改。
     ShimDef* cont = cpu.shims ? cpu.shims->findMutable("lift", kCallbackContinuationName) : nullptr;
     if (!cont) {
         shimAbort("kernel32", api,
                   "内部续延 shim `lift!%s` 没注册（registerStringShims 未跑？）",
                   kCallbackContinuationName);
     }
-    cpu.cache->installShim(kCallbackContinuationEa, cont->id);
+    // ★ 为什么 `cont` 查到了也还要判可达性：`findMutable` 只证明"注册表里有这项"，
+    //   不证明"那个固定 EA 调得动"（上面那段事实核查）。
+    const bool callable_through_stub = cpu.shims->byStubEa(kCallbackContinuationEa) != nullptr;
+    if (cpu.cache == nullptr && !callable_through_stub) {
+        std::fprintf(stderr,
+                     "[kernel32] %s：续延桩 0x%08X 不可调用 —— 这台 cpu 没有块缓存"
+                     "（`X86::cache == nullptr`，AOT 臂 / 手搓夹具），而宿主的桩表里也没有这个 EA"
+                     "（`ShimRegistry::add` 不发 `stub_ea`）⇒ 无法执行 guest 回调的续延。\n"
+                     "  ⛔ 这里**在任何 guest 可见动作之前**停：不写 locale 暂存页、不铺回调帧。\n",
+                     api, kCallbackContinuationEa);
+        cpu.running = false;
+        cpu.stop_why = "kernel32!EnumSystemLocalesA：缺少续延执行能力（没有块缓存、桩表也没有续延桩 EA）";
+        cpu.stop_kind = HostStopKind::Trap;
+        call.result = 0;  // 停机路径上的返回值不重要；⛔ 但别留未初始化
+        return;
+    }
+    if (cpu.cache) cpu.cache->installShim(kCallbackContinuationEa, cont->id);
 
     // locale 串放进**固定暂存页**（每条 16 字节对齐；8 位十六进制 + 结尾 0 = 9 字节）
     const std::uint32_t count = static_cast<std::uint32_t>(sizeof(kLocales) / sizeof(kLocales[0]));

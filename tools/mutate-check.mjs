@@ -1857,24 +1857,38 @@ const MUTATIONS = [
   // ── emulator-lift · marker 事件源（`TriggerKind::Marker`）──
 
 
-  // ── emulator-lift · DDraw surface 销毁路径的**归属**判据 ──
-  //   缺陷形态：判据拿进程级 `activeMachine()`（会被别的 Machine / 析构合法改写）⇒ 判据一失败，
-  //   那块 arena 就**永久没有回收入口**（magic 已先被清，谁也再进不了 destroySurfaceState）。
-  //   变异 = 把判据换回旧口径；`tests/ddraw.cpp` 的 `release-owner-not-active` 会红。
+  // ── emulator-lift · DDraw surface 销毁路径的 arena **回收判据** ──
+  //   缺陷形态（REQ-01M6ZY8SZRR3KA92ZC9QBNQ349）：销毁路径"arena 该不该回收"的判据曾取进程级
+  //   `activeMachine()` ⇒ 判据一失败（另一台 Machine 抢过 g_active / 上一台已析构），那块 arena 就
+  //   **永久没有回收入口**（magic 已先被清，谁也再进不了 destroySurfaceState）。
+  //   2026-11-14 的 shim/Machine 解耦把归属换成 `hostOf(cpu)`（+ `HostServices::ownsCpu`）⇒
+  //   **"换回 activeMachine()"这个旧变异已无法表达**：`machine.h` 不在本 TU 的 include 图里，
+  //   块作用域声明又会落进 `lift::ddraw`（链接失败）—— 2026-11-15 两种写法都实测为构建失败
+  //   （= 工具记「无法判定」，等于没验）。
+  //   ★ 同一轮还**证伪了"弱化回只判非空"这个方向**：把 `requireMachine` 的 `ownsCpu` 判据去掉后
+  //     `ctest:ddraw` 仍然**全绿** —— 没有任何 ddraw CTest 用 `X86` 副本调 ddraw 入口（F1 当时对
+  //     feeder 副本的验证是一个**不入库的临时探针**，见 `.tmp/aot/f1/RESULT.md` §④），
+  //     连 `surfaceLockCount` 那处 `ownsCpu` 也没有用例覆盖 ⇒ 那个方向今天一条守卫也红不了。
+  //   ⇒ 本条目改为钉住这条用例**真正断言的那个不变量**：回收必须真的落到那块 arena 上
+  //     （`surfaces().destroy(arena_ea)`，key = `[state+kSfArena]`）。变异 = 把 key 换成状态块 EA
+  //     ⇒ 回收变成空操作（后果与缺陷形态逐字相同："arena 永久没有回收入口"）。
+  //   ★ 实测（2026-11-15）：`ctest:ddraw` 退出码 8；只红 2 条断言、且**只**在
+  //     `ddraw/release-owner-not-active`（:847 / :848 的 surfaceCount / bytesInUse）—— 其它 ddraw
+  //     用例没有"回收之后回基线"的断言 ⇒ 这条变异唯一地由本用例抓住。
   //   ★ 不写 `if (false)` 那类短路：`/W4 /WX` 的 C4127 会把构建弄失败（会被记成"无法判定"）。
   {
     file: 'apps/emulator-lift/src/runtime/ddraw_surface.cpp',
-    from: '    Machine* m = machineOf(cpu);\n',
+    from: '            m->surfaces().destroy(arena_ea);\n',
     to:
-      '    Machine* m = activeMachine();  // 变异：判据换回进程级 g_active（修复前的口径）\n' +
-      '    if (m != nullptr && &m->cpu() != &cpu) m = nullptr;\n',
+      '            m->surfaces().destroy(state);  // 变异：回收 key 换成状态块 EA（≠ arena EA）' +
+      ' ⇒ arena 永久漏\n',
     guard: 'ctest:ddraw',
     ctest: 'ddraw',
     buildDir: 'apps/emulator-lift/out',
     what:
-      'destroySurfaceState 的归属判据换回 activeMachine() ⇒ ddraw 的 release-owner-not-active 红' +
-      '（另一台 Machine 抢过 g_active 时 arena 的 surfaceCount / bytesInUse 停在"建完之后"，' +
-      '且默认级别打出 [warn] "arena … 无法回收" ⇒ 协议上等于永久泄漏）',
+      'arena 回收打不到 arena（key 用状态块 EA，而不是 `[state+kSfArena]`）⇒ ddraw 的 ' +
+      'release-owner-not-active 红（实测 2 条断言：arena 的 surfaceCount / bytesInUse 停在' +
+      '"建完之后" ⇒ 协议上等于永久泄漏）',
   },
 
   // ── `--time-limit 0` = **不设墙钟上限**（`REQ-01M711JN018QDSWK4726Y1A0KV`）──────────────
@@ -2480,6 +2494,35 @@ const MUTATIONS = [
     what:
       '`peekMatching` 遇到不匹配的消息也 `pop_front`（旧实现的"吞消息"）⇒ PeekMessage 过滤会静默丢消息：' +
       '`peek-filter-keeps-messages` 的第二次 Peek(hwnd=B) 拿到 0、`peek-filter-range` 第一条断言拿到 0 ⇒ 当场红',
+  },
+
+  // ── 归属判据 `HostServices::ownsCpu`：**恒真** = 只判 `host` 非空 ────────────────
+  //   故障形态（F1 修掉的那个**静默**缺陷）：`AudioEngine` 的 feeder 持一份 `X86` 的**整份拷贝**
+  //   （`audio.cpp` 的 `audio_cpu_ = *cpu_`）⇒ `host` / `machine` 两个指针被一并复制 ⇒
+  //   "`host != nullptr`" 对这份**非主线程的私有副本**同样成立。7 处 ddraw / d3d9 / pipeline / sprite
+  //   判据里凡是没有第二道门的，就靠 `host->ownsCpu(cpu)` 挡住它；而 `SurfaceArena` / `GpuRaster`
+  //   都**没有锁** ⇒ 放行 = 真数据竞争，且**静默**（不崩、不报、偶发错像素 / 堆结构损坏）。
+  //   守卫：`apps/emulator-lift/tests/host_services_owns_cpu.cpp`（CTest `lift-host-services-owns-cpu`）：
+  //   ① 真 owner 的那份 cpu ⇒ `ownsCpu == true`；② `X86 copy = machine.cpu()` ⇒ `host` **非空**但
+  //   `ownsCpu(copy) == false`；③ 真实入口 `ddraw::createSurfaceState`（第一句就是 `requireMachine`）
+  //   对副本**拒绝**（返回 0）而对 owner 成功。
+  //   ★ 变异形态**必须吃掉参数**（`(void)cpu; return true;`）：`emulator-lift-runtime` 是 `/W4 /WX`，
+  //     裸 `return true;` 会因 `-Wunused-parameter` **编不过** ⇒ 那会被记成「不可判定（构建失败）」，
+  //     而不是「守卫红了」（实测：`error: unused parameter 'cpu' [-Werror,-Wunused-parameter]`）。
+  //   ⛔ 也不用 `if (false)`：`/W4 /WX` 的 C4127（条件恒真）同样让工具记「无法判定」。
+  //   ★ `buildDir` 是 `out-g2`：与邻居同形（`apps/emulator-lift/out*`），但用本轮自己的构建目录
+  //     —— `out/` 与其它 `out-*` 归别人（并发工作树），⛔ 不借它们重建。
+  {
+    file: 'apps/emulator-lift/src/runtime/machine.h',
+    from: '    bool ownsCpu(const X86& cpu) const override { return &cpu_ == &cpu; }',
+    to: '    bool ownsCpu(const X86& cpu) const override { (void)cpu; return true; }  // 变异：恒真（副本也能过）',
+    guard: 'ctest:lift-host-services-owns-cpu',
+    ctest: 'lift-host-services-owns-cpu',
+    buildDir: 'apps/emulator-lift/out-g2',
+    what:
+      '`Machine::ownsCpu` 恒真（归属判据退化成"只判 host 非空"）⇒ 音频 feeder 的私有 `X86` 副本也能过 ' +
+      '⇒ `lift-host-services-owns-cpu` 当场红：② 的两条 `ownsCpu(copy)` 失败 + ③ 的真实入口真的给副本' +
+      '建出了一块（返回非 0，而不是被拒的 0）',
   },
 ];
 

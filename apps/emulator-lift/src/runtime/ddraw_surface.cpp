@@ -18,7 +18,8 @@
 #include "runtime/font.h"
 #include "runtime/handles.h"
 #include "runtime/heap.h"
-#include "runtime/machine.h"
+#include "runtime/host_services.h"
+#include "runtime/x86.h"
 #include "runtime/memory.h"
 #include "runtime/pixel_format.h"
 #include "runtime/present.h"
@@ -102,10 +103,12 @@ void ddrawWarn(const char* what, const char* fmt, ...) {
     va_end(ap);
 }
 
-bool requireMachine(X86& cpu, Machine** out, std::string* why) {
-    Machine* m = activeMachine();
-    if (!m || &m->cpu() != &cpu) {
-        if (why) *why = "DDraw：activeMachine() 不是这台 cpu 的 Machine（装配问题）";
+bool requireMachine(X86& cpu, HostServices** out, std::string* why) {
+    HostServices* m = hostOf(cpu);
+    // ★ 归属判据（`ownsCpu`）：宿主非空**且**这台 cpu 就是它装配的那一份（见 host_services.h）。
+    //   只判 `m == nullptr` 会放行 feeder 的私有 `X86` 副本（它在另一个线程上，⛔ 不许碰 arena）。
+    if (m == nullptr || !m->ownsCpu(cpu)) {
+        if (why) *why = "DDraw：这台 cpu 没有可用的宿主服务（hostOf(cpu) 为空，或不是该宿主装配的那份 X86）";
         return false;
     }
     if (!m->surfaces().ready()) {
@@ -116,7 +119,7 @@ bool requireMachine(X86& cpu, Machine** out, std::string* why) {
     return true;
 }
 
-GuestSurface* guestSurface(Machine& m, std::uint32_t arena_ea) { return m.surfaces().find(arena_ea); }
+GuestSurface* guestSurface(HostServices& m, std::uint32_t arena_ea) { return m.surfaces().find(arena_ea); }
 
 bool readSurfaceState(X86& cpu, std::uint32_t state, SurfaceInfo* out, std::string* why) {
     if (state == 0) {
@@ -324,7 +327,7 @@ std::uint32_t surfaceChainHead(X86& cpu) {
 // surface 状态块
 // ---------------------------------------------------------------------------------------
 std::uint32_t createSurfaceState(X86& cpu, int width, int height, std::uint32_t caps, bool primary,
-                                 unsigned bpp_override, std::string* why) {    Machine* m = nullptr;
+                                 unsigned bpp_override, std::string* why) {    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return 0;
     if (!cpu.heap || !cpu.heap->ready()) {
         if (why) *why = "DDraw：guest 堆未就绪（surface 状态块要放在 guest 堆上）";
@@ -424,11 +427,11 @@ void destroySurfaceState(X86& cpu, std::uint32_t state) {
     const std::uint32_t arena_ea = cpu.mem->rd32(state + kSfArena);
     // ★ 先取 owner，**再**清 magic（本单 REQ-01M6ZY8SZRR3KA92ZC9QBNQ349）：
     //   magic 清了就再也进不了本函数 ⇒ "arena 该不该回收"的判据必须在它之前成立。
-    //   归属取 `machineOf(cpu)`（`Machine::wire()` 装配时捕获的宿主侧归属），⛔ 不是
+    //   归属取 `hostOf(cpu)`（`X86::host`，`Machine::wire()` / AOT 装配时接上的服务视图），⛔ 不是
     //   `activeMachine()` —— 后者是"最后 init 的那台"的进程级全局，会被别的 Machine /
     //   析构合法改写；用它当判据，判据一失败 arena 就永久没有回收入口
     //   （同族：d3d9.cpp 的 destroyTextureState / destroyDeviceState）。
-    Machine* m = machineOf(cpu);
+    HostServices* m = hostOf(cpu);
     // 从链表里摘掉（★ guest 可见语义：不论 owner 找不找得到都照旧发生）
     if (d != 0) {
         std::uint32_t prev = 0;
@@ -451,10 +454,10 @@ void destroySurfaceState(X86& cpu, std::uint32_t state) {
         if (m != nullptr) {
             m->surfaces().destroy(arena_ea);
         } else {
-            // ⛔ 不许静默丢资源：宿主不知道这块 arena 归谁（没走 `Machine::wire()` 的 X86）
+            // ⛔ 不许静默丢资源：宿主不知道这块 arena 归谁（没走 `Machine::wire()` / AOT 装配的 X86）
             //    ⇒ 响亮点名（默认 warn 级别就看得见）。生产路径不存在这种 X86（见 machine.h）。
             ddrawWarn("destroySurfaceState",
-                      "arena 0x%08X 无法回收：这台 cpu 没有宿主侧归属（machineOf == nullptr）", arena_ea);
+                      "arena 0x%08X 无法回收：这台 cpu 没有宿主服务（hostOf == nullptr）", arena_ea);
         }
     }
     if (cpu.heap) cpu.heap->free(state);
@@ -503,7 +506,7 @@ SurfaceFormat formatForBpp(unsigned bpp) { return pixel_format::formatForBpp(bpp
 
 std::uint32_t blt(X86& cpu, const SurfaceInfo& dst, const Rect* dst_rect, const SurfaceInfo& src,
                   const Rect* src_rect, std::uint32_t flags, std::string* why) {
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return kGeneric;
     GuestSurface* d = guestSurface(*m, dst.arena);
     GuestSurface* s = guestSurface(*m, src.arena);
@@ -574,7 +577,7 @@ std::uint32_t blt(X86& cpu, const SurfaceInfo& dst, const Rect* dst_rect, const 
 
 std::uint32_t bltFast(X86& cpu, const SurfaceInfo& dst, int x, int y, const SurfaceInfo& src,
                       const Rect* src_rect, std::uint32_t flags, std::string* why) {
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return kGeneric;
     GuestSurface* d = guestSurface(*m, dst.arena);
     GuestSurface* s = guestSurface(*m, src.arena);
@@ -620,15 +623,17 @@ std::uint32_t bltFast(X86& cpu, const SurfaceInfo& dst, int x, int y, const Surf
 // 锁 / DC
 // ---------------------------------------------------------------------------------------
 std::uint32_t surfaceLockCount(X86& cpu, const SurfaceInfo& s) {
-    Machine* m = activeMachine();
-    if (!m || &m->cpu() != &cpu) return 0;
+    // ★ 归属判据（`ownsCpu`）：feeder 的私有 `X86` 副本拷了 `host` ⇒ 光判非空会放行它，
+    //   而它跑在另一个线程上、`SurfaceArena` 无锁（复审 T2a P2-1）。
+    HostServices* m = hostOf(cpu);
+    if (m == nullptr || !m->ownsCpu(cpu)) return 0;
     const GuestSurface* gs = m->surfaces().find(s.arena);
     return gs ? gs->lock_count : 0;
 }
 
 std::uint32_t lock(X86& cpu, const SurfaceInfo& s, const Rect* rect, std::uint32_t desc_ea,
                    std::uint32_t flags, std::uint32_t event, std::string* why) {
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return kGeneric;
     if (event != 0) {
         if (why) *why = "DDraw：Lock 的 hEvent 非 NULL（异步锁未实现）";
@@ -677,7 +682,7 @@ std::uint32_t lock(X86& cpu, const SurfaceInfo& s, const Rect* rect, std::uint32
 }
 
 std::uint32_t unlock(X86& cpu, const SurfaceInfo& s, std::uint32_t lp_surface, std::string* why) {
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return kGeneric;
     const GuestSurface* gs = m->surfaces().find(s.arena);
     if (!gs || gs->lock_count == 0) {
@@ -702,7 +707,7 @@ std::uint32_t unlock(X86& cpu, const SurfaceInfo& s, std::uint32_t lp_surface, s
 }
 
 std::uint32_t getDC(X86& cpu, const SurfaceInfo& s, std::uint32_t* out_hdc, std::string* why) {
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return kGeneric;
     if (!out_hdc) {
         if (why) *why = "DDraw：GetDC 的 lphDC 为 NULL";
@@ -730,7 +735,7 @@ std::uint32_t getDC(X86& cpu, const SurfaceInfo& s, std::uint32_t* out_hdc, std:
             if (why) *why = "DDraw：gdiCreateDc 失败（句柄表分配不出来）";
             return kGeneric;
         }
-        if (!fontAttachDcSurface(hdc, s.arena, &m->surfaces())) {
+        if (!fontAttachDcSurface(*cpu.handles, hdc, s.arena, &m->surfaces())) {
             if (why) *why = "DDraw：fontAttachDcSurface 失败（P2 字体层没接上 ⇒ TextOutA 画不进 surface）";
             releasePayload(*cpu.handles, hdc);
             cpu.handles->close(hdc);
@@ -749,7 +754,7 @@ std::uint32_t getDC(X86& cpu, const SurfaceInfo& s, std::uint32_t* out_hdc, std:
 }
 
 std::uint32_t releaseDC(X86& cpu, std::uint32_t hdc, std::string* why) {
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return kGeneric;
     if (hdc == 0) {
         if (why) *why = "DDraw：ReleaseDC 的 HDC 为 NULL";
@@ -770,7 +775,7 @@ std::uint32_t releaseDC(X86& cpu, std::uint32_t hdc, std::string* why) {
     cpu.mem->wr32(state + kSfDcCount, count);
     if (count == 0) {
         // 最后一次 ReleaseDC：解绑 + 回收 GDI DC（payload 的 destroy 由句柄表统一做）
-        fontDetachDc(hdc);
+        fontDetachDc(*cpu.handles, hdc);
         if (cpu.handles) {
             releasePayload(*cpu.handles, hdc);
             cpu.handles->close(hdc);
@@ -785,7 +790,7 @@ std::uint32_t releaseDC(X86& cpu, std::uint32_t hdc, std::string* why) {
 // ---------------------------------------------------------------------------------------
 std::uint32_t flip(X86& cpu, const SurfaceInfo& s, std::uint32_t back_surface, std::uint32_t flags,
                    std::string* why) {
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return kGeneric;
     if (!s.primary) {
         if (why) *why = "DDraw：Flip 的对象不是 primary surface";
@@ -862,7 +867,7 @@ std::uint32_t setColorKey(X86& cpu, const SurfaceInfo& s, std::uint32_t flags, s
 
 std::uint32_t availableVidMem(X86& cpu, std::uint32_t caps_ea, std::uint32_t total_ea,
                               std::uint32_t free_ea, std::string* why) {
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return kGeneric;
     if (!committedOut(cpu, total_ea, 4, "lpdwTotal", why)) return kInvalidParams;
     if (!committedOut(cpu, free_ea, 4, "lpdwFree", why)) return kInvalidParams;

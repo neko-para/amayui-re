@@ -957,3 +957,115 @@
 - **复现**：上面那条 `ctest -R`（或单跑 `lift-ir-proto` / `lift-ir-shim` 看打印的读数行）；`--lifted-only`
   负控：`apps/emulator-lift/out/lift-ir-shim --lifted-only`（需回解释器 ⇒ exit 9）。报告
   `.tmp/irshape/{impl-stage-a,impl-stage-b,change-review-stage-a,change-review-stage-b}.md`。
+
+### OBS-20261115-01 · Shape A 真机 boot→TITLE：AOT 二进制 3000 帧 `exit 0` / `misses 0` / 窗口里就是标题画面
+
+- **口径**：Windows x64 · RelWithDebInfo（`windows-x64` 预设，Ninja + clang-cl 22.1.2）· 2026-11-15 ·
+  二进制 = `apps/emulator-lift/out-h1/emulator-lift-aot.exe`（**干净重建**；Shape A：执行构建期 lift 出来的代码，
+  ⛔ 不构造 `Machine`、`cpu.machine=nullptr`）· `--present window` 可见窗口（`window=visible` ·
+  `driver=gpu-direct video=windows gpu=direct3d12`）· `--skip-logo` · `--audio off` · `--game-dir ../../dist/install` ·
+  每档一个全新私有 `--appdata`（`apps/emulator-lift` 为 cwd）。
+  ★ 不是口径 A（口径 A = 解释器 `emulator-lift.exe` + `../../links/install` + `--present-hidden`）⇒ ⛔ 不与其他条目混表。
+- **命令原文**（两档只差最后一段）：
+  ```powershell
+  .\out-h1\emulator-lift-aot.exe --audio off --appdata ..\..\.tmp\aot\h1\appdata-r1-3000 `
+    --game-dir ..\..\dist\install --skip-logo --present window --max-frames 3000
+  .\out-h1\emulator-lift-aot.exe --audio off --appdata ..\..\.tmp\aot\h1\appdata-r2-3000 `
+    --game-dir ..\..\dist\install --skip-logo --present window --max-frames 3000 `
+    --native-overrides all --lst ..\..\corpus\disasm\files\AGE.EXE__dumped.sectfix.EXE.lst
+  ```
+- **读数（① 不带 override）**：`exit 0` · `frames 3000` ·
+  `stop : stopped @ eip=00498AE4（正常结局） — max-frames（shim com!IDirect3DDevice9::Present）` ·
+  `table : entries=33496 lookups=117715390 hits=117715390 misses=0 avg_cmp=1.06` ·
+  `arena in_use=108595152 peak=108595152 surfaces=21` · `insns 1,696,174,952` ·
+  `skip-logo : applied @ T_Command=0x100017E0 (+0x5EB5C=0；写前 1；钩子 EA=004BAA33)` ·
+  `window : guest primary=00010000 class="ARCGameEngine" wndproc=004B92F0 in-dispatch-table=yes` ·
+  `override : hits=0`（未给开关）。
+- **读数（② `--native-overrides all`）**：`exit 0` · `frames 3000` · **同一个 `stop`** ·
+  `misses=0`（`lookups=81955124`）· `arena` 三数**逐项相同** `108595152 / 108595152 / 21` · `insns 1,204,451,644` ·
+  `override : hits=7320047 insns=22257726 skipped-nested=0（函数级 19 项 hits=7320047 回退=0 · 段级 3 项 hits=0 ·
+  非 call 帧跳过=351009）` · `⛔ 未装（缺嵌套执行器）：sub_48B090`。
+- **两档都没有硬停**：stderr 无 `decode-error`、无"停在派发表里没有的 EA" ⇒ 判据 1（`handoffs==0`，派发面只有
+  lifted / shim 两类）与判据 3（无 `_Exit(3/4/9)` / `llvm.trap`）在本条成立。
+- **到达 TITLE = 已判定**：帧 3000 的窗口像素（`--present-screenshot` → `.tmp/aot/h1/shots/shot-3000.bmp`，
+  转 PNG `shot-3000.png`，sha256 `244f85a030d9d4be6526c3e459d2c1b5bee7ea619ec5f9f995ed231c15192a1c`）
+  是**标题画面**：`天結いキャッスルマイスター Version 1.00.0000` 标题 logo + 立绘 + **Game Start / Load Data /
+  Eushully-chan Room / Option / Quit** 五个菜单按钮 + 底部 `(c)2017 Eushully All Rights Reserved.` + `FE01–FE05`
+  五个 install 槽。判据 = 人看这一帧（本条目由父级会话看图判定），⛔ 不做成 CTest（业务正确性不作判据）。
+- **画面不是静止图**：帧 1 / 10 / 100 / 500 / 3000 的 `--present-screenshot` 统计（背景色 = 出现最多的 RGB）——
+  帧 1：1,300 色 / 非背景 **0.22%**（近全黑）· 帧 10：204,663 色 / **97.0%** · 帧 100：218,922 色 / **94.2%** ·
+  帧 500：223,625 色 / **94.1%** · 帧 3000：223,801 色 / **93.8%**；① 档 3000 帧的逐帧 `lastHash` 有 **2,959 个不同值**
+  （最长连续相同 2 帧）。
+- **口径警告（会咬人的三条）**：① 末帧 `lastHash` 在窗口档**不可复现**（①/② 与 5 次回读各不同：
+  `0x7835…`/`0x8B34…`/`0x773F…`/`0xD727…`）⇒ ⛔ 不是判据；判据是 `stop` / `frames` / `misses` / arena 三数。
+  ② **逐帧 `[frame] n=k hash=` 跨 run 不可比**：① 与 ② 的 3000 行只有第 1 帧相同（`0xF3FDFBDFBB518F7F`），
+  第 2 帧起全不同 ⇒ 逐帧像素对照**当前做不到**（窗口档 = 真实时钟，每帧含的指令数随墙钟漂）。
+  ③ 墙钟只作伴生读数（本机同期有别的构建/进程）⇒ 本条**没有**任何性能结论。
+- **与解释器臂的可比项**（同一 `--max-frames 300` 档，见 OBS-20261114-… 与 `.tmp/aot/w1`）：`stop @ 00498AE4` 同址、
+  `arena 55412672·55412672·19` 逐值相同、**frame 1 的窗口像素 fnv64 逐位相同**（`0xebf024febe998b05`）。
+  ⛔ 不说"两臂等价"，只说这三项相等。
+- **未做**：游戏菜单（Game Start / Load Data）没点 · `--present headless/auto`、`--present-vsync 1`、
+  `--time-limit`、`--max-insns`、`--dump-frame` 没测 · 输入只投过 `WM_KEYDOWN`/`WM_CLOSE`（见下条）。
+- **复现**：上面两条命令（`--max-frames` 可先换 10 试 ≈30 s）；读数存档 `.tmp/aot/h1/readings.md`。
+
+### OBS-20261115-02 · AOT 窗口档的交互链：一个键走到 WndProc 跳表 case 256；点 X ⇒「終了」框 ⇒ `exit 0`
+
+- **口径**：同 OBS-20261115-01（同一 `out-h1` 二进制 / `--present window` 可见 / `--skip-logo` / `--audio off` /
+  每档一个全新私有 `--appdata`）· 驱动方式 = 向 **SDL 宿主窗口**投 Win32 消息（`PostMessage`：`WM_KEYDOWN` VK_A +
+  `WM_KEYUP`；`WM_CLOSE`）+ `EnumWindows`/`EnumChildWindows` 读窗口与子控件；⛔ 不注入 guest、⛔ 不读 guest 内存。
+- **命令原文**（cwd = `apps/emulator-lift`；脚本 `.tmp/aot/h1/probe-interact.ps1` / `close-answer.ps1`）：
+  ```powershell
+  pwsh -NoProfile -File ..\..\.tmp\aot\h1\probe-interact.ps1 -Tag keyprobe -KeyProbe `
+    -ExtraLine '--skip-logo --until 0x4B9367' -ObserveSec 40
+  pwsh -NoProfile -File ..\..\.tmp\aot\h1\probe-interact.ps1 -Tag closeprobe -CloseProbe `
+    -ExtraLine '--skip-logo' -ObserveSec 25
+  pwsh -NoProfile -File ..\..\.tmp\aot\h1\close-answer.ps1
+  ```
+- **读数（键）**：`PostMessage(WM_KEYDOWN,VK_A)=True` · `stop : until-ea @ eip=004B9367（正常结局）` ·
+  `misses=0`（`lookups=5624355`）· stderr 无 `decode-error` · trace 尾 =
+  `PeekMessageA → GetMessageA → TranslateMessage → DispatchMessageA`。⇒ 一个键走完
+  `SDL 窗口 → input::key → guest 队列 WM_KEYDOWN(0x100) → DispatchMessageA → WndProc(004B92F0) → 跳表 case 256 = 0x004B9367`。
+- **读数（关窗，只观察）**：`PostMessage(WM_CLOSE)=True` ⇒ 顶层窗口出现 `#32770|終了`，子控件 =
+  `Static|ゲームを終了しますか？` + `Button|キャンセル` + `Button|タイトルに戻る` + `Button|プログラムを終了する`；
+  guest 停在模态框上等回答（探针不答 ⇒ 25 s 后 kill，`exit=-1` 是探针 kill 的，不是产品失败）。
+- **读数（关窗，答「プログラムを終了する」）**：**`exit=0`** · `stop : stopped @ eip=004123E3（正常结局） — present: 窗口关闭` ·
+  `misses=0` · `window : guest 还没有窗口（primary=0）` · stderr 只有
+  `[warn] [shim] agerc!_ShowDialog@12: id=3「終了」系统对话框 ⇒ 用户选择 1`，**无** `decode-error` ·
+  trace 尾 = guest 自己的关窗路径：`DeleteFileA ret=004B9670 → KillTimer ret=004B967A → DestroyWindow ret=004B9681 →
+  ShowWindow ret=004B968F → PostQuitMessage ret=004B9697 → OutputDebugStringA ret=004B96A1`。
+- **⚠ 这条读数取代了两处更早的临时读数**（都在 `.tmp/`，未入库、原样保留）：`.tmp/aot/w1/readings.md` 记的
+  "guest 驱动的关窗做不到 / 停在 `004B95EC`"、`.tmp/aot/c1` 记的 "`WM_KEYDOWN` 会 decode-error" ——
+  那是**旧闭包**（`WndProc` 跳表 12 个 case 未解码）上的读数；闭包补了第五类后两者都通。
+- **未做**：框的另两个分支（`キャンセル` / `タイトルに戻る`）· 鼠标消息（`WM_MOUSEMOVE`/点击）· 键盘只投了 VK_A ·
+  ⛔ 没有把这些探针做成 CTest（这是观察，不是合同）。
+- **复现**：上面三条命令；读数存档 `.tmp/aot/h1/readings.md`。
+
+### OBS-20261115-03 · 最终树复核（含派发哈希表 + `ownsCpu` 守卫）：干净重建 `93/93` CTest、两档 3000 帧仍是 `exit 0` / `misses 0` / 帧 3000 = 标题画面
+
+- **口径**：**当前工作树**（`E:\Projects\amayui-re`，含 T0…H1 全部未提交改动）· Windows x64 / RelWithDebInfo ·
+  2026-11-15 · build dir = `apps/emulator-lift/out-final`（**干净重建**：`cmake --preset windows-x64 -B out-final`）。
+  命令与读数与 `OBS-20261115-01` 同一参数，只换了 build dir —— 目的是证明**当前树**（不是某个中间态）能构建、测试绿、并复现 TITLE。
+- **构建**：configure `exit 0`（12.1 s）· build `exit 0`（257.6 s / 583 步）· **warning 49**（`src/main.cpp` 5 + `tests/*` 44，
+  **`src/aot/**` = 0**）· **error 0**。
+- **全量 CTest**：**93/93 Passed · 0 Failed · 0 Skipped**（61.86 s）。条数 = `OBS-20261115-01` 那次构建的 92 +
+  新增的 `lift-host-services-owns-cpu`（按名字做差集：只在 final 有它；**没 skip**，0.14 s）。
+- **两档 3000 帧**（`--skip-logo --present window --max-frames 3000 --audio off`，各自全新 `--appdata`）：
+  两档都 `exit 0` · `frames 3000` · `stop : stopped @ eip=00498AE4（正常结局） — max-frames（shim com!IDirect3DDevice9::Present）` ·
+  `misses 0` · `arena 108595152 / 108595152 / 21`（`heap_blocks 6674`）· `lookups` 117,691,778（①）/ 81,947,718（②）·
+  `skip-logo : applied @ T_Command=0x100017E0 (+0x5EB5C=0；写前 1；钩子 EA=004BAA33)`（两档逐字相同）·
+  `insns` 1,696,735,834（①）/ 1,204,409,271（②）；② 的 `override hits=7,320,038 insns=22,249,870`、
+  `⛔ 未装（缺嵌套执行器）：sub_48B090`。**无 `decode-error`、无停机。**
+- ★ **新读数（派发表已换开放寻址哈希）**：`probe : probes=124472314 avg=1.06 max=7 | table cap=131072 load=0.256 entries=33496 build_max=7`
+  （② 是 `avg=1.08`）。⚠ **口径**：`OBS-20261115-01` 的 `avg_cmp=1.06` 是**二分比较**/次，本条的 `probe avg` 是**线性探测**/次
+  —— 数值碰巧接近，⛔ 不能当"表没换"的证据；能证明换表的只有 `probe` 行本身 + `cap=131072 / load=0.256 / max=7`。
+- **画面**：帧 1 / 10 / 3000 的 `--present-screenshot`（1280×720，背景色 = 出现最多的 RGB）——
+  帧 1：1,300 色 / 非背景 **0.002169** / fnv64 `0xd858c45963ccb2d9`（与 `OBS-20261115-01` 的帧 1 **逐像素相同**）·
+  帧 10：207,894 色 / **0.969466** · 帧 3000：225,493 色 / **0.940987** / fnv64 `0xd061d7e518638875`。
+  帧 3000 的像素内容 = 标题 logo + 立绘 + 五个菜单按钮（Game Start / Load Data / Eushully-chan Room / Option / Quit）
+  + 版权行 + `EP.01–EP.05`；与帧 10 **不是同一张静止图**（颜色数/比例/fnv64 都不同）。**"到达 TITLE"仍按人工确认口径**。
+- **与 `OBS-20261115-01` 的对照**：`应当相同` 的项**全部相同**（exit / frames / `stop` EA+原因 / `misses` /
+  arena 三数 / `heap_blocks` / `entries` / `skip-logo` 行 / override 开关行 / native-ovr 装配 / 帧 1 截图）；
+  `允许不同` 的项（`insns` ±0.03% / `lookups` / 墙钟 / 末帧与逐帧 hash / 帧 10·3000 的截图比例）都在墙钟漂移的量级内。
+- **未做**：`LIFT_STRESS` 档 · 交互探针（见 `OBS-20261115-02`，本条未重跑）· 逐帧像素跨臂对照（wall clock 下做不到）。
+- **复现**：`cd apps/emulator-lift && cmake --preset windows-x64 -B out-final && cmake --build out-final &&
+  ctest --test-dir out-final`，然后上面两档命令（`--max-frames` 可先换 10）。读数存档 `.tmp/aot/final/readings.md`。

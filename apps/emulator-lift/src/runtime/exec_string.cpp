@@ -48,16 +48,10 @@ void writeElem(X86& cpu, std::uint32_t ea, std::uint8_t size, std::uint32_t v) {
     }
 }
 
-bool par(std::uint32_t v) {
-    std::uint8_t x = static_cast<std::uint8_t>(v & 0xFFu);
-    x ^= static_cast<std::uint8_t>(x >> 4);
-    x &= 0x0Fu;
-    return ((0x6996u >> x) & 1u) != 0;
-}
-
+// ★ 2026-11-14（D10 P1）：这里原来有一份 `par()`（同一张 0x6996 表但**没取反** ⇒ 奇校验）。
+//   现在 PF 只由 `setSubFlags` 按 `exec.h` 的 `parityEven`（SDM 偶校验）写一次 ⇒ ⛔ 不再二次覆盖。
 void setCmpFlags(X86& cpu, std::uint32_t a, std::uint32_t b, std::uint8_t size) {
     setSubFlags(cpu, a, b, a - b, size, false);
-    cpu.setPf(par(a - b));
 }
 
 // 一条串操作**实际访问**的字节区间：`[lo, hi)`（长度恰好 `n`）。

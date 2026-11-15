@@ -28,6 +28,7 @@ namespace lift {
 struct X86;
 struct PeImage;
 class Machine;
+class HostServices;
 class BlockCache;
 class LstIndex;
 class Vfs;
@@ -257,6 +258,15 @@ struct X86 {
     //     见 runtime/guest_token.h 的不变式）。
     Machine* machine = nullptr;
 
+    // ★ 宿主服务（`runtime/host_services.h`）：shim 侧要的那几份状态对象（surfaces / presenter /
+    //   gpuRaster / seh / decoder / close-confirm）从**这里**取，⛔ 不从 `Machine` 取 ——
+    //   AOT 臂不构造 `Machine`，但它必须能跑**同一批** shim（父级裁决 D4）。
+    //   · 解释器：`Machine::wire()` 把它自己接上（`Machine : public HostServices`）；
+    //   · AOT：`AotHost::init()` 自己那份（T0 还没有这些对象 ⇒ 保持 nullptr）。
+    //   ★ 纯宿主指针：不进 guest 内存、不改 guest 布局 / 地址 / COM ABI。
+    //   ★ 取用面只有一个：`hostOf(cpu)`（见本文件末尾）。
+    HostServices* host = nullptr;
+
     // ---- 最近执行过的指令（诊断用环形缓冲；停在 eip=0 这类地方时能看见"从哪来"）----
     // ★ 2026-11-14（阶段 B 复审判 P2-1）：24 → 64。原因不是"诊断想多看几条"，而是
     //   `tests/lift_ir_shim.cpp` 现在**真的**从这个缓冲拼解释器臂的控制流序列（28 条）：
@@ -406,5 +416,16 @@ private:
     char last_error_[192] = {};
     std::uint32_t last_error_ea_ = 0;
 };
+
+// 这台 cpu 的**宿主服务**（`Machine` 或 AOT 宿主的装配；见 x86.h 的 `X86::host`）。
+//   ★ 与 `machineOf()` 的分工：`machineOf` 回答"谁装配了这台 cpu"（要 `Machine` 具体类型）；
+//     `hostOf` 只回答"shim 要的状态在哪"（接口，AOT 也有）。
+//   ★ **归属**判据不是 `host != nullptr`，而是 `host != nullptr && host->ownsCpu(cpu)`
+//     （`HostServices::ownsCpu`）：`host` 会被 `X86` 的整份拷贝带走（`audio.cpp` 的 feeder 副本
+//     `audio_cpu_ = *cpu_`）⇒ 光看非空认不出"这是别人那一份副本"。碰 `SurfaceArena` / `GpuRaster`
+//     这类无锁共享状态的地方必须用它（见 `host_services.h` 的说明）。
+//   ★ 没有 `activeMachine()` 式的兜底：`Machine::wire()` / `AotHost::init()` 是**唯一**的装配点，
+//     没装配就是 nullptr ⇒ 调用点必须显式处理（降级或响亮停，见各调用点）。
+inline HostServices* hostOf(const X86& cpu) { return cpu.host; }
 
 }  // namespace lift

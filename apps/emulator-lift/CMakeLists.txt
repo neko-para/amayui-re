@@ -205,6 +205,123 @@ add_executable(emulator-lift src/main.cpp)
 target_link_libraries(emulator-lift PRIVATE emulator-lift-runtime)
 
 # =====================================================================================
+# Shape A · 构建期静态 lift 的 **T0** 落点：`emulator-lift-aot`（只做平台 bring-up）
+# ★ 为什么是**独立 target**、不是给 `emulator-lift` 加一个 flag：Shape A 的产物是
+#   "lift 出来的代码 + runtime/shims 链接进**同一个二进制**，解释器只留在测试构建里"（父级裁决）。
+#   新 target 的源在 `src/aot/`：⛔ 不 include `machine.h`、⛔ 不实例化 `Machine`、
+#   ⛔ 不碰 `BlockCache` / 解码器。T0 只做：映射 PE、建 guest 栈 / 堆 / TEB、注册并 bind shim、
+#   设好 cpu 初始寄存器，**执行 0 条 guest 指令**，打印读数后 exit 0。
+# ★ linker map 是 T0 那个读数的**证据**（"到底有哪些只属于解释器的 .obj 被拽进来了"）——
+#   固定文件名落在构建目录（preset 的 binaryDir = `out/`）⇒ 可复核、不靠猜。
+# ★ 告警口径跟既有 target 走：本块**不加**任何 `-W` / `/W` 覆盖（`/W4 /WX` 属于
+#   `emulator-lift-runtime`，⛔ 不在这里放宽、也不另立一套）。
+# =====================================================================================
+add_executable(emulator-lift-aot src/aot/aot_main.cpp src/aot/aot_host.cpp)
+target_link_libraries(emulator-lift-aot PRIVATE emulator-lift-runtime)
+if(MSVC)
+    # clang-cl 也走这一支（MSVC=TRUE）：`/MAP` 交给 lld-link。
+    target_link_options(emulator-lift-aot PRIVATE "/MAP:${CMAKE_CURRENT_BINARY_DIR}/emulator-lift-aot.map")
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_link_options(emulator-lift-aot PRIVATE "-Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/emulator-lift-aot.map")
+endif()
+
+# =====================================================================================
+# Shape A · T1a：`emulator-lift-gen`（**构建期 host tool**）
+# ★ 只做"入口 EA 集合 + PE 字节 → `.ll`"：⛔ 不做 census、⛔ 不建 `closure.txt`、
+#   ⛔ 不把批量 IR 链进 AOT（那是 T1c）。
+# ★ 位置：`if(LIFT_BUILD_TESTS)` **之前** —— 那个块会把 `CMAKE_RUNTIME_OUTPUT_DIRECTORY`
+#   改成 `out/tests`，产品 / 工具 target 必须落在它之前（与 `emulator-lift` / `emulator-lift-aot`
+#   同一口径）。★ 只插入，⛔ 不改上面任何一行。
+# ★ 允许链 `emulator-lift-runtime`：解码 / 语义只有一份（"产品二进制里没有解释器"是 T3 的约束）。
+# ★ 告警口径与上面两个 target 一致：本块**不加**任何 `-W` / `/W` 覆盖。
+# =====================================================================================
+add_executable(emulator-lift-gen src/aot/lift_gen.cpp src/aot/lift_gen_emit.cpp)
+target_link_libraries(emulator-lift-gen PRIVATE emulator-lift-runtime)
+
+# =====================================================================================
+# Shape A · T2b：`emulator-lift-aot` 的**执行源**（生成物 + 派发表）
+#
+# ★ 只插入：本块**不改上面任何一行**，也不改 `if(LIFT_BUILD_TESTS)` 里的任何一行。
+# ★ 位置为什么必须在 `if(LIFT_BUILD_TESTS)` **之前**：那个块把 `CMAKE_RUNTIME_OUTPUT_DIRECTORY`
+#   改成 `out/tests`（产品二进制会被塞进测试目录）；且既有 `find_program(LIFT_IR_CLANG)` 也在那块里
+#   —— 产品 target 不能依赖"测试开关打开时才找到 clang"。
+# ★ 顺序（D12 / T1c）：`lift-gen --check aot/closure.txt`（**构建期硬闸**，坏闭包当场红）
+#   → `lift-gen --roots aot/closure.txt --out out/aot/lift_aot.ll --pin … --table …`
+#   → `clang -c -O2` → `out/aot/lift_aot.obj`。
+# ★ 缺 clang / 缺执行源 / 缺 closure.txt 的处置：**替身 TU**（不加 `.obj`、不定义
+#   `LIFT_AOT_HAS_GENERATED`）⇒ configure / build **永不断**；AOT 启动时**响亮报告"没有生成物"**
+#   并 exit 1（⛔ 不许静默跑成空壳）。与既有 `lift-ir-*` / `lift-ir-gen-*` 的处置同一套口径。
+# ★ 告警口径：本块**不加**任何 `-W` / `/W` 覆盖（`/W4 /WX` 属于 `emulator-lift-runtime`）。
+# =====================================================================================
+set(LIFT_AOT_DIR "${CMAKE_CURRENT_BINARY_DIR}/aot")
+set(LIFT_AOT_CLOSURE "${CMAKE_CURRENT_SOURCE_DIR}/aot/closure.txt")
+set(LIFT_AOT_AGE_EXE "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE")
+find_program(LIFT_AOT_IR_CLANG NAMES clang clang.exe)
+if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLOSURE}")
+    set(LIFT_AOT_TARGET_FLAGS "")
+    if(WIN32)
+        # 与预设 `windows-x64` 的 clang-cl 一致（`-c` 产出 COFF，链接器与 clang-cl 编的 TU 同源）
+        set(LIFT_AOT_TARGET_FLAGS --target=x86_64-pc-windows-msvc)
+    endif()
+    # ① 生成物：一次 custom command 写三份（`.ll` / pin / 派发表）。
+    #    ★ 第一条命令是**构建期硬闸**：`--check` 红 ⇒ 这个 custom command 失败 ⇒ 构建当场红。
+    add_custom_command(
+        OUTPUT "${LIFT_AOT_DIR}/lift_aot.ll" "${LIFT_AOT_DIR}/lift_pin.h"
+               "${LIFT_AOT_DIR}/lift_table.inc"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${LIFT_AOT_DIR}"
+        COMMAND $<TARGET_FILE:emulator-lift-gen> --check "${LIFT_AOT_CLOSURE}" --exe "${LIFT_AOT_AGE_EXE}"
+        COMMAND $<TARGET_FILE:emulator-lift-gen>
+                --exe "${LIFT_AOT_AGE_EXE}" --roots "${LIFT_AOT_CLOSURE}"
+                --out "${LIFT_AOT_DIR}/lift_aot.ll"
+                --pin "${LIFT_AOT_DIR}/lift_pin.h"
+                --table "${LIFT_AOT_DIR}/lift_table.inc"
+        DEPENDS emulator-lift-gen "${LIFT_AOT_CLOSURE}" "${LIFT_AOT_AGE_EXE}"
+        COMMENT "lift-aot: closure --check + roots/PE -> out/aot/lift_aot.ll + lift_pin.h + lift_table.inc"
+        VERBATIM)
+    # ② `clang -c -O2`（无 llc；`-Wno-override-module` = 这份 IR 是目标无关的，triple 交给驱动）
+    add_custom_command(
+        OUTPUT "${LIFT_AOT_DIR}/lift_aot.obj"
+        COMMAND ${LIFT_AOT_IR_CLANG} -c -O2 ${LIFT_AOT_TARGET_FLAGS} -Wno-override-module
+                -o "${LIFT_AOT_DIR}/lift_aot.obj" "${LIFT_AOT_DIR}/lift_aot.ll"
+        DEPENDS "${LIFT_AOT_DIR}/lift_aot.ll"
+        COMMENT "lift-aot: lift_aot.ll -> lift_aot.obj（clang -c -O2，无 llc）")
+    set_source_files_properties("${LIFT_AOT_DIR}/lift_aot.obj" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+    target_sources(emulator-lift-aot PRIVATE
+        src/aot/aot_dispatch.cpp
+        src/aot/aot_run.cpp
+        "${LIFT_AOT_DIR}/lift_aot.obj")
+    # ★ `aot_dispatch.cpp` `#include "lift_table.inc"`（生成物）⇒ 必须显式声明文件级依赖，
+    #   否则并行构建可能在生成之前就编译它（clean build 才显形的那种红）。
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/aot/aot_dispatch.cpp"
+        PROPERTIES OBJECT_DEPENDS "${LIFT_AOT_DIR}/lift_table.inc")
+    target_include_directories(emulator-lift-aot PRIVATE "${LIFT_AOT_DIR}")
+    # ★ 这个宏是"生成物在场"的唯一判据（`aot_dispatch.cpp` 用它决定表有没有内容；
+    #   `aot_main.cpp` 用它决定"没有生成物"的响亮报告）。
+    target_compile_definitions(emulator-lift-aot PRIVATE LIFT_AOT_HAS_GENERATED=1)
+    message(STATUS "emulator-lift-aot: 执行源 = ${LIFT_AOT_DIR}/lift_aot.obj（clang = ${LIFT_AOT_IR_CLANG}）")
+else()
+    message(STATUS
+        "emulator-lift-aot: 缺 clang / 执行源（${LIFT_AOT_AGE_EXE}）/ closure.txt ⇒ 替身 TU："
+        "构建不断，但 AOT 启动时会响亮报告「没有生成物」并 exit 1")
+    target_sources(emulator-lift-aot PRIVATE src/aot/aot_dispatch.cpp src/aot/aot_run.cpp)
+endif()
+
+# =====================================================================================
+# Shape A · T1b：`emulator-lift-closure`（**构建期 host tool**：census + PE → `closure.txt`）
+# ★ 职责只有一件：把"实际执行过的块 EA 集合"（census）+ PE 字节 ⇒ **分量根**（入库件
+#   `aot/closure.txt`）。⛔ 不发射 IR、⛔ 不改解释器、⛔ 不跑游戏（census 由既有解释器产出）。
+# ★ 为什么与 `emulator-lift-gen` 分开：生成 `closure.txt` 是**改入库件**的写路径，只该在
+#   "重新跑一次 census"时发生；`lift-gen` 是每次构建都跑的读路径（roots → `.ll`）。
+#   两者共用 `.text` 判据与 hex 文法（`src/aot/lift_aot_text.h`），⛔ 不写第二份。
+# ★ 位置与告警口径同上面两个 target（`if(LIFT_BUILD_TESTS)` 之前、不加任何 `-W` / `/W` 覆盖）。
+# ★ 为什么要带 `lift_gen_emit.cpp`：`genBranchTarget`（`jmp/jcc/call rel32` 目标 = ea+len+imm32 回绕）
+#   只有**一份**实现，就在那份文件里。⛔ 不许在本工具里再写一遍（两份判据必然漂）。
+# =====================================================================================
+add_executable(emulator-lift-closure src/aot/closure_build.cpp src/aot/lift_gen_emit.cpp)
+target_link_libraries(emulator-lift-closure PRIVATE emulator-lift-runtime)
+
+
+# =====================================================================================
 # P2 · GDI 字体 / 文本（宿主 Amayui CN + 三档 GGO + 自洽）
 # ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
 # =====================================================================================
@@ -439,6 +556,22 @@ add_test(NAME lift-voice-poll COMMAND lift-voice-poll)
 add_executable(lift-seh tests/seh.cpp)
 target_link_libraries(lift-seh PRIVATE emulator-lift-runtime)
 add_test(NAME seh COMMAND lift-seh)
+
+# ---- pure：`HostServices::ownsCpu` 的**归属**判据（"这份 X86 是谁的"）----
+# 判据见 tests/host_services_owns_cpu.cpp 的头注释：① 真 owner 的那份 cpu ⇒ true；
+# ② `X86 copy = machine.cpu()`（= `audio.cpp` 的 `audio_cpu_ = *cpu_`）⇒ `host` 非空
+# 但 `ownsCpu(copy) == false`；③ 真实入口 `ddraw::createSurfaceState`（第一句就是
+# `requireMachine(...)`）对副本**拒绝**、对 owner 成功。
+# 红了意味着：`ownsCpu` 退化成"只判 host 非空" ⇒ 音频 feeder 的私有 `X86` 副本能从**非主线程**
+# 碰无锁的 `SurfaceArena` / `GpuRaster`（静默数据竞争，见 runtime/host_services.h）。
+# ★ **顶层无条件**注册 ⇒ pure 档（判据 = 注册位置，见 AGENTS.md §5）：`initBare()` 不载 PE、
+#   不读 LFS、不碰游戏安装。
+# ★ 用例名 = `lift-host-services-owns-cpu`：`tools/mutate-check.mjs` 的
+#   `ctest:lift-host-services-owns-cpu` 指向它（变异 = `Machine::ownsCpu` 恒真）。
+add_executable(lift-host-services-owns-cpu tests/host_services_owns_cpu.cpp)
+target_link_libraries(lift-host-services-owns-cpu PRIVATE emulator-lift-runtime)
+add_test(NAME lift-host-services-owns-cpu COMMAND lift-host-services-owns-cpu)
+set_tests_properties(lift-host-services-owns-cpu PROPERTIES SKIP_RETURN_CODE 77)
 
 # ---- 默认：Windows 宿主编码契约（argv = UTF-8 / 输出字节 = UTF-8）----
 # ★ 子进程用**文件**重定向（不走管道：受限沙箱里捕获管道会 EPERM）。
@@ -1451,5 +1584,69 @@ target_compile_definitions(lift-ir-shim PRIVATE LIFT_IR_BUILD_TYPE="${CMAKE_BUIL
 target_compile_definitions(lift-ir-shim PRIVATE _CRT_SECURE_NO_WARNINGS)
 add_test(NAME lift-ir-shim COMMAND lift-ir-shim)
 set_tests_properties(lift-ir-shim PROPERTIES SKIP_RETURN_CODE 77)
+
+# =====================================================================================
+# Shape A / T1a：`emulator-lift-gen` 生成物的**语义等价**验证（只插入新 target / 新 add_test）
+# ★ 判据分两层（父级要求分开报）：
+#   ① 逐字节 vs `tests/ir/*.ll` —— 生成器是"内存形态"（状态留在 `%st`），手写 golden 是 SSA 形态
+#      ⇒ 预期**不同**；不为了让 diff 消失去改 golden。
+#   ② 语义等价 —— 用**同一份测试体**（`tests/lift_ir_proto.cpp` / `tests/lift_ir_shim.cpp`），
+#      只把链接的 `.ll` 从手写 golden 换成生成物 ⇒ 既有 CTest 的逐位差分判据逐条不变。
+# ★ 缺 clang / 缺执行源 ⇒ 链 `tests/ir/lift_stub.cpp`（与上面 `lift-ir-*` 同一套处置），
+#   测试体自己 `LIFT_SKIP(77)`；⛔ `add_test` 仍在**最外层**（不嵌进任何 if）⇒ 档位 = pure。
+# =====================================================================================
+set(LIFT_GEN_ROOTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/ir/roots_golden.txt")
+set(LIFT_GEN_AGE_EXE "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE")
+set(LIFT_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/aot")
+if(LIFT_IR_CLANG AND EXISTS "${LIFT_GEN_AGE_EXE}")
+    # ★ 夹具口径：这两个用例只测 `tests/ir/roots_golden.txt` 里那两个手写根 ⇒ 软根全关，
+    #   回到"只按 --roots 展开"的旧口径。否则第三类（`.data` 指针表，PE 全局、不受 `--roots`
+    #   约束）会把 golden_gen.ll 从 125 KB 涨到 ~162 MB、每次构建多编 ~2 分钟（G3 §11 的读数）；
+    #   第五类（D26，可执行节的 dword）同理且更甚：它不受 `--roots` 约束，开着会把整个 `.text`
+    #   的候选面都收成软根。⇒ 四个 `--no-close-*` 一个不能少。
+    add_custom_command(OUTPUT "${LIFT_GEN_DIR}/golden_gen.ll"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${LIFT_GEN_DIR}"
+        COMMAND $<TARGET_FILE:emulator-lift-gen>
+                --exe "${LIFT_GEN_AGE_EXE}" --roots "${LIFT_GEN_ROOTS}"
+                --out "${LIFT_GEN_DIR}/golden_gen.ll"
+                --no-close-calls --no-close-stores --no-close-data --no-close-jmptab
+        DEPENDS emulator-lift-gen "${LIFT_GEN_ROOTS}" "${LIFT_GEN_AGE_EXE}"
+        COMMENT "lift-gen: roots + PE -> out/aot/golden_gen.ll（T1a；不 commit）"
+        VERBATIM)
+    add_custom_command(OUTPUT "${LIFT_GEN_DIR}/golden_gen.obj"
+        COMMAND ${LIFT_IR_CLANG} -c -O2 ${LIFT_IR_TARGET_FLAGS} -Wno-override-module
+                -o "${LIFT_GEN_DIR}/golden_gen.obj" "${LIFT_GEN_DIR}/golden_gen.ll"
+        DEPENDS "${LIFT_GEN_DIR}/golden_gen.ll"
+        COMMENT "lift-gen: golden_gen.ll -> .obj（clang -c -O2，无 llc）")
+    set(LIFT_GEN_SRC "${LIFT_GEN_DIR}/golden_gen.obj")
+    # ★ T1c：生成物在块边界发 `@lift_tick`（D2）⇒ lifted 臂与解释器**同一口径**记账；
+    #   手写 golden（`tests/ir/lift_*.ll`）没有 tick ⇒ 两份测试体用这个宏区分"期望的 lifted 侧条数"。
+    set(LIFT_GEN_DEFINE LIFT_IR_CLANG=1 LIFT_GEN_TICKS=1)
+else()
+    message(STATUS
+        "lift-gen goldens: 缺 clang 或执行源（${LIFT_GEN_AGE_EXE}）⇒ 链 tests/ir/lift_stub.cpp（用例 SKIP 77）")
+    set(LIFT_GEN_SRC "${CMAKE_CURRENT_SOURCE_DIR}/tests/ir/lift_stub.cpp")
+    set(LIFT_GEN_DEFINE "")
+endif()
+add_executable(lift-ir-gen-proto tests/lift_ir_proto.cpp ${LIFT_GEN_SRC})
+target_link_libraries(lift-ir-gen-proto PRIVATE emulator-lift-runtime)
+target_compile_definitions(lift-ir-gen-proto PRIVATE ${LIFT_GEN_DEFINE})
+# ★ 同一份测试体（`tests/lift_ir_proto.cpp`）在两条 target 下报**各自的**用例名：
+#   这条定义让 `finish()` 打出 `lift-ir-gen-proto`（缺省 = `lift-ir-proto`）。
+target_compile_definitions(lift-ir-gen-proto PRIVATE LIFT_IR_CASE_GEN=1)
+target_compile_definitions(lift-ir-gen-proto PRIVATE LIFT_IR_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
+target_compile_definitions(lift-ir-gen-proto PRIVATE _CRT_SECURE_NO_WARNINGS)
+add_test(NAME lift-ir-gen-proto COMMAND lift-ir-gen-proto $<TARGET_FILE:lift-ir-gen-proto>)
+set_tests_properties(lift-ir-gen-proto PROPERTIES SKIP_RETURN_CODE 77)
+
+add_executable(lift-ir-gen-shim tests/lift_ir_shim.cpp ${LIFT_GEN_SRC})
+target_link_libraries(lift-ir-gen-shim PRIVATE emulator-lift-runtime)
+target_compile_definitions(lift-ir-gen-shim PRIVATE ${LIFT_GEN_DEFINE})
+# ★ 同 `lift-ir-gen-proto`：共用源文件、用例名跟着 target 走（`lift-ir-gen-shim`）。
+target_compile_definitions(lift-ir-gen-shim PRIVATE LIFT_IR_CASE_GEN=1)
+target_compile_definitions(lift-ir-gen-shim PRIVATE LIFT_IR_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
+target_compile_definitions(lift-ir-gen-shim PRIVATE _CRT_SECURE_NO_WARNINGS)
+add_test(NAME lift-ir-gen-shim COMMAND lift-ir-gen-shim)
+set_tests_properties(lift-ir-gen-shim PROPERTIES SKIP_RETURN_CODE 77)
 
 endif() # LIFT_BUILD_TESTS

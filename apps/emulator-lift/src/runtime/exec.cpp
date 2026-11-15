@@ -9,21 +9,23 @@
 #include <cstring>
 #include <string>
 
-#include "runtime/machine.h"
+#include "corpus/lst_index.h"
+#include "runtime/audio.h"
+#include "runtime/host_services.h"
 #include "runtime/x86.h"
 
 namespace lift {
-namespace {
 
+// ★ **PF 的唯一一份判据**（SDM：低 8 位的 popcount 为**偶** ⇒ PF=1）。
+//   2026-11-14（D10 P1）：这份原先是**三份拷贝**里的正确那份（另两份在 `exec_integer.cpp` /
+//   `exec_string.cpp`，都少了取反 ⇒ 移位 / `scas`·`cmps` 之后的 PF 与生成器**相反**）。
+//   现在另两处直接调这里，⛔ 不许再留第二份 `0x6996` 表。
 bool parityEven(std::uint8_t v) {
     v ^= static_cast<std::uint8_t>(v >> 4);
     v &= 0x0F;
     // 0x6996 的位 = **奇校验**（popcount 为奇 ⇒ 1）⇒ PF（偶校验）要取反。
-    // 旧实现直接返回该位 ⇒ PF 全部反了（审计 T7 的 PF 夹具暴露）。
     return ((0x6996u >> v) & 1u) == 0;
 }
-
-}  // namespace
 
 void setLogicFlags(X86& cpu, std::uint32_t result, std::uint8_t size) {
     std::uint32_t mask = 0xFFFFFFFFu;
@@ -312,7 +314,8 @@ void dumpRecentInsns(const X86& cpu, std::FILE* out) {
         std::fprintf(out, "  %08X %s   (eflags=%08X)\n", cpu.last_eip[idx],
                      cpu.last_mnemonic[idx] ? cpu.last_mnemonic[idx] : "?", cpu.last_flags[idx]);
     }
-    Machine* m = activeMachine();
+    // ★ 诊断面：解码器从宿主服务取（`hostOf`）。没装配 ⇒ 只打原始 mnemonic（⛔ 不崩、⛔ 不猜）。
+    HostServices* m = hostOf(cpu);
     if (!m) return;
     std::fprintf(out, "  --- 反汇编（含操作数，最近 %d 条）---\n", cpu.last_count < 8 ? cpu.last_count : 8);
     for (int i = 0; i < 8 && i < cpu.last_count; ++i) {
@@ -328,7 +331,7 @@ void dumpAtEa(X86& cpu, std::uint32_t ea, std::FILE* out) {
     if (cpu.lst) text = cpu.lst->textAt(ea);
     if (text.empty() && cpu.cache && cpu.mem) {
         // `.lst` 里没有这一行（例如在 CRT 的 COLLAPSED 区里）⇒ 现场反汇编
-        if (Machine* m = activeMachine()) text = m->decoder().text(*cpu.mem, ea);
+        if (HostServices* m = hostOf(cpu)) text = m->decoder().text(*cpu.mem, ea);
     }
     std::fprintf(out, "  at %08X : %s\n", ea, text.empty() ? "(没有文本：既不在 .lst 里，也解不出来)" : text.c_str());
 }

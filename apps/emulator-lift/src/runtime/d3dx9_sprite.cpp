@@ -24,7 +24,7 @@
 #include "runtime/d3d9.h"
 #include "runtime/d3d9_pipeline.h"  // GPU 覆盖账本（sprite 也记账）
 #include "runtime/heap.h"
-#include "runtime/machine.h"
+#include "runtime/host_services.h"
 #include "runtime/math.h"
 #include "runtime/memory.h"
 #include "runtime/pixel_format.h"
@@ -110,10 +110,11 @@ void spriteWarn(const char* what, const char* fmt, ...) {
     logAt(LogLevel::Debug, LogD3dx9, prefix, "%s", msg);
 }
 
-bool requireMachine(X86& cpu, Machine** out, std::string* why) {
-    Machine* m = activeMachine();
-    if (!m || &m->cpu() != &cpu) {
-        if (why) *why = "D3DX9：activeMachine() 不是这台 cpu 的 Machine（装配问题）";
+bool requireMachine(X86& cpu, HostServices** out, std::string* why) {
+    HostServices* m = hostOf(cpu);
+    // ★ 归属判据（`ownsCpu`）：宿主非空**且**这台 cpu 就是它装配的那一份（见 host_services.h）。
+    if (m == nullptr || !m->ownsCpu(cpu)) {
+        if (why) *why = "D3DX9：这台 cpu 没有可用的宿主服务（hostOf(cpu) 为空，或不是该宿主装配的那份 X86）";
         return false;
     }
     if (!m->surfaces().ready()) {
@@ -325,7 +326,7 @@ struct DrawInput {
 std::uint32_t createSpriteState(X86& cpu, std::uint32_t device_object, std::string* why,
                                 bool* out_of_memory) {
     if (out_of_memory) *out_of_memory = false;
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return 0;
     (void)m;
     if (!cpu.mem) {
@@ -610,7 +611,7 @@ std::uint32_t draw(X86& cpu, std::uint32_t state, std::uint32_t texture, std::ui
 // ---------------------------------------------------------------------------------------
 bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
                     std::uint64_t* pixels_written, std::string* why) {
-    Machine* m = nullptr;
+    HostServices* m = nullptr;
     if (!requireMachine(cpu, &m, why)) return false;
     State s;
     if (!readState(cpu, state, &s, why)) return false;
@@ -1048,7 +1049,9 @@ std::uint32_t onLostDevice(X86& cpu, std::uint32_t state, std::string* why) {
     // 设备丢失后旧批次不能再用，它 AddRef 的纹理也要还掉）。
     // ★ 但**更早的 End 已经入队**的 GPU draw 不属于这个未提交批次（CPU 路径下它们早画完了）⇒
     //   先 flush，别让"设备丢失"把已经提交过的画面一起丢掉。
-    if (Machine* m = activeMachine(); m != nullptr && &m->cpu() == &cpu) {
+    // ★ 归属判据（`ownsCpu`）：`GpuRaster` 无锁，feeder 的私有 `X86` 副本不能走到这里
+    //   （它继承了 `host`，但 `&Machine::cpu() != &audio_cpu_`；复审 T2a P2-1）。
+    if (HostServices* m = hostOf(cpu); m != nullptr && m->ownsCpu(cpu)) {
         if (GpuRaster* gpu = m->gpuRaster(); gpu != nullptr && gpu->rasterActive()) {
             std::string flush_err;
             if (!gpu->rasterFlush(&flush_err)) {

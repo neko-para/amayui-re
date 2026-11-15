@@ -726,7 +726,7 @@ int main() {
         LIFT_CHECK(surface != nullptr);
         const std::uint32_t hdc2 = lift::gdiCreateDc(m.handles(), /*display=*/false, "SURFACE");
         LIFT_CHECK_NE_U32(hdc2, 0u);
-        LIFT_CHECK(lift::fontAttachDcSurface(hdc2, surface_ea, &m.surfaces()));
+        LIFT_CHECK(lift::fontAttachDcSurface(m.handles(), hdc2, surface_ea, &m.surfaces()));
         lift::GdiDcObject* dc = lift::gdiAsDc(m.handles(), hdc2);
         LIFT_CHECK(dc != nullptr);
         if (!dc || !surface) return finish("gdi");
@@ -790,8 +790,8 @@ int main() {
         LIFT_CHECK_EQ_U32(m.mem().rd8(surface_ea + 30u * surface->pitch + 0u * 4u + 0u), 0xFFu);
         LIFT_CHECK_EQ_U32(m.mem().rd8(surface_ea + 30u * surface->pitch + 0u * 4u + 2u), 0u);
 
-        LIFT_CHECK(lift::fontDetachDc(hdc2));
-        LIFT_CHECK(!lift::fontDetachDc(0x00DEAD00u));  // 不是 DC：false + 一行日志（不崩）
+        LIFT_CHECK(lift::fontDetachDc(m.handles(), hdc2));
+        LIFT_CHECK(!lift::fontDetachDc(m.handles(), 0x00DEAD00u));  // 不是 DC：false + 一行日志（不崩）
     }
 
     return finish("gdi");

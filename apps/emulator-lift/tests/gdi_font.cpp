@@ -336,7 +336,7 @@ int main() {
         LIFT_CHECK_NE_U32(surface_ea, 0u);
         lift::GuestSurface* surface = m.surfaces().find(surface_ea);
         LIFT_CHECK(surface != nullptr);
-        LIFT_CHECK(lift::fontAttachDcSurface(hdc, surface_ea, &m.surfaces()));
+        LIFT_CHECK(lift::fontAttachDcSurface(m.handles(), hdc, surface_ea, &m.surfaces()));
         if (!surface) return finish("gdi-font");
         std::uint8_t* pixels = m.surfaces().pixels(*surface);
         LIFT_CHECK(pixels != nullptr);

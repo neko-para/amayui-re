@@ -42,7 +42,7 @@
 #include "runtime/audio.h"
 #include "runtime/clock.h"
 #include "runtime/host_window.h"
-#include "runtime/machine.h"
+#include "runtime/host_services.h"
 #include "runtime/present.h"
 #include "runtime/x86.h"
 #include "shims/register.h"
@@ -128,17 +128,17 @@ void shimSetCursorPos(X86& cpu, ShimCall& call) {
     const int x = call.i32(0);
     const int y = call.i32(1);
     wm->setCursorPos(x, y);  // ① guest 可见状态（屏幕坐标）—— 开关开不开都先落地
-    // ② 宿主副作用。判据照 `user32_menu.cpp` 的 MessageBoxA：Machine + 有 sink + 不在音频 feeder 线程
+    // ② 宿主副作用。判据照 `user32_menu.cpp` 的 MessageBoxA：有宿主服务 + 有 sink + 不在音频 feeder 线程
     //    （WindowManager 是主线程独占宿主对象；feeder 上碰它本身就在既有违规账里）。
-    Machine* machine = cpu.machine;
-    if (machine != nullptr && cpu.audio != nullptr && cpu.audio->onFeederThread()) {
+    // ★ 空指针**降级**（语义原样保留）：没有宿主服务 ⇒ 只改虚拟光标、返回 TRUE。
+    HostServices* host = hostOf(cpu);
+    if (host != nullptr && cpu.audio != nullptr && cpu.audio->onFeederThread()) {
         shimLogWarn("user32", "SetCursorPos",
                     "(%d,%d) 在音频 feeder 线程上被调用 ⇒ 只改虚拟光标（⛔ 不碰宿主窗口 / 光标）", x, y);
         call.result = 1;
         return;
     }
-    PresentSink* sink = (machine != nullptr && machine->presenter().hasSink()) ? machine->presenter().sink()
-                                                                              : nullptr;
+    PresentSink* sink = (host != nullptr && host->presenter().hasSink()) ? host->presenter().sink() : nullptr;
     if (sink == nullptr || !sink->hostCursorWarpEnabled()) {
         // 缺省档（以及"开关开着但没有可见窗口"——sink 的 enabled 已经含 `windowHidden()`）。
         shimLog("user32", "SetCursorPos",

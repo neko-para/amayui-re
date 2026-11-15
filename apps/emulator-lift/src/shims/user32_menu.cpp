@@ -33,7 +33,7 @@
 #include "runtime/audio.h"
 #include "runtime/cp932.h"
 #include "runtime/host_window.h"
-#include "runtime/machine.h"
+#include "runtime/host_services.h"
 #include "runtime/message_box.h"
 #include "runtime/present.h"
 #include "runtime/x86.h"
@@ -224,23 +224,24 @@ void shimMessageBoxA(X86& cpu, ShimCall& call) {
 
     // ★ 分支口径：只有"主线程 + 有窗口 sink"才弹**系统对话框**（`SDL_ShowMessageBox`）。
     //   feeder / headless / 无 sink / 系统框起不来 ⇒ 立即默认值 + **一次** warn（⛔ 不阻塞）。
-    Machine* machine = cpu.machine;
+    // ★ 空指针**降级**（语义原样保留）：没有宿主服务（纯夹具 / AOT 还没装配）⇒ 立即返回默认值。
+    HostServices* host = hostOf(cpu);
     std::uint32_t result = fallback;
     PresentSink* sink = nullptr;
-    if (machine != nullptr) {
+    if (host != nullptr) {
         if (cpu.audio != nullptr && cpu.audio->onFeederThread()) {
             shimLogWarn("user32", "MessageBoxA",
                         "在音频 feeder 线程上被调用 ⇒ headless 语义：立即返回默认值 %u（⛔ 不碰窗口）",
                         fallback);
-        } else if (!machine->presenter().hasSink()) {
+        } else if (!host->presenter().hasSink()) {
             shimLogWarn("user32", "MessageBoxA",
                         "headless / 没有窗口 sink ⇒ 立即返回默认值 %u（⛔ 不弹系统框、不阻塞）", fallback);
         } else {
-            sink = machine->presenter().sink();
+            sink = host->presenter().sink();
         }
     } else {
         shimLogWarn("user32", "MessageBoxA",
-                    "没有装配 Machine（纯夹具）⇒ 立即返回默认值 %u（⛔ 不阻塞）", fallback);
+                    "没有宿主服务（纯夹具 / AOT 未装配）⇒ 立即返回默认值 %u（⛔ 不阻塞）", fallback);
     }
     if (sink != nullptr) {
         std::uint32_t shown = fallback;

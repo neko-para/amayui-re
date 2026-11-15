@@ -25,7 +25,6 @@
 #include FT_FREETYPE_H
 
 #include "runtime/cp932.h"
-#include "runtime/machine.h"
 #include "runtime/pixel_format.h"
 #include "runtime/vfs.h"  // openHostFileUtf8（Windows 的 UTF-8 路径）
 
@@ -1021,13 +1020,11 @@ TextDrawResult gdiDrawText(FontEngine& fonts, const GdiFontDesc& desc, const Gdi
 // =======================================================================================
 // ★ 与 P1 的接缝
 // =======================================================================================
-bool fontAttachDcSurface(std::uint32_t hdc, std::uint32_t surface_ea, SurfaceArena* arena) {
-    Machine* machine = activeMachine();
-    if (machine == nullptr) {
-        std::fprintf(stderr, "[font] fontAttachDcSurface(0x%08X)：没有活动 Machine\n", hdc);
-        return false;
-    }
-    GdiDcObject* dc = gdiAsDc(machine->handles(), hdc);
+// ★ 句柄表由**调用方**给（`cpu.handles`）：这两个接缝不再去问"哪台 Machine 是活动的" ——
+//   句柄表本来就在 `X86` 上（`x86.h`），AOT 臂同样有它（父级裁决 D4 的解耦口径）。
+bool fontAttachDcSurface(HandleTable& handles, std::uint32_t hdc, std::uint32_t surface_ea,
+                         SurfaceArena* arena) {
+    GdiDcObject* dc = gdiAsDc(handles, hdc);
     if (dc == nullptr) {
         std::fprintf(stderr, "[font] fontAttachDcSurface(0x%08X)：不是 GDI DC 句柄\n", hdc);
         return false;
@@ -1042,13 +1039,8 @@ bool fontAttachDcSurface(std::uint32_t hdc, std::uint32_t surface_ea, SurfaceAre
     return true;
 }
 
-bool fontDetachDc(std::uint32_t hdc) {
-    Machine* machine = activeMachine();
-    if (machine == nullptr) {
-        std::fprintf(stderr, "[font] fontDetachDc(0x%08X)：没有活动 Machine\n", hdc);
-        return false;
-    }
-    GdiDcObject* dc = gdiAsDc(machine->handles(), hdc);
+bool fontDetachDc(HandleTable& handles, std::uint32_t hdc) {
+    GdiDcObject* dc = gdiAsDc(handles, hdc);
     if (dc == nullptr) {
         std::fprintf(stderr, "[font] fontDetachDc(0x%08X)：不是 GDI DC 句柄\n", hdc);
         return false;
