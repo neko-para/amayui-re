@@ -172,26 +172,23 @@ bool nativeFtol2Sse(X86& cpu, GuestMemory& mem, std::uint32_t* result) {
     if (static_cast<std::uint64_t>(frame) + 0x20u > GuestMemory::kSpace)
         return decline(FtolWhy::ScratchUnreadable);
     if (!mem.committed(frame, 0x20u)) return decline(FtolWhy::ScratchUnreadable);
-    Ext80 x;
-    std::memcpy(x, cpu.fpu.regs[cpu.fpu.phys(0)], 16);
-    const std::int64_t n = x87ToI64(x, /*truncate=*/true);
+    // ★ D49：x87 的实数模型是 `double` ⇒ `st(0)` 直接就是一个 double。
+    const double x = cpu.fpu.regs[cpu.fpu.phys(0)];
+    const std::int64_t n = x87ToI64Trunc(x);
     // G-5 越界边界上的"就近 vs 截断"分叉：guest 的 `fistp` 按**当前 RC 就近**取整，只有**取整值**
-    //   放不进 int64 才落不定值 + IE；`truncate=true` 的 invalid 判据是"**截断值**放不进"。
-    //   两者只在 `x ∈ (2^63−1, 2^63)` 上不同，而该区间内唯一可表示的 ext80 值是 `2^63−0.5`
-    //   （区间内 ulp = 0.5）：guest 就近成 2^63 ⇒ `0/0x80000000` + IE；trunc 给 `0xFFFFFFFF/0x7FFFFFFF`。
-    //   ⇒ 那一点交解释器（⛔ 不在这里自己算"就近"：那会把 RC 重新拖进来）。
-    //   ★ 放在 applyControlWord **之前**：这条判据只依赖 trunc 与一个常量比较，都与 RC 无关
-    //     ⇒ 回退路径上宿主 softfloat 全局一位都不动（准入门 ②）。
+    //   放不进 int64 才落不定值 + IE；`truncate` 的 invalid 判据是"**截断值**放不进"。
+    //   ⚠ **D49 之后这条判据结构性不可达**：double 在 2^63 附近的 ulp = 2048 ⇒ 开区间
+    //   (2^63−1, 2^63) 里**没有可表示值**（旧 extF80 模型里唯一那一点是 2^63−0.5）。
+    //   保留它是**防御性**的：判据本身只依赖"trunc 值 == INT64_MAX 且 x > INT64_MAX"，
+    //   与 RC 无关 ⇒ 万一将来 `x87ToI64Trunc` 的界改了，这里仍然把分叉点交给解释器。
     if (n == kI64Max) {
-        Ext80 limit;
-        x87FromI64(kI64Max, limit);
-        if (x87Compare(x, limit) > 0) return decline(FtolWhy::TruncRoundDiverge);
+        const double limit = x87FromI64(kI64Max);
+        if (x > limit) return decline(FtolWhy::TruncRoundDiverge);
     }
 
     // ── ② 从这里开始不再回退 ──────────────────────────────────────────────────────────────
-    x87ApplyControlWord(cpu.fpu.control);  // 解释器每条 FP 指令之前都做同一件事（native_affine 同形）
     std::uint8_t scratch[4];
-    x87RegToMem(x, scratch, 4);  // = `0x4E8301 fst dword [esp+18h]`：f32 的 4 字节 + PE/UE/OE
+    x87StoreMem(x, scratch, 4);  // = `0x4E8301 fst dword [esp+18h]`：f32 的 4 字节（+ OE/PE）
     std::memcpy(mem.host(frame + 0x18u), scratch, 4);
     // ── ③ 弹栈 + 状态字 ────────────────────────────────────────────────────────────────
     cpu.fpu.setEmpty(cpu.fpu.phys(0));
@@ -204,7 +201,9 @@ bool nativeFtol2Sse(X86& cpu, GuestMemory& mem, std::uint32_t* result) {
         if (f & 4u) s |= 0x0008u;   // OE（overflow）
         if (f & 8u) s |= 0x0004u;   // ZE（divide-by-zero）
         if (f & 16u) s |= 0x0001u;  // IE（invalid）
-        if (s & 0x003Fu) s |= 0x0080u;  // ES（解释器同一条简化：有粘性位就汇总）
+        // ★ 任务 0 / D55：**ES（异常汇总）= 任一异常位非零**（与解释器 `syncStatus` 同一条；
+        //   ⛔ 漏它 ⇒ native 臂 0x0001 vs 解释器 0x0081 ⇒ `native-override-assets` 红）。
+        if ((s & 0x003Fu) != 0) s |= 0x0080u;
         s = static_cast<std::uint16_t>((s & ~0x3800u) | ((cpu.fpu.top & 7u) << 11));  // TOP
         cpu.fpu.status = s;  // ⛔ 不动 C0..C3（见上）
     }

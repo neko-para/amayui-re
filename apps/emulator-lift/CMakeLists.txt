@@ -221,8 +221,15 @@ target_link_libraries(emulator-lift-aot PRIVATE emulator-lift-runtime)
 if(MSVC)
     # clang-cl 也走这一支（MSVC=TRUE）：`/MAP` 交给 lld-link。
     target_link_options(emulator-lift-aot PRIVATE "/MAP:${CMAKE_CURRENT_BINARY_DIR}/emulator-lift-aot.map")
+    # ★ S7（D53）：**宿主栈请求 32 MB**（只预留虚拟地址空间，按需提交）。
+    #   为什么：S7 之后每个 guest `call` = 一个宿主 `call` ⇒ 宿主栈深度跟 guest 调用深度同阶。
+    #   缺省 1 MB 对深递归的 guest 代码是**新引入的风险**（见 S7 报告）。按 objdump 实测：\n    #   宿主帧 80 B/层（5 个 callee-saved + 0x20 + 返回地址），而 guest 栈 1 MB、每层 guest 帧 ≥4 B\n    #   ⇒ 最坏 1 MB / 4 B × 80 B = 20 MB ⇒ 32 MB 覆盖"guest 自己能装下"的全部深度。与"我们自己
+    #   CreateThread 时会给的大小"同一档（D53 §①）。⛔ 这不是语义改动：只影响栈上限。
+    target_link_options(emulator-lift-aot PRIVATE "/STACK:33554432")
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_link_options(emulator-lift-aot PRIVATE "-Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/emulator-lift-aot.map")
+    # macOS/Linux：主线程栈由系统决定（通常 8 MB）⇒ 只需把"请求值"写下来，不改（非 Windows 目标
+    # 只做兼容性验证，不阻塞本轮）。
 endif()
 
 # =====================================================================================
@@ -235,7 +242,8 @@ endif()
 # ★ 允许链 `emulator-lift-runtime`：解码 / 语义只有一份（"产品二进制里没有解释器"是 T3 的约束）。
 # ★ 告警口径与上面两个 target 一致：本块**不加**任何 `-W` / `/W` 覆盖。
 # =====================================================================================
-add_executable(emulator-lift-gen src/aot/lift_gen.cpp src/aot/lift_gen_emit.cpp)
+add_executable(emulator-lift-gen src/aot/lift_gen.cpp src/aot/lift_gen_emit.cpp
+                                src/aot/lift_struct.cpp)
 target_link_libraries(emulator-lift-gen PRIVATE emulator-lift-runtime)
 
 # =====================================================================================
@@ -469,6 +477,9 @@ enable_testing()
 # ★ 它**不属于**任何测试：产品二进制也要链它（将来 lifted 代码是产品的一部分）。
 # =====================================================================================
 target_sources(emulator-lift-runtime PRIVATE src/runtime/lift_abi.cpp)
+# ★ EA → Insn 解码缓存（`lift_one` 的唯一加速层；契约见 `src/runtime/decode_cache.h`）：
+#   四桶归因实测解码占 `lift_one` 的 79%（见该文件头注）⇒ 缓存 + **逐字节**校验。
+target_sources(emulator-lift-runtime PRIVATE src/runtime/decode_cache.cpp)
 
 # =====================================================================================
 if(LIFT_BUILD_TESTS)
@@ -557,8 +568,19 @@ add_executable(lift-seh tests/seh.cpp)
 target_link_libraries(lift-seh PRIVATE emulator-lift-runtime)
 add_test(NAME seh COMMAND lift-seh)
 
-# ---- pure：`HostServices::ownsCpu` 的**归属**判据（"这份 X86 是谁的"）----
-# 判据见 tests/host_services_owns_cpu.cpp 的头注释：① 真 owner 的那份 cpu ⇒ true；
+# ---- pure：**EA → Insn 解码缓存**的等价判据（`lift_one` 的 B 桶就是它）----
+# 判据见 tests/decode_cache.cpp 的头注释：命中 / 未命中 / 字节被改后重解 / 页尾窗口不完整，
+# 四种情形都必须与"每次都重新解码"给出**逐字段相同**的 Insn（含 op / 长度 / 操作数）。
+# 红了意味着：缓存在**自我修改的代码**上给出了陈旧答案（静默跑旧指令；AOT 臂的
+# `lift_note_write` 是 no-op ⇒ 逐字节校验是这条缺口唯一的自愈机制）。
+# ★ **顶层无条件**注册 ⇒ pure 档（判据 = 注册位置，见 AGENTS.md §5）：只构造 GuestMemory + Decoder，
+#   不载 PE、不读 LFS、不碰游戏安装。
+# ★ 用例名 = `lift-decode-cache`：`tools/mutate-check.mjs` 的 `ctest:lift-decode-cache` 指向它。
+add_executable(lift-decode-cache tests/decode_cache.cpp)
+target_link_libraries(lift-decode-cache PRIVATE emulator-lift-runtime)
+add_test(NAME lift-decode-cache COMMAND lift-decode-cache)
+
+# ---- pure：`HostServices::ownsCpu` 的**归属**判据（"这份 X86 是谁的"）----# 判据见 tests/host_services_owns_cpu.cpp 的头注释：① 真 owner 的那份 cpu ⇒ true；
 # ② `X86 copy = machine.cpu()`（= `audio.cpp` 的 `audio_cpu_ = *cpu_`）⇒ `host` 非空
 # 但 `ownsCpu(copy) == false`；③ 真实入口 `ddraw::createSurfaceState`（第一句就是
 # `requireMachine(...)`）对副本**拒绝**、对 owner 成功。
@@ -1097,6 +1119,16 @@ add_executable(lift-mechanism tests/mechanism.cpp)
 target_link_libraries(lift-mechanism PRIVATE emulator-lift-runtime)
 add_test(NAME mechanism COMMAND lift-mechanism)
 
+# ---- pure：`ShimRegistry` 的桩 EA 解析 —— **槽位索引 ≡ 线性扫描**（S1 性能修的等价合同）----
+# 判据见 `tests/shim_stub_index.cpp` 头注释：① 每个已登记 shim 都由索引直接命中（`stubIndexSlowPathHits`
+# 不动，⛔ 不是墙钟断言）；② 桩页**逐槽**（含从未发号的那些）`byStubEa`/`idForStub` 与"扫 defs_ 取
+# 第一条"的定义相同；③ 页外/未对齐 ⇒ nullptr；④ addRuntime 追加后旧槽映射仍指向同一条（存 id 不存
+# 指针）；⑤ 夹具直写 stub_ea 后仍等于线性扫描（慢路径兜底）。
+# ★ 不需要游戏资产 / GPU ⇒ 顶层无条件注册 = pure 档。
+add_executable(lift-shim-stub-index tests/shim_stub_index.cpp)
+target_link_libraries(lift-shim-stub-index PRIVATE emulator-lift-runtime)
+add_test(NAME lift-shim-stub-index COMMAND lift-shim-stub-index)
+
 # ---- pure：P1 / B2 —— DirectDraw 2D 核心（动态导出 + COM 对象 + surface/Blt/Lock/Flip/枚举）----
 add_executable(lift-ddraw tests/ddraw.cpp)
 target_link_libraries(lift-ddraw PRIVATE emulator-lift-runtime)
@@ -1609,7 +1641,7 @@ if(LIFT_IR_CLANG AND EXISTS "${LIFT_GEN_AGE_EXE}")
         COMMAND $<TARGET_FILE:emulator-lift-gen>
                 --exe "${LIFT_GEN_AGE_EXE}" --roots "${LIFT_GEN_ROOTS}"
                 --out "${LIFT_GEN_DIR}/golden_gen.ll"
-                --no-close-calls --no-close-stores --no-close-data --no-close-jmptab
+                --no-close-calls --no-close-stores --no-close-data --no-close-jmptab --no-s7
         DEPENDS emulator-lift-gen "${LIFT_GEN_ROOTS}" "${LIFT_GEN_AGE_EXE}"
         COMMENT "lift-gen: roots + PE -> out/aot/golden_gen.ll（T1a；不 commit）"
         VERBATIM)
@@ -1648,5 +1680,161 @@ target_compile_definitions(lift-ir-gen-shim PRIVATE LIFT_IR_BUILD_TYPE="${CMAKE_
 target_compile_definitions(lift-ir-gen-shim PRIVATE _CRT_SECURE_NO_WARNINGS)
 add_test(NAME lift-ir-gen-shim COMMAND lift-ir-gen-shim)
 set_tests_properties(lift-ir-gen-shim PROPERTIES SKIP_RETURN_CODE 77)
+
+# =====================================================================================
+# 检查点 2 / D49：**x87 两臂差分**（`lift-x87-diff`）
+# ★ 判据（红了意味着什么）：`tests/ir/x87_roots.txt` 里 23 个真实 x87 站点（= 300 帧直方图
+#   99.6% 的 x87 动态调用）逐个"生成代码 vs 解释器"逐位相同 —— 8 个 double 槽的**位型**、
+#   top、tag、状态字、控制字、8 GPR、EFLAGS、一段 guest 内存。详见 `tests/x87_diff.cpp` 头注。
+# ★ 为什么单独一份生成物：根集只有这 23 个 EA ⇒ 模块小、构建快，且**每个根就是一个 x87 指令**
+#   （生成器的块首 = 根）⇒ 差分从"那条 op"开始，而不是从某个函数入口开始。
+# ★ 缺 clang / 缺执行源 ⇒ 不链生成物、不定义 `LIFT_X87_DIFF` ⇒ 测试体自己返回 77（SKIP），
+#   与 `lift-ir-gen-*` 同一套处置。⛔ `add_test` 仍在**最外层**（不嵌进 if / foreach）⇒ 档位 = pure。
+# =====================================================================================
+set(LIFT_X87_DIR "${CMAKE_CURRENT_BINARY_DIR}/x87diff")
+set(LIFT_X87_ROOTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/ir/x87_roots.txt")
+if(LIFT_IR_CLANG AND EXISTS "${LIFT_GEN_AGE_EXE}")
+    add_custom_command(
+        OUTPUT "${LIFT_X87_DIR}/lift_aot.ll" "${LIFT_X87_DIR}/lift_pin.h"
+               "${LIFT_X87_DIR}/lift_table.inc"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${LIFT_X87_DIR}"
+        COMMAND $<TARGET_FILE:emulator-lift-gen>
+                --exe "${LIFT_GEN_AGE_EXE}" --roots "${LIFT_X87_ROOTS}"
+                --out "${LIFT_X87_DIR}/lift_aot.ll"
+                --pin "${LIFT_X87_DIR}/lift_pin.h"
+                --table "${LIFT_X87_DIR}/lift_table.inc"
+                --no-close-calls --no-close-stores --no-close-data --no-close-jmptab --no-s7
+        DEPENDS emulator-lift-gen "${LIFT_X87_ROOTS}" "${LIFT_GEN_AGE_EXE}"
+        COMMENT "lift-x87-diff: roots + PE -> x87diff/lift_aot.ll + pin + table"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${LIFT_X87_DIR}/lift_aot.obj"
+        COMMAND ${LIFT_IR_CLANG} -c -O2 ${LIFT_IR_TARGET_FLAGS} -Wno-override-module
+                -o "${LIFT_X87_DIR}/lift_aot.obj" "${LIFT_X87_DIR}/lift_aot.ll"
+        DEPENDS "${LIFT_X87_DIR}/lift_aot.ll"
+        COMMENT "lift-x87-diff: lift_aot.ll -> .obj（clang -c -O2）")
+    set_source_files_properties("${LIFT_X87_DIR}/lift_aot.obj"
+        PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+    add_executable(lift-x87-diff tests/x87_diff.cpp src/aot/aot_dispatch.cpp
+                   "${LIFT_X87_DIR}/lift_aot.obj")
+    # ★ `aot_dispatch.cpp` 靠这个宏决定"表里有没有内容"（与 `emulator-lift-aot` 同一判据）
+    target_compile_definitions(lift-x87-diff PRIVATE LIFT_AOT_HAS_GENERATED=1 LIFT_X87_DIFF=1
+        LIFT_X87_PE_PATH="${LIFT_GEN_AGE_EXE}" _CRT_SECURE_NO_WARNINGS)
+    target_include_directories(lift-x87-diff PRIVATE "${LIFT_X87_DIR}")
+    # `aot_dispatch.cpp` `#include "lift_table.inc"` ⇒ 显式文件级依赖（clean build 的并行坑）
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/aot/aot_dispatch.cpp"
+        PROPERTIES OBJECT_DEPENDS "${LIFT_X87_DIR}/lift_table.inc")
+else()
+    message(STATUS "lift-x87-diff: 缺 clang 或执行源（${LIFT_GEN_AGE_EXE}）⇒ 不链生成物（用例 SKIP 77）")
+    add_executable(lift-x87-diff tests/x87_diff.cpp)
+endif()
+target_link_libraries(lift-x87-diff PRIVATE emulator-lift-runtime)
+add_test(NAME lift-x87-diff COMMAND lift-x87-diff)
+set_tests_properties(lift-x87-diff PROPERTIES SKIP_RETURN_CODE 77)
+
+# =====================================================================================
+# 2026-11-15 · **把 `lift_one` 调用点降到 0** 时新增的 inline 族：两臂差分（`lift-ops-diff`）
+# ★ 判据（红了意味着什么）：`tests/ir/ops_roots.txt` 的每个站点，从同一份受控状态出发，
+#   "生成代码 vs 解释器"逐位相同 —— 8 GPR / EFLAGS / 8 个 x87 槽（double 位型）/ top / tag /
+#   状态字 / 控制字 / 8 个 xmm / mxcsr / 一段 guest 内存；停机类还要求 `stop_why` 字符串相同。
+#   详见 `tests/ops_diff.cpp` 头注。
+# ★ 为什么单独一份生成物：根集只含这些站点 ⇒ 模块小、构建快，且每个根就是一条指令
+#   （生成器的块首 = 根）⇒ 差分从"那条 op"开始。
+# ★ 缺 clang / 缺执行源 ⇒ 不链生成物、不定义 `LIFT_OPS_DIFF` ⇒ 测试体自己返回 77（SKIP），
+#   与 `lift-ir-gen-*` 同一套处置。⛔ `add_test` 仍在**最外层** ⇒ 档位 = pure（§12.4）。
+# =====================================================================================
+set(LIFT_OPS_DIR "${CMAKE_CURRENT_BINARY_DIR}/opsdiff")
+set(LIFT_OPS_ROOTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/ir/ops_roots.txt")
+if(LIFT_IR_CLANG AND EXISTS "${LIFT_GEN_AGE_EXE}")
+    add_custom_command(
+        OUTPUT "${LIFT_OPS_DIR}/lift_aot.ll" "${LIFT_OPS_DIR}/lift_pin.h"
+               "${LIFT_OPS_DIR}/lift_table.inc"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${LIFT_OPS_DIR}"
+        COMMAND $<TARGET_FILE:emulator-lift-gen>
+                --exe "${LIFT_GEN_AGE_EXE}" --roots "${LIFT_OPS_ROOTS}"
+                --out "${LIFT_OPS_DIR}/lift_aot.ll"
+                --pin "${LIFT_OPS_DIR}/lift_pin.h"
+                --table "${LIFT_OPS_DIR}/lift_table.inc"
+                --no-close-calls --no-close-stores --no-close-data --no-close-jmptab --no-s7
+        DEPENDS emulator-lift-gen "${LIFT_OPS_ROOTS}" "${LIFT_GEN_AGE_EXE}"
+        COMMENT "lift-ops-diff: roots + PE -> opsdiff/lift_aot.ll + pin + table"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${LIFT_OPS_DIR}/lift_aot.obj"
+        COMMAND ${LIFT_IR_CLANG} -c -O2 ${LIFT_IR_TARGET_FLAGS} -Wno-override-module
+                -o "${LIFT_OPS_DIR}/lift_aot.obj" "${LIFT_OPS_DIR}/lift_aot.ll"
+        DEPENDS "${LIFT_OPS_DIR}/lift_aot.ll"
+        COMMENT "lift-ops-diff: lift_aot.ll -> .obj（clang -c -O2）")
+    set_source_files_properties("${LIFT_OPS_DIR}/lift_aot.obj"
+        PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+    add_executable(lift-ops-diff tests/ops_diff.cpp src/aot/aot_dispatch.cpp
+                   "${LIFT_OPS_DIR}/lift_aot.obj")
+    target_compile_definitions(lift-ops-diff PRIVATE LIFT_AOT_HAS_GENERATED=1 LIFT_OPS_DIFF=1
+        LIFT_OPS_PE_PATH="${LIFT_GEN_AGE_EXE}" _CRT_SECURE_NO_WARNINGS)
+    target_include_directories(lift-ops-diff PRIVATE "${LIFT_OPS_DIR}")
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/aot/aot_dispatch.cpp"
+        PROPERTIES OBJECT_DEPENDS "${LIFT_OPS_DIR}/lift_table.inc")
+else()
+    message(STATUS "lift-ops-diff: 缺 clang 或执行源（${LIFT_GEN_AGE_EXE}）⇒ 不链生成物（用例 SKIP 77）")
+    add_executable(lift-ops-diff tests/ops_diff.cpp)
+endif()
+target_link_libraries(lift-ops-diff PRIVATE emulator-lift-runtime)
+add_test(NAME lift-ops-diff COMMAND lift-ops-diff)
+set_tests_properties(lift-ops-diff PROPERTIES SKIP_RETURN_CODE 77)
+
+
+# =====================================================================================
+# S7 / D53：**宿主 `ret` / 宿主 `call` 与 guest 栈的一致性**（`lift-s7-structured`）
+# ★ 判据（红了意味着什么）：`tests/ir/s7_roots.txt` 的调用者 F 在受控状态下
+#   一次表查找就跑完 F → `call G` → G 返回 → F 返回；返回后 guest `esp` 回到调用前、
+#   `[esp]` 仍是没被写过的栈哨兵；且与解释器臂逐位相同。详见 `tests/s7_structured.cpp` 头注。
+# ★ 为什么单独一份生成物：只需要一对（F, G，都是单元根）⇒ 模块小、构建快，差分从函数入口开始。
+# ★ 缺 clang / 缺执行源 ⇒ 不链生成物、不定义 `LIFT_S7_STRUCTURED` ⇒ 测试体返回 77（SKIP）；
+#   ⛔ `add_test` 仍在**最外层**（档位 = pure，判据 = 注册位置 §12.4）。
+# =====================================================================================
+set(LIFT_S7_DIR "${CMAKE_CURRENT_BINARY_DIR}/s7diff")
+set(LIFT_S7_ROOTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/ir/s7_roots.txt")
+# ★ 与 `tests/ir/s7_roots.txt` **一一对应**（测试体用它们做"这真的是一次宿主 call/ret"的自检）。
+set(LIFT_S7_CALLER_EA 0x004C0980)
+set(LIFT_S7_CALLEE_EA 0x004C0210)
+if(LIFT_IR_CLANG AND EXISTS "${LIFT_GEN_AGE_EXE}")
+    add_custom_command(
+        OUTPUT "${LIFT_S7_DIR}/lift_aot.ll" "${LIFT_S7_DIR}/lift_pin.h"
+               "${LIFT_S7_DIR}/lift_table.inc"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${LIFT_S7_DIR}"
+        COMMAND $<TARGET_FILE:emulator-lift-gen>
+                --exe "${LIFT_GEN_AGE_EXE}" --roots "${LIFT_S7_ROOTS}"
+                --out "${LIFT_S7_DIR}/lift_aot.ll"
+                --pin "${LIFT_S7_DIR}/lift_pin.h"
+                --table "${LIFT_S7_DIR}/lift_table.inc"
+                --no-close-stores --no-close-data --no-close-jmptab
+        DEPENDS emulator-lift-gen "${LIFT_S7_ROOTS}" "${LIFT_GEN_AGE_EXE}"
+        COMMENT "lift-s7-structured: roots + PE -> s7diff/lift_aot.ll + pin + table"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${LIFT_S7_DIR}/lift_aot.obj"
+        COMMAND ${LIFT_IR_CLANG} -c -O2 ${LIFT_IR_TARGET_FLAGS} -Wno-override-module
+                -o "${LIFT_S7_DIR}/lift_aot.obj" "${LIFT_S7_DIR}/lift_aot.ll"
+        DEPENDS "${LIFT_S7_DIR}/lift_aot.ll"
+        COMMENT "lift-s7-structured: lift_aot.ll -> .obj（clang -c -O2）")
+    set_source_files_properties("${LIFT_S7_DIR}/lift_aot.obj"
+        PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+    add_executable(lift-s7-structured tests/s7_structured.cpp src/aot/aot_dispatch.cpp
+                   "${LIFT_S7_DIR}/lift_aot.obj")
+    target_compile_definitions(lift-s7-structured PRIVATE LIFT_AOT_HAS_GENERATED=1
+        LIFT_S7_STRUCTURED=1 LIFT_S7_PE_PATH="${LIFT_GEN_AGE_EXE}"
+        LIFT_S7_CALLER_EA=${LIFT_S7_CALLER_EA} LIFT_S7_CALLEE_EA=${LIFT_S7_CALLEE_EA}
+        _CRT_SECURE_NO_WARNINGS)
+    target_include_directories(lift-s7-structured PRIVATE "${LIFT_S7_DIR}")
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/aot/aot_dispatch.cpp"
+        PROPERTIES OBJECT_DEPENDS "${LIFT_S7_DIR}/lift_table.inc")
+else()
+    message(STATUS "lift-s7-structured: 缺 clang 或执行源（${LIFT_GEN_AGE_EXE}）⇒ 不链生成物（用例 SKIP 77）")
+    add_executable(lift-s7-structured tests/s7_structured.cpp)
+    target_compile_definitions(lift-s7-structured PRIVATE LIFT_S7_CALLER_EA=0 LIFT_S7_CALLEE_EA=0)
+endif()
+target_link_libraries(lift-s7-structured PRIVATE emulator-lift-runtime)
+add_test(NAME lift-s7-structured COMMAND lift-s7-structured)
+set_tests_properties(lift-s7-structured PROPERTIES SKIP_RETURN_CODE 77)
 
 endif() # LIFT_BUILD_TESTS

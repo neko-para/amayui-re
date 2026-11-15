@@ -1069,3 +1069,163 @@
 - **未做**：`LIFT_STRESS` 档 · 交互探针（见 `OBS-20261115-02`，本条未重跑）· 逐帧像素跨臂对照（wall clock 下做不到）。
 - **复现**：`cd apps/emulator-lift && cmake --preset windows-x64 -B out-final && cmake --build out-final &&
   ctest --test-dir out-final`，然后上面两档命令（`--max-frames` 可先换 10）。读数存档 `.tmp/aot/final/readings.md`。
+
+### OBS-20261115-04 · AOT 墙钟 **84.2 s → 50.0 s（−40.6%）**：大头是**宿主侧每派发一次的 385 项线性扫描**，不是被翻译的代码
+
+- **口径**：`windows-x64` 预设（RelWithDebInfo）· 同一台机器、同一会话、交错 A/B/A/B/A/B/… 共 7 对 · 只差 exe。
+  命令（cwd = `apps/emulator-lift`；`--game-dir` 必需，缺了 AGERC 装载失败 ⇒ `exit 2` / `frames 0`；
+  `--appdata` 每次给全新空目录做状态隔离）：
+  ```
+  <exe> --skip-logo --present window --max-frames 300 --game-dir ..\..\dist\install --appdata <空目录>
+  ```
+- **主表（可见窗口，7 对，中位数）**：墙钟 **84.21 s → 50.00 s**（−34.21 s / **−40.6%**）；
+  `TotalProcessorTime` **82.67 s → 48.53 s**（−41.3%）。安静子集（第 3–7 对）配对中位差 −40.7%。
+  派生量：`ns / dispatch` 1121.8 → **665.1**；`ns / guest 指令` 90.7 → **53.8**。
+  交叉核对（`--present window --present-hidden`，3 对，另一时段）：84.38 → 49.35 s（−41.5%），同量级。
+  ⚠ 可见窗口在别的进程全屏时会**阻塞在 Present**（实测同一 exe 有一次 2% CPU / 10 min 未完成）⇒ 隐藏窗口只作核对，主表用可见窗口。
+- **语义指纹（20 次运行全部逐位相同）**：`frames 300` · `stopped @ 00498AE4` · arena `108595152·108595152·21` ·
+  `table misses 0`。⚠ **`insns` 不是判据**：同一 binary 内就有 **0.22%** 漂移（`927.26–929.26 M`），
+  两臂同带 —— 本游戏的帧节奏依赖墙钟（`timeGetTime` / `PeekMessage`），300 帧内的 guest 指令数本身有抖动。
+- **根因（代码级 + 量级对账）**：`aot_run.cpp:670` **每次派发**都调 `shims_.byStubEa(ea)`，而它
+  （旧 `shims.cpp:263`）= `lock_guard<recursive_mutex>` + 对 `defs_` **线性扫 385 项**（`ShimDef` 含两个
+  `std::string` ⇒ 每项 100+ B、整趟 40+ KB），99.9% 的派发扫完返回 `nullptr`。
+  实测**单次反查 ≈ 450 ns**（配对微基准 88.3 → 86.3 ns 证明**不是锁**，是扫描/L1 流量）；
+  按 75.07 M 次分摊 **≈33.8 s**。`lift_shim` 内的 `idForStub`(+`byStubEa`) 0.842 M 次 ≈ **0.37 s**。
+  合计 34.14 s = 实测中位差。
+- **改法**（⛔ 无 override、⛔ 未碰 IR 发射器）：槽位索引 `slot → id+1`（**不存指针**，防 `addRuntime`
+  令 `defs_` 重分配后悬垂）+ 命中后 `stub_ea` **二次校验**（表过期只降级到慢路径，不会给错答案）；
+  登记发号点加**响亮停**断言 `stub_ea == 0 || (在桩页内 && 4 对齐)`；dispatcher 的桩页判据 = **一次无符号减法 + 一次比较**；
+  `lift_shim_id()` 让 AOT 把 dispatcher 已解析的 id 递下去（解释器臂的 `cache->peek` 路径**逐字未动**）；
+  定时器泵的 `steady_clock::now()` 从"每派发"降到"每 `kCheckStride` 条"（上限 1.6 s；本臂 `定时器回调=0`，实际 ≈0）。
+- **上一轮的归因是错的，这里纠正**：`--profile` 的 `dispatch-top` 把 `_memcpy` 算成 46% 是**幻影** ——
+  它按"每个派发成本均匀"分摊，而 `_memcpy` 的块占 53% 的派发次数，于是分到 53% 的时间。
+  `dispatch-top` 的 `ms` 列**不是**该 EA 的实测成本（`ms ≈ 采样数 × 3.14 ms`，即派发份额）。
+  ⇒ 当时"40 s 是实打实的翻译成本"的结论**作废**。
+- **剩余 50 s 的构成**（`--profile` 归因，`np2` 运行，**仅归因、不进判据**）：
+  `lift_one` **≈42.0 s（85%）** · D3D9 GPU shim 体 ≈6.6 s（13%）· 派发固定项 + lifted 块体 ≈0.5 s（1%，≈7 ns/派发）。
+  `lift_one` **47.1 M 次 × ≈892 ns**；其中 **x87 占 93.3%**（Fld 14041 / Fstp 9524 / Fmul 7098 / Faddp 3085 / Fadd 2453 /
+  Fxch 1496 / Fsub 813 / Fmulp 683 / Fst 588 / Fsubp 449 / Fnstsw 417 / Fild 430 / …，采样 1/1024）；
+  整数侧 `Mov 1136 / Div 1071 / Imul 248 / Rol 157 / Ror 138 / Idiv 121 / Movs 83 / Stos 72 / Push 32`。
+  ★ **每种 op 的下限都极高**：`Mov` **517 ns**、`Div` 496、`Rol` 555（x87 普遍 870–1100）⇒ 即使把 x87 全拿掉，
+  地板仍在。⇒ 这条把"`lift_one` 到底是解码贵 / 执行贵 / 状态搬昂贵"变成了下一轮必须先测的问题。
+- **机器不慢（排除法）**：内联汇编探针（`.tmp/aot/freqprobe.cpp`）—— 依赖链 `add` **0.26 ns/轮**
+  ⇒ 核心 ≈ **3.83 GHz**（turbo；`rdtsc` 3.194 GHz 是基频，与 `--profile` 的 `freq:` 一致）；
+  8 路独立 add 0.69 ns/轮（≈3 add/cycle）。
+- **验收臂（3000 帧，新 exe）**：`exit 0` · `frames 3000` · `table misses 0`（117,821,137 次查找，`avg_cmp=1.01`）·
+  `stopped @ 00498AE4` · arena `108595152·108595152·21`；墙钟 **324.4 s** / CPU 313.3 s；
+  `insns 1,696,446,245`；`dispatch 124,473,969`（lifted 117,821,137 / shim 6,652,832）；`skip-logo: applied`。
+- **CTest**：**94/94**（新增 `lift-shim-stub-index`，196 checks，顶层无条件 ⇒ pure 档）。
+  变异：把 `idForStub` 的返回值改成"槽号当 id" ⇒ 该用例 **5 failures / CTest 退出码 8**（红得有意义：
+  夹具故意先登记两条无桩的 `add`，所以 id(2,3,4) ≠ 槽号(0,1,2)）。
+- **未做 / 未覆盖**：定时器"到期判定粒度变成 4096 条指令"这一语义变化**没有用例**（本臂定时器从不触发）；
+  `slot_index_` 的**无锁并发读**没有工具证明（Windows 上无 TSAN；缓解 = 定长表 + `defs_.reserve` + 命中后二次校验）；
+  "feeder 线程读的同时主线程 `addRuntime`"没有用例；构建的 exe **字节不可复现**（lld-link 时间戳/GUID）。
+- **复现**：脚本 `.tmp/perf-aot/run-case.ps1` / `interleave.ps1`；原始 stdout/stderr 在 `.tmp/perf-aot/{vis,hid,final,accept}/`；
+  profile 原始输出 `.tmp/perf-aot/final/np2.out.txt`。
+
+### OBS-20261115-05 · AOT 墙钟 **58.4 s → 19.1 s（−67%）**：`lift_one` 的 79.3% 是**解码器**，加字节校验的解码缓存即可
+
+- **口径**：`windows-x64`（RelWithDebInfo）· 同一台机器、同一会话、交错 A/B/A/B/A/B 共 3 对、只差 exe
+  （基线拷出留证：sha256 `6E9A3FEB…76BCD` / 12,045,824 B；连同 8 个运行时 DLL 一起拷，否则 `0xC0000135`）。
+  命令（cwd = `apps/emulator-lift`；`--game-dir` 必需；`--appdata` 每次全新空目录）：
+  ```
+  <exe> --skip-logo --present window --max-frames 300 --game-dir ..\..\dist\install --appdata <空目录>
+  ```
+- **读数（中位）**：墙钟 **58.42 s → 19.08 s（−67%）**；`TotalProcessorTime` **53.80 s → 15.45 s（−71%）**。
+  ⚠ 本轮基线（58.42 s）比 `OBS-20261115-04` 的 50.00 s 慢 —— 同一台机器今天更慢（A/B 是几分钟内交替跑的，
+  配对比较才有效，⛔ 不要跨观察直接相减）。
+- **`lift_one` 四桶**（`--profile`，单次采样在 4 个段界各取一次时，每桶含 ~21 ns 取时地板；关档仍是一次指针判空）：
+
+  | 桶 | 修前 ns | 占比 | 修后 ns |
+  |---|---:|---:|---:|
+  | A 换入（`liftRegsToCpu` + eip） | 34.7 | 3.1% | 36.3 |
+  | **B 解码**（`Insn`/`why` 构造 + `decode`） | **878.6** | **79.3%** | **101.2** |
+  | C 执行（`noteInsn` + `execInsn`） | 160.6 | 14.5% | **135.9** |
+  | D 回读（`liftCpuToRegs` + eip） | 34.5 | 3.1% | 37.2 |
+  | 合计 | 1108.4 | 100% | 310.6（真值 ≈227，扣掉 84 ns 取时地板） |
+
+  ★ 地板与 x87 无关：连 `Mov` 也有 **B=601.8 ns**（`Div` 526.7）；x87 的增量在 **C 桶**（148 vs 115 ns）。
+- **改法**：`src/runtime/decode_cache.{h,cpp}`（新）—— EA → `Insn` **直接映射 512 槽**缓存，条目
+  `{ea, len, 原始字节[15], Insn}`；命中须**同时**满足 EA 相同 + `mem.committed(ea,15)` + 那 `len` 个字节
+  **逐字节相同**，否则重解并覆盖。只缓存"15 字节窗口完整"的结果（否则 `9B` 前缀合并的长度/op 会随可读字节数变）。
+  另把原来**每条指令都调一次**的 `opName()` 改成只在采样时调。
+- **`lift_one` 总账**：1108.4 → 310.6 ns/次（总 52.25 s → 14.62 s，−72%），**解释掉 96% 的墙钟节省**；
+  命中率 **96.3%**（45,345,150 / 47,079,342），`invalidated=0`、`uncached=0`。
+  ⚠ 但 `lift_one` 仍占 19.08 s 的 **14.62 s ≈ 77%**（最大桶已是 C = `execInsn` / x87 SoftFloat）。
+- **语义指纹（6 次运行逐位相同）**：`exit 0` · `frames 300` · `table misses=0` · `stopped @ 00498AE4` ·
+  arena `108595152·108595152·21`。`insns` 分布 928,339,444–930,355,050（**0.23%**，不作判据）。
+  ⚠ `[frame] n=300 hash` 在**同一份二进制自己跑两次之间**就已不同 ⇒ 它本来就不是稳定指纹。
+- **CTest**：**95/95**（新增 `lift-decode-cache`，40 条断言、5 组：命中 ≡ 重解 / 异 EA 不污染 /
+  SMC 重解（5 字节 `mov`→1 字节 `nop`，长度 5→1、op Mov→Nop、`invalidated` 恰好 +1）/ 页尾窗口不完整 /
+  解码失败面一致）。变异（删掉命中时的逐字节校验）**红**：CTest 退出码 8；还原后绿。仓库合同档 546/546。
+- **SMC 只在解码层自愈**：缓存**不可能**给出陈旧 `Insn`，但"已发射的 lifted IR 仍执行旧语义"这条缺口
+  **本轮没有变化**（`lift_note_write` 在 AOT 里仍是 no-op）⇒ ⛔ 不要读成"SMC 修好了"。
+  且 300 帧内 `invalidated=0`、`uncached=0`（guest 一次都没写代码页）⇒ **自愈路径只有 CTest 覆盖，无真负载证据**。
+- **新风险**：78 KiB/线程的 TLS（512 槽 × 152 B，`thread_local`）；直接映射冲突 3.68% 未命中（只影响速度，
+  语义无损）；页尾附近那条指令永不命中（每帧重复解一次，可忽略）。
+- **未测**：B 桶内部**没有**再拆子桶（Zydis vs `toLowerStr`+`unordered_map` vs 三张线性 `strcmp` 表各占多少）
+  —— 缓存把 B 整段干掉后不需要，**未实测、不作断言**。
+- **复现**：读数与机器可读数据在 `.tmp/liftone-perf/{prof1,prof2,ab,baseline}/`（`ab/ab.json`）；
+  profile 行在 `prof1/run.out.txt:780-797` 与 `prof2/run.out.txt:781-784`。
+
+### OBS-20261115-06 · AOT **19.08 → 8.14 s**（x87 换 `double` + 抬进 IR、S7 结构翻译）· **翻译侧已达 native 量级（1.7 ns/条）**，剩余 78% 是图形 shim
+
+- **口径**：`windows-x64`（RelWithDebInfo）· 同一台机器 · 300 帧
+  `<exe> --skip-logo --present window --max-frames 300 --game-dir ..\..\dist\install --appdata <每次全新空目录>`
+  （cwd = `apps/emulator-lift`）。⚠ **两段的 A/B 性质不同**：x87 那段**没有配对 A/B**（基线 exe 被清理删了，
+  用台账跨会话对比）；S7 那段有 3 对交错。
+- **x87 → `double` 模型 + 抬进 IR**（D49/D55）：`X87State::regs` `uint8_t[8][16]`（SoftFloat `extF80` 原位字节）
+  → **`double regs[8]`**；`fpu_bridge.*` 整份重写成一份 double 模型；四个 native override 改用同一批桥函数。
+  生成代码里 x87 算术是**普通 LLVM 浮点指令**（`fadd/fsub/fmul/fdiv/fneg/sqrt/rint/sitofp/fptosi double`、`fpext/fptrunc`、`fcmp uno`）；
+  状态全在 `%cpu`，偏移契约集中在 `src/runtime/x87_layout.h` + `lift_abi.cpp` 的 7 条 `static_assert(offsetof(...))`；
+  只有超验函数（25 个调用点）走 `@lift_x87_sem` → 解释器**同一份** `execFpu`。
+  **读数**：300 帧墙钟中位 **9.01 s**（3 次 9.081/9.005/8.923）、CPU 7.97 s；`lift_one` **47.04M → 3.23M 次（−93.1%）**，
+  折算 **14.62 s → ≈0.61 s**；3000 帧验收臂五项全过（65.25 s）；CTest 96/96。
+  新守卫 `lift-x87-diff`（22 个真实 x87 站点，逐位比 8 槽 double 位型 / top / tag / 状态字 / 控制字 / 8 GPR / EFLAGS /
+  1 KiB guest 内存）；变异 `Fsubr` 反操作数 ⇒ 红。
+- ★ **同一轮引入并修回的一处语义回归（必须记住）**：换模型时异常位只剩 IE/ZE，**PE/UE/OE/ES 一律不置**，
+  而**guest 确实在读** —— 解释器臂 300 帧 `tri` **828,931 → 828,965**、`insns` −0.06%。
+  修回 OE/UE/ES（判据只有一份：`fpu_bridge.cpp` 的 `x87RaiseOverflowUnderflow`；OE = 结果 ±inf 且两操作数都有限，
+  `fdiv` 在 `b==0` 时不判（那是 ZE）；UE = 结果次正规；ES = 状态字任一异常位非零，与 D49 **之前**那条同源），
+  生成代码发**同一份位型判据**的 IR（`x87RaiseFloatFlags`，OE=0x08 / UE=0x10 都带 ES）。
+  **PE 仍恒 0**（double 下几乎每条都与真值不等，除软件浮点或每 op 读 MXCSR 外无法判定）—— 已在 `fpu_bridge.h` §5
+  与 `x87_layout.h` 的 `kStatus` 注释里写明"按 PE 分支的 guest 路径会走'精确'那一支"。
+  差分扩到两批极端状态（1e308 ⇒ OE/fistp 越界/压满栈；1e-308÷1e8 ⇒ 次正规 UE）：**1390 checks / 0 failures**，
+  `OE 7 · UE 2 · ES 21`（两臂同时）；变异删掉 UE 那一行 ⇒ 红（`expected 0x800 got 0x890`）。
+  `tri` 改回后 830,001 → **828,499**（−0.18%，⚠ 跨会话散布就有 ~1,000 ⇒ 这个差在噪声边缘，不能全归因）。
+- **S7（一对一结构翻译）**（D53/D54）：判据在 `lift-gen` 里跑**它自己的 Zydis 解码**（`src/aot/lift_struct.{h,cpp}`），
+  ⛔ 没有搬 `.lst` 普查。`call rel32`（caller+callee 都可结构化）⇒ **宿主 `call`**；`ret` ⇒ 宿主 `ret`；
+  跨函数 `jmp` ⇒ 尾调用；间接 ⇒ `lift_dyn`（查表 + **实测 `jmpq *%rax` 的 TCO**）。
+  宿主 call/lift_dyn 后的唯一 continuation 判据 = **`%r == resume`**，否则原样上抛 ⇒ **部分转换天然安全**。
+  **覆盖率（按 `.ll` 实际站点）**：可结构化 **4,949 / 10,211（48.5%）**；降级 5,262（自身 2,321 + 调用图传染 2,941）；
+  首因 = 间接 call **1,641** · 动态返回 628 · 可变长栈 35 · 写返回槽 14 · 表外 callee 3。
+  `ret` 7,002 → 宿主 ret **1,777（25.4%）**；`call` 24,388 → 宿主 call **1,230** / `lift_dyn` 5,241 / 其余派发 17,917。
+  **`dispatch total` 75,172,837 → 46,875,828（−37.6%）**；`lift_dyn` 查表 14.8M 次（不计入 dispatch，`misses` 仍 0）。
+  **墙钟 8.533 → 8.135 s（−4.7%）**、CPU 7.094 → 6.594 s（−7.0%），3 对交错，语义指纹逐位相同。
+  ⚠ 派发被换成 14.8M 次 `lift_dyn` 查表，所以 dispatch −37.6% 只兑成墙钟 −4.7%。
+  新守卫 `lift-s7-structured`（F `0x4C0980` → G `0x4C0210`，31 checks）：`表查找=1`、`esp` 回位、
+  `[esp-4]` 是压入的 resume、`[esp]` 仍是哨兵、与解释器逐位；变异 `structured.clear()` ⇒ `表查找=3` 红。
+  ★ **必保语义**：`--skip-logo` / recovery 两个宿主钩子的 EA 被强制留在派发边界（`src/aot/aot_hook_ea.h`），
+  否则 S7 会让它们**静默失效**。
+- ★★ **本轮最重要的结论**（交付 exe 上跑一次 `--profile`，300 帧，机器上有别的负载 ⇒ 绝对值偏高、比例可用）：
+
+  | 项 | 折算 | 占比 |
+  |---|---:|---:|
+  | **图形 shim（top-9）** | **≈8.62 s** | **≈78%** |
+  | └ `DrawIndexedPrimitive` 18,000 × **174.9 µs** · `Present` 300 × **8.43 ms** · `Clear` 301 × **5.04 ms** · `DrawPrimitive` 323 × **2.28 ms** | | |
+  | `lift_one` | ≈0.76 s | 7% |
+  | **派发 + 全部 lifted 代码体** | **≈1.6 s** | ≈15% |
+
+  ⇒ **929M 条 guest 指令跑在 ≈1.6 s 里 = 1.7 ns/条 ≈ 6.5 cycles/条**（3.8 GHz 核心）—— **翻译侧已是 native 量级**
+  （最早的基线是 55 ns/条 ⇒ 降了 32 倍）。★ 早先那次 50 s 的 profile 里 shim 只占 13%（约 6.6 s）：
+  **shim 的绝对值没变，是别的东西变快了**。
+  ⇒ **端到端墙钟现在由图形 shim 决定**（`DrawIndexedPrimitive` 175 µs/次、`Clear` 5 ms/次、`Present` 8.4 ms/次，
+  比合理成本高 1–3 个数量级，疑似每次 draw 重建 D3D12 管线 / 软件清屏 / 软件呈现转换）。
+  这是**另一条工作线**（图形实现效率，不是翻译质量）。
+- **未做 / 未覆盖**：`fsub`/`fsubp`/`fsubrp`/`fcom`（4.3% 的 x87 调用）**无逐位证据** —— 静态站点全在 `0x450000+`，
+  而 `sectfix` 的 PE 那段没有 raw 字节（`.lst` 头写明来自另一份 dump），只有 3000 帧验收臂兜底；
+  S7 的**逐函数动态权重**没有读数（`--profile` 的 `dispatch-top` 是每 EA 的派发份额，不能按函数归因）；
+  宿主栈深度已量化（生成函数帧 **80 B/层**，guest 栈 1 MB ⇒ 最坏 ~20 MB）并加 `/STACK:33554432`，**没有**运行期栈探测；
+  native overrides 在结构化路径上基本失效（可选性能档，本轮未开）。
+- **复现**：`.tmp/aot/s7/{census.md,census.mjs,prof.out.txt}`、`.tmp/aot/s7/base/`（基线 exe + sha256）；
+  S7 降级清单逐条打在 `lift-gen` 的 stderr（EA + 原因 + 首因站点 + 传染源，5,262 行，确定性升序）。

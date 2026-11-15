@@ -788,6 +788,11 @@ int runMain() {
 #endif
     std::printf("[lift-ir-shim] build=%s\n", build);
 
+    // ★ S7（D53）：生成代码里的**间接 `jmp` / 间接 `call`** 走 `@lift_dyn`（查表 + 尾调用）。
+    //   本夹具的"表"就是 `lookupLifted`（夹具自己的 3 个入口）⇒ 把它装成 `lift_dyn` 的查找。
+    //   ⛔ 不装 ⇒ `lift_dyn` 会**响亮停**（宿主装配错误，不是语义差别；见它的实现）。
+    ::lift::liftDynLookup = &lookupLifted;
+
     // ---- 1) 差分 + 控制流 + shim 独立性（同一批组）----------------------------------------
     constexpr int kGroups = 80;  // 判据要求 ≥64
     std::uint64_t groups = 0, mismatches = 0;

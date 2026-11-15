@@ -73,6 +73,63 @@ extern "C" void lift_tick(void* cpu, std::uint32_t n);
 //       （⛔ 不许静默返回 true —— 那会把"没执行"变成"执行成功"）。
 extern "C" bool lift_one(void* cpu, LiftRegs* st, std::uint32_t ea);
 
+// ★ **采样式内部 profile 的唯一接缝**（AOT 的 `--profile`）：`lift_one` 是**生成物直接 call**
+//   的（`lift_gen_emit.cpp` 的 `call i1 @lift_one`），宿主一次都看不见 ⇒ 单次耗时的采样只能在这里。
+//   ★ 三条硬约束（父级裁决 (A)）：
+//     ① **关档零成本**：热路径上只有**一次指针判空**（`&&` 短路 ⇒ 计数器 / 取时都不执行）；
+//     ② 默认 `nullptr`，解释器臂（`emulator-lift`）**永不设置它** ⇒ 解释器行为逐字不变；
+//     ③ **不改 `lift_one` 的语义**：只在它那四段之间插取时（+ 出口一次），⛔ 不提前、不延后、
+//        不改它读写什么（它是 S3 设计里的"整字屏障"）；取时本身只在**采样到的**那一次执行。
+//   ★ 采样率 = 每 `kLiftOneProfileStride` 次调用一次；计数器在 `lift_abi.cpp`（宿主不去数）。
+namespace lift {
+// ★ 一次采样的**四段归因**（只给 `--profile` 的读数用；⛔ 不进任何判据、⛔ 不改语义）：
+//   [0] A 换入 = `liftRegsToCpu` + `saved_eip` / `cpu.eip = ea`
+//   [1] B 解码 = `Insn` / `std::string why` 构造 + `Decoder::decode`（含解码缓存查找）
+//   [2] C 执行 = `noteInsn` + `opName`（采样时才取）+ `execInsn`
+//   [3] D 回读 = `liftCpuToRegs` + `cpu.eip` 复原
+//   ★ 四段之和 == `ns`（每段都是相邻两次取时之差）⇒ 一段没算漏、也没重复算。
+//   ⚠ 每段都含一次 `liftOneProfileNowNs()`（实测 ~20 ns/次，见 `freq: 取时开销`）⇒
+//     短段的读数有那个量级的地板，⛔ 不要把 5 ns 的差当成结论。
+struct LiftOneProfileSample {
+    std::uint32_t ea = 0;
+    std::uint64_t ns = 0;          // 整条 `lift_one`（= 四段之和）
+    const char* op = "?";          // `opName(in.op)`；解码失败时是 "?"
+    std::uint64_t phase_ns[4] = {};  // A / B / C / D
+};
+using LiftOneProfileHook = void (*)(const LiftOneProfileSample&);
+extern LiftOneProfileHook liftOneProfileHook;
+inline constexpr std::uint64_t kLiftOneProfileStride = 1024;
+// 只在钩子非空时被调用（关档不执行）：这一次调用是否该采样 / 采样用的单调时钟（ns）。
+bool liftOneProfileSampleDue();
+std::uint64_t liftOneProfileNowNs();
+}  // namespace lift
+
+// ②b 停机原语（2026-11-15，本轮：`lift_one` 调用点 → 0）。
+//   § 为什么需要它：`Hlt` / `Int3` / `Int` / `Op::Other`（助记符认识但没实现）在解释器里
+//     **恒**走"响亮停"（`exec_control.cpp:62-72` 的 `hlt`/`trapInt`、`exec.cpp:339-371` 的
+//     `unimplemented`）⇒ 它们不需要"解释执行一条指令"，只需要**把同一条停机面表达出来**。
+//     以前它们走 `lift_one`（一次宿主调用 + 一次解码 + `execInsn` → 立刻 false），
+//     生成的 `.ll` 里因此留下 `call i1 @lift_one` —— 而这条路径的语义**不是**"翻译"。
+//   § 停机面**逐字**照解释器（唯一判据）：`running = false` + `stop_why = <同一句字符串>`
+//     （`cpuFault` / `trapInt` / `unimplemented` 都是这两步）。⛔ 不写 `stop_kind`
+//     （解释器也不写 ⇒ AOT 的 `hostStopReason` 归到 `Stopped`，与今天**逐位相同**）。
+//   § 打印：只打一行 `=== guest stop ===` + why + EA（诊断面；⛔ 不进任何判据）。
+//   § 返回：`void`。发射器随后发 `ret i32 kLiftHalt`（trampoline 的停机口径不变）。
+//   `kind` ∈ `LiftStopKind`（闭集合，与解释器的停机点一一对应，见 `.cpp`）。
+enum LiftStopKind : std::uint32_t {
+    kLiftStopHlt = 0,        // `exec_control.cpp:63-65`：stop_why = "hlt"
+    kLiftStopInt3 = 1,       // `exec_control.cpp:67-69` → trapInt
+    kLiftStopInt = 2,        // `exec_control.cpp:70-72` → trapInt
+    kLiftStopOther = 3,      // `exec.cpp:210` → unimplemented（助记符认识但没实现）
+    kLiftStopInvalid = 4,    // `exec.cpp:209` → unimplemented（解码得到 Invalid）
+    kLiftStopDivZero = 5,    // `exec_integer.cpp:273/278` → cpuFault("除零（#DE）")
+    kLiftStopDivOverflow = 6,    // `exec_integer.cpp:312/319/326` → cpuFault("div 商溢出（#DE）")
+    kLiftStopIdivOverflow = 7,   // `exec_integer.cpp:281/290/293/300/303` → cpuFault("idiv 商溢出（#DE）")
+    // MOVAPS/MOVDQA 的 m128 未按 16 字节对齐（`exec_fpu.cpp:1010-1016` → unimplemented）
+    kLiftStopSseAlign = 8,
+};
+extern "C" void lift_stop(void* cpu, std::uint32_t ea, std::uint32_t kind);
+
 // ③ 段基址（`fs:` / `gs:` 覆盖的 EA 计算要用）。解释器臂的真源是 `X86::fs_base` / `gs_base`
 //   （`x86.cpp` 的 `eaOf`：`ea = base[index] + disp + …`）。
 //   ★ 本轮生成器**不**用它：`fs:`/`gs:` 操作数一律走 `lift_one`（D10-P2 / D12：不 inline 化）。
@@ -87,6 +144,20 @@ extern "C" std::uint32_t lift_gs_base(void* cpu);
 //   与"回到 trampoline 的哨兵" 0xFFFFFFFF 区分开：那个是**正常**结局（guest 自己 ret 到栈哨兵）。
 inline constexpr std::uint32_t kLiftHalt = 0xFFFFFFFEu;
 
+// =====================================================================================
+// ★ S7（D53）：**动态入口** `lift_dyn(cpu, st, ea)` —— 查派发表 + **尾调用**进目标，
+//   ⛔ 不回宿主主循环。
+//   生成代码只在"目标运行期才知道"的站点发它（间接 `jmp` / 间接 `call reg|mem`）：
+//     · 间接 `jmp`：`%r = tail call i32 @lift_dyn(...)` + `ret i32 %r` ⇒ 真尾调用（LLVM 落成 jmp）；
+//     · 间接 `call`：同上，但 `%r == resume EA` 才在本宿主帧里继续（见 `lift_gen_emit.cpp` 的
+//       `emitCallReturnCheck`：guest `ret` 弹的就是我们压的那一格 ⇒ 判据就是"返回 EA == resume"）。
+//   ★ 返回 = 目标的返回值（= 下一个 guest EA）；目标不在派发表 ⇒ 响亮停并返回 `kLiftHalt`。
+//   ★ 声明**无属性**（⛔ `argmemonly` / `noalias` / `readnone`）：它经由 `cpu->mem` 读写 guest
+//     内存（"参数里**存的**指针"那一层），与 `lift_one` 同一条理由。
+//   ★ 实现里最后一步必须是**尾调用**（`[[clang::musttail]]`，见 .cpp）：否则每个 `lift_dyn`
+//     站点都多一个宿主栈帧 ⇒ 深递归会爆栈，"tail call 站点"这个读数也会失真。
+extern "C" std::uint32_t lift_dyn(void* cpu, LiftRegs* st, std::uint32_t ea);
+
 // 走进一个 shim（阶段 B 的 ④）。语义**全部**在 `lift_abi.cpp`，这里只钉契约：
 //   ① `liftRegsToCpu(*st, cpu)`（8 GPR + eflags 物化；`cpu.eip = stub_ea`，与解释器 dispatcher
 //      命中 shim 块时同一口径）—— 因为 `invoke` 第一条就读 `[esp]` 取返回地址、`ShimCall::u32`
@@ -99,6 +170,19 @@ inline constexpr std::uint32_t kLiftHalt = 0xFFFFFFFEu;
 // 失败面：桩 EA 不在注册表 / id 失效 ⇒ 走 `trapUnimplemented`（响亮停机）⇒ 返回 `kLiftHalt`。
 extern "C" std::uint32_t lift_shim(std::uint32_t stub_ea, LiftRegs* st, void* cpu);
 
+// ★ **AOT 专用入口**（S3 性能修，2026-11-15）：调用方（AOT 的派发循环）**已经把桩 EA 解析成了
+//   `ShimRegistry::id`**（槽位索引表），⇒ 这里不再反查（不 `cache->peek`、不 `idForStub`、
+//   不再拿 shims 锁）。语义与 `lift_shim` **逐字相同**的唯一差别就是"id 从哪来"：
+//   · `id_plus_one != 0` ⇒ id = `id_plus_one - 1`，**直接**当已解析的登记项用；
+//   · `id_plus_one == 0` ⇒ 不知道 ⇒ 走 `lift_shim` 的**同一条**反查路径（块缓存 → 注册表）。
+//     （0 是合法 id ⇒ 用 +1 编码"有 id"，⛔ 不要把 0 当"没有 id"。）
+//   ★ 为什么必须由调用方递 id（⛔ 不要改成"槽号 = id"）：id 是**注册序**，桩槽是**导入序 /
+//     发号序**（`shims.cpp` 的 bind/addRuntime），两者本来就不一定相等（夹具更明确不等）
+//     ⇒ `(stub_ea - 桩页) >> 2` 不是 id。判据：`lift-shim-stub-index`（`tests/shim_stub_index.cpp`）。
+//   ★ 解释器臂不调这个入口（它的 dispatcher 有块缓存，走 `peek` 那条），行为不变。
+extern "C" std::uint32_t lift_shim_id(std::uint32_t id_plus_one, std::uint32_t stub_ea, LiftRegs* st,
+                                      void* cpu);
+
 namespace lift {
 // 入口 = **resume EA**（复审裁决 1a）：`sub_436D00` 的两条 `call` 返回点 0x436D14 / 0x436D19
 // 都在函数中段 ⇒ 一个 `.ll` 导出**一个**函数，函数体开头按 `%ea` 分派到对应入口块。
@@ -108,6 +192,16 @@ namespace lift {
 //   ^cpu    只给 lift_note_write 用
 //   返回    下一个 guest EA；0xFFFFFFFF = 回 trampoline 的哨兵
 using LiftFn = std::uint32_t (*)(LiftRegs*, std::uint8_t*, std::uint32_t, void*);
+
+// ★ S7：`lift_dyn` 的派发表查找**唯一安装点**。运行期由执行臂 / 生成物夹具设成
+//   `lift::aot::lookup`（见 `aot_dispatch.h`）。
+//   ★ 为什么用函数指针而不是让 `lift_abi.cpp` 直接调 `aot::lookup`：`lift_abi.cpp` 属于
+//     `emulator-lift-runtime`（**所有**测试 exe 都链它），而派发表在 `aot_dispatch.cpp`
+//     （只有 AOT 臂 / 生成物夹具带）⇒ 直接依赖会给 ~100 个测试 exe 各加一个 undefined symbol。
+//   ★ 缺省 `nullptr` ⇒ `lift_dyn` 走**响亮停**（⛔ 不许静默当成"跑完了"）。
+//   ★ 解释器臂（`emulator-lift`）不装、也不需要：生成代码才用得到它。
+using LiftDynLookup = LiftFn (*)(std::uint32_t ea);
+extern LiftDynLookup liftDynLookup;
 
 void liftRegsToCpu(const LiftRegs&, X86&);  // 逐字段 8 行 + eflags，⛔ 不用 memcpy/offsetof 当正确性依据
 void liftCpuToRegs(const X86&, LiftRegs&);  // 同上

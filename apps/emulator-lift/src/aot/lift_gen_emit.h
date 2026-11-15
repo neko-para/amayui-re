@@ -140,18 +140,98 @@ struct GenClosureStats {
     std::uint64_t jumptab_live_roots = 0;      // 最终**仍在入口集**的第五类软根数（= 实际新增 unit 根）
 };
 
+// ★ S7（D53）：结构翻译的**输入形状**。判据在 `aot/lift_struct.*`（跑在 `lift-gen` 自己的
+//   Zydis 解码结果上），发射器**只消费结论**、⛔ 不在这里重新判定。
+struct GenStructure {
+    // ★ `--no-s7` 时 false：**整套** S7 lowering 关闭（宿主 call / lift_dyn / 返回判据），
+    //   回到 D55 之前的形状（每个 `call`/`ret`/间接跳转都回 trampoline）。
+    //   用途见 `lift_gen.cpp` 的 `Options::s7`：协议形状夹具（`lift-ir-gen-shim`）断言的是旧形状。
+    bool enabled = true;
+    std::set<std::uint32_t> structured_roots;  // 可一对一转译的单元根（`analyzeStructure` 的 fixpoint 结果）
+    // ★ 宿主语义钩子 EA（skip-logo / recovery）：指向它们的静态边**必须**留在派发边界
+    //   （`ret i32 <EA>`）—— 否则 S7 之后它们再也见不到 trampoline ⇒ 钩子静默失效。
+    //   见 `aot/aot_hook_ea.h` 的完整理由。
+    std::set<std::uint32_t> hook_eas;
+    std::uint32_t shim_begin = 0;  // shim 桩页（`GuestLayout::shim_page`）
+    std::uint32_t shim_end = 0;    // `shim_page + shim_slots*4`
+};
+
 struct GenEmitStats {
     std::uint64_t traps_unsupported = 0;  // 未实现 op 的 `llvm.trap`（T1c 起应恒为 0）
     std::uint64_t traps_bad = 0;          // 每个入口函数 switch 的 `bad:` 一个 `llvm.trap`
+    // ★ S3-a / S3-b 的读数（**生成期确定性计数**，⛔ 不是运行期埋点；只进 `.ll` 头部注释）。
+    //   口径见 `.tmp/aot/s3design/plan.md` §1.8：物化 / 逐位交付 / 融合读者 / 回退原因分桶。
+    //   ★ "融合读者"是本步的**收益指标**（⛔ 不用墙钟）。
+    std::uint64_t flags_materialize_calls = 0;   // `materialize(mask != 0)` 的调用次数
+    std::uint64_t flags_materialize_stores = 0;  // 其中**真的发了 IR** 的（有 lazy 位 ⇒ 一次 store）
+    std::uint64_t flags_deliver[6] = {0, 0, 0, 0, 0, 0};  // 按位 deliverBit 次数（cf..of）
+    std::uint64_t flags_kill = 0;                // killBit 次数（死位；S3-a/b 应恒 0）
+    std::uint64_t flags_fused = 0;               // 融合读者总数（jcc+setcc+cmovcc）
+    std::uint64_t flags_fused_jcc = 0;
+    std::uint64_t flags_fused_setcc = 0;
+    std::uint64_t flags_fused_cmovcc = 0;
+    std::uint64_t flags_fallback_pf = 0;          // 退化：cc ∈ {P,NP}（PF 不是一条 icmp）
+    std::uint64_t flags_fallback_multi = 0;       // 退化：需要的位有多个生产者
+    std::uint64_t flags_fallback_other_op = 0;    // 退化：最近写者不是 cmp/test
+    std::uint64_t flags_fallback_cross_block = 0;  // 退化：块内没有写者（跨块）
+    std::uint64_t flags_fallback_not_direct = 0;   // 退化：cmp 的 o/no（OF 不是一条 icmp）
+    std::uint64_t flags_fuse_missed = 0;           // 读数：后向扫描说不能融、前向其实能（应恒 0）
+    // ★ S3-c：块图上的 flags 活性读数（**生成期确定性计数**，⛔ 不是运行期埋点；只进 `.ll` 头部）。
+    //   口径见 `.tmp/aot/s3design/plan.md` §1.4 / §1.8：零 flags 块 / escape 分类 / 块尾物化位数分布。
+    std::uint64_t flags_blocks = 0;                // 参与活性计算的块数（= 发射的块数）
+    std::uint64_t flags_zero_blocks = 0;           // 零 flags 块：need_out=∅ 且块内没有活写
+    std::uint64_t flags_escape_blocks = 0;         // escape（need_out = ALL）的块数
+    std::uint64_t flags_escape_ret = 0;            // 其中末条是 `ret`（目标运行期才知道）
+    std::uint64_t flags_escape_indirect = 0;       // 其中末条是间接 `jmp`/`call`（目标运行期才知道）
+    std::uint64_t flags_escape_no_block = 0;       // 其中"边目标 ∉ 任何块"（shim 桩/合成 EA/dropped/…）
+    std::uint64_t flags_edge_no_block = 0;         // 静态边落空（逐条计；应 = 0 之外的都必须可解释）
+    std::uint64_t flags_need_in_all = 0;           // need_in == kAllBits 的块数（含屏障的块 + 其前驱）
+    std::uint64_t flags_need_out_all = 0;          // need_out == kAllBits 的块数
+    std::uint64_t flags_tail_bits[6] = {0, 0, 0, 0, 0, 0};  // 块尾 `need_out` 的按位分布（cf..of）
     // ★ T1c：单指令宿主原语 `lift_one` 的调用点（= 不再 inline 的那些指令，静态站点数）
     std::uint64_t lift_one_sites = 0;
     std::map<std::string, std::uint64_t> lift_one_by_op;  // 按 op 分组（读数用；std::map ⇒ 确定性）
+    // ★ 检查点 2 / D49：x87 抬进 IR 的读数（**生成期确定性计数**，⛔ 不是运行期埋点）
+    //   `x87_inline_sites` = 发射成普通 LLVM 浮点指令 / 状态机的站点数；
+    //   `x87_helper_sites` = 走 `@lift_x87_sem`（超越函数 + fprem/fscale/fxtract/fxam）的站点数。
+    //   两者之和 + `lift_one_by_op` 里的 x87 桶 = x87 全族的站点数（覆盖表的分母）。
+    std::uint64_t x87_inline_sites = 0;
+    std::uint64_t x87_helper_sites = 0;
+    bool used_x87_sem = false;
     bool used_tick = false;       // 发过 `@lift_tick`
     bool used_lift_one = false;   // 发过 `@lift_one`
     bool used_note_write = false;
     bool used_ctpop = false;
     bool used_cttz = false;
     bool used_ctlz = false;
+    // ★ 2026-11-15（本轮：`lift_one` 调用点 → 0）：停机原语 `@lift_stop` 的站点数
+    //   （`Hlt/Int3/Int/Other/Invalid` + `Div/Idiv` 的 `#DE`）。`used_lift_stop` 决定发不发 `declare`。
+    bool used_lift_stop = false;
+    std::uint64_t lift_stop_sites = 0;
+    // ★ 同轮：MMX/SSE / 串操作 / 乘除 的内联站点数（生成期确定性读数）
+    std::uint64_t packed_sites = 0;
+    std::uint64_t sse_sites = 0;
+    std::uint64_t string_sites = 0;
+    std::uint64_t imul_sites = 0;
+    std::uint64_t div_sites = 0;
+    std::uint64_t rotate_sites = 0;
+    std::uint64_t shxd_sites = 0;
+    std::uint64_t cmpxchg_sites = 0;
+    bool used_ldexp = false;
+    bool used_ctlz64 = false;
+    // ★ S7（D53）读数：**按 `.ll` 里实际发射的站点**分类（⛔ 不是估值）。口径见 `lift_struct.h`。
+    //   ret：在可结构化单元里 ⇒ 宿主 `ret`（返回给宿主调用者）；否则 ⇒ 回派发器（`ret i32`）。
+    std::uint64_t s7_ret_host = 0;
+    std::uint64_t s7_ret_dispatch = 0;
+    std::uint64_t s7_call_host = 0;       // 静态目标 + 可结构化 caller/callee ⇒ 宿主 `call`
+    std::uint64_t s7_call_lift_dyn = 0;   // 间接 `call reg/mem` ⇒ `lift_dyn` 尾调用
+    std::uint64_t s7_call_shim = 0;       // 目标 = shim 桩 ⇒ 保持今天的 `ret i32`（派发）
+    std::uint64_t s7_call_dispatch = 0;   // 其余 ⇒ 保持今天的 `ret i32`（派发）
+    std::uint64_t s7_jmp_tail = 0;        // 跨单元 `jmp` + 目标可结构化 ⇒ 尾调用
+    std::uint64_t s7_jmp_lift_dyn = 0;    // 间接 `jmp` ⇒ `lift_dyn` 尾调用
+    std::uint64_t s7_jmp_dispatch = 0;    // 跨单元 `jmp` + 目标不可结构化 ⇒ `ret i32`
+    std::uint64_t s7_tail_calls = 0;      // 所有 `tail call` 站点（jmp 尾调用 + lift_dyn）
+    bool used_lift_dyn = false;
 };
 
 // 把分区结果整份吐成 LLVM IR 文本（单模块）。
@@ -163,7 +243,7 @@ struct GenEmitStats {
 bool emitModule(const std::vector<GenComponent>& components,
                 const std::set<std::uint32_t>& entry_set,
                 const std::set<std::uint32_t>& dropped_blocks, const GenClosureStats& closure,
-                std::string* out, GenEmitStats* stats,
+                const GenStructure& structure, std::string* out, GenEmitStats* stats,
                 std::vector<GenUnsupported>* unsupported);
 
 }  // namespace aot

@@ -3,8 +3,12 @@
 // ★ 执行单位是 **basic block**，不是 `sub_`（README §2.2）：`jmp/call/ret` 只改 `eip` 并回 dispatcher。
 // ★ 块由**运行时解码**填充（`table[EA]`），本线默认**不产出任何生成代码**（D2）。
 // ★ guest 内存是独立地址空间（`GuestMemory`）；⛔ 宿主指针不进 guest 槽。
-// ★ x87 寄存器存 **softfloat extFloat80 的原位字节**（10 字节有效 + 6 字节填充）——
-//   这是 D3 的落点：算术走 vendor 的 SoftFloat，我们只负责栈 / tag / 控制字 / 条件码。
+// ★ x87 的实数模型 = **`double`**（D49，2026-11-15 用户裁决）：尾数 53 位、PC 字段无效、
+//   RC 只影响整数转换与 `frndint`。⛔ 不再是 SoftFloat 的 `extF80`（16 字节槽）。
+// ★ **这里的字节偏移是生成代码契约**：AOT 发射器把 x87 状态放进 `%cpu`（`X86*`），
+//   它用的偏移来自 `runtime/x87_layout.h`（唯一一份常量），由 `lift_abi.cpp` 的
+//   `static_assert(offsetof(...))` 钉住。⇒ **改本文件 X87State 的字段顺序 / 类型必须同步
+//   `x87_layout.h`**，否则构建当场红（`lift_abi.cpp` 那一组断言就是判据）。
 #pragma once
 
 #include <cstdint>
@@ -47,10 +51,14 @@ struct NativeOverride;
 void noteGuestWrite(BlockCache* cache, std::uint32_t ea, std::size_t n);
 
 // x87 状态（8 寄存器栈 + 控制/状态字 + TOP + tag）
+//
+// ★ **布局是生成代码契约**（见文件头最后一段 + `runtime/x87_layout.h`）：
+//     `regs` = 8 个 double（64 B, +0）· `control` u16 (+64) · `status` u16 (+66) ·
+//     `top` u8 (+68) · `tag` u16 (+70)。⚠ 字段顺序/类型一改就要同步 `x87_layout.h`。
 struct X87State {
-    // 每个寄存器 16 字节：softfloat `extFloat80_t`（signExp 2 字节 + significand 8 字节）原位放
-    std::uint8_t regs[8][16] = {};
-    std::uint16_t control = 0x037Fu;  // 缺省控制字（x87 reset 值）
+    // ★ D49：每个寄存器一个 **`double`**（不再是 SoftFloat `extFloat80_t` 的 16 字节原位字节）。
+    double regs[8] = {};
+    std::uint16_t control = 0x037Fu;  // 缺省控制字（x87 reset 值）；PC 位能读能写但**不生效**
     std::uint16_t status = 0;         // 状态字（异常位 + C0..C3 + TOP）
     std::uint8_t top = 0;             // 0..7
     std::uint16_t tag = 0xFFFFu;      // 每 2 位一个寄存器（8 个 = 16 位）：0=valid 1=zero 2=special 3=empty

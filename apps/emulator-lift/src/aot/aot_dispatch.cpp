@@ -193,10 +193,10 @@ unsigned tableBuildMaxProbes() { return g_buildMaxProbes; }
 
 LiftFn lookup(std::uint32_t ea, std::uint64_t* comparisons) {
     ++g_stats.lookups;
-    // ---- 首次使用 ⇒ 摊表（这一次分支在 6,200 万次查找里只有第一次为真，分支预测吃得下）----
-    if (!g_slotsReady) buildSlots();
     std::uint64_t probes = 0;
     LiftFn found = nullptr;
+    // ---- 首次使用 ⇒ 摊表（这一次分支在 6,200 万次查找里只有第一次为真，分支预测吃得下）----
+    if (!g_slotsReady) buildSlots();
     std::size_t h = slotOf(ea);
     for (;;) {
         const Slot& s = g_slots[h];
@@ -222,6 +222,27 @@ LiftFn lookup(std::uint32_t ea, std::uint64_t* comparisons) {
     return found;
 }
 
+// ★ S7：与 `lookup` **逐字相同**的查找，只是不记 trampoline 的派发账（改记 `lift_dyn_*`）。
+//   ⛔ 不要把它实现成"调 lookup 再减计数"：那会同时弄脏 max_probes / comparisons。
+LiftFn lookupUncounted(std::uint32_t ea) {
+    if (!g_slotsReady) buildSlots();
+    ++g_stats.lift_dyn_lookups;
+    std::size_t h = slotOf(ea);
+    LiftFn found = nullptr;
+    for (std::size_t probes = 1;; ++probes) {
+        const Slot& s = g_slots[h];
+        if (s.ea == ea) {
+            found = s.fn;
+            break;
+        }
+        if (s.ea == 0) break;
+        h = (h + 1) & kSlotMask;
+        if (probes >= kSlotCount) break;
+    }
+    if (found == nullptr) ++g_stats.lift_dyn_misses;
+    return found;
+}
+
 void resetDispatchStats() { g_stats = DispatchStats{}; }
 
 DispatchStats dispatchStats() { return g_stats; }
@@ -233,10 +254,12 @@ void printProbeLine(std::FILE* out) {
                            : 0.0;
     std::fprintf(out,
                  "probe     : probes=%llu avg=%.2f max=%llu | table cap=%zu load=%.3f entries=%zu "
-                 "build_max=%u\n",
+                 "build_max=%u | lift_dyn lookups=%llu misses=%llu\n",
                  static_cast<unsigned long long>(g_stats.comparisons), avg,
                  static_cast<unsigned long long>(g_stats.max_probes), tableCapacity(),
-                 tableLoadFactor(), kTableSize, g_buildMaxProbes);
+                 tableLoadFactor(), kTableSize, g_buildMaxProbes,
+                 static_cast<unsigned long long>(g_stats.lift_dyn_lookups),
+                 static_cast<unsigned long long>(g_stats.lift_dyn_misses));
 }
 
 }  // namespace aot

@@ -99,8 +99,10 @@
 #include <utility>
 #include <vector>
 
+#include "aot/aot_hook_ea.h"
 #include "aot/lift_aot_text.h"
 #include "aot/lift_gen_emit.h"
+#include "aot/lift_struct.h"
 #include "runtime/decode.h"
 #include "runtime/exec.h"
 #include "runtime/host_encoding.h"
@@ -165,6 +167,12 @@ struct Options {
     std::string dump_blocks;
     unsigned long max_components = 0;
     bool verbose = false;
+    // ★ S7（D53）：一对一结构翻译（`ret`→宿主 ret / `call`→宿主 call / 间接→`lift_dyn`）。
+    //   默认**开**；`--no-s7` 关（= 回到 D55 之前的形状：每个 `call`/`ret` 都回 trampoline）。
+    //   ★ 为什么需要这个开关：**协议形状**的差分夹具（`lift-ir-gen-shim` 的 `golden_gen.ll`）
+    //     断言的是"派发序列 / call 后 esp 与 [esp]"—— 那是 S7 **故意改变**的形状。让那些夹具
+    //     继续跑旧形状（它们自己的判据一字不改），S7 的形状由 `lift-s7-structured` + AOT 臂覆盖。
+    bool s7 = true;
 };
 
 void usage() {
@@ -183,6 +191,8 @@ void usage() {
         "  --close-jmptab        打开第五类软根（D26：可执行节跳表 dword → **尚未解码**的代码；会新增块）\n"
         "  --no-close-jmptab     关掉第五类软根（缺省 %s：见 kCloseJmptabByDefault 与 .tmp/aot/c2/readings.md）\n"
         "  --dump-blocks <file>  只读覆盖率读数：最终块的 `start EA / 字节长度 / 指令数`（升序文本；⛔ 不改 .ll / 派发表）\n"
+        "  --no-s7               关掉 S7 的一对一结构翻译（默认开）：回到 D55 之前的形状\n"
+        "                        （每个 call/ret 都回 trampoline；协议形状夹具用它）\n"
         "  --max-components N    分量数上限（超过 ⇒ 退出码 2；缺省不限）\n"
         "  --verbose             逐分量读数\n"
         "  --help\n"
@@ -1527,6 +1537,8 @@ int main(int argc, char** argv) {
             if (!needValue("--table", &opt.table)) return 2;
         } else if (a == "--no-close-calls") {
             opt.close_calls = false;
+        } else if (a == "--no-s7") {
+            opt.s7 = false;
         } else if (a == "--no-close-stores") {
             opt.close_stores = false;
         } else if (a == "--max-components") {
@@ -1862,6 +1874,38 @@ int main(int argc, char** argv) {
     dispatch_entries.insert(jump_table.added.begin(), jump_table.added.end());
 
     // ---- ④ 发射 ----
+    // ★ S7（D53）：先按函数判"能不能一对一结构翻译"（判据在 `aot/lift_struct.*`，跑在本进程
+    //   **自己的 Zydis 解码结果**上；⛔ 不搬 `.lst` 的那套普查）。
+    //   `entry_owner` = 派发入口 EA → 它所属单元的根（call 目标归属 / 传染边的输入）。
+    std::map<std::uint32_t, std::uint32_t> entry_owner;
+    for (const GenComponent& comp : components) {
+        for (const std::uint32_t ea : comp.entries) entry_owner.emplace(ea, comp.root);
+    }
+    const lift::aot::StructResult structure = lift::aot::analyzeStructure(
+        components, entry_owner, drops.dropped, layout.shim_page, layout.shim_page + layout.shim_slots * 4u);
+    // ★ S7：交给发射器的**结论**（判据在上面；发射器只消费）。
+    lift::aot::GenStructure gen_structure;
+    gen_structure.enabled = opt.s7;
+    gen_structure.structured_roots = opt.s7 ? structure.structured : std::set<std::uint32_t>{};
+    if (!opt.s7) {
+        std::fprintf(stderr, "lift-gen: [S7] --no-s7 ⇒ 结构翻译关闭（全部 call/ret 回 trampoline）\n");
+    }
+    gen_structure.shim_begin = layout.shim_page;
+    gen_structure.shim_end = layout.shim_page + layout.shim_slots * 4u;
+    // ★ 宿主钩子 EA 只在这一份模块**真的能到达它**时才有意义（小根集模块，如 x87 差分 /
+    //   golden，根本不含 WinMain ⇒ 那里没有钩子点）。判据 = "它在入口集里"（能在派发表里查到）：
+    //   · 在入口集 ⇒ 指向它的边发 `ret i32 <EA>`（trampoline 跑钩子后再派发回来）；
+    //   · 不在入口集 ⇒ 这一份模块里不存在"钩子必须生效"的路径 ⇒ 不列（⛔ 不发 `ret i32`：
+    //     那会在 trampoline 里响亮停）。全量模块（`aot/closure.txt`）两个钩子都在入口集。
+    for (const std::uint32_t hook : lift::aot::kHostHookEas) {
+        if (entry_owner.count(hook) != 0) {
+            gen_structure.hook_eas.insert(hook);
+        } else {
+            std::fprintf(stderr,
+                         "lift-gen: [S7] 宿主钩子 EA %08X 不在本模块的入口集（小根集模块）⇒ 不列检查点\n",
+                         hook);
+        }
+    }
     std::string ir;
     GenEmitStats stats;
     std::vector<GenUnsupported> unsupported;
@@ -1922,10 +1966,57 @@ int main(int argc, char** argv) {
     closure.jump_table_added = jump_table.added.size();
     closure.jump_table_skipped = jump_table.skipped.size();
     closure.jump_table_unclaimed = jump_table.unclaimed.size();
-    if (!lift::aot::emitModule(components, all_entries, drops.dropped, closure, &ir, &stats,
-                               &unsupported)) {
+    if (!lift::aot::emitModule(components, all_entries, drops.dropped, closure, gen_structure, &ir,
+                               &stats, &unsupported)) {
         std::fprintf(stderr, "emulator-lift-gen: 发射器内部错误\n");
         return 1;
+    }
+    // ★ S7（D53）的覆盖率读数（stderr + `.ll` 头部都有；⛔ 只进读数、不进判据）。
+    {
+        const lift::aot::StructStats& s7 = structure.stats;
+        std::fprintf(stderr,
+                     "lift-gen: [S7 判据] 单元根=%llu 自身通过=%llu 可结构化=%llu（自身降级=%llu · "
+                     "调用图传染=%llu）· 首因 可变长栈=%llu 写返回槽=%llu 间接call=%llu 动态返回=%llu "
+                     "表外callee=%llu\n",
+                     static_cast<unsigned long long>(s7.functions),
+                     static_cast<unsigned long long>(s7.self_ok),
+                     static_cast<unsigned long long>(s7.structured),
+                     static_cast<unsigned long long>(s7.downgraded_self),
+                     static_cast<unsigned long long>(s7.downgraded_callee),
+                     static_cast<unsigned long long>(s7.reason_varstack),
+                     static_cast<unsigned long long>(s7.reason_return_slot),
+                     static_cast<unsigned long long>(s7.reason_indirect_call),
+                     static_cast<unsigned long long>(s7.reason_dynamic_ret),
+                     static_cast<unsigned long long>(s7.reason_unknown_callee));
+        std::fprintf(stderr,
+                     "lift-gen: [S7 判据/站点账] ret=%llu（可结构化单元里=%llu）· call=%llu（静态=%llu "
+                     "间接=%llu）⇒ 宿主call=%llu lift_dyn=%llu shim派发=%llu 其余派发=%llu · jmp=%llu"
+                     "（静态=%llu 间接=%llu）\n",
+                     static_cast<unsigned long long>(s7.ret_sites),
+                     static_cast<unsigned long long>(s7.ret_sites_structured),
+                     static_cast<unsigned long long>(s7.call_sites),
+                     static_cast<unsigned long long>(s7.call_sites_static),
+                     static_cast<unsigned long long>(s7.call_sites_indirect),
+                     static_cast<unsigned long long>(s7.call_sites_host),
+                     static_cast<unsigned long long>(s7.call_sites_lift_dyn),
+                     static_cast<unsigned long long>(s7.call_sites_shim),
+                     static_cast<unsigned long long>(s7.call_sites_dispatch),
+                     static_cast<unsigned long long>(s7.jmp_sites),
+                     static_cast<unsigned long long>(s7.jmp_sites_static),
+                     static_cast<unsigned long long>(s7.jmp_sites_indirect));
+        // 降级清单（EA + 原因 + 首因站点 + 传染源）。**全量**打 stderr：它是裁决的可复核面。
+        std::size_t printed = 0;
+        for (const auto& kv : structure.reason) {
+            const auto eit = structure.reason_ea.find(kv.first);
+            const auto cit = structure.contagious_from.find(kv.first);
+            std::fprintf(stderr, "lift-gen: [S7 降级] %08X 原因=%s 站点=%08X%s%08X\n", kv.first,
+                         lift::aot::structReasonName(kv.second),
+                         eit != structure.reason_ea.end() ? eit->second : 0u,
+                         cit != structure.contagious_from.end() ? " 传染自=" : "",
+                         cit != structure.contagious_from.end() ? cit->second : 0u);
+            ++printed;
+        }
+        std::fprintf(stderr, "lift-gen: [S7 降级] 合计 %zu 个单元根不可结构化（逐条见上）\n", printed);
     }
 
     // 计数（父级要求的读数）

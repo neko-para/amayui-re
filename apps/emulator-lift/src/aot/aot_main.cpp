@@ -63,6 +63,11 @@ void usage() {
         "                      ★ `sub_48B090` 需要嵌套 guest 执行器 ⇒ 本臂**不装**它（只计数）\n"
         "  --audio off|virtual|sdl  音频后端（本臂**只实现 off**：没有音频设备 / 喂料线程）\n"
         "  --dump-frame <path> 每次 Present 导出一份 guest 后缓冲 BMP（{frame} = 4 位帧号）\n"
+        "  --profile           采样式内部 profile（**缺省关**）：每帧时间戳 + 派发 / lift_one / shim\n"
+        "                      归因 + 机器频率校准；采样率 = dispatch 1/4096、lift_one 1/1024、\n"
+        "                      shim 1/64（每个 shim 各自的调用序号；也写在输出头）。★ 采样本身会\n"
+        "                      轻微影响时序 ⇒ 性能结论请用**关档**跑（⛔ 不拿 --profile 的墙钟当结论）；\n"
+        "                      六项判据开/关一致\n"
         "\n"
         "★ 呈现档位（口径与 emulator-lift 相同；缺省 headless）：\n"
         "  --present headless|window|auto\n"
@@ -225,6 +230,9 @@ int main(int argc, char** argv) {
         } else if (a == "--dump-frame") {
             // ★ 与 `src/main.cpp:1157` 同一个字段（`cpu.shim.frame_dump`）；D3D9 Present 消费。
             if (!needValue("--dump-frame", &frame_dump)) return 2;
+        } else if (a == "--profile") {
+            // ★ 采样式内部 profile（缺省关；采样率与三条硬口径见 `aot_host.h` 的 `AotProfile`）。
+            run_opts.profile = true;
         } else if (a == "--present") {
             if (!needValue("--present", &present_mode)) return 2;
         } else if (a == "--present-driver") {

@@ -29,7 +29,7 @@
 //      `n` 必须是 `ns-edi`、`15*n` 也一起变 ⇒ 不在这里放宽。
 //   G5 源跨度 `4*ns` 已提交（`[eax+edi*4]`，edi ∈ [0,ns)）。
 //   G6 目标跨度 `2*ch*(n-1)+2` 已提交（**不是** `2*ch*n`：最后一次 `lea` 之后不再写）。
-//   G7 `ST(0)` 的 ext80 位型 == `x87FromDouble(32767.0)` ∧ 空闲槽 ≥ 2（段内每样本还有一次 `fld`）。
+//   G7 `ST(0)` == 32767.0（D49：ST(0) 就是 double）∧ 空闲槽 ≥ 2（段内每样本还有一次 `fld`）。
 //   G8 `[0x55F2E8] == 0` 且已提交（= `__ftol2` 走 x87 支而不是 `cvttsd2si`；与 `native_crt.cpp` 同判据）。
 //   G9 栈 scratch `[align16(esp_seg-0x28), +0x20)` 已提交：那次 `call __ftol2_sse` 会压返回地址
 //      ⇒ `__ftol2` 自己入口的 esp = `esp_seg-4`，它的 `frame = (esp-0x24)&~15`
@@ -42,17 +42,15 @@
 //
 // ★ **⛔ 不调 `nativeFtol2Sse`**：它有 6 个 per-value decline 出口（`FtolWhy`）⇒ 要么两遍（先探
 //   再算）、要么在段内回退一半；而"两遍"在 src/dst 重叠时与"读一条写一条"分叉。这里**一遍、升序、
-//   读一条写一条**，算术与解释器**逐指令同源**（`x87MemToReg` → `x87Mul` → `x87ToI64` +
-//   `x87RegToMem`，与 `exec_fpu.cpp` / `nativeFtol2Sse` 是同一批桥函数）：
-//     · 乘数 = 32767.0（`.lst` `0x5291B8 dq 32767.0`；⛔ 不是 32768）。乘积在 ext80 里**恒精确**
-//       （≤ 24+15 位有效位）⇒ `fmul` 不置 PE；但**不**用"`double p = f*32767.0` 再 `x87FromDouble`"
-//       那个更短的形式：那句"恒精确"只在控制字精度 ≥ 53 位时成立，而 guest 里有 94 条 `fldcw`
-//       （PC=24 时 guest 的 `fmul` 会舍入 ⇒ 两条臂分叉）。`x87Mul` 让控制字 / NaN 载荷 / sNaN
-//       语义全由 SoftFloat 给 —— 与解释器同一条路。
-//     · `x87ToI64(truncate)` = `__ftol2` 的 `fistp` 那条路（解释器口径）；
-//     · **必须**做一次 `fst dword` 等价转换（`x87RegToMem(prod, scratch, 4)`）：它同时给出
-//       PE/UE/OE（**PE 只来自 ftol2 的 f32 转换**——省掉这一步状态字必红）与 guest 可见的那
-//       4 字节 `[E+18h,E+1Ch)`。
+//   读一条写一条**，算术与解释器**逐指令同源**（`x87LoadMem` → `x87Mul` → `x87ToI64Trunc` +
+//   `x87StoreMem`，与 `exec_fpu.cpp` / `nativeFtol2Sse` 是同一批桥函数）：
+//     · 乘数 = 32767.0（`.lst` `0x5291B8 dq 32767.0`；⛔ 不是 32768）。★ D49 之后 x87 的
+//       `fmul` 就是 double 乘法（PC 不生效、PE 不追）⇒ 必须走 `x87Mul` 而不是自己写 `f * 32767.0`：
+//       那样做的**唯一**理由是"异常位与解释器同源"（OE 由模型给），值本身两者相同。
+//     · `x87ToI64Trunc` = `__ftol2` 的 `fistp` 那条路（解释器口径）；
+//     · **必须**做一次 `fst dword` 等价转换（`x87StoreMem(prod, scratch, 4)`）：它给出 guest
+//       可见的那 4 字节 `[E+18h,E+1Ch)`。⚠ D49 之后它**不再置** PE/UE（模型不追 inexact /
+//       underflow；那一档随 D49 作废）。
 //     · x87 净不变：段外一次 `fld dbl`（ST(0)=32767.0）+ 段内每样本一次 `fld dword` + ftol2 弹回
 //       ⇒ 本实现不 push/pop（净效果相同；被用的那个物理槽在入口就是 free ⇒ tag 位也不变）。
 // ★ `replaced_insns = 15*n + n_clip_hi + 2*n_clip_lo`（**不是** `15*n + n_clip`；逐条数见头文件）。
@@ -74,7 +72,7 @@ namespace {
 // ★ G7 用**字面量**校验 guest 的 `ST(0)`（那是 guest 自己压进来的值），这一行是"乘数"这个参数本身；
 //   两者语义上必须是同一个数，但**分开写**是有意的：变异测试要能只改乘数（G7 仍然通过 ⇒ 值表差分
 //   才会红），而不是让 G7 把变异当成"形状不对"而 Declined（那红得没意义）。
-// ★ 这是**唯一的乘数**：`x87FromDouble(kPcmScale, scale80)` 之后每样本 `x87Mul(sample80, scale80)`。
+// ★ 这是**唯一的乘数**：每样本 `x87Mul(sample, kPcmScale)`。
 constexpr double kPcmScale = 32767.0;
 
 // `[0x55F2E8]`：CRT 的 x87→SSE 选路开关（唯一写者 `0x4F1117`）。非 0 ⇒ 真机走 `cvttsd2si` ⇒ 交解释器。
@@ -127,15 +125,12 @@ BlockOverrideOutcome nativePcm48D767(X86& cpu, GuestMemory& mem, std::uint64_t* 
         return BlockOverrideOutcome::Declined;
     if (!mem.committed(dst, static_cast<std::size_t>(dst_bytes))) return BlockOverrideOutcome::Declined;
 
-    // G7 `ST(0)` 的 ext80 位型 == 32767.0 ∧ 空闲槽 ≥ 2。
+    // G7 `ST(0)` == 32767.0 ∧ 空闲槽 ≥ 2。
     //   ★ 判据用**物理槽**（`empty(phys(0))`，⛔ 不是 `empty(0)`）。
-    //   ★ `x87FromDouble(32767.0)` 是**精确**转换（无舍入 ⇒ 不置任何异常位），所以它放在闸门里
-    //     不会给 `fpu.status` 留副作用。
+    //   ★ D49 之后 ST(0) 就是一个 double ⇒ 直接比值（不再比 ext80 的 10 字节位型）。
     if (cpu.fpu.empty(cpu.fpu.phys(0))) return BlockOverrideOutcome::Declined;
     {
-        Ext80 want;
-        x87FromDouble(32767.0, want);
-        if (std::memcmp(cpu.fpu.regs[cpu.fpu.phys(0)], want, 10) != 0) return BlockOverrideOutcome::Declined;
+        if (cpu.fpu.regs[cpu.fpu.phys(0)] != 32767.0) return BlockOverrideOutcome::Declined;
         unsigned used = 0;
         for (int i = 0; i < 8; ++i)
             if (!cpu.fpu.empty(i)) ++used;
@@ -156,17 +151,10 @@ BlockOverrideOutcome nativePcm48D767(X86& cpu, GuestMemory& mem, std::uint64_t* 
         return BlockOverrideOutcome::Declined;
 
     // ── ② 从这里开始不再回退 ────────────────────────────────────────────────────────────
-    // 解释器在每条 FP 指令之前都做同一件事（`exec_fpu.cpp`）；段内不改控制字 ⇒ 做一次就够。
-    // ★ 算术**逐指令复刻解释器**（`fld` → `fmul` → `__ftol2`）：`x87MemToReg` / `x87Mul` /
-    //   `x87ToI64` / `x87RegToMem` 与 `exec_fpu.cpp` + `nativeFtol2Sse` 是**同一批**桥函数。
-    //   为什么不用"`double p = f*32767.0` 再 `x87FromDouble`"那个更短的形式：乘积虽然恒精确
-    //   （≤ 24+15 位有效位），但那句"恒精确"只在**控制字精度 ≥ 53 位**时成立；guest 里有 94 条
-    //   `fldcw`（`0x4046B2` / `0x408206` / `0x44A6DB` …），PC=24（单精度）时 guest 的 `fmul` 会
-    //   把乘积舍入到 24 位 ⇒ 两条臂分叉。走 `x87Mul` 后控制字 / NaN 载荷 / sNaN 语义全部由
-    //   SoftFloat 给，和解释器**同一条路**（乘数常量见 `kPcmScale`）。
-    x87ApplyControlWord(cpu.fpu.control);
-    Ext80 scale80;                    // = 段外 `0x48D738 fld dbl_5291B8`（G7 已核 guest 的 ST(0) 就是它）
-    x87FromDouble(kPcmScale, scale80);
+    // ★ 算术**逐指令复刻解释器**（`fld` → `fmul` → `__ftol2`）：`x87LoadMem` / `x87Mul` /
+    //   `x87ToI64Trunc` / `x87StoreMem` 与 `exec_fpu.cpp` + `nativeFtol2Sse` 是**同一批**桥函数。
+    //   ⚠ D49 之后 PC 位不生效 ⇒ 乘积恒按 double 语义算（旧注释里"PC=24 时 guest 的 fmul 会
+    //     舍入到 24 位"那条**不再成立**；两臂之所以仍然一致，是因为解释器也忽略 PC）。
 
     const std::uint8_t* s = mem.host(src);
     std::uint8_t* d = mem.host(dst);
@@ -179,15 +167,13 @@ BlockOverrideOutcome nativePcm48D767(X86& cpu, GuestMemory& mem, std::uint64_t* 
     std::uint32_t last_edx = 0;  // 末个 ftol2 的高 32 位（死值）
 
     for (std::int32_t i = 0; i < ns; ++i) {
-        // `0x48D76D fld dword ptr [eax+edi*4]` + `0x48D770 fmul st, st(1)`。
-        Ext80 sample80;
-        x87MemToReg(s + 4ull * static_cast<std::uint32_t>(i), sample80, 4);
-        Ext80 prod;
-        x87Mul(sample80, scale80, prod);
+        // `0x48D76D fld dword ptr [eax+edi*4]` + `0x48D770 fmul st, st(1)`（ST(1) 就是 `dbl_5291B8`）。
+        const X87Val sample = x87LoadMem(s + 4ull * static_cast<std::uint32_t>(i), 4);
+        const X87Val prod = x87Mul(sample, kPcmScale);
         // `call __ftol2_sse`：EDX:EAX = 64 位截断值（解释器口径；见 nativeFtol2Sse）。
-        const std::int64_t v = x87ToI64(prod, /*truncate=*/true);
-        // `0x4E8301 fst dword [esp+18h]` 的等价：PE/UE/OE + guest 可见的 4 字节。
-        x87RegToMem(prod, ftol_scratch, 4);
+        const std::int64_t v = x87ToI64Trunc(prod);
+        // `0x4E8301 fst dword [esp+18h]` 的等价：guest 可见的 4 字节（异常位由 `x87Mul` 给）。
+        x87StoreMem(prod, ftol_scratch, 4);
         last_edx = static_cast<std::uint32_t>(static_cast<std::uint64_t>(v) >> 32);
         // 低 32 位**有符号**比较（两条独立判据：0x48D777 `jle` / 0x48D86B `jge`）。
         std::int32_t ax = static_cast<std::int32_t>(static_cast<std::uint32_t>(v));
@@ -223,7 +209,9 @@ BlockOverrideOutcome nativePcm48D767(X86& cpu, GuestMemory& mem, std::uint64_t* 
         if (f & 4u) st |= 0x0008u;   // OE（overflow）
         if (f & 8u) st |= 0x0004u;   // ZE（divide-by-zero）
         if (f & 16u) st |= 0x0001u;  // IE（invalid）
-        if (st & 0x003Fu) st |= 0x0080u;  // ES（解释器同一条简化：有粘性位就汇总）
+        // ★ 任务 0 / D55：**ES（异常汇总）= 任一异常位非零**（与解释器 `syncStatus` 同一条；
+        //   ⛔ 漏它 ⇒ 这一支的末态少 0x0080 ⇒ `native-override-assets` 的 `pcm/value-table` 红）。
+        if ((st & 0x003Fu) != 0) st |= 0x0080u;
         st = static_cast<std::uint16_t>((st & ~0x3800u) | ((cpu.fpu.top & 7u) << 11));  // TOP
         cpu.fpu.status = st;
     }

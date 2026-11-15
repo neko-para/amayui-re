@@ -57,6 +57,14 @@ std::size_t tableSize();
 //   槽里的 EA；⛔ 那是"查找成本"的读数，不是二分那种 log2 比较）。
 LiftFn lookup(std::uint32_t ea, std::uint64_t* comparisons);
 
+// ★ S7（D53）：**同一条查找路径、但不计 trampoline 的派发账**。给生成代码的 `lift_dyn` 用
+//   （间接 `jmp` / `call reg|mem` 的尾调用）：那一次查找**不是**一次派发（没有回主循环），
+//   若记进 `DispatchStats` 会把 `table lookups/misses` 的口径弄脏（间接跳转的目标很大一类是
+//   shim 桩 EA ⇒ 每次都会记一个 "miss"，而旧口径的 `misses=0` 是六项语义指纹之一）。
+//   ⇒ 它只记自己的 `lift_dyn_lookups`（读数，见 `DispatchStats`）。
+//   ⚠ 语义与 `lookup` **逐字相同**（同一个哈希槽数组、同一套探测、同一份 miss 语义）。
+LiftFn lookupUncounted(std::uint32_t ea);
+
 // ---- 哈希表的几何（读数用；⛔ 不是调用方该依赖的实现细节）----
 std::size_t tableCapacity();          // 槽数（2 的幂；没有生成物时 0）
 double tableLoadFactor();             // 表长 / 槽数（没有生成物时 0）
@@ -69,6 +77,10 @@ struct DispatchStats {
     std::uint64_t misses = 0;       // 查不到（响亮停机的那一次也计入）
     std::uint64_t comparisons = 0;  // 关键字比较次数总和（哈希表：= 探测次数总和）
     std::uint64_t max_probes = 0;   // 单次查找的最坏探测次数（**运行期实测**，与建表那个分开）
+    // ★ S7：`lift_dyn`（间接 jmp / 间接 call 的尾调用）的查找次数 —— **单独一档**，不混进上面
+    //   那四个数（理由见 `lookupUncounted` 的注释）。
+    std::uint64_t lift_dyn_lookups = 0;
+    std::uint64_t lift_dyn_misses = 0;  // 其中"不是生成函数"的（绝大多数是 shim 桩 EA，交回 trampoline）
 };
 void resetDispatchStats();
 DispatchStats dispatchStats();

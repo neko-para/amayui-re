@@ -38,11 +38,15 @@
 //     这一项**只计数**（`override : … skipped-nested=`），⛔ 不为了它去开嵌套执行器。
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
+#include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "aot/aot_hook_ea.h"
 #include "corpus/lst_index.h"
 #include "runtime/audio.h"
 #include "runtime/clock.h"
@@ -96,14 +100,10 @@ const char* aotStopName(AotStop r);
 bool aotStopOk(AotStop r);
 
 // ★ `--skip-logo` 的两个 guest 事实（锚 **EA**，不锚行号；只对 D1 pin 住的那一份 exe 成立）：
-//   · 钩子点 = `0x004BAA33` —— `call sub_415640` 的 **resume EA**（生成器把每条 call 的下一条 EA
-//     加进入口集 ⇒ 它在派发表里）。⚠ **不能**照抄解释器的 `0x004BAA37`：那只是同一函数内部的块
-//     （`bb_4BAA37` 由 `bb_4BAA33` 的 `jmp short` 直接并入），派发表里**没有**它 ⇒ 挂那里永不命中。
-//     两点之间只有一条 `jmp short`（无语义）⇒ 在这里写那一格与解释器在 `0x4BAA37` 写等价，
-//     且同样发生在 `0x4BAA3A` 的 `mov ds:dword_55E1BC, eax`（指针发布）**之前**。
+//   · 钩子点 = `kSkipLogoHookEa`（`aot/aot_hook_ea.h` —— **唯一一份**常量；S7 之后生成器也读它，
+//     以保证这个 EA 留在派发边界上，见那份头注）。
 //   · 字段 = `T_Command + 0x5EB5C`（解释器 `machine.cpp:38-39` 的 `kShowLogoInitEa` /
 //     `kShowLogoFieldOffset` 的**同一个字段**，只换钩子 EA）。
-constexpr std::uint32_t kSkipLogoHookEa = 0x004BAA33u;
 constexpr std::uint32_t kSkipLogoFieldOffset = 0x0005EB5Cu;
 
 struct AotRunOptions {
@@ -115,6 +115,9 @@ struct AotRunOptions {
     //   （`machine.cpp:1377-1401`；对同一份 exe pin 住的那一格 `T_Command + 0x5EB5C` 写 0）。
     //   ⛔ 不跳过 boot / 不改 eip / 不改任何寄存器。AOT 的钩子点是 `0x004BAA33`（见 aot_run.cpp）。
     bool skip_logo = false;
+    // ★ `--profile`：**缺省关**。关着时执行循环里连一个计数器都不加（见 `AotProfile` 的三条硬口径）。
+    //   开着的全部产物都落在 stdout 末尾的 `=== profile (sampling: …) ===` 块 + 每帧一行 `frame-ms:`。
+    bool profile = false;
 };
 
 struct AotRunResult {
@@ -138,6 +141,88 @@ struct AotRunResult {
     std::uint64_t ov_not_call = 0;
     bool ok() const { return aotStopOk(reason); }
 };
+
+// =====================================================================================
+// 采样式内部 profile（`--profile`；**缺省关 ⇒ 执行循环里连一个计数器都不加**）
+//
+// ★ 三条硬口径（父级任务书）：
+//   ① **默认关闭**：没有 `--profile` 时行为 / 产物 / 输出**逐字不变**（新增的只有 `--help` 那一行）。
+//   ② **采样，不逐次**：三个固定 stride（下面常量），⛔ 不在热路径上对每一次调用计时。
+//      为什么必须采样：`lift_one` 单次 70–150 ns，而两次 `steady_clock::now()` 本身就是 ~40 ns
+//      ⇒ 逐次计时是与被测对象同量级的仪器。1/1024 把它压到 ~0.1%。
+//   ③ **不改任何语义**：只读计数器；`frames` / `stop` / `misses` / arena / 末帧 hash / `insns`
+//      在开/关两档必须逐位一致（父级验证 3 就是拿这两档对账）。
+//
+// ★ 读数的四个落点（都在 stdout 里、都有固定前缀，`Select-String` 能抓）：
+//   `frame-ms:`（每帧一行，Present 时打）/ `dispatch-top:`（top-20）/
+//   `liftone:`（op 汇总 + top-20 (op,EA)）/ `shim:`（top-15）/ `freq:`（机器频率校准）。
+// =====================================================================================
+struct AotProfile {
+    // ---- 采样率（固定间隔；**会打进输出头**，⛔ 不把数字抄进散文）----
+    static constexpr std::uint64_t kDispatchStride = 4096;  // 每 N 次派发采样一次（自计时间隔法）
+    // ★ `lift_one` 的 stride **只有一份**：`lift::kLiftOneProfileStride`（`runtime/lift_abi.h`）——
+    //   计数器在 `lift_abi.cpp` 里（`lift_one` 是生成物直接 call 的，宿主看不见），这里只引用它。
+    static constexpr std::uint64_t kLiftOneStride = lift::kLiftOneProfileStride;
+    // ★ shim 的 stride 是**每个 shim 各自**的调用序号（用 `ShimDef::call_count`），不是全体调用数。
+    //   为什么不用 1/1024：全体 1/1024 下，调用数只有几百的 shim（`D3D9::Present` = 300 次）拿到
+    //   0–1 个样本 ⇒ "总量"会整块失真（实测 on1 恰好 1 个样本、3.8 ms/次 ⇒ 折算 1.15 s，
+    //   而 on2 里它连 top-15 都没进）。按每个 shim 自己的序号采样后，Present 也能拿到 ~5 个样本。
+    //   代价：总样本 ≈ Σ调用/64 ≈ 3.5k 次取时（< 0.2 ms）。
+    static constexpr std::uint64_t kShimStride = 64;
+
+    bool on = false;
+    // ---- 机器频率校准（cycle → ms）----
+    // ★ `tsc_ok` = 这个平台能读 TSC。TSC 是**恒定速率**（一般 = 标称基频）⇒ 即使核心降频，
+    //   `ticks / ghz` 仍是墙钟时间；这就是为什么必须实测而不是硬编码 3.2 GHz。
+    bool tsc_ok = false;
+    double ghz = 0.0;           // 实测 TSC 频率（GHz）；0 = 不可用
+    double calib_ms = 0.0;      // 校准忙循环的墙钟长度（ms）
+    std::uint64_t calib_ticks = 0;  // 校准忙循环里走过的 ticks
+    // 仪器自身的一次取时开销（ns；实测，不猜）—— 读数时必须知道它是不是与 `lift_one` 同量级。
+    double clock_read_ns = 0.0;
+    // 本轮 `run()` 的墙钟长度（ms；`run()` 收口时写）—— 只给"占墙钟 x%"用。
+    double wall_ms = 0.0;
+    // ---- ① 每帧时间戳 ----
+    std::uint64_t frame_lines = 0;
+    // ---- ② 派发归因（自计时间隔法：区间消耗记到**该次采样的入口 EA** 上）----
+    std::uint64_t dispatch_calls = 0;    // 本轮派发总次数（含 shim；只作读数，⛔ 不参与语义）
+    std::uint64_t dispatch_seen = 0;     // 距上次采样的派发计数（到 stride 就清零）
+    std::uint64_t dispatch_samples = 0;  // 真正取到的样本数（首个样本只立基线）
+    std::uint64_t dispatch_last = 0;     // 上一次采样的 ticks
+    std::uint64_t dispatch_total = 0;    // 采样区间累计（ticks；`tsc_ok == false` 时是 ns）
+    // ea → {样本数, ticks}
+    std::map<std::uint32_t, std::pair<std::uint64_t, std::uint64_t>> dispatch_by_ea;
+    // ---- ③ lift_one 归因（按 EA 聚合；一个 EA 只对应一条静态指令 ⇒ op 由样本带入）----
+    struct LiftOneStat {
+        std::uint64_t n = 0;    // 样本数
+        std::uint64_t ns = 0;   // 采样到的单次耗时之和
+        std::string op;         // 该 EA 的 op 名（`opName(in.op)`；首次样本记下）
+    };
+    std::uint64_t liftone_samples = 0;
+    std::map<std::uint32_t, LiftOneStat> liftone_by_ea;
+    // ★ 四桶归因（A 换入 / B 解码 / C 执行 / D 回读）：**按 op** 累计（样本数与 `liftone_samples` 同一个集合）。
+    //   ⛔ 只用于归因（"慢在哪一段"），不进任何判据；每段含一次取时（~20 ns 地板，见 `clock_read_ns`）。
+    static constexpr int kLiftOnePhaseCount = 4;
+    std::map<std::string, std::array<std::uint64_t, kLiftOnePhaseCount>> liftone_phase_by_op;
+    std::array<std::uint64_t, kLiftOnePhaseCount> liftone_phase_total{};
+    // ---- ④ shim 归因（**总量**，不是最慢一次 ⇒ 与解释器 `shimmax` 不同）----
+    struct ShimStat {
+        std::uint64_t n = 0;      // 样本数
+        std::uint64_t ticks = 0;  // 采样到的耗时之和（TSC ticks；非 TSC 平台是 ns）
+    };
+    std::uint64_t shim_seen = 0;  // 预留（当前实现按每个 shim 自己的 `call_count` 采样，不用这个）
+    // "module!name" → {样本数, ticks}。总调用数从 `ShimRegistry` 的 `call_count` 读（⛔ 不逐次记账）。
+    std::map<std::string, ShimStat> shim_by_name;
+
+    void reset() { *this = AotProfile{}; }
+};
+
+// 平台取时：x86 = TSC ticks，其它平台 = `steady_clock` 纳秒（口径由 `AotProfile::tsc_ok` 定）。
+std::uint64_t profileTicks();
+// "自进程启动到现在"的毫秒（Windows 用 `GetProcessTimes`，其它平台退到程序静态初始化时刻）。
+double profileProcessMs();
+// ticks → ms（`tsc_ok == false` 时 ticks 就是 ns）。
+double profileTicksToMs(std::uint64_t ticks, const AotProfile& p);
 
 // =====================================================================================
 class AotHost final : public HostServices {
@@ -201,7 +286,22 @@ public:
     // ⑤ 读数（bring-up 结束时的"起点"快照）。
     void printReadout(std::FILE* out) const;
     // ⑥ 跑完的摘要（停因 / EA / insns / frames / 派发表读数）。
+    //   ★ `--profile` 的整块读数（`=== profile (sampling: …) ===` + 四张表 + `freq:`）也由它在
+    //     **最后**打印 —— 这就是"落 stdout 末尾（进程退出前）"的落点（`aot_main.cpp` 在它之后
+    //     只写 stderr / 返回退出码）。
     void printRunSummary(const AotRunResult& r, std::FILE* out) const;
+
+    // ---- 采样式内部 profile（`--profile`）----
+    // `run()` 开头调一次：清空上一轮的账 + 跑机器频率校准（忙循环，只在开档时）。
+    void beginProfile();
+    // 关档时调一次：摘掉 `lift_one` 的采样钩子（⛔ 不给"上一轮开过"留一条还在计时的缝）。
+    void stopProfile();
+    // `lift_one` 采样钩子的落点（转发见 `aot_host.cpp` 的 `aotLiftOneProfileHook`）。
+    void noteProfileLiftOne(const lift::LiftOneProfileSample& s);
+    // 表块（`prof_.on == false` 时**一行都不打** ⇒ 关档逐字不变）。
+    void printProfile(std::FILE* out) const;
+    AotProfile& profile() { return prof_; }
+    const AotProfile& profile() const { return prof_; }
 
     // ---- 读数取用 ----
     const PeImage& image() const { return image_; }
@@ -267,7 +367,10 @@ private:
     // SEH 派发（拆自 `machine.cpp:2208-2280` 的 `Machine::pumpSeh`；影子栈部分不要 —— 那是 profiler）。
     Pump pumpSeh(AotRunResult& r);
     // shim 停机归类（真源 `machine.cpp:1651-1675`；⛔ 三条判据的顺序不许换）。
-    void classifyShimStop(const ShimDef* def, AotRunResult& r);
+    // ★ 收的是 **id + 1**（0 = 桩 EA 不在注册表）而不是 `const ShimDef*`：`lift_shim` 里可能
+    //   `addRuntime`（COM 对象创建）⇒ `defs_` 扩容 ⇒ 调用前取到的指针会悬垂（`shims.h` 的警告）。
+    //   这**不是**行为改动：`ShimDef::id` 就是下标，`byId()` 与调用前的 `def` 指向同一条。
+    void classifyShimStop(std::uint32_t def_id_plus_one, AotRunResult& r);
     // 宿主置停的三分类（真源 `machine.cpp:75-80` 的 `hostStopReason`；那份是内部链接，抄判据不抄代码）。
     static AotStop hostStopReason(const X86& cpu);
     // `regs` ↔ `cpu` 的同步（lifted 侧的状态真源是 `regs`；宿主侧逻辑读 `cpu`）。
@@ -366,6 +469,9 @@ private:
     // ★ 为什么值得记：`call reg/mem`（虚表调用）的返回地址不在 `[esp]-5` 上 ⇒ 那些到达会被判据
     //   拒掉。**这是性能缺口不是语义缺口**，但"到底有多少、落在哪些 EA"必须看得见。
     std::vector<std::uint32_t> not_call_logged_;
+
+    // ---- 采样式内部 profile（`--profile`；`on == false` 时所有字段恒为初值、零成本）----
+    AotProfile prof_;
 };
 
 }  // namespace aot

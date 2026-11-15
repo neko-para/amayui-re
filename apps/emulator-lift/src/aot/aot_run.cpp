@@ -38,11 +38,19 @@ namespace {
 // ★ `--accept-recovery-dialog` 的默认"绕过"判定点（真源 `machine.cpp:47` 的 `kRecoveryCheckEa`）。
 //   它是 `sub_454730` 的返回地址（块起点）：EAX = "$$AGE.TMP 能不能打开" ⇒ 置 0 = "打不开" = 上次
 //   正常结束 ⇒ `cmp eax,1` 为假 ⇒ 走 0x4BA856 干净返回，**永不到 0x4BA825 的 MessageBoxA**。
+//   ★ 常量在 `aot/aot_hook_ea.h`（**唯一一份**：S7 之后生成器也读它，保证这个 EA 留在派发边界上）。
 //   ★ 这个常量**只对 D1 pin 住的那一份 exe** 成立 —— 换 exe 会在 `loadImage` 就被 pin 拦下。
-constexpr std::uint32_t kRecoveryCheckEa = 0x004BA718u;
 
 // 每 4096 条查一次墙钟（与解释器 `machine.cpp:1148-1157` 同粒度）。
 constexpr std::uint64_t kCheckStride = 4096u;
+
+// ★ S7（D53）：生成代码的 `lift_dyn` 用的派发表查找 —— 与 trampoline 走的是**同一张表**
+//   （同一个 `aot_dispatch.cpp` 的哈希槽数组，⛔ 不另建第二份），但**不记 trampoline 的派发账**：
+//   那是"尾调用进目标"的一次查找，不是一次派发（见 `lookupUncounted` 的注释）。
+LiftFn lookupForLiftDyn(std::uint32_t ea) { return lookupUncounted(ea); }
+
+// ★ 定时器泵的"没有到期项"哨兵（见下面 ⑤ 的节流）：`due_100ns` 是不可能取到的最大值。
+constexpr std::uint64_t kNoTimerDue = ~std::uint64_t{0};
 
 // ★ 诊断开关（**默认关、零成本**；存在即开，与 `LIFT_FRAME_TRACE` 同口径）：
 //   `LIFT_AOT_SHIM_TRACE=1` ⇒ 每次走 `lift_shim` 打一行 `[aot-shim] …`（module!name / 桩 EA / insns）。
@@ -98,12 +106,14 @@ void AotHost::syncRegsFromCpu() { liftCpuToRegs(cpu_, regs_); }
 // =====================================================================================
 // 宿主置停的归类（shim 路径）
 // =====================================================================================
-void AotHost::classifyShimStop(const ShimDef* def, AotRunResult& r) {
+void AotHost::classifyShimStop(std::uint32_t def_id_plus_one, AotRunResult& r) {
     // ★ 真源 `machine.cpp:1651-1675`。三种"停"要分清，顺序固定：
     //   ① 注册表里没有 fn（或桩 EA 根本不在注册表里）= 缺口（Unimplemented，红）；
     //   ② 有 fn + 宿主停机种类非 None = 不是正常结局（Trap / ResourceExhausted）；
     //   ③ 有 fn + 种类 None = 实现里主动停（ExitProcess / --max-frames / 影片放完 …）⇒ Stopped（正常）。
     //   ⚠ `had_impl` 对 ② 与 ③ **都是真** —— 这就是要 `X86::stop_kind` 的原因。
+    //   ★ 按 **id** 重新解析（⛔ 不用调用前那个指针：`lift_shim` 里可能 addRuntime 扩容）。
+    const ShimDef* def = def_id_plus_one != 0u ? shims_.byId(def_id_plus_one - 1u) : nullptr;
     if (def == nullptr) {
         // `lift_shim` 在"桩 EA 不在注册表"时会走 `trapUnimplemented`（置 Trap + stop_why）。
         r.reason = hostStopReason(cpu_);
@@ -317,6 +327,10 @@ bool AotHost::fireDueTimer(AotRunResult& r) {
 // =====================================================================================
 AotRunResult AotHost::run(const AotRunOptions& opts) {
     AotRunResult r;
+    // ★ S7（D53）：给生成代码的 `lift_dyn` 装上**唯一的派发表查找**（`aot/aot_dispatch.h` 的
+    //   `lookup` = 与 trampoline 同一张表）⇒ 间接 `jmp` / `call reg|mem` 的尾调用能路由到目标。
+    //   缺省 `nullptr` 时 `lift_dyn` 会**响亮停**（⛔ 不静默）；这里装上之后才允许跑生成代码。
+    lift::liftDynLookup = &lookupForLiftDyn;
     if (!prepared_) {
         r.reason = AotStop::NoCode;
         r.detail = "AotHost 还没 prepare（没有 guest 进程结构 / shim 桩）⇒ 不能执行";
@@ -340,6 +354,16 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     resetDispatchStats();
     timerFires_ = 0;
     callResumes_ = 0;
+    // ★ `--profile`（缺省关）：清空上一轮的账 + **启动时**跑一次已知长度的忙循环校准机器频率。
+    //   ⛔ 关档时这一行都不执行（`beginProfile` 不被调用 ⇒ `prof_.on == false` ⇒ 采样点全是死代码分支）。
+    //   ★ 代价：开档时多花 ~60 ms（校准忙循环）；它发生在 `wall_start` 之前，**不进** `run()` 的墙钟，
+    //     但 `frame-ms` 的 `t_ms` 是"自进程启动" ⇒ 开档的 `t_ms` 含这 ~60 ms（读数时记住这一点）。
+    if (opts.profile) {
+        beginProfile();
+    } else {
+        // ★ 关档必须是**真的**关：摘掉 `lift_one` 的采样钩子（上一轮开过也一样）。
+        stopProfile();
+    }
     // ★ `--skip-logo`：一次性 latch 的**按轮**状态（语义 = `AotRunOptions::skip_logo`）。
     //   解释器那四个成员是 Machine 的（`machine.h:555-558`，进程只跑一轮）；本宿主的 `run()` 可以
     //   被调多次 ⇒ 在这里按轮重置，保证"同一台宿主第二轮不会假装命中过"。
@@ -358,6 +382,14 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         if (n == logged_frames + 1) {
             std::printf("[frame] n=%llu hash=0x%016llX\n", static_cast<unsigned long long>(n),
                         static_cast<unsigned long long>(presenter_.lastHash()));
+            // ★ `--profile` 的**每帧时间戳**（1 行/帧，开销 = 一次 `GetSystemTimeAsFileTime`）。
+            //   `t_ms` = 自**进程启动**到该帧 present 完成的毫秒（Windows 用 `GetProcessTimes` 的
+            //   creation 时间当基准，⛔ 不用"程序跑到这里"近似）；`insns` = 当时的 `cpu_.insns`。
+            if (prof_.on) {
+                std::printf("frame-ms: n=%llu t_ms=%.3f insns=%llu\n", static_cast<unsigned long long>(n),
+                            profileProcessMs(), static_cast<unsigned long long>(cpu_.insns));
+                ++prof_.frame_lines;
+            }
         } else {
             // 一次 shim 里发生了多次 Present（正常是 1 次）：hash 只有最后一帧那一份，⛔ 不冒充逐帧。
             std::printf("[frame] n=%llu..%llu（一次 shim 里 %llu 次 Present）hash=0x%016llX（只有最后一帧）\n",
@@ -365,6 +397,18 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
                         static_cast<unsigned long long>(n),
                         static_cast<unsigned long long>(n - logged_frames),
                         static_cast<unsigned long long>(presenter_.lastHash()));
+            if (prof_.on) {
+                // 这一格里发生了多次 Present ⇒ 只有一个时刻（它们同一趟 shim 里跑完的）。
+                // ⛔ 不伪造 K 个时间戳：那会变成"看起来逐帧、其实只有一次取样"。
+                std::printf(
+                    "frame-ms: n=%llu..%llu t_ms=%.3f insns=%llu（一次 shim 里 %llu 次 Present：只有最后"
+                    "一个时刻）\n",
+                    static_cast<unsigned long long>(logged_frames + 1),
+                    static_cast<unsigned long long>(n), profileProcessMs(),
+                    static_cast<unsigned long long>(cpu_.insns),
+                    static_cast<unsigned long long>(n - logged_frames));
+                ++prof_.frame_lines;
+            }
         }
         logged_frames = n;
     };
@@ -374,7 +418,51 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     std::uint64_t next_time_check = 0;
     // ★ 块边界事件泵的节流（与解释器 `machine.cpp:1097` / `:1298` 同粒度：每 4096 条一次）。
     std::uint64_t next_present_check = 0;
+    // ★ 定时器泵的节流（S2）：`steady_clock::now()` 从"每轮派发"降到"每 kCheckStride 条一次"。
+    //   两次采样之间只做一次**整数比较**（缓存的"最早到期时间" vs 缓存的"上次采样时刻"）⇒
+    //   绝大多数轮次连取时都不做。语义口径不变（D2b）：判定用 `clock_` 的同一份墙钟、同刻到期
+    //   取 id 最小者（那是 `fireDueTimer` 自己的选择逻辑，未改）、oneshot 仍移除、周期仍续约、
+    //   回调帧仍逐字节同样铺。唯一差别 = **到期判定的粒度是 4096 条 guest 指令**（与 `--time-limit`
+    //   同一个口径）；本轮 300 帧里 `synthetic: 定时器回调=0` ⇒ 对读数逐位无影响（A/B 实测见报告）。
+    std::uint64_t next_timer_check = 0;
+    std::uint64_t timer_due_hint = kNoTimerDue;  // 上次采样时 `timers` 里最早的 due_100ns
+    std::uint64_t timer_now_hint = 0;            // 上次采样的 `clock_.now100ns()`（同一份时钟）
+    // ★ 桩页判据的**一次减法**：取注册表自己的 page/slots（与 `byStubEa` 同一个来源，⛔ 不取 layout_）。
+    const std::uint32_t stub_page = shims_.stubPage();
+    const std::uint32_t stub_span = shims_.stubSlots() * 4u;
+    // 定时器泵的"最早到期时间"（只供上面的节流用；O(timers) 且**只在采样点/触发后**调用）。
+    auto earliestTimerDue = [&]() -> std::uint64_t {
+        std::uint64_t due = kNoTimerDue;
+        for (const GuestTimer& t : cpu_.shim.timers) {
+            if (t.due_100ns < due) due = t.due_100ns;
+        }
+        return due;
+    };
     std::uint32_t ea = cpu_.eip;
+
+    // ★ `--profile` ②：**派发归因**（自计时间隔法 / self-time）。
+    //   每 `kDispatchStride` 次派发取一次 TSC，把"距上次采样之间消耗的 ticks"整笔记到
+    //   **这次采样的入口 EA** 上。⛔ 不逐次计时（两次取时就与一个块同量级，仪器会喧宾夺主）；
+    //   开档的逐次成本只有一条 `++` 与一次比较。
+    //   ★ 第一个样本只立基线：它没有"上一个采样点"，强行记会把启动前的未知区间算进去。
+    auto profileDispatchSample = [&](std::uint32_t at_ea) {
+        if (!prof_.on) return;
+        ++prof_.dispatch_calls;
+        if (++prof_.dispatch_seen < AotProfile::kDispatchStride) return;
+        prof_.dispatch_seen = 0;
+        const std::uint64_t now = profileTicks();
+        if (prof_.dispatch_last == 0) {
+            prof_.dispatch_last = now;
+            return;
+        }
+        const std::uint64_t delta = now - prof_.dispatch_last;
+        prof_.dispatch_last = now;
+        prof_.dispatch_total += delta;
+        ++prof_.dispatch_samples;
+        auto& slot = prof_.dispatch_by_ea[at_ea];
+        ++slot.first;
+        slot.second += delta;
+    };
 
     for (;;) {
         // ★ 块边界的第一件事：把 lifted 侧的寄存器现场同步进 `cpu_`（宿主侧逻辑读 cpu）。
@@ -478,14 +566,31 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
 
         // ---- ⑤ 到期的 winmm 定时器在**块边界**触发（machine.cpp:1402-1418）----
         //   ⛔ 不嵌套：一个回调没跑完就不再触发下一个；嵌套 guest 调用 / SEH 期间也不触发。
+        //   ★ S2 节流：`timers.empty()` 之外的判定用**缓存的比较量**，只在每 kCheckStride 条
+        //     guest 指令时取一次 `clock_.now100ns()`（⛔ 不每轮派发取时；旧实现每轮一次 ≈ 21 ns）。
+        //     `timer_due_hint <= timer_now_hint` ⇔ "上次采样时刻已经有定时器到期"
+        //     ⇔ `fireDueTimer` 会选中一个（它的选择逻辑与判据**一个字都没改**）。
         if (!calls_.active() && !cpu_.shim.timer_firing && !cpu_.shim.timers.empty() &&
             !cpu_.shim.callback.active && !seh_.busy()) {
-            if (fireDueTimer(r)) {
-                syncRegsFromCpu();
-                ea = cpu_.eip;
-                continue;
+            if (cpu_.insns >= next_timer_check) {
+                next_timer_check = cpu_.insns + kCheckStride;
+                timer_now_hint = clock_.now100ns();
+                timer_due_hint = earliestTimerDue();
             }
-            if (r.reason != AotStop::None) break;
+            if (timer_due_hint <= timer_now_hint) {  // ★ 绝大多数轮次：这一次整数比较就是全部开销
+                if (fireDueTimer(r)) {
+                    // 回调要跑很久（它自己也可能 timeSetEvent / timeKillEvent）⇒ 用**新的**采样
+                    // 重算，⛔ 不拿旧 now 再判一次（否则周期定时器会按"旧时刻"空转重复触发）。
+                    timer_now_hint = clock_.now100ns();
+                    timer_due_hint = earliestTimerDue();
+                    syncRegsFromCpu();
+                    ea = cpu_.eip;
+                    continue;
+                }
+                // `fireDueTimer` 报"没有到期的"（拿到更新的一次 now 之后）⇒ 把缓存刷新成事实。
+                timer_due_hint = earliestTimerDue();
+                if (r.reason != AotStop::None) break;
+            }
         }
 
         // ---- ⑤' guest native override（真源 `machine.cpp:1420-1533`；D25 第 1 项）----
@@ -610,15 +715,24 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         }
 
         // ---- ⑥ 分派：shim 桩 EA → `lift_shim`；否则派发表 → `lift_cc_<根>`；都不是 ⇒ 响亮停 ----
-        //   ★ 桩 EA 的判据与解释器同一份来源：`ShimRegistry::byStubEa`（注册表反查；AOT 没有块缓存）。
-        //     另外把"落在桩页范围内的 4 字节对齐地址"也算桩 EA —— 那是 bind 发号的形状，
-        //     未实现的导入也占一个槽（执行到就由 `lift_shim` 的 trap 路径响亮停）。
-        const ShimDef* def = shims_.byStubEa(ea);
-        const bool in_stub_page = ea >= layout_.shim_page &&
-                                  ea < layout_.shim_page + layout_.shim_slots * 4u && (ea & 3u) == 0u;
-        if (def != nullptr || in_stub_page) {
+        //   ★ 桩 EA 的判据与解释器同一份来源：`ShimRegistry` 的桩页（AOT 没有块缓存）。
+        //   ★ 形状是**一次无符号减法 + 一次比较**（S1）：
+        //       off = ea - stub_page   // 无符号：ea < page ⇒ 巨大值 ⇒ 一定落在页外
+        //       off < stub_span        // 1 次 compare
+        //     ⛔ 不再单独算 `in_stub_page`（旧代码先花一次 `byStubEa` 的**线性扫描**，
+        //     `&&` 顺序让它白付；现在页内才查表，页外连表都不碰）。
+        //   ★ 为什么可以**不**测 `(ea & 3) == 0`：登记期断言（`ShimRegistry::checkStubEaShape`，
+        //     响亮停）把桩 EA 的形状钉成 `page + slot*4` ⇒ "页内未对齐 ⇒ 一定不是桩 EA"是**前提**。
+        //     万一真有一个页内未对齐 EA（只有 guest 跳进桩页中间才可能），槽位索引的二次校验会
+        //     拒掉它 ⇒ `def == nullptr` ⇒ `lift_shim` 的 trap 路径（响亮停）。
+        //   ★ 槽位索引表在**页内**才被访问：一次数组取 + 一次 `stub_ea` 校验（`byStubEa`，无锁）。
+        const std::uint32_t stub_off = ea - stub_page;
+        const bool in_stub_page = stub_off < stub_span;
+        const ShimDef* def = in_stub_page ? shims_.byStubEa(ea) : nullptr;
+        if (in_stub_page) {
             ++r.dispatches;
             ++r.shim_calls;
+            profileDispatchSample(ea);
             if (shimTraceOn()) {
                 std::fprintf(stderr, "[aot-shim] %llu ins=%-9llu %s!%s stub=%08X ret=%08X\n",
                              static_cast<unsigned long long>(r.shim_calls),
@@ -627,14 +741,39 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
                              def != nullptr ? def->name.c_str() : "(unknown-stub)", ea,
                              mem_.rd32(cpu_.esp()));
             }
-            const std::uint32_t next = ::lift_shim(ea, &regs_, &cpu_);
+            // ★ `--profile` ④：**shim 归因**（每 `kShimStride` 次**该 shim 自己的**调用采样一次）。
+            //   口径与解释器 `--profile` 的 `shimmax` **相反**：这里要**总量**（采样 ns 之和 +
+            //   按总调用数折算），不是"最慢一次"。总调用数不在这里记 —— 直接读 `ShimDef::call_count`。
+            //   ★ 为什么是"每个 shim 各自"而不是全体调用数：`invoke` 在**入口**才 `++call_count`
+            //     ⇒ 这里的 `call_count + 1` 就是本次序号。若按全体 1/1024，调用数只有几百的
+            //     `D3D9::Present`（300 次）会拿到 0–1 个样本 ⇒ 它那一行的"总量"整块失真。
+            const bool shim_sample =
+                prof_.on && def != nullptr &&
+                ((def->call_count + 1u) % AotProfile::kShimStride) == 0;
+            std::uint64_t shim_t0 = 0;
+            if (shim_sample) {
+                shim_t0 = profileTicks();
+            }
+            // ★ S3：**把已解析的 id 递下去**（`def->id + 1`；0 = 不知道 ⇒ 回退 `lift_shim` 的反查）。
+            //   `lift_shim` 自己每次都要 `cache->peek`（AOT `cpu.cache == nullptr` ⇒ 恒 miss）+
+            //   `idForStub`（旧实现 = 拿锁 + 线性扫 385 项）。这里已经拿到 def ⇒ 不该再付那笔。
+            const std::uint32_t shim_id1 = def != nullptr ? def->id + 1u : 0u;
+            const std::uint32_t next = ::lift_shim_id(shim_id1, ea, &regs_, &cpu_);
+            if (shim_sample) {
+                const std::uint64_t delta = profileTicks() - shim_t0;
+                const std::string key =
+                    def != nullptr ? (def->module + "!" + def->name) : std::string("(unknown-stub)");
+                auto& st = prof_.shim_by_name[key];
+                ++st.n;
+                st.ticks += delta;
+            }
             // ★ 每帧 `lastHash` 读数（D）：Present 只在 shim 路径上发生；必须在 `!cpu_.running` 与
             //   帧数闸门**之前**打 —— `--max-frames` 恰好是 D3D9 自己在 Present 里置停的那条路，
             //   晚一步就会丢掉最后一帧的读数。
             logPresentedFrames();
             // `lift_shim` 自己把整块状态回读进了 `*st`；`cpu_` 与它一致（同一次调用里同步过）。
             if (!cpu_.running) {
-                classifyShimStop(def, r);
+                classifyShimStop(shim_id1, r);
                 break;
             }
             if (next == ::kLiftHalt) {
@@ -676,6 +815,7 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         }
         ++r.dispatches;
         ++r.lifted_calls;
+        profileDispatchSample(ea);
         const std::uint32_t next = fn(&regs_, mem_.host(0), ea, &cpu_);
         if (next == ::kLiftHalt) {
             // 生成物里的停机出口：`lift_one` 的 false / `lift_stop`（T1c 的口径）。
@@ -701,6 +841,11 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     r.ea = cpu_.eip;
     r.insns = cpu_.insns;
     r.frames = presenter_.frameCount();
+    // ★ `--profile`：本轮墙钟长度（只给 `dispatch-top:` 的"占墙钟 x%"用；⛔ 不参与任何判据）。
+    if (prof_.on) {
+        prof_.wall_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wall_start).count();
+    }
     // ---- D28 的新增读数：派发表（开放寻址）的**探测分布**（probes avg / max / cap / load factor）----
     // ★ 为什么落在这里：既有那行 `table : …` 在 `aot_host.cpp`（本轮改动面不含它）⇒ 新读数由
     //   `aot_dispatch.cpp` 自己出、在这里打；`printProbeLine` 只读计数器，⛔ 不影响停机判据。

@@ -186,6 +186,11 @@ void ShimRegistry::configureStubPage(std::uint32_t page, std::uint32_t slots) {
     }
     shim_page_ = page;
     shim_slots_ = slots;
+    // ★ 索引表按新桩页重建（此刻 `next_slot_ == 0` ⇒ 还没有任何 stub EA，表必然是空的）+ 预留容量：
+    //   bind 之后 `addRuntime` 还会追加 def；预留到"现有登记 + 槽位上限"⇒ 运行期**不再重分配**
+    //   （并发读 `defs_` 的读者 —— 例如 feeder 的 `idForStub` —— 不会看到被释放的旧缓冲）。
+    defs_.reserve(defs_.size() + shim_slots_);
+    rebuildSlotIndexLocked();
 }
 
 ShimDef* ShimRegistry::addRuntime(const char* module, const char* name, Conv conv, int argc, ShimFn fn) {
@@ -217,6 +222,8 @@ ShimDef* ShimRegistry::addRuntime(const char* module, const char* name, Conv con
     }
     const std::uint32_t ea = shim_page_ + next_slot_ * 4u;
     ++next_slot_;
+    // ★ 登记期断言（响亮停）：发出去的 EA 必须满足 `page + slot*4` 的形状。
+    checkStubEaInPageLocked(ea, "addRuntime");
     // ② bind() 之前登记过、但那时没有桩页（bind 成功后本该都有地址）⇒ 复用这一条，补上地址
     if (existing) {
         existing->conv = conv;
@@ -225,6 +232,7 @@ ShimDef* ShimRegistry::addRuntime(const char* module, const char* name, Conv con
         existing->reason = nullptr;
         existing->declared = true;
         existing->stub_ea = ea;
+        rebuildSlotIndexLocked();  // 新槽 → 索引表（O(defs_)；登记不是热路径）
         return existing;
     }
     ShimDef def;
@@ -239,6 +247,7 @@ ShimDef* ShimRegistry::addRuntime(const char* module, const char* name, Conv con
     def.declared = true;   // host 侧显式登记过
     def.imported = false;  // IAT 里没有它（动态导出 / vtable 槽）
     defs_.push_back(std::move(def));
+    rebuildSlotIndexLocked();  // 新条目 → 索引表
     return &defs_.back();
 }
 
@@ -261,6 +270,32 @@ ShimDef* ShimRegistry::findMutable(const char* module, const char* name) {
 }
 
 const ShimDef* ShimRegistry::byStubEa(std::uint32_t ea) const {
+    // ★ 热路径（AOT：每次 shim 派发 / 每次 `lift_shim`）：**无锁**，一次无符号减 + 一次边界比较 +
+    //   一次数组取 + 一次 `stub_ea` 二次校验。为什么不需要锁：
+    //   · `shim_page_` / `shim_slots_` 在 bind() 之后不再改；
+    //   · `slot_index_` 在 bind()/configureStubPage() 时定长，运行期只写已有格子（4 字节标量）；
+    //   · 命中后还要 `d->stub_ea == ea`：表过期（夹具直写 stub_ea）时**不会**给出错答案，只会走慢路径。
+    //   ⛔ 不要在这里加 `size()` 之类的"顺手一致性检查" —— 那就把锁/扫描又请回来了。
+    const std::uint32_t slots = shim_slots_;
+    const std::uint32_t off = ea - shim_page_;  // 无符号：ea < page ⇒ 巨大值 ⇒ 一定落在页外
+    if (slots != 0u && off < slots * 4u) {
+        const std::uint32_t slot = off >> 2;
+        if (slot < slot_index_.size()) {
+            const std::uint32_t id1 = slot_index_[slot];
+            if (id1 != 0u) {
+                const ShimDef* d = defByIdUnlocked(id1 - 1u);
+                if (d != nullptr && d->stub_ea == ea) return d;
+            }
+        }
+    }
+    // ---- 慢路径：**与改动前逐字相同**的线性扫描（仍在锁内）----
+    //   什么时候到这儿：未登记的槽（随后 lift_shim 响亮停）/ 页外 EA / 未对齐 EA /
+    //   `slot_index_` 还没建 / 有人直写了 `stub_ea` 让表过期。
+    stub_index_slow_.fetch_add(1u, std::memory_order_relaxed);
+    return byStubEaLinearLocked(ea);
+}
+
+const ShimDef* ShimRegistry::byStubEaLinearLocked(std::uint32_t ea) const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     for (const ShimDef& d : defs_)
         if (d.stub_ea == ea && ea != 0) return &d;
@@ -268,15 +303,67 @@ const ShimDef* ShimRegistry::byStubEa(std::uint32_t ea) const {
 }
 
 std::uint32_t ShimRegistry::idForStub(std::uint32_t ea) const {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    for (const ShimDef& d : defs_)
-        if (d.stub_ea == ea && ea != 0) return d.id;
-    return 0;
+    // ★ 同一份解析路径（旧实现也是"扫一遍取 d.id"）：不再单独拿锁 / 再扫一遍。
+    const ShimDef* d = byStubEa(ea);
+    return d != nullptr ? d->id : 0u;
 }
 
 const ShimDef* ShimRegistry::byId(std::uint32_t id) const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
+    return defByIdUnlocked(id);
+}
+
+const ShimDef* ShimRegistry::defByIdUnlocked(std::uint32_t id) const {
+    // 与 `byId()` **同一条**解析路径：一次边界检查 + `&defs_[id]`（⛔ 表里不存指针）。
     return id < defs_.size() ? &defs_[id] : nullptr;
+}
+
+void ShimRegistry::rebuildSlotIndexLocked() {
+    slot_index_.assign(shim_slots_, 0u);
+    for (std::size_t i = 0; i < defs_.size(); ++i) {
+        const ShimDef& d = defs_[i];
+        if (d.stub_ea == 0) continue;
+        // ★ 这里**不**做"必须在桩页内"的断言：登记路径（`bind` / `addRuntime`）各自在**发号点**
+        //   已经响亮停地断言过（那才是"桩 EA 只有一种形状"的证明）；而夹具会**直写** `stub_ea`
+        //   （`tests/fixture.h` 的 `kStubBase = 0x7FFE2000` 与 `configureStubPage(0x7FF80000,…)` 就是
+        //   两个不同的页）⇒ 那些 def **不进索引表**，查询落回"与旧实现逐字相同"的线性扫描。
+        //   ⛔ 不要为了让它们进表而放宽页判据（那会把"页外 ⇒ 一定不是桩 EA"的结论弄丢）。
+        if (d.stub_ea < shim_page_ || (d.stub_ea - shim_page_) >= shim_slots_ * 4u || (d.stub_ea & 3u) != 0u) {
+            continue;
+        }
+        // ★ `byStubEa` 用**下标**当 id（表里存 i+1）⇒ 这里必须钉住 `id == 下标`
+        //   （全部登记路径都是 `def.id = defs_.size()` 后 push_back；违反就是内部不一致）。
+        if (d.id != i) {
+            std::fprintf(stderr,
+                         "[shim] ⛔ 内部不一致：defs_[%zu].id=%u（槽位索引表按**下标**解析）\n", i, d.id);
+            std::fflush(stderr);
+            std::abort();
+        }
+        const std::uint32_t slot = (d.stub_ea - shim_page_) >> 2;
+        // 同一个槽被两条登记抢 ⇒ **先登记者胜**（与旧 `byStubEa` 的"扫到第一个"逐位相同）。
+        if (slot_index_[slot] == 0u) slot_index_[slot] = static_cast<std::uint32_t>(i) + 1u;
+    }
+}
+
+void ShimRegistry::checkStubEaInPageLocked(std::uint32_t stub_ea, const char* where) const {
+    checkStubEaShape(stub_ea, shim_page_, shim_slots_, where);
+}
+
+void ShimRegistry::checkStubEaShape(std::uint32_t stub_ea, std::uint32_t page, std::uint32_t slots,
+                                    const char* where) {
+    // ★ **可证明的保命闸**（不是"观察到"）：桩 EA 只由 bind()/addRuntime() 发号，形状恒为
+    //   `page + slot*4`。有了这条断言，"非桩页 ⇒ 一定不是桩 EA"与"桩页内未对齐 ⇒ 一定不是
+    //   桩 EA"才是**前提**（AOT 的派发热路径据此只用一次无符号比较，见 `aot_run.cpp`）。
+    if (stub_ea == 0u) return;
+    const bool in_page = slots != 0u && stub_ea >= page && (stub_ea - page) < slots * 4u;
+    if (in_page && (stub_ea & 3u) == 0u) return;
+    std::fprintf(stderr,
+                 "[shim] ⛔ 桩 EA 违反登记期不变量（%s）：stub_ea=%08X，桩页=%08X+%u 槽（%u 字节）\n"
+                 "  要求：stub_ea == 0 或 [page, page+slots*4) 内且 4 字节对齐。\n"
+                 "  ⛔ 不静默继续：AOT 派发快路径以这条不变量为前提（见 aot_run.cpp / shims.h）。\n",
+                 where, stub_ea, page, slots, slots * 4u);
+    std::fflush(stderr);
+    std::abort();
 }
 
 std::vector<ShimDef> ShimRegistry::snapshot() const {
@@ -316,7 +403,10 @@ bool ShimRegistry::bind(GuestMemory& mem, const PeImage& img, std::uint32_t shim
             return false;
         }
         def->imported = true;
-        if (def->stub_ea == 0) def->stub_ea = shim_page + slot * 4u;
+        if (def->stub_ea == 0) {
+            def->stub_ea = shim_page + slot * 4u;
+            checkStubEaShape(def->stub_ea, shim_page, shim_slots, "bind/import");
+        }
         ++slot;
         if (!def->fn) ++unresolved;
         // IAT 槽指向桩页里的唯一地址
@@ -338,12 +428,17 @@ bool ShimRegistry::bind(GuestMemory& mem, const PeImage& img, std::uint32_t shim
             return false;
         }
         d.stub_ea = shim_page + slot * 4u;
+        checkStubEaShape(d.stub_ea, shim_page, shim_slots, "bind/extras");
         ++slot;
     }
     // ★ 记下桩页状态：`addRuntime` 从这里**接着往后**发地址（⛔ 绝不覆盖 bind 已发的 EA）。
     shim_page_ = shim_page;
     shim_slots_ = shim_slots;
     next_slot_ = slot;
+    // ★ 槽位索引表（见 shims.h 的注释）：bind 是**唯一**批量发号的地方 ⇒ 在这里重建一次。
+    //   预留容量 = 现有登记 + 剩余槽位（之后 addRuntime 只会消耗这些槽位、不会再扩容）。
+    defs_.reserve(defs_.size() + (shim_slots_ - next_slot_));
+    rebuildSlotIndexLocked();
     return true;
 }
 

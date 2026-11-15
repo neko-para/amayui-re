@@ -335,57 +335,29 @@ bool huffDecodeOnce(const GuestMemory& mem, const HuffCodebook& cb, HuffReader* 
 // ---------------------------------------------------------------------------------------
 // ⑤ `sub_4E1950` 的分量累加：`fld [val] / fadd [dst] / fstp dword [dst]`
 //
-// ★ 逐位等价（与解释器同一条结果）依据：
-//   · 单精度落盘 ⇒ 只要"精确和的 float32 舍入"一致，结果就一致；
-//   · 两个 **float32** 的精确和，在 |指数差| <= 24 时有效位 <= 48 ⇒ 整段落进宿主 double（53 位）
-//     ⇒ `(double)a + (double)b` 是**精确值**，再 `(float)` 一次舍入 = 正确舍入 = SoftFloat 的
-//     `extF80`（64 位有效位，同样精确）+ `extF80_to_f32`；
-//   · |指数差| > 24 时小操作数 `< 0.5 ulp`，其精确和的小数部分 < 半个 ulp 且大操作数自身
-//     在 ulp 里是整的 ⇒ 两种实现都给出**大操作数本身**（不会出现双重舍入差）。
-//   ⇒ 只有 `inf`/`NaN` 不走这条推理（NaN payload / 静默位是另一套规则）⇒ 那两个走 SoftFloat。
+// ★ **D49 之后这一段没有推理了**：x87 的实数模型就是 double ⇒ 解释器做的是
+//   `x87Add(x87LoadMem(val,4), x87LoadMem(cur,4))` 再 `x87StoreMem(…, 4)`，本文件调**同一批**
+//   桥函数 ⇒ 结果与异常位逐位同源（⛔ 不自己写 `(float)((double)a + (double)b)`：那会造出
+//   第二个模型，异常位（OE）也会与解释器分叉）。
+//   ⚠ 旧口径（D49 之前）在这里有一段"两个 f32 的精确和 vs SoftFloat extF80"的推理与
+//     inf/NaN 的单独分支 —— 那两条都随 D49 作废（数学上仍然成立，但不再是"等价性依据"）。
 // ---------------------------------------------------------------------------------------
-float bitsToFloat(std::uint32_t bits) {
-    float f = 0.0f;
-    std::memcpy(&f, &bits, 4);
-    return f;
-}
-
-bool isFiniteF32(std::uint32_t bits) { return (bits & 0x7F800000u) != 0x7F800000u; }
-
 // `ST0 = val; ST0 += dst; fstp dword [dst]` 的等价物。
-// `flags` = SoftFloat 的异常位（1=PE / 2=UE / 4=OE / 8=ZE / 16=IE），与 `exec_fpu.cpp` 的
+// `flags` = x87 的异常位（1=PE / 2=UE / 4=OE / 8=ZE / 16=IE），与 `exec_fpu.cpp` 的
 // `syncStatus` 同口径。
+// ★ **D49（x87 = double）之后这里只剩一行**：有限 / 非有限输入不再分叉 —— 解释器就是
+//   `x87Add(x87LoadMem(val,4), x87LoadMem(cur,4))` + `x87StoreMem(…, 4)`，本函数调的是**同一批**
+//   桥函数（⛔ 不自己写 `(float)(a+b)`：那会造出第二个模型，且异常位会与解释器分叉）。
 std::uint32_t f32AddStore(std::uint32_t val_bits, std::uint32_t dst_bits, std::uint32_t* flags) {
-    if (!isFiniteF32(val_bits) || !isFiniteF32(dst_bits)) {
-        Ext80 a, b, r;
-        std::uint8_t raw[4];
-        std::memcpy(raw, &val_bits, 4);
-        x87MemToReg(raw, a, 4);
-        std::memcpy(raw, &dst_bits, 4);
-        x87MemToReg(raw, b, 4);
-        x87Add(a, b, r);
-        x87RegToMem(r, raw, 4);
-        *flags |= x87TakeExceptionFlags();
-        std::uint32_t out = 0;
-        std::memcpy(&out, raw, 4);
-        return out;
-    }
-    const double s = static_cast<double>(bitsToFloat(val_bits)) + static_cast<double>(bitsToFloat(dst_bits));
-    // ★ 上溢判据只能是"**舍入之后**是不是 inf"：`fstp dword` 走 IEEE 的溢出规则 ——
-    //   `s ∈ (FLT_MAX, 2^128 − 2^103)` 这一段**舍到 FLT_MAX**（只置 PE），从阈值起才舍到 inf（OE|PE）。
-    //   ⛔ 别写成 `|s| > FLT_MAX`：那会把"刚好超过 FLT_MAX 一点点"错判成上溢。
-    const float rf = static_cast<float>(s);
+    std::uint8_t raw[4];
+    std::memcpy(raw, &val_bits, 4);
+    const lift::X87Val a = x87LoadMem(raw, 4);
+    std::memcpy(raw, &dst_bits, 4);
+    const lift::X87Val b = x87LoadMem(raw, 4);
+    x87StoreMem(x87Add(a, b), raw, 4);
+    *flags |= x87TakeExceptionFlags();
     std::uint32_t out = 0;
-    std::memcpy(&out, &rf, 4);
-    if ((out & 0x7F800000u) == 0x7F800000u) {  // 舍入后是 inf（入参已保证有限）
-        *flags |= 1u | 4u;                     // PE | OE
-        return out;
-    }
-    if (static_cast<double>(rf) != s) {  // 不精确
-        *flags |= 1u;                    // PE
-        // `fstp dword` 落到 subnormal 且不精确 ⇒ `extF80_to_f32` 置 UE
-        if ((out & 0x7F800000u) == 0u && (out & 0x007FFFFFu) != 0u) *flags |= 2u;
-    }
+    std::memcpy(&out, raw, 4);
     return out;
 }
 
@@ -398,7 +370,9 @@ void syncX87Flags(X86& cpu, std::uint32_t flags) {
     if (flags & 4u) s |= 0x0008u;   // OE
     if (flags & 8u) s |= 0x0004u;   // ZE
     if (flags & 16u) s |= 0x0001u;  // IE
-    if (s & 0x003Fu) s |= 0x0080u;  // ES
+    // ★ 任务 0 / D55：**ES = 任一异常位非零**（与解释器 `syncStatus` 同一条；⛔ 漏它 ⇒ 这一支
+    //   的末态比解释器少 0x0080，`native-override-assets` 会红）。
+    if ((s & 0x003Fu) != 0) s |= 0x0080u;
     cpu.fpu.status = s;
 }
 
@@ -507,7 +481,6 @@ bool nativeHuffVector4E1950(X86& cpu, GuestMemory& mem, std::uint32_t* result) {
     mem.wr32(a3 + kBrEndbyte, r.endbyte);
     mem.wr32(a3 + kBrEndbit, r.endbit);
     // ---- 第二遍：累加（dim<=8 的 8 路跳表与 >8 的通用循环同语义）----
-    x87ApplyControlWord(cpu.fpu.control);
     std::uint32_t flags = 0u;
     std::uint8_t* dp = mem.host(dst);
     const std::uint8_t* vl = mem.host(valuelist);

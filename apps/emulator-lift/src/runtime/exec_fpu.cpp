@@ -1,22 +1,25 @@
 // emulator-lift · x87（S4：语料里 47 个形态）+ MMX/SSE 整数打包
 //
-// ★ 算术内核 = SoftFloat `extF80`（plan §4 D3）：四则 / 开方 / 取余 / 取整 / 比较全部转给它；
-//   这里只做**寄存器栈 / tag / 控制字 / 状态字 / 条件码**（8 寄存器栈 + TOP + tag word）。
-//   80 位精度：寄存器槽是 16 字节的 `extFloat80_t`（见 X87State），PC / RC 来自控制字
-//   （`extF80_roundingPrecision` / `softfloat_roundingMode`），异常位写状态字。
+// ★ **D49（2026-11-15 用户裁决）：x87 的实数模型统一成 `double`。**
+//   「这里 x87 统一用 double 模拟实现。不追求 80bit 完全一致。」
+//   ⇒ 算术内核不再是 Berkeley SoftFloat 的 `extF80`，而是 `runtime/fpu_bridge.h` 里那份
+//     **double 模型**（值怎么算）+ 本文件的**寄存器栈 / tag / 控制字 / 状态字 / 条件码**。
+//   ★ **一份模型，两臂共用**：AOT 发射器把同一套语义发成普通 LLVM 浮点指令
+//     （`src/aot/lift_gen_emit.cpp` 的 `emitX87*`）⇒ 差分夹具对 x87 仍然有意义。
+//   ⛔ 不许"AOT 用 double、解释器留 extF80"：那会造出两个 x87 模型，差异还是静默的。
 //
-// ★ **1 ulp 偏差登记**（Intel SDM 明说这些助记符是 *implementation defined* ⇒ 任何实现都拿不到
-//   逐位，真机之间也不保证一致）。以下走**宿主 libm**，路径 = extF80 → double → libm →
-//   double → extF80（double 只有 53 位尾数，真机 x87 是 64 位尾数）：
-//       `fsin` `fcos` `fsincos` `fptan` `fpatan` `fyl2x` `fyl2xp1` `f2xm1`
-//   ⇒ 与真机结果**可能差 1 ulp**（真实值边界：|结果| 在 [1,2) 的正规值区间内的最后一位；
-//   输入绝对值 ≥ 2^63 时 `fsin`/`fcos` 按 Intel 语义置 C2=1 并**不改** ST(0)）。
-//   `fscale` 也用 double 读指数（指数是整数 ⇒ 只有 |e| > 2^53 才有差；实际永远命中不了）。
-//   ⛔ 本作语料这族合计约 10 条，且不在启动路径上；不要为它引入第三方库（plan §4 D3）。
-//   `fprem` / `fprem1` **不在此列**：走 SoftFloat 的精确整数余数路径（见 fpu_bridge.cpp）。
+// ★ 接受的偏差（与 `fpu_bridge.h` 文件头同一份清单）：尾数 53 位 · PC 字段无效 ·
+//   四则一律就近舍入（RC 只影响 `fist`/`fistp`/`frndint`/`fisttp`）· 异常位只建模 IE/ZE/OE ·
+//   NaN 传播 payload / pseudo-denormal 不追。
 //
-// ★ MMX 复用 x87 寄存器槽的**低 64 位**（Intel：MMX 与 x87 共用物理寄存器）；SSE 的 XMM
-//   在 `X86::xmm[8][4]`。`emms` 把 tag word 置全 empty（Intel 语义）。
+// ★ 超越函数（`fsin` `fcos` `fsincos` `fptan` `fpatan` `fyl2x` `fyl2xp1` `f2xm1` `fscale`
+//   `fprem` `fprem1` `fxtract`）走**宿主 libm**，实现是 `fpu_bridge.cpp` 的那几个函数 ——
+//   生成代码的 `lift_x87_*` helper 调的是**同一份**（⛔ 不在发射器里再写一遍公式）。
+//   1 ulp 偏差登记照旧：Intel SDM 明说这些助记符是 *implementation defined*。
+//
+// ★ MMX 复用 x87 寄存器槽的**低 64 位**（Intel：MMX 与 x87 共用物理寄存器）⇒ 现在就是
+//   `double` 槽的 8 字节。SSE 的 XMM 在 `X86::xmm[8][4]`。`emms` 把 tag word 置全 empty。
+
 // ★ SSE 浮点 / 128 位搬移是独立一族（`Op::Sse` + `execSse()`，见文件下半部）；语料 0 条，
 //   但按 Intel SDM 实现（不再是"未实现 ⇒ 响亮失败"）。
 // `movsd`（SSE2 标量 double）与串操作 `movsd` 同名 ⇒ 由解码器按操作数形态分派（见 decode.cpp）。
@@ -51,8 +54,8 @@ enum : std::uint16_t {
     SW_TOP = 0x3800,
 };
 
-std::uint8_t* stSlot(X86& cpu, int i) { return cpu.fpu.regs[cpu.fpu.phys(i)]; }
-const std::uint8_t* stConst(const X86& cpu, int i) { return cpu.fpu.regs[cpu.fpu.phys(i)]; }
+double* stSlot(X86& cpu, int i) { return &cpu.fpu.regs[cpu.fpu.phys(i)]; }
+const double* stConst(const X86& cpu, int i) { return &cpu.fpu.regs[cpu.fpu.phys(i)]; }
 
 int stIndex(const Operand& op, int def) {
     return (op.kind == OpKind::Reg) ? static_cast<int>(regSpec(op.reg).index) : def;
@@ -68,18 +71,20 @@ void setCC(X86& cpu, bool c0, bool c1, bool c2, bool c3) {
     cpu.fpu.status = s;
 }
 
-// SoftFloat 的异常标志 → x87 状态字（取走并清空；对应"读状态字"这一步）
+// 挂账的浮点异常位 → x87 状态字（取走并清空；对应"读状态字"这一步）
+// ★ 任务 0 / D55：**IE / ZE / OE / UE 都会被置**（PE 恒 0，见 `fpu_bridge.h` 文件头 §5）；
+//   **ES（异常汇总）= 状态字里任一异常位非零** —— 与 D49 之前的实现同一条（真机也这样，
+//   栈上溢 = IE + ES）。SF（stack fault 位）仍恒 0（本轮不补，见 `fpu_bridge.h` §5）。
 void syncStatus(X86& cpu) {
     const std::uint8_t f = x87TakeExceptionFlags();
     std::uint16_t s = cpu.fpu.status;
-    if (f & 1) s |= SW_PE;
-    if (f & 2) s |= SW_UE;
-    if (f & 4) s |= SW_OE;
-    if (f & 8) s |= SW_ZE;
-    if (f & 16) s |= SW_IE;
-    // ES：有**未屏蔽**异常时为 1。控制字掩码没逐位复现（本仓没有依赖 ES 的分支），
-    // 这里按"只要有一位异常置了就汇总"简化 —— 已在 S4 报告里点名。
-    if (s & 0x003Fu) s |= SW_ES;
+    if (f & kX87PE) s |= SW_PE;
+    if (f & kX87UE) s |= SW_UE;
+    if (f & kX87OE) s |= SW_OE;
+    if (f & kX87ZE) s |= SW_ZE;
+    if (f & kX87IE) s |= SW_IE;
+    if ((s & 0x003Fu) != 0) s |= SW_ES;  // 汇总位：任一异常位 ⇒ ES
+
     s = static_cast<std::uint16_t>((s & ~SW_TOP) | ((cpu.fpu.top & 7u) << 11));
     cpu.fpu.status = s;
 }
@@ -89,7 +94,7 @@ void markValid(X86& cpu, int physical) {
     if (x87IsZero(cpu.fpu.regs[physical])) cpu.fpu.setZero(physical);
 }
 
-void push(X86& cpu, const Ext80 v) {
+void push(X86& cpu, double v) {
     const int next = (cpu.fpu.top - 1) & 7;
     if (!cpu.fpu.empty(next)) {
         // 栈上溢：置 C1 + invalid（Intel：x87 报 stack overflow 后退回原状）
@@ -98,110 +103,119 @@ void push(X86& cpu, const Ext80 v) {
         return;
     }
     cpu.fpu.top = static_cast<std::uint8_t>(next);
-    std::memcpy(cpu.fpu.regs[cpu.fpu.top], v, 16);
+    cpu.fpu.regs[cpu.fpu.top] = v;
     markValid(cpu, cpu.fpu.top);
 }
 
 void pop(X86& cpu) {
     cpu.fpu.setEmpty(cpu.fpu.top);
     cpu.fpu.top = static_cast<std::uint8_t>((cpu.fpu.top + 1) & 7);
+    // ★ 检查点 2（D49）：**把状态字的 TOP 镜像一并更新**（原来是"下一次 syncStatus 才更新"）。
+    //   理由：生成代码（`lift_gen_emit.cpp` 的 `x87Pop`）也这么做 ⇒ 两条臂的状态字逐位可比。
+    //   这条改动对解释器**不可观察**：状态字的唯一读出口（`fnstsw`/`fnstenv`/`fnsave`）本来
+    //   都会先 `syncStatus`；改的只是"两次读之间那个没人看的字段"。
+    cpu.fpu.status =
+        static_cast<std::uint16_t>((cpu.fpu.status & ~SW_TOP) | ((cpu.fpu.top & 7u) << 11));
 }
 
-void storeSt0(X86& cpu, const Ext80 v) {
-    std::memcpy(stSlot(cpu, 0), v, 16);
+void storeSt0(X86& cpu, double v) {
+    *stSlot(cpu, 0) = v;
     markValid(cpu, cpu.fpu.phys(0));
     syncStatus(cpu);
 }
 
-// 取内存操作数（按它的宽度）；返回 false ⇒ 不支持
-bool loadMemValue(X86& cpu, const MemOperand& m, Ext80 out) {
+// 取内存操作数（按它的宽度 4 / 8 / 10）；返回 false ⇒ 不支持
+bool loadMemValue(X86& cpu, const MemOperand& m, double* out) {
     const std::uint32_t ea = cpu.eaOf(m);
     switch (m.size) {
         case 4: {
             std::uint8_t b[4];
             for (int i = 0; i < 4; ++i) b[i] = cpu.mem->rd8(ea + static_cast<std::uint32_t>(i));
-            x87MemToReg(b, out, 4);
+            *out = x87LoadMem(b, 4);
             return true;
         }
         case 8: {
             std::uint8_t b[8];
             for (int i = 0; i < 8; ++i) b[i] = cpu.mem->rd8(ea + static_cast<std::uint32_t>(i));
-            x87MemToReg(b, out, 8);
+            *out = x87LoadMem(b, 8);
             return true;
         }
         case 10: {
             std::uint8_t b[10];
             for (int i = 0; i < 10; ++i) b[i] = cpu.mem->rd8(ea + static_cast<std::uint32_t>(i));
-            x87MemToReg(b, out, 10);
+            *out = x87LoadMem(b, 10);
             return true;
         }
         default: return false;
     }
 }
 
-bool loadIntMem(X86& cpu, const MemOperand& m, Ext80 out) {
+bool loadIntMem(X86& cpu, const MemOperand& m, double* out) {
     const std::uint32_t ea = cpu.eaOf(m);
     switch (m.size) {
-        case 2: x87FromI16(static_cast<std::int16_t>(cpu.mem->rd16(ea)), out); return true;
-        case 4: x87FromI32(static_cast<std::int32_t>(cpu.mem->rd32(ea)), out); return true;
-        case 8: x87FromI64(static_cast<std::int64_t>(cpu.mem->rd64(ea)), out); return true;
+        case 2: *out = x87FromI16(static_cast<std::int16_t>(cpu.mem->rd16(ea))); return true;
+        case 4: *out = x87FromI32(static_cast<std::int32_t>(cpu.mem->rd32(ea))); return true;
+        case 8: *out = x87FromI64(static_cast<std::int64_t>(cpu.mem->rd64(ea))); return true;
         default: return false;
     }
 }
 
-void storeMemValue(X86& cpu, const MemOperand& m, const Ext80 v) {
+void storeMemValue(X86& cpu, const MemOperand& m, double v) {
     const std::uint32_t ea = cpu.eaOf(m);
     std::uint8_t b[10] = {};
     const std::uint8_t size = m.size ? m.size : 4;
-    x87RegToMem(v, b, size);
+    x87StoreMem(v, b, size);
     for (int i = 0; i < size; ++i) cpu.mem->wr8(ea + static_cast<std::uint32_t>(i), b[i]);
 }
 
-void storeIntMem(X86& cpu, const MemOperand& m, const Ext80 v, bool truncate = false) {
+// ★ `fist`/`fistp` 按**当前 RC** 舍入（`fisttp` 恒朝零）—— D49 §3 的"整数转换至少要把
+//   截断 vs 就近分对"。⚠ 与旧实现的判据保持一致：`m16` 也走 i32 的转换路径再截低 16 位
+//   （所以 16 位越界**不会**置 IE —— 这是既有口径，本轮不发明新语义）。
+void storeIntMem(X86& cpu, const MemOperand& m, double v, X87Round rc) {
     const std::uint32_t ea = cpu.eaOf(m);
     switch (m.size) {
-        case 2: cpu.mem->wr16(ea, static_cast<std::uint16_t>(x87ToI32(v, truncate))); break;
-        case 4: cpu.mem->wr32(ea, static_cast<std::uint32_t>(x87ToI32(v, truncate))); break;
-        case 8: cpu.mem->wr64(ea, static_cast<std::uint64_t>(x87ToI64(v, truncate))); break;
+        case 2: cpu.mem->wr16(ea, static_cast<std::uint16_t>(x87ToI32(v, rc))); break;
+        case 4: cpu.mem->wr32(ea, static_cast<std::uint32_t>(x87ToI32(v, rc))); break;
+        case 8: cpu.mem->wr64(ea, static_cast<std::uint64_t>(x87ToI64(v, rc))); break;
         default: break;
     }
 }
 
 // 二元算术：dst 与 src 的取法覆盖 `fadd st(i), st` / `fadd st, st(i)` / `fadd [mem]` 三种形态
 bool arith(X86& cpu, const Insn& in, Op op) {
-    Ext80 a;
-    Ext80 b;
+    double a = 0.0;
+    double b = 0.0;
     int dst_index = 0;  // 结果写回哪个 ST（0 = ST0）
     if (in.op0().kind == OpKind::Mem) {
-        if (!loadMemValue(cpu, in.op0().mem, b)) return unimplemented(cpu, in, "x87 算术的内存操作数宽度不支持");
-        std::memcpy(a, stConst(cpu, 0), 16);
+        if (!loadMemValue(cpu, in.op0().mem, &b)) return unimplemented(cpu, in, "x87 算术的内存操作数宽度不支持");
+        a = *stConst(cpu, 0);
         dst_index = 0;
     } else {
         // 寄存器形态：op0 是目标 ST(i)，op1 是源（省略时源 = ST0）
         const int i0 = static_cast<int>(regSpec(in.op0().reg).index);
         dst_index = i0;
-        std::memcpy(a, stConst(cpu, i0), 16);
+        a = *stConst(cpu, i0);
         if (in.op1().kind == OpKind::Reg) {
             const int i1 = static_cast<int>(regSpec(in.op1().reg).index);
-            std::memcpy(b, stConst(cpu, i1), 16);
+            b = *stConst(cpu, i1);
         } else if (in.op1().kind == OpKind::Mem) {
-            if (!loadMemValue(cpu, in.op1().mem, b)) return unimplemented(cpu, in, "x87 算术的内存操作数宽度不支持");
+            if (!loadMemValue(cpu, in.op1().mem, &b)) return unimplemented(cpu, in, "x87 算术的内存操作数宽度不支持");
         } else {
-            std::memcpy(b, stConst(cpu, 0), 16);
+            b = *stConst(cpu, 0);
         }
     }
-    x87ApplyControlWord(cpu.fpu.control);
-    Ext80 r;
+    // ★ D49：四则一律就近舍入（RC **不**参与；⛔ 不逐 op fesetround）
+    double r = 0.0;
     switch (op) {
-        case Op::Fadd: x87Add(a, b, r); break;
-        case Op::Fsub: x87Sub(a, b, r); break;
-        case Op::Fsubr: x87Sub(b, a, r); break;
-        case Op::Fmul: x87Mul(a, b, r); break;
-        case Op::Fdiv: x87Div(a, b, r); break;
-        case Op::Fdivr: x87Div(b, a, r); break;
+        case Op::Fadd: r = x87Add(a, b); break;
+        case Op::Fsub: r = x87Sub(a, b); break;
+        case Op::Fsubr: r = x87Sub(b, a); break;
+        case Op::Fmul: r = x87Mul(a, b); break;
+        case Op::Fdiv: r = x87Div(a, b); break;
+        case Op::Fdivr: r = x87Div(b, a); break;
         default: return unimplemented(cpu, in, "x87 算术族没有这条语义");
     }
-    std::memcpy(stSlot(cpu, dst_index), r, 16);
+    *stSlot(cpu, dst_index) = r;
     markValid(cpu, cpu.fpu.phys(dst_index));
     syncStatus(cpu);
     return true;
@@ -209,29 +223,27 @@ bool arith(X86& cpu, const Insn& in, Op op) {
 
 bool integerArith(X86& cpu, const Insn& in, Op op) {
     if (in.op0().kind != OpKind::Mem) return unimplemented(cpu, in, "fiadd 族只支持内存操作数");
-    Ext80 b;
-    if (!loadIntMem(cpu, in.op0().mem, b)) return unimplemented(cpu, in, "fiadd 族的整数宽度不支持");
-    Ext80 a;
-    std::memcpy(a, stConst(cpu, 0), 16);
-    x87ApplyControlWord(cpu.fpu.control);
-    Ext80 r;
+    double b = 0.0;
+    if (!loadIntMem(cpu, in.op0().mem, &b)) return unimplemented(cpu, in, "fiadd 族的整数宽度不支持");
+    const double a = *stConst(cpu, 0);
+    double r = 0.0;
     switch (op) {
-        case Op::Fiadd: x87Add(a, b, r); break;
-        case Op::Fisub: x87Sub(a, b, r); break;
-        case Op::Fisubr: x87Sub(b, a, r); break;
-        case Op::Fimul: x87Mul(a, b, r); break;
-        case Op::Fidiv: x87Div(a, b, r); break;
-        case Op::Fidivr: x87Div(b, a, r); break;
+        case Op::Fiadd: r = x87Add(a, b); break;
+        case Op::Fisub: r = x87Sub(a, b); break;
+        case Op::Fisubr: r = x87Sub(b, a); break;
+        case Op::Fimul: r = x87Mul(a, b); break;
+        case Op::Fidiv: r = x87Div(a, b); break;
+        case Op::Fidivr: r = x87Div(b, a); break;
         default: return unimplemented(cpu, in, "fi 算术族没有这条语义");
     }
-    std::memcpy(stSlot(cpu, 0), r, 16);
+    *stSlot(cpu, 0) = r;
     markValid(cpu, cpu.fpu.phys(0));
     syncStatus(cpu);
     return true;
 }
 
 bool compare(X86& cpu, const Insn& in, bool pop_after, bool quiet) {
-    Ext80 b;
+    double b = 0.0;
     // ★ **操作数形态在这里不统一**（实测 Zydis，见 `tests/conformance_cases.cpp` 的 `x87-fucomp`）：
     //     `fcom st(i)`  / `fcomp st(i)`  ⇒ **一个**操作数（就是源）；
     //     `fucom st(i)` / `fucomp st(i)` ⇒ **两个**操作数 `st0, st(i)`（Zydis 把隐含的 ST(0) 也列出来）；
@@ -239,20 +251,18 @@ bool compare(X86& cpu, const Insn& in, bool pop_after, bool quiet) {
     //   旧实现只看 `op0` ⇒ 对 `fucom`/`fucomp` 拿到的源是 **ST(0) 自己**（永远"相等"，C3=1），
     //   是**静默算错**（语料里 fucomp 11 条 / fucom 1 条）。⇒ 先看 `op1` 是不是寄存器。
     if (in.op1().kind == OpKind::Reg) {
-        std::memcpy(b, stConst(cpu, stIndex(in.op1(), 1)), 16);
+        b = *stConst(cpu, stIndex(in.op1(), 1));
     } else if (in.op0().kind == OpKind::Reg) {
-        std::memcpy(b, stConst(cpu, stIndex(in.op0(), 1)), 16);
+        b = *stConst(cpu, stIndex(in.op0(), 1));
     } else if (in.op0().kind == OpKind::Mem) {
-        if (!loadMemValue(cpu, in.op0().mem, b)) return unimplemented(cpu, in, "fcom 的内存操作数宽度不支持");
+        if (!loadMemValue(cpu, in.op0().mem, &b)) return unimplemented(cpu, in, "fcom 的内存操作数宽度不支持");
     } else {
         // ★ **无显式操作数**的 `fcom` / `fcomp` / `fucom` / `fucomp` / `fcompp` / `fucompp`
         //   比的是 **ST(1)**，不是 ST(0)（Intel SDM：隐式源操作数是 ST(1)）。
-        std::memcpy(b, stConst(cpu, 1), 16);
+        b = *stConst(cpu, 1);
     }
-    x87ApplyControlWord(cpu.fpu.control);
-    // FCOM 对 QNaN 也要报 invalid；FUCOM 是 quiet（只有 SNaN 报）。
-    if (!quiet && (x87IsNan(stConst(cpu, 0)) || x87IsNan(b))) x87RaiseInvalid();
-    const int cmp = x87Compare(stConst(cpu, 0), b);
+    // FCOM 对 QNaN 也要报 invalid；FUCOM 是 quiet（只有 SNaN 报）—— 判据在 `x87Compare` 里唯一一份。
+    const int cmp = x87Compare(*stConst(cpu, 0), b, quiet);
     if (cmp == 2) {
         setCC(cpu, true, false, true, true);  // 无序：C3=C2=C0=1
     } else if (cmp == 0) {
@@ -270,11 +280,8 @@ bool compare(X86& cpu, const Insn& in, bool pop_after, bool quiet) {
 // `fcomi` / `fcomip` / `fucomi` / `fucomip`：结果进 **EFLAGS**（ZF/PF/CF），不动 C0..C3
 bool compareEflags(X86& cpu, const Insn& in, bool pop_after, bool quiet) {
     const int i = (in.op1().kind == OpKind::Reg) ? stIndex(in.op1(), 0) : stIndex(in.op0(), 1);
-    Ext80 b;
-    std::memcpy(b, stConst(cpu, i), 16);
-    x87ApplyControlWord(cpu.fpu.control);
-    if (!quiet && (x87IsNan(stConst(cpu, 0)) || x87IsNan(b))) x87RaiseInvalid();
-    const int cmp = x87Compare(stConst(cpu, 0), b);
+    const double b = *stConst(cpu, i);
+    const int cmp = x87Compare(*stConst(cpu, 0), b, quiet);
     cpu.setOf(false);
     cpu.setSf(false);
     cpu.setAf(false);
@@ -315,7 +322,7 @@ bool fcmov(X86& cpu, const Insn& in) {
     }
     const int i = (in.op1().kind == OpKind::Reg) ? stIndex(in.op1(), 1) : stIndex(in.op0(), 1);
     if (take) {
-        std::memcpy(stSlot(cpu, 0), stConst(cpu, i), 16);
+        *stSlot(cpu, 0) = *stConst(cpu, i);
         markValid(cpu, cpu.fpu.phys(0));
     }
     return true;
@@ -323,8 +330,7 @@ bool fcmov(X86& cpu, const Insn& in) {
 
 void doFninit(X86& cpu) {
     cpu.fpu.reset();
-    x87ApplyControlWord(cpu.fpu.control);
-    x87TakeExceptionFlags();
+    x87ClearExceptionFlags();
 }
 
 // ---- 环境 / 状态保存区（32 位保护模式：28 字节环境 + 8×10 字节寄存器栈）----
@@ -343,15 +349,18 @@ void doLoadEnv(X86& cpu, std::uint32_t ea) {
     cpu.fpu.status = cpu.mem->rd16(ea + 4);
     cpu.fpu.tag = cpu.mem->rd16(ea + 8);
     cpu.fpu.top = static_cast<std::uint8_t>((cpu.fpu.status >> 11) & 7u);
-    x87ApplyControlWord(cpu.fpu.control);
+    // ★ D49：控制字只存下来（PC 不生效，RC 由 `fist*`/`frndint` 现取）⇒ 这里没有别的动作。
 }
 
 void doFnsave(X86& cpu, std::uint32_t ea) {
     doSaveEnv(cpu, ea);
     for (int i = 0; i < 8; ++i) {
-        const std::uint8_t* p = cpu.fpu.regs[cpu.fpu.phys(i)];
+        // ★ 寄存器是 double ⇒ 以 **10 字节扩展格式**写进保存区（加宽是精确的；D49 的偏差只体现
+        //   在低 11 位尾数恒 0）。`frstor` 读回来时再收窄 ⇒ 往返逐位一致（对可表示的 double）。
+        std::uint8_t b[10] = {};
+        x87StoreMem(cpu.fpu.regs[cpu.fpu.phys(i)], b, 10);
         for (int k = 0; k < 10; ++k) {
-            cpu.mem->wr8(ea + 28u + static_cast<std::uint32_t>(i) * 10u + static_cast<std::uint32_t>(k), p[k]);
+            cpu.mem->wr8(ea + 28u + static_cast<std::uint32_t>(i) * 10u + static_cast<std::uint32_t>(k), b[k]);
         }
     }
     doFninit(cpu);  // INTEL：FNSAVE 之后 FPU 处于 init 状态
@@ -360,11 +369,11 @@ void doFnsave(X86& cpu, std::uint32_t ea) {
 void doFrstor(X86& cpu, std::uint32_t ea) {
     doLoadEnv(cpu, ea);
     for (int i = 0; i < 8; ++i) {
-        std::uint8_t b[16] = {};
+        std::uint8_t b[10] = {};
         for (int k = 0; k < 10; ++k) {
             b[k] = cpu.mem->rd8(ea + 28u + static_cast<std::uint32_t>(i) * 10u + static_cast<std::uint32_t>(k));
         }
-        std::memcpy(cpu.fpu.regs[cpu.fpu.phys(i)], b, 16);
+        cpu.fpu.regs[cpu.fpu.phys(i)] = x87LoadMem(b, 10);
     }
     cpu.fpu.top = static_cast<std::uint8_t>((cpu.fpu.status >> 11) & 7u);
 }
@@ -378,8 +387,8 @@ void doFxam(X86& cpu) {
         c3 = true;
         c0 = true;
     } else {
-        sign = x87SignBit(stConst(cpu, 0));
-        switch (x87Classify(stConst(cpu, 0))) {
+        sign = x87SignBit(*stConst(cpu, 0));
+        switch (x87Classify(*stConst(cpu, 0))) {
             case X87Class::Nan: c0 = true; break;
             case X87Class::Normal: c2 = true; break;
             case X87Class::Infinity: c2 = true; c0 = true; break;
@@ -390,56 +399,47 @@ void doFxam(X86& cpu) {
     setCC(cpu, c0, sign, c2, c3);  // C1 = 符号位
 }
 
-// 超越函数 / 实现定义族：extF80 → double → libm → extF80（见文件头的 1 ulp 登记）
+// 超越函数 / 实现定义族：全走 `fpu_bridge.cpp` 的宿主 libm 入口（D49：一份模型，两臂共用
+// —— 生成代码的 `lift_x87_*` helper 调的是**同一批**函数）。
 bool transcendental(X86& cpu, const Insn& in) {
-    x87ApplyControlWord(cpu.fpu.control);
-    const double x = x87ToDouble(stConst(cpu, 0));
-    Ext80 r;
+    const double x = *stConst(cpu, 0);
     switch (in.op) {
         case Op::Fsin:
         case Op::Fcos: {
             // Intel：|ST(0)| >= 2^63 ⇒ C2=1，ST(0) 不变
-            if (!(std::fabs(x) < 9223372036854775808.0)) {
+            if (!x87TrigInRange(x)) {
                 setCC(cpu, false, false, true, false);
                 syncStatus(cpu);
                 return true;
             }
-            x87FromDouble(in.op == Op::Fsin ? std::sin(x) : std::cos(x), r);
-            storeSt0(cpu, r);
+            storeSt0(cpu, in.op == Op::Fsin ? x87Sin(x) : x87Cos(x));
             setCC(cpu, false, false, false, false);
             return true;
         }
         case Op::Fsincos: {
-            if (!(std::fabs(x) < 9223372036854775808.0)) {
+            if (!x87TrigInRange(x)) {
                 setCC(cpu, false, false, true, false);
                 syncStatus(cpu);
                 return true;
             }
             // Intel：正弦写 ST(0)，**再把余弦压栈** ⇒ 最终 ST(0)=cos、ST(1)=sin
-            x87FromDouble(std::sin(x), r);
-            std::memcpy(stSlot(cpu, 0), r, 16);
+            *stSlot(cpu, 0) = x87Sin(x);
             markValid(cpu, cpu.fpu.phys(0));
-            Ext80 c;
-            x87FromDouble(std::cos(x), c);
-            push(cpu, c);
+            push(cpu, x87Cos(x));
             setCC(cpu, false, false, false, false);
             syncStatus(cpu);
             return true;
         }
         case Op::Fptan: {
-            x87FromDouble(std::tan(x), r);
-            storeSt0(cpu, r);
-            Ext80 one;
-            x87One(one);
-            push(cpu, one);  // Intel：结果留在 ST(1)，再把 1.0 压栈
+            storeSt0(cpu, x87Tan(x));
+            push(cpu, 1.0);  // Intel：结果留在 ST(1)，再把 1.0 压栈
             setCC(cpu, false, false, false, false);
             syncStatus(cpu);
             return true;
         }
         case Op::Fpatan: {
-            const double y = x87ToDouble(stConst(cpu, 1));
-            x87FromDouble(std::atan2(y, x), r);
-            std::memcpy(stSlot(cpu, 1), r, 16);  // 写 ST(1)，然后 pop ⇒ 结果落到 ST(0)
+            const double y = *stConst(cpu, 1);
+            *stSlot(cpu, 1) = x87Atan2(y, x);  // 写 ST(1)，然后 pop ⇒ 结果落到 ST(0)
             markValid(cpu, cpu.fpu.phys(1));
             pop(cpu);
             setCC(cpu, false, false, false, false);
@@ -448,10 +448,9 @@ bool transcendental(X86& cpu, const Insn& in) {
         }
         case Op::Fyl2x:
         case Op::Fyl2xp1: {
-            const double y = x87ToDouble(stConst(cpu, 1));
-            const double v = (in.op == Op::Fyl2x) ? std::log2(x) : std::log2(x + 1.0);
-            x87FromDouble(y * v, r);
-            std::memcpy(stSlot(cpu, 1), r, 16);
+            const double y = *stConst(cpu, 1);
+            const double v = (in.op == Op::Fyl2x) ? x87Log2(x) : x87Log2p1(x);
+            *stSlot(cpu, 1) = x87Mul(y, v);
             markValid(cpu, cpu.fpu.phys(1));
             pop(cpu);
             setCC(cpu, false, false, false, false);
@@ -459,8 +458,7 @@ bool transcendental(X86& cpu, const Insn& in) {
             return true;
         }
         case Op::F2xm1: {
-            x87FromDouble(std::exp2(x) - 1.0, r);
-            storeSt0(cpu, r);
+            storeSt0(cpu, x87Exp2m1(x));
             setCC(cpu, false, false, false, false);
             return true;
         }
@@ -522,7 +520,7 @@ bool pkLoad(X86& cpu, const Operand& op, PackVec& v, int* bytes) {
                 //   8 个 x87 数据寄存器本身，与 TOP 无关）。用 `phys()` 会让 TOP≠0 时的 MMX
                 //   读写落到别的槽上 —— 那是**静默算错**（同一份 phys() 既写又读会自洽地掩盖它，
                 //   所以 `mmx-*` 那几条从 TOP=0 开始的夹具都照不到）。守卫：`mmx-top-rotated`。
-                std::memcpy(v.b, cpu.fpu.regs[sp.index], 8);
+                std::memcpy(v.b, &cpu.fpu.regs[sp.index], 8);
                 *bytes = 8;
                 return true;
             }
@@ -559,7 +557,7 @@ bool pkStore(X86& cpu, const Operand& op, const PackVec& v, int bytes) {
             if (sp.cls != RegClass::X87) return false;
             // MMX 写只覆盖低 64 位；★ 不动 tag word（Intel：MMX 指令不影响 x87 tag word）。
             // ★ 同样**不能过 `phys()`**（理由见 `pkLoad`）：MM0..MM7 = 固定物理槽 R0..R7。
-            std::memcpy(cpu.fpu.regs[sp.index], v.b, 8);
+            std::memcpy(&cpu.fpu.regs[sp.index], v.b, 8);
             return true;
         }
         case OpKind::Xmm: {
@@ -1266,11 +1264,11 @@ bool execSse(X86& cpu, const Insn& in) {
 bool execFpu(X86& cpu, const Insn& in) {
     switch (in.op) {
         case Op::Fld: {
-            Ext80 v;
+            double v = 0.0;
             if (in.op0().kind == OpKind::Reg) {
-                std::memcpy(v, stConst(cpu, stIndex(in.op0(), 0)), 16);
+                v = *stConst(cpu, stIndex(in.op0(), 0));
             } else if (in.op0().kind == OpKind::Mem) {
-                if (!loadMemValue(cpu, in.op0().mem, v)) return unimplemented(cpu, in, "fld 的宽度不支持");
+                if (!loadMemValue(cpu, in.op0().mem, &v)) return unimplemented(cpu, in, "fld 的宽度不支持");
             } else {
                 return unimplemented(cpu, in, "fld 的操作数形态不支持");
             }
@@ -1280,23 +1278,22 @@ bool execFpu(X86& cpu, const Insn& in) {
         }
         case Op::Fild: {
             if (in.op0().kind != OpKind::Mem) return unimplemented(cpu, in, "fild 只支持内存操作数");
-            Ext80 v;
-            if (!loadIntMem(cpu, in.op0().mem, v)) return unimplemented(cpu, in, "fild 的整数宽度不支持");
+            double v = 0.0;
+            if (!loadIntMem(cpu, in.op0().mem, &v)) return unimplemented(cpu, in, "fild 的整数宽度不支持");
             push(cpu, v);
             syncStatus(cpu);
             return true;
         }
         case Op::Fst:
         case Op::Fstp: {
-            const std::uint8_t* v = stConst(cpu, 0);
+            const double v = *stConst(cpu, 0);
             if (in.op0().kind == OpKind::Reg) {
                 const int i = stIndex(in.op0(), 0);
-                if (i != 0) {  // `fst st(0)` 是空操作（也避开 memcpy 自拷贝）
-                    std::memcpy(stSlot(cpu, i), v, 16);
+                if (i != 0) {  // `fst st(0)` 是空操作
+                    *stSlot(cpu, i) = v;
                     markValid(cpu, cpu.fpu.phys(i));
                 }
             } else if (in.op0().kind == OpKind::Mem) {
-                x87ApplyControlWord(cpu.fpu.control);
                 storeMemValue(cpu, in.op0().mem, v);
             } else {
                 return unimplemented(cpu, in, "fst 的操作数形态不支持");
@@ -1308,16 +1305,14 @@ bool execFpu(X86& cpu, const Insn& in) {
         case Op::Fist:
         case Op::Fistp: {
             if (in.op0().kind != OpKind::Mem) return unimplemented(cpu, in, "fist 只支持内存操作数");
-            x87ApplyControlWord(cpu.fpu.control);
-            storeIntMem(cpu, in.op0().mem, stConst(cpu, 0));
+            storeIntMem(cpu, in.op0().mem, *stConst(cpu, 0), x87RoundOf(cpu.fpu.control));
             if (in.op == Op::Fistp) pop(cpu);
             syncStatus(cpu);
             return true;
         }
         case Op::Fisttp: {
             if (in.op0().kind != OpKind::Mem) return unimplemented(cpu, in, "fisttp 只支持内存操作数");
-            x87ApplyControlWord(cpu.fpu.control);
-            storeIntMem(cpu, in.op0().mem, stConst(cpu, 0), true);  // 朝零截断（不看 RC）
+            storeIntMem(cpu, in.op0().mem, *stConst(cpu, 0), X87Round::Zero);  // 朝零截断（不看 RC）
             pop(cpu);
             syncStatus(cpu);
             return true;
@@ -1391,7 +1386,6 @@ bool execFpu(X86& cpu, const Insn& in) {
         case Op::Fcmovnu:
             return fcmov(cpu, in);
         case Op::Fnstsw: {
-            x87ApplyControlWord(cpu.fpu.control);
             syncStatus(cpu);
             const std::uint16_t sw = cpu.fpu.status;
             if (in.op0().kind == OpKind::Reg) {
@@ -1407,7 +1401,7 @@ bool execFpu(X86& cpu, const Insn& in) {
         case Op::Fldcw: {
             if (in.op0().kind != OpKind::Mem) return unimplemented(cpu, in, "fldcw 只支持内存操作数");
             cpu.fpu.control = cpu.mem->rd16(cpu.eaOf(in.op0().mem));
-            x87ApplyControlWord(cpu.fpu.control);
+            // ★ D49：PC 位**不生效**，RC 只在 `fist`/`fistp`/`frndint` 处现取（⛔ 不 fesetround）
             return true;
         }
         case Op::Fnstcw: {
@@ -1441,10 +1435,9 @@ bool execFpu(X86& cpu, const Insn& in) {
             const int i = (in.op0().kind == OpKind::Reg) ? static_cast<int>(regSpec(in.op0().reg).index) : 1;
             const int p0 = cpu.fpu.phys(0);
             const int p1 = cpu.fpu.phys(i);
-            std::uint8_t tmp[16];
-            std::memcpy(tmp, cpu.fpu.regs[p0], 16);
-            std::memcpy(cpu.fpu.regs[p0], cpu.fpu.regs[p1], 16);
-            std::memcpy(cpu.fpu.regs[p1], tmp, 16);
+            const double tmp = cpu.fpu.regs[p0];
+            cpu.fpu.regs[p0] = cpu.fpu.regs[p1];
+            cpu.fpu.regs[p1] = tmp;
             return true;
         }
         case Op::Ffree: {
@@ -1462,19 +1455,19 @@ bool execFpu(X86& cpu, const Insn& in) {
             return true;
         case Op::Fnop:
             return true;
-        case Op::Fld1: { Ext80 v; x87One(v); push(cpu, v); syncStatus(cpu); return true; }
-        case Op::Fldz: { Ext80 v; x87Zero(v); push(cpu, v); syncStatus(cpu); return true; }
-        case Op::Fldpi: { Ext80 v; x87Pi(v); push(cpu, v); syncStatus(cpu); return true; }
-        case Op::Fldln2: { Ext80 v; x87Ln2(v); push(cpu, v); syncStatus(cpu); return true; }
-        case Op::Fldlg2: { Ext80 v; x87Lg2(v); push(cpu, v); syncStatus(cpu); return true; }
-        case Op::Fldl2e: { Ext80 v; x87L2e(v); push(cpu, v); syncStatus(cpu); return true; }
-        case Op::Fldl2t: { Ext80 v; x87L2t(v); push(cpu, v); syncStatus(cpu); return true; }
+        case Op::Fld1: push(cpu, x87One()); syncStatus(cpu); return true;
+        case Op::Fldz: push(cpu, x87Zero()); syncStatus(cpu); return true;
+        case Op::Fldpi: push(cpu, x87Pi()); syncStatus(cpu); return true;
+        case Op::Fldln2: push(cpu, x87Ln2()); syncStatus(cpu); return true;
+        case Op::Fldlg2: push(cpu, x87Lg2()); syncStatus(cpu); return true;
+        case Op::Fldl2e: push(cpu, x87L2e()); syncStatus(cpu); return true;
+        case Op::Fldl2t: push(cpu, x87L2t()); syncStatus(cpu); return true;
         case Op::Fchs:
-            x87ChangeSign(stSlot(cpu, 0));
+            *stSlot(cpu, 0) = x87ChangeSign(*stConst(cpu, 0));
             markValid(cpu, cpu.fpu.phys(0));
             return true;
         case Op::Fabs:
-            x87Abs(stSlot(cpu, 0));
+            *stSlot(cpu, 0) = x87Abs(*stConst(cpu, 0));
             markValid(cpu, cpu.fpu.phys(0));
             return true;
         case Op::Fninit:
@@ -1488,9 +1481,7 @@ bool execFpu(X86& cpu, const Insn& in) {
         case Op::Fwait:
             return true;
         case Op::Ftst: {
-            Ext80 zero;
-            x87Zero(zero);
-            const int cmp = x87Compare(stConst(cpu, 0), zero);
+            const int cmp = x87Compare(*stConst(cpu, 0), 0.0, /*quiet=*/false);
             if (cmp == 2) setCC(cpu, true, false, true, true);
             else if (cmp == 0) setCC(cpu, false, false, false, true);
             else if (cmp < 0) setCC(cpu, true, false, false, false);
@@ -1499,62 +1490,41 @@ bool execFpu(X86& cpu, const Insn& in) {
             return true;
         }
         case Op::Fsqrt: {
-            x87ApplyControlWord(cpu.fpu.control);
-            Ext80 r;
-            x87Sqrt(stConst(cpu, 0), r);
-            storeSt0(cpu, r);
+            storeSt0(cpu, x87Sqrt(*stConst(cpu, 0)));
             return true;
         }
         case Op::Frndint: {
-            x87ApplyControlWord(cpu.fpu.control);
-            Ext80 r;
-            x87RoundToInt(stConst(cpu, 0), r);
-            storeSt0(cpu, r);
+            storeSt0(cpu, x87RoundToInt(*stConst(cpu, 0), x87RoundOf(cpu.fpu.control)));
             return true;
         }
         case Op::Fprem:
         case Op::Fprem1: {
-            x87ApplyControlWord(cpu.fpu.control);
-            Ext80 r;
-            if (in.op == Op::Fprem) {
-                x87RemTrunc(stConst(cpu, 0), stConst(cpu, 1), r);
-            } else {
-                x87Rem(stConst(cpu, 0), stConst(cpu, 1), r);
-            }
+            const double a = *stConst(cpu, 0);
+            const double b = *stConst(cpu, 1);
+            const double r = (in.op == Op::Fprem) ? x87RemTrunc(a, b) : x87Rem(a, b);
             syncStatus(cpu);  // 真运算的异常位先落账
             // 商的低 3 位 → C0(bit2) / C3(bit1) / C1(bit0)；C2=1 表示"没算完"
             bool c0 = false;
             bool c1 = false;
             bool c2 = false;
             bool c3 = false;
-            Ext80 diff = {};
-            Ext80 qv = {};
-            x87Sub(stConst(cpu, 0), r, diff);
-            x87Div(diff, stConst(cpu, 1), qv);
-            Ext80 lim = {};
-            x87FromI64(static_cast<std::int64_t>(1) << 62, lim);
-            Ext80 aq = {};
-            std::memcpy(aq, qv, 16);
-            x87Abs(aq);
-            if (x87Compare(aq, lim) < 0) {
-                const std::int64_t q = x87ToI64(qv, true);
+            const double qv = x87Div(x87Sub(a, r), b);
+            if (std::fabs(qv) < 4611686018427387904.0) {  // 2^62
+                const std::int64_t q = x87ToI64Trunc(qv);
                 c0 = ((q >> 2) & 1) != 0;
                 c3 = ((q >> 1) & 1) != 0;
                 c1 = (q & 1) != 0;
             } else {
                 c2 = true;
             }
-            x87TakeExceptionFlags();  // 丢弃"算商位"产生的 inexact
-            std::memcpy(stSlot(cpu, 0), r, 16);
+            x87ClearExceptionFlags();  // 丢弃"算商位"产生的异常位（与旧实现同口径）
+            *stSlot(cpu, 0) = r;
             markValid(cpu, cpu.fpu.phys(0));
             setCC(cpu, c0, c1, c2, c3);
             return true;
         }
         case Op::Fscale: {
-            x87ApplyControlWord(cpu.fpu.control);
-            Ext80 r;
-            x87Scale(stConst(cpu, 0), stConst(cpu, 1), r);
-            storeSt0(cpu, r);
+            storeSt0(cpu, x87Scale(*stConst(cpu, 0), *stConst(cpu, 1)));
             return true;
         }
         case Op::Fxam:
@@ -1562,10 +1532,10 @@ bool execFpu(X86& cpu, const Insn& in) {
             syncStatus(cpu);
             return true;
         case Op::Fxtract: {
-            Ext80 sig = {};
-            Ext80 exp = {};
-            x87Extract(stConst(cpu, 0), sig, exp);
-            std::memcpy(stSlot(cpu, 0), sig, 16);
+            double sig = 0.0;
+            double exp = 0.0;
+            x87Extract(*stConst(cpu, 0), &sig, &exp);
+            *stSlot(cpu, 0) = sig;
             markValid(cpu, cpu.fpu.phys(0));
             push(cpu, exp);  // 指数压栈 ⇒ 最终 ST(0)=指数、ST(1)=尾数
             syncStatus(cpu);
@@ -1585,4 +1555,19 @@ bool execFpu(X86& cpu, const Insn& in) {
     }
 }
 
+
+// =====================================================================================
+// AOT 生成代码的 x87 helper 入口（检查点 2 / D49）
+// =====================================================================================
+// ★ `lift_x87_sem(cpu, op)`（`lift_abi.cpp`）转发到这里。它配一个**只带 op** 的 `Insn` 调
+//   `execFpu` ⇒ 超越函数族 / fprem / fscale / fxtract / fxam 的语义与解释器**逐位同一份**
+//   （⛔ 不在发射器里重写公式，也不另起一份 double 实现）。
+// ★ 只接受**无内存操作数**的 op：`unsupportedReasonOf`（发射器）只把这一族路由过来；
+//   其余 op 会走 `execFpu` 里需要操作数的分支（`op0().kind == None`）⇒ `unimplemented` 响亮失败。
+bool execX87NoOperand(X86& cpu, Op op) {
+    Insn in;
+    in.op = op;
+    in.mnemonic = opName(op);
+    return execFpu(cpu, in);
+}
 }  // namespace lift

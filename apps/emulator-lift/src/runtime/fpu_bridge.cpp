@@ -1,325 +1,315 @@
-// emulator-lift · x87 ↔ Berkeley SoftFloat（`extF80`）的桥
+// emulator-lift · x87 的**实数模型**（D49：`double`）：实现
 //
-// ★ 这里**没有**我们自己写的浮点算术：四则 / 开方 / 取余 / 取整 / 比较全部转给 SoftFloat。
-//   理由（plan §4 D3）：extF80 就是 x86 的 80 位扩展；PC/RC 与 `extF80_roundingPrecision` /
-//   `softfloat_roundingMode` 一一对应；纯整数实现 ⇒ 三个 preset 逐位一致。
-// ★ 一个**关键的巧合**（省掉一层转换）：SoftFloat 的 `extFloat80_t`（8086 特化，LITTLEENDIAN）
-//   布局是 `{uint64 signif; uint16 signExp;}`，长度 16 —— 与 x86 的 10 字节内存格式
-//   **前 10 字节逐字节相同**。所以 guest 寄存器槽里存的就是它，内存 ↔ 寄存器只在
-//   4/8 字节（float/double）这两个宽度上需要真转换。
-// ⚠ 已知边界（plan §4 D3）：SoftFloat 不复现 x87 的 pseudo-denormal / unnormal 表示。
+// ★ 这里**没有**地址空间、没有寄存器栈、没有 tag word —— 只回答"值怎么算"。
+//   状态（8 个槽 / TOP / tag / 状态字 / 控制字）在 `exec_fpu.cpp`（解释器）与
+//   `src/aot/lift_gen_emit.cpp`（发射器）里各有一份**同一语义**的实现。
+//
+// ★ 为什么保留"挂账异常位"这条通道（而不是把异常位直接写进 X87State）：
+//   1. 解释器现有 20 处 `syncStatus()` 的调用形状不必改（取走 + 映射进状态字）；
+//   2. `fpu-thread-flags` 那条守卫（`REQ-01M76ZHN9V2WNCYT1ACJDJ94CW`）要的正是
+//      "这份挂账**每线程一份**" —— 音频 feeder 是第二条 guest 执行流。
+//   ⇒ 存放是 `thread_local`，⛔ 不要退回进程级全局。
 #include "runtime/fpu_bridge.h"
 
 #include <cmath>
 #include <cstring>
 
-extern "C" {
-// ★ 必须先 include `platform.h`：`LITTLEENDIAN` 决定 `extFloat80_t` 的**字段顺序**
-//   （小端 = `{uint64 signif; uint16 signExp;}`，大端 = 反序）。库侧的 `.c` 都先 include 它，
-//   而这里原先只 include `softfloat.h` ⇒ 同一个结构体在**库侧与我们的 TU 里布局不同**：
-//   `signif` / `signExp` 互相错位，于是 `x87ChangeSign` / `x87Abs` / `x87IsZero` / `x87IsNan` /
-//   `x87Scale` 全在错的偏移上动手（实测：`fchs` 翻到 significand 的低位字，`-1.5` 不变号）。
-//   ⛔ 不要删这一行，也不要挪到 `softfloat.h` 之后（那就白写了）。
-#include "platform.h"
-#include "softfloat.h"
-}
-
 namespace lift {
 namespace {
 
-extFloat80_t& as(Ext80 v) { return *reinterpret_cast<extFloat80_t*>(v); }
-const extFloat80_t& as(const Ext80 v) { return *reinterpret_cast<const extFloat80_t*>(v); }
+// ★ 每线程一份（见文件头的第 2 条）。⛔ 不加 `static`：那会把 TLS 变成"每 TU 一份"。
+thread_local std::uint8_t g_x87_flags = 0;
 
-void store(extFloat80_t v, Ext80 out) { std::memcpy(out, &v, sizeof(extFloat80_t)); }
+void raise(std::uint8_t bits) { g_x87_flags = static_cast<std::uint8_t>(g_x87_flags | bits); }
 
-float32_t f32FromBits(std::uint32_t bits) {
-    float32_t f;
-    f.v = bits;
-    return f;
+// ---------------- x87 的 10 字节扩展精度内存格式 ↔ double ----------------
+// 布局（小端）：[0..7] = 尾数（显式整数位在 bit63）· [8..9] = 符号 + 15 位偏置指数（bias 16383）
+double m80ToDouble(const std::uint8_t* p) {
+    std::uint64_t signif = 0;
+    std::uint16_t se = 0;
+    std::memcpy(&signif, p, 8);
+    std::memcpy(&se, p + 8, 2);
+    const bool neg = (se & 0x8000u) != 0;
+    const unsigned e = static_cast<unsigned>(se & 0x7FFFu);
+    if (e == 0x7FFFu) {
+        if ((signif << 1) == 0) return neg ? -INFINITY : INFINITY;
+        // NaN：保住 quiet 位（m80 的 bit62 ⇒ double 的 bit51）与高 52 位尾数
+        std::uint64_t frac = (signif >> 11) & 0xFFFFFFFFFFFFFull;
+        if (frac == 0) frac = 0x8000000000000ull;  // 尾数全是低 11 位 ⇒ 强行留成 NaN
+        std::uint64_t bits = (static_cast<std::uint64_t>(neg) << 63) | (0x7FFull << 52) | frac;
+        double d = 0;
+        std::memcpy(&d, &bits, 8);
+        return d;
+    }
+    if (e == 0 && signif == 0) return neg ? -0.0 : 0.0;
+    // 值 = signif · 2^(biased − 16383 − 63)；`e == 0`（pseudo-denormal）按 biased = 1 算
+    const int biased = (e == 0) ? 1 : static_cast<int>(e);
+    const double m = static_cast<double>(signif);  // 就近到 53 位
+    const double v = std::ldexp(m, biased - 16383 - 63);
+    return neg ? -v : v;
 }
-float64_t f64FromBits(std::uint64_t bits) {
-    float64_t f;
-    f.v = bits;
-    return f;
+
+void doubleToM80(double v, std::uint8_t* p) {
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &v, 8);
+    const bool neg = (bits >> 63) != 0;
+    const unsigned exp = static_cast<unsigned>((bits >> 52) & 0x7FFu);
+    std::uint64_t frac = bits & 0xFFFFFFFFFFFFFull;
+    std::uint64_t signif = 0;
+    unsigned se = 0;
+    if (exp == 0x7FFu) {
+        se = 0x7FFFu;
+        // inf ⇒ 整数位 1、余 0；NaN ⇒ 整数位 1 + quiet 位 + payload（bit51 ⇒ bit62）
+        signif = (frac == 0) ? 0x8000000000000000ull : (0x8000000000000000ull | (frac << 11));
+    } else if (exp == 0 && frac == 0) {
+        se = 0;
+        signif = 0;
+    } else if (exp == 0) {
+        // double 次正规：先规格化（bit52 置位）再按正规公式落位
+        int sh = 0;
+        while ((frac & 0x10000000000000ull) == 0) {
+            frac <<= 1;
+            ++sh;
+        }
+        signif = 0x8000000000000000ull | ((frac & 0xFFFFFFFFFFFFFull) << 11);
+        se = static_cast<unsigned>(16383 - 1022 - sh);
+    } else {
+        signif = 0x8000000000000000ull | (frac << 11);
+        se = static_cast<unsigned>(static_cast<int>(exp) - 1023 + 16383);
+    }
+    if (neg) se |= 0x8000u;
+    std::memset(p, 0, 10);
+    std::memcpy(p, &signif, 8);
+    const std::uint16_t se16 = static_cast<std::uint16_t>(se);
+    std::memcpy(p + 8, &se16, 2);
 }
-float64_t f64FromDouble(double d) {
-    float64_t f;
-    std::memcpy(&f.v, &d, 8);
-    return f;
+
+// 按 RC 取整（`frndint` / 整数转换共用唯一一份）。NaN / ±inf 原样返回。
+double roundByRc(double v, X87Round rc) {
+    if (std::isnan(v) || std::isinf(v)) return v;
+    switch (rc) {
+        case X87Round::Down: return std::floor(v);
+        case X87Round::Up: return std::ceil(v);
+        case X87Round::Zero: return std::trunc(v);
+        default: return std::nearbyint(v);  // 宿主默认 = 就近偶数（D49：⛔ 不逐 op fesetround）
+    }
+}
+
+std::int32_t toI32(double v, X87Round rc) {
+    const double r = roundByRc(v, rc);
+    // ±2^31 是边界：|r| ≥ 2^31 越界（−2^31 本身**在**范围内）
+    if (!(r >= -2147483648.0 && r < 2147483648.0)) {
+        raise(kX87IE);
+        return static_cast<std::int32_t>(0x80000000u);
+    }
+    return static_cast<std::int32_t>(r);
+}
+
+std::int64_t toI64(double v, X87Round rc) {
+    const double r = roundByRc(v, rc);
+    if (!(r >= -9223372036854775808.0 && r < 9223372036854775808.0)) {
+        raise(kX87IE);
+        return static_cast<std::int64_t>(0x8000000000000000ull);
+    }
+    return static_cast<std::int64_t>(r);
 }
 
 }  // namespace
 
-void x87MemToReg(const std::uint8_t* mem, Ext80 out, std::uint8_t size) {
-    extFloat80_t v{};
+X87Round x87RoundOf(std::uint16_t control) {
+    return static_cast<X87Round>((control >> 10) & 3u);
+}
+
+// ---------------- 内存 ↔ 寄存器 ----------------
+X87Val x87LoadMem(const std::uint8_t* mem, unsigned size) {
     switch (size) {
         case 4: {
-            std::uint32_t bits = 0;
-            std::memcpy(&bits, mem, 4);
-            v = f32_to_extF80(f32FromBits(bits));
-            break;
+            float f = 0.0f;
+            std::memcpy(&f, mem, 4);
+            return static_cast<double>(f);  // m32 → double 是**精确**的
         }
         case 8: {
-            std::uint64_t bits = 0;
-            std::memcpy(&bits, mem, 8);
-            v = f64_to_extF80(f64FromBits(bits));
-            break;
+            double d = 0;
+            std::memcpy(&d, mem, 8);
+            return d;
         }
         case 10:
-        default:
-            // 与 x86 内存格式逐字节相同（见文件头）
-            std::memset(out, 0, 16);
-            std::memcpy(out, mem, 10);
+        default: return m80ToDouble(mem);
+    }
+}
+
+void x87StoreMem(X87Val v, std::uint8_t* mem, unsigned size) {
+    switch (size) {
+        case 4: {
+            const float f = static_cast<float>(v);  // 就近偶数（x87 的 fst m32 同样按 RC；见文件头 §3）
+            std::memcpy(mem, &f, 4);
             return;
-    }
-    store(v, out);
-}
-
-void x87RegToMem(const Ext80 in, std::uint8_t* mem, std::uint8_t size) {
-    const extFloat80_t v = as(in);
-    switch (size) {
-        case 4: {
-            const float32_t f = extF80_to_f32(v);
-            std::memcpy(mem, &f.v, 4);
-            break;
         }
-        case 8: {
-            const float64_t f = extF80_to_f64(v);
-            std::memcpy(mem, &f.v, 8);
-            break;
-        }
+        case 8: std::memcpy(mem, &v, 8); return;
         case 10:
-        default:
-            std::memcpy(mem, &v, 10);
-            break;
+        default: doubleToM80(v, mem); return;
     }
 }
 
-void x87FromI16(std::int16_t v, Ext80 out) { store(i32_to_extF80(v), out); }
-void x87FromI32(std::int32_t v, Ext80 out) { store(i32_to_extF80(v), out); }
-void x87FromI64(std::int64_t v, Ext80 out) { store(i64_to_extF80(v), out); }
-void x87FromU32(std::uint32_t v, Ext80 out) { store(ui32_to_extF80(v), out); }
-void x87FromU64(std::uint64_t v, Ext80 out) { store(ui64_to_extF80(v), out); }
+// ---------------- 整数 ↔ double ----------------
+// ★ i64 → double 在 |v| > 2^53 时会丢低位（53 位尾数）—— D49 接受的偏差（旧 extF80 路径是精确的）。
+X87Val x87FromI16(std::int16_t v) { return static_cast<double>(v); }
+X87Val x87FromI32(std::int32_t v) { return static_cast<double>(v); }
+X87Val x87FromI64(std::int64_t v) { return static_cast<double>(v); }
 
-std::int32_t x87ToI32(const Ext80 in, bool truncate) {
-    return static_cast<std::int32_t>(
-        extF80_to_i32(as(in), truncate ? softfloat_round_minMag : softfloat_roundingMode, false));
-}
-std::int64_t x87ToI64(const Ext80 in, bool truncate) {
-    return static_cast<std::int64_t>(
-        extF80_to_i64(as(in), truncate ? softfloat_round_minMag : softfloat_roundingMode, false));
+std::int32_t x87ToI32(X87Val v, X87Round rc) { return toI32(v, rc); }
+std::int64_t x87ToI64(X87Val v, X87Round rc) { return toI64(v, rc); }
+std::int32_t x87ToI32Trunc(X87Val v) { return toI32(v, X87Round::Zero); }
+std::int64_t x87ToI64Trunc(X87Val v) { return toI64(v, X87Round::Zero); }
+
+// ---------------- 常量 ----------------
+// ★ 旧实现压的是"64 位有效位的扩展精度常数"（与真机逐位相同）。D49 之后寄存器是 double
+//   ⇒ 常数只能到 53 位尾数，**这与真机的差**是 D49 明写接受的第一条偏差。
+X87Val x87One() { return 1.0; }
+X87Val x87Zero() { return 0.0; }
+X87Val x87Pi() { return 3.14159265358979323846264338327950288; }
+X87Val x87Ln2() { return 0.693147180559945309417232121458176568; }
+X87Val x87Lg2() { return 0.301029995663981195213738894724493027; }
+X87Val x87L2e() { return 1.44269504088896340735992468100189214; }
+X87Val x87L2t() { return 3.32192809488736234787031942948939018; }
+
+// ---------------- 四则 ----------------
+// ★ 异常位（任务 0 / D55 的裁决）：OE / UE 由**结果结构**判定，判据只有一份（下面这个函数）；
+//   PE **恒 0**（[fpu_bridge.h](fpu_bridge.h) 文件头 §5）。生成代码发同一份判据的 IR
+//   （`FnEmit::x87RaiseFloatFlags`）⇒ 两臂逐位可比。
+//   OE ⇐ r 是 ±inf 且 a、b **都有限**（把"运算上溢到 inf"与"inf 传播 / 除零"分开）；
+//   UE ⇐ r 是次正规（`|r| < DBL_MIN && r != 0`；⚠ 真机还要"且不精确"，本模型没有 PE ⇒ 按结构判）。
+void x87RaiseOverflowUnderflow(X87Val a, X87Val b, X87Val r) {
+    if (std::isinf(r) && std::isfinite(a) && std::isfinite(b)) raise(kX87OE);
+    if (std::fpclassify(r) == FP_SUBNORMAL) raise(kX87UE);
 }
 
-// ★ x87 的"超越常数"（FLD1/FLDZ/FLDPI/FLDL2E/FLDL2T/FLDLG2/FLDLN2）压栈的是**64 位有效位**的
-//   扩展精度常数，不是 double（53 位）舍入值（Intel SDM Vol.2 对每条 FLD 常数都写明"该常数按
-//   扩展精度四舍五入到 64 位有效位"）。旧实现走 `f64_to_extF80(字面量)` ⇒ 低 11 位恒为 0，
-//   与真机**逐位不同**（差 ~2^-64 相对，肉眼看不见，但"逐位"这句话就不成立了）。
-//   ⇒ 这里直接写 64 位有效位的位模式，值由一次独立的 BigInt 定点（2^-400）推导得到：
-//        π    = 16·atan(1/5) − 4·atan(1/239)（Machin）
-//        ln2  = 2·atanh(1/3)        ln5 = 2·ln2 + 2·atanh(1/9)      ln10 = ln2 + ln5
-//        log2(e) = 1/ln2            log10(2) = ln2/ln10              log2(10) = ln10/ln2
-//     再按"最近偶数"取 64 位有效位。求法与判据写在 `docs/s4-fpu-audit.md`（含 10 字节位模式），
-//     守卫逐字节钉住：`x87-fldpi` / `x87-fldln2` / `x87-fldlg2` / `x87-fldl2e` / `x87-fldl2t`。
-static void x87Const(std::uint16_t signExp, std::uint64_t signif, Ext80 out) {
-    std::memset(out, 0, 16);
-    // 小端：`extFloat80_t` = {uint64 signif; uint16 signExp}，前 10 字节就是 x86 的内存格式
-    std::memcpy(out, &signif, 8);
-    std::memcpy(out + 8, &signExp, 2);
+X87Val x87Add(X87Val a, X87Val b) {
+    const X87Val r = a + b;
+    x87RaiseOverflowUnderflow(a, b, r);
+    return r;
 }
-void x87One(Ext80 out) { store(i32_to_extF80(1), out); }
-void x87Zero(Ext80 out) { store(i32_to_extF80(0), out); }
-void x87Pi(Ext80 out) { x87Const(0x4000u, 0xC90FDAA22168C235ull, out); }
-void x87Ln2(Ext80 out) { x87Const(0x3FFEu, 0xB17217F7D1CF79ACull, out); }
-void x87Lg2(Ext80 out) { x87Const(0x3FFDu, 0x9A209A84FBCFF799ull, out); }
-void x87L2e(Ext80 out) { x87Const(0x3FFFu, 0xB8AA3B295C17F0BCull, out); }
-void x87L2t(Ext80 out) { x87Const(0x4000u, 0xD49A784BCD1B8AFEull, out); }
-void x87Ln10(Ext80 out) { x87Const(0x4000u, 0x935D8DDDAAA8AC17ull, out); }
-
-void x87Add(const Ext80 a, const Ext80 b, Ext80 out) { store(extF80_add(as(a), as(b)), out); }
-void x87Sub(const Ext80 a, const Ext80 b, Ext80 out) { store(extF80_sub(as(a), as(b)), out); }
-void x87Mul(const Ext80 a, const Ext80 b, Ext80 out) { store(extF80_mul(as(a), as(b)), out); }
-void x87Div(const Ext80 a, const Ext80 b, Ext80 out) { store(extF80_div(as(a), as(b)), out); }
-void x87Sqrt(const Ext80 a, Ext80 out) { store(extF80_sqrt(as(a)), out); }
-void x87RoundToInt(const Ext80 a, Ext80 out) {
-    store(extF80_roundToInt(as(a), softfloat_roundingMode, false), out);
+X87Val x87Sub(X87Val a, X87Val b) {
+    const X87Val r = a - b;
+    x87RaiseOverflowUnderflow(a, b, r);
+    return r;
 }
-void x87Rem(const Ext80 a, const Ext80 b, Ext80 out) {
-    // x87 的 fprem 是"部分余数"（可能没算完，C2=1）；SoftFloat 的 rem 一次算完 ⇒ C2 恒 0。
-    // 这在数值上是同样的结果（fprem 循环到 C2=0 的终值），差别只在中间步数。
-    store(extF80_rem(as(a), as(b)), out);
+X87Val x87Mul(X87Val a, X87Val b) {
+    const X87Val r = a * b;
+    x87RaiseOverflowUnderflow(a, b, r);
+    return r;
 }
-void x87Scale(const Ext80 a, const Ext80 b, Ext80 out) {
-    // fscale：ST0 * 2^trunc(ST1)。★ 不再手改指数域（那会把下溢做成 pseudo-denormal）——
-    // 而是**构造 2^e** 再走 `extF80_mul`：溢出 / 下溢 / 精度标志全部由 SoftFloat 给，
-    // 乘 2 的幂本身是精确的（不会误置 inexact）。
-    const double d = x87ToDouble(b);
-    std::int64_t e = 0;
-    if (std::isnan(d)) {
-        store(as(a), out);  // fscale 的 NaN 语义不在本仓关键路径上：原样返回，别静默改值
-        return;
+X87Val x87Div(X87Val a, X87Val b) {
+    if (std::isinf(a) && std::isinf(b)) raise(kX87IE);
+    else if (b == 0.0) {
+        if (a == 0.0 || std::isnan(a)) raise(kX87IE);
+        else raise(kX87ZE);
     }
-    if (d > 20000.0) e = 20000;
-    else if (d < -20000.0) e = -20000;
-    else e = static_cast<std::int64_t>(d < 0 ? -std::floor(-d) : std::floor(d));
-
-    extFloat80_t p{};
-    const std::uint16_t sign = static_cast<std::uint16_t>(as(a).signExp & 0x8000u);
-    if (e > 16383) {
-        // 结果必然上溢：交给 mul 之前的饱和（置 OE 后返回 inf）
-        p.signExp = 0x7FFF;
-        p.signif = 0x8000000000000000ull;
-        softfloat_raiseFlags(softfloat_flag_overflow);
-    } else if (e >= -16382) {
-        p.signExp = static_cast<std::uint16_t>(16383 + e);
-        p.signif = 0x8000000000000000ull;
-    } else if (e >= -16445) {
-        // 次正规的 2^e（signif 的整数位放在 bit63 ⇒ 值 = signif * 2^-16445）
-        p.signExp = 0;
-        p.signif = 1ull << static_cast<unsigned>(e + 16445);
-    } else {
-        p.signExp = 0;
-        p.signif = 0;
-        softfloat_raiseFlags(softfloat_flag_underflow);
-    }
-    if (sign) p.signExp = static_cast<std::uint16_t>(p.signExp | 0x8000u);
-    store(extF80_mul(as(a), p), out);
+    const X87Val r = a / b;
+    // ★ `b == 0` 的 inf 是 ZE 的结果，⛔ 不是上溢 ⇒ 不判 OE（UE 不受影响，inf 不是次正规）。
+    if (b != 0.0) x87RaiseOverflowUnderflow(a, b, r);
+    return r;
 }
-void x87ChangeSign(Ext80 v) { as(v).signExp ^= 0x8000u; }
-void x87Abs(Ext80 v) { as(v).signExp &= 0x7FFFu; }
+X87Val x87Sqrt(X87Val a) {
+    if (a < 0.0) raise(kX87IE);
+    return std::sqrt(a);
+}
+X87Val x87RoundToInt(X87Val v, X87Round rc) { return roundByRc(v, rc); }
+// `fprem1` = IEEE 余数（商取最近偶数）；`fprem` = 商朝零截断（fmod）。
+// ★ C2（"没算完"）在本模型里恒 0：double 一次算得完（与旧 SoftFloat 路径同口径）。
+X87Val x87Rem(X87Val a, X87Val b) {
+    if (b == 0.0 || std::isinf(a)) raise(kX87IE);
+    return std::remainder(a, b);
+}
+X87Val x87RemTrunc(X87Val a, X87Val b) {
+    if (b == 0.0 || std::isinf(a)) raise(kX87IE);
+    return std::fmod(a, b);
+}
+X87Val x87Scale(X87Val a, X87Val b) {
+    if (std::isnan(b)) return a;  // 与旧实现一致：NaN 指数 ⇒ 原样返回（⛔ 不静默改值）
+    int e = 0;
+    if (b > 20000.0) e = 20000;
+    else if (b < -20000.0) e = -20000;
+    else e = static_cast<int>(std::trunc(b));
+    const X87Val r = std::ldexp(a, e);
+    // `fscale` 也会上溢 / 下溢：按同一条判据（指数操作数用 1.0 —— 它是 scale 的"次数"，不是值）
+    x87RaiseOverflowUnderflow(a, 1.0, r);
+    return r;
+}
+X87Val x87ChangeSign(X87Val v) { return -v; }  // 只翻符号位（含 NaN：`-v` 就是符号位取反）
+X87Val x87Abs(X87Val v) { return std::fabs(v); }
 
-int x87Compare(const Ext80 a, const Ext80 b) {
-    const extFloat80_t av = as(a);
-    const extFloat80_t bv = as(b);
-    if (extF80_isSignalingNaN(av) || extF80_isSignalingNaN(bv)) {
-        softfloat_raiseFlags(softfloat_flag_invalid);
+// ---------------- 比较 / 分类 ----------------
+bool x87IsNan(X87Val v) { return std::isnan(v); }
+bool x87IsSnan(X87Val v) {
+    if (!std::isnan(v)) return false;
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &v, 8);
+    return (bits & 0x0008000000000000ull) == 0;  // quiet 位（bit51）为 0 ⇒ signaling
+}
+bool x87IsZero(X87Val v) { return v == 0.0; }  // ±0 都算 zero（tag 01 的判据）
+bool x87IsInf(X87Val v) { return std::isinf(v); }
+bool x87SignBit(X87Val v) {
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &v, 8);
+    return (bits >> 63) != 0;
+}
+
+int x87Compare(X87Val a, X87Val b, bool quiet) {
+    const bool na = std::isnan(a);
+    const bool nb = std::isnan(b);
+    if (na || nb) {
+        // `fcom`（quiet=false）对 QNaN 也置 IE；`fucom`（quiet=true）只对 SNaN 置。
+        if (!quiet || x87IsSnan(a) || x87IsSnan(b)) raise(kX87IE);
         return 2;
     }
-    // ★ 无序（quiet NaN）也是 `cmp == 2`：`extF80_eq/lt` 对 QNaN 都是 false，
-    //   不先判 NaN 会把它读成 "greater" ⇒ fcom 的 C3/C2/C0 全错（实测夹具 x87-fcom-unordered）。
-    if (x87IsNan(a) || x87IsNan(b)) return 2;
-    if (extF80_eq(av, bv)) return 0;
-    if (extF80_lt(av, bv)) return -1;
-    return 1;
-}
-bool x87IsNan(const Ext80 a) {
-    const extFloat80_t v = as(a);
-    const std::uint16_t exp = v.signExp & 0x7FFFu;
-    return exp == 0x7FFFu && (v.signif & 0x7FFFFFFFFFFFFFFFull) != 0;
-}
-bool x87IsZero(const Ext80 a) {
-    const extFloat80_t v = as(a);
-    return (v.signExp & 0x7FFFu) == 0 && v.signif == 0;
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return 0;
 }
 
-bool x87IsInf(const Ext80 a) {
-    const extFloat80_t v = as(a);
-    return (v.signExp & 0x7FFFu) == 0x7FFFu && (v.signif << 1) == 0;
-}
-bool x87SignBit(const Ext80 a) { return (as(a).signExp & 0x8000u) != 0; }
-
-X87Class x87Classify(const Ext80 a) {
-    const extFloat80_t v = as(a);
-    const std::uint16_t e = static_cast<std::uint16_t>(v.signExp & 0x7FFFu);
-    if (e == 0x7FFFu) return (v.signif << 1) != 0 ? X87Class::Nan : X87Class::Infinity;
-    if (e == 0) return v.signif == 0 ? X87Class::Zero : X87Class::Denormal;
+X87Class x87Classify(X87Val v) {
+    if (std::isnan(v)) return X87Class::Nan;
+    if (std::isinf(v)) return X87Class::Infinity;
+    if (v == 0.0) return X87Class::Zero;
+    if (std::fpclassify(v) == FP_SUBNORMAL) return X87Class::Denormal;
     return X87Class::Normal;
 }
 
-void x87Extract(const Ext80 a, Ext80 significand, Ext80 exponent) {
-    // FXTTRACT：ST(0) = 尾数（[1,2)，指数域 = bias），ST(1) = 指数（带符号整数，extF80 表示）
-    const extFloat80_t v = as(a);
-    const std::uint16_t sign = static_cast<std::uint16_t>(v.signExp & 0x8000u);
-    const std::uint16_t e = static_cast<std::uint16_t>(v.signExp & 0x7FFFu);
-    extFloat80_t s{};
-    extFloat80_t x{};
-    if (e == 0 && v.signif == 0) {
-        // ±0 ⇒ 尾数 ±0、指数 −∞（Intel：不置 invalid）
-        s.signExp = sign;
-        s.signif = 0;
-        x.signExp = static_cast<std::uint16_t>(0x7FFFu | sign);
-        x.signif = 0x8000000000000000ull;
-    } else if (e == 0x7FFFu) {
-        s = v;  // inf / NaN 原样穿过（本仓不作伪值）
-        x = v;
-    } else {
-        std::uint64_t m = v.signif;
-        std::int32_t biased = e;
-        if (e == 0) {  // 次正规：先规格化，指数随之下降
-            int sh = 0;
-            while ((m & 0x8000000000000000ull) == 0) {
-                m <<= 1;
-                ++sh;
-            }
-            biased = static_cast<std::int32_t>(1 - sh);
-        }
-        s.signExp = static_cast<std::uint16_t>(0x3FFFu | sign);
-        s.signif = m;
-        x = i32_to_extF80(static_cast<std::int32_t>(biased) - 16383);
-    }
-    store(s, significand);
-    store(x, exponent);
-}
-
-void x87RemTrunc(const Ext80 a, const Ext80 b, Ext80 out) {
-    // x87 的 FPREM 是**商朝零截断**的余数（fmod 语义）；SoftFloat 的 `extF80_rem` 是
-    // IEEE 余数（商取最近偶数，= FPREM1）。两者只在商的奇偶性上差一个 |b|：
-    //   令 r = a − n·b（n = 最近偶数商）。若 sign(r) 与 sign(a) 相同（或 r = 0），
-    //   则 trunc(a/b) 就是 n ⇒ 结果 = r；否则 trunc(a/b) = n ∓ 1 ⇒ 结果 = r + sign(a)·|b|。
-    // ★ 这一步是**精确**的：真余数的有效位不超过 64 位，SoftFloat 的加减不会引入舍入。
-    const extFloat80_t av = as(a);
-    const extFloat80_t bv = as(b);
-    extFloat80_t r = extF80_rem(av, bv);
-    const std::uint16_t re = static_cast<std::uint16_t>(r.signExp & 0x7FFFu);
-    if (re == 0x7FFFu) {  // NaN / inf：rem 已经给出结果（并置了 invalid）
-        store(r, out);
+void x87Extract(X87Val a, X87Val* significand, X87Val* exponent) {
+    if (std::isnan(a) || std::isinf(a)) {  // inf / NaN 原样穿过（本仓不作伪值）
+        *significand = a;
+        *exponent = a;
         return;
     }
-    if (r.signif == 0 && re == 0) {
-        store(r, out);
+    if (a == 0.0) {  // ±0 ⇒ 尾数 ±0、指数 −∞（Intel：不置 invalid）
+        *significand = a;
+        *exponent = -INFINITY;
         return;
     }
-    const bool sa = (av.signExp & 0x8000u) != 0;
-    const bool sr = (r.signExp & 0x8000u) != 0;
-    if (sa == sr) {
-        store(r, out);
-        return;
-    }
-    extFloat80_t shift = bv;
-    shift.signExp = static_cast<std::uint16_t>(shift.signExp & 0x7FFFu);  // |b|
-    if (sa) shift.signExp = static_cast<std::uint16_t>(shift.signExp | 0x8000u);  // sign(a)·|b|
-    store(extF80_add(r, shift), out);
+    int e = 0;
+    const X87Val m = std::frexp(a, &e);  // a = m·2^e，m ∈ [0.5,1)
+    *significand = m * 2.0;              // [1,2)
+    *exponent = static_cast<X87Val>(e - 1);
 }
 
-double x87ToDouble(const Ext80 a) {
-    const float64_t f = extF80_to_f64(as(a));
-    double d = 0;
-    std::memcpy(&d, &f.v, 8);
-    return d;
-}
-void x87FromDouble(double d, Ext80 out) { store(f64_to_extF80(f64FromDouble(d)), out); }
+// ---------------- 超越函数（宿主 libm：唯一的进出口） ----------------
+X87Val x87Sin(X87Val x) { return std::sin(x); }
+X87Val x87Cos(X87Val x) { return std::cos(x); }
+X87Val x87Tan(X87Val x) { return std::tan(x); }
+X87Val x87Atan2(X87Val y, X87Val x) { return std::atan2(y, x); }
+X87Val x87Log2(X87Val x) { return std::log2(x); }
+X87Val x87Log2p1(X87Val x) { return std::log2(x + 1.0); }
+X87Val x87Exp2m1(X87Val x) { return std::exp2(x) - 1.0; }
+bool x87TrigInRange(X87Val x) { return std::fabs(x) < 9223372036854775808.0; }
 
-std::uint8_t x87PeekExceptionFlags() { return softfloat_exceptionFlags; }
-void x87ClearExceptionFlags() { softfloat_exceptionFlags = 0; }
-void x87RaiseInvalid() { softfloat_raiseFlags(softfloat_flag_invalid); }
-
-void x87ApplyControlWord(std::uint16_t control) {
-    switch ((control >> 10) & 3u) {
-        case 0: softfloat_roundingMode = softfloat_round_near_even; break;
-        case 1: softfloat_roundingMode = softfloat_round_min; break;
-        case 2: softfloat_roundingMode = softfloat_round_max; break;
-        default: softfloat_roundingMode = softfloat_round_minMag; break;
-    }
-    switch ((control >> 8) & 3u) {
-        case 0: extF80_roundingPrecision = 32; break;
-        case 2: extF80_roundingPrecision = 64; break;
-        default: extF80_roundingPrecision = 80; break;
-    }
-    softfloat_detectTininess = softfloat_tininess_afterRounding;
-}
-
+// ---------------- 异常位（挂账通道） ----------------
+std::uint8_t x87PeekExceptionFlags() { return g_x87_flags; }
+void x87ClearExceptionFlags() { g_x87_flags = 0; }
+void x87RaiseInvalid() { raise(kX87IE); }
 std::uint8_t x87TakeExceptionFlags() {
-    const std::uint8_t f = softfloat_exceptionFlags;
-    softfloat_exceptionFlags = 0;
+    const std::uint8_t f = g_x87_flags;
+    g_x87_flags = 0;
     return f;
 }
 

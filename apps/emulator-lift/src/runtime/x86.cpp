@@ -30,11 +30,11 @@ std::uint32_t X86::readReg(Reg reg) const {
         case RegClass::Gpr8: return (r[spec.index] >> (8 * spec.byte_off)) & 0xFFu;
         case RegClass::Seg: return seg[spec.index];
         case RegClass::X87: {
-            // 只有 fstsw / fxch 之类会读 x87 寄存器的"整数值"；这里返回低 4 字节的原始位
-            // （真正需要 80 位值的语义在 exec_fpu.cpp 里走 fpu_bridge）
-            const std::uint8_t* p = fpu.regs[fpu.phys(spec.index)];
+            // 只有 fstsw / fxch 之类会读 x87 寄存器的"整数值"；这里返回槽位**低 4 字节的原始位**
+            // （D49 之后槽里是 `double`；真正需要浮点值的语义在 exec_fpu.cpp 里走 fpu_bridge）。
+            const double d = fpu.regs[fpu.phys(spec.index)];
             std::uint32_t v = 0;
-            std::memcpy(&v, p, 4);
+            std::memcpy(&v, &d, 4);
             return v;
         }
         case RegClass::None:
@@ -54,8 +54,10 @@ void X86::writeReg(Reg reg, std::uint32_t value) {
         }
         case RegClass::Seg: seg[spec.index] = static_cast<std::uint16_t>(value & 0xFFFFu); break;
         case RegClass::X87: {
-            std::uint8_t* p = fpu.regs[fpu.phys(spec.index)];
-            std::memcpy(p, &value, 4);  // 只覆盖低 32 位：调用方要用 80 位时走 fpu_bridge
+            // 只覆盖槽位**低 32 位**（D49 之后槽里是 `double`；调用方要用浮点值时走 fpu_bridge）
+            double d = fpu.regs[fpu.phys(spec.index)];
+            std::memcpy(&d, &value, 4);
+            fpu.regs[fpu.phys(spec.index)] = d;
             break;
         }
         case RegClass::None:

@@ -506,7 +506,6 @@ AffineResult runAffine(const std::vector<std::uint8_t>& code4CCC60, const Affine
     // ★ 还要把**宿主全局**的 softfloat 舍入/异常位复位：softfloat 的 `roundingMode` /
     //   `roundingPrecision` 是进程级全局量，上一臂（解释器）跑完会把它留在**本用例的控制字**上
     //   ⇒ 若不复位，"override 忘了 apply 控制字"会继承同一份残值而**静默相同**，控制字用例就白写了。
-    lift::x87ApplyControlWord(0x037Fu);
     lift::x87ClearExceptionFlags();
     fx.m.cpu().fpu.control = c.control;
     fx.m.cpu().fpu.status = c.entry_status;
@@ -756,7 +755,6 @@ FtolResult runFtol(const std::vector<std::uint8_t>& code, const FtolCase& c, boo
     for (std::uint32_t i = 0; i < 0x20u; ++i) fx.m.mem().wr8(frame + i, 0x5Au);
     // 宿主的 softfloat 舍入模式 / 粘性异常位是**进程级全局** ⇒ 两臂都必须从同一份缺省出发，
     // 否则"override 少 sync 一次"会继承上一臂的异常位而**静默相同**。
-    lift::x87ApplyControlWord(0x037Fu);
     lift::x87ClearExceptionFlags();
     fx.m.cpu().fpu.control = 0x037Fu;
     fx.m.cpu().fpu.status = c.entry_status;
@@ -915,7 +913,6 @@ PcmSnapshot runPcm(const std::vector<std::uint8_t>& code_range, const std::vecto
     const std::uint32_t ftol_frame = (esp_seg - 0x28u) & ~15u;
     for (std::uint32_t i = 0; i < 0x20u; ++i) fx.m.mem().wr8(ftol_frame + i, 0x5Au);
     // 宿主的 softfloat 舍入模式 / 粘性异常位是**进程级（现在每线程）全局** ⇒ 两臂都从同一份缺省出发。
-    lift::x87ApplyControlWord(0x037Fu);
     lift::x87ClearExceptionFlags();
     cpu.fpu.control = 0x037Fu;
     cpu.fpu.status = 0u;  // C0..C3 也从 0 出发（段内没有指令改它们 ⇒ 两臂都该保持 0）
@@ -1323,7 +1320,6 @@ HuffResult runHuff(const HuffCase& c, const HuffCodes& code, bool with_override)
     if (!fx.m.placeCode(kHuffCallEa, a.b.data(), a.b.size(), &fx.err)) return out;
     fx.rearmStack();
     // 两臂从**同一份** x87 缺省出发（宿主 softfloat 的舍入模式 / 粘性位是进程级全局）
-    lift::x87ApplyControlWord(0x037Fu);
     lift::x87ClearExceptionFlags();
     fx.m.cpu().fpu.control = 0x037Fu;
     fx.m.cpu().fpu.status = 0u;
@@ -2476,25 +2472,33 @@ int main() {
             c.want_edx = 0x80000000u;  // **恰好** −2^63：位型与不定值相同，但**不置 IE**
             add(c);
         }
-        // ── ★ 10 字节 ext80：宿主 double 截断会差一位的三档 ──
+        // ── ★ 10 字节 ext80 输入：**D49 之后这三档的期望值变了** ──
+        //   旧口径（extF80，64 位有效位）下它们证明"宿主 double 截断会差一位"：2^53+1 / 2^62+1.5 /
+        //   2^63−1 在 ext80 里都可表示。**D49 之后 x87 的槽位是 double（53 位尾数）**⇒ `fld tbyte`
+        //   先把这些值**收窄**到 double：
+        //     · 2^53+1  ⇒ 2^53        ⇒ 截断值 = 2^53        ⇒ EAX=0x00000000 / EDX=0x00200000
+        //     · 2^62+1.5⇒ 2^62+2      ⇒ 截断值 = 2^62+2      ⇒ EAX=0x00000002 / EDX=0x40000000
+        //     · 2^63−1  ⇒ 2^63        ⇒ 越界 ⇒ 不定值       ⇒ EAX=0x00000000 / EDX=0x80000000
+        //   ⇒ 断言改成**新语义**（这就是 D49 明写接受的"尾数 53 位"偏差的可见面），并保留三条：
+        //     它们仍然守着"`fld tbyte` 的收窄 + 截断"这条路径（只是不再证明 80 位精确）。
         {
-            FtolCase c;  // 2^53 + 1（double 表示不出 ⇒ `(int64)(double)` 会给 2^53）
+            FtolCase c;  // 2^53 + 1 ⇒ double 收窄成 2^53
             c.name = "ftol/2^53+1-ext80";
             mk80(false, 53, 0x8000000000000400ull, &c);  // sig = (2^53+1) × 2^10 ⇒ 值 = sig × 2^-10
-            c.want_eax = 1u;
+            c.want_eax = 0u;
             c.want_edx = 0x00200000u;
             add(c);
-            FtolCase d;  // 2^62 + 1.5 ⇒ 截断 = 2^62+1；就近(-even) = 2^62+2 ⇒ 再修正 −1
+            FtolCase d;  // 2^62 + 1.5 ⇒ double 收窄成 2^62（该处 ulp = 1024）⇒ 截断 = 2^62
             d.name = "ftol/2^62+1.5-ext80";
             mk80(false, 62, 0x8000000000000003ull, &d);
-            d.want_eax = 1u;
+            d.want_eax = 0u;
             d.want_edx = 0x40000000u;
             add(d);
-            FtolCase e;  // 2^63 − 1（64 位有效位全 1）⇒ INT64_MAX，**不置 IE**
+            FtolCase e;  // 2^63 − 1 ⇒ double 收窄成 2^63 ⇒ 越界 ⇒ INT64 不定值
             e.name = "ftol/2^63-1-ext80";
             mk80(false, 62, 0xFFFFFFFFFFFFFFFEull, &e);
-            e.want_eax = 0xFFFFFFFFu;
-            e.want_edx = 0x7FFFFFFFu;
+            e.want_eax = 0u;
+            e.want_edx = 0x80000000u;
             add(e);
         }
         // ── ±Inf / NaN（都是 `EAX=0, EDX=0x80000000` + IE；⛔ 不是 `0x80000000/0`）──

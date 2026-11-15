@@ -10,6 +10,7 @@
 //   同时记进"基座缺口"清单（A5）。⛔ 不许静默 no-op（SCOPE §3）。
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <mutex>
@@ -80,7 +81,10 @@ struct ShimDef {
     int argc = 0;
     ShimFn fn = nullptr;            // nullptr ⇒ 未实现（执行即响亮失败）
     const char* reason = nullptr;   // 未实现 / stub 的理由（SCOPE 偏差必须点名）
-    std::uint32_t stub_ea = 0;      // 唯一 guest 地址
+    // 唯一 guest 地址。★ 形状**恒为** `stubPage() + slot*4`（登记期断言；见 checkStubEaInPage）。
+    // ⛔ 不要直接写它：索引表会过期 ⇒ 查询退到线性扫描（慢路径，语义仍对但热路径失效）。
+    //   正常路径 = bind() / addRuntime() 发号。
+    std::uint32_t stub_ea = 0;
     std::uint32_t id = 0;           // 从 0 起的稳定序号（trace 用）
     bool imported = false;          // 这个导入在本镜像的导入表里出现过
     bool declared = false;          // true = host 侧**显式**登记过（add / addUnimplemented）
@@ -138,10 +142,22 @@ public:
     // ---- 查询 ----
     const ShimDef* find(const char* module, const char* name) const;
     ShimDef* findMutable(const char* module, const char* name);
+    // ★ 桩 EA → 登记项。**O(1)、无锁**（槽位索引表）：AOT 的派发循环每次 shim 派发都走它。
+    //   口径与旧实现（对 `defs_` 线性扫描、返回**先登记**的那条、`ea == 0` 恒 nullptr）**逐位相同**；
+    //   索引未覆盖（未登记槽 / 页外 EA / 未对齐 EA / 有人直写了 `ShimDef::stub_ea`）时回退到
+    //   **与旧实现逐字相同**的线性扫描（在锁内）⇒ 语义不靠"索引一定对"来保证。
+    //   ★ 这就是"为什么 `lift_shim` 仍然可以拿它当唯一来源"：索引**不是**第二份真源。
     const ShimDef* byStubEa(std::uint32_t ea) const;
     const ShimDef* byId(std::uint32_t id) const;
     // ★ 方案 C：返回 id 而不是指针（feeder 线程不能被主线程的 addRuntime 扩容弄成悬垂）。
     std::uint32_t idForStub(std::uint32_t ea) const;  // 0 = 没有
+    // ★ 诊断（只读计数器，⛔ 不参与任何判定）：`byStubEa` / `idForStub` 走**慢路径**（线性扫描）的次数。
+    //   为什么要有它：热路径的"O(1) 且无锁"是**可被证伪的读数**，不是散文 —— 等价性用例拿它当判据
+    //   （已登记桩查一遍之后它必须**不动**；索引坏了 / 表过期了它就会涨）。⛔ 不要拿它当性能断言。
+    std::uint64_t stubIndexSlowPathHits() const {
+        return stub_index_slow_.load(std::memory_order_relaxed);
+    }
+    void resetStubIndexStats() const { stub_index_slow_.store(0, std::memory_order_relaxed); }
     const std::vector<ShimDef>& all() const { return defs_; }
     // ★ 方案 C：给 feeder 的私有 BlockCache 预装 shim 块时用（拷贝，避免 defs_ 并发扩容）。
     std::vector<ShimDef> snapshot() const;
@@ -168,8 +184,38 @@ private:
     std::uint32_t shim_page_ = 0;
     std::uint32_t shim_slots_ = 0;
     std::uint32_t next_slot_ = 0;  // 下一个空闲槽（**已发出的槽数**，也从 bind 里继承）
+    // =================================================================================
+    // ★ 桩槽索引表（S1 性能修，2026-11-15）：`slot → def id + 1`（0 = 空槽）。
+    //
+    // 为什么是这个形状：
+    //   · `stub_ea` **只**由 bind() / addRuntime() 发号，形状恒为 `shim_page_ + slot*4`
+    //     （登记期断言 `checkStubEaInPage` 把它从"观察"变成"前提"，违反即响亮停）；
+    //   · 于是 `ea → slot` 是一次无符号减 + 一次移位，`slot → 登记项` 是**一次数组取**；
+    //   · ⛔ 表里存 **id / 下标，不存 `ShimDef*`**：`defs_` 是 std::vector，`addRuntime` 会追加
+    //     ⇒ 任何缓存的指针都会悬空。返回指针一律走 `defByIdUnlocked()`（与 `byId()` **同一条**
+    //     解析路径：一次边界检查 + `&defs_[id]`）。
+    //   · 表长 = `shim_slots_`，在 configureStubPage / bind 时**定死**，运行期不再扩容 ⇒ 热路径
+    //     读它不需要锁（读到旧值也不会错：命中后还要 `d->stub_ea == ea` 二次校验，不成立就走
+    //     与旧实现逐字相同的线性扫描）。
+    // =================================================================================
+    std::vector<std::uint32_t> slot_index_;
+    // 在 bind() / configureStubPage() 的**末尾**调（都在锁内）：按 `defs_` 重建整张表。
+    void rebuildSlotIndexLocked();
+    // 登记期断言（**响亮停**）：`stub_ea == 0 || (stub_ea 在 [page, page+slots*4) 且 4 字节对齐)`。
+    //   ★ 两个重载：bind() 里比对的是**参数**（成员 `shim_page_` 要到 bind 末尾才更新），其余地方比成员。
+    void checkStubEaInPageLocked(std::uint32_t stub_ea, const char* where) const;
+    static void checkStubEaShape(std::uint32_t stub_ea, std::uint32_t page, std::uint32_t slots,
+                                 const char* where);
+    // 与 `byId()` 同一条解析路径（唯一差别：调用方**已经**持有锁或走的是只读快路径）。
+    const ShimDef* defByIdUnlocked(std::uint32_t id) const;
+    // ★ 旧实现（线性扫描 + 锁）—— 现在只作**慢路径**：索引未覆盖时兜底，语义与改动前逐字相同。
+    const ShimDef* byStubEaLinearLocked(std::uint32_t ea) const;
+    // 慢路径命中次数（诊断；见 `stubIndexSlowPathHits()` 的注释）。
+    mutable std::atomic<std::uint64_t> stub_index_slow_{0};
     // ★ 方案 C：feeder 线程也会 invoke shim（Lock/Unlock/Stop/COM trampoline），defs_ 可能被
     //   主线程 addRuntime 扩容 ⇒ 所有注册/查询/invoke 都走这把递归锁（invoke 期间不允许扩容）。
+    //   ⚠ 唯一例外是 `byStubEa` 的**快路径**（只读 `slot_index_` + `defs_`，不拿锁）：
+    //     它读的表在 bind 之后不再重新分配，且命中后还有 `stub_ea` 二次校验 ⇒ 不依赖锁来保证正确性。
     mutable std::recursive_mutex mutex_;
 };
 

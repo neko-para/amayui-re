@@ -7,5 +7,45 @@
 #
 # ★ 格式口径：只认"一行一个 EA"（`0x` 前缀可省；大小写不敏感）；⛔ 不写派生值
 #   （函数名 / 字节范围 / 指令数都能从 PE 重算）。T1c 换 `closure.txt` 格式时只改解析。
+#
+# ★ 2026-11-15 新增三条（**寄存器计数移位 CL** 的定点差分；判据见 `tests/lift_ir_proto.cpp` §2b）：
+#   0x41880A = `sub_4187B0` 的尾块 `loc_41880A`（shr×4 + shl×3，七个计数全在运行期）
+#   0x4C6E64 = `sub_4C6E30` 的位读取器尾段（sar edx, cl；计数 = 7 - [esi+44h]）
+#   0x4E4B98 = `sub_4E4B90` 的尾块（shl eax, cl 是块内**最后一条写 flags** 的指令 ⇒ 出口六位可比）
+#   ★ 这三个都是**中段入口**（不是函数起点）：生成器按"入口 EA → 块闭包"展开，实测分别只收
+#     1 / 3 / 1 个块（尾块以 retn 收尾）⇒ 组件很小，且不需要手写任何 IR。
+#   ★ 为什么挑这三个位置：判据是"生成的 IR vs 解释器"在同一份**真字节**上逐位相同，而
+#     flags 只有在"这条移位是块内最后一条写 flags 的指令"时才可能出现在出口比对里；
+#     全语料扫描的结论是 `sar/shr …, cl` 一处都没有这种位置（⇒ 它们的标志位在游戏里是死写），
+#     只有 `shl …, cl` 有 4 处 ⇒ A/B 证**结果**、C 证 **flags**。
+#
+# ★ 2026-11-15 · S3-b 新增六条（**条件融合** `cmp`/`test` + `jcc` 的定点差分；判据见
+#   `tests/lift_ir_proto.cpp` §2c）：每条都是"一个入口块 + 两个分支块、两路都以 `ret` 收尾"的
+#   小菱形（无 `call`/`jmp`），所以组件很小、一次 `lift_cc_*` 调用就跑完：
+#     0x47A7F3 = `cmp edx,[eax+14h] / jb`（无符号）            ⇒ `icmp ult`
+#     0x49EE49 = `cmp eax,0FFh / jl`（有符号）                 ⇒ `icmp slt`
+#     0x404DEA = `cmp [ecx+408h],eax / jle`（有符号 + ZF）     ⇒ `icmp sle`
+#     0x4200F7 = `test esi,esi / je`（= `jz`，opcode 0x74）    ⇒ `icmp eq R,0`
+#     0x4DD199 = `test ah,5 / jp`（**PF ⇒ 退化路径**）          ⇒ 从 base 读 PF
+#     0x4D19D3 = `cmp [ebp+0Ch],0 / mov eax,[ebp+8] / je`（中间夹非写者，仍要融合）
+#
+# ★ 2026-11-15 · S3-c 新增两条（**`div`/`idiv` 与 flags 的两臂逐位 oracle**；判据见
+#   `tests/lift_ir_proto.cpp` §2d）。它们是本步（块间活性 + 死标志位消除）唯一的
+#   "死位仍然逐位对"的守卫：死位按定义不可观察，300 帧的六项不变量看不见它，只有这两条能红。
+#     0x48D500 = `mov eax,[ecx+26E4h] / imul eax,3E8h / xor edx,edx / div [ecx+26F0h] / retn`
+#                ⇒ 两条屏障 + escape(retn)；EFLAGS&0x8D5 出口必须是 0x44
+#     0x419F0D = `idiv [esi+77614h] / pop edi / pop esi / mov [ecx],edx / retn`
+#                ⇒ 一条屏障 + escape(retn)；入口六位全 1，idiv 一位不写 ⇒ 出口仍是 0x8D5
 0x436D00
 0x4D4B40
+0x41880A
+0x4C6E64
+0x4E4B98
+0x47A7F3
+0x49EE49
+0x404DEA
+0x4200F7
+0x4DD199
+0x4D19D3
+0x48D500
+0x419F0D

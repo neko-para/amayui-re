@@ -23,6 +23,13 @@ bool execFpu(X86& cpu, const Insn& in);       // x87（S4：语料里 47 个形�
 bool execPacked(X86& cpu, const Insn& in);    // MMX / SSE 整数打包（`Op::Packed`，实现落在 exec_fpu.cpp）
 bool execSse(X86& cpu, const Insn& in);       // SSE 标量单精度 + 128 位搬移（`Op::Sse`，实现落在 exec_fpu.cpp）
 
+// ★ 检查点 2（D49）：AOT 生成代码的 x87 宿主 helper 入口。
+//   `lift_x87_sem(cpu, op)` = 对**无内存操作数**的 x87 op 调解释器的同一份实现
+//   （`execFpu` 配一个只带 `op` 的 `Insn`）⇒ 超越函数 / fprem / fscale / fxtract / fxam 的
+//   语义**只有一处**（⛔ 不在发射器里重写公式）。定义在 `exec_fpu.cpp`。
+//   ⛔ 它不是"第二个 lift_one"：不解码、不过 dispatcher、不碰 eip；只有编译期已知的 op 码。
+bool execX87NoOperand(X86& cpu, Op op);
+
 // 控制流指令（块在这里收尾）
 bool opIsControl(Op op);
 // x87 家族（`Op::Fld .. Op::F2xm1` 的连续区间）

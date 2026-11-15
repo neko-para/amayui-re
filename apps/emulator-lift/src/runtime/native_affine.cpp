@@ -11,9 +11,9 @@
 //     ★ 每步**先读两个再写两个**；`stride == 1` 时相邻两点的 `dst[i+1]` / `dst[i]` 会重叠，后写赢。
 //     ★ 循环上界 = `count*stride` 的 **32 位回绕**，比较是**有符号**的。
 //   · 0x4CCD2C: 返回 `EAX = dst + 4*(i0+1+N*stride)`（进循环时），否则 inner 对象。
-// ★ x87 逐位：算术走 SoftFloat `extF80`；`fsin`/`fcos` 走 `x87ToDouble → std::sin/cos →
-//   x87FromDouble`（与 `exec_fpu.cpp` 的 `transcendental()` 同一条路径）⇒ 运算符顺序照抄即可逐位相同。
-//   ⛔ 不许用 `double` 重写：那会差最后一位 float，破坏逐字节 A/B。
+// ★ x87 逐位：D49 之后两臂都用**同一份 double 模型**（`fpu_bridge.h`）；
+//   `fsin`/`fcos` 走 `x87Sin`/`x87Cos`（与 `exec_fpu.cpp` 的 `transcendental()` 同一批函数）
+//   ⇒ 运算符顺序照抄即可逐位相同。
 // ★ 状态字：解释器每个 FP 指令都 `syncStatus`；本实现只在末尾补一次（OR 是可交换的，
 //   且 `fsin`/`fcos` 之后没有任何指令改 C0..C3 —— 逐条核过 exec_fpu.cpp）。
 #include "runtime/native_affine.h"
@@ -58,7 +58,9 @@ void syncX87Status(X86& cpu) {
     if (f & 4u) s |= 0x0008u;   // OE（overflow）
     if (f & 8u) s |= 0x0004u;   // ZE（divide-by-zero）
     if (f & 16u) s |= 0x0001u;  // IE（invalid）
-    if (s & 0x003Fu) s |= 0x0080u;                                                     // ES
+    // ★ 任务 0 / D55：**ES（异常汇总）= 状态字里任一异常位非零** —— 与解释器 `syncStatus`
+    //   最后一步逐字相同（⛔ 漏了它，native 臂的末态会比解释器少 0x0080 ⇒ `native-override-assets` 红）。
+    if ((s & 0x003Fu) != 0) s |= 0x0080u;
     s = static_cast<std::uint16_t>(s & ~0x4700u);                                      // C0..C3 = 0
     s = static_cast<std::uint16_t>((s & ~0x3800u) | ((cpu.fpu.top & 7u) << 11));       // TOP
     cpu.fpu.status = s;
@@ -73,48 +75,38 @@ bool affineAngleInRange(float angle, float angle_scale) {
     return std::fabs(a * s) < kSinLimit / 4.0;
 }
 
-bool affineCoeffs(const Ext80 angle, const Ext80 angle_scale, const Ext80 radius, bool flip_x, bool flip_y,
+bool affineCoeffs(X87Val angle, X87Val angle_scale, X87Val radius, bool flip_x, bool flip_y,
                   AffineCoeffs* out) {
     if (out == nullptr) return false;
-    Ext80 theta;
-    x87Mul(angle, angle_scale, theta);  // fld [obj+0x14]; fmul flt_52F1B0
-    const double d = x87ToDouble(theta);
-    if (!(std::fabs(d) < kSinLimit)) return false;  // 防御性：正常路径由 affineAngleInRange 判掉
-    Ext80 sn, cs;
-    x87FromDouble(std::sin(d), sn);  // fsin（transcendental() 同路径）
-    x87FromDouble(std::cos(d), cs);  // fcos
-    Ext80 sx, sy, t1, t2, t3, b, c, dd;
-    x87FromI32(flip_x ? -1 : 1, sx);  // fild ±1（`[obj+0x18] == 0` ⇒ +1）
-    x87FromI32(flip_y ? -1 : 1, sy);
-    x87Mul(sx, radius, t1);   // fmul st, st(2)      ⇒ sx*r
-    x87Mul(t1, cs, t2);       // fld st; fmul st,st(4) ⇒ sx*r*cos = A
-    x87Mul(radius, sy, t3);   // fxch st(2); fmulp st(3),st ⇒ r*sy
-    x87Mul(t3, sn, b);        // fld st(2); fmul st,st(5) ⇒ r*sy*sin
-    x87ChangeSign(b);         // fchs                ⇒ B = -(r*sy*sin)
-    x87Mul(sn, t1, dd);       // fxch st(1); fmulp st(5),st ⇒ sin*(sx*r) = D
-    x87Mul(cs, t3, c);        // fxch st(2); fmulp st(3),st ⇒ cos*(r*sy) = C
-    std::memcpy(out->a, t2, 16);
-    std::memcpy(out->b, b, 16);
-    std::memcpy(out->c, c, 16);
-    std::memcpy(out->d, dd, 16);
+    const X87Val theta = x87Mul(angle, angle_scale);  // fld [obj+0x14]; fmul flt_52F1B0
+    if (!(std::fabs(theta) < kSinLimit)) return false;  // 防御性：正常路径由 affineAngleInRange 判掉
+    const X87Val sn = x87Sin(theta);  // fsin（与解释器 `transcendental()` 同一份）
+    const X87Val cs = x87Cos(theta);  // fcos
+    const X87Val sx = flip_x ? -1.0 : 1.0;  // fild ±1（`[obj+0x18] == 0` ⇒ +1）
+    const X87Val sy = flip_y ? -1.0 : 1.0;
+    const X87Val t1 = x87Mul(sx, radius);   // fmul st, st(2)      ⇒ sx*r
+    const X87Val t2 = x87Mul(t1, cs);       // fld st; fmul st,st(4) ⇒ sx*r*cos = A
+    const X87Val t3 = x87Mul(radius, sy);   // fxch st(2); fmulp st(3),st ⇒ r*sy
+    const X87Val b = x87ChangeSign(x87Mul(t3, sn));  // fld st(2); fmul st,st(5) ⇒ r*sy*sin；fchs
+    const X87Val dd = x87Mul(sn, t1);       // fxch st(1); fmulp st(5),st ⇒ sin*(sx*r) = D
+    const X87Val c = x87Mul(cs, t3);        // fxch st(2); fmulp st(3),st ⇒ cos*(r*sy) = C
+    out->a = t2;
+    out->b = b;
+    out->c = c;
+    out->d = dd;
     return true;
 }
 
-void affinePoint(const AffineCoeffs& k, const Ext80 ix, const Ext80 iy, const Ext80 add4, const Ext80 add8,
-                 Ext80 out0, Ext80 out1) {
-    Ext80 p, q, s, r;
+void affinePoint(const AffineCoeffs& k, X87Val ix, X87Val iy, X87Val add4, X87Val add8, X87Val* out0,
+                 X87Val* out1) {
     // out0 = (iy*B) + (ix*A) + [obj+4]（faddp 的 st1+st0 顺序）
-    x87Mul(iy, k.b, p);
-    x87Mul(ix, k.a, q);
-    x87Add(p, q, s);
-    x87Add(s, add4, r);
-    std::memcpy(out0, r, 16);
+    const X87Val p = x87Mul(iy, k.b);
+    const X87Val q = x87Mul(ix, k.a);
+    *out0 = x87Add(x87Add(p, q), add4);
     // out1 = (iy*C) + (ix*D) + [obj+8]
-    x87Mul(iy, k.c, p);
-    x87Mul(ix, k.d, q);
-    x87Add(p, q, s);
-    x87Add(s, add8, r);
-    std::memcpy(out1, r, 16);
+    const X87Val p1 = x87Mul(iy, k.c);
+    const X87Val q1 = x87Mul(ix, k.d);
+    *out1 = x87Add(x87Add(p1, q1), add8);
 }
 
 bool nativeAffine4CCC60(X86& cpu, GuestMemory& mem, std::uint32_t* result) {
@@ -165,35 +157,35 @@ bool nativeAffine4CCC60(X86& cpu, GuestMemory& mem, std::uint32_t* result) {
     if (!affineAngleInRange(bitsToFloat(angle_bits), bitsToFloat(scale_bits))) return false;
 
     // ── ② 从这里开始不再回退（所有 guest 写都在下面）────────────────────────────────────
-    x87ApplyControlWord(cpu.fpu.control);
     std::uint8_t raw[4];
-    Ext80 angle, scale, radius, add4, add8;
     std::memcpy(raw, &angle_bits, 4);
-    x87MemToReg(raw, angle, 4);
+    const X87Val angle = x87LoadMem(raw, 4);
     std::memcpy(raw, &scale_bits, 4);
-    x87MemToReg(raw, scale, 4);
+    const X87Val scale = x87LoadMem(raw, 4);
     const std::uint32_t radius_bits = mem.rd32(state + 0x10u);
     std::memcpy(raw, &radius_bits, 4);
-    x87MemToReg(raw, radius, 4);
-    x87MemToReg(mem.host(obj + 0x04u), add4, 4);
-    x87MemToReg(mem.host(obj + 0x08u), add8, 4);
+    const X87Val radius = x87LoadMem(raw, 4);
+    const X87Val add4 = x87LoadMem(mem.host(obj + 0x04u), 4);
+    const X87Val add8 = x87LoadMem(mem.host(obj + 0x08u), 4);
     AffineCoeffs k;
     if (!affineCoeffs(angle, scale, radius, mem.rd8(obj + 0x18u) != 0u, mem.rd8(obj + 0x19u) != 0u, &k)) {
-        x87TakeExceptionFlags();  // 不可达（范围已判过）；保持"回退无 x87 残留"
+        x87ClearExceptionFlags();  // 不可达（范围已判过）；保持"回退无 x87 残留"
         return false;
     }
     const std::uint8_t* sp = mem.host(static_cast<std::uint32_t>(src_lo));
     std::uint8_t* dp = mem.host(static_cast<std::uint32_t>(dst_lo));
     for (std::int64_t i = i0; i <= last; i += stride) {
         const std::size_t off = static_cast<std::size_t>(4 * (i - i0));
-        Ext80 ix, iy, o0, o1;
-        x87MemToReg(sp + off, ix, 4);      // fld [src+i]
-        x87MemToReg(sp + off + 4, iy, 4);  // fld [src+i+1]
-        affinePoint(k, ix, iy, add4, add8, o0, o1);
-        std::uint8_t b0[4], b1[4];
-        x87RegToMem(o0, b0, 4);  // fstp dword [dst+i]
+        const X87Val ix = x87LoadMem(sp + off, 4);      // fld [src+i]
+        const X87Val iy = x87LoadMem(sp + off + 4, 4);  // fld [src+i+1]
+        X87Val o0 = 0.0;
+        X87Val o1 = 0.0;
+        affinePoint(k, ix, iy, add4, add8, &o0, &o1);
+        std::uint8_t b0[4];
+        std::uint8_t b1[4];
+        x87StoreMem(o0, b0, 4);  // fstp dword [dst+i]
         std::memcpy(dp + off, b0, 4);
-        x87RegToMem(o1, b1, 4);  // fstp dword [dst+i+1]
+        x87StoreMem(o1, b1, 4);  // fstp dword [dst+i+1]
         std::memcpy(dp + off + 4, b1, 4);
     }
     syncX87Status(cpu);

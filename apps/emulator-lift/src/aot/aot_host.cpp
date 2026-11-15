@@ -6,13 +6,33 @@
 #include "aot/aot_host.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <map>
 #include <thread>
 #include <utility>
 #include <vector>
 
+#if defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
+// ---- 采样式内部 profile（`--profile`）的取时件：x86 用 TSC，其它平台退到 steady_clock ----
+//   ★ 关档时这些一行都不执行（见 `AotProfile` 的三条硬口径）。
+#define LIFT_AOT_HAS_TSC 1
+#endif
+#if defined(LIFT_AOT_HAS_TSC) && defined(_WIN32)
+#include <intrin.h>  // __rdtsc（clang-cl / cl.exe）
+#endif
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>  // GetProcessTimes（frame-ms 的"自进程启动"基准）
+#endif
+
 #include "aot/aot_dispatch.h"
+#include "runtime/decode_cache.h"  // `liftOneDecodeCache()`：只读命中率（`decode-cache:` 行）
 #include "runtime/sha256.h"  // lift::toLower（与解释器 `main.cpp:882` 同一份）
 #include "shims/register.h"
 
@@ -831,6 +851,464 @@ void AotHost::printRunSummary(const AotRunResult& r, std::FILE* out) const {
                  static_cast<unsigned long long>(seh_.raiseCount()),
                  static_cast<unsigned long long>(seh_.handlerCalls()),
                  static_cast<unsigned long long>(seh_.unhandledCount()));
+    // ---- `--profile` 的整块读数（**关档时一行都不打** ⇒ 全文与基线逐字相同）----
+    // ★ 落点为什么在这里：`aot_main.cpp` 在 `printRunSummary` 之后只有 stderr 回声 + `return`，
+    //   所以这里就是"stdout 末尾（进程退出前）"。⛔ 不改 main 的打印顺序。
+    printProfile(out);
+}
+
+// =====================================================================================
+// 采样式内部 profile（`--profile`）—— 取时 / 频率校准 / 表块
+//
+// ★ 采样点在 `aot_run.cpp`（派发 / shim / 每帧时间戳）；本文件只负责**取时原语**、
+//   **机器频率校准**与**表块打印**。三条硬口径见 `aot_host.h` 的 `AotProfile`。
+// =====================================================================================
+
+namespace {
+
+std::uint64_t readTsc() {
+#if defined(LIFT_AOT_HAS_TSC)
+#if defined(_MSC_VER) || (defined(__clang__) && defined(_WIN32))
+    return static_cast<std::uint64_t>(__rdtsc());
+#else
+    return static_cast<std::uint64_t>(__builtin_ia32_rdtsc());
+#endif
+#else
+    return 0;
+#endif
+}
+
+std::uint64_t steadyNs() {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                          std::chrono::steady_clock::now().time_since_epoch())
+                                          .count());
+}
+
+bool platformHasTsc() {
+#if defined(LIFT_AOT_HAS_TSC)
+    return readTsc() != 0;
+#else
+    return false;
+#endif
+}
+
+// ★ `lift_one` 采样钩子的转发点：钩子是 C 风格的函数指针（`lift_abi.h`），账本在宿主实例上
+//   ⇒ 用"当前开档的宿主"这**一个**指针转接（单进程里同时只有一台宿主在跑）。
+//   ★ 关档时钩子恒 `nullptr`（`stopProfile()` 摘掉）⇒ `lift_one` 里只多一次指针判空。
+AotHost* g_profile_host = nullptr;
+void aotLiftOneProfileHook(const lift::LiftOneProfileSample& s) {
+    if (g_profile_host != nullptr) g_profile_host->noteProfileLiftOne(s);
+}
+
+}  // namespace
+
+std::uint64_t profileTicks() {
+#if defined(LIFT_AOT_HAS_TSC)
+    return readTsc();
+#else
+    return steadyNs();
+#endif
+}
+
+double profileProcessMs() {
+#if defined(_WIN32)
+    // ★ Windows：真"自进程启动"（`GetProcessTimes` 的 creation 时间），不用静态初始化时刻近似。
+    FILETIME create{}, exit_t{}, kernel{}, user{};
+    if (GetProcessTimes(GetCurrentProcess(), &create, &exit_t, &kernel, &user)) {
+        FILETIME now{};
+        GetSystemTimeAsFileTime(&now);
+        ULARGE_INTEGER a{};
+        ULARGE_INTEGER b{};
+        a.LowPart = create.dwLowDateTime;
+        a.HighPart = create.dwHighDateTime;
+        b.LowPart = now.dwLowDateTime;
+        b.HighPart = now.dwHighDateTime;
+        if (b.QuadPart >= a.QuadPart) {
+            return static_cast<double>(b.QuadPart - a.QuadPart) / 10000.0;  // 100ns → ms
+        }
+    }
+#endif
+    // 回退（非 Windows / 取不到进程时间）：程序静态初始化时刻 ⇒ 少算了进程加载那几 ms（登记在这里）。
+    static const auto origin = std::chrono::steady_clock::now();
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - origin).count();
+}
+
+double profileTicksToMs(std::uint64_t ticks, const AotProfile& p) {
+    if (ticks == 0) return 0.0;
+    if (p.tsc_ok && p.ghz > 0.0) {
+        // ghz = ticks/ns ⇒ ns = ticks / ghz ⇒ ms = ns / 1e6
+        return static_cast<double>(ticks) / p.ghz / 1.0e6;
+    }
+    return static_cast<double>(ticks) / 1.0e6;  // 非 TSC 平台：ticks 就是 ns
+}
+
+void AotHost::beginProfile() {
+    prof_.reset();
+    prof_.on = true;
+    prof_.tsc_ok = platformHasTsc();
+    // ---- 仪器自校准：一次 `steady_clock::now()` 的耗时（ns）----
+    // ★ 为什么必须量它：`lift_one` 的采样区间 = 入口 t0（**不含**）到出口 t1（**部分含**）；
+    //   如果一次取时就有几百 ns，那"lift_one 平均 5xx ns"里就有仪器的一份 ⇒ 读数会误导。
+    //   ⛔ 不猜这个数，也不拿它去"修正"测量值（只报出来，让读的人自己判断）。
+    {
+        constexpr int kReps = 2000;
+        volatile std::int64_t sink_ns = 0;
+        const auto c0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < kReps; ++i) {
+            const auto t = std::chrono::steady_clock::now();
+            // 防优化：把某一位折进一个 volatile（否则整轮可能被删）
+            sink_ns ^= static_cast<std::int64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count());
+        }
+        const auto c1 = std::chrono::steady_clock::now();
+        const double total_ns = std::chrono::duration<double, std::nano>(c1 - c0).count();
+        prof_.clock_read_ns = total_ns / static_cast<double>(kReps);
+    }
+    // ★ `lift_one` 的采样钩子（唯一接缝；契约见 `runtime/lift_abi.h`）。关档时它保持 nullptr。
+    g_profile_host = this;
+    lift::liftOneProfileHook = &aotLiftOneProfileHook;
+    if (!prof_.tsc_ok) {
+        // 非 x86（例如 macOS arm64）：没有 TSC ⇒ dispatch 区间用 steady_clock ns。
+        // ★ 不编一个 GHz 出来：那会让 cycles→ms 的换算变成假的（`freq:` 行会明说不可用）。
+        return;
+    }
+    // ---- 机器频率校准：**已知长度的忙循环**，实测 ticks / 墙钟 ⇒ GHz ----
+    // ★ 为什么必须实测（⛔ 不硬编码 3.2 GHz）：TSC 是**恒定速率**（通常 = 标称基频），不同机器
+    //   基频不同（也可能被 BIOS / 虚拟化改），硬编码的系数会让 ms 读数整体偏几个百分点到一倍。
+    // ★ 循环体是**依赖链**（每次乘加依赖上一次）⇒ 不会被乱序 / 向量化；`volatile` sink 防整段被删。
+    volatile std::uint64_t sink = 0;
+    auto bench = [&](std::uint64_t iters) {
+        std::uint64_t x = 0x9E3779B97F4A7C15ull;
+        const auto t0 = std::chrono::steady_clock::now();
+        const std::uint64_t c0 = profileTicks();
+        for (std::uint64_t i = 0; i < iters; ++i) {
+            x = x * 6364136223846793005ull + 1442695040888963407ull;
+        }
+        const std::uint64_t c1 = profileTicks();
+        const auto t1 = std::chrono::steady_clock::now();
+        sink = sink ^ x;
+        return std::make_pair(c1 - c0,
+                              std::chrono::duration<double, std::milli>(t1 - t0).count());
+    };
+    // pilot：先跑一小段，把主测量定在 ~30 ms（快慢机器差一个数量级也不会跑成 0 或跑 10 s）。
+    const auto pilot = bench(200000ull);
+    const double iters_per_ms = pilot.second > 0.0 ? 200000.0 / pilot.second : 5.0e5;
+    std::uint64_t iters = static_cast<std::uint64_t>(iters_per_ms * 30.0);
+    if (iters < 200000ull) iters = 200000ull;
+    // 3 轮取**最大** ticks/ms：被调度抢占的那几轮只会偏小（取最大 = 最接近真实频率）。
+    double best_ghz = 0.0;
+    for (int round = 0; round < 3; ++round) {
+        const auto r = bench(iters);
+        if (r.first == 0 || r.second <= 0.0) continue;
+        const double ghz = static_cast<double>(r.first) / (r.second * 1.0e6);
+        if (ghz > best_ghz) {
+            best_ghz = ghz;
+            prof_.calib_ticks = r.first;
+            prof_.calib_ms = r.second;
+        }
+    }
+    prof_.ghz = best_ghz;
+}
+
+void AotHost::stopProfile() {
+    // ★ 关档：摘掉 `lift_one` 的钩子（`nullptr` ⇒ 热路径上只剩一次指针判空）并清空账。
+    //   为什么要显式摘：`run()` 可以被调多轮，上一轮开着、这一轮不带 `--profile` 时
+    //   ⛔ 不许它继续在后台采样（那会让"关档"不再是关档）。
+    lift::liftOneProfileHook = nullptr;
+    g_profile_host = nullptr;
+    prof_.reset();
+}
+
+void AotHost::noteProfileLiftOne(const lift::LiftOneProfileSample& s) {
+    if (!prof_.on) return;
+    AotProfile::LiftOneStat& st = prof_.liftone_by_ea[s.ea];
+    ++st.n;
+    st.ns += s.ns;
+    // 一个 EA 只对应一条静态指令 ⇒ op 名只有第一次需要记（SMC 改了字节也不会改 EA→op 的用途）。
+    if (st.op.empty()) st.op = (s.op != nullptr && *s.op != '\0') ? s.op : "?";
+    ++prof_.liftone_samples;
+    // 四桶（A/B/C/D）：按 op 累计 + 全体累计。⛔ 只用于归因。
+    auto& phase = prof_.liftone_phase_by_op[st.op];
+    for (int i = 0; i < AotProfile::kLiftOnePhaseCount; ++i) {
+        phase[static_cast<std::size_t>(i)] += s.phase_ns[i];
+        prof_.liftone_phase_total[static_cast<std::size_t>(i)] += s.phase_ns[i];
+    }
+}
+
+void AotHost::printProfile(std::FILE* out) const {
+    if (out == nullptr || !prof_.on) return;  // ★ 关档：连表头都不打（关/开两档的 stdout 只差这一块）
+    const AotProfile& p = prof_;
+
+    std::fprintf(out,
+                 "\n=== profile (sampling: dispatch 1/%llu, lift_one 1/%llu, shim 1/%llu-per-shim) ===\n",
+                 static_cast<unsigned long long>(AotProfile::kDispatchStride),
+                 static_cast<unsigned long long>(AotProfile::kLiftOneStride),
+                 static_cast<unsigned long long>(AotProfile::kShimStride));
+
+    // ---- freq：机器频率校准（把 cycles 换算成 ms 的唯一系数）----
+    if (p.tsc_ok && p.ghz > 0.0) {
+        std::fprintf(out,
+                     "freq: ~%.2f GHz（TSC 实测：依赖链忙循环 %.1f ms 走 %llu ticks；TSC 恒定速率 ⇒ "
+                     "核心降频不影响 cycles→ms）\n",
+                     p.ghz, p.calib_ms,
+                     static_cast<unsigned long long>(p.calib_ticks));
+    } else {
+        std::fprintf(out,
+                     "freq: 不可用（这台平台读不到 TSC ⇒ dispatch 区间用 steady_clock ns；"
+                     "⛔ 不硬编码 GHz）\n");
+    }
+    // 仪器自身的量级（读数时必须摆出来：`lift_one` 的平均 ns 里有一部分是取时的尾巴）
+    std::fprintf(out,
+                 "freq: 取时开销 %.1f ns/次（steady_clock，2000 次实测；lift_one 的采样区间**不含**入口取时、"
+                 "出口取时的尾巴会计进测量值）\n",
+                 p.clock_read_ns);
+
+    // ---- frame-ms：每帧一行已在 Present 时打过，这里只报行数（⛔ 不重复刷屏）----
+    std::fprintf(out,
+                 "frame-ms: %llu 行（每帧一行，Present 时打；t_ms = 自进程启动到该帧 present 完成）\n",
+                 static_cast<unsigned long long>(p.frame_lines));
+
+    // ---- ② 派发归因：自计时间隔法（权重记到该次采样的入口 EA 上）----
+    {
+        struct Row {
+            std::uint32_t ea;
+            std::uint64_t hits;
+            std::uint64_t ticks;
+        };
+        std::vector<Row> rows;
+        rows.reserve(p.dispatch_by_ea.size());
+        for (const auto& kv : p.dispatch_by_ea) rows.push_back({kv.first, kv.second.first, kv.second.second});
+        std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
+            if (a.ticks != b.ticks) return a.ticks > b.ticks;
+            return a.ea < b.ea;
+        });
+        const double total_ms = profileTicksToMs(p.dispatch_total, p);
+        const double total_pct_of_wall = p.wall_ms > 0.0 ? 100.0 * total_ms / p.wall_ms : 0.0;
+        std::fprintf(out,
+                     "dispatch-top: 自计时间隔法 %llu 个样本 / %llu 次派发；采样区间合计 %.1f ms"
+                     "（占覆盖到的墙钟 %.1f%%；未覆盖 = 收尾那不到一个 stride）\n",
+                     static_cast<unsigned long long>(p.dispatch_samples),
+                     static_cast<unsigned long long>(p.dispatch_calls), total_ms, total_pct_of_wall);
+        constexpr std::size_t kTop = 20;
+        const std::size_t shown = std::min(kTop, rows.size());
+        for (std::size_t i = 0; i < shown; ++i) {
+            const double ms = profileTicksToMs(rows[i].ticks, p);
+            const double pct = p.dispatch_total != 0
+                                   ? 100.0 * static_cast<double>(rows[i].ticks) /
+                                         static_cast<double>(p.dispatch_total)
+                                   : 0.0;
+            std::fprintf(out, "dispatch-top: %2zu. ea=%08X 采样=%llu ms=%9.3f 占比=%5.1f%%\n", i + 1,
+                         rows[i].ea, static_cast<unsigned long long>(rows[i].hits), ms, pct);
+        }
+        if (rows.size() > shown) {
+            std::fprintf(out, "dispatch-top: 另有 %zu 个 EA（未展开）\n", rows.size() - shown);
+        }
+        if (rows.empty()) std::fprintf(out, "dispatch-top: （没有样本）\n");
+    }
+
+    // ---- ③ lift_one 归因（每 1/1024 采样一次单次耗时，按 op 类别 + EA 聚合）----
+    //   ★ 输出两块：按 op 汇总（`op / 次数 / 平均 ns / 总 ns`）+ 按 (op, EA) 的 top-20。
+    //     后者回答"热点落在那条指令上"，前者回答"开销集中在哪类 op"。
+    if (p.liftone_by_ea.empty()) {
+        std::fprintf(out,
+                     "liftone: （没有样本 —— 本构建里 `lift_one` 一次都没被调用，或采样钩子没接上）\n");
+    } else {
+        struct OpRow {
+            std::string op;
+            std::uint64_t n;
+            std::uint64_t ns;
+        };
+        std::map<std::string, std::pair<std::uint64_t, std::uint64_t>> by_op;
+        for (const auto& kv : p.liftone_by_ea) {
+            auto& slot = by_op[kv.second.op];
+            slot.first += kv.second.n;
+            slot.second += kv.second.ns;
+        }
+        std::vector<OpRow> ops;
+        ops.reserve(by_op.size());
+        for (const auto& kv : by_op) ops.push_back({kv.first, kv.second.first, kv.second.second});
+        std::sort(ops.begin(), ops.end(), [](const OpRow& a, const OpRow& b) {
+            if (a.ns != b.ns) return a.ns > b.ns;
+            return a.op < b.op;
+        });
+        std::fprintf(out,
+                     "liftone: 每 %llu 次采样一次单次耗时（%llu 个样本 / %zu 个 EA）—— 按 op 类别汇总：\n",
+                     static_cast<unsigned long long>(AotProfile::kLiftOneStride),
+                     static_cast<unsigned long long>(p.liftone_samples), p.liftone_by_ea.size());
+        for (const OpRow& o : ops) {
+            const double avg = o.n != 0 ? static_cast<double>(o.ns) / static_cast<double>(o.n) : 0.0;
+            std::fprintf(out, "liftone: op=%-10s 次数=%-7llu 平均ns=%8.1f 总ns=%12llu\n", o.op.c_str(),
+                         static_cast<unsigned long long>(o.n), avg,
+                         static_cast<unsigned long long>(o.ns));
+        }
+        // top-20 (op, EA)
+        struct EaRow {
+            std::uint32_t ea;
+            std::uint64_t n;
+            std::uint64_t ns;
+            std::string op;
+        };
+        std::vector<EaRow> eas;
+        eas.reserve(p.liftone_by_ea.size());
+        for (const auto& kv : p.liftone_by_ea) {
+            eas.push_back({kv.first, kv.second.n, kv.second.ns, kv.second.op});
+        }
+        std::sort(eas.begin(), eas.end(), [](const EaRow& a, const EaRow& b) {
+            if (a.ns != b.ns) return a.ns > b.ns;
+            return a.ea < b.ea;
+        });
+        constexpr std::size_t kTop = 20;
+        const std::size_t shown = std::min(kTop, eas.size());
+        std::fprintf(out, "liftone: 按 (op, EA) 的 top-%zu（总 ns 降序）：\n", shown);
+        for (std::size_t i = 0; i < shown; ++i) {
+            const double avg = eas[i].n != 0 ? static_cast<double>(eas[i].ns) / static_cast<double>(eas[i].n)
+                                             : 0.0;
+            std::fprintf(out, "liftone: %2zu. op=%-10s ea=%08X 次数=%-5llu 平均ns=%8.1f 总ns=%llu\n",
+                         i + 1, eas[i].op.c_str(), eas[i].ea,
+                         static_cast<unsigned long long>(eas[i].n), avg,
+                         static_cast<unsigned long long>(eas[i].ns));
+        }
+        if (eas.size() > shown) std::fprintf(out, "liftone: 另有 %zu 个 EA（未展开）\n", eas.size() - shown);
+
+        // ---- ③b 四桶归因：A 换入 / B 解码 / C 执行 / D 回读 ----
+        //   ★ 为什么要有它（父级任务书"任务 1"）：`lift_one` 的**每种 op 的下限都极高**
+        //     （`Mov` 517 ns / `Div` 496 ns，本该几十 ns），而那个地板与 op 无关 ⇒ 只能靠"分段的读数"
+        //     定位，不能按猜测动手。四段之和 == 该次采样的总 ns（同一条取时链）。
+        //   ⚠ 每段各含**一次**取时（`freq: 取时开销` 那一行的 ns）⇒ 短段的读数有那个量级的地板。
+        //   ⛔ 这些数字只用于归因；⛔ 不进任何判据、⛔ 不改变任何语义。
+        {
+            static const char* const kPhaseName[AotProfile::kLiftOnePhaseCount] = {
+                "A 换入(liftRegsToCpu+eip)",
+                "B 解码(Insn/why+decode)",
+                "C 执行(noteInsn+execInsn)",
+                "D 回读(liftCpuToRegs+eip)",
+            };
+            const double samples = static_cast<double>(p.liftone_samples);
+            std::uint64_t total_ns = 0;
+            for (const auto& kv : p.liftone_by_ea) total_ns += kv.second.ns;
+            std::fprintf(out,
+                         "liftone-phase: 四桶归因（%llu 个样本；每段含一次取时 ≈ %.1f ns 的地板；"
+                         "四段之和 = 采样区间）\n",
+                         static_cast<unsigned long long>(p.liftone_samples), p.clock_read_ns);
+            for (int i = 0; i < AotProfile::kLiftOnePhaseCount; ++i) {
+                const std::uint64_t ns = p.liftone_phase_total[static_cast<std::size_t>(i)];
+                const double avg = samples > 0.0 ? static_cast<double>(ns) / samples : 0.0;
+                const double pct = total_ns > 0 ? 100.0 * static_cast<double>(ns) / static_cast<double>(total_ns)
+                                                : 0.0;
+                std::fprintf(out, "liftone-phase: %-28s 平均ns=%8.1f 占比=%5.1f%% 总ns=%12llu\n",
+                             kPhaseName[i], avg, pct, static_cast<unsigned long long>(ns));
+            }
+            // 按 op 的四段平均（取"总 ns 降序"的前若干个 op，再补一行全体）——这是"x87 的地板在哪一段"的答案。
+            struct PhaseRow {
+                std::string op;
+                std::uint64_t n;
+                std::array<std::uint64_t, AotProfile::kLiftOnePhaseCount> ns;
+            };
+            std::map<std::string, std::uint64_t> op_n;
+            for (const auto& kv : p.liftone_by_ea) op_n[kv.second.op] += kv.second.n;
+            std::vector<PhaseRow> rows;
+            rows.reserve(p.liftone_phase_by_op.size());
+            for (const auto& kv : p.liftone_phase_by_op) {
+                rows.push_back({kv.first, op_n[kv.first], kv.second});
+            }
+            std::sort(rows.begin(), rows.end(), [](const PhaseRow& a, const PhaseRow& b) {
+                std::uint64_t ta = 0, tb = 0;
+                for (int i = 0; i < AotProfile::kLiftOnePhaseCount; ++i) {
+                    ta += a.ns[static_cast<std::size_t>(i)];
+                    tb += b.ns[static_cast<std::size_t>(i)];
+                }
+                if (ta != tb) return ta > tb;
+                return a.op < b.op;
+            });
+            constexpr std::size_t kPhaseTop = 12;
+            const std::size_t phase_shown = std::min(kPhaseTop, rows.size());
+            std::fprintf(out, "liftone-phase: 按 op 的四段平均 ns（总 ns 降序，前 %zu 个；A/B/C/D）\n",
+                         phase_shown);
+            for (std::size_t i = 0; i < phase_shown; ++i) {
+                const PhaseRow& r = rows[i];
+                const double n = r.n != 0 ? static_cast<double>(r.n) : 1.0;
+                std::uint64_t sum = 0;
+                for (int k = 0; k < AotProfile::kLiftOnePhaseCount; ++k) sum += r.ns[static_cast<std::size_t>(k)];
+                std::fprintf(out,
+                             "liftone-phase: op=%-10s 次数=%-6llu 平均ns=%7.1f  A=%6.1f B=%6.1f C=%6.1f D=%6.1f\n",
+                             r.op.c_str(), static_cast<unsigned long long>(r.n),
+                             static_cast<double>(sum) / n, static_cast<double>(r.ns[0]) / n,
+                             static_cast<double>(r.ns[1]) / n, static_cast<double>(r.ns[2]) / n,
+                             static_cast<double>(r.ns[3]) / n);
+            }
+        }
+
+        // ---- ③c 解码缓存命中率（`lift_one` 的 B 桶由它决定；只作读数）----
+        //   ★ `invalidated` = "EA 相同但字节变了" ⇒ **SMC 自愈真的在工作**的直接证据
+        //     （AOT 臂 `lift_note_write` 是 no-op，所以这条路径是唯一的防线）。
+        //   ⛔ 这些数字只作读数，不进任何判据。
+        {
+            const lift::DecodeCache& c = lift::liftOneDecodeCache();
+            const std::uint64_t lookups = c.hits + c.misses + c.invalidated;
+            const double rate = lookups != 0 ? 100.0 * static_cast<double>(c.hits) / static_cast<double>(lookups)
+                                             : 0.0;
+            std::fprintf(out,
+                         "decode-cache: 槽=%zu 命中=%llu 未命中=%llu 字节被改(重解)=%llu 不可缓存=%llu "
+                         "命中率=%.1f%%（%llu 次查找）\n",
+                         lift::kDecodeCacheSlots, static_cast<unsigned long long>(c.hits),
+                         static_cast<unsigned long long>(c.misses),
+                         static_cast<unsigned long long>(c.invalidated),
+                         static_cast<unsigned long long>(c.uncached), rate,
+                         static_cast<unsigned long long>(lookups));
+        }
+    }
+
+    // ---- ④ shim 归因（**总量**口径，与解释器 `--profile` 的 `shimmax` 不同）----
+    //   ★ `shimmax` = 最慢一次；这里要的是"这个 shim 一共花了多少" ⇒ 采样 ns 之和 + 按总调用数折算。
+    //   ★ 总调用数**不逐次记账**：直接读 `ShimRegistry` 的 `call_count`（`invoke` 本来就在记）。
+    {
+        std::map<std::string, std::uint64_t> call_counts;
+        for (const ShimDef& d : shims_.all()) {
+            call_counts[d.module + "!" + d.name] = d.call_count;
+        }
+        struct Row {
+            std::string key;
+            std::uint64_t n;
+            std::uint64_t ticks;
+            std::uint64_t calls;
+        };
+        std::vector<Row> rows;
+        rows.reserve(p.shim_by_name.size());
+        for (const auto& kv : p.shim_by_name) {
+            const auto it = call_counts.find(kv.first);
+            rows.push_back({kv.first, kv.second.n, kv.second.ticks,
+                            it != call_counts.end() ? it->second : 0ull});
+        }
+        std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
+            if (a.ticks != b.ticks) return a.ticks > b.ticks;
+            return a.key < b.key;
+        });
+        constexpr std::size_t kTop = 15;
+        const std::size_t shown = std::min(kTop, rows.size());
+        std::fprintf(out,
+                     "shim: 每个 shim **各自**每 %llu 次调用采样一次（top-%zu，按采样到的总耗时降序；"
+                     "`总ns` = 采样 ns 之和，`折算ms` = 平均 × 总调用数）\n",
+                     static_cast<unsigned long long>(AotProfile::kShimStride), shown);
+        for (std::size_t i = 0; i < shown; ++i) {
+            const double avg_ns = rows[i].n != 0 ? profileTicksToMs(rows[i].ticks, p) * 1.0e6 /
+                                                        static_cast<double>(rows[i].n)
+                                                  : 0.0;
+            const double total_ns = profileTicksToMs(rows[i].ticks, p) * 1.0e6;
+            const double est_ms = rows[i].calls != 0 ? avg_ns * static_cast<double>(rows[i].calls) / 1.0e6
+                                                     : 0.0;
+            // ★ 样本少（调用数不到两个 stride）时 `折算ms` 靠 1 个样本外推 ⇒ 必须当场标出来，
+            //    ⛔ 不让它冒充"这个 shim 一共花了多少"。
+            const char* warn = rows[i].n <= 1 ? " ⚠ 仅 1 个样本（调用数 < stride）⇒ 折算值不可当真"
+                                              : "";
+            std::fprintf(out,
+                         "shim: %2zu. %-42s 样本=%-5llu 调用=%-8llu 平均ns=%10.1f 总ns=%12.0f 折算ms=%9.3f%s\n",
+                         i + 1, rows[i].key.c_str(), static_cast<unsigned long long>(rows[i].n),
+                         static_cast<unsigned long long>(rows[i].calls), avg_ns, total_ns, est_ms, warn);
+        }
+        if (rows.empty()) std::fprintf(out, "shim: （没有样本）\n");
+        if (rows.size() > shown) std::fprintf(out, "shim: 另有 %zu 个 shim（未展开）\n", rows.size() - shown);
+    }
+    std::fflush(out);
 }
 
 }  // namespace aot

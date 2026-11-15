@@ -473,3 +473,71 @@
   看到"某个图层整块不见"时：先查 `unsupported :` 有没有 `bit30=GPU 不支持 alpha test`、
   `skipped top:` 有没有 `GPU 不支持 alpha test（ALPHATESTENABLE=1）`（**默认级别各只出一次**）——
   有就是本条，不是混合参数配错。
+
+### BUG-24 · AOT 点 **OPTION** 响亮停：菜单 switch 的 `case 14`（`0x41B92D`，跳表 `jpt_41B672` 就在 `.text` 里）从未被抬升
+- **现象**（2026-11-15 用户实测）：`emulator-lift-aot` 跑到 TITLE 后点 **OPTION** ⇒
+  `stop : decode-error @ eip=0041B92D（非正常结局） — EA 0041B92D 既不在派发表里（closure 缺这一行？）也不是 shim 桩 EA ⇒ 响亮停（查找 1 次比较；表 33496 项）`。
+  走同样路径到 TITLE 是正常的，**只有点到这一支才撞上**。
+- **已证事实**（可复算）：
+  1. `0x41B92D` 是菜单命令 switch 的 **case 14**：
+     ```
+     .text:0041B672   jmp  ds:jpt_41B672[edi*4]        ; switch jump
+     .text:0041B974   jpt_41B672 dd offset loc_41B679  ; 跳表本体在 .text 内部（共 15 项，case 0–14）
+     .text:0041B92D   loc_41B92D:  ; jumptable 0041B672 case 14
+     ```
+  2. **生成物里没有这个块**：`out/aot/lift_aot.ll` 既没有 `bb_41B92D`，也没有 `switch` 的 `i32 4307245` case
+     ⇒ 该 EA **从未被解码/发射**。
+  3. 同表另外 12 个 case 目标**都有 `bb_*` 块**（所以那些分支能跑）⇒ 跳表**大体被识别了**，**只丢了最后一项**。
+  4. **不是回归**：`apps/emulator-lift/aot/closure.txt` 未被修改（入库件）；派发表 `entries=33496` 与
+     `OBS-20261115-03`（今天之前）完全一致 ⇒ 可派发集合没变。
+  5. **范围更广**：语料里 `jmp ds:jpt_*[reg*4]` 型 switch **56 处**；抽 6 张表，"case 目标不在闭包根"比例 =
+     `5/6`、`6/6`、`11/13`、`15/15`、`9/13`、`11/13` ⇒ 菜单/命令分发型代码里点到没走过的分支都可能撞上。
+- **机制（2026-11-15 定死；纯只读取证，每步有读数）**：**表被当成指令吃掉了 ⇒ 真正的 case 目标落在一条"垃圾块"内部
+  ⇒ 被 overlap 判据永久拒收**。因果链：
+  1. `.lst:40920` 的 `0x41B96F call __CxxThrowException@8`（5 字节、**不返回**）⇒ 而"每条 call 的下一条 EA"
+     被**无条件**塞进 entries/leaders（`lift_gen.cpp:437-441`）⇒ **`0x41B974` = 跳表首**成了 leader/派发入口
+     （`lift_aot.ll:231122` 有 `i32 4307316, label %bb_41B974`）；
+  2. 从表首解码：第一个 dword `0x41B679` 的字节是 `79 B6` ⇒ 解成 `jns 0x41B92C`（`.ll:231271-231278` 的 IR 形状完全对上）；
+     jcc 目标 `0x41B92C` 成 leader；
+  3. **阶段①里 case 体一个都没解码**（间接 jmp 没有静态后继）⇒ 没有任何块在 `0x41B923` 处截断它
+     ⇒ 这条垃圾块从 `0x41B92C` **线性爬过 `0x41B92D`**；
+  4. D26 判 `0x41B92D`：不在入口集、不是块首、**`BlockSpans::inside` 为真** ⇒ 记 overlap 并塞进
+     `rejected_targets_`（**单调、永久**）；
+  5. 同轮另外 10 个 case 目标被收下 ⇒ `0x41B923` 的块出现 ⇒ 那条垃圾块**后来**才被丢掉
+     （所以 `.ll` 里只剩 `bb_exit_41B92C`），**但判过的不会再判** ⇒ `bb_41B92D` 永远不出现。
+  ⇒ **排除的两个候选**：**① case 数读成 14 不成立**（`lift_aot.ll:231223` 是 `icmp ugt i32 %t41, 14`；
+  表 15 项、索引 0–14、PE 值与 `.lst` 逐项一致）；**② 对齐过滤不成立**（D26 的 4 字节对齐判的是**表项地址**，
+  对目标 EA 无要求；同表 `0x41B679`/`0x41B6AB`/`0x41B885`/`0x41B8C5` 都非 4 对齐且都被收下）。
+  ★ 同一条垃圾块还吞了**真实的 `sub_41B9B0`**（生成日志 `[soft-root/重叠（call）] 0041B9B0`）。
+  ★ 上图"13 个不同目标"是按 `loc_*` 数的；算上 `def_41B672`（= `0x41B963`，cases 7,13 共用）是 **14**。
+- **全语料量化（62 张 `jpt_*` 表 / 663 项 / 605 去重）**：可派发 **573**；
+  **缺块 25**（要新块，D26 型 —— 24 个在 `.lst` 的 COLLAPSED 区，正常区只有 `0x41B92D` 这一例）；
+  **缺 entry 5**（只需 entries，D21 型，**0 新块**）；不在 `closure.txt` 的 **557/605**；有缺口的共 **7 张**。
+  另有 **10/62 张表的表首本身就是块首 + 派发入口**（= 表字节被解码这个面的规模）。
+- **修法方向（按形态，不按 EA；`closure.txt` 不动）**：
+  - **S1 前置识别**：形态 = `Jmp` + `Mem` + `index≠None` + `scale==4` + `base==None`；表长**首选由前置 bounds check 反推**
+    （`cmp idx,N` + 无符号 `ja` ⇒ 项数 N+1，并用"`ja` 目标 ∈ 表项"交叉验证），兜底才是"向后读到不像指针"；
+    ⛔ 产品路径不读 `.lst`（测试可以 —— `LIFT_AGE_LST` 已是多条 CTest 的 env）；
+  - **S2 表区间从解码里排除 + 表首不当 leader**（call 的返回 EA 落在表区间 ⇒ 不入 entries）⇒ 从根上断掉 `jns` 那条链；
+  - **S3 表项在建块之前就成为 leader** ← **根治点**：今天 D26 是"块定型后才收"，所以只能丢；
+    先立 leader，`buildBlocks` 会在 leader 处断开 ⇒ 那 25 个缺块自动修好，且"表项落进别人块"这一类消失；
+  - **S4 间接 jmp → `switch`**（仍读 guest 内存、语义逐位不变）、0 派发，与 S7 的目标形态一致；越界语义需单独裁决。
+  - 阶段：`P0 只读审计 → P1 排除 → P2 立 leader → P3 switch → P4 D21/D26 退位`，每阶段可独立回退；
+    守卫 = 新 CTest `--jmptab-audit`（断言"每张真实跳表的每个 case 目标都可派发 + 表区间无块首"，
+    **今天红、P2 后绿**）+ 变异 M1（bounds 谓词反转）/ M2（去掉 exec-range 过滤）。
+  - ⚠ 不确定项（未写成结论）：盖住 `0x41B92D` 的那条块是 `[0x41B92C, X)` 属**推断**（`blocks` 无 dump 口、
+    垃圾块后续被丢所以 `.ll` 里看不到）；10/62 里只有 2 张能点名触发者；24 个 collapsed 区缺块目标的机制未定。
+- **⛔ 不许只把这几个 EA 手工塞进 `closure.txt`**（那修好一个菜单、留 61 张表）。
+  修完要给"62 张表里还有多少 case 目标未进闭包 / 未可派发"的**前后读数**。
+- **复现 / 排障**（`apps/emulator-lift` 下）：
+  ```powershell
+  .\out\emulator-lift-aot.exe --skip-logo --present window --max-frames 3000 `
+    --game-dir ..\..\dist\install --appdata <每次全新的空目录>
+  # 在 TITLE 上点 OPTION ⇒ 应不再出现 decode-error @ 0041B92D
+  ```
+  离线核对（不跑游戏）：`Select-String corpus\disasm\files\AGE.EXE__dumped.sectfix.EXE.lst -Pattern "jumptable 41B672"`
+  应列出 case 0–14（含 `loc_41B92D`），再逐个查 `out\aot\lift_aot.ll` 里有没有对应 `bb_*`。
+  全量取证脚本：`.tmp/aot/jpt/probe.mjs`（只读）；全量结果 `.tmp/aot/jpt/scan-out.txt`；设计单 `.tmp/aot/jpt/plan.md`。
+- **代表守卫**：待补 —— 设计给的形状是**新 CTest `--jmptab-audit`**：断言"语料里每张 `jpt_*` 表的
+  每个 case 目标都可派发 + 表区间内没有块首"。**今天它是红的**（1 张表有缺口就会红），P2（表项在建块前立 leader）之后应转绿。
+  变异两条：M1 把 bounds 谓词反转、M2 去掉 exec-range 过滤 —— 都必须能让它红。

@@ -2524,6 +2524,78 @@ const MUTATIONS = [
       '⇒ `lift-host-services-owns-cpu` 当场红：② 的两条 `ownsCpu(copy)` 失败 + ③ 的真实入口真的给副本' +
       '建出了一块（返回非 0，而不是被拒的 0）',
   },
+  // ---- S1/S3 性能修（2026-11-15）：桩 EA 解析 = 槽位索引表，**存 id 不存槽号** ----
+  // ★ 为什么这条值得一条变异：`idForStub` 的返回值就是 `ShimRegistry::invokeById` 的键；把"槽号"
+  //   当 id 是**最像对的**那种错（真机上 id 与槽常常恰好相等，夹具里才明显不等），后果是**调错
+  //   shim**（静默行为错，不是崩溃）。守卫在 `apps/emulator-lift/tests/shim_stub_index.cpp`：
+  //   ① 逐槽 `byStubEa` / `idForStub` 与"扫 defs_ 取第一条"的定义相同；② 已登记 shim 必须走索引
+  //   （`stubIndexSlowPathHits` 不动）；③ 页外 / 页内未对齐 ⇒ null；④ addRuntime 追加后旧槽仍指向
+  //   同一条（表里存 id / 下标，⛔ 不存 `ShimDef*`）。
+  // ★ 用例里**先登记两条无桩的 `add`** ⇒ 桩 id(2,3,4) ≠ 槽号(0,1,2) ⇒ "槽号当 id"必然不等价。
+  // ★ `buildDir` 是 `out-perf1`：本轮自己的构建目录（`out/` 与其它 `out-*` 归别人，⛔ 不借它们重建）。
+  {
+    file: 'apps/emulator-lift/src/runtime/shims.cpp',
+    from: '    return d != nullptr ? d->id : 0u;',
+    to: '    return d != nullptr ? static_cast<std::uint32_t>((ea - stubPage()) >> 2) : 0u;  // 变异：把槽号当 id',
+    guard: 'ctest:lift-shim-stub-index',
+    ctest: 'lift-shim-stub-index',
+    buildDir: 'apps/emulator-lift/out-perf1',
+    what:
+      '`idForStub` 返回**槽号**而不是登记 id（本轮唯一的正确性约束就是"id = 注册序 ≠ 槽 = 发号序"）' +
+      '⇒ `lift-shim-stub-index` 的逐槽等价当场红：`stub-index-every-slot` / `-after-growth` / ' +
+      '`-direct-write` 里 `idForStub(ea)` 与 oracle 的 `def.id` 不相等',
+  },
+  // ---- `lift_one` 的 EA → Insn 解码缓存（2026-11-15）：**逐字节校验**是它唯一的正确性主张 ----
+  // ★ 为什么这条值得一条变异：AOT 臂的 `lift_note_write` 是 **no-op**（`cpu.cache == nullptr`）
+  //   ⇒ "guest 写代码页"没有任何钩子。解码缓存的逐字节比较是**这条缺口在解码层面唯一的自愈机制**；
+  //   把它删掉（只按 EA 命中）⇒ guest 改了字节之后仍然执行**旧的** Insn（静默跑旧指令：不崩、
+  //   不黑屏、`git diff` 也看不见）。
+  // ★ 变异形态必须是"**没有**逐字节比较"而不是 `if (false)`：本工程 `/W4 /WX`，编译期恒假的条件
+  //   （C4127 / `-Wunused-variable`）会让工具记「不可判定（构建失败）」而不是「守卫红了」。
+  //   这里把 `same` 换成一个**运行时**恒真、编译器证明不了的量（`mem.committed(ea,1)` —— 进到这里
+  //   之前已经要求过 `committed(ea, 15)`），并顺手删掉 `live`（否则它变成未使用变量）。
+  // ★ 守卫：`apps/emulator-lift/tests/decode_cache.cpp`（CTest `lift-decode-cache`）的
+  //   `smc-invalidate` 组 —— 改字节后仍命中 ⇒ `cache.invalidated` 停在 0，且返回的 Insn 是改前
+  //   那一条（长度 5 / op=Mov / imm=0x12345678），而重新解码给的是长度 1 / op=Nop。
+  // ★ `buildDir` 是本轮自己的构建目录（`out/` 与其它 `out-*` 归别人，⛔ 不借它们重建）。
+  {
+    file: 'apps/emulator-lift/src/runtime/decode_cache.cpp',
+    from:
+      '        const std::uint8_t* live = mem.host(ea);\n' +
+      '        bool same = true;\n' +
+      '        for (std::uint8_t i = 0; i < e.len; ++i) {\n' +
+      '            if (live[i] != e.bytes[i]) {\n' +
+      '                same = false;\n' +
+      '                break;\n' +
+      '            }\n' +
+      '        }\n',
+    to: '        bool same = mem.committed(ea, 1u);  // 变异：逐字节校验被删掉（只按 EA 命中 ⇒ 陈旧答案）\n',
+    guard: 'ctest:lift-decode-cache',
+    ctest: 'lift-decode-cache',
+    buildDir: 'apps/emulator-lift/out-liftone1',
+    what:
+      '解码缓存命中时不再逐字节校验（只按 EA 命中）⇒ `lift-decode-cache` 的 `smc-invalidate` 红：' +
+      '改字节后仍返回改前那条 Insn（长度 5 / op=Mov / imm=0x12345678），`invalidated` 停在 0 —— ' +
+      '正是"AOT 臂没有 SMC 钩子"会退化成的那种静默跑旧代码',
+  },  // ★ 代表 "x87 抬进 IR 之后**语义写错**"这一类错（检查点 2 / D49 的守卫 `lift-x87-diff`）。
+  //   形态选 `fsubr` 的**操作数顺序**：它是"反向减法"（`ST(0) = mem/reg − ST(0)`），写反了
+  //   仍然是一条合法的 `fsub`、仍然跑完不崩、300 帧的六项语义指纹也照旧**全绿**（实测：本轮
+  //   把 `fsub`/`fsubr` 写反过，`tri` 只差 0.004%）—— 只有逐位差分能抓住它。
+  //   判据：`tests/x87_diff.cpp` 的 `fsubr@00430AE6` 组 ⇒ `st(0)` 位型从 `BFF8…`（−1.5）变
+  //   `3FF8…`（+1.5），且 guest 内存区随之不同。
+  // ⚠ `buildDir` 写 `out`（§12.3：下一轮起唯一的树）。本轮（2026-11-15）实测用的是
+  //   `out-d49`（同一份代码 + 同一条命令，红/绿都实测过），见 `.tmp/aot/decisions.md` D49 那条的追加。
+  {
+    file: 'apps/emulator-lift/src/aot/lift_gen_emit.cpp',
+    from: '        case Op::Fsubr: r = bin("fsub", "double", b, a); break;\n',
+    to: '        case Op::Fsubr: r = bin("fsub", "double", a, b); break;  // 变异：操作数顺序写反\n',
+    guard: 'ctest:lift-x87-diff',
+    ctest: 'lift-x87-diff',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'x87 的 `fsubr` 操作数顺序写反（`b−a` → `a−b`）⇒ `lift-x87-diff` 的 `fsubr@00430AE6` 组红：' +
+      '`st(0)` 位型 BFF8000000000000（−1.5）变 3FF8000000000000（+1.5），guest 内存区随之不同',
+  },
 ];
 
 let mutationRunSeq = 0;

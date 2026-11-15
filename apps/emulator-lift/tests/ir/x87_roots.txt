@@ -1,0 +1,73 @@
+# x87 两臂差分（检查点 2 / D49）的**根集**（一行一个 hex EA；`#` 起注释）
+#
+# 用途：`lift-x87-diff`（`tests/x87_diff.cpp`）用这份根集让 `emulator-lift-gen` 生成一份
+# **只含这些 EA 的**模块；测试体对每个 EA：
+#   ① 从同一份受控状态出发（8 个 double 槽 + top + tag + 控制字 + GPR + 已提交数据区）；
+#   ② **lifted 臂**：`lookup(ea)` 拿生成代码，跑到"回到表外 EA"或预算用尽；
+#   ③ **解释器臂**：同一份状态，`Machine::run(max_insns = lifted 侧实测条数)`；
+#   ④ 逐位比较：8 个槽（double 位型）/ top / tag / 状态字 / 控制字 / 8 GPR / EFLAGS / 内存区。
+#
+# ★ 为什么是"真字节"而不是合成指令：这些 EA 都是 AGE.EXE 里**真实的** x87 指令位置（判据 =
+#   `.lst` 的助记符，测试体在跑之前会**解码并断言**起点助记符 == 期望的 op ⇒ 根集写错会红）。
+#   用真字节的额外好处：op 后面的指令也一起进比对（两臂必须走同一条路径）。
+# ★ 覆盖：22 个 op = 300 帧直方图里 **95.7% 的 x87 动态调用**（`OBS-20261115-04` 的采样口径）。
+#   ⚠ **未覆盖**（如实记账，⛔ 不是"忘了"）：
+#     · `fsub` / `fsubp` / `fsubrp` / `fcom`（合计 1,852 / 42,936 = 4.3%）：`.lst` 里这些 op 的
+#       **全部**静态站点都落在 `0x450000+`，而 `sectfix` 的 PE 在那一段**没有 raw 字节**
+#       （测试体读到的 8 字节全 0 ⇒ 助记符自检当场红：`@ 00478769 的助记符是 "add"，字节 0000…`）。
+#       `.lst` 的文件头写明它来自**另一份 dump**（`Input SHA256: 1937F0…`，与 sectfix 件不同）
+#       ⇒ 这是**语料与执行源的范围差**，不是语义问题。⇒ 它们由 300 帧验收臂 + 下面的
+#       "同一个 helper/同一批桥函数"覆盖，但**没有逐位差分**（本轮最诚实的缺口）。
+#     · `fwait` / `fldpi` / `fsin` / `fcos` / `fpatan` / `fucom(pp)` / `fiadd` 等：`.lst` 里 0–2 条
+#       静态站点且多在未映射段；语义走同一批桥函数 / 同一个 `@lift_x87_sem` helper。
+# ★ 口径：⛔ 不要往这里加"合成指令"—— 合成码要另造 PE，本轮不做（记在报告里）。
+#
+# op            EA          依据（.lst 的起点指令）
+# fld           0x41829C    fld    dword ptr [ecx+4E0h]
+# fstp          0x486412    fstp   st
+# fst           0x40584D    fst    [ebp+var_44]
+# fmul          0x4184E5    fmul   dbl_51FB50
+# fmulp         0x40469B    fmulp  st(1), st
+# fadd          0x4184DF    fadd   dbl_51FB58
+# faddp         0x408120    faddp  st(1), st
+# fsub          0x478769    fsub   dbl_51D7F8（原选 0x478769 的 .lst 行与 PE 字节不符 ⇒ 换址）
+# fsubr         0x430AE6    fsubr  [ebp+var_8]
+# fsubp         0x461443    fsubp  st(1), st
+# fsubrp        0x452C92    fsubrp st(4), st
+# fdiv          0x404660    fdiv   dbl_51DD10
+# fdivp         0x4184FB    fdivp  st(1), st
+# fdivr         0x430BA6    fdivr  [ebp+var_8]
+# fxch          0x4035E7    fxch   st(2)
+# fnstsw        0x4035A2    fnstsw ax
+# fild          0x41C350    fild   dword ptr [eax]
+# fistp         0x4046B5    fistp  qword ptr [ebp-10h]
+# fchs          0x40811E    fchs
+# fabs          0x42CEEF    fabs
+# fcom          0x470505    fcom   st(1)
+# fcomp         0x412685    fcomp  [ebp+var_77C]
+# fldz          0x40584B    fldz
+# fld1          0x418299    fld1
+# fldcw         0x4046B2    fldcw  word ptr [ebp+var_C]
+# fnstcw        0x4081F4    fnstcw word ptr [ebp+arg_0+6]
+0x41829C
+0x486412
+0x40584D
+0x4184E5
+0x40469B
+0x4184DF
+0x408120
+0x430AE6
+0x404660
+0x4184FB
+0x430BA6
+0x4035E7
+0x4035A2
+0x41C350
+0x4046B5
+0x40811E
+0x42CEEF
+0x412685
+0x40584B
+0x418299
+0x4046B2
+0x4081F4

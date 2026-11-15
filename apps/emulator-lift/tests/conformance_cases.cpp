@@ -2535,10 +2535,12 @@ void verify_x87_fucom(Fixture& f) {
 }
 
 // ---- `fld1` / `fldz` / 五个超越常数 ----
-// ★ 常数这条是**逐位**判据：x87 压栈的是 64 位有效位的扩展精度常数，不是 double 舍入值。
-//   旧实现走 `f64_to_extF80(字面量)`，低 11 位恒为 0 ⇒ 这三条会红（fldl2e/fldlg2/fldln2
-//   在语料里各有 1–2 条；fldpi/fldl2t 语料里没有，但同一条代码路径，一并钉住）。
-//   10 字节位模式来自 `fpu_bridge.cpp` 的推导说明（Machin / atanh 级数 + 64 位有效位）。
+// ★ **D49 改变了这条判据的口径**（旧口径：x87 压栈的是 64 位有效位的扩展精度常数，逐位按
+//   真机；旧断言钉的是那 10 字节位型）。D49 之后寄存器是 **double**（53 位尾数）⇒ `fstp tbyte`
+//   写出去的是"double 加宽到 10 字节"：尾数低 11 位**恒 0**、指数域不变。
+//   ⇒ 断言改成**加宽后的**位型（下面每个常量的低 32 位正是"double 尾数低 32 位 << 11"的低半）。
+//   ⚠ 这**不是**"为了让测试变绿而改 expected"：判据本身从"与真机 80 位逐位相同"降级成
+//     "与我们自己那份 double 模型逐位相同"，理由与偏差都登记在 `docs`/`fpu_bridge.h`。
 void x87_const_case(Fixture& f, const char* op_hex) {
     f.dataHex(kDataEa + 0x10u, "00000000" "00000000" "0000" "0000");
     const std::string code = std::string(op_hex) + " DB 3D 10 00 48 00 C3";  // fld 常数；fstp tbyte [0x10]
@@ -2546,8 +2548,9 @@ void x87_const_case(Fixture& f, const char* op_hex) {
 }
 void setup_x87_fld1(Fixture& f) { x87_const_case(f, "D9 E8"); }
 void verify_x87_fld1(Fixture& f) {
-    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0u);           // 1.0：signif 低 32 位 = 0
-    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x14u), 0x80000000u);  //      signif 高 32 位 = 0x8000_0000
+    // 1.0 ⇒ 尾数 = 0x8000_0000_0000_0000（整数位 1、小数 0），指数域 0x3FFF
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0u);
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x14u), 0x80000000u);
     LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x18u), 0x3FFFu);
 }
 void setup_x87_fldz(Fixture& f) {
@@ -2560,31 +2563,36 @@ void verify_x87_fldz(Fixture& f) {
 }
 void setup_x87_fldpi(Fixture& f) { x87_const_case(f, "D9 EB"); }
 void verify_x87_fldpi(Fixture& f) {
-    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0x2168C235u);
+    // π 的 double = 0x400921FB_54442D18 ⇒ 加宽：signif = 0xC90FDAA22168C000、se = 0x4000
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0x2168C000u);
     LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x14u), 0xC90FDAA2u);
     LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x18u), 0x4000u);
 }
 void setup_x87_fldln2(Fixture& f) { x87_const_case(f, "D9 ED"); }
 void verify_x87_fldln2(Fixture& f) {
-    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0xD1CF79ACu);
+    // ln2 的 double = 0x3FE62E42_FEFA39EF ⇒ 加宽：signif = 0xB17217F7D1CF7800
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0xD1CF7800u);
     LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x14u), 0xB17217F7u);
     LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x18u), 0x3FFEu);
 }
 void setup_x87_fldl2e(Fixture& f) { x87_const_case(f, "D9 EA"); }
 void verify_x87_fldl2e(Fixture& f) {
-    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0x5C17F0BCu);
+    // log2(e) 的 double = 0x3FF71547_652B82FE ⇒ 加宽：signif = 0xB8AA3B295C17F000
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0x5C17F000u);
     LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x14u), 0xB8AA3B29u);
     LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x18u), 0x3FFFu);
 }
 void setup_x87_fldlg2(Fixture& f) { x87_const_case(f, "D9 EC"); }
 void verify_x87_fldlg2(Fixture& f) {
-    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0xFBCFF799u);
+    // log10(2) 的 double = 0x3FD34413_509F79FF ⇒ 加宽：signif = 0x9A209A84FBCFF800
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0xFBCFF800u);
     LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x14u), 0x9A209A84u);
     LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x18u), 0x3FFDu);
 }
 void setup_x87_fldl2t(Fixture& f) { x87_const_case(f, "D9 E9"); }
 void verify_x87_fldl2t(Fixture& f) {
-    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0xCD1B8AFEu);
+    // log2(10) 的 double = 0x400A934F_0979A371 ⇒ 加宽：signif = 0xD49A784BCD1B8800
+    LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x10u), 0xCD1B8800u);
     LIFT_CHECK_EQ_U32(f.mem().rd32(kDataEa + 0x14u), 0xD49A784Bu);
     LIFT_CHECK_EQ_U32(f.mem().rd16(kDataEa + 0x18u), 0x4000u);
 }

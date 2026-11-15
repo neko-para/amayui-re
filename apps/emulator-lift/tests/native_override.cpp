@@ -2659,66 +2659,61 @@ int main() {
     //     θ=0 ⇒ sin=+0 / cos=1（精确）⇒ A=r*sx、B=-(r*sy*+0)、C=r*sy、D=sx*r*+0；
     //     以及 `out0 = iy*B + ix*A + add4` / `out1 = iy*C + ix*D + add8` 的乘加顺序。
     {
-        lift::x87ApplyControlWord(0x037Fu);  // 默认控制字（64 位尾数 / 最近偶数）
-        auto extFromFloat = [](float f, lift::Ext80 out) {
-            std::uint8_t b[4];
-            std::memcpy(b, &f, 4);
-            lift::x87MemToReg(b, out, 4);
-        };
+        // ★ D49 之后 `X87Val` 就是 double ⇒ 夹具不再需要"mem32 → ext80"的转换层。
+        auto valFromFloat = [](float f) { return static_cast<lift::X87Val>(f); };
+        auto valFromI32 = [](std::int32_t v) { return static_cast<lift::X87Val>(v); };
 
         LIFT_CHECK(lift::affineAngleInRange(0.0f, 0.017453292f));
         LIFT_CHECK(lift::affineAngleInRange(359.0f, 0.017453292f));
         LIFT_CHECK(!lift::affineAngleInRange(1.0e30f, 0.017453292f));  // |θ| >= 2^63 ⇒ 交解释器
         LIFT_CHECK(!lift::affineAngleInRange(std::nanf(""), 1.0f));
 
-        lift::Ext80 angle, scale, radius;
-        extFromFloat(0.0f, angle);
-        extFromFloat(1.0f, scale);
-        extFromFloat(2.0f, radius);
+        const lift::X87Val angle = valFromFloat(0.0f);
+        const lift::X87Val scale = valFromFloat(1.0f);
+        const lift::X87Val radius = valFromFloat(2.0f);
         lift::AffineCoeffs k;
         LIFT_CHECK(lift::affineCoeffs(angle, scale, radius, false, false, &k));
-        lift::Ext80 two, minusTwo;
-        lift::x87FromI32(2, two);
-        lift::x87FromI32(-2, minusTwo);
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87Compare(k.a, two)), 0u);  // A = +2
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87Compare(k.c, two)), 0u);  // C = +2
+        const lift::X87Val two = valFromI32(2);
+        const lift::X87Val minusTwo = valFromI32(-2);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87Compare(k.a, two, false)), 0u);  // A = +2
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87Compare(k.c, two, false)), 0u);  // C = +2
         LIFT_CHECK(lift::x87IsZero(k.b) && lift::x87SignBit(k.b));    // B = -(r*1*+0) = -0
         LIFT_CHECK(lift::x87IsZero(k.d) && !lift::x87SignBit(k.d));   // D = +0*sx*r = +0
 
         // flip_x ⇒ sx=-1：A/D 反号；B 的零符号只由 sy 决定（θ=0 时 sin=+0）⇒ 仍是 -0。
         LIFT_CHECK(lift::affineCoeffs(angle, scale, radius, true, false, &k));
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87Compare(k.a, minusTwo)), 0u);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87Compare(k.a, minusTwo, false)), 0u);
         LIFT_CHECK(lift::x87IsZero(k.b) && lift::x87SignBit(k.b));  // -(r*1*+0) = -0
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87Compare(k.c, two)), 0u);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87Compare(k.c, two, false)), 0u);
         LIFT_CHECK(lift::x87IsZero(k.d) && lift::x87SignBit(k.d));  // +0 * (sx*r) = -0
         // flip_y ⇒ sy=-1：C 反号；`-(r*(-1)*+0)` 先得 -0、fchs 后是 **+0**。
         LIFT_CHECK(lift::affineCoeffs(angle, scale, radius, false, true, &k));
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87Compare(k.a, two)), 0u);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87Compare(k.a, two, false)), 0u);
         LIFT_CHECK(lift::x87IsZero(k.b) && !lift::x87SignBit(k.b));  // +0
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87Compare(k.c, minusTwo)), 0u);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87Compare(k.c, minusTwo, false)), 0u);
         LIFT_CHECK(lift::x87IsZero(k.d) && !lift::x87SignBit(k.d));  // +0
 
-        // 单点：A=1 B=10 C=100 D=1000（整数在 ext80 精确）⇒
+        // 单点：A=1 B=10 C=100 D=1000（整数在 double 里精确）⇒
         //   out0 = 3*10 + 2*1 + 7 = 39；out1 = 3*100 + 2*1000 + 8 = 2308。
         //   ⛔ 把 ix/iy 或两个平移对调，这两条会当场红。
         lift::AffineCoeffs m;
-        lift::x87FromI32(1, m.a);
-        lift::x87FromI32(10, m.b);
-        lift::x87FromI32(100, m.c);
-        lift::x87FromI32(1000, m.d);
-        lift::Ext80 ix, iy, add4, add8, o0, o1;
-        lift::x87FromI32(2, ix);
-        lift::x87FromI32(3, iy);
-        lift::x87FromI32(7, add4);
-        lift::x87FromI32(8, add8);
-        lift::affinePoint(m, ix, iy, add4, add8, o0, o1);
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87ToI32(o0, false)), 39u);
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87ToI32(o1, false)), 2308u);
+        m.a = valFromI32(1);
+        m.b = valFromI32(10);
+        m.c = valFromI32(100);
+        m.d = valFromI32(1000);
+        const lift::X87Val ix = valFromI32(2);
+        const lift::X87Val iy = valFromI32(3);
+        const lift::X87Val add4 = valFromI32(7);
+        const lift::X87Val add8 = valFromI32(8);
+        lift::X87Val o0 = 0.0;
+        lift::X87Val o1 = 0.0;
+        lift::affinePoint(m, ix, iy, add4, add8, &o0, &o1);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87ToI32Trunc(o0)), 39u);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::x87ToI32Trunc(o1)), 2308u);
 
         // 进入 fsin 的 C2 区（|θ| >= 2^63）⇒ 核本身也要防御性返回 false。
-        lift::Ext80 huge, one;
-        extFromFloat(1.0e30f, huge);
-        extFromFloat(1.0f, one);
+        const lift::X87Val huge = valFromFloat(1.0e30f);
+        const lift::X87Val one = valFromFloat(1.0f);
         LIFT_CHECK(!lift::affineCoeffs(huge, one, radius, false, false, &k));
     }
 
@@ -2862,11 +2857,8 @@ int main() {
         lift_test::g_current_case = "ftol/decline-no-write";
         constexpr std::uint32_t kFlagEa = 0x0055F2E8u;
         constexpr std::uint32_t kUncommitted = 0x00B00000u;  // 从不 placeData ⇒ 未提交页
-        auto extFromF64 = [](double d, lift::Ext80 out) {
-            std::uint8_t b[8];
-            std::memcpy(b, &d, 8);
-            lift::x87MemToReg(b, out, 8);
-        };
+        // ★ D49：x87 的槽位就是 double ⇒ 夹具直接赋值（不再有 mem64 → ext80 的转换层）。
+        auto extFromF64 = [](double d) { return static_cast<lift::X87Val>(d); };
         // 夹具：bare 机 + `[0x55F2E8]`（可故意不铺）+ 表里那一项
         auto bootFtol = [&](lift::Machine& m, std::string& err, bool with_flag) {
             if (!m.initBare(&err) || !m.prepareStack(&err)) return false;
@@ -2881,7 +2873,7 @@ int main() {
             std::uint32_t esp = 0;
             std::uint16_t status = 0, control = 0, tag = 0;
             std::uint8_t top = 0;
-            std::uint8_t regs[8][16] = {};
+            lift::X87Val regs[8] = {};
             std::uint8_t scratch[0x20] = {};
             std::uint8_t exc = 0;
             std::uint32_t flag = 0;
@@ -2915,9 +2907,7 @@ int main() {
             LIFT_CHECK(rig);
             if (!rig) return;
             // 缺省夹具：`st(0)` = 2.7（已置 valid）、esp 落在已提交栈上
-            lift::Ext80 v;
-            extFromF64(2.7, v);
-            std::memcpy(m.cpu().fpu.regs[m.cpu().fpu.phys(0)], v, 16);
+            m.cpu().fpu.regs[m.cpu().fpu.phys(0)] = extFromF64(2.7);
             m.cpu().fpu.setValid(m.cpu().fpu.phys(0));
             m.cpu().esp() = m.layout().stack_top - 0x40u;
             setup(m);
@@ -2926,7 +2916,6 @@ int main() {
             // scratch 哨兵（只在已提交时铺：未提交页写不得 —— 那一档要的正是"没铺"）
             if (m.mem().committed(frame, 0x20u))
                 for (std::uint32_t i = 0; i < 0x20u; ++i) m.mem().wr8(frame + i, 0x5Au);
-            lift::x87ApplyControlWord(0x037Fu);
             lift::x87ClearExceptionFlags();
             lift::x87RaiseInvalid();  // 宿主粘性位预置：回退路径不许把它 take 走
             const FtolSnap before = ftolSnap(m, frame);
@@ -2970,33 +2959,31 @@ int main() {
                 m.cpu().esp() = page;  // E = align16(page − 0x24) = page − 0x30 ⇒ 未提交
             },
             true);
-        // ⑥ `x ∈ (2^63−1, 2^63)`：唯一可表示点是 `2^63−0.5`（sig = 2^64−1、E = 62）
-        //   ⇒ guest 的 `fistp`（就近）给不定值，trunc 给 INT64_MAX ⇒ 两条语义在这一格分叉，必须交解释器
-        checkDecline(
-            "boundary-2^63-minus-half", lift::FtolWhy::TruncRoundDiverge,
-            [](lift::Machine& m) {
-                std::uint8_t t80[10] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x3D, 0x40};
-                std::memcpy(m.cpu().fpu.regs[m.cpu().fpu.phys(0)], t80, 10);
-            },
-            true);
-        // ⑦ 同一条边界但 `x = 2^63−1`（可表示、**不越界**）⇒ **不许**回退（否则 G-5 就宽到把正常值也挡了）
+        // ⑥⑦ **D49 改变了这一格**：旧口径（extF80）下 `2^63−0.5` / `2^63−1` 都是可表示值，
+        //   于是"guest 的 fistp 就近"与"我们的 trunc"在 `2^63−0.5` 上分叉 ⇒ 那一档必须回退
+        //   （`FtolWhy::TruncRoundDiverge`）。**D49 之后 x87 的槽位是 double**（2^63 附近 ulp = 2048）
+        //   ⇒ 这两个 10 字节值读进来都是 **2^63**、转换越界 ⇒ 两条路径给出同一个不定值
+        //   （`EAX=0` / `EDX=0x80000000`），**不再分叉** ⇒ G-5 结构性不可达。
+        //   ⇒ 断言改成新语义：**不许回退**，且结果 = 越界不定值（与解释器的 `fistp` 一致）。
         {
+            lift_test::g_current_case = "ftol/d49-2^63-boundary";
             lift::Machine m;
             std::string err;
             const bool rig = bootFtol(m, err, true);
             LIFT_CHECK(rig);
             if (rig) {
-                std::uint8_t t80[10] = {0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x3D, 0x40};
-                std::memcpy(m.cpu().fpu.regs[m.cpu().fpu.phys(0)], t80, 10);
+                const std::uint8_t t80[10] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x3D, 0x40};
+                m.cpu().fpu.regs[m.cpu().fpu.phys(0)] = lift::x87LoadMem(t80, 10);
+                LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.cpu().fpu.regs[m.cpu().fpu.phys(0)] ==
+                                                             9223372036854775808.0),
+                                  1u);  // 2^63（D49 的收窄）
                 m.cpu().fpu.setValid(m.cpu().fpu.phys(0));
                 m.cpu().esp() = m.layout().stack_top - 0x40u;
-                lift::x87ApplyControlWord(0x037Fu);
                 lift::x87ClearExceptionFlags();
                 std::uint32_t r = 0;
-                lift_test::g_current_case = "ftol/boundary-2^63-minus-1";
                 LIFT_CHECK(lift::nativeFtol2Sse(m.cpu(), m.mem(), &r));
-                LIFT_CHECK_EQ_U32(r, 0xFFFFFFFFu);
-                LIFT_CHECK_EQ_U32(m.cpu().edx(), 0x7FFFFFFFu);
+                LIFT_CHECK_EQ_U32(r, 0u);                    // 越界 ⇒ 不定值低半
+                LIFT_CHECK_EQ_U32(m.cpu().edx(), 0x80000000u);  // 高半
             }
         }
 
@@ -3008,15 +2995,12 @@ int main() {
             const bool rig = bootFtol(m, err, true);
             LIFT_CHECK(rig);
             if (rig) {
-                lift::Ext80 v;
-                extFromF64(-2.7, v);
-                std::memcpy(m.cpu().fpu.regs[m.cpu().fpu.phys(0)], v, 16);
+                m.cpu().fpu.regs[m.cpu().fpu.phys(0)] = extFromF64(-2.7);
                 m.cpu().fpu.setValid(m.cpu().fpu.phys(0));
                 const std::uint32_t esp = m.layout().stack_top - 0x40u;
                 m.cpu().esp() = esp;
                 const std::uint32_t ret_ea = 0x00401000u;
                 m.mem().wr32(esp, ret_ea);
-                lift::x87ApplyControlWord(0x037Fu);
                 lift::x87ClearExceptionFlags();
                 lift::NativeOverride* ov = m.overrides().at(0);
                 LIFT_CHECK(ov != nullptr);
@@ -3046,14 +3030,11 @@ int main() {
                 const double vals[6] = {2.7, -2.7, 1.5, -1.5, 0.5, -0.5};
                 const std::uint32_t want[6] = {2u, 0xFFFFFFFEu, 1u, 0xFFFFFFFFu, 0u, 0u};
                 for (int i = 0; i < 6; ++i) {
-                    lift::Ext80 v;
-                    extFromF64(vals[i], v);
-                    std::memcpy(m.cpu().fpu.regs[i], v, 16);
+                    m.cpu().fpu.regs[i] = extFromF64(vals[i]);
                     m.cpu().fpu.setValid(i);
                 }
                 m.cpu().esp() = m.layout().stack_top - 0x40u;
                 for (int k = 0; k < 6; ++k) {
-                    lift::x87ApplyControlWord(0x037Fu);
                     lift::x87ClearExceptionFlags();
                     std::uint32_t r = 0;
                     LIFT_CHECK(lift::nativeFtol2Sse(m.cpu(), m.mem(), &r));
@@ -3960,7 +3941,6 @@ int main() {
                 m.mem().wr32(esp + 4u, a1);
                 m.mem().wr32(esp + 8u, a2);
             }
-            lift::x87ApplyControlWord(0x037Fu);
             lift::x87ClearExceptionFlags();
             const HuffSnap before = snap(m);
             std::uint32_t r = 0xDEADBEEFu;
@@ -4113,7 +4093,6 @@ int main() {
             m.mem().wr32(esp, 0xFFFFFFFFu);
             m.mem().wr32(esp + 4u, kCbEa);
             m.mem().wr32(esp + 8u, kBrEa);
-            lift::x87ApplyControlWord(0x037Fu);
             lift::x87ClearExceptionFlags();
             m.cpu().fpu.control = 0x037Fu;
             std::uint32_t r = 0xDEADBEEFu;
