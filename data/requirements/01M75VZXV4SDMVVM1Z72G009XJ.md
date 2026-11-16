@@ -2,11 +2,11 @@
 
 - id: REQ-01M75VZXV4SDMVVM1Z72G009XJ
 - type: bug
-- status: blocked
-- parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- blocked_by: [REQ-01M75WWFGT8ZEBGEPENQHSYTB8]
+- status: dropped
+- parent: REQ-01M7JHSDH16HCVEV4BA6NKSHN2
 - repro: apps/emulator-lift/scripts/recipes/se-eof.plan#click 830 592
 - severity: S1
+- dropped_reason: 2026-11-16 用户裁决：历史遗留的解释侧工作一律废弃（解释器已退役，AOT 侧若再发现同类问题另行提单）。本条是解释器 feeder 线程的 shim 令牌争用（fills/fill_max 读数全来自 --audio sdl 的解释器臂）；AOT 今天根本没有 feeder ⇒ 无从复现。AOT 接音频后若再现尾声重播，按'与暂停/令牌的配合'重新立单。
 - tags: [emulator-lift audio token scheduler]
 
 ## 现象

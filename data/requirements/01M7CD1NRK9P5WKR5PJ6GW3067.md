@@ -2,8 +2,9 @@
 
 - id: REQ-01M7CD1NRK9P5WKR5PJ6GW3067
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M7CZQZ5RR0WV8CQE2ZEKJHHQ
+- done_reason: 2026-11-16 重整收口：立项已完成（M-lift-1 已落地、覆盖率判据已立），剩余 5 个活子单按'改哪一层'迁到分类树（M-lift-2/4 + 压力档 → lift·效率；M-lift-3 → shim·图形侧；M-lift-5 → 工具/测试）。本节点不再承载排序职责，只作裁决与历史记录。
 - tags: [emulator-lift, llvm, performance, aot]
 
 ## 一句话

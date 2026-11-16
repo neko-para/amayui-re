@@ -2,8 +2,9 @@
 
 - id: REQ-01M7BY4FMA9VPETYEEV4V7RF2Y
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M7CZQZK3QQJBP5XCX88B4CTE
+- dropped_reason: 同 B 支路废弃：native override 机制已删（AGENTS §12.8），解释器退役 ⇒ 无宿主。且缩略图本身的缺陷已由 GPU RTT 路径收口（REQ-01M780VKKRFHJEX6VM74DRCYBM / REQ-01M79MSMWGFEKF8J7C7VYWS4YP 已 done）⇒ 没有剩下的性能缺口要靠 override。
 - tags: [emulator-lift, native-override, save-load]
 
 # emulator-lift · 存档缩略图 `sub_4A42C0`（ShrinkTexture）函数级 native override

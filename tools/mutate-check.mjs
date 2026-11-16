@@ -1089,6 +1089,22 @@ const MUTATIONS = [
       'queue==0 / buttons==0 断言红），陈旧关窗也不再当宿主 stop（stopRequested/controlStopReason 断言红）',
   },
 
+  // ── 🐞S2 `emu-ctl screenshot` 全黑（`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`；守卫 = `tests/control_snapshot.cpp`）──
+  //   ★ 代表"截图读的不是最后呈现的那一帧"这一类静默失效：
+  //     present **不冻结** ⇒ `dumpLastFrame` 退回写现场后缓冲（下一帧的 Clear(0) 之后 = 全黑 = 本缺陷形态）。
+  {
+    file: 'apps/emulator-lift/src/runtime/present.cpp',
+    from: '        freezePresentedFrame(arena, surface);',
+    to: '        (void)0;  // 变异：不冻结',
+    guard: 'ctest:lift-control-snapshot',
+    ctest: 'lift-control-snapshot',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'present() 不再冻结该帧像素 ⇒ `dumpLastFrame` 退回写现场（已被清成 0 的后缓冲）⇒ ' +
+      'lift-control-snapshot 的 `screenshot-freezes-frame` 在 `shot == ref`（与同帧 `--dump-frame` 参照逐字节相同）' +
+      '与 `hash_still_matches` 断言上红；同帧 `--dump-frame` 仍绿 ⇒ 正是本单"同一帧 dump 正常、screenshot 全黑"的形状',
+  },
+
   {
     // ★ S3（判据 3b）代表 "快照里混进了一个会自己走的数" 这一类错：
     //   `state_seq` 的语义是**客户端可见的暂停状态转移**（进入/离开各一次）；采样⛔ 不许自增。

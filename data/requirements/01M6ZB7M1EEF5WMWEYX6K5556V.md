@@ -3,7 +3,7 @@
 - id: REQ-01M6ZB7M1EEF5WMWEYX6K5556V
 - type: req
 - status: open
-- parent: REQ-01M3TC7BK0J9TBQKGGWQ35A3NR
+- parent: REQ-01M7JHSE82SRRH0QJ7G6GXRD0Y
 - tags: [cp932, encoding, platform]
 
 ## 一句话

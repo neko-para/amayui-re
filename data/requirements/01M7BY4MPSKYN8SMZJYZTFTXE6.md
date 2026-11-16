@@ -2,8 +2,9 @@
 
 - id: REQ-01M7BY4MPSKYN8SMZJYZTFTXE6
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M7CZQZK3QQJBP5XCX88B4CTE
+- dropped_reason: 同 B 支路废弃：'这三处能不能 override' 这个问题随机制删除而失去对象（AOT 执行来源只有 IR 与 shim，解释器退役）。若将来仍要减这三处阻塞，应另立'不依赖 override 机制'的单（例如把阻塞移出令牌 / 分帧），⛔ 不要把它挂回本机制。
 - tags: [emulator-lift, native-override, profile]
 
 # emulator-lift · 写档 / 读档 / FELLOW 三处 >1s 阻塞段：能否 native override（评估）

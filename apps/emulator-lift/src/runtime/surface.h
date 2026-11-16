@@ -56,6 +56,19 @@ struct GuestSurface {
     std::uint32_t d3d9_multisample = 0;             // PresentParams::MultiSampleType（≠ NONE ⇒ 锁必失败）
 };
 
+// ★ BMP 编码的**唯一**实现（`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`）：
+//   `dumpBmp`（现场 surface）与 `HeadlessPresenter::dumpLastFrame`（冻结副本）都走这一份 ⇒
+//   24/32bpp 分支只有一处，⛔ 不许在调用方各写一遍（两处编码一旦分叉，"冻结副本 == 同帧 --dump-frame"
+//   那条守卫就只剩一个失效模式）。
+//   `desc` 给**尺寸 / pitch / 格式**（⛔ 不从现场 surface 重算）；`src` 是 `desc.pitch * desc.height`
+//   字节的像素首字节（可以是 guest 内存，也可以是宿主的冻结副本）。
+bool dumpBmpRaw(const GuestSurface& desc, const std::uint8_t* src, const std::string& host_path,
+                std::string* err);
+
+// ★ FNV-1a over `desc.pitch * desc.height` 字节（**唯一**算法；`SurfaceArena::hash` 与
+//   `dumpLastFrame` 的 `hash_still_matches` 都走它 ⇒ "在写出的那份字节上算 hash"与现场算的是同一个函数）。
+std::uint64_t hashPixels(const GuestSurface& desc, const std::uint8_t* src);
+
 class SurfaceArena {
 public:
     bool init(GuestMemory* mem, std::uint32_t begin, std::uint32_t size);
@@ -78,6 +91,7 @@ public:
     std::uint64_t hash(const GuestSurface& s) const;
 
     // 写 32/24 位 BMP（32bpp 时保留 BGR，alpha 丢；16bpp 565 转 24 位）。
+    // ★ 本体只有一份：`dumpBmpRaw`（本函数 = 取现场像素指针 + 转交，2 行）。
     bool dumpBmp(const GuestSurface& s, const std::string& host_path, std::string* err) const;
 
     const char* lastError() const { return last_error_; }

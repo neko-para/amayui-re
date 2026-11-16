@@ -3,7 +3,7 @@
 - id: REQ-01M7B7591WHEVZMYFZ1Q2D8SHQ
 - type: req
 - status: open
-- parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- parent: REQ-01M7JHSD5MWTB9N8WJC2Y2T69M
 
 ## 背景（原父单第 7 条留下的欠账）
 

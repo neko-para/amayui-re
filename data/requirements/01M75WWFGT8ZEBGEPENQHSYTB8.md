@@ -2,8 +2,9 @@
 
 - id: REQ-01M75WWFGT8ZEBGEPENQHSYTB8
 - type: req
-- status: open
-- parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- status: dropped
+- parent: REQ-01M7JHSE82SRRH0QJ7G6GXRD0Y
+- dropped_reason: 2026-11-16 用户裁决：历史遗留的解释侧工作一律废弃（解释器已退役，AOT 侧若再发现同类问题另行提单）。本条是解释器时代的令牌作用域计划（M0 把阻塞等待移出令牌 / M1 缩到容器区域），两个子项都已 done。模型结论'令牌 = 容器锁，不是执行锁'仍成立，但它是**知识**不是待办（已落在正文与 guest_token.h 的口径里）⇒ 作为待办废弃。
 - tags: [emulator-lift audio token design]
 
 ## 模型裁决（已定）

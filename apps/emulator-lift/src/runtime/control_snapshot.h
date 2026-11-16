@@ -66,13 +66,17 @@ struct ControlSnapshot {
 // =====================================================================================
 // `screenshot` 的结果（S2）
 // =====================================================================================
-// `source` 恒 `guest-backbuffer`：读的是 presenter 保留的 guest 后缓冲描述符
-// （`dumpLastFrame`），⛔ 不是窗口回读 —— 两者差叠层 / letterbox / 光标（`design-review.md` §2a）。
+// `source` 恒 `guest-backbuffer`：读的是 **`present()` 当场冻结的 guest 后缓冲副本**
+// （`dumpLastFrame`；没冻结 / 冻结失败才退回读现场描述符），⛔ 不是窗口回读 —— 两者差
+// 叠层 / letterbox / 光标（`design-review.md` §2a）。
 struct ControlScreenshot {
     std::string path;
     std::uint64_t bytes = 0;
     std::uint64_t frame = 0;
-    bool hash_still_matches = false;  // 现场重算 == 记录的 `last_surface_hash_`（与暂停无关）
+    // 语义 = **写出的这份字节仍等于 presenter 记录的那一帧**（`last_surface_hash_`），与暂停无关。
+    // ★ 冻结路径下**恒 true** ⇒ 它只回答"冻结有没有生效"，⛔ 不能当"图对不对"的判据
+    //   （判内容要判非全黑 / 与同帧 `--dump-frame` 对照）。
+    bool hash_still_matches = false;
     const char* source = "guest-backbuffer";
 };
 

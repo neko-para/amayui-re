@@ -3,7 +3,7 @@
 - id: REQ-01M7FRY0M1RH5XCT8XD2MTFTSC
 - type: req
 - status: open
-- parent: REQ-01M7CD1NRK9P5WKR5PJ6GW3067
+- parent: REQ-01M7JHSFB2SSBBNSJ82YDED8M1
 - tags: [emulator-lift, lift, test]
 
 ## 缺口是什么

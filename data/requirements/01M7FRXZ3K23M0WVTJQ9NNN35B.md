@@ -3,7 +3,7 @@
 - id: REQ-01M7FRXZ3K23M0WVTJQ9NNN35B
 - type: req
 - status: open
-- parent: REQ-01M7CD1NRK9P5WKR5PJ6GW3067
+- parent: REQ-01M7JHSD5MWTB9N8WJC2Y2T69M
 - tags: [emulator-lift, d3d9, efficiency]
 
 ## 为什么单独立这一节点

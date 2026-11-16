@@ -3,7 +3,7 @@
 - id: REQ-01M73JV31QVQX206Y3YG5QDMND
 - type: bug
 - status: open
-- parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- parent: REQ-01M7JHSD5MWTB9N8WJC2Y2T69M
 - repro: apps/emulator-lift/src/shims/d3dx9.cpp#uploadRgbaToTexture
 - severity: S2
 - tags: [emulator-lift d3d9 texture alpha artifact]

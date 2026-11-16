@@ -463,12 +463,19 @@ void AotHost::printRunSummary(const AotRunResult& r, std::FILE* out) const {
     //   ★ `lastHash` 是**最后一次 Present 的 guest 后缓冲哈希**（`arena.hash(surface)`，`present.cpp:68`）；
     //     逐帧读数由 `run()` 在每次 Present 之后打印（`[frame] n=… hash=…`）。
     //   ★ `sinkFailures` 与解释器同口径（提交失败**不改** guest 的 Present 结果）。
+    //   ★ `freezeFailures` / `freezeNs`（`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ` 的 F1）：**一次性**读数，
+    //     只在这一行出现（⛔ 不加周期性输出，`AGENTS.md` §12.8 第 3 条）。`freezeNs` = **最近一次**
+    //     `present()` 冻像素副本的墙钟（`PresentBreakdown::freeze_ns`；缺省/没开控制层 = 0）。
+    //     这两个字段只回答"冻结这条路有没有真的走通、花了多少"，⛔ 不参与任何语义判据。
     std::fprintf(out,
-                 "present   : sink=%s frames=%llu lastHash=0x%016llX sinkFailures=%llu%s\n",
+                 "present   : sink=%s frames=%llu lastHash=0x%016llX sinkFailures=%llu "
+                 "freezeFailures=%llu freezeNs=%llu%s\n",
                  presenter_.sink() != nullptr ? presenter_.sink()->describe().c_str() : "headless(no-sink)",
                  static_cast<unsigned long long>(r.frames),
                  static_cast<unsigned long long>(presenter_.lastHash()),
                  static_cast<unsigned long long>(presenter_.sinkFailures()),
+                 static_cast<unsigned long long>(presenter_.freezeFailures()),
+                 static_cast<unsigned long long>(presentBreakdown().freeze_ns),
                  presenter_.sinkFailures() == 0 ? "" : "（最后一次错误见 stderr）");
     // ★ 默认档就改写 guest 寄存器的那个钩子（T2 §1.2 #14 / `machine.cpp:1369`）的实际结局：
     //   "命中了并置 0" 与 "根本没走到" 是两件事，⛔ 不许只写一行模糊的 `bypassed`。
@@ -1023,9 +1030,11 @@ ControlShotStatus AotHost::controlScreenshot(const std::string& path, ControlScr
         if (err != nullptr) *err = "no frame presented yet";
         return ControlShotStatus::NoFrameYet;
     }
-    // ★ 读的是 presenter 保留的 **guest 后缓冲描述符**（`dumpLastFrame`），⛔ 不是窗口回读 ——
-    //   两者差叠层 / letterbox / 光标。`hash_still_matches` 的语义是"现场重算 == 记录的
-    //   last_surface_hash_"，与暂停无关，照实回（`dumpLastFrame` 自己算）。
+    // ★ 写的是 `present()` **当场冻结的那一帧**（`dumpLastFrame`）：控制层启用时是像素副本
+    //   （`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`）；没冻结 / 冻结失败时退回写现场（= 修复前的行为）。
+    //   ⛔ 不是窗口回读 —— 两者差叠层 / letterbox / 光标。`hash_still_matches` = 在**实际写出的
+    //   那份字节**上算 hash 与记录的 `last_surface_hash_` 比（副本路径下恒 true：这张 BMP 就是
+    //   presenter 记录的那一帧），`dumpLastFrame` 自己算。
     bool hash_still_matches = false;
     std::string dump_err;
     if (!presenter_.dumpLastFrame(path, &hash_still_matches, &dump_err)) {

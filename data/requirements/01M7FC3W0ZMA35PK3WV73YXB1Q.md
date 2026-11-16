@@ -3,7 +3,7 @@
 - id: REQ-01M7FC3W0ZMA35PK3WV73YXB1Q
 - type: req
 - status: doing
-- parent: REQ-01M7CD1NRK9P5WKR5PJ6GW3067
+- parent: REQ-01M7JHSEZVMYB4XHEN32V7V6HJ
 - tags: [emulator-lift, lift, efficiency]
 
 ## 为什么单独立这一节点

@@ -3,7 +3,7 @@
 - id: REQ-01M7HQJEEENYDJ91FB5DAC4K23
 - type: req
 - status: open
-- parent: REQ-01M7CD1NRK9P5WKR5PJ6GW3067
+- parent: REQ-01M7JHSEZVMYB4XHEN32V7V6HJ
 - tags: [emulator-lift, aot, stress, perf]
 
 ## 一句话

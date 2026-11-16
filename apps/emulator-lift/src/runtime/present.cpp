@@ -12,6 +12,10 @@
 namespace lift {
 namespace {
 constexpr std::uint64_t kLatchAfterFailures = 3;
+// ★ 冻结副本的**上限**（`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`）：`pitch*height` 是 guest 给的数，
+//   先查乘法溢出（uint32 × int32 ⇒ uint64 不会溢出）再查这个上限；> 64 MB 直接拒
+//   （1280×720×32bpp = 3.7 MB，4K 一帧还有余）。拒绝 ⇒ 计数 + warn 一次 + **退回写现场**。
+constexpr std::uint64_t kFreezeMaxBytes = 64ull * 1024ull * 1024ull;
 
 std::uint64_t nowNs() {
     return static_cast<std::uint64_t>(
@@ -61,6 +65,55 @@ void HeadlessPresenter::noteDumpFailure(const std::string& path, const std::stri
     }
 }
 
+void HeadlessPresenter::noteFreezeFailure(const std::string& why) {
+    // ★ 与 `noteDumpFailure` 同一条口径：**计数** + **只第一次**喊。
+    //   失败 ⇒ `frozen_valid_` 保持 false ⇒ 截图**退回写现场**（⛔ 不新增错误码、⛔ 不拿更旧的一帧冒充）。
+    frozen_valid_ = false;
+    ++freeze_failures_;
+    if (!freeze_failure_warned_) {
+        freeze_failure_warned_ = true;
+        logAt(LogLevel::Warn, LogD3d9, "[present] ",
+              "最后帧冻结失败（第 %llu 次 / 累计 %llu）：%s ⇒ 这一帧的 screenshot 退回写现场后缓冲"
+              "（= 修复前的行为）；后续失败只计数（不刷屏），总数见 run summary 的 freezeFailures=",
+              static_cast<unsigned long long>(freeze_failures_),
+              static_cast<unsigned long long>(freeze_failures_), why.c_str());
+    }
+}
+
+void HeadlessPresenter::setFreezeFrame(bool on) {
+    freeze_ = on;
+    // 关掉 ⇒ 副本立刻作废（⛔ 不拿"上一次开着的帧"冒充）。
+    if (!on) frozen_valid_ = false;
+}
+
+void HeadlessPresenter::freezePresentedFrame(const SurfaceArena& arena, const GuestSurface& surface) {
+    // ★ 尺寸校验（`pitch*height` 来自 guest）：负/零尺寸、超上限都直接拒。
+    if (surface.width <= 0 || surface.height <= 0 || surface.pitch == 0) {
+        noteFreezeFailure("尺寸非法（width/height/pitch 有 0 或负）");
+        return;
+    }
+    const std::uint64_t bytes =
+        static_cast<std::uint64_t>(surface.pitch) * static_cast<std::uint64_t>(surface.height);
+    if (bytes > kFreezeMaxBytes) {
+        noteFreezeFailure("尺寸超上限（pitch*height > 64 MB）");
+        return;
+    }
+    const std::uint8_t* p = arena.pixels(surface);
+    if (p == nullptr) {
+        noteFreezeFailure("surface 没有像素");
+        return;
+    }
+    try {
+        frozen_pixels_.assign(p, p + bytes);
+    } catch (...) {
+        noteFreezeFailure("分配失败（std::bad_alloc）");
+        return;
+    }
+    // ★ 描述符**一起存**：截图时⛔ 不从现场 surface 重算尺寸 / 格式 / pitch。
+    frozen_desc_ = surface;
+    frozen_valid_ = true;
+}
+
 bool HeadlessPresenter::present(const SurfaceArena& arena, const GuestSurface& surface,
                                 const std::string& dump_path, std::string* err) {
     // ★ 先记录（与今天完全一致）：显示失败不能改变 frameCount / lastHash / dump。
@@ -82,11 +135,28 @@ bool HeadlessPresenter::present(const SurfaceArena& arena, const GuestSurface& s
     // ★ 采样点（交互模型的 `screen` 源）：**只在这里**。帧号 / hash 已经算好 ⇒ 判定侧拿到的
     //   就是"这一次呈现"的真实观测值；没挂 sampler 时整段是零成本。
     if (sampler_ != nullptr) sampler_->observe(arena, surface, frame_count_, last_hash_);
-    // 最后帧的**描述符**（不拷像素）：失败时要补写一张画面，见 dumpLastFrame()。
+    // 最后帧的**描述符**：永远记（退回路径要用）；像素**只在控制层启用时**拷成副本。
     last_arena_ = &arena;
     last_surface_ = surface;
     last_surface_hash_ = last_hash_;
     have_last_surface_ = true;
+
+    // ★ **冻结点**（`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`；design-review §2 裁决的落点）：
+    //   位置 = `last_surface_hash_ = last_hash_` **之后**、sink 分支 **之前**。四条判据：
+    //   (a) 在 `++frame_count_` 之后 ⇒ 冻结的就是这一帧；
+    //   (b) 在 hash 之后 ⇒ 不动 `lastHash` 读数（`present-tail` / `frame-log` / §12.6 指纹口径逐位不变）；
+    //   (c) 在 sink 之前 ⇒ 冻结字节可证明就是被 hash 的字节，且 sink 失败时 present 对 guest 仍算成功
+    //       ⇒ "shot == 被呈现的那一帧"与窗口成败无关；
+    //   (d) 在 Present 闸门之前 ⇒ 否则闸门那一拍没有副本。
+    //   ⛔ 不要挪进 Present 闸门里（撞判据 5：每拍推进一帧）；⛔ `--dump-frame` 不走副本（独立对照）。
+    //   缺省（没有控制层）⇒ 一次 `freeze_` 判空，零拷贝。
+    if (freeze_) {
+        const std::uint64_t freeze_begin = nowNs();
+        freezePresentedFrame(arena, surface);
+        pb.freeze_ns = nowNs() - freeze_begin;
+    } else {
+        pb.freeze_ns = 0;
+    }
 
     if (sink_ && !sink_latched_) {
         std::string sink_err;
@@ -176,10 +246,22 @@ bool HeadlessPresenter::dumpLastFrame(const std::string& host_path, bool* hash_s
         if (err) *err = "还没有 Present 过（没有最后帧可写）";
         return false;
     }
-    // ★ 如实报告像素是否仍是**被采样到的那一帧**：guest 可能已经在对这块后缓冲画下一帧了。
-    //   ⛔ 不一致也照样写（诊断价值大于"干净"），但调用方要把这句话打出来。
+    // ★ **冻结副本路径**（`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`）：写 `present()` 当场冻的那一帧。
+    //   ⛔ 不读 guest 后缓冲 —— 那块字节在 Present 之后会被下一帧的 `Clear(0)` / 回读改写；
+    //   `--dump-frame` 之所以一直正常，是因为它写在 Present 之内（回读之后），那是**独立对照**。
+    //   `hash_still_matches` = 在这份**将被写出的字节**上算 hash，与记录的 `last_surface_hash_` 比
+    //   （同一帧冻的 ⇒ 恒 true：这张 BMP 就是 presenter 记录的那一帧）。
+    if (freeze_ && frozen_valid_) {
+        if (hash_still_matches != nullptr) {
+            *hash_still_matches = hashPixels(frozen_desc_, frozen_pixels_.data()) == last_surface_hash_;
+        }
+        return dumpBmpRaw(frozen_desc_, frozen_pixels_.data(), host_path, err);
+    }
+    // ★ **退回路径**（没开冻结 / 冻结失败）：写现场 = 今天的行为，⛔ 不新增错误码 / 不新增 why。
+    //   如实报告像素是否仍是被采样到的那一帧（guest 可能已经在对这块后缓冲画下一帧了）。
     if (hash_still_matches != nullptr) {
-        *hash_still_matches = last_arena_->hash(last_surface_) == last_surface_hash_;
+        *hash_still_matches =
+            hashPixels(last_surface_, last_arena_->pixels(last_surface_)) == last_surface_hash_;
     }
     return last_arena_->dumpBmp(last_surface_, host_path, err);
 }

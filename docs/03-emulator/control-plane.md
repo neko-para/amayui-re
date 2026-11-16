@@ -82,10 +82,10 @@ node tools/emu-ctl.mjs quit                      # 收口：bye → 摘要 → �
 | 端点卡在不返回的 shim | 汇点不到 ⇒ 客户端 `timeout`（exit 3）、端点仍活；⛔ 不 kill、⛔ 不假装成功 |
 | window 档 | **可用**（`--present window` + `--control-root`）。代价：暂停期间不泵事件 ⇒ OS 可能判"无响应"。**别停太久。** |
 | 陈旧事件 | resume 时丢弃 `event.timestamp` 早于恢复时刻的 OS 输入；暂停态的关窗/ESC 当**宿主 stop**（`bye.reason:"window-closed"`）⇒ 否则 resume 首轮会把这一轮结束掉 |
-| 截图来源 | 恒 `guest-backbuffer`（presenter 保留的 guest 后缓冲），⛔ 不是窗口回读 ⇒ 与"你看到的那一屏"差叠层/letterbox/光标 |
-| ⚠ 截图**当前是坏的** | 实测 2026-11-16：`screenshot` 写出的 BMP **全黑**（headless 与 window 都是 `0/921600` 非黑像素），
-而同一帧 `--dump-frame` 是正常画面（99%+ 非黑）⇒ `dumpLastFrame` 那条"保留最后一张"的路径没拿到像素。
-缺陷单见 `REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`（🐞S2）。⚠ **判据 5 目前只验稳定性**（`hash_still_matches` + 两拍相同），全黑 buffer 也满足它。 |
+| 截图来源 | `guest-backbuffer-frozen`：`present()` 当场冻结的 guest 后缓冲**像素副本**（只在 `--control-root` 时拷；1280×720×32bpp ≈ 3.7 MB/帧）。⛔ 不是窗口回读（不叠层 / 不带 letterbox / 不带光标），⛔ 也不是"暂停那一刻的现场后缓冲"——现场这时已被下一帧的 `Clear` / 回读改写（实测：`paused_at=block` 时现场是清除色、`present` 时才是画面） |
+| `hash_still_matches` | 语义 = "写出的这份字节仍等于 presenter 记录的那一帧"。**冻结路径下恒 true** ⇒ 它只回答"**冻结有没有生效**"（把冻结去掉会变 false —— 守卫就是靠这条红的）；⛔ **不能当"图对不对"的判据**：判内容要判 BMP 非全黑，或与同帧 `--dump-frame` 逐字节对照 |
+| 读不到的两处（残余） | 冻结**分配失败**时退回写现场（极端情况仍可能写出一张全黑图；只 warn 一次 + 计数）；计数与最近一次冻结耗时在 AOT 摘要的 `present :` 行（`freezeFailures=` / `freezeNs=`）。⛔ 没有协议级 `unavailable`（2026-11-16 收窄裁决：不为它扩协议） |
+| 病史 | `REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`（🐞S2，2026-11-16 收口）：旧实现只留"最后一张"的**描述符**、暂停时才读像素 ⇒ 读到的不是那一帧（`paused_at=block` 时全黑 0.000%，`present` 时 99.679%） |
 
 ## 5. 怎么查
 
@@ -107,5 +107,8 @@ pnpm tools requirements show REQ-01M7HX0CJ202MJ4PZXW80VFA0J   # 判据 14 条（
 ## 6. 未做
 
 `key`（暂不做）· `resume --until-ea` · 录制导出配方（M2）· "点击是否真的被施加"没有回执字段（要 e2e 断言只能看配方摘要的 `fired`）·
-DSH 插件薄包装（它只 exec CLI，⛔ 不自己实现协议）· **Windows 全部未验证**（限令牌下能否 listen、`TerminateProcess`
-后的残留识别、`netsh` 保留端口段、Low 完整性标签下 ctl 文件的可读性）。
+DSH 插件薄包装（它只 exec CLI，⛔ 不自己实现协议）。
+
+★ **Windows 已验（2026-11-16，win32）**：`--control-root` 能 listen `127.0.0.1`，`list/pause/sample/screenshot/resume/click/quit`
+全通（`control : ws://127.0.0.1:<port>` + `alive:1`）；`--control-port 0` 取到的端口不在保留段（实测 `netsh` 排除段 50000–50059，取到 62556）。
+⚠ 仍未测：`TerminateProcess` 后的残留识别、Low 完整性标签下 `ctl.*.json` 的可读性（用户裁决"后续不考虑沙箱" ⇒ W5 已 drop）。

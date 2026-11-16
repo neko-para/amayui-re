@@ -2,8 +2,9 @@
 
 - id: REQ-01M75PTEGCR1Y91FKKJ1CWPNH2
 - type: req
-- status: open
-- parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- status: dropped
+- parent: REQ-01M7JHSDH16HCVEV4BA6NKSHN2
+- dropped_reason: 2026-11-16 用户裁决：历史遗留的解释侧工作一律废弃（解释器已退役；AOT 侧若再发现另立单）。本条的两个'已落地杠杆'是 per-EA native override（撞 AGENTS §9 不给某个 EA 开特判 + §12.8 执行来源只有 IR 与 shim），且今天没有任何产品 exe 能开 --native-overrides ⇒ 方案面已失效。正文保留每刀预算与实测（那是测量结论，不是待办）；AOT 接音频后若要减稳态占空，按新形状重新立单。
 - tags: [emulator-lift audio performance decode]
 
 ## 目标
@@ -56,6 +57,7 @@
 - 参考机与本机 2.3× 差距是否全为解释器速度（未拆）。
 
 ## 2026-11-12 预算订正与剩余杠杆（`.tmp/audio-token/throughput-analysis.md`）
+
 - 预算基数 = `sub_48D610` incl **522.787 ms / 3 刀**（不是单里的 412 ms/刀；比例仍可用，绝对 ms 必须重测）。
 - **PCM 段只有 4–7 ms/刀**（`0x48D881` 尾块 self 4.947 ms / 66,176×6 量出；整段 12–20 ms/3 刀）
   ⇒ `guest=` 只会掉个位数 ms，别按 15–28 ms 判"没生效"。
@@ -67,13 +69,9 @@
   再按 insn 份额外推（必须报区间）。`sub_4D9AC0`（vorbis_book_init_decode 126.5 ms/次）过不了"不碰 guest 容器" ⇒ 不 override。
 
 ## 2026-11-12 PCM 段实测（feeder 臂，`REQ-01M75W6BB...` 落地后）
+
 - `bov` 86→2660（`bovd=bovf=0`）；`guest` 均值 **78.78 ms** vs `all,-sub_48D610` 基线 **84.38 ms**（−6.6%）；
   pump 臂两臂 WAV 逐字节相同（段在 pump 不生效，符合设计）。
 - 与预算订正一致：PCM 段本身只值个位数 ms/刀；剩余杠杆排序 = `sub_4E6480`（floor1_inverse2 12.5%）>
   `sub_4E61E0`（floor1_inverse1 12.5%，arena 风险）> 起播重建 218.9 ms/条（一次性）。
 - 绝对判据在 Windows（本机已 ~80 ms）⇒ 读数见 `REQ-01M770JFDPZKKJR7D0ZZ09FJJ7`（已 done）。
-
-## 状态（2026-11-13）
-
-- `blocked_by` 已 done（`fill_max=214.74 ms / fill_slow=0`）⇒ 开单。新判据 = 「30 s 实时臂 `underruns=0` + `fill_max` 上界（文档口径 500 ms）」，`fill_max/fill_slow` 从只记账升为守卫。
-- 三杠杆：Huffman ✅ · `__ftol2_sse` ✅ · 起播重建（`sub_4B6570`，218.9 ms/条）未做 ⇒ 已另开单。

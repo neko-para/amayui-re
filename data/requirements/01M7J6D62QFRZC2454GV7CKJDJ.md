@@ -3,7 +3,7 @@
 - id: REQ-01M7J6D62QFRZC2454GV7CKJDJ
 - type: req
 - status: open
-- parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- parent: REQ-01M7JHSEKXW8KAKB6K2RS645M7
 - tags: [emulator-lift, coverage, aot]
 
 ## 一句话

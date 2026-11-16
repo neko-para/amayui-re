@@ -123,18 +123,9 @@ bool SurfaceArena::unlock(std::uint32_t ea) {
     return true;
 }
 
-std::uint64_t SurfaceArena::hash(const GuestSurface& s) const {
-    // ★ 全帧像素指纹（Present 的 `hash=` / DDraw Flip / `--dump-frame` 判据都用它）。
-    //   判据不变：**确定性 · 内容敏感（改 1 字节就变）· 非 0**；同内容同值、跨机同值。
-    //   实现要点（常数优化，不改语义）：
-    //     · 按 8 字节字读（小端假设：本线三个目标平台 x64/arm64 都是小端）；
-    //     · 长度先混进去（否则"末尾补零"与"不加"会撞成同一个值）；
-    //     · 末尾做一次 finalizer（乘法 + 异或右移），让高位也参与 —— 旧实现是逐字节 FNV，
-    //       在没有 finalizer 时低位雪崩很好、高位很差。
-    //   ⛔ 不要拿它当"顺序无关"的集合哈希：它有位置语义（同一帧、同一字节序才可比）。
-    const std::uint8_t* p = pixels(s);
+std::uint64_t hashPixels(const GuestSurface& desc, const std::uint8_t* p) {
     if (!p) return 0;
-    const std::uint64_t n = static_cast<std::uint64_t>(s.pitch) * static_cast<std::uint64_t>(s.height);
+    const std::uint64_t n = static_cast<std::uint64_t>(desc.pitch) * static_cast<std::uint64_t>(desc.height);
     std::uint64_t h = 0xCBF29CE484222325ull ^ (n * 0x9E3779B97F4A7C15ull);
     std::uint64_t i = 0;
     for (; i + 8 <= n; i += 8) {
@@ -150,9 +141,24 @@ std::uint64_t SurfaceArena::hash(const GuestSurface& s) const {
     return h;
 }
 
-bool SurfaceArena::dumpBmp(const GuestSurface& s, const std::string& host_path, std::string* err) const {
-    const std::uint8_t* p = pixels(s);
-    if (!p) {
+std::uint64_t SurfaceArena::hash(const GuestSurface& s) const {
+    // ★ 全帧像素指纹（Present 的 `hash=` / DDraw Flip / `--dump-frame` 判据都用它）。
+    //   判据不变：**确定性 · 内容敏感（改 1 字节就变）· 非 0**；同内容同值、跨机同值。
+    //   实现要点（常数优化，不改语义）：
+    //     · 按 8 字节字读（小端假设：本线三个目标平台 x64/arm64 都是小端）；
+    //     · 长度先混进去（否则"末尾补零"与"不加"会撞成同一个值）；
+    //     · 末尾做一次 finalizer（乘法 + 异或右移），让高位也参与 —— 旧实现是逐字节 FNV，
+    //       在没有 finalizer 时低位雪崩很好、高位很差。
+    //   ⛔ 不要拿它当"顺序无关"的集合哈希：它有位置语义（同一帧、同一字节序才可比）。
+    //   本体只有一份（`hashPixels`）⇒ 冻结副本可以用**同一个函数**在副本字节上重算。
+    return hashPixels(s, pixels(s));
+}
+
+// ★ 编码唯一化（`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`）：现场 surface 与**冻结副本**共用这一份。
+//   ⛔ 不要把 `src` 换成"调用方自己再取一次像素"—— 冻结副本的契约正是"编码与描述符都不再碰 guest"。
+bool dumpBmpRaw(const GuestSurface& desc, const std::uint8_t* src, const std::string& host_path,
+                std::string* err) {
+    if (!src) {
         if (err) *err = "surface 没有像素";
         return false;
     }
@@ -161,10 +167,11 @@ bool SurfaceArena::dumpBmp(const GuestSurface& s, const std::string& host_path, 
         if (err) *err = "打不开 BMP 输出：" + host_path;
         return false;
     }
-    const bool b32 = s.format.bpp == 32;
+    const std::uint8_t* p = src;
+    const bool b32 = desc.format.bpp == 32;
     const std::uint32_t out_bpp = b32 ? 32u : 24u;
-    const std::uint32_t out_row = (static_cast<std::uint32_t>(s.width) * (out_bpp / 8u) + 3u) & ~3u;
-    const std::uint32_t image_size = out_row * static_cast<std::uint32_t>(s.height);
+    const std::uint32_t out_row = (static_cast<std::uint32_t>(desc.width) * (out_bpp / 8u) + 3u) & ~3u;
+    const std::uint32_t image_size = out_row * static_cast<std::uint32_t>(desc.height);
     const std::uint32_t file_size = 14u + 40u + image_size;
     // BITMAPFILEHEADER
     std::fputc('B', f);
@@ -175,8 +182,8 @@ bool SurfaceArena::dumpBmp(const GuestSurface& s, const std::string& host_path, 
     write32(f, 14u + 40u);
     // BITMAPINFOHEADER
     write32(f, 40);
-    write32(f, static_cast<std::uint32_t>(s.width));
-    write32(f, static_cast<std::uint32_t>(s.height));
+    write32(f, static_cast<std::uint32_t>(desc.width));
+    write32(f, static_cast<std::uint32_t>(desc.height));
     write16(f, 1);
     write16(f, static_cast<std::uint16_t>(out_bpp));
     write32(f, 0);  // BI_RGB
@@ -186,18 +193,19 @@ bool SurfaceArena::dumpBmp(const GuestSurface& s, const std::string& host_path, 
     write32(f, 0);
     write32(f, 0);
     std::vector<std::uint8_t> row(out_row, 0);
-    for (std::int32_t y = s.height - 1; y >= 0; --y) {
-        const std::uint8_t* src = p + static_cast<std::uint64_t>(y) * s.pitch;
-        for (std::int32_t x = 0; x < s.width; ++x) {
+    for (std::int32_t y = desc.height - 1; y >= 0; --y) {
+        const std::uint8_t* src_row = p + static_cast<std::uint64_t>(y) * desc.pitch;
+        for (std::int32_t x = 0; x < desc.width; ++x) {
             if (b32) {
-                const std::uint8_t* px = src + static_cast<std::uint64_t>(x) * 4u;
+                const std::uint8_t* px = src_row + static_cast<std::uint64_t>(x) * 4u;
                 row[static_cast<std::size_t>(x) * 4u + 0] = px[0];
                 row[static_cast<std::size_t>(x) * 4u + 1] = px[1];
                 row[static_cast<std::size_t>(x) * 4u + 2] = px[2];
                 row[static_cast<std::size_t>(x) * 4u + 3] = 0;
             } else {
-                const std::uint16_t v = static_cast<std::uint16_t>(src[static_cast<std::size_t>(x) * 2u] |
-                                                                   (src[static_cast<std::size_t>(x) * 2u + 1] << 8));
+                const std::uint16_t v =
+                    static_cast<std::uint16_t>(src_row[static_cast<std::size_t>(x) * 2u] |
+                                               (src_row[static_cast<std::size_t>(x) * 2u + 1] << 8));
                 const std::uint8_t r = static_cast<std::uint8_t>(((v >> 11) & 0x1F) * 255 / 31);
                 const std::uint8_t g = static_cast<std::uint8_t>(((v >> 5) & 0x3F) * 255 / 63);
                 const std::uint8_t b = static_cast<std::uint8_t>((v & 0x1F) * 255 / 31);
@@ -210,6 +218,15 @@ bool SurfaceArena::dumpBmp(const GuestSurface& s, const std::string& host_path, 
     }
     std::fclose(f);
     return true;
+}
+
+bool SurfaceArena::dumpBmp(const GuestSurface& s, const std::string& host_path, std::string* err) const {
+    const std::uint8_t* p = pixels(s);
+    if (!p) {
+        if (err) *err = "surface 没有像素";
+        return false;
+    }
+    return dumpBmpRaw(s, p, host_path, err);
 }
 
 }  // namespace lift

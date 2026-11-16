@@ -316,6 +316,66 @@ void caseDumpLastFrame() {
 }
 
 // =====================================================================================
+// ⑤b 截图 = **冻结**的那一帧（`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`，🐞S2）
+//
+// 判据：`present()` 把该帧像素冻结成副本；之后 guest 后缓冲被下一帧的 `Clear(0)` 清零（`d3d9.cpp` 的
+//       Clear 逐像素直写 guest）⇒ 截图**仍须**与"同一帧当场写"的参照 BMP 逐字节相同
+//       （`--dump-frame` 是独立对照，⛔ 不走副本）。
+// 改前为什么红：`dumpLastFrame` 读 `pixels(last_surface_)` = 那块 guest 地址**现在**的内容
+//       （`memory.h` 的 `host()` 永不返回 null）⇒ 清零后写出来的是全黑图（= 本单形态）。
+// =====================================================================================
+void caseScreenshotFreezesFrame() {
+    ::lift_test::g_current_case = "screenshot-freezes-frame";
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::path("control-snapshot-work") / "freeze";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    LIFT_CHECK(fs::is_directory(dir, ec));
+
+    lift::GuestMemory mem;
+    LIFT_CHECK(mem.reserve());
+    lift::SurfaceArena arena;
+    LIFT_CHECK(arena.init(&mem, 0x10000000u, 0x00100000u));
+    lift::SurfaceFormat fmt;
+    fmt.bpp = 32;
+    fmt.rmask = 0x00FF0000u;
+    fmt.gmask = 0x0000FF00u;
+    fmt.bmask = 0x000000FFu;
+    fmt.amask = 0xFF000000u;
+    const std::uint32_t ea = arena.create(8, 6, fmt);
+    lift::GuestSurface* surface = arena.find(ea);
+    LIFT_CHECK(ea != 0 && surface != nullptr);
+    if (surface == nullptr) return;
+    auto* px = arena.pixels(*surface);
+    LIFT_CHECK(px != nullptr);
+    if (px == nullptr) return;
+    for (int i = 0; i < 8 * 6; ++i) px[i] = 0xFF204060u;  // ARGB 小端 = B,G,R,A
+
+    lift::HeadlessPresenter presenter;
+    // ★ 新开关（唯一产品调用点在 `aot_run.cpp`：与 `setPresentGate` 同处同条件 `control_ != nullptr`）。
+    presenter.setFreezeFrame(true);
+    std::string err;
+    const fs::path ref_path = dir / "ref.bmp";  // 同一帧"当场写"（`--dump-frame` 那条独立路径）
+    const fs::path shot_path = dir / "shot.bmp";
+    LIFT_CHECK(presenter.present(arena, *surface, ref_path.string(), &err));
+
+    // ② 模拟下一帧的 `Clear(0)`：把 guest 后缓冲清零（现场已经不是画面）。
+    std::memset(px, 0,
+                static_cast<std::size_t>(surface->pitch) * static_cast<std::size_t>(surface->height));
+    bool hash_still_matches = false;
+    LIFT_CHECK(presenter.dumpLastFrame(shot_path.string(), &hash_still_matches, &err));
+    const std::string ref = readWholeFile2(ref_path.string());
+    const std::string shot = readWholeFile2(shot_path.string());
+    std::printf("[freeze] shot==ref=%d bytes ref=%zu shot=%zu hash_still_matches=%d\n",
+                shot == ref ? 1 : 0, ref.size(), shot.size(), hash_still_matches ? 1 : 0);
+    LIFT_CHECK(!ref.empty());
+    LIFT_CHECK(shot == ref);         // ★ 清零之后截图仍是那一帧（今天这条红）
+    LIFT_CHECK(hash_still_matches);  // ★ 冻结路径下 = "这张 BMP 就是 presenter 记录的那一帧"
+    fs::remove_all(fs::path("control-snapshot-work"), ec);
+}
+
+// =====================================================================================
 // ⑬ 控制层 resume 的陈旧事件闸门（判据 13 的**纯**机制面；真 SDL 队列在 tests/present_window.cpp）
 // =====================================================================================
 void caseClassifyStale() {
@@ -355,6 +415,8 @@ int main() {
     casePositionAndSha();
     caseJsonStable();
     caseDumpLastFrame();
+    // ★ `REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`（🐞S2）：截图写的是 present 时**冻结**的那一帧。
+    caseScreenshotFreezesFrame();
     caseClassifyStale();
     return lift_test::finish("lift-control-snapshot");
 }

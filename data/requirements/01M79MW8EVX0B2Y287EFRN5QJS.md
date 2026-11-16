@@ -2,8 +2,9 @@
 
 - id: REQ-01M79MW8EVX0B2Y287EFRN5QJS
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M7CZQZK3QQJBP5XCX88B4CTE
+- dropped_reason: 机制已不存在：AOT 臂的 native override 于 2026-11-16 整条删除（AGENTS §12.8 第 1 条：执行来源只有 IR 与 shim），解释器已退役 ⇒ 函数级 override 没有合法宿主。本条原是解释侧的起播解码优化（mdct_init 41.8 ms / 32.4 ms），不再维护。
 - tags: [emulator-lift, audio, native-override]
 
 ## 订正（2026-11-13 · 音频阶段设计，`.tmp/audio-phase/design.md` §4）

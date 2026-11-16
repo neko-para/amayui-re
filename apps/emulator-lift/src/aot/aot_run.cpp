@@ -426,7 +426,14 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     };
     // ★ 控制层 **Present 闸门**（S2）：装一次，`present()` 在 sink / dump 之后回调它。
     //   位置只在 `present.cpp`（⛔ 不在这里另找时机）；没接控制层时不装 ⇒ `present()` 里一次判空。
-    if (control_ != nullptr) presenter_.setPresentGate(&AotHost::presentGateThunk, this);
+    if (control_ != nullptr) {
+        presenter_.setPresentGate(&AotHost::presentGateThunk, this);
+        // ★ **冻结最后呈现帧的像素副本**（`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`）：唯一产品调用点，
+        //   与 `setPresentGate` **同处同条件**（`control_ != nullptr`）⇒ 缺省档零成本。
+        //   ⛔ 不要派生自 `hasPresentGate()`（那样任何新闸门都会静默背上 3.7 MB/帧）；
+        //   ⛔ `--dump-frame` 不走副本（它是"当场写"的独立对照）。
+        presenter_.setFreezeFrame(true);
+    }
     // ★ 起点：`cpu_.eip` 已经是 PE entry（`prepare` 设的）⇒ lifted 侧现场由它派生。
     syncRegsFromCpu();
     const auto wall_start = std::chrono::steady_clock::now();

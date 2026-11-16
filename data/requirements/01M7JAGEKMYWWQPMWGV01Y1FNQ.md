@@ -2,8 +2,9 @@
 
 - id: REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M7HC1WJ9X0QCQ51Q9F01988W
+- verify: apps/emulator-lift/tests/control_snapshot.cpp#screenshot-freezes-frame
 - repro: apps/emulator-lift/src/runtime/present.cpp#dumpLastFrame
 - severity: S2
 - tags: [emulator-lift, control-plane, present]
@@ -11,60 +12,53 @@
 ## 现象
 
 `emu-ctl screenshot`（服务端走 `Presenter::dumpLastFrame`）写出来的 BMP **全黑**，而**同一帧**用 `--dump-frame`
-（`SurfaceArena::dumpBmp`，present 汇点内当场写）却是正常画面。
+（`SurfaceArena::dumpBmp`，在 present 汇点内当场写）却是正常画面。
 
-## 实测（2026-11-16，macos-arm64 RelWithDebInfo，headless 与 window 各一次）
+## 根因（2026-11-16 取证；原「猜测」已被确认并修正措辞）
 
-```
-A. headless frame 578:  screenshot → ok, bytes=3686454, hash_still_matches:true
-                          check-black → 非黑 0/921600 (0.000%)  lum min/avg/max 0/0.00/0
-B. window   frame 544:  screenshot → ok, bytes=3686454, hash_still_matches:false
-                          check-black → 非黑 0/921600 (0.000%)  lum max 0
-C. 对照 --dump-frame（headless, --max-frames 6）:
-                          frame_0001 0.2% · 0002 99.3% · 0003 99.5% · 0004 99.6% · 0005 99.9% · 0006 99.9% 非黑
-```
-（`node .tmp/check-black.mjs <bmp>` 是只读 BMP 的小工具，`.mjs` 口径；A/B 用 `emu-ctl screenshot`。）
+1. `present()` 只留**描述符**（`last_arena_` / `last_surface_` / `last_surface_hash_`），**不拷像素**；
+   `dumpLastFrame` 在**暂停那一刻**才去读 guest 像素。
+2. 那块 guest 后缓冲**只在 Present 那一刻是完整一帧**：GPU 开着时 D3D9 绘制只写 GPU target，guest 只在 `present` 里回读；
+   而帧首 `Clear` 会**逐像素直写 guest**（清成 0）⇒ 从 Clear 到下次回读之间，guest 里就是清除色。
+3. `--dump-frame` 恰写在回读之后、`present` 之内 ⇒ 它永远对；`dumpLastFrame` 写在暂停时刻 ⇒
+   取决于暂停落在哪：落在 **Present 闸门**＝有图，落在**块边界**＝黑。
 
-⇒ **不是"headless 没有像素"**（headless 也能有内容，C 就是 headless）；黑的是 **`dumpLastFrame` 那条"保留最后一张"的路径**。
+### 实测（win32，2026-11-16，`--present headless`，连续 `resume --for-ms 40` + `screenshot`）
 
-### 追记（同日，探索者的读数；把"恒黑"改成"竞态 + headless 结构性"）
-
-| 场景 | 读数 |
+| 暂停落点 | 读数 |
 |---|---|
-| `--present window --present-hidden`，`screenshot` **重试到"像素非全 0"为止** | **5/7 拿到真图**（LOAD/SAVE 屏的列表、缩略图、"NEW!"），2 张黑 ⇒ 这条路径是**竞态**，⛔ 不是恒坏 |
-| `--present headless` | 反复都是黑（与"presenter 没有 sink、保留的那份 surface 拿不到像素"一致） |
+| `paused_at=block` frame=542 | 非黑 **0/921600 (0.000%)** · `hash_still_matches=false` |
+| `paused_at=present` frame=547 | 非黑 **918642/921600 (99.679%)** · `hash_still_matches=true` |
 
-⇒ 准确的现象是：**headless 结构性黑；window 档是竞态（同一个暂停点有时有、有时没有）**。
-这比"恒黑"更糟的一点是：**`hash_still_matches:true` 与"两拍相同"在两种情况下都能成立** ⇒ 判据 5 完全抓不到。
+⇒ **推翻了本单原写的"headless 结构性黑"**：headless 也能有画面；决定因素是**暂停落点**（机制见上）。
 
-### 临时规避（已告知探索者，写在这里供别人照用）
+## 修法（2026-11-16 落地，最小改法）
 
-- 需要"看画面"⇒ 用 **`--dump-frame '<dir>/frame_{frame}.bmp'`**（那条路径实测正常）+ `node .tmp/check-black.mjs <bmp>` 判非黑比例；
-  ⚠ `--max-frames` 要小（3.6 MB/帧）。
-- 判据一律用 `data.sample.script.name/pos`、`state_seq`、`fired`/`pending`/`exit`；⛔ 不用 `screenshot` 当证据。
-- 若非要 `screenshot`：**重试到非全 0**（并用 `check-black.mjs` 证明），且**在文档里标成"画面读数、非判据"**。
+`present()` 在 `last_surface_hash_` 定稿之后、交给 sink **之前**，把该帧像素（**连描述符一起**）冻结成一份副本；
+`dumpLastFrame` 冻结有效就写副本、否则**退回写现场**（= 今天的行为）。**只在 `--control-root` 时拷**（缺省零成本）。
+`surface` 抽出 `dumpBmpRaw(desc, src, …)` 从副本写盘；`hash_still_matches` 改成在**实际写出的那份字节**上算。
 
 ## 判据（能红）
 
-1. `--present headless` 跑到 ≥30 帧后 `screenshot` ⇒ 写出的 BMP **非黑像素 > 50%**（拿 `--dump-frame` 同帧对照，两者内容一致或至少都是画面而不是空）。
-2. `--present window` 同样（同一帧的 `--dump-frame` 与 `screenshot` 应当一致）。
-3. 修复后判据仍要保住原来那两条：同一暂停点两拍 `shasum` 相同、`hash_still_matches` 的语义不变。
+1. `--present headless` 跑到 ≥30 帧后 `screenshot` ⇒ 非黑像素 > 50%（与同帧 `--dump-frame` 对照）。
+   **修后读数**：6 次 resume+screenshot **全部 99.679%**，含 `paused_at=block` 的那几次
+   （独立复审自建目录复跑：`paused_at=block` frame=98 → 99.679%）。
+2. `--present window` 同样 —— **<未取证>**（本轮只跑 headless）。
+3. pure 守卫 `apps/emulator-lift/tests/control_snapshot.cpp#screenshot-freezes-frame`：
+   present（同时写一份参照 BMP）→ 把**现场**像素 `memset` 成 0 → `dumpLastFrame` 写出的 BMP 必须与参照**逐字节相同**。
+   **修前红**（`shot==ref=0`，`90 checks, 2 failures`），修后绿（`90 checks, 0 failures`）。
+   ★ 它不是自证：参照走 `arena.dumpBmp`（现场）、清的是现场、截图读的是 `frozen_pixels_`。
+4. 变异清单一条：删掉冻结那一行 ⇒ 上面那条用例当场红（`ctest` exit 8）。**实测红过**。
 
-## 猜测（⛔ 未取证，只是缩小范围）
+## 收口（2026-11-16）
 
-`dumpLastFrame` 读的是"保留下来的最后一张 surface 描述符"（`last_arena_` / `last_surface_` / `last_surface_hash_`），
-而 `--dump-frame` 读的是 **present 汇点当时**的那一张。若是 arena 每帧回收/重置了同一块 surface，
-那么"留下来的描述符"可能在下一帧就被清空 ⇒ 读到全 0；而 `last_surface_hash_` 也是在**同一个空 buffer** 上重算的，
-所以 `hash_still_matches:true` 反而说明不了任何内容问题。
+- `verify: apps/emulator-lift/tests/control_snapshot.cpp#screenshot-freezes-frame`
+- 独立复审裁决 **approve-with-fixes**（`.tmp/shot-defect/change-review.md`）：修法 / 冻结点正确、
+  守卫不是自证、实测能红、端到端 3 次 ≥99% 非黑。三处文本修补（失败计数可见、合同注释、客户端帮助）同轮带走。
+- **契约口径已改**：`hash_still_matches` 在冻结路径下**恒 true**，只回答"冻结有没有生效"（删掉冻结会变 false）；
+  ⛔ 不再声称它验内容 ⇒ M0 判据 5 因此补了"BMP **非全黑**"（`REQ-01M7HX0CJ202MJ4PZXW80VFA0J`）。
 
-⚠ 这条猜测不要去改实现之前当结论；先看 `presenter_` 里 last_* 的写入点与 arena 的复用策略。
+## 残余（⛔ 不在本单）
 
-## 对判据 5 的影响（重要）
-
-M0 的判据 5 现在写的是"`paused_at ∈ {present,block}` + `hash_still_matches:true` + 两拍 `shasum` 相同"。
-**这三条在全黑 buffer 上也全部成立**（实测 A 就是 `hash_still_matches:true` + 两拍相同）⇒ 判据 5 **只验了稳定性、没验内容**。
-修复落地的同一轮必须给判据 5 补一条"非全黑 / 与 `--dump-frame` 同帧一致"。
-
-## 来源
-
-`REQ-01M7HX0CJ202MJ4PZXW80VFA0J` 的 S2 实现后，探索者报"headless 截图全黑"；本条是父级的实测复核（A/B/C 三组）。
+- 冻结**分配失败**时退回写现场（极端情况仍可能写出一张全黑图），只 warn 一次 + 计数（`freezeFailures=` 进 AOT 摘要）。
+- window 档端到端、16bpp 运行时、DDraw Flip 路径未实测。

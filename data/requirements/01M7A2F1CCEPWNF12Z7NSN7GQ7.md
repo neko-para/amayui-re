@@ -3,7 +3,7 @@
 - id: REQ-01M7A2F1CCEPWNF12Z7NSN7GQ7
 - type: req
 - status: open
-- parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- parent: REQ-01M7JHSD5MWTB9N8WJC2Y2T69M
 - tags: [emulator-lift, d3d9, fidelity]
 
 ## 缺口

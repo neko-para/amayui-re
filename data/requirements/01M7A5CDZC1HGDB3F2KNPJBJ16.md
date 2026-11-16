@@ -3,7 +3,7 @@
 - id: REQ-01M7A5CDZC1HGDB3F2KNPJBJ16
 - type: req
 - status: open
-- parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- parent: REQ-01M7JHSFB2SSBBNSJ82YDED8M1
 - tags: [emulator-lift, overrides, ledger]
 
 ## 背景（2026-11-13 审计，`.tmp/lift-overrides/audit.md`）

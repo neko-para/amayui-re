@@ -2,9 +2,10 @@
 
 - id: REQ-01M6XVYA68DQWWMQPY795WPN0Q
 - type: req
-- status: doing
+- status: dropped
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
 - order: 0
+- dropped_reason: 2026-11-16 解散（用户裁决：单子到处散落）：它是'未收口工作汇总'，活载重只剩 3/40，且 3 个活子单已按'改哪一层'迁到分类树（令牌等待→共用 runtime·并发；quit-graph 首点击→输入与窗口；组装输入→输入与窗口）。正文是 §10 禁止的变更记录且已与现状冲突（三处状态写错）、贴 80 行预算 ⇒ 不再维护；历史见 git log。
 - tags: [emulator-lift, interaction, performance]
 
 ## 这张单收什么

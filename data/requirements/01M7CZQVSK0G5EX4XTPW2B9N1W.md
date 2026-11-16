@@ -2,8 +2,9 @@
 
 - id: REQ-01M7CZQVSK0G5EX4XTPW2B9N1W
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M3TC7BK0J9TBQKGGWQ35A3NR
+- dropped_reason: 2026-11-16 拍平：L 的两支只剩一支（B · 手写 native override 已 drop —— AOT 执行来源只有 IR 与 shim，解释器退役）。中间层没有存在意义：A 已迁到 'lift 层 · 语义与覆盖'，其子单按类分散到 语义/效率/工具 三组。边界文字随 A 保留。
 - tags: [emulator-lift, lift, perf]
 
 ## 这一支回答什么

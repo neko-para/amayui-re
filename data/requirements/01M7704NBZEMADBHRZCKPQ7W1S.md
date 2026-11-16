@@ -2,8 +2,9 @@
 
 - id: REQ-01M7704NBZEMADBHRZCKPQ7W1S
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- dropped_reason: 2026-11-16 过时：5 条里的 4 条目标测试文件已随解释器退役删除（cli-time-limit / cli-dump-frame 随 target 删除；title-entry-paths / movie-logo 的解释器入口不复存在），只剩 frame_dump_failure 一条仍有意义，而它已被 AOT 侧覆盖缺口单（REQ-01M7J6D62QFRZC2454GV7CKJDJ）收走。'搬 POSIX'这个动作本身在 win32 优先、且只剩一条的现状下不成立。若将来要回 mac 验某条守卫，另立单。
 - tags: [emulator-lift, tests, portability, macos]
 
 ## 一句话

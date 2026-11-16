@@ -3,7 +3,7 @@
 - id: REQ-01M7FRY04PTP9788QZPVPKA5ND
 - type: req
 - status: open
-- parent: REQ-01M7CD1NRK9P5WKR5PJ6GW3067
+- parent: REQ-01M7JHSEZVMYB4XHEN32V7V6HJ
 - tags: [emulator-lift, lift, debt]
 
 ## 这份欠账是什么

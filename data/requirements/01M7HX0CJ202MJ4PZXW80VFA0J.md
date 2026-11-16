@@ -24,7 +24,10 @@ AOT 臂落 **M0 控制层**：`--control-root <dir>` 起一个只绑 loopback �
 3c. **`script_sha` 覆盖脚本体**：`.tmp` scratch 安装树对 TITLE.BIN `insert-after` ⇒ sha 变；负对照 = 垃圾裸件 ⇒ 引擎自报文件名。
 3d. **读不到是枚举**：boot 前 ⇒ `available:false` + `why` ∈ 既有 8 个字面量，退出码 0。
 4. **步进可重复**：3 次 `resume --for-ms 200` ⇒ **`state_seq` 单调增（每个暂停边界至少 +1）**、`insns` 前进；帧会推进的屏 `resume --for frames 1` ⇒ frame +1；帧不推进 ⇒ `timeout`（exit 3）**且谓词已清**（之后 `resume` = `not_paused`）。
-5. **截图是同一帧**（2026-11-16 改字面）：`paused_at ∈ {present,block}` + `hash_still_matches:true` + 两拍 `shasum` 相同 + `source:"guest-backbuffer"`。⛔ 不强制 `present`：那会让 `screenshot` 在从不 Present 的屏（TITLE 轮询 frame=0）永远等不到 —— 事实字段不是必须满足的条件。
+5. **截图是最后呈现的那一帧**（2026-11-16 二次改字面）：`paused_at ∈ {present,block}` + `source:"guest-backbuffer-frozen"`
+   + 两拍 `shasum` 相同 + **BMP 非全黑（≥50% 非黑）**。⛔ 不强制 `present`（那会让从不 Present 的屏永远等不到）；
+   ⛔ 不再把 `hash_still_matches` 当"内容对不对"的判据 —— 它在冻结路径下**恒 true**，只回答"冻结有没有生效"
+   （见缺陷 `REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`；删掉冻结它会变 false，守卫因此能红）。
 6. **时钟冻结**：暂停 2 s ⇒ `guest_ms` 差 < 5 ms、`paused_total_ms` ≈ +2000；**配方守卫钟同冻**；`--time-limit` 也扣暂停。
 9. **僵尸判死 = `connect()`，不是 pid**：(a) `kill -9` 暂停中实例 ⇒ `list` 报 `alive:false, why:"refused"` 且文件仍在；(b) 同 root 再起 ⇒ 成功；**`emu-ctl gc`** 只删残留（条件 = 连接失败 + pid 不存活 + 文件名严格 `ctl.<pid>.<8hex>.json`），⛔ 不删 `keep.txt`、`list` 不自动删；(c) 残留文件 port 改到别人在听的 ⇒ `alive:false`；(d) `--control-idle-timeout 2` 暂停 3 s ⇒ 自收口（`bye.reason=="stopped"` + `requested_by=="idle"`）且文件删。
 10. **只绑 loopback + 未授权被拒**：端点 `local_endpoint()` == `127.0.0.1`；错 token ⇒ 握手失败；带 `Origin` ⇒ 拒。
@@ -44,6 +47,8 @@ AOT 臂落 **M0 控制层**：`--control-root <dir>` 起一个只绑 loopback �
 - **`pause` 幂等**（已暂停 ⇒ `ok:true`）；`resume` 在未暂停态才 `not_paused`。`--control-predicate-timeout`（缺省 30）保留公开。
 - **`--lst` 永不给 AOT 补**（`aot-arm-shape` 禁词表里有它）；`--report` 也不补（AOT 无 BlockCache 账）。
 - **`key` 不进 M0**；`--control-root` 与 `--input-plan` 可同用（`click` 走立即队列，M1）。
+- **截图 = `present()` 当场冻结的像素副本**（只在 `--control-root` 时拷，≈3.7 MB/帧；⛔ 不是"暂停那一刻的现场后缓冲"——
+  现场这时已被下一帧改写）。`hash_still_matches` 因此只回答"冻结有没有生效"，⛔ 不为它扩协议、不拆新字段（2026-11-16 收窄裁决）。
 
 ## 落点
 
@@ -51,4 +56,7 @@ AOT 臂落 **M0 控制层**：`--control-root <dir>` 起一个只绑 loopback �
 
 ## 未做（M1/M2）
 
-`click`/`key` / `resume --until-ea` / 录制导出 / DSH 插件包装 / Windows 读数（Low 完整性、`TerminateProcess`、`netsh` 端口段）。
+`click`/`key` / `resume --until-ea` / 录制导出 / DSH 插件包装。
+**Windows 已验（2026-11-16，win32）**：`--control-root` 能 listen `127.0.0.1`，`list/pause/sample/screenshot/resume/click/quit` 全通；
+`--control-port 0` 取到的端口不在保留段（`netsh` 排除段 50000–50059，取到 62556）。
+仍未测：`TerminateProcess` 后的残留识别、Low 完整性（后者按用户裁决 drop："后续不考虑沙箱"）。

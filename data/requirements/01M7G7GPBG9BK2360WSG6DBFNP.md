@@ -3,7 +3,7 @@
 - id: REQ-01M7G7GPBG9BK2360WSG6DBFNP
 - type: req
 - status: open
-- parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
+- parent: REQ-01M7JHSDH16HCVEV4BA6NKSHN2
 - tags: [emulator-lift, aot, audio]
 
 ## 现象

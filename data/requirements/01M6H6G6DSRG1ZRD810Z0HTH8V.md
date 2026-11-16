@@ -2,8 +2,9 @@
 
 - id: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
 - type: req
-- status: doing
+- status: done
 - parent: REQ-01M3TC7BK0J9TBQKGGWQ35A3NR
+- done_reason: 2026-11-16 里程碑收束（用户裁决：需求单到处散落，改按层/侧分类）：M2 交付面已完成；剩余未收口项**全部**迁到 'emulator-lift · 活工作分类（按层 / 侧）' 的 7 个组（图形/音频/输入/共用 runtime/语义与覆盖/效率/工具）。本节点只作历史里程碑，⛔ 不再往里挂新单。
 - tags: [emulator-lift m2]
 
 ## 一句话

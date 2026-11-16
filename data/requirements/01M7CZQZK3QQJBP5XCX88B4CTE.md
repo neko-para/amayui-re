@@ -2,8 +2,9 @@
 
 - id: REQ-01M7CZQZK3QQJBP5XCX88B4CTE
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M7CZQVSK0G5EX4XTPW2B9N1W
+- dropped_reason: 用户 2026-11-16 裁决：整条 B 支路废弃。B = 手写 native override（函数级/段级），是解释侧机制；AOT 臂自 2026-11-16 起执行来源只有 IR 与 shim（AGENTS §12.8 第 1 条，那套机制已整条删除），解释器已退役 ⇒ 没有合法宿主。三个子单一同 drop；将来若需要'语义更优件'，只能走构建期（改闭包 / 改发射的 IR）。
 - tags: [lift, native-override]
 
 ## 范围

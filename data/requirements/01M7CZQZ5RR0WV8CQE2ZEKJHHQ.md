@@ -3,7 +3,7 @@
 - id: REQ-01M7CZQZ5RR0WV8CQE2ZEKJHHQ
 - type: req
 - status: open
-- parent: REQ-01M7CZQVSK0G5EX4XTPW2B9N1W
+- parent: REQ-01M7JHSEKXW8KAKB6K2RS645M7
 - tags: [lift, aot]
 
 ## 范围

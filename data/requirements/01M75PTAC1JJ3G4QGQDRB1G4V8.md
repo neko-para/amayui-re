@@ -2,12 +2,12 @@
 
 - id: REQ-01M75PTAC1JJ3G4QGQDRB1G4V8
 - type: bug
-- status: blocked
+- status: dropped
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- blocked_by: [REQ-01M75VZXV4SDMVVM1Z72G009XJ]
 - verify: apps/emulator-lift/tests/audio.cpp#audio-device/stop-then-play-without-seek
 - repro: apps/emulator-lift/tests/audio.cpp#audio-device/stop-drops-stale-fill
 - severity: S1
+- dropped_reason: 2026-11-16 去重：本单与 REQ-01M75VZXV4SDMVVM1Z72G009XJ 是同一现象、同一根因（feeder 在 shim 边界被令牌挡住），且本单正文自己已推翻标题里的'旧位置通知'归因。合并到后者，不另维护。
 - tags: [emulator-lift audio dsound feeder]
 
 ## 现象

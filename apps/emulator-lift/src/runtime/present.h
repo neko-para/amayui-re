@@ -169,6 +169,7 @@ inline StaleEventAction classifyStaleEvent(HostEventClass cls, std::uint64_t tim
 struct PresentBreakdown {
     std::uint64_t readback_ns = 0;  // GPU target → guest 后缓冲（直出且本帧无 GPU 绘制时是 guest → target）
     std::uint64_t hash_ns = 0;      // guest 像素哈希（HeadlessPresenter）
+    std::uint64_t freeze_ns = 0;    // 冻结像素副本（只在控制层启用时；缺省 0 = 一次判空）
     std::uint64_t sink_ns = 0;      // sink->submitFrame（SDL 上传+RenderPresent / GPU 直出 blit+submit）
     std::uint64_t stats_ns = 0;     // frameStats 直方图（d3d9 Present 的诊断行）
     bool direct = false;            // 本帧的呈现是否走 GPU 直出（swapchain blit）
@@ -252,9 +253,20 @@ public:
     //   施加任何 step：计划只记账，到期 step 只能由**下一个 guest 读点**消费（`input_plan.h` 铁律 3）。
     void setInputPlan(InputPlan* plan) { input_plan_ = plan; }
 
+    // ★ **冻结最后呈现帧的像素副本**（`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`）：唯一产品调用点 =
+    //   `aot_run.cpp` 里与 `setPresentGate` 同处同条件（`control_ != nullptr`）。缺省关 ⇒
+    //   `present()` 里一次判空、零拷贝。⛔ 不要派生自 `hasPresentGate()`（那样任何新闸门都会
+    //   静默背上 3.7 MB/帧）；⛔ `--dump-frame` 不走副本（它是"当场写"的独立对照）。
+    void setFreezeFrame(bool on);
+    // 诊断：冻结失败**次数**（0 = 一次都没失败）。形状同 `dumpFailures()`：计数 + 只第一次 warn。
+    // 失败 ⇒ `frozen_valid_ = false` ⇒ `dumpLastFrame` **退回写现场**（= 今天的行为，⛔ 不新增错误码）。
+    std::uint64_t freezeFailures() const { return freeze_failures_; }
+
     // ★ 补写"最后呈现的那一帧"（交互模型 §2：三种失败都要存最后画面）。
-    //   只留**描述符**（几十字节），不拷像素 ⇒ 每帧零成本；代价是像素可能已经是下一帧的绘制中状态，
-    //   所以 `hash_still_matches` 如实报告"这些像素还是不是被采样到的那一帧"（不一致也照样写，供诊断）。
+    //   · 冻结有效（控制层启用且这一帧冻成了）⇒ 写**副本**（描述符 + 像素一起冻，⛔ 不读 guest）；
+    //   · 没冻结 / 冻结失败 ⇒ **退回写现场**（= 今天的行为，⛔ 不新增错误码 / 不新增 why）。
+    //   `hash_still_matches` = **在它实际写出的那份字节上**算 hash，与记录的 `last_surface_hash_` 比
+    //   （副本路径下因此恒 true：这张 BMP 就是 presenter 记录的那一帧；现场路径下仍是今天的语义）。
     bool dumpLastFrame(const std::string& host_path, bool* hash_still_matches, std::string* err) const;
     bool hasLastFrame() const { return have_last_surface_; }
 
@@ -272,6 +284,11 @@ private:
     void noteSinkFailure(const std::string& why);
     // 帧导出失败：计数 + **只第一次**打默认级别 warn（⛔ 不每帧刷屏）。
     void noteDumpFailure(const std::string& path, const std::string& why);
+    // 冻结失败：计数 + **只第一次** warn（形状照 `noteDumpFailure`）；⛔ 不把更旧的一帧冒充最后一帧，
+    // 而是让 `frozen_valid_` 保持 false ⇒ 截图退回写现场。
+    void noteFreezeFailure(const std::string& why);
+    // 把**这一帧**的像素拷进副本（描述符一起存）。只在 `freeze_` 为真时被 `present()` 调。
+    void freezePresentedFrame(const SurfaceArena& arena, const GuestSurface& surface);
 
     std::unique_ptr<PresentSink> sink_;
     std::uint64_t frame_count_ = 0;
@@ -283,7 +300,7 @@ private:
     // ★ 帧导出（BMP）失败账：`dump_failures_` 每帧累加；`dump_failure_warned_` 保证只喊一次。
     std::uint64_t dump_failures_ = 0;
     bool dump_failure_warned_ = false;
-    // 最后帧的描述符 + 当时的 hash（`dumpLastFrame` 用；不持有像素）。
+    // 最后帧的描述符 + 当时的 hash（`dumpLastFrame` 的**退回路径**用）。
     FrameSampler* sampler_ = nullptr;
     // ★ `presents` 门的 emit 点（`--input-plan`；nullptr = 没有计划）。只记账，不施加 step。
     InputPlan* input_plan_ = nullptr;
@@ -291,6 +308,14 @@ private:
     GuestSurface last_surface_{};
     std::uint64_t last_surface_hash_ = 0;
     bool have_last_surface_ = false;
+    // ★ **冻结副本**（只在 `freeze_` 为真时写）：描述符 + 像素一起存 ⇒ 截图时不从现场 surface 重算。
+    //   `assign` 复用容量（**不是**每帧一块）。`frozen_valid_ == false` ⇒ 截图退回写现场。
+    bool freeze_ = false;
+    std::vector<std::uint8_t> frozen_pixels_;
+    GuestSurface frozen_desc_{};
+    bool frozen_valid_ = false;
+    std::uint64_t freeze_failures_ = 0;
+    bool freeze_failure_warned_ = false;
     // ★ 控制层 Present 闸门（nullptr = 没有控制层 ⇒ `present()` 里一次判空）。
     PresentGateFn gate_fn_ = nullptr;
     void* gate_user_ = nullptr;
