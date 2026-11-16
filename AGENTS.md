@@ -13,13 +13,18 @@
 >
 > ★ **规则只有可执行才算规则**：每条纪律要么落在 `.gitattributes` / `.gitignore` / `pnpm` 脚本里，
 > 要么落在 `tools/` 的守卫里。写成散文的 `policy: "..."` 机器执行不了、agent 也不会去读 —— 那是伪装成数据的文档。
+>
+> ★ **两个工作树（2026-11-17 起）**：`E:\Projects\amayui-re` = `main`（控制层**真相**）·
+> `E:\Projects\amayui-re-dev` = `dev`（**代码 / 工具**）。提交、合并、谁改哪条路径、缺资产怎么办 —— 全在 **§14**。
 
 ---
 
 ## 0. 三条最常被踩的
 
 1. **旧仓 `E:\Games\Eushully\天結` 是只读来源**：不改、不删、不移动它任何东西（可读、可 `git status` 证明未变）。
-2. **不要 `git add` / `git commit`**：提交时机由用户决定（沿用旧仓的长期要求）。
+2. **提交按 §14 的口径**：可以 `git add` / `git commit` / 撤回暂存，但 ⛔ 已提交的历史**不许改写**
+   （`reset --hard` / `rebase` / `--force`），合回 `main` 一律 `git merge`（不 squash）；
+   ⛔ **需求单只在 `E:\Projects\amayui-re`（`main`）改**，`dev` 工作树只做代码 / 工具（§14.3）。
 3. **不要凭记忆写游戏 / 引擎语义结论**（字段含义、函数用途、opcode 语义、脚本角色…）：那些属于**待重建的知识层**，
    必须绑可再校验的观察（锚点锚 **EA**，不锚语料行号）之后才准登记。
 
@@ -338,3 +343,72 @@ ctest --test-dir out --output-on-failure
 - ⛔ 翻译线**不产出**引擎语义结论：那些要走 §6（锚 EA + 可再校验观察）。
 - ⛔ 不为翻译去改 `AGE.EXE`（汉化项目与修改 `AGE.EXE` 无关）。
 - 整篇重译与局部更新走同一个闭环（检索 → 改中文 → 生成编辑清单 → 逐条应用 → 过判据），细节见 `amayui-translate` 技能。
+
+## 14. 双工作树：`main` 真相仓 + `dev` 代码仓（2026-11-17 起）
+
+★ 同一个仓挂**两个可写工作树**（`git worktree`），**按路径分家** —— 这是整套并行能成立的全部理由。
+
+| 路径 | 分支 | 是什么 | 谁的活 |
+|---|---|---|---|
+| `E:\Projects\amayui-re` | `main` | **控制层真相** | 需求单 · `AGENTS.md` / `CTX.md` · `data/**` · `corpus/**` · `docs/00-origin\|01-translation\|02-engine/**` |
+| `E:\Projects\amayui-re-dev` | `dev` | **代码 / 工具臂** | `apps/**` · `tools/**` · `plugins/**` · `packages/**` · `docs/03-emulator/**` · `release/**` |
+
+- ★ **两边改的文件集不相交 ⇒ merge 不冲突**。谁"顺手"在 dev 改了需求单、或在 main 改了源码，
+  就得人工解冲突，而且真相变成两份 —— 这是本节唯一的硬禁止。
+- ★ main 上的代码树**照旧可建可跑**（合并后要在这里过门禁、跑带资产的验收），但它**不长新代码**。
+
+### 14.1 提交
+
+- ✅ `git add` · `git commit` · `git restore --staged`（撤回暂存）· `git reset`（**默认 `--mixed`**）。
+- ⛔ **已提交的东西不许回退 / 改写**：已合进 `main` 或已推送的提交 ⛔ `reset --hard` · ⛔ `commit --amend` ·
+  ⛔ `rebase` · ⛔ `push --force` / `--force-with-lease`。提交坏了 ⇒ **往前修**（再来一条修复提交；`git revert` 也生成新提交）。
+  **历史只追加。**
+- dev 上**尚未合进 main** 的最后一条提交可以 `--amend`；⛔ main 上一律新提交（main 的历史是审计面）。
+- 提交说明沿用现有风格（`feat:` / `fix:` / `chore:` / `docs:` / `test:`），一条提交一件事。
+- 推送默认**不做**，要用户点头。
+- ★ 两棵树**各自的 index 是分开的**（`git worktree` 自带）⇒ 两个会话同时 `git add` / `commit` 不互踩；
+  ⛔ 但同一个分支不能在两棵树里同时 checkout（git 自己会拒，别去 `--force` 它）。
+
+### 14.2 合并：只 `merge`，不 `rebase`、不 `squash`
+
+```bash
+cd E:\Projects\amayui-re     && git merge dev    # 拿代码（快进 / 真合并都行）
+cd E:\Projects\amayui-re-dev && git merge main   # 拿需求 / 政策改动
+```
+
+- ⛔ 不要 `rebase` 把 dev 挪到 main 顶上（那会改写已提交历史，撞 14.1 红线）。
+- 合并后在 **main** 上跑门禁：`pnpm test` / `pnpm verify` / `node tools/requirements.mjs --validate`。
+- **合并后才发现的集成问题**（冲突 / 门禁红）优先回 dev 修、再 `git merge dev`；万不得已直接在 main 上改的，
+  改完**立刻** `git merge main` 进 dev —— 别让两边代码分叉。
+
+### 14.3 `data/**` 只在 main 改
+
+- ⛔ dev 上不建 / 不改需求单（`data/requirements/**`），也不动 `data/spec|shape|ledger|routes|translations/**`、`corpus/**`。
+- ⇒ **dev 上的 `requirements --validate` 不是门**：它读的是分叉时的旧快照 —— 红可能是"main 后来加了锚点"，
+  绿可能是"dev 还没删那个 test"。**只有 main 上的 validate 算数。**
+- dev 上发现"该登记的事"（新缺陷 / 该拆的单 / 前提被推翻）⇒ 写进**main 工作树**的 `.tmp/`
+  （如 `E:\Projects\amayui-re\.tmp\dev-findings.md`）。⛔ 不写 dev 的 `.tmp/`：`/.tmp` 每棵树各一份且 gitignore，main 侧看不见。
+
+### 14.4 锚点跨工作树
+
+- 需求单的 `verify:` / `repro:` 锚的是 dev 会改的测试名。改名 / 删用例前 `rg '<名字>' data/requirements`（§12.4），
+  在 dev 上只看得到旧快照 ⇒ 交付里必须带**锚点变更清单**（增 / 删 / 改名 / 新增 CTest），
+  合回 main 后由 main 侧 `tools/requirements.mjs --set` 补锚并 `--validate`。锚点解析不了 ⇒ 红（设计如此，不是误报）。
+
+### 14.5 生成物与本地资产：各树各一份，**不要求对齐**
+
+- `apps/emulator-lift/out` 与 `node_modules` **各树各一份**：CMake 缓存里是绝对路径、pnpm 链接同理 ⇒ 树不能共用。
+  §12.3「构建树只有一个」管的是"同一棵树里别再开 `out-<名字>`"，⛔ 不是"全仓只许一棵 `out`"。
+- **本地资产默认不对齐**（2026-11-17 实况：dev 只有 `pnpm i` + 构建产物）：`corpus/disasm/files/`（解压视图）、
+  `corpus/assets` 里的字体解压、`dist/`（含 `dist/install`）、`links/install`、`links/raw` 都可能缺。
+  ⇒ **带资产的验收（`assets` / `external` 档、`--install`、真游戏）回 main 做**；dev 只保证纯文本档。
+- dev 上某条 `pnpm verify` 红了，先分辨"资产缺失"还是"代码坏了"：**同一条命令在 main 上绿 ⇒ 是资产**。
+  真要补齐：只读复用 main 的绝对路径（如 `--install E:\Projects\amayui-re\dist\install`），比复制省 ~8 GB；
+  ⛔ 别让 dev 的产物写进 main 的树。
+- 控制层发现：`emu-ctl` 缺省读 `<本仓>/.tmp/emu-ctl` ⇒ 两棵树各扫自己那份，**并行跑实例不互抢**；
+  ⛔ 不要把 A 树的 `--control-root` 指到 B 树的 `.tmp/emu-ctl`（"多个 alive ⇒ 退出码 4"）。
+
+### 14.6 政策与交接文档只有一份
+
+- `AGENTS.md` / `CTX.md` **只在 main 改**；dev 要新政策 ⇒ 先在 main 改，再 `git merge main` 进 dev。
+- 理由与 14.3 同构：两份副本一分叉，"同一句话在两个工作树里就是两条规则"。

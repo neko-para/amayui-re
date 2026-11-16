@@ -1,7 +1,9 @@
 # CTX · 交接（2026-11-16 晚 · mac arm64 → win32）
 
 > 这是**待办 / 裁决清单**，不是口径文档。口径看 `AGENTS.md` §12 · `apps/emulator-lift/README.md` · `docs/03-emulator/`。
-> 进度真源仍是 `pnpm tools requirements plan`（活节点 55）。**本机状态**：HEAD `b6afe77 feat: emu ctl`，工作树**干净**（本轮全部已提交）。
+> 进度真源仍是 `pnpm tools requirements plan`（⛔ 不在这里抄数字）。
+> **两个工作树**（2026-11-17 起）：`E:\Projects\amayui-re` = `main`（真相仓：需求单 / 本文件）·
+> `E:\Projects\amayui-re-dev` = `dev`（代码 / 工具）。提交 / 合并 / 谁改哪条路径 / 缺资产怎么办 → `AGENTS.md` **§14**。
 
 ---
 
@@ -10,19 +12,23 @@
 **控制层 M0 + M1 已落地并验完**：AOT 臂有 WS 端点（`--control-root`）+ 独立客户端 `tools/emu-ctl.mjs`
 （`list/pause/resume/sample/screenshot/click/wait/quit/gc`），能把二进制**停住 → 采样脚本位置 → 投点击 → 继续**。
 **解释器已退役**（target + 6 条 CLI 级 CTest 删除）。**配方前半段已改位置门**（TITLE / GAMESTART / SN0000）。
-剩下的是：三份长配方的尾巴、一个截图缺陷、加载屏的第三条门、以及 **Windows 侧一次都没验过**。
+剩的是 **C1 三份长配方的尾巴**（区间已取证）。截图缺陷已修（冻结 present 那一帧，`REQ-01M7JAGE…` 已收口）；
+**自动到加载存档屏**已人眼验过（`REQ-01M7GA4…` 已关）—— 但**第三条门**（`await global/local`，§B2）**仍 open**；
+Windows 侧已验过一轮（见 `docs/03-emulator/control-plane.md` §6）。
 
-本机读数（macos-arm64 / RelWithDebInfo / HEAD `b6afe77`）：`ctest` **99/99**（skip 3）· `pnpm test` **574** ·
+上一轮读数（macos-arm64 / RelWithDebInfo / HEAD `b6afe77`）：`ctest` **99/99**（skip 3）· `pnpm test` **574** ·
 `pnpm verify` **491** · `mutate --list` **108/108** · `requirements validate` **6/6** · `pgrep` 无残留。
+Windows 侧（2026-11-17 / `windows-x64` = RelWithDebInfo）：`pnpm test` **574** · `pnpm verify` **491** ·
+`mutate --list` **109/109** · `requirements validate` **6/6** · `ctest -R "control-snapshot|control-endpoint|present-window"` **4/4**；
+⚠ **`ctest` 全量还没在 Windows 跑过一遍**（W1 待做，别把"抽跑 4 条"说成"全量绿"）。
 
 ---
 
 ## B. 需要你裁决（agent 不能替）
 
-1. **截图缺陷先修吗**（`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`，🐞S2）：
-   `emu-ctl screenshot` 在 `--present headless` **必黑**、在 `--present window` **竞态**（5/7 有图，重试能中）；
-   同一帧 `--dump-frame` 正常。⚠ 它让 **M0 判据 5 形同虚设**（全黑 buffer 也满足 `hash_still_matches` + 两拍相同）。
-   ⇒ 建议**先修**（要动 `present.h/cpp` 的 last_* 保留策略 / arena 复用），修完同轮给判据 5 补"非全黑"。
+1. ~~**截图缺陷先修吗**~~ ✅ **已修并收口**（2026-11-17，`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ` = done）：
+   根因是 `dumpLastFrame` 在暂停点读 guest backbuffer（只有 present 那一刻完整），现改为 present 时**冻结副本**；
+   `source` 报 `guest-backbuffer-frozen`，判据 5 补了"BMP ≥50% 非黑"。实测 `paused_at=block` 由 **0.000% → 99.679%**。
 2. **加载屏的第三条门现在做吗**（`REQ-01M7J97QY66KMP5SBPCTR0S3TP`）：
    加载屏与保存屏**共用 `SAVE.BIN` 且同区间**（已由读数钉死）⇒ 位置门**区分不了**，唯一区分量是 `global a9cb` 位。
    做它需要"按槽号读 global/local 的只读取址原语"（含解码），你已说"可以后续安排"。**不做就只能靠配方自己知道刚才点的是 Load 还是 Save**（不能当判据）。
@@ -134,8 +140,8 @@ node tools/emu-ctl.mjs --describe      # 控制层命令表 / mutates / 两种 p
    采样命中率**不能**推门命中率，反之亦然（实测：GAMESTART 门 7/7，而采样 `0/47`）。
 2. **`sample`/门的判据要"停在该屏且能吃输入的那一段"**：TITLE/FELLOW/SAVE 都是"回调体吃 click、轮询体不吃"；
    把门下在轮询体上会得到"门命中、click 也施加了，但界面不动"（FELLOW 负对照就是这样 exit 5 的）。
-3. **⛔ 不要用 `emu-ctl screenshot` 当证据**（缺陷 `REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`）：headless 必黑、window 竞态。
-   要看画面 ⇒ `--dump-frame '<dir>/frame_{frame}.bmp'` + `node .tmp/check-black.mjs <bmp>`（`.mjs`，读非黑比例）。
+3. **`screenshot` 现在取的是 present 时冻结的那一帧**（缺陷已修，2026-11-17）：与 `--dump-frame` 同一份像素；
+   `hash_still_matches` 只回答"冻结有没有成"，**不当内容判据** ⇒ 内容判据看**非黑比例**（`node .tmp/check-black.mjs <bmp>`，`.mjs`）。
 4. **存档环境**：只用 `corpus/fixtures/` 的原版样本（旧汉化存档是 GBK：**能看见能加载**，但"标题/当前章节"会乱码）；
    `--appdata` = `%AppData%` 根，实际落点 `<appdata>/Local/Eushully/天結いキャッスルマイスター/SAVE/`；
    ★ **带 fixtures 的 `SAVE.DAT`/`SAVE.BAK` ⇒ 第一屏是 110–119（全空）**；把它们拿掉 ⇒ 000–009（有项）。
@@ -145,4 +151,5 @@ node tools/emu-ctl.mjs --describe      # 控制层命令表 / mutates / 两种 p
    `{op, ok:true, data:{<op>:…}}` ⇒ 路径是 `data.sample.script.pos`（不是 `sample.script.pos`）。
 7. **到 TITLE 的自动化必须带 `--skip-logo`**；`stop @` 在 `--max-frames` 下无证明力；`lastHash` 不是指纹；
    能用的是收尾 `region` 三数（需 `--region-log`）—— ⚠ 但 `region` 对"点没点中"**没有区分力**（实测点了/没点同值）。
-8. **⛔ 不跨机器比墙钟**（§12.6）；⛔ 不 `git add` / `commit`；⛔ 需求树只经 CLI 写。
+8. **⛔ 不跨机器比墙钟**（§12.6）；提交 / 合并按 `AGENTS.md` **§14**（可 `add` / `commit` / 撤暂存；已提交历史不许改写，合回 main 只 `merge`）；
+   ⛔ 需求树只经 CLI 写，且**只在 `main` 工作树**写（dev 上不建 / 不改需求单）。
