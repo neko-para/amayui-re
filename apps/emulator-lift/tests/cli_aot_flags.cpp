@@ -9,10 +9,17 @@
 //   ③ 错拼 `--cursor-wrap`（wrap ≠ warp）**仍然**是 `未知参数` + exit 2。
 //      红了 ⇒ 参数解析退化成"接受任何参数"，② 的绿就没有意义（§12.5 的 `--native-overrides`
 //      那条纪律：⛔ 不许靠"什么都收"让守卫变绿）。
-//   ④ `--sound` ⇒ **被接受**（不是 `未知参数`）并打**一条**一次性说明：含理由（本臂没有音频管线）
-//      与跟踪单占位 `TODO(REQ)`；且这条说明在这份 stderr 里**恰好出现一次**。
-//      红了 ⇒ 要么"指定了就跑不起来"（另一种"无法指定"），要么静默接受（用户以为该有声）。
+//   ④ `--sound` ⇒ **被接受**（不是 `未知参数`）并打**一条**一次性说明：这条说明必须**与代码一致**
+//      —— `--sound` 现在真的进 `AudioEngine` 的静音门（`muted=0`），所以它**不许**再说
+//      "本臂没有音频管线 / 不会有声音"（那是接线前的形状）。且这条说明在这份 stderr 里**恰好一次**。
+//      红了 ⇒ 要么"指定了就跑不起来"（另一种"无法指定"），要么静默接受（用户以为该有声），
+//      要么文案在**撒谎**（代码接线了、话还写着没接线）。
 //   ⑤ 缺省档（**不给** `--sound`）这条说明**不出现**（同一份 stderr 面的对照组）。
+//   ⑥ **S1 参数面**：`--audio virtual` / `--audio sdl` **不再**被拒（旧文案"本臂只有 off"必须消失）；
+//      非法值 `--audio bogus` 仍 **exit 2** 并点名合法值域（⛔ 不放宽成"认不出就当 off"）；
+//      `--audio-dump` 缺值 ⇒ exit 2 并点名这个 flag（⛔ 不静默当成"没有 dump"）。
+//      红了 ⇒ 用户要么无法指定后端 / dump，要么非法值被静默吞掉。
+//   ⑦ `--help` 里有 `--audio-dump`（否则用户不知道这条入口存在）。
 //
 // ★ 四条主断言**全部判在 GPU bring-up 之前**：AOT 臂的参数校验（`aot_main.cpp` 的
 //   `--audio` / `--cursor-warp` 平台闸门 / `present_window_flag` / `--sound` 说明）都在
@@ -170,6 +177,9 @@ int main(int argc, char** argv) {
         LIFT_CHECK_EQ_U32(r.exit_code, 0u);
         LIFT_CHECK(r.out.find("--cursor-warp") != std::string::npos);
         LIFT_CHECK(r.out.find("--sound") != std::string::npos);
+        // ★ S1：`--audio` 的三个档位与 `--audio-dump` 必须在 help 里（否则用户不知道它们存在）。
+        LIFT_CHECK(r.out.find("--audio off|virtual|sdl") != std::string::npos);
+        LIFT_CHECK(r.out.find("--audio-dump") != std::string::npos);
         // ★ S4：`--input-plan` 必须在 help 里（否则用户不知道 AOT 臂有输入控制面）。
         LIFT_CHECK(r.out.find("--input-plan") != std::string::npos);
     }
@@ -345,7 +355,7 @@ int main(int argc, char** argv) {
         LIFT_CHECK(r.err.find("--cursor-wrap") != std::string::npos);
     }
 
-    // ---- ④ `--sound`：**接受** + 一条一次性说明（含理由 + 跟踪单占位），⛔ 不是 `未知参数` ----
+    // ---- ④ `--sound`：**接受** + 一条一次性说明（与代码一致：真的进静音门），⛔ 不是 `未知参数` ----
     //      ★ 不判退出码：`--sound` 之后本臂仍会因"没有执行源 / 没有 GPU"而 exit 2 —— 那与
     //        `--sound` 无关，判据是"它被接受 + 说了实话"，在 GPU bring-up 之前就已成立。
     g_current_case = "sound-accepted-with-once-notice";
@@ -355,12 +365,61 @@ int main(int argc, char** argv) {
         LIFT_CHECK(!r.timed_out);
         LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
         LIFT_CHECK(countOccurrences(r.err, kSoundNoticeMarker) == 1u);
-        // ② 理由必须在：本臂没有音频管线（不是"暂不支持"这种含糊话）。
-        LIFT_CHECK(r.err.find("没有音频管线") != std::string::npos);
+        // ② **与代码一致**：`--sound` 现在真的把静音门关掉（`AudioEngine` 的 `muted=0`）⇒
+        //    文案不许再写"没有音频管线 / 不会有声音"（那是接线前的形状）。
+        LIFT_CHECK(r.err.find("muted=0") != std::string::npos);
+        LIFT_CHECK(r.err.find("没有音频管线") == std::string::npos);
+        LIFT_CHECK(r.err.find("不会有声音") == std::string::npos);
         // ③ 跟踪单 id 必须**是真的**（`REQ-` + 26 位 ULID），⛔ 不许把占位符发出去。
         //    ★ 按**形态**判、不锚具体 id：换单号不该让守卫红，但留着 `TODO(` 必须红。
         LIFT_CHECK(r.err.find("REQ-") != std::string::npos);
         LIFT_CHECK(r.err.find("TODO(") == std::string::npos);
+    }
+
+    // ---- ⑥ S1：`--audio virtual` / `--audio sdl` **不再**被拒（旧文案"本臂只有 off"必须消失）----
+    //      ★ 仍然 exit 2 是**别的**原因（临时 cwd 里没有执行源 / 没有 GPU）—— 判据只判"音频这一关
+    //        过去了没有"，⛔ 不拿总退出码冒充。
+    g_current_case = "audio-backends-accepted";
+    {
+        for (const wchar_t* mode : {L"virtual", L"sdl"}) {
+            const ChildRun r = runChild(exe, std::wstring(L"--audio ") + mode + L" --present headless", root,
+                                        root / (std::wstring(mode) + L".out"), root / (std::wstring(mode) + L".err"));
+            LIFT_CHECK(r.started);
+            LIFT_CHECK(!r.timed_out);
+            LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
+            // 旧形状：`--audio %s 未实现（本臂只有 off：没有音频设备 / 喂料线程）`。
+            LIFT_CHECK(r.err.find("未实现（本臂只有 off") == std::string::npos);
+            LIFT_CHECK(r.err.find("值非法") == std::string::npos);
+        }
+    }
+
+    // ---- ⑥' 非法值**仍然** exit 2，且点名合法值域（⛔ 不许"认不出就当 off"）----
+    g_current_case = "audio-bogus-value-rejected";
+    {
+        const ChildRun r = runChild(exe, L"--audio bogus --present headless", root, root / "bogus.out",
+                                    root / "bogus.err");
+        LIFT_CHECK(r.started);
+        LIFT_CHECK(!r.timed_out);
+        LIFT_CHECK_EQ_U32(r.exit_code, 2u);
+        LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
+        LIFT_CHECK(r.err.find("--audio") != std::string::npos);
+        LIFT_CHECK(r.err.find("bogus") != std::string::npos);
+        // 合法值域必须**写在报错里**（人照它改），不是只说"非法"。
+        LIFT_CHECK(r.err.find("off") != std::string::npos);
+        LIFT_CHECK(r.err.find("virtual") != std::string::npos);
+        LIFT_CHECK(r.err.find("sdl") != std::string::npos);
+    }
+
+    // ---- ⑥'' `--audio-dump` 缺值 ⇒ exit 2 + 点名这个 flag（⛔ 不静默当成"没有 dump"）----
+    g_current_case = "audio-dump-needs-value";
+    {
+        const ChildRun r = runChild(exe, L"--audio-dump", root, root / "dumpmiss.out", root / "dumpmiss.err");
+        LIFT_CHECK(r.started);
+        LIFT_CHECK(!r.timed_out);
+        LIFT_CHECK_EQ_U32(r.exit_code, 2u);
+        LIFT_CHECK(r.err.find("--audio-dump") != std::string::npos);
+        LIFT_CHECK(r.err.find("需要一个值") != std::string::npos);
+        LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
     }
 
     // ---- ⑤ 对照组：**不给** `--sound` ⇒ 那条说明不出现（同一份 stderr 面）----

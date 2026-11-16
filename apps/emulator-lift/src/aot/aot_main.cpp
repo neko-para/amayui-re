@@ -61,7 +61,11 @@ void usage() {
         "  --time-limit SEC    墙钟上限（每 4096 条查一次；0 = 不限）\n"
         "  --skip-logo         一次性 latch：T_Command + 0x5EB5C 写 0（口径同 emulator-lift；\n"
         "                      钩子点 AOT 用 0x004BAA33；⛔ 不跳过 boot、不改 eip/寄存器）\n"
-        "  --audio off|virtual|sdl  音频后端（本臂**只实现 off**：没有音频设备 / 喂料线程）\n"
+        "  --audio off|virtual|sdl  音频后端（缺省 off：不开设备 / 不跑混音；判据只有一份 =\n"
+        "                      runtime/audio_policy.h）。virtual = 虚拟设备时钟（确定性、可 dump）；\n"
+        "                      sdl = 真设备（打不开 ⇒ 退回 virtual，摘要里 device=fallback）\n"
+        "  --audio-dump <path> 把 48k/16/2ch 交付缓冲写成 WAV（缺省不给 = 不写）；给了它而 --audio off\n"
+        "                      ⇒ 档位自动提升为 virtual（与 AudioEngine::configure 同一条规则）\n"
         "  --input-plan <file> 组装输入配方（缺省不给 = 没有任何输入注入，行为与本参数无关）：\n"
         "                      文件格式 = **唯一一份配方语法**（`runtime/recipe.h`；解释器臂的\n"
         "                      `--interaction-graph` 已退役 ⇒ 本臂是**唯一**的配方入口；\n"
@@ -196,9 +200,12 @@ int main(int argc, char** argv) {
     // ★ `--input-plan <file>`（S4）：AOT 臂的**唯一**输入控制面（`runtime/input_plan.h`）。
     //   缺省空 = 不给 ⇒ 输出与行为逐字节不变（含那 57 行 stdout）。
     std::string input_plan_path;
-    std::string audio_mode = "off";  // ★ 本臂缺省 off（没有音频设备）
-    // ★ `--sound`（缺省关，与 `src/main.cpp:269` 同值）：本臂**接受**它，但只打一条一次性说明
-    //   —— 这条臂没有音频管线（理由 / 后果 / 跟踪单只有一处：`runtime/present_flags.h`）。
+    std::string audio_mode = "off";  // ★ 本臂缺省 off（不开设备 / 不跑混音：与改动前逐位相同）
+    // ★ S1：`--audio-dump <path>`（缺省空 = 不写 WAV）。给了它而档位是 off ⇒ 引擎把档位提升成
+    //   virtual（`AudioEngine::configure` 的唯一规则；⛔ 不在这里另写一份）。
+    std::string audio_dump;
+    // ★ `--sound`（缺省关）：**真的**进 `AudioEngine` 的静音门（`mute_ = !sound`）—— 不再是
+    //   `aot_host.cpp` 里的硬写 false（b-3）。文案与口径见 `runtime/present_flags.h`。
     bool sound = false;
     lift::aot::AotRunOptions run_opts;
     // ---- 呈现档位（取值 / 缺省 / 使用门槛**照 `src/main.cpp:226-227`、`:357-394`、`:637-663`）----
@@ -286,8 +293,16 @@ int main(int argc, char** argv) {
             run_opts.time_limit_sec = d;
         } else if (a == "--audio") {
             if (!needValue("--audio", &audio_mode)) return 2;
+        } else if (a == "--audio-dump") {
+            if (!needValue("--audio-dump", &audio_dump)) return 2;
+            // ★ 空串不是"没有 dump"：argv 里给了 `""` 时静默当成没给会把"我要落盘"变成静默失效。
+            if (audio_dump.empty()) {
+                std::fprintf(stderr, "emulator-lift-aot: --audio-dump 需要一个非空路径\n");
+                return 2;
+            }
         } else if (a == "--sound") {
-            // ★ 与 `src/main.cpp:519-520` 同一个 bool；本臂只做"接受 + 一条一次性说明"（见下）。
+            // ★ `--sound` 只置一个 bool：它经 `host.configureAudio(...)` 进 `AudioEngine` 的静音门
+            //   （`mute_ = !sound`），并由下面那条一次性说明与代码同形地报出来。
             sound = true;
         } else if (a == "--skip-logo") {
             // ★ 与 `src/main.cpp:301-302` 同一条：只置一个 bool（一次性 latch，语义在 aot_run.cpp）。
@@ -397,11 +412,12 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-    // ★ 本臂**只实现 off**：没有音频设备 / 喂料线程。⛔ 不静默忽略 `--audio sdl`（那会让"以为有声"）。
-    if (audio_mode != "off") {
-        std::fprintf(stderr,
-                     "emulator-lift-aot: --audio %s 未实现（本臂只有 off：没有音频设备 / 喂料线程）\n",
-                     audio_mode.c_str());
+    // ★ S1：`--audio` 的值域判据**只有一份**（`runtime/audio_policy.h` 的 `parseAudioMode`）。
+    //   ⛔ 不放宽成"认不出就当 off"：非法值仍 exit 2，并**点名合法值域**（人照它改）。
+    const lift::AudioModeParse audio_parse = lift::parseAudioMode(audio_mode.c_str());
+    if (!audio_parse.ok) {
+        std::fprintf(stderr, "emulator-lift-aot: --audio 的值非法：`%s`（%s）\n", audio_mode.c_str(),
+                     audio_parse.error != nullptr ? audio_parse.error : "值域 = off / virtual / sdl");
         return 2;
     }
 
@@ -418,11 +434,11 @@ int main(int argc, char** argv) {
     }
 
     // ---- `--sound`：**接受** + 一条一次性说明（⛔ 不 exit 2、⛔ 不静默）----
-    //   ★ 裁决与硬事实只在 `runtime/present_flags.h` 的 `kAotSoundNotice`（含理由 / 后果 / 跟踪单）。
+    //   ★ 文案与硬事实只在 `runtime/present_flags.h` 的 `kAotSoundNotice`：`--sound` 现在**真的**
+    //     进 `AudioEngine` 的静音门（`configure(…, sound)`，见下面的 configureAudio）⇒ 那条话
+    //     必须与代码同形（⛔ 不许再说"本臂没有音频管线"）。
     //   ★ 打印点**只有这里**（parse 之后、GPU bring-up 之前）⇒ 一次，且命令行一给就能判
     //     （守卫 `cli-aot-flags` 因此不需要 GPU）。
-    //   ★ 放在 `--audio` 拒绝**之后**：那句"其余行为不受影响"不能被一次 `--audio sdl` 的 exit 2
-    //     打脸（⛔ 本臂不因为 `--sound` 拒绝启动，但别的硬拒绝照旧）。
     if (sound) std::fputs(lift::kAotSoundNotice, stderr);
 
     // ---- `--input-plan`：**解析在 GPU bring-up 之前**（CLI 判据不需要 GPU）----
@@ -558,6 +574,14 @@ int main(int argc, char** argv) {
     // ---- ① 平台 + guest 地址空间 + 宿主服务装配 ----
     if (!host.init(&err)) {
         std::fprintf(stderr, "emulator-lift-aot: 宿主装配失败：%s\n", err.c_str());
+        return 1;
+    }
+    // ---- ①' S1/S2：CLI 的音频三参数落到音频引擎（`init` 里的缺省是 `configure(off,"",false)`）----
+    //   ★ 位置：`init()` 之后、`run()` 之前（`AudioEngine::configure` 要求"还没 begin"）。
+    //   ★ 缺省档（不给 `--audio` / `--audio-dump` / `--sound`）⇒ 这里是 `configure(off,"",false)`，
+    //     与 `init()` 里那次逐位相同 ⇒ 默认档输出逐字不变。
+    if (!host.configureAudio(audio_parse.mode, audio_dump, sound, &err)) {
+        std::fprintf(stderr, "emulator-lift-aot: 音频后端 configure 失败：%s\n", err.c_str());
         return 1;
     }
     // ★ GPU 光栅化后端：**必须在第一条 guest 指令之前**接到宿主服务上（口径 `main.cpp:1171` 的

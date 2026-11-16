@@ -191,9 +191,14 @@ bool AudioEngine::begin(std::string* err) {
             sdl_device_opened_ = true;
         }
     }
-    // ★ 真线程只在"真设备 + 宿主时钟"下启用：虚拟时钟的 tick 是主线程的确定性账本，
-    //   不能由第二条 guest 执行流并发推进。窗口模式本来就会 `--real-time`。
-    thread_mode_ = (mode_ == AudioMode::Sdl && clock_ && clock_->realTime());
+    // ★ S0 定档：判据**只有一份**（`runtime/audio_policy.h` 的 `audioThreadMode()`）——
+    //   ⛔ 不要在这里写 `mode_ == Sdl && clock_->realTime()` 这类内联判据（那正是"不可测 + 靠
+    //   `setupFeederContext` 失败回退"的来源）。三个输入：生效档位 / 宿主时钟是否墙钟 /
+    //   是否有 Machine（真 feeder 线程要 `Machine::layout().feeder_teb`；AOT 有意没有 Machine
+    //   ⇒ 结构上恒 D 泵，⛔ 不靠失败回退）。
+    //   ★ `mode_` 在上一块里可能已被 `Sdl ⇒ Virtual` 的回退改过 ⇒ 这里读到的是**真档位**。
+    const bool has_machine = cpu_ != nullptr && cpu_->machine != nullptr;
+    thread_mode_ = audioThreadMode(mode_, clock_ != nullptr && clock_->realTime(), has_machine);
     begun_ = true;
     if (thread_mode_) startMixThread();
     if (mode_ != AudioMode::Off) {
@@ -1307,9 +1312,11 @@ AudioPump AudioEngine::pump() {
     }
     // ★ 走到这里的**只有** `thread_mode_ == false`（上面那块已返回）⇒ 本引擎当前没有 feeder
     //   线程、也没有 mixer 线程。这就是上面那条不变量的唯一来源：
-    //   `thread_mode_` 只在 `begin()` 由 `Sdl && clock_->realTime()` 置真；它从 true 变 false
-    //   的**唯一**路径是 `startFeederThread()` 里 `setupFeederContext()` 失败 —— 那一步发生在
-    //   **建线程之前**（失败时 `thread_mode_` 改回 false、`stopMixThread()`，日志"退回主线程泵"）
+    //   `thread_mode_` 只在 `begin()` 由**纯谓词** `audioThreadMode(mode, realTime, hasMachine)`
+    //   （`runtime/audio_policy.h`，唯一一份）置真 —— **AOT 的 `hasMachine == false` ⇒ 从第一刻起
+    //   就是 false，不走"起线程再失败回退"**；解释器臂上它从 true 变 false 的路径只有
+    //   `startFeederThread()` 里 `setupFeederContext()` 失败 —— 那一步发生在**建线程之前**
+    //   （失败时 `thread_mode_` 改回 false、`stopMixThread()`，日志"退回主线程泵"）
     //   ⇒ **不存在"feeder 线程已经在跑、而 `pump()` 走 D"的状态**（复审
     //     `.tmp/audio-token/compensation-change-review.md` §4 / `feed-paths-audit.md` §4 #2）。
     //   ⛔ 因此这里**不再加**"是否曾经起过线程"的闩/断言位：它要防的状态今天不可达，删掉它
@@ -1750,6 +1757,10 @@ void AudioEngine::startFeederThread() {
     if (feeder_thread_.joinable()) return;
     std::string err;
     if (!setupFeederContext(&err)) {
+        // ★ 这条回退**不是**定档判据（定档 = `begin()` 里的 `audioThreadMode()`，唯一一份）：
+        //   `thread_mode_` 已经为真的前提下才可能走到这里 ⇒ 它只是"该起线程但起不来"的**防御网**。
+        //   ★ AOT 臂走不到：`hasMachine == false` ⇒ `thread_mode_` 从第一刻起就是 false
+        //     ⇒ 根本不会调本函数（`resumeFeeder()` 里先判 `thread_mode_`）。
         logAt(LogLevel::Warn, "feeder 真线程启动失败（%s）⇒ 退回主线程泵", err.c_str());
         thread_mode_ = false;
         stopMixThread();

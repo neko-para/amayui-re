@@ -86,8 +86,10 @@ bool AotHost::init(std::string* err) {
     cpu_.host = this;
     // ★ `present-tail` 的 insns 源：与 `Machine::wire` 同一个注入点（只读指针）。
     presenter_.setInsnSource(&cpu_.insns);
-    // ★ 音频：口径 = 解释器臂的 `--audio off`（`AudioEngine::attach` + `AudioMode::Off`）。
-    //   ⛔ 不建真设备 / 不跑喂料线程（AOT 本轮没有音频验收目标）。
+    // ★ 音频：`attach` 之后先落**缺省档**（`configure(off,"",false)`）——它与改动前的形状逐位相同。
+    //   ★ CLI 的 `--audio` / `--audio-dump` / `--sound` 由 `aot_main` 在 `init()` 之后调
+    //     `configureAudio()` 覆盖（`configure` 只要求"还没 begin"）；缺省档不会走到那一步的差异上。
+    //   ★ 生命周期（begin / end）在 `run()` 的入口 / 出口（与解释器 `machine.cpp:1059` / `:1854` 同口径）。
     audio_.attach(&cpu_, &mem_, &clock_);
     {
         std::string audio_err;
@@ -106,6 +108,22 @@ bool AotHost::init(std::string* err) {
     seh_.reset();
     cpu_.fpu.reset();
     initialized_ = true;
+    return true;
+}
+
+bool AotHost::configureAudio(AudioMode mode, const std::string& dump_path, bool sound, std::string* err) {
+    // ★ 唯一入口（`aot_main`）：把 CLI 的三个事实落进 `AudioEngine`。`configure` 只要求"还没 begin"
+    //   ⇒ 在 `init()` 之后、`run()` 之前调。⛔ 不要在这里做值域校验（那是 `audio_policy.h` 的
+    //   `parseAudioMode`，唯一一份；这里只收已经合法的 `AudioMode`）。
+    if (!initialized_) {
+        if (err != nullptr) *err = "AotHost 未 init";
+        return false;
+    }
+    std::string local;
+    if (!audio_.configure(mode, dump_path, sound, &local)) {
+        if (err != nullptr) *err = local.empty() ? std::string("AudioEngine::configure 失败") : local;
+        return false;
+    }
     return true;
 }
 
@@ -410,7 +428,11 @@ void AotHost::printReadout(std::FILE* out, bool region_log) const {
                  cpu_.handles != nullptr ? "yes" : "no", cpu_.com != nullptr ? "yes" : "no",
                  cpu_.calls != nullptr ? "yes" : "no", cpu_.windows != nullptr ? "yes" : "no",
                  cpu_.fonts != nullptr ? "yes" : "no",
-                 cpu_.audio != nullptr ? audioModeName(audio_.mode()) : "no");
+                 // ★ 读**配置**事实（`configuredMode()`），不是 `mode()`：readout 打在 `run()` 的
+                 //   `begin()` **之前**，那时 `mode_` 还是 Off ⇒ 用 `mode()` 会让 `--audio sdl`
+                 //   的 bring-up 读数写一句假的 `audio=off`（真实的档位 / `device=ok|fallback`
+                 //   在收口的 `audio     :` 一行）。缺省档两者同为 `off` ⇒ 默认档读数逐字不变。
+                 cpu_.audio != nullptr ? audioModeName(audio_.configuredMode()) : "no");
     std::fprintf(out, "owner     : cpu.machine=nullptr（AOT 有意没有 Machine）+ cpu.host=this\n");
 
     // ---- 派发表（构建期生成物的真源是 lift-gen --table）----
@@ -528,6 +550,12 @@ void AotHost::printRunSummary(const AotRunResult& r, std::FILE* out) const {
                  static_cast<unsigned long long>(seh_.raiseCount()),
                  static_cast<unsigned long long>(seh_.handlerCalls()),
                  static_cast<unsigned long long>(seh_.unhandledCount()));
+    // ---- S2 的**机械判据**：音频**启用**时打一行与解释器 `machine.cpp:2955` 同形的 `audio     :`
+    //   （`mode` / `device=ok|fallback|none` / `muted` / fills / pushed / underruns / …）。
+    //   ★ **只有在 `enabled()` 时**才打：缺省档（`--audio off`，包括不给任何音频 flag）**一行都不打**
+    //     ⇒ 默认档 stdout 与改动前逐字相同（`AGENTS.md` §12.8 第 3 条 / 本单最硬的一条）。
+    //   ★ 一次性输出（不是周期性）：落点与 `--profile` 块同处"stdout 末尾"的前一刻。
+    if (audio_.enabled()) audio_.dumpSummary(out);
     // ---- `--profile` 的整块读数（**关档时一行都不打** ⇒ 全文与基线逐字相同）----
     // ★ 落点为什么在这里：`aot_main.cpp` 在 `printRunSummary` 之后只有 stderr 回声 + `return`，
     //   所以这里就是"stdout 末尾（进程退出前）"。⛔ 不改 main 的打印顺序。

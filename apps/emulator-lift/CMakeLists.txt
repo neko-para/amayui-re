@@ -1886,4 +1886,30 @@ add_test(NAME lift-jmptab-dispatch
     COMMAND emulator-lift-gen --jmptab-audit
             --exe "${LIFT_AOT_AGE_EXE}" --roots "${LIFT_AOT_CLOSURE}")
 
+# =====================================================================================
+# AOT 音频接线 S0–S2：**定档谓词 + 参数面**（pure）与**真音频设备档**（配置期 opt-in）
+#
+# ★ ① `aot-audio-flags`：纯头 `runtime/audio_policy.h` 的判据（S0 真值表 / S1 值域）
+#   + `AudioEngine::configure` 的静音门与 dump 提升 + 缺省档 begin/end 是 no-op。
+#   输入只有"自造字节的 Machine 夹具"（`tests/audio.cpp` 同一种 `initBare`/`prepareStack`），
+#   ⛔ 不读 LFS / 安装树、⛔ 不碰 SDL 设备 ⇒ `add_test` 在**最外层**（§12.4 判据 = 注册位置）。
+# ★ ② `audio-sdl-device`：只在"这台机器真有音频设备"时才该跑。本机可能没有（无桌面 / 远程会话 /
+#   服务账号）⇒ **配置期 opt-in**（`if(DEFINED ENV{LIFT_AUDIO_SDL_DEVICE})`，档位 = assets，§12.4）
+#   + 运行期 `LIFT_SKIP(77)`（CMake 侧 `SKIP_RETURN_CODE 77`）。
+#   ⛔ 不要把它挪到最外层"让默认 ctest 也跑一下"：那会在没有声卡的机器上变成一条**永远 skip**
+#   的用例（§14.5 的口径：缺输入的症状不该被"看起来跑了"掩盖）。
+#   打开方式：`$env:LIFT_AUDIO_SDL_DEVICE=1; cmake --preset windows-x64`，之后
+#   `ctest --test-dir out -R audio-sdl-device --output-on-failure`。
+# =====================================================================================
+add_executable(lift-aot-audio-flags tests/aot_audio_flags.cpp)
+target_link_libraries(lift-aot-audio-flags PRIVATE emulator-lift-runtime)
+add_test(NAME aot-audio-flags COMMAND lift-aot-audio-flags)
+
+if(DEFINED ENV{LIFT_AUDIO_SDL_DEVICE})
+    add_executable(lift-audio-sdl-device tests/audio_sdl_device.cpp)
+    target_link_libraries(lift-audio-sdl-device PRIVATE emulator-lift-runtime)
+    add_test(NAME audio-sdl-device COMMAND lift-audio-sdl-device)
+    set_tests_properties(audio-sdl-device PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
 endif() # LIFT_BUILD_TESTS

@@ -30,6 +30,7 @@
 #include <thread>
 #include <vector>
 
+#include "runtime/audio_policy.h"
 #include "runtime/guest_call.h"
 #include "runtime/native_overrides.h"
 #include "runtime/x86.h"
@@ -42,13 +43,8 @@ class Decoder;
 class BlockCache;
 enum class LogLevel : int;
 
-enum class AudioMode : std::uint8_t {
-    Off = 0,      // 不出声、不跑泵（旧 silent 口径）
-    Virtual = 1,  // 虚拟设备时钟（确定性；可 dump）
-    Sdl = 2,      // SDL3 真设备（能听到）
-};
-
-const char* audioModeName(AudioMode m);
+// ★ `AudioMode` / `audioModeName` / `audioThreadMode`（S0 定档谓词）/ `parseAudioMode`（S1 参数面）
+//   只有一份：`runtime/audio_policy.h`（纯头，可被 pure CTest 直接驱动）。⛔ 不要在这里再写一份。
 
 enum class AudioPump : std::uint8_t {
     Idle = 0,       // 没有要做的 / 已经做完了
@@ -169,6 +165,11 @@ public:
     void end();                    // 关闭设备、回填 WAV 大小；幂等
     bool enabled() const { return mode_ != AudioMode::Off; }
     AudioMode mode() const { return mode_; }
+    // ★ 只读：`configure()` 之后 / `begin()` 之前的**配置事实**（`mode()` 要等 begin 才是真值）。
+    //   存在理由：`configure(Off, <非空 dump 路径>, …)` 会把档位**提升**成 Virtual
+    //   （规则在 audio.cpp 的 configure 里，唯一一份）—— S1 的守卫要能机械判这条提升，
+    //   ⛔ 不去猜 / ⛔ 不在测试里重抄那条规则。
+    AudioMode configuredMode() const { return configured_mode_; }
     // 缺省 true = 静音；`--sound` 时 false。与后端（`--audio`）正交。
     bool muted() const { return mute_; }
     bool threadMode() const { return thread_mode_; }

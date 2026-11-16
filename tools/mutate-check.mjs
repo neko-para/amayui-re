@@ -3432,6 +3432,39 @@ const MUTATIONS = [
       '`buildTarget` 不再与 `add_test(NAME … COMMAND …)` 推出的 target 比较（恒不成立）⇒ 填错的 target 又能' +
       '静默通过 `--list`，而那条变异跑起来只会记「不可判定（构建失败）」⇒ mutate-static 的 buildTarget 用例红',
   },
+  // ── AOT 音频接线 S0–S2（`REQ-01M7G7GPBG9BK2360WSG6DBFNP` 的派生；守卫 = `tests/aot_audio_flags.cpp`）──
+  //   ★ 这一对代表"档位判定 / 参数面**静默**失效"这一类错：两者都不会崩、不会改指纹，
+  //     只会让"以为有声"或"以为有仪表"变成假的。
+  {
+    // S0：退回"没有 hasMachine 这一条"⇒ AOT（`cpu_.machine == nullptr`）会先起 mixer 线程、
+    //   再靠 `setupFeederContext` 失败**回退**成 D 泵（并打一条误导性 Warn）—— 正是本单要删掉的形态。
+    file: 'apps/emulator-lift/src/runtime/audio_policy.h',
+    from: '    return mode == AudioMode::Sdl && real_time_clock && has_machine;',
+    // ⚠ 变异形态**必须吃掉参数**（`(void)has_machine;`）：本工程 `/W4 /WX`，直接删掉最后一元会让
+    //   `has_machine` 变成 unused parameter ⇒ **编不过** ⇒ 工具记「不可判定（构建失败）」而不是「守卫红了」
+    //   （实测 2026-11-17：第一次就是这么写的，1/2 条按预期变红 + 1 条不可判定）。
+    to: '    (void)has_machine;\n    return mode == AudioMode::Sdl && real_time_clock;  // 变异：丢掉 hasMachine',
+    guard: 'ctest:aot-audio-flags',
+    ctest: 'aot-audio-flags',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-aot-audio-flags',
+    what:
+      'S0 定档谓词丢掉 `hasMachine` ⇒ AOT 又回到"起线程再失败回退"（`pump()` 在回退前恒 Idle + 每条 run 一条' +
+      '误导性 Warn）⇒ `aot-audio-flags` 的真值表 `(Sdl, rt, hasMachine=false) ⇒ 0` 当场红',
+  },
+  {
+    // S1：合法值被解析成 Off ⇒ "认不出就当 off" 那类静默失效（`--audio sdl` 等于没给）。
+    file: 'apps/emulator-lift/src/runtime/audio_policy.h',
+    from: '    if (audioTextEquals(value, "sdl")) return {true, AudioMode::Sdl, nullptr};',
+    to: '    if (audioTextEquals(value, "sdl")) return {true, AudioMode::Off, nullptr};  // 变异：认不出就当 off',
+    guard: 'ctest:aot-audio-flags',
+    ctest: 'aot-audio-flags',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-aot-audio-flags',
+    what:
+      '`--audio sdl` 被解析成 `Off`（"认不出就当 off"）⇒ 用户以为开了真设备、其实整条音频是关的，' +
+      '而**没有任何症状** ⇒ `aot-audio-flags` 的解析断言红',
+  },
 ];
 
 let mutationRunSeq = 0;

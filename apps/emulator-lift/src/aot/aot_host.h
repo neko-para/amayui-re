@@ -250,6 +250,14 @@ public:
     //    服务指针接到 cpu 上（`Machine::init` 的 surfaces + `Machine::wire` 的接线）。
     bool init(std::string* err);
 
+    // ①' **S1/S2 的音频配置入口**（`aot_main` 在 `init()` 之后、`run()` 之前调一次）：
+    //   `--audio` 的档位 / `--audio-dump` 的路径 / `--sound` 的静音门，全部落到 `AudioEngine`。
+    //   ★ 缺省档（三个 flag 都不给）= `configure(Off, "", false)` —— 与 `init()` 里那次逐位相同
+    //     ⇒ 默认档行为 / 输出逐字不变。
+    //   ★ 值域校验**不在这里**：那是 `runtime/audio_policy.h` 的 `parseAudioMode`（唯一一份），
+    //     这里只收已经合法的 `AudioMode`。
+    bool configureAudio(AudioMode mode, const std::string& dump_path, bool sound, std::string* err);
+
     // ② 载入 PE：解析头 / 节表 / 导入表 / entry，把节按 `image_base + RVA` 映射进 guest。
     //    ★ D1：**先核对**构建期 pin（sha256 + entry）再映射 —— 不一致 ⇒ 返回 false 且
     //      `pinMismatch() == true`（调用方 exit 2）。

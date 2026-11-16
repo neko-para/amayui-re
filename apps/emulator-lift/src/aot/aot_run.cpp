@@ -345,6 +345,18 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         return r;
     }
 
+    // ★ **S2 生命周期 · begin**（与解释器 `machine.cpp:1056-1062` 同口径）：打开 SDL 设备 / dump 文件；
+    //   失败**只降级，不阻止 boot**（与解释器一致：`begin` 失败只打一行 stderr）。
+    //   ★ 位置 = 生成物检查**之后**：没有可执行的东西就不该占设备 / 建 WAV。
+    //   ★ 缺省档（`--audio off`）时 `begin()` 立刻返回 true，不开设备、不建文件、不打任何输出
+    //     ⇒ 默认档逐字不变。★ 与 `end()` **成对**：本函数从这里到最后只有一个出口。
+    {
+        std::string audio_err;
+        if (!audio_.begin(&audio_err) && !audio_err.empty()) {
+            std::fprintf(stderr, "[audio] begin 失败：%s\n", audio_err.c_str());
+        }
+    }
+
     // ---- 每轮开头（只留 guest 语义那几条；真源 `machine.cpp:943-1094`）----
     windows_.setOwnerThread(std::this_thread::get_id());
     seh_.reset();  // ★ 状态机**跨块存活、只跨 run 清**（machine.cpp:1007）
@@ -854,6 +866,12 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         r.reason = AotStop::Unimplemented;
         if (r.detail.empty()) r.detail = "执行循环退出但没有停因（宿主内部不一致）";
     }
+    // ★ **S2 生命周期 · end**（与解释器 `machine.cpp:1854` 同口径）：关闭 SDL 设备 / 回填 WAV 大小；
+    //   此后不再写 guest。★ 与入口的 `begin()` 成对：本函数中"生成物在场"之后的路径只有这一个出口。
+    //   ⚠ 取"现在"= 收口这一刻的读数（`present` 行的 tail 之类）不依赖它；⛔ 不要把 `end()` 挪到
+    //     `printRunSummary` 之后 —— 摘要里的 `audio     :` 一行读的是**同一份** stats，先 end 再打
+    //     才能让 `device=` / `dump=` 反映"这一轮真的开了什么"（统计值不受 end 影响）。
+    audio_.end();
     // ★ 摘掉 Present 闸门：下一轮 `run()` 可能不带控制层（⛔ 留一条指向旧 Control 的回调）。
     presenter_.setPresentGate(nullptr, nullptr);
     return r;
