@@ -107,6 +107,7 @@
 #endif
 
 #include "runtime/cp932.h"
+#include "runtime/input.h"
 #include "runtime/vfs.h"   // HostDirEntry / kAttr* / Vfs 的完整定义（x86.h 只前置声明 Vfs）
 #include "runtime/x86.h"
 #include "shims/kernel32_file.h"
@@ -860,6 +861,11 @@ void readFile(X86& cpu, ShimCall& call) {
     }
     if (got > 0) cpu.mem->writeBytes(buf, tmp.data(), got);
     if (out_ea != 0) cpu.mem->wr32(out_ea, static_cast<std::uint32_t>(got));
+    // ★ 投递层（S1）：`ReadFile` 是**事件源**（"一次 guest 读文件完成"），⛔ 不是输入读点。
+    //   位置 = **成功返回之前**（失败 / 0 字节早退都不发事件）。S1 只有一次判空。
+    if (cpu.windows != nullptr) {
+        input::deliverFileRead(*cpu.windows, InputPoint::FileRead);
+    }
     call.result = 1;  // EOF 也是 TRUE + 0 字节
 }
 

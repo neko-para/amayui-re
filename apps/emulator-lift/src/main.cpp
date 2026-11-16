@@ -27,6 +27,7 @@
 #include "runtime/host_encoding.h"
 #include "runtime/log.h"
 #include "runtime/machine.h"
+#include "runtime/present_flags.h"  // --cursor-warp 的判据 + 文案（与 AOT 臂**同一份**）
 #include "runtime/present_sdl.h"
 #include "runtime/sha256.h"
 #include "runtime/vfs.h"  // openHostFileUtf8（Windows 的 UTF-8 路径）
@@ -133,9 +134,7 @@ void usage() {
         "  --present-screenshot-frame <N>  只回读第 N 个 Present（1 起；缺省 0 = 每帧都写）\n"
         "  --overlay           窗口左上角调试叠层（鼠标 guest 客户区坐标 / fps / frame / raster / present；\n"
         "                      默认关；只改宿主送显的窗口像素，⛔ 不写 guest 内存、不进 --dump-frame）\n"
-        "  --cursor-warp       让 guest 的 SetCursorPos **同时移动你机器的真实光标**（缺省关；\n"
-        "                      只在 --present window/auto 且窗口可见时生效；宿主副作用，\n"
-        "                      除\"开着却挪不动 ⇒ FALSE\"那一裁决例外外，虚拟光标 / GetCursorPos / WM_* 逐位不变）\n"
+        "%s"
         "  --input-script <path>  指令式输入时间线（`at frame N` / `at insn N` / `at guest_ms T` / `at wall_ms T` / at marker <名字> / after / wait；\n"
         "                     动作 = mouse_move / mouse_down / mouse_up / click / key_down / key_up / profile_begin / profile_end / quit）。\n"
         "                     段标记（各独占一行、**必须成对**，且需 --anchor-script）：\n"
@@ -175,7 +174,8 @@ void usage() {
         "                             -名字 = 排除该项；也可显式叠加调试项（缺省关）\n"
         "  --baseline-lift <N> 宿主基线补偿像素（缺省 2；0 = 关；★ 宿主视觉策略，不是引擎语义）\n"
         "  --font-engine-name  字体 A/B 对照档：上报引擎字面名（字形仍来自宿主 Amayui CN）\n"
-        "  --smoke             只验证宿主层可链接（不建窗口、不需要游戏）\n");
+        "  --smoke             只验证宿主层可链接（不建窗口、不需要游戏）\n",
+        lift::kCursorWarpHelp);
 }
 
 }  // namespace
@@ -644,9 +644,8 @@ int main(int argc, char** argv) {
     //   不成立，而在 30 分钟后从日志里发现"光标一次都没动"是最差的形状。实现层仍然有第二道防线
     //   （`hostCursorWarpToScreen` 在非 win32/macOS 上返回 false）。
     if (cursor_warp && !lift::hostCursorPlatformSupported()) {
-        std::fprintf(stderr,
-                     "emulator-lift: --cursor-warp 在本平台未实现（%s）；本线只做 win32 / macOS\n"
-                     "  ⇒ 去掉该参数，或按 README §4.2c 的口径用 --input-script 注入位置\n",
+        // ★ 判据与文案与 AOT 臂**同一处**（`runtime/present_flags.h`），⛔ 不在这里另写一句。
+        std::fprintf(stderr, lift::kCursorWarpUnsupportedFormat, "emulator-lift",
                      lift::hostCursorPlatformName());
         return 2;
     }
@@ -657,8 +656,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (present_mode == "headless" && present_window_flag) {
-        std::fprintf(stderr, "--present headless 不接受窗口参数（--present-driver / --present-vsync / "
-                             "--present-hidden / --present-screenshot / --overlay / --cursor-warp）\n");
+        std::fprintf(stderr, lift::kHeadlessRejectsWindowFlagsFormat, lift::kWindowFlagsInterpreter);
         return 2;
     }
     if (present_mode != "headless" && present_driver.find("software") != std::string::npos) {
@@ -762,9 +760,9 @@ int main(int argc, char** argv) {
         //   隐藏回退走**同一句** stderr warn。上一版只有 auto 分支打，README 却写成两条路径都
         //   "给 warn"（复审阻 2c）。⛔ 不改成 exit 2：`--present-hidden` 是有意的无窗口复现档，
         //   且 auto 的回退发生在 init 之后，parse 期没法 exit 2（需求判据 3 对"窗口隐藏"只要求 warn）。
-        if (ok && cursor_warp && wopt.hidden) {
-            std::fprintf(stderr,
-                         "  ⚠ --cursor-warp 本轮不生效（窗口隐藏 ⇒ 不挪宿主光标；只改 guest 虚拟光标）\n");
+        if (ok && lift::cursorWarpState(cursor_warp, lift::hostCursorPlatformSupported(), wopt.hidden) ==
+                      lift::CursorWarpState::OnButHidden) {
+            std::fputs(lift::kCursorWarpHiddenWarn, stderr);
         }
         if (ok && !sdl->rasterActive()) {
             werr = "GPU device 建出来了，但光栅化后端未激活（`rasterActive()==false`）";
@@ -1182,18 +1180,11 @@ int main(int argc, char** argv) {
     // ★ `--cursor-warp` 的**有效状态**一行（缺省关）：`on` / `off` / `on-but-hidden` / `unsupported`。
     //   与 `describe()` 里的 `cursor-warp=on|off`（sink 自己的开关）分工不同 —— 这一行回答
     //   "这轮真的会不会挪宿主光标"（含"开关开着但窗口是隐藏的"这种静默失效）。
+    //   ★ 判据与四个状态名只有一份（`runtime/present_flags.h`），与 AOT 臂逐字相同。
     {
-        const char* state = "off";
-        if (cursor_warp) {
-            if (!lift::hostCursorPlatformSupported()) {
-                state = "unsupported（本平台未实现）";
-            } else if (display->windowHidden()) {
-                state = "on-but-hidden（隐藏窗口 ⇒ 不挪宿主光标）";
-            } else {
-                state = "on";
-            }
-        }
-        std::printf("cursor-warp: %s\n", state);
+        const lift::CursorWarpState st = lift::cursorWarpState(
+            cursor_warp, lift::hostCursorPlatformSupported(), display->windowHidden());
+        std::printf("cursor-warp: %s\n", lift::cursorWarpStateName(st));
     }
 
     bool present_window_active = false;

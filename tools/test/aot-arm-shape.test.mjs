@@ -1,4 +1,4 @@
-/** @env pure @kind gate @why AOT 臂重新长出第三份语义实现（`--native-overrides`）或逐帧日志回到缺省档 —— 前者让"跑通"不再证明 lifted 代码对（静默），后者让 stdout 行数随帧数增长（300 帧 = 300 行） */
+/** @env pure @kind gate @why AOT 臂重新长出第三份语义实现（`--native-overrides`）· 逐帧日志回到缺省档（行数随帧数增长）· 或启动快照的区域表回到缺省档（28 行噪音）—— 三条都会让"缺省档的读数面"被静默改回去 */
 /**
  * `apps/emulator-lift/src/aot/` 的**源码形态守卫**（纯文本，不构建、不跑 exe）。
  *
@@ -32,6 +32,7 @@ const AOT_DIR = new URL('apps/emulator-lift/src/aot/', ROOT);
 const AOT_MAIN = new URL('apps/emulator-lift/src/aot/aot_main.cpp', ROOT);
 const AOT_RUN = new URL('apps/emulator-lift/src/aot/aot_run.cpp', ROOT);
 const AOT_HOST_H = new URL('apps/emulator-lift/src/aot/aot_host.h', ROOT);
+const AOT_HOST_CPP = new URL('apps/emulator-lift/src/aot/aot_host.cpp', ROOT);
 
 function read(url) {
   return fs.readFileSync(url, 'utf8');
@@ -139,5 +140,76 @@ test('② 逐帧 `[frame]` 必须在 `frame_log`（或 `prof_.on`）的条件里
   assert.ok(
     /bool frame_log\s*=/.test(read(AOT_HOST_H)),
     'aot_host.h：`AotRunOptions` 里没有 `bool frame_log = false;`（`--frame-log` 的字段）',
+  );
+});
+
+test('③ guest 区域表的打印必须在 `region_log`（`--region-log`）的条件内 —— 缺省档 0 行', () => {
+  // ★ 判据来源：用户 2026-11-16 的口径"region 信息是多余的噪音，考虑 opt-in 而非默认"。
+  //   `printReadout` 的 68 行里 **28 行**是区域表（`regions   :` 1 行 + 每段一行 27 行），
+  //   它是一次性快照里**唯一被判为噪音**的一块（⛔ 别的一次性 readout 一格都不许收）。
+  //   ⇒ 断言的是**性质**：那两条打印必须落在 `if (region_log) { … }` 的**块内**。
+  //   ⛔ 不断言"输出里没有 `regions :`"：那会把"把整块删掉"也判成合格，而删掉等于丢判据面
+  //   （要的是**保留读数、改成 opt-in**，不是让它消失）。
+  const text = read(AOT_HOST_CPP);
+  const lines = text.split('\n');
+  const isComment = (s) => s.trim().startsWith('//');
+
+  /** 从 `if (region_log) {` 那行起做花括号配对，返回 [起, 止] 行号（含）；找不到闸门 ⇒ null。 */
+  function gateBlockRange() {
+    for (let i = 0; i < lines.length; i += 1) {
+      if (isComment(lines[i])) continue;
+      if (!/if\s*\(\s*region_log\s*\)/.test(lines[i])) continue;
+      let depth = 0;
+      let opened = false;
+      for (let j = i; j < lines.length; j += 1) {
+        for (const ch of lines[j]) {
+          if (ch === '{') {
+            depth += 1;
+            opened = true;
+          } else if (ch === '}') {
+            depth -= 1;
+            if (opened && depth === 0) return [i, j];
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  const gate = gateBlockRange();
+  assert.ok(
+    gate !== null,
+    'aot_host.cpp：找不到 `if (region_log) { … }` 这块闸门 —— 区域表必须在 `region_log` ' +
+      '（`--region-log`，缺省关）的条件内打印。`if (true)` / 无条件打印都会让缺省档回到 28 行。',
+  );
+
+  const prints = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (isComment(lines[i])) continue;
+    if (lines[i].includes('regions   :') || lines[i].includes('dumpRegions(')) prints.push(i);
+  }
+  assert.ok(
+    prints.length >= 2,
+    `aot_host.cpp：找不全区域表的两处打印（期望 \`regions   :\` 与 \`dumpRegions(\` 各一行，` +
+      `实际 ${prints.length} 处）—— 区域表被整段删了？本守卫要的是"保留读数 + 改闸门"，不是删掉读数`,
+  );
+  for (const i of prints) {
+    assert.ok(
+      i > gate[0] && i < gate[1],
+      `aot_host.cpp:${i + 1}：这条区域表打印在 \`if (region_log)\` 的块**外**（块 = ` +
+        `第 ${gate[0] + 1}–${gate[1] + 1} 行）⇒ 缺省档会打整块 28 行快照。\n` +
+        `  该行：${lines[i].trim()}`,
+    );
+  }
+  // opt-in 的开关必须真的接上（与 ② 同一张清单）：`--region-log` 有解析、有字段（**缺省关**）、有 --help 文案。
+  const main = read(AOT_MAIN);
+  const helpAndParse = (main.match(/--region-log/g) ?? []).length;
+  assert.ok(
+    helpAndParse >= 2,
+    `aot_main.cpp：\`--region-log\` 只出现 ${helpAndParse} 次（至少要 --help 文案 + 一个解析分支）`,
+  );
+  assert.ok(
+    /bool region_log\s*=\s*false\s*;/.test(read(AOT_HOST_H)),
+    'aot_host.h：`AotRunOptions` 里没有 `bool region_log = false;`（`--region-log` 的字段，且必须缺省关）',
   );
 });

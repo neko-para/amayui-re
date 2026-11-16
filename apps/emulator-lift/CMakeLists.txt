@@ -52,6 +52,9 @@ add_library(emulator-lift-runtime STATIC
     #   `input_script.cpp` = 指令式时间线（`at frame N` / `at guest_ms T` / click / key ...）。
     src/runtime/input.cpp
     src/runtime/input_script.cpp
+    #   ★ 输入**投递层**（S1：骨架 + 计数，没有配方）：`input_plan.h` 的三条铁律是形状真源。
+    #     ⛔ 它不在执行循环里被调用（守卫 `tools/test/input-plan-shape.test.mjs` ①）。
+    src/runtime/input_plan.cpp
     #   `engine_marker.cpp` = 脚本身份（marker）采样器：`TriggerKind::Marker` 的**唯一**取数口
     #   （VM 循环头 `0x4123F0` / 消息泵回来的块入口 `0x4123E5`；常量与 EA 锚在头文件）。
     src/runtime/engine_marker.cpp
@@ -541,16 +544,16 @@ enable_testing()
 
 # =====================================================================================
 # ★ AOT 形状守卫 ①：**分片清单自洽**（顶层无条件 ⇒ `pure` 档，默认 `ctest` 就跑）
-#   判据在 `tests/cmake/lift_aot_split.cmake`（Σfunctions == PIN_FUNCTIONS / 符号集合两两不交且
-#   并集 == 派发表 / 每份 ≤ 20 MB / 份数 == LIFT_AOT_SPLIT / 清单 sha256 与文件一致）。
+#   判据在**被测二进制** `emulator-lift-gen --verify-split`（Σfunctions == PIN_FUNCTIONS / 符号集合
+#   两两不交且并集 == 派发表 / 每份 ≤ 20 MB / 份数 == LIFT_AOT_SPLIT / 清单 sha256 与文件一致）。
 #   ⛔ 不断言任何"当前数字"：全部由 `out/aot/` 的产物自己算。
-#   没有生成物（缺 clang / 执行源 / closure.txt）时脚本自己 skip（不红）。
+#   没有生成物（缺 clang / 执行源 / closure.txt）时 `--verify-split` 自己 skip（exit 0，不红）。
+#   ★ 2026-11-16：原来这条跑的是 `tests/cmake/lift_aot_split.cmake`（COMMAND ${CMAKE_COMMAND}）——
+#     那不是 target、没有 `main(`，`cmake-test-entry` 的"注册名 ↔ 源文件"判据判不了它
+#     （那条守卫防的是"空壳用例 ctest 照样绿"）。现在判据落在被测二进制自己身上，一点没弱。
 # =====================================================================================
 add_test(NAME lift-aot-split-manifest
-         COMMAND ${CMAKE_COMMAND}
-                 -DLIFT_AOT_DIR=${LIFT_AOT_DIR}
-                 -DLIFT_AOT_SPLIT=${LIFT_AOT_SPLIT}
-                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/lift_aot_split.cmake)
+         COMMAND emulator-lift-gen --verify-split "${LIFT_AOT_DIR}" --split ${LIFT_AOT_SPLIT})
 
 # =====================================================================================
 # 测试（`LIFT_BUILD_TESTS`，默认 ON；`-DLIFT_BUILD_TESTS=OFF` ⇒ 只构建产品二进制）
@@ -642,6 +645,20 @@ add_executable(lift-cli-cursor-warp tests/cli_cursor_warp.cpp)
 target_link_libraries(lift-cli-cursor-warp PRIVATE emulator-lift-runtime)
 add_test(NAME cli-cursor-warp COMMAND lift-cli-cursor-warp $<TARGET_FILE:emulator-lift>)
 set_tests_properties(cli-cursor-warp PROPERTIES SKIP_RETURN_CODE 77)
+
+# ---- pure：**AOT 臂**的 `--cursor-warp` / `--sound` 参数面（CLI 级 + 真子进程）----
+# 判据见 tests/cli_aot_flags.cpp：① `--help` 里两个 flag 都在；② `--cursor-warp --present headless`
+# ⇒ exit 2 且文案是"headless 不接受窗口参数"（⛔ 不是 `未知参数`）；③ 错拼 `--cursor-wrap`
+# **仍然**是 `未知参数`（钉住 ② 不是靠"接受任何参数"）；④ `--sound` 被**接受**并打**恰好一条**
+# 说明（含理由"没有音频管线" + 跟踪单占位 `TODO(REQ)`，⛔ 不是拒绝启动）；⑤ 对照组：不给
+# `--sound` 时那条说明不出现。
+# ★ 五条全部判在 **GPU bring-up 之前**（`aot_main.cpp` 的参数校验早于 `SdlWindow::init`）
+#   ⇒ 不需要 GPU、不需要 LFS / 游戏安装 ⇒ **没有** `LIFT_SKIP_IF_NO_GPU`。
+# ★ 顶层无条件注册 ⇒ pure 档（判据 = 注册位置，见 AGENTS.md §12.4）。
+add_executable(lift-cli-aot-flags tests/cli_aot_flags.cpp)
+target_link_libraries(lift-cli-aot-flags PRIVATE emulator-lift-runtime)
+add_test(NAME cli-aot-flags COMMAND lift-cli-aot-flags $<TARGET_FILE:emulator-lift-aot>)
+set_tests_properties(cli-aot-flags PROPERTIES SKIP_RETURN_CODE 77)
 
 # ---- pure：guest `ExitProcess(n)` / `TerminateProcess(_, n)` 的**宿主进程退出码**守卫 ----
 # 判据见 tests/exit_code.cpp 文件头：① 纯映射（0 ⇒ 0；非 0 ⇒ 2 且**不透传** n）；
@@ -1054,6 +1071,15 @@ add_test(NAME input-marker COMMAND lift-input-marker)
 add_executable(lift-input-anchor tests/input_anchor.cpp)
 target_link_libraries(lift-input-anchor PRIVATE emulator-lift-runtime)
 add_test(NAME input-anchor COMMAND lift-input-anchor)
+
+# ---- pure：输入**投递层** S1 的关系断言（`REQ-01M7G7EMX3JR272D8FVM7JFY9D`）----
+# ★ 判据（红了意味着什么）：每个读点调一次 shim ⇒ `InputPlan::deliverCalls(point)` 与
+#   `ShimDef::call_count` **逐点相等**。两个数来自**两个独立来源**（计划自己的账 vs shim 框架
+#   唯一的 `++` 点 `shims.cpp`）⇒ 红了 = 有一条读点没经过投递入口 / 投递入口被挪走了。
+# ★ 顶层无条件注册 ⇒ **pure** 档（夹具 = `initBare` + 自造机器码，⛔ 不需要游戏 / LFS / 窗口）。
+add_executable(lift-input-plan-read-points tests/input_plan.cpp)
+target_link_libraries(lift-input-plan-read-points PRIVATE emulator-lift-runtime)
+add_test(NAME input-plan-read-points COMMAND lift-input-plan-read-points)
 
 # ---- 2026-11-14：`interaction-graph`（`tests/interaction_graph.cpp`）已按测试模型删除 ----
 # 判据是"交互图走通 / 等一屏 → 点一下"这类**业务正确性**（测试模型单

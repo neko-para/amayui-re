@@ -23,6 +23,9 @@
 namespace lift {
 
 class FrameSampler;
+// ★ 输入计划（`runtime/input_plan.h`）：只为了在 Present 成功那一刻推 `PlanEventKind::Frame`
+//   （= `presents` 门的刻度）。⛔ 本头不 include 它（present.h 保持轻；`present.cpp` 里 include）。
+class InputPlan;
 // ★ 系统对话框的数据（定义在 `runtime/message_box.h`；本头只前向声明 ⇒ 保持 SDL-free）。
 struct ModalSpec;
 
@@ -176,6 +179,11 @@ public:
     void setFrameSampler(FrameSampler* sampler) { sampler_ = sampler; }
     FrameSampler* frameSampler() const { return sampler_; }
 
+    // ★ `--input-plan` 的 `presents` 门：Present **成功那一次**记账（`++frame_count_` 同一刻）。
+    //   非拥有指针（计划的生命周期 = 调用方；`nullptr` = 没有计划 ⇒ 一次判空）。⛔ 不在这里
+    //   施加任何 step：计划只记账，到期 step 只能由**下一个 guest 读点**消费（`input_plan.h` 铁律 3）。
+    void setInputPlan(InputPlan* plan) { input_plan_ = plan; }
+
     // ★ 补写"最后呈现的那一帧"（交互模型 §2：三种失败都要存最后画面）。
     //   只留**描述符**（几十字节），不拷像素 ⇒ 每帧零成本；代价是像素可能已经是下一帧的绘制中状态，
     //   所以 `hash_still_matches` 如实报告"这些像素还是不是被采样到的那一帧"（不一致也照样写，供诊断）。
@@ -209,6 +217,8 @@ private:
     bool dump_failure_warned_ = false;
     // 最后帧的描述符 + 当时的 hash（`dumpLastFrame` 用；不持有像素）。
     FrameSampler* sampler_ = nullptr;
+    // ★ `presents` 门的 emit 点（`--input-plan`；nullptr = 没有计划）。只记账，不施加 step。
+    InputPlan* input_plan_ = nullptr;
     const SurfaceArena* last_arena_ = nullptr;
     GuestSurface last_surface_{};
     std::uint64_t last_surface_hash_ = 0;

@@ -21,6 +21,7 @@
 namespace lift {
 
 struct X86;
+class InputPlan;
 
 struct WinMessage {
     std::uint32_t hwnd = 0;
@@ -286,6 +287,18 @@ public:
     std::uint64_t noteInputSample(std::uint64_t guest_ms);
 
     // =====================================================================================
+    // ★ 投递层接线（S1；`REQ-01M7G7EMX3JR272D8FVM7JFY9D`）
+    //   **非拥有指针**（形状照 `presenter_.setFrameSampler(&sampler_)`）：计划的生命周期在
+    //   宿主装配处（S4），`WindowManager` 只借它。`nullptr` = 没有计划 = 缺省档 ⇒ 每个读点
+    //   只有**一次判空**（`inputPlan()` 是 inline 裸读，⛔ 不要在这里加 checkMainThread；
+    //   那会把"1 条 null 检查"变成"线程检查 + 判空"）。
+    //   ★ 只有 `setInputPlan` 是状态入口（算进主线程亲和性账），读指针不算。
+    //   ⚠ `setInputPlan` 必须在 `machine.cpp` / `aot_run.cpp` 的**循环外**调用（S4 的装配点）。
+    // =====================================================================================
+    void setInputPlan(InputPlan* plan);
+    InputPlan* inputPlan() const { return input_plan_; }
+
+    // =====================================================================================
     // 无效区（update region；M2 · P4 / B7）
     // ★ 语义（Win32 文档）：`InvalidateRect` 往无效区里**并**矩形、`ValidateRect` / `ValidateRgn`
     //   从中**减**矩形；`GetUpdateRgn` 只读（**不**改变无效区）；`UpdateWindow` 发完 WM_PAINT 后清空。
@@ -325,6 +338,8 @@ private:
     std::uint64_t input_sample_period_ms_ = 0;  // 最近 K 个采样间隔的**最大值**（周期估计）
     std::uint64_t last_input_sample_ms_ = 0;
     bool have_input_sample_ = false;
+    // ★ 投递层（S1）：非拥有指针；nullptr = 没有计划（缺省档）。
+    InputPlan* input_plan_ = nullptr;
     // 上一次采样间隔的小环（K = 8）：同一个"输入迭代"里往往有**多次**读点
     // （GetAsyncKeyState + GetCursorPos…），它们之间的间隔只有 0~1 ms；取**最大值**才代表
     // "迭代周期"，取最近一次会被这种同迭代内的小间隔污染成 1 ms（⇒ 安全下限失效）。

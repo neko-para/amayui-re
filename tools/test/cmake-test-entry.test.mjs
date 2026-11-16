@@ -90,14 +90,30 @@ function tokenizeCmakeArgs(body) {
   return tokens;
 }
 
-/** `add_executable(<target> <src…>)` → Map(target → [源文件相对 app 根的路径…])。 */
-function parseExecutables(cmakeText) {
-  const executables = new Map();
+/**
+ * `add_executable(<target> <src…>)` → **声明列表** `[{target, sources}]`（一条命令一条）。
+ * ★ 为什么不能直接 `Map(target → sources)`：同一个 target 可以在 `if(...)` / `else()` 两个互斥分支里
+ *   各声明一次（`lift-x87-diff` / `lift-ops-diff` / `lift-s7-structured` 就是这样：AOT 开时多链一个
+ *   `aot_dispatch.cpp`）。Map 会按 target 去重 ⇒ 声明数少了 3 条，于是"解析器不静默漏条"的完整性
+ *   断言会误报。声明列表保留每一条 ⇒ 完整性判据照旧（解析到的声明数 == 文本里的 add_executable 数）。
+ */
+function parseExecutableDeclarations(cmakeText) {
+  const declarations = [];
   for (const m of cmakeText.matchAll(/\badd_executable\s*\(\s*([A-Za-z0-9_.-]+)\s+([^)]*)\)/g)) {
-    executables.set(
-      m[1],
-      tokenizeCmakeArgs(m[2]).filter((t) => !t.startsWith('$<') && !t.startsWith('${')),
-    );
+    declarations.push({
+      target: m[1],
+      sources: tokenizeCmakeArgs(m[2]).filter((t) => !t.startsWith('$<') && !t.startsWith('${')),
+    });
+  }
+  return declarations;
+}
+
+/** 声明列表 → Map(target → 源文件并集)。互斥分支的两条声明合并成并集（判 flag/用例名时是超集，不会假绿）。 */
+function executableSources(declarations) {
+  const executables = new Map();
+  for (const { target, sources } of declarations) {
+    const prev = executables.get(target) ?? [];
+    executables.set(target, [...prev, ...sources.filter((s) => !prev.includes(s))]);
   }
   return executables;
 }
@@ -273,14 +289,24 @@ const NAME_DIVERGENCES = new Map([
 ]);
 
 const cmakeText = stripCmakeComments(fs.readFileSync(CMAKE_ABS, 'utf8'));
-const executables = parseExecutables(cmakeText);
+const executableDeclarations = parseExecutableDeclarations(cmakeText);
+const executables = executableSources(executableDeclarations);
 const tests = parseTests(cmakeText, executables);
 
 test('CMakeLists 的每条 add_test / add_executable 都被解析到（解析器不静默漏条）', () => {
   const rawAddTest = [...cmakeText.matchAll(/\badd_test\s*\(/g)].length;
   const rawAddExecutable = [...cmakeText.matchAll(/\badd_executable\s*\(/g)].length;
   assert.equal(tests.length, rawAddTest, `解析到 ${tests.length} 条 add_test，但文本里有 ${rawAddTest} 条`);
-  assert.equal(executables.size, rawAddExecutable, `解析到 ${executables.size} 个 add_executable，但文本里有 ${rawAddExecutable} 个`);
+  assert.equal(
+    executableDeclarations.length,
+    rawAddExecutable,
+    `解析到 ${executableDeclarations.length} 条 add_executable 声明，但文本里有 ${rawAddExecutable} 条`,
+  );
+  // 同一 target 在互斥分支里的重复声明是合法的；但每个声明都必须被解析出 target + 至少一个源文件。
+  for (const d of executableDeclarations) {
+    assert.ok(d.sources.length > 0, `add_executable \`${d.target}\` 没有解析出源文件（解析器漏了这条声明）`);
+  }
+  // 每个 add_test 的 target 都必须能映射到源文件（否则守卫判不了）。
   for (const t of tests) {
     assert.ok(
       t.sources.length > 0,

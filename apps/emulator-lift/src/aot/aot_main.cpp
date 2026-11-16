@@ -21,7 +21,10 @@
 
 #include "aot/aot_dispatch.h"
 #include "aot/aot_host.h"
+#include "runtime/host_cursor.h"      // `--cursor-warp` 的平台闸门（与解释器臂同一条判据）
 #include "runtime/host_encoding.h"
+#include "runtime/input_plan.h"       // `--input-plan`（S4：AOT 臂唯一的输入控制面）
+#include "runtime/present_flags.h"    // `--cursor-warp` / `--sound` 的**唯一**一份判据 + 文案
 #include "runtime/present_sdl.h"
 #include "runtime/vfs.h"  // openHostFileUtf8（Windows 的 UTF-8 路径）
 
@@ -57,6 +60,13 @@ void usage() {
         "  --skip-logo         一次性 latch：T_Command + 0x5EB5C 写 0（口径同 emulator-lift；\n"
         "                      钩子点 AOT 用 0x004BAA33；⛔ 不跳过 boot、不改 eip/寄存器）\n"
         "  --audio off|virtual|sdl  音频后端（本臂**只实现 off**：没有音频设备 / 喂料线程）\n"
+        "  --input-plan <file> 组装输入计划（缺省不给 = 没有任何输入注入，行为与本参数无关）：\n"
+        "                      文件格式 = `--interaction-graph` 的线性写法子集，门只有\n"
+        "                      `await always` / `await presents <n>`（guest 累计 Present 帧数 ≥ n），\n"
+        "                      动作只有 `click <x> <y> [left|right]` / `key <VK>`；\n"
+        "                      推进只发生在 **guest 读点**（flush-before-read），⛔ 没有帧精度保证；\n"
+        "                      跑完打一行 `input-plan: …` 摘要（一次性）。解析失败 ⇒ exit 2 + 行号\n"
+        "%s"
         "  --dump-frame <path> 每次 Present 导出一份 guest 后缓冲 BMP（{frame} = 4 位帧号）\n"
         "  --profile           采样式内部 profile（**缺省关**）：每帧时间戳 + 派发 / lift_one / shim\n"
         "                      归因 + 机器频率校准；采样率 = dispatch 1/4096、lift_one 1/1024、\n"
@@ -66,6 +76,10 @@ void usage() {
         "  --frame-log         每次 Present 打一行 `[frame] n=<帧号> hash=<guest 后缓冲哈希>`（**缺省关**）：\n"
         "                      逐帧 hash 是画面序列读数（在动 / 卡住同一帧），不是判据；末帧 hash 看摘要\n"
         "                      `present :` 行。`--profile` 档也会打这一条（已有 profile 存档的可比面）\n"
+        "  --region-log        启动 readout 末尾打 guest 区域表（`regions   :` 一行 + 每段一行，共 28 行；\n"
+        "                      **缺省关**）：那是**静态布局快照**（谁占了哪一段），一次 run 里不变，\n"
+        "                      属噪音 ⇒ 缺省档不打。⛔ 只影响这一块，别的 readout（exe / PE / 导入 /\n"
+        "                      地址与服务面 / pin / 缺口 / 停机原因）一格都不收\n"
         "\n"
         "★ 呈现档位（口径与 emulator-lift 相同；缺省 headless）：\n"
         "  --present headless|window|auto\n"
@@ -77,10 +91,12 @@ void usage() {
         "  --present-hidden          强制隐藏窗口（仍必须显式 --present window/auto）\n"
         "  --present-screenshot <path>      每次可见窗口 Present 后存一张窗口 BMP（{frame} 可用）\n"
         "  --present-screenshot-frame N     只回读第 N 帧（1 起；0 = 每帧都写）\n"
+        "%s"
         "  --help              这份说明\n"
         "\n"
         "★ 执行模型：入口 EA → 构建期生成的派发表（`lift_cc_<EA>`）；shim 桩 EA → `lift_shim`；\n"
-        "  两者都不是 ⇒ **响亮停机并打印 EA**（⛔ 不设\"返回哨兵 = 结束\"的约定）。\n");
+        "  两者都不是 ⇒ **响亮停机并打印 EA**（⛔ 不设\"返回哨兵 = 结束\"的约定）。\n",
+        lift::kAotSoundHelp, lift::kCursorWarpHelp);
 }
 
 // ★ 执行源定位**照抄** `src/main.cpp` 的四处顺序（--exe → env → 仓库内入库件 → 拒绝启动）。
@@ -137,7 +153,13 @@ int main(int argc, char** argv) {
     std::string game_dir;
     std::string appdata_dir;
     std::string guest_root;
+    // ★ `--input-plan <file>`（S4）：AOT 臂的**唯一**输入控制面（`runtime/input_plan.h`）。
+    //   缺省空 = 不给 ⇒ 输出与行为逐字节不变（含那 57 行 stdout）。
+    std::string input_plan_path;
     std::string audio_mode = "off";  // ★ 本臂缺省 off（没有音频设备）
+    // ★ `--sound`（缺省关，与 `src/main.cpp:269` 同值）：本臂**接受**它，但只打一条一次性说明
+    //   —— 这条臂没有音频管线（理由 / 后果 / 跟踪单只有一处：`runtime/present_flags.h`）。
+    bool sound = false;
     lift::aot::AotRunOptions run_opts;
     // ---- 呈现档位（取值 / 缺省 / 使用门槛**照 `src/main.cpp:226-227`、`:357-394`、`:637-663`）----
     std::string present_mode = "headless";  // 与解释器同缺省
@@ -146,6 +168,10 @@ int main(int argc, char** argv) {
     std::uint32_t present_vsync = 0;
     bool present_vsync_set = false;
     bool present_hidden = false;
+    // ★ 宿主真光标（`--cursor-warp`，缺省关；与 `src/main.cpp:233` 同一个值）：只加宿主副作用，
+    //   ⛔ 不改 guest 可见状态。只在 `--present window/auto` 且窗口可见时才真的挪（见
+    //   `runtime/present_flags.h` 的 `cursorWarpState`）。
+    bool cursor_warp = false;
     std::string present_screenshot;
     bool present_screenshot_set = false;
     std::uint64_t present_screenshot_frame = 0;
@@ -169,6 +195,8 @@ int main(int argc, char** argv) {
             if (!needValue("--appdata", &appdata_dir)) return 2;
         } else if (a == "--guest-root") {
             if (!needValue("--guest-root", &guest_root)) return 2;
+        } else if (a == "--input-plan") {
+            if (!needValue("--input-plan", &input_plan_path)) return 2;
         } else if (a == "--max-frames") {
             std::string v;
             if (!needValue("--max-frames", &v)) return 2;
@@ -208,6 +236,9 @@ int main(int argc, char** argv) {
             run_opts.time_limit_sec = d;
         } else if (a == "--audio") {
             if (!needValue("--audio", &audio_mode)) return 2;
+        } else if (a == "--sound") {
+            // ★ 与 `src/main.cpp:519-520` 同一个 bool；本臂只做"接受 + 一条一次性说明"（见下）。
+            sound = true;
         } else if (a == "--skip-logo") {
             // ★ 与 `src/main.cpp:301-302` 同一条：只置一个 bool（一次性 latch，语义在 aot_run.cpp）。
             run_opts.skip_logo = true;
@@ -220,6 +251,9 @@ int main(int argc, char** argv) {
         } else if (a == "--frame-log") {
             // ★ 逐帧 `[frame] n=… hash=…`（**缺省关**；理由见 `AotRunOptions::frame_log`）。
             run_opts.frame_log = true;
+        } else if (a == "--region-log") {
+            // ★ 启动 readout 末尾的 guest 区域表 28 行（**缺省关**；理由见 `AotRunOptions::region_log`）。
+            run_opts.region_log = true;
         } else if (a == "--present") {
             if (!needValue("--present", &present_mode)) return 2;
         } else if (a == "--present-driver") {
@@ -238,6 +272,10 @@ int main(int argc, char** argv) {
             present_vsync_set = true;
         } else if (a == "--present-hidden") {
             present_hidden = true;
+        } else if (a == "--cursor-warp") {
+            // ★ 与 `src/main.cpp:398-400` 同一条：只置一个 bool。窗口参数（headless 下 exit 2
+            //   —— 没有可见窗口可映射）。
+            cursor_warp = true;
         } else if (a == "--present-screenshot") {
             if (!needValue("--present-screenshot", &present_screenshot)) return 2;
             present_screenshot_set = true;
@@ -269,22 +307,46 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    // ---- `--sound`：**接受** + 一条一次性说明（⛔ 不 exit 2、⛔ 不静默）----
+    //   ★ 裁决与硬事实只在 `runtime/present_flags.h` 的 `kAotSoundNotice`（含理由 / 后果 / 跟踪单）。
+    //   ★ 打印点**只有这里**（parse 之后、GPU bring-up 之前）⇒ 一次，且命令行一给就能判
+    //     （守卫 `cli-aot-flags` 因此不需要 GPU）。
+    //   ★ 放在 `--audio` 拒绝**之后**：那句"其余行为不受影响"不能被一次 `--audio sdl` 的 exit 2
+    //     打脸（⛔ 本臂不因为 `--sound` 拒绝启动，但别的硬拒绝照旧）。
+    if (sound) std::fputs(lift::kAotSoundNotice, stderr);
+
+    // ---- `--input-plan`：**解析在 GPU bring-up 之前**（CLI 判据不需要 GPU）----
+    //   ★ 文件不存在 / 语法错 / 门种类不支持 ⇒ **exit 2 + 点名行号与原因**（⛔ 不许静默忽略）。
+    lift::InputPlan input_plan;
+    if (!input_plan_path.empty()) {
+        std::string plan_err;
+        if (!input_plan.loadFile(input_plan_path, &plan_err)) {
+            std::fprintf(stderr, "emulator-lift-aot: --input-plan 载入失败：%s\n", plan_err.c_str());
+            return 2;
+        }
+    }
+
     // ---- 呈现后端参数校验（口径**逐条**照 `src/main.cpp:637-676`；⛔ 不发明第三种语义）----
+    // ★ `--cursor-warp` 是**平台**能力：Linux / 其它平台没有实现 ⇒ 启动即拒绝（exit 2）。
+    //   判据与文案与解释器臂**同一处**（`runtime/present_flags.h`），⛔ 不在这里另写一句。
+    if (cursor_warp && !lift::hostCursorPlatformSupported()) {
+        std::fprintf(stderr, lift::kCursorWarpUnsupportedFormat, "emulator-lift-aot",
+                     lift::hostCursorPlatformName());
+        return 2;
+    }
     if (present_mode != "headless" && present_mode != "window" && present_mode != "auto") {
         std::fprintf(stderr, "emulator-lift-aot: --present 只能是 headless / window / auto（收到 %s）\n",
                      present_mode.c_str());
         return 2;
     }
-    const bool present_window_flag =
-        present_driver_set || present_vsync_set || present_hidden || present_screenshot_set;
+    const bool present_window_flag = present_driver_set || present_vsync_set || present_hidden ||
+                                     present_screenshot_set || cursor_warp;
     if (present_screenshot_frame != 0 && present_screenshot.empty()) {
         std::fprintf(stderr, "--present-screenshot-frame 需要同时给 --present-screenshot <path>\n");
         return 2;
     }
     if (present_mode == "headless" && present_window_flag) {
-        std::fprintf(stderr,
-                     "--present headless 不接受窗口参数（--present-driver / --present-vsync / "
-                     "--present-hidden / --present-screenshot）\n");
+        std::fprintf(stderr, lift::kHeadlessRejectsWindowFlagsFormat, lift::kWindowFlagsAot);
         return 2;
     }
     if (present_mode != "headless" && present_driver.find("software") != std::string::npos) {
@@ -311,6 +373,9 @@ int main(int argc, char** argv) {
         wopt.hidden = present_mode == "headless" || present_hidden;
         wopt.screenshot_path = present_screenshot;
         wopt.screenshot_frame = present_screenshot_frame;
+        // ★ 与解释器臂同一个字段（`main.cpp:742`）：缺这一行 ⇒ sink 恒 `cursor_warp=false`
+        //   ⇒ `hostCursorWarpEnabled()` 恒假 ⇒ shim 只改虚拟光标（用户看到的"不会移动鼠标"）。
+        wopt.cursor_warp = cursor_warp;
         wopt.raster_gpu = true;
         auto sdl = std::make_unique<lift::SdlWindow>();
         std::string werr;
@@ -326,6 +391,13 @@ int main(int argc, char** argv) {
             wopt.hidden = true;
             werr.clear();
             ok = sdl->init(wopt, &werr);
+        }
+        // ★ "我开了但没生效"必须响亮一次（与解释器臂同一句话、同一判据；见
+        //   `runtime/present_flags.h`）：`--present-hidden` 与 auto 的隐藏回退走同一条 stderr warn。
+        //   ⛔ 不改成 exit 2：隐藏窗口是有意的无窗口复现档（`main.cpp:761-764` 的同一裁决）。
+        if (ok && lift::cursorWarpState(cursor_warp, lift::hostCursorPlatformSupported(), wopt.hidden) ==
+                      lift::CursorWarpState::OnButHidden) {
+            std::fputs(lift::kCursorWarpHiddenWarn, stderr);
         }
         if (ok && !sdl->rasterActive()) {
             werr = "GPU device 建出来了，但光栅化后端未激活（`rasterActive()==false`）";
@@ -405,6 +477,14 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // ---- ③'' `--input-plan` 装配（`WindowManager` = 唯一状态源；`presenter` = presents 门）----
+    //   ★ 两处都只是**非拥有指针**。计划不给 ⇒ 两处都不装配 ⇒ 读点只付一条判空、输出逐字节不变。
+    //   ★ ⛔ 不装在 `aot_run.cpp` / `machine.cpp` 里（守卫 ① 钉住那 5 个词 = 0 命中）。
+    if (input_plan.armed()) {
+        host.cpu().windows->setInputPlan(&input_plan);
+        host.presenter().setInputPlan(&input_plan);
+    }
+
     // ---- ③' AGERC.DLL：真实 guest 模块（口径同 `src/main.cpp`：`--game-dir` 下那份，走 VFS 解析）----
     //   ★ 缺它不是"可选项"：guest 启动早期就 `LoadLibraryA("AGERC.DLL")`，没有镜像 ⇒ 返回 0 + 126
     //     ⇒ guest 走错误对话框路径（实测停在 `poly:005C3627 = j_MessageBoxA_15`）。
@@ -437,7 +517,7 @@ int main(int argc, char** argv) {
                      "   （构建仍然成功，但**不能执行**）。⛔ 不静默跑成空壳：只打 bring-up 读数后 exit 1。\n"
                      "   修：装上 clang（`clang --version`）并确认执行源在场后重新 configure / build。\n\n");
         std::printf("emulator-lift-aot: Shape A —— bring-up 读数（**没有生成物，未执行任何 guest 指令**）\n");
-        host.printReadout(stdout);
+        host.printReadout(stdout, run_opts.region_log);
         std::fflush(stdout);
         return 1;
     }
@@ -492,13 +572,37 @@ int main(int argc, char** argv) {
     std::printf("raster    : %s%s\n", host.gpuRaster() != nullptr ? host.gpuRaster()->rasterName() : "(nullptr)",
                 present_mode == "headless" ? "（headless 离屏；**隐藏**窗口，不出现可见窗口）" : "");
     std::printf("present   : %s\n", sdl_display->describe().c_str());
-    host.printReadout(stdout);
+    // ★ `--cursor-warp` 的**有效状态**一行（缺省关）：`on` / `off` / `on-but-hidden` / `unsupported`。
+    //   与 `describe()` 里的 `cursor-warp=on|off`（sink 自己的开关）分工不同 —— 这一行回答
+    //   "这轮真的会不会挪宿主光标"（含"开关开着但窗口是隐藏的"这种静默失效）。
+    //   ★ 判据与四个状态名只有一份（`runtime/present_flags.h`），与解释器臂逐字相同。
+    {
+        const lift::CursorWarpState st =
+            lift::cursorWarpState(cursor_warp, lift::hostCursorPlatformSupported(), sdl_display->windowHidden());
+        std::printf("cursor-warp: %s\n", lift::cursorWarpStateName(st));
+    }
+    host.printReadout(stdout, run_opts.region_log);
     std::fflush(stdout);
 
     // ---- ⑥ 执行 ----
     const lift::aot::AotRunResult r = host.run(run_opts);
     // ★ 与解释器 `main.cpp:1269` 同一条收口：先摘事件泵，再打摘要（⛔ 不让泵在收口后碰窗口）。
     if (present_window_active) host.cpu().windows->clearHostEventPump();
+    // ---- ⑥' `--input-plan` 收口：**跑结束前必须抬**（否则下一次 run 会看到"键一直按着"）----
+    //   `releaseAll()` 只抬起待办的键 / 按钮，不是 step、不推进入口；返回个数只用于摘要。
+    if (input_plan.armed()) {
+        input_plan.releaseAll(*host.cpu().windows);
+        printf("input-plan: %s\n", input_plan.summary().c_str());
+        if (input_plan.stepsApplied() < input_plan.steps()) {
+            // 响亮但不改退出码（⛔ 本单不新增停止原因）：还没到期的 step 是**配方问题**，不是成功。
+            std::fprintf(stderr,
+                         "emulator-lift-aot: ⚠ input-plan 还有 %llu 步没到期（共 %llu 步；"
+                         "看 `presents` 门的目标帧数是否超过本轮 `--max-frames`）\n",
+                         (unsigned long long)(input_plan.steps() - input_plan.stepsApplied()),
+                         (unsigned long long)input_plan.steps());
+        }
+        std::fflush(stdout);
+    }
     host.printRunSummary(r, stdout);
     if (r.reason == lift::aot::AotStop::DecodeError) {
         // ★ "EA 不在表里 / 不是 shim" 这一类**必须**在 stderr 上也响亮一次（stdout 的摘要可能被管道吞）。

@@ -42,6 +42,7 @@
 #include "runtime/audio.h"
 #include "runtime/clock.h"
 #include "runtime/host_window.h"
+#include "runtime/input.h"
 #include "runtime/host_services.h"
 #include "runtime/present.h"
 #include "runtime/x86.h"
@@ -106,6 +107,9 @@ void shimGetCursorPos(X86& cpu, ShimCall& call) {
         return;
     }
     int x = 0, y = 0;
+    // ★ 投递层（S1）：电平读点 —— flush 在 `getCursorPos` **之前**、在参数合法性检查**之后**
+    //   （lpPoint 非法 ⇒ 保持 Win32 失败语义，不 flush）。
+    input::deliverLevel(*wm, InputPoint::CursorPos);
     wm->getCursorPos(&x, &y);
     // ★ 采样计数（见 `host_window.h` 的 `inputSampleCount`）：`GetCursorPos` 是**引擎每迭代的
     //   位置采样**（实测这条实现线 20 Hz）⇒ 它就是"guest 的输入迭代跑过一次"的心跳。
@@ -127,6 +131,8 @@ void shimSetCursorPos(X86& cpu, ShimCall& call) {
     WindowManager* wm = requireWindows(cpu, "SetCursorPos");
     const int x = call.i32(0);
     const int y = call.i32(1);
+    // ★ 投递层（S1）：**写点**（所有权：计划自己的位置不被这里顶掉；S2 才填）。
+    input::deliverWrite(*wm, InputPoint::SetCursorPos);
     wm->setCursorPos(x, y);  // ① guest 可见状态（屏幕坐标）—— 开关开不开都先落地
     // ② 宿主副作用。判据照 `user32_menu.cpp` 的 MessageBoxA：有宿主服务 + 有 sink + 不在音频 feeder 线程
     //    （WindowManager 是主线程独占宿主对象；feeder 上碰它本身就在既有违规账里）。
@@ -349,6 +355,8 @@ void shimMsgWaitForMultipleObjects(X86& cpu, ShimCall& call) {
         shimAbort("user32", "MsgWaitForMultipleObjects",
                   "pHandles=0x%08X 读不出 %u 个句柄（调用点 EA=0x%08X）", handles, n_count, call.ret_ea);
     }
+    // ★ 投递层（S1）：队列读点 —— flush 在 `pumpTimers` **之前**（掩码匹配能看到 flush 出来的消息）。
+    input::deliverQueue(*wm, InputPoint::MsgWait);
     wm->pumpTimers(cpu);
     // 只看队首是不对的：可能有"不匹配掩码"的消息挡在前面 —— 逐条扫（不取走）。
     // ★ 本线的队列是单个 FIFO；Win32 的"按掩码分类的多个队列"是建模简化，日志里明说。

@@ -20,6 +20,7 @@
 #include <cstdint>
 
 #include "runtime/host_window.h"
+#include "runtime/input_plan.h"
 
 namespace lift {
 namespace input {
@@ -54,6 +55,43 @@ bool mouseWheel(WindowManager& wm, int client_x, int client_y, int delta_120, In
                 std::uint32_t time_ms);
 bool key(WindowManager& wm, std::uint32_t vk, bool down, std::uint32_t scancode, InputSource src,
          std::uint32_t time_ms);
+
+// =====================================================================================
+// 投递层入口（S1：**四个**，每个读点第一句调其中一个）
+//
+// ★ 为什么是四个而不是一个：投递语义按真机分四类（复审确认原设计"按真机分开"是对的）——
+//   · **电平**（`GetAsyncKeyState` / `GetCursorPos` / `TranslateMessage` 的修饰键）：读时按当前
+//     状态求值 ⇒ `deliverLevel`
+//   · **队列**（`PeekMessageA` / `GetMessageA` / `MsgWaitForMultipleObjects` / `WaitMessage` /
+//     `GetQueueStatus` / `DispatchMessageA` 的消费端）：push 进 `WindowManager` 的 FIFO ⇒
+//     `deliverQueue`
+//   · **写点**（`SetCursorPos`）：所有权 / 不被计划顶掉 ⇒ `deliverWrite`
+//   · **事件源**（`ReadFile`）：⛔ 它不是输入族，只是"文件读完"的事件源 ⇒ `deliverFileRead`
+//   ⇒ 四类都要在**同一次读点内、读之前**落地（flush-before-read 的**位置**在 S1 就留好；
+//      S2 才填内容）。
+//
+// ★ 成本（S1 的硬要求）：**没有计划时 = 一条 null 检查**。这四个函数都是 `inline`：
+//   `wm.inputPlan()` 是 `host_window.h` 里的 inline 裸指针读，非空才 call `atPoint()`。
+//   ⛔ 不要在快路径上加 `armed()` / 取时钟 / 碰容器 / 加第二个 `if`。
+//
+// ★ 唯一性能口径：判据是**调用点不在执行循环里**（不是"每次多少钱"）。
+// =====================================================================================
+inline void deliverLevel(WindowManager& wm, InputPoint point) {
+    InputPlan* plan = wm.inputPlan();
+    if (plan != nullptr) plan->atPoint(wm, point);
+}
+inline void deliverQueue(WindowManager& wm, InputPoint point) {
+    InputPlan* plan = wm.inputPlan();
+    if (plan != nullptr) plan->atPoint(wm, point);
+}
+inline void deliverWrite(WindowManager& wm, InputPoint point) {
+    InputPlan* plan = wm.inputPlan();
+    if (plan != nullptr) plan->atPoint(wm, point);
+}
+inline void deliverFileRead(WindowManager& wm, InputPoint point) {
+    InputPlan* plan = wm.inputPlan();
+    if (plan != nullptr) plan->atPoint(wm, point);
+}
 
 }  // namespace input
 }  // namespace lift

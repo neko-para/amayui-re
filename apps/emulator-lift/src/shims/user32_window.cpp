@@ -13,6 +13,7 @@
 #include "runtime/clock.h"  // GetAsyncKeyState 的采样计数要 guest 时钟（noteInputSample）
 #include "runtime/guest_call.h"
 #include "runtime/host_window.h"
+#include "runtime/input.h"
 #include "runtime/region.h"
 #include "runtime/x86.h"
 #include "shims/register.h"
@@ -490,6 +491,8 @@ void shimGetAsyncKeyState(X86& cpu, ShimCall& call) {
     //   guest 从这一刻起真的"看见"了按下状态。⛔ 不改返回值。
     //   ⚠ 口径：`PeekMessageA` **不**计数（它在这条实现线里 219,164 次 / 400M 条 ⇒ 算进去等于没等；
     //   而且消息在队列里不会丢）。理由写在 `host_window.h`。
+    // ★ 投递层（S1）：**读之前**先 flush（S2 的到期 step 会在这里落地；S1 只有一次判空）。
+    input::deliverLevel(*cpu.windows, InputPoint::KeyLevel);
     cpu.windows->noteInputSample(cpu.clock ? cpu.clock->nowMs() : 0u);
     const std::uint32_t vk = call.u32(0) & 0xFFu;
     call.result = cpu.windows->keyDown(vk) ? 0x8000u : 0u;
@@ -565,6 +568,8 @@ void shimPeekMessageA(X86& cpu, ShimCall& call) {
     const std::uint32_t min_filter = call.u32(2);
     const std::uint32_t max_filter = call.u32(3);
     const bool do_remove = (call.u32(4) & kPmRemove) != 0;
+    // ★ 投递层（S1）：flush 在 `pumpTimers` **之前** ⇒ flush 出来的 `WM_*` 会被**本次** peek 看到。
+    input::deliverQueue(*cpu.windows, InputPoint::PeekMsg);
     cpu.windows->pumpTimers(cpu);
     // 过滤条件（与文档一致）：hWnd != 0 ⇒ 只匹配该窗口（0 = 调用线程任意窗口）；
     // wMsgFilterMin / wMsgFilterMax != 0 ⇒ 只匹配 [min, max] 里的 message（0 = 该侧不限）。
@@ -585,6 +590,8 @@ void shimPeekMessageA(X86& cpu, ShimCall& call) {
 }
 
 void shimGetMessageA(X86& cpu, ShimCall& call) {
+    // ★ 投递层（S1）：空队列时由计划供给消息是 S5；S1 只有一次判空（行为逐字节不变）。
+    input::deliverQueue(*cpu.windows, InputPoint::GetMsg);
     WinMessage m;
     if (!cpu.windows->get(cpu, &m)) {
         shimAbort("user32", "GetMessageA",
@@ -662,6 +669,8 @@ void shimTranslateMessage(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
+    // ★ 投递层（S1）：派生电平（shift / caps）读之前先 flush。
+    input::deliverLevel(*cpu.windows, InputPoint::Translate);
     WinMessage m;
     if (!readMsg(cpu, call.u32(0), &m)) {
         // lpMsg 不可读 ⇒ 没有可翻译的消息（真机是未定义行为；本线按"没有"处理，⛔ 不假装翻译成功）
@@ -710,6 +719,9 @@ void shimDispatchMessageA(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
+    // ★ 投递层（S1）：队列消费端 —— flush 在 `readMsg` 之后、派发之前，保证"投递的消息"与
+    //   "派发"的顺序一致（S1 只有一次判空）。
+    input::deliverQueue(*cpu.windows, InputPoint::Dispatch);
     HostWindow* w = cpu.windows->find(m.hwnd);
     // ★ 诊断（info 档；⛔ 默认 warn 不打印）：这条是"guest 真的把消息交给了 WndProc"的唯一证据。
     //   与 `[present] post WM_CLOSE …` 配对判读：只投递、不派发 ⇒ guest 的确认框没机会建
@@ -776,6 +788,8 @@ void shimPostQuitMessage(X86& cpu, ShimCall& call) {
 }
 
 void shimWaitMessage(X86& cpu, ShimCall& call) {
+    // ★ 投递层（S1）：队列读点，flush 在 `pumpTimers` 之前。
+    input::deliverQueue(*cpu.windows, InputPoint::WaitMessage);
     cpu.windows->pumpTimers(cpu);
     if (cpu.clock) cpu.clock->advance100ns(10000ull);  // 1 ms 虚拟时间；P0 不阻塞宿主
     call.result = 1;
@@ -788,8 +802,15 @@ void shimIsDialogMessageA(X86& cpu, ShimCall& call) {
 }
 
 void shimGetQueueStatus(X86& cpu, ShimCall& call) {
-    (void)cpu;
     (void)call.u32(0);
+    // ★ 投递层（S1）：这是**队列读点**（见 `runtime/input.h` 的四类）。今天返回值恒 0（P0
+    //   保守"没有队列状态"）；下面那次 `queueSize()` 读**不改变返回值**，只让"本函数读消息队列"
+    //   在源码上成立（守卫 ② 按谓词判，不按名单 —— 否则它会被判成"没接线的队列读者"）。
+    if (cpu.windows != nullptr) {
+        input::deliverQueue(*cpu.windows, InputPoint::QueueStatus);
+        const std::size_t pending = cpu.windows->queueSize();
+        (void)pending;
+    }
     call.result = 0;  // P0：保守返回“没有队列状态”；引擎只在少数路径读
 }
 

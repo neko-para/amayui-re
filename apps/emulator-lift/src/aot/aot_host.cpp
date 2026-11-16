@@ -326,7 +326,7 @@ const GpuRaster* AotHost::gpuRaster() const {
     return s != nullptr ? const_cast<PresentSink*>(s)->gpuRaster() : nullptr;
 }
 
-void AotHost::printReadout(std::FILE* out) const {
+void AotHost::printReadout(std::FILE* out, bool region_log) const {
     if (out == nullptr) return;
 
     // ---- 镜像身份（一行）+ 节表 ----
@@ -424,9 +424,14 @@ void AotHost::printReadout(std::FILE* out) const {
 
 
     // ---- guest 区域表（"谁占了哪一段"的机械读数；复用既有的 dumpRegions）----
-    std::fprintf(out, "regions   : %zu 段（committed=%llu 字节）\n", mem_.regions().size(),
-                 static_cast<unsigned long long>(mem_.committedBytes()));
-    dumpRegions(mem_.regions(), out);}
+    //   ★ **opt-in**（`--region-log`，缺省关；见 `AotRunOptions::region_log`）：这 28 行是静态布局快照，
+    //     一次 run 里不变 ⇒ 属噪音。⛔ 只闸这一块：上面任何一条 readout 都不受影响。
+    if (region_log) {
+        std::fprintf(out, "regions   : %zu 段（committed=%llu 字节）\n", mem_.regions().size(),
+                     static_cast<unsigned long long>(mem_.committedBytes()));
+        dumpRegions(mem_.regions(), out);
+    }
+}
 
 void AotHost::printRunSummary(const AotRunResult& r, std::FILE* out) const {
     if (out == nullptr) return;

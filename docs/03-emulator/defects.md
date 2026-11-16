@@ -538,6 +538,110 @@
   离线核对（不跑游戏）：`Select-String corpus\disasm\files\AGE.EXE__dumped.sectfix.EXE.lst -Pattern "jumptable 41B672"`
   应列出 case 0–14（含 `loc_41B92D`），再逐个查 `out\aot\lift_aot.ll` 里有没有对应 `bb_*`。
   全量取证脚本：`.tmp/aot/jpt/probe.mjs`（只读）；全量结果 `.tmp/aot/jpt/scan-out.txt`；设计单 `.tmp/aot/jpt/plan.md`。
-- **代表守卫**：待补 —— 设计给的形状是**新 CTest `--jmptab-audit`**：断言"语料里每张 `jpt_*` 表的
-  每个 case 目标都可派发 + 表区间内没有块首"。**今天它是红的**（1 张表有缺口就会红），P2（表项在建块前立 leader）之后应转绿。
-  变异两条：M1 把 bounds 谓词反转、M2 去掉 exec-range 过滤 —— 都必须能让它红。
+- **代表守卫**：CTest **`lift-jmptab-dispatch`**（`add_test` 在 `CMakeLists.txt` **最外层无条件** ⇒ `pure` 档；
+  跑 `emulator-lift-gen --jmptab-audit --exe <sectfix> --roots aot/closure.txt`，退出码 = 判据）。
+  它断言四条**性质**（⛔ 不断言当前数字）：P-1 表区间落在同一个可执行节内；P-2 表区间内**不存在任何已发射块首**；
+  P-3 每个"在可执行节内 ∧ 能解码"的表项都**可派发**；P-4 表项无自指。
+- **落地结果（2026-11-16，`9998381`）**：
+  - 守卫**先红过**：只上 P0（审计模式、不动闭包）时 `exit 1` —— P-2 红 15 张表 / 34 个块首
+    （来源分类 `call-ret` 8 · `jcc` 16 · `none` 10）、P-3 红 5 张表 / 30 项；P1+P2 落地后全过。
+  - `bb_41B92D` 出现（块 + 派发 case + `lift_table.inc` 行）；覆盖它的那条垃圾块消失；
+    `.ll` 里表首 `bb_41B974` 从 **2 处 → 0 处**（表字节不再被当指令解码）。
+  - **62 张 `.lst` 表的可派发目标 577 → 605（缺 28 → 0）**；缺块 25→0、缺 entry 3→0。
+  - **关档零回归的硬证明**：`--no-jmptab-exclude --no-close-jmptab-items` 下 `.ll` 的 sha256 与改前
+    **逐字节相同**（`C9FF6054…E14FB49`），`roots/entries/functions/blocks/insns` 逐项相等 ⇒ 新代码在关档下完全惰性。
+  - 默认档读数：`blocks` 71,929→71,995 · `insns` 349,663→349,396 · `entries` 33,496→33,509 ·
+    `functions` 10,211→10,254 · D21 `added` 23→5 · D26 软根 603→75。
+- **★ 变异实测的教训（比这条 bug 本身值钱）**：设计单给的两条变异（M1 把 bounds 谓词 `ja`→`jbe`、
+  M2 去掉"值必须在可执行节内"）**在默认档都不红** —— M1 反过来后策略 A 全部失效退回策略 B，
+  而 B 逐项读**精确**，表长照样对；M2 被"离表 >64 KiB 就停"兜住。**能真红的两条**是：
+  M1′ 把项数取 `imm` 而不是 `imm+1`（配 `--no-close-jmptab`）⇒ 收敛硬红并**点名**
+  `0044A3A0 0049F730 004C80B0`；M3 让 P2 不注入 ⇒ P-3 红 4 张表 / 22 项（正是那 4 张**地址非 4 字节对齐**的表）。
+  ⇒ 教训：**变异必须能点名机制**，否则"它会红"是空话。
+- **量化口径的两处纠正（本轮实测）**：① 设计单写"缺 entry 5 个"**实际是 3 个**
+  （`0x4F5F81` / `0x4F88BB` 是把 `def_*` 符号名硬解成 EA 的幽灵，PE 真值 `0x4F619D` / `0x4F8C5F` 早就在派发表里）；
+  ② 那 24 个 collapsed 区缺块的**真因不是 overlap**，而是那 4 张表的**地址非 4 字节对齐**
+  （`0x4F1A01` mod1 / `0x4F542A` mod2 / `0x503AAE` mod2 / `0x509903` mod3）⇒ D21/D26 的 `i += 4` 扫描**一个都看不到**它们。
+  ★ 另外识别出 **8 张 `.lst` 里没有名字的真表**（PE 字节级证据：真 `FF 24 8D/95` 站点 + CRT `memcpy`/`memset`
+  的二级分派 + 表后 40–67 B 的 case 体簇 + 末项后一个 dword 是代码字节而非指针 ⇒ 终止干净），
+  它们贡献 `functions` +18。**拒绝它们等于在 `memcpy` 里复制一遍本条缺陷。**
+- **⛔ 不要再用"62 张表 / 663 项 / 605 去重"当验收值**：识别面是**解码流**而不是 `.lst` 标签，
+  真实候选是 **76 个 disp32**（62 张与 `.lst` 同址 + 14 个 `.lst` 无名的），终态是 `tables=70`（6 个假站点被判据 ② 打掉）。
+
+### BUG-25 · AOT 臂：`EnumSystemLocalesA` 的 guest 回调续延桩写的是**字面量**，只有解释器认得 ⇒ 「加载存档」响亮停
+- **现象**（2026-11-15 用户实测）：AOT 臂走「**加载存档**」路径 ⇒
+  `[kernel32] EnumSystemLocalesA：续延桩 0x7FFEF000 不可调用 —— 这台 cpu 没有块缓存（X86::cache == nullptr，AOT 臂 / 手搓夹具），
+  而宿主的桩表里也没有这个 EA（ShimRegistry::add 不发 stub_ea）⇒ 无法执行 guest 回调的续延。`
+  同一条路径在**解释器臂**（`emulator-lift`）下正常。
+- **机制（已定死，每条有行号）**：
+  1. 「续延桩」= 一个**内部 shim** `lift!__guest_callback_return`（`kernel32_string.cpp` 的 `registerStringShims`，
+     用 `s.add(...)` 登记，**不是导入**：不进 IAT、不进 overrides）。
+  2. `ShimRegistry::bind` 的 extras 循环**早就给它发了真桩 EA**（桩页 `[0x7FFE0000, 0x7FFE8000)`、8192 槽）。
+  3. 但 `startGuestCallback` 往 guest 栈上铺的返回地址是**字面量** `0x7FFEF000` —— 它落在桩页**之外**
+     ⇒ `byStubEa` / `idForStub` 查不到。
+  4. 解释器能跑，只因为 `cpu.cache->installShim(0x7FFEF000, id)` 把那个字面量塞进了 `BlockCache`
+     （块缓存能装**任意** EA）。AOT 没有块缓存，识别集合 = 派发表 ∪ 桩页内 ⇒ **接不住**。
+  5. ⇒ 这不是"缺续延执行能力"，是**铺错地址**：能用的 EA 一直在注册表里，只是没人用它。
+- **裁决（两条，都是本轮定的）**：
+  1. **修法**：铺栈那个地址与 `installShim` 都改用 `cont->stub_ea`（为 0 才惰性发号，仍拿不到 ⇒ Trap 响亮停，
+     ⛔ 不退回字面量）；守卫换成**与臂无关**的不变量 `cpu.cache != nullptr ∨ byStubEa(cont_ea) 命中`。
+     零新槽（`registered=385 / bound-stub-ea=385 / next-slot=385` 修前修后一个没动）。
+  2. **⛔ 那条注释里"将来改成 `addRuntime` 会自动放宽"是假话，已按事实重写**：守卫读的是**常量字面量**，
+     而桩 EA 是 `页基 + 槽号*4`（槽号由登记序定）⇒ 没有任何常量能等于它 ⇒ 守卫**必须改**。
+     同理"复审建议 (a)"的**字面实现会炸**（注册期 `shim_slots_ == 0` ⇒ `addRuntime` 直接失败）。
+  3. **★ 由此得到一条规则（已进 `AGENTS.md` §12.8）**：**shim 回调的续延 = 一次普通 shim 调用**；
+     它的 EA **必须来自桩页分配**（`addRuntime` / `bind` 发号），⛔ **不许写字面量**。
+     判据不是"这条臂能跑"，而是"**每一条臂的识别集合里都有它**"。
+     ★ 佐证：合成 EA `0x7FFEF004/008/010/014` 也是字面量，但**两臂各有一段 pump** 才没出事——
+     这正是"手写数字然后只教一条臂 ⇒ 另一条臂必漏且静默"的正面/反面两个例子。
+- **族的大小（本轮枚举）**：按"EA 必须落进该臂的识别集合"分类 —— 精确同族（字面量 + 只有 `installShim`）= **1 处**（就是本条）；
+  合成 EA 型 4 个 EA + 2 处多回调续延、`addRuntime` 真桩 EA 型 8 个调用点，**两臂都通**（对照组）；
+  另一族是真的要"嵌套 guest 执行器"（`native_image_upload`，**但它只是解释器侧的 native override**，AOT 从不装
+  ⇒ 见 `REQ-01M7CZH25AVZWVZH4JH408CJPB` 的 2026-11-16 更正，⛔ 不是 AOT 的缺口）。
+- **代表守卫**：`apps/emulator-lift/tests/locale_ext.cpp` 的用例 **`enum-locales-no-cache`**
+  （并进既有 CTest `locale-ext`，`pure` 档，0.1 s）。形状：把 `EnumSystemLocalesA` 整个流程放到
+  **`cpu.cache = nullptr`** 的 `X86` 上、**按 AOT 的方式派发**（桩 EA ⇒ `lift_shim`；guest 代码由解释器代跑到栈顶返回地址），
+  断言 2 个 locale 的回调都真的发生、停因不是 `Trap`、且栈上那个 EA 能被 `byStubEa` 查到。
+  ★ **修前它红**（`568 checks, 12 failures`，退出 1，打的就是用户看到的那句话）；**修后绿**。
+  变异：把 `cont_ea` 改回字面量 ⇒ 该用例当场红。
+- **可证伪读数（本轮实测）**：解释器 `--trace-shims` 193,182 行**修前修后 SHA256 相同、逐行 0 差异**；
+  AOT 300 帧语义指纹逐位相同（`exit 0` / `frames 300` / `stop @ 00498AE4` / arena 三元组 / `table misses=0`）。
+- **未做（如实记）**：AOT 侧那条 `LIFT_AOT_SHIM_TRACE=1` 的「1 行 `kernel32!EnumSystemLocalesA` + 2 行续延」
+  读数**没拿到** —— boot 的 300 帧不经过「加载存档」那一屏，而 AOT 臂**没有输入脚本 / 交互控制面**
+  ⇒ 需要一次人工点窗口的 AOT 跑。**用户 2026-11-16 手工确认：该提交点上「加载存档」已正常。**
+### BUG-26 · 同一输入两臂结果不同：TITLE 上 `click 1070 480` 在 AOT 生效、在解释器无反应
+
+- **现象**（2026-11-16 探测时撞到；13 次 run，每次全新空 `--appdata`）：
+
+  | 臂 | `region`（in_use / surfaces / heap_blocks） | 判定 |
+  |---|---|---|
+  | **AOT**（`--input-plan`，`click 1070 480`） | `117490928 / 25 / 6821`（两次 run 逐位相同） | 相对基准 **+8.9 MB、+4 surfaces** |
+  | **解释器**（同一动作） | 与**无动作逐位相同**；`engine_marker` 停在 `TITLE.BIN`、无新 identity（`frame=` 全是 0） | **无反应** |
+  | 基准（不给 plan） | `108595152 / 21 / 6674`（三次相同） | — |
+  | 特异性对照（中性 `click 640 360`） | `108595152 / 21 / 6676` | 只多 2 个 block ⇒ 不算反应 |
+
+  ⇒ 同一份输入，一条臂换了画面、另一条臂什么都没发生。
+- **为什么这条比"配方对不对"重要**：如果两臂对同一输入给出不同结果，那么**所有"解释器能跑通 / AOT 跑不通"
+  的结论都可能是输入路径差异而不是引擎差异**。这条不查清，后面每个"某处 AOT 表现不符"都要重打折扣。
+- **两个候选原因（都未定）**：
+  1. **时间步长**：两臂 guest 时间步长差 ~**15 倍** ⇒ 同一条 `await presents 150` 对应的 guest 时刻差很远；
+  2. **解释器侧 `bounded-no-sample=1`**：可能让 `region` / marker 在实际渲染前就收口。
+  ★ 第三种必须一起排除：**两臂走的是两条不同的施加路径** —— AOT 是本轮新接的 `deliver*`（`runtime/input.h`），
+  解释器是老的 `InputScript::tick`。若两条路径对"同一动作"的语义不同（按下/抬起时机、坐标缩放、客户区 vs 屏幕坐标），
+  那是**实现分歧**，比时间步长严重。
+- **判据（可判，两臂各跑一次）**：同一次点击后，两臂的 `region` 三数**要么都变、要么都不变**；只有一侧变 ⇒ 分歧成立。
+  命令（两臂都要 `--skip-logo`、都要**全新空** `--appdata`、都要 `--region-log`）：
+
+  ```powershell
+  .\out\emulator-lift.exe     --skip-logo --present window --max-frames 400 --appdata <新> --region-log <同一份输入>
+  .\out\emulator-lift-aot.exe --skip-logo --present window --max-frames 400 --appdata <新> --region-log --input-plan <同一份输入>
+  ```
+- **⛔ 两个读数的教训**（本轮实测，别再踩）：
+  - `stop @` 在 `--max-frames` 下**两侧恒同**（`00498AE4`，停在 Present 桩）⇒ **无证明力**；
+  - `lastHash` 每次 run 都不同（`clock=real-time` + TITLE 是动画屏）⇒ **不是稳定指纹**；
+  - ⇒ 可用的是**收尾 `region` 三数**：同一命令多次 run **逐位相同**，且随屏而变。
+- **另记**：`ESC`（VK `0x1B`）在这条路径上**无区分力**（两侧落同一 `EA 00513B90` / 同一条 `agerc!_ShowDialog`，返回 IDOK = 退出程序）；
+  `--input-plan` **表达不了"同一份计划去掉动作"**（只有门没有动作 ⇒ 解析报 `线性 step step1 缺动作行`、exit 2），
+  对照只能用"不给 plan"或"惰性点击"两档。
+- **复现**：`.tmp/aot/recipe/report.md`（13 次 run 的记录 + 对照表）· 配方 `.tmp/aot/recipe/title-loaddata.plan` ·
+  入库图 `graphs/title-loaddata.graph`（客户区坐标 `1070,480` 是**用户给的**，非本仓推导）。

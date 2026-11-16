@@ -1033,7 +1033,7 @@ const MUTATIONS = [
     buildDir: 'apps/emulator-lift/out',
     what:
       '续延桩 EA 改回字面量 0x7FFEF000（在桩页之外）⇒ 无块缓存时桩表路由不到它 ⇒ locale-ext 的 ' +
-      'enum-locales-no-cache（`cpu.cache == nullptr`）当场红；⛔ 解释器臂不会红（块缓存能装任意 EA）',
+      'enum-locales-no-cache（`cpu.cache == nullptr`）当场红；★ 解释器臂不会红（块缓存能装任意 EA）',
   },
 
   {
@@ -1476,13 +1476,15 @@ const MUTATIONS = [
     // ★ 代表 "x87 override 的运算顺序 / `fchs` 被弄丢" 这一类错（REQ-01M6NZSAAD0WCNBE3RKMFF84R5）。
     //   判据：`apps/emulator-lift/tests/native_override_assets.cpp` 的 ④ = `sub_4CCC60` 的**函数级真字节
     //   两臂**（同一份 guest 机器码跑解释器当 oracle，再跑 native 实现；比 dst / 寄存器 / x87 状态字）。
-    //   `x87ChangeSign(b)` 是 `.lst` 0x4CCCC8 `fchs` 的唯一落点（B = -(r*sy*sin)）⇒ 注释掉它，
+    //   `x87ChangeSign(...)` 是 `.lst` 0x4CCCC8 `fchs` 的唯一落点（B = -(r*sy*sin)）⇒ 去掉它，
     //   B 的符号翻正 ⇒ 每个点的 dst[i] 都变 ⇒ 当场红。
+    //   ★ 2026-11-16：实现里两次运算已合并成一行（`x87ChangeSign(x87Mul(t3, sn))`），
+    //     旧的 `from: '    x87ChangeSign(b);'` 已不存在 —— 更新到当前文本，破坏语义不变（丢 fchs）。
     //   ★ 为什么挑这一条而不是 sin/cos 对调：`.lst` 0x4CCC80/0x4CCC84 的两次求值互相独立
     //   （都在同一个 θ 上，各自只写自己的栈槽）⇒ 那种"变异"不会改变任何 guest 可见状态，红得没意义。
     file: 'apps/emulator-lift/src/runtime/native_affine.cpp',
-    from: '    x87ChangeSign(b);',
-    to: '    // x87ChangeSign(b);',
+    from: '    const X87Val b = x87ChangeSign(x87Mul(t3, sn));',
+    to: '    const X87Val b = x87Mul(t3, sn);',
     guard: 'ctest:native-override-assets',
     ctest: 'native-override-assets',
     buildDir: 'apps/emulator-lift/out',
@@ -2043,22 +2045,24 @@ const MUTATIONS = [
   {
     // ★ 代表 "x87 float→int64 的**截断方向**被改掉" 这一类错（REQ-01M75PW4MXS06MN6FKGXB36ETH，`__ftol2_sse`）。
     //   `__ftol2` 的修正环（`.lst` 0x4E8319..0x4E833B 的 `fstp dword` + `add 7FFFFFFFh` + `sbb/adc`）
-    //   把 `fistp` 的"按 RC 就近取整"拉回**向零截断** ⇒ 实现里的 `x87ToI64(x, truncate=true)`
-    //   是这一项语义的唯一落点；改成 `false`（就近）⇒ `±1.5` / `±2.7` 这类小数部分 ≥0.5 的输入
-    //   整数值差 1。
+    //   把 `fistp` 的"按 RC 就近取整"拉回**向零截断** ⇒ 实现里的 `x87ToI64Trunc(x)`
+    //   （= `x87ToI64(x, X87Round::Zero)`）是这一项语义的唯一落点；改成 `X87Round::Near`（就近）
+    //   ⇒ `±1.5` / `±2.7` 这类小数部分 ≥0.5 的输入整数值差 1。
     //   守卫：`apps/emulator-lift/tests/native_override_assets.cpp` 的 `ftol/*` 边界表
     //   （解释器臂 = 真字节 oracle，逐值比 `EDX:EAX`）。
     //   ★ 为什么挑这一条而不是"忘弹栈"：截断是**本项的核心语义**，而"忘弹栈"更多是框架 ABI 的
     //     共性错；另外这条变异**只有在边界表带非整数/非 2 的幂时才红**（`±0.4` 那种两边都给 0）
     //     ⇒ 它同时钉住"边界表必须有判别力"这件事。
+    //   ★ 2026-11-16：桥函数已改名为 `x87ToI64Trunc`（旧 `x87ToI64(x, /*truncate=*/true)` 不存在）
+    //     ⇒ 更新 `from`，破坏语义不变（截断 → 就近）。
     file: 'apps/emulator-lift/src/runtime/native_crt.cpp',
-    from: '    const std::int64_t n = x87ToI64(x, /*truncate=*/true);',
-    to: '    const std::int64_t n = x87ToI64(x, /*truncate=*/false);',
+    from: '    const std::int64_t n = x87ToI64Trunc(x);',
+    to: '    const std::int64_t n = x87ToI64(x, X87Round::Near);',
     guard: 'ctest:native-override-assets',
     ctest: 'native-override-assets',
     buildDir: 'apps/emulator-lift/out',
     what:
-      '`__ftol2_sse` 的截断改成"按 RC 就近取整"（`x87ToI64(x, false)`）⇒ `±1.5`/`±2.7` 差 1：' +
+      '`__ftol2_sse` 的截断改成"按 RC 就近取整"（`x87ToI64(x, X87Round::Near)`）⇒ `±1.5`/`±2.7` 差 1：' +
       'native-override-assets 的 ftol 边界表逐值断言当场红',
   },
 
@@ -2445,6 +2449,31 @@ const MUTATIONS = [
       '(-105,850) 实际 (-5,900) ⇒ 当场红',
   },
 
+  // ── AOT 臂：`--cursor-warp` **没进 `present_window_flag`** ────────────────────────────────
+  //   故障形态 = 解析了 flag、也送进了 `SdlWindowOptions`，但**漏了**"它算窗口参数"这一格
+  //   ⇒ `--cursor-warp --present headless` 不再被 headless 闸门拒绝（静默走到建窗口 / 找执行源），
+  //   用户看到的还是"给了也没用"。★ 这是本单最轻的漏法：删掉 4 个字符即可，而且**没有任何**
+  //   运行期症状（只在参数面）。
+  //   判据：`tests/cli_aot_flags.cpp` 的 `headless-rejects-cursor-warp`（stderr 必须是
+  //   "`--present headless` 不接受窗口参数（… --cursor-warp）"，⛔ 不含 `未知参数`）。
+  //   ★ `from` 是**落地后实际的代码字节**（4 / 37 空格缩进，换行照源文件）。
+  {
+    file: 'apps/emulator-lift/src/aot/aot_main.cpp',
+    from:
+      '    const bool present_window_flag = present_driver_set || present_vsync_set || present_hidden ||\n' +
+      '                                     present_screenshot_set || cursor_warp;',
+    to:
+      '    const bool present_window_flag = present_driver_set || present_vsync_set || present_hidden ||\n' +
+      '                                     present_screenshot_set;  // 变异：cursor_warp 不算窗口参数',
+    guard: 'ctest:cli-aot-flags',
+    ctest: 'cli-aot-flags',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '把 AOT 臂 `present_window_flag` 里的 `|| cursor_warp` 删掉 ⇒ `--cursor-warp --present headless` ' +
+      '不再被 headless 闸门拒绝（stderr 变成"找不到执行源 / GPU 拒绝"）⇒ ' +
+      'cli-aot-flags/headless-rejects-cursor-warp 的"不含未知参数 + 含 --present headless"当场红',
+  },
+
   // ── advapi32 注册表：`RegOpenKeyExA` 的 `phkResult` 参数校验 ──────────────────────────────
   //   故障形态：把"`phkResult == NULL` ⇒ 87、不写内存"整段去掉，退回"`if (out)` 才写 + 恒 0"
   //   ⇒ 非法参数又被答成 `ERROR_SUCCESS`（这正是 REQ-01M7ATN3WPB14TVZJWZXTPQW3V 修掉的那条）。
@@ -2611,6 +2640,119 @@ const MUTATIONS = [
     what:
       'x87 的 `fsubr` 操作数顺序写反（`b−a` → `a−b`）⇒ `lift-x87-diff` 的 `fsubr@00430AE6` 组红：' +
       '`st(0)` 位型 BFF8000000000000（−1.5）变 3FF8000000000000（+1.5），guest 内存区随之不同',
+  },
+  {
+    // ★ 代表 "AOT 臂的逐帧 `[frame]` 读数从缺省档回来" 这一类错（2026-11-16 删 override / 收敛默认输出那轮）。
+    //   守卫 `tools/test/aot-arm-shape.test.mjs` ② 的判据是：每条 `std::printf("[frame] …")` 必须落在
+    //   `frame_log` / `prof_.on` 的条件里（同一行或前两行）。把闸门 `if (frame_log_on)` 换成 `if (true)`
+    //   ⇒ 该 printf 与条件脱钩 ⇒ 缺省档每 Present 一行（300 帧 = 300 行）⇒ 守卫 ② 当场红。
+    //   ⛔ 不改成"删掉 printf"：那是把读数整段删掉，守卫 ①（找不到 printf）也会红，但证明不了"闸门"这件事。
+    file: 'apps/emulator-lift/src/aot/aot_run.cpp',
+    from:
+      '            if (frame_log_on) {\n' +
+      '                std::printf("[frame] n=%llu hash=0x%016llX\\n", static_cast<unsigned long long>(n),',
+    to:
+      '            if (true) {  // 变异：逐帧 [frame] 的闸门去掉（缺省档每 Present 一行）\n' +
+      '                std::printf("[frame] n=%llu hash=0x%016llX\\n", static_cast<unsigned long long>(n),',
+    guard: 'tools/test/aot-arm-shape.test.mjs',
+    what:
+      '`[frame]` 逐帧 printf 的 `frame_log` 闸门被去掉（`if (frame_log_on)` → `if (true)`）⇒ ' +
+      '缺省档每 Present 打一行（300 帧 = 300 行）⇒ aot-arm-shape ② 红：printf 不在 frame_log / prof_.on 条件里',
+  },
+  {
+    // ★ 代表 "启动快照里的 guest 区域表从缺省档回来" 这一类错（2026-11-16 把区域表改 opt-in 那轮）。
+    //   守卫 `tools/test/aot-arm-shape.test.mjs` ③ 的判据是**性质**：`regions   :` 与 `dumpRegions(`
+    //   必须落在 `if (region_log) { … }` 的块**内**。把闸门换成 `if (true)` ⇒ 那两条打印不在
+    //   任何 `region_log` 条件内 ⇒ 缺省档回到整块 28 行（`regions :` + 27 行段表）⇒ 守卫 ③ 当场红。
+    //   ⛔ 不改"删掉这两条打印"：那样读数整段消失（丢判据面），证明不了"闸门"这件事。
+    file: 'apps/emulator-lift/src/aot/aot_host.cpp',
+    from:
+      '    if (region_log) {\n' +
+      '        std::fprintf(out, "regions   : %zu 段（committed=%llu 字节）\\n", mem_.regions().size(),',
+    to:
+      '    if (true) {  // 变异：区域表的 region_log 闸门去掉（缺省档打整块 28 行）\n' +
+      '        std::fprintf(out, "regions   : %zu 段（committed=%llu 字节）\\n", mem_.regions().size(),',
+    guard: 'tools/test/aot-arm-shape.test.mjs',
+    what:
+      '区域表 28 行的 `region_log` 闸门被去掉（`if (region_log)` → `if (true)`）⇒ 缺省档回到整块 28 行 ' +
+      '（`regions   :` 1 行 + 27 行段表）⇒ aot-arm-shape ③ 红：那两条打印不在 `if (region_log)` 的块内',
+  },
+
+  // ── 输入投递层 S1（`REQ-01M7G7EMX3JR272D8FVM7JFY9D`；守卫 `tools/test/input-plan-shape.test.mjs`）──
+  //   ★ 三条都只跑 `node --test`（⛔ 不加重建整棵树的 CTest 条目）：判据是**源码形态**，
+  //     改一处文本就够；C++ 侧的关系断言（CTest `input-plan-read-points`）已由普通 CTest 覆盖。
+  {
+    // 守卫 ①：把"投递/推进"塞回 `Machine::run` 的块边界 `if`（= 用户点名的旧错误）。
+    file: 'apps/emulator-lift/src/runtime/machine.cpp',
+    from: '        if (harness_marker || harness_script) {\n',
+    to:
+      '        if (harness_marker || harness_script) {\n' +
+      '            input::deliverLevel(*cpu_.windows, InputPoint::KeyLevel);  // 变异：块边界 pump 回来了\n',
+    guard: 'tools/test/input-plan-shape.test.mjs',
+    what:
+      '在 `Machine::run` 的块边界 `if (harness_marker || harness_script)` 里塞一次 `input::deliverLevel(...)` ' +
+      '⇒ 输入推进回到"每个基本块过一次"的老位置 ⇒ input-plan-shape ① 红（`input::` / `deliver(` 命中 ≠ 0）',
+  },
+  {
+    // 守卫 ②：拿掉一个读点的投递入口 ⇒ "读输入态"谓词为真、"调了投递入口"为假（单边为真）。
+    file: 'apps/emulator-lift/src/shims/user32_window.cpp',
+    from: '    input::deliverLevel(*cpu.windows, InputPoint::KeyLevel);\n',
+    to: '    // 变异：GetAsyncKeyState 的投递入口被拿掉（读点不再 flush-before-read）\n',
+    guard: 'tools/test/input-plan-shape.test.mjs',
+    what:
+      '删掉 `shimGetAsyncKeyState` 的 `input::deliverLevel(...)` ⇒ 这条读点绕过投递层（"读影子键电平"=真，' +
+      '"调了投递入口"=假）⇒ input-plan-shape ② 红并点名 `user32!GetAsyncKeyState`',
+  },
+  {
+    // 守卫 ③：把关系断言写成恒真（两侧抄同一个表达式）⇒ "两个独立来源"退化成一份。
+    file: 'apps/emulator-lift/tests/input_plan.cpp',
+    from: '    const std::uint64_t shim_calls = defs[i] != nullptr ? defs[i]->call_count : 0;\n',
+    to: '    const std::uint64_t shim_calls = delivered;  // 变异：关系断言退化成恒真\n',
+    guard: 'tools/test/input-plan-shape.test.mjs',
+    what:
+      '把 CTest `input-plan-read-points` 的 `shim_calls` 直接抄成 `delivered`（`ShimDef::call_count` 那一侧消失）' +
+      '⇒ 关系断言 \(deliverCalls == call_count\) 变成恒真 ⇒ input-plan-shape ③ 红',
+  },
+
+  // ── S4 + S2′（`--input-plan` 的 CLI 面 / 门 + 待抬起；守卫是**两条 CTest**）──
+  //   ★ 两条都只改一处文本，然后重建 + 跑那一条 CTest（`buildDir` = 唯一那棵 lift 树）。
+  {
+    // CLI 面：计划文件不存在 ⇒ **exit 2 + 点名路径**（⛔ 不许静默忽略）。
+    file: 'apps/emulator-lift/src/runtime/input_plan.cpp',
+    from:
+      '    if (f == nullptr) {\n' +
+      '        if (err) *err = "打不开输入计划：" + path;\n' +
+      '        clear();\n' +
+      '        return false;\n' +
+      '    }\n',
+    to:
+      '    if (f == nullptr) {\n' +
+      '        // 变异：打不开的计划被静默吞掉（当空计划继续跑）\n' +
+      '        clear();\n' +
+      '        return true;\n' +
+      '    }\n',
+    guard: 'ctest:cli-aot-flags',
+    ctest: 'cli-aot-flags',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '`InputPlan::loadFile` 打不开文件时返回 true（空计划）⇒ `--input-plan /nonexistent` 不再 exit 2、' +
+      'stderr 也不点名路径 ⇒ cli-aot-flags 的 `input-plan-missing-file` 红（"以为按了、其实没按"）',
+  },
+  {
+    // 引擎面：flush-before-read 之后 guest **同一次读**必须看到按下态（⛔ 不是"下一次"）。
+    file: 'apps/emulator-lift/src/runtime/input_plan.cpp',
+    from:
+      '            input::key(wm, r.vk, /*down=*/true, /*scancode=*/0u, InputSource::Script,\n' +
+      '                       kPlanMessageTimeMs);\n',
+    to:
+      '            input::key(wm, r.vk, /*down=*/false, /*scancode=*/0u, InputSource::Script,\n' +
+      '                       kPlanMessageTimeMs);  // 变异：按下变抬起\n',
+    guard: 'ctest:input-plan-read-points',
+    ctest: 'input-plan-read-points',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'step 的 `key` 由 down 改成 up ⇒ 读点 flush 之后 `WindowManager` 里**没有**按下态 ⇒ ' +
+      'input-plan-read-points 的 `input-plan/gates-and-releases` 红（关系断言 + `keyDown(vk)` 两条同时红）',
   },
 ];
 

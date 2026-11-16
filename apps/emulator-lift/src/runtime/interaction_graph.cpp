@@ -211,6 +211,7 @@ const char* condKindName(CondKind k) {
         case CondKind::ScreenRect: return "screen rect";
         case CondKind::ScreenChanged: return "screen changed";
         case CondKind::Script: return "script";
+        case CondKind::Presents: return "presents";
     }
     return "?";
 }
@@ -256,6 +257,11 @@ bool condHolds(const GraphCond& c, const FrameSampler& sampler, std::uint64_t sa
             //   没有有效身份（base 还没发布 / 没采样）⇒ 不成立（不是"总是成立"）。
             if (identity == nullptr || !identity->valid) return false;
             return c.script_by_id ? identity->id == c.script_id : scriptNameMatches(c.script, *identity);
+        case CondKind::Presents:
+            // ★ 只在 `InputPlan::atPoint()` 里判（`event_calls_[Frame] >= c.presents`）；
+            //   `--interaction-graph` 根本解析不出这个 kind（`loadText(..., allow_plan_conds)`）。
+            //   走到这里说明有人把图文件的解析闸门关了 ⇒ **不成立**（⛔ 不假装成立）。
+            return false;
     }
     return false;
 }
@@ -279,6 +285,7 @@ bool condYieldsBox(CondKind k) {
         case CondKind::Always:
         case CondKind::ScreenHash:
         case CondKind::ScreenChanged:
+        case CondKind::Presents:
         case CondKind::Script: return false;
     }
     return false;
@@ -291,6 +298,7 @@ bool condNeedsRectBinding(CondKind k) {
         case CondKind::Always:
         case CondKind::ScreenHash:
         case CondKind::ScreenChanged:
+        case CondKind::Presents:
         case CondKind::Script: return false;
     }
     return false;
@@ -307,6 +315,7 @@ bool condNeedsFrameWatch(CondKind k) {
         case CondKind::ScreenChanged: return true;
         case CondKind::Always:
         case CondKind::ScreenRect:
+        case CondKind::Presents:
         case CondKind::Script: return false;
     }
     return false;
@@ -323,6 +332,9 @@ bool condNeedsNewSample(CondKind k) {
             // ★ `script` 是**电平**：判据是"当前身份 =="，不是"动作之后又来过一帧"。
             //   ⛔ 不能沿用画面源的"要新样本"：房间空闲时帧会停、Present 计数不涨 ⇒
             //   `expect script …` 会永远等不到（正是 `interaction-model.md` §5 那个坑）。
+            return false;
+        case CondKind::Presents:
+            // ★ plan 的门：判据是"累计帧数 >= n"（绝对），不是"动作之后又来一帧"。
             return false;
     }
     return false;
@@ -377,7 +389,8 @@ bool expectMayMatch(const GraphCond& c, const FrameSampler& sampler, std::uint64
 // ---------------------------------------------------------------------------------------
 // 解析
 // ---------------------------------------------------------------------------------------
-bool InteractionGraph::loadText(const std::string& text, const std::string& origin, std::string* err) {
+bool InteractionGraph::loadText(const std::string& text, const std::string& origin, std::string* err,
+                                bool allow_plan_conds) {
     clear();
     // ★ 先解析到**局部**容器，全部成功才提交：失败时旧图已被清掉（`failed` 的图不许留在半截状态）。
     std::vector<Node> nodes;
@@ -434,6 +447,16 @@ bool InteractionGraph::loadText(const std::string& text, const std::string& orig
             *out = CondKind::Script;
             return true;
         }
+        if (head == "presents") {
+            // ★ 只认 `--input-plan`（`allow_plan_conds`）。图里写它 = **解析期硬错**：
+            //   图的推进在块边界、plan 的推进在 guest 读点，同一个词两侧刻度不同。
+            if (!allow_plan_conds) {
+                return failAt(ln, "`presents` 只用于 --input-plan（--interaction-graph 不认：图在块边界"
+                                  "推进，plan 只在 guest 读点推进）");
+            }
+            *out = CondKind::Presents;
+            return true;
+        }
         if (head != "screen") {
             return failAt(ln, "未知条件：" + tok[1] +
                                   "（只认 always / screen hash / screen rect / screen changed / script）");
@@ -483,6 +506,18 @@ bool InteractionGraph::loadText(const std::string& text, const std::string& orig
                 if (tok.size() != 3) return failAt(ln, "`screen changed` 不带参数");
                 out->text = "screen changed";
                 return true;
+            case CondKind::Presents: {
+                // `presents <n>`：**绝对**累计 Present 帧数（不是"再来 n 帧"）。
+                if (tok.size() != 3) {
+                    return failAt(ln, "`presents` 需要一个帧数（绝对累计 Present 数，收到 " +
+                                          std::to_string(tok.size() - 2) + " 个词）");
+                }
+                std::uint64_t n = 0;
+                if (!parseUnsigned(tok[2], &n)) return failAt(ln, "不是合法数字：" + tok[2]);
+                out->presents = n;
+                out->text = "presents " + u64s(n);
+                return true;
+            }
             case CondKind::ScreenHash: {
                 if (tok.size() != 4) return failAt(ln, "`screen hash` 需要一个指纹（0x 十六进制，最多 16 位）");
                 std::uint64_t hash = 0;
@@ -821,6 +856,10 @@ bool InteractionGraph::loadText(const std::string& text, const std::string& orig
         } else if (head == "expect") {
             if (b.expect != 0) return duplicate(b.expect);
             if (!parseCond(line.tok, line.no, &n.expect)) return false;
+            // `presents` 是**推进门**（`--input-plan` 的 when），不是画面观测值 ⇒ ⛔ 不能当 expect。
+            if (n.expect.kind == CondKind::Presents) {
+                return failAt(line.no, "`presents` 只能当 `await` / `when`（推进门），⛔ 不能当 `expect`");
+            }
             n.has_expect = true;
             b.expect = line.no;
         } else if (head == "action") {

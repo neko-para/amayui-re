@@ -114,6 +114,13 @@ struct AotRunOptions {
     //   （"在动 / 卡住同一帧"），不是判据；末帧 hash 另有一份（摘要的 `present : … lastHash=`）。
     //   ★ 闸门 = `frame_log || prof_.on`：`--profile` 档**逐字不变**（那是已有存档的可比面）。
     bool frame_log = false;
+    // ★ `--region-log`：**缺省关**。开档才打 `printReadout` 末尾的 guest 区域表
+    //   （`regions   :` 一行 + 每段一行，共 **28 行**；`dumpRegions` 复用 `runtime/memory.cpp` 那份）。
+    //   为什么缺省关（用户 2026-11-16 口径："region 信息是多余的噪音，考虑 opt-in 而非默认"）：
+    //   那 28 行是**静态布局的快照**（谁占了哪一段），一次 run 里不变，而同一个问题用
+    //   `heap` / `stack` / `va` 那几行 + 复跑一次 `--region-log` 就能回答 ⇒ 属噪音。
+    //   ★ 形态与 `--frame-log` **同族**：一类读数的 opt-in、⛔ 不是"总开关"（别的 readout 一行不动）。
+    bool region_log = false;
 };
 
 struct AotRunResult {
@@ -252,7 +259,9 @@ public:
     void setGpuRaster(GpuRaster* raster) { gpu_raster_ = raster; }
 
     // ⑤ 读数（bring-up 结束时的"起点"快照）。
-    void printReadout(std::FILE* out) const;
+    //   ★ `region_log` = `--region-log`（缺省关）：只闸 `regions   :` 那一整块（28 行），
+    //     ⛔ 别的 readout（exe / PE / 导入 / 地址与服务面 / pin / 缺口）一格都不收。
+    void printReadout(std::FILE* out, bool region_log) const;
     // ⑥ 跑完的摘要（停因 / EA / insns / frames / 派发表读数）。
     //   ★ `--profile` 的整块读数（`=== profile (sampling: …) ===` + 四张表 + `freq:`）也由它在
     //     **最后**打印 —— 这就是"落 stdout 末尾（进程退出前）"的落点（`aot_main.cpp` 在它之后

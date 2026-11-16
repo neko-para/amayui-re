@@ -231,5 +231,5 @@ int main() {
         LIFT_CHECK(r.byStubEa(0x7FF90008u) == nullptr);  // 桩页外（第 3 格不存在）
     }
 
-    return lift_test::finish("shim-stub-index");
+    return lift_test::finish("lift-shim-stub-index");
 }

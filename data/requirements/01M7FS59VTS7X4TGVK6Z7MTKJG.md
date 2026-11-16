@@ -2,8 +2,9 @@
 
 - id: REQ-01M7FS59VTS7X4TGVK6Z7MTKJG
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M7CD1NRK9P5WKR5PJ6GW3067
+- verify: apps/emulator-lift/CMakeLists.txt#lift-jmptab-dispatch
 - repro: docs/03-emulator/defects.md#BUG-24
 - severity: S2
 - tags: [emulator-lift, lift, closure]

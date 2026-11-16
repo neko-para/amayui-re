@@ -437,6 +437,13 @@ std::uint64_t WindowManager::noteInputSample(std::uint64_t guest_ms) {
     return ++input_samples_;
 }
 
+// ---- 投递层接线（S1）：非拥有指针；**唯一**的状态入口（读取端 `inputPlan()` 是 inline 裸读，
+//      刻意**不**走 checkMainThread —— 读点快路径的成本必须是"一条 null 检查"）。
+void WindowManager::setInputPlan(InputPlan* plan) {
+    checkMainThread("window.inputplan");
+    input_plan_ = plan;
+}
+
 // ---- 无效区（update region；M2 · P4 / B7）----
 //
 // ★ 口径见 host_window.h。这里只保证两件事：

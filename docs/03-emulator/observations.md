@@ -1229,3 +1229,112 @@
   native overrides 在结构化路径上基本失效（可选性能档，本轮未开）。
 - **复现**：`.tmp/aot/s7/{census.md,census.mjs,prof.out.txt}`、`.tmp/aot/s7/base/`（基线 exe + sha256）；
   S7 降级清单逐条打在 `lift-gen` 的 stderr（EA + 原因 + 首因站点 + 传染源，5,262 行，确定性升序）。
+### OBS-20261116-01 · AOT 构建 **228 s → 80.8 s（2.82×）**：一半是**重复劳动**，一半是**单 TU 单核**
+
+- **口径**：`apps/emulator-lift`，RelWithDebInfo / win32-x64 / Ryzen 7 7735H（8C/16T）/ clang 22.1.2；
+  读数来自 `out/.ninja_log` 的边起止（同机同树）与 `Measure-Command` 计时（两次取中位）。
+- **改造前的三段**（2026-11-16 实测）：
+
+  | 段 | 墙钟 | 说明 |
+  |---|---|---|
+  | `lift-gen --check` | 48.58 s | ★ **纯重复**：它调的就是生成命令下一行要跑的同一个 `buildAll` |
+  | `lift-gen`（完整生成，含 134 MB 落盘） | 58.14 s | 发射 + 落盘只占 ≈5.7 s |
+  | `clang -c -O2`（134 MB 单 TU） | 120.7 s（111.0 / 130.4 中位） | **单进程单核**，16 核里只用了 1 核 |
+  | 链接 | ≈0.5 s | |
+  | **合计** | **≈228 s** | |
+
+- **两刀**：① 闭包五条判据并进生成那一趟（`--closure-gate`，`--check` 不再单独跑）⇒ 228 → 197.6 s（−48.6 s，产物**逐字节相同**）；
+  ② IR 按分量拆 8 份 + `-j8`（**仍是 `-c -O2`**）⇒ 197.6 → **80.8 s**（clang 段 120.7 → 21.6 s）。
+- **8 份并行时单进程慢 ≈20%**（总 CPU 162 s vs 134 s）= **内存带宽**，不是逻辑问题 ⇒ clang 段落在 21.6 s 而非线性预测的 ≈17 s。
+  线性度实测：最大分片 18.13 MB / 3,638 函数单独编 = **15.74 s**（线性预测 16.3 s，3% 内）。
+- **拆分没有损失代码质量**（三条静态判据）：
+  `llvm-objdump -d` 指令行 2,619,129（单份）→ **2,613,209**（8 份）= **−0.226%**；
+  8 份 body 拼接与单份 body 的 **sha256 相同**（`5b25e0de…`）；IR 里 `call i32 @lift_cc_*` **2571 == 2571**
+  （最后一条是"跨份静态 call 没退化成 `ret i32`"的判据）。
+- **运行期没变**：300 帧交错 A/B 中位 4.97 s（单份）vs 4.99 s（8 份）= +0.4%（噪声内）；
+  语义指纹 `exit` / `frames` / `stop @ 00498AE4` / arena 三元组 / `table misses=0` 逐位相同。
+- **现在改生成器 ≈80 s，改 shim / runtime 只重链接 ≈5 s**（`.ll` 是 CMake 的 generated output ⇒ 只有动 `lift_gen*` 才重生成）。
+- **守卫**：`lift-aot-split-manifest`（22.8 s，`pure`）判分片清单自洽（Σfunctions == pin、符号两两不交、
+  并集 == 派发表、每份 ≤20 MB、份数 == `LIFT_AOT_SPLIT`）；configure 期 `FATAL_ERROR` 钉住"仍是 `-c -O2`"；
+  `LIFT_AOT_SHAPE="split8-O2"` 进二进制并在启动打一行；回退 = `-DLIFT_AOT_SPLIT=1`。
+- **仍未解决的两块成本**：`lift-gen` 的 58.6 s（其中 52 s 是**两趟**闭包分析，第二趟由 BUG-24 的跳表识别引入）；
+  `lift-jmptab-dispatch` 单条 CTest 就要 59.7 s（同一份分析）。⇒ 要再快得优化 `buildAll` 本身，那需要先有需求。
+
+### OBS-20261116-02 · AOT 缺省 stdout **388 行 → 85 行**：周期性输出只有一条，但它占 78%
+
+- **口径**：`emulator-lift-aot.exe --skip-logo --present window --max-frames 300`，每次全新 `--appdata`；RelWithDebInfo。
+- **改造前**：缺省档 388 行，其中 **300 行是 `[frame] n=… hash=…`**（每次 `Present` 一行，**当时没有任何开关**）
+  + 3 行 override 读数（`native-ovr:` 1 行 + `override  :` 2 行）。
+- **改造后**：缺省档 **85 行**；`--frame-log` 档 385 行（= 85 + 300），行形态与改前**逐字相同**；
+  `--profile` 档 733 → 730（只少那 3 条 override；`[frame]` 300 行、`frame-ms` 301 行的字段形态不变）。
+- **剩下 85 行的分类**（★ 这是"下一刀要不要收"的判据）：启动头部 4 · `printReadout` **68**
+  （exe 1 / PE 9 / 导入 19 / 地址与服务面 11 / 区域表 28）· `[skip-logo]` 1 · `probe` 1 · 指纹摘要 6 ·
+  `present` 1 · 钩子结局 4；stderr 1 行（AGERC 冲突）。
+- ★ **判据是"这条会在一次 run 里出现几次"，不是"看着吵就删"**：那 68 行是**一次性**的启动快照，
+  而且 `pin` / `gaps` / `region` 属于判据面（出问题时是唯一消息面）⇒ 这一轮**故意不收**。
+- **守卫**：`tools/test/aot-arm-shape.test.mjs`（`pure`/`contract`）——① `src/aot/` 里不许再出现 override 机制的
+  33 个标识符；② `[frame]` 的 `printf` 必须在 `frame_log`（或 `prof_.on`）的条件里。改前红 2/2（194 处命中）→ 改后绿。
+- ★ **后续（同日，同一个门禁的第三刀）**：用户判定 **region 表是多余噪音** ⇒ 再加窄开关 **`--region-log`**（缺省关），
+  **缺省 stdout 85 → 57 行**。那 28 行（`regions   :` 1 行 + 27 行段表）在源码里是 `printReadout` 的**最后一块**、
+  在 stdout 里**连续**（改前第 45–72 行）⇒ 只关它、⛔ 别的 readout 一格没动。
+  `--region-log` 档那 28 行与改前**逐字节相同**（块 sha256 `CB9CF03F…`）；语义指纹三档逐位相同。
+  守卫加第 ③ 条（**性质**断言："区域表打印必须在 `if (region_log)` 块内"；⛔ 不写成"输出里没有 `regions :`"——
+  后者会把"整块删掉"也判成合格）。变异 `if (region_log)` → `if (true)` ⇒ 该守卫 2/2 红。
+- ★ **一条口径裁决（父级，写下来免得下一个 agent 猜）**：`[frame]` 的闸门是 `frame_log || prof_.on`，
+  而 region 表**只认 `region_log`**（⇒ `--profile` 档也少这 28 行）。理由：`prof_.on` 顺带打开的东西只该是
+  **profile 自己的主体**（逐帧时间序列）；region 是启动几何、不是性能归因的对象，没有任何 profile 分析用它。
+  ⇒ 想给 `--profile` 加回这 28 行，得先有一条"某次 profile 分析读 region"的证据。
+### OBS-20261116-03 · 输入投递层 S1+S4 落地：**执行循环零新增**、行为逐位不变、成本在噪声内
+
+- **口径**：`apps/emulator-lift`，RelWithDebInfo / win32-x64；读数来自 `ctest`、`llvm-objdump -d`、
+  AOT 300 帧交错 A/B ×3（每次全新 `--appdata`）。日期 2026-11-16。
+- **做了什么**：`runtime/input_plan.{h,cpp}`（计划句柄 + 门 `{Always, Presents}` + flush-before-read + 待抬起）·
+  `runtime/input.h` 的四个投递入口（电平 / 队列 / 写点 / 事件源，均 inline + 一条 null 检查）·
+  11 个投递点在**读之前**接线（9 读点 + `SetCursorPos` + `ReadFile` 只作事件源）·
+  AOT `--input-plan <file>`（解析在 GPU bring-up 之前 ⇒ 文件错不需要 GPU）。
+- **行为**：AOT 300 帧语义指纹**逐位相同**（`exit 0` / `frames 300` / `stop @ 00498AE4` /
+  arena `55412672·55412672·19` / `table misses=0` / `lastHash`）。缺省 stdout 58 行；
+  有计划 59 行，**只多 `input-plan:` 那一行**。
+- **静态成本**：`llvm-objdump -d` 指令行 解释器 613,671→**613,823（+152）**、AOT 3,142,049→**3,142,218（+169）**；
+  `lift_aot.obj` **0 字节变化**（改的都是 runtime/shim，没碰生成物）。
+- **动态成本**：300 帧交错 A/B 3 对 = −3.25% / +4.83% / −0.51%，**中位 −0.51% ⇒ 在噪声内**
+  （本机分辨不了 <5%，⛔ 不许把这类差异当结论）。
+- **执行循环零新增（本设计的核心判据）**：`src/runtime/machine.cpp` 与 `src/aot/aot_run.cpp` 里
+  `InputPlan` / `input_plan` / `input::` / `deliver(` / `atPoint(` / `note(` 命中 **0**。
+  ★ 旧 `harness_script` 闸门**故意保留**（删它是后续单）⇒ 守卫把"新层不许进循环"与"旧层还在"分开判：
+  5 个新层词两文件必须 0，旧 tick 只许钉在已知的两个位置。
+- **守卫**：`tools/test/input-plan-shape.test.mjs`（源码形态）+ CTest `input-plan-read-points`（关系断言：
+  `plan.deliverCalls` ⟺ `shims.callCount`，两个独立来源）+ `ctest:cli-aot-flags` 的 `--input-plan` 三组用例；
+  三条都**实测红过**再绿，并各入 `tools/mutate-check.mjs` 一条变异。
+- **没证明的**：端到端到「加载存档」屏没跑成——机制驱动了 AOT（`fired=1 presents=300`），但**不知道** TITLE 菜单上
+  「Load Data」的键/坐标，而仓里现有坐标是**人手写未复核**的 ⇒ 按 §6 不能当证据。
+  单 `REQ-01M7GA4B8T9JXFDAYK46YHNH7K`（缺一份经验证配方 + 人手对照读数）。
+### OBS-20261116-04 · 屏幕级对照该用什么读数：`region` 三数是**稳定且随屏而变**的指纹，`stop @` 无证明力、`lastHash` 不是指纹
+
+- **口径**：`emulator-lift-aot.exe --present headless --game-dir dist/install --skip-logo --max-frames 400 --appdata <每次全新>`
+  + `--region-log`；RelWithDebInfo；13 次 run。日期 2026-11-16。
+- **三个读数各自的可用性**（本轮实测，⛔ 别再拿前两个当判据）：
+
+  | 读数 | 结论 |
+  |---|---|
+  | `stop @ <EA>` | ★ `--max-frames` 下**两侧恒同**（`00498AE4`，停在 Present 桩，与画面无关）⇒ **无证明力** |
+  | `lastHash` | 4 次 run **每次不同**（`clock=real-time` + TITLE 是动画屏）⇒ **不是稳定指纹** |
+  | **收尾 `region` 三数**（in_use / surfaces / heap_blocks） | **同一命令多次 run 逐位相同**，且**随屏而变** ⇒ 可作屏幕级对照（需 `--region-log`） |
+
+- **实测对照表**（同一命令，只换动作）：
+
+  | 跑法 | `region` 三数 |
+  |---|---|
+  | 不给输入计划（3 次） | `108595152 / 21 / 6674` |
+  | 中性点击 `640 360`（**特异性对照**） | `108595152 / 21 / 6676`（只多 2 个 block ⇒ 不算反应） |
+  | `click 1070 480`（2 次逐位相同） | `117490928 / 25 / 6821`（**+8.9 MB / +4 surfaces**） |
+  | `click 1186 373`（GameStart） | `112791848 / 24 / 6747` |
+
+- ★★ **一条会改变所有后续命令的前提**：**到 TITLE 的任何自动化都必须带 `--skip-logo`**。
+  不带时逐帧 hash 在 **frame 64** 就冻死（`0xBE8BCF5F5F55D3F5` 连续 337 帧）⇒ 那之后的按键**打在静止的 boot 帧上**。
+  这正是 S4 那次"端到端"失败的真正原因（当时没带 `--skip-logo`，却被当成"配方不对"）。
+- ★ **一个反讽，值得记下来**：`region` 刚被判定为"噪音"并改成 opt-in（`OBS-20261116-02/03`），
+  但它同时是**目前唯一稳定、随屏而变**的屏幕指纹。⇒ 收它当**缺省输出**是对的，⛔ 但**不要把它整块删掉**，
+  它是"某次 run 到底停在哪一屏"的可机械对照面。
+- **用它的代价**：`--region-log` 是诊断档；拿它做对照时，两侧必须**都**带这个开关（否则三数都缺）。
+- **另记**：`ESC`（VK `0x1B`）在这条路径上无区分力（两侧落同一 `EA 00513B90` / 同一条 `agerc!_ShowDialog`）。

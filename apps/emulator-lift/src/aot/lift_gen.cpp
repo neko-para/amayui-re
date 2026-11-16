@@ -93,6 +93,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <set>
 #include <string>
@@ -208,6 +209,10 @@ struct Options {
     std::string out_dir;
     // `--split-prefix`：分片文件名的前缀（缺省 `lift_aot`）⇒ `<dir>/<prefix>.part00.ll`。
     std::string split_prefix = "lift_aot";
+    // ★ `--verify-split <aot-dir>`：**独立模式**——只读 `out/aot/` 的产物，验分片清单自洽
+    //   （CTest `lift-aot-split-manifest` 的被测入口；六项断言见下面 verifyAotSplit 的头注）。
+    //   ⛔ 不需要 `--exe` / `--roots` / `--out`；没有生成物时 skip（exit 0）。
+    std::string verify_split;
     // ★ 入库件硬闸（`--closure-gate`）：**生成这一趟同时**做 `--check` 的五条校验并打同一行汇总。
     //   CMake 的 AOT 生成命令带它 ⇒ 坏闭包在**构建期**硬红，且只分析一次（省 48.6 s）。
     //   ⛔ 缺省关：测试夹具的 roots 文件不是 `0x`+8 位严格文法（`tests/ir/*_roots.txt`），
@@ -225,6 +230,9 @@ void usage() {
         "  --closure-gate        生成这一趟**同时**做 --check 的五条硬闸（同一行汇总；CMake 的 AOT 生成命令带它）\n"
         "  --split N             把输出分成 N 份 `.ll`（缺省 1 = 今天的单份路径；分桶 = 根 EA 升序贪心）\n"
         "  --out-dir <dir>       --split N>1 时的落点目录（分片名 `lift_aot.partNN.ll` + 清单 `lift_aot.split.txt`）\n"
+        "  --split-prefix <s>    分片文件名前缀（缺省 lift_aot ⇒ `<dir>/lift_aot.partNN.ll`）\n"
+        "  --verify-split <dir>  独立模式：只读 <dir> 的产物验分片清单自洽（CTest\n"
+        "                        `lift-aot-split-manifest` 的被测入口；没有生成物 ⇒ skip、exit 0）\n"
         "  --pin <file.h>        额外写 exe 的 sha256 + entry（AOT 启动核对，D1；⛔ 不入库）\n"
         "  --table <file.inc>    额外写派发表 `EA → lift_cc_<根>`（AOT 的 EA→LiftFn 查找面；⛔ 不入库）\n"
         "  --no-close-calls      关掉静态调用闭包（D14 默认开；对照档 = 只按 --roots 展开）\n"
@@ -2893,6 +2901,269 @@ bool writeBlockDump(const std::string& path, const std::vector<GenComponent>& co
     return true;
 }
 
+// =====================================================================================
+// ★ `--verify-split <aot-dir>`：**分片清单自洽**（CTest `lift-aot-split-manifest` 的被测入口）
+//
+// 2026-11-16：这条 CTest 原来跑的是 `tests/cmake/lift_aot_split.cmake`（`COMMAND ${CMAKE_COMMAND}`）
+// ⇒ 它没有 target、没有 `main(`，于是 `cmake-test-entry` 的"注册面 ↔ 源文件"判据判不了它
+// （那条守卫防的是"空壳用例 ctest 照样绿"）。现在把六项断言搬进**被测二进制自己**：
+//
+//   1. `Σ functions == LIFT_AOT_PIN_FUNCTIONS`（pin 是启动期核对的同一份计数）
+//   2. 各份 `define i32 @lift_cc_*` 的符号集合**两两不交**，并集 == `lift_table.inc` 的函数名集合
+//   3. 每份 `.ll` ≤ 20 MB（`design.md` §3.1 的上界）
+//   4. 份数 == `--split N`；清单里每份的 sha256 / 字节数与文件实际一致
+//
+// ⛔ 不断言任何"当前数字"：全部由 `out/aot/` 的产物自己算。没有生成物（缺 clang / 执行源 /
+//   closure.txt）时照旧 **skip（exit 0）**，与旧的 `.cmake` 脚本口径一致（AOT 侧的"没有生成物"
+//   由 `emulator-lift-aot` 启动时响亮报告并 exit 1 覆盖）。
+// 退出码：0 = OK / skip；1 = 判据破了；2 = 参数或读文件错。
+// =====================================================================================
+
+std::vector<std::string> splitTextLines(const std::string& text) {
+    std::vector<std::string> lines;
+    std::string cur;
+    for (const char c : text) {
+        if (c == '\n') {
+            if (!cur.empty() && cur.back() == '\r') cur.pop_back();
+            lines.push_back(cur);
+            cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+    if (!cur.empty()) {
+        if (cur.back() == '\r') cur.pop_back();
+        lines.push_back(cur);
+    }
+    return lines;
+}
+
+std::vector<std::string> splitWs(const std::string& line) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (const char c : line) {
+        if (c == ' ' || c == '\t') {
+            if (!cur.empty()) {
+                out.push_back(cur);
+                cur.clear();
+            }
+        } else {
+            cur += c;
+        }
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
+bool readTextFile(const std::filesystem::path& p, std::string* out) {
+    std::ifstream file(p, std::ios::binary);
+    if (!file) return false;
+    out->assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    return true;
+}
+
+/** 一份 `.ll` 里的 `define i32 @lift_cc_<hex>(` 符号名（与 `.cmake` 的 REGEX 同一判据）。 */
+std::vector<std::string> liftDefineNames(const std::string& text) {
+    std::vector<std::string> names;
+    const std::string prefix = "define i32 @";
+    for (const std::string& line : splitTextLines(text)) {
+        if (line.compare(0, prefix.size(), prefix) != 0) continue;
+        const std::size_t at = prefix.size();
+        const std::size_t lparen = line.find('(', at);
+        if (lparen == std::string::npos) continue;
+        const std::string name = line.substr(at, lparen - at);
+        if (name.compare(0, 8, "lift_cc_") == 0 && name.size() > 8) names.push_back(name);
+    }
+    return names;
+}
+
+bool parseU64(const std::string& s, std::uint64_t* out) {
+    if (s.empty()) return false;
+    char* endp = nullptr;
+    const unsigned long long v = std::strtoull(s.c_str(), &endp, 10);
+    if (endp == s.c_str() || *endp != '\0') return false;
+    *out = static_cast<std::uint64_t>(v);
+    return true;
+}
+
+bool readPinFunctions(const std::filesystem::path& pin, std::uint64_t* out, std::string* err) {
+    std::string text;
+    if (!readTextFile(pin, &text)) {
+        if (err != nullptr) *err = "读不了 `" + pin.string() + "`";
+        return false;
+    }
+    const std::string key = "#define LIFT_AOT_PIN_FUNCTIONS ";
+    for (const std::string& line : splitTextLines(text)) {
+        if (line.compare(0, key.size(), key) != 0) continue;
+        std::string v = line.substr(key.size());
+        while (!v.empty() && (v.back() == 'u' || v.back() == 'U')) v.pop_back();
+        if (!parseU64(v, out)) {
+            if (err != nullptr) *err = "解析不了 LIFT_AOT_PIN_FUNCTIONS：`" + line + "`";
+            return false;
+        }
+        return true;
+    }
+    if (err != nullptr) *err = "lift_pin.h 里没有 LIFT_AOT_PIN_FUNCTIONS";
+    return false;
+}
+
+bool readTableFunctions(const std::filesystem::path& table, std::set<std::string>* out,
+                        std::string* err) {
+    std::string text;
+    if (!readTextFile(table, &text)) {
+        if (err != nullptr) *err = "读不了 `" + table.string() + "`";
+        return false;
+    }
+    const std::string prefix = "LIFT_AOT_ENTRY(";
+    const std::string sep = ", ";
+    for (const std::string& line : splitTextLines(text)) {
+        if (line.compare(0, prefix.size(), prefix) != 0) continue;
+        const std::size_t sep_at = line.find(sep, prefix.size());
+        const std::size_t close = line.rfind(')');
+        if (sep_at == std::string::npos || close == std::string::npos || close <= sep_at) continue;
+        out->insert(line.substr(sep_at + sep.size(), close - (sep_at + sep.size())));
+    }
+    return true;
+}
+
+int verifyAotSplit(const std::string& arg, std::size_t split) {
+    if (split == 0) {
+        std::fprintf(stderr, "emulator-lift-gen: --verify-split 的 --split 必须 ≥ 1\n");
+        return 2;
+    }
+    std::error_code ec;
+    std::filesystem::path dir(arg);
+    if (std::filesystem::is_regular_file(dir, ec)) dir = dir.parent_path();
+
+    const std::filesystem::path pin = dir / "lift_pin.h";
+    const std::filesystem::path table = dir / "lift_table.inc";
+    if (!std::filesystem::exists(pin) || !std::filesystem::exists(table)) {
+        std::printf(
+            "lift-gen --verify-split: skip（没有 lift_pin.h / lift_table.inc：本次构建没有 AOT 生成物）\n");
+        return 0;
+    }
+    auto fail = [](const std::string& msg) {
+        std::fprintf(stderr, "emulator-lift-gen --verify-split: %s\n", msg.c_str());
+        return 1;
+    };
+
+    std::uint64_t pin_functions = 0;
+    std::string err;
+    if (!readPinFunctions(pin, &pin_functions, &err)) return fail(err);
+    std::set<std::string> table_fns;
+    if (!readTableFunctions(table, &table_fns, &err)) return fail(err);
+    if (table_fns.empty()) return fail("lift_table.inc 里一行 LIFT_AOT_ENTRY 都没有");
+
+    if (split == 1) {
+        // ---- 单份路径（缺省回退形状）：份数必然 1，清单不应存在 ----
+        const std::filesystem::path ll = dir / "lift_aot.ll";
+        if (!std::filesystem::exists(ll)) return fail("split=1 但没有 `" + ll.string() + "`");
+        if (std::filesystem::exists(dir / "lift_aot.split.txt")) {
+            return fail("split=1 却存在 `" + (dir / "lift_aot.split.txt").string() +
+                        "`（清单陈旧 / 两种形状混在一棵树里）");
+        }
+        std::string text;
+        if (!readTextFile(ll, &text)) return fail("读不了 `" + ll.string() + "`");
+        const std::vector<std::string> defs = liftDefineNames(text);
+        if (defs.size() != pin_functions) {
+            return fail("split=1 的定义数=" + std::to_string(defs.size()) +
+                        " != PIN_FUNCTIONS=" + std::to_string(pin_functions));
+        }
+        const std::set<std::string> uniq(defs.begin(), defs.end());
+        if (uniq.size() != defs.size()) return fail("split=1 的 .ll 里有重复 `define`");
+        std::printf("lift-gen --verify-split: OK（single-O2；defines=%zu）\n", defs.size());
+        return 0;
+    }
+
+    // ---- 多份路径：清单 + 每份文件 ----
+    const std::filesystem::path manifest = dir / "lift_aot.split.txt";
+    if (!std::filesystem::exists(manifest)) {
+        return fail("LIFT_AOT_SPLIT=" + std::to_string(split) + " 但没有 `" + manifest.string() + "`");
+    }
+    std::string manifest_text;
+    if (!readTextFile(manifest, &manifest_text)) return fail("读不了 `" + manifest.string() + "`");
+    std::vector<std::string> parts;
+    for (const std::string& line : splitTextLines(manifest_text)) {
+        if (line.compare(0, 5, "part ") == 0) parts.push_back(line);
+    }
+    if (parts.size() != split) {
+        return fail("清单份数=" + std::to_string(parts.size()) + " != LIFT_AOT_SPLIT=" +
+                    std::to_string(split) + "（典型原因：改了 LIFT_AOT_SPLIT 却没重新生成清单）");
+    }
+
+    constexpr std::uint64_t kMaxPartBytes = 20971520;  // 20 MB（design.md §3.1）
+    std::uint64_t sum_functions = 0;
+    std::uint64_t max_part_bytes = 0;
+    std::set<std::string> seen;
+    for (const std::string& line : parts) {
+        const std::vector<std::string> f = splitWs(line);
+        if (f.size() != 8) {
+            return fail("清单行字段数=" + std::to_string(f.size()) + "（应为 8）：`" + line + "`");
+        }
+        const std::string& idx = f[1];
+        const std::filesystem::path part_path = dir / f[2];
+        const std::string& want_sha = f[3];
+        std::uint64_t want_bytes = 0;
+        std::uint64_t want_fns = 0;
+        if (!parseU64(f[4], &want_bytes) || !parseU64(f[5], &want_fns)) {
+            return fail("清单第 " + idx + " 份的 bytes/functions 不是十进制整数：`" + line + "`");
+        }
+        if (!std::filesystem::exists(part_path)) {
+            return fail("清单第 " + idx + " 份的文件不存在：`" + part_path.string() + "`");
+        }
+        std::string content;
+        if (!readTextFile(part_path, &content)) {
+            return fail("读不了清单第 " + idx + " 份：`" + part_path.string() + "`");
+        }
+        const std::vector<std::uint8_t> raw(content.begin(), content.end());
+        const std::string real_sha = lift::toLower(lift::toHex(lift::sha256(raw)));
+        if (real_sha != lift::toLower(want_sha)) {
+            return fail("第 " + idx + " 份 sha256 不一致（清单=" + want_sha + " 实际=" + real_sha + "）");
+        }
+        if (content.size() != want_bytes) {
+            return fail("第 " + idx + " 份字节数不一致（清单=" + std::to_string(want_bytes) +
+                        " 实际=" + std::to_string(content.size()) + "）");
+        }
+        if (content.size() > kMaxPartBytes) {
+            return fail("第 " + idx + " 份 " + std::to_string(content.size()) + " B 超过 20 MB 上界");
+        }
+        if (content.size() > max_part_bytes) max_part_bytes = content.size();
+
+        const std::vector<std::string> defs = liftDefineNames(content);
+        if (defs.size() != want_fns) {
+            return fail("第 " + idx + " 份 define 数=" + std::to_string(defs.size()) +
+                        " != 清单 functions=" + std::to_string(want_fns));
+        }
+        sum_functions += defs.size();
+        for (const std::string& fn : defs) {
+            if (!seen.insert(fn).second) {
+                return fail("符号 `" + fn + "` 出现在两份分片里（⛔ 两两不交破了）");
+            }
+            if (table_fns.find(fn) == table_fns.end()) {
+                return fail("第 " + idx + " 份定义了 `" + fn + "`，但派发表里没有它");
+            }
+        }
+    }
+    if (sum_functions != pin_functions) {
+        return fail("Σ functions=" + std::to_string(sum_functions) +
+                    " != LIFT_AOT_PIN_FUNCTIONS=" + std::to_string(pin_functions));
+    }
+    if (seen.size() != table_fns.size()) {
+        return fail("分片并集=" + std::to_string(seen.size()) +
+                    " != 派发表函数集=" + std::to_string(table_fns.size()));
+    }
+    for (const std::string& fn : table_fns) {
+        if (seen.find(fn) == seen.end()) {
+            return fail("派发表里的 `" + fn + "` 不在任何分片里");
+        }
+    }
+    std::printf(
+        "lift-gen --verify-split: OK（LIFT_AOT_SPLIT=%zu；Σfunctions=%llu；最大份=%llu B）\n", split,
+        static_cast<unsigned long long>(sum_functions),
+        static_cast<unsigned long long>(max_part_bytes));
+    return 0;
+}
+
 }  // namespace
 
 // =====================================================================================
@@ -2939,6 +3210,8 @@ int main(int argc, char** argv) {
             if (!needValue("--out-dir", &opt.out_dir)) return 2;
         } else if (a == "--split-prefix") {
             if (!needValue("--split-prefix", &opt.split_prefix)) return 2;
+        } else if (a == "--verify-split") {
+            if (!needValue("--verify-split", &opt.verify_split)) return 2;
         } else if (a == "--pin") {
             if (!needValue("--pin", &opt.pin)) return 2;
         } else if (a == "--table") {
@@ -2996,6 +3269,10 @@ int main(int argc, char** argv) {
             usage();
             return 2;
         }
+    }
+    // ★ `--verify-split` 是**独立模式**：只读 `out/aot/` 的产物，⛔ 不需要 `--exe/--roots/--out`。
+    if (!opt.verify_split.empty()) {
+        return verifyAotSplit(opt.verify_split, opt.split);
     }
     // ★ `--check` 是**独立模式**：只吃 `--exe` + 一个 closure.txt，⛔ 不需要 `--roots/--out`。
     if (!opt.check.empty()) {

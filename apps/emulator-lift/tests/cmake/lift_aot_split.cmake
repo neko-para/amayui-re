@@ -1,5 +1,13 @@
 # =====================================================================================
-# AOT 形状守卫 ①：**分片清单自洽**（CTest / pure 档；顶层无条件注册 ⇒ 默认 `ctest` 就跑）
+# AOT 形状守卫 ①：**分片清单自洽** —— ⚠ 2026-11-16 起**不再是 CTest 的判据入口**。
+#
+# ★ 权威判据已搬进被测二进制：CTest `lift-aot-split-manifest` 现在跑
+#   `emulator-lift-gen --verify-split <out/aot> --split <N>`（六项断言在 `src/aot/lift_gen.cpp`
+#   的 `verifyAotSplit` 里，与本脚本逐条对等）。搬迁理由：旧注册面是 `COMMAND ${CMAKE_COMMAND} -P …`
+#   ⇒ 没有 target、没有 `main(`，`tools/test/cmake-test-entry.test.mjs` 的"注册名 ↔ 源文件"判据判不了它。
+# ★ 这份脚本保留为**手工诊断**（`cmake -DLIFT_AOT_DIR=… -DLIFT_AOT_SPLIT=… -P lift_aot_split.cmake`），
+#   ⛔ 不要把它重新接回 `add_test`；改判据请改 `verifyAotSplit`，并让两处保持一致（或删掉本文件）。
+# =====================================================================================
 #
 # 设计：`.tmp/aot/irsplit/design.md` §4.1-2。红线是"拆分的每一份都复用**全局**算出来的
 # `entry_owner` / `block_flags` / `structure.structured_roots`"——这条红线坏掉时**产物仍然能链、

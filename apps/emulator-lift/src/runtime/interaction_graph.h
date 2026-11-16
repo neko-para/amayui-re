@@ -73,6 +73,12 @@ enum class CondKind : std::uint8_t {
     ScreenRect = 2,   // 矩形均值命中（产出框 ⇒ `click center` 的坐标来源）
     ScreenChanged = 3,// 自进入等待以来"与上一次采样不同"发生过（读 `changeCount()`）
     Script = 4,       // 引擎脚本身份（marker 源的**电平**：当前身份 == X）
+    // ★ `presents <n>`：guest **累计** Present 帧数 ≥ n（绝对）。**只给 `--input-plan` 用**
+    //   （`S4/S2'` 的门，见 `runtime/input_plan.h`）：`--interaction-graph` 不认这个词 ——
+    //   图是在**块边界**推进的，plan 只在 **guest 读点**推进；同一个词两侧刻度不同 ⇒ 解析期分开
+    //   （`loadText` 的 `allow_plan_conds`）。计数由 `HeadlessPresenter::present()` 成功那一次推
+    //   （`present.cpp`；两臂同一份，guest 可见、确定）。
+    Presents = 5,
 };
 const char* condKindName(CondKind k);
 
@@ -86,6 +92,7 @@ struct GraphCond {
     bool script_by_id = false;              // true = 文本能解析成 u32（十进制 / 0x）⇒ 按 id
     std::string text;                       // 规范化后的可读写法（trace / 报错用，⛔ 不参与判定）
     int rect_index = -1;                    // bindSampler 填（= 该矩形在 sampler 里的索引）
+    std::uint64_t presents = 0;             // Presents：目标**绝对**帧数（`--input-plan` 专用）
 };
 // 只读 `FrameSampler` 的单调计数 + **最近一次身份采样**：不采样、不读像素。
 // `identity` = 最近一次 VM 循环头采样（`Machine::last_marker_sample_`；可为 nullptr ⇒
@@ -146,7 +153,11 @@ constexpr std::uint64_t kDefaultNodeTimeoutMs = 5000;
 class InteractionGraph {
 public:
     // ---- 解析（失败 ⇒ false + err 带 `origin:行: 原因`；成功 ⇒ 旧图被替换）----
-    bool loadText(const std::string& text, const std::string& origin, std::string* err);
+    // ★ `allow_plan_conds`：只由 `InputPlan::loadText` 传 true ⇒ 允许 `presents <n>` 这个**只属于
+    //   `--input-plan` 的门**（理由见 `CondKind::Presents`）。`--interaction-graph` 的调用方用缺省值
+    //   ⇒ 图文件里写 `presents` 是**解析期硬错**（⛔ 不是"解析了但永不成立"的静默降级）。
+    bool loadText(const std::string& text, const std::string& origin, std::string* err,
+                  bool allow_plan_conds = false);
     bool loadFile(const std::string& path, std::string* err);
     void clear();
 
