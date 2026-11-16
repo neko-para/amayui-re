@@ -343,6 +343,24 @@ function sleepSync(ms) {
 }
 
 /**
+ * `cmake --build` 的 argv（**唯一**一处构造它 ⇒ 单测只需断言这一个纯函数）。
+ *
+ * ★ `target`（条目字段 `buildTarget`）= **只重建守卫生效的那个 target**。
+ *   为什么需要它：本仓的 `emulator-lift-runtime` 是**静态库** ⇒ 链进每一个 exe；只改一个 TU
+ *   也会把 15 MB 的 `emulator-lift-aot.exe` 重链一遍（实测单条变异 12 min，其中编译只占几秒）。
+ *   带 `--target` 之后单条变异只编 1 个 TU + 链 1 个小 exe。
+ *   ⚠ 代价：**其它 exe 会停在变异版** ⇒ 一轮结束时必须全量重建回基线（`finalizeBuildDirs`）。
+ * @param {string} buildDir
+ * @param {string|null|undefined} target
+ * @returns {string[]}
+ */
+export function cmakeBuildArgs(buildDir, target) {
+  const args = ['--build', buildDir];
+  if (target) args.push('--target', String(target));
+  return args;
+}
+
+/**
  * 重建构建目录。
  *
  * ★ 为什么要**重试**（实测，2026-11-08）：Windows 上同一个 exe 在几秒内被链接两次时，
@@ -355,16 +373,18 @@ function sleepSync(ms) {
  *   那是最糟的误判（前者会被当成假守卫，后者会让整轮中止）。
  *   ⇒ 重试是安全的：构建是幂等的，真编译错误重试也不会变绿（只是慢一点）。
  *   ⛔ 不要用重试掩盖**判据**层面的失败 —— 它只包 `cmake --build`，不包 ctest / node --test。
+ *
+ * ★ `target`（缺省 null = **全量**）：见 `cmakeBuildArgs`。**收尾那次必须不带它**。
  */
-function buildCtestTargets(logFd, buildDir = CTEST_BUILD_DIR, { attempts = 3, delayMs = 800 } = {}) {
+function buildCtestTargets(logFd, buildDir = CTEST_BUILD_DIR, { attempts = 3, delayMs = 800, target = null } = {}) {
   let last = null;
   let prev = null;
   for (let i = 1; i <= attempts; i += 1) {
-    last = spawnSync('cmake', ['--build', buildDir], { cwd: ROOT, stdio: ctestStdio(logFd) });
+    last = spawnSync('cmake', cmakeBuildArgs(buildDir, target), { cwd: ROOT, stdio: ctestStdio(logFd) });
     if (!last.error && last.status === 0) {
       if (i > 1) {
         console.error(
-          `（重建 ${buildDir} 第 ${i} 次才成功；上一次 ${prev?.error ? prev.error.message : `退出码 ${prev?.status}`}，` +
+          `（重建 ${buildDir}${target ? ` --target ${target}` : ''} 第 ${i} 次才成功；上一次 ${prev?.error ? prev.error.message : `退出码 ${prev?.status}`}，` +
             '按 Windows 文件占用抖动重试）',
         );
       }
@@ -375,6 +395,42 @@ function buildCtestTargets(logFd, buildDir = CTEST_BUILD_DIR, { attempts = 3, de
   }
   return last;
 }
+
+/**
+ * 一轮结束时的**全量重建回基线**（每个构建目录一次，⛔ 不带 `--target`）。
+ *
+ * ★ 为什么必须有（这条比提速更重要）：条目带 `buildTarget` 时，本轮只重建了守卫那一个 target
+ *   ⇒ `out/` 里**其它 exe 会停在变异版**。之后谁拿 `out/emulator-lift-aot.exe` 去测墙钟 A/B，
+ *   读的就是一个被改坏过的二进制 —— **静默错、没有症状**。
+ *   ⇒ 判据不是"尽量重建"，而是"**没回到基线就不许 exit 0**"。
+ * ★ 不走这条的只有一种情况：**还原失败**（源文件可能还是变异文）—— 那时全量构建会把变异编进去，
+ *   比"exe 陈旧"更糟；那条路由 journal 下次自愈（`recoverMutationJournal`，它自己全量重建）。
+ * @param {number|null} logFd
+ * @param {string[]} dirs 去重后的构建目录（相对仓库根）
+ * @param {{build?: Function}} [opts] 测试注入点（假 build，避免真跑 cmake）
+ * @returns {{ok:boolean, dirs:string[], failedDir?:string, why?:string}}
+ */
+export function finalizeBuildDirs(logFd, dirs, opts = {}) {
+  const root = opts.root ?? ROOT;
+  const build = opts.build ?? buildCtestTargets;
+  const done = [];
+  for (const dir of dirs) {
+    // 没配置过的目录不重建（那是"本机跑不了"，由条目自己记"无法判定"）
+    if (!fs.existsSync(path.join(root, dir, 'CMakeCache.txt'))) continue;
+    const r = build(logFd, dir, {});  // ★ 空 opts ⇒ 全量，⛔ 不传 target
+    if (r?.error || r?.status !== 0) {
+      return {
+        ok: false,
+        dirs: done,
+        failedDir: dir,
+        why: r?.error ? r.error.message : `退出码 ${r?.status}`,
+      };
+    }
+    done.push(dir);
+  }
+  return { ok: true, dirs: done };
+}
+
 
 /**
  * 只跑**一条** CTest（不构建），带**单测超时**。
@@ -445,7 +501,10 @@ export function runCtestGuard(name, logFd, buildDir = CTEST_BUILD_DIR, opts = {}
         reason: 'config',
       };
     }
-    const build = (opts.build ?? buildCtestTargets)(logFd, buildDir);
+    // ★ `opts.buildTarget`（条目字段 `buildTarget`）⇒ 只重建守卫生效的那个 target。
+    //   ⛔ 缺省 null = 全量（**不改缺省行为**）；一轮结束的收尾由 `finalizeBuildDirs` 全量补齐。
+    const target = opts.buildTarget ?? null;
+    const build = (opts.build ?? buildCtestTargets)(logFd, buildDir, { target });
     if (build.error) return { unavailable: `cmake 不可用：${build.error.message}`, reason: 'build' };
     if (build.status !== 0) {
       return { unavailable: `构建失败（cmake --build ${buildDir}，退出码 ${build.status}）`, reason: 'build' };
@@ -746,6 +805,8 @@ export function recoverMutationJournal({
   }
 
   // ③ CTest 守卫：源文件还原了，exe 里可能还是变异版 ⇒ 按条目重建（去重）
+  //   ★ **全量**（⛔ 不按 `buildTarget`）：journal 里没有 buildTarget 的信息，而且"自愈"的语义是
+  //     "把整棵树撤干净" —— 只重建守卫那个 target 会把别的 exe 留在变异版（静默错）。
   const buildDirs = [...new Set(loaded.entries.filter((e) => e.ctest).map((e) => e.buildDir ?? CTEST_BUILD_DIR))];
   for (const dir of buildDirs) {
     const r = build(null, dir);
@@ -818,6 +879,8 @@ function restoreOnSignal(signal) {
       if (cur === entry.mutated) fs.writeFileSync(abs, entry.before, 'utf8');
     }
     const dirs = [...new Set(appliedEntries.filter((e) => e.ctest).map((e) => e.buildDir ?? CTEST_BUILD_DIR))];
+    // ★ **全量**（⛔ 不按 `buildTarget`）：这里不知道"当前这条有没有 buildTarget"，而且信号路径的
+    //   语义是"把我的改动彻底撤干净" ⇒ 必须让每个 exe 都回到基线。
     for (const dir of dirs) buildCtestTargets(null, dir);
     if (activeJournalPath) fs.rmSync(activeJournalPath, { force: true });
     appliedEntries = [];
@@ -1117,6 +1180,10 @@ const MUTATIONS = [
     guard: 'ctest:aot-window-profile',
     ctest: 'aot-window-profile',
     buildDir: 'apps/emulator-lift/out',
+    // ★ 只重建守卫的 target（**CMake target 名带 `lift-` 前缀**，CTest 名没有）：
+    //   runtime 是静态库 ⇒ 不带它的全量构建会把 15 MB 的 `emulator-lift-aot.exe` 重链两遍。
+    //   安全性由「一轮结束的全量重建回基线」兜底（见 `finalizeBuildDirs`）。
+    buildTarget: 'lift-aot-window-profile',
     what:
       '窗口的精确包络漏掉 `shim` ⇒ 归一后 `lift+boundary` 把 shim 那一份算进自己 ⇒ ' +
       '闭式（wall = lift+boundary+shim+partial+instrument）当场不成立',
@@ -2994,14 +3061,20 @@ let mutationRunSeq = 0;
 export async function runMutationEntry(m, ctx = {}) {
   const root = ctx.root ?? ROOT;
   const runCtest = ctx.runCtest ?? runCtestGuard;
-  const rebuild = ctx.rebuild ?? ((buildDir) => buildCtestTargets(null, buildDir));
+  const rebuild =
+    ctx.rebuild ?? ((dir) => buildCtestTargets(null, dir, { target: buildTarget }));
   const verifyCtest =
     ctx.verifyCtest ?? ((name, buildDir, opts) => runCtestOnce(name, null, buildDir, opts));
   const journalPath = ctx.journalPath ?? null;
   const journalEntries = ctx.journalEntries ?? [];
   const buildDir = m.buildDir ?? CTEST_BUILD_DIR;
   const timeoutSec = ctx.ctestTimeoutSec ?? m.ctestTimeoutSec ?? null;
-  const ctestOpts = { root, timeoutSec };
+  // ★ `buildTarget`（条目字段）⇒ 三次构建都只重建守卫生效的那个 target：
+  //   基线 / 变异 / 还原各一次，全量重链 15 MB 的 exe 是这条自检**唯一的**大头。
+  //   ⛔ 安全性由「一轮结束的全量重建」兜底（`finalizeBuildDirs`）—— 这里省掉的只是**这一轮的**
+  //   "顺便把无关 exe 重链两遍"，不是"基线的正确性"。
+  const buildTarget = m.buildTarget ?? null;
+  const ctestOpts = { root, timeoutSec, buildTarget };
   const abs = path.join(root, m.file);
   const before = fs.readFileSync(abs, 'utf8');
   if (!before.includes(m.from)) {
@@ -3317,6 +3390,25 @@ export async function main(argv = process.argv.slice(2)) {
   const results = [];
   // ★ 信号恢复要看的"当前已施加"清单 + journal 里的条目（两者同源，顺序一致）
   const journalEntries = [];
+  // ★ 一轮结束的**全量重建回基线**（每个构建目录一次，⛔ 不带 `--target`）。
+  //   为什么：条目带 `buildTarget` 时本轮只重建守卫那一个 target ⇒ `out/` 里其它 exe 可能停在
+  //   **变异版**。谁拿它去测墙钟 A/B 就是静默错（没有症状）⇒ 收尾必须回到基线，失败就不许 exit 0。
+  //   ⛔ 唯一不走这条的是"还原失败"（源文件可能还是变异文 ⇒ 全量构建会把变异编进去）——
+  //     那条路保留 journal，由下次启动的 `recoverMutationJournal`（它自己全量重建）自愈。
+  const buildDirs = [...new Set(selected.filter((m) => m.ctest).map((m) => m.buildDir ?? CTEST_BUILD_DIR))];
+  const finish = (code) => {
+    if (!buildDirs.length) return code;
+    const fin = finalizeBuildDirs(null, buildDirs);
+    if (!fin.ok) {
+      console.error(
+        `\n✗ **exe 未能重建回基线**（${fin.failedDir}：${fin.why}）⇒ 不能算通过：` +
+          `\`${fin.failedDir}\` 里可能有停在变异版的 exe（⛔ 别拿它测 A/B）。`,
+      );
+      return 2;
+    }
+    console.log(`已全量重建回基线（${fin.dirs.length} 个构建目录，全量 target、不带 --target）`);
+    return code;
+  };
   installSignalGuards(journalPath);
   for (const m of selected) {
     // ★ 守卫不存在 ⇒ 这次变异**什么也证明不了**（`node --test <缺失文件>` 退出码 1 会被读成"守卫红了"）
@@ -3348,6 +3440,8 @@ export async function main(argv = process.argv.slice(2)) {
     });
     if (restoreProblem) {
       // ★ journal 条目**故意留着**：源文件或 exe 还没回到基线 ⇒ 下次启动靠它继续/拒绝
+      // ★ ⛔ 这里**不做**收尾的全量重建：源文件可能还是变异文 ⇒ 全量构建会把变异编进去
+      //   （比"exe 陈旧"更糟）。交给下次启动的 `recoverMutationJournal`（它全量重建）。
       console.error(`\n✗ **还原失败**：${m.file} —— ${restoreProblem}。已中止（工作树可能被污染，请查 git diff）`);
       return 2;
     }
@@ -3387,7 +3481,7 @@ export async function main(argv = process.argv.slice(2)) {
     // ★ 单独一类：**守卫不存在** ≠ "守卫没红"、≠ "无法判定"。它必须响亮，因为跑起来会变成假绿。
     console.error('⛔ 这些变异的**守卫不存在**（守卫文件被删 / CTest 注册被删）—— 变异"红了"也什么也没证明（必须从清单里删掉，或改指仍存在的守卫）：');
     for (const g of goneRows) console.error(`  - ${g.file} → ${g.missingWhy}`);
-    return 1;
+    return finish(1);
   }
   if (stale.length) {
     console.error('⚠ 这些变异的**施加点已经不存在**（源文件改过 ⇒ 清单过期，等于什么也没验到）：');
@@ -3398,7 +3492,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (failed.length) {
     console.error('★ 这些守卫**没抓住**已知的破坏 ⇒ 它们不是"会红的守卫"（断言恒真？或压根没验那个常量）：');
     for (const f of failed) console.error(`  - ${f.what}（${f.guard}）`);
-    return 1;
+    return finish(1);
   }
   if (timedOutRows.length) {
     // ★ 超时 ⇒ **不可判定**，但也不能被 exit 0 掩盖：它意味着"这条守卫会红"这件事没被证明。
@@ -3407,7 +3501,7 @@ export async function main(argv = process.argv.slice(2)) {
       `✗ ${timedOutRows.length} 条 CTest 守卫**超时未结束**（不可判定(超时)，不是"红"）` +
         ' ⇒ 不能算通过；先查该守卫是否真会挂死，确属慢档再用 `--ctest-timeout <秒>` 调大。',
     );
-    return 5;
+    return finish(5);
   }
   if (unver.length && unver.length === results.length) {
     // ★ 全部条目都"无法判定（其它）"（构建目录不存在 / 资产缺失）≠ 通过：旧实现这里仍 exit 0，
@@ -3416,9 +3510,9 @@ export async function main(argv = process.argv.slice(2)) {
       '✗ 全部 %d 条变异都无法判定（本机没有可跑的守卫）⇒ 不能算通过；先构建对应域 / 备齐资产再跑。',
       results.length,
     );
-    return 4;
+    return finish(4);
   }
-  return stale.length ? 1 : 0;
+  return finish(stale.length ? 1 : 0);
 }
 
 const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
