@@ -115,6 +115,11 @@ bool expectRgb(lift::SdlWindow& win, int x, int y, std::uint32_t rgb, const char
 //     因为"用户暂停时点了 X"而走进 guest 的关窗路径）。
 // 判据 = `queueSize` / `mouseButtons` / `stopRequested` + `controlStopReason`。
 // 红了意味着：resume 首轮把暂停期间的输入当"刚发生"灌给 guest，或暂停时的关窗把这一轮结束掉。
+//
+// ★ **本用例只是"映射 + sink"这一层**：它自己调 `win.noteControlResume()` 造恢复时刻。
+//   "控制层到底有没有调到宿主"是**另一条**判据，见 `tests/control_endpoint.cpp` 的
+//   `control-resume-arms-host-hook`（真协议 + 真 `serve()` 数 `controlOnResume()` 次数）——
+//   缺陷 `REQ-01M7JFDZK1SZW72SBAW6BC3DRT` 就是"这里绿、接线根本不存在"。⛔ 两层都必须在。
 // =====================================================================================
 bool pushStaleEvent(SDL_Event* e, std::uint64_t timestamp_ns) {
     e->common.timestamp = timestamp_ns;

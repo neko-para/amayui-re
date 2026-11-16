@@ -27,6 +27,10 @@
 //      但配方的 `next_` / `pending` / 当前门 **一位不动**；
 //      **判据 1**：配方 click 与立即队列 click 投出的消息与坐标**逐位相同**（同一段 apply）；
 //      **判据 4**：缩放客户区下只有一个映射公式（1280×720 恒等 / 1920×1080 按同一公式；回推参考系同一点）。
+//   ⑬ **`resume` 真的通知宿主**（`REQ-01M7JFDZK1SZW72SBAW6BC3DRT`）：paused → running 的**每一次**转移各 arm 一次
+//      "恢复时刻"（`controlOnResume`）；`pause` / `sample` / 运行态的 `resume`（`not_paused`）都不 arm。
+//      ⇒ 生产路径上陈旧事件闸门不是死代码。⚠ `present-window` 的陈旧事件用例直接调 sink 的
+//      `noteControlResume()`，它证明的是**纯映射 + sink 一侧**，证明不了这条接线存在 —— 两层都要有。
 //
 // ★ 传输侧的 WS 客户端是**本文件自带的裸实现**（upgrade 请求 + `Sec-WebSocket-Accept` 校验 +
 //   掩码帧），不引任何新依赖；⛔ **不 spawn 子进程**（`AGENTS.md` §5.1：捕获子进程输出 = EPERM）。
@@ -488,6 +492,11 @@ struct FakeHostSide final : lift::ControlHostSide {
         return lift::ControlShotStatus::Ok;
     }
     std::uint64_t controlPresentFrame() const override { return frame.load(); }
+    // ★ `resume` 的宿主即时动作计数器（`REQ-01M7JFDZK1SZW72SBAW6BC3DRT` 的判据面）：
+    //   生产实现里这一步是"把恢复时刻记到 sink 上"（`AotHost::controlOnResume` → `presenter_` → `sink_`），
+    //   替身只数**被调到了几次** —— 缺陷的形状不是"记错了时刻"，是"**一次都没被调**"。
+    std::atomic<unsigned> resume_noted{0};
+    void controlOnResume() override { resume_noted.fetch_add(1, std::memory_order_relaxed); }
 };
 
 // =====================================================================================
@@ -1502,6 +1511,134 @@ void caseClickCoordinateMap() {
 }
 
 // =====================================================================================
+// ★ `resume` 必须真的**通知宿主**（`REQ-01M7JFDZK1SZW72SBAW6BC3DRT`，🐞S2）
+//
+// 洞：`ControlHostSide::controlOnResume()` 声明了、`AotHost` 也实现了（→ presenter → sink 记"恢复时刻"），
+//   但 `Control::serve()` 的 Resume 分支**一次都没调它** ⇒ 生产路径上 `stale_input_before_ns` 恒 0 ⇒
+//   `classifyStaleEvent` 恒 `Keep`：暂停 10 s 里的点击 / 拖动 / 关窗会被 resume 首轮当"刚发生"灌进 guest。
+//   `present-window` 的用例只证明**纯映射 + sink 一侧**成立（它直接调 `win.noteControlResume()`），
+//   证明不了"控制层到宿主这条线存在" —— 那正是本条用例的位置：**真协议 + 真 `serve()`**。
+//
+// 判据：paused → running 的**每一次**转移 arm 一次，其余命令不 arm。
+//   ① `pause` 不 arm（进暂停态没有"首轮灌洪水"这回事）；
+//   ② `resume` arm 一次；
+//   ③ 运行态再 `resume`（`not_paused`）不 arm —— 没有状态转移就没有"恢复时刻"；
+//   ④ `sample`（暂停态取数）不 arm；
+//   ⑤ `resume --for-ms` **也** arm：它同样放行 guest 一轮，那一轮同样会把队列里的洪水吃进来；
+//   ⑥ 再 `resume` ⇒ 又多一次（计到 3）。
+// 红了意味着：恢复时刻没被记下来 ⇒ 陈旧事件闸门是死代码（本缺陷的形状；`rm` 掉 serve 里那一行就红）。
+// =====================================================================================
+void caseResumeArmsHostHook() {
+    ::lift_test::g_current_case = "control-resume-arms-host-hook";
+
+    namespace fs = std::filesystem;
+    const fs::path root = fs::path("control-endpoint-work") / "ctl-resume-hook";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::create_directories(root, ec);
+    LIFT_CHECK(fs::is_directory(root, ec));
+
+    lift::Control a;
+    lift::Control::Options opts;
+    opts.root = root.string();
+    opts.port = 0;
+    opts.idle_timeout_s = 300.0;
+    opts.orphan_timeout_s = 10.0;
+    opts.predicate_timeout_s = 2.0;
+    opts.session = "sess-resume-hook";
+    opts.exe_sha256 = "resume-hook";
+    opts.shape = "test-shape";
+    std::string err;
+    LIFT_CHECK(a.start(opts, &err));
+    if (!a.started()) {
+        std::fprintf(stderr, "start err: %s\n", err.c_str());
+        return;
+    }
+
+    const std::string token = jsonString(readWholeFile(a.controlFilePath()), "token");
+    WsClient ws;
+    LIFT_CHECK(ws.connectTo(a.localPort()));
+    LIFT_CHECK(ws.handshake(token, false));
+    std::string hello;
+    LIFT_CHECK(ws.readText(&hello));
+
+    FakeHostSide fake;
+    std::atomic<bool> gate_quit{false};
+    bool stop_flag = false;
+    // 主线程 = 本用例的 gate 线程（与 AOT 的块边界汇点同形：`pending()` / `watching()` ⇒ `serve()`）。
+    std::thread gate([&] {
+        lift::WindowManager wm;
+        lift::VirtualClock clk;
+        clk.setRealTime(true);  // `resume --for-ms` 的谓词走 guest 时钟 ⇒ 要它真的走
+        lift::Control::Context ctx;
+        ctx.clock = &clk;
+        ctx.windows = &wm;
+        ctx.stop_requested = &stop_flag;
+        ctx.paused_at = "block";
+        ctx.host = &fake;
+        while (!gate_quit.load()) {
+            if (a.pending() || a.watching()) {
+                if (a.serve(ctx)) {
+                    gate_quit.store(true);
+                    break;
+                }
+                if (a.watching()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        }
+    });
+
+    auto call = [&](const char* req) -> std::string {
+        std::string out;
+        if (!ws.writeFrame(1, req)) return out;
+        if (!ws.readText(&out)) return std::string();
+        return out;
+    };
+
+    // ① 进暂停态：不 arm
+    const std::string p1 = call("{\"id\":1,\"op\":\"pause\"}");
+    LIFT_CHECK(p1.find("\"ok\":true") != std::string::npos);
+    LIFT_CHECK(fake.resume_noted.load() == 0u);
+
+    // ② 第一次恢复：arm 一次
+    const std::string r1 = call("{\"id\":2,\"op\":\"resume\"}");
+    LIFT_CHECK(r1.find("\"ok\":true") != std::string::npos);
+    LIFT_CHECK(fake.resume_noted.load() == 1u);
+
+    // ③ 运行态再 `resume` ⇒ `not_paused`，且**不** arm（没有状态转移）
+    const std::string r2 = call("{\"id\":3,\"op\":\"resume\"}");
+    LIFT_CHECK(r2.find("\"not_paused\"") != std::string::npos);
+    LIFT_CHECK(fake.resume_noted.load() == 1u);
+
+    // ④ 暂停后取数（`sample`）不 arm
+    const std::string p2 = call("{\"id\":4,\"op\":\"pause\"}");
+    LIFT_CHECK(p2.find("\"ok\":true") != std::string::npos);
+    const std::string s1 = call("{\"id\":5,\"op\":\"sample\"}");
+    LIFT_CHECK(s1.find("\"ok\":true") != std::string::npos);
+    LIFT_CHECK(fake.resume_noted.load() == 1u);
+
+    // ⑤ `resume --for-ms` 也放行 guest ⇒ 也要 arm；谓词成立后**重停**
+    const std::string r3 = call("{\"id\":6,\"op\":\"resume\",\"for_ms\":30}");
+    LIFT_CHECK(r3.find("\"ok\":true") != std::string::npos);
+    LIFT_CHECK(r3.find("\"paused\":true") != std::string::npos);
+    LIFT_CHECK(fake.resume_noted.load() == 2u);
+
+    // ⑥ 再恢复到运行态 ⇒ 第三次
+    const std::string r4 = call("{\"id\":7,\"op\":\"resume\"}");
+    LIFT_CHECK(r4.find("\"ok\":true") != std::string::npos);
+    const unsigned noted = fake.resume_noted.load();
+    std::printf("[judge-resume-hook] pause/resume(not_paused)/sample/resume--for-ms/resume 之后 "
+                "controlOnResume 被调 %u 次（期望 3）\n", noted);
+    LIFT_CHECK(noted == 3u);
+
+    gate_quit.store(true);
+    if (gate.joinable()) gate.join();
+    a.shutdown("stopped");
+    ws.close();
+}
+
+// =====================================================================================
 // idle / orphan 两条超时（判据 9d 的形态）：两者都只**请求**收口（⛔ 控制线程里不杀进程），
 // 且 `bye.requested_by` 必须能区分（idle vs orphan）—— 否则"谁把这一轮收了"无法回答。
 // =====================================================================================
@@ -1656,6 +1793,7 @@ int main() {
     caseScreenshotSemantics();
     caseClickDelivery();
     caseClickCoordinateMap();
+    caseResumeArmsHostHook();
     caseTimeouts();
     return lift_test::finish("lift-control-endpoint");
 }
