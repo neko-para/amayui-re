@@ -1,138 +1,148 @@
-# CTX · mac arm64 上要做的事（2026-11-16 交接）
+# CTX · 交接（2026-11-16 晚 · mac arm64 → win32）
 
-> 这份是**待办清单**，不是口径文档。口径看 `AGENTS.md` §12 / `apps/emulator-lift/README.md` / `docs/03-emulator/`
-> （`input-plan.md` · `observations.md` · `defects.md`）。**进度真源仍是 `pnpm tools requirements plan`**。
-> 上一版（2026-11-13）的 P0–P6 待办**不在本文保留**——它们都在需求树里，用上面的命令查。
-> 下面所有读数都是 **win32-x64 / RelWithDebInfo** 的实测，**只作 arm64 对照基线**；⛔ 不要跨机器比墙钟。
+> 这是**待办 / 裁决清单**，不是口径文档。口径看 `AGENTS.md` §12 · `apps/emulator-lift/README.md` · `docs/03-emulator/`。
+> 进度真源仍是 `pnpm tools requirements plan`（活节点 55）。**本机状态**：HEAD `b6afe77 feat: emu ctl`，工作树**干净**（本轮全部已提交）。
 
 ---
 
-## A. 我请你做的事（只有人能做的 4 条）
+## A. 一句话现状
 
-1. **切机器前先提交**。工作树现在有 **43 项**未提交改动（`git status --porcelain` 现为 43 行；
-   最近提交 `9998381 feat: opt build speed & fixes`）。不提交就得整包搬过去。
-2. **跑一次人工对照**（端到端配方只差这一档）：
-   ```
-   ./out/emulator-lift-aot --skip-logo --present window --max-frames 600 \
-     --game-dir <安装树> --appdata <每次全新空目录> --region-log
-   ```
-   到 TITLE 后**手点一次「Load Data」**，把那次收尾的 **`region` 三数**（`in_use / surfaces / heap_blocks`）发我。
-   单：`REQ-01M7GA4B8T9JXFDAYK46YHNH7K`。
-3. **`--cursor-warp` 真的挪宿主光标**这件事我没自证过（win32 上只证到状态行 `cursor-warp: on`）。
-   跑一次 `--present window --cursor-warp`，看光标有没有被挪——顺便验 mac 分支。
-4. **arm64 上重验一次读档路径**（你在 win32 上已确认正常）。
+**控制层 M0 + M1 已落地并验完**：AOT 臂有 WS 端点（`--control-root`）+ 独立客户端 `tools/emu-ctl.mjs`
+（`list/pause/resume/sample/screenshot/click/wait/quit/gc`），能把二进制**停住 → 采样脚本位置 → 投点击 → 继续**。
+**解释器已退役**（target + 6 条 CLI 级 CTest 删除）。**配方前半段已改位置门**（TITLE / GAMESTART / SN0000）。
+剩下的是：三份长配方的尾巴、一个截图缺陷、加载屏的第三条门、以及 **Windows 侧一次都没验过**。
+
+本机读数（macos-arm64 / RelWithDebInfo / HEAD `b6afe77`）：`ctest` **99/99**（skip 3）· `pnpm test` **574** ·
+`pnpm verify` **491** · `mutate --list` **108/108** · `requirements validate` **6/6** · `pgrep` 无残留。
 
 ---
 
-## B. arm64 第一条命令序列（先确认地基）
+## B. 需要你裁决（agent 不能替）
+
+1. **截图缺陷先修吗**（`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`，🐞S2）：
+   `emu-ctl screenshot` 在 `--present headless` **必黑**、在 `--present window` **竞态**（5/7 有图，重试能中）；
+   同一帧 `--dump-frame` 正常。⚠ 它让 **M0 判据 5 形同虚设**（全黑 buffer 也满足 `hash_still_matches` + 两拍相同）。
+   ⇒ 建议**先修**（要动 `present.h/cpp` 的 last_* 保留策略 / arena 复用），修完同轮给判据 5 补"非全黑"。
+2. **加载屏的第三条门现在做吗**（`REQ-01M7J97QY66KMP5SBPCTR0S3TP`）：
+   加载屏与保存屏**共用 `SAVE.BIN` 且同区间**（已由读数钉死）⇒ 位置门**区分不了**，唯一区分量是 `global a9cb` 位。
+   做它需要"按槽号读 global/local 的只读取址原语"（含解码），你已说"可以后续安排"。**不做就只能靠配方自己知道刚才点的是 Load 还是 Save**（不能当判据）。
+3. **控制层探索手感 7 条挑哪几条做**（`REQ-01M7J624JNTFBY7WF52J50KQDC`）：
+   优先级建议：`--until-pos`（按 pos 条件暂停）> `click` 施加回执 > 门失败 fail-fast > 缺省 orphan/root > 录制导出（M2）。其余两条（headless 截图黑、sample≠门的口径）已写进文档。
+4. **AOT 覆盖缺口 6 条挑哪几条补**（`REQ-01M7J6D62QFRZC2454GV7CKJDJ`）：
+   最像"该补"的是 **`--dump-frame` 开跑前建目录**（纯启动期判定，不需要 guest 代码）；其余（`--time-limit` 解析、hidden 窗口）成本更高。
+
+---
+
+## C. 需要动手的（按顺序；每条都有判据）
+
+### C1 · 三份长配方的尾巴改位置门（**READY，区间已取证**）
+
+可用区间（全部有读数，出处 `docs/03-emulator/scripts/*.md`）：
+
+| 屏 | 区间 | 说明 |
+|---|---|---|
+| TITLE | `[0x0460,0x0520)` | 吃 click 的窗口（门 15/15） |
+| GAMESTART | `[0x0664,0x0724)` | 门 15/15 |
+| SN0000 页1 / 页2 / 页3 | `[0x46B8,0x470C)` · `[0x5038,0x504C)` · `[0x5990,0x59A4)` | 页 1 门 12/12；页 2/3 3/3 |
+| **FELLOW** | ★`[0x1684,0x16A4)` | 4/4；**不要**用轮询体 `[0x1570,0x15A8)`（门命中但点击不换屏 ⇒ exit 5） |
+| **SAVE**（含加载屏） | `[0x1104,0x11C4)` | 3/3；⚠ 两屏同区间，位置区分不了 |
+
+要改的三份：`sn0000-quit.plan` · `sn0000-save.plan` · `sn0000-save-profile.plan` ——
+把 `await script FELLOW` + 其后 `wait 10000/2000` 换成 `await position FELLOW 0x1684 0x16A4 timeout 60000`；
+把 `await script SAVE` + `wait 2000` 换成 `await position SAVE 0x1104 0x11C4 timeout 30000`。
+
+**必须保留的 `wait`**（真·时间语义，别删）：`click 650 320` 之后的 `wait 8000/15000`（确认框 `SBUNKI.BIN` 上没有稳定门）、
+profiler 窗内时长、`se-eof` 的 `wait 12000`（SE 尾音）、`title-loaddata` 的 `wait 20000`（缺陷复现件，**该文件不要动**）。
+
+判据：每份跑 3 次 ⇒ `steps/fired/pending/presents` 与 `region` 三元组逐位相同、exit 0；负对照（换成该屏永不执行的区间）⇒ exit 5 + 点名。
+⛔ **5 条 `repro:` 点击行一个空格都不许改**（`1070 480` / `650 320` / `1186 373` / `1180 640` / `830 592`）。
+⚠ 缺读数：`sn0000-quit` 的 `click 100 270` 与"回 TITLE"段 ⇒ 那一段**保持原样 + 加注释**，别硬改。
+
+### C2 · 修截图缺陷（见 B1）
+
+判据：headless 跑到 ≥30 帧后 `screenshot` ⇒ 非黑像素 > 50%（拿 `--dump-frame` 同帧对照）；window 同样；
+两拍 `shasum` 相同、`hash_still_matches` 语义不变。临时规避见 §G-3。
+
+### C3 · 第三条门 `await global/local`（见 B2）
+
+判据（单据正文有）：`await global a9cb 1` 在加载路径成立、保存路径不成立；`local` 越界 ⇒ exit 2 点名；
+门未满足 ⇒ 停在原步 + `timeout` ⇒ exit 5 点名；读数必须来自执行中的 guest（⛔ 不读宿主缓存）。
+⚠ 实现落点应是**共享 runtime 的只读取址原语**（与 guest 同一份解码），⛔ 不在配方驱动器里另写一份。
+
+### C4 · Windows 侧验证（**一条都没做过**）
+
+| # | 验什么 | 怎么判 |
+|---|---|---|
+| W1 | `ctest` 全绿 | Windows 上应**真跑** mac 上 skip 的 3 条：`cli-aot-flags`（Windows 专有）、`gpu-raster`、`frame-dump-failure`（用 MSVC `io.h`） |
+| W2 | vcpkg 冷装 | 本轮为控制层加 `boost-asio`(default-features:false)/`boost-beast`/`nlohmann-json`；⚠ **实测不是"全 header-only"**：`boost-beast` 把 asio 的默认特性重新打开 ⇒ 装了 `boost-context`/`boost-date-time`/`boost-container` 三个**编库**端口。Windows 要另付一次冷装 |
+| W3 | 编译 | clang-cl + MSVC STL 编 `<boost/beast/websocket.hpp>`（`_WIN32_WINNT` / `/permissive-` / 告警等级）；`find_package(Boost CONFIG COMPONENTS asio beast)` 实测 mac 可用，Windows 待验 |
+| W4 | **受限令牌/普通令牌下能否 listen `127.0.0.1`** | 端点起不来就是"控制层在 Windows 不可用"⇒ 记成事实，⛔ 不要改传输 |
+| W5 | `ctl.<pid>.<nonce8>.json` 的 ACL / Low 完整性 | 沙箱起的模拟器写文件、DSH 宿主读并连 —— 两个方向各测一次 |
+| W6 | `TerminateProcess` 之后 | `list` 应报 `alive:false, why:"refused"` 且文件残留；`emu-ctl gc` 只删残留、不删 `keep.txt` |
+| W7 | `netsh int ipv4 show excludedportrange protocol=tcp` | 对照 `--control-port 0` 拿到的端口是否落在保留段 |
+| W8 | 真 OS 事件洪峰（判据 13 的另一半） | Windows 上比 mac 容易（可直接 `SendInput`/`PostMessage`）：暂停期间点/拖窗口，resume 后**这一轮不许结束**、frame 继续 +1 |
+| W9 | 单实例/多实例/授权 | `--control-port <已占用>` ⇒ exit 2 点名；两实例 ⇒ 2 alive、不带 `--session` ⇒ exit 4；错 token ⇒ 握手失败；带 `Origin` ⇒ 拒 |
+
+### C5 · 旧账（仍是活单，别重复开）
+
+- `REQ-01M7704NBZEMADBHRZCKPQ7W1S`：把**剩余 Windows 专有守卫搬 POSIX**（`title-entry-paths` / `movie-logo` / `frame-dump-failure` 等）—— 注意 `cli-time-limit` / `cli-dump-frame` 已随解释器退役，**不在其列**。
+- `REQ-01M7G7GPBG9BK2360WSG6DBFNP`：AOT 音频管线（真出声）。
+- `REQ-01M7GA4B8T9JXFDAYK46YHNH7K`：AOT 自动到「加载存档」屏 + 人手对照（本轮的 `SAVE.md` / `save-format.md` 已把环境与区间备好）。
+
+---
+
+## D. 已收口（⛔ 不要重做）
+
+| 单 | 结论 | 凭据 |
+|---|---|---|
+| `REQ-01M7HX0CJ202MJ4PZXW80VFA0J`（M0） | WS 端点 + 端点发现 + 暂停/时钟冻结/截图/继续/idle+orphan 收口；14 条判据在 mac 上逐条取读数 | verify `tests/control_endpoint.cpp#endpoint-surface` |
+| `REQ-01M7J2P5S27VX7WMRR3ZC9K2E8`（M1） | `click` 入队到立即队列、读点施加、**不推进配方 `next_`**、队列上界 64 | verify `tests/control_endpoint.cpp#click-enqueue-at-read-point` |
+| `REQ-01M7HQ57XV66FZQA5ECGHWD71N`（解释器边界） | 6 条 CLI CTest + target + `src/main.cpp` 删除；13 条全部归位 | done_reason |
+| `REQ-01M7HP2YRZG222E0NE2H6MW6NK`（🐞S2 退出码） | AOT 出口读 `shim.exit_code`（非零 ⇒ 2），映射搬到 `src/runtime/guest_exit.h` | verify `tests/guest_exit.cpp#lift-guest-exit` |
+| 配方前缀 | TITLE / GAMESTART / SN0000 页 1–3 已改位置门；`se-eof`/`sn0000` 3/3 逐位相同 | `REQ-01M7HTXBADJC7R5CHKRJ1MMADG` |
+| 脚本级分析落盘 | `docs/03-emulator/scripts/{TITLE,GAMESTART,SN0000,FELLOW,SAVE}.md` + `_recipe-map.md` | 每份都带命令与读数 |
+
+★ 覆盖缺口**已登记**（⛔ 不是"没有缺口"）：`REQ-01M7J6D62QFRZC2454GV7CKJDJ`（AOT 上无端到端断言的 6 个面）。
+
+---
+
+## E. 我请你做的（只有人能做的）
+
+1. **切机器前确认 commit**（本机 HEAD `b6afe77`，工作树干净；`out/` 不入库，Windows 要重新构建）。
+2. **`--cursor-warp` 真机自证**（win32 上只证到状态行 `cursor-warp: on`）：`--present window --cursor-warp` 看宿主光标有没有被挪。
+3. **人工对照一次「加载存档」**：用 fixtures 组出的 appdata（见 §G-4），点 Load Data，把收尾 `region` 三数发我（`REQ-01M7GA4B8T9JXFDAYK46YHNH7K`）。
+4. **Windows 上重跑一次控制层全链**（`list → pause → sample → resume --for-ms 200 → screenshot → quit`）—— W4/W5/W6 都在这里。
+
+---
+
+## F. 恢复命令
 
 ```bash
 cd apps/emulator-lift
-cmake --preset macos-arm64          # Ninja / RelWithDebInfo
-cmake --build --preset macos-arm64
-ctest --test-dir out --output-on-failure
+cmake --preset windows-x64            # vcpkg 清单模式：改 vcpkg.json 就等于装依赖
+cmake --build --preset windows-x64
+ctest --test-dir out --output-on-failure      # 期望 99/99（Windows 上 skip 应更少）
 cd ../.. && pnpm test && pnpm verify && node tools/requirements.mjs --validate
+node tools/emu-ctl.mjs --describe      # 控制层命令表 / mutates / 两种 paused_total_ms 口径
 ```
 
-**win32 基线**（arm64 要重新报，别套用）：`ctest` **102/102**（104.9 s）· `pnpm test` **552/552** ·
-`pnpm verify` **500/500** · `requirements validate` **6/6** · `git diff --check` exit 0。
-
-⚠ mac 上已知会 SKIP 的：`cli-time-limit` / `cli-dump-frame` / `frame-dump-failure`（Windows 专有）、
-`gpu-raster`（dummy 视频建不出 GPU device）。**跳过要如实记成跳过，⛔ 别把"没跑"说成绿。**
-
 ---
 
-## C. 逐项回归（本次会话动过的 7 个面）
+## G. 坑（本轮踩过，别再踩）
 
-### C1 · IR 拆 8 份（`LIFT_AOT_SPLIT=8`，仍 `-c -O2`）
-- **win32**：构建 228 s → **80.8 s**（lift-gen 58.64 / clang 段 21.63 / 链接 0.54）；
-  `objdump -d` 2,613,209（split8）vs 2,619,129（split1）= **−0.226%**；`.ll` 合计 134,075,853 B（8 份 / 16.0–18.1 MB）。
-- **arm64 要验**：① 8 份 clang 真的并行；② `ctest -R lift-aot-split-manifest` 过；
-  ③ ★ **`.ll` 的 8 份应与 win32 逐字节相同**（IR 是 target-independent）——最便宜也最强的跨架构判据：
-  比对 `out/aot/lift_aot.split.txt` 里每份的 `sha256 / bytes / functions`。
-  ⇒ **先回 win32 把这份清单存下来**（`out/` 不入库，切机器就没了）。
-- 回退：`-DLIFT_AOT_SPLIT=1`（一行，不用回滚源码）。
-
-### C2 · 闭包闸并进生成那一趟（`--closure-gate`）
-- **win32**：单独那次 `--check` 的 48.6 s 已并掉；`.ll` / pin / table **逐字节相同**。
-- **arm64 要验**：① 产物与 win32 同（用 C1③ 那份清单）；② **坏闭包仍硬红**：在 `.tmp/` 造坏副本
-  （⛔ 别动入库件 `aot/closure.txt`）⇒ 构建必须失败并打出同一行汇总。
-
-### C3 · BUG-24 跳表闭包（审计 + 区间排除 + 表项立 leader）
-- **win32**：`bb_41B92D` 出现、表首 `bb_41B974` 消失；62 张 `.lst` 表可派发目标 **577 → 605**（缺 28 → 0）；
-  关档（`--no-jmptab-exclude --no-close-jmptab-items`）的 `.ll` 与改前**逐字节相同**。
-- **arm64 要验**：`ctest -R lift-jmptab-dispatch`（win32 46.95 s）；审计行应满足
-  `items_nondispatch=0 · block_starts_in_range=0 · covers_protected=0 · passes=2`。
-
-### C4 · `EnumSystemLocalesA` 续延桩
-- **win32**：`locale-ext` 新用例 `enum-locales-no-cache` 修前红（12 failures）→ 修后绿；
-  `shim :` 三数 `registered=385 / bound-stub-ea=385 / next-slot=385` **修前修后不变**。
-- **arm64 要验**：`ctest -R locale-ext`；以及读档路径真跑（见 A4）。
-
-### C5 · 删掉 AOT 的 `--native-overrides` + 逐帧日志改 opt-in
-- **win32**：净删 566 行；缺省 stdout **388 → 85**；`--native-overrides` / `--lst` 是**未知参数 ⇒ exit 2**；指纹逐位同。
-- **arm64 要验**：那两个参数仍 exit 2；缺省 stdout 行数；`ctest -R 'aot-arm-shape|cli-aot-flags'`。
-
-### C6 · `region` 表改 opt-in（`--region-log`）
-- **win32**：缺省 stdout **85 → 57**；`--region-log` 加回那 28 行且与改前**逐字节相同**。
-- **arm64 要验**：两条行数；`ctest -R aot-arm-shape` 的第 ③ 条断言。
-- ★ 反讽但重要：`region` 三数是目前**唯一稳定、随屏而变**的屏幕指纹（`OBS-20261116-04`）⇒ **别把这块整段删掉**。
-
-### C7 · 输入投递层（S1 + S4 + S2′）
-- **win32**：11 个投递点全部接上；`machine.cpp` / `aot_run.cpp` 里新层 5 个词 **0 命中**；
-  指纹逐位同；300 帧交错 A/B 中位 **−0.51%（噪声内）**；`objdump -d` +152 / +169 行；`lift_aot.obj` 0 变化。
-- **arm64 要验**：`ctest -R 'input-plan-read-points|cli-aot-flags'` ·
-  `node --test --test-isolation=none tools/test/input-plan-shape.test.mjs` ·
-  `node tools/mutate-check.mjs --match 'input-plan-shape'`（⛔ 别跑全量）。
-- 设计口径：`docs/03-emulator/input-plan.md`（**已复审修正**）。`.tmp/aot/input/design.md` 有错，⛔ 别照它实现。
-
----
-
-## D. 只在 mac 上才验得到的平台点
-
-1. **`--cursor-warp` 的 mac 分支是存在的**：`src/runtime/host_cursor.cpp` 的 `__APPLE__` 走
-   `CGWarpMouseCursorPosition` + `CGAssociateMouseAndMouseCursorPosition`
-   （注释写明**不需要辅助功能授权**；warp 后必须复位关联，否则"脚本挪完光标玩家推不动"）。
-   ⇒ 期望 `cursor-warp: on`，**不是** `unsupported`（`Unsupported` 只给 Linux / 其它平台）。
-2. **HiDPI：point vs pixel**。mac 上窗口尺寸是 **point**；若 Retina 缩放，guest 1280×720 → 屏幕坐标的换算
-   可能与 win32 不同。相关纯函数在 `src/runtime/cursor_map.h`（`cursor-map/*` 已钉住 image 尺寸敏感）。
-   ⇒ warp 落点偏了先查这一层，别先怀疑输入投递。
-3. **`--sound`**：AOT 臂一律"接受 + 一次性说明 + 不出声"（本臂无音频管线，票 `REQ-01M7G7GPBG9BK2360WSG6DBFNP`）。
-   mac 上应**仍是这条说明**，不是静默。
-4. **资产与安装树**：`links/install` / LFS 资产 / 两份宿主字体要在 mac 上到位；缺了 `assets` 档会跳过。
-5. **mac 本机能做 GPU**：`--present window` / `--present hidden` 都能建 Metal device；
-   但 `SDL_VIDEODRIVER=dummy` ⇒ 无 GPU ⇒ **拒绝启动**（测试 `LIFT_SKIP(77)`）。`--present headless` = **隐藏窗口**。
-
----
-
-## E. 已知未做（都已在需求树里，别重复开单）
-
-| 单 | 内容 |
-|---|---|
-| `REQ-01M7G7GPBG9BK2360WSG6DBFNP` | AOT 音频管线：feeder 在 AOT 臂怎么跑（真出声） |
-| `REQ-01M7GA4B8T9JXFDAYK46YHNH7K` | AOT 自动到「加载存档」屏：缺一份经验证的按键/坐标配方 + 人手对照 |
-| `REQ-01M7GAMJQ26DHZSPJQTXZ88S7D`（**BUG-26**） | 同一输入两臂结果不同：`click 1070 480` 在 AOT 生效、在解释器无反应 |
-| 输入后续（未开单，见父单正文） | `GetMessageA` 空队列由计划供给 · 两臂共有事件 emit · 旧 `harness_script` 路径删除 · `Reads`/`Insns` 门 · 干净的"无动作对照"（`noop` 动作） |
-
-★ **建议优先 BUG-26**：如果两臂对同一输入给出不同结果，那所有"解释器能跑通 / AOT 跑不通"的结论
-都可能是**输入路径差异**而不是引擎差异。三个候选原因（两臂 guest 时间步长差约 15× / 解释器 `bounded-no-sample` /
-**两臂走了两条不同施加路径**）都还没定。
-
----
-
-## F. 坑（这次踩过，别再踩）
-
-1. **到 TITLE 的任何自动化都必须带 `--skip-logo`**。不带时逐帧 hash 在 **frame 64** 就冻死
-   （`0xBE8BCF5F5F55D3F5` 连续 337 帧）⇒ 之后的按键打在**静止的 boot 帧**上。
-   ⚠ 所以之前那份"300 帧指纹逐位相同"里，`lastHash` 其实是**冻结的 boot 帧**，不是标题画面。
-2. **判据别选错**：`stop @` 在 `--max-frames` 下两侧恒同（停在 Present 桩）⇒ **无证明力**；
-   `lastHash` 每次 run 都不同（real-time + 动画屏）⇒ **不是指纹**；
-   **能用的是收尾 `region` 三数**（需 `--region-log`，两侧都要带）。
-3. **`--input-plan` 表达不了"同一份计划去掉动作"**（只有门没动作 ⇒ 解析报 `缺动作行`、exit 2）
-   ⇒ 对照只能用"不给 plan"或"惰性点击"两档。
-4. **⛔ 不跨机器比墙钟**（`AGENTS.md` §12.6：同机 / release / 交错 A/B ≥3 对 / 中位）；本机分辨不了 <5%。
-5. **⛔ AOT 臂没有 native override 了**：`src/aot/` 里那套机制的标识符是**禁用词**
-   （`tools/test/aot-arm-shape.test.mjs` 钉住 33 个）。
-6. **守卫的"红"要分级**：如果红只因**编译不过**（断言用了新增 API），它没证明运行期行为 ⇒ 报告里标"证明力弱"。
-7. **需求树只能经 CLI 写**：`node tools/requirements.mjs --set … --write`；⛔ 不手改 `data/requirements/*.md`。
-8. **⛔ 不要 `git add` / `commit`**：提交时机由你定（本条长期有效）。
+1. **`sample` 与 `await position` 的评估点不同**：`sample` 停在**块边界**，位置门在**读点**判定 ⇒
+   采样命中率**不能**推门命中率，反之亦然（实测：GAMESTART 门 7/7，而采样 `0/47`）。
+2. **`sample`/门的判据要"停在该屏且能吃输入的那一段"**：TITLE/FELLOW/SAVE 都是"回调体吃 click、轮询体不吃"；
+   把门下在轮询体上会得到"门命中、click 也施加了，但界面不动"（FELLOW 负对照就是这样 exit 5 的）。
+3. **⛔ 不要用 `emu-ctl screenshot` 当证据**（缺陷 `REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`）：headless 必黑、window 竞态。
+   要看画面 ⇒ `--dump-frame '<dir>/frame_{frame}.bmp'` + `node .tmp/check-black.mjs <bmp>`（`.mjs`，读非黑比例）。
+4. **存档环境**：只用 `corpus/fixtures/` 的原版样本（旧汉化存档是 GBK：**能看见能加载**，但"标题/当前章节"会乱码）；
+   `--appdata` = `%AppData%` 根，实际落点 `<appdata>/Local/Eushully/天結いキャッスルマイスター/SAVE/`；
+   ★ **带 fixtures 的 `SAVE.DAT`/`SAVE.BAK` ⇒ 第一屏是 110–119（全空）**；把它们拿掉 ⇒ 000–009（有项）。
+5. **`resume --for-ms` 结束会重新暂停**，而"暂停 + 客户端全断"⇒ `--control-orphan-timeout`（缺省 **10 s**）**自己 quit**。
+   连续采样要么一个进程里跑完，要么两次命令间隔 <10 s，要么显式 `--control-orphan-timeout 600`。
+6. **驱动脚本必须用 `node`（`.mjs`）**：⛔ 不要 Python、不要 `bash + python3 -c`；`--json` 成功信封是
+   `{op, ok:true, data:{<op>:…}}` ⇒ 路径是 `data.sample.script.pos`（不是 `sample.script.pos`）。
+7. **到 TITLE 的自动化必须带 `--skip-logo`**；`stop @` 在 `--max-frames` 下无证明力；`lastHash` 不是指纹；
+   能用的是收尾 `region` 三数（需 `--region-log`）—— ⚠ 但 `region` 对"点没点中"**没有区分力**（实测点了/没点同值）。
+8. **⛔ 不跨机器比墙钟**（§12.6）；⛔ 不 `git add` / `commit`；⛔ 需求树只经 CLI 写。
