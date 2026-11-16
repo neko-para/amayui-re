@@ -3465,6 +3465,58 @@ const MUTATIONS = [
       '`--audio sdl` 被解析成 `Off`（"认不出就当 off"）⇒ 用户以为开了真设备、其实整条音频是关的，' +
       '而**没有任何症状** ⇒ `aot-audio-flags` 的解析断言红',
   },
+  // ── D3DX surface 拷贝（SC0000 第 1 步；守卫 = `tests/d3dx9_load_surface.cpp`，CTest `d3dx9-load-surface`）──
+  //   ★ 这三条代表同一类错：**"看起来拷了、其实错了"** —— 半开当闭区间（多拷一圈）、尺寸不等硬拷（内容错）、
+  //     跨序不换 R/B（红蓝互换）。三者都不崩、不改指纹，只有逐像素断言能抓。
+  //   ★ 三条都实测红过（2026-11-17，实现者报的 failures 数写在 `what` 里）。
+  {
+    file: 'apps/emulator-lift/src/runtime/d3d9.cpp',
+    from:
+      '        *r = static_cast<std::int32_t>(cpu.mem->rd32(ea + 8));\n' +
+      '        *b = static_cast<std::int32_t>(cpu.mem->rd32(ea + 12));',
+    to:
+      '        *r = static_cast<std::int32_t>(cpu.mem->rd32(ea + 8)) + 1;  // 变异：半开当闭区间\n' +
+      '        *b = static_cast<std::int32_t>(cpu.mem->rd32(ea + 12)) + 1;',
+    guard: 'ctest:d3dx9-load-surface',
+    ctest: 'd3dx9-load-surface',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3dx9-load-surface',
+    what:
+      'rect 的 right/bottom 各 +1（半开当闭区间）⇒ 3×2 变 4×3：`load-surface+rect-semantics` 的逐像素断言红' +
+      '（实测 45 failures）',
+  },
+  {
+    file: 'apps/emulator-lift/src/runtime/d3d9.cpp',
+    from: '    if (sw != dw || sh != dh) {',
+    to: '    if (cpu.mem == nullptr && (sw != dw || sh != dh)) {  // 变异：1:1 判据失效',
+    guard: 'ctest:d3dx9-load-surface',
+    ctest: 'd3dx9-load-surface',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3dx9-load-surface',
+    what:
+      '源/目标矩形尺寸不等不再拒绝（静默按左上角硬拷）⇒ `load-surface+one-to-one` 的"响亮停 + 目标一字节不变"红' +
+      '（实测 4 failures）',
+  },
+  {
+    file: 'apps/emulator-lift/src/runtime/d3d9.cpp',
+    from:
+      '        if (so != dow) {\n' +
+      '            plan.byte_map[0] = 2u;\n' +
+      '            plan.byte_map[2] = 0u;\n' +
+      '        }',
+    to:
+      '        if (so != dow) {\n' +
+      '            // 变异：跨序不换 R/B\n' +
+      '            plan.byte_map[0] = 0u;\n' +
+      '            plan.byte_map[2] = 2u;\n' +
+      '        }',
+    guard: 'ctest:d3dx9-load-surface',
+    ctest: 'd3dx9-load-surface',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3dx9-load-surface',
+    what:
+      '32bpp 跨序（`{21,22}↔{32,33}`）不换 R/B ⇒ `load-surface+format-pairs` 的 swapRbPlan 断言红（实测 8 failures）',
+  },
 ];
 
 let mutationRunSeq = 0;
