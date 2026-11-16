@@ -5,10 +5,13 @@
 //   （2026-11-17 实测，见 `docs/03-emulator/measurement.md`）⇒ 整轮口径会被别的段稀释
 //   （整轮 shim 占 1.4% 不代表窗口内也是 1.4%）。窗口 = 把同一批桶**限在一段时间里**。
 //
-// ★ 闭式（必须成立；`unaccounted` 是**定义式**，恒有数、恒打印）：
+// ★ 闭式（`Totals::totals()` 一次算完，`aot/window_prof.cpp` 是唯一实现）：
 //     wall = lift + boundary + shim + partial + instrument + unaccounted
-//   · `unaccounted/wall > 3%` ⇒ 本次读数**作废**（打印 `INVALID`）—— 阈值来历见 M-12：
-//     仪器残余 ≈1.6% ⇒ 3% 是 2× 余量。
+//   · `unaccounted` 是**定义式残差**（`wall − 五项`），按设计**恒打印**；
+//     它在本仪器里**结构上恒 ~0** —— 因为绝对量取自精确包络、采样只决定 `lift:boundary` 的比值
+//     （见下"偏离"第 2 条）。
+//   · ⇒ **真正会作废本次读数的是 `coverage`**（= 采样外推 / 精确包络），`coverage ∉ [0.5, 2]` ⇒ `suspect`；
+//     `unaccounted/wall` 那条 3% 闸门仍然在（`kInvalidRatio`），只是它几乎不会触发（残差恒 ~0）。
 //
 // ★ 三条读法红线（⛔ 违反会让闭式立刻破）：
 //   ① `present` ⊂ `shim`（`D3D9::Present` 是 shim，`present()` 在它内部被调）⇒ 只作子行。
@@ -19,8 +22,8 @@
 //
 // ★ 成本（缺省档一行都不执行；护栏 = `on`）：
 //   · shim：每次调用 2 次取时（窗口内**精确**；shim 只占派发 ~1.4% ⇒ <0.1%）
-//   · lift / boundary：每 `kStride` 个派发取 3 次（≈1 ns/派发，<2%）；窗口内派发数
-//     < `kFullSampleBelow` 时**自动全量**（夹具 / 小窗口要精确闭式）
+//   · lift / boundary：每 `kStride` 个派发才取 3 次（≈1 ns/派发，<2%）。**全窗口同一个 stride**
+//     —— 窗口太短只会让样本变少（表头打"⚠ 窗口短 ⇒ 样本少"），⛔ 不会切到"自动全量"。
 //   · present 子桶：**零**（`presentBreakdown()` 本来就一直在计时）
 //   · lift_dyn：一次 `++`（闸门是一个 bool）
 //
@@ -107,14 +110,12 @@ struct AotWindowProf {
     void reset() { *this = AotWindowProf{}; }
 
     // 一次实测区间的**净工作**：区间里含一次取时（时间戳在取时调用里读，剩下的调用开销
-    // 落在区间内）⇒ 扣掉一次 `clock_read_ns`。
-    // ★ 为什么必须扣（2026-11-17 实测）：不扣的话那 ~25 ns 会被 `iter/sampled` 外推
-    //   64×（FELLOW init：外推和 3.1 s > 墙钟 2.0 s，`bias` 2.08×）。
-    std::uint64_t netSpan(std::uint64_t from_ns, std::uint64_t to_ns) const {
-        const std::uint64_t span = to_ns - from_ns;
-        const auto read = static_cast<std::uint64_t>(span_overhead_ns);
-        return span > read ? span - read : 0;
-    }
+    // 落在区间内）⇒ 扣掉一次 `span_overhead_ns`。
+    // ★ 为什么必须扣（2026-11-17 实测）：不扣的话那 ~30 ns 会被 `iter/sampled` 外推
+    //   64×（FELLOW init：外推和 3.1 s > 墙钟 2.0 s）。
+    // ★ 定义在 `aot/window_prof.cpp`（⛔ 不是纯头）：闭式与它一起搬出去，是为了让
+    //   **单条变异只重编一个 TU**（纯头变异会把整条 AOT 臂重编一遍，一条变异 12 分钟）。
+    std::uint64_t netSpan(std::uint64_t from_ns, std::uint64_t to_ns) const;
 
     // 窗口内第 `iter` 个派发是否取时。
     // ★ 用**乘性散列**取高 6 位 ⇒ 平均 1/64，且**不与 guest 循环周期对齐**。
@@ -192,36 +193,16 @@ struct AotWindowProf {
         bool valid() const { return !suspect && ratio() <= AotWindowProf::kInvalidRatio; }
     };
 
-    // ★ 闭式的唯一出口。⛔ 不要在别处另算一套。
+    // ★ 闭式的唯一出口（**定义在 `aot/window_prof.cpp`**，`aot-window-profile` 与 AOT 臂共用一份）。
+    //   ⛔ 不要在别处另算一套。
     //
     // ★ 为什么"份额来自采样、绝对值来自包络"（2026-11-17 实测教训）：
     //   被计时的区间里恒含仪器税（一次取时），而外推要乘 `iter/sampled`（≈64）⇒ 那 30 ns 会被
     //   放大 64×。实测 FELLOW init：直接外推得 1.77 s，而墙钟只有 1.62 s（且减去 shim 后只剩 1.34 s）。
     //   ⇒ 绝对量用**精确包络** `wall − shim − partial − instrument`，采样只决定 `lift:boundary` 的**比值**。
-    //   代价：`unaccounted` 在结构上恒 ~0（归一的必然）⇒ 取而代之的自检是 `coverage` 那一行。
-    Totals totals() const {
-        Totals t;
-        t.wall = static_cast<double>(t_close_ns > t_open_ns ? t_close_ns - t_open_ns : 0);
-        const double scale = sampled != 0 ? static_cast<double>(iter) / static_cast<double>(sampled) : 0.0;
-        const double lift_est = static_cast<double>(lift_ns) * scale;
-        const double boundary_est = static_cast<double>(boundary_ns) * scale;
-        t.shim = static_cast<double>(shim_ns);
-        t.partial = static_cast<double>(partial_ns);
-        const double reads = static_cast<double>(sampled) * 2.0 + static_cast<double>(shim_calls) * 2.0;
-        t.instrument = reads * clock_read_ns;
-        double envelope = t.wall - t.shim - t.partial - t.instrument;
-        if (envelope < 0.0) envelope = 0.0;
-        const double covered = lift_est + boundary_est;
-        t.coverage = envelope > 0.0 ? covered / envelope : (covered > 0.0 ? 1.0e9 : 1.0);
-        t.suspect = t.coverage < Totals::kMinCoverage || t.coverage > Totals::kMaxCoverage;
-        if (covered > 0.0) {
-            t.lift = lift_est / covered * envelope;
-            t.boundary = boundary_est / covered * envelope;
-        }
-        t.unaccounted = t.wall - (t.lift + t.boundary + t.shim + t.partial + t.instrument);
-        if (t.unaccounted < 1.0) t.unaccounted = 0.0;  // 浮点噪声（归一后恒 0）
-        return t;
-    }
+    //   代价：`unaccounted` 在结构上恒 ~0（归一的必然）⇒ 取代它的自检是 `coverage` 那一行
+    //   （`coverage ∉ [0.5, 2]` ⇒ `suspect` ⇒ 本次读数作废）。
+    Totals totals() const;
 
     // 具名行的判定档（`measurement.md` M-12 §5 的单一阈值）
     enum class Rank { Noise = 0, Watch = 1, Candidate = 2 };

@@ -40,6 +40,12 @@ add_subdirectory(third_party/berkeley-softfloat)
 # ---- 运行时 ----
 add_library(emulator-lift-runtime STATIC
     src/runtime/memory.cpp
+    # ★ 窗口 profile 的**闭式实现**（`aot/window_prof.h` 的唯一 out-of-line 部分）。
+    #   归属本 target 而不是 AOT target：纯 CTest `lift-aot-window-profile` 只链本 target，
+    #   AOT 臂也链它 ⇒ **一份实现两处用**。⛔ 只放进 AOT target 会让测试链接失败。
+    #   ★ 为什么不做成纯头：头被 `aot_host.h` 包含 ⇒ 头里施加变异 = 整条 AOT 臂重编
+    #     （一条变异 12 分钟）；搬成 TU 后单条变异只重编 1 个 TU（见 `tools/mutate-check.mjs` 那条）。
+    src/aot/window_prof.cpp
     src/runtime/sha256.cpp
     src/runtime/image.cpp
     src/runtime/mnemonics.cpp
@@ -1424,8 +1430,11 @@ add_test(NAME profile-window COMMAND lift-profile-window)
 # =====================================================================================
 # **AOT 窗口 profile**（`profile_begin` / `profile_end` 之间的分桶账；pure：纯算术夹具）
 # ★ 判据见 tests/aot_window_profile.cpp 文件头：① 闭式 `wall = lift + boundary + shim +
-#   partial + instrument + unaccounted`；② 采样桶按 `iter/sampled` 外推（1/64 采样不外推
-#   ⇒ 读数只剩真值的 1.6%）；③ `unaccounted > 3%` ⇒ 作废；④ 没开窗 ⇒ 全 0、三档阈值只有一份。
+#   partial + instrument + unaccounted`；② 采样只决定 `lift:boundary` 的**比值**，绝对量取自
+#   精确包络（1/64 采样直接外推会把取时税放大 64×，实测 1.77 s vs 墙钟 1.62 s）；
+#   ③ **作废看 `coverage`**（采样外推 / 包络，`∉ [0.5, 2]` ⇒ `suspect`）—— `unaccounted` 是
+#   定义式残差、归一后恒 ~0，它照打但**不是**作废判据（3% 那道闸门仍在 `valid()` 里）；
+#   ④ 没开窗 ⇒ 全 0、三档阈值只有一份。
 # ★ 与上面那条 `profile-window` **不是一回事**：那是解释器 `WindowProfiler` 的分项（块缓存 /
 #   迭代器 / 派发循环），AOT 一个都没有 ⇒ 这里重新定义桶（`interp → boundary`、无 `native`）。
 # ★ 顶层无条件注册 ⇒ pure 档（判据 = 注册位置，AGENTS.md §12.4）。

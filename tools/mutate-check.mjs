@@ -1108,11 +1108,12 @@ const MUTATIONS = [
   // ── 窗口 profile（`REQ-01M7JNX5MR7RWTBNBAE70PBCQP`；守卫 = `tests/aot_window_profile.cpp`）──
   //   ★ 代表"闭式里漏了一个桶"这一类静默失效：把 `shim` 从归一用的包络里去掉 ⇒
   //     归一后 `lift+boundary` 把 shim 那一份吞掉 ⇒ 表里各行百分比互相矛盾。
-  //     ⚠ 变异落在**纯头**（`window_prof.h`）上：不跑模拟器，只编测试即可。
+  //     ★ 变异落在 **`window_prof.cpp`**（闭式的唯一实现）而不是头：头被 `aot_host.h` 包含
+  //     ⇒ 头里变异会重编整条 AOT 臂（实测一条 12 分钟）。搬成 TU 后这里只重编 1 个 TU。
   {
-    file: 'apps/emulator-lift/src/aot/window_prof.h',
-    from: '        double envelope = t.wall - t.shim - t.partial - t.instrument;',
-    to: '        double envelope = t.wall - t.partial - t.instrument;  // 变异：漏掉 shim',
+    file: 'apps/emulator-lift/src/aot/window_prof.cpp',
+    from: '    double envelope = t.wall - t.shim - t.partial - t.instrument;',
+    to: '    double envelope = t.wall - t.partial - t.instrument;  // 变异：漏掉 shim',
     guard: 'ctest:aot-window-profile',
     ctest: 'aot-window-profile',
     buildDir: 'apps/emulator-lift/out',
