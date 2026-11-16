@@ -2,8 +2,9 @@
 
 - id: REQ-01M7CZH2JJKEDF8ATX4H8RJFZ2
 - type: spike
-- status: open
+- status: dropped
 - parent: REQ-01M7JHSDWT13XEZJHEET2BDH1C
+- dropped_reason: 2026-11-17 用户裁决：新的 --input-plan（await position/script 位置门 + click/wait 配方）已基本满足需求 ⇒ 本 spike 的三条候选（录制回放 / 事件脚本 / 状态注入）不再需要评估。它的触发条件『要在复杂路径上取读数』已由位置配方解决，且门已在 TITLE/GAMESTART/SN0000/FELLOW 上取到 4/4 级的命中读数。⛔ 不要把本条当成『输入注入还能重做』的入口；将来若真出现位置门表达不了的动作（轨迹 / 长按节奏），按新形状另立单。
 - tags: [emulator-lift, input, tooling]
 
 ## 问题
