@@ -360,6 +360,11 @@ ctest --test-dir out --output-on-failure
 
 - ★ **两边改的文件集不相交 ⇒ merge 不冲突**。谁"顺手"在 dev 改了需求单、或在 main 改了源码，
   就得人工解冲突，而且真相变成两份 —— 这是本节唯一的硬禁止。
+- ★ **纯文本资料可以在 main 直接改**（用户 2026-11-17 口径）：`docs/**` 的新文件与更正、需求单、`AGENTS.md` ——
+  不必为"改一段文档"去排 `dev` 的单车道。代价只有一条：**同一个文件两边都改就会冲突**
+  ⇒ 动手前先看 `git -C E:\Projects\amayui-re-dev status --porcelain` / `git diff main -- <文件>`；
+  撞上了就先改 main，再 `git merge main` 进 dev。
+  ⛔ 但**编译 / 构建 / 跑 exe 仍然只能在 dev**（一棵构建树，且 main 的 `out/` 会变 stale）。
 - ★ main 上的代码树**照旧可建可跑**（合并后要在这里过门禁、跑带资产的验收），但它**不长新代码**。
 
 ### 14.1 提交
