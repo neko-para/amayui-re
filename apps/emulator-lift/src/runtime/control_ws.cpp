@@ -23,7 +23,6 @@
 // ★ 端点发现（§2.5）：`<root>/ctl.<pid>.<nonce8>.json`，`listen()` 成功之后才写（`.tmp` → rename），
 //   正常退出删；`--control-port 0` 由系统给端口。文件名带 pid + nonce ⇒ 同一 root 多实例不互相覆盖，
 //   且"创建"是幂等的新建（⛔ 不改已有文件、⛔ 不按通配删任何东西）。
-#define _CRT_SECURE_NO_WARNINGS
 #include "runtime/control.h"
 
 #include <algorithm>
