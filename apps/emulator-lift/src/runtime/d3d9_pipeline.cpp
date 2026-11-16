@@ -3826,6 +3826,62 @@ void transformVertex(X86& cpu, std::uint32_t pe, const FvfLayout& fvf, const std
     (void)vertex_index;
 }
 
+// =====================================================================================
+// 顶点变换的**每 Draw 去重**（`REQ-01M7FRXZ3K23M0WVTJQ9NNN35B` 修法排序第 4 项）
+// =====================================================================================
+// ★ 为什么成立（⛔ 前提不成立就不能用，这条注释就是前提）：
+//   `transformVertex` 在一次 Draw 内**只依赖顶点号** —— 它读的三样东西在这次调用期间都不变：
+//     ① 状态块 `pe` 里的光照 / 材质 / 变换 / 渲染状态（guest 在 shim 调用期间不执行，本函数也不写它们）；
+//     ② FVF 布局 `fvf`（drawPrecheck 读一次）；
+//     ③ 顶点号 → 顶点字节偏移（`stride` 与 `voffset` 在本函数里是常量）⇒ 同一个顶点号读到同一份字节。
+//   所以同一个顶点号的第 2..n 次变换结果与第 1 次**逐位相同**，只算一次是等价的。
+//   ⇒ guest 可见语义不变：写进 `verts` 的还是**同一个 CVertex**（只是少算了重复的那几次）。
+// ★ 键 = `索引值 - MinVertexIndex`（调用方已校验 idx ∈ [MinVertexIndex, MinVertexIndex+NumVertices)）
+//   ⇒ 键域有界、且与"顶点号"一一对应（顶点号 = BaseVertexIndex + idx，Base 是常量）。
+// ★ 索引流里重复引用非常常见（实测 60 帧：558,180 个索引只对应 140,160 个不同顶点 = 75% 可省）。
+// ★ 有效位用 `epoch`，⛔ 不"每次 Draw 清数组"：`CVertex` 是 232 B 的大结构，清一遍是白花；`verts.size()`
+//   的语义也不会因为缓存而漂移（缓存是独立数组，与 `verts` 无关）。
+struct VertexXformCache {
+    std::vector<CVertex> verts;        // slot = 顶点号 - MinVertexIndex
+    std::vector<std::uint32_t> epoch;  // 0 = 空；否则 = 本轮的轮号
+    std::uint32_t cur = 0;
+
+    void beginDraw() {
+        if (++cur == 0u) {  // 轮号回绕（2^32 次 Draw 才一次）：清一遍再来
+            std::fill(epoch.begin(), epoch.end(), 0u);
+            cur = 1u;
+        }
+    }
+    const CVertex* find(std::uint32_t slot) const {
+        if (slot >= epoch.size() || epoch[slot] != cur) return nullptr;
+        return &verts[slot];
+    }
+    void put(std::uint32_t slot, const CVertex& v) {
+        if (slot >= epoch.size()) {
+            // 几何增长（与 std::vector 同一口径）：容量跨 Draw 保留，稳态下这里一次都不进。
+            std::size_t cap = epoch.empty() ? 64u : epoch.size() * 2u;
+            if (cap <= slot) cap = static_cast<std::size_t>(slot) + 1u;
+            epoch.resize(cap, 0u);
+            verts.resize(cap);
+        }
+        epoch[slot] = cur;
+        verts[slot] = v;
+    }
+};
+
+// 取一个顶点：本轮算过就直接拷出来，没算过才真的变换（`out` 总是被整体写入）
+void transformVertexOnce(VertexXformCache& cache, X86& cpu, std::uint32_t pe, const FvfLayout& fvf,
+                         const std::uint8_t* vp, std::uint32_t slot, std::uint32_t vertex_index,
+                         const math::Mat4d& world, const math::Mat4d& view, const math::Mat4d& proj,
+                         CVertex* out) {
+    if (const CVertex* hit = cache.find(slot)) {
+        *out = *hit;
+        return;
+    }
+    transformVertex(cpu, pe, fvf, vp, vertex_index, world, view, proj, out);
+    cache.put(slot, *out);
+}
+
 // GPU 一批的完整描述：状态 + 可选的 stage 0 纹理（准入通过后由 submitPrimitives 直接消费）。
 struct GpuBatchPlan {
     GpuRasterState state;
@@ -4222,12 +4278,20 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
         noteGpuSkip(cpu, pe, gpu_why, gpu_skip_bit);
         return false;
     }
-    std::vector<GpuRasterVertex> gpu_vertices;
-    bool gpu_invw_ok = true;
+    // ★ 复用缓冲（修法排序第 3 项）：这两个容器**不跨调用**（`rasterQueue` 在入队时就把顶点拷进
+    //   后端自己的队列，见 `d3d9_gpu.cpp` 的 `draw.vertices.assign(...)`；`saved_tris` 只喂本函数内的
+    //   统计与那一行诊断）⇒ 用 `thread_local` 复用，每次 Draw 只 `clear()`（不释放容量）。
+    //   ⚠ 重入：本进程的 Draw 只在主线程、且**不在 Draw 内部再进 Draw**（顶点路径只读状态块 / guest
+    //   内存，`rasterQueue` 只入队不回调 guest）⇒ 同线程不会有第二个活着的 `submitPrimitives`。
+    //   `clear()` 之后 `size()` 仍是真实元素数（⛔ 不是容量）。
     struct SavedTri {
         SVertex a, b, c;
     };
-    std::vector<SavedTri> saved_tris;
+    static thread_local std::vector<GpuRasterVertex> gpu_vertices;
+    static thread_local std::vector<SavedTri> saved_tris;
+    gpu_vertices.clear();
+    saved_tris.clear();
+    bool gpu_invw_ok = true;
     g_gpu_alpha_agg = AlphaAgg{};
     g_alpha_agg_from_gpu = false;
     // ★ 准入已通过 ⇒ 后端一定非空（`gpuEligible` 的第一条拒批就是 `ctx.gpu == nullptr`）。
@@ -5118,7 +5182,10 @@ std::uint32_t drawPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t prim, std
     if (!requireMachine(cpu, &m, why)) return kInvalidCall;
     DrawContext ctx;
     if (!prepareContext(cpu, "DrawPrimitive", dev, pe, &ctx, why)) return kInvalidCall;
-    std::vector<std::uint8_t> decl_buf;
+    // ★ 复用缓冲（修法排序第 3 项）：`decl_buf` 由 `buildDeclVertices` 的 `assign` 整体重写、
+    //   `verts` 由 `gatherVertices` 的 `clear()+reserve()` 重写 ⇒ 两者都不跨调用（下面 consumer 也
+    //   不拿走它们），可以 `thread_local` 复用。`size()` 语义不变（`clear()` 不释放容量）。
+    static thread_local std::vector<std::uint8_t> decl_buf;
     const std::uint8_t* base = nullptr;
     if (decl.present) {
         if (!buildDeclVertices(cpu, pe, "DrawPrimitive", decl, start_vertex, vertex_count, &decl_buf, why))
@@ -5139,7 +5206,8 @@ std::uint32_t drawPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t prim, std
     const math::Mat4d view = readMatrix(cpu, pe + kPlTransforms + kTsView * 64u);
     const math::Mat4d proj = readMatrix(cpu, pe + kPlTransforms + kTsProjection * 64u);
     // 顶点偏移按字节：offset 是流偏移，start_vertex 是顶点序号
-    std::vector<CVertex> verts;
+    // ★ 复用缓冲（第 3 项）：`gatherVertices` 内部先 `clear()` 再 `reserve(count)` ⇒ 容量跨 Draw 保留。
+    static thread_local std::vector<CVertex> verts;
     if (!gatherVertices(cpu, pe, fvf, base + offset, stride, start_vertex, vertex_count, world, view, proj, &verts,
                         why)) {
         return kInvalidCall;
@@ -5227,7 +5295,10 @@ std::uint32_t drawIndexedPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t pr
     if (!prepareContext(cpu, "DrawIndexedPrimitive", dev, pe, &ctx, why)) return kInvalidCall;
     // ★ 声明路：把两条流按声明去交错成一份 `num_vertices` 个顶点的临时缓冲（**从 `first` 起**），
     //   后面逐索引取顶点就退化成"从这份交错缓冲里按 `idx-min` 取"——与 FVF 路完全同一条。
-    std::vector<std::uint8_t> decl_buf;
+    // ★ 复用缓冲（修法排序第 3 项）：`decl_buf` 由 `buildDeclVertices` 的 `assign` 整体重写；
+    //   `verts` 是本函数的局部产物（`submitPrimitives` 只读它，`rasterQueue` 入队时就把顶点拷走）
+    //   ⇒ 两者都能 `thread_local` 复用，每次 Draw 不再堆分配。
+    static thread_local std::vector<std::uint8_t> decl_buf;
     if (decl.present &&
         !buildDeclVertices(cpu, pe, "DrawIndexedPrimitive", decl, static_cast<std::uint32_t>(first),
                            num_vertices, &decl_buf, why)) {
@@ -5246,7 +5317,11 @@ std::uint32_t drawIndexedPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t pr
     const std::uint32_t voffset = decl.present ? 0u : plGet(cpu, pe, kPlStreams + 4u);
     const std::uint32_t vstride = decl.present ? decl.synth_stride : stride;
     const std::uint32_t vlen_eff = decl.present ? static_cast<std::uint32_t>(decl_buf.size()) : vlength;
-    std::vector<CVertex> verts;
+    // ★ 本单第 4 项：同一个顶点号只变换一次（缓存见 `VertexXformCache` 上方的前提说明）。
+    static thread_local VertexXformCache xform_cache;
+    xform_cache.beginDraw();
+    static thread_local std::vector<CVertex> verts;
+    verts.clear();
     verts.reserve(index_count);
     for (std::uint32_t i = 0; i < index_count; ++i) {
         std::uint32_t idx = 0;
@@ -5285,8 +5360,9 @@ std::uint32_t drawIndexedPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t pr
             decl.present ? static_cast<std::size_t>(relative) * vstride
                          : static_cast<std::size_t>(voffset) + static_cast<std::size_t>(vertex_index) * vstride;
         CVertex v;
-        transformVertex(cpu, pe, fvf, vbase + byte_offset, static_cast<std::uint32_t>(vertex_index), world, view,
-                        proj, &v);
+        transformVertexOnce(xform_cache, cpu, pe, fvf, vbase + byte_offset,
+                            static_cast<std::uint32_t>(relative), static_cast<std::uint32_t>(vertex_index), world,
+                            view, proj, &v);
         verts.push_back(v);
     }
     std::uint32_t tris = 0;
@@ -5343,7 +5419,8 @@ std::uint32_t drawPrimitiveUP(X86& cpu, std::uint32_t dev, std::uint32_t prim, s
     const math::Mat4d world = readMatrix(cpu, pe + kPlTransforms + kTsWorld * 64u);
     const math::Mat4d view = readMatrix(cpu, pe + kPlTransforms + kTsView * 64u);
     const math::Mat4d proj = readMatrix(cpu, pe + kPlTransforms + kTsProjection * 64u);
-    std::vector<CVertex> verts;
+    // ★ 复用缓冲（第 3 项）：`gatherVertices` 内部先 `clear()` 再 `reserve(count)`。
+    static thread_local std::vector<CVertex> verts;
     if (!gatherVertices(cpu, pe, fvf, base, stride, 0u, vertex_count, world, view, proj, &verts, why)) {
         return kInvalidCall;
     }
@@ -5418,7 +5495,11 @@ std::uint32_t drawIndexedPrimitiveUP(X86& cpu, std::uint32_t dev, std::uint32_t 
     const math::Mat4d world = readMatrix(cpu, pe + kPlTransforms + kTsWorld * 64u);
     const math::Mat4d view = readMatrix(cpu, pe + kPlTransforms + kTsView * 64u);
     const math::Mat4d proj = readMatrix(cpu, pe + kPlTransforms + kTsProjection * 64u);
-    std::vector<CVertex> verts;
+    // ★ 复用缓冲（第 3 项）+ 每 Draw 顶点变换去重（第 4 项）：与 `drawIndexedPrimitive` 同一套。
+    static thread_local VertexXformCache xform_cache;
+    xform_cache.beginDraw();
+    static thread_local std::vector<CVertex> verts;
+    verts.clear();
     verts.reserve(index_count);
     for (std::uint32_t i = 0; i < index_count; ++i) {
         std::uint32_t idx = 0;
@@ -5436,7 +5517,8 @@ std::uint32_t drawIndexedPrimitiveUP(X86& cpu, std::uint32_t dev, std::uint32_t 
             return kInvalidCall;
         }
         CVertex v;
-        transformVertex(cpu, pe, fvf, vbase + static_cast<std::size_t>(idx) * stride, idx, world, view, proj, &v);
+        transformVertexOnce(xform_cache, cpu, pe, fvf, vbase + static_cast<std::size_t>(idx) * stride,
+                            static_cast<std::uint32_t>(idx - min_index), idx, world, view, proj, &v);
         verts.push_back(v);
     }
     std::uint32_t tris = 0;
