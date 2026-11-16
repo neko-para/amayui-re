@@ -41,8 +41,10 @@
  * `tools/test/mutate-timeout.test.mjs`。
  *
  * 用法：`pnpm test:mutation`（也可 `node tools/mutate-check.mjs --list` 只看变异清单 ——
- * 它同时做**静态存在性检查**：每条 `from` 是不是还在源文件里。判据抽成导出函数
- * `staticManifestCheck`，守卫在 `tools/test/mutate-static.test.mjs`；清单过期的根因见那里的注释）。
+ * 它同时做**静态存在性检查**：① 每条 `from` 是不是还在源文件里；② 每条 `buildTarget` 是否**等于**
+ * `add_test(NAME <x> COMMAND <y> …)` 推出的可执行 target（权威来源是 CMakeLists，⛔ 不手工维护第二张表）。
+ * 判据抽成导出函数 `staticManifestCheck` / `ctestCommandTarget`，守卫在
+ * `tools/test/mutate-static.test.mjs`；清单过期的根因见那里的注释）。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -570,6 +572,286 @@ function guardMissing(m) {
 /* ───────────────── 静态存在性检查（`--list` 就报"清单过期"，不构建、不施加变异） ───────────────── */
 
 /**
+ * 去掉 CMake 文本里的 `#` 注释（**只去真注释**：引号 / bracket 实参里的 `#` 原样保留）。
+ * ★ 为什么必须去注释：`# add_test(NAME 已删的用例 …)` 那种注释行**不是注册**；
+ *   不去掉的话，"注册被删、只剩一行注释"会被读成"还在"，静态检查就成了"清单说了算"。
+ * ★ 为什么不用 `split('#')`：`add_test(… "${P}/a#b")` 里的 `#` 是实参的一部分。
+ * @param {string} text
+ * @returns {string} 与原文字节数相同的文本（注释字符换成空格、换行保留 ⇒ 偏移/行号不失真）
+ */
+function stripCmakeComments(text) {
+  const out = text.split('');
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '"') {
+      i += 1;
+      while (i < text.length) {
+        if (text[i] === '\\') {
+          i += 2;
+          continue;
+        }
+        if (text[i] === '"') {
+          i += 1;
+          break;
+        }
+        i += 1;
+      }
+      continue;
+    }
+    if (ch === '[') {
+      const br = /^\[(=*)\[/.exec(text.slice(i));
+      if (br) {
+        const close = `]${br[1]}]`;
+        const end = text.indexOf(close, i + br[0].length);
+        i = end < 0 ? text.length : end + close.length;
+        continue;
+      }
+    }
+    if (ch === '#') {
+      const nl = text.indexOf('\n', i);
+      const stop = nl < 0 ? text.length : nl;
+      for (let k = i; k < stop; k += 1) out[k] = ' ';
+      i = stop;
+      continue;
+    }
+    i += 1;
+  }
+  return out.join('');
+}
+
+/**
+ * 把 CMake 文本里每个 `add_test(…)` 的**括号内文本**切出来。
+ * ★ 为什么不按行正则：`add_test` 可以跨行（本仓 `lift-aot-split-manifest` /
+ *   `lift/no-gpu-refuses-start` 就是）—— 按行匹配会在"NAME 与 COMMAND 不在同一行"时判不了。
+ * ★ 跳过引号 / `[=[…]=]` 里的括号；`#` 注释已由 `stripCmakeComments` 抹掉。
+ * @param {string} text
+ * @returns {string[]} 每项 = 一对**平衡括号**之间的文本（不含外层括号）；括号不配对的片段不报
+ */
+function addTestBlocks(text) {
+  const blocks = [];
+  const head = /\badd_test\s*\(/g;
+  let m;
+  while ((m = head.exec(text)) !== null) {
+    let i = m.index + m[0].length;
+    const start = i;
+    let depth = 1;
+    while (i < text.length && depth > 0) {
+      const ch = text[i];
+      if (ch === '"') {
+        i += 1;
+        while (i < text.length) {
+          if (text[i] === '\\') {
+            i += 2;
+            continue;
+          }
+          if (text[i] === '"') {
+            i += 1;
+            break;
+          }
+          i += 1;
+        }
+        continue;
+      }
+      if (ch === '[') {
+        const br = /^\[(=*)\[/.exec(text.slice(i));
+        if (br) {
+          const close = `]${br[1]}]`;
+          const end = text.indexOf(close, i + br[0].length);
+          i = end < 0 ? text.length : end + close.length;
+          continue;
+        }
+      }
+      if (ch === '(') depth += 1;
+      else if (ch === ')') depth -= 1;
+      i += 1;
+    }
+    if (depth === 0) blocks.push(text.slice(start, i - 1));
+    head.lastIndex = i;
+  }
+  return blocks;
+}
+
+/**
+ * 切 CMake 实参：空白分隔；`"…"`（含 `\"` 转义）与 `[=[…]=]` / `[[…]]` 各算**一个** token。
+ * @param {string} text 一段 `add_test(…)` 的括号内文本
+ * @returns {string[]}
+ */
+function cmakeArgTokens(text) {
+  const tokens = [];
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (/\s/.test(ch)) {
+      i += 1;
+      continue;
+    }
+    if (ch === '"') {
+      let j = i + 1;
+      let out = '';
+      while (j < text.length) {
+        if (text[j] === '\\') {
+          out += text[j + 1] ?? '';
+          j += 2;
+          continue;
+        }
+        if (text[j] === '"') break;
+        out += text[j];
+        j += 1;
+      }
+      tokens.push(out);
+      i = j + 1;
+      continue;
+    }
+    if (ch === '[') {
+      const br = /^\[(=*)\[/.exec(text.slice(i));
+      if (br) {
+        const close = `]${br[1]}]`;
+        const end = text.indexOf(close, i + br[0].length);
+        if (end >= 0) {
+          tokens.push(text.slice(i + br[0].length, end));
+          i = end + close.length;
+          continue;
+        }
+      }
+    }
+    let j = i;
+    while (j < text.length && !/\s/.test(text[j])) j += 1;
+    tokens.push(text.slice(i, j));
+    i = j;
+  }
+  return tokens;
+}
+
+/**
+ * `add_test(NAME <x> COMMAND <y> …)` ⇒ CTest `<x>` 的**可执行 target** `<y>`。
+ *
+ * ★ 为什么这是唯一的权威来源：条目字段 `buildTarget`（见 `cmakeBuildArgs`）会变成
+ *   `cmake --build <dir> --target <名>`。填错一个名字 ⇒ 那条变异**永远记「不可判定（构建失败）」**
+ *   ⇒ 它再也不会证明"守卫会红"，而 `--list` 与汇总表**都看不出来**（与"`buildDir` 指向已删构建树、
+ *   永远「不可判定」"是同一种失效）⇒ 判据必须**从 CMakeLists 派生**，⛔ 不手工维护第二张表。
+ *
+ * `COMMAND` 的三种形态（本仓现在只用前两种）：
+ *   ① `COMMAND <裸名>` ⇒ target = `<裸名>`（最常见）；
+ *   ② `COMMAND $<TARGET_FILE:<名>>` ⇒ target = `<名>`；
+ *   ③ `COMMAND ${变量}` / 其它生成器表达式 / 路径 ⇒ **判不了**（返回 `ok:false`，⛔ 不猜）。
+ *
+ * @param {string} cmakeText
+ * @param {string} ctestName
+ * @returns {{found:false} | {found:true, ok:true, target:string} | {found:true, ok:false, why:string}}
+ *   `found:false` = 文本里没有叫这个名字的 `add_test`；`ok:false` = 有，但 `COMMAND` 判不了。
+ */
+export function ctestCommandTarget(cmakeText, ctestName) {
+  /** `COMMAND` 的第一个 token → 判据（三种形态，见函数头） */
+  const classify = (cmd) => {
+    if (typeof cmd !== 'string' || cmd === '') return { ok: false, why: 'COMMAND 是空的' };
+    const target = /^\$<TARGET_FILE:([^>]+)>$/.exec(cmd);
+    if (target) return { ok: true, target: target[1].trim() };
+    if (cmd.startsWith('${') || cmd.startsWith('$<')) {
+      return { ok: false, why: `COMMAND 是变量 / 生成器表达式（${cmd}），推不出 target 名` };
+    }
+    if (/[\\/]/.test(cmd) || /\.(exe|cmake)$/i.test(cmd)) {
+      return { ok: false, why: `COMMAND 是路径而不是 target 名（${cmd}）` };
+    }
+    return { ok: true, target: cmd };
+  };
+  const found = [];
+  for (const body of addTestBlocks(stripCmakeComments(cmakeText))) {
+    const tokens = cmakeArgTokens(body);
+    const ni = tokens.findIndex((t) => t.toUpperCase() === 'NAME');
+    if (ni < 0 || ni + 1 >= tokens.length) continue;
+    if (tokens[ni + 1] !== ctestName) continue;
+    const ci = tokens.findIndex((t, k) => k > ni + 1 && t.toUpperCase() === 'COMMAND');
+    if (ci < 0 || ci + 1 >= tokens.length) {
+      found.push({ ok: false, why: '没有 COMMAND（或 COMMAND 后面没有实参）' });
+      continue;
+    }
+    found.push(classify(tokens[ci + 1]));
+  }
+  if (found.length === 0) return { found: false };
+  // 同名 add_test 出现多次：只有"推出的 target 一致"才算判得了（否则 CTest 名有歧义）
+  const distinct = [...new Set(found.map((f) => (f.ok ? `target:${f.target}` : `why:${f.why}`)))];
+  if (distinct.length > 1) {
+    return { found: true, ok: false, why: `同名 add_test 出现 ${found.length} 次且 COMMAND 不一致` };
+  }
+  return { found: true, ...found[0] };
+}
+
+/**
+ * 条目字段 `buildTarget` 还成立吗（只读；判据 = `ctestCommandTarget`，来源 = 该 `buildDir` 所属工程的
+ * `CMakeLists.txt` 的 `add_test(NAME … COMMAND …)`）。
+ *
+ * ★ 为什么它必须和 `from` 的存在性检查在**同一趟**里（⛔ 不新增第二次遍历）：`--list` 一次就把
+ *   "清单与源文件 / CMakeLists 对不上"全部报出来，而不是等全量跑到那一条。
+ * ★ 两类失配都**不可判定**、都不许静默放过：
+ *   a. CTest 名在 CMakeLists 里找不到 / `COMMAND` 判不了 ⇒ 推不出 target（⛔ 不猜）；
+ *   b. 推得出，但**不等于**条目的 `buildTarget` ⇒ 点名"应为 X，实为 Y"。
+ * @param {object} m 清单条目
+ * @param {string} root 仓库根
+ * @param {Map<string,string|{error:string}>} cmakeTexts 同一趟里的 CMakeLists 文本缓存（按相对路径）
+ * @returns {{checked:boolean, problem?:string}} `checked` = 真比对过（判据成立）；`problem` = 失配原因
+ */
+function checkBuildTarget(m, root, cmakeTexts) {
+  if (m?.buildTarget === undefined) return { checked: false }; // 不带 = 全量构建，判据不适用
+  const buildDir = String(m.buildDir ?? CTEST_BUILD_DIR);
+  const name =
+    typeof m.ctest === 'string' && m.ctest !== ''
+      ? m.ctest
+      : String(m.guard ?? '').startsWith('ctest:')
+        ? String(m.guard).slice('ctest:'.length)
+        : null;
+  if (typeof m.buildTarget !== 'string' || m.buildTarget === '') {
+    return { checked: false, problem: `buildTarget 不是非空字符串（${JSON.stringify(m.buildTarget)}）` };
+  }
+  if (name === null) {
+    return {
+      checked: false,
+      problem: `带 buildTarget 却不是 CTest 条目（guard=${JSON.stringify(m.guard)}）⇒ 判不了它对应哪条 add_test`,
+    };
+  }
+  const cmakeRel = path.join(path.dirname(buildDir), 'CMakeLists.txt');
+  let text = cmakeTexts.get(cmakeRel);
+  if (text === undefined) {
+    try {
+      text = fs.readFileSync(path.join(root, cmakeRel), 'utf8');
+    } catch (err) {
+      text = { error: err.code === 'ENOENT' ? '文件不存在' : err.message };
+    }
+    cmakeTexts.set(cmakeRel, text);
+  }
+  if (typeof text !== 'string') {
+    return {
+      checked: false,
+      problem: `buildTarget 静态检查：读不了 ${cmakeRel}（${text.error}）⇒ 判不了它注册的可执行 target（条目 buildDir=${buildDir}）`,
+    };
+  }
+  const d = ctestCommandTarget(text, name);
+  if (!d.found) {
+    return {
+      checked: false,
+      problem:
+        `buildTarget 静态检查：${cmakeRel} 里找不到 add_test(NAME ${name} …) ⇒ 判不了它的可执行 target` +
+        `（条目 buildDir=${buildDir}）`,
+    };
+  }
+  if (!d.ok) {
+    return {
+      checked: false,
+      problem: `buildTarget 静态检查：add_test ${name} 的 COMMAND 判不了（${d.why}）（条目 buildDir=${buildDir}）`,
+    };
+  }
+  if (d.target !== m.buildTarget) {
+    return {
+      checked: true,
+      problem:
+        `buildTarget 静态检查：应为 ${d.target}，实为 ${m.buildTarget}` +
+        `（条目 buildDir=${buildDir}；来源 ${cmakeRel} 的 add_test(NAME ${name} … COMMAND …)）`,
+    };
+  }
+  return { checked: true };
+}
+
+/**
  * 一条变异的**施加点**在当前源文件里还成立吗（只读：不构建、不施加变异）。
  *
  * ★ 为什么要这一步（实测，2026-11-10，`REQ-01M70KGDXSKDVK7MCJYFABXERH` 的根因）：
@@ -583,21 +865,30 @@ function guardMissing(m) {
  *   ① `file` 存在（相对仓库根）且**不是目录**；② `from` 是非空字符串；③ `from` 是文件内容的**子串**。
  *   ★ `file` 声明成**目录 / 多文件 / glob** 时 `from` 该落在哪一份里清单说不出来 ⇒ **跳过并报出来**
  *     （⛔ 不静默放过：那会重新变回"看起来检查过了"）。
+ *   ④ ★ 可选字段 `buildTarget`：必须**等于**由 `add_test(NAME <ctest> COMMAND <target> …)` 推出的
+ *     可执行 target（`checkBuildTarget` / `ctestCommandTarget`）。判不了的（找不到 add_test / COMMAND 是
+ *     变量）也算失配 —— 填错的 target 只会让那条变异**永远「不可判定（构建失败）」**。
  *
  * @param {Array<{file:string, from:string, what:string}>} mutations 清单（真清单或其副本）
  * @param {string} [root] 仓库根（测试用临时根目录）
  * @returns {{checked:number, problems:Array<{file:string, what:string, why:string}>,
- *            skipped:Array<{file:string, what:string, why:string}>}}
- *   `checked` = **真验过**（file 可读 + `from` 是子串）的条数；`problems` = 失配；
- *   `skipped` = 静态检查不适用的条目（附原因）。
+ *            skipped:Array<{file:string, what:string, why:string}>, targetChecked:number}}
+ *   `checked` = **真验过 `from`**（file 可读 + `from` 是子串）的条数；`problems` = 失配（`from` 与 `buildTarget` 两类）；
+ *   `skipped` = `from` 静态检查不适用的条目（附原因）；`targetChecked` = **真比对过 `buildTarget`** 的条数。
  */
 export function staticManifestCheck(mutations, root = ROOT) {
   const problems = [];
   const skipped = [];
+  const cmakeTexts = new Map(); // CMakeLists 文本缓存（同一趟里只读一次 / 一个文件）
   let checked = 0;
+  let targetChecked = 0;
   for (const m of mutations) {
     const file = String(m?.file ?? '');
     const what = String(m?.what ?? '');
+    // ④ ★ `buildTarget` 的静态存在性检查（与 `from` 的检查**同一趟**；只读 CMakeLists）
+    const t = checkBuildTarget(m, root, cmakeTexts);
+    if (t.checked) targetChecked += 1;
+    if (t.problem) problems.push({ file, what, why: t.problem });
     // ① 多文件 / glob 声明：静态检查不适用（必须报出来，⛔ 不静默）
     if (file === '' || /[*?[\]{}]/.test(file)) {
       skipped.push({ file, what, why: 'file 是多文件 / glob 声明 ⇒ 静态检查不适用' });
@@ -635,7 +926,7 @@ export function staticManifestCheck(mutations, root = ROOT) {
       });
     }
   }
-  return { checked, problems, skipped };
+  return { checked, problems, skipped, targetChecked };
 }
 
 /* ───────────────────── 崩溃安全：预写日志（journal）与启动自愈 ───────────────────── */
@@ -916,7 +1207,7 @@ export const DOMAIN = {
 
 export const OPERATIONS = [
   { name: 'check', argv: [], mutates: true, summary: '★ 逐条施加变异 ⇒ 跑指定守卫（`node --test` 用例，或 `ctest:<名字>` 的 CTest）⇒ 要求退出码非 0，最后**逐条还原并比对全文**（会同步恢复 SIGINT/SIGTERM；SIGKILL 后下次启动靠 journal 自愈）；★ CTest 带**单测超时**：超时 = 不可判定（超时）、收掉进程树、继续下一条（退出码 5），⛔ 不记成"守卫红了"' },
-  { name: 'list', argv: ['--list'], mutates: false, summary: '只列变异清单（不动任何变异文件；但**启动时仍会先自愈 journal** —— 上次留下的变异态不该因为"只看清单"而继续存在）；★ 顺带做**静态存在性检查**：`file` 存在 + `from` 是该文件内容的子串（不构建、不施加变异），失配 ⇒ 非 0 退出' },
+  { name: 'list', argv: ['--list'], mutates: false, summary: '只列变异清单（不动任何变异文件；但**启动时仍会先自愈 journal** —— 上次留下的变异态不该因为"只看清单"而继续存在）；★ 顺带做**静态存在性检查**：`file` 存在 + `from` 是该文件内容的子串 + `buildTarget` 等于 `add_test(NAME … COMMAND …)` 推出的可执行 target（不构建、不施加变异），失配 ⇒ 非 0 退出' },
 ];
 
 export { MUTATIONS };
@@ -927,6 +1218,10 @@ export { MUTATIONS };
  *   条目的职责是证明"这个守卫**会**红"（不然它会烂成恒真断言），⛔ **不是**给每个缺陷 / 每个常量
  *   各配一条 —— 那样清单会随修 bug 的轮次线性膨胀，而每条都要花一次构建 + 一次实跑来"自证"。
  *   新增守卫时补一条代表；修好一个缺陷时**不要**顺手再补一条（那条缺陷的历史进 `defects.md`）。
+ * ★ CTest 条目**顺手填 `buildTarget`**（= 该用例 `add_test(NAME <x> COMMAND <y> …)` 的可执行 target，
+ *   ⛔ 常常 ≠ CTest 名，例：`aot-window-profile` ⇒ `lift-aot-window-profile`）：值错了
+ *   `cmake --build --target` 会失败 ⇒ 那条变异**永远记「不可判定（构建失败）」** ⇒ 它再也不会
+ *   证明"守卫会红"。⇒ `--list` 的静态检查逐条比对这张映射（`ctestCommandTarget` / `checkBuildTarget`）。
  */
 const MUTATIONS = [
   // ── 本机私有清单覆盖（平台相关路径）──
@@ -1079,6 +1374,7 @@ const MUTATIONS = [
     guard: 'ctest:shim-abi',
     ctest: 'shim-abi',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-shim-abi',
     what: 'stdcall 不再弹参 ⇒ 栈每次调用涨 argc*4 ⇒ shim-abi 的 esp 平衡断言红',
   },
 
@@ -1094,6 +1390,7 @@ const MUTATIONS = [
     guard: 'ctest:locale-ext',
     ctest: 'locale-ext',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-locale-ext',
     what:
       '续延桩 EA 改回字面量 0x7FFEF000（在桩页之外）⇒ 无块缓存时桩表路由不到它 ⇒ locale-ext 的 ' +
       'enum-locales-no-cache（`cpu.cache == nullptr`）当场红；★ 解释器臂不会红（块缓存能装任意 EA）',
@@ -1111,6 +1408,7 @@ const MUTATIONS = [
     guard: 'ctest:lift-control-endpoint',
     ctest: 'lift-control-endpoint',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-control-endpoint',
     what:
       '暂停不冻结 guest 时钟 ⇒ 暂停 2.1 s 后 `guest_ms` 差 ≈2100 ms（判据 6 的"暂停对 guest 不可见"）' +
       '⇒ lift-control-endpoint 的 [judge6] delta < 5 断言红',
@@ -1123,6 +1421,7 @@ const MUTATIONS = [
     guard: 'ctest:lift-control-endpoint',
     ctest: 'lift-control-endpoint',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-control-endpoint',
     what:
       '带 Origin 头的握手不再被拒 ⇒ 浏览器里的任意网页都能连本机控制端点（判据 10 后半）' +
       '⇒ lift-control-endpoint 的 origin status == 403 断言红',
@@ -1147,6 +1446,7 @@ const MUTATIONS = [
     guard: 'ctest:present-window',
     ctest: 'present-window',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-present-window',
     what:
       'resume 不再丢弃"暂停期间产生的 OS 输入"⇒ 陈旧 motion/button 被当成刚发生（present-window 的 ' +
       'queue==0 / buttons==0 断言红），陈旧关窗也不再当宿主 stop（stopRequested/controlStopReason 断言红）',
@@ -1163,6 +1463,7 @@ const MUTATIONS = [
     guard: 'ctest:lift-control-endpoint',
     ctest: 'lift-control-endpoint',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-control-endpoint',
     what:
       'resume 不再 arm "恢复时刻" ⇒ 生产路径上陈旧事件闸门是死代码（`control-resume-arms-host-hook` 的 ' +
       '`controlOnResume` 计数 3 → 0 断言红）',
@@ -1199,6 +1500,7 @@ const MUTATIONS = [
     guard: 'ctest:lift-control-snapshot',
     ctest: 'lift-control-snapshot',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-control-snapshot',
     what:
       'present() 不再冻结该帧像素 ⇒ `dumpLastFrame` 退回写现场（已被清成 0 的后缓冲）⇒ ' +
       'lift-control-snapshot 的 `screenshot-freezes-frame` 在 `shot == ref`（与同帧 `--dump-frame` 参照逐字节相同）' +
@@ -1232,6 +1534,7 @@ const MUTATIONS = [
     guard: 'ctest:lift-control-endpoint',
     ctest: 'lift-control-endpoint',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-control-endpoint',
     what:
       '`sample` 每次自增 state_seq ⇒ 同一暂停点连采两次的 res 文本不同（判据 3b 的机制面：' +
       '`s1.text == s2.text` 断言红）；这会让"步进/快照可复现"静默失效',
@@ -1262,6 +1565,7 @@ const MUTATIONS = [
     guard: 'ctest:lift-control-endpoint',
     ctest: 'lift-control-endpoint',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-control-endpoint',
     what:
       '`screenshot` 不再自己暂停 ⇒ 未暂停态调用后 `paused` 仍 false、`state_seq` 不动 ⇒ ' +
       'lift-control-endpoint 的 [judge5-screenshot-pauses] 断言红（客户端只能自己补发 pause）',
@@ -1284,6 +1588,7 @@ const MUTATIONS = [
     guard: 'ctest:lift-control-endpoint',
     ctest: 'lift-control-endpoint',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-control-endpoint',
     what:
       '`click` 不再只接受暂停态 ⇒ 未暂停时回 `ok:true`（并把 click 排进下一个读点）⇒ ' +
       'lift-control-endpoint 的 [judge3-click-not-paused] 断言红',
@@ -1306,6 +1611,7 @@ const MUTATIONS = [
     guard: 'ctest:d3d9',
     ctest: 'd3d9',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3d9',
     what:
       'SetRenderTarget 按 D3D8 的签名读参（第 1 个实参当成 pRenderTarget）⇒ 纹理 RT 的绑定退化成' +
       '"绑后缓冲"、像素仍为 0 ⇒ d3d9/offscreen-surface-rt-data 的逐像素断言当场红',
@@ -1323,6 +1629,7 @@ const MUTATIONS = [
     guard: 'ctest:gpu-batch-order',
     ctest: 'gpu-batch-order',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-gpu-batch',
     what:
       '把 `min_filter` 覆盖成 `mag_filter`（两个过滤合成一档）⇒ 交进后端的 sampler `min_filter` 不再等于' +
       ' guest 设的值 ⇒ gpu-batch/sampler-filter-eligibility 当场红',
@@ -1353,6 +1660,7 @@ const MUTATIONS = [
     guard: 'ctest:gpu-batch-order',
     ctest: 'gpu-batch-order',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-gpu-batch',
     what:
       '后缓冲规范化改用**外观**判据（尺寸相同）⇒ 同尺寸的**纹理**表面也被当成后缓冲规范化：' +
       '`color_surface` 被清成 0（往别人的像素上画）且这一批不再按"目标不是默认后缓冲"回退 ⇒ ' +
@@ -1382,6 +1690,7 @@ const MUTATIONS = [
     guard: 'ctest:fpu-thread-flags',
     ctest: 'fpu-thread-flags',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-fpu-thread',
     what:
       'THREAD_LOCAL 退回空（softfloat 状态进程级共享）⇒ barrier 强制交错下两条线程的异常位同时在场 ' +
       '⇒ 一个 take 读到对方的位、另一个读到 0 ⇒ fpu-thread-flags 每次必红（实测 10/10）',
@@ -1421,6 +1730,7 @@ const MUTATIONS = [
     guard: 'ctest:softfloat-tls',
     ctest: 'softfloat-tls',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-softfloat-tls',
     what:
       '消费者拿不到前置 include（INTERFACE → PRIVATE）⇒ `tests/softfloat_tls.cpp` 那个"先 include ' +
       'softfloat.h"的 TU 退回空 THREAD_LOCAL 兜底 ⇒ softfloat-tls 红（实测 7 条断言：saw ' +
@@ -1441,6 +1751,7 @@ const MUTATIONS = [
     guard: 'ctest:native-override',
     ctest: 'native-override',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-native-override',
     what:
       'InsertNode 的平局判据从严格 > 放宽成 >=（等长也替换 match_pos）⇒ 先入树的候选被顶掉：' +
       'lzss/tie-strict-greater 的定点字节 EE F0 变 F0 F0，当场红（实测见 .tmp/reveq/…/report.md）',
@@ -1466,6 +1777,7 @@ const MUTATIONS = [
     guard: 'ctest:gdi-font',
     ctest: 'gdi-font',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-gdi-font',
     what:
       '`metrics()` 的缓存忽略键（恒返回第一条）⇒ 小字号的度量复用给大字号 / bold 拿到常规那份 ⇒ ' +
       'gdi-font 的 `metrics-size-change` / `metrics-bold-differs` 当场红',
@@ -1484,6 +1796,7 @@ const MUTATIONS = [
     guard: 'ctest:gpu-batch-barrier',
     ctest: 'gpu-batch-barrier',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-gpu-batch',
     what:
       '点/线展开的 quad 半宽写成 0 ⇒ 线上的三角形全部退化（0 像素）⇒ gpu-batch/lines-points 的' +
       '"线上非背景像素 >= 8" 当场红',
@@ -1504,6 +1817,7 @@ const MUTATIONS = [
     guard: 'ctest:d3d9-pipeline-gpu',
     ctest: 'd3d9-pipeline-gpu',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3d9-pipeline',
     what:
       '[decl-range] 声明路的取顶点映射退回 `idx`（不减 MinVertexIndex）⇒ 索引 2/3/4 读成顶点 2/3/4 而不是 0/1/2 ' +
       '⇒ d3d9p/indexed-range-decl 的 (a)(b) 三条像素断言红（点落在 30/40/50 而不是 10/20/30）',
@@ -1523,6 +1837,7 @@ const MUTATIONS = [
     guard: 'ctest:d3d9-pipeline-gpu',
     ctest: 'd3d9-pipeline-gpu',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3d9-pipeline',
     what:
       '[start-wrap] `start_index + index_count` 退回 u32 加法 ⇒ 0xFFFFFFF0+0x20 回绕成 0x10 越过上界检查 ' +
       '⇒ 按 8.6 GB 偏移读索引 ⇒ d3d9p/indexed-range-start-wrap 进程崩（是崩溃，不是 INVALIDCALL）',
@@ -1553,6 +1868,7 @@ const MUTATIONS = [
     guard: 'ctest:d3d9-pipeline-gpu',
     ctest: 'd3d9-pipeline-gpu',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3d9-pipeline',
     what:
       '[offscreen-rt] 删掉 ownerless 判据 ⇒ CreateOffscreenPlainSurface 的 surface 被静默绑成 RT0 ' +
       '⇒ d3d9p/set-render-target-offscreen-refused 的 INVALIDCALL / 渲染目标不变 / 像素落点三条红',
@@ -1571,6 +1887,7 @@ const MUTATIONS = [
     guard: 'ctest:d3d9-pipeline-gpu',
     ctest: 'd3d9-pipeline-gpu',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3d9-pipeline',
     what:
       '[decl-draw-uv] `buildDeclVertices` 的 stream1（TEXCOORD）偏移写成 +1 字节 ⇒ 采到的 UV 错位 ' +
       '⇒ d3d9p/vertex-decl-draw 的四角 texel 颜色（红/绿/蓝/白）当场换掉',
@@ -1591,6 +1908,7 @@ const MUTATIONS = [
     guard: 'ctest:gpu-batch-order',
     ctest: 'gpu-batch-order',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-gpu-batch',
     what:
       '删掉 `submitPrimitives` 准入早退里的 noteGpuSkip ⇒ 被拒批的 skipped_draws 恒 0 / 摘要无 skipped top' +
       ' ⇒ gpu-batch/skip-ledger 当场红',
@@ -1613,6 +1931,7 @@ const MUTATIONS = [
     guard: 'ctest:gpu-batch-order',
     ctest: 'gpu-batch-order',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-gpu-batch',
     what:
       '把 `Clear(ZBUFFER, z)` 的 z 在 shim→后端那一跳写死回 1.0 ⇒ 后端收到的 z 与 pass 清除值都是 1.0 ' +
       '（guest 给的是 0.25）⇒ gpu-batch/depth-clear-value 的位模式断言当场红',
@@ -1629,6 +1948,7 @@ const MUTATIONS = [
     guard: 'ctest:d3d9',
     ctest: 'd3d9',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3d9',
     what:
       'GetRenderTargetData 不再校验源/目标格式一致 ⇒ 16bpp 目标的失败面变成 E_FAIL（不是 ' +
       'D3DERR_INVALIDCALL）⇒ d3d9 的 offscreen-surface-rt-data ③b 当场红',
@@ -1648,6 +1968,7 @@ const MUTATIONS = [
     guard: 'ctest:d3d9-gpu',
     ctest: 'd3d9-gpu',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3d9',
     what:
       'LineCaps 声明改回 0x17（多报 TEXTURE|FOG）⇒ 带纹理的线仍被 D3DERR_INVALIDCALL 拒绝 ⇒ ' +
       'd3d9/caps-claims ① 当场红',
@@ -1664,6 +1985,7 @@ const MUTATIONS = [
     guard: 'ctest:d3d9-pipeline-gpu',
     ctest: 'd3d9-pipeline-gpu',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3d9-pipeline',
     what:
       'validateDevice 把 `*pNumPasses` 写成 2 ⇒ 与"本线无多 pass 装备"的声明矛盾 ⇒ ' +
       'd3d9p/validate-device-one-pass 当场红',
@@ -1681,6 +2003,7 @@ const MUTATIONS = [
     guard: 'ctest:native-override',
     ctest: 'native-override',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-native-override',
     what:
       'LZSS 解码的结尾判据改回无条件 true（输入提前耗尽 / 输出没填满也报成功）⇒ ' +
       'native-override 的 ④c 截断流用例当场红',
@@ -1700,6 +2023,7 @@ const MUTATIONS = [
     guard: 'ctest:lift-guest-exit',
     ctest: 'lift-guest-exit',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-guest-exit',
     what:
       'guest 退出码改成透传（非 0 ⇒ n 原值，不再压成 2）⇒ `lift-guest-exit` 的 nonzero 用例当场红',
   },
@@ -1721,6 +2045,7 @@ const MUTATIONS = [
     guard: 'ctest:rep-bulk',
     ctest: 'rep-bulk',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-rep-bulk',
     what:
       '`rep movs*` 快路径的方向闸门写反（正/逆涂抹互换）⇒ 逆向重叠的 4 B 分块把源字节涂抹：' +
       'rep-bulk 的 diff 矩阵逐字节差分（34 例）与 hits/declines 断言当场红',
@@ -1742,6 +2067,7 @@ const MUTATIONS = [
     guard: 'ctest:native-override-assets',
     ctest: 'native-override-assets',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-native-override-assets',
     what:
       'B 系数（`fchs` @0x4CCCC8）不再取号 ⇒ 每个顶点的 dst[i] 符号项错 ⇒ ' +
       'native-override-assets 的 sub_4CCC60 两臂逐字节当场红',
@@ -1763,6 +2089,7 @@ const MUTATIONS = [
     guard: 'ctest:codepage',
     ctest: 'codepage',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-codepage',
     what: 'MultiByteToWideChar 退回逐字节直通（0x82A0 → U+0082 U+00A0）⇒ codepage 的 932 定点断言红',
   },
 
@@ -1774,6 +2101,7 @@ const MUTATIONS = [
     guard: 'ctest:strfmt',
     ctest: 'strfmt',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-strfmt',
     what: '半角片假名 / 8 个单字节例外不再走单字节表 ⇒ strfmt 的 CP932 定点断言红（说明那张表真的被用）',
   },
 
@@ -1785,6 +2113,7 @@ const MUTATIONS = [
     guard: 'ctest:fault-report',
     ctest: 'fault-report',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-fault-report',
     what: '归因恒为 guest ⇒ 宿主 AV 又被报成上一条 guest 访存（`access :` 行回来了）⇒ fault-report 红',
   },
 
@@ -1795,6 +2124,7 @@ const MUTATIONS = [
     guard: 'ctest:locale-ext',
     ctest: 'locale-ext',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-locale-ext',
     what: 'GetLocaleInfoA 不写字节 ⇒ A 的空串 != W 的 CP932 投影 ⇒ locale-ext 的 get-locale-info-a 红',
   },
 
@@ -1805,6 +2135,7 @@ const MUTATIONS = [
     guard: 'ctest:file-io',
     ctest: 'file-io',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-file-io',
     what: 'access=0 又按可读处理 ⇒ 只查属性的句柄能读 ⇒ file-io 的 access-zero-open 红',
   },
 
@@ -1815,6 +2146,7 @@ const MUTATIONS = [
     guard: 'ctest:sync-ext',
     ctest: 'sync-ext',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-sync-ext',
     what: '同步对象访问位检查失效 ⇒ 零访问位句柄也能改状态 ⇒ sync-ext 的 duplicate-access-and-pseudo 红',
   },
 
@@ -1826,6 +2158,7 @@ const MUTATIONS = [
     guard: 'ctest:shims-core',
     ctest: 'shims-core',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-shims-core',
     what: '未 signaled 的等待又静默返回 WAIT_TIMEOUT ⇒ shims-core 的 unsignaled-wait-traps 红（子进程没有 abort）',
   },
 
@@ -1847,6 +2180,7 @@ const MUTATIONS = [
     guard: 'ctest:memory-pages',
     ctest: 'memory-pages',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-memory-pages',
     what: '堆请求的 bytes+header 退回 32 位 ⇒ 0xFFFFFFF8 请求切出 size=0 的块并返回非空指针 ⇒ memory-pages 的 heap-request-overflow 红',
   },
 
@@ -1860,6 +2194,7 @@ const MUTATIONS = [
     guard: 'ctest:dispatch',
     ctest: 'dispatch',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-dispatch',
     what: '>256 条无控制流的直路又当成 DecodeError ⇒ dispatch 的 long-block-splits 红（语料里 0x415DF6 的 554 条块）',
   },
 
@@ -1871,6 +2206,7 @@ const MUTATIONS = [
     guard: 'ctest:decode-crosscheck',
     ctest: 'decode-crosscheck',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-decode-crosscheck',
     what: 'A3 的 len_checked 不计数 ⇒ 断言 len_checked==checked 红（防止"只比助记符、不静默跳过长度"）',
   },
 
@@ -1891,6 +2227,7 @@ const MUTATIONS = [
     guard: 'ctest:pe-loader',
     ctest: 'pe-loader',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-pe-loader',
     what: '节 raw 声明区间越过文件末尾又静默接受（退回"只看要拷的字节"）⇒ pe-loader 的 raw-padding-beyond-eof 红（半载入仍返回 true）',
   },
 
@@ -1912,6 +2249,7 @@ const MUTATIONS = [
     guard: 'ctest:input-injection',
     ctest: 'input-injection',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-input-injection',
     what:
       'GetAsyncKeyState 恒返回 0（丢掉 keyDown 的最高位）⇒ input-injection 的 ' +
       '`testEaxImm(0x8000)` 那几条当场红（注入路径的"按键真的被看见"没有别的判据）',
@@ -1926,6 +2264,7 @@ const MUTATIONS = [
     guard: 'ctest:conformance',
     ctest: 'conformance',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-conformance',
     what:
       '`F2 0F 10`（SSE2 标量 movsd）退回 `Op::Movs` ⇒ 静默按串操作执行（改 [edi] / 推进 esi·edi）；' +
       'conformance 的 `sse-movsd-*` 三条红',
@@ -1943,6 +2282,7 @@ const MUTATIONS = [
     guard: 'ctest:conformance-rejects-hollow-case',
     ctest: 'conformance-rejects-hollow-case',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-conformance',
     what:
       '恒等判据退回"含哨兵 ret"的旧口径 ⇒ 空心夹具不再被判红（负控 CTest `conformance-rejects-hollow-case` 红）',
   },
@@ -1966,6 +2306,7 @@ const MUTATIONS = [
     guard: 'ctest:window-manager-token',
     ctest: 'window-manager-token',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-wm-token',
     what:
       '`WindowManager::find` 入口不再调 `checkMainThread("window.find")` ⇒ worker 线程碰 wm 时 ' +
       '`offThread()` 不涨、`firstOffThreadSite()` 仍是 nullptr ⇒ window-manager-token 的 ' +
@@ -1988,6 +2329,7 @@ const MUTATIONS = [
     guard: 'ctest:gdi-font-fallback',
     ctest: 'gdi-font-fallback',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-gdi-font-fallback',
     what:
       '缺字判据改成"load 成功" ⇒ 主 face 的 `.notdef` 被当成有字形（后备永远不被问）⇒ ' +
       'gdi-font-fallback 的 `fallback/mask` 红（期望后备的 mask，实际是 `.notdef` 的 1×1 / advance=3）',
@@ -2013,6 +2355,7 @@ const MUTATIONS = [
     guard: 'ctest:gdi-font-fallback-assets',
     ctest: 'gdi-font-fallback-assets',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-gdi-font-fallback',
     what:
       'shim 不再把 guest 字节交给 `addMemoryFont`（只记日志 + 假句柄）⇒ 引擎 `memoryFontCount()` ' +
       '仍是 0、U+E010 回 `.notdef` ⇒ gdi-font-fallback-assets 的 `shim/add-font-mem` 红',
@@ -2025,6 +2368,7 @@ const MUTATIONS = [
     guard: 'ctest:audio-device',
     ctest: 'audio-device',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-audio',
     what:
       '去掉最终交付缓冲那一次 `memset` ⇒ 默认静音失效（处理照跑、缓冲没被置 0）⇒ ' +
       'audio-device 的 `default-muted-delivery` 红（`muted_bytes=` 与 dump 的零值判据）',
@@ -2044,6 +2388,7 @@ const MUTATIONS = [
     guard: 'ctest:mnemonics',
     ctest: 'mnemonics',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-mnemonics',
     what: '裸标识符（如未映射的 `cld`）又默认判数据 ⇒ mnemonics 的 lst-classify 红（A2 的假绿口子回来了）',
   },
 
@@ -2058,6 +2403,7 @@ const MUTATIONS = [
     guard: 'ctest:d3d9-pipeline',
     ctest: 'd3d9-pipeline',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3d9-pipeline',
     what:
       'SetRenderTarget 不再把 viewport 回写成新目标的全幅（修前形状：只写 colorSurface/Arena）⇒ ' +
       'd3d9-pipeline 的 `set-render-target-viewport` 红（绑定纹理表面后 GetViewport 仍是 guest 设的 ' +
@@ -2073,6 +2419,7 @@ const MUTATIONS = [
     guard: 'ctest:mechanism',
     ctest: 'mechanism',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-mechanism',
     what:
       '`releaseIf` 不再校验代际（按 EA 直接减引用）⇒ 陈旧持有者会把**复用同一 EA 的新对象**Release 掉 ⇒ ' +
       'mechanism 的 com-generation-stale-holder 红（新对象的 refcount / 对象表项被减）',
@@ -2094,6 +2441,7 @@ const MUTATIONS = [
     guard: 'ctest:input-expect',
     ctest: 'input-expect',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-input-expect',
     what:
       '观测窗恒判"已变化" ⇒ input-expect 的 expect-change-not-changed / expect-change-unclosed ' +
       '红（"动作没生效"这一类再也不会被抓住）',
@@ -2120,6 +2468,7 @@ const MUTATIONS = [
     guard: 'ctest:d3d9',
     ctest: 'd3d9',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3d9',
     what:
       'Apply 不写回（修前形状）⇒ d3d9 的 stateblock-capture-apply 红：Apply 之后渲染状态 / ' +
       '纹理 / FVF / 变换 / 采样器 / 纹理级 / 视口 / 裁剪矩形仍停在"改后"的值（实测 24 条断言红）',
@@ -2157,6 +2506,7 @@ const MUTATIONS = [
     guard: 'ctest:ddraw',
     ctest: 'ddraw',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-ddraw',
     what:
       'arena 回收打不到 arena（key 用状态块 EA，而不是 `[state+kSfArena]`）⇒ ddraw 的 ' +
       'release-owner-not-active 红（实测 2 条断言：arena 的 surfaceCount / bytesInUse 停在' +
@@ -2186,6 +2536,7 @@ const MUTATIONS = [
     guard: 'ctest:seh',
     ctest: 'seh',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-seh',
     what:
       '`fs:[0]` 链走到底时不再报 `StopReason::UnhandledException`，而是把那一层派发悄悄摘掉 ⇒ ' +
       '`seh` 的 B 组（两层 record 都返 0 必须非 ok 停机）红：理由变成 decode-error、' +
@@ -2209,6 +2560,7 @@ const MUTATIONS = [
     guard: 'ctest:seh',
     ctest: 'seh',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-seh',
     what:
       '`EXCEPTION_NONCONTINUABLE` 上 handler 返回 `disposition=1` 又被当成"装载 CONTEXT 继续执行" ⇒ ' +
       '`seh` 的 E 组红：停因不再是 `noncontinuable-exception`（落到 decode-error / no-code），' +
@@ -2235,6 +2587,7 @@ const MUTATIONS = [
     guard: 'ctest:d3dx9',
     ctest: 'd3dx9',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3dx9',
     what:
       'PNG 解码成功但**不上传像素**（回到"只建不写"）⇒ `d3dx9/texture-from-memory-png` 红：' +
       '四角/中心/两个非角点的逐像素断言全红（期望 R=16x+8 / G=16y+8 / B=240-16x / A=8+32x 的 ' +
@@ -2254,6 +2607,7 @@ const MUTATIONS = [
     guard: 'ctest:d3d9-mip',
     ctest: 'd3d9-mip',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3d9-mip',
     what:
       'LOD 恒取 0（`mipLevelForLod` 的 `lod + 0.5` 变成 `lod*0.0 + 0.5`）⇒ 缩小时仍只采 level 0：' +
       'd3d9-mip 的 2:1 / 4:1 级号断言当场红（实测见 .tmp/reveq/REQ-01M73G2724479XAVS176WBZ65Q/report.md）',
@@ -2279,6 +2633,7 @@ const MUTATIONS = [
     guard: 'ctest:native-override-assets',
     ctest: 'native-override-assets',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-native-override-assets',
     what:
       '`__ftol2_sse` 的截断改成"按 RC 就近取整"（`x87ToI64(x, X87Round::Near)`）⇒ `±1.5`/`±2.7` 差 1：' +
       'native-override-assets 的 ftol 边界表逐值断言当场红',
@@ -2301,6 +2656,7 @@ const MUTATIONS = [
     guard: 'ctest:native-override-assets',
     ctest: 'native-override-assets',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-native-override-assets',
     what:
       '`sub_4E1570` 失败支的 `adv(read)` 改成 `adv(codelengths[lo])`（两条分支的字节数写成同一个）' +
       '⇒ 位游标错位：native-override-assets 的 `huff/fail-len-gt-read` 当场红' +
@@ -2324,6 +2680,7 @@ const MUTATIONS = [
     guard: 'ctest:native-override-assets',
     ctest: 'native-override-assets',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-native-override-assets',
     what:
       '反射变体（`sub_436D00`）的 `crc >> 8` 写成 `crc << 8`（`.lst` 0x436D39 `shr eax,8` 写反）⇒ ' +
       'native-override-assets 的 `crc/d00-reflected-*` 与 `crc/d00-standard-value` 当场红' +
@@ -2347,6 +2704,7 @@ const MUTATIONS = [
     guard: 'ctest:audio-device',
     ctest: 'audio-device',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-audio',
     what:
       '`removeBuffer` 不再有界等"正在跑的那一刀 fill"（erase/dropPending 之后直接返回）⇒ ' +
       '`audio-device/remove-waits-inflight` 的 `fill_waits == 1` / 耗时 ≥ 15 ms 当场红',
@@ -2367,6 +2725,7 @@ const MUTATIONS = [
     guard: 'ctest:gpu-batch-order',
     ctest: 'gpu-batch-order',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-gpu-batch',
     what:
       '反馈环闸失效（同批把 RT 当采样纹理不再被拒）⇒ `d3d9p/render-to-texture-feedback` 的 ' +
       '`queued_a==0` / reason 断言当场红',
@@ -2387,6 +2746,7 @@ const MUTATIONS = [
     guard: 'ctest:gpu-batch-order',
     ctest: 'gpu-batch-order',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-gpu-batch',
     what:
       'sprite 采样自己正在写的 RT 不再被跳过（判据失效）⇒ `d3d9p/sprite-feedback-loop` 的 ' +
       '`queued==0` / `sprite_skipped==1` / 具名位断言当场红',
@@ -2411,6 +2771,7 @@ const MUTATIONS = [
     guard: 'ctest:gpu-batch-barrier',
     ctest: 'gpu-batch-barrier',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-gpu-batch',
     ctestTimeoutSec: 300,
     what:
       '换 target 无条件清深度 ⇒ A 写的 z=0.5 在切到 B 后被清成 1.0，B 上 z=0.7 的片元被错误接受 ' +
@@ -2432,6 +2793,7 @@ const MUTATIONS = [
     guard: 'ctest:d3d9-pipeline',
     ctest: 'd3d9-pipeline',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3d9-pipeline',
     what:
       'default 不再拒绝白名单外状态 ⇒ `Set(2,1)` 被存下（guest 堆变了 / Set(2) 不再是 INVALIDCALL）' +
       '⇒ `d3d9p/render-state-policy` (3) 与 `d3d9p/render-state-domain` 的"非 D3DRS"段当场红',
@@ -2451,6 +2813,7 @@ const MUTATIONS = [
     guard: 'ctest:d3d9-pipeline',
     ctest: 'd3d9-pipeline',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3d9-pipeline',
     what:
       '`D3DRS_PATCHEDGESTYLE=163` 从 B 档（接受并存下）挪进拒绝档 ⇒ `Set(163, …)` 返回 ' +
       'D3DERR_INVALIDCALL 且 bit41 不置位 ⇒ `d3d9p/render-state-domain` 的"合法 D3DRS"段当场红',
@@ -2474,6 +2837,7 @@ const MUTATIONS = [
     guard: 'ctest:d3d9-pipeline',
     ctest: 'd3d9-pipeline',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3d9-pipeline',
     what:
       '材质来源选择不再看 `D3DRS_COLORVERTEX` ⇒ `COLORVERTEX=0` 时顶点色仍参与光照（本单缺陷形态）' +
       '⇒ `d3d9p/material-source` ① 红：期望材质蓝 (0,0,1,1)，实际拿到顶点红 (1,0,0,1)',
@@ -2492,6 +2856,7 @@ const MUTATIONS = [
     guard: 'ctest:gpu-batch-order',
     ctest: 'gpu-batch-order',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-gpu-batch',
     what:
       '`colorTargetOfState` 的 arena 恒为 0（后缓冲）⇒ 绑定纹理 RT 的 Draw 把目标身份判成后缓冲 ' +
       '⇒ `d3d9p/render-to-texture` 的 `gpu_base == tex_pixels` 红（像素静默写错 surface）',
@@ -2510,6 +2875,7 @@ const MUTATIONS = [
     guard: 'ctest:d3d9-pipeline-gpu',
     ctest: 'd3d9-pipeline-gpu',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3d9-pipeline',
     what:
       '`vi = base + idx` 改回忽略 min（减去 min64）⇒ (a)(b) 的负 base 合法调用变成 vi<0 假拒 ' +
       '⇒ `d3d9p/indexed-range` (a)(b) 当场红',
@@ -2530,6 +2896,7 @@ const MUTATIONS = [
     guard: 'ctest:lift/no-gpu-refuses-start',
     ctest: 'lift/no-gpu-refuses-start',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-gpu-batch',
     what:
       '无 GPU 时不再拒绝启动（改回静默继续）⇒ 子进程 exit 2 的原因是"找不到执行源"而不是 GPU ' +
       '⇒ `lift/no-gpu-refuses-start`（AOT 臂）当场红',
@@ -2551,6 +2918,7 @@ const MUTATIONS = [
     guard: 'ctest:audio-device',
     ctest: 'audio-device',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-audio',
     what:
       '把"环陈旧 ⇒ 交付静音"的判据改成恒 fresh（照读环）⇒ 第 2 圈是斜坡重播、' +
       'underrun_silence_events/bytes 归零 ⇒ `audio-device/underrun-silence-stale` 当场红',
@@ -2585,6 +2953,7 @@ const MUTATIONS = [
     guard: 'ctest:cursor-warp',
     ctest: 'cursor-warp',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-cursor-warp',
     what:
       'SetCursorPos 的宿主映射忘了减 guest 窗口原点（把屏幕坐标当客户区坐标送进 warp）⇒ ' +
       'cursor-warp/on-calls-once-with-client-coords 期望 (220,190) 实际 (320,240)、no-clamp 期望 ' +
@@ -2610,6 +2979,7 @@ const MUTATIONS = [
     guard: 'ctest:cli-aot-flags',
     ctest: 'cli-aot-flags',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-cli-aot-flags',
     what:
       '把 AOT 臂 `present_window_flag` 里的 `|| cursor_warp` 删掉 ⇒ `--cursor-warp --present headless` ' +
       '不再被 headless 闸门拒绝（stderr 变成"找不到执行源 / GPU 拒绝"）⇒ ' +
@@ -2642,6 +3012,7 @@ const MUTATIONS = [
     guard: 'ctest:advapi32-registry',
     ctest: 'advapi32-registry',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-advapi32-registry',
     what:
       '去掉 RegOpenKeyExA 的 phkResult 参数校验（退回"if (out) 才写 + 恒 ERROR_SUCCESS"）⇒ ' +
       'reg-open-null-phkresult 期望 0x00000057 实际 0x00000000、LastError 期望 0x57 实际 0 ⇒ 当场红',
@@ -2678,6 +3049,7 @@ const MUTATIONS = [
     guard: 'ctest:user32-window',
     ctest: 'user32-window',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-user32-window',
     what:
       '`peekMatching` 遇到不匹配的消息也 `pop_front`（旧实现的"吞消息"）⇒ PeekMessage 过滤会静默丢消息：' +
       '`peek-filter-keeps-messages` 的第二次 Peek(hwnd=B) 拿到 0、`peek-filter-range` 第一条断言拿到 0 ⇒ 当场红',
@@ -2779,6 +3151,7 @@ const MUTATIONS = [
     guard: 'ctest:lift-x87-diff',
     ctest: 'lift-x87-diff',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-x87-diff',
     what:
       'x87 的 `fsubr` 操作数顺序写反（`b−a` → `a−b`）⇒ `lift-x87-diff` 的 `fsubr@00430AE6` 组红：' +
       '`st(0)` 位型 BFF8000000000000（−1.5）变 3FF8000000000000（+1.5），guest 内存区随之不同',
@@ -2876,6 +3249,7 @@ const MUTATIONS = [
     guard: 'ctest:cli-aot-flags',
     ctest: 'cli-aot-flags',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-cli-aot-flags',
     what:
       '`InputPlan::loadFile` 打不开文件时返回 true（空计划）⇒ `--input-plan /nonexistent` 不再 exit 2、' +
       'stderr 也不点名路径 ⇒ cli-aot-flags 的 `input-plan-missing-file` 红（"以为按了、其实没按"）',
@@ -2899,6 +3273,7 @@ const MUTATIONS = [
     guard: 'ctest:input-plan-read-points',
     ctest: 'input-plan-read-points',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-input-plan-read-points',
     what:
       '`wait` 的"未到期就停"被去掉（`if (now < s.wait_deadline_ms) return;` → `if (false) return;`）⇒ ' +
       '`wait` 退化成空操作 ⇒ input-plan-read-points 的 `input-plan/gates-and-releases` 红' +
@@ -2915,6 +3290,7 @@ const MUTATIONS = [
     guard: 'ctest:input-plan-read-points',
     ctest: 'input-plan-read-points',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-input-plan-read-points',
     what:
       '把 `await position` 的 `pos >= s.pos_to` 改成 `pos > s.pos_to`（半开区间变成闭区间）⇒ ' +
       '`pos == TO`（0x0460）也命中 ⇒ input-plan-read-points 的 `input-plan/position-gate` 红',
@@ -2931,6 +3307,7 @@ const MUTATIONS = [
     guard: 'ctest:input-plan-read-points',
     ctest: 'input-plan-read-points',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-input-plan-read-points',
     what:
       '把完成度的退出码映射改成恒 0（`pending != 0` / `timeout` 到期 ⇒ exit 5 变成 ⇒ 0）⇒ ' +
       'input-plan-read-points 的 `input-plan/completion` 红（`recipeOutcomeExitCode(Running)` 应为 5、' +
@@ -2953,6 +3330,7 @@ const MUTATIONS = [
     guard: 'ctest:input-plan-read-points',
     ctest: 'input-plan-read-points',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-input-plan-read-points',
     what:
       '把行尾 `timeout` 的落点丢掉（`s.timeout_ms = inline_timeout` → `(void)inline_timeout`）⇒ ' +
       '`await script TITLE timeout 2500` 的守卫恒 0 ⇒ input-plan-read-points 的 ' +
@@ -2969,6 +3347,7 @@ const MUTATIONS = [
     guard: 'ctest:input-plan-read-points',
     ctest: 'input-plan-read-points',
     buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-input-plan-read-points',
     what:
       '删掉"`wait` 恒 0"的特判 ⇒ `stepTimeoutMs(wait, 5000)` 回到 5000 ⇒ input-plan-read-points 的 ' +
       '`input-plan/step-timeout` 红（`wait` 的守卫应为 0；图臂里 guest 时钟冲过 5000 就会被假判 timeout）',
@@ -3035,6 +3414,19 @@ const MUTATIONS = [
     what:
       '去掉 `click` 坐标的 0..1279 / 0..719 闭区间校验 ⇒ 越界坐标被放到线上（本应本地退出码 2）' +
       '⇒ emu-ctl.test 的 click 越界 argv 断言红',
+  },
+  // ── 清单自身的静态度量：`buildTarget` 必须等于 `add_test(NAME … COMMAND …)` 推出的 target ──
+  //   ★ 破坏 = 让"应为 / 实为"的比较恒不成立 ⇒ 填错的 target 又能静默通过 `--list`，而那条变异跑起来
+  //     只会记「不可判定（构建失败）」—— 与"`buildDir` 指向已删构建树"同一种失效（永远证明不了守卫会红）。
+  //   判据 = `tools/test/mutate-static.test.mjs` e)（注入假清单 + 假 CMakeLists，⛔ 不真编 C++）。
+  {
+    file: 'tools/mutate-check.mjs',
+    from: '            if (d.target !== m.buildTarget) {',
+    to: '            if (false) {  // 变异：buildTarget 与 add_test 推出的 target 不再比较',
+    guard: 'tools/test/mutate-static.test.mjs',
+    what:
+      '`buildTarget` 不再与 `add_test(NAME … COMMAND …)` 推出的 target 比较（恒不成立）⇒ 填错的 target 又能' +
+      '静默通过 `--list`，而那条变异跑起来只会记「不可判定（构建失败）」⇒ mutate-static 的 buildTarget 用例红',
   },
 ];
 
@@ -3312,8 +3704,11 @@ export async function main(argv = process.argv.slice(2)) {
         '    重新 configure + 构建，再跑本工具。\n' +
         '  ⛔ **它会临时改写工作树里的文件** ⇒ 有别的进程正在编辑本仓时**不要**跑（还原会覆盖别人的改动）。\n' +
         '  --list 只列清单（不动任何变异文件；但每次启动都会先自愈上次中断留下的 journal）。\n' +
-        '    ★ 它同时做**静态存在性检查**（`file` 在不在、`from` 还是不是源文件的子串；不构建、不施加变异）\n' +
-        '      ⇒ 清单过期（源文件改名 / 搬家 / 文案改写）在这里就非 0 退出，而不是等全量跑到那一条。\n' +
+        '    ★ 它同时做**静态存在性检查**（`file` 在不在、`from` 还是不是源文件的子串、\n' +
+        '      `buildTarget` 是否等于 `CMakeLists.txt` 里 `add_test(NAME … COMMAND …)` 推出的可执行 target；\n' +
+        '      不构建、不施加变异）\n' +
+        '      ⇒ 清单过期（源文件改名 / 搬家 / 文案改写）或 target 名填错在这里就非 0 退出，\n' +
+        '        而不是等全量跑到那一条（填错的 target 会让那条变异永远记「不可判定（构建失败）」）。\n' +
         '  --match <子串> 只跑 file / what / guard 里含该子串的变异（例：--match shape）。\n\n' +
         '  退出码：0 全部按预期变红 / 1 有守卫没抓住或清单过期 / 2 还原失败 / 内部错误 / 3 启动自愈拒绝运行 /\n' +
         '          4 全部不可判定(其它) / 5 有不可判定(超时)。\n\n' +
@@ -3364,7 +3759,8 @@ export async function main(argv = process.argv.slice(2)) {
           gone.map(({ m, missing }) => `  - ${m.file}（${missing}）`).join('\n'),
       );
     }
-    // ★ 静态存在性检查（**只读**：不构建、不施加变异）：`file` 在不在、`from` 还是不是它的子串。
+    // ★ 静态存在性检查（**只读**：不构建、不施加变异）：`file` 在不在、`from` 还是不是它的子串、
+    //   以及带 `buildTarget` 的条目与 CMakeLists 的 `add_test(NAME … COMMAND …)` 映射一致。
     //   原先这一步只在"全量跑到那一条"时才发生（`⚠ 变异点没找到`）⇒ 清单可以静默过期一整轮，
     //   而 `--list` 看起来一切正常。现在 `--list` 一次就把全部失配报出来（判据见 `staticManifestCheck`）。
     const stat = staticManifestCheck(selected, ROOT);
@@ -3372,8 +3768,8 @@ export async function main(argv = process.argv.slice(2)) {
     if (stat.problems.length) {
       console.error(
         `\n⛔ ${stat.problems.length}/${selected.length} 条**静态失配**` +
-          '（`from` 已不是源文件的子串 / 出现次数 ≠ 1 ⇒ 清单过期或变异点不唯一：' +
-          '全量跑到它只会记「变异点没找到」或**静默只改第一处**，什么也没验到）：',
+          '（`from` 已不是源文件的子串 / 出现次数 ≠ 1 / `buildTarget` ≠ `add_test(NAME … COMMAND …)` 推出的 target：' +
+          '全量跑到它只会记「变异点没找到」/「不可判定（构建失败）」或**静默只改第一处**，什么也没验到）：',
       );
       // ★ 逐条：`⛔ <file>: from 片段已不存在` + 从 `what` 取的一句话（定位用）
       for (const p of stat.problems) console.error(`  ⛔ ${p.file}: ${p.why}\n      ${p.what}`);
@@ -3382,6 +3778,7 @@ export async function main(argv = process.argv.slice(2)) {
     console.log(
       `\n静态检查通过：${selected.length} 条里验证了 ${stat.checked} 条` +
         `（file 存在 + from 是源文件子串且**恰好出现 1 次**）` +
+        (stat.targetChecked ? ` · buildTarget：${stat.targetChecked} 条与 CMakeLists 的 add_test 映射一致` : '') +
         (stat.skipped.length ? ` · ${stat.skipped.length} 条不适用（多文件声明，已逐条报出）` : ' · 0 条不适用'),
     );
     return 0;

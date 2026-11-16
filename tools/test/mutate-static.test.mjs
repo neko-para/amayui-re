@@ -18,6 +18,11 @@
  *   c. **接线**：真 spawn `node tools/mutate-check.mjs --list`，退出码 0 且打出"静态检查通过 … 条里验证了 … 条"
  *      （否则 a 绿、而 `--list` 根本没在查）。
  *
+ * ★ 2026-11-17 追加 `buildTarget` 的静态存在性（判据见 `tools/mutate-check.mjs` 的 `checkBuildTarget` /
+ *   `ctestCommandTarget`）：填错一个 target 名 ⇒ `cmake --build --target` 失败 ⇒ 那条变异永远记
+ *   「不可判定（构建失败）」⇒ 它再也不会证明"守卫会红"，而 `--list` 看起来正常（与 `buildDir` 指向已删
+ *   构建树是同一种失效）。d) 解析三种 `COMMAND` 形态、e) 两类失配都点名、f) 真清单每条都真被比对过。
+ *
  * ★ 全程只读仓库内的文本；子进程的 journal 指到 `.tmp/` 下（gitignored），不碰真实工作树。
  */
 import { after, test } from 'node:test';
@@ -26,7 +31,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-import { MUTATIONS, staticManifestCheck } from '../mutate-check.mjs';
+import { MUTATIONS, ctestCommandTarget, staticManifestCheck } from '../mutate-check.mjs';
 import { REPO_ROOT } from '../lib/paths.mjs';
 
 const SCRATCH = path.join(REPO_ROOT, '.tmp', 'mutate-static-test');
@@ -121,12 +126,123 @@ test('c) 接线：`--list` 真的跑静态检查并打汇总（退出码 0；不
     /静态检查通过：\d+ 条里验证了 \d+ 条/,
     `--list 必须打静态检查的汇总（否则这个检查没接线：stdout=${JSON.stringify(list.stdout)}）`,
   );
+  // ★ `buildTarget` 的静态检查也必须**在 --list 的汇总里露面**（否则它跑了没跑看不出来）
+  assert.match(
+    list.stdout,
+    /buildTarget：\d+ 条与 CMakeLists 的 add_test 映射一致/,
+    `--list 必须打 buildTarget 的静态检查计数（否则这条检查没接线：stdout=${JSON.stringify(list.stdout)}）`,
+  );
   assert.ok(!list.stdout.includes('⛔'), `清单健康时不该有 ⛔（实际：${list.stdout}）`);
   assert.equal(list.stderr.trim(), '', `清单健康时 --list 不该往 stderr 写东西（实际：${JSON.stringify(list.stderr)}）`);
+
+  // ★ `--list --match` 是**同一条**静态检查路线（⛔ 不许只在全量 `--list` 上生效）：
+  //   选中 1 条带 buildTarget 的条目 ⇒ 汇总里必须出现"buildTarget：1 条"
+  const one = run(['--list', '--match', 'aot-window-profile']);
+  assert.equal(one.status, 0, `--list --match 一条健康条目必须退出 0（${one.all}）`);
+  assert.match(
+    one.stdout,
+    /buildTarget：1 条与 CMakeLists 的 add_test 映射一致/,
+    `--list --match 也必须跑 buildTarget 的静态检查（stdout=${JSON.stringify(one.stdout)}）`,
+  );
 
   // ★ `--match` 一条都没选中 ⇒ 必须**报**，不许打"0 条里验证了 0 条 / 静态检查通过"（一次空验证看起来像通过）
   const noMatch = run(['--list', '--match', `绝不匹配的串-${process.pid}`]);
   assert.notEqual(noMatch.status, 0, `--match 空匹配必须非 0 退出（实际：${noMatch.all}）`);
   assert.match(noMatch.all, /没有匹配/, '必须说明"没有匹配"，而不是静默通过');
   assert.ok(!noMatch.stdout.includes('静态检查通过'), `⛔ 空匹配不许打出"静态检查通过"（假绿）：${noMatch.stdout}`);
+});
+
+/* ── 2026-11-17：`buildTarget` 的静态存在性（填错 target = 那条变异永远「不可判定（构建失败）」）── */
+
+/** 假 CMakeLists：覆盖 `COMMAND` 的三种形态 + 跨行 `add_test` + 注释掉的一条（⛔ 不真编 C++） */
+const FAKE_CMAKE = [
+  '# 假 CMakeLists（只喂给解析器；⛔ 不真编 C++）',
+  'add_test(NAME bare COMMAND lift-bare --flag)',
+  'add_test(NAME wrapped COMMAND $<TARGET_FILE:lift-wrapped> $<TARGET_FILE:an-arg>)',
+  'add_test(NAME multi-line',
+  '         COMMAND lift-multi --x "${SOME_DIR}")',
+  'add_test(NAME from-var COMMAND ${CMAKE_COMMAND} -E echo hi)',
+  '# add_test(NAME commented-out COMMAND lift-nope)',
+].join('\n');
+
+test('d) `add_test(NAME … COMMAND …)` ⇒ 可执行 target：裸名 / $<TARGET_FILE:> / 变量判不了 / 注释与跨行', () => {
+  // ① 裸名（最常见）
+  assert.deepEqual(ctestCommandTarget(FAKE_CMAKE, 'bare'), { found: true, ok: true, target: 'lift-bare' });
+  // ② `$<TARGET_FILE:<名>>`：取尖括号里那个名字（后面再跟别的 `$<TARGET_FILE:…>` 实参也不影响）
+  assert.deepEqual(ctestCommandTarget(FAKE_CMAKE, 'wrapped'), { found: true, ok: true, target: 'lift-wrapped' });
+  // ③ 跨行 add_test（NAME 与 COMMAND 不在同一行）
+  assert.deepEqual(ctestCommandTarget(FAKE_CMAKE, 'multi-line'), { found: true, ok: true, target: 'lift-multi' });
+  // ④ `COMMAND ${变量}` ⇒ **判不了**（⛔ 不猜）
+  const fromVar = ctestCommandTarget(FAKE_CMAKE, 'from-var');
+  assert.equal(fromVar.found, true);
+  assert.equal(fromVar.ok, false);
+  assert.match(fromVar.why, /变量/, `要说明 COMMAND 是变量（实际：${fromVar.why}）`);
+  // ⑤ 注释掉的 add_test **不是注册**（与"注册被删"同判）
+  assert.deepEqual(ctestCommandTarget(FAKE_CMAKE, 'commented-out'), { found: false });
+  // ⑥ 文本里没有这条 add_test
+  assert.deepEqual(ctestCommandTarget(FAKE_CMAKE, 'ghost'), { found: false });
+});
+
+test('e) 假清单 + 假 CMakeLists：`buildTarget` 的三类失配都点名（找不到 / 判不了 / 应为 X 实为 Y）', () => {
+  const root = path.join(SCRATCH, 'fake-root');
+  const cmakeDir = path.join(root, 'apps', 'emulator-lift');
+  fs.mkdirSync(cmakeDir, { recursive: true });
+  fs.writeFileSync(path.join(cmakeDir, 'CMakeLists.txt'), FAKE_CMAKE, 'utf8');
+  fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'src', 'a.cpp'), 'int a;\n', 'utf8');
+
+  const base = { file: 'src/a.cpp', from: 'int a;', to: 'int b;', buildDir: 'apps/emulator-lift/out' };
+  const withCtest = (ctest, buildTarget, what) => ({ ...base, guard: `ctest:${ctest}`, ctest, buildTarget, what });
+  const faked = [
+    withCtest('bare', 'lift-bare', '一致（绿）'),
+    withCtest('wrapped', 'lift-wrapped', '一致（绿，$<TARGET_FILE:>）'),
+    withCtest('ghost', 'lift-bare', 'CTest 名在 CMakeLists 里找不到'),
+    withCtest('from-var', 'lift-bare', 'COMMAND 判不了'),
+    withCtest('bare', 'lift-wrapped', '值错（应为 lift-bare）'),
+    { file: 'src/a.cpp', from: 'int a;', what: '不带 buildTarget（全量构建）' },
+  ];
+  const r = staticManifestCheck(faked, root);
+  // 一致的两条 + 不带字段的一条都不报；三类失配各报一条
+  assert.equal(
+    r.problems.length,
+    3,
+    `应当恰好 3 条 buildTarget 失配（实际：\n${r.problems.map((p) => `  ⛔ ${p.what}: ${p.why}`).join('\n')}\n）`,
+  );
+  assert.equal(r.checked, faked.length, '`from` 检查不受影响（每条都在）');
+  assert.equal(r.targetChecked, 3, '一致的两条 + 值错的那条都**真比对过**（找不到 / 判不了的不算比对）');
+  assert.deepEqual(r.skipped, [], '这里没有多文件声明');
+
+  const byWhat = new Map(r.problems.map((p) => [p.what, p]));
+  // a. CTest 名在 CMakeLists 里找不到 ⇒ 点名 CTest 名 + 条目 + buildDir
+  const missing = byWhat.get('CTest 名在 CMakeLists 里找不到');
+  assert.ok(missing, 'CTest 名找不到必须报');
+  assert.equal(missing.file, 'src/a.cpp', '必须点名**条目**本身（而不是 CMakeLists）');
+  assert.match(missing.why, /找不到 add_test\(NAME ghost …\)/, `要点名 CTest 名（实际：${missing.why}）`);
+  assert.match(missing.why, /buildDir=apps\/emulator-lift\/out/, `要点名 buildDir（实际：${missing.why}）`);
+  // b. `COMMAND ${变量}` 判不了 ⇒ 同样必须报（⛔ 不猜一个 target 出来）
+  const unjudgeable = byWhat.get('COMMAND 判不了');
+  assert.ok(unjudgeable, 'COMMAND 判不了必须报');
+  assert.match(unjudgeable.why, /COMMAND 判不了/, `要说明判不了（实际：${unjudgeable.why}）`);
+  assert.match(unjudgeable.why, /buildDir=apps\/emulator-lift\/out/);
+  // c. 值错 ⇒ 点名"应为 X，实为 Y"
+  const mismatch = byWhat.get('值错（应为 lift-bare）');
+  assert.ok(mismatch, '值错必须报');
+  assert.match(mismatch.why, /应为 lift-bare，实为 lift-wrapped/, `要点名应为/实为（实际：${mismatch.why}）`);
+  assert.match(mismatch.why, /buildDir=apps\/emulator-lift\/out/);
+});
+
+test('f) 真清单：每条带 buildTarget 的条目都**真比对过**（覆盖面不是静默跳过）', () => {
+  const withTarget = MUTATIONS.filter((m) => typeof m.buildTarget === 'string');
+  assert.ok(withTarget.length > 1, `清单里应当有多条带 buildTarget 的条目（实际 ${withTarget.length}）`);
+  const r = staticManifestCheck(MUTATIONS, REPO_ROOT);
+  assert.deepEqual(
+    r.problems,
+    [],
+    `真清单不该有静态失配：\n${r.problems.map((p) => `  ⛔ ${p.file}: ${p.why}`).join('\n')}`,
+  );
+  assert.equal(
+    r.targetChecked,
+    withTarget.length,
+    `带 buildTarget 的 ${withTarget.length} 条里只有 ${r.targetChecked} 条真比对过（其余被判不了 ⇒ 这条检查其实没生效）`,
+  );
 });
