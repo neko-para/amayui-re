@@ -14,8 +14,9 @@
 > ★ **规则只有可执行才算规则**：每条纪律要么落在 `.gitattributes` / `.gitignore` / `pnpm` 脚本里，
 > 要么落在 `tools/` 的守卫里。写成散文的 `policy: "..."` 机器执行不了、agent 也不会去读 —— 那是伪装成数据的文档。
 >
-> ★ **两个工作树（2026-11-17 起）**：`E:\Projects\amayui-re` = `main`（控制层**真相**）·
-> `E:\Projects\amayui-re-dev` = `dev`（**代码 / 工具**）。提交、合并、谁改哪条路径、缺资产怎么办 —— 全在 **§14**。
+> ★ **两个工作树（2026-11-17 起 · 仅 win32 设备）**：`E:\Projects\amayui-re` = `main`（控制层**真相**）·
+> `E:\Projects\amayui-re-dev` = `dev`（**代码 / 工具**）。提交、合并、谁改哪条路径、执行器（`.githooks`）、
+> 以及"mac 上没有 worktree 这回事" —— 全在 **§14**。
 
 ---
 
@@ -348,6 +349,10 @@ ctest --test-dir out --output-on-failure
 
 ★ 同一个仓挂**两个可写工作树**（`git worktree`），**按路径分家** —— 这是整套并行能成立的全部理由。
 
+★ **设备范围**（2026-11-17 实况）：两棵工作树**只在 win32（当前设备）**成立；**macOS 上仍是一仓一树**（没有 `dev` 的 checkout）。
+⇒ §14.2 / §14.5 / §14.7 的"两棵树"口径 **mac 上不适用**；但 **§14.1 的"可以 `add` / `commit`"两边都生效**（换设备**不撤销**）。
+⇒ 下文凡是只在 win32 成立的地方标 **【win】**。
+
 | 路径 | 分支 | 是什么 | 谁的活 |
 |---|---|---|---|
 | `E:\Projects\amayui-re` | `main` | **控制层真相** | 需求单 · `AGENTS.md` / `CTX.md` · `data/**` · `corpus/**` · `docs/00-origin\|01-translation\|02-engine/**` |
@@ -395,20 +400,38 @@ cd E:\Projects\amayui-re-dev && git merge main   # 拿需求 / 政策改动
   在 dev 上只看得到旧快照 ⇒ 交付里必须带**锚点变更清单**（增 / 删 / 改名 / 新增 CTest），
   合回 main 后由 main 侧 `tools/requirements.mjs --set` 补锚并 `--validate`。锚点解析不了 ⇒ 红（设计如此，不是误报）。
 
-### 14.5 生成物与本地资产：各树各一份，**不要求对齐**
+### 14.5 生成物与本地资产：各树各一份（【win】）
 
 - `apps/emulator-lift/out` 与 `node_modules` **各树各一份**：CMake 缓存里是绝对路径、pnpm 链接同理 ⇒ 树不能共用。
   §12.3「构建树只有一个」管的是"同一棵树里别再开 `out-<名字>`"，⛔ 不是"全仓只许一棵 `out`"。
-- **本地资产默认不对齐**（2026-11-17 实况：dev 只有 `pnpm i` + 构建产物）：`corpus/disasm/files/`（解压视图）、
-  `corpus/assets` 里的字体解压、`dist/`（含 `dist/install`）、`links/install`、`links/raw` 都可能缺。
-  ⇒ **带资产的验收（`assets` / `external` 档、`--install`、真游戏）回 main 做**；dev 只保证纯文本档。
-- dev 上某条 `pnpm verify` 红了，先分辨"资产缺失"还是"代码坏了"：**同一条命令在 main 上绿 ⇒ 是资产**。
-  真要补齐：只读复用 main 的绝对路径（如 `--install E:\Projects\amayui-re\dist\install`），比复制省 ~8 GB；
-  ⛔ 别让 dev 的产物写进 main 的树。
+- ★ **缺什么就在本树重建**（2026-11-17 口径）：`corpus/disasm/files/`（解压视图）· `corpus/assets` 的字体解压 ·
+  `corpus/fixtures/**` · `links/install` / `links/raw` 两个符号链接 —— 这些**体积有限、可确定性重建**，
+  ⇒ ⛔ **不要为了省几个 GB 跨树指路径**（那会让"这一跑读的是谁的文件"变成隐变量，读数也就没意义了）。
+- **唯一例外：`dist/`（含 `dist/install`，main 上 ≈ 7.8 GB 的真安装树）**。它是生成物且很大
+  ⇒ 需要 `--install` 时**只读复用 main 的绝对路径**（`--install E:\Projects\amayui-re\dist\install`），
+  ⛔ 不在 dev 再产一份，⛔ 也别让 dev 的产物写进 main 的树。
 - 控制层发现：`emu-ctl` 缺省读 `<本仓>/.tmp/emu-ctl` ⇒ 两棵树各扫自己那份，**并行跑实例不互抢**；
   ⛔ 不要把 A 树的 `--control-root` 指到 B 树的 `.tmp/emu-ctl`（"多个 alive ⇒ 退出码 4"）。
 
-### 14.6 政策与交接文档只有一份
+### 14.6 活政策 vs 快照：`AGENTS.md` 要维护，`CTX.md` **不**维护
 
-- `AGENTS.md` / `CTX.md` **只在 main 改**；dev 要新政策 ⇒ 先在 main 改，再 `git merge main` 进 dev。
-- 理由与 14.3 同构：两份副本一分叉，"同一句话在两个工作树里就是两条规则"。
+- `AGENTS.md` 是**活政策**，只在 main 改；dev 要新政策 ⇒ 先在 main 改，再 `git merge main` 进 dev。
+- `CTX.md` **不是需要维护的文档**：它是"准备切换设备"那一刻的**交接快照**。
+  ⇒ ⛔ 平时不要顺手更新它、不要跟着代码补数字（那会变成一份永远过期的状态表）；
+  只有用户说"要换设备 / 看交接"时才重建。
+- 两者共同的硬线：**同一句话不许在两个工作树里各有一份**（副本一分叉就是两条规则）。
+
+### 14.7 执行器：`.githooks/pre-commit`（【win】已在跑）
+
+★ 本节的口径不靠自觉：**`.githooks/pre-commit`** 是入库件，**非 `main` 分支上提交控制层文件即拒**
+（`data/**` · `corpus/**` · `AGENTS.md` · `CTX.md`）；合并 / `cherry-pick` / `revert` 产生的提交放行（它们在做**同步**，不是新建真相）。
+
+```bash
+git config core.hooksPath .githooks                 # 每个 clone / 每台机器一次（worktree 共用同一份 config）
+git config --get core.hooksPath                     # 应打印 .githooks ——打印不出来就是**没生效**
+```
+
+- ⛔ 反向（main 上别长代码）**故意不做执行器**：14.2 留了"集成问题可在 main 直接修"的口子，硬拦会把它堵死。
+- ⛔ `git commit --no-verify` 是后门：绕过它就等于明知故犯让真相分两份；真绕了要在提交说明里写明原因。
+- ★ **注册了不等于生效**：2026-11-17 实测 —— 先在 main 建了 hook 文件、dev 还没拿到它，dev 上提交 `data/.hooktest`
+  **照样成功**（hook 文件不在那棵树的 cwd 下）。⇒ 判定口径是"每棵树各实测**一次真提交被拒**"，不是看 `git config` 有值。
