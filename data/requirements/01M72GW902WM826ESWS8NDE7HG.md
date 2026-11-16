@@ -2,10 +2,11 @@
 
 - id: REQ-01M72GW902WM826ESWS8NDE7HG
 - type: bug
-- status: open
+- status: dropped
 - parent: REQ-01M7JHSEKXW8KAKB6K2RS645M7
 - repro: apps/emulator-lift/src/runtime/seh.cpp#RtlUnwind
 - severity: S2
+- dropped_reason: 2026-11-17 用户裁决：这是解释侧的缺陷（观察路径是 macOS/arm64 + --raster gpu + --input-script，其中 --raster/--input-script 今天都已不存在）⇒ 按既有裁决废弃；AOT 侧若再观测到，另立新单处理。⚠ 废弃≠证伪：崩溃的 eip=004E743F 是 **guest EA**（CRT _CallCatchBlock2 一族），机制面（seh.cpp 的 RtlUnwind / guest C++ EH 展开）是**两臂共用**的运行时 ⇒ 若 AOT 上再出现 guest memory fault，⛔ 不要用『解释侧单已废弃』驳回它，按新形状另立单（判据：一次 guest memory fault 即视为存在；9→1/10 基线下 20 次全绿不构成已修）。
 - tags: [emulator-lift, seh, crash]
 
 ## 一句话
