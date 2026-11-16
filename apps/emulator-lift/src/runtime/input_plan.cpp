@@ -1,10 +1,10 @@
-// emulator-lift · 输入投递层（三条指令的 AOT 输入配方）—— 口径见 `input_plan.h` 的头注。
+// emulator-lift · 输入投递层（四条指令的 AOT 输入配方）—— 口径见 `input_plan.h` 的头注。
 //
 // ⛔ 本文件**不是**第二份输入状态：状态只有 `WindowManager` 一份。这里只有指令表 + 计数 +
 //   待抬起队列；施加输入的**每一处**都走 `runtime/input.h` 既有的 `input::*`（与 SDL / 旧脚本
 //   同一条路径）。
-// ★ 墙钟只出现在 **`wait`** 一处（宿主单调时钟，非阻塞 deadline）；`await script` 的门只看
-//   引擎身份（guest 内存），⛔ 不看时钟、不看帧号。
+// ★ 墙钟只出现在 **`wait`** 一处（宿主单调时钟，非阻塞 deadline）；`await script` / `await
+//   position` 的门只看 guest 内存（脚本身份 + PC），⛔ 不看时钟、不看帧号。
 #include "runtime/input_plan.h"
 
 #include <chrono>
@@ -80,6 +80,39 @@ bool parseU64(const std::string& t, std::uint64_t* out) {
     return true;
 }
 
+// `await position` 的 FROM / TO：**只认带 `0x` 前缀的 hex**（与清单 `label_%08x` 对照方便）。
+// ⛔ 不收十进制 / 负数 / 裸 hex（`39C`）—— 那是"看起来像偏移、其实单位不明"的静默陷阱。
+bool parseHexU32(const std::string& t, std::uint32_t* out) {
+    if (t.size() < 3 || t[0] != '0' || (t[1] != 'x' && t[1] != 'X')) return false;
+    std::uint64_t v = 0;
+    for (std::size_t i = 2; i < t.size(); ++i) {
+        const char c = t[i];
+        unsigned digit = 0;
+        if (c >= '0' && c <= '9') {
+            digit = static_cast<unsigned>(c - '0');
+        } else if (c >= 'a' && c <= 'f') {
+            digit = static_cast<unsigned>(c - 'a' + 10);
+        } else if (c >= 'A' && c <= 'F') {
+            digit = static_cast<unsigned>(c - 'A' + 10);
+        } else {
+            return false;
+        }
+        v = v * 16ull + digit;
+        if (v > 0xFFFFFFFFull) return false;  // 超出 u32（点名"不是 32 位值"由调用方做）
+    }
+    *out = static_cast<std::uint32_t>(v);
+    return true;
+}
+
+// 有界 guest 读：越界 / 未提交 ⇒ false（同 `engine_marker.cpp` 的口径；⛔ 绝不裸读）。
+bool readU32(const GuestMemory& mem, std::uint64_t ea, std::uint32_t* out) {
+    if (ea > 0xFFFFFFFFull - 3ull) return false;
+    const std::uint32_t a = static_cast<std::uint32_t>(ea);
+    if (!mem.committed(a, 4u)) return false;
+    *out = mem.rd32(a);
+    return true;
+}
+
 // `click` 的参考系坐标：允许负数（人手可能量到边缘外），但必须是完整整数。
 bool parseInt(const std::string& t, int* out) {
     const bool negative = !t.empty() && t[0] == '-';
@@ -131,6 +164,7 @@ void InputPlan::clear() {
     applied_ = 0;
     fired_ = 0;
     released_ = 0;
+    position_misses_ = 0;
     read_points_ = 0;
     releases_pending_ = 0;
     deliver_calls_.fill(0);
@@ -163,8 +197,8 @@ bool InputPlan::loadFile(const std::string& path, std::string* err) {
     return loadText(text, path, err);
 }
 
-// ★ **专用平铺解析器**：只认三条指令（`await script <名字>` / `wait <ms>` / `click <x> <y>
-//   [left|right]`）。⛔ 不复用 `InteractionGraph::loadText`：那个模型是"一个门 + 恰好一个动作"，
+// ★ **专用平铺解析器**：只认四条指令（`await script <名字>` / `await position <名字> <FROM> <TO>` /
+//   `wait <ms>` / `click <x> <y> [left|right]`）。⛔ 不复用 `InteractionGraph::loadText`：那个模型是"一个门 + 恰好一个动作"，
 //   表达不了 `wait`，也表达不了"门的下面紧跟着一条等待"（见头注 H1）。
 bool InputPlan::loadText(const std::string& text, const std::string& origin, std::string* err) {
     clear();
@@ -178,22 +212,50 @@ bool InputPlan::loadText(const std::string& text, const std::string& origin, std
         const std::string head = lowerAscii(tok[0]);
         if (head == "await") {
             const std::string sub = tok.size() > 1 ? lowerAscii(tok[1]) : std::string();
-            if (sub != "script") {
-                // `await always` / `await presents <n>` / `await marker …` 全落这里。
-                return fail(line,
-                            "未知指令：`" + body +
-                                "`（只认 `await script <名字>` / `wait <ms>` / `click <x> <y> [left|right]`）");
+            if (sub == "script") {
+                if (tok.size() != 3) {
+                    return fail(line, "`await script` 需要一个脚本名（收到 " +
+                                          std::to_string(tok.size() > 2 ? tok.size() - 2 : 0) + " 个词）");
+                }
+                PlanStep s;
+                s.kind = InstrKind::AwaitScript;
+                s.script = tok[2];
+                s.line = line;
+                steps.push_back(std::move(s));
+                return true;
             }
-            if (tok.size() != 3) {
-                return fail(line, "`await script` 需要一个脚本名（收到 " +
-                                      std::to_string(tok.size() > 2 ? tok.size() - 2 : 0) + " 个词）");
+            if (sub == "position") {
+                // ★ 语法：`await position <SCRIPT> <FROM> <TO>`；FROM 含、TO 不含；解析期校验 FROM < TO。
+                //   ⛔ 脚本名**不在这里**校验（名字匹配是运行期的事：`scriptNameMatches`）。
+                if (tok.size() != 5) {
+                    return fail(line, "`await position` 需要 `<脚本名> <FROM> <TO>`（收到 " +
+                                          std::to_string(tok.size() > 2 ? tok.size() - 2 : 0) +
+                                          " 个词；FROM/TO 是带 `0x` 前缀的 hex）");
+                }
+                std::uint32_t from = 0;
+                std::uint32_t to = 0;
+                if (!parseHexU32(tok[3], &from) || !parseHexU32(tok[4], &to)) {
+                    return fail(line, "`await position` 的 FROM/TO 必须是带 `0x` 前缀的 32 位 hex（收到 `" +
+                                          tok[3] + "` `" + tok[4] + "`）");
+                }
+                if (from >= to) {
+                    return fail(line, "`await position` 要求 FROM < TO（半开区间 `[FROM, TO)`；收到 `" + tok[3] +
+                                          "` `" + tok[4] + "`）");
+                }
+                PlanStep s;
+                s.kind = InstrKind::AwaitPosition;
+                s.script = tok[2];
+                s.pos_from = from;
+                s.pos_to = to;
+                s.line = line;
+                steps.push_back(std::move(s));
+                return true;
             }
-            PlanStep s;
-            s.kind = InstrKind::AwaitScript;
-            s.script = tok[2];
-            s.line = line;
-            steps.push_back(std::move(s));
-            return true;
+            // `await always` / `await presents <n>` / `await marker …` 全落这里。
+            return fail(line,
+                        "未知指令：`" + body +
+                            "`（只认 `await script <名字>` / `await position <名字> <FROM> <TO>` / `wait <ms>` / "
+                            "`click <x> <y> [left|right]`）");
         }
         if (head == "wait") {
             if (tok.size() != 2) {
@@ -243,7 +305,8 @@ bool InputPlan::loadText(const std::string& text, const std::string& origin, std
         }
         // `key` / 图那套 `node` `when` `action` `next` `expect` `timeout` / 任何别的词。
         return fail(line, "未知指令：`" + body +
-                              "`（只认 `await script <名字>` / `wait <ms>` / `click <x> <y> [left|right]`）");
+                              "`（只认 `await script <名字>` / `await position <名字> <FROM> <TO>` / `wait <ms>` / "
+                              "`click <x> <y> [left|right]`）");
     };
 
     int line_no = 0;
@@ -263,7 +326,11 @@ bool InputPlan::loadText(const std::string& text, const std::string& origin, std
     }
 
     if (steps.empty()) {
-        if (err) *err = origin + ": 文件里没有任何指令（只认 `await script <名字>` / `wait <ms>` / `click …`）";
+        if (err) {
+            *err = origin +
+                   ": 文件里没有任何指令（只认 `await script <名字>` / `await position <名字> <FROM> <TO>` / "
+                   "`wait <ms>` / `click …`）";
+        }
         return false;
     }
     steps_ = std::move(steps);
@@ -298,15 +365,31 @@ void InputPlan::atPoint(WindowManager& wm, InputPoint point) {
     bool identity_fresh = false;
     while (next_ < steps_.size()) {
         PlanStep& s = steps_[next_];
-        if (s.kind == InstrKind::AwaitScript) {
+        if (s.kind == InstrKind::AwaitScript || s.kind == InstrKind::AwaitPosition) {
             // ★ **电平**门：身份当前就是它 ⇒ 通过；身份读不到（base==0 / valid=false）⇒ 不成立。
-            if (mem_ == nullptr) return;  // 没有身份来源 ⇒ 继续等（⛔ 不报错）
+            if (mem_ == nullptr) {
+                if (s.kind == InstrKind::AwaitPosition) ++position_misses_;
+                return;  // 没有身份来源 ⇒ 继续等（⛔ 不报错）
+            }
             if (!identity_fresh) {
                 refreshIdentity();
                 identity_fresh = true;
             }
-            if (!identity_.valid) return;
+            if (!identity_.valid) {
+                if (s.kind == InstrKind::AwaitPosition) ++position_misses_;
+                return;
+            }
             if (!scriptNameMatches(s.script, identity_)) return;
+            if (s.kind == InstrKind::AwaitPosition) {
+                // ★ 位置是**同一层**的第二个条件：script 匹配 **且** `FROM <= pos < TO`。
+                //   读不到 ⇒ 不成立（继续等）；⛔ 不报错、不超时、不施加。
+                std::uint32_t pos = 0;
+                if (!readScriptPosition(&pos)) {
+                    ++position_misses_;
+                    return;
+                }
+                if (pos < s.pos_from || pos >= s.pos_to) return;  // 半开区间：TO 不含
+            }
         } else if (s.kind == InstrKind::Wait) {
             // ★ **非阻塞**：只记 deadline（起点 = 第一次到达这条指令的读点）；到期由下一个读点消费。
             const std::uint64_t now = nowMs();
@@ -322,6 +405,36 @@ void InputPlan::atPoint(WindowManager& wm, InputPoint point) {
         ++applied_;
         ++next_;
     }
+}
+
+// 读一次"脚本内位置"（label 坐标 = 脚本体内的**绝对字节偏移**，4 字节对齐）。
+// ★ 只读 guest 内存：`frame[cur].+0x00`（基址）+ `+0x04`（PC）；公式见头注的 EA 锚。
+// ★ 读不到 / 不自洽 ⇒ false（门不成立、继续等）；⛔ 不报错、不 abort、不猜一个位置。
+bool InputPlan::readScriptPosition(std::uint32_t* pos) {
+    if (mem_ == nullptr || !identity_.valid) return false;
+    std::uint32_t engine = 0;
+    if (!readU32(*mem_, kEngineSingletonGlobal, &engine) || engine == 0) return false;
+    const std::uint64_t rec = static_cast<std::uint64_t>(engine) + kEngineFrameBase +
+                              static_cast<std::uint64_t>(kFrameStride) * identity_.cur;
+    std::uint32_t base = 0;
+    std::uint32_t pc = 0;
+    if (!readU32(*mem_, rec + kFrameBodyBaseOffset, &base) || !readU32(*mem_, rec + kFramePcOffset, &pc)) {
+        return false;
+    }
+    // ① 引擎还没发布基址（`0x40EE44 GlobalAlloc` 之前 / 帧已清）⇒ 不成立。
+    if (base == 0 || !mem_->committed(base, 1u)) return false;
+    // ② PC 必须在**脚本体缓冲里**：`pc < base` ⇒ 不是"当前指令"。
+    //    ⚠ 装载长度（`ReadFile` 的字节数）**没有写回 guest**（`0x40F680..` 只是栈上
+    //    `lpNumberOfBytesRead`）⇒ 精确上界读不到；用"同区域 + 已提交 + 语料上界"三条代替。
+    if (pc < base || !mem_->committed(pc, 4u)) return false;
+    const Region* region = mem_->regionOf(base);
+    if (region == nullptr || pc >= region->end) return false;
+    const std::uint64_t off = static_cast<std::uint64_t>(pc) - base;
+    if (off > kScriptBodyMaxBytes) return false;  // 读到别的对象了（跨区伪 pos）
+    const std::uint64_t at = kScriptHeaderLen + off;
+    if (at > 0xFFFFFFFFull) return false;
+    *pos = static_cast<std::uint32_t>(at);
+    return true;
 }
 
 void InputPlan::applyStep(WindowManager& wm, const PlanStep& s) {

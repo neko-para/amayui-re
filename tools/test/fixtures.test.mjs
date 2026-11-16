@@ -11,7 +11,10 @@
  * 钉住：① 结构合法；② 槽 76–79 齐备且 .DAT/.STH 成对；③ 盘上文件与登记集合**两边相等**；
  *       ④ mtime 与 samples.json 一致时，「槽头 +264 起七个 u16 == 文件 mtime」必须成立；
  *       ⑤ mtime 已漂移时**如实 skip**（fresh clone 的正常状态）并指向恢复命令 —— 不假装通过；
- *       ⑥ `containers` 的名字唯一、`what` 非空、与槽载荷不重名。
+ *       ⑥ `containers` 的名字唯一、`what` 非空、与槽载荷不重名；
+ *       ⑦ 目录里的条目只能是**登记的载荷 / 目录文档 / OS 元数据**（判据 = `classifyFixtureEntry`
+ *          纯函数，见下；`REQ-01M7HAK2H6R8RWEG15RBDH5585`：Finder 的 `.DS_Store` 不再撞穿它，
+ *          而塞一个真样本（`random.bin`）必须依旧红）。
  *
  * 运行：`pnpm test`
  */
@@ -21,6 +24,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { REPO_ROOT } from '../lib/paths.mjs';
+import { FIXTURE_DOC_FILES, classifyFixtureEntry, isAllowedFixtureEntry } from '../lib/samples.mjs';
 import { wallClock } from '../lib/time.mjs';
 
 const FIXTURES = path.join(REPO_ROOT, 'corpus', 'fixtures');
@@ -92,15 +96,38 @@ test('样本文件都在盘上且非空', () => {
 });
 
 test('目录里除了载荷、目录 README、samples.json 及其同名说明书之外，不应有别的文件（防"悄悄塞进来的样本"）', () => {
-  const listed = new Set([
-    ...allFiles(),
-    'README.md',
-    path.basename(SAMPLES), // samples.json
-    path.basename(SAMPLES).replace(/\.json$/, '.md'), // samples.md（同名说明书约定）
-    '.gitkeep',
-  ]);
+  const listed = new Set([...allFiles(), ...FIXTURE_DOC_FILES]);
   const actual = fs.readdirSync(FIXTURES, { withFileTypes: true }).filter((d) => d.isFile()).map((d) => d.name);
-  for (const n of actual) assert.ok(listed.has(n), `${n} 没登记在 samples.json 里（要么登记，要么删掉）`);
+  const bad = actual.filter((n) => !isAllowedFixtureEntry(n, listed));
+  assert.deepEqual(bad, [], `这些文件既没登记在 samples.json 里，也不是目录文档 / OS 元数据（要么登记，要么删掉）：\n  - ${bad.join('\n  - ')}`);
+});
+
+test('★ 目录白名单判据（纯函数）：OS 元数据放过；未登记的普通文件（真样本）必须红', () => {
+  const listed = new Set([...allFiles(), ...FIXTURE_DOC_FILES]);
+
+  // ① 已登记：载荷 / 系统容器 / 目录文档 —— 一律放过
+  for (const n of ['SAVE76.DAT', 'SAVE76.STH', 'RT.DAT', 'SAVE.DAT', 'README.md', 'samples.json', 'samples.md', '.gitkeep']) {
+    assert.equal(classifyFixtureEntry(n, listed), 'listed', `${n} 已登记（或属目录文档），必须放过`);
+    assert.equal(isAllowedFixtureEntry(n, listed), true, `${n} 已登记（或属目录文档），必须放过`);
+  }
+
+  // ② OS 元数据：点文件（`._*` AppleDouble、Finder 的 `.DS_Store`）+ 非点文件的三项
+  for (const n of ['.DS_Store', 'Thumbs.db', 'THUMBS.DB', 'desktop.ini', '._SAVE76.DAT', 'Icon\r']) {
+    assert.equal(classifyFixtureEntry(n, listed), 'os-metadata', `${JSON.stringify(n)} 是 OS 元数据，必须放过`);
+    assert.equal(isAllowedFixtureEntry(n, listed), true, `${JSON.stringify(n)} 是 OS 元数据，必须放过`);
+  }
+
+  // ③ 真样本 / 普通文件：**未登记就必须红** —— 这条守卫不许因为 ② 而变松
+  for (const n of ['random.bin', 'SAVE75.DAT', 'SAVE76.DAT.bak', 'samples.json.bak', 'README']) {
+    assert.equal(classifyFixtureEntry(n, listed), 'unknown', `${n} 未登记，必须红`);
+    assert.equal(isAllowedFixtureEntry(n, listed), false, `${n} 未登记，必须红`);
+  }
+
+  // ④ 嵌套目录：判据只看 basename ⇒ 嵌套的 `.DS_Store` 一样忽略，嵌套的真样本一样红
+  assert.equal(classifyFixtureEntry('saves/.DS_Store', listed), 'os-metadata', '嵌套目录的 .DS_Store 也必须忽略');
+  assert.equal(classifyFixtureEntry('saves/Thumbs.db', listed), 'os-metadata', '嵌套目录的 Thumbs.db 也必须忽略');
+  assert.equal(classifyFixtureEntry('saves/random.bin', listed), 'unknown', '嵌套的真样本同样不许放过');
+  assert.equal(classifyFixtureEntry('saves\\random.bin', listed), 'unknown', '另一平台的路径分隔符同样不许绕过');
 });
 
 test('每个 .DAT 的槽头时刻 == wallClock(mtimeMs, tzOffsetMinutes)（mtime 已漂移则如实 skip）', (t) => {

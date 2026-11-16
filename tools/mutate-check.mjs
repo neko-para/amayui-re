@@ -2752,6 +2752,36 @@ const MUTATIONS = [
       '`wait` 退化成空操作 ⇒ input-plan-read-points 的 `input-plan/gates-and-releases` 红' +
       '（注入时钟 1499ms 时 `fired` 应为 0，变异后立刻变 1）',
   },
+  {
+    // 第四条指令：位置门是**半开**区间（FROM 含、TO 不含）⇒ 改成闭区间后，`pos == TO` 也会通过。
+    //   ★ 用单测（不是端到端）当判据：`input-plan/position-gate` 里有一条 `pos == TO` **不**命中
+    //     的断言（0x0460 = 轮询体的末指令末尾）⇒ 这是 `REQ-01M7HBG0NYH957M9EK3JVMF5CC` 一族里
+    //     "位置门"的代表变异（⛔ 不是每个常量一条）。
+    file: 'apps/emulator-lift/src/runtime/input_plan.cpp',
+    from: '                if (pos < s.pos_from || pos >= s.pos_to) return;  // 半开区间：TO 不含\n',
+    to:
+      '                if (pos < s.pos_from || pos > s.pos_to) return;  // 变异：半开区间变成闭区间（TO 也含）\n',
+    guard: 'ctest:input-plan-read-points',
+    ctest: 'input-plan-read-points',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '把 `await position` 的 `pos >= s.pos_to` 改成 `pos > s.pos_to`（半开区间变成闭区间）⇒ ' +
+      '`pos == TO`（0x0460）也命中 ⇒ input-plan-read-points 的 `input-plan/position-gate` 红',
+  },
+  {
+    // fixtures 目录白名单：**OS 元数据**必须放过（Finder 会在 `corpus/fixtures/` 里重新生成 `.DS_Store`）。
+    //   ★ 判据改成恒 false ⇒ 点文件 / `Thumbs.db` / `desktop.ini` 重新撞穿白名单，
+    //     macOS 上 `pnpm verify` 又 499/500（删文件只是当次止血，下一趟 Finder 就复发）。
+    file: 'tools/lib/samples.mjs',
+    from:
+      "  if (FIXTURE_OS_METADATA_FILES.includes(base.toLowerCase())) return 'os-metadata';\n" +
+      "  if (base.startsWith('.')) return 'os-metadata';\n",
+    to: "  if (false) return 'os-metadata';  // 变异：忽略 OS 元数据的判据恒 false\n",
+    guard: 'tools/test/fixtures.test.mjs',
+    what:
+      '把"忽略 OS 元数据"的判据改成恒 false ⇒ `.DS_Store` / `Thumbs.db` / `desktop.ini` / `._*` 又算未登记 ⇒ ' +
+      '`fixtures.test.mjs` 的白名单单测红（macOS 上 Finder 一碰目录就重新生成 `.DS_Store` ⇒ pnpm verify 499/500 复发）',
+  },
 ];
 
 let mutationRunSeq = 0;

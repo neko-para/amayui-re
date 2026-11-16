@@ -1,4 +1,4 @@
-// emulator-lift · 输入**投递层**（S1 骨架 + 三条指令的 AOT 输入配方）
+// emulator-lift · 输入**投递层**（S1 骨架 + 四条指令的 AOT 输入配方）
 //
 // 口径来源：`REQ-01M7HBG0NYH957M9EK3JVMF5CC`（父单 `REQ-01M7G7EJF062NKQ0D40RF3BZ4Z`）；
 //   投递层本身的口径来自 `REQ-01M7G7EMX3JR272D8FVM7JFY9D`。
@@ -26,10 +26,18 @@
 //    ⚠ 如果你发现需要给记账函数传 `WindowManager&`，那说明设计错了 —— 停下报告。
 //
 // =====================================================================================
-// 配方格式（**三条指令**，平铺；`#` 注释、空行忽略）
+// 配方格式（**四条指令**，平铺；`#` 注释、空行忽略）
 //
 //   await script TITLE      ← 电平门：当前引擎脚本身份 == TITLE 即通过（不是边沿）。
 //                             名字 ASCII 大小写不敏感、**两侧**都忽略 `.bin`（`scriptNameMatches`）。
+//   await position TITLE 0x039C 0x0460
+//                           ← **脚本内位置**的电平门（半开区间 `[FROM, TO)`）：
+//                             script 匹配 **且** `FROM <= pos < TO` 才通过，否则继续等
+//                             （⛔ 不报错、不超时）。`FROM` / `TO` 必须是带 `0x` 前缀的 hex；
+//                             解析期校验 `FROM < TO`；脚本名**不在解析期校验**（名字匹配是运行期的事）。
+//                             `pos = header_len + (frame[cur].+0x04 − frame[cur].+0x00)`
+//                             = 脚本体内**绝对字节偏移**（4 字节对齐），与 `dist/views/data/*.txt`
+//                             的 `label_%08x` **同一坐标系**；`header_len` 见下面的常量。
 //   wait 500                ← **宿主单调**毫秒（`std::chrono::steady_clock`）；正整数。
 //   click 1070 480 right    ← x/y = **1280×720 参考系**；按钮词裸写 `left`/`right`（省略 = left，
 //                             ⛔ 不收 `=left`）。
@@ -43,6 +51,9 @@
 //     偏差，**不可评估**；`wait` 只作粗推进，⛔ 不当判据 / 不作跨臂比）。
 //   · 身份来源 = `MarkerSampler`（**纯读 guest 内存**，`runtime/engine_marker.h`），由装配点
 //     调 `attachGuestMemory()` 挂进来；`base==0` / `valid=false` ⇒ 门**不成立**（继续等，⛔ 不报错）。
+//   · 位置门同样只读 guest 内存（`frame[cur].+0x00/+0x04`，EA `0x40EE57` / `0x412825`）；
+//     `base==0` / `pc` 不在脚本体缓冲里 / 读不到 ⇒ 门**不成立**（继续等），并记一个内部计数
+//     `positionMisses()`（缺省不打印）。
 //   · 坐标在投递前过 `cursor_map.h` 的 `referenceToClientPixel()`（**唯一公式**）：
 //     目标 = 主窗口客户区 `HostWindow::client_w/h`（headless 也有；0 ⇒ 退回 1280×720）；
 //     `mouseMove` / `mouseButton(down)` / `mouseButton(up)` 共用**同一个**映射结果。
@@ -92,6 +103,33 @@ enum class InputPoint : std::uint8_t {
 
 constexpr std::size_t kInputPointCount = static_cast<std::size_t>(InputPoint::Count);
 const char* inputPointName(InputPoint point);
+
+// =====================================================================================
+// `await position` 的两格读数 + 头长（**全部是 guest 内存读**，不依赖 Machine / X86）
+//
+// 取证（`.tmp/script-pos/research.md` §1；锚都是 `.lst` 的 EA）：
+//   · `frame[cur].+0x00`（= `Engine+0x5D894+0x78*cur`）= **脚本体缓冲基址**：
+//     写 `0x40EE57`（`GlobalAlloc` 的返回值）；`0x40F69E` 是 `ReadFile` 的 `lpBuffer`。
+//   · `frame[cur].+0x04`（= `Engine+0x5D898+0x78*cur`）= **PC**：`0x412825` 取 opcode、
+//     `0x41347D..0x413487` 每条指令步进。它是**指进脚本体缓冲的 guest 指针**。
+//   · ⇒ `pos = header_len + (pc − base)`，与 `dist/views/data/*.txt` 的 `label_%08x` 同一坐标系。
+//
+// ★ `header_len` **不是**从 guest 内存读的，这一点与本文件原先的猜测不同（逐字核过装载器）：
+//   `0x40EE67` 把 0x20 字节头读进**栈**缓冲 `[ebp+Buffer]`，`0x40EFF2` 把
+//   `sub_header_length` 读进**栈**变量 `[ebp+var_160]`，`0x40F01C` 把 sub-header 读进
+//   `[ebp+var_15C]`；随后 `0x40F69E` 才 `ReadFile` 进 `frame[cur]+0x00` —— 此时文件游标已在
+//   `0x20 + sub_header_length`。⇒ **缓冲区从 `header_len` 处开始，头本身在 guest 里没有落点**
+//   （全函数 4 处 `lpNumberOfBytesRead` 都是栈地址，读数也没有写回 guest）。
+//   ⇒ 只能用语料事实：941/941 视图签名 `SYS4450`、`sub_header_length = 0x1C`
+//   ⇒ `header_len = 0x20 + 0x1C = 0x3C`（v5 的 `0x44` 在本语料零出现）。
+//   ⛔ 别把它改成"读 `base` 处的签名"：`base` 处是**第一条指令的 opcode**。
+// =====================================================================================
+inline constexpr std::uint32_t kFrameBodyBaseOffset = 0x00000000u;  // 记录 +0x00 = 脚本体缓冲基址
+inline constexpr std::uint32_t kFramePcOffset = 0x00000004u;         // 记录 +0x04 = PC
+inline constexpr std::uint32_t kScriptHeaderLen = 0x0000003Cu;       // 0x20 + sub_header_length（SYS4450）
+// 装载长度的**上界**（引擎不把 `ReadFile` 的字节数写回 guest ⇒ 精确长度读不到）。
+// 本语料最大的脚本 1.5 MB；超过这个数的 `pc − base` 一定是"读到了别的对象"（防跨区伪 pos）。
+inline constexpr std::uint32_t kScriptBodyMaxBytes = 0x01000000u;
 
 // 内部判定点 → 计划的事件词汇（闭集合；今天只消费 `Frame`）。
 // ★ 本枚举现在就存在，是为了让 `note()` 的形状**从第一天起**就是"只记账"：
@@ -149,11 +187,13 @@ public:
     std::uint64_t deliverCalls(InputPoint point) const;
     std::uint64_t noteCalls(PlanEventKind kind) const;
     std::uint64_t steps() const { return static_cast<std::uint64_t>(steps_.size()); }
-    // 已消费的**指令**数（含 `await script` / `wait`；= `next_`）。
+    // 已消费的**指令**数（含 `await script` / `await position` / `wait`；= `next_`）。
     std::uint64_t stepsApplied() const { return applied_; }
     // **已施加的 `click`** 数（摘要 `fired=`；`await` / `wait` 不算"动作"）。
     std::uint64_t fired() const { return fired_; }
     std::uint64_t releases() const { return released_; }
+    // 位置门"这一刻读不到位置"的次数（base==0 / pc 越界 / 未提交）。⛔ 缺省不打印（诊断用）。
+    std::uint64_t positionMisses() const { return position_misses_; }
     std::uint64_t presenting() const { return event_calls_[static_cast<std::size_t>(PlanEventKind::Frame)]; }
     std::size_t pendingReleases() const { return releases_pending_; }
     const std::string& origin() const { return origin_; }
@@ -161,13 +201,16 @@ public:
     std::string summary() const;
 
 private:
-    // 平铺指令流的三种指令（⛔ 不是图语法：一个 step 不再"自带一个门 + 一个动作"）。
-    enum class InstrKind : std::uint8_t { AwaitScript = 0, Wait = 1, Click = 2 };
+    // 平铺指令流的**四条**指令（⛔ 不是图语法：一个 step 不再"自带一个门 + 一个动作"）。
+    enum class InstrKind : std::uint8_t { AwaitScript = 0, Wait = 1, Click = 2, AwaitPosition = 3 };
 
     struct PlanStep {
         InstrKind kind = InstrKind::AwaitScript;
-        // AwaitScript
+        // AwaitScript / AwaitPosition
         std::string script;                 // 名字原文（⛔ 不参与判定：判定走 `scriptNameMatches`）
+        // AwaitPosition（半开区间 `[pos_from, pos_to)`；label 坐标 = 脚本体内绝对字节偏移）
+        std::uint32_t pos_from = 0;
+        std::uint32_t pos_to = 0;
         // Wait（运行时状态：第一次到达这条指令的那个读点 = 起点）
         std::uint64_t wait_ms = 0;
         std::uint64_t wait_deadline_ms = 0;
@@ -188,6 +231,8 @@ private:
 
     // 采一次身份（同 `(cur,id)` + 名字表签名不变 ⇒ 复用缓存的名字，不重解析）。
     void refreshIdentity();
+    // 读一次"脚本内位置"（label 坐标）。读不到 ⇒ false（门不成立）；⛔ 不抛、不报错。
+    bool readScriptPosition(std::uint32_t* pos);
     std::uint64_t nowMs() const;
     void applyStep(WindowManager& wm, const PlanStep& s);
     void releaseDue(WindowManager& wm);
@@ -204,6 +249,7 @@ private:
     std::uint64_t applied_ = 0;         // 已消费指令数
     std::uint64_t fired_ = 0;           // 已施加 click 数
     std::uint64_t released_ = 0;
+    std::uint64_t position_misses_ = 0;  // 位置门读不到位置的次数（诊断；缺省不打印）
     std::uint64_t read_points_ = 0;     // 读点序号（待抬起的兜底刻度）
     std::size_t releases_pending_ = 0;
     std::array<std::uint64_t, kInputPointCount> deliver_calls_{};

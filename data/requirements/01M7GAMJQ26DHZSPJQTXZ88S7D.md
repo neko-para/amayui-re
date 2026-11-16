@@ -2,10 +2,11 @@
 
 - id: REQ-01M7GAMJQ26DHZSPJQTXZ88S7D
 - type: bug
-- status: open
+- status: dropped
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
 - repro: docs/03-emulator/defects.md#BUG-26
 - severity: S2
+- dropped_reason: 不是缺陷：这是**机制未统一**，不是同一实现下的行为分歧。实测解释器根本不接 --input-plan（未知参数 + exit 2；setInputPlan() 全仓只有 aot_main.cpp:484-485 两处调用），所以「两臂同一输入」今天不可执行；原来的对比是 AOT 的 --input-plan 与解释器的 --input-script/--interaction-graph 两条不同施加路径。观测本身（TITLE 上 click 1070 480 在 AOT 生效、在解释器无反应）保留在 docs/03-emulator/defects.md#BUG-26 与 input-plan.md §6。要让这条重新成立：先给解释器接同一条 deliver* 路径（另单）。
 - tags: [emulator-lift, input, divergence]
 
 ## 现象（2026-11-16 探测时撞到）

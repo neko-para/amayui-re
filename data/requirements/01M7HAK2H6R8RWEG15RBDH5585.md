@@ -2,10 +2,12 @@
 
 - id: REQ-01M7HAK2H6R8RWEG15RBDH5585
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
+- verify: tools/test/fixtures.test.mjs#★ 目录白名单判据（纯函数）：OS 元数据放过；未登记的普通文件（真样本）必须红
 - repro: tools/test/fixtures.test.mjs#悄悄塞进来的样本
 - severity: S3
+- done_reason: 判据抽成纯函数（tools/lib/samples.mjs 的 classifyFixtureEntry/isAllowedFixtureEntry）：登记集合 | OS 元数据（点文件 + thumbs.db/desktop.ini）通过，其余红。取证：touch corpus/fixtures/.DS_Store ⇒ fixtures 7 pass；再 touch random.bin ⇒ 6 pass/1 fail（真样本依旧红）。变异：mutate-check 加 1 条并实测 1/1 红。门禁：pnpm test 552/552 · pnpm verify 501/501（500 + 新增纯函数单测）。余留：corpus/fixtures/README.md:50 措辞未同步（corpus 边界禁改）；守卫仍只扫顶层（既有）。
 - tags: [toolchain, fixtures, platform]
 
 ## 一句话

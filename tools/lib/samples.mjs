@@ -77,12 +77,65 @@ const SAMPLE_INVARIANTS = [
   ['`containers` 里的文件不属任何槽：名字唯一、`what` 非空、三时间字段齐全', '同上'],
   ['`containers` 的条目名不得与槽载荷重名（一个文件只能有一个身份）', '同上'],
   ['槽头 +264 起七个 u16 的年月日时分秒 == `wallClock(mtimeMs, tzOffsetMinutes)`；星期与日期自洽', '`tools/test/fixtures.test.mjs`'],
-  ['目录里的文件集合 == 本文件登记的集合（两边都不许多）', '`tools/test/fixtures.test.mjs`'],
+  ['目录里的文件集合 == 本文件登记的集合 + 目录文档；OS 元数据（点文件 / `Thumbs.db` / `desktop.ini`）不算（两边都不许多）', '`tools/test/fixtures.test.mjs`'],
   ['载荷的 `filter=lfs`（**不靠 origin 枚举**）', '`pnpm tools corpus validate` 的守卫 #6'],
 ];
 
 const pad = (n) => String(n).padStart(2, '0');
 const filesOf = (slot) => EXTS.map((e) => `SAVE${slot}.${e}`);
+
+// ───────────────────────────────────────────────── 目录白名单（纯函数，判据在这里）
+
+/**
+ * `corpus/fixtures/` 目录里"自带文档"的文件（不是样本）：目录 README、台账本身、台账的同名说明书、
+ * git 的空目录占位。★ 它们与载荷一起构成**唯一**的正向白名单（`listed` 集合由调用方给）。
+ */
+export const FIXTURE_DOC_FILES = Object.freeze(['README.md', 'samples.json', 'samples.md', '.gitkeep']);
+
+/**
+ * **OS 元数据**的文件名（⚠ 不是"任何隐藏文件"）：Windows 资源管理器的 `Thumbs.db` / `desktop.ini`，
+ * 以及 Finder 给"自定义图标"留下的 `Icon\r`（名字里带一个 CR）。
+ * ★ 为什么点文件不在这个集合里、而是下面单独一条规则：macOS 的点文件不止三种（`.DS_Store`、
+ *   `._*` AppleDouble、`.localized` …），**不可能枚举完** —— 枚举式白名单会随 Finder 版本再次变红。
+ */
+export const FIXTURE_OS_METADATA_FILES = Object.freeze(['thumbs.db', 'desktop.ini', 'icon\r']);
+
+/**
+ * **`corpus/fixtures/` 里这个条目算不算允许出现的文件** —— 纯函数（不读盘、不打印、不看文件内容）。
+ *
+ * 判据（三条，互相独立）：
+ *   ① `listed`（调用方给的**已登记集合**：`samples.json` 的载荷 + `containers` + `FIXTURE_DOC_FILES`）
+ *      ⇒ `'listed'`。
+ *   ② **OS 元数据** ⇒ `'os-metadata'`：
+ *      · basename 大小写不敏感地等于 `FIXTURE_OS_METADATA_FILES` 里的一项（`Thumbs.db` / `desktop.ini` /
+ *        Finder 的 `Icon\r`）—— 它们**不是**点文件，光靠 ③ 兜不住；
+ *      · basename **以 `.` 开头**（POSIX 隐藏文件 = 点文件）。
+ *        ★ 为什么这一刀切是安全的、而不是"把任何隐藏文件都放过"：本函数只服务 `corpus/fixtures/`
+ *          **这一层**，而这里的载荷是 `samples.json` 按名字加载的**可见名数据文件**（`SAVE76.DAT`）；
+ *          点开头在这个目录里没有任何合法用途（唯一的例外 `.gitkeep` 已在 ① 里，不靠这条）。
+ *        ★ ⛔ 判据里**没有**"Windows hidden 属性"、也没有"仓库别处的点文件" —— 那些不在本函数的服务范围内。
+ *   ③ 其余 ⇒ `'unknown'`（**不放过**：`random.bin` 这类"悄悄塞进来的样本"必须红）。
+ *
+ * 嵌套路径（`saves/.DS_Store`）只取 basename ⇒ 嵌套目录里的 OS 元数据同样被认出来；
+ * 两种分隔符都认（这个名字可能来自另一台机器）。
+ *
+ * @param {string} name 文件名或相对路径
+ * @param {Set<string>} [listed] 已登记的文件名集合
+ * @returns {'listed' | 'os-metadata' | 'unknown'}
+ */
+export function classifyFixtureEntry(name, listed = new Set()) {
+  const base = String(name ?? '').split(/[\\/]/).pop();
+  if (base === '') return 'unknown';
+  if (listed.has(base)) return 'listed';
+  if (FIXTURE_OS_METADATA_FILES.includes(base.toLowerCase())) return 'os-metadata';
+  if (base.startsWith('.')) return 'os-metadata';
+  return 'unknown';
+}
+
+/** 上面那个判据的布尔形态（守卫读起来更直白）：这个条目算不算"允许出现"。 */
+export function isAllowedFixtureEntry(name, listed) {
+  return classifyFixtureEntry(name, listed) !== 'unknown';
+}
 
 // ───────────────────────────────────────────────── samples.json 读写
 

@@ -1,4 +1,4 @@
-// emulator-lift · 输入投递层（关系断言 + 三条指令的配方语义；pure，顶层 CTest 注册）
+// emulator-lift · 输入投递层（关系断言 + 四条指令的配方语义；pure，顶层 CTest 注册）
 //
 // 判据（红了意味着什么）：
 //   ① 每个读点调一次 shim ⇒ `InputPlan::deliverCalls(point)` 与 `ShimDef::call_count`
@@ -13,6 +13,10 @@
 //      · 未知指令 / 旧指令 / 缺参数 / 负毫秒 / `=left` ⇒ `loadText` 失败且点名 `origin:行:`；
 //      · `click` 的坐标从 **1280×720 参考系**缩放到客户区，`mouseMove` / `mouseButton` /
 //        抬起用**同一个**映射结果；抬起语义的 sampled / forced 两条腿都在 **click** 上验。
+//   ⑤ 第四条指令 `await position`（**脚本内位置**的电平门，半开区间 `[FROM, TO)`）：
+//      · 命中 / 边界（`pos == FROM` 命中、`pos == TO` 不命中）/ 区间外继续等；
+//      · `base==0` / `pc < base` / `pc` 未提交 / `pc − base` 越上界 ⇒ 不满足、不崩、不施加；
+//      · `FROM >= TO` / 缺参数 / 非 `0x` hex ⇒ 解析期失败；未知脚本名**不**在解析期校验。
 //
 // ⚠ 诚实边界：`ReadFile`（第 11 个投递点，只是**事件源**）**不在**本用例里 ——
 //   它要一个有效文件句柄（`CreateFileA` + `Vfs` 的 game_dir），那属于 `tests/file_io.cpp` 的夹具面；
@@ -21,7 +25,7 @@
 //   `tools/mutate-check.mjs` 的匹配锚 ⇒ ⛔ 不要改它的断言文本。
 //
 // ★ 引用单：`REQ-01M7G7EMX3JR272D8FVM7JFY9D`（父单 `REQ-01M7G7EJF062NKQ0D40RF3BZ4Z`）
-//   + `REQ-01M7HBG0NYH957M9EK3JVMF5CC`（三条指令）。
+//   + `REQ-01M7HBG0NYH957M9EK3JVMF5CC`（三条指令 + 第四条 `await position`）。
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -154,7 +158,7 @@ void caseRelation() {
 }
 
 // =====================================================================================
-// 三条指令 · 夹具（假 Engine / 注入时钟 / 消息解码）
+// 三条指令 + 第四条 `await position` · 夹具（假 Engine / 注入时钟 / 消息解码）
 //
 // ★ 假 Engine 的形状与 `tests/input_marker.cpp` 同源：只摆 `MarkerSampler` 需要的那几格
 //   （单例 / `cur` / 第 0 条帧记录 / 名字表根）。⛔ 不依赖游戏安装 / LFS。
@@ -350,6 +354,122 @@ void caseScriptGate() {
 }
 
 // =====================================================================================
+// 判据 5 · 第四条指令 `await position`：脚本内位置的电平门（半开区间）
+//
+// 夹具：`publishEngine` 摆好身份；`frame[cur].+0x00` 指向一块已提交的"脚本体"，
+// `+0x04` 由每个用例设成"label 坐标 → PC"的逆映射（`pc = base + (pos − header_len)`）。
+// 判据（红了意味着什么）：
+//   ① 区间内命中 ⇒ 同一个读点施加 click；区间外 ⇒ 继续等（⛔ 不报错、不施加）；
+//   ② 边界：`pos == FROM` **命中**、`pos == TO` **不命中**（半开区间）；
+//   ③ 读不到位置（base==0 / pc < base / pc 未提交 / pc−base 越上界）⇒ 不满足、不崩；
+//   ④ 位置门**同时**要求 script 匹配（脚本名不符 ⇒ 即使 pos 在区间内也不通过）。
+// =====================================================================================
+void casePositionGate() {
+    lift_test::g_current_case = "input-plan/position-gate";
+    lift_fixture::Fixture f;
+    LIFT_CHECK(f.ok);
+    if (!f.ok) return;
+    lift::WindowManager* wm = f.m.cpu().windows;
+    LIFT_CHECK(wm != nullptr);
+    if (wm == nullptr) return;
+    LIFT_CHECK(wm->createWindow("PlanTest", 0u, 0u, 0u, 0u, 1280, 720, 0u) != 0);
+    LIFT_CHECK(publishEngine(f.m, "TITLE.BIN", 42u));
+
+    // `publishEngine` 已把 `frame[cur].+0x00` 预置成 kCodeBase（已提交）⇒ 就拿它当脚本体。
+    const std::uint32_t body = kCodeBase;
+    auto setPc = [&](std::uint32_t pos) {
+        put32(f.m, kFrameBase + lift::kFramePcOffset, body + (pos - lift::kScriptHeaderLen));
+    };
+
+    // ---- ① + ②：命中 / 左边界（FROM 含）/ 区间外继续等 ----
+    lift::InputPlan plan;
+    std::string err;
+    const bool loaded = plan.loadText("await position title 0x039C 0x0460\nclick 10 20\n", "mem", &err);
+    if (!loaded) std::fprintf(stderr, "位置配方被拒：%s\n", err.c_str());
+    LIFT_CHECK(loaded);
+    if (!loaded) return;
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.steps()), 2);
+    plan.attachGuestMemory(&f.m.mem());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.fired()), 0);
+
+    setPc(0x0398);  // 区间**左外**（S0 段的尾巴）
+    plan.atPoint(*wm, lift::InputPoint::PeekMsg);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.fired()), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 0);
+    LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);
+
+    setPc(0x039C);  // **pos == FROM** ⇒ 命中
+    plan.atPoint(*wm, lift::InputPoint::PeekMsg);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.fired()), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 2);
+    LIFT_CHECK_EQ_U32(wm->mouseButtons(), lift::input::kMkLButton);
+    (void)plan.releaseAll(*wm);
+    LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);
+
+    // ---- ②：右边界（TO 不含）——`pos == TO` 不通过、`pos == 末指令起点` 通过 ----
+    lift::InputPlan to_plan;
+    LIFT_CHECK(to_plan.loadText("await position TITLE 0x039C 0x0460\nclick 10 20\n", "mem", &err));
+    to_plan.attachGuestMemory(&f.m.mem());
+    setPc(0x0460);  // **pos == TO** ⇒ 不通过（半开区间）
+    to_plan.atPoint(*wm, lift::InputPoint::PeekMsg);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(to_plan.fired()), 0);
+    setPc(0x045C);  // 末指令（jmp）的起点 ⇒ 通过
+    to_plan.atPoint(*wm, lift::InputPoint::PeekMsg);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(to_plan.fired()), 1);
+    (void)to_plan.releaseAll(*wm);
+
+    // ---- ①：位置门**同时**要求 script 匹配（pos 在区间内、名字不符 ⇒ 不通过）----
+    lift::InputPlan other;
+    LIFT_CHECK(other.loadText("await position NOSUCHSCRIPT 0x039C 0x0460\nclick 10 20\n", "mem", &err));
+    other.attachGuestMemory(&f.m.mem());
+    setPc(0x039C);
+    for (int i = 0; i < 3; ++i) other.atPoint(*wm, lift::InputPoint::PeekMsg);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(other.fired()), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(other.stepsApplied()), 0);
+
+    // ---- ③ 读不到位置 ⇒ 不满足、不崩、不施加（每种都记一次内部计数）----
+    lift::InputPlan robust;
+    LIFT_CHECK(robust.loadText("await position TITLE 0x039C 0x0460\nclick 10 20\n", "mem", &err));
+    robust.attachGuestMemory(&f.m.mem());
+    const std::uint64_t misses0 = robust.positionMisses();
+
+    // (a) 引擎没发布帧记录基址（`base==0`）
+    put32(f.m, kFrameBase + lift::kFrameBodyBaseOffset, 0u);
+    robust.atPoint(*wm, lift::InputPoint::PeekMsg);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(robust.fired()), 0);
+    put32(f.m, kFrameBase + lift::kFrameBodyBaseOffset, body);
+
+    // (b) `pc < base`（不是脚本体里的指针）
+    put32(f.m, kFrameBase + lift::kFramePcOffset, body - 4u);
+    robust.atPoint(*wm, lift::InputPoint::PeekMsg);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(robust.fired()), 0);
+
+    // (c) `pc` 未提交（读到空页）
+    put32(f.m, kFrameBase + lift::kFramePcOffset, 0x10000000u);
+    robust.atPoint(*wm, lift::InputPoint::PeekMsg);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(robust.fired()), 0);
+
+    // (d) `pc − base` 超过语料上界（pc 仍在同一块已提交区域里 ⇒ 只有上界这一条能拦住）
+    constexpr std::uint32_t kBigBody = 0x30000000u;
+    constexpr std::uint32_t kBigSize = 0x02000000u;  // 32 MiB > kScriptBodyMaxBytes
+    LIFT_CHECK(f.m.mem().commitZeroed(kBigBody, kBigSize, lift::RegionKind::Heap, "fake-body"));
+    put32(f.m, kFrameBase + lift::kFrameBodyBaseOffset, kBigBody);
+    put32(f.m, kFrameBase + lift::kFramePcOffset, kBigBody + lift::kScriptBodyMaxBytes + 4u);
+    robust.atPoint(*wm, lift::InputPoint::PeekMsg);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(robust.fired()), 0);
+    LIFT_CHECK(robust.positionMisses() >= misses0 + 4);
+
+    // 恢复到合法位置 ⇒ 同一个计划仍然能通过（门是电平，不是一次性的）
+    put32(f.m, kFrameBase + lift::kFrameBodyBaseOffset, body);
+    setPc(0x0400);
+    robust.atPoint(*wm, lift::InputPoint::PeekMsg);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(robust.fired()), 1);
+    LIFT_CHECK_EQ_U32(wm->mouseButtons(), lift::input::kMkLButton);
+    (void)robust.releaseAll(*wm);
+    LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);
+}
+
+// =====================================================================================
 // 判据 1 + 4 · 解析期硬错：旧指令 / 未知指令 / 缺参数 / 负毫秒 / `=left` ⇒ 带 `origin:行:`
 // =====================================================================================
 void caseParseErrors() {
@@ -369,6 +489,12 @@ void caseParseErrors() {
         {"wait -5\n", "mem:1:", "正整数"},
         {"wait 0\n", "mem:1:", "正整数"},
         {"wait\n", "mem:1:", "wait"},
+        // `await position` 的解析期四条：区间倒置 / 缺参数 / 非 hex / 裸 hex。
+        {"await position TITLE 0x0460 0x039C\n", "mem:1:", "FROM < TO"},
+        {"await position TITLE 0x039C\n", "mem:1:", "await position"},
+        {"await position TITLE 0x039C 0x46G\n", "mem:1:", "hex"},
+        {"await position TITLE 39C 460\n", "mem:1:", "hex"},
+        {"await position\n", "mem:1:", "await position"},
         {"click 1\n", "mem:1:", "缺参数"},
         {"click 1 2 =left\n", "mem:1:", "按钮词"},
         {"# 注释\nawait script TITLE\nawait presents 2\n", "mem:3:", "未知指令"},
@@ -394,14 +520,16 @@ void caseParseErrors() {
         }
     }
 
-    // ---- 合法配方：三条指令都吃，`#` / 空行 / 行尾注释 / 大小写指令名都忽略 ----
+    // ---- 合法配方：四条指令都吃，`#` / 空行 / 行尾注释 / 大小写指令名都忽略 ----
     lift::InputPlan plan;
     std::string err;
-    const bool ok = plan.loadText("\n# 注释\nAwait script TITLE  # 行尾注释\n\nWait 250\nclick 1 2 right\n",
-                                  "mem", &err);
+    const bool ok = plan.loadText(
+        "\n# 注释\nAwait script TITLE  # 行尾注释\n\nWait 250\nclick 1 2 right\n"
+        "await POSITION some-name 0x0000039C 0x00000460  # 未知脚本名不在解析期校验\n",
+        "mem", &err);
     if (!ok) std::fprintf(stderr, "合法配方被拒：%s\n", err.c_str());
     LIFT_CHECK(ok);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.steps()), 3);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.steps()), 4);
 }
 
 // =====================================================================================
@@ -527,6 +655,7 @@ int main() {
     caseRelation();
     caseInstructionsAndClock();
     caseScriptGate();
+    casePositionGate();
     caseParseErrors();
     caseCoordinateScale();
     caseForcedRelease();
