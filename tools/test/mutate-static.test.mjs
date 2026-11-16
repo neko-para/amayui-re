@@ -130,3 +130,31 @@ test('c) 接线：`--list` 真的跑静态检查并打汇总（退出码 0；不
   assert.match(noMatch.all, /没有匹配/, '必须说明"没有匹配"，而不是静默通过');
   assert.ok(!noMatch.stdout.includes('静态检查通过'), `⛔ 空匹配不许打出"静态检查通过"（假绿）：${noMatch.stdout}`);
 });
+
+test('d) `buildDir` 只许 §12.3 的两棵树 —— `out-<名字>` 那种"本轮自己的树"一律不许（它只会永远「不可判定」）', () => {
+  // ★ 为什么这条值得常驻（实测 2026-11-17）：清单里曾有 3 条写 `out-g2` / `out-perf1` / `out-liftone1`
+  //   —— 那是"每个 agent 一棵构建树"时代的产物（§12.3 之后已禁止）。那三棵树早就不存在 ⇒
+  //   `runCtestGuard` 只能报"构建目录未配置" ⇒ 记「不可判定（其它）」⇒ 那三条**一次也证明不了**
+  //   "守卫会红"，但清单看起来完全正常，全量跑也只是一路「无法判定」。
+  const ALLOWED = ['apps/emulator-lift/out', 'apps/emulator-cxx/out'];
+  /** 判据本身（纯函数；对真清单与注入副本**同一份**，⛔ 不许一处有一处没有） */
+  const violations = (list) =>
+    list
+      .filter((m) => m.ctest && !ALLOWED.includes(m.buildDir ?? ''))
+      .map((m) => `${m.file} ⇒ buildDir=${JSON.stringify(m.buildDir)}（守卫 ${m.ctest}）`);
+
+  assert.deepEqual(
+    violations(MUTATIONS),
+    [],
+    '有 CTest 条目的 `buildDir` 不在 §12.3 的两棵树里（`out-<名字>` 会永远记「不可判定」⇒ 该条什么也没证明）：\n' +
+      violations(MUTATIONS).map((s) => `  ⛔ ${s}`).join('\n'),
+  );
+
+  // ★ 反向：判据不是恒真 —— 注入一条 `out-<名字>` 必须被点名
+  const faked = [
+    ...MUTATIONS,
+    { file: 'x.cpp', from: 'x', to: 'y', guard: 'ctest:whatever', ctest: 'whatever', buildDir: 'apps/emulator-lift/out-whatever', what: '假构建树探针' },
+  ];
+  assert.equal(violations(faked).length, 1, '注入的 `out-<名字>` 必须被报出来（否则上面那条"0 条"是恒真断言）');
+  assert.match(violations(faked)[0], /out-whatever/);
+});

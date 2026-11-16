@@ -2613,15 +2613,16 @@ const MUTATIONS = [
   //     裸 `return true;` 会因 `-Wunused-parameter` **编不过** ⇒ 那会被记成「不可判定（构建失败）」，
   //     而不是「守卫红了」（实测：`error: unused parameter 'cpu' [-Werror,-Wunused-parameter]`）。
   //   ⛔ 也不用 `if (false)`：`/W4 /WX` 的 C4127（条件恒真）同样让工具记「无法判定」。
-  //   ★ `buildDir` 是 `out-g2`：与邻居同形（`apps/emulator-lift/out*`），但用本轮自己的构建目录
-  //     —— `out/` 与其它 `out-*` 归别人（并发工作树），⛔ 不借它们重建。
+  //   ★ `buildDir` = `apps/emulator-lift/out`（§12.3「构建树只有一个」）。原先写的是 `out-g2`
+  //     ——"本轮自己的构建目录"—— 那棵树**早就不存在**了 ⇒ 这条只会永远记「不可判定（其它）」，
+  //     一次也证明不了"守卫会红"。
   {
     file: 'apps/emulator-lift/src/runtime/machine.h',
     from: '    bool ownsCpu(const X86& cpu) const override { return &cpu_ == &cpu; }',
     to: '    bool ownsCpu(const X86& cpu) const override { (void)cpu; return true; }  // 变异：恒真（副本也能过）',
     guard: 'ctest:lift-host-services-owns-cpu',
     ctest: 'lift-host-services-owns-cpu',
-    buildDir: 'apps/emulator-lift/out-g2',
+    buildDir: 'apps/emulator-lift/out',
     what:
       '`Machine::ownsCpu` 恒真（归属判据退化成"只判 host 非空"）⇒ 音频 feeder 的私有 `X86` 副本也能过 ' +
       '⇒ `lift-host-services-owns-cpu` 当场红：② 的两条 `ownsCpu(copy)` 失败 + ③ 的真实入口真的给副本' +
@@ -2635,14 +2636,14 @@ const MUTATIONS = [
   //   （`stubIndexSlowPathHits` 不动）；③ 页外 / 页内未对齐 ⇒ null；④ addRuntime 追加后旧槽仍指向
   //   同一条（表里存 id / 下标，⛔ 不存 `ShimDef*`）。
   // ★ 用例里**先登记两条无桩的 `add`** ⇒ 桩 id(2,3,4) ≠ 槽号(0,1,2) ⇒ "槽号当 id"必然不等价。
-  // ★ `buildDir` 是 `out-perf1`：本轮自己的构建目录（`out/` 与其它 `out-*` 归别人，⛔ 不借它们重建）。
+  // ★ `buildDir` = `apps/emulator-lift/out`（§12.3）。原先写 `out-perf1`（那棵树已不存在 ⇒ 永远「不可判定」）。
   {
     file: 'apps/emulator-lift/src/runtime/shims.cpp',
     from: '    return d != nullptr ? d->id : 0u;',
     to: '    return d != nullptr ? static_cast<std::uint32_t>((ea - stubPage()) >> 2) : 0u;  // 变异：把槽号当 id',
     guard: 'ctest:lift-shim-stub-index',
     ctest: 'lift-shim-stub-index',
-    buildDir: 'apps/emulator-lift/out-perf1',
+    buildDir: 'apps/emulator-lift/out',
     what:
       '`idForStub` 返回**槽号**而不是登记 id（本轮唯一的正确性约束就是"id = 注册序 ≠ 槽 = 发号序"）' +
       '⇒ `lift-shim-stub-index` 的逐槽等价当场红：`stub-index-every-slot` / `-after-growth` / ' +
@@ -2660,7 +2661,7 @@ const MUTATIONS = [
   // ★ 守卫：`apps/emulator-lift/tests/decode_cache.cpp`（CTest `lift-decode-cache`）的
   //   `smc-invalidate` 组 —— 改字节后仍命中 ⇒ `cache.invalidated` 停在 0，且返回的 Insn 是改前
   //   那一条（长度 5 / op=Mov / imm=0x12345678），而重新解码给的是长度 1 / op=Nop。
-  // ★ `buildDir` 是本轮自己的构建目录（`out/` 与其它 `out-*` 归别人，⛔ 不借它们重建）。
+  // ★ `buildDir` = `apps/emulator-lift/out`（§12.3）。原先写 `out-liftone1`（那棵树已不存在 ⇒ 永远「不可判定」）。
   {
     file: 'apps/emulator-lift/src/runtime/decode_cache.cpp',
     from:
@@ -2675,7 +2676,7 @@ const MUTATIONS = [
     to: '        bool same = mem.committed(ea, 1u);  // 变异：逐字节校验被删掉（只按 EA 命中 ⇒ 陈旧答案）\n',
     guard: 'ctest:lift-decode-cache',
     ctest: 'lift-decode-cache',
-    buildDir: 'apps/emulator-lift/out-liftone1',
+    buildDir: 'apps/emulator-lift/out',
     what:
       '解码缓存命中时不再逐字节校验（只按 EA 命中）⇒ `lift-decode-cache` 的 `smc-invalidate` 红：' +
       '改字节后仍返回改前那条 Insn（长度 5 / op=Mov / imm=0x12345678），`invalidated` 停在 0 —— ' +
@@ -3224,7 +3225,12 @@ export async function main(argv = process.argv.slice(2)) {
         '  --list 只列清单（不动任何变异文件；但每次启动都会先自愈上次中断留下的 journal）。\n' +
         '    ★ 它同时做**静态存在性检查**（`file` 在不在、`from` 还是不是源文件的子串；不构建、不施加变异）\n' +
         '      ⇒ 清单过期（源文件改名 / 搬家 / 文案改写）在这里就非 0 退出，而不是等全量跑到那一条。\n' +
-        '  --match <子串> 只跑 file / what / guard 里含该子串的变异（例：--match shape）。\n\n' +
+        '  --match <子串> 只跑 file / what / guard 里含该子串的变异（例：--match shape）。\n' +
+        `  ★ **日常只跑你这轮动到的那一条**（\`--match <该条 what 里的独特子串>\`）。不带 \`--match\` = **全量 ${MUTATIONS.length} 条**，\n` +
+        `    其中 ${MUTATIONS.filter((m) => m.ctest).length} 条是 CTest 条目、每条要 **2 次增量构建**（变异前 / 还原后各一次）+ **3 次 ctest**\n` +
+        '    （基线 / 变异 / 还原确认）⇒ 代价随条数线性放大，**十几分钟起步**；而且它会**临时改写工作树里的文件**\n' +
+        '    ⇒ 别人还在编辑、或正在测墙钟 A/B 时 ⛔ 不要开。\n' +
+        '    全量是**刻意扫**（改过清单结构 / 里程碑前），⛔ 不是"顺手跑一下"。\n\n' +
         '  退出码：0 全部按预期变红 / 1 有守卫没抓住或清单过期 / 2 还原失败 / 内部错误 / 3 启动自愈拒绝运行 /\n' +
         '          4 全部不可判定(其它) / 5 有不可判定(超时)。\n\n' +
         '  崩溃安全：动文件前把 {file,before,mutated,guard?} 原子写进 .tmp/mutate-check/journal.json；\n' +
