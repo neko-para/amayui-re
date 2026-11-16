@@ -353,17 +353,22 @@ ctest --test-dir out --output-on-failure
 
 | 树 | 额外职责（只有它有） | 也能当 |
 |---|---|---|
-| `E:\Projects\amayui-re` | **真相**：需求单 · `AGENTS.md` / `CTX.md` · `data/**` · `corpus/**` | **代码车道 A**（自带 `out/`） |
-| `E:\Projects\amayui-re-dev` | 无（它不承担任何真相职责） | **代码车道 B**（自带 `out/`） |
+| `E:\Projects\amayui-re` | **真相**：需求单 · `AGENTS.md` / `CTX.md` · `data/**` · `corpus/**` | 代码车道（**仅限短、独立、不会被 dev 依赖**的活） |
+| `E:\Projects\amayui-re-dev` | 无（它不承担任何真相职责） | **代码车道（长任务默认落这里）** |
 
 - ★ **硬约束只有一条**：两条活跃车道**不许同时改同一批文件**。两个子系统最容易撞的公共面是
   `apps/emulator-lift/CMakeLists.txt` 与 `tools/mutate-check.mjs` ⇒ 各自**追加在自己的段尾**，撞了由父级手工解。
   开新车道前先看另一棵树：`git -C <另一棵> status --porcelain` + `git -C <另一棵> diff --name-only`。
 - ★ **真相件始终只在 main**（需求单 / `AGENTS.md` / `CTX.md` / `corpus/**`）：这是"真相只有一份"，与并行无关。
-- ★ **合并是双向的**：
-  - `dev → main`：把 dev 车道的成果**收口**进真相仓；
-  - `main → dev`：main 上也长了代码 ⇒ **必须** `git merge main` 进 dev，否则下一条 dev 车道的基线是旧的。
-  - 两个方向都只用 `merge`；⛔ 不 `rebase`、⛔ 不 `squash`。
+- ★ **合并方向：只有 `dev → main`**（用户 2026-11-17 口径）。`git merge dev` 把 dev 车道的成果收口进真相仓；
+  ⛔ **不把 main 的代码 merge 进 dev**（那样合并方向就乱了，也说不清哪棵树是整合点）。
+  ⇒ 真相件（需求单 / `AGENTS.md` / `docs`）**天然只能在 main 产出** ⇒ dev 仍要 `git merge main` 拿它们 ——
+  这不是"代码合并"，是**同步真相**；为了把冲突面压到最小，真相件改动集中在 main 并尽快 sync。
+- ★ 由上面那条派生出**分派规则**（本条的实操价值全在这里）：
+  - **长任务 / 会被 dev 依赖的代码 ⇒ 一律放 dev**；
+  - main 只做"**短、独立、不会被 dev 依赖**"的活，外加真相件；
+  - 若 dev 的新任务依赖 main 上还在开发的代码 ⇒ **阻塞等待**，⛔ 不要为此造 main→dev 的代码合并；
+    等待期把不依赖的部分先做掉，或把它挪到 dev 里另一条队列。
 - ★ **要墙钟读数的车道独占机器**：两条车道同时 `cmake --build` 会互相污染时序读数（§12.6）。
   功能类验收（红/绿、停点名字、`insns`）不受影响 ⇒ 并行时把"性能结论"让给独占用例。
 - ★ main 的 `out/` 会因 main 的代码改动变 **stale**：在 main 跑代码就得在 main 重建（10 min 级）。
@@ -388,14 +393,14 @@ ctest --test-dir out --output-on-failure
 ### 14.2 合并：只 `merge`，不 `rebase`、不 `squash`
 
 ```bash
-cd E:\Projects\amayui-re     && git merge dev    # 拿代码（快进 / 真合并都行）
-cd E:\Projects\amayui-re-dev && git merge main   # 拿需求 / 政策改动
+cd E:\Projects\amayui-re && git merge dev      # ★ 唯一方向：把 dev 车道的成果收口进真相仓
 ```
 
 - ⛔ 不要 `rebase` 把 dev 挪到 main 顶上（那会改写已提交历史，撞 14.1 红线）。
 - 合并后在 **main** 上跑门禁：`pnpm test` / `pnpm verify` / `node tools/requirements.mjs --validate`。
-- **合并后才发现的集成问题**（冲突 / 门禁红）优先回 dev 修、再 `git merge dev`；万不得已直接在 main 上改的，
-  改完**立刻** `git merge main` 进 dev —— 别让两边代码分叉。
+- **集成问题（冲突 / 门禁红）一律回 dev 修**，再 `git merge dev`。
+  ⛔ 不要走"在 main 上改一行再 merge 进 dev"那条路 —— 那就是 main→dev 的代码合并，被本节禁止。
+  （唯一例外：14.1 提到的"提交坏了往前修"，那是**修复提交**，不是把 main 的代码搬进 dev。）
 
 ### 14.3 `data/**` 只在 main 改
 
