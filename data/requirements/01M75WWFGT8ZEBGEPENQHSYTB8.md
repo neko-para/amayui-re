@@ -57,7 +57,8 @@
 
 ## 判据
 
-- M0：`fill_slow=0`、`fill_max_ms ≤0.2 s`、`tokenwait` 总量下降一个量级、`ctest` 82/82；
+- M0：`fill_slow=0`、`fill_max_ms ≤0.2 s`、`tokenwait` 总量下降一个量级、`ctest` **全量绿**
+  （怎么查：`ctest --test-dir apps/emulator-lift/out`；⛔ 不抄数字 —— 本条原写"82/82"，那是 2026-11 的快照）；
 - M1 翻默认前：`check()` 覆盖率补齐 + 负控通过 + `ctest` 全绿 + 一次真 SDL 运行无 `violations`；
 - ⛔ 不许用"听感变好"当判据 —— 用 `fill_slow` / `fill_max_ms` / `tokenwait`。
 

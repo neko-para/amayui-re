@@ -40,7 +40,7 @@
 - `pnpm tools lift check` 绿；`lift report` 出现 `bareUnexecuted`（AGERC）与 `not-referenced` 计数；
 - `overrides.json` 与 `lift sync` 输出逐字节一致；
 - 被删的 12 条在 `rg` 里消失（C++ 与 JSON 都没有），且 `lift report` 的导入覆盖仍 100%；
-- 未改动引擎行为（只删不可达登记；`ctest` 95 注册 / 91 通过 / 4 SKIP）。
+- 未改动引擎行为（只删不可达登记；`ctest` **全量绿** —— 怎么查见 §10，⛔ 不抄"95 注册 / 91 通过 / 4 SKIP"那类快照数）；
 
 ## 未做 / 待裁决
 

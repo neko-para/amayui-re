@@ -13,8 +13,16 @@
 
 ## 读数（2026-11-10，macOS arm64 / RelWithDebInfo）
 - 命令与 `.tmp/quit-inv/logs/` 里的 run 相同（`--skip-logo --present window --present-hidden --raster gpu --input-script <at frame 130 / click 1190 630>`）。
+- ⚠ **复现物已丢**（2026-11-17 核）：`.tmp/quit-inv/logs/` 是本地临时件（`.tmp` 不入库）⇒ 今天不在，
+  本单只剩正文这一份记录（`.tmp` 里也再没有任何 quit/fault 日志）。
+- 当时的命令：`--skip-logo --present window --present-hidden --raster gpu --input-script <at frame 130 / click 1190 630>`。
+  ⚠ **这两个 flag 今天都不存在**：`--raster` 随 CPU 光栅退休删除；`--input-script` 在 AOT 臂没有对应物
+  （AOT 的输入只有 `--input-plan`）。⇒ 复跑用等价配方 `repo:apps/emulator-lift/scripts/recipes/sn0000-quit.plan`
+  （`--present window --present-hidden --skip-logo --input-plan …`）；⚠ **复现率未验证**（不许据此说"已修"）。
 - 观测：`guest memory fault` 的 `eip=004E743F`（`0x4E743F` 落在 `sub_4E73EB`/`_CallCatchBlock2` 一族；`0x4E738B` 是 `_CallCatchBlock2` 的入口，语料里这段是 COLLAPSED CRT，未登记函数）；故障地址 `0x06AD1CD5` 是**写**（栈里出现的 `0xE06D7363` = C++ 异常码 ⇒ 处于异常展开中）。
 - 频次：同一命令 **9 次里 1 次**；其余 8 次正常 exit 0。
+- ★ **重开 / 复跑条件**（因为日志丢了）：在等价配方或手工 TITLE→Quit 上再观测到**一次** `guest memory fault`
+  ⇒ 视为仍然存在；跑 20 次一次不中**也不构成"修好了"**（9→1/10 的基线下，20 次全绿的概率约 12%）⇒ 要收口必须给机制。
 
 ## 与已知缺陷的关系
 - 与 `REQ-01M72GAA7CVKBPP9QRT0PRPBTM`（SEH：handler 返回 ContinueExecution 且 CONTEXT 未改 ⇒ 异常被静默丢弃）**同族区域但不同失效方式**：那条是"异常没被转移"，这条是"展开过程踩坏指针 → 真 fault"。
