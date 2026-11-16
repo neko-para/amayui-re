@@ -410,6 +410,12 @@ cd E:\Projects\amayui-re-dev && git merge main   # 拿需求 / 政策改动
 - **唯一例外：`dist/`（含 `dist/install`，main 上 ≈ 7.8 GB 的真安装树）**。它是生成物且很大
   ⇒ 需要 `--install` 时**只读复用 main 的绝对路径**（`--install E:\Projects\amayui-re\dist\install`），
   ⛔ 不在 dev 再产一份，⛔ 也别让 dev 的产物写进 main 的树。
+  ★ **实测代价（2026-11-17）**：把 `links/install` 建成 → main `dist/install` 的 junction 之后，
+  **任何没带 `--appdata` 的运行都会往 main 的树里写**（实测生成过 0 字节 `$$AGE.TMP`）
+  ⇒ 在 dev 跑真游戏**一律显式给 `--appdata <本树 .tmp 下>`**；跑完 `git -C E:\Projects\amayui-re status` 必须干净。
+  ★ **缺资产的症状是红，不是 skip**：dev 首轮全量 `ctest` = **96/99**（3 条报"打不开 `.lst`"）+ 1 skip（无 `SYS4INI.BIN`）；
+  补齐 `corpus/disasm/files/`（解压）与 `links/install` 后 **99/99 · 0 skip**。
+  ⇒ 看到 96/99 先查资产，⛔ 别当回归，也⛔ 别把它归因成"平台 skip"。
 - 控制层发现：`emu-ctl` 缺省读 `<本仓>/.tmp/emu-ctl` ⇒ 两棵树各扫自己那份，**并行跑实例不互抢**；
   ⛔ 不要把 A 树的 `--control-root` 指到 B 树的 `.tmp/emu-ctl`（"多个 alive ⇒ 退出码 4"）。
 
