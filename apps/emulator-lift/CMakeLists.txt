@@ -230,7 +230,16 @@ if(MSVC)
     #   CreateThread 时会给的大小"同一档（D53 §①）。⛔ 这不是语义改动：只影响栈上限。
     target_link_options(emulator-lift-aot PRIVATE "/STACK:33554432")
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    target_link_options(emulator-lift-aot PRIVATE "-Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/emulator-lift-aot.map")
+    # ★ linker map 的驱动 flag **必须按平台分**：Apple ld64 只认小写 `-map`，
+    #   GNU ld / ld.lld（ELF）只认大写 `-Map`，大小写**不通用**（Apple 侧给 `-Map` 会
+    #   `ld: unknown options: -Map` 直接链接失败）。
+    # ★ 这是**链接器驱动的语法差异**，⛔ 不是告警口径 / 不是语义放宽：两支产出的是同一份
+    #   map，路径也同一个（上面 T0 的口径不变）。
+    if(APPLE)
+        target_link_options(emulator-lift-aot PRIVATE "-Wl,-map,${CMAKE_CURRENT_BINARY_DIR}/emulator-lift-aot.map")
+    else()
+        target_link_options(emulator-lift-aot PRIVATE "-Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/emulator-lift-aot.map")
+    endif()
     # macOS/Linux：主线程栈由系统决定（通常 8 MB）⇒ 只需把"请求值"写下来，不改（非 Windows 目标
     # 只做兼容性验证，不阻塞本轮）。
 endif()
