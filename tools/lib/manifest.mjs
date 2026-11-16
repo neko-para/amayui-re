@@ -556,7 +556,7 @@ export function validateManifest(manifest, opts = {}) {
         if (statKind(path.resolve(repoRoot, e.dest)) !== 'dir') continue;
         if (lfsDirs.has(e.dest)) continue;
         // ★ 「**还没入库**」（目录里有文件，但 git 一个都还没跟踪）与「LFS 规则没了」是两件事：
-        //   前者是 `git add` 之前的状态 —— 提交时机由用户定（`AGENTS.md` §0 第 2 条），
+        //   前者是"已落盘、还没进索引"的**正常中间态** —— 提交时机不是门禁该管的事（`AGENTS.md` §14.1），
         //   所以它只能 warn：否则每新增一个入库件都会把门禁搞红，逼人为了过门禁去 `git add`。
         //   后者（已跟踪、却一个 lfs 都没有）才是要红的那个缺口 —— 说明 .gitattributes 的规则被整块删了。
         const destAbs2 = path.resolve(repoRoot, e.dest);
