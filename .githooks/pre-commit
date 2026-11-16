@@ -1,0 +1,38 @@
+#!/bin/sh
+# .githooks/pre-commit —— 「双工作树分家」的执行器（AGENTS.md §14.7）
+#
+# 拒绝：在 **非 main 分支**上提交控制层文件（data/** · corpus/** · AGENTS.md · CTX.md）。
+# 理由：需求树 / 语料 / 政策只有**一份**真相（main 工作树）；在 dev 上改它 = 两份真相 + merge 必冲突。
+#
+# 放行：
+#   · main 分支上的任何提交（真相仓本来就该改这些）
+#   · 合并 / cherry-pick / revert 产生的提交（它们在**同步**，不是新建一条真相）
+#   · 空索引
+#
+# 绕过：`git commit --no-verify`（有意留的后门；绕了 = 明知故犯让真相分两份）
+# 注册：`git config core.hooksPath .githooks`（每个 clone 一次；worktree 共用同一份 config）
+
+set -u
+
+branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
+[ "$branch" = "main" ] && exit 0
+
+# 合并 / 拣选 / 回退：放行（同步语义）
+for ref in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD; do
+    if git rev-parse -q --verify "$ref" >/dev/null 2>&1; then
+        exit 0
+    fi
+done
+
+bad=$(git diff --cached --name-only -z --no-renames \
+    | tr '\0' '\n' \
+    | grep -E '^(data/|corpus/|AGENTS\.md$|CTX\.md$)' \
+    | head -n 20)
+
+[ -z "$bad" ] && exit 0
+
+echo "pre-commit 拒绝：分支 '$branch' 不许提交控制层文件（AGENTS.md §14.3 / §14.6）" >&2
+echo "$bad" | sed 's/^/  - /' >&2
+echo "=> 这些改动请在 main 工作树里提交（E:\\Projects\\amayui-re）。" >&2
+echo "   确需绕过：git commit --no-verify —— 但那意味着两份真相开始分叉。" >&2
+exit 1
