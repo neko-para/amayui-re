@@ -42,6 +42,7 @@
 #include "aot/aot_hook_ea.h"
 #include "aot/window_prof.h"  // 窗口 profile 的桶与闭式（纯头；可被 pure CTest 直接驱动）
 #include "runtime/audio.h"
+#include "runtime/audio_pump_gate.h"  // S3 泵闸门（纯头；可被 pure CTest 直接驱动）
 #include "runtime/clock.h"
 #include "runtime/com.h"
 #include "runtime/control_snapshot.h"  // 控制层快照的值类型 + `ControlHostSide`（⛔ 无 beast）
@@ -434,6 +435,12 @@ private:
     WindowManager windows_;
     FontEngine fonts_;
     AudioEngine audio_;
+    // ★ **S3 泵闸门**（`runtime/audio_pump_gate.h` 的纯状态机，唯一一份）：块边界"该不该调
+    //   `audio_.pump()`" + 节流点 + **真调了几次**。`run()` 里那个 `if (audio_pump_.due(…))` 是
+    //   AOT 臂上 `AudioEngine::pump()` 的**唯一调用点**；off 档 `due()` 恒假 ⇒ `calls()` 恒 0
+    //   （"off 档不进 pump"的机械判据，读数见 `printRunSummary` 的 `audio-pump:` 行 /
+    //   `LIFT_AOT_AUDIO_TRACE`）。⚠ 它**不是**第二份音频语义：判据 / 记账只有这一份。
+    AudioPumpGate audio_pump_;
     SurfaceArena surfaces_;
     HeadlessPresenter presenter_;
     Seh seh_;

@@ -3517,6 +3517,51 @@ const MUTATIONS = [
     what:
       '32bpp 跨序（`{21,22}↔{32,33}`）不换 R/B ⇒ `load-surface+format-pairs` 的 swapRbPlan 断言红（实测 8 failures）',
   },
+  // ── S3 音频泵（`REQ-01M7JZM1QQ728KX1C0G2F232T1`；守卫 = `aot-audio-pump` / `audio-device`）──
+  //   ★ 这三条代表"泵**进来了**但**不该进来**"这一类静默失效：缺省档每块边界都抢 audio mutex、
+  //     或者把节流去掉（每次派发都过一遍的热路径）、或者账只记了一半。
+  {
+    // S3：丢掉 off 判据 ⇒ 缺省档每块边界都**真的进** `pump()`（抢 audio mutex / 推进混音 / 改设备时钟），
+    //   而 stdout 仍可能看起来没变 —— 本单最该被钉住的**静默**破法。
+    file: 'apps/emulator-lift/src/runtime/audio_pump_gate.h',
+    from: '        if (!f.enabled) return false;             // ★ off 档：一次都不进 pump（本单最硬的一条）',
+    to: '        if (false) return false;  // 变异：丢掉 off 判据（缺省档会进 pump）',
+    guard: 'ctest:aot-audio-pump',
+    ctest: 'aot-audio-pump',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-aot-audio-pump',
+    what:
+      'S3 泵闸门丢掉 `!f.enabled` ⇒ `--audio off`（缺省档）每块边界都进 `pump()`' +
+      ' ⇒ `aot-audio-pump` 的 `s3-pump-gate-off-never-due` 红（实测 6 failures：pumped=6212 ≠ 0）',
+  },
+  {
+    // S3：节流被去掉 ⇒ 块边界（每次派发都过一遍的热路径）每块都去抢 audio mutex。
+    file: 'apps/emulator-lift/src/runtime/audio_pump_gate.h',
+    from: '        return f.insns >= next_check_;',
+    to: '        return true;  // 变异：不节流（每块都泵）',
+    guard: 'ctest:aot-audio-pump',
+    ctest: 'aot-audio-pump',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-aot-audio-pump',
+    what:
+      'S3 去掉 `kCheckStride` 节流（`due()` 恒真）⇒ 10 万块边界泵 100000 次而不是 25 次' +
+      ' ⇒ `aot-audio-pump` 的 `s3-pump-gate-stride-throttles` 红（实测 4 failures：100000 ≠ 25）',
+  },
+  {
+    // S3：D 泵那一刀不记 `fill_bytes`（回到"只有 feeder 那条记"的形状）⇒ AOT 唯一可达档里恒 0。
+    file: 'apps/emulator-lift/src/runtime/audio.cpp',
+    from:
+      '                    if (c.mem->committed(stream + kStreamBytes, 4))\n' +
+      '                        self->stats_.fill_bytes += c.mem->rd32(stream + kStreamBytes) / 4u;',
+    to: '                    // 变异：D 泵这一刀不记 fill_bytes',
+    guard: 'ctest:audio-device',
+    ctest: 'audio-device',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-audio',
+    what:
+      'D 泵（主线程）那一刀不记 `fill_bytes` ⇒ AOT（恒 D 泵）"喂了多少字节"恒 0，而 `fills>0` 让人以为账是全的' +
+      ' ⇒ `audio-device` 的 `audio-device/d-pump-fill-bytes` 红（实测改动前 2 failures）',
+  },
 ];
 
 let mutationRunSeq = 0;

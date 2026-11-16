@@ -228,6 +228,12 @@ public:
         bool muted = false;
         double fill_max_ms = 0.0;
         std::uint64_t fills = 0;
+        // ★ S3（`REQ-01M7JZM1QQ728KX1C0G2F232T1` 的缺口 #3/#4）：喂料 / 交付的**字节账**。
+        //   `fills` 只回答"跑了几刀"，回答不了"喂了多少"；`fill_bytes` 之前只有 `feederEvent`
+        //   那条记（AOT 恒 D 泵 ⇒ 唯一可达档里恒 0）。⇒ 两个量都进快照，供摘要的一行读数用。
+        //   口径与 `dumpSummary` 的 `fill_bytes=` / `played=` 同一份 `stats_`（⛔ 不另算）。
+        std::uint64_t fill_bytes = 0;
+        std::uint64_t pushed_bytes = 0;
         std::uint64_t muted_bytes = 0;
         std::uint64_t underruns = 0;
         std::uint64_t fill_slow = 0;

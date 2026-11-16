@@ -799,6 +799,7 @@ struct DeliveryRun {
     bool begun = false;
     bool filled = false;
     std::uint64_t fills = 0;
+    std::uint64_t fill_bytes = 0;  // ★ S3：D 泵那一刀记的"喂了多少字节"（`[stream+0x444] / 4`）
     std::uint64_t mixed = 0;
     std::uint64_t muted = 0;
     std::uint64_t notifications = 0;
@@ -807,6 +808,8 @@ struct DeliveryRun {
 };
 
 constexpr std::uint32_t kDeliveryBytes = 48000u;  // 0.25 s @ 48k / 16 / 2
+// 夹具里 guest 环的长度（`stream + 0x444` = L）。★ `fill_bytes` 的口径 = L/4（与 `feederEvent` 同一条）。
+constexpr std::uint32_t kDeliveryRingBytes = 384000u;
 
 std::vector<std::int16_t> makeRamp(std::uint32_t bytes) {
     std::vector<std::int16_t> pcm(bytes / 2);
@@ -854,6 +857,8 @@ DeliveryRun runDelivery(bool sound, const char* tag) {
     m.mem().wr32(sound_obj + 0x654u + 4u * slot, stream);
     m.mem().wr32(stream + 0x40Cu, obj);
     m.mem().wr32(stream + 0x444u, bytes);
+    // ★ 夹具自证：环长必须就是 `kDeliveryRingBytes`（下面 `fill_bytes` 的期望值按它算）。
+    LIFT_CHECK_EQ_U32(bytes, kDeliveryRingBytes);
 
     lift::AudioFormat fmt;
     fmt.sample_rate = 48000;
@@ -881,6 +886,7 @@ DeliveryRun runDelivery(bool sound, const char* tag) {
 
     const lift::AudioStats& st = a.stats();  // end() 不清统计
     r.fills = st.fills;
+    r.fill_bytes = st.fill_bytes;  // ★ S3：D 泵那一刀也要记字节数（feeder 那条早就记）
     r.mixed = st.mixed_bytes;
     r.muted = st.muted_bytes;
     r.notifications = st.notifications;
@@ -963,6 +969,25 @@ void testMutedDeliveryParity() {
     // ④ 再钉一次计数语义（两个方向都钉，防止"恒等成立"）。
     LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(muted.muted), static_cast<std::uint32_t>(muted.mixed));
     LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(sound.muted), 0u);
+}
+
+// ---- S3：**D 泵**那一刀也要记 `fill_bytes`（`REQ-01M7JZM1QQ728KX1C0G2F232T1` 的缺口 #3）----
+//
+// 判据（红了意味着什么）：
+//   一次 **D 泵**（主线程 `pump()` 铺帧；不是 feeder 线程）跑完 `sub_4B6C30` 之后，
+//   `stats().fill_bytes` 必须 += 该流的环长 / 4（与 `feederEvent` 的收尾**同一条口径**：
+//   `[stream+0x444] / 4`）。红了 ⇒ "喂了多少字节"在**唯一可达档**（AOT 恒 D 泵，
+//   `runtime/audio_policy.h` 的 S0 谓词）恒 0 ⇒ 摘要里的 `fill_bytes=` 永远读不出东西，
+//   而 `fills>0` 会让人以为喂料账是完整的。
+// ★ 复用 `runDelivery` 的同一条夹具（`Virtual` 档 ⇒ 无 feeder 线程 ⇒ 走 D 泵，pure 档），
+//   只多断言这一个量；`fills == 1` 与 `r.fill_bytes != 0` 两个方向都钉（防"换成常量"）。
+void testDPumpFillBytes() {
+    lift_test::g_current_case = "audio-device/d-pump-fill-bytes";
+    const DeliveryRun r = runDelivery(/*sound=*/true, "d-pump-bytes");
+    LIFT_CHECK(r.begun && r.filled);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.fills), 1u);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.fill_bytes), kDeliveryRingBytes / 4u);
+    LIFT_CHECK(r.fill_bytes != 0);
 }
 
 // ---- underrun 插静音（判据 = 写见证，⛔ 不是内容比对）：design §1.6 的 pure 档夹具 ----------
@@ -1123,6 +1148,7 @@ int main() {
     testDefaultMutedDelivery();
     testSoundOnDelivery();
     testMutedDeliveryParity();
+    testDPumpFillBytes();
     testUnderrunSilenceStale();
     testUnderrunSilenceNotTriggered();
     testUnderrunSilenceGuestZeros();

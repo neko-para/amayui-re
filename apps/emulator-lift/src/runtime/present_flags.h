@@ -104,20 +104,27 @@ inline constexpr const char* kWindowFlagsAot =
 //   `AotHost::configureAudio()`；档位来自 `--audio off|virtual|sdl`，PCM 落盘来自 `--audio-dump`。
 //   ⇒ 这条说明**必须**与代码同形：⛔ 不许再说"本臂没有音频管线 / 不会有声音"（那是接线前的形状，
 //   也是一句会被守卫 `cli-aot-flags` 当场判红的假话）。
-// ★ 还没接的那一段（诚实的边界）：音频**泵**（`AudioEngine::pump()` 铺 `sub_4B6C30` 帧）不在本轮
-//   范围内 ⇒ 摘要里 `fills / fill_bytes / pushed` 会是 0。这是一句**读数**，不是"没有能力"。
+// ★ S3 之后这条说明的**边界**（2026-11-17，`REQ-01M7JZM1QQ728KX1C0G2F232T1`）：
+//   泵已接在**块边界**（`aot_run.cpp` 的 ⑤'，每 `kCheckStride` 条 guest 指令一次；AOT 恒主线程
+//   D 泵 —— `cpu_.machine == nullptr` ⇒ S0 谓词恒 false）⇒ `fills / fill_bytes / pushed` 不再是
+//   结构性的 0，它们是**读数**（有没有真喂到料取决于跑到了哪、以及本机有没有设备）。
+//   ⇒ 这条说明⛔ 不许再说"泵还没接线 / 这三个量本轮会是 0"：那是一句会被守卫当场判红的假话
+//     （同一个理由见上面 105-106 行；S3 之前的原文就是那么写的）。
 // ★ 打印点**只有一个**（`aot_main.cpp` 的参数校验段），且在 GPU bring-up **之前**
 //   ⇒ ① 一次（不是每帧）；② 命令行一给就能判（守卫 `cli-aot-flags` 因此不需要 GPU）。
-// ★ 跟踪单 id 写在 `kAotSoundNotice` 里（`REQ-01M7G7GPBG9BK2360WSG6DBFNP`）。
+// ★ 跟踪单 id 写在 `kAotSoundNotice` 里（`REQ-01M7G7GPBG9BK2360WSG6DBFNP` = S0–S2；
+//   `REQ-01M7JZM1QQ728KX1C0G2F232T1` = S3 泵 / S4 出声）。
 //   守卫 `cli-aot-flags` 按**形态**判（必须出现 `REQ-`、且不许出现 `TODO(`）——换单号不会让它红。
 // =====================================================================================
 inline constexpr const char* kAotSoundNotice =
     "emulator-lift-aot: --sound 已接受：取消缺省静音门（muted=0），并真正传给音频引擎"
     "（不再是硬写 false）\n"
     "  · 档位由 --audio 决定（缺省 off / virtual / sdl）；要 PCM 落盘请给 --audio-dump <path>\n"
-    "  · ⚠ 音频**泵（fill）**还没接线：摘要的 fills / fill_bytes / pushed 本轮会是 0\n"
-    "  · 读数：收口时 stdout 的 `audio     :` 一行（mode / device / muted / muted_bytes / …）\n"
-    "  · 跟踪单：REQ-01M7G7GPBG9BK2360WSG6DBFNP（AOT 音频接线：S0 定档 / S1 参数面 / S2 生命周期）\n";
+    "  · 音频泵在**块边界**推进（每 4096 条 guest 指令一次；AOT 恒主线程 D 泵）\n"
+    "  · 读数：收口时 stdout 的 `audio     :` 一行（mode / device / muted / muted_bytes / …）"
+    "与 `audio-pump:` 一行（calls / fills / fill_bytes / pushed）\n"
+    "  · 跟踪单：REQ-01M7G7GPBG9BK2360WSG6DBFNP（S0 定档 / S1 参数面 / S2 生命周期）、"
+    "REQ-01M7JZM1QQ728KX1C0G2F232T1（S3 泵）\n";
 
 /** `--help` 里 AOT 臂 `--sound` 那一行（与上面那条说明同一口径：接受，且真的进静音门）。 */
 inline constexpr const char* kAotSoundHelp =

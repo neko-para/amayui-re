@@ -1464,9 +1464,18 @@ AudioPump AudioEngine::pump() {
                     const bool guest_silence = c.mem->committed(stream + kStreamDone, 4) &&
                                                c.mem->rd32(stream + kStreamDone) >= 2u;
                     std::lock_guard<std::recursive_mutex> lk(self->mutex_);
+                    // ★ S3（`REQ-01M7JZM1QQ728KX1C0G2F232T1` 的缺口 #3）：**D 泵这一刀也要记字节数**。
+                    //   口径与 `feederEvent` 的收尾**逐字同一条**（那里唯一的写法）：
+                    //   `[stream+0x444]`（环长 L）`/ 4`。⛔ 不要另立一条口径 —— 两条喂料路径
+                    //   （feeder 线程 / 主线程 D 泵）的 `fill_bytes` 必须是同一个量，否则
+                    //   "喂了多少字节"在 AOT（恒 D 泵）与解释器（可能 thread 档）之间不可比。
+                    //   ⛔ 读不到就不记（与 feeder 那条的 `committed` 判据一致：⛔ 不把 0 当好读数）。
+                    if (c.mem->committed(stream + kStreamBytes, 4))
+                        self->stats_.fill_bytes += c.mem->rd32(stream + kStreamBytes) / 4u;
                     self->noteFillWitness(ev_obj, quarter, witness_pre_ok && post_ok, witness_pre, post,
                                           guest_silence);
                 }
+
                 // ★ 只读诊断计数（dumpSummary 的 `fill_max_ms` / `fill_slow`）：⛔ 不参与判定。
                 const std::uint64_t fill_us = static_cast<std::uint64_t>(
                     std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
@@ -2256,6 +2265,8 @@ AudioEngine::Snapshot AudioEngine::snapshot() const {
     s.muted = mute_;
     s.fill_max_ms = static_cast<double>(stats_.fill_max_us) / 1000.0;
     s.fills = stats_.fills;
+    s.fill_bytes = stats_.fill_bytes;
+    s.pushed_bytes = stats_.pushed_bytes;
     s.muted_bytes = stats_.muted_bytes;
     s.underruns = stats_.underruns;
     s.fill_slow = stats_.fill_slow;

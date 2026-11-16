@@ -555,7 +555,21 @@ void AotHost::printRunSummary(const AotRunResult& r, std::FILE* out) const {
     //   ★ **只有在 `enabled()` 时**才打：缺省档（`--audio off`，包括不给任何音频 flag）**一行都不打**
     //     ⇒ 默认档 stdout 与改动前逐字相同（`AGENTS.md` §12.8 第 3 条 / 本单最硬的一条）。
     //   ★ 一次性输出（不是周期性）：落点与 `--profile` 块同处"stdout 末尾"的前一刻。
-    if (audio_.enabled()) audio_.dumpSummary(out);
+    if (audio_.enabled()) {
+        audio_.dumpSummary(out);
+        // ---- S3 泵的读数（**只在音频开启时打**；off 档这一行不存在 ⇒ 默认档 stdout 逐字不变）----
+        //   为什么要另起一行而不塞进上面那行：`dumpSummary` 是**解释器与 AOT 共用**的一份口径
+        //   （`machine.cpp:2955` 也在用），改它的字段顺序会让两条臂的 `audio     :` 行不可比；
+        //   而 `calls=`（真调 pump 的次数）是 AOT 臂独有的量。⇒ 追加一行，⛔ 不动那一行。
+        //   ★ 判据面：`fills>0 && fill_bytes>0 && pushed>0` = "通知真被消费、字节真的喂进去了"；
+        //     `calls=0` 只在 off 档成立，而 off 档根本不打这一行 ⇒ 两者不会互相冒充。
+        const AudioEngine::Snapshot a = audio_.snapshot();
+        std::fprintf(out, "audio-pump: calls=%llu fills=%llu fill_bytes=%llu pushed=%llu\n",
+                     static_cast<unsigned long long>(audio_pump_.calls()),
+                     static_cast<unsigned long long>(a.fills),
+                     static_cast<unsigned long long>(a.fill_bytes),
+                     static_cast<unsigned long long>(a.pushed_bytes));
+    }
     // ---- `--profile` 的整块读数（**关档时一行都不打** ⇒ 全文与基线逐字相同）----
     // ★ 落点为什么在这里：`aot_main.cpp` 在 `printRunSummary` 之后只有 stderr 回声 + `return`，
     //   所以这里就是"stdout 末尾（进程退出前）"。⛔ 不改 main 的打印顺序。
