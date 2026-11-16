@@ -1834,6 +1834,240 @@ std::uint32_t updateSurface(X86& cpu, std::uint32_t src_surface, std::uint32_t s
     return kOk;
 }
 
+// ---------------------------------------------------------------------------------------
+// `D3DXLoadSurfaceFromSurface` 的语义层（导出在 `shims/d3dx9.cpp`）
+// ---------------------------------------------------------------------------------------
+namespace {
+
+// 32bpp 的两套通道序（D3DFORMAT 值）：None = 不是这两套里的任何一个。
+enum class ChannelOrder32 { None, BgraBytes, RgbaBytes };
+ChannelOrder32 channelOrder32(std::uint32_t format) {
+    switch (format) {
+        case kFmtA8R8G8B8:  // 内存字节序 B,G,R,A
+        case kFmtX8R8G8B8:  // 内存字节序 B,G,R,X
+            return ChannelOrder32::BgraBytes;
+        case kFmtA8B8G8R8:  // 内存字节序 R,G,B,A
+        case kFmtX8B8G8R8:  // 内存字节序 R,G,B,X
+            return ChannelOrder32::RgbaBytes;
+        default:
+            return ChannelOrder32::None;
+    }
+}
+
+}  // namespace
+
+SurfaceCopyPlan surfaceCopyPlan(std::uint32_t src_format, std::uint32_t dst_format) {
+    SurfaceCopyPlan plan;
+    SurfaceFormat sfmt;
+    SurfaceFormat dfmt;
+    const bool s_known = surfaceFormatForD3DFormat(src_format, &sfmt);
+    const bool d_known = surfaceFormatForD3DFormat(dst_format, &dfmt);
+    // ① 同一个 D3DFORMAT（纹理支持集里的 21/22/23/24/25/26）：逐字节直拷，bpp 取支持集那一份。
+    if (s_known && d_known && src_format == dst_format) {
+        plan.supported = true;
+        plan.bytes_per_pixel = sfmt.bytesPerPixel();
+        return plan;
+    }
+    // ②③ 32bpp 的两套通道序：同序 ⇒ 恒等映射（21↔22、32↔33 只差顶字节算不算 alpha）；
+    //    跨序 ⇒ 只换 R/B（{2,1,0,3}），顶字节原样照抄（⛔ 不臆造 X8 的 0xFF / 0x00）。
+    const ChannelOrder32 so = channelOrder32(src_format);
+    const ChannelOrder32 dow = channelOrder32(dst_format);
+    if (so != ChannelOrder32::None && dow != ChannelOrder32::None) {
+        plan.supported = true;
+        plan.bytes_per_pixel = 4u;
+        if (so != dow) {
+            plan.byte_map[0] = 2u;
+            plan.byte_map[2] = 0u;
+        }
+        return plan;
+    }
+    // ④ 其它（16bpp ↔ 32bpp、不同 16bpp 格式、未知格式、深度格式…）⇒ 不支持。
+    return plan;
+}
+
+SurfaceCopyResult copySurfaceRect(X86& cpu, std::uint32_t src_surface, std::uint32_t src_rect_ea,
+                                  std::uint32_t dst_surface, std::uint32_t dst_rect_ea,
+                                  std::uint32_t color_key, std::string* why) {
+    if (!cpu.com) {
+        if (why) *why = "D3DXLoadSurfaceFromSurface：没有 ComRegistry（装配问题）";
+        return SurfaceCopyResult::Broken;
+    }
+    // 色键：文档只定义"匹配像素写成透明黑"，**比较口径（是否含 alpha）没写死** ⇒ 本线不实现。
+    // ★ 调用方传 0 是正常路径（0 = 禁用色键），不是缺口。
+    if (color_key != 0) {
+        char buf[220];
+        std::snprintf(buf, sizeof(buf),
+                      "D3DXLoadSurfaceFromSurface：ColorKey=0x%08X 未实现（文档只定义\"匹配像素写成透明黑\"，"
+                      "比较口径没写死 ⇒ 本线不做，⛔ 不猜）",
+                      color_key);
+        if (why) *why = buf;
+        return SurfaceCopyResult::Unsupported;
+    }
+    // 两边都必须是本模块建的 IDirect3DSurface9；不是 ⇒ 契约错（D3DERR_INVALIDCALL，可继续）；
+    // 是我们的对象却没有状态块 / 状态块 magic 不对 ⇒ 装配崩坏（响亮停）。
+    auto resolve = [&](std::uint32_t obj, const char* name, TextureInfo* ti, std::uint32_t* state,
+                       SurfaceCopyResult* fail) -> bool {
+        if (obj == 0) {
+            if (why) *why = std::string("D3DXLoadSurfaceFromSurface：") + name + " 为 NULL";
+            *fail = SurfaceCopyResult::Contract;
+            return false;
+        }
+        const char* iface = cpu.com->ifaceOf(obj);
+        if (iface == nullptr || std::strcmp(iface, "IDirect3DSurface9") != 0) {
+            if (why) *why = std::string("D3DXLoadSurfaceFromSurface：") + name + " 不是本模块的 IDirect3DSurface9";
+            *fail = SurfaceCopyResult::Contract;
+            return false;
+        }
+        *state = cpu.com->userOf(obj);
+        if (*state == 0) {
+            if (why) *why = std::string("D3DXLoadSurfaceFromSurface：") + name + " 没有状态块（装配崩坏）";
+            *fail = SurfaceCopyResult::Broken;
+            return false;
+        }
+        if (!surfaceInfoOfState(cpu, *state, ti, why)) {
+            const std::string detail = why != nullptr ? *why : std::string();
+            if (why) *why = std::string("D3DXLoadSurfaceFromSurface：") + name + " 的状态块不可用：" + detail;
+            *fail = SurfaceCopyResult::Broken;
+            return false;
+        }
+        return true;
+    };
+    TextureInfo src;
+    TextureInfo dst;
+    std::uint32_t src_state = 0;
+    std::uint32_t dst_state = 0;
+    SurfaceCopyResult fail = SurfaceCopyResult::Contract;
+    if (!resolve(src_surface, "pSourceSurface", &src, &src_state, &fail)) return fail;
+    if (!resolve(dst_surface, "pDestinationSurface", &dst, &dst_state, &fail)) return fail;
+
+    // 半开矩形 [left,right) × [top,bottom)；rect == NULL ⇒ **整幅该 surface**。
+    // 越界 / 空 / 指针不可读 ⇒ 契约错（⛔ 不隐式裁剪，与 updateSurface 同口径）。
+    auto read_rect = [&](std::uint32_t ea, std::uint32_t w, std::uint32_t h, const char* name,
+                         std::int32_t* l, std::int32_t* t, std::int32_t* r, std::int32_t* b) -> bool {
+        if (ea == 0) {
+            *l = 0;
+            *t = 0;
+            *r = static_cast<std::int32_t>(w);
+            *b = static_cast<std::int32_t>(h);
+            return true;
+        }
+        if (!committedOut(cpu, ea, 16u, name, why)) return false;
+        *l = static_cast<std::int32_t>(cpu.mem->rd32(ea + 0));
+        *t = static_cast<std::int32_t>(cpu.mem->rd32(ea + 4));
+        *r = static_cast<std::int32_t>(cpu.mem->rd32(ea + 8));
+        *b = static_cast<std::int32_t>(cpu.mem->rd32(ea + 12));
+        if (*l < 0 || *t < 0 || *r > static_cast<std::int32_t>(w) ||
+            *b > static_cast<std::int32_t>(h) || *r <= *l || *b <= *t) {
+            char buf[220];
+            std::snprintf(buf, sizeof(buf),
+                          "D3DXLoadSurfaceFromSurface：%s=(%d,%d,%d,%d) 越界 / 空（面 %ux%u）⇒ D3DERR_INVALIDCALL"
+                          "（⛔ 不隐式裁剪）",
+                          name, *l, *t, *r, *b, w, h);
+            if (why) *why = buf;
+            return false;
+        }
+        return true;
+    };
+    std::int32_t sl = 0, st = 0, sr = 0, sb = 0;
+    std::int32_t dl = 0, dt = 0, dr = 0, db = 0;
+    if (!read_rect(src_rect_ea, src.width, src.height, "pSrcRect", &sl, &st, &sr, &sb))
+        return SurfaceCopyResult::Contract;
+    if (!read_rect(dst_rect_ea, dst.width, dst.height, "pDestRect", &dl, &dt, &dr, &db))
+        return SurfaceCopyResult::Contract;
+    const std::int32_t sw = sr - sl;
+    const std::int32_t sh = sb - st;
+    const std::int32_t dw = dr - dl;
+    const std::int32_t dh = db - dt;
+    // 文档：尺寸不等时按 Filter 缩放。本线只做 1:1；⛔ 不静默按左上角硬拷（"尺寸对、内容错"）。
+    if (sw != dw || sh != dh) {
+        char buf[220];
+        std::snprintf(buf, sizeof(buf),
+                      "D3DXLoadSurfaceFromSurface：源矩形 %dx%d ≠ 目标矩形 %dx%d（文档口径 = 按 Filter 缩放；"
+                      "本线只做 1:1 ⇒ 不实现，⛔ 不按左上角硬拷）",
+                      sw, sh, dw, dh);
+        if (why) *why = buf;
+        return SurfaceCopyResult::Unsupported;
+    }
+    const SurfaceCopyPlan plan = surfaceCopyPlan(src.format, dst.format);
+    if (!plan.supported) {
+        char buf[220];
+        std::snprintf(buf, sizeof(buf),
+                      "D3DXLoadSurfaceFromSurface：D3DFORMAT %u → %u 的转换未实现（本线只做 1:1 直拷、"
+                      "32bpp 的 RGBA↔BGRA、同序 32bpp；其它组合 ⛔ 不猜）",
+                      src.format, dst.format);
+        if (why) *why = buf;
+        return SurfaceCopyResult::Unsupported;
+    }
+    HostServices* m = hostOf(cpu);
+    if (m == nullptr) {
+        if (why) *why = "D3DXLoadSurfaceFromSurface：拿不到宿主服务";
+        return SurfaceCopyResult::Broken;
+    }
+    GuestSurface* sg = m->surfaces().find(src.arena);
+    GuestSurface* dg = m->surfaces().find(dst.arena);
+    if (sg == nullptr || dg == nullptr) {
+        if (why) *why = "D3DXLoadSurfaceFromSurface：源 / 目标像素不在 arena 里（状态与 arena 不一致）";
+        return SurfaceCopyResult::Broken;
+    }
+    const std::uint32_t bpp = plan.bytes_per_pixel;
+    if (bpp == 0 || sg->format.bytesPerPixel() != bpp || dg->format.bytesPerPixel() != bpp ||
+        sg->pitch == 0 || dg->pitch == 0) {
+        if (why) *why = "D3DXLoadSurfaceFromSurface：格式 / 行距与计划不一致（状态崩坏）";
+        return SurfaceCopyResult::Broken;
+    }
+    const std::uint32_t row_bytes = static_cast<std::uint32_t>(sw) * bpp;
+    if (row_bytes > sg->pitch || row_bytes > dg->pitch) {
+        if (why) *why = "D3DXLoadSurfaceFromSurface：行字节数超过行距（状态崩坏）";
+        return SurfaceCopyResult::Broken;
+    }
+    std::uint8_t* sbase = m->surfaces().pixels(*sg);
+    std::uint8_t* dbase = m->surfaces().pixels(*dg);
+    if (sbase == nullptr || dbase == nullptr) {
+        if (why) *why = "D3DXLoadSurfaceFromSurface：像素指针为空（状态崩坏）";
+        return SurfaceCopyResult::Broken;
+    }
+    // 屏障（与 lockRect / updateSurface / getRenderTargetData 同一形状）：
+    //   源是当前 GPU 镜像目标 ⇒ 先把未读回的绘制落回 guest；目标是同一块镜像 ⇒ 同做（否则拷贝会被读回盖掉）；
+    //   都不是 ⇒ 只 flush（队列里的绘制不写这两块像素）。
+    if (GpuRaster* gpu = m->gpuRaster(); gpu != nullptr && gpu->rasterActive() && gpu->rasterDirty()) {
+        std::string gerr;
+        const void* target = gpu->rasterTargetBase();
+        if (target != nullptr && (target == sbase || target == dbase)) {
+            const bool target_is_src = target == sbase;
+            GuestSurface* tg = target_is_src ? sg : dg;
+            if (!gpu->rasterSyncToGuest(target_is_src ? sbase : dbase, tg->pitch, tg->width, tg->height, &gerr)) {
+                if (why) *why = "D3DXLoadSurfaceFromSurface：拷贝前 GPU 像素读回失败：" + gerr;
+                return SurfaceCopyResult::Broken;
+            }
+        } else if (!gpu->rasterFlush(&gerr)) {
+            if (why) *why = "D3DXLoadSurfaceFromSurface：拷贝前 GPU 队列 flush 失败：" + gerr;
+            return SurfaceCopyResult::Broken;
+        }
+    }
+    const bool identity = plan.byte_map[0] == 0u && plan.byte_map[1] == 1u && plan.byte_map[2] == 2u &&
+                          plan.byte_map[3] == 3u;
+    for (std::int32_t y = 0; y < sh; ++y) {
+        const std::uint8_t* srow = sbase + static_cast<std::size_t>(st + y) * sg->pitch +
+                                   static_cast<std::size_t>(sl) * bpp;
+        std::uint8_t* drow = dbase + static_cast<std::size_t>(dt + y) * dg->pitch +
+                             static_cast<std::size_t>(dl) * bpp;
+        if (identity) {
+            std::memcpy(drow, srow, row_bytes);
+        } else {
+            for (std::int32_t x = 0; x < sw; ++x) {
+                const std::uint8_t* s = srow + static_cast<std::size_t>(x) * bpp;
+                std::uint8_t* d = drow + static_cast<std::size_t>(x) * bpp;
+                for (std::uint32_t k = 0; k < bpp; ++k) d[k] = s[plan.byte_map[k]];
+            }
+        }
+    }
+    // 宿主写了目标的像素 ⇒ 内容版本降级为"未知"（与 updateSurface / getRenderTargetData 同一口径）。
+    markTextureContentUnknown(cpu, dst_state);
+    d3d9Log("D3DXLoadSurfaceFromSurface", "0x%08X (%d,%d %dx%d) → 0x%08X (%d,%d)：%d 行 × %u B", src_surface, sl,
+            st, sw, sh, dst_surface, dl, dt, sh, row_bytes);
+    return SurfaceCopyResult::Ok;
+}
+
 std::uint32_t getRenderTargetData(X86& cpu, std::uint32_t render_target, std::uint32_t dest_surface,
                                   std::string* why) {
     if (!cpu.com) {

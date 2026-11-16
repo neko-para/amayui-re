@@ -1543,6 +1543,19 @@ add_executable(lift-d3d9-mip tests/d3d9_mip.cpp)
 target_link_libraries(lift-d3d9-mip PRIVATE emulator-lift-runtime)
 add_test(NAME d3d9-mip COMMAND lift-d3d9-mip)
 
+# =====================================================================================
+# M2 · `d3dx9_43!D3DXLoadSurfaceFromSurface`（2D surface 拷贝；SC0000 首句的门）
+# ★ 判据见 tests/d3dx9_load_surface.cpp 文件头：① 半开矩形 / 目标偏移 / NULL = 整幅；
+#   ② 越界 / 负坐标 / 空矩形 / rect 指针不可读 ⇒ D3DERR_INVALIDCALL + 目标一字节不变（⛔ 不隐式裁剪）；
+#   ③ 源/目标矩形尺寸不等 ⇒ 响亮停（只做 1:1）；④ colorKey != 0 ⇒ 响亮停；
+#   ⑤ 格式：同 D3DFORMAT / 同序 32bpp ⇒ 恒等；RGBA↔BGRA ⇒ 只换 R/B；其它 ⇒ 拒绝。
+# ★ 顶层无条件注册 ⇒ **pure** 档（自造 guest 字节 + 运行时建的真 surface，不碰游戏 / LFS）。
+#   ⛔ 它曾是 `register_import_gaps.cpp` 里「M3 · 3D 不做」的一条；按微软文档是 2D blit ⇒ 真实现。
+# =====================================================================================
+add_executable(lift-d3dx9-load-surface tests/d3dx9_load_surface.cpp)
+target_link_libraries(lift-d3dx9-load-surface PRIVATE emulator-lift-runtime)
+add_test(NAME d3dx9-load-surface COMMAND lift-d3dx9-load-surface)
+
 # ---- pure：帧导出**每帧失败**不拖住 Present / 计数 / warn 只一次 / 成功路径照旧 ----
 # ★ 判据见 tests/frame_dump_failure.cpp 头注释。裸 GuestMemory + SurfaceArena（⛔ 不碰游戏）。
 # ★ 顶层无条件注册 ⇒ pure 档。
