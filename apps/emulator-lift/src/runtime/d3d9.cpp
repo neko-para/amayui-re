@@ -16,6 +16,7 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <vector>
 
 #include "runtime/com.h"
 #include "runtime/d3d9_pipeline.h"
@@ -85,7 +86,11 @@ enum DevOff : std::uint32_t {
 };
 constexpr std::uint32_t kDvMagicValue = 0x31443944u;  // 'D9D1'
 
+// ★ **先判可见性，再拼前缀**（`REQ-01M7FRXZ3K23M0WVTJQ9NNN35B` 第 2 项）：默认日志级别下 `Info` 不可见，
+//   而 `setRenderState` 这类热路径**每次调用**都要走一遍这里 ⇒ 原来每次都白做一次 `snprintf`。
+//   实测 260,675 次 × ~0.7 µs ≈ 180 ms。⛔ 输出文本与门控行为一个字都不变（判据仍是 `logVisible`）。
 void d3d9Log(const char* what, const char* fmt, ...) {
+    if (!logVisible(LogLevel::Info, LogD3d9)) return;
     char prefix[256];
     std::snprintf(prefix, sizeof(prefix), "[d3d9] %s: ", what ? what : "?");
     va_list ap;
@@ -96,6 +101,7 @@ void d3d9Log(const char* what, const char* fmt, ...) {
 
 // 契约级失败（guest 违约）用它：默认 warn 级别就看得见（Info 要 --verbose）。
 void d3d9Warn(const char* what, const char* fmt, ...) {
+    if (!logVisible(LogLevel::Warn, LogD3d9)) return;  // 同上：先判可见性再拼前缀
     char prefix[256];
     std::snprintf(prefix, sizeof(prefix), "[d3d9] %s: ", what ? what : "?");
     va_list ap;
@@ -689,12 +695,22 @@ std::uint32_t clear(X86& cpu, const DeviceInfo& dev, std::uint32_t count, std::u
         if (x2 > gs->width) x2 = gs->width;
         if (y2 > gs->height) y2 = gs->height;
         if (x2 <= x1 || y2 <= y1) return;
+        // ★ **行级填充**（`REQ-01M7FRXZ3K23M0WVTJQ9NNN35B` 第 1 项）：原实现**逐像素**算地址再调
+        //   `ddraw::storePixel`（每次一次 `memcpy`），921,600 px 实测 5.28 ms。
+        //   现在：**用同一份 `storePixel` 构造一行模板**（落 `width` 次，不是 `width×height` 次），
+        //   再逐行 `memcpy` 到目标 —— 写入的**字节序列与前实现逐位相同**。
+        //   ⛔ 裁剪口径 / `cleared_pixels` / 返回码都没动；模板行 `thread_local` 复用，不产生每次 Clear 的分配。
+        const std::size_t pixels = static_cast<std::size_t>(x2 - x1);
+        const std::size_t row_bytes = pixels * bytes_per_pixel;
+        static thread_local std::vector<std::uint8_t> row;
+        if (row.size() < row_bytes) row.resize(row_bytes);
+        for (std::size_t i = 0; i < pixels; ++i) {
+            ddraw::storePixel(row.data() + i * bytes_per_pixel, gs->format.bpp, pixel);
+        }
+        std::uint8_t* const dst0 = base + static_cast<std::size_t>(y1) * gs->pitch +
+                                   static_cast<std::size_t>(x1) * bytes_per_pixel;
         for (int y = y1; y < y2; ++y) {
-            for (int x = x1; x < x2; ++x) {
-                std::uint8_t* p = base + static_cast<std::size_t>(y) * gs->pitch +
-                                  static_cast<std::size_t>(x) * bytes_per_pixel;
-                ddraw::storePixel(p, gs->format.bpp, pixel);
-            }
+            std::memcpy(dst0 + static_cast<std::size_t>(y - y1) * gs->pitch, row.data(), row_bytes);
         }
         cleared_pixels += static_cast<std::uint32_t>((x2 - x1) * (y2 - y1));
     };

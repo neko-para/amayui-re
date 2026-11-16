@@ -381,7 +381,10 @@ constexpr std::uint32_t kIbHeader = 28;
 constexpr std::uint32_t kIbMagicValue = 0x30394249u;  // 'IB09'
 constexpr std::uint32_t kMaxBufferBytes = 64u * 1024u * 1024u;
 
+// ★ **先判可见性，再拼前缀**（`REQ-01M7FRXZ3K23M0WVTJQ9NNN35B` 第 2 项）：与 `d3d9Log` 同形。
+//   默认级别下 `Info` 不可见 ⇒ 原实现每次都白做一次 `snprintf`。⛔ 输出文本与门控行为不变。
 void pipeLog(const char* what, const char* fmt, ...) {
+    if (!logVisible(LogLevel::Info, LogD3d9)) return;
     char prefix[256];
     std::snprintf(prefix, sizeof(prefix), "[d3d9] %s: ", what ? what : "?");
     va_list ap;
