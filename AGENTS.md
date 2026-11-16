@@ -435,3 +435,5 @@ git config --get core.hooksPath                     # 应打印 .githooks ——
 - ⛔ `git commit --no-verify` 是后门：绕过它就等于明知故犯让真相分两份；真绕了要在提交说明里写明原因。
 - ★ **注册了不等于生效**：2026-11-17 实测 —— 先在 main 建了 hook 文件、dev 还没拿到它，dev 上提交 `data/.hooktest`
   **照样成功**（hook 文件不在那棵树的 cwd 下）。⇒ 判定口径是"每棵树各实测**一次真提交被拒**"，不是看 `git config` 有值。
+- 读数（2026-11-17 / win32 / git 2.x）：dev 上 `git add data/.zz-hooktest` + `commit` ⇒ **exit 1** 并列名该文件、
+  索引保持不变；dev 上 `git merge --no-ff main` ⇒ **放行**；dev 上改 `tools/**` 提交 ⇒ **放行**。
