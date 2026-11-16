@@ -31,7 +31,8 @@
    reason 由该行文本派生（或强制 reason ⊆ 该行文本），⛔ 不再保留自由散文。
    同时修 **reason 读取**：相邻字符串字面量必须拼接（`kernel32_agerc.cpp` 那处）。
 5. **`MODULE_REASONS` 退役**：派生缺口不再用一张模块级理由表（它正是过期文本的产地），改成指向 SCOPE 行。
-6. **清理 37 条过期 reason**：按 SCOPE 今天的口径重写（音频→已实现方案C / 视频→已实现方案A / 3D→部分落地）；`imm32!ImmAssociateContext` 引用的"IME 不做"条款不存在 ⇒ 要么在 SCOPE §1 立一行，要么删条目。
+6. ~~**清理 37 条过期 reason**~~ **已移出**（2026-11-17）：连同"SCOPE §1 补名 + `imm32` 条款"一起归
+   `REQ-01M7JN57AJKKYHSPKT9VXDH01S` —— 那是**一次性数据清理**，红了没人会发现，混在本单会让它永远收不了口。
 7. **守卫/测试**：`tools/test/lift.test.mjs` 加：①字节一致 ②scope_ref 悬空 ⇒ 红 ③kind 三值 ④AGERC bare 不进 overrides。变异（`tools/mutate-check.mjs`）：改一条 scope_ref 成不存在 ⇒ 红。
 8. **口径文档**：`data/lift/overrides.md` 更新（kind 三值 / scope_ref / 唯一写入口 / AGERC 单列）。
 
@@ -42,6 +43,12 @@
 - 被删的 12 条在 `rg` 里消失（C++ 与 JSON 都没有），且 `lift report` 的导入覆盖仍 100%；
 - 未改动引擎行为（只删不可达登记；`ctest` **全量绿** —— 怎么查见 §10，⛔ 不抄"95 注册 / 91 通过 / 4 SKIP"那类快照数）；
 
-## 未做 / 待裁决
+## 裁决（未定；⛔ 不是本单判据，不阻塞收口）
 
-- `CreateProcessA` 做不做；MF 15 条 / MCI+mixer 6 条是否永久 no-op —— 这两组留给用户裁决，本单只按现状登记并保留。
+以下两组是**能力**取舍，不是机制缺口 —— 本单只按现状登记并保留，等用户裁：
+
+- `CreateProcessA` 做不做；
+- MF 15 条 / MCI+mixer 6 条是否永久 `noop`。
+
+★ 为什么单列：机制（`kind` 三值 / `scope_ref` / 字节一致）红了 = 守卫当场红，能收口；
+而这两组**红了也没人会发现**（只影响"要不要实现某个 API"）⇒ 混在一起会让本单永远等不到收口。
