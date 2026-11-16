@@ -242,7 +242,11 @@ void InteractionGraph::enterStep(std::size_t index, std::uint64_t frame, std::ui
     const Step& s = recipe_.steps()[index];
     std::string line = "step " + s.id + " enter frame=" + u64s(frame) + " insn=" + u64s(insns) +
                        " guest_ms=" + u64s(guest_ms) + " what=" + stepText(s);
-    if (s.timeout_ms == 0) line += " timeout=" + u64s(timeoutOf(s)) + "(default)";
+    if (s.timeout_ms == 0) {
+        const std::uint64_t width = timeoutOf(s);
+        // `wait` 没有守卫（0）⇒ 别在 trace 里印 `timeout=0(default)`，那看起来像"守卫是 0 ms"。
+        line += width == 0 ? std::string(" timeout=none") : " timeout=" + u64s(width) + "(default)";
+    }
     traceLine(line);
     if (s.isGate()) {
         state_ = State::Gate;

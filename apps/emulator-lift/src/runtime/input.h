@@ -1,4 +1,6 @@
-// emulator-lift · 输入应用层（★ SDL 真实事件与 `--input-script` 注入的**唯一**汇合点）
+// emulator-lift · 输入应用层（★ SDL 真实事件与（机器内）注入的**唯一**汇合点）
+//   ★ 2026-11-16：`--input-script` 的 CLI 入口已退役；注入侧只剩配方驱动器的 actuator 与 pure CTest 夹具
+//     （见 `runtime/input_script.h` 头注与 `docs/03-emulator/input-plan.md` §7）。
 //
 // ★ 为什么要有这一层（2026-11-08）：在它之前，"一次输入"的落地代码只存在于
 //   `present_sdl.cpp` 的 `handleEvent` 里 —— 那是 SDL 回调，只有 OS 能喂它。于是

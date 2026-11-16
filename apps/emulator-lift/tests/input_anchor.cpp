@@ -1,4 +1,6 @@
-// emulator-lift · 时间线的 **0 点**（`--anchor-script <id>`）—— pure 守卫
+// emulator-lift · 时间线的 **0 点**（原 `--anchor-script <id>`，CLI 2026-11-16 已退役）—— pure 守卫
+//   ★ 它守的是 `InputScript`/`Machine` 的**机器内**语义（`setOriginScript` + `validateOrigin*`）：
+//     保留的夹具（`profile-window` / `input-expect` 的时间锚）仍走这套机械。
 //
 // ★ 判据（红了意味着什么）：`--anchor-script <id>` 把时间线的 0 点定在"**首次观察到进入**引擎脚本
 //   `<id>`"的那一个可观察样本上 —— 四个单位（frame / insn / guest_ms / wall_ms）全部重定基；

@@ -1,7 +1,8 @@
 // emulator-lift · **输入脚本的否定证据**：条件永不满足的动作在 run 结束时必须留下可解析的读数
 // —— pure 守卫（BUG-20 / `REQ-01M72QSNQCH3GHH3158A7YX96V`）
 //
-// ★ 判据（红了意味着什么）：一份 `--input-script` 时间线跑完之后，
+// ★ 判据（红了意味着什么）：一份时间线（`--input-script` 的 CLI 已退役；夹具经 `loadInputScriptText`
+//   装载）跑完之后，
 //   ① 有**未应用动作**且不是脚本自己 `quit` ⇒ 运行摘要里**必须**有
 //      `input-script: unfinished pending=<n> releases=<m> first="<原动作行>"`，且 `pending` / `first`
 //      与脚本原文逐字对得上；

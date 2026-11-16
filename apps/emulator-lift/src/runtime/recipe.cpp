@@ -111,11 +111,11 @@ std::string hex8(std::uint32_t v) {
 std::string u64s(std::uint64_t v) { return std::to_string(static_cast<unsigned long long>(v)); }
 
 // 词表提示（报错用）。**唯一一份**：指令加了一条就只改这里。
-// ★ 没有"按入口裁剪"的参数：七条指令两臂都认（能力面只有一份，见 `recipe.h`）。
+// ★ 没有"按入口裁剪"的参数：六条指令 + 行尾 `timeout` 两臂都认（能力面只有一份，见 `recipe.h`）。
 std::string instructionList() {
     return std::string(
-        "`await script <名字>` / `await position <名字> <FROM> <TO>` / `wait <ms>` / "
-        "`click <x> <y> [left|right]` / `timeout <ms>` / `profile_begin <label>` / "
+        "`await script <名字> [timeout <ms>]` / `await position <名字> <FROM> <TO> [timeout <ms>]` / "
+        "`wait <ms>` / `click <x> <y> [left|right]` / `profile_begin <label>` / "
         "`profile_end <label>` / `quit`");
 }
 
@@ -216,10 +216,11 @@ bool stepGateHolds(const Step& s, const MarkerSample* identity, const ScriptPosi
 }
 
 std::uint64_t stepTimeoutMs(const Step& s, std::uint64_t default_ms) {
-    if (s.timeout_ms != 0) return s.timeout_ms;                 // 显式 `timeout` 恒覆盖
-    if (default_ms == 0) return 0;                              // 这一臂不给缺省 ⇒ 没有窗口
-    // `wait <ms>` 自己就要跑 ms 毫秒 ⇒ 缺省守卫必须容得下它（见 `recipe.h` 的说明）。
-    return s.kind == StepKind::Wait ? s.wait_ms + default_ms : default_ms;
+    if (s.timeout_ms != 0) return s.timeout_ms;  // 显式 `timeout` 恒覆盖（解析期保证只在门上）
+    // ★ `wait <ms>` 是**固定时长**、到点就走 ⇒ **没有守卫**（⛔ 不再有 `ms + 缺省` 的补丁：
+    //   那份补丁是图节点上的 timeout 拍平成线性写法时被拖到 `wait` 上的，固定等待不需要"等它成立"）。
+    if (s.kind == StepKind::Wait) return 0;
+    return default_ms;  // 没写 ⇒ 用驱动器给的缺省（0 = 这个驱动器不给缺省守卫）
 }
 
 bool stepWindowExpired(std::uint64_t elapsed_ms, std::uint64_t guard_ms) {
@@ -265,32 +266,57 @@ bool Recipe::loadText(const std::string& text, const std::string& origin, std::s
     const std::string list = instructionList();
 
     // 一行 = 一条指令（`#` 到行尾是注释；空行忽略，但行号照数）。
-    auto parseLine = [&](int line, const std::string& body, const std::vector<std::string>& tok) -> bool {
+    // ★ `tok` 按值收：行尾 `timeout <ms>` 会被剥掉，剩下的才是"指令 + 参数"。
+    auto parseLine = [&](int line, const std::string& body, std::vector<std::string> tok) -> bool {
         const std::string head = lowerAscii(tok[0]);
         auto push = [&](Step s) {
             s.line = line;
             s.id = "step" + std::to_string(steps.size() + 1);
             steps.push_back(std::move(s));
         };
-        // `timeout` 只改**上一条**指令的守卫 ⇒ 单独处理（不是一条指令）。
-        // ★ 两臂都认（能力面只有一份）：守卫的**宽度**由 `stepTimeoutMs` 给，缺省值由入口给。
+        // ---- 行尾 `timeout <ms>`（**只有门**能带；⛔ 旧的"守上一条指令"写法已删除，不留两种）----
+        //   · 单独一行 `timeout` ⇒ 硬错，文案直接说"写到它守的那一行末尾"；
+        //   · `wait` 是固定时长 ⇒ 没有可等待的东西（文案给出改回的正确写法）；
+        //   · `click` / `profile_*` / `quit` 同样没有可等待的东西。
+        //   · 其余未知指令 ⇒ 交给下面统一报"未知指令"（回显整行）。
         if (head == "timeout") {
-            if (tok.size() != 2) {
-                return fail(line, "`timeout` 需要一个毫秒数（收到 " + std::to_string(tok.size() - 1) + " 个词）");
+            return fail(line,
+                        "`timeout <ms>` 不能单独一行（⛔ 没有\"守上一条指令\"的写法）：把它写到它守的那个门"
+                        "**那一行的末尾**，例 `await script TITLE timeout 30000`");
+        }
+        std::uint64_t inline_timeout = 0;
+        for (std::size_t i = 1; i < tok.size(); ++i) {
+            if (lowerAscii(tok[i]) != "timeout") continue;
+            if (i + 1 == tok.size()) {
+                return fail(line, "`timeout` 后面要跟一个毫秒数（收到 0 个词）");
+            }
+            if (i + 2 != tok.size()) {
+                return fail(line, "`timeout <ms>` 只能写在**行尾**（`timeout` 后面还有 " +
+                                      std::to_string(tok.size() - i - 1) + " 个词）");
+            }
+            const bool on_gate = head == "await" && tok.size() >= 3 &&
+                                 (lowerAscii(tok[1]) == "script" || lowerAscii(tok[1]) == "position");
+            if (!on_gate) {
+                if (head == "wait") {
+                    const std::string fixed = i == 1 ? std::string("wait <ms>") : "wait " + tok[1];
+                    return fail(line, "`wait` 是**固定时长**（到点就走），没有可等待的东西 ⇒ 去掉 `timeout`，"
+                                      "把它写回 `" + fixed + "`");
+                }
+                if (head == "click" || head == "profile_begin" || head == "profile_end" || head == "quit" ||
+                    head == "exit") {
+                    return fail(line, "`" + tok[0] +
+                                          "` 没有可等待的东西 ⇒ `timeout <ms>` 只能挂在 `await script` / "
+                                          "`await position` 那一行的末尾");
+                }
+                break;  // 未知指令：下面统一报"未知指令"
             }
             std::uint64_t ms = 0;
-            if (!parseU64(tok[1], &ms) || ms == 0) {
-                return fail(line, "`timeout` 的毫秒必须是**正整数**（收到 `" + tok[1] + "`）");
+            if (!parseU64(tok[i + 1], &ms) || ms == 0) {
+                return fail(line, "`timeout` 的毫秒必须是**正整数**（收到 `" + tok[i + 1] + "`）");
             }
-            if (steps.empty()) {
-                return fail(line, "`timeout` 前面没有任何指令（它守的是**上一条**指令）");
-            }
-            if (steps.back().timeout_ms != 0) {
-                return fail(line, "上一条指令（step" + std::to_string(steps.size()) +
-                                      "）已经写过 `timeout`（每步只写一次）");
-            }
-            steps.back().timeout_ms = ms;
-            return true;
+            inline_timeout = ms;
+            tok.resize(i);  // 剥掉行尾 `timeout <ms>`，下面按普通指令解析
+            break;
         }
         if (head == "await") {
             const std::string sub = tok.size() > 1 ? lowerAscii(tok[1]) : std::string();
@@ -302,6 +328,7 @@ bool Recipe::loadText(const std::string& text, const std::string& origin, std::s
                 Step s;
                 s.kind = StepKind::AwaitScript;
                 s.script = tok[2];
+                s.timeout_ms = inline_timeout;  // 行尾 `timeout <ms>`（0 = 没写）
                 push(std::move(s));
                 return true;
             }
@@ -328,6 +355,7 @@ bool Recipe::loadText(const std::string& text, const std::string& origin, std::s
                 s.script = tok[2];
                 s.pos_from = from;
                 s.pos_to = to;
+                s.timeout_ms = inline_timeout;  // 行尾 `timeout <ms>`（0 = 没写）
                 push(std::move(s));
                 return true;
             }

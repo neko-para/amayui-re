@@ -738,15 +738,6 @@ void Machine::flushFrameTrace() {
     std::fflush(stdout);
 }
 
-bool Machine::loadInputScript(const std::string& path, std::string* err) {
-    // 换脚本前先把旧脚本仍按着的输入抬起来（⛔ 不静默留下"卡住的键"）。
-    if (input_script_.active()) input_script_.abandon(*cpu_.windows, clock_.nowMs());
-    if (!input_script_.loadFile(path, err)) return false;
-    std::printf("input-script: %s（%zu 条动作；触发 = at frame / at guest_ms / at insn / at wall_ms / after / wait）\n",
-                path.c_str(), input_script_.actionCount());
-    return true;
-}
-
 bool Machine::loadInputScriptText(const std::string& text, const std::string& origin, std::string* err) {
     if (input_script_.active()) input_script_.abandon(*cpu_.windows, clock_.nowMs());
     if (!input_script_.loadText(text, origin, err)) return false;
@@ -771,8 +762,8 @@ bool Machine::loadInteractionGraphText(const std::string& text, const std::strin
 }
 
 // 一份 `InputScript` 的公共推进：tick + profiler 窗口边界登记 + `quit` 唤醒。
-// ★ 时间线（`--input-script`）与交互图的 actuator 走**同一条**路径：两条通道的动作
-//   （自动 hold / 延迟抬起 / profiler / quit）只有一份实现，⛔ 不要各写一遍。
+// ★ 交互图的 actuator 走这条路（原时间线也走它；2026-11-16 起时间线没有 CLI 入口，只剩夹具）：
+//   自动 hold / 延迟抬起 / profiler / quit 只有一份实现，⛔ 不要各写一遍。
 void Machine::pumpScript(InputScript& script, X86& cpu, std::uint64_t wall_ms) {
     if (!script.active()) return;
     if (cpu.windows == nullptr) return;
@@ -1205,7 +1196,8 @@ RunResult Machine::run(const RunOptions& opts) {
                     sampleMarker();
                 }
             }
-            // ★ 指令式输入时间线（`--input-script`）：在**块边界**推进。不依赖窗口 sink / OS 焦点 /
+            // ★ 指令式输入时间线（`--input-script` 已退役；夹具仍从 `loadInputScriptText` 装载）：
+            //   在**块边界**推进。不依赖窗口 sink / OS 焦点 /
             //   真实光标：它只写 `cpu_.windows` 的那一份状态并发同组 WM_*（见 runtime/input.h）。
             //   ⛔ 嵌套 guest 调用（WndProc / 音频 fill）与定时器回调进行中不注入：那些帧的 eip 不是
             //   主循环的块边界，插进去会把"一帧内 down+up"这类节流语义搅乱。

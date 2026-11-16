@@ -310,7 +310,7 @@ bool SdlWindow::Impl::shotWanted() const {
 // 调试叠层（`--overlay`）：行 / 时间窗 / 两条路径各自的上传与绘制
 // ---------------------------------------------------------------------------------------
 // ★ 鼠标坐标的真源 = `WindowManager::cursorClientPos(hwnd)` —— 与 `click x y` /
-//   `--input-script` 用的是**同一格**（guest 客户区坐标）。没有主窗口 ⇒ 整行省略。
+//   注入（`InputScript`；CLI 已退役）用的是**同一格**（guest 客户区坐标）。没有主窗口 ⇒ 整行省略。
 void SdlWindow::Impl::notePresentTime() {
     if (!overlay) return;  // ★ 叠层关闭时一次也不记（零成本）
     const std::uint64_t now = SDL_GetTicksNS();
@@ -1095,7 +1095,7 @@ void SdlWindow::cancelCloseRequest() {
     impl_->close_deadline_ns = 0;
 }
 
-// 宿主侧请求关窗（`--input-script close_window` / 测试）：与 SDL 的 X 同一条路（含宽限/二次确认）。
+// 宿主侧请求关窗（`InputScript::close_window` / 测试）：与 SDL 的 X 同一条路（含宽限/二次确认）。
 void SdlWindow::requestClose() { impl_->requestClose(); }
 
 void SdlWindow::attachWindowManager(WindowManager* windows) { impl_->windows = windows; }

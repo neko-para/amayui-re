@@ -5,7 +5,7 @@
 # `=== profile window: <label> ===`（逐帧 / guest 函数 / shim 表）。
 #
 # 写法 = 顺序配方（语法真源 `apps/emulator-lift/src/runtime/recipe.h`）：
-#   `timeout N` 守的是**它上一条**指令；`wait N` = **宿主墙钟**毫秒。
+#   `timeout N` 写在它守的那条 `await` 的**行尾**；`wait N` = **宿主墙钟**毫秒（固定时长，⛔ 不带 timeout）。
 #
 # 运行（与 sn0000-save.plan 同一套窗口 + GPU 参数）—— ⚠ 入口只有 **AOT 臂的 `--input-plan`**
 # （2026-11-16：解释器臂的 `--interaction-graph` 已退役；见 `scripts/recipes/README.md`）：
@@ -19,8 +19,7 @@
 #   文件里 `fellow-enter 3031 帧 7.39 s` / `save-confirm 3369 帧 7.42 s` 是**解释器臂的历史读数**。
 # 单帧定位：加 `--frame-log`（AOT 臂；解释器臂是 `LIFT_FRAME_TRACE=1`）⇒ `[frame] n=… hash=…`。
 
-await script TITLE
-timeout 30000
+await script TITLE timeout 30000
 wait 5000
 
 click 1186 373
@@ -30,15 +29,13 @@ wait 2000
 
 click 830 592
 
-await script SN0000
-timeout 35000
+await script SN0000 timeout 35000
 wait 25000
 
 # ① 右键进入 FELLOW：窗口覆盖点击 + 转场（save 图给这段留 10 s；这里留 12 s）
 profile_begin fellow-enter
 click 500 500 right
 wait 12000
-timeout 20000
 profile_end fellow-enter
 
 await script FELLOW
@@ -56,7 +53,6 @@ wait 1000
 profile_begin save-confirm
 click 650 320
 wait 15000
-timeout 30000
 profile_end save-confirm
 
 wait 2000

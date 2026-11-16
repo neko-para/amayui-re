@@ -17,14 +17,17 @@
 //      · 命中 / 边界（`pos == FROM` 命中、`pos == TO` 不命中）/ 区间外继续等；
 //      · `base==0` / `pc < base` / `pc` 未提交 / `pc − base` 越上界 ⇒ 不满足、不崩、不施加；
 //      · `FROM >= TO` / 缺参数 / 非 `0x` hex ⇒ 解析期失败；未知脚本名**不**在解析期校验。
-//   ⑥ **能力面只有一份**（`REQ-01M7HP2Q1N0N004M8R4RPABWSV` 的前置）：`timeout` / `profile_begin` /
+//   ⑥ **能力面只有一份**（`REQ-01M7HP2Q1N0N004M8R4RPABWSV` 的前置）：行尾 `timeout` / `profile_begin` /
 //      `profile_end` / `quit` 在**本臂**同样被接受并落地（⛔ 不再是"这个入口不认"的 exit 2）：
-//      · `timeout <ms>` 到期 ⇒ `outcome()==TimedOut` + 失败报告点名 `origin:行` + 门/动作；
-//        未到期（差 1 ms）**不**判失败；
+//      · `timeout <ms>` **只能写在 `await …` 那一行的末尾**（守的就是同一行那个门）；到期 ⇒
+//        `outcome()==TimedOut` + 失败报告点名 `origin:行` + 门/动作；未到期（差 1 ms）**不**判失败；
+//      · `wait` **没有守卫**（固定时长、到点就走）：显式给它 `timeout` = 解析期硬错；
 //      · `quit` ⇒ `postQuit(0)`（WM_QUIT）+ 不再推进；`quit` 之后还有指令 ⇒ `pending != 0`；
 //      · `profile_begin/end` ⇒ 区间收口（`profileWindows()`）。
 //   ⑦ **完成度是判据**：门永不成立 ⇒ `outcome()==Running` + `pending != 0` +
 //      `recipeOutcomeExitCode()` = **5**（⛔ 不是 0）；全部走完 ⇒ `Done` + 退出码 0。
+//   ⑧ **跨行 `timeout` / `wait` 带 `timeout` / `click` 带 `timeout` ⇒ 解析期硬错**（文案点名修法）；
+//      **超长 `wait`（例 20000 ms）不再被判 timeout**（删掉 `ms + 缺省` 那条补丁的证明）。
 //
 // ⚠ 诚实边界：`ReadFile`（第 11 个投递点，只是**事件源**）**不在**本用例里 ——
 //   它要一个有效文件句柄（`CreateFileA` + `Vfs` 的 game_dir），那属于 `tests/file_io.cpp` 的夹具面；
@@ -507,10 +510,19 @@ void caseParseErrors() {
         {"click 1\n", "mem:1:", "缺参数"},
         {"click 1 2 =left\n", "mem:1:", "按钮词"},
         // `timeout` / `profile_*` / `quit` 的**参数**仍然硬错（能力面统一了，⛔ 不是"什么都收"）：
-        {"timeout\n", "mem:1:", "毫秒数"},
-        {"timeout 500\n", "mem:1:", "前面没有任何指令"},
-        {"wait 10\ntimeout 0\n", "mem:2:", "正整数"},
-        {"wait 10\ntimeout 5\ntimeout 6\n", "mem:3:", "已经写过"},
+        // ★ 行内 `timeout`：孤立成行 / 挂在 `wait` / `click` / `quit` / `profile_*` 上都是硬错，
+        //   而且文案必须**指向修法**（不是只说"这里不对"）。
+        {"await script TITLE\ntimeout 30000\n", "mem:2:", "不能单独一行"},
+        {"click 1 2 timeout 5000\n", "mem:1:", "没有可等待的东西"},
+        {"quit timeout 5000\n", "mem:1:", "没有可等待的东西"},
+        {"profile_begin w timeout 5000\n", "mem:1:", "没有可等待的东西"},
+        {"profile_end w timeout 5000\n", "mem:1:", "没有可等待的东西"},
+        {"wait 5000 timeout 9000\n", "mem:1:", "写回 `wait 5000`"},
+        // 缺参 / 非数字 / 0 / 不是行尾 ⇒ 硬错（点出行号）。
+        {"await script TITLE timeout\n", "mem:1:", "毫秒数"},
+        {"await script TITLE timeout abc\n", "mem:1:", "正整数"},
+        {"await script TITLE timeout 0\n", "mem:1:", "正整数"},
+        {"await position TITLE 0x039C 0x0460 timeout 2500 extra\n", "mem:1:", "行尾"},
         {"profile_begin\n", "mem:1:", "label"},
         {"profile_end a b\n", "mem:1:", "label"},
         {"quit now\n", "mem:1:", "不带参数"},
@@ -537,19 +549,32 @@ void caseParseErrors() {
         }
     }
 
-    // ---- 合法配方：**七条**指令都吃（能力面只有一份），`#` / 空行 / 行尾注释 / 大小写指令名都忽略 ----
+    // 跨行 `timeout` 的文案必须**指向修法**（"写到它守的那一行末尾"）—— 只说"这里不对"帮不了人。
+    {
+        lift::InputPlan cross;
+        std::string cross_err;
+        LIFT_CHECK(!cross.loadText("await script TITLE\ntimeout 30000\nclick 1 2\n", "mem", &cross_err));
+        LIFT_CHECK(cross_err.find("mem:2:") != std::string::npos);
+        LIFT_CHECK(cross_err.find("末尾") != std::string::npos);
+    }
+
+    // ---- 合法配方：**六条指令 + 行尾 `timeout`** 都吃（能力面只有一份），`#` / 空行 / 行尾注释 /
+    //      大小写指令名都忽略 ----
     lift::InputPlan plan;
     std::string err;
     const bool ok = plan.loadText(
-        "\n# 注释\nAwait script TITLE  # 行尾注释\ntimeout 2500\n\nWait 250\nclick 1 2 right\n"
+        "\n# 注释\nAwait script TITLE timeout 2500  # 行尾注释\n\nWait 250\nclick 1 2 right\n"
         "profile_begin w\nprofile_end w\n"
-        "await POSITION some-name 0x0000039C 0x00000460  # 未知脚本名不在解析期校验\nquit\n",
+        "await POSITION some-name 0x0000039C 0x00000460 timeout 7000  # 未知脚本名不在解析期校验\nquit\n",
         "mem", &err);
     if (!ok) std::fprintf(stderr, "合法配方被拒：%s\n", err.c_str());
     LIFT_CHECK(ok);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.steps()), 7);  // timeout 不是一条指令
-    // `timeout` 挂在它**前面**那条指令上（守上一条）
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.steps()), 7);  // `timeout` 不是一条指令
+    // 行尾 `timeout` 挂在**同一行那个门**上（两种门都验；`wait` / `click` 等不能带）。
     LIFT_CHECK(plan.stepAt(0) != nullptr && plan.stepAt(0)->timeout_ms == 2500u);
+    LIFT_CHECK(plan.stepAt(5) != nullptr && plan.stepAt(5)->timeout_ms == 7000u);
+    LIFT_CHECK(plan.stepAt(1) != nullptr && plan.stepAt(1)->timeout_ms == 0u);  // `wait` 没有守卫
+    LIFT_CHECK(plan.stepAt(2) != nullptr && plan.stepAt(2)->timeout_ms == 0u);  // `click` 也没有
 }
 
 // =====================================================================================
@@ -671,13 +696,14 @@ void caseForcedRelease() {
 
 
 // =====================================================================================
-// 判据 ⑥ · 能力面只有一份：`timeout` 在本臂（读点臂）**到期** ⇒ 失败并点名
+// 判据 ⑥ · 能力面只有一份：行尾 `timeout` 在本臂（读点臂）**到期** ⇒ 失败并点名
 //
 // 判据（红了意味着什么）：
-//   ① 显式 `timeout 500` 守前一条门：**差 1 ms 不判**、超 1 ms 判（`>` 不是 `>=`）；
+//   ① 行尾 `timeout 500`（守**同一行**那个门）：**差 1 ms 不判**、超 1 ms 判（`>` 不是 `>=`）；
 //   ② 判失败之后：`outcome()==TimedOut`、`pending` 不动、`fired` 不增（⛔ 失败后继续点）；
 //   ③ `failureReport()` 点名 `mem:<行>` + 门/动作 + 指令原文（人能照着修）；
-//   ④ 共享宽度公式 `stepTimeoutMs`：显式覆盖缺省、`wait` 的缺省 = `ms + 缺省`、缺省 0 ⇒ 0。
+//   ④ 共享宽度公式 `stepTimeoutMs`：显式覆盖缺省、`wait` **恒 0**（固定时长、没有守卫）、缺省 0 ⇒ 0；
+//   ⑤ `wait` 没有守卫（图臂的缺省 5000 也吃不到它）：guest 时钟冲过 `ms + 5000` 也**不**判 timeout。
 // =====================================================================================
 void caseStepTimeout() {
     lift_test::g_current_case = "input-plan/step-timeout";
@@ -693,8 +719,8 @@ void caseStepTimeout() {
         lift::Step wait;
         wait.kind = lift::StepKind::Wait;
         wait.wait_ms = 25000;
-        // `wait` 的缺省守卫必须容得下它自己（守卫短于动作 = 永远不可能完成）
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::stepTimeoutMs(wait, 5000)), 30000);
+        // ★ `wait` 是固定时长、到点就走 ⇒ **没有守卫**（⛔ 不再有 `ms + 缺省` 那条补丁）：两个入口都是 0。
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::stepTimeoutMs(wait, 5000)), 0);
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::stepTimeoutMs(wait, 0)), 0);
         // "到期"的比较只有一份：严格大于
         LIFT_CHECK(!lift::stepWindowExpired(500, 500));
@@ -716,7 +742,7 @@ void caseStepTimeout() {
     plan.setClockForTest(&testNowMs);
     plan.attachGuestMemory(&f.m.mem());
     std::string err;
-    const bool loaded = plan.loadText("await script NOSUCHSCRIPT\ntimeout 500\nclick 10 20\n", "mem", &err);
+    const bool loaded = plan.loadText("await script NOSUCHSCRIPT timeout 500\nclick 10 20\n", "mem", &err);
     if (!loaded) std::fprintf(stderr, "带 timeout 的配方被拒：%s\n", err.c_str());
     LIFT_CHECK(loaded);
     if (!loaded) return;
@@ -762,6 +788,31 @@ void caseStepTimeout() {
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.fired()), 0);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pending()), 2);
     LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);
+
+    // ---- ⑤ `wait` **没有守卫**（删掉 `ms + 5000` 那条补丁的证明）----
+    //   图臂有两把尺：guest 毫秒 + 墙钟。headless 下 guest 时钟可以远远跑在墙钟前面 ⇒ 旧公式会给
+    //   `wait 20000` 一个 25000 的守卫，于是 guest 时钟一冲过 25000 就判 timeout（"固定等待"变成了
+    //   假失败）。现在 `wait` 恒 0 ⇒ 同一条 `wait 20000` 冲过去**不失败**，墙钟到点才走完。
+    //   ⛔ 不要把它改成"缩小到刚好不触发"：判据是"守卫根本不存在"。
+    {
+        lift_fixture::Fixture gf;
+        LIFT_CHECK(gf.ok);
+        if (!gf.ok) return;
+        lift::WindowManager* gwm = gf.m.cpu().windows;
+        LIFT_CHECK(gwm != nullptr);
+        if (gwm == nullptr) return;
+        lift::InteractionGraph graph;
+        std::string gerr;
+        LIFT_CHECK(graph.loadText("wait 20000\n", "mem:graph", &gerr));
+        graph.tick(*gwm, 0, 0, 0, 0, nullptr, nullptr);  // 进入 wait：due = wall 20000
+        // guest 时钟 25001 > 旧的 `ms + 5000` = 25000；墙钟还远没到 20000 ⇒ 旧公式在这里判 timeout。
+        graph.tick(*gwm, 1, 25001, 100, 100, nullptr, nullptr);
+        LIFT_CHECK(!graph.failed());
+        LIFT_CHECK(!graph.done());
+        graph.tick(*gwm, 2, 25002, 200, 20001, nullptr, nullptr);  // 墙钟到点 ⇒ 走完
+        LIFT_CHECK(!graph.failed());
+        LIFT_CHECK(graph.done());
+    }
 }
 
 // =====================================================================================
@@ -859,8 +910,7 @@ void caseProfileAndQuit() {
     //   （flush-before-read），没有这条 `wait` 就观察不到"窗口开着"那一刻。
     const bool loaded = plan.loadText(
         "profile_begin title\n"
-        "await script TITLE\n"
-        "timeout 30000\n"
+        "await script TITLE timeout 30000\n"
         "wait 500\n"
         "profile_end title\n"
         "quit\n"

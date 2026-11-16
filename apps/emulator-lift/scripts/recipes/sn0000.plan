@@ -5,10 +5,9 @@
 # 边界照样是 block 边界；`profile_end` 之后到下一次 `profile_begin` 之间的 2 s 不计入任何窗。
 #
 # 写法 = 顺序配方（语法真源 `apps/emulator-lift/src/runtime/recipe.h`）：
-#   `timeout N` 守的是**它上一条**指令；`wait N` = **宿主墙钟**毫秒。
+#   `timeout N` 写在它守的那条 `await` 的**行尾**；`wait N` = **宿主墙钟**毫秒（固定时长，⛔ 不带 timeout）。
 
-await script TITLE
-timeout 30000
+await script TITLE timeout 30000
 wait 5000
 
 click 1186 373
@@ -18,8 +17,7 @@ wait 2000
 
 click 830 592
 
-await script SN0000
-timeout 30000
+await script SN0000 timeout 30000
 wait 25000
 
 profile_begin idle

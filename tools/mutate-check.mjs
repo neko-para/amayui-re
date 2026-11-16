@@ -2795,6 +2795,43 @@ const MUTATIONS = [
       '`recipeOutcomeExitCode(TimedOut)` 应为 5）',
   },
   {
+    // ★ **行内 `timeout` 真的被记下来**（2026-11-16 起 `timeout` 只能写在 `await …` 那一行的末尾；
+    //   旧的跨行写法已删）。把"挂到 step 上"改成丢弃 ⇒ 门永远没有守卫 ⇒
+    //   ① `input-plan/parse-errors` 的 `stepAt(0)->timeout_ms == 2500` 红；
+    //   ② `input-plan/step-timeout` 的"超 1 ms 判到期"永远不发生 ⇒ 红。
+    file: 'apps/emulator-lift/src/runtime/recipe.cpp',
+    from:
+      '                s.kind = StepKind::AwaitScript;\n' +
+      '                s.script = tok[2];\n' +
+      '                s.timeout_ms = inline_timeout;  // 行尾 `timeout <ms>`（0 = 没写）\n',
+    to:
+      '                s.kind = StepKind::AwaitScript;\n' +
+      '                s.script = tok[2];\n' +
+      '                (void)inline_timeout;  // 变异：行尾 timeout 被忽略（门永远没有守卫）\n',
+    guard: 'ctest:input-plan-read-points',
+    ctest: 'input-plan-read-points',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '把行尾 `timeout` 的落点丢掉（`s.timeout_ms = inline_timeout` → `(void)inline_timeout`）⇒ ' +
+      '`await script TITLE timeout 2500` 的守卫恒 0 ⇒ input-plan-read-points 的 ' +
+      '`input-plan/parse-errors`（解析后 `timeout_ms` 应为 2500）与 `input-plan/step-timeout`' +
+      '（超 1 ms 应判到期）红',
+  },
+  {
+    // ★ **`wait` 没有守卫**（2026-11-16 裁决：删掉 `ms + 缺省` 那条补丁）。把这条特判删掉 ⇒
+    //   `stepTimeoutMs(wait, 5000)` 又变成 5000 ⇒ 超长 `wait` 会被假判 timeout（headless 下 guest
+    //   时钟跑在墙钟前面时必然踩到）。判据 = `input-plan/step-timeout` 的两条 0 断言 + 图臂长等待。
+    file: 'apps/emulator-lift/src/runtime/recipe.cpp',
+    from: '    if (s.kind == StepKind::Wait) return 0;\n',
+    to: '    // 变异：`wait` 又拿到缺省守卫（`ms + 缺省` 那条补丁回来了）\n',
+    guard: 'ctest:input-plan-read-points',
+    ctest: 'input-plan-read-points',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '删掉"`wait` 恒 0"的特判 ⇒ `stepTimeoutMs(wait, 5000)` 回到 5000 ⇒ input-plan-read-points 的 ' +
+      '`input-plan/step-timeout` 红（`wait` 的守卫应为 0；图臂里 guest 时钟冲过 5000 就会被假判 timeout）',
+  },
+  {
     // fixtures 目录白名单：**OS 元数据**必须放过（Finder 会在 `corpus/fixtures/` 里重新生成 `.DS_Store`）。
     //   ★ 判据改成恒 false ⇒ 点文件 / `Thumbs.db` / `desktop.ini` 重新撞穿白名单，
     //     macOS 上 `pnpm verify` 又 499/500（删文件只是当次止血，下一趟 Finder 就复发）。

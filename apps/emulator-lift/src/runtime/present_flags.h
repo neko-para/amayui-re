@@ -76,7 +76,7 @@ inline constexpr const char* kCursorWarpHelp =
 /** 平台闸门拒绝（`%s` = 程序名，`%s` = 平台名）；`exit 2` 之前那两句。 */
 inline constexpr const char* kCursorWarpUnsupportedFormat =
     "%s: --cursor-warp 在本平台未实现（%s）；本线只做 win32 / macOS\n"
-    "  ⇒ 去掉该参数，或按 README §4.2c 的口径用 --input-script 注入位置\n";
+    "  ⇒ 去掉该参数（注入位置由配方决定：AOT 臂 `--input-plan`；见 README §4.2d）\n";
 
 /** 窗口隐藏 ⇒ 这轮不生效（**一次性** stderr warn；判据 = `CursorWarpState::OnButHidden`）。 */
 inline constexpr const char* kCursorWarpHiddenWarn =

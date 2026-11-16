@@ -31,12 +31,13 @@
 //
 // =====================================================================================
 // 能力面 = **共享的那一份**（`runtime/recipe.h`；⛔ 本臂没有自己的指令表）
-//   七条指令全认：`await script` / `await position` / `wait <ms>` / `click x y [l|r]` /
-//   `timeout <ms>` / `profile_begin|end <label>` / `quit`。本臂只决定它们**落在哪个宿主对象**上：
+//   六条指令 + 行尾 `timeout` 全认：`await script` / `await position` / `wait <ms>` /
+//   `click x y [l|r]` / `profile_begin|end <label>` / `quit`（`timeout <ms>` 只能写在两个 `await`
+//   那一行的末尾）。本臂只决定它们**落在哪个宿主对象**上：
 //   · `click` → `input::mouseMove` / `mouseButton`（唯一施加路径）+ 待抬起队列；
-//   · `wait` → 非阻塞 deadline（宿主单调毫秒），到期由**下一个读点**消费；
-//   · `timeout` → 本臂**唯一**的尺 = 宿主墙钟（`stepTimeoutMs` 给宽度；本臂不给缺省值 ⇒
-//     没写 `timeout` 就没有每步守卫，卡住由 `--time-limit` / `--max-frames` 这层看门狗报）；
+//   · `wait` → 非阻塞 deadline（宿主单调毫秒），到期由**下一个读点**消费（★ 固定时长、没有守卫）；
+//   · 门上的 `timeout` → 本臂**唯一**的尺 = 宿主墙钟（`stepTimeoutMs` 给宽度；本臂不给缺省值 ⇒
+//     没写 `timeout` 就没有守卫，卡住由 `--time-limit` / `--max-frames` 这层看门狗报）；
 //   · `profile_begin|end` → 本臂没有区间 profiler（`WindowProfiler` 是解释器块循环的仪器）
 //     ⇒ 落成**宿主墙钟区间读数**（一次性两行：begin / end + 区间读数），可与 `--profile` 的
 //     整轮读数对齐；⛔ 不假装开了窗口 profiler；

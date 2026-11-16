@@ -1,8 +1,7 @@
 # 写法 = 顺序配方（语法真源 `apps/emulator-lift/src/runtime/recipe.h`）：
-#   `timeout N` 守的是**它上一条**指令（写在 `await` 后面 = 守那个门）；`wait N` = **宿主墙钟**毫秒。
+#   `timeout N` 写在它守的那条 `await` 的**行尾**；`wait N` = **宿主墙钟**毫秒（固定时长，⛔ 不带 timeout）。
 
-await script TITLE
-timeout 30000
+await script TITLE timeout 30000
 wait 5000
 
 click 1186 373
@@ -12,19 +11,16 @@ wait 2000
 
 click 830 592
 
-await script SN0000
-timeout 35000
+await script SN0000 timeout 35000
 wait 25000
 
 click 500 500 right
 wait 10000
-timeout 20000
 
-await script FELLOW
 # FELLOW（SN0000 右键之后那一屏）在本机要穿过一次 ~9–17 s 的同步长活（nested guest call：
 # 窗口里一次 Present 都没有、指令照涨；实测这一屏全程 8.8 s / 16.8 s）。缺省 5000 ms 必红
 # ⇒ 60 s（≈3.6× 实测上限）是给那次长活留的余量，⛔ 不是"刚好够"。
-timeout 60000
+await script FELLOW timeout 60000
 wait 2000
 
 click 100 140
@@ -36,10 +32,6 @@ click 300 100
 wait 1000
 click 650 320
 
-# 存档写入是同步的，但缩略图（STH）+ 1 MB DAT 在模拟器上要 ~7 s；单条 wait 的
-# 缺省 timeout = 5000 ms ⇒ 拆成 5 段给足收口时间（否则配方先结束、文件停在 0 字节）。
-wait 5000
-wait 5000
-wait 5000
-wait 5000
-wait 5000
+# 存档写入是同步的，但缩略图（STH）+ 1 MB DAT 在模拟器上要 ~7 s ⇒ 一条 8 s 的**固定等待**足够。
+# ★ `wait` 没有守卫（固定时长、到点就走）⇒ 不需要再拆段，也不会被判 timeout。
+wait 8000

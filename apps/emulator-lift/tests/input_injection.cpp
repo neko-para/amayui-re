@@ -1,4 +1,5 @@
-// emulator-lift · 注入通道守卫：`--input-script` 不依赖 OS 条件（pure）
+// emulator-lift · 注入通道守卫：时间线注入不依赖 OS 条件（pure；`--input-script` 的 CLI 已退役，
+// 但注入层 / 自动 hold / 所有权仍是配方 actuator 与夹具的公共底座）
 //
 // 判据（红了意味着什么）：
 //   ① 一份指令式时间线在**完全 headless**（不 `SDL_Init(VIDEO)`、没有窗口、没有焦点、没有任何人

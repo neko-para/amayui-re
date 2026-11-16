@@ -70,7 +70,8 @@
 // ★ 为什么这条必须是 pure 且顶层无条件注册：它只用 `initBare()` 自造字节 + 真 `Machine`，
 //   不碰游戏 / LFS / GPU / 音频设备（`Machine` 的缺省音频档就是 `Off` ⇒ 单线程）。
 // ★ 为什么可以把"墙钟读数"放进 CTest：断言的是**量级不变量**（不是性能门槛）。性能判据仍走
-//   `pnpm tools lift bench idle`（真工况 + N 遍 + 中位 + 落 JSON）。
+//   ~~`pnpm tools lift bench idle`~~（旧 bench 2026-11-16 已随 `--input-script` 退役；真工况基线
+//   只在 AOT 侧按 `REQ-01M7HQJEEENYDJ91FB5DAC4K23` 重写 —— 见 docs/03-emulator/input-plan.md §7）。
 #include <algorithm>
 #include <atomic>
 #include <chrono>

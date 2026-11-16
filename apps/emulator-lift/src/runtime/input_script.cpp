@@ -150,7 +150,7 @@ const char* triggerKindName(TriggerKind k) {
 const char* triggerUnitName(TriggerKind k) { return triggerKindName(k); }
 
 // ---- ★ `--anchor-script` 的启动期校验（⛔ 不跑一半就退化成"0 点从 run 起算"）----
-//   两条判据的**唯一实现**：`main` 用它 exit 2，pure CTest 用它断言"缺 `--input-script` ⇒ 解析期报错"。
+//   两条判据的**唯一实现**：pure CTest 用它断言"缺时间线 ⇒ 解析期报错"（CLI 入口 2026-11-16 已退役）。
 //   ★ 2026-11-16：`--interaction-graph` 已退役 ⇒ 不再有"与交互图互斥"那一条（它没有生产者了）。
 std::string validateOriginCli(bool anchor_requested, bool input_script_given) {
     if (!anchor_requested) return std::string();

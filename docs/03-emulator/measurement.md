@@ -67,7 +67,10 @@
   grep '^instr' ../../.tmp/profile-ab/bench-*.log   # 两臂的标签必须只差 profile=
   ```
 
-- **怎么量（有安装，真实工作负载）**：两臂 = 同一份时间线，只差一个开关；宿主墙钟 N=5 取中位数：
+- **怎么量（有安装，真实工作负载）**：两臂 = 同一份时间线，只差一个开关；宿主墙钟 N=5 取中位数。
+  ★ **2026-11-16：`--input-script` 的 CLI 已退役**（`docs/03-emulator/input-plan.md` §7）⇒ 下面这条
+  **解释器臂**的 A/B 命令**跑不了**；保留为历史方法 / 读数口径。重开＝AOT 侧压力档按
+  `REQ-01M7HQJEEENYDJ91FB5DAC4K23` 重写（配方驱动），⛔ 不复活 `--input-script`：
   ```
   # ① 窗口 profiler 的 A/B：.tmp/profile-ab/room-off.txt 与 room-on.txt **只差**这两行
   #      at insn <A> / profile_begin enter / at insn <B> / profile_end enter
@@ -134,6 +137,7 @@
 - **怎么量**：脚本里所有窗口边界写 `at insn N`；`at frame N` 只用于**同一次运行内**的相对窗口（`wait k frames`）。
   现成样式：`.tmp/roomopt/enter-clean.txt` / `exit-clean.txt`（注释里写清了为什么）。
   `--input-script` 的触发集合 = `at frame / at guest_ms / at insn / at wall_ms / after / wait`（启动行会打出来）。
+  ★ 2026-11-16：该入口已退役 ⇒ 本条原则（**指令数比帧号稳**）保留；重开时用配方 / AOT 压力档的同口径锚。
 
 ### M-06 · "动作发出去"不等于"guest 看见了"：用采样数 / 像素差分，不用帧号
 - **为什么**：`click` 的按下短于 guest 采样周期会被**静默吞掉**（BUG-04）；此时帧号不动、退出码也可能是 0。

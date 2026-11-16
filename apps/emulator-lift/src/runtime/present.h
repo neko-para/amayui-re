@@ -38,7 +38,8 @@ public:
     virtual void pumpHostEvents() {}
     // 用户关窗（或平台 quit）；false = 继续跑。
     virtual bool stopRequested() const { return false; }
-    // ★ 宿主侧"像点了 X 一样"请求关窗（`--input-script close_window` / 自动化测试用）。
+    // ★ 宿主侧"像点了 X 一样"请求关窗（`InputScript` 的 `close_window` 动作 / 自动化测试用；
+    //   `--input-script` 的 CLI 入口 2026-11-16 已退役）。
     //   默认 no-op（headless 没有窗口）；窗口 sink 走与 `SDL_EVENT_WINDOW_CLOSE_REQUESTED`
     //   **同一条**路（`present_sdl.cpp` 的 `Impl::requestClose`），因此关窗宽限/二次确认语义一致。
     virtual void requestClose() {}

@@ -55,7 +55,7 @@
 - **`pnpm tools lift bench idle --n 5`**（一条命令 + 落文件）已落地：`tools/lift.mjs` 新 op `bench`（口径 A 写死
   `--present window --present-vsync 0 --present-hidden --raster gpu --native-overrides all --skip-logo`；每遍**独立子进程**；
   JSON 落 `.cache/lift-bench/`，含 exe sha256+mtime、`CMAKE_BUILD_TYPE` 回读、脚本 sha256、工作树指纹、逐遍原始值 + 中位数；
-  `Debug` 直接拒绝；解析失败**不估算**，落 `*-FAILED.json`）。守卫 `repo:tools/test/lift-bench.test.mjs`（10 用例，纯解析器）。
+  `Debug` 直接拒绝；解析失败**不估算**，落 `*-FAILED.json`）。守卫 `tools/test/lift-bench.test.mjs（2026-11-16 随旧 bench 退役删除：解释器臂的 bench 与被测对象一起退，性能测量改按 AOT 压力档重写）`（10 用例，纯解析器）。
 - **N=5 基线（TITLE 空转）**：`106.19 / 105.42 / 105.05 / 106.37 / 105.87` ms/M ⇒ **中位 105.87 ms/M = 9.446 M insn/s**（极差 1.2%）；
   另一轮独立 N=5 = 104.97（极差 1.4%）；10 遍合并中位 105.65 ⇒ **可复跑**。块命中 99.981% · 平均块长 8.20–8.23。
   ⚠ 工况是 **TITLE（每帧都 Present，≈34 fps）**，⛔ **不能**与 OBS-05 的 64.7 ms/M（EU-ROOM 静置、Present=0）相减比快慢。

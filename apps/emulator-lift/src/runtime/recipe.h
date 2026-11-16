@@ -10,12 +10,14 @@
 //
 // ---- 行写法（人写；`#` 起注释、空行忽略、行号照数）----
 //
-//     await script TITLE                 ← 电平门：当前脚本身份 == TITLE（ASCII 大小写不敏感，
+//     await script TITLE timeout 30000   ← 电平门：当前脚本身份 == TITLE（ASCII 大小写不敏感，
 //                                          两侧都忽略 `.bin`；`id:0x%08X` 退化名始终接受）
-//     timeout 30000                      ← 可选：**上一条指令**的守卫（等它成立的上限，ms）
-//     await position TITLE 0x0460 0x0520 ← 同一层再加"脚本内位置"：`FROM <= pos < TO`（半开区间）
-//     wait 5000                          ← 宿主单调毫秒（非阻塞：只记 deadline）
+//                                          ★ 行尾 `timeout <ms>` = **这个门**的守卫（等它成立的上限）
+//     await position TITLE 0x0460 0x0520 timeout 5000
+//                                        ← 同一层再加"脚本内位置"：`FROM <= pos < TO`（半开区间）
+//     wait 5000                          ← 宿主单调毫秒（固定时长；⛔ 不带 timeout）
 //     click 1070 480 left                ← x/y = 1280×720 参考系；按钮词裸写 left|right（省略 = left）
+//                                          （⛔ 不带 timeout：点击没有可等待的东西）
 //     profile_begin fellow-enter         ← 区间 profiler 的边界（label 只用于对齐 / 报错）
 //     profile_end fellow-enter
 //     quit                               ← 立刻结束这次运行
@@ -25,13 +27,16 @@
 //   · `await position` 的 FROM / TO 必须是**带 `0x` 前缀的 32 位 hex**，解析期校验 `FROM < TO`；
 //     脚本名**不在解析期校验**（名字匹配是运行期的事）。位置读数只有一份
 //     （`runtime/engine_marker.h` 的 `readScriptPositionSample`）。
-//   · `timeout` 挂在**它前面**那条指令上（写在 `await` 之后 = 守这个门）；缺省由驱动器给
-//     （见 `stepTimeoutMs`）。
+//   · ★ `timeout <ms>` 是**行尾可选项**，只允许出现在 `await script` / `await position` 上：它守的是
+//     **同一行**那个门。⛔ 单独一行写 `timeout` = 解析期硬错（旧的"守上一条指令"写法已删除，
+//     ⛔ 不留两种写法）；写在 `wait` / `click` / `profile_*` / `quit` 后面同样是硬错 —— 那些指令
+//     **没有可等待的东西**（`wait` 是固定时长、到点就走）。缺省由驱动器给（见 `stepTimeoutMs`）。
 //   · `wait` 是**宿主墙钟毫秒**（与 `--input-plan` 原来的 `wait <ms>` 同一口径）⇒ 同一份配方两次跑的
-//     完成时刻不可复现，因此带 `wait` 的 trace 一律 `NON-DIFFABLE`。
+//     完成时刻不可复现，因此带 `wait` 的 trace 一律 `NON-DIFFABLE`。★ 它**没有守卫**（固定时长
+//     不需要"等它成立"）：卡住由 `--time-limit` / `--max-frames` 这层看门狗报。
 //
 // ---- 能力面：**只有一份** ----
-// ★ 七条指令**每个驱动器都认**；⛔ 不存在"这个入口不认某条指令"的解析期硬错，也⛔ 不再有
+// ★ 六条指令 + 行尾 `timeout` **每个驱动器都认**；⛔ 不存在"这个入口不认某条指令"的解析期硬错，也⛔ 不再有
 //   `kPlanFeatures` / `kGraphFeatures` 这类**按入口分叉的能力面表**（2026-11-16 统一；用户口径：
 //   "不要没有新生产者的兼容层"）。`timeout` / `profile_begin` / `profile_end` / `quit` 的**语义**
 //   在各驱动器是同一份（本文件 + `recipe.cpp`）。
@@ -86,7 +91,8 @@ struct Step {
     MouseButton button = MouseButton::Left;
     // ProfileBegin / ProfileEnd
     std::string label;
-    // `timeout <ms>`：挂在**前一条**指令上的守卫（0 = 没写；缺省由驱动器给，见 `stepTimeoutMs`）
+    // 行尾 `timeout <ms>`（只有 `await script` / `await position` 允许）：**同一行那个门**的守卫
+    // （0 = 没写；缺省由驱动器给，见 `stepTimeoutMs`）
     std::uint64_t timeout_ms = 0;
     int line = 0;  // 指令那一行（报错定位）
 
@@ -130,11 +136,11 @@ bool scriptNameMatches(const std::string& want, const MarkerSample& sample);
 // 每步守卫的**宽度**（唯一一份）
 // ---------------------------------------------------------------------------------------
 // 返回这条指令的守卫窗口（ms）；**0 = 不设窗口**（这个驱动器没有缺省，且作者也没写 `timeout`）。
-//   · 显式 `timeout <ms>` **恒覆盖**（两个驱动器同一条）；
+//   · 显式 `timeout <ms>` **恒覆盖**（两个驱动器同一条；解析期保证只有门能带它）；
 //   · 没写 ⇒ 用驱动器给的缺省 `default_ms`（0 = 这个驱动器不给缺省守卫）；
-//   · `wait <ms>` 这条指令**自己就要跑 ms 毫秒** ⇒ 它的缺省守卫必须容得下它，否则这条指令
-//     永远不可能完成（"守卫比动作本身还短" = 自相矛盾，只会在运行期变成一条假 `timeout`）：
-//     `wait` 的缺省 = `ms + default_ms`。显式 `timeout` 仍然覆盖这条缺省。
+//   · ★ `wait <ms>` **没有守卫**（恒返回 0）：它是**固定时长**、到点就走，不需要"等它成立"。
+//     ⛔ 不再有 `ms + 缺省` 那种补丁（那份补丁的来历是图节点上的 timeout 被拍平到 `wait` 上）；
+//     真卡住由 `--time-limit` / `--max-frames` 这层看门狗报。
 std::uint64_t stepTimeoutMs(const Step& s, std::uint64_t default_ms);
 
 // 到期口径（唯一一份）：**已等的**严格超过窗口才算到期（`>` 不是 `>=`）⇒ `timeout 2000`

@@ -1,4 +1,16 @@
-// emulator-lift · 指令式输入时间线（`--input-script`）
+// emulator-lift · 指令式输入时间线（原 `--input-script`；2026-11-16 起没有 CLI 入口）
+//
+// ★★ 2026-11-16 用户裁决（`REQ-01M7HQ57XV66FZQA5ECGHWD71N`）：**时间线输入的 CLI 用户面整族退役**
+//   （`--input-script` / `--anchor-script` / `--input-stall-*` / `--input-max-hold` /
+//   `--input-marker-timeout-ms` / `--expect-change-*`），旧 bench（`pnpm tools lift bench` +
+//   `scripts/bench/*.txt`）一并退役。**本类保留为最小面**：它仍是两处保留消费者的动作落地面 ——
+//   ① 机器内配方驱动器的 actuator（`InteractionGraph::actuator`，动作经 `appendText` 追加成
+//      `at frame <当前+1>`）；② pure CTest 夹具（`input-tick` / `input-injection` / `input-expect` /
+//      `input-unfinished` / `input-marker` / `input-anchor` / `profile-window` / `insn-cost` / `messagebox`）。
+//   ⇒ 本文件里的"注入不需要焦点 / 自动 hold / 解析期错误"等性质仍然生效，但**没有命令行入口**；
+//   ⛔ 不要为新需求再把它挂回 CLI（那样就是给解释器开第二套输入语义）。
+//   ⇒ 断面的判据与依赖清单见 `.tmp/graphfix/report-idescript.md`；重开条件见
+//     `docs/03-emulator/input-plan.md` §7（AOT 压力档重写）。
 //
 // ★ 目的（2026-11-08）：把「在某个时刻点一下 OPTION / 按一下键」从**手工 PowerShell 动作**
 //   （SetForegroundWindow → 挪真实光标 → SendInput → 等 250~350 ms）变成**可复现的一次运行**。
@@ -145,7 +157,8 @@ struct TimelineOrigin {
 //   抽成**纯函数**是为了让 pure CTest 能断言"没给 `--input-script` 却给 `--anchor-script` ⇒ 解析期报错" ——
 //   `main` 的进程退出码在 CTest 里不可达，这里是同一段判据的**唯一实现**（⛔ 不复制一份到 test 里）。
 //   返回空串 = 通过；非空 = 用法错误的原因（调用方 `exit 2`）。
-//   ⛔ 2026-11-16 起没有"与 `--interaction-graph` 互斥"这一条：那条入口已退役（`--input-script` 还在）。
+//   ⛔ 2026-11-16 起没有"与 `--interaction-graph` 互斥"这一条：**两条 CLI 入口都已退役**
+//      （`--interaction-graph` 先退，`--input-script` 本轮退）；本函数只剩 pure CTest 夹具在调。
 std::string validateOriginCli(bool anchor_requested, bool input_script_given);
 std::string validateOriginScript(bool anchor_requested, std::size_t action_count);
 

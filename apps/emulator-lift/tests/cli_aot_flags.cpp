@@ -257,6 +257,9 @@ int main(int argc, char** argv) {
             {"unit.plan", "wait 500 wall_ms\n", "wait"},
             {"missing.plan", "click 1\n", "缺参数"},
             {"eqleft.plan", "click 1 2 =left\n", "按钮词"},
+            // 行内 `timeout` 的缺参 / 非数字 ⇒ 同样是 exit 2 + 行号（⛔ 不许静默当成 0）。
+            {"to-missing.plan", "await script TITLE timeout\n", "毫秒数"},
+            {"to-nan.plan", "await script TITLE timeout abc\n", "正整数"},
         };
         for (const BadArg& b : kBads) {
             const fs::path p = root / b.name;
@@ -273,6 +276,43 @@ int main(int argc, char** argv) {
             LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
             LIFT_CHECK(r.err.find(std::string(b.name) + ":1:") != std::string::npos);
             LIFT_CHECK(r.err.find(b.word) != std::string::npos);
+        }
+    }
+
+    // ---- ①''''' `timeout` **只能写在 `await …` 那一行的末尾**：跨行 / 挂在 `wait` / `click` 上 ⇒
+    //      exit 2 + 点名行号 + 文案指向修法。
+    //      红了 ⇒ 旧写法（"守上一条指令"）被静默接受，或者用户看不出该怎么改。
+    g_current_case = "input-plan-rejects-stray-timeout";
+    {
+        struct StrayTimeout {
+            const char* name;
+            const char* text;
+            const char* want_line;  // `文件:行:`
+            const char* word;       // 报错里必须出现的词（修法 / 原因）
+            const char* word2;      // 可空：第二条必须出现的词（`wait` 的文案要点名改写后的整行）
+        };
+        const StrayTimeout kStray[] = {
+            {"crossline.plan", "await script TITLE\ntimeout 30000\nclick 1 2\n", ":2:", "末尾", nullptr},
+            {"waitto.plan", "wait 5000 timeout 9000\n", ":1:", "固定时长", "写回 `wait 5000`"},
+            {"clickto.plan", "click 1186 373 timeout 5000\n", ":1:", "没有可等待的东西", nullptr},
+            {"quitto.plan", "quit timeout 5000\n", ":1:", "没有可等待的东西", nullptr},
+        };
+        for (const StrayTimeout& s : kStray) {
+            const fs::path p = root / s.name;
+            {
+                std::ofstream out(p, std::ios::binary);
+                out << s.text;
+            }
+            const std::string tag = std::string(s.name) + ".";
+            const ChildRun r = runChild(exe, L"--input-plan " + quoteArg(p.wstring()), root, root / (tag + "out"),
+                                        root / (tag + "err"));
+            LIFT_CHECK(r.started);
+            LIFT_CHECK(!r.timed_out);
+            LIFT_CHECK_EQ_U32(r.exit_code, 2u);
+            LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
+            LIFT_CHECK(r.err.find(std::string(s.name) + s.want_line) != std::string::npos);
+            LIFT_CHECK(r.err.find(s.word) != std::string::npos);
+            if (s.word2 != nullptr) LIFT_CHECK(r.err.find(s.word2) != std::string::npos);
         }
     }
 

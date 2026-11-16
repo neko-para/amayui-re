@@ -8,20 +8,15 @@
 # ⛔ 不写帧号（见 docs/03-emulator/interaction-model.md）
 #
 # 写法 = 顺序配方（语法真源 `apps/emulator-lift/src/runtime/recipe.h`）：
-#   `timeout N` 守的是**它上一条**指令（写在 `await` 后面 = 守那个门）；`wait N` = **宿主墙钟**毫秒。
+#   `timeout N` 写在它守的那条 `await` 的**行尾**；`wait N` = **宿主墙钟**毫秒（固定时长，⛔ 不带 timeout）。
 #   ⚠ "点击是否真的被 TITLE 的输入回调消费"用 `await script` 判不了（见 OBS-20261116-05）：
 #     可读配方要 `await position TITLE 0x0460 0x0520`（这属于**另立**一张图，⛔ 不往本文件塞）。
 
-await script TITLE
-timeout 30000
+await script TITLE timeout 30000
 wait 5000
 
 click 1070 480
 
-# 给"进加载界面 / 或干净退出"留足 20 s。
-# ⚠ 单条 wait 自身受缺省 5000 ms timeout 约束 ⇒ 拆成 5 段（否则会被判 timeout，掩盖真正的结局）。
-wait 4000
-wait 4000
-wait 4000
-wait 4000
-wait 4000
+# 给"进加载界面 / 或干净退出"留足 20 s（合计仍是 20 s）。
+# ★ `wait` 是固定时长、**没有守卫** ⇒ 一条写够就行（不再需要拆段）。
+wait 20000

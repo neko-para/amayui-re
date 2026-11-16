@@ -2,8 +2,9 @@
 
 - id: REQ-01M7HSXV7NP1ANJP5Q5TSM78A1
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M7G7EJF062NKQ0D40RF3BZ4Z
+- dropped_reason: 不是缺口：旧 bench（pnpm tools lift bench + scripts/bench/*.txt + --input-script）测的是**正在退役的解释器臂**，与被测对象一起死。真要做性能测量 = 按 AOT 侧压力档**重写**（REQ-01M7HQJEEENYDJ91FB5DAC4K23：boot→TITLE 稳定 / 打开 FELLOW / 加载存档，驱动用配方的确定性门）⇒ ⛔ 不需要为旧 bench 给配方补 at frame/insn/marker。用户 2026-11-16 口径：'如果真的需要测试也是重新写'。
 - tags: [emulator-lift, bench, input]
 
 ## 一句话

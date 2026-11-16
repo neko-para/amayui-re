@@ -167,7 +167,8 @@ int exitCodeForRun(const RunResult& r);
 //     **真子进程**的退出码断言（⛔ 只测 accessor 不叫"进程退出码"）。
 int exitCodeForGuestExit(std::uint32_t guest_exit_code);
 
-// ★ 时间线（`--input-script`）的**效果级判据**（`--expect-change-after` / `--expect-change-window`）：
+// ★ 时间线的**效果级判据**（原 `--expect-change-after` / `--expect-change-window`；2026-11-16 起
+//   那两个 CLI 参数随 `--input-script` 整族退役 ⇒ 本策略只剩 pure CTest 夹具在配它）：
 //   "动作发出去" ≠ "guest 看见了"（BUG-04 的点击被吞、BUG-16 的房间「戻る」无反应，都是它漏掉的）。
 //   策略：动作被**应用**之后开一个观测窗，要求窗口内 `FrameSampler::changeCount()` 增长。
 //   ★ 窗口单位 = **采样数**（一次 Present = 一个样本），⛔ 不是墙钟：`--present window` 是 real-time
@@ -294,33 +295,34 @@ public:
     //     被一并复制 ⇒ 那条判据对一个**非主线程的私有副本**也成立。
     bool ownsCpu(const X86& cpu) const override { return &cpu_ == &cpu; }
 
-    // ★ 指令式输入时间线（`--input-script`）：见 `runtime/input_script.h`。
-    //   加载失败 ⇒ false + err（带行号）；⛔ 不静默跳过。可以在 run 之前 / 两次 run 之间替换。
-    bool loadInputScript(const std::string& path, std::string* err);
-    // 直接给文本（测试 / 内嵌用）：与 `loadInputScript` 走同一个解析器（⛔ 没有第二套语法）。
+    // ★ 指令式输入时间线（**2026-11-16 起没有 CLI 入口**：`--input-script` 整族已退役）。
+    //   见 `runtime/input_script.h` 的头注：本类现在只是**机器内的动作落地面** + pure CTest 夹具。
+    //   直接给文本（测试 / 内嵌用）：带行号的解析失败 ⇒ false + err。
     bool loadInputScriptText(const std::string& text, const std::string& origin, std::string* err);
     InputScript& inputScript() { return input_script_; }
     const InputScript& inputScript() const { return input_script_; }
-    // ★ 帧停滞兜底阈值（`--input-stall-ms`；0 = 关闭）。必须在 `run()` 之前设。
+    // ★ 帧停滞兜底阈值（原 `--input-stall-ms`；0 = 关闭）。必须在 `run()` 之前设。
     // ★ 这三个旋钮**同时**作用到两条通道（时间线 + 交互图的 actuator）：图把动作追加进自己的
-    //   actuator，用户传 `--input-max-hold` / `--input-stall-ms` 时**必须**也生效 ——
-    //   否则那三个 flag 对图静默无效（复审发现）。
+    //   actuator，调 `setInputMaxHoldMs` / `setInputStallMs` 时**必须**也生效 ——
+    //   否则旋钮对图静默无效（复审发现）。
+    //   ⚠ 2026-11-16 起 CLI 已退役（`--input-stall-*` / `--input-max-hold` 不再是参数）：
+    //     调用者只剩 pure CTest 夹具（`profile_window` / `input_marker`）与宿主内嵌。
     void setInputStallMs(std::uint64_t ms) {
         input_script_.setDefaultStallMs(ms);
         interaction_.actuator().setDefaultStallMs(ms);
     }
-    // 还没出现第一帧时的宽限（`--input-stall-boot-ms`；boot 期间没有 Present 不算停滞）。
+    // 还没出现第一帧时的宽限（原 `--input-stall-boot-ms`；boot 期间没有 Present 不算停滞）。
     void setInputStallBootGraceMs(std::uint64_t ms) {
         input_script_.setDefaultBootGraceMs(ms);
         interaction_.actuator().setDefaultBootGraceMs(ms);
     }
-    // ★ 自动 hold 的上限（`--input-max-hold`，guest ms；0 = 不设限）。必须在 `run()` 之前设。
+    // ★ 自动 hold 的上限（原 `--input-max-hold`，guest ms；0 = 不设限）。必须在 `run()` 之前设。
     //   到上限仍未采样 ⇒ 抬起 + 告警（见 `runtime/input_script.h`）；⛔ 不挂死。
     void setInputMaxHoldMs(std::uint64_t ms) {
         input_script_.setMaxAutoHoldMs(ms);
         interaction_.actuator().setMaxAutoHoldMs(ms);
     }
-    // ★ marker 超时（`--input-marker-timeout-ms`，**宿主墙钟** ms；0 = 不设限）。只作用到时间线：
+    // ★ marker 超时（原 `--input-marker-timeout-ms`，**宿主墙钟** ms；0 = 不设限）。只作用到时间线：
     //   交互图的 actuator 没有 marker 动作源（图生成的是 `at frame`）。必须在 `run()` 之前设。
     void setInputMarkerTimeoutMs(std::uint64_t ms) { input_script_.setMarkerTimeoutMs(ms); }
     // ★ 在 VM 循环头的**块入口**采一次样并喂给时间线（`Machine::run` 的钩子调它；纯档夹具也直接调）。
@@ -329,8 +331,8 @@ public:
     bool sampleMarker();
     const MarkerSample& lastMarkerSample() const { return last_marker_sample_; }
     const MarkerSampler& markerSampler() const { return marker_sampler_; }
-    // 每个块边界推进一次注入时间线（`Machine::run` 内部调用；`GetMessageA` 阻塞时的宿主事件泵
-    // 也调用它，否则 guest 卡在等消息时脚本永远不触发）。
+    // 每个块边界推进一次注入时间线（`Machine::run` 内部调用）。★ 2026-11-16 起没有 CLI 入口：
+    // 它服务的是 pure CTest 夹具与宿主内嵌（交互配方的 actuator 走 `pumpScript`，不经过这里）。
     void tickInputScript(X86& cpu);
 
     // ★ 交互配方驱动器：见 `runtime/interaction_graph.h`。⛔ 2026-11-16 起**没有 CLI 入口**
@@ -340,13 +342,13 @@ public:
     bool loadInteractionGraphText(const std::string& text, const std::string& origin, std::string* err);
     InteractionGraph& interactionGraph() { return interaction_; }
     const InteractionGraph& interactionGraph() const { return interaction_; }
-    // 画面特征采样器：只给时间线的效果级判据用（`--expect-change-after`；策略关 ⇒ 不接、零成本）。
+    // 画面特征采样器：只给效果级判据用（策略关 ⇒ 不接、零成本）。
     FrameSampler& sampler() { return sampler_; }
     // 每个块边界推进一次交互配方（顺序：先配方 tick（它 append 动作）再 actuator tick（真正发 WM_*））。
     void tickInteraction(X86& cpu);
 
-    // ★ 时间线的效果级判据（见上面的 `ExpectChangePolicy`）：必须在 `run()` 之前、**在
-    //   `loadInputScript*` 之后**配置一次（策略要扫一遍脚本的动作；零匹配 = 拒绝 ⇒ 不许静默开局）。
+    // ★ 效果级判据（见上面的 `ExpectChangePolicy`）：必须在 `run()` 之前、**在
+    //   `loadInputScriptText` 之后**配置一次（策略要扫一遍脚本的动作；零匹配 = 拒绝 ⇒ 不许静默开局）。
     //   与交互配方驱动器**互斥**（配方有自己的门语义；两套判据同时开 = 两套口径）。
     bool configureExpectChange(const ExpectChangePolicy& p, std::string* err);
     bool expectChangeEnabled() const { return expect_policy_.enabled; }
@@ -446,7 +448,7 @@ private:
     // ★ 一份 `InputScript` 的公共推进（时间线与交互图的 actuator **共用**这条路径：
     //   tick / profiler 窗口边界登记 / `quit` 唤醒 WM_QUIT）。⛔ 不要给两条通道各写一遍。
     void pumpScript(InputScript& script, X86& cpu, std::uint64_t wall_ms);
-    // ---- 时间线的效果级判据（`--expect-change-*`；见 `ExpectChangePolicy`）----
+    // ---- 效果级判据（原 `--expect-change-*`；见 `ExpectChangePolicy`）----
     //   ★ 开窗**就地**在 `tickInputScript` 里做（⛔ 不延迟到块边界）：`InputScript::tick` 里
     //     `quit` 之后的同 tick 动作不会再被应用，而块边界的 `quit` 分支会先 break ——
     //     延迟开窗会让 `click` + `quit` 静默通过（正是本单要消灭的"发完不管"）。

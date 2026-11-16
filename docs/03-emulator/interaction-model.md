@@ -29,11 +29,14 @@
   而轮询体里同一个门也命中、点击却**不被消费** ⇒ "输入循环在跑" ≠ "点击会被消费"。
 - **动作**：`click <x> <y> [left|right]`（1280×720 参考系，投递前过 `cursor_map.h` 的唯一映射）·
   `wait <ms>`（**宿主墙钟**，非阻塞 deadline）· `profile_begin|end <label>` · `quit`（立即收口）。
-- **`timeout <ms>`**：守的是**它上一条**指令（写在 `await` 后面 = 守那个门）。缺省由**入口**给
-  （`recipe.h` 的 `stepTimeoutMs` 是唯一一份宽度公式）：解释器臂 **5000 ms**（它的"到期"有两把尺）；
-  AOT 臂**不给缺省**（它只有宿主墙钟一把尺，看门狗是 `--time-limit` / `--max-frames`）⇒
-  没写 `timeout` 就没有每步守卫。`wait <ms>` 这种"自己就要跑 ms 毫秒"的指令，缺省守卫是
-  `ms + 缺省`（守卫短于动作本身就是自相矛盾）。⚠ 缺省值不同是**入口策略**，不是能力面分叉：
+- **`timeout <ms>`**：**行尾可选项**，只允许出现在 `await script` / `await position` 那一行的末尾
+  （它守的就是**同一行**那个门；⛔ 旧的"守上一条指令"跨行写法已删除，单独一行写 `timeout` = 解析期硬错）。
+  缺省由**入口**给（`recipe.h` 的 `stepTimeoutMs` 是唯一一份宽度公式）：解释器臂 **5000 ms**（它的
+  "到期"有两把尺）；AOT 臂**不给缺省**（它只有宿主墙钟一把尺，看门狗是 `--time-limit` /
+  `--max-frames`）⇒ 没写 `timeout` 就没有守卫。
+  ★ **`wait <ms>` 没有守卫**（`stepTimeoutMs` 对它恒返回 0）：它是**固定时长**、到点就走，
+  不需要"等它成立"（旧的 `ms + 缺省` 补丁已删）。`click` / `profile_*` / `quit` 也没有可等待的
+  东西 ⇒ 给它们写 `timeout` = 解析期硬错。⚠ 缺省值不同是**入口策略**，不是能力面分叉：
   显式 `timeout` 在两臂语义相同。到期 = **已等的严格超过**窗口（`>` 不是 `>=`，同一份判据）。
 - **一个用户入口 + 一个机器内驱动器，同一份语义**：
   - `--input-plan`（AOT 臂，**唯一**的用户入口）：在 guest **读点**推进，动作直接写 `WindowManager`；
@@ -43,7 +46,7 @@
   ⇒ 差别只有**推进点**与**动作怎么落地**；顺序推进、两个门的判定、每步守卫的宽度 / 到期判据、
   完成度的结论与退出码**都是同一份实现**（`runtime/recipe.cpp` 的解析 + `stepGateHolds` +
   `stepTimeoutMs` / `stepWindowExpired` + `RecipeOutcome`）。
-  ★ **能力面只有一份**（2026-11-16 统一）：七条指令每个驱动器都认，⛔ 没有 `kPlanFeatures` /
+  ★ **能力面只有一份**（2026-11-16 统一）：六条指令 + 行尾 `timeout` 每个驱动器都认，⛔ 没有 `kPlanFeatures` /
   `kGraphFeatures` 这种按入口分叉的表，也⛔ 没有"这个入口不认"的解析期硬错。
 
 ## 2. 失败（全部响亮）
@@ -55,8 +58,9 @@
 
 - 一律：**非 0 退出（5）** + stderr 打失败报告并**点名 `文件:行` + 门/动作**（解释器臂：哪一条指令 /
   等的是什么 / 等了多久 / 最后一次身份 / 位置读数 / actuator 账；AOT 臂：`FAIL timeout` 或
-  `FAIL incomplete` + 那条指令 + 进度 `steps= applied= pending= fired= reads=`）+ 解释器臂补写
-  "最后画面"BMP（从未 Present 过就明说写不出来）。⛔ 不许 warning-only。
+  `FAIL incomplete` + 那条指令 + 进度 `steps= applied= pending= fired= reads=`）。
+  ⛔ 不许 warning-only。★ 解释器臂"补写最后画面 BMP"随 `--expect-change-*` 退役删掉了
+  （2026-11-16：那条分流没有 CLI 生产者了；片面对照改看 `--dump-frame`）。
 - ★ **退出码 5 只有一处口径**（`recipe.h` 的 `recipeOutcomeExitCode`）：`Done` ⇒ 0（**不覆盖**运行结论）；
   `Running`（还有指令没消费）/ `TimedOut` ⇒ 5。⛔ 不许只打警告仍 exit 0 —— 那是"图 → 配方"改写
   会把 CTest 变成假绿的缝（ADR `REQ-01M7HP2Q1N0N004M8R4RPABWSV` 的前置）。
@@ -102,15 +106,16 @@
   一个识别失败会静默改掉点击位置；
 - 需要"这一屏 + 就绪"时，`await position` 是**不依赖 Present** 的可判定谓词（PC 在脚本体内）。
 
-⇒ `runtime/screen_sample.*` **不是**为配方服务的：它仍服务时间线的效果级判据
-（`--expect-change-after` / `--expect-change-window`，见 README §4.2c）与 `--overlay` 的每帧读数。
-⛔ 不要因为"配方不用它"就删掉。
+⇒ `runtime/screen_sample.*` **不是**为配方服务的：它服务**画面采样**（`FrameSampler` /
+`ScreenSample`）与 `--overlay` 的每帧读数。★ 2026-11-16：效果级判据的 CLI 已随 `--input-script`
+退役（`--expect-change-after` / `--expect-change-window` 不再是参数），但采样器本身仍有消费者
+（`--overlay` 与 pure CTest 夹具）⇒ ⛔ 不要因为"配方不用它"或"CLI 没了"就删掉。
 
 ## 6. 实现边界（现在没有的）
 
 | 缺什么 | 状态 |
 |---|---|
-| 模板匹配 / 单点取色 / 区域均值作为**门** | **不做**（画面采样只服务 `--expect-change-after`） |
+| 模板匹配 / 单点取色 / 区域均值作为**门** | **不做**（画面采样只服务 `--overlay` 与夹具的采样计数） |
 | 条件组合（AND/OR）、错误分支、回跳 | **不做**：顺序模型没有图 |
 | JSON 文件入口 / 生成器 | **没有**：行写法是唯一入口（第二份 schema 必漂） |
 | 鼠标拖拽 / 滚轮 / `hold` 时序 | **不做**：`click` = 按下 + 抬起，抬起由注入层的自动 hold 决定 |
@@ -123,8 +128,10 @@
 3. `await position`（脚本内位置门）—— ✅ 保留；AOT 臂"到加载存档屏"的配方靠它确定。
 4. **顺序模型收敛（2026-11-16）**：两臂共用 `runtime/recipe.{h,cpp}`；节点结构、画面三源、
    `expect`、`key` 一并退役。`graphs/` 与 `scripts/interaction/` 的存量文件见 `graphs/README.md`。
-5. **未做**：把 `--input-script` 时间线（`at frame` / `at insn` / `at marker` 的细粒度触发）并入配方 ——
-   时间线的触发单位比配方细，合并要先决定"细粒度触发在顺序模型里怎么表达"。
+5. **已退役（2026-11-16 用户裁决）**：`--input-script` 时间线（`at frame` / `at insn` / `at marker`）
+   **不并入配方** —— 旧 bench 不需要了，"真要做测试也是重新写"；⛔ 不为它给配方补细粒度触发。
+   断面的依赖清单见 `.tmp/graphfix/report-idescript.md`，重开条件见 `input-plan.md` §7
+   （AOT 压力档按 `REQ-01M7HQJEEENYDJ91FB5DAC4K23` 重写）。
 
 ## 8. 外部文档
 

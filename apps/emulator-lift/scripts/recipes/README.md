@@ -27,6 +27,19 @@ click 830 592
 `click 650 320` 在 `sn0000-save.plan` 与 `sn0000-quit.plan` 里都出现（两张不同的单锚的是各自那条路径），
 所以**两张都不许动这一行**。
 
+## 行写法（语法真源 = `src/runtime/recipe.h`；这里只举例，⛔ 不复述 schema）
+
+```text
+await script TITLE timeout 30000        # 行尾 `timeout` = **这个门**的守卫（最多等 30 s）
+await position TITLE 0x0460 0x0520 timeout 5000
+wait 5000                               # 固定时长（宿主墙钟）⇒ ⛔ 不带 timeout
+click 1186 373                          # ⛔ 不带 timeout（点击没有可等待的东西）
+```
+
+★ `timeout <ms>` **只能**写在 `await script` / `await position` 那一行的末尾。单独一行写 `timeout`
+（旧的"守上一条指令"写法）/ 挂在 `wait` · `click` · `profile_*` · `quit` 上 ⇒ **解析期硬错**
+（`exit 2` + 行号，文案会告诉你该写回哪一行）。`wait` **没有守卫**：它是固定时长、到点就走。
+
 ## 文件 → 干什么 → 谁在用
 
 | 文件 | 干什么 | 谁在用（`repro:` 锚 / docs / 需求单） |
@@ -54,8 +67,9 @@ cd apps/emulator-lift
 判据读数（一次性输出，缺省档就有）：
 
 - `input-plan: steps=N fired=M pending=K presents=… released=… held=…`
-- **完成度是判据**：`pending != 0` 或某步 `timeout` 到期 ⇒ stderr 点名 `文件:行` + 门/动作，**exit 5**
+- **完成度是判据**：`pending != 0` 或某个**门**的 `timeout` 到期 ⇒ stderr 点名 `文件:行` + 门/动作，**exit 5**
   （`Done` ⇒ 0；解析失败 ⇒ exit 2 + 行号）。⛔ 不要把 exit 5 读成"解析失败"。
+  ★ `wait` 是固定时长、**没有守卫** ⇒ 它不会被判 timeout（真卡住看 `--time-limit` / `--max-frames`）。
 
 ### ★ 这些配方是 **real-time 档**（`--present window`），不是 headless
 

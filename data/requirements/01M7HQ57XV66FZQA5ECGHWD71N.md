@@ -58,8 +58,21 @@
 
 本单只登记顺序；**不删任何东西**（第 4 步的"建 AOT 压力档"要单独立单）。
 
-## 用户裁决（2026-11-16，覆盖上面两条细节）
+> "这里历史的 bench（解释器侧）并不需要了？如果真的需要测试也是重新写，为什么说需要按旧的测试补充输入能力？"
 
-1. **6 份配方保留**，但**挪进子目录**、⛔ 不再散在仓根 ⇒ 落点 `apps/emulator-lift/scripts/recipes/<名>.plan`（内容就是现在的新语法）。
-2. **feeder 的覆盖损失不开单**：用户自测（"本身也是性能产生的问题，大概率已经无问题了"）⇒ 退役 `feeder-seg-e2e` 不另挂跟进单。
-3. 删除面收敛为：`--interaction-graph` / `--input-script` 的用户面 + 图解析残留 + `scripts/interaction/`（3 张 `room-*`，`node` 语法、无 repro 锚）+ 仓根 `graphs/`。
+⇒ **旧 bench 不保留**：`pnpm tools lift bench` + `scripts/bench/*.txt` + 它拼的 `--input-script` 与**被测的解释器臂**一起死。
+⇒ 性能测量只在 AOT 侧**重写**（`REQ-01M7HQJEEENYDJ91FB5DAC4K23`），⛔ **不为旧 bench 给配方补 `at frame/insn/marker`**。
+⇒ `--input-script` / `InputScript` **可以删**（含只测它的用例），前提是保留的用例（`input-expect` / `profile-window` / `screen_sample`）不依赖它；依赖就报告最小保留面。
+
+## 落地实测（2026-11-16，`--input-script` 那一轮）
+
+- **退役 = 8 个时间线参数整族**（`--input-script` / `--anchor-script` / `--input-stall-ms` / `--input-stall-boot-ms` /
+  `--input-max-hold` / `--input-marker-timeout-ms` / `--expect-change-after` / `--expect-change-window`）⇒ 给了就是"已退役"+exit 2。
+  理由（已认可）：它们共用**同一条时间线**，只留一半会留下半死面。
+- **`InputScript` 类保留最小面**：9 处结构性依赖 —— `profile-window`（窗口边界=脚本动作）· `input-expect`（扫脚本动作）·
+  `InteractionGraph::actuator`（**配方动作经 `appendText` 落地**，自动 hold / 延迟抬起 / quit 唤醒 / profiler 请求只有这一份）·
+  `input-tick` / `injection` / `unfinished` / `marker` / `anchor` / `insn-cost` / `messagebox`（用 `loadInputScriptText` 造确定性时间锚）。
+  ⇒ 它从"输入驱动"变成"**可测试的动作落地**"，无 CLI 生产者。
+- **CTest 102 → 102**（退役面里没有一条 CTest 只测 CLI；旧 bench 只有 `add_executable` 没有 `add_test`）。
+  node toolchain 档 **501 → 491**（删了 `tools/test/lift-bench.test.mjs` 的 10 个 `test()`）。
+- 若将来连机器内机械也删，会失效的锚：`REQ-01M710E6PV4PPHECPPCCTRF5RA` · `REQ-01M72QSNQCH3GHH3158A7YX96V`（`REQ-01M701PEB38VDQJD4QR2JEBA74` 的 profile_window 不要删）。

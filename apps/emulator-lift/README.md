@@ -195,15 +195,14 @@ apps/emulator-lift/
                                         --present headless|window|auto --present-driver
                                         --present-vsync --present-hidden --present-screenshot
                                         --present-screenshot-frame --overlay --cursor-warp
-                                        --input-script
   src/runtime/log.h                   ← 日志分级 / 分类 / 模式（默认 warn；Error 永远显示）
   src/runtime/host_encoding.{h,cpp}   ← 进程入口编码契约：UTF-8 argv（GetCommandLineW）/ 控制台码页
   src/runtime/native_overrides.{h,cpp}← guest 函数级 native override（试点；默认关）
   src/runtime/present.{h,cpp}         ← 唯一记录点（hash / frameCount / BMP）+ 可选 PresentSink
   src/runtime/present_sdl.{h,cpp}     ← 真实 SDL 窗口 + GPU API 呈现（pimpl；头文件不暴露 SDL 类型）
   src/runtime/message_box.{h,cpp}     ← ★ MessageBox / AGERC「終了」的纯映射：uType/选择子→ModalSpec + 策略（系统框在 present 缝）
-  src/runtime/input.{h,cpp}           ← ★ 输入应用层：SDL 真实事件与 `--input-script` 注入的**唯一**汇合点
-  src/runtime/input_script.{h,cpp}    ← ★ 指令式输入时间线（at frame / at guest_ms / click / key ...）
+  src/runtime/input.{h,cpp}           ← ★ 输入应用层：SDL 真实事件与（机器内）注入的**唯一**汇合点
+  src/runtime/input_script.{h,cpp}    ← ★ 指令式输入时间线（at frame / click / key ...；**CLI 已退役**，只剩机器内落地面 + 夹具）
   src/runtime/frame_blit.{h,cpp}      ← guest 后缓冲 masks → 宿主纹理格式（六种；纯函数）
   src/runtime/memory.{h,cpp}          ← 4 GiB 预留 + 按需提交 + 提交位图 + 区域表 + fault 诊断
   src/runtime/image.{h,cpp}           ← PE 节表/导入表/入口 + 映射 + 栈(1 MiB+guard) + TEB/PEB
@@ -347,7 +346,8 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
 - 无窗口 / headless / feeder / 系统框起不来 ⇒ 返回 1（今天的行为）+ 一行 warn。
 - 结果 **2/0** 会撤掉宿主那次关窗请求（清 `close_pending`/宽限/deadline ⇒ 窗口留着）；
   结果 **1** 保留（guest 自己走关窗；宽限只作兜底）。
-- 自动化：`--input-script` 的 `close_window` 宿主动作可像点 X 一样请求关窗；
+- 自动化：`InputScript` 的 `close_window` 宿主动作可像点 X 一样请求关窗（**机器内/夹具**；
+  `--input-script` 的 CLI 入口已退役）；
   三臂（`--close-confirm exit|title|cancel`）的复现命令见 `docs/03-emulator/observations.md`
   （原 CTest `close-confirm` 是**缺陷复现件**，已按测试模型于 2026-11-14 删除，⛔ 不进测试）。
 - trace 输入清单会记 `trace-input close-confirm= …`（非 `ask` 才混进 hash）。
@@ -426,220 +426,61 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
   headless 没有事件源时，空队列 `GetMessageA` 仍按旧语义 abort。看画面用 `--real-time` / `--max-frames`；
   `--bench + window` 的 MIPS 含 SDL 上传/呈现开销，不是解释器绝对吞吐。
 - `--present-screenshot-frame N`：只回读第 N 个 Present（0/缺省 = 每帧都写）。配合 `--max-frames N`
-  就是"定帧截图"（只产出一张，不写 N 份 BMP）。见 §4.2c 的一行命令。
+  就是"定帧截图"（只产出一张，不写 N 份 BMP）：`./out/emulator-lift --game-dir <安装> --skip-logo
+  --present window --present-hidden --max-frames 155 --present-screenshot out.bmp
+  --present-screenshot-frame 155`。
 
-## 4.2c 脚本化输入（`--input-script`）
+## 4.2c 脚本化输入（`--input-script`）—— **已退役**（2026-11-16）
 
-**为什么有它**：要"点一下 OPTION"曾经必须 `SetForegroundWindow` → 把真实光标挪进窗口 →
-`SendInput` → 等几百毫秒。那套动作的前提全是**OS 侧条件**：SDL 只把键盘事件给**有焦点**的窗口、
-鼠标事件给**光标下面**的窗口，而且 `WINDOW_FOCUS_LOST` 会把键电平清掉。下面这条通道把这些前提全去掉：
-**注入不需要焦点、不移动真实光标、可一条命令复现**（唯一例外：同时开 `--cursor-warp` 时，
-guest 自己的 `SetCursorPos` 会让宿主光标真的动 —— 那是 guest 的行为，不是注入通道的行为）。
+★ **本节的用户面已删**：`emulator-lift --input-script <path>` 与它的整族时间线参数
+（`--anchor-script` / `--input-stall-ms` / `--input-stall-boot-ms` / `--input-max-hold` /
+`--input-marker-timeout-ms` / `--expect-change-after` / `--expect-change-window`）**都不是参数了**
+（给了 ⇒ 一行"已退役" + `exit 2`）。旧 bench（`pnpm tools lift bench` + `scripts/bench/*.txt`）一并退役。
 
-**机制（判据：注入路径不依赖任何只有 OS 能提供的条件）**
+- **为什么**：用户 2026-11-16 裁决 —— 解释器进入退役排期，输入的用户面只留 AOT 臂的
+  `--input-plan`（配方，见 §4.2d）；"旧 bench 不需要了，真要做测试也是重新写"。
+  登记单 `REQ-01M7HQ57XV66FZQA5ECGHWD71N`。
+- **重开条件**：性能测量只在 **AOT 侧**按压力档重写（`REQ-01M7HQJEEENYDJ91FB5DAC4K23`：
+  boot→TITLE 稳定 / 打开 FELLOW / 加载存档；驱动用配方的确定性门）。⛔ 不为旧 bench 给配方补
+  `at frame/insn/marker`；⛔ 不复活 `--input-script`。理由 / 断面 / 依赖清单见
+  `docs/03-emulator/input-plan.md` §7 与 `.tmp/graphfix/report-idescript.md`。
+- **仍然成立的装配口径**（配方与夹具共用，⛔ 不要另写一套）：
+  - `src/runtime/input.cpp` 是 SDL 真实事件与注入的**唯一汇合点**：两者都只改 `WindowManager` 的
+    同一份状态（影子键电平 / 鼠标按钮位图 / 虚拟光标）并 post **同一组** `WM_*`；guest 的全部读点
+    （`GetAsyncKeyState` / `GetCursorPos` / `PeekMessageA` / WndProc）读同一份状态。
+  - 坐标是 **guest 客户区坐标**（1280×720 参考系）；`client → screen` 只经过
+    `WindowManager::setCursorClientPos`（+ 窗口原点），⛔ 注入侧没有第二套映射。
+  - **输入所有权是全局一份**（按 vk 记在 `WindowManager`）：任一份输入源收口都会把它按下的键抬起来。
+  - **`click` 会自动等到被 guest 采样**（`GetCursorPos` / `GetAsyncKeyState` 的采样计数 +1 再等一个采样
+    周期；上限在 `InputScript` 内，缺省 1000 ms guest 时间）—— 这条保证仍由
+    `runtime/input_script.cpp` 实现，配方驱动器的 actuator 走的就是它。
+- **保留的最小面**：`runtime/input_script.{h,cpp}` 与 `Machine` 的 tick 机械**没有删** ——
+  交互配方驱动器的 actuator（`InteractionGraph::actuator`）与若干 pure CTest 夹具结构上依赖它。
+  ⛔ 但没有 CLI 入口；新需求不许把它挂回命令行。
 
-- `src/runtime/input.cpp` 是 SDL 真实事件与注入的**唯一汇合点**：两者都只改 `WindowManager` 的同一份
-  状态（影子键电平 / 鼠标按钮位图 / 虚拟光标）并 post **同一组** `WM_*`。guest 的全部读点
-  （`GetAsyncKeyState`、`GetCursorPos`、`PeekMessageA`/`GetMessageA` → `DispatchMessageA` → WndProc）
-  因此读的是同一份状态；⛔ 不存在"注入只发消息、`GetAsyncKeyState` 仍读 OS"的第二份状态。
-- 注入**不经过 SDL**、不读 OS 键鼠、不需要窗口焦点；`--present headless`（不出现可见窗口）也能注入。
-- ⚠ **系统对话框期间时间线只剩 `at wall_ms`**：`MessageBoxA` / AGERC「終了」框会弹**系统对话框**
-  （`SDL_ShowMessageBox`）并阻塞 guest（宿主自己的等待循环不再推进 `frame` / `insn` / `guest_ms`）
-  ⇒ 给对话框写的注入脚本必须用 `at wall_ms`（该 run 因此不可 diff）；key 要保持按住，后面得再有一条
-  远期动作（否则脚本"结束即抬起"，框可能看不到按下）。★ Enter / Esc 是**电平**判据：若该键
-  在框打开**之前**就已按下，框打开的第一帧就会回答（既定口径，不是缺陷）。
-- ★ **系统对话框不做像素级还原**：`MessageBoxA` 的按钮文字 / 「終了」框的三个选项由
-  `runtime/message_box.h` 的 `ModalSpec` 决定，图标不还原、位置/尺寸由系统决定。
-  无窗口 / headless / feeder ⇒ **不弹框**，立即返回默认值 + 一行 warn。
-- 坐标是 **guest 客户区坐标**（引擎的 1280×720 虚拟屏）。`client → screen` 只经过
-  `WindowManager::setCursorClientPos`（+ 窗口原点），与 SDL 路径**同一处**；⛔ 注入侧没有第二套映射。
-- 时间线在**块边界**推进（`Machine::run`）；guest 阻塞在 `GetMessageA` 时由**窗口模式的宿主事件泵**
-  推进（`--present headless` 没有事件源：guest 真阻塞在 `GetMessageA` 时仍按既有语义 abort）。
-  `quit` 会同时投一条 `WM_QUIT` 把阻塞中的 guest 唤醒。
-- **优先级（显式，互不污染）**：脚本按下的键 / 按钮归脚本，期间 OS 的按下 / 抬起 / **焦点丢失清键**
-  都不生效（注入不因失焦而丢）；脚本 `key_up` / `mouse_up` 即交还 OS；反过来，脚本接管光标期间
-  **真人松开按钮仍被接受**（否则 `VK_LBUTTON` 电平会卡在按下）。脚本结束（动作跑完 / `quit`）时，
-  仍按着的键 / 按钮会**按同一组 WM_* 抬起**（WndProc 收得到 `WM_KEYUP` / `WM_LBUTTONUP`）再把所有权
-  交还 —— 真人接着玩不会撞上"卡住的键"。
-- ⚠ `--present window` 走 real-time 时钟 ⇒ **毫秒**触发不可复现，用**帧**；`--present headless`
-  的时钟档确定性。两档的光栅化是**同一套 GPU**（差别只在呈现）⇒ 帧内容一致；要跑长脚本 / 看画面用
-  `--present window --present-hidden`（仍然无焦点、无光标，仍可脚本化）。
-
-**语法**（一行一条；`#` 起注释；换行或 `;` 分隔）
-
-| 写法 | 含义 |
-|---|---|
-| `at frame N` | 触发条件 = 第 N 个 Present（1 起；headless 也计数） |
-| `at guest_ms T` | 触发条件 = guest 虚拟时钟 T 毫秒 |
-| `at insn N` | 触发条件 = guest 累计执行指令数 N（**帧内也能切**；确定性） |
-| `at wall_ms T` | 触发条件 = 宿主墙钟 T 毫秒（自 run 起） |
-| `at marker <名字>` | 触发条件 = 引擎**进入**某个脚本（脚本身份 `(cur, id)` 的**边沿**；采样点 = VM 循环头）。载荷 = 名字：读不到就降级成 `id:0xXXXXXXXX` **仍触发**并打一条警告；同一 `(cur,id)` 重复出现不重复发，首个样本只播种。等不到 ⇒ `InteractionFailed` + `marker-timeout:` detail + exit 5（超时 = `--input-marker-timeout-ms`，缺省 30000 **宿主墙钟** ms；0 = 不设限） |
-| `after N frames` / `after N ms` / `after N insn` | 触发条件 = 上一个**同单位**锚点 + N |
-| `wait N frames` / `wait N ms` / `wait N insn` | 推进锚点，并记一个 **no-op 动作**（脚本要等它到期才收口 ⇒ 尾部 `wait` 能"保持按住 / 保持等待"） |
-| `... stall MS` | （只对 frame）帧停滞兜底阈值；见下 |
-| `mouse_move X Y` | 客户区坐标；脚本由此**拥有光标**（`GetCursorPos` 立即是它） |
-| `mouse_down [left\|right\|middle]` / `mouse_up [...]` | 用脚本上一次的坐标；`mouse_up` 若按下**还没被 guest 采样**过 ⇒ 自动推迟（见下） |
-| `click X Y [button] [hold N [frames\|ms]]` | move + down 在触发点；up **自动**等到被采样（不带 `hold`），显式 `hold` 则按帧 / ms（见下） |
-| `key_down VK` / `key_up VK` | Win32 虚拟键码（1..255，十进制或 `0x`）；`key_up` 与 `mouse_up` 走同一条"至少被采样一次"保证 |
-| `profile_begin <label>` / `profile_end <label>` | 打开 / 关闭一个**区间 profiler** 窗口（§4.3.2）；边界 = 本动作的触发条件 |
-| `quit` | 触发时结束本次运行（`StopReason::Stopped`） |
-| `close_window` | 宿主动作：像用户点了窗口 X 一样请求关窗（`PresentSink::requestClose`；headless no-op）。用于关窗二次确认的自动化 |
-
-动作前必须先给时间（`at` / `after` / `wait`），否则解析失败（带行号，exit 2）。
-
-**触发条件是一个"条件"，不是帧号。** 内部只有 `Trigger{kind, value, name}` 五种 kind（frame / guest_ms /
-insn / wall_ms / marker），调度只问"到期了吗"，不关心是哪一种（`marker` 不按数字到期：只有边沿会应用它）。
-★ **这条时间线现在只是过渡形态**：
-要换的交互模型（任务 = 一串**顺序**配方：门 → 动作 → 下一个门；失败全部响亮）以
-`docs/03-emulator/interaction-model.md` 为**模型/判据**真源、`src/runtime/recipe.h` 为**行写法**真源。
-本文件**不复述**它的 schema，
-也不写"未来的 marker / 状态机"长什么样；`script` 事件源与时间线怎么并入见那份文档的"分期"。
-
-**`click` 会自动等到被采样（⛔ 不要手算 hold）**：一次 `click` 仍然是"按下 + 抬起"（不重试、不变两次、
-不改 guest 采样率），但**抬起的最早时刻由注入层保证**，不是由写脚本的人猜：
-
-- **判据**：按下之后 guest 的输入**采样计数**至少 +1（`WindowManager::inputSampleCount()`），
-  并且从"看到按下"的那次采样起再等**一个采样周期**（= 最近一次采样间隔，夹在 1..200 ms）。
-  第二条是安全下限：引擎可能先取位置、下一句才读按钮电平（避开采样边界的竞态）。
-- **采样点只算电平读点**：`GetCursorPos` 与 `GetAsyncKeyState`（`src/shims/user32_input.cpp` /
-  `src/shims/user32_window.cpp`）。⛔ **不算 `PeekMessageA`** —— 它在这条实现线里是每 ~1.8k 条指令一次
-  （实测 profile，比 20 Hz 的采样点快三个数量级），算进去等于没等；而且消息在队列里不会丢。
-  `GetKeyState` 本线没有实现。
-- **上限**：`--input-max-hold <ms>`（guest 时间，缺省 **1000**；`0` = 不设限 = 显式选择"宁可挂死"）。
-  guest 一直不采样（画面静止 / 在别的循环里）⇒ 到上限**仍然抬起 + stderr 告警**（⛔ 不静默、⛔ 不挂死），
-  脚本继续往下跑。
-- **显式覆盖**：`click X Y [button] hold N`（帧，旧写法）/ `hold N frames` / `hold N ms`（guest 时间）
-  ⇒ **完全按用户说的做**，不看采样。手写的 `mouse_down` … `mouse_up` / `key_down` … `key_up`
-  走同一条保证：对应的按下还没被采样过 ⇒ `mouse_up` / `key_up` 自动推迟（`deferred-ups`）。
-- **可观测**：每次抬起打
-  `click-release … auto=1 waited_samples=N hold_ms=M post_sample_ms=K`（`auto=0` = 显式 hold），
-  run summary 的 `inputstat` 行下面再给一行
-  `release : total … auto … explicit … deferred-ups … bounded-no-sample … waited-samples-max … hold-ms-max …`。
-  ⇒ 判断"是不是又没点中"先看这两处，别先猜。
-- **守卫**（顶层 pure CTest，`tests/input_injection.cpp`）：`input-injection/click-spans-sample`
-  （伪造一个 50 ms 周期的消费者：down 与 up 之间必须跨过采样点，且 guest 侧 `kDownSeenPolls ≥ 1`）·
-  `input-injection/click-honors-explicit-hold`（显式 `hold 2` 在 +2 帧落地，guest 一次没采样也照做）·
-  `input-injection/click-bounded-without-sampling`（完全不采样 ⇒ 到 1000 ms 抬起 + `bounded-no-sample`
-  + 脚本继续）。★ 变异实测会红：把自动判据改回"同一 tick 内 up" ⇒ 上面三条全红，
-  `kDownSeenPolls = 0`（正是用户看到的现象）。
-
-**帧停滞兜底（为什么必须有）**：`at frame` / `wait N frames` 的前提是"帧在推进"，而实测
-**EU-ROOM 界面稳定后不再 Present**（帧号停住）—— 纯帧锚点会永远不触发。规则：
-
-- 有未到期的 frame 条件、且帧号已 `stall` ms 没变 ⇒ 打一条**告警**，把剩下所有 frame 条件按
-  "最近帧间隔均值（夹在 1..100 ms）"折算成 `wall_ms` 条件后**继续**（⛔ 不挂死）。
-- `stall` 可逐条给（`wait 5 frames stall 8000`），缺省取 `--input-stall-ms`（缺省 10000，`0` = 关闭）。
-- **还没出现第一帧（boot）不算停滞**：那一段本来就没有 Present，宽限取 `--input-stall-boot-ms`
-  （缺省 30000）。⛔ 否则长 boot 会被误判成"卡住"并把整条时间线折算乱。
-- 兜底只在"帧真的停住"时生效：帧正常推进时它一次也不触发（守卫 `tests/profile_window.cpp`）。
-
-**一条命令**（实测：`--skip-logo` 到 TITLE → 点 Option → 停在第 155 帧 → 截图）
-
-```bash
-cd apps/emulator-lift
-# .tmp/input/click-option.txt：
-#   at frame 120
-#   mouse_move 812 622
-#   wait 5 frames
-#   click 812 622
-#   wait 30 frames
-#   quit
-./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-dir ../../links/install \
-  --present window --present-hidden --native-overrides all --skip-logo \
-  --input-script ../../.tmp/input/click-option.txt --max-frames 200 \
-  --present-screenshot ../../.tmp/option-window.bmp --present-screenshot-frame 155
-```
-
-产物 `option-window.bmp` 就是 OPTION（系统设定）界面。`--max-frames 200` / `quit` 二者都只是兜底；
-`--present-screenshot-frame` 让截图只写一张。把 `--present window --present-hidden` 换成
-`--present headless` 就得到**不出现可见窗口**的同一条时间线（GPU 光栅化照旧）。
-
-**退出 EU-ROOM 的一行命令**（回归"点一次就能回 TITLE"；不需要任何 hold）：
-
-```bash
-cd apps/emulator-lift
-# .tmp/clickfix/exit-click.txt：
-#   at frame 90
-#   mouse_move 944 562
-#   wait 3 frames
-#   click 944 562
-#   at insn 300000000
-#   mouse_move 1227 680
-#   at insn 300020000
-#   click 1227 680
-#   at insn 600000000
-#   quit
-LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-dir ../../links/install \
-  --present window --present-hidden --native-overrides all --skip-logo \
-  --input-script ../../.tmp/clickfix/exit-click.txt --time-limit 200
-```
-
-判据（三步都看 `[frame]` 行）：点击帧出现 `click-release … auto=1 waited_samples>0 hold_ms≈一个采样周期`
-⇒ 其后有一帧是**单帧 ~1.5×10^8 条指令 / 8~9 s**（TITLE 重载）⇒ 再往后回到 ~2.8×10^5 条/帧（TITLE 动画）。
-这就是"一次 click 就回 TITLE"的机械判据（不需要肉眼认同一个画面）。
-运行日志与逐帧 BMP 是**本地证据**（`.tmp/` 不入库）：判据本身在上面这两行日志里。
-
-**效果级判据（`--expect-change-after` / `--expect-change-window`，缺省关）**
-
-时间线原本只管"动作发出去"，**不管 guest 有没有看见**（BUG-16 的房间「戻る」就是这么静默过的：点击无反应、
-退出码 0）。这两个 flag 把"动作之后必须观测到变化"变成运行期判据 —— **旧脚本一个字都不用改**：
-
-```bash
-./out/emulator-lift ... --input-script <脚本> \
-  --expect-change-after click[,key,mouse] --expect-change-window <采样数>
-```
-
-| 参数 | 语义 |
-|---|---|
-| `--expect-change-after click[,key,mouse]` | 只对这几类动作开观测窗。`click` = `click`；`key` = `key_down`/`key_up`；`mouse` = `mouse_down`/`mouse_up`。`mouse_move` **不**要求变化（hover 可能本来就不改像素） |
-| `--expect-change-window <采样数>` | 观测窗长度，**单位 = 采样数**（一次 Present = 一个样本；缺省 30）。⛔ 不是毫秒：`--present window` 是 real-time 时钟，毫秒窗口不可复现；采样数才是"guest 又画了几帧"的确定性计数 |
-
-- **判据**：动作被应用之后，运行期读 `FrameSampler::changeCount()`；窗口内增长过 ⇒ 满足（日志
-  `[expect-change] ok "…"`）。三种失败**一律响亮**（stderr `[expect-change] FAIL …` + 退出码 **5**，
-  与交互配方失败同一个停因 `InteractionFailed`，`detail` 里写明是哪种）：
-  - `not-changed`：采样在增长、窗口也走满了，但画面**一次都没变**（动作没生效？）；
-  - `no-sample`：动作之后**一次采样都没有**（识别源失明：没接采样器 / guest 一直没 Present）
-    —— 与"没变"分开报（修法完全不同）；
-  - `unclosed`：运行结束时窗口**还没判定**（⛔ "跑完就算过"正是要消灭的）。⇒ 开着这个策略时，
-    给观测窗留时间（`wait` / 更长的窗口 / 别在 click 后立刻 `quit`）。
-- **与配方驱动器互斥**（配置期拒绝）：同一个进程里挂了顺序配方就不会再开这套判据（两套口径）。
-  ⚠ 2026-11-16 起配方没有 CLI 入口（`--interaction-graph` 已退役），这条只可能被程序内夹具撞上；
-  判据仍留在 `Machine::configureExpectChange`（pure CTest `input-expect` 守着）。
-- **启动期拒绝**（exit 2，⛔ 不静默开局）：没给 `--input-script`；脚本里**没有匹配的动作**
-  （否则一个观测窗都开不了 = 静默绿）；只给 `--expect-change-window` 而不给 `--expect-change-after`；
-  类别 / 数字非法（窗口只收十进制正整数）。
-- **其它消费者闸门**（`--assert-guest-token`）仍**先判**：它们的退出码优先于这里的 5
-  （既有优先级，未因本策略改变）。
-- **与自动 hold 的关系**：`click` 的抬起由自动 hold 决定（等 guest 的输入采样点，上限 `--input-max-hold`）。
-  窗口在**按下**那一刻开，但在这次动作的抬起发出之前**不判失败** —— 否则一次合法点击会在 up 之前被窗口判死。
-  ⇒ 窗口要**大于一次自动 hold 花掉的采样数**（缺省 30 个采样在 60 fps 下 ≈0.5 s，通常够；太小会误报）。
-  运行结束时抬起还没发出的窗口归 `unclosed`（⛔ 不归成 `not-changed`：那是"没给动作留时间"，不是"动作没生效"）。
-- **它只回答"动作之后 guest 有没有画出新帧"**，⛔ 不回答"是这次动作造成的"：TITLE 动画 / 淡入会掩盖漏点，
-  一次变化也会同时满足重叠的窗口。要**因果**就用 BMP diff（`pnpm tools lift diff`，见 §4.1）。
-- 失败时还会补写**最后呈现的那一帧**：`<脚本路径>.expect-fail.bmp`
-  （像素仍等于最后一次 Present 的 hash 与否会如实打印；从未 Present 过则明说写不出来）。
-- 守卫（顶层 pure CTest `input-expect`，`tests/input_expect.cpp`）：变 / 不变 / 一次采样都没有 / 策略关 /
-  跑完未判定 / 解析拒绝 / 配置后换脚本导致零窗 七例；另断言"策略开时采样器真的挂上了、关着时没挂"
-  （没接采样器会让 `sampleCount` 恒 0 ⇒ 全判 `no-sample`）。
+**守卫**（顶层 pure CTest，仍然在）：`input-tick` / `input-injection` / `input-expect` /
+`input-unfinished` / `input-marker` / `input-anchor` / `profile-window` / `insn-cost` / `messagebox`。
+它们测的是注入通道 / 自动 hold / 效果级判据 / 时间锚这些**机器内性质**，不是命令行。
 
 
 ## 4.2d 顺序配方（`--input-plan`，AOT 臂）
 
-**要换掉的是什么**：`--input-script` 是**定时器时间线** —— `at frame N` 到点就发动作，发完不管有没有生效。
+**要换掉的是什么**：`--input-script`（已退役）是**定时器时间线** —— `at frame N` 到点就发动作，发完不管有没有生效。
 它已经骗过人：点击被静默漏掉时下游照样跑，于是基于假数据做了两轮优化。这里换的是**顺序配方**：
 `await <门>` → 动作 → 再等下一个门；失败**响亮**。
 
 ★ **两处真源，本节都不复述**（两份 schema 必漂）：
 - **行写法 / 闭集合 / 两臂能力面** = `src/runtime/recipe.h`
-  （`await script` / `await position` / `wait <ms>` / `click <x> <y> [left|right]` / `timeout <ms>` /
-  `profile_begin|end <label>` / `quit`）；
+  （`await script [timeout <ms>]` / `await position … [timeout <ms>]` / `wait <ms>` /
+  `click <x> <y> [left|right]` / `profile_begin|end <label>` / `quit`）；
 - **模型与判据** = `docs/03-emulator/interaction-model.md`。
 
 ★ **唯一入口 = AOT 臂 `--input-plan`**（2026-11-16 起）。解释器臂的 `--interaction-graph` /
 `--interaction-trace` / `--interaction-fail-dump` **已退役**（用户裁决 `REQ-01M7HQ57XV66FZQA5ECGHWD71N`）。
 解释器侧只剩**机器内驱动器** `runtime/interaction_graph.*`（`Machine::tickInteraction`；没有 CLI 参数
 能装载它，那套 exit 5 闸门也随入口删掉）。缺省 `timeout` 策略：AOT 臂**不给缺省**（卡住由
-`--time-limit` / `--max-frames` 报，或跑完 `pending != 0` ⇒ exit 5）。
+`--time-limit` / `--max-frames` 报，或跑完 `pending != 0` ⇒ exit 5）。★ `wait` **没有守卫**
+（固定时长、到点就走）；`timeout` 只能写在 `await …` 那一行的末尾。
 
 ```bash
 ./out/emulator-lift-aot --game-dir <安装> --appdata <每次全新空目录> --skip-logo --audio off \
@@ -649,19 +490,21 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-d
 ```
 
 ⚠ **这些配方是 real-time 档**（`wait <ms>` = 宿主墙钟；headless 下 guest 推进与墙钟不成比例 ⇒
-先撞自己的 `timeout` 或跑完 `pending != 0`）。只验"能不能解析"用 `--max-frames 1`。
+先撞门的 `timeout` 或跑完 `pending != 0`）。只验"能不能解析"用 `--max-frames 1`。
 
 ```text
-await script TITLE
-timeout 30000      # 守的是**上一条**指令（= 这个门最多等 30 s）
-wait 5000          # 宿主墙钟毫秒
-click 1070 480
+await script TITLE timeout 30000   # 行尾 `timeout` = **这个门**的守卫（最多等 30 s）
+wait 5000                          # 宿主墙钟毫秒；固定时长 ⇒ ⛔ 不带 timeout
+click 1070 480                     # ⛔ 不带 timeout（没有可等待的东西）
 ```
+
+★ `timeout` 单独一行（旧的跨行写法）/ 挂在 `wait` · `click` · `profile_*` · `quit` 上 ⇒ 解析期硬错
+（`exit 2` + 行号，文案会告诉你写回哪一行）。
 
 | 退出码 | 含义 | 判据 |
 |---|---|---|
 | `0` | 配方**走完** | `input-plan: steps=… fired=… pending=0 …`（且没有 `FAIL timeout` / `FAIL incomplete`） |
-| `5` | 配方**没走完**：某步 `timeout` 到期（`FAIL timeout`）或跑完仍 `pending != 0`（`FAIL incomplete`）；**时间线的效果级判据**失败（`--expect-change-after` 的 `not-changed` / `no-sample` / `unclosed`）也用 5；**`at marker <名字>` 等不到**（`marker-timeout:`）也是 5 | 配方 ⇒ stderr 点名 `plan: 文件:行` + `step: stepN（行 N，门/动作）` + `waiting:` + 窗口/进度；时间线 ⇒ 前缀 `[expect-change]`；marker 超时 ⇒ 前缀 `[marker]`、detail 形如 `marker-timeout: waited=<名字> last=<名字或 id> waited_ms=<n>`（⛔ 不写 BMP：等的是**事件**） |
+| `5` | 配方**没走完**：某步 `timeout` 到期（`FAIL timeout`）或跑完仍 `pending != 0`（`FAIL incomplete`）。★ 2026-11-16 起 `emulator-lift` 的 CLI 上**没有别的 5 来源**（时间线的 `expect-change` / `marker-timeout` 随 `--input-script` 退役；机器内的 `InteractionFailed` 兜底仍打 `[interaction]`） | 配方 ⇒ stderr 点名 `plan: 文件:行` + `step: stepN（行 N，门/动作）` + `waiting:` + 窗口/进度 |
 | `2` | 参数 / 解析失败（带 `文件:行`），或运行期**非 ok 的停因**（`unimplemented-slot` = 已注册但槽/形态没实现、`resource-exhausted` = 我方 arena / guest 堆不够、`unimplemented` / `decode-error` / `no-code` …） | 启动阶段就拒绝，⛔ 不跑一半；运行期停因看摘要 `stop` / `detail` 行 |
 
 - ★ **AOT 臂的完成度也是判据**（`REQ-01M7HP2Q1N0N004M8R4RPABWSV` 的前置）：跑完打
@@ -672,15 +515,15 @@ click 1070 480
 - ★ 退出码的**兜底口径**只有一条：`lift::exitCodeForRun(r)`（`RunResult::ok()` ⇒ 0，否则 2）。
   配方的"没走完 / `timeout`"仍是 5 —— 那些**优先**。
   两个停因 `resource-exhausted` / `unimplemented-slot` **不在 `ok()` 里** ⇒ 没有别的闸门时退出码是 2。
-- **与 `--input-script` 不可能同时开**：配方只有 AOT 臂入口（`emulator-lift-aot`），时间线只有
-  解释器臂入口（`emulator-lift`）。两者都只写 `WindowManager` 的同一份状态、都走
-  `runtime/input.cpp` 那一层 ⇒ 真人 / 时间线 / 配方同一语义。
+- **输入时间线不再有 CLI 入口**（`--input-script` 2026-11-16 退役）⇒ 命令行上不可能出现"两套输入语义并存"。
+  配方与机器内驱动器都只写 `WindowManager` 的同一份状态、都走 `runtime/input.cpp` 那一层
+  ⇒ 真人 / 夹具 / 配方同一语义。
 - **⛔ 不写帧号**：房间装载要 ~5×10^8 条指令，而房间空闲时 Present 会稀疏到 ~0.5 s 一帧 ⇒
   帧锚点在这种路径上会**永远等不到**（这是时间线在 EU-ROOM 上点不到「戻る」的实证原因）。
 - **门只有两个源**：引擎脚本身份（marker，纯读 guest 内存）与**脚本内位置**（`await position`；
   读数只有一份 —— `runtime/engine_marker.h` 的 `readScriptPositionSample`）。
-  ⇒ 配方**不消费画面采样**：整帧 hash / 矩形均值那一路仍只服务 `--expect-change-after`
-  （时间线的效果级判据，见 §4.2c；两者在同一个进程里互斥）。
+  ⇒ 配方**不消费画面采样**：整帧 hash / 矩形均值那一路服务 `--overlay` 与夹具的采样计数
+  （效果级判据的 CLI 已随 `--input-script` 退役，见 §4.2c）。
 - **`wait <ms>` 是宿主墙钟** ⇒ 同一份配方两次跑的完成时刻不可复现（判定只能看完成度 / `pending`，
   ⛔ 不要拿两次跑的墙钟差当读数）。
 - ⚠ **输入所有权是全局一份**：脚本 / 配方的键与按钮所有权都记在 `WindowManager`（按 vk），
@@ -976,7 +819,7 @@ sprite 合批与那条直方图的算法。⛔ 不把逐帧数字写进 README�
 
 **窗口调试叠层（`--overlay`，默认关；只作用于 `--present window`）**：在**呈现画面左上角**叠一块
 `mouse <x>,<y>` / `fps <x.x>` / `frame <n>` / `raster <cpu|gpu>` / `present <direct|renderer>`
-（`mouse` = **guest 客户区坐标**，与 `click x y` / `--input-script` 同一格；最近 1 s 的 Present 次数 = `fps`）。
+（`mouse` = **guest 客户区坐标**，与配方的 `click x y` 同一格；最近 1 s 的 Present 次数 = `fps`）。
 另有 `script`（当前顶层脚本身份，名字来自引擎名字表；从未采到身份就整行省略）与 `worst`（最近 3 s 内
 **每帧** wall / guest / shim 的最大值，每帧 = 相邻两次 Present 的间隔；`guest` 需要块计时，没开时写 `--`）。
 拿不到的字段**整行省略**（⛔ 不编数字）。⛔ 只改**宿主送显的窗口像素**：不写 guest 内存。
@@ -1079,22 +922,16 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
 ### 4.3.2 可定界的区间 profiler（`profile_begin` / `profile_end`）
 
 `--profile` 是**整轮**的、逐帧 trace 是**按 Present** 的。要回答"某一段里谁吃的"（例如"点进 EU-ROOM
-的那几秒"），用脚本把一段墙钟**框起来**：窗口边界 = 脚本动作被触发的那一个 **block 边界**，
+的那几秒"），把一段墙钟**框起来**：窗口边界 = 脚本动作被触发的那一个 **block 边界**，
 所以边界可以落在帧上（`at frame N`）、也可以落在**帧内**（`at insn N` / `at guest_ms T`）。
 
+★ **2026-11-16：解释器 CLI 上已不可达** —— 窗口边界由时间线动作给出，而 `--input-script` 已退役。
+判据 / 闭式 / 未闭合口径**不变**，消费者改成机器内驱动器（配方里的 `profile_begin` / `profile_end`，
+经 `InteractionGraph` 追加）与 pure CTest `profile-window`：
+
 ```bash
-# .tmp/room/enter.txt：
-#   at frame 88
-#   profile_begin enter        # 窗口开始
-#   at frame 90
-#   mouse_move 944 562
-#   wait 3 frames
-#   click 944 562
-#   at frame 106
-#   profile_end enter          # 窗口结束 ⇒ 立刻打印一次表
-#   at insn 500000000
-#   quit
-LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe ... --input-script .tmp/room/enter.txt
+cd apps/emulator-lift && ctest -R '^profile-window$' --output-on-failure
+node --test --test-isolation=none tools/test/input-plan-shape.test.mjs   # 形状：不许进执行循环
 ```
 
 - **只在该脚本真有 `profile_*` 动作时才计时**（没有这些动作 ⇒ 整条记账路径是 no-op）。

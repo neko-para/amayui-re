@@ -35,10 +35,11 @@ namespace lift {
 enum class GraphFailure : std::uint8_t { None = 0, Timeout = 1 };
 const char* graphFailureName(GraphFailure f);
 
-// 缺省 `timeout`（配方里没写 `timeout` 的那条指令用它；trace 里标 `(default)`）。
+// 缺省 `timeout`（配方里没写 `timeout` 的**门**用它；trace 里标 `(default)`）。
 // ★ 这是**入口给的策略**（不是能力面）：本臂的"到期"有两把尺（guest 毫秒 + 墙钟停滞兜底），
 //   所以给得起 5000 ms 的缺省；AOT 臂只有宿主墙钟一把尺且它的看门狗是 `--time-limit` /
-//   `--max-frames` ⇒ 那边不给缺省。宽度公式只有一份：`recipe.h` 的 `stepTimeoutMs`。
+//   `--max-frames` ⇒ 那边不给缺省。宽度公式只有一份：`recipe.h` 的 `stepTimeoutMs`
+//   （★ `wait <ms>` 在那里恒为 0：固定时长、没有守卫）。
 constexpr std::uint64_t kDefaultStepTimeoutMs = 5000;
 
 class InteractionGraph {
@@ -94,6 +95,7 @@ private:
     enum class State : std::uint8_t { Idle = 0, Gate = 1, Acting = 2, Done = 3, Failed = 4 };
 
     // 本臂的守卫宽度 = 共享公式 + 本臂缺省（`recipe.h` 的 `stepTimeoutMs`；⛔ 不再写第二份）。
+    //   ★ `wait <ms>` 在共享公式里恒为 0（固定时长、没有守卫）⇒ 这里不再有 `ms + 缺省` 那种补丁。
     std::uint64_t timeoutOf(const Step& s) const { return stepTimeoutMs(s, kDefaultStepTimeoutMs); }
     // 进入第 i 条指令：门 ⇒ 等；动作 ⇒ 立刻施加（quit 一发即收口）。
     void enterStep(std::size_t index, std::uint64_t frame, std::uint64_t guest_ms, std::uint64_t insns,

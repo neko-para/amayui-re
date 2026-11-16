@@ -53,36 +53,6 @@ std::uint32_t parseHex(const char* s) {
     return static_cast<std::uint32_t>(std::strtoul(s, nullptr, 16));
 }
 
-// ★ `--anchor-script <id>` 的 id 解析：十进制或 `0x` 十六进制，**0..0xFFFFFFFF**（32 位原值）。
-//   ⛔ 不用 `std::strtoull`：它接受 `-1`（回绕成 ULLONG_MAX）与溢出值，而那是"参数非法"（exit 2），
-//   不是"目标脚本 id = 2^64-1"。⛔ 也不接受其它进制（`08` 之类不该被当八进制）。
-bool parseAnchorScriptId(const char* text, std::uint64_t* out) {
-    if (text == nullptr || *text == '\0') return false;
-    const char* p = text;
-    int base = 10;
-    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
-        base = 16;
-        p += 2;
-    }
-    if (*p == '\0') return false;
-    std::uint64_t v = 0;
-    for (; *p != '\0'; ++p) {
-        int d = -1;
-        if (*p >= '0' && *p <= '9') {
-            d = *p - '0';
-        } else if (base == 16 && *p >= 'a' && *p <= 'f') {
-            d = *p - 'a' + 10;
-        } else if (base == 16 && *p >= 'A' && *p <= 'F') {
-            d = *p - 'A' + 10;
-        }
-        if (d < 0 || d >= base) return false;
-        v = v * static_cast<std::uint64_t>(base) + static_cast<std::uint64_t>(d);
-        if (v > 0xFFFFFFFFull) return false;  // id 是 32 位原值（含 ≥0x80000000 的"负 id"形态）
-    }
-    *out = v;
-    return true;
-}
-
 void usage() {
     std::printf(
         "emulator-lift —— 在 guest-state x86 上执行 AGE.EXE 的机器码（M1a）\n"
@@ -135,29 +105,10 @@ void usage() {
         "  --overlay           窗口左上角调试叠层（鼠标 guest 客户区坐标 / fps / frame / raster / present；\n"
         "                      默认关；只改宿主送显的窗口像素，⛔ 不写 guest 内存、不进 --dump-frame）\n"
         "%s"
-        "  --input-script <path>  指令式输入时间线（`at frame N` / `at insn N` / `at guest_ms T` / `at wall_ms T` / at marker <名字> / after / wait；\n"
-        "                     动作 = mouse_move / mouse_down / mouse_up / click / key_down / key_up / profile_begin / profile_end / quit）。\n"
-        "                     段标记（各独占一行、**必须成对**，且需 --anchor-script）：\n"
-        "                       before-anchor  之后 = **绝对**段：按声明值执行（不随 0 点重定基、闩锁前也执行）；\n"
-        "                       after-anchor   之后 = **相对**段：参与 0 点重定基、闩锁前被抑制；\n"
-        "                       ⛔ 缺 after-anchor = 解析期错误（不猜\"绝对到文件尾\"还是\"绝对止于闩锁\"）；\n"
-        "                       ⛔ 绝对段内不许 profile_begin / profile_end（窗口 profiler 的 0 点语义与锚点冲突：\n"
-        "                          0 点之前的时刻与 0 点之后不是同一把尺子）\n"
-        "                     注入**不需要窗口焦点、也不移动真实光标**；格式见 README §4.2c\n"
-        "  --input-marker-timeout-ms <ms>  `at marker <名字>` 等不到的超时（**宿主墙钟** ms，缺省 30000；0 = 不设限）；\n"
-        "                             到点 ⇒ InteractionFailed + `marker-timeout:` detail + exit 5（⛔ 不静默继续）\n"
-        "  --anchor-script <id>  时间线的 **0 点** = 首次**观察到**进入引擎脚本 <id>（十进制 / `0x` 十六进制；\n"
-        "                     0 是根脚本的**合法** id，⛔ 不是\"关闭\"）。0 点作用于 frame / insn / guest_ms / wall_ms；\n"
-        "                     跑完仍未观察到 ⇒ InteractionFailed + `origin-missed:` + exit 5\n"
-        "  --input-stall-ms <ms>      帧号停住多久之后把剩余 frame 条件折成 wall_ms（缺省 10000；0 = 关闭兜底）\n"
-        "  --input-stall-boot-ms <ms> 还没出现第一帧（boot）时的宽限（缺省 30000；⛔ boot 不算停滞）\n"
-        "  --input-max-hold <ms>      自动 hold 的上限（guest ms，缺省 1000；0 = 不设限）：`click` / 显式 up\n"
-        "                             等 guest 采样，到上限仍未采样 ⇒ 抬起 + 告警（⛔ 不挂死）；见 README §4.2c\n"
-        "  --expect-change-after <list>  时间线的**效果级判据**（缺省关）：动作应用之后必须在窗口内看到\n"
-        "                             画面变化；list = click[,key,mouse]。三种失败（没变 / 没采样 /\n"
-        "                             跑完未判定）一律 stderr `[expect-change]` + exit 5；见 README §4.2c\n"
-        "  --expect-change-window <samples>  观测窗长度（**采样数**，一次 Present = 一个样本；缺省 30）。\n"
-        "                             ⛔ 不是毫秒：`--present window` 是 real-time 时钟，毫秒窗口不可复现\n"
+        "  ⛔ 2026-11-16 起**时间线输入整族退役**：`--input-script` / `--anchor-script` / `--input-stall-ms` /\n"
+        "     `--input-stall-boot-ms` / `--input-max-hold` / `--input-marker-timeout-ms` / `--expect-change-after` /\n"
+        "     `--expect-change-window` 都不再是参数（给了 ⇒ 一行「已退役」+ exit 2）。理由与重开条件见\n"
+        "     `docs/03-emulator/input-plan.md` §7：输入只经 AOT 臂的 `--input-plan`（配方），旧 bench 一并退役）。\n"
         "  --audio off|sdl|virtual  音频后端（缺省 sdl = 真设备；virtual = 确定性设备时钟；off = silent）\n"
         "  --audio-dump <path>  把混音结果写成 WAV（44.1k/16/2；与 sdl 同时用 = tee）\n"
         "  --sound              允许出声（缺省静音：设备/混音/喂料/guest DS 调用照跑，只在交付前置 0）\n"
@@ -227,28 +178,6 @@ int main(int argc, char** argv) {
     bool overlay = false;
     // ★ 宿主真光标（`--cursor-warp`，默认关）：只加宿主副作用，⛔ 不改 guest 可见状态。
     bool cursor_warp = false;
-    std::string input_script_path;
-    // ★ 帧停滞兜底（README §4.2c）：帧不推进时把剩余 frame 触发条件折算成 wall_ms。
-    //   0 = 关闭（显式选择"宁可挂死也不提前"）。
-    std::uint64_t input_stall_ms = 10000;
-    // 还没出现第一帧时的宽限（boot 期间没有 Present 不算停滞）。
-    std::uint64_t input_stall_boot_ms = 30000;
-    // ★ 自动 hold 的上限（README §4.2c）：`click` / 显式 up 等 guest 采样，等不到就到这里抬起 + 告警。
-    //   0 = 不设限（显式选择"宁可挂死"）。
-    std::uint64_t input_max_hold_ms = 1000;
-    // ★ marker 超时（`at marker <名字>` 等不到）：**宿主墙钟** ms；0 = 不设限。
-    //   到点 ⇒ `InteractionFailed` + `marker-timeout:` detail + exit 5（⛔ 不静默继续）。
-    std::uint64_t input_marker_timeout_ms = 30000;
-    // ★ 时间线的 **0 点**（`--anchor-script <id>`，见 `runtime/input_script.h` 的 `TimelineOrigin`）。
-    //   ★ 启用判据是 `anchor_script_set`，⛔ 不是 `id != 0` —— `0` 是**根脚本的合法 id**
-    //     （`engine_marker.cpp` 明说），拿它当"关闭"哨兵会让"锚根脚本"变成"没给"。
-    bool anchor_script_set = false;
-    std::uint32_t anchor_script_id = 0;
-    // ★ 时间线的效果级判据（README §4.2c）：`--expect-change-after` 的原始写法 + 窗口长度（采样数）。
-    //   缺省关（打开会改变既有脚本的退出码）。窗口缺省 30 个采样（60 fps 下 ≈0.5 s）。
-    std::string expect_change_after;
-    std::uint64_t expect_change_window = 30;
-    bool expect_change_window_set = false;
     // ★ 方案 D：默认 SDL 后端 + **静音**（`--sound` 才出声；设备 / 混音 / 喂料照跑）；
     //   `--audio=virtual` = 确定性设备时钟（CTest / dump）；`--audio=off` = 旧 silent 口径。
     //   `--audio-dump` 与真输出可同时用（tee）。
@@ -387,102 +316,21 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(a, "--cursor-warp") == 0) {
             // 宿主真光标：缺省关；窗口参数（headless 下 exit 2 —— 没有可见窗口可映射）。
             cursor_warp = true;
-        } else if (std::strcmp(a, "--input-script") == 0 && i + 1 < arg_count) {
-            input_script_path = args[++i];
-            if (input_script_path.empty()) {
-                std::fprintf(stderr, "--input-script 需要一个非空路径\n");
-                return 2;
-            }
-        } else if (std::strcmp(a, "--input-stall-ms") == 0 && i + 1 < arg_count) {
-            // 帧停滞兜底阈值（0 = 关闭）。见 README §4.2c。
-            const char* text = args[++i].c_str();
-            char* end = nullptr;
-            const unsigned long long v = std::strtoull(text, &end, 10);
-            if (end == text || *end != '\0') {
-                std::fprintf(stderr, "--input-stall-ms 需要非负整数（收到 %s）\n", text);
-                return 2;
-            }
-            input_stall_ms = static_cast<std::uint64_t>(v);
-        } else if (std::strcmp(a, "--input-stall-boot-ms") == 0 && i + 1 < arg_count) {
-            const char* text = args[++i].c_str();
-            char* end = nullptr;
-            const unsigned long long v = std::strtoull(text, &end, 10);
-            if (end == text || *end != '\0') {
-                std::fprintf(stderr, "--input-stall-boot-ms 需要非负整数（收到 %s）\n", text);
-                return 2;
-            }
-            input_stall_boot_ms = static_cast<std::uint64_t>(v);
-        } else if (std::strcmp(a, "--input-max-hold") == 0 && i + 1 < arg_count) {
-            // 自动 hold 的上限（guest ms；0 = 不设限）。见 README §4.2c。
-            const char* text = args[++i].c_str();
-            char* end = nullptr;
-            const unsigned long long v = std::strtoull(text, &end, 10);
-            if (end == text || *end != '\0') {
-                std::fprintf(stderr, "--input-max-hold 需要非负整数（收到 %s）\n", text);
-                return 2;
-            }
-            input_max_hold_ms = static_cast<std::uint64_t>(v);
-        } else if (std::strcmp(a, "--input-marker-timeout-ms") == 0 && i + 1 < arg_count) {
-            // `at marker <名字>` 等不到的超时（宿主墙钟 ms；0 = 不设限）。见 README §4.2c。
-            // ★ 只收十进制非负整数：`strtoull` 会把 `-1` 回绕成 ULLONG_MAX（那是非法参数，不是"不设限"）。
-            const char* text = args[++i].c_str();
-            bool digits = text[0] != '\0';
-            for (const char* p = text; *p != '\0'; ++p) {
-                if (*p < '0' || *p > '9') {
-                    digits = false;
-                    break;
-                }
-            }
-            char* end = nullptr;
-            errno = 0;
-            const unsigned long long v = digits ? std::strtoull(text, &end, 10) : 0ull;
-            if (!digits || end == text || *end != '\0' || errno == ERANGE) {
-                std::fprintf(stderr, "--input-marker-timeout-ms 需要非负整数（收到 %s）\n", text);
-                return 2;
-            }
-            input_marker_timeout_ms = static_cast<std::uint64_t>(v);
-        } else if (std::strcmp(a, "--anchor-script") == 0 && i + 1 < arg_count) {
-            // 时间线 0 点 = 首次**观察到**进入脚本 <id>（语义见 runtime/input_script.h 的 TimelineOrigin）。
-            const char* text = args[++i].c_str();
-            std::uint64_t v = 0;
-            if (!parseAnchorScriptId(text, &v)) {
-                std::fprintf(stderr,
-                             "--anchor-script 需要 0..0xFFFFFFFF 的整数（十进制或 0x 十六进制；收到 %s）\n",
-                             text);
-                return 2;
-            }
-            anchor_script_set = true;
-            anchor_script_id = static_cast<std::uint32_t>(v);
-        } else if (std::strcmp(a, "--expect-change-after") == 0 && i + 1 < arg_count) {
-            // 效果级判据：动作之后必须观测到画面变化（见 README §4.2c）。
-            expect_change_after = args[++i];
-            if (expect_change_after.empty()) {
-                std::fprintf(stderr, "--expect-change-after 需要一个非空列表（click[,key,mouse]）\n");
-                return 2;
-            }
-        } else if (std::strcmp(a, "--expect-change-window") == 0 && i + 1 < arg_count) {
-            // ★ 只收**十进制正整数**：`std::strtoull` 会接受 `-1`（回绕成 ULLONG_MAX）与溢出值，
-            //   而那是"参数非法"（必须 exit 2），不是"窗口 2^64-1"。⇒ 先逐字符查数字，再查范围。
-            const char* text = args[++i].c_str();
-            expect_change_window_set = true;
-            bool digits = text[0] != '\0';
-            for (const char* p = text; *p != '\0'; ++p) {
-                if (*p < '0' || *p > '9') {
-                    digits = false;
-                    break;
-                }
-            }
-            char* end = nullptr;
-            errno = 0;
-            const unsigned long long v = digits ? std::strtoull(text, &end, 10) : 0ull;
-            if (!digits || end == text || *end != '\0' || errno == ERANGE || v == 0) {
-                std::fprintf(stderr,
-                             "--expect-change-window 需要正整数（单位 = 采样数，一次 Present = 一个样本；"
-                             "收到 %s）\n",
-                             text);
-                return 2;
-            }
-            expect_change_window = static_cast<std::uint64_t>(v);
+        } else if (std::strcmp(a, "--input-script") == 0 || std::strcmp(a, "--anchor-script") == 0 ||
+                   std::strcmp(a, "--input-stall-ms") == 0 || std::strcmp(a, "--input-stall-boot-ms") == 0 ||
+                   std::strcmp(a, "--input-max-hold") == 0 ||
+                   std::strcmp(a, "--input-marker-timeout-ms") == 0 ||
+                   std::strcmp(a, "--expect-change-after") == 0 ||
+                   std::strcmp(a, "--expect-change-window") == 0) {
+            // ★ 2026-11-16 用户裁决：**时间线输入整族退役**（`REQ-01M7HQ57XV66FZQA5ECGHWD71N`）。
+            //   ⛔ 不静默忽略：旧脚本 / 旧 bench 的调用方必须当场看到"这条路没了"（exit 2）。
+            //   ⛔ 也不为它补一套"新参数名"：输入的用户面只有 AOT 臂的 `--input-plan`（配方）。
+            std::fprintf(stderr,
+                         "emulator-lift: %s 已退役（2026-11-16）——解释器臂没有输入时间线入口了；\n"
+                         "  输入的用户面只有 AOT 臂 `--input-plan`（配方 = apps/emulator-lift/scripts/recipes/*.plan）。\n"
+                         "  理由 / 重开条件见 docs/03-emulator/input-plan.md §7\n",
+                         a);
+            return 2;
         } else if (std::strcmp(a, "--audio") == 0 && i + 1 < arg_count) {
             audio_mode = args[++i];
             if (audio_mode != "off" && audio_mode != "sdl" && audio_mode != "virtual") {
@@ -578,17 +426,6 @@ int main(int argc, char** argv) {
                              frame_dump.c_str(), ec.message().c_str(), ec.value());
                 return 2;
             }
-        }
-    }
-
-    // ---- ★ `--anchor-script` 的**解析期**校验（依赖；⛔ 不跑一半就退化成"0 点从 run 起算"）----
-    //   判据的**唯一实现**在 `runtime/input_script.cpp`（`validateOriginCli`）：那里也是 pure CTest
-    //   断言"没给 `--input-script` 却给 `--anchor-script` ⇒ 解析期报错"的入口（进程退出码在 CTest 里不可达）。
-    {
-        const std::string why = lift::validateOriginCli(anchor_script_set, !input_script_path.empty());
-        if (!why.empty()) {
-            std::fprintf(stderr, "emulator-lift: %s\n", why.c_str());
-            return 2;
         }
     }
 
@@ -962,86 +799,11 @@ int main(int argc, char** argv) {
     // ★ X 的二次确认策略（AGERC `_ShowDialog@12` id==3）：缺省 ask = 真弹系统「終了」框。
     machine.setCloseConfirmPolicy(close_confirm);
 
-    // ★ 0 点的**配置**必须先于脚本解析：`before-anchor` / `after-anchor` 的解析期判据要问
-    //   "有没有 `--anchor-script`"（没开却写段标记 ⇒ 解析期报错）。配置跨 `clear()` 存活
-    //   ⇒ 放在 `loadInputScript` 之前不会丢（`REQ-01M710E6PV4PPHECPPCCTRF5RA`）。
-    if (anchor_script_set) machine.inputScript().setOriginScript(anchor_script_id);
-    // ---- 指令式输入时间线（`--input-script`）：启动前解析，失败立刻拒绝（⛔ 不跑一半）----
-    if (!input_script_path.empty()) {
-        std::string script_err;
-        if (!machine.loadInputScript(input_script_path, &script_err)) {
-            std::fprintf(stderr, "emulator-lift: --input-script 解析失败\n  %s\n", script_err.c_str());
-            return 2;
-        }
-    }
-    // ★ 输入旋钮只在给了时间线时才有意义（⛔ 不静默接受一个永远不生效的 flag）。
-    if (!input_script_path.empty()) {
-        machine.setInputStallMs(input_stall_ms);
-        machine.setInputStallBootGraceMs(input_stall_boot_ms);
-        machine.setInputMaxHoldMs(input_max_hold_ms);
-    }
-    // ★ marker 只是**时间线**的事件源。
-    if (!input_script_path.empty()) machine.setInputMarkerTimeoutMs(input_marker_timeout_ms);
-    // ★ 时间线的 0 点（`--anchor-script <id>`）：配置 + 启动日志 + "不可复现"的警告。
-    //   ★ 配置**跨 run / clear() 存活**（`setOriginScript` 只写配置；闩锁状态每轮重置）——
-    //     所以必须在这里、`run()` 之前设。
-    if (anchor_script_set) {
-        const std::string why = lift::validateOriginScript(true, machine.inputScript().actionCount());
-        if (!why.empty()) {
-            std::fprintf(stderr, "emulator-lift: %s\n", why.c_str());
-            return 2;
-        }
-        // ★ 配置已在解析**之前**设过（段标记的解析期判据要用它）—— 这里只做启动日志与警告。
-        std::printf(
-            "anchor    : 0 点 = 首次**观察到**进入脚本 0x%08X（frame / insn / guest_ms / wall_ms 全部重定基；\n"
-            "            跑完仍未观察到 ⇒ stderr `[anchor] FAIL origin-missed:` + exit 5）\n",
-            anchor_script_id);
-        // ★ 裁决 6：`at wall_ms` **允许**，但必须打一行"该锚在 real-time 档不可复现"的警告
-        //   （⛔ 不因此 exit 2：墙钟在 headless 档是确定性的，脚本本身仍然可跑）。
-        bool has_wall_ms = false;
-        for (const lift::InputScript::Action& act : machine.inputScript().actions()) {
-            if (act.trigger.kind == lift::TriggerKind::WallMs) {
-                has_wall_ms = true;
-                break;
-            }
-        }
-        if (has_wall_ms) {
-            std::fprintf(stderr,
-                         "emulator-lift: ⚠ 脚本里有 `at wall_ms` 条件，而 0 点来自脚本身份 ⇒ 该锚在 real-time 档"
-                         "（--present window）**不可复现**（墙钟不随 guest 脚本推进；那一档请用 frame / insn）\n");
-        }
-    }
-    // ★ 时间线的效果级判据（`--expect-change-after` / `--expect-change-window`）：解析 + 配置。
-    //   缺省关；三条拒绝都是 exit 2（⛔ 不静默退化成"关"—— 静默失败正是本单要消灭的东西）：
-    //   ① 没给 `--input-script`（判的是时间线的动作；没有脚本 = 一个动作都不会被看）；
-    //   ② 类别 / 数字写错（窗口只收十进制正整数）；
-    //   ③ 脚本里**没有匹配的动作**（否则一个观测窗都开不了 ⇒ "静默绿"，与"发完不管"同类）；
-    //      只给 `--expect-change-window` 而不给 `--expect-change-after` 也拒绝（它只在策略开时生效）。
-    if (expect_change_window_set && expect_change_after.empty()) {
-        std::fprintf(stderr,
-                     "--expect-change-window 只在 --expect-change-after 开启时生效；单独给它不会看任何动作\n");
-        return 2;
-    }
-    if (!expect_change_after.empty()) {
-        if (input_script_path.empty()) {
-            std::fprintf(stderr,
-                         "--expect-change-after 需要同时给 --input-script（它判的是时间线动作有没有生效）\n");
-            return 2;
-        }
-        lift::ExpectChangePolicy policy;
-        std::string policy_err;
-        if (!lift::parseExpectChangeActions(expect_change_after, &policy, &policy_err)) {
-            std::fprintf(stderr, "emulator-lift: --expect-change-after 解析失败：%s\n", policy_err.c_str());
-            return 2;
-        }
-        policy.window_samples = expect_change_window;
-        if (!machine.configureExpectChange(policy, &policy_err)) {
-            std::fprintf(stderr, "emulator-lift: --expect-change-after 配置失败：%s\n", policy_err.c_str());
-            return 2;
-        }
-        std::printf("expect    : after=%s（窗口 %llu 个采样；失败 ⇒ stderr [expect-change] + exit 5）\n",
-                    policy.text.c_str(), (unsigned long long)policy.window_samples);
-    }
+    // ★ 2026-11-16：`--input-script` 整族（时间线 / 0 点 / 效果级判据）的 CLI 入口已退役
+    //   （`REQ-01M7HQ57XV66FZQA5ECGHWD71N`）。`InputScript` 类本身**保留**为机器内动作落地面：
+    //   交互配方驱动器（`InteractionGraph::actuator`）与 pure CTest 夹具还要用它 ⇒ 见报告
+    //   `.tmp/graphfix/report-idescript.md` 的依赖清单。⛔ 不要在这里补第二套输入语义。
+
     // ★ guest 眼里的主模块路径（用户 2026-11-05 口径）：`<guest 根>\AGE.EXE`，
     //   打开它拿到的是**我们真正在跑的那份字节**（拆壳件），不是 `--game-dir` 下的加壳原件。
     //   默认档的 `image` 行已经带 exe 路径 ⇒ 这条配置回显只在 Verbose 打。
@@ -1158,13 +920,10 @@ int main(int argc, char** argv) {
         lift::SdlWindow* sdl_raw = display.get();
         machine.presenter().setSink(std::move(display));
         sdl_raw->attachWindowManager(machine.cpu().windows);
-        // ★ 注入脚本也要在这里推进：guest 可能阻塞在 `GetMessageA`（等消息）——那时
+        // ★ 交互配方驱动器也要在这里推进：guest 可能阻塞在 `GetMessageA`（等消息）——那时
         //   `Machine::run` 的块边界循环不在跑，只有宿主事件泵会被调用。
         machine.cpu().windows->setHostEventPump([sdl_raw, &machine](lift::X86& cpu) {
             sdl_raw->pumpHostEvents(5);
-            machine.tickInputScript(cpu);
-            // ★ 交互图也要在这里推进：理由与时间线同一条 —— guest 阻塞在 `GetMessageA` 时
-            //   没有块边界，只有宿主的这个泵会被调用。
             machine.tickInteraction(cpu);
         });
         present_window_active = true;
@@ -1241,40 +1000,13 @@ int main(int argc, char** argv) {
             return 4;
         }
     }
-    // ★ 交互任务的失败：**非 0 退出**（5，可与 2 = 未实现缺口区分）+ stderr 打失败报告 + 存最后画面。
+    // ★ 交互任务的失败：**非 0 退出**（5，可与 2 = 未实现缺口区分）+ stderr 打 detail。
     //   ⛔ 不许 warning-only、⛔ 不许当 0 点继续跑。
-    //   ★ 2026-11-16：`--interaction-graph` 退役 ⇒ 这个停因现在只有**两条**来源（时间线 0 点没闩锁 /
-    //     marker 超时 / 效果级判据），图那条"任务没走完 + 失败报告"的分流随入口一并删除。
+    //   ★ 2026-11-16：`--input-script` 整族退役（0 点 / 效果级判据 / marker 超时随入口删除），
+    //     `--interaction-graph` 更早已退役 ⇒ 本进程的 CLI 路径上这个停因**没有生产者**了
+    //     （`Machine::run` 的直接消费者 = pure CTest / 宿主内嵌）。保留这条兜底是因为
+    //     "诊断面不能空"：⛔ 不静默 0 —— 哪天出现新生产者，它当场就有一个响亮的出口。
     if (r.reason == lift::StopReason::InteractionFailed) {
-        // ★ 时间线 0 点没闩锁（`--anchor-script`）：**先于**其它两条分流。
-        //   复用同一个 `InteractionFailed`（退出码 5），detail 是 `origin-missed:` 那一行。
-        if (r.origin_missed) {
-            std::fprintf(stderr, "[anchor] %s\n", r.detail.c_str());
-            return 5;
-        }
-        // ★ marker 超时（`at marker <名字>` 等不到）：**先于** expect-change 那条分流。
-        //   复用同一个 `InteractionFailed`（退出码 5），但 `detail` 是 `marker-timeout:` 那一行。
-        if (r.marker_timeout) {
-            std::fprintf(stderr, "[marker] %s\n", r.detail.c_str());
-            return 5;
-        }
-        // ★ 时间线的效果级判据：`RunResult.detail` 三种之一（not-changed / no-sample / unclosed）。
-        if (machine.expectChangeEnabled()) {
-            std::fprintf(stderr, "[expect-change] %s\n", r.detail.c_str());
-            const std::string dump_path = input_script_path + ".expect-fail.bmp";
-            bool still = true;
-            std::string dump_err;
-            if (machine.presenter().dumpLastFrame(dump_path, &still, &dump_err)) {
-                std::fprintf(stderr,
-                             "[expect-change] 最后画面：%s（像素仍等于最后一次 Present 的 hash：%s）\n",
-                             dump_path.c_str(),
-                             still ? "是" : "否 —— guest 可能已经画了下一帧，只作诊断");
-            } else {
-                std::fprintf(stderr, "[expect-change] 最后画面写不出来：%s\n", dump_err.c_str());
-            }
-            return 5;
-        }
-        // ★ 兜底：`InteractionFailed` 但三个分流标志一个都没置 ⇒ 诊断面不能空（⛔ 不静默 0）。
         std::fprintf(stderr, "[interaction] %s\n", r.detail.c_str());
         return 5;
     }

@@ -4,22 +4,18 @@
 # ⛔ 不写帧号（见 docs/03-emulator/interaction-model.md）
 #
 # 写法 = 顺序配方（语法真源 `apps/emulator-lift/src/runtime/recipe.h`）：
-#   `timeout N` 守的是**它上一条**指令 ⇒ 写在 `await` 的后面；`wait N` = **宿主墙钟**毫秒。
+#   `timeout N` 写在它守的那条 `await` 的**行尾**；`wait N` = **宿主墙钟**毫秒（固定时长，⛔ 不带 timeout）。
 
-await script TITLE
-timeout 30000
+await script TITLE timeout 30000
 wait 5000
 
 click 1186 373
 
-await script GAMESTART
-timeout 30000
+await script GAMESTART timeout 30000
 wait 3000
 
 click 830 592
 
-# 给 SE 播完 + 尾声重复留足时间。
-# ⚠ 单条 `wait` 自身受缺省 5000 ms 的 timeout 约束 ⇒ 单条 wait 不要超过 4000 ms（拆成多条）。
-wait 4000
-wait 4000
-wait 4000
+# 给 SE 播完 + 尾声重复留足时间（合计仍是 12 s）。
+# ★ `wait` 是固定时长、**没有守卫** ⇒ 一条写够就行（不再需要拆段）。
+wait 12000
