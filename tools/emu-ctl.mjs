@@ -15,7 +15,8 @@
  * ★ `click` 已解锁（顶层 `{op,x,y,button}`；参考坐标 1280×720；只接受暂停态）；⛔ `key` 仍是 M1 未实现
  *   （传了明确回"未实现" + 退出码 2）；
  *   `gc` **只**删残留端点文件（connect 判死 + pid 不存活 + 文件名严格匹配），⛔ 不碰 keep.txt 等其它文件；
- *   `list` 永远只报告、不删；⛔ 不"自动挑一个"实例（多个 alive ⇒ 退出码 4 + 全部列出）。
+ *   `list` 永远只报告、不删；⛔ 不"自动挑一个"实例（多个 alive ⇒ 要挑实例的 op 退出码 4 + 全部列出；
+ *   `list` 恒 0，多实例也 0）。
  */
 import fs from 'node:fs';
 import net from 'node:net';
@@ -58,7 +59,8 @@ const HELP = `tools/emu-ctl.mjs — AOT 控制层客户端（Node 内置 WebSock
   1  端点回 ok:false（或连接在答复前断开）
   2  参数 / 协议错（含 nonce 不一致、click 坐标/按钮非法、key = M1 未实现、gc 的 root 不可读 / 删除失败）
   3  超时（端点仍活）
-  4  找不到 / 多个实例（不猜；用 --session <id> 精确选中）
+  4  找不到 / 多个实例（**仅"要挑一个实例"的 op**：pause/resume/sample/screenshot/click/wait/quit；
+     不猜，用 --session <id> 精确选中；⛔ \`list\` 恒 0，多实例也 0）
 
 ★ \`list\` 的 why ∈ {ok, refused, timeout, nonce_mismatch, bad_file}
   · kill -9 的残留文件 ⇒ alive:false, why:"refused"，**文件仍在**（list 不删；要清就用 gc）
@@ -89,7 +91,7 @@ const HELP = `tools/emu-ctl.mjs — AOT 控制层客户端（Node 内置 WebSock
   ★ 截图是 present 时冻结的那一帧；\`hash_still_matches\` 只回答"冻结有没有生效"，⛔ 别拿它当判据
     （判内容要判非全黑 / 与同帧 \`--dump-frame\` 对照）。
 
-⛔ 未实现：key（M1 的剩余能力，服务端还没有这个 op）· "自动挑一个"实例（多个 alive ⇒ 退出码 4）
+⛔ 未实现：key（M1 的剩余能力，服务端还没有这个 op）· "自动挑一个"实例（要挑实例的 op 在多个 alive 时 ⇒ 退出码 4；\`list\` 恒 0）
 `;
 
 /** 客户端侧失败（不是服务端的 `ok:false`）。`kind` 决定退出码（见 lib 的 `exitCodeForError`）。 */

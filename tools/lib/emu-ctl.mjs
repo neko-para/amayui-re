@@ -38,7 +38,7 @@ export const EXIT = Object.freeze({
   endpoint: 1, // 端点回 ok:false
   usage: 2, // 参数 / 协议错
   timeout: 3, // 超时（端点仍活）
-  instance: 4, // 找不到 / 多个实例
+  instance: 4, // 找不到 / 多个实例（**仅"要挑一个实例"的 op**；`list` 恒 0）
 });
 
 /** 本客户端实现的操作（`click` 已解锁；⛔ `key` 仍是 M1 未实现；`gc` 只删残留端点文件）。 */
@@ -376,6 +376,7 @@ export function listRow(entry, probe) {
  *
  * ★ 缺省时"恰好一个 alive"才自动选中；多个 ⇒ 全部列出 + 退出码 4。
  *   `--session` 精确匹配；匹配不到 / 匹配到多个（不应该）都退出码 4。
+ *   ⛔ 只有"要挑一个实例"的 op 才走这里（`list` 恒 0，多实例也 0）。
  */
 export function selectEntry(entries, session = null) {
   const all = [...(entries ?? [])];
@@ -642,11 +643,11 @@ export function describe() {
       '1': '端点回 ok:false',
       '2': '参数 / 协议错（含 click 坐标/按钮非法、key 仍是 M1 未实现、gc 的 root 不可读 / 删除失败）',
       '3': '超时（端点仍活）',
-      '4': '找不到 / 多个实例（不猜；`--session <id>` 精确选中）',
+      '4': '找不到 / 多个实例（**仅"要挑一个实例"的 op**：pause/resume/sample/screenshot/click/wait/quit；⛔ `list` 恒 0，多实例也 0）',
     },
     listWhy: WHY,
     selection:
-      '`--session <id>` 精确选中；缺省时**恰好一个 alive** 才自动选中，多个 ⇒ 退出码 4 并全部列出；零个 ⇒ 4。',
+      '`--session <id>` 精确选中；缺省时**恰好一个 alive** 才自动选中，多个 ⇒ 退出码 4 并全部列出；零个 ⇒ 4。⛔ `list` 不走这条：它只报告全部条目，恒 0。',
     gc: {
       deletes:
         '**只**删同时满足三条的残留端点文件：① `connect()` 判死（`why ∈ {refused,timeout}`；`nonce_mismatch` = 端口上有个别的服务 ⇒ 不删）② 文件里的 `pid` 不存活（`kill(pid,0)`；pid 复用 ⇒ pid 只是辅助，主判据仍是 ①）③ 文件名严格匹配 `ctl.<数字>.<8hex>.json`。',
@@ -722,6 +723,6 @@ export function describeText() {
   L.push(`  ${d.traps.wait}`);
   L.push(`  ${d.traps.criteria}`);
   L.push('');
-  L.push('⛔ 未实现：key（M1 的剩余能力，服务端还没有；传了 ⇒ 退出码 2）· "自动挑一个"实例（多个 alive ⇒ 退出码 4）');
+  L.push('⛔ 未实现：key（M1 的剩余能力，服务端还没有；传了 ⇒ 退出码 2）· "自动挑一个"实例（要挑实例的 op 在多个 alive 时 ⇒ 退出码 4；`list` 恒 0）');
   return `${L.join('\n')}\n`;
 }
