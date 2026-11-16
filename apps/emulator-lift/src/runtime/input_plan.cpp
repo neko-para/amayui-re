@@ -312,6 +312,8 @@ void InputPlan::applyProfileMark(const Step& s, std::uint64_t now_ms) {
         std::printf("[profile-window] begin label=%s wall_ms=%s reads=%s（AOT 臂：区间读数，不是分项 profiler）\n",
                     s.label.c_str(), u64s(now_ms).c_str(), u64s(read_points_).c_str());
         std::fflush(stdout);
+        // ★ 窗口 profile 的开窗（唯一外部消费者；见 `setProfileMarkHook`）。
+        if (mark_fn_ != nullptr) mark_fn_(mark_ctx_, s.label.c_str(), /*begin=*/true);
         return;
     }
     if (!profile_open_) {
@@ -330,6 +332,8 @@ void InputPlan::applyProfileMark(const Step& s, std::uint64_t now_ms) {
     std::printf("[profile-window] end label=%s wall_ms=%s elapsed_ms=%s reads=%s\n", profile_label_.c_str(),
                 u64s(now_ms).c_str(), u64s(elapsed).c_str(), u64s(reads).c_str());
     std::fflush(stdout);
+    // ★ 收窗 + 打窗口表（在既有 `[profile-window] end` 之后 ⇒ 旧的逐行格式逐字不变）。
+    if (mark_fn_ != nullptr) mark_fn_(mark_ctx_, profile_label_.c_str(), /*begin=*/false);
     profile_open_ = false;
     profile_label_.clear();
     ++profile_windows_;

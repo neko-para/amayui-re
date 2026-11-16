@@ -200,3 +200,43 @@
   ⇒ 两臂的 guest 时钟**各自**跟宿主墙钟走，**帧号 / 逐帧 `insns` 不可比**（两臂跑到同一帧号时并不是同一 guest 状态；
   实测两臂只到 1542 / 1463 帧，且同一帧号的 `insns` 早期吻合、后段分叉）。A/B 只能用：
   ① `insns_unattributed == 0`（native override 补账与块级闭合的机械判据）② **确定性口径**下的逐帧比较 ③ assets 档的 `cpu.insns` 精确相等。
+
+### M-12 · AOT 窗口 profile（`profile_begin/end` 之间的分桶账）：闭合靠**包络**，份额靠**采样**
+
+- **字段**（`=== profile window: <label> ===`，`end` 之后打一次）：
+  `wall`（T0→T1，`steady_clock`，已扣控制层暂停）· `lift` · `boundary` · `shim`（+ `present` / `shim:<module!name>` 子行）·
+  `partial` · `instrument` · `unaccounted` · `coverage` · `lift_dyn` · `verdict`。
+- **桶的定义（AOT 专有；⛔ 不要照抄解释器的六项）**：
+  · `lift` = `fn(...)`（一个 lifted 根函数的执行）；
+  · `boundary` = **块顶 → 分派前**：控制层闸门 / 停机请求 / `--time-limit` / `pumpHostEvents` / 三个合成 EA 泵 /
+    定时器泵 —— 这是解释器那套里 `interp` 的对偶（派发循环自身的税）；
+  · `shim` = `lift_shim` 整段（**精确**：每次调用 2 次取时）；
+  · `partial` = 窗口两个边沿的 sliver（开/关落在某个区间中间 ⇒ 那半截单独记）；
+  · `instrument` = 仪器自己花掉的时间（每次取时 ~20–35 ns，**单列**，⛔ 不塞进任何业务桶）；
+  · `unaccounted` = 定义式 = `wall − 上面五项`；**`>3%` ⇒ 本次读数作废**（打印 `INVALID`）。
+- **⚠ 2026-11-17 的实测教训（这条是 M-12 存在的主要理由）**：**不能**把采样均值直接外推成绝对时间。
+  每次采样自带的取时开销落在**被计时的区间里**，而外推要乘 `iter/sampled`（≈64）⇒ 30 ns 被放大 64×。
+  实测 FELLOW init：直接外推得 **3.1 s**，而墙钟只有 **2.0 s**。⇒ 现在的口径是
+  **绝对量取精确包络 `wall − shim − partial − instrument`，采样只决定 `lift:boundary` 的比值**；
+  `unaccounted` 因此结构上恒 ~0，**取代它的自检是 `coverage`**（= 采样外推 / 包络，1.00 才吻合；
+  实测 1.0–1.5 波动、只作诊断，离谱到 `[0.5, 2]` 之外才判作废）。
+- **采样方式**：每迭代一次取时决策，用**乘性散列取高 6 位**（平均 1/64）。⛔ 不许写 `iter % 64 == 0`：
+  实测那会与 guest 循环周期对齐、恒定采到同相位（外推偏高 1.6×）。`iter` 是**窗口内迭代数**（含未分派的迭代）。
+- **成本**（实测，`--profile` **不需要开**）：`shim` 2 次取时/调用；`lift`/`boundary` 2 次/64 迭代；
+  `present` 子桶 **0**（`presentBreakdown()` 本来就一直在计时）；`lift_dyn` 一次 `bool` 判断 + 一次 `++`。
+  整体 ≈ +2–4% 墙钟（见 `instrument` 行）。**默认档（不开窗）一行不打、一次取时都不做**。
+- **`lift_dyn` 只报次数**：它是**尾调用**（`return fn(...)`）⇒ 区间含目标函数体，报时间会与 `lift` 双计。
+  今天它是唯一能看见"间接跳转那一大批派发"的读数（不计 dispatch、不进 liftone 采样）。
+- **优化候选的判定（写死，单口径）**：任何**具名行**占 `wall` **≥10%** ⇒ 候选；3–10% ⇒ 观察名单（需两次读数复现）；
+  <3% ⇒ 噪声。最高具名行 <10% ⇒ 结论写"**纯 CPU 均匀分布，暂不优化**"（合格交付，⛔ 不为凑产出挑 6% 的行）。
+  `lift` 是**聚合**行，⛔ 不进候选（要看它内部就上按 EA 展开）。
+- **读数（2026-11-17 / win32 / RelWithDebInfo / N=3 / 配方 `.tmp/wprof/fellow.plan`）**：
+  `fellow-init` `wall` **2209 / 2302 / 2270 ms**（中位 2270）· `insns` **612.4 / 612.4 / 612.7 M**（±0.06%）·
+  `lift` **50.0 / 50.1 / 49.7%** · `boundary` **28.7 / 29.9 / 29.1%** · `shim` **18.6 / 17.5 / 18.5%** ·
+  `coverage` 1.20–1.22 · `frames = 0`（整段零 Present）。
+  最大的单条 shim 是 `user32!PeekMessageA` **5.3%**、`gdi32!DeleteObject` **5.1%**、`winmm!timeGetTime` **3.8%**
+  ⇒ **没有单条 shim ≥10%**；`boundary` 是唯一 ≥10% 的具名行。
+  `fellow-enter`（转场，~200–260 ms）：`shim` **92–94%**，其中 `D3D9::Present` ~32% / `D3D9::Clear` ~31% / `ID3DXSprite::End` ~16%。
+- **怎么量**：配方里写 `profile_begin <label>` / `profile_end <label>`（`docs/03-emulator/input-plan.md`），
+  跑 `emulator-lift-aot --present headless --skip-logo --game-dir links/install --appdata <本树 .tmp> --input-plan <plan>`；
+  ⛔ 必须显式给 `--appdata`（否则往安装树里写）。守卫：CTest `aot-window-profile`（pure，纯算术夹具）。

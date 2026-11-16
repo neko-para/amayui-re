@@ -157,6 +157,17 @@ public:
     //   ⛔ 不在这里另存一份暂停账：暂停账的唯一来源是 `VirtualClock`。
     void attachClock(const VirtualClock* clock);
 
+    // ★ **窗口 profile 的标记钩子**（`profile_begin` / `profile_end` 的唯一外部消费者）。
+    //   · 为什么是裸函数指针 + `void*`：缺省 nullptr ⇒ 每个读点只多一次判空（⛔ 不用
+    //     `std::function`：那是一次间接跳转 + 可能的分配，而"不开窗零成本"是硬口径）。
+    //   · ⛔ **不改配方语法**：钩子只在既有 `applyProfileMark` 的**成功开/收口**处回调
+    //     （被忽略的重复 `begin` / 无主的 `end` 不回调 —— 它们没开窗，也就不该有关窗）。
+    using ProfileMarkHook = void (*)(void* ctx, const char* label, bool begin);
+    void setProfileMarkHook(void* ctx, ProfileMarkHook fn) {
+        mark_ctx_ = ctx;
+        mark_fn_ = fn;
+    }
+
     // ★ **唯一**能施加 step 的入口（也只经 `runtime/input.h` 的四个投递入口到达）。
     //   flush-before-read：先把到期 step 落地到 `WindowManager`，**再**让 shim 去读。
     //   ★ 同一个读点内的顺序：待抬起 → **立即队列（控制层 `click`）** → 配方当步。
@@ -308,6 +319,9 @@ private:
     std::uint64_t profile_started_ms_ = 0;
     std::uint64_t profile_reads_at_begin_ = 0;
     std::uint64_t profile_windows_ = 0;  // 正常收口的窗口数（begin+end 配对）
+    // ★ 窗口 profile 的标记钩子（缺省 nullptr ⇒ 每个读点一次判空；见 `setProfileMarkHook`）
+    void* mark_ctx_ = nullptr;
+    ProfileMarkHook mark_fn_ = nullptr;
     std::array<std::uint64_t, kInputPointCount> deliver_calls_{};
     std::array<std::uint64_t, kPlanEventCount> event_calls_{};
 };

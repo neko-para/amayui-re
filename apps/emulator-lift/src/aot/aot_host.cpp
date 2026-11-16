@@ -1060,5 +1060,177 @@ ControlShotStatus AotHost::controlScreenshot(const std::string& path, ControlScr
 
 void AotHost::controlOnResume() { presenter_.noteControlResume(); }
 
+// =====================================================================================
+// 窗口 profile（`profile_begin/end` 驱动；桶与闭式在 `aot/window_prof.h`，这里只做
+// "开/关 + 快照 + 打表"。⛔ 零新 CLI：不开窗 ⇒ 一个取时都不做、一行都不打。
+// =====================================================================================
+void AotHost::beginWindow(const char* label) {
+    win_.reset();
+    win_.on = true;
+    win_.label = (label != nullptr && *label != '\0') ? label : "(unnamed)";
+    win_.t_open_ns = windowNowNs();
+    win_.insns_open = cpu_.insns;
+    win_.frames_open = presenter_.frameCount();
+    win_.liftdyn_open = ::liftDynCalls;
+    // 每个 shim 的精确账：按 registry id 索引（`byId` 是 O(1)；⛔ 不用 map，热路径里每次调用
+    // 一次 map 查找在 init 那种 40 万次 shim 的窗口里是几 ms 级噪声）。
+    const std::size_t nshim = shims_.size();
+    win_.per_shim_ns.assign(nshim, 0);
+    win_.per_shim_calls.assign(nshim, 0);
+    // ★ 仪器自校准（同 `beginProfile` 的忙循环；窗口内每个采样迭代 3 次取时 ⇒ 必须量出来扣掉）。
+    //   一次窗口只做一次（2000 次取时 ≈ 40 µs）。
+    {
+        constexpr int kReps = 2000;
+        volatile std::int64_t sink_ns = 0;
+        const auto c0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < kReps; ++i) {
+            const auto t = std::chrono::steady_clock::now();
+            sink_ns ^= static_cast<std::int64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count());
+        }
+        const auto c1 = std::chrono::steady_clock::now();
+        const double total_ns = std::chrono::duration<double, std::nano>(c1 - c0).count();
+        win_.clock_read_ns = total_ns / static_cast<double>(kReps);
+    }
+    // ★ 再量一次"区间里那一刀"：`t0=now(); t1=now()` ⇒ `t1-t0` 就是一个**被计时区间**里的仪器税。
+    //   这是 `netSpan` 要扣的那个数（⛔ 不要拿上面那个"调 now() 一圈"的数顶替，实测差 2×）。
+    {
+        constexpr int kPairs = 256;
+        std::uint64_t acc = 0;
+        for (int i = 0; i < kPairs; ++i) {
+            const std::uint64_t t0 = windowNowNs();
+            const std::uint64_t t1 = windowNowNs();
+            acc += t1 - t0;
+        }
+        win_.span_overhead_ns = static_cast<double>(acc) / static_cast<double>(kPairs);
+    }
+    ::liftDynCountOn = true;
+}
+
+void AotHost::endWindow() {
+    if (!win_.on) return;
+    win_.closeEdges(windowNowNs());
+    win_.insns_close = cpu_.insns;
+    win_.frames_close = presenter_.frameCount();
+    win_.liftdyn_close = ::liftDynCalls;
+    win_.on = false;
+    ::liftDynCountOn = false;
+
+    const AotWindowProf::Totals t = win_.totals();
+    const auto ms = [](double ns) { return ns / 1.0e6; };
+    const auto pct = [&](double v) {
+        return t.wall > 0.0 ? (v / t.wall) * 100.0 : 0.0;
+    };
+    std::printf("=== profile window: %s ===\n", win_.label.c_str());
+    std::printf("wall        : %10.3f ms   iter=%llu sampled=%llu（stride %llu%s）insns=%llu frames=%llu\n",
+                ms(t.wall), static_cast<unsigned long long>(win_.iter),
+                static_cast<unsigned long long>(win_.sampled),
+                static_cast<unsigned long long>(AotWindowProf::kStride),
+                win_.iter < AotWindowProf::kLowSampleBelow ? "，⚠ 窗口短 ⇒ 样本少" : "",
+                static_cast<unsigned long long>(win_.insns_close - win_.insns_open),
+                static_cast<unsigned long long>(win_.frames_close - win_.frames_open));
+    std::printf("lift        : %10.3f ms  %5.1f%%  est\n", ms(t.lift), pct(t.lift));
+    std::printf("boundary    : %10.3f ms  %5.1f%%  est\n", ms(t.boundary), pct(t.boundary));
+    std::printf("shim        : %10.3f ms  %5.1f%%  exact(N=%llu)\n", ms(t.shim), pct(t.shim),
+                static_cast<unsigned long long>(win_.shim_calls));
+    // present 子桶（⊂ shim；⛔ 不加进闭式）
+    if (win_.present_calls != 0) {
+        const double psum = static_cast<double>(win_.present_readback_ns + win_.present_hash_ns +
+                                                win_.present_freeze_ns + win_.present_sink_ns +
+                                                win_.present_stats_ns);
+        std::printf("  present   : %10.3f ms  %5.1f%%  n=%llu（readback %.3f / hash %.3f / freeze %.3f / sink %.3f / stats %.3f ms）\n",
+                    ms(psum), pct(psum), static_cast<unsigned long long>(win_.present_calls),
+                    ms(static_cast<double>(win_.present_readback_ns)),
+                    ms(static_cast<double>(win_.present_hash_ns)),
+                    ms(static_cast<double>(win_.present_freeze_ns)),
+                    ms(static_cast<double>(win_.present_sink_ns)),
+                    ms(static_cast<double>(win_.present_stats_ns)));
+    }
+    // 每个 shim 的精确行（降序，只打 ≥0.5% 的；余下合并成一行，⛔ 不给"看不见的残差"）
+    {
+        struct Row {
+            double ns;
+            std::uint64_t calls;
+            std::string name;
+        };
+        std::vector<Row> rows;
+        rows.reserve(win_.per_shim_ns.size());
+        for (std::size_t id = 0; id < win_.per_shim_ns.size(); ++id) {
+            if (win_.per_shim_calls[id] == 0) continue;
+            const ShimDef* def = shims_.byId(static_cast<std::uint32_t>(id));
+            rows.push_back(Row{static_cast<double>(win_.per_shim_ns[id]), win_.per_shim_calls[id],
+                               def != nullptr ? (def->module + "!" + def->name) : std::string("(unknown)")});
+        }
+        std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.ns > b.ns; });
+        double rest_ns = 0.0;
+        std::uint64_t rest_calls = 0;
+        int printed = 0;
+        for (const Row& r : rows) {
+            const double share = t.wall > 0.0 ? r.ns / t.wall : 0.0;
+            if (share < 0.005 || printed >= 10) {
+                rest_ns += r.ns;
+                rest_calls += r.calls;
+                continue;
+            }
+            std::printf("  shim:%-34s %10.3f ms  %5.1f%%  N=%llu\n", r.name.c_str(), ms(r.ns), pct(r.ns),
+                        static_cast<unsigned long long>(r.calls));
+            ++printed;
+        }
+        if (rest_calls != 0) {
+            std::printf("  shim:(rest)                            %10.3f ms  %5.1f%%  N=%llu\n", ms(rest_ns),
+                        pct(rest_ns), static_cast<unsigned long long>(rest_calls));
+        }
+    }
+    std::printf("partial     : %10.3f ms  %5.1f%%  exact\n", ms(t.partial), pct(t.partial));
+    std::printf("instrument  : %10.3f ms  %5.1f%%  （%.1f ns/取时 × %llu 次）\n", ms(t.instrument),
+                pct(t.instrument), win_.clock_read_ns,
+                static_cast<unsigned long long>(win_.sampled * 3 + win_.shim_calls * 2));
+    std::printf("unaccounted : %10.3f ms  %5.1f%%  %s\n", ms(t.unaccounted),
+                t.wall > 0.0 ? (t.unaccounted / t.wall) * 100.0 : 0.0,
+                t.suspect ? "⚠ 五项之和偏离墙钟 >15% ⇒ 本次读数作废（见 coverage）"
+                          : (t.valid() ? "ok(≤3%)" : "INVALID: unaccounted 超 3% ⇒ 本次读数作废"));
+    std::printf("coverage    : %.2f×  （五项之和 / 墙钟；1.00 = 外推与墙钟吻合）\n", t.coverage);
+    // `lift_dyn`：只报次数（尾调用 ⇒ 区间含目标体，⛔ 不进闭式）
+    std::printf("lift_dyn    : %llu 次（计数精确；⛔ 不进闭式：尾调用 ⇒ 区间含目标体）\n",
+                static_cast<unsigned long long>(win_.liftdyn_close - win_.liftdyn_open));
+    // ★ 结论行（写死的单口径，§5）：最高**具名行** ≥10% 才是优化候选。
+    {
+        double top = 0.0;
+        std::string top_name = "(none)";
+        for (std::size_t id = 0; id < win_.per_shim_ns.size(); ++id) {
+            if (win_.per_shim_calls[id] == 0) continue;
+            const double v = static_cast<double>(win_.per_shim_ns[id]);
+            if (v > top) {
+                const ShimDef* def = shims_.byId(static_cast<std::uint32_t>(id));
+                top = v;
+                top_name = def != nullptr ? (def->module + "!" + def->name) : std::string("(unknown)");
+            }
+        }
+        // `boundary` 也是具名行；`lift` 聚合**不进候选**（M-12 §5.2）
+        const bool boundary_wins = t.boundary > top;
+        const double best = boundary_wins ? t.boundary : top;
+        const double share = t.wall > 0.0 ? best / t.wall : 0.0;
+        const AotWindowProf::Rank rank = AotWindowProf::rankOf(share);
+        const char* verdict = rank == AotWindowProf::Rank::Candidate
+                                  ? "候选（≥10%）"
+                                  : rank == AotWindowProf::Rank::Watch ? "观察名单（3–10%，需两次复现）"
+                                                                       : "噪声（<3%）";
+        std::printf("verdict     : 最高具名行 = %s %.1f%% ⇒ %s%s\n",
+                    boundary_wins ? "boundary" : top_name.c_str(), share * 100.0, verdict,
+                    rank == AotWindowProf::Rank::Candidate ? "" : "（无单点值得优化 ⇒ 记「均匀分布」）");
+    }
+    std::fflush(stdout);
+}
+
+void AotHost::windowMarkThunk(void* ctx, const char* label, bool begin) {
+    auto* host = static_cast<AotHost*>(ctx);
+    if (host == nullptr) return;
+    if (begin) {
+        host->beginWindow(label);
+    } else {
+        host->endWindow();
+    }
+}
+
 }  // namespace aot
 }  // namespace lift

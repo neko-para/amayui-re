@@ -177,11 +177,15 @@ click 1070 480 right    # x/y = 1280×720 参考系；按钮词裸写（省略 =
   ⛔ 不等 guest 自己退出：实测 WM_QUIT 之后 guest 会走进**闭包外**的停机路径（停在 `00513B90`
   ⇒ `decode-error`、exit 2），那与"quit 是正常结局"冲突。`quit` 之后的指令**不再推进** ⇒
   末尾不是 `quit` 的配方会留下 `pending != 0`（= 任务没走完 ⇒ 5）。
-- ★ **`profile_begin|end <label>` 在本臂的落点**：本臂没有区间 profiler（`WindowProfiler` 的分项来自
-  `BlockCache` / `ShimRegistry` / 派发循环，AOT 臂一个都没有）⇒ 落成**宿主墙钟区间读数**：
-  begin / end 各一行一次性输出（`label` + `wall_ms` + `reads`）。⛔ 不假装开了分项 profiler
-  （那会打出"看起来有分项、其实是空的"假读数）。`end` 没有配对的 `begin` ⇒ 一行 stderr 提示、
-  **不判失败**（仪器问题不是任务失败）。
+- ★ **`profile_begin|end <label>` 在本臂的落点**：两件事，同一次收口里出。
+  1. **宿主墙钟区间读数**（既有）：begin / end 各一行（`label` + `wall_ms` + `reads`）。
+  2. **窗口桶表**（2026-11-17 起，`REQ-01M7JNX5MR7RWTBNBAE70PBCQP`）：`end` 之后打一张
+     `=== profile window: <label> ===` 的表（`wall / lift / boundary / shim（+ present / shim:名 子行） /
+     partial / instrument / unaccounted / coverage / lift_dyn / verdict`）。口径见 `measurement.md` **M-12**。
+     ★ 它**不依赖 `--profile`**（窗口自己驱动）⇒ 不开窗 = 一行不打、一次取时都不做。
+  ⛔ 两件事都**不是**解释器 `WindowProfiler` 的分项（那套来自 `BlockCache` / `Iterator` / 派发循环，
+  AOT 一个都没有）—— AOT 的桶是**重新定义**的（`interp → boundary`、**没有** `native`）。
+  `end` 没有配对的 `begin` ⇒ 一行 stderr 提示、**不判失败**（仪器问题不是任务失败）。
 - ⛔ **解析期硬错**（`exit 2` + `文件:行号: 原因`，**只剩两类**）：
   · **两臂都不认**：`await always` · `await presents <n>` · `key <VK>` · 旧节点模型的 `node / when /
     action / next / expect` · 画面源 `screen …` · 任何别的词（报"未知指令"并回显那行）；
