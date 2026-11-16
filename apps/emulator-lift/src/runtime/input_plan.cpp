@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "runtime/clock.h"       // VirtualClock（暂停补偿的唯一读数：pausedTotalMs）
 #include "runtime/cursor_map.h"  // referenceToClientPixel（1280×720 参考系 → 客户区，唯一公式）
 #include "runtime/input.h"       // input::mouseMove / mouseButton（唯一施加路径）
 #include "runtime/memory.h"      // GuestMemory（身份采样只经 MarkerSampler 读它）
@@ -64,6 +65,7 @@ const char* inputPointName(InputPoint point) {
 void InputPlan::clear() {
     recipe_.clear();
     pending_.clear();
+    immediate_.clear();
     identity_ = MarkerSample{};
     next_ = 0;
     applied_ = 0;
@@ -100,7 +102,15 @@ void InputPlan::attachGuestMemory(const GuestMemory* mem) {
 
 void InputPlan::setClockForTest(NowFn now_ms) { now_fn_ = now_ms; }
 
-std::uint64_t InputPlan::nowMs() const { return now_fn_ != nullptr ? now_fn_() : hostNowMs(); }
+void InputPlan::attachClock(const VirtualClock* clock) { clock_ = clock; }
+
+std::uint64_t InputPlan::nowMs() const {
+    const std::uint64_t raw = now_fn_ != nullptr ? now_fn_() : hostNowMs();
+    if (clock_ == nullptr) return raw;  // 缺省档：逐位不变（没有控制层就没有暂停）
+    // ★ 暂停区间**不计入**配方守卫钟（裁决：`body-m0.md` 末节）。
+    const std::uint64_t paused = clock_->pausedTotalMs();
+    return raw > paused ? raw - paused : 0;
+}
 
 bool InputPlan::loadFile(const std::string& path, std::string* err) {
     Recipe r;
@@ -144,9 +154,16 @@ void InputPlan::atPoint(WindowManager& wm, InputPoint point) {
     const std::size_t i = static_cast<std::size_t>(point);
     if (i < deliver_calls_.size()) ++deliver_calls_[i];
     ++read_points_;
-    if (!recipe_.active() && pending_.empty()) return;
+    // ★ 早退条件多了**立即队列非空**这一项：控制层的 click 可能在**没有配方**的运行里进来
+    //   （队列恒空时这里与改动前逐位相同 ⇒ 默认档不变）。
+    if (!recipe_.active() && pending_.empty() && immediate_.empty()) return;
     // ① 到期 / 兜底的**待抬起**先落地（同一次读点内、读之前）。
     releaseDue(wm);
+    // ①' ★ **立即队列先于配方当步**（判据 2 的前半）：控制层的 click 在这里施加，
+    //    走**同一段** `applyClickAt`、计入 `fired_`，但**不动** `next_` / `applied_` / 守卫账。
+    //    放在 `quit_requested_` / `failed_` 的早退**之前**：控制层已经对客户端答了 `ok:true`，
+    //    不该因为**配方自己的**失败 / quit 把它静默丢掉（它只等下一个读点）。
+    drainImmediate(wm);
     // ② `quit` 之后不再推进；守卫到期之后同样不再推进（⛔ 不许"失败后继续点"）。
     if (quit_requested_ || failed_) return;
     // ③ flush-before-read：按文件顺序把到期指令消费到 `WindowManager`（⛔ 不越过未到期的指令）。
@@ -221,8 +238,37 @@ void InputPlan::atPoint(WindowManager& wm, InputPoint point) {
     }
 }
 
+bool InputPlan::enqueueClick(int ref_x, int ref_y, MouseButton button) {
+    // ★ **有界**（判据 5）：满了就返回 false，由控制层回 `bad_request`。⛔ 不丢旧的、⛔ 不静默扩容器。
+    //   ⚠ 这里**不做映射**：参考坐标原样排队，映射只在施加那一刻由 `applyClickAt` 做**一次**
+    //   （否则"排队时的客户端尺寸"与"施加时的客户端尺寸"会变成两套口径）。
+    if (immediate_.size() >= kImmediateClickCapacity) return false;
+    ImmediateClick c;
+    c.x = ref_x;
+    c.y = ref_y;
+    c.button = button;
+    immediate_.push_back(c);
+    return true;
+}
+
+void InputPlan::drainImmediate(WindowManager& wm) {
+    // ★ 只消费立即队列：**不碰** `next_` / `applied_` / `wait_started_` / 守卫账 ⇒ 配方里未到期的门
+    //   照旧等（判据 2 的"步进指针不动"）。每条 +1 `fired_`（与配方 click 同一读数口径）。
+    while (!immediate_.empty()) {
+        const ImmediateClick c = immediate_.front();
+        immediate_.erase(immediate_.begin());
+        applyClickAt(wm, c.x, c.y, c.button);
+        ++fired_;
+    }
+}
+
 void InputPlan::applyClick(WindowManager& wm, const Step& s) {
-    // `applyClick` 只在 `kind == Click` 时被调（`atPoint` 的分支已经排他）⇒ 这里不用再判 kind。
+    // 配方 step 的壳：只把 `Step` 里的三个值交给**同一段**核心（⛔ 不复制映射 / 记账）。
+    applyClickAt(wm, s.x, s.y, s.button);
+}
+
+void InputPlan::applyClickAt(WindowManager& wm, int ref_x, int ref_y, MouseButton button) {
+    // ★ 这是**唯一**的 click 施加核心（配方 step 与控制层立即队列都到这里；判据 1 的"同一 apply 通道"）。
     // ★ 坐标**算一次**：`mouseMove` / `mouseButton(down)` / 之后抬起都读同一对值
     //   （⛔ 两处各算一次 ⇒ move 到 A、消息 lParam 是 B 的静默漂移）。
     int client_x = 0;
@@ -233,11 +279,11 @@ void InputPlan::applyClick(WindowManager& wm, const Step& s) {
         target_w = w->client_w;  // 0 / 没有窗口 ⇒ referenceToClientPixel 退回 1280×720
         target_h = w->client_h;
     }
-    referenceToClientPixel(target_w, target_h, s.x, s.y, &client_x, &client_y);
+    referenceToClientPixel(target_w, target_h, ref_x, ref_y, &client_x, &client_y);
     // ★ 与 `input.cpp` 的脚本路径同一段代码：先光标（消息 `WM_MOUSEMOVE` + 电平），再按下。
     input::mouseMove(wm, client_x, client_y, InputSource::Script, kPlanMessageTimeMs);
     PendingRelease r;
-    r.button = s.button;
+    r.button = button;
     r.x = client_x;
     r.y = client_y;
     r.press_samples = wm.inputSampleCount();

@@ -4,15 +4,14 @@
 - type: bug
 - status: done
 - parent: REQ-01M6XVYA68DQWWMQPY795WPN0Q
-- verify: apps/emulator-lift/tests/cli_time_limit.cpp#zero-equals-omit
-- repro: apps/emulator-lift/src/main.cpp#--time-limit
+- repro: docs/03-emulator/observations.md#time-limit
 - severity: S3
-- done_reason: 选①：解析改为 strtod+endptr+isfinite+secs<0.0 ⇒ --time-limit 0 与省略完全等价（真机实测摘要逐字相同、都 exit 0）；-1/abc 仍 exit 2 且消息指名 flag；usage 第 107 行的"0 = 不限"现在才成立。守卫 cli-time-limit（新建最小 PE32 夹具、顶层注册 ⇒ pure；修前 6 条红）。变异一条（退回 <=0.0）实测红。
+- done_reason: 该能力（--time-limit 的 CLI 边界）随解释器退役（2026-11-16）；AOT 臂 --time-limit 仍在用，但其边界断言已无端到端守卫 —— 已知覆盖缺口，登记在 REQ-01M7HQ57XV66FZQA5ECGHWD71N 正文。
 - tags: [emulator-lift, cli, usability]
 
 ## 判据（存在性 + 观测）
 
-- **help 与代码不一致**：`repo:apps/emulator-lift/src/main.cpp` 的 usage 第 106 行写
+- **help 与代码不一致**：解释器 `apps/emulator-lift/src/main.cpp`（已随解释器退役）的 usage 第 106 行写
   `--time-limit <秒>   墙钟上限（探索用；0 = 不限，缺省）`，而同一文件 `:305-309` 的实现是
   `time_limit_sec = strtod(...); if (time_limit_sec <= 0.0) { "需要正数秒"; return 2; }`。
 - **可复现**：`.\out\emulator-lift.exe --time-limit 0 ...` ⇒ 立刻 `exit 2`、无运行摘要（实测 188 ms）。

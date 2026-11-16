@@ -21,6 +21,8 @@
 
 #include "aot/aot_dispatch.h"
 #include "aot/aot_host.h"
+#include "runtime/control.h"          // 控制层端点（`--control-root`；PIMPL，⛔ 不含 beast / nlohmann）
+#include "runtime/guest_exit.h"       // guest 退出码 → 宿主退出码（与解释器臂**同一份**映射；纯头）
 #include "runtime/host_cursor.h"      // `--cursor-warp` 的平台闸门（与解释器臂同一条判据）
 #include "runtime/host_encoding.h"
 #include "runtime/input_plan.h"       // `--input-plan`（S4：AOT 臂唯一的输入控制面）
@@ -105,6 +107,19 @@ void usage() {
         "                      **缺省关**）：那是**静态布局快照**（谁占了哪一段），一次 run 里不变，\n"
         "                      属噪音 ⇒ 缺省档不打。⛔ 只影响这一块，别的 readout（exe / PE / 导入 /\n"
         "                      地址与服务面 / pin / 缺口 / 停机原因）一格都不收\n"
+        "\n"
+        "★ 控制层（停住 / 继续 / 采样 / 截图 / 投递一条 click / 收口；**缺省完全不启动** ⇒ 不给\n"
+        "  --control-root 时行为与逐字节输出都不变）：\n"
+        "  --control-root <dir>  端点文件目录（**必须显式给**）；起一个只绑 127.0.0.1 的 WS 端点，\n"
+        "                        写 `<dir>/ctl.<pid>.<nonce8>.json`（url / pid / port / nonce / token /\n"
+        "                        session / exe_sha256 / shape / started_utc），正常退出删\n"
+        "  --control-port N      端口（0 = 由系统给，缺省 0）；被占用 ⇒ **exit 2 并点名端口**（⛔ 不换端口）\n"
+        "  --control-idle-timeout S   暂停态且无命令超过 S 秒 ⇒ 端点自己 quit（缺省 300）\n"
+        "  --control-orphan-timeout S 客户端断了但端点还暂停 ⇒ 自行 quit（缺省 10；⛔ 不抱着 GPU 停着）\n"
+        "  --control-predicate-timeout S  resume --for-ms/--for frames 等不到谓词 ⇒ 回 timeout（缺省 30；\n"
+        "                             客户端据此 exit 3；谓词当场取消，⛔ 之后不会再「自己停住」）\n"
+        "                        能力面（本轮）= pause / resume / sample / screenshot / click / quit；\n"
+        "                        协议 schema = emu-ctl/2\n"
         "\n"
         "★ 呈现档位（口径与 emulator-lift 相同；缺省 headless）：\n"
         "  --present headless|window|auto\n"
@@ -201,6 +216,16 @@ int main(int argc, char** argv) {
     bool present_screenshot_set = false;
     std::uint64_t present_screenshot_frame = 0;
     std::string frame_dump;  // --dump-frame（guest 后缓冲 BMP；`cpu.shim.frame_dump`）
+    // ★ 控制层（`--control-*`；缺省全不给 ⇒ 控制层**完全不启动**，默认档逐字节不变）。
+    std::string control_root;
+    std::uint32_t control_port = 0;
+    bool control_port_set = false;
+    double control_idle_s = 300.0;
+    double control_orphan_s = 10.0;
+    double control_predicate_s = 30.0;
+    bool control_idle_set = false;
+    bool control_orphan_set = false;
+    bool control_predicate_set = false;
 
     for (std::size_t i = 1; i < args.size(); ++i) {
         const std::string& a = args[i];
@@ -281,6 +306,54 @@ int main(int argc, char** argv) {
             run_opts.region_log = true;
         } else if (a == "--present") {
             if (!needValue("--present", &present_mode)) return 2;
+        } else if (a == "--control-root") {
+            if (!needValue("--control-root", &control_root)) return 2;
+        } else if (a == "--control-port") {
+            std::string v;
+            if (!needValue("--control-port", &v)) return 2;
+            char* endp = nullptr;
+            const unsigned long long n = std::strtoull(v.c_str(), &endp, 10);
+            if (endp == v.c_str() || *endp != '\0' || n > 65535ull) {
+                std::fprintf(stderr, "emulator-lift-aot: --control-port 需要 0..65535：`%s`\n", v.c_str());
+                return 2;
+            }
+            control_port = static_cast<std::uint32_t>(n);
+            control_port_set = true;
+        } else if (a == "--control-idle-timeout") {
+            std::string v;
+            if (!needValue("--control-idle-timeout", &v)) return 2;
+            char* endp = nullptr;
+            const double d = std::strtod(v.c_str(), &endp);
+            if (endp == v.c_str() || *endp != '\0' || d < 0.0) {
+                std::fprintf(stderr, "emulator-lift-aot: --control-idle-timeout 需要非负数：`%s`\n", v.c_str());
+                return 2;
+            }
+            control_idle_s = d;
+            control_idle_set = true;
+        } else if (a == "--control-orphan-timeout") {
+            std::string v;
+            if (!needValue("--control-orphan-timeout", &v)) return 2;
+            char* endp = nullptr;
+            const double d = std::strtod(v.c_str(), &endp);
+            if (endp == v.c_str() || *endp != '\0' || d < 0.0) {
+                std::fprintf(stderr, "emulator-lift-aot: --control-orphan-timeout 需要非负数：`%s`\n",
+                             v.c_str());
+                return 2;
+            }
+            control_orphan_s = d;
+            control_orphan_set = true;
+        } else if (a == "--control-predicate-timeout") {
+            std::string v;
+            if (!needValue("--control-predicate-timeout", &v)) return 2;
+            char* endp = nullptr;
+            const double d = std::strtod(v.c_str(), &endp);
+            if (endp == v.c_str() || *endp != '\0' || !(d > 0.0)) {
+                std::fprintf(stderr, "emulator-lift-aot: --control-predicate-timeout 需要正数：`%s`\n",
+                             v.c_str());
+                return 2;
+            }
+            control_predicate_s = d;
+            control_predicate_set = true;
         } else if (a == "--present-driver") {
             if (!needValue("--present-driver", &present_driver)) return 2;
             present_driver_set = true;
@@ -329,6 +402,18 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "emulator-lift-aot: --audio %s 未实现（本臂只有 off：没有音频设备 / 喂料线程）\n",
                      audio_mode.c_str());
+        return 2;
+    }
+
+    // ---- 控制层参数校验：`--control-*` 只要给了一个就必须有 `--control-root` ----
+    //   ★ 缺省（一个都不给）⇒ 控制层**完全不启动** ⇒ 默认档逐字节不变（判据 1）。
+    //   ⛔ 不静默忽略 `--control-port`：那会让人以为在控制、其实端点没起来。
+    const bool control_any = !control_root.empty() || control_port_set || control_idle_set ||
+                             control_orphan_set || control_predicate_set;
+    if (control_any && control_root.empty()) {
+        std::fprintf(stderr,
+                     "emulator-lift-aot: --control-port / --control-idle-timeout / --control-orphan-timeout / "
+                     "--control-predicate-timeout 需要同时给 --control-root <dir>\n");
         return 2;
     }
 
@@ -503,12 +588,19 @@ int main(int argc, char** argv) {
     }
 
     // ---- ③'' `--input-plan` 装配（`WindowManager` = 唯一状态源；`presenter` 只为摘要读数留）----
-    //   ★ 两处都只是**非拥有指针**。计划不给 ⇒ 两处都不装配 ⇒ 读点只付一条判空、输出逐字节不变。
+    //   ★ 两处都只是**非拥有指针**。计划不给**且**控制层不开 ⇒ 两处都不装配 ⇒ 读点只付一条判空、
+    //     输出逐字节不变。
+    //   ★ **M1 起多一个装配条件**：控制层开着就必须装 —— `click` 的施加点是 `InputPlan::atPoint`
+    //     （同一个 `InputPlan`），而"没有任何配方"的运行也必须能投一条点击。
+    //     代价：那种运行里每个输入读点多两次计数器自增（⛔ 不打印、不改 guest 行为）。
     //   ★ ⛔ 不装在 `aot_run.cpp` / `machine.cpp` 里（守卫 ① 钉住那 6 个词 = 0 命中）。
     //   ★ 身份来源（`await script` 的门）在这里挂：`host.mem()` 只有在 `init()` 之后才可读
     //     （解析在 bring-up 之前 ⇒ 解析期⛔ 不采身份）。`atPoint()` 签名不变。
-    if (input_plan.armed()) {
+    if (input_plan.armed() || control_any) {
         input_plan.attachGuestMemory(&host.mem());
+        // ★ 暂停补偿（S1）：配方的每步守卫钟 = 宿主单调毫秒 − 累计暂停毫秒。
+        //   缺省（没有控制层 / 没暂停过）`pausedTotalMs() == 0` ⇒ 与改动前逐位相同。
+        input_plan.attachClock(&host.clock());
         host.cpu().windows->setInputPlan(&input_plan);
         // `present.cpp` 的 `note(Frame)` 保留：它只是摘要 `presents=` 的读数，⛔ 不再是门。
         host.presenter().setInputPlan(&input_plan);
@@ -617,10 +709,61 @@ int main(int argc, char** argv) {
     host.printReadout(stdout, run_opts.region_log);
     std::fflush(stdout);
 
+    // =====================================================================================
+    // ⑤' 控制层端点（`--control-root`；缺省**完全不启动** ⇒ 默认档逐字节不变）
+    //   ★ 起在 GPU bring-up / prepare / 生成物检查**之后**：没有可跑的东西就不该监听端口。
+    //   ★ `exe_sha256` 取 `host.image().sha256`（与 pin 同源）；`present` 取 `windowHidden()`
+    //     （⛔ 不由 `--present` 推：`auto` 会静默回落隐藏窗 —— `design-review.md` §2-2）。
+    //   ★ 监听失败 ⇒ **exit 2 + 点名端口**（判据 12）；⛔ 不静默换端口、⛔ 不降级成"没有控制层"。
+    // =====================================================================================
+    lift::Control control;
+    bool control_started = false;
+    if (control_any) {
+        lift::Control::Options copts;
+        copts.root = control_root;
+        copts.port = static_cast<std::uint16_t>(control_port);
+        copts.idle_timeout_s = control_idle_s;
+        copts.orphan_timeout_s = control_orphan_s;
+        copts.predicate_timeout_s = control_predicate_s;
+        copts.exe_sha256 = host.image().sha256;
+        copts.shape = LIFT_AOT_SHAPE;
+        copts.present = sdl_display->windowHidden() ? "hidden" : "visible";
+        std::string ctl_err;
+        if (!control.start(copts, &ctl_err)) {
+            std::fprintf(stderr, "emulator-lift-aot: 控制端点启动失败（exit 2）：%s\n", ctl_err.c_str());
+            return 2;
+        }
+        control_started = true;
+        host.setControl(&control);
+        // ★ `present` 的事实来源只有一处（`windowHidden()`，⛔ 不由 `--present` 推：`auto` 会静默
+        //   回落隐藏窗）。`hello.present` 与 `sample.present` 都读它。
+        host.setPresentState(copts.present);
+        // 一次性 readout（§12.8 第 3 条：一次性输出可以；⛔ 不是周期性）。
+        std::printf(
+            "control   : ws://%s  file=%s  idle=%.1fs orphan=%.1fs predicate=%.1fs  "
+            "caps=pause,resume,sample,screenshot,click,quit\n",
+            control.localEndpoint().c_str(), control.controlFilePath().c_str(), control_idle_s,
+            control_orphan_s, control_predicate_s);
+        std::fflush(stdout);
+    }
+
     // ---- ⑥ 执行 ----
     const lift::aot::AotRunResult r = host.run(run_opts);
     // ★ 与解释器 `main.cpp:1269` 同一条收口：先摘事件泵，再打摘要（⛔ 不让泵在收口后碰窗口）。
     if (present_window_active) host.cpu().windows->clearHostEventPump();
+    // ---- ⑥'' 控制层收口：**摘要之前**（design-ws §2.3 第 6 条：⛔ 不先打摘要再 join，
+    //   那会让"端点已消失"这句话晚于摘要出去，人就会读到假象）。
+    //   `bye.reason` = run 的停机原因（⛔ 不等于命令名；`requested_by` 另有一格区分 client/idle/orphan）
+    //   `bye` 先于摘要 ⇒ 判据 14 的"bye 先于摘要"。
+    host.setControl(nullptr);
+    if (control_started) {
+        // ★ `bye` 两个字段各管一件事（父级裁决）：`reason` = run 为什么结束（窗口类停机用
+        //   `window-closed`，⛔ 不等于命令名）；`requested_by` = 谁请求的（窗口关闭 = `client`）。
+        const std::string run_reason =
+            r.host_stop_reason.empty() ? lift::aot::aotStopName(r.reason) : r.host_stop_reason;
+        const char* requested_by = r.host_stop_reason == "window-closed" ? "client" : nullptr;
+        control.shutdown(run_reason, requested_by);
+    }
     // ---- ⑥' `--input-plan` 收口：**跑结束前必须抬**（否则下一次 run 会看到"按钮一直按着"）----
     //   `releaseAll()` 只抬起待办的按钮，不是 step、不推进入口；返回个数只用于摘要。
     //   ★ 完成度是**判据**（`REQ-01M7HP2Q1N0N004M8R4RPABWSV` 的前置）：`pending != 0`（任务没走完）
@@ -650,6 +793,11 @@ int main(int argc, char** argv) {
         return lift::recipeOutcomeExitCode(plan_outcome);  // = 5（recipe.h 的 kRecipeIncompleteExitCode）
     }
     std::fflush(stderr);
-    // ★ 退出码口径与解释器臂逐字相同（`machine.cpp:109` 的 `exitCodeForRun`）：ok ⇒ 0，否则 2。
-    return r.ok() ? 0 : 2;
+    // ★ 退出码口径与解释器臂逐字相同（`machine.cpp` 的 `exitCodeForRun` + `runtime/guest_exit.h`）：
+    //   ① run 本身没有正常结束 ⇒ 2（= `exitCodeForRun`）；
+    //   ② run 正常停下 ⇒ 再看 guest 自己有没有 `ExitProcess(n)` / `TerminateProcess(_, n)`：
+    //      n == 0 ⇒ 0，n != 0 ⇒ 2。⛔ 漏掉 ② 就是 "guest 调 ExitProcess(3) 而宿主仍 exit 0"。
+    //   本臂读 `host.cpu().shim.exit_code`（与解释器 `machine.guestExitCode()` 同一个字段）。
+    if (!r.ok()) return 2;
+    return lift::exitCodeForGuestExit(host.cpu().shim.exit_code);
 }

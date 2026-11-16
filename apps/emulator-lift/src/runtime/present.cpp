@@ -119,7 +119,26 @@ bool HeadlessPresenter::present(const SurfaceArena& arena, const GuestSurface& s
             if (err != nullptr) *err = dump_err;  // 失败原因仍交给调用方（诊断用；不改变返回值）
         }
     }
+    // ★ **控制层 Present 闸门**（S2）：位置 = sink（与 `--dump-frame`）**之后**、返回之前。
+    //   理由（design-review §1 / §2b）：此刻 `++frame_count_` 与 `last_surface_hash_` 已定稿、
+    //   帧已交给 sink（`paused_at:"present"` 因此成立）；⛔ 不放在 sink 之前 —— 那样窗口里会是上一帧。
+    //   回调可以阻塞（`pause` / `sample`）；没接控制层时只是**一次判空**。
+    if (gate_fn_ != nullptr) {
+        try {
+            (void)gate_fn_(gate_user_);
+        } catch (...) {
+            // 控制层是只读宿主面：它的异常**不许**改变 guest 的 Present 结果（与 sink 同一条兜底）。
+        }
+    }
     return true;
+}
+
+void HeadlessPresenter::noteControlResume() {
+    if (sink_ != nullptr) sink_->noteControlResume();
+}
+
+const char* HeadlessPresenter::controlStopReason() const {
+    return sink_ != nullptr ? sink_->controlStopReason() : nullptr;
 }
 
 // ★ 运行摘要 `present-tail` 的墙钟：最后一次 Present 那一刻 → **现在**（`dumpRunSummary` 在 run 收口

@@ -52,6 +52,13 @@
 //     目标 = 主窗口客户区 `HostWindow::client_w/h`（headless 也有；0 ⇒ 退回 1280×720）；
 //     `mouseMove` / `mouseButton(down)` / `mouseButton(up)` 共用**同一个**映射结果。
 //
+// ★ **第二条生产者 = 控制层的立即队列**（M1 · `REQ-01M7J2P5S27VX7WMRR3ZC9K2E8`）：
+//   控制层的 `click` 在**暂停态**入队（`enqueueClick`），由**下一个 guest 读点**（`atPoint`）
+//   **先于**配方当步施加。它 **不推进** 配方的 `next_` / `applied_`（配方里未到期的门照旧等），
+//   但走**同一段**施加核心（`applyClickAt` ⇒ 同一份 `referenceToClientPixel` + 同一份
+//   `input::*` + 同一份 down→待抬起记账），并计入 `fired()`。⛔ 不许为它复制第二套坐标映射 /
+//   第二套按钮记账 / 第二个施加点（守卫：`lift-control-endpoint` 的 click 用例）。
+//
 // ★ **完成度是判据**（`REQ-01M7HP2Q1N0N004M8R4RPABWSV` 的前置）：跑完时 `pending != 0`
 //   （任务没走完）或某一步的 `timeout` 到期 ⇒ `outcome()` 不是 `Done` ⇒ CLI 层按
 //   `recipeOutcomeExitCode()` 给 **5** 并点名那一步（`failureReport()` 带 `文件:行` + 门/动作）。
@@ -79,6 +86,7 @@ namespace lift {
 
 class WindowManager;
 class GuestMemory;
+class VirtualClock;
 
 // 11 个投递点（**闭集合**；读路径已由复审穷举核过）：
 //   9 个读点 + 1 个写点（`SetCursorPos`）+ 1 个事件源（`ReadFile` —— ⛔ 它不是"输入族"，
@@ -141,9 +149,33 @@ public:
     using NowFn = std::uint64_t (*)();
     void setClockForTest(NowFn now_ms);
 
+    // ★ **暂停补偿**（控制层 S1）：本臂的守卫钟 = 宿主单调毫秒 − 累计暂停毫秒。
+    //   为什么必须有：每步的 `timeout` 用的是本文件**自己的** `steady_clock`（不是 guest 的
+    //   `VirtualClock`）⇒ 只冻结 guest 时钟时，一次 2 s 暂停会把配方里 `timeout 1000` 的窗口走掉
+    //   （裁决：`body-m0.md` 末节"冻结必须同时补偿这两把钟"）。
+    //   `clock` = 宿主那份 `VirtualClock`（`pausedTotalMs()` 是唯一读数）；nullptr = 不减（缺省档逐位不变）。
+    //   ⛔ 不在这里另存一份暂停账：暂停账的唯一来源是 `VirtualClock`。
+    void attachClock(const VirtualClock* clock);
+
     // ★ **唯一**能施加 step 的入口（也只经 `runtime/input.h` 的四个投递入口到达）。
     //   flush-before-read：先把到期 step 落地到 `WindowManager`，**再**让 shim 去读。
+    //   ★ 同一个读点内的顺序：待抬起 → **立即队列（控制层 `click`）** → 配方当步。
     void atPoint(WindowManager& wm, InputPoint point);
+
+    // =====================================================================================
+    // ★ **立即队列**（控制层 `click` 的唯一落点；M1）
+    //   · 生产者 = 控制层（**主线程**的 `Control::serve()`，只在暂停态）；
+    //   · 消费者 = 本层：下一个 guest 读点（`atPoint`），**先于**配方当步；
+    //   · ⛔ 不推进配方（`next_` / `applied_` / 守卫账一位不动）⇒ 未到期的门照旧等；
+    //   · 施加走 `applyClickAt`（与配方 `click` **同一段**代码）并计入 `fired()`；
+    //   · **有界**：满了 `enqueueClick` 返回 false ⇒ 控制层回 `bad_request`（⛔ 静默丢）。
+    //   ★ 没有控制层时这条队列**恒空** ⇒ `atPoint` 的早退条件与默认档逐字节不变。
+    // =====================================================================================
+    static constexpr std::size_t kImmediateClickCapacity = 64;
+    // `ref_x` / `ref_y` = **1280×720 参考坐标**（与配方 `click x y` 同一口径；已由控制层校验）。
+    // 返回 false = 队列已满（⛔ 不排队、不丢旧的）。
+    bool enqueueClick(int ref_x, int ref_y, MouseButton button);
+    std::size_t queuedClicks() const { return immediate_.size(); }
 
     // ★ 记账函数：**不接受 `WindowManager`**、不持有计划指针、只能累加计数。
     //   ⇒ 它**不可能**施加到期 step；到期 step 只能由**下一个读点**消费。
@@ -166,6 +198,8 @@ public:
         return static_cast<std::uint64_t>(recipe_.size()) - applied_;
     }
     // **已施加的 `click`** 数（摘要 `fired=`；`await` / `wait` / `profile_*` / `quit` 不算"动作"）。
+    // ★ **两种生产者同一口径**：配方 step 与控制层立即队列的 click 都记这里
+    //   （判据 1 的"两边 fired 相同"读的就是这一格）。
     std::uint64_t fired() const { return fired_; }
     std::uint64_t releases() const { return released_; }
     // 位置门"这一刻读不到位置"的次数（base==0 / pc 越界 / 未提交）。⛔ 缺省不打印（诊断用）。
@@ -210,10 +244,23 @@ private:
         std::uint64_t press_reads = 0;    // 按下那一刻的读点序号（兜底抬起用）
     };
 
+    // 立即队列的一条：**1280×720 参考坐标**（⛔ 还没映射 —— 映射只发生在施加那一刻的那一次）。
+    struct ImmediateClick {
+        int x = 0;
+        int y = 0;
+        MouseButton button = MouseButton::Left;
+    };
+
     // 采一次身份（同 `(cur,id)` + 名字表签名不变 ⇒ 复用缓存的名字，不重解析）。
     void refreshIdentity();
     std::uint64_t nowMs() const;
+    // ★ **唯一**的 click 施加核心：配方 step 与立即队列**都**走它
+    //   （同一份 `referenceToClientPixel` + 同一份 `input::*` + 同一份 down→待抬起记账）。
+    void applyClickAt(WindowManager& wm, int ref_x, int ref_y, MouseButton button);
+    // 配方 step 的壳：只把 `Step` 的三个值交给上面那一段（⛔ 不复制映射 / 记账）。
     void applyClick(WindowManager& wm, const Step& s);
+    // 立即队列消费（同一次读点内、配方之前；⛔ 不碰 `next_` / `applied_`）。
+    void drainImmediate(WindowManager& wm);
     // 区间边界的**本臂落点**（没有窗口 profiler ⇒ 一次性两行宿主墙钟读数）。
     void applyProfileMark(const Step& s, std::uint64_t now_ms);
     // `quit` 的**本臂落点**：与解释器臂同一个交付点 = `WindowManager::postQuit(0)`。
@@ -225,10 +272,13 @@ private:
 
     Recipe recipe_;
     std::vector<PendingRelease> pending_;
+    // 控制层投进来的 click（**第二条生产者**；有界，见 `kImmediateClickCapacity`）。
+    std::vector<ImmediateClick> immediate_;
     const GuestMemory* mem_ = nullptr;  // 装配点挂；nullptr ⇒ 门恒不成立
     MarkerSampler marker_sampler_;
     MarkerSample identity_;             // 最近一次采样（名字按上面那条规则缓存）
     NowFn now_fn_ = nullptr;            // 测试缝（nullptr = steady_clock）
+    const VirtualClock* clock_ = nullptr;  // 暂停补偿（nullptr = 不减；见 attachClock）
     std::uint64_t next_ = 0;            // 下一个待判的指令（顺序推进，⛔ 不回跳）
     std::uint64_t applied_ = 0;         // 已消费指令数
     std::uint64_t fired_ = 0;           // 已施加 click 数

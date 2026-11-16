@@ -1036,6 +1036,143 @@ const MUTATIONS = [
       'enum-locales-no-cache（`cpu.cache == nullptr`）当场红；★ 解释器臂不会红（块缓存能装任意 EA）',
   },
 
+  // ── 控制层端点（S0 传输 + S1 闸门/时钟；守卫 = `tests/control_endpoint.cpp`）──
+  //   ★ 两条各代表一类"静默失效"：
+  //     ① 暂停**不冻结 guest 时钟** ⇒ 暂停 2 s 后 guest 的 `timeGetTime` 跳 2000 ms
+  //        （症状是超时/动画/帧率自适应随暂停漂 —— 不崩、不报错，只是读数不再可比）；
+  //     ② 握手**不拒 `Origin`** ⇒ 任何网页都能连本机端点（安全边界，静默失守）。
+  {
+    file: 'apps/emulator-lift/src/runtime/control_ws.cpp',
+    from: '                if (ctx.clock != nullptr) ctx.clock->freeze();  // ★ 冻结区间对 guest 不可见',
+    to: '                (void)0;  // 变异：暂停不冻结 guest 时钟',
+    guard: 'ctest:lift-control-endpoint',
+    ctest: 'lift-control-endpoint',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '暂停不冻结 guest 时钟 ⇒ 暂停 2.1 s 后 `guest_ms` 差 ≈2100 ms（判据 6 的"暂停对 guest 不可见"）' +
+      '⇒ lift-control-endpoint 的 [judge6] delta < 5 断言红',
+  },
+
+  {
+    file: 'apps/emulator-lift/src/runtime/control_ws.cpp',
+    from: '    if (req.find(http::field::origin) != req.end()) {',
+    to: '    if (false) {  // 变异：不拒 Origin',
+    guard: 'ctest:lift-control-endpoint',
+    ctest: 'lift-control-endpoint',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '带 Origin 头的握手不再被拒 ⇒ 浏览器里的任意网页都能连本机控制端点（判据 10 后半）' +
+      '⇒ lift-control-endpoint 的 origin status == 403 断言红',
+  },
+
+  {
+    // ★ S4（判据 13）代表 "resume 把暂停期间的 OS 输入当**刚发生**" 这一类错：
+    //   暂停 = 完全停（不动 SDL）⇒ 10 s 的点击/拖动/关窗全排在队列里；resume 首轮排空时必须
+    //   按 `event.common.timestamp` 丢掉"早于恢复时刻"的 OS 输入，并把暂停期间的关窗 / ESC
+    //   当**宿主 stop**（⛔ 投 WM_CLOSE 进 guest ⇒ 这一轮被"用户暂停时点了下窗口"结束掉）。
+    //   变异 = 分类器永远 Keep（阈值比较消失）⇒ `tests/present_window.cpp` 的三条断言红。
+    file: 'apps/emulator-lift/src/runtime/present.h',
+    from:
+      'inline StaleEventAction classifyStaleEvent(HostEventClass cls, std::uint64_t timestamp_ns,\n' +
+      '                                           std::uint64_t resume_ns) {\n' +
+      '    if (resume_ns == 0 || timestamp_ns == 0 || timestamp_ns >= resume_ns) return StaleEventAction::Keep;',
+    to:
+      'inline StaleEventAction classifyStaleEvent(HostEventClass cls, std::uint64_t timestamp_ns,\n' +
+      '                                           std::uint64_t resume_ns) {\n' +
+      '    (void)cls; (void)timestamp_ns; (void)resume_ns;  // 变异：不按时间戳过滤\n' +
+      '    return StaleEventAction::Keep;',
+    guard: 'ctest:present-window',
+    ctest: 'present-window',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'resume 不再丢弃"暂停期间产生的 OS 输入"⇒ 陈旧 motion/button 被当成刚发生（present-window 的 ' +
+      'queue==0 / buttons==0 断言红），陈旧关窗也不再当宿主 stop（stopRequested/controlStopReason 断言红）',
+  },
+
+  {
+    // ★ S3（判据 3b）代表 "快照里混进了一个会自己走的数" 这一类错：
+    //   `state_seq` 的语义是**客户端可见的暂停状态转移**（进入/离开各一次）；采样⛔ 不许自增。
+    //   变异 = 已暂停态收到 `sample` 也走"进入暂停"分支（freeze + ++state_seq）⇒
+    //   同一暂停点连采两次的 res 文本不再逐字节相同（3b 的机制面红）。
+    file: 'apps/emulator-lift/src/runtime/control_ws.cpp',
+    from:
+      '            case ControlOp::Sample: {\n' +
+      '                // ★ `sample` = **暂停（若未停）** + 一份 POD 快照（主线程填，控制线程只序列化）。\n' +
+      '                if (!paused) {\n' +
+      '                    if (ctx.clock != nullptr) ctx.clock->freeze();\n' +
+      '                    paused = true;\n' +
+      '                    paused_at = ctx.paused_at;\n' +
+      '                    ++state_seq;\n' +
+      '                }',
+    to:
+      '            case ControlOp::Sample: {\n' +
+      '                // 变异：每次采样都当"进入暂停"（state_seq 自增 + 重冻时钟）\n' +
+      '                {\n' +
+      '                    if (ctx.clock != nullptr) ctx.clock->freeze();\n' +
+      '                    paused = true;\n' +
+      '                    paused_at = ctx.paused_at;\n' +
+      '                    ++state_seq;\n' +
+      '                }',
+    guard: 'ctest:lift-control-endpoint',
+    ctest: 'lift-control-endpoint',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '`sample` 每次自增 state_seq ⇒ 同一暂停点连采两次的 res 文本不同（判据 3b 的机制面：' +
+      '`s1.text == s2.text` 断言红）；这会让"步进/快照可复现"静默失效',
+  },
+
+  {
+    // ★ S2（判据 5 / 客户端契约）代表 "`screenshot` 忘了自己暂停" 这一类错：
+    //   设计 §4 的命令表写的是"**暂停 + 写最后呈现那一帧**"；只写文件、不置暂停态 ⇒
+    //   客户端拿到一张**不是暂停点**的帧（`state_seq` 不动、`paused` 仍 false），
+    //   而错误码/文件都正常 ⇒ 静默。
+    //   变异 = 去掉 Screenshot 分支的"若未暂停则停在该汇点"块 ⇒
+    //   lift-control-endpoint 的 [judge5-screenshot-pauses]（paused / state_seq+1 / paused_at）红。
+    file: 'apps/emulator-lift/src/runtime/control_ws.cpp',
+    from:
+      '            case ControlOp::Screenshot: {\n' +
+      '                // ★ 与 `sample` **同一条**"若未暂停则停在该汇点"的路径（判据 5 / 设计 §4 的命令表：\n' +
+      '                //   `screenshot` = 暂停 + 写最后呈现那一帧）。`paused_at` 由**实际停住的汇点**填\n' +
+      '                //   （`ctx.paused_at`：块边界 `"block"` / Present 闸门 `"present"`）。\n' +
+      '                if (!paused) {\n' +
+      '                    if (ctx.clock != nullptr) ctx.clock->freeze();\n' +
+      '                    paused = true;\n' +
+      '                    paused_at = ctx.paused_at;\n' +
+      '                    ++state_seq;  // 进入暂停态严格 +1（与 pause/sample 同一口径）\n' +
+      '                }',
+    to:
+      '            case ControlOp::Screenshot: {\n' +
+      '                // 变异：screenshot 不再自己暂停（只写文件）\n',
+    guard: 'ctest:lift-control-endpoint',
+    ctest: 'lift-control-endpoint',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '`screenshot` 不再自己暂停 ⇒ 未暂停态调用后 `paused` 仍 false、`state_seq` 不动 ⇒ ' +
+      'lift-control-endpoint 的 [judge5-screenshot-pauses] 断言红（客户端只能自己补发 pause）',
+  },
+
+  {
+    // ★ M1（`REQ-01M7J2P5S27VX7WMRR3ZC9K2E8` 判据 3）代表 "`click` 在暂停态之外也被收下" 这一类错：
+    //   合同是"**只在暂停态入队**；未暂停 ⇒ `error.code:"not_paused"`（⛔ 静默丢）"。
+    //   去掉那道判定 ⇒ 运行态投的 click 也回 `ok:true` 并真的排队，客户端会以为
+    //   "这一下已经按当前画面点过了"（而施加点其实在下一次暂停之后的某个读点）。
+    //   守卫：`apps/emulator-lift/tests/control_endpoint.cpp#caseClickDelivery` 的
+    //   `[judge3-click-not-paused]`（`code == "not_paused"` 断言当场红）。
+    file: 'apps/emulator-lift/src/runtime/control_ws.cpp',
+    from:
+      '                // ★ 判据 3：`click` **只**在暂停态入队（未暂停 ⇒ `not_paused`；⛔ 静默丢）。\n' +
+      '                if (!paused) {',
+    to:
+      '                // 变异：去掉 click 的 not_paused 判定（运行态也照收并排队）\n' +
+      '                if (false) {',
+    guard: 'ctest:lift-control-endpoint',
+    ctest: 'lift-control-endpoint',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '`click` 不再只接受暂停态 ⇒ 未暂停时回 `ok:true`（并把 click 排进下一个读点）⇒ ' +
+      'lift-control-endpoint 的 [judge3-click-not-paused] 断言红',
+  },
+
   {
     // ★ 代表 "shim 按**别的 API 版本的签名**读参" 这一类错（`REQ-01M780VKKRFHJEX6VM74DRCYBM`）：
     //   `IDirect3DDevice9::SetRenderTarget(DWORD RenderTargetIndex, IDirect3DSurface9*)` 被当成
@@ -1434,20 +1571,21 @@ const MUTATIONS = [
   },
 
   {
-    // ★ 代表 "guest 的 ExitProcess(n) 只进了 shim 状态、没接到宿主进程退出码"这一类错
-    //   （REQ-01M77CMJGJ9EJVNPFS2TKMMHD1）。判据：`apps/emulator-lift/tests/exit_code.cpp` ——
-    //   自造最小 PE（导入 `kernel32!ExitProcess`）起**真子进程**：`n=3 ⇒ exit 2`、`n=0 ⇒ exit 0`、
-    //   `TerminateProcess(_,3) ⇒ exit 2`。删掉最终分流 ⇒ n=3 也 exit 0 ⇒ 当场红。
-    //   ★ 为什么不是"只测 accessor"：那会漏掉"映射写了但 main 没接线"的半修。
-    file: 'apps/emulator-lift/src/main.cpp',
-    from: '    return lift::exitCodeForGuestExit(machine.guestExitCode());',
-    to: '    return lift::exitCodeForRun(r);',
-    guard: 'ctest:exit-code',
-    ctest: 'exit-code',
+    // ★ 代表 "guest 退出码映射被改成**透传**"这一类错（`REQ-01M7HP2YRZG222E0NE2H6MW6NK` 的
+    //   纯函数面）：`exitCodeForGuestExit` 是解释器臂与 AOT 臂**共用**的那一份映射，现在住在
+    //   `src/runtime/guest_exit.h`（AOT ⛔ 不 include `machine.h`，所以它必须自成一个纯头）。
+    //   判据：`apps/emulator-lift/tests/guest_exit.cpp` —— 0 ⇒ 0；非 0（含 127/128/255/256/259/
+    //   0x7FFFFFFF/0xFFFFFFFF）⇒ 2 且**不等于 n**。改成透传 ⇒ 1/3/... 落回自己 ⇒ 当场红。
+    //   ★ 为什么变异点选这里（不是 `aot_main` 的接线）：纯用例够不到 AOT 的 e2e 退出码面
+    //     （见该文件头的"弱守卫"说明），它能钉住的正是这条映射本身。
+    file: 'apps/emulator-lift/src/runtime/guest_exit.h',
+    from: '    return guest_exit_code == 0u ? 0 : 2;',
+    to: '    return static_cast<int>(guest_exit_code & 0xFFu);',
+    guard: 'ctest:lift-guest-exit',
+    ctest: 'lift-guest-exit',
     buildDir: 'apps/emulator-lift/out',
     what:
-      'main 最终出口不再读 guest 的 ExitProcess 退出码（退回只看 run 是否 ok）⇒ ' +
-      '真子进程 ExitProcess(3) 变 exit 0 ⇒ exit-code 的 process/exit-3 当场红',
+      'guest 退出码改成透传（非 0 ⇒ n 原值，不再压成 2）⇒ `lift-guest-exit` 的 nonzero 用例当场红',
   },
 
   {
@@ -1909,42 +2047,6 @@ const MUTATIONS = [
       '"建完之后" ⇒ 协议上等于永久泄漏）',
   },
 
-  // ── `--time-limit 0` = **不设墙钟上限**（`REQ-01M711JN018QDSWK4726Y1A0KV`）──────────────
-  //   ★ 破坏 = 把"0 = 不限"的判据退回 `secs <= 0.0`（= 本单修前的样子）。后果不是崩溃，而是
-  //     **usage 骗人**：help 说"0 = 不限，缺省"，代码却 exit 2 ⇒ 探索脚本里写死的 `--time-limit 0`
-  //     换一份二进制就整轮跑不起来（实测 188 ms 就退，连运行摘要都没有）。
-  //   ★ 判据在 **CLI 级** CTest（解析 → 运行 → 摘要 → 退出码整条链路）：`tests/cli_time_limit.cpp`
-  //     的 `zero-equals-omit` —— `--time-limit 0` 必须与**省略该参数**同退出码、且 stop / insns /
-  //     blocks 读数逐字相同；破坏后那一组当场红（`bad--1` / `bad-abc` 两条仍绿：它们守反方向）。
-  //   ⛔ 不用 `if (false)`：那只是"判据整条消失"；`secs <= 0.0` 精确表达**修前那种错**。
-  {
-    file: 'apps/emulator-lift/src/main.cpp',
-    from: "            if (end == text || *end != '\\0' || !std::isfinite(secs) || secs < 0.0) {",
-    to: "            if (end == text || *end != '\\0' || secs <= 0.0) {  // 变异：0 又变成非法（help 重新骗人）",
-    guard: 'ctest:cli-time-limit',
-    ctest: 'cli-time-limit',
-    buildDir: 'apps/emulator-lift/out',
-    what:
-      '`--time-limit` 的"0 = 不限"退回 `<= 0.0`（本单修前）⇒ cli-time-limit 的 zero-equals-omit 红：' +
-      '`--time-limit 0` 又 exit 2 而 usage 仍声称"0 = 不限"',
-  },
-  // ── `--dump-frame` 的目录必须在开跑前建好（`REQ-01M73YBCC3DZ05Y9NSDTRKTMMY`）────────────────
-  //   ★ 破坏 = 删掉 `create_directories`（保留 `(void)dump_dir;` 让编译通过）= 本单修前的样子：
-  //     目录不存在时进程照跑，直到别的停止条件（真游戏实测 **546 s**；目录建好后同一命令 7 s）。
-  //     纯档 CLI 用例没有 Present ⇒ 它抓的是"目录没建出来"（①）与"建不出来却 exit 0"（②）。
-  //   ⛔ 不用 `if (false)`：`(void)dump_dir;` 精确表达"那道闸被摘掉"，且不引入未使用变量告警。
-  {
-    file: 'apps/emulator-lift/src/main.cpp',
-    from: '            std::filesystem::create_directories(dump_dir, ec);',
-    to: '            (void)dump_dir;  // 变异：不建目录（= 修前）',
-    guard: 'ctest:cli-dump-frame',
-    ctest: 'cli-dump-frame',
-    buildDir: 'apps/emulator-lift/out',
-    what:
-      '`--dump-frame` 的目录不再预建（= 本单修前）⇒ cli-dump-frame 的 creates-missing-dir 红：' +
-      '子进程 exit 0 但目录不存在（真游戏里它会空转到别的停止条件，实测 546 s）',
-  },
-
   // ── `RaiseException` / `RtlUnwind` 的派发（`REQ-01M708DF24KY0QZNEHY66S0HYW`）──
   //   ★ 这条钉的正是本单要消灭的病：**未处理异常静默收场**（= 修前那种"一抛就没人管、进程照常"）。
   //     `seh` 的 B 组断言"两层 record 都返 0 ⇒ reason == UnhandledException"；静默后理由变成
@@ -2303,7 +2405,10 @@ const MUTATIONS = [
     //   （或真的开跑），stderr 里没有那句 GPU 拒绝文案。
     //   守卫：`lift/no-gpu-refuses-start`（`tests/gpu_batch.cpp` 的子进程臂；`SDL_VIDEODRIVER=dummy`
     //   强制"建不出 GPU device"，⛔ 不靠真拔显卡；后端在**执行源定位之前**建 ⇒ 不需要游戏资产）。
-    file: 'apps/emulator-lift/src/main.cpp',
+    //   ★ 2026-11-16 起该 CTest 的子进程实参是 **AOT 臂**（`$<TARGET_FILE:emulator-lift-aot>`）
+    //   ⇒ 变异点必须跟着落到 `aot_main.cpp` 的同一条判据上；指向 `main.cpp` 会变成
+    //   "变异施加在解释器上、守卫跑 AOT" ⇒ 变异存活（这条自检就假绿了）。
+    file: 'apps/emulator-lift/src/aot/aot_main.cpp',
     from: '        if (!ok || !sdl->rasterActive()) {',
     to: '        if (false) {',
     guard: 'ctest:lift/no-gpu-refuses-start',
@@ -2311,7 +2416,7 @@ const MUTATIONS = [
     buildDir: 'apps/emulator-lift/out',
     what:
       '无 GPU 时不再拒绝启动（改回静默继续）⇒ 子进程 exit 2 的原因是"找不到执行源"而不是 GPU ' +
-      '⇒ `lift/no-gpu-refuses-start` 当场红',
+      '⇒ `lift/no-gpu-refuses-start`（AOT 臂）当场红',
   },
 
   {
@@ -2333,85 +2438,6 @@ const MUTATIONS = [
     what:
       '把"环陈旧 ⇒ 交付静音"的判据改成恒 fresh（照读环）⇒ 第 2 圈是斜坡重播、' +
       'underrun_silence_events/bytes 归零 ⇒ `audio-device/underrun-silence-stale` 当场红',
-  },
-
-  // ── 默认 stdout 降噪（REQ-01M7AG06MXS6PK2B53B29QM76Z）──
-  {
-    // ★ 代表 "缺口清单又变回每次 run 无条件刷 14 行" 这一类错：
-    //   默认档只该打 `gap       : N 条（--report 看明细）`；把门控删掉（恢复无条件）⇒
-    //   `导入总数 = …` + 每条 `  缺口 module!api —— 理由` 全部回到默认输出。
-    //   守卫：`apps/emulator-lift/tests/gpu_batch.cpp` 的 `caseStdoutQuiet`（`stdout-quiet` CTest；
-    //   自造最小 PE + 假 `.lst`，默认档数行数 / 找 `  缺口 ` / `--report` 臂必须仍有明细）。
-    file: 'apps/emulator-lift/src/main.cpp',
-    from:
-      '    if (verbose_output) {\n' +
-      '        machine.reportBaseGaps(stdout);\n' +
-      '    } else {\n' +
-      '        std::printf("gap       : %zu 条（--report 看明细）\\n", machine.baseGapCount());\n' +
-      '    }',
-    to: '    machine.reportBaseGaps(stdout);',
-    guard: 'ctest:stdout-quiet',
-    ctest: 'stdout-quiet',
-    buildDir: 'apps/emulator-lift/out',
-    what:
-      '删掉缺口明细的默认门控（恢复每次 run 无条件 `reportBaseGaps`）⇒ 默认 stdout 又出现' +
-      '`导入总数 = …` + `  缺口 ` 明细 ⇒ stdout-quiet 的"默认档无缺口明细 / ≤25 行"当场红',
-  },
-  {
-    // ★ 代表 "native-override per-entry 又回到默认档逐条刷" 这一类错：
-    //   `show_all_overrides` 只在 Verbose 为真；改成恒真 ⇒ 默认档又打全表（启动清单是另一处门控，
-    //   两处都按"默认只留汇总行"折叠）。守卫的默认臂里 `_memcpy` 恰好命中 1 次 ⇒ 全打时
-    //   `  _memcpy @ 00401010 … hits=1 …` 必然出现 ⇒ `stdout-quiet` 红。
-    file: 'apps/emulator-lift/src/runtime/machine.cpp',
-    from: '        const bool show_all_overrides = verbose;',
-    to: '        const bool show_all_overrides = true;  // 变异：默认档也逐条打',
-    guard: 'ctest:stdout-quiet',
-    ctest: 'stdout-quiet',
-    buildDir: 'apps/emulator-lift/out',
-    what:
-      'per-entry 门控恒真（默认档也打全表）⇒ 默认 stdout 出现 `  _memcpy @ …` 逐条行 ⇒ ' +
-      'stdout-quiet 的"默认档无 per-entry"当场红',
-  },
-  {
-    // ★ 代表 "native-override 的异常判据又把 `hits==0` 算进来" 这一类错：
-    //   native override 无命中是**完全正常**的情况（这一趟没走到它）；把它算异常 ⇒ 每条本轮没走到
-    //   的 override 都被误报成"异常"（`=== 异常 ===` 里 `native-ovr: 异常 N 项：… hits=0 …`）。
-    //   守卫：`apps/emulator-lift/tests/gpu_batch.cpp` 的 `caseStdoutQuiet` 默认臂 —— 夹具同时开
-    //   `_memcpy`（命中 1 次）与 `_memset`（从不被调用 ⇒ hits=0）⇒ 新口径下 0 条异常。
-    //   变异 = 把 `hits == 0` 加回函数级判据 ⇒ `_memset hits=0` 进异常行 ⇒ 默认臂"没有
-    //   `native-ovr: 异常` 行"的断言当场红。
-    file: 'apps/emulator-lift/src/runtime/machine.cpp',
-    from: '            const bool anomaly = e->fallbacks != 0 || declines != 0;',
-    to:
-      '            const bool anomaly = e->hits == 0 || e->fallbacks != 0 || declines != 0;  ' +
-      '// 变异：hits==0 又算异常',
-    guard: 'ctest:stdout-quiet',
-    ctest: 'stdout-quiet',
-    buildDir: 'apps/emulator-lift/out',
-    what:
-      'native-ovr 异常判据加回 `hits==0` ⇒ 本轮没走到的 override（夹具里的 `_memset`）被误报 ⇒ ' +
-      '默认 stdout 出现 `native-ovr: 异常 … hits=0 …` ⇒ stdout-quiet 的"默认臂无异常行"当场红',
-  },
-  {
-    // ★ 代表 "把删掉的 A4 real-time 警告行又打回正常游玩路径" 这一类错：
-    //   那行（窗口模式 ⇒ A4 的逐字节可复现断言自动跳过）在正常游玩时没有任何信息量 ——
-    //   A4 是 guest 执行 trace 的**哈希可复现**（`tests/boot_trace.cpp`，headless + 虚拟时钟下仍成立），
-    //   不是渲染像素固定复现；real-time trace 的人看输入清单里的 `clock=REAL-TIME` 字段即可。
-    //   守卫：`stdout-quiet` 默认臂断言合并流里**没有** `逐字节可复现断言自动跳过`。
-    //   变异 = 把该行无条件加回 ⇒ 默认臂 stderr 出现它 ⇒ 当场红。
-    file: 'apps/emulator-lift/src/main.cpp',
-    from: '    opt.profile_top = profile_top;',
-    to:
-      '    opt.profile_top = profile_top;\n' +
-      '    std::fprintf(stderr, "emulator-lift: ⚠ 窗口模式（自动 real-time）：宿主时钟进 guest ⇒ ' +
-      '**A4 的逐字节可复现断言自动跳过**（trace 输入清单里的 clock=REAL-TIME）\\n");  ' +
-      '// 变异：把删掉的 A4 警告加回（无条件）',
-    guard: 'ctest:stdout-quiet',
-    ctest: 'stdout-quiet',
-    buildDir: 'apps/emulator-lift/out',
-    what:
-      '把已删除的 A4 警告行无条件加回（正常游玩也打）⇒ stdout-quiet 默认臂的' +
-      '"没有 `逐字节可复现断言自动跳过`"断言当场红',
   },
 
   // ── 新守卫：`add_test` 的 flag 必须在目标源文件里有分派（`cmake-test-entry`）─────────────
@@ -2844,6 +2870,55 @@ const MUTATIONS = [
     what:
       '把"忽略 OS 元数据"的判据改成恒 false ⇒ `.DS_Store` / `Thumbs.db` / `desktop.ini` / `._*` 又算未登记 ⇒ ' +
       '`fixtures.test.mjs` 的白名单单测红（macOS 上 Finder 一碰目录就重新生成 `.DS_Store` ⇒ pnpm verify 499/500 复发）',
+  },
+
+  // ── `emu-ctl` 客户端（`tools/lib/emu-ctl.mjs`；守卫 `tools/test/emu-ctl.test.mjs`）──
+  //   ★ 判据 9c：端口被**别的服务**占着时，`list` 必须靠 `hello.nonce` 对不上判死。
+  {
+    file: 'tools/lib/emu-ctl.mjs',
+    from:
+      '  if (hello.nonce !== entry.nonce) return `hello.nonce 与端点文件不一致（${JSON.stringify(hello.nonce)} ≠ ${JSON.stringify(entry.nonce)}）`;',
+    to: '  // 变异：不再校验 hello.nonce（陌生服务也能冒充本实例）\n',
+    guard: 'tools/test/emu-ctl.test.mjs',
+    what:
+      '去掉 `hello.nonce` 与端点文件的同一性校验 ⇒ 端口被别的服务占着时 `list` 会把陌生服务当成 alive ' +
+      '（判据 9c 的客户端面失效）⇒ emu-ctl.test 的 helloMismatch nonce 断言红',
+  },
+  //   ★ ⛔ 不猜：多个 alive 必须退出码 4 + 全部列出；这条变异让它"自动挑第一个"。
+  {
+    file: 'tools/lib/emu-ctl.mjs',
+    from:
+      '  const alive = all.filter((e) => e.alive === true);\n' +
+      '  if (alive.length === 1) return { ok: true, entry: alive[0] };\n' +
+      "  return { ok: false, code: EXIT.instance, reason: alive.length === 0 ? 'none' : 'multiple', entries: all, session: null };",
+    to:
+      '  const alive = all.filter((e) => e.alive === true);\n' +
+      '  if (alive.length >= 1) return { ok: true, entry: alive[0] };  // 变异：自动挑第一个\n' +
+      "  return { ok: false, code: EXIT.instance, reason: 'none', entries: all, session: null };",
+    guard: 'tools/test/emu-ctl.test.mjs',
+    what:
+      '把"恰好一个 alive 才自动选中"改成"有 alive 就挑第一个" ⇒ 同 root 两个实例时 `sample` 不报退出码 4 ' +
+      '（判据 11 的客户端面失效）⇒ emu-ctl.test 的 selectEntry multiple 断言红',
+  },
+  //   ★ 判据 9(b)：`gc` 只删 `ctl.<pid>.<nonce8>.json` —— 去掉文件名严格匹配 ⇒ `keep.txt` 也会被删。
+  {
+    file: 'tools/lib/emu-ctl.mjs',
+    from: "  if (!CTL_NAME_RE.test(String(item?.name ?? ''))) return { action: 'keep', why: 'name_mismatch' };\n",
+    to: '  // 变异：不再要求文件名严格匹配（keep.txt 也会被当成待删项）\n',
+    guard: 'tools/test/emu-ctl.test.mjs',
+    what:
+      '去掉 `gc` 的"文件名严格匹配 ctl.<pid>.<8hex>.json"判据 ⇒ `keep.txt`（connect 失败 + pid 死了）' +
+      '也会被删（判据 9b 的 keep.txt 失效）⇒ emu-ctl.test 的 gcDecision name_mismatch 断言红',
+  },
+  //   ★ `click` 的参考坐标必须在本地校验（服务端也会拒，但客户端先挡住 = 省一次往返）。
+  {
+    file: 'tools/lib/emu-ctl.mjs',
+    from: '  if (!Number.isSafeInteger(n) || n < 0 || n > limit) {\n',
+    to: '  if (false) {  // 变异：不校验 click 坐标上界\n',
+    guard: 'tools/test/emu-ctl.test.mjs',
+    what:
+      '去掉 `click` 坐标的 0..1279 / 0..719 闭区间校验 ⇒ 越界坐标被放到线上（本应本地退出码 2）' +
+      '⇒ emu-ctl.test 的 click 越界 argv 断言红',
   },
 ];
 

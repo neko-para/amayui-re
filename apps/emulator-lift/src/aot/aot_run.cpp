@@ -26,6 +26,7 @@
 #include <string>
 
 #include "aot/aot_dispatch.h"
+#include "runtime/control.h"  // Control（PIMPL 门面：⛔ 不含 beast / nlohmann / guest 头）
 
 namespace lift {
 namespace aot {
@@ -350,6 +351,7 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     calls_.reset();  // 与 seh 同口径：一次 run 的嵌套回调状态不跨 run
     cpu_.running = true;
     cpu_.stop_kind = HostStopKind::None;  // ★ 按轮重置（machine.cpp:1094）
+    control_stop_ = false;               // 控制层的置停标志也是**按轮**的事实（不跨 run）
     cpu_.shim.max_frames = opts.max_frames;
     if (!clock_.realTime()) clock_.setRealTime(true);  // D2b：wall clock（⛔ 没有 --clock= 开关）
     resetDispatchStats();
@@ -422,12 +424,18 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         }
         logged_frames = n;
     };
+    // ★ 控制层 **Present 闸门**（S2）：装一次，`present()` 在 sink / dump 之后回调它。
+    //   位置只在 `present.cpp`（⛔ 不在这里另找时机）；没接控制层时不装 ⇒ `present()` 里一次判空。
+    if (control_ != nullptr) presenter_.setPresentGate(&AotHost::presentGateThunk, this);
     // ★ 起点：`cpu_.eip` 已经是 PE entry（`prepare` 设的）⇒ lifted 侧现场由它派生。
     syncRegsFromCpu();
     const auto wall_start = std::chrono::steady_clock::now();
     std::uint64_t next_time_check = 0;
     // ★ 块边界事件泵的节流（与解释器 `machine.cpp:1097` / `:1298` 同粒度：每 4096 条一次）。
     std::uint64_t next_present_check = 0;
+    // ★ 控制层**重停谓词**（`resume --for-*`）的轮询节流（与上面同一个 kCheckStride 口径）：
+    //   `watching()` 是一次 atomic load；只有真的武装了谓词才读 `steady_clock` / `frameCount`。
+    std::uint64_t next_control_check = 0;
     // ★ 定时器泵的节流（S2）：`steady_clock::now()` 从"每轮派发"降到"每 kCheckStride 条一次"。
     //   两次采样之间只做一次**整数比较**（缓存的"最早到期时间" vs 缓存的"上次采样时刻"）⇒
     //   绝大多数轮次连取时都不做。语义口径不变（D2b）：判定用 `clock_` 的同一份墙钟、同刻到期
@@ -480,6 +488,37 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         syncCpuFromRegs();
         cpu_.eip = ea;
 
+        // ---- ⓪− 控制层闸门（`--control-root`；缺省 nullptr ⇒ 只有一次判空）----
+        //   ★ 位置 = 寄存器同步之后、合成 EA 泵之前（`design-review.md` §1 第 2 条的裁决）：
+        //     此刻 `cpu_` 已与 lifted 侧一致、`ea` = 本轮块入口、没有 in-flight shim。
+        //   ★ **只读语义**：`serve()` 只动宿主对象（时钟冻结 / `postQuit` / 置停标志），
+        //     ⛔ 不写 `cpu_` / `regs_` ⇒ 返回后**不需要**反向同步；暂停对 guest 不可见。
+        //   ★ 返回 true = 已置停（客户端 `quit` / idle / orphan）⇒ 立即收口，⛔ 不再进下一块。
+        if (control_ != nullptr &&
+            (control_->pending() || (control_->watching() && cpu_.insns >= next_control_check))) {
+            Control::Context gate_ctx;
+            gate_ctx.clock = &clock_;
+            gate_ctx.windows = &windows_;
+            gate_ctx.stop_requested = &control_stop_;
+            gate_ctx.paused_at = "block";
+            gate_ctx.host = this;
+            if (control_->serve(gate_ctx)) {
+                r.reason = AotStop::Stopped;
+                r.detail = "control: quit";
+                cpu_.running = false;
+                break;
+            }
+            next_control_check = cpu_.insns + kCheckStride;
+        }
+        // ★ 置停可能发生在**上一个块边界之后**（Present 闸门里的 `quit` / idle / orphan）：块边界
+        //   读一次 bool（`control_ == nullptr` 时连这一读都不付）⇒ 立即收口，⛔ 不再进下一块。
+        if (control_ != nullptr && control_stop_) {
+            r.reason = AotStop::Stopped;
+            r.detail = "control: quit";
+            cpu_.running = false;
+            break;
+        }
+
         // ---- ⓪ 外部停止请求（`--input-plan` 的 `quit`；`AotRunOptions::stop_requested`）----
         //   ★ 与解释器臂**同一条口径**（`machine.cpp:1270`：`actuator().quitRequested()` ⇒
         //     `Stopped` + detail `… quit`）：本次运行在**下一个块边界**收口，⛔ 不等 guest 自己退出。
@@ -496,10 +535,13 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         // ---- ① `--time-limit`（每 4096 条查一次墙钟；machine.cpp:1148-1157）----
         if (opts.time_limit_sec > 0.0 && cpu_.insns >= next_time_check) {
             const auto now = std::chrono::steady_clock::now();
-            const double elapsed = std::chrono::duration<double>(now - wall_start).count();
+            // ★ 暂停不是运行时间（父级 2026-11-16 裁决 / 判据 6）：`--time-limit` 与 guest 时钟同口径
+            //   扣掉累计暂停。没有暂停过 ⇒ `pausedTotalMs() == 0` ⇒ 与改动前逐位等价。
+            double elapsed = std::chrono::duration<double>(now - wall_start).count();
+            elapsed -= static_cast<double>(clock_.pausedTotalMs()) / 1000.0;
             if (elapsed >= opts.time_limit_sec) {
                 r.reason = AotStop::TimeLimit;
-                r.detail = "达到 --time-limit（墙钟上限）";
+                r.detail = "达到 --time-limit（墙钟上限，已扣暂停）";
                 break;
             }
             next_time_check = cpu_.insns + kCheckStride;
@@ -516,7 +558,15 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
                 presenter_.pumpHostEvents();
                 if (presenter_.stopRequested()) {
                     r.reason = AotStop::Stopped;
-                    r.detail = "present: 窗口关闭";
+                    // ★ 控制层口径（S4）：暂停期间的关窗 / ESC ⇒ `bye.reason:"window-closed"`，
+                    //   ⛔ 不投 `WM_CLOSE` 进 guest、⛔ 不把"停止"和"谁请求的"压进一个枚举。
+                    const char* host_reason = presenter_.controlStopReason();
+                    if (host_reason != nullptr) {
+                        r.host_stop_reason = host_reason;
+                        r.detail = "control: 暂停期间的关窗 / ESC（宿主 stop）";
+                    } else {
+                        r.detail = "present: 窗口关闭";
+                    }
                     cpu_.running = false;
                     break;
                 }
@@ -763,6 +813,8 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         r.reason = AotStop::Unimplemented;
         if (r.detail.empty()) r.detail = "执行循环退出但没有停因（宿主内部不一致）";
     }
+    // ★ 摘掉 Present 闸门：下一轮 `run()` 可能不带控制层（⛔ 留一条指向旧 Control 的回调）。
+    presenter_.setPresentGate(nullptr, nullptr);
     return r;
 }
 

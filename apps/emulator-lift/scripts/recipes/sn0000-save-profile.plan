@@ -18,19 +18,21 @@
 #   不是解释器臂那套分项窗口 profiler ⇒ 下面“把两对边界去掉再跑一次”的 A/B 只对**区间读数**有意义；
 #   文件里 `fellow-enter 3031 帧 7.39 s` / `save-confirm 3369 帧 7.42 s` 是**解释器臂的历史读数**。
 # 单帧定位：加 `--frame-log`（AOT 臂；解释器臂是 `LIFT_FRAME_TRACE=1`）⇒ `[frame] n=… hash=…`。
+#
+# ★ 已取证的前缀用**位置门**（区间与读数：`docs/03-emulator/scripts/TITLE.md` / `GAMESTART.md` / `SN0000.md`）；
+#   FELLOW / SAVE 之后仍是 `await script` + `wait`（区间还没取证）。两片窗自己的 `wait` 是**真·时间语义**
+#   （量宿主墙钟区间）⇒ 保留。
 
-await script TITLE timeout 30000
-wait 5000
+await position TITLE 0x0460 0x0520 timeout 30000
 
 click 1186 373
 
-await script GAMESTART
-wait 2000
+await position GAMESTART 0x0664 0x0724 timeout 30000
 
 click 830 592
 
-await script SN0000 timeout 35000
-wait 25000
+# 页 1 停点（`SN0000.md` 区间表第 3 行 / ⑤：`i073` @0x46B8 起、下一 label 0x470C 止）—— 取代旧的 `wait 25000`。
+await position SN0000 0x46B8 0x470C timeout 35000
 
 # ① 右键进入 FELLOW：窗口覆盖点击 + 转场（save 图给这段留 10 s；这里留 12 s）
 profile_begin fellow-enter
@@ -38,11 +40,13 @@ click 500 500 right
 wait 12000
 profile_end fellow-enter
 
+# 待取证：FELLOW/SAVE 的可用位置区间（见 docs/03-emulator/scripts/_recipe-map.md ③-4/③-5）
 await script FELLOW
 wait 2000
 
 click 100 140
 
+# 待取证：FELLOW/SAVE 的可用位置区间（见 docs/03-emulator/scripts/_recipe-map.md ③-4/③-5）
 await script SAVE
 wait 2000
 

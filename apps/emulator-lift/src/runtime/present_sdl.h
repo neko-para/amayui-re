@@ -63,6 +63,11 @@ public:
     //   没有事件源时 PresentSink 的 0ms 轮询语义不变。
     void pumpHostEvents(int wait_ms);
     bool stopRequested() const override;
+    // ★ `PresentSink`（控制层 S4）：resume 时记"恢复时刻"⇒ 丢弃陈旧 OS 输入；暂停期间的关窗/ESC
+    //   当宿主 stop（`controlStopReason() == "window-closed"`）。判据在 `runtime/present.h`
+    //   的 `classifyStaleEvent`（pure），实现见 `present_sdl.cpp` 的 `pumpOneEvent`。
+    void noteControlResume() override;
+    const char* controlStopReason() const override;
     // ★ `PresentSink`：宿主侧请求关窗（与 SDL 的 WINDOW_CLOSE_REQUESTED 同一条路）。
     void requestClose() override;
     // ★ `PresentSink`：**系统对话框**（`SLD_ShowMessageBox`）。会阻塞 ⇒ 实现里套 `GuestToken::YieldGuard`；

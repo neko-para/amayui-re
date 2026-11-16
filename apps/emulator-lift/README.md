@@ -185,7 +185,12 @@ apps/emulator-lift/
   CMakeLists.txt                      ← 目标 + CTest（**分级靠注册位置**，见 AGENTS.md §5）
   CMakePresets.json / vcpkg.json      ← windows-x64 / linux-x64 / macos-arm64；依赖 sdl3 + zydis + freetype + glm
   README.md / SCOPE.md / docs/        ← 口径 / 用户拍板的偏差 / 计划长文
-  src/main.cpp                        ← CLI：--exe --lst --game-dir --appdata --agerc --skip-logo
+  src/aot/aot_main.cpp                ← **AOT 臂**的 CLI（唯一产品入口）：--game-dir --appdata --agerc --skip-logo
+                                        --max-insns --max-frames --dump-frame --time-limit --input-plan
+                                        --present headless|window|auto --control-root/--control-port/…
+  （已删）src/main.cpp                 ← 解释器 CLI：**2026-11-16 随解释器退役**，下面这些开关今天不再存在：
+                                        --exe --lst --report --bench --smoke --profile-top --native-overrides
+                                        --overlay --present-screenshot --trace-shims --trace-blocks --real-time
                                         --accept-recovery-dialog --close-confirm ask|exit|title|cancel
                                         --until shim|ea --trace-shims --trace-blocks
                                         --max-insns --max-frames --dump-frame --time-limit
@@ -306,11 +311,11 @@ D3D9 `Present` 可以把**后缓冲的 guest 像素**写成 BMP（`SurfaceArena:
 
 ```bash
 # 第一帧
-./out/emulator-lift --game-dir <install> --appdata <tmp> \
+./out/emulator-lift-aot --game-dir <install> --appdata <tmp> \
   --max-frames 1 --dump-frame ../../.tmp/frame-{frame}.bmp
 
 # 覆盖同一文件，拿第 N 帧（重跑时每次覆盖；最后留下的是第 N 帧）
-./out/emulator-lift ... --max-frames 100 --dump-frame ../../.tmp/frame-last.bmp
+./out/emulator-lift-aot ... --max-frames 100 --dump-frame ../../.tmp/frame-last.bmp
 ```
 
 - `{frame}` 会替换成 **4 位帧号**；不含占位符时同一路径被覆盖。
@@ -370,9 +375,9 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
 
 ```bash
 # 看得见的窗口（真 SDL 窗口；自动 real-time）
-./out/emulator-lift ... --max-frames 300 --present window
+./out/emulator-lift-aot ... --max-frames 300 --present window
 # 无人值守 / CTest：隐藏窗口 + 宿主回读截图
-./out/emulator-lift ... --max-frames 1 --present window --present-hidden \
+./out/emulator-lift-aot ... --max-frames 1 --present window --present-hidden \
   --present-screenshot ../../.tmp/window-{frame}.bmp
 ```
 
@@ -426,7 +431,7 @@ root script 的 `0x130` 因而读到 0、不执行 `call-script 5262`（LOGO）�
   headless 没有事件源时，空队列 `GetMessageA` 仍按旧语义 abort。看画面用 `--real-time` / `--max-frames`；
   `--bench + window` 的 MIPS 含 SDL 上传/呈现开销，不是解释器绝对吞吐。
 - `--present-screenshot-frame N`：只回读第 N 个 Present（0/缺省 = 每帧都写）。配合 `--max-frames N`
-  就是"定帧截图"（只产出一张，不写 N 份 BMP）：`./out/emulator-lift --game-dir <安装> --skip-logo
+  就是"定帧截图"（只产出一张，不写 N 份 BMP）：`./out/emulator-lift-aot --game-dir <安装> --skip-logo
   --present window --present-hidden --max-frames 155 --present-screenshot out.bmp
   --present-screenshot-frame 155`。
 
@@ -723,9 +728,9 @@ gpu       : draws=N gpu=N recorded=N queued=N empty=N fragments=N skipped=N
 
 ```bash
 # 离屏 GPU 光栅（不建可见窗口；headless 也走 GPU）
-./out/emulator-lift ... --max-frames 4 --dump-frame ...
+./out/emulator-lift-aot ... --max-frames 4 --dump-frame ...
 # 可见窗口 + GPU 光栅（缺省就是这条）；日志里 present=direct/<mode> 是直出的正证据
-./out/emulator-lift ... --max-frames 300 --present window --present-hidden
+./out/emulator-lift-aot ... --max-frames 300 --present window --present-hidden
 ```
 
 评估口径：GPU blend / 采样舍入与 D3D9 参考允许**每通道 ≤1 LSB**，不拿单一 hash 当唯一判据；
@@ -739,7 +744,11 @@ CTest `gpu-direct-present` 把这条做成守卫（含 16bpp 转换 / 尺寸变�
 末尾 finalizer）与直方图各自的耗时看 `LIFT_FRAME_TRACE=1` 的 `pres :` 行（§4.3.1）。再往下要动的是
 sprite 合批与那条直方图的算法。⛔ 不把逐帧数字写进 README。
 
-## 4.3 热点 profile 与 native override（函数级 + 段级）
+## 4.3 热点 profile 与 native override（函数级 + 段级）—— **解释器侧，已随解释器退役**（2026-11-16）
+
+★ 本节描述的 `--profile-top` / `--native-overrides` / `--lst` 只存在于**已删除**的解释器 CLI 上；
+AOT 臂现在是**未知参数 ⇒ exit 2**（`--lst` 还在 `aot-arm-shape` 的禁词表里，⛔ 不要装回去）。
+保留本节只为：**旧读数（`docs/03-emulator/observations.md`）里的命令还能读懂**。
 
 ```bash
 # 找热点（guest 块级 + 按 .lst 函数入口聚合 + 宿主 shim 墙钟；不改变执行结果）

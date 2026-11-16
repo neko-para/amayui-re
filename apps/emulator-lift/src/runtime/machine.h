@@ -27,6 +27,7 @@
 #include "runtime/decode.h"
 #include "runtime/engine_marker.h"
 #include "runtime/guest_call.h"
+#include "runtime/guest_exit.h"
 #include "runtime/host_window.h"
 #include "runtime/handles.h"
 #include "runtime/heap.h"
@@ -158,14 +159,10 @@ struct RunResult {
 //   而兄弟单已裁"⛔ 不把夹具造 OOM 做成产品参数"）。
 int exitCodeForRun(const RunResult& r);
 
-// ★ guest 自己调 `ExitProcess(n)` / `TerminateProcess(_, n)` 的 `n` → **宿主进程**退出码。
-//   n == 0 ⇒ 0（正常收尾）；n != 0 ⇒ 2（与 decode-error 同档：这是"引擎自己判定失败"）。
-//   ⛔ 不把 guest 的任意 n 直接当宿主退出码：主机的退出码语义是 0..255 的 shell 约定，
-//     直接透传会让 `exit(259)` 之类的值被截断 / 误读成别的状态（真机上 Windows 会截到 8 位、
-//     POSIX 一样只留低 8 位）⇒ 这里只回答"正常 / 非正常"这一位。
-//   ★ 抽成纯函数：`main` 的最终分流读它，`tests/exit_code.cpp` 同时用它做纯映射断言和
-//     **真子进程**的退出码断言（⛔ 只测 accessor 不叫"进程退出码"）。
-int exitCodeForGuestExit(std::uint32_t guest_exit_code);
+// ★ guest 自己调 `ExitProcess(n)` / `TerminateProcess(_, n)` 的 `n` → **宿主进程**退出码的
+//   纯映射在 `runtime/guest_exit.h`（**单独一个头**：AOT 臂也要用它，而 `aot_main.cpp` 明令
+//   ⛔ 不 include 本文件 ⇒ 这条映射不能留在这里）。`main` 的最终分流读它；
+//   `tests/exit_code.cpp`（真子进程）与 `tests/guest_exit.cpp`（纯映射）都钉它。
 
 // ★ 时间线的**效果级判据**（原 `--expect-change-after` / `--expect-change-window`；2026-11-16 起
 //   那两个 CLI 参数随 `--input-script` 整族退役 ⇒ 本策略只剩 pure CTest 夹具在配它）：

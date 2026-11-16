@@ -4,10 +4,9 @@
 - type: bug
 - status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- verify: apps/emulator-lift/tests/host_encoding.cpp#host-encoding
-- repro: apps/emulator-lift/tests/host_encoding.cpp#host-encoding
+- repro: docs/03-emulator/encoding-backend.md#CP932
 - severity: S1
-- done_reason: 已修并加回归守卫 host-encoding：UTF-8 argv（GetCommandLineW）/ 控制台码页 65001（重定向不动）/ 目录级 /utf-8；实测日文 --game-dir 从 exit 3 变为 exit 0，ctest 43/43 绿。
+- done_reason: 守卫 tests/host_encoding.cpp 随解释器一起退役（用户裁决 2026-11-16）：它断言的是解释器 CLI 的输出面（UTF-8 argv / 控制台码页），解释器 target 已删 ⇒ 判定面不存在。解码/编码口径留在 docs/03-emulator/encoding-backend.md，⛔ 不假装还有守卫。
 - tags: [emulator-lift windows encoding]
 
 ## 现象

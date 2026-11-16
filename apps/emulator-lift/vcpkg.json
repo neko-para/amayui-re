@@ -7,6 +7,12 @@
     "zydis",
     "freetype",
     "glm",
-    "libpng"
+    "libpng",
+    {
+      "name": "boost-asio",
+      "default-features": false
+    },
+    "boost-beast",
+    "nlohmann-json"
   ]
 }

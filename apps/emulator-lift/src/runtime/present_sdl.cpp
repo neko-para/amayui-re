@@ -190,6 +190,12 @@ struct SdlWindow::Impl {
     bool close_pending = false;
     int close_frames_left = 0;
     std::uint64_t close_deadline_ns = 0;
+    // ★ 控制层 resume 的**陈旧事件闸门**（S4）：恢复时刻（`SDL_GetTicksNS`）；0 = 没启用。
+    //   判据 / 纯映射在 `runtime/present.h` 的 `classifyStaleEvent`（SDL-free，pure CTest 也测它）。
+    std::uint64_t stale_input_before_ns = 0;
+    // ★ 本次 stop 的**原因**（控制层 `bye.reason` 用）：只有"暂停期间的关窗 / ESC"这一条给
+    //   `"window-closed"`，其余停机原因保持 nullptr（⛔ 不冒充控制层口径）。
+    const char* control_stop_reason = nullptr;
 
     // ---- 调试叠层（`--overlay`，默认关）----
     // ★ 两条呈现路径共用**同一份**行 / 尺寸（`overlayLines`），只有上传方式不同。
@@ -243,6 +249,10 @@ struct SdlWindow::Impl {
     // ★ `why` 是"这次为什么收 run"的**唯一指纹**（info 档一行）：`sdl-quit` / `grace-expired` /
     //   `close-deadline` / `no-guest-window`。⛔ 默认档（warn）不打印，别把普通游玩弄吵。
     void requestStop(const char* why);
+    // ★ 陈旧事件闸门（S4）：分类 + 单条处理（`StaleAction` 直接复用纯映射的类型）。
+    using StaleAction = lift::StaleEventAction;
+    StaleAction classifySdlEvent(const SDL_Event& event) const;
+    bool pumpOneEvent(const SDL_Event& event);
     void requestClose();
     void advanceCloseFrame();
     void handleEvent(const SDL_Event& event);
@@ -272,6 +282,11 @@ void SdlWindow::Impl::requestStop(const char* why) {
     // ★ 诊断（info 档）：这条是"宿主为什么收口"的唯一指纹。判读表见 .tmp/close-path/wm-close.md §5.4。
     lift::logAt(lift::LogLevel::Info, lift::LogGeneral, "[present] ", "stop: %s", why ? why : "(unknown)");
     stop = true;
+    // ★ 控制层口径：只有"暂停期间的关窗 / ESC"这条（`control-paused-close`）映射成
+    //   `bye.reason:"window-closed"`；其它宿主停机原因不归控制层（由 run 结果映射）。
+    if (why != nullptr && std::strcmp(why, "control-paused-close") == 0) {
+        control_stop_reason = "window-closed";
+    }
     // 唤醒可能正阻塞在 GetMessageA 里的 guest：WM_QUIT 是队列尾的虚拟项。
     if (windows != nullptr) windows->postQuit(0);
 }
@@ -607,16 +622,68 @@ void SdlWindow::Impl::handleEvent(const SDL_Event& event) {
     }
 }
 
+// ★ 控制层 resume 的陈旧事件闸门（S4）：把 SDL 事件映射成**纯**分类（判据在 present.h）。
+//   ⛔ 不在这里写阈值比较：比较只有 `classifyStaleEvent` 一份（pure CTest 测它，SDL 这里只喂事实）。
+SdlWindow::Impl::StaleAction SdlWindow::Impl::classifySdlEvent(const SDL_Event& event) const {
+    HostEventClass cls = HostEventClass::Other;
+    switch (event.type) {
+        case SDL_EVENT_MOUSE_MOTION:
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        case SDL_EVENT_MOUSE_BUTTON_UP:
+        case SDL_EVENT_MOUSE_WHEEL:
+        case SDL_EVENT_KEY_DOWN:
+        case SDL_EVENT_KEY_UP:
+        case SDL_EVENT_WINDOW_FOCUS_LOST:
+            cls = HostEventClass::OsInput;
+            break;
+        case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+            cls = HostEventClass::CloseRequest;
+            break;
+        case SDL_EVENT_QUIT:
+            cls = HostEventClass::AppQuit;
+            break;
+        default:
+            cls = HostEventClass::Other;
+            break;
+    }
+    // ESC 是"用户要退出"的第二种形状（与关窗同一条意图）⇒ 单独一类。
+    if (event.type == SDL_EVENT_KEY_DOWN && vkFromSdlKey(event.key.key) == 0x1B) {
+        cls = HostEventClass::EscapeKey;
+    }
+    return classifyStaleEvent(cls, event.common.timestamp, stale_input_before_ns);
+}
+
+// 处理一条事件；返回 false = 已收口（调用方停止排空队列）。
+bool SdlWindow::Impl::pumpOneEvent(const SDL_Event& event) {
+    // ★ **闸门在 handleEvent 之前**：陈旧 OS 输入一次都不许进 `input::*`（它会写 guest 状态并
+    //   post 无上界队列）；陈旧关窗 / ESC 当宿主 stop（⛔ 不投 `WM_CLOSE` 进 guest）。
+    switch (classifySdlEvent(event)) {
+        case StaleAction::Drop:
+            return true;  // 丢弃：暂停期间的 OS 输入不是"刚发生"
+        case StaleAction::HostStop:
+            requestStop("control-paused-close");
+            return false;
+        case StaleAction::Keep:
+            break;
+    }
+    handleEvent(event);
+    return !stop;
+}
+
 void SdlWindow::Impl::pumpEvents(int wait_ms) {
     if (stop) return;
     SDL_Event event;
     if (wait_ms > 0) {
         if (SDL_WaitEventTimeout(&event, wait_ms)) {
-            handleEvent(event);
-            while (SDL_PollEvent(&event)) handleEvent(event);
+            if (!pumpOneEvent(event)) return;
+            while (SDL_PollEvent(&event)) {
+                if (!pumpOneEvent(event)) return;
+            }
         }
     } else {
-        while (SDL_PollEvent(&event)) handleEvent(event);
+        while (SDL_PollEvent(&event)) {
+            if (!pumpOneEvent(event)) return;
+        }
     }
     if (close_pending && !stop && SDL_GetTicksNS() >= close_deadline_ns) requestStop("close-deadline");
 }
@@ -803,6 +870,8 @@ void SdlWindow::shutdown() {
     impl_->close_pending = false;
     impl_->close_frames_left = 0;
     impl_->close_deadline_ns = 0;
+    impl_->stale_input_before_ns = 0;
+    impl_->control_stop_reason = nullptr;
     impl_->frame_no = 0;
     impl_->screenshot_path.clear();
     impl_->screenshot_frame = 0;
@@ -1036,6 +1105,11 @@ void SdlWindow::pumpHostEvents(int wait_ms) {
     if (impl_->window == nullptr) return;
     impl_->pumpEvents(wait_ms);
 }
+
+// ★ 控制层 `resume`：记"恢复时刻"⇒ 早于它入队的 OS 输入一律丢弃（`pumpOneEvent` 的分类闸门）。
+void SdlWindow::noteControlResume() { impl_->stale_input_before_ns = SDL_GetTicksNS(); }
+
+const char* SdlWindow::controlStopReason() const { return impl_->control_stop_reason; }
 
 // =======================================================================================
 // 系统对话框（`runtime/message_box.h` 的 ModalSpec）

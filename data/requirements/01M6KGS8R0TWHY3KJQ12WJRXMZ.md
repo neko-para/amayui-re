@@ -28,7 +28,7 @@ ALF 条目不作为装载来源，只留作取证对照。
 
 ## 做成什么（两段，已落地）
 
-1. `repo:apps/emulator-lift/src/main.cpp`：显式 `--agerc` → `--game-dir/AGERC.DLL`（VFS 解析）；
+1. `repo:apps/emulator-lift/src/aot/aot_main.cpp`：显式 `--agerc` → `--game-dir/AGERC.DLL`（VFS 解析，`resolve("AGERC.DLL")`）；
    都没有 ⇒ 留空，`LoadLibraryA("AGERC.DLL")` 走 0 + 126。⛔ 没有 ALF 分支、⛔ 不读 `SYS4INI.BIN`。
 2. 真实 guest 模块装载（PE 节映射 + 真实 ImageBase/HINSTANCE；资源 / 版本从镜像解析）已落地；
    `LoadIconA` 从镜像的 `RT_GROUP_ICON`（`IDI_ICON1`）拼 `HICON`，伪 HICON 只在 `.rsrc` 映射失败时作应急。

@@ -210,9 +210,6 @@ else()
         -Wno-unused-variable -Wno-unused-const-variable)
 endif()
 
-add_executable(emulator-lift src/main.cpp)
-target_link_libraries(emulator-lift PRIVATE emulator-lift-runtime)
-
 # =====================================================================================
 # Shape A · 构建期静态 lift 的 **T0** 落点：`emulator-lift-aot`（只做平台 bring-up）
 # ★ 为什么是**独立 target**、不是给 `emulator-lift` 加一个 flag：Shape A 的产物是
@@ -555,6 +552,27 @@ target_sources(emulator-lift-runtime PRIVATE
     src/runtime/png_decode.cpp)
 target_link_libraries(emulator-lift-runtime PRIVATE PNG::PNG)
 
+# =====================================================================================
+# 控制层（`--control-root`）：WebSocket over `boost::asio` / `boost::beast` + `nlohmann::json`
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+# ★ 依赖从**清单**来（`vcpkg.json`；⛔ 不手工 vcpkg install、⛔ 不改 out/vcpkg_installed/）：
+#   `boost-asio`（`"default-features": false`）+ `boost-beast` + `nlohmann-json`。
+#   ⚠ 实测：`boost-beast` 依赖 `boost-asio` 时**没有**写 default-features ⇒ vcpkg 的"特性可加"模型
+#     会把 asio 的默认特性重新打开 ⇒ 仍然装了 `boost-context` / `boost-date-time`（各一个静态库）。
+#     这是**依赖账的事实**，记在报告里（design-ws §1.2 的"35 个 header-only 端口"因此不成立）。
+# ★ `control_ws.cpp` 是**唯一** include beast / nlohmann 的 TU（`runtime/control.h` 用 PIMPL 挡住）；
+#   别的 TU 只 include `runtime/control.h`（零第三方头 ⇒ 编译时间不受影响）。
+# =====================================================================================
+find_package(Boost CONFIG REQUIRED COMPONENTS asio beast)
+find_package(nlohmann_json CONFIG REQUIRED)
+target_sources(emulator-lift-runtime PRIVATE
+    # `control_snapshot.cpp` = 快照的**主线程取数**（位置走 engine_marker 的唯一公式；⛔ 不碰 GPU）。
+    #   它**不** include beast / nlohmann ⇒ pure CTest 可以直接驱动它。
+    src/runtime/control_snapshot.cpp
+    src/runtime/control_ws.cpp)
+target_link_libraries(emulator-lift-runtime PRIVATE
+    Boost::asio Boost::beast nlohmann_json::nlohmann_json)
+
 enable_testing()
 
 # =====================================================================================
@@ -572,8 +590,8 @@ add_test(NAME lift-aot-split-manifest
 
 # =====================================================================================
 # 测试（`LIFT_BUILD_TESTS`，默认 ON；`-DLIFT_BUILD_TESTS=OFF` ⇒ 只构建产品二进制）
-# ★ 开关只包**测试 target 与 `add_test`**：产品二进制 `emulator-lift` / `emulator-lift-runtime`
-#   与依赖库 `lift-pl-mpeg` 在上面的产品区（OFF 时必须照样能编出 `emulator-lift`）。
+# ★ 开关只包**测试 target 与 `add_test`**：产品二进制 `emulator-lift-aot`（+ 构建期工具
+#   `emulator-lift-gen` / `-closure`）与依赖库 `lift-pl-mpeg` 在上面的产品区（OFF 时照样能编）。
 # ★ 测试可执行文件统一落到 `${CMAKE_BINARY_DIR}/tests`（= `out/tests/`）；产品仍在 `${CMAKE_BINARY_DIR}`。
 #   multi-config 生成器要为每个配置各设一次（Ninja 是单配置，用不带后缀那个）。
 # ★ 本块**不缩进**：整块缩进会把 diff 变成全文件重写；CMake 不要求缩进。
@@ -619,27 +637,15 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_BINARY_DIR}/tests")
 # ① 无 GPU ⇒ **拒绝启动**（非 0 退出 + stderr 明确指路）。用 `SDL_VIDEODRIVER=dummy` 强制
 #    "建不出 GPU device"（⛔ 不靠真拔显卡）；后端在**执行源定位之前**建 ⇒ 这条不需要游戏资产。
 # ★ 判据落在进程边界（退出码 + stderr 文案）上 ⇒ 由 `tests/gpu_batch.cpp` 起真子进程收输出；
-#   子进程实参 = `$<TARGET_FILE:emulator-lift>`。
+#   子进程实参 = `$<TARGET_FILE:emulator-lift-aot>`（2026-11-16 从解释器臂换到 AOT 臂：两臂的
+#   拒绝点与文案同源，实测同为 9 checks / 0 failures；⛔ 判据一条不变）。
 # ★ 原 `lift/raster-flag-gone`（"`--raster` 必须继续不存在"）**已摘注册**：那条判的是**设计冻结**
 #   （flag 已从代码里消失、没有静默失败路径；有人加回来 `git diff` 看得见）⇒ 按测试模型不配守卫。
 add_test(NAME lift/no-gpu-refuses-start
-    COMMAND lift-gpu-batch --no-gpu-refuses-start $<TARGET_FILE:emulator-lift>)
+    COMMAND lift-gpu-batch --no-gpu-refuses-start $<TARGET_FILE:emulator-lift-aot>)
 set_tests_properties(lift/no-gpu-refuses-start PROPERTIES
     ENVIRONMENT "SDL_VIDEODRIVER=dummy"
     TIMEOUT 120)
-
-# ---- pure：`--time-limit` 的 CLI 契约（`REQ-01M711JN018QDSWK4726Y1A0KV`）----
-# 判据见 tests/cli_time_limit.cpp 的头注释：① `--time-limit 0` 与**省略该参数**行为等价
-# （退出码 + 摘要里 stop / insns / blocks / trace-in / instr 五行逐字相同，且 stop 不是 time-limit）；
-# ② 正数仍然生效；③ `-1` / `abc` 仍然 exit 2 且 stdout 没有运行摘要。
-# ★ 纯档：执行源是**测试自己构造的最小 PE32** + `--max-insns 1` ⇒ 不需要 LFS / 游戏安装；
-#   顶层无条件注册 ⇒ pure（判据 = 注册位置，见 AGENTS.md §5）。
-# ★ 子进程的 cwd 由测试指到临时目录 ⇒ 默认的 `../../corpus/...` 执行源 / `.lst` 候选都找不到，
-#   结果不随宿主 cwd 漂。
-add_executable(lift-cli-time-limit tests/cli_time_limit.cpp)
-target_link_libraries(lift-cli-time-limit PRIVATE emulator-lift-runtime)
-add_test(NAME cli-time-limit COMMAND lift-cli-time-limit $<TARGET_FILE:emulator-lift>)
-set_tests_properties(cli-time-limit PROPERTIES SKIP_RETURN_CODE 77)
 
 # ---- pure：`SetCursorPos` 的宿主光标 warp（`--cursor-warp`，缺省关）----
 # 判据见 tests/cursor_warp.cpp 的头注释：① 缺省档一次也不挪；② 开着时用**guest 客户区坐标**
@@ -649,17 +655,6 @@ set_tests_properties(cli-time-limit PROPERTIES SKIP_RETURN_CODE 77)
 add_executable(lift-cursor-warp tests/cursor_warp.cpp)
 target_link_libraries(lift-cursor-warp PRIVATE emulator-lift-runtime)
 add_test(NAME cursor-warp COMMAND lift-cursor-warp)
-
-# ---- pure：`--cursor-warp` 的参数闸门（CLI 级 + 真子进程）----
-# 判据见 tests/cli_cursor_warp.cpp：① 缺省呈现档（headless）+ 该 flag ⇒ 宿主 **exit 2**，
-# stderr 点名 flag 与 `--present headless`，stdout 没有运行摘要；⛔ 不用 `WILL_FAIL TRUE`
-# （那会让 abort / exit 3 也算过）；② 缺省档启动回声两处都报 `off`；③ 可见窗口下报 `on`
-# （guest 只跑一条 `nop` ⇒ **不会**调 SetCursorPos，不挪任何人的光标）。
-# ★ 顶层无条件注册 ⇒ pure 档；②③ 需要呈现后端，无 GPU 时由测试体自己 SKIP 77。
-add_executable(lift-cli-cursor-warp tests/cli_cursor_warp.cpp)
-target_link_libraries(lift-cli-cursor-warp PRIVATE emulator-lift-runtime)
-add_test(NAME cli-cursor-warp COMMAND lift-cli-cursor-warp $<TARGET_FILE:emulator-lift>)
-set_tests_properties(cli-cursor-warp PROPERTIES SKIP_RETURN_CODE 77)
 
 # ---- pure：**AOT 臂**的 `--cursor-warp` / `--sound` 参数面（CLI 级 + 真子进程）----
 # 判据见 tests/cli_aot_flags.cpp：① `--help` 里两个 flag 都在；② `--cursor-warp --present headless`
@@ -675,16 +670,18 @@ target_link_libraries(lift-cli-aot-flags PRIVATE emulator-lift-runtime)
 add_test(NAME cli-aot-flags COMMAND lift-cli-aot-flags $<TARGET_FILE:emulator-lift-aot>)
 set_tests_properties(cli-aot-flags PROPERTIES SKIP_RETURN_CODE 77)
 
-# ---- pure：guest `ExitProcess(n)` / `TerminateProcess(_, n)` 的**宿主进程退出码**守卫 ----
-# 判据见 tests/exit_code.cpp 文件头：① 纯映射（0 ⇒ 0；非 0 ⇒ 2 且**不透传** n）；
-# ② **真子进程**（自造最小 PE32 导入 kernel32!ExitProcess，跑真实 emulator-lift）：
-#    ExitProcess(3) ⇒ 宿主 exit 2 + 默认 warn 日志含 exit_code=3；ExitProcess(0) ⇒ 0；
-# ③ TerminateProcess(_,3) 同一口径。
-# ★ 纯档（顶层无条件注册）：执行源是测试自己构造的 PE，不碰 LFS / 游戏安装。
-add_executable(lift-exit-code tests/exit_code.cpp)
-target_link_libraries(lift-exit-code PRIVATE emulator-lift-runtime)
-add_test(NAME exit-code COMMAND lift-exit-code $<TARGET_FILE:emulator-lift>)
-set_tests_properties(exit-code PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+# ---- pure：guest 退出码 → **宿主进程**退出码的纯映射（`REQ-01M7HP2YRZG222E0NE2H6MW6NK`）----
+# 判据见 tests/guest_exit.cpp 文件头：0 ⇒ 0；非 0（含 127/128/255/256/259/0xFFFFFFFF 边界）⇒ 2
+# 且**不透传** n。映射本身在 `src/runtime/guest_exit.h`（AOT 臂与解释器臂**同一份**）。
+# ★ 顶层无条件注册 ⇒ pure 档（判据 = 注册位置，见 AGENTS.md §12.4）。
+# ★ 本用例**故意只 include `runtime/guest_exit.h`**（不 include `machine.h`）——它同时是
+#   "AOT 臂拿得到这条纯函数、不必把 `Machine` 拖进来"的编译期证据。
+# ⚠ **弱守卫**：AOT 的 e2e 进程退出码面结构性测不到（`exit-code` 的夹具是合成 PE，AOT 只跑
+#   被 pin 的 PE）⇒ 这里钉的是映射，钉不到 `aot_main` 的接线；接线靠代码审阅 + 手工读数。
+# ★ 用例名 = `lift-guest-exit`：`tools/mutate-check.mjs` 的 `ctest:lift-guest-exit` 指向它。
+add_executable(lift-guest-exit tests/guest_exit.cpp)
+target_link_libraries(lift-guest-exit PRIVATE emulator-lift-runtime)
+add_test(NAME lift-guest-exit COMMAND lift-guest-exit)
 
 # ---- pure：guest 函数级 native override（差分 / 回退 / ABI）----
 add_executable(lift-native-override tests/native_override.cpp)
@@ -720,6 +717,32 @@ add_executable(lift-decode-cache tests/decode_cache.cpp)
 target_link_libraries(lift-decode-cache PRIVATE emulator-lift-runtime)
 add_test(NAME lift-decode-cache COMMAND lift-decode-cache)
 
+# ---- pure：**控制层端点**（`--control-root`；S0 传输 + S1 闸门/时钟）----
+# 判据见 tests/control_endpoint.cpp 的头注释：监听失败点名端口 / 只绑 loopback /
+# 错 token 与带 Origin 被拒 / hello 与 `ctl.<pid>.<nonce8>.json` 逐字段一致 /
+# 未知 op ⇒ unknown_op 且 res.nonce 回显 / 收口只删自己那个文件 /
+# 暂停 2 s 的 guest_ms 差 < 5 ms（判据 6）且配方守卫钟同冻。
+# 红了意味着：端点能被人从非 loopback 连上、或"暂停对 guest 不可见"不成立、
+# 或 hello 与端点文件各写了一份身份（两个来源漂）。
+# ★ **顶层无条件**注册 ⇒ pure 档：自带裸 WS 客户端 + 注入时钟，⛔ 不 spawn 子进程、
+#   不载 PE、不读 LFS、不碰游戏安装。
+# ★ 用例名 = `lift-control-endpoint`：`tools/mutate-check.mjs` 的 `ctest:lift-control-endpoint` 指向它。
+add_executable(lift-control-endpoint tests/control_endpoint.cpp)
+target_link_libraries(lift-control-endpoint PRIVATE emulator-lift-runtime
+    $<$<PLATFORM_ID:Windows>:ws2_32>)
+add_test(NAME lift-control-endpoint COMMAND lift-control-endpoint)
+
+# ---- pure：**控制层快照**（S3）----
+# 判据见 tests/control_snapshot.cpp 的头注释：① 读不到时 `why` ∈ engine_marker 既有 8 个字面量
+# （判据 3d）；② 位置只走 `readScriptPositionSample` 的唯一公式、`header_len == 0x3C`、`pos % 4 == 0`
+# （判据 3a 的机制面）；③ `script_sha` 覆盖脚本体（文件 +4 字节 ⇒ sha 变；解析不到 ⇒ 枚举理由，判据 3c）；
+# ④ 同一份快照序列化两次逐字节相同且**没有墙钟 / 自增字段**（判据 3b 的机制面）。
+# 红了意味着：`sample` 的某格开始随"采样时刻"漂（同一暂停点两次不一样），或位置公式被第二份实现接管。
+# ★ **顶层无条件**注册 ⇒ pure 档：只构造 GuestMemory + 临时目录里的 TITLE.BIN，⛔ 不碰 GPU / LFS。
+add_executable(lift-control-snapshot tests/control_snapshot.cpp)
+target_link_libraries(lift-control-snapshot PRIVATE emulator-lift-runtime)
+add_test(NAME lift-control-snapshot COMMAND lift-control-snapshot)
+
 # ---- pure：`HostServices::ownsCpu` 的**归属**判据（"这份 X86 是谁的"）----# 判据见 tests/host_services_owns_cpu.cpp 的头注释：① 真 owner 的那份 cpu ⇒ true；
 # ② `X86 copy = machine.cpu()`（= `audio.cpp` 的 `audio_cpu_ = *cpu_`）⇒ `host` 非空
 # 但 `ownsCpu(copy) == false`；③ 真实入口 `ddraw::createSurfaceState`（第一句就是
@@ -734,19 +757,6 @@ add_executable(lift-host-services-owns-cpu tests/host_services_owns_cpu.cpp)
 target_link_libraries(lift-host-services-owns-cpu PRIVATE emulator-lift-runtime)
 add_test(NAME lift-host-services-owns-cpu COMMAND lift-host-services-owns-cpu)
 set_tests_properties(lift-host-services-owns-cpu PROPERTIES SKIP_RETURN_CODE 77)
-
-# ---- 默认：Windows 宿主编码契约（argv = UTF-8 / 输出字节 = UTF-8）----
-# ★ 子进程用**文件**重定向（不走管道：受限沙箱里捕获管道会 EPERM）。
-# ★ 起子进程时 cwd = 源码目录 ⇒ 默认的 `../../corpus/...` 执行源 / `.lst` 能按相对路径找到。
-# ★ 它是**设计的合同** ⇒ **默认档（顶层无条件）**；⛔ 不要再用 `if(EXISTS …)` 决定它注册与否
-#   （那会让"这条用例存不存在"随机器漂）。它要真启动 emulator-lift（会载入执行源）⇒ 缺 LFS 资产时
-#   由测试体自己判（无 GPU ⇒ `LIFT_SKIP` 77；执行源缺失 ⇒ 它自己红）。
-add_executable(lift-host-encoding tests/host_encoding.cpp)
-target_link_libraries(lift-host-encoding PRIVATE emulator-lift-runtime)
-add_test(NAME host-encoding COMMAND lift-host-encoding $<TARGET_FILE:emulator-lift>)
-set_tests_properties(host-encoding PROPERTIES
-    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-    SKIP_RETURN_CODE 77)
 
 # =====================================================================================
 # 输入（C）：**路径只在这里定义一次**，下面的 STATUS 盘点与各 `add_test` 都引用它们。
@@ -1117,15 +1127,6 @@ add_test(NAME gpu-batch-barrier COMMAND lift-gpu-batch --gpu)
 set_tests_properties(gpu-batch-barrier PROPERTIES
     ENVIRONMENT "SDL_VIDEODRIVER=dummy" SKIP_RETURN_CODE 77)
 
-# ---- pure：**默认 stdout 降噪**（`REQ-01M7AG06MXS6PK2B53B29QM76Z`）----
-# 判据见 `tests/gpu_batch.cpp` 的 `caseStdoutQuiet` 头注释：默认档 ≤25 行 / 无 `  缺口 ` 明细 /
-# 无 native-override per-entry / `stop`·`detail` 在前 10 行；`--report` 臂保留缺口明细；
-# `--profile` 臂保留 per-entry。两臂成对 ⇒ "删掉"不能冒充"折叠"。
-# ★ 执行源是测试自造的最小 PE + 假 `.lst` ⇒ 不碰 LFS / 游戏安装 ⇒ 顶层注册 = pure 档。
-# ★ 默认 / `--profile` 臂要真 GPU（headless 也建隐藏窗口）⇒ 无 GPU 时 SKIP 77。
-add_test(NAME stdout-quiet COMMAND lift-gpu-batch --stdout-quiet $<TARGET_FILE:emulator-lift>)
-set_tests_properties(stdout-quiet PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
-
 add_executable(lift-mechanism tests/mechanism.cpp)
 target_link_libraries(lift-mechanism PRIVATE emulator-lift-runtime)
 add_test(NAME mechanism COMMAND lift-mechanism)
@@ -1250,7 +1251,7 @@ target_link_libraries(lift-bench PRIVATE emulator-lift-runtime)
 # ★ `boot-trace` 已移进 `LIFT_STRESS`（它跑真游戏，按测试模型不属于合同档）；它是**读数档**
 #   （同输入两次 trace 逐字节相同 + 稳定 hash），**变异清单不覆盖它**（2026-11-14 摘条目：
 #   默认机器上它恒为占位，⛔ 留一条永远不跑的变异条目只会让清单显得"覆盖了"）。
-#   `base-coverage`（导入覆盖普查）已删 —— 改由 `emulator-lift --report` 的缺口清单承担。
+#   `base-coverage`（导入覆盖普查）已删 —— 原由 `emulator-lift --report` 承担；该入口 2026-11-16 随解释器退役 ⇒ 今天无替代。
 # =====================================================================================
 
 # ---- 默认：执行源（拆壳件）的真实 PE 载入 ----
@@ -1261,8 +1262,8 @@ set_tests_properties(loader PROPERTIES
     ENVIRONMENT "LIFT_AGE_EXE=${AGE_SECTFIX_EXE};LIFT_AGE_LST=${AGE_LST}" SKIP_RETURN_CODE 77)
 
 # ---- 2026-11-14：`base-coverage`（`tests/base_coverage.cpp`，A5 导入覆盖普查）已按测试模型删除 ----
-# 判据是"跑到 L2 + 动态缺口为空"的业务结论；缺口**普查**改由 `emulator-lift --report` 的
-# 缺口清单承担（⛔ 不新写工具），复现命令见 `docs/03-emulator/observations.md`。
+# 判据是"跑到 L2 + 动态缺口为空"的业务结论；缺口**普查**原由 `emulator-lift --report` 承担，
+# 该入口 2026-11-16 随解释器退役 ⇒ 今天无替代（⛔ 不新写工具）；复现命令见 `docs/03-emulator/observations.md`。
 
 # ---- 默认：**真 guest 字节**的 native override 差分（解释器 vs override；缺资产 ⇒ SKIP 77）----
 # 判据见 tests/native_override_assets.cpp 文件头：同一份夹具，真字节跑解释器 vs native 实现，
@@ -1516,22 +1517,6 @@ add_test(NAME insn-cost COMMAND lift-insn-cost)
 add_executable(lift-d3d9-mip tests/d3d9_mip.cpp)
 target_link_libraries(lift-d3d9-mip PRIVATE emulator-lift-runtime)
 add_test(NAME d3d9-mip COMMAND lift-d3d9-mip)
-
-# =====================================================================================
-# `--dump-frame` 的目录必须在开跑前建好（`REQ-01M73YBCC3DZ05Y9NSDTRKTMMY`）
-# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
-# ★ 判据见 tests/cli_dump_frame.cpp 头注释：
-#   ① 不存在的目录 ⇒ 子进程 exit 0 **且目录真的建出来**；
-#   ② 建不出来（中间被普通文件挡住）⇒ exit 2 + stderr 说清是 `--dump-frame` / 目录；
-#   ③ 两条子进程都在 30 s 内结束（旧实现的缺陷形态 = 目录不存在时空转 546 s）。
-# ★ 顶层无条件注册 ⇒ **pure** 档：执行源是测试自己构造的最小 PE32 + `--max-insns 1`
-#   （⛔ 不碰 LFS / 游戏安装 / 窗口；与 cli-time-limit 同一口径）。
-# ★ `tools/mutate-check.mjs` 的 `ctest:cli-dump-frame` 指向它（去掉 create_directories ⇒ 当场红）。
-# =====================================================================================
-add_executable(lift-cli-dump-frame tests/cli_dump_frame.cpp)
-target_link_libraries(lift-cli-dump-frame PRIVATE emulator-lift-runtime)
-add_test(NAME cli-dump-frame COMMAND lift-cli-dump-frame $<TARGET_FILE:emulator-lift>)
-set_tests_properties(cli-dump-frame PROPERTIES SKIP_RETURN_CODE 77)
 
 # ---- pure：帧导出**每帧失败**不拖住 Present / 计数 / warn 只一次 / 成功路径照旧 ----
 # ★ 判据见 tests/frame_dump_failure.cpp 头注释。裸 GuestMemory + SurfaceArena（⛔ 不碰游戏）。

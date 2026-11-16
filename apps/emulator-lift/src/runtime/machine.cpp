@@ -108,10 +108,8 @@ const char* stopReasonName(StopReason r) {
 //   在 `main.cpp` 里先于本函数返回，别把它们的码并进来。
 int exitCodeForRun(const RunResult& r) { return r.ok() ? 0 : 2; }
 
-// ★ 见 machine.h：guest 的退出码**只**回答"正常 / 非正常"这一位（⛔ 不透传 n）。
-//   非 0 与 decode-error 同档（2）：对调用方（shell / CI）来说两者的处置一样 —— 这次 run
-//   没有以"引擎正常收尾"结束；具体数值在 guest 的 `cpu.shim.exit_code` / warn 日志里。
-int exitCodeForGuestExit(std::uint32_t guest_exit_code) { return guest_exit_code == 0u ? 0 : 2; }
+// ★ `exitCodeForGuestExit` 已搬到 `runtime/guest_exit.h`（AOT 臂也要用同一条映射，而它
+//   ⛔ 不 include `machine.h`）⇒ 这里**只留**上面那道 run 级兜底。
 
 // ---------------------------------------------------------------------------------------
 // 时间线的效果级判据（`--expect-change-after` / `--expect-change-window`）
@@ -2583,9 +2581,9 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out, SummaryMode mod
         }
     }
     // native-override 的**异常条目**（fallbacks!=0 / declines）：默认档也必须留。
-    //   ★ 这一行是 `stdout-quiet` 的变异点：`show_all_overrides` 改成 `true` ⇒ 默认档又逐条打全表。
+    //   ★ 默认档只留汇总 / 异常条目（原 `stdout-quiet` 的变异点；该 CTest 2026-11-16 随解释器退役）。
     if (has_overrides) {
-        // ★ 这条是 `stdout-quiet` 的**变异点**：改成 `true` ⇒ 默认档又逐条打全表。
+        // ★ 变异点：改成 `true` ⇒ 默认档又逐条打全表（今天没有 CTest 守这一条）。
         const bool show_all_overrides = verbose;
         // ★ 默认档的异常条目**一行点名**（不是删掉）：`fallbacks!=0` / 条件分支被拒（declines）——
         //   这两类必须留，但不必各占一行。⛔ `hits==0` 不是异常（无命中是正常情况）。

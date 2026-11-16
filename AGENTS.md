@@ -196,8 +196,12 @@ pnpm typecheck                  # tsc --noEmit，六份工程
 ## 12. 一 · lift 线（`apps/emulator-lift`）
 
 `apps/emulator-lift` 是 C++/CMake 的 x86-32 guest-state 模拟器，执行 `AGE.EXE` 的**原机器码**。
-三个可执行产物：解释器 `emulator-lift` · AOT 臂 `emulator-lift-aot`（构建期把 guest 代码抬升成 LLVM IR 再链进去）·
+★ **唯一产品臂 = AOT 臂 `emulator-lift-aot`**（构建期把 guest 代码抬升成 LLVM IR 再链进去）；
 构建期工具 `emulator-lift-gen` / `emulator-lift-closure`。
+★ **解释器 `emulator-lift` 已于 2026-11-16 退役**（用户裁决）：target 与其 6 条 CLI 级 CTest 一起删除，
+`emulator-lift-runtime` 与 `Machine` 仍保留（`tests/*` 都用它）。退役的代价（AOT 侧没有端到端断言的几个面）
+登记在需求单 `REQ-01M7HQ57XV66FZQA5ECGHWD71N` 的 `## 未做` 与派生单里，⛔ 不要把"没有断言"当成"没有缺口"。
+
 
 ### 12.1 落点
 
@@ -290,6 +294,20 @@ ctest --test-dir out --output-on-failure
    - **默认档不许有周期性输出**（每帧 / 每 N 次派发 / 每次 shim）。周期性输出一律 opt-in（如 `--frame-log`）；
      ★ **一次性**输出（停机原因 / 启动 readout / pin 核对 / 缺口清单）⛔ **不许**收——出问题时那是唯一的消息面。
      判据不是"看着吵就删"，而是"这条会在一次 run 里出现几次"。
+
+### 12.9 脚本级分析落点（2026-11-16 定）
+
+**一份脚本一份 `.md`，落 `docs/03-emulator/scripts/<NAME>.md`**（`<NAME>` 与 `<NAME>.BIN` 同名，全大写）。
+
+- ★ **为什么有这条**：配方要按**脚本内位置**下门（`await position <SCRIPT> <lo> <hi>`），而"哪段区间是哪个屏、
+  哪段吃点击、哪段是轮询"这类结论**会被反复重新取证**。留在 `.tmp/` 里等于每次重做；写进需求单正文会挤爆 80 行预算；
+  写进 README 就是"状态"（§10 禁止）。
+- **每份必含四节**：`## 身份`（`dist/views/data/` 下的清单路径 + 行数、加载后 `script` 身份名怎么来的）·
+  `## 位置区间`（表格：`[lo,hi)` / 它是什么 / **复现命令** / 读数日期）· `## 输入点`（哪段吃 click、哪段是轮询）· `## 待核`。
+- **每条区间必须带"怎么复现"**（控制层 `emu-ctl` 的 `pause`+`sample`，或 `--input-plan` 的一次 run），
+  且 ⛔ **没有读数的区间只能进 `## 待核`**，不许进区间表（§10「文档必须带命令与读数」）。
+- ⛔ 不写剧情 / 进度 / 当前状态；⛔ 不把"我读了清单推出来的"写成结论（§6 准入门照样管语义结论：锚 EA 或守卫用例 id）。
+- 目录里有哪些脚本已有分析 = **看目录本身**（⛔ 不在 README 里列清单，那会过期）。
 
 ## 13. 二 · 翻译线（后续会用）
 

@@ -2,9 +2,10 @@
 
 - id: REQ-01M7HP2YRZG222E0NE2H6MW6NK
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- repro: apps/emulator-lift/src/main.cpp#exitCodeForGuestExit
+- verify: apps/emulator-lift/tests/guest_exit.cpp#lift-guest-exit
+- repro: apps/emulator-lift/src/runtime/guest_exit.h#exitCodeForGuestExit
 - severity: S2
 - tags: [emulator-lift, aot, exit-code]
 

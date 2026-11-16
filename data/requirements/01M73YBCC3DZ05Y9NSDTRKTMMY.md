@@ -4,9 +4,9 @@
 - type: bug
 - status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- verify: apps/emulator-lift/tests/cli_dump_frame.cpp#cli-dump-frame
-- repro: apps/emulator-lift/src/main.cpp#frame_dump
+- repro: docs/03-emulator/observations.md#dump-frame
 - severity: S3
+- done_reason: 守卫 tests/cli_dump_frame.cpp 与复现入口 src/main.cpp 随解释器退役（2026-11-16）：'开跑前把目录建好'是解释器 CLI 的判据。AOT 臂 --dump-frame 的写失败面由 tests/frame_dump_failure.cpp（presenter 层）覆盖。
 - tags: [emulator-lift cli usability]
 
 ## 一句话

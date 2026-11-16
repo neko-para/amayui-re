@@ -4,7 +4,7 @@
 - type: bug
 - status: done
 - parent: REQ-01M75S724HE50D26EEMDNY3Z54
-- verify: apps/emulator-lift/tests/exit_code.cpp#process/exit-3
+- verify: apps/emulator-lift/tests/guest_exit.cpp#exitCodeForGuestExit
 - repro: apps/emulator-lift/src/runtime/native_lzss.cpp#in >= in_end
 - severity: S1
 - tags: [emulator-lift, diagnosability]

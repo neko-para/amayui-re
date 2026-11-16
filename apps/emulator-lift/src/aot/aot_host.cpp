@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <map>
 #include <thread>
 #include <utility>
@@ -32,6 +33,7 @@
 #endif
 
 #include "aot/aot_dispatch.h"
+#include "runtime/control.h"       // 控制层 Present 闸门 / Context（轻头：⛔ 无 beast / nlohmann）
 #include "runtime/decode_cache.h"  // `liftOneDecodeCache()`：只读命中率（`decode-cache:` 行）
 #include "shims/register.h"
 
@@ -978,6 +980,76 @@ void AotHost::printProfile(std::FILE* out) const {
     }
     std::fflush(out);
 }
+
+// =====================================================================================
+// 控制层（S2/S3/S4）的**主线程取数口**：全部在主线程被调（`Control::serve` 在汇点里跑）
+//   ★ 这里只**读**宿主 / guest；⛔ 不改 guest 状态、⛔ 不进执行循环。
+// =====================================================================================
+bool AotHost::presentGateThunk(void* user) {
+    auto* self = static_cast<AotHost*>(user);
+    Control* control = self->control_;
+    if (control == nullptr) return false;
+    // 没有命令、也没武装谓词 ⇒ 一次判空就回（窗口档每帧都会走到这里）。
+    if (!control->pending() && !control->watching()) return false;
+    Control::Context ctx;
+    ctx.clock = &self->clock_;
+    ctx.windows = &self->windows_;
+    ctx.stop_requested = &self->control_stop_;
+    ctx.paused_at = "present";
+    ctx.host = self;
+    // 返回 true = 已置停（`quit` / idle / orphan）；块边界读 `control_stop_` 后收口。
+    return control->serve(ctx);
+}
+
+void AotHost::fillControlSnapshot(ControlSnapshot& out) {
+    out = ControlSnapshot{};
+    out.insns = cpu_.insns;
+    out.frame = presenter_.frameCount();
+    out.last_hash = presenter_.lastHash();
+    out.present = present_state_;
+    out.guest_ms = clock_.nowMs();
+    out.paused_total_ms = clock_.pausedCommittedMs();
+    // ★ 位置 + 身份 + script_sha 的**唯一**填充点（位置公式只在 engine_marker 的
+    //   `readScriptPositionSample`；本文件不重写公式）。
+    fillControlScriptSample(mem_, control_marker_, vfs_, &out.script);
+    // `paused` / `paused_at` / `state_seq` 由 `Control` 填（状态机在控制层，不在宿主）。
+}
+
+ControlShotStatus AotHost::controlScreenshot(const std::string& path, ControlScreenshot& out,
+                                              std::string* err) {
+    // ★ **三态**（判据 5 的客户端契约）：`io` 只留给"有像素但写不出去"；一次 Present 都没有 ⇒
+    //   数据**没到** ⇒ `NoFrameYet`（协议层 `unavailable`），⛔ 不冒充 IO 失败。
+    if (!presenter_.hasLastFrame()) {
+        if (err != nullptr) *err = "no frame presented yet";
+        return ControlShotStatus::NoFrameYet;
+    }
+    // ★ 读的是 presenter 保留的 **guest 后缓冲描述符**（`dumpLastFrame`），⛔ 不是窗口回读 ——
+    //   两者差叠层 / letterbox / 光标。`hash_still_matches` 的语义是"现场重算 == 记录的
+    //   last_surface_hash_"，与暂停无关，照实回（`dumpLastFrame` 自己算）。
+    bool hash_still_matches = false;
+    std::string dump_err;
+    if (!presenter_.dumpLastFrame(path, &hash_still_matches, &dump_err)) {
+        if (err != nullptr) *err = dump_err.empty() ? "dumpLastFrame 失败（没有给出原因）" : dump_err;
+        return ControlShotStatus::IoFailed;
+    }
+    std::error_code ec;
+    const std::uintmax_t size = std::filesystem::file_size(path, ec);
+    if (ec) {
+        // ★ 写成功但读不到大小：照实报 io（⛔ 不静默回 0 当"空文件"）。
+        if (err != nullptr) {
+            *err = "截图已写但读不到文件大小：" + path + "（" + ec.message() + "）";
+        }
+        return ControlShotStatus::IoFailed;
+    }
+    out.path = path;
+    out.bytes = static_cast<std::uint64_t>(size);
+    out.frame = presenter_.frameCount();
+    out.hash_still_matches = hash_still_matches;
+    out.source = "guest-backbuffer";
+    return ControlShotStatus::Ok;
+}
+
+void AotHost::controlOnResume() { presenter_.noteControlResume(); }
 
 }  // namespace aot
 }  // namespace lift

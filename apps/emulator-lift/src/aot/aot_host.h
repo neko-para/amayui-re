@@ -43,7 +43,9 @@
 #include "runtime/audio.h"
 #include "runtime/clock.h"
 #include "runtime/com.h"
+#include "runtime/control_snapshot.h"  // 控制层快照的值类型 + `ControlHostSide`（⛔ 无 beast）
 #include "runtime/decode.h"
+#include "runtime/engine_marker.h"  // 控制层 `sample` 的脚本身份采样器
 #include "runtime/font.h"
 #include "runtime/guest_call.h"
 #include "runtime/handles.h"
@@ -59,6 +61,12 @@
 #include "runtime/surface.h"
 #include "runtime/vfs.h"
 #include "runtime/x86.h"
+
+namespace lift {
+// ★ 控制层端点（`runtime/control.h`）：这里只**前置声明** —— ⛔ 不 include control.h 的实现面，
+//   更不 include beast / nlohmann（那是 `runtime/control_ws.cpp` 一个 TU 的事）。
+class Control;
+}  // namespace lift
 
 namespace lift {
 namespace aot {
@@ -134,6 +142,9 @@ struct AotRunOptions {
 struct AotRunResult {
     AotStop reason = AotStop::None;
     std::string detail;
+    // ★ 控制层 `bye.reason` 的**宿主停机原因**（空 = 按 `reason` 映射）。唯一生产者 = 窗口 sink
+    //   的"暂停期间的关窗 / ESC"（`PresentSink::controlStopReason()`），值 `"window-closed"`。
+    std::string host_stop_reason;
     std::uint32_t ea = 0;         // 收口时的 eip
     std::uint64_t insns = 0;      // `cpu.insns`（跨 run 累计，与解释器同一份）
     std::uint64_t frames = 0;     // `presenter().frameCount()`（跨 run 累计）
@@ -226,7 +237,7 @@ double profileProcessMs();
 double profileTicksToMs(std::uint64_t ticks, const AotProfile& p);
 
 // =====================================================================================
-class AotHost final : public HostServices {
+class AotHost final : public HostServices, public ControlHostSide {
 public:
     AotHost() = default;
     // 内含 4 GiB 虚拟预留（`GuestMemory`）与 shim 注册表（互斥量）/ 堆块表 ⇒ 不支持拷贝。
@@ -265,6 +276,25 @@ public:
     //    ★ `aot_main.cpp` 两个档位（headless / window）都设：解释器的 `--present headless` 也建
     //      **隐藏窗口 + GPU device**（`main.cpp:724-726`）⇒ 两臂的像素路径才会是同一个。
     void setGpuRaster(GpuRaster* raster) { gpu_raster_ = raster; }
+
+    // ④'' 控制层端点（`--control-root`；缺省 nullptr ⇒ 块边界的闸门连原子读都不付）。
+    //   所有权**不在这里**（`Control` 由 `aot_main.cpp` 持有）⇒ 与 `gpu_raster_` 同形的非拥有指针。
+    //   ⛔ 只有主线程调它（`run()` 的块边界汇点在主线程）。
+    void setControl(Control* control) { control_ = control; }
+    Control* control() { return control_; }
+    // ★ 控制层 `hello.present` / `sample.present` 的事实来源（`windowHidden()` 的判据，⛔ 不由
+    //   `--present` 推）。`aot_main` 在**起控制层那一刻**算一次（`auto` 会静默回落隐藏窗）。
+    void setPresentState(const std::string& state) { present_state_ = state; }
+
+    // ---- `ControlHostSide`（S2/S3/S4；⛔ 只在主线程被调）----
+    void fillControlSnapshot(ControlSnapshot& out) override;
+    ControlShotStatus controlScreenshot(const std::string& path, ControlScreenshot& out,
+                                        std::string* err) override;
+    void controlOnResume() override;
+    std::uint64_t controlPresentFrame() const override { return presenter_.frameCount(); }
+    // 宿主时钟（控制层的 freeze/unfreeze 与 `guest_ms` 读数都要它；解释器臂同形 `Machine::clock()`）。
+    VirtualClock& clock() { return clock_; }
+    const VirtualClock& clock() const { return clock_; }
 
     // ⑤ 读数（bring-up 结束时的"起点"快照）。
     //   ★ `region_log` = `--region-log`（缺省关）：只闸 `regions   :` 那一整块（28 行），
@@ -339,6 +369,9 @@ public:
     bool ownsCpu(const X86& cpu) const override { return &cpu == &cpu_; }
 
 private:
+    // ★ 控制层 Present 闸门的 C 函数指针（`HeadlessPresenter::setPresentGate` 的形状；
+    //   `user` = 本宿主）。只在主线程被调；`control_ == nullptr` 时已摘掉，不会进这里。
+    static bool presentGateThunk(void* user);
     // 块边界的宿主泵（三个合成 EA：`0x7FFEF008` 续延 / `0x7FFEF004` 定时器返回 / SEH 派发）。
     // ★ 这三个 EA 都**落在 shim 桩页范围内**（0x7FFE0000 + 0x2000 槽）⇒ 必须在"桩 EA ⇒ lift_shim"
     //   之前认出来，否则会被当成普通桩 EA 而落到 `lift_shim` 的"桩 EA 不在注册表"响亮停上
@@ -410,6 +443,15 @@ private:
     // ★ GPU 光栅化后端（`Machine::gpu_raster_` 的同形）：由 `aot_main.cpp` 在第一条 guest 指令之前设。
     //   所有权**不在这里**（`SdlWindow` 由 main 的 `display` / presenter 的 sink 持有）。
     GpuRaster* gpu_raster_ = nullptr;
+    // ★ 控制层端点（非拥有；缺省 nullptr = 没有控制层 ⇒ 块边界只有一次判空）。
+    Control* control_ = nullptr;
+    // 控制层快照的脚本身份采样器（有状态：名字解析缓存 / 一次告警去重；只有 `sample` 会驱动它）。
+    MarkerSampler control_marker_;
+    // `visible` | `hidden`（连接时的事实；`setPresentState` 写一次）。
+    std::string present_state_ = "hidden";
+    // ★ 控制层 `quit` 的置停标志（`serve()` 也直接返回 true；这个 bool 是"下单点"的事实面）：
+    //   与 `AotRunOptions::stop_requested`（`--input-plan` 的 quit）**分开** —— 两条来源各自可归因。
+    bool control_stop_ = false;
     // SEH 展开**不许跨过宿主 guest 回调帧**的判据（真源 `machine.cpp:2208-2236`）：
     // 0 = 不在任何回调里；非 0 = 最内层回调帧的返回槽 EA。影子栈那块是 profiler，⛔ 不复刻。
     std::uint32_t seh_guest_boundary_ = 0;

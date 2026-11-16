@@ -105,6 +105,143 @@ bool expectRgb(lift::SdlWindow& win, int x, int y, std::uint32_t rgb, const char
     return true;
 }
 
+// =====================================================================================
+// ★ 控制层 resume 的**陈旧事件闸门**（判据 13 的机制面）——真 SDL 队列 + `SDL_PushEvent`
+//
+// 现场：`pause` 是完全停（暂停期间 `pumpEvents` 一次不跑）⇒ 暂停 10 s 里的点击 / 拖动 / 关窗
+// 全排在 SDL 队列里。`resume` 首轮排空时：
+//   · 早于"恢复时刻"的 **OS 输入** 必须丢弃（⛔ 不压进 guest 的无上界队列）；
+//   · 早于"恢复时刻"的 **关窗 / ESC** 当**宿主 stop**（⛔ 不投 `WM_CLOSE` 进 guest ⇒ 这一轮不会
+//     因为"用户暂停时点了 X"而走进 guest 的关窗路径）。
+// 判据 = `queueSize` / `mouseButtons` / `stopRequested` + `controlStopReason`。
+// 红了意味着：resume 首轮把暂停期间的输入当"刚发生"灌给 guest，或暂停时的关窗把这一轮结束掉。
+// =====================================================================================
+bool pushStaleEvent(SDL_Event* e, std::uint64_t timestamp_ns) {
+    e->common.timestamp = timestamp_ns;
+    return SDL_PushEvent(e);
+}
+
+void caseControlResumeStaleEvents() {
+    ::lift_test::g_current_case = "control-resume-stale-events";
+
+    auto open = [](lift::SdlWindow& win, lift::WindowManager& wm, std::string* err) -> bool {
+        wm.registerClass("ctl-stale", 0, 0);
+        const std::uint32_t hwnd = wm.createWindow("ctl-stale", 0, 0, 0, 0, 640, 480, 0);
+        if (hwnd == 0) return false;
+        lift::SdlWindowOptions opt;
+        opt.title = "control stale events";
+        opt.driver_list = "software";
+        opt.hidden = true;
+        if (!win.init(opt, err)) return false;
+        win.attachWindowManager(&wm);
+        win.noteControlResume();  // 恢复时刻 = 现在（之后的事件都算"新"）
+        return true;
+    };
+
+    // ---- ① 陈旧 OS 输入 ⇒ 丢弃（队列 / 按钮电平一位都不动）----
+    {
+        lift::SdlWindow win;
+        lift::WindowManager wm;
+        std::string err;
+        if (!open(win, wm, &err)) {
+            std::fprintf(stderr, "open 失败（dummy+software 是机械守卫）：%s\n", err.c_str());
+            LIFT_CHECK(false);  // ★ 不许 SKIP 掉真实回归（与文件头的 requireWindow 同口径）
+            return;
+        }
+        const std::uint64_t resume_ns = SDL_GetTicksNS();
+        win.noteControlResume();  // 恢复时刻 = resume_ns 之后的一刻
+        const std::uint64_t stale = resume_ns > 5'000'000'000ull ? resume_ns - 5'000'000'000ull : 1ull;
+
+        SDL_Event motion{};
+        motion.type = SDL_EVENT_MOUSE_MOTION;
+        motion.motion.windowID = win.windowIdForTest();
+        motion.motion.x = 100.0f;
+        motion.motion.y = 120.0f;
+        LIFT_CHECK(pushStaleEvent(&motion, stale));
+        SDL_Event down{};
+        down.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+        down.button.windowID = win.windowIdForTest();
+        down.button.button = SDL_BUTTON_LEFT;
+        down.button.x = 100.0f;
+        down.button.y = 120.0f;
+        LIFT_CHECK(pushStaleEvent(&down, stale));
+        win.pumpHostEvents();
+        const std::size_t stale_queue = wm.queueSize();
+        const std::uint32_t stale_buttons = wm.mouseButtons();
+        std::printf("[judge13-stale] stale motion+down: queue=%zu buttons=%u\n", stale_queue,
+                    static_cast<unsigned>(stale_buttons));
+        LIFT_CHECK(stale_queue == 0);      // ⛔ 没有 WM_MOUSEMOVE 进 guest 队列
+        LIFT_CHECK(stale_buttons == 0u);   // ⛔ 没有按钮电平
+
+        // 对照：**新鲜** motion 必须照旧（证明上面的 0 不是因为"泵坏了"）。
+        SDL_Event fresh{};
+        fresh.type = SDL_EVENT_MOUSE_MOTION;
+        fresh.motion.windowID = win.windowIdForTest();
+        fresh.motion.x = 200.0f;
+        fresh.motion.y = 220.0f;
+        LIFT_CHECK(pushStaleEvent(&fresh, SDL_GetTicksNS() + 1'000'000ull));
+        win.pumpHostEvents();
+        std::printf("[judge13-stale] fresh motion: queue=%zu\n", wm.queueSize());
+        LIFT_CHECK(wm.queueSize() >= 1);
+        win.shutdown();
+    }
+
+    // ---- ② 陈旧关窗 ⇒ 宿主 stop（`bye.reason:"window-closed"`），⛔ 不投 WM_CLOSE ----
+    {
+        lift::SdlWindow win;
+        lift::WindowManager wm;
+        std::string err;
+        if (!open(win, wm, &err)) {
+            std::fprintf(stderr, "open 失败（dummy+software 是机械守卫）：%s\n", err.c_str());
+            LIFT_CHECK(false);  // ★ 不许 SKIP 掉真实回归（与文件头的 requireWindow 同口径）
+            return;
+        }
+        const std::uint64_t now = SDL_GetTicksNS();
+        const std::uint64_t stale = now > 3'000'000'000ull ? now - 3'000'000'000ull : 1ull;
+        SDL_Event close_ev{};
+        close_ev.type = SDL_EVENT_WINDOW_CLOSE_REQUESTED;
+        close_ev.window.windowID = win.windowIdForTest();
+        LIFT_CHECK(pushStaleEvent(&close_ev, stale));
+        win.pumpHostEvents();
+        std::printf("[judge13-close] stop=%d reason=%s queue=%zu\n", win.stopRequested() ? 1 : 0,
+                    win.controlStopReason() != nullptr ? win.controlStopReason() : "(null)", wm.queueSize());
+        LIFT_CHECK(win.stopRequested());
+        LIFT_CHECK(win.controlStopReason() != nullptr);
+        LIFT_CHECK(std::string(win.controlStopReason()) == "window-closed");
+        LIFT_CHECK(wm.queueSize() == 0);  // ⛔ 没有 WM_CLOSE 进 guest
+        win.shutdown();
+    }
+
+    // ---- ③ 陈旧 ESC ⇒ 同一条宿主 stop（⛔ 不进 guest 的键盘路径）----
+    {
+        lift::SdlWindow win;
+        lift::WindowManager wm;
+        std::string err;
+        if (!open(win, wm, &err)) {
+            std::fprintf(stderr, "open 失败（dummy+software 是机械守卫）：%s\n", err.c_str());
+            LIFT_CHECK(false);  // ★ 不许 SKIP 掉真实回归（与文件头的 requireWindow 同口径）
+            return;
+        }
+        const std::uint64_t now = SDL_GetTicksNS();
+        const std::uint64_t stale = now > 3'000'000'000ull ? now - 3'000'000'000ull : 1ull;
+        SDL_Event esc{};
+        esc.type = SDL_EVENT_KEY_DOWN;
+        esc.key.windowID = win.windowIdForTest();
+        esc.key.key = SDLK_ESCAPE;
+        esc.key.scancode = SDL_SCANCODE_ESCAPE;
+        LIFT_CHECK(pushStaleEvent(&esc, stale));
+        win.pumpHostEvents();
+        std::printf("[judge13-esc] stop=%d reason=%s queue=%zu keydown(ESC)=%d\n", win.stopRequested() ? 1 : 0,
+                    win.controlStopReason() != nullptr ? win.controlStopReason() : "(null)", wm.queueSize(),
+                    wm.keyDown(0x1B) ? 1 : 0);
+        LIFT_CHECK(win.stopRequested());
+        LIFT_CHECK(win.controlStopReason() != nullptr);
+        LIFT_CHECK(std::string(win.controlStopReason()) == "window-closed");
+        LIFT_CHECK(!wm.keyDown(0x1B));  // ⛔ 进 guest 的键盘状态没被改
+        win.shutdown();
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -119,7 +256,8 @@ int main(int argc, char** argv) {
         if (!requireWindow(win, gpu, &err)) {
             if (gpu) LIFT_SKIP(err.c_str());
             LIFT_CHECK(false);
-            return lift_test::finish("present-window");
+            caseControlResumeStaleEvents();
+    return lift_test::finish("present-window");
         }
         LIFT_CHECK(std::strcmp(win.rendererName(), gpu ? "gpu" : "software") == 0);
         if (gpu && !win.isGpuRenderer()) LIFT_SKIP(win.describe().c_str());
@@ -148,7 +286,8 @@ int main(int argc, char** argv) {
         if (!requireWindow(win, gpu, &err)) {
             if (gpu) LIFT_SKIP(err.c_str());
             LIFT_CHECK(false);
-            return lift_test::finish("present-window");
+            caseControlResumeStaleEvents();
+    return lift_test::finish("present-window");
         }
         lift::WindowManager wm;
         const std::uint32_t hwnd = wm.createWindow("EventTest", 0x10000000u, 0, 0, 0, 1280, 720, 0);
@@ -262,7 +401,8 @@ int main(int argc, char** argv) {
         if (!requireWindow(win, gpu, &err)) {
             if (gpu) LIFT_SKIP(err.c_str());
             LIFT_CHECK(false);
-            return lift_test::finish("present-window");
+            caseControlResumeStaleEvents();
+    return lift_test::finish("present-window");
         }
         LIFT_CHECK(std::strcmp(win.rendererName(), gpu ? "gpu" : "software") == 0);
         if (gpu && !win.isGpuRenderer()) LIFT_SKIP(win.describe().c_str());
@@ -281,7 +421,8 @@ int main(int argc, char** argv) {
         if (!requireWindow(win, gpu, &err)) {
             if (gpu) LIFT_SKIP(err.c_str());
             LIFT_CHECK(false);
-            return lift_test::finish("present-window");
+            caseControlResumeStaleEvents();
+    return lift_test::finish("present-window");
         }
         LIFT_CHECK(std::strcmp(win.rendererName(), gpu ? "gpu" : "software") == 0);
         if (gpu && !win.isGpuRenderer()) LIFT_SKIP(win.describe().c_str());
@@ -303,7 +444,8 @@ int main(int argc, char** argv) {
         if (!requireWindow(win, gpu, &err)) {
             if (gpu) LIFT_SKIP(err.c_str());
             LIFT_CHECK(false);
-            return lift_test::finish("present-window");
+            caseControlResumeStaleEvents();
+    return lift_test::finish("present-window");
         }
         LIFT_CHECK(std::strcmp(win.rendererName(), gpu ? "gpu" : "software") == 0);
         if (gpu && !win.isGpuRenderer()) LIFT_SKIP(win.describe().c_str());
@@ -322,7 +464,8 @@ int main(int argc, char** argv) {
         if (!requireWindow(win, gpu, &err)) {
             if (gpu) LIFT_SKIP(err.c_str());
             LIFT_CHECK(false);
-            return lift_test::finish("present-window");
+            caseControlResumeStaleEvents();
+    return lift_test::finish("present-window");
         }
         LIFT_CHECK(std::strcmp(win.rendererName(), gpu ? "gpu" : "software") == 0);
         if (gpu && !win.isGpuRenderer()) LIFT_SKIP(win.describe().c_str());
@@ -334,7 +477,8 @@ int main(int argc, char** argv) {
         LIFT_CHECK(s2 != nullptr);
         if (s2 == nullptr) {
             LIFT_CHECK(false);
-            return lift_test::finish("present-window");
+            caseControlResumeStaleEvents();
+    return lift_test::finish("present-window");
         }
         auto* p2 = f.arena.pixels(*s2);
         for (int y = 0; y < s2->height; ++y) {
@@ -351,7 +495,8 @@ int main(int argc, char** argv) {
         LIFT_CHECK(s3 != nullptr);
         if (s3 == nullptr) {
             LIFT_CHECK(false);
-            return lift_test::finish("present-window");
+            caseControlResumeStaleEvents();
+    return lift_test::finish("present-window");
         }
         auto* p3 = f.arena.pixels(*s3);
         for (int y = 0; y < s3->height; ++y) {
@@ -378,7 +523,8 @@ int main(int argc, char** argv) {
         if (!requireWindow(*sink, gpu, &werr)) {
             if (gpu) LIFT_SKIP(werr.c_str());
             LIFT_CHECK(false);
-            return lift_test::finish("present-window");
+            caseControlResumeStaleEvents();
+    return lift_test::finish("present-window");
         }
         lift::SdlWindow* win = sink.get();
         const std::uint32_t hwnd = m.cpu().windows->createWindow("CloseTest", 0x10000000u, 0, 0, 0, 1280, 720, 0);
@@ -412,7 +558,8 @@ int main(int argc, char** argv) {
         if (!requireWindow(*win, gpu, &werr)) {
             if (gpu) LIFT_SKIP(werr.c_str());
             LIFT_CHECK(false);
-            return lift_test::finish("present-window");
+            caseControlResumeStaleEvents();
+    return lift_test::finish("present-window");
         }
         const std::uint32_t hwnd =
             m.cpu().windows->createWindow("MouseTest", 0x00C00000u, 0, 100, 50, 1280, 720, 0);
@@ -530,5 +677,6 @@ int main(int argc, char** argv) {
     }
 
     LIFT_CHECK_EQ_U32(SDL_WasInit(SDL_INIT_VIDEO), 0u);
+    caseControlResumeStaleEvents();
     return lift_test::finish("present-window");
 }

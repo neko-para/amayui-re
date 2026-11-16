@@ -5,17 +5,20 @@
 #
 # 写法 = 顺序配方（语法真源 `apps/emulator-lift/src/runtime/recipe.h`）：
 #   `timeout N` 写在它守的那条 `await` 的**行尾**；`wait N` = **宿主墙钟**毫秒（固定时长，⛔ 不带 timeout）。
+#
+# ★ 门 = **位置门**（区间与读数：`docs/03-emulator/scripts/TITLE.md` / `GAMESTART.md` 的区间表）。
+#   门本身保证"在这一屏 **且** 在吃 click 的那一段"⇒ 换屏之后**不再需要** `wait` 等它稳下来
+#   （旧版两条 5000 / 3000 就是这么删掉的：它们原来干的事现在由门干）。
 
-await script TITLE timeout 30000
-wait 5000
+await position TITLE 0x0460 0x0520 timeout 30000
 
 click 1186 373
 
-await script GAMESTART timeout 30000
-wait 3000
+await position GAMESTART 0x0664 0x0724 timeout 30000
 
 click 830 592
 
 # 给 SE 播完 + 尾声重复留足时间（合计仍是 12 s）。
+# ★ 这一条是**真·时间语义**（等音频喂完 / 等尾声重复发生），位置门表达不了 ⇒ **保留**（判据 3）。
 # ★ `wait` 是固定时长、**没有守卫** ⇒ 一条写够就行（不再需要拆段）。
 wait 12000
