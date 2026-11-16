@@ -51,6 +51,15 @@ constexpr std::uint32_t kFmtX1R5G5B5 = 24;
 constexpr std::uint32_t kFmtA1R5G5B5 = 25;
 constexpr std::uint32_t kFmtA4R4G4B4 = 26;
 
+// ★ 32bpp 的"另一套通道顺序"（D3DFMT_A8B8G8R8 / X8B8G8R8）：与 21/22 只差 R/B 的排布
+//   （21/22 的内存字节序 = B,G,R,A/X；32/33 = R,G,B,A/X）。
+//   ⛔ **不在**纹理支持集里：`formatForD3dFormat` 不认它们 ⇒ `D3DXCreateTexture` /
+//   `CreateOffscreenPlainSurface` 都建不出来（GPU 纹理上传按 B8G8R8A8 逐字节搬运，
+//   放行它们会得到"尺寸对、通道错"的静默画面）。
+//   ⇒ 这两个值**只**为 `copySurfaceRect` 的格式判据服务（见 `surfaceCopyPlan`），⛔ 不谎称能建。
+constexpr std::uint32_t kFmtA8B8G8R8 = 32;
+constexpr std::uint32_t kFmtX8B8G8R8 = 33;
+
 // ★ 深度格式（⛔ **不在**上面那份纹理支持集里：`formatForD3dFormat` 不认它 ⇒ 当纹理问就该答"不支持"）。
 //   本线**真的建**的深度面是 32bpp（`d3d9_pipeline.cpp` 的 `createForDevice`：
 //   `pixel_format::formatForBpp(32)`），与 D3DFMT_D24S8 的字节足迹一致 ⇒ 只有 75 算"真的建了"；
@@ -603,6 +612,45 @@ std::uint32_t getRenderTargetData(X86& cpu, std::uint32_t render_target, std::ui
 //   · 复制后目标内容版本降级为"未知"。
 std::uint32_t updateSurface(X86& cpu, std::uint32_t src_surface, std::uint32_t src_rect_ea,
                             std::uint32_t dst_surface, std::uint32_t dst_point_ea, std::string* why);
+
+// =====================================================================================
+// `d3dx9_43!D3DXLoadSurfaceFromSurface`（2D surface 拷贝；导出在 `shims/d3dx9.cpp`）
+//
+// ★ 为什么语义层落在这里：rect / surface 状态 / arena / 屏障都在本模块；shim 只管 8 个参数与 HRESULT。
+// ★ 判据 = **微软文档**（`D3DXLoadSurfaceFromSurface`），⛔ 不是"这次跑通了"：
+//   · `src_rect_ea == 0` ⇒ 整幅源；`dst_rect_ea == 0` ⇒ **整幅目标**（不是"左上角"）；
+//   · 两个 rect 都是**半开矩形** `[left,right) × [top,bottom)`；
+//   · rect 越界 / 空 / 指针不可读 ⇒ **契约错**（调用方答 `D3DERR_INVALIDCALL`），
+//     ⛔ **不隐式裁剪**、⛔ 不夹取（与 `updateSurface` 同口径）；
+//   · **本线只做 1:1**：源 / 目标矩形尺寸不等 ⇒ `Unsupported`（文档说那会按 `Filter` 缩放；
+//     本线不实现，⛔ 不静默按左上角硬拷 —— 那会得到"尺寸对、内容错"的画面）；
+//   · `color_key != 0` ⇒ `Unsupported`：文档只说"匹配像素写成透明黑"，**比较口径（是否含 alpha）没写死**
+//     ⇒ 本线只做无色键的拷贝，⛔ 不臆造语义（调用方传 0 是正常路径：0 = 禁用色键）；
+//   · `destPalette` / `srcPalette` 只对 8-bit 调色板格式有意义；本线没有调色板格式 ⇒ 按文档**忽略**；
+//   · 格式：由 `surfaceCopyPlan` 判（见下）。
+//   · `Ok` = 已拷贝；`Contract` = 参数契约错（可继续的失败）；`Unsupported` / `Broken` = 调用方**响亮停**。
+enum class SurfaceCopyResult { Ok, Contract, Unsupported, Broken };
+
+// 1:1 拷贝的**逐字节搬运计划**（唯一一份格式判据；`copySurfaceRect` 与夹具共用）。
+//   · `supported == false` ⇒ 调用方按 `Unsupported` 响亮停（⛔ 不猜转换语义）；
+//   · `bytes_per_pixel` = 每个像素搬运的字节数（与两边的 arena 实际格式对不上 ⇒ 状态崩坏）；
+//   · `byte_map[k]` = 目标像素的第 k 字节取自源像素的第 `byte_map[k]` 字节。
+//   · 规则（D3DFORMAT 值）：
+//     ① 两边 D3DFORMAT **相同** ⇒ 恒等映射（任何 bpp；逐字节直拷）；
+//     ② 32bpp 的**同序**组合（21↔22、32↔33）⇒ 恒等映射：布局相同，只差"顶字节算不算 alpha"
+//        ⇒ 文档说 X8 的顶字节"不属于颜色" ⇒ 本线**照抄不改**（⛔ 不臆造 0xFF / 0x00）；
+//     ③ 32bpp 的 **RGBA↔BGRA**（{21,22} ↔ {32,33}）⇒ 只换 R/B（`{2,1,0,3}`），其余位逐位照抄；
+//     ④ 其它（16bpp ↔ 32bpp、不同 16bpp 格式、未知格式…）⇒ 不支持（缩放 / 通道重排 / 位深变换都不做）。
+struct SurfaceCopyPlan {
+    bool supported = false;
+    std::uint32_t bytes_per_pixel = 0;
+    std::uint8_t byte_map[4] = {0, 1, 2, 3};
+};
+SurfaceCopyPlan surfaceCopyPlan(std::uint32_t src_format, std::uint32_t dst_format);
+
+SurfaceCopyResult copySurfaceRect(X86& cpu, std::uint32_t src_surface, std::uint32_t src_rect_ea,
+                                  std::uint32_t dst_surface, std::uint32_t dst_rect_ea,
+                                  std::uint32_t color_key, std::string* why);
 
 // ★ 把一块状态块的**内容版本降级为"未知"**（0）：它被当成了 render target（`SetRenderTarget`
 //   绑到纹理表面），之后宿主可能经 Clear / CPU 光栅回退 / GPU 读回写它的像素 —— 这些路径不经过

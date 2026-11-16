@@ -1607,6 +1607,60 @@ std::uint32_t createD3dxSurfaceObject(X86& cpu, std::uint32_t user, std::uint32_
     return obj;
 }
 
+// ---------------------------------------------------------------------------------------
+// D3DXLoadSurfaceFromSurface（8 个参数）：**2D surface 拷贝**，语义层在 `d3d9::copySurfaceRect`。
+//
+// 签名（SDK d3dx9tex.h）：
+//   HRESULT D3DXLoadSurfaceFromSurface(IDirect3DSurface9* pDestSurface, const PALETTEENTRY* pDestPalette,
+//                                      const RECT* pDestRect, IDirect3DSurface9* pSrcSurface,
+//                                      const PALETTEENTRY* pSrcPalette, const RECT* pSrcRect,
+//                                      DWORD Filter, D3DCOLOR ColorKey)
+// ★ 判据 = 微软文档（半开矩形 / 不裁剪 / 1:1 / 色键 / 通道序），口径写在 `runtime/d3d9.h`。
+// ★ `Contract`（参数契约错）= D3DERR_INVALIDCALL + warn，机器继续；`Unsupported` / `Broken` = 响亮停。
+// ---------------------------------------------------------------------------------------
+void shimD3DXLoadSurfaceFromSurface(X86& cpu, ShimCall& call) {
+    const char* method = "D3DXLoadSurfaceFromSurface";
+    const std::uint32_t dst = call.u32(0);
+    const std::uint32_t dst_palette = call.u32(1);
+    const std::uint32_t dst_rect = call.u32(2);
+    const std::uint32_t src = call.u32(3);
+    const std::uint32_t src_palette = call.u32(4);
+    const std::uint32_t src_rect = call.u32(5);
+    const std::uint32_t filter = call.u32(6);
+    const std::uint32_t color_key = call.u32(7);
+    // 调色板只对 8-bit 调色板格式有意义；本线没有调色板格式 ⇒ 按文档忽略（非 NULL 时留一行，⛔ 不静默）。
+    if (dst_palette != 0 || src_palette != 0) {
+        d3dxLog(method, "调色板参数 dest=0x%08X src=0x%08X 被忽略（本线没有 8-bit 调色板格式）", dst_palette,
+                src_palette);
+    }
+    std::string why;
+    const d3d9::SurfaceCopyResult r =
+        d3d9::copySurfaceRect(cpu, src, src_rect, dst, dst_rect, color_key, &why);
+    switch (r) {
+        case d3d9::SurfaceCopyResult::Ok:
+            // Filter 在 1:1 拷贝里不参与采样（没有缩放、没有 mip）⇒ 只记录，不解释成别的语义。
+            d3dxLog(method, "S_OK（Filter=0x%08X，1:1 拷贝 ⇒ Filter 不参与采样）", filter);
+            call.result = d3d9::kOk;
+            return;
+        case d3d9::SurfaceCopyResult::Contract:
+            // 真机同样答 D3DERR_INVALIDCALL（可继续的失败，⛔ 不 trap、⛔ 不裁剪后假装成功）。
+            d3dxWarn(method, "%s", why.c_str());
+            call.result = d3d9::kInvalidCall;
+            return;
+        case d3d9::SurfaceCopyResult::Unsupported:
+            // 本线没实现的语义（缩放 / 色键 / 格式组合）⇒ 响亮停，⛔ 不返回一个"看起来成功"的 HRESULT。
+            d3dxTrap(cpu, method, "%s（Filter=0x%08X，ColorKey=0x%08X）", why.c_str(), filter, color_key);
+            call.result = d3d9::kInvalidCall;
+            return;
+        case d3d9::SurfaceCopyResult::Broken:
+            // 状态崩坏（状态块 / arena 对不上、GPU 读回失败…）⇒ 响亮停。
+            d3dxTrap(cpu, method, "%s", why.c_str());
+            call.result = d3d9::kFail;
+            return;
+    }
+    call.result = d3d9::kFail;
+}
+
 void registerD3DX9Shims(ShimRegistry& shims) {
     // 本安装的 d3dx9 导入表（`.data` 0x51D498 起 19 条）：本簇实现下面这些。
     // ★ 静态导入 ⇒ 走 `add`（IAT 桩页），⛔ 不是 dynamic_exports 那条动态解析路。
@@ -1617,6 +1671,10 @@ void registerD3DX9Shims(ShimRegistry& shims) {
     // TITLE Live2D 纹理（`.lst` 0x478398）走这条；先做 header 级 stub，后续再解码像素。
     shims.add("d3dx9_43", "D3DXCreateTextureFromFileInMemory", Conv::Stdcall, 4,
               &shimD3DXCreateTextureFromFileInMemory);
+    // 2D surface 拷贝（8 参）。★ 它原先被误登记在「M3 · 3D 不做」的缺口表里（`register_import_gaps.cpp`）；
+    //   按微软文档它是 surface→surface 的 2D blit，与 3D 无关 ⇒ 真实现 + 从缺口表移出（`sync --write`）。
+    shims.add("d3dx9_43", "D3DXLoadSurfaceFromSurface", Conv::Stdcall, 8,
+              &shimD3DXLoadSurfaceFromSurface);
     // ---- D3DX math：只登记**确定写对**的几条（行向量约定）；其余仍是派生缺口 ----
     shims.add("d3dx9_43", "D3DXMatrixMultiply", Conv::Stdcall, 3, &shimD3DXMatrixMultiply);
     shims.add("d3dx9_43", "D3DXMatrixScaling", Conv::Stdcall, 4, &shimD3DXMatrixScaling);
