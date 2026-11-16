@@ -81,11 +81,24 @@ node tools/emu-ctl.mjs quit                      # 收口：bye → 摘要 → �
 | 暂停/掉线 | idle（暂停且无未决命令，缺省 300 s）与 orphan（连接断但还暂停，缺省 10 s）都会让端点**自己收口** |
 | 端点卡在不返回的 shim | 汇点不到 ⇒ 客户端 `timeout`（exit 3）、端点仍活；⛔ 不 kill、⛔ 不假装成功 |
 | window 档 | **可用**（`--present window` + `--control-root`）。代价：暂停期间不泵事件 ⇒ OS 可能判"无响应"。**别停太久。** |
-| 陈旧事件 | resume 时丢弃 `event.timestamp` 早于恢复时刻的 OS 输入；暂停态的关窗/ESC 当**宿主 stop**（`bye.reason:"window-closed"`）⇒ 否则 resume 首轮会把这一轮结束掉 |
+| 陈旧事件 | **arm 点在 `Control::serve()` 的 Resume 分支**：普通 `resume` 与 `resume --for-*`（两者都放行 guest）各 arm 一次；`pause` / `sample` / `screenshot` / `click` 与 idle/orphan 收口**都不 arm**（它们不产生"恢复首轮"）。arm = 把"恢复时刻"记到宿主 sink 上 ⇒ 之后丢弃 `event.timestamp` 早于它的 OS 输入、把早于它的关窗/ESC 当**宿主 stop**（`bye.reason:"window-closed"`）⇒ 否则 resume 首轮会把这一轮结束掉 |
 | 截图来源 | `guest-backbuffer-frozen`：`present()` 当场冻结的 guest 后缓冲**像素副本**（只在 `--control-root` 时拷；1280×720×32bpp ≈ 3.7 MB/帧）。⛔ 不是窗口回读（不叠层 / 不带 letterbox / 不带光标），⛔ 也不是"暂停那一刻的现场后缓冲"——现场这时已被下一帧的 `Clear` / 回读改写（实测：`paused_at=block` 时现场是清除色、`present` 时才是画面） |
 | `hash_still_matches` | 语义 = "写出的这份字节仍等于 presenter 记录的那一帧"。**冻结路径下恒 true** ⇒ 它只回答"**冻结有没有生效**"（把冻结去掉会变 false —— 守卫就是靠这条红的）；⛔ **不能当"图对不对"的判据**：判内容要判 BMP 非全黑，或与同帧 `--dump-frame` 逐字节对照 |
 | 读不到的两处（残余） | 冻结**分配失败**时退回写现场（极端情况仍可能写出一张全黑图；只 warn 一次 + 计数）；计数与最近一次冻结耗时在 AOT 摘要的 `present :` 行（`freezeFailures=` / `freezeNs=`）。⛔ 没有协议级 `unavailable`（2026-11-16 收窄裁决：不为它扩协议） |
 | 病史 | `REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`（🐞S2，2026-11-16 收口）：旧实现只留"最后一张"的**描述符**、暂停时才读像素 ⇒ 读到的不是那一帧（`paused_at=block` 时全黑 0.000%，`present` 时 99.679%） |
+
+★ **陈旧事件闸门要两层判据，⛔ 只留第二层就等于让"接线掉了"静默通过**（2026-11-17 / win32 / `windows-x64` = RelWithDebInfo）：
+
+1. **接线**（`lift-control-endpoint` 的 `control-resume-arms-host-hook`）：真协议 + 真 `serve()`，数 `controlOnResume()` 被调几次 ——
+   `pause`→0 · `resume`→1 · 运行态 `resume`（`not_paused`）→1 · `sample`→1 · `resume` + `"for_ms":30`→2 · 再 `resume`→3。
+   `ctest --test-dir out -R "control|present"` ⇒ **5/5 通过**；把 `Control::serve()` 里那一行拆掉 ⇒ **`lift-control-endpoint` 失败**
+   （`506 checks, 5 failures`，读数打印 `controlOnResume 被调 0 次（期望 3）`）。
+   `node tools/mutate-check.mjs --match controlOnResume` ⇒ 守卫红（CTest 退出码 8）。
+2. **映射**（`present-window` 的 `control-resume-stale-events`）：陈旧 OS 输入丢弃 / 陈旧关窗当宿主 stop。
+   ⚠ 它**自己**调 `win.noteControlResume()` 造恢复时刻 ⇒ 只能证明纯映射 + sink 一侧。
+   病史（`REQ-01M7JFDZK1SZW72SBAW6BC3DRT`，🐞S2，2026-11-17 收口）：这一层一直是绿的，而生产路径上
+   `controlOnResume()` **零调用** ⇒ `stale_input_before_ns` 恒 0 ⇒ `classifyStaleEvent` 恒 `Keep` ——
+   暂停 10 s 里的点击 / 拖动 / 关窗会被 resume 首轮当"刚发生"灌进 guest。
 
 ## 5. 怎么查
 

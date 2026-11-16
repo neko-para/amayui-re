@@ -1089,6 +1089,22 @@ const MUTATIONS = [
       'queue==0 / buttons==0 断言红），陈旧关窗也不再当宿主 stop（stopRequested/controlStopReason 断言红）',
   },
 
+  {
+    // ★ 同一类错（判据 13）的**另一半**：上面那条改的是"分类器失效"，这条改的是"**根本没 arm**"。
+    //   现场：`Control::serve()` 的 Resume 分支漏了通知宿主 ⇒ `stale_input_before_ns` 恒 0 ⇒
+    //   纯映射再对也永远走不到（缺陷 `REQ-01M7JFDZK1SZW72SBAW6BC3DRT`）。⛔ 两条都必须留：
+    //   只留分类器那条时，接线掉了 `present-window` 照样全绿（它自己直接调 `noteControlResume`）。
+    file: 'apps/emulator-lift/src/runtime/control_ws.cpp',
+    from: '                if (ctx.host != nullptr) ctx.host->controlOnResume();',
+    to: '                (void)0;  // 变异：resume 不通知宿主（不 arm 陈旧事件闸门）',
+    guard: 'ctest:lift-control-endpoint',
+    ctest: 'lift-control-endpoint',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      'resume 不再 arm "恢复时刻" ⇒ 生产路径上陈旧事件闸门是死代码（`control-resume-arms-host-hook` 的 ' +
+      '`controlOnResume` 计数 3 → 0 断言红）',
+  },
+
   // ── 🐞S2 `emu-ctl screenshot` 全黑（`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`；守卫 = `tests/control_snapshot.cpp`）──
   //   ★ 代表"截图读的不是最后呈现的那一帧"这一类静默失效：
   //     present **不冻结** ⇒ `dumpLastFrame` 退回写现场后缓冲（下一帧的 Clear(0) 之后 = 全黑 = 本缺陷形态）。
