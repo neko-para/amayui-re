@@ -24,8 +24,8 @@
 
 1. **旧仓 `E:\Games\Eushully\天結` 是只读来源**：不改、不删、不移动它任何东西（可读、可 `git status` 证明未变）。
 2. **提交按 §14 的口径**：可以 `git add` / `git commit` / 撤回暂存，但 ⛔ 已提交的历史**不许改写**
-   （`reset --hard` / `rebase` / `--force`），合回 `main` 一律 `git merge`（不 squash）；
-   ⛔ **需求单只在 `E:\Projects\amayui-re`（`main`）改**，`dev` 工作树只做代码 / 工具（§14.3）。
+   （`reset --hard` / `rebase` / `--force`），合并一律 `git merge`（不 squash）；
+   ⛔ **真相件（需求单 / `AGENTS.md` / `corpus/**`）只在 `main` 改** —— 代码与资料**两边都能改**（§14）。
 3. **不要凭记忆写游戏 / 引擎语义结论**（字段含义、函数用途、opcode 语义、脚本角色…）：那些属于**待重建的知识层**，
    必须绑可再校验的观察（锚点锚 **EA**，不锚语料行号）之后才准登记。
 
@@ -345,27 +345,33 @@ ctest --test-dir out --output-on-failure
 - ⛔ 不为翻译去改 `AGE.EXE`（汉化项目与修改 `AGE.EXE` 无关）。
 - 整篇重译与局部更新走同一个闭环（检索 → 改中文 → 生成编辑清单 → 逐条应用 → 过判据），细节见 `amayui-translate` 技能。
 
-## 14. 双工作树：`main` 真相仓 + `dev` 代码仓（2026-11-17 起）
+## 14. 双工作树：两条可写的**并行车道**（2026-11-17 起）
 
-★ 同一个仓挂**两个可写工作树**（`git worktree`），**按路径分家** —— 这是整套并行能成立的全部理由。
+★ 同一个仓挂**两个可写工作树**（`git worktree`）。★ **它存在的意义就是代码编辑能并行两路**
+（用户 2026-11-17 口径：否则不如都写在 main）。
+⇒ **按子系统 / 路径分活**，⛔ 不按"main 只做真相、dev 只做代码"那种单车道分法。
+
+| 树 | 额外职责（只有它有） | 也能当 |
+|---|---|---|
+| `E:\Projects\amayui-re` | **真相**：需求单 · `AGENTS.md` / `CTX.md` · `data/**` · `corpus/**` | **代码车道 A**（自带 `out/`） |
+| `E:\Projects\amayui-re-dev` | 无（它不承担任何真相职责） | **代码车道 B**（自带 `out/`） |
+
+- ★ **硬约束只有一条**：两条活跃车道**不许同时改同一批文件**。两个子系统最容易撞的公共面是
+  `apps/emulator-lift/CMakeLists.txt` 与 `tools/mutate-check.mjs` ⇒ 各自**追加在自己的段尾**，撞了由父级手工解。
+  开新车道前先看另一棵树：`git -C <另一棵> status --porcelain` + `git -C <另一棵> diff --name-only`。
+- ★ **真相件始终只在 main**（需求单 / `AGENTS.md` / `CTX.md` / `corpus/**`）：这是"真相只有一份"，与并行无关。
+- ★ **合并是双向的**：
+  - `dev → main`：把 dev 车道的成果**收口**进真相仓；
+  - `main → dev`：main 上也长了代码 ⇒ **必须** `git merge main` 进 dev，否则下一条 dev 车道的基线是旧的。
+  - 两个方向都只用 `merge`；⛔ 不 `rebase`、⛔ 不 `squash`。
+- ★ **要墙钟读数的车道独占机器**：两条车道同时 `cmake --build` 会互相污染时序读数（§12.6）。
+  功能类验收（红/绿、停点名字、`insns`）不受影响 ⇒ 并行时把"性能结论"让给独占用例。
+- ★ main 的 `out/` 会因 main 的代码改动变 **stale**：在 main 跑代码就得在 main 重建（10 min 级）。
+  这是并行的代价，⛔ 别为此把代码推回 dev。
 
 ★ **设备范围**（2026-11-17 实况）：两棵工作树**只在 win32（当前设备）**成立；**macOS 上仍是一仓一树**（没有 `dev` 的 checkout）。
 ⇒ §14.2 / §14.5 / §14.7 的"两棵树"口径 **mac 上不适用**；但 **§14.1 的"可以 `add` / `commit`"两边都生效**（换设备**不撤销**）。
 ⇒ 下文凡是只在 win32 成立的地方标 **【win】**。
-
-| 路径 | 分支 | 是什么 | 谁的活 |
-|---|---|---|---|
-| `E:\Projects\amayui-re` | `main` | **控制层真相** | 需求单 · `AGENTS.md` / `CTX.md` · `data/**` · `corpus/**` · `docs/00-origin\|01-translation\|02-engine/**` |
-| `E:\Projects\amayui-re-dev` | `dev` | **代码 / 工具臂** | `apps/**` · `tools/**` · `plugins/**` · `packages/**` · `docs/03-emulator/**` · `release/**` |
-
-- ★ **两边改的文件集不相交 ⇒ merge 不冲突**。谁"顺手"在 dev 改了需求单、或在 main 改了源码，
-  就得人工解冲突，而且真相变成两份 —— 这是本节唯一的硬禁止。
-- ★ **纯文本资料可以在 main 直接改**（用户 2026-11-17 口径）：`docs/**` 的新文件与更正、需求单、`AGENTS.md` ——
-  不必为"改一段文档"去排 `dev` 的单车道。代价只有一条：**同一个文件两边都改就会冲突**
-  ⇒ 动手前先看 `git -C E:\Projects\amayui-re-dev status --porcelain` / `git diff main -- <文件>`；
-  撞上了就先改 main，再 `git merge main` 进 dev。
-  ⛔ 但**编译 / 构建 / 跑 exe 仍然只能在 dev**（一棵构建树，且 main 的 `out/` 会变 stale）。
-- ★ main 上的代码树**照旧可建可跑**（合并后要在这里过门禁、跑带资产的验收），但它**不长新代码**。
 
 ### 14.1 提交
 
