@@ -4,6 +4,9 @@
 > + 何时/谁发现 + **一条**代表守卫（没有就写"无守卫，仅文档"）+ 复现路径。
 > ⛔ 不为每个缺陷加回一个用例；⛔ 不写"还剩几条"（会过时）。守卫门槛见 `README.md` §0.1。
 > 编号 `BUG-NN` 一经分配不再改；补记在后面追加。这里的**读数**是历史上的观察，不是当前状态。
+> ★ **2026-11-16 起 `--interaction-graph` / `--interaction-trace` / `--interaction-fail-dump` 已退役**
+> ⇒ 本文里的这些复现命令是**历史命令**；配方今天的入口 = AOT 臂 `--input-plan`
+> （`apps/emulator-lift/scripts/recipes/*.plan`，索引见那里的 `README.md`）。
 
 ### BUG-01 · 第二次进 OPTION 必然停（纹理 arena 耗尽，一次往返净泄漏 18.08 MB）
 - **现象**：进 OPTION → 右键退回 TITLE → 再进 OPTION ⇒ 停在装载中，纹理缺失/黑块，stderr 一句 `surface 分配失败（5898240 字节）：guest 堆耗尽`。

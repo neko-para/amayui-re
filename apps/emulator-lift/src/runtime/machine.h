@@ -22,6 +22,7 @@
 #include "runtime/critical_sections.h"
 #include "runtime/font.h"
 #include "runtime/present.h"
+#include "runtime/screen_sample.h"
 #include "runtime/surface.h"
 #include "runtime/decode.h"
 #include "runtime/engine_marker.h"
@@ -54,7 +55,7 @@ enum class StopReason : std::uint8_t {
     Stopped,       // guest 自己停（hlt / 停机）
     NoCode,        // eip 落在没有代码的地方
     TimeLimit,     // 墙钟上限（--time-limit；探索用，不用于确定性比对）
-    // ★ 识别驱动的交互任务**失败**（三种失败：timeout / no-sample / expect_change）。
+    // ★ 识别驱动的交互任务**失败**（顺序配方的 `timeout` / "任务没走完"）。
     //   ⛔ 不进 `ok()`：它必须是非 0 退出（真源 `docs/03-emulator/interaction-model.md` §2）。
     InteractionFailed,
     // ★ 我方 arena / guest 堆不够（`d3dxResourceStop`）。⛔ 不是正常结局、不进 `ok()`。
@@ -152,7 +153,7 @@ struct RunResult {
 
 // ★ `main` 最后那道兜底退出码（**只**回答"这次 run 本身成不成功"：ok ⇒ 0，否则 2）。
 //   ⛔ 不是完整映射：`main.cpp` 先跑几道消费者策略闸门（--assert-guest-token ⇒ 4、
-//   --interaction-graph 没走完 / 三种失败 ⇒ 5），它们**优先于**本函数。
+//   时间线的三种失败 ⇒ 5），它们**优先于**本函数。
 //   抽成函数是为了让纯档用例能断言"新停机原因 ⇒ 非 0"（真正的黑盒进程退出码需要 CLI 造 OOM，
 //   而兄弟单已裁"⛔ 不把夹具造 OOM 做成产品参数"）。
 int exitCodeForRun(const RunResult& r);
@@ -332,21 +333,21 @@ public:
     // 也调用它，否则 guest 卡在等消息时脚本永远不触发）。
     void tickInputScript(X86& cpu);
 
-    // ★ 识别驱动的交互任务（`--interaction-graph`）：见 `runtime/interaction_graph.h`，
-    //   真源 `docs/03-emulator/interaction-model.md`。与时间线**并存**（真源 §7 第 3 期才合并）。
+    // ★ 交互配方驱动器：见 `runtime/interaction_graph.h`。⛔ 2026-11-16 起**没有 CLI 入口**
+    //   （`--interaction-graph` 已退役）——这里只剩程序内的夹具入口（pure CTest 用它）。
     bool loadInteractionGraph(const std::string& path, std::string* err);
     // 直接给文本（测试 / 内嵌用）：与 `loadInteractionGraph` 走同一个解析器。
     bool loadInteractionGraphText(const std::string& text, const std::string& origin, std::string* err);
     InteractionGraph& interactionGraph() { return interaction_; }
     const InteractionGraph& interactionGraph() const { return interaction_; }
-    // 画面特征采样器：加载图时挂到 presenter 上（没加载图 ⇒ 不采样、零成本）。
+    // 画面特征采样器：只给时间线的效果级判据用（`--expect-change-after`；策略关 ⇒ 不接、零成本）。
     FrameSampler& sampler() { return sampler_; }
-    // 每个块边界推进一次交互图（顺序：先图 tick（它 append 动作）再 actuator tick（真正发 WM_*））。
+    // 每个块边界推进一次交互配方（顺序：先配方 tick（它 append 动作）再 actuator tick（真正发 WM_*））。
     void tickInteraction(X86& cpu);
 
     // ★ 时间线的效果级判据（见上面的 `ExpectChangePolicy`）：必须在 `run()` 之前、**在
     //   `loadInputScript*` 之后**配置一次（策略要扫一遍脚本的动作；零匹配 = 拒绝 ⇒ 不许静默开局）。
-    //   与 `--interaction-graph` **互斥**（图有自己的 `expect_change` 语义；两套判据同时开 = 两套口径）。
+    //   与交互配方驱动器**互斥**（配方有自己的门语义；两套判据同时开 = 两套口径）。
     bool configureExpectChange(const ExpectChangePolicy& p, std::string* err);
     bool expectChangeEnabled() const { return expect_policy_.enabled; }
     const ExpectChangePolicy& expectChangePolicy() const { return expect_policy_; }
@@ -498,11 +499,12 @@ private:
     std::uint32_t marker_logged_id_ = 0;
     bool marker_logged_degraded_ = false;
     std::string marker_logged_name_;
-    // ★ 识别驱动的交互任务（`--interaction-graph`）+ 它的画面采样器。
-    //   采样器只在这张图被加载时挂到 presenter 上（`loadInteractionGraph`），否则一次也不采样。
+    // ★ 交互配方驱动器：**顺序配方**的推进器（`runtime/recipe.h`）。今天没有 CLI 入口。
+    //   ⚠ 它**不消费**画面采样（门只有身份 + 脚本内位置）；`sampler_` 是 `--expect-change-after`
+    //   的（两者互斥），⛔ 不要在这里重新接线。
     InteractionGraph interaction_;
     FrameSampler sampler_;
-    // 图失败 / 完成时投 WM_QUIT 唤醒阻塞中的 guest（只投一次）。
+    // 配方驱动器失败 / 完成时投 WM_QUIT 唤醒阻塞中的 guest（只投一次）。
     bool interaction_stop_posted_ = false;
     // ★ 区间 profiler（`runtime/window_profile.h`）：armed = 脚本里有 profile_begin/end 动作。
     //   ⛔ 没有这些动作时它整条路径都是 no-op（两次 steady_clock 也不会有）。

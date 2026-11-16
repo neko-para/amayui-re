@@ -1,10 +1,13 @@
-// emulator-lift · 输入投递层（四条指令的 AOT 输入配方）—— 口径见 `input_plan.h` 的头注。
+// emulator-lift · 输入投递层（AOT 臂：在 guest 读点推进配方）—— 口径见 `input_plan.h` 的头注。
 //
-// ⛔ 本文件**不是**第二份输入状态：状态只有 `WindowManager` 一份。这里只有指令表 + 计数 +
-//   待抬起队列；施加输入的**每一处**都走 `runtime/input.h` 既有的 `input::*`（与 SDL / 旧脚本
-//   同一条路径）。
-// ★ 墙钟只出现在 **`wait`** 一处（宿主单调时钟，非阻塞 deadline）；`await script` / `await
-//   position` 的门只看 guest 内存（脚本身份 + PC），⛔ 不看时钟、不看帧号。
+// ⛔ 本文件**不是**第二份输入状态：状态只有 `WindowManager` 一份。这里只有"到期了没有"的推进 +
+//   计数 + 待抬起队列；施加输入的**每一处**都走 `runtime/input.h` 既有的 `input::*`（与 SDL /
+//   旧脚本同一条路径）。
+// ★ **解析与门判定不在这里**：配方是 `runtime/recipe.h` 的那一份（**唯一一份**解析器与 step 模型；
+//   机器内驱动器 `InteractionGraph` 读的也是它）。本文件只做两件事：① 到点把指令施加到
+//   `WindowManager`；② 采身份 / 读位置（后者与 `readScriptPositionSample` 同一份实现）。
+// ★ 墙钟只出现在 **`wait`** 一处（宿主单调时钟，非阻塞 deadline）；两个门只看 guest 内存
+//   （脚本身份 + PC），⛔ 不看时钟、不看帧号。
 #include "runtime/input_plan.h"
 
 #include <chrono>
@@ -12,7 +15,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "runtime/cursor_map.h"  // referenceToClientPixel（1280×720 参考系 → 客户区，唯一公式）
@@ -28,112 +30,16 @@ namespace {
 constexpr std::uint64_t kForceReleaseReads = 16;
 
 // 计划消息的 `MSG.time`：**没有** guest 时钟来源（plan 不在 tick 上下文里被调用）⇒ 恒 0。
-// 引擎不读它（`interaction-model.md` 的 `script` 源不碰 MSG.time）。
+// 引擎不读它（`interaction-model.md` 的门不碰 MSG.time）。
 constexpr std::uint32_t kPlanMessageTimeMs = 0;
-
-// 报错口径与 `interaction_graph.cpp` 一致：`<origin>:<行号>: <原因>`（CLI 层据此 exit 2）。
-std::string errAt(const std::string& origin, int line, const std::string& why) {
-    return origin + ":" + std::to_string(line) + ": " + why;
-}
-
-bool isWordSpace(char c) { return c == ' ' || c == '\t' || c == '\r'; }
-
-std::string trimAscii(const std::string& s) {
-    std::size_t b = 0;
-    std::size_t e = s.size();
-    while (b < e && isWordSpace(s[b])) ++b;
-    while (e > b && isWordSpace(s[e - 1])) --e;
-    return s.substr(b, e - b);
-}
-
-std::string lowerAscii(std::string s) {
-    for (char& c : s) {
-        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
-    }
-    return s;
-}
-
-std::vector<std::string> splitWords(const std::string& s) {
-    std::vector<std::string> out;
-    std::size_t i = 0;
-    while (i < s.size()) {
-        while (i < s.size() && isWordSpace(s[i])) ++i;
-        if (i >= s.size()) break;
-        const std::size_t start = i;
-        while (i < s.size() && !isWordSpace(s[i])) ++i;
-        out.push_back(s.substr(start, i - start));
-    }
-    return out;
-}
-
-// 只认十进制非负整数（⛔ 不用 strtoull：它对 "-5" 会回绕成一个大正数）。
-bool parseU64(const std::string& t, std::uint64_t* out) {
-    if (t.empty() || t.size() > 20) return false;
-    std::uint64_t v = 0;
-    for (char c : t) {
-        if (c < '0' || c > '9') return false;
-        const std::uint64_t digit = static_cast<std::uint64_t>(c - '0');
-        if (v > (UINT64_MAX - digit) / 10ull) return false;
-        v = v * 10ull + digit;
-    }
-    *out = v;
-    return true;
-}
-
-// `await position` 的 FROM / TO：**只认带 `0x` 前缀的 hex**（与清单 `label_%08x` 对照方便）。
-// ⛔ 不收十进制 / 负数 / 裸 hex（`39C`）—— 那是"看起来像偏移、其实单位不明"的静默陷阱。
-bool parseHexU32(const std::string& t, std::uint32_t* out) {
-    if (t.size() < 3 || t[0] != '0' || (t[1] != 'x' && t[1] != 'X')) return false;
-    std::uint64_t v = 0;
-    for (std::size_t i = 2; i < t.size(); ++i) {
-        const char c = t[i];
-        unsigned digit = 0;
-        if (c >= '0' && c <= '9') {
-            digit = static_cast<unsigned>(c - '0');
-        } else if (c >= 'a' && c <= 'f') {
-            digit = static_cast<unsigned>(c - 'a' + 10);
-        } else if (c >= 'A' && c <= 'F') {
-            digit = static_cast<unsigned>(c - 'A' + 10);
-        } else {
-            return false;
-        }
-        v = v * 16ull + digit;
-        if (v > 0xFFFFFFFFull) return false;  // 超出 u32（点名"不是 32 位值"由调用方做）
-    }
-    *out = static_cast<std::uint32_t>(v);
-    return true;
-}
-
-// 有界 guest 读：越界 / 未提交 ⇒ false（同 `engine_marker.cpp` 的口径；⛔ 绝不裸读）。
-bool readU32(const GuestMemory& mem, std::uint64_t ea, std::uint32_t* out) {
-    if (ea > 0xFFFFFFFFull - 3ull) return false;
-    const std::uint32_t a = static_cast<std::uint32_t>(ea);
-    if (!mem.committed(a, 4u)) return false;
-    *out = mem.rd32(a);
-    return true;
-}
-
-// `click` 的参考系坐标：允许负数（人手可能量到边缘外），但必须是完整整数。
-bool parseInt(const std::string& t, int* out) {
-    const bool negative = !t.empty() && t[0] == '-';
-    const std::string digits = negative ? t.substr(1) : t;
-    std::uint64_t v = 0;
-    if (!parseU64(digits, &v)) return false;
-    if (negative) {
-        if (v > 2147483648ull) return false;
-        *out = static_cast<int>(-static_cast<std::int64_t>(v));
-    } else {
-        if (v > 2147483647ull) return false;
-        *out = static_cast<int>(v);
-    }
-    return true;
-}
 
 // 与 `present.cpp` 的 `nowNs()` 同源：宿主单调时钟（⛔ 不是 `clock.h` 的 guest 虚拟时钟）。
 std::uint64_t hostNowMs() {
     const auto now = std::chrono::steady_clock::now().time_since_epoch();
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
 }
+
+std::string u64s(std::uint64_t v) { return std::to_string(static_cast<unsigned long long>(v)); }
 
 }  // namespace
 
@@ -156,9 +62,8 @@ const char* inputPointName(InputPoint point) {
 }
 
 void InputPlan::clear() {
-    steps_.clear();
+    recipe_.clear();
     pending_.clear();
-    origin_.clear();
     identity_ = MarkerSample{};
     next_ = 0;
     applied_ = 0;
@@ -167,6 +72,21 @@ void InputPlan::clear() {
     position_misses_ = 0;
     read_points_ = 0;
     releases_pending_ = 0;
+    wait_started_ = false;
+    wait_deadline_ms_ = 0;
+    guard_armed_ = false;
+    guard_started_ms_ = 0;
+    guard_ms_ = 0;
+    failed_ = false;
+    failed_index_ = 0;
+    failed_elapsed_ms_ = 0;
+    failed_guard_ms_ = 0;
+    quit_requested_ = false;
+    profile_open_ = false;
+    profile_label_.clear();
+    profile_started_ms_ = 0;
+    profile_reads_at_begin_ = 0;
+    profile_windows_ = 0;
     deliver_calls_.fill(0);
     event_calls_.fill(0);
 }
@@ -183,158 +103,24 @@ void InputPlan::setClockForTest(NowFn now_ms) { now_fn_ = now_ms; }
 std::uint64_t InputPlan::nowMs() const { return now_fn_ != nullptr ? now_fn_() : hostNowMs(); }
 
 bool InputPlan::loadFile(const std::string& path, std::string* err) {
-    std::FILE* f = openHostFileUtf8(path, "rb");
-    if (f == nullptr) {
-        if (err) *err = "打不开输入计划：" + path;
+    Recipe r;
+    if (!r.loadFile(path, err)) {
         clear();
         return false;
     }
-    std::string text;
-    char buf[4096];
-    std::size_t n = 0;
-    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
-    std::fclose(f);
-    return loadText(text, path, err);
+    clear();
+    recipe_ = std::move(r);
+    return true;
 }
 
-// ★ **专用平铺解析器**：只认四条指令（`await script <名字>` / `await position <名字> <FROM> <TO>` /
-//   `wait <ms>` / `click <x> <y> [left|right]`）。⛔ 不复用 `InteractionGraph::loadText`：那个模型是"一个门 + 恰好一个动作"，
-//   表达不了 `wait`，也表达不了"门的下面紧跟着一条等待"（见头注 H1）。
 bool InputPlan::loadText(const std::string& text, const std::string& origin, std::string* err) {
+    Recipe r;
+    if (!r.loadText(text, origin, err)) {
+        clear();
+        return false;
+    }
     clear();
-    std::vector<PlanStep> steps;
-    auto fail = [&](int line, const std::string& why) {
-        if (err) *err = errAt(origin, line, why);
-        return false;
-    };
-    // 一行 = 一条指令（`#` 到行尾是注释；空行忽略，但行号照数）。
-    auto parseLine = [&](int line, const std::string& body, const std::vector<std::string>& tok) -> bool {
-        const std::string head = lowerAscii(tok[0]);
-        if (head == "await") {
-            const std::string sub = tok.size() > 1 ? lowerAscii(tok[1]) : std::string();
-            if (sub == "script") {
-                if (tok.size() != 3) {
-                    return fail(line, "`await script` 需要一个脚本名（收到 " +
-                                          std::to_string(tok.size() > 2 ? tok.size() - 2 : 0) + " 个词）");
-                }
-                PlanStep s;
-                s.kind = InstrKind::AwaitScript;
-                s.script = tok[2];
-                s.line = line;
-                steps.push_back(std::move(s));
-                return true;
-            }
-            if (sub == "position") {
-                // ★ 语法：`await position <SCRIPT> <FROM> <TO>`；FROM 含、TO 不含；解析期校验 FROM < TO。
-                //   ⛔ 脚本名**不在这里**校验（名字匹配是运行期的事：`scriptNameMatches`）。
-                if (tok.size() != 5) {
-                    return fail(line, "`await position` 需要 `<脚本名> <FROM> <TO>`（收到 " +
-                                          std::to_string(tok.size() > 2 ? tok.size() - 2 : 0) +
-                                          " 个词；FROM/TO 是带 `0x` 前缀的 hex）");
-                }
-                std::uint32_t from = 0;
-                std::uint32_t to = 0;
-                if (!parseHexU32(tok[3], &from) || !parseHexU32(tok[4], &to)) {
-                    return fail(line, "`await position` 的 FROM/TO 必须是带 `0x` 前缀的 32 位 hex（收到 `" +
-                                          tok[3] + "` `" + tok[4] + "`）");
-                }
-                if (from >= to) {
-                    return fail(line, "`await position` 要求 FROM < TO（半开区间 `[FROM, TO)`；收到 `" + tok[3] +
-                                          "` `" + tok[4] + "`）");
-                }
-                PlanStep s;
-                s.kind = InstrKind::AwaitPosition;
-                s.script = tok[2];
-                s.pos_from = from;
-                s.pos_to = to;
-                s.line = line;
-                steps.push_back(std::move(s));
-                return true;
-            }
-            // `await always` / `await presents <n>` / `await marker …` 全落这里。
-            return fail(line,
-                        "未知指令：`" + body +
-                            "`（只认 `await script <名字>` / `await position <名字> <FROM> <TO>` / `wait <ms>` / "
-                            "`click <x> <y> [left|right]`）");
-        }
-        if (head == "wait") {
-            if (tok.size() != 2) {
-                return fail(line, "`wait` 只收一个毫秒数（收到 " + std::to_string(tok.size() - 1) + " 个词）");
-            }
-            std::uint64_t ms = 0;
-            if (!parseU64(tok[1], &ms) || ms == 0) {
-                return fail(line, "`wait` 的毫秒必须是**正整数**（收到 `" + tok[1] + "`）");
-            }
-            PlanStep s;
-            s.kind = InstrKind::Wait;
-            s.wait_ms = ms;
-            s.line = line;
-            steps.push_back(std::move(s));
-            return true;
-        }
-        if (head == "click") {
-            if (tok.size() < 3) {
-                return fail(line, "`click` 缺参数：要 `<x> <y> [left|right]`（收到 " +
-                                      std::to_string(tok.size() - 1) + " 个词）");
-            }
-            if (tok.size() > 4) {
-                return fail(line, "`click` 参数过多：最多 4 个词（收到 " + std::to_string(tok.size()) + " 个）");
-            }
-            int x = 0;
-            int y = 0;
-            if (!parseInt(tok[1], &x) || !parseInt(tok[2], &y)) {
-                return fail(line, "`click` 的坐标必须是整数（收到 `" + tok[1] + "` `" + tok[2] + "`）");
-            }
-            PlanStep s;
-            s.kind = InstrKind::Click;
-            s.x = x;
-            s.y = y;
-            s.line = line;
-            if (tok.size() == 4) {
-                const std::string word = lowerAscii(tok[3]);
-                if (word == "left") {
-                    s.button = MouseButton::Left;
-                } else if (word == "right") {
-                    s.button = MouseButton::Right;
-                } else {
-                    return fail(line, "`click` 的按钮词只认**裸写**的 `left` / `right`（收到 `" + tok[3] + "`）");
-                }
-            }
-            steps.push_back(std::move(s));
-            return true;
-        }
-        // `key` / 图那套 `node` `when` `action` `next` `expect` `timeout` / 任何别的词。
-        return fail(line, "未知指令：`" + body +
-                              "`（只认 `await script <名字>` / `await position <名字> <FROM> <TO>` / `wait <ms>` / "
-                              "`click <x> <y> [left|right]`）");
-    };
-
-    int line_no = 0;
-    std::size_t start = 0;
-    while (start <= text.size()) {
-        std::size_t end = text.find('\n', start);
-        if (end == std::string::npos) end = text.size();
-        std::string raw = text.substr(start, end - start);
-        ++line_no;
-        const std::size_t hash = raw.find('#');
-        if (hash != std::string::npos) raw.resize(hash);
-        const std::string body = trimAscii(raw);
-        const std::vector<std::string> tok = splitWords(body);
-        if (!tok.empty() && !parseLine(line_no, body, tok)) return false;
-        if (end == text.size()) break;
-        start = end + 1;
-    }
-
-    if (steps.empty()) {
-        if (err) {
-            *err = origin +
-                   ": 文件里没有任何指令（只认 `await script <名字>` / `await position <名字> <FROM> <TO>` / "
-                   "`wait <ms>` / `click …`）";
-        }
-        return false;
-    }
-    steps_ = std::move(steps);
-    origin_ = origin;
+    recipe_ = std::move(r);
     return true;
 }
 
@@ -358,17 +144,36 @@ void InputPlan::atPoint(WindowManager& wm, InputPoint point) {
     const std::size_t i = static_cast<std::size_t>(point);
     if (i < deliver_calls_.size()) ++deliver_calls_[i];
     ++read_points_;
-    if (steps_.empty() && pending_.empty()) return;
+    if (!recipe_.active() && pending_.empty()) return;
     // ① 到期 / 兜底的**待抬起**先落地（同一次读点内、读之前）。
     releaseDue(wm);
-    // ② flush-before-read：按文件顺序把到期指令消费到 `WindowManager`（⛔ 不越过未到期的指令）。
+    // ② `quit` 之后不再推进；守卫到期之后同样不再推进（⛔ 不许"失败后继续点"）。
+    if (quit_requested_ || failed_) return;
+    // ③ flush-before-read：按文件顺序把到期指令消费到 `WindowManager`（⛔ 不越过未到期的指令）。
     bool identity_fresh = false;
-    while (next_ < steps_.size()) {
-        PlanStep& s = steps_[next_];
-        if (s.kind == InstrKind::AwaitScript || s.kind == InstrKind::AwaitPosition) {
+    while (next_ < recipe_.size()) {
+        const Step& s = recipe_.steps()[static_cast<std::size_t>(next_)];
+        // ★ **每步守卫**（共享宽度 = `stepTimeoutMs`）：本臂只有一把尺 = 宿主墙钟。
+        //   本臂不给自己缺省值（0）⇒ 没写 `timeout` 的配方在这里一次时钟也不读（零成本）。
+        if (!guard_armed_) {
+            const std::uint64_t guard = stepTimeoutMs(s, 0);
+            if (guard != 0) {
+                guard_armed_ = true;
+                guard_ms_ = guard;
+                guard_started_ms_ = nowMs();
+            }
+        }
+        if (guard_armed_) {
+            const std::uint64_t elapsed = nowMs() - guard_started_ms_;
+            if (stepWindowExpired(elapsed, guard_ms_)) {
+                failTimeout(static_cast<std::size_t>(next_), elapsed, guard_ms_);
+                return;
+            }
+        }
+        if (s.isGate()) {
             // ★ **电平**门：身份当前就是它 ⇒ 通过；身份读不到（base==0 / valid=false）⇒ 不成立。
             if (mem_ == nullptr) {
-                if (s.kind == InstrKind::AwaitPosition) ++position_misses_;
+                if (s.kind == StepKind::AwaitPosition) ++position_misses_;
                 return;  // 没有身份来源 ⇒ 继续等（⛔ 不报错）
             }
             if (!identity_fresh) {
@@ -376,69 +181,48 @@ void InputPlan::atPoint(WindowManager& wm, InputPoint point) {
                 identity_fresh = true;
             }
             if (!identity_.valid) {
-                if (s.kind == InstrKind::AwaitPosition) ++position_misses_;
+                if (s.kind == StepKind::AwaitPosition) ++position_misses_;
                 return;
             }
-            if (!scriptNameMatches(s.script, identity_)) return;
-            if (s.kind == InstrKind::AwaitPosition) {
-                // ★ 位置是**同一层**的第二个条件：script 匹配 **且** `FROM <= pos < TO`。
-                //   读不到 ⇒ 不成立（继续等）；⛔ 不报错、不超时、不施加。
-                std::uint32_t pos = 0;
-                if (!readScriptPosition(&pos)) {
+            // ★ 位置是**同一层**的第二个条件：script 匹配 **且** `FROM <= pos < TO`。
+            //   读不到 ⇒ 不成立（继续等）；⛔ 不报错、不超时、不施加。
+            ScriptPositionSample pos;
+            if (s.kind == StepKind::AwaitPosition) {
+                pos = readScriptPositionSample(*mem_, identity_);
+                if (!pos.valid) {
                     ++position_misses_;
                     return;
                 }
-                if (pos < s.pos_from || pos >= s.pos_to) return;  // 半开区间：TO 不含
             }
-        } else if (s.kind == InstrKind::Wait) {
-            // ★ **非阻塞**：只记 deadline（起点 = 第一次到达这条指令的读点）；到期由下一个读点消费。
+            if (!stepGateHolds(s, &identity_, pos)) return;
+        } else if (s.kind == StepKind::Wait) {
+            // ★ **非阻塞**：只记 deadline（起点 = 第一次到达这条指令的读点）；到期由下个读点消费。
             const std::uint64_t now = nowMs();
-            if (!s.wait_started) {
-                s.wait_started = true;
-                s.wait_deadline_ms = now + s.wait_ms;
+            if (!wait_started_) {
+                wait_started_ = true;
+                wait_deadline_ms_ = now + s.wait_ms;
             }
-            if (now < s.wait_deadline_ms) return;
-        } else {  // Click
-            applyStep(wm, s);
+            if (now < wait_deadline_ms_) return;
+            wait_started_ = false;
+        } else if (s.kind == StepKind::Click) {
+            applyClick(wm, s);
             ++fired_;
+        } else if (s.kind == StepKind::ProfileBegin || s.kind == StepKind::ProfileEnd) {
+            applyProfileMark(s, nowMs());
+        } else {  // Quit
+            applyQuit(wm);
         }
         ++applied_;
         ++next_;
+        guard_armed_ = false;  // 下一条指令重新起算（同一次读点内继续 flush）
+        // ★ `quit` 之后不再推进（`InputScript` 的 `if (quit_requested_) continue` 同口径）：
+        //   但它**自己**已经算走完 ⇒ 末尾的 `quit` 不会让 pending 变非 0。
+        if (quit_requested_) return;
     }
 }
 
-// 读一次"脚本内位置"（label 坐标 = 脚本体内的**绝对字节偏移**，4 字节对齐）。
-// ★ 只读 guest 内存：`frame[cur].+0x00`（基址）+ `+0x04`（PC）；公式见头注的 EA 锚。
-// ★ 读不到 / 不自洽 ⇒ false（门不成立、继续等）；⛔ 不报错、不 abort、不猜一个位置。
-bool InputPlan::readScriptPosition(std::uint32_t* pos) {
-    if (mem_ == nullptr || !identity_.valid) return false;
-    std::uint32_t engine = 0;
-    if (!readU32(*mem_, kEngineSingletonGlobal, &engine) || engine == 0) return false;
-    const std::uint64_t rec = static_cast<std::uint64_t>(engine) + kEngineFrameBase +
-                              static_cast<std::uint64_t>(kFrameStride) * identity_.cur;
-    std::uint32_t base = 0;
-    std::uint32_t pc = 0;
-    if (!readU32(*mem_, rec + kFrameBodyBaseOffset, &base) || !readU32(*mem_, rec + kFramePcOffset, &pc)) {
-        return false;
-    }
-    // ① 引擎还没发布基址（`0x40EE44 GlobalAlloc` 之前 / 帧已清）⇒ 不成立。
-    if (base == 0 || !mem_->committed(base, 1u)) return false;
-    // ② PC 必须在**脚本体缓冲里**：`pc < base` ⇒ 不是"当前指令"。
-    //    ⚠ 装载长度（`ReadFile` 的字节数）**没有写回 guest**（`0x40F680..` 只是栈上
-    //    `lpNumberOfBytesRead`）⇒ 精确上界读不到；用"同区域 + 已提交 + 语料上界"三条代替。
-    if (pc < base || !mem_->committed(pc, 4u)) return false;
-    const Region* region = mem_->regionOf(base);
-    if (region == nullptr || pc >= region->end) return false;
-    const std::uint64_t off = static_cast<std::uint64_t>(pc) - base;
-    if (off > kScriptBodyMaxBytes) return false;  // 读到别的对象了（跨区伪 pos）
-    const std::uint64_t at = kScriptHeaderLen + off;
-    if (at > 0xFFFFFFFFull) return false;
-    *pos = static_cast<std::uint32_t>(at);
-    return true;
-}
-
-void InputPlan::applyStep(WindowManager& wm, const PlanStep& s) {
-    // `loadText` 只产生 Click 一种"会施加的"指令 ⇒ 走到这里 kind 一定是 Click。
+void InputPlan::applyClick(WindowManager& wm, const Step& s) {
+    // `applyClick` 只在 `kind == Click` 时被调（`atPoint` 的分支已经排他）⇒ 这里不用再判 kind。
     // ★ 坐标**算一次**：`mouseMove` / `mouseButton(down)` / 之后抬起都读同一对值
     //   （⛔ 两处各算一次 ⇒ move 到 A、消息 lParam 是 B 的静默漂移）。
     int client_x = 0;
@@ -461,6 +245,68 @@ void InputPlan::applyStep(WindowManager& wm, const PlanStep& s) {
     input::mouseButton(wm, r.x, r.y, r.button, /*down=*/true, InputSource::Script, kPlanMessageTimeMs);
     pending_.push_back(r);
     ++releases_pending_;
+}
+
+void InputPlan::applyProfileMark(const Step& s, std::uint64_t now_ms) {
+    // ★ 本臂**没有**区间 profiler（`WindowProfiler` 是解释器块循环的仪器：它的分项来自
+    //   `BlockCache` / `ShimRegistry` / 派发循环，AOT 臂一个都没有）⇒ 落成**宿主墙钟区间读数**：
+    //   begin / end 各一行一次性输出，区间宽度可与 `--profile` 的整轮读数 / `frame-ms:` 对齐。
+    //   ⛔ 不假装开了窗口 profiler（那会是"看起来有分项、其实是空的"假读数）。
+    if (s.kind == StepKind::ProfileBegin) {
+        if (profile_open_) {
+            std::fprintf(stderr,
+                         "[profile-window] ⚠ 上一个 profile_begin(%s) 还没收口，忽略 %s（行 %d）\n",
+                         profile_label_.c_str(), s.label.c_str(), s.line);
+            return;
+        }
+        profile_open_ = true;
+        profile_label_ = s.label;
+        profile_started_ms_ = now_ms;
+        profile_reads_at_begin_ = read_points_;
+        std::printf("[profile-window] begin label=%s wall_ms=%s reads=%s（AOT 臂：区间读数，不是分项 profiler）\n",
+                    s.label.c_str(), u64s(now_ms).c_str(), u64s(read_points_).c_str());
+        std::fflush(stdout);
+        return;
+    }
+    if (!profile_open_) {
+        std::fprintf(stderr, "[profile-window] ⚠ profile_end(%s) 没有对应的 profile_begin（行 %d）⇒ 忽略\n",
+                     s.label.c_str(), s.line);
+        return;
+    }
+    const std::uint64_t elapsed = now_ms - profile_started_ms_;
+    const std::uint64_t reads = read_points_ - profile_reads_at_begin_;
+    if (s.label != profile_label_) {
+        // label 只用于对齐 / 报错（与解释器臂同口径）⇒ 不匹配是**响亮**的提示，不是失败。
+        std::fprintf(stderr,
+                     "[profile-window] ⚠ profile_end(%s) 与 begin(%s) 的 label 不一致（行 %d）；仍按同一窗口收口\n",
+                     s.label.c_str(), profile_label_.c_str(), s.line);
+    }
+    std::printf("[profile-window] end label=%s wall_ms=%s elapsed_ms=%s reads=%s\n", profile_label_.c_str(),
+                u64s(now_ms).c_str(), u64s(elapsed).c_str(), u64s(reads).c_str());
+    std::fflush(stdout);
+    profile_open_ = false;
+    profile_label_.clear();
+    ++profile_windows_;
+}
+
+void InputPlan::applyQuit(WindowManager& wm) {
+    // ★ 与解释器臂**同一个**交付点：`Machine::pumpScript` 消费 `InputScript::quitRequested()` 时
+    //   也是 `cpu.windows->postQuit(0)`（一次性；WM_QUIT 是队列尾的虚拟项）⇒ guest 的消息循环
+    //   拿到它之后自己退出，run 以"guest 正常退出"收口。
+    //   ⛔ 不在这里另造一种"宿主直接杀进程"的语义（那会让两臂的 quit 不同）。
+    quit_requested_ = true;
+    wm.postQuit(0);
+    std::printf("[input-plan] quit：已投 WM_QUIT（read point %s；后续指令不再推进）\n",
+                u64s(read_points_).c_str());
+    std::fflush(stdout);
+}
+
+void InputPlan::failTimeout(std::size_t index, std::uint64_t elapsed_ms, std::uint64_t guard_ms) {
+    if (failed_) return;  // ⛔ 失败只报一次（读点还会继续来）
+    failed_ = true;
+    failed_index_ = index;
+    failed_elapsed_ms_ = elapsed_ms;
+    failed_guard_ms_ = guard_ms;
 }
 
 void InputPlan::releaseDue(WindowManager& wm) {
@@ -516,14 +362,65 @@ std::uint64_t InputPlan::noteCalls(PlanEventKind kind) const {
 
 std::string InputPlan::summary() const {
     // 一行、**一次性**（⛔ 不许每帧打：`AGENTS.md` §12.8 第 3 条）。
-    // ★ `presents=` 只是**读数**（`present.cpp` 推的 guest 累计 Present 数），⛔ 不再是门。
-    char buf[256];
-    std::snprintf(buf, sizeof(buf), "steps=%llu fired=%llu presents=%llu released=%llu held=%zu",
-                  static_cast<unsigned long long>(steps_.size()),
+    // ★ `presents=` 只是**读数**（`present.cpp` 推的 guest 累计 Present 数），⛔ 不是门。
+    // ★ `pending=` = **还没走完的指令数**（判据：≠ 0 ⇒ 任务没走完 ⇒ exit 5，见 `outcome()`）。
+    //   位置在 `fired=` 之后（`steps= fired= pending=` 是读这一行的最短形式；旧的四个字段照旧在）。
+    char buf[320];
+    std::snprintf(buf, sizeof(buf), "steps=%llu fired=%llu pending=%llu presents=%llu released=%llu held=%zu",
+                  static_cast<unsigned long long>(recipe_.size()),
                   static_cast<unsigned long long>(fired_),
+                  static_cast<unsigned long long>(pending()),
                   static_cast<unsigned long long>(presenting()),
                   static_cast<unsigned long long>(released_), pending_.size());
     return std::string(buf);
+}
+
+RecipeOutcome InputPlan::outcome() const {
+    // ★ 判据只有一条：**配方的走完数**。`TimedOut` 是"没走完 + 知道是哪一条"；
+    //   `Running` 是"跑完了仍然还有指令没消费"（= 任务没走完，⛔ 不是成功）。
+    if (failed_) return RecipeOutcome::TimedOut;
+    if (recipe_.active() && next_ >= recipe_.size()) return RecipeOutcome::Done;
+    return RecipeOutcome::Running;
+}
+
+const Step* InputPlan::currentStep() const {
+    // 失败时点名**到期的那一条**；没失败就点名**第一条还没消费的**（= 卡在哪）。
+    if (failed_) {
+        return failed_index_ < recipe_.size() ? &recipe_.steps()[failed_index_] : nullptr;
+    }
+    if (next_ < recipe_.size()) return &recipe_.steps()[static_cast<std::size_t>(next_)];
+    return nullptr;
+}
+
+std::string InputPlan::failureReport() const {
+    const Step* s = currentStep();
+    if (s == nullptr) return std::string();
+    std::string r;
+    if (failed_) {
+        r += "input-plan: FAIL timeout\n";
+    } else {
+        r += "input-plan: FAIL incomplete（配方没有走完）\n";
+    }
+    // ★ 点名必须有 `文件:行`（`REQ-01M7HP2Q1N0N004M8R4RPABWSV` 的前置：人能照着修）
+    r += "  plan     : " + recipe_.origin() + ":" + std::to_string(s->line) + "\n";
+    r += "  step     : " + s->id + "（行 " + std::to_string(s->line) + "，" +
+         (s->isGate() ? "门" : "动作") + "）\n";
+    r += "  waiting  : " + stepText(*s) + "\n";
+    if (failed_) {
+        r += "  window   : 守卫 " + u64s(failed_guard_ms_) + " ms（宿主墙钟；本臂只有这一把尺）已等 " +
+             u64s(failed_elapsed_ms_) + " ms ⇒ 到期\n";
+    } else if (s->isGate()) {
+        r += "  说明     : 跑完时这个门还**没有**成立 ⇒ 任务没走完（⛔ 不是成功）\n";
+    } else {
+        r += "  说明     : 跑完时这条**动作**还没轮到（前面的门没走完 / 被 `quit` 截断）⇒ "
+             "任务没走完（⛔ 不是成功）\n";
+    }
+    r += "  progress : steps=" + u64s(steps()) + " applied=" + u64s(applied_) + " pending=" + u64s(pending()) +
+         " fired=" + u64s(fired_) + " reads=" + u64s(read_points_) + "\n";
+    if (failed_) {
+        r += "  说明     : 只在**本臂**有的那把尺上判（宿主墙钟）；guest 侧还在不在跑不影响这条结论\n";
+    }
+    return r;
 }
 
 }  // namespace lift

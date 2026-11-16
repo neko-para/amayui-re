@@ -70,9 +70,9 @@ struct SkipVerdict {
 
 namespace skip_report_detail {
 
-// 按 `\n` 切行（去掉行尾 `\r`）。与 `stress_harness.h` 的 `linesStartingWith(text, "")` 同口径，
-// 但这里**故意不引 `stress_harness.h`**：那份是压力档专用（还带 windows.h / subprocess），
-// 本份要能被默认档的 pure 测试直接 include。
+// 按 `\n` 切行（去掉行尾 `\r`）。原 `tests/stress_harness.h` 的 `linesStartingWith(text, "")` 同口径，
+// 但这里**故意不引它**：那份是压力档专用（还带 windows.h / subprocess），
+// 本份要能被默认档的 pure 测试直接 include（`stress_harness.h` 已随 6 条压力用例退役删除，2026-11-16）。
 inline std::vector<std::string> splitLines(const std::string& text) {
     std::vector<std::string> out;
     std::size_t pos = 0;

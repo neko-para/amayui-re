@@ -24,8 +24,8 @@
 
 | 出口 | 图 | 读数 |
 |---|---|---|
-| 左键点「戻る」 | `repo:apps/emulator-lift/scripts/interaction/room-exit.graph` | exit 0 · `detail: interaction: task done` · `transitions=11 actions=3 samples=249 changes=44` · 末帧第 249 帧 `0x94CB492BF7F1AEEB` · `insns=2,120,728,564`（三次读数逐位相同） |
-| 右键点「戻る」 | `repo:apps/emulator-lift/scripts/interaction/room-exit-right.graph` | exit 0 · 同样的计数 · 末帧同 hash · `insns=2,120,726,066`；trace 与左键版只差三处：`origin=` 行 / `action click center right applied` / `node back enter` 的 insn 差 4 条 |
+| 左键点「戻る」 | `（已删）apps/emulator-lift/scripts/interaction/room-exit.graph` | exit 0 · `detail: interaction: task done` · `transitions=11 actions=3 samples=249 changes=44` · 末帧第 249 帧 `0x94CB492BF7F1AEEB` · `insns=2,120,728,564`（三次读数逐位相同） |
+| 右键点「戻る」 | `（已删）apps/emulator-lift/scripts/interaction/room-exit-right.graph` | exit 0 · 同样的计数 · 末帧同 hash · `insns=2,120,726,066`；trace 与左键版只差三处：`origin=` 行 / `action click center right applied` / `node back enter` 的 insn 差 4 条 |
 
 - **因果对照（同机同构建）**：`click 100 100` / 不点击 / 只 hover ⇒ 全部 exit 5（`expect-change` 或 `timeout(node back)`）；
   `click 1100 150`（CG 鑑賞）⇒ 画面变了但不是 TITLE ⇒ 成功可归因于"在按钮上的一次点击"。

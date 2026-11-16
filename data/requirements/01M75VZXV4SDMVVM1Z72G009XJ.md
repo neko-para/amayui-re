@@ -5,7 +5,7 @@
 - status: blocked
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
 - blocked_by: [REQ-01M75WWFGT8ZEBGEPENQHSYTB8]
-- repro: graphs/se-eof.graph#click 830 592
+- repro: apps/emulator-lift/scripts/recipes/se-eof.plan#click 830 592
 - severity: S1
 - tags: [emulator-lift audio token scheduler]
 

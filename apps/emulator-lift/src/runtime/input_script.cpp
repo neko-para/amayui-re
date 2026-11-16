@@ -150,16 +150,11 @@ const char* triggerKindName(TriggerKind k) {
 const char* triggerUnitName(TriggerKind k) { return triggerKindName(k); }
 
 // ---- ★ `--anchor-script` 的启动期校验（⛔ 不跑一半就退化成"0 点从 run 起算"）----
-//   两条判据的**唯一实现**：`main` 用它 exit 2，pure CTest 用它断言"互斥 ⇒ 解析期报错"。
-std::string validateOriginCli(bool anchor_requested, bool input_script_given, bool interaction_graph_given) {
+//   两条判据的**唯一实现**：`main` 用它 exit 2，pure CTest 用它断言"缺 `--input-script` ⇒ 解析期报错"。
+//   ★ 2026-11-16：`--interaction-graph` 已退役 ⇒ 不再有"与交互图互斥"那一条（它没有生产者了）。
+std::string validateOriginCli(bool anchor_requested, bool input_script_given) {
     if (!anchor_requested) return std::string();
-    // ① 与交互图**互斥**：图有自己的 actuator 与**绝对触发**（`at frame <F+1>`），
-    //    再叠一个 0 点会把它的绝对触发整体抬 `origin.frame` 帧（语义直接对不上）。
-    if (interaction_graph_given) {
-        return "--anchor-script 与 --interaction-graph 互斥：图有自己的 actuator 与**绝对触发**"
-               "（0 点重定基会把它们整体抬起）⇒ 二选一";
-    }
-    // ② 只有时间线认 0 点 ⇒ 没给 `--input-script` 时它是无意义的配置（⛔ 不静默接受）。
+    // 只有时间线认 0 点 ⇒ 没给 `--input-script` 时它是无意义的配置（⛔ 不静默接受）。
     if (!input_script_given) {
         return "--anchor-script 需要同时给 --input-script（它给的是那条时间线的 0 点）";
     }

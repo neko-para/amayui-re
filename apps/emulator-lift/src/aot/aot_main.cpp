@@ -60,8 +60,10 @@ void usage() {
         "  --skip-logo         一次性 latch：T_Command + 0x5EB5C 写 0（口径同 emulator-lift；\n"
         "                      钩子点 AOT 用 0x004BAA33；⛔ 不跳过 boot、不改 eip/寄存器）\n"
         "  --audio off|virtual|sdl  音频后端（本臂**只实现 off**：没有音频设备 / 喂料线程）\n"
-        "  --input-plan <file> 组装输入计划（缺省不给 = 没有任何输入注入，行为与本参数无关）：\n"
-        "                      文件格式 = **四条指令**（`#` 注释 / 空行忽略，按文件顺序执行）：\n"
+        "  --input-plan <file> 组装输入配方（缺省不给 = 没有任何输入注入，行为与本参数无关）：\n"
+        "                      文件格式 = **唯一一份配方语法**（`runtime/recipe.h`；解释器臂的\n"
+        "                      `--interaction-graph` 已退役 ⇒ 本臂是**唯一**的配方入口；\n"
+        "                      ⛔ 没有\"本入口不认\"的指令）：\n"
         "                        await script <名字>   电平门：当前引擎脚本身份 == 名字即通过\n"
         "                                              （ASCII 大小写不敏感、两侧都忽略 .bin）\n"
         "                        await position <名字> <FROM> <TO>\n"
@@ -73,9 +75,17 @@ void usage() {
         "                        click <x> <y> [left|right]\n"
         "                                              x/y = **1280×720 参考系**，投递前按客户区缩放；\n"
         "                                              按钮词裸写，省略 = left（不收 =left）\n"
+        "                        timeout <ms>          **上一条指令**的守卫（本臂只有宿主墙钟这一把尺）\n"
+        "                        profile_begin|end <label>\n"
+        "                                              区间读数（本臂没有分项 profiler ⇒ begin/end 各一行\n"
+        "                                              宿主墙钟 + 读点数，可与 --profile 对齐）\n"
+        "                        quit                  投 WM_QUIT 结束本次运行（后续指令不再推进）\n"
         "                      推进只发生在 **guest 读点**（flush-before-read），⛔ 没有帧精度保证；\n"
         "                      旧指令（`await always` / `await presents <n>` / `key`）/ 图语法 ⇒ exit 2；\n"
-        "                      跑完打一行 `input-plan: …` 摘要（一次性）。解析失败 ⇒ exit 2 + 行号\n"
+        "                      跑完打一行 `input-plan: steps=… fired=… pending=…` 摘要（一次性）；\n"
+        "                      ★ **完成度是判据**：pending != 0 或某步 timeout 到期 ⇒ stderr 点名\n"
+        "                      `文件:行` + 门/动作 并 **exit 5**（⛔ 不许只警告仍 exit 0）。\n"
+        "                      解析失败 ⇒ exit 2 + 行号\n"
         "%s"
         "  --dump-frame <path> 每次 Present 导出一份 guest 后缓冲 BMP（{frame} = 4 位帧号）\n"
         "  --profile           采样式内部 profile（**缺省关**）：每帧时间戳 + 派发 / lift_one / shim\n"
@@ -497,6 +507,10 @@ int main(int argc, char** argv) {
         host.cpu().windows->setInputPlan(&input_plan);
         // `present.cpp` 的 `note(Frame)` 保留：它只是摘要 `presents=` 的读数，⛔ 不再是门。
         host.presenter().setInputPlan(&input_plan);
+        // ★ `quit` 的**宿主停止请求**（唯一生产者 = 配方里的 `quit`）：run 循环每个块边界读它 ⇒
+        //   本次运行以 `Stopped` 收口（与解释器臂 `Machine::run` 读 `actuator().quitRequested()`
+        //   同一条口径）。⛔ 不等 guest 自己退出（它的停机路径可能不在闭包里）。
+        run_opts.stop_requested = input_plan.quitFlag();
     }
 
     // ---- ③' AGERC.DLL：真实 guest 模块（口径同 `src/main.cpp`：`--game-dir` 下那份，走 VFS 解析）----
@@ -604,17 +618,16 @@ int main(int argc, char** argv) {
     if (present_window_active) host.cpu().windows->clearHostEventPump();
     // ---- ⑥' `--input-plan` 收口：**跑结束前必须抬**（否则下一次 run 会看到"按钮一直按着"）----
     //   `releaseAll()` 只抬起待办的按钮，不是 step、不推进入口；返回个数只用于摘要。
+    //   ★ 完成度是**判据**（`REQ-01M7HP2Q1N0N004M8R4RPABWSV` 的前置）：`pending != 0`（任务没走完）
+    //     或某一步的 `timeout` 到期 ⇒ **exit 5** + stderr 点名 `文件:行` + 门/动作。
+    //     ⛔ 不许只打一行 stderr 警告仍 exit 0 —— 那正是"图 → 配方"改写会把 CTest 变成假绿的缝。
+    //   ★ 判据先算、摘要照打（读数面不因失败而消失）；退出码在 `printRunSummary` 之后取，
+    //     保证"跑失败（2）"与"配方没走完（5）"两个数都能在 stdout 上看到原因。
+    const lift::RecipeOutcome plan_outcome =
+        input_plan.armed() ? input_plan.outcome() : lift::RecipeOutcome::Done;
     if (input_plan.armed()) {
         input_plan.releaseAll(*host.cpu().windows);
         printf("input-plan: %s\n", input_plan.summary().c_str());
-        if (input_plan.stepsApplied() < input_plan.steps()) {
-            // 响亮但不改退出码（⛔ 本单不新增停止原因）：没走完的指令是**配方问题**，不是成功。
-            std::fprintf(stderr,
-                         "emulator-lift-aot: ⚠ input-plan 还有 %llu 条指令没走完（共 %llu 条；"
-                         "看卡在哪条 `await script` 的身份 / `wait` 的 deadline，以及本轮 `--max-frames`）\n",
-                         (unsigned long long)(input_plan.steps() - input_plan.stepsApplied()),
-                         (unsigned long long)input_plan.steps());
-        }
         std::fflush(stdout);
     }
     host.printRunSummary(r, stdout);
@@ -623,6 +636,14 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "emulator-lift-aot: ⛔ 停在一个派发表里没有的 EA：%s\n", r.detail.c_str());
     }
     std::fflush(stdout);
+    if (plan_outcome != lift::RecipeOutcome::Done) {
+        // 多行报告（点名 `文件:行` + 门/动作 + 进度）由 `InputPlan` 自己算（同一个结论只在一个出口）。
+        const std::string report = input_plan.failureReport();
+        std::fputs(report.empty() ? "input-plan: FAIL（配方没有走完，但没有可点名的指令）\n" : report.c_str(),
+                   stderr);
+        std::fflush(stderr);
+        return lift::recipeOutcomeExitCode(plan_outcome);  // = 5（recipe.h 的 kRecipeIncompleteExitCode）
+    }
     std::fflush(stderr);
     // ★ 退出码口径与解释器臂逐字相同（`machine.cpp:109` 的 `exitCodeForRun`）：ok ⇒ 0，否则 2。
     return r.ok() ? 0 : 2;

@@ -263,21 +263,21 @@ apps/emulator-lift/
 判据 = **读数 + 阈值**（fps / 帧时间 p95 / 堆峰值 / 音频 underrun / 启动耗时 / 长跑稳定），
 ⛔ **不是业务结果**（"到达某界面 / 不崩 / 某 marker 出现 / 播完了"这类业务断言不作判据；
 稳定性例外：长跑不崩、guest fault 计数 = 0 属效率/稳定指标）。成员看 `ctest --test-dir out -N`
-（⛔ 不在这里列清单 —— 清单会随下一次改动变错）。下面以 `movie-logo` 为例。
+（⛔ 不在这里列清单 —— 清单会随下一次改动变错）。下面以 `boot-trace` 为例。
 
 ★ **⛔ 不要把它理解成"资产在不在"**：资产（安装树 / LFS 语料 / 宿主字体）是**输入，假定在场**。
 需要语料 / 安装根的**接口合同**（`loader` / `gdi-font` / `gdi-font-fallback-assets` /
 `native-override-assets` / `decode-crosscheck` / `corpus-mnemonics` ……）一律在**默认档**
 （顶层无条件注册）；缺输入时由它们自己判（红 / SKIP 77），configure 的盘点行会把 `MISSING` 写全路径。
 
-`movie-logo`（`tests/movie_logo.cpp`）真启模拟器、真放 LOGO 影片（子进程按**墙钟秒**计），默认
+`boot-trace`（`tests/boot_trace.cpp`）真启模拟器跑真 boot（真镜像 + `.lst`），默认
 **不注册**（`add_executable` 也在同一个 `if` 里 ⇒ 没开 `LIFT_STRESS` 连这个 target 都不编）。注册条件是
 **一条**：设了 `LIFT_STRESS`。安装根只有一处 —— 仓库根的
 `links/install`（Windows / macOS 都指向真实安装树；见根 `.gitignore`），换机器时用
 `-DLIFT_STRESS_GAME_DIR=<目录>` 覆盖（CMake 缓存变量，缺省 = `links/install`）。
 ★ 安装树是**输入、假定在场**：显式开了 `LIFT_STRESS` 而它（或 LFS 语料）MISSING ⇒ configure 直接
 `FATAL_ERROR`，⛔ 不是"少注册几条"。
-判据见 `tests/movie_logo.cpp` 的文件头。
+判据见 `tests/boot_trace.cpp` 的文件头。
 
 ```powershell
 # ① 显式注册 / 跑这条压力用例（macOS / Linux 把 preset 换成对应的那个）
@@ -285,23 +285,20 @@ $env:LIFT_STRESS = "1"                 # POSIX：export LIFT_STRESS=1
 cmake --preset windows-x64            # ★ DEFINED ENV{...} 是**配置期**求值 ⇒ 必须重新 configure
 cmake --build --preset windows-x64
 ctest --test-dir out -N               # 这时才会列出这一档的用例
-ctest --test-dir out -R movie-logo --output-on-failure
+ctest --test-dir out -R boot-trace --output-on-failure
 Remove-Item Env:LIFT_STRESS            # 想回到默认门禁：取消变量后再 configure 一次
 
 # ② 手工跑（不经 CTest）时让"影片放完即停" —— CTest 已自动注入这一条
 $env:LIFT_STOP_AFTER_MOVIE = "1"
 ```
 
-- `LIFT_STOP_AFTER_MOVIE=1`：DirectShow 图的停机链看到"影片已放完"（`completed_`）就结束本次运行，
-  不再空转到 `--time-limit`；`--time-limit` 仍保留作**兜底**。**缺省关** ⇒ 行为与不设它时一致。
-  它是**模拟器级**开关（不是测试专属）：手工玩时 export 了它，会在第一个影片放完后退出。
-- `movie-logo` 在 `ctest` 里**总是**带 `LIFT_STOP_AFTER_MOVIE=1`（`set_tests_properties(... ENVIRONMENT ...)`，
-  分号分隔的列表），并由 `add_test` 传 `--expect-early-stop`。要验证"关掉时与旧行为逐字一致"，直接跑
-  `out/tests/lift-movie-logo.exe`（参数见 `CMakeLists.txt` 的 `add_test`）而不设该变量、也不传那个开关。
-- 测试据此断言钩子生效（两个子进程的 run summary 都得是 `stop      : stopped`）—— 钩子失效时它不会
-  静默退回"变慢但仍绿"。判据挂在 CMake 传的那个参数上，**不挂在环境变量**上（env 被删掉时也要红）。
-- ★ 同一档里 `boot-trace` 是**确定性读数**（同一条命令跑两次，停因 / eip / 指令数 / 状态摘要哈希逐字节
+- ★ `boot-trace` 是**确定性读数**（同一条命令跑两次，停因 / eip / 指令数 / 状态摘要哈希逐字节
   相同；`--trace-shims` 的 trace 字节也相同），不是"能到 L2 就算业务做对了"。
+- `LIFT_STOP_AFTER_MOVIE=1` 仍是**模拟器级**开关：DirectShow 图的停机链看到"影片已放完"（`completed_`）
+  就结束本次运行，不再空转到 `--time-limit`（`--time-limit` 仍保留作**兜底**）；**缺省关** ⇒ 行为与
+  不设它时一致；手工玩时 export 了它，会在第一个影片放完后退出。⚠ 断言它的那条用例
+  （`movie-logo`）**2026-11-16 随 6 条压力用例一起退役**（用户裁决 `REQ-01M7HQ57XV66FZQA5ECGHWD71N`）
+  ⇒ 这个开关今天**没有自动守卫**，判据记录见 `docs/03-emulator/observations.md`。
 - ★ `conformance-safe` **不在**这一档：它是同一批用例在 `LIFT_SAFE_MEMORY=1` 下的第二遍，
   **实测 0.53 s（2026-11-13，本机 RelWithDebInfo）** ⇒ 顶层注册（默认档），默认门禁就跑。
 
@@ -493,8 +490,9 @@ guest 自己的 `SetCursorPos` 会让宿主光标真的动 —— 那是 guest �
 **触发条件是一个"条件"，不是帧号。** 内部只有 `Trigger{kind, value, name}` 五种 kind（frame / guest_ms /
 insn / wall_ms / marker），调度只问"到期了吗"，不关心是哪一种（`marker` 不按数字到期：只有边沿会应用它）。
 ★ **这条时间线现在只是过渡形态**：
-要换的交互模型（任务 = 节点图，节点 = `when` → `action` → `next`；三种失败全部响亮；两种识别源
-为什么都要）以 `docs/03-emulator/interaction-model.md` 为**唯一真源**。本文件**不复述**它的 schema，
+要换的交互模型（任务 = 一串**顺序**配方：门 → 动作 → 下一个门；失败全部响亮）以
+`docs/03-emulator/interaction-model.md` 为**模型/判据**真源、`src/runtime/recipe.h` 为**行写法**真源。
+本文件**不复述**它的 schema，
 也不写"未来的 marker / 状态机"长什么样；`script` 事件源与时间线怎么并入见那份文档的"分期"。
 
 **`click` 会自动等到被采样（⛔ 不要手算 hold）**：一次 `click` 仍然是"按下 + 抬起"（不重试、不变两次、
@@ -598,13 +596,15 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-d
 
 - **判据**：动作被应用之后，运行期读 `FrameSampler::changeCount()`；窗口内增长过 ⇒ 满足（日志
   `[expect-change] ok "…"`）。三种失败**一律响亮**（stderr `[expect-change] FAIL …` + 退出码 **5**，
-  与交互图的三种失败同一个停因 `InteractionFailed`，`detail` 里写明是哪种）：
+  与交互配方失败同一个停因 `InteractionFailed`，`detail` 里写明是哪种）：
   - `not-changed`：采样在增长、窗口也走满了，但画面**一次都没变**（动作没生效？）；
   - `no-sample`：动作之后**一次采样都没有**（识别源失明：没接采样器 / guest 一直没 Present）
     —— 与"没变"分开报（修法完全不同）；
   - `unclosed`：运行结束时窗口**还没判定**（⛔ "跑完就算过"正是要消灭的）。⇒ 开着这个策略时，
     给观测窗留时间（`wait` / 更长的窗口 / 别在 click 后立刻 `quit`）。
-- **与 `--interaction-graph` 互斥**（exit 2）：图有自己的 `expect` 语义，两套判据同时开会出两套口径。
+- **与配方驱动器互斥**（配置期拒绝）：同一个进程里挂了顺序配方就不会再开这套判据（两套口径）。
+  ⚠ 2026-11-16 起配方没有 CLI 入口（`--interaction-graph` 已退役），这条只可能被程序内夹具撞上；
+  判据仍留在 `Machine::configureExpectChange`（pure CTest `input-expect` 守着）。
 - **启动期拒绝**（exit 2，⛔ 不静默开局）：没给 `--input-script`；脚本里**没有匹配的动作**
   （否则一个观测窗都开不了 = 静默绿）；只给 `--expect-change-window` 而不给 `--expect-change-after`；
   类别 / 数字非法（窗口只收十进制正整数）。
@@ -615,8 +615,7 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-d
   ⇒ 窗口要**大于一次自动 hold 花掉的采样数**（缺省 30 个采样在 60 fps 下 ≈0.5 s，通常够；太小会误报）。
   运行结束时抬起还没发出的窗口归 `unclosed`（⛔ 不归成 `not-changed`：那是"没给动作留时间"，不是"动作没生效"）。
 - **它只回答"动作之后 guest 有没有画出新帧"**，⛔ 不回答"是这次动作造成的"：TITLE 动画 / 淡入会掩盖漏点，
-  一次变化也会同时满足重叠的窗口。要**因果**就用 `screen rect … avg`（交互图）或 BMP diff
-  （`pnpm tools lift diff`，见 §4.1）。
+  一次变化也会同时满足重叠的窗口。要**因果**就用 BMP diff（`pnpm tools lift diff`，见 §4.1）。
 - 失败时还会补写**最后呈现的那一帧**：`<脚本路径>.expect-fail.bmp`
   （像素仍等于最后一次 Present 的 hash 与否会如实打印；从未 Present 过则明说写不出来）。
 - 守卫（顶层 pure CTest `input-expect`，`tests/input_expect.cpp`）：变 / 不变 / 一次采样都没有 / 策略关 /
@@ -624,60 +623,74 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-d
   （没接采样器会让 `sampleCount` 恒 0 ⇒ 全判 `no-sample`）。
 
 
-## 4.2d 识别驱动的交互任务（`--interaction-graph`）
+## 4.2d 顺序配方（`--input-plan`，AOT 臂）
 
 **要换掉的是什么**：`--input-script` 是**定时器时间线** —— `at frame N` 到点就发动作，发完不管有没有生效。
-它已经骗过人：点击被静默漏掉时下游照样跑，于是基于假数据做了两轮优化。这里换的是**交互模型**：
-识别 → 操作 → 再识别；失败**响亮**。★ schema / 三种失败 / 判定口径的**唯一真源**是
-`docs/03-emulator/interaction-model.md`（本节不复述，两份 schema 必漂）。
+它已经骗过人：点击被静默漏掉时下游照样跑，于是基于假数据做了两轮优化。这里换的是**顺序配方**：
+`await <门>` → 动作 → 再等下一个门；失败**响亮**。
+
+★ **两处真源，本节都不复述**（两份 schema 必漂）：
+- **行写法 / 闭集合 / 两臂能力面** = `src/runtime/recipe.h`
+  （`await script` / `await position` / `wait <ms>` / `click <x> <y> [left|right]` / `timeout <ms>` /
+  `profile_begin|end <label>` / `quit`）；
+- **模型与判据** = `docs/03-emulator/interaction-model.md`。
+
+★ **唯一入口 = AOT 臂 `--input-plan`**（2026-11-16 起）。解释器臂的 `--interaction-graph` /
+`--interaction-trace` / `--interaction-fail-dump` **已退役**（用户裁决 `REQ-01M7HQ57XV66FZQA5ECGHWD71N`）。
+解释器侧只剩**机器内驱动器** `runtime/interaction_graph.*`（`Machine::tickInteraction`；没有 CLI 参数
+能装载它，那套 exit 5 闸门也随入口删掉）。缺省 `timeout` 策略：AOT 臂**不给缺省**（卡住由
+`--time-limit` / `--max-frames` 报，或跑完 `pending != 0` ⇒ exit 5）。
 
 ```bash
-./out/emulator-lift --game-dir <安装> --skip-logo --audio off \
-  --interaction-graph scripts/interaction/room-enter.graph \
-  --interaction-trace /tmp/room.trace \
-  [--interaction-fail-dump /tmp/room-fail.bmp] [--time-limit 900]
+./out/emulator-lift-aot --game-dir <安装> --appdata <每次全新空目录> --skip-logo --audio off \
+  --present window --present-hidden \
+  --input-plan scripts/recipes/sn0000-save.plan \
+  [--max-frames 8000] [--time-limit 900]
+```
+
+⚠ **这些配方是 real-time 档**（`wait <ms>` = 宿主墙钟；headless 下 guest 推进与墙钟不成比例 ⇒
+先撞自己的 `timeout` 或跑完 `pending != 0`）。只验"能不能解析"用 `--max-frames 1`。
+
+```text
+await script TITLE
+timeout 30000      # 守的是**上一条**指令（= 这个门最多等 30 s）
+wait 5000          # 宿主墙钟毫秒
+click 1070 480
 ```
 
 | 退出码 | 含义 | 判据 |
 |---|---|---|
-| `0` | 任务**走完**（或用户任务里写了 `quit`） | trace 末尾有 `task done nodes=… transitions=…` |
-| `5` | 三种失败之一（`timeout` / `no-sample` / `expect_change`），**或者任务没走完**（guest 侧硬停：`unimplemented-slot` / `resource-exhausted` / `ExitProcess` 等）；**时间线的效果级判据**失败（`--expect-change-after` 的 `not-changed` / `no-sample` / `unclosed`）也用 5；**`at marker <名字>` 等不到**（`marker-timeout:`）也是 5 | 三种失败 ⇒ stderr 有 `failureReport()`（节点 / 等的是什么 / 等了多久 / 每个受监视矩形的最后采样值）；"没走完" ⇒ 打 `stop=` / `detail=` 与最后状态；时间线 ⇒ stderr 前缀是 `[expect-change]`（不是 `[interaction]`）；marker 超时 ⇒ 前缀是 `[marker]`、detail 形如 `marker-timeout: waited=<名字> last=<名字或 id> waited_ms=<n>`（⛔ 不写 BMP：等的是**事件**，不是画面）。前三种都补写最后画面 BMP —— **能写就写**：从未 Present 过时会明说"写不出来"（那时没有画面可存） |
+| `0` | 配方**走完** | `input-plan: steps=… fired=… pending=0 …`（且没有 `FAIL timeout` / `FAIL incomplete`） |
+| `5` | 配方**没走完**：某步 `timeout` 到期（`FAIL timeout`）或跑完仍 `pending != 0`（`FAIL incomplete`）；**时间线的效果级判据**失败（`--expect-change-after` 的 `not-changed` / `no-sample` / `unclosed`）也用 5；**`at marker <名字>` 等不到**（`marker-timeout:`）也是 5 | 配方 ⇒ stderr 点名 `plan: 文件:行` + `step: stepN（行 N，门/动作）` + `waiting:` + 窗口/进度；时间线 ⇒ 前缀 `[expect-change]`；marker 超时 ⇒ 前缀 `[marker]`、detail 形如 `marker-timeout: waited=<名字> last=<名字或 id> waited_ms=<n>`（⛔ 不写 BMP：等的是**事件**） |
 | `2` | 参数 / 解析失败（带 `文件:行`），或运行期**非 ok 的停因**（`unimplemented-slot` = 已注册但槽/形态没实现、`resource-exhausted` = 我方 arena / guest 堆不够、`unimplemented` / `decode-error` / `no-code` …） | 启动阶段就拒绝，⛔ 不跑一半；运行期停因看摘要 `stop` / `detail` 行 |
 
+- ★ **AOT 臂的完成度也是判据**（`REQ-01M7HP2Q1N0N004M8R4RPABWSV` 的前置）：跑完打
+  `input-plan: steps=N fired=M pending=K presents=… released=… held=…`；`pending != 0`
+  （跑完了还有指令没走完）或某步 `timeout` 到期 ⇒ **exit 5** + stderr 点名 `文件:行` + 门/动作
+  （`FAIL timeout` / `FAIL incomplete`）。⛔ 不许只打一行警告仍 exit 0。
+  `recipe.h` 的 `recipeOutcomeExitCode` 是**唯一一份**口径（历史上解释器臂那两处 exit 5 也是这个数）。
 - ★ 退出码的**兜底口径**只有一条：`lift::exitCodeForRun(r)`（`RunResult::ok()` ⇒ 0，否则 2）。
-  交互图的"任务没走完 / 三种失败"仍是 5 —— 那些**优先**。
-  两个新停因 `resource-exhausted` / `unimplemented-slot` **不在 `ok()` 里** ⇒ 没有别的闸门时退出码是 2。
-
-- **与 `--input-script` 并存**（真源 §7 第 3 期才把时间线并入节点图）。两条通道都只写
-  `WindowManager` 的同一份状态、都走 `runtime/input.cpp` 那一层 ⇒ 真人 / 时间线 / 节点图三者同一语义。
+  配方的"没走完 / `timeout`"仍是 5 —— 那些**优先**。
+  两个停因 `resource-exhausted` / `unimplemented-slot` **不在 `ok()` 里** ⇒ 没有别的闸门时退出码是 2。
+- **与 `--input-script` 不可能同时开**：配方只有 AOT 臂入口（`emulator-lift-aot`），时间线只有
+  解释器臂入口（`emulator-lift`）。两者都只写 `WindowManager` 的同一份状态、都走
+  `runtime/input.cpp` 那一层 ⇒ 真人 / 时间线 / 配方同一语义。
 - **⛔ 不写帧号**：房间装载要 ~5×10^8 条指令，而房间空闲时 Present 会稀疏到 ~0.5 s 一帧 ⇒
   帧锚点在这种路径上会**永远等不到**（这是时间线在 EU-ROOM 上点不到「戻る」的实证原因）。
-- **画面采样点 = Present**（`HeadlessPresenter::present`，唯一呈现汇点）：`screen hash` 用已有的整帧 hash，
-  `screen rect … avg` / `screen changed` 由 `runtime/screen_sample.h` 在同一个点取样。
-  ⇒ 既没加载图、也没开 `--expect-change-after` 时一次也不采样（零成本；时间线的效果级判据
-  会在策略开时把同一个采样器挂上，见 §4.2c）。
-- **trace 可以逐行 diff**：同一路径两次运行逐字节相同（时间戳除外；`origin=` 只写文件名，
-  ⛔ 不写宿主路径）；`--present window` 是 real-time ⇒ trace 头部（第 2 行）标 `# NON-DIFFABLE`，
-  那一档的 trace 不参与 diff。
-- ⚠ **两条通道并存时不要同时"按着"输入**：脚本的键 / 按钮所有权是**全局一份**（`WindowManager` 按 vk 记），
-  任一份脚本收口都会把它按下的键抬起来。现在图的动作是"追加进它自己的 actuator"，所以两条脚本
-  **同时各按一个键**不安全 —— 要么只用一条，要么把两条的动作时间错开。
-- **线性写法**：人写用的短形态，解析期展开成同一份节点；schema 与判据的唯一真源是
-  `docs/03-emulator/interaction-model.md`（§1 / §1.1），本文件**不复述**。示例：
-
-  ```
-  await script TITLE
-  click 1174 377
-  await script GAMESTART
-  click 715 576
-  await script SN0000
-  click 100 100
-  ```
-
-  不知道 `script` 该写哪个名字时，用诊断 `LIFT_LOG_MARKERS`（见 §4.3.1 的诊断环境变量列表）先看身份。
-- 现成的路径脚本在 `scripts/interaction/`（进 / 出 EU-ROOM；出房间的左键 / 右键变体也在那里）。
-  `click` 可带按钮词 `left` / `right`（省略 = `left`）；需求单的判据与进度见需求树
-  （`pnpm tools requirements show REQ-01M6XVYY5TCKSAS80WS7PADF8P`）。
+- **门只有两个源**：引擎脚本身份（marker，纯读 guest 内存）与**脚本内位置**（`await position`；
+  读数只有一份 —— `runtime/engine_marker.h` 的 `readScriptPositionSample`）。
+  ⇒ 配方**不消费画面采样**：整帧 hash / 矩形均值那一路仍只服务 `--expect-change-after`
+  （时间线的效果级判据，见 §4.2c；两者在同一个进程里互斥）。
+- **`wait <ms>` 是宿主墙钟** ⇒ 同一份配方两次跑的完成时刻不可复现（判定只能看完成度 / `pending`，
+  ⛔ 不要拿两次跑的墙钟差当读数）。
+- ⚠ **输入所有权是全局一份**：脚本 / 配方的键与按钮所有权都记在 `WindowManager`（按 vk），
+  任一份脚本收口都会把它按下的键抬起来 ⇒ 同一个进程里别让两份输入源同时"按着"。
+- 不知道 `script` 该写哪个名字时，用诊断 `LIFT_LOG_MARKERS`（见 §4.3.1）先看身份；
+  "这一屏的输入回调就绪了没有"用 `await position`（区间要取证：`docs/03-emulator/observations.md`
+  的 `OBS-20261116-05`，`TITLE` 的输入段是 `[0x0460, 0x0520)`）。
+- 现成的配方在 `apps/emulator-lift/scripts/recipes/*.plan`（**索引 = `scripts/recipes/README.md`**：
+  每张干什么 / 被谁使用 / 怎么跑）。⛔ 仓根**不再有** `graphs/`；`scripts/interaction/` 已删
+  （三张 `room-*` 是旧语法，随 `--interaction-graph` 一并退役）。
 
 
 ## 4.2b GPU 光栅化（GPU 是**唯一**的光栅实现；无 GPU ⇒ 拒绝启动）
@@ -967,8 +980,8 @@ sprite 合批与那条直方图的算法。⛔ 不把逐帧数字写进 README�
 另有 `script`（当前顶层脚本身份，名字来自引擎名字表；从未采到身份就整行省略）与 `worst`（最近 3 s 内
 **每帧** wall / guest / shim 的最大值，每帧 = 相邻两次 Present 的间隔；`guest` 需要块计时，没开时写 `--`）。
 拿不到的字段**整行省略**（⛔ 不编数字）。⛔ 只改**宿主送显的窗口像素**：不写 guest 内存。
-叠层只在**窗口**与 `--present-screenshot`（窗口像素）里可见；`--interaction-fail-dump` /
-`--dump-frame` 是 **guest 帧**（`arena.dumpBmp`），不含叠层 —— 与"guest 像素 / 整帧 hash 零改动"同口径。
+叠层只在**窗口**与 `--present-screenshot`（窗口像素）里可见；`--dump-frame` 是 **guest 帧**
+（`arena.dumpBmp`），不含叠层 —— 与"guest 像素 / 整帧 hash 零改动"同口径。
 两条呈现路径（GPU 直出 / SDL_Renderer 上传）都画；守卫 = `tests/overlay.cpp`（CTest `overlay` /
 `overlay-gpu`）。
 
@@ -1085,7 +1098,7 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift.exe ... --input-script .tmp/room/enter.tx
 ```
 
 - **只在该脚本真有 `profile_*` 动作时才计时**（没有这些动作 ⇒ 整条记账路径是 no-op）。
-  解析期就在脚本里的与**运行期经 `appendText` 追加的**（`--interaction-graph` 走这条）都算：
+  解析期就在脚本里的与**运行期经 `appendText` 追加的**（机器内配方驱动器走这条）都算：
   后者的 arm 发生在 `profile_begin` 被消费的那一刻（否则窗口照开照收、表全是 0）。
   `--profile` 的**表格内容**由 `tests/profile_window.cpp` 从 API 断言（窗口/块/边表）；**文本格式本身没有守卫**
   （纯诊断输出；原先解析它的 `tests/profile_shims.cpp` 已随 `5e4fca3 refactor: clean tests` 删除）。

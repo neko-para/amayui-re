@@ -13,7 +13,8 @@
 //   ③ **未闭合**：脚本只写 `profile_begin` 不写 `profile_end` ⇒ 运行结束时必须**自动收口 +
 //      告警 + 照样打印**（⛔ 不许静默丢数据）。断言 stdout 有表 + stderr 有"未闭合"。
 //   ④ **运行期追加**（`REQ-01M701PEB38VDQJD4QR2JEBA74`）：`InputScript::appendText` 在**运行中**
-//      追加的 `profile_begin/end`（`--interaction-graph` 走的就是这条路）必须**重新 arm** ——
+//      追加的 `profile_begin/end`（配方驱动器 `InteractionGraph` 走这条路；其 CLI 入口 2026-11-16 已退役）
+//      必须**重新 arm** ——
 //      否则窗口照开照收、表却全是 0（iterations=0 / self=0.000ms / shim 墙钟 0.0ms），
 //      而且不报错不告警。判据见 ⑥ 的用例 `profile-window-runtime-append-arm`。
 //
@@ -127,7 +128,7 @@ void shimBurn(lift::X86&, lift::ShimCall& call) {
 
 // ★ **运行期追加**的驱动（缺陷 `REQ-01M701PEB38VDQJD4QR2JEBA74` 的那条路径）：
 //   `InputScript` 里唯一能在**运行中**把 `profile_begin/end` 塞进去的入口就是 `appendText`
-//   （`--interaction-graph` 的 `InteractionGraph::issueAction` 就是这么做的）。这里用宿主 shim
+//   （`InteractionGraph::issueAction` 就是这么做的）。这里用宿主 shim
 //   直接调同一个入口，理由：bare machine 没有 Present ⇒ 图追加的 `at frame <F+1>` 永远不到期
 //   （只能靠帧停滞兜底折算成墙钟，那是另一条口径、不是这张单要守的东西）。
 //   ★ 追加的触发值是**绝对 `at insn`**（`appendText` 里 `after`/`wait` 用的是追加段自己的锚点）。
@@ -850,7 +851,7 @@ int main() {
     // =================================================================================
     // ⑥ **运行期追加**的 `profile_begin/end` 必须重新 arm（REQ-01M701PEB38VDQJD4QR2JEBA74）
     //   缺陷：`run()` 只在 prepare 期按 `input_script_.hasProfileActions()` arm 一次；而
-    //   `--interaction-graph` 的 `profile_begin/end` 是**运行中**经 `appendText` 追加的
+    //   配方驱动器的 `profile_begin/end` 是**运行中**经 `appendText` 追加的
     //   ⇒ `armed_` 停在 false ⇒ 窗口照开照收、表却全是 0（不报错、不告警 = 静默残表）。
     //   判据（缺一条都说明"运行期 arm"没落地）：
     //     ① `appendText` 真的在运行中被调用（`g_arm_calls==2`）——否则这条用例测的是空气；

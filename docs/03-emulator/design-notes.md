@@ -86,7 +86,11 @@
 - **重开条件（三条，任一条成立就重开）**：① 语料或 `src` 出现 `ldmxcsr` / `stmxcsr` / `fxsave` / `fxrstor`（机械触发器：assets 档 `corpus-mnemonics` 会红）；② 要投递 `#XM` 或实现掩码 / 舍入控制（RC）；③ feeder 可达任何 XMM 指令 —— 那时 `AudioEngine::Context` **必须**一起加 `mxcsr`，否则 pump 路径会**静默**泄漏 IE（save/restore 借的是主 `cpu_` 的寄存器）。
 
 ### L3-graphfmt-01 · 交互图格式：**保持行写法**；⛔ 不换 YAML/TOML/JSON（要省维护就 table 化解析器）
-- **取舍**：`--interaction-graph` 的输入**只保留行写法**（`node` / `when` / `action` / `next` / `timeout` / `expect`）。
+> ⚠ 2026-11-16：这条取舍的**载体**换了 —— 入口 `--interaction-graph` 已退役，配方现在是
+> `scripts/recipes/*.plan`（行写法，`runtime/recipe.h`）；`node` / `when` / `action` / `next` / `expect`
+> 那套**节点语法**早已随顺序模型删掉。下面「只保留行写法、不换 YAML/TOML/JSON」的结论仍然成立。
+- **取舍**：配方输入**只保留行写法**（当时是 `node` / `when` / `action` / `next` / `timeout` / `expect`；
+  今天见 `runtime/recipe.h`）。
   `docs/03-emulator/interaction-model.md` 是唯一 schema；JSON 只是**等价展示**，文件入口留到"生成器落地"时按原计划
   作为**第二入口**加，⛔ 不取代行写法。
 - **备选**：YAML（yaml-cpp）/ TOML（toml++）/ JSON（nlohmann，emulator 共用 baseline 里**已有** 3.12.0）。**没选**，三条读数：

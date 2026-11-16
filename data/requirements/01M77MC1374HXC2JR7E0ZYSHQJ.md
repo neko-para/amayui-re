@@ -5,7 +5,7 @@
 - status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
 - verify: docs/03-emulator/defects.md#BUG-22
-- repro: graphs/sn0000-quit.graph#click 1180 640
+- repro: apps/emulator-lift/scripts/recipes/sn0000-quit.plan#click 1180 640
 - severity: S2
 - tags: [emulator-lift, quit, title, unimplemented]
 

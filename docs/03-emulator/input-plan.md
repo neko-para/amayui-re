@@ -2,8 +2,15 @@
 
 > 状态口径：本文只写**不变量 / 落点 / 怎么查**。读数与历史进 `observations.md`；
 > 缺陷进 `defects.md`（`BUG-26`）；进度真源 `pnpm tools requirements plan`。
-> 配方语法（**四条指令**）由 `REQ-01M7HBG0NYH957M9EK3JVMF5CC` + 位置门裁决；本文是**修正后的口径**
-> （设计经独立复审；早期的本地设计稿 / 复审稿在 `.tmp/aot/` 下，已删除，⛔ 不要照旧稿实现）。
+> ★ **配方语法 / 闭集合 / 能力面的真源 = `apps/emulator-lift/src/runtime/recipe.h`**
+> （`--input-plan` 与机器内驱动器 `InteractionGraph` **共用同一个解析器与同一个 step 模型**；
+> ★ **能力面只有一份**：七条指令每个驱动器都认，⛔ 没有 `kPlanFeatures` / `kGraphFeatures` 这种按入口
+> 分叉的表，也没有"这个入口不认"的解析期硬错 —— 入口只决定**推进点**与**动作落在哪个宿主对象**上。
+> ★ **2026-11-16：`--interaction-graph` 用户入口退役**（配方只经本臂）⇒ 本文的 `--input-plan` 就是
+> 唯一入口；解释器臂只剩机器内驱动器（没有 CLI 参数能装载它）。
+> 本文只写"落到哪、怎么查"，⛔ 不在这里维护第二份语法表）。
+> 现行口径由 `REQ-01M7HBG0NYH957M9EK3JVMF5CC` + 位置门裁决（设计经独立复审；早期的本地设计稿 /
+> 复审稿在 `.tmp/aot/` 下，已删除，⛔ 不要照旧稿实现）。
 
 ## 0. 为什么这么做（口径来源）
 
@@ -117,16 +124,22 @@ WaitMessage · GetQueueStatus · TranslateMessage · DispatchMessageA · SetCurs
 
 ### 2.7 门的**最小可用集**
 
-**只有 `{Script}` 与 `{Position}`（都是电平）**。`ScreenChanged` / `ScreenRect` / `ScreenHash` /
-`Presents` / `Reads` / `Insns` / `MessageTaken` / `FileReadDone` / `GuestBlocked` 在 `--input-plan`
-里都**不可表达**
-（写进配方 = 解析期硬错）。
+**只有 `await script` 与 `await position`（都是电平门）** —— 这个臂能表达的门就这两条。
+画面源（`screen hash` / `screen rect … avg` / `screen changed` / `always`）与旧节点模型
+（`node` / `when` / `action` / `next` / `expect`）在 2026-11-16 随顺序模型收敛一起退役
+（理由与判据 = `interaction-model.md` §5）；现在写进配方 = **未知指令**（解析期硬错）。
+`await presents <n>` / `key <VK>` 同样是硬错（下面两条是"为什么不做"的记账）。
 - 为什么删 `Presents`：它是**帧号门**，人无法评估；同一个 N 在两臂不对应同一 guest 时刻（`BUG-26` 候选①）。
 - ★ 陷阱（留下当"为什么不做"）：`Reads` 的刻度**不是"读点次数"** —— `inputSampleCount` 只在
   `GetCursorPos` / `GetAsyncKeyState` 自增，后者在这条 UI 路径上一次也没被调用 ⇒ 实际是
   `GetCursorPos` 的 20 Hz；且同一次迭代常有多个读点 ⇒ "after 2 reads" 可能只是**一次**迭代。
 
-### 2.8 配方格式：**四条指令**（平铺；⛔ 不是图语法的子集）
+### 2.8 配方格式：共享语法的**一份**（真源 = `runtime/recipe.h`）
+
+> 本节只列**落到哪**；⛔ 不要把 `recipe.h` 的词表抄成第二份真源。
+> 图那套词（`screen …` / `node` / `when` / `next` / `expect`）已退役 ⇒ 现在写进配方是未知指令。
+> ★ **七条指令本臂都认、都有落点**（2026-11-16 能力面统一；`timeout` / `profile_begin` / `profile_end` /
+> `quit` 不再是"这个入口不认"）：落点表见下面那段，语义真源仍是 `recipe.h`。
 
 ```
 # 注释（整行 / 行尾都吃）；空行忽略
@@ -139,13 +152,37 @@ click 1070 480 right    # x/y = 1280×720 参考系；按钮词裸写（省略 =
 
 - **按文件顺序执行**；`click` 在同一个读点施加（flush-before-read 口径不变）。
 - **`wait` 的起点** = 上一条指令生效的那个读点 ⇒ 有 0..一个迭代周期的偏差（**不可评估**）。
-- ⛔ **没有每步超时**：卡住由 `--time-limit` / `--max-frames` 这层看门狗报。
-- ⛔ **解析期硬错**（`exit 2` + `文件:行号: 原因`，点名"未知指令"）：
-  `await always` · `await presents <n>` · `key <VK>` · 图那套 `node / when / action / next /
-  expect / timeout` · 任何别的词。缺参数 / 负毫秒 / `=left` 同样硬错。
+- ★ **`timeout <ms>` 在本臂也有落点**（守**上一条**指令）：本臂**只有一把尺 = 宿主墙钟**
+  （`stepTimeoutMs` 给宽度、`stepWindowExpired` 判到期；"刚好等满"还不算到期 = 严格大于）。
+  到期 ⇒ 记下是哪一条 ⇒ **exit 5** + stderr 点名（见 §2.9）。
+  ★ **本臂不给缺省窗口**（0 = 没写 `timeout` 就没有每步守卫）：本臂的看门狗是 `--time-limit` /
+  `--max-frames`，而且"等 TITLE"这种门的耗时在 headless 下与解释器臂不是一个量级
+  ⇒ 一个固定缺省值在两臂含义不同。解释器臂的缺省是 5000 ms（它有两把尺）。
+  ⛔ 这不是能力面分叉：**显式 `timeout` 在两臂语义相同**，差别只在入口给的缺省策略
+  （`recipe.h` 的 `stepTimeoutMs` 是唯一一份公式）。
+- ★ **`quit` 在本臂的落点**：`WindowManager::postQuit(0)`（与解释器臂**同一个**交付点 ——
+  `Machine::pumpScript` 消费 `quit` 时也是投 WM_QUIT）+ **宿主停止请求**
+  （`AotRunOptions::stop_requested`，run 循环在下一个块边界收口成 `Stopped`/`detail=input-plan: quit`）。
+  ⛔ 不等 guest 自己退出：实测 WM_QUIT 之后 guest 会走进**闭包外**的停机路径（停在 `00513B90`
+  ⇒ `decode-error`、exit 2），那与"quit 是正常结局"冲突。`quit` 之后的指令**不再推进** ⇒
+  末尾不是 `quit` 的配方会留下 `pending != 0`（= 任务没走完 ⇒ 5）。
+- ★ **`profile_begin|end <label>` 在本臂的落点**：本臂没有区间 profiler（`WindowProfiler` 的分项来自
+  `BlockCache` / `ShimRegistry` / 派发循环，AOT 臂一个都没有）⇒ 落成**宿主墙钟区间读数**：
+  begin / end 各一行一次性输出（`label` + `wall_ms` + `reads`）。⛔ 不假装开了分项 profiler
+  （那会打出"看起来有分项、其实是空的"假读数）。`end` 没有配对的 `begin` ⇒ 一行 stderr 提示、
+  **不判失败**（仪器问题不是任务失败）。
+- ⛔ **解析期硬错**（`exit 2` + `文件:行号: 原因`，**只剩一类** = **两臂都不认**）：
+  `await always` · `await presents <n>` · `key <VK>` · 旧节点模型的 `node / when / action / next /
+  expect` · 画面源 `screen …` · 任何别的词（报"未知指令"并回显那行）。
+  缺参数 / 负毫秒 / `=left` / `timeout` 前面没有指令 / 同一条指令写两次 `timeout` 同样硬错。
 - ★ **只写门 / 只写 `wait` 是合法的**（线性指令流）⇒ 旧的"同一份计划去掉动作表达不了"
   这一限制**不再成立**：现在可以直接给一份"只等门"的配方当对照。
-- ⛔ 解释器臂**不接** `--input-plan`（给它 = `未知参数` + exit 2）；"两臂同一份配方"要等解释器接线。
+- ⛔ 解释器臂**不接** `--input-plan`（给它 = `未知参数` + exit 2）。
+  两个驱动器**共用同一份解析器与同一个 step 模型**（`runtime/recipe.{h,cpp}`），差别只有**入口**与**推进点**：
+  本臂在 guest **读点**推进（`InputPlan::atPoint`），机器内驱动器在**块边界**推进（`InteractionGraph::tick`）。
+  ★ 2026-11-16：`--interaction-graph` 已退役 ⇒ **本臂是唯一的配方入口**。
+  ★ **同一个文件两臂都能跑**（能力面只有一份）：差别只剩推进点 / 动作落点 / 缺省 `timeout` 策略
+  （本臂不给缺省，解释器臂 5000 ms）。
 
 #### `await position` 的语法与坐标
 
@@ -174,13 +211,49 @@ click 1070 480 right    # x/y = 1280×720 参考系；按钮词裸写（省略 =
   ⚠ **这一条没有取证**：仓里没有"非 1280×720 时点击命中"的观测；已观测的 run 里目标都是
   1280×720（恒等）。⇒ 它是一条**显式裁决**，不是已验证结论。
 
+### 2.9 **完成度是判据**（`pending != 0` / `timeout` 到期 ⇒ exit 5）
+
+- 跑完打一行**完成度**读数（一次性，位置在 `input-plan:` 前缀后）：
+  `input-plan: steps=N fired=M pending=K presents=… released=… held=…`
+  ⇒ 读这一行的最短形式就是 `steps= fired= pending=`（旧字段一个都没动）。
+- ★ **判据**（`recipe.h` 的 `RecipeOutcome` / `recipeOutcomeExitCode`，**唯一一份**：
+  `--input-plan` 与机器内驱动器都对同一个 5 口径）：
+  · `pending == 0` ⇒ `Done` ⇒ **不覆盖**运行结论（run 自己失败仍然 2）；
+  · `pending != 0`（跑完了还有指令没消费）⇒ **exit 5** + stderr 点名**第一条没走完的**指令；
+  · 某步 `timeout` 到期 ⇒ **exit 5** + stderr 点名**到期的那一条**。
+  ⛔ 不许只打一行警告仍 exit 0 —— 那正是"图 → 配方"改写会把 CTest 变成假绿的那条缝
+  （ADR `REQ-01M7HP2Q1N0N004M8R4RPABWSV` 的**前置**）。
+- 报错形状（`InputPlan::failureReport()`；`plan:` 行 = `文件:行号`）：
+
+  ```text
+  input-plan: FAIL timeout
+    plan     : /tmp/feat/to.plan:1
+    step     : step1（行 1，门）
+    waiting  : await script NOSUCHSCRIPT
+    window   : 守卫 2000 ms（宿主墙钟；本臂只有这一把尺）已等 2001 ms ⇒ 到期
+    progress : steps=2 applied=0 pending=2 fired=0 reads=1898273
+  ```
+
+  `FAIL incomplete（配方没有走完）` 是同一条报告的另一个头（没有 `window` 行，`说明` 换成
+  "跑完时这条还没有成立 / 没有轮到它"）。
+- ★ **反例/正例读数**（2026-11-16，macos-arm64 RelWithDebInfo，`--present headless --skip-logo
+  --region-log --max-frames 400`，每次全新 `--appdata`；命令见"怎么查"）：
+
+  | 配方 | 改前 | 改后 |
+  |---|---|---|
+  | `await position TITLE 0x388C 0x38A4` + `click 1070 480` | `fired=0` + **exit 0** | `steps=2 fired=0 pending=2` + **exit 5** + 点名 `plan:1` / `step1（行 1，门）` / `await position TITLE 0x0000388C 0x000038A4` |
+  | `await position TITLE 0x0460 0x0520` + `click 1070 480 left` | exit 0 · `fired=1`（`region in_use=117490928 / surfaces=25`） | **不变**：exit 0 · `steps=2 fired=1 pending=0` · 同上 region（`heap_blocks=6821`） |
+  | `await script NOSUCHSCRIPT` + `timeout 2000` + `click 1070 480` | （改前 `timeout` = **exit 2**「这个入口不认」） | **exit 5** · `FAIL timeout` · 守卫 2000 ms / 已等 2001 ms · 点名 `step1（行 1，门）`（⛔ 不是靠 `--time-limit`） |
+
 ## 3. 落点地图
 
 | 件 | 位置 |
 |---|---|
-| 计划对象 + 四条指令 + 待抬起 + 摘要 | `src/runtime/input_plan.{h,cpp}` |
+| **配方解析器 + step 模型 + 门判定**（唯一一份，两臂共用；语法真源） | `src/runtime/recipe.{h,cpp}`（`Recipe` / `Step` / `stepGateHolds` / `scriptNameMatches`） |
+| **AOT 臂的读点驱动**（顺序推进 + 施加 click + 待抬起 + 计数 + 摘要） | `src/runtime/input_plan.{h,cpp}`（`atPoint` 是唯一施加口） |
+| **解释器臂的块边界驱动**（同一份 `Recipe`；动作经 `InputScript` 追加） | `src/runtime/interaction_graph.{h,cpp}` |
 | 参考系 → 客户区的**唯一**映射 | `src/runtime/cursor_map.{h,cpp}`（`referenceToClientPixel`） |
-| 名字口径（大小写 / 两侧 `.bin` / 退化名） | `src/runtime/interaction_graph.{h,cpp}`（`scriptNameMatches`） |
+| 名字口径（大小写 / 两侧 `.bin` / 退化名） | `src/runtime/recipe.{h,cpp}`（`scriptNameMatches`） |
 | 四个投递入口（inline，无计划时**一条 null 检查**） | `src/runtime/input.h` |
 | 装配点 | `WindowManager::setInputPlan()` + `InputPlan::attachGuestMemory(&host.mem())`（AOT 臂；`atPoint()` 签名不变） |
 | AOT CLI | `src/aot/aot_main.cpp` 的 `--input-plan`（解析在 **GPU bring-up 之前** ⇒ 文件错不需要 GPU） |
@@ -209,16 +282,24 @@ click 1070 480 right    # x/y = 1280×720 参考系；按钮词裸写（省略 =
 | ④ | CLI 面：`--input-plan` 缺文件 / **旧指令硬错** / 缺参数 / 负毫秒 / `=left` ⇒ `exit 2` + 点名行号；缺省档不出现 `input-plan:` 行 | 强（⚠ `cli-aot-flags` 在非 Windows 是 SKIP） |
 | ⑤ | 语义面（CTest `input-plan-read-points`）：`await script` 电平门 + 身份读不到继续等 + `wait` 注入时钟（未到期不施加 / 到期施加，不需要真睡）+ click 的 sampled / forced 抬起 + 1280×720 → 客户区缩放且 move/down/up 同一结果 | 强：改语义就红 |
 | ⑥ | 位置门（同一 CTest 的 `input-plan/position-gate`）：`pos == FROM` 命中 / `pos == TO` 不命中 / 区间外继续等 / `base==0`·`pc<base`·`pc` 未提交·`pc−base` 越上界 ⇒ 不满足不崩 / `FROM>=TO`·缺参数·非 hex ⇒ 解析期硬错 / 未知脚本名不在解析期校验 | 强：改半开区间或哨兵就红（`tools/mutate-check.mjs` 有一条第 ⑥ 条的代表变异） |
+| ⑦ | **完成度判据**（同一 CTest 的 `input-plan/completion`）：门永不成立 ⇒ `outcome()==Running` + `pending==2` + `recipeOutcomeExitCode()==5`；全走完 ⇒ `Done` + 0 + 空报告；`Done` 时 `failureReport()` 为空串 | 强：**这就是"图 → 配方"改写会不会把 CTest 变成假绿的唯一闸门**（`tools/mutate-check.mjs` 有一条"完成度 ⇒ 恒 0"的代表变异） |
+| ⑧ | **能力面只有一份**（同一 CTest 的 `input-plan/step-timeout` + `input-plan/profile-and-quit`）：`timeout` 差 1 ms 不判 / 超 1 ms 判 + 报告点名 `mem:<行>` + 门；`quit` ⇒ 队列尾 WM_QUIT + 不再推进；`profile_begin|end` ⇒ 收口一次、孤儿 `end` 不失败；七条指令在**本臂**解析器上都被接受 | 强：谁把某条指令写成"这个入口不认"就红（含 `wait` 的缺省守卫 = `ms + 缺省`） |
 
 ★ **一条要记住的分级**：如果一条守卫的"红"只是因为**编译不过**（断言用到新增 API），
 它并没有证明**运行期行为** ⇒ 必须在报告里标成"证明力弱"，⛔ 不许与运行时红并列。
 
 ## 6. 已做 / 未做
 
+- **已做（2026-11-16 第二轮）**：**能力面统一 + 完成度成判据**
+  （`REQ-01M7HP2Q1N0N004M8R4RPABWSV` 的前置）：删掉 `kPlanFeatures` / `kGraphFeatures`（能力面只有一份）·
+  `timeout` / `profile_begin|end` / `quit` 在本臂都有落点（§2.8）· `pending=` 读数 + `pending != 0`
+  或 `timeout` 到期 ⇒ **exit 5** + 点名（§2.9）· 变异"完成度 ⇒ 恒 0"能红。
 - **已做**：S1（投递层 + 11 读点，行为逐字节不变）· S4（AOT `--input-plan` + 一行摘要）·
   S2′（flush-before-read + 待抬起 + `releaseAll`）· **三条指令**（`await script` 电平门 +
-  `wait` 宿主单调毫秒 + `click` 1280×720 参考系缩放；删 `key` / `presents` / 图语法）·
-  **第四条 `await position`**（脚本内位置电平门，`header_len + (pc−base)`，半开区间；见 §2.6/§2.8）。
+  `wait` 宿主单调毫秒 + `click` 1280×720 参考系缩放；删 `key` / `presents` / 节点图模型）·
+  **第四条 `await position`**（脚本内位置电平门，`header_len + (pc−base)`，半开区间；见 §2.6/§2.8）·
+  **2026-11-16 两臂收敛**：解析器与 step 模型搬到 `runtime/recipe.{h,cpp}`，两臂共用；
+  画面三源 / `expect` / `key` 一并退役（`interaction-model.md` §5）。
 - **未做**：`GetMessageA` 空队列由计划供给 · 两臂共有的事件 emit 点（`ScreenSample` 等）· 旧路径删除 ·
   `ScreenChanged` / `ScreenRect` / `click center` · 键盘（`key` 已删，需要时再加） · 解释器臂接 `--input-plan` ·
   **`await position` 的区间选取**（哪些脚本的哪一段"点击会被消费"只解了 TITLE；其余脚本要按 §2 的方法逐支解）。
@@ -230,8 +311,36 @@ click 1070 480 right    # x/y = 1280×720 参考系；按钮词裸写（省略 =
 ```bash
 node tools/requirements.mjs --plan                 # 进度真源（父单 REQ-01M7G7EJF062NKQ0D40RF3BZ4Z）
 cd apps/emulator-lift && ctest -R 'input-plan|cli-aot-flags' --output-on-failure
-node tools/mutate-check.mjs --match 'input-plan-read-points'   # 变异自检（wait deadline 那条）
+node tools/mutate-check.mjs --match 'input-plan-read-points'   # 变异自检（wait deadline 那两条）
+node tools/mutate-check.mjs --match '完成度'                    # 变异自检（pending != 0 ⇒ exit 5 那条）
 node --test --test-isolation=none tools/test/input-plan-shape.test.mjs
+```
+
+★ **完成度判据的端到端读数**（下面三段命令的实测输出见 §2.9 的表；`--max-frames 400` 只是让 run
+自己停下 —— 判据是 `pending` / `timeout`，⛔ 不是 `--time-limit`）：
+
+```bash
+cd apps/emulator-lift
+# 反例：永不执行的区间 ⇒ pending=2 ⇒ exit 5 + 点名（改前是 fired=0 + exit 0）
+printf 'await position TITLE 0x388C 0x38A4\nclick 1070 480\n' > /tmp/neg.plan
+./out/emulator-lift-aot --present headless --skip-logo --game-dir ../../links/install \
+  --appdata "$(mktemp -d)" --region-log --max-frames 400 --input-plan /tmp/neg.plan
+# input-plan: steps=2 fired=0 pending=2 presents=400 released=0 held=0
+# stderr: input-plan: FAIL incomplete（配方没有走完） / plan: …/neg.plan:1 / step: step1（行 1，门）
+#         waiting: await position TITLE 0x0000388C 0x000038A4        ⇒ exit 5
+
+# 每步超时：`timeout` 守上一条指令（改前这里连解析都不过 = exit 2「这个入口不认」）
+printf 'await script NOSUCHSCRIPT\ntimeout 2000\nclick 1070 480\n' > /tmp/to.plan
+./out/emulator-lift-aot --present headless --skip-logo --game-dir ../../links/install \
+  --appdata "$(mktemp -d)" --max-frames 400 --input-plan /tmp/to.plan
+# input-plan: FAIL timeout / window: 守卫 2000 ms…已等 2001 ms ⇒ 到期 / step: step1（行 1，门） ⇒ exit 5
+
+# 能力面：`quit`（末尾 ⇒ Done，进程按预期提前收口）与 `profile_begin|end`
+printf 'await script TITLE\ntimeout 30000\nwait 3000\nquit\n' > /tmp/quit.plan
+./out/emulator-lift-aot --present headless --skip-logo --game-dir ../../links/install \
+  --appdata "$(mktemp -d)" --max-frames 400 --input-plan /tmp/quit.plan
+# [input-plan] quit：已投 WM_QUIT … / input-plan: steps=3 fired=0 pending=0
+# stop: stopped … — input-plan: quit     ⇒ exit 0（帧号停在 197/400 ⇒ 真的提前收口）
 ```
 
 端到端（AOT，**唯一可复现的 `region` 级对照 = 负对照**；每次全新空 `--appdata`）：

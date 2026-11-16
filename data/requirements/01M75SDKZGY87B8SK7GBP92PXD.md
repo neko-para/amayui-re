@@ -5,7 +5,7 @@
 - status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
 - verify: apps/emulator-lift/tests/loader.cpp#agerc-exports
-- repro: graphs/title-loaddata.graph#click 1070 480
+- repro: apps/emulator-lift/scripts/recipes/title-loaddata.plan#click 1070 480
 - severity: S1
 - tags: [emulator-lift shim agerc]
 

@@ -17,6 +17,14 @@
 //      · 命中 / 边界（`pos == FROM` 命中、`pos == TO` 不命中）/ 区间外继续等；
 //      · `base==0` / `pc < base` / `pc` 未提交 / `pc − base` 越上界 ⇒ 不满足、不崩、不施加；
 //      · `FROM >= TO` / 缺参数 / 非 `0x` hex ⇒ 解析期失败；未知脚本名**不**在解析期校验。
+//   ⑥ **能力面只有一份**（`REQ-01M7HP2Q1N0N004M8R4RPABWSV` 的前置）：`timeout` / `profile_begin` /
+//      `profile_end` / `quit` 在**本臂**同样被接受并落地（⛔ 不再是"这个入口不认"的 exit 2）：
+//      · `timeout <ms>` 到期 ⇒ `outcome()==TimedOut` + 失败报告点名 `origin:行` + 门/动作；
+//        未到期（差 1 ms）**不**判失败；
+//      · `quit` ⇒ `postQuit(0)`（WM_QUIT）+ 不再推进；`quit` 之后还有指令 ⇒ `pending != 0`；
+//      · `profile_begin/end` ⇒ 区间收口（`profileWindows()`）。
+//   ⑦ **完成度是判据**：门永不成立 ⇒ `outcome()==Running` + `pending != 0` +
+//      `recipeOutcomeExitCode()` = **5**（⛔ 不是 0）；全部走完 ⇒ `Done` + 退出码 0。
 //
 // ⚠ 诚实边界：`ReadFile`（第 11 个投递点，只是**事件源**）**不在**本用例里 ——
 //   它要一个有效文件句柄（`CreateFileA` + `Vfs` 的 game_dir），那属于 `tests/file_io.cpp` 的夹具面；
@@ -45,6 +53,7 @@ namespace {
 constexpr std::uint32_t kWmKeyDown = 0x0100u;
 constexpr std::uint32_t kWmChar = 0x0102u;
 constexpr std::uint32_t kQsPostMessage = 0x0008u;
+constexpr std::uint32_t kWmQuit = 0x0012u;  // WM_QUIT（`quit` 的交付物；队尾虚拟消息）
 
 // 鼠标消息（只用于本文件的坐标 / 抬起断言；值来自 `runtime/input.h` 的闭集合）。
 constexpr std::uint32_t kWmMouseMove = 0x0200u;
@@ -497,6 +506,14 @@ void caseParseErrors() {
         {"await position\n", "mem:1:", "await position"},
         {"click 1\n", "mem:1:", "缺参数"},
         {"click 1 2 =left\n", "mem:1:", "按钮词"},
+        // `timeout` / `profile_*` / `quit` 的**参数**仍然硬错（能力面统一了，⛔ 不是"什么都收"）：
+        {"timeout\n", "mem:1:", "毫秒数"},
+        {"timeout 500\n", "mem:1:", "前面没有任何指令"},
+        {"wait 10\ntimeout 0\n", "mem:2:", "正整数"},
+        {"wait 10\ntimeout 5\ntimeout 6\n", "mem:3:", "已经写过"},
+        {"profile_begin\n", "mem:1:", "label"},
+        {"profile_end a b\n", "mem:1:", "label"},
+        {"quit now\n", "mem:1:", "不带参数"},
         {"# 注释\nawait script TITLE\nawait presents 2\n", "mem:3:", "未知指令"},
         {"\n# 只有注释\n", "mem:", "没有任何指令"},
     };
@@ -520,16 +537,19 @@ void caseParseErrors() {
         }
     }
 
-    // ---- 合法配方：四条指令都吃，`#` / 空行 / 行尾注释 / 大小写指令名都忽略 ----
+    // ---- 合法配方：**七条**指令都吃（能力面只有一份），`#` / 空行 / 行尾注释 / 大小写指令名都忽略 ----
     lift::InputPlan plan;
     std::string err;
     const bool ok = plan.loadText(
-        "\n# 注释\nAwait script TITLE  # 行尾注释\n\nWait 250\nclick 1 2 right\n"
-        "await POSITION some-name 0x0000039C 0x00000460  # 未知脚本名不在解析期校验\n",
+        "\n# 注释\nAwait script TITLE  # 行尾注释\ntimeout 2500\n\nWait 250\nclick 1 2 right\n"
+        "profile_begin w\nprofile_end w\n"
+        "await POSITION some-name 0x0000039C 0x00000460  # 未知脚本名不在解析期校验\nquit\n",
         "mem", &err);
     if (!ok) std::fprintf(stderr, "合法配方被拒：%s\n", err.c_str());
     LIFT_CHECK(ok);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.steps()), 4);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.steps()), 7);  // timeout 不是一条指令
+    // `timeout` 挂在它**前面**那条指令上（守上一条）
+    LIFT_CHECK(plan.stepAt(0) != nullptr && plan.stepAt(0)->timeout_ms == 2500u);
 }
 
 // =====================================================================================
@@ -649,6 +669,245 @@ void caseForcedRelease() {
     LIFT_CHECK(plan.releases() >= 1);
 }
 
+
+// =====================================================================================
+// 判据 ⑥ · 能力面只有一份：`timeout` 在本臂（读点臂）**到期** ⇒ 失败并点名
+//
+// 判据（红了意味着什么）：
+//   ① 显式 `timeout 500` 守前一条门：**差 1 ms 不判**、超 1 ms 判（`>` 不是 `>=`）；
+//   ② 判失败之后：`outcome()==TimedOut`、`pending` 不动、`fired` 不增（⛔ 失败后继续点）；
+//   ③ `failureReport()` 点名 `mem:<行>` + 门/动作 + 指令原文（人能照着修）；
+//   ④ 共享宽度公式 `stepTimeoutMs`：显式覆盖缺省、`wait` 的缺省 = `ms + 缺省`、缺省 0 ⇒ 0。
+// =====================================================================================
+void caseStepTimeout() {
+    lift_test::g_current_case = "input-plan/step-timeout";
+
+    // ---- ④ 宽度公式（唯一一份；两个入口共用）----
+    {
+        lift::Step gate;
+        gate.kind = lift::StepKind::AwaitScript;
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::stepTimeoutMs(gate, 0)), 0);      // 本臂无缺省
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::stepTimeoutMs(gate, 5000)), 5000);  // 解释器臂缺省
+        gate.timeout_ms = 250;
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::stepTimeoutMs(gate, 5000)), 250);  // 显式覆盖
+        lift::Step wait;
+        wait.kind = lift::StepKind::Wait;
+        wait.wait_ms = 25000;
+        // `wait` 的缺省守卫必须容得下它自己（守卫短于动作 = 永远不可能完成）
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::stepTimeoutMs(wait, 5000)), 30000);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::stepTimeoutMs(wait, 0)), 0);
+        // "到期"的比较只有一份：严格大于
+        LIFT_CHECK(!lift::stepWindowExpired(500, 500));
+        LIFT_CHECK(lift::stepWindowExpired(501, 500));
+        LIFT_CHECK(!lift::stepWindowExpired(1000000, 0));  // 0 = 没有窗口
+    }
+
+    lift_fixture::Fixture f;
+    LIFT_CHECK(f.ok);
+    if (!f.ok) return;
+    lift::WindowManager* wm = f.m.cpu().windows;
+    LIFT_CHECK(wm != nullptr);
+    if (wm == nullptr) return;
+    LIFT_CHECK(wm->createWindow("PlanTest", 0u, 0u, 0u, 0u, 1280, 720, 0u) != 0);
+    // 身份 = TITLE，但配方等的是 NOSUCHSCRIPT ⇒ 门永不成立
+    LIFT_CHECK(publishEngine(f.m, "TITLE.BIN", 42u));
+
+    lift::InputPlan plan;
+    plan.setClockForTest(&testNowMs);
+    plan.attachGuestMemory(&f.m.mem());
+    std::string err;
+    const bool loaded = plan.loadText("await script NOSUCHSCRIPT\ntimeout 500\nclick 10 20\n", "mem", &err);
+    if (!loaded) std::fprintf(stderr, "带 timeout 的配方被拒：%s\n", err.c_str());
+    LIFT_CHECK(loaded);
+    if (!loaded) return;
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.steps()), 2);  // timeout 不是一条指令
+    LIFT_CHECK(!plan.failed());
+    LIFT_CHECK(plan.outcome() == lift::RecipeOutcome::Running);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pending()), 2);
+
+    // ---- ① 差 1 ms：不判失败 ----
+    g_now_ms = 1000;
+    plan.atPoint(*wm, lift::InputPoint::CursorPos);
+    LIFT_CHECK(!plan.failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.fired()), 0);
+    g_now_ms = 1500;  // 已等 500 ms ⇒ 还没到期（严格大于）
+    plan.atPoint(*wm, lift::InputPoint::CursorPos);
+    LIFT_CHECK(!plan.failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.fired()), 0);
+
+    // ---- ② 超 1 ms：到期 ⇒ 失败（**同一个读点**就判）----
+    g_now_ms = 1501;
+    plan.atPoint(*wm, lift::InputPoint::CursorPos);
+    LIFT_CHECK(plan.failed());
+    LIFT_CHECK(plan.outcome() == lift::RecipeOutcome::TimedOut);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.fired()), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pending()), 2);
+    const lift::Step* stuck = plan.currentStep();
+    LIFT_CHECK(stuck != nullptr);
+    if (stuck != nullptr) {
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(stuck->line), 1);
+        LIFT_CHECK(stuck->kind == lift::StepKind::AwaitScript);
+    }
+
+    // ---- ③ 报告点名：`mem:1` + 门 + 指令原文 ----
+    const std::string report = plan.failureReport();
+    LIFT_CHECK(report.find("FAIL timeout") != std::string::npos);
+    LIFT_CHECK(report.find("mem:1") != std::string::npos);
+    LIFT_CHECK(report.find("await script NOSUCHSCRIPT") != std::string::npos);
+    LIFT_CHECK(report.find("门") != std::string::npos);
+    LIFT_CHECK(report.find("pending=2") != std::string::npos);
+
+    // ---- ② 失败之后不再推进：再喂 10 个读点，fired / pending 一格不动 ----
+    for (int i = 0; i < 10; ++i) plan.atPoint(*wm, lift::InputPoint::CursorPos);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.fired()), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pending()), 2);
+    LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);
+}
+
+// =====================================================================================
+// 判据 ⑦ · **完成度是判据**：门永不成立 ⇒ `pending != 0` ⇒ 退出码 **5**（⛔ 不是 0）
+//
+// 判据（红了意味着什么）：这一条就是"图 → 配方"改写会不会把 CTest 变成假绿的唯一闸门。
+//   · `Routing`（还有指令没消费）⇒ `pending != 0` 且 `recipeOutcomeExitCode()` = 5；
+//   · `Done` ⇒ `pending == 0` 且 `recipeOutcomeExitCode()` = 0（**不覆盖**调用方的运行结论）；
+//   · `failureReport()` 在 `Done` 时是空串（⛔ 不许把成功也打成失败）。
+// =====================================================================================
+void caseCompletion() {
+    lift_test::g_current_case = "input-plan/completion";
+
+    // ---- 退出码口径（唯一一份；= 解释器臂那两处 exit 5）----
+    LIFT_CHECK_EQ_I64(lift::recipeOutcomeExitCode(lift::RecipeOutcome::Done), 0);
+    LIFT_CHECK_EQ_I64(lift::recipeOutcomeExitCode(lift::RecipeOutcome::Running), 5);
+    LIFT_CHECK_EQ_I64(lift::recipeOutcomeExitCode(lift::RecipeOutcome::TimedOut), 5);
+    LIFT_CHECK_EQ_I64(lift::kRecipeIncompleteExitCode, 5);
+
+    lift_fixture::Fixture f;
+    LIFT_CHECK(f.ok);
+    if (!f.ok) return;
+    lift::WindowManager* wm = f.m.cpu().windows;
+    LIFT_CHECK(wm != nullptr);
+    if (wm == nullptr) return;
+    LIFT_CHECK(wm->createWindow("PlanTest", 0u, 0u, 0u, 0u, 1280, 720, 0u) != 0);
+    LIFT_CHECK(publishEngine(f.m, "TITLE.BIN", 42u));
+
+    // ---- ① 门永不成立（没有 `timeout` ⇒ 不会判超时，只会"没走完"）----
+    lift::InputPlan stuck;
+    stuck.setClockForTest(&testNowMs);
+    stuck.attachGuestMemory(&f.m.mem());
+    std::string err;
+    LIFT_CHECK(stuck.loadText("await position TITLE 0x388C 0x38A4\nclick 1070 480\n", "mem", &err));
+    for (int i = 0; i < 25; ++i) {
+        g_now_ms += 1000;  // ★ 走很久也不算超时：没写 `timeout` ⇒ 本臂没有缺省窗口
+        stuck.atPoint(*wm, lift::InputPoint::CursorPos);
+    }
+    LIFT_CHECK(!stuck.failed());
+    LIFT_CHECK(stuck.outcome() == lift::RecipeOutcome::Running);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(stuck.pending()), 2);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(stuck.fired()), 0);
+    LIFT_CHECK_EQ_I64(lift::recipeOutcomeExitCode(stuck.outcome()), 5);
+    const std::string report = stuck.failureReport();
+    LIFT_CHECK(report.find("FAIL incomplete") != std::string::npos);
+    LIFT_CHECK(report.find("mem:1") != std::string::npos);
+    LIFT_CHECK(report.find("await position TITLE 0x0000388C 0x000038A4") != std::string::npos);
+    // 摘要里 `pending=` 必须在（读这一行最短的形式：steps= fired= pending=）
+    LIFT_CHECK(stuck.summary().find("steps=2 fired=0 pending=2") != std::string::npos);
+
+    // ---- ② 反过来：全部走完 ⇒ Done + 退出码 0 + 空报告 ----
+    lift::InputPlan done;
+    done.setClockForTest(&testNowMs);
+    done.attachGuestMemory(&f.m.mem());
+    LIFT_CHECK(done.loadText("await script TITLE\nclick 10 20\n", "mem", &err));
+    done.atPoint(*wm, lift::InputPoint::CursorPos);
+    LIFT_CHECK(done.outcome() == lift::RecipeOutcome::Done);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(done.pending()), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(done.fired()), 1);
+    LIFT_CHECK_EQ_I64(lift::recipeOutcomeExitCode(done.outcome()), 0);
+    LIFT_CHECK(done.failureReport().empty());
+    LIFT_CHECK(done.currentStep() == nullptr);
+    LIFT_CHECK(done.summary().find("pending=0") != std::string::npos);
+    (void)done.releaseAll(*wm);
+}
+
+// =====================================================================================
+// 判据 ⑥' · `profile_begin|end` 与 `quit` 在**本臂**落地（不再是"这个入口不认"）
+//
+// 判据（红了意味着什么）：
+//   ① 三条指令在 `--input-plan` 的解析器上**都被接受**（旧形状是 exit 2 的硬错）；
+//   ② `profile_begin` + `profile_end` 收口一次（`profileWindows() == 1`），未配对的 `profile_end`
+//      不算收口（响亮提示在 stderr，不是失败）；
+//   ③ `quit` ⇒ `wm` 队列尾出现 WM_QUIT（与解释器臂同一个交付点）+ `quitRequested()` 为真 +
+//      **不再推进**（后面的 `click` 永远不施加 ⇒ `pending != 0`）。
+// =====================================================================================
+void caseProfileAndQuit() {
+    lift_test::g_current_case = "input-plan/profile-and-quit";
+    lift_fixture::Fixture f;
+    LIFT_CHECK(f.ok);
+    if (!f.ok) return;
+    lift::WindowManager* wm = f.m.cpu().windows;
+    LIFT_CHECK(wm != nullptr);
+    if (wm == nullptr) return;
+    LIFT_CHECK(wm->createWindow("PlanTest", 0u, 0u, 0u, 0u, 1280, 720, 0u) != 0);
+    LIFT_CHECK(publishEngine(f.m, "TITLE.BIN", 42u));
+    g_now_ms = 1000;
+
+    // ---- ① 三条指令都被接受（旧形状：`timeout` / `profile_*` / `quit` ⇒ "这个入口不认" + exit 2）----
+    lift::InputPlan plan;
+    plan.setClockForTest(&testNowMs);
+    plan.attachGuestMemory(&f.m.mem());
+    std::string err;
+    // ★ `wait 500` 夹在 begin / end 之间：`atPoint` 会在**同一个读点**把连续可满足的指令全部消费掉
+    //   （flush-before-read），没有这条 `wait` 就观察不到"窗口开着"那一刻。
+    const bool loaded = plan.loadText(
+        "profile_begin title\n"
+        "await script TITLE\n"
+        "timeout 30000\n"
+        "wait 500\n"
+        "profile_end title\n"
+        "quit\n"
+        "click 10 20\n",
+        "mem", &err);
+    if (!loaded) std::fprintf(stderr, "profile/quit 配方被拒（能力面又分叉了）：%s\n", err.c_str());
+    LIFT_CHECK(loaded);
+    if (!loaded) return;
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.steps()), 6);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.profileWindows()), 0);
+
+    // ---- ② `profile_end` 没有配对的 `begin`：响亮提示但不失败（先验一条独立配方）----
+    {
+        lift::InputPlan orphan;
+        orphan.setClockForTest(&testNowMs);
+        LIFT_CHECK(orphan.loadText("profile_end lonely\n", "mem", &err));
+        orphan.atPoint(*wm, lift::InputPoint::CursorPos);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(orphan.profileWindows()), 0);
+        LIFT_CHECK(orphan.outcome() == lift::RecipeOutcome::Done);  // 仪器问题不是任务失败
+    }
+
+    // ---- ③ 正常一跑：begin 落地 ⇒ open；`wait` 到期后 end 收口 ⇒ quit 投 WM_QUIT ----
+    g_now_ms = 2000;
+    plan.atPoint(*wm, lift::InputPoint::CursorPos);  // profile_begin + 门成立 + wait 起算（未到期）
+    LIFT_CHECK(plan.profileOpen());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.profileWindows()), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pending()), 4);  // wait 还没到期 ⇒ 剩 4 条未消费
+    g_now_ms = 2500;
+    plan.atPoint(*wm, lift::InputPoint::CursorPos);  // wait 到期 + profile_end 收口 + quit
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.profileWindows()), 1);
+    LIFT_CHECK(!plan.profileOpen());
+    LIFT_CHECK(plan.quitRequested());
+    LIFT_CHECK(*plan.quitFlag());
+    // WM_QUIT 是队列尾的一条虚拟消息（`WindowManager::peekAt(queueSize())`）
+    lift::WinMessage quit_msg;
+    LIFT_CHECK(wm->peekAt(wm->queueSize(), &quit_msg));
+    LIFT_CHECK_EQ_U32(quit_msg.message, kWmQuit);
+    // quit 之后的 `click` 永远不施加 ⇒ 任务没走完（⛔ quit 不是"万能成功"）
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.fired()), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pending()), 1);
+    LIFT_CHECK(plan.outcome() == lift::RecipeOutcome::Running);
+    for (int i = 0; i < 10; ++i) plan.atPoint(*wm, lift::InputPoint::CursorPos);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.fired()), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pending()), 1);
+    LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);
+}
+
 }  // namespace
 
 int main() {
@@ -656,6 +915,9 @@ int main() {
     caseInstructionsAndClock();
     caseScriptGate();
     casePositionGate();
+    caseStepTimeout();
+    caseCompletion();
+    caseProfileAndQuit();
     caseParseErrors();
     caseCoordinateScale();
     caseForcedRelease();

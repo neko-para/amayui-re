@@ -1,0 +1,25 @@
+# 复现：GAMESTART 界面点"下一步" ⇒ 播一个 SE（叠在 BGM 上）⇒ SE 播完后**混合的尾声被重复 2–3 次**
+#   坐标来自用户：TITLE 的「はじめから」= 1186,373；GAMESTART 的「下一步」= 830,592（与 sn0000.plan 同路）
+# 判据：`--audio-dump` 出来的 WAV 里，尾声那一截应当出现 2–3 次**完全相同的字节段**（用窗口哈希找重）
+# ⛔ 不写帧号（见 docs/03-emulator/interaction-model.md）
+#
+# 写法 = 顺序配方（语法真源 `apps/emulator-lift/src/runtime/recipe.h`）：
+#   `timeout N` 守的是**它上一条**指令 ⇒ 写在 `await` 的后面；`wait N` = **宿主墙钟**毫秒。
+
+await script TITLE
+timeout 30000
+wait 5000
+
+click 1186 373
+
+await script GAMESTART
+timeout 30000
+wait 3000
+
+click 830 592
+
+# 给 SE 播完 + 尾声重复留足时间。
+# ⚠ 单条 `wait` 自身受缺省 5000 ms 的 timeout 约束 ⇒ 单条 wait 不要超过 4000 ms（拆成多条）。
+wait 4000
+wait 4000
+wait 4000

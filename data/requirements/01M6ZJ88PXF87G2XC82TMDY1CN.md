@@ -27,7 +27,7 @@
 
 ## 判据（修好后）
 
-`--raster-sprites 1` 跑 `repo:apps/emulator-lift/scripts/interaction/room-enter.graph` 的帧，与
+`--raster-sprites 1` 跑 `（已删）apps/emulator-lift/scripts/interaction/room-enter.graph` 的帧，与
 `--raster-sprites 0` 的帧**逐字节相同**（`sha256` 相等）；OPTION 同样。
 
 ## 现状（临时处置）

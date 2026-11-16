@@ -26,8 +26,8 @@ hover 会换高亮、点 CG 鑑賞 有效、ESC 有效，而同一位置的 clic
 
 ## 处置
 
-- 图：`repo:apps/emulator-lift/scripts/interaction/room-exit.graph` 的 room 节点回到 `action click center`
-  （删掉"退回 ESC"的临时行与错误注记）；新增 `repo:apps/emulator-lift/scripts/interaction/room-exit-right.graph`
+- 图：`（已删）apps/emulator-lift/scripts/interaction/room-exit.graph` 的 room 节点回到 `action click center`
+  （删掉"退回 ESC"的临时行与错误注记）；新增 `（已删）apps/emulator-lift/scripts/interaction/room-exit-right.graph`
   （右键 = 引擎取消位 bit5，同一终态）。
 - 判据：两份图真机 `exit 0 + task done + TITLE hash`；pure 守卫
   `repo:docs/03-emulator/defects.md` 的 `graph-scripts-parse`（两份图必须能解析）

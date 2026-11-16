@@ -11,6 +11,11 @@
 > `./out/emulator-lift.exe --appdata ../../.tmp/appdata --game-dir ../../links/install --present window --present-hidden --native-overrides all --skip-logo --input-script <脚本>`
 > ★ **2026-11-13 起 `--raster` 已删除**（GPU 是唯一光栅实现）：本文早于那天的条目里出现的 `--raster cpu|gpu`
 > 是**当时的命令原文**，照抄今天会 `未知参数：--raster` 退出 2 —— 复现那些条目时把它删掉。
+> ★ **2026-11-16 起 `--interaction-graph` / `--interaction-trace` / `--interaction-fail-dump` 已退役**
+> （配方只经 AOT 臂 `--input-plan`，落点 `apps/emulator-lift/scripts/recipes/*.plan`）：本文里出现的
+> `--interaction-graph <图>` 同样是**当时的命令原文**；要重跑同一份配方就换成
+> `emulator-lift-aot ... --input-plan scripts/recipes/<名>.plan`（⚠ real-time 档），
+> 而那条命令里的 `--interaction-trace` / `--interaction-fail-dump` **没有替代品**（入口已删）。
 > 读数属于哪个工作树：`git log -1 --format=%h`（本文取自 2026-11-08 `2bd8eaf` 附近）；换构建后不要混表（`measurement.md` M-01）。
 
 ## 过渡（进出 EU-ROOM）

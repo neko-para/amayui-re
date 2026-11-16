@@ -121,6 +121,14 @@ struct AotRunOptions {
     //   `heap` / `stack` / `va` 那几行 + 复跑一次 `--region-log` 就能回答 ⇒ 属噪音。
     //   ★ 形态与 `--frame-log` **同族**：一类读数的 opt-in、⛔ 不是"总开关"（别的 readout 一行不动）。
     bool region_log = false;
+    // ★ **外部请求停止**（缺省 nullptr = 从不请求）。唯一的生产者 = `--input-plan` 的 `quit`
+    //   （`InputPlan::quitFlag()`）⇒ 与解释器臂**同一条口径**（`machine.cpp` 的
+    //   `interaction_.actuator().quitRequested()` ⇒ `Stopped` + detail `… quit`）：
+    //   本次运行以 `Stopped`（正常结局）收口，⛔ **不等 guest 自己退出** —— 那会把 guest
+    //   带进它的停机路径，而停机路径可能不在闭包里（实测：WM_QUIT 之后停在 `00513B90`
+    //   ⇒ `decode-error`，退出码 2）。
+    //   读点在**主线程**里写这个 bool、主线程的块边界读它 ⇒ 不需要原子。
+    const bool* stop_requested = nullptr;
 };
 
 struct AotRunResult {

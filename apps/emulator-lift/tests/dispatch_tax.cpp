@@ -32,8 +32,8 @@
 //      这里直接调 `Machine::dumpRunSummary`（吃 `RunResult` + Machine 状态）⇒ 不需要 guest / 安装 / 子进程，
 //      于是"删掉 `if (any)` 门"在 macOS 上也当场红。
 //
-//   ⑧ `stress/skip-report`：**S9 的"红的时候逐条列原因"负控**（纯函数：`tests/stress_skip_report.h`
-//      的 `judgeSkipReport()`）—— 喂**合成文本**三组，⛔ 不跑游戏、⛔ 不建子进程：
+//   ⑧ `stress/skip-report`："红的时候逐条列原因"负控（纯函数：`tests/stress_skip_report.h`
+//      的 `judgeSkipReport()`；原 S9 压力用例 2026-11-16 退役，纯函数与这条负控仍在）—— 喂**合成文本**三组，⛔ 不跑游戏、⛔ 不建子进程：
 //      ① `skipped=0` 且无 `skipped top:` ⇒ 通过；② `skipped=3` + 三行 `skipped top:` ⇒ 失败，
 //      且失败消息里**逐条原样**含那三行；③ `skipped=1` 但原因表缺失 ⇒ 失败，且消息明确说
 //      "原因缺失"（⛔ 不许静默通过 —— 这条比 ② 重要：没有原因表时只说得出"少了 3 批"）。

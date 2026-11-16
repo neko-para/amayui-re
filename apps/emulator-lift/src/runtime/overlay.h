@@ -5,7 +5,7 @@
 //   两条呈现路径（GPU 直出 / SDL_Renderer）共用**同一份**行与图像（⛔ 不要各写一份格式化）。
 // ★ 纪律：叠层只存在于**宿主送显的那一份像素**里 —— ⛔ 不写 guest 内存。
 //   ✅ 只在**窗口**与 `--present-screenshot`（窗口像素）里可见；
-//   ⛔ `--interaction-fail-dump` / `--dump-frame` 是 **guest 帧**（`arena.dumpBmp`），
+//   ⛔ `--dump-frame` 是 **guest 帧**（`arena.dumpBmp`），
 //   不含叠层 —— 这与"guest 像素 / 整帧 hash 零改动"是同一条口径（⛔ 不要为了快照可见去写 guest）。
 // ★ 默认关：只有 `--overlay`（且 `--present window`）才会被调用。
 //

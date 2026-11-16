@@ -166,7 +166,10 @@ bool parseExpectChangeActions(const std::string& spec, ExpectChangePolicy* out, 
 bool Machine::configureExpectChange(const ExpectChangePolicy& p, std::string* err) {
     if (interaction_.active()) {
         if (err) {
-            *err = "与 --interaction-graph 互斥：图有自己的 `expect` 语义，两套判据同时开会出两套口径";
+            // ★ 文案里保留 `interaction`（`runtime/interaction_graph.h`）：这是驱动器的名字，
+            //   pure CTest `input-expect` 用它区分"配方冲突"与"没脚本 / 没匹配动作"两类拒绝。
+            *err = "与交互配方驱动器（runtime/interaction_graph.h）互斥：配方有自己的门语义，"
+                   "两套判据同时开会出两套口径";
         }
         return false;
     }
@@ -752,25 +755,18 @@ bool Machine::loadInputScriptText(const std::string& text, const std::string& or
 }
 
 bool Machine::loadInteractionGraph(const std::string& path, std::string* err) {
-    // 换图前先把旧图仍按着的输入抬起来（⛔ 不静默留下"卡住的键"），并把采样器摘下来。
+    // 换配方前先把旧配方仍按着的输入抬起来（⛔ 不静默留下"卡住的键"）。
     if (interaction_.active()) interaction_.actuator().abandon(*cpu_.windows, clock_.nowMs());
     if (!interaction_.loadFile(path, err)) return false;
-    sampler_.reset();
-    interaction_.bindSampler(sampler_);
-    presenter_.setFrameSampler(&sampler_);
-    std::fprintf(stderr,
-                 "[interaction] 图：%s（%zu 个节点，entry=%s；采样 = Present，矩形 %zu 个）\n",
-                 path.c_str(), interaction_.nodes().size(), interaction_.entry().c_str(),
-                 sampler_.rectCount());
+    // ★ **不再接画面采样器**：配方的门只有"脚本身份 + 脚本内位置"两个源（`runtime/recipe.h`），
+    //   画面采样仍由 `--expect-change-after` 在 `run()` 里按需接（两条通道互斥，见 §4.2c）。
+    std::fprintf(stderr, "[interaction] 配方：%s（%zu 条指令）\n", path.c_str(), interaction_.steps().size());
     return true;
 }
 
 bool Machine::loadInteractionGraphText(const std::string& text, const std::string& origin, std::string* err) {
     if (interaction_.active()) interaction_.actuator().abandon(*cpu_.windows, clock_.nowMs());
     if (!interaction_.loadText(text, origin, err)) return false;
-    sampler_.reset();
-    interaction_.bindSampler(sampler_);
-    presenter_.setFrameSampler(&sampler_);
     return true;
 }
 
@@ -789,8 +785,9 @@ void Machine::pumpScript(InputScript& script, X86& cpu, std::uint64_t wall_ms) {
     if (script.takeProfileBegin(&label)) {
         // ★ **运行期追加**的 `profile_begin` 必须在这里重新 arm（缺陷 `REQ-01M701PEB38VDQJD4QR2JEBA74`）：
         //   `run()` 只在 **prepare 期**按 `input_script_.hasProfileActions()` arm 一次；而
-        //   `--interaction-graph` 的 `profile_begin/end` 是**运行中**才经 `InputScript::appendText`
-        //   追加进来的（`InteractionGraph::issueAction`）⇒ prepare 期那个判据看到的是 false，
+        //   配方驱动器（历史上经 `--interaction-graph`，今天只有程序内夹具）的 `profile_begin/end`
+        //   是**运行中**才经 `InputScript::appendText` 追加进来的（`InteractionGraph::issueAction`）
+        //   ⇒ prepare 期那个判据看到的是 false，
         //   `armed_` 会停在 false：窗口照开照收，可 `iterations` / 函数表的 self / shim 墙钟
         //   全是 0，而且不报错、不告警（= 静默残表）。
         //   为什么选这一点：它就是"脚本**消费** ProfileBegin 的那一刻"（`InputScript` 把请求交出来，
@@ -924,12 +921,18 @@ bool Machine::sampleMarker() {
 void Machine::tickInteraction(X86& cpu) {
     if (!interaction_.active()) return;
     if (cpu.windows == nullptr) return;
-    // ★ 顺序是判据的一部分：先让图判定并在命中时**追加**动作（`at frame <F+1>`，本块边界内绝不生效），
+    // ★ 顺序是判据的一部分：先让配方判定并在命中时**追加**动作（`at frame <F+1>`，本块边界内绝不生效），
     //   再由 actuator 推进（真正发 WM_* + 自动 hold + 延迟抬起）。
     //   ★ 身份 = `last_marker_sample_`（最近一次 VM 循环头采样；门控见 `run()` 的块入口钩子）。
-    //     `script` 是**电平**条件：同一个身份重复传进去仍然成立（⛔ 不是边沿）。
-    interaction_.tick(*cpu.windows, sampler_, presenter_.frameCount(), clock_.nowMs(), cpu.insns, wallMs(),
-                      &last_marker_sample_);
+    //     身份门是**电平**：同一个身份重复传进去仍然成立（⛔ 不是边沿）。
+    //   ★ 位置 = 块边界上**现读一次**（与 `--input-plan` 共用 `readScriptPositionSample`）；
+    //     配方里没有 `await position` ⇒ 一次也不读（零成本）。
+    ScriptPositionSample position;
+    if (interaction_.needsPositionSamples() && cpu.mem != nullptr) {
+        position = readScriptPositionSample(*cpu.mem, last_marker_sample_);
+    }
+    interaction_.tick(*cpu.windows, presenter_.frameCount(), clock_.nowMs(), cpu.insns, wallMs(),
+                      &last_marker_sample_, &position);
     pumpScript(interaction_.actuator(), cpu, wallMs());
     // ★ 图在**宿主事件泵**里失败 / 完成时，guest 可能正阻塞在 `GetMessageA`（那时没有块边界）
     //   ⇒ 不叫醒它就永远到不了 `Machine::run` 的那条检查（`quit` 早就是这么做的，图没有理由不）。
@@ -1010,8 +1013,9 @@ RunResult Machine::run(const RunOptions& opts) {
     instrument_.window_prof = window_prof_.armed();
     instrument_.expect_change = expect_policy_.enabled;
     // ★ 时间线的效果级判据要读**画面采样**：没接线时 `sampleCount()` 恒 0 ⇒ 会把"没接采样器"
-    //   误报成"识别源失明"。只在本策略开时接（缺省零成本）；交互图的采样器由 `loadInteractionGraph`
-    //   在解析期接好，⛔ 这里不碰它（`sampler_.reset()` 会把图的矩形登记清掉）。
+    //   误报成"识别源失明"。只在本策略开时接（缺省零成本）。
+    //   ★ 交互配方驱动器**不消费**画面采样（门只有身份 + 脚本内位置）⇒ 它不接；
+    //     两者互斥（`configureExpectChange` 拒绝），所以这里是唯一一处接线点。
     if (!interaction_.active()) {
         if (expect_policy_.enabled) {
             sampler_.reset();  // 跨 run 时清掉 `last_.hash`（否则第一个样本会被记成 changed）
@@ -1246,10 +1250,9 @@ RunResult Machine::run(const RunOptions& opts) {
                     break;
                 }
             }
-            // ★ 识别驱动的交互任务（`--interaction-graph`）：同样的门控（嵌套 guest 调用 / 定时器回调
-            //   进行中不推进）。三种失败 = **非 0 退出**（StopReason::InteractionFailed 不进 `ok()`）；
-            //   任务走完（`next` 空）与时间线的 `quit` 一样收口成 `Stopped`（那是**成功**结束，
-            //   判据是 trace 最后的 `task done`，不是退出码）。
+            // ★ 交互配方驱动器（今天没有 CLI 入口）：同样的门控（嵌套 guest 调用 / 定时器回调进行中
+            //   不推进）。三种失败 = **非 0 退出**（StopReason::InteractionFailed 不进 `ok()`）；
+            //   配方走完与时间线的 `quit` 一样收口成 `Stopped`（那是**成功**结束，不是靠退出码判）。
             if (interaction_.active() && !guest_calls_.active() && !cpu_.shim.timer_firing && !seh_.busy()) {
                 const auto t_graph = window_prof_.active() ? std::chrono::steady_clock::now()
                                                            : std::chrono::steady_clock::time_point{};
@@ -2752,15 +2755,15 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out, SummaryMode mod
                          messageBoxLastResult());
         }
     }
-    // ★ 交互图（`--interaction-graph`）：状态 / 迁移次数 / 发出的动作数 / 采样量 / 失败类别。
+    // ★ 交互配方驱动器（今天没有 CLI 入口）：状态 / 迁移次数 / 发出的动作数 / 失败类别。
     //   失败类别单独一行（`FAIL`），因为它必须与"跑完了"（done）在读输出时一眼分开。
+    //   ⚠ 不再打 `samples= / changes=`：顺序模型的门只有身份与脚本内位置，不消费画面采样。
     if (interaction_.active()) {
-        std::fprintf(out, "interaction: state=%s node=%s transitions=%llu actions=%llu samples=%llu changes=%llu\n",
+        std::fprintf(out, "interaction: state=%s step=%s transitions=%llu actions=%llu\n",
                      interaction_.stateName(),
                      interaction_.current() != nullptr ? interaction_.current()->id.c_str() : "-",
                      (unsigned long long)interaction_.stateChanges(),
-                     (unsigned long long)interaction_.actionsIssued(),
-                     (unsigned long long)sampler_.sampleCount(), (unsigned long long)sampler_.changeCount());
+                     (unsigned long long)interaction_.actionsIssued());
         if (interaction_.failed()) {
             std::fprintf(out, "FAIL      : %s（%s）\n", graphFailureName(interaction_.failure()),
                          interaction_.failureDetail().c_str());

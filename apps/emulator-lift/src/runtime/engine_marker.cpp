@@ -104,6 +104,58 @@ NameResult resolveIdName(const GuestMemory& mem, std::uint32_t db_ea, std::uint3
 
 }  // namespace
 
+// ★ **唯一一份**"脚本内位置"读数（两条臂共用；公式见头文件的 EA 锚）。
+//   读不到 / 不自洽 ⇒ `valid=false`（门不成立、继续等）；⛔ 不报错、不 abort、不猜一个位置。
+ScriptPositionSample readScriptPositionSample(const GuestMemory& mem, const MarkerSample& identity) {
+    ScriptPositionSample out;
+    out.cur = identity.cur;
+    if (!identity.valid) {
+        out.why = "identity-invalid";
+        return out;
+    }
+    std::uint32_t engine = 0;
+    if (!readU32(mem, kEngineSingletonGlobal, &engine) || engine == 0) {
+        out.why = "engine-unpublished";
+        return out;
+    }
+    const std::uint64_t rec = static_cast<std::uint64_t>(engine) + kEngineFrameBase +
+                              static_cast<std::uint64_t>(kFrameStride) * identity.cur;
+    std::uint32_t base = 0;
+    std::uint32_t pc = 0;
+    if (!readU32(mem, rec + kFrameBodyBaseOffset, &base) || !readU32(mem, rec + kFramePcOffset, &pc)) {
+        out.why = "frame-record-uncommitted";
+        return out;
+    }
+    // ① 引擎还没发布基址（`0x40EE44 GlobalAlloc` 之前 / 帧已清）⇒ 不成立。
+    if (base == 0 || !mem.committed(base, 1u)) {
+        out.why = "body-base-unpublished";
+        return out;
+    }
+    // ② PC 必须在**脚本体缓冲里**：`pc < base` ⇒ 不是"当前指令"。
+    if (pc < base || !mem.committed(pc, 4u)) {
+        out.why = "pc-outside-body";
+        return out;
+    }
+    const Region* region = mem.regionOf(base);
+    if (region == nullptr || pc >= region->end) {
+        out.why = "pc-outside-region";
+        return out;
+    }
+    const std::uint64_t off = static_cast<std::uint64_t>(pc) - base;
+    if (off > kScriptBodyMaxBytes) {  // 读到别的对象了（跨区伪 pos）
+        out.why = "pc-offset-over-max";
+        return out;
+    }
+    const std::uint64_t at = kScriptHeaderLen + off;
+    if (at > 0xFFFFFFFFull) {
+        out.why = "pos-overflow";
+        return out;
+    }
+    out.valid = true;
+    out.pos = static_cast<std::uint32_t>(at);
+    return out;
+}
+
 MarkerSample MarkerSampler::sampleIdentity(const GuestMemory& mem) {
     MarkerSample s;
     ++attempts_;

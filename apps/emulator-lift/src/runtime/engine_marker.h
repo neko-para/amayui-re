@@ -38,6 +38,23 @@ inline constexpr std::uint32_t kFrameStride = 0x00000078u;             // 记录
 inline constexpr std::uint32_t kFrameIdentityOffset = 0x0000003Cu;     // 统一文件 id（0x40EDEB 写）
 inline constexpr std::uint32_t kFrameCount = 40u;                      // 0x41C85A cmp eax,28h / 0x41C6C1 cmp ...,27h
 
+// ---- 脚本内位置（`await position` 的唯一读数：两条臂共用 `readScriptPositionSample`）----
+// ★ 与身份读**同一条记录**：`frame[cur].+0x00` = 脚本体缓冲基址（`0x40EE57` 写 `GlobalAlloc` 的返回值，
+//   `0x40F69E` 是 `ReadFile` 的 `lpBuffer`）；`+0x04` = PC（`0x412825` 取 opcode、`0x41347D..0x413487`
+//   每条指令步进）。⇒ `pos = header_len + (pc − base)`，与 `dist/views/data/*.txt` 的 `label_%08x`
+//   同一坐标系。
+// ★ `header_len` **不是**从 guest 内存读的：装载器把 0x20 字节头与 `sub_header_length` 读进**栈**
+//   （`0x40EE67` / `0x40EFF2` / `0x40F01C`），`0x40F69E` 从文件偏移 `0x3C` 起 `ReadFile` 进
+//   `frame[cur]+0x00` —— 头在 guest 内存里**没有落点**。⇒ 只能用语料事实：941/941 视图签名 `SYS4450`、
+//   `sub_header_length = 0x1C` ⇒ `header_len = 0x20 + 0x1C = 0x3C`（v5 的 `0x44` 在本语料零出现）。
+//   ⛔ 别把它改成"读 `base` 处的签名"：`base` 处是**第一条指令的 opcode**。
+inline constexpr std::uint32_t kFrameBodyBaseOffset = 0x00000000u;  // 记录 +0x00 = 脚本体缓冲基址
+inline constexpr std::uint32_t kFramePcOffset = 0x00000004u;        // 记录 +0x04 = PC
+inline constexpr std::uint32_t kScriptHeaderLen = 0x0000003Cu;      // 0x20 + sub_header_length（SYS4450）
+// 装载长度的**上界**（引擎不把 `ReadFile` 的字节数写回 guest ⇒ 精确长度读不到）。
+// 本语料最大的脚本 1.5 MB；超过这个数的 `pc − base` 一定是"读到了别的对象"（防跨区伪 pos）。
+inline constexpr std::uint32_t kScriptBodyMaxBytes = 0x01000000u;
+
 // ---- id → 名字（内嵌在 Engine+0xA609C 的 FileDB；解析器 sub_454FA0）----
 inline constexpr std::uint32_t kFileIndexOffset = 0x000A609Cu;         // Engine+0xA609C（lea ecx,[esi+0A609Ch]）
 inline constexpr std::uint32_t kFileRootCountOffset = 0x0000040Cu;     // 根条目数（0x454FCC cmp eax,[ecx+40Ch]）
@@ -66,6 +83,18 @@ struct MarkerSample {
     std::uint64_t name_table_sig = 0;
     const char* why = nullptr;  // valid=false / name_degraded 的原因（静态字面量；只进日志）
 };
+
+// 一次"脚本内位置"读数。`valid=false` ⇒ 这一刻**读不到**（门不成立、继续等；⛔ 不猜一个位置）。
+struct ScriptPositionSample {
+    bool valid = false;
+    std::uint32_t pos = 0;      // label 坐标 = `kScriptHeaderLen + (pc − base)`
+    std::uint32_t cur = 0;      // 用的帧槽（= 传入身份的 `cur`；诊断用）
+    const char* why = nullptr;  // valid=false 的原因（静态字面量；只进日志）
+};
+
+// ★ **唯一一份**位置读数（`--input-plan` 与机器内驱动器共用；⛔ 不要在别处再写一遍公式）。
+//   只读 guest 内存，不依赖 Machine / X86；`identity.valid == false` ⇒ 不成立（继续等，⛔ 不报错）。
+ScriptPositionSample readScriptPositionSample(const GuestMemory& mem, const MarkerSample& identity);
 
 // marker 采样器（有状态：告警**每类只打一次**；计数供 run summary / CTest 读）。
 // ★ 纯档夹具直接 `MarkerSampler s; s.sample(machine.mem())` 即可驱动一次采样。

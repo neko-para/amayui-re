@@ -4,8 +4,8 @@
 - type: req
 - status: done
 - parent: REQ-01M6K84KHPA1XF3B1HSHXME6W0
-- verify: apps/emulator-lift/tests/movie_logo.cpp#movie-logo
 - tags: [video, emulator-lift]
+- done_reason: 守卫 movie-logo 已按用户裁决退役（2026-11-16：AOT 速度已远超解释器，那 6 条 LIFT_STRESS 的测试目标不存在）⇒ 本单不再有自动化守卫；能力当时的依据留在 `docs/03-emulator/movie-dshow-protocol.md` 与 `defects.md` 的历史读数；重开条件 = 需要回归真影片播放时走 AOT 侧压力档（`REQ-01M7HQJEEENYDJ91FB5DAC4K23`）或从 git 恢复该用例。
 
 # emulator-lift · 视频 A v1：DirectShow 纹理影片真实现（LOGO）
 

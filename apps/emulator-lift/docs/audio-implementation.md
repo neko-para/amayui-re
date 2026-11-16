@@ -427,6 +427,9 @@ feeder 的 dispatch 只查这一份。`feeder_ok` 是**编译期 opt-in**（`kKn
 今天照敲会 `exit 2`（未知参数）；光栅只有 GPU 一条实现，下面给的就是今天真能跑的等价命令）：
 
 ```bash
+# ⚠ **历史命令（2026-11-16 起跑不了）**：`--interaction-graph` 已退役；而这条 A/B 同时要
+#   `--native-overrides`（解释器专有）与真音频（AOT 臂只实现 `--audio off`）⇒ 今天没有等价跑法。
+#   读数保留作历史；配方本体已搬到 scripts/recipes/se-eof.plan。
 # 段级臂（`--raster gpu` 已删：光栅只有 GPU 一条实现，去掉该 flag 即等价）
 LIFT_AUDIO_TRACE=1 ./out/emulator-lift --verbose --appdata <fresh> --game-dir ../../links/install \
   --present window --present-hidden --native-overrides all --skip-logo --audio sdl \

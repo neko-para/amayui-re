@@ -19,7 +19,7 @@
 - **动作仍走时间线那套注入**：图把动作**追加**进 `InputScript`，自动 hold / 延迟抬起 / profiler 窗口 / `quit` 只有一份实现
   （⛔ 不另写一套按下抬起）。可选按钮词（`click … [left|right]`，缺省 left）也走同一条路。
 - **守卫**：`repo:docs/03-emulator/defects.md`（19 条 pure 用例）+ 变异条目 `ctest:interaction-graph`。
-- **脚本**：`repo:apps/emulator-lift/scripts/interaction/` 三份（进房间 / 出房间·左键 / 出房间·右键），全部**零帧号**。
+- **脚本**：`（已删）apps/emulator-lift/scripts/interaction/` 三份（进房间 / 出房间·左键 / 出房间·右键），全部**零帧号**。
 
 ## 判据对照
 

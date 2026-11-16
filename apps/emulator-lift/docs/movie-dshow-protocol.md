@@ -315,9 +315,12 @@
      每 64 像素取一个，输出 `nonzero / sampled / FNV-1a hash`。泵在每 30 帧（+首帧）打一行
      `[dshow] tex movie #n w=… h=… nonzero=… sampled=… hash=…`。
      实测：`w=1280 h=720 nonzero=14400 sampled=14400`，帧间 hash 变化 ⇒ **纹理真的被引擎写了**。
-   - **assets 守卫**：`tests/movie_logo.cpp` 断言 `tex movie` 的 1280×720 / `nonzero>0` / ≥2 个不同
-     hash / 出现在 `首帧已送渲染器` 之后。★ `--real-time` 下渲染慢会**丢帧**（实测 43/259 帧，与真机
-     一致）⇒ 测试只要求 `samples ≥ 20`，"播完"由 `completed=true` 守。
+   - **assets 守卫（⚠ 2026-11-16 已退役）**：`tests/movie_logo.cpp` 当年断言 `tex movie` 的 1280×720 /
+     `nonzero>0` / ≥2 个不同 hash / 出现在 `首帧已送渲染器` 之后。★ `--real-time` 下渲染慢会**丢帧**
+     （实测 43/259 帧，与真机一致）⇒ 测试只要求 `samples ≥ 20`，"播完"由 `completed=true` 守。
+     ★ 那条用例随 6 条 `LIFT_STRESS` 压力用例一起删除（用户裁决 `REQ-01M7HQ57XV66FZQA5ECGHWD71N`）
+     ⇒ 下面几处"守卫"都是**当时的判据记录**，今天没有自动守卫；读数与命令见
+     `docs/03-emulator/observations.md`。
 
 14. **样本缓冲的通道序 = BGR（2026-11-07 用户实测纠正）**
    - 现象：LOGO 后半段的**粉色**渲染成**紫色**（R/B 对调）。

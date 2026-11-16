@@ -2718,16 +2718,16 @@ const MUTATIONS = [
   //   ★ 两条都只改一处文本，然后重建 + 跑那一条 CTest（`buildDir` = 唯一那棵 lift 树）。
   {
     // CLI 面：计划文件不存在 ⇒ **exit 2 + 点名路径**（⛔ 不许静默忽略）。
-    file: 'apps/emulator-lift/src/runtime/input_plan.cpp',
+    file: 'apps/emulator-lift/src/runtime/recipe.cpp',
     from:
       '    if (f == nullptr) {\n' +
-      '        if (err) *err = "打不开输入计划：" + path;\n' +
+      '        if (err) *err = "打不开配方：" + path;\n' +
       '        clear();\n' +
       '        return false;\n' +
       '    }\n',
     to:
       '    if (f == nullptr) {\n' +
-      '        // 变异：打不开的计划被静默吞掉（当空计划继续跑）\n' +
+      '        // 变异：打不开的配方被静默吞掉（当空配方继续跑）\n' +
       '        clear();\n' +
       '        return true;\n' +
       '    }\n',
@@ -2742,8 +2742,18 @@ const MUTATIONS = [
     // 三条指令：`wait <ms>` 的 deadline 是**唯一的墙钟面** ⇒ 去掉"未到期就停"这一步，
     // `wait` 就退化成空操作（配方里的等待被静默吞掉）。
     file: 'apps/emulator-lift/src/runtime/input_plan.cpp',
-    from: '            if (now < s.wait_deadline_ms) return;\n',
-    to: '            if (false) return;  // 变异：wait 不再等（deadline 被忽略）\n',
+    from:
+      '            if (!wait_started_) {\n' +
+      '                wait_started_ = true;\n' +
+      '                wait_deadline_ms_ = now + s.wait_ms;\n' +
+      '            }\n' +
+      '            if (now < wait_deadline_ms_) return;\n',
+    to:
+      '            // 变异：wait 不再等（deadline 被忽略）\n' +
+      '            (void)now;\n' +
+      '            (void)wait_started_;\n' +
+      '            (void)wait_deadline_ms_;\n' +
+      '            return;\n',
     guard: 'ctest:input-plan-read-points',
     ctest: 'input-plan-read-points',
     buildDir: 'apps/emulator-lift/out',
@@ -2757,16 +2767,32 @@ const MUTATIONS = [
     //   ★ 用单测（不是端到端）当判据：`input-plan/position-gate` 里有一条 `pos == TO` **不**命中
     //     的断言（0x0460 = 轮询体的末指令末尾）⇒ 这是 `REQ-01M7HBG0NYH957M9EK3JVMF5CC` 一族里
     //     "位置门"的代表变异（⛔ 不是每个常量一条）。
-    file: 'apps/emulator-lift/src/runtime/input_plan.cpp',
-    from: '                if (pos < s.pos_from || pos >= s.pos_to) return;  // 半开区间：TO 不含\n',
-    to:
-      '                if (pos < s.pos_from || pos > s.pos_to) return;  // 变异：半开区间变成闭区间（TO 也含）\n',
+    file: 'apps/emulator-lift/src/runtime/recipe.cpp',
+    from: '            return position.pos >= s.pos_from && position.pos < s.pos_to;\n',
+    to: '            return position.pos >= s.pos_from && position.pos <= s.pos_to;  // 变异：TO 也含\n',
     guard: 'ctest:input-plan-read-points',
     ctest: 'input-plan-read-points',
     buildDir: 'apps/emulator-lift/out',
     what:
       '把 `await position` 的 `pos >= s.pos_to` 改成 `pos > s.pos_to`（半开区间变成闭区间）⇒ ' +
       '`pos == TO`（0x0460）也命中 ⇒ input-plan-read-points 的 `input-plan/position-gate` 红',
+  },
+  {
+    // ★ **完成度判据**（`REQ-01M7HP2Q1N0N004M8R4RPABWSV` 的前置）：配方没走完（`pending != 0`）
+    //   或某一步 `timeout` 到期 ⇒ **exit 5**。把它改成恒 0 ⇒ "配方没走完"重新变成**假绿面**
+    //   （只打一行 stderr、退出码 0）—— 那正是"图 → 配方"改写会把 CTest 变绿的那条缝。
+    //   ★ 用单测当判据（不是端到端）：`input-plan/completion` 直接断言
+    //     `recipeOutcomeExitCode(Running) == 5`，⛔ 不依赖 GPU / 游戏安装。
+    file: 'apps/emulator-lift/src/runtime/recipe.cpp',
+    from: '    return o == RecipeOutcome::Done ? 0 : kRecipeIncompleteExitCode;\n',
+    to: '    return o == RecipeOutcome::Done ? 0 : 0;  // 变异：完成度不再影响退出码（"没走完"重新变成假绿面）\n',
+    guard: 'ctest:input-plan-read-points',
+    ctest: 'input-plan-read-points',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '把完成度的退出码映射改成恒 0（`pending != 0` / `timeout` 到期 ⇒ exit 5 变成 ⇒ 0）⇒ ' +
+      'input-plan-read-points 的 `input-plan/completion` 红（`recipeOutcomeExitCode(Running)` 应为 5、' +
+      '`recipeOutcomeExitCode(TimedOut)` 应为 5）',
   },
   {
     // fixtures 目录白名单：**OS 元数据**必须放过（Finder 会在 `corpus/fixtures/` 里重新生成 `.DS_Store`）。

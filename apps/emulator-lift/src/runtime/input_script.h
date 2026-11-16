@@ -142,10 +142,11 @@ struct TimelineOrigin {
 // ★ `--anchor-script` 的**启动期**校验（解析期报错，⛔ 不跑一半就退化成"0 点从 run 起算"）。
 //   两条判据分开是因为它们的信息不同：① 只依赖 CLI 组合（argv 解析完就能判），
 //   ② 依赖脚本已解析（"一个触发 / 动作都没有"的脚本让 0 点无从谈起）。
-//   抽成**纯函数**是为了让 pure CTest 能断言"与 `--interaction-graph` 同给 ⇒ 解析期报错" ——
+//   抽成**纯函数**是为了让 pure CTest 能断言"没给 `--input-script` 却给 `--anchor-script` ⇒ 解析期报错" ——
 //   `main` 的进程退出码在 CTest 里不可达，这里是同一段判据的**唯一实现**（⛔ 不复制一份到 test 里）。
 //   返回空串 = 通过；非空 = 用法错误的原因（调用方 `exit 2`）。
-std::string validateOriginCli(bool anchor_requested, bool input_script_given, bool interaction_graph_given);
+//   ⛔ 2026-11-16 起没有"与 `--interaction-graph` 互斥"这一条：那条入口已退役（`--input-script` 还在）。
+std::string validateOriginCli(bool anchor_requested, bool input_script_given);
 std::string validateOriginScript(bool anchor_requested, std::size_t action_count);
 
 class InputScript {

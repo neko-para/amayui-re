@@ -242,29 +242,15 @@ function appSourceText() {
 }
 
 /**
- * 用例名对不上的**显式例外**（8 条，逐条带证据断言）。
+ * 用例名对不上的**显式例外**（3 条，逐条带证据断言）。
  * ⛔ 这不是"按模式永远放行"：每条都必须在源文件/CMake 里找到对应证据，否则本守卫红。
  * 命名不一致是历史事实（需求单的 `verify` 锚的是这些字面量，改名会断链），
  * 而 `conformance*` 三条本来就没有"单个用例名"这一个判别子。
+ * ★ 2026-11-16 删掉 5 条（`feeder-seg-e2e` / `stress-boot` / `stress-title-steady` / `stress-adv-audio` /
+ *   `stress-gpu-coverage`）：那 6 条 `LIFT_STRESS` 压力用例随解释器臂退役删除，例外表跟着过期
+ *   （这张表自己的判据就是"过期例外 ⇒ 红"，见 `tools/test` 的 `usedDivergences` 检查）。
  */
 const NAME_DIVERGENCES = new Map([
-  [
-    'feeder-seg-e2e',
-    {
-      expectCase: 'feeder-seg',
-      why: '端到端 harness 的 finish 标签是 feeder-seg（测试名多 -e2e 只是 CTest 命名；需求单 verify 锚这个字面量）',
-    },
-  ],
-  ['stress-boot', { expectCase: 's1-boot-first-frame', why: '压力档用例名用 s1-* 编号，CTest 名用 stress-*' }],
-  [
-    'stress-title-steady',
-    { expectCase: 's2-title-steady', why: '压力档用例名用 s2-* 编号，CTest 名用 stress-*' },
-  ],
-  ['stress-adv-audio', { expectCase: 's3-adv-audio', why: '压力档用例名用 s3-* 编号，CTest 名用 stress-*' }],
-  [
-    'stress-gpu-coverage',
-    { expectCase: 's9-gpu-coverage', why: '压力档用例名用 s9-* 编号，CTest 名用 stress-*' },
-  ],
   [
     'conformance',
     {

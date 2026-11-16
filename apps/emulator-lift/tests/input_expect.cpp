@@ -392,12 +392,12 @@ int main() {
             LIFT_CHECK(!m.configureExpectChange(p, &err));
             LIFT_CHECK(!err.empty());
         }
-        // 与交互图同用 ⇒ 拒绝（图有自己的 `expect` 语义，两套判据同时开 = 两套口径）。
+        // 与交互配方同用 ⇒ 拒绝（两条通道同时开 = 两套判据 / 两套口径）。
         {
             lift::Machine m;
             std::string gerr;
-            LIFT_CHECK(m.loadInteractionGraphText(
-                "entry a\nnode a\n  when always\n  action quit\n  next\n", "inline:graph", &gerr));
+            // 顺序配方（与 `--input-plan` 同一个解析器；这里只要"有一份任务"就够，不关心内容）。
+            LIFT_CHECK(m.loadInteractionGraphText("await script TITLE\nquit\n", "inline:graph", &gerr));
             LIFT_CHECK(lift::parseExpectChangeActions("click", &p, &err));
             p.window_samples = 3;
             LIFT_CHECK(!m.configureExpectChange(p, &err));

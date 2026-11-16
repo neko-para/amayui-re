@@ -148,13 +148,9 @@ void usage() {
         "                             到点 ⇒ InteractionFailed + `marker-timeout:` detail + exit 5（⛔ 不静默继续）\n"
         "  --anchor-script <id>  时间线的 **0 点** = 首次**观察到**进入引擎脚本 <id>（十进制 / `0x` 十六进制；\n"
         "                     0 是根脚本的**合法** id，⛔ 不是\"关闭\"）。0 点作用于 frame / insn / guest_ms / wall_ms；\n"
-        "                     与 --interaction-graph 互斥；跑完仍未观察到 ⇒ InteractionFailed + `origin-missed:` + exit 5\n"
+        "                     跑完仍未观察到 ⇒ InteractionFailed + `origin-missed:` + exit 5\n"
         "  --input-stall-ms <ms>      帧号停住多久之后把剩余 frame 条件折成 wall_ms（缺省 10000；0 = 关闭兜底）\n"
         "  --input-stall-boot-ms <ms> 还没出现第一帧（boot）时的宽限（缺省 30000；⛔ boot 不算停滞）\n"
-        "  --interaction-graph <path>  识别驱动的交互任务（节点图：when → action → next）。与 --input-script **并存**；\n"
-        "                     格式与三种失败见 docs/03-emulator/interaction-model.md。⛔ 不写帧号\n"
-        "  --interaction-trace <path>  交互任务的 trace（一行一事件；确定性字段，可逐行 diff）\n"
-        "  --interaction-fail-dump <path>  失败时补写「最后呈现的那一帧」BMP（缺省 <graph>.fail.bmp）\n"
         "  --input-max-hold <ms>      自动 hold 的上限（guest ms，缺省 1000；0 = 不设限）：`click` / 显式 up\n"
         "                             等 guest 采样，到上限仍未采样 ⇒ 抬起 + 告警（⛔ 不挂死）；见 README §4.2c\n"
         "  --expect-change-after <list>  时间线的**效果级判据**（缺省关）：动作应用之后必须在窗口内看到\n"
@@ -232,13 +228,6 @@ int main(int argc, char** argv) {
     // ★ 宿主真光标（`--cursor-warp`，默认关）：只加宿主副作用，⛔ 不改 guest 可见状态。
     bool cursor_warp = false;
     std::string input_script_path;
-    // ★ 识别驱动的交互任务（`--interaction-graph`）：见 docs/03-emulator/interaction-model.md。
-    std::string interaction_graph_path;
-    std::string interaction_trace_path;
-    std::string interaction_fail_dump;
-    // 图是否成功加载：`interactionGraph().active()` 在 `abandon()`/清空后会变假，而"任务没走完"
-    // 的判定要的是"本次运行**本来**有个任务"。
-    bool interaction_graph_loaded = false;
     // ★ 帧停滞兜底（README §4.2c）：帧不推进时把剩余 frame 触发条件折算成 wall_ms。
     //   0 = 关闭（显式选择"宁可挂死也不提前"）。
     std::uint64_t input_stall_ms = 10000;
@@ -404,16 +393,6 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "--input-script 需要一个非空路径\n");
                 return 2;
             }
-        } else if (std::strcmp(a, "--interaction-graph") == 0 && i + 1 < arg_count) {
-            interaction_graph_path = args[++i];
-            if (interaction_graph_path.empty()) {
-                std::fprintf(stderr, "--interaction-graph 需要一个非空路径\n");
-                return 2;
-            }
-        } else if (std::strcmp(a, "--interaction-trace") == 0 && i + 1 < arg_count) {
-            interaction_trace_path = args[++i];
-        } else if (std::strcmp(a, "--interaction-fail-dump") == 0 && i + 1 < arg_count) {
-            interaction_fail_dump = args[++i];
         } else if (std::strcmp(a, "--input-stall-ms") == 0 && i + 1 < arg_count) {
             // 帧停滞兜底阈值（0 = 关闭）。见 README §4.2c。
             const char* text = args[++i].c_str();
@@ -602,12 +581,11 @@ int main(int argc, char** argv) {
         }
     }
 
-    // ---- ★ `--anchor-script` 的**解析期**校验（互斥 / 依赖；⛔ 不跑一半就退化成"0 点从 run 起算"）----
+    // ---- ★ `--anchor-script` 的**解析期**校验（依赖；⛔ 不跑一半就退化成"0 点从 run 起算"）----
     //   判据的**唯一实现**在 `runtime/input_script.cpp`（`validateOriginCli`）：那里也是 pure CTest
-    //   断言"与 --interaction-graph 同给 ⇒ 解析期报错"的入口（进程退出码在 CTest 里不可达）。
+    //   断言"没给 `--input-script` 却给 `--anchor-script` ⇒ 解析期报错"的入口（进程退出码在 CTest 里不可达）。
     {
-        const std::string why =
-            lift::validateOriginCli(anchor_script_set, !input_script_path.empty(), !interaction_graph_path.empty());
+        const std::string why = lift::validateOriginCli(anchor_script_set, !input_script_path.empty());
         if (!why.empty()) {
             std::fprintf(stderr, "emulator-lift: %s\n", why.c_str());
             return 2;
@@ -996,26 +974,13 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-    // ---- 识别驱动的交互任务（`--interaction-graph`）：同样启动前解析，失败立刻拒绝 ----
-    //   ★ 与时间线并存（真源 §7 第 3 期才把时间线并入）；两条通道都写同一份 WindowManager 状态。
-    if (!interaction_graph_path.empty()) {
-        std::string graph_err;
-        if (!machine.loadInteractionGraph(interaction_graph_path, &graph_err)) {
-            std::fprintf(stderr, "emulator-lift: --interaction-graph 解析失败\n  %s\n", graph_err.c_str());
-            return 2;
-        }
-        interaction_graph_loaded = true;
-    }
-    // ★ 输入旋钮对**两条通道**同时生效（时间线 + 交互图的 actuator）。放在两处加载之后：
-    //   图的动作是追加进它自己的 actuator 的，用户传的 `--input-max-hold` / `--input-stall-ms`
-    //   必须也落在那里 —— 否则那几个 flag 对图静默无效。
-    //   自动 hold 的上限还要**小于**节点 timeout：否则上一条 click 的抬起会一直挡住下一条追加。
-    if (!input_script_path.empty() || interaction_graph_loaded) {
+    // ★ 输入旋钮只在给了时间线时才有意义（⛔ 不静默接受一个永远不生效的 flag）。
+    if (!input_script_path.empty()) {
         machine.setInputStallMs(input_stall_ms);
         machine.setInputStallBootGraceMs(input_stall_boot_ms);
         machine.setInputMaxHoldMs(input_max_hold_ms);
     }
-    // ★ marker 只是**时间线**的事件源（交互图的 actuator 生成的是 `at frame`，没有 marker 动作）。
+    // ★ marker 只是**时间线**的事件源。
     if (!input_script_path.empty()) machine.setInputMarkerTimeoutMs(input_marker_timeout_ms);
     // ★ 时间线的 0 点（`--anchor-script <id>`）：配置 + 启动日志 + "不可复现"的警告。
     //   ★ 配置**跨 run / clear() 存活**（`setOriginScript` 只写配置；闩锁状态每轮重置）——
@@ -1046,16 +1011,11 @@ int main(int argc, char** argv) {
                          "（--present window）**不可复现**（墙钟不随 guest 脚本推进；那一档请用 frame / insn）\n");
         }
     }
-    if (!interaction_fail_dump.empty() && !interaction_graph_loaded) {
-        std::fprintf(stderr, "--interaction-fail-dump 需要同时给 --interaction-graph\n");
-        return 2;
-    }
     // ★ 时间线的效果级判据（`--expect-change-after` / `--expect-change-window`）：解析 + 配置。
-    //   缺省关；四条拒绝都是 exit 2（⛔ 不静默退化成"关"—— 静默失败正是本单要消灭的东西）：
+    //   缺省关；三条拒绝都是 exit 2（⛔ 不静默退化成"关"—— 静默失败正是本单要消灭的东西）：
     //   ① 没给 `--input-script`（判的是时间线的动作；没有脚本 = 一个动作都不会被看）；
-    //   ② 与 `--interaction-graph` 同用（图有自己的 `expect` 语义 ⇒ 两套口径）；
-    //   ③ 类别 / 数字写错（窗口只收十进制正整数）；
-    //   ④ 脚本里**没有匹配的动作**（否则一个观测窗都开不了 ⇒ "静默绿"，与"发完不管"同类）；
+    //   ② 类别 / 数字写错（窗口只收十进制正整数）；
+    //   ③ 脚本里**没有匹配的动作**（否则一个观测窗都开不了 ⇒ "静默绿"，与"发完不管"同类）；
     //      只给 `--expect-change-window` 而不给 `--expect-change-after` 也拒绝（它只在策略开时生效）。
     if (expect_change_window_set && expect_change_after.empty()) {
         std::fprintf(stderr,
@@ -1230,32 +1190,10 @@ int main(int argc, char** argv) {
                      "emulator-lift: ⚠ --bench + 窗口呈现：MIPS 含 SDL 上传/呈现开销，不是解释器绝对吞吐\n");
     }
 
-    // ★ 交互 trace：首行必须标 `NON-DIFFABLE` 与否 ⇒ 只能在**知道呈现档位之后**开
-    //   （`--present window` 是 real-time 时钟，那一档的 trace 不参与 diff）。见真源 §4。
-    //   ★ 墙钟等待（图里出现过 `wait … wall_ms`）⇒ 时序不可复现：同一输入两次跑的完成时刻
-    //     取决于宿主调度 ⇒ 那种图的 trace 一律标 `NON-DIFFABLE`（与窗口档同理）。
-    std::FILE* interaction_trace = nullptr;
-    if (!interaction_trace_path.empty()) {
-        if (!machine.interactionGraph().active()) {
-            std::fprintf(stderr, "--interaction-trace 需要同时给 --interaction-graph\n");
-            return 2;
-        }
-        interaction_trace = lift::openHostFileUtf8(interaction_trace_path, "wb");
-        if (interaction_trace == nullptr) {
-            std::fprintf(stderr, "emulator-lift: 打不开 --interaction-trace 输出：%s\n",
-                         interaction_trace_path.c_str());
-            return 2;
-        }
-        machine.interactionGraph().setTrace(interaction_trace,
-                                            !present_window_active && !machine.interactionGraph().usesWallClock());
-    }
-
+    // ★ 交互 trace 随 `--interaction-graph` 一并退役（2026-11-16，`REQ-01M7HQ57XV66FZQA5ECGHWD71N`）：
+    //   它唯一的消费者就是那条入口。
     const std::uint64_t t0 = SDL_GetTicksNS();
     const lift::RunResult r = machine.run(opt);
-    if (interaction_trace != nullptr) {
-        std::fclose(interaction_trace);
-        interaction_trace = nullptr;
-    }
     const std::uint64_t t1 = SDL_GetTicksNS();
     if (present_window_active) machine.cpu().windows->clearHostEventPump();
 
@@ -1303,53 +1241,24 @@ int main(int argc, char** argv) {
             return 4;
         }
     }
-    // ★ 交互任务**没走完**就必须响亮：`Stopped` 是"实现里主动停"（`ok()` 为真，退出 0），
-    //   但任务图只认自己的 `done()` —— guest 侧硬停（d3dxTrap 的"未实现方法槽" / 资源耗尽 /
-    //   ExitProcess）会让运行"看起来成功"而任务其实停在半路。实测：EU-ROOM 里按 ESC ⇒
-    //   `stop: stopped` + `detail: unimplemented … LockRect` + **exit 0**（静默当成成功）。
-    //   ⛔ 这里不猜是哪一种停：任务没到 `task done` 就是失败（退出码与三种失败同一个 5）。
-    if (interaction_graph_loaded && !machine.interactionGraph().done() &&
-        r.reason != lift::StopReason::InteractionFailed) {
-        const lift::InteractionGraph& g = machine.interactionGraph();
-        std::fprintf(stderr,
-                     "[interaction] 任务没有走完（不是 0 点）：stop=%s detail=%s\n"
-                     "  最后状态：state=%s node=%s（trace 里最后一条事件就是断点）\n",
-                     lift::stopReasonName(r.reason), r.detail.c_str(), g.stateName(),
-                     g.current() != nullptr ? g.current()->id.c_str() : "-");
-        const std::string dump_path = interaction_fail_dump.empty()
-                                          ? lift::InteractionGraph::defaultFailDumpPath(interaction_graph_path)
-                                          : interaction_fail_dump;
-        bool still = true;
-        std::string dump_err;
-        if (machine.presenter().dumpLastFrame(dump_path, &still, &dump_err)) {
-            std::fprintf(stderr, "[interaction] 最后画面：%s（像素仍等于最后一次 Present 的 hash：%s）\n", dump_path.c_str(),
-                         still ? "是" : "否 —— guest 可能已经画了下一帧，只作诊断");
-        } else {
-            std::fprintf(stderr, "[interaction] 最后画面写不出来：%s\n", dump_err.c_str());
-        }
-        return 5;
-    }
-    // ★ 交互任务的三种失败（真源 §2）：**非 0 退出**（5，可与 2 = 未实现缺口区分）+ stderr 打
-    //   "最后状态与全部候选" + 存最后画面。⛔ 不许 warning-only、⛔ 不许当 0 点继续跑。
+    // ★ 交互任务的失败：**非 0 退出**（5，可与 2 = 未实现缺口区分）+ stderr 打失败报告 + 存最后画面。
+    //   ⛔ 不许 warning-only、⛔ 不许当 0 点继续跑。
+    //   ★ 2026-11-16：`--interaction-graph` 退役 ⇒ 这个停因现在只有**两条**来源（时间线 0 点没闩锁 /
+    //     marker 超时 / 效果级判据），图那条"任务没走完 + 失败报告"的分流随入口一并删除。
     if (r.reason == lift::StopReason::InteractionFailed) {
-        // ★ 时间线 0 点没闩锁（`--anchor-script`）：**先于**其它三个分流（marker 超时 / expect-change /
-        //   交互图）。复用同一个 `InteractionFailed`（退出码 5），detail 是 `origin-missed:` 那一行；
-        //   ⛔ 不许落到交互图分支（图没加载时 `failureReport()` 是空串、还会往 CWD 写 `.fail.bmp`）。
+        // ★ 时间线 0 点没闩锁（`--anchor-script`）：**先于**其它两条分流。
+        //   复用同一个 `InteractionFailed`（退出码 5），detail 是 `origin-missed:` 那一行。
         if (r.origin_missed) {
             std::fprintf(stderr, "[anchor] %s\n", r.detail.c_str());
             return 5;
         }
-        // ★ marker 超时（`at marker <名字>` 等不到）：**先于** expect-change / 交互图两条分流。
-        //   复用同一个 `InteractionFailed`（退出码 5），但 `detail` 是 `marker-timeout:` 那一行；
-        //   ⛔ 不许落到交互图分支：图没加载时 `failureReport()` 是空串、还会往 CWD 写 `.fail.bmp`。
+        // ★ marker 超时（`at marker <名字>` 等不到）：**先于** expect-change 那条分流。
+        //   复用同一个 `InteractionFailed`（退出码 5），但 `detail` 是 `marker-timeout:` 那一行。
         if (r.marker_timeout) {
             std::fprintf(stderr, "[marker] %s\n", r.detail.c_str());
             return 5;
         }
-        // ★ 时间线的效果级判据与交互图**共用**这一个停因（⛔ 不新增枚举成员），但报告出口不同：
-        //   图有 `failureReport()`（节点 / 等的是什么 / 采样值），时间线只有 `RunResult.detail`
-        //   （三种之一：not-changed / no-sample / unclosed）。⛔ 不许落到下面图那条分支上：
-        //   图没加载时 `failureReport()` 是空串、dump 路径会变成 `".fail.bmp"`（往 CWD 写）。
+        // ★ 时间线的效果级判据：`RunResult.detail` 三种之一（not-changed / no-sample / unclosed）。
         if (machine.expectChangeEnabled()) {
             std::fprintf(stderr, "[expect-change] %s\n", r.detail.c_str());
             const std::string dump_path = input_script_path + ".expect-fail.bmp";
@@ -1365,23 +1274,12 @@ int main(int argc, char** argv) {
             }
             return 5;
         }
-        const lift::InteractionGraph& g = machine.interactionGraph();
-        std::fputs(g.failureReport().c_str(), stderr);
-        const std::string dump_path = interaction_fail_dump.empty()
-                                          ? lift::InteractionGraph::defaultFailDumpPath(interaction_graph_path)
-                                          : interaction_fail_dump;
-        bool still = true;
-        std::string dump_err;
-        if (machine.presenter().dumpLastFrame(dump_path, &still, &dump_err)) {
-            std::fprintf(stderr, "[interaction] 最后画面：%s（像素仍等于最后一次 Present 的 hash：%s）\n", dump_path.c_str(),
-                         still ? "是" : "否 —— guest 可能已经画了下一帧，只作诊断");
-        } else {
-            std::fprintf(stderr, "[interaction] 最后画面写不出来：%s\n", dump_err.c_str());
-        }
+        // ★ 兜底：`InteractionFailed` 但三个分流标志一个都没置 ⇒ 诊断面不能空（⛔ 不静默 0）。
+        std::fprintf(stderr, "[interaction] %s\n", r.detail.c_str());
         return 5;
     }
     // ★ 兜底退出码抽到 `lift::exitCodeForRun`（纯函数，tests/mechanism.cpp 直接断言）：
-    //   上面几道消费者闸门（token / 交互图）**优先**，它们没拦下才落到这里。
+    //   上面几道消费者闸门（token / 时间线）**优先**，它们没拦下才落到这里。
     // ★ guest 自己 `ExitProcess(n)` / `TerminateProcess(_, n)`（REQ-01M77CMJGJ9EJVNPFS2TKMMHD1）：
     //   n != 0 ⇒ 宿主退出码非 0（2，与 decode-error 同档）；n == 0 保持 0。
     //   位置在**所有消费者闸门之后**（4/5/3 那些分流不动）；「run 本身失败 ⇒ 2」也先判，

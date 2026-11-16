@@ -16,7 +16,7 @@
 | **我们依赖哪些外部文档**，以及**我们偏离文档的地方**（偏在哪 / 为什么 / 谁受益） | `external-docs.md` |
 | **仓库自己的机械装置还成立吗**（素材清单 / 语料定位 / 台账 / shape / spec / 写路径 / 插件闭接口） | `repo-guards.md` |
 | **一条 opcode / 一个 EA 的取证** | 技能 `amayui-re-engine`（知识层，不在这里） |
-| **交互模型**（任务 = 节点图；`when` → `action` → `next`；三种失败全部响亮；两种识别源） | `interaction-model.md` |
+| **交互模型**（任务 = 一串**顺序**配方：门 → 动作 → 下一个门；失败全部响亮；两个门 = 脚本身份 / 脚本内位置；唯一入口 = AOT 臂 `--input-plan`，配方落点 `apps/emulator-lift/scripts/recipes/*.plan`） | `interaction-model.md` |
 | **CP932 编码后端能不能换成系统接口**（评估：解码等价 9790/9795、编码 373 个重复映射的字节选择分歧；结论与待补的 Windows 实测） | `encoding-backend.md` |
 
 ### 0.1 判据：什么进 test，什么进文档

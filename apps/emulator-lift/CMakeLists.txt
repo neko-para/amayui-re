@@ -62,7 +62,11 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/surface.cpp
     # ★ 画面特征采样（交互模型的 `screen` 源）：采样点 = Present。
     src/runtime/screen_sample.cpp
-    # ★ 识别驱动的交互状态机（节点图 when → action → next；判定只读采样计数，动作经 InputScript 追加）。
+    # ★ 输入**配方**（一套语法、一份解析器）：`recipe.cpp` = 解析器 + 顺序模型 + 门判定（**唯一一份**）；
+    #   `interaction_graph.cpp` = 机器内驱动器（块边界推进、动作经 InputScript 追加；
+    #     ⚠ 2026-11-16 起**没有 CLI 入口** —— `--interaction-graph` 已退役，只剩 pure 夹具用它）；
+    #   `input_plan.cpp` = **唯一的用户入口**（AOT 臂 `--input-plan`；guest 读点推进、动作直接写 WindowManager）。
+    src/runtime/recipe.cpp
     src/runtime/interaction_graph.cpp
     src/runtime/present.cpp
     src/runtime/present_sdl.cpp
@@ -831,31 +835,15 @@ set_tests_properties(gdi-font-fallback-assets PROPERTIES
 #   `docs/03-emulator/defects.md` / `observations.md`。
 # ★ `DEFINED ENV{…}` 是**配置期**求值 ⇒ 改了环境变量必须重新 configure（`cmake --preset windows-x64`），
 #   `ctest -N` 才会跟着变；`add_executable` 也在同一个 `if` 里 ⇒ 没开这档连 target 都不编。
+# ★ **2026-11-16 退役了 6 条**（用户裁决：AOT 速度已远超解释器，"测试目标已不存在"）：
+#   `feeder-seg-e2e` / `movie-logo` / `stress-boot` / `stress-title-steady` / `stress-adv-audio` /
+#   `stress-gpu-coverage`（+ 6 个独占源文件），登记单 `REQ-01M7HQ57XV66FZQA5ECGHWD71N`。
+#   ⇒ 那 6 条都是"带 `--native-overrides` 的解释器压力/效率读数"，AOT 结构上没有 override。
+#   ⚠ **空窗期**：端到端压力档在 AOT 侧还没建（新档见 `REQ-01M7HQJEEENYDJ91FB5DAC4K23`）⇒
+#     这一段里端到端速度只能人手跑（`scripts/recipes/*.plan` + `emulator-lift-aot --input-plan`），
+#     ⛔ 不许把"没有读数"说成"没有退化"。
 # =====================================================================================
-
-# ---- LIFT_STRESS：**feeder 臂**的段级 override 读数守卫（`bov= / bovd= / bovf=`；2026-11-13 降档）----
-# REQ-01M75W6BB3PY3MF42ZTS23KTBS。判据见 tests/feeder_seg_e2e.cpp 文件头：
-# ① 子进程 exit 0；② 日志里 `feeder=host-thread` + `device=ok`（缺 ⇒ SKIP 77：量错了臂）；
-# ③ 至少一行 `bov>0`；④ 所有行 `bovd==0 && bovf==0`；⑤ `bov>0` 之后不许回到 0。
-# ⛔ 不断言 `bov` 的具体值（读数进文档），⛔ 不断言 `ov` 上升/下降（段会吃掉 ftol2 的函数级命中）。
-# ★ 语义证据在 `native-override-assets` 的 `pcm/*` 真字节两臂；这条只回答"feeder 里有没有接管"。
-# ★ 真音频设备 / 窗口不可用 ⇒ 测试自己 `LIFT_SKIP`(77)（那不是判据红）。
-# ★ **降档的理由是贵**：实测 30 s（`docs/03-emulator/observations.md`）⇒ 走 `LIFT_STRESS` opt-in
-#   （判据 = **用途**：压力/效率面；⛔ 不是"资产在不在"）：
-#     $env:LIFT_STRESS=1; ctest --test-dir out -R feeder-seg-e2e --output-on-failure
 if(DEFINED ENV{LIFT_STRESS})
-    add_executable(lift-feeder-seg-e2e tests/feeder_seg_e2e.cpp)
-    target_link_libraries(lift-feeder-seg-e2e PRIVATE emulator-lift-runtime)
-    add_test(NAME feeder-seg-e2e COMMAND lift-feeder-seg-e2e
-        $<TARGET_FILE:emulator-lift>
-        "${LIFT_STRESS_GAME_DIR}"
-        "${CMAKE_CURRENT_BINARY_DIR}/feeder-seg-e2e-work"
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../graphs/se-eof.graph")
-    set_tests_properties(feeder-seg-e2e PROPERTIES
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        SKIP_RETURN_CODE 77
-        TIMEOUT 900)
-
     # ---- LIFT_STRESS：boot trace（A4）的**读数 + 阈值**面（2026-11-14 从默认档移入）----
     # ★ 为什么不在默认档：它跑**真游戏**（真镜像 + `.lst` + 真 boot 到 L2），按测试模型不属于
     #   "要真游戏"的接口合同档（默认档只测 shim 合同 + 执行器核心，不需要游戏安装）。
@@ -880,132 +868,6 @@ if(DEFINED ENV{LIFT_STRESS})
     add_executable(lift-dispatch-tax tests/dispatch_tax.cpp)
     target_link_libraries(lift-dispatch-tax PRIVATE emulator-lift-runtime)
     add_test(NAME dispatch-tax COMMAND lift-dispatch-tax)
-endif()
-
-# ---- LIFT_STRESS 档：真机安装上的 LOGO 影片压力面（首帧 / completed / 堆平稳 / tex#1 差分）----
-# 判据见 tests/movie_logo.cpp 的头注释。它要真机安装根（输入假定在场；缺 ⇒ 测试自己 SKIP 77）；
-# GPU 不可用（raster 行不是 sdl-gpu）⇒ 测试自己 `LIFT_SKIP`(77)。
-# ★ **opt-in 的理由是用途**：这条要真启模拟器、真放 LOGO 影片（子进程按**墙钟秒**计），是**全部用例里最贵**的
-#   一条 ⇒ 默认门禁**不注册**它，必须显式打开（判据 = 条件里的 `DEFINED ENV{LIFT_STRESS}`）：
-#     $env:LIFT_STRESS=1; ctest --test-dir out -R movie-logo --output-on-failure
-#   ⛔ `DEFINED ENV{…}` 是**配置期**求值 ⇒ 改了环境变量必须重新 configure
-#   （`cmake --preset windows-x64`），`ctest -N` 才会跟着变。
-# ★ `add_executable` 也在同一个 if 里：没开 `LIFT_STRESS` 时连这个 target 都不编。
-# ★ 不改测试名与文件路径（需求单 `01M6T07SC0XN81G1MZJYJXXGV9` 的 verify 指向它们）。
-if(DEFINED ENV{LIFT_STRESS})
-    add_executable(lift-movie-logo tests/movie_logo.cpp)
-    target_link_libraries(lift-movie-logo PRIVATE emulator-lift-runtime)
-    # ★ 真机影片只在 RelWithDebInfo 树里跑（用户口径：Debug 解释器慢到无法使用；
-    #   2026-11-07 起 preset 只有 RelWithDebInfo）。万一有人手工配 Debug，测试自己 `LIFT_SKIP`(77)。
-    target_compile_definitions(lift-movie-logo PRIVATE
-        LIFT_MOVIE_LOGO_IS_DEBUG=$<IF:$<CONFIG:Debug>,1,0>)
-    # ★ 第 5 个参数 `--expect-early-stop`：把"钩子必须生效"钉在 **CMake 侧**（与上面的 ENVIRONMENT
-    #   成对）—— 若只让测试拿 env 变量自证，将来删掉 ENVIRONMENT 就会静默退回 45 s 仍然绿。
-    add_test(NAME movie-logo COMMAND lift-movie-logo $<TARGET_FILE:emulator-lift>
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE"
-        "${LIFT_STRESS_GAME_DIR}"
-        "${CMAKE_CURRENT_BINARY_DIR}/movie-logo-work"
-        --expect-early-stop)
-    set_tests_properties(movie-logo PROPERTIES
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        SKIP_RETURN_CODE 77
-        # ★ **事件驱动提前停**（缺省关；这里显式打开）：影片放完（图停机链看到 `completed_`）就结束
-        #   本次运行，不再空转到 `--time-limit`。`--time-limit` 仍保留作**兜底**（⛔ 不要改小）。
-        # ★ ENVIRONMENT 是**分号分隔的列表**：这里只有一项；要加别的写成 "A=1;B=2"，
-        #   ⛔ 不要用第二个 `set_tests_properties` 把它覆盖掉（那会盖掉整条属性）。
-        ENVIRONMENT "LIFT_STOP_AFTER_MOVIE=1"
-        # 子进程自带 `--time-limit` 兜底（boot + 影片）；墙钟上限留余量。
-        TIMEOUT 180)
-endif()
-
-# =====================================================================================
-# LIFT_STRESS：**压力/效率四场景（MVP，2026-11-14）** —— S1 / S2 / S3 / S9
-# ★ 判据 = **读数 + 阈值**（帧时间 / 指令吞吐 / 堆字节 / 音频计数 / GPU 准入拒批计数）；
-#   ⛔ 没有一条业务断言（"到了某界面 / 某 marker 出现 / 某帧 hash 等于 X" 一律不进判据）。
-#   设计依据 `.tmp/test-model/stress-design.md` 的 §0.1（判据纪律）· §0.2（R1–R5 派生规则）·
-#   §A1.0（口径 W / H · N 遍取中位 · 每次全新 `--appdata`）· §A2（场景）。
-# ★ **每条阈值的推导写在对应 `tests/stress_*.cpp` 的文件头**：规则编号 + 依据读数 + 算出来的值。
-#   ⛔ 不许先写一个好看的数字再让实现去凑（先测 — 再钉）。
-# ★ 口径分两套、参数**不许混写**：`S1`/`S9` = **口径 H**（`--present headless`，虚拟时钟、确定性）；
-#   `S2`/`S3` = **口径 W**（`--present window --present-hidden --present-vsync 0`，real-time 墙钟）。
-#   `--present headless` 拒绝窗口参数（`src/main.cpp:639`）⇒ 混写会 exit 2。
-# ★ 驱动 ≠ 判据：`scripts/bench/idle.txt` / `graphs/sn0000.graph` 只把画面推着走；
-#   驱动失败（exit 5 / `FAIL :`）**不进判据**，只记进 JSON 的 `driver` 段。
-# ★ 落盘：仓库根 `.cache/lift-stress/<场景>-<UTC 时间戳>.json`（逐遍原始值 + 中位 + exe sha256 +
-#   `CMAKE_BUILD_TYPE` + 工作树指纹 + 负载档）。⛔ 不进 git（`.cache/` 已 gitignore）。
-# ★ 为什么这四条只在 `LIFT_STRESS`：它们都跑**真游戏**（唯一允许跑真游戏的一档，`AGENTS.md` §5），
-#   且每条 N=3 遍（S1 ~15 s / S2 ~150 s / S3 ~160 s / S9 ~470 s）。
-# ★ 输入假定在场：显式开档而输入 MISSING ⇒ 上面的 `FATAL_ERROR` 已经挡过；测试自己也会 `LIFT_SKIP`(77)
-#   （没有 GPU / 没有真音频设备 / 非 Windows 或非 RelWithDebInfo 树）—— ⛔ 不假绿、也⛔ 不静默缩水。
-# =====================================================================================
-if(DEFINED ENV{LIFT_STRESS})
-    # 读数落点（仓库根，`out/` 之外 ⇒ 不进 git、也不会被 `cmake --build` 清掉）。
-    set(LIFT_STRESS_JSON_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../.cache/lift-stress")
-
-    # ---- S1：boot → TITLE 首帧（口径 H）。判据见 tests/stress_boot.cpp 文件头 ①②③④⑤ ----
-    add_executable(lift-stress-boot tests/stress_boot.cpp)
-    target_link_libraries(lift-stress-boot PRIVATE emulator-lift-runtime)
-    add_test(NAME stress-boot COMMAND lift-stress-boot $<TARGET_FILE:emulator-lift>
-        "${LIFT_STRESS_GAME_DIR}"
-        "${CMAKE_CURRENT_BINARY_DIR}/stress-boot-work"
-        "${LIFT_STRESS_JSON_DIR}"
-        "$<CONFIG>")
-    set_tests_properties(stress-boot PROPERTIES
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        SKIP_RETURN_CODE 77
-        # 3 遍 × 实测 ~5 s + 进程启停余量（⛔ 不要压到接近实测值：超时会变成假红）。
-        TIMEOUT 300)
-
-    # ---- S2：TITLE 稳态帧时间（口径 W）。判据见 tests/stress_title_steady.cpp 文件头 ①②③④⑤ ----
-    # ★ `LIFT_FRAME_TRACE=1` 由 **CTest 的 ENVIRONMENT** 注入（同 movie-logo 的 `LIFT_STOP_AFTER_MOVIE`）：
-    #   测试自己再断言"真跑出 ≥2 条 n≥100 的 `[frame]` 行"⇒ 环境变量被删掉时**变红**，⛔ 不会静默变绿。
-    add_executable(lift-stress-title-steady tests/stress_title_steady.cpp)
-    target_link_libraries(lift-stress-title-steady PRIVATE emulator-lift-runtime)
-    add_test(NAME stress-title-steady COMMAND lift-stress-title-steady $<TARGET_FILE:emulator-lift>
-        "${LIFT_STRESS_GAME_DIR}"
-        "${CMAKE_CURRENT_BINARY_DIR}/stress-title-steady-work"
-        "${LIFT_STRESS_JSON_DIR}"
-        "$<CONFIG>"
-        "${CMAKE_CURRENT_SOURCE_DIR}/scripts/bench/idle.txt")
-    set_tests_properties(stress-title-steady PROPERTIES
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        SKIP_RETURN_CODE 77
-        ENVIRONMENT "LIFT_FRAME_TRACE=1"
-        # 3 遍 × 实测 ~49 s（脚本窗口 200M 条 + boot）⇒ 留 ~4× 余量。
-        TIMEOUT 600)
-
-    # ---- S3：ADV 一段 + 真音频（口径 W + `--audio sdl`）。判据见 tests/stress_adv_audio.cpp ①②③④⑤ ----
-    # ★ 驱动 = 仓里**现成**的 `graphs/sn0000.graph`（⛔ 不新编坐标；图的判定结果不进判据）。
-    add_executable(lift-stress-adv-audio tests/stress_adv_audio.cpp)
-    target_link_libraries(lift-stress-adv-audio PRIVATE emulator-lift-runtime)
-    add_test(NAME stress-adv-audio COMMAND lift-stress-adv-audio $<TARGET_FILE:emulator-lift>
-        "${LIFT_STRESS_GAME_DIR}"
-        "${CMAKE_CURRENT_BINARY_DIR}/stress-adv-audio-work"
-        "${LIFT_STRESS_JSON_DIR}"
-        "$<CONFIG>"
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../graphs/sn0000.graph")
-    set_tests_properties(stress-adv-audio PROPERTIES
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        SKIP_RETURN_CODE 77
-        ENVIRONMENT "LIFT_FRAME_TRACE=1"
-        # 3 遍 × 实测 ~52 s（图的时间线 ~44 s + boot）⇒ 留 ~5× 余量。
-        TIMEOUT 900)
-
-    # ---- S9：GPU 覆盖读数（口径 H，600 帧）。判据见 tests/stress_gpu_coverage.cpp 文件头 ①②③④⑤⑥ ----
-    # ★ 这一条最贵（单遍实测 ~155 s）但最重要：GPU-only 之后每一处准入拒批都是**潜在缺画**。
-    add_executable(lift-stress-gpu-coverage tests/stress_gpu_coverage.cpp)
-    target_link_libraries(lift-stress-gpu-coverage PRIVATE emulator-lift-runtime)
-    add_test(NAME stress-gpu-coverage COMMAND lift-stress-gpu-coverage $<TARGET_FILE:emulator-lift>
-        "${LIFT_STRESS_GAME_DIR}"
-        "${CMAKE_CURRENT_BINARY_DIR}/stress-gpu-coverage-work"
-        "${LIFT_STRESS_JSON_DIR}"
-        "$<CONFIG>")
-    set_tests_properties(stress-gpu-coverage PROPERTIES
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        SKIP_RETURN_CODE 77
-        # 3 遍 × 实测 124–155 s（本批两次真跑：373.8 s / 381.0 s 整条）⇒ 留 ~3× 余量
-        #（这条最容易在慢机上超时，⛔ 不要压小）。
-        TIMEOUT 1200)
 endif()
 
 # =====================================================================================
@@ -1094,6 +956,10 @@ add_test(NAME input-plan-read-points COMMAND lift-input-plan-read-points)
 # 判据是"交互图走通 / 等一屏 → 点一下"这类**业务正确性**（测试模型单
 # `REQ-01M7ATAB5A18W7XBCKFBEQS7HB` 点名取消）；它**不进测试**。复现命令见
 # `docs/03-emulator/defects.md` BUG-16。
+# ★ 2026-11-16：**入口本身也退役了**（`--interaction-graph` / `--interaction-trace` /
+#   `--interaction-fail-dump` 三个 CLI 参数 + 仓根 `graphs/` + `scripts/interaction/`）；
+#   配方只经 AOT 臂 `--input-plan`（落点 `scripts/recipes/*.plan`）。登记单
+#   `REQ-01M7HQ57XV66FZQA5ECGHWD71N`。`runtime/interaction_graph.*` 保留为机器内驱动器。
 
 add_executable(lift-memory-pages tests/memory_pages.cpp)
 target_link_libraries(lift-memory-pages PRIVATE emulator-lift-runtime)

@@ -480,6 +480,19 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         syncCpuFromRegs();
         cpu_.eip = ea;
 
+        // ---- ⓪ 外部停止请求（`--input-plan` 的 `quit`；`AotRunOptions::stop_requested`）----
+        //   ★ 与解释器臂**同一条口径**（`machine.cpp:1270`：`actuator().quitRequested()` ⇒
+        //     `Stopped` + detail `… quit`）：本次运行在**下一个块边界**收口，⛔ 不等 guest 自己退出。
+        //     不等它的理由：guest 的停机路径可能不在闭包里（实测 WM_QUIT 之后停在 `00513B90`
+        //     ⇒ `decode-error`，退出码 2），那与"quit 是正常结局"这条语义冲突。
+        //   ★ 判据只读一个 bool（读点在主线程写、这里主线程读）⇒ 缺省 nullptr 时是一条判空。
+        if (opts.stop_requested != nullptr && *opts.stop_requested) {
+            r.reason = AotStop::Stopped;
+            r.detail = "input-plan: quit";
+            cpu_.running = false;
+            break;
+        }
+
         // ---- ① `--time-limit`（每 4096 条查一次墙钟；machine.cpp:1148-1157）----
         if (opts.time_limit_sec > 0.0 && cpu_.insns >= next_time_check) {
             const auto now = std::chrono::steady_clock::now();

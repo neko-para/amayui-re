@@ -47,5 +47,5 @@ handler `sub_41A820` 的抛点）、数据损坏对话框选"终止"（`0x412491
   不再称"EU-ROOM 退出的前置"。
 - `REQ-01M717SQJ2RDFRJCB41RREXQYX`（room-exit 终态，blocked）：保留"等 `戻る`"，但写明"SEH 不是这条路的判据"。
 - `REQ-01M6ZDSPVYS3R78TK8TFKVBC8N`（戻る 点击，open）：删掉"点中它就走退出路径 ⇒ 停在 0x4123C4"这句（错误归属）。
-- `repo:apps/emulator-lift/scripts/interaction/room-exit.graph` 的 room 节点注释：ESC 不是 `戻る` 的同一条路。
+- `（已删）apps/emulator-lift/scripts/interaction/room-exit.graph` 的 room 节点注释：ESC 不是 `戻る` 的同一条路。
 - spec `CORE-BOOT-EVENT-LOOP` 补一条"ESC ⇒ 关闭消息"（`0x4B9367` / `0x4B9373`）—— 这条缺口正是本次误归属的根。

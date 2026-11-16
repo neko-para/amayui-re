@@ -5,7 +5,7 @@
 //   闩锁**只发生一次**（重进不定基）；闩锁前**抑制**全部数值触发；闩锁 pending 期间**禁用**帧停滞
 //   折算；`id 0` 是**合法目标**（⛔ 没有"关闭"哨兵）；跑完仍未闩锁 ⇒ 收尾**响亮失败**
 //   （`InteractionFailed` + `origin-missed:` detail + 退出码 5 的分流）；
-//   与 `--interaction-graph` 同给 ⇒ **解析期报错**。
+//   没给 `--input-script` 却给 `--anchor-script` ⇒ **解析期报错**。
 //
 // ★ 用例（kebab-case；需求单拿 `<文件>#<用例名>` 当 verify 锚）：
 //   ① `anchor/fires-when-already-inside`          开局就在目标脚本 ⇒ 首个样本即闩锁（0 点 = 首个样本）
@@ -13,7 +13,7 @@
 //   ③ `anchor/latch-once`                         A→X→B→X：第二次进入 **不**重新定基
 //   ④ `anchor/id-zero-is-a-target`                `id 0` 能当目标（哨兵不存在）
 //   ⑤ `anchor/missed-is-loud`                     未闩锁就结束 ⇒ `origin-missed:` + `InteractionFailed` + 非 0
-//   ⑥ `anchor/rejects-interaction-graph`          与 `--interaction-graph` 同给 ⇒ 解析期报错（+ 空脚本 exit 2）
+//   ⑥ `anchor/usage-errors`                      没给 `--input-script` 却给 `--anchor-script` ⇒ 解析期报错（+ 空脚本 exit 2）
 //   ⑦ `anchor/no-stall-fallback-while-pending`    闩锁 pending 期间帧停滞折算**不**发生（`!stallFallbackFired()`）
 //   ⑧ `anchor/rebase-all-four-units`              四个单位各一条重定基断言（frame / insn / guest_ms / wall_ms）
 //   ⑨ `anchor/samples-without-marker-action`      真 `Machine::run`："只有 anchor、没有 marker 动作"也采样（L6 门控）
@@ -342,21 +342,19 @@ int main() {
     }
 
     // =================================================================================
-    // ⑥ 互斥 / 用法：`--anchor-script` + `--interaction-graph` ⇒ **解析期报错**；
+    // ⑥ 用法：没给 `--input-script` 却给 `--anchor-script` ⇒ **解析期报错**；
     //    给了 anchor 而脚本一个动作都没有 ⇒ 用法错误（exit 2 的那条路径）
     //    ★ 判据的**唯一实现**是 `validateOriginCli` / `validateOriginScript`（`main` 也用它 exit 2）。
+    //    ★ 2026-11-16：`--interaction-graph` 退役 ⇒ "与图互斥"那一条没有生产者了，判据随之删
+    //      （不是改弱：那条路径上的 CLI 组合已经不可能出现）。
     // =================================================================================
     {
-        g_current_case = "anchor/rejects-interaction-graph";
-        const std::string both = lift::validateOriginCli(true, true, true);
-        LIFT_CHECK(!both.empty());
-        LIFT_CHECK(contains(both, "互斥"));
-        LIFT_CHECK(contains(both, "interaction-graph"));
-        const std::string no_script = lift::validateOriginCli(true, false, false);
+        g_current_case = "anchor/usage-errors";
+        const std::string no_script = lift::validateOriginCli(true, false);
         LIFT_CHECK(!no_script.empty());
         LIFT_CHECK(contains(no_script, "--input-script"));
-        LIFT_CHECK(lift::validateOriginCli(true, true, false).empty());   // 只有时间线 ⇒ 通过
-        LIFT_CHECK(lift::validateOriginCli(false, false, false).empty());  // 没给 anchor ⇒ 通过
+        LIFT_CHECK(lift::validateOriginCli(true, true).empty());   // 只有时间线 ⇒ 通过
+        LIFT_CHECK(lift::validateOriginCli(false, false).empty());  // 没给 anchor ⇒ 通过
         // "给了 anchor 但脚本里一个触发都没有" ⇒ 用法错误
         LIFT_CHECK(!lift::validateOriginScript(true, 0).empty());
         LIFT_CHECK(lift::validateOriginScript(true, 1).empty());

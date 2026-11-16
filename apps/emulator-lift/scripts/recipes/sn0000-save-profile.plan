@@ -1,0 +1,62 @@
+# 区间 profiler（README §4.3.2）量两处严重卡顿：
+#   ① fellow-enter  = SN0000 里右键 → FELLOW（转场 / 装载）
+#   ② save-confirm  = SAVE 里点“确认保存”（缩略图 + 1 MB DAT 写盘）
+# 边界 = 动作触发的 block 边界；每个 `profile_end` 打印一次
+# `=== profile window: <label> ===`（逐帧 / guest 函数 / shim 表）。
+#
+# 写法 = 顺序配方（语法真源 `apps/emulator-lift/src/runtime/recipe.h`）：
+#   `timeout N` 守的是**它上一条**指令；`wait N` = **宿主墙钟**毫秒。
+#
+# 运行（与 sn0000-save.plan 同一套窗口 + GPU 参数）—— ⚠ 入口只有 **AOT 臂的 `--input-plan`**
+# （2026-11-16：解释器臂的 `--interaction-graph` 已退役；见 `scripts/recipes/README.md`）：
+#   cd apps/emulator-lift && ./out/emulator-lift-aot --present window --present-hidden \
+#     --skip-logo --audio off \
+#     --game-dir ../../links/install --appdata ../../.tmp/save-profile/appdata \
+#     --input-plan scripts/recipes/sn0000-save-profile.plan \
+#     --max-frames 8000 --time-limit 400
+# ★ 本臂的 `profile_begin/end` 是**宿主墙钟区间读数**（begin / end 各一行，label + wall_ms + reads），
+#   不是解释器臂那套分项窗口 profiler ⇒ 下面“把两对边界去掉再跑一次”的 A/B 只对**区间读数**有意义；
+#   文件里 `fellow-enter 3031 帧 7.39 s` / `save-confirm 3369 帧 7.42 s` 是**解释器臂的历史读数**。
+# 单帧定位：加 `--frame-log`（AOT 臂；解释器臂是 `LIFT_FRAME_TRACE=1`）⇒ `[frame] n=… hash=…`。
+
+await script TITLE
+timeout 30000
+wait 5000
+
+click 1186 373
+
+await script GAMESTART
+wait 2000
+
+click 830 592
+
+await script SN0000
+timeout 35000
+wait 25000
+
+# ① 右键进入 FELLOW：窗口覆盖点击 + 转场（save 图给这段留 10 s；这里留 12 s）
+profile_begin fellow-enter
+click 500 500 right
+wait 12000
+timeout 20000
+profile_end fellow-enter
+
+await script FELLOW
+wait 2000
+
+click 100 140
+
+await script SAVE
+wait 2000
+
+click 300 100
+wait 1000
+
+# ② 确认保存：窗口覆盖点击 + 缩略图 + DAT 写盘（实测 ~7 s；留 15 s）
+profile_begin save-confirm
+click 650 320
+wait 15000
+timeout 30000
+profile_end save-confirm
+
+wait 2000

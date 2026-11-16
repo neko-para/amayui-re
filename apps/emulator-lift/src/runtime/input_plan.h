@@ -1,8 +1,12 @@
-// emulator-lift · 输入**投递层**（S1 骨架 + 四条指令的 AOT 输入配方）
+// emulator-lift · 输入**投递层**（AOT 臂入口：在 guest **读点**推进同一份配方）
 //
 // 口径来源：`REQ-01M7HBG0NYH957M9EK3JVMF5CC`（父单 `REQ-01M7G7EJF062NKQ0D40RF3BZ4Z`）；
 //   投递层本身的口径来自 `REQ-01M7G7EMX3JR272D8FVM7JFY9D`。
 //   设计/落点/偏差 ⇒ `docs/03-emulator/input-plan.md`（⛔ 本文件不复述那篇的读数）。
+// ★ **语法与顺序模型不在这里**：配方由 `runtime/recipe.h` 解析（**唯一一份**；机器内驱动器
+//   `InteractionGraph` 读的也是它），
+//   本文件只负责"在 guest 读点上把到期的那一条指令**施加**到 `WindowManager`"。
+//   ⛔ 不要在这里再写一份解析 / 再解释一次"门成立是什么意思"。
 //
 // =====================================================================================
 // 三条铁律（写在这里 = 后来人的第一道闸；改之前先读一遍）
@@ -26,38 +30,31 @@
 //    ⚠ 如果你发现需要给记账函数传 `WindowManager&`，那说明设计错了 —— 停下报告。
 //
 // =====================================================================================
-// 配方格式（**四条指令**，平铺；`#` 注释、空行忽略）
-//
-//   await script TITLE      ← 电平门：当前引擎脚本身份 == TITLE 即通过（不是边沿）。
-//                             名字 ASCII 大小写不敏感、**两侧**都忽略 `.bin`（`scriptNameMatches`）。
-//   await position TITLE 0x039C 0x0460
-//                           ← **脚本内位置**的电平门（半开区间 `[FROM, TO)`）：
-//                             script 匹配 **且** `FROM <= pos < TO` 才通过，否则继续等
-//                             （⛔ 不报错、不超时）。`FROM` / `TO` 必须是带 `0x` 前缀的 hex；
-//                             解析期校验 `FROM < TO`；脚本名**不在解析期校验**（名字匹配是运行期的事）。
-//                             `pos = header_len + (frame[cur].+0x04 − frame[cur].+0x00)`
-//                             = 脚本体内**绝对字节偏移**（4 字节对齐），与 `dist/views/data/*.txt`
-//                             的 `label_%08x` **同一坐标系**；`header_len` 见下面的常量。
-//   wait 500                ← **宿主单调**毫秒（`std::chrono::steady_clock`）；正整数。
-//   click 1070 480 right    ← x/y = **1280×720 参考系**；按钮词裸写 `left`/`right`（省略 = left，
-//                             ⛔ 不收 `=left`）。
-//
-//   · **按文件顺序**推进：`atPoint()` 从第一个未消费的指令开始，遇到不成立的指令就停
-//     （⛔ 不越过它）。
-//   · `await always` / `await presents <n>` / `key <VK>` / 图那套 `node/when/action/next/
-//     expect/timeout` ⇒ **解析期硬错**（`文件:行号: 未知指令：…`，调用方 `exit 2`）。
-//   · `wait` 是**非阻塞**的：只记 deadline，⛔ 不许 sleep（`atPoint` 在 shim 栈里）；
-//     到期由**下一个读点**消费。起点 = 上一条指令生效的那个读点（因此有 0..一个迭代周期的
-//     偏差，**不可评估**；`wait` 只作粗推进，⛔ 不当判据 / 不作跨臂比）。
+// 能力面 = **共享的那一份**（`runtime/recipe.h`；⛔ 本臂没有自己的指令表）
+//   七条指令全认：`await script` / `await position` / `wait <ms>` / `click x y [l|r]` /
+//   `timeout <ms>` / `profile_begin|end <label>` / `quit`。本臂只决定它们**落在哪个宿主对象**上：
+//   · `click` → `input::mouseMove` / `mouseButton`（唯一施加路径）+ 待抬起队列；
+//   · `wait` → 非阻塞 deadline（宿主单调毫秒），到期由**下一个读点**消费；
+//   · `timeout` → 本臂**唯一**的尺 = 宿主墙钟（`stepTimeoutMs` 给宽度；本臂不给缺省值 ⇒
+//     没写 `timeout` 就没有每步守卫，卡住由 `--time-limit` / `--max-frames` 这层看门狗报）；
+//   · `profile_begin|end` → 本臂没有区间 profiler（`WindowProfiler` 是解释器块循环的仪器）
+//     ⇒ 落成**宿主墙钟区间读数**（一次性两行：begin / end + 区间读数），可与 `--profile` 的
+//     整轮读数对齐；⛔ 不假装开了窗口 profiler；
+//   · `quit` → `WindowManager::postQuit(0)`（与解释器臂**同一个**交付点：`machine.cpp` 的
+//     `quit` 也是投 WM_QUIT）⇒ guest 的消息循环拿到 WM_QUIT 后自己退出；本臂随即不再推进。
+//   · **按文件顺序**推进：从第一条未消费的指令开始，遇到不成立的指令就停（⛔ 不越过它）。
 //   · 身份来源 = `MarkerSampler`（**纯读 guest 内存**，`runtime/engine_marker.h`），由装配点
 //     调 `attachGuestMemory()` 挂进来；`base==0` / `valid=false` ⇒ 门**不成立**（继续等，⛔ 不报错）。
-//   · 位置门同样只读 guest 内存（`frame[cur].+0x00/+0x04`，EA `0x40EE57` / `0x412825`）；
-//     `base==0` / `pc` 不在脚本体缓冲里 / 读不到 ⇒ 门**不成立**（继续等），并记一个内部计数
-//     `positionMisses()`（缺省不打印）。
+//   · 位置门同样只读 guest 内存（`readScriptPositionSample`，与图臂**同一份**）；读不到 ⇒ 门
+//     **不成立**（继续等），并记一个内部计数 `positionMisses()`（缺省不打印）。
 //   · 坐标在投递前过 `cursor_map.h` 的 `referenceToClientPixel()`（**唯一公式**）：
 //     目标 = 主窗口客户区 `HostWindow::client_w/h`（headless 也有；0 ⇒ 退回 1280×720）；
 //     `mouseMove` / `mouseButton(down)` / `mouseButton(up)` 共用**同一个**映射结果。
-//   · ⛔ 没有每步超时：卡住由 `--time-limit` / `--max-frames` 这层看门狗报。
+//
+// ★ **完成度是判据**（`REQ-01M7HP2Q1N0N004M8R4RPABWSV` 的前置）：跑完时 `pending != 0`
+//   （任务没走完）或某一步的 `timeout` 到期 ⇒ `outcome()` 不是 `Done` ⇒ CLI 层按
+//   `recipeOutcomeExitCode()` 给 **5** 并点名那一步（`failureReport()` 带 `文件:行` + 门/动作）。
+//   ⛔ 不许只打一行警告仍 exit 0。
 //
 // 判据（见 `tools/test/input-plan-shape.test.mjs` 与 CTest `input-plan-read-points` /
 // `cli-aot-flags`）：
@@ -74,7 +71,8 @@
 #include <string>
 #include <vector>
 
-#include "runtime/interaction_graph.h"  // GraphCond 词汇 / `scriptNameMatches` / `MarkerSample`
+#include "runtime/engine_marker.h"
+#include "runtime/recipe.h"
 
 namespace lift {
 
@@ -104,33 +102,6 @@ enum class InputPoint : std::uint8_t {
 constexpr std::size_t kInputPointCount = static_cast<std::size_t>(InputPoint::Count);
 const char* inputPointName(InputPoint point);
 
-// =====================================================================================
-// `await position` 的两格读数 + 头长（**全部是 guest 内存读**，不依赖 Machine / X86）
-//
-// 取证（`.tmp/script-pos/research.md` §1；锚都是 `.lst` 的 EA）：
-//   · `frame[cur].+0x00`（= `Engine+0x5D894+0x78*cur`）= **脚本体缓冲基址**：
-//     写 `0x40EE57`（`GlobalAlloc` 的返回值）；`0x40F69E` 是 `ReadFile` 的 `lpBuffer`。
-//   · `frame[cur].+0x04`（= `Engine+0x5D898+0x78*cur`）= **PC**：`0x412825` 取 opcode、
-//     `0x41347D..0x413487` 每条指令步进。它是**指进脚本体缓冲的 guest 指针**。
-//   · ⇒ `pos = header_len + (pc − base)`，与 `dist/views/data/*.txt` 的 `label_%08x` 同一坐标系。
-//
-// ★ `header_len` **不是**从 guest 内存读的，这一点与本文件原先的猜测不同（逐字核过装载器）：
-//   `0x40EE67` 把 0x20 字节头读进**栈**缓冲 `[ebp+Buffer]`，`0x40EFF2` 把
-//   `sub_header_length` 读进**栈**变量 `[ebp+var_160]`，`0x40F01C` 把 sub-header 读进
-//   `[ebp+var_15C]`；随后 `0x40F69E` 才 `ReadFile` 进 `frame[cur]+0x00` —— 此时文件游标已在
-//   `0x20 + sub_header_length`。⇒ **缓冲区从 `header_len` 处开始，头本身在 guest 里没有落点**
-//   （全函数 4 处 `lpNumberOfBytesRead` 都是栈地址，读数也没有写回 guest）。
-//   ⇒ 只能用语料事实：941/941 视图签名 `SYS4450`、`sub_header_length = 0x1C`
-//   ⇒ `header_len = 0x20 + 0x1C = 0x3C`（v5 的 `0x44` 在本语料零出现）。
-//   ⛔ 别把它改成"读 `base` 处的签名"：`base` 处是**第一条指令的 opcode**。
-// =====================================================================================
-inline constexpr std::uint32_t kFrameBodyBaseOffset = 0x00000000u;  // 记录 +0x00 = 脚本体缓冲基址
-inline constexpr std::uint32_t kFramePcOffset = 0x00000004u;         // 记录 +0x04 = PC
-inline constexpr std::uint32_t kScriptHeaderLen = 0x0000003Cu;       // 0x20 + sub_header_length（SYS4450）
-// 装载长度的**上界**（引擎不把 `ReadFile` 的字节数写回 guest ⇒ 精确长度读不到）。
-// 本语料最大的脚本 1.5 MB；超过这个数的 `pc − base` 一定是"读到了别的对象"（防跨区伪 pos）。
-inline constexpr std::uint32_t kScriptBodyMaxBytes = 0x01000000u;
-
 // 内部判定点 → 计划的事件词汇（闭集合；今天只消费 `Frame`）。
 // ★ 本枚举现在就存在，是为了让 `note()` 的形状**从第一天起**就是"只记账"：
 //   ⛔ 不开放字符串、⛔ 不携带 `WindowManager`。
@@ -152,7 +123,7 @@ constexpr std::size_t kPlanEventCount = static_cast<std::size_t>(PlanEventKind::
 class InputPlan {
 public:
     // 有一个非空的指令表 ⇒ armed。⛔ 本函数不看墙钟、不看帧号。
-    bool armed() const { return !steps_.empty(); }
+    bool armed() const { return recipe_.active(); }
 
     // ---- 装载（CLI 层；失败 ⇒ false + err 带 `origin:行: 原因`）----
     bool loadFile(const std::string& path, std::string* err);
@@ -186,41 +157,50 @@ public:
     // 读数（守卫 ③ 的关系断言 / 摘要行用；⛔ 不是性能判据）。
     std::uint64_t deliverCalls(InputPoint point) const;
     std::uint64_t noteCalls(PlanEventKind kind) const;
-    std::uint64_t steps() const { return static_cast<std::uint64_t>(steps_.size()); }
+    std::uint64_t steps() const { return static_cast<std::uint64_t>(recipe_.size()); }
     // 已消费的**指令**数（含 `await script` / `await position` / `wait`；= `next_`）。
     std::uint64_t stepsApplied() const { return applied_; }
-    // **已施加的 `click`** 数（摘要 `fired=`；`await` / `wait` 不算"动作"）。
+    // **还没消费**的指令数（摘要 `pending=`；= steps − applied）。≠ 0 ⇒ 任务没走完。
+    std::uint64_t pending() const {
+        return static_cast<std::uint64_t>(recipe_.size()) - applied_;
+    }
+    // **已施加的 `click`** 数（摘要 `fired=`；`await` / `wait` / `profile_*` / `quit` 不算"动作"）。
     std::uint64_t fired() const { return fired_; }
     std::uint64_t releases() const { return released_; }
     // 位置门"这一刻读不到位置"的次数（base==0 / pc 越界 / 未提交）。⛔ 缺省不打印（诊断用）。
     std::uint64_t positionMisses() const { return position_misses_; }
-    std::uint64_t presenting() const { return event_calls_[static_cast<std::size_t>(PlanEventKind::Frame)]; }
+    std::uint64_t presenting() const {
+        return event_calls_[static_cast<std::size_t>(PlanEventKind::Frame)];
+    }
     std::size_t pendingReleases() const { return releases_pending_; }
-    const std::string& origin() const { return origin_; }
+    // 已**正常收口**的区间数（`profile_begin` + `profile_end` 配对；读数，⛔ 不是性能判据）。
+    std::uint64_t profileWindows() const { return profile_windows_; }
+    bool profileOpen() const { return profile_open_; }
+    const std::string& origin() const { return recipe_.origin(); }
     // 一行摘要（**一次性**输出；⛔ 不许每帧打）。
     std::string summary() const;
 
-private:
-    // 平铺指令流的**四条**指令（⛔ 不是图语法：一个 step 不再"自带一个门 + 一个动作"）。
-    enum class InstrKind : std::uint8_t { AwaitScript = 0, Wait = 1, Click = 2, AwaitPosition = 3 };
+    // ---- 完成度（**判据**；`aot_main` 据此给退出码）----
+    //   `TimedOut` = 某一步的守卫到期；`Running` = 跑完了还有指令没消费（任务没走完）；
+    //   `Done` = 全部指令走完。⚠ 「跑完」= guest 侧停机（`--max-frames` / `--time-limit` / 退出），
+    //   ⛔ 不是"计划自己说完成"。
+    RecipeOutcome outcome() const;
+    bool failed() const { return failed_; }
+    // 没走完 / 超时时该打什么（多行；**点名** `文件:行` + 门/动作 + 进度）。`Done` ⇒ 空串。
+    //   ★ `aot_main` 直接写 stderr；⛔ 不在这里打（同一个结论只在一个出口）。
+    std::string failureReport() const;
+    // 当前"卡住的那一条"（`TimedOut` / `Running` 且 pending ≠ 0；否则 nullptr）。
+    const Step* currentStep() const;
+    // 第 `index` 条指令（越界 ⇒ nullptr；报错定位 / 守卫用）。
+    const Step* stepAt(std::size_t index) const {
+        return index < recipe_.size() ? &recipe_.steps()[index] : nullptr;
+    }
+    // **宿主停止请求**的句柄（`quit` 一落地就为真；交给 `AotRunOptions::stop_requested`）。
+    //   ★ 只有这一个生产者：`quit` 指令。⛔ 不要用它表达"配方没走完"（那是 `outcome()`）。
+    const bool* quitFlag() const { return &quit_requested_; }
+    bool quitRequested() const { return quit_requested_; }
 
-    struct PlanStep {
-        InstrKind kind = InstrKind::AwaitScript;
-        // AwaitScript / AwaitPosition
-        std::string script;                 // 名字原文（⛔ 不参与判定：判定走 `scriptNameMatches`）
-        // AwaitPosition（半开区间 `[pos_from, pos_to)`；label 坐标 = 脚本体内绝对字节偏移）
-        std::uint32_t pos_from = 0;
-        std::uint32_t pos_to = 0;
-        // Wait（运行时状态：第一次到达这条指令的那个读点 = 起点）
-        std::uint64_t wait_ms = 0;
-        std::uint64_t wait_deadline_ms = 0;
-        bool wait_started = false;
-        // Click
-        int x = 0;                          // 1280×720 参考系
-        int y = 0;
-        MouseButton button = MouseButton::Left;
-        int line = 0;
-    };
+private:
     struct PendingRelease {
         MouseButton button = MouseButton::Left;
         int x = 0;                       // **已缩放**的客户区坐标（move / down / up 共用）
@@ -231,17 +211,20 @@ private:
 
     // 采一次身份（同 `(cur,id)` + 名字表签名不变 ⇒ 复用缓存的名字，不重解析）。
     void refreshIdentity();
-    // 读一次"脚本内位置"（label 坐标）。读不到 ⇒ false（门不成立）；⛔ 不抛、不报错。
-    bool readScriptPosition(std::uint32_t* pos);
     std::uint64_t nowMs() const;
-    void applyStep(WindowManager& wm, const PlanStep& s);
+    void applyClick(WindowManager& wm, const Step& s);
+    // 区间边界的**本臂落点**（没有窗口 profiler ⇒ 一次性两行宿主墙钟读数）。
+    void applyProfileMark(const Step& s, std::uint64_t now_ms);
+    // `quit` 的**本臂落点**：与解释器臂同一个交付点 = `WindowManager::postQuit(0)`。
+    void applyQuit(WindowManager& wm);
+    // 某一步的守卫到期 ⇒ 记下是哪一条（下标）/ 等了多久（**唯一**失败面；⛔ 不 warning-only）。
+    void failTimeout(std::size_t index, std::uint64_t elapsed_ms, std::uint64_t guard_ms);
     void releaseDue(WindowManager& wm);
     void emitRelease(WindowManager& wm, const PendingRelease& r);
 
-    std::vector<PlanStep> steps_;
+    Recipe recipe_;
     std::vector<PendingRelease> pending_;
-    std::string origin_;
-    const GuestMemory* mem_ = nullptr;  // 装配点挂；nullptr ⇒ `await script` 恒不成立
+    const GuestMemory* mem_ = nullptr;  // 装配点挂；nullptr ⇒ 门恒不成立
     MarkerSampler marker_sampler_;
     MarkerSample identity_;             // 最近一次采样（名字按上面那条规则缓存）
     NowFn now_fn_ = nullptr;            // 测试缝（nullptr = steady_clock）
@@ -252,6 +235,28 @@ private:
     std::uint64_t position_misses_ = 0;  // 位置门读不到位置的次数（诊断；缺省不打印）
     std::uint64_t read_points_ = 0;     // 读点序号（待抬起的兜底刻度）
     std::size_t releases_pending_ = 0;
+    // `wait` 的 deadline（宿主毫秒；起点 = 第一次到达这条指令的那个读点）
+    bool wait_started_ = false;
+    std::uint64_t wait_deadline_ms_ = 0;
+    // 每步守卫的窗口（宿主毫秒；宽度 = `stepTimeoutMs(s, 0)`；**0 = 这条指令没有窗口**）
+    bool guard_armed_ = false;
+    std::uint64_t guard_started_ms_ = 0;
+    std::uint64_t guard_ms_ = 0;
+    // 失败面（`TimedOut`）：点名用的那一条 + 读数
+    bool failed_ = false;
+    std::size_t failed_index_ = 0;
+    std::uint64_t failed_elapsed_ms_ = 0;
+    std::uint64_t failed_guard_ms_ = 0;
+    // `quit` 之后不再推进（⛔ 不许把 quit 后面的指令静默施加掉）
+    // ★ 这个 bool 同时是**宿主停止请求**的句柄（`quitFlag()`）：AOT 的 run 循环每个块边界读它
+    //   ⇒ 与解释器臂 `Machine::run` 读 `actuator().quitRequested()` **同一条口径**。
+    bool quit_requested_ = false;
+    // `profile_begin|end` 的区间账（一次性读数；⛔ 不是性能判据）
+    bool profile_open_ = false;
+    std::string profile_label_;
+    std::uint64_t profile_started_ms_ = 0;
+    std::uint64_t profile_reads_at_begin_ = 0;
+    std::uint64_t profile_windows_ = 0;  // 正常收口的窗口数（begin+end 配对）
     std::array<std::uint64_t, kInputPointCount> deliver_calls_{};
     std::array<std::uint64_t, kPlanEventCount> event_calls_{};
 };

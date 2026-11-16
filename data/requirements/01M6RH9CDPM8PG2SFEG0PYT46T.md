@@ -4,7 +4,6 @@
 - type: req
 - status: done
 - parent: REQ-01M6H6G6DSRG1ZRD810Z0HTH8V
-- verify: apps/emulator-lift/tests/stress_title_steady.cpp#kFrameMedianMs
 - done_reason: 判据重基后收口（重基说明写在正文顶部）：① GPU 覆盖成立 —— S9 的 600 帧读数 skipped_draws=0 / sprite_skipped=0（OBS-20261114-06），fallback 账已随 CPU 光栅退休删除；② 帧墙钟 '≤33 ms' 对中位成立 —— TITLE 稳态中位 31.3 / 31.5 / 32.0 ms、p95 39.3–42.7 ms，阈值门落在 stress-title-steady（中位 ≤46.95 / p95 ≤57.9，R1 = 标定 ×1.5），⛔ 单遍读数不进断言；③ 原判据 3/4/5 作废：判据 3 比较 CPU↔GPU 同批像素而 CPU 光栅已删、判据 4 的 --raster cpu / --raster-sprites 0 / --gpu-strict 已随该 flag 退休、判据 5 点名的 gpu-mapping / gpu-raster 在本仓零命中（覆盖面由 d3d9-gpu / d3d9-pipeline-gpu 两条顶层 GPU 臂 + gpu-batch/* 承担）；④ 残余项由子单 REQ-01M6RQ2XNWRDV35E72D7G2ZV7D 收口（2026-11-14 done，其验收 3 '按需回读' 明确不做并写明理由）⇒ 父不先于子的条件已满足。
 - tags: [emulator-lift, d3d9, gpu, raster, performance, title]
 
