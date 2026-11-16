@@ -119,14 +119,19 @@ inline HostQuitAction hostQuitAction(HostQuitSource source, bool close_pending) 
 // ★ **控制层 resume 的陈旧事件闸门**（S4；纯映射，SDL-free）
 //
 // 现场（`design-review.md` §2-4）：`pause` 是"完全停"（主线程停在汇点等 cv，`pumpEvents` 一次不跑）
-// ⇒ 暂停 10 s 里点/拖窗口的事件全排在 SDL 队列里；`resume` 首轮 `SDL_PollEvent` 会把它们当
-// "刚发生"：① 关窗事件 ⇒ `postMessage(WM_CLOSE)` ⇒ 这一轮直接结束；② ESC 同；③ 10 s 的输入
-// 压进同一毫秒并塞进**无上界**的 guest 消息队列。
+// ⇒ 暂停 10 s 里点/拖窗口的事件全排在 **Win32 队列**里（根本没进 SDL 队列；下一次 `SDL_PumpEvents`
+// 才转换进来）；`resume` 首轮 `SDL_PollEvent` 会把它们当"刚发生"：① 关窗事件 ⇒ `postMessage(WM_CLOSE)`
+// ⇒ 这一轮直接结束；② ESC 同；③ 10 s 的输入压进同一毫秒并塞进**无上界**的 guest 消息队列。
 //
-// 判据 = `SDL_Event.common.timestamp`（SDL 在事件**产生**时盖的纳秒戳）与"恢复时刻"比：
+// 判据 = `SDL_Event.common.timestamp` 与"恢复时刻"比（输入事件：Win32 后端用
+// `WIN_GetEventTimestamp()` 把戳回溯到投递时刻）：
 //   · `< 恢复时刻` 且是 **OS 输入**类 ⇒ 丢弃（⛔ 不进 guest 队列）；
-//   · `< 恢复时刻` 且是 **关窗 / ESC / SDL_QUIT**（用户想退出）⇒ 当**宿主 stop**
+//   · `< 恢复时刻` 且是 **ESC / SDL_QUIT**（用户想退出）⇒ 当**宿主 stop**
 //     （`bye.reason:"window-closed"`），⛔ 不投 `WM_CLOSE` 进 guest；
+//   · ★ **关窗拿不到陈旧戳**：`WM_CLOSE` → `SDL_SendWindowEvent(…, SDL_EVENT_WINDOW_CLOSE_REQUESTED, 0, 0)`
+//     把戳置 0，随后 `SDL_PushEvent` 填**当下**（pump 时刻，必晚于恢复时刻）⇒ `classifyStaleEvent`
+//     恒 `Keep` ⇒ 暂停期间的关窗**仍会投 `WM_CLOSE` 进 guest**，故不按陈旧处理。
+//     见 `REQ-01M7JNVD59RD49RSKD9N2S9TXW`（纯映射里 `CloseRequest` 仍返回 `HostStop`，只是生产上到不了）。
 //   · 其余（resize / expose / render 等）照旧 —— 它们没有"事件洪峰"这回事。
 //   `resume_ns == 0`（没启用）/ `timestamp == 0`（SDL 没盖戳的合成事件）⇒ 一律 Keep（不猜）。
 // 判据在 `tests/present_window.cpp`（真 SDL 队列 + `SDL_PushEvent` 造陈旧戳），⛔ 不靠肉眼。

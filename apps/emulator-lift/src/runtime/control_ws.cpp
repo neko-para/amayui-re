@@ -1105,9 +1105,12 @@ bool Control::Impl::serve(Context& ctx) {
                 paused_at = "";
                 ++state_seq;  // ★ 离开暂停态严格 +1
                 // ★ **resume 的宿主即时动作**（`REQ-01M7JFDZK1SZW72SBAW6BC3DRT`）：
-                //   暂停期间 `pumpEvents` 一次不跑 ⇒ 点/拖/关窗全排在 SDL 队列里，而 resume 会**放行 guest**
+                //   暂停期间 `pumpEvents` 一次不跑 ⇒ 点/拖/关窗全排在 **Win32 队列**里（还没进 SDL 队列；
+                //   下一次 `SDL_PumpEvents` 才转换进来），而 resume 会**放行 guest**
                 //   （下面两条出口都放行：普通 resume 与 `--for-*`）。这一刻把"恢复时刻"记到宿主 sink 上
-                //   ⇒ 早于它的 OS 输入丢弃、早于它的关窗/ESC 当宿主 stop（判据是纯函数 `classifyStaleEvent`）。
+                //   ⇒ 早于它的 OS 输入丢弃、早于它的 ESC 当宿主 stop（判据是纯函数 `classifyStaleEvent`）。
+                //   ⚠ 关窗拿不到陈旧戳（`SDL_SendWindowEvent` 置 0 ⇒ `SDL_PushEvent` 填当下）⇒ 不按陈旧处理，
+                //     见 `REQ-01M7JNVD59RD49RSKD9N2S9TXW`。
                 //   ⛔ 只在这里 arm：`pause` / `sample` / `screenshot` / `click` 都不离开暂停态；
                 //     `requestQuit`（idle / orphan）虽然也清 paused，但它同时 `stop_requested = true` ⇒ 没有"首轮"。
                 //   ★ 与 `for_*` 无关：`resume --for-ms/-frames` 同样放行 guest 一轮，那一轮同样会把洪水吃进来。

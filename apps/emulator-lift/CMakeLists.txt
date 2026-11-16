@@ -727,10 +727,13 @@ add_test(NAME lift-decode-cache COMMAND lift-decode-cache)
 # ★ **顶层无条件**注册 ⇒ pure 档：自带裸 WS 客户端 + 注入时钟，⛔ 不 spawn 子进程、
 #   不载 PE、不读 LFS、不碰游戏安装。
 # ★ 用例名 = `lift-control-endpoint`：`tools/mutate-check.mjs` 的 `ctest:lift-control-endpoint` 指向它。
+# ★ `WORKING_DIRECTORY` 钉在构建树：用例用相对路径建 `control-endpoint-work/`，
+#   缺了它从源码树直接跑 exe 就会往 `apps/emulator-lift/` 里丢 untracked 目录（⛔ 不用 .gitignore 掩盖）。
 add_executable(lift-control-endpoint tests/control_endpoint.cpp)
 target_link_libraries(lift-control-endpoint PRIVATE emulator-lift-runtime
     $<$<PLATFORM_ID:Windows>:ws2_32>)
-add_test(NAME lift-control-endpoint COMMAND lift-control-endpoint)
+add_test(NAME lift-control-endpoint COMMAND lift-control-endpoint
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
 # ---- pure：**控制层快照**（S3）----
 # 判据见 tests/control_snapshot.cpp 的头注释：① 读不到时 `why` ∈ engine_marker 既有 8 个字面量

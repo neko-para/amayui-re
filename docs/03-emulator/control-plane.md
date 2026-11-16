@@ -45,7 +45,12 @@ node tools/emu-ctl.mjs quit                      # 收口：bye → 摘要 → �
   本仓的工具语言只有 `.mjs`（`AGENTS.md` §3），Python 在 Windows 那台机器上不保证存在；而且内联解析极易把 `--json` 的**信封**读错
   —— 成功时是 `{op, ok:true, data:{<op>:…}}`，所以位置是 **`data.sample.script.pos`**，不是 `sample.script.pos`。
   （实测教训：有人写了 `d.get('sample')` 的 shell 循环，于是每一行都是空读数，且看不出错。）
-- 退出码：`0` 成功（含 `script.available:false`）· `1` 端点回 `ok:false` · `2` 参数/协议错 · `3` 超时（端点仍活）· `4` 找不到/多个实例。
+- 退出码：`0` 成功（含 `script.available:false`）· `1` 端点回 `ok:false` · `2` 参数/协议错 · `3` 超时（端点仍活）·
+  `4` 找不到 / **多个实例 —— 仅对"要挑一个实例"的 op**（`pause`·`resume`·`sample`·`screenshot`·`click`·`wait`·`quit`）；
+  ⛔ **`list` 恒 0**：它只报告、不挑实例，多实例也 0（全列）。
+- 退出码读数（2026-11-17 / win32 / `windows-x64` = RelWithDebInfo）：同一 `--control-root` 下两个 alive 实例 ⇒
+  `node tools/emu-ctl.mjs list` **exit 0**（`count:2 alive:2`、两条都列出）；同目录 `node tools/emu-ctl.mjs sample`
+  不给 `--session` ⇒ **exit 4** + `有 2 个 alive 端点，必须用 --session 选一个（⛔ 不猜）`。
 
 ## 2. 协议事实（客户端要按这个实现，⛔ 不要按设计稿）
 
@@ -81,7 +86,7 @@ node tools/emu-ctl.mjs quit                      # 收口：bye → 摘要 → �
 | 暂停/掉线 | idle（暂停且无未决命令，缺省 300 s）与 orphan（连接断但还暂停，缺省 10 s）都会让端点**自己收口** |
 | 端点卡在不返回的 shim | 汇点不到 ⇒ 客户端 `timeout`（exit 3）、端点仍活；⛔ 不 kill、⛔ 不假装成功 |
 | window 档 | **可用**（`--present window` + `--control-root`）。代价：暂停期间不泵事件 ⇒ OS 可能判"无响应"。**别停太久。** |
-| 陈旧事件 | **arm 点在 `Control::serve()` 的 Resume 分支**：普通 `resume` 与 `resume --for-*`（两者都放行 guest）各 arm 一次；`pause` / `sample` / `screenshot` / `click` 与 idle/orphan 收口**都不 arm**（它们不产生"恢复首轮"）。arm = 把"恢复时刻"记到宿主 sink 上 ⇒ 之后丢弃 `event.timestamp` 早于它的 OS 输入、把早于它的关窗/ESC 当**宿主 stop**（`bye.reason:"window-closed"`）⇒ 否则 resume 首轮会把这一轮结束掉 |
+| 陈旧事件 | **arm 点在 `Control::serve()` 的 Resume 分支**：普通 `resume` 与 `resume --for-*`（两者都放行 guest）各 arm 一次；`pause` / `sample` / `screenshot` / `click` 与 idle/orphan 收口**都不 arm**（它们不产生"恢复首轮"）。arm = 把"恢复时刻"记到宿主 sink 上。暂停期间事件**排在 Win32 队列**里（不跑 `SDL_PumpEvents` ⇒ 根本没进 SDL 队列；下一次 pump 才转换进来）。判据 = `SDL_Event.common.timestamp` 与"恢复时刻"比，**三档**：① **输入 ✅**：早于恢复时刻 ⇒ 丢弃（不进 guest）；② **ESC ✅**：早于恢复时刻 ⇒ 当**宿主 stop**（`bye.reason:"window-closed"`）—— 判得动是因为 Win32 后端用 `WIN_GetEventTimestamp()` 把戳回溯到投递时刻；③ **关窗 ❌ 不可判**：`WM_CLOSE` → `SDL_SendWindowEvent(…, SDL_EVENT_WINDOW_CLOSE_REQUESTED, 0, 0)` 把 `timestamp` 置 0、`SDL_PushEvent` 再填**当下**（pump 时刻，必晚于恢复时刻）⇒ `classifyStaleEvent` 恒 `Keep` ⇒ 暂停期间的关窗**仍是"投 `WM_CLOSE` 进 guest"**，见 `REQ-01M7JNVD59RD49RSKD9N2S9TXW` |
 | 截图来源 | `guest-backbuffer-frozen`：`present()` 当场冻结的 guest 后缓冲**像素副本**（只在 `--control-root` 时拷；1280×720×32bpp ≈ 3.7 MB/帧）。⛔ 不是窗口回读（不叠层 / 不带 letterbox / 不带光标），⛔ 也不是"暂停那一刻的现场后缓冲"——现场这时已被下一帧的 `Clear` / 回读改写（实测：`paused_at=block` 时现场是清除色、`present` 时才是画面） |
 | `hash_still_matches` | 语义 = "写出的这份字节仍等于 presenter 记录的那一帧"。**冻结路径下恒 true** ⇒ 它只回答"**冻结有没有生效**"（把冻结去掉会变 false —— 守卫就是靠这条红的）；⛔ **不能当"图对不对"的判据**：判内容要判 BMP 非全黑，或与同帧 `--dump-frame` 逐字节对照 |
 | 读不到的两处（残余） | 冻结**分配失败**时退回写现场（极端情况仍可能写出一张全黑图；只 warn 一次 + 计数）；计数与最近一次冻结耗时在 AOT 摘要的 `present :` 行（`freezeFailures=` / `freezeNs=`）。⛔ 没有协议级 `unavailable`（2026-11-16 收窄裁决：不为它扩协议） |
@@ -95,6 +100,7 @@ node tools/emu-ctl.mjs quit                      # 收口：bye → 摘要 → �
    （`506 checks, 5 failures`，读数打印 `controlOnResume 被调 0 次（期望 3）`）。
    `node tools/mutate-check.mjs --match controlOnResume` ⇒ 守卫红（CTest 退出码 8）。
 2. **映射**（`present-window` 的 `control-resume-stale-events`）：陈旧 OS 输入丢弃 / 陈旧关窗当宿主 stop。
+   ⚠ 其中的**关窗**只在"带陈旧戳"时成立：生产路径上关窗拿不到陈旧戳（上表 ❌ 档）⇒ ⛔ 不能读成"暂停期间的关窗已被挡住"。
    ⚠ 它**自己**调 `win.noteControlResume()` 造恢复时刻 ⇒ 只能证明纯映射 + sink 一侧。
    病史（`REQ-01M7JFDZK1SZW72SBAW6BC3DRT`，🐞S2，2026-11-17 收口）：这一层一直是绿的，而生产路径上
    `controlOnResume()` **零调用** ⇒ `stale_input_before_ns` 恒 0 ⇒ `classifyStaleEvent` 恒 `Keep` ——
@@ -124,4 +130,9 @@ DSH 插件薄包装（它只 exec CLI，⛔ 不自己实现协议）。
 
 ★ **Windows 已验（2026-11-16，win32）**：`--control-root` 能 listen `127.0.0.1`，`list/pause/sample/screenshot/resume/click/quit`
 全通（`control : ws://127.0.0.1:<port>` + `alive:1`）；`--control-port 0` 取到的端口不在保留段（实测 `netsh` 排除段 50000–50059，取到 62556）。
-⚠ 仍未测：`TerminateProcess` 后的残留识别、Low 完整性标签下 `ctl.*.json` 的可读性（用户裁决"后续不考虑沙箱" ⇒ W5 已 drop）。
+★ **已测：`TerminateProcess` 后的残留识别**（2026-11-17 / win32 / `windows-x64` = RelWithDebInfo）：
+`taskkill /F /PID <pid>` 杀一个实例后 `ctl.<pid>.<nonce8>.json` **仍残留**（实测 403 B）；同 root
+`node tools/emu-ctl.mjs list` **exit 0**、该条 `alive:false, why:"refused"`（TCP ECONNREFUSED）、活条目 `why:"ok"`；
+`gc --dry-run` 与 `gc` 的删除集合**一致**（`remove ctl.<pid>.<nonce8>.json … why:"dead"` / `keep ctl.<alive>.json … why:"alive"`），
+`gc` 后只剩活条目、**exit 0**（读数：`共 2 条 · alive 1 · dead 1` → gc `removed 1 · kept 1` → `共 1 条 · alive 1 · dead 0`）。
+Low 完整性标签下 `ctl.*.json` 的可读性按既有裁决 drop，⛔ 不复活。

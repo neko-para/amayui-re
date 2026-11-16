@@ -108,11 +108,12 @@ bool expectRgb(lift::SdlWindow& win, int x, int y, std::uint32_t rgb, const char
 // =====================================================================================
 // ★ 控制层 resume 的**陈旧事件闸门**（判据 13 的机制面）——真 SDL 队列 + `SDL_PushEvent`
 //
-// 现场：`pause` 是完全停（暂停期间 `pumpEvents` 一次不跑）⇒ 暂停 10 s 里的点击 / 拖动 / 关窗
-// 全排在 SDL 队列里。`resume` 首轮排空时：
+// 生产现场：`pause` 是完全停（暂停期间 `pumpEvents` 一次不跑）⇒ 暂停 10 s 里的点击 / 拖动 / 关窗
+// 先排在 **Win32 队列**里（下一次 `SDL_PumpEvents` 才转换进 SDL 队列）。`resume` 首轮排空时：
 //   · 早于"恢复时刻"的 **OS 输入** 必须丢弃（⛔ 不压进 guest 的无上界队列）；
-//   · 早于"恢复时刻"的 **关窗 / ESC** 当**宿主 stop**（⛔ 不投 `WM_CLOSE` 进 guest ⇒ 这一轮不会
-//     因为"用户暂停时点了 X"而走进 guest 的关窗路径）。
+//   · 早于"恢复时刻"的 **ESC** 当**宿主 stop**（⛔ 不投 `WM_CLOSE` 进 guest）。
+//   ★ 关窗**拿不到**陈旧戳（`SDL_SendWindowEvent` 置 0 ⇒ `SDL_PushEvent` 填当下）⇒ 生产上到不了这个
+//     分支；本条用 `SDL_PushEvent` 造戳，只证明纯映射 + sink 一侧，见 `REQ-01M7JNVD59RD49RSKD9N2S9TXW`。
 // 判据 = `queueSize` / `mouseButtons` / `stopRequested` + `controlStopReason`。
 // 红了意味着：resume 首轮把暂停期间的输入当"刚发生"灌给 guest，或暂停时的关窗把这一轮结束掉。
 //
