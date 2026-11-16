@@ -146,19 +146,20 @@ bool asciiEqualsIgnoreCase(const std::string& a, const std::string& b) {
 
 std::string degradedIdName(std::uint32_t id) { return "id:" + hexId(id); }
 
-// `TITLE` 与 `TITLE.BIN` 都算命中（**只**省略 `.BIN` 这一个后缀；⛔ 不做任意前缀 / 通配）。
-bool scriptNameHits(const std::string& want, const std::string& got) {
-    if (asciiEqualsIgnoreCase(want, got)) return true;
+// 去掉一个**大小写不敏感**的 `.BIN` 后缀（**只**剥这一个后缀；⛔ 不做任意前缀 / 通配）。
+std::string stripBinSuffix(const std::string& name) {
     const std::string suffix = ".BIN";
-    if (got.size() > suffix.size() && asciiEqualsIgnoreCase(got.substr(got.size() - suffix.size()), suffix)) {
-        return asciiEqualsIgnoreCase(want, got.substr(0, got.size() - suffix.size()));
+    if (name.size() > suffix.size() &&
+        asciiEqualsIgnoreCase(name.substr(name.size() - suffix.size()), suffix)) {
+        return name.substr(0, name.size() - suffix.size());
     }
-    return false;
+    return name;
 }
 
-bool scriptNameMatches(const std::string& want, const MarkerSample& s) {
-    if (scriptNameHits(want, s.name)) return true;
-    return scriptNameHits(want, degradedIdName(s.id));
+// `TITLE` 与 `TITLE.BIN` **两侧**都算命中：want / got 各剥一次 `.BIN` 再比。
+// ⚠ 旧实现只剥 got 一侧 ⇒ `want=TITLE.BIN × got=TITLE` 不命中（`got` 没有后缀可剥）。
+bool scriptNameHits(const std::string& want, const std::string& got) {
+    return asciiEqualsIgnoreCase(stripBinSuffix(want), stripBinSuffix(got));
 }
 
 // 矩形均值的命中判据：**每通道**差 ≤ `kRectAvgTolerance`（与真源 §1 的"判定口径"一致）。
@@ -203,6 +204,13 @@ std::vector<SourceLine> splitLines(const std::string& text) {
 }
 
 }  // namespace
+
+// ★ 导出给 `--input-plan` 的 `await script`（声明在 `interaction_graph.h`）：定义放在匿名命名空间
+//   之外只为可链接，语义/实现一个字不改；三个 helper 仍是本 TU 私有。
+bool scriptNameMatches(const std::string& want, const MarkerSample& s) {
+    if (scriptNameHits(want, s.name)) return true;
+    return scriptNameHits(want, degradedIdName(s.id));
+}
 
 const char* condKindName(CondKind k) {
     switch (k) {

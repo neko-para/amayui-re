@@ -537,7 +537,8 @@
   ```
   离线核对（不跑游戏）：`Select-String corpus\disasm\files\AGE.EXE__dumped.sectfix.EXE.lst -Pattern "jumptable 41B672"`
   应列出 case 0–14（含 `loc_41B92D`），再逐个查 `out\aot\lift_aot.ll` 里有没有对应 `bb_*`。
-  全量取证脚本：`.tmp/aot/jpt/probe.mjs`（只读）；全量结果 `.tmp/aot/jpt/scan-out.txt`；设计单 `.tmp/aot/jpt/plan.md`。
+  全量取证脚本 / 结果 / 设计单曾是本地临时稿（`.tmp/aot/jpt/`，已删除 ⇒ ⛔ 不可再引用）；
+  可再校验的判据只有下面这条 CTest。
 - **代表守卫**：CTest **`lift-jmptab-dispatch`**（`add_test` 在 `CMakeLists.txt` **最外层无条件** ⇒ `pure` 档；
   跑 `emulator-lift-gen --jmptab-audit --exe <sectfix> --roots aot/closure.txt`，退出码 = 判据）。
   它断言四条**性质**（⛔ 不断言当前数字）：P-1 表区间落在同一个可执行节内；P-2 表区间内**不存在任何已发射块首**；
@@ -607,7 +608,9 @@
 - **可证伪读数（本轮实测）**：解释器 `--trace-shims` 193,182 行**修前修后 SHA256 相同、逐行 0 差异**；
   AOT 300 帧语义指纹逐位相同（`exit 0` / `frames 300` / `stop @ 00498AE4` / arena 三元组 / `table misses=0`）。
 - **未做（如实记）**：AOT 侧那条 `LIFT_AOT_SHIM_TRACE=1` 的「1 行 `kernel32!EnumSystemLocalesA` + 2 行续延」
-  读数**没拿到** —— boot 的 300 帧不经过「加载存档」那一屏，而 AOT 臂**没有输入脚本 / 交互控制面**
+  读数**没拿到** —— boot 的 300 帧不经过「加载存档」那一屏，而 AOT 臂只有 `--input-plan`
+  （三条指令 `await script` / `wait` / `click`），**没有**解释器那套 `--input-script` / `--interaction-graph`
+  控制面，也还没有一份经验证到那一屏的配方
   ⇒ 需要一次人工点窗口的 AOT 跑。**用户 2026-11-16 手工确认：该提交点上「加载存档」已正常。**
 ### BUG-26 · 同一输入两臂结果不同：TITLE 上 `click 1070 480` 在 AOT 生效、在解释器无反应
 
@@ -620,28 +623,43 @@
   | 基准（不给 plan） | `108595152 / 21 / 6674`（三次相同） | — |
   | 特异性对照（中性 `click 640 360`） | `108595152 / 21 / 6676` | 只多 2 个 block ⇒ 不算反应 |
 
-  ⇒ 同一份输入，一条臂换了画面、另一条臂什么都没发生。
+  ⇒ 同一份**语义**输入（⚠ 不是同一个 `--input-plan` 文件：解释器臂今天**不接** `--input-plan`），
+  一条臂换了画面、另一条臂什么都没发生。
 - **为什么这条比"配方对不对"重要**：如果两臂对同一输入给出不同结果，那么**所有"解释器能跑通 / AOT 跑不通"
   的结论都可能是输入路径差异而不是引擎差异**。这条不查清，后面每个"某处 AOT 表现不符"都要重打折扣。
 - **两个候选原因（都未定）**：
-  1. **时间步长**：两臂 guest 时间步长差 ~**15 倍** ⇒ 同一条 `await presents 150` 对应的 guest 时刻差很远；
+  1. **时间步长**：两臂 guest 时间步长差 ~**15 倍** ⇒ 同一条帧号门（旧配方的 `await presents 150`；
+     今天在 `--input-plan` 里已是**解析期硬错**）对应的 guest 时刻差很远；
   2. **解释器侧 `bounded-no-sample=1`**：可能让 `region` / marker 在实际渲染前就收口。
   ★ 第三种必须一起排除：**两臂走的是两条不同的施加路径** —— AOT 是本轮新接的 `deliver*`（`runtime/input.h`），
   解释器是老的 `InputScript::tick`。若两条路径对"同一动作"的语义不同（按下/抬起时机、坐标缩放、客户区 vs 屏幕坐标），
   那是**实现分歧**，比时间步长严重。
 - **判据（可判，两臂各跑一次）**：同一次点击后，两臂的 `region` 三数**要么都变、要么都不变**；只有一侧变 ⇒ 分歧成立。
+  ⚠ 两臂今天**没有同一份配置面**：AOT 用 `--input-plan`（三条指令），解释器要用 `--input-script` /
+  `--interaction-graph` 复现同一个动作 ⇒ 判据只能是"同一份**语义**动作"（点击的客户区坐标 + 生效后的
+  guest 时刻粗略对齐），⛔ 不是"同一个文件"。
   命令（两臂都要 `--skip-logo`、都要**全新空** `--appdata`、都要 `--region-log`）：
 
   ```powershell
-  .\out\emulator-lift.exe     --skip-logo --present window --max-frames 400 --appdata <新> --region-log <同一份输入>
-  .\out\emulator-lift-aot.exe --skip-logo --present window --max-frames 400 --appdata <新> --region-log --input-plan <同一份输入>
+  .\out\emulator-lift.exe     --skip-logo --present window --max-frames 400 --appdata <新> --region-log <同一份语义动作>
+  .\out\emulator-lift-aot.exe --skip-logo --present window --max-frames 400 --appdata <新> --region-log --input-plan <同一份语义动作>
   ```
 - **⛔ 两个读数的教训**（本轮实测，别再踩）：
   - `stop @` 在 `--max-frames` 下**两侧恒同**（`00498AE4`，停在 Present 桩）⇒ **无证明力**；
   - `lastHash` 每次 run 都不同（`clock=real-time` + TITLE 是动画屏）⇒ **不是稳定指纹**；
   - ⇒ 可用的是**收尾 `region` 三数**：同一命令多次 run **逐位相同**，且随屏而变。
-- **另记**：`ESC`（VK `0x1B`）在这条路径上**无区分力**（两侧落同一 `EA 00513B90` / 同一条 `agerc!_ShowDialog`，返回 IDOK = 退出程序）；
-  `--input-plan` **表达不了"同一份计划去掉动作"**（只有门没有动作 ⇒ 解析报 `线性 step step1 缺动作行`、exit 2），
-  对照只能用"不给 plan"或"惰性点击"两档。
-- **复现**：`.tmp/aot/recipe/report.md`（13 次 run 的记录 + 对照表）· 配方 `.tmp/aot/recipe/title-loaddata.plan` ·
-  入库图 `graphs/title-loaddata.graph`（客户区坐标 `1070,480` 是**用户给的**，非本仓推导）。
+- **另记**：`ESC`（VK `0x1B`）在这条路径上**无区分力**（两侧落同一 `EA 00513B90` / 同一条 `agerc!_ShowDialog`，返回 IDOK = 退出程序）。
+  ★ 旧口径"`--input-plan` 表达不了『同一份计划去掉动作』（只有门没有动作 ⇒ `缺动作行`、exit 2）"
+  **已不成立**：现在是线性指令流 ⇒ 只写门 / 只写 `wait` 都合法，干净的"去掉 click"对照**可以**写。
+  （本轮读数仍拿"不给 plan"当基准；那批 13 次 run 是旧语法时代取的。）
+- **复现**：本机 13 次 run 的原始记录是本地临时稿（`.tmp/aot/`，已删除 ⇒ ⛔ 不可再引用）。
+  今天等价的配方（三条指令，`--input-plan`）：
+
+  ```text
+  await script TITLE
+  click 1070 480 right     # x/y = 1280×720 参考系；实测窗口档客户区 = 1280×720 ⇒ 与旧读数同义
+  ```
+
+  ⚠ 旧探测用的是 `await presents 150`（帧号门，今天**解析期硬错**）；`await script TITLE` 是**就近替换、
+  不是等价**（两者的 guest 时刻不同，见候选①）。
+  入库图 `graphs/title-loaddata.graph`（坐标 `1070,480` 是**用户给的**，非本仓推导）。

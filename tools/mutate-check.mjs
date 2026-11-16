@@ -2739,20 +2739,18 @@ const MUTATIONS = [
       'stderr 也不点名路径 ⇒ cli-aot-flags 的 `input-plan-missing-file` 红（"以为按了、其实没按"）',
   },
   {
-    // 引擎面：flush-before-read 之后 guest **同一次读**必须看到按下态（⛔ 不是"下一次"）。
+    // 三条指令：`wait <ms>` 的 deadline 是**唯一的墙钟面** ⇒ 去掉"未到期就停"这一步，
+    // `wait` 就退化成空操作（配方里的等待被静默吞掉）。
     file: 'apps/emulator-lift/src/runtime/input_plan.cpp',
-    from:
-      '            input::key(wm, r.vk, /*down=*/true, /*scancode=*/0u, InputSource::Script,\n' +
-      '                       kPlanMessageTimeMs);\n',
-    to:
-      '            input::key(wm, r.vk, /*down=*/false, /*scancode=*/0u, InputSource::Script,\n' +
-      '                       kPlanMessageTimeMs);  // 变异：按下变抬起\n',
+    from: '            if (now < s.wait_deadline_ms) return;\n',
+    to: '            if (false) return;  // 变异：wait 不再等（deadline 被忽略）\n',
     guard: 'ctest:input-plan-read-points',
     ctest: 'input-plan-read-points',
     buildDir: 'apps/emulator-lift/out',
     what:
-      'step 的 `key` 由 down 改成 up ⇒ 读点 flush 之后 `WindowManager` 里**没有**按下态 ⇒ ' +
-      'input-plan-read-points 的 `input-plan/gates-and-releases` 红（关系断言 + `keyDown(vk)` 两条同时红）',
+      '`wait` 的"未到期就停"被去掉（`if (now < s.wait_deadline_ms) return;` → `if (false) return;`）⇒ ' +
+      '`wait` 退化成空操作 ⇒ input-plan-read-points 的 `input-plan/gates-and-releases` 红' +
+      '（注入时钟 1499ms 时 `fired` 应为 0，变异后立刻变 1）',
   },
 ];
 

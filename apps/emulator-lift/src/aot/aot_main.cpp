@@ -61,10 +61,15 @@ void usage() {
         "                      钩子点 AOT 用 0x004BAA33；⛔ 不跳过 boot、不改 eip/寄存器）\n"
         "  --audio off|virtual|sdl  音频后端（本臂**只实现 off**：没有音频设备 / 喂料线程）\n"
         "  --input-plan <file> 组装输入计划（缺省不给 = 没有任何输入注入，行为与本参数无关）：\n"
-        "                      文件格式 = `--interaction-graph` 的线性写法子集，门只有\n"
-        "                      `await always` / `await presents <n>`（guest 累计 Present 帧数 ≥ n），\n"
-        "                      动作只有 `click <x> <y> [left|right]` / `key <VK>`；\n"
+        "                      文件格式 = **三条指令**（`#` 注释 / 空行忽略，按文件顺序执行）：\n"
+        "                        await script <名字>   电平门：当前引擎脚本身份 == 名字即通过\n"
+        "                                              （ASCII 大小写不敏感、两侧都忽略 .bin）\n"
+        "                        wait <ms>             宿主单调时钟毫秒（正整数；非阻塞）\n"
+        "                        click <x> <y> [left|right]\n"
+        "                                              x/y = **1280×720 参考系**，投递前按客户区缩放；\n"
+        "                                              按钮词裸写，省略 = left（不收 =left）\n"
         "                      推进只发生在 **guest 读点**（flush-before-read），⛔ 没有帧精度保证；\n"
+        "                      旧指令（`await always` / `await presents <n>` / `key`）/ 图语法 ⇒ exit 2；\n"
         "                      跑完打一行 `input-plan: …` 摘要（一次性）。解析失败 ⇒ exit 2 + 行号\n"
         "%s"
         "  --dump-frame <path> 每次 Present 导出一份 guest 后缓冲 BMP（{frame} = 4 位帧号）\n"
@@ -477,11 +482,15 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // ---- ③'' `--input-plan` 装配（`WindowManager` = 唯一状态源；`presenter` = presents 门）----
+    // ---- ③'' `--input-plan` 装配（`WindowManager` = 唯一状态源；`presenter` 只为摘要读数留）----
     //   ★ 两处都只是**非拥有指针**。计划不给 ⇒ 两处都不装配 ⇒ 读点只付一条判空、输出逐字节不变。
-    //   ★ ⛔ 不装在 `aot_run.cpp` / `machine.cpp` 里（守卫 ① 钉住那 5 个词 = 0 命中）。
+    //   ★ ⛔ 不装在 `aot_run.cpp` / `machine.cpp` 里（守卫 ① 钉住那 6 个词 = 0 命中）。
+    //   ★ 身份来源（`await script` 的门）在这里挂：`host.mem()` 只有在 `init()` 之后才可读
+    //     （解析在 bring-up 之前 ⇒ 解析期⛔ 不采身份）。`atPoint()` 签名不变。
     if (input_plan.armed()) {
+        input_plan.attachGuestMemory(&host.mem());
         host.cpu().windows->setInputPlan(&input_plan);
+        // `present.cpp` 的 `note(Frame)` 保留：它只是摘要 `presents=` 的读数，⛔ 不再是门。
         host.presenter().setInputPlan(&input_plan);
     }
 
@@ -588,16 +597,16 @@ int main(int argc, char** argv) {
     const lift::aot::AotRunResult r = host.run(run_opts);
     // ★ 与解释器 `main.cpp:1269` 同一条收口：先摘事件泵，再打摘要（⛔ 不让泵在收口后碰窗口）。
     if (present_window_active) host.cpu().windows->clearHostEventPump();
-    // ---- ⑥' `--input-plan` 收口：**跑结束前必须抬**（否则下一次 run 会看到"键一直按着"）----
-    //   `releaseAll()` 只抬起待办的键 / 按钮，不是 step、不推进入口；返回个数只用于摘要。
+    // ---- ⑥' `--input-plan` 收口：**跑结束前必须抬**（否则下一次 run 会看到"按钮一直按着"）----
+    //   `releaseAll()` 只抬起待办的按钮，不是 step、不推进入口；返回个数只用于摘要。
     if (input_plan.armed()) {
         input_plan.releaseAll(*host.cpu().windows);
         printf("input-plan: %s\n", input_plan.summary().c_str());
         if (input_plan.stepsApplied() < input_plan.steps()) {
-            // 响亮但不改退出码（⛔ 本单不新增停止原因）：还没到期的 step 是**配方问题**，不是成功。
+            // 响亮但不改退出码（⛔ 本单不新增停止原因）：没走完的指令是**配方问题**，不是成功。
             std::fprintf(stderr,
-                         "emulator-lift-aot: ⚠ input-plan 还有 %llu 步没到期（共 %llu 步；"
-                         "看 `presents` 门的目标帧数是否超过本轮 `--max-frames`）\n",
+                         "emulator-lift-aot: ⚠ input-plan 还有 %llu 条指令没走完（共 %llu 条；"
+                         "看卡在哪条 `await script` 的身份 / `wait` 的 deadline，以及本轮 `--max-frames`）\n",
                          (unsigned long long)(input_plan.steps() - input_plan.stepsApplied()),
                          (unsigned long long)input_plan.steps());
         }

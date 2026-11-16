@@ -14,6 +14,11 @@
 
 namespace lift {
 
+// `--input-plan` 的坐标参考系：人手在**标准画面**上量出来的 (x,y) 都属于它。
+// ⛔ 这两个常数只在本文件（= 唯一公式来源）里被除；`input_plan.cpp` 里不许出现 1280/720 的除法。
+inline constexpr int kReferenceFrameW = 1280;
+inline constexpr int kReferenceFrameH = 720;
+
 struct LetterboxMap {
     // 画面像素 / 图像像素。0 = 没有可映射的几何（窗口 / 图像尺寸非正）。
     double scale = 0.0;
@@ -51,5 +56,16 @@ bool windowPixelToImage(const LetterboxMap& map, double window_x, double window_
 // 返回 false = 几何不可用（非正尺寸），此时不写输出。
 bool mapWindowPixelToImage(int window_w, int window_h, int image_w, int image_h, double window_x,
                            double window_y, int* image_x, int* image_y);
+
+// 1280×720 **参考系** → 目标**客户区**像素（各轴独立均匀缩放 + 四舍五入；⛔ 不 clamp）。
+//   目标尺寸 = 主窗口的 `HostWindow::client_w/h`（headless 也有；guest 的 `CreateWindowExA` 填）。
+//   0 / 非正 ⇒ 退回 1280×720（恒等映射 = "还没有窗口"时的确定性缺省）。
+// ★ 方向与 `windowPixelToImage` 相反：那个是"窗口像素 → 画面像素"的**反**函数（带 clamp）；
+//   这个是"参考系 → 目标空间"的**正**映射，用于把配方里的人手坐标投给 `input::*`。
+// ★ 非 16:9 时按**各轴独立**缩放（拉伸参考系，不 letterbox、不 clamp 到边缘）——
+//   ⚠ 这一条**未取证**（没有"非 1280×720 时点击命中"的观测）；已观测的 run 里目标是 1280×720
+//   ⇒ 恒等。改这一条之前先补观测（`docs/03-emulator/input-plan.md` §2.8）。
+// 返回 false = 输出指针为空。
+bool referenceToClientPixel(int client_w, int client_h, int ref_x, int ref_y, int* x, int* y);
 
 }  // namespace lift

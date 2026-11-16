@@ -50,4 +50,17 @@ bool mapWindowPixelToImage(int window_w, int window_h, int image_w, int image_h,
                               image_y);
 }
 
+bool referenceToClientPixel(int client_w, int client_h, int ref_x, int ref_y, int* x, int* y) {
+    if (x == nullptr || y == nullptr) return false;
+    // 0 / 非正 = 还没有窗口 ⇒ 目标就是参考系（恒等）；⛔ 不在这里猜 1280×720 之外的尺寸。
+    const int w = client_w > 0 ? client_w : kReferenceFrameW;
+    const int h = client_h > 0 ? client_h : kReferenceFrameH;
+    // 各轴独立（非 16:9 时拉伸参考系），四舍五入；⛔ 不 clamp（人手写的点原样投出去）。
+    *x = static_cast<int>(std::lround(static_cast<double>(ref_x) * static_cast<double>(w) /
+                                      static_cast<double>(kReferenceFrameW)));
+    *y = static_cast<int>(std::lround(static_cast<double>(ref_y) * static_cast<double>(h) /
+                                      static_cast<double>(kReferenceFrameH)));
+    return true;
+}
+
 }  // namespace lift

@@ -188,17 +188,18 @@ int main(int argc, char** argv) {
         LIFT_CHECK(r.err.find("no-such-plan.plan") != std::string::npos);
     }
 
-    // ---- ①'' `--input-plan <语法错文件>` ⇒ exit 2 且**点出行号**（`<path>:3:`）----
+    // ---- ①'' `--input-plan <语法错文件>` ⇒ exit 2 且**点出行号**（`<path>:4:`）----
     //      红了 ⇒ 语法错被当成"空计划"吞掉，或者报错不带位置（人无法修）。
+    //      ★ 坏行放在第 4 行：`expect …` 是**图语法**，plan 只认三条指令 ⇒ 未知指令。
     g_current_case = "input-plan-syntax-error-names-line";
     {
         const fs::path bad = root / "bad.plan";
         {
             std::ofstream out(bad, std::ios::binary);
-            out << "# 语法错：presents 后面不是数字\n";
-            out << "await always\n";
+            out << "# 语法错：第 4 行是图语法（--input-plan 不认）\n";
+            out << "await script TITLE\n";
             out << "click 1 2\n";
-            out << "await presents abc\n";
+            out << "expect screen changed\n";
         }
         const ChildRun r = runChild(exe, L"--input-plan " + quoteArg(bad.wstring()), root, root / "planbad.out",
                                     root / "planbad.err");
@@ -206,9 +207,73 @@ int main(int argc, char** argv) {
         LIFT_CHECK(!r.timed_out);
         LIFT_CHECK_EQ_U32(r.exit_code, 2u);
         LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
-        // 行号 = 文件里第 4 行（`await presents abc`）—— 判据是"报错点出**那一行**"，不是"有行号"。
+        // 行号 = 文件里第 4 行 —— 判据是"报错点出**那一行**"，不是"有行号"。
         LIFT_CHECK(r.err.find("bad.plan:4:") != std::string::npos);
-        LIFT_CHECK(r.err.find("abc") != std::string::npos);
+        LIFT_CHECK(r.err.find("未知指令") != std::string::npos);
+        LIFT_CHECK(r.err.find("expect") != std::string::npos);
+    }
+
+    // ---- ①''' 旧指令一律**解析期硬错**：`await always` / `await presents <n>` / `key` ----
+    //      红了 ⇒ 旧配方被静默接受（"按了但语义不对"），或报错不点名行 / 不点名"未知指令"。
+    g_current_case = "input-plan-rejects-old-instructions";
+    {
+        struct OldInstr {
+            const char* name;
+            const char* text;
+        };
+        const OldInstr kOld[] = {
+            {"always.plan", "await always\n"},
+            {"presents.plan", "await presents 120\n"},
+            {"key.plan", "key 13\n"},
+        };
+        for (const OldInstr& o : kOld) {
+            const fs::path p = root / o.name;
+            {
+                std::ofstream out(p, std::ios::binary);
+                out << o.text;
+            }
+            const std::string tag = std::string(o.name) + ".";
+            const ChildRun r = runChild(exe, L"--input-plan " + quoteArg(p.wstring()), root, root / (tag + "out"),
+                                        root / (tag + "err"));
+            LIFT_CHECK(r.started);
+            LIFT_CHECK(!r.timed_out);
+            LIFT_CHECK_EQ_U32(r.exit_code, 2u);
+            LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
+            LIFT_CHECK(r.err.find(std::string(o.name) + ":1:") != std::string::npos);
+            LIFT_CHECK(r.err.find("未知指令") != std::string::npos);
+        }
+    }
+
+    // ---- ①'''' 缺参数 / 负毫秒 / 单位后缀 / `=left` ⇒ exit 2 + `文件:行号:` ----
+    g_current_case = "input-plan-rejects-bad-arguments";
+    {
+        struct BadArg {
+            const char* name;
+            const char* text;
+            const char* word;
+        };
+        const BadArg kBads[] = {
+            {"neg.plan", "wait -5\n", "正整数"},
+            {"unit.plan", "wait 500 wall_ms\n", "wait"},
+            {"missing.plan", "click 1\n", "缺参数"},
+            {"eqleft.plan", "click 1 2 =left\n", "按钮词"},
+        };
+        for (const BadArg& b : kBads) {
+            const fs::path p = root / b.name;
+            {
+                std::ofstream out(p, std::ios::binary);
+                out << b.text;
+            }
+            const std::string tag = std::string(b.name) + ".";
+            const ChildRun r = runChild(exe, L"--input-plan " + quoteArg(p.wstring()), root, root / (tag + "out"),
+                                        root / (tag + "err"));
+            LIFT_CHECK(r.started);
+            LIFT_CHECK(!r.timed_out);
+            LIFT_CHECK_EQ_U32(r.exit_code, 2u);
+            LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
+            LIFT_CHECK(r.err.find(std::string(b.name) + ":1:") != std::string::npos);
+            LIFT_CHECK(r.err.find(b.word) != std::string::npos);
+        }
     }
 
     // ---- ② `--cursor-warp` + 缺省呈现档（headless）⇒ exit 2，且是"headless 不接受窗口参数"----

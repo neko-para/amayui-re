@@ -102,6 +102,12 @@ struct GraphCond {
 bool condHolds(const GraphCond& c, const FrameSampler& sampler, std::uint64_t samples_at_start,
                std::uint64_t changes_at_start, const MarkerSample* identity);
 
+// `script` 条件的名字口径（**唯一一份**，两个调用方共用：`--interaction-graph` 与
+// `--input-plan` 的 `await script`）：ASCII 大小写不敏感 · **两侧**都忽略 `.BIN` 后缀 ·
+// `id:0x%08X` 退化名**始终**接受。
+// ★ 定义留在 `interaction_graph.cpp`（⛔ 不要在别的 TU 里再写一份：两份一定静默漂）。
+bool scriptNameMatches(const std::string& want, const MarkerSample& sample);
+
 // ---------------------------------------------------------------------------------------
 // 动作（闭集合）
 // ---------------------------------------------------------------------------------------
