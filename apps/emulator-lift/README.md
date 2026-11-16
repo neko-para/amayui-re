@@ -750,6 +750,29 @@ sprite 合批与那条直方图的算法。⛔ 不把逐帧数字写进 README�
 AOT 臂现在是**未知参数 ⇒ exit 2**（`--lst` 还在 `aot-arm-shape` 的禁词表里，⛔ 不要装回去）。
 保留本节只为：**旧读数（`docs/03-emulator/observations.md`）里的命令还能读懂**。
 
+### 4.3.0 AOT 臂的 profile 入口（2026-11-17 起；本节其余各条都是解释器遗产）
+
+AOT 臂**有** `--profile`，但口径**不同**：它只有四套**整轮**归因（派发入口 EA / 每条 shim 的耗时总量 /
+`lift_one` 的指令 op+4 相 / Present 子项），**没有**函数级聚合，也**没有**区间分项 ——
+AGENTS §12.5 说清"profile 只是归因、⛔ 不进判据"。
+
+要问"**某一段时间**花在哪"用**窗口 profile**（不用开 `--profile`）：
+
+```bash
+# 配方里写两行（其它指令照旧）
+#   profile_begin fellow-init
+#   await position FELLOW 0x1684 0x16A4 timeout 60000
+#   profile_end   fellow-init
+./out/emulator-lift-aot --present headless --skip-logo --game-dir links/install \
+  --appdata .tmp/app --input-plan .tmp/fellow.plan
+```
+
+⇒ `profile_end` 之后打一张 `=== profile window: <label> ===`（`wall / lift / boundary / shim /
+partial / instrument / unaccounted / coverage / lift_dyn / verdict`）。
+口径（闭式、3% 作废、10% 才叫候选、为什么"份额来自采样、绝对量来自包络"）见
+`docs/03-emulator/measurement.md` **M-12**；配方动词见 `docs/03-emulator/input-plan.md`。
+★ 不开窗 = 一行不打、一次取时都不做（AGENTS §12.8 第 3 条）。
+
 ```bash
 # 找热点（guest 块级 + 按 .lst 函数入口聚合 + 宿主 shim 墙钟；不改变执行结果）
 ./out/emulator-lift ... --max-frames 1 --profile --profile-top 40

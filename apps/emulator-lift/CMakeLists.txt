@@ -1421,6 +1421,19 @@ add_executable(lift-profile-window tests/profile_window.cpp)
 target_link_libraries(lift-profile-window PRIVATE emulator-lift-runtime)
 add_test(NAME profile-window COMMAND lift-profile-window)
 
+# =====================================================================================
+# **AOT 窗口 profile**（`profile_begin` / `profile_end` 之间的分桶账；pure：纯算术夹具）
+# ★ 判据见 tests/aot_window_profile.cpp 文件头：① 闭式 `wall = lift + boundary + shim +
+#   partial + instrument + unaccounted`；② 采样桶按 `iter/sampled` 外推（1/64 采样不外推
+#   ⇒ 读数只剩真值的 1.6%）；③ `unaccounted > 3%` ⇒ 作废；④ 没开窗 ⇒ 全 0、三档阈值只有一份。
+# ★ 与上面那条 `profile-window` **不是一回事**：那是解释器 `WindowProfiler` 的分项（块缓存 /
+#   迭代器 / 派发循环），AOT 一个都没有 ⇒ 这里重新定义桶（`interp → boundary`、无 `native`）。
+# ★ 顶层无条件注册 ⇒ pure 档（判据 = 注册位置，AGENTS.md §12.4）。
+# =====================================================================================
+add_executable(lift-aot-window-profile tests/aot_window_profile.cpp)
+target_link_libraries(lift-aot-window-profile PRIVATE emulator-lift-runtime)
+add_test(NAME aot-window-profile COMMAND lift-aot-window-profile)
+
 # ---- pure：影片解码器（自造字节 + fake 帧源；不碰游戏 / LFS）----
 # 判据见 tests/movie_decoder.cpp 文件头：坏输入不崩、时间推进单调/不重复、ended 只报一次、
 # Frame 指针在下一次 decode 前稳定、seek/rewind 后重新起解。

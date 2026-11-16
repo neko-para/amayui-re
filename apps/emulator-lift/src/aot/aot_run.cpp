@@ -368,6 +368,10 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         // ★ 关档必须是**真的**关：摘掉 `lift_one` 的采样钩子（上一轮开过也一样）。
         stopProfile();
     }
+    // ★ 窗口 profile：**按轮重置**。窗口只由配方的 `profile_begin` 开（⛔ 不跨 run、⛔ 不自动开），
+    //   `lift_dyn` 的计数闸门同步关掉 —— 缺省档在 `lift_dyn` 里只付一次 bool 判断。
+    win_.on = false;
+    ::liftDynCountOn = false;
     // ★ `--skip-logo`：一次性 latch 的**按轮**状态（语义 = `AotRunOptions::skip_logo`）。
     //   解释器那四个成员是 Machine 的（`machine.h:555-558`，进程只跑一轮）；本宿主的 `run()` 可以
     //   被调多次 ⇒ 在这里按轮重置，保证"同一台宿主第二轮不会假装命中过"。
@@ -387,6 +391,9 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     auto logPresentedFrames = [&]() {
         const std::uint64_t n = presenter_.frameCount();
         if (n == logged_frames) return;
+        // ★ 窗口 profile 的 `present` 子桶（⊂ shim；**零额外成本** —— `presentBreakdown()` 本来
+        //   就一直在计时）。⚠ 一次 shim 里多次 Present 时只有最后一帧的拆分（只增计数）。
+        if (win_.on) win_.notePresent(presentBreakdown(), n - logged_frames);
         if (n == logged_frames + 1) {
             if (frame_log_on) {
                 std::printf("[frame] n=%llu hash=0x%016llX\n", static_cast<unsigned long long>(n),
@@ -490,6 +497,20 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     };
 
     for (;;) {
+        // ★ 窗口 profile 的**第一个**取时点（`win_.on` 为假时这一步只付一次 bool 读）：
+        //   `t_a` = 块顶（= boundary 桶的起点），`t_b` 在分派前取（见 ⑥ 之前）。
+        //   只有被选中的迭代取时（小窗口全量 / 大窗口 1/64）⇒ 成本 ~1 ns/派发。
+        std::uint64_t win_a = 0;
+        std::uint64_t win_b = 0;
+        bool win_sample = false;
+        if (win_.on) {
+            ++win_.iter;
+            win_sample = win_.sampleDue();
+            if (win_sample) {
+                win_a = windowNowNs();
+                ++win_.sampled;
+            }
+        }
         // ★ 块边界的第一件事：把 lifted 侧的寄存器现场同步进 `cpu_`（宿主侧逻辑读 cpu）。
         //   ⛔ 反方向的同步只在宿主侧真的改过 cpu 之后做（下面 Pump::Handled 的三处）。
         syncCpuFromRegs();
@@ -690,6 +711,8 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         //     万一真有一个页内未对齐 EA（只有 guest 跳进桩页中间才可能），槽位索引的二次校验会
         //     拒掉它 ⇒ `def == nullptr` ⇒ `lift_shim` 的 trap 路径（响亮停）。
         //   ★ 槽位索引表在**页内**才被访问：一次数组取 + 一次 `stub_ea` 校验（`byStubEa`，无锁）。
+        // ★ 窗口 profile：`t_b` = 分派前（boundary 桶的终点；`lift`/`shim` 桶的起点）。
+        if (win_sample) win_b = windowNowNs();
         const std::uint32_t stub_off = ea - stub_page;
         const bool in_stub_page = stub_off < stub_span;
         const ShimDef* def = in_stub_page ? shims_.byStubEa(ea) : nullptr;
@@ -722,7 +745,13 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
             //   `lift_shim` 自己每次都要 `cache->peek`（AOT `cpu.cache == nullptr` ⇒ 恒 miss）+
             //   `idForStub`（旧实现 = 拿锁 + 线性扫 385 项）。这里已经拿到 def ⇒ 不该再付那笔。
             const std::uint32_t shim_id1 = def != nullptr ? def->id + 1u : 0u;
+            // ★ 窗口 profile：`shim` 桶**精确**（每次调用 2 次取时；shim 只占派发 ~1.4%）。
+            std::uint64_t win_shim_t0 = 0;
+            const bool win_shim = win_.on && def != nullptr;
+            if (win_shim) win_shim_t0 = windowNowNs();
             const std::uint32_t next = ::lift_shim_id(shim_id1, ea, &regs_, &cpu_);
+            if (win_shim) win_.noteShim(def->id, windowNowNs() - win_shim_t0);
+            if (win_sample) win_.noteBoundary(win_a, win_b);
             if (shim_sample) {
                 const std::uint64_t delta = profileTicks() - shim_t0;
                 const std::string key =
@@ -780,7 +809,9 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         ++r.dispatches;
         ++r.lifted_calls;
         profileDispatchSample(ea);
+        if (win_sample) win_.noteBoundary(win_a, win_b);
         const std::uint32_t next = fn(&regs_, mem_.host(0), ea, &cpu_);
+        if (win_sample) win_.noteLift(win_b, windowNowNs());
         if (next == ::kLiftHalt) {
             // 生成物里的停机出口：`lift_one` 的 false / `lift_stop`（T1c 的口径）。
             // 解释器把这一类归成 `Unimplemented` + `detail = cpu.stop_why`（T2 §2.2）。
@@ -802,6 +833,9 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
 
     // ---- 收口（只留 guest 语义的读数；真源 machine.cpp:1806-1826）----
     syncCpuFromRegs();
+    // ★ 窗口 profile：配方只写了 `profile_begin` 而没写 `profile_end`（或 run 在窗口中途收口）
+    //   ⇒ **照样打表 + 关闸门**（⛔ 不静默丢数据；与解释器"未闭合也打印"同口径）。
+    if (win_.on) endWindow();
     r.ea = cpu_.eip;
     r.insns = cpu_.insns;
     r.frames = presenter_.frameCount();

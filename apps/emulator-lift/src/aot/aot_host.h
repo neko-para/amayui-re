@@ -40,6 +40,7 @@
 #include <vector>
 
 #include "aot/aot_hook_ea.h"
+#include "aot/window_prof.h"  // 窗口 profile 的桶与闭式（纯头；可被 pure CTest 直接驱动）
 #include "runtime/audio.h"
 #include "runtime/clock.h"
 #include "runtime/com.h"
@@ -318,6 +319,19 @@ public:
     AotProfile& profile() { return prof_; }
     const AotProfile& profile() const { return prof_; }
 
+    // ---- 窗口 profile（`profile_begin/end` 驱动；**零新 CLI**）----
+    // 开窗：清账、快照 insns/frames/lift_dyn、实测一次取时开销（~10 µs）、打开 `lift_dyn` 计数闸门。
+    void beginWindow(const char* label);
+    // 收窗：算两个边沿 sliver、打表（含 `unaccounted` 与 `INVALID` 判定）、关闸门。
+    // ★ 未闭合（配方只写 `profile_begin`）时由 `run()` 的收口路径调它 ⇒ ⛔ 不静默丢数据。
+    void endWindow();
+    // 窗口标记的落点（`InputPlan::ProfileMarkHook` 的 thunk）：begin ⇒ 开窗，end ⇒ 打表 + 关窗。
+    // ★ 静态 + `void*` 上下文 = 与 `InputPlan` 的 C 形状钩子对齐（⛔ 不用 std::function：
+    //   那会在每个读点付一次间接跳转，而"缺省零成本"是硬口径）。`aot_main.cpp` 取它的地址。
+    static void windowMarkThunk(void* ctx, const char* label, bool begin);
+    AotWindowProf& window() { return win_; }
+    const AotWindowProf& window() const { return win_; }
+
     // ---- 读数取用 ----
     const PeImage& image() const { return image_; }
     const GuestLayout& layout() const { return layout_; }
@@ -464,6 +478,9 @@ private:
 
     // ---- 采样式内部 profile（`--profile`；`on == false` 时所有字段恒为初值、零成本）----
     AotProfile prof_;
+
+    // ---- 窗口 profile（`profile_begin/end` 驱动；`on == false` 时一个取时都不做）----
+    AotWindowProf win_;
 };
 
 }  // namespace aot

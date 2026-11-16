@@ -1105,6 +1105,22 @@ const MUTATIONS = [
       '`controlOnResume` 计数 3 → 0 断言红）',
   },
 
+  // ── 窗口 profile（`REQ-01M7JNX5MR7RWTBNBAE70PBCQP`；守卫 = `tests/aot_window_profile.cpp`）──
+  //   ★ 代表"闭式里漏了一个桶"这一类静默失效：把 `shim` 从归一用的包络里去掉 ⇒
+  //     归一后 `lift+boundary` 把 shim 那一份吞掉 ⇒ 表里各行百分比互相矛盾。
+  //     ⚠ 变异落在**纯头**（`window_prof.h`）上：不跑模拟器，只编测试即可。
+  {
+    file: 'apps/emulator-lift/src/aot/window_prof.h',
+    from: '        double envelope = t.wall - t.shim - t.partial - t.instrument;',
+    to: '        double envelope = t.wall - t.partial - t.instrument;  // 变异：漏掉 shim',
+    guard: 'ctest:aot-window-profile',
+    ctest: 'aot-window-profile',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '窗口的精确包络漏掉 `shim` ⇒ 归一后 `lift+boundary` 把 shim 那一份算进自己 ⇒ ' +
+      '闭式（wall = lift+boundary+shim+partial+instrument）当场不成立',
+  },
+
   // ── 🐞S2 `emu-ctl screenshot` 全黑（`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`；守卫 = `tests/control_snapshot.cpp`）──
   //   ★ 代表"截图读的不是最后呈现的那一帧"这一类静默失效：
   //     present **不冻结** ⇒ `dumpLastFrame` 退回写现场后缓冲（下一帧的 Clear(0) 之后 = 全黑 = 本缺陷形态）。

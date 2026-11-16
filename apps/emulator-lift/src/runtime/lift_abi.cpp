@@ -409,6 +409,11 @@ namespace lift {
 LiftDynLookup liftDynLookup = nullptr;
 }  // namespace lift
 
+// ★ 窗口 profile 的计数（缺省关 ⇒ `lift_dyn` 里只多一次 bool 判断）。
+//   ⚠ 定义在**全局**作用域：声明在 `lift_abi.h` 的 `extern "C" lift_dyn` 旁边（同名一处）。
+bool liftDynCountOn = false;
+std::uint64_t liftDynCalls = 0;
+
 extern "C" std::uint32_t lift_dyn(void* cpu_ptr, LiftRegs* st, std::uint32_t ea) {
     if (!cpu_ptr || !st) {
         std::fprintf(stderr, "[lift_dyn] 调用方传了空指针（cpu=%p st=%p ea=%08X）\n", cpu_ptr,
@@ -417,6 +422,9 @@ extern "C" std::uint32_t lift_dyn(void* cpu_ptr, LiftRegs* st, std::uint32_t ea)
         std::_Exit(4);  // 宿主自身 bug（与 lift_shim / lift_one 同一档退出码）
     }
     lift::X86& cpu = *static_cast<lift::X86*>(cpu_ptr);
+    // ★ 窗口 profile：只计数（闸门是 bool ⇒ 缺省档一次判断）。位置在查表**之前** —— 查表失败
+    //   （EA 不在表里 ⇒ 原样返回给 trampoline 裁决）那次也算一次动态入口。
+    if (liftDynCountOn) ++liftDynCalls;
     const lift::LiftDynLookup lookup = lift::liftDynLookup;
     if (lookup == nullptr) {
         std::fprintf(stderr,

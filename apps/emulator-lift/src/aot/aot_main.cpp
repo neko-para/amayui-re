@@ -604,6 +604,10 @@ int main(int argc, char** argv) {
         host.cpu().windows->setInputPlan(&input_plan);
         // `present.cpp` 的 `note(Frame)` 保留：它只是摘要 `presents=` 的读数，⛔ 不再是门。
         host.presenter().setInputPlan(&input_plan);
+        // ★ 窗口 profile 的标记钩子（`profile_begin/end` ⇒ 开/收窗 + 打桶表）。
+        //   装配位置与其余 `attach*` 同处：`AotHost` 已在作用域里，钩子只在**有配方**时才有意义。
+        //   ⛔ 不改配方语法：钩子只消费既有的 `profile_begin` / `profile_end` 两步。
+        input_plan.setProfileMarkHook(&host, &lift::aot::AotHost::windowMarkThunk);
         // ★ `quit` 的**宿主停止请求**（唯一生产者 = 配方里的 `quit`）：run 循环每个块边界读它 ⇒
         //   本次运行以 `Stopped` 收口（与解释器臂 `Machine::run` 读 `actuator().quitRequested()`
         //   同一条口径）。⛔ 不等 guest 自己退出（它的停机路径可能不在闭包里）。

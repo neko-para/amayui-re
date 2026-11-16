@@ -158,6 +158,14 @@ inline constexpr std::uint32_t kLiftHalt = 0xFFFFFFFEu;
 //     站点都多一个宿主栈帧 ⇒ 深递归会爆栈，"tail call 站点"这个读数也会失真。
 extern "C" std::uint32_t lift_dyn(void* cpu, LiftRegs* st, std::uint32_t ea);
 
+// ★ 窗口 profile 的 `lift_dyn` 计数（AGENTS §12.8 第 3 条：缺省零成本 ⇒ 闸门是一个 bool）。
+//   ★ 为什么只报**次数**、不报时间：`lift_dyn` 是**尾调用**（`return fn(...)`）⇒ 它的区间
+//     含目标函数体，与 `lift` 桶重复 ⇒ 报时间会双计。计数则是**精确**的（每次调用一次 `++`）。
+//   ★ 为什么今天必须有它：S7 之前 `lift_dyn` 是"完全无读数"的（不计 dispatch、不进 liftone 采样）
+//     ⇒ 间接跳转那一大批派发在任何表里都没有一行。
+extern bool liftDynCountOn;
+extern std::uint64_t liftDynCalls;
+
 // 走进一个 shim（阶段 B 的 ④）。语义**全部**在 `lift_abi.cpp`，这里只钉契约：
 //   ① `liftRegsToCpu(*st, cpu)`（8 GPR + eflags 物化；`cpu.eip = stub_ea`，与解释器 dispatcher
 //      命中 shim 块时同一口径）—— 因为 `invoke` 第一条就读 `[esp]` 取返回地址、`ShimCall::u32`
