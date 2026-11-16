@@ -3562,6 +3562,25 @@ const MUTATIONS = [
       'D 泵（主线程）那一刀不记 `fill_bytes` ⇒ AOT（恒 D 泵）"喂了多少字节"恒 0，而 `fills>0` 让人以为账是全的' +
       ' ⇒ `audio-device` 的 `audio-device/d-pump-fill-bytes` 红（实测改动前 2 failures）',
   },
+  // ── AOT 音频接线（`REQ-01M7K04EY6D3GQNB5DRWP0DYJ8` 洞 6；守卫 = `aot-audio-wiring`）──
+  //   ★ 代表"**接线断了**"这类**自证式断言抓不到**的静默失效：`--sound` 从 CLI→引擎的路上被摘掉，
+  //     而 `kAotSoundNotice` 那句 `muted=0` 照旧打印 —— 引擎其实是静音的。
+  //   ★ 变异落在 `aot_main.cpp`（**产品 exe 的 TU**），守卫靠子进程跑那个 exe
+  //     ⇒ `CMakeLists.txt` 里有 `add_dependencies(lift-aot-audio-wiring emulator-lift-aot)`，
+  //       否则 `--target <守卫>` 只重建守卫 exe、产品 exe 停在变异前 ⇒ **假绿**。
+  {
+    file: 'apps/emulator-lift/src/aot/aot_main.cpp',
+    from: '    if (!host.configureAudio(audio_parse.mode, audio_dump, sound, &err)) {',
+    to: '    if (!host.configureAudio(audio_parse.mode, audio_dump, /*变异：--sound 接线删掉*/ false, &err)) {',
+    guard: 'ctest:aot-audio-wiring',
+    ctest: 'aot-audio-wiring',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-aot-audio-wiring',
+    what:
+      'AOT 臂 `--sound` 不进 `AudioEngine::configure`（传死 false）⇒ 摘要里 `audio : … muted=1`，' +
+      '而 `kAotSoundNotice` 照旧声明 `muted=0` ⇒ `aot-audio-wiring` 的 `sound-virtual` / `sound-dump` 红' +
+      '（实测 2 failures；`virtual-no-sound` 对照组仍绿 ⇒ 红的方向唯一）',
+  },
 ];
 
 let mutationRunSeq = 0;

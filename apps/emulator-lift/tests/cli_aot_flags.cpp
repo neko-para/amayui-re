@@ -10,16 +10,22 @@
 //      红了 ⇒ 参数解析退化成"接受任何参数"，② 的绿就没有意义（§12.5 的 `--native-overrides`
 //      那条纪律：⛔ 不许靠"什么都收"让守卫变绿）。
 //   ④ `--sound` ⇒ **被接受**（不是 `未知参数`）并打**一条**一次性说明：这条说明必须**与代码一致**
-//      —— `--sound` 现在真的进 `AudioEngine` 的静音门（`muted=0`），所以它**不许**再说
-//      "本臂没有音频管线 / 不会有声音"（那是接线前的形状）。且这条说明在这份 stderr 里**恰好一次**。
-//      红了 ⇒ 要么"指定了就跑不起来"（另一种"无法指定"），要么静默接受（用户以为该有声），
-//      要么文案在**撒谎**（代码接线了、话还写着没接线）。
+//      —— ⛔ 不许再说"本臂没有音频管线 / 不会有声音"（那是接线前的形状）。且这条说明在这份 stderr
+//      里**恰好一次**。红了 ⇒ 要么"指定了就跑不起来"（另一种"无法指定"），要么静默接受。
+//      ★ **洞 6**：这里⛔ **不**再断言"说明文本里含 `muted=0`"——那是**自证式断言**（只断言自己
+//        打的那句话，`--sound` 的接线丢了它照绿）。真正的判据落在**引擎状态**上：
+//        `aot-audio-wiring`（真 run，读收口摘要的 `audio     : … muted=0|1`，含 `muted=1` 的对照组）。
+//      ★ **洞 4**：这段说明里"读数"那句必须限定"**仅** `--audio virtual|sdl` 或 `--audio-dump` 时
+//        才有 `audio     :` 一行"（只给 `--sound` 时档位是 off ⇒ 没有那一行）。行为判据同样在
+//        `aot-audio-wiring` 的①（那条 run 里那一行**不存在**）。
 //   ⑤ 缺省档（**不给** `--sound`）这条说明**不出现**（同一份 stderr 面的对照组）。
 //   ⑥ **S1 参数面**：`--audio virtual` / `--audio sdl` **不再**被拒（旧文案"本臂只有 off"必须消失）；
 //      非法值 `--audio bogus` 仍 **exit 2** 并点名合法值域（⛔ 不放宽成"认不出就当 off"）；
 //      `--audio-dump` 缺值 ⇒ exit 2 并点名这个 flag（⛔ 不静默当成"没有 dump"）。
 //      红了 ⇒ 用户要么无法指定后端 / dump，要么非法值被静默吞掉。
-//   ⑦ `--help` 里有 `--audio-dump`（否则用户不知道这条入口存在）。
+//   ⑦ `--help` 里有 `--audio-dump`（否则用户不知道这条入口存在）；且它的说明**声明**了
+//      「abort 之后 dump 不可信」（洞 7：`std::abort()` 路径跳过 `AudioEngine::end()` ⇒ WAV 两个
+//      长度字段不回填。⛔ 不改 abort 语义，只声明）。
 //
 // ★ 四条主断言**全部判在 GPU bring-up 之前**：AOT 臂的参数校验（`aot_main.cpp` 的
 //   `--audio` / `--cursor-warp` 平台闸门 / `present_window_flag` / `--sound` 说明）都在
@@ -180,6 +186,11 @@ int main(int argc, char** argv) {
         // ★ S1：`--audio` 的三个档位与 `--audio-dump` 必须在 help 里（否则用户不知道它们存在）。
         LIFT_CHECK(r.out.find("--audio off|virtual|sdl") != std::string::npos);
         LIFT_CHECK(r.out.find("--audio-dump") != std::string::npos);
+        // ★ 洞 7：`--audio-dump` 的说明必须**声明**「abort 之后 dump 不可信」（不改 abort 语义，只声明）。
+        //   红了 ⇒ 那条已知的失效方式（`std::abort()` 跳过 `end()` ⇒ WAV 长度字段不回填）又变成
+        //   "只有读过代码的人知道"。
+        LIFT_CHECK(r.out.find("abort") != std::string::npos);
+        LIFT_CHECK(r.out.find("不可信") != std::string::npos);
         // ★ S4：`--input-plan` 必须在 help 里（否则用户不知道 AOT 臂有输入控制面）。
         LIFT_CHECK(r.out.find("--input-plan") != std::string::npos);
     }
@@ -358,6 +369,9 @@ int main(int argc, char** argv) {
     // ---- ④ `--sound`：**接受** + 一条一次性说明（与代码一致：真的进静音门），⛔ 不是 `未知参数` ----
     //      ★ 不判退出码：`--sound` 之后本臂仍会因"没有执行源 / 没有 GPU"而 exit 2 —— 那与
     //        `--sound` 无关，判据是"它被接受 + 说了实话"，在 GPU bring-up 之前就已成立。
+    //      ★ **洞 6**：这条用例**不再**拿"说明文本里含 `muted=0`"当证据（自证式断言：接线丢了它照绿）。
+    //        证据 = `aot-audio-wiring` 读收口摘要的 `audio     : … muted=0`（含 `muted=1` 对照组）。
+    //        这里保留的文本判据只有一条**反向**的：⛔ 不许把接线前的谎话写回来。
     g_current_case = "sound-accepted-with-once-notice";
     {
         const ChildRun r = runChild(exe, L"--sound", root, root / "sound.out", root / "sound.err");
@@ -365,9 +379,7 @@ int main(int argc, char** argv) {
         LIFT_CHECK(!r.timed_out);
         LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
         LIFT_CHECK(countOccurrences(r.err, kSoundNoticeMarker) == 1u);
-        // ② **与代码一致**：`--sound` 现在真的把静音门关掉（`AudioEngine` 的 `muted=0`）⇒
-        //    文案不许再写"没有音频管线 / 不会有声音"（那是接线前的形状）。
-        LIFT_CHECK(r.err.find("muted=0") != std::string::npos);
+        // 反向判据：⛔ 不许再写回"没有音频管线 / 不会有声音"（接线前的形状）。
         LIFT_CHECK(r.err.find("没有音频管线") == std::string::npos);
         LIFT_CHECK(r.err.find("不会有声音") == std::string::npos);
         // ③ 跟踪单 id 必须**是真的**（`REQ-` + 26 位 ULID），⛔ 不许把占位符发出去。

@@ -6,10 +6,15 @@
 //   ② **不隐式裁剪**：越界 / 负坐标 / 空矩形 / rect 指针不可读 ⇒ `D3DERR_INVALIDCALL` + 机器继续 +
 //      目标**一个字节都不变**。⛔ 静默夹取 / 部分拷贝都会红。
 //   ③ **只做 1:1**：源矩形 2×2 → 目标矩形 3×3 ⇒ **响亮停**（文档说那会按 Filter 缩放；本线不实现）。
-//   ④ **不支持 colorKey**：`ColorKey != 0` ⇒ 响亮停（文档没把"匹配口径"写死 ⇒ ⛔ 不臆造）。
-//   ⑤ **格式**（`d3d9::surfaceCopyPlan`）：同 D3DFORMAT ⇒ 恒等映射；32bpp 同序（21↔22、32↔33）⇒ 恒等；
-//      RGBA↔BGRA（{21,22}↔{32,33}）⇒ 只换 R/B，其余位（含 X8 的顶字节）照抄；其它组合 ⇒ 拒绝。
+//   ④ **不支持 colorKey**：`ColorKey != 0` ⇒ 响亮停。★ 拒绝的**理由**是"本期未实现"，⛔ 不是
+//      "文档没写死"——文档明写 `ColorKey` 是 always a 32-bit ARGB color 且 Alpha is significant
+//      （`https://learn.microsoft.com/en-us/windows/win32/direct3d9/d3dxloadsurfacefromsurface`）。
+//      `caseColorKey` 连**理由文本**一起判（改成"文档没写死"⇒ 红）。
+//   ⑤ **格式**（`d3d9::surfaceCopyPlan`）：同 D3DFORMAT ⇒ 恒等映射；32bpp 同序的 **A8→X8**
+//      （丢 alpha）⇒ 恒等；**X8→A8**（`22→21`，把不携带信息的顶字节当 alpha）⇒ **拒绝**
+//      （父级裁决：响亮停，⛔ 不猜 0xFF）；RGBA↔BGRA ⇒ 只换 R/B，其余位照抄；其它组合 ⇒ 拒绝。
 //      ★ 16bpp 的同格式拷贝也走真 surface：它证明逐字节搬运**按 bpp 走**（不是硬拷 4 字节）。
+//      ★ `22→21` 另有一条**真 surface** 用例（顶字节 0 ⇒ Trap + 目标一字节不变）。
 //   ⑥ `rect == NULL` ⇒ **整幅**该 surface（不是"左上角"、也不是"0×0"）。
 //
 // ★ 全部经 guest 代码 → IAT 桩 → shim 调（8 个参数按 stdcall 压栈），测的是 guest 可见的导出。
@@ -369,6 +374,17 @@ void caseContract() {
     LIFT_CHECK_EQ_U32(bad_ptr.hr, lift::d3d9::kInvalidCall);
     LIFT_CHECK(bad_ptr.run.reason == lift::StopReason::UntilEa);
     LIFT_CHECK(allPixel32(r, dst, kDstSentinel));
+
+    // ---- 洞 2：`src_surface == dst_surface` ⇒ D3DERR_INVALIDCALL ----
+    //   ★ 为什么不是"支持自拷贝"：矩形错位时行区间重叠 ⇒ `memcpy` UB，且会把**尚未读到的源行**
+    //     覆盖掉（像素搬花）。真机行为未取证 ⇒ 父级裁决 = 一律拒绝（⛔ 不猜"应该支持"）。
+    //   ★ 这里用**同一块** surface + 目标偏移 (1,1)：宽度 < 面宽 ⇒ 行区间一定重叠。
+    const std::uint32_t self_src = r.placeRect(0, 0, 5, 4);
+    const std::uint32_t self_dst = r.placeRect(1, 1, 6, 5);
+    const Rig::Call self = r.loadSurface(dst, self_src, dst, self_dst, kFilterDefault, 0u);
+    LIFT_CHECK_EQ_U32(self.hr, lift::d3d9::kInvalidCall);
+    LIFT_CHECK(self.run.reason == lift::StopReason::UntilEa);  // 契约错必须可继续
+    LIFT_CHECK(allPixel32(r, dst, kDstSentinel));              // 目标一字节不变
     // 这些全是"可继续的失败"：不许记成 unimplemented / 不许 trap。
     LIFT_CHECK_EQ_U32(r.m.cpu().shim.unimplemented_calls, traps_before);
     LIFT_CHECK(r.m.cpu().stop_why == nullptr || std::strlen(r.m.cpu().stop_why) == 0);
@@ -396,10 +412,15 @@ void caseFormatPairs() {
     LIFT_CHECK(identityPlan(planOf(kFmtX8R8G8B8, kFmtX8R8G8B8), 4u));
     LIFT_CHECK(identityPlan(planOf(kFmtR5G6B5, kFmtR5G6B5), 2u));
     LIFT_CHECK(identityPlan(planOf(kFmtA4R4G4B4, kFmtA4R4G4B4), 2u));
-    // 32bpp 同序：布局相同，只差"顶字节算不算 alpha"⇒ 恒等（X8 的顶字节照抄，⛔ 不臆造）。
+    // 32bpp 同序：布局相同，只差"顶字节算不算 alpha"。
+    // ★ **丢 alpha 允许**（A8→X8 = 21→22）：X8 的顶字节不携带信息 ⇒ 丢了不造信息。
     LIFT_CHECK(identityPlan(planOf(kFmtA8R8G8B8, kFmtX8R8G8B8), 4u));
-    LIFT_CHECK(identityPlan(planOf(kFmtX8R8G8B8, kFmtA8R8G8B8), 4u));
+    // ★ **造 alpha 拒绝**（X8→A8 = 22→21，父级裁决）：X8 的顶字节不携带信息（`f.amask = 0`），
+    //   照抄会把它写成目标的 alpha ⇒ 目标被采样 / 混色时像素变透明。⛔ 不猜 0xFF / 0x00。
+    LIFT_CHECK(!planOf(kFmtX8R8G8B8, kFmtA8R8G8B8).supported);
     LIFT_CHECK(identityPlan(planOf(kFmtA8B8G8R8, kFmtX8B8G8R8), 4u));
+    // ⚠ 邻臂（33→32 = X8B8G8R8→A8B8G8R8）是**同一个形状**，但 32/33 建不出真 surface、
+    //   父级裁决只点名了 `22→21` ⇒ 这一格**保持原状**（⛔ 不越权改裁决；见需求单"判不了"）。
     LIFT_CHECK(identityPlan(planOf(kFmtX8B8G8R8, kFmtA8B8G8R8), 4u));
     // RGBA↔BGRA（{21,22} ↔ {32,33}）⇒ 只换 R/B（目标字节 0/2 取源字节 2/0），其余照抄。
     for (const std::uint32_t a : {kFmtA8R8G8B8, kFmtX8R8G8B8}) {
@@ -465,6 +486,39 @@ void caseFormatPairs() {
     LIFT_CHECK(bad.run.reason == lift::StopReason::Trap);
     LIFT_CHECK(bad.hr != lift::d3d9::kOk);
     LIFT_CHECK(allPixel32(r2, dst32, kDstSentinel));
+
+    // ---- 洞 1：**真 surface** 的 X8(22) → A8(21)，顶字节 0 ⇒ 响亮停 + 目标一字节不变 ----
+    //   ★ 为什么必须是真 surface：纯函数只判"计划"，判不了"目标有没有被写"。这一格从 guest 代码
+    //     经 IAT 桩进 shim，落到的就是"像素会不会被悄悄写成透明"。
+    Rig r3;
+    LIFT_CHECK(r3.boot());
+    if (!r3.ok) return;
+    Surf x8;
+    Surf a8;
+    LIFT_CHECK(r3.makeSurface(4u, 4u, kFmtX8R8G8B8, &x8));
+    LIFT_CHECK(r3.makeSurface(4u, 4u, kFmtA8R8G8B8, &a8));
+    if (!r3.ok) return;
+    // 源顶字节 = 0（X8 的合法读数：这一字节不携带信息），RGB 给可辨认值。
+    for (std::uint32_t y = 0; y < x8.height; ++y)
+        for (std::uint32_t x = 0; x < x8.width; ++x)
+            r3.m.mem().wr32(x8.ea + y * x8.pitch + x * 4u, 0x00A1B2C3u);
+    r3.fill32(a8, kDstSentinel);
+    const Rig::Call x8_to_a8 = r3.loadSurface(x8, 0u, a8, 0u, kFilterDefault, 0u);
+    LIFT_CHECK(x8_to_a8.run.reason == lift::StopReason::Trap);
+    LIFT_CHECK(x8_to_a8.hr != lift::d3d9::kOk);
+    LIFT_CHECK(allPixel32(r3, a8, kDstSentinel));  // ⛔ 不许"填一个 0xFF 继续跑"
+    // 反方向（A8 → X8 = 丢 alpha）**仍然允许**：逐字节直拷，顶字节原样照抄（丢信息 ≠ 造信息）。
+    Surf a8_src;
+    Surf x8_dst;
+    LIFT_CHECK(r3.makeSurface(4u, 4u, kFmtA8R8G8B8, &a8_src));
+    LIFT_CHECK(r3.makeSurface(4u, 4u, kFmtX8R8G8B8, &x8_dst));
+    if (!r3.ok) return;
+    r3.fill32(a8_src, 0xA1B2C3D4u);
+    r3.fill32(x8_dst, kDstSentinel);
+    const Rig::Call a8_to_x8 = r3.loadSurface(a8_src, 0u, x8_dst, 0u, kFilterDefault, 0u);
+    LIFT_CHECK_EQ_U32(a8_to_x8.hr, lift::d3d9::kOk);
+    LIFT_CHECK(a8_to_x8.run.reason == lift::StopReason::UntilEa);
+    LIFT_CHECK(allPixel32(r3, x8_dst, 0xA1B2C3D4u));  // 顶字节照抄（X8 一侧不携带信息）
 }
 
 // ---------------------------------------------------------------------------------------
@@ -495,7 +549,9 @@ void caseOneToOne() {
 }
 
 // ---------------------------------------------------------------------------------------
-// ④ colorKey != 0 ⇒ 响亮停（文档只定义"匹配像素写成透明黑"，比较口径没写死 ⇒ 不臆造）
+// ④ colorKey != 0 ⇒ 响亮停。★ 判据包含**拒绝的理由**：文档明写 ColorKey 是 "always a 32-bit
+//   ARGB color" 且 "Alpha is significant" ⇒ 不是"无法定义"，是**本期没做**。
+//   ⛔ 旧理由（"文档没写死比较口径"）是错的 ⇒ 谁把它改回去，这条用例就红。
 // ---------------------------------------------------------------------------------------
 void caseColorKey() {
     lift_test::g_current_case = "d3dx9/load-surface+color-key";
@@ -513,6 +569,19 @@ void caseColorKey() {
     LIFT_CHECK(c.run.reason == lift::StopReason::Trap);
     LIFT_CHECK(c.hr != lift::d3d9::kOk);
     LIFT_CHECK(allPixel32(r, dst, kDstSentinel));
+
+    // ---- 洞 3：理由文本是"本期未实现（文档已定义：32-bit ARGB、alpha 参与比较）"+ 文档链接 ----
+    //   ★ 直接调语义层读 `why`：guest 侧的 `stop_why` 只有 "unimplemented D3DX9 call"（不含理由）。
+    std::string why;
+    const lift::d3d9::SurfaceCopyResult res =
+        lift::d3d9::copySurfaceRect(r.m.cpu(), src.object, 0u, dst.object, 0u, 0xFF00FF00u, &why);
+    LIFT_CHECK(res == lift::d3d9::SurfaceCopyResult::Unsupported);
+    LIFT_CHECK(why.find("本期未实现") != std::string::npos);
+    LIFT_CHECK(why.find("ARGB") != std::string::npos);
+    LIFT_CHECK(why.find("alpha") != std::string::npos);
+    LIFT_CHECK(why.find("learn.microsoft.com") != std::string::npos);
+    // ⛔ 那条错误理由（"文档没写死"）不许再出现 —— 它是洞 3 的原文。
+    LIFT_CHECK(why.find("没写死") == std::string::npos);
 }
 
 }  // namespace

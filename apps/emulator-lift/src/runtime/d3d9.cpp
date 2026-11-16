@@ -1873,6 +1873,14 @@ SurfaceCopyPlan surfaceCopyPlan(std::uint32_t src_format, std::uint32_t dst_form
     const ChannelOrder32 so = channelOrder32(src_format);
     const ChannelOrder32 dow = channelOrder32(dst_format);
     if (so != ChannelOrder32::None && dow != ChannelOrder32::None) {
+        // ★ 裁决（`REQ-01M7K04EY6D3GQNB5DRWP0DYJ8` 洞 1）：**`22→21` 一律不支持** ⇒ 调用方响亮停
+        //   （`Unsupported` ⇒ `Trap`）。理由：本仓格式表里 X8 的顶字节 `amask = 0u`（不携带信息），
+        //   照抄会把它写成目标的 **alpha** ⇒ 目标被采样 / 混色时像素变透明。
+        //   ⛔ 不填 0xFF / 0x00（那是"猜一个转换语义"，与 §6 准入门冲突；真机口径未取证）。
+        //   ★ 反方向 `21→22`（丢 alpha）**保持允许** —— 那是丢信息，不是造信息。
+        //   ⚠ 邻臂 `33→32`（X8B8G8R8 → A8B8G8R8）是**同一个形状**，但 32/33 建不出真 surface、
+        //     父级裁决只点名 `22→21` ⇒ 这一格**保持原状**（未裁决 ⇒ 不改，⛔ 不越权改裁决）。
+        if (src_format == kFmtX8R8G8B8 && dst_format == kFmtA8R8G8B8) return plan;  // supported = false
         plan.supported = true;
         plan.bytes_per_pixel = 4u;
         if (so != dow) {
@@ -1892,13 +1900,17 @@ SurfaceCopyResult copySurfaceRect(X86& cpu, std::uint32_t src_surface, std::uint
         if (why) *why = "D3DXLoadSurfaceFromSurface：没有 ComRegistry（装配问题）";
         return SurfaceCopyResult::Broken;
     }
-    // 色键：文档只定义"匹配像素写成透明黑"，**比较口径（是否含 alpha）没写死** ⇒ 本线不实现。
+    // 色键：文档**明写** "ColorKey … always a 32-bit ARGB color … Alpha is significant"
+    //   （https://learn.microsoft.com/en-us/windows/win32/direct3d9/d3dxloadsurfacefromsurface）
+    //   ⇒ 比较口径**不是**无法定义，是**本期没实现**（洞 3：旧文案说"文档没写死"，那是错的）。
     // ★ 调用方传 0 是正常路径（0 = 禁用色键），不是缺口。
     if (color_key != 0) {
-        char buf[220];
+        char buf[320];
         std::snprintf(buf, sizeof(buf),
-                      "D3DXLoadSurfaceFromSurface：ColorKey=0x%08X 未实现（文档只定义\"匹配像素写成透明黑\"，"
-                      "比较口径没写死 ⇒ 本线不做，⛔ 不猜）",
+                      "D3DXLoadSurfaceFromSurface：ColorKey=0x%08X 本期未实现（文档已定义：32-bit ARGB、"
+                      "alpha 参与比较 ⇒ 匹配像素写成透明黑；见 "
+                      "https://learn.microsoft.com/en-us/windows/win32/direct3d9/d3dxloadsurfacefromsurface）"
+                      "⇒ 本线不做，⛔ 不猜",
                       color_key);
         if (why) *why = buf;
         return SurfaceCopyResult::Unsupported;
@@ -1939,6 +1951,20 @@ SurfaceCopyResult copySurfaceRect(X86& cpu, std::uint32_t src_surface, std::uint
     SurfaceCopyResult fail = SurfaceCopyResult::Contract;
     if (!resolve(src_surface, "pSourceSurface", &src, &src_state, &fail)) return fail;
     if (!resolve(dst_surface, "pDestinationSurface", &dst, &dst_state, &fail)) return fail;
+
+    // ★ 裁决（洞 2）：**同一个 surface 的自拷贝一律 `D3DERR_INVALIDCALL`**（可继续的契约错）。
+    //   理由：下面按行 `memcpy` 且不比较源 / 目标对象；矩形错位时行区间重叠 ⇒ `memcpy` UB，
+    //   而且会把**尚未读到的源行**先覆盖掉（像素搬花）。真机行为未取证
+    //   ⇒ ⛔ 不猜"应该支持自拷贝"（也不做"先拷到临时缓冲"那种猜出来的语义）。
+    //   ⚠ 只判**对象身份**（父级裁决的口径）；两个不同对象包同一个状态块（同一块 arena）的
+    //     别名情形未裁决 ⇒ 不在这里扩权（见需求单"判不了"）。
+    if (src_surface == dst_surface) {
+        if (why)
+            *why = "D3DXLoadSurfaceFromSurface：pSourceSurface == pDestinationSurface（同一 surface 的"
+                   "自拷贝会让行区间重叠 ⇒ memcpy UB + 覆盖尚未读到的源行；真机行为未取证）"
+                   "⇒ D3DERR_INVALIDCALL，⛔ 不猜\"应该支持自拷贝\"";
+        return SurfaceCopyResult::Contract;
+    }
 
     // 半开矩形 [left,right) × [top,bottom)；rect == NULL ⇒ **整幅该 surface**。
     // 越界 / 空 / 指针不可读 ⇒ 契约错（⛔ 不隐式裁剪，与 updateSurface 同口径）。

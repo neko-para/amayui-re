@@ -13,10 +13,13 @@
 //     · `audio.cpp:141` 的 `mute_ = !sound`（唯一交付点 `generateTo` 末尾）。
 //   本头只负责"**把同一个 bool 组合成给人看的状态**"，⛔ 不参与 guest 语义。
 //
-// ★ **AOT 臂的音频已接线（S0–S2）**：档位由 `--audio` 决定、`--sound` 真的进 `mute_`、`--audio-dump`
-//   落 WAV、`run()` 入口 / 出口成对 `begin()` / `end()`；还没接的是**泵**（`pump()`，S3）。
+// ★ **AOT 臂的音频已接线（S0–S3）**：档位由 `--audio` 决定、`--sound` 真的进 `mute_`、`--audio-dump`
+//   落 WAV、`run()` 入口 / 出口成对 `begin()` / `end()`、泵（`pump()`）已接在**块边界**（S3）。
 //   ⇒ 本头里的 `kAotSoundNotice` 是"**接受 + 说实话**"那一条一次性说明（⛔ 不是拒绝启动，
 //   ⛔ 也不静默接受，⛔ 不再说"没有音频管线 / 不会有声音"）。
+// ★ 洞 4（`REQ-01M7K04EY6D3GQNB5DRWP0DYJ8`）的教训：这条说明**引用的每一行读数都必须真的存在**。
+//   `audio     :` / `audio-pump:` 只在 `AudioEngine::enabled()` 时打（`aot_host.cpp` 的
+//   `printRunSummary`）⇒ **只给 `--sound`** 时档位是 off，那两行**不存在** ⇒ 文案必须限定范围。
 #pragma once
 
 #include <cstdint>
@@ -112,6 +115,19 @@ inline constexpr const char* kWindowFlagsAot =
 //     （同一个理由见上面 105-106 行；S3 之前的原文就是那么写的）。
 // ★ 打印点**只有一个**（`aot_main.cpp` 的参数校验段），且在 GPU bring-up **之前**
 //   ⇒ ① 一次（不是每帧）；② 命令行一给就能判（守卫 `cli-aot-flags` 因此不需要 GPU）。
+// ★ **这份文本不许再当证据**（洞 6）：`cli-aot-flags` 的 `sound-accepted-with-once-notice` 曾断言
+//   "这段话里含 `muted=0`"——那是**自证式断言**（只断言自己打的那句话，`--sound` 的接线丢了照绿）。
+//   真正的判据落在**引擎状态**上：CTest `aot-audio-wiring`（真 run，读收口摘要的
+//   `audio     : … muted=0`，并用 `--audio virtual` 不给 `--sound` 的 `muted=1` 当对照组）。
+// ★ 洞 4/5 的口径（2026-11-17，`REQ-01M7K04EY6D3GQNB5DRWP0DYJ8`）：
+//   · 读数那两行**只在 `--audio virtual|sdl` 或 `--audio-dump` 时**存在（只给 `--sound` ⇒ 档位 off）：
+//     实测 `--sound` ⇒ stdout 无 `audio     :` / `audio-pump:` 行；`--sound --audio virtual` ⇒ 两行都在。
+//   · `--audio-dump` 的字节数**照实测定**（2026-11-17，AOT 臂，`--exe` 拆壳件 +
+//     `--game-dir ../../dist/install` + `--audio-dump <tmp>.wav --max-frames 300 --skip-logo
+//     --present headless`）：**仍是 44 B（data=0）**，同一次 run 的读数是
+//     `fills=12 fill_bytes=1152000 mixed=0 pushed=0` ⇒ S3 接线之后 dump **也不保证有 PCM**
+//     （交付字节账 = `mixed` / `pushed`；`fills` / `fill_bytes` 只说明 guest 真的写过环）。
+//     ⛔ 不许把"S3 之后就有 PCM"写进文案——那是没验证过的承诺。
 // ★ 跟踪单 id 写在 `kAotSoundNotice` 里（`REQ-01M7G7GPBG9BK2360WSG6DBFNP` = S0–S2；
 //   `REQ-01M7JZM1QQ728KX1C0G2F232T1` = S3 泵 / S4 出声）。
 //   守卫 `cli-aot-flags` 按**形态**判（必须出现 `REQ-`、且不许出现 `TODO(`）——换单号不会让它红。
@@ -119,16 +135,21 @@ inline constexpr const char* kWindowFlagsAot =
 inline constexpr const char* kAotSoundNotice =
     "emulator-lift-aot: --sound 已接受：取消缺省静音门（muted=0），并真正传给音频引擎"
     "（不再是硬写 false）\n"
-    "  · 档位由 --audio 决定（缺省 off / virtual / sdl）；要 PCM 落盘请给 --audio-dump <path>\n"
+    "  · 档位由 --audio 决定（缺省 off / virtual / sdl）；--audio-dump <path> 把交付缓冲写成 WAV\n"
     "  · 音频泵在**块边界**推进（每 4096 条 guest 指令一次；AOT 恒主线程 D 泵）\n"
-    "  · 读数：收口时 stdout 的 `audio     :` 一行（mode / device / muted / muted_bytes / …）"
-    "与 `audio-pump:` 一行（calls / fills / fill_bytes / pushed）\n"
+    "  · 读数：**仅当给了 --audio virtual|sdl 或 --audio-dump 时**，收口时 stdout 才有 "
+    "`audio     :` 一行（mode / device / muted / muted_bytes / …）与 `audio-pump:` 一行"
+    "（calls / fills / fill_bytes / pushed）；只给 --sound 时档位是 off ⇒ **这两行都不存在**\n"
+    "  · --audio-dump 的 WAV = 44 字节头 + 这一跑**真交付**（mixed）的字节（data 记在头里）："
+    "没有真交付时它就是 44 字节（data=0）—— S3 接泵之后也**不保证**有 PCM\n"
+    "  · 判断\"有没有 PCM\"看 fills / fill_bytes / mixed / pushed，⛔ 别只看文件在不在\n"
     "  · 跟踪单：REQ-01M7G7GPBG9BK2360WSG6DBFNP（S0 定档 / S1 参数面 / S2 生命周期）、"
     "REQ-01M7JZM1QQ728KX1C0G2F232T1（S3 泵）\n";
 
 /** `--help` 里 AOT 臂 `--sound` 那一行（与上面那条说明同一口径：接受，且真的进静音门）。 */
 inline constexpr const char* kAotSoundHelp =
     "  --sound              取消缺省静音门（muted=0）；档位仍由 --audio 决定\n"
-    "                      （缺省 off ⇒ 不开设备 / 不产生 PCM；读数看摘要 `audio     :` 一行）\n";
+    "                      （缺省 off ⇒ 不开设备 / 不产生 PCM；读数 `audio     :` 一行**只在**\n"
+    "                      给了 --audio virtual|sdl 或 --audio-dump 时才有）\n";
 
 }  // namespace lift

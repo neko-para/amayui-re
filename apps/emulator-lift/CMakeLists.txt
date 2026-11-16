@@ -673,6 +673,13 @@ add_test(NAME cursor-warp COMMAND lift-cursor-warp)
 # ★ 顶层无条件注册 ⇒ pure 档（判据 = 注册位置，见 AGENTS.md §12.4）。
 add_executable(lift-cli-aot-flags tests/cli_aot_flags.cpp)
 target_link_libraries(lift-cli-aot-flags PRIVATE emulator-lift-runtime)
+# ★ **必须显式依赖产品 exe**（`REQ-01M7K04EY6D3GQNB5DRWP0DYJ8` 洞 7 的连带发现）：
+#   本用例**spawn** `emulator-lift-aot` 去读它的 `--help` / 退出码，而变异自检的
+#   `buildTarget: 'lift-cli-aot-flags'` 只重建守卫 exe ⇒ 产品 exe 会停在**变异前** ⇒ 那条变异**假绿**。
+#   加这一行之后 `cmake --build --target lift-cli-aot-flags` 会把产品 exe 一起重编重链。
+#   ⚠ **任何 spawn 产品 exe 的 CTest 都要有这一行**（对照：`lift-aot-audio-wiring` 同形）。
+#   ⛔ 不要把它当"顺手加的依赖"删掉 —— 删了不会红，只会让变异自检**静默**变成声称。
+add_dependencies(lift-cli-aot-flags emulator-lift-aot)
 add_test(NAME cli-aot-flags COMMAND lift-cli-aot-flags $<TARGET_FILE:emulator-lift-aot>)
 set_tests_properties(cli-aot-flags PROPERTIES SKIP_RETURN_CODE 77)
 
@@ -1928,6 +1935,25 @@ add_test(NAME aot-audio-flags COMMAND lift-aot-audio-flags)
 add_executable(lift-aot-audio-pump tests/aot_audio_pump.cpp)
 target_link_libraries(lift-aot-audio-pump PRIVATE emulator-lift-runtime)
 add_test(NAME aot-audio-pump COMMAND lift-aot-audio-pump)
+
+# ---- `--sound` / `--audio` / `--audio-dump` 的**接线**（洞 4/5/6/7 的机械判据）-------------
+# ★ 判据 = **引擎自己打的读数**（`audio     : … muted=0|1`）+ WAV 的结构，⛔ 不是 `kAotSoundNotice`
+#   那句文案（旧 `cli-aot-flags` 的 `sound-accepted-with-once-notice` 只断言自己的文案 ⇒ 自证式）。
+#   判据清单与"红了意味着什么"见 `tests/aot_audio_wiring.cpp` 的文件头；核心一条：
+#   **删掉 `aot_main` / `AotHost::configureAudio` 里 `--sound` 的接线 ⇒ 这条用例红**。
+# ★ 为什么是**真 run**（4 次 `--max-frames 5`，本机 CTest 读数 2.1 s）：那三段是接线，纯夹具只钉得住最后一段
+#   （`aot-audio-flags` 的 ③ 已钉 `AudioEngine` 自己）。
+# ★ 缺 GPU / 缺生成物 / 缺执行源 ⇒ `LIFT_SKIP(77)`（CMake 侧 `SKIP_RETURN_CODE 77`）；
+#   ⛔ 不挪到 `if()` 里当"只在有资产时才注册"——那会让"这台机器上它从不证明任何事"变成静默事实。
+add_executable(lift-aot-audio-wiring tests/aot_audio_wiring.cpp)
+target_link_libraries(lift-aot-audio-wiring PRIVATE emulator-lift-runtime)
+# ★ 守卫**通过子进程**跑产品 exe ⇒ 必须声明这条依赖：否则 `cmake --build out --target
+#   lift-aot-audio-wiring`（变异自检 `buildTarget` 的用法）只重建守卫 exe、产品 exe 停在**变异前**
+#   ⇒ 变异施加了却读的是旧二进制 ⇒ 那条变异条目会**假绿**（本仓 `cli-aot-flags` 的同形坑）。
+add_dependencies(lift-aot-audio-wiring emulator-lift-aot)
+add_test(NAME aot-audio-wiring
+    COMMAND lift-aot-audio-wiring $<TARGET_FILE:emulator-lift-aot> "${AGE_SECTFIX_EXE}")
+set_tests_properties(aot-audio-wiring PROPERTIES SKIP_RETURN_CODE 77)
 
 if(DEFINED ENV{LIFT_AUDIO_SDL_DEVICE})
     add_executable(lift-audio-sdl-device tests/audio_sdl_device.cpp)
