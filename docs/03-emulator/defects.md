@@ -666,3 +666,47 @@
   ⚠ 旧探测用的是 `await presents 150`（帧号门，今天**解析期硬错**）；`await script TITLE` 是**就近替换、
   不是等价**（两者的 guest 时刻不同，见候选①）。
   入库图 `graphs/title-loaddata.graph`（坐标 `1070,480` 是**用户给的**，非本仓推导）。
+
+### BUG-27 · `bt/bts/btr/btc` 的**内存形**把位偏移截成低 5 位（寄存器形语义）⇒ 客侧 `_strcspn` 跳错槽 ⇒ `_setlocale` 失败 ⇒ 日文文本按**字节**量
+
+- **现象**（2026-11-17 用户口径 + 读数）：SC0000 的加载确认框「ロードしますか？」两颗按钮偏宽
+  （引擎客户区口径 `0xA0+0x1D*9c` = **334 px**，字符口径应 **247**）；`i2c6` 的 `local 9c = 6`（应 3）。
+  ⇒ 中文/日文文本在日文执行环境里按字节算宽度，UI 排版整体偏宽。
+- **根因**：Intel SDM（BT/BTS/BTR/BTC 的 Operation 段）——**寄存器形**才把位偏移截到操作数宽度的低位；
+  **内存形**的位偏移是**地址**偏移：访问 `EA + (BitOffset DIV 位宽) * 字节数`，只有余数选位。
+  我们两臂都无条件截成低 5 位 ⇒ 客侧 CRT 的 `_strcspn`（32 字节位图、`bts/bt [esp],eax`）跳错槽：
+  `"japanese"` 的第 4 字节 `'n'=0x6E` 与分隔符 `'.'=0x2E` 低 5 位同为 14 ⇒ 被误判成"命中分隔符"
+  ⇒ 语言解析成 `"japa"`、国家 `"ese"` ⇒ LCID 查不到 ⇒ `setlocale` 返回 NULL ⇒ `mb_cur_max=1`
+  ⇒ `__mbstrlen` 走 `strlen`。
+- **修法**：`src/runtime/exec_integer.cpp`（`Op::Bt/Bts/Btr/Btc`，语义真源）内存形
+  `dst.mem.disp += (off / 位宽) * 字节数`、`bit = off & (位宽-1)`；`src/aot/lift_gen_emit.cpp`
+  `emitBitTest` 同一判据（`sdiv` + `loadMemAt/storeMemAt`，读写语义只有一份）。
+  连带：`aot/closure.txt` 补 `0x004F80E0`（`EnumSystemLocalesA` 的回调 EA；它只以**未对齐立即数**
+  `push $0x4F80E0` 出现在 `0x4F822B`，D26 的 4 字节对齐扫描抓不到 ⇒ 修好位偏移后第一次走到它就
+  `decode-error @ 004F80E0`）。
+- **读数**（mac arm64 / RelWithDebInfo / `split8-O2-lto-abi`）：`local 9c` **6 → 3**；按钮宽三种口径
+  都 **−87**（青色填充 322→235 · 外沿 342→255 · 客户区 334→247）；60 帧语义指纹五项逐位相同
+  （`entries` 33509→33517 = 闭包 +1 根的预期）。A/B 与打印：`.tmp/sc0000/locale-diag.md`。
+- **何时 / 谁发现**：2026-11-17，用户指出"raw 上的排版也歪了就是我们的问题"→ 诊断 subagent 用
+  `setlocale` 入参打印定位（`lang=[japa] country=[ese]`）。
+- **代表守卫**：`tests/conformance_cases.cpp` 的 6 条内存形用例（`bt-mem-hi-slot` / `bt-mem-low-bit-only`
+  负控 / `bts-mem-slot` / `btr-mem-slot` / `btc-mem-slot` / `bt-mem-word` 16 位）+ AOT 侧
+  `tests/ops_diff.cpp` 用真实站点 `0x4F7C8D`/`0x4F7CA8` 两臂比较。变异：去掉 `disp` 修正 ⇒ 红；
+  AOT 把 delta 折 0 ⇒ `lift-ops-diff` 红。⚠ **`conformance_cases.cpp` 只驱动解释器**：AOT 语义是
+  构建期从 `AGE.EXE` 生成的，造"合成字节的 AOT 臂"= §12.8 禁止的第三份实现 ⇒ 两臂同判拆成两层。
+- **复现**：`.tmp/sc0000/lc-dialog.plan`（`load24` 截到确认框）+ 全新 appdata；`emu-ctl screenshot`
+  量按钮宽，或临时打印 `local 9c`。
+
+### BUG-28 · `GetCPInfo` 的 `CPINFO::LeadByte` 写到 +4（文档是 +6）⇒ 0x81–0x9F 前导字节整段丢
+
+- **现象**：与 BUG-27 同一用户可见结果（文本按字节量、按钮偏宽）。**只修 BUG-27 时 `local 9c` 仍 6**；
+  两处都修才 3。
+- **根因**：`CPINFO = UINT MaxCharSize(4) + BYTE DefaultChar[MAX_DEFAULTCHAR=2] + BYTE LeadByte[MAX_LEADBYTES=12]`
+  ⇒ `LeadByte` 从 **+6** 起。旧实现写 +4：`0x81/0x9F` 落进 `DefaultChar`，`LeadByte` 只剩 `{0xE0,0xFC}`
+  ⇒ 客侧 CRT 的 `__mbctype` 不把 `0x81–0x9F` 当前导字节 ⇒ 平假名首字节（`0x82`）按单字节数。
+- **修法**：`src/shims/kernel32_bootstrap.cpp` `shimGetCPInfo`：`buf[6..9] = 81,9F,E0,FC`，
+  `buf[4]/[5]`（`DefaultChar`）保持 0。
+- **读数**：`GetCPInfo(932)` 的 18 字节块 `02 00 00 00 00 00 81 9F E0 FC 00 …`（修前 `… 81 9F E0 FC` 在 +4）。
+- **何时 / 谁发现**：2026-11-17，同一轮诊断（A/B 的第二因）。
+- **代表守卫**：`tests/locale_ext.cpp#get-cp-info-layout`（`MaxCharSize==2`、`+4/+5==0`、`+6..+9=={81,9F,E0,FC}`、
+  其余字节不被写）。变异：`buf[6]→buf[4]` ⇒ 红。
