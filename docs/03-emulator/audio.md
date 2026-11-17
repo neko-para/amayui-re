@@ -63,3 +63,17 @@ audio-pump: calls=0 fills=3 fill_bytes=288000 pushed=428800 feeder=host-thread l
 ★ `calls=0` 是 **thread 档的正常读数**（主线程一次都不泵），⛔ 不要拿它当"没跑音频"。
 ★ `dev_frames` 是 SDL 设备缓冲，与 lead **两笔账**（提前垫多少 / 设备一次取走多少），⛔ 不要相加成"总延迟"。
 ◆ 设备打不开 ⇒ 回退 `virtual` ⇒ 自然是 D 泵（`lead=115200 B`）：那时只记"真设备档未测"，⛔ 不要放宽谓词。
+
+## 4. 吞吐读数（2026-11-17 / mac arm64 M3 / 转场 90 s / `--audio sdl --sound`）
+
+```
+fills=186  fill_bytes=15561900  pushed=17304320  played=17285120  notify=186
+underruns=2  underrun_silence_events=2  underrun_silence_bytes=124672
+fill_max_ms=1016.04  fill_slow=1  fill_overlapped=5
+```
+
+- **平均 ≈ 484 ms 一刀**（每刀产出 ~0.5 s 音频）⇒ 平均利用率 ~95–100%，**没有余量**。
+- **最坏 1.0 s 一刀** ⇒ 那两刀 underrun，各插入 ~0.32 s 静音；机制是"插静音、**时间轴不漂**"（`underrun_silence_*`），
+  所以**音乐整体节奏不会变**，只是偶发空档。
+- 对照：解释器时代（含已退役的 per-EA override）是 **200–250 ms/刀**。
+- 归因未做（feeder 没有 per-thread profile）⇒ 单子 `REQ-01M7N0G…`（先测再优化）。
