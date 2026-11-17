@@ -48,7 +48,8 @@ alpha test(bit30) · FLAT(31) · **stage≥1(33)** · 多 bpp(36) · 寻址(37) 
 - ✅ **P1**（已收口，同子单）：导出 9 参 + 9 槽 `ID3DXEffect` 只记状态；E2E `exit 0 / pending=0 / unimplemented=0`；
   ★ 实测**推翻**了"effect draw 会被 stage≥1 拒绝"的预期（203 只绑 Tex0 ⇒ bit33 不触发）⇒ 新增临时具名位 **44**
   `effect shader 尚未实现执行`，每批一条 warn（E2E 1195 批）。P2 要把它翻面。
-- **P2**：Fade(201) 的 MSL + DXBC(SM5.1) 双源 + 后端"每 draw 一个 shader + 常量 + 2 纹理" + 只对 effect draw 开口子。
+- ✅ **P2**（已收口，子单 `REQ-01M7MSGRRHCA23RAX1QGDAYJ3X`）：Fade(201) 的 MSL + DXBC(SM5.1) 双源 + 每 draw 一个 shader/常量/2 纹理；
+  像素 oracle 1 LSB；NaN 档「不可观测」；翻面**按 technique 分流**（Fade recorded / 203·202 仍具名拒绝）。
   判据：两张已知纹理 + `Alpha∈{0,0.5,1}` 的像素 oracle；账本 `recorded` 非 `skipped`。
 - **P3**：203 两个 technique（10-tap）。★ 价值重述（2026-11-17 探针）：**画面正确性**（effect 层今天整层被丢弃），
   ⛔ 不再是"换 insns 收益"—— 该窗口的 2e10/帧是 **caps=0（等级 0）** 走软件模糊的产物，等级 ≥2 时软件模糊 0 次调用。
