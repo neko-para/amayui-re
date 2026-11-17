@@ -94,6 +94,33 @@ void caseFixedScales() {
                          "1920x1080 窗口 + 1280x720 画面：expected scale=1.5 off=(0,0), got %.9f off=(%.9f,%.9f)",
                          map.scale, map.off_x, map.off_y);
     }
+    // ★ 范围裁决（2026-11-18）：`--scale` **只改窗口，不改帧** ⇒ readout 必须自己说清
+    //   "image 仍是 1280×720（放大，接受模糊）"，⛔ 不许让人读成"帧被重渲染成 1920×1080"。
+    {
+        lift::ScaleReport scaled;
+        scaled.scale = 1.5;
+        scaled.window_w = 1920;
+        scaled.window_h = 1080;
+        const std::string line = lift::scaleReadoutLine(scaled);
+        std::printf("[readout-1.5] %s\n", line.c_str());
+        ++lift_test::g_checks;
+        if (line != "scale: 1.5（window 1920x1080，image 1280x720；放大，接受模糊）") {
+            lift_test::failf(__FILE__, __LINE__, "1.5 readout 不是期望的那一行：`%s`", line.c_str());
+        }
+    }
+    // 缩小档（s < 1）说"缩小"，⛔ 不冒充"放大，接受模糊"；恰好 1.0 不加这一句（缺省那一行已钉）。
+    {
+        lift::ScaleReport half;
+        half.scale = 0.5;
+        half.window_w = 640;
+        half.window_h = 360;
+        const std::string line = lift::scaleReadoutLine(half);
+        std::printf("[readout-0.5] %s\n", line.c_str());
+        ++lift_test::g_checks;
+        if (line != "scale: 0.5（window 640x360，image 1280x720；缩小）") {
+            lift_test::failf(__FILE__, __LINE__, "0.5 readout 不是期望的那一行：`%s`", line.c_str());
+        }
+    }
 }
 
 // ---- ③ 鼠标映射：窗口像素 → 画面像素（只走 cursor_map.h 的既有公式）----
@@ -215,7 +242,9 @@ void caseAutoDpi() {
     ok_report.window_h = ok_size.h;
     const std::string ok_line = lift::scaleReadoutLine(ok_report);
     std::printf("[readout-auto-ok] %s\n", ok_line.c_str());
-    LIFT_CHECK(ok_line == "scale: 1.25（window 1600x900，image 1280x720；auto ← display content scale 1.25）");
+    LIFT_CHECK(ok_line ==
+               "scale: 1.25（window 1600x900，image 1280x720；放大，接受模糊；"
+               "auto ← display content scale 1.25）");
 
     lift::ScaleReport fb_report;
     fb_report.auto_requested = true;
