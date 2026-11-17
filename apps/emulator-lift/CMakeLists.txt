@@ -1518,6 +1518,14 @@ add_executable(lift-timer-ext tests/timer_ext.cpp)
 target_link_libraries(lift-timer-ext PRIVATE emulator-lift-runtime)
 add_test(NAME timer-ext COMMAND lift-timer-ext)
 
+# ---- pure：**墙钟 vs uptime** 的拆分（BUG-30；判据见 tests/kernel32_time.cpp 文件头）----
+# ★ 修前的形状：GetLocalTime / GetSystemTime 把宿主 uptime 当 1970 epoch 展开（存档显示 1970/1/6）。
+#   这里同时钉两条：uptime 仍是单调 uptime（GetTickCount），墙钟 / 本地时间 / FILETIME 走真实 epoch；
+#   时区通过 `shims/time_zone.h` 的测试缝注入（⛔ 不依赖本机 TZ、不断言当前年份）。
+add_executable(lift-kernel32-time tests/kernel32_time.cpp)
+target_link_libraries(lift-kernel32-time PRIVATE emulator-lift-runtime)
+add_test(NAME kernel32-time COMMAND lift-kernel32-time)
+
 # ---- pure：S6 前三族的**核心行为**（内存 / 错误码·TLS / 同步）----
 # ★ 补的是"最常走的那条路"没有可再校验观察的缺口（审计单 REQ-01M6JFZ73GTZE9F6967RRSH6CE）；
 #   判据见 tests/shims_core.cpp 的文件头（每条至少两个断言，含宿主可见状态）。

@@ -732,3 +732,50 @@
   **读数**：`pushed - played` 115200 B（600.0 ms）→ **19200 B（100.0 ms）**（4/4 次精确同值）；
   `calls=` 12 万级 → **0**；underruns / `fill_slow` 全 0；`dev_frames=1024`（21.3 ms，另一笔账）。
   **代表守卫**：`aot_audio_flags.cpp#s0-thread-mode-truth-table`（用户裁决的机械表达）+ `audio.cpp#audio-device/feeder-teb-is-own`（BUG-22 回归口）。
+
+### BUG-30 · 存档列表显示 `1970/1/6 21:23`：`GetLocalTime`/`GetSystemTime` 把宿主 uptime 当 1970 epoch（且不做时区）（**已修**，2026-11-18）
+
+- **现象**（用户 2026-11-18 实测）：存档列表的时间显示 `1970/1/6 21:23`；同一份存档的时间随宿主开机时长漂移。
+- **根因**：`runtime/clock.h` 的 `rawNow100ns()` 取 `steady_clock`（零点 = 宿主开机），`now100ns()` 没有 epoch 项
+  （`epoch_100ns_` 只进 `machine.cpp` 的 trace、从未被 set）；`shims/kernel32_time.cpp` 的 `GetLocalTime` / `GetSystemTime`
+  直接把它按"1970-01-01 起"展开 ⇒ 引擎拿到的本地时间 = `1970-01-01` + 宿主 uptime。
+  AOT 臂 `aot_run.cpp` / `aot_host.cpp` **强制** real-time ⇒ 产品臂没有虚拟档可躲。
+- **写侧 / 读侧均无错**：写侧 `0x4377B6 GetLocalTime` → 0x124 B header `+0x108`（16 B `SYSTEMTIME`），`0x437869 WriteFile`；
+  读侧 `0x438120` 原样搬 header、`0x42D700` 原样交给脚本，`SAVE.BIN` 用字面量 `/` `:` 画数字（所以不补零）。
+- **读数（2026-11-18 / win32，修前）**：宿主 boot `2026-11-12 04:35:16`（WMI，1 s 粒度），SAVE03.DAT `+0x108` =
+  `b2 07 01 00 02 00 06 00 15 00 17 00 36 00 f9 02` ⇒ `1970-01-06(dow=2) 21:23:54.761`（自 1970 起 509,034.761 s）；
+  `boot + 509,034.761 s` = `2026-11-18 01:59:10.8`，与该文件 mtime `01:59:11.204` 差 0.4 s（六份 header 全部 <1 s）。
+  同一串按 `FILETIME` / `time_t` / `i64 100ns` 解释都对不上 21:23 ⇒ 不是未初始化内存。
+- **次因（独立、被主因掩盖）**：`GetLocalTime == GetSystemTime`、不读宿主时区（`kernel32_time.cpp` 偏差 1）
+  ⇒ epoch 修好后画面仍是 UTC，与 +08 差 8 小时。`time` / `_time64` / `SystemTimeToFileTime` / `FileTimeToLocalFileTime`
+  在 AGE.EXE 里**没有导入**，也无对应 shim。
+- **修法方向（原登记，未实施时的判据）**：把"墙钟"与"uptime"拆开 —— `GetTickCount` / `timeGetTime` / QPC 仍用单调 uptime；
+  `GetLocalTime` / `GetSystemTime` / `GetSystemTimeAsFileTime` / `GetThreadTimes` 用 `system_clock` 起步的墙钟；
+  `GetLocalTime` 再做宿主时区换算。测试用注入墙钟 base + 时区，⛔ 不断言"当前年份"。
+- **修法（已实施，2026-11-18）**：
+  · `runtime/clock.h` 新增 `wall100ns()`（**1970-01-01 00:00:00Z** 起算的 100 ns）：
+    `wall_base_100ns_ + now100ns()`。real 档在 `setRealTime(true)` 捕获 `system_clock::now() - rawNow100ns()`
+    （单调零点那一刻的墙钟）⇒ 之后只随单调增量走（宿主 NTP 回拨 / 手改钟不会让墙钟倒退或跳）；
+    虚拟档 base 缺省 **0** ⇒ 与修前的展开**逐位相同**。`now100ns()` / `nowMs()` / `qpc()` 一行未改。
+    测试缝 `setWallBaseForTest(base)`；冻结语义与 `now100ns()` 同源（暂停对墙钟同样不可见）。
+  · `shims/kernel32_time.cpp`：`GetSystemTime` = UTC 墙钟；`GetLocalTime` = UTC → **宿主时区**；
+    `GetSystemTimeAsFileTime` = 墙钟 + 1601 delta；`GetThreadTimes` 的创建时间用墙钟。
+    `GetTickCount` / `GetTickCount64` / `timeGetTime` / QPC 不动。
+  · 时区落在新头 `src/shims/time_zone.h`：Windows `SystemTimeToTzSpecificLocalTime(nullptr, …)`、
+    POSIX `localtime_r()` 的 `tm_gmtoff` —— **DST 按被换算的那个 UTC 时刻判定**（⛔ 不看"现在是不是夏令时"）。
+    测试缝 `setOffsetForTest(fn)` 注入 `(UTC 秒) → 偏移秒`，用例不依赖本机 TZ。
+- **读数（2026-11-18 / win32 / RelWithDebInfo，修后）**：注入墙钟 `2024-03-05T12:34:56.789Z` + uptime `1 h` ⇒
+  `GetSystemTime` = `2024/3/5(dow=2) 12:34:56.789`；同一时刻 `GetTickCount` = **3,600,000**（证明两条读数已拆开）；
+  `GetSystemTimeAsFileTime - 0x019DB1DED53E8000` = 注入墙钟（往返一致）；`GetThreadTimes` 创建时间 = 同一 FILETIME。
+  假 DST 规则（冬 +1 h / 夏 +2 h）下，`2024-01-15T12:00Z` ⇒ `GetLocalTime` 13:00、`2024-07-15T12:00Z` ⇒ 14:00，
+  `GetLocalTime - GetSystemTime` 恰为注入偏移；冻结 5 s 期间墙钟与 uptime 都不前进，解冻后只随单调增量走。
+  **CTest**：`kernel32-time` 59 checks / 0 failures（0.03 s）；全量 `ctest` = **109/109**（155.71 s，0 skip）。
+  **变异**：`node tools/mutate-check.mjs --match kernel32-time` ⇒ `GetSystemTime` 退回 `now100ns()` 后该守卫**红**
+  （CTest 退出码 8），1/1 按预期变红，之后全量重建回基线。
+- **未做 / 待验**：**真存档画面未复验**（需要游戏安装 + 一次存档写读；本轮的判据是注入时钟的 CTest）。
+  预期：`SAVE.BIN +0x108` 从 `1970/1/6` 变成宿主本地日期（+08 机器上比 UTC 多 8 h）。
+- **代表守卫**：`kernel32_time.cpp / wall-vs-uptime-split`（uptime 与墙钟必须同时成立）、
+  `filetime-and-thread-creation-use-wall`、`local-time-host-zone-dst`（假 DST 规则）、
+  `virtual-base-plus-virtual-now`、`freeze-freezes-wall-too`；CTest 名 `kernel32-time`。
+- **复现**：直接读 header：
+  `[IO.File]::ReadAllBytes('<SAVE03.DAT>')[0x108..0x117]` 后按 `SYSTEMTIME`（16 B LE）展开。

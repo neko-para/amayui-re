@@ -4073,6 +4073,26 @@ const MUTATIONS = [
       'effect-draw-blur-recorded 在 `program == SlideBlurPs20` 上当场红（纯档、不依赖 GPU），' +
       'blur-pixels 也会红；★ 这条对 win32（DXBC）同样成立',
   },
+
+  // ── 墙钟 vs uptime（BUG-30）：`GetSystemTime` 退回"把 uptime 当 1970 epoch"的修前形状 ──
+  //   ★ 代表"把两条读数又合成一条"这一类错：uptime 读数本身是单调的、`GetTickCount` 仍然对，
+  //     所以**只有**"墙钟要真的是 epoch"那一半的断言会红（年份 / 月日逐位不符）。
+  //   ⛔ 不选 `GetLocalTime` 的同一行：它还会经过时区，红了分不清是 uptime 混进来还是偏移错了。
+  {
+    file: 'apps/emulator-lift/src/shims/kernel32_time.cpp',
+    from:
+      '    writeSystemTime(cpu, call.u32(0), civilFrom100ns(cpu.clock->wall100ns()), "GetSystemTime");',
+    to:
+      '    writeSystemTime(cpu, call.u32(0), civilFrom100ns(cpu.clock->now100ns()), "GetSystemTime");  // 变异：退回 uptime',
+    guard: 'ctest:kernel32-time',
+    ctest: 'kernel32-time',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-kernel32-time',
+    what:
+      'GetSystemTime 退回 `now100ns()`（宿主 uptime）⇒ 注入的墙钟 2024-03-05T12:34:56.789Z 被展开成 ' +
+      '1970-01-01 + 1 h ⇒ `kernel32-time` 的 wall-vs-uptime-split 在年份 / 月日 / 时分秒上红' +
+      '（uptime 那一半仍绿，正是 BUG-30 的修前形状）',
+  },
 ];
 
 let mutationRunSeq = 0;
