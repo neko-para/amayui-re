@@ -18,10 +18,13 @@
 
 | | caps = 0（现状） | caps = 3.0（实验） |
 |---|---|---|
-| `D3DXCreateEffectFromResourceA` | **0 次** | **出现**（`stop: unimplemented @ eip=7FFE0060`） |
-| 跑到哪里 | 43,241,506,632 条 / 1600 帧 | 5,733,532,029 条 / 1525 帧（在第 1525 帧停在该导入） |
+| `D3DXCreateEffectFromResourceA` | **0 次**（600.60 s / 14,122 帧 / 843.9e9 条跑满） | **12.74 s 就调到**（`stop: unimplemented @ eip=7FFE0060`，`insns=5.73e9 / frames=1525`） |
+| callsite / 实参 | — | `0x004B0798`；资源 **201** = 效果等级 2；`Engine+0xB590` 只建一次 |
 
-⇒ **分路确认**：引擎按 caps 选 FX/pixel shader 路径 vs 软件路径；我们报 0 是它走软件的**原因**。
+⇒ **分路确认（单变量、有 EA 链）**：`GetDeviceCaps` 的 `D3DCAPS9.PixelShaderVersion`（caps 缓冲 `[ebp+var_140]`
+与门 `[ebp+var_74]` 相差 `0xCC`）决定引擎去不去建 effect。
+⚠ 证据强度要分清：**"分路"是已证**；"FX 路取代软件模糊"是**同帧推论**（改后 run 在建 effect 那帧就停了，
+看不到替代过程）；"真机走 FX 路"是**推断**（本段单帧 2e10 条 guest 指令真机也跑不赢），**没有真机读数**。
 
 ## 要裁决的事（⛔ agent 不能替用户拍板）
 
