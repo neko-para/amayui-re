@@ -846,9 +846,10 @@ public:
            const std::set<std::uint32_t>& dropped_blocks,
            const std::map<std::uint32_t, BlockFlags>& flags, const GenStructure& structure,
            const std::map<std::uint32_t, std::uint32_t>& entry_owner, GenEmitStats* stats,
-           std::vector<GenUnsupported>* unsupported)
+           std::vector<GenUnsupported>* unsupported, const GenIrTarget& ir_target)
         : comp_(comp), entries_(entries), dropped_(dropped_blocks), flags_(flags),
-          structure_(structure), owner_(entry_owner), stats_(stats), unsupported_(unsupported) {}
+          structure_(structure), owner_(entry_owner), stats_(stats), unsupported_(unsupported),
+          ir_target_(ir_target) {}
 
     std::string run();
     // ★ S3：生成期硬错（不是警告）。`emitModule` 见到 true ⇒ 返回 false ⇒ `lift-gen` 退出码 1。
@@ -1099,6 +1100,9 @@ private:
     const std::map<std::uint32_t, std::uint32_t>& owner_;  // ★ S7：入口 EA → 单元根
     GenEmitStats* stats_;
     std::vector<GenUnsupported>* unsupported_;
+    // ★ 本单：`define` 行的 `#0 {` 与 `emitPrologue` 的 `attributes #0 = {...}` 是**同一份**取值
+    //   （都由 `lift-gen --ir-target-*` 传进来）。`empty()` ⇒ 定义行与今天逐字节相同（⛔ 不发 `#0`）。
+    const GenIrTarget& ir_target_;
     std::string body_;
     int tmp_ = 0;
     std::set<std::uint32_t> exit_ea_;  // 需要单独 `ret` 块的入口 EA（jcc 的两个出口）
@@ -5497,7 +5501,10 @@ std::string FnEmit::run() {
     std::sort(entries.begin(), entries.end());
     entries.erase(std::unique(entries.begin(), entries.end()), entries.end());
 
-    put("define i32 @" + genFunctionName(comp_.root) + "(ptr %st, ptr %mem, i32 %ea, ptr %cpu) {\n");
+    // ★ 本单：`ir_target_` 非空 ⇒ 定义行挂 `#0 {`（属性组在 `emitPrologue` 里发；两组值同源）；
+    //   空 ⇒ 与今天**逐字节相同**（既有夹具 / `--check` / golden 走的就是这条路）。
+    put("define i32 @" + genFunctionName(comp_.root) + "(ptr %st, ptr %mem, i32 %ea, ptr %cpu)" +
+        (ir_target_.empty() ? "" : " #0") + " {\n");
     put("entry:\n");
     // ★ A3：这里**不再**预先发 9 条 `%p_sN = getelementptr i8, ptr %st, i64 K`。
     //   那些 GEP 在旧实现里**一次都没被用过**（`loadReg` / `flushRegs` 各自另发），
@@ -5590,7 +5597,7 @@ bool emitBodies(const std::vector<GenComponent>& components,
                 const std::set<std::uint32_t>& entry_set,
                 const std::set<std::uint32_t>& dropped_blocks, const GenStructure& structure,
                 GenEmitStats* stats, std::vector<GenUnsupported>* unsupported,
-                std::vector<std::string>* chunks) {
+                std::vector<std::string>* chunks, const GenIrTarget& ir_target) {
     // ★ S7：入口 EA → 单元根（调用目标的归属）。**用 components 自己的 entries**（含 D21 跳表加进来的），
     //   与派发表同一份来源 ⇒ 不会出现"表里有、这里没有"。
     std::map<std::uint32_t, std::uint32_t> entry_owner;
@@ -5620,7 +5627,7 @@ bool emitBodies(const std::vector<GenComponent>& components,
     }
     for (const GenComponent& comp : components) {
         FnEmit emit(comp, entry_set, dropped_blocks, block_flags, structure, entry_owner, stats,
-                    unsupported);
+                    unsupported, ir_target);
         std::string one = emit.run();
         if (emit.failed()) {
             // ★ S3-a：生成期硬错（"读了/要物化一个 Poison 位"= flags 活性自相矛盾）。
@@ -5637,7 +5644,8 @@ bool emitBodies(const std::vector<GenComponent>& components,
 
 // 模块头 + `declare` 清单（**全局读数**；拆分时每份重复这一段 ⇒ 每份都是独立可编译模块）。
 // ★ `stats` 是**全部** body 发射之后的累计值 ⇒ 头部读数与单份模块完全一致（同输入同字节）。
-std::string emitPrologue(const GenClosureStats& closure, const GenEmitStats* stats) {
+std::string emitPrologue(const GenClosureStats& closure, const GenEmitStats* stats,
+                         const GenIrTarget& ir_target) {
     std::string text;
     text += "; emulator-lift · Shape A / T1c —— 由 `emulator-lift-gen` 生成，⛔ 不手改、不 commit。\n";
     text += "; 契约：%st = LiftRegs*（r[0..7] + eflags@+32）；%mem = guest EA 0 的宿主基址；\n";
@@ -5817,6 +5825,18 @@ std::string emitPrologue(const GenClosureStats& closure, const GenEmitStats* sta
                  static_cast<unsigned long long>(stats->lift_one_sites),
                  static_cast<unsigned long long>(stats->flags_fused));
     text += "\n";
+    // ★ 本单：**函数属性组**（`#0`）—— 注释头之后、`declare` 之前，**恰好一行**。
+    //   · 值**原样**拼进去（不转义）：`--ir-target-*` 从 configure 期的 clang 探针来，
+    //     与运行库 TU 的函数属性串**逐字相同**（mac 期望读数见 `.tmp/codegen/attrs-min.txt`）。
+    //   · ⛔ 只在 `ir_target` 两个值都非空时发：任一为空 ⇒ 产物与今天**逐字节相同**
+    //     （既有 C++ 测试 / `--check` / golden 夹具都直接调这些 API，不能因为"顺手对齐"变字节）。
+    //   · 为什么这行是 LTO 内联的**唯一**开关（不是 codegen 开关）：LLVM 的
+    //     `areInlineCompatible()` 比函数属性，一侧缺 ⇒ callee 的 feature 不是 caller 的子集 ⇒
+    //     `lift_tick` / `lift_note_write` 一条都内联不进 AOT（`.tmp/lto/report.md` §5.2/§5.3）。
+    if (!ir_target.empty()) {
+        text += "attributes #0 = { \"target-cpu\"=\"" + ir_target.cpu + "\" \"target-features\"=\"" +
+                ir_target.features + "\" }\n";
+    }
     // ★ E2 / S1：给两个**逐指令**宿主原语加内存属性 —— 这是"clang 愿不愿把 `%st` 保活"的许可实验。
     //   `argmemonly`：`lift_tick` 只碰 `cpu->insns`、`lift_note_write` 只碰 `cpu->cache`
     //   （`aot_host.cpp:60` 把 cache 置 nullptr ⇒ AOT 里它连那一层都不碰）⇒ 两者**只访问指针参数
@@ -5884,12 +5904,13 @@ bool emitModule(const std::vector<GenComponent>& components,
                 const std::set<std::uint32_t>& entry_set,
                 const std::set<std::uint32_t>& dropped_blocks, const GenClosureStats& closure,
                 const GenStructure& structure, std::string* out, GenEmitStats* stats,
-                std::vector<GenUnsupported>* unsupported) {
+                std::vector<GenUnsupported>* unsupported, const GenIrTarget& ir_target) {
     if (out == nullptr || stats == nullptr || unsupported == nullptr) return false;
     std::vector<std::string> chunks;
-    if (!emitBodies(components, entry_set, dropped_blocks, structure, stats, unsupported, &chunks))
+    if (!emitBodies(components, entry_set, dropped_blocks, structure, stats, unsupported, &chunks,
+                    ir_target))
         return false;
-    std::string text = emitPrologue(closure, stats);
+    std::string text = emitPrologue(closure, stats, ir_target);
     for (const std::string& c : chunks) text += c;
     *out = std::move(text);
     return true;
@@ -5900,7 +5921,8 @@ bool emitModuleSplit(const std::vector<GenComponent>& components,
                      const std::set<std::uint32_t>& dropped_blocks, const GenClosureStats& closure,
                      const GenStructure& structure, std::size_t split, GenEmitStats* stats,
                      std::vector<GenUnsupported>* unsupported, std::vector<std::string>* parts,
-                     std::vector<std::vector<std::uint32_t>>* part_roots) {
+                     std::vector<std::vector<std::uint32_t>>* part_roots,
+                     const GenIrTarget& ir_target) {
     if (stats == nullptr || unsupported == nullptr || parts == nullptr || part_roots == nullptr)
         return false;
     if (split == 0) split = 1;
@@ -5912,7 +5934,8 @@ bool emitModuleSplit(const std::vector<GenComponent>& components,
     if (split > components.size()) split = components.size();
     // ★ 全局分析一次（entry_owner / block_flags / body 全部在这里；⛔ 不按份重算）。
     std::vector<std::string> chunks;
-    if (!emitBodies(components, entry_set, dropped_blocks, structure, stats, unsupported, &chunks))
+    if (!emitBodies(components, entry_set, dropped_blocks, structure, stats, unsupported, &chunks,
+                    ir_target))
         return false;
     // ★ 分桶（确定性纯函数）：分量根 EA 升序、贪心填到 `Σbody/split`。
     //   `components` 本身已按根升序 ⇒ 用下标顺序即可；这里仍显式排序，防上游顺序变动改变产物。
@@ -5936,7 +5959,7 @@ bool emitModuleSplit(const std::vector<GenComponent>& components,
         buckets[bi].push_back(idx);
         acc += sz;
     }
-    const std::string prologue = emitPrologue(closure, stats);
+    const std::string prologue = emitPrologue(closure, stats, ir_target);
     parts->clear();
     part_roots->clear();
     for (std::size_t b = 0; b < split; ++b) {

@@ -117,6 +117,7 @@ using lift::aot::GenBlock;
 using lift::aot::GenComponent;
 using lift::aot::GenEdge;
 using lift::aot::GenEmitStats;
+using lift::aot::GenIrTarget;
 using lift::aot::GenUnsupported;
 
 // 8 位大写 hex（定义在下面"⑤ --pin / --table"块里；识别 / 审计的 EA 打印要先用到它）
@@ -213,6 +214,17 @@ struct Options {
     //   （CTest `lift-aot-split-manifest` 的被测入口；六项断言见下面 verifyAotSplit 的头注）。
     //   ⛔ 不需要 `--exe` / `--roots` / `--out`；没有生成物时 skip（exit 0）。
     std::string verify_split;
+    // ★ 本单：AOT `.ll` 的**函数属性**（`"target-cpu"` / `"target-features"`）—— 与运行库 TU 对齐。
+    //   · 取值**唯一来源** = configure 期的 clang 探针（`CMakeLists.txt` 的 `ir_target_probe.c`）⇒
+    //     CMake 用 `--ir-target-cpu/--ir-target-features` 传进来。⛔ 不写死 `apple-m1`（win 上根本不是它）。
+    //   · **两者任一为空 ⇒ 产物逐字节等于今天**（不发 `attributes #0`、define 行不加 ` #0`）：
+    //     既有夹具 / `--check` / 直接调 API 的路径都不传这两个参数。
+    //   · 为什么是属性而不是 `-mcpu`：见 `lift_gen_emit.h` 的 `GenIrTarget` 头注（`-mcpu` 实测无效）。
+    GenIrTarget ir_target;
+    // ★ `--verify-ir-target <aot-dir>`：**独立模式**——只读 `out/aot/` 的产物，验"每个
+    //   `define i32 @lift_cc_*` 都挂着与运行库一致的 target 属性组"（CTest `lift-aot-ir-target-attrs`
+    //   的被测入口）。⛔ 不需要 `--exe/--roots/--out`；没有生成物时 skip（exit 0），与 `--verify-split` 同口径。
+    std::string verify_ir_target;
     // ★ 入库件硬闸（`--closure-gate`）：**生成这一趟同时**做 `--check` 的五条校验并打同一行汇总。
     //   CMake 的 AOT 生成命令带它 ⇒ 坏闭包在**构建期**硬红，且只分析一次（省 48.6 s）。
     //   ⛔ 缺省关：测试夹具的 roots 文件不是 `0x`+8 位严格文法（`tests/ir/*_roots.txt`），
@@ -233,6 +245,13 @@ void usage() {
         "  --split-prefix <s>    分片文件名前缀（缺省 lift_aot ⇒ `<dir>/lift_aot.partNN.ll`）\n"
         "  --verify-split <dir>  独立模式：只读 <dir> 的产物验分片清单自洽（CTest\n"
         "                        `lift-aot-split-manifest` 的被测入口；没有生成物 ⇒ skip、exit 0）\n"
+        "  --ir-target-cpu <s>   写进 `.ll` 的 `\"target-cpu\"` 函数属性（configure 期的 clang 探针取值；\n"
+        "                        缺省空 ⇒ 不发属性、产物与不带本参数时逐字节相同）\n"
+        "  --ir-target-features <s>  同上，`\"target-features\"`（原样字符串，不转义）\n"
+        "  --verify-ir-target <dir>  独立模式：验每个 `define i32 @lift_cc_*` 都挂着与运行库一致的\n"
+        "                        target 属性组（CTest `lift-aot-ir-target-attrs` 的被测入口；\n"
+        "                        需要同时给 --split N 与 --ir-target-cpu/--ir-target-features；\n"
+        "                        没有生成物 ⇒ skip、exit 0）\n"
         "  --pin <file.h>        额外写 exe 的 sha256 + entry（AOT 启动核对，D1；⛔ 不入库）\n"
         "  --table <file.inc>    额外写派发表 `EA → lift_cc_<根>`（AOT 的 EA→LiftFn 查找面；⛔ 不入库）\n"
         "  --no-close-calls      关掉静态调用闭包（D14 默认开；对照档 = 只按 --roots 展开）\n"
@@ -3164,6 +3183,141 @@ int verifyAotSplit(const std::string& arg, std::size_t split) {
     return 0;
 }
 
+// =====================================================================================
+// ★ `--verify-ir-target <aot-dir> --split N --ir-target-cpu <cpu> --ir-target-features <feat>`
+//   （CTest `lift-aot-ir-target-attrs` 的被测入口）
+//
+// 判据（**每份** `.ll`；产物名的口径与 `--verify-split` 完全一致：N=1 ⇒ `<dir>/lift_aot.ll`，
+//   N>1 ⇒ `<dir>/lift_aot.partNN.ll`）：
+//   ① 恰好**一行**以 `attributes #0 = {` 开头，且其中两个值**逐字**等于参数；
+//   ② 每个以 `define i32 @lift_cc_` 开头的行都以 ` #0 {` 结尾。
+//
+// 为什么这两条是判据（⛔ 不是风格检查）：
+//   LLVM 的 LTO 内联器 `areInlineCompatible()` 比的是**函数属性**（callee 的 feature 必须是 caller
+//   的子集）。运行库 TU 由 C++ 前端编译 ⇒ 每个函数都带 `"target-cpu"` / `"target-features"`；
+//   生成物若不带（或只带一半），两边就判"不相容" ⇒ `lift_tick` / `lift_note_write` **一条都不内联**，
+//   而**没有任何东西会喊**（构建成功、产物正常、运行结果也一样，只有站点数与墙钟静默不变）。
+//   ⇒ 这条用例红了意味着：LTO 一旦打开也买不到任何东西，而你以为买到了。
+//
+// ★ 没有生成物（缺 clang / 执行源 / closure.txt ⇒ 没有 `lift_pin.h` / `lift_table.inc`）⇒ **skip、exit 0**：
+//   与 `--verify-split` 同一条"没有生成物不算红"（AOT 侧"没有生成物"由 `emulator-lift-aot` 启动时
+//   响亮报告并 exit 1 覆盖）。
+// 退出码：0 = OK / skip；1 = 判据破了；2 = 参数或读文件错。
+// =====================================================================================
+int verifyAotIrTarget(const std::string& arg, std::size_t split, const GenIrTarget& want) {
+    if (split == 0) {
+        std::fprintf(stderr, "emulator-lift-gen: --verify-ir-target 的 --split 必须 ≥ 1\n");
+        return 2;
+    }
+    std::error_code ec;
+    std::filesystem::path dir(arg);
+    if (std::filesystem::is_regular_file(dir, ec)) dir = dir.parent_path();
+    // ★ 与 `--verify-split` **同一条** skip 口径："本次构建没有 AOT 生成物"。
+    if (!std::filesystem::exists(dir / "lift_pin.h") ||
+        !std::filesystem::exists(dir / "lift_table.inc")) {
+        std::printf(
+            "lift-gen --verify-ir-target: skip（没有 lift_pin.h / lift_table.inc："
+            "本次构建没有 AOT 生成物）\n");
+        return 0;
+    }
+    // ★ 有产物却没有期望值 = CMake 那侧的接线掉了（探针没跑 / 参数没传）。
+    //   ⛔ 不许当 skip —— 那正是本用例要防的静默失效（属性整条消失而门禁照样绿）。
+    if (want.empty()) {
+        std::fprintf(stderr,
+                     "emulator-lift-gen --verify-ir-target: 期望值为空（cpu=`%s`；features=%zu 字符）"
+                     "⇒ CMake 没把 configure 期探针的 `--ir-target-cpu/--ir-target-features` 传进来；"
+                     "这会让 `attributes #0` 与 define 行的 ` #0 {` 一起消失 ⇒ LTO 的 "
+                     "areInlineCompatible 判不相容、lift_tick / lift_note_write 静默不内联\n",
+                     want.cpu.c_str(), want.features.size());
+        return 2;
+    }
+    auto fail = [](const std::string& msg) {
+        std::fprintf(stderr, "emulator-lift-gen --verify-ir-target: %s\n", msg.c_str());
+        return 1;
+    };
+    const std::string attrs_prefix = "attributes #0 = {";
+    const std::string cpu_pair = "\"target-cpu\"=\"" + want.cpu + "\"";
+    const std::string feat_pair = "\"target-features\"=\"" + want.features + "\"";
+    const std::string define_prefix = "define i32 @lift_cc_";
+    const std::string define_tail = " #0 {";
+    std::uint64_t defines = 0;
+    for (std::size_t i = 0; i < split; ++i) {
+        std::string name;
+        if (split == 1) {
+            name = "lift_aot.ll";
+        } else {
+            char b[64];
+            std::snprintf(b, sizeof(b), "lift_aot.part%02zu.ll", i);
+            name = b;
+        }
+        const std::filesystem::path p = dir / name;
+        if (!std::filesystem::exists(p)) {
+            return fail("第 " + std::to_string(i) + " 份 `" + p.string() +
+                        "` 不存在（pin / 派发表在却没有这一份 ⇒ 产物形状陈旧："
+                        "改了 LIFT_AOT_SPLIT 却没重新生成 `.ll`）");
+        }
+        std::string text;
+        if (!readTextFile(p, &text)) {
+            return fail("读不了第 " + std::to_string(i) + " 份 `" + p.string() + "`");
+        }
+        std::size_t attrs_lines = 0;
+        std::string attrs_line;
+        std::uint64_t part_defines = 0;
+        for (const std::string& line : splitTextLines(text)) {
+            if (line.compare(0, attrs_prefix.size(), attrs_prefix) == 0) {
+                ++attrs_lines;
+                attrs_line = line;
+            }
+            if (line.compare(0, define_prefix.size(), define_prefix) != 0) continue;
+            ++part_defines;
+            if (line.size() < define_tail.size() ||
+                line.compare(line.size() - define_tail.size(), define_tail.size(), define_tail) !=
+                    0) {
+                const std::size_t lparen = line.find('(');
+                const std::string fn = line.substr(0, lparen);
+                const std::string tail =
+                    line.size() > 48 ? "…" + line.substr(line.size() - 48) : line;
+                return fail("第 " + std::to_string(i) + " 份 `" + name + "`：`" + fn +
+                            "` 的 define 行尾是 `" + tail + "`（应为 ` #0 {`）⇒ 这个函数**没有** "
+                            "target 属性 ⇒ LTO 里 callee 的 feature 不是 caller 的子集 ⇒ "
+                            "areInlineCompatible 判不相容 ⇒ lift_tick / lift_note_write "
+                            "静默不内联（构建成功、运行结果一样，只是没有收益）");
+            }
+        }
+        if (attrs_lines != 1) {
+            return fail(
+                "第 " + std::to_string(i) + " 份 `" + name + "`：`attributes #0 = {` 出现 " +
+                std::to_string(attrs_lines) + " 行（应为恰好 1 行）" +
+                (attrs_lines == 0
+                     ? " ⇒ 属性组缺失：define 行挂着 #0 却没有可解析的属性（clang 直接报错），"
+                       "define 行不挂 #0 则函数属性与运行库对不上 ⇒ LTO 判不相容、tick/note 静默不内联"
+                     : " ⇒ 同一份里有两个 #0 组，哪一组生效说不清"));
+        }
+        if (attrs_line.find(cpu_pair) == std::string::npos) {
+            return fail("第 " + std::to_string(i) + " 份 `" + name + "`：属性组里没有逐字出现 `" +
+                        cpu_pair + "`（实际行=`" + attrs_line +
+                        "`）⇒ 与运行库 TU 的 target-cpu 对不上 ⇒ areInlineCompatible 判不相容");
+        }
+        if (attrs_line.find(feat_pair) == std::string::npos) {
+            return fail("第 " + std::to_string(i) + " 份 `" + name +
+                        "`：属性组里的 `\"target-features\"` 不是**逐字**等于参数串（实际行=`" +
+                        attrs_line +
+                        "`）⇒ 与运行库 TU 的 feature 集对不上 ⇒ areInlineCompatible 判不相容 "
+                        "⇒ tick/note 静默不内联");
+        }
+        defines += part_defines;
+    }
+    if (defines == 0) {
+        return fail(
+            "所有份里一条 `define i32 @lift_cc_` 都没有（pin / 派发表在场却零定义 ⇒ 产物是空壳，"
+            "上面两条断言会恒真 ⇒ 这条用例什么也没验到）");
+    }
+    std::printf(
+        "lift-gen --verify-ir-target: OK（parts=%zu；defines=%llu；cpu=%s；features=%zu 字符）\n",
+        split, static_cast<unsigned long long>(defines), want.cpu.c_str(), want.features.size());
+    return 0;
+}
+
 }  // namespace
 
 // =====================================================================================
@@ -3212,6 +3366,12 @@ int main(int argc, char** argv) {
             if (!needValue("--split-prefix", &opt.split_prefix)) return 2;
         } else if (a == "--verify-split") {
             if (!needValue("--verify-split", &opt.verify_split)) return 2;
+        } else if (a == "--ir-target-cpu") {
+            if (!needValue("--ir-target-cpu", &opt.ir_target.cpu)) return 2;
+        } else if (a == "--ir-target-features") {
+            if (!needValue("--ir-target-features", &opt.ir_target.features)) return 2;
+        } else if (a == "--verify-ir-target") {
+            if (!needValue("--verify-ir-target", &opt.verify_ir_target)) return 2;
         } else if (a == "--pin") {
             if (!needValue("--pin", &opt.pin)) return 2;
         } else if (a == "--table") {
@@ -3273,6 +3433,10 @@ int main(int argc, char** argv) {
     // ★ `--verify-split` 是**独立模式**：只读 `out/aot/` 的产物，⛔ 不需要 `--exe/--roots/--out`。
     if (!opt.verify_split.empty()) {
         return verifyAotSplit(opt.verify_split, opt.split);
+    }
+    // ★ `--verify-ir-target` 同族（独立模式）：只读 `out/aot/` 的产物 + 那两个期望值。
+    if (!opt.verify_ir_target.empty()) {
+        return verifyAotIrTarget(opt.verify_ir_target, opt.split, opt.ir_target);
     }
     // ★ `--check` 是**独立模式**：只吃 `--exe` + 一个 closure.txt，⛔ 不需要 `--roots/--out`。
     if (!opt.check.empty()) {
@@ -3531,12 +3695,13 @@ int main(int argc, char** argv) {
         // ★★ 一次全局分析（`emitModuleSplit` 内部走 `emitBodies`：entry_owner / block_flags /
         //    structured_roots 全部按**全集**算一次）⇒ 拆分只是**输出的分区**。
         if (!lift::aot::emitModuleSplit(components, all_entries, drops.dropped, closure, gen_structure,
-                                        opt.split, &stats, &unsupported, &parts, &part_roots)) {
+                                        opt.split, &stats, &unsupported, &parts, &part_roots,
+                                        opt.ir_target)) {
             std::fprintf(stderr, "emulator-lift-gen: 发射器内部错误\n");
             return 1;
         }
     } else if (!lift::aot::emitModule(components, all_entries, drops.dropped, closure, gen_structure,
-                                      &ir, &stats, &unsupported)) {
+                                      &ir, &stats, &unsupported, opt.ir_target)) {
         std::fprintf(stderr, "emulator-lift-gen: 发射器内部错误\n");
         return 1;
     }

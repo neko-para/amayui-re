@@ -300,6 +300,10 @@ set(LIFT_AOT_SPLIT 8 CACHE STRING
     "AOT IR 拆成几份：1 = 单份路径（今天的形状）；N>1 = 按分量根 EA 升序贪心分桶（N = 8 是裁决值）")
 # ★ IR 的编译参数**唯一落点**（configure 期断言盯的就是这一行）。
 set(LIFT_AOT_CLANG_FLAGS -c -O2)
+# ★ 本单：IR 的 target 函数属性（唯一的两个值）。**缺省空** = 不发属性（产物与今天逐字节相同）；
+#   有 clang 的那条路上由下面的**探针**填（⛔ 不在这里写死任何 CPU 名）。
+set(LIFT_AOT_IR_TARGET_CPU "")
+set(LIFT_AOT_IR_TARGET_FEATURES "")
 if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLOSURE}")
     set(LIFT_AOT_TARGET_FLAGS "")
     if(WIN32)
@@ -336,6 +340,65 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
         endforeach()
     endif()
 
+    # =================================================================================
+    # ★ configure 期**探针**：IR 的 target 函数属性（`"target-cpu"` / `"target-features"`）。
+    #   这是这两个值的**唯一来源** —— 用**同一份** clang（同一个 `LIFT_AOT_TARGET_FLAGS`）编一个
+    #   极小的 C 文件，把前端写进函数属性的那一串读出来。⛔ 不写死 `apple-m1`：win 上是
+    #   `x86-64` + 空 feature 集（`.tmp/codegen/report.md` §1.3 的实测），写死就等于把 mac 的裁决
+    #   带进别的平台。
+    #
+    #   为什么需要"和运行库同一份"（本单的判据，⛔ 不是"让 codegen 用上更多指令"）：
+    #   · `clang -###` 摊开看，AOT `.ll` 与 C++ TU 的 **codegen 参数逐项相同**（同一 `-target-cpu`
+    #     + 同一串 feature）⇒ codegen 早就一致；差异只在**函数属性**这一层（C++ 前端会写，
+    #     生成物过去一条都不写）。
+    #   · LLVM 的 LTO 内联判据 `areInlineCompatible()` 比的是**函数属性**（callee 的 feature 必须是
+    #     caller 的子集）⇒ 一侧缺属性 = 不相容 ⇒ `lift_tick` / `lift_note_write` 一条都内联不进 AOT
+    #     （`.tmp/lto/report.md` §5.2/§5.3）。
+    #   · 给 `.ll` 的 driver 加 `-mcpu=...` **无效**：实测产物逐字节相同（`-mcpu` 只影响 codegen，
+    #     ⛔ 不给函数补属性）。
+    #   · 补属性是 **codegen 中性** 的：手工把 C++ TU 的属性串注进 part00 后 `.obj` 与默认逐字节
+    #     相同（`.tmp/codegen/report.md`）⇒ 于是"8 个 obj 的 sha256 逐一不变"能当本单的判据。
+    #   ★ mac 的期望读数（与 `.tmp/codegen/attrs-min.txt` **逐字**相同）：
+    #       target-cpu      = apple-m1
+    #       target-features = +aes,+altnzcv,+bti,+ccdp,+ccidx,+complxnum,+crc,+dit,+dotprod,+flagm,
+    #                         +fp-armv8,+fp16fml,+fptoint,+fullfp16,+jsconv,+lse,+neon,+pauth,
+    #                         +perfmon,+predres,+ras,+rcpc,+rdm,+sb,+sha2,+sha3,+specrestrict,
+    #                         +ssbs,+v8.1a,+v8.2a,+v8.3a,+v8.4a,+v8.5a,+v8a,+zcm,+zcz（36 个）
+    #     ⚠ 读数会随 clang / 机器变（这正是"不能写死"的理由）⇒ 本块只断言"非空"，不断言具体值。
+    # =================================================================================
+    file(MAKE_DIRECTORY "${LIFT_AOT_DIR}")
+    file(WRITE "${LIFT_AOT_DIR}/ir_target_probe.c" "int f(void) { return 0; }\n")
+    execute_process(
+        COMMAND ${LIFT_AOT_IR_CLANG} ${LIFT_AOT_TARGET_FLAGS} -S -emit-llvm -O2
+                -o "${LIFT_AOT_DIR}/ir_target_probe.ll" "${LIFT_AOT_DIR}/ir_target_probe.c"
+        RESULT_VARIABLE LIFT_AOT_PROBE_RC
+        OUTPUT_VARIABLE _LIFT_AOT_PROBE_OUT   # 只为不把 clang 的输出混进 configure 日志
+        ERROR_VARIABLE LIFT_AOT_PROBE_ERR)
+    if(NOT LIFT_AOT_PROBE_RC EQUAL 0)
+        message(FATAL_ERROR
+            "IR target 探针编不过（clang=${LIFT_AOT_IR_CLANG} rc=${LIFT_AOT_PROBE_RC}）："
+            "`${LIFT_AOT_PROBE_ERR}`")
+    endif()
+    file(READ "${LIFT_AOT_DIR}/ir_target_probe.ll" _LIFT_AOT_PROBE_LL)
+    #   两段正则各自只留一个捕获组 ⇒ 取 `CMAKE_MATCH_1`（探针 .ll 里的属性组形如
+    #   `attributes #0 = { … "target-cpu"="<cpu>" "target-features"="<feat>" }`）。
+    string(REGEX MATCH "\"target-cpu\"=\"([^\"]*)\"" _LIFT_AOT_PROBE_CPU
+           "${_LIFT_AOT_PROBE_LL}")
+    set(LIFT_AOT_IR_TARGET_CPU "${CMAKE_MATCH_1}")
+    string(REGEX MATCH "\"target-features\"=\"([^\"]*)\"" _LIFT_AOT_PROBE_FEAT
+           "${_LIFT_AOT_PROBE_LL}")
+    set(LIFT_AOT_IR_TARGET_FEATURES "${CMAKE_MATCH_1}")
+    if(NOT LIFT_AOT_IR_TARGET_CPU OR NOT LIFT_AOT_IR_TARGET_FEATURES)
+        # ★ 这里必须**当场**失败：探针没拿到 target 属性 ⇒ 生成物与运行库的 LTO 属性会对不上 ⇒
+        #   LTO 静默不内联（构建照绿、产物照跑，只是没有收益）。那是**没有任何症状**的失效。
+        message(FATAL_ERROR
+            "IR target 探针没拿到 target 属性（cpu=`${LIFT_AOT_IR_TARGET_CPU}`；"
+            "features=`${LIFT_AOT_IR_TARGET_FEATURES}`）⇒ 生成物与运行库的 LTO 属性会对不上 ⇒ "
+            "areInlineCompatible 判不相容、lift_tick / lift_note_write 静默不内联。"
+            "探针产物见 `${LIFT_AOT_DIR}/ir_target_probe.ll`（clang=${LIFT_AOT_IR_CLANG}）")
+    endif()
+    message(STATUS "emulator-lift-aot: IR target 属性 = cpu `${LIFT_AOT_IR_TARGET_CPU}` / features `${LIFT_AOT_IR_TARGET_FEATURES}`（configure 期探针）")
+
     # ① 生成物：一次 custom command 写全部 `.ll`（N=1 = 一份）+ 分片清单（N>1）+ pin + 派发表。
     #    ★ `--closure-gate` = **构建期硬闸**（`--check` 的五条校验、同一行汇总）在**生成这一趟**
     #      里做 —— 不再有第二条独立的 `--check` 命令（那会把同一个 `buildAll` 跑两遍，省 48.6 s）。
@@ -361,6 +424,8 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
             --exe "${LIFT_AOT_AGE_EXE}" --roots "${LIFT_AOT_CLOSURE}"
             --closure-gate --split ${LIFT_AOT_SPLIT} --split-prefix lift_aot
             --out-dir "${LIFT_AOT_DIR}"
+            --ir-target-cpu "${LIFT_AOT_IR_TARGET_CPU}"
+            --ir-target-features "${LIFT_AOT_IR_TARGET_FEATURES}"
             --pin "${LIFT_AOT_DIR}/lift_pin.h"
             --table "${LIFT_AOT_DIR}/lift_table.inc")
     else()
@@ -371,6 +436,8 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
             --exe "${LIFT_AOT_AGE_EXE}" --roots "${LIFT_AOT_CLOSURE}"
             --closure-gate
             --out "${LIFT_AOT_DIR}/lift_aot.ll"
+            --ir-target-cpu "${LIFT_AOT_IR_TARGET_CPU}"
+            --ir-target-features "${LIFT_AOT_IR_TARGET_FEATURES}"
             --pin "${LIFT_AOT_DIR}/lift_pin.h"
             --table "${LIFT_AOT_DIR}/lift_table.inc")
     endif()
@@ -593,6 +660,24 @@ enable_testing()
 # =====================================================================================
 add_test(NAME lift-aot-split-manifest
          COMMAND emulator-lift-gen --verify-split "${LIFT_AOT_DIR}" --split ${LIFT_AOT_SPLIT})
+
+# =====================================================================================
+# ★ AOT 形状守卫 ②：**IR 的 target 函数属性与运行库对齐**（顶层无条件 ⇒ `pure` 档）。
+#   判据在**被测二进制** `emulator-lift-gen --verify-ir-target`：每份 `.ll` 恰好一行
+#   `attributes #0 = {`（两个值逐字等于 configure 期探针的读数）+ 每个 `define i32 @lift_cc_`
+#   行都以 ` #0 {` 结尾。
+#   为什么这是判据（⛔ 不是风格检查）：LLVM 的 LTO 内联器 `areInlineCompatible()` 比的是**函数属性**
+#   —— 一侧缺属性 ⇒ `lift_tick` / `lift_note_write` 一条都不内联，而**没有任何东西会喊**
+#   （构建成功、产物正常、运行结果一样，只是没有收益）。`.tmp/lto/report.md` §5.2/§5.3。
+#   ★ 期望值就是"生成命令用的那两个变量"（同一份），⛔ 不从 `.ll` 里反读（那是自证）。
+#   ★ `LIFT_AOT_SPLIT=1` 也在这同一处注册：份数由 `LIFT_AOT_SPLIT` 决定，产物名口径与
+#     `--verify-split` 一致（N=1 ⇒ `lift_aot.ll`；N>1 ⇒ `lift_aot.partNN.ll`）。
+#   没有生成物（缺 clang / 执行源 / closure.txt）时 `--verify-ir-target` 自己 skip（exit 0，不红）。
+# =====================================================================================
+add_test(NAME lift-aot-ir-target-attrs
+         COMMAND emulator-lift-gen --verify-ir-target "${LIFT_AOT_DIR}" --split ${LIFT_AOT_SPLIT}
+                 --ir-target-cpu "${LIFT_AOT_IR_TARGET_CPU}"
+                 --ir-target-features "${LIFT_AOT_IR_TARGET_FEATURES}")
 
 # =====================================================================================
 # 测试（`LIFT_BUILD_TESTS`，默认 ON；`-DLIFT_BUILD_TESTS=OFF` ⇒ 只构建产品二进制）

@@ -234,6 +234,33 @@ struct GenEmitStats {
     bool used_lift_dyn = false;
 };
 
+// =====================================================================================
+// ★ 本单：AOT `.ll` 里每个 `define i32 @lift_cc_*` 的**函数属性**（`"target-cpu"` /
+//   `"target-features"`）—— 与运行库 TU 对齐的那一份。
+//
+//   为什么需要它（⛔ 不是"让 codegen 用上更多指令"）：
+//   · `clang -###` 摊开看，`.ll` 输入与 C++ 输入的 codegen 参数**逐项相同**（同一 `-target-cpu`
+//     + 同一串 feature）⇒ **codegen 早就一致**，差的只是**函数属性**这一层。
+//   · LLVM 的 LTO 内联判据 `areInlineCompatible()` 比的是**函数属性**（callee 的 feature 必须是
+//     caller 的子集）：C++ 前端会把 CPU 名写进每个函数的属性，而本生成器过去一条都不写
+//     ⇒ 一侧缺属性 = 不相容 ⇒ `lift_tick` / `lift_note_write` 一条都内联不进 AOT。
+//   · 给 `.ll` 的 driver 加 `-mcpu=...` **无效**（实测产物逐字节相同）：`-mcpu` 只影响 codegen，
+//     ⛔ 不会给函数补属性。
+//   · 补属性是 **codegen 中性** 的：手工把 C++ TU 的属性串注进 part00 后 `.obj` 与默认逐字节相同
+//     （`.tmp/codegen/report.md`）⇒ 本单的判据就是"8 个 obj 的 sha256 逐一不变"。
+//
+//   ★ **取值唯一来源** = configure 期的 clang 探针（`CMakeLists.txt` 的 `ir_target_probe.c` →
+//     `lift-gen --ir-target-cpu/--ir-target-features`）。⛔ 不写死 `apple-m1`：win 上是
+//     `x86-64` + 空 feature 集，写死就等于把 mac 的裁决带进别处。
+//   ★ **两者任一为空 ⇒ 输出必须逐字节等于今天**（默认构造的 POD 走的就是这条路）：
+//     既有 C++ 测试 / `--check` / golden 夹具都直接调这些 API，⛔ 不能因为"顺手对齐一下"变字节。
+struct GenIrTarget {
+    std::string cpu;
+    std::string features;
+    // 两个都非空才发属性（见上：任一为空 ⇒ 今天的字节）。
+    bool empty() const { return cpu.empty() || features.empty(); }
+};
+
 // 把分区结果整份吐成 LLVM IR 文本（单模块）。
 // `entry_set` = 全部分量根 ∪ 全部 resume EA（决定"目标是不是入口 EA ⇒ ret i32"）。
 // `dropped_blocks` = 被丢弃的派生 leader（D10 P3）：它们**没有块**，所以任何指向它们的边
@@ -244,7 +271,8 @@ bool emitModule(const std::vector<GenComponent>& components,
                 const std::set<std::uint32_t>& entry_set,
                 const std::set<std::uint32_t>& dropped_blocks, const GenClosureStats& closure,
                 const GenStructure& structure, std::string* out, GenEmitStats* stats,
-                std::vector<GenUnsupported>* unsupported);
+                std::vector<GenUnsupported>* unsupported,
+                const GenIrTarget& ir_target = GenIrTarget{});
 
 // ★ 拆分输出（`lift-gen --split N`）：**全局分析一次**，只把"输出"按分量分桶。
 //   红线的机械形态（design.md §3.2-3）：`entry_owner` / `block_flags` / `structure.structured_roots`
@@ -259,7 +287,8 @@ bool emitModuleSplit(const std::vector<GenComponent>& components,
                      const std::set<std::uint32_t>& dropped_blocks, const GenClosureStats& closure,
                      const GenStructure& structure, std::size_t split, GenEmitStats* stats,
                      std::vector<GenUnsupported>* unsupported, std::vector<std::string>* parts,
-                     std::vector<std::vector<std::uint32_t>>* part_roots);
+                     std::vector<std::vector<std::uint32_t>>* part_roots,
+                     const GenIrTarget& ir_target = GenIrTarget{});
 
 }  // namespace aot
 }  // namespace lift

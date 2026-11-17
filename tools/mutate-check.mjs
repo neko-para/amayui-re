@@ -3764,6 +3764,37 @@ const MUTATIONS = [
       '`--target <守卫>` 只重建守卫 exe 时产品 exe 停在变异前，而 `--list` 看起来完全正常 ⇒ ' +
       'mutate-static 的 spawn 依赖用例（h) 的四条失配 / i) 的覆盖计数）红',
   },
+  // ── AOT `.ll` 的 target 函数属性（守卫 = CTest `lift-aot-ir-target-attrs`）─────────────
+  //   ★ 代表"**属性掉了，而构建与运行都完全正常**"这一类静默失效：LLVM 的 LTO 内联器
+  //     `areInlineCompatible()` 比的是**函数属性**（callee 的 feature 必须是 caller 的子集）。
+  //     生成物不挂 `#0` ⇒ 与运行库 TU 判不相容 ⇒ `lift_tick` / `lift_note_write` 一条都内联不进
+  //     AOT（`.tmp/lto/report.md` §5.2/§5.3 的实测），而**没有任何东西会喊**：
+  //     构建成功、产物正常、60 帧语义指纹逐位相同，只有 LTO 的收益静默消失。
+  //   ★ 变异形态：属性组 `attributes #0 = {…}` **照旧发射**（`emitPrologue` 那半边不动），只把
+  //     `define` 行的 ` #0` 摘掉 ⇒ 组还在、没人引用 ⇒ **IR 仍然合法可编**（实测 clang 接受未引用的
+  //     属性组）⇒ 于是红的一定是 `--verify-ir-target` 的第 ② 条，⛔ 不是"构建失败"那种不可判定。
+  //   ★ `buildTarget` **故意不填**（= 全量构建）：这条用例的判据读的是 `out/aot/*.ll`，而
+  //     `.ll` 由 **`emulator-lift-aot`** 的 custom command 生成、`emulator-lift-gen` 只是它的
+  //     `DEPENDS`。⇒ `--target emulator-lift-gen` 只重链工具、**不重新生成 `.ll`** ⇒ 守卫读到旧产物
+  //     ⇒ **假绿**；而 `--target emulator-lift-aot` 虽正确，却在 `staticManifestCheck` 里过不了
+  //     （那里要求 `buildTarget` == `add_test(NAME <x> COMMAND <y>)` 推出的 `<y>` = `emulator-lift-gen`）。
+  //     全量构建是本仓唯一"既重建工具又重建产物"的口径，代价只是这一条多编几秒。
+  {
+    file: 'apps/emulator-lift/src/aot/lift_gen_emit.cpp',
+    from:
+      '    put("define i32 @" + genFunctionName(comp_.root) + "(ptr %st, ptr %mem, i32 %ea, ptr %cpu)" +\n' +
+      '        (ir_target_.empty() ? "" : " #0") + " {\\n");',
+    to:
+      '    put("define i32 @" + genFunctionName(comp_.root) + "(ptr %st, ptr %mem, i32 %ea, ptr %cpu)" +\n' +
+      '        (ir_target_.empty() ? "" : "") + " {\\n");  // 变异：define 行不再挂 #0',
+    guard: 'ctest:lift-aot-ir-target-attrs',
+    ctest: 'lift-aot-ir-target-attrs',
+    buildDir: 'apps/emulator-lift/out',
+    what:
+      '`define i32 @lift_cc_*` 行不再挂 `#0`（属性组照旧发射但没人引用）⇒ 函数上没有 target-cpu / ' +
+      'target-features ⇒ LTO 的 areInlineCompatible 与运行库 TU 判不相容 ⇒ lift_tick / lift_note_write ' +
+      '静默不内联（构建成功、语义指纹相同 ⇒ 只有收益消失）⇒ lift-aot-ir-target-attrs 的第 ② 条红',
+  },
 ];
 
 let mutationRunSeq = 0;
