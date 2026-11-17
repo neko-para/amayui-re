@@ -710,6 +710,15 @@ target_sources(emulator-lift-runtime PRIVATE
     src/runtime/pixel_format.cpp)
 target_link_libraries(emulator-lift-runtime PUBLIC glm::glm)
 # =====================================================================================
+# M2 · DirectXMath（**只在 `runtime/math.cpp` 里用**：`XMMatrixDecompose` 是
+#   `D3DXMatrixDecompose` 的语义真源 —— 134 例与 native d3dx9_43 对拍一致，
+#   见 `docs/03-emulator/d3dx-math.md`。⛔ `XMVECTOR` / DirectXMath 头**不准**进任何公共头
+#   （`runtime/math.h` 继续只暴露 glm）⇒ 链接一律 PRIVATE。
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+# =====================================================================================
+find_package(directxmath CONFIG REQUIRED)
+target_link_libraries(emulator-lift-runtime PRIVATE Microsoft::DirectXMath)
+# =====================================================================================
 # 宿主侧 MPEG-1 影片解码（vendor pl_mpeg；无 COM / 无 guest / 无 SDL / 无线程）
 # ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
 # ★ pl_mpeg 是单文件库：`third_party/pl_mpeg/pl_mpeg_impl.cpp` 是**唯一**定义

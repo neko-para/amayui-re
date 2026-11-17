@@ -86,6 +86,7 @@ constexpr std::uint32_t kProcD3DXMatrixRotationAxis = 0x7FF81140u;
 constexpr std::uint32_t kProcD3DXMatrixRotationYawPitchRoll = 0x7FF81160u;
 constexpr std::uint32_t kProcD3DXMatrixOrthoLH = 0x7FF81180u;
 constexpr std::uint32_t kProcD3DXCreateTextureFromFileInMemory = 0x7FF811A0u;
+constexpr std::uint32_t kProcD3DXMatrixDecompose = 0x7FF811C0u;
 constexpr std::uint32_t kSentinel = 0xFFFFFFFFu;
 constexpr std::uint32_t kFixtureHeapBytes = 0x00100000u;
 
@@ -236,6 +237,7 @@ struct Fixture {
         if (!fixStub("d3dx9_43", "D3DXCreateTextureFromFileInMemory",
                      kProcD3DXCreateTextureFromFileInMemory))
             return false;
+        if (!fixStub("d3dx9_43", "D3DXMatrixDecompose", kProcD3DXMatrixDecompose)) return false;
         return true;
     }
 
@@ -1442,6 +1444,294 @@ void caseMatrix() {
 }
 
 // ---------------------------------------------------------------------------------------
+// ⑥b D3DXMatrixDecompose（语义真源 = native `d3dx9_43.dll`；134 例对拍见
+//     `docs/03-emulator/d3dx-math.md`）
+//
+// 判据只锁**引擎会读的**与 native 的**可观察行为**：
+//   · scale / translation：轴对齐输入**逐位**，一般输入 1e-6；
+//   · 四元数：按**方向 + 合成**判（⛔ 不逐位 —— native 在被接受的切变输入上不归一化，
+//     本实现（DirectXMath）归一化；引擎 5 个调用点都不读 quat）；
+//   · 失败路径：scale + translation **已写**、四元数**一个字节都不动**（sentinel 还在）、
+//     机器不停、`unimplemented_calls` 不涨。
+// ★ 合成检查在**测试侧独立实现**（⛔ 不调 math::）：D3DX 行向量约定下
+//   `M_ij = scale_i * R_col(q)[j][i]`（i,j<3），最后一行 = (translation, 1)。
+// ---------------------------------------------------------------------------------------
+void caseMatrixDecompose() {
+    Fixture f;
+    LIFT_CHECK(f.boot());
+
+    auto fbits = [](float v) {
+        std::uint32_t b = 0;
+        std::memcpy(&b, &v, 4);
+        return b;
+    };
+    auto rdU = [&f](std::uint32_t ea, int i) {
+        return f.m.mem().rd32(ea + static_cast<std::uint32_t>(i) * 4u);
+    };
+    auto rdF = [&f, &rdU](std::uint32_t ea, int i) {
+        const std::uint32_t b = rdU(ea, i);
+        float v = 0.0f;
+        std::memcpy(&v, &b, 4);
+        return v;
+    };
+    auto close = [](float got, float want, float tol) { return std::fabs(got - want) <= tol; };
+
+    // 一次分解：三个出参缓冲预填 0xA5A5A5A5 sentinel ⇒ "没写"与"写成 0"可区分
+    // （native 失败路径的不变量正是"quat 没动"）。
+    auto decompose = [&](const float m16[16], std::uint32_t* s_ea, std::uint32_t* q_ea,
+                         std::uint32_t* t_ea, lift::RunResult* rr) {
+        const std::uint32_t sent[4] = {0xA5A5A5A5u, 0xA5A5A5A5u, 0xA5A5A5A5u, 0xA5A5A5A5u};
+        const std::uint32_t m_ea = f.placeMatrix(m16);
+        *s_ea = f.placeData(sent, 12);
+        *q_ea = f.placeData(sent, 16);
+        *t_ea = f.placeData(sent, 12);
+        return f.callExportRaw(kProcD3DXMatrixDecompose, {*s_ea, *q_ea, *t_ea, m_ea}, rr);
+    };
+    // 四元数 → **列向量**旋转矩阵（x,y,z,w；测试侧独立公式，⛔ 不借 math::）
+    auto rot = [&rdF](std::uint32_t q_ea, double r[3][3]) {
+        const double x = rdF(q_ea, 0);
+        const double y = rdF(q_ea, 1);
+        const double z = rdF(q_ea, 2);
+        const double w = rdF(q_ea, 3);
+        r[0][0] = 1.0 - 2.0 * (y * y + z * z);
+        r[0][1] = 2.0 * (x * y - w * z);
+        r[0][2] = 2.0 * (x * z + w * y);
+        r[1][0] = 2.0 * (x * y + w * z);
+        r[1][1] = 1.0 - 2.0 * (x * x + z * z);
+        r[1][2] = 2.0 * (y * z - w * x);
+        r[2][0] = 2.0 * (x * z - w * y);
+        r[2][1] = 2.0 * (y * z + w * x);
+        r[2][2] = 1.0 - 2.0 * (x * x + y * y);
+    };
+    auto det3 = [](const double r[3][3]) {
+        return r[0][0] * (r[1][1] * r[2][2] - r[1][2] * r[2][1]) -
+               r[0][1] * (r[1][0] * r[2][2] - r[1][2] * r[2][0]) +
+               r[0][2] * (r[1][0] * r[2][1] - r[1][1] * r[2][0]);
+    };
+    // 合成回输入矩阵：M_ij = s_i * R_col(q)[j][i]（i,j<3）；最后一行 = (t,1)。
+    auto checkComposition = [&](const float m16[16], std::uint32_t s_ea, std::uint32_t q_ea,
+                                std::uint32_t t_ea) {
+        double r[3][3];
+        rot(q_ea, r);
+        const double s[3] = {rdF(s_ea, 0), rdF(s_ea, 1), rdF(s_ea, 2)};
+        double got[16];
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) got[i * 4 + j] = s[i] * r[j][i];
+            got[i * 4 + 3] = 0.0;
+        }
+        got[12] = rdF(t_ea, 0);
+        got[13] = rdF(t_ea, 1);
+        got[14] = rdF(t_ea, 2);
+        got[15] = 1.0;
+        for (int i = 0; i < 16; ++i) {
+            ++lift_test::g_checks;
+            const double want = m16[i];
+            const double tol = 1e-5 * (std::fabs(want) > 1.0 ? std::fabs(want) : 1.0);
+            if (!(std::fabs(got[i] - want) <= tol))
+                lift_test::failf(__FILE__, __LINE__, "合成 m[%d] 期望 %.9g 得 %.9g", i, want, got[i]);
+        }
+    };
+    // 单位四元数（轴对齐输入的期望；⛔ 不用逐位断言，跨平台（SSE/NEON）只保证 ≤1e-7）
+    auto checkIdentityQuat = [&](std::uint32_t q_ea) {
+        LIFT_CHECK(std::fabs(rdF(q_ea, 0)) <= 1e-6f);
+        LIFT_CHECK(std::fabs(rdF(q_ea, 1)) <= 1e-6f);
+        LIFT_CHECK(std::fabs(rdF(q_ea, 2)) <= 1e-6f);
+        LIFT_CHECK(rdF(q_ea, 3) > 1.0f - 1e-6f);
+    };
+
+    // ① 纯平移：scale 逐位 (1,1,1) / q 单位 / translation 逐位 = flat 12/13/14
+    {
+        lift_test::g_current_case = "d3dx9/matrix-decompose-translation";
+        const float m[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                             0.0f, 0.0f, 1.0f, 0.0f, 10.0f, 20.0f, 30.0f, 1.0f};
+        std::uint32_t s = 0, q = 0, t = 0;
+        lift::RunResult rr;
+        LIFT_CHECK_EQ_U32(decompose(m, &s, &q, &t, &rr), lift::d3d9::kOk);
+        LIFT_CHECK_EQ_U32(rdU(s, 0), fbits(1.0f));
+        LIFT_CHECK_EQ_U32(rdU(s, 1), fbits(1.0f));
+        LIFT_CHECK_EQ_U32(rdU(s, 2), fbits(1.0f));
+        checkIdentityQuat(q);
+        LIFT_CHECK_EQ_U32(rdU(t, 0), fbits(10.0f));
+        LIFT_CHECK_EQ_U32(rdU(t, 1), fbits(20.0f));
+        LIFT_CHECK_EQ_U32(rdU(t, 2), fbits(30.0f));
+        checkComposition(m, s, q, t);
+
+        // m[3][3]（=2）与透视列（flat 3/7/11）**被忽略**（native 实测）：平移仍是 flat 12/13/14
+        // 逐位（⛔ 不按 m33 归一化、⛔ 不从透视列推东西）。
+        const float m33[16] = {1.0f, 0.0f, 0.0f, 0.1f, 0.0f, 1.0f, 0.0f, 0.2f,
+                               0.0f, 0.0f, 1.0f, 0.3f, 10.0f, 20.0f, 30.0f, 2.0f};
+        std::uint32_t s2 = 0, q2 = 0, t2 = 0;
+        lift::RunResult rr2;
+        LIFT_CHECK_EQ_U32(decompose(m33, &s2, &q2, &t2, &rr2), lift::d3d9::kOk);
+        LIFT_CHECK_EQ_U32(rdU(s2, 0), fbits(1.0f));
+        LIFT_CHECK_EQ_U32(rdU(s2, 1), fbits(1.0f));
+        LIFT_CHECK_EQ_U32(rdU(s2, 2), fbits(1.0f));
+        LIFT_CHECK_EQ_U32(rdU(t2, 0), fbits(10.0f));
+        LIFT_CHECK_EQ_U32(rdU(t2, 1), fbits(20.0f));
+        LIFT_CHECK_EQ_U32(rdU(t2, 2), fbits(30.0f));
+        checkIdentityQuat(q2);
+    }
+
+    // ② RotZ(+90°)：q.z = **+**0.7071068（共轭 bug ⇒ -0.7071068，当场红）
+    {
+        lift_test::g_current_case = "d3dx9/matrix-decompose-rotation";
+        // D3DXMatrixRotationZ(+π/2) 的行主序矩阵（行向量约定）
+        const float m[16] = {0.0f, 1.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f,
+                             0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+        std::uint32_t s = 0, q = 0, t = 0;
+        lift::RunResult rr;
+        LIFT_CHECK_EQ_U32(decompose(m, &s, &q, &t, &rr), lift::d3d9::kOk);
+        LIFT_CHECK_EQ_U32(rdU(s, 0), fbits(1.0f));
+        LIFT_CHECK_EQ_U32(rdU(s, 1), fbits(1.0f));
+        LIFT_CHECK_EQ_U32(rdU(s, 2), fbits(1.0f));
+        LIFT_CHECK(close(rdF(q, 2), 0.70710678f, 1e-6f));
+        LIFT_CHECK(close(rdF(q, 3), 0.70710678f, 1e-6f));
+        LIFT_CHECK(std::fabs(rdF(q, 0)) <= 1e-6f);
+        LIFT_CHECK(std::fabs(rdF(q, 1)) <= 1e-6f);
+        LIFT_CHECK_EQ_U32(rdU(t, 0), fbits(0.0f));
+        LIFT_CHECK_EQ_U32(rdU(t, 1), fbits(0.0f));
+        LIFT_CHECK_EQ_U32(rdU(t, 2), fbits(0.0f));
+        checkComposition(m, s, q, t);
+    }
+
+    // ③ 非均匀缩放 + 平移：scale 逐位 (2,3,4)、translation 逐位、q 单位
+    {
+        lift_test::g_current_case = "d3dx9/matrix-decompose-scale";
+        const float m[16] = {2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 3.0f, 0.0f, 0.0f,
+                             0.0f, 0.0f, 4.0f, 0.0f, 9.0f, 8.0f, 7.0f, 1.0f};
+        std::uint32_t s = 0, q = 0, t = 0;
+        lift::RunResult rr;
+        LIFT_CHECK_EQ_U32(decompose(m, &s, &q, &t, &rr), lift::d3d9::kOk);
+        // ★ 红判据：把"列长"当 scale（2/3/4 在这个矩阵里对角也相同，所以另用非对角项检查是
+        //   ④ TRS 的职责）；这里锁逐位值 + 平移逐位。
+        LIFT_CHECK_EQ_U32(rdU(s, 0), fbits(2.0f));
+        LIFT_CHECK_EQ_U32(rdU(s, 1), fbits(3.0f));
+        LIFT_CHECK_EQ_U32(rdU(s, 2), fbits(4.0f));
+        LIFT_CHECK_EQ_U32(rdU(t, 0), fbits(9.0f));
+        LIFT_CHECK_EQ_U32(rdU(t, 1), fbits(8.0f));
+        LIFT_CHECK_EQ_U32(rdU(t, 2), fbits(7.0f));
+        checkIdentityQuat(q);
+        checkComposition(m, s, q, t);
+    }
+
+    // ④ R·S·T（Rz30°）：合成 1e-5、scale 1e-6、|q|≈1、q.z = sin(15°)
+    //    ★ 非对角项 ⇒ "把第 i 行 xyz 的长度当 scale" 与"把第 i 列长度当 scale"在这里分家。
+    {
+        lift_test::g_current_case = "d3dx9/matrix-decompose-trs";
+        const float c = static_cast<float>(std::cos(3.14159265358979323846 / 6.0));
+        const float s30 = 0.5f;
+        const float m[16] = {2.0f * c, 2.0f * s30, 0.0f, 0.0f,
+                             -3.0f * s30, 3.0f * c, 0.0f, 0.0f,
+                             0.0f, 0.0f, 4.0f, 0.0f,
+                             9.0f, 8.0f, 7.0f, 1.0f};
+        std::uint32_t s = 0, q = 0, t = 0;
+        lift::RunResult rr;
+        LIFT_CHECK_EQ_U32(decompose(m, &s, &q, &t, &rr), lift::d3d9::kOk);
+        LIFT_CHECK(close(rdF(s, 0), 2.0f, 1e-6f));
+        LIFT_CHECK(close(rdF(s, 1), 3.0f, 1e-6f));
+        LIFT_CHECK(close(rdF(s, 2), 4.0f, 1e-6f));
+        LIFT_CHECK(close(rdF(q, 2), std::sin(3.14159265358979323846 / 12.0), 1e-6f));
+        LIFT_CHECK(close(rdF(q, 3), std::cos(3.14159265358979323846 / 12.0), 1e-6f));
+        LIFT_CHECK(close(rdF(q, 0), 0.0f, 1e-6f));
+        LIFT_CHECK(close(rdF(q, 1), 0.0f, 1e-6f));
+        const float qlen = std::sqrt(rdF(q, 0) * rdF(q, 0) + rdF(q, 1) * rdF(q, 1) +
+                                     rdF(q, 2) * rdF(q, 2) + rdF(q, 3) * rdF(q, 3));
+        LIFT_CHECK(close(qlen, 1.0f, 1e-5f));
+        LIFT_CHECK_EQ_U32(rdU(t, 0), fbits(9.0f));
+        LIFT_CHECK_EQ_U32(rdU(t, 1), fbits(8.0f));
+        LIFT_CHECK_EQ_U32(rdU(t, 2), fbits(7.0f));
+        checkComposition(m, s, q, t);
+    }
+
+    // ⑤ 零 scale diag(2,0,4)：**S_OK**（⛔ 不是"奇异即失败"）、scale 逐位、q 有限且 |q|≈1
+    {
+        lift_test::g_current_case = "d3dx9/matrix-decompose-zero-scale";
+        const float m[16] = {2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                             0.0f, 0.0f, 4.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+        std::uint32_t s = 0, q = 0, t = 0;
+        lift::RunResult rr;
+        // ★ 红判据：返回 D3DERR_INVALIDCALL（glm / "奇异即失败" 的实现会红在这里）。
+        LIFT_CHECK_EQ_U32(decompose(m, &s, &q, &t, &rr), lift::d3d9::kOk);
+        LIFT_CHECK_EQ_U32(rdU(s, 0), fbits(2.0f));
+        LIFT_CHECK_EQ_U32(rdU(s, 1), fbits(0.0f));
+        LIFT_CHECK_EQ_U32(rdU(s, 2), fbits(4.0f));
+        LIFT_CHECK_EQ_U32(rdU(t, 0), fbits(0.0f));
+        LIFT_CHECK_EQ_U32(rdU(t, 1), fbits(0.0f));
+        LIFT_CHECK_EQ_U32(rdU(t, 2), fbits(0.0f));
+        const float qx = rdF(q, 0), qy = rdF(q, 1), qz = rdF(q, 2), qw = rdF(q, 3);
+        LIFT_CHECK(std::isfinite(qx) && std::isfinite(qy) && std::isfinite(qz) && std::isfinite(qw));
+        LIFT_CHECK(close(std::sqrt(qx * qx + qy * qy + qz * qz + qw * qw), 1.0f, 1e-6f));
+    }
+
+    // ⑥ 切变 0.5：**D3DERR_INVALIDCALL**、机器不停、scale+translation 已写、quat 不动
+    {
+        lift_test::g_current_case = "d3dx9/matrix-decompose-shear";
+        const float m[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.5f, 1.0f, 0.0f, 0.0f,
+                             0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+        std::uint32_t s = 0, q = 0, t = 0;
+        lift::RunResult rr;
+        const std::uint32_t traps_before = f.m.cpu().shim.unimplemented_calls;
+        // ★ 红判据：返回 S_OK（没有切变检查）。
+        LIFT_CHECK_EQ_U32(decompose(m, &s, &q, &t, &rr), lift::d3d9::kInvalidCall);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(rr.reason),
+                          static_cast<std::uint32_t>(lift::StopReason::UntilEa));
+        LIFT_CHECK(rr.ok());
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(f.m.cpu().shim.unimplemented_calls), traps_before);
+        // native：失败路径上 scale + translation **已经写了**
+        LIFT_CHECK(close(rdF(s, 0), 1.0f, 1e-6f));
+        LIFT_CHECK(close(rdF(s, 1), std::sqrt(1.25f), 1e-6f));
+        LIFT_CHECK(close(rdF(s, 2), 1.0f, 1e-6f));
+        LIFT_CHECK_EQ_U32(rdU(t, 0), fbits(0.0f));
+        LIFT_CHECK_EQ_U32(rdU(t, 1), fbits(0.0f));
+        LIFT_CHECK_EQ_U32(rdU(t, 2), fbits(0.0f));
+        // native：失败路径上 quat **一个字节都不动**（sentinel 还在）
+        for (int i = 0; i < 4; ++i) LIFT_CHECK_EQ_U32(rdU(q, i), 0xA5A5A5A5u);
+    }
+
+    // ⑦ 镜像 diag(-1,1,1)：S_OK；只断言 |scale| + det(R(q))>0 + 合成
+    //    （⛔ 不锁符号落哪根轴 —— native 的落点是"|scale| 最大的轴，并列取下标最小"，
+    //     是 DirectXMath 的实现约定，不是 D3DX 文档承诺）
+    {
+        lift_test::g_current_case = "d3dx9/matrix-decompose-mirror";
+        const float m[16] = {-1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                             0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+        std::uint32_t s = 0, q = 0, t = 0;
+        lift::RunResult rr;
+        LIFT_CHECK_EQ_U32(decompose(m, &s, &q, &t, &rr), lift::d3d9::kOk);
+        LIFT_CHECK(close(std::fabs(rdF(s, 0)), 1.0f, 1e-6f));
+        LIFT_CHECK(close(std::fabs(rdF(s, 1)), 1.0f, 1e-6f));
+        LIFT_CHECK(close(std::fabs(rdF(s, 2)), 1.0f, 1e-6f));
+        double r[3][3];
+        rot(q, r);
+        // det(R) > 0 ⇒ 负行列式被 scale 的符号吸收了（旋转部分仍是"真旋转"）
+        LIFT_CHECK(det3(r) > 0.0);
+        checkComposition(m, s, q, t);
+    }
+
+    // ⑧ 未提交出参（pOutScale=NULL）⇒ loud trap（与同文件其它 math shim 同一口径）
+    {
+        lift_test::g_current_case = "d3dx9/matrix-decompose-bad-pointer";
+        const float m[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                             0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+        const std::uint32_t m_ea = f.placeMatrix(m);
+        const std::uint32_t sent[4] = {0xA5A5A5A5u, 0xA5A5A5A5u, 0xA5A5A5A5u, 0xA5A5A5A5u};
+        const std::uint32_t q_ea = f.placeData(sent, 16);
+        const std::uint32_t t_ea = f.placeData(sent, 12);
+        const std::uint32_t traps_before = f.m.cpu().shim.unimplemented_calls;
+        lift::RunResult rr;
+        f.callExportRaw(kProcD3DXMatrixDecompose, {0u, q_ea, t_ea, m_ea}, &rr);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(rr.reason),
+                          static_cast<std::uint32_t>(lift::StopReason::Trap));
+        LIFT_CHECK(!rr.ok());
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(f.m.cpu().shim.unimplemented_calls),
+                          traps_before + 1u);
+        LIFT_CHECK(std::string(f.m.cpu().stop_why ? f.m.cpu().stop_why : "") ==
+                   "unimplemented D3DX9 call");
+        LIFT_CHECK(rr.detail.find("D3DXMatrixDecompose") != std::string::npos);
+    }
+}
+
+// ---------------------------------------------------------------------------------------
 // ③ loud trap：未实现槽 / 非 0 纹理 / NULL 纹理 + NULL src rect
 // ---------------------------------------------------------------------------------------
 void caseTraps() {
@@ -2048,6 +2338,7 @@ int main(int argc, char** argv) {
         caseSpriteEarlyExitStaleTexture();
         if (caseDoNotAddRefStaleTexture(false) != 0) return 1;
         caseMatrix();
+        caseMatrixDecompose();
         caseTraps();
         caseCreateSpriteOom();
         return finish("d3dx9");

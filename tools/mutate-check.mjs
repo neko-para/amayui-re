@@ -4128,6 +4128,29 @@ const MUTATIONS = [
       'snow-vertices / snow-pixels 的每一批被整批拒（`skipped_draws` 涨、`effect_queued==0`）；' +
       '★ 这条是"A 的前置被撤掉"的机械证据',
   },
+
+  // ── emulator-lift · `D3DXMatrixDecompose` 的四元数**共轭**（符号/方向） ──────────────────
+  //   语义真源 = native d3dx9_43（134 例对拍表与复现命令见 docs/03-emulator/d3dx-math.md）。
+  //   变异 = 写四元数时把 z 分量取反 ⇒ 对绕 z 的旋转输入（本文件两条用例都是 Rz）等于写共轭：
+  //   native 的 RotZ(+90°) 给 **+**0.7071，共轭给 -0.7071。
+  //   判据：`tests/d3dx9.cpp` 的 `d3dx9/matrix-decompose-rotation`（q.z 的**符号**，⛔ 不逐位断
+  //   quat）与 `d3dx9/matrix-decompose-trs`（q.z = sin15°）当场红。
+  //   ★ 不选"零 scale 返 S_OK"是因为那会同时改控制流、红点会落在更多断言上，说不清是哪一条
+  //     判据抓住的；这条只动一个符号，红点唯一。
+  {
+    file: 'apps/emulator-lift/src/shims/d3dx9.cpp',
+    from: '        wrF(cpu, rot_ea + 8u, rot.z);',
+    to: '        wrF(cpu, rot_ea + 8u, -rot.z);  // 变异：四元数写共轭（z 取反）\n',
+    guard: 'ctest:d3dx9',
+    ctest: 'd3dx9',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3dx9',
+    what:
+      '`D3DXMatrixDecompose` 写四元数时把 z 取反（= 对绕 z 的旋转写**共轭**）⇒ ' +
+      '`d3dx9/matrix-decompose-rotation` 的 q.z 期望 +0.7071 得 -0.7071、' +
+      '`d3dx9/matrix-decompose-trs` 的 q.z 期望 sin15° 同样翻号 ⇒ 两条当场红；' +
+      '合成检查（S·R(q)·T = M）会把同一个方向错误再报一遍',
+  },
 ];
 
 let mutationRunSeq = 0;

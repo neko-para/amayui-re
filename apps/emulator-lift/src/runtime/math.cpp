@@ -5,7 +5,9 @@
 #include "runtime/math.h"
 
 #include <cmath>
+#include <cstring>
 
+#include <DirectXMath.h>  // ★ 只在本 TU：XMMatrixDecompose（⛔ 不让 XMVECTOR 进公共头）
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -140,6 +142,44 @@ float normalize3(const float in[3], float out[3]) {
     out[1] = v.y;
     out[2] = v.z;
     return length;
+}
+
+bool decomposeD3D(const float d3d[16], Vec3* scale, Quat* rot, Vec3* trans) {
+    // D3DXMATRIX（行主序 / 行向量）与 XMFLOAT4X4 的 flat 布局**逐位相同** ⇒ 直接拷 64 B
+    // （这不是"跨约定的 memcpy"：DirectXMath 的 r[i] 就是 D3DX 的第 i 行，见 math.h 文件头 ①）。
+    DirectX::XMFLOAT4X4 m;
+    std::memcpy(m.m, d3d, sizeof(m.m));
+
+    // ★ 两条 ABI 事实（perf 评估里实测踩到，⛔ 不要图省事把 guest 指针直接传进来）：
+    //   ① outScale / outTrans 是 **XMVECTOR\*** —— DirectXMath 往 *outScale 写 4 个 float
+    //      （3 个轴长 + 第 4 个 0），往 *outTrans 写整个 M.r[3]（16 B）⇒ 传 12 B 的
+    //      D3DXVECTOR3 会踩栈。这里用 16 B 对齐的 scratch 接。
+    //   ② 失败路径**不写** outRotQuat（native 也一样：quat 出参一个字节都不动）⇒ 必须
+    //      先在本地接、再按 ok 决定写不写 *rot。
+    DirectX::XMVECTOR s = DirectX::XMVectorZero();
+    DirectX::XMVECTOR q = DirectX::XMVectorZero();
+    DirectX::XMVECTOR t = DirectX::XMVectorZero();
+    const bool ok = DirectX::XMMatrixDecompose(&s, &q, &t, DirectX::XMLoadFloat4x4(&m));
+
+    // ★ 成功与失败**都**写 scale + translation：native 在返回 D3DERR_INVALIDCALL 之前已经
+    //   把这两者写了（DirectXMath 的实现同样如此：outTrans / pfScales 在判失败之前落盘）。
+    //   万一将来某个版本的 DirectXMath 在失败路径提前返回，scratch 里也已经有它写下的值；
+    //   这里不依赖"它一定写了"这个实现细节 —— 写回的是 scratch，而不是"成功才有值"。
+    DirectX::XMFLOAT3 sf;
+    DirectX::XMFLOAT3 tf;
+    DirectX::XMStoreFloat3(&sf, s);
+    DirectX::XMStoreFloat3(&tf, t);
+    *scale = Vec3(sf.x, sf.y, sf.z);
+    *trans = Vec3(tf.x, tf.y, tf.z);
+
+    if (ok) {
+        DirectX::XMFLOAT4 qf;
+        DirectX::XMStoreFloat4(&qf, q);
+        // XMFLOAT4 = (x,y,z,w)（D3DXQUATERNION 的顺序）；glm::quat 构造是 (w,x,y,z)、
+        // 内存布局是 x,y,z,w ⇒ 这个转换刚好让 `rot.x/.y/.z/.w` 与 D3DX 四个字段一一对应。
+        *rot = Quat(qf.w, qf.x, qf.y, qf.z);
+    }
+    return ok;
 }
 
 }  // namespace math

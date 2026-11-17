@@ -20,6 +20,7 @@
 #include <cstddef>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>  // glm::quat 的完整定义（decomposeD3D 的出参类型）
 
 namespace lift {
 namespace math {
@@ -30,6 +31,7 @@ using Vec3 = glm::vec3;
 using Vec4 = glm::vec4;
 using Vec3d = glm::dvec3;
 using Vec4d = glm::dvec4;
+using Quat = glm::quat;  // glm 的构造是 (w,x,y,z)、内存布局是 x,y,z,w（见 decomposeD3D）
 
 template <typename T>
 using Mat4T = glm::tmat4x4<T, glm::defaultp>;
@@ -118,6 +120,27 @@ Mat4 orthoLH(float w, float h, float zn, float zf);
 
 // 归一化便捷版（float；返回长度，零向量 ⇒ out=(0,0,0)、返回 0）
 float normalize3(const float in[3], float out[3]);
+
+// ---------------------------------------------------------------------------------------
+// D3DXMATRIX 的仿射分解（`D3DXMatrixDecompose` 的数学核）
+//
+// ★ 语义真源 = **DirectXMath 的 `XMMatrixDecompose`**（依赖见 CMakeLists 的 DirectXMath 块；
+//   `XMVECTOR` / DirectXMath 头只出现在 math.cpp，⛔ 不进这个公共头）。它与 native
+//   `d3dx9_43.dll`（9.29.952.3111）在 134 个矩阵上**逐例判定一致**（scale ≤1 ulp、translation
+//   逐位、零 scale / 全零 / m[3][3] / 透视列 / 负 det 落点全一致；只有"被接受的切变输入"的
+//   四元数因归一化差 ≤6.2e-4）。对拍表与复现命令见 `docs/03-emulator/d3dx-math.md`。
+//
+// ★ 输入是 **D3DX 的 16 个 float（行主序 / 行向量）** —— 与 guest 里的 `D3DXMATRIX` 逐位相同，
+//   所以这里收 `const float[16]` 而不是 GLM 类型：native 是 float 路径，先转 double 会丢 ulp
+//   （perf 对拍：手写 double 版 dS ≤2.4e-7，float 版逐位 0）。
+//
+// ★ 两条 ABI / 语义事实（实现里照做，⛔ 不要"优化掉"）：
+//   ① `*scale` / `*trans` **成功与失败两条路径都写**（native 在返回 INVALIDCALL 之前已经写了
+//      scale + translation；DirectXMath 同样先写这两者再判失败）；
+//   ② 失败路径**不写** `*rot`（native 此时四元数出参一个字节都不动 ⇒ shim 必须保住 sentinel）。
+//
+// 返回：true = S_OK；false = D3DERR_INVALIDCALL（切变超过 ~0.1425 / 非 SRT）。
+bool decomposeD3D(const float d3d[16], Vec3* scale, Quat* rot, Vec3* trans);
 
 }  // namespace math
 }  // namespace lift

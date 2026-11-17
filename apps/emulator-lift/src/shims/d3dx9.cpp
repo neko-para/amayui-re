@@ -1505,6 +1505,61 @@ void shimD3DXVec3Normalize(X86& cpu, ShimCall& call) {
     call.result = bits;
 }
 
+// ---------------------------------------------------------------------------------------
+// D3DXMatrixDecompose（M3 · D3DX math）
+//   HRESULT WINAPI D3DXMatrixDecompose(D3DXVECTOR3* pOutScale, D3DXQUATERNION* pOutRotation,
+//                                      D3DXVECTOR3* pOutTranslation, const D3DXMATRIX* pM);
+//   （本机 SDK `d3dx9math.h:294`；文档只给 S_OK / D3DERR_INVALIDCALL，没写失败条件 ⇒ 边界靠实测）
+//
+// ★ 数学核在 `math::decomposeD3D`（语义真源 = DirectXMath 的 XMMatrixDecompose；对拍表与
+//   复现命令见 `docs/03-emulator/d3dx-math.md`）。这里只做指针校验 / guest 读 / guest 写。
+// ★ 出参字节数：scale 12 / rotation 16 / translation 12 / pM 64。
+// ★ 失败语义（native 实测，⛔ 三条都别"优化"）：
+//   ① 切变超过 ~0.1425 ⇒ `D3DERR_INVALIDCALL`（0x8876086C）；
+//   ② 失败路径上 **scale + translation 已经写了**（native 与 DirectXMath 都先写这两者）；
+//   ③ 失败路径上 **rotation 一个字节都不动** —— 引擎 2 处调用点会按 HRESULT 打
+//      「マトリックスの分割に失敗しました」后返回，另外 3 处忽略返回值；
+//      但"未动"是 native 的可观察行为，测试拿 sentinel 判它（⛔ 不清零、不写默认四元数）。
+// ---------------------------------------------------------------------------------------
+void shimD3DXMatrixDecompose(X86& cpu, ShimCall& call) {
+    const std::uint32_t scale_ea = call.u32(0);
+    const std::uint32_t rot_ea = call.u32(1);
+    const std::uint32_t trans_ea = call.u32(2);
+    const std::uint32_t m_ea = call.u32(3);
+    if (!cpu.mem->committed(scale_ea, 12) || !cpu.mem->committed(rot_ea, 16) ||
+        !cpu.mem->committed(trans_ea, 12) || !cpu.mem->committed(m_ea, 64)) {
+        d3dxTrap(cpu, "D3DXMatrixDecompose",
+                 "pOutScale=0x%08X pOutRotation=0x%08X pOutTranslation=0x%08X pM=0x%08X 有未提交缓冲区",
+                 scale_ea, rot_ea, trans_ea, m_ea);
+        call.result = 0;
+        return;
+    }
+    float m_in[16];
+    for (int i = 0; i < 16; ++i) m_in[i] = rdF(cpu, m_ea + static_cast<std::uint32_t>(i) * 4u);
+    math::Vec3 scale;
+    math::Vec3 translation;
+    math::Quat rot(1.0f, 0.0f, 0.0f, 0.0f);
+    const bool ok = math::decomposeD3D(m_in, &scale, &rot, &translation);
+    // scale + translation：两条路径都写（见上面 ②）
+    wrF(cpu, scale_ea + 0u, scale.x);
+    wrF(cpu, scale_ea + 4u, scale.y);
+    wrF(cpu, scale_ea + 8u, scale.z);
+    wrF(cpu, trans_ea + 0u, translation.x);
+    wrF(cpu, trans_ea + 4u, translation.y);
+    wrF(cpu, trans_ea + 8u, translation.z);
+    if (ok) {
+        // glm::quat 的 x/y/z/w 成员与 D3DXQUATERNION 的字段一一对应（见 math::decomposeD3D）
+        wrF(cpu, rot_ea + 0u, rot.x);
+        wrF(cpu, rot_ea + 4u, rot.y);
+        wrF(cpu, rot_ea + 8u, rot.z);
+        wrF(cpu, rot_ea + 12u, rot.w);
+        call.result = d3d9::kOk;
+        return;
+    }
+    // ★ 失败：scale + translation 已写，rotation **不动**（③）
+    call.result = d3d9::kInvalidCall;
+}
+
 
 
 // ---------------------------------------------------------------------------------------
@@ -1688,6 +1743,10 @@ void registerD3DX9Shims(ShimRegistry& shims) {
     shims.add("d3dx9_43", "D3DXMatrixLookAtLH", Conv::Stdcall, 4, &shimD3DXMatrixLookAtLH);
     shims.add("d3dx9_43", "D3DXVec4Transform", Conv::Stdcall, 3, &shimD3DXVec4Transform);
     shims.add("d3dx9_43", "D3DXVec3Normalize", Conv::Stdcall, 2, &shimD3DXVec3Normalize);
+    // ★ D3DXMatrixDecompose：语义真源 = DirectXMath 的 XMMatrixDecompose（134 例与 native
+    //   d3dx9_43 对拍一致，见 `docs/03-emulator/d3dx-math.md`）。它原先在
+    //   `register_import_gaps.cpp` 的派生缺口表里（`pnpm tools lift sync --write` 重生时消失）。
+    shims.add("d3dx9_43", "D3DXMatrixDecompose", Conv::Stdcall, 4, &shimD3DXMatrixDecompose);
     // ---- effect 簇（GPU 路线 P1）：`D3DXCreateEffectFromResourceA`（9 参）+ `ID3DXEffect` 的 9 槽 ----
     // ★ 从 `register_import_gaps.cpp` 的 addUnimplemented 搬来真实现（那一行由
     //   `pnpm tools lift sync --write` 重生成时消失）；只记状态、⛔ 不执行 shader。
