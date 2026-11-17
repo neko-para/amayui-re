@@ -2,8 +2,9 @@
 
 - id: REQ-01M7MNJ5V5FR759S6KWVJWGREY
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M7JHSD5MWTB9N8WJC2Y2T69M
+- done_reason: 已由 ADR REQ-01M7MNP9K8T81SP2HNXQ9TTXPG 裁决：走真正的 GPU 渲染（shader / D3DX FX 路径）；路线与阶段在 REQ-01M7MNPGETP2CQJ3ACMCGEHKF5，取证在 S0 子单
 - tags: [emulator-lift, d3d9, fx, caps]
 
 ## 一句话
