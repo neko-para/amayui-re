@@ -1016,6 +1016,18 @@ if(DEFINED ENV{LIFT_STRESS})
                 "⛔ 不要靠关掉输入让 configure 过：档位按用途，输入是假定在场的。")
         endif()
     endforeach()
+    # ★ TITLE→Quit 的 E2E 要的是**原版**安装树（`links/raw`），不是 `LIFT_STRESS_GAME_DIR`（缺省
+    #   `links/install` = 汉化修订版，脚本偏移会漂）。⇒ 这一份输入**另判**，但⛔ 不新增全局输入变量：
+    #   路径就是仓库根的 `links/raw`（与 `links/install` 同一条 `.gitignore` 口径）。
+    set(_LIFT_STRESS_RAW_GAME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../links/raw")
+    if(NOT EXISTS "${_LIFT_STRESS_RAW_GAME_DIR}/AGE.EXE")
+        message(FATAL_ERROR
+            "按用途显式打开了 LIFT_STRESS，但 TITLE→Quit 的 E2E 需要**原版**安装树：\n"
+            "  MISSING  ${_LIFT_STRESS_RAW_GAME_DIR}/AGE.EXE\n"
+            "怎么补：把原版游戏安装目录链到仓库根的 `links/raw`（不是 `links/install`：后者是汉化修订版，\n"
+            "        脚本偏移会漂，退出路径的坐标/字节都不可比）。\n"
+            "⛔ 不要靠关掉输入让 configure 过：stress 档的输入是假定在场的。")
+    endif()
 endif()
 
 # =====================================================================================
@@ -1083,6 +1095,26 @@ if(DEFINED ENV{LIFT_STRESS})
     add_executable(lift-dispatch-tax tests/dispatch_tax.cpp)
     target_link_libraries(lift-dispatch-tax PRIVATE emulator-lift-runtime)
     add_test(NAME dispatch-tax COMMAND lift-dispatch-tax)
+
+    # ---- LIFT_STRESS：TITLE→Quit 退出路径的**端到端复现件**（2026-11-17）----
+    # ★ 为什么是 stress 而不是默认档：它**真跑原版安装树**（`links/raw` + TITLE 界面 + 135 帧），
+    #   判据是"guest 自己的退出路径走完"（`Command_Exit_Exception` 的 catch 续延 → `ExitProcess`），
+    #   ⛔ 不是某个 shim 接口的合同 ⇒ 按用途只能进"唯一允许跑真游戏"的 stress 档。
+    # ★ 默认档的**机制守卫**是 `lift-closure-imm32`（候选集 + 派发表里必须有三行
+    #   `LIFT_AOT_ENTRY`）—— 它在顶层无条件注册，跑的是扫描 + 生成物，不跑游戏。
+    #   本 E2E 是它的**端到端复现件**，不是门禁；缺 `links/raw` ⇒ 测试自己 `LIFT_SKIP(77)`。
+    # ★ 输入检查：configure 期已在上面把 `links/raw/AGE.EXE` 缺省判成 `FATAL_ERROR`（stress 档口径），
+    #   ⛔ 不新增第二个全局输入变量。
+    add_executable(lift-aot-quit-exit tests/aot_quit_exit.cpp)
+    target_link_libraries(lift-aot-quit-exit PRIVATE emulator-lift-runtime)
+    # ★ 读的是**产品 target 的产物**（`emulator-lift-aot`）⇒ 显式依赖：否则 `--target
+    #   lift-aot-quit-exit` 只编守卫 exe、产品 exe 停在变异前 ⇒ 变异自检假绿。
+    add_dependencies(lift-aot-quit-exit emulator-lift-aot)
+    add_test(NAME aot-quit-exit
+        COMMAND lift-aot-quit-exit
+                "$<TARGET_FILE:emulator-lift-aot>" "${_LIFT_STRESS_RAW_GAME_DIR}"
+                "${_LIFT_STRESS_RAW_GAME_DIR}/AGE.EXE" "${AGE_SECTFIX_EXE}")
+    set_tests_properties(aot-quit-exit PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 420)
 endif()
 
 # =====================================================================================
@@ -2100,6 +2132,33 @@ set_tests_properties(lift-s7-structured PROPERTIES SKIP_RETURN_CODE 77)
 add_test(NAME lift-jmptab-dispatch
     COMMAND emulator-lift-gen --jmptab-audit
             --exe "${LIFT_AOT_AGE_EXE}" --roots "${LIFT_AOT_CLOSURE}")
+
+# =====================================================================================
+# D26 的第二条扫描：**可执行节里任意偏移的指令 imm32**（`push imm32` / `mov reg, imm32`）
+#
+# 判据（红了意味着什么）见 `tests/closure_imm32.cpp` 文件头：
+#   ① `0x004F80E0` / `0x00513B90` / `0x0041389A` 三个"只有未对齐 imm32 引用"的入口
+#      都必须出现在**候选集**里；② `push` 与 `mov` 两半的输入面计数自洽；
+#   ③ `0x004F80E0` 的旧手工根已从 `aot/closure.txt` 删掉（所以派发表里有它只可能来自扫描）；
+#   ④ 生成物里真有它：派发表 3 行 `LIFT_AOT_ENTRY(0x…u, …)` + `.ll` 的
+#      `define i32 @lift_cc_<EA>(`。
+# ★ 守卫与生成器**共用同一份**扫描实现（`src/aot/closure_scan.h`，inline）⇒ 它绿才说明
+#   生成器收得到；两处各写一套的话，守卫绿只是"另一份扫描绿"。
+# ★ 输入（PE / closure.txt / out/aot 生成物）假定在场；生成物不在场 ⇒ `LIFT_SKIP(77)`。
+# ★ 顶层无条件注册 ⇒ **pure** 档（`AGENTS.md` §12.4：判据 = 注册位置）。
+# ★ `add_dependencies(… emulator-lift-aot)`：它读的是**产品 target 的生成物**
+#   （`lift_table.inc` / `lift_aot*.ll`）。没有这一行时 `cmake --build out --target
+#   lift-closure-imm32` 只编守卫 exe ⇒ 读到的可能是变异前的旧表 ⇒ 变异自检**假绿**
+#   （本仓 `cli-aot-flags` / `aot-audio-wiring` 的同形坑）。
+# =====================================================================================
+add_executable(lift-closure-imm32 tests/closure_imm32.cpp)
+target_link_libraries(lift-closure-imm32 PRIVATE emulator-lift-runtime)
+add_dependencies(lift-closure-imm32 emulator-lift-aot)
+add_test(NAME lift-closure-imm32
+    COMMAND lift-closure-imm32
+            "${LIFT_AOT_AGE_EXE}" "${LIFT_AOT_CLOSURE}"
+            "${LIFT_AOT_DIR}/lift_table.inc" "${LIFT_AOT_DIR}")
+set_tests_properties(lift-closure-imm32 PROPERTIES SKIP_RETURN_CODE 77)
 
 # =====================================================================================
 # AOT 音频接线 S0–S2：**定档谓词 + 参数面**（pure）与**真音频设备档**（配置期 opt-in）

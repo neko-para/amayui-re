@@ -3845,6 +3845,27 @@ const MUTATIONS = [
       '`CPINFO::LeadByte` 写回 +4（旧布局）⇒ `locale-ext` 的 `get-cp-info-layout` 在 ' +
       '`DefaultChar[0]==0`（+4）与 `LeadByte[0]==0x81`（+6）两条上红 —— 判据是微软文档的字段偏移',
   },
+
+  // ── D26 未对齐 imm32 扫描（`src/aot/closure_scan.h`；守卫 = `tests/closure_imm32.cpp`）──
+  //   故障形态：把"任意偏移"退化成"4 字节对齐"（`++i` → `i += 4`）。这是**唯一的**静默失效点：
+  //   扫描照跑、不报错，只是 `0x004F80E0` / `0x00513B90` / `0x0041389A` 三个入口不再进候选集
+  //   ⇒ 派发表缺三行 ⇒ TITLE→Quit 又停在 `00513B90` / `0041389A`。
+  //   判据：`tests/closure_imm32.cpp` 的 `closure-imm32/candidates`（候选集必须含这三个 EA）
+  //   与 `closure-imm32/dispatch-table`（生成物必须含三行 `LIFT_AOT_ENTRY`）当场红。
+  //   ★ `from` 是**落地后实际的代码字节**（8 空格缩进；`closure_scan.h` 里只出现一次）。
+  {
+    file: 'apps/emulator-lift/src/aot/closure_scan.h',
+    from: '        for (std::uint64_t i = 0; i + 5 <= n; ++i) {',
+    to:
+      '        for (std::uint64_t i = 0; i + 5 <= n; i += 4) {  // 变异：只扫 4 字节对齐',
+    guard: 'ctest:lift-closure-imm32',
+    ctest: 'lift-closure-imm32',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-closure-imm32',
+    what:
+      '把未对齐 imm32 扫描退化成 4 字节对齐（`++i` → `i += 4`）⇒ 0x004F80E0 / 0x00513B90 / ' +
+      '0x0041389A 的候选消失、派发表缺这三行 ⇒ `lift-closure-imm32` 当场红',
+  },
 ];
 
 let mutationRunSeq = 0;

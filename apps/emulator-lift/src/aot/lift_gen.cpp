@@ -67,6 +67,29 @@
 //     ⇒ 在 `buildUnits` 里**迭代到不动点**（`rejected_targets_` 单调 ⇒ 必然收敛）。
 //   ★ 尺寸护栏：`.ll` > 320 MB **或** `clang -c -O2` > 400 s ⇒ 缺省**关**（`--close-jmptab` 才开）。
 //
+// ★ D26 的第二条扫描（同一类软根，不是第六类）：**可执行节里任意偏移的指令 imm32**
+//   （`push imm32` = `68 id` · `mov r32, imm32` = `B8+rd id` / `C7 /0 id`）。上面那条"4 字节对齐
+//   dword"结构性看不到**指令流里的 imm32**（它的地址由 opcode 位置决定）。本语料三条实证：
+//     · `0x004F80E0`（`LanguageEnumProc`）：唯一引用是 `0x4F822A` 的 `push $0x4F80E0`，
+//       imm32 在 `0x4F822B`（mod 4 = 3）⇒ 旧扫描抓不到，以前靠 `closure.txt` 的手工根；
+//     · `0x00513B90`（`SEH_412290`，`sub_412290` 的 SEH handler chunk）：唯一引用是 `0x412295` 的
+//       `push offset SEH_412290`，imm32 在 `0x412296`（mod 4 = 2）⇒ TITLE→Quit 的 C++ throw 展开到它
+//       时"派发表里没有这个 EA"；
+//     · `0x0041389A`（`sub_412290` 的 `catch(Command_Exit_Exception)` 续延）：唯一引用是
+//       `0x413562` 的 `mov eax, offset loc_41389A`（catch 体把续延地址交给 `___CxxFrameHandler3`），
+//       imm32 在 `0x413563`（mod 4 = 3）⇒ push 扫不到它，Quit 的下一跳又会停在派发表外。
+//   ⇒ 判据：可执行节里**任意偏移**的 `68` / `B8..BF`（/ `C7` + `mod=11, reg=000`）+ 紧随 4 字节
+//     （小端）落在可执行节内 ⇒ 候选目标，与对齐 dword 的候选**并集**，收/丢仍走 `offerSoftRoot`
+//     （越界 / 解不出 / 重叠三档分开记），输入面读数（站点 / 落在执行节内 / 仅这条扫描发现）
+//     **单独报**。⛔ 不为此新增 SoftKind。
+//   ★ 为什么不是"任意偏移的任意 4 字节"：只认**会携带 imm32 的 opcode**（`68` / `B8..BF` / `C7 /0`），
+//     这是"这个 imm32 是代码指针"的最窄形态证据；opcode 字节作为别的指令的操作数字节 / 数据常量
+//     会撞进来，由 `offerSoftRoot` 的"在可执行节 + 能解码 + 不与已发射块重叠"三道过滤器接住
+//     （本语料 push 802 站点 / 539 目标、mov 里 126 个新目标，handler chunk / catch 续延 /
+//     线程 `StartAddress` 等都是真入口）。
+//   ★ 与 D15 的边界：D15 只认 `mov [mem], imm32`（"写内存的值"）；`push imm32` / `mov reg, imm32`
+//     **不是**写内存，两者不重叠、账也分开。
+//
 // CLI：
 //   --exe <PE>            字节真源（PE 节表映射进 guest 后交给 `Decoder`）
 //   --roots <file>        一行一个 hex EA（`#` 起注释）；本轮**只**认这一种输入形状
@@ -101,6 +124,7 @@
 #include <vector>
 
 #include "aot/aot_hook_ea.h"
+#include "aot/closure_scan.h"
 #include "aot/lift_aot_text.h"
 #include "aot/lift_gen_emit.h"
 #include "aot/lift_struct.h"
@@ -438,6 +462,14 @@ inline BlockSpans buildBlockSpans(const std::map<std::uint32_t, GenBlock>& block
 //   `jpt_xxx` 那张 dword 表），真源是文件 raw 字节。`.bss` 尾巴（`raw_size < vsize`）没有初值 ⇒ 跳过。
 // ★ 对齐口径：节内偏移 4 字节对齐 = EA 4 字节对齐（`raw_offset` 是 FileAlignment 对齐、节 VA 是
 //   SectionAlignment 对齐、ImageBase 也 4 字节对齐）⇒ `i += 4` 这一步就是判据的一半。
+// -------------------------------------------------------------------------------------
+// ★ **未对齐的指令 imm32**（同一类 D26 的第二条扫描）：
+//   上面那条"4 字节对齐 dword"漏掉了**指令流里的 imm32**（地址由 opcode 位置决定，不保证对齐）。
+//   判据、opcode 集、三条语料实证（`0x4F80E0` / `0x513B90` / `0x41389A`）与"为什么不是任意 4 字节"
+//   的长注释**统一在** `aot/closure_scan.h` 的文件头（守卫 `tests/closure_imm32.cpp` 也读那一份）
+//   ⇒ ⛔ 不在这里再抄第二份（两份判据迟早漂）。
+//   `lift_gen.cpp` 只做：把 `scanInstructionImmediates()` 的候选**并进** `jumptab_seeds_`，
+//   走 `offerSoftRoot` 的同一套收/丢判据；输入面读数（push / mov / 仅这条扫描发现）单独报。
 // =====================================================================================
 struct JumpTabScan {
     std::uint64_t sites = 0;          // 扫过的可执行节 4 字节对齐 dword 站点数
@@ -1278,9 +1310,27 @@ public:
         jumptab_sites_ = sites;
         jumptab_in_exec_ = in_exec;
     }
+    // ★ D26 的第二条扫描（未对齐指令 imm32：push / mov）：候选**并入**同一条 `jumptab_seeds_`（收/丢判据
+    //   与对齐 dword 那一类完全相同，⛔ 不另写一套），但输入面的读数**分开记**（否则说不清
+    //   "新增的这些是从哪条扫描来的"）。调用顺序：先 `setJumpTableSeeds` 再本函数。
+    void setInstructionImmediateSeeds(std::set<std::uint32_t> seeds, std::uint64_t push_sites,
+                                      std::uint64_t push_in_exec, std::uint64_t mov_sites,
+                                      std::uint64_t mov_in_exec) {
+        imm32_seeds_ = std::move(seeds);
+        imm32_push_sites_ = push_sites;
+        imm32_push_in_exec_ = push_in_exec;
+        imm32_mov_sites_ = mov_sites;
+        imm32_mov_in_exec_ = mov_in_exec;
+        jumptab_seeds_.insert(imm32_seeds_.begin(), imm32_seeds_.end());
+    }
     const std::set<std::uint32_t>& jumpTabSeeds() const { return jumptab_seeds_; }
     std::uint64_t jumpTabSites() const { return jumptab_sites_; }
     std::uint64_t jumpTabInExec() const { return jumptab_in_exec_; }
+    std::uint64_t imm32PushSites() const { return imm32_push_sites_; }
+    std::uint64_t imm32PushInExec() const { return imm32_push_in_exec_; }
+    std::uint64_t imm32MovSites() const { return imm32_mov_sites_; }
+    std::uint64_t imm32MovInExec() const { return imm32_mov_in_exec_; }
+    std::uint64_t imm32Distinct() const { return imm32_seeds_.size(); }
     std::uint64_t jumpTabDistinct() const { return jumptab_seeds_.size(); }
     std::uint64_t jumpTabRounds() const { return jumptab_rounds_; }
     // 候选面（"先量后收"的那一半）：由 `buildUnits` 阶段③在**收之前**填一次（⛔ 不是判据的输入）。
@@ -1573,6 +1623,12 @@ private:
     std::set<std::uint32_t> jumptab_seeds_;     // D26 候选集（`scanExecCodeDwords` 给的升序集合）
     std::uint64_t jumptab_sites_ = 0;           // D26 读数：扫过的可执行节 dword 站点数
     std::uint64_t jumptab_in_exec_ = 0;         // 其中值落在可执行节内的站点数
+    // ★ D26 的第二条扫描：未对齐指令 imm32（push / mov；候选已经并进 `jumptab_seeds_`；这里只留读数）。
+    std::set<std::uint32_t> imm32_seeds_;
+    std::uint64_t imm32_push_sites_ = 0;
+    std::uint64_t imm32_push_in_exec_ = 0;
+    std::uint64_t imm32_mov_sites_ = 0;
+    std::uint64_t imm32_mov_in_exec_ = 0;
     std::uint64_t jumptab_rounds_ = 0;          // D26 读数：不动点迭代跑了几轮（0 = 关 / 无候选）
     JumpTabSurface jumptab_surface_;            // D26 读数：候选面（收之前读一次）
     std::set<std::uint32_t> scanned_;           // 已经扫过的 leader（两次 `explore` 之间共享）
@@ -2240,6 +2296,13 @@ struct BuildRun {
     JumpTabSurface jumptab_surface;
     std::uint64_t jumptab_rounds = 0;
     std::uint64_t jumptab_live_roots = 0;
+    // ★ D26 的第二条扫描（未对齐指令 imm32：push / mov）的输入面读数（候选已并进 `jumptab_*` 的账）。
+    std::uint64_t imm32_sites = 0;        // 未对齐 imm32 的总站点数（push + mov）
+    std::uint64_t imm32_in_exec = 0;      // 其中值落在可执行节内的
+    std::uint64_t imm32_push_sites = 0;   // `push imm32` 站点数
+    std::uint64_t imm32_mov_sites = 0;    // `mov reg, imm32` 站点数
+    std::uint64_t imm32_distinct = 0;     // 不同候选目标数
+    std::uint64_t imm32_only = 0;         // 仅由这条扫描发现（不在对齐 dword 候选里）的目标数
     // ★ P1（S2）的读数
     std::uint64_t data_range_leaders = 0;
     std::uint64_t data_range_root_hits = 0;
@@ -2266,6 +2329,22 @@ bool buildAll(const std::set<std::uint32_t>& roots, const lift::PeImage& image,
     // D17 / D26 的候选面是**静态**的（扫一遍 PE 就有）⇒ 每趟重建 Explorer 时复用同一份扫描结果。
     const DataPtrScan data_scan = scanDataPointers(image, exec_ranges);
     const JumpTabScan jumptab_scan = scanExecCodeDwords(image, exec_ranges);
+    // ★ D26 的第二条扫描：**可执行节里任意偏移的指令 imm32**（push / mov；未对齐立即数）。
+    //   与对齐 dword 的候选**并集**进 `jumptab_seeds_`（收/丢判据完全相同）；这里只多记输入面读数。
+    const lift::aot::Imm32Scan imm32_scan =
+        lift::aot::scanInstructionImmediates(image, exec_ranges);
+    out->imm32_sites = imm32_scan.sites;
+    out->imm32_in_exec = imm32_scan.in_exec;
+    out->imm32_push_sites = imm32_scan.push_sites;
+    out->imm32_mov_sites = imm32_scan.mov_sites;
+    out->imm32_distinct = imm32_scan.targets.size();
+    {
+        std::uint64_t only = 0;
+        for (const std::uint32_t ea : imm32_scan.targets) {
+            if (jumptab_scan.targets.count(ea) == 0) ++only;
+        }
+        out->imm32_only = only;
+    }
     // ★ 审计模式**总是**跑 S1（它的用途就是"只看识别 / 只读审计"）：两个消费开关都关时，
     //   `ranges` / `items` 都是空 ⇒ 识别结果不改变任何东西 ⇒ 这就是"只加 P0、没上 P1/P2"的
     //   改前状态（守卫在那一档必须红）。
@@ -2297,6 +2376,9 @@ bool buildAll(const std::set<std::uint32_t>& roots, const lift::PeImage& image,
                           opt.close_jmptab_items, accounts);
         explorer.setDataPointerSeeds(data_scan.targets, data_scan.sites, data_scan.in_exec);
         explorer.setJumpTableSeeds(jumptab_scan.targets, jumptab_scan.sites, jumptab_scan.in_exec);
+        explorer.setInstructionImmediateSeeds(imm32_scan.targets, imm32_scan.push_sites,
+                                              imm32_scan.push_in_exec, imm32_scan.mov_sites,
+                                              imm32_scan.mov_in_exec);
         if (opt.jmptab_exclude) explorer.setDataRanges(ranges);
         if (opt.close_jmptab_items) explorer.setJumpTableItems(items);
         if (!buildUnits(roots, &explorer, accounts, &out->blocks, &out->drops, err, err_ea)) {
@@ -2315,6 +2397,11 @@ bool buildAll(const std::set<std::uint32_t>& roots, const lift::PeImage& image,
         out->jumptab_surface = explorer.jumpTabSurface();
         out->jumptab_rounds = explorer.jumpTabRounds();
         out->jumptab_live_roots = explorer.liveJumpTabRoots();
+        out->imm32_sites = explorer.imm32PushSites() + explorer.imm32MovSites();
+        out->imm32_in_exec = explorer.imm32PushInExec() + explorer.imm32MovInExec();
+        out->imm32_push_sites = explorer.imm32PushSites();
+        out->imm32_mov_sites = explorer.imm32MovSites();
+        out->imm32_distinct = explorer.imm32Distinct();
         out->data_range_leaders = explorer.dataRangeLeaders();
         out->data_range_root_hits = explorer.dataRangeRootHits();
         out->call_ret_in_data_range = explorer.callRetInDataRange();
@@ -4020,16 +4107,29 @@ int main(int argc, char** argv) {
     //   ★ 与 D17 的本质区别：这里的 `added` 是**新增 unit 根 = 新增块 / 新增指令**（D17 那行不是）。
     std::printf(
         "lift-gen: 可执行节跳表目标（D26）%s soft-roots=%zu（新增 unit 根 = **会新增块**）· 丢弃：越界=%zu "
-        "解不出=%zu 重叠=%zu · shim 目标跳过=%zu · 不动点轮数=%llu · 最终仍在入口集=%zu\n",
+        "解不出=%zu 重叠=%zu · shim 目标跳过=%zu · 不动点轮数=%llu · 最终仍在入口集=%llu\n",
         opt.close_jmptab ? "on" : "off", soft_jumptab.added.size(), soft_jumptab.outside.size(),
         soft_jumptab.undecodable.size(), soft_jumptab.overlap.size(),
         soft_jumptab.shim_targets.size(),
         static_cast<unsigned long long>(run.jumptab_rounds),
-        run.jumptab_live_roots);
+        static_cast<unsigned long long>(run.jumptab_live_roots));
     {
         const JumpTabSurface& s = run.jumptab_surface;
+        // ★ D26 的第二条扫描（未对齐 imm32：`push imm32` / `mov reg, imm32`）：**只有输入面读数**。
+        //   候选已经并进下面那行的"不同候选（并集）"，收/丢的账仍然是 `soft_jumptab`
+        //   （⛔ 不另立一类软根）。
         std::printf(
-            "lift-gen: 可执行节的 4 字节对齐 dword 候选面：站点=%llu · 值在可执行节内=%llu · 不同候选=%llu "
+            "lift-gen: 未对齐 imm32 候选面（D26 第二条扫描）：站点=%llu（push imm32=%llu · mov reg, "
+            "imm32=%llu）· 值在可执行节内=%llu · 不同候选=%llu（其中仅这条扫描发现的=%llu）\n",
+            static_cast<unsigned long long>(run.imm32_sites),
+            static_cast<unsigned long long>(run.imm32_push_sites),
+            static_cast<unsigned long long>(run.imm32_mov_sites),
+            static_cast<unsigned long long>(run.imm32_in_exec),
+            static_cast<unsigned long long>(run.imm32_distinct),
+            static_cast<unsigned long long>(run.imm32_only));
+        std::printf(
+            "lift-gen: 可执行节代码指针候选面（对齐 dword ∪ 未对齐 imm32）：对齐 dword 站点=%llu · "
+            "值在可执行节内=%llu · 不同候选（并集）=%llu "
             "· 已在入口集/已判过=%llu · 已是块首（第四类 D21 处理）=%llu · 可解码=%llu · 解不出=%llu "
             "· 被重叠挡下=%llu · shim 桩=%llu\n",
             static_cast<unsigned long long>(s.sites), static_cast<unsigned long long>(s.in_exec),
@@ -4041,17 +4141,24 @@ int main(int argc, char** argv) {
             static_cast<unsigned long long>(s.overlap_pre), static_cast<unsigned long long>(s.shim));
         // ★ 恒等式（可手工核）：`不同候选 = 已在入口集/已判过 + shim 桩 + 已是块首 + 被重叠挡下 + 可解码 + 解不出`。
         std::fprintf(stderr,
-                     "lift-gen: [可执行节跳表 D26/%s] soft-roots=%zu（最终仍在入口集=%zu）丢弃：越界=%zu "
-                     "解不出=%zu 重叠=%zu · shim 目标跳过=%zu · 轮数=%llu · 站点=%llu（值在可执行节内=%llu）"
-                     " · 不同候选=%llu · 已在入口集/已判过=%llu · 已是块首=%llu · 可解码=%llu · 解不出=%llu"
+                     "lift-gen: [可执行节跳表 D26/%s] soft-roots=%zu（最终仍在入口集=%llu）丢弃：越界=%zu "
+                     "解不出=%zu 重叠=%zu · shim 目标跳过=%zu · 轮数=%llu · 对齐 dword 站点=%llu（值在可执行节内=%llu）"
+                     " · 未对齐 imm32 站点=%llu（push=%llu · mov=%llu · 值在可执行节内=%llu，仅这条扫描发现=%llu）"
+                     " · 不同候选（并集）=%llu · 已在入口集/已判过=%llu · 已是块首=%llu · 可解码=%llu · 解不出=%llu"
                      " · 被重叠挡下=%llu\n",
                      opt.close_jmptab ? "on" : "off", soft_jumptab.added.size(),
-                     run.jumptab_live_roots, soft_jumptab.outside.size(),
+                     static_cast<unsigned long long>(run.jumptab_live_roots),
+                     soft_jumptab.outside.size(),
                      soft_jumptab.undecodable.size(), soft_jumptab.overlap.size(),
                      soft_jumptab.shim_targets.size(),
                      static_cast<unsigned long long>(run.jumptab_rounds),
                      static_cast<unsigned long long>(s.sites),
                      static_cast<unsigned long long>(s.in_exec),
+                     static_cast<unsigned long long>(run.imm32_sites),
+                     static_cast<unsigned long long>(run.imm32_push_sites),
+                     static_cast<unsigned long long>(run.imm32_mov_sites),
+                     static_cast<unsigned long long>(run.imm32_in_exec),
+                     static_cast<unsigned long long>(run.imm32_only),
                      static_cast<unsigned long long>(s.distinct),
                      static_cast<unsigned long long>(s.in_entries),
                      static_cast<unsigned long long>(s.block_starts),
