@@ -509,3 +509,166 @@ cp -R .tmp/p2/appdata2 /tmp/appdata-lto-default      # 任意"未跑过"的 appd
 与 Linux 未验证** ⇒ `LIFT_AOT_LTO` 在非 APPLE 上默认 **OFF**；显式 `-DLIFT_AOT_LTO=ON` 属未验证路径
 （CMake 会打 `WARNING`，不拦）。覆盖面只有 `fellow-init` 一个窗口（4.92 亿 guest insns、0 帧、纯计算段），
 没有覆盖音频 / 真 GPU 呈现 / 存档写盘 / 其它场景。
+
+---
+
+## 11. 2026-11-17：lift_tick 去判空后的内联读数
+
+### 11.1 改了什么
+
+`apps/emulator-lift/src/runtime/lift_abi.cpp`：`lift_tick` 的
+
+```cpp
+if (!cpu_ptr) { fprintf(stderr, …); fflush(stderr); _Exit(4); }
+```
+
+删掉，改成 `assert(cpu_ptr != nullptr)`（`#include <cassert>`）。理由（源码注释里同一份）：
+唯一调用方是**生成物**（`lift_gen_emit.cpp` 发 `call void @lift_tick`），trampoline 恒传
+`&AotRunner::cpu_`；`runtime/` 与 `tests/` 零调用、也没有测试断言过 null 行为。用 `assert`
+而不是静默：RelWithDebInfo / Release（`NDEBUG`）下**零代码零分支**，Debug 档仍能点名
+`cpu_ptr == nullptr`。`lift_one` / `lift_shim` 的判空**保留**（不是 10 万站点级热路径）。
+`lift_abi.h` 的契约注释同步改成"必须非空；Debug 档 assert"。
+⛔ 没有动 `flushTick` 的发射、`insns` 记账语义、`X86` 布局；没有加 `always_inline`。
+
+### 11.2 站点读数（mac arm64 / RelWithDebInfo / `split8-O2-lto-abi`）
+
+```bash
+llvm-objdump -d --no-show-raw-insn --demangle <bin> | rg -c 'bl\s+.*_lift_tick'
+llvm-nm <bin> | rg _lift_tick
+```
+
+| 项 | before（HEAD 7efba89 产物） | after（本轮） |
+|---|---:|---:|
+| `bl _lift_tick` 站点 | **13,893** | **0** |
+| `_lift_tick` 符号 | `0000000100e2f7f0 t _lift_tick` | **符号被删**（`llvm-nm` 里没有） |
+| `__text` | 14,852,376 B | 13,903,808 B（**−948,568 B，−6.39%**） |
+| 可执行文件 | 20,801,920 B | 19,644,384 B（−5.56%） |
+
+⇒ 上一轮 B 档"大函数里没内联的那 13,893 个"在本轮**全部内联**：没有残留 `bl`，连符号都被删了。
+因此**没有 inline 拒绝理由可拿**（`opt -pass-remarks-missed=inline` 无从触发），也不需要
+`always_inline`。
+
+### 11.3 逐函数 census（IR 站点 vs 反汇编 store）——判据**不成立**
+
+```bash
+node .tmp/tick-inline/census.mjs apps/emulator-lift/out/aot .tmp/tick-inline/after.dis \
+     .tmp/tick-inline/census.json
+```
+
+口径：IR 侧数 `part*.ll` 里每个 `@lift_cc_*` 的 `call void @lift_tick(ptr %cpu, i32 n)`；
+反汇编侧按 **CFG must 分析**跟踪 `cpu` / `cpu+0x6d8` 的寄存器（`-O2` 会把基址提进寄存器，
+`str xN,[xInsns]` 里不再有 `#0x6d8`），数对 `offsetof(X86, insns)=0x6d8` 的 store。
+`offsetof` 由探针实测 = **0x6d8**（`sizeof(X86)=1792`）。
+
+| 项 | 读数 |
+|---|---:|
+| IR `@lift_cc_*` 函数 | 10,254 |
+| IR `call void @lift_tick` 站点 | **104,949**（Σn = 348,208） |
+| 其中"从入口 switch 可达"的站点 | 104,848（**101 个在 IR 死块里**） |
+| 反汇编 store（direct `[cpu,#0x6d8]` + hoisted `[xInsns]`） | **102,185**（100,828 + 1,357） |
+| 逐函数 `store == IR 站点` | **8,138 / 10,254** |
+| 逐函数不等 | 2,116 |
+
+差值直方图（`store − IR`，按函数数）：`+1:672 · +2:199 · −1:507 · −2:238 · −3:109 · −4:88 …`
+（长尾到 `−86 / +8`）。完整 2,116 条不等清单在 `.tmp/tick-inline/census.json`（观测产物，不入库）。
+
+**这个判据在本 build 上不可用**，原因不是"没内联"，而是优化把
+"一个 IR 调用点 = 一个 store"这个前提打破了。三条可复现的证据：
+
+**① LTO 把整个 `lift_cc_*` 函数内联进彼此（会给调用方**加** tick）。**
+IR 里 `call i32 @lift_cc_*` 共 **2,571** 个站点，反汇编里 `bl _lift_cc_*` 只剩 **605** 个
+⇒ ~1,966 个整函数内联。例：`lift_cc_401A81` 的 IR 只有 1 个 `lift_tick(…, i32 2)`，但机器码有
+**2** 个 store：
+
+```text
+1003f1e64:  ldr  x9, [x3, #0x6d8]
+1003f1e68:  add  x9, x9, #0x2
+1003f1e6c:  str  x9, [x3, #0x6d8]      ; 自己的 tick(2)
+…
+1003f1e90:  ldr  x10, [x3, #0x6d8]
+1003f1e94:  add  x10, x10, #0x5
+1003f1e98:  str  x10, [x3, #0x6d8]     ; 内联进来的 lift_cc_4E6F18 的 tick(5)
+```
+
+`lift_cc_401A81` 的 IR 里紧跟着 `call i32 @lift_cc_4E6F18(ptr %st, ptr %mem, i32 5140248, ptr %cpu)`；
+`lift_cc_4E6F18` 只有一个 switch case `i32 5140248 → bb_4E6F18`，而 `bb_4E6F18` 里恰好只有一个
+`lift_tick(…, i32 5)`。⇒ 多出来的 store 是**被内联的 callee 的 tick**，不是重复计数。
+
+**② 相同块被合并（会把两个 IR 站点合到一个 store）。**
+例：`lift_cc_402A00` 的 IR 有 8 个 tick（6,4,5,5,4,4,3,4，Σ35），机器码只有 **7** 个 store（Σ31）：
+switch 的 `0x402A42` 与 `0x402A4F` 两个 IR 块（各一个 `lift_tick(…, i32 4)`）落到**同一个**机器块：
+
+```text
+1003f9aa4:  b.eq   0x1003f9ab8          ; case 0x402A42
+1003f9ab4:  b.ne   0x1003f9c50          ; case 0x402A4F 落到 fallthrough
+1003f9ab8:  …                            ; 共享块
+1003f9ad4:  ldr    x13, [x3, #0x6d8]
+1003f9ad8:  add    x13, x13, #0x4
+1003f9adc:  str    x13, [x3, #0x6d8]     ; 一份 store 服务两个 IR tick 站点
+```
+
+**③ IR 死块**：101 个 `call void @lift_tick` 位于从入口 `switch` 到不了的块里（生成物的
+"只能从别的入口进"的块），codegen 当死代码删掉 —— 它们在 IR 文本里，但从来不会执行。
+
+另有 **5 个函数用跳转表**（`br xN`），census 的机器 CFG 解不出 `br` 的目标，逐函数数字不可用：
+`lift_cc_4F6E1E`（IR 89 / store 3）、`lift_cc_50D260`（94/15）、`lift_cc_4EDBDE`（50/13）、
+`lift_cc_425A10`（15/2）、`lift_cc_426120`（20/6）。⇒ 这 5 个只能按"再无 `bl _lift_tick`"判。
+
+### 11.4 语义指纹（60 帧，before/after 各自全新 appdata）
+
+```bash
+node .tmp/lto/run-fingerprint.mjs <bin> .tmp/tick-inline/appdata-<档> /tmp/fp-<档>.txt --frames 60
+```
+
+| 项 | before | after |
+|---|---|---|
+| `exit` | 0 | 0 |
+| `frames` | 60 | 60 |
+| `stop @` | `eip=00498AE4`（max-frames · shim `Present`） | 同左 |
+| arena `in_use / peak / surfaces` | 108595152 / 108595152 / 21 | 108595152 / 108595152 / 21 |
+| `table misses` | 0（entries=33509） | 0（entries=33509） |
+
+**五项逐位相同**。附注：`heap_blocks` 两档都是 6904（§6 表里是 6670 —— 那是另一个 appdata
+快照的读数，不是本轮判据）；`insns` 793,429,194 → 793,463,481（+0.004%，**不作判据**）。
+
+### 11.5 FELLOW 窗口（`--max-frames 6000`，每次全新 appdata）
+
+```bash
+/usr/bin/time -lp apps/emulator-lift/out/emulator-lift-aot --present headless --skip-logo \
+  --audio off --game-dir links/install --appdata <新目录> --max-frames 6000 --time-limit 180 \
+  --input-plan .tmp/lto-feature/fellow-init-fp.plan
+```
+
+| run | `wall` | `lift` | `boundary` | `shim` | 窗口 `insns` |
+|---|---:|---:|---:|---:|---:|
+| 1 | 560.024 ms | 263.758 ms (47.1%) | 154.891 ms (27.7%) | 116.018 ms (20.7%) | 492,724,228 |
+| 2 | 557.720 ms | 260.366 ms (46.7%) | 154.423 ms (27.7%) | 108.382 ms (19.4%) | 492,367,689 |
+| 3 | 543.056 ms | 255.922 ms (47.1%) | 158.255 ms (29.1%) | 101.368 ms (18.7%) | 492,475,103 |
+| 中位 | **557.720 ms** | 260.366 ms | 154.891 ms | 108.382 ms | — |
+
+`frames=0` · `unaccounted 0.000 ms` · `coverage 1.86` · `verdict = 候选（boundary 27.7%）` 三次一致；
+总帧收口 `stop @ eip=00498AE4`、`frames=6000`。
+
+**对比 §10 的 B 中位 542.96 ms**：本轮中位 557.72 ms（**+2.7%**），最好一次 543.06 ms（+0.02%）。
+⚠ 采集时 `uptime` 1 分钟负载 **4.67**（这台机器有背景负载）；且这是三次同向 run、**没有做
+交错 A/B**，按 `AGENTS.md` §12.6 不能据此判"变慢/变快" —— 只能说本轮**没有稳定复现 ≤543 ms**。
+
+### 11.6 门禁与结论
+
+`ctest --test-dir out --output-on-failure`：**105 条 · 101 passed · 4 skipped · 0 failed**
+（79.73 s）。skip 逐条原因：
+
+| 用例 | 原因 |
+|---|---|
+| `cli-aot-flags` | AOT 参数面用 `CreateProcessW` 起子进程（Windows 专有） |
+| `gpu-raster` | CTest 设 `SDL_VIDEODRIVER=dummy` ⇒ 建不出 GPU 设备（SKIP 77） |
+| `frame-dump-failure` | stderr 捕获 / 目录当文件写用 MSVC `<io.h>`（Windows 专有） |
+| `aot-audio-wiring` | 接线用 `CreateProcessW` 起子进程（Windows 专有） |
+
+**一句话结论**：本轮之后**没有任何 `bl _lift_tick`**（符号也被删）—— 上一轮残留的 13,893 个
+站点**全部内联**，不需要 `always_inline`、也没有拒绝理由要提供。但**"每个函数 store 数 == IR
+站点数"这个逐函数判据在本 build 上不成立**（8,138/10,254 相等）：LTO 同时把整个 `lift_cc_*`
+内联进彼此（2,571 个 IR 调用点 → 605 个 `bl`）、并合并相同块，两个方向都会让 store 数偏离
+IR 站点数（§11.3 的 ①②③ 各有逐例反汇编）。要把这个判据变成可用的门禁，需要**按 IR 记账**
+（例如给每个 tick 站点一个可追踪标记，或把内联进来的 callee tick 计入调用方），那属于本轮
+边界之外的发射改造。

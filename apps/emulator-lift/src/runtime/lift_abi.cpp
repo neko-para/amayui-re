@@ -5,6 +5,7 @@
 //   （复审 §5.3 的"两侧都放"）：这里守着 `.ll` 编译期的偏移假设，测试守着"改布局会红"。
 #include "runtime/lift_abi.h"
 
+#include <cassert>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
@@ -107,12 +108,17 @@ extern "C" void lift_note_write(void* cpu, std::uint32_t ea, std::uint32_t n) {
 // ① lift_tick —— 只记条数（D2b：时钟 = wall clock ⇒ 不推进虚拟时间）
 // ---------------------------------------------------------------------------------------
 extern "C" void lift_tick(void* cpu_ptr, std::uint32_t n) {
-    if (!cpu_ptr) {
-        // 与 `lift_shim` 的空指针同一档：调用方（生成物 / trampoline）的编程错误，⛔ 不静默。
-        std::fprintf(stderr, "[lift_tick] 调用方传了空 cpu（n=%u）\n", n);
-        std::fflush(stderr);
-        std::_Exit(4);
-    }
+    // ★ 2026-11-17：**移除**空指针分支（用户裁决），改 Debug 档 `assert`。
+    //   · 为什么可以删：唯一调用方是**生成物**（`lift_gen_emit.cpp` 发的 `call void @lift_tick`），
+    //     trampoline 恒传 `&AotRunner::cpu_`；`runtime/` 与 `tests/` 零调用，也没有任何测试
+    //     断言过 `cpu == nullptr` 时的行为（旧口径因此没有消费者）。
+    //   · 为什么用 `assert` 而不是静默：Release/NDEBUG 下它**零代码、零分支**；Debug 档仍会在
+    //     解引用之前**点名** `cpu_ptr == nullptr`（而不是把编程错误变成一个没有名字的段错误）。
+    //   · 为什么值得：这一条 `cbz` 落在 **10 万级** tick 站点上（IR 实测 104,949 个；
+    //     历史 native 口径 101,765 —— 每个块边界 / 每次宿主调用前一次），是发射面最大的
+    //     单一固定成本之一。
+    //   ⛔ 不要顺手把 `lift_one` / `lift_shim` 的判空也删掉：它们不是 10 万站点级的热路径。
+    assert(cpu_ptr != nullptr);
     static_cast<lift::X86*>(cpu_ptr)->insns += n;
 }
 

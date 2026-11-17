@@ -49,7 +49,10 @@ extern "C" void lift_note_write(void* cpu, std::uint32_t ea, std::uint32_t n);
 //   ★ D2b：时钟 = **wall clock** ⇒ 这里**只**记条数，⛔ 不推进虚拟时间（那部分是恒等操作）。
 //   ★ `rep` 类按**1 条**算（与解释器同一口径：`execString` 在一条 `Insn` 里循环元素，
 //     `machine.cpp` 的 `++cpu_.insns` 一条一次）。
-//   `cpu == nullptr` ⇒ 调用方编程错误 ⇒ 响亮退出（⛔ 不静默 no-op）。
+//   `cpu` **必须非空**；Debug 档 `assert` 点名，Release/NDEBUG 下零代码零分支。
+//   ★ 2026-11-17 用户裁决：旧的"`cpu == nullptr` ⇒ 响亮退出"分支已删 —— 唯一调用方是生成物
+//     （恒传 `&AotRunner::cpu_`），`runtime/` 与 `tests/` 零调用，也没有测试断言过 null 行为。
+//     ⛔ 不要把这个判空加回来：它在 10 万级 tick 站点上是一条热路径 `cbz`。
 extern "C" void lift_tick(void* cpu, std::uint32_t n);
 
 // ② 单指令宿主原语：把**这一条** guest 指令交给既有执行器（`Decoder` + `execInsn`）执行一次。
