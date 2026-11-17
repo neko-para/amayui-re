@@ -14,7 +14,7 @@
 | **数字怎么比**（profiler 口径、墙钟在哪个 build 上可比、音频 underrun 判据） | `measurement.md` |
 | **AOT lift 的静态指令预算**（host/guest、块边界税、循环/派发上界；一次性读数与复核命令） | `aot-instruction-budget.md` |
 | **AOT 该不该开 LTO / 改回 single LL**（A/B0/B1/B2/C 对照；一次性读数、LSP 污染标注与复核命令） | `aot-lto-evaluation.md` |
-| **blind wipe（场景命令族 kind 2）转场为什么卡**（身份 EA · 每帧工作量模型 · H1–H6 · `--until` 盲区 · 配方 `scripts/recipes/sc0000-wipe.plan` · timed 读数与未定的仪器缺口） | `wipe-profile.md` |
+| **blind wipe（场景命令族 kind 2）转场为什么卡**（身份 EA · 每帧工作量模型 · H1–H6 · `--until` 盲区 · 配方 `scripts/recipes/sc0000-wipe.plan` · timed 读数 · **按帧 shim 分桶**（`--profile-slow-frames`）的读数与未定项） | `wipe-profile.md` |
 | **D3DX math 的语义从哪来**（`D3DXMatrixDecompose` 的 native 对拍表 / 134 例 / 引擎 5 个调用点 EA / 容差与复现命令） | `d3dx-math.md` |
 | **caps 声明什么、凭什么、缺一个会怎样**（目标值 2.0/1.0 · 为什么 VS 必须报 1.0 · 硬等式 `required == implemented` · 会建的程序集 · 待核） | `caps.md` |
 | **GPU 批的透视校正插值**（逐顶点 `1/w` · 顶点上的 `uv/w` / `color/w` 怎么在片元里除回来 · 202 的透视 `Proj` 为什么现在能画 · 双源改动 · 新像素 oracle 与仿射控制行 · 读数 · 残余风险） | `gpu-perspective.md` |

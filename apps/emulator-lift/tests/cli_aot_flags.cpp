@@ -26,6 +26,10 @@
 //   ⑦ `--help` 里有 `--audio-dump`（否则用户不知道这条入口存在）；且它的说明**声明**了
 //      「abort 之后 dump 不可信」（洞 7：`std::abort()` 路径跳过 `AudioEngine::end()` ⇒ WAV 两个
 //      长度字段不回填。⛔ 不改 abort 语义，只声明）。
+//   ⑧ `--profile-slow-frames <ms>`（按帧的 shim 分桶）：`--help` 里有它；**缺 `--profile` ⇒ exit 2
+//      并点名两者**（含值 0 = 显式关那一档）；负数 / 小数 / 带单位 / 垃圾 / 缺值 ⇒ exit 2 且点名；
+//      `--profile --profile-slow-frames 50` **被接受**。
+//      红了 ⇒ 要么仪器"给了但跑不起来"，要么非法值被静默吞成 0（= 以为在量、其实没量）。
 //
 // ★ 四条主断言**全部判在 GPU bring-up 之前**：AOT 臂的参数校验（`aot_main.cpp` 的
 //   `--audio` / `--cursor-warp` 平台闸门 / `present_window_flag` / `--sound` 说明）都在
@@ -193,6 +197,9 @@ int main(int argc, char** argv) {
         LIFT_CHECK(r.out.find("不可信") != std::string::npos);
         // ★ S4：`--input-plan` 必须在 help 里（否则用户不知道 AOT 臂有输入控制面）。
         LIFT_CHECK(r.out.find("--input-plan") != std::string::npos);
+        // ★ `--profile-slow-frames` 必须在 help 里（否则"按帧的 shim 分桶"这条仪器等于不存在，
+        //   而 wipe 剖面的最大缺口正是它 —— 见 `docs/03-emulator/wipe-profile.md`）。
+        LIFT_CHECK(r.out.find("--profile-slow-frames") != std::string::npos);
         // ★ `--scale` 必须在 help 里，且说明里写明 `auto` 与 headless 的两条口径
         //   （否则用户不知道有这条入口，也不知道 headless 下它不生效）。
         LIFT_CHECK(r.out.find("--scale auto|数值") != std::string::npos);
@@ -499,6 +506,77 @@ int main(int argc, char** argv) {
         LIFT_CHECK(r.err.find("--audio-dump") != std::string::npos);
         LIFT_CHECK(r.err.find("需要一个值") != std::string::npos);
         LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
+    }
+
+    // ---- ⑦ `--profile-slow-frames`：**依赖 `--profile`**（缺了它 ⇒ exit 2 并点名两者）----
+    //      红了 ⇒ 一个拿不到墙钟尺的仪器被静默接受（表里 `wall_ms` 全 0 / 表根本不出现），
+    //      而那正是"以为在量、其实没量"。★ 值 0（显式关）同样要带 `--profile`：判据只有一条。
+    g_current_case = "profile-slow-frames-requires-profile";
+    {
+        const ChildRun r = runChild(exe, L"--profile-slow-frames 50 --present headless", root, root / "psf.out",
+                                    root / "psf.err");
+        LIFT_CHECK(r.started);
+        LIFT_CHECK(!r.timed_out);
+        LIFT_CHECK_EQ_U32(r.exit_code, 2u);
+        LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
+        LIFT_CHECK(r.err.find("--profile-slow-frames") != std::string::npos);
+        LIFT_CHECK(r.err.find("同时给 --profile") != std::string::npos);
+        // 启动前拒绝 ⇒ 一行运行摘要都没有（不是"跑了一部分才停"）
+        LIFT_CHECK(!hasLineStartingWith(r.out, "stop"));
+        const ChildRun r0 = runChild(exe, L"--profile-slow-frames 0 --present headless", root,
+                                     root / "psf0.out", root / "psf0.err");
+        LIFT_CHECK(r0.started);
+        LIFT_CHECK(!r0.timed_out);
+        LIFT_CHECK_EQ_U32(r0.exit_code, 2u);
+        LIFT_CHECK(r0.err.find("未知参数") == std::string::npos);
+        LIFT_CHECK(r0.err.find("--profile-slow-frames") != std::string::npos);
+    }
+
+    // ---- ⑦' 取值：负数 / 小数 / 单位 / 垃圾 / 缺值 ⇒ exit 2 且**点名这个 flag** ----
+    //      红了 ⇒ `strtoull("-1")` 式的静默回绕（负号被当成巨大毫秒数）或"认不出就当 0"
+    //      （= 让人以为开着仪器、其实一次都不记）。
+    g_current_case = "profile-slow-frames-bad-values";
+    {
+        struct BadSlow {
+            const wchar_t* arg;
+            const char* word;  // stderr 里必须出现的那个值（人照它改）
+        };
+        const BadSlow kBads[] = {{L"abc", "abc"}, {L"-1", "-1"}, {L"1.5", "1.5"}, {L"50ms", "50ms"}};
+        for (const BadSlow& b : kBads) {
+            const std::wstring cmd =
+                std::wstring(L"--profile --profile-slow-frames ") + b.arg + L" --present headless";
+            std::string tag = "slow-";
+            for (const wchar_t* p = b.arg; *p != L'\0'; ++p) tag.push_back(static_cast<char>(*p));
+            tag += ".";
+            const ChildRun r = runChild(exe, cmd, root, root / (tag + "out"), root / (tag + "err"));
+            LIFT_CHECK(r.started);
+            LIFT_CHECK(!r.timed_out);
+            LIFT_CHECK_EQ_U32(r.exit_code, 2u);
+            LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
+            LIFT_CHECK(r.err.find("--profile-slow-frames") != std::string::npos);
+            LIFT_CHECK(r.err.find(b.word) != std::string::npos);
+        }
+        // 缺值：`--profile-slow-frames` 后面没有东西 ⇒ exit 2 + `需要一个值` + 点名（与其它 flag 同一句）。
+        const ChildRun missing = runChild(exe, L"--profile --profile-slow-frames", root, root / "slowmiss.out",
+                                          root / "slowmiss.err");
+        LIFT_CHECK(missing.started);
+        LIFT_CHECK(!missing.timed_out);
+        LIFT_CHECK_EQ_U32(missing.exit_code, 2u);
+        LIFT_CHECK(missing.err.find("--profile-slow-frames") != std::string::npos);
+        LIFT_CHECK(missing.err.find("需要一个值") != std::string::npos);
+    }
+
+    // ---- ⑦'' `--profile --profile-slow-frames 50` **被接受**（⛔ 不是 `未知参数`）----
+    //      ★ 不判总退出码：之后本臂仍会因"临时 cwd 里没有执行源 / 没有 GPU"exit 2 ——
+    //        判据是"这一关过去了"，⛔ 不拿总退出码冒充（与 `scale-headless-accepted` 同一条处置）。
+    g_current_case = "profile-slow-frames-accepted-with-profile";
+    {
+        const ChildRun r = runChild(exe, L"--profile --profile-slow-frames 50 --present headless", root,
+                                    root / "slowok.out", root / "slowok.err");
+        LIFT_CHECK(r.started);
+        LIFT_CHECK(!r.timed_out);
+        LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
+        LIFT_CHECK(r.err.find("--profile-slow-frames") == std::string::npos);
     }
 
     // ---- ⑤ 对照组：**不给** `--sound` ⇒ 那条说明不出现（同一份 stderr 面）----

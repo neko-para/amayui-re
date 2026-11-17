@@ -40,6 +40,7 @@
 #include <vector>
 
 #include "aot/aot_hook_ea.h"
+#include "aot/frame_bucket.h"  // 按帧 shim 分桶（`--profile-slow-frames`；纯逻辑 + 有界状态机）
 #include "aot/window_prof.h"  // 窗口 profile 的桶与闭式（纯头；可被 pure CTest 直接驱动）
 #include "runtime/audio.h"
 #include "runtime/audio_pump_gate.h"  // S3 泵闸门（纯头；可被 pure CTest 直接驱动）
@@ -120,6 +121,12 @@ struct AotRunOptions {
     // ★ `--profile`：**缺省关**。关着时执行循环里连一个计数器都不加（见 `AotProfile` 的三条硬口径）。
     //   开着的全部产物都落在 stdout 末尾的 `=== profile (sampling: …) ===` 块 + 每帧一行 `frame-ms:`。
     bool profile = false;
+    // ★ `--profile-slow-frames <ms>`：**缺省 0 = 关**；CLI 要求**必须与 `--profile` 同时给**
+    //   （否则 exit 2 —— 它没有自己的时间轴，离开 `--profile` 连帧时间戳都没有）。
+    //   >0 ⇒ 每帧结束时若该帧宿主墙钟 ≥ 它，就把**这一帧**的 shim 时间按名字分桶存下来，
+    //   run 结束时打**一张**表（⛔ 不每帧打）。口径 / 有界 / 主线程口径见 `aot/frame_bucket.h`。
+    //   ★ 0 = 关 ⇒ 执行循环里一次取时都不多做（与"没给这个 flag"逐条相同）。
+    std::uint64_t profile_slow_frames_ms = 0;
     // ★ `--frame-log`：**缺省关**。开档才打逐帧 `[frame] n=<帧号> hash=<guest 后缓冲哈希>`。
     //   为什么缺省关：行数 = 帧数（300 帧 ⇒ 300 行，占默认 stdout 的 78%），而它只是**画面序列**读数
     //   （"在动 / 卡住同一帧"），不是判据；末帧 hash 另有一份（摘要的 `present : … lastHash=`）。
@@ -328,6 +335,14 @@ public:
     void printProfile(std::FILE* out) const;
     AotProfile& profile() { return prof_; }
     const AotProfile& profile() const { return prof_; }
+    // ---- 按帧的 shim 分桶（`--profile-slow-frames <ms>`；缺省关）----
+    // run 结束时打**一次**（⛔ 不每帧打）：`frame / wall_ms / guest insns / top-N shim（名字 + ms + 次数）`。
+    // `on == false` 时一行都不打 ⇒ 默认档 / 只给 `--profile` 的档逐字不变。
+    void printSlowFrames(std::FILE* out) const;
+    FrameBucketProf& frameBucket() { return frame_prof_; }
+    const FrameBucketProf& frameBucket() const { return frame_prof_; }
+    // shim id → `module!name`（慢帧表的具名行用它；格式与窗口 profile 的具名行一致 ⇒ 两张表的行可直接对照）。
+    std::string shimDisplayName(std::uint32_t id) const;
 
     // ---- 窗口 profile（`profile_begin/end` 驱动；**零新 CLI**）----
     // 开窗：清账、快照 insns/frames/lift_dyn、实测一次取时开销（~10 µs）、打开 `lift_dyn` 计数闸门。
@@ -507,6 +522,8 @@ private:
 
     // ---- 窗口 profile（`profile_begin/end` 驱动；`on == false` 时一个取时都不做）----
     AotWindowProf win_;
+    // ---- 按帧 shim 分桶（`--profile-slow-frames`；`on == false` 时一个取时都不做、一行都不打）----
+    FrameBucketProf frame_prof_;
 };
 
 }  // namespace aot

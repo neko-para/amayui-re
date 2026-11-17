@@ -113,6 +113,15 @@ void usage() {
         "                      shim 1/64（每个 shim 各自的调用序号；也写在输出头）。★ 采样本身会\n"
         "                      轻微影响时序 ⇒ 性能结论请用**关档**跑（⛔ 不拿 --profile 的墙钟当结论）；\n"
         "                      六项判据开/关一致\n"
+        "  --profile-slow-frames <ms>\n"
+        "                      **必须与 --profile 同时给**（否则 exit 2）；**缺省 0 = 关**。>0 ⇒ 每帧\n"
+        "                      结束时若该帧宿主墙钟 ≥ <ms>，就把**这一帧**的 shim 时间按名字分桶\n"
+        "                      （含调用次数）存下来，run 结束时打**一张**表：\n"
+        "                        frame / wall_ms / guest insns / top-8 shim（名字 + ms + 次数）\n"
+        "                      有界：慢帧最多 32 条、每帧最多 8 个名字，超出只报数（⛔ 不静默）。\n"
+        "                      ★ wall_ms = 该帧 `frame-ms` 的 t_ms 差（同一把尺）；shim 时间复用窗口\n"
+        "                      profile 那条精确取时，**只统计主线程**（音频 feeder 的调用不计）。\n"
+        "                      诊断档 ⇒ 多出来的取时会轻微影响时序，⛔ 不进任何性能判据\n"
         "  --frame-log         每次 Present 打一行 `[frame] n=<帧号> hash=<guest 后缓冲哈希>`（**缺省关**）：\n"
         "                      逐帧 hash 是画面序列读数（在动 / 卡住同一帧），不是判据；末帧 hash 看摘要\n"
         "                      `present :` 行。`--profile` 档也会打这一条（已有 profile 存档的可比面）\n"
@@ -226,6 +235,9 @@ int main(int argc, char** argv) {
     // ★ `--sound`（缺省关）：**真的**进 `AudioEngine` 的静音门（`mute_ = !sound`）—— 不再是
     //   `aot_host.cpp` 里的硬写 false（b-3）。文案与口径见 `runtime/present_flags.h`。
     bool sound = false;
+    // ★ `--profile-slow-frames <ms>`（缺省不给 = 关；**必须与 `--profile` 同给** ⇒ 见下面的校验）。
+    //   为什么单独记一个 bool：值 0 也是"给了这个 flag"（= 显式关），⛔ 不要靠 `!= 0` 判"给没给"。
+    bool profile_slow_frames_set = false;
     lift::aot::AotRunOptions run_opts;
     // ---- 呈现档位（取值 / 缺省 / 使用门槛**照 `src/main.cpp:226-227`、`:357-394`、`:637-663`）----
     std::string present_mode = "headless";  // 与解释器同缺省
@@ -349,6 +361,28 @@ int main(int argc, char** argv) {
         } else if (a == "--profile") {
             // ★ 采样式内部 profile（缺省关；采样率与三条硬口径见 `aot_host.h` 的 `AotProfile`）。
             run_opts.profile = true;
+        } else if (a == "--profile-slow-frames") {
+            // ★ 按帧的 shim 分桶（缺省关；口径见 `aot/frame_bucket.h`）。**只收十进制非负整数**：
+            //   `strtoull("-1")` 会静默回绕成巨大值 ⇒ 负号 / 小数 / 垃圾一律 exit 2 并点名。
+            std::string v;
+            if (!needValue("--profile-slow-frames", &v)) return 2;
+            bool digits_only = !v.empty();
+            for (const char c : v) {
+                if (c < '0' || c > '9') {
+                    digits_only = false;
+                    break;
+                }
+            }
+            char* endp = nullptr;
+            const unsigned long long n = digits_only ? std::strtoull(v.c_str(), &endp, 10) : 0ull;
+            if (!digits_only || endp == v.c_str() || *endp != '\0') {
+                std::fprintf(stderr,
+                             "emulator-lift-aot: --profile-slow-frames 需要非负整数（毫秒，0 = 关）：`%s`\n",
+                             v.c_str());
+                return 2;
+            }
+            run_opts.profile_slow_frames_ms = n;
+            profile_slow_frames_set = true;
         } else if (a == "--frame-log") {
             // ★ 逐帧 `[frame] n=… hash=…`（**缺省关**；理由见 `AotRunOptions::frame_log`）。
             run_opts.frame_log = true;
@@ -466,6 +500,18 @@ int main(int argc, char** argv) {
     if (!audio_parse.ok) {
         std::fprintf(stderr, "emulator-lift-aot: --audio 的值非法：`%s`（%s）\n", audio_mode.c_str(),
                      audio_parse.error != nullptr ? audio_parse.error : "值域 = off / virtual / sdl");
+        return 2;
+    }
+
+    // ---- `--profile-slow-frames`：**必须与 `--profile` 一起给**（⛔ 不静默忽略）----
+    //   ★ 为什么是硬错而不是"自动打开 --profile"：那会让"我只想要这一张表"变成"整轮都背上采样
+    //     profile 的取时税"，而这条表的墙钟读数是拿 `frame-ms`（`--profile` 的产物）当尺的
+    //     ⇒ 两档不可分。⛔ 也不静默当没给：那正是"以为在量、其实没量"的失效形态。
+    //   ★ 值 0 也算"给了"：显式关（与不给等价）仍必须带 `--profile`，判据只有一条。
+    if (profile_slow_frames_set && !run_opts.profile) {
+        std::fprintf(stderr,
+                     "emulator-lift-aot: --profile-slow-frames 需要同时给 --profile"
+                     "（它的 wall_ms 就是 --profile 的 `frame-ms` 帧间差；0 = 关）\n");
         return 2;
     }
 

@@ -240,3 +240,26 @@
 - **怎么量**：配方里写 `profile_begin <label>` / `profile_end <label>`（`docs/03-emulator/input-plan.md`），
   跑 `emulator-lift-aot --present headless --skip-logo --game-dir links/install --appdata <本树 .tmp> --input-plan <plan>`；
   ⛔ 必须显式给 `--appdata`（否则往安装树里写）。守卫：CTest `aot-window-profile`（pure，纯算术夹具）。
+
+### M-13 · AOT **按帧** shim 分桶（`--profile-slow-frames <ms>`）：窗口的补集，不是替代
+
+- **要解决的问题**：窗口桶（M-12）按**窗口**切，一段 1800 ms 的窗里只有 ~10 帧是真正要看的、其余 ~118 帧把
+  `ms/帧` 与具名行的 `ms/次` 都稀释掉（实测 wipe：`ID3DXSprite::End` 窗口 **0.223 ms/次** vs 条带帧 **0.86–1.34 ms/次**，
+  ~4× 差）。⇒ 需要一个"**只保留慢帧**、且按**单帧**分桶"的读数。
+- **CLI**：`--profile-slow-frames <ms>`，**必须与 `--profile` 同时给**（缺 ⇒ `exit 2` 并点名两者；值 0 = 关）。
+  缺省 0 ⇒ **一行不多打、一次取时都不多做**；`--profile` 的产物（`frame-ms:` 等）逐字不变。
+- **字段**（run 结束打**一张**表，⛔ 不每帧打）：`slow-frames: frames / slow / listed / dropped` +
+  每帧 `slow-frame: n / wall_ms / insns / shim_ms / shim_calls / presents` + 每帧 top-8 `shim（名字 + ms + calls）`。
+- **时间口径（唯一一份）**：
+  · `wall_ms` = `frame-ms:` 的 `t_ms` **帧间差** —— 同一把尺 ⇒ 阈值可以直接与既有 Δt 读数对照；
+  · `shim_ms` = **M-12 的 `shim` 桶那条精确计时**（`windowNowNs()` 包住 `lift_shim_id` 的同一对取时）⇒ 一次调用只付一笔取时税；
+  · **只统计主线程**：打点在主执行循环里 ⇒ 音频 feeder 线程的 shim **结构上进不来**（要量 feeder 看 `tokenhold` / `shimmax`）；
+  · `insns` = `cpu_.insns` 的帧间差（该帧 guest 指令数）。
+- **有界**：慢帧 ≤ 32 条、每帧 ≤ 8 个名字；超出**只报数**（`dropped=N` / `另有 M 个 shim`）⇒ 撞上界时
+  "没看到"≠"不存在"。
+- **归因红线**：本表只回答"**这一帧**是哪个 shim 花掉的"，不回答 shim **内部**怎么花的（没有子桶）；
+  且它是**诊断档** ⇒ ⛔ 不进任何性能判据、⛔ 不与关档 run 比墙钟。
+- **怎么量**：`--present headless --skip-logo --audio off --profile --profile-slow-frames <ms> --max-frames N --input-plan <plan>`
+  （`--appdata` 用**副本**，⛔ 不写用户原件）。守卫：CTest `aot-frame-bucket`（pure：名字合并 + 有界 top-N + 阈值门 + 关档）
+  与 `cli-aot-flags` 的 `profile-slow-frames-*`（纯 CLI 面）。读数见 `wipe-profile.md` 的
+  `## 按帧 shim 分桶`（2026-11-18）。

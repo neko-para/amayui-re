@@ -402,6 +402,14 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     //   `lift_dyn` 的计数闸门同步关掉 —— 缺省档在 `lift_dyn` 里只付一次 bool 判断。
     win_.on = false;
     ::liftDynCountOn = false;
+    // ★ `--profile-slow-frames <ms>`（缺省 0 = 关）：**按轮重置**。
+    //   ⛔ `reset()` 只是清账（不取时）；`begin()` 里那一刀 `profileProcessMs()` 是**取时**，
+    //   所以它只在"真的要开档"时才调 ⇒ 默认档 / 只给 `--profile` 的档连一次取时都不多做。
+    //   `now_ms` / `insns` 取 run 起点：第一帧的墙钟 = "从 run 开始到第一帧 Present"。
+    frame_prof_.reset();
+    if (opts.profile && opts.profile_slow_frames_ms != 0) {
+        frame_prof_.begin(opts.profile_slow_frames_ms, profileProcessMs(), cpu_.insns, shims_.size());
+    }
     // ★ `--skip-logo`：一次性 latch 的**按轮**状态（语义 = `AotRunOptions::skip_logo`）。
     //   解释器那四个成员是 Machine 的（`machine.h:555-558`，进程只跑一轮）；本宿主的 `run()` 可以
     //   被调多次 ⇒ 在这里按轮重置，保证"同一台宿主第二轮不会假装命中过"。
@@ -417,6 +425,9 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     //   ★ 为什么缺省关：行数 = 帧数（300 帧 ⇒ 300 行，占默认 stdout 的 78%），而它只是**画面序列**读数；
     //     末帧 hash 另有出口（摘要 `present : … lastHash=0x…`）。
     const bool frame_log_on = opts.frame_log || prof_.on;  // ★ `|| prof_.on`：已有 profile 存档的可比面
+    // ★ shim 名字解析（`--profile-slow-frames` 的具名行用）：只在**慢帧保存时**被调（⛔ 不在热路径上）。
+    //   与窗口 profile 的具名行同一份格式（`module!name`），唯一差别是这里按 id 查一次注册表。
+    const ShimNameFn frame_shim_name = [this](std::uint32_t id) { return shimDisplayName(id); };
     std::uint64_t logged_frames = presenter_.frameCount();
     auto logPresentedFrames = [&]() {
         const std::uint64_t n = presenter_.frameCount();
@@ -433,9 +444,15 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
             //   `t_ms` = 自**进程启动**到该帧 present 完成的毫秒（Windows 用 `GetProcessTimes` 的
             //   creation 时间当基准，⛔ 不用"程序跑到这里"近似）；`insns` = 当时的 `cpu_.insns`。
             if (prof_.on) {
+                const double t_ms = profileProcessMs();
                 std::printf("frame-ms: n=%llu t_ms=%.3f insns=%llu\n", static_cast<unsigned long long>(n),
-                            profileProcessMs(), static_cast<unsigned long long>(cpu_.insns));
+                            t_ms, static_cast<unsigned long long>(cpu_.insns));
                 ++prof_.frame_lines;
+                // ★ 按帧 shim 分桶：**同一把尺**（`t_ms` 的帧间差 = 该帧墙钟）⇒ 阈值与
+                //   `frame-ms` 算出来的 Δt 可以直接对照。关档时只是一次 bool 判断。
+                if (frame_prof_.on) {
+                    frame_prof_.endFrame(n, t_ms, cpu_.insns, 1u, frame_shim_name);
+                }
             }
         } else {
             // 一次 shim 里发生了多次 Present（正常是 1 次）：hash 只有最后一帧那一份，⛔ 不冒充逐帧。
@@ -449,14 +466,20 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
             if (prof_.on) {
                 // 这一格里发生了多次 Present ⇒ 只有一个时刻（它们同一趟 shim 里跑完的）。
                 // ⛔ 不伪造 K 个时间戳：那会变成"看起来逐帧、其实只有一次取样"。
+                const double t_ms = profileProcessMs();
                 std::printf(
                     "frame-ms: n=%llu..%llu t_ms=%.3f insns=%llu（一次 shim 里 %llu 次 Present：只有最后"
                     "一个时刻）\n",
                     static_cast<unsigned long long>(logged_frames + 1),
-                    static_cast<unsigned long long>(n), profileProcessMs(),
+                    static_cast<unsigned long long>(n), t_ms,
                     static_cast<unsigned long long>(cpu_.insns),
                     static_cast<unsigned long long>(n - logged_frames));
                 ++prof_.frame_lines;
+                // ★ 分桶同样只有这一个时刻 ⇒ 把这一格记到**最后一个帧号**上，并把 `presents`
+                //   如实记成 K（打印时标出来，⛔ 不冒充"K 个独立帧"）。
+                if (frame_prof_.on) {
+                    frame_prof_.endFrame(n, t_ms, cpu_.insns, n - logged_frames, frame_shim_name);
+                }
             }
         }
         logged_frames = n;
@@ -844,12 +867,23 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
             //   `lift_shim` 自己每次都要 `cache->peek`（AOT `cpu.cache == nullptr` ⇒ 恒 miss）+
             //   `idForStub`（旧实现 = 拿锁 + 线性扫 385 项）。这里已经拿到 def ⇒ 不该再付那笔。
             const std::uint32_t shim_id1 = def != nullptr ? def->id + 1u : 0u;
-            // ★ 窗口 profile：`shim` 桶**精确**（每次调用 2 次取时；shim 只占派发 ~1.4%）。
-            std::uint64_t win_shim_t0 = 0;
-            const bool win_shim = win_.on && def != nullptr;
-            if (win_shim) win_shim_t0 = windowNowNs();
+            // ★ 窗口 profile 的 `shim` 桶 + `--profile-slow-frames` 的**按帧**分桶：**共用同一对取时**
+            //   （⛔ 不要各取一次 —— 两把取时是两笔仪器税，而且会给出两个不同的 shim 墙钟）。
+            //   口径与原来逐字相同：`shim` 桶**精确**（每次调用 2 次取时；shim 只占派发 ~1.4%）。
+            //   ★ `def_id` 在**下调之前**取：`lift_shim` 里可能 `addRuntime`（`defs_` 扩容）⇒ 调用后
+            //     那个指针可能已失效（`shims.h` 的警告），⛔ 不要读 `def->id`。
+            const std::uint32_t def_id = def != nullptr ? def->id : 0u;
+            const bool shim_timed = (win_.on || frame_prof_.on) && def != nullptr;
+            std::uint64_t shim_wall_t0 = 0;
+            if (shim_timed) shim_wall_t0 = windowNowNs();
             const std::uint32_t next = ::lift_shim_id(shim_id1, ea, &regs_, &cpu_);
-            if (win_shim) win_.noteShim(def->id, windowNowNs() - win_shim_t0);
+            if (shim_timed) {
+                const std::uint64_t shim_dt = windowNowNs() - shim_wall_t0;
+                if (win_.on) win_.noteShim(def_id, shim_dt);
+                // ★ 只累计**主线程**：这条分支在主执行循环里 ⇒ 音频 feeder 线程的 shim 调用
+                //   （走 `aot_feeder.cpp` 自己的 IR 执行器）**结构上进不来**。
+                if (frame_prof_.on) frame_prof_.noteShim(def_id, shim_dt);
+            }
             if (win_sample) win_.noteBoundary(win_a, win_b);
             if (shim_sample) {
                 const std::uint64_t delta = profileTicks() - shim_t0;

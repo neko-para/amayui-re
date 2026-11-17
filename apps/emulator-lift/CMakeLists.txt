@@ -46,6 +46,11 @@ add_library(emulator-lift-runtime STATIC
     #   ★ 为什么不做成纯头：头被 `aot_host.h` 包含 ⇒ 头里施加变异 = 整条 AOT 臂重编
     #     （一条变异 12 分钟）；搬成 TU 后单条变异只重编 1 个 TU（见 `tools/mutate-check.mjs` 那条）。
     src/aot/window_prof.cpp
+    # ★ 按帧 shim 分桶（`--profile-slow-frames`）的**纯逻辑实现**（`aot/frame_bucket.h` 的
+    #   out-of-line 部分：名字合并 + 有界 top-N + 有界慢帧表）。归属本 target 的理由与
+    #   `window_prof.cpp` 相同：纯 CTest `lift-aot-frame-bucket` 只链本 target，AOT 臂也链它
+    #   ⇒ **一份实现两处用**（⛔ 只放进 AOT target 会让测试链接失败）。
+    src/aot/frame_bucket.cpp
     src/runtime/sha256.cpp
     src/runtime/image.cpp
     src/runtime/mnemonics.cpp
@@ -1746,6 +1751,20 @@ add_test(NAME profile-window COMMAND lift-profile-window)
 add_executable(lift-aot-window-profile tests/aot_window_profile.cpp)
 target_link_libraries(lift-aot-window-profile PRIVATE emulator-lift-runtime)
 add_test(NAME aot-window-profile COMMAND lift-aot-window-profile)
+
+# =====================================================================================
+# **AOT 按帧 shim 分桶**（`--profile-slow-frames <ms>`；pure：纯算术夹具 + 名字表，不取时）
+# ★ 判据见 tests/aot_frame_bucket.cpp 文件头：① 名字合并（同名 id 相加）+ 有界 top-N；
+#   ② 阈值门（**只**存 ≥ 阈值的帧，且每帧的账不跨帧漏）；
+#   ③ 上界（慢帧 ≤ 32、每帧名字 ≤ 8；超出只计数 ⇒ `frames_dropped`，⛔ 不静默）；
+#   ④ 关档（阈值 0 / 没开）⇒ 一次不存、`on == false`。
+# ★ 与 `aot-window-profile` **不是一回事**：那是窗口桶 + 闭式；这里是**单帧**的 shim 具名分桶
+#   （wipe 剖面第二段卡的仪器缺口，见 docs/03-emulator/wipe-profile.md）。
+# ★ 顶层无条件注册 ⇒ pure 档（判据 = 注册位置，AGENTS.md §12.4）。
+# =====================================================================================
+add_executable(lift-aot-frame-bucket tests/aot_frame_bucket.cpp)
+target_link_libraries(lift-aot-frame-bucket PRIVATE emulator-lift-runtime)
+add_test(NAME aot-frame-bucket COMMAND lift-aot-frame-bucket)
 
 # ---- pure：影片解码器（自造字节 + fake 帧源；不碰游戏 / LFS）----
 # 判据见 tests/movie_decoder.cpp 文件头：坏输入不崩、时间推进单调/不重复、ended 只报一次、

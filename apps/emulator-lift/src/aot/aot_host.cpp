@@ -629,6 +629,9 @@ void AotHost::printRunSummary(const AotRunResult& r, std::FILE* out) const {
     // ★ 落点为什么在这里：`aot_main.cpp` 在 `printRunSummary` 之后只有 stderr 回声 + `return`，
     //   所以这里就是"stdout 末尾（进程退出前）"。⛔ 不改 main 的打印顺序。
     printProfile(out);
+    // ★ `--profile-slow-frames`：**一次性**慢帧表（run 结束时打一次；⛔ 不每帧打）。
+    //   关档时 `printSlowFrames` 第一行就返回 ⇒ 默认档 / 只给 `--profile` 的档逐字不变。
+    printSlowFrames(out);
 }
 
 // =====================================================================================
@@ -1081,6 +1084,67 @@ void AotHost::printProfile(std::FILE* out) const {
         }
         if (rows.empty()) std::fprintf(out, "shim: （没有样本）\n");
         if (rows.size() > shown) std::fprintf(out, "shim: 另有 %zu 个 shim（未展开）\n", rows.size() - shown);
+    }
+    std::fflush(out);
+}
+
+// =====================================================================================
+// 按帧的 shim 分桶（`--profile-slow-frames <ms>`；缺省关）
+//
+// ★ 为什么打**一张**表而不是每帧两行：`AGENTS.md` §12.8 第 3 条——周期性输出默认禁；
+//   一次 run 一张表 = 一次性输出（与 `--profile` 的整块读数同一个落点、同一条口径）。
+// ★ 数据面（墙钟 / insns / shim 时间）在 `aot_run.cpp` 的 `frame_prof_.endFrame(...)` 收口；
+//   这里只**打印**（唯一一份格式）。⛔ 不要在这里重新取时 / 重新分桶。
+// =====================================================================================
+std::string AotHost::shimDisplayName(std::uint32_t id) const {
+    const ShimDef* def = shims_.byId(id);
+    return def != nullptr ? (def->module + "!" + def->name) : std::string("(unknown)");
+}
+
+void AotHost::printSlowFrames(std::FILE* out) const {
+    const FrameBucketProf& f = frame_prof_;
+    if (out == nullptr || !f.on) return;  // ★ 关档：一行都不打（默认档逐字节不变）
+    std::fprintf(out,
+                 "\n=== profile slow-frames: 阈值 ≥%llu ms（按帧的 shim 分桶；每帧 top-%zu）===\n",
+                 static_cast<unsigned long long>(f.threshold_ms),
+                 FrameBucketProf::kTopN);
+    std::fprintf(out,
+                 "slow-frames: frames=%llu slow=%llu listed=%zu dropped=%llu（上限 %zu）\n",
+                 static_cast<unsigned long long>(f.frames_seen),
+                 static_cast<unsigned long long>(f.slow_frames), f.rows.size(),
+                 static_cast<unsigned long long>(f.frames_dropped),
+                 FrameBucketProf::kMaxSlowFrames);
+    std::fprintf(out,
+                 "slow-frames: 口径：wall_ms = 该帧 `frame-ms` 的 t_ms 差（同一把尺）· insns = 该帧"
+                 " guest 指令数 · shim_ms = 该帧**主线程** shim 的精确墙钟（音频 feeder 的调用不计；"
+                 "每次调用含一次取时的仪器税，未扣）\n");
+    if (f.rows.empty()) {
+        std::fprintf(out, "slow-frames: （没有 ≥%llu ms 的帧）\n",
+                     static_cast<unsigned long long>(f.threshold_ms));
+        std::fflush(out);
+        return;
+    }
+    for (const SlowFrameRow& r : f.rows) {
+        std::fprintf(out,
+                     "slow-frame: n=%llu wall_ms=%9.3f insns=%llu shim_ms=%9.3f shim_calls=%llu"
+                     " presents=%llu\n",
+                     static_cast<unsigned long long>(r.frame), r.wall_ms,
+                     static_cast<unsigned long long>(r.insns), static_cast<double>(r.shim_ns) / 1.0e6,
+                     static_cast<unsigned long long>(r.shim_calls),
+                     static_cast<unsigned long long>(r.presents));
+        for (std::size_t i = 0; i < r.top.size(); ++i) {
+            std::fprintf(out, "slow-frame:   %2zu. %-42s ms=%9.3f calls=%llu\n", i + 1,
+                         r.top[i].name.c_str(), static_cast<double>(r.top[i].ns) / 1.0e6,
+                         static_cast<unsigned long long>(r.top[i].calls));
+        }
+        if (r.shim_rows > r.top.size()) {
+            std::fprintf(out, "slow-frame:   另有 %zu 个 shim（未展开）\n", r.shim_rows - r.top.size());
+        }
+    }
+    if (f.frames_dropped != 0) {
+        std::fprintf(out, "slow-frames: 另有 %llu 帧未列出（上限 %zu；⛔ 不是没有慢帧）\n",
+                     static_cast<unsigned long long>(f.frames_dropped),
+                     FrameBucketProf::kMaxSlowFrames);
     }
     std::fflush(out);
 }
