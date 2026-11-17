@@ -226,3 +226,24 @@ cd ../.. && node tools/mutate-check.mjs --match '固定功能片元漏除'
 node tools/mutate-check.mjs --match 'GPU 顶点不带逐顶点'
 node tools/mutate-check.mjs --list                                            # 静态检查：146/146
 ```
+
+## 9. 202 的可达性（N1，2026-11-18）
+
+> 需求单 `REQ-01M7NNNMPFB1GDB52J662Y1CMZ`。结论：**这份 appdata 的存档全在序章 / 地牢 2D ADV，没有一张在雪地图上**
+> ⇒ 202 在真 run 到不了，不是配方写法问题。
+
+- **输入面（实测，headless + 控制层 sample/screenshot）**：
+  - SAVE00（`click 300 91`）→ `SN0000.BIN:0x46E8` @ frame 1624（序章旁白）；
+  - SAVE02（`click 300 220`）→ `SC0000.BIN:0x99C0` @ frame 1443（地牢 2D ADV）；
+  - SAVE03（`click 300 269`）→ `SC0000.BIN:0xCB9C` @ frame 678（地牢 2D ADV）；
+  - ★ 「加载第 4 槽 + 1 击」的 wipe 之后**不是 3D 雪景**，而是地牢 2D ADV（再点 10 下仍在地牢，`SC0000:0xF7C8` @ frame 3317）。
+- **触发链（静态，锚 EA）**：202 的唯一创建点 `0x418340`（`0x4183AE push 0CAh` → `D3DXCreateEffectFromResourceA`，
+  错误串 `Set3DEffectSnow` @ `0x418363`）；唯一脚本上游 = **opcode `0x326`**（handler `0x426E10`）。
+  `i326` 在 941 份脚本清单里**只有 1 次**（`SETWEATHER.BIN:39`），且被 `global-int 4fdb == 2` 门控；
+  而 `4fdb` 的 189 处脚本写点里**没有一次写 2**（0×184 / 1×3 / 3×2）⇒ 天气型来自**数据记录**
+  （`SETL2DMOC.BIN` 的 `i341`/`i345`：记录 id + 天气列），**雪是地图数据驱动，不是剧情脚本驱动**。
+- **运行**：两条链共 20,000 帧，挂 `--until 0x418340`（`lift_table.inc` 的合法派发块入口）⇒ **0 命中**、`[warn]` 0 条。
+  ⚠ 位 21 / `skipped_draws` 在真 run 仍无机械读数（AOT 摘要不打印 d3d9 `unsupported`，见 §6.4）。
+- **下一步**：要一份**雪地图存档**（真机存一槽）或先解析 `SETL2DMOC` 的 238 条 `i341` 记录（天气列 = 2 的地图 id）；
+  ⛔ 不要靠继续堆点击（80 击只推进 2 句对白）。存在性快判据：`LIFT_AOT_SHIM_TRACE=1` 里 `D3DXCreateEffectFromResourceA` 的资源号 `202`。
+  有雪档后可直接用两个已查表停点：`0x004B56D0`（`Snow::Render` / `SetMatrix("Proj")`）、`0x00426E10`（`0x326` handler）。

@@ -8,31 +8,39 @@
 
 ## 一句话
 
-找到一条能**真正走到 202（Snow）**的 run 配方（加载第 4 槽 + 推进到 wipe 之后），
-并用 `--until` 的**派发块入口**定位 202 的 draw，证明雪批已入队、位 21（`kUnGpuVertexW`）0 次。
+找到一条能**真正走到 202（Snow）**的 run 配方（加载雪地图存档 + 推进），并用**派发块入口**的 `--until`
+证明雪批已入队、位 21 0 次。
 
-## 为什么
+## 现状（2026-11-18 实测，结论：这份输入面到不了）
 
-- A（202 的 shim / CPU `vs_1_0` / `ps_1_0` / binding）与 B（GPU 透视校正插值）都已实现并通过夹具级判据；
-  但 B 的 E2E 4 次尝试（`--until 0x00418340`）**一次未命中** ⇒ 现有配方走不到 202。
-- A/B 的验收明确是"夹具级"；"雪真的出现在真 run"需要一条可达配方，这是 N1 的产出，不是 A/B 的实现缺口。
+- **输入面**：`.tmp/appdata` 的四张存档全在**序章 / 地牢 2D ADV**：
+  SAVE00 → `SN0000:0x46E8`（序章旁白）、SAVE02 → `SC0000:0x99C0`（地牢）、SAVE03 → `SC0000:0xCB9C`（地牢）。
+  ★ 「第 4 槽 + 1 击」的 wipe 之后仍是**地牢 2D ADV**（再点 10 下仍在地牢）⇒ **不是雪景**。
+- **运行**：两条链共 20,000 帧，挂 `--until 0x418340`（202 唯一创建点，`lift_table.inc` 的合法块入口）⇒ **0 命中**、`[warn]` 0 条。
+- **静态**：202 唯一创建点 `0x418340`（`Set3DEffectSnow`）；唯一脚本上游 = `opcode 0x326`（handler `0x426E10`）；
+  `i326` 在 941 份脚本清单里只有 1 次（`SETWEATHER.BIN:39`），且被 `global-int 4fdb == 2` 门控；
+  `4fdb` 的 189 处脚本写点里没有一次写 2 ⇒ 天气型来自 **`SETL2DMOC` 数据记录**（`i341`/`i345`），
+  **雪是地图数据驱动**，不是剧情脚本驱动。
 
-## 要做
+## 卡住（需要人）
 
-1. 从 `apps/emulator-lift/scripts/recipes/sc0000-wipe.plan`（加载 SAVE03 + 1 击）继续：wipe 之后进入 3D 场景，
-   找到触发 202 的条件（天气 / 场景 / 脚本 opcode `0x326` 的 `SetBlindWipe` 后续？）。
-2. 用**派发块入口**做 `--until`（⛔ 不用 `call` 返回点；见 BUG-31）：定位 202 的 `DrawPrimitiveUP` / `SetMatrix("Proj")` 之后的批。
-3. 记录：`kUnGpuVertexW` 次数、`skipped_draws`、`snow-pixels` 的对应帧、截图。
-4. 把可用配方落成 tracked `apps/emulator-lift/scripts/recipes/`（文件名/注释写清前置：第 4 槽 + 几次点击）。
+- **需要一份雪地图存档**（真机走到雪景存一槽；或已有存档给我）。没有它，换任何点击配方都到不了 202。
+- agent 能绕的部分：静态解析 `SETL2DMOC` 的 238 条 `i341` 记录（天气列 = 2 的地图 id），与当前地图 id 对齐；
+  或用 `LIFT_AOT_SHIM_TRACE=1` grep `D3DXCreateEffectFromResourceA` 的资源号 `202` 做存在性快判据。
+
+## 下一步（有雪档后）
+
+1. 把雪档放进 appdata，按加载屏行 y 选中它；用 `sc0000-wipe.plan` 同形（加载 + 推进）改槽位。
+2. `--until 0x418340`（首次创建）；再 `--until 0x004B56D0`（`Snow::Render` / `SetMatrix("Proj")`）。
+3. 记录位 21 / `skipped_draws` / 截图；落 tracked recipe。
 
 ## 判据
 
-- 一条 recipe 跑到 202 的 draw（有停止点/计数证据）；位 21 `kUnGpuVertexW` **0 次**、`skipped_draws` 不增。
-- 雪在截图里可见（若不可见，必须给出具名原因：被谁拒 / 哪一帧 / 什么条件没满足，⛔ 不写"应该能看到"）。
-- 读数进 `docs/03-emulator/wipe-profile.md` 或 `docs/03-emulator/gpu-perspective.md`（带日期/口径）；**不进默认门禁**
-  （业务正确性不作判据）。
+- 一条 recipe 跑到 202 的 draw（停止点/计数证据）；位 21 `kUnGpuVertexW` **0 次**、`skipped_draws` 不增。
+- 雪在截图里可见；若不可见，给具名原因（被谁拒 / 哪一帧 / 什么条件没满足），⛔ 不写"应该能看到"。
+- 读数进 `docs/03-emulator/gpu-perspective.md`；不进默认门禁。
 
 ## 未做
 
 - ⛔ 不实现 202 / B 的代码；⛔ 不改 caps / 守卫。
-- 若 202 需要特定剧情推进，写清前置，不把"需要更多点击"当成失败。
+- 若需要特定地图，写清前置；不把"需要更多点击"当失败。
