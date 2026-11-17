@@ -298,8 +298,50 @@ find_program(LIFT_AOT_IR_CLANG NAMES clang clang.exe)
 # =====================================================================================
 set(LIFT_AOT_SPLIT 8 CACHE STRING
     "AOT IR 拆成几份：1 = 单份路径（今天的形状）；N>1 = 按分量根 EA 升序贪心分桶（N = 8 是裁决值）")
-# ★ IR 的编译参数**唯一落点**（configure 期断言盯的就是这一行）。
+# =====================================================================================
+# ★ LTO 档：**mac 默认 ON**（2026-11-17 用户裁决：只要有可见优化就接受默认开），其它平台默认 OFF。
+#
+#   为什么 mac 现在可以默认开：253cbe0 让生成物带上 `target-cpu` / `target-features` **函数属性**，
+#   LLVM 的 `areInlineCompatible()` 那道闸被解开 ⇒ `lift_tick` / `lift_note_write` 真被内联。
+#   实测（2026-11-17 / mac arm64 / Apple clang 17 + ld64）：FELLOW 进入窗口墙钟中位 **−12.61%**
+#   （10 次交错 run，5/5 对全负）、`_lift_tick` 站点 **−86.4%**、`_lift_note_write` **−100%**、
+#   语义指纹 10/10 逐位相同。代价：AOT 链接 **37.42 s / 3.03 GB**（OFF 0.16 s / 250 MB）、
+#   `__text` **+3.14%**。读数与复现配方：`docs/03-emulator/aot-lto-evaluation.md` §10。
+#
+#   ⛔ 其它平台默认 OFF：LTO 只在 mac（Apple clang 17 + ld64）实测过；win32（clang-cl + lld-link）
+#   **未验证**。AGENTS.md §2 的口径是 win32 优先、mac 只做兼容性验证 ⇒ ⛔ 不许因为"默认开"
+#   把 win32 构建弄红。要在非 APPLE 上试：`-DLIFT_AOT_LTO=ON`（未验证）。
+#   回退（mac 上遇到问题）：`-DLIFT_AOT_LTO=OFF`（一行，⛔ 不用回滚源码）。
+#
+#   OFF ⇒ 逐字节 = 旧形状：`-c -O2` · `-flto` 被 configure 期硬闸拒绝 · shape = `splitN-O2`。
+#   ON  ⇒ `LIFT_AOT_CLANG_FLAGS` 变 `-c -O2 -flto`；`-flto` 不再被硬闸拒绝（仍拒
+#         `-O0/-O1/-Os/-Oz/-flto=thin/llc`）；`emulator-lift-aot` 的**链接行**也带 `-flto`。
+#   `LIFT_AOT_LTO_ABI`（仅 ON 时有效）= `src/runtime/lift_abi.cpp` 也编成 bitcode ⇒
+#     `lift_tick` / `lift_note_write` / `lift_dyn` 才有机会被内联进 AOT。
+#   `LIFT_AOT_LTO_RUNTIME`（仅 ON 时有效）= 整个 `emulator-lift-runtime`（含 shim）都编 bitcode。
+#     ⛔ 默认 OFF：B2 那轮实测整库 LTO 只让 runtime 变大、无收益。
+#
+#   ⚠ 这是**默认形状**（不是实验档）：改默认值 / 改形状前先读 §10 的读数与代价。
+# =====================================================================================
+if(APPLE)
+    set(_LIFT_AOT_LTO_DEFAULT ON)
+else()
+    set(_LIFT_AOT_LTO_DEFAULT OFF)
+endif()
+option(LIFT_AOT_LTO "AOT IR + 最终链接用 -flto（APPLE 默认 ON；其它平台默认 OFF = 未验证）"
+       ${_LIFT_AOT_LTO_DEFAULT})
+option(LIFT_AOT_LTO_ABI "LTO 档下把 src/runtime/lift_abi.cpp 也编成 bitcode（tick/note/dyn 可被内联）" ON)
+option(LIFT_AOT_LTO_RUNTIME "LTO 档下整个 emulator-lift-runtime（含 shim）也编成 bitcode" OFF)
+if(NOT APPLE AND NOT LIFT_AOT_LTO)
+    message(STATUS
+        "emulator-lift-aot: LTO 在非 APPLE 上默认 OFF（未验证）；要开用 -DLIFT_AOT_LTO=ON（未验证）")
+endif()
+
+# ★ IR 的编译参数**唯一落点**（configure 期断言盯的就是这一行；OFF 档一字不动）。
 set(LIFT_AOT_CLANG_FLAGS -c -O2)
+if(LIFT_AOT_LTO)
+    set(LIFT_AOT_CLANG_FLAGS -c -O2 -flto)
+endif()
 # ★ 本单：IR 的 target 函数属性（唯一的两个值）。**缺省空** = 不发属性（产物与今天逐字节相同）；
 #   有 clang 的那条路上由下面的**探针**填（⛔ 不在这里写死任何 CPU 名）。
 set(LIFT_AOT_IR_TARGET_CPU "")
@@ -313,8 +355,9 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
 
     # =================================================================================
     # ★ configure 期断言（守卫 3，⛔ 只断言**不相容**，不断言任何墙钟 / 字节数）：
-    #   ① `LIFT_AOT_SPLIT > 1` 时 IR 的参数必须仍是 `-c -O2`；
-    #   ② 出现 `-O1` / `-O0` / `-Os` / `-Oz` / `-flto` / `llc` ⇒ 直接失败；
+    #   ① `LIFT_AOT_SPLIT > 1` 时 IR 的参数必须**恰好**是档位值：OFF 档 `-c -O2`；ON 档 `-c -O2 -flto`；
+    #   ② 出现 `-O1` / `-O0` / `-Os` / `-Oz` / `llc` / `-flto=thin` ⇒ 直接失败；
+    #      `-flto` 只在 OFF 档失败（ON 档它是期望值的一部分）；
     #   ③ `.obj` 的个数必须 == `LIFT_AOT_SPLIT`（下面 `target_sources` 之前复核）；
     #   ④ `LIFT_AOT_SINGLE_TU`（如将来有人加）与 `LIFT_AOT_SPLIT > 1` 互斥。
     #   为什么是 configure 期：把 `-O2` 降级 / 换 LTO 是**唯一**能让"拆分构建"在墙钟上
@@ -327,12 +370,21 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
         message(FATAL_ERROR "LIFT_AOT_SPLIT=${LIFT_AOT_SPLIT} 超出口令范围（≤ 100）")
     endif()
     if(LIFT_AOT_SPLIT GREATER 1)
-        if(NOT "${LIFT_AOT_CLANG_FLAGS}" STREQUAL "-c;-O2")
-            message(FATAL_ERROR
-                "LIFT_AOT_SPLIT=${LIFT_AOT_SPLIT} 时 AOT IR 的参数必须仍是 `-c -O2`，"
-                "实际 = `${LIFT_AOT_CLANG_FLAGS}`（⛔ 不许降 -O1/-O0、⛔ 不许 LTO）")
+        # ★ 硬闸按档位分叉（两档都要断言）：OFF ⇒ `-c -O2` 且 `-flto/-flto=thin` 一律失败；
+        #   ON ⇒ 必须恰好 `-c -O2 -flto`，仍拒 -O0/-O1/-Os/-Oz/-flto=thin/llc。
+        if(LIFT_AOT_LTO)
+            set(_LIFT_AOT_EXPECT "-c;-O2;-flto")
+            set(_LIFT_AOT_BAD -O0 -O1 -Os -Oz -flto=thin llc)
+        else()
+            set(_LIFT_AOT_EXPECT "-c;-O2")
+            set(_LIFT_AOT_BAD -O0 -O1 -Os -Oz -flto -flto=thin llc)
         endif()
-        foreach(_bad IN ITEMS -O0 -O1 -Os -Oz -flto -flto=thin llc)
+        if(NOT "${LIFT_AOT_CLANG_FLAGS}" STREQUAL "${_LIFT_AOT_EXPECT}")
+            message(FATAL_ERROR
+                "LIFT_AOT_SPLIT=${LIFT_AOT_SPLIT} 时 AOT IR 的参数必须仍是 `${_LIFT_AOT_EXPECT}`，"
+                "实际 = `${LIFT_AOT_CLANG_FLAGS}`（⛔ 不许降 -O1/-O0；⛔ OFF 档不许 LTO）")
+        endif()
+        foreach(_bad IN ITEMS ${_LIFT_AOT_BAD})
             if("${LIFT_AOT_CLANG_FLAGS}" MATCHES "(^|;)${_bad}(;|$)")
                 message(FATAL_ERROR
                     "LIFT_AOT_SPLIT=${LIFT_AOT_SPLIT} 时 AOT IR 的参数里出现 `${_bad}`（⛔ 禁止）")
@@ -479,11 +531,24 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
     target_include_directories(emulator-lift-aot PRIVATE "${LIFT_AOT_DIR}")
     # ★ 这个宏是"生成物在场"的唯一判据（`aot_dispatch.cpp` 用它决定表有没有内容；
     #   `aot_main.cpp` 用它决定"没有生成物"的响亮报告）。
-    # ★ `LIFT_AOT_SHAPE` = 形状进二进制 + 启动横幅一行（判据档只能是 `single-O2` / `splitN-O2` 之一）。
+    # ★ `LIFT_AOT_SHAPE` = 形状进二进制 + 启动横幅一行（OFF 档 = `single-O2` / `splitN-O2`；
+    #   LTO 档必须可辨识：后缀 `-lto`，再按档位加 `-parts`（只有 8 份 IR 是 bitcode）/
+    #   `-abi`（+ lift_abi.cpp）/ `-rt`（+ 整个 runtime）⇒ 默认 mac 形状 = `split8-O2-lto-abi`）。
     if(LIFT_AOT_SPLIT GREATER 1)
         set(LIFT_AOT_SHAPE "split${LIFT_AOT_SPLIT}-O2")
     else()
         set(LIFT_AOT_SHAPE "single-O2")
+    endif()
+    if(LIFT_AOT_LTO)
+        set(LIFT_AOT_SHAPE "${LIFT_AOT_SHAPE}-lto")
+        if(LIFT_AOT_LTO_ABI)
+            set(LIFT_AOT_SHAPE "${LIFT_AOT_SHAPE}-abi")
+        else()
+            set(LIFT_AOT_SHAPE "${LIFT_AOT_SHAPE}-parts")
+        endif()
+        if(LIFT_AOT_LTO_RUNTIME)
+            set(LIFT_AOT_SHAPE "${LIFT_AOT_SHAPE}-rt")
+        endif()
     endif()
     target_compile_definitions(emulator-lift-aot PRIVATE
         LIFT_AOT_HAS_GENERATED=1
@@ -495,6 +560,43 @@ else()
         "emulator-lift-aot: 缺 clang / 执行源（${LIFT_AOT_AGE_EXE}）/ closure.txt ⇒ 替身 TU："
         "构建不断，但 AOT 启动时会响亮报告「没有生成物」并 exit 1")
     target_sources(emulator-lift-aot PRIVATE src/aot/aot_dispatch.cpp src/aot/aot_run.cpp)
+endif()
+
+# =====================================================================================
+# ★ LTO 档：运行库一侧的接线（⛔ 只在 `LIFT_AOT_LTO=ON` 时执行；OFF 档一行都不加）。
+#
+#   为什么必须单独接线：只给 8 份 `.ll` 加 `-flto` 时，链接器只看得到**这 8 份**的 IR ⇒
+#   能内联跨 part 的 `lift_cc_*`，但看不到 `lift_tick` / `lift_note_write` / `lift_dyn`
+#   （它们在 `src/runtime/lift_abi.cpp`，是另一个 TU，且被静态库 `emulator-lift-runtime`
+#   收着）。要让它们进 LTO，那个 TU 必须也是 bitcode；要连 shim 一起内联，整个库都必须
+#   是 bitcode（`LIFT_AOT_LTO_RUNTIME`，默认 OFF）。
+#   ⚠ `-flto` 在**链接行**：一旦链进去的静态库成员里有 bitcode，该链接命令就必须带 `-flto`
+#     （否则 ld64 不跑 LTO 后端）⇒ 这里用 `INTERFACE` 让所有链 `emulator-lift-runtime` 的
+#     target（`emulator-lift-gen` / 测试 exe / AOT 臂）自动继承。
+#   ⚠ 只有 APPLE（Apple clang 17 + ld64）实测过；非 APPLE 上 `LIFT_AOT_LTO` 默认 OFF，
+#     显式 `-DLIFT_AOT_LTO=ON` 属未验证路径 ⇒ 只告警，不拦（硬闸仍按 ON 档断言 `-c -O2 -flto`）。
+# =====================================================================================
+if(LIFT_AOT_LTO)
+    if(NOT APPLE)
+        message(WARNING
+            "LIFT_AOT_LTO=ON 在非 APPLE 平台上**未验证**（win32 = clang-cl + lld-link；Linux = ld.lld）："
+            "很可能链接失败。默认档只在 mac 开；这里按你的显式要求继续。")
+    endif()
+    if(LIFT_AOT_LTO_ABI)
+        set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/lift_abi.cpp"
+            PROPERTIES COMPILE_OPTIONS "-flto")
+    endif()
+    if(LIFT_AOT_LTO_RUNTIME)
+        target_compile_options(emulator-lift-runtime PRIVATE -flto)
+    endif()
+    if(LIFT_AOT_LTO_ABI OR LIFT_AOT_LTO_RUNTIME)
+        # 运行库里出现 bitcode ⇒ 每个链它的 target 的链接行都要 `-flto`。
+        target_link_options(emulator-lift-runtime INTERFACE -flto)
+    endif()
+    # AOT 臂自己的链接行：8 份 `.obj` 是 bitcode ⇒ 必须带 `-flto`。
+    target_link_options(emulator-lift-aot PRIVATE -flto)
+    message(STATUS
+        "LIFT_AOT_LTO: ON（ABI=${LIFT_AOT_LTO_ABI} RUNTIME=${LIFT_AOT_LTO_RUNTIME}；shape=${LIFT_AOT_SHAPE}）")
 endif()
 
 # =====================================================================================

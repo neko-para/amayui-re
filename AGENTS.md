@@ -319,9 +319,16 @@ ctest --test-dir out --output-on-failure
    出处：`defects.md#BUG-25`（1 处，字面量在桩页外）；对照：合成 EA `0x7FFEF004/008/010/014` 也是字面量，
    但**两臂各有一段 pump** 才没出事。
 3. **构建形状与输出默认档都是判据面，都要被断言。**
-   - IR 拆 8 份（clang 段 120.7 s → 21.6 s）**必须仍是 `-c -O2`**：configure 期 `FATAL_ERROR` 钉住
-     （出现 `-O0/-O1/-Os/-Oz/-flto/llc` 即失败），形状进二进制（`LIFT_AOT_SHAPE="split8-O2"`）并在启动打一行，
-     分片清单自洽由 CTest `lift-aot-split-manifest` 判。回退 = `-DLIFT_AOT_SPLIT=1`（一行，⛔ 不用回滚源码）。
+   - IR 拆 8 份（clang 段 120.7 s → 21.6 s）**默认形状 = `split8 -c -O2` + mac 上 `-flto`**
+     （`LIFT_AOT_LTO` 在 APPLE 上默认 **ON**，shape 带 `-lto-abi` = `split8-O2-lto-abi`，启动打一行；
+     其它平台默认 **OFF**——LTO 只在 mac 的 Apple clang 17 + ld64 实测过，win32/Linux 未验证，
+     要试显式 `-DLIFT_AOT_LTO=ON`）。configure 期 `FATAL_ERROR` 钉住：OFF 档必须恰好 `-c -O2`
+     （出现 `-flto/-flto=thin` 即失败）；ON 档必须恰好 `-c -O2 -flto`；两档都拒
+     `-O0/-O1/-Os/-Oz/-flto=thin/llc`。分片清单自洽由 CTest `lift-aot-split-manifest` 判。
+     依据（2026-11-17 / mac arm64）：属性对齐后 `_lift_tick` 站点 **−86.4%**、`_lift_note_write`
+     **−100%**、FELLOW init 墙钟 **−12.61%**（5/5 对全负）——
+     `docs/03-emulator/aot-lto-evaluation.md` §10。回退 = `-DLIFT_AOT_LTO=OFF`（一行，⛔ 不用回滚源码）；
+     回退拆分 = `-DLIFT_AOT_SPLIT=1`。
    - 闭包五条判据在**生成那一趟**里做（`--closure-gate`），⛔ 不再单独跑一次 `--check`（那是同一份分析的重复）。
    - **默认档不许有周期性输出**（每帧 / 每 N 次派发 / 每次 shim）。周期性输出一律 opt-in（如 `--frame-log`）；
      ★ **一次性**输出（停机原因 / 启动 readout / pin 核对 / 缺口清单）⛔ **不许**收——出问题时那是唯一的消息面。

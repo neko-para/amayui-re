@@ -680,13 +680,15 @@ int main(int argc, char** argv) {
     }
 
     // ---- ④' AOT **形状**进二进制 + 启动第一屏一行（设计 §4.1-4）----
-    //   `LIFT_AOT_SHAPE` 由 CMake 从 `LIFT_AOT_SPLIT` + `-O2` 派生：判据档只允许
-    //   `single-O2` / `splitN-O2` 两种写法；将来真有 dev 档，它的值必须带 `-NOT-A-JUDGE`
-    //   ⇒ 这里同时打警示，让人**无法**在 dev 档上得出性能结论。
+    //   `LIFT_AOT_SHAPE` 由 CMake 从 `LIFT_AOT_SPLIT` + `-O2`（+ LTO 档的 `-lto` / `-abi` …）派生：
+    //   OFF 档是 `single-O2` / `splitN-O2`；LTO 档带 `-lto` 后缀（默认 mac = `split8-O2-lto-abi`）。
+    //   ⇒ 横幅的 `-O2` 之后按 shape 里有没有 `-lto` 派生 ` · LTO`（⛔ 不写死，否则 LTO 档会变半句假话）。
+    //   将来真有 dev 档，它的值必须带 `-NOT-A-JUDGE` ⇒ 这里同时打警示，让人**无法**在 dev 档上得出性能结论。
     {
         const char* shape = LIFT_AOT_SHAPE;
-        std::printf("emulator-lift-aot: AOT 形状 LIFT_AOT_SHAPE=\"%s\"（split=%d · -O2）\n", shape,
-                    static_cast<int>(LIFT_AOT_SPLIT));
+        const bool lto = std::strstr(shape, "-lto") != nullptr;
+        std::printf("emulator-lift-aot: AOT 形状 LIFT_AOT_SHAPE=\"%s\"（split=%d · -O2%s）\n", shape,
+                    static_cast<int>(LIFT_AOT_SPLIT), lto ? " · LTO" : "");
         if (std::strstr(shape, "-NOT-A-JUDGE") != nullptr) {
             std::printf("⚠ 非判据档（⛔ 性能结论不可用）\n");
         }

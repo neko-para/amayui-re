@@ -1,5 +1,7 @@
 # AOT LTO 评估（A / B0 / B1 / B2 / C，opt-in 实验）
 
+> ⚠ **本节结论已被 §10 取代（2026-11-17）**：LTO 现在是 mac 的默认形状（`-DLIFT_AOT_LTO=OFF` 回退）；下面的读数保留为历史快照。
+
 - 仓库 `/Users/nekosu/Documents/Projects/amayui-re`（macOS arm64，一仓一树）· 起点 `9468226`（工作树初始干净）
 - 机器：12 核 / 36 GB · Apple clang 17.0.0（`/usr/bin/clang` 与 `/usr/bin/c++` 同一份）
 - 构建：Ninja · RelWithDebInfo · vcpkg 复用 `apps/emulator-lift/out/vcpkg_installed`（⛔ 未重新 install）
@@ -346,3 +348,164 @@ cmake -S apps/emulator-lift -B .tmp/lto/build-b0 -G Ninja \
   -DVCPKG_MANIFEST_INSTALL=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
   -DLIFT_BUILD_TESTS=OFF -DLIFT_AOT_LTO=ON -DLIFT_AOT_LTO_ABI=ON
 ```
+
+---
+
+## 10. 2026-11-17 复核：IR 属性对齐后 LTO 默认开启（mac）
+
+> 口径：`/Users/nekosu/Documents/Projects/amayui-re` · macOS arm64（Apple M1 / 12 核 / 36 GB）·
+> Apple clang 17.0.0 · Ninja · RelWithDebInfo · 起点 `253cbe0`（本单 = 把 opt-in 落成默认）·
+> A/B 交错、每 run 全新 appdata、同机同天。
+> ⚠ 下面所有数字都是 **2026-11-17 的一次实测快照**；⛔ 不是断言、不进 test。§1–§9 的旧读数
+> （opt-in 实验、默认 OFF 那一轮）保留为历史快照，⛔ 不改写。
+
+### 10.1 改了什么
+
+1. **`253cbe0`（上一单）**：configure 期用**同一份 clang** 探一个极小 C 文件，把前端写进函数属性的
+   `"target-cpu"` / `"target-features"` 串读出来，经 `--ir-target-cpu` / `--ir-target-features` 交给
+   `lift-gen` ⇒ 8 份 `.ll` 的每个 `define` 都挂属性（另由 `lift-aot-ir-target-attrs` 做构建期判据）。
+   这一步解掉了 LLVM `areInlineCompatible()` 的闸（上一轮 §5.2 的定因）。
+2. **本单**：把上一轮的 opt-in 档落成**默认**（`apps/emulator-lift/CMakeLists.txt`）：
+   - `LIFT_AOT_LTO`：**APPLE 默认 ON**；其它平台默认 **OFF**（LTO 只在 mac 的 Apple clang 17 + ld64
+     实测过，win32/Linux 未验证；要试显式 `-DLIFT_AOT_LTO=ON`）。
+   - `LIFT_AOT_LTO_ABI` 默认 **ON**（`src/runtime/lift_abi.cpp` 也编 bitcode）；`LIFT_AOT_LTO_RUNTIME`
+     保持 **OFF**（B2 那轮整库 LTO 只让 runtime 变大、无收益）。
+   - configure 期硬闸**按档位分叉**（`LIFT_AOT_SPLIT>1` 时两档都断言）：OFF ⇒ 必须恰好 `-c;-O2`，
+     出现 `-flto/-flto=thin` 一律 `FATAL_ERROR`；ON ⇒ 必须恰好 `-c;-O2;-flto`，仍拒
+     `-O0/-O1/-Os/-Oz/-flto=thin/llc`。
+   - shape：OFF = `splitN-O2`；ON = `split8-O2-lto-abi`（`-parts` / `-rt` 分支按 ABI/RUNTIME 档位）。
+   - 启动横幅按 shape 里的 `-lto` 派生：`LIFT_AOT_SHAPE="split8-O2-lto-abi"（split=8 · -O2 · LTO）`。
+   - 回退 = `-DLIFT_AOT_LTO=OFF`（一行，⛔ 不用回滚源码）。
+3. 语义面**零改动**：`--ir-target-*` / `lift-aot-ir-target-attrs` / 探针一行未动；⛔ 不引入
+   `-march/-mcpu/-mtune`；⛔ 不打开 `LIFT_AOT_LTO_RUNTIME`。
+4. ⚠ 上一轮实验在 `out/CMakeCache.txt` 里留过 `LIFT_AOT_LTO:UNINITIALIZED=OFF` ⇒ 重新评估默认值时
+   先 `cmake --preset macos-arm64 -U 'LIFT_AOT_LTO.*' -U LIFT_AOT_LTO`（否则 `option()` 会沿用缓存里的 OFF）。
+
+### 10.2 静态（A = LTO OFF · B = LTO ON `-abi` 档；同机同天）
+
+| 量 | A（OFF，`split8-O2`） | B（ON，`split8-O2-lto-abi`） | Δ |
+|---|---:|---:|---:|
+| `__text` 字节 | 14,399,532 | 14,852,364 | **+452,832（+3.14%）** |
+| 总 native 条数 | 3,608,111 | 3,721,295 | +113,184（+3.14%） |
+| lift 条数 | 2,500,533 | 2,689,677 | **+189,144（+7.56%）** |
+| `_lift_tick` 站点 | 101,765 | 13,893 | **−87,872（−86.4%）** |
+| `_lift_note_write` 站点 | 38,535 | **0**（符号被删） | **−38,535（−100%）** |
+| `_lift_dyn` 站点 | 5,658 | 5,678 | +20（+0.35%） |
+| 跨 part `_lift_cc_*` 站点 | 2,267 | 1,653 | −614（−27.1%） |
+| 二进制体积 | 19,596,800 B | 20,801,920 B | +6.15% |
+
+命令：`node .tmp/lto/measure.mjs <binary> --out <json>`（口径 = `llvm-objdump -d` 的指令行数）。
+⇒ 静态是**变大**的（每个内联点复制"判空 + 取 + 加 + 存"），换来的是动态减少 ~88k 个 `bl` + 参数装配 + `ret`。
+`_lift_note_write` 在 B 里连符号都没有（被 internalize + 内联，内联体改调
+`lift::noteGuestWrite(BlockCache*,uint,uint)`，38,698 个站点）。
+
+### 10.3 窗口（FELLOW 进入段，`profile_begin/end fellow-init`；10 run 交错 A,B×5）
+
+| # | 档 | wall (ms) | insns | lift % | boundary % | shim % | instrument % |
+|---|---|---:|---:|---:|---:|---:|---:|
+| A1 | OFF | 619.4 | 492,382,900 | 50.7 | 29.1 | 16.2 | 4.0 |
+| B1 | ON | 541.1 | 492,550,239 | 47.7 | 29.0 | 18.4 | 4.9 |
+| A2 | OFF | 622.2 | 492,480,599 | 52.0 | 27.7 | 16.0 | 4.2 |
+| B2 | ON | 540.3 | 492,475,609 | 47.4 | 29.1 | 18.5 | 5.0 |
+| A3 | OFF | 621.5 | 492,333,744 | 51.5 | 27.9 | 16.2 | 4.3 |
+| B3 | ON | 540.7 | 492,722,042 | 47.4 | 29.2 | 18.5 | 4.9 |
+| A4 | OFF | 618.9 | 492,263,392 | 51.3 | 28.6 | 16.1 | 4.0 |
+| B4 | ON | 545.3 | 492,509,867 | 46.4 | 29.1 | 19.8 | 4.7 |
+| A5 | OFF | 621.0 | 492,201,040 | 51.3 | 28.5 | 16.1 | 4.0 |
+| B5 | ON | 544.8 | 492,379,106 | 47.7 | 28.3 | 18.6 | 5.4 |
+
+**中位**：
+
+| 量 | A（OFF） | B（ON） | Δ |
+|---|---:|---:|---:|
+| `wall` | **621.27 ms**（618.88–622.21） | **542.96 ms**（540.28–545.34） | **−78.31 ms（−12.61%）** |
+| `insns` | 492,358,322 | 492,530,053 | +171,731（**+0.03%**，在 ±0.2% 抖动内，**不作效率判据**） |
+| `lift` 桶 | 319.4 ms（51.4%） | 257.2 ms（47.5%） | **−62.2 ms（−19.5%）** |
+| `boundary` 桶 | 177.0 ms（28.6%） | 157.5 ms（29.1%） | −19.5 ms（−11.0%） |
+| `shim` 桶 | 100.3 ms（16.1%） | 100.7 ms（18.6%） | +0.4 ms（+0.4%，不变） |
+| `instrument` 桶 | 25.8 ms | 26.6 ms | ≈ 不变 |
+
+**逐对差**（A−B，负 = ON 更快）：5/5 全负。
+
+| 对 | A (ms) | B (ms) | Δ ms | Δ % |
+|---|---:|---:|---:|---:|
+| 1 | 619.36 | 541.08 | −78.28 | −12.64% |
+| 2 | 622.21 | 540.28 | −81.93 | −13.17% |
+| 3 | 621.51 | 540.73 | −80.78 | −13.00% |
+| 4 | 618.88 | 545.34 | −73.54 | −11.88% |
+| 5 | 621.02 | 544.83 | −76.19 | −12.27% |
+
+`lift + boundary` 的绝对包络（`wall − shim − partial − instrument`）中位 A **495.0 ms** / B **414.1 ms**
+（−80.9 ms，其中 lift −62.2、boundary −19.5）⇒ 省下的 ~80 ms 全落在 lifted 代码段，与静态 tick/note
+站点读数方向一致；`shim` 不变说明不是"少做了宿主调用"。
+窗口有效性 10/10：`=== profile window: fellow-init ===` 有打印 · `frames=0` · `unaccounted 0.000 ms` ·
+`coverage 1.68–1.88` · `verdict = 候选（boundary 27.7–29.6%）`。
+
+### 10.4 实际配方（⛔ 不是任务给的原始 plan）
+
+两处偏差都是实测修正的：
+
+1. **`profile_begin` 必须在 `await script FELLOW` 之后**（给定配方把它放在 SN0000 右键之后 ⇒ 窗口里
+   混进 12 次 Present，`frames != 0`、insns 也偏低）。
+2. **用 `--max-frames 6000` 收口，⛔ 不要用 `quit`**：`quit` 投在"下一个读点"，同一档跨 run 的
+   `frames`（5440–5631）与 `stop @EA` 会漂 ⇒ 语义指纹不可复现。固定帧收口时 10/10 的 `frames=6000`、
+   `stop @ eip=00498AE4` 恒同。窗口在更早的 `await position FELLOW` 处已结束，不受影响。
+
+可粘贴的 plan（存成 `/tmp/fellow-init.plan`）：
+
+```
+await position TITLE 0x0460 0x0520 timeout 30000
+click 1186 373
+await position GAMESTART 0x0664 0x0724 timeout 30000
+click 830 592
+await position SN0000 0x46B8 0x470C timeout 35000
+click 500 500 right
+await script FELLOW timeout 60000
+profile_begin fellow-init
+await position FELLOW 0x1684 0x16A4 timeout 60000
+profile_end fellow-init
+```
+
+命令行（`--appdata` 必须是**全新副本**；`--game-dir links/install` 只读）：
+
+```bash
+cp -R .tmp/p2/appdata2 /tmp/appdata-lto-default      # 任意"未跑过"的 appdata 快照
+/usr/bin/time -lp out/emulator-lift-aot --present headless --skip-logo --audio off \
+  --game-dir links/install --appdata /tmp/appdata-lto-default \
+  --max-frames 6000 --time-limit 180 --input-plan /tmp/fellow-init.plan
+```
+
+（本节的 10 次 run 用 `.tmp/lto-feature/fellow-init-fp.plan`，等价于上面这份；每次一份全新 appdata。
+`insns` 是本机 mac 的 4.92 亿，任务给的口径 5–7 亿来自 win 上的另一段读数 —— 两档 insns 相等即可比。）
+
+### 10.5 语义指纹、代价、平台范围
+
+**语义指纹 10/10 逐位相同**（A 与 B 全部 10 次 run）：
+
+| 项 | 值 |
+|---|---|
+| `exit` | 0 |
+| `frames` | 6000（`--max-frames 6000`） |
+| `stop @` | `eip=00498AE4`（max-frames · shim `Present`） |
+| arena | `in_use=125625400` / `peak=125625400` / `surfaces=31` |
+| `heap_blocks` | 7863 |
+| `table misses` | 0（`entries=33509`，`hits=lookups`） |
+| `input-plan` | `steps=10 fired=3 pending=0` |
+
+总 `insns` 不进指纹（±0.16% 抖动，`AGENTS.md` §12.6 已写明不作判据）。
+
+**代价（同机同天）**：
+
+| 项 | OFF | ON（`-abi`） |
+|---|---:|---:|
+| configure | 2.83 s | 2.45 s |
+| 全量构建 | 0.06 s（no-op） | **65.05 s / 3.05 GB**（`INTERFACE -flto` 让 ~96 条链接都跑 LTO 后端） |
+| AOT 臂链接（重复链接一次） | **0.16 s / 250 MB** | **37.42 s / 3.03 GB** |
+| `__text` | 14,399,532 B | +3.14% |
+
+⇒ 每次改 AOT IR / 运行库后重建都要付这 ~37 s / 3 GB 的链接。
+
+**平台范围**：只在 **mac（macOS arm64 · Apple clang 17 · ld64）** 实测。**win32（clang-cl + lld-link）
+与 Linux 未验证** ⇒ `LIFT_AOT_LTO` 在非 APPLE 上默认 **OFF**；显式 `-DLIFT_AOT_LTO=ON` 属未验证路径
+（CMake 会打 `WARNING`，不拦）。覆盖面只有 `fellow-init` 一个窗口（4.92 亿 guest insns、0 帧、纯计算段），
+没有覆盖音频 / 真 GPU 呈现 / 存档写盘 / 其它场景。

@@ -1,5 +1,8 @@
 # AOT lift 静态指令量评估（arm64 · RelWithDebInfo · **静态**）
 
+> ⚠ **2026-11-17 起 mac 默认形状带 LTO**：`__text` +3.14%、lift +7.56%（`aot-lto-evaluation.md` §10）；
+> 本文件是 **OFF 形状**的读数。
+
 > 只读普查。**不写产品代码 / 不改 tracked 文件 / 不跑游戏·CTest·构建**。
 > 这是 **2026-11-17 的一次静态读数**（不是断言、不进 test）；原报告与脚本曾落在 `.tmp/insn-overhead/`。
 > 口径：commit `bae9299` · Darwin 25.3 arm64 · RelWithDebInfo · 静态。
