@@ -672,3 +672,140 @@ node .tmp/lto/run-fingerprint.mjs <bin> .tmp/tick-inline/appdata-<档> /tmp/fp-<
 IR 站点数（§11.3 的 ①②③ 各有逐例反汇编）。要把这个判据变成可用的门禁，需要**按 IR 记账**
 （例如给每个 tick 站点一个可追踪标记，或把内联进来的 callee tick 计入调用方），那属于本轮
 边界之外的发射改造。
+
+---
+
+## 12. 2026-11-18：win32 默认开启（clang-cl 22.1.2 + lld-link）—— `/Ob1` 是那道缺失的闸
+
+> 口径：`E:\Projects\amayui-re` · win32（AMD Ryzen 7 7735H · 8C/16T）· clang / clang-cl / lld-link / llvm-lib
+> **22.1.2** · CMake 4.3.0-rc1 · Ninja 1.13.2 · RelWithDebInfo · 起点 = `303bc96`（`main`）·
+> A/B 交错、每 run 全新 appdata、同机同天。
+> ⚠ 所有数字都是 **2026-11-18 的一次实测快照**；⛔ 不是断言、不进 test。§1–§9（opt-in 实验）与 §10/§11（mac）
+> 的旧读数**不改写**。
+
+### 12.1 改了什么
+
+1. **默认值**：`LIFT_AOT_LTO` 在 `APPLE OR WIN32` 上默认 **ON**；Linux 仍 **OFF**（未验证）。
+   `LIFT_AOT_LTO_ABI` 保持默认 ON（`src/runtime/lift_abi.cpp` 编 bitcode）；`LIFT_AOT_LTO_RUNTIME` 保持 OFF。
+   shape 仍是 `split8-O2-lto-abi`，启动横幅一行不变（`-lto` 从 shape 派生）。
+2. **`lift_abi.cpp` 单点 `/Ob2`**（★ 本节的**核心**，见 12.2）：只在 WIN32 追加，非 WIN32 仍是 `-flto`。
+3. **不做**的事：⛔ 不动全局 flags（`CMAKE_CXX_FLAGS_RELWITHDEBINFO` 的 `/Ob1` 保留）；
+   ⛔ 不按平台收窄链接行的 `-flto`（实测 `out/build.ninja` 带 `-flto` 链接成功，lld-link 自动 LTO，
+   只打一条 `warning: ignoring unknown argument '-flto'`）；⛔ 不动 `LIFT_AOT_SPLIT`、⛔ 不引入 `-flto=thin`。
+4. 回退 = `-DLIFT_AOT_LTO=OFF`（一行）；⚠ 若 `out/` 的 cache 里已有显式 `LIFT_AOT_LTO:BOOL=OFF`
+   （例如旧树 / `out-user`），要**默认档**得先 `-U LIFT_AOT_LTO`（或删掉那条 cache 项）—— `option()` 会沿用缓存值。
+
+### 12.2 管线与根因：为什么第一轮"LTO 跑了却没内联任何一个热函数"
+
+**管线（能通，已验）**：`clang -c -O2 -flto --target=x86_64-pc-windows-msvc`（8 份 `.ll`）与
+`clang-cl -c … -flto`（`lift_abi.cpp`）都产 **LLVM bitcode**（magic `42 43 C0 DE`），`llvm-lib` 归档，
+`lld-link` 链接。**lld-link 自动对 bitcode 输入跑 LTO**（不需要链接行的 `-flto`；给了只打一条 warning）。
+探针：bitcode 归档成员 + native `.obj` ⇒ 被调函数被 internalize + 内联（PDB 里连符号都没有）。
+
+**第一轮（只有管线、没有 `/Ob2`）的负结果**：跨 part `lift_cc_*` 真被内联（直接调用 1,107 → 636；
+抽样 `lift_cc_4E6F18` 272 → 0、`lift_cc_4E6DB8` 49 → 0），但
+**`lift_tick` 104,750 → 105,617、`lift_note_write` 39,075 → 39,319、`lift_dyn` 5,189 → 5,198**
+—— **一条都没内联**，窗口墙钟反而 **+2.75%**（3/3 对全正）。
+⇒ 那组读数**不能**读作"LTO 在 win32 无收益"，它测的是"只内联了跨 part 调用"的 LTO。
+
+⚠ 这一轮还踩过一个**读数陷阱**：`llvm-nm` 在 win32 PE 上打印 `no symbols`（lld-link 不写 COFF 符号表），
+改用 `.pdb` publics 取地址后，ON 档里 `lift_tick` 被 internalize + 挪地址 ⇒ publics 里查不到 ⇒
+"按 PDB 地址数 `callq`"读成 **0 站点**（假阴性）。**正确口径 = 函数体地址**（父级用
+`lift_cc_401000` 里的 `callq` 目标 + 前 3 条指令逐字对照钉死了这一点）。
+
+**根因（机械、已验）**：`CMAKE_CXX_FLAGS_RELWITHDEBINFO` = `/Zi /O2 /Ob1 /DNDEBUG`，
+其中 MSVC 的 **`/Ob1`**（"只内联标了 `inline` 的函数"）被 clang-cl 落成**函数级 `noinline`**：
+`lift_abi.cpp` 的 bitcode IR 里 `lift_tick`（`#8`）/ `lift_note_write`（`#4`）/ `lift_dyn`（`#4`）的
+attributes 都带 `noinline` ⇒ LTO **结构上**不可能内联它们。
+**不是** mac §5.2 那个 `areInlineCompatible()`：AOT 侧 `attributes #0 = { "target-cpu"="x86-64"
+"target-features"="+cmov,+cx8,+fxsr,+mmx,+sse,+sse2,+x87" }` 与 `lift_abi` 的一模一样。
+
+**`/Ob` 覆盖顺序（3 行小文件验过）**：`clang-cl /c /O2 /Ob1 /Ob2 -flto` ⇒ IR **没有** `noinline`；
+`/Ob2 /Ob1` ⇒ **有**。⇒ **后写的赢**，所以 `COMPILE_OPTIONS "-flto;/Ob2"` 追加在全局 `/Ob1` 之后有效。
+
+### 12.3 静态（A = LTO OFF `split8-O2` · B = LTO ON `split8-O2-lto-abi` + `/Ob2`；同机同天）
+
+口径 = **函数体地址**上的 `callq`（⛔ 不经过 PDB public）。`lift_tick` / `lift_note_write` 用指令序列指纹
+在反汇编里定位函数体（`testq/je/movl/movq 0x260(%rcx)/jmp`；`movl %edx,%eax/addq %rax,0x6e0(%rcx)/retq`），
+先在 OFF 上自校验命中已知地址，再到 ON 上找。
+
+| 量 | A（OFF） | B（ON + `/Ob2`） | Δ |
+|---|---:|---:|---:|
+| 反汇编指令行 | 3,502,918 | 3,314,520 | **−5.38%** |
+| `__text` | 13,826,294 B | 13,315,318 B | **−3.70%** |
+| 可执行文件 | 15,929,856 B | 15,283,200 B | −4.06% |
+| **`lift_tick` 调用** | **104,750** | **0**（函数体在反汇编里已不存在） | **−100%** |
+| **`lift_note_write` 调用** | **39,075** | **0**（函数体已不存在） | **−100%** |
+| **`lift_dyn` 调用** | **5,189**（+603 `jmp`） | **5,198**（+612 `jmp`） | **+0.17%**（与 mac +0.35% 同向） |
+| 跨 part `lift_cc_*` 调用 | 1,107（269 distinct） | 621（230 distinct） | −43.9% |
+| 直接 `callq` 总数 | 192,185 | 87,174 | **−54.6%** |
+
+⇒ 与 mac 同一形态：两个热 shim 全内联、`lift_dyn` 不动（它是分配器式的大函数），**代码变小**（mac 那轮是变大 —— mac
+的 tick 还带着判空，win32 这轮已先做过 §11 的去判空）。
+
+### 12.4 A/B（FELLOW init 窗口，`--max-frames 6000`，热缓存，每 run 全新 appdata，顺序交替 A→B / B→A）
+
+窗口有效：6 次 run 全部 `frames=0` · 窗口 guest `insns` **612.37M–613.92M（±0.13%）** ·
+`unaccounted 0.000 ms` · `coverage 1.27–1.46×` · 窗内文件 shim 只有 `kernel32!CreateFileA` **N=68**
+（热缓存下 12–14 ms ≈ 窗口墙钟的 1%）。
+
+| pair | A（OFF）win ms | B（ON+/Ob2）win ms | Δ ms | Δ % |
+|---|---:|---:|---:|---:|
+| 1 | 1319 | 1197 | −122 | **−9.25%** |
+| 2 | 2240 | 1597 | −643 | **−28.71%** |
+| 3 | 2094 | 1588 | −506 | **−24.16%** |
+| 4 | 1570 | 1479 | −91 | **−5.80%** |
+| 5 | 1836 | 1819 | −17 | **−0.93%** |
+
+- **方向：5/5 对 ON 更快**；**逐对 Δ 中位 = −122 ms（−9.25%）**；两侧中位 1836 → 1588 ms（−13.5%）。
+- ⚠ **噪声说明**：A 侧自己在 1319–2240 ms 之间漂（窗口 insns 只差 ±0.13%）⇒ 单看某一对不可靠；
+  结论只建立在"5/5 同向 + 逐对中位"。幅度区间 −0.9%…−28.7%，真实值大概率在 −9%…−14%
+  （与 mac §10 的 −12.61% 重合）。进程 CPU 时间两侧接近（A 59.0/76.3/73.3/66.9/72.4 s，
+  B 58.6/69.4/73.7/66.5/67.1 s）⇒ 不是"少做了活"。
+
+### 12.5 语义指纹
+
+10/10 run（A/B 各 5）**逐项相同**：`exit 0` · `frames 6000`（`--max-frames 6000`）·
+`stop @ eip=00498AE4`（max-frames · shim `com!IDirect3DDevice9::Present`）。
+另外默认档（无 `-D`、`-U LIFT_AOT_LTO` 后）单独跑 2 次，同样 `exit 0` / `frames 6000` / `stop @ 00498AE4`，
+且**启动横幅**是 `LIFT_AOT_SHAPE="split8-O2-lto-abi"`。
+
+### 12.6 门禁与代价
+
+- `ctest --test-dir out --output-on-failure`（默认档构建）：**107/107 passed · 0 failed**（127.8 s）。
+- configure（默认档，`-U LIFT_AOT_LTO`）：**9.81 s**，STATUS `LIFT_AOT_LTO: ON（shape=split8-O2-lto-abi）`，
+  cache `LIFT_AOT_LTO:BOOL=ON`（`-D` 一个都没给 ⇒ **默认就是 ON**）。
+- 全量 build（`--parallel 4`）：**193.9 s** · 120/120 · 峰值 **922.2 MB/进程 / 960.1 MB 合计**。
+- **AOT 臂链接：100.1 s**（OFF 0.71 s；无 `/Ob2` 那轮 119.8 s）⇒ 每次改 AOT IR / 运行库都要付这 ~100 s。
+- ⚠ 并行构建有个**旧竞态**：`vcpkg z-applocal` 在 `out/tests/` 上并发拷 DLL 会互撞（默认并行度下 8+6 个目标红，
+  `The process cannot access the file because it is being used by another process.`）；`--parallel 4` 一次过。
+  与 LTO 无关，但 LTO 让链接变长会放大它。
+
+### 12.7 平台范围
+
+mac（Apple clang 17 + ld64）与 win32（clang-cl + lld-link 22.1.2）实测；**Linux（ld.lld）未验证**
+⇒ `LIFT_AOT_LTO` 在 Linux 上仍默认 **OFF**，显式 `-DLIFT_AOT_LTO=ON` 属未验证路径（CMake 只告警、不拦）。
+覆盖面：`fellow-init` 一个窗口（~6.1 亿 guest insns、0 帧、纯计算段 + 一次 68 次 `CreateFileA`）。
+
+### 12.8 复现（win32）
+
+```powershell
+cd apps/emulator-lift
+cmake --preset windows-x64 -U LIFT_AOT_LTO     # 默认档：应打印 shape=split8-O2-lto-abi、cache LIFT_AOT_LTO=ON
+cmake --build --preset windows-x64 --parallel 4
+ctest --test-dir out --output-on-failure
+
+# 静态（口径 = 函数体地址；⛔ 不要用 PDB public 判"有没有内联"）
+#   OFF：lift_tick 0x140B9B730 / note_write 0x140B9B710 / dyn 0x140B9C400
+#   ON ：lift_tick（函数体已不存在）/ note_write（已不存在）/ dyn 0x140C7C3E0
+#   脚本：.tmp/lto-win32/{symbols.ps1,findseq.mjs,measure.mjs,dis8.ps1}
+
+# A/B（FELLOW init 窗口，每次全新 appdata）
+<exe> --present headless --skip-logo --audio off --game-dir links/install --appdata <全新副本> `
+      --max-frames 6000 --time-limit 180 --input-plan .tmp/lto-win32/fellow-init.plan
+```
+
+⚠ **读数口径两条硬规矩**（本轮踩过）：
+1. `llvm-nm` 在 win32 PE 上不可用（`no symbols`）；符号地址要取 `.pdb` publics，但**内联后的函数会从 publics 消失**
+   ⇒ 判"是否内联"必须**按函数体地址/指令序列**数 `callq`，⛔ 不能按"符号还在不在"。
+2. 冷盘会让同一段 guest 代码的墙钟差 ±50%（窗口内含 `CreateFileA`）⇒ **先 warmup 再测**，且只认"逐对方向 + 中位"。

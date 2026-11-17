@@ -303,42 +303,54 @@ find_program(LIFT_AOT_IR_CLANG NAMES clang clang.exe)
 set(LIFT_AOT_SPLIT 8 CACHE STRING
     "AOT IR 拆成几份：1 = 单份路径（今天的形状）；N>1 = 按分量根 EA 升序贪心分桶（N = 8 是裁决值）")
 # =====================================================================================
-# ★ LTO 档：**mac 默认 ON**（2026-11-17 用户裁决：只要有可见优化就接受默认开），其它平台默认 OFF。
+# ★ LTO 档：**APPLE + WIN32 默认 ON**（2026-11-17 用户裁决：只要有可见优化就接受默认开；2026-11-18 win32 验证通过），
+#   Linux 默认 OFF（未验证）。
 #
-#   为什么 mac 现在可以默认开：253cbe0 让生成物带上 `target-cpu` / `target-features` **函数属性**，
+#   为什么 mac 可以默认开：253cbe0 让生成物带上 `target-cpu` / `target-features` **函数属性**，
 #   LLVM 的 `areInlineCompatible()` 那道闸被解开 ⇒ `lift_tick` / `lift_note_write` 真被内联。
 #   实测（2026-11-17 / mac arm64 / Apple clang 17 + ld64）：FELLOW 进入窗口墙钟中位 **−12.61%**
 #   （10 次交错 run，5/5 对全负）、`_lift_tick` 站点 **−86.4%**、`_lift_note_write` **−100%**、
 #   语义指纹 10/10 逐位相同。代价：AOT 链接 **37.42 s / 3.03 GB**（OFF 0.16 s / 250 MB）、
 #   `__text` **+3.14%**。读数与复现配方：`docs/03-emulator/aot-lto-evaluation.md` §10。
 #
-#   ⛔ 其它平台默认 OFF：LTO 只在 mac（Apple clang 17 + ld64）实测过；win32（clang-cl + lld-link）
-#   **未验证**。AGENTS.md §2 的口径是 win32 优先、mac 只做兼容性验证 ⇒ ⛔ 不许因为"默认开"
-#   把 win32 构建弄红。要在非 APPLE 上试：`-DLIFT_AOT_LTO=ON`（未验证）。
-#   回退（mac 上遇到问题）：`-DLIFT_AOT_LTO=OFF`（一行，⛔ 不用回滚源码）。
+#   ★ win32 也已实测（2026-11-18 / clang-cl + lld-link 22.1.2）：窗口墙钟中位 **−9.25%**（5/5 对同向）、
+#   `lift_tick` 调用 **104,750 → 0**、`lift_note_write` **39,075 → 0**（两者的函数体在反汇编里已不存在）、
+#   `lift_dyn` +0.17%（不内联，与 mac 同向）、`__text` **−3.70%**、语义指纹 10/10 相同、
+#   ctest 全绿。代价：AOT 链接 **100.1 s / 927 MB**（OFF 0.71 s）。读数：同文档 §12。
+#   ⚠ **win32 有一个结构性障碍**：RelWithDebInfo 的 MSVC 默认 flags 带 `/Ob1`（"只内联标了 inline 的函数"），
+#     clang-cl 把它落成函数级 **`noinline`** ⇒ `lift_tick` / `lift_note_write` / `lift_dyn` 的 IR 定义带
+#     `noinline`，LTO **结构上**内联不了它们（实测：不解这一档时调用 104,750 → 105,617，一条没少、窗口 +2.75%）。
+#     ⇒ `LIFT_AOT_LTO_ABI` 那条单点给 `lift_abi.cpp` 追加 `/Ob2`（**只在 WIN32**：clang 不认 `/Ob` 系列）。
+#     这一段是"为什么 win32 上 LTO 真的有效"的唯一原因，⛔ 不要删。
+#
+#   ⛔ Linux 默认 OFF：LTO 只在 mac（Apple clang 17 + ld64）与 win32（clang-cl + lld-link 22.1.2）实测过，
+#   Linux（ld.lld）未验证。要在 Linux 上试：`-DLIFT_AOT_LTO=ON`（未验证）。
+#   回退（任一平台遇到问题）：`-DLIFT_AOT_LTO=OFF`（一行，⛔ 不用回滚源码）。
 #
 #   OFF ⇒ 逐字节 = 旧形状：`-c -O2` · `-flto` 被 configure 期硬闸拒绝 · shape = `splitN-O2`。
 #   ON  ⇒ `LIFT_AOT_CLANG_FLAGS` 变 `-c -O2 -flto`；`-flto` 不再被硬闸拒绝（仍拒
-#         `-O0/-O1/-Os/-Oz/-flto=thin/llc`）；`emulator-lift-aot` 的**链接行**也带 `-flto`。
+#         `-O0/-O1/-Os/-Oz/-flto=thin/llc`）；`emulator-lift-aot` 的**链接行**也带 `-flto`
+#         （lld-link 会打一条 `ignoring unknown argument '-flto'` 的 **warning** 并忽略它 —— 它
+#         **自动**识别 bitcode 跑 LTO；ld64 / ld.lld 则需要这个参数才跑 LTO 后端）。
 #   `LIFT_AOT_LTO_ABI`（仅 ON 时有效）= `src/runtime/lift_abi.cpp` 也编成 bitcode ⇒
-#     `lift_tick` / `lift_note_write` / `lift_dyn` 才有机会被内联进 AOT。
+#     `lift_tick` / `lift_note_write` / `lift_dyn` 才有机会被内联进 AOT（WIN32 再加 `/Ob2`，见上）。
 #   `LIFT_AOT_LTO_RUNTIME`（仅 ON 时有效）= 整个 `emulator-lift-runtime`（含 shim）都编 bitcode。
 #     ⛔ 默认 OFF：B2 那轮实测整库 LTO 只让 runtime 变大、无收益。
 #
-#   ⚠ 这是**默认形状**（不是实验档）：改默认值 / 改形状前先读 §10 的读数与代价。
+#   ⚠ 这是**默认形状**（不是实验档）：改默认值 / 改形状前先读 §10（mac）与 §12（win32）的读数与代价。
 # =====================================================================================
-if(APPLE)
+if(APPLE OR WIN32)
     set(_LIFT_AOT_LTO_DEFAULT ON)
 else()
     set(_LIFT_AOT_LTO_DEFAULT OFF)
 endif()
-option(LIFT_AOT_LTO "AOT IR + 最终链接用 -flto（APPLE 默认 ON；其它平台默认 OFF = 未验证）"
+option(LIFT_AOT_LTO "AOT IR + 最终链接用 -flto（APPLE / WIN32 默认 ON；Linux 默认 OFF = 未验证）"
        ${_LIFT_AOT_LTO_DEFAULT})
 option(LIFT_AOT_LTO_ABI "LTO 档下把 src/runtime/lift_abi.cpp 也编成 bitcode（tick/note/dyn 可被内联）" ON)
 option(LIFT_AOT_LTO_RUNTIME "LTO 档下整个 emulator-lift-runtime（含 shim）也编成 bitcode" OFF)
-if(NOT APPLE AND NOT LIFT_AOT_LTO)
+if(NOT APPLE AND NOT WIN32 AND NOT LIFT_AOT_LTO)
     message(STATUS
-        "emulator-lift-aot: LTO 在非 APPLE 上默认 OFF（未验证）；要开用 -DLIFT_AOT_LTO=ON（未验证）")
+        "emulator-lift-aot: LTO 在 Linux 上默认 OFF（未验证）；要开用 -DLIFT_AOT_LTO=ON（未验证）")
 endif()
 
 # ★ IR 的编译参数**唯一落点**（configure 期断言盯的就是这一行；OFF 档一字不动）。
@@ -575,21 +587,34 @@ endif()
 #   （它们在 `src/runtime/lift_abi.cpp`，是另一个 TU，且被静态库 `emulator-lift-runtime`
 #   收着）。要让它们进 LTO，那个 TU 必须也是 bitcode；要连 shim 一起内联，整个库都必须
 #   是 bitcode（`LIFT_AOT_LTO_RUNTIME`，默认 OFF）。
-#   ⚠ `-flto` 在**链接行**：一旦链进去的静态库成员里有 bitcode，该链接命令就必须带 `-flto`
-#     （否则 ld64 不跑 LTO 后端）⇒ 这里用 `INTERFACE` 让所有链 `emulator-lift-runtime` 的
-#     target（`emulator-lift-gen` / 测试 exe / AOT 臂）自动继承。
-#   ⚠ 只有 APPLE（Apple clang 17 + ld64）实测过；非 APPLE 上 `LIFT_AOT_LTO` 默认 OFF，
-#     显式 `-DLIFT_AOT_LTO=ON` 属未验证路径 ⇒ 只告警，不拦（硬闸仍按 ON 档断言 `-c -O2 -flto`）。
+#   ⚠ `-flto` 在**链接行**：一旦链进去的静态库成员里有 bitcode，ld64 / ld.lld 不加它就不跑 LTO 后端 ⇒
+#     这里用 `INTERFACE` 让所有链 `emulator-lift-runtime` 的 target（`emulator-lift-gen` / 测试 exe / AOT 臂）
+#     自动继承。**lld-link 相反**：它自动识别 bitcode 跑 LTO，`-flto` 只会打一条
+#     `warning: ignoring unknown argument '-flto'`（warning，不是 error）并忽略 —— 保留它是无害的、
+#     也是 mac / Linux 需要的形状，⛔ 不要按平台收窄（那会改动已被实测的形状而没有收益）。
+#   ⚠ Linux（ld.lld）未验证；显式 `-DLIFT_AOT_LTO=ON` 属未验证路径 ⇒ 只告警，不拦
+#     （硬闸仍按 ON 档断言 `-c -O2 -flto`）。
 # =====================================================================================
 if(LIFT_AOT_LTO)
-    if(NOT APPLE)
+    if(NOT APPLE AND NOT WIN32)
         message(WARNING
-            "LIFT_AOT_LTO=ON 在非 APPLE 平台上**未验证**（win32 = clang-cl + lld-link；Linux = ld.lld）："
-            "很可能链接失败。默认档只在 mac 开；这里按你的显式要求继续。")
+            "LIFT_AOT_LTO=ON 在 Linux 上**未验证**（ld.lld）：很可能链接失败。"
+            "默认档只在 mac / win32 开；这里按你的显式要求继续。")
     endif()
     if(LIFT_AOT_LTO_ABI)
+        # ★ win32 的结构性障碍与修正（2026-11-18，读数见 `docs/03-emulator/aot-lto-evaluation.md` §12）：
+        #   RelWithDebInfo 的 MSVC 默认 flags 带 `/Ob1`（"只内联标了 inline 的函数"），clang-cl 把它落成
+        #   函数级 **`noinline`** ⇒ `lift_tick` / `lift_note_write` / `lift_dyn` 的 IR 定义带 `noinline`，
+        #   LTO **结构上**内联不了它们（实测：104,750 条 `lift_tick` 调用一条没少、窗口反而 +2.75%）。
+        #   `/Ob2` 追加在 `-flto` 之后（clang-cl 后 `/Ob` 覆盖前 `/Ob`，3 行小文件验过）⇒ `noinline` 消失、
+        #   tick/note 调用归零、`__text` −3.70%、窗口中位 −9.25%。**只 WIN32 加**：clang 不认 `/Ob` 系列。
+        if(WIN32)
+            set(_LIFT_AOT_ABI_COMPILE_OPTS "-flto;/Ob2")
+        else()
+            set(_LIFT_AOT_ABI_COMPILE_OPTS "-flto")
+        endif()
         set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/lift_abi.cpp"
-            PROPERTIES COMPILE_OPTIONS "-flto")
+            PROPERTIES COMPILE_OPTIONS "${_LIFT_AOT_ABI_COMPILE_OPTS}")
     endif()
     if(LIFT_AOT_LTO_RUNTIME)
         target_compile_options(emulator-lift-runtime PRIVATE -flto)
