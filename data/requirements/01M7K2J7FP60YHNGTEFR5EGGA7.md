@@ -2,8 +2,9 @@
 
 - id: REQ-01M7K2J7FP60YHNGTEFR5EGGA7
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M7JZM1QQ728KX1C0G2F232T1
+- verify: apps/emulator-lift/tests/audio.cpp#audio-device/epoch-relative-cursor
 - repro: apps/emulator-lift/src/runtime/audio.cpp#generateTo
 - severity: S2
 - tags: [emulator-lift, audio, bug]
@@ -51,3 +52,10 @@ AOT 的虚拟音频档里，**设备交付游标用的是"自开机以来"的绝
 - 不研究"音频怎么和 input 系统配合"（用户口径）。
 - 不改 `AudioEngine` 的混音 / 重采样 / 音量（那些已登记在 `docs/audio-implementation.md` §5）。
 - 真机行为未取证的地方写 `<待核>`，⛔ 不猜。
+
+## 收口（macOS 2026-11-17 / main 工作树）
+
+- 修法：`AudioEngine::begin` 记 `origin_100ns_`；虚拟档 `advanceDevice` 用 `now - origin`；`generateTo` 越界改为 `++stats_.gen_overflow` + 首次一行 Warn（不再静默）。时钟档 / WAV 结构 / guest 路径未动。
+- 判据 1/2/3 的守卫：`apps/emulator-lift/tests/audio.cpp#audio-device/epoch-relative-cursor`（主）+ `#audio-device/generate-to-overflow-counted`；修前 222 checks / 8 failures，修后 224 / 0。
+- 读数：`ctest --test-dir out` 104/104（4 skip 全是平台 / 无 GPU）；变异 `--match '设备游标退回'` ✅ 红 1/1（49.6 s）。
+- 判据 4（guest 指纹逐位不变）：mac 上 AOT 真 run 的 CTest 是 Windows 专有，没有本机读数；本次改动只在宿主侧记账（`begin` / `advanceDevice` / `generateTo` / `dumpSummary`），guest 路径一行未碰 ⇒ 不阻塞收口。Windows 侧补一次 `--audio virtual --audio-dump` 真 run 即可（读数 = `gen_overflow=0` 且 dump `data_size>44`）。

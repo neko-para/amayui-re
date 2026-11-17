@@ -141,6 +141,11 @@ struct AudioStats {
     //     ⛔ 只读诊断：不作为断言取值（读数进 docs/03-emulator/observations.md，不进 test）。
     std::uint64_t fill_wait_us = 0;
     std::uint64_t fill_wait_max_us = 0;
+    // ★ S2（`REQ-01M7K2J7FP60YHNGTEFR5EGGA7`）：`generateTo()` 的**越界门**命中次数
+    //   （`out_frames64 > 0xFFFFFFFF`）。越界那一刻仍然 `return`（一次混音不可能产出 4 Gi 帧），
+    //   ⛔ 但**不许静默**：每次 +1、首次一行 Warn；读数 = `dumpSummary` 的 `gen_overflow=`。
+    //   正常档恒 0（游标原点已改成"这一轮引擎的起点"）；非 0 说明设备时钟 / 原点又跑飞了。
+    std::uint64_t gen_overflow = 0;
     std::uint32_t max_buffers = 0;
 };
 
@@ -423,6 +428,8 @@ private:
     // 环陈旧（宿主插静音）首次一行 Warn；之后只 `underrun_silence_bytes/events` 计数。
     bool warned_underrun_ = false;
     bool underrun_active_ = false;
+    // `generateTo` 越界（S2）首次一行 Warn；之后只 `stats_.gen_overflow` 计数。
+    bool warned_gen_overflow_ = false;
 
     std::vector<Buffer> buffers_;
     std::deque<AudioNotifyEvent> pending_;
@@ -430,6 +437,9 @@ private:
 
     // 全局时间线（单位都是"混音输出字节"；44.1k/16/2 ⇒ 4 B/frame）
     std::uint64_t played_ = 0;     // 设备已经消费的字节
+    // ★ 游标原点（S2）：`begin()` 那一刻的 `clock_->now100ns()`。虚拟档 `advanceDevice()` 用
+    //   `now - origin_100ns_` 算 `played_` —— ⛔ 不是 `now` 的绝对值（AOT 是墙钟 ⇒ 那等于"自开机"）。
+    std::uint64_t origin_100ns_ = 0;
     // 影片音频：宿主 PCM（48k/S16/2ch）+ 它在输出帧轴上的起点。
     std::vector<std::int16_t> host_pcm_;
     std::uint64_t host_start_frame_ = 0;

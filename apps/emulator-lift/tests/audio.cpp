@@ -1132,6 +1132,163 @@ void testUnderrunSilenceGuestZeros() {
     LIFT_CHECK_EQ_U32(r.stats.underruns, 0u);
 }
 
+// ---- S2（`REQ-01M7K2J7FP60YHNGTEFR5EGGA7`）：虚拟档的交付游标必须相对**这一轮引擎的起点** ----
+//
+// ★ 判据（红了意味着什么）：
+//   ① 同一份输入（384000 B 斜坡环 + 0.25 s 推进）在**两个不同的"自开机时刻"**（5 天 / 14 天）
+//      下，`played_bytes` 都是 0.25 s 对应的 **48000 B**（⛔ 不是 8e10 量级的自开机字节数）；
+//   ② 两条 run 的 dump `data_size` 相同、PCM 逐字节相同，且都等于斜坡前 48000 B
+//      ⇒ 排除"两边都空、所以相等"的假绿；
+//   ③ `gen_overflow == 0`（游标没被顶到 `generateTo` 的越界门）。
+// ★ 时钟档不动：`setRealTime(true)`（AOT 的口径）**保留**，只把 `rawNow` 读数注入成"自开机 N 天"
+//   ⇒ 不真睡、不依赖真安装。修前：游标 = 自开机绝对值 ⇒ 恒越界 ⇒ dump 只有 44 B 头。
+struct EpochRun {
+    bool begun = false;
+    std::uint64_t played = 0;
+    std::uint64_t mixed = 0;
+    std::uint64_t gen_overflow = 0;
+    std::uint32_t data_declared = 0;
+    std::vector<std::uint8_t> data;
+};
+
+// 注入给 `VirtualClock::setRawNowForTest` 的"原始墙钟读数"（100 ns）。
+std::uint64_t g_fake_raw_now_100ns = 0;
+std::uint64_t fakeRawNow100ns() { return g_fake_raw_now_100ns; }
+
+constexpr std::uint64_t kOneDay100ns = 86'400ull * 10'000'000ull;  // 1 天（100 ns 单位）
+constexpr std::uint64_t kFiveDays100ns = 5ull * kOneDay100ns;
+constexpr std::uint64_t kQuarterSecond100ns = 2'500'000ull;  // 0.25 s
+
+EpochRun runEpochDelivery(std::uint64_t raw_base_100ns, const char* tag) {
+    EpochRun r;
+    std::string err;
+    lift::Machine m;
+    if (!initMachine(m, &err)) return r;
+    const std::string dump = std::string("lift-audio-epoch-") + tag + ".wav";
+    std::remove(dump.c_str());
+    // ★ AOT 的时钟档：realTime **保持打开**（⛔ 不许为了修游标把它关掉）。
+    g_fake_raw_now_100ns = raw_base_100ns;
+    m.clock().setRealTime(true);
+    m.clock().setRawNowForTest(&fakeRawNow100ns);
+    if (!m.configureAudio(lift::AudioMode::Virtual, dump, /*sound=*/true, &err)) return r;
+    lift::AudioEngine& a = m.audio();
+    if (!a.begin(&err)) return r;  // ★ 游标原点 = raw_base_100ns（begin 那一刻）
+    r.begun = true;
+
+    // ★ 地址不许重叠：环 = 384000 B（0x00440000..0x0049DC00），状态块放在环**之外**。
+    const std::uint32_t data_ea = 0x00440000u;
+    const std::uint32_t state_ea = 0x004A0000u;
+    const std::uint32_t obj_ea = 0x004A1000u;
+    const std::vector<std::int16_t> pcm = makeRamp(kDeliveryRingBytes);
+    std::vector<std::uint8_t> zeros(16, 0);
+    if (!m.placeData(data_ea, pcm.data(), kDeliveryRingBytes, &err)) return r;
+    if (!m.placeData(state_ea, zeros.data(), zeros.size(), &err)) return r;
+
+    lift::AudioFormat fmt;
+    fmt.sample_rate = 48000;
+    fmt.channels = 2;
+    fmt.bits = 16;
+    fmt.block_align = 4;
+    fmt.avg_bytes = 192000;
+    a.addBuffer(state_ea, obj_ea, data_ea, kDeliveryRingBytes, 0x181C8u, fmt);
+    const std::uint32_t offsets[4] = {0u, 96000u, 192000u, 288000u};
+    a.setNotify(state_ea, 4, offsets);
+    a.play(state_ea, true);
+
+    // 相对引擎起点推进 0.25 s ⇒ 48000 输出字节（⛔ 不真睡）。
+    g_fake_raw_now_100ns += kQuarterSecond100ns;
+    if (a.pump() != lift::AudioPump::Idle) return r;  // Virtual 档不会铺 guest 帧
+    r.played = a.playedBytes();
+    r.mixed = a.mixedBytes();
+    r.gen_overflow = a.stats().gen_overflow;
+    a.end();  // 回填 WAV 头
+
+    std::FILE* f = std::fopen(dump.c_str(), "rb");
+    if (f) {
+        std::uint8_t hdr[44] = {};
+        if (std::fread(hdr, 1, sizeof(hdr), f) == sizeof(hdr) && std::memcmp(hdr, "RIFF", 4) == 0 &&
+            std::memcmp(hdr + 8, "WAVEfmt ", 8) == 0 && std::memcmp(hdr + 36, "data", 4) == 0) {
+            r.data_declared = static_cast<std::uint32_t>(hdr[40]) |
+                              (static_cast<std::uint32_t>(hdr[41]) << 8) |
+                              (static_cast<std::uint32_t>(hdr[42]) << 16) |
+                              (static_cast<std::uint32_t>(hdr[43]) << 24);
+            r.data.resize(r.data_declared);
+            if (std::fread(r.data.data(), 1, r.data.size(), f) != r.data.size()) r.data.clear();
+        }
+        std::fclose(f);
+    }
+    std::remove(dump.c_str());
+    return r;
+}
+
+void testEpochRelativeCursor() {
+    lift_test::g_current_case = "audio-device/epoch-relative-cursor";
+    const EpochRun five = runEpochDelivery(kFiveDays100ns, "epoch-5d");
+    const EpochRun fourteen = runEpochDelivery(kFiveDays100ns + 9ull * kOneDay100ns, "epoch-14d");
+    LIFT_CHECK(five.begun && fourteen.begun);
+    // ① 游标相对引擎起点：0.25 s ⇒ 48000 B（⛔ 不是自开机以来的 8e10 量级）。
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(five.played), kDeliveryBytes);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(fourteen.played), kDeliveryBytes);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(five.mixed), kDeliveryBytes);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(fourteen.mixed), kDeliveryBytes);
+    // ③ 游标没有顶到 `generateTo` 的越界门。
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(five.gen_overflow), 0u);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(fourteen.gen_overflow), 0u);
+    // ② 两份 dump 的 data_size / PCM 完全相同（不随 epoch 变），且 = 斜坡前 48000 B。
+    LIFT_CHECK_EQ_U32(five.data_declared, kDeliveryBytes);
+    LIFT_CHECK_EQ_U32(fourteen.data_declared, kDeliveryBytes);
+    LIFT_CHECK(five.data.size() == fourteen.data.size());
+    if (five.data.size() >= kDeliveryBytes && fourteen.data.size() >= kDeliveryBytes) {
+        const std::vector<std::int16_t> ramp = makeRamp(kDeliveryRingBytes);
+        LIFT_CHECK(std::memcmp(five.data.data(), fourteen.data.data(), kDeliveryBytes) == 0);
+        LIFT_CHECK(std::memcmp(five.data.data(), ramp.data(), kDeliveryBytes) == 0);
+    }
+}
+
+// ★ S2 的另一半：`generateTo()` 的越界门**不许静默**。这一条**故意**把虚拟时钟推到越界
+//   （2 天 ⇒ played ≈ 3.3e10 B ⇒ 8.3e9 帧 > 0xFFFFFFFF），断言：
+//   ① `stats().gen_overflow` 每次 +1（两次 pump ⇒ 2 ⇒ 排除"布尔 / 常量"）；
+//   ② 越界那一次仍然**丢弃**该请求（`mixed_bytes` 保持 0、dump 的 data_size = 0）——
+//      这是显式裁决（按 4 Gi 帧分配不可接受），不是本用例的失败；
+//   ③ 读数面 = `AudioStats::gen_overflow`（`dumpSummary` 里是 `gen_overflow=` 字段）。
+//      ⛔ 不捕获 stderr 判"告警只打一次"（日志是观测面，不是契约面；判据落在计数上）。
+void testGenerateToOverflowCounted() {
+    lift_test::g_current_case = "audio-device/generate-to-overflow-counted";
+    std::string err;
+    lift::Machine m;
+    LIFT_CHECK(initMachine(m, &err));
+    const std::string dump = "lift-audio-overflow.wav";
+    std::remove(dump.c_str());
+    LIFT_CHECK(m.configureAudio(lift::AudioMode::Virtual, dump, /*sound=*/true, &err));
+    lift::AudioEngine& a = m.audio();
+    LIFT_CHECK(a.begin(&err));
+    // 2 天虚拟时间 ⇒ played ≈ 33.2e9 B ≈ 8.3e9 帧 > 0xFFFFFFFF。
+    m.clock().advance100ns(2ull * kOneDay100ns);
+    a.pump();
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(a.stats().gen_overflow), 1u);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(a.mixedBytes()), 0u);
+    // 再推 0.25 s：计数继续涨（不是一次性布尔 / 常量）。
+    m.clock().advance100ns(kQuarterSecond100ns);
+    a.pump();
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(a.stats().gen_overflow), 2u);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(a.mixedBytes()), 0u);
+    a.end();  // 回填 WAV 头
+    // dump 只有 44 B 头（data_size = 0）——越界请求被**显式**丢弃，账在 `gen_overflow`。
+    std::FILE* f = std::fopen(dump.c_str(), "rb");
+    LIFT_CHECK(f != nullptr);
+    if (f) {
+        std::uint8_t hdr[44] = {};
+        LIFT_CHECK(std::fread(hdr, 1, sizeof(hdr), f) == sizeof(hdr));
+        const std::uint32_t data_size = static_cast<std::uint32_t>(hdr[40]) |
+                                        (static_cast<std::uint32_t>(hdr[41]) << 8) |
+                                        (static_cast<std::uint32_t>(hdr[42]) << 16) |
+                                        (static_cast<std::uint32_t>(hdr[43]) << 24);
+        LIFT_CHECK_EQ_U32(data_size, 0u);
+        std::fclose(f);
+    }
+    std::remove(dump.c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -1152,5 +1309,7 @@ int main() {
     testUnderrunSilenceStale();
     testUnderrunSilenceNotTriggered();
     testUnderrunSilenceGuestZeros();
+    testEpochRelativeCursor();
+    testGenerateToOverflowCounted();
     return lift_test::finish("audio-device");
 }

@@ -178,6 +178,13 @@ bool AudioEngine::begin(std::string* err) {
         if (err) *err = "AudioEngine 没有 attach（cpu/mem/clock）";
         return false;
     }
+    // ★ 游标原点（S2，`REQ-01M7K2J7FP60YHNGTEFR5EGGA7`）：虚拟档的 `played_` 必须相对**这一轮
+    //   引擎的起点**算。AOT 的时钟是墙钟（`AotHost::init` 里 `setRealTime(true)`）⇒ `now100ns()`
+    //   是 steady_clock 的**绝对值**（自开机）；直接拿它当游标 ⇒ `played_` 落在 1e10 量级 ⇒
+    //   `generateTo` 的越界门恒命中、`mixed/pushed` 恒 0、dump 只有 44 B 头（本单的 S2）。
+    //   ⛔ 不许改成"把 `setRealTime(false)` 关掉"绕过（那会改 AOT 时钟档 / guest 可见时间语义）；
+    //   ⛔ 也不许把原点写成 0（那等于把墙钟当相对时间）。
+    origin_100ns_ = clock_->now100ns();
     if (!dump_path_.empty() && !openDump()) {
         logAt(LogLevel::Warn, "dump 打不开：%s（继续，只是没有 WAV）", dump_path_.c_str());
     }
@@ -1026,7 +1033,21 @@ void AudioEngine::generateTo(std::uint64_t target) {
     n &= ~static_cast<std::uint64_t>(kBlockAlign - 1);  // 输出帧对齐（48k / S16 / 2ch）
     if (n == 0) return;
     const std::uint64_t out_frames64 = n / kBlockAlign;
-    if (out_frames64 > 0xFFFFFFFFull) return;
+    if (out_frames64 > 0xFFFFFFFFull) {
+        // ★ S2：⛔ 不许静默 return。这一路曾经无声（`mixed/pushed` 恒 0、dump 只有 44 B 头、
+        //   日志里一个字都没有）⇒ 一次混音不可能真产出 4 Gi 帧，越界只有一个解释：
+        //   设备游标 / 原点跑飞了。记账（每次 +1）+ 首次一行 Warn，然后仍然丢弃这一次请求
+        //   （按 4 Gi 帧 `vector` 分配不可接受；⛔ 不要在这里 try 分配 / 分块硬塞）。
+        ++stats_.gen_overflow;
+        if (!warned_gen_overflow_) {
+            warned_gen_overflow_ = true;
+            logAt(LogLevel::Warn,
+                  "generateTo 请求越界：%llu 输出帧 > 0xFFFFFFFF（本次丢弃 %llu B）；"
+                  "之后同类只计 gen_overflow",
+                  static_cast<unsigned long long>(out_frames64), static_cast<unsigned long long>(n));
+        }
+        return;
+    }
     const std::uint32_t out_frames = static_cast<std::uint32_t>(out_frames64);
     std::vector<std::int64_t> acc(static_cast<std::size_t>(out_frames) * 2u, 0);
     // ★ 宿主替 guest 插的静音按**输出帧**记一次（同帧多条流陈旧只算一帧），最后 × 4 B。
@@ -1229,8 +1250,12 @@ void AudioEngine::advanceDevice() {
             played_ = new_played;
         }
     } else {
+        // ★ 游标原点 = `begin()` 记的 `origin_100ns_`（S2）：⛔ 不是 `now100ns()` 的绝对值
+        //   （AOT 的时钟是墙钟 ⇒ 绝对值 = 自开机，`played_` 会落在 1e10 量级并恒撞越界门）。
+        //   `now < origin` 只可能是测试注入的 raw 被回拨 ⇒ 按 0 处理（不让无符号减法绕成天文数字）。
         const std::uint64_t now = clock_->now100ns();
-        const std::uint64_t new_played = now * kBytesPerSec / kTicksPerSec;
+        const std::uint64_t elapsed = now > origin_100ns_ ? now - origin_100ns_ : 0ull;
+        const std::uint64_t new_played = elapsed * kBytesPerSec / kTicksPerSec;
         if (new_played > played_) {
             fireCrossings(played_, new_played);
             played_ = new_played;
@@ -2299,7 +2324,9 @@ void AudioEngine::dumpSummary(std::FILE* out) const {
                  // ★ underrun 插静音（`.tmp/audio-phase/design.md` §1.5）：`underruns` 的分项 +
                  //   写见证链路读数（⛔ 只读观测，绝对值不当断言；口径见 docs/03-emulator/measurement.md M-07）。
                  " underrun_silence_bytes=%llu underrun_silence_events=%llu fill_witnessed=%llu"
-                 " guest_silence_fills=%llu%s\n",
+                 // ★ S2：`gen_overflow` = `generateTo()` 越界门命中次数（正常档恒 0；非 0 =
+                 //   设备游标 / 原点跑飞）。放在末尾 ⇒ 原有字段顺序没动。
+                 " guest_silence_fills=%llu gen_overflow=%llu%s\n",
                  audioModeName(mode_), device, mute_ ? 1 : 0,
                  static_cast<unsigned long long>(stats_.muted_bytes),
                  static_cast<unsigned long long>(stats_.fills),
@@ -2325,6 +2352,7 @@ void AudioEngine::dumpSummary(std::FILE* out) const {
                  static_cast<unsigned long long>(stats_.underrun_silence_events),
                  static_cast<unsigned long long>(stats_.fill_witnessed),
                  static_cast<unsigned long long>(stats_.guest_silence_fills),
+                 static_cast<unsigned long long>(stats_.gen_overflow),
                  dump_path_.empty() ? "" : (" dump=" + dump_path_).c_str());
 }
 
