@@ -732,3 +732,26 @@
   **读数**：`pushed - played` 115200 B（600.0 ms）→ **19200 B（100.0 ms）**（4/4 次精确同值）；
   `calls=` 12 万级 → **0**；underruns / `fill_slow` 全 0；`dev_frames=1024`（21.3 ms，另一笔账）。
   **代表守卫**：`aot_audio_flags.cpp#s0-thread-mode-truth-table`（用户裁决的机械表达）+ `audio.cpp#audio-device/feeder-teb-is-own`（BUG-22 回归口）。
+
+### BUG-30 · 存档列表显示 `1970/1/6 21:23`：`GetLocalTime`/`GetSystemTime` 把宿主 uptime 当 1970 epoch（且不做时区）
+
+- **现象**（用户 2026-11-18 实测）：存档列表的时间显示 `1970/1/6 21:23`；同一份存档的时间随宿主开机时长漂移。
+- **根因**：`runtime/clock.h` 的 `rawNow100ns()` 取 `steady_clock`（零点 = 宿主开机），`now100ns()` 没有 epoch 项
+  （`epoch_100ns_` 只进 `machine.cpp` 的 trace、从未被 set）；`shims/kernel32_time.cpp` 的 `GetLocalTime` / `GetSystemTime`
+  直接把它按"1970-01-01 起"展开 ⇒ 引擎拿到的本地时间 = `1970-01-01` + 宿主 uptime。
+  AOT 臂 `aot_run.cpp` / `aot_host.cpp` **强制** real-time ⇒ 产品臂没有虚拟档可躲。
+- **写侧 / 读侧均无错**：写侧 `0x4377B6 GetLocalTime` → 0x124 B header `+0x108`（16 B `SYSTEMTIME`），`0x437869 WriteFile`；
+  读侧 `0x438120` 原样搬 header、`0x42D700` 原样交给脚本，`SAVE.BIN` 用字面量 `/` `:` 画数字（所以不补零）。
+- **读数（2026-11-18 / win32）**：宿主 boot `2026-11-12 04:35:16`（WMI，1 s 粒度），SAVE03.DAT `+0x108` =
+  `b2 07 01 00 02 00 06 00 15 00 17 00 36 00 f9 02` ⇒ `1970-01-06(dow=2) 21:23:54.761`（自 1970 起 509,034.761 s）；
+  `boot + 509,034.761 s` = `2026-11-18 01:59:10.8`，与该文件 mtime `01:59:11.204` 差 0.4 s（六份 header 全部 <1 s）。
+  同一串按 `FILETIME` / `time_t` / `i64 100ns` 解释都对不上 21:23 ⇒ 不是未初始化内存。
+- **次因（独立、被主因掩盖）**：`GetLocalTime == GetSystemTime`、不读宿主时区（`kernel32_time.cpp` 已登记偏差 1）
+  ⇒ epoch 修好后画面仍是 UTC，与 +08 差 8 小时。`time` / `_time64` / `SystemTimeToFileTime` / `FileTimeToLocalFileTime`
+  在 AGE.EXE 里**没有导入**，也无对应 shim。
+- **修法方向（未实施）**：把"墙钟"与"uptime"拆开 —— `GetTickCount` / `timeGetTime` / QPC 仍用单调 uptime；
+  `GetLocalTime` / `GetSystemTime` / `GetSystemTimeAsFileTime` / `GetThreadTimes` 用 `system_clock` 起步的墙钟；
+  `GetLocalTime` 再做宿主时区换算。测试用注入墙钟 base + 时区，⛔ 不断言"当前年份"。
+- **代表守卫**：无（`apps/emulator-lift/tests` 里 grep 不到 `GetLocalTime` / `GetSystemTime`）。建议新增 `kernel32_time/*`。
+- **复现**：`.tmp/save-time/report.md`（本地，未入库）；直接读 header：
+  `[IO.File]::ReadAllBytes('<SAVE03.DAT>')[0x108..0x117]` 后按 `SYSTEMTIME`（16 B LE）展开。

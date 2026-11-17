@@ -57,11 +57,14 @@
   矩阵 / `Color` 进 program；`vs_2_0` 的 pass ⇒ 仍具名拒绝。
 - **不回归**：`fade-pixels` / `blur-pixels` / `d3d9p/*` 全绿；fixed-function 路径逐字节不变。
 - **变异实测红**（`tools/mutate-check.mjs --match`）：矩阵槽截断成 4 float · 漏乘 `Color` · 删 202 binding。
+- **run 级边界**：GPU 批的 `invw != 1` 仍被 `kUnGpuPerspective` 整批拒（B 单 `REQ-01M7NC21S484PFYDAE7YTNX02J` 收口）；
+  A 的验收 = **夹具级**（recorded + 状态 + CPU `w` 直调 + 像素 oracle），⛔ 不把这条拒绝写成"已支持"。
 - `ctest` 全绿。
 
 ## 前置 / 未做
 
-- 前置：N3（`Proj` 语义）。N1（`--until 0x00418340` 看雪景可达）**不阻塞**本单。
-- E2E 时序：A 的 E2E（以及 N1）在 **P4 之前**做 —— 那时 `LIFT_D3D9_PS_VERSION=0x200` 这个 opt-in 还在；
-  P4 一合就只剩默认 caps。
-- 未做：雪景的真实 run 级验收（取决于 N1）；`Proj` 若 N3 读不出结论，先登记 `## 待核` 再实现。
+- 前置：N3（`Proj` 语义）已完成（`docs/03-emulator/d3dx-effect.md` §11）。N1（`--until 0x00418340` 看雪景可达）**不阻塞**本单。
+- 未做（B 单 `REQ-01M7NC21S484PFYDAE7YTNX02J`）：**GPU 批的透视校正插值** —— `submitPrimitives` 的 `gpu_invw_ok`
+  对 `invw != 1` 的批仍 `recordUnsupported(kUnGpuPerspective)`；A ⛔ 不碰这条闸，202 的真 run 雪景由 B 收口。
+- 测试口径：`snow-vertices` 的 GPU 路径用 **`w == 1` 的仿射 `Proj`**（单位 / 缩放+平移）满足"两档不同落点"；
+  透视 `w` 语义用**直调 CPU 变换**覆盖（不经 GPU 闸），⛔ 不写成 expected-fail / skip。

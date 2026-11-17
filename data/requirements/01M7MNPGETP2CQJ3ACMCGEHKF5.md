@@ -58,6 +58,8 @@ alpha test(bit30) · FLAT(31) · **stage≥1(33)** · 多 bpp(36) · 寻址(37) 
   ★ 判据随探针重述：该窗口的 `insns` 收益**不是** P3 的价值（软件模糊在 caps=0 才跑），价值是**画面正确性**。
 - ⬜ **A**（子单 `REQ-01M7NAW2QT3TG9RCFMKR052C83`）：202 的 `SetMatrix/SetVector` + CPU `vs_1_0` + `ps_1_0 SnowPS` + binding 202。
   **A 是 P4 的前置**；⛔ 不接受"把 202 登记成已知缺失"来绕过。
+- ⬜ **B**（子单 `REQ-01M7NC21S484PFYDAE7YTNX02J`）：GPU 批的**透视校正插值**（逐顶点 `1/w` + `uv/w` / `color/w`）——
+  202 的 `clip.w ≠ 1` 批不再被 `kUnGpuPerspective` 整批拒，雪才真画出来。**B 在 A 之后**（同文件面，串行）。
 - **P4**：caps 报 `PS=0xFFFF0200` / `VS=0xFFFE0100` + **硬等式 `required == implemented`** 守卫（缺一个 ⇒ **启动 Trap**，
   ⛔ 没有 gap / 已知偏离这一项）。**必须 P3 + A 之后**（提前报 2.0 会同时点亮 203/202）。
 
