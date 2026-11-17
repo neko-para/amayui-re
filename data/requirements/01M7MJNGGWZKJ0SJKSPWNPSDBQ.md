@@ -4,7 +4,7 @@
 - type: bug
 - status: open
 - parent: REQ-01M7JHSD5MWTB9N8WJC2Y2T69M
-- repro: .tmp/sc0000-gfx/report.md#C1
+- repro: docs/03-emulator/scripts/SC0000.md#第 4 轮读数
 - severity: S2
 - tags: [emulator-lift, sc0000, script-wait]
 

@@ -31,6 +31,7 @@
 `+0x08 Release` · `+0x78 SetFloat` · `+0xD0 SetTexture` · `+0xE8 SetTechnique` · `+0xFC Begin` · `+0x100 BeginPass` ·
 `+0x104 CommitChanges` · `+0x108 EndPass` · `+0x10C End`。
 未读到（⛔ 别按"应该"实现）：`GetDevice +0x110` / `OnLostDevice +0x114` / `OnResetDevice +0x118`。
+★ A 单新增确认：202 的 `Color` / `Proj` 走 **`+0x88 SetVector` / `+0x98 SetMatrix`**。
 
 ## 现有后端的能力边界（S0）
 
@@ -40,6 +41,7 @@ alpha test(bit30) · FLAT(31) · **stage≥1(33)** · 多 bpp(36) · 寻址(37) 
 `Create/SetVertexShader`(+0x16C/+0x170) 与 `Create/SetPixelShader`(+0x194/+0x198) ⇒ 走到就是 `comUnsupported` 响停。
 ★ 注：`--raster gpu` 开关**已删**（GPU 是唯一光栅，没有开关）。
 ★ 注：effect 指针存的是 `this(0x100504F0)+0xB590`，**不是** marker 的 `Engine`。
+★ 202 的 `vs_1_0` 由 **CPU 程序**兑现（A 单 `REQ-01M7NAW2QT3TG9RCFMKR052C83`）；设备 VS 槽仍未实现 ⇒ 被调用照旧 `comUnsupported`。
 
 ## 阶段（每段都要有可再校验判据；⛔ 不许"看起来像"）
 
@@ -54,19 +56,21 @@ alpha test(bit30) · FLAT(31) · **stage≥1(33)** · 多 bpp(36) · 寻址(37) 
 - ✅ **P3**（已收口，子单 `REQ-01M7N01HHDJ5EC6HC4SE6J99TS`）：203 的 `SlideBlur`（**21-tap**，源文本如此）/`ZoomBlur`（10-tap）双源真画；
   转场从纯黑变成"被横向模糊的塔"（`pos=0xD190` 段 before 1 个 hash / after 25 个）；像素与参考 **0 LSB**；202 仍具名拒绝。
   ★ 判据随探针重述：该窗口的 `insns` 收益**不是** P3 的价值（软件模糊在 caps=0 才跑），价值是**画面正确性**。
-
-- **P4**：caps 报 `PS=0xFFFF0200` / `VS=0` + "声明⇔行为"守卫。**必须 P3 之后**（提前报 2.0 会同时点亮 203）。
+- ⬜ **A**（子单 `REQ-01M7NAW2QT3TG9RCFMKR052C83`）：202 的 `SetMatrix/SetVector` + CPU `vs_1_0` + `ps_1_0 SnowPS` + binding 202。
+  **A 是 P4 的前置**；⛔ 不接受"把 202 登记成已知缺失"来绕过。
+- **P4**：caps 报 `PS=0xFFFF0200` / `VS=0xFFFE0100` + **硬等式 `required == implemented`** 守卫（缺一个 ⇒ **启动 Trap**，
+  ⛔ 没有 gap / 已知偏离这一项）。**必须 P3 + A 之后**（提前报 2.0 会同时点亮 203/202）。
 
 ## 风险 / 待核（⛔ 别当已核）
 
 - **NaN**：`ColRate` 的 `0/0`（两图全透明）在 ps_2_0 与 Metal clamp 下不保证一致 ⇒ P2 必须有该用例把行为钉住。
 - **203 的 `Tex0` 来源未读**（`[this+0xA668h]` 包装 +0x20）：若是"后缓冲快照"就撞反馈环（bit28/43）—— P3 最大未知，先读。
 - **level 还有第 2 入口**：`0x4A6FA2` 的 `arg_4 ∈ [-1..2]` 且 ≠ -1 时直接覆盖 `[this+0xB64C]` ⇒ "caps=2.0 ⇒ 等级一定 2"有例外。
-- P1/P2/P3 的 E2E 验证都需要"临时让引擎走 FX 路"（caps 默认为 0 ⇒ 走不到）。需要一个**显式 opt-in 的开发开关**（例如
-  `LIFT_D3D9_PS_VERSION`），缺省关闭、启动读数一行、且默认输出逐字节不变；⛔ 不许把 caps 缺省改高（那会让未实现路径静默点亮）。
+- P1–P3 期间用临时 opt-in（`LIFT_D3D9_PS_VERSION`）让引擎走 FX 路；**P4 已裁决删除该开关**（caps 固定报真实能力）。
+  ⛔ 不要把 opt-in 当产品形态，也不要在 P4 之后重新引入。
 
 ## 判据（父单收口时）
 
-- caps 报的值与实现能力一致（守卫：报 PS≥2.0 ⇒ `D3DXCreateEffectFromResourceA` 已实现且不响停）。
+- caps 报的值与实现能力一致：报 PS=2.0 / VS=1.0 ⇒ 4 个 effect 程序 + 202 的 `SnowVS` 全在实现集；漏一个启动 Trap。
 - 同一段转场：单帧 guest 指令从 2e10 回到 1e6 量级，画面与 CPU oracle 差异在阈值内。
 - 映射表覆盖 4 个资源；漏一个 ⇒ 响亮停并点名 id/哈希。
