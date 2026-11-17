@@ -31,7 +31,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-import { MUTATIONS, ctestCommandTarget, staticManifestCheck } from '../mutate-check.mjs';
+import { MUTATIONS, addDependencyTargets, ctestCommandTarget, ctestSpawnedTargets, staticManifestCheck } from '../mutate-check.mjs';
 import { REPO_ROOT } from '../lib/paths.mjs';
 
 const SCRATCH = path.join(REPO_ROOT, '.tmp', 'mutate-static-test');
@@ -132,6 +132,16 @@ test('c) 接线：`--list` 真的跑静态检查并打汇总（退出码 0；不
     /buildTarget：\d+ 条与 CMakeLists 的 add_test 映射一致/,
     `--list 必须打 buildTarget 的静态检查计数（否则这条检查没接线：stdout=${JSON.stringify(list.stdout)}）`,
   );
+  // ★ spawn 产品 exe 的 `add_dependencies` 检查同理：计数必须露面，而且不能是"0 条"那种空转
+  assert.match(
+    list.stdout,
+    /spawn 产品 exe：\d+ 条 add_dependencies 覆盖/,
+    `--list 必须打 spawn 产品 exe 的静态检查计数（否则这条检查没接线：stdout=${JSON.stringify(list.stdout)}）`,
+  );
+  assert.ok(
+    Number(/spawn 产品 exe：(\d+) 条/.exec(list.stdout)?.[1] ?? '0') > 0,
+    `全量 --list 至少要判过 1 条 spawn 产品 exe 的条目（否则这个计数恒 0 = 空转：${list.stdout}）`,
+  );
   assert.ok(!list.stdout.includes('⛔'), `清单健康时不该有 ⛔（实际：${list.stdout}）`);
   assert.equal(list.stderr.trim(), '', `清单健康时 --list 不该往 stderr 写东西（实际：${JSON.stringify(list.stderr)}）`);
 
@@ -143,6 +153,12 @@ test('c) 接线：`--list` 真的跑静态检查并打汇总（退出码 0；不
     one.stdout,
     /buildTarget：1 条与 CMakeLists 的 add_test 映射一致/,
     `--list --match 也必须跑 buildTarget 的静态检查（stdout=${JSON.stringify(one.stdout)}）`,
+  );
+  // ★ 同一条路线上 spawn 依赖检查也要露面：`aot-window-profile` 不 spawn 产品 exe ⇒ "0 条覆盖"
+  assert.match(
+    one.stdout,
+    /spawn 产品 exe：0 条 add_dependencies 覆盖/,
+    `--list --match 也必须跑 spawn 依赖检查（stdout=${JSON.stringify(one.stdout)}）`,
   );
 
   // ★ `--match` 一条都没选中 ⇒ 必须**报**，不许打"0 条里验证了 0 条 / 静态检查通过"（一次空验证看起来像通过）
@@ -159,6 +175,9 @@ const FAKE_CMAKE = [
   '# 假 CMakeLists（只喂给解析器；⛔ 不真编 C++）',
   'add_test(NAME bare COMMAND lift-bare --flag)',
   'add_test(NAME wrapped COMMAND $<TARGET_FILE:lift-wrapped> $<TARGET_FILE:an-arg>)',
+  // ★ 第二个 `$<TARGET_FILE:…>` 也是"spawn 的 target" ⇒ 判据要求它有 `add_dependencies`
+  //   （h) 覆盖"缺 ⇒ 报"；e) 要的是"有 ⇒ 通过"，所以这里补上那一行）
+  'add_dependencies(lift-wrapped an-arg)',
   'add_test(NAME multi-line',
   '         COMMAND lift-multi --x "${SOME_DIR}")',
   'add_test(NAME from-var COMMAND ${CMAKE_COMMAND} -E echo hi)',
@@ -276,4 +295,181 @@ test('g) `buildDir` 只许 §12.3 的两棵树 —— `out-<名字>` 那种"本�
   ];
   assert.equal(violations(faked).length, 1, '注入的 `out-<名字>` 必须被报出来（否则上面那条"0 条"是恒真断言）');
   assert.match(violations(faked)[0], /out-whatever/);
+});
+
+/* ── 2026-11-17：spawn 产品 exe 的 `buildTarget` 必须有 `add_dependencies`（假绿面）── */
+
+/**
+ * 假 CMakeLists（只喂给解析器；⛔ 不真编 C++）。覆盖：
+ *   - 跨行 `add_test` + 多个 `$<TARGET_FILE:…>`；
+ *   - `add_dependencies` 多行 / 多目标；
+ *   - 自 spawn（product == buildTarget）；
+ *   - 两个 spawn 只给了一个依赖（另一个仍缺）；
+ *   - `add_dependencies` 的第一实参是变量（判不了）；
+ *   - 注释掉的 `add_dependencies`（⛔ 不算声明）。
+ */
+const FAKE_CMAKE_SPAWN = [
+  '# 假 CMakeLists（只喂给解析器；⛔ 不真编 C++）',
+  'add_executable(lift-guard tests/guard.cpp)',
+  'add_executable(emulator-lift-aot src/aot/aot_main.cpp)',
+  'add_test(NAME spawn-product',
+  '         COMMAND lift-guard --flag $<TARGET_FILE:emulator-lift-aot> "${AGE_X}")',
+  'add_test(NAME spawn-product-with-dep',
+  '         COMMAND lift-guard-with-dep $<TARGET_FILE:emulator-lift-aot>)',
+  'add_dependencies(lift-guard-with-dep',
+  '                 emulator-lift-aot',
+  '                 emulator-lift-gen)',
+  '# 自 spawn：product == buildTarget ⇒ 判据不适用',
+  'add_test(NAME self-spawn COMMAND lift-self $<TARGET_FILE:lift-self>)',
+  'add_test(NAME spawn-two COMMAND lift-two $<TARGET_FILE:a> $<TARGET_FILE:b>)',
+  'add_dependencies(lift-two a)',
+  'add_test(NAME spawn-var-dep COMMAND lift-var $<TARGET_FILE:emulator-lift-aot>)',
+  'add_dependencies(${SOME_TARGET} emulator-lift-aot)',
+  '# 注释掉的 add_dependencies 不算声明',
+  '# add_dependencies(lift-commented emulator-lift-aot)',
+  'add_test(NAME spawn-commented COMMAND lift-commented $<TARGET_FILE:emulator-lift-aot>)',
+].join('\n');
+
+test('h) spawn 产品 exe 的 buildTarget 必须有 add_dependencies（缺 ⇒ 点名 CTest / 产品 exe / 缺哪一行；有 ⇒ 通过；自 spawn / 不带 buildTarget ⇒ 不适用）', () => {
+  // ① 解析器本身：跨行 add_test + 多个 `$<TARGET_FILE:>`；多行 / 多目标 add_dependencies
+  assert.deepEqual(ctestSpawnedTargets(FAKE_CMAKE_SPAWN, 'spawn-product'), {
+    found: true,
+    targets: ['emulator-lift-aot'],
+  });
+  assert.deepEqual(ctestSpawnedTargets(FAKE_CMAKE_SPAWN, 'spawn-two'), { found: true, targets: ['a', 'b'] });
+  assert.deepEqual(ctestSpawnedTargets(FAKE_CMAKE_SPAWN, 'self-spawn'), { found: true, targets: ['lift-self'] });
+  assert.deepEqual(ctestSpawnedTargets(FAKE_CMAKE_SPAWN, 'ghost'), { found: false }, '没有这条 add_test');
+  assert.deepEqual(
+    addDependencyTargets(FAKE_CMAKE_SPAWN, 'lift-guard-with-dep').deps,
+    ['emulator-lift-aot', 'emulator-lift-gen'],
+    '多行 / 多目标的 add_dependencies 要摊平',
+  );
+  assert.deepEqual(addDependencyTargets(FAKE_CMAKE_SPAWN, 'lift-two').deps, ['a']);
+  assert.deepEqual(
+    addDependencyTargets(FAKE_CMAKE_SPAWN, 'lift-commented').deps,
+    [],
+    '注释掉的 add_dependencies ⛔ 不算声明',
+  );
+
+  // ② 假清单 + 假 CMakeLists：三类"缺依赖"各报一条，有的 / 自 spawn / 不带 buildTarget 都不报
+  const root = path.join(SCRATCH, 'fake-root-spawn');
+  fs.mkdirSync(path.join(root, 'apps', 'emulator-lift'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'apps', 'emulator-lift', 'CMakeLists.txt'), FAKE_CMAKE_SPAWN, 'utf8');
+  fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'src', 'a.cpp'), 'int a;\n', 'utf8');
+
+  const base = { file: 'src/a.cpp', from: 'int a;', to: 'int b;', buildDir: 'apps/emulator-lift/out' };
+  const withCtest = (ctest, buildTarget, what) => ({ ...base, guard: `ctest:${ctest}`, ctest, buildTarget, what });
+  const faked = [
+    withCtest('spawn-product', 'lift-guard', 'spawn 产品 exe 但缺依赖'),
+    withCtest('spawn-product-with-dep', 'lift-guard-with-dep', '有依赖（绿）'),
+    withCtest('self-spawn', 'lift-self', '自 spawn（判据不适用）'),
+    withCtest('spawn-two', 'lift-two', '两个 spawn 只给一个依赖'),
+    withCtest('spawn-var-dep', 'lift-var', 'add_dependencies 第一实参是变量'),
+    withCtest('spawn-commented', 'lift-commented', '依赖被注释掉'),
+    { file: 'src/a.cpp', from: 'int a;', what: '不带 buildTarget（全量构建 ⇒ 判据不适用）' },
+  ];
+  const r = staticManifestCheck(faked, root);
+  assert.equal(
+    r.problems.length,
+    4,
+    `应当恰好 4 条 spawn 依赖失配（实际：\n${r.problems.map((p) => `  ⛔ ${p.what}: ${p.why}`).join('\n')}\n）`,
+  );
+  assert.equal(r.checked, faked.length, '`from` 检查不受影响（每条都在）');
+  assert.equal(r.targetChecked, 6, '6 条带 buildTarget 的都真比对过');
+  assert.equal(r.spawnChecked, 1, '只有"有依赖"的那条算判过');
+  assert.equal(
+    r.spawnNotApplicable,
+    1,
+    '自 spawn 的那条判据不适用（不带 buildTarget 的不进 targetChecked / spawn 计数）',
+  );
+
+  const byWhat = new Map(r.problems.map((p) => [p.what, p]));
+  // a. 缺依赖 ⇒ 点名 CTest 名 / 产品 exe / 缺的那一行（`add_dependencies(lift-guard emulator-lift-aot)`）
+  const missing = byWhat.get('spawn 产品 exe 但缺依赖');
+  assert.ok(missing, '缺 add_dependencies 必须报');
+  assert.equal(missing.file, 'src/a.cpp', '必须点名**条目**本身');
+  assert.match(missing.why, /CTest `spawn-product`/, `要点名 CTest（实际：${missing.why}）`);
+  assert.match(missing.why, /spawn 产品 exe `emulator-lift-aot`/, `要点名产品 exe（实际：${missing.why}）`);
+  assert.match(
+    missing.why,
+    /add_dependencies\(lift-guard emulator-lift-aot\)/,
+    `要点名缺的那一行（实际：${missing.why}）`,
+  );
+  assert.match(missing.why, /buildDir=apps\/emulator-lift\/out/);
+  // b. 两个 spawn 只给了一个依赖 ⇒ 只点名缺的那个（⛔ 不因为"有 add_dependencies"就放过）
+  const partial = byWhat.get('两个 spawn 只给一个依赖');
+  assert.ok(partial, '两个 spawn 只给一个依赖必须报');
+  assert.match(partial.why, /add_dependencies\(lift-two b\)/, `要点名缺的 b（实际：${partial.why}）`);
+  assert.ok(!/add_dependencies\(lift-two a\)/.test(partial.why), `a 已有依赖，⛔ 不该被点名（实际：${partial.why}）`);
+  // c. 变量 target ⇒ 判不了，但**仍然报**（⛔ 不猜成"有依赖"）
+  const varDep = byWhat.get('add_dependencies 第一实参是变量');
+  assert.ok(varDep, '变量 target 的 add_dependencies 判不了，必须报');
+  assert.match(varDep.why, /判不了/, `要说明判不了（实际：${varDep.why}）`);
+  // d. 注释掉的依赖不算声明
+  const commented = byWhat.get('依赖被注释掉');
+  assert.ok(commented, '注释掉的 add_dependencies 必须当成"没有"');
+  assert.match(commented.why, /add_dependencies\(lift-commented emulator-lift-aot\)/);
+  // e. 有依赖 / 自 spawn / 不带 buildTarget ⇒ 一条都不许报
+  for (const what of ['有依赖（绿）', '自 spawn（判据不适用）', '不带 buildTarget（全量构建 ⇒ 判据不适用）']) {
+    assert.ok(!byWhat.has(what), `「${what}」不该被报成失配`);
+  }
+});
+
+test('i) 真清单 + 真 CMakeLists：spawn 产品 exe 的条目**每条都判过**，且删掉那条 add_dependencies 当场红', () => {
+  const cmakeRel = path.join('apps', 'emulator-lift', 'CMakeLists.txt');
+  const cmakeText = fs.readFileSync(path.join(REPO_ROOT, cmakeRel), 'utf8');
+  const withTarget = MUTATIONS.filter((m) => typeof m.buildTarget === 'string');
+  // ★ 期望"真有跨 target spawn"的条目：判据从 CMake 文本派生（⛔ 不在这里抄一份名单）
+  const spawners = withTarget.filter((m) => {
+    const name = m.ctest ?? String(m.guard ?? '').slice('ctest:'.length);
+    const sp = ctestSpawnedTargets(cmakeText, name);
+    return sp.found && sp.targets.some((t) => t !== m.buildTarget);
+  });
+  assert.ok(spawners.length > 0, '清单里至少要有一条 spawn 产品 exe 的条目（否则这条检查是空转）');
+
+  const r = staticManifestCheck(MUTATIONS, REPO_ROOT);
+  assert.deepEqual(
+    r.problems,
+    [],
+    `真清单不该有静态失配：\n${r.problems.map((p) => `  ⛔ ${p.file}: ${p.why}`).join('\n')}`,
+  );
+  assert.equal(
+    r.spawnChecked,
+    spawners.length,
+    `真清单里真有跨 target spawn 的 ${spawners.length} 条里只有 ${r.spawnChecked} 条判过（其余被静默跳过 ⇒ 假绿面又回来了）`,
+  );
+  assert.equal(
+    r.spawnChecked + r.spawnNotApplicable,
+    r.targetChecked,
+    '每条比过 buildTarget 的条目都必须有一条 spawn 判定（判过 / 不适用），⛔ 不许两边都不算',
+  );
+
+  // ★ 反向：拿**真** CMake 文本把那一行删掉 ⇒ 真清单里的 no-gpu 条目必须当场红
+  //   （证明判据读的是 live 文本，而不是 h) 里那份假的）
+  const broken = cmakeText.replace('add_dependencies(lift-gpu-batch emulator-lift-aot)', '');
+  assert.notEqual(broken, cmakeText, '真 CMakeLists 里必须有 `add_dependencies(lift-gpu-batch emulator-lift-aot)`（本单的修复）');
+  const root = path.join(SCRATCH, 'fake-root-broken');
+  fs.mkdirSync(path.join(root, 'apps', 'emulator-lift'), { recursive: true });
+  fs.writeFileSync(path.join(root, cmakeRel), broken, 'utf8');
+  fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'src', 'a.cpp'), 'int a;\n', 'utf8');
+  const probe = {
+    file: 'src/a.cpp',
+    from: 'int a;',
+    to: 'int b;',
+    buildDir: 'apps/emulator-lift/out',
+    guard: 'ctest:lift/no-gpu-refuses-start',
+    ctest: 'lift/no-gpu-refuses-start',
+    buildTarget: 'lift-gpu-batch',
+    what: '真 CMake 删掉 gpu-batch 的依赖（反向探针）',
+  };
+  const rb = staticManifestCheck([probe], root);
+  assert.equal(rb.problems.length, 1, `删掉依赖后必须报 1 条（实际：${JSON.stringify(rb.problems)}）`);
+  assert.match(rb.problems[0].why, /spawn 产品 exe `emulator-lift-aot`/, `要点名产品 exe（实际：${rb.problems[0].why}）`);
+  assert.match(
+    rb.problems[0].why,
+    /add_dependencies\(lift-gpu-batch emulator-lift-aot\)/,
+    `要点名缺的那一行（实际：${rb.problems[0].why}）`,
+  );
 });

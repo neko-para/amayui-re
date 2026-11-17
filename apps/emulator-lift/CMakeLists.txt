@@ -1132,6 +1132,14 @@ set_tests_properties(gpu-direct-present PROPERTIES SKIP_RETURN_CODE 77)
 # 且 syncFromGuest 在队列非空时被拒绝（⛔ 静默覆盖）。去掉 flush ⇒ 队列不清空 ⇒ 当场红。
 add_executable(lift-gpu-batch tests/gpu_batch.cpp)
 target_link_libraries(lift-gpu-batch PRIVATE emulator-lift-runtime)
+# ★ **必须显式依赖产品 exe**（`REQ-01M7K2J7VXKJMK1BJ3H7YCVJFJ`）：`lift/no-gpu-refuses-start`
+#   （`tests/gpu_batch.cpp` 的子进程臂，见上方 `:650`）**spawn** `$<TARGET_FILE:emulator-lift-aot>`
+#   去读它的退出码与 stderr；而变异自检的 `buildTarget: 'lift-gpu-batch'` 只重建**守卫** exe
+#   ⇒ 落在 `src/aot/aot_main.cpp` 的那个变异会让产品 exe 停在**变异前** ⇒ 守卫跑的是旧二进制
+#   ⇒ 那条变异**假绿**（`cli-aot-flags` / `aot-audio-wiring` 的同形坑）。
+#   加这一行之后 `cmake --build out --target lift-gpu-batch` 会把产品 exe 一起重编重链。
+#   ⛔ 删了不会红，只会让「无 GPU 时不再拒绝启动」这条变异自检**静默**变成声称。
+add_dependencies(lift-gpu-batch emulator-lift-aot)
 # ★ 顶层无条件注册 ⇒ pure 档（`AGENTS.md` §5：判据是注册位置）。
 #   这条同时承载后缓冲 LockRect 的屏障用例（`caseBackBufferLockBarrier`）—— 只注册 `--gpu` 那条的话，
 #   在无 GPU 机器上它会 SKIP 77 ⇒ "删屏障"的变异静默逃逸。

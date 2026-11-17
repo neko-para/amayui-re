@@ -42,9 +42,11 @@
  *
  * 用法：`pnpm test:mutation`（也可 `node tools/mutate-check.mjs --list` 只看变异清单 ——
  * 它同时做**静态存在性检查**：① 每条 `from` 是不是还在源文件里；② 每条 `buildTarget` 是否**等于**
- * `add_test(NAME <x> COMMAND <y> …)` 推出的可执行 target（权威来源是 CMakeLists，⛔ 不手工维护第二张表）。
- * 判据抽成导出函数 `staticManifestCheck` / `ctestCommandTarget`，守卫在
- * `tools/test/mutate-static.test.mjs`；清单过期的根因见那里的注释）。
+ * `add_test(NAME <x> COMMAND <y> …)` 推出的可执行 target（权威来源是 CMakeLists，⛔ 不手工维护第二张表）；
+ * ③ 该 CTest 若 spawn 了**别的产品 exe**（`$<TARGET_FILE:z>`，z ≠ buildTarget），同一 CMakeLists 必须有
+ * `add_dependencies(buildTarget z)`（否则产品 exe 停在变异前 ⇒ 那条变异**假绿**）。
+ * 判据抽成导出函数 `staticManifestCheck` / `ctestCommandTarget` / `ctestSpawnedTargets` /
+ * `addDependencyTargets`，守卫在 `tools/test/mutate-static.test.mjs`；清单过期的根因见那里的注释）。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -621,16 +623,17 @@ function stripCmakeComments(text) {
 }
 
 /**
- * 把 CMake 文本里每个 `add_test(…)` 的**括号内文本**切出来。
- * ★ 为什么不按行正则：`add_test` 可以跨行（本仓 `lift-aot-split-manifest` /
- *   `lift/no-gpu-refuses-start` 就是）—— 按行匹配会在"NAME 与 COMMAND 不在同一行"时判不了。
+ * 把 CMake 文本里每个 `<callName>(…)` 的**括号内文本**切出来（`add_test` / `add_dependencies` 共用）。
+ * ★ 为什么不按行正则：这两类语句都可以跨行（本仓 `lift-aot-split-manifest` /
+ *   `lift/no-gpu-refuses-start` / `lift-gpu-batch` 的依赖就是）—— 按行匹配会在"关键字与实参不在同一行"时判不了。
  * ★ 跳过引号 / `[=[…]=]` 里的括号；`#` 注释已由 `stripCmakeComments` 抹掉。
  * @param {string} text
+ * @param {string} callName 形参名（`add_test` / `add_dependencies`）
  * @returns {string[]} 每项 = 一对**平衡括号**之间的文本（不含外层括号）；括号不配对的片段不报
  */
-function addTestBlocks(text) {
+function cmakeCallBlocks(text, callName) {
   const blocks = [];
-  const head = /\badd_test\s*\(/g;
+  const head = new RegExp(`\\b${callName}\\s*\\(`, 'g');
   let m;
   while ((m = head.exec(text)) !== null) {
     let i = m.index + m[0].length;
@@ -670,6 +673,11 @@ function addTestBlocks(text) {
     head.lastIndex = i;
   }
   return blocks;
+}
+
+/** 每个 `add_test(…)` 的括号内文本（`cmakeCallBlocks` 的专用入口） */
+function addTestBlocks(text) {
+  return cmakeCallBlocks(text, 'add_test');
 }
 
 /**
@@ -778,18 +786,123 @@ export function ctestCommandTarget(cmakeText, ctestName) {
 }
 
 /**
+ * 一条 `add_test(NAME <x> COMMAND …)` 的 COMMAND 里**spawn 了哪些 target**（`$<TARGET_FILE:<名>>`）。
+ *
+ * ★ 为什么必须从 COMMAND 里取（⛔ 不按"名字像产品 exe"猜）：CTest 的可执行 target 只是**父进程**；
+ *   父进程若把产品 exe 当子进程起（`$<TARGET_FILE:…>` 实参），那句变异的施加点可能落在**产品 exe 的 TU** 里
+ *   ⇒ `cmake --build --target <守卫>` 不重建产品 exe ⇒ 守卫跑的是变异前的二进制 ⇒ **假绿**。
+ *   判据见 `checkSpawnDependencies`（缺 `add_dependencies` 就报）。
+ *
+ * @param {string} cmakeText
+ * @param {string} ctestName
+ * @returns {{found:false} | {found:true, targets:string[]}} 按出现顺序去重的 target 名
+ *   （同名 `add_test` 的 `COMMAND` 判不了时前面已经报过 —— 这里只看**第一次**匹配的块）
+ */
+export function ctestSpawnedTargets(cmakeText, ctestName) {
+  const text = stripCmakeComments(cmakeText);
+  for (const body of cmakeCallBlocks(text, 'add_test')) {
+    const tokens = cmakeArgTokens(body);
+    const ni = tokens.findIndex((t) => t.toUpperCase() === 'NAME');
+    if (ni < 0 || ni + 1 >= tokens.length) continue;
+    if (tokens[ni + 1] !== ctestName) continue;
+    const ci = tokens.findIndex((t, k) => k > ni + 1 && t.toUpperCase() === 'COMMAND');
+    const cmdTokens = ci < 0 ? [] : tokens.slice(ci + 1);
+    const targets = [];
+    for (const tok of cmdTokens) {
+      const re = /\$<TARGET_FILE:([^<>]+)>/g;
+      let mm;
+      while ((mm = re.exec(tok)) !== null) {
+        const name = mm[1].trim();
+        if (name !== '' && !targets.includes(name)) targets.push(name);
+      }
+    }
+    return { found: true, targets };
+  }
+  return { found: false };
+}
+
+/**
+ * 某 target 声明过哪些 `add_dependencies(<target> <依赖…>)` 依赖（多行 / 多目标都摊平）。
+ *
+ * ★ 为什么读 CMake 而不是读构建图：CMake 已经是真源，我们只读 `add_test` / `add_dependencies`
+ *   两类语句（见需求单 `REQ-01M7K2J7VXKJMK1BJ3H7YCVJFJ` 的「未做」：不做通用依赖图求解）。
+ *
+ * @param {string} cmakeText
+ * @param {string} target
+ * @returns {{deps:string[], unjudgeable:boolean}} `unjudgeable` = 有 `add_dependencies` 的第一实参是
+ *   变量 / 生成器表达式 ⇒ "这个 target 到底有没有声明依赖"判不了（⛔ 不猜）
+ */
+export function addDependencyTargets(cmakeText, target) {
+  const text = stripCmakeComments(cmakeText);
+  const deps = [];
+  let unjudgeable = false;
+  for (const body of cmakeCallBlocks(text, 'add_dependencies')) {
+    const tokens = cmakeArgTokens(body);
+    if (tokens.length === 0) continue;
+    const head = tokens[0];
+    if (head === '' || head.startsWith('$')) {
+      unjudgeable = true;
+      continue;
+    }
+    if (head !== target) continue;
+    for (const d of tokens.slice(1)) {
+      if (d === '' || d.startsWith('$')) continue;
+      if (!deps.includes(d)) deps.push(d);
+    }
+  }
+  return { deps, unjudgeable };
+}
+
+/**
+ * 该条目的 CTest **spawn 了产品 exe** 时，`add_dependencies(<buildTarget> <产品 exe>)` 在不在。
+ *
+ * ★ 为什么这是假绿面（本仓两次实测）：`buildTarget` 只重建守卫 exe；若变异落在产品 exe 的 TU 里
+ *   （`aot_main.cpp` 之类），产品 exe 停在**变异前** ⇒ 守卫跑旧二进制 ⇒ 变异看起来"没红"，
+ *   而 `--list`（只查 target 名对不对）完全看不出来。已修的两例：`cli-aot-flags` / `aot-audio-wiring`。
+ * ★ 只查**清单里带 `buildTarget` 的条目**（不带 = 全量构建，天然安全）⇒ ⛔ 不要求"所有 CTest"都加依赖。
+ * ★ product == buildTarget（自 spawn）⇒ 判据不适用（同一个 exe，本来就会重建）。
+ *
+ * @returns {{applicable:boolean, problem?:string}} `applicable` = 真有跨 target 的 spawn（判过）
+ */
+function checkSpawnDependencies({ cmakeRel, text, ctestName, buildTarget, buildDir }) {
+  const sp = ctestSpawnedTargets(text, ctestName);
+  if (!sp.found) return { applicable: false }; // 前面已报"找不到 add_test"
+  const foreign = sp.targets.filter((t) => t !== buildTarget);
+  if (foreign.length === 0) return { applicable: false }; // 自 spawn / 不 spawn ⇒ 不需要依赖
+  const ad = addDependencyTargets(text, buildTarget);
+  const missing = foreign.filter((t) => !ad.deps.includes(t));
+  if (missing.length === 0) return { applicable: true };
+  return {
+    applicable: true,
+    problem:
+      `buildTarget 静态检查：CTest \`${ctestName}\` 该用例 spawn 产品 exe ` +
+      missing.map((t) => `\`${t}\`（\`$<TARGET_FILE:${t}>\`）`).join(' / ') +
+      `，但缺 add_dependencies ⇒ 需要这一行：` +
+      missing.map((t) => `\`add_dependencies(${buildTarget} ${t})\``).join(' / ') +
+      `（${cmakeRel}）⇒ \`cmake --build --target ${buildTarget}\` 只会重建守卫 exe，产品 exe 停在变异前` +
+      ` ⇒ 该变异会**假绿**（条目 buildDir=${buildDir}）` +
+      (ad.unjudgeable ? '；另有 add_dependencies 的 target 是变量，判不了' : ''),
+  };
+}
+
+/**
  * 条目字段 `buildTarget` 还成立吗（只读；判据 = `ctestCommandTarget`，来源 = 该 `buildDir` 所属工程的
  * `CMakeLists.txt` 的 `add_test(NAME … COMMAND …)`）。
  *
  * ★ 为什么它必须和 `from` 的存在性检查在**同一趟**里（⛔ 不新增第二次遍历）：`--list` 一次就把
  *   "清单与源文件 / CMakeLists 对不上"全部报出来，而不是等全量跑到那一条。
- * ★ 两类失配都**不可判定**、都不许静默放过：
+ * ★ 三类失配都**不可判定**、都不许静默放过：
  *   a. CTest 名在 CMakeLists 里找不到 / `COMMAND` 判不了 ⇒ 推不出 target（⛔ 不猜）；
- *   b. 推得出，但**不等于**条目的 `buildTarget` ⇒ 点名"应为 X，实为 Y"。
+ *   b. 推得出，但**不等于**条目的 `buildTarget` ⇒ 点名"应为 X，实为 Y"；
+ *   c. target 名对，但该 CTest **spawn 了产品 exe** 而 CMakeLists 缺
+ *      `add_dependencies(<buildTarget> <产品 exe>)` ⇒ 变异落在产品 exe 的 TU 里时**假绿**
+ *      （判据 = `checkSpawnDependencies`；只查带 `buildTarget` 的条目，⛔ 不要求"所有 CTest"都加依赖）。
  * @param {object} m 清单条目
  * @param {string} root 仓库根
  * @param {Map<string,string|{error:string}>} cmakeTexts 同一趟里的 CMakeLists 文本缓存（按相对路径）
- * @returns {{checked:boolean, problem?:string}} `checked` = 真比对过（判据成立）；`problem` = 失配原因
+ * @returns {{checked:boolean, spawn?:'checked'|'not-applicable'|'problem', problem?:string}}
+ *   `checked` = 真比对过（判据成立）；`spawn` = spawn 依赖判过的结果（不适用 = 自 spawn / 不 spawn）；
+ *   `problem` = 失配原因
  */
 function checkBuildTarget(m, root, cmakeTexts) {
   if (m?.buildTarget === undefined) return { checked: false }; // 不带 = 全量构建，判据不适用
@@ -848,7 +961,18 @@ function checkBuildTarget(m, root, cmakeTexts) {
         `（条目 buildDir=${buildDir}；来源 ${cmakeRel} 的 add_test(NAME ${name} … COMMAND …)）`,
     };
   }
-  return { checked: true };
+  // ★ target 名对了还不够：若这条 CTest 的 COMMAND **spawn 了别的产品 exe**（`$<TARGET_FILE:X>`，
+  //   X ≠ buildTarget），`--target buildTarget` 不会重建 X ⇒ 变异落在 X 的 TU 里时**假绿**。
+  //   判据 = 同一个 CMakeLists 里必须有 `add_dependencies(buildTarget X)`（`checkSpawnDependencies`）。
+  const spawn = checkSpawnDependencies({
+    cmakeRel,
+    text,
+    ctestName: name,
+    buildTarget: m.buildTarget,
+    buildDir,
+  });
+  if (spawn.problem) return { checked: true, spawn: 'problem', problem: spawn.problem };
+  return { checked: true, spawn: spawn.applicable ? 'checked' : 'not-applicable' };
 }
 
 /**
@@ -868,13 +992,21 @@ function checkBuildTarget(m, root, cmakeTexts) {
  *   ④ ★ 可选字段 `buildTarget`：必须**等于**由 `add_test(NAME <ctest> COMMAND <target> …)` 推出的
  *     可执行 target（`checkBuildTarget` / `ctestCommandTarget`）。判不了的（找不到 add_test / COMMAND 是
  *     变量）也算失配 —— 填错的 target 只会让那条变异**永远「不可判定（构建失败）」**。
+ *     ⑤ ★ 该 CTest 的 COMMAND 若 **spawn 了别的产品 exe**（`$<TARGET_FILE:X>`，X ≠ buildTarget），
+ *     同一 CMakeLists 必须有 `add_dependencies(buildTarget X)`（`checkSpawnDependencies`）；缺了同样算失配 ——
+ *     否则 `--target buildTarget` 只重建守卫 exe，变异落在产品 exe 的 TU 里时**假绿**。
+ *     ⛔ 只查带 `buildTarget` 的条目（不带 = 全量构建，天然安全）。
  *
  * @param {Array<{file:string, from:string, what:string}>} mutations 清单（真清单或其副本）
  * @param {string} [root] 仓库根（测试用临时根目录）
  * @returns {{checked:number, problems:Array<{file:string, what:string, why:string}>,
- *            skipped:Array<{file:string, what:string, why:string}>, targetChecked:number}}
- *   `checked` = **真验过 `from`**（file 可读 + `from` 是子串）的条数；`problems` = 失配（`from` 与 `buildTarget` 两类）；
- *   `skipped` = `from` 静态检查不适用的条目（附原因）；`targetChecked` = **真比对过 `buildTarget`** 的条数。
+ *            skipped:Array<{file:string, what:string, why:string}>, targetChecked:number,
+ *            spawnChecked:number, spawnNotApplicable:number}}
+ *   `checked` = **真验过 `from`**（file 可读 + `from` 是子串）的条数；`problems` = 失配
+ *   （`from` / `buildTarget` / spawn 依赖三类）；`skipped` = `from` 静态检查不适用的条目（附原因）；
+ *   `targetChecked` = **真比对过 `buildTarget`** 的条数；`spawnChecked` = 其中**真有跨 target spawn
+ *   且 `add_dependencies` 在场**的条数；`spawnNotApplicable` = 带 buildTarget 但**不 spawn 别的 target**
+ *   （自 spawn / 无生成器表达式）⇒ 判据不适用。
  */
 export function staticManifestCheck(mutations, root = ROOT) {
   const problems = [];
@@ -882,12 +1014,16 @@ export function staticManifestCheck(mutations, root = ROOT) {
   const cmakeTexts = new Map(); // CMakeLists 文本缓存（同一趟里只读一次 / 一个文件）
   let checked = 0;
   let targetChecked = 0;
+  let spawnChecked = 0;
+  let spawnNotApplicable = 0;
   for (const m of mutations) {
     const file = String(m?.file ?? '');
     const what = String(m?.what ?? '');
     // ④ ★ `buildTarget` 的静态存在性检查（与 `from` 的检查**同一趟**；只读 CMakeLists）
     const t = checkBuildTarget(m, root, cmakeTexts);
     if (t.checked) targetChecked += 1;
+    if (t.spawn === 'checked') spawnChecked += 1;
+    else if (t.spawn === 'not-applicable') spawnNotApplicable += 1;
     if (t.problem) problems.push({ file, what, why: t.problem });
     // ① 多文件 / glob 声明：静态检查不适用（必须报出来，⛔ 不静默）
     if (file === '' || /[*?[\]{}]/.test(file)) {
@@ -926,7 +1062,7 @@ export function staticManifestCheck(mutations, root = ROOT) {
       });
     }
   }
-  return { checked, problems, skipped, targetChecked };
+  return { checked, problems, skipped, targetChecked, spawnChecked, spawnNotApplicable };
 }
 
 /* ───────────────────── 崩溃安全：预写日志（journal）与启动自愈 ───────────────────── */
@@ -1207,7 +1343,7 @@ export const DOMAIN = {
 
 export const OPERATIONS = [
   { name: 'check', argv: [], mutates: true, summary: '★ 逐条施加变异 ⇒ 跑指定守卫（`node --test` 用例，或 `ctest:<名字>` 的 CTest）⇒ 要求退出码非 0，最后**逐条还原并比对全文**（会同步恢复 SIGINT/SIGTERM；SIGKILL 后下次启动靠 journal 自愈）；★ CTest 带**单测超时**：超时 = 不可判定（超时）、收掉进程树、继续下一条（退出码 5），⛔ 不记成"守卫红了"' },
-  { name: 'list', argv: ['--list'], mutates: false, summary: '只列变异清单（不动任何变异文件；但**启动时仍会先自愈 journal** —— 上次留下的变异态不该因为"只看清单"而继续存在）；★ 顺带做**静态存在性检查**：`file` 存在 + `from` 是该文件内容的子串 + `buildTarget` 等于 `add_test(NAME … COMMAND …)` 推出的可执行 target（不构建、不施加变异），失配 ⇒ 非 0 退出' },
+  { name: 'list', argv: ['--list'], mutates: false, summary: '只列变异清单（不动任何变异文件；但**启动时仍会先自愈 journal** —— 上次留下的变异态不该因为"只看清单"而继续存在）；★ 顺带做**静态存在性检查**：`file` 存在 + `from` 是该文件内容的子串 + `buildTarget` 等于 `add_test(NAME … COMMAND …)` 推出的可执行 target + 该 CTest spawn 的产品 exe（`$<TARGET_FILE:X>`，X ≠ buildTarget）有 `add_dependencies(buildTarget X)`（不构建、不施加变异），失配 ⇒ 非 0 退出' },
 ];
 
 export { MUTATIONS };
@@ -3581,6 +3717,53 @@ const MUTATIONS = [
       '而 `kAotSoundNotice` 照旧声明 `muted=0` ⇒ `aot-audio-wiring` 的 `sound-virtual` / `sound-dump` 红' +
       '（实测 2 failures；`virtual-no-sound` 对照组仍绿 ⇒ 红的方向唯一）',
   },
+  // ── S2 虚拟音频档的交付游标（`REQ-01M7K2J7FP60YHNGTEFR5EGGA7`）──
+  //   ★ 判据：虚拟档的 `played_` 必须相对**这一轮引擎的起点**（`begin()` 记的 `origin_100ns_`），
+  //     ⛔ 不是 `now100ns()` 的绝对值 —— AOT 的时钟是墙钟（`setRealTime(true)`）⇒ 绝对值 = **自开机**。
+  //     退回绝对值 ⇒ `played_` 落在 8e10 量级 ⇒ 恒撞 `generateTo` 的越界门 ⇒ `mixed/pushed` 恒 0、
+  //     dump 只有 44 B 头，而且**没有任何告警**（本单 S2 的原症状）。
+  //   ★ 变异形态注意：删掉 `elapsed` 那行后 `origin_100ns_` 就只写不读 ⇒ clang 的
+  //     `-Wunused-private-field`（`-Wall` 内）会把它算成未使用 ⇒ 编不过（工具会记「不可判定(构建失败)」）。
+  //     所以用 `(void)origin_100ns_;` 保住一次读 —— 这是"运行时恒真"的形态，⛔ 不是 `if (false)`。
+  //   守卫：`apps/emulator-lift/tests/audio.cpp` 的 `audio-device/epoch-relative-cursor`
+  //   （注入"自开机 5 天 / 14 天"两档 raw ⇒ 游标必须都是 0.25 s 的 48000 B、dump 必须一致）。
+  {
+    file: 'apps/emulator-lift/src/runtime/audio.cpp',
+    from: '        const std::uint64_t elapsed = now > origin_100ns_ ? now - origin_100ns_ : 0ull;\n' +
+          '        const std::uint64_t new_played = elapsed * kBytesPerSec / kTicksPerSec;',
+    to: '        (void)origin_100ns_;  // 变异：游标退回自开机绝对时间\n' +
+        '        const std::uint64_t new_played = now * kBytesPerSec / kTicksPerSec;',
+    guard: 'ctest:audio-device',
+    ctest: 'audio-device',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-audio',
+    what:
+      '虚拟档的设备游标退回 `now100ns()` 的**绝对值**（自开机）⇒ `played_` 落在 8e10 量级、' +
+      '恒撞 `generateTo` 的越界门 ⇒ `audio-device/epoch-relative-cursor` 的"游标 = 48000 B /' +
+      ' dump 有 PCM / 不随 epoch 变"当场红（本单 S2 的原症状）',
+  },
+  // ── spawn 产品 exe 的 `buildTarget` 必须有 `add_dependencies`（假绿面）─────────────
+  //   ★ 代表"**变异施加了、但产品 exe 没重建**"这一类错（`REQ-01M7K2J7VXKJMK1BJ3H7YCVJFJ`）：
+  //     守卫 spawn 产品 exe，`cmake --build --target <守卫>` 只重建守卫 exe ⇒ 守卫跑的是变异前的
+  //     产品 exe ⇒ 变异看起来"没红"（与"`buildDir` 指向已删构建树"同一种**不可观测**失效）。
+  //   判据 = `tools/test/mutate-static.test.mjs` h)（假 CMake + 假清单）与 i)（真 CMake 删掉那一行），
+  //   ⛔ 不真编 C++。
+  {
+    file: 'tools/mutate-check.mjs',
+    // ★ `from` 跨两行写：单行文本会在**本条目自己的字符串字面量**里再出现一次 ⇒ `--list` 报"出现 2 次"。
+    // ★ `to` **原样保留 from 那两行**，只在前面插一句 early return ⇒ 变异施加后清单里的 `from` 仍在文件里
+    //   （否则守卫红的原因是"清单过期"，不是"新检查被削弱" —— 那种红什么也证明不了）。
+    from: '  const foreign = sp.targets.filter((t) => t !== buildTarget);\n' +
+          '  if (foreign.length === 0) return { applicable: false }; // 自 spawn / 不 spawn ⇒ 不需要依赖',
+    to: '  return { applicable: false };  // 变异：spawn 产品 exe 的条目一律当"判据不适用"\n' +
+        '  const foreign = sp.targets.filter((t) => t !== buildTarget);\n' +
+        '  if (foreign.length === 0) return { applicable: false }; // 自 spawn / 不 spawn ⇒ 不需要依赖',
+    guard: 'tools/test/mutate-static.test.mjs',
+    what:
+      '不再要求 spawn 产品 exe 的条目有 `add_dependencies(<buildTarget> <产品 exe>)`（spawn 判据一律当"不适用"）⇒ ' +
+      '`--target <守卫>` 只重建守卫 exe 时产品 exe 停在变异前，而 `--list` 看起来完全正常 ⇒ ' +
+      'mutate-static 的 spawn 依赖用例（h) 的四条失配 / i) 的覆盖计数）红',
+  },
 ];
 
 let mutationRunSeq = 0;
@@ -3926,7 +4109,8 @@ export async function main(argv = process.argv.slice(2)) {
     if (stat.problems.length) {
       console.error(
         `\n⛔ ${stat.problems.length}/${selected.length} 条**静态失配**` +
-          '（`from` 已不是源文件的子串 / 出现次数 ≠ 1 / `buildTarget` ≠ `add_test(NAME … COMMAND …)` 推出的 target：' +
+          '（`from` 已不是源文件的子串 / 出现次数 ≠ 1 / `buildTarget` ≠ `add_test(NAME … COMMAND …)` 推出的 target / ' +
+          'spawn 产品 exe 但缺 `add_dependencies`：' +
           '全量跑到它只会记「变异点没找到」/「不可判定（构建失败）」或**静默只改第一处**，什么也没验到）：',
       );
       // ★ 逐条：`⛔ <file>: from 片段已不存在` + 从 `what` 取的一句话（定位用）
@@ -3937,6 +4121,10 @@ export async function main(argv = process.argv.slice(2)) {
       `\n静态检查通过：${selected.length} 条里验证了 ${stat.checked} 条` +
         `（file 存在 + from 是源文件子串且**恰好出现 1 次**）` +
         (stat.targetChecked ? ` · buildTarget：${stat.targetChecked} 条与 CMakeLists 的 add_test 映射一致` : '') +
+        (stat.spawnChecked + stat.spawnNotApplicable
+          ? ` · spawn 产品 exe：${stat.spawnChecked} 条 add_dependencies 覆盖` +
+            `（${stat.spawnNotApplicable} 条不 spawn 其它 target，判据不适用）`
+          : '') +
         (stat.skipped.length ? ` · ${stat.skipped.length} 条不适用（多文件声明，已逐条报出）` : ' · 0 条不适用'),
     );
     return 0;

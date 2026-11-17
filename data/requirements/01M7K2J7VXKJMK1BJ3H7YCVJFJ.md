@@ -2,8 +2,9 @@
 
 - id: REQ-01M7K2J7VXKJMK1BJ3H7YCVJFJ
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M7JHSEZVMYB4XHEN32V7V6HJ
+- verify: tools/test/mutate-static.test.mjs#i) 真清单 + 真 CMakeLists
 - tags: [emulator-lift, toolchain, mutation]
 
 ## 一句话
@@ -53,3 +54,13 @@
 - 不做"通用依赖图求解"（CMake 已经是真源，我们只读 `add_test` / `add_dependencies` 两类语句）。
 - 不改 `finalizeBuildDirs` 的收尾全量重建（它兜的是"陈旧 exe"，与本单的"变异没进 exe"是两件事，
   两个都需要）。
+
+## 收口（macOS 2026-11-17 / main 工作树）
+
+- 静态检查：`--list` 的 `staticManifestCheck` 新增第 ③ 类（CTest spawn 产品 exe ⇒ 必须 `add_dependencies(buildTarget, product)`）；只查带 `buildTarget` 的条目，自 spawn 自动判不适用。
+- 修复：`CMakeLists.txt:1142` 加 `add_dependencies(lift-gpu-batch emulator-lift-aot)`（此前 `lift/no-gpu-refuses-start` 的 `aot_main.cpp` 变异假绿）。
+- 先红后绿：红原文点名 `lift/no-gpu-refuses-start` 缺 `add_dependencies(lift-gpu-batch emulator-lift-aot)`；补后 `--list` exit 0，123/123 验过，`targetChecked=98`、`spawnChecked=4`、`spawnNotApplicable=94`、`skipped=0`。
+- 守卫：`tools/test/mutate-static.test.mjs` h)/i) 9/9；新变异 1/1 红 2.98 s；同形真跑 `--match '无 GPU 时不再拒绝启动'` 1/1 红 7.04 s（产品 exe mtime 变、守卫 exe 不变）。
+- 门禁：`pnpm test` 574/574、`pnpm verify` 502/502、`ctest` 104/104（4 skip 平台/无 GPU）。
+- 未做：不做通用依赖图；不改 `finalizeBuildDirs`（票的边界）。
+- 复审发现另开：`REQ-01M7KVG8Y1ZC6C9R3V9BW47BZ3`（既有 `mutate-check.mjs:3555` 变异自指 ⇒ 假红当红）。
