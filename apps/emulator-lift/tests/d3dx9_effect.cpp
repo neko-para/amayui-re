@@ -21,13 +21,24 @@
 //   ⑥ `d3dx9-effect/effect-draw-recorded`：Fade（201）的 draw **不再被拒绝** ⇒ 后端收到一条 effect
 //      队列条目（程序 / 常量表 / 两张纹理 / 第二套 UV 都是文本说的那一份）；出 pass 后回到固定功能。
 //      ★ 这是 P1 用例 `d3dx9-effect/effect-draw-refused` 的**翻面**（那条"必须拒绝"的断言已删）。
-//   ⑦ `d3dx9-effect/effect-draw-unimplemented`：203 的 SlideBlur（P3 才做）**仍然具名拒绝**
-//      （bit 44 + 原因串）—— P2 的翻面没有把"没实现的"变成"静默接受"。
+//   ⑦ `d3dx9-effect/effect-draw-unimplemented`：**202 的 Snow**（`vs_1_0`，本线不做 GPU 顶点着色）
+//      **仍然具名拒绝**（bit 44 + 原因串含 id/technique/pass）—— 翻面没有把"没实现的"变成"静默接受"。
 //   ⑧ `d3dx9-effect/fade-pixels`（要 GPU）：两张已知纹理 + `Alpha ∈ {0,0.5,1}` 的像素 oracle
 //      （容差 ≤1 LSB/通道）+ 「两图全透明 ⇒ `ret.a==0` ⇒ 目标逐字节不变」的**不可观测**档。
+//   ★ P3（同一张单，203 的两个 `ps_2_0` technique）追加的判据：
+//   ⑨ `d3dx9-effect/effect-draw-blur-recorded`（pure）：203 的 SlideBlur / ZoomBlur **不再被拒**
+//      ——后端收到的程序 / 6 个常量（`Length,Width,Height,Angle,CenterU,CenterV` 的**声明顺序**）/
+//      1 张纹理 / TEXCOORD0 / sampler = Clamp+Linear 都是文本说的那一份。
+//   ⑩ `d3dx9-effect/blur-pixels`（要 GPU）：16×16 已知纹理 + 真 GPU + RT 读回，**两个 technique**
+//      的输出与 C++ 参考（逐句照 203 的源文本：SlideBlur **21 tap** × 0.0476、ZoomBlur **10 tap**
+//      × `ratio[10]`，双线性 + CLAMP）比（容差 ≤1 LSB/通道）；Angle=0/90 两档分别钉住
+//      **步长方向**（cos/sin）与 **uv 步长**（`Length/max(W,H)*0.05`）。
 //
 // ★ 输入：`LIFT_AGE_EXE`（CMake 注入 `${AGE_SECTFIX_EXE}`；缺 ⇒ LIFT_SKIP 77）。
 //   ①② 不读语料 ⇒ 没有语料时它们**已经跑过**，`SKIP` 只表示剩下两条没跑。
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -805,11 +816,201 @@ void caseEffectDrawRecorded(const lift::PeImage& img) {
 }
 
 // =======================================================================================
-// ⑧ P2 · **没实现的 pass 程序仍然具名拒绝**（bit 44 覆盖到 P2 之外）
+// ⑨ P3 · 203 的两个 technique **真的执行**（SlideBlur / ZoomBlur；pure：Mock 后端）
 //
-// 红了意味着什么：203 的 SlideBlur（P3 才做）被"静默接受"了 —— 那会按固定功能写出错误像素
+// 红了意味着什么：203 的某一条翻面翻错了 —— 要么仍被拒（`尚未实现执行`），要么送进后端的
+//   程序/常量/纹理/采样器不是 FX 文本说的那一份（那会"画得出来但画面是错的"，且账上无声）。
+// 判据：
+//   ① 作用域里的画法快照：`implemented` ∧ 程序号（SlideBlurPs20 / ZoomBlurPs20）∧
+//      `constant_count == 6` 且**按声明顺序** `Length,Width,Height,Angle,CenterU,CenterV`；
+//   ② 纹理 1 张、`uv_set == 0`（源文本 `Tex0UV : TEXCOORD0`）、sampler = **Clamp × Linear × mip**；
+//   ③ draw 被接受（S_OK、skipped 不涨）且后端收到的就是 ①②；
+//   ④ `EffectProgramBinding` 表里 203 的两条**逐字**对上（resource/technique/entry/profile）。
+// ★ 为什么用 Mock：这条判"这一批该怎么画"，不判像素（像素在 ⑩，要真 GPU）。
+// =======================================================================================
+void caseEffectDrawBlurRecorded(const lift::PeImage& img) {
+    lift_test::g_current_case = "d3dx9-effect/effect-draw-blur-recorded";
+    // ④ 先对**唯一那张表**（最后一跳）：203 的两条与文本的 technique/entry/profile 逐字一致。
+    {
+        const lift::d3dx9::EffectProgramBinding* b = lift::d3dx9::effectProgramBindings();
+        int seen = 0;
+        bool slide = false;
+        bool zoom = false;
+        for (; b->resource_id != 0; ++b) {
+            ++seen;
+            if (b->resource_id != 203u) continue;
+            if (std::strcmp(b->technique, "SlideBlur") == 0) {
+                slide = true;
+                LIFT_CHECK(std::strcmp(b->pixel_entry, "SlideBlurPS") == 0);
+                LIFT_CHECK(std::strcmp(b->pixel_profile, "ps_2_0") == 0);
+                LIFT_CHECK(b->program == lift::d3d9::EffectProgram::SlideBlurPs20);
+            } else if (std::strcmp(b->technique, "ZoomBlur") == 0) {
+                zoom = true;
+                LIFT_CHECK(std::strcmp(b->pixel_entry, "ZoomBlurPS") == 0);
+                LIFT_CHECK(std::strcmp(b->pixel_profile, "ps_2_0") == 0);
+                LIFT_CHECK(b->program == lift::d3d9::EffectProgram::ZoomBlurPs20);
+            }
+        }
+        LIFT_CHECK(slide && zoom);
+        LIFT_CHECK_EQ_I64(seen, 4);  // 200/201 的 Fade + 203 的两条（终止项不算）
+    }
+
+    lift_fixture::Fixture f;
+    LIFT_CHECK(f.ok);
+    if (!f.ok) return;
+    LIFT_CHECK(setupMachine(f));
+    f.m.cpu().image = &img;
+    const std::uint32_t proc3d = f.use("d3d9", "Direct3DCreate9");
+    const std::uint32_t d3d9 = f.call(proc3d, {lift::d3d9::kSdkVersion});
+    LIFT_CHECK_NE_U32(d3d9, 0u);
+    if (d3d9 == 0) return;
+    std::uint32_t device = 0;
+    LIFT_CHECK(createDevice(f, d3d9, &device));
+    if (device == 0) return;
+
+    EffectMockRaster mock;
+    f.m.setGpuRaster(&mock);
+
+    // 一张 16×16 A8R8G8B8 纹理（这里只看"送到后端的是哪张"，内容无关）
+    const std::uint32_t proc_tex = f.use("d3dx9_43", "D3DXCreateTexture");
+    std::uint32_t tex = 0;
+    LIFT_CHECK_EQ_U32(createTexture(f, proc_tex, device, 16u, 16u, 0u, lift::d3d9::kFmtA8R8G8B8, &tex),
+                      lift::d3dx9::kOk);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return;
+
+    const std::uint32_t proc_fx = f.use("d3dx9_43", "D3DXCreateEffectFromResourceA");
+    const std::uint32_t out_ea = f.u32data(0);
+    LIFT_CHECK_EQ_U32(f.call(proc_fx, {device, 0u, 203u, 0u, 0u, 0u, 0u, out_ea, 0u}), lift::d3dx9::kOk);
+    const std::uint32_t effect = f.m.mem().rd32(out_ea);
+    LIFT_CHECK_NE_U32(effect, 0u);
+    if (effect == 0) return;
+
+    const std::uint32_t s_tex0 = f.cstr("Tex0");
+    const std::uint32_t s_len = f.cstr("Length");
+    const std::uint32_t s_w = f.cstr("Width");
+    const std::uint32_t s_h = f.cstr("Height");
+    const std::uint32_t s_angle = f.cstr("Angle");
+    const std::uint32_t s_cu = f.cstr("CenterU");
+    const std::uint32_t s_cv = f.cstr("CenterV");
+    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xD0u, {s_tex0, tex}), lift::d3dx9::kOk);
+
+    struct Tech {
+        const char* name;
+        lift::d3d9::EffectProgram program;
+        lift::GpuEffectProgram gpu_program;
+    };
+    const Tech techs[2] = {
+        {"SlideBlur", lift::d3d9::EffectProgram::SlideBlurPs20, lift::GpuEffectProgram::SlideBlurPs20},
+        {"ZoomBlur", lift::d3d9::EffectProgram::ZoomBlurPs20, lift::GpuEffectProgram::ZoomBlurPs20},
+    };
+
+    // 三个**不共线**的顶点（共线 ⇒ 退化三角形 ⇒ 一个顶点都进不了 GPU）；FVF = 0x244 ⇒ 36 B/顶点
+    std::vector<std::uint8_t> vb(3u * 36u, 0);
+    const float uv0[3][2] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}};
+    const float uv1[3][2] = {{0.0f, 0.0f}, {0.5f, 0.0f}, {0.0f, 0.5f}};
+    for (std::uint32_t i = 0; i < 3u; ++i) {
+        const float pos[4] = {10.0f + 10.0f * static_cast<float>(i), (i == 2u) ? 20.0f : 10.0f, 0.5f, 1.0f};
+        std::uint8_t* base = vb.data() + i * 36u;
+        std::memcpy(base + 0u, pos, sizeof(pos));
+        const std::uint32_t color = 0xFFFFFFFFu;
+        std::memcpy(base + 16u, &color, 4);
+        std::memcpy(base + 20u, uv0[i], sizeof(uv0[i]));  // TEXCOORD0
+        std::memcpy(base + 28u, uv1[i], sizeof(uv1[i]));  // TEXCOORD1（203 不用它）
+    }
+    const std::uint32_t vtx = f.data(vb.data(), vb.size());
+
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x164u, {0x0244u}), lift::d3dx9::kOk);  // SetFVF(TEX2)
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA4u, {}), lift::d3dx9::kOk);           // BeginScene
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x94u, {0u, 0u}), lift::d3dx9::kOk);     // SetRenderTarget(0,NULL)
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsZEnable, 0u}), lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsCullMode, lift::d3d9::kCullNone}),
+                      lift::d3dx9::kOk);
+
+    for (const Tech& t : techs) {
+        const std::uint32_t s_tech = f.cstr(t.name);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xE8u, {s_tech}), lift::d3dx9::kOk);
+        // ★ 6 个常量**按声明顺序**（不是按字母、不是按 203 的哪个 technique）
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x78u, {s_len, floatBits(20.0f)}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x78u, {s_w, floatBits(16.0f)}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x78u, {s_h, floatBits(16.0f)}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x78u, {s_angle, floatBits(90.0f)}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x78u, {s_cu, floatBits(0.15625f)}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x78u, {s_cv, floatBits(0.03125f)}), lift::d3dx9::kOk);
+        const std::uint32_t passes_ea = f.u32data(0);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xFCu, {passes_ea, 0u}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(passes_ea), 1u);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x100u, {0u}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x104u, {}), lift::d3dx9::kOk);
+        {
+            const lift::d3d9::EffectDrawScope sc = lift::d3d9::effectDrawScope();
+            LIFT_CHECK(sc.active && sc.in_pass);
+            if (!sc.program.implemented) {
+                std::fprintf(stderr, "（%s 未实现的原因）= %s\n", t.name, sc.program.reason.c_str());
+            }
+            LIFT_CHECK(sc.program.implemented);
+            LIFT_CHECK(sc.program.program == t.program);
+            LIFT_CHECK_EQ_U32(sc.program.constant_count, 6u);
+            LIFT_CHECK(sc.program.constants[0] == 20.0f);
+            LIFT_CHECK(sc.program.constants[1] == 16.0f);
+            LIFT_CHECK(sc.program.constants[2] == 16.0f);
+            LIFT_CHECK(sc.program.constants[3] == 90.0f);
+            LIFT_CHECK(sc.program.constants[4] == 0.15625f);
+            LIFT_CHECK(sc.program.constants[5] == 0.03125f);
+            LIFT_CHECK_EQ_U32(sc.program.texture_count, 1u);
+            LIFT_CHECK_EQ_U32(sc.program.textures[0], tex);
+            LIFT_CHECK_EQ_U32(sc.program.uv_set[0], 0u);  // `Tex0UV : TEXCOORD0`
+            // 203 的 sampler_state：Clamp/Clamp/Linear×3（D3D9 枚举原值 3/3/2/2/2）
+            LIFT_CHECK_EQ_U32(sc.program.address_u[0], 3u);
+            LIFT_CHECK_EQ_U32(sc.program.address_v[0], 3u);
+            LIFT_CHECK_EQ_U32(sc.program.mag_filter[0], 2u);
+            LIFT_CHECK_EQ_U32(sc.program.min_filter[0], 2u);
+            LIFT_CHECK_EQ_U32(sc.program.mip_filter[0], 2u);
+        }
+        mock.effect_queued = 0;
+        mock.plain_queued = 0;
+        mock.uv1_values.clear();
+        const std::uint64_t skipped_before = lift::d3d9::gpuCoverage().skipped_draws;
+        const std::uint32_t hr =
+            callMethod(f, device, 0x14Cu, {lift::d3d9::kPtTriangleList, 1u, vtx, 36u});
+        LIFT_CHECK_EQ_U32(hr, lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::d3d9::gpuCoverage().skipped_draws),
+                          static_cast<std::int64_t>(skipped_before));
+        LIFT_CHECK_EQ_U32(mock.effect_queued, 1u);
+        LIFT_CHECK_EQ_U32(mock.plain_queued, 0u);
+        LIFT_CHECK(mock.last.program == t.gpu_program);
+        LIFT_CHECK_EQ_U32(mock.last.constant_count, 6u);
+        LIFT_CHECK(mock.last.constants[0] == 20.0f && mock.last.constants[3] == 90.0f);
+        LIFT_CHECK(mock.last.constants[4] == 0.15625f && mock.last.constants[5] == 0.03125f);
+        LIFT_CHECK_EQ_U32(mock.last.texture_count, 1u);
+        LIFT_CHECK_EQ_U32(mock.last.textures[0].uv_set, 0u);
+        LIFT_CHECK_EQ_U32(mock.last.textures[0].texture.width, 16u);
+        LIFT_CHECK(mock.last.textures[0].texture.sampler.mag_filter == lift::GpuFilter::Linear);
+        LIFT_CHECK(mock.last.textures[0].texture.sampler.mipmap);  // MipFilter=Linear ⇒ 有 mip
+        LIFT_CHECK(mock.last.textures[0].texture.sampler.address_u == lift::GpuAddress::Clamp);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(mock.uv1_values.size()), 6u);
+        // 单纹理 ⇒ `uv1` 与 `uv0` 同一套（后端仍然收到**第二套数组**，只是值相同）
+        LIFT_CHECK(mock.uv1_values[0] == 0.0f && mock.uv1_values[1] == 0.0f);
+        LIFT_CHECK(mock.uv1_values[2] == 1.0f && mock.uv1_values[3] == 0.0f);
+        std::printf("effect draw recorded（203）：technique=%s program=%u constants=%u texels=%u\n", t.name,
+                    static_cast<unsigned>(mock.last.program), mock.last.constant_count,
+                    mock.last.texture_count);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x108u, {}), lift::d3dx9::kOk);  // EndPass
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x10Cu, {}), lift::d3dx9::kOk);  // End
+    }
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA8u, {}), lift::d3dx9::kOk);  // EndScene
+    f.m.setGpuRaster(nullptr);
+}
+
+// =======================================================================================
+// ⑧ P3 · **没实现的 pass 程序仍然具名拒绝**（bit 44 覆盖到实现集之外）
+//
+// 红了意味着什么：202 的 Snow（`vs_1_0`）被"静默接受"了 —— 那会按固定功能写出错误像素
 //   而账上一个位都没有（本仓最贵的一类错）。
-// 判据：HRESULT = D3DERR_INVALIDCALL ∧ `skipped_draws +1` ∧ 原因串含 id=203/SlideBlur/pass=0 ∧ bit44 置位。
+// 判据：HRESULT = D3DERR_INVALIDCALL ∧ `skipped_draws +1` ∧ 原因串含 **id=202 / Snow / pass=0 /
+//   VertexShader / vs_1_0**（P3 把每一条具名原因都补上了资源上下文）∧ bit44 置位。
+// ★ 为什么用 202 而不是 203：203 的两个 technique 在 P3 **真的画**（⑨/⑩ 钉住）；202 的
+//   `vs_1_0` 是这条线故意不做的那一半（T&L 留在 CPU，design-notes 的 L3-tl-01）。
 // =======================================================================================
 void caseEffectDrawUnimplemented(const lift::PeImage& img) {
     lift_test::g_current_case = "d3dx9-effect/effect-draw-unimplemented";
@@ -831,11 +1032,11 @@ void caseEffectDrawUnimplemented(const lift::PeImage& img) {
 
     const std::uint32_t proc_fx = f.use("d3dx9_43", "D3DXCreateEffectFromResourceA");
     const std::uint32_t out_ea = f.u32data(0);
-    LIFT_CHECK_EQ_U32(f.call(proc_fx, {device, 0u, 203u, 0u, 0u, 0u, 0u, out_ea, 0u}), lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(f.call(proc_fx, {device, 0u, 202u, 0u, 0u, 0u, 0u, out_ea, 0u}), lift::d3dx9::kOk);
     const std::uint32_t effect = f.m.mem().rd32(out_ea);
     LIFT_CHECK_NE_U32(effect, 0u);
     if (effect == 0) return;
-    const std::uint32_t s_tech = f.cstr("SlideBlur");
+    const std::uint32_t s_tech = f.cstr("Snow");
     LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xE8u, {s_tech}), lift::d3dx9::kOk);
     const std::uint32_t passes_ea = f.u32data(0);
     LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xFCu, {passes_ea, 0u}), lift::d3dx9::kOk);
@@ -845,9 +1046,12 @@ void caseEffectDrawUnimplemented(const lift::PeImage& img) {
         const lift::d3d9::EffectDrawScope sc = lift::d3d9::effectDrawScope();
         LIFT_CHECK(sc.active && sc.in_pass);
         LIFT_CHECK(!sc.program.implemented);
-        LIFT_CHECK(sc.program.reason.find("SlideBlur") != std::string::npos);
-        LIFT_CHECK(sc.program.reason.find("203") != std::string::npos);
-        LIFT_CHECK(sc.program.reason.find("不在实现集里") != std::string::npos);
+        // ★ 具名原因必须说清"哪一批"：资源 id / technique / pass 都在串里（P3 补的上下文）
+        LIFT_CHECK(sc.program.reason.find("id=202") != std::string::npos);
+        LIFT_CHECK(sc.program.reason.find("Snow") != std::string::npos);
+        LIFT_CHECK(sc.program.reason.find("pass=0") != std::string::npos);
+        LIFT_CHECK(sc.program.reason.find("VertexShader") != std::string::npos);
+        LIFT_CHECK(sc.program.reason.find("vs_1_0") != std::string::npos);
         std::printf("具名原因 = %s\n", sc.program.reason.c_str());
     }
     std::vector<std::uint8_t> vb(3u * 20u, 0);
@@ -869,14 +1073,14 @@ void caseEffectDrawUnimplemented(const lift::PeImage& img) {
     std::string reason;
     std::uint64_t count = 0;
     for (const auto& kv : lift::d3d9::gpuCoverage().skipped_reasons) {
-        if (kv.first.find("不在实现集里") != std::string::npos) {
+        if (kv.first.find("VertexShader") != std::string::npos) {
             reason = kv.first;
             count = kv.second;
         }
     }
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(count), 1);
-    LIFT_CHECK(reason.find("id=203") != std::string::npos);
-    LIFT_CHECK(reason.find("SlideBlur") != std::string::npos);
+    LIFT_CHECK(reason.find("id=202") != std::string::npos);
+    LIFT_CHECK(reason.find("Snow") != std::string::npos);
     LIFT_CHECK(reason.find("pass=0") != std::string::npos);
     {
         lift::d3d9::PipelineInfo info;
@@ -889,6 +1093,7 @@ void caseEffectDrawUnimplemented(const lift::PeImage& img) {
     LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA8u, {}), lift::d3dx9::kOk);
     f.m.setGpuRaster(nullptr);
 }
+
 
 // =======================================================================================
 // ⑨ P2 · **像素 oracle**：两张已知纹理 + `Alpha ∈ {0, 0.5, 1}`（真 GPU + RTT 读回）
@@ -1221,6 +1426,361 @@ int caseFadePixels(const lift::PeImage& img) {
 }
 
 // =======================================================================================
+// ⑩ P3 · **203 的像素 oracle**：两个 technique × 已知 16×16 纹理（真 GPU + RT 读回）
+//
+// 红了意味着什么：SlideBlur / ZoomBlur 的**算术**被写坏了 —— tap 数、权重、uv 步长、
+//   方向（cos/sin）、CLAMP 语义、常量绑定，任何一处错都会让读回值偏离参考实现。
+// 判据（每档）：读回像素与 C++ 参考（**逐句照源文本**）的差 ≤ 1 LSB/通道。
+//   · SlideBlur：`for( float i = -10.0f; i <= 10.0f; i++ )` ⇒ **21 个 tap**，每 tap `0.0476f`，
+//     `tLen = Length / max(Width, Height) * 0.05f`，`tmpUV = (cosT, sinT) * tLen * i`；
+//   · ZoomBlur：`for( float i = 0.0f; i < 10.0f; i++ )` ⇒ **10 个 tap**，权重 = 文本的 `ratio[10]`，
+//     `offset = normalize(dir) * texelSize * Length * length(dir)`，`texelSize = 1/1024`。
+//
+// ★ 为什么采样点都落在 **texel 中心**：参数按"步长 = 整数个 texel"挑（16 宽的纹理 + `tLen = 1/16`、
+//   ZoomBlur 用 `Length = 1024` 使 `texelSize*Length = 1`）⇒ 每 tap 的双线性权重是 (1,0)，
+//   参考实现不必与各 GPU 的**亚纹素精度**赛跑（那会有几 LSB 的实现差异，容差就不再是 1）。
+//   代价：CLAMP 臂仍然被测到（越界的 tap 落在边缘 texel 上）。
+// ★ 方向：Angle=0 只在 **x** 上走、Angle=90 只在 **y** 上走；纹理 R 随 x 变、G 随 y 变
+//   ⇒ cos/sin 写反或漏乘一定红（单看"有没有画出来"抓不到）。
+// ★ 没有 SDL_GPU 设备 / 没有显示系统 ⇒ SKIP 77（⛔ 不拿 Mock 后端冒充像素判据）。
+// =======================================================================================
+namespace {
+
+// 归一化颜色（0..1）—— 参考实现全程用 double，最后才量化到 8 bit。
+struct Bgra8f {
+    double b = 0.0, g = 0.0, r = 0.0, a = 1.0;
+};
+
+// D3D9 的 `CLAMP` + `LINEAR`：先把 uv 钳到 [0,1]，再按 **texel 中心** 做双线性（越界邻居取边缘）。
+//   ★ 与 D3D9 的 `D3DTADDRESS_CLAMP` 一致：钳的是**地址**，所以 uv<0 采到的就是第一个 texel。
+Bgra8f sampleClampLinear(const std::vector<Bgra8>& tex, int w, int h, double u, double v) {
+    const double uu = u < 0.0 ? 0.0 : (u > 1.0 ? 1.0 : u);
+    const double vv = v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);
+    const double fx = uu * static_cast<double>(w) - 0.5;
+    const double fy = vv * static_cast<double>(h) - 0.5;
+    const double x0f = std::floor(fx);
+    const double y0f = std::floor(fy);
+    const double tx = fx - x0f;
+    const double ty = fy - y0f;
+    const int x0 = static_cast<int>(x0f);
+    const int y0 = static_cast<int>(y0f);
+    const auto at = [&](int x, int y) -> const Bgra8& {
+        x = x < 0 ? 0 : (x >= w ? w - 1 : x);
+        y = y < 0 ? 0 : (y >= h ? h - 1 : y);
+        return tex[static_cast<std::size_t>(y) * static_cast<std::size_t>(w) +
+                   static_cast<std::size_t>(x)];
+    };
+    const Bgra8& c00 = at(x0, y0);
+    const Bgra8& c10 = at(x0 + 1, y0);
+    const Bgra8& c01 = at(x0, y0 + 1);
+    const Bgra8& c11 = at(x0 + 1, y0 + 1);
+    const auto ch = [&](std::uint8_t a00, std::uint8_t a10, std::uint8_t a01, std::uint8_t a11) {
+        const double top = (a00 / 255.0) * (1.0 - tx) + (a10 / 255.0) * tx;
+        const double bot = (a01 / 255.0) * (1.0 - tx) + (a11 / 255.0) * tx;
+        return top * (1.0 - ty) + bot * ty;
+    };
+    Bgra8f out;
+    out.b = ch(c00.b, c10.b, c01.b, c11.b);
+    out.g = ch(c00.g, c10.g, c01.g, c11.g);
+    out.r = ch(c00.r, c10.r, c01.r, c11.r);
+    out.a = ch(c00.a, c10.a, c01.a, c11.a);
+    return out;
+}
+
+// 归一化 → 8 bit（ps_2_0 写到 A8R8G8B8 目标：钳到 [0,1] 后四舍五入）
+Bgra8 quantizeBgra(double b, double g, double r, double a) {
+    const auto q = [](double v) {
+        const double c = v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);
+        const double x = c * 255.0 + 0.5;
+        return static_cast<std::uint8_t>(x > 255.0 ? 255.0 : x);
+    };
+    Bgra8 out;
+    out.b = q(b);
+    out.g = q(g);
+    out.r = q(r);
+    out.a = q(a);
+    return out;
+}
+
+// 资源 203 `SlideBlurPS` 的参考实现（21 tap × 0.0476）
+Bgra8 referenceSlideBlur(const std::vector<Bgra8>& tex, int w, int h, double u0, double v0,
+                         double length, double width, double height, double angle) {
+    const double kDegToRad = 0.017453292519943295;  // 源文本的 `radians(Angle)`
+    const double sin_t = std::sin(angle * kDegToRad);
+    const double cos_t = std::cos(angle * kDegToRad);
+    const double t_len = length / std::max(width, height) * 0.05;
+    double acc_b = 0.0, acc_g = 0.0, acc_r = 0.0, acc_a = 0.0;
+    for (int tap = -10; tap <= 10; ++tap) {
+        const double fi = static_cast<double>(tap);
+        const double du = cos_t * t_len * fi;
+        const double dv = sin_t * t_len * fi;
+        const Bgra8f c = sampleClampLinear(tex, w, h, u0 + du, v0 + dv);
+        acc_b += c.b * 0.0476;
+        acc_g += c.g * 0.0476;
+        acc_r += c.r * 0.0476;
+        acc_a += c.a * 0.0476;
+    }
+    return quantizeBgra(acc_b, acc_g, acc_r, acc_a);
+}
+
+// 资源 203 `ZoomBlurPS` 的参考实现（10 tap × ratio[10]）
+Bgra8 referenceZoomBlur(const std::vector<Bgra8>& tex, int w, int h, double u0, double v0, double length,
+                        double center_u, double center_v) {
+    const double texel_size = 0.0009765625;  // 源文本的 `static const float2 texelSize`
+    const double ratio[10] = {0.19, 0.17, 0.15, 0.13, 0.11, 0.09, 0.07, 0.05, 0.03, 0.01};
+    const double dx = center_u - u0;
+    const double dy = center_v - v0;
+    const double len = std::sqrt(dx * dx + dy * dy);
+    // 源文本：`normalize( dir ) * texelSize * Length * length( dir )`。
+    //   ★ `dir == 0` 时 `normalize` 在 ps_2_0 与 Metal 上都是**未定义**的 ⇒ 本用例只测 dir != 0。
+    const double nx = len != 0.0 ? dx / len : 0.0;
+    const double ny = len != 0.0 ? dy / len : 0.0;
+    const double ox = nx * texel_size * length * len;
+    const double oy = ny * texel_size * length * len;
+    double acc_b = 0.0, acc_g = 0.0, acc_r = 0.0, acc_a = 0.0;
+    for (int tap = 0; tap < 10; ++tap) {
+        const double fi = static_cast<double>(tap);
+        const Bgra8f c = sampleClampLinear(tex, w, h, u0 + ox * fi, v0 + oy * fi);
+        acc_b += c.b * ratio[tap];
+        acc_g += c.g * ratio[tap];
+        acc_r += c.r * ratio[tap];
+        acc_a += c.a * ratio[tap];
+    }
+    return quantizeBgra(acc_b, acc_g, acc_r, acc_a);
+}
+
+}  // namespace
+
+int caseBlurPixels(const lift::PeImage& img) {
+    lift_test::g_current_case = "d3dx9-effect/blur-pixels";
+    lift_fixture::Fixture f;
+    LIFT_CHECK(f.ok);
+    if (!f.ok) return 1;
+    LIFT_CHECK(setupMachine(f));
+    f.m.cpu().image = &img;
+
+    const std::uint32_t proc3d = f.use("d3d9", "Direct3DCreate9");
+    const std::uint32_t d3d9 = f.call(proc3d, {lift::d3d9::kSdkVersion});
+    LIFT_CHECK_NE_U32(d3d9, 0u);
+    if (d3d9 == 0) return 1;
+    std::uint32_t device = 0;
+    LIFT_CHECK(createDevice(f, d3d9, &device));
+    if (device == 0) return 1;
+
+    lift::SdlWindow win;
+    lift::SdlWindowOptions opt;
+    opt.title = "emulator-lift d3dx9 blur oracle";
+    opt.driver_list = "software";
+    opt.hidden = true;
+    opt.raster_gpu = true;
+    std::string werr;
+    if (!win.init(opt, &werr)) LIFT_SKIP(werr.c_str());
+    if (!win.rasterActive()) {
+        win.shutdown();
+        LIFT_SKIP("rasterActive == false（建不出 SDL_GPU 设备）");
+    }
+    f.m.setGpuRaster(win.gpuRaster());
+
+    const std::uint32_t proc_tex = f.use("d3dx9_43", "D3DXCreateTexture");
+    const int kW = 64;
+    const int kH = 64;
+    const int kTexW = 16;
+    const int kTexH = 16;
+    // 已知 texel：R = 17x、G = 17y、B = 255-17x、A = 255（x/y 各 16 档 ⇒ 两个方向都可分辨）
+    std::vector<Bgra8> texels(static_cast<std::size_t>(kTexW) * static_cast<std::size_t>(kTexH));
+    for (int y = 0; y < kTexH; ++y) {
+        for (int x = 0; x < kTexW; ++x) {
+            Bgra8 t;
+            t.r = static_cast<std::uint8_t>(17 * x);
+            t.g = static_cast<std::uint8_t>(17 * y);
+            t.b = static_cast<std::uint8_t>(255 - 17 * x);
+            t.a = 255;
+            texels[static_cast<std::size_t>(y) * static_cast<std::size_t>(kTexW) +
+                   static_cast<std::size_t>(x)] = t;
+        }
+    }
+    std::uint32_t rt = 0;
+    LIFT_CHECK_EQ_U32(createTexture(f, proc_tex, device, static_cast<std::uint32_t>(kW),
+                                    static_cast<std::uint32_t>(kH), 0x1u, lift::d3d9::kFmtA8R8G8B8, &rt),
+                      lift::d3dx9::kOk);
+    LIFT_CHECK_NE_U32(rt, 0u);
+    if (rt == 0) return 1;
+
+    const std::uint32_t proc_fx = f.use("d3dx9_43", "D3DXCreateEffectFromResourceA");
+    const std::uint32_t out_ea = f.u32data(0);
+    LIFT_CHECK_EQ_U32(f.call(proc_fx, {device, 0u, 203u, 0u, 0u, 0u, 0u, out_ea, 0u}), lift::d3dx9::kOk);
+    const std::uint32_t effect = f.m.mem().rd32(out_ea);
+    LIFT_CHECK_NE_U32(effect, 0u);
+    if (effect == 0) return 1;
+
+    const std::uint32_t s_tex0 = f.cstr("Tex0");
+    const std::uint32_t s_len = f.cstr("Length");
+    const std::uint32_t s_w = f.cstr("Width");
+    const std::uint32_t s_h = f.cstr("Height");
+    const std::uint32_t s_angle = f.cstr("Angle");
+    const std::uint32_t s_cu = f.cstr("CenterU");
+    const std::uint32_t s_cv = f.cstr("CenterV");
+
+    const std::uint32_t rt_surface = textureSurface(f, rt);
+    LIFT_CHECK_NE_U32(rt_surface, 0u);
+    if (rt_surface == 0) return 1;
+
+    // 全屏四边形（屏幕空间，覆盖 64×64）：uv **恒定** = 目标像素算出来的就是同一个值。
+    //   uv0 = (0.03125, 0.03125) = 16×16 纹理里 (0,0) 那个 texel 的中心。
+    const float kU0 = 0.03125f;
+    const float kV0 = 0.03125f;
+    std::vector<std::uint8_t> vb(6u * 36u, 0);
+    const float corners[6][2] = {{0, 0}, {64, 0}, {64, 64}, {0, 0}, {64, 64}, {0, 64}};
+    for (int i = 0; i < 6; ++i) {
+        const float pos[4] = {corners[i][0], corners[i][1], 0.0f, 1.0f};
+        std::uint8_t* base = vb.data() + static_cast<std::size_t>(i) * 36u;
+        std::memcpy(base + 0u, pos, sizeof(pos));
+        const std::uint32_t color = 0xFFFFFFFFu;
+        std::memcpy(base + 16u, &color, 4);
+        const float uvs[2][2] = {{kU0, kV0}, {kU0, kV0}};
+        std::memcpy(base + 20u, uvs[0], sizeof(uvs[0]));  // TEXCOORD0
+        std::memcpy(base + 28u, uvs[1], sizeof(uvs[1]));  // TEXCOORD1（203 不用）
+    }
+    const std::uint32_t vtx = f.data(vb.data(), vb.size());
+
+    const auto readback = [&](std::vector<std::uint8_t>* out, std::uint32_t* pitch_out) {
+        const std::uint32_t offs_out = f.u32data(0xDEADBEEFu);
+        if (callMethod(f, device, 0x90u,
+                       {static_cast<std::uint32_t>(kW), static_cast<std::uint32_t>(kH),
+                        lift::d3d9::kFmtA8R8G8B8, 2u, offs_out, 0u}) != 0) {
+            return false;
+        }
+        const std::uint32_t offs = f.m.mem().rd32(offs_out);
+        if (offs == 0) return false;
+        if (callMethod(f, device, 0x80u, {rt_surface, offs}) != 0) return false;
+        const std::uint32_t lr_ea = f.zeroData(8u);
+        if (callMethod(f, offs, 0x34u, {lr_ea, 0u, 0u}) != 0) return false;
+        const std::uint32_t pitch = f.m.mem().rd32(lr_ea + 0u);
+        const std::uint32_t bits = f.m.mem().rd32(lr_ea + 4u);
+        if (bits == 0 || pitch == 0) return false;
+        out->assign(static_cast<std::size_t>(pitch) * static_cast<std::size_t>(kH), 0u);
+        f.m.mem().readBytes(bits, out->data(), out->size());
+        callMethod(f, offs, 0x38u, {});
+        *pitch_out = pitch;
+        return true;
+    };
+
+    // 一批"公共状态"：不透明覆盖（blend 关）⇒ 读回的就是 shader 输出
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA4u, {}), lift::d3dx9::kOk);                // BeginScene
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x94u, {0u, rt_surface}), lift::d3dx9::kOk);  // 绑 RT
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xBCu, {f.data(std::array<std::uint32_t, 6>{0u, 0u, 64u, 64u,
+                                                                                        0x3F800000u, 0u}.data(),
+                                                          24u)}),
+                      lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x164u, {0x0244u}), lift::d3dx9::kOk);  // SetFVF(TEX2)
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsZEnable, 0u}), lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsCullMode, lift::d3d9::kCullNone}),
+                      lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsAlphaBlendEnable, 0u}), lift::d3dx9::kOk);
+
+    struct Case {
+        const char* name;
+        float length;
+        float width;
+        float height;
+        float angle;
+        float center_u;
+        float center_v;
+        bool zoom;
+    };
+    const Case cases[3] = {
+        {"SlideBlur Angle=0", 20.0f, 16.0f, 16.0f, 0.0f, 0.0f, 0.0f, false},
+        {"SlideBlur Angle=90", 20.0f, 16.0f, 16.0f, 90.0f, 0.0f, 0.0f, false},
+        // ZoomBlur：`texelSize*Length = 1` ⇒ 步长 = 整数 texel（采样落在 texel 中心）；
+        //   center 取 (0.15625, 0.03125) = texel (2,0) 的中心 ⇒ 方向纯 x、dir = 0.125
+        {"ZoomBlur", 1024.0f, 0.0f, 0.0f, 0.0f, 0.15625f, 0.03125f, true},
+    };
+
+    int worst = -1;
+    for (const Case& c : cases) {
+        // ★ 每一档**新建**一张纹理再绑：直接改 guest 像素**不推进内容版本**（P2 §5.2 的坑）
+        std::uint32_t tex = 0;
+        LIFT_CHECK_EQ_U32(createTexture(f, proc_tex, device, static_cast<std::uint32_t>(kTexW),
+                                        static_cast<std::uint32_t>(kTexH), 0u, lift::d3d9::kFmtA8R8G8B8,
+                                        &tex),
+                          lift::d3dx9::kOk);
+        LIFT_CHECK_NE_U32(tex, 0u);
+        if (tex == 0) return 1;
+        {
+            lift::d3d9::TextureInfo ti;
+            LIFT_CHECK(lift::d3d9::textureInfo(f.m.cpu(), tex, &ti, nullptr));
+            lift::GuestSurface* gs = f.m.surfaces().find(ti.arena);
+            LIFT_CHECK(gs != nullptr);
+            if (gs == nullptr) return 1;
+            std::uint8_t* px = f.m.surfaces().pixels(*gs);
+            for (int y = 0; y < kTexH; ++y) {
+                for (int x = 0; x < kTexW; ++x) {
+                    const Bgra8& t = texels[static_cast<std::size_t>(y) * kTexW + static_cast<std::size_t>(x)];
+                    std::uint8_t* dst = px + static_cast<std::size_t>(y) * gs->pitch +
+                                        static_cast<std::size_t>(x) * 4u;
+                    dst[0] = t.b;
+                    dst[1] = t.g;
+                    dst[2] = t.r;
+                    dst[3] = t.a;
+                }
+            }
+        }
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xD0u, {s_tex0, tex}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xE8u, {f.cstr(c.zoom ? "ZoomBlur" : "SlideBlur")}),
+                          lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x78u, {s_len, floatBits(c.length)}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x78u, {s_w, floatBits(c.width)}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x78u, {s_h, floatBits(c.height)}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x78u, {s_angle, floatBits(c.angle)}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x78u, {s_cu, floatBits(c.center_u)}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x78u, {s_cv, floatBits(c.center_v)}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, device, 0xACu, {0u, 0u, 1u, 0xFF000000u, 0x3F800000u, 0u}),
+                          lift::d3dx9::kOk);  // Clear(TARGET)
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xFCu, {0u, 0u}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x100u, {0u}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x104u, {}), lift::d3dx9::kOk);
+        const std::uint32_t dhr = callMethod(f, device, 0x14Cu, {lift::d3d9::kPtTriangleList, 2u, vtx, 36u});
+        if (dhr != lift::d3dx9::kOk) {
+            for (const auto& kv : lift::d3d9::gpuCoverage().skipped_reasons) {
+                std::fprintf(stderr, "[blur-oracle-skip] %llu × %s\n", (unsigned long long)kv.second,
+                             kv.first.c_str());
+            }
+        }
+        LIFT_CHECK_EQ_U32(dhr, lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x108u, {}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x10Cu, {}), lift::d3dx9::kOk);
+
+        std::vector<std::uint8_t> px;
+        std::uint32_t pitch = 0;
+        LIFT_CHECK(readback(&px, &pitch));
+        const Bgra8 got = pixelAtBgra(px, pitch, kW / 2, kH / 2);
+        const Bgra8 want = c.zoom
+                               ? referenceZoomBlur(texels, kTexW, kTexH, kU0, kV0, c.length, c.center_u,
+                                                   c.center_v)
+                               : referenceSlideBlur(texels, kTexW, kTexH, kU0, kV0, c.length, c.width,
+                                                    c.height, c.angle);
+        const int d = std::max({channelDiff(got.r, want.r), channelDiff(got.g, want.g),
+                                channelDiff(got.b, want.b), channelDiff(got.a, want.a)});
+        if (d > worst) worst = d;
+        if (d > 1) {
+            lift_test::failf(__FILE__, __LINE__,
+                             "%s 像素不符：got(B=%u G=%u R=%u A=%u) want(B=%u G=%u R=%u A=%u) 误差=%d",
+                             c.name, got.b, got.g, got.r, got.a, want.b, want.g, want.r, want.a, d);
+        }
+        std::printf("%s：像素 B=%u G=%u R=%u A=%u（参考 B=%u G=%u R=%u A=%u，误差 %d）\n", c.name, got.b,
+                    got.g, got.r, got.a, want.b, want.g, want.r, want.a, d);
+    }
+    LIFT_CHECK(worst >= 0 && worst <= 1);
+    std::printf("203 像素 oracle：三档最大误差 = %d LSB/通道\n", worst);
+
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA8u, {}), lift::d3dx9::kOk);  // EndScene
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x94u, {0u, 0u}), lift::d3dx9::kOk);  // 解绑 RT
+    f.m.setGpuRaster(nullptr);
+    win.shutdown();
+    return 0;
+}
+
+// =======================================================================================
 // ④ D3DXCreateEffectFromResourceA + 9 槽（只记状态）
 // =======================================================================================
 void caseObjectSlots(const lift::PeImage& img) {
@@ -1390,7 +1950,9 @@ int main() {
     caseObjectSlots(img);    // ④
     caseFxParse(img);        // ⑤（P2：FX 文本解析）
     caseEffectDrawRecorded(img);       // ⑥（P2：翻面 P1 的"必须拒绝"）
-    caseEffectDrawUnimplemented(img);  // ⑦（P2：203/202 仍然具名拒绝）
+    caseEffectDrawBlurRecorded(img);   // ⑨（P3：203 的 SlideBlur / ZoomBlur 翻面）
+    caseEffectDrawUnimplemented(img);  // ⑦（P3：202 仍然具名拒绝）
     if (caseFadePixels(img) != 0) return 1;  // ⑧（P2：像素 oracle；没有 GPU ⇒ SKIP 77）
+    if (caseBlurPixels(img) != 0) return 1;  // ⑩（P3：203 的像素 oracle；没有 GPU ⇒ SKIP 77）
     return finish("d3dx9-effect");
 }

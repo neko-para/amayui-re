@@ -260,11 +260,12 @@ enum UnsupportedBit : std::uint32_t {
     //     == 本批要写的颜色目标像素基址" ⇒ 跳过这一条 + 记这一位。⛔ 不是"未实现"，
     //     是**表达不了**（GPU 采样读上传缓存）⇒ 与 draw 路同一种拒绝语义。
     kUnSpriteRtFeedbackLoop = 43,
-    // ---- 44：`REQ-01M7MSGRRHCA23RAX1QGDAYJ3X`（GPU 路线 P2）----
-    //   ★ 语义（P2 翻面后的口径）：**这一批该由 effect 的 pass 程序画，但那个程序不在实现集里**
-    //     —— 203 的 SlideBlur/ZoomBlur（P3 才做 10-tap）、202 的 Snow（vs_1_0，不做 GPU 顶点着色）、
-    //     以及"technique 不在资源文本里 / SetTexture 没绑 / 纹理对象解析不了"这类具名缺口。
-    //     P2 实现集内的程序（Fade 的 ps_2_0 / ps_1_0）**不再经过这一位**：它们真的被 GPU 画出来。
+    // ---- 44：`REQ-01M7MSGRRHCA23RAX1QGDAYJ3X`（GPU 路线 P2；P3 扩实现集）----
+    //   ★ 语义（P3 之后的口径）：**这一批该由 effect 的 pass 程序画，但那个程序不在实现集里**
+    //     —— 202 的 Snow（vs_1_0，不做 GPU 顶点着色）、以及"technique 不在资源文本里 /
+    //     SetTexture 没绑 / 纹理对象解析不了"这类具名缺口。
+    //     实现集内的程序（Fade 的 ps_2_0 / ps_1_0 + 203 的 SlideBlur / ZoomBlur ps_2_0）
+    //     **不再经过这一位**：它们真的被 GPU 画出来。
     //   ★ 为什么不复用 33（stage>=1）：33 的触发条件是**固定功能**的多级纹理（stage1 绑了纹理 /
     //     op 未 DISABLE）；effect draw 的纹理**不经过** device 的 stage 状态（它来自 effect 的
     //     `SetTexture`）⇒ 两条可以独立发生（实测：203 的 blur 只绑 Tex0 ⇒ 33 不触发）。
@@ -664,7 +665,7 @@ const char* unsupportedBitName(std::uint32_t bit) {
     if (bit == kUnRenderStateStored) return "合法 D3DRS（只存）";
     if (bit == kUnDepthClearZ) return "Clear(ZBUFFER) 的 z 越界";
     if (bit == kUnSpriteRtFeedbackLoop) return "sprite 反馈环";
-    if (bit == kUnEffectProgramNotExecuted) return "effect 的 pass 程序不在实现集里（P2 只实现 Fade）";
+    if (bit == kUnEffectProgramNotExecuted) return "effect 的 pass 程序不在实现集里（Fade + 203 的 SlideBlur/ZoomBlur）";
     return "未分配";
 }
 
@@ -4217,6 +4218,12 @@ bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why, U
         switch (prog.program) {
             case d3d9::EffectProgram::FadePs20: e.effect_draw.program = GpuEffectProgram::FadePs20; break;
             case d3d9::EffectProgram::FadePs10: e.effect_draw.program = GpuEffectProgram::FadePs10; break;
+            case d3d9::EffectProgram::SlideBlurPs20:
+                e.effect_draw.program = GpuEffectProgram::SlideBlurPs20;
+                break;
+            case d3d9::EffectProgram::ZoomBlurPs20:
+                e.effect_draw.program = GpuEffectProgram::ZoomBlurPs20;
+                break;
             default:
                 return deny_effect("effect 程序号不在后端的实现集里");
         }

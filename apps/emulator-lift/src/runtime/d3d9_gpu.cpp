@@ -165,6 +165,45 @@ float4 PSMainFadeLinear(FxVSOut i) : SV_Target {
     float Alpha = g_fx[0].x;
     return g_fx_tex0.Sample(g_fx_smp0, i.uv0) * (1.0 - Alpha) + g_fx_tex1.Sample(g_fx_smp1, i.uv1) * Alpha;
 }
+// 资源 203 `technique SlideBlur` 的 `compile ps_2_0 SlideBlurPS()`（逐句照源文本）
+//   ★ **21 个 tap**：`for( float i = -10.0f; i <= 10.0f; i++ )`（上下界**含**）+ 每 tap `0.0476f`。
+float4 PSMainSlideBlur(FxVSOut i) : SV_Target {
+    const float Length = g_fx[0].x;   // float Length;
+    const float Width = g_fx[0].y;    // float Width;
+    const float Height = g_fx[0].z;   // float Height;
+    const float Angle = g_fx[0].w;    // float Angle;
+    float2 tmpUV;
+    // 源文本：`sin( radians( Angle ) )` / `cos( radians( Angle ) )`；`radians(x)` = `x * (pi/180)`
+    //   ⇒ 两份源都内联同一个常数（Metal 的 metal_stdlib **没有** `radians()`，实测编译报
+    //     "use of undeclared identifier 'radians'" ⇒ 不内联就没法让 MSL 与 DXBC 说同一件事）。
+    float sinT = sin(Angle * 0.017453292519943295);
+    float cosT = cos(Angle * 0.017453292519943295);
+    float tLen = Length / max(Width, Height) * 0.05;
+    float4 retCol = float4(0.0, 0.0, 0.0, 0.0);   // 源文本：float4 retCol = 0.0f;
+    for (int tap = -10; tap <= 10; ++tap) {
+        const float fi = (float)tap;
+        tmpUV.x = cosT * tLen * fi;
+        tmpUV.y = sinT * tLen * fi;
+        retCol += g_fx_tex0.Sample(g_fx_smp0, i.uv0 + tmpUV) * 0.0476;
+    }
+    return retCol;
+}
+// 资源 203 `technique ZoomBlur` 的 `compile ps_2_0 ZoomBlurPS()`（逐句照源文本）
+//   ★ **10 个 tap**：`for( float i = 0.0f; i < 10.0f; i++ )`，权重 = 文本里的 `ratio[10]`，
+//     `texelSize = 1/1024`（文本的 `static const float2 texelSize = 0.0009765625f`）。
+float4 PSMainZoomBlur(FxVSOut i) : SV_Target {
+    const float texelSize = 0.0009765625;                 // static const float2 texelSize
+    const float ratio[10] = {0.19, 0.17, 0.15, 0.13, 0.11, 0.09, 0.07, 0.05, 0.03, 0.01};
+    const float Length = g_fx[0].x;
+    const float2 center = float2(g_fx[1].x, g_fx[1].y);   // center.x = CenterU; center.y = CenterV;
+    float4 retCol = float4(0.0, 0.0, 0.0, 0.0);
+    float2 dir = center - i.uv0;
+    float2 offset = normalize(dir) * texelSize * Length * length(dir);
+    for (int tap = 0; tap < 10; ++tap) {
+        retCol += g_fx_tex0.Sample(g_fx_smp0, i.uv0 + offset * (float)tap) * ratio[tap];
+    }
+    return retCol;
+}
 )";
 constexpr SDL_GPUShaderFormat kShaderFormat = SDL_GPU_SHADERFORMAT_DXBC;
 constexpr const char* kShaderFormatName = "DXBC";
@@ -311,6 +350,52 @@ fragment float4 PSMainFadeLinear(FxFSIn in [[stage_in]],
     const float Alpha = u.c[0].x;
     return tex0.sample(smp0, in.uv0) * (1.0 - Alpha) + tex1.sample(smp1, in.uv1) * Alpha;
 }
+// 资源 203 `technique SlideBlur` 的 `compile ps_2_0 SlideBlurPS()`（逐句照源文本）
+//   ★ **21 个 tap**：`for( float i = -10.0f; i <= 10.0f; i++ )`（上下界**含**）+ 每 tap `0.0476f`。
+//   ★ 只用 1 张纹理 / 1 个 sampler ⇒ 这个 entry point 的 `num_samplers` 就是 1（见 `kFxEntries`）。
+fragment float4 PSMainSlideBlur(FxFSIn in [[stage_in]],
+                                texture2d<float> tex0 [[texture(0)]],
+                                sampler smp0 [[sampler(0)]],
+                                constant FxUniforms& u [[buffer(0)]]) {
+    const float Length = u.c[0].x;   // float Length;
+    const float Width = u.c[0].y;    // float Width;
+    const float Height = u.c[0].z;   // float Height;
+    const float Angle = u.c[0].w;    // float Angle;
+    float2 tmpUV;
+    // 源文本：`sin( radians( Angle ) )` / `cos( radians( Angle ) )`；`radians(x)` = `x * (pi/180)`
+    //   ⇒ 两份源都内联同一个常数（Metal 的 metal_stdlib **没有** `radians()`，实测编译报
+    //     "use of undeclared identifier 'radians'" ⇒ 不内联就没法让 MSL 与 DXBC 说同一件事）。
+    float sinT = sin(Angle * 0.017453292519943295);
+    float cosT = cos(Angle * 0.017453292519943295);
+    float tLen = Length / max(Width, Height) * 0.05;
+    float4 retCol = float4(0.0, 0.0, 0.0, 0.0);   // 源文本：float4 retCol = 0.0f;
+    for (int tap = -10; tap <= 10; ++tap) {
+        const float fi = float(tap);
+        tmpUV.x = cosT * tLen * fi;
+        tmpUV.y = sinT * tLen * fi;
+        retCol += tex0.sample(smp0, in.uv0 + tmpUV) * 0.0476;
+    }
+    return retCol;
+}
+// 资源 203 `technique ZoomBlur` 的 `compile ps_2_0 ZoomBlurPS()`（逐句照源文本）
+//   ★ **10 个 tap**：`for( float i = 0.0f; i < 10.0f; i++ )`，权重 = 文本里的 `ratio[10]`，
+//     `texelSize = 1/1024`（文本的 `static const float2 texelSize = 0.0009765625f`）。
+fragment float4 PSMainZoomBlur(FxFSIn in [[stage_in]],
+                               texture2d<float> tex0 [[texture(0)]],
+                               sampler smp0 [[sampler(0)]],
+                               constant FxUniforms& u [[buffer(0)]]) {
+    const float texelSize = 0.0009765625;                 // static const float2 texelSize
+    const float ratio[10] = {0.19, 0.17, 0.15, 0.13, 0.11, 0.09, 0.07, 0.05, 0.03, 0.01};
+    const float Length = u.c[0].x;
+    const float2 center = float2(u.c[1].x, u.c[1].y);     // center.x = CenterU; center.y = CenterV;
+    float4 retCol = float4(0.0, 0.0, 0.0, 0.0);
+    float2 dir = center - in.uv0;
+    float2 offset = normalize(dir) * texelSize * Length * length(dir);
+    for (int tap = 0; tap < 10; ++tap) {
+        retCol += tex0.sample(smp0, in.uv0 + offset * float(tap)) * ratio[tap];
+    }
+    return retCol;
+}
 )MSL";
 constexpr SDL_GPUShaderFormat kShaderFormat = SDL_GPU_SHADERFORMAT_MSL;
 constexpr const char* kShaderFormatName = "MSL";
@@ -332,8 +417,24 @@ constexpr TexEntry kTexEntries[] = {
 constexpr std::size_t kTexEntryCount = sizeof(kTexEntries) / sizeof(kTexEntries[0]);
 
 // effect 程序的 entry point 表（下标 = `GpuEffectProgram` 的整数值；★ 与 FX 文本的对应关系见
-// `shims/d3dx9_effect.h` 的 `EffectProgramBinding`：201 的 ps_2_0 ⇒ FadePs20、200 的 ps_1_0 ⇒ FadePs10）。
-constexpr const char* kFxEntries[2] = {"PSMainFade", "PSMainFadeLinear"};
+// `shims/d3dx9_effect.h` 的 `EffectProgramBinding`：201 的 ps_2_0 ⇒ FadePs20、200 的 ps_1_0 ⇒ FadePs10、
+// 203 的 SlideBlur/ZoomBlur ⇒ SlideBlurPs20/ZoomBlurPs20）。
+//   ★ 每个 entry 还声明**它自己用几个 sampler**：Fade 采两张纹理（Tex0/Tex1 = TEXCOORD0/1），
+//     203 的两个 technique 都只采一张（`SrcTexSampler` ⇒ `Tex0`，TEXCOORD0）
+//     ⇒ ⛔ 不要给它们声明 2 个 sampler（那会让后端绑定一张用不到的纹理，且与 FX 文本不符）。
+struct FxEntry {
+    const char* entry;
+    std::uint32_t samplers;
+};
+constexpr FxEntry kFxEntries[] = {
+    {"PSMainFade", 2u},        // FadePs20（201 ps_2_0）
+    {"PSMainFadeLinear", 2u},  // FadePs10（200 ps_1_0）
+    {"PSMainSlideBlur", 1u},   // SlideBlurPs20（203 ps_2_0，21 tap）
+    {"PSMainZoomBlur", 1u},    // ZoomBlurPs20（203 ps_2_0，10 tap）
+};
+constexpr std::size_t kFxEntryCount = sizeof(kFxEntries) / sizeof(kFxEntries[0]);
+static_assert(kFxEntryCount == static_cast<std::size_t>(GpuEffectProgram::ZoomBlurPs20) + 1u,
+              "kFxEntries 必须与 GpuEffectProgram 的整数值一一对应（下标 = 程序号）");
 
 // ★ 诊断用：到目前为止入队的**带批号** draw 数（`LIFT_GPU_FF_TEX` 的 `[gpu-depth]` 用它定位
 //   `Clear(ZBUFFER)` 落在哪两批之间）。只在探针开启时被读，⛔ 不参与任何判据。
@@ -2597,17 +2698,19 @@ private:
         return p;
     }
 
-    // ★ effect draw 的 pipeline（P2）：顶点 = `FxVertex`（两套 uv），片元 = FX pass 程序，
-    //   2 个 sampler + 1 个 uniform（常量表）。★ 与固定功能 pipeline **不共用缓存键**
-    //   （分开的 map ⇒ 不可能撞）。
+    // ★ effect draw 的 pipeline（P2 / P3）：顶点 = `FxVertex`（两套 uv），片元 = FX pass 程序，
+    //   每个程序自己声明 sampler 数（见 `kFxEntries`）+ 1 个 uniform（常量表）。
+    //   ★ 与固定功能 pipeline **不共用缓存键**（分开的 map ⇒ 不可能撞）。
     SDL_GPUGraphicsPipeline* pipelineForEffect(GpuEffectProgram program, const GpuRasterState& state,
                                                std::string* err) {
-        const std::uint64_t key = pipelineKey(state, /*textured=*/false) * 4u +
+        // ★ 键里给程序号留 **3 位**（8 个程序）：`kFxEntries` 目前 4 条，⛔ 不要用 `*4` 那种
+        //   "刚好够用"的步长 —— 加第 5 个程序时它会与下一个 pipelineKey 撞进同一格。
+        const std::uint64_t key = pipelineKey(state, /*textured=*/false) * 8u +
                                   static_cast<std::uint64_t>(program) + 1u;
         auto it = fx_pipelines_.find(key);
         if (it != fx_pipelines_.end()) return it->second;
         const std::uint32_t index = static_cast<std::uint32_t>(program);
-        if (index >= 2u) {
+        if (index >= kFxEntryCount) {
             if (err) *err = "SDL_GPU：未知的 effect 程序";
             return nullptr;
         }
@@ -2744,7 +2847,7 @@ private:
             ps->Release();
             if (pixel_shaders_tex_[i] == nullptr) ok = false;
         }
-        // ---- effect 程序（P2）：2 个 sampler + 1 个 uniform（常量表）----
+        // ---- effect 程序（P2/P3）：每个程序的 sampler 数见 `kFxEntries` + 1 个 uniform（常量表）----
         {
             ID3DBlob* fxvs = nullptr;
             if (FAILED(D3DCompile(kShaderSource, std::strlen(kShaderSource), "d3d9_gpu.hlsl", nullptr, nullptr,
@@ -2759,18 +2862,19 @@ private:
             fxvs->Release();
             if (fx_vertex_shader_ == nullptr) ok = false;
         }
-        for (std::size_t i = 0; i < 2; ++i) {
+        for (std::size_t i = 0; i < kFxEntryCount; ++i) {
             ID3DBlob* ps = nullptr;
             if (FAILED(D3DCompile(kShaderSource, std::strlen(kShaderSource), "d3d9_gpu.hlsl", nullptr, nullptr,
-                                  kFxEntries[i], "ps_5_1", flags, 0, &ps, &errors))) {
-                if (err) *err = std::string("D3DCompile(") + kFxEntries[i] + ") 失败：" +
+                                  kFxEntries[i].entry, "ps_5_1", flags, 0, &ps, &errors))) {
+                if (err) *err = std::string("D3DCompile(") + kFxEntries[i].entry + ") 失败：" +
                                 (errors ? static_cast<const char*>(errors->GetBufferPointer()) : "");
                 if (errors) errors->Release();
                 ok = false;
                 continue;
             }
             if (errors) { errors->Release(); errors = nullptr; }
-            fx_pixel_shaders_[i] = make(ps, SDL_GPU_SHADERSTAGE_FRAGMENT, kFxEntries[i], 2, 1);
+            fx_pixel_shaders_[i] =
+                make(ps, SDL_GPU_SHADERSTAGE_FRAGMENT, kFxEntries[i].entry, kFxEntries[i].samplers, 1);
             ps->Release();
             if (fx_pixel_shaders_[i] == nullptr) ok = false;
         }
@@ -2801,11 +2905,12 @@ private:
             pixel_shaders_tex_[i] = make(kTexEntries[i].entry, SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
             if (pixel_shaders_tex_[i] == nullptr) ok = false;
         }
-        // ---- effect 程序（P2）：2 个 sampler + 1 个 uniform（常量表）----
+        // ---- effect 程序（P2/P3）：每个程序的 sampler 数见 `kFxEntries` + 1 个 uniform（常量表）----
         fx_vertex_shader_ = make("FxVSMain", SDL_GPU_SHADERSTAGE_VERTEX, 0);
         if (fx_vertex_shader_ == nullptr) ok = false;
-        for (std::size_t i = 0; i < 2; ++i) {
-            fx_pixel_shaders_[i] = make(kFxEntries[i], SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 1);
+        for (std::size_t i = 0; i < kFxEntryCount; ++i) {
+            fx_pixel_shaders_[i] = make(kFxEntries[i].entry, SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                       kFxEntries[i].samplers, 1);
             if (fx_pixel_shaders_[i] == nullptr) ok = false;
         }
         if (!ok) {
@@ -2868,7 +2973,8 @@ private:
     SDL_GPUShader* pixel_shaders_tex_[kTexEntryCount] = {};
     // ★ P2：effect 的程序（下标 = `GpuEffectProgram` 的整数值）+ 直通 VS（带第二套 UV 属性）。
     SDL_GPUShader* fx_vertex_shader_ = nullptr;
-    SDL_GPUShader* fx_pixel_shaders_[2] = {nullptr, nullptr};
+    // ★ 下标 = `GpuEffectProgram` 的整数值 ⇒ 长度必须 = `kFxEntryCount`（static_assert 在表边）
+    SDL_GPUShader* fx_pixel_shaders_[kFxEntryCount] = {};
     SDL_GPUTexture* target_ = nullptr;
     SDL_GPUTexture* depth_ = nullptr;
     SDL_GPUBuffer* vertex_buffer_ = nullptr;

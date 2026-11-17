@@ -772,6 +772,12 @@ constexpr EffectProgramBinding kBindings[] = {
     {kEffectIdFadePs20, "Fade", "FadePS", "ps_2_0", d3d9::EffectProgram::FadePs20},
     // 资源 200：同一份文本、`compile ps_1_0`（逐通道直接 lerp）
     {kEffectIdFadePs10, "Fade", "FadePS", "ps_1_0", d3d9::EffectProgram::FadePs10},
+    // 资源 203：**两个** technique，各自一个 pass（P3；`ps_2_0`）
+    //   · SlideBlur：21 tap（`for( float i = -10.0f; i <= 10.0f; i++ )`，每 tap `0.0476f`）
+    //   · ZoomBlur ：10 tap（`for( float i = 0.0f; i < 10.0f; i++ )`，权重 = 文本的 `ratio[10]`）
+    //   ★ 门牌（technique / entry / profile）全部来自 FX 文本的解析结果 ⇒ 这里只做最后一跳。
+    {kEffectIdBlurPs20, "SlideBlur", "SlideBlurPS", "ps_2_0", d3d9::EffectProgram::SlideBlurPs20},
+    {kEffectIdBlurPs20, "ZoomBlur", "ZoomBlurPS", "ps_2_0", d3d9::EffectProgram::ZoomBlurPs20},
     {0u, nullptr, nullptr, nullptr, d3d9::EffectProgram::None},
 };
 
@@ -826,19 +832,21 @@ bool effectDrawProgram(X86& cpu, std::uint32_t state, d3d9::EffectDrawProgram* o
     const std::uint32_t tech_ea = cpu.mem->rd32(state + kFxTech);
     const std::string technique = tech_ea != 0 ? cpu.mem->readCString(tech_ea) : std::string();
     const std::uint32_t pass_index = cpu.mem->rd32(state + kFxPassIndex);
-    const auto unimplemented = [out](const std::string& reason) {
+    // ★ **每一条**具名原因都带同一段上下文（资源 id / technique / pass）：
+    //   "哪一批被拒"必须能从原因串读出来，⛔ 不能只写"这个 pass 带 VertexShader"而说不清是哪个资源。
+    const std::string context = "资源 id=" + std::to_string(resource_id) + " technique=\"" + technique +
+                                "\" pass=" + std::to_string(pass_index) + "：";
+    const auto unimplemented = [out, &context](const std::string& reason) {
         out->implemented = false;
         out->program = d3d9::EffectProgram::None;
         out->constant_count = 0;
         out->texture_count = 0;
-        out->reason = reason;
+        out->reason = context + reason;
         return true;
     };
     const FxPass* pass = fxPassAt(*module, technique, pass_index);
     if (pass == nullptr) {
-        return unimplemented("资源 id=" + std::to_string(resource_id) + " technique=\"" + technique +
-                             "\" 的第 " + std::to_string(pass_index) +
-                             " 个 pass 不在 FX 文本里（technique 表与 pass 数都由文本解析得出）");
+        return unimplemented("这个 pass 不在 FX 文本里（technique 表与 pass 数都由文本解析得出）");
     }
     if (pass->has_vertex_shader) {
         return unimplemented("pass 带 VertexShader（" + pass->vertex_profile + " " + pass->vertex_entry +
@@ -857,10 +865,10 @@ bool effectDrawProgram(X86& cpu, std::uint32_t state, d3d9::EffectDrawProgram* o
         break;
     }
     if (binding == nullptr) {
-        return unimplemented("shader 程序不在实现集里：资源 id=" + std::to_string(resource_id) +
-                             " technique=\"" + technique + "\" pass=" + std::to_string(pass_index) +
-                             " entry=" + pass->pixel_entry + " profile=" + pass->pixel_profile +
-                             "（P2 只实现了 Fade 的 ps_2_0 / ps_1_0）");
+        return unimplemented("shader 程序不在实现集里：entry=" + pass->pixel_entry + " profile=" +
+                             pass->pixel_profile +
+                             "（P3 的实现集 = Fade 的 ps_2_0/ps_1_0 + 203 的 SlideBlur/ZoomBlur ps_2_0；"
+                             "202 的 Snow 带 vs_1_0 ⇒ 不在这条线里）");
     }
     const FxShader* shader = fxFindShader(*module, pass->pixel_entry);
     if (shader == nullptr) {

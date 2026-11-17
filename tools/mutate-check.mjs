@@ -2856,8 +2856,16 @@ const MUTATIONS = [
     //   ★ 变异 = 闸的条件再 `&& color_base == nullptr`（RT 分支里 `color_base` 恒非空 ⇒ 闸永不触发）；
     //     ⛔ 不写 `&& false`（`/W4 /WX` 的常量条件告警）。
     file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
-    from: '            if (rt_sampled) {',
-    to: '            if (rt_sampled && ctx.color_base == nullptr) {',
+    // ★ `from` 必须带上前一行：P2 在**同一个 if 块**里给 effect 路的采样源加了**同样一行**
+    //   `if (rt_sampled) {`（`ctx.effect_textures[s]`）⇒ 只写那一行会命中 2 次
+    //   （`--list` 的静态检查当场判「出现次数 ≠ 1」）。判据 = 固定功能路那一份
+    //   （`ctx.textures[s].pixels == ctx.color_base`）。
+    from:
+      '                                    ctx.textures[s].pixels == ctx.color_base;\n' +
+      '            if (rt_sampled) {',
+    to:
+      '                                    ctx.textures[s].pixels == ctx.color_base;\n' +
+      '            if (rt_sampled && ctx.color_base == nullptr) {',
     guard: 'ctest:gpu-batch-order',
     ctest: 'gpu-batch-order',
     buildDir: 'apps/emulator-lift/out',
@@ -3970,6 +3978,78 @@ const MUTATIONS = [
     what:
       'Fade 的 MSL 片元把 `c0.a*(1-Alpha)` 写成 `c0.a*Alpha` ⇒ ret.a / ColRate 全偏 ⇒ ' +
       '`d3dx9-effect` 的 fade-pixels 在三档像素上都红（容差 1 LSB 抓得住）；★ 只比"画没画"会假绿',
+  },
+
+  // ── GPU 路线 P3 ① · SlideBlur 的 **tap 数**少一个（`src/runtime/d3d9_gpu.cpp` 的 **MSL** 块）──
+  //   源文本：`for( float i = -10.0f; i <= 10.0f; i++ )` ⇒ **21 个 tap**（上下界都含）。
+  //   故障形态：`i <= 10` 写成 `i < 10`（20 tap）—— 画面仍然"糊"，只是少了一侧的采样，
+  //   肉眼很难发现；而 10-tap/21-tap 的混淆正是这张单最容易犯的错（任务描述说"10-tap"，
+  //   ZoomBlur 才是 10，SlideBlur 是 21）。
+  //   ★ `from` 带上 `float(tap)` 那一行：DXBC 块里有**同样**的循环头（两份源逐句一致），
+  //     不带上下文就会命中 DXBC 那份 ⇒ 在 mac 上（只编 MSL）**假绿**。
+  {
+    file: 'apps/emulator-lift/src/runtime/d3d9_gpu.cpp',
+    from:
+      '    for (int tap = -10; tap <= 10; ++tap) {\n' +
+      '        const float fi = float(tap);',
+    to:
+      '    for (int tap = -10; tap < 10; ++tap) {  // 变异：上下界少一档（21 tap → 20 tap）\n' +
+      '        const float fi = float(tap);',
+    guard: 'ctest:d3dx9-effect',
+    ctest: 'd3dx9-effect',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3dx9-effect',
+    what:
+      'SlideBlur 的 MSL 片元把 `i <= 10` 写成 `i < 10`（21 tap → 20 tap）⇒ 一侧的 10 个采样消失 ⇒ ' +
+      '`d3dx9-effect` 的 blur-pixels 在 Angle=0 / Angle=90 两档上红（R 45→36、G 45→36 的 9 LSB 偏差）；' +
+      '★ 只断言"糊了 / 画出来了"会假绿',
+  },
+
+  // ── GPU 路线 P3 ② · SlideBlur 的 **uv 步长**放大 10 倍（同一文件的 MSL 块）──
+  //   源文本：`tLen = Length / max( Width, Height ) * 0.05f`。步长既是"模糊半径"也是 UV 单位。
+  //   ★ 这是最像"能跑"的破坏之一：draw 成功、账本干净，只是采样点全跑到纹理外（CLAMP 之后
+  //     绝大多数 tap 落在边缘 texel 上）⇒ 画面是一块偏色，不是模糊。
+  {
+    file: 'apps/emulator-lift/src/runtime/d3d9_gpu.cpp',
+    from:
+      '    float tLen = Length / max(Width, Height) * 0.05;\n' +
+      '    float4 retCol = float4(0.0, 0.0, 0.0, 0.0);   // 源文本：float4 retCol = 0.0f;\n' +
+      '    for (int tap = -10; tap <= 10; ++tap) {\n' +
+      '        const float fi = float(tap);',
+    to:
+      '    float tLen = Length / max(Width, Height) * 0.5;  // 变异：uv 步长放大 10 倍\n' +
+      '    float4 retCol = float4(0.0, 0.0, 0.0, 0.0);   // 源文本：float4 retCol = 0.0f;\n' +
+      '    for (int tap = -10; tap <= 10; ++tap) {\n' +
+      '        const float fi = float(tap);',
+    guard: 'ctest:d3dx9-effect',
+    ctest: 'd3dx9-effect',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3dx9-effect',
+    what:
+      'SlideBlur 的 MSL 片元把 `* 0.05` 写成 `* 0.5`（uv 步长放大 10 倍）⇒ 21 个 tap 几乎全部 CLAMP 到边缘 ' +
+      'texel ⇒ `d3dx9-effect` 的 blur-pixels 在 Angle=0/90 两档上红（参考值的像素与边缘色差 > 1 LSB）；' +
+      '★ 这条与 ① 一起钉住"步长 / 方向"这条算术',
+  },
+
+  // ── GPU 路线 P3 ③ · 203 的 **program 映射**把 SlideBlur 接到 ZoomBlur 上（跨平台那条）──
+  //   ★ 上面两条只改 MSL 源文本（win32 上编的是 DXBC ⇒ 那两条在 win32 上不适用，与 P2 ② 同一条口径）。
+  //     这一条改的是 `d3d9_pipeline.cpp` 的程序号映射：**两个平台都会红**。
+  {
+    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
+    from:
+      '            case d3d9::EffectProgram::SlideBlurPs20:\n' +
+      '                e.effect_draw.program = GpuEffectProgram::SlideBlurPs20;',
+    to:
+      '            case d3d9::EffectProgram::SlideBlurPs20:\n' +
+      '                e.effect_draw.program = GpuEffectProgram::ZoomBlurPs20;  // 变异：映射接错',
+    guard: 'ctest:d3dx9-effect',
+    ctest: 'd3dx9-effect',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3dx9-effect',
+    what:
+      '203 的 program 映射把 SlideBlur 接到 ZoomBlur 的 shader 上 ⇒ `d3dx9-effect` 的 ' +
+      'effect-draw-blur-recorded 在 `program == SlideBlurPs20` 上当场红（纯档、不依赖 GPU），' +
+      'blur-pixels 也会红；★ 这条对 win32（DXBC）同样成立',
   },
 ];
 

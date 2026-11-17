@@ -6,8 +6,13 @@
 //      赋值 —— 出现任何别的状态名 ⇒ `UnsupportedState` + **具名原因**（⛔ 不静默忽略）。
 //   ② **程序解析**（`effectDrawProgram`）：把"当前 technique + pass"翻成
 //      `d3d9::EffectDrawProgram`（实现集内的程序 + 按声明顺序的常量表 + SetTexture 记下的纹理 EA）。
-//      不在实现集里的程序（203 / 202）⇒ `implemented=false` + 具名原因 ⇒ 调用方整批拒绝（bit 44）。
-//   ③ `Begin` 的 `*pPasses` 改成**解析结果**（P1 的常量 1 退役）。
+//      不在实现集里的程序（202 Snow）⇒ `implemented=false` + 具名原因 ⇒ 调用方整批拒绝（bit 44）。
+//      ③ `Begin` 的 `*pPasses` 改成**解析结果**（P1 的常量 1 退役）。
+//
+// ★ P3（同一张单）在本模块只改**最后一跳**：`EffectProgramBinding` 表加 203 的两条
+//   （`SlideBlur` / `ZoomBlur`，都是 `ps_2_0`）；technique → pass → entry/profile 仍然全部来自
+//   FX 文本解析（⛔ 不按"资源 id 203 ⇒ 某个程序"硬编码）。常量表顺序 = 文本声明顺序：
+//   `Length / Width / Height / Angle / CenterU / CenterV`（后端的 uniform 布局见 `d3d9_effect_gpu.h`）。
 //
 // ★ 范围（P0 + P1 原样保留）：
 //   ① **P0**：从 PE `.rsrc` 的 **RT_RCDATA** 按 id / 字符串名取 200/201/202/203 的字节
@@ -199,9 +204,9 @@ const FxPass* fxPassAt(const FxModule& module, const std::string& technique, std
 // ★ 实现集（"entry + profile ⇒ 后端程序"）是**唯一**一张表；它只做最后一跳的映射，
 //   门牌（technique / pass / 参数名 / 纹理名 / UV 语义）全部来自 `FxModule`。
 struct EffectProgramBinding {
-    std::uint32_t resource_id;     // 200 / 201
-    const char* technique;         // "Fade"
-    const char* pixel_entry;       // "FadePS"
+    std::uint32_t resource_id;     // 200 / 201 / 203
+    const char* technique;         // "Fade" / "SlideBlur" / "ZoomBlur"
+    const char* pixel_entry;       // "FadePS" / "SlideBlurPS" / "ZoomBlurPS"
     const char* pixel_profile;     // "ps_2_0" / "ps_1_0"
     d3d9::EffectProgram program;   // 后端要画的那一档
 };

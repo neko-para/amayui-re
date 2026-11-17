@@ -29,13 +29,24 @@ namespace lift {
 //   ★ 这张表是"实现集"的**唯一**声明面：不在表里的程序 ⇒ 调用方**具名拒绝**（bit 44）。
 //   · `FadePs20` = 资源 201 `technique Fade` 的 `compile ps_2_0 FadePS()`（alpha 归一化）
 //   · `FadePs10` = 资源 200 同一个 technique 的 `compile ps_1_0 FadePS()`（逐通道直接 lerp）
+//   · `SlideBlurPs20` = 资源 203 `technique SlideBlur` 的 `compile ps_2_0 SlideBlurPS()`
+//     （**21 个 tap**：源文本 `for( float i = -10.0f; i <= 10.0f; i++ )`，每 tap 权重 `0.0476f`）
+//   · `ZoomBlurPs20` = 资源 203 `technique ZoomBlur` 的 `compile ps_2_0 ZoomBlurPS()`
+//     （**10 个 tap**：`for( float i = 0.0f; i < 10.0f; i++ )`，权重是文本里的 `ratio[10]` 表）
+//   ★ "10-tap" 只属于 ZoomBlur —— SlideBlur 的循环上下界是 **-10..+10（含）⇒ 21 个 tap**。
+//     ⛔ 不要按"两个都是 10 tap"写（那是把 P3 任务描述当源文本用；源文本是唯一真源）。
 enum class GpuEffectProgram : std::uint8_t {
     FadePs20 = 0,
     FadePs10 = 1,
+    SlideBlurPs20 = 2,
+    ZoomBlurPs20 = 3,
 };
 
-// 常量表容量：一张 32 B 的 uniform（= 2 × float4），Fade 只用 [0]（Alpha）；
-// 203 的 6 个常量也装得下（P3）。⛔ 上限写死是因为后端 push constant 的大小必须是常量。
+// 常量表容量：一张 32 B 的 uniform（= 2 × float4）。
+//   · Fade 只用 [0]（Alpha）；
+//   · 203 用满 [0..5]：`Length / Width / Height / Angle / CenterU / CenterV`
+//     （按 FX 源文本的**声明顺序** ⇒ `c[0] = (Length, Width, Height, Angle)`、`c[1] = (CenterU, CenterV, 0, 0)`）。
+// ⛔ 上限写死是因为后端 push constant 的大小必须是常量。
 constexpr std::uint32_t kGpuEffectMaxConstants = 8;
 constexpr std::uint32_t kGpuEffectMaxTextures = 2;
 

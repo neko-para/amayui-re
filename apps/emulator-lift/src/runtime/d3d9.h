@@ -323,9 +323,9 @@ const PixelShaderVersionOverride& pixelShaderVersionOverride();
 //   pass 里"（那是 D3DX 的宿主状态）⇒ 由 `shims/d3dx9_effect.cpp` 在 Begin/BeginPass/CommitChanges/
 //   EndPass/End/销毁的**唯一边界**上报，这里只存值。**程序解析也在那一层**（它读得到 FX 文本），
 //   这里只存一份"这一批该怎么画"的快照。
-// ★ P2 的实现集 = **Fade（`ps_2_0` 201 / `ps_1_0` 200）**。不在实现集里的程序（203 的
-//   SlideBlur/ZoomBlur、202 的 Snow）⇒ `program.implemented == false` + `program.reason`，
-//   调用方**具名拒绝该批**（bit 44），⛔ 不静默降级成固定功能、⛔ 也不静默接受。
+// ★ P2 的实现集 = **Fade（`ps_2_0` 201 / `ps_1_0` 200）**；P3 追加 **203 的 SlideBlur / ZoomBlur
+//   （`ps_2_0`）**。不在实现集里的程序（202 的 Snow —— 它带 `vs_1_0`）⇒ `program.implemented == false`
+//   + `program.reason`，调用方**具名拒绝该批**（bit 44），⛔ 不静默降级成固定功能、⛔ 也不静默接受。
 // ★ 纯宿主、无锁（单线程解释器；与 `g_unsupported_mirror` 同口径）；⛔ 不写 guest 内存。
 // =====================================================================================
 // FX 文本里已实现的 shader 程序（与 `runtime/d3d9_effect_gpu.h` 的 `GpuEffectProgram` 一一对应；
@@ -334,6 +334,8 @@ enum class EffectProgram : std::uint32_t {
     None = 0,
     FadePs20 = 1,  // 资源 201 `technique Fade` / `compile ps_2_0`（alpha 归一化）
     FadePs10 = 2,  // 资源 200 同一 technique / `compile ps_1_0`（逐通道直接 lerp）
+    SlideBlurPs20 = 3,  // 资源 203 `technique SlideBlur` / `compile ps_2_0`（21 tap，见后端）
+    ZoomBlurPs20 = 4,   // 资源 203 `technique ZoomBlur` / `compile ps_2_0`（10 tap，见后端）
 };
 
 constexpr std::uint32_t kEffectMaxConstants = 8;  // 与后端 uniform 容量同源
