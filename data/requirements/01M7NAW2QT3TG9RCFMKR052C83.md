@@ -22,9 +22,10 @@
 
 ## 要做
 
-0. **N3 前置读数（读代码，不用跑）**：`Proj` 到底是哪一组矩阵（构造时第一个 4×4，`[renderer+418h]` 的语义：
-   view×proj 还是 world×view×proj）与行/列序。它决定 CPU `vs_1_0` 的实现形状。
-   ⛔ 参考实现**不许**照着"以为的 Proj"写 —— 否则实现与参考会犯同一个错而双双绿。
+0. **N3 已完成（2026-11-18，只读，EA 锚）**：`Proj` = **纯投影矩阵**（`D3DXMatrixPerspectiveFovLH`，不含 view/world）；
+   行主序 + 行向量 `v'=v*M`；`SetMatrix("Proj")` 在 `Begin` **之前**、每次 `Snow::Render` 一次 ⇒ **per-effect**；
+   **顶点进来时已是视图空间**（引擎在 CPU 上乘过 `world×view`）⇒ 只乘 `Proj`、`w` 不除。
+   读数与 EA 表：`docs/03-emulator/d3dx-effect.md` §11。
 1. **状态槽（`+0x88 SetVector` / `+0x98 SetMatrix`）**：照 `SetFloat`/`SetTexture` 的形状加两个 shim；状态块扩容，
    **矩阵 16 float 用独立 64 B 区**（⛔ 不许塞进 `constants[8]`，会把 203 的常量表挤爆；`Color` 4 float 另表）。
    同名覆盖；**没设过 ⇒ 全 0**（D3D uniform 初值就是 0，⛔ 不要默认成单位矩阵 —— 那会掩盖"引擎没设"的 bug）。
@@ -33,10 +34,12 @@
    202 ⇒ `implemented=true, has_vs=true, program=SnowPs10`；未知 VS profile（`vs_2_0`/`vs_3_0`）⇒ 仍具名拒绝。
    ⛔ 不要"凡 `vs_1_0` 都放行"。
 3. **CPU `vs_1_0`**：新增一个独立变换实现（⛔ **不改** fixed-function 的 `transformVertex` 语义）：
-   跳过光照、`clip = transformVec4D3D(Proj, (x,y,z,1))`、uv 直通、位置直接写 clip（裁剪/屏幕映射仍在 `submitPrimitives`）。
+   跳过光照、`clip = transformVec4D3D(Proj, vec4(pos,1))`（行向量、`Proj` 在右）、`w` 原样保留**不做除**、
+   uv 直通、位置直接写 clip（裁剪/屏幕映射仍在 `submitPrimitives`）。
+   ⛔ **不许**再乘设备的 WORLD/VIEW（顶点进来时已是视图空间，N3 已证）。
    只接**两个**变换实现点（`gatherVertices` / `transformVertexOnce`）与**四条** draw 路径
    （`drawPrimitive` / `drawIndexedPrimitive` / `drawPrimitiveUP` / `drawIndexedPrimitiveUP`）。
-   ⚠ `transformVertexOnce` 的每 Draw 去重缓存键是 `vertex_index` ⇒ VS 路必须把矩阵并入键或禁用该路缓存。
+   ⚠ `transformVertexOnce` 的每 Draw 去重缓存键是 `vertex_index` ⇒ VS 路必须把 `Proj` 并入键或禁用该路缓存。
    ⚠ `pretransformed`（XYZRHW）与 VS 路互斥，要显式分流。
 4. **`ps_1_0 SnowPS`**：MSL + DXBC 双源，语义 `return tex2D(TexSmp, UV) * Color;`；`Color` 是 **uniform float4**
    （不是顶点色），`Tex` 1 张、`uv_set=0`；push constant 32 B 足够（矩阵在 CPU 用掉，⛔ 不进 uniform）。

@@ -158,8 +158,9 @@ P2 新增 constexpr 表后当场红 ⇒ 补终止项 + `effectResourcePinBySha` 
 - ❌ 推翻"整体依然没变化 / 像卡在 CPU 渲染侧"的初判 —— 那是**缺省档（caps=0）**的现象：不设 `LIFT_D3D9_PS_VERSION` 时
   引擎根本不会建 effect，P1/P2 的成果**不会被触发**。
 - ✅ 确立：`caps ⇒ FX 分路 ⇒ 转场与真机一致（除 203 的 effect 层）`，这条现在是**用户实测**而不是推断。
-- ⇒ 之后要做的是：**P3（203 的两个 10-tap technique）**，然后 **P4（把 caps 缺省翻到 `PS=0x200` + `caps 声明 ⇔ 实现能力` 守卫）**；
-  202（Snow，`vs_1_0`）也要在那之前决定（按 ADR 预转写可以转成 C++ 在 CPU 顶点阶段跑，或者先允许它缺失并登记）。
+- ⇒ 之后要做的是：**P3（203 的两个 10-tap technique）**，然后 **P4（把 caps 缺省翻到 `PS=0x200` / `VS=0xFFFE0100` +
+  `required == implemented` 硬等式守卫）**；202（Snow，`vs_1_0`）**必须先实现**（A 单
+  `REQ-01M7NAW2QT3TG9RCFMKR052C83`）—— ⛔ "先允许它缺失并登记" 这条已被用户否决（2026-11-18）。
 
 ## 10. P3 · 203 的两个 technique（SlideBlur / ZoomBlur）
 
@@ -184,3 +185,63 @@ P2 新增 constexpr 表后当场红 ⇒ 补终止项 + `effectResourcePinBySha` 
 | 变异 | tap 21→20 = 12 LSB · uv 步长 ×10 = 72 LSB · program 映射 = 45 LSB + 纯档 `mock.last.program` 红 |
 
 ⇒ 至此 **caps=0x200 下转场与真机一致**（用户实测 + 本地读数）。剩下的是：**202（Snow）**、P4（caps 固定 2.0）。
+
+## 11. 202 的 `Proj` 语义（N3，2026-11-18 / win32 / 只读）
+
+> 目的：202（`SnowPS` / `technique Snow`，`vs_1_0 + ps_1_0`）落地前，先定 `SetMatrix("Proj")` 喂的是哪组矩阵、
+> 行/列序、以及顶点进来时在哪个空间 —— 它决定 CPU `vs_1_0` 的形状。
+> 语料 `corpus/disasm/files/AGE.EXE__dumped.sectfix.EXE.lst`（sha256 `7a7ba237ac22a9eb…`）；锚点全部是**二进制 EA**。
+
+### 11.1 结论
+
+1. `[renderer+418h]` = **纯投影矩阵**（`D3DXMatrixPerspectiveFovLH` 的输出），**不含 view / world**；
+   同组 `[+458h]` = view（`LookAtLH` / `D3DTS_VIEW=2`）、`[+498h]` = world（`D3DTS_WORLD=256`）。
+2. 202 的 `Proj` = `[renderer+418h]` 的**逐字节副本**（`Snow+1Ch`），中间没有再乘任何矩阵。
+3. 行/列序 = **D3DX 原生**：行主序（`m[r][c]@16r+4c`）+ 行向量 `v' = v*M`。
+4. `SetMatrix("Proj")` 在 `Begin` **之前**、每次 `Snow::Render` 一次 ⇒ **per-effect**（跨多轮 Begin/End 保持）；
+   `Color` 是每粒子在 `Begin` 前设的 uniform float4。
+5. **顶点进来时已经是视图空间**（引擎在 CPU 上乘过 `world×view`）⇒ CPU `vs_1_0` 只乘 `Proj`：
+   `clip = mul(vec4(pos,1), Proj)`，`w` 原样输出、**不做除**。⛔ 不许再用设备的 WORLD/VIEW 状态（会二次变换）。
+
+### 11.2 证据（节选）
+
+| EA | 观察 | 说明 |
+|---|---|---|
+| `0x4531BE / 0x4531CE / 0x4531DE` | `lea edi,[ebx+418h]/[+458h]/[+498h]` + `rep movsd`(0x10) | 这三个字段的写点（`sub_4531B0`，`retn 0C0h` = 3×4×4） |
+| `0x499DD7 / 0x49A28D / 0x4A1DA7` | 三个调用点传参顺序全是 **(proj, view, world)** | 分派成立：`+418h←arg_0`、`+458h←arg_40`、`+498h←arg_80` |
+| `0x49A21A` · `0x4A1D89` | `D3DXMatrixPerspectiveFovLH` · `SetTransform(3)` | `[app+0A388h]` = 投影（`D3DTS_PROJECTION`） |
+| `0x499D77` · `0x499D94` | `D3DXMatrixLookAtLH` · `SetTransform(2)` | `[app+0A3C8h]` = view（`D3DTS_VIEW`） |
+| `0x4A1DB4` | `SetTransform(0x100)` | `[app+0A408h]` = world（`D3DTS_WORLD`） |
+| `0x4B5716 / 0x4B5726` | `lea edx,[esi+1Ch]` + `push "Proj"` + `call [ecx+98h]` | `SetMatrix("Proj", &[Snow+1Ch])`，无二次乘 |
+| `0x4B5726` vs `0x4B55C4` | `Snow::Render` 的 SetMatrix vs `Snow::DrawOne` 的 `[+0FCh] Begin` | `Proj` 在 Begin 之前 ⇒ per-effect；Begin/End 每粒子一对 |
+| `0x4B5767` · `0x4B543A` | `D3DXMatrixMultiply(world, view)` · `D3DXVec4Transform((x,y,z,1))` | 顶点先变成视图空间；`0x4B55F5 DrawPrimitiveUP(TRIANGLESTRIP,2,particle+2Ch,20)` 交给 VS |
+| `0x4B5706` | `push 102h` | FVF = `XYZ|TEX1`（无 normal / diffuse） |
+| `0x4A70E2 / 0x4A70DC / 0x4A70D6 / 0x4A70D0` | `1.0 → [+0A408h]/[+0A41Ch]/[+0A430h]/[+0A444h]` | 对角在 `+0/+14h/+28h/+3Ch` ⇒ **行主序** |
+| `0x4B550B` | `fld [ecx+34h]; fsub [eax+34h]` | 排序键 = 变换后的 z（降序）⇒ 佐证视图空间深度 |
+
+### 11.3 对实现的含义
+
+- C++：`clip = transformVec4D3D(fromD3DLayout(proj16), Vec4(x,y,z,1))` —— 与 `transformVertex`
+  （`d3d9_pipeline.cpp:3866` 的 `multiplyD3D(multiplyD3D(world,view),proj)`）**同一套算子、只换矩阵**。
+- ⛔ 不要用设备的 WORLD/VIEW 状态；⛔ 不做 `w` 除法（裁剪在 `clipHomogeneous`、`1/w` 在 `toScreen`）。
+- shim 侧：`SetMatrix` 在 Begin 之前，而 `publishDrawProgram`（`d3dx9_effect.cpp:1410`）在 scope 外是 no-op
+  ⇒ 矩阵必须进**状态块**、在 `Begin`/`BeginPass` 发布时读；⛔ 不能存成"最后一次 SetMatrix"的全局。
+- `transformVertexOnce`（`d3d9_pipeline.cpp:3919`）的每 Draw 去重前提是"顶点号唯一决定结果"；VS 路多一个输入（`Proj`）
+  ⇒ 缓存键要并入矩阵，或这条路禁用缓存。
+
+### 11.4 复现（只读）
+
+```bash
+pnpm tools disasm-fn show sub_4B56D0 --lst --lines 130   # 202 的 SetMatrix / SetTexture / SetTechnique / world×view
+pnpm tools disasm-fn show sub_4531B0 --lst               # +418h/+458h/+498h 的写点
+pnpm tools disasm-fn callers sub_4531B0                  # 三个调用点的传参顺序
+pnpm tools disasm-at at --ea 0x4B5700 --lines 40          # SetMatrix("Proj") 现场
+pnpm tools disasm-at at --ea 0x4531B0 --lines 26          # 写点现场
+```
+
+### 11.5 待核
+
+1. `D3DXMatrixMultiply` 的参数顺序（按 D3DX 公开语义 `out = M1*M2`；若相反则 world/view 语义互换，但**不影响本结论**）。
+2. `[app+0A408h]`（world）除单位阵初始化外没有别的立即数写点；**指针间接写**未穷尽 ⇒ 本语料里 world 恒为单位阵。
+3. `Proj` 是 `Snow` **构造时的快照**（之后相机移动会不会用旧投影 = 需 N1 的 run 才能判）。
+4. 粒子的 uv 写点未核（`sub_4B5410` 只写 xyz）。
