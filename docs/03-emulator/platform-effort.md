@@ -421,7 +421,7 @@ ADV 上执行的是 `0x320`（6）/ `0x322`（7）/ `0x32a`（3）这类**简单
 **驱动因素.**
 1. **设备状态机**：渲染状态 / 纹理阶段 / 采样器 / 变换矩阵 / 顶点声明 —— 每个 draw 的正确性依赖「之前设过什么」；
    换成 Metal 后状态是**每管线**的，要重新建模；
-2. **着色器**：只有 1 个 effect（雪），但它是**编译过的 FX 二进制**（`D3DXCreateEffectFromResourceA` 直接吃资源 id 202）；
+2. **着色器**：**4 个 effect**（PE `.rsrc` 的 `RT_RCDATA` 200/201/202/203），而且**都是 ASCII HLSL 源码**、不是编译后的 FX 二进制（2026-11-17 实测：4/4 无 FX magic / DXBC / CTAB / 版本 token ⇒ 无内嵌字节码）；
    macOS 上要么反汇编/重写这个 effect，要么把 HLSL 翻成 MSL（emulator 的 `gpu_quad.cpp` / `gpu_scene.cpp`
    已经证明「HLSL + MSL 双源」是可行姿势，但那是**重写**的管线，不是**复用** D3DX 的 effect）；
 3. **`.x` 网格层级**：`D3DXLoadMeshHierarchyFromXInMemory` + 自定义回调（`dword_55DA00/04` 是游戏的
