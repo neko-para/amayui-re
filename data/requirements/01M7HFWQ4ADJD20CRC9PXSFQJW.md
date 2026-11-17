@@ -2,8 +2,9 @@
 
 - id: REQ-01M7HFWQ4ADJD20CRC9PXSFQJW
 - type: spike
-- status: open
+- status: done
 - parent: REQ-01M7JHSEKXW8KAKB6K2RS645M7
+- done_reason: 已按 EA 锚收口（台账 KN-01M7M6B79X6S6428733S4E3P13 / KN-01M7M6B3477V7H2Z1Z0S04475G）：opcode 0x0CD 的 handler = sub_41ACD0，观察层没有'读输入类型'——它只在 Engine+0x5EEA4 的按帧槽 256 项表上推动写指针/做深度校验（PC=base+4*target）。助记符属命名层、未复核；SBUNKI 主轮询等的 (local 90) 由鼠标回调的确认支路写，不是这个 opcode。同族 0x2FC（i2fc）= 读触摸输入队列（sub_431BA0），与 'i2fc 返回值' 无关（eax 被 VM 丢弃，脚本看的是操作数 1）。
 - tags: [emulator-lift, reverse, semantics]
 
 ## 一句话

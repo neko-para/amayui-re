@@ -2,43 +2,46 @@
 
 - id: REQ-01M7M45WSPSYB6XC82TS3X4YM2
 - type: req
-- status: blocked
+- status: open
 - parent: REQ-01M7G7EJF062NKQ0D40RF3BZ4Z
-- blocked_by: [REQ-01M7HFWQ4ADJD20CRC9PXSFQJW]
 - tags: [emulator-lift, input, sc0000]
 
-## 现象（2026-11-17 / mac arm64 / HEAD 4272091 / `--game-dir links/raw`）
+## 现象（2026-11-17 / mac arm64 / `--game-dir links/raw`）
 
 加载存档屏 → 选槽 001（缩略图台词逐字 = SC0000 第一句）→ 弹 `SBUNKI.BIN`「ロードしますか？」。
-**`はい` / `いいえ` 都点不动**：注入点击的 `fired/released` 递增、`SBUNKI` 的鼠标回调也跑了
-（`pos` 采到 `0x30A4` = 回调尾 `sub_30A4`），但确认动作块 `[0x30AC,0x32E8)` **从未执行**。
+**`はい` 点不动**：注入点击的 `fired/released` 递增，但确认动作块 `[0x30AC,0x32E8)` 从未执行。
+可复现：4 次独立 run（`.tmp/sc0000/run-raw{8,9,10,15}.log`）同一步停住；读数见
+`.tmp/sc0000/read2.md`。⇒ SC0000 的渲染路径**根本到不了**。
 
-⇒ SC0000 的渲染路径**根本到不了**（这比任何 D3DX 缺口都靠前）。可复现：4 次独立 run
-（`.tmp/sc0000/run-raw{8,9,10,15}.log`）同一步停住；截图 `.tmp/sc0000/shots/`。读数见
-`.tmp/sc0000/read2.md`。
+## 已排除（都有读数，⛔ 不要再试）
 
-## 为什么不是"坐标不对"
+- **注入链路本身**：3 次 click 的 `WM_LBUTTONDOWN/UP` 全部 `DispatchMessageA` 进 guest WndProc `0x004B92F0`
+  （lParam 逐位对）；`GetAsyncKeyState(VK_LBUTTON)` 在 `read-mouse-button` 那条指令处返回 `0x8000`
+  （SBUNKI `pos=0x0B0C`；`GetCursorPos@0x0AF8` 返回 (650,320)）。
+- **按住时长**：`kForceReleaseReads 16→4000`（跨 2 拍、两拍都读到 mask=0x1）仍然 FAIL。
+- **`GetForegroundWindow` 恒 0**：改成返回主窗口 hwnd 后仍然 FAIL（`.tmp/sc0000/exp-a.md`）。
+- **`i2fc`（0x2FC）不是断点**：它是**触摸输入队列**的读取（handler `sub_431BA0`，台账
+  `KN-01M7M6B3477V7H2Z1Z0S04475G`）；`e == 1` 只是触摸支路 `0xDA8` 的前置，鼠标会话必走
+  **`jcc a3 → 0x0F60`** 的鼠标兜底。
 
-- 槽 001 的点击**生效了**（缩略图出现、确认框弹出）⇒ 坐标 + `click` 投递本身是通的；
-- 确认框的 `はい` 有 hover 高亮（截图）⇒ 光标位置对；
-- 6 种投递形状都试过（`[0x9F8,0xB18)` / 主轮询体 `[0x9A4,0x9F8)` / `i2fc` 段 `[0xA14,0xAF8)` /
-  `いいえ`(640,396) / 连点两次）⇒ 全部 `fired+1` 但框不动。
+## 现在最可能的断点：`0x0F60` 的 gate
 
-## 静态观察（SBUNKI 清单，⛔ 未过 §6 准入门，只是"读到了什么"）
+`0x0F60` 是"鼠标行选中确认"，gate = `1 <= (local 9) < f8dfc`，再过 `f8dff[f8dfc-1]` / `f8dfe`。
+`local 9` 由 `i12e`（0x12E，handler **`sub_42F230`**，未读）算出来——它是"鼠标位置命中第几个项"的判据。
+⇒ 怀疑：点在 `650 320` 时 `i12e` 没命中"はい"（视觉 hover 高亮可能来自另一条路径）。
 
-- 主轮询 `0x9A4`：`get-input-type` → `eq 9e, 90, 1` → `jcc 9e 0x30AC ffffffff`；不成立就
-  `sleep 1` + `jmp 0x9A4`。即门是 **`get-input-type == 1`**。
-- 回调里（`0xB70` 之后）还要求 `(global-int f8fa5) & 4` 非 0 才 `mov 90 1`（= 让门成立）。
-- `get-input-type` 的 opcode 语义**未登记**：见 `REQ-01M7HFWQ4ADJD20CRC9PXSFQJW`（0x0CD）。
+## 要裁决 / 下一步（二选一）
 
-## 现在的判断
-
-要么是 **`get-input-type` 读的那份状态**没被注入点击填上（→ 本仓 input/shim 面的缺口），
-要么是 `f8fa5` 的写者需要另一条输入路径（键盘 / 消息边沿）。两者都要先有
-`REQ-01M7HFWQ4ADJD20CRC9PXSFQJW` 的结论才判得动 ⇒ 本单**blocked_by** 那张 spike。
+1. **M0 继续取证（只读 RE）**：读 `sub_42F230`（`i12e` 的命中矩形）、`f8dff`/`f8dfc` 的装载、
+   以及加载框入口 `f8dfc` 的值 ⇒ 算出"はい"的命中矩形，用一次位置门 run 验证。
+   ⚠ 要在仿真里直接读 `(local 9)`/`f8dfc` 得给控制层加"按帧槽读脚本局部变量"（改 schema ⇒ 先立单）。
+2. **M1 实现触摸语义（产品裁决）**：`RegisterTouchWindow`/`GetTouchInputInfo`/`CloseTouchInputHandle`
+   现在被 `src/shims/dynamic_exports.cpp:27/30/33` 显式判成"XP 没有这个导出"，`WM_TOUCH(0x240)` 也不在注入面。
+   实现三件套 + 注入 `WM_TOUCH` ⇒ 触摸支路 `0xDA8` 可达。**风险**：给 guest 造设备 = 语义面新增（过 §6）、
+   整条 UI 语义漂移（`0xA1C` 把 local4 强置 1 等）、与"本机报 XP 5.1"的口径冲突。
 
 ## 判据
 
-- 机制定了之后：把这条转成 `bug`（带 `repro`）或直接实现（若属 shim 缺口），
-- 验收 = 同一配方能过确认框、`await script SC0000` 命中；守卫按机制选（input 面优先
-  `input-plan-read-points` / `lift-control-endpoint` 那一族）。
+- 过确认框：`await position SBUNKI 0x0F60 0x1040`（鼠标支路）或 `[0xDA8,0x0F60)`（触摸支路）命中，
+  且 `await script SC0000` 命中。
+- 之后按那次 run 的 `stop:` 名字选 D3DX 的实现单元（⛔ 不猜）。
