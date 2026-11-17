@@ -725,3 +725,10 @@
 - **连带**：`audio.cpp:1325-1352` 的 `pump()` 反向锁序论证建立在"绝不存在 feeder 在跑而 pump 走 D"之上 ⇒ 谓词一改，那段注释与前提必须一起改。
 - **何时 / 谁发现**：2026-11-17，用户报"hover 音效触发与播放有明显间隔"；父级在同一轮把它归到 `has_machine` 门与 600 ms lead。
 - **需求单**：`REQ-01M7MHEZRQJSMAAWPESVW44DSK`（判据：AOT + `--audio sdl` ⇒ `feeder=host-thread`、lead=19200 B、TEB 不同、`--audio off` 输出逐字节不变）。
+
+- **修法 / 读数（2026-11-17 已修）**：`audioThreadMode()` 降到两个事实（`mode == Sdl && real_time`），
+  "能起 feeder"由 `attach(..., const GuestLayout&)` 的引用入参钉死；AOT 新增 `CriticalSectionTable`（feeder 的硬前提）、
+  feeder 的 guest 执行器走 **AOT IR 派发**（新 `src/aot/aot_feeder.{h,cpp}`），TEB 用 `GuestLayout::feeder_teb`（自有，不共主线程）。
+  **读数**：`pushed - played` 115200 B（600.0 ms）→ **19200 B（100.0 ms）**（4/4 次精确同值）；
+  `calls=` 12 万级 → **0**；underruns / `fill_slow` 全 0；`dev_frames=1024`（21.3 ms，另一笔账）。
+  **代表守卫**：`aot_audio_flags.cpp#s0-thread-mode-truth-table`（用户裁决的机械表达）+ `audio.cpp#audio-device/feeder-teb-is-own`（BUG-22 回归口）。
