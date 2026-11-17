@@ -2,8 +2,9 @@
 
 - id: REQ-01M7NC46ZFG61JZ0X78AQ9BRSW
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M7JHSE82SRRH0QJ7G6GXRD0Y
+- verify: apps/emulator-lift/tests/kernel32_time.cpp#wall-vs-uptime-split
 - repro: docs/03-emulator/defects.md#BUG-30
 - severity: S3
 - tags: [emulator-lift, shim, kernel32, time]
