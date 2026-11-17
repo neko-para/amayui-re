@@ -21,9 +21,11 @@
    **一条没少**（102,595 / 38,756 / 5,674，与 B0 完全相同）。**唯一被内联的是跨 part 的 `lift_cc_*`**：
    站点 2,267 → **1,543**（−724，32%），而且内联是**净增代码**（lift 代码 +0.17%）。
 3. **为什么 tick/note/dyn 内联不掉（已实测定因）**：AOT IR 的函数**没有** `target-cpu` / `target-features`
-   属性，而运行库 TU（`lift_abi.cpp` / 所有 shim）带 `apple-m1` 的 features ⇒ LLVM 的
-   `areInlineCompatible()` 判"运行库 → AOT"不相容 ⇒ **一条都不内联**。证据见 §5.2（离线 `llvm-link`+`opt`：
-   原样 17,544 → 17,561；把两侧 feature 属性都删掉 → **3,086**）。
+   **函数属性**，而 clang 的 C++ 前端会把 `apple-m1` 写进运行库 TU（`lift_abi.cpp` / 所有 shim）的每个函数
+   属性 ⇒ LLVM 的 `areInlineCompatible()` 判“运行库 → AOT”不相容 ⇒ **一条都不内联**。★ 这是**属性**
+   不对等，**不是** codegen 的 feature 不同：`clang -###` 对 `.ll` 与 C++ 的 cc1 行逐项相同（都是
+   `-target-cpu apple-m1` + 同一串 feature）；mac 上 IR 的 codegen 并没有 feature 缺失。证据见 §5.2
+   （离线 `llvm-link`+`opt`：原样 17,544 → 17,561；把两侧属性都删掉 → **3,086**；补属性后 `.obj` 与默认逐字节相同）。
 4. **代价**：`-flto` 链接 = **29.1 s（2.40 GB 峰值）**（B0）/ **45.0 s（4.25 GB）**（B2），而今天的常规链接
    = **0.21 s（247 MB）**。C（single LL）没有 LTO 链接，但 clang 段从 7.35 s 涨到 **38.9 s（2.67 GB）**。
 5. **C（single LL）与 B0 等价**：跨 part 内联量完全相同（liftCc 2,267 → 1,543），tick/note/dyn 照样跨 TU；
@@ -31,11 +33,14 @@
 6. **诊断档 B1x（把运行库的 feature 注进 8 份 IR）**：tick 站点 **102,595 → 13,893（−86%）**、
    note_write **38,756 → 0（−100%）**；但 `__text` **+3.1%**、lift 代码 +7.6%；
    固定 guest 工作量（`--max-insns 4e8` / `8e8`）的墙钟 **−8% / −4.6%**（mac，交错取中位）。
-   ⇒ LTO 真正能买到的东西（tick/note 内联）**要先把 feature 属性补上**，而且**静态是变大的、动态是变快的**。
+   ⇒ LTO 真正能买到的东西（tick/note 内联）**要先把函数属性补上**（值由 CMake 传入，⛔ 不写死 apple-m1），
+   而且**静态是变大的、动态是变快的**。
 
 **建议：默认不改（保持 §12.8 的 `split8 -c -O2`）。** LTO 今天零收益、纯成本；C 也不划算。
-只有"LTO + lift-gen 发射 target-features"这条路能拿到 mac 上 5–8% 墙钟，代价是 +3% 代码、+36 s 链接、
-3 GB RSS，且要动 AGENTS §12.8 的冻结裁决（详见 §8）。
+只有"LTO + lift-gen 发射 target-cpu/target-features **函数属性**"这条路能拿到 mac 上 5–8% 墙钟，
+代价是 +3% 代码、+36 s 链接、3 GB RSS，且要动 AGENTS §12.8 的冻结裁决（详见 §8）。
+★ 注意：这不是“启用 mac 上原本没用到的 CPU feature”（mac 上 feature 本来就在用），而是“让 LTO 内联器
+认得出两侧是同一个 target”；win x64 的 AVX/SSE4 才是真正的“要不要提高 feature 基线”裁决。
 
 ---
 
@@ -170,7 +175,19 @@ shape 变成**可辨识**的：`split8-O2-lto-parts`（只有 8 份）/ `split8-
   **runtime 内部**的 LTO（runtime 桶 +65,896 条、调用站点重排：`_SDL_SetError_REAL` 2,090、
   `lift::guestFault` 1,091、`___clang_call_terminate` 1,007 等），但**没有一条运行库函数进 AOT**。
 
-### 5.2 定因：`areInlineCompatible()` 被 `target-features` 挡住（离线复现）
+### 5.2 定因：`areInlineCompatible()` 被**函数级属性**挡住（离线复现）
+
+★ **校正（2026-11-17 复核）**：这里说的“feature 不匹配”是 **LLVM 函数属性**层面，**不是 codegen 的
+target feature**。`clang -###` 对 `.ll` 与 C++ 的 cc1 行**逐项相同**（`-target-cpu apple-m1` + 同一 27 个
+显式 feature）⇒ mac 上 AOT IR 的 codegen 与 runtime/shim **是同一份 clang 默认**，没有“shim 有、IR 没有”
+的 feature 缺失。差异只在：`lift-gen` 发射的 `.ll` 函数**没有** `"target-cpu"/"target-features"` 属性，
+而 clang 的 C++ 前端会把 `apple-m1` 写进每个函数属性；`areInlineCompatible` 比较属性 ⇒ 拒绝内联。
+- `-mcpu=apple-m1` 对 `.ll` 无效：默认已经是 apple-m1（该 flag 实际映射到 `apple-a14`，产物逐字节相同）。
+- 给 part00 的每个 `define` 补属性后，`.obj` 与默认**逐字节相同** ⇒ 属性只影响 LTO 内联，不改 codegen。
+- **mac 量化**：`-mcpu=generic` 关掉 feature ⇒ `__text` −53,912 B(−0.37%)、lifted NEON **7,745→3,709
+  (−52%)** ⇒ feature 确实在用；60 帧指纹逐位相同。
+- **win x64**：IR 与 C++ 默认都是 `-target-cpu x86-64`、0 feature（SSE2）；8 份全编 `+AVX2` −0.40% 条、
+  VEX 115,206、`%ymm` 8,892、`.text` −8,915 B。<待核：win 运行机 feature 集>（无 win 环境，未实测）。
 
 ```bash
 $ LLVM=/opt/homebrew/opt/llvm/bin
@@ -190,11 +207,12 @@ $ $LLVM/llvm-dis /tmp/m2.bc -o /tmp/m2.ll && grep -c 'call void @lift_tick' /tmp
 #   17,544 → 3,086        ← 82% 的 tick 调用立刻被内联
 ```
 
-⇒ **机械原因就是 feature 不匹配**（LLVM 的 `areInlineCompatible` 要求 callee 的 feature 是 caller 的
-子集；"无属性" vs "+apple-m1" 判失败）。这也解释了为什么 B0/B1/B2 三个档的 tick 站点**一分不差**：
-三种 LTO 配置都过不了这道闸。补 `-mcpu=apple-m1` 到 AOT 的 clang 命令**没用**——实测
-`clang -c -O2 -flto -mcpu=apple-m1` 对 `.ll` 输入**不会**给函数加 target 属性（B1f 档与 B1 逐项相同）。
-要修只能**让 lift-gen 在 IR 里发射这两个函数属性**（或构建期后处理 `.ll`）。
+⇒ **机械原因是函数属性不对等**（LLVM 的 `areInlineCompatible` 要求 callee 的 feature 是 caller 的
+子集；“无属性” vs “+apple-m1” 判失败），**不是** codegen 的 target feature 不同（§5.2 开头的校正）。
+这也解释了为什么 B0/B1/B2 三个档的 tick 站点**一分不差**：三种 LTO 配置都过不了这道闸。补
+`-mcpu=apple-m1` 到 AOT 的 clang 命令**没用**——实测 `clang -c -O2 -flto -mcpu=apple-m1` 对 `.ll`
+输入**不会**给函数加 target 属性（B1f 档与 B1 逐项相同）。要修只能**让 lift-gen 在 IR 里发射这两个
+函数属性**（或构建期后处理 `.ll`；属性值由 CMake 传入，⛔ 不要写死 apple-m1）。
 
 ### 5.3 诊断档 B1x：把运行库的 feature 注进 8 份 IR 之后
 
