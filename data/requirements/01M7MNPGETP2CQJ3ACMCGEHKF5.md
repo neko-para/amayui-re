@@ -35,3 +35,18 @@
 - caps 报的值与实现能力一致（守卫：报 PS≥2.0 ⇒ `D3DXCreateEffectFromResourceA` 已实现且不响停）。
 - 同一段转场：单帧 guest 指令从 2e10 回到 1e6 量级，画面与 CPU oracle 差异在阈值内。
 - 映射表覆盖**S0 点清的全部** shader；漏一个 ⇒ 启动期/首次使用时响亮停并点名哈希。
+
+## 有限集合的第一次盘点（2026-11-17，S0 进行中；资源由 S0 agent 从 PE/资源链抽出，父级读内容）
+
+四个 effect 资源**都是 FX 源文本（HLSL）**，不是编译后的二进制（都以 `//====` 注释开头，892–1,776 B）：
+
+| 资源 | 内容 | 说明 |
+|---|---|---|
+| 200 | `FadePS` + `technique Fade` | 两张纹理按 `Alpha` 交叉淡化（`ret.a = c0.a*(1-Alpha) + c1.a*Alpha`）；引擎效果**等级 1** |
+| 201 | `FadePS` + `technique Fade` | 同上；引擎效果**等级 2**（转场第一帧要的就是这个） |
+| 202 | `SnowPS` + `technique Snow` | 雪粒子 |
+| 203 | `SlideBlurPS` + `ZoomBlurPS`，`technique SlideBlur` / `ZoomBlur`（`compile ps_2_0`） | **横向滑窗模糊**（"横向模糊"就是它）；软件 `BlurTexture` 是它的 CPU 回退 |
+
+⇒ 预转写的对象是 **4 个 effect / 5 个 ps_2_0 级 shader**，而且拿到的是**源码**（不需要反汇编字节码）：
+S2 的工作量 = 把这 5 个 HLSL 逐份转成 MSL/DXBC + 每个 technique 的 pass 状态表；S1 = 资源号/哈希 → 表的映射 + `ID3DXEffect`
+（`SetFloat("Alpha")` / `SetTexture("Tex0"/"Tex1")` / `Begin/Pass/End`）的最小子集。
