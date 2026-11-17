@@ -753,5 +753,23 @@
   `GetLocalTime` / `GetSystemTime` / `GetSystemTimeAsFileTime` / `GetThreadTimes` 用 `system_clock` 起步的墙钟；
   `GetLocalTime` 再做宿主时区换算。测试用注入墙钟 base + 时区，⛔ 不断言"当前年份"。
 - **代表守卫**：无（`apps/emulator-lift/tests` 里 grep 不到 `GetLocalTime` / `GetSystemTime`）。建议新增 `kernel32_time/*`。
-- **复现**：`.tmp/save-time/report.md`（本地，未入库）；直接读 header：
+- **复现**：直接读 header：
   `[IO.File]::ReadAllBytes('<SAVE03.DAT>')[0x108..0x117]` 后按 `SYSTEMTIME`（16 B LE）展开。
+
+### BUG-31 · `--until` 只认派发主循环：`lift_dyn` 尾调用目标与 `call` 返回点停不住（假阴性）
+
+- **现象**：`--until <EA>` 对两类 EA 永远不命中、run 只会 time-limit：
+  ① 跳转表 case 体（`jmp ds:jpt_4B1832` → `lift_dyn` 尾调用）；
+  ② `call` 的返回地址（如 `0x4A9F50` / `0x4AF05A`，`out/aot/lift_table.inc` 里没有这些块入口）。
+  实测（2026-11-18）：blind wipe 的 4 条 mode 探针（`0x4B1F99 / 0x4B21DB / 0x4B286F / 0x4B2AB5`）全部 time-limit；
+  阳性对照 `--until 0x4B06D0`（call 目标 = 块入口）当场命中。`D3DXMatrixDecompose` 的 E2E 用
+  `--until 0x4A9F50 / 0x4AF05A` 4 次尝试全部 time-limit。
+- **根因**：`--until` 的比较只在 AOT 派发主循环（`aot/aot_run.cpp`）；`runtime/lift_abi.cpp` 的 `lift_dyn`
+  直接尾调用 `fn`，不检查 until；生成代码块内也不检查。
+- **正确用法（临时绕开）**：用**派发块入口**（`out/aot/lift_table.inc` 里有的 EA），或 `call` 之后紧邻的块入口
+  （`0x4A9F55` / `0x4AF05F`；后者尚未取得命中读数，属待核）。
+- **修法方向（未实施）**：给 `lift_dyn` 加**仅诊断档**的 until 检查（全局 atomic 开关 + 比较 EA，默认档一次 relaxed load），
+  或在派发表生成时把"call 返回点"列为可停块入口；⛔ 不要为诊断把检查塞进每个生成块。
+- **代表守卫**：无（`--until` 目前只有 CLI 行为，无 CTest 钉"跳转表 case 能停"）。
+- **复现**：`--until 0x4B21DB` 的 blind wipe mode 探针（命令见 `docs/03-emulator/wipe-profile.md`）⇒ time-limit；
+  `--until 0x4B06D0` 同配方 ⇒ `until-ea` 命中。
