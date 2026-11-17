@@ -2,8 +2,10 @@
 
 - id: REQ-01M7M964YWQKNEY9YZ3NM8C7BD
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M6ZB7M1EEF5WMWEYX6K5556V
+- verify: apps/emulator-lift/tests/conformance_cases.cpp#bt-mem-hi-slot
+- done_reason: 根因不是 locale shim 的返回值，而是两条独立原因（详见 docs/03-emulator/defects.md 的 BUG-27/28）：① bt/bts/btr/btc 的内存形位偏移被截成低 5 位（SDM：内存形是地址偏移 EA+(BitOffset DIV 位宽)*字节数）⇒ 客侧 _strcspn 把 japanese 切成 japa ⇒ setlocale 失败 ⇒ mb_cur_max=1；② GetCPInfo 的 CPINFO::LeadByte 写到 +4（文档是 +6）。两处都修后 local 9c 6→3、按钮宽 334→247（三种口径都 −87）；60 帧语义指纹五项逐位相同。守卫：conformance 的 6 条内存形用例（含 16 位/负控）+ locale-ext 的 get-cp-info-layout + lift-ops-diff 的真实站点两臂比较；3 条变异各 --match 实测红。
 - tags: [emulator-lift, encoding, text]
 
 ## 现象（2026-11-17 / mac / SBUNKI 的运行时取样）
