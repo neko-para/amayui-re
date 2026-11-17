@@ -4,16 +4,23 @@
 //   同一份 guest 输入在任意机器 / 任意时刻跑出来的 tick / FILETIME / SYSTEMTIME 逐位相同
 //   （这是判据 A4 的前提，见 clock.h）。
 //
-// ★ 本文件用的两个常数：
-//   · 虚拟时钟的零点 = **1970-01-01 00:00:00Z**（`GetSystemTime` 的固定 epoch）。
-//   · `0x019DB1DED53E8000` = 116444736000000000 = 1601-01-01 → 1970-01-01 的 100 ns 数。
-//     `GetSystemTimeAsFileTime` 输出 `now100ns() + 这个常数`（FILETIME 的起点是 1601，见 Win32）。
-//     ⇒ 两条 API 说的是同一天：SYSTEMTIME 按 1970 epoch 展开，FILETIME 平移 1601→1970。
+// ★ 本文件用的两个读数口径（BUG-30 之后**必须分开**）：
+//   · **uptime** = `cpu.clock->now100ns()` / `nowMs()` / `qpc()`：宿主启动起算的**单调**读数
+//     （虚拟档 = 从 0 起算的虚拟时间）。它只服务 `GetTickCount*` / `timeGetTime` / QPC，
+//     ⛔ **不当 epoch 展开**（修前就是这么错的：存档显示 `1970/1/6` = 1970 + 宿主 uptime）。
+//   · **墙钟** = `cpu.clock->wall100ns()`：1970-01-01 00:00:00Z 起算的 100 ns（口径见 clock.h）。
+//     `GetSystemTime` / `GetSystemTimeAsFileTime` / `GetThreadTimes` 用它；
+//     `GetLocalTime` 再用**宿主时区**（`shims/time_zone.h`，含 DST）换算。
+//   · `0x019DB1DED53E8000` = 116444736000000000 = 1601-01-01 → 1970-01-01 的 100 ns 数：
+//     `GetSystemTimeAsFileTime` 输出 `wall100ns() + 这个常数`（FILETIME 的起点是 1601）。
+//     ⇒ 两条 API 说的是同一天：SYSTEMTIME 按墙钟展开，FILETIME 平移 1601→1970。
 //
 // ⚠ 偏差（逐条）：
-//   1. **`GetLocalTime` == `GetSystemTime`**（不做时区）：本模拟器没有 tz 数据库，也不读宿主
-//      时区 ⇒ 本地时间恒等于 UTC。影响：guest 若用本地时间做显示（标题栏 / 存档时间戳）会看到
-//      UTC；游戏逻辑里"按日期分支"的代码只有在跨时区边界时才可能有差异。
+//   1. `GetLocalTime` 的时区来自**宿主**（Windows `SystemTimeToTzSpecificLocalTime` /
+//      POSIX `localtime_r` 的 `tm_gmtoff`，DST 按被换算的时刻判定）。影响：guest 看到的是
+//      跑这一趟的那台机器的时区；同一份输入在不同时区的机器上会差 UTC 偏移（这是**宿主事实**，
+//      与游戏数据无关）。虚拟时钟档（非 AOT）的墙钟 base 缺省 0 ⇒ 本地时间落在 1970 附近，
+//      理论上只有测试会看到；产品臂（AOT）恒 real-time ⇒ 恒是真日期。
 //   2. **`QueryPerformanceFrequency` 是仿真值 3,579,545 Hz**（VirtualClock 的固定频率，不是
 //      宿主 TSC / 高精度计时器）。QPC 因此也是虚拟的、单调的、可复现的。
 //   3. **`GetTickCount64` 走 EAX:EDX 两个寄存器返回**（`ShimCall` 只有一个 32 位 `result`）；
@@ -34,6 +41,7 @@
 
 #include "runtime/x86.h"
 #include "shims/register.h"
+#include "shims/time_zone.h"
 
 namespace lift {
 namespace {
@@ -96,6 +104,18 @@ CivilTime civilFrom100ns(std::uint64_t t) {
     return c;
 }
 
+// 墙钟（1970 起算的 100 ns）→ **本地**公历字段：先按宿主时区取该时刻的偏移，再加到 UTC 上。
+// ★ DST 由 `time_zone.h` 按**这个时刻**判定（⛔ 不是按"现在是不是夏令时"）。
+CivilTime localCivilFromWall100ns(std::uint64_t wall_100ns) {
+    const std::int64_t wall = static_cast<std::int64_t>(wall_100ns);
+    const std::int32_t offset_sec =
+        time_zone::utcOffsetSecondsFor(wall / static_cast<std::int64_t>(kTicksPerSec));
+    const std::int64_t local = wall + static_cast<std::int64_t>(offset_sec) * 10000000LL;
+    // 虚拟档 base=0（1970-01-01）+ 西半球负偏移 ⇒ 会落到 1970 之前；夹到 epoch，
+    // ⛔ 不把它按无符号回绕展开成 58xxx 年（产品臂恒 real-time ⇒ 只有测试可能碰到）。
+    return civilFrom100ns(static_cast<std::uint64_t>(local < 0 ? 0 : local));
+}
+
 void writeSystemTime(X86& cpu, std::uint32_t ea, const CivilTime& c, const char* api) {
     if (ea == 0) shimAbort("kernel32", api, "lpSystemTime 为 NULL");
     cpu.mem->wr16(ea + 0x00, static_cast<std::uint16_t>(c.year));
@@ -127,7 +147,8 @@ void shimGetSystemTimeAsFileTime(X86& cpu, ShimCall& call) {
     requireClock(cpu, "GetSystemTimeAsFileTime");
     const std::uint32_t ea = call.u32(0);
     if (ea == 0) shimAbort("kernel32", "GetSystemTimeAsFileTime", "lpSystemTimeAsFileTime 为 NULL");
-    writeU64(cpu, ea, cpu.clock->now100ns() + kFiletimeEpochDelta);
+    // ★ 墙钟（不是 uptime）：FILETIME = 1970 墙钟 + 1601→1970 的 delta。
+    writeU64(cpu, ea, cpu.clock->wall100ns() + kFiletimeEpochDelta);
     call.result = 0;  // void
 }
 
@@ -162,15 +183,17 @@ void shimQueryPerformanceFrequency(X86& cpu, ShimCall& call) {
 void shimGetSystemTime(X86& cpu, ShimCall& call) {
     requireMem(cpu, "GetSystemTime");
     requireClock(cpu, "GetSystemTime");
-    writeSystemTime(cpu, call.u32(0), civilFrom100ns(cpu.clock->now100ns()), "GetSystemTime");
+    // ★ UTC = 墙钟（⛔ 不是 `now100ns()` 的 uptime）。
+    writeSystemTime(cpu, call.u32(0), civilFrom100ns(cpu.clock->wall100ns()), "GetSystemTime");
     call.result = 0;
 }
 
 void shimGetLocalTime(X86& cpu, ShimCall& call) {
     requireMem(cpu, "GetLocalTime");
     requireClock(cpu, "GetLocalTime");
-    // 偏差 1：没有时区 ⇒ 本地时间 == UTC
-    writeSystemTime(cpu, call.u32(0), civilFrom100ns(cpu.clock->now100ns()), "GetLocalTime");
+    // ★ UTC 墙钟 → 宿主时区（DST 按该时刻判定；口径见 `shims/time_zone.h`）。
+    writeSystemTime(cpu, call.u32(0), localCivilFromWall100ns(cpu.clock->wall100ns()),
+                    "GetLocalTime");
     call.result = 0;
 }
 
@@ -178,8 +201,8 @@ void shimGetLocalTime(X86& cpu, ShimCall& call) {
 // ★ 为什么必须实现（不是"跳过"）：CRT 的 C++ 静态初始化器里有 ConcRT 的
 //   `Concurrency::details::Security::InitializeCookie`（0x4EC82C），它拿 `GetThreadTimes` 的
 //   返回值去搅 cookie —— 不实现它就停在静态初始化里，永远到不了 `_WinMain@16`。
-// ★ 时间同源 = `cpu.clock`（和 GetSystemTimeAsFileTime 同一个 100 ns 零点 + 1601 偏移）：
-//   · lpCreationTime = **进程/线程创建时刻** = 虚拟时钟的当前值（guest 单线程 ⇒ 线程与进程同刻创建）；
+// ★ 时间同源 = `cpu.clock` 的**墙钟**（和 GetSystemTimeAsFileTime 同一个 1970 墙钟 + 1601 偏移）：
+//   · lpCreationTime = **进程/线程创建时刻** = 墙钟当前值（guest 单线程 ⇒ 线程与进程同刻创建）；
 //   · lpExitTime     = 0（还没退出；真机上线程没结束时这个值是未定义的，这里取 0）；
 //   · lpKernelTime / lpUserTime = 0（偏差 8：本模拟器**不统计 guest 的 CPU 时间**）。
 //   ⇒ 逐位可复现（判据 A4 的前提），且四个输出都写满 8 字节（FILETIME）。
@@ -195,7 +218,7 @@ void shimGetThreadTimes(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
-    const std::uint64_t created = cpu.clock->now100ns() + kFiletimeEpochDelta;
+    const std::uint64_t created = cpu.clock->wall100ns() + kFiletimeEpochDelta;
     const std::uint32_t slots[4] = {call.u32(1), call.u32(2), call.u32(3), call.u32(4)};
     for (int i = 0; i < 4; ++i) {
         if (slots[i] == 0) continue;  // 四个出参都可为 NULL（Win32 允许）

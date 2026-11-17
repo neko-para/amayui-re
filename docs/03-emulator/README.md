@@ -26,6 +26,7 @@
 | **交互模型**（任务 = 一串**顺序**配方：门 → 动作 → 下一个门；失败全部响亮；两个门 = 脚本身份 / 脚本内位置；唯一入口 = AOT 臂 `--input-plan`，配方落点 `apps/emulator-lift/scripts/recipes/*.plan`） | `interaction-model.md` |
 | **某个脚本里哪段是哪个屏 / 哪段吃输入**（脚本级分析：身份 · 位置区间 · 输入点 · 待核；一条区间必须带复现命令与读数） | `scripts/<NAME>.md`（口径见 `scripts/README.md`） |
 | **怎么停下来看 AOT 跑到哪**（控制层：两个汇点 / WS 协议事实 / `sample` 快照 / 僵尸与 `gc` / window 档与陈旧事件 / 怎么跑 `emu-ctl`） | `control-plane.md` |
+| **窗口缩放 `--scale <auto/数值>`**（**只改窗口、不改帧**：窗口客户区 = round(1280×s)×round(720×s)、画面仍 1280×720（放大，接受模糊）；auto 取 display content scale；鼠标映射仍只有 `cursor_map.h` 一份；headless 不生效） | `window-scale.md` |
 | **CP932 编码后端能不能换成系统接口**（评估：解码等价 9790/9795、编码 373 个重复映射的字节选择分歧；结论与待补的 Windows 实测） | `encoding-backend.md` |
 
 ### 0.1 判据：什么进 test，什么进文档

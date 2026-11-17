@@ -137,11 +137,26 @@
 |---|---|---|---|---|
 | L1-PE-01 | 资源查找失败一律 `false` + 具体原因（"没有这一项" / 类型不存在 / 目录声明损坏**都是失败**，⛔ 不当成"没有资源"）；资源名比较**大小写不敏感**；`RT_GROUP_ICON` 返回组声明的 `RT_ICON` ID 列表，**不保证每个 ID 都存在**（调用方自查） | 文档 · `FindResource`（代码注释 `pe_resource.cpp:54`） | `runtime/pe_resource.cpp:54-64`、`87-91`、`150-152`、`362-384` | `pe_resource.cpp / pure-find-by-id`、`pure-find-by-name`、`pure-icon-group` |
 
+## TIME —— 计时：墙钟 / uptime / 时区
+
+> **口径（BUG-30）**：`cpu.clock` 对外有**两条**读数，⛔ 不许再合成一条。
+> **uptime** = 宿主启动起算的单调读数（虚拟档 = 从 0 起算），只服务 `GetTickCount*` / `timeGetTime` / QPC；
+> **墙钟** = 1970-01-01 00:00:00Z 起算的 epoch，只服务 `GetSystemTime*` / `GetThreadTimes` / `GetLocalTime`。
+> 修前的错就是"把 uptime 当 1970 epoch 展开"（存档显示 `1970/1/6`，随开机时长漂）。
+
+| id | 合同 | 依据 | 实现 | 守卫 |
+|---|---|---|---|---|
+| L1-TIME-01 | **两条读数分家**：`GetTickCount` / `GetTickCount64` / `timeGetTime` / QPC = 单调 uptime（零点 = 时钟起点：AOT real 档 = 宿主启动，虚拟档 = 0），⛔ 不是 epoch；`GetSystemTime` = UTC 墙钟（1970 起算）、`GetSystemTimeAsFileTime` = 墙钟 + 1601→1970 delta（`0x019DB1DED53E8000`）、`GetThreadTimes` 的创建时间 = 同一份墙钟。real 档的 wall base 在 `setRealTime(true)` 捕获为 `system_clock::now() − 单调读数`，之后只随**单调增量**走（宿主调时不会让墙钟倒退 / 跳跃）；虚拟档 base = 0 ⇒ `GetSystemTime` 与 BUG-30 修前**逐位相同**。控制层暂停（`freeze`）对两条读数都不可见（暂停区间不写进存档时间戳）。 | 文档 · `GetSystemTime` / `GetSystemTimeAsFileTime` / `GetThreadTimes` / `GetTickCount`（URL 待补）＋ `我们自定`（"墙钟 = 捕获点 epoch + 单调增量"是本线口径；`system_clock` 的起点按 1970 处理） | `runtime/clock.h:102`（`wall100ns`）、`:141`（`captureWallBase`）· `shims/kernel32_time.cpp:151`、`:187`、`:221` | `kernel32_time.cpp / wall-vs-uptime-split`、`filetime-and-thread-creation-use-wall`、`virtual-base-plus-virtual-now`、`freeze-freezes-wall-too`（CTest `kernel32-time`） |
+| L1-TIME-02 | `GetLocalTime` = UTC 墙钟 + **宿主**时区偏移；DST 按**被换算的那个时刻**判定（⛔ 不是按"现在是不是夏令时"一刀切）；偏移取不到 ⇒ 按 UTC（0，不猜）。本地与 UTC 的字段差 = 偏移（跨日时日期一起变）。 | 文档 · `GetLocalTime` / `SystemTimeToTzSpecificLocalTime`（URL 待补）＋ `我们自定`（宿主时区是**宿主事实**，不进确定性判据；产品臂恒 real-time） | `shims/time_zone.h:80`（`hostUtcOffsetSeconds`）、`:86`（Windows tz 规则）、`:99`（注入优先的入口）· `shims/kernel32_time.cpp:109`（`localCivilFromWall100ns`）、`:195` | `kernel32_time.cpp / local-time-host-zone-dst`（假 DST 规则；不依赖本机 TZ） |
+
 ## 覆盖范围（这份账**没有**写到的部分）
 
 - **x86 语义**（指令 / 标志位 / x87）不是 Win32 合同，归 CTest `conformance` 与 spec 的 ISA 章。
-- **内核对象其余族**（version / imagehlp / shell32 / 定时器）：只有形态层，没到"对外承诺"的密度 ⇒ 未取证
-  （registry 的唯一一条合同见 `L1-REG-01`，只锁**参数校验**，不锁 no-op 的取值口径）。
+- **内核对象其余族**（version / imagehlp / shell32 / winmm 多媒体定时器的回调语义）：只有形态层，没到"对外承诺"的密度 ⇒ 未取证
+  （registry 的唯一一条合同见 `L1-REG-01`，只锁**参数校验**，不锁 no-op 的取值口径）；
+  计时族本身的两条合同见上面的 `L1-TIME-01/02`（**不**包括 `timeSetEvent` 的协作式触发口径——那在 `tests/timer_ext.cpp`，是行为夹具不是 L1 合同）。
+- **guest 侧时区 API**（`SetTimeZoneInformation` / `GetTimeZoneInformation`）本线**没有导入也没有 shim**
+  ⇒ `L1-TIME-02` 只承诺"`GetLocalTime` 按宿主时区"，不承诺 guest 能设置时区。
 - **`LoadImage` / 图标尺寸**：全仓没有 `LoadImage`（只有伪 `LoadIconA`/`LoadCursorA`）⇒ 给不出合同。
 - **`FindResourceA`** 仍是 `addUnimplemented`（`shims/kernel32_bootstrap.cpp:864`）⇒ Win32 层的"资源查找失败码"没有可观察面。
 - **`D3DERR_OUTOFVIDEOMEMORY`** 全仓未出现；`CreateDevice` 的资源失败走 `kFail(0x80004005)`（`shims/d3d9.cpp:345-348`）—— 与文档不符，**待定**，未写成合同。

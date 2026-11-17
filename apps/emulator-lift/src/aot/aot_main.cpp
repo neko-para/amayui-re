@@ -30,6 +30,7 @@
 #include "runtime/present_flags.h"    // `--cursor-warp` / `--sound` 的**唯一**一份判据 + 文案
 #include "runtime/present_sdl.h"
 #include "runtime/vfs.h"  // openHostFileUtf8（Windows 的 UTF-8 路径）
+#include "runtime/window_scale.h"  // `--scale <auto|数值>` 的**唯一**一份口径（尺寸 / DPI / readout 文案）
 
 namespace {
 
@@ -143,6 +144,16 @@ void usage() {
         "  --present-hidden          强制隐藏窗口（仍必须显式 --present window/auto）\n"
         "  --present-screenshot <path>      每次可见窗口 Present 后存一张窗口 BMP（{frame} 可用）\n"
         "  --present-screenshot-frame N     只回读第 N 帧（1 起；0 = 每帧都写）\n"
+        "  --scale auto|数值  窗口客户区 = round(1280×s) × round(720×s)。★ **只改窗口、不改帧**：\n"
+        "                      guest 画面恒为 1280×720，放大后的模糊**可接受**（真机也糊）⇒\n"
+        "                      ⛔ 不做高分辨率重渲染 / 不改帧尺寸 / 不加 upscale pass。缺省 1.0\n"
+        "                      = 1280×720，逐字节不变。auto = 按显示 DPI（SDL 的 display content\n"
+        "                      scale）取，取不到 ⇒ 回 1.0 并打一行 readout；启动固定打一行\n"
+        "                      `scale: …（window WxH，image 1280x720；放大，接受模糊）`\n"
+        "                      （缺省 1.0 也打，一次性；s<1 说\"缩小\"）。★ `--present headless`\n"
+        "                      对 `--scale` **无副作用**：接受但不生效（隐藏离屏窗口仍是\n"
+        "                      1280×720，也不查 DPI）。非 auto 且非正数 / NaN / 垃圾 ⇒ exit 2\n"
+        "                      并点名本参数\n"
         "%s"
         "  --help              这份说明\n"
         "\n"
@@ -230,6 +241,9 @@ int main(int argc, char** argv) {
     std::string present_screenshot;
     bool present_screenshot_set = false;
     std::uint64_t present_screenshot_frame = 0;
+    // ★ `--scale <auto|数值>`（缺省 Fixed 1.0 = 1280×720，逐字节不变）。取值 / 拒绝 / readout
+    //   文案的唯一一份在 `runtime/window_scale.h`；本文件只做"解析 + 交给 sink + 打印"。
+    lift::ScaleSpec scale_spec;
     std::string frame_dump;  // --dump-frame（guest 后缓冲 BMP；`cpu.shim.frame_dump`）
     // ★ 控制层（`--control-*`；缺省全不给 ⇒ 控制层**完全不启动**，默认档逐字节不变）。
     std::string control_root;
@@ -425,6 +439,18 @@ int main(int argc, char** argv) {
                 return 2;
             }
             present_screenshot_frame = n;
+        } else if (a == "--scale") {
+            // ★ 解析即判据（GPU bring-up 之前）：非 `auto` 且非正数 / NaN / Inf / 垃圾 ⇒ exit 2。
+            //   拒绝口径与文案的唯一一份在 `runtime/window_scale.h`（⛔ 不在这里另写一套数字判断）。
+            std::string v;
+            if (!needValue("--scale", &v)) return 2;
+            const lift::ScaleParse parsed = lift::parseScaleSpec(v.c_str());
+            if (!parsed.ok) {
+                std::fprintf(stderr, "emulator-lift-aot: --scale 的值非法：`%s`（%s）\n", v.c_str(),
+                             parsed.error != nullptr ? parsed.error : "只能是 auto 或正数");
+                return 2;
+            }
+            scale_spec = parsed.spec;
         } else if (a == "--help" || a == "-h") {
             usage();
             return 0;
@@ -524,6 +550,9 @@ int main(int argc, char** argv) {
         // ★ 与解释器臂同一个字段（`main.cpp:742`）：缺这一行 ⇒ sink 恒 `cursor_warp=false`
         //   ⇒ `hostCursorWarpEnabled()` 恒假 ⇒ shim 只改虚拟光标（用户看到的"不会移动鼠标"）。
         wopt.cursor_warp = cursor_warp;
+        // ★ `--scale` 只交给**窗口档**：`--present headless` 的隐藏离屏窗口保持 1280×720
+        //   （= `--scale` 对 headless 无副作用；不设它 ⇒ 不查 DPI、不改窗口尺寸）。
+        if (present_mode != "headless") wopt.scale = scale_spec;
         wopt.raster_gpu = true;
         auto sdl = std::make_unique<lift::SdlWindow>();
         std::string werr;
@@ -757,6 +786,23 @@ int main(int argc, char** argv) {
         const lift::CursorWarpState st =
             lift::cursorWarpState(cursor_warp, lift::hostCursorPlatformSupported(), sdl_display->windowHidden());
         std::printf("cursor-warp: %s\n", lift::cursorWarpStateName(st));
+    }
+    // ★ `--scale` 的**一次性**启动 readout（§12.8 第 3 条：一次性输出 ⛔ 不许收；缺省 1.0 也打）。
+    //   · 窗口档：事实来自 sink —— 窗口**建完之后** `SDL_GetWindowSize` 回读的客户区尺寸
+    //     （⛔ 不是把请求值抄回来；窗口管理器可能约束尺寸）；
+    //   · headless：`--scale` **接受但不生效**（隐藏离屏窗口仍 1280×720、也不查 DPI）⇒ 把
+    //     `applied` 置 false，由 `runtime/window_scale.h` 的**同一份**文案打出"不生效"。
+    //   · `auto` 取不到 display content scale ⇒ 同一行里写明"SDL 返回 0 ⇒ 回 1.0"（⛔ 不静默）。
+    {
+        lift::ScaleReport scale_report = sdl_display->scaleReport();
+        if (present_mode == "headless") {
+            scale_report.applied = false;
+            scale_report.auto_requested = scale_spec.kind == lift::ScaleSpec::Kind::Auto;
+            scale_report.scale = scale_spec.value;
+            scale_report.window_w = lift::kBaseWindowW;
+            scale_report.window_h = lift::kBaseWindowH;
+        }
+        std::printf("%s\n", lift::scaleReadoutLine(scale_report).c_str());
     }
     host.printReadout(stdout, run_opts.region_log);
     std::fflush(stdout);

@@ -193,6 +193,10 @@ int main(int argc, char** argv) {
         LIFT_CHECK(r.out.find("不可信") != std::string::npos);
         // ★ S4：`--input-plan` 必须在 help 里（否则用户不知道 AOT 臂有输入控制面）。
         LIFT_CHECK(r.out.find("--input-plan") != std::string::npos);
+        // ★ `--scale` 必须在 help 里，且说明里写明 `auto` 与 headless 的两条口径
+        //   （否则用户不知道有这条入口，也不知道 headless 下它不生效）。
+        LIFT_CHECK(r.out.find("--scale auto|数值") != std::string::npos);
+        LIFT_CHECK(r.out.find("headless") != std::string::npos);
     }
 
     // ---- ①' `--input-plan <不存在的文件>` ⇒ exit 2 且 stderr **点名那个路径** ----
@@ -352,6 +356,69 @@ int main(int argc, char** argv) {
         // 启动前拒绝 ⇒ **一行运行摘要都没有**（不是"跑了一部分才停"）
         LIFT_CHECK(!hasLineStartingWith(r.out, "stop"));
         LIFT_CHECK(!hasLineStartingWith(r.out, "insns"));
+    }
+
+    // ---- ②' `--scale`：垃圾值 / 缺值 ⇒ exit 2 且**点名参数**（⛔ 不是"未知参数"，⛔ 不静默当缺省）----
+    //      红了 ⇒ 用户给了非法倍率却跑出一个静默的缺省窗口（"看起来生效了、其实没生效"）。
+    g_current_case = "scale-bogus-values-rejected";
+    {
+        struct BadScale {
+            const wchar_t* arg;  // `--scale` 之后那个值（宽字符，直接拼进子进程命令行）
+            const char* word;    // stderr 里必须出现的词（值本身）
+        };
+        const BadScale kBads[] = {
+            {L"0", "0"},     {L"-1", "-1"}, {L"nan", "nan"}, {L"inf", "inf"},
+            {L"abc", "abc"}, {L"1.5x", "1.5x"},
+        };
+        for (const BadScale& b : kBads) {
+            const std::wstring cmd = std::wstring(L"--scale ") + b.arg + L" --present headless";
+            std::string tag = "scale-";
+            for (const wchar_t* p = b.arg; *p != L'\0'; ++p) tag.push_back(static_cast<char>(*p));
+            tag += ".";
+            const ChildRun r = runChild(exe, cmd, root, root / (tag + "out"), root / (tag + "err"));
+            LIFT_CHECK(r.started);
+            LIFT_CHECK(!r.timed_out);
+            LIFT_CHECK_EQ_U32(r.exit_code, 2u);
+            LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
+            LIFT_CHECK(r.err.find("--scale") != std::string::npos);
+            LIFT_CHECK(r.err.find(b.word) != std::string::npos);
+            // 启动前拒绝 ⇒ 一行运行摘要都没有。
+            LIFT_CHECK(!hasLineStartingWith(r.out, "stop"));
+        }
+        // 缺值：`--scale` 后面没有东西 ⇒ exit 2 + `需要一个值` + 点名前缀（与其它 flag 同一句）。
+        const ChildRun missing =
+            runChild(exe, L"--scale", root, root / "scalemiss.out", root / "scalemiss.err");
+        LIFT_CHECK(missing.started);
+        LIFT_CHECK(!missing.timed_out);
+        LIFT_CHECK_EQ_U32(missing.exit_code, 2u);
+        LIFT_CHECK(missing.err.find("--scale") != std::string::npos);
+        LIFT_CHECK(missing.err.find("需要一个值") != std::string::npos);
+    }
+
+    // ---- ②'' `--scale` 在 headless 下**接受但不生效**（⛔ 不进"headless 不接受窗口参数"那一类）----
+    //      ★ 不判总退出码：这条命令之后本臂仍会因"临时 cwd 里没有执行源 / 没有 GPU"exit 2 ——
+    //        判据是"`--scale` 这一关过去了"，⛔ 不拿总退出码冒充。readout 那一行（`scale: …`）
+    //        在 GPU bring-up 之后才打（本用例**不假定 GPU 在场**）⇒ 那一面由 pure 用例
+    //        `window-scale/headless-readout` 钉。
+    g_current_case = "scale-headless-accepted";
+    {
+        const ChildRun r = runChild(exe, L"--scale 1.5 --present headless", root, root / "scalehl.out",
+                                    root / "scalehl.err");
+        LIFT_CHECK(r.started);
+        LIFT_CHECK(!r.timed_out);
+        LIFT_CHECK_EQ_U32(r.exit_code, 2u);  // 仍会因别的原因退出；下面三条才是判据
+        LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
+        LIFT_CHECK(r.err.find("--scale") == std::string::npos);           // 没有对 --scale 的报错
+        // ⛔ 不是被当成窗口参数拒绝（判据是那句话，不是"出现过 --present headless"：
+        //    无 GPU 的机器上拒绝启动的文案里**也会**提到 `--present headless`）。
+        LIFT_CHECK(r.err.find("不接受窗口参数") == std::string::npos);
+        // 对照组：`auto` 同样被接受（数值与 auto 走同一个分支）。
+        const ChildRun ra = runChild(exe, L"--scale auto --present headless", root, root / "scaleauto.out",
+                                     root / "scaleauto.err");
+        LIFT_CHECK(ra.started);
+        LIFT_CHECK(!ra.timed_out);
+        LIFT_CHECK(ra.err.find("未知参数") == std::string::npos);
+        LIFT_CHECK(ra.err.find("--scale") == std::string::npos);
     }
 
     // ---- ③ 错拼（wrap ≠ warp）**仍然**是未知参数：钉住"② 不是靠接受任何参数"----

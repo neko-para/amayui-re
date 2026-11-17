@@ -1626,6 +1626,28 @@ const MUTATIONS = [
       '闭式（wall = lift+boundary+shim+partial+instrument）当场不成立',
   },
 
+  // ── `--scale <auto|数值>` 的窗口尺寸公式（`src/runtime/window_scale.cpp`；守卫 = CTest `window-scale`）──
+  //   故障形态：`round(1280×s)` / `round(720×s)` 退化成**截断**。这是最像"能跑"的破坏 ——
+  //   1.5 / 1.25 这些乘积本来就是整数的档位**完全不变**（1280×1.5、720×1.5、720×1.25 都是整），
+  //   只有 1.33 这类非整数倍率的客户区各少 1 px；画面照显、鼠标只有零点几像素偏移。
+  //   ⇒ 判据必须是**公式**（`window-scale/fixed-sizes` 的 1.33 ⇒ 1702×958），
+  //     ⛔ 不是"窗口建出来了"（那在截断档上照样成立，会假绿）。
+  {
+    file: 'apps/emulator-lift/src/runtime/window_scale.cpp',
+    from: '    const double v = roundHalfAway(static_cast<double>(base) * scale);',
+    to:
+      '    const double v = static_cast<double>(static_cast<int>(static_cast<double>(base) * scale));  // 变异：截断',
+    guard: 'ctest:window-scale',
+    ctest: 'window-scale',
+    buildDir: 'apps/emulator-lift/out',
+    // ★ 只重建守卫的 target（runtime 是静态库 ⇒ 全量构建会把 15 MB 的 AOT 产品臂也重链，
+    //   这对本判据没用）；安全性由「一轮结束的全量重建回基线」兜底（`finalizeBuildDirs`）。
+    buildTarget: 'lift-window-scale',
+    what:
+      '窗口尺寸从四舍五入退化成截断 ⇒ 1.33 倍时客户区 1702×957（应 1702×958）⇒ ' +
+      '`window-scale/fixed-sizes` 的 1.33 用例红；★ 1.5 / 1.25 的乘积是整数 ⇒ 只钉"窗口建出来了"会假绿',
+  },
+
   // ── 🐞S2 `emu-ctl screenshot` 全黑（`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`；守卫 = `tests/control_snapshot.cpp`）──
   //   ★ 代表"截图读的不是最后呈现的那一帧"这一类静默失效：
   //     present **不冻结** ⇒ `dumpLastFrame` 退回写现场后缓冲（下一帧的 Clear(0) 之后 = 全黑 = 本缺陷形态）。
@@ -4178,6 +4200,26 @@ const MUTATIONS = [
       '`d3dx9/matrix-decompose-rotation` 的 q.z 期望 +0.7071 得 -0.7071、' +
       '`d3dx9/matrix-decompose-trs` 的 q.z 期望 sin15° 同样翻号 ⇒ 两条当场红；' +
       '合成检查（S·R(q)·T = M）会把同一个方向错误再报一遍',
+  },
+
+  // ── 墙钟 vs uptime（BUG-30）：`GetSystemTime` 退回"把 uptime 当 1970 epoch"的修前形状 ──
+  //   ★ 代表"把两条读数又合成一条"这一类错：uptime 读数本身是单调的、`GetTickCount` 仍然对，
+  //     所以**只有**"墙钟要真的是 epoch"那一半的断言会红（年份 / 月日逐位不符）。
+  //   ⛔ 不选 `GetLocalTime` 的同一行：它还会经过时区，红了分不清是 uptime 混进来还是偏移错了。
+  {
+    file: 'apps/emulator-lift/src/shims/kernel32_time.cpp',
+    from:
+      '    writeSystemTime(cpu, call.u32(0), civilFrom100ns(cpu.clock->wall100ns()), "GetSystemTime");',
+    to:
+      '    writeSystemTime(cpu, call.u32(0), civilFrom100ns(cpu.clock->now100ns()), "GetSystemTime");  // 变异：退回 uptime',
+    guard: 'ctest:kernel32-time',
+    ctest: 'kernel32-time',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-kernel32-time',
+    what:
+      'GetSystemTime 退回 `now100ns()`（宿主 uptime）⇒ 注入的墙钟 2024-03-05T12:34:56.789Z 被展开成 ' +
+      '1970-01-01 + 1 h ⇒ `kernel32-time` 的 wall-vs-uptime-split 在年份 / 月日 / 时分秒上红' +
+      '（uptime 那一半仍绿，正是 BUG-30 的修前形状）',
   },
 ];
 
