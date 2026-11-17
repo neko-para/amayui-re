@@ -1,8 +1,13 @@
 // emulator-lift · GPU 路线 P0/P1：effect 资源字节 + `D3DXCreateEffectFromResourceA` + ID3DXEffect 9 槽
 //
 // ★ 判据（红了意味着什么）：
-//   ① `d3dx9-effect/caps-ps-version`：`LIFT_D3D9_PS_VERSION` 的**值域**与 caps 映射只有 4 档
-//      （0 / 0x100 / 0x200 / 0x300）；别的值必须被判非法（⛔ 不"认不出就当 0"）。纯函数，不读 env。
+//   ① `d3dx9-effect/caps-ps-version`（P4）：`GetDeviceCaps` 写进 guest 的**四个 shader 字段**是
+//      固定值 —— `PixelShaderVersion=0xFFFF0200` / `VertexShaderVersion=0xFFFE0100` /
+//      `MaxVertexShaderConst=96` / `MaxPixelShaderValue=8.0f`。P1 的开发 opt-in（读 env 那个）已删 ⇒
+//      这里不再有"值域 / 档位"，只有"声明 == 真实实现能力"。
+//   ①b `d3dx9-effect/caps-programs-guard`（P4）：caps 会让引擎建的 effect program 集必须**全部**
+//      在实现集里（硬等式）。从实现集里拿掉 202 的 `SnowPS`（或 `SnowVS`）⇒ **启动即 Trap**，
+//      且 `why` 点名 missing（⛔ 不是 warn / gap / 白名单）。
 //   ② `d3dx9-effect/unrecorded-loud-stop`：**自造**一张最小 PE（RT_RCDATA id=201 + 不在收录集的字节）
 //      ⇒ `readEffectSource` 必须答 `Unrecorded`，`why` 里必须同时出现 **id / 字节的 sha256 / 前 32 字节**；
 //      经 shim 走一遍 ⇒ 机器**停**（`Trap` + `unimplemented_calls` +1）且**不留** COM 对象
@@ -21,11 +26,13 @@
 //   ⑥ `d3dx9-effect/effect-draw-recorded`：Fade（201）的 draw **不再被拒绝** ⇒ 后端收到一条 effect
 //      队列条目（程序 / 常量表 / 两张纹理 / 第二套 UV 都是文本说的那一份）；出 pass 后回到固定功能。
 //      ★ 这是 P1 用例 `d3dx9-effect/effect-draw-refused` 的**翻面**（那条"必须拒绝"的断言已删）。
-//   ⑦ `d3dx9-effect/effect-draw-unimplemented`：**202 的 Snow**（`vs_1_0`，本线不做 GPU 顶点着色）
-//      **仍然具名拒绝**（bit 44 + 原因串含 id/technique/pass）—— 翻面没有把"没实现的"变成"静默接受"。
-//      ★ A 单（`REQ-01M7NAW2QT3TG9RCFMKR052C83`）把这条**整条翻面**：202 真的画 ⇒ 用例改名为
-//      `effect-draw-snow-recorded`（见 ⑪），"没实现的 program 仍具名拒绝"改由一条自造 `vs_2_0`
-//      文本的负控承担（同一个用例里）。
+//   ⑦（已退役）P2/P3 的 `d3dx9-effect/effect-draw-unimplemented`：202 当时**具名拒绝**（bit 44）。
+//      ★ A 单把这条整条翻面成 `effect-draw-snow-recorded`（见 ⑪）——202 真的画。
+//      ★ P4 又把"运行期撞到未实现 program"整个改成 `pipelineTrap()`（见 ⑦b）：⛔ 位 44 不再
+//      承担这条语义。
+//   ⑦b `d3dx9-effect/effect-draw-unimplemented-traps`（P4）：运行期 effect draw 撞到**未实现的
+//      program** ⇒ `pipelineTrap()` 响亮停（stderr 现场含资源 / technique / entry / profile），
+//      ⛔ 不再走 P1 的 "warn + 0 像素 + 位 44 继续跑"。
 //   ⑧ `d3dx9-effect/fade-pixels`（要 GPU）：两张已知纹理 + `Alpha ∈ {0,0.5,1}` 的像素 oracle
 //      （容差 ≤1 LSB/通道）+ 「两图全透明 ⇒ `ret.a==0` ⇒ 目标逐字节不变」的**不可观测**档。
 //   ★ P3（同一张单，203 的两个 `ps_2_0` technique）追加的判据：
@@ -56,6 +63,12 @@
 #include <cstring>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+#include <io.h>  // _dup / _dup2 / _fileno / _close / _read / _write（stderr tee 用）
+#else
+#include <unistd.h>  // dup / dup2 / fileno / close / read / write
+#endif
 
 #include "check.h"
 #include "fixture.h"
@@ -245,6 +258,69 @@ std::uint32_t floatBits(float v) {
     return bits;
 }
 
+// ---- stderr **tee**（"响亮停真的把 program / technique / entry / profile 打出来"的判据用）----
+// 形态照 `tests/d3d9_pipeline.cpp` / `tests/dsound.cpp`：只捕获不回显会让中途 trap 的现场全丢；
+// `finish()` 把新增的一段同时写进内存 log 与真 stderr。
+struct StderrTee {
+#ifdef _WIN32
+    using FdT = int;
+    static FdT dupFd(int fd) { return _dup(fd); }
+    static int dup2Fd(int src, int dst) { return _dup2(src, dst); }
+    static int filenoOf(std::FILE* f) { return _fileno(f); }
+    static void closeFd(FdT fd) { _close(fd); }
+    static int writeFd(FdT fd, const void* buf, unsigned n) { return _write(fd, buf, n); }
+#else
+    using FdT = int;
+    static FdT dupFd(int fd) { return ::dup(fd); }
+    static int dup2Fd(int src, int dst) { return ::dup2(src, dst); }
+    static int filenoOf(std::FILE* f) { return ::fileno(f); }
+    static void closeFd(FdT fd) { ::close(fd); }
+    static int writeFd(FdT fd, const void* buf, unsigned n) {
+        return static_cast<int>(::write(fd, buf, n));
+    }
+#endif
+    std::FILE* tmp = nullptr;
+    FdT saved = -1;
+    bool active = false;
+    std::string log;
+
+    bool begin() {
+        tmp = std::tmpfile();
+        if (!tmp) return false;
+        std::fflush(stderr);
+        saved = dupFd(2);
+        if (saved < 0) return false;
+        if (dup2Fd(filenoOf(tmp), 2) < 0) return false;
+        active = true;
+        return true;
+    }
+    std::string finish() {
+        if (!active) return log;
+        std::fflush(stderr);
+        std::fseek(tmp, 0, SEEK_END);
+        const long size = std::ftell(tmp);
+        if (size > 0) {
+            std::fseek(tmp, 0, SEEK_SET);
+            std::vector<char> chunk(static_cast<std::size_t>(size));
+            const std::size_t got = std::fread(chunk.data(), 1, chunk.size(), tmp);
+            log.append(chunk.data(), got);
+            std::size_t off = 0;
+            while (off < got) {
+                const int n = writeFd(saved, chunk.data() + off, static_cast<unsigned>(got - off));
+                if (n <= 0) break;
+                off += static_cast<std::size_t>(n);
+            }
+        }
+        dup2Fd(saved, 2);
+        closeFd(saved);
+        saved = -1;
+        active = false;
+        std::fclose(tmp);
+        tmp = nullptr;
+        return log;
+    }
+};
+
 // 一套"能建 COM 对象"的最小夹具（heap + 桩页 + d3dx9 注册）
 bool setupMachine(lift_fixture::Fixture& f) {
     if (!f.ok) return false;
@@ -256,43 +332,65 @@ bool setupMachine(lift_fixture::Fixture& f) {
            f.m.shims().findMutable("d3d9", "Direct3DCreate9") != nullptr;
 }
 
+// 定义在 ⑤ 之后（这里先声明：caps 用例也要走 createDevice → GetDeviceCaps 的真路径）。
+bool createDevice(lift_fixture::Fixture& f, std::uint32_t d3d9, std::uint32_t* out);
+
 // =======================================================================================
-// ① caps opt-in 的值域 / 映射（纯函数；不读 env）
+// ① caps 的 shader 声明（P4）：**固定四个值，没有 env / 没有档位**
+//
+// 红了意味着什么：`fillCaps` 又一次与真实实现能力脱节 —— 要么少报（引擎走软件模糊 / 转场 40+ s
+//   黑屏；缺省 caps=0 的形态），要么多报（引擎去建本线兑付不了的 shader）。P4 已把
+//   P1 的开发 opt-in（读 env 那个）已整条删掉 ⇒ 这条不再测"值域 / 映射"，只测**写进 guest 的四个字段**。
+// 判据：
+//   ① `GetDeviceCaps` 返回 S_OK、机器没停（caps 声明与实现集的等式由 `caps-programs-guard` 判）；
+//   ② +0xCC / +0xC4 / +0xC8 / +0xD0 逐字段等于 `d3d9.h` 的声明值（⛔ 测试不另抄数字），
+//      且与 D3DPS_VERSION(2,0) / D3DVS_VERSION(1,0) 的字面值一致（这是**产品口径**，不是读数）；
+//   ③ caps 块之外的 canary 不被写。
 // =======================================================================================
 void caseCapsPsVersion() {
     lift_test::g_current_case = "d3dx9-effect/caps-ps-version";
-    struct Row {
-        std::uint32_t request;
-        bool valid;
-        std::uint32_t caps;
-        float max_value;
-    };
-    const Row rows[] = {
-        {0u, true, 0u, 0.0f},
-        {0x100u, true, 0xFFFF0100u, 1.0f},
-        {0x200u, true, 0xFFFF0200u, 8.0f},
-        {0x300u, true, 0xFFFF0300u, 8.0f},
-        // 非法：0x1FF / 0x400 / D3DCAPS9 的**整个字段值**（env 只收低 16 位）/ 0xFFFF0000
-        {0x1FFu, false, 0u, 0.0f},
-        {0x400u, false, 0u, 0.0f},
-        {0xFFFF0200u, false, 0u, 0.0f},
-        {0xFFFF0000u, false, 0u, 0.0f},
-        {0x40u, false, 0u, 0.0f},
-    };
-    for (const Row& r : rows) {
-        std::uint32_t caps = 0xDEADBEEFu;
-        float max_value = -1.0f;
-        const bool ok = lift::d3d9::shaderCapsForPixelShaderVersion(r.request, &caps, &max_value);
-        LIFT_CHECK_EQ_U32(ok ? 1u : 0u, r.valid ? 1u : 0u);
-        if (ok) {
-            LIFT_CHECK_EQ_U32(caps, r.caps);
-            LIFT_CHECK(max_value == r.max_value);
-        }
-    }
-    // 出参可空（实现内部有一次只用它做值域判定）
-    LIFT_CHECK(lift::d3d9::shaderCapsForPixelShaderVersion(0x200u, nullptr, nullptr));
-    LIFT_CHECK(!lift::d3d9::shaderCapsForPixelShaderVersion(0x201u, nullptr, nullptr));
-    std::printf("caps 值域：0 / 0x100 / 0x200 / 0x300 合法，其余非法\n");
+    lift_fixture::Fixture f;
+    LIFT_CHECK(f.ok);
+    if (!f.ok) return;
+    LIFT_CHECK(setupMachine(f));
+    const std::uint32_t proc3d = f.use("d3d9", "Direct3DCreate9");
+    LIFT_CHECK_NE_U32(proc3d, 0u);
+    if (proc3d == 0) return;
+    const std::uint32_t d3d9 = f.call(proc3d, {lift::d3d9::kSdkVersion});
+    LIFT_CHECK_NE_U32(d3d9, 0u);
+    if (d3d9 == 0) return;
+    std::uint32_t device = 0;
+    LIFT_CHECK(createDevice(f, d3d9, &device));
+    if (device == 0) return;
+
+    // 0xD4 之后留 4 B canary（两次不同初值 ⇒ 既能看"全写"也能看"越界不写"）
+    const std::vector<std::uint8_t> caps_init(lift::d3d9::kCapsBytes + 4u, 0xCCu);
+    const std::uint32_t caps_ea = f.data(caps_init.data(), caps_init.size());
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x1Cu, {caps_ea}), lift::d3d9::kOk);
+    LIFT_CHECK(f.m.cpu().running);
+
+    const std::uint32_t ps = f.m.mem().rd32(caps_ea + lift::d3d9::kCapsPixelShaderVersion);
+    const std::uint32_t vs = f.m.mem().rd32(caps_ea + lift::d3d9::kCapsVertexShaderVersion);
+    const std::uint32_t max_vs_const = f.m.mem().rd32(caps_ea + lift::d3d9::kCapsMaxVertexShaderConst);
+    const std::uint32_t max_ps_bits = f.m.mem().rd32(caps_ea + lift::d3d9::kCapsMaxPixelShaderValue);
+    float max_ps = 0.0f;
+    std::memcpy(&max_ps, &max_ps_bits, sizeof(max_ps));
+
+    // ② 逐字段 == 声明值（唯一一份在 `d3d9.h`）
+    LIFT_CHECK_EQ_U32(ps, lift::d3d9::kCapsPixelShaderVersionClaim);
+    LIFT_CHECK_EQ_U32(vs, lift::d3d9::kCapsVertexShaderVersionClaim);
+    LIFT_CHECK_EQ_U32(max_vs_const, lift::d3d9::kCapsMaxVertexShaderConstClaim);
+    LIFT_CHECK(max_ps == lift::d3d9::kCapsMaxPixelShaderValueClaim);
+    // 字面值（D3D 版本常量的产品口径；⛔ 不是"当前读数"）
+    LIFT_CHECK_EQ_U32(ps, 0xFFFF0200u);   // D3DPS_VERSION(2,0)
+    LIFT_CHECK_EQ_U32(vs, 0xFFFE0100u);   // D3DVS_VERSION(1,0)
+    LIFT_CHECK_EQ_U32(max_vs_const, 96u); // vs_1_0 的 c0..c95（自洽值，caps.md §7 第 1 条）
+    LIFT_CHECK(max_ps == 8.0f);           // ps_2_0 的常见上限（自洽值，caps.md §7 第 4 条）
+    // ③ 越界不写
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(caps_ea + lift::d3d9::kCapsBytes), 0xCCCCCCCCu);
+    std::printf("caps（P4 固定）：PixelShaderVersion=0x%08X VertexShaderVersion=0x%08X "
+                "MaxVertexShaderConst=%u MaxPixelShaderValue=%g\n",
+                ps, vs, max_vs_const, static_cast<double>(max_ps));
 }
 
 // =======================================================================================
@@ -454,6 +552,105 @@ bool createDevice(lift_fixture::Fixture& f, std::uint32_t d3d9, std::uint32_t* o
     if (hr != lift::d3d9::kOk) return false;
     *out = f.m.mem().rd32(out_ea);
     return *out != 0;
+}
+
+// =======================================================================================
+// ①b caps ⇒ 实现集的**硬等式**（P4）：缺一个 ⇒ **启动即 Trap**，且 `why` 点名 missing
+//
+// 红了意味着什么：caps 声明了"我会 ps_2_0 / vs_1_0"，而实现集里少一条 ⇒ 引擎会在运行期去建 /
+//   提交一个本线画不出来的 program（声明与能力分叉）。这条必须**启动时**红，⛔ 不能拖到某一帧
+//   才停、⛔ 也不能 warn 之后继续跑。
+// 判据：
+//   ① **生产路径**（真 `GetDeviceCaps` + 真表）⇒ S_OK、机器仍在跑、守卫返回 true；
+//   ② 从实现集里拿掉 202 的 `SnowPS / ps_1_0` ⇒ 守卫返回 false、`stop_kind == Trap`、
+//      `stop_why` = "caps 实现集守卫"，`why` 里**点名** `missing` / id=202 / technique=Snow /
+//      SnowPS / ps_1_0；
+//   ③ 拿掉 `SnowVS / vs_1_0` ⇒ 同样 Trap 且点名 `vertex vs_1_0 SnowVS`（VS 那一半也钉住）；
+//   ④ ②③ 的 required 都来自**同一份 pin 资源字节**（要 LIFT_AGE_EXE）⇒ ⛔ 不是手抄的期望表。
+// =======================================================================================
+void caseCapsProgramsGuard(const lift::PeImage& img) {
+    lift_test::g_current_case = "d3dx9-effect/caps-programs-guard";
+    // 实现集快照（唯一来源 = 运行时那两张表；⛔ 用例不手抄门牌）
+    const lift::d3dx9::EffectCapsImplementedForTest full = lift::d3dx9::effectCapsImplemented();
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(full.pixel.size()), 5);   // 200/201/202/203×2
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(full.vertex.size()), 1);  // SnowVS/vs_1_0
+
+    // ① 生产路径：真 `GetDeviceCaps`（`fillCaps` 之后紧跟守卫）⇒ 不 Trap
+    {
+        lift_fixture::Fixture f;
+        LIFT_CHECK(f.ok);
+        if (!f.ok) return;
+        LIFT_CHECK(setupMachine(f));
+        f.m.cpu().image = &img;
+        const std::uint32_t proc3d = f.use("d3d9", "Direct3DCreate9");
+        const std::uint32_t d3d9 = f.call(proc3d, {lift::d3d9::kSdkVersion});
+        LIFT_CHECK_NE_U32(d3d9, 0u);
+        if (d3d9 == 0) return;
+        std::uint32_t device = 0;
+        LIFT_CHECK(createDevice(f, d3d9, &device));
+        if (device == 0) return;
+        const std::uint32_t caps_ea = f.zeroData(lift::d3d9::kCapsBytes);
+        LIFT_CHECK_EQ_U32(callMethod(f, device, 0x1Cu, {caps_ea}), lift::d3d9::kOk);
+        LIFT_CHECK(f.m.cpu().running);
+        std::string why;
+        LIFT_CHECK(lift::d3dx9::effectCapsGuard(f.m.cpu(), caps_ea, &why));
+        LIFT_CHECK(f.m.cpu().running);
+        LIFT_CHECK(why.empty());
+    }
+
+    // ② 拿掉 202 的 PS binding ⇒ 启动 Trap + 点名 missing
+    {
+        lift_fixture::Fixture f;
+        LIFT_CHECK(f.ok);
+        if (!f.ok) return;
+        LIFT_CHECK(setupMachine(f));
+        f.m.cpu().image = &img;
+        const std::uint32_t caps_ea = f.zeroData(lift::d3d9::kCapsBytes);
+        std::string why;
+        LIFT_CHECK_EQ_U32(lift::d3d9::fillCaps(f.m.cpu(), caps_ea, &why), lift::d3d9::kOk);
+        lift::d3dx9::EffectCapsImplementedForTest impl = full;
+        bool removed = false;
+        for (std::size_t i = 0; i < impl.pixel.size(); ++i) {
+            if (impl.pixel[i].resource_id == lift::d3dx9::kEffectIdSnowPs10) {
+                impl.pixel.erase(impl.pixel.begin() + static_cast<std::ptrdiff_t>(i));
+                removed = true;
+                break;
+            }
+        }
+        LIFT_CHECK(removed);
+        LIFT_CHECK(!lift::d3dx9::effectCapsGuardForTest(f.m.cpu(), caps_ea, impl, &why));
+        LIFT_CHECK(!f.m.cpu().running);
+        LIFT_CHECK(f.m.cpu().stop_kind == lift::HostStopKind::Trap);
+        LIFT_CHECK(f.m.cpu().stop_why != nullptr &&
+                   std::strcmp(f.m.cpu().stop_why, "caps 实现集守卫") == 0);
+        LIFT_CHECK(why.find("missing") != std::string::npos);
+        LIFT_CHECK(why.find("id=202") != std::string::npos);
+        LIFT_CHECK(why.find("Snow") != std::string::npos);
+        LIFT_CHECK(why.find("SnowPS") != std::string::npos);
+        LIFT_CHECK(why.find("ps_1_0") != std::string::npos);
+        std::printf("caps 守卫（缺 202 PS）的 missing = %s\n", why.c_str());
+    }
+
+    // ③ 拿掉 SnowVS（VS 那一半）⇒ 同样 Trap 且点名 vertex
+    {
+        lift_fixture::Fixture f;
+        LIFT_CHECK(f.ok);
+        if (!f.ok) return;
+        LIFT_CHECK(setupMachine(f));
+        f.m.cpu().image = &img;
+        const std::uint32_t caps_ea = f.zeroData(lift::d3d9::kCapsBytes);
+        std::string why;
+        LIFT_CHECK_EQ_U32(lift::d3d9::fillCaps(f.m.cpu(), caps_ea, &why), lift::d3d9::kOk);
+        lift::d3dx9::EffectCapsImplementedForTest impl = full;
+        impl.vertex.clear();
+        LIFT_CHECK(!lift::d3dx9::effectCapsGuardForTest(f.m.cpu(), caps_ea, impl, &why));
+        LIFT_CHECK(!f.m.cpu().running);
+        LIFT_CHECK(f.m.cpu().stop_kind == lift::HostStopKind::Trap);
+        LIFT_CHECK(why.find("vertex") != std::string::npos);
+        LIFT_CHECK(why.find("vs_1_0") != std::string::npos);
+        LIFT_CHECK(why.find("SnowVS") != std::string::npos);
+        std::printf("caps 守卫（缺 SnowVS）的 missing = %s\n", why.c_str());
+    }
 }
 
 
@@ -1249,6 +1446,120 @@ void caseEffectDrawSnowRecorded(const lift::PeImage& img) {
             lift::d3dx9::destroyEffectState(f.m.cpu(), state);
         }
     }
+}
+
+
+// =======================================================================================
+// ⑦b 运行期闸（P4）：effect draw 撞到**未实现的 program** ⇒ `pipelineTrap()` 响亮停
+//
+// 红了意味着什么：这条路径又退回了 P1 的"warn + 0 像素 + 位 44 继续跑"——画面会静默缺一层
+//   （P4 的判据是"声明 == 实现"：启动守卫已保证 caps 会让引擎建的每个 program 都在实现集里，
+//   运行期还撞到它只可能是守卫漏了 / guest 换了 FX 文本）。⛔ 不许降级成 warn / 跳过。
+// 判据：
+//   ① 自造 FX（`ps_2_0 NopePS`，不在 `kBindings` 里）⇒ BeginPass 后作用域 `implemented == false`；
+//   ② Draw ⇒ 返回 D3DERR_INVALIDCALL + `stop_kind == Trap` + `stop_why == "unimplemented effect
+//      program"`；stderr 现场含 `D3D9 pipeline trap` / 资源 id=901 / technique="T" / entry
+//      `NopePS` / profile `ps_2_0`（⛔ 不是"只停不说"）；
+//   ③ **负控**：EndPass/End 之后同一份几何照常接受（S_OK、机器仍在跑）⇒ Trap 是**作用域相关**的，
+//      不是"所有 draw 都停"；已实现的 program（202 那一档的 `effect-draw-snow-recorded`）也是负控。
+// =======================================================================================
+void caseEffectDrawProgramTraps(const lift::PeImage& img) {
+    lift_test::g_current_case = "d3dx9-effect/effect-draw-unimplemented-traps";
+    lift_fixture::Fixture f;
+    LIFT_CHECK(f.ok);
+    if (!f.ok) return;
+    LIFT_CHECK(setupMachine(f));
+    f.m.cpu().image = &img;
+    const std::uint32_t proc3d = f.use("d3d9", "Direct3DCreate9");
+    const std::uint32_t d3d9 = f.call(proc3d, {lift::d3d9::kSdkVersion});
+    LIFT_CHECK_NE_U32(d3d9, 0u);
+    if (d3d9 == 0) return;
+    std::uint32_t device = 0;
+    LIFT_CHECK(createDevice(f, d3d9, &device));
+    if (device == 0) return;
+    EffectMockRaster mock;
+    f.m.setGpuRaster(&mock);
+
+    // 自造 FX：只有一个 PS pass，entry/profile 故意不在实现集里（`kBindings` 查不到 ⇒ unimplemented）
+    const std::string text =
+        "float4 NopePS(float2 uv : TEXCOORD0) : COLOR { return float4(1,1,1,1); }\n"
+        "technique T { pass P0 { PixelShader=compile ps_2_0 NopePS(); } }\n";
+    lift::d3dx9::EffectSource src;
+    src.id = 901u;
+    src.bytes.assign(text.begin(), text.end());
+    src.size = static_cast<std::uint32_t>(src.bytes.size());
+    src.sha256 = lift::toHex(lift::sha256(src.bytes));
+    std::string why;
+    const std::uint32_t state = lift::d3dx9::createEffectState(f.m.cpu(), device, src, &why);
+    LIFT_CHECK_NE_U32(state, 0u);
+    if (state == 0) return;
+    LIFT_CHECK_EQ_U32(lift::d3dx9::effectSetTechnique(f.m.cpu(), state, "T", &why), lift::d3dx9::kOk);
+    const std::uint32_t passes_ea = f.u32data(0u);
+    LIFT_CHECK_EQ_U32(lift::d3dx9::effectBegin(f.m.cpu(), state, passes_ea, 0u, &why),
+                      lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(lift::d3dx9::effectBeginPass(f.m.cpu(), state, 0u, &why), lift::d3dx9::kOk);
+    // ★ 作用域的**唯一**上报口是 `noteEffectDraw*`（shim 的 `Begin`/`BeginPass` 在调完 C++ 之后
+    //   发布；那条路径由 `effect-draw-*-recorded` 覆盖）。本用例的被测面是**运行期闸**，所以按
+    //   `publishDrawProgram` 的同一顺序直接铺作用域 —— ⛔ 不绕开"program == unimplemented"这个前提。
+    lift::d3d9::noteEffectDrawBegin(state, 0u, 901u, "T");
+    lift::d3d9::noteEffectDrawBeginPass(0u);
+    {
+        lift::d3d9::EffectDrawProgram prog;
+        LIFT_CHECK(lift::d3dx9::effectDrawProgram(f.m.cpu(), state, &prog, &why));
+        LIFT_CHECK(!prog.implemented);
+        lift::d3d9::noteEffectDrawProgram(prog);
+    }
+    {
+        const lift::d3d9::EffectDrawScope sc = lift::d3d9::effectDrawScope();
+        LIFT_CHECK(sc.active && sc.in_pass);
+        LIFT_CHECK(!sc.program.implemented);
+        LIFT_CHECK(sc.program.reason.find("NopePS") != std::string::npos);
+        // ★ 本用例句柄只喂作用域（不走 COM 表）；`destroyEffectState` 在 End 之后回收。
+    }
+
+    // 一份最小几何：FVF = XYZ(0x002)（12 B/顶点），TRIANGLELIST ×1
+    const float xyz[3][3] = {{-0.5f, -0.5f, 0.5f}, {0.5f, -0.5f, 0.5f}, {0.0f, 0.5f, 0.5f}};
+    const std::uint32_t vtx = f.data(xyz, sizeof(xyz));
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x164u, {0x002u}), lift::d3dx9::kOk);  // SetFVF(XYZ)
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA4u, {}), lift::d3dx9::kOk);         // BeginScene
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x94u, {0u, 0u}), lift::d3dx9::kOk);   // SetRenderTarget(0,NULL)
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsZEnable, 0u}), lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsCullMode, lift::d3d9::kCullNone}),
+                      lift::d3dx9::kOk);
+
+    // ② 未实现的 program ⇒ pipelineTrap（⛔ 不是 warn + 0 像素 + 位 44）
+    StderrTee tee;
+    LIFT_CHECK(tee.begin());
+    const std::uint32_t hr =
+        callMethod(f, device, 0x14Cu, {lift::d3d9::kPtTriangleList, 1u, vtx, 12u});
+    const std::string err = tee.finish();
+    LIFT_CHECK_EQ_U32(hr, lift::d3dx9::kInvalidCall);
+    LIFT_CHECK(!f.m.cpu().running);
+    LIFT_CHECK(f.m.cpu().stop_kind == lift::HostStopKind::Trap);
+    LIFT_CHECK(f.m.cpu().stop_why != nullptr &&
+               std::strcmp(f.m.cpu().stop_why, "unimplemented effect program") == 0);
+    LIFT_CHECK(err.find("D3D9 pipeline trap") != std::string::npos);
+    LIFT_CHECK(err.find("资源 id=901") != std::string::npos);
+    LIFT_CHECK(err.find("technique=\"T\"") != std::string::npos);
+    LIFT_CHECK(err.find("NopePS") != std::string::npos);
+    LIFT_CHECK(err.find("ps_2_0") != std::string::npos);
+    std::printf("effect draw trap 的停因 = %s（stderr %zu B）\n",
+                f.m.cpu().stop_why ? f.m.cpu().stop_why : "?", err.size());
+
+    // ③ 负控：Trap 是**作用域相关**的 —— 出 pass/出 effect 后同一份几何照常接受。
+    //    先续上：`effectEndPass` / `effectEnd` 都只推进状态（trap 已把 running 置 false，但它们
+    //    不跑机器、只写状态块 ⇒ 可以直接调），作用域由同一批 `noteEffectDraw*` 收尾。
+    LIFT_CHECK_EQ_U32(lift::d3dx9::effectEndPass(f.m.cpu(), state, &why), lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(lift::d3dx9::effectEnd(f.m.cpu(), state, &why), lift::d3dx9::kOk);
+    lift::d3d9::noteEffectDrawEndPass();
+    lift::d3d9::noteEffectDrawEnd();
+    LIFT_CHECK(!lift::d3d9::effectDrawScope().in_pass);
+    f.m.cpu().running = true;  // 只为了跑负控那一次 Draw（trap 已判过 stop_kind）
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x14Cu, {lift::d3d9::kPtTriangleList, 1u, vtx, 12u}),
+                      lift::d3dx9::kOk);
+    LIFT_CHECK(f.m.cpu().running);
+    lift::d3dx9::destroyEffectState(f.m.cpu(), state);
+    f.m.setGpuRaster(nullptr);
 }
 
 
@@ -2580,11 +2891,13 @@ int main() {
     LIFT_CHECK(img.resource_rva != 0);
 
     caseResources(img);      // ③
+    caseCapsProgramsGuard(img);  // ①b（P4：caps ⇒ 实现集的硬等式，缺一个启动 Trap）
     caseObjectSlots(img);    // ④
     caseFxParse(img);        // ⑤（P2：FX 文本解析）
     caseEffectDrawRecorded(img);       // ⑥（P2：翻面 P1 的"必须拒绝"）
     caseEffectDrawBlurRecorded(img);   // ⑨（P3：203 的 SlideBlur / ZoomBlur 翻面）
     caseEffectDrawSnowRecorded(img);   // ⑧（A 单：202 翻面成 recorded + `vs_2_0` 负控）
+    caseEffectDrawProgramTraps(img);   // ⑦b（P4：未实现 program 的 draw ⇒ pipelineTrap）
     caseSnowVertices(img);             // ⑪（A 单：CPU `vs_1_0` 的顶点性质；Mock 后端）
     if (caseFadePixels(img) != 0) return 1;  // ⑩（P2：像素 oracle；没有 GPU ⇒ SKIP 77）
     if (caseBlurPixels(img) != 0) return 1;  // ⑫（P3：203 的像素 oracle；没有 GPU ⇒ SKIP 77）

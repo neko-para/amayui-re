@@ -703,6 +703,19 @@ struct PipeWarnCounts {
 };
 const PipeWarnCounts& pipeWarnCounts();
 
+// =====================================================================================
+// 响亮停（P4）：effect draw 撞到**未实现的 program** ⇒ 打印现场并停机器
+// =====================================================================================
+// ★ 为什么不是 `pipeWarn` + 0 像素 + 具名位 44（P1 的临时形态，本单已删）：那等于"每帧继续跑、
+//   只是不画"—— 画面会静默缺一层，而且启动守卫的缺口永远只有到运行期才暴露。
+//   P4 的口径是"**声明 == 实现**"：caps 会让引擎建的每个 program 启动时就核对过；运行期还撞到
+//   声明之外的 program，只可能是启动守卫漏了 / guest 换了 FX 文本 ⇒ 必须停在这儿。
+// ★ 与 `pipeWarn` 的分工：`pipeWarn` 仍是"**可继续**的拒绝"（后端缺能力 / 纹理形态不支持…）；
+//   本函数只给"这一批的程序根本不存在"这条。`what` 是调用点名字，`fmt` 里带 `program.reason`
+//   （资源 id / technique / pass / entry / profile 都在里面）。
+// ★ 落点 = `submitPrimitives`：那里拿得到 `X86&`（要停机器）与整份 `ctx.effect.program`。
+void pipelineTrap(X86& cpu, const char* what, const char* fmt, ...);
+
 // Present 的像素统计（"非背景像素数"的判据；用后缓冲像素算，⛔ 不是猜）
 struct FrameStats {
     std::uint32_t total_pixels = 0;

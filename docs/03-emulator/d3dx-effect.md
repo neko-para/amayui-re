@@ -316,3 +316,20 @@ node tools/mutate-check.mjs --match '202（Snow/SnowPS'
 ★ `invw != 1` 那条闸的**现场复现**（一行改动，测完 `git restore` 即可；B 单的复现面）：
 把 `tests/d3dx9_effect.cpp` 的 `caseSnowVertices` 里 `xyz_persp` 的 z 从 `1.0f` 改成 `10.0f`，
 重建后跑 `ctest -R '^d3dx9-effect$' --output-on-failure` ⇒ 见 12.3 第 1 条的 warn 与 `0x8876086C`。
+
+## 13. P4 · caps 固定 + 启动硬等式 + 运行期 `pipelineTrap()`（2026-11-18 / win32）
+
+- **caps 不再有 opt-in**：`LIFT_D3D9_PS_VERSION` 已整条删除；`runtime/d3d9.cpp:fillCaps()` 固定写
+  `PixelShaderVersion=0xFFFF0200` / `VertexShaderVersion=0xFFFE0100` / `MaxVertexShaderConst=96` /
+  `MaxPixelShaderValue=8.0f`（口径、证据与"为什么 VS 必须 1.0"见 `caps.md` §2）。
+- **启动守卫**：`shims/d3d9.cpp:shimGetDeviceCaps()` 在 `fillCaps` 之后调
+  `shims/d3dx9_effect.cpp:effectCapsGuard()` —— 按 guest 的 `+0xCC` 推出"引擎会建哪些 effect"
+  （等级 1 ⇒ 200/202；等级 2 ⇒ 再加 201/203），从 4 条 pin 的**字节**跑 `parseEffectSource` 得到
+  program 集，与 `kBindings` ∪ `kVertexBindings` 做**硬等式**。缺一个（或实现集多一条）⇒
+  `stop_why="caps 实现集守卫"` 的 Trap，读数列出 `missing` / `extra`（`caps.md` §3）。
+- **运行期**：`runtime/d3d9_pipeline.cpp:submitPrimitives()` 在 `gpuEligible` **之前**判
+  `ctx.effect_draw && !ctx.effect.program.implemented` ⇒ `pipelineTrap()`（打印资源 / technique /
+  pass / entry / profile + 寄存器 + 栈；`stop_why="unimplemented effect program"`）。⛔ 不再是
+  P1 的 `pipeWarn` + 0 像素 + 位 44；位 44 只剩"程序已实现、但这一批画不了"的其它拒批。
+- ★ 本单**不实现任何 shader**：200/201/202/203 的实现落点仍是 §8 / §10 / §12。
+- 读数与复现命令：`caps.md` §8；变异：`node tools/mutate-check.mjs --match '硬等式降级'`。

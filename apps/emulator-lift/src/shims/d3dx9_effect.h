@@ -6,7 +6,8 @@
 //      赋值 —— 出现任何别的状态名 ⇒ `UnsupportedState` + **具名原因**（⛔ 不静默忽略）。
 //   ② **程序解析**（`effectDrawProgram`）：把"当前 technique + pass"翻成
 //      `d3d9::EffectDrawProgram`（实现集内的程序 + 按声明顺序的常量表 + SetTexture 记下的纹理 EA）。
-//      不在实现集里的程序 ⇒ `implemented=false` + 具名原因 ⇒ 调用方整批拒绝（bit 44）。
+//      不在实现集里的程序 ⇒ `implemented=false` + 具名原因；**P4 起**运行期由 `pipelineTrap()`
+//      响亮停（⛔ 不再是 P1 的 warn + 0 像素 + 位 44）。
 //      ★ A 单（202 的 Snow）：带 `VertexShader` 的 pass 也按 `(entry, profile)` 查 VS 实现集
 //      （`effectVertexProgramSupported`）—— 命中则 `has_vs=true`（CPU 顶点程序），否则仍具名拒绝。
 //      ③ `Begin` 的 `*pPasses` 改成**解析结果**（P1 的常量 1 退役）。
@@ -231,8 +232,46 @@ const EffectProgramBinding* effectProgramBindings();  // 以 `resource_id == 0` 
 //   `vs_1_0` 只是一档；不查表就等于声称"任何 vs_1_0 的 GLSL 语义我都算对了"（⛔ 那是假话）。
 // ★ 本线**只有一个** CPU 顶点程序：`transformVertexVs10`（`Pos = mul(pos, Proj)`、uv 直通、
 //   ⛔ 无光照、⛔ 不乘设备 WORLD/VIEW、⛔ 不除 w）。表里每条都必须是它兑现得了的那一条。
-// ★ 命中 ⇒ `EffectDrawProgram::has_vs = true`；未命中 ⇒ 该批**具名拒绝**（bit 44）。
+// ★ 命中 ⇒ `EffectDrawProgram::has_vs = true`；未命中 ⇒ 该批 `implemented == false`，
+//   运行期由 `pipelineTrap()` **响亮停**（P4；⛔ 不再是 warn + 0 像素 + 位 44）。
 bool effectVertexProgramSupported(const std::string& entry, const std::string& profile);
+
+// ---------------------------------------------------------------------------------------
+// 启动守卫（P4）：**caps 声明的能力 ⇒ 引擎会建的 effect program 集，必须 == 实现集**
+// ---------------------------------------------------------------------------------------
+// ★ 硬等式（`required == implemented`；⛔ 没有 gap / declared_gap / 已知偏离 / 白名单）：
+//   required    = 对 `effectResourcePins()` 里**会被建**的资源（等级由 guest caps 的 +0xCC 推）
+//                 跑 `parseEffectSource` 得到的 (resource_id, technique, entry, profile) 集
+//                 ∪ 那些 pass 的 (vertex_entry, vertex_profile) 集
+//   implemented = `effectProgramBindings()`（kBindings）∪ VS 实现集（kVertexBindings）
+//   missing     = required \ implemented（只用于**点名**；非空 ⇒ Trap）
+//   extra       = implemented \ required（声明侧不再覆盖的实现集条目 ⇒ 同样 Trap）
+// ★ 两侧都不是手抄：required 来自 pin 资源**字节**的解析结果；implemented 就是运行时那两张表
+//   （改一处两边一起变 —— 守卫断言的是**关系**，不是某个具体值）。
+// ★ 前提取自 `fillCaps` **实际写进 guest** 的 +0xCC / +0xC4（不是另一个常量）⇒ caps 报什么，
+//   等式就按什么算。
+// ★ 落点 = shim 层：调用方是 `shims/d3d9.cpp:shimGetDeviceCaps()`（`fillCaps` 之后 —— 那里同时
+//   拿得到真写进 guest 的值与 `d3d9Trap`）。⛔ 不让 `runtime/` 反向 include `shims/`。
+// ★ 缺一个 ⇒ **启动 Trap**（`HostStopKind::Trap`，读数列出 missing/extra），⛔ 不是 warn、
+//   ⛔ 不是"运行到那一帧才停"、⛔ 不是画 0 像素继续跑。readout 用 `std::printf`（默认可见、一次性）。
+struct EffectProgramKey {
+    std::uint32_t resource_id = 0;  // pixel：资源 id（200..203）；vertex：0
+    std::string technique;          // vertex：空
+    std::string entry;              // FadePS / SnowPS / SlideBlurPS / ZoomBlurPS / SnowVS
+    std::string profile;            // ps_1_0 / ps_2_0 / vs_1_0
+};
+// 实现集快照（生产 = 运行时那两张表；`...ForTest` 可以给一份**少一条**的 ⇒ 用来证明守卫会红）。
+struct EffectCapsImplementedForTest {
+    std::vector<EffectProgramKey> pixel;
+    std::vector<EffectProgramKey> vertex;
+};
+// 生产路径（用运行时表）：返回 false ⇒ 已 Trap（`cpu.running == false`；`why` 点名 missing/extra）。
+bool effectCapsGuard(X86& cpu, std::uint32_t caps_ea, std::string* why);
+// 测试接缝：用**给定**的实现集判（同样会 Trap）。⛔ 生产路径不传它。
+bool effectCapsGuardForTest(X86& cpu, std::uint32_t caps_ea,
+                            const EffectCapsImplementedForTest& implemented, std::string* why);
+// 运行时两张表的快照（测试拿它再删一条交给 `effectCapsGuardForTest`，⛔ 不手抄门牌）。
+EffectCapsImplementedForTest effectCapsImplemented();
 
 // 解析出的模块（进程内缓存：4 份资源的文本来自**不可变**的 PE 字节，按内容 sha256 缓存；
 // 同一份 sha256 ⇒ 同一份模型）。`effectModuleOf` 的失败原因写 `why`。

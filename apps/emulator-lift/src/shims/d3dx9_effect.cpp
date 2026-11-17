@@ -863,6 +863,228 @@ bool effectVertexProgramSupported(const std::string& entry, const std::string& p
 
 const EffectProgramBinding* effectProgramBindings() { return kBindings; }
 
+// =======================================================================================
+// 启动守卫（P4 · `REQ-01M7MXHYR1M72JW77J136GT3ZG`）
+// =======================================================================================
+// ★ 为什么在 shim 层：`required` 要读 pin 的 PE（`cpu.image` 的 `.rsrc`）并跑 FX 文本解析 ——
+//   两样都在 shim 层；`runtime/` 反过来 include `shims/` 就是反向依赖。
+// ★ 为什么按 guest 的 +0xCC 推等级、而不是直接读常量：声明值必须**真的写进了 guest**才算数
+//   （`fillCaps` 与这里的读点是同一次 `GetDeviceCaps`）⇒ 声明与等式不可能各说各话。
+namespace {
+
+std::string effectProgramKeyText(const EffectProgramKey& k) {
+    if (k.resource_id == 0) return "vertex " + k.profile + " " + k.entry;
+    return "id=" + std::to_string(k.resource_id) + " technique=\"" + k.technique + "\" " + k.profile + " " +
+           k.entry;
+}
+
+bool effectProgramKeyIn(const std::vector<EffectProgramKey>& set, const EffectProgramKey& key) {
+    for (const EffectProgramKey& k : set) {
+        if (k.resource_id == key.resource_id && k.technique == key.technique && k.entry == key.entry &&
+            k.profile == key.profile) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void effectProgramKeyPushUnique(std::vector<EffectProgramKey>* set, EffectProgramKey key) {
+    if (!effectProgramKeyIn(*set, key)) set->push_back(std::move(key));
+}
+
+std::string effectProgramKeyList(const std::vector<EffectProgramKey>& set) {
+    if (set.empty()) return "{}";
+    std::string out = "{";
+    for (std::size_t i = 0; i < set.size(); ++i) {
+        if (i != 0) out += "；";
+        out += effectProgramKeyText(set[i]);
+    }
+    out += "}";
+    return out;
+}
+
+// 引擎的效果等级（`0x4A6FB7 cmp eax,0FFFF0200h / jb` ⇒ 2；`0x4A6FCA cmp eax,0FFFF0100h / jb` ⇒ 1）。
+// ★ 第 2 入口（配置键 `display:PixelShader`）只能把等级覆盖到 [-1..2] ⇒ 等级 ∈ {0,1,2}；
+//   `required` 按**声明值推出的最高等级**取，不依赖那个配置的缺省值（caps.md §4）。
+std::uint32_t effectLevelForPixelShaderVersion(std::uint32_t ps) {
+    if (ps >= 0xFFFF0200u) return 2u;
+    if (ps >= 0xFFFF0100u) return 1u;
+    return 0u;
+}
+
+// ★ P4 启动守卫的响亮停（与 `fxTrap` 分开：这不是"某个 effect 资源没收录 / 没实现"，而是
+//   "声明的 caps 与实现集不符" ⇒ `stop_why` 要能一眼分辨）。
+//   ⛔ 不 ++`unimplemented_calls`：没有哪个 API 槽"没实现"，这是一条宿主侧一致性判据。
+void effectCapsGuardTrap(X86& cpu, const std::string& detail) {
+    std::fprintf(stderr,
+                 "\n=== caps 实现集守卫（P4 · REQ-01M7MXHYR1M72JW77J136GT3ZG） ===\n  %s\n"
+                 "  （caps 报的能力 ⇒ 引擎会建这些 effect program；不满足 ⇒ 启动即停。\n"
+                 "    ⛔ 没有 gap / declared_gap / 白名单：要么实现它，要么把 caps 改回真实能力）\n",
+                 detail.c_str());
+    dumpRegisters(cpu, stderr);
+    dumpGuestStack(cpu, stderr, 24);
+    cpu.running = false;
+    cpu.stop_why = "caps 实现集守卫";
+    cpu.stop_kind = HostStopKind::Trap;
+}
+
+// required：按 guest caps 的 +0xCC 推"引擎会建哪些资源"，再从 **pin 资源的字节**解析出 program 集。
+//   等级门槛：200/202 ⇒ ≥1；201/203 ⇒ ≥2（`0x4B0743 push 0C8h` / `0x4B0790 push 0C9h` /
+//   `0x4B07FC push 0CBh`；202 由脚本 `opcode 0x326` 触发，但**可能**会建 ⇒ 一律算 required）。
+bool effectCapsRequiredPrograms(X86& cpu, std::uint32_t caps_ea, std::vector<EffectProgramKey>* pixel,
+                                std::vector<EffectProgramKey>* vertex, std::string* why) {
+    if (cpu.mem == nullptr) {
+        if (why) *why = "caps 实现集守卫：cpu.mem 为空";
+        return false;
+    }
+    if (caps_ea == 0 || !cpu.mem->committed(caps_ea, d3d9::kCapsBytes)) {
+        if (why) *why = "caps 实现集守卫：D3DCAPS9 指针为空 / 未提交";
+        return false;
+    }
+    if (cpu.image == nullptr || cpu.image->bytes.empty()) {
+        if (why) *why = "caps 实现集守卫：cpu.image 为空（拿不到 pin 资源的字节）";
+        return false;
+    }
+    const std::uint32_t level = effectLevelForPixelShaderVersion(
+        cpu.mem->rd32(caps_ea + d3d9::kCapsPixelShaderVersion));
+    static const std::uint32_t kIds[] = {kEffectIdFadePs10, kEffectIdFadePs20, kEffectIdSnowPs10,
+                                         kEffectIdBlurPs20};
+    for (std::uint32_t id : kIds) {
+        const std::uint32_t need = (id == kEffectIdFadePs20 || id == kEffectIdBlurPs20) ? 2u : 1u;
+        if (level < need) continue;
+        EffectSource src;
+        std::string read_why;
+        const EffectSourceStatus st = readEffectSource(*cpu.image, id, &src, &read_why);
+        if (st != EffectSourceStatus::Ok) {
+            if (why) *why = "caps 实现集守卫：required 读不到资源 " + std::to_string(id) + "（" + read_why + "）";
+            return false;
+        }
+        const std::string text(reinterpret_cast<const char*>(src.bytes.data()), src.bytes.size());
+        std::string parse_why;
+        const FxModule* module = effectModuleForSha(src.sha256, text, &parse_why);
+        if (module == nullptr) {
+            if (why) *why = "caps 实现集守卫：资源 " + std::to_string(id) + " 的 FX 文本解析失败（" +
+                            parse_why + "）";
+            return false;
+        }
+        for (const FxTechnique& tech : module->techniques) {
+            for (const FxPass& pass : tech.passes) {
+                if (pass.has_pixel_shader) {
+                    effectProgramKeyPushUnique(
+                        pixel, EffectProgramKey{id, tech.name, pass.pixel_entry, pass.pixel_profile});
+                }
+                if (pass.has_vertex_shader) {
+                    effectProgramKeyPushUnique(
+                        vertex, EffectProgramKey{0u, std::string(), pass.vertex_entry, pass.vertex_profile});
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool effectCapsGuardImpl(X86& cpu, std::uint32_t caps_ea,
+                         const EffectCapsImplementedForTest& implemented, std::string* why) {
+    if (why) why->clear();
+    if (cpu.mem == nullptr || caps_ea == 0 || !cpu.mem->committed(caps_ea, d3d9::kCapsBytes)) {
+        const std::string detail = "D3DCAPS9 指针无效 / 未提交（GetDeviceCaps 的 pCaps 不对）";
+        if (why) *why = detail;
+        effectCapsGuardTrap(cpu, detail);
+        return false;
+    }
+    const std::uint32_t ps = cpu.mem->rd32(caps_ea + d3d9::kCapsPixelShaderVersion);
+    const std::uint32_t vs = cpu.mem->rd32(caps_ea + d3d9::kCapsVertexShaderVersion);
+    const std::uint32_t level = effectLevelForPixelShaderVersion(ps);
+    // ★ 纯夹具（`Machine::initBare`）没有装配 PE ⇒ required 不可计算。**生产路径恒有** pin 的
+    //   镜像（AOT 启动前核对 sha256，AGENTS §12.5）⇒ 这里只跳过"不可计算"，⛔ 不是"缺了也算过"。
+    if (cpu.image == nullptr || cpu.image->bytes.empty()) {
+        static bool printed_no_image = false;
+        if (!printed_no_image) {
+            printed_no_image = true;
+            std::printf("caps      : PixelShaderVersion=0x%08X VertexShaderVersion=0x%08X ⇒ 等级 %u；"
+                        "镜像未装配（cpu.image 无字节）⇒ required 不可算、纯夹具跳过等式"
+                        "（生产 AOT 恒有 pin）\n",
+                        ps, vs, level);
+            std::fflush(stdout);
+        }
+        return true;
+    }
+    std::vector<EffectProgramKey> required_pixel;
+    std::vector<EffectProgramKey> required_vertex;
+    std::string required_why;
+    if (!effectCapsRequiredPrograms(cpu, caps_ea, &required_pixel, &required_vertex, &required_why)) {
+        if (why) *why = required_why;
+        effectCapsGuardTrap(cpu, required_why);
+        return false;
+    }
+    std::vector<EffectProgramKey> missing;
+    std::vector<EffectProgramKey> extra;
+    for (const EffectProgramKey& k : required_pixel) {
+        if (!effectProgramKeyIn(implemented.pixel, k)) missing.push_back(k);
+    }
+    for (const EffectProgramKey& k : required_vertex) {
+        if (!effectProgramKeyIn(implemented.vertex, k)) missing.push_back(k);
+    }
+    for (const EffectProgramKey& k : implemented.pixel) {
+        if (!effectProgramKeyIn(required_pixel, k)) extra.push_back(k);
+    }
+    for (const EffectProgramKey& k : implemented.vertex) {
+        if (!effectProgramKeyIn(required_vertex, k)) extra.push_back(k);
+    }
+    // ★ 一次性 readout（§12.8：一次性输出不许收）⇒ "哪些 effect 会被用"默认可见。
+    //   用 `std::printf` 而不是 `fxLog`：后者是 Info 级，默认 `Warn` 档看不见。
+    static bool printed = false;
+    if (!printed) {
+        printed = true;
+        std::printf("caps      : PixelShaderVersion=0x%08X VertexShaderVersion=0x%08X ⇒ 等级 %u ⇒ "
+                    "会建 %s；required = %zu pixel + %zu vertex（%s），implemented = %zu + %zu ⇒ %s\n",
+                    ps, vs, level,
+                    level == 0u ? "无（0x4B072D jl 跳过整条 FX 路）"
+                                : (level >= 2u ? "200/201/202/203" : "200/202"),
+                    required_pixel.size(), required_vertex.size(),
+                    effectProgramKeyList(required_pixel).c_str(), implemented.pixel.size(),
+                    implemented.vertex.size(),
+                    (missing.empty() && extra.empty()) ? "硬等式成立" : "硬等式不成立");
+        std::fflush(stdout);
+    }
+    if (!missing.empty() || !extra.empty()) {
+        std::string detail;
+        if (!missing.empty()) {
+            detail += "missing（required \\ implemented）= " + effectProgramKeyList(missing);
+        }
+        if (!extra.empty()) {
+            if (!detail.empty()) detail += "\n  ";
+            detail += "extra（implemented \\ required）= " + effectProgramKeyList(extra);
+        }
+        if (why) *why = detail;
+        effectCapsGuardTrap(cpu, detail);
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+EffectCapsImplementedForTest effectCapsImplemented() {
+    EffectCapsImplementedForTest out;
+    for (const EffectProgramBinding* b = kBindings; b->resource_id != 0; ++b) {
+        out.pixel.push_back(EffectProgramKey{b->resource_id, b->technique, b->pixel_entry, b->pixel_profile});
+    }
+    for (const EffectVertexBinding* b = kVertexBindings; b->entry != nullptr; ++b) {
+        out.vertex.push_back(EffectProgramKey{0u, std::string(), b->entry, b->profile});
+    }
+    return out;
+}
+
+bool effectCapsGuard(X86& cpu, std::uint32_t caps_ea, std::string* why) {
+    return effectCapsGuardImpl(cpu, caps_ea, effectCapsImplemented(), why);
+}
+
+bool effectCapsGuardForTest(X86& cpu, std::uint32_t caps_ea,
+                            const EffectCapsImplementedForTest& implemented, std::string* why) {
+    return effectCapsGuardImpl(cpu, caps_ea, implemented, why);
+}
+
 const FxModule* effectModuleForSha(const std::string& sha256, const std::string& text, std::string* why) {
     const std::string want = toLower(sha256);
     auto it = fxModuleCache().find(want);
@@ -1590,7 +1812,8 @@ std::uint32_t effectBegin(X86& cpu, std::uint32_t state, std::uint32_t passes_ea
     }
     // ★ P2：`*pPasses` = **FX 文本解析出来的** pass 数（P1 的常量 1 已退役）。
     //   technique 没设 / 名字不在文本里 ⇒ 0 个 pass（真机同样不会跑 pass 循环）⇒ 之后任何"在这段
-    //   作用域里提交的 draw"都会因 `effectDrawProgram` 的具名原因被拒（bit 44）—— ⛔ 没有静默接受。
+    //   作用域里提交的 draw"都会因 `effectDrawProgram` 的具名原因触发 `pipelineTrap()`（P4）——
+    //   ⛔ 没有静默接受。
     const FxModule* module = effectModuleOf(cpu, state, nullptr);
     std::uint32_t kPassesReported = 0u;
     const std::uint32_t tech_ea = cpu.mem->rd32(state + kFxTech);
@@ -1622,7 +1845,7 @@ std::uint32_t effectBeginPass(X86& cpu, std::uint32_t state, std::uint32_t index
         fxWarn("ID3DXEffect::BeginPass", "不在 Begin..End 之间（仍推进状态）");
     }
     // ★ index 越界的判定不在这里：`effectDrawProgram` 按**文本解析出的** pass 表取 pass，
-    //   取不到 ⇒ 该批带具名原因被拒（bit 44）。这里只推进状态。
+    //   取不到 ⇒ 该批带具名原因触发 `pipelineTrap()`（P4）。这里只推进状态。
 
     cpu.mem->wr32(state + kFxInPass, 1u);
     cpu.mem->wr32(state + kFxPassIndex, index);
@@ -1674,9 +1897,10 @@ std::uint32_t requireEffect(X86& cpu, ShimCall& call, const char* method) {
     return state;
 }
 
-// ★ P2：把"这一批该怎么画"（程序 + 常量表 + 纹理 EA）推进 `d3d9` 的 effect 作用域。
-//   ⛔ 解析失败 / 不在实现集**不**在这里停：那要按**每一批**记账（bit 44 + 具名原因），
-//   由 `gpuEligible` 统一做（它会读 `EffectDrawScope::program.reason`）。
+// ★ P4：把"这一批该怎么画"（程序 + 常量表 + 纹理 EA）推进 `d3d9` 的 effect 作用域。
+//   ⛔ 解析失败 / 不在实现集**不**在这里停（这里只发布快照）：运行期由 `submitPrimitives` 的
+//   `pipelineTrap()` 响亮停（它读 `EffectDrawScope::program.reason`，里面有资源 / technique /
+//   pass / entry / profile）。⛔ 不是 P1 的 "warn + 0 像素 + 位 44 继续跑"。
 void publishDrawProgram(X86& cpu, std::uint32_t state) {
     const d3d9::EffectDrawScope scope = d3d9::effectDrawScope();
     if (!scope.active || scope.state != state) return;

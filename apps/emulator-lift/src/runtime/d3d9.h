@@ -265,52 +265,42 @@ constexpr std::uint32_t kCapsCursorClaim = 0x00000000u;
 constexpr std::uint32_t kCapsVertexProcessingClaim = 0x00000018u;
 
 // =====================================================================================
-// 开发用 opt-in：`LIFT_D3D9_PS_VERSION`（GPU 路线 P1 的 E2E 入口；⛔ **不改缺省值**）
+// Shader caps：**按真实实现能力报**（P4 = `REQ-01M7MXHYR1M72JW77J136GT3ZG`；固定值，无 opt-in）
 //
-// ★ 为什么需要它：caps 缺省把 `PixelShaderVersion` 报 0 ⇒ 引擎的效果等级恒 0
-//   （`0x4A6FDD mov [esi+0B64Ch], 0`），**永远走不到** `D3DXCreateEffectFromResourceA` ⇒
-//   P1 的实现没有 E2E 观测面。这是**开发用**开关：缺省不存在该 env ⇒ `fillCaps` 逐字节不变。
-// ★ 为什么 P1 就够用（不必等 P2/P3/P4）：等级只决定"引擎会不会去建 effect"，而着色器的**执行**
-//   依赖 P2/P3；本段允许画面不对（effect draw 会被 `gpuEligible` 的 stage≥1 整批拒绝，具名可见）。
+// ★ P1 的开发开关（那个读 env 的 psver opt-in）已随 P4**整条删除**：⛔ 不再有"报低一档 / 登记已知
+//   偏离 / declared_gap / 白名单"这一档。声明值 = 实现集，守卫是**硬等式**
+//   （`shims/d3dx9_effect.cpp` 的 `effectCapsGuard`）：caps 会让引擎建的每个 effect program
+//   都必须在 `kBindings` ∪ `kVertexBindings` 里，**缺一个 ⇒ 启动 Trap**（`GetDeviceCaps` 当场停）。
+//
+// ★ 取值与兑现者（口径真源 `docs/03-emulator/caps.md` §2）：
+//   · `PixelShaderVersion = 0xFFFF0200`（ps_2_0）⇒ 引擎效果等级 2 ⇒ 会建 200/201/202/203
+//     （ps_1_0 / ps_2_0 / ps_1_0 / ps_2_0；兑现者 = 后端 effect 管线的 5 条 binding）。
+//   · `VertexShaderVersion = 0xFFFE0100`（vs_1_0）⇒ **CPU 顶点程序** `transformVertexVs10`
+//     （202 的 `SnowVS`：`Pos = mul(pos, Proj)`）。设备 vtable 的 `Create/SetVertexShader`
+//     仍未实现（被调用即 `comUnsupported`）—— 那是**已声明边界**，⛔ 不进等式。
+//   · `MaxVertexShaderConst = 96` / `MaxPixelShaderValue = 8.0f`：**自洽值**（vs_1_0 的
+//     `c0..c95` / ps_2_0 的常见上限），引擎对 `+0xC8` / `+0xD0` **零读点**，⛔ 不是取证值
+//     （caps.md §7 第 1/4 条已登记"待核"）。
 //
 // ★ 取证（父级 2026-11-17 复核；EA 全在同一份 `.lst`）：
 //   · 引擎只读 **5 个** D3DCAPS9 字段：`+0x58/+0x5C` MaxTextureWidth/Height（0x499128/0x49912E）·
 //     `+0xCC` **PixelShaderVersion**（0x4A6FB4）· `+0xAC` MaxVertexBlendMatrixIndex（0x47A579）·
-//     `+0x0C` Caps2（0x488B55，死读）。其余字段**零读点** ⇒ 本开关**只**改 `+0xCC`（外加两个
-//     shader 常量数按版本给自洽值，但它们没有消费点 —— ⛔ 不要为它们编语义）。
+//     `+0x0C` Caps2（0x488B55，死读）。其余字段**零读点**。
 //   · 等级判据（`sub_4A6xxx`，`Engine+0xB64C`）：`0x4A6FB7 cmp eax,0FFFF0200h / jb` ⇒ 等级 2；
 //     `0x4A6FCA cmp eax,0FFFF0100h / jb` ⇒ 等级 1；否则 0。写回点 `0x4A6FBE/0x4A6FD1/0x4A6FDD`。
-//     消费：等级 1 ⇒ 建资源 200；≥2 ⇒ 建 201 与 203；0 ⇒ `0x4B072D jl` 跳过 FX 路；
+//     消费：等级 1 ⇒ 建资源 200 与 202；≥2 ⇒ 另建 201 与 203；0 ⇒ `0x4B072D jl` 跳过 FX 路；
 //     <2 ⇒ 软件模糊；≥1 且 `[this+0xB590] != 0` ⇒ `SetTechnique("Fade")`。
 //     ⚠ `Engine+0xB590` 就是本模块 `D3DXCreateEffectFromResourceA` 的 `ppEffect` 出参。
 //   · ⚠ 等级还有**第 2 入口**：`0x4A6FA2 mov eax,[ebp+arg_4]`，arg_4 ∈ [-1..2] 且 ≠ -1 时
-//     **直接覆盖** `[Engine+0xB64C]`（`0x4A6FE9`）⇒ "caps=2.0 ⇒ 等级一定 2"有例外；E2E 里若看到
-//     等级被覆盖，如实记，别硬解释。
+//     **直接覆盖** `[Engine+0xB64C]`（`0x4A6FE9`）⇒ "caps=2.0 ⇒ 等级一定 2"有例外（见 caps.md
+//     §4：`required` 取全 4 个正是为了不依赖配置键 `display:PixelShader` 的缺省值）。
 // =====================================================================================
-// D3DPS_VERSION(major,minor) 的低 16 位（`D3DPS_VERSION(1,1) = 0xFFFF0100` 等）。
-constexpr std::uint32_t kPsVersionCompat1_1 = 0x100u;  // 引擎判"等级 ≥1"
-constexpr std::uint32_t kPsVersion2_0 = 0x200u;        // 引擎判"等级 2"（0x4A6FB7 的 0xFFFF0200）
-constexpr std::uint32_t kPsVersion3_0 = 0x300u;        // 同样 ≥ 0xFFFF0200 ⇒ 等级 2
-
-// 把 `LIFT_D3D9_PS_VERSION` 的**取值**映射成 caps 的两个字段。
-//   · 合法值只有 0 / 0x100 / 0x200 / 0x300（0 = 缺省，两字段都 0）；
-//   · 返回 false ⇒ 非法（⛔ 调用方必须响亮停，不许"认不出就当 0"）；
-//   · `caps_pixel_shader_version` = `0xFFFF0000 | version`（D3DCAPS9 的 +0xCC 布局）；
-//   · `caps_max_pixel_shader_value` = 1.0（ps_1_x）/ 8.0（ps_2_0、ps_3_0）—— ⛔ 无读点，仅为自洽。
-//   ★ 纯函数（不读 env）：守卫直测值域与映射，E2E 测真接线。
-bool shaderCapsForPixelShaderVersion(std::uint32_t requested, std::uint32_t* caps_pixel_shader_version,
-                                     float* caps_max_pixel_shader_value);
-
-// `LIFT_D3D9_PS_VERSION` 的**进程内一次**解析结果（第一次问 caps 时读 env 并打一行 readout）。
-struct PixelShaderVersionOverride {
-    bool present = false;       // env 存在 = 开档
-    bool valid = true;          // 值域合法
-    std::uint32_t version = 0;  // 0 / 0x100 / 0x200 / 0x300
-    std::string text;           // env 原文（诊断 / 错误消息用）
-};
-// 读 env（只读一次）。开档时向 stdout 打**一行** readout（含"等级 = N ⇒ 会建哪些 FX"）；
-// 非法值 ⇒ 向 stderr 打一行点名合法值，`valid=false`（调用方负责硬停）。
-const PixelShaderVersionOverride& pixelShaderVersionOverride();
+// D3DPS_VERSION(2,0) = 0xFFFF0200 / D3DVS_VERSION(1,0) = 0xFFFE0100（D3DCAPS9 的 +0xCC / +0xC4）。
+constexpr std::uint32_t kCapsPixelShaderVersionClaim = 0xFFFF0200u;   // D3DPS_VERSION(2,0)
+constexpr std::uint32_t kCapsVertexShaderVersionClaim = 0xFFFE0100u;  // D3DVS_VERSION(1,0)
+// ★ 自洽值（引擎零读点；来源待核，caps.md §7 第 1/4 条）：
+constexpr std::uint32_t kCapsMaxVertexShaderConstClaim = 96u;  // vs_1_0 的 c0..c95（公开规范口径）
+constexpr float kCapsMaxPixelShaderValueClaim = 8.0f;          // ps_2_0 的常见上限（自洽值）
 
 // =====================================================================================
 // effect draw 作用域（GPU 路线 P2：**pass 的程序真的执行**）
@@ -325,8 +315,9 @@ const PixelShaderVersionOverride& pixelShaderVersionOverride();
 //   这里只存一份"这一批该怎么画"的快照。
 // ★ P2 的实现集 = **Fade（`ps_2_0` 201 / `ps_1_0` 200）**；P3 追加 **203 的 SlideBlur / ZoomBlur
 //   （`ps_2_0`）**；A 单追加 **202 的 Snow（`ps_1_0` SnowPS + `vs_1_0` SnowVS）**。
-//   不在实现集里的程序 ⇒ `program.implemented == false` + `program.reason`，调用方**具名拒绝该批**
-//   （bit 44），⛔ 不静默降级成固定功能、⛔ 也不静默接受。
+//   不在实现集里的程序 ⇒ `program.implemented == false` + `program.reason`；**P4 起**运行期由
+//   `submitPrimitives` 的 `pipelineTrap()` **响亮停**（⛔ 不再是 warn + 0 像素 + 位 44 继续跑），
+//   启动时则由 `shims/d3dx9_effect.cpp` 的 `effectCapsGuard` 按 caps 做硬等式。
 // ★ 202 是唯一带 **VertexShader** 的 pass：它的 `vs_1_0` 由 **CPU 顶点程序**兑现
 //   （`transformVertexVs10`，`Pos = mul(pos, Proj)`；见 `EffectDrawProgram::has_vs`）。
 //   ⛔ 这不是"把 T&L 搬上 GPU"：设备侧 `Create/SetVertexShader` 仍未实现（被调用即 comUnsupported）。
@@ -492,8 +483,9 @@ void destroyDeviceState(X86& cpu, std::uint32_t state);
 
 // ---- D3DCAPS9 ----
 // 全部 0xD4 字节都写确定值（MaxTextureWidth/Height = kMaxTextureWidth/Height）。
-// ★ 本线**没有 shader / 没有绘制** ⇒ VertexShaderVersion / PixelShaderVersion 报 0
-//   （⛔ 不谎称 3.0 让引擎走进没实现的路径）。
+// ★ shader 版本 = **真实实现能力**（P4 固定值，无 env）：PS = `kCapsPixelShaderVersionClaim`
+//   （0xFFFF0200）/ VS = `kCapsVertexShaderVersionClaim`（0xFFFE0100）；两个常量数的口径见上面的
+//   同名常量块。★ 声明值与实现集的**硬等式**由 `shims/d3dx9_effect.cpp` 的启动守卫判（缺 ⇒ Trap）。
 std::uint32_t fillCaps(X86& cpu, std::uint32_t caps_ea, std::string* why);
 
 // ---- CheckDeviceFormat：**真值判定** + 诊断记录（宿主侧环形缓冲；⛔ 记录不是语义状态）----

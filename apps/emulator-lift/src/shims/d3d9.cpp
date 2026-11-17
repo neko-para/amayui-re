@@ -37,6 +37,7 @@
 #include "runtime/exec.h"
 #include "runtime/memory.h"
 #include "runtime/x86.h"
+#include "shims/d3dx9_effect.h"  // P4 启动守卫（caps ⇒ 实现集的硬等式）
 #include "shims/d3dx9_surface.h"
 #include "shims/register.h"
 
@@ -403,6 +404,17 @@ void shimGetDeviceCaps(X86& cpu, ShimCall& call) {
     const std::uint32_t hr = d3d9::fillCaps(cpu, caps_ea, &why);
     if (hr != d3d9::kOk) {
         d3d9Trap(cpu, "IDirect3DDevice9::GetDeviceCaps(+0x1C)", "%s（this=0x%08X）", why.c_str(), self);
+        call.result = hr;
+        return;
+    }
+    // ★ P4（`REQ-01M7MXHYR1M72JW77J136GT3ZG`）：caps 一旦**真的写进 guest**，就会决定引擎去建
+    //   哪些 effect program ⇒ 立刻验硬等式 `required == implemented`。缺一个 ⇒ **启动 Trap**
+    //   （`effectCapsGuard` 自己打印读数 / missing 并停机器；⛔ 不是 warn、⛔ 不是运行到那一帧才停）。
+    //   ★ 落点为什么在这里：`fillCaps` 刚返回（拿得到**真的**写进 guest 的值），而 `runtime/`
+    //     不能反向 include `shims/`（守卫要读 pin 资源的字节 + FX 文本解析）。
+    if (!d3dx9::effectCapsGuard(cpu, caps_ea, &why)) {
+        call.result = d3d9::kInvalidCall;
+        return;
     }
     call.result = hr;
 }

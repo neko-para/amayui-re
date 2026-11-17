@@ -4107,12 +4107,13 @@ const MUTATIONS = [
       '★ 只断言"画出来了 / 有像素"会假绿',
   },
 
-  // ── A 单 ③ · 删掉 202 的 `kBindings` 一行（跨平台那条）──
-  //   ★ 上面两条分别钉"矩阵槽"与"片元算术"；这一条钉**门牌表**本身：删掉 202 的一条 ⇒
-  //     "带 VertexShader 的 pass"重新变成"程序不在实现集"（具名拒绝）—— 也就是 A 的前置被撤掉。
-  //   ★ 与 ① ② 不同，它**不依赖平台**（纯 CPU 侧的表）：`effect-draw-snow-recorded` 的表长/门牌断言
-  //     与 `implemented` 断言同时红，snow-vertices / snow-pixels 的每一批也会因 `implemented=false`
-  //     被整批拒（`skipped_draws` 涨）⇒ 三重红。
+  // ── P4 · 删掉 202 的 `kBindings` 一行 ⇒ **启动守卫当场 Trap**（硬等式）──
+  //   ★ 故障形态：caps 声明 ps_2_0/vs_1_0 ⇒ 引擎会建 202 ⇒ **声明在、实现集里少一条**。
+  //     P4 之后这条由 `effectCapsGuard`（`GetDeviceCaps` 路径）在**启动时**抓住（`pipelineTrap` /
+  //     `caps 实现集守卫`），⛔ 不再拖到某一帧、⛔ 也不是 warn。
+  //     ★ 同一份破坏还会让 `effect-draw-snow-recorded` 的表长 / `implemented` 断言与
+  //     snow-vertices / snow-pixels 的每一批同时红（多重证据，⛔ 不是"只红一处"）。
+  //   ★ 这条不依赖平台（纯 CPU 侧的表）。
   {
     file: 'apps/emulator-lift/src/shims/d3dx9_effect.cpp',
     from:
@@ -4123,10 +4124,37 @@ const MUTATIONS = [
     buildDir: 'apps/emulator-lift/out',
     buildTarget: 'lift-d3dx9-effect',
     what:
-      '删掉 `kBindings` 里 202（Snow/SnowPS/ps_1_0）那一行 ⇒ 202 的 draw 重新变成"程序不在实现集"：' +
-      '`d3dx9-effect` 的 effect-draw-snow-recorded 在表长（seen==5）与 `implemented` 上红、' +
-      'snow-vertices / snow-pixels 的每一批被整批拒（`skipped_draws` 涨、`effect_queued==0`）；' +
-      '★ 这条是"A 的前置被撤掉"的机械证据',
+      '删掉 `kBindings` 里 202（Snow/SnowPS/ps_1_0）那一行 ⇒ caps 会让引擎建的 program 少一条 ⇒ ' +
+      '`d3dx9-effect` 的 caps-programs-guard 在**启动时** Trap 并点名 missing=id=202/technique=Snow/' +
+      'SnowPS/ps_1_0；同一份破坏还让 effect-draw-snow-recorded 的表长（seen==5）与 `implemented` 红、' +
+      'snow-vertices / snow-pixels 的每一批被整批拒；★ 这条是"声明 == 实现"被撤掉的机械证据',
+  },
+
+  // ── P4 · 把启动守卫的硬等式**降级成 warn**（`shims/d3dx9_effect.cpp`）──
+  //   故障形态：`required != implemented` 时不再停机器、只把原因留在 `why` 里继续跑 —— 这正是 P4
+  //   要消灭的"警告 + 继续"。判据：`caps-programs-guard` 的两条注入用例（缺 202 PS / 缺 SnowVS）
+  //   必须看到 `stop_kind == Trap` 且 `cpu.running == false`；⛔ "why 非空"发现不了这条降级。
+  {
+    file: 'apps/emulator-lift/src/shims/d3dx9_effect.cpp',
+    from:
+      '        if (why) *why = detail;\n' +
+      '        effectCapsGuardTrap(cpu, detail);\n' +
+      '        return false;\n' +
+      '    }\n' +
+      '    return true;',
+    to:
+      '        if (why) *why = detail;  // 变异：把硬等式降级成 warn（不停机器）\n' +
+      '        return true;\n' +
+      '    }\n' +
+      '    return true;',
+    guard: 'ctest:d3dx9-effect',
+    ctest: 'd3dx9-effect',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3dx9-effect',
+    what:
+      '把 caps ⇒ 实现集的硬等式降级成 warn（不停机器、只写 why 就继续跑）⇒ `d3dx9-effect` 的 ' +
+      'caps-programs-guard 在"缺 202 PS / 缺 SnowVS"两条注入用例上红（守卫返回 true / cpu 仍在跑）；' +
+      '★ 只断言 why 非空会假绿',
   },
 
   // ── emulator-lift · `D3DXMatrixDecompose` 的四元数**共轭**（符号/方向） ──────────────────

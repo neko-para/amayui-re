@@ -53,6 +53,7 @@
 
 #include "runtime/com.h"
 #include "runtime/d3d9.h"
+#include "runtime/exec.h"  // dumpRegisters / dumpGuestStack（pipelineTrap 的现场）
 #include "runtime/heap.h"
 #include "runtime/host_services.h"
 #include "runtime/math.h"
@@ -260,17 +261,16 @@ enum UnsupportedBit : std::uint32_t {
     //     == 本批要写的颜色目标像素基址" ⇒ 跳过这一条 + 记这一位。⛔ 不是"未实现"，
     //     是**表达不了**（GPU 采样读上传缓存）⇒ 与 draw 路同一种拒绝语义。
     kUnSpriteRtFeedbackLoop = 43,
-    // ---- 44：`REQ-01M7MSGRRHCA23RAX1QGDAYJ3X`（GPU 路线 P2；P3 扩实现集）----
-    //   ★ 语义（P3 之后的口径）：**这一批该由 effect 的 pass 程序画，但那个程序不在实现集里**
-    //     —— 202 的 Snow（vs_1_0，不做 GPU 顶点着色）、以及"technique 不在资源文本里 /
-    //     SetTexture 没绑 / 纹理对象解析不了"这类具名缺口。
-    //     实现集内的程序（Fade 的 ps_2_0 / ps_1_0 + 203 的 SlideBlur / ZoomBlur ps_2_0）
-    //     **不再经过这一位**：它们真的被 GPU 画出来。
+    // ---- 44：`REQ-01M7MSGRRHCA23RAX1QGDAYJ3X`（GPU 路线 P2；P4 收窄语义）----
+    //   ★ 语义（P4 之后）：**effect draw 的其余拒批** —— 程序已实现、但这一批画不了：
+    //     后端没有 effect 管线 / 纹理数不在 1..2 / 纹理非 32bpp / UV 布局与后端固定槽不符 /
+    //     纹理解析失败 等。
+    //   ★ "程序不在实现集里" **不再**走这一位：P4 起那是 `pipelineTrap()`（响亮停，`submitPrimitives`
+    //     在 `gpuEligible` 之前就停了）——⛔ 不是"warn + 0 像素 + 记账继续跑"。
     //   ★ 为什么不复用 33（stage>=1）：33 的触发条件是**固定功能**的多级纹理（stage1 绑了纹理 /
     //     op 未 DISABLE）；effect draw 的纹理**不经过** device 的 stage 状态（它来自 effect 的
     //     `SetTexture`）⇒ 两条可以独立发生（实测：203 的 blur 只绑 Tex0 ⇒ 33 不触发）。
-    //   ★ P1 的临时位（`kUnEffectShaderNotExecuted`，"只记状态不执行"）**已删**：那一位在 P2 之后
-    //     永远不会被置起（Fade 走 GPU、其余在这里具名）⇒ 留着它就是一条恒假的契约。
+    //   ★ P1 的临时位（`kUnEffectShaderNotExecuted`，"只记状态不执行"）**已删**。
     kUnEffectProgramNotExecuted = 44,
 };
 
@@ -453,6 +453,27 @@ void pipeWarn(PipeWarnCategory cat, const char* what, const char* fmt, ...) {
               "同类告警已打满 %u 次 ⇒ 之后只计数（每一次仍以 debug 级别留一条）", kPipeWarnBudget);
     }
     logAt(LogLevel::Debug, LogD3d9, prefix, "%s", msg);
+}
+
+// ★ P4（`REQ-01M7MXHYR1M72JW77J136GT3ZG`）：effect draw 命中"未实现的 program" ⇒ **响亮停**。
+//   打印现场（资源 / technique / pass / entry / profile 由 `program.reason` 带进来）+ 寄存器 + 栈。
+//   ⛔ 不再是 `pipeWarn` + 0 像素 + 位 44：那会让画面静默缺一层，而启动守卫的缺口永远只有到
+//   运行期才暴露。`stop_why` 取"unimplemented effect program"（与槽级 `comUnsupported` 的
+//   "unimplemented D3D9 call"、effect 资源级 "unimplemented D3DX effect" 三者可区分）。
+void pipelineTrap(X86& cpu, const char* what, const char* fmt, ...) {
+    std::fprintf(stderr, "\n=== D3D9 pipeline trap ===\n  %s\n  reason: ", what ? what : "?");
+    va_list ap;
+    va_start(ap, fmt);
+    std::vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    std::fprintf(stderr,
+                 "\n  （effect 的 program 不在实现集里 ⇒ 启动守卫漏了 / guest 换了 FX 文本。\n"
+                 "    ⛔ 不 warn + 0 像素继续跑：那会让画面静默缺一层）\n");
+    dumpRegisters(cpu, stderr);
+    dumpGuestStack(cpu, stderr, 24);
+    cpu.running = false;
+    cpu.stop_why = "unimplemented effect program";
+    cpu.stop_kind = HostStopKind::Trap;
 }
 
 bool requireMachine(X86& cpu, HostServices** out, std::string* why) {
@@ -665,7 +686,7 @@ const char* unsupportedBitName(std::uint32_t bit) {
     if (bit == kUnRenderStateStored) return "合法 D3DRS（只存）";
     if (bit == kUnDepthClearZ) return "Clear(ZBUFFER) 的 z 越界";
     if (bit == kUnSpriteRtFeedbackLoop) return "sprite 反馈环";
-    if (bit == kUnEffectProgramNotExecuted) return "effect 的 pass 程序不在实现集里（Fade + 203 的 SlideBlur/ZoomBlur）";
+    if (bit == kUnEffectProgramNotExecuted) return "effect draw 被拒（程序不在实现集 ⇒ pipelineTrap；本位只剩其它 effect 拒批）";
     return "未分配";
 }
 
@@ -4244,24 +4265,21 @@ bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why, U
         return deny(kUnGpuColorWrite);
     }
     // ---- effect draw（P2）：这批由 FX pass 程序画 ⇒ **不看** device 的 stage 状态 ----
-    //   ★ 这里判定的是"能不能真的画"：程序在实现集里 + 后端支持 effect 队列 + 纹理解析得了。
+    //   ★ 这里判定的是"已实现的程序**能不能真的画**"：后端支持 effect 队列 + 纹理解析得了。
     //     任何一条不满足 ⇒ **整批拒绝 + 具名位 44**（⛔ 不落回固定功能画 —— 那会写出错误像素而
-    //     账上一个具名位都没有）。
+    //     账上一个具名位都没有）。程序本身不在实现集 ⇒ 在 `submitPrimitives` 就 `pipelineTrap()` 了。
     if (ctx.effect_draw) {
         const d3d9::EffectDrawProgram& prog = ctx.effect.program;
         // ★ 默认可见：effect 的**每一条**拒批都走 `pipeWarn`（配额 4 次 + 一行汇总，汇总行带**总次数**）。
         //   ⛔ 不再用 P1 的 `effectDrawWarn`（每批一条、无预算）—— P2 之后这是**普通**的准入拒绝，
         //   与其它 bit 同一档；但⛔ 不许"静默拒绝"：AOT 摘要**不打印** GPU 覆盖账，这里是唯一的默认消息面。
+        // ★ P4：`!prog.implemented` **不在这里** —— 那是 `pipelineTrap()` 的现场（`submitPrimitives`
+        //   在进本函数**之前**就停了）。本函数只剩"程序已实现但这一批画不了"的形态拒批。
         const auto deny_effect = [&](const char* reason) {
             if (why) *why = reason;
             pipeWarn(PipeWarnCategory::Other, "effect", "%s", reason);
             return deny(kUnEffectProgramNotExecuted);
         };
-        if (!prog.implemented) {
-            char buf[640];
-            std::snprintf(buf, sizeof(buf), "effect 的 pass 程序没有实现执行：%s", prog.reason.c_str());
-            return deny_effect(buf);
-        }
         if (!gpuSupportsEffectDraw(ctx.gpu)) {
             return deny_effect("这个 GPU 后端没有 effect 管线（每 draw 一个 shader + 常量 + 2 纹理）"
                                "⇒ 不接受该批");
@@ -4552,6 +4570,18 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
     }
     GpuBatchPlan plan;
     std::string gpu_why;
+    // ★ P4（`REQ-01M7MXHYR1M72JW77J136GT3ZG`）：effect draw 命中"未实现的 program" ⇒ **响亮停**。
+    //   ⛔ 不再是 warn + 0 像素 + 位 44 继续跑（P1 的临时形态）：启动守卫已保证"caps 会让引擎建
+    //   的每个 program 都在实现集里" ⇒ 运行期还撞到它，只有两种可能：守卫漏了，或 guest 在
+    //   运行期换了 FX 文本。两种都必须停在现场（画面静默缺一层是最坏的结局）。
+    if (ctx.effect_draw && !ctx.effect.program.implemented) {
+        char buf[768];
+        std::snprintf(buf, sizeof(buf), "effect 的 pass 程序没有实现执行：%s",
+                      ctx.effect.program.reason.c_str());
+        if (why) *why = buf;
+        pipelineTrap(cpu, "Draw（effect program 不在实现集里）", "%s", buf);
+        return false;
+    }
     // ★ `gpuEligible` 拒批时**指名**是哪一类（29..40）。默认值 = `kUnGpuNoBackend`：
     //   `gpuEligible` 内部对 `ctx.gpu == nullptr` / `!rasterActive()` 也写这个位，保留默认值只是让
     //   "压根没进准入"的那条路也有名字。

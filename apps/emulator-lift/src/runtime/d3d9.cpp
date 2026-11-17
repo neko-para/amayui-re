@@ -519,93 +519,10 @@ void noteEffectDrawProgram(const EffectDrawProgram& program) {
 // ---------------------------------------------------------------------------------------
 // D3DCAPS9
 // ---------------------------------------------------------------------------------------
-// ★ 开发用 opt-in：`LIFT_D3D9_PS_VERSION`（取证与口径见 `d3d9.h` 的同名注释块）。
-//   缺省（env 不存在）⇒ 两个字段都 0，`fillCaps` 的输出与改动前**逐字节一致**。
-bool shaderCapsForPixelShaderVersion(std::uint32_t requested, std::uint32_t* caps_pixel_shader_version,
-                                     float* caps_max_pixel_shader_value) {
-    if (caps_pixel_shader_version) *caps_pixel_shader_version = 0u;
-    if (caps_max_pixel_shader_value) *caps_max_pixel_shader_value = 0.0f;
-    switch (requested) {
-        case 0u:
-            return true;  // 缺省档：两者都是 0
-        case kPsVersionCompat1_1:  // ps_1_1 ⇒ 引擎判"等级 ≥1"（0x4A6FCA 的 0xFFFF0100）
-            if (caps_pixel_shader_version) *caps_pixel_shader_version = 0xFFFF0000u | requested;
-            if (caps_max_pixel_shader_value) *caps_max_pixel_shader_value = 1.0f;
-            return true;
-        case kPsVersion2_0:  // ps_2_0 ⇒ 0xFFFF0200（0x4A6FB7 的判据）
-        case kPsVersion3_0:  // ps_3_0 ≥ 0xFFFF0200 ⇒ 同样是等级 2
-            if (caps_pixel_shader_version) *caps_pixel_shader_version = 0xFFFF0000u | requested;
-            if (caps_max_pixel_shader_value) *caps_max_pixel_shader_value = 8.0f;
-            return true;
-        default:
-            return false;
-    }
-}
-
-namespace {
-
-// 等级 → "会去建哪些 FX"（readout 用。读数是 D3D9 caps 的**引擎侧后果**，不是我们的实现能力，
-// ⛔ 不要把它说成"已支持 shader"：着色器执行是 P2/P3 的事）。
-const char* levelFxSummary(std::uint32_t version) {
-    if (version == 0u) return "等级 0 ⇒ 不建 FX（0x4B072D jl 跳过整条 FX 路）";
-    if (version == kPsVersionCompat1_1) return "等级 1 ⇒ 只建资源 200（Fade ps_1_0）";
-    return "等级 2 ⇒ 建资源 201（Fade ps_2_0）与 203（ZoomBlur/SlideBlur；>1 才走）";
-}
-
-std::string trimText(const char* text) {
-    std::string s = text ? text : "";
-    std::size_t b = 0;
-    while (b < s.size() && (s[b] == ' ' || s[b] == '\t' || s[b] == '\r' || s[b] == '\n')) ++b;
-    std::size_t e = s.size();
-    while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\r' || s[e - 1] == '\n')) --e;
-    return s.substr(b, e - b);
-}
-
-}  // namespace
-
-const PixelShaderVersionOverride& pixelShaderVersionOverride() {
-    // ★ 只读一次 env（进程内一份）：缺省档连分支都不多 — 没有 env ⇒ present=false、valid=true、0。
-    static const PixelShaderVersionOverride cached = [] {
-        PixelShaderVersionOverride out;
-        const char* raw = std::getenv("LIFT_D3D9_PS_VERSION");
-        if (raw == nullptr) return out;  // 缺省：开档不存在 ⇒ ⛔ 不打任何字
-        out.present = true;
-        out.text = raw;
-        const std::string trimmed = trimText(raw);
-        bool ok = !trimmed.empty();
-        unsigned long parsed = 0;
-        if (ok) {
-            char* end = nullptr;
-            errno = 0;
-            parsed = std::strtoul(trimmed.c_str(), &end, 0);
-            if (errno != 0 || end == nullptr || *end != '\0') ok = false;
-        }
-        if (ok) ok = shaderCapsForPixelShaderVersion(static_cast<std::uint32_t>(parsed), nullptr, nullptr);
-        if (!ok) {
-            out.valid = false;
-            // ★ 响亮：点名合法值（⛔ 不"认不出就当 0"）。硬停由 `fillCaps` 的调用方语义完成。
-            std::fprintf(stderr,
-                         "[d3d9] LIFT_D3D9_PS_VERSION=\"%s\" 非法：只接受 0 / 0x100 / 0x200 / 0x300"
-                         "（= 缺省 / ps_1_1 / ps_2_0 / ps_3_0 的 D3DPS_VERSION 低 16 位）\n",
-                         raw);
-            std::fflush(stderr);
-            return out;
-        }
-        out.version = static_cast<std::uint32_t>(parsed);
-        // ★ 一次性 readout（§12.8 第 3 条：一次性输出允许；⛔ 不是周期性）。
-        //   只在开档时出现 ⇒ 缺省档的 stdout 行集合与改动前一致。
-        std::uint32_t caps_version = 0;
-        float caps_max = 0.0f;
-        shaderCapsForPixelShaderVersion(out.version, &caps_version, &caps_max);
-        std::printf("caps      : LIFT_D3D9_PS_VERSION=%s ⇒ PixelShaderVersion=0x%08X（%s；"
-                    "开发用 opt-in，缺省档不变）\n",
-                    out.text.c_str(), caps_version, levelFxSummary(out.version));
-        std::fflush(stdout);
-        return out;
-    }();
-    return cached;
-}
-
+// ★ P4（`REQ-01M7MXHYR1M72JW77J136GT3ZG`）：shader caps 固定按**真实实现能力**报 —— 没有
+//   开发用的 psver opt-in 了（env 解析 / 值域校验 / readout 整条删除）。
+//   声明值与实现集的**硬等式**由 `shims/d3dx9_effect.cpp` 的 `effectCapsGuard` 在
+//   `GetDeviceCaps` 路径上判：缺一个 program ⇒ 启动 Trap（⛔ 不是 warn / gap / 白名单）。
 std::uint32_t fillCaps(X86& cpu, std::uint32_t caps_ea, std::string* why) {
     if (!committedOut(cpu, caps_ea, kCapsBytes, "D3DCAPS9", why)) return kInvalidCall;
     // ① 先整块清零：引擎按 352 B 栈缓冲读，残留字节会变成随机能力（⛔ 不留未初始化）
@@ -652,37 +569,24 @@ std::uint32_t fillCaps(X86& cpu, std::uint32_t caps_ea, std::string* why) {
     cpu.mem->wr32(caps_ea + kCapsMaxVertexIndex, 0xFFFFFu);
     cpu.mem->wr32(caps_ea + kCapsMaxStreams, 16u);
     cpu.mem->wr32(caps_ea + kCapsMaxStreamStride, 255u);
-    // ★ 本线**没有 shader** ⇒ 缺省把两个版本号与常量数报 0（⛔ 不谎称 vs_3_0 让引擎走进没实现的路径）
-    // ★ 开发用 opt-in（`LIFT_D3D9_PS_VERSION`，见 `d3d9.h`）：缺省**不存在**该 env ⇒ 下面四行
-    //   与改动前逐字节一致（ps_caps = 0 / ps_max = 0.0f）。非法值 ⇒ 响亮停（⛔ 不认不出就当 0）。
-    const PixelShaderVersionOverride& ps_override = pixelShaderVersionOverride();
-    if (!ps_override.valid) {
-        std::fprintf(stderr,
-                     "\n=== 非法的 LIFT_D3D9_PS_VERSION ===\n  值 = \"%s\"\n"
-                     "  合法值只有 0 / 0x100 / 0x200 / 0x300（其余一律响亮停，⛔ 不静默当 0）\n",
-                     ps_override.text.c_str());
-        dumpRegisters(cpu, stderr);
-        cpu.running = false;
-        cpu.stop_why = "非法的 LIFT_D3D9_PS_VERSION";
-        cpu.stop_kind = HostStopKind::Trap;
-        if (why) *why = "LIFT_D3D9_PS_VERSION 非法（只接受 0 / 0x100 / 0x200 / 0x300）";
-        return kInvalidCall;
-    }
-    std::uint32_t ps_caps = 0;
-    float ps_max = 0.0f;
-    shaderCapsForPixelShaderVersion(ps_override.version, &ps_caps, &ps_max);
-    cpu.mem->wr32(caps_ea + kCapsVertexShaderVersion, 0u);
-    cpu.mem->wr32(caps_ea + kCapsMaxVertexShaderConst, 0u);
-    cpu.mem->wr32(caps_ea + kCapsPixelShaderVersion, ps_caps);
-    wrFloat(cpu, caps_ea + kCapsMaxPixelShaderValue, ps_max);
-    if (ps_override.present) {
-        d3d9Log("GetDeviceCaps",
-                "LIFT_D3D9_PS_VERSION=%s ⇒ PixelShaderVersion=0x%08X MaxPixelShaderValue=%g"
-                "（开发用 opt-in；MaxVertexShaderConst 仍 0 —— 引擎无读点）",
-                ps_override.text.c_str(), ps_caps, static_cast<double>(ps_max));
-    }
-    d3d9Log("GetDeviceCaps", "D3DCAPS9（%u B）= 0 ⇒ MaxTextureWidth=%u MaxTextureHeight=%u（shader 版本报 0）",
-            kCapsBytes, kMaxTextureWidth, kMaxTextureHeight);
+    // ★ P4：shader caps = **真实实现能力**（固定值，⛔ 没有 env / 没有"报低一档"）。
+    //   这四个值兑现得了：4 份 effect 资源的 5 条 PS binding 都在后端实现集里；`vs_1_0` 由
+    //   CPU 顶点程序 `transformVertexVs10`（202 的 `SnowVS`）兑现。设备侧的
+    //   `Create/SetVertexShader` 仍未实现 —— 那是**已声明边界**（被调用即 comUnsupported），
+    //   ⛔ 不进 caps/实现集等式（见 `docs/03-emulator/caps.md` §2.1/§3）。
+    cpu.mem->wr32(caps_ea + kCapsVertexShaderVersion, kCapsVertexShaderVersionClaim);
+    cpu.mem->wr32(caps_ea + kCapsMaxVertexShaderConst, kCapsMaxVertexShaderConstClaim);
+    cpu.mem->wr32(caps_ea + kCapsPixelShaderVersion, kCapsPixelShaderVersionClaim);
+    wrFloat(cpu, caps_ea + kCapsMaxPixelShaderValue, kCapsMaxPixelShaderValueClaim);
+    // 每次问 caps 都记一行 Info（默认 `Warn` 档看不见）；**默认可见**的启动 readout 在 shim 层
+    // 的启动守卫里（`shims/d3dx9_effect.cpp:effectCapsGuard` —— 它同时判"声明 == 实现集"）。
+    d3d9Log("GetDeviceCaps",
+            "D3DCAPS9（%u B）⇒ PixelShaderVersion=0x%08X VertexShaderVersion=0x%08X "
+            "MaxVertexShaderConst=%u MaxPixelShaderValue=%g",
+            kCapsBytes, kCapsPixelShaderVersionClaim, kCapsVertexShaderVersionClaim,
+            kCapsMaxVertexShaderConstClaim, static_cast<double>(kCapsMaxPixelShaderValueClaim));
+    d3d9Log("GetDeviceCaps", "MaxTextureWidth=%u MaxTextureHeight=%u（engine 只读 +0x58/+0x5C）",
+            kMaxTextureWidth, kMaxTextureHeight);
     return kOk;
 }
 

@@ -406,6 +406,20 @@ void caseCreateDeviceAndCaps() {
     LIFT_CHECK_NE_U32(max_h, 0u);
     LIFT_CHECK_EQ_U32(max_w, lift::d3d9::kMaxTextureWidth);
     LIFT_CHECK_EQ_U32(max_h, lift::d3d9::kMaxTextureHeight);
+    // ★ P4（`REQ-01M7MXHYR1M72JW77J136GT3ZG`）：shader 版本**逐字段**按真实实现能力报（没有 env）；
+    //   四个值都在 `d3d9.h` 的 `kCaps*Claim`（实现与守卫共用一份，⛔ 这里不另抄数字）。
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(caps_a + lift::d3d9::kCapsPixelShaderVersion),
+                      lift::d3d9::kCapsPixelShaderVersionClaim);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(caps_a + lift::d3d9::kCapsVertexShaderVersion),
+                      lift::d3d9::kCapsVertexShaderVersionClaim);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(caps_a + lift::d3d9::kCapsMaxVertexShaderConst),
+                      lift::d3d9::kCapsMaxVertexShaderConstClaim);
+    {
+        const std::uint32_t bits = f.m.mem().rd32(caps_a + lift::d3d9::kCapsMaxPixelShaderValue);
+        float value = 0.0f;
+        std::memcpy(&value, &bits, sizeof(value));
+        LIFT_CHECK(value == lift::d3d9::kCapsMaxPixelShaderValueClaim);
+    }
     // 0xD4 之外的 canary 没被写
     LIFT_CHECK_EQ_U32(f.m.mem().rd32(caps_a + lift::d3d9::kCapsBytes), 0x00000000u);
     LIFT_CHECK_EQ_U32(f.m.mem().rd32(caps_b + lift::d3d9::kCapsBytes), 0xFFFFFFFFu);
