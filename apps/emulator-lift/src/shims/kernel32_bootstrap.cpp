@@ -175,14 +175,19 @@ void shimGetCPInfo(X86& cpu, ShimCall& call) {
         return;
     }
     // CPINFO: MaxCharSize(4) + DefaultChar[2] + LeadByte[12] = 18 字节
+    // ★ 微软文档（`GetCPInfo` / `CPINFO`）：`UINT MaxCharSize` + `BYTE DefaultChar[MAX_DEFAULTCHAR=2]`
+    //   + `BYTE LeadByte[MAX_LEADBYTES=12]` ⇒ **LeadByte 从偏移 6 起**。
+    //   ⛔ 旧实现在 +4：0x81/0x9F 落进 `DefaultChar`，`LeadByte` 只剩 {0xE0,0xFC}
+    //   ⇒ 客侧 CRT 的 `__mbctype` 不把 0x81–0x9F 当前导字节 ⇒ 平假名首字节（0x82）按单字节数
+    //   ⇒ `_mbstrlen` 把「いいえ」数成 6（字符口径是 3）。`DefaultChar` 保持 0。
     std::uint8_t buf[18] = {};
     const bool is932 = isCp932Family(cp);
     buf[0] = is932 ? 2 : 1;  // MaxCharSize
     if (is932) {
-        buf[4] = 0x81;  // LeadByte[0] = 0x81
-        buf[5] = 0x9F;
-        buf[6] = 0xE0;
-        buf[7] = 0xFC;
+        buf[6] = 0x81;  // LeadByte[0]
+        buf[7] = 0x9F;  // LeadByte[1]
+        buf[8] = 0xE0;  // LeadByte[2]
+        buf[9] = 0xFC;  // LeadByte[3]
     }
     cpu.mem->writeBytes(info, buf, sizeof(buf));
     call.result = 1;

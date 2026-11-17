@@ -563,15 +563,31 @@ bool execInteger(X86& cpu, const Insn& in) {
         case Op::Bts:
         case Op::Btr:
         case Op::Btc: {
+            // ★ INTEL SDM（BT/BTS/BTR/BTC）：**寄存器形**才把位偏移截到操作数宽度的低位
+            //   （32 位 ⇒ 低 5 位）；**内存形**的位偏移是**地址**偏移 ——
+            //   访问 `EA + (BitOffset DIV 操作数位宽) * 操作数字节数`，只有余数选位。
+            //   ⛔ 旧实现无条件截位：客侧 CRT 的 `_strcspn`（32 字节位图，`bts/bt [esp],eax`）
+            //   因此跳错槽 —— `"japanese"` 的第 4 字节 `'n'=0x6E` 与分隔符 `'.'=0x2E`
+            //   低 5 位同为 14 ⇒ 误判成"命中分隔符" ⇒ 语言被切成 `"japa"` ⇒ `_setlocale` 失败。
+            //   ⇒ 解释器是本语义的**真源**，AOT 的 `FnEmit::emitBitTest` 照这一份发 IR。
             const std::uint8_t size = opSize(in.op0());
-            const std::uint32_t bit = rd(cpu, in.op1()) & (bitsOf(size) - 1);
-            const std::uint32_t v = rd(cpu, in.op0());
+            const unsigned width = bitsOf(size);
+            const std::uint32_t off = rd(cpu, in.op1());
+            const std::uint32_t bit = off & (width - 1u);
+            Operand dst = in.op0();
+            if (dst.kind == OpKind::Mem) {
+                const std::int32_t soff = static_cast<std::int32_t>(off);
+                const std::int32_t slot = soff / static_cast<std::int32_t>(width);
+                // `disp` 是 uint32 补码（`insn.h` 的 `MemOperand`）⇒ 加法自然回绕。
+                dst.mem.disp += static_cast<std::uint32_t>(slot * static_cast<std::int32_t>(size));
+            }
+            const std::uint32_t v = rd(cpu, dst);
             cpu.setCf(((v >> bit) & 1u) != 0);
             std::uint32_t nv = v;
             if (in.op == Op::Bts) nv |= (1u << bit);
             if (in.op == Op::Btr) nv &= ~(1u << bit);
             if (in.op == Op::Btc) nv ^= (1u << bit);
-            if (in.op != Op::Bt) wr(cpu, in.op0(), nv);
+            if (in.op != Op::Bt) wr(cpu, dst, nv);
             return true;
         }
         case Op::Bsf:

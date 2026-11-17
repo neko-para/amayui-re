@@ -907,6 +907,13 @@ private:
     std::string eaOf(const MemOperand& m);
     std::string loadMemValue(const MemOperand& m);
     void storeMemValue(const MemOperand& m, const std::string& v);
+    // ★ 按**显式 EA**（而不是 `MemOperand`）读 / 写一个 guest 值。为什么需要第二组：
+    //   `bt/bts/btr/btc` 的内存形要在**运行时**按位偏移调整地址
+    //   （SDM：`EA + (BitOffset DIV 位宽) * 字节数`）—— 那个 delta 是 SSA 值，
+    //   塞不进 `MemOperand::disp`（编译期常量）。`loadMemValue/storeMemValue` 本身就是这一组
+    //   的薄包装 ⇒ 读写语义（align 1 / zext / `lift_note_write`）只有一份。
+    std::string loadMemAt(const std::string& ea, unsigned size);
+    void storeMemAt(const std::string& ea, unsigned size, const std::string& v);
     std::string loadAt(const std::string& ea);
     std::string memPtrFor(const std::string& ea);
     std::string readValue(const Operand& op);
@@ -1308,8 +1315,7 @@ std::string FnEmit::eaOf(const MemOperand& m) {
     return ea.empty() ? std::string("0") : ea;
 }
 
-std::string FnEmit::loadMemValue(const MemOperand& m) {
-    const std::string ea = eaOf(m);
+std::string FnEmit::loadMemAt(const std::string& ea, unsigned size) {
     const std::string e64 = tmp();
     add(e64 + " = zext i32 " + ea + " to i64");
     const std::string p = tmp();
@@ -1317,7 +1323,7 @@ std::string FnEmit::loadMemValue(const MemOperand& m) {
     const std::string v = tmp();
     // ★ 一律 align 1：guest 地址不保证对齐（夹具里 kBuf 就是故意非对齐的）；
     //   `align 4` 在 LLVM 里是"我保证对齐"的承诺，违约是 UB。语义优先。
-    switch (m.size) {
+    switch (size) {
         case 1: {
             add(v + " = load i8, ptr " + p + ", align 1");
             const std::string z = tmp();
@@ -1334,22 +1340,23 @@ std::string FnEmit::loadMemValue(const MemOperand& m) {
     }
 }
 
+std::string FnEmit::loadMemValue(const MemOperand& m) { return loadMemAt(eaOf(m), m.size); }
+
 // 照 `X86::writeMem`：先 `lift_note_write`（SMC 失效）再写。`push/pop` 不走这里。
-void FnEmit::storeMemValue(const MemOperand& m, const std::string& v) {
+void FnEmit::storeMemAt(const std::string& ea, unsigned size, const std::string& v) {
     // ★ 宿主调用之前先把挂账的条数发出去 + 把块内寄存器缓存写回 `%st`（E2 / S2）：
     //   `lift_note_write` 也是宿主调用（口径：**任何**宿主调用之前 `%st` 都是同步的）。
     //   本条自己**还没**执行完 ⇒ 不在这批 tick 里（pending 只含之前的指令）。
     //   ★ 顺序：先 tick 再 flush —— 两者都在调用之前，互不依赖；`flushRegs()` **不**清缓存，
-    //     所以下面的 `eaOf` 仍然命中缓存（不会因为这次 flush 多读一次 `%st`）。
+    //     所以 `ea` 在调用方算得再早也不受影响（flush 只写回 `%st`，不改 SSA 值）。
     syncBeforeHostCall();
-    const std::string ea = eaOf(m);
-    add("call void @lift_note_write(ptr %cpu, i32 " + ea + ", i32 " + std::to_string(m.size) + ")");
+    add("call void @lift_note_write(ptr %cpu, i32 " + ea + ", i32 " + std::to_string(size) + ")");
     stats_->used_note_write = true;
     const std::string e64 = tmp();
     add(e64 + " = zext i32 " + ea + " to i64");
     const std::string p = tmp();
     add(p + " = getelementptr i8, ptr %mem, i64 " + e64);
-    switch (m.size) {
+    switch (size) {
         case 1: {
             const std::string t = tmp();
             add(t + " = trunc i32 " + v + " to i8");
@@ -1364,6 +1371,10 @@ void FnEmit::storeMemValue(const MemOperand& m, const std::string& v) {
         }
         default: add("store i32 " + v + ", ptr " + p + ", align 1"); break;
     }
+}
+
+void FnEmit::storeMemValue(const MemOperand& m, const std::string& v) {
+    storeMemAt(eaOf(m), m.size, v);
 }
 
 // 从显式 EA 读一个 i32（`ret` 的返回地址 / `leave` 的保存 EBP 用）。
@@ -2581,12 +2592,24 @@ void FnEmit::emitMul(const Insn& in) {
 }
 
 // `bt/bts/btr/btc`：只动 CF（+ 条件写目的操作数）。
+// ★ SDM：**寄存器形**才把位偏移截到操作数宽度的低位；**内存形**的位偏移是**地址**偏移 ——
+//   访问 `EA + (BitOffset DIV 位宽) * 字节数`，只有余数选位。语义真源 = 解释器
+//   `exec_integer.cpp` 的 `Op::Bt/Bts/Btr/Btc`（⛔ 两臂不许各写一份判据）。
 void FnEmit::emitBitTest(const Insn& in) {
     const unsigned size = in.op0().size != 0 ? in.op0().size : 4u;
     const unsigned bits = bitsOfSize(size);
     const std::string idx = readValue(in.op1());
     const std::string bit = andv(idx, bits - 1u);
-    const std::string v = readValue(in.op0());
+    // ★ 只有内存形才调整地址。`sdiv`（有符号截断除法）而不是 `udiv`：偏移是**有符号**的
+    //   （`bt eax, -1` 合法）；余数由 `& (bits-1)` 取，与解释器的 `off & (bits-1)` 同形。
+    const bool is_mem = in.op0().kind == OpKind::Mem;
+    std::string mem_ea;
+    if (is_mem) {
+        const std::string slot = bin("sdiv", "i32", idx, i32c(bits));
+        const std::string delta = bin("mul", "i32", slot, i32c(size));
+        mem_ea = bin("add", "i32", eaOf(in.op0().mem), delta);
+    }
+    const std::string v = is_mem ? maskVal(loadMemAt(mem_ea, size), size) : readValue(in.op0());
     // ★ 第 16 行：`bt/bts/btr/btc` **只写 CF**（其余五位一位都不碰 ⇒ 保持 base 的旧值）。
     const std::uint8_t w = flagsWriteMask(in);
     const std::uint8_t m = wrMaskAt(cur_index_);
@@ -2601,7 +2624,8 @@ void FnEmit::emitBitTest(const Insn& in) {
         case Op::Btr: nv = bin("and", "i32", v, bin("xor", "i32", one, i32c(0xFFFFFFFFu))); break;
         default: nv = bin("xor", "i32", v, one); break;
     }
-    writeDest(in.op0(), nv);
+    if (is_mem) storeMemAt(mem_ea, size, nv);
+    else writeDest(in.op0(), nv);
 }
 
 // `bsf/bsr`：只动 ZF；v==0 时不写目的寄存器（用 select 写回原值 ⇒ 观察不到差别）。

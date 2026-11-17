@@ -16,6 +16,9 @@
 //   QNaN / SNaN 差别（用例名 `sse-*`）；`movsd`（F2 0F 10 / 11）另有一条碰撞说明与三条用例。
 #include "harness.h"
 
+#include <initializer_list>
+#include <utility>
+
 namespace lift_test {
 namespace {
 
@@ -923,6 +926,94 @@ void setup_btc(Fixture& f) {
 }
 void verify_btc(Fixture& f) {
     LIFT_CHECK_EQ_U32(f.cpu().eax(), 0x0000000Du);
+    LIFT_CHECK(f.cpu().cf());
+}
+
+// ---------- ④' bt / bts / btr / btc 的**内存形**（SDM 位串语义）----------
+// ★ 判据（SDM Vol.2 `BT`/`BTS`/`BTR`/`BTC` 的 Operation 段）：**寄存器形**才把位偏移截到
+//   操作数宽度的低位；**内存形**的位偏移是**地址**偏移 ——
+//      访问 `EA + (BitOffset DIV 操作数位宽) * 操作数字节数`，只有余数（BitOffset MOD 位宽）选位。
+//   ⛔ 上面那 4 条（`bt/bts/btr/btc`）全是寄存器形（ModRM `C8` = mod 11），内存形一条没测。
+//   ★ 这一族**不是**假想的边界：客侧 CRT 的 `_strcspn`（32 字节位图，`btsl/btl %eax,(%esp)`）
+//     就靠它。两臂（解释器 / AOT）以前都无条件截成低 5 位 ⇒ 位号 0x6E 被读成 14 —— 与分隔符
+//     `'.'=0x2E` 同一格 ⇒ `"japanese"` 被切成 `"japa"` ⇒ `_setlocale(0,"japanese")` 失败。
+//   数值口径（一条通用算式，⛔ 不是"某个 opcode 的特判"）：`off = 0x6E = 110`、位宽 32 ⇒
+//     槽 = 110 DIV 32 = 3（地址 +3*4 = +12）、位 = 110 MOD 32 = 14 ⇒ **buf[13] 的 bit6 = 0x40**。
+// ★ 40 字节缓冲整块清零后只按 (下标, 值) 覆写 ⇒ "哪一字节变了"本身可读。
+void putBitBuffer(Fixture& f, std::initializer_list<std::pair<std::uint32_t, std::uint8_t>> patch) {
+    std::uint8_t buf[40] = {};
+    for (const auto& kv : patch) {
+        if (kv.first < sizeof buf) buf[kv.first] = kv.second;
+    }
+    char hex[3 * sizeof buf + 1] = {0};
+    for (std::size_t i = 0; i < sizeof buf; ++i)
+        std::snprintf(hex + 2 * i, 3, "%02X", static_cast<unsigned>(buf[i]));
+    f.dataHex(kDataEa, hex);
+}
+// 内存形四条全用同一个位偏移：`0F BA /4../7 ib` + ModRM `25/2D/35/3D` = `[disp32]`
+//   （mod=00 / rm=101 ⇒ 绝对地址 0x00480000 = kDataEa）。
+void setup_bt_mem_hi_slot(Fixture& f) {
+    putBitBuffer(f, {{13, 0x40}});  // 正确位置：buf+12 的 bit14
+    f.cpu().setCf(false);
+    f.codeHex(kCodeEa, "0F BA 25 00 00 48 00 6E C3");  // bt dword [0x480000], 0x6E
+}
+void verify_bt_mem_hi_slot(Fixture& f) {
+    LIFT_CHECK(f.cpu().cf());
+    for (std::uint32_t i = 0; i < 40u; ++i)
+        LIFT_CHECK_EQ_U32(f.mem().rd8(kDataEa + i), i == 13u ? 0x40u : 0x00u);  // bt 不改内存
+}
+void setup_bt_mem_low_bit_only(Fixture& f) {
+    // ★ 负控：只有 buf+0 的 bit14 置位。**截位的旧语义**会在这里命中（CF=1）；
+    //   SDM 的正确取值在 buf+12 ⇒ CF=0。0x6E 与 0x2E 的低 5 位相同正是客侧踩的那一脚。
+    putBitBuffer(f, {{1, 0x40}});
+    f.cpu().setCf(true);  // 先置 1：CF 必须被改写成 0（不写就红）
+    f.codeHex(kCodeEa, "0F BA 25 00 00 48 00 6E C3");  // bt dword [0x480000], 0x6E
+}
+void verify_bt_mem_low_bit_only(Fixture& f) {
+    LIFT_CHECK(!f.cpu().cf());
+    // 位偏移 110 也可写成 `bt [kDataEa+12], 14` 同义；这里保留 +110 的整型口径。
+    for (std::uint32_t i = 0; i < 40u; ++i)
+        LIFT_CHECK_EQ_U32(f.mem().rd8(kDataEa + i), i == 1u ? 0x40u : 0x00u);
+}
+void setup_bts_mem_slot(Fixture& f) {
+    putBitBuffer(f, {});  // 全 0
+    f.cpu().setCf(true);  // CF 必须被写成"原 bit 值"= 0
+    f.codeHex(kCodeEa, "0F BA 2D 00 00 48 00 6E C3");  // bts dword [0x480000], 0x6E
+}
+void verify_bts_mem_slot(Fixture& f) {
+    // 只有 buf[13] 的 bit6 变 ⇒ 其余 39 个字节一位都不许动（"写错槽"就是红）
+    for (std::uint32_t i = 0; i < 40u; ++i)
+        LIFT_CHECK_EQ_U32(f.mem().rd8(kDataEa + i), i == 13u ? 0x40u : 0x00u);
+    LIFT_CHECK(!f.cpu().cf());
+}
+void setup_btr_mem_slot(Fixture& f) {
+    putBitBuffer(f, {{13, 0x40}});
+    f.cpu().setCf(false);  // CF 必须被写成"原 bit 值"= 1
+    f.codeHex(kCodeEa, "0F BA 35 00 00 48 00 6E C3");  // btr dword [0x480000], 0x6E
+}
+void verify_btr_mem_slot(Fixture& f) {
+    for (std::uint32_t i = 0; i < 40u; ++i) LIFT_CHECK_EQ_U32(f.mem().rd8(kDataEa + i), 0u);
+    LIFT_CHECK(f.cpu().cf());
+}
+void setup_btc_mem_slot(Fixture& f) {
+    putBitBuffer(f, {{13, 0x40}});
+    f.cpu().setCf(false);  // CF 必须被写成"原 bit 值"= 1
+    f.codeHex(kCodeEa, "0F BA 3D 00 00 48 00 6E C3");  // btc dword [0x480000], 0x6E
+}
+void verify_btc_mem_slot(Fixture& f) {
+    for (std::uint32_t i = 0; i < 40u; ++i) LIFT_CHECK_EQ_U32(f.mem().rd8(kDataEa + i), 0u);
+    LIFT_CHECK(f.cpu().cf());
+}
+// ★ 16 位操作数（`bits=16, size=2`）：同一公式 —— `off = 0x2E = 46` ⇒ 槽 = 46 DIV 16 = 2
+//   （地址 +2*2 = +4）、位 = 46 MOD 16 = 14 ⇒ **buf[5] 的 bit6**。⛔ 不是"截到低 4 位"。
+void setup_bt_mem_word(Fixture& f) {
+    // ★ 只有**正确格**（buf+4 的 bit14 = buf[5] 的 bit6）置位：截位的旧语义会去读 buf+0 的 bit14
+    //   （= 0）⇒ CF=0 ⇒ 红。⛔ 别把 buf+0 也置上 —— 那样两臂都给 CF=1，这条用例就恒绿了。
+    putBitBuffer(f, {{5, 0x40}});
+    f.cpu().setCf(false);
+    f.codeHex(kCodeEa, "66 0F BA 25 00 00 48 00 2E C3");  // bt word ptr [0x480000], 0x2E
+}
+void verify_bt_mem_word(Fixture& f) {
     LIFT_CHECK(f.cpu().cf());
 }
 
@@ -2768,6 +2859,13 @@ const Case* conformanceCases(std::size_t* count) {
         {"bts", setup_bts, verify_bts},
         {"btr", setup_btr, verify_btr},
         {"btc", setup_btc, verify_btc},
+        // ★ 内存形（SDM：位偏移是**地址**偏移）—— 上面 4 条全是寄存器形。
+        {"bt-mem-hi-slot", setup_bt_mem_hi_slot, verify_bt_mem_hi_slot},
+        {"bt-mem-low-bit-only", setup_bt_mem_low_bit_only, verify_bt_mem_low_bit_only},
+        {"bts-mem-slot", setup_bts_mem_slot, verify_bts_mem_slot},
+        {"btr-mem-slot", setup_btr_mem_slot, verify_btr_mem_slot},
+        {"btc-mem-slot", setup_btc_mem_slot, verify_btc_mem_slot},
+        {"bt-mem-word", setup_bt_mem_word, verify_bt_mem_word},
         {"bsf", setup_bsf, verify_bsf},
         {"bsr", setup_bsr, verify_bsr},
         {"bsf-zero", setup_bsf_zero, verify_bsf_zero},

@@ -3039,6 +3039,7 @@
 0x004F5A09  # why: call-target
 0x004F5AE2  # why: call-target
 0x004F65D4  # why: call-target
+0x004F80E0  # why: indirect-entry（`EnumSystemLocalesA` 的回调 EA；`LanguageEnumProc`。它只以 `push $0x4F80E0` 的**未对齐立即数**出现在 0x4F822B（`___get_qualified_locale` 的"只有语言、没有国家"分支）⇒ D26 的 4 字节对齐 dword 站点扫描抓不到，必须手工补成根，否则第一条走到的 guest 指令就 `decode-error`）
 0x004F9988  # why: call-target
 0x004F9A6F  # why: call-target
 0x004F9E68  # why: call-target

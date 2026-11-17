@@ -16,6 +16,10 @@
 //        `paddusw` · `pcmpeqw` · `pcmpeqd` · `psllw` · `psrlw` · `psllq` · `psraw` · `punpcklbw`
 //        · `packuswb` · `paddq` · `psubq` · `psubd` · `emms`
 //   SSE：`movdqa` · `movsd`
+//   `bt` / `bts` 的**内存形**（SDM：位偏移是**地址**偏移 —— `EA + (off DIV 位宽)*字节数`；
+//   站点 = 客侧 CRT `_strcspn` 的 32 字节位图，`bts/bt [esp],eax`）。`bt` 的结果只落在 CF 上，
+//   而块尾的 `jae` 会把它**融合**进分支（S3-c 活性分析 ⇒ CF 不进 `%st`）⇒ 可观测的语义差是
+//   **下一条 EA**（`OpsCase::compare_next_ea`），⛔ 不是 flags 字。
 //   停机面：`int`（`Int`）· `xlat`（`Op::Other`）
 //   ⚠ 未覆盖（如实登记）：
 //     · `imul` 的 **1 操作数**与 **3 操作数**形态：本根集里挑不到已知形态的站点
@@ -66,6 +70,15 @@ struct OpsCase {
     bool ptr_fill = true;
     std::uint8_t fill = 0x11;   // 只有 `ptr_fill == false` 时用
     bool stops = false;  // true = 两臂都必须在这一条上停机（`stop_why` 必须相同）
+    // `0` = 缺省的栈顶（`stack_top - 0x40` + 哨兵）；非 0 = 显式 ESP。
+    // ★ 为什么需要它：`bt/bts` 的**内存形**站点（`_strcspn` 的 32 字节位图）用 ESP 当基址，
+    //   而位偏移 ≥ 32 时 SDM 要求地址 +N*4 ⇒ 写入落在 `[esp+12]`。要让它落进**被比较的内存窗口**
+    //   （`kProbeAt..+4KiB`）就必须把 ESP 指到那里（栈页不在窗口里）。
+    std::uint32_t esp = 0;
+    // 把"块出口的**下一条 EA**"也纳入比较（缺省不比：`ret`/`call` 收口的块两臂的出口口径不同，
+    // 那是另一层契约）。`bt` 这类"只写一位标志、而这位又被块尾分支融合"的站点靠它才可观测：
+    // 位取值错 ⇒ 走另一条边 ⇒ 两臂返回的 EA 不同。
+    bool compare_next_ea = false;
 };
 
 // ★ 与 `tests/ir/ops_roots.txt` 的行序**一一对应**（数量不等 ⇒ 硬错）。
@@ -137,6 +150,18 @@ constexpr OpsCase kCases[] = {
     // ---- 停机面：`int` 与 `Op::Other`（`exec_control.cpp:70-72` / `exec.cpp:210`）----
     {.ea = 0x0040B659, .op = "int", .stops = true},
     {.ea = 0x00418E10, .op = "xlat", .stops = true},
+    // ---- ★ `bt/bts` 的**内存形**（SDM：位偏移是地址偏移，⛔ 不是低 5 位）----
+    //   站点 = 客侧 CRT 的 `_strcspn`（32 字节位图；`0x6E` 与 `0x2E` 低 5 位相同，正是 `_setlocale`
+    //   被切错的地方）。两臂以前都无条件截位 ⇒ 这一族能把 AOT 发射器单独钉住（解释器由
+    //   `conformance` 的 `bt-mem-*` 用例按 SDM 定死 = 语义真源）。
+    //   ESP 指进**被比较的内存窗口**（`kProbeAt+0x100`）⇒ `[esp+12]` 的写入 / 读取都在比较范围里。
+    //   `fill = 0x3E`：`[esp+0]` 的 bit14 = (0x3E+1)&0x40 = 0、`[esp+12]` 的 bit14 = (0x3E+5)&0x40 = 0x40
+    //   ⇒ **截位的旧语义**会读成 CF=0、SDM 的语义 CF=1（两臂必须在同一处取值）。
+    //   `.eax = 0x6E`：指令是 `bts/bt [esp], eax` ⇒ 位偏移在 EAX（110 ⇒ 槽 3、位 14）。
+    {.ea = 0x004F7C8D, .op = "bts", .eax = 0x6Eu, .ptr_fill = false, .fill = 0x3E,
+     .esp = kProbeAt + 0x100u, .compare_next_ea = true},
+    {.ea = 0x004F7CA8, .op = "bt", .eax = 0x6Eu, .ptr_fill = false, .fill = 0x3E,
+     .esp = kProbeAt + 0x100u, .compare_next_ea = true},
 };
 constexpr std::size_t kCaseCount = sizeof(kCases) / sizeof(kCases[0]);
 
@@ -180,7 +205,7 @@ void setState(Arm& a, const OpsCase& c) {
     cpu.ebp() = c.ebp;
     cpu.esi() = c.esi;
     cpu.edi() = c.edi;
-    cpu.esp() = a.m.layout().stack_top - 0x40u;
+    cpu.esp() = c.esp != 0 ? c.esp : a.m.layout().stack_top - 0x40u;
     a.m.mem().wr32(cpu.esp(), kSentinel);
     // ★ `mov eax, large fs:0` 之类要访问 `fs_base`：受控状态必须把它指到**已提交**的 scratch，
     //   否则两臂都会碰到未提交页（解释器报 guest fault、VEH 报 host fault —— 那不是语义差）。
@@ -212,6 +237,7 @@ struct StateSnap {
     std::uint32_t r[8] = {};
     std::uint32_t eflags = 0;
     std::uint32_t cf6 = 0;   // EFLAGS 的六位（0x8D5）：**只对停机面比较**（见 compare 的注释）
+    std::uint32_t eip = 0;   // 只给 `compare_next_ea` 用（缺省不比）
     std::vector<std::uint8_t> mem;
 };
 
@@ -226,6 +252,7 @@ StateSnap snap(const Arm& a) {
     std::memcpy(s.xmm, cpu.xmm, sizeof(s.xmm));
     s.mxcsr = cpu.mxcsr;
     for (int i = 0; i < 8; ++i) s.r[i] = cpu.r[i];
+    s.eip = cpu.eip;
     s.eflags = cpu.eflags;
     s.cf6 = cpu.eflags & 0x8D5u;
     const std::uint8_t* p = a.m.mem().host(kProbeAt);
@@ -233,7 +260,8 @@ StateSnap snap(const Arm& a) {
     return s;
 }
 
-void compare(const char* tag, const StateSnap& lifted, const StateSnap& interp, bool flags_ok) {
+void compare(const char* tag, const StateSnap& lifted, const StateSnap& interp, bool flags_ok,
+             bool next_ea_ok) {
     for (int i = 0; i < 8; ++i) {
         std::uint64_t lb = 0;
         std::uint64_t ib = 0;
@@ -257,8 +285,10 @@ void compare(const char* tag, const StateSnap& lifted, const StateSnap& interp, 
     for (int i = 0; i < 8; ++i) LIFT_CHECK_EQ_U32(lifted.r[i], interp.r[i]);
     // ★ **不比 EFLAGS 整字**：AOT 的 S3-c 活性分析故意只写"后继会读"的位（死位保持旧值），
     //   而解释器每条写者都整份写六位 ⇒ 两臂的 eflags 在死位上**本来就允许不同**。
-    //   ⇒ 这里只在"两臂都停在同一处"的用例上比（停机面没有后继，六位都该一致）。
+    //   ⇒ 只在 `flags_ok` 的用例上比（停机面：没有后继，六位都该一致）。
     if (flags_ok) LIFT_CHECK_EQ_U32(lifted.cf6, interp.cf6);
+    // ★ `compare_next_ea`：两臂必须落到**同一个下一条 guest EA**（`bt` 的位取值只能从这里看见）。
+    if (next_ea_ok) LIFT_CHECK_EQ_U32(lifted.eip, interp.eip);
     if (lifted.mem != interp.mem)
         lift_test::failf(__FILE__, __LINE__, "[%s] guest 内存区前 %u 字节不同", tag,
                          static_cast<unsigned>(kMemProbe));
@@ -335,6 +365,8 @@ int main(int argc, char** argv) {
             if (!li.m.cpu().running) break;
         }
         lift::liftRegsToCpu(regs, li.m.cpu());
+        // ★ 生成代码把"下一条 guest EA"**当返回值**给出来（`%st` 里没有 eip）⇒ 出口 EA 取 `ea`。
+        const std::uint32_t lifted_next_ea = ea;
         const std::uint64_t lifted_insns = li.m.cpu().insns - insns0;
 
         // ---- ② 解释器臂：同一份状态，跑**同样条数**（停机类跑 1 条）----
@@ -360,7 +392,9 @@ int main(int argc, char** argv) {
             LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lifted_insns),
                               static_cast<std::uint32_t>(interp_insns));
         }
-        compare(tag_buf, snap(li), snap(ia), c.stops);
+        StateSnap lsnap = snap(li);
+        lsnap.eip = lifted_next_ea;  // 生成代码的出口 EA = 上一块的返回值
+        compare(tag_buf, lsnap, snap(ia), c.stops, c.compare_next_ea);
         ++covered;
         g_current_case = "(none)";
     }

@@ -3795,6 +3795,56 @@ const MUTATIONS = [
       'target-features ⇒ LTO 的 areInlineCompatible 与运行库 TU 判不相容 ⇒ lift_tick / lift_note_write ' +
       '静默不内联（构建成功、语义指纹相同 ⇒ 只有收益消失）⇒ lift-aot-ir-target-attrs 的第 ② 条红',
   },
+
+  // ── 🐞SC0000 `local 9c = 6`（SBUNKI 确认框按钮宽 334，应 247；`REQ-…` 见 .tmp/sc0000/locale-diag.md）──
+  //   ★ 两条根因各代表一类静默失效，**判据都是 SDM / 微软文档**（⛔ 不是"当前取值"）：
+  //     ① `bt/bts/btr/btc` 的**内存形**位偏移被截成低 5 位（寄存器形语义）⇒ 客侧 `_strcspn`
+  //        的 32 字节位图跳错槽 ⇒ `"japanese"` 被切成 `"japa"` ⇒ `_setlocale` 失败。
+  //        解释器是语义真源，AOT 发射器必须与它逐位一致（两臂各一条变异、**各打各的守卫**）。
+  //     ② `GetCPInfo` 的 `CPINFO::LeadByte` 写到 +4（文档是 +6）⇒ 0x81–0x9F 的前导字节整段丢
+  //        ⇒ `_mbstrlen` 按字节数数 ⇒ 对话框宽度按 6 个字符算。
+  {
+    file: 'apps/emulator-lift/src/runtime/exec_integer.cpp',
+    from:
+      '                dst.mem.disp += static_cast<std::uint32_t>(slot * static_cast<std::int32_t>(size));',
+    to: '                (void)slot;  // 变异：不修正 disp（= 旧的"截位"语义）',
+    guard: 'ctest:conformance',
+    ctest: 'conformance',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-conformance',
+    what:
+      '解释器去掉**内存形**的 `disp` 修正（位偏移又只取低 5 位）⇒ conformance 的 `bt-mem-hi-slot` / ' +
+      '`bt-mem-low-bit-only` / `bts-mem-slot` / `btr-mem-slot` / `btc-mem-slot` / `bt-mem-word` 当场红 ' +
+      '（每个都按 SDM 的"地址偏移"算好了期望位置，不是"某个数字"）',
+  },
+  {
+    file: 'apps/emulator-lift/src/aot/lift_gen_emit.cpp',
+    from: '        mem_ea = bin("add", "i32", eaOf(in.op0().mem), delta);',
+    to:
+      '        mem_ea = bin("add", "i32", eaOf(in.op0().mem), bin("mul", "i32", delta, i32c(0u)));  // 变异：delta=0（= 旧的"截位"语义）',
+    guard: 'ctest:lift-ops-diff',
+    ctest: 'lift-ops-diff',
+    buildDir: 'apps/emulator-lift/out',
+    // ★ 只重建这个 target：`out/opsdiff/lift_aot.ll` 的 custom command 以 `emulator-lift-gen`
+    //   为 DEPENDS ⇒ 重编工具 + 重新生成 IR + 重链守卫，一次做完（不碰 15 MB 的 AOT 产品臂）。
+    buildTarget: 'lift-ops-diff',
+    what:
+      'AOT 发射器把内存形的地址增量折成 0（位偏移又只取低 5 位）⇒ `lift-ops-diff` 的 ' +
+      '`bts@004F7C8D` / `bt@004F7CA8` 红（写入落在 `[esp+0]` 而不是 `[esp+12]`；`bt` 的位取值错 ⇒ ' +
+      '块尾 `jae` 走另一条边 ⇒ 两臂的**下一条 EA** 不同）。★ 解释器臂不会红：语义真源是对的',
+  },
+  {
+    file: 'apps/emulator-lift/src/shims/kernel32_bootstrap.cpp',
+    from: '        buf[6] = 0x81;  // LeadByte[0]',
+    to: '        buf[4] = 0x81;  // 变异：LeadByte[0] 写回 +4（旧布局）',
+    guard: 'ctest:locale-ext',
+    ctest: 'locale-ext',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-locale-ext',
+    what:
+      '`CPINFO::LeadByte` 写回 +4（旧布局）⇒ `locale-ext` 的 `get-cp-info-layout` 在 ' +
+      '`DefaultChar[0]==0`（+4）与 `LeadByte[0]==0x81`（+6）两条上红 —— 判据是微软文档的字段偏移',
+  },
 ];
 
 let mutationRunSeq = 0;

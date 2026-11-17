@@ -217,6 +217,40 @@ int main() {
         LIFT_CHECK(f.ok);
     }
 
+    // ①'' `GetCPInfo` 的 `CPINFO` 布局（判据 = 微软文档的**字段偏移**，⛔ 不是"当前取值"）
+    //   `CPINFO = UINT MaxCharSize(4) + BYTE DefaultChar[2] + BYTE LeadByte[12]` ⇒ LeadByte 从 **+6**。
+    //   红了意味着什么：客侧 CRT 的 `_setmbcp` 按 +6 读前导字节表（0x4F38D1 `movb -0x512(%ebp),%al`）；
+    //   写到 +4 会把 0x81/0x9F 灌进 `DefaultChar` 并丢掉 0x81–0x9F 那一段前导字节 ⇒
+    //   `__mbctype` 不把平假名首字节（0x82）当双字节 ⇒ `_mbstrlen` 把「いいえ」数成 6 个字符
+    //   ⇒ 对话框里"字符数 × 行高"算出的按钮宽度变成 334（正确 247）。
+    {
+        g_current_case = "get-cp-info-layout";
+        Fixture f;
+        lift::registerBootstrapShims(f.m.shims());  // ★ GetCPInfo 在 bootstrap 族（不是 string 族）
+        LIFT_CHECK(f.ok);
+        const std::uint32_t gcp = f.use("GetCPInfo");
+        // 24 字节缓冲，先填**已知图案** ⇒ "被写到哪儿"和"没被写到哪儿"都能判。
+        std::uint8_t pat[24];
+        for (std::size_t i = 0; i < sizeof pat; ++i) pat[i] = static_cast<std::uint8_t>(0xA0u + i);
+        const std::uint32_t buf = f.data(pat, sizeof pat);
+        LIFT_CHECK_EQ_U32(f.call(gcp, {932u, buf}), 1u);
+        // 4 字节 MaxCharSize = 2（CP932 = DBCS，文档口径）
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(buf), 2u);
+        // DefaultChar[2] **仍是 0**（旧实现把 0x81/0x9F 写到了这里）
+        LIFT_CHECK_EQ_U32(f.m.mem().rd8(buf + 4u), 0u);
+        LIFT_CHECK_EQ_U32(f.m.mem().rd8(buf + 5u), 0u);
+        // LeadByte 从 +6 起：CP932 的 {0x81,0x9F,0xE0,0xFC} + 其余 8 字节为 0
+        const std::uint8_t kLead[4] = {0x81u, 0x9Fu, 0xE0u, 0xFCu};
+        for (std::uint32_t i = 0; i < 4u; ++i) LIFT_CHECK_EQ_U32(f.m.mem().rd8(buf + 6u + i), kLead[i]);
+        for (std::uint32_t i = 10u; i < 18u; ++i) LIFT_CHECK_EQ_U32(f.m.mem().rd8(buf + i), 0u);
+        // 18 字节 = sizeof(CPINFO)；缓冲**其余字节不被写**（图案原样）
+        for (std::uint32_t i = 18u; i < 24u; ++i)
+            LIFT_CHECK_EQ_U32(f.m.mem().rd8(buf + i), static_cast<std::uint32_t>(0xA0u + i));
+        // `lpCPInfo == NULL` ⇒ 0（同一 shim 的错误面，一并钉住）
+        LIFT_CHECK_EQ_U32(f.call(gcp, {932u, 0u}), 0u);
+        LIFT_CHECK(f.ok);
+    }
+
     // ② EnumSystemLocalesA：回调真的被调用 + 参数正确 + FALSE 停止
     {
         g_current_case = "enum-system-locales-callback";
