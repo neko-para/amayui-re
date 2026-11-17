@@ -710,3 +710,18 @@
 - **何时 / 谁发现**：2026-11-17，同一轮诊断（A/B 的第二因）。
 - **代表守卫**：`tests/locale_ext.cpp#get-cp-info-layout`（`MaxCharSize==2`、`+4/+5==0`、`+6..+9=={81,9F,E0,FC}`、
   其余字节不被写）。变异：`buf[6]→buf[4]` ⇒ 红。
+
+### BUG-29 · AOT 臂把「要不要真 feeder 线程」判成 `has_machine` ⇒ 恒主线程 D 泵、预读 600 ms ⇒ 所有音效延迟 ~0.6 s
+
+- **现象**（用户 2026-11-17 实测）：TITLE 上把鼠标**移进/移出按钮**触发的 SE，从"触发"到真正听见有明显可见间隔。
+- **根因**（父级静态核实）：`runtime/audio_policy.h` 的 `audioThreadMode(mode, real_time_clock, has_machine)` 要求三者全真才走
+  "host-thread（方案 C）"；调用点 `runtime/audio.cpp:203-208` 传 `has_machine = cpu_ && cpu_->machine`，而 **AOT 臂有意
+  `cpu_.machine == nullptr`** ⇒ 谓词恒 false ⇒ AOT 从第一刻起就是"主线程泵（方案 D）"，并不是"起线程失败再回退"。
+  D 泵的预读 lead 是 `audio.cpp:47` 的 `kLeadBytes = 600 ms`（同一处注释就写着"代价是 SE 也有 ~600ms 延迟"）；
+  真线程档的 lead 是 `audio.cpp:50` 的 `kThreadLeadBytes = 100 ms`。
+- **★ 用户裁决**：**D 泵从来不是被决策过的方案**，AOT 侧按 `has_machine` 判成恒 D 是**绝对的错误**。
+  ⇒ 修法不是"把 lead 调小"，而是给 AOT 实现**真 feeder 线程**（feeder 自己的 TEB + 音频栈，⛔ 不共主线程 TEB ——
+  共用就是 BUG-22 那条 `fs:[0]` 被另一条线程改写、Quit 的 C++ throw 派发到已复用 record）。
+- **连带**：`audio.cpp:1325-1352` 的 `pump()` 反向锁序论证建立在"绝不存在 feeder 在跑而 pump 走 D"之上 ⇒ 谓词一改，那段注释与前提必须一起改。
+- **何时 / 谁发现**：2026-11-17，用户报"hover 音效触发与播放有明显间隔"；父级在同一轮把它归到 `has_machine` 门与 600 ms lead。
+- **需求单**：`REQ-01M7MHEZRQJSMAAWPESVW44DSK`（判据：AOT + `--audio sdl` ⇒ `feeder=host-thread`、lead=19200 B、TEB 不同、`--audio off` 输出逐字节不变）。
