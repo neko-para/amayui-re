@@ -68,3 +68,11 @@ base gap 桩）⇒ guest 视角就是"这个 API 不存在"，停机原因是 `U
 - `i238` 是 AGE 脚本 opcode（handler `sub_4248C0`），不是 lift 缺口。
 - 第 2 步先决 = 一次读数 run（`LIFT_AOT_SHIM_TRACE=1`；`--import-gaps` 不存在）；本机 `links/install` 是另一修订版，未到达 SC0000 ⇒ 等原版树/可对齐读数。
 - A-1/A-2 与第 1 步「只做 1:1 / 不猜转换」冲突；未实现，等裁决。
+
+## 第 3 轮（2026-11-17）：确认框已过，SC0000 到达
+
+- `.tmp/sc0000/load24.plan`（三次回调形状）`rc=0` · `steps=12 fired=4 pending=0` · `script=SC0000.BIN`；
+  根因/读数见 `docs/03-emulator/scripts/SC0000.md`「第 3 轮」。
+- 到 SC0000 后 3371 帧、`pos` 到 `0x6B28`/`0xC68`，**无 `unimplemented` 停点** ⇒ headless 没撞
+  `D3DXLoadSurfaceFromSurface`，与 win32 `frames=523` 不同形（未定）。
+- 下一步：挂 `await position SC0000 0x6AB4 0x6B90` 推进到下一屏，等停点再选单元（⛔ 不猜）。
