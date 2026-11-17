@@ -160,3 +160,27 @@ P2 新增 constexpr 表后当场红 ⇒ 补终止项 + `effectResourcePinBySha` 
 - ✅ 确立：`caps ⇒ FX 分路 ⇒ 转场与真机一致（除 203 的 effect 层）`，这条现在是**用户实测**而不是推断。
 - ⇒ 之后要做的是：**P3（203 的两个 10-tap technique）**，然后 **P4（把 caps 缺省翻到 `PS=0x200` + `caps 声明 ⇔ 实现能力` 守卫）**；
   202（Snow，`vs_1_0`）也要在那之前决定（按 ADR 预转写可以转成 C++ 在 CPU 顶点阶段跑，或者先允许它缺失并登记）。
+
+## 10. P3 · 203 的两个 technique（SlideBlur / ZoomBlur）
+
+- **前置（`Tex0` 来源）**：`[this+0xA668]` = 纹理表 **slot 36**（基址 `0xA5D8 + 36*4`）= 引擎自建的**全屏 `D3DUSAGE_RENDERTARGET` 纹理**
+  （`sub_4A6D00 → sub_4A2C10(...,36,w,h,mode) → sub_48AB20/48AC40 → D3DXCreateTexture(usage=1, fmt 21/22)`）。
+  引擎次序：`0x4B32AF SetTargetTexture(36)` 画进去 → `0x4B34C0 SetTargetTexture(v384[4])` **切走** → `0x4B3625 SetTexture("Tex0",36)` →
+  `0x4B36A3` 全屏四边形 ⇒ **采样的是已完成的快照**，不撞反馈环；bit43 闸保留且对 effect 纹理也查（实测 0 次触发）。
+- **tap 数按源文本**：`SlideBlur` 是 **21 tap**（`i=-10..+10` 含）×0.0476，`ZoomBlur` 是 **10 tap** ×`ratio[10]`
+  ⇒ "10-tap" 只对 ZoomBlur 成立。
+- **实现**：MSL + DXBC 双源各加 `PSMainSlideBlur` / `PSMainZoomBlur`；`kFxEntries` 扩成 `{entry, samplers}`（203 = 1 sampler）；
+  pipeline 键步长 `*4 → *8`。★ Metal 没有 `radians()`（`MTLLibraryErrorCode=3`）⇒ 两源内联 `Angle*π/180`。
+- **翻面**：203 两条 binding ⇒ `recorded`；202（Snow，`vs_1_0`）仍 `kUnEffectProgramNotExecuted`（原因串带 id/technique/pass）。
+
+### 10.1 读数
+
+| 项 | 读数 |
+|---|---|
+| `d3dx9-effect` | **608 checks / 0 failures**（全量 107 项：103 passed + 4 平台 skip） |
+| 像素（真 GPU + 纹理 RT + 读回） | SlideBlur `Angle=0 ⇒ B=210 G=0 R=45`、`Angle=90 ⇒ B=255 G=45 R=0`、ZoomBlur ⇒ `B=159 G=0 R=96`，与参考 **0 LSB**（容差 1） |
+| E2E（caps=0x200） | `没有实现执行` **1091 → 0**、`pending=0`、`implemented=299 gaps=11` 与 before 逐字相同 |
+| 黑 → 有内容 | `SN0000 pos=0xD190` 段：before 44 采样 = **1 个 hash**（纯黑 `0xD11B…`）；after 25 采样 = **25 个 hash**；抽帧 before `uniq=1 / nonblack=0%`、after `uniq=8.2万–28.9万`（亮度 244→102 的斜坡） |
+| 变异 | tap 21→20 = 12 LSB · uv 步长 ×10 = 72 LSB · program 映射 = 45 LSB + 纯档 `mock.last.program` 红 |
+
+⇒ 至此 **caps=0x200 下转场与真机一致**（用户实测 + 本地读数）。剩下的是：**202（Snow）**、P4（caps 固定 2.0）。

@@ -51,9 +51,10 @@ alpha test(bit30) · FLAT(31) · **stage≥1(33)** · 多 bpp(36) · 寻址(37) 
 - ✅ **P2**（已收口，子单 `REQ-01M7MSGRRHCA23RAX1QGDAYJ3X`）：Fade(201) 的 MSL + DXBC(SM5.1) 双源 + 每 draw 一个 shader/常量/2 纹理；
   像素 oracle 1 LSB；NaN 档「不可观测」；翻面**按 technique 分流**（Fade recorded / 203·202 仍具名拒绝）。
   判据：两张已知纹理 + `Alpha∈{0,0.5,1}` 的像素 oracle；账本 `recorded` 非 `skipped`。
-- **P3**：203 两个 technique（10-tap）。★ 价值重述（2026-11-17 探针）：**画面正确性**（effect 层今天整层被丢弃），
-  ⛔ 不再是"换 insns 收益"—— 该窗口的 2e10/帧是 **caps=0（等级 0）** 走软件模糊的产物，等级 ≥2 时软件模糊 0 次调用。
-  判据：该 technique 的 draw 被 `recorded` 且像素与参考一致（不再挂"单帧 insns 降到 1e6"）。
+- ✅ **P3**（已收口，子单 `REQ-01M7N01HHDJ5EC6HC4SE6J99TS`）：203 的 `SlideBlur`（**21-tap**，源文本如此）/`ZoomBlur`（10-tap）双源真画；
+  转场从纯黑变成"被横向模糊的塔"（`pos=0xD190` 段 before 1 个 hash / after 25 个）；像素与参考 **0 LSB**；202 仍具名拒绝。
+  ★ 判据随探针重述：该窗口的 `insns` 收益**不是** P3 的价值（软件模糊在 caps=0 才跑），价值是**画面正确性**。
+
 - **P4**：caps 报 `PS=0xFFFF0200` / `VS=0` + "声明⇔行为"守卫。**必须 P3 之后**（提前报 2.0 会同时点亮 203）。
 
 ## 风险 / 待核（⛔ 别当已核）
