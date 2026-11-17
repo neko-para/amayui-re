@@ -349,9 +349,9 @@ std::uint32_t mipLevelForLod(double lod, std::uint32_t levels);
 //   · ⛔ **不做 `w` 除法**（`clip.w` 原样保留；裁剪在 `submitPrimitives`，`1/w` 在 `toScreen`）；
 //   · ⛔ 不光照、⛔ 不动 uv（uv 由 `readVertex` 直通）。
 // ★ 唯一调用者 = 管线内的 `transformVertexVs10`（`gatherVertices` / `transformVertexOnce` 两个变换
-//   实现点都走它）。这里只是一个**纯函数形状**：因为 `w != 1` 的批会被 GPU 准入的
-//   `kUnGpuPerspective` 整批拒（另一条单的已知限制）⇒ 管线级观测不到"透视 `Proj` 下 `w` 没被除"，
-//   而那正是本单最容易写错的一处。
+//   实现点都走它）。这里只是一个**纯函数形状**：管线级只能观测"两条路交出同一批顶点"（`snow-vertices`
+//   的透视档），而"`clip = mul(pos, Proj)` 这件事本身"（单位阵 ⇒ 恒等 / 只缩 x / **透视下 `w` 原样保留**）
+//   由一个不依赖光栅的入口逐条钉住 —— `w` 没被除正是这里最容易写错的一处。
 math::Vec4d clipVs10(const float proj16[16], double x, double y, double z);
 
 // =====================================================================================

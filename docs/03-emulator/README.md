@@ -17,6 +17,7 @@
 | **blind wipe（场景命令族 kind 2）转场为什么卡**（身份 EA · 每帧工作量模型 · H1–H6 · `--until` 盲区 · 配方 `scripts/recipes/sc0000-wipe.plan` · timed 读数与未定的仪器缺口） | `wipe-profile.md` |
 | **D3DX math 的语义从哪来**（`D3DXMatrixDecompose` 的 native 对拍表 / 134 例 / 引擎 5 个调用点 EA / 容差与复现命令） | `d3dx-math.md` |
 | **caps 声明什么、凭什么、缺一个会怎样**（目标值 2.0/1.0 · 为什么 VS 必须报 1.0 · 硬等式 `required == implemented` · 会建的程序集 · 待核） | `caps.md` |
+| **GPU 批的透视校正插值**（逐顶点 `1/w` · 顶点上的 `uv/w` / `color/w` 怎么在片元里除回来 · 202 的透视 `Proj` 为什么现在能画 · 双源改动 · 新像素 oracle 与仿射控制行 · 读数 · 残余风险） | `gpu-perspective.md` |
 | **"为什么这么实现"**（内部取舍 = L3，重写实现时可自由改，但要保住它列出的可观察现象） | `design-notes.md` |
 | **overlay / UI 宿主的设计裁决**（一个 host + 同一套 API、插件化、每帧 display list、1280×720 声明 + 窗口像素合成、单一输入 router、失败口径） | `overlay.md` |
 | **overlay 的 QuickJS 绑定**（Maa 封装可复用的形状 / QuickJS-ng v0.10.1 与预算 API / 沙箱 intrinsic 白名单 / 值转换 / TS 作者体验 / 静态链） | `overlay-quickjs.md` |

@@ -31,17 +31,39 @@
 
 namespace lift {
 
+// 屏幕空间顶点（CPU 做完 T&L / 裁剪 / 屏幕映射之后交给 GPU 光栅的东西）。
+//
+// ★ 颜色与 uv 是**已经乘过 1/w 的值**（`diffuse/w`、`uv/w`）：D3D9 的插值是透视校正的，而 GPU 的
+//   片元属性插值在**屏幕空间线性** ⇒ 后端必须在顶点里同时拿到**逐顶点**的 `1/w`，片元里再
+//   `attr = attr_over_w / invw` 把透视校正还原回来（口径 / 判据见 `docs/03-emulator/gpu-perspective.md`）。
+//   · 固定功能 / XYZRHW / sprite 的批 `w == 1` ⇒ `invw == 1` ⇒ 那个除法是**恒等**（逐像素与旧实现相同）；
+//   · ⛔ 不要"整批一个 invw"：`w` 是**逐顶点**的，整批近似会在大深度跨度上系统性画错（近处糊、远处抖）。
+//   · `w` 不可表示（`w <= 0` / 非有限）的批在 `submitPrimitives` 就**具名拒绝**了（位 21
+//     `kUnGpuVertexW`）⇒ 到这里 `invw` 一定是有限正数。
 struct GpuRasterVertex {
     float x = 0.0f;
     float y = 0.0f;
     float z = 0.0f;
-    float r = 1.0f;
+    float r = 1.0f;    // diffuse.r / w
     float g = 1.0f;
     float b = 1.0f;
     float a = 1.0f;
-    float u = 0.0f;
-    float v = 0.0f;
+    float u = 0.0f;    // texcoord.u / w
+    float v = 0.0f;    // texcoord.v / w
+    float invw = 1.0f; // 1/w（逐顶点）
 };
+
+// 顶点上**真正的** uv（= `(u/w) ÷ (1/w)`；`w == 1` 时就是 `u`）。
+// `invw` 非正 / 非有限 ⇒ false —— 调用方按"整幅"这类**保守**方式处理，⛔ 不猜一个 uv。
+inline bool gpuVertexUv(const GpuRasterVertex& v, float* u, float* vv) {
+    if (!(v.invw > 0.0f) || !std::isfinite(v.invw)) return false;
+    const float iu = v.u / v.invw;
+    const float iv = v.v / v.invw;
+    if (!std::isfinite(iu) || !std::isfinite(iv)) return false;
+    *u = iu;
+    *vv = iv;
+    return true;
+}
 
 // ---------------------------------------------------------------------------------------
 // texel 矩形 + 方案 C（先脏矩形判、再切段）的**纯函数**判据
@@ -64,6 +86,9 @@ inline bool gpuTexelRectsIntersect(const GpuTexelRect& a, const GpuTexelRect& b)
 }
 
 // 一条 draw 的采样区域 = 顶点 u/v 的 bbox × 纹理尺寸，**外扩 1 texel**（过滤/纯量化的保守外扩）。
+// ★ uv 必须取**透视校正后的顶点 uv**（`gpuVertexUv` = `(u/w)÷(1/w)`）：`GpuRasterVertex::u/v` 是
+//   `u/w`，`w != 1` 时 `u/w` 的 bbox 与真实采样范围可以差一个数量级（近处 uv/w 小、远处大）
+//   ⇒ 直接拿 `u/w` 算脏区会**少传 texel**（画面缺一块而看不出来）。
 // ★ 保守到底的四条（做不到就返回整幅，宁可多切一段，⛔ 不许少切）：
 //   · u/v 有任何一项落在 [0,1] 之外（WRAP 寻址会把整幅都采到）、或非有限值 ⇒ 整幅；
 //   · **寻址是 WRAP/MIRROR 且 bbox 贴到 0/1 边界** ⇒ 整幅（贴边采样会把对边 texel 也采进来：
@@ -75,16 +100,19 @@ inline GpuTexelRect gpuDrawSampleRect(const GpuRasterVertex* v, std::size_t n, i
     GpuTexelRect whole{0, 0, width, height};
     if (v == nullptr || n == 0) return GpuTexelRect{};
     if (width <= 0 || height <= 0) return GpuTexelRect{};
-    float umin = v[0].u;
-    float umax = v[0].u;
-    float vmin = v[0].v;
-    float vmax = v[0].v;
+    float umin = 0.0f;
+    float vmin = 0.0f;
+    if (!gpuVertexUv(v[0], &umin, &vmin)) return whole;
+    float umax = umin;
+    float vmax = vmin;
     for (std::size_t i = 1; i < n; ++i) {
-        if (!std::isfinite(v[i].u) || !std::isfinite(v[i].v)) return whole;
-        if (v[i].u < umin) umin = v[i].u;
-        if (v[i].u > umax) umax = v[i].u;
-        if (v[i].v < vmin) vmin = v[i].v;
-        if (v[i].v > vmax) vmax = v[i].v;
+        float uu = 0.0f;
+        float vv = 0.0f;
+        if (!gpuVertexUv(v[i], &uu, &vv)) return whole;
+        if (uu < umin) umin = uu;
+        if (uu > umax) umax = uu;
+        if (vv < vmin) vmin = vv;
+        if (vv > vmax) vmax = vv;
     }
     if (!std::isfinite(umin) || !std::isfinite(umax) || !std::isfinite(vmin) || !std::isfinite(vmax)) return whole;
     if (umin < 0.0f || vmin < 0.0f || umax > 1.0f || vmax > 1.0f) return whole;

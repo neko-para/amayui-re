@@ -46,6 +46,7 @@
 #include "runtime/d3d9_pipeline.h"
 #include "runtime/log.h"
 #include "runtime/machine.h"
+#include "runtime/math.h"  // `perspectiveFovLH` / `toD3DLayout`（用例里要"真的透视矩阵"，⛔ 不手抄 16 个数）
 #include "runtime/surface.h"
 #include "shims/register.h"
 
@@ -3506,6 +3507,485 @@ void caseMaterialSource() {
     LIFT_CHECK(out[2] == 1.0 && out[0] == 0.0 && out[1] == 0.0);
 }
 
+// =======================================================================================
+// ㉔ `d3d9p/perspective-interpolation`（B 单 `REQ-01M7NC21S484PFYDAE7YTNX02J`）
+//
+// 红了意味着什么：GPU 批把**逐顶点 `1/w`** 丢了（或片元里没除回来）⇒ 透视批在屏幕空间**线性**
+//   插值 `uv/w` / `color/w`，画出来就是"仿射贴图"（近处拉长、纹理爬行）；反过来 `w == 1` 的批
+//   也会被除错（固定功能的既有像素用例会红）。
+//
+// 几何（**两个深度不同的三角形** + 已知 uv / 颜色梯度）：
+//   · 视图空间四边形：下边 `z = 1`（近）、上边 `z = 4`（远）；`PROJECTION = perspectiveFovLH`、
+//     WORLD / VIEW = 单位阵 ⇒ `clip.w = z_view` 跨 **1..0.25 的 1/w**；
+//   · 屏幕落点用 `clipVs10`（= 实现里 `mul(vec4(pos,1), Proj)` 的**同一份**算式）算 ⇒ 透视批在
+//     屏幕上是一个**梯形**（近大远小）；
+//   · 顶点属性：uv 从 (0,0)/(1,0) 到 (1,1)/(0,1)；顶点色 近=红 / 远=蓝。
+//
+// 四批 draw（同一个四边形；每批画完读回整幅像素）：
+//   ① XYZ + TEX1（透视，w 跨 1..4）⇒ 逐像素 == 参考 `(Σλ·uv/w)/(Σλ·1/w)` 的**那个 texel**（≤1 LSB）；
+//   ② ①的**仿射版**（XYZRHW, rhw=1 ⇒ `invw == 1`，屏幕几何与 ① 逐 float 相同）⇒ 逐像素 == 仿射参考；
+//   ③ XYZ + DIFFUSE（透视）⇒ 逐像素 == 透视校正后的颜色（≤1 LSB）；
+//   ④ ③的**仿射版**（XYZRHW）。
+// 控制行（证明不是恒真）：②与"①的参考"在**同一批像素**上必须差 > 32 LSB 的至少 20 个；
+//   ④与"③的参考"同理。②/④ 就是"故意不做透视校正"的那一档 —— 不是 bug，是本用例的控制行。
+//
+// ★ 采样只取**三角形内部**（重心权重 ≥ 0.03）且**远离 texel 边界**（0.06 texel）的像素：
+//   前者避开光栅化填充规则的边界、后者让 POINT 采样的参考是**精确的某个 texel**（与 float 抖动无关）。
+// ★ 参考 texel 由纹理内容**唯一**决定（texel(x,y) 的 R=x*16 / G=y*16 / B=255-x*16）⇒ 错一个 texel 就红。
+// ★ 没有 GPU 设备 / 没有显示系统 ⇒ SKIP 77（⛔ 不拿 Mock 冒充像素判据）。
+// =======================================================================================
+namespace {
+
+// 参考用的屏幕空间三角形 —— 顶点坐标就是**真正交给光栅器的那组 float**（⛔ 不另算一份几何）。
+struct RefTri {
+    float x[3];
+    float y[3];
+    double invw[3];  // 1/w（仿射档全 1）
+    double u[3];
+    double v[3];
+    double r[3], g[3], b[3];  // 0..1
+};
+
+// p 对 tri 的重心坐标；三个都 >= margin（= 只采内部点）⇒ true。
+bool refBary(const RefTri& t, double px, double py, double l[3], double margin) {
+    const double ax = static_cast<double>(t.x[0]);
+    const double ay = static_cast<double>(t.y[0]);
+    const double bx = static_cast<double>(t.x[1]);
+    const double by = static_cast<double>(t.y[1]);
+    const double cx = static_cast<double>(t.x[2]);
+    const double cy = static_cast<double>(t.y[2]);
+    const double det = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    if (std::fabs(det) < 1e-9) return false;
+    l[1] = ((px - ax) * (cy - ay) - (py - ay) * (cx - ax)) / det;
+    l[2] = ((bx - ax) * (py - ay) - (by - ay) * (px - ax)) / det;
+    l[0] = 1.0 - l[1] - l[2];
+    return l[0] >= margin && l[1] >= margin && l[2] >= margin;
+}
+
+// 透视校正插值：`Σ λ·attr/w ÷ Σ λ·(1/w)`。`invw == 1` ⇒ 退化成屏幕空间线性（控制行就是它）。
+double refAttr(const RefTri& t, const double l[3], const double* attr) {
+    double num = 0.0;
+    double den = 0.0;
+    for (int i = 0; i < 3; ++i) {
+        num += l[i] * attr[i] * t.invw[i];
+        den += l[i] * t.invw[i];
+    }
+    return den != 0.0 ? num / den : 0.0;
+}
+
+int refChannelDiff(std::uint32_t a, std::uint32_t b) {
+    int worst = 0;
+    for (int sh = 0; sh < 24; sh += 8) {
+        const int d = static_cast<int>((a >> sh) & 0xFFu) - static_cast<int>((b >> sh) & 0xFFu);
+        const int ad = d < 0 ? -d : d;
+        if (ad > worst) worst = ad;
+    }
+    return worst;
+}
+
+std::uint8_t refQuantize(double c) {
+    if (!(c > 0.0)) return 0u;
+    if (c >= 1.0) return 255u;
+    return static_cast<std::uint8_t>(c * 255.0 + 0.5);
+}
+
+}  // namespace
+
+int casePerspectiveInterpolation() {
+    lift_test::g_current_case = "d3d9p/perspective-interpolation";
+    Rig r;
+    std::string why;
+    if (!r.upGpu(&why)) LIFT_SKIP(why.c_str());
+
+    constexpr int kW = 64;
+    constexpr int kH = 64;
+    constexpr int kTexW = 16;
+    constexpr int kTexH = 16;
+
+    // ---- 16×16 纹理：texel(x,y) 的 R=x*16 / G=y*16 / B=255-x*16（每个 texel 唯一）----
+    std::uint32_t tex = 0;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, kTexW, kTexH, lift::d3d9::kFmtA8R8G8B8, &tex), 0u);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return 0;
+    {
+        const std::uint32_t locked = r.f.placeBytes(std::vector<std::uint8_t>(8, 0));
+        LIFT_CHECK_EQ_U32(r.f.method(tex, kOffTextureLockRect, {0u, locked, 0u, 0u}), 0u);
+        const std::uint32_t pitch = r.f.m.mem().rd32(locked + 0u);
+        const std::uint32_t bits = r.f.m.mem().rd32(locked + 4u);
+        LIFT_CHECK_NE_U32(bits, 0u);
+        for (int y = 0; y < kTexH; ++y) {
+            for (int x = 0; x < kTexW; ++x) {
+                const std::uint32_t rr = static_cast<std::uint32_t>(x * 16);
+                const std::uint32_t gg = static_cast<std::uint32_t>(y * 16);
+                const std::uint32_t bb = 255u - rr;
+                // A8R8G8B8 的内存布局 = BGRA（低字节是 B）⇒ 按 D3DCOLOR(ARGB) 写字面值
+                const std::uint32_t argb = 0xFF000000u | (rr << 16) | (gg << 8) | bb;
+                r.f.m.mem().wr32(bits + static_cast<std::uint32_t>(y) * pitch +
+                                     static_cast<std::uint32_t>(x) * 4u,
+                                 argb);
+            }
+        }
+        LIFT_CHECK_EQ_U32(r.f.method(tex, kOffTextureUnlockRect, {0u}), 0u);
+    }
+
+    // ---- 几何：视图空间四边形（下边 z=1 / 上边 z=4）+ 透视 PROJECTION ----
+    float proj16[16] = {};
+    lift::math::toD3DLayout(lift::math::perspectiveFovLH(0.7853982f, 1.0f, 0.1f, 100.0f), proj16);
+    const float view_pos[4][3] = {{-0.35f, -0.35f, 1.0f},
+                                  {0.35f, -0.35f, 1.0f},
+                                  {0.35f, 0.35f, 4.0f},
+                                  {-0.35f, 0.35f, 4.0f}};
+    const float vert_uv[4][2] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}};
+    // D3DCOLOR = ARGB：近边红 / 远边蓝
+    const std::uint32_t vert_col[4] = {0xFFFF0000u, 0xFFFF0000u, 0xFF0000FFu, 0xFF0000FFu};
+
+    float scr[4][2] = {};
+    double invw[4] = {};
+    for (int i = 0; i < 4; ++i) {
+        const lift::math::Vec4d c =
+            lift::d3d9::clipVs10(proj16, static_cast<double>(view_pos[i][0]),
+                                 static_cast<double>(view_pos[i][1]), static_cast<double>(view_pos[i][2]));
+        invw[i] = 1.0 / c.w;
+        scr[i][0] = static_cast<float>((c.x * invw[i] * 0.5 + 0.5) * static_cast<double>(kW));
+        scr[i][1] = static_cast<float>((-c.y * invw[i] * 0.5 + 0.5) * static_cast<double>(kH));
+    }
+    // 两个**深度不同**的三角形：T0=(0,1,2) / T1=(0,2,3)。近边 1/w=1、远边 1/w=0.25。
+    const int tri_idx[2][3] = {{0, 1, 2}, {0, 2, 3}};
+    RefTri tri[2] = {};
+    RefTri tri_affine[2] = {};
+    for (int ti = 0; ti < 2; ++ti) {
+        for (int k = 0; k < 3; ++k) {
+            const int i = tri_idx[ti][k];
+            tri[ti].x[k] = scr[i][0];
+            tri[ti].y[k] = scr[i][1];
+            tri[ti].invw[k] = invw[i];
+            tri[ti].u[k] = static_cast<double>(vert_uv[i][0]);
+            tri[ti].v[k] = static_cast<double>(vert_uv[i][1]);
+            tri[ti].r[k] = static_cast<double>((vert_col[i] >> 16) & 0xFFu) / 255.0;
+            tri[ti].g[k] = static_cast<double>((vert_col[i] >> 8) & 0xFFu) / 255.0;
+            tri[ti].b[k] = static_cast<double>(vert_col[i] & 0xFFu) / 255.0;
+        }
+        tri_affine[ti] = tri[ti];
+        tri_affine[ti].invw[0] = 1.0;  // 控制行：故意**不做**透视校正
+        tri_affine[ti].invw[1] = 1.0;
+        tri_affine[ti].invw[2] = 1.0;
+    }
+    LIFT_CHECK(tri[0].invw[0] == 1.0 && std::fabs(tri[0].invw[2] - 0.25) < 1e-9);
+
+    // 像素中心处的参考（透视 / 仿射共用一份算式，只有 `invw` 不同）。
+    const auto sampleRef = [&](bool perspective, int x, int y, double* u, double* v, double* cr,
+                               double* cg, double* cb) -> bool {
+        const double px = static_cast<double>(x) + 0.5;
+        const double py = static_cast<double>(y) + 0.5;
+        for (int ti = 0; ti < 2; ++ti) {
+            double l[3] = {0.0, 0.0, 0.0};
+            if (!refBary(tri[ti], px, py, l, 0.03)) continue;
+            const RefTri& t = perspective ? tri[ti] : tri_affine[ti];
+            *u = refAttr(t, l, t.u);
+            *v = refAttr(t, l, t.v);
+            *cr = refAttr(t, l, t.r);
+            *cg = refAttr(t, l, t.g);
+            *cb = refAttr(t, l, t.b);
+            return true;
+        }
+        return false;
+    };
+    // uv → texel（POINT + CLAMP + level 0）。`safe` = 离 texel 边界 > 0.06 texel（参考不受 float 抖动影响）。
+    const auto texelOf = [&](double u, double v, int* tx, int* ty) -> bool {
+        const double fu = u * static_cast<double>(kTexW);
+        const double fv = v * static_cast<double>(kTexH);
+        const int ix = static_cast<int>(std::floor(fu));
+        const int iy = static_cast<int>(std::floor(fv));
+        const double du = fu - static_cast<double>(ix);
+        const double dv = fv - static_cast<double>(iy);
+        if (ix < 0 || ix >= kTexW || iy < 0 || iy >= kTexH) return false;
+        if (!(du > 0.06 && du < 0.94 && dv > 0.06 && dv < 0.94)) return false;
+        *tx = ix;
+        *ty = iy;
+        return true;
+    };
+    const auto texelPixel = [&](int tx, int ty) -> std::uint32_t {
+        return (static_cast<std::uint32_t>(tx * 16) << 16) | (static_cast<std::uint32_t>(ty * 16) << 8) |
+               (255u - static_cast<std::uint32_t>(tx * 16));
+    };
+    const auto snapshot = [&]() {
+        std::vector<std::uint32_t> out(static_cast<std::size_t>(kW) * kH, 0u);
+        for (int y = 0; y < kH; ++y) {
+            for (int x = 0; x < kW; ++x) {
+                out[static_cast<std::size_t>(y) * kW + x] = r.f.pixelAt(x, y) & 0x00FFFFFFu;
+            }
+        }
+        return out;
+    };
+
+    // ---- 公共状态 ----
+    const std::vector<float> identity16 = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsZEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsCullMode, lift::d3d9::kCullNone), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsAlphaBlendEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setTransform(lift::d3d9::kTsWorld, identity16), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setTransform(lift::d3d9::kTsView, identity16), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setTransform(lift::d3d9::kTsProjection,
+                                       std::vector<float>(proj16, proj16 + 16)),
+                      0u);
+    LIFT_CHECK_EQ_U32(r.f.setTexture(0u, tex), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMagFilter, lift::d3d9::kTexfPoint), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMinFilter, lift::d3d9::kTexfPoint), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMipFilter, lift::d3d9::kTexfNone), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampAddressU, lift::d3d9::kAddressClamp), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampAddressV, lift::d3d9::kAddressClamp), 0u);
+
+    // 顶点缓冲：顶点顺序 = 两个三角形（{0,1,2} / {0,2,3}）。
+    const int order[6] = {0, 1, 2, 0, 2, 3};
+    const auto pushF = [](std::vector<std::uint8_t>* out, float f) {
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &f, sizeof(bits));
+        for (int b = 0; b < 4; ++b) out->push_back(static_cast<std::uint8_t>((bits >> (8 * b)) & 0xFFu));
+    };
+    const auto pushU32 = [](std::vector<std::uint8_t>* out, std::uint32_t v) {
+        for (int b = 0; b < 4; ++b) out->push_back(static_cast<std::uint8_t>((v >> (8 * b)) & 0xFFu));
+    };
+    // XYZ + TEX1（20 B）
+    const auto build_xyz_tex = [&]() {
+        std::vector<std::uint8_t> vb;
+        for (int k = 0; k < 6; ++k) {
+            const int i = order[k];
+            pushF(&vb, view_pos[i][0]);
+            pushF(&vb, view_pos[i][1]);
+            pushF(&vb, view_pos[i][2]);
+            pushF(&vb, vert_uv[i][0]);
+            pushF(&vb, vert_uv[i][1]);
+        }
+        return r.f.placeBytes(vb);
+    };
+    // XYZRHW + DIFFUSE + TEX1（28 B；rhw=1 ⇒ 屏幕坐标就是顶点坐标）
+    const auto build_rhw_tex = [&]() {
+        std::vector<std::uint8_t> vb;
+        for (int k = 0; k < 6; ++k) {
+            const int i = order[k];
+            pushF(&vb, scr[i][0]);
+            pushF(&vb, scr[i][1]);
+            pushF(&vb, 0.0f);
+            pushF(&vb, 1.0f);
+            pushU32(&vb, 0xFFFFFFFFu);
+            pushF(&vb, vert_uv[i][0]);
+            pushF(&vb, vert_uv[i][1]);
+        }
+        return r.f.placeBytes(vb);
+    };
+    // XYZ + DIFFUSE（16 B）
+    const auto build_xyz_diffuse = [&]() {
+        std::vector<std::uint8_t> vb;
+        for (int k = 0; k < 6; ++k) {
+            const int i = order[k];
+            pushF(&vb, view_pos[i][0]);
+            pushF(&vb, view_pos[i][1]);
+            pushF(&vb, view_pos[i][2]);
+            pushU32(&vb, vert_col[i]);
+        }
+        return r.f.placeBytes(vb);
+    };
+    // XYZRHW + DIFFUSE（20 B）
+    const auto build_rhw_diffuse = [&]() {
+        std::vector<std::uint8_t> vb;
+        for (int k = 0; k < 6; ++k) {
+            const int i = order[k];
+            pushF(&vb, scr[i][0]);
+            pushF(&vb, scr[i][1]);
+            pushF(&vb, 0.0f);
+            pushF(&vb, 1.0f);
+            pushU32(&vb, vert_col[i]);
+        }
+        return r.f.placeBytes(vb);
+    };
+    const auto draw_and_read = [&](std::uint32_t fvf, std::uint32_t stride, std::uint32_t vb,
+                                   std::vector<std::uint32_t>* out) -> bool {
+        LIFT_CHECK_EQ_U32(r.f.setFvf(fvf), 0u);
+        LIFT_CHECK_EQ_U32(r.f.clearTo(kClearColor), 0u);
+        LIFT_CHECK_EQ_U32(r.f.beginScene(), 0u);
+        const std::uint32_t hr = r.f.drawUp(lift::d3d9::kPtTriangleList, 2u, vb, stride);
+        if (hr != 0u) {
+            std::fprintf(stderr, "[perspective] draw 被拒 hr=0x%08X fvf=0x%X\n", hr, fvf);
+            return false;
+        }
+        LIFT_CHECK_EQ_U32(r.f.endScene(), 0u);
+        if (!r.syncPixel(&why)) return false;
+        *out = snapshot();
+        return true;
+    };
+
+    // ---- ① 透视纹理批 / ② 同一屏幕几何的仿射纹理批 ----
+    std::vector<std::uint32_t> px_tex_persp;
+    std::vector<std::uint32_t> px_tex_affine;
+    const std::uint32_t vb_xyz_tex = build_xyz_tex();
+    if (!draw_and_read(0x0102u, 20u, vb_xyz_tex, &px_tex_persp)) {
+        LIFT_SKIP(why.c_str());
+    }
+    const std::uint32_t vb_rhw_tex = build_rhw_tex();
+    if (!draw_and_read(0x0144u, 28u, vb_rhw_tex, &px_tex_affine)) {
+        LIFT_SKIP(why.c_str());
+    }
+
+    int tex_sampled = 0;
+    int tex_worst_persp = 0;
+    int tex_worst_affine = 0;
+    int tex_control_pixels = 0;
+    int tex_control_max = 0;
+    bool texel_seen[kTexW * kTexH] = {};
+    int texel_seen_count = 0;
+    for (int y = 0; y < kH; ++y) {
+        for (int x = 0; x < kW; ++x) {
+            double pu = 0.0, pv = 0.0, pr = 0.0, pg = 0.0, pb = 0.0;
+            if (!sampleRef(true, x, y, &pu, &pv, &pr, &pg, &pb)) continue;
+            int ptx = 0, pty = 0;
+            if (!texelOf(pu, pv, &ptx, &pty)) continue;  // 靠近 texel 边界 ⇒ 不参与
+            double au = 0.0, av = 0.0, ar = 0.0, ag = 0.0, ab = 0.0;
+            if (!sampleRef(false, x, y, &au, &av, &ar, &ag, &ab)) continue;
+            int atx = 0, aty = 0;
+            if (!texelOf(au, av, &atx, &aty)) continue;  // 仿射参考也要"远离边界"才能比
+            const std::size_t at = static_cast<std::size_t>(y) * kW + x;
+            const std::uint32_t want_persp = texelPixel(ptx, pty);
+            const std::uint32_t want_affine = texelPixel(atx, aty);
+            const int dp = refChannelDiff(px_tex_persp[at], want_persp);
+            const int da = refChannelDiff(px_tex_affine[at], want_affine);
+            if (dp > tex_worst_persp) tex_worst_persp = dp;
+            if (da > tex_worst_affine) tex_worst_affine = da;
+            const int dc = refChannelDiff(px_tex_affine[at], want_persp);
+            if (dc > tex_control_max) tex_control_max = dc;
+            if (dc > 32) ++tex_control_pixels;
+            const int idx = pty * kTexW + ptx;
+            if (!texel_seen[idx]) {
+                texel_seen[idx] = true;
+                ++texel_seen_count;
+            }
+            ++tex_sampled;
+        }
+    }
+    LIFT_CHECK(tex_sampled >= 100);
+    LIFT_CHECK(texel_seen_count >= 16);   // 参考真的在扫过多个 texel（⛔ 不是一块单色）
+    LIFT_CHECK(tex_worst_persp <= 1);     // ① 与 `uv/w ÷ 1/w` 的参考逐像素 ≤1 LSB
+    LIFT_CHECK(tex_worst_affine <= 1);    // ② 仿射版与仿射参考一致（同一条光栅路径）
+    LIFT_CHECK(tex_control_pixels >= 20); // 控制行：不做透视校正 ⇒ 至少 20 个像素差 > 32 LSB
+    std::printf(
+        "perspective/uv：采样 %d 像素（%d 个 texel）；透视批最大误差 %d LSB；仿射批 %d LSB；"
+        "控制行 %d 像素差 >32（最大 %d）\n",
+        tex_sampled, texel_seen_count, tex_worst_persp, tex_worst_affine, tex_control_pixels,
+        tex_control_max);
+
+    // ---- ③ 透视颜色批 / ④ 同一屏幕几何的仿射颜色批（无纹理 ⇒ 输出 = 插值后的顶点色）----
+    LIFT_CHECK_EQ_U32(r.f.setTexture(0u, 0u), 0u);
+    std::vector<std::uint32_t> px_col_persp;
+    std::vector<std::uint32_t> px_col_affine;
+    const std::uint32_t vb_xyz_col = build_xyz_diffuse();
+    if (!draw_and_read(0x0042u, 16u, vb_xyz_col, &px_col_persp)) {
+        LIFT_SKIP(why.c_str());
+    }
+    const std::uint32_t vb_rhw_col = build_rhw_diffuse();
+    if (!draw_and_read(0x0044u, 20u, vb_rhw_col, &px_col_affine)) {
+        LIFT_SKIP(why.c_str());
+    }
+
+    int col_sampled = 0;
+    int col_worst_persp = 0;
+    int col_worst_affine = 0;
+    int col_control_pixels = 0;
+    int col_control_max = 0;
+    for (int y = 0; y < kH; ++y) {
+        for (int x = 0; x < kW; ++x) {
+            double pu = 0.0, pv = 0.0, pr = 0.0, pg = 0.0, pb = 0.0;
+            if (!sampleRef(true, x, y, &pu, &pv, &pr, &pg, &pb)) continue;
+            double au = 0.0, av = 0.0, ar = 0.0, ag = 0.0, ab = 0.0;
+            if (!sampleRef(false, x, y, &au, &av, &ar, &ag, &ab)) continue;
+            const std::size_t at = static_cast<std::size_t>(y) * kW + x;
+            const std::uint32_t want_persp =
+                (static_cast<std::uint32_t>(refQuantize(pr)) << 16) |
+                (static_cast<std::uint32_t>(refQuantize(pg)) << 8) | refQuantize(pb);
+            const std::uint32_t want_affine =
+                (static_cast<std::uint32_t>(refQuantize(ar)) << 16) |
+                (static_cast<std::uint32_t>(refQuantize(ag)) << 8) | refQuantize(ab);
+            const int dp = refChannelDiff(px_col_persp[at], want_persp);
+            const int da = refChannelDiff(px_col_affine[at], want_affine);
+            if (dp > col_worst_persp) col_worst_persp = dp;
+            if (da > col_worst_affine) col_worst_affine = da;
+            const int dc = refChannelDiff(px_col_affine[at], want_persp);
+            if (dc > col_control_max) col_control_max = dc;
+            if (dc > 24) ++col_control_pixels;
+            ++col_sampled;
+        }
+    }
+    LIFT_CHECK(col_sampled >= 100);
+    LIFT_CHECK(col_worst_persp <= 1);
+    LIFT_CHECK(col_worst_affine <= 1);
+    LIFT_CHECK(col_control_pixels >= 20);
+    std::printf("perspective/color：采样 %d 像素；透视批最大误差 %d LSB；仿射批 %d LSB；"
+                "控制行 %d 像素差 >24（最大 %d）\n",
+                col_sampled, col_worst_persp, col_worst_affine, col_control_pixels, col_control_max);
+
+    // 解绑 / 释放纹理（后面的用例不再依赖它）
+    LIFT_CHECK_EQ_U32(r.f.method(tex, 0x08u, {}), 0u);
+    return 0;
+}
+
+// =======================================================================================
+// ㉕ `d3d9p/vertex-w-refused`（B 单的**具名拒绝**面）
+//
+// 红了意味着什么：`w <= 0` 的顶点不再被具名拒绝 —— 要么又被"凡 `w != 1` 就拒"的旧闸盖住（透视批也画
+//   不了，另一种红在 `perspective-interpolation`），要么被当成 `1/w`（`w = 0` 时静默丢、`w < 0` 时
+//   镜像到错误位置）。
+//
+// 判据：XYZRHW 的 `rhw = -1` ⇒ `w = -1` ⇒ Draw 回 `D3DERR_INVALIDCALL`、位 21 `kUnGpuVertexW` 置位、
+//   `skipped_draws +1`（一个像素都不写 ⇒ 必须有账）；同一三角形的 `rhw = +1` 是**正控**（S_OK、
+//   `skipped` 不涨、位 21 不置位）。
+// ★ 这一档只在 `--gpu` 臂：pure 臂里"任何 Draw 都 INVALIDCALL"（`kUnGpuNoBackend`）会让断言恒真。
+// =======================================================================================
+int caseVertexWRefused() {
+    lift_test::g_current_case = "d3d9p/vertex-w-refused";
+    Rig r;
+    std::string why;
+    if (!r.upGpu(&why)) LIFT_SKIP(why.c_str());
+
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsZEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsCullMode, lift::d3d9::kCullNone), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsAlphaBlendEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.f.setFvf(kFvfXyzRhwDiffuse), 0u);
+    const auto device_bit21 = [&]() {
+        lift::d3d9::PipelineInfo pi;
+        if (!lift::d3d9::pipelineInfoOfDevice(r.f.m.cpu(), r.f.device.state, &pi, nullptr)) return true;
+        return (pi.unsupported[21u / 32u] & (1u << (21u % 32u))) != 0u;
+    };
+
+    // ---- 正控：rhw = 1（w = 1）⇒ 正常画、skipped 不涨、位 21 不置位 ----
+    //   ★ 覆盖账在**每次 `Machine::run` 开头**重算（`gpuCoverageReset`）⇒ 必须在"Draw 是这一跑
+    //     最后一次 guest 调用"时读：`clearTo` / `beginScene` / `drawUp` 各是一跑，读完再 `endScene`。
+    const std::uint32_t ok_tri = r.f.placeRhwDiffuse(
+        {{0.0f, 0.0f, 0.0f, 1.0f}, {20.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 20.0f, 0.0f, 1.0f}},
+        {0xFFFF0000u, 0xFFFF0000u, 0xFFFF0000u});
+    LIFT_CHECK_EQ_U32(r.f.clearTo(kClearColor), 0u);
+    LIFT_CHECK_EQ_U32(r.f.beginScene(), 0u);
+    LIFT_CHECK_EQ_U32(r.f.drawUp(lift::d3d9::kPtTriangleList, 1u, ok_tri, 20u), 0u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::d3d9::gpuCoverage().skipped_draws), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::d3d9::gpuCoverage().gpu_draws), 1);
+    LIFT_CHECK(!device_bit21());
+    LIFT_CHECK_EQ_U32(r.f.endScene(), 0u);
+
+    // ---- 负控：rhw = -1（w = -1 ⇒ `1/w` 无意义）⇒ 具名拒绝 ----
+    const std::uint32_t bad_tri = r.f.placeRhwDiffuse(
+        {{0.0f, 0.0f, 0.0f, -1.0f}, {20.0f, 0.0f, 0.0f, -1.0f}, {0.0f, 20.0f, 0.0f, -1.0f}},
+        {0xFFFF0000u, 0xFFFF0000u, 0xFFFF0000u});
+    LIFT_CHECK_EQ_U32(r.f.beginScene(), 0u);
+    LIFT_CHECK_EQ_U32(r.f.drawUp(lift::d3d9::kPtTriangleList, 1u, bad_tri, 20u), lift::d3d9::kInvalidCall);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::d3d9::gpuCoverage().skipped_draws), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::d3d9::gpuCoverage().gpu_draws), 0);
+    LIFT_CHECK(device_bit21());
+    LIFT_CHECK_EQ_U32(r.f.endScene(), 0u);
+    // 拒绝之后同一份几何（w 合法）照旧能画（⛔ 不是把整条路关掉）
+    LIFT_CHECK_EQ_U32(r.f.beginScene(), 0u);
+    LIFT_CHECK_EQ_U32(r.f.drawUp(lift::d3d9::kPtTriangleList, 1u, ok_tri, 20u), 0u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::d3d9::gpuCoverage().skipped_draws), 0);
+    LIFT_CHECK_EQ_U32(r.f.endScene(), 0u);
+    return 0;
+}
+
 }  // namespace
 
 // ★ 两条臂（`REQ-01M7A74YG08R65NJBFXF7DEJDK`）：CPU 光栅已删 ⇒ 要**画像素**的用例必须装真 GPU。
@@ -3560,6 +4040,12 @@ int main(int argc, char** argv) {
             rc = caseSetRenderTargetOffscreenRefused();
             if (rc != 0) return rc;
             rc = caseValidateDeviceOnePass();
+            if (rc != 0) return rc;
+            // ★ B 单：GPU 批的透视校正插值（uv/w · color/w · 逐顶点 1/w）+ 仿射控制行
+            rc = casePerspectiveInterpolation();
+            if (rc != 0) return rc;
+            // ★ B 单：`w <= 0` 的具名拒绝（旧闸拆掉之后**只剩**这一类真拒绝）
+            rc = caseVertexWRefused();
             if (rc != 0) return rc;
             return finish("d3d9-pipeline-gpu");
         }

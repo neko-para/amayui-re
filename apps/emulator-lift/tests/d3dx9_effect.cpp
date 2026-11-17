@@ -1373,9 +1373,10 @@ void caseEffectDrawSnowRecorded(const lift::PeImage& img) {
 
     // FVF = XYZ(0x002) | TEX1(0x100) = 0x102 ⇒ 20 B/顶点（与引擎的 `push 102h` / `push 14h` 一致）。
     // 顶点是**视图空间**（引擎已乘过 world×view）⇒ z 由 `Proj` 变成 clip.w。
-    // ★ 这里取 z = 1 ⇒ `clip.w = 1`：`submitPrimitives` 有一条**既有**的 `kUnGpuPerspective` 闸
-    //   （`invw != 1` ⇒ 整批具名拒绝，透视校正插值要另开单）⇒ 真距离（z=10）的批今天到不了后端，
-    //   本条用例判的是"这一批该怎么画 / 后端收到什么"，所以取 w=1 的那一档。
+    // ★ 这一档取 z = 1（`clip.w = 1`）**只为把判据收在"后端收到什么"上**：B 单
+    //   （`REQ-01M7NC21S484PFYDAE7YTNX02J`）已拆掉"凡 `invw != 1` 整批拒"的闸，真透视批现在也画
+    //   （透视校正的像素判据在 `snow-pixels` 的透视档 + `d3d9p/perspective-interpolation`）；
+    //   这里不掺 `w` 维度，免得"程序绑定 / 常量表"的断言被几何变化带偏。
     std::vector<std::uint8_t> vb(4u * 20u, 0);
     const float pos[4][3] = {{-0.3f, -0.2f, 1.0f}, {0.3f, -0.2f, 1.0f}, {-0.3f, 0.2f, 1.0f}, {0.3f, 0.2f, 1.0f}};
     const float uv[4][2] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}, {1.0f, 1.0f}};
@@ -1620,13 +1621,12 @@ void caseSnowVertices(const lift::PeImage& img) {
 
     // 两批顶点（都是 FVF `0x102` = XYZ|TEX1 ⇒ 20 B/顶点，与引擎的 `push 102h` / `push 14h` 一致）：
     //   · `ndc`：z = 0.5 ⇒ 单位 `Proj` 下 clip 深度落在 [0,1]（不裁剪）；
-    //   · `persp`：z = 1 ⇒ 真透视 `Proj` 下 `clip.w = z = 1`。
-    //   ★ 为什么 `persp` 取 w=1 而不是"真实距离"（z=10）：`submitPrimitives` 有一条**既有**的
-    //     `kUnGpuPerspective` 闸（`invw != 1` ⇒ 整批具名拒绝，`w != 1` 就需要着色器里做透视校正
-    //     插值，那是另一条单的活）⇒ 管线级看不到 `w != 1` 的顶点。`w` 没被除这一条因此走
-    //     `clipVs10` 的纯函数判据（见下面 ⑤）。
+    //   · `persp`：z 从 1 到 4 ⇒ 透视 `Proj` 下 `clip.w = z_view` **跨 1..4**（真的 `invw != 1`）。
+    //   ★ B 单（`REQ-01M7NC21S484PFYDAE7YTNX02J`）：`submitPrimitives` 的"凡 `invw != 1` 整批拒"已拆
+    //     ⇒ 这一档**真的**进 GPU；两条路（固定功能 / CPU `vs_1_0`）都交同一批顶点（含逐顶点 `invw`）。
+    //     ⛔ 不再像 A 单那样退到 `z = 1`（那档 `w == 1`，观测不到透视批）。
     const float xyz_ndc[4][3] = {{-0.8f, -0.5f, 0.5f}, {0.8f, -0.5f, 0.5f}, {-0.8f, 0.5f, 0.5f}, {0.8f, 0.5f, 0.5f}};
-    const float xyz_persp[4][3] = {{-0.3f, -0.2f, 1.0f}, {0.3f, -0.2f, 1.0f}, {-0.3f, 0.2f, 1.0f}, {0.3f, 0.2f, 1.0f}};
+    const float xyz_persp[4][3] = {{-0.3f, -0.2f, 1.0f}, {0.3f, -0.2f, 1.0f}, {-0.3f, 0.2f, 4.0f}, {0.3f, 0.2f, 4.0f}};
     const float uv[4][2] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}, {1.0f, 1.0f}};
     const auto make_strip = [&f, &uv](const float xyz[4][3]) -> std::uint32_t {
         std::vector<std::uint8_t> vb(4u * 20u, 0);
@@ -1668,7 +1668,9 @@ void caseSnowVertices(const lift::PeImage& img) {
         LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x108u, {}), lift::d3dx9::kOk);
         LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x10Cu, {}), lift::d3dx9::kOk);
     };
-    // 逐 float 比两批顶点（x/y/z/r/g/b/a/u/v 全比 —— ⛔ 不比绝对屏幕坐标，只比"两条路一样")
+    // 逐 float 比两批顶点（x/y/z/r/g/b/a/u/v/**invw** 全比 —— ⛔ 不比绝对屏幕坐标，只比"两条路一样"）
+    //   ★ `invw` 也进比较：B 单之后 GPU 顶点带**逐顶点 1/w**（透视批跨 1..0.25）⇒ 两条路连它都相同，
+    //     "`1/w` 只在其中一条路上被改过"会当场红。
     const auto same_vertices = [](const std::vector<lift::GpuRasterVertex>& a,
                                   const std::vector<lift::GpuRasterVertex>& b, const char* what) {
         if (a.size() != b.size() || a.empty()) {
@@ -1677,9 +1679,9 @@ void caseSnowVertices(const lift::PeImage& img) {
         }
         bool ok = true;
         for (std::size_t i = 0; i < a.size() && ok; ++i) {
-            const float lhs[9] = {a[i].x, a[i].y, a[i].z, a[i].r, a[i].g, a[i].b, a[i].a, a[i].u, a[i].v};
-            const float rhs[9] = {b[i].x, b[i].y, b[i].z, b[i].r, b[i].g, b[i].b, b[i].a, b[i].u, b[i].v};
-            for (int k = 0; k < 9; ++k) {
+            const float lhs[10] = {a[i].x, a[i].y, a[i].z, a[i].r, a[i].g, a[i].b, a[i].a, a[i].u, a[i].v, a[i].invw};
+            const float rhs[10] = {b[i].x, b[i].y, b[i].z, b[i].r, b[i].g, b[i].b, b[i].a, b[i].u, b[i].v, b[i].invw};
+            for (int k = 0; k < 10; ++k) {
                 if (lhs[k] != rhs[k]) {
                     lift_test::failf(__FILE__, __LINE__, "%s：顶点 #%zu 的第 %d 个 float 不同（%.9g vs %.9g）",
                                      what, i, k, static_cast<double>(lhs[k]), static_cast<double>(rhs[k]));
@@ -1753,7 +1755,8 @@ void caseSnowVertices(const lift::PeImage& img) {
 
     // ---- ④ 纯函数：`clip = mul(vec4(pos,1), Proj)` 的三条不变量 ----
     //   ⛔ 不抄算术：只断言"单位阵 ⇒ 恒等 / 缩放只作用在 x / 透视矩阵下 `w` 原样保留"。
-    //   ★ `w` 那一条只能在这里验（`w != 1` 的批会被 `kUnGpuPerspective` 整批拒，管线级看不见）。
+    //   ★ 这一档是**纯函数**级（不依赖光栅）：它钉的是"`w` 没被除"这句**式子本身**；
+    //     透视批**进 GPU 之后**的那一半由 ⑤（B 单拆闸之后真的能到后端）覆盖。
     float proj16[16] = {};
     lift::math::toD3DLayout(lift::math::perspectiveFovLH(0.7853982f, 4.0f / 3.0f, 0.1f, 100.0f), proj16);
     {
@@ -1785,26 +1788,50 @@ void caseSnowVertices(const lift::PeImage& img) {
         LIFT_CHECK(near_z.z >= 0.0 && near_z.z <= near_z.w + 1e-9);
     }
 
-    // ---- ⑤ 同一份透视 Proj 交给固定功能的 PROJECTION ⇒ 逐 float 相同 ----
+    // ---- ⑤ 同一份透视 Proj 交给固定功能的 PROJECTION ⇒ 逐 float 相同（含逐顶点 `invw`）----
     //   ★ 这一条把"乘了设备的 WORLD/VIEW"证伪：多乘一次 world/view 就会与固定功能那条路分开。
-    //   （顶点取 `w == 1` 的那一批，原因见文件头那条 `kUnGpuPerspective` 说明。）
+    //   ★ B 单：这一档是**真的透视批**（`clip.w` 跨 1..4 ⇒ `invw` 跨 1..0.25）——旧闸会整批拒，
+    //     现在两条路都交同一批顶点。顶点仍逐 float 相同（连 `invw`），并额外钉住：
+    //     ① 这条 Draw **真的进了 GPU 批**（`gpu_draws == 1`）且"没画"的账是 0；
+    //     ② 这批顶点里**确实**有 `invw != 1` ⇒ 上面那条断言不是"因为 w 恒 1 才成立"。
+    //   ★ 覆盖账在**每次 `Machine::run` 开头**重算 ⇒ 必须在"Draw 是这一跑最后一次 guest 调用"时读：
+    //     `draw_plain` 就是单条 Draw 调用 ⇒ 它返回后立刻读（下一跑会把账清 0）。
     //   ★ 先把光照关回去：上一档故意把材质设成红，那条状态会让**固定功能**的顶点色变红，
     //     与"两条路的几何一样"这条判据无关（关掉之后两条路又都是白，逐 float 才能比）。
     LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsLighting, 0u}), lift::d3dx9::kOk);
     const std::uint32_t proj_ea = f.data(proj16, sizeof(proj16));
     LIFT_CHECK_EQ_U32(callMethod(f, device, 0xB0u, {lift::d3d9::kTsProjection, proj_ea}), lift::d3dx9::kOk);
     draw_plain(vtx_persp);
+    {
+        const lift::d3d9::GpuCoverage& cov = lift::d3d9::gpuCoverage();
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(cov.skipped_draws), 0);  // 透视批不再被整批拒
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(cov.gpu_draws), 1);      // 真的进了 GPU 批
+    }
     const std::vector<lift::GpuRasterVertex> plain_persp = mock.plain_vertices;
     draw_vs(vtx_persp, proj16);
     const std::vector<lift::GpuRasterVertex> vs_persp = mock.effect_vertices;
     LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(vs_persp.size()), 6u);
     LIFT_CHECK(same_vertices(plain_persp, vs_persp, "透视 Proj vs 固定功能（device PROJ = 同一份 Proj）"));
+    // ★ B 单口径：位 21 `kUnGpuVertexW`（`w` 不可表示）**不置位** ⇒ 走的是"透视批照画"那条路
+    {
+        lift::d3d9::PipelineInfo pi;
+        LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(f.m.cpu(), f.m.cpu().com->userOf(device), &pi, nullptr));
+        LIFT_CHECK((pi.unsupported[0] & (1u << 21)) == 0u);
+    }
+    {
+        bool saw_nonunit_invw = false;
+        for (const lift::GpuRasterVertex& v : vs_persp) {
+            if (std::fabs(static_cast<double>(v.invw) - 1.0) > 1e-6) saw_nonunit_invw = true;
+        }
+        LIFT_CHECK(saw_nonunit_invw);  // 这批真的 `w != 1`（⛔ 不是又退到 w=1 的档）
+    }
     // 与单位 Proj 那一档**不同**（否则"乘了矩阵"这件事本身没有证据）
     LIFT_CHECK(
         std::fabs(static_cast<double>(vs_persp[0].x) - static_cast<double>(vs_identity[0].x)) > 1.0);
 
-    std::printf("snow-vertices：单位 Proj 与固定功能逐 float 相同（%zu 顶点）；透视 Proj 亦相同；"
-                "透视下 clip.w 原样保留；光照下 VS 顶点色仍是白\n",
+    std::printf("snow-vertices：单位 Proj 与固定功能逐 float 相同（%zu 顶点）；真透视 Proj（w 跨 1..4）"
+                "亦相同（含 invw；gpu_draws=1、位 21 未置位）；透视下 clip.w 原样保留；"
+                "光照下 VS 顶点色仍是白\n",
                 vs_identity.size());
 
     LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA8u, {}), lift::d3dx9::kOk);  // EndScene
@@ -2716,6 +2743,169 @@ int caseSnowPixels(const lift::PeImage& img) {
     }
     LIFT_CHECK(worst >= 0 && worst <= 1);
     std::printf("202 像素 oracle：四档最大误差 = %d LSB/通道\n", worst);
+
+    // =====================================================================================
+    // ⑤ 真透视 `Proj` 档（B 单 `REQ-01M7NC21S484PFYDAE7YTNX02J`）
+    //
+    // 红了意味着什么：`clip.w != 1` 的批又被整批拒（旧闸回来了），或者 GPU 批**没带/没除**逐顶点
+    //   `1/w` —— 后者会让 `uv_over_w` 直接当 uv 用，采样坐标被乘上 `Σλ·(1/w)`（本档 ≈0.6）⇒ 采到
+    //   别的 texel。
+    // 几何：视图空间四边形，下边 z=1（近）/ 上边 z=4（远）⇒ `clip.w` 跨 1..4；`Proj = perspectiveFovLH`；
+    //   **uv 恒定**在 texel(12,12) 的中心（0.78125）。透视校正下 `(u0/w) ÷ (1/w) == u0`（逐像素）⇒
+    //   在**任意**内部像素都应采到 texel(12,12)；不校正则 uv = u0·(Σλ/w) ≠ u0 ⇒ 采到别的 texel。
+    // 判据：① Draw 回 S_OK（⛔ 不再 `D3DERR_INVALIDCALL`）；② `skipped_draws` 不涨、位 21 不置位；
+    //   ③ 采样像素 == `texel(12,12) * Color`；④ 控制行：该像素"不校正"的 uv 必须离开 texel(12,12)
+    //   至少 2 个 texel（证明这个采样点对"漏除 invw"有分辨力，⛔ 不是恒真）。
+    // =====================================================================================
+    {
+        // 一张 16×16：全红，只有 (12,12) 是蓝（与上面 `texel_b` 同一份颜色）
+        std::uint32_t ptex = 0;
+        LIFT_CHECK_EQ_U32(
+            createTexture(f, proc_tex, device, static_cast<std::uint32_t>(kTexW), static_cast<std::uint32_t>(kTexH),
+                          0u, lift::d3d9::kFmtA8R8G8B8, &ptex),
+            lift::d3dx9::kOk);
+        LIFT_CHECK_NE_U32(ptex, 0u);
+        if (ptex == 0) return 1;
+        {
+            lift::d3d9::TextureInfo ti;
+            LIFT_CHECK(lift::d3d9::textureInfo(f.m.cpu(), ptex, &ti, nullptr));
+            lift::GuestSurface* gs = f.m.surfaces().find(ti.arena);
+            LIFT_CHECK(gs != nullptr);
+            if (gs == nullptr) return 1;
+            std::uint8_t* px = f.m.surfaces().pixels(*gs);
+            for (int y = 0; y < kTexH; ++y) {
+                for (int x = 0; x < kTexW; ++x) {
+                    const Bgra8 t = (x == 12 && y == 12) ? texel_b : texel_a;
+                    std::uint8_t* dst = px + static_cast<std::size_t>(y) * gs->pitch +
+                                        static_cast<std::size_t>(x) * 4u;
+                    dst[0] = t.b;
+                    dst[1] = t.g;
+                    dst[2] = t.r;
+                    dst[3] = t.a;
+                }
+            }
+        }
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xD0u, {s_tex, ptex}), lift::d3dx9::kOk);
+        const float white4[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x88u, {s_color, f.data(white4, sizeof(white4))}),
+                          lift::d3dx9::kOk);
+
+        // `Proj`：真透视（顶点是视图空间 ⇒ `clip.w = z_view` 跨 1..4）
+        float pproj16[16] = {};
+        lift::math::toD3DLayout(lift::math::perspectiveFovLH(0.7853982f, 1.0f, 0.1f, 100.0f), pproj16);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x98u, {s_proj, f.data(pproj16, sizeof(pproj16))}),
+                          lift::d3dx9::kOk);
+
+        const float kUv = (12.0f + 0.5f) / 16.0f;  // texel(12,12) 的中心（二进制精确）
+        const float vpos[6][3] = {{-0.35f, -0.35f, 1.0f}, {0.35f, -0.35f, 1.0f}, {0.35f, 0.35f, 4.0f},
+                                  {-0.35f, -0.35f, 1.0f}, {0.35f, 0.35f, 4.0f}, {-0.35f, 0.35f, 4.0f}};
+        std::vector<std::uint8_t> pvb(6u * 20u, 0);
+        for (int i = 0; i < 6; ++i) {
+            std::uint8_t* base = pvb.data() + static_cast<std::size_t>(i) * 20u;
+            std::memcpy(base + 0u, vpos[i], sizeof(vpos[i]));
+            const float uv[2] = {kUv, kUv};
+            std::memcpy(base + 12u, uv, sizeof(uv));
+        }
+        const std::uint32_t pvtx = f.data(pvb.data(), pvb.size());
+
+        // 四边形四个角的屏幕落点 + `1/w`（与实现同一个 `mul(vec4(pos,1), Proj)`）。
+        //   pvb 里 v0/v1/v2/v3 的下标 = 0 / 1 / 2 / 5。
+        const int corner_of[4] = {0, 1, 2, 5};
+        double scr[4][2] = {};
+        double iw[4] = {};
+        for (int i = 0; i < 4; ++i) {
+            const float* p = vpos[corner_of[i]];
+            const lift::math::Vec4d c = lift::d3d9::clipVs10(pproj16, static_cast<double>(p[0]),
+                                                             static_cast<double>(p[1]), static_cast<double>(p[2]));
+            iw[i] = 1.0 / c.w;
+            scr[i][0] = (c.x * iw[i] * 0.5 + 0.5) * 64.0;
+            scr[i][1] = (-c.y * iw[i] * 0.5 + 0.5) * 64.0;
+        }
+        // 控制行选点：找一个**三角形内部**（重心权重 ≥ 0.08）且"不校正"的 uv 离 texel(12,12)
+        //   至少 2 个 texel 的像素 —— 这样"漏除 invw"必然采到别的 texel。
+        const int tri_corner[2][3] = {{0, 1, 2}, {0, 2, 3}};
+        int sx = -1;
+        int sy = -1;
+        double s_sum_invw = 0.0;
+        for (int y = 0; y < kH && sx < 0; ++y) {
+            for (int x = 0; x < kW; ++x) {
+                const double px = x + 0.5;
+                const double py = y + 0.5;
+                for (int ti = 0; ti < 2; ++ti) {
+                    const int ia = tri_corner[ti][0];
+                    const int ib = tri_corner[ti][1];
+                    const int ic = tri_corner[ti][2];
+                    const double det = (scr[ib][0] - scr[ia][0]) * (scr[ic][1] - scr[ia][1]) -
+                                       (scr[ib][1] - scr[ia][1]) * (scr[ic][0] - scr[ia][0]);
+                    if (std::fabs(det) < 1e-9) continue;
+                    const double l1 = ((px - scr[ia][0]) * (scr[ic][1] - scr[ia][1]) -
+                                       (py - scr[ia][1]) * (scr[ic][0] - scr[ia][0])) / det;
+                    const double l2 = ((scr[ib][0] - scr[ia][0]) * (py - scr[ia][1]) -
+                                       (scr[ib][1] - scr[ia][1]) * (px - scr[ia][0])) / det;
+                    const double l0 = 1.0 - l1 - l2;
+                    if (l0 < 0.08 || l1 < 0.08 || l2 < 0.08) continue;
+                    const double sum_invw = l0 * iw[ia] + l1 * iw[ib] + l2 * iw[ic];
+                    // "漏除 invw" 时采样坐标 = u0·(Σλ/w) ⇒ 与 u0 的差（texel 为单位）
+                    const double shift_texels = std::fabs(1.0 - sum_invw) * static_cast<double>(kUv) * kTexW;
+                    if (shift_texels < 2.0) continue;
+                    sx = x;
+                    sy = y;
+                    s_sum_invw = sum_invw;
+                    break;
+                }
+            }
+        }
+        LIFT_CHECK(sx >= 0 && sy >= 0);
+        if (sx < 0 || sy < 0) return 1;
+        // 采样点必须落在 texel(12,12) 的**中心**：控制行证明"不校正会离开它 ≥2 个 texel"
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(std::floor(kUv * kTexW)), 12u);
+
+        LIFT_CHECK_EQ_U32(callMethod(f, device, 0xACu, {0u, 0u, 1u, 0xFF112233u, 0x3F800000u, 0u}),
+                          lift::d3dx9::kOk);  // Clear(TARGET)
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xFCu, {0u, 0u}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x100u, {0u}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x104u, {}), lift::d3dx9::kOk);
+        const std::uint32_t dhr = callMethod(f, device, 0x14Cu, {lift::d3d9::kPtTriangleList, 2u, pvtx, 20u});
+        if (dhr != lift::d3dx9::kOk) {
+            for (const auto& kv : lift::d3d9::gpuCoverage().skipped_reasons) {
+                std::fprintf(stderr, "[snow-persp-skip] %llu × %s\n", (unsigned long long)kv.second,
+                             kv.first.c_str());
+            }
+        }
+        LIFT_CHECK_EQ_U32(dhr, lift::d3dx9::kOk);
+        // ② 真透视批**不再被整批拒**：这条 Draw 真的进了 GPU 批、且"没画"的账是 0；
+        //    位 21 `kUnGpuVertexW` 不置位。★ 覆盖账在每次 `Machine::run` 开头重算 ⇒ 必须在
+        //    "Draw 是这一跑最后一次 guest 调用"时读（下一跑 `EndPass` 会把它清 0）。
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::d3d9::gpuCoverage().skipped_draws), 0);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::d3d9::gpuCoverage().gpu_draws), 1);
+        {
+            lift::d3d9::PipelineInfo pi;
+            LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(f.m.cpu(), f.m.cpu().com->userOf(device), &pi, nullptr));
+            LIFT_CHECK((pi.unsupported[0] & (1u << 21)) == 0u);  // bit21 = 顶点 w 不可表示
+        }
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x108u, {}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x10Cu, {}), lift::d3dx9::kOk);
+
+        std::vector<std::uint8_t> px;
+        std::uint32_t pitch = 0;
+        LIFT_CHECK(readback(&px, &pitch));
+        const Bgra8 got = pixelAtBgra(px, pitch, sx, sy);
+        const Bgra8 want = quantizeBgra(texel_b.b / 255.0, texel_b.g / 255.0, texel_b.r / 255.0,
+                                        texel_b.a / 255.0);  // Color = 白 ⇒ 就是 texel 本身
+        const int d = std::max({channelDiff(got.r, want.r), channelDiff(got.g, want.g),
+                                channelDiff(got.b, want.b), channelDiff(got.a, want.a)});
+        if (d > 1) {
+            lift_test::failf(__FILE__, __LINE__,
+                             "透视 Proj 档像素 (%d,%d) 不符：got(B=%u G=%u R=%u A=%u) "
+                             "want(B=%u G=%u R=%u A=%u) 误差=%d（Σλ·1/w=%.4f）",
+                             sx, sy, got.b, got.g, got.r, got.a, want.b, want.g, want.r, want.a, d,
+                             s_sum_invw);
+        }
+        std::printf("202 透视批（Proj 透视，w 跨 1..4）：像素 (%d,%d) B=%u G=%u R=%u A=%u（误差 %d；"
+                    "不校正则 uv 偏 %.2f texel）\n",
+                    sx, sy, got.b, got.g, got.r, got.a, d,
+                    std::fabs(1.0 - s_sum_invw) * static_cast<double>(kUv) * kTexW);
+    }
 
     LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA8u, {}), lift::d3dx9::kOk);        // EndScene
     LIFT_CHECK_EQ_U32(callMethod(f, device, 0x94u, {0u, 0u}), lift::d3dx9::kOk);  // 解绑 RT

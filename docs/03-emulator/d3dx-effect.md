@@ -279,17 +279,13 @@ pnpm tools disasm-at at --ea 0x4531B0 --lines 26          # 写点现场
 
 ### 12.3 残余风险 / 边界（写清，不当成"已完成"）
 
-1. ★ **真 run 里 202 的批今天会被 GPU 准入的 `invw != 1` 闸整批拒**（`submitPrimitives` 的
-   `gpu_invw_ok` / `kUnGpuPerspective` = bit 21）。202 的 `Proj` 是透视矩阵、顶点是视图空间
-   ⇒ `clip.w = z_view ≠ 1` ⇒ `invw ≠ 1` ⇒ 该闸**具名拒绝**（`D3DERR_INVALIDCALL` + warn + bit 21），
-   理由写在代码里："GPU 的屏幕空间插值不能等价替代透视校正（要补就得给着色器加 W 插值，那是另一条单的活）"。
-   ⇒ **本单（A）的验收口径 = 夹具级 + recorded + 像素**；"雪真的出现在真 run"归 **B 单
-   `REQ-01M7NC21S484PFYDAE7YTNX02J`**（GPU 批的透视校正插值）。⛔ 本条**不是**已知缺失/降级：
-   它是另一个已立单的能力面，A 没有为它加任何特判或回退。
-   实测（本条读数就是 B 单的复现面）：把 `snow-vertices` 透视那一档的顶点 z 从 `1.0` 改成 `10.0`
-   ⇒ 两条 draw 都回 `0x8876086C`，stderr 出现
-   `[warn] [d3d9] GPU 光栅化: 顶点 invw!=1（GPU 的屏幕空间插值不能等价替代透视校正）⇒ 拒绝该批`，
-   `skipped_draws` +1（即上面 12.2 的"逐 float 相同"当场不成立）。
+1. ~~**真 run 里 202 的批今天会被 GPU 准入的 `invw != 1` 闸整批拒**~~ **（B 单已拆，2026-11-18）**：
+   `submitPrimitives` 的 `gpu_invw_ok` / `kUnGpuPerspective`（bit 21）已拆掉，GPU 批现在带**逐顶点
+   `1/w`**、片元里 `uv = (uv/w) ÷ (1/w)` 做透视校正 ⇒ 202 的透视 `Proj` 批**真入队、真画**。
+   bit21 收窄成"顶点 `w` 不可表示（`w<=0` / 非有限）"（号不变）。口径 / 判据 / 读数见
+   `gpu-perspective.md`；本条原文保留作历史（A 单当时的边界），⛔ 不要再当成现状。
+   （原文：A 单实测把 `snow-vertices` 透视那一档的顶点 z 从 `1.0` 改成 `10.0` ⇒ 两条 draw 都回
+   `0x8876086C`、`skipped_draws` +1 —— 那正是当时那条闸的形状。）
 2. **矩阵槽只有一份**（`kFxMaxMatrixParams = 1`）：4 份资源里恰好只有 1 个 `float4x4`。若将来某份
    FX 文本出现**两个** `float4x4`，`effectDrawProgram` 会**具名拒绝**（⛔ 不静默丢一个）；
    `SetMatrix` 换名字时打一条 warn 并把旧名字的空间释放（旧 uniform 回到"没设过 = 全 0"）。
@@ -313,9 +309,10 @@ node tools/mutate-check.mjs --match '漏乘'
 node tools/mutate-check.mjs --match '202（Snow/SnowPS'
 ```
 
-★ `invw != 1` 那条闸的**现场复现**（一行改动，测完 `git restore` 即可；B 单的复现面）：
-把 `tests/d3dx9_effect.cpp` 的 `caseSnowVertices` 里 `xyz_persp` 的 z 从 `1.0f` 改成 `10.0f`，
-重建后跑 `ctest -R '^d3dx9-effect$' --output-on-failure` ⇒ 见 12.3 第 1 条的 warn 与 `0x8876086C`。
+★ **B 单之后**那条 `invw != 1` 闸的现场复现（一行改动，测完 `git restore` 即可）现在**验证的是修复**：
+把 `tests/d3dx9_effect.cpp` 的 `caseSnowVertices` 里 `xyz_persp` 的 z 从（A 单的）`1.0f` 改成 `10.0f`，
+重建后跑 `ctest -R '^d3dx9-effect$' --output-on-failure` ⇒ 两条 draw 都回 S_OK、顶点逐 float 仍相同
+（`invw = 0.1`），**不再**出现 `0x8876086C` / `invw!=1` 的 warn。修复前的形状（当时的读数）见 §12.3 第 1 条。
 
 ## 13. P4 · caps 固定 + 启动硬等式 + 运行期 `pipelineTrap()`（2026-11-18 / win32）
 

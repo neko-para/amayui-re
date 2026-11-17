@@ -3986,11 +3986,11 @@ const MUTATIONS = [
   {
     file: 'apps/emulator-lift/src/runtime/d3d9_gpu.cpp',
     from:
-      '    float4 c1 = tex1.sample(smp1, in.uv1);\n' +
+      '    float4 c1 = tex1.sample(smp1, in.uv1 / in.invw);\n' +
       '    float4 ret = float4(0.0, 0.0, 0.0, 0.0);   // 源文本：float4 ret = 0;\n' +
       '    ret.a = c0.a * (1.0 - Alpha) + c1.a * Alpha;',
     to:
-      '    float4 c1 = tex1.sample(smp1, in.uv1);\n' +
+      '    float4 c1 = tex1.sample(smp1, in.uv1 / in.invw);\n' +
       '    float4 ret = float4(0.0, 0.0, 0.0, 0.0);   // 源文本：float4 ret = 0;\n' +
       '    ret.a = c0.a * Alpha + c1.a * Alpha;  // 变异：1-Alpha 写成 Alpha',
     guard: 'ctest:d3dx9-effect',
@@ -4114,11 +4114,11 @@ const MUTATIONS = [
     from:
       'float4 PSMainSnow(FxVSOut i) : SV_Target {\n' +
       '    const float4 Color = g_fx[0];   // float4 Color;（uniform；没 SetVector 过 ⇒ 全 0）\n' +
-      '    return g_fx_tex0.Sample(g_fx_smp0, i.uv0) * Color;',
+      '    return g_fx_tex0.Sample(g_fx_smp0, i.uv0 / i.invw) * Color;',
     to:
       'float4 PSMainSnow(FxVSOut i) : SV_Target {\n' +
       '    const float4 Color = g_fx[0];   // float4 Color;（uniform；没 SetVector 过 ⇒ 全 0）\n' +
-      '    return g_fx_tex0.Sample(g_fx_smp0, i.uv0);  // 变异：漏乘 Color',
+      '    return g_fx_tex0.Sample(g_fx_smp0, i.uv0 / i.invw);  // 变异：漏乘 Color',
     guard: 'ctest:d3dx9-effect',
     ctest: 'd3dx9-effect',
     buildDir: 'apps/emulator-lift/out',
@@ -4127,6 +4127,46 @@ const MUTATIONS = [
       '202 的 DXBC 片元漏乘 `Color`（`texel * Color` → `texel`）⇒ `d3dx9-effect` 的 snow-pixels 在 ' +
       '`Color={0.5,0.25,0.75,1}`（R 128≠255）与 `Color={0,0,0,1}` 控制行（该全 0）两档上红；' +
       '★ 只断言"画出来了 / 有像素"会假绿',
+  },
+
+  // ── B 单 ① · 片元里**漏除 `invw`**（`src/runtime/d3d9_gpu.cpp` 的 **DXBC** 固定功能片元）──
+  //   故障形态：`uv = (uv/w) ÷ (1/w)` 写成 `uv = uv/w` —— 顶点上乘过的 `1/w` 没人除回来 ⇒ 画出来是
+  //   "仿射贴图"（近处拉长 / 纹理爬行）。这正是拆掉"凡 `invw != 1` 整批拒"之后**最像能跑**的破坏：
+  //   draw 成功、账本干净（`skipped=0`），只有像素读回能抓到。
+  //   ★ 为什么打 **DXBC** 那份：win32 的 SDL_GPU 后端只编 DXBC（MSL 那份在这台机器上不进编译）。
+  //     两份源逐句一致（`d3d9_gpu.cpp` 的注释里互相点名）。
+  {
+    file: 'apps/emulator-lift/src/runtime/d3d9_gpu.cpp',
+    from:
+      'float4 PSMainTex(VSOut i) : SV_Target { return g_tex.Sample(g_samp, i.uv / i.invw) * (i.color / i.invw); }',
+    to:
+      'float4 PSMainTex(VSOut i) : SV_Target { return g_tex.Sample(g_samp, i.uv) * (i.color / i.invw); }  // 变异：漏除 invw',
+    guard: 'ctest:d3d9-pipeline-gpu',
+    ctest: 'd3d9-pipeline-gpu',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3d9-pipeline',
+    what:
+      '固定功能片元漏除 `invw`（`Sample(samp, uv/invw)` → `Sample(samp, uv)`）⇒ `d3d9-pipeline-gpu` 的 ' +
+      'perspective-interpolation 在"透视批 == uv/w 参考"上红（采样坐标被乘 Σλ·1/w，本档偏 8+ texel）；' +
+      '同一份破坏也让 `d3dx9-effect` 的 snow-pixels 透视档红；★ `w==1` 的批完全不受影响 ⇒ 只跑仿射用例会假绿',
+  },
+
+  // ── B 单 ② · **顶点没带逐顶点 `1/w`**（`src/runtime/d3d9_pipeline.cpp` 的 `push_tri`）──
+  //   故障形态：`g.invw = v.invw` 写成 1 ⇒ 片元里的除法退化成功恒等，与①同样的"仿射贴图"。
+  //   ★ 这一条是**纯 CPU 侧**的投放点（与①分开：一个在"携不携带"，一个在"除不除"）：
+  //     `d3dx9-effect` 的 snow-vertices（pure，Mock 记录顶点，`saw_nonunit_invw`）也会红。
+  {
+    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
+    from: '            g.invw = static_cast<float>(v.invw);',
+    to: '            g.invw = 1.0f;  // 变异：整批一个 invw（丢掉逐顶点 1/w）',
+    guard: 'ctest:d3d9-pipeline-gpu',
+    ctest: 'd3d9-pipeline-gpu',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3d9-pipeline',
+    what:
+      'GPU 顶点不带逐顶点 `1/w`（`g.invw = v.invw` → `1.0f`）⇒ `d3d9-pipeline-gpu` 的 ' +
+      'perspective-interpolation 在透视批的 uv/color 上红；`d3dx9-effect` 的 snow-vertices（pure）也在 ' +
+      '`saw_nonunit_invw` 上红；★ 只断言"`invw != 1` 不再拒批"会假绿（画出来的仍是仿射）',
   },
 
   // ── P4 · 删掉 202 的 `kBindings` 一行 ⇒ **启动守卫当场 Trap**（硬等式）──

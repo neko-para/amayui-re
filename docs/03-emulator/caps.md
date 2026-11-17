@@ -129,10 +129,11 @@ extra       = implemented \ required                                  // 声明�
 
 - **P4 已实施**（§1）：env 已删、caps 固定 2.0/1.0、启动硬等式 + 运行期 `pipelineTrap()` 都在。
   本单**不实现任何 shader 程序**（202 在 A 单、203 在 P3）。
-- **B（GPU 透视校正插值，`REQ-01M7NC21S484PFYDAE7YTNX02J`）独立**：P4 的守卫与验收**不依赖** B 的视觉验收
-  （守卫只看"声明的 caps ⇒ 实现集完备"）。反之 **202 的真 run 归 B**：`submitPrimitives` 的 `gpu_invw_ok` 对
-  `invw != 1` 整批拒（`kUnGpuPerspective` = 位 21），而 202 的 `Proj` 是透视矩阵 ⇒ `clip.w = z_view ≠ 1`
-  ⇒ run 级必撞（`d3dx-effect.md` §12.3 第 1 条）。A 的验收口径 = **夹具级**，⛔ 不写成"雪已支持"。
+- **B（GPU 透视校正插值，`REQ-01M7NC21S484PFYDAE7YTNX02J`）已实施（2026-11-18）**：P4 的守卫与验收
+  **不依赖** B 的视觉验收（守卫只看"声明的 caps ⇒ 实现集完备"）。B 拆掉了 `submitPrimitives` 的
+  `gpu_invw_ok` 整批拒（bit 21 收窄成"顶点 `w` 不可表示"），202 的透视 `Proj` 批**真入队、真画**；
+  口径 / 判据 / 读数见 `gpu-perspective.md`。★ 但 **202 的真 run 可达性仍未观测**：`--until 0x00418340`
+  在现有配方（TITLE→GAMESTART→ADV→FELLOW→SAVE）上不命中 ⇒ "雪真的出现"仍缺真 run 证据（§7 第 5 条）。
 - 设备 `Create/SetVertexShader` / `Create/SetPixelShader` 未实现 ⇒ 被调用即 `comUnsupported` 响停（§2.1）：
   **已声明的能力边界**，⛔ 不是偏离、⛔ 不进等式。
 

@@ -620,14 +620,20 @@ T&L / 裁剪 / 状态机 / 失败码仍全在 CPU（三角形顶点已经是屏�
   点尺寸（POINTSIZE / POINTSCALE / POINTSPRITE / FVF PSIZE）仍未实现 ⇒ 点按 1px 并记账（bit19）；
   需要纹理采样的点/线（stage 级活跃且绑了纹理）**响亮拒绝**（`D3DERR_INVALIDCALL` + bit16）。
 
-**不再回退 CPU，改成"显式拒绝 + 具名记账"**（已改完的两条；`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：
-"回退 CPU 重放"等于保留第二实现 ⇒ 两条旁路改为**拒绝该批**（Draw 返回 `D3DERR_INVALIDCALL`，
+**不再回退 CPU，改成"显式拒绝 + 具名记账"**（已改完；`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：
+"回退 CPU 重放"等于保留第二实现 ⇒ 这些旁路改为**拒绝该批**（Draw 返回 `D3DERR_INVALIDCALL`，
 本批不进画面），但**记账不静默**：
 
 | 旁路 | 条件 | 记的位 |
 |---|---|---|
-| `invw != 1` | 顶点 w≠1（如 XYZRHW 的 rhw≠1）：GPU 的屏幕空间插值不能等价透视校正 | bit21 `invw!=1` |
+| 顶点 `w` 不可表示 | `w <= 0` / 非有限 ⇒ `1/w` 无意义（如 XYZRHW 的 `rhw < 0`） | bit21 `顶点 w 不可表示` |
 | GPU 后端失败 | 准入通过但后端绘制/入队失败（⛔ 不再 CPU 重放该批） | bit23 `GPU 后端失败` |
+
+★ **`invw != 1` 不再是拒绝理由**（`REQ-01M7NC21S484PFYDAE7YTNX02J`，B 单）：GPU 顶点带**逐顶点
+`1/w`**，片元里 `uv = (uv/w) ÷ (1/w)`、`color = (color/w) ÷ (1/w)` 做透视校正 ⇒ 202 的透视 `Proj`
+（`clip.w = z_view ≠ 1`）**照画**。bit21 收窄成"`w` 不可表示"（号不变），`w == 1` 的批除法是恒等。
+口径 / 判据：`docs/03-emulator/gpu-perspective.md`；像素守卫 `d3d9p/perspective-interpolation`
+（真 GPU，含**仿射控制行**）+ `d3dx9-effect` 的 `snow-pixels` 透视档。
 
 两者的痕迹：运行摘要的 `unsupported :` 行（具名位）+ 默认级别一行 warn（`pipe-warn` 的 `other` 桶）
 + 后端失败的 `gpu_failures` 计数。⚠ 曾经点名的守卫 `gpu-batch/reject-accounting` 在 2026-11-14
@@ -701,7 +707,7 @@ gpu       : draws=N gpu=N recorded=N queued=N empty=N fragments=N skipped=N
 在 Verbose 档恒打，默认档只打 non-benign 位（非空时）。
 
 - ★ **`skipped` 是"未画"的唯一口径**（`REQ-01M7AAXVGY9SG75XCREHPX641Z`）：
-  - `skipped` = 这一批 **GPU 没画**（`gpuEligible` 准入拒绝 / 没装后端 / `invw!=1` /
+  - `skipped` = 这一批 **GPU 没画**（`gpuEligible` 准入拒绝 / 没装后端 / 顶点 `w` 不可表示 /
     后端失败 / 带纹理点线）—— **"未画"只看这个数**。
     **真实场景应恒 0**；`skipped>0` 意味着这一批**没有进画面**。
   - `skipped top:` 是 `skipped` 的按原因聚合（次数降序、原因升序、最多 5 条）。拒批的具名位
@@ -942,7 +948,7 @@ LIFT_FRAME_TRACE=1 ./out/emulator-lift ... --max-frames 80 --real-time \
   `[ebp-0x24]`/`[ebp-0x20]` 是它传给 `sub_49E390` 的纹理 id 数组，`-1` = 这一批**没有纹理**）。
   同一个开关还会为 stage 0/1 的 op/arg 写打 `[sts] stage=… type=… value=… ret=…` ——
   **"这一批用的到底是 DIFFUSE 还是 TFACTOR"只能看这个**（`ret=` 定位写它的 guest EA）。
-- **`skipped=` 才是"GPU 没画"的账**（准入拒绝 / 没装后端 / `invw!=1` / MIP 缩小 /
+- **`skipped=` 才是"GPU 没画"的账**（准入拒绝 / 没装后端 / 顶点 `w` 不可表示 /
   后端失败；sprite 那一行是 `sprite_skipped=`），按原因聚合进 `skipped top:`。
   真实场景的判据是 `skipped=0` 且 `sprite_skipped=0`（口径见 §4.2b）。
 - `LIFT_LOG_MARKERS=1`（诊断，默认关）：引擎帧身份（marker 源）**变化**时往 stdout 打一行

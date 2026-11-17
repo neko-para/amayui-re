@@ -105,32 +105,38 @@ GpuRasterStats g_stats;
 GpuEffectRaster* g_live_effect_raster = nullptr;
 
 #if defined(_WIN32)
+// ★★ 透视校正（`REQ-01M7NC21S484PFYDAE7YTNX02J`，B 单）—— **MSL 与 DXBC 逐句一致**：
+//   · 顶点缓冲里的 color / uv 是**已乘过 1/w** 的值（`d3d9_pipeline.cpp` 的 `toScreen`），
+//     顶点还多带一个**逐顶点** `invw`（location 3；effect 批是 location 4）；
+//   · VS 把三者原样交给光栅器（GPU 的片元属性插值在**屏幕空间线性**）；
+//   · PS 里 `uv = uv_over_w / invw`、`color = color_over_w / invw` 把透视校正还原回来。
+//   `w == 1` 的批（固定功能 / XYZRHW / sprite）`invw == 1` ⇒ 除法是**恒等**，逐像素与旧实现相同。
 const char* kShaderSource = R"(
-struct VSIn { float3 pos : TEXCOORD0; float4 color : TEXCOORD1; float2 uv : TEXCOORD2; };
-struct VSOut { float4 pos : SV_Position; float4 color : TEXCOORD0; float2 uv : TEXCOORD1; };
-VSOut VSMain(VSIn i) { VSOut o; o.pos = float4(i.pos, 1.0); o.color = i.color; o.uv = i.uv; return o; }
-float4 PSMain(VSOut i) : SV_Target { return i.color; }
+struct VSIn { float3 pos : TEXCOORD0; float4 color : TEXCOORD1; float2 uv : TEXCOORD2; float invw : TEXCOORD3; };
+struct VSOut { float4 pos : SV_Position; float4 color : TEXCOORD0; float2 uv : TEXCOORD1; float invw : TEXCOORD2; };
+VSOut VSMain(VSIn i) { VSOut o; o.pos = float4(i.pos, 1.0); o.color = i.color; o.uv = i.uv; o.invw = i.invw; return o; }
+float4 PSMain(VSOut i) : SV_Target { return i.color / i.invw; }
 Texture2D g_tex : register(t0, space2);
 SamplerState g_samp : register(s0, space2);
 // 0: MODULATE(texture, diffuse)（颜色与 alpha 都是）
-float4 PSMainTex(VSOut i) : SV_Target { return g_tex.Sample(g_samp, i.uv) * i.color; }
+float4 PSMainTex(VSOut i) : SV_Target { return g_tex.Sample(g_samp, i.uv / i.invw) * (i.color / i.invw); }
 // 1: SELECTARG1(TEXTURE)（颜色与 alpha 都取纹理）
-float4 PSMainTexSelect(VSOut i) : SV_Target { return g_tex.Sample(g_samp, i.uv); }
+float4 PSMainTexSelect(VSOut i) : SV_Target { return g_tex.Sample(g_samp, i.uv / i.invw); }
 // 2: 颜色 MODULATE，alpha 取纹理
 float4 PSMainTexModAlphaTex(VSOut i) : SV_Target {
-    float4 t = g_tex.Sample(g_samp, i.uv); float4 c = t * i.color; c.a = t.a; return c;
+    float4 t = g_tex.Sample(g_samp, i.uv / i.invw); float4 c = t * (i.color / i.invw); c.a = t.a; return c;
 }
 // 3: 颜色取纹理，alpha MODULATE
 float4 PSMainTexSelAlphaMod(VSOut i) : SV_Target {
-    float4 t = g_tex.Sample(g_samp, i.uv); float4 c = t; c.a = t.a * i.color.a; return c;
+    float4 t = g_tex.Sample(g_samp, i.uv / i.invw); float4 c = t; c.a = t.a * (i.color.a / i.invw); return c;
 }
 // 4: 颜色 MODULATE，alpha 取 diffuse
 float4 PSMainTexModAlphaDiff(VSOut i) : SV_Target {
-    float4 t = g_tex.Sample(g_samp, i.uv); float4 c = t * i.color; c.a = i.color.a; return c;
+    float4 t = g_tex.Sample(g_samp, i.uv / i.invw); float4 c = t * (i.color / i.invw); c.a = i.color.a / i.invw; return c;
 }
 // 5: 颜色取纹理，alpha 取 diffuse
 float4 PSMainTexSelAlphaDiff(VSOut i) : SV_Target {
-    float4 t = g_tex.Sample(g_samp, i.uv); float4 c = t; c.a = i.color.a; return c;
+    float4 t = g_tex.Sample(g_samp, i.uv / i.invw); float4 c = t; c.a = i.color.a / i.invw; return c;
 }
 
 // =====================================================================================
@@ -138,22 +144,24 @@ float4 PSMainTexSelAlphaDiff(VSOut i) : SV_Target {
 // ★ 顶点仍是 CPU 变换后的屏幕空间三角形（design-notes 的 L3-tl-01）⇒ 这里只有一个直通 VS，
 //   它**多带一套纹理坐标**（uv1 = FVF 的 TEXCOORD1；⛔ 不与 uv0 合并）。
 // ★ 绑定约定 = SDL_GPU 的 DXBC 规则（片元：t/s 在 space2、uniform 在 space3）。
-//   ⚠ 本文件在 mac 上只编 MSL 分支；DXBC 这一支**在 win32 上首次运行时才会被 D3DCompile 编译**
-//     （本轮的读数全部来自 Metal ⇒ DXBC 侧只有"照同一份语义写"的保证，没有运行时读数）。
+//   ⚠ 本文件在 mac 上只编 MSL 分支；DXBC 这一支只在 win32 上被 SDL/D3DCompile 运行期编译。
+//     ⇒ **两份源没有任何编译器强制它们一致**：改一份必须手工同步另一份（逐句）。
+//     ★ 读数面（2026-11-18）：win32 上的真 GPU 像素用例（`d3dx9-effect` 的 fade/blur/snow-pixels、
+//     `d3d9-pipeline-gpu`）走的**就是 DXBC**；MSL 那一支只有 mac 上跑 ctest 才有运行时读数。
 // =====================================================================================
-struct FxVSIn { float3 pos : TEXCOORD0; float4 color : TEXCOORD1; float2 uv0 : TEXCOORD2; float2 uv1 : TEXCOORD3; };
-struct FxVSOut { float4 pos : SV_Position; float4 color : TEXCOORD0; float2 uv0 : TEXCOORD1; float2 uv1 : TEXCOORD2; };
-FxVSOut FxVSMain(FxVSIn i) { FxVSOut o; o.pos = float4(i.pos, 1.0); o.color = i.color; o.uv0 = i.uv0; o.uv1 = i.uv1; return o; }
+struct FxVSIn { float3 pos : TEXCOORD0; float4 color : TEXCOORD1; float2 uv0 : TEXCOORD2; float2 uv1 : TEXCOORD3; float invw : TEXCOORD4; };
+struct FxVSOut { float4 pos : SV_Position; float4 color : TEXCOORD0; float2 uv0 : TEXCOORD1; float2 uv1 : TEXCOORD2; float invw : TEXCOORD3; };
+FxVSOut FxVSMain(FxVSIn i) { FxVSOut o; o.pos = float4(i.pos, 1.0); o.color = i.color; o.uv0 = i.uv0; o.uv1 = i.uv1; o.invw = i.invw; return o; }
 Texture2D g_fx_tex0 : register(t0, space2);
 Texture2D g_fx_tex1 : register(t1, space2);
 SamplerState g_fx_smp0 : register(s0, space2);
 SamplerState g_fx_smp1 : register(s1, space2);
 cbuffer FxConstants : register(b0, space3) { float4 g_fx[2]; };
-// 资源 201 `technique Fade` 的 `compile ps_2_0 FadePS()`（逐句照源文本）
+// 资源 201 `technique Fade` 的 `compile ps_2_0 FadePS()`（逐句照源文本；uv 走 `uv_over_w / invw`）
 float4 PSMainFade(FxVSOut i) : SV_Target {
     float Alpha = g_fx[0].x;
-    float4 c0 = g_fx_tex0.Sample(g_fx_smp0, i.uv0);
-    float4 c1 = g_fx_tex1.Sample(g_fx_smp1, i.uv1);
+    float4 c0 = g_fx_tex0.Sample(g_fx_smp0, i.uv0 / i.invw);
+    float4 c1 = g_fx_tex1.Sample(g_fx_smp1, i.uv1 / i.invw);
     float4 ret = float4(0.0, 0.0, 0.0, 0.0);   // 源文本：float4 ret = 0;
     ret.a = c0.a * (1.0 - Alpha) + c1.a * Alpha;
     float ColRate = clamp(c1.a * Alpha / ret.a, 0.0, 1.0);
@@ -163,7 +171,8 @@ float4 PSMainFade(FxVSOut i) : SV_Target {
 // 资源 200 同一 technique 的 `compile ps_1_0 FadePS()`：逐通道直接 lerp（没有 alpha 归一化）
 float4 PSMainFadeLinear(FxVSOut i) : SV_Target {
     float Alpha = g_fx[0].x;
-    return g_fx_tex0.Sample(g_fx_smp0, i.uv0) * (1.0 - Alpha) + g_fx_tex1.Sample(g_fx_smp1, i.uv1) * Alpha;
+    return g_fx_tex0.Sample(g_fx_smp0, i.uv0 / i.invw) * (1.0 - Alpha) +
+           g_fx_tex1.Sample(g_fx_smp1, i.uv1 / i.invw) * Alpha;
 }
 // 资源 203 `technique SlideBlur` 的 `compile ps_2_0 SlideBlurPS()`（逐句照源文本）
 //   ★ **21 个 tap**：`for( float i = -10.0f; i <= 10.0f; i++ )`（上下界**含**）+ 每 tap `0.0476f`。
@@ -172,6 +181,7 @@ float4 PSMainSlideBlur(FxVSOut i) : SV_Target {
     const float Width = g_fx[0].y;    // float Width;
     const float Height = g_fx[0].z;   // float Height;
     const float Angle = g_fx[0].w;    // float Angle;
+    float2 uv0 = i.uv0 / i.invw;
     float2 tmpUV;
     // 源文本：`sin( radians( Angle ) )` / `cos( radians( Angle ) )`；`radians(x)` = `x * (pi/180)`
     //   ⇒ 两份源都内联同一个常数（Metal 的 metal_stdlib **没有** `radians()`，实测编译报
@@ -184,7 +194,7 @@ float4 PSMainSlideBlur(FxVSOut i) : SV_Target {
         const float fi = (float)tap;
         tmpUV.x = cosT * tLen * fi;
         tmpUV.y = sinT * tLen * fi;
-        retCol += g_fx_tex0.Sample(g_fx_smp0, i.uv0 + tmpUV) * 0.0476;
+        retCol += g_fx_tex0.Sample(g_fx_smp0, uv0 + tmpUV) * 0.0476;
     }
     return retCol;
 }
@@ -197,10 +207,11 @@ float4 PSMainZoomBlur(FxVSOut i) : SV_Target {
     const float Length = g_fx[0].x;
     const float2 center = float2(g_fx[1].x, g_fx[1].y);   // center.x = CenterU; center.y = CenterV;
     float4 retCol = float4(0.0, 0.0, 0.0, 0.0);
-    float2 dir = center - i.uv0;
+    float2 uv0 = i.uv0 / i.invw;
+    float2 dir = center - uv0;
     float2 offset = normalize(dir) * texelSize * Length * length(dir);
     for (int tap = 0; tap < 10; ++tap) {
-        retCol += g_fx_tex0.Sample(g_fx_smp0, i.uv0 + offset * (float)tap) * ratio[tap];
+        retCol += g_fx_tex0.Sample(g_fx_smp0, uv0 + offset * (float)tap) * ratio[tap];
     }
     return retCol;
 }
@@ -209,9 +220,10 @@ float4 PSMainZoomBlur(FxVSOut i) : SV_Target {
 //   ★ `Color` 是 **uniform float4**（`SetVector("Color", …)` 记下的那一份），⛔ 不是顶点色；
 //     `Tex` 1 张 / `uv_set = 0`（`TexSmp` 采 `UV : TEXCOORD0`）。
 //   ★ `Proj`（`float4x4`）**不在这里**：那条 `vs_1_0` 由 CPU 顶点程序兑现（`transformVertexVs10`）。
+//     顶点带的 `invw` 就是 `1/clip.w` ⇒ `uv0 / invw` 是 D3D9 那条透视校正的采样坐标。
 float4 PSMainSnow(FxVSOut i) : SV_Target {
     const float4 Color = g_fx[0];   // float4 Color;（uniform；没 SetVector 过 ⇒ 全 0）
-    return g_fx_tex0.Sample(g_fx_smp0, i.uv0) * Color;
+    return g_fx_tex0.Sample(g_fx_smp0, i.uv0 / i.invw) * Color;
 }
 )";
 constexpr SDL_GPUShaderFormat kShaderFormat = SDL_GPU_SHADERFORMAT_DXBC;
@@ -221,6 +233,10 @@ constexpr const char* kShaderFormatName = "DXBC";
 // · 顶点属性走 [[stage_in]]（location 与 pipeline 的 vertex attributes 对齐）；
 // · 片段插值走 [[user(locnN)]]（与 HLSL 的 TEXCOORD0/1 对齐）；
 // · 纹理/采样器 = [[texture(0)]] / [[sampler(0)]]（SDL 的 MSL 绑定约定）。
+// ★★ 透视校正（`REQ-01M7NC21S484PFYDAE7YTNX02J`，B 单）—— **与上面的 DXBC 源逐句一致**：
+//   顶点属性里的 color / uv 是**已乘过 1/w** 的值，外加**逐顶点** `invw`（attribute 3；effect 批
+//   是 attribute 4）；VS 原样交给光栅器，PS 里 `attr / invw` 把透视校正还原回来。
+//   `w == 1` 的批（固定功能 / XYZRHW / sprite）`invw == 1` ⇒ 除法恒等 ⇒ 逐像素与旧实现相同。
 const char* kShaderSource = R"MSL(
 #include <metal_stdlib>
 using namespace metal;
@@ -229,12 +245,14 @@ struct VSIn {
     float3 pos [[attribute(0)]];
     float4 color [[attribute(1)]];
     float2 uv [[attribute(2)]];
+    float invw [[attribute(3)]];
 };
 
 struct VSOut {
     float4 pos [[position]];
     float4 color [[user(locn0)]];
     float2 uv [[user(locn1)]];
+    float invw [[user(locn2)]];
 };
 
 vertex VSOut VSMain(VSIn in [[stage_in]]) {
@@ -242,35 +260,37 @@ vertex VSOut VSMain(VSIn in [[stage_in]]) {
     out.pos = float4(in.pos, 1.0);
     out.color = in.color;
     out.uv = in.uv;
+    out.invw = in.invw;
     return out;
 }
 
 struct FSIn {
     float4 color [[user(locn0)]];
     float2 uv [[user(locn1)]];
+    float invw [[user(locn2)]];
 };
 
 fragment float4 PSMain(FSIn in [[stage_in]]) {
-    return in.color;
+    return in.color / in.invw;
 }
 
 fragment float4 PSMainTex(FSIn in [[stage_in]],
                           texture2d<float> tex [[texture(0)]],
                           sampler samp [[sampler(0)]]) {
-    return tex.sample(samp, in.uv) * in.color;
+    return tex.sample(samp, in.uv / in.invw) * (in.color / in.invw);
 }
 
 fragment float4 PSMainTexSelect(FSIn in [[stage_in]],
                                 texture2d<float> tex [[texture(0)]],
                                 sampler samp [[sampler(0)]]) {
-    return tex.sample(samp, in.uv);
+    return tex.sample(samp, in.uv / in.invw);
 }
 
 fragment float4 PSMainTexModAlphaTex(FSIn in [[stage_in]],
                                      texture2d<float> tex [[texture(0)]],
                                      sampler samp [[sampler(0)]]) {
-    float4 t = tex.sample(samp, in.uv);
-    float4 c = t * in.color;
+    float4 t = tex.sample(samp, in.uv / in.invw);
+    float4 c = t * (in.color / in.invw);
     c.a = t.a;
     return c;
 }
@@ -278,27 +298,27 @@ fragment float4 PSMainTexModAlphaTex(FSIn in [[stage_in]],
 fragment float4 PSMainTexSelAlphaMod(FSIn in [[stage_in]],
                                      texture2d<float> tex [[texture(0)]],
                                      sampler samp [[sampler(0)]]) {
-    float4 t = tex.sample(samp, in.uv);
+    float4 t = tex.sample(samp, in.uv / in.invw);
     float4 c = t;
-    c.a = t.a * in.color.a;
+    c.a = t.a * (in.color.a / in.invw);
     return c;
 }
 
 fragment float4 PSMainTexModAlphaDiff(FSIn in [[stage_in]],
                                       texture2d<float> tex [[texture(0)]],
                                       sampler samp [[sampler(0)]]) {
-    float4 t = tex.sample(samp, in.uv);
-    float4 c = t * in.color;
-    c.a = in.color.a;
+    float4 t = tex.sample(samp, in.uv / in.invw);
+    float4 c = t * (in.color / in.invw);
+    c.a = in.color.a / in.invw;
     return c;
 }
 
 fragment float4 PSMainTexSelAlphaDiff(FSIn in [[stage_in]],
                                       texture2d<float> tex [[texture(0)]],
                                       sampler samp [[sampler(0)]]) {
-    float4 t = tex.sample(samp, in.uv);
+    float4 t = tex.sample(samp, in.uv / in.invw);
     float4 c = t;
-    c.a = in.color.a;
+    c.a = in.color.a / in.invw;
     return c;
 }
 
@@ -312,12 +332,14 @@ struct FxVSIn {
     float4 color [[attribute(1)]];
     float2 uv0 [[attribute(2)]];
     float2 uv1 [[attribute(3)]];
+    float invw [[attribute(4)]];
 };
 struct FxVSOut {
     float4 pos [[position]];
     float4 color [[user(locn0)]];
     float2 uv0 [[user(locn1)]];
     float2 uv1 [[user(locn2)]];
+    float invw [[user(locn3)]];
 };
 vertex FxVSOut FxVSMain(FxVSIn in [[stage_in]]) {
     FxVSOut out;
@@ -325,6 +347,7 @@ vertex FxVSOut FxVSMain(FxVSIn in [[stage_in]]) {
     out.color = in.color;
     out.uv0 = in.uv0;
     out.uv1 = in.uv1;
+    out.invw = in.invw;
     return out;
 }
 struct FxUniforms { float4 c[2]; };
@@ -332,8 +355,9 @@ struct FxFSIn {
     float4 color [[user(locn0)]];
     float2 uv0 [[user(locn1)]];
     float2 uv1 [[user(locn2)]];
+    float invw [[user(locn3)]];
 };
-// 资源 201 `technique Fade` 的 `compile ps_2_0 FadePS()`（逐句照源文本）
+// 资源 201 `technique Fade` 的 `compile ps_2_0 FadePS()`（逐句照源文本；uv 走 `uv_over_w / invw`）
 fragment float4 PSMainFade(FxFSIn in [[stage_in]],
                            texture2d<float> tex0 [[texture(0)]],
                            sampler smp0 [[sampler(0)]],
@@ -341,8 +365,8 @@ fragment float4 PSMainFade(FxFSIn in [[stage_in]],
                            sampler smp1 [[sampler(1)]],
                            constant FxUniforms& u [[buffer(0)]]) {
     const float Alpha = u.c[0].x;
-    float4 c0 = tex0.sample(smp0, in.uv0);
-    float4 c1 = tex1.sample(smp1, in.uv1);
+    float4 c0 = tex0.sample(smp0, in.uv0 / in.invw);
+    float4 c1 = tex1.sample(smp1, in.uv1 / in.invw);
     float4 ret = float4(0.0, 0.0, 0.0, 0.0);   // 源文本：float4 ret = 0;
     ret.a = c0.a * (1.0 - Alpha) + c1.a * Alpha;
     float ColRate = clamp(c1.a * Alpha / ret.a, 0.0, 1.0);
@@ -357,7 +381,8 @@ fragment float4 PSMainFadeLinear(FxFSIn in [[stage_in]],
                                  sampler smp1 [[sampler(1)]],
                                  constant FxUniforms& u [[buffer(0)]]) {
     const float Alpha = u.c[0].x;
-    return tex0.sample(smp0, in.uv0) * (1.0 - Alpha) + tex1.sample(smp1, in.uv1) * Alpha;
+    return tex0.sample(smp0, in.uv0 / in.invw) * (1.0 - Alpha) +
+           tex1.sample(smp1, in.uv1 / in.invw) * Alpha;
 }
 // 资源 203 `technique SlideBlur` 的 `compile ps_2_0 SlideBlurPS()`（逐句照源文本）
 //   ★ **21 个 tap**：`for( float i = -10.0f; i <= 10.0f; i++ )`（上下界**含**）+ 每 tap `0.0476f`。
@@ -370,6 +395,7 @@ fragment float4 PSMainSlideBlur(FxFSIn in [[stage_in]],
     const float Width = u.c[0].y;    // float Width;
     const float Height = u.c[0].z;   // float Height;
     const float Angle = u.c[0].w;    // float Angle;
+    float2 uv0 = in.uv0 / in.invw;
     float2 tmpUV;
     // 源文本：`sin( radians( Angle ) )` / `cos( radians( Angle ) )`；`radians(x)` = `x * (pi/180)`
     //   ⇒ 两份源都内联同一个常数（Metal 的 metal_stdlib **没有** `radians()`，实测编译报
@@ -382,7 +408,7 @@ fragment float4 PSMainSlideBlur(FxFSIn in [[stage_in]],
         const float fi = float(tap);
         tmpUV.x = cosT * tLen * fi;
         tmpUV.y = sinT * tLen * fi;
-        retCol += tex0.sample(smp0, in.uv0 + tmpUV) * 0.0476;
+        retCol += tex0.sample(smp0, uv0 + tmpUV) * 0.0476;
     }
     return retCol;
 }
@@ -398,10 +424,11 @@ fragment float4 PSMainZoomBlur(FxFSIn in [[stage_in]],
     const float Length = u.c[0].x;
     const float2 center = float2(u.c[1].x, u.c[1].y);     // center.x = CenterU; center.y = CenterV;
     float4 retCol = float4(0.0, 0.0, 0.0, 0.0);
-    float2 dir = center - in.uv0;
+    float2 uv0 = in.uv0 / in.invw;
+    float2 dir = center - uv0;
     float2 offset = normalize(dir) * texelSize * Length * length(dir);
     for (int tap = 0; tap < 10; ++tap) {
-        retCol += tex0.sample(smp0, in.uv0 + offset * float(tap)) * ratio[tap];
+        retCol += tex0.sample(smp0, uv0 + offset * float(tap)) * ratio[tap];
     }
     return retCol;
 }
@@ -414,7 +441,7 @@ fragment float4 PSMainSnow(FxFSIn in [[stage_in]],
                            sampler smp0 [[sampler(0)]],
                            constant FxUniforms& u [[buffer(0)]]) {
     const float4 Color = u.c[0];   // float4 Color;（uniform；没 SetVector 过 ⇒ 全 0）
-    return tex0.sample(smp0, in.uv0) * Color;
+    return tex0.sample(smp0, in.uv0 / in.invw) * Color;
 }
 )MSL";
 constexpr SDL_GPUShaderFormat kShaderFormat = SDL_GPU_SHADERFORMAT_MSL;
@@ -882,7 +909,7 @@ public:
         draw.pipeline = pipelineFor(state, draw.textured, err);
         if (draw.pipeline == nullptr) return false;
         // 顶点缓冲在入队时就长够（flush 里不再创建 GPU 缓冲）。★ 按**字节**记账：
-        // effect draw 的顶点是 `FxVertex`（44 B），与固定功能的 `Vertex`（36 B）混在一条缓冲里。
+        // effect draw 的顶点是 `FxVertex`（48 B），与固定功能的 `Vertex`（40 B）混在一条缓冲里。
         const std::uint64_t need_bytes = static_cast<std::uint64_t>(queued_vertex_bytes_) +
                                          static_cast<std::uint64_t>(count) * sizeof(Vertex);
         if (need_bytes > 0xFFFFFFFFull) {
@@ -946,9 +973,14 @@ public:
                                  ff_probe_keys_.end();
             int px = 0;
             int py = 0;
+            // ★ 探针要的是**真正的** uv（`u/w ÷ 1/w`）：`GpuRasterVertex::u/v` 是 `u/w`，
+            //   `w != 1` 时直接拿它选 texel 会选到别处（诊断读数骗人）。取不到 ⇒ 退回原值。
+            float probe_u = draw.vertices[0].u;
+            float probe_v = draw.vertices[0].v;
+            (void)gpuVertexUv(draw.vertices[0], &probe_u, &probe_v);
             if (ff_probe_keys_.size() < kFfProbeMax && ff_probe_round_ < kFfProbeRounds &&
                 gpuFfTexProbeWanted(ffTexProbeEnv(), already, draw.batch_tag, true) && !draw.vertices.empty() &&
-                gpuFfTexProbeTexel(draw.vertices[0].u, draw.vertices[0].v, tex_w, tex_h, &px, &py)) {
+                gpuFfTexProbeTexel(probe_u, probe_v, tex_w, tex_h, &px, &py)) {
                 ff_probe_keys_.push_back(key);
                 draw.probe.armed = true;
                 draw.probe.x = px;
@@ -999,7 +1031,7 @@ public:
                              tex_w, tex_h, draw.probe.generation, draw.probe.recorded, draw.probe.upload_blocks,
                              static_cast<double>(v0.x), static_cast<double>(v0.y), static_cast<double>(v0.z),
                              static_cast<double>(nx), static_cast<double>(ny), static_cast<double>(v0.z),
-                             static_cast<double>(v0.u), static_cast<double>(v0.v), static_cast<double>(zmin),
+                             static_cast<double>(probe_u), static_cast<double>(probe_v), static_cast<double>(zmin),
                              static_cast<double>(zmax), draw.vertex_offset, count, width_, height_,
                              draw.state.viewport_x, draw.state.viewport_y, draw.state.viewport_w,
                              draw.state.viewport_h, draw.state.scissor_x0, draw.state.scissor_y0,
@@ -1177,6 +1209,8 @@ public:
                         //   这里只是把值搬过去；缺失 ⇒ 0（不会发生，入队处拒绝）。
                         dst->u1 = have_uv1 ? d.fx_uv1[vi * 2u] : 0.0f;
                         dst->v1 = have_uv1 ? d.fx_uv1[vi * 2u + 1u] : 0.0f;
+                        // ★ 逐顶点 `1/w`（透视校正）：片元里 `uv_over_w / invw` / `color / invw`。
+                        dst->invw = v.invw;
                         ++dst;
                     }
                     continue;
@@ -1192,6 +1226,8 @@ public:
                     dst->a = v.a;
                     dst->u = v.u;
                     dst->v = v.v;
+                    // ★ 逐顶点 `1/w`（透视校正）：片元里 `uv_over_w / invw` / `color / invw`。
+                    dst->invw = v.invw;
                     ++dst;
                 }
             }
@@ -2107,20 +2143,22 @@ private:
 
     struct Vertex {
         float x, y, z;
-        float r, g, b, a;
-        float u, v;
+        float r, g, b, a;   // diffuse / w
+        float u, v;         // texcoord / w
+        float invw;         // 1/w（逐顶点；片元里除回来做透视校正）
     };
-    static_assert(sizeof(Vertex) == 36, "vertex stride");
+    static_assert(sizeof(Vertex) == 40, "vertex stride");
 
     // ★ effect draw 的顶点：与上面同一份屏幕空间数据 + **第二套纹理坐标**（FVF 的 TEXCOORD1）。
     //   两条流共用一个 GPU 顶点缓冲（按字节偏移排），但 pipeline 的 stride / 属性表各自声明。
     struct FxVertex {
         float x, y, z;
-        float r, g, b, a;
-        float u0, v0;
-        float u1, v1;
+        float r, g, b, a;   // diffuse / w
+        float u0, v0;       // TEXCOORD0 / w
+        float u1, v1;       // TEXCOORD1 / w
+        float invw;         // 1/w（逐顶点）
     };
-    static_assert(sizeof(FxVertex) == 44, "effect vertex stride");
+    static_assert(sizeof(FxVertex) == 48, "effect vertex stride");
 
     struct TextureEntry {
         SDL_GPUTexture* texture = nullptr;
@@ -2698,7 +2736,7 @@ private:
         const std::uint64_t key = pipelineKey(state, textured);
         auto it = pipelines_.find(key);
         if (it != pipelines_.end()) return it->second;
-        SDL_GPUVertexAttribute attrs[3]{};
+        SDL_GPUVertexAttribute attrs[4]{};
         attrs[0].location = 0;
         attrs[0].buffer_slot = 0;
         attrs[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3;
@@ -2711,9 +2749,14 @@ private:
         attrs[2].buffer_slot = 0;
         attrs[2].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
         attrs[2].offset = sizeof(float) * 7;
+        // 3 = `invw`（逐顶点 1/w；MSL 的 [[attribute(3)]] / DXBC 的 TEXCOORD3）
+        attrs[3].location = 3;
+        attrs[3].buffer_slot = 0;
+        attrs[3].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT;
+        attrs[3].offset = sizeof(float) * 9;
         SDL_GPUShader* ps = textured ? texShaderFor(state.tex_mode) : pixel_shader_;
         SDL_GPUGraphicsPipeline* p =
-            buildPipeline(vertex_shader_, ps, attrs, 3, sizeof(Vertex), state, "纹理片元置换", err);
+            buildPipeline(vertex_shader_, ps, attrs, 4, sizeof(Vertex), state, "纹理片元置换", err);
         if (p == nullptr) return nullptr;
         pipelines_[key] = p;
         return p;
@@ -2735,7 +2778,7 @@ private:
             if (err) *err = "SDL_GPU：未知的 effect 程序";
             return nullptr;
         }
-        SDL_GPUVertexAttribute attrs[4]{};
+        SDL_GPUVertexAttribute attrs[5]{};
         attrs[0].location = 0;
         attrs[0].buffer_slot = 0;
         attrs[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3;
@@ -2752,7 +2795,12 @@ private:
         attrs[3].buffer_slot = 0;
         attrs[3].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
         attrs[3].offset = sizeof(float) * 9;
-        SDL_GPUGraphicsPipeline* p = buildPipeline(fx_vertex_shader_, fx_pixel_shaders_[index], attrs, 4,
+        // 4 = `invw`（逐顶点 1/w；MSL 的 [[attribute(4)]] / DXBC 的 TEXCOORD4）
+        attrs[4].location = 4;
+        attrs[4].buffer_slot = 0;
+        attrs[4].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT;
+        attrs[4].offset = sizeof(float) * 11;
+        SDL_GPUGraphicsPipeline* p = buildPipeline(fx_vertex_shader_, fx_pixel_shaders_[index], attrs, 5,
                                                    sizeof(FxVertex), state, "effect", err);
         if (p == nullptr) return nullptr;
         fx_pipelines_[key] = p;

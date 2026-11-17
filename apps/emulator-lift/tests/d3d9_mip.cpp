@@ -210,7 +210,7 @@ void caseRightBatchTriangleLod() {
     const double v0 = 0.3513;
     const double vx[3] = {1060.0, 1260.0, 1060.0};
     const double vy[3] = {40.0, 40.0, 680.0};
-    const double invw1[3] = {1.0, 1.0, 1.0};  // XYZRHW 批（`gpu_invw_ok` 放行的那种）
+    const double invw1[3] = {1.0, 1.0, 1.0};  // XYZRHW 批（`w == 1`，透视校正是恒等）
     const double uw[3] = {u0, u0 + 200.0 / tex, u0};             // 200 texel / 200 px = 1.0
     const double vw[3] = {v0, v0, v0 + 1818.0 / tex};            // 1818 texel / 640 px = 2.84
     double dux = 0.0, dvx = 0.0, duy = 0.0, dvy = 0.0;

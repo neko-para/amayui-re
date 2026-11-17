@@ -209,7 +209,12 @@ enum UnsupportedBit : std::uint32_t {
     //   ★ **22 是空号**：它原来的语义（`MIPFILTER=NONE` + 缩小采样 ⇒ 拒绝该批）已由**真实现**
     //     取代（per-sampler `max_lod = 0.49`，见 `d3d9_gpu.cpp` 的 `kNoMipMaxLod`）⇒ 该拒绝不复存在，位删除。
     //     ⛔ 不要把 22 复用给别的语义（那会让历史读数产生歧义）。
-    kUnGpuPerspective = 21,    // 顶点 invw!=1：GPU 的屏幕空间插值不能等价透视校正
+    // ★ 21（`REQ-01M7NC21S484PFYDAE7YTNX02J`，B 单）：**语义收窄**，号不变。
+    //   · 以前 = "顶点 `invw != 1`" ⇒ 整批拒。那条闸已拆：GPU 顶点现在带**逐顶点 `1/w`**，
+    //     片元里 `attr = attr/w ÷ (1/w)` 做透视校正 ⇒ 常规透视批（202 的 `Proj`）**必须**照画。
+    //   · 现在 = "顶点 `w` **不可表示**"（`w <= 0` / 非有限 ⇒ `1/w` 无意义）：这才是真正表达不了的一类。
+    //     ⛔ 不要退回"凡 w≠1 就拒"（那正是本单拆掉的闸）；⛔ 也不要把它复用给别的语义。
+    kUnGpuVertexW = 21,        // 顶点 w<=0 / 非有限（1/w 无意义）⇒ 拒绝该批
     kUnGpuBackendFailure = 23, // GPU 后端绘制失败（⛔ 不再 CPU 重放该批）
     kUnTextureOpLevel = 24,
     kUnAlphaOpLevel = 25,
@@ -627,13 +632,14 @@ void recordUnsupported(X86& cpu, std::uint32_t pe, UnsupportedBit bit, const cha
 //
 // `skipped` 的**唯一**入口：一批 GPU 真的**没画**（准入拒绝 / 准入后拒绝 / 后端失败）。
 // ★ 这是 draw 路径上**唯一**的"未画"信号（⛔ 不合流成一个数）。
-//   提前返回的批（`invw!=1` / MIP 缩小 / 后端失败 / 带纹理点线）同样一像素都不写
+//   提前返回的批（`w` 不可表示 / MIP 缩小 / 后端失败 / 带纹理点线）同样一像素都不写
 //   ⇒ 以前它们连账都没有（设计 §A.3 的盲区），现在一定有 `skipped`。
 // ★ "打通 recordUnsupported" = 同一份位图 + 同一套去重（同一位只在第一次出声）：
 //   这里不另外维护日志键，直接复用 `recordUnsupported` 的 `bit_new` 判据。
 // ★ 计数点：`submitPrimitives` 的**主路径在函数末尾**统一记（与 `draw_calls` 同一处判据）；
-//   `admitLinePointDraw` / `invw` / MIP 这三条**早退**路径赶不到函数末尾 ⇒ 在各自的
+//   `admitLinePointDraw` / `w 不可表示` / MIP 这三条**早退**路径赶不到函数末尾 ⇒ 在各自的
 //   `return false` 之前补一次（否则它们又回到无账状态）。
+//   ★ `w != 1` 的透视批**不再**是早退路径（B 单：片元里做透视校正）⇒ 它们走末尾那条统一记账。
 // =====================================================================================
 void noteGpuSkip(X86& cpu, std::uint32_t pe, const std::string& reason, UnsupportedBit bit) {
     ++g_gpu_coverage.skipped_draws;
@@ -663,7 +669,7 @@ const char* unsupportedBitName(std::uint32_t bit) {
     if (bit == kUnClippingDisabled) return "CLIPPING=0";
     if (bit == kUnPointSize) return "POINTSIZE";
     if (bit == kUnLastPixel) return "LASTPIXEL=0";
-    if (bit == kUnGpuPerspective) return "invw!=1";
+    if (bit == kUnGpuVertexW) return "顶点 w 不可表示";
     if (bit == kUnGpuBackendFailure) return "GPU 后端失败";
     if (bit == kUnTextureOpLevel) return "纹理级 OP";
     if (bit == kUnAlphaOpLevel) return "纹理级 ALPHAOP";
@@ -1540,8 +1546,9 @@ bool clipPointVertex(const DrawContext& ctx, const CVertex& v) {
 // =====================================================================================
 // CPU `vs_1_0`（资源 202 的 `SnowVS`）的单顶点变换 —— **公开纯函数**（见 `d3d9_pipeline.h`）
 // =====================================================================================
-// ★ 为什么定义在匿名命名空间**外面**：① 它是头文件里的公开纯函数（用例直接打它，因为 `w != 1` 的批
-//   会被 GPU 准入的 `kUnGpuPerspective` 整批拒 ⇒ 管线级观测不到"`w` 没被除"——那是本单最容易写错的一处）；
+// ★ 为什么定义在匿名命名空间**外面**：① 它是头文件里的公开纯函数（用例直接打它 —— 管线级的
+//   `snow-vertices` 只能观测"两条路交出同一批顶点"，而"`w` 没被除 / 没乘错矩阵"这类**逐句**性质
+//   需要一个不依赖光栅的入口）；
 //   ② 管线里**唯一**的调用者是 `transformVertexVs10`（`gatherVertices` / `transformVertexOnce`
 //   两个变换实现点都经它）⇒ 没有第二份算式。
 math::Vec4d clipVs10(const float proj16[16], double x, double y, double z) {
@@ -4619,7 +4626,7 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
     gpu_vertices.clear();
     gpu_uv1.clear();
     saved_tris.clear();
-    bool gpu_invw_ok = true;
+    bool gpu_w_bad = false;
     g_gpu_alpha_agg = AlphaAgg{};
     g_alpha_agg_from_gpu = false;
     // ★ 准入已通过 ⇒ 后端一定非空（`gpuEligible` 的第一条拒批就是 `ctx.gpu == nullptr`）。
@@ -4651,11 +4658,13 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
                 return;
             }
         }
-        // SVertex 的颜色/uv 已经乘过 invw；GPU 的顶点着色器输出 w=1 ⇒ 屏幕空间线性插值，
-        // 只有 invw==1 才与 D3D9 的透视校正等价。
-        if (std::fabs(a.invw - 1.0) > 1e-9 || std::fabs(b.invw - 1.0) > 1e-9 ||
-            std::fabs(c.invw - 1.0) > 1e-9) {
-            gpu_invw_ok = false;
+        // ★ 透视校正（`REQ-01M7NC21S484PFYDAE7YTNX02J`，B 单）：`SVertex` 的颜色/uv 已经乘过
+        //   `invw`（`toScreen`），GPU 顶点再带一份**逐顶点 `invw`** ⇒ 片元里 `attr = attr/w ÷ (1/w)`
+        //   把透视校正还原回来。⛔ 不再因为 `invw != 1` 拒批（202 的透视 `Proj` 就是这种批）。
+        //   这里只挑"**不可表示**"的顶点：`w <= 0` / 非有限 ⇔ `invw <= 0` / 非有限（`1/w` 无意义）。
+        if (!(finite(a.invw) && a.invw > 0.0) || !(finite(b.invw) && b.invw > 0.0) ||
+            !(finite(c.invw) && c.invw > 0.0)) {
+            gpu_w_bad = true;
         }
         saved_tris.push_back({a, b, c});
         const auto add = [&](const SVertex& v) {
@@ -4676,6 +4685,8 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
             }
             g.u = static_cast<float>(v.u[gpu_tex_coord]);
             g.v = static_cast<float>(v.v[gpu_tex_coord]);
+            // ★ 逐顶点 `1/w`：片元着色器用它把 `uv/w` / `color/w` 除回**透视校正**后的值。
+            g.invw = static_cast<float>(v.invw);
             gpu_vertices.push_back(g);
             if (plan.effect) {
                 const std::uint32_t uv1 = plan.effect_uv1_set < kMaxTexCoords ? plan.effect_uv1_set : 1u;
@@ -4855,22 +4866,21 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
     //   且不把缩小的 MAG 选中 —— 为什么不是 0 见 `d3d9_gpu.cpp` 的 `kNoMipMaxLod`）。
     //   `gpuEligible` 已把 `mip_filter != NONE` 写进 `plan.texture.sampler.mipmap`，
     //   后端按缓存键建**第二个** sampler ⇒ 这一批照画（`REQ-01M7AZ68J05PMVWVY7A589TQ6Y`）。
-    if (!gpu_invw_ok) {
-        // ★ 这条**不回退 CPU 重放**（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：
-        //   invw != 1：屏幕空间插值会与透视校正产生像素差（要补就得给着色器加 W 插值，
-        //   那是另一条单的活；本线**不做近似的透视校正**）。
-        //   按裁决做**显式拒绝 + 具名记账**：本批不进画面（`D3DERR_INVALIDCALL`），但
-        //   `unsupported` 位、默认级别的 warn 都留得下痕迹。⛔ 不许"删完静默不画"。
-        const UnsupportedBit bit = kUnGpuPerspective;
+    if (gpu_w_bad) {
+        // ★ 这条**不回退 CPU 重放**（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`），也⛔ 不是旧的
+        //   "凡 invw!=1 就拒"（B 单已拆掉那条闸：透视批现在由片元的 `attr/w ÷ (1/w)` 正确表达）。
+        //   这里只剩**真正不可表示**的一类：`w <= 0` / 非有限 ⇒ `1/w` 无意义（D3D9 的合法
+        //   clip 空间要求 `w > 0`；负=`rhw<0` 这类坏输入）。按裁决做显式拒绝 + 具名记账：
+        //   本批不进画面（`D3DERR_INVALIDCALL`），但 `unsupported` 位、默认级别的 warn 都留得下痕迹。
+        const UnsupportedBit bit = kUnGpuVertexW;
         char buf[320];
         std::snprintf(buf, sizeof(buf),
-                      "顶点 invw!=1（GPU 的屏幕空间插值不能等价替代透视校正）⇒ 拒绝该批");
-        recordUnsupported(cpu, pe, bit, buf, 0u);
+                      "顶点 w 不可表示（w<=0 / 非有限 ⇒ 1/w 无意义）⇒ 拒绝该批");
         pipeWarn(PipeWarnCategory::Other, "GPU 光栅化", "%s", buf);
         if (why) *why = buf;
         gpu_vertices.clear();
-        // ★ 本单：这条早退**必须**补上 `skipped` —— 它一个像素都不写，不补就完全没有账
-        //   （设计 §A.3 的盲区）。计数放这里而不是函数末尾，是因为这里直接 return（拿不到末尾块）。
+        // ★ 这条早退**必须**补上 `skipped` —— 它一个像素都不写，不补就完全没有账（设计 §A.3 的盲区）。
+        //   计数放这里而不是函数末尾，是因为这里直接 return（拿不到末尾块）。
         noteGpuSkip(cpu, pe, buf, bit);
         return false;
     } else {
@@ -4990,8 +5000,9 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
                 noteCoverageEmpty();
             }
         } else {
-            // 这一批 GPU **没画**：早退的那几类（准入拒绝 / `invw!=1` / MIP 缩小）都已经在自己那里记过
+            // 这一批 GPU **没画**：早退的那几类（准入拒绝 / `w` 不可表示 / MIP 缩小）都已经在自己那里记过
             // `skipped`，走到这里的只有"准入通过、后端绘制/入队失败"（`gpu_failed`，上面已记 bit23）。
+            // ★ 透视批（`w != 1`）**不**在这里（B 单）：它是准入通过、真的入队的那一类。
             const std::string skip_why = gpu_failed ? backend_failure_reason
                                                     : (gpu_why.empty() ? std::string("GPU 不可用（原因未登记）")
                                                                        : gpu_why);
