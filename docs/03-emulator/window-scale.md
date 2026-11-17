@@ -14,6 +14,10 @@
 | 任意 `--scale` + `--present headless` | 隐藏离屏窗口仍 `1280×720` | `1280×720` | **不生效**（接受 + readout 明说） |
 
 - **缺省 1.0 = 改动前的逐字节行为**：`SDL_CreateWindow(title, 1280, 720, …)` 的实参不变。
+- ★ **范围裁决（2026-11-18，用户口径）：`--scale` 只改窗口，不改帧。**
+  guest 画面恒为 1280×720；窗口比画面大时画面是**放大**出来的，**模糊可接受**（真机也没做特殊处理，
+  同样糊）。⇒ ⛔ 不做高分辨率重渲染 / ⛔ 不改帧尺寸 / ⛔ 不加额外 upscale pass。
+  `auto` 也只决定窗口倍率，不改变帧尺寸。
 - 缩放只改**宿主窗口大小**，⛔ 不改 guest 可见的任何东西（后缓冲、D3D9 模式、`GetClientRect` 的
   虚拟屏仍是 1280×720）。
 - 公式 / 校验 / readout 文案的**唯一一份**在 `apps/emulator-lift/src/runtime/window_scale.h`
@@ -40,13 +44,16 @@
 格式串只有一份（`window_scale.h::scaleReadoutLine`）：
 
 ```
-scale: 1.5（window 1920x1080，image 1280x720）
+scale: 1.5（window 1920x1080，image 1280x720；放大，接受模糊）
 scale: 1.0（window 1280x720，image 1280x720）
-scale: 1.5（window 1920x1080，image 1280x720；auto ← display content scale 1.5）
+scale: 0.5（window 640x360，image 1280x720；缩小）
+scale: 1.5（window 1920x1080，image 1280x720；放大，接受模糊；auto ← display content scale 1.5）
 scale: 1.0（window 1280x720，image 1280x720；auto 取不到 display content scale（SDL 返回 0.0）⇒ 回 1.0）
 scale: 1.5（--present headless ⇒ 无窗口可施，不生效；image 1280x720）
 ```
 
+- `image` 恒为被呈现的那一帧（**1280×720**）—— 这一格就是"只改窗口、不改帧"的读数：
+  窗口比它大时同一行带 `放大，接受模糊`（s<1 则 `缩小`，恰好 1.0 不带这一句）。
 - `window` 是**建完窗口之后** `SDL_GetWindowSize` 回读的客户区尺寸（⛔ 不是把请求值抄回来）。
 - 只在启动打一次；`AGENTS.md` §12.8 第 3 条：一次性输出（启动 readout）⛔ 不许收。
 
@@ -73,9 +80,9 @@ ctest --test-dir out -R "cursor-warp|window-scale|cli-aot-flags|lift-control-end
 
 | 命令里的 `--scale` / 档位 | 启动 readout 那一行 |
 |---|---|
-| `--present window --scale 1.5` | `scale: 1.5（window 1920x1080，image 1280x720）` |
-| `--present window --scale 1.25` | `scale: 1.25（window 1600x900，image 1280x720）` |
-| `--present window --scale auto`（本机显示缩放 150%） | `scale: 1.5（window 1920x1080，image 1280x720；auto ← display content scale 1.5）` |
+| `--present window --scale 1.5` | `scale: 1.5（window 1920x1080，image 1280x720；放大，接受模糊）` |
+| `--present window --scale 1.25` | `scale: 1.25（window 1600x900，image 1280x720；放大，接受模糊）` |
+| `--present window --scale auto`（本机显示缩放 150%） | `scale: 1.5（window 1920x1080，image 1280x720；放大，接受模糊；auto ← display content scale 1.5）` |
 | `--present window`（缺省） | `scale: 1.0（window 1280x720，image 1280x720）` |
 | `--present headless --scale 1.5` | `scale: 1.5（--present headless ⇒ 无窗口可施，不生效；image 1280x720）` |
 
