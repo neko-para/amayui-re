@@ -2,8 +2,9 @@
 
 - id: REQ-01M7MXHYR1M72JW77J136GT3ZG
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M7MNPGETP2CQJ3ACMCGEHKF5
+- verify: apps/emulator-lift/tests/d3dx9_effect.cpp#d3dx9-effect/caps-programs-guard
 - tags: [emulator-lift, d3d9, caps]
 
 ## 一句话
