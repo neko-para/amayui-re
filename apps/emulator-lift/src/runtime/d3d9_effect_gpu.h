@@ -33,6 +33,9 @@ namespace lift {
 //     （**21 个 tap**：源文本 `for( float i = -10.0f; i <= 10.0f; i++ )`，每 tap 权重 `0.0476f`）
 //   · `ZoomBlurPs20` = 资源 203 `technique ZoomBlur` 的 `compile ps_2_0 ZoomBlurPS()`
 //     （**10 个 tap**：`for( float i = 0.0f; i < 10.0f; i++ )`，权重是文本里的 `ratio[10]` 表）
+//   · `SnowPs10` = 资源 202 `technique Snow` 的 `compile ps_1_0 SnowPS()`
+//     （`return tex2D(TexSmp, UV) * Color;`；`Color` 是 **uniform float4**，⛔ 不是顶点色；
+//     同 pass 的 `vs_1_0` 由 **CPU** 顶点程序兑现 —— 后端仍然只收屏幕空间三角形）
 //   ★ "10-tap" 只属于 ZoomBlur —— SlideBlur 的循环上下界是 **-10..+10（含）⇒ 21 个 tap**。
 //     ⛔ 不要按"两个都是 10 tap"写（那是把 P3 任务描述当源文本用；源文本是唯一真源）。
 enum class GpuEffectProgram : std::uint8_t {
@@ -40,12 +43,15 @@ enum class GpuEffectProgram : std::uint8_t {
     FadePs10 = 1,
     SlideBlurPs20 = 2,
     ZoomBlurPs20 = 3,
+    SnowPs10 = 4,
 };
 
 // 常量表容量：一张 32 B 的 uniform（= 2 × float4）。
 //   · Fade 只用 [0]（Alpha）；
 //   · 203 用满 [0..5]：`Length / Width / Height / Angle / CenterU / CenterV`
 //     （按 FX 源文本的**声明顺序** ⇒ `c[0] = (Length, Width, Height, Angle)`、`c[1] = (CenterU, CenterV, 0, 0)`）。
+//   · 202 只用 [0..3]（`float4 Color` ⇒ 4 个 float；`Proj` 是 `float4x4`，在 CPU 顶点程序里用掉，
+//     ⛔ **不进 uniform** —— push constant 只有 32 B）。
 // ⛔ 上限写死是因为后端 push constant 的大小必须是常量。
 constexpr std::uint32_t kGpuEffectMaxConstants = 8;
 constexpr std::uint32_t kGpuEffectMaxTextures = 2;

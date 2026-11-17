@@ -23,6 +23,9 @@
 //      ★ 这是 P1 用例 `d3dx9-effect/effect-draw-refused` 的**翻面**（那条"必须拒绝"的断言已删）。
 //   ⑦ `d3dx9-effect/effect-draw-unimplemented`：**202 的 Snow**（`vs_1_0`，本线不做 GPU 顶点着色）
 //      **仍然具名拒绝**（bit 44 + 原因串含 id/technique/pass）—— 翻面没有把"没实现的"变成"静默接受"。
+//      ★ A 单（`REQ-01M7NAW2QT3TG9RCFMKR052C83`）把这条**整条翻面**：202 真的画 ⇒ 用例改名为
+//      `effect-draw-snow-recorded`（见 ⑪），"没实现的 program 仍具名拒绝"改由一条自造 `vs_2_0`
+//      文本的负控承担（同一个用例里）。
 //   ⑧ `d3dx9-effect/fade-pixels`（要 GPU）：两张已知纹理 + `Alpha ∈ {0,0.5,1}` 的像素 oracle
 //      （容差 ≤1 LSB/通道）+ 「两图全透明 ⇒ `ret.a==0` ⇒ 目标逐字节不变」的**不可观测**档。
 //   ★ P3（同一张单，203 的两个 `ps_2_0` technique）追加的判据：
@@ -33,6 +36,14 @@
 //      的输出与 C++ 参考（逐句照 203 的源文本：SlideBlur **21 tap** × 0.0476、ZoomBlur **10 tap**
 //      × `ratio[10]`，双线性 + CLAMP）比（容差 ≤1 LSB/通道）；Angle=0/90 两档分别钉住
 //      **步长方向**（cos/sin）与 **uv 步长**（`Length/max(W,H)*0.05`）。
+//   ★ A 单（`REQ-01M7NAW2QT3TG9RCFMKR052C83`：202 = `SetMatrix("Proj")` + `SetVector("Color")`
+//     + CPU `vs_1_0` + `ps_1_0 SnowPS`）追加的判据：
+//   ⑪ `d3dx9-effect/effect-draw-snow-recorded`（pure）：202 ⇒ recorded（`has_vs` / `SnowPs10` /
+//      `Color` 展开成 4 个常量 / `Proj` 的 16 个 float 进 `vs_matrix`）+ `vs_2_0` 的 pass 仍具名拒绝。
+//   ⑫ `d3dx9-effect/snow-vertices`（pure，Mock 记录顶点）：单位 `Proj` 与固定功能的单位变换**逐 float
+//      相同**；两档 `Proj` ⇒ 落点按 `mul(pos, Proj)` 变；光照开着也不改顶点色（VS 路无光照）。
+//   ⑬ `d3dx9-effect/snow-pixels`（要 GPU）：已知 16×16 纹理 × `Color` 三档 + 换 uv 一档
+//      ⇒ 逐通道 `texel*Color`（容差 ≤1 LSB）；`Color={0,0,0,1}` 是控制行（全 0）。
 //
 // ★ 输入：`LIFT_AGE_EXE`（CMake 注入 `${AGE_SECTFIX_EXE}`；缺 ⇒ LIFT_SKIP 77）。
 //   ①② 不读语料 ⇒ 没有语料时它们**已经跑过**，`SKIP` 只表示剩下两条没跑。
@@ -52,6 +63,7 @@
 #include "runtime/d3d9_effect_gpu.h"
 #include "runtime/d3d9_pipeline.h"
 #include "runtime/gpu_raster.h"
+#include "runtime/math.h"  // `perspectiveFovLH`（用例里要"真的透视矩阵"，⛔ 不手抄 16 个数）
 #include "runtime/present_sdl.h"
 #include "runtime/d3dx9_sprite.h"  // HRESULT 常量（kOk / kInvalidCall / kNoInterface / kFail）
 #include "runtime/exec.h"
@@ -604,9 +616,12 @@ public:
         ++plain_draws;
         return true;
     }
-    bool rasterQueue(const lift::GpuRasterVertex*, std::size_t, const lift::GpuRasterTexture*,
-                     const lift::GpuRasterState&, std::string*) override {
+    bool rasterQueue(const lift::GpuRasterVertex* vertices, std::size_t count,
+                     const lift::GpuRasterTexture*, const lift::GpuRasterState&, std::string*) override {
         ++plain_queued;
+        // ★ A 单（`snow-vertices`）：固定功能那一批**真的交给 GPU 的顶点**也要能读
+        //   （与 effect 批逐 float 对照 ⇒ 不抄绝对屏幕坐标）。
+        plain_vertices.assign(vertices, vertices + count);
         tags.push_back(lift::gpuRasterBatchTag());
         return true;
     }
@@ -617,6 +632,7 @@ public:
         last = effect;
         last_state = state;
         vertex_count = count;
+        effect_vertices.assign(vertices, vertices + count);
         uv1_values.assign(uv1, uv1 + count * 2u);
         tags.push_back(lift::gpuRasterBatchTag());
         return true;
@@ -635,6 +651,8 @@ public:
     lift::GpuEffectDraw last;
     lift::GpuRasterState last_state;
     std::vector<float> uv1_values;
+    std::vector<lift::GpuRasterVertex> effect_vertices;  // 最近一条 effect 批的**屏幕空间**顶点
+    std::vector<lift::GpuRasterVertex> plain_vertices;   // 最近一条固定功能批的顶点
     std::size_t vertex_count = 0;
     std::uint32_t effect_queued = 0;
     std::uint32_t plain_queued = 0;
@@ -852,7 +870,7 @@ void caseEffectDrawBlurRecorded(const lift::PeImage& img) {
             }
         }
         LIFT_CHECK(slide && zoom);
-        LIFT_CHECK_EQ_I64(seen, 4);  // 200/201 的 Fade + 203 的两条（终止项不算）
+        LIFT_CHECK_EQ_I64(seen, 5);  // 200/201 的 Fade + 202 的 Snow + 203 的两条（终止项不算）
     }
 
     lift_fixture::Fixture f;
@@ -1003,17 +1021,50 @@ void caseEffectDrawBlurRecorded(const lift::PeImage& img) {
 }
 
 // =======================================================================================
-// ⑧ P3 · **没实现的 pass 程序仍然具名拒绝**（bit 44 覆盖到实现集之外）
+// ⑧ A 单 · 202（Snow）的 draw **翻面成 recorded**（+ `vs_2_0` 负控）
 //
-// 红了意味着什么：202 的 Snow（`vs_1_0`）被"静默接受"了 —— 那会按固定功能写出错误像素
-//   而账上一个位都没有（本仓最贵的一类错）。
-// 判据：HRESULT = D3DERR_INVALIDCALL ∧ `skipped_draws +1` ∧ 原因串含 **id=202 / Snow / pass=0 /
-//   VertexShader / vs_1_0**（P3 把每一条具名原因都补上了资源上下文）∧ bit44 置位。
-// ★ 为什么用 202 而不是 203：203 的两个 technique 在 P3 **真的画**（⑨/⑩ 钉住）；202 的
-//   `vs_1_0` 是这条线故意不做的那一半（T&L 留在 CPU，design-notes 的 L3-tl-01）。
+// 红了意味着什么：
+//   ① 202 仍被拒 / 仍按固定功能画 —— 雪景画错位置，而账上一个位都没有（本仓最贵的一类错）；
+//   ② `SetMatrix("Proj")` / `SetVector("Color")` 没真的进 program（矩阵 16 float / `Color` 4 float），
+//      或矩阵被默认成单位阵（那会掩盖"引擎没设"这条真话）；
+//   ③ "带 VertexShader ⇒ 一律拒绝"退化成"凡 vs_1_0 都放行"（未知 profile 也会被接受）。
+// 判据：
+//   · 作用域快照：`implemented ∧ has_vs ∧ program == SnowPs10`、`constant_count == 4` 且就是
+//     `SetVector("Color")` 的 4 个值、`vs_matrix` 的 16 个 float **逐个等于** `SetMatrix("Proj")`
+//     的值、纹理 1 张 / `uv_set == 0` / sampler = Linear×3 + Wrap（202 的 `sampler_state` 原文）；
+//   · draw 被接受（S_OK、`skipped_draws` 不涨）且后端收到的程序号 = `GpuEffectProgram::SnowPs10`；
+//   · 唯一那张 `kBindings` 表里有 202 的一条，门牌逐字对上（表长 = 5）；
+//   · **负控**：VS 实现集按 (entry, profile) 查表（`vs_2_0` / `vs_3_0` / 别的 entry 一律不命中）；
+//     再用一段**自造 FX 文本**（`VertexShader=compile vs_2_0 …`）建一个状态块，`effectDrawProgram`
+//     必须 `implemented == false` 且原因**点名 vs_2_0 / VertexShader**。
+// ★ 这是 P3 的 `effect-draw-unimplemented`（"202 必须被拒"）的**翻面**：断言方向整个反过来。
 // =======================================================================================
-void caseEffectDrawUnimplemented(const lift::PeImage& img) {
-    lift_test::g_current_case = "d3dx9-effect/effect-draw-unimplemented";
+void caseEffectDrawSnowRecorded(const lift::PeImage& img) {
+    lift_test::g_current_case = "d3dx9-effect/effect-draw-snow-recorded";
+    // ---- ① `kBindings` 的 202 一条（门牌逐字）+ 表长
+    {
+        const lift::d3dx9::EffectProgramBinding* b = lift::d3dx9::effectProgramBindings();
+        int seen = 0;
+        bool snow = false;
+        for (; b->resource_id != 0; ++b) {
+            ++seen;
+            if (b->resource_id != 202u) continue;
+            snow = true;
+            LIFT_CHECK(std::strcmp(b->technique, "Snow") == 0);
+            LIFT_CHECK(std::strcmp(b->pixel_entry, "SnowPS") == 0);
+            LIFT_CHECK(std::strcmp(b->pixel_profile, "ps_1_0") == 0);
+            LIFT_CHECK(b->program == lift::d3d9::EffectProgram::SnowPs10);
+        }
+        LIFT_CHECK(snow);
+        LIFT_CHECK_EQ_I64(seen, 5);  // 200/201 的 Fade + 202 的 Snow + 203 的两条（终止项不算）
+    }
+    // ---- ② VS 实现集 = 按 (entry, profile) 查表，⛔ 不是"凡 vs_1_0 都放行"
+    LIFT_CHECK(lift::d3dx9::effectVertexProgramSupported("SnowVS", "vs_1_0"));
+    LIFT_CHECK(!lift::d3dx9::effectVertexProgramSupported("SnowVS", "vs_2_0"));
+    LIFT_CHECK(!lift::d3dx9::effectVertexProgramSupported("SnowVS", "vs_3_0"));
+    LIFT_CHECK(!lift::d3dx9::effectVertexProgramSupported("SnowVS", "ps_1_0"));
+    LIFT_CHECK(!lift::d3dx9::effectVertexProgramSupported("SnowVP", "vs_1_0"));
+
     lift_fixture::Fixture f;
     LIFT_CHECK(f.ok);
     if (!f.ok) return;
@@ -1026,9 +1077,16 @@ void caseEffectDrawUnimplemented(const lift::PeImage& img) {
     std::uint32_t device = 0;
     LIFT_CHECK(createDevice(f, d3d9, &device));
     if (device == 0) return;
-    const std::uint32_t dev_state = f.m.cpu().com->userOf(device);
     EffectMockRaster mock;
     f.m.setGpuRaster(&mock);
+
+    // 一张 16×16 A8R8G8B8 纹理（202 的 `Tex`；内容无关，这里只看"哪张 / 哪套 UV / 什么采样器"）
+    const std::uint32_t proc_tex = f.use("d3dx9_43", "D3DXCreateTexture");
+    std::uint32_t tex = 0;
+    LIFT_CHECK_EQ_U32(createTexture(f, proc_tex, device, 16u, 16u, 0u, lift::d3d9::kFmtA8R8G8B8, &tex),
+                      lift::d3dx9::kOk);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return;
 
     const std::uint32_t proc_fx = f.use("d3dx9_43", "D3DXCreateEffectFromResourceA");
     const std::uint32_t out_ea = f.u32data(0);
@@ -1036,8 +1094,59 @@ void caseEffectDrawUnimplemented(const lift::PeImage& img) {
     const std::uint32_t effect = f.m.mem().rd32(out_ea);
     LIFT_CHECK_NE_U32(effect, 0u);
     if (effect == 0) return;
+
+    // `Proj`：真透视（`D3DXMatrixPerspectiveFovLH` 的口径）—— 用 runtime/math 的生成器 + 同一个
+    // 布局适配点转成 guest 的 D3DX 行主序，⛔ 不在用例里手抄 16 个数（手抄会与实现犯同一个错）。
+    float proj16[16] = {};
+    lift::math::toD3DLayout(lift::math::perspectiveFovLH(0.7853982f, 4.0f / 3.0f, 0.1f, 100.0f), proj16);
+    const std::uint32_t proj_ea = f.data(proj16, sizeof(proj16));
+    const float color[4] = {1.0f, 1.0f, 1.0f, 0.5f};
+    const std::uint32_t color_ea = f.data(color, sizeof(color));
+
     const std::uint32_t s_tech = f.cstr("Snow");
+    const std::uint32_t s_proj = f.cstr("Proj");
+    const std::uint32_t s_color = f.cstr("Color");
+    const std::uint32_t s_tex = f.cstr("Tex");
     LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xE8u, {s_tech}), lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xD0u, {s_tex, tex}), lift::d3dx9::kOk);
+    // ★ N3：`SetMatrix("Proj")` 发生在 `Begin` **之前**（`0x4B5716` vs `0x4B55C4`）
+    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x98u, {s_proj, proj_ea}), lift::d3dx9::kOk);
+    // 每粒子在 Begin **之前**设 `Color`（`0x4B55AD`）
+    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x88u, {s_color, color_ea}), lift::d3dx9::kOk);
+    // 状态块里两槽都记下了（同名覆盖 + 16/4 个 float 的宽度）
+    {
+        lift::d3dx9::EffectInfo info;
+        std::string why;
+        LIFT_CHECK(lift::d3dx9::effectInfo(f.m.cpu(), effect, &info, &why));
+        LIFT_CHECK_EQ_U32(info.set_matrices, 1u);
+        LIFT_CHECK_EQ_U32(info.set_vectors, 1u);
+        LIFT_CHECK_EQ_U32(info.vector_param_count, 1u);
+        LIFT_CHECK(info.matrix_set);
+        float got_m[16] = {};
+        std::string mname;
+        bool mset = false;
+        LIFT_CHECK(lift::d3dx9::effectMatrixParamAt(f.m.cpu(), info.state, &mname, got_m, &mset));
+        LIFT_CHECK(mset);
+        LIFT_CHECK(mname == "Proj");
+        for (int i = 0; i < 16; ++i) LIFT_CHECK(got_m[i] == proj16[i]);
+        float got_v[4] = {};
+        std::string vname;
+        LIFT_CHECK(lift::d3dx9::effectVectorParamAt(f.m.cpu(), info.state, 0u, &vname, got_v));
+        LIFT_CHECK(vname == "Color");
+        for (int i = 0; i < 4; ++i) LIFT_CHECK(got_v[i] == color[i]);
+        // 同名覆盖：再设一次不同的值 ⇒ 仍然是**一项**，值是新的
+        const float color2[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+        const std::uint32_t color2_ea = f.data(color2, sizeof(color2));
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x88u, {s_color, color2_ea}), lift::d3dx9::kOk);
+        LIFT_CHECK(lift::d3dx9::effectInfo(f.m.cpu(), effect, &info, &why));
+        LIFT_CHECK_EQ_U32(info.set_vectors, 2u);
+        LIFT_CHECK_EQ_U32(info.vector_param_count, 1u);  // ⛔ 不是第二项
+        LIFT_CHECK(lift::d3dx9::effectVectorParamAt(f.m.cpu(), info.state, 0u, &vname, got_v));
+        for (int i = 0; i < 4; ++i) LIFT_CHECK(got_v[i] == color2[i]);
+        // 换回这一批要用的那份
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x88u, {s_color, color_ea}), lift::d3dx9::kOk);
+    }
+
     const std::uint32_t passes_ea = f.u32data(0);
     LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xFCu, {passes_ea, 0u}), lift::d3dx9::kOk);
     LIFT_CHECK_EQ_U32(f.m.mem().rd32(passes_ea), 1u);
@@ -1045,55 +1154,351 @@ void caseEffectDrawUnimplemented(const lift::PeImage& img) {
     {
         const lift::d3d9::EffectDrawScope sc = lift::d3d9::effectDrawScope();
         LIFT_CHECK(sc.active && sc.in_pass);
-        LIFT_CHECK(!sc.program.implemented);
-        // ★ 具名原因必须说清"哪一批"：资源 id / technique / pass 都在串里（P3 补的上下文）
-        LIFT_CHECK(sc.program.reason.find("id=202") != std::string::npos);
-        LIFT_CHECK(sc.program.reason.find("Snow") != std::string::npos);
-        LIFT_CHECK(sc.program.reason.find("pass=0") != std::string::npos);
-        LIFT_CHECK(sc.program.reason.find("VertexShader") != std::string::npos);
-        LIFT_CHECK(sc.program.reason.find("vs_1_0") != std::string::npos);
-        std::printf("具名原因 = %s\n", sc.program.reason.c_str());
+        if (!sc.program.implemented) std::fprintf(stderr, "（202 未实现的原因）= %s\n", sc.program.reason.c_str());
+        LIFT_CHECK(sc.program.implemented);
+        LIFT_CHECK(sc.program.has_vs);
+        LIFT_CHECK(sc.program.program == lift::d3d9::EffectProgram::SnowPs10);
+        LIFT_CHECK(sc.program.vs_matrix_set);
+        for (int i = 0; i < 16; ++i) LIFT_CHECK(sc.program.vs_matrix[i] == proj16[i]);
+        // `float4x4 Proj` **不进** constants[]；`float4 Color` 展开成 4 个 float
+        LIFT_CHECK_EQ_U32(sc.program.constant_count, 4u);
+        for (int i = 0; i < 4; ++i) LIFT_CHECK(sc.program.constants[i] == color[i]);
+        LIFT_CHECK_EQ_U32(sc.program.texture_count, 1u);
+        LIFT_CHECK_EQ_U32(sc.program.textures[0], tex);
+        LIFT_CHECK_EQ_U32(sc.program.uv_set[0], 0u);  // `TexSmp` 采 `UV : TEXCOORD0`
+        // 202 的 `sampler_state`：`MipFilter/MinFilter/MagFilter = LINEAR`，Address 没写 ⇒ WRAP(1)
+        LIFT_CHECK_EQ_U32(sc.program.mag_filter[0], 2u);
+        LIFT_CHECK_EQ_U32(sc.program.min_filter[0], 2u);
+        LIFT_CHECK_EQ_U32(sc.program.mip_filter[0], 2u);
+        LIFT_CHECK_EQ_U32(sc.program.address_u[0], 1u);
+        LIFT_CHECK_EQ_U32(sc.program.address_v[0], 1u);
     }
-    std::vector<std::uint8_t> vb(3u * 20u, 0);
-    for (std::uint32_t i = 0; i < 3u; ++i) {
-        const float xyzw[4] = {10.0f + 10.0f * static_cast<float>(i), 10.0f, 0.5f, 1.0f};
-        std::memcpy(vb.data() + i * 20u, xyzw, sizeof(xyzw));
-        const std::uint32_t color = 0xFFFFFFFFu;
-        std::memcpy(vb.data() + i * 20u + 16u, &color, 4);
+
+    // FVF = XYZ(0x002) | TEX1(0x100) = 0x102 ⇒ 20 B/顶点（与引擎的 `push 102h` / `push 14h` 一致）。
+    // 顶点是**视图空间**（引擎已乘过 world×view）⇒ z 由 `Proj` 变成 clip.w。
+    // ★ 这里取 z = 1 ⇒ `clip.w = 1`：`submitPrimitives` 有一条**既有**的 `kUnGpuPerspective` 闸
+    //   （`invw != 1` ⇒ 整批具名拒绝，透视校正插值要另开单）⇒ 真距离（z=10）的批今天到不了后端，
+    //   本条用例判的是"这一批该怎么画 / 后端收到什么"，所以取 w=1 的那一档。
+    std::vector<std::uint8_t> vb(4u * 20u, 0);
+    const float pos[4][3] = {{-0.3f, -0.2f, 1.0f}, {0.3f, -0.2f, 1.0f}, {-0.3f, 0.2f, 1.0f}, {0.3f, 0.2f, 1.0f}};
+    const float uv[4][2] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}, {1.0f, 1.0f}};
+    for (std::uint32_t i = 0; i < 4u; ++i) {
+        std::uint8_t* base = vb.data() + i * 20u;
+        std::memcpy(base + 0u, pos[i], sizeof(pos[i]));
+        std::memcpy(base + 12u, uv[i], sizeof(uv[i]));
     }
     const std::uint32_t vtx = f.data(vb.data(), vb.size());
-    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x164u, {0x0044u}), lift::d3dx9::kOk);
-    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA4u, {}), lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x164u, {0x0102u}), lift::d3dx9::kOk);  // SetFVF(XYZ|TEX1)
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA4u, {}), lift::d3dx9::kOk);           // BeginScene
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x94u, {0u, 0u}), lift::d3dx9::kOk);     // SetRenderTarget(0,NULL)
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsZEnable, 0u}), lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsCullMode, lift::d3d9::kCullNone}),
+                      lift::d3dx9::kOk);
     const std::uint64_t skipped_before = lift::d3d9::gpuCoverage().skipped_draws;
-    const std::uint32_t hr = callMethod(f, device, 0x14Cu, {lift::d3d9::kPtTriangleList, 1u, vtx, 20u});
-    LIFT_CHECK_EQ_U32(hr, lift::d3dx9::kInvalidCall);
+    // 引擎的形状：`DrawPrimitiveUP(TRIANGLESTRIP, 2, particle+2Ch, 20)`
+    const std::uint32_t hr =
+        callMethod(f, device, 0x14Cu, {lift::d3d9::kPtTriangleStrip, 2u, vtx, 20u});
+    LIFT_CHECK_EQ_U32(hr, lift::d3dx9::kOk);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::d3d9::gpuCoverage().skipped_draws),
-                      static_cast<std::int64_t>(skipped_before + 1u));
-    LIFT_CHECK_EQ_U32(mock.effect_queued, 0u);
-    std::string reason;
-    std::uint64_t count = 0;
-    for (const auto& kv : lift::d3d9::gpuCoverage().skipped_reasons) {
-        if (kv.first.find("VertexShader") != std::string::npos) {
-            reason = kv.first;
-            count = kv.second;
+                      static_cast<std::int64_t>(skipped_before));
+    LIFT_CHECK_EQ_U32(mock.effect_queued, 1u);
+    LIFT_CHECK_EQ_U32(mock.plain_queued, 0u);
+    LIFT_CHECK(mock.last.program == lift::GpuEffectProgram::SnowPs10);
+    LIFT_CHECK_EQ_U32(mock.last.constant_count, 4u);
+    for (int i = 0; i < 4; ++i) LIFT_CHECK(mock.last.constants[i] == color[i]);
+    LIFT_CHECK_EQ_U32(mock.last.texture_count, 1u);
+    LIFT_CHECK_EQ_U32(mock.last.textures[0].uv_set, 0u);
+    LIFT_CHECK_EQ_U32(mock.last.textures[0].texture.width, 16u);
+    LIFT_CHECK_EQ_U32(mock.vertex_count, 6u);  // 2 个三角形 × 3
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(mock.effect_vertices.size()), 6u);
+    std::printf("effect draw recorded（202）：program=%u constants=%u texels=%u verts=%zu\n",
+                static_cast<unsigned>(mock.last.program), mock.last.constant_count,
+                mock.last.texture_count, mock.effect_vertices.size());
+
+    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x108u, {}), lift::d3dx9::kOk);  // EndPass
+    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x10Cu, {}), lift::d3dx9::kOk);  // End
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA8u, {}), lift::d3dx9::kOk);   // EndScene
+    f.m.setGpuRaster(nullptr);
+
+    // ---- ③ 负控：`vs_2_0` 的 pass ⇒ 仍**具名拒绝**（自造 FX 文本 → 状态块 → effectDrawProgram）
+    {
+        const std::string text =
+            "float4 VS(float4 pos : POSITION) : POSITION { return pos; }\n"
+            "float4 PS(float2 uv : TEXCOORD0) : COLOR { return float4(1,1,1,1); }\n"
+            "technique T { pass P0 { VertexShader=compile vs_2_0 VS(); "
+            "PixelShader=compile ps_2_0 PS(); } }\n";
+        lift::d3dx9::EffectSource src;
+        src.id = 900u;
+        src.bytes.assign(text.begin(), text.end());
+        src.size = static_cast<std::uint32_t>(src.bytes.size());
+        src.sha256 = lift::toHex(lift::sha256(src.bytes));
+        std::string why;
+        const std::uint32_t state = lift::d3dx9::createEffectState(f.m.cpu(), device, src, &why);
+        LIFT_CHECK_NE_U32(state, 0u);
+        if (state != 0) {
+            LIFT_CHECK_EQ_U32(lift::d3dx9::effectSetTechnique(f.m.cpu(), state, "T", &why), lift::d3dx9::kOk);
+            LIFT_CHECK_EQ_U32(lift::d3dx9::effectBeginPass(f.m.cpu(), state, 0u, &why), lift::d3dx9::kOk);
+            lift::d3d9::EffectDrawProgram prog;
+            LIFT_CHECK(lift::d3dx9::effectDrawProgram(f.m.cpu(), state, &prog, &why));
+            LIFT_CHECK(!prog.implemented);
+            LIFT_CHECK(!prog.has_vs);
+            LIFT_CHECK(prog.reason.find("vs_2_0") != std::string::npos);
+            LIFT_CHECK(prog.reason.find("VertexShader") != std::string::npos);
+            LIFT_CHECK(prog.reason.find("VS 实现集") != std::string::npos);
+            std::printf("vs_2_0 负控的具名原因 = %s\n", prog.reason.c_str());
+            lift::d3dx9::destroyEffectState(f.m.cpu(), state);
         }
     }
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(count), 1);
-    LIFT_CHECK(reason.find("id=202") != std::string::npos);
-    LIFT_CHECK(reason.find("Snow") != std::string::npos);
-    LIFT_CHECK(reason.find("pass=0") != std::string::npos);
-    {
-        lift::d3d9::PipelineInfo info;
-        LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(f.m.cpu(), dev_state, &info, nullptr));
-        constexpr std::uint32_t kEffectBit = 44u;
-        LIFT_CHECK((info.unsupported[kEffectBit / 32u] & (1u << (kEffectBit % 32u))) != 0);
-    }
-    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x108u, {}), lift::d3dx9::kOk);
-    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x10Cu, {}), lift::d3dx9::kOk);
-    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA8u, {}), lift::d3dx9::kOk);
-    f.m.setGpuRaster(nullptr);
 }
 
+
+// =======================================================================================
+// ⑪ A 单 · `snow-vertices`：CPU `vs_1_0` 的**顶点性质**（pure：Mock 后端记录顶点）
+//
+// 红了意味着什么：`vs_1_0` 被写成了别的东西 —— 又乘了设备的 WORLD/VIEW（二次变换）、除过 `w`、
+//   走了固定功能的 T&L（那会把光照/材质色写进顶点色），或 `SetMatrix("Proj")` 根本没参与变换。
+// 判据全部是**性质**（⛔ 不抄绝对屏幕坐标、⛔ 不重抄实现里的算术）：
+//   ① 单位 `Proj` ⇒ 交给 GPU 的顶点与「固定功能 + 单位 world/view/proj」那一批**逐 float 相同**
+//      （两条路共用同一个 clip→屏幕映射 ⇒ 相等就等价于"`clip == 输入顶点`，逐 float"）；
+//   ② 两档不同 `Proj` ⇒ 两组不同落点，且方向正是 `mul(pos, Proj)` 说的那一侧
+//      （`Proj = scale(0.5)` ⇒ 每个顶点沿 x **向视口中心移动一半**，y/z/uv 不动）；
+//   ③ 把同一份 `Proj` 交给固定功能的 PROJECTION，world/view 保持单位 ⇒ **逐 float 相同**
+//      —— 这一条同时证伪"乘了 world/view"与"做了 w 除法"（两者都会改变落点），也证伪 uv 没直通；
+//   ④ 光照开着（`LIGHTING=1` + 材质漫反射 = 红）：固定功能那批的顶点色变成**材质色**，
+//      VS 那批**仍是顶点里的白** ⇒ VS 路不光照（⛔ 不是"走了另一条固定功能分支"）。
+// =======================================================================================
+void caseSnowVertices(const lift::PeImage& img) {
+    lift_test::g_current_case = "d3dx9-effect/snow-vertices";
+    lift_fixture::Fixture f;
+    LIFT_CHECK(f.ok);
+    if (!f.ok) return;
+    LIFT_CHECK(setupMachine(f));
+    f.m.cpu().image = &img;
+    const std::uint32_t proc3d = f.use("d3d9", "Direct3DCreate9");
+    const std::uint32_t d3d9 = f.call(proc3d, {lift::d3d9::kSdkVersion});
+    LIFT_CHECK_NE_U32(d3d9, 0u);
+    if (d3d9 == 0) return;
+    std::uint32_t device = 0;
+    LIFT_CHECK(createDevice(f, d3d9, &device));
+    if (device == 0) return;
+    EffectMockRaster mock;
+    f.m.setGpuRaster(&mock);
+
+    // 纹理：202 的 program 要绑 `Tex`（否则 `implemented=false`，这批根本到不了顶点阶段）
+    const std::uint32_t proc_tex = f.use("d3dx9_43", "D3DXCreateTexture");
+    std::uint32_t tex = 0;
+    LIFT_CHECK_EQ_U32(createTexture(f, proc_tex, device, 16u, 16u, 0u, lift::d3d9::kFmtA8R8G8B8, &tex),
+                      lift::d3dx9::kOk);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return;
+    const std::uint32_t proc_fx = f.use("d3dx9_43", "D3DXCreateEffectFromResourceA");
+    const std::uint32_t out_ea = f.u32data(0);
+    LIFT_CHECK_EQ_U32(f.call(proc_fx, {device, 0u, 202u, 0u, 0u, 0u, 0u, out_ea, 0u}), lift::d3dx9::kOk);
+    const std::uint32_t effect = f.m.mem().rd32(out_ea);
+    LIFT_CHECK_NE_U32(effect, 0u);
+    if (effect == 0) return;
+    const std::uint32_t s_tech = f.cstr("Snow");
+    const std::uint32_t s_proj = f.cstr("Proj");
+    const std::uint32_t s_color = f.cstr("Color");
+    const std::uint32_t s_tex = f.cstr("Tex");
+    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xE8u, {s_tech}), lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xD0u, {s_tex, tex}), lift::d3dx9::kOk);
+    const float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    const std::uint32_t color_ea = f.data(color, sizeof(color));
+    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x88u, {s_color, color_ea}), lift::d3dx9::kOk);
+
+    // 两批顶点（都是 FVF `0x102` = XYZ|TEX1 ⇒ 20 B/顶点，与引擎的 `push 102h` / `push 14h` 一致）：
+    //   · `ndc`：z = 0.5 ⇒ 单位 `Proj` 下 clip 深度落在 [0,1]（不裁剪）；
+    //   · `persp`：z = 1 ⇒ 真透视 `Proj` 下 `clip.w = z = 1`。
+    //   ★ 为什么 `persp` 取 w=1 而不是"真实距离"（z=10）：`submitPrimitives` 有一条**既有**的
+    //     `kUnGpuPerspective` 闸（`invw != 1` ⇒ 整批具名拒绝，`w != 1` 就需要着色器里做透视校正
+    //     插值，那是另一条单的活）⇒ 管线级看不到 `w != 1` 的顶点。`w` 没被除这一条因此走
+    //     `clipVs10` 的纯函数判据（见下面 ⑤）。
+    const float xyz_ndc[4][3] = {{-0.8f, -0.5f, 0.5f}, {0.8f, -0.5f, 0.5f}, {-0.8f, 0.5f, 0.5f}, {0.8f, 0.5f, 0.5f}};
+    const float xyz_persp[4][3] = {{-0.3f, -0.2f, 1.0f}, {0.3f, -0.2f, 1.0f}, {-0.3f, 0.2f, 1.0f}, {0.3f, 0.2f, 1.0f}};
+    const float uv[4][2] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}, {1.0f, 1.0f}};
+    const auto make_strip = [&f, &uv](const float xyz[4][3]) -> std::uint32_t {
+        std::vector<std::uint8_t> vb(4u * 20u, 0);
+        for (std::uint32_t i = 0; i < 4u; ++i) {
+            std::uint8_t* base = vb.data() + i * 20u;
+            std::memcpy(base + 0u, xyz[i], sizeof(xyz[i]));
+            std::memcpy(base + 12u, uv[i], sizeof(uv[i]));
+        }
+        return f.data(vb.data(), vb.size());
+    };
+    const std::uint32_t vtx_ndc = make_strip(xyz_ndc);
+    const std::uint32_t vtx_persp = make_strip(xyz_persp);
+
+    constexpr double kViewportW = 320.0;  // `createDevice` 的后缓冲 = 320×240；视口由下面 SetViewport 定
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x164u, {0x0102u}), lift::d3dx9::kOk);  // SetFVF(XYZ|TEX1)
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA4u, {}), lift::d3dx9::kOk);           // BeginScene
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x94u, {0u, 0u}), lift::d3dx9::kOk);     // SetRenderTarget(0,NULL)
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xBCu,
+                                 {f.data(std::array<std::uint32_t, 6>{0u, 0u, 320u, 240u, 0x3F800000u, 0u}.data(),
+                                         24u)}),
+                      lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsZEnable, 0u}), lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsCullMode, lift::d3d9::kCullNone}),
+                      lift::d3dx9::kOk);
+
+    // 固定功能那一批（**出 effect 作用域** ⇒ 走 `transformVertex`：world/view/proj 由设备状态给）
+    const auto draw_plain = [&](std::uint32_t vtx) {
+        LIFT_CHECK_EQ_U32(callMethod(f, device, 0x14Cu, {lift::d3d9::kPtTriangleStrip, 2u, vtx, 20u}),
+                          lift::d3dx9::kOk);
+    };
+    // effect 那一批（`SetMatrix` 在 `Begin` 之前，与引擎的次序一致；N3）
+    const auto draw_vs = [&](std::uint32_t vtx, const float m[16]) {
+        const std::uint32_t m_ea = f.data(m, 16u * sizeof(float));
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x98u, {s_proj, m_ea}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xFCu, {0u, 0u}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x100u, {0u}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, device, 0x14Cu, {lift::d3d9::kPtTriangleStrip, 2u, vtx, 20u}),
+                          lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x108u, {}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x10Cu, {}), lift::d3dx9::kOk);
+    };
+    // 逐 float 比两批顶点（x/y/z/r/g/b/a/u/v 全比 —— ⛔ 不比绝对屏幕坐标，只比"两条路一样")
+    const auto same_vertices = [](const std::vector<lift::GpuRasterVertex>& a,
+                                  const std::vector<lift::GpuRasterVertex>& b, const char* what) {
+        if (a.size() != b.size() || a.empty()) {
+            lift_test::failf(__FILE__, __LINE__, "%s：顶点数不同（%zu vs %zu）", what, a.size(), b.size());
+            return false;
+        }
+        bool ok = true;
+        for (std::size_t i = 0; i < a.size() && ok; ++i) {
+            const float lhs[9] = {a[i].x, a[i].y, a[i].z, a[i].r, a[i].g, a[i].b, a[i].a, a[i].u, a[i].v};
+            const float rhs[9] = {b[i].x, b[i].y, b[i].z, b[i].r, b[i].g, b[i].b, b[i].a, b[i].u, b[i].v};
+            for (int k = 0; k < 9; ++k) {
+                if (lhs[k] != rhs[k]) {
+                    lift_test::failf(__FILE__, __LINE__, "%s：顶点 #%zu 的第 %d 个 float 不同（%.9g vs %.9g）",
+                                     what, i, k, static_cast<double>(lhs[k]), static_cast<double>(rhs[k]));
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        return ok;
+    };
+
+    // ---- ① 单位 Proj ⇒ 与「固定功能 + 单位 world/view/proj」逐 float 相同 ----
+    draw_plain(vtx_ndc);
+    const std::vector<lift::GpuRasterVertex> plain_identity = mock.plain_vertices;
+    LIFT_CHECK_EQ_U32(mock.plain_queued, 1u);
+    const float identity16[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                                  0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    draw_vs(vtx_ndc, identity16);
+    const std::vector<lift::GpuRasterVertex> vs_identity = mock.effect_vertices;
+    LIFT_CHECK_EQ_U32(mock.effect_queued, 1u);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(vs_identity.size()), 6u);  // 2 个三角形 × 3
+    LIFT_CHECK(same_vertices(plain_identity, vs_identity, "单位 Proj vs 固定功能（单位 world/view/proj）"));
+
+    // ---- ② 两档不同 Proj ⇒ 不同落点，且 x 向视口中心收一半（y / z / uv 不动）----
+    const float half_x16[16] = {0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                                0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    draw_vs(vtx_ndc, half_x16);
+    const std::vector<lift::GpuRasterVertex> vs_half = mock.effect_vertices;
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(vs_half.size()), 6u);
+    {
+        const double cx = 0.5 * kViewportW;
+        bool moved = false;
+        for (std::size_t i = 0; i < vs_half.size(); ++i) {
+            const double a = static_cast<double>(vs_identity[i].x) - cx;
+            const double b = static_cast<double>(vs_half[i].x) - cx;
+            if (std::fabs(b - 0.5 * a) > 1e-3) {
+                lift_test::failf(__FILE__, __LINE__,
+                                 "Proj 的 x 缩 0.5：顶点 #%zu 的 x 偏移没有减半（相对中心 %.6f → %.6f）", i, a, b);
+            }
+            if (std::fabs(b) < std::fabs(a) - 1e-6) moved = true;
+            LIFT_CHECK(vs_half[i].y == vs_identity[i].y);
+            LIFT_CHECK(vs_half[i].z == vs_identity[i].z);
+            LIFT_CHECK(vs_half[i].u == vs_identity[i].u && vs_half[i].v == vs_identity[i].v);
+            LIFT_CHECK(vs_half[i].a == vs_identity[i].a);
+        }
+        LIFT_CHECK(moved);  // 两组**确实不同**（不是恒等）
+    }
+
+    // ---- ③ 光照开着也不改顶点色（VS 路无光照）----
+    //   材质漫反射 = 红；`0x102` 既没法线也没顶点 diffuse ⇒ 固定功能那条**必须**变成材质色，
+    //   而 VS 那条必须保持顶点里的白（⛔ 否则说明它走了固定功能的 T&L）。
+    //   ★ 这一档必须在"设备 PROJ 还是单位阵"时做（见下面 ④ 会改设备 PROJ）。
+    std::vector<std::uint8_t> material(68u, 0);
+    const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+    std::memcpy(material.data() + 0u, red, sizeof(red));  // D3DMATERIAL9::Diffuse
+    const std::uint32_t material_ea = f.data(material.data(), material.size());
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xC4u, {material_ea}), lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsLighting, 1u}), lift::d3dx9::kOk);
+    draw_plain(vtx_ndc);
+    const std::vector<lift::GpuRasterVertex> plain_lit = mock.plain_vertices;
+    draw_vs(vtx_ndc, identity16);
+    const std::vector<lift::GpuRasterVertex> vs_lit = mock.effect_vertices;
+    LIFT_CHECK(!plain_lit.empty());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plain_lit.size()), static_cast<std::int64_t>(vs_lit.size()));
+    for (std::size_t i = 0; i < plain_lit.size() && i < vs_lit.size(); ++i) {
+        // 固定功能：材质漫反射（红）
+        LIFT_CHECK(plain_lit[i].r == 1.0f && plain_lit[i].g == 0.0f && plain_lit[i].b == 0.0f);
+        // VS 路：顶点色（FVF 0x102 没有 diffuse ⇒ 白），⛔ 不受光照/材质影响
+        LIFT_CHECK(vs_lit[i].r == 1.0f && vs_lit[i].g == 1.0f && vs_lit[i].b == 1.0f);
+    }
+
+    // ---- ④ 纯函数：`clip = mul(vec4(pos,1), Proj)` 的三条不变量 ----
+    //   ⛔ 不抄算术：只断言"单位阵 ⇒ 恒等 / 缩放只作用在 x / 透视矩阵下 `w` 原样保留"。
+    //   ★ `w` 那一条只能在这里验（`w != 1` 的批会被 `kUnGpuPerspective` 整批拒，管线级看不见）。
+    float proj16[16] = {};
+    lift::math::toD3DLayout(lift::math::perspectiveFovLH(0.7853982f, 4.0f / 3.0f, 0.1f, 100.0f), proj16);
+    {
+        const lift::math::Vec4d a = lift::d3d9::clipVs10(identity16, 0.25, -0.5, 0.75);
+        LIFT_CHECK(a.x == 0.25 && a.y == -0.5 && a.z == 0.75 && a.w == 1.0);
+        const lift::math::Vec4d b = lift::d3d9::clipVs10(half_x16, 0.25, -0.5, 0.75);
+        LIFT_CHECK(b.x == 0.125 && b.y == -0.5 && b.z == 0.75 && b.w == 1.0);
+        // 平移档（第二档仿射 `Proj`）：`w` 行仍是 (0,0,0,1) ⇒ w 不变，x/y/z 各加平移量
+        const float shift16[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                                   0.0f, 0.0f, 1.0f, 0.0f, 0.25f, -0.5f, 0.125f, 1.0f};
+        const lift::math::Vec4d s = lift::d3d9::clipVs10(shift16, 0.25, -0.5, 0.75);
+        LIFT_CHECK(s.x == 0.5 && s.y == -1.0 && s.z == 0.875 && s.w == 1.0);
+        // 透视：`Proj` 的 `w` 行 = (0,0,1,0) ⇒ `clip.w = z`（**原样保留**）。若实现里除了 w，
+        //   `clip.w` 会变成 1；若乘了 world/view，x/y 会再变一次（这里只钉 w 与"非恒等"）。
+        const lift::math::Vec4d c = lift::d3d9::clipVs10(proj16, 0.5, -0.25, 3.0);
+        LIFT_CHECK(c.w == 3.0);
+        LIFT_CHECK(c.x != 0.5 && c.y != -0.25);   // 真的乘了矩阵
+        // `clip.xy` 按 `mul(vec4, Proj)`：同 y/z 下 `x` 加倍 ⇒ `clip.x` 加倍（`Proj` 的 x 行没有交叉项）；
+        //   y 方向同理 ⇒ 这两条一起钉住"**行向量、Proj 在右**"（列向量约定下 x 会串到 w 上）。
+        const lift::math::Vec4d c2 = lift::d3d9::clipVs10(proj16, 1.0, -0.25, 3.0);
+        LIFT_CHECK(c2.x == 2.0 * c.x);
+        LIFT_CHECK(c2.y == c.y && c2.w == c.w);
+        const lift::math::Vec4d c3 = lift::d3d9::clipVs10(proj16, 0.5, -0.5, 3.0);
+        LIFT_CHECK(c3.y == 2.0 * c.y);
+        LIFT_CHECK(c3.w == c.w);
+        // 近/远平面各出来一个 z：`clip.z / clip.w` 必须落在 [0,1]（D3D 的裁剪空间口径）
+        LIFT_CHECK(c.z > 0.0 && c.z < c.w);
+        const lift::math::Vec4d near_z = lift::d3d9::clipVs10(proj16, 0.0, 0.0, 0.1);
+        LIFT_CHECK(near_z.z >= 0.0 && near_z.z <= near_z.w + 1e-9);
+    }
+
+    // ---- ⑤ 同一份透视 Proj 交给固定功能的 PROJECTION ⇒ 逐 float 相同 ----
+    //   ★ 这一条把"乘了设备的 WORLD/VIEW"证伪：多乘一次 world/view 就会与固定功能那条路分开。
+    //   （顶点取 `w == 1` 的那一批，原因见文件头那条 `kUnGpuPerspective` 说明。）
+    //   ★ 先把光照关回去：上一档故意把材质设成红，那条状态会让**固定功能**的顶点色变红，
+    //     与"两条路的几何一样"这条判据无关（关掉之后两条路又都是白，逐 float 才能比）。
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsLighting, 0u}), lift::d3dx9::kOk);
+    const std::uint32_t proj_ea = f.data(proj16, sizeof(proj16));
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xB0u, {lift::d3d9::kTsProjection, proj_ea}), lift::d3dx9::kOk);
+    draw_plain(vtx_persp);
+    const std::vector<lift::GpuRasterVertex> plain_persp = mock.plain_vertices;
+    draw_vs(vtx_persp, proj16);
+    const std::vector<lift::GpuRasterVertex> vs_persp = mock.effect_vertices;
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(vs_persp.size()), 6u);
+    LIFT_CHECK(same_vertices(plain_persp, vs_persp, "透视 Proj vs 固定功能（device PROJ = 同一份 Proj）"));
+    // 与单位 Proj 那一档**不同**（否则"乘了矩阵"这件事本身没有证据）
+    LIFT_CHECK(
+        std::fabs(static_cast<double>(vs_persp[0].x) - static_cast<double>(vs_identity[0].x)) > 1.0);
+
+    std::printf("snow-vertices：单位 Proj 与固定功能逐 float 相同（%zu 顶点）；透视 Proj 亦相同；"
+                "透视下 clip.w 原样保留；光照下 VS 顶点色仍是白\n",
+                vs_identity.size());
+
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA8u, {}), lift::d3dx9::kOk);  // EndScene
+    f.m.setGpuRaster(nullptr);
+}
 
 // =======================================================================================
 // ⑨ P2 · **像素 oracle**：两张已知纹理 + `Alpha ∈ {0, 0.5, 1}`（真 GPU + RTT 读回）
@@ -1781,6 +2186,234 @@ int caseBlurPixels(const lift::PeImage& img) {
 }
 
 // =======================================================================================
+// ⑫ A 单 · `snow-pixels`：`ps_1_0 SnowPS` 的**像素 oracle**（真 GPU + 纹理 RT 读回）
+//
+// 红了意味着什么：`SnowPS` 的算术被写坏了 —— 漏乘 / 加错 `Color`、`Color` 读成了顶点色、
+//   uv 没直通、或者把 `Proj` 塞进了 uniform（那会与 CPU 侧的矩阵抢同一个槽）。
+// 判据（每档）：读回像素 == `texel * Color`（逐通道，容差 ≤1 LSB）；用**恒定 uv** 采样
+//   **texel 中心**（双线性权重 (1,0)、导数 0 ⇒ LOD 落到 0 级）⇒ 参考值与各 GPU 的亚纹素精度无关。
+//   · `Color = {1,1,1,1}` 与 `{0.5,0.25,0.75,1}` 两档 ⇒ 逐通道乘法的**两个不同**结果；
+//   · `Color = {0,0,0,1}` 是**控制行**：输出必须逐通道为 0（证明"乘法真的在乘"，
+//     而不是一条恒等的 shader）；
+//   · 另一张纹理 / 另一个 uv ⇒ 采到的是**另一个 texel**（证明 uv 真的直通，⛔ 不是常量）。
+// ★ 没有 SDL_GPU 设备 / 没有显示系统 ⇒ SKIP 77（⛔ 不拿 Mock 后端冒充像素判据）。
+// =======================================================================================
+namespace {
+
+// 位图内容 + 读回采样点：`Color` 三档 × 两个 texel（同一张 16×16 纹理里两块不同颜色）
+struct SnowPixelCase {
+    const char* name;
+    float color[4];
+    Bgra8 texel;   // 采样点那个 texel 的 BGRA
+    float u;       // 恒定 uv（texel 中心）
+    float v;
+};
+
+}  // namespace
+
+int caseSnowPixels(const lift::PeImage& img) {
+    lift_test::g_current_case = "d3dx9-effect/snow-pixels";
+    lift_fixture::Fixture f;
+    LIFT_CHECK(f.ok);
+    if (!f.ok) return 1;
+    LIFT_CHECK(setupMachine(f));
+    f.m.cpu().image = &img;
+    const std::uint32_t proc3d = f.use("d3d9", "Direct3DCreate9");
+    const std::uint32_t d3d9 = f.call(proc3d, {lift::d3d9::kSdkVersion});
+    LIFT_CHECK_NE_U32(d3d9, 0u);
+    if (d3d9 == 0) return 1;
+    std::uint32_t device = 0;
+    LIFT_CHECK(createDevice(f, d3d9, &device));
+    if (device == 0) return 1;
+
+    lift::SdlWindow win;
+    lift::SdlWindowOptions opt;
+    opt.title = "emulator-lift d3dx9 snow oracle";
+    opt.driver_list = "software";
+    opt.hidden = true;
+    opt.raster_gpu = true;
+    std::string werr;
+    if (!win.init(opt, &werr)) LIFT_SKIP(werr.c_str());
+    if (!win.rasterActive()) {
+        win.shutdown();
+        LIFT_SKIP("rasterActive == false（建不出 SDL_GPU 设备）");
+    }
+    f.m.setGpuRaster(win.gpuRaster());
+
+    const int kW = 64;
+    const int kH = 64;
+    const int kTexW = 16;
+    const int kTexH = 16;
+    const std::uint32_t proc_tex = f.use("d3dx9_43", "D3DXCreateTexture");
+    std::uint32_t rt = 0;
+    LIFT_CHECK_EQ_U32(createTexture(f, proc_tex, device, static_cast<std::uint32_t>(kW),
+                                    static_cast<std::uint32_t>(kH), 0x1u, lift::d3d9::kFmtA8R8G8B8, &rt),
+                      lift::d3dx9::kOk);
+    LIFT_CHECK_NE_U32(rt, 0u);
+    if (rt == 0) return 1;
+
+    const std::uint32_t proc_fx = f.use("d3dx9_43", "D3DXCreateEffectFromResourceA");
+    const std::uint32_t out_ea = f.u32data(0);
+    LIFT_CHECK_EQ_U32(f.call(proc_fx, {device, 0u, 202u, 0u, 0u, 0u, 0u, out_ea, 0u}), lift::d3dx9::kOk);
+    const std::uint32_t effect = f.m.mem().rd32(out_ea);
+    LIFT_CHECK_NE_U32(effect, 0u);
+    if (effect == 0) return 1;
+    const std::uint32_t s_tech = f.cstr("Snow");
+    const std::uint32_t s_proj = f.cstr("Proj");
+    const std::uint32_t s_color = f.cstr("Color");
+    const std::uint32_t s_tex = f.cstr("Tex");
+    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xE8u, {s_tech}), lift::d3dx9::kOk);
+
+    // 单位 `Proj`（顶点已经是 clip 空间的 [-1,1] 四边形 ⇒ 铺满视口；w = 1 ⇒ 屏幕映射是 D3D 那一份）
+    const float identity16[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                                  0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    const std::uint32_t proj_ea = f.data(identity16, sizeof(identity16));
+    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x98u, {s_proj, proj_ea}), lift::d3dx9::kOk);
+
+    // 全屏四边形（clip 空间，两个三角形）：FVF `0x102`（XYZ|TEX1）⇒ 20 B/顶点；**恒定 uv**
+    const auto make_quad = [&f](float u, float v) -> std::uint32_t {
+        const float corners[6][3] = {{-1.0f, -1.0f, 0.5f}, {1.0f, -1.0f, 0.5f}, {1.0f, 1.0f, 0.5f},
+                                     {-1.0f, -1.0f, 0.5f}, {1.0f, 1.0f, 0.5f}, {-1.0f, 1.0f, 0.5f}};
+        std::vector<std::uint8_t> vb(6u * 20u, 0);
+        for (int i = 0; i < 6; ++i) {
+            std::uint8_t* base = vb.data() + static_cast<std::size_t>(i) * 20u;
+            std::memcpy(base + 0u, corners[i], sizeof(corners[i]));
+            const float uv[2] = {u, v};
+            std::memcpy(base + 12u, uv, sizeof(uv));
+        }
+        return f.data(vb.data(), vb.size());
+    };
+
+    const std::uint32_t rt_surface = textureSurface(f, rt);
+    LIFT_CHECK_NE_U32(rt_surface, 0u);
+    if (rt_surface == 0) return 1;
+    const auto readback = [&](std::vector<std::uint8_t>* out, std::uint32_t* pitch_out) {
+        const std::uint32_t offs_out = f.u32data(0xDEADBEEFu);
+        if (callMethod(f, device, 0x90u,
+                       {static_cast<std::uint32_t>(kW), static_cast<std::uint32_t>(kH),
+                        lift::d3d9::kFmtA8R8G8B8, 2u, offs_out, 0u}) != 0) {
+            return false;
+        }
+        const std::uint32_t offs = f.m.mem().rd32(offs_out);
+        if (offs == 0) return false;
+        if (callMethod(f, device, 0x80u, {rt_surface, offs}) != 0) return false;
+        const std::uint32_t lr_ea = f.zeroData(8u);
+        if (callMethod(f, offs, 0x34u, {lr_ea, 0u, 0u}) != 0) return false;
+        const std::uint32_t pitch = f.m.mem().rd32(lr_ea + 0u);
+        const std::uint32_t bits = f.m.mem().rd32(lr_ea + 4u);
+        if (bits == 0 || pitch == 0) return false;
+        out->assign(static_cast<std::size_t>(pitch) * static_cast<std::size_t>(kH), 0u);
+        f.m.mem().readBytes(bits, out->data(), out->size());
+        callMethod(f, offs, 0x38u, {});
+        *pitch_out = pitch;
+        return true;
+    };
+
+    // 公共状态：不透明覆盖（blend 关）⇒ 读回的就是 shader 输出
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA4u, {}), lift::d3dx9::kOk);                // BeginScene
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x94u, {0u, rt_surface}), lift::d3dx9::kOk);  // 绑 RT
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xBCu,
+                                 {f.data(std::array<std::uint32_t, 6>{0u, 0u, 64u, 64u, 0x3F800000u, 0u}.data(),
+                                         24u)}),
+                      lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x164u, {0x0102u}), lift::d3dx9::kOk);  // SetFVF(XYZ|TEX1)
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsZEnable, 0u}), lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsCullMode, lift::d3d9::kCullNone}),
+                      lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsAlphaBlendEnable, 0u}), lift::d3dx9::kOk);
+
+    // 16×16 纹理：整张 = `texel_a`；再把 (12,12) 那一格涂成 `texel_b`（用于"uv 真的直通"那一行）。
+    const Bgra8 texel_a{0, 0, 255, 255};  // 红（B=0 G=0 R=255）
+    const Bgra8 texel_b{255, 0, 0, 255};  // 蓝（B=255 G=0 R=0）
+    const float kUa = (2.0f + 0.5f) / 16.0f;    // texel (2,2) 的中心
+    const float kUb = (12.0f + 0.5f) / 16.0f;   // texel (12,12) 的中心
+    const SnowPixelCase cases[4] = {
+        {"Color={1,1,1,1}", {1.0f, 1.0f, 1.0f, 1.0f}, texel_a, kUa, kUa},
+        {"Color={0.5,0.25,0.75,1}", {0.5f, 0.25f, 0.75f, 1.0f}, texel_a, kUa, kUa},
+        {"Color={0,0,0,1}（控制行）", {0.0f, 0.0f, 0.0f, 1.0f}, texel_a, kUa, kUa},
+        {"uv 换到 texel(12,12)", {1.0f, 1.0f, 1.0f, 1.0f}, texel_b, kUb, kUb},
+    };
+
+    int worst = -1;
+    for (const SnowPixelCase& c : cases) {
+        // ★ 每一档**新建**一张纹理再绑（直接改 guest 像素不推进内容版本 ⇒ 上传缓存会走快路径）
+        std::uint32_t tex = 0;
+        LIFT_CHECK_EQ_U32(createTexture(f, proc_tex, device, static_cast<std::uint32_t>(kTexW),
+                                        static_cast<std::uint32_t>(kTexH), 0u, lift::d3d9::kFmtA8R8G8B8, &tex),
+                          lift::d3dx9::kOk);
+        LIFT_CHECK_NE_U32(tex, 0u);
+        if (tex == 0) return 1;
+        {
+            lift::d3d9::TextureInfo ti;
+            LIFT_CHECK(lift::d3d9::textureInfo(f.m.cpu(), tex, &ti, nullptr));
+            lift::GuestSurface* gs = f.m.surfaces().find(ti.arena);
+            LIFT_CHECK(gs != nullptr);
+            if (gs == nullptr) return 1;
+            std::uint8_t* px = f.m.surfaces().pixels(*gs);
+            for (int y = 0; y < kTexH; ++y) {
+                for (int x = 0; x < kTexW; ++x) {
+                    const Bgra8 t = (x == 12 && y == 12) ? texel_b : texel_a;
+                    std::uint8_t* dst = px + static_cast<std::size_t>(y) * gs->pitch +
+                                        static_cast<std::size_t>(x) * 4u;
+                    dst[0] = t.b;
+                    dst[1] = t.g;
+                    dst[2] = t.r;
+                    dst[3] = t.a;
+                }
+            }
+        }
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xD0u, {s_tex, tex}), lift::d3dx9::kOk);
+        const std::uint32_t color_ea = f.data(c.color, sizeof(c.color));
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x88u, {s_color, color_ea}), lift::d3dx9::kOk);
+        const std::uint32_t vtx = make_quad(c.u, c.v);
+        // ★ Clear 色特意**不是**任何一条期望值：控制行（`Color={0,0,0,1}` ⇒ 全 0）才有意义
+        //   （否则"shader 压根没画"也会看起来对）。
+        LIFT_CHECK_EQ_U32(callMethod(f, device, 0xACu, {0u, 0u, 1u, 0xFF112233u, 0x3F800000u, 0u}),
+                          lift::d3dx9::kOk);  // Clear(TARGET)
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xFCu, {0u, 0u}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x100u, {0u}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x104u, {}), lift::d3dx9::kOk);
+        const std::uint32_t dhr = callMethod(f, device, 0x14Cu, {lift::d3d9::kPtTriangleList, 2u, vtx, 20u});
+        if (dhr != lift::d3dx9::kOk) {
+            for (const auto& kv : lift::d3d9::gpuCoverage().skipped_reasons) {
+                std::fprintf(stderr, "[snow-oracle-skip] %llu × %s\n", (unsigned long long)kv.second,
+                             kv.first.c_str());
+            }
+        }
+        LIFT_CHECK_EQ_U32(dhr, lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x108u, {}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x10Cu, {}), lift::d3dx9::kOk);
+
+        std::vector<std::uint8_t> px;
+        std::uint32_t pitch = 0;
+        LIFT_CHECK(readback(&px, &pitch));
+        const Bgra8 got = pixelAtBgra(px, pitch, kW / 2, kH / 2);
+        // 参考：`return tex2D(TexSmp, UV) * Color;` ⇒ 逐通道 `texel*Color`（钳到 [0,1] 后量化）。
+        // ★ D3D 的 `float4 Color` = (x,y,z,w) = (**R**, **G**, **B**, **A**) ⇒ B 通道乘 `color[2]`。
+        const Bgra8 want = quantizeBgra((c.texel.b / 255.0) * c.color[2], (c.texel.g / 255.0) * c.color[1],
+                                        (c.texel.r / 255.0) * c.color[0], (c.texel.a / 255.0) * c.color[3]);
+        const int d = std::max({channelDiff(got.r, want.r), channelDiff(got.g, want.g),
+                                channelDiff(got.b, want.b), channelDiff(got.a, want.a)});
+        if (d > worst) worst = d;
+        if (d > 1) {
+            lift_test::failf(__FILE__, __LINE__,
+                             "%s 像素不符：got(B=%u G=%u R=%u A=%u) want(B=%u G=%u R=%u A=%u) 误差=%d", c.name,
+                             got.b, got.g, got.r, got.a, want.b, want.g, want.r, want.a, d);
+        }
+        std::printf("%s：像素 B=%u G=%u R=%u A=%u（参考 B=%u G=%u R=%u A=%u，误差 %d）\n", c.name, got.b,
+                    got.g, got.r, got.a, want.b, want.g, want.r, want.a, d);
+    }
+    LIFT_CHECK(worst >= 0 && worst <= 1);
+    std::printf("202 像素 oracle：四档最大误差 = %d LSB/通道\n", worst);
+
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA8u, {}), lift::d3dx9::kOk);        // EndScene
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x94u, {0u, 0u}), lift::d3dx9::kOk);  // 解绑 RT
+    f.m.setGpuRaster(nullptr);
+    win.shutdown();
+    return 0;
+}
+
+// =======================================================================================
 // ④ D3DXCreateEffectFromResourceA + 9 槽（只记状态）
 // =======================================================================================
 void caseObjectSlots(const lift::PeImage& img) {
@@ -1951,8 +2584,10 @@ int main() {
     caseFxParse(img);        // ⑤（P2：FX 文本解析）
     caseEffectDrawRecorded(img);       // ⑥（P2：翻面 P1 的"必须拒绝"）
     caseEffectDrawBlurRecorded(img);   // ⑨（P3：203 的 SlideBlur / ZoomBlur 翻面）
-    caseEffectDrawUnimplemented(img);  // ⑦（P3：202 仍然具名拒绝）
-    if (caseFadePixels(img) != 0) return 1;  // ⑧（P2：像素 oracle；没有 GPU ⇒ SKIP 77）
-    if (caseBlurPixels(img) != 0) return 1;  // ⑩（P3：203 的像素 oracle；没有 GPU ⇒ SKIP 77）
+    caseEffectDrawSnowRecorded(img);   // ⑧（A 单：202 翻面成 recorded + `vs_2_0` 负控）
+    caseSnowVertices(img);             // ⑪（A 单：CPU `vs_1_0` 的顶点性质；Mock 后端）
+    if (caseFadePixels(img) != 0) return 1;  // ⑩（P2：像素 oracle；没有 GPU ⇒ SKIP 77）
+    if (caseBlurPixels(img) != 0) return 1;  // ⑫（P3：203 的像素 oracle；没有 GPU ⇒ SKIP 77）
+    if (caseSnowPixels(img) != 0) return 1;  // ⑬（A 单：202 的像素 oracle；没有 GPU ⇒ SKIP 77）
     return finish("d3dx9-effect");
 }

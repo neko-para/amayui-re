@@ -324,8 +324,14 @@ const PixelShaderVersionOverride& pixelShaderVersionOverride();
 //   EndPass/End/销毁的**唯一边界**上报，这里只存值。**程序解析也在那一层**（它读得到 FX 文本），
 //   这里只存一份"这一批该怎么画"的快照。
 // ★ P2 的实现集 = **Fade（`ps_2_0` 201 / `ps_1_0` 200）**；P3 追加 **203 的 SlideBlur / ZoomBlur
-//   （`ps_2_0`）**。不在实现集里的程序（202 的 Snow —— 它带 `vs_1_0`）⇒ `program.implemented == false`
-//   + `program.reason`，调用方**具名拒绝该批**（bit 44），⛔ 不静默降级成固定功能、⛔ 也不静默接受。
+//   （`ps_2_0`）**；A 单追加 **202 的 Snow（`ps_1_0` SnowPS + `vs_1_0` SnowVS）**。
+//   不在实现集里的程序 ⇒ `program.implemented == false` + `program.reason`，调用方**具名拒绝该批**
+//   （bit 44），⛔ 不静默降级成固定功能、⛔ 也不静默接受。
+// ★ 202 是唯一带 **VertexShader** 的 pass：它的 `vs_1_0` 由 **CPU 顶点程序**兑现
+//   （`transformVertexVs10`，`Pos = mul(pos, Proj)`；见 `EffectDrawProgram::has_vs`）。
+//   ⛔ 这不是"把 T&L 搬上 GPU"：设备侧 `Create/SetVertexShader` 仍未实现（被调用即 comUnsupported）。
+//   ⛔ 也不是"凡 vs_1_0 都放行"：`(vertex_entry, vertex_profile)` 必须命中
+//   `shims/d3dx9_effect.cpp` 的 VS 实现集（`effectVertexProgramSupported`）。
 // ★ 纯宿主、无锁（单线程解释器；与 `g_unsupported_mirror` 同口径）；⛔ 不写 guest 内存。
 // =====================================================================================
 // FX 文本里已实现的 shader 程序（与 `runtime/d3d9_effect_gpu.h` 的 `GpuEffectProgram` 一一对应；
@@ -336,6 +342,7 @@ enum class EffectProgram : std::uint32_t {
     FadePs10 = 2,  // 资源 200 同一 technique / `compile ps_1_0`（逐通道直接 lerp）
     SlideBlurPs20 = 3,  // 资源 203 `technique SlideBlur` / `compile ps_2_0`（21 tap，见后端）
     ZoomBlurPs20 = 4,   // 资源 203 `technique ZoomBlur` / `compile ps_2_0`（10 tap，见后端）
+    SnowPs10 = 5,  // 资源 202 `technique Snow` / `compile ps_1_0`（`tex2D*Color`；同 pass 还有 vs_1_0）
 };
 
 constexpr std::uint32_t kEffectMaxConstants = 8;  // 与后端 uniform 容量同源
@@ -345,7 +352,18 @@ constexpr std::uint32_t kEffectMaxTextures = 2;   // Fade 的 Tex0/Tex1
 struct EffectDrawProgram {
     bool implemented = false;  // 本 pass 的程序在实现集里（⇒ 走后端 effect 管线）
     EffectProgram program = EffectProgram::None;
+    // ---- CPU 顶点程序（`vs_1_0`；资源 202 的 `SnowVS`）----
+    // ★ 带 VertexShader 的 pass **不再一律拒绝**：`(vertex_entry, vertex_profile)` 命中 VS 实现集
+    //   ⇒ `has_vs = true`，这一批的顶点改用 `transformVertexVs10`（`Pos = mul(pos, Proj)`）。
+    //   ⛔ 不是"凡 vs_1_0 都放行"（查表在 `shims/d3dx9_effect.cpp` 的 `effectVertexProgramSupported`）。
+    bool has_vs = false;
+    // `SetMatrix("<矩阵参数名>", …)` 的 16 个 float（D3DX 行主序，与 `D3D9` 设备矩阵同一份布局）。
+    // ★ **没设过 ⇒ 全 0**（D3D 的 uniform 初值就是 0）；⛔ 不默认成单位阵 —— 那会掩盖"引擎没设"。
+    float vs_matrix[16] = {};
+    bool vs_matrix_set = false;
     // 常量：按 FX 源文本的**声明顺序**（`float Alpha;` ⇒ [0]）；没 SetFloat 过 ⇒ 0。
+    // ★ `float4`（`Color`）展开成 4 个 float（`SetVector` 记的那一份）；`float4x4`（`Proj`）
+    //   **不进这张表**（它在 CPU 顶点程序里用掉，见 `vs_matrix`；后端 push constant 只有 32 B）。
     std::uint32_t constant_count = 0;
     float constants[kEffectMaxConstants] = {};
     // 纹理：`SetTexture` 记下的**guest 纹理对象 EA**（0 = 没有绑）+ 它采哪一套 UV。

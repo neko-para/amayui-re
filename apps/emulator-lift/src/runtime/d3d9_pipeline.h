@@ -42,6 +42,7 @@
 #include <string>
 
 #include "runtime/gpu_raster.h"  // GpuRasterState / GpuTexMode（GPU 准入的映射目标）
+#include "runtime/math.h"        // `clipVs10` 的返回类型（Vec4d；D3DX 布局的唯一适配点在 math.h）
 #include "runtime/surface.h"     // SurfaceFormat（后缓冲 / 纹理的像素布局）
 
 namespace lift {
@@ -336,6 +337,22 @@ double lodFromUvDerivatives(double du_dx, double dv_dx, double du_dy, double dv_
                             double tex_height);
 // LOD → 级号：`clamp(floor(lod + 0.5), 0, levels-1)`（最近级）。非有限 / `levels <= 1` ⇒ 0。
 std::uint32_t mipLevelForLod(double lod, std::uint32_t levels);
+
+// =====================================================================================
+// CPU `vs_1_0`（资源 202 的 `SnowVS`）—— 纯函数形状（守卫直接打）
+//
+// ★ 语义（逐句照 FX 源文本 + N3 的 EA 读数，`docs/03-emulator/d3dx-effect.md` §11）：
+//     `Pos = mul(pos, Proj);  UV = uv;`
+//   ⇒ `clip = mul(vec4(x,y,z,1), Proj)`（**行向量**、`Proj` 在右、D3DX 行主序）。
+// ★ 不变量（每一条都有判据）：
+//   · ⛔ **不乘设备的 WORLD / VIEW**（顶点进来时已是视图空间：引擎在 CPU 上乘过 `world×view`）；
+//   · ⛔ **不做 `w` 除法**（`clip.w` 原样保留；裁剪在 `submitPrimitives`，`1/w` 在 `toScreen`）；
+//   · ⛔ 不光照、⛔ 不动 uv（uv 由 `readVertex` 直通）。
+// ★ 唯一调用者 = 管线内的 `transformVertexVs10`（`gatherVertices` / `transformVertexOnce` 两个变换
+//   实现点都走它）。这里只是一个**纯函数形状**：因为 `w != 1` 的批会被 GPU 准入的
+//   `kUnGpuPerspective` 整批拒（另一条单的已知限制）⇒ 管线级观测不到"透视 `Proj` 下 `w` 没被除"，
+//   而那正是本单最容易写错的一处。
+math::Vec4d clipVs10(const float proj16[16], double x, double y, double z);
 
 // =====================================================================================
 // 状态块生命周期（createDeviceState / destroyDeviceState 里挂钩）

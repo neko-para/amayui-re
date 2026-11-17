@@ -47,7 +47,7 @@ constexpr EffectResourcePin kPins[] = {
 };
 
 constexpr std::uint32_t kFxMagicValue = 0x31305846u;  // 'FX01'
-constexpr std::uint32_t kFxBytes = 96u;
+constexpr std::uint32_t kFxBytes = 184u;
 enum FxOff : std::uint32_t {
     kFxMagic = 0,
     kFxDevice = 4,
@@ -73,18 +73,38 @@ enum FxOff : std::uint32_t {
     kFxTexTable = 84,    // guest EA：kFxTexCap 项 × 8 B（name_ea, texture EA）
     kFxFloatCap = 88,
     kFxTexCap = 92,
+    // ★ A 单（202）：`SetVector` / `SetMatrix` 两槽。⛔ 不塞进上面的 float 表（一个 `float4x4`
+    //   就 16 float，会把 Fade/203 的常量表挤爆）；矩阵是状态块里的**一块独立 64 B 区**。
+    kFxSetVectors = 96,
+    kFxSetMatrices = 100,
+    kFxVectorCount = 104,
+    kFxVectorTable = 108,  // guest EA：kFxVectorCap 项 × 20 B（name_ea, 4 个 float）
+    kFxVectorCap = 112,
+    kFxMatrix = 116,       // **内联 64 B**：16 个 float（D3DX 行主序；没设过 ⇒ 全 0）
+    kFxMatrixName = 180,   // guest EA：这块矩阵是谁设的（0 = 没设过）
 };
 constexpr std::uint32_t kFxEntryBytes = 8u;
+constexpr std::uint32_t kFxVectorEntryBytes = 20u;  // name_ea(4) + 4 个 float(16)
 constexpr std::uint32_t kFxInitialFloatCap = 8u;
 constexpr std::uint32_t kFxInitialTexCap = 4u;
+constexpr std::uint32_t kFxInitialVectorCap = 2u;
 constexpr std::uint32_t kFxMaxFloatCap = 256u;  // 上限（防跑飞；引擎实测 7 个名字）
 constexpr std::uint32_t kFxMaxTexCap = 32u;     // 引擎实测 2 张
+constexpr std::uint32_t kFxMaxVectorCap = 32u;  // 引擎实测 1 个（202 的 Color）
 constexpr std::uint32_t kFxShaChars = 64u;
 // E_OUTOFMEMORY（winerror.h）：guest 堆不够时交回 guest 的 HRESULT（⛔ 不记成 unimplemented）
 constexpr std::uint32_t kOutOfMemory = 0x8007000Eu;
 
 // guest 内存里的 u32 自增（没有 rd32Ref 这种接口）
 void bump32(X86& cpu, std::uint32_t ea) { cpu.mem->wr32(ea, cpu.mem->rd32(ea) + 1u); }
+
+// guest 内存里的一个 float（`SetVector` / `SetMatrix` 的 `const float*` 实参）
+float rdGuestF32(X86& cpu, std::uint32_t ea) {
+    const std::uint32_t bits = cpu.mem->rd32(ea);
+    float out = 0.0f;
+    std::memcpy(&out, &bits, sizeof(out));
+    return out;
+}
 
 // 日志前缀与 d3dx9.cpp 同形（`[d3dx9] <what>: `）
 void fxLog(const char* what, const char* fmt, ...) {
@@ -176,8 +196,10 @@ int findName(X86& cpu, std::uint32_t table, std::uint32_t count, const std::stri
 }
 
 // 表满 ⇒ 扩一倍（上限见常量）。返回 false = 堆不够 / 超过上限（why 点名）。
+// ★ `entry_bytes` 是表项宽度（float/纹理表 8 B、向量表 20 B）—— ⛔ 不写死 `kFxEntryBytes`：
+//   那样加向量表时会按 8 B 扩容、把 4 个 float 的一行切成两行（静默错位）。
 bool growTable(X86& cpu, std::uint32_t state, std::uint32_t table_off, std::uint32_t cap_off,
-               std::uint32_t max_cap, const char* what, std::string* why) {
+               std::uint32_t max_cap, std::uint32_t entry_bytes, const char* what, std::string* why) {
     const std::uint32_t cap = cpu.mem->rd32(state + cap_off);
     if (cap >= max_cap) {
         if (why) *why = std::string("D3DX9 effect：") + what + "表已达上限 " + std::to_string(max_cap);
@@ -185,7 +207,7 @@ bool growTable(X86& cpu, std::uint32_t state, std::uint32_t table_off, std::uint
     }
     const std::uint32_t next = (cap * 2u > max_cap) ? max_cap : cap * 2u;
     const std::uint32_t table = cpu.mem->rd32(state + table_off);
-    const std::uint32_t grown = cpu.heap->realloc(table, next * kFxEntryBytes, /*zero=*/true);
+    const std::uint32_t grown = cpu.heap->realloc(table, next * entry_bytes, /*zero=*/true);
     if (grown == 0) {
         if (why) *why = std::string("D3DX9 effect：guest 堆扩充 ") + what + "表失败：" + cpu.heap->lastError();
         return false;
@@ -767,11 +789,46 @@ std::uint32_t fxTextureValue(X86& cpu, std::uint32_t state, const std::string& n
     return 0;
 }
 
+// `SetVector` 记录里按名字取 4 个 float（没有 ⇒ false；`out` 不动）
+bool fxVectorValue(X86& cpu, std::uint32_t state, const std::string& name, float out[4]) {
+    const std::uint32_t count = cpu.mem->rd32(state + kFxVectorCount);
+    const std::uint32_t table = cpu.mem->rd32(state + kFxVectorTable);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const std::uint32_t entry = table + i * kFxVectorEntryBytes;
+        const std::uint32_t name_ea = cpu.mem->rd32(entry);
+        if (name_ea == 0) continue;
+        if (cpu.mem->readCString(name_ea) != name) continue;
+        for (std::uint32_t c = 0; c < 4; ++c) {
+            const std::uint32_t bits = cpu.mem->rd32(entry + 4u + c * 4u);
+            std::memcpy(&out[c], &bits, sizeof(float));
+        }
+        return true;
+    }
+    return false;
+}
+
+// 矩阵槽：按**名字**取值。`SetMatrix` 只设过一块（`kFxMaxMatrixParams == 1`）⇒
+//   名字不符 = 这个 uniform **没被设过** ⇒ false（`out` 保持全 0，⛔ 不默认成单位阵）。
+bool fxMatrixValue(X86& cpu, std::uint32_t state, const std::string& name, float out[16], bool* set) {
+    const std::uint32_t name_ea = cpu.mem->rd32(state + kFxMatrixName);
+    const bool hit = name_ea != 0 && cpu.mem->readCString(name_ea) == name;
+    for (std::uint32_t c = 0; c < 16; ++c) {
+        const std::uint32_t bits = cpu.mem->rd32(state + kFxMatrix + c * 4u);
+        std::memcpy(&out[c], &bits, sizeof(float));
+    }
+    if (set != nullptr) *set = hit;
+    return hit;
+}
+
 constexpr EffectProgramBinding kBindings[] = {
     // 资源 201：`technique Fade { pass P0 { PixelShader=compile ps_2_0 FadePS(); } }`
     {kEffectIdFadePs20, "Fade", "FadePS", "ps_2_0", d3d9::EffectProgram::FadePs20},
     // 资源 200：同一份文本、`compile ps_1_0`（逐通道直接 lerp）
     {kEffectIdFadePs10, "Fade", "FadePS", "ps_1_0", d3d9::EffectProgram::FadePs10},
+    // 资源 202：`technique Snow` / `compile ps_1_0 SnowPS()`（`return tex2D(TexSmp, UV)*Color;`）
+    //   ★ 同一 pass 还有 `VertexShader=compile vs_1_0 SnowVS()`：PS 由这张表兑现，VS 由
+    //     `kVertexBindings`（CPU 顶点程序）兑现 —— 两张表各管一半，⛔ 不互相冒充。
+    {kEffectIdSnowPs10, "Snow", "SnowPS", "ps_1_0", d3d9::EffectProgram::SnowPs10},
     // 资源 203：**两个** technique，各自一个 pass（P3；`ps_2_0`）
     //   · SlideBlur：21 tap（`for( float i = -10.0f; i <= 10.0f; i++ )`，每 tap `0.0476f`）
     //   · ZoomBlur ：10 tap（`for( float i = 0.0f; i < 10.0f; i++ )`，权重 = 文本的 `ratio[10]`）
@@ -781,7 +838,28 @@ constexpr EffectProgramBinding kBindings[] = {
     {0u, nullptr, nullptr, nullptr, d3d9::EffectProgram::None},
 };
 
+// VS 实现集：`(vertex_entry, vertex_profile)` 命中 **且只有** 这张表里的那些 ⇒ 允许。
+// ★ 为什么按名字而不是"凡 vs_1_0"：本线的 CPU 顶点程序是**逐句照** `SnowVS` 的源文本写的一个
+//   函数（`Pos = mul(pos, Proj); UV = uv;`，见 `d3d9_pipeline.cpp` 的 `transformVertexVs10`）。
+//   只有"这条 VS 的语义就是那一个式子"时才兑现得了 ⇒ 名字 + profile 一起钉。
+//   ⛔ 未命中（`vs_2_0` / `vs_3_0` / 别的 entry）⇒ 调用方**具名拒绝**，不猜"大概差不多"。
+struct EffectVertexBinding {
+    const char* entry;
+    const char* profile;
+};
+constexpr EffectVertexBinding kVertexBindings[] = {
+    {"SnowVS", "vs_1_0"},  // 资源 202：`void SnowVS(pos, uv, out Pos, out UV) { Pos=mul(pos,Proj); UV=uv; }`
+    {nullptr, nullptr},
+};
+
 }  // namespace
+
+bool effectVertexProgramSupported(const std::string& entry, const std::string& profile) {
+    for (const EffectVertexBinding* b = kVertexBindings; b->entry != nullptr; ++b) {
+        if (entry == b->entry && profile == b->profile) return true;
+    }
+    return false;
+}
 
 const EffectProgramBinding* effectProgramBindings() { return kBindings; }
 
@@ -839,6 +917,8 @@ bool effectDrawProgram(X86& cpu, std::uint32_t state, d3d9::EffectDrawProgram* o
     const auto unimplemented = [out, &context](const std::string& reason) {
         out->implemented = false;
         out->program = d3d9::EffectProgram::None;
+        out->has_vs = false;
+        out->vs_matrix_set = false;
         out->constant_count = 0;
         out->texture_count = 0;
         out->reason = context + reason;
@@ -848,9 +928,17 @@ bool effectDrawProgram(X86& cpu, std::uint32_t state, d3d9::EffectDrawProgram* o
     if (pass == nullptr) {
         return unimplemented("这个 pass 不在 FX 文本里（technique 表与 pass 数都由文本解析得出）");
     }
+    // ★ A 单：带 VertexShader 的 pass **不再一律拒绝** —— 按 (entry, profile) 查 VS 实现集。
+    //   命中 ⇒ 这一批的顶点改用 CPU 顶点程序（`transformVertexVs10`）；未命中 ⇒ 仍然具名拒绝。
+    //   ⛔ 不是"凡 vs_1_0 都放行"：表在 `kVertexBindings`（唯一的 CPU 顶点程序是 SnowVS 那条）。
     if (pass->has_vertex_shader) {
-        return unimplemented("pass 带 VertexShader（" + pass->vertex_profile + " " + pass->vertex_entry +
-                             "）⇒ 本线不做 GPU 顶点着色（T&L 留在 CPU，见 design-notes 的 L3-tl-01）");
+        if (!effectVertexProgramSupported(pass->vertex_entry, pass->vertex_profile)) {
+            return unimplemented("pass 的 VertexShader 不在 VS 实现集里（" + pass->vertex_profile + " " +
+                                 pass->vertex_entry +
+                                 "）⇒ 本线只有一个 CPU 顶点程序（vs_1_0 的 SnowVS：Pos=mul(pos,Proj)、"
+                                 "uv 直通、无光照）；按 (entry, profile) 查表，⛔ 不是凡 vs_1_0 都放行");
+        }
+        out->has_vs = true;
     }
     if (!pass->has_pixel_shader) {
         return unimplemented("pass 没有 PixelShader 赋值（本模块只建模 PixelShader / VertexShader 两条 pass 状态）");
@@ -867,17 +955,52 @@ bool effectDrawProgram(X86& cpu, std::uint32_t state, d3d9::EffectDrawProgram* o
     if (binding == nullptr) {
         return unimplemented("shader 程序不在实现集里：entry=" + pass->pixel_entry + " profile=" +
                              pass->pixel_profile +
-                             "（P3 的实现集 = Fade 的 ps_2_0/ps_1_0 + 203 的 SlideBlur/ZoomBlur ps_2_0；"
-                             "202 的 Snow 带 vs_1_0 ⇒ 不在这条线里）");
+                             "（本线的实现集 = Fade 的 ps_2_0/ps_1_0 + Snow 的 ps_1_0 + 203 的 "
+                             "SlideBlur/ZoomBlur ps_2_0）");
     }
     const FxShader* shader = fxFindShader(*module, pass->pixel_entry);
     if (shader == nullptr) {
         return unimplemented("pass 引用的 " + pass->pixel_entry + "() 在 FX 文本里没有定义");
     }
     // ---- 常量表：按**声明顺序**（uniform；`texture` 参数不算常量）----
+    // ★ 类型决定占几个 float（⛔ 不按"每个常量 1 个 float"硬展开）：
+    //   `float` ⇒ 1（`SetFloat`）/ `float4` ⇒ 4（`SetVector` 的 4 个 float）/
+    //   `float4x4` ⇒ **不进常量表**（进 `vs_matrix`，CPU 顶点程序用掉；后端 push constant 只有 32 B）/
+    //   `texture` ⇒ 跳过（由 sampler 的 `Texture=<名字>` 引用）。
     std::uint32_t constant_count = 0;
+    bool matrix_seen = false;
     for (const FxConstant& c : module->constants) {
         if (fxIsTextureType(c.type)) continue;
+        if (c.type == "float4x4") {
+            if (!pass->has_vertex_shader) {
+                return unimplemented("FX 文本有 float4x4 常量 `" + c.name +
+                                     "`，但这个 pass 没有 VertexShader ⇒ 本线没有它的去处"
+                                     "（矩阵只喂 CPU 顶点程序，⛔ 不进 uniform）");
+            }
+            if (matrix_seen) {
+                return unimplemented("FX 文本有多个 float4x4 常量（第二个是 `" + c.name +
+                                     "）⇒ 本线的矩阵槽只有一块 64 B（kFxMaxMatrixParams=1）");
+            }
+            matrix_seen = true;
+            // 没设过 ⇒ 全 0（D3D 的 uniform 初值；⛔ 不默认成单位阵）
+            fxMatrixValue(cpu, state, c.name, out->vs_matrix, &out->vs_matrix_set);
+            continue;
+        }
+        if (c.type == "float4") {
+            float v4[4] = {0.0f, 0.0f, 0.0f, 0.0f};  // 没 SetVector 过 ⇒ 0
+            fxVectorValue(cpu, state, c.name, v4);
+            if (constant_count + 4u > d3d9::kEffectMaxConstants) {
+                return unimplemented("FX 文本的 uniform 常量（含 float4 展开）超过后端容量 " +
+                                     std::to_string(d3d9::kEffectMaxConstants) + "（⛔ 不截断）");
+            }
+            for (std::uint32_t k = 0; k < 4u; ++k) out->constants[constant_count + k] = v4[k];
+            constant_count += 4u;
+            continue;
+        }
+        if (c.type != "float") {
+            return unimplemented("FX 文本的 uniform 类型 `" + c.type + "` 不在本线建模的 "
+                                 "float / float4 / float4x4 / texture 里（常量 `" + c.name + "`）");
+        }
         if (constant_count >= d3d9::kEffectMaxConstants) {
             return unimplemented("FX 文本的 uniform 常量超过后端容量 " +
                                  std::to_string(d3d9::kEffectMaxConstants) + "（⛔ 不截断）");
@@ -1081,10 +1204,12 @@ std::uint32_t createEffectState(X86& cpu, std::uint32_t device_object, const Eff
     }
     const std::uint32_t floats = cpu.heap->alloc(kFxInitialFloatCap * kFxEntryBytes, /*zero=*/true);
     const std::uint32_t textures = cpu.heap->alloc(kFxInitialTexCap * kFxEntryBytes, /*zero=*/true);
+    const std::uint32_t vectors = cpu.heap->alloc(kFxInitialVectorCap * kFxVectorEntryBytes, /*zero=*/true);
     const std::uint32_t sha = cpu.heap->alloc(kFxShaChars + 1u, /*zero=*/true);
-    if (floats == 0 || textures == 0 || sha == 0) {
+    if (floats == 0 || textures == 0 || vectors == 0 || sha == 0) {
         if (floats != 0) cpu.heap->free(floats);
         if (textures != 0) cpu.heap->free(textures);
+        if (vectors != 0) cpu.heap->free(vectors);
         if (sha != 0) cpu.heap->free(sha);
         cpu.heap->free(state);
         if (out_of_memory) *out_of_memory = true;
@@ -1099,8 +1224,12 @@ std::uint32_t createEffectState(X86& cpu, std::uint32_t device_object, const Eff
     cpu.mem->wr32(state + kFxSha, sha);
     cpu.mem->wr32(state + kFxFloatTable, floats);
     cpu.mem->wr32(state + kFxTexTable, textures);
+    cpu.mem->wr32(state + kFxVectorTable, vectors);
     cpu.mem->wr32(state + kFxFloatCap, kFxInitialFloatCap);
     cpu.mem->wr32(state + kFxTexCap, kFxInitialTexCap);
+    cpu.mem->wr32(state + kFxVectorCap, kFxInitialVectorCap);
+    // ★ 矩阵区在状态块内联（64 B）⇒ 分配时已清零 ⇒ "没设过 = 全 0" 天然成立
+    //   （⛔ 不在这里写单位阵：那会掩盖"引擎没 SetMatrix 过"）。
     return state;
 }
 
@@ -1125,12 +1254,21 @@ void destroyEffectState(X86& cpu, std::uint32_t state) {
         const std::uint32_t name_ea = cpu.mem->rd32(tex_table + i * kFxEntryBytes);
         if (name_ea != 0) cpu.heap->free(name_ea);
     }
+    const std::uint32_t vec_count = cpu.mem->rd32(state + kFxVectorCount);
+    const std::uint32_t vec_table = cpu.mem->rd32(state + kFxVectorTable);
+    for (std::uint32_t i = 0; i < vec_count; ++i) {
+        const std::uint32_t name_ea = cpu.mem->rd32(vec_table + i * kFxVectorEntryBytes);
+        if (name_ea != 0) cpu.heap->free(name_ea);
+    }
     const std::uint32_t tech = cpu.mem->rd32(state + kFxTech);
     const std::uint32_t sha = cpu.mem->rd32(state + kFxSha);
+    const std::uint32_t matrix_name = cpu.mem->rd32(state + kFxMatrixName);
     if (tech != 0) cpu.heap->free(tech);
     if (sha != 0) cpu.heap->free(sha);
+    if (matrix_name != 0) cpu.heap->free(matrix_name);
     if (float_table != 0) cpu.heap->free(float_table);
     if (tex_table != 0) cpu.heap->free(tex_table);
+    if (vec_table != 0) cpu.heap->free(vec_table);
     cpu.heap->free(state);
 }
 
@@ -1154,6 +1292,8 @@ bool effectInfoOfState(X86& cpu, std::uint32_t state, EffectInfo* out, std::stri
     const std::uint32_t tech = cpu.mem->rd32(state + kFxTech);
     if (tech != 0) out->technique = cpu.mem->readCString(tech);
     out->set_floats = cpu.mem->rd32(state + kFxSetFloats);
+    out->set_vectors = cpu.mem->rd32(state + kFxSetVectors);
+    out->set_matrices = cpu.mem->rd32(state + kFxSetMatrices);
     out->set_textures = cpu.mem->rd32(state + kFxSetTextures);
     out->set_techniques = cpu.mem->rd32(state + kFxSetTechniques);
     out->begins = cpu.mem->rd32(state + kFxBegins);
@@ -1162,7 +1302,9 @@ bool effectInfoOfState(X86& cpu, std::uint32_t state, EffectInfo* out, std::stri
     out->end_passes = cpu.mem->rd32(state + kFxEndPasses);
     out->ends = cpu.mem->rd32(state + kFxEnds);
     out->float_param_count = cpu.mem->rd32(state + kFxFloatCount);
+    out->vector_param_count = cpu.mem->rd32(state + kFxVectorCount);
     out->texture_count = cpu.mem->rd32(state + kFxTexCount);
+    out->matrix_set = cpu.mem->rd32(state + kFxMatrixName) != 0;
     return true;
 }
 
@@ -1189,6 +1331,38 @@ bool effectFloatParamAt(X86& cpu, std::uint32_t state, std::uint32_t index, std:
     const std::uint32_t bits = cpu.mem->rd32(entry + 4);
     if (name) *name = name_ea != 0 ? cpu.mem->readCString(name_ea) : std::string();
     if (value) std::memcpy(value, &bits, sizeof(float));
+    return true;
+}
+
+bool effectVectorParamAt(X86& cpu, std::uint32_t state, std::uint32_t index, std::string* name,
+                         float value[4]) {
+    std::string why;
+    if (!stateOk(cpu, state, &why)) return false;
+    if (index >= cpu.mem->rd32(state + kFxVectorCount)) return false;
+    const std::uint32_t entry = cpu.mem->rd32(state + kFxVectorTable) + index * kFxVectorEntryBytes;
+    const std::uint32_t name_ea = cpu.mem->rd32(entry);
+    if (name) *name = name_ea != 0 ? cpu.mem->readCString(name_ea) : std::string();
+    if (value != nullptr) {
+        for (std::uint32_t c = 0; c < 4; ++c) {
+            const std::uint32_t bits = cpu.mem->rd32(entry + 4u + c * 4u);
+            std::memcpy(&value[c], &bits, sizeof(float));
+        }
+    }
+    return true;
+}
+
+bool effectMatrixParamAt(X86& cpu, std::uint32_t state, std::string* name, float value[16], bool* set) {
+    std::string why;
+    if (!stateOk(cpu, state, &why)) return false;
+    const std::uint32_t name_ea = cpu.mem->rd32(state + kFxMatrixName);
+    if (name) *name = name_ea != 0 ? cpu.mem->readCString(name_ea) : std::string();
+    if (value != nullptr) {
+        for (std::uint32_t c = 0; c < 16; ++c) {
+            const std::uint32_t bits = cpu.mem->rd32(state + kFxMatrix + c * 4u);
+            std::memcpy(&value[c], &bits, sizeof(float));
+        }
+    }
+    if (set != nullptr) *set = name_ea != 0;
     return true;
 }
 
@@ -1226,7 +1400,7 @@ std::uint32_t effectSetFloat(X86& cpu, std::uint32_t state, const std::string& n
     } else {
         std::string grew;
         if (count >= cpu.mem->rd32(state + kFxFloatCap)) {
-            if (!growTable(cpu, state, kFxFloatTable, kFxFloatCap, kFxMaxFloatCap,
+            if (!growTable(cpu, state, kFxFloatTable, kFxFloatCap, kFxMaxFloatCap, kFxEntryBytes,
                            "float", &grew)) {
                 if (why) *why = grew;
                 return kOutOfMemory;
@@ -1248,6 +1422,102 @@ std::uint32_t effectSetFloat(X86& cpu, std::uint32_t state, const std::string& n
     return d3dx9::kOk;
 }
 
+// `SetVector("Color", &float4)`：照 `effectSetFloat` 的形状，但一项占 **20 B**（name_ea + 4 float）。
+// ★ 为什么单独一张表：`float4` 与 `float` 的**宽度不同**，混进同一张 8 B 表会把 4 个 float 切成
+//   两行（表项错位），且 `effectDrawProgram` 要按 FX 文本里的类型决定读 1 个还是 4 个。
+std::uint32_t effectSetVector(X86& cpu, std::uint32_t state, const std::string& name,
+                              const float value[4], std::string* why) {
+    if (!stateOk(cpu, state, why)) return d3dx9::kInvalidCall;
+    if (name.empty()) {
+        if (why) *why = "D3DX9 effect：SetVector 的参数名为空（D3DX 合法名必须非空）";
+        return d3dx9::kInvalidArg;
+    }
+    const std::uint32_t count = cpu.mem->rd32(state + kFxVectorCount);
+    int found = -1;
+    {
+        const std::uint32_t table = cpu.mem->rd32(state + kFxVectorTable);
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const std::uint32_t name_ea = cpu.mem->rd32(table + i * kFxVectorEntryBytes);
+            if (name_ea != 0 && cpu.mem->readCString(name_ea) == name) {
+                found = static_cast<int>(i);
+                break;
+            }
+        }
+    }
+    std::uint32_t entry = 0;
+    if (found >= 0) {
+        entry = cpu.mem->rd32(state + kFxVectorTable) +
+                static_cast<std::uint32_t>(found) * kFxVectorEntryBytes;
+    } else {
+        std::string grew;
+        if (count >= cpu.mem->rd32(state + kFxVectorCap)) {
+            if (!growTable(cpu, state, kFxVectorTable, kFxVectorCap, kFxMaxVectorCap,
+                           kFxVectorEntryBytes, "向量", &grew)) {
+                if (why) *why = grew;
+                return kOutOfMemory;
+            }
+        }
+        const std::uint32_t name_ea = allocName(cpu, name);
+        if (name_ea == 0) {
+            if (why) *why = std::string("D3DX9 effect：guest 堆分配向量参数名失败：") + cpu.heap->lastError();
+            return kOutOfMemory;
+        }
+        entry = cpu.mem->rd32(state + kFxVectorTable) + count * kFxVectorEntryBytes;
+        cpu.mem->wr32(entry, name_ea);
+        cpu.mem->wr32(state + kFxVectorCount, count + 1u);
+        fxLog("ID3DXEffect::SetVector", "\"%s\" = (%g, %g, %g, %g)（第 %u 个向量参数）", name.c_str(),
+              static_cast<double>(value[0]), static_cast<double>(value[1]),
+              static_cast<double>(value[2]), static_cast<double>(value[3]), count + 1u);
+    }
+    for (std::uint32_t c = 0; c < 4; ++c) {
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &value[c], sizeof(bits));
+        cpu.mem->wr32(entry + 4u + c * 4u, bits);
+    }
+    bump32(cpu, state + kFxSetVectors);
+    return d3dx9::kOk;
+}
+
+// `SetMatrix("Proj", &float4x4)`：写进状态块的**独立 64 B 区**（⛔ 不进 constants[]）。
+// ★ 同名覆盖：直接重写那 16 个 float。
+// ★ 不同名：这块区只有一份（`kFxMaxMatrixParams == 1`）⇒ 覆盖并把名字换成新的，同时**警告**
+//   —— 旧的那个 uniform 就此"没被设过"（D3D 语义：它的值仍是初值 0）。⛔ 不静默留两个名字。
+std::uint32_t effectSetMatrix(X86& cpu, std::uint32_t state, const std::string& name,
+                              const float matrix[16], std::string* why) {
+    if (!stateOk(cpu, state, why)) return d3dx9::kInvalidCall;
+    if (name.empty()) {
+        if (why) *why = "D3DX9 effect：SetMatrix 的参数名为空（D3DX 合法名必须非空）";
+        return d3dx9::kInvalidArg;
+    }
+    const std::uint32_t old = cpu.mem->rd32(state + kFxMatrixName);
+    const bool same = old != 0 && cpu.mem->readCString(old) == name;
+    if (!same) {
+        const std::uint32_t name_ea = allocName(cpu, name);
+        if (name_ea == 0) {
+            if (why) *why = std::string("D3DX9 effect：guest 堆分配矩阵参数名失败：") + cpu.heap->lastError();
+            return kOutOfMemory;
+        }
+        if (old != 0) {
+            fxWarn("ID3DXEffect::SetMatrix",
+                   "矩阵槽被换名：\"%s\" → \"%s\"（本线的矩阵槽只有一块 64 B；"
+                   "kFxMaxMatrixParams=1 ⇒ 旧的那个 uniform 回到「没设过 = 全 0」）",
+                   cpu.mem->readCString(old).c_str(), name.c_str());
+            cpu.heap->free(old);
+        }
+        cpu.mem->wr32(state + kFxMatrixName, name_ea);
+    }
+    for (std::uint32_t c = 0; c < 16; ++c) {
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &matrix[c], sizeof(bits));
+        cpu.mem->wr32(state + kFxMatrix + c * 4u, bits);
+    }
+    bump32(cpu, state + kFxSetMatrices);
+    if (!same) {
+        fxLog("ID3DXEffect::SetMatrix", "\"%s\" = 16 float（独立 64 B 区）", name.c_str());
+    }
+    return d3dx9::kOk;
+}
+
 std::uint32_t effectSetTexture(X86& cpu, std::uint32_t state, const std::string& name, std::uint32_t texture,
                          std::string* why) {
     if (!stateOk(cpu, state, why)) return d3dx9::kInvalidCall;
@@ -1264,7 +1534,7 @@ std::uint32_t effectSetTexture(X86& cpu, std::uint32_t state, const std::string&
     } else {
         std::string grew;
         if (count >= cpu.mem->rd32(state + kFxTexCap)) {
-            if (!growTable(cpu, state, kFxTexTable, kFxTexCap, kFxMaxTexCap, "纹理",
+            if (!growTable(cpu, state, kFxTexTable, kFxTexCap, kFxMaxTexCap, kFxEntryBytes, "纹理",
                            &grew)) {
                 if (why) *why = grew;
                 return kOutOfMemory;
@@ -1531,6 +1801,51 @@ void shimEffectSetFloat(X86& cpu, ShimCall& call) {
     call.result = hr == d3dx9::kOk ? hr : reportMethodFailure(cpu, "ID3DXEffect::SetFloat", hr, why);
 }
 
+// `SetVector(+0x88)`（引擎在 `0x4B55AD` 用它对 `Color` 设每粒子的 uniform float4）
+// 与 `SetMatrix(+0x98)`（`0x4B5716` 设 `Proj`，**在 Begin 之前**）—— 两个槽都只**记状态**：
+// 状态块里的矩阵/向量区 ⇒ `Begin`/`BeginPass` 发布时被 `effectDrawProgram` 读走（⛔ 不做全局）。
+void shimEffectSetVector(X86& cpu, ShimCall& call) {
+    const std::uint32_t state = requireEffect(cpu, call, "ID3DXEffect::SetVector(+0x88)");
+    if (state == 0) {
+        call.result = d3dx9::kInvalidCall;
+        return;
+    }
+    const std::string name = stringArg(cpu, call.u32(1), "ID3DXEffect::SetVector(+0x88)");
+    const std::uint32_t ea = call.u32(2);
+    if (ea == 0 || !cpu.mem->committed(ea, 16)) {
+        fxTrap(cpu, "ID3DXEffect::SetVector(+0x88)", "pVector=0x%08X 为 NULL / 未提交（要 4 个 float）", ea);
+        call.result = d3dx9::kInvalidCall;
+        return;
+    }
+    float value[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (std::uint32_t c = 0; c < 4; ++c) value[c] = rdGuestF32(cpu, ea + c * 4u);
+    std::string why;
+    const std::uint32_t hr = d3dx9::effectSetVector(cpu, state, name, value, &why);
+    if (hr == d3dx9::kOk) publishDrawProgram(cpu, state);
+    call.result = hr == d3dx9::kOk ? hr : reportMethodFailure(cpu, "ID3DXEffect::SetVector", hr, why);
+}
+
+void shimEffectSetMatrix(X86& cpu, ShimCall& call) {
+    const std::uint32_t state = requireEffect(cpu, call, "ID3DXEffect::SetMatrix(+0x98)");
+    if (state == 0) {
+        call.result = d3dx9::kInvalidCall;
+        return;
+    }
+    const std::string name = stringArg(cpu, call.u32(1), "ID3DXEffect::SetMatrix(+0x98)");
+    const std::uint32_t ea = call.u32(2);
+    if (ea == 0 || !cpu.mem->committed(ea, 64)) {
+        fxTrap(cpu, "ID3DXEffect::SetMatrix(+0x98)", "pMatrix=0x%08X 为 NULL / 未提交（要 16 个 float）", ea);
+        call.result = d3dx9::kInvalidCall;
+        return;
+    }
+    float matrix[16] = {};
+    for (std::uint32_t c = 0; c < 16; ++c) matrix[c] = rdGuestF32(cpu, ea + c * 4u);
+    std::string why;
+    const std::uint32_t hr = d3dx9::effectSetMatrix(cpu, state, name, matrix, &why);
+    if (hr == d3dx9::kOk) publishDrawProgram(cpu, state);
+    call.result = hr == d3dx9::kOk ? hr : reportMethodFailure(cpu, "ID3DXEffect::SetMatrix", hr, why);
+}
+
 void shimEffectSetTexture(X86& cpu, ShimCall& call) {
     const std::uint32_t state = requireEffect(cpu, call, "ID3DXEffect::SetTexture(+0xD0)");
     if (state == 0) {
@@ -1638,7 +1953,10 @@ void shimEffectEnd(X86& cpu, ShimCall& call) {
     call.result = hr == d3dx9::kOk ? hr : reportMethodFailure(cpu, "ID3DXEffect::End", hr, why);
 }
 
-// ID3DXEffect：S0 §3.2 的 9 个取证槽 + IUnknown 的 QueryInterface/AddRef（Release 是第 3 槽）。
+// ID3DXEffect：S0 §3.2 的 9 个取证槽 + A 单的 2 槽（+0x88 / +0x98）+ IUnknown 的
+// QueryInterface/AddRef（Release 是第 3 槽）。
+// ★ +0x88 SetVector / +0x98 SetMatrix 的取证：202 的 `Snow::DrawOne` 用 `[eax+88h]` 设 `Color`、
+//   `Snow::Render` 用 `[ecx+98h]` 设 `Proj`（EA 锚 `0x4B55AD` / `0x4B5716`）。
 // ★ +0x110 GetDevice / +0x114 OnLostDevice / +0x118 OnResetDevice **没被读到** ⇒ fn=nullptr
 //   ⇒ `comUnsupported` 的 loud trap（⛔ 不按"应该会调"补）。填在这里的另一个作用：
 //   它们落在 vtable 内（⛔ 不越界），trap 时能打印 iface + 偏移。
@@ -1648,6 +1966,8 @@ const std::vector<ComMethod>& effectMethods() {
         {0x04u, "AddRef", Conv::Stdcall, 0, &shimEffectAddRef},
         {0x08u, "Release", Conv::Stdcall, 0, &shimEffectRelease},              // ★ 0x4AB454
         {0x78u, "SetFloat", Conv::Stdcall, 2, &shimEffectSetFloat},            // ★ 0x4B3D3E / …
+        {0x88u, "SetVector", Conv::Stdcall, 2, &shimEffectSetVector},          // ★ 0x4B55AD（Color）
+        {0x98u, "SetMatrix", Conv::Stdcall, 2, &shimEffectSetMatrix},          // ★ 0x4B5716（Proj）
         {0xD0u, "SetTexture", Conv::Stdcall, 2, &shimEffectSetTexture},        // ★ 0x4B3D68 / …
         {0xE8u, "SetTechnique", Conv::Stdcall, 1, &shimEffectSetTechnique},    // ★ 0x4B3D21 / …
         {0xFCu, "Begin", Conv::Stdcall, 2, &shimEffectBegin},                  // ★ 0x4B3DAC / 0x4B3667

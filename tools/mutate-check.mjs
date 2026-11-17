@@ -4051,6 +4051,83 @@ const MUTATIONS = [
       'effect-draw-blur-recorded 在 `program == SlideBlurPs20` 上当场红（纯档、不依赖 GPU），' +
       'blur-pixels 也会红；★ 这条对 win32（DXBC）同样成立',
   },
+
+  // ── A 单（`REQ-01M7NAW2QT3TG9RCFMKR052C83` · 202 Snow）① · 矩阵槽截断成 4 float ──
+  //   故障形态：`SetMatrix("Proj")` 的 16 个 float 只写进前 4 个（`c < 16` → `c < 4`）。
+  //   ★ 这是最像"能跑"的破坏：shim 不报错、`SetMatrix` 返回 S_OK、程序照样 recorded，
+  //     只有**矩阵的 12 个元素恒 0** ⇒ 顶点被压成一条线（画面全错而账上无声）。
+  //   ⇒ 判据必须是**矩阵的逐元素读数**（16 个）与**顶点对照**，⛔ "SetMatrix 成功了"发现不了。
+  {
+    file: 'apps/emulator-lift/src/shims/d3dx9_effect.cpp',
+    from:
+      '    for (std::uint32_t c = 0; c < 16; ++c) {\n' +
+      '        std::uint32_t bits = 0;\n' +
+      '        std::memcpy(&bits, &matrix[c], sizeof(bits));\n' +
+      '        cpu.mem->wr32(state + kFxMatrix + c * 4u, bits);',
+    to:
+      '    for (std::uint32_t c = 0; c < 4; ++c) {  // 变异：矩阵槽截断成 4 float\n' +
+      '        std::uint32_t bits = 0;\n' +
+      '        std::memcpy(&bits, &matrix[c], sizeof(bits));\n' +
+      '        cpu.mem->wr32(state + kFxMatrix + c * 4u, bits);',
+    guard: 'ctest:d3dx9-effect',
+    ctest: 'd3dx9-effect',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3dx9-effect',
+    what:
+      '`SetMatrix` 只写矩阵的 4 个 float（`c < 16` → `c < 4`）⇒ `Proj` 的后 12 个元素恒 0 ⇒ ' +
+      '`d3dx9-effect` 的 effect-draw-snow-recorded 在 `sc.program.vs_matrix[i] == proj16[i]`（i≥4）与 ' +
+      '`effectMatrixParamAt` 上当场红，snow-vertices 的单位/缩放对照也会红；' +
+      '★ 只断言"SetMatrix 返回 S_OK / 程序 recorded"会假绿',
+  },
+
+  // ── A 单 ② · `ps_1_0 SnowPS` **漏乘 `Color`**（`src/runtime/d3d9_gpu.cpp` 的 **DXBC** 块）──
+  //   源文本：`return tex2D(TexSmp, UV) * Color;`。故障形态：乘法没了（只剩纹理采样）。
+  //   ★ 为什么打 **DXBC** 那份：win32 的 SDL_GPU 后端只编 DXBC（`LIFT_*` 下的 `_WIN32` 分支），
+  //     改 MSL 那份在这台机器上**编译都不进**（那正是 P2②/P3① 两条变异在 win32 不适用的原因）。
+  //     两份源必须逐句一致（注释里互相点名）⇒ 这条与那两条合起来覆盖双源。
+  //   ★ 为什么"漏乘"是最像能跑的破坏：画面上雪照样是白色的（`Color` 的 w=sin 相位只调制亮度），
+  //     控制行 `Color={0,0,0,1}`（该全 0）也不会变黑 —— 只有像素读回能抓到。
+  {
+    file: 'apps/emulator-lift/src/runtime/d3d9_gpu.cpp',
+    from:
+      'float4 PSMainSnow(FxVSOut i) : SV_Target {\n' +
+      '    const float4 Color = g_fx[0];   // float4 Color;（uniform；没 SetVector 过 ⇒ 全 0）\n' +
+      '    return g_fx_tex0.Sample(g_fx_smp0, i.uv0) * Color;',
+    to:
+      'float4 PSMainSnow(FxVSOut i) : SV_Target {\n' +
+      '    const float4 Color = g_fx[0];   // float4 Color;（uniform；没 SetVector 过 ⇒ 全 0）\n' +
+      '    return g_fx_tex0.Sample(g_fx_smp0, i.uv0);  // 变异：漏乘 Color',
+    guard: 'ctest:d3dx9-effect',
+    ctest: 'd3dx9-effect',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3dx9-effect',
+    what:
+      '202 的 DXBC 片元漏乘 `Color`（`texel * Color` → `texel`）⇒ `d3dx9-effect` 的 snow-pixels 在 ' +
+      '`Color={0.5,0.25,0.75,1}`（R 128≠255）与 `Color={0,0,0,1}` 控制行（该全 0）两档上红；' +
+      '★ 只断言"画出来了 / 有像素"会假绿',
+  },
+
+  // ── A 单 ③ · 删掉 202 的 `kBindings` 一行（跨平台那条）──
+  //   ★ 上面两条分别钉"矩阵槽"与"片元算术"；这一条钉**门牌表**本身：删掉 202 的一条 ⇒
+  //     "带 VertexShader 的 pass"重新变成"程序不在实现集"（具名拒绝）—— 也就是 A 的前置被撤掉。
+  //   ★ 与 ① ② 不同，它**不依赖平台**（纯 CPU 侧的表）：`effect-draw-snow-recorded` 的表长/门牌断言
+  //     与 `implemented` 断言同时红，snow-vertices / snow-pixels 的每一批也会因 `implemented=false`
+  //     被整批拒（`skipped_draws` 涨）⇒ 三重红。
+  {
+    file: 'apps/emulator-lift/src/shims/d3dx9_effect.cpp',
+    from:
+      '    {kEffectIdSnowPs10, "Snow", "SnowPS", "ps_1_0", d3d9::EffectProgram::SnowPs10},',
+    to: '    // 变异：删掉 202 的 binding（Snow 回到"程序不在实现集"）',
+    guard: 'ctest:d3dx9-effect',
+    ctest: 'd3dx9-effect',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3dx9-effect',
+    what:
+      '删掉 `kBindings` 里 202（Snow/SnowPS/ps_1_0）那一行 ⇒ 202 的 draw 重新变成"程序不在实现集"：' +
+      '`d3dx9-effect` 的 effect-draw-snow-recorded 在表长（seen==5）与 `implemented` 上红、' +
+      'snow-vertices / snow-pixels 的每一批被整批拒（`skipped_draws` 涨、`effect_queued==0`）；' +
+      '★ 这条是"A 的前置被撤掉"的机械证据',
+  },
 ];
 
 let mutationRunSeq = 0;

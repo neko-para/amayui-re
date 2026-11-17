@@ -204,6 +204,15 @@ float4 PSMainZoomBlur(FxVSOut i) : SV_Target {
     }
     return retCol;
 }
+// 资源 202 `technique Snow` 的 `compile ps_1_0 SnowPS()`（逐句照源文本）
+//   源文本：`float4 SnowPS( float2 UV : TEXCOORD0 ) : COLOR { return tex2D(TexSmp, UV)*Color; }`
+//   ★ `Color` 是 **uniform float4**（`SetVector("Color", …)` 记下的那一份），⛔ 不是顶点色；
+//     `Tex` 1 张 / `uv_set = 0`（`TexSmp` 采 `UV : TEXCOORD0`）。
+//   ★ `Proj`（`float4x4`）**不在这里**：那条 `vs_1_0` 由 CPU 顶点程序兑现（`transformVertexVs10`）。
+float4 PSMainSnow(FxVSOut i) : SV_Target {
+    const float4 Color = g_fx[0];   // float4 Color;（uniform；没 SetVector 过 ⇒ 全 0）
+    return g_fx_tex0.Sample(g_fx_smp0, i.uv0) * Color;
+}
 )";
 constexpr SDL_GPUShaderFormat kShaderFormat = SDL_GPU_SHADERFORMAT_DXBC;
 constexpr const char* kShaderFormatName = "DXBC";
@@ -396,6 +405,17 @@ fragment float4 PSMainZoomBlur(FxFSIn in [[stage_in]],
     }
     return retCol;
 }
+// 资源 202 `technique Snow` 的 `compile ps_1_0 SnowPS()`（逐句照源文本）
+//   源文本：`float4 SnowPS( float2 UV : TEXCOORD0 ) : COLOR { return tex2D(TexSmp, UV)*Color; }`
+//   ★ `Color` = **uniform float4**（`SetVector("Color", …)`），⛔ 不是顶点色；`Proj` 不进 uniform
+//     （CPU 顶点程序用掉它）。精度/饱和照 200 的 `PSMainFadeLinear`（同一个 `ps_1_0` 档）。
+fragment float4 PSMainSnow(FxFSIn in [[stage_in]],
+                           texture2d<float> tex0 [[texture(0)]],
+                           sampler smp0 [[sampler(0)]],
+                           constant FxUniforms& u [[buffer(0)]]) {
+    const float4 Color = u.c[0];   // float4 Color;（uniform；没 SetVector 过 ⇒ 全 0）
+    return tex0.sample(smp0, in.uv0) * Color;
+}
 )MSL";
 constexpr SDL_GPUShaderFormat kShaderFormat = SDL_GPU_SHADERFORMAT_MSL;
 constexpr const char* kShaderFormatName = "MSL";
@@ -418,9 +438,9 @@ constexpr std::size_t kTexEntryCount = sizeof(kTexEntries) / sizeof(kTexEntries[
 
 // effect 程序的 entry point 表（下标 = `GpuEffectProgram` 的整数值；★ 与 FX 文本的对应关系见
 // `shims/d3dx9_effect.h` 的 `EffectProgramBinding`：201 的 ps_2_0 ⇒ FadePs20、200 的 ps_1_0 ⇒ FadePs10、
-// 203 的 SlideBlur/ZoomBlur ⇒ SlideBlurPs20/ZoomBlurPs20）。
+// 203 的 SlideBlur/ZoomBlur ⇒ SlideBlurPs20/ZoomBlurPs20、202 的 ps_1_0 ⇒ SnowPs10）。
 //   ★ 每个 entry 还声明**它自己用几个 sampler**：Fade 采两张纹理（Tex0/Tex1 = TEXCOORD0/1），
-//     203 的两个 technique 都只采一张（`SrcTexSampler` ⇒ `Tex0`，TEXCOORD0）
+//     203 的两个 technique 与 202 的 SnowPS 都只采一张（202 是 `TexSmp ⇒ Tex`，TEXCOORD0）
 //     ⇒ ⛔ 不要给它们声明 2 个 sampler（那会让后端绑定一张用不到的纹理，且与 FX 文本不符）。
 struct FxEntry {
     const char* entry;
@@ -431,9 +451,10 @@ constexpr FxEntry kFxEntries[] = {
     {"PSMainFadeLinear", 2u},  // FadePs10（200 ps_1_0）
     {"PSMainSlideBlur", 1u},   // SlideBlurPs20（203 ps_2_0，21 tap）
     {"PSMainZoomBlur", 1u},    // ZoomBlurPs20（203 ps_2_0，10 tap）
+    {"PSMainSnow", 1u},        // SnowPs10（202 ps_1_0，`tex2D*Color`；1 张纹理 / uv0）
 };
 constexpr std::size_t kFxEntryCount = sizeof(kFxEntries) / sizeof(kFxEntries[0]);
-static_assert(kFxEntryCount == static_cast<std::size_t>(GpuEffectProgram::ZoomBlurPs20) + 1u,
+static_assert(kFxEntryCount == static_cast<std::size_t>(GpuEffectProgram::SnowPs10) + 1u,
               "kFxEntries 必须与 GpuEffectProgram 的整数值一一对应（下标 = 程序号）");
 
 // ★ 诊断用：到目前为止入队的**带批号** draw 数（`LIFT_GPU_FF_TEX` 的 `[gpu-depth]` 用它定位
@@ -2703,7 +2724,7 @@ private:
     //   ★ 与固定功能 pipeline **不共用缓存键**（分开的 map ⇒ 不可能撞）。
     SDL_GPUGraphicsPipeline* pipelineForEffect(GpuEffectProgram program, const GpuRasterState& state,
                                                std::string* err) {
-        // ★ 键里给程序号留 **3 位**（8 个程序）：`kFxEntries` 目前 4 条，⛔ 不要用 `*4` 那种
+        // ★ 键里给程序号留 **3 位**（8 个程序）：`kFxEntries` 目前 5 条，⛔ 不要用 `*4` 那种
         //   "刚好够用"的步长 —— 加第 5 个程序时它会与下一个 pipelineKey 撞进同一格。
         const std::uint64_t key = pipelineKey(state, /*textured=*/false) * 8u +
                                   static_cast<std::uint64_t>(program) + 1u;

@@ -6,7 +6,9 @@
 //      赋值 —— 出现任何别的状态名 ⇒ `UnsupportedState` + **具名原因**（⛔ 不静默忽略）。
 //   ② **程序解析**（`effectDrawProgram`）：把"当前 technique + pass"翻成
 //      `d3d9::EffectDrawProgram`（实现集内的程序 + 按声明顺序的常量表 + SetTexture 记下的纹理 EA）。
-//      不在实现集里的程序（202 Snow）⇒ `implemented=false` + 具名原因 ⇒ 调用方整批拒绝（bit 44）。
+//      不在实现集里的程序 ⇒ `implemented=false` + 具名原因 ⇒ 调用方整批拒绝（bit 44）。
+//      ★ A 单（202 的 Snow）：带 `VertexShader` 的 pass 也按 `(entry, profile)` 查 VS 实现集
+//      （`effectVertexProgramSupported`）—— 命中则 `has_vs=true`（CPU 顶点程序），否则仍具名拒绝。
 //      ③ `Begin` 的 `*pPasses` 改成**解析结果**（P1 的常量 1 退役）。
 //
 // ★ P3（同一张单）在本模块只改**最后一跳**：`EffectProgramBinding` 表加 203 的两条
@@ -40,24 +42,36 @@
 //     而且那会让"读到什么"取决于 guest 是否改过内存）。`X86::image` 为空 ⇒ 响亮失败。
 //
 // ★ `ID3DXEffect` 的槽（S0 §3.2；槽号与 `d3dx9effect.h` 的声明顺序逐位吻合，**不是猜的**）：
-//     +0x08 Release · +0x78 SetFloat · +0xD0 SetTexture · +0xE8 SetTechnique · +0xFC Begin ·
-//     +0x100 BeginPass · +0x104 CommitChanges · +0x108 EndPass · +0x10C End
-//   ⇒ 本模块填这 9 个 + IUnknown 的 QueryInterface/AddRef/Release（`createObject` 不自动给）；
+//     +0x08 Release · +0x78 SetFloat · +0x88 SetVector · +0x98 SetMatrix · +0xD0 SetTexture ·
+//     +0xE8 SetTechnique · +0xFC Begin · +0x100 BeginPass · +0x104 CommitChanges · +0x108 EndPass ·
+//     +0x10C End
+//   ⇒ 本模块填这 11 个 + IUnknown 的 QueryInterface/AddRef/Release（`createObject` 不自动给）；
 //   取证里**没读到**的 `GetDevice +0x110` / `OnLostDevice +0x114` / `OnResetDevice +0x118`
 //   显式登记成 `fn=nullptr` ⇒ `comUnsupported` 的 loud trap（⛔ 不"猜着实现"）。
-//   其余槽（0x0C..0x74 / 0x7C..0xCC 之间的 SetInt/SetBool/SetMatrix/Get* 等）由
+//   其余槽（0x0C..0x74 / 0x7C..0x84 / 0x8C..0x94 / 0x9C..0xCC 之间的 SetInt/SetBool/Get* 等）由
 //   `ComRegistry::createObject` 统一填成 `unsupported+0xNN` 的 loud trap（同一约定）。
+//   ★ 为什么补 +0x88 / +0x98（A 单，EA 锚 `0x4B5716` / `0x4B55AD`）：202 的 `Snow::Render` 在 `Begin`
+//     **之前**就 `SetMatrix("Proj", &float4x4)`、每粒子 `SetVector("Color", &float4)`；槽不存在
+//     ⇒ 引擎在雪景第一帧就 `comUnsupported` 停机（不是"少画一层雪"）。
 //
 // ★ 语义（**P2**：pass 真的执行）：
-//   · `SetFloat` / `SetTexture` / `SetTechnique` 把"参数名 → 值"记进 guest 堆上的状态块
-//     （P1 原样保留：这一层仍**不**碰 GPU、**不**提交 draw）。
+//   · `SetFloat` / `SetVector` / `SetMatrix` / `SetTexture` / `SetTechnique` 把"参数名 → 值"记进
+//     guest 堆上的状态块（P1 原样保留：这一层仍**不**碰 GPU、**不**提交 draw）。
+//     ★ 三个标量/向量/矩阵槽**分开存**（⛔ 不塞进同一张 `constants[]` 表）：
+//       float 1 个值 / `float4` 4 个值（`SetVector`）/ 矩阵**独立 64 B 区**（`SetMatrix`，16 float）。
+//       同名覆盖；**没设过 ⇒ 全 0**（D3D uniform 初值；⛔ 矩阵不默认成单位阵）。
 //   · `Begin` 的 `*pPasses` = **FX 文本解析出来的** pass 数（P1 的常量 1 已退役）；technique 没设 /
 //     名字不在文本里 ⇒ **0**（该作用域里的任何 draw 都会带具名原因被拒，⛔ 不静默接受）。
-//   · `Begin` / `BeginPass` / `CommitChanges`（以及作用域内的 `SetFloat`/`SetTexture`/`SetTechnique`）
-//     会把"这一批该怎么画"（`d3d9::EffectDrawProgram`：程序 + 常量表 + 纹理 EA + UV 集 + sampler 状态）
-//     推给 `d3d9` 的 effect 作用域 —— `gpuEligible` 据此走后端 effect 管线（每 draw 一个 shader +
-//     常量表 + 最多 2 张纹理，见 `runtime/d3d9_effect_gpu.h`）。
+//   · `Begin` / `BeginPass` / `CommitChanges`（以及作用域内的 `SetFloat`/`SetVector`/`SetMatrix`/
+//     `SetTexture`/`SetTechnique`）会把"这一批该怎么画"（`d3d9::EffectDrawProgram`：程序 + 常量表 +
+//     纹理 EA + UV 集 + sampler 状态 + **CPU 顶点程序**）推给 `d3d9` 的 effect 作用域 ——
+//     `gpuEligible` 据此走后端 effect 管线（每 draw 一个 shader + 常量表 + 最多 2 张纹理，见
+//     `runtime/d3d9_effect_gpu.h`）。
 //   · `EndPass` / `End` 只推进状态并返回 `S_OK`；乱序只 warn。
+//   ★ 为什么矩阵/`Color` 必须**进状态块**（而不是"最后一次 SetMatrix/SetVector 的全局"）：引擎的
+//     `SetMatrix("Proj")` 发生在 `Begin` **之前**（EA 锚 `0x4B5716` vs `0x4B55C4`），而
+//     `publishDrawProgram` 在 effect 作用域外是 no-op ⇒ 只有在 `Begin`/`BeginPass` 发布时**从状态块读**
+//     才拿得到那一份（N3 §11.3 的结论）。
 //
 // ★ 未收录 / 解析不了 ⇒ **响亮停**（ADR `REQ-01M7MNYPDXM2NEQR77DXYZM3CJ` 的第 2 条后果）：
 //   导出层打印**资源 id + sha256 + 前 32 字节**，并 `cpu.running=false`（`HostStopKind::Trap`）。
@@ -204,13 +218,21 @@ const FxPass* fxPassAt(const FxModule& module, const std::string& technique, std
 // ★ 实现集（"entry + profile ⇒ 后端程序"）是**唯一**一张表；它只做最后一跳的映射，
 //   门牌（technique / pass / 参数名 / 纹理名 / UV 语义）全部来自 `FxModule`。
 struct EffectProgramBinding {
-    std::uint32_t resource_id;     // 200 / 201 / 203
-    const char* technique;         // "Fade" / "SlideBlur" / "ZoomBlur"
-    const char* pixel_entry;       // "FadePS" / "SlideBlurPS" / "ZoomBlurPS"
+    std::uint32_t resource_id;     // 200 / 201 / 202 / 203
+    const char* technique;         // "Fade" / "Snow" / "SlideBlur" / "ZoomBlur"
+    const char* pixel_entry;       // "FadePS" / "SnowPS" / "SlideBlurPS" / "ZoomBlurPS"
     const char* pixel_profile;     // "ps_2_0" / "ps_1_0"
     d3d9::EffectProgram program;   // 后端要画的那一档
 };
 const EffectProgramBinding* effectProgramBindings();  // 以 `resource_id == 0` 的项终止
+
+// **VS 实现集**（`vertex_entry`, `vertex_profile` ⇒ 本线的 CPU 顶点程序）。
+// ★ 为什么是表而不是"凡 vs_1_0 都放行"：pass 里写的是**哪个函数的哪个 profile**，
+//   `vs_1_0` 只是一档；不查表就等于声称"任何 vs_1_0 的 GLSL 语义我都算对了"（⛔ 那是假话）。
+// ★ 本线**只有一个** CPU 顶点程序：`transformVertexVs10`（`Pos = mul(pos, Proj)`、uv 直通、
+//   ⛔ 无光照、⛔ 不乘设备 WORLD/VIEW、⛔ 不除 w）。表里每条都必须是它兑现得了的那一条。
+// ★ 命中 ⇒ `EffectDrawProgram::has_vs = true`；未命中 ⇒ 该批**具名拒绝**（bit 44）。
+bool effectVertexProgramSupported(const std::string& entry, const std::string& profile);
 
 // 解析出的模块（进程内缓存：4 份资源的文本来自**不可变**的 PE 字节，按内容 sha256 缓存；
 // 同一份 sha256 ⇒ 同一份模型）。`effectModuleOf` 的失败原因写 `why`。
@@ -219,7 +241,9 @@ const FxModule* effectModuleOf(X86& cpu, std::uint32_t state, std::string* why);
 
 // 一次 Begin/BeginPass/CommitChanges 的"这批该怎么画"快照：程序 + 常量表 + 纹理 EA。
 //   · `implemented == false` ⇒ `out->reason` 有名有姓（资源 id / technique / pass / entry / profile）；
-//   · 常量按 `FxModule::constants` 的**声明顺序**取值（没 SetFloat 过 ⇒ 0，D3D 的 uniform 初值）；
+//   · 常量按 `FxModule::constants` 的**声明顺序**取值（没 SetFloat/SetVector 过 ⇒ 0，D3D 的 uniform 初值）：
+//     `float` ⇒ 1 个、`float4` ⇒ 4 个（`SetVector` 的 4 个 float）、`float4x4` ⇒ **不进这张表**
+//     （进 `vs_matrix`，CPU 顶点程序用掉）、`texture` ⇒ 跳过；
 //   · 纹理按 sampler → texture 参数名 → `SetTexture` 的 EA（未绑 ⇒ 0 + count 仍然算上，好让
 //     调用方**具名拒绝**"shader 要两张纹理但只绑了一张"）。
 bool effectDrawProgram(X86& cpu, std::uint32_t state, d3d9::EffectDrawProgram* out, std::string* why);
@@ -229,6 +253,10 @@ bool effectDrawProgram(X86& cpu, std::uint32_t state, d3d9::EffectDrawProgram* o
 // ---------------------------------------------------------------------------------------
 constexpr std::uint32_t kFxMaxFloatParams = 32;  // 引擎实测只设 7 个名字（Alpha/Angle/…）
 constexpr std::uint32_t kFxMaxTextures = 8;      // 实测 Tex0/Tex1
+constexpr std::uint32_t kFxMaxVectorParams = 8;  // `float4` 参数（实测 1 个：202 的 Color）
+// ★ 矩阵槽 = **一块** 64 B（16 float），⛔ 不是表：4 份资源里恰好只有 1 个 `float4x4`（202 的
+//   `Proj`）。⛔ 不塞进 `constants[]`（一个 4×4 就 16 float，会把 Fade/203 的常量表挤爆）。
+constexpr std::uint32_t kFxMaxMatrixParams = 1;
 
 // 一次 effect 的可观察状态（夹具 / 日志用；字段全部来自 guest 状态块）
 struct EffectInfo {
@@ -243,6 +271,8 @@ struct EffectInfo {
     std::uint32_t pass_index = 0;       // 最近一次 BeginPass 的索引
     std::uint32_t passes_reported = 0;  // 最近一次 Begin 写给 *pPasses 的值
     std::uint32_t set_floats = 0;
+    std::uint32_t set_vectors = 0;
+    std::uint32_t set_matrices = 0;
     std::uint32_t set_textures = 0;
     std::uint32_t set_techniques = 0;
     std::uint32_t begins = 0;
@@ -251,7 +281,9 @@ struct EffectInfo {
     std::uint32_t end_passes = 0;
     std::uint32_t ends = 0;
     std::uint32_t float_param_count = 0;
+    std::uint32_t vector_param_count = 0;
     std::uint32_t texture_count = 0;
+    bool matrix_set = false;      // `SetMatrix` 设过（名字见 `effectMatrixParamAt`）
 };
 
 // 建 effect 状态块（guest 堆）+ 记下资源身份；返回状态块 EA（0 = 失败，why 点名）。
@@ -266,10 +298,15 @@ bool effectInfo(X86& cpu, std::uint32_t object, EffectInfo* out, std::string* wh
 // 参数表逐条读（name 是 guest 侧名字串的宿主拷贝；index 越界 ⇒ false）。
 bool effectFloatParamAt(X86& cpu, std::uint32_t state, std::uint32_t index, std::string* name,
                         float* value);
+// 向量表逐条读：`value` = 4 个 float（`SetVector` 的 `const D3DXVECTOR4*`）。index 越界 ⇒ false。
+bool effectVectorParamAt(X86& cpu, std::uint32_t state, std::uint32_t index, std::string* name,
+                         float value[4]);
+// 矩阵槽：`value` = 16 个 float（D3DX 行主序）；`set` = 设过没有（没设过 ⇒ `value` 全 0）。
+bool effectMatrixParamAt(X86& cpu, std::uint32_t state, std::string* name, float value[16], bool* set);
 bool effectTextureAt(X86& cpu, std::uint32_t state, std::uint32_t index, std::string* name,
                      std::uint32_t* texture);
 
-// 释放状态块 + 参数表 + 纹理表 + 名字串（Release 到 0 时由 shim / `on_zero` 调；幂等）。
+// 释放状态块 + 参数表 + 纹理表 + 向量表 + 矩阵名字 + 名字串（Release 到 0 时由 shim / `on_zero` 调；幂等）。
 void destroyEffectState(X86& cpu, std::uint32_t state);
 
 // ---------------------------------------------------------------------------------------
@@ -277,6 +314,12 @@ void destroyEffectState(X86& cpu, std::uint32_t state);
 // ---------------------------------------------------------------------------------------
 std::uint32_t effectSetFloat(X86& cpu, std::uint32_t state, const std::string& name, float value,
                        std::string* why);
+// `value` = 4 个 float（guest 侧 `const D3DXVECTOR4*` 已由 shim 读成宿主数组）
+std::uint32_t effectSetVector(X86& cpu, std::uint32_t state, const std::string& name,
+                              const float value[4], std::string* why);
+// `matrix` = 16 个 float（guest 侧 `const D3DXMATRIX*` 已由 shim 读成宿主数组，D3DX 行主序）
+std::uint32_t effectSetMatrix(X86& cpu, std::uint32_t state, const std::string& name,
+                              const float matrix[16], std::string* why);
 std::uint32_t effectSetTexture(X86& cpu, std::uint32_t state, const std::string& name, std::uint32_t texture,
                          std::string* why);
 std::uint32_t effectSetTechnique(X86& cpu, std::uint32_t state, const std::string& name, std::string* why);

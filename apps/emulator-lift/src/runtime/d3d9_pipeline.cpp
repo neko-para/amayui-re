@@ -1517,6 +1517,19 @@ bool clipPointVertex(const DrawContext& ctx, const CVertex& v) {
 }  // namespace
 
 // =====================================================================================
+// CPU `vs_1_0`（资源 202 的 `SnowVS`）的单顶点变换 —— **公开纯函数**（见 `d3d9_pipeline.h`）
+// =====================================================================================
+// ★ 为什么定义在匿名命名空间**外面**：① 它是头文件里的公开纯函数（用例直接打它，因为 `w != 1` 的批
+//   会被 GPU 准入的 `kUnGpuPerspective` 整批拒 ⇒ 管线级观测不到"`w` 没被除"——那是本单最容易写错的一处）；
+//   ② 管线里**唯一**的调用者是 `transformVertexVs10`（`gatherVertices` / `transformVertexOnce`
+//   两个变换实现点都经它）⇒ 没有第二份算式。
+math::Vec4d clipVs10(const float proj16[16], double x, double y, double z) {
+    double d3d[16];
+    for (int i = 0; i < 16; ++i) d3d[i] = static_cast<double>(proj16[i]);
+    return math::transformVec4D3D(math::fromD3DLayout(d3d), math::Vec4d(x, y, z, 1.0));
+}
+
+// =====================================================================================
 // `Clear(..., D3DCLEAR_ZBUFFER, ..., z, ...)` 的 z 接受域（`REQ-01M6RMVJTTM8PDNXB39TVJ40WN`）
 // =====================================================================================
 // ★ 为什么放在匿名命名空间**外面**：它要被 `d3d9.cpp::clear`（另一个 TU）调用 ⇒ 必须有外部链接。
@@ -3816,6 +3829,66 @@ bool prepareContext(X86& cpu, const char* what, std::uint32_t dev, std::uint32_t
     return true;
 }
 
+// =====================================================================================
+// effect 的 CPU 顶点程序（`vs_1_0`；资源 202 的 `SnowVS`）—— **A 单**
+//
+// ★ 语义（逐句照 FX 源文本 + N3 的 EA 读数，`docs/03-emulator/d3dx-effect.md` §11）：
+//     `Pos = mul(pos, Proj);  UV = uv;`
+//   ⇒ `clip = transformVec4D3D(fromD3DLayout(proj16), (x,y,z,1))`（**行向量**、`Proj` 在右）。
+//   · **跳过光照**：`102h`（XYZ|TEX1）没有 normal / diffuse，`SnowPS` 也不用顶点色 ⇒ 顶点色保持
+//     `readVertex` 给的缺省/顶点色（⛔ 不写材质漫反射，那是固定功能分支的语义）。
+//   · **uv 直通**：`readVertex` 已经按 FVF 读进 `u[]/v[]`，这里一个字节都不动。
+//   · **位置直接写 clip**：裁剪 / `1/w` / 屏幕映射仍在 `submitPrimitives`（⛔ 不做 `w` 除法）。
+//   · ⛔ **不乘设备的 WORLD / VIEW**：顶点进来时**已经是视图空间**（引擎在 CPU 上乘过
+//     `world×view`，EA 锚 `0x4B5767` + `0x4B543A`）⇒ 再乘一次就是二次变换。
+// ★ 与固定功能的 `transformVertex` **并存**：那一份是 200/201/203 也在用的唯一一份 T&L
+//   （`design-notes` 的 `L3-tl-01`），⛔ 不改它的语义；分流只发生在两个变换实现点。
+// =====================================================================================
+struct VsProgram {
+    bool active = false;      // 这一批由 effect 的 CPU 顶点程序画
+    float proj16[16] = {};    // `SetMatrix("Proj")` 的 16 float（**没设过 ⇒ 全 0**，⛔ 不是单位阵）
+};
+
+// 从一次 Draw 的作用域快照里取"这一批要不要走 CPU 顶点程序"。
+VsProgram vsProgramOf(const DrawContext& ctx) {
+    VsProgram p;
+    if (!ctx.effect_draw || !ctx.effect.program.has_vs) return p;
+    p.active = true;
+    for (int i = 0; i < 16; ++i) p.proj16[i] = ctx.effect.program.vs_matrix[i];
+    return p;
+}
+
+// XYZRHW（预变换）与 VS 路**互斥**：XYZRHW 的 x/y 已经是屏幕坐标，再乘一次投影矩阵没有意义；
+// 而"忽略 VS 按固定功能画"会写出与 shader 不符的像素却账上一个位都没有 ⇒ **显式具名拒绝**。
+// （202 用 `102h`（XYZ），所以生产路径不会撞到这条；它是给将来别的 FX 资源兜底的。）
+bool vsProgramPrecheck(const VsProgram& vs, const FvfLayout& fvf, const char* what, std::string* why) {
+    if (!vs.active || !fvf.xyz_rhw) return true;
+    char buf[224];
+    std::snprintf(buf, sizeof(buf),
+                  "D3D9 流水线：%s 的 FVF 是 XYZRHW（预变换），但它在一个带 VertexShader 的 effect pass 里 "
+                  "⇒ 顶点空间互斥（VS 的 Proj 对屏幕坐标没有意义）",
+                  what);
+    pipeWarn(PipeWarnCategory::Other, "effect", "%s", buf);
+    if (why) *why = buf;
+    return false;
+}
+
+// `transformVertexVs10`：**管线内**的 vs_1_0 顶点变换（两个变换实现点都经它）。
+//   ★ 算式在 `clipVs10`（公开纯函数，见文件上方）—— ⛔ 这里不再写第二份。
+//   ★ 顶点色 / uv 一个字节都不动（⛔ 无光照、⛔ 不碰 uv）。
+void transformVertexVs10(X86& cpu, const FvfLayout& fvf, const std::uint8_t* base, const float proj16[16],
+                         CVertex* out) {
+    readVertex(cpu, fvf, base, 0, out, nullptr);
+    // 预变换顶点在 `vsProgramPrecheck` 就被拒了 ⇒ 这里不会进来；仍是显式早退（不写错位数据）。
+    if (out->pretransformed) return;
+    const math::Vec4d clip = clipVs10(proj16, out->x, out->y, out->z);
+    out->x = clip.x;
+    out->y = clip.y;
+    out->z = clip.z;
+    out->w = clip.w;
+    // ⛔ 不碰 out->r/g/b/a（无光照）、⛔ 不碰 u/v（直通）
+}
+
 // 顶点变换（XYZ 路：WORLD → VIEW → PROJECTION；XYZRHW 路：已经是屏幕坐标）
 void transformVertex(X86& cpu, std::uint32_t pe, const FvfLayout& fvf, const std::uint8_t* base,
                      std::uint32_t vertex_index, const math::Mat4d& world, const math::Mat4d& view,
@@ -3916,10 +3989,18 @@ struct VertexXformCache {
 };
 
 // 取一个顶点：本轮算过就直接拷出来，没算过才真的变换（`out` 总是被整体写入）
+// ★ VS 路（`vs.active`）**不走缓存**：缓存的前提是"顶点号唯一决定结果"，而 VS 的输入多了一个
+//   `Proj`（`EffectDrawProgram::vs_matrix`）—— 把矩阵并进键要另开一套（并且跨越"哪条 draw 用了哪组
+//   矩阵"的边界），而 202 每粒子的顶点数只有 4 个 ⇒ 直接算更省心、也**证明**不会读到旧顶点。
+//   ⛔ 不"反正同一次 Draw 里矩阵不变"就沿用缓存：那是靠一条不再显式成立的前提换来的性能。
 void transformVertexOnce(VertexXformCache& cache, X86& cpu, std::uint32_t pe, const FvfLayout& fvf,
                          const std::uint8_t* vp, std::uint32_t slot, std::uint32_t vertex_index,
                          const math::Mat4d& world, const math::Mat4d& view, const math::Mat4d& proj,
-                         CVertex* out) {
+                         const VsProgram& vs, CVertex* out) {
+    if (vs.active) {
+        transformVertexVs10(cpu, fvf, vp, vs.proj16, out);
+        return;
+    }
     if (const CVertex* hit = cache.find(slot)) {
         *out = *hit;
         return;
@@ -4223,6 +4304,12 @@ bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why, U
                 break;
             case d3d9::EffectProgram::ZoomBlurPs20:
                 e.effect_draw.program = GpuEffectProgram::ZoomBlurPs20;
+                break;
+            case d3d9::EffectProgram::SnowPs10:
+                // 资源 202：`tex2D(TexSmp, UV) * Color`（`Color` = uniform float4，见 `constants[]`）。
+                // ★ 它同 pass 的 `vs_1_0` **不在这条路上**：顶点已在 CPU 侧变换完（`transformVertexVs10`）⇒
+                //   后端只收屏幕空间三角形（`L3-tl-01`，与 Fade/203 完全相同）。
+                e.effect_draw.program = GpuEffectProgram::SnowPs10;
                 break;
             default:
                 return deny_effect("effect 程序号不在后端的实现集里");
@@ -5246,10 +5333,11 @@ bool drawPrecheck(X86& cpu, const char* method, std::uint32_t dev, std::uint32_t
 }
 
 // 读一批顶点（从 guest 内存的 base 起，按 stride 走）
+// ★ `vs.active` ⇒ 走 effect 的 CPU 顶点程序（`transformVertexVs10`），⛔ 不碰固定功能那条。
 bool gatherVertices(X86& cpu, std::uint32_t pe, const FvfLayout& fvf, const std::uint8_t* base,
                     std::uint32_t stride, std::uint32_t first, std::uint32_t count,
                     const math::Mat4d& world, const math::Mat4d& view, const math::Mat4d& proj,
-                    std::vector<CVertex>* out, std::string* why) {
+                    const VsProgram& vs, std::vector<CVertex>* out, std::string* why) {
     if (base == nullptr) {
         if (why) *why = "D3D9 流水线：顶点数据指针为空";
         return false;
@@ -5266,7 +5354,11 @@ bool gatherVertices(X86& cpu, std::uint32_t pe, const FvfLayout& fvf, const std:
         const std::uint32_t index = first + i;
         const std::uint8_t* vp = base + static_cast<std::size_t>(index) * stride;
         CVertex v;
-        transformVertex(cpu, pe, fvf, vp, index, world, view, proj, &v);
+        if (vs.active) {
+            transformVertexVs10(cpu, fvf, vp, vs.proj16, &v);
+        } else {
+            transformVertex(cpu, pe, fvf, vp, index, world, view, proj, &v);
+        }
         out->push_back(v);
     }
     return true;
@@ -5403,6 +5495,9 @@ std::uint32_t drawPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t prim, std
     if (!requireMachine(cpu, &m, why)) return kInvalidCall;
     DrawContext ctx;
     if (!prepareContext(cpu, "DrawPrimitive", dev, pe, &ctx, why)) return kInvalidCall;
+    // ★ A 单：这一批是不是由 effect 的 `vs_1_0` 画（快照在 prepareContext 里取）。XYZRHW 与 VS 路互斥。
+    const VsProgram vs = vsProgramOf(ctx);
+    if (!vsProgramPrecheck(vs, fvf, "DrawPrimitive", why)) return kInvalidCall;
     // ★ 复用缓冲（修法排序第 3 项）：`decl_buf` 由 `buildDeclVertices` 的 `assign` 整体重写、
     //   `verts` 由 `gatherVertices` 的 `clear()+reserve()` 重写 ⇒ 两者都不跨调用（下面 consumer 也
     //   不拿走它们），可以 `thread_local` 复用。`size()` 语义不变（`clear()` 不释放容量）。
@@ -5429,8 +5524,8 @@ std::uint32_t drawPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t prim, std
     // 顶点偏移按字节：offset 是流偏移，start_vertex 是顶点序号
     // ★ 复用缓冲（第 3 项）：`gatherVertices` 内部先 `clear()` 再 `reserve(count)` ⇒ 容量跨 Draw 保留。
     static thread_local std::vector<CVertex> verts;
-    if (!gatherVertices(cpu, pe, fvf, base + offset, stride, start_vertex, vertex_count, world, view, proj, &verts,
-                        why)) {
+    if (!gatherVertices(cpu, pe, fvf, base + offset, stride, start_vertex, vertex_count, world, view, proj,
+                        vs, &verts, why)) {
         return kInvalidCall;
     }
     std::uint32_t tris = 0;
@@ -5514,6 +5609,9 @@ std::uint32_t drawIndexedPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t pr
     if (!requireMachine(cpu, &m, why)) return kInvalidCall;
     DrawContext ctx;
     if (!prepareContext(cpu, "DrawIndexedPrimitive", dev, pe, &ctx, why)) return kInvalidCall;
+    // ★ A 单：VS 路分流（见 `drawPrimitive` 的同一处）
+    const VsProgram vs = vsProgramOf(ctx);
+    if (!vsProgramPrecheck(vs, fvf, "DrawIndexedPrimitive", why)) return kInvalidCall;
     // ★ 声明路：把两条流按声明去交错成一份 `num_vertices` 个顶点的临时缓冲（**从 `first` 起**），
     //   后面逐索引取顶点就退化成"从这份交错缓冲里按 `idx-min` 取"——与 FVF 路完全同一条。
     // ★ 复用缓冲（修法排序第 3 项）：`decl_buf` 由 `buildDeclVertices` 的 `assign` 整体重写；
@@ -5583,7 +5681,7 @@ std::uint32_t drawIndexedPrimitive(X86& cpu, std::uint32_t dev, std::uint32_t pr
         CVertex v;
         transformVertexOnce(xform_cache, cpu, pe, fvf, vbase + byte_offset,
                             static_cast<std::uint32_t>(relative), static_cast<std::uint32_t>(vertex_index), world,
-                            view, proj, &v);
+                            view, proj, vs, &v);
         verts.push_back(v);
     }
     std::uint32_t tris = 0;
@@ -5632,6 +5730,9 @@ std::uint32_t drawPrimitiveUP(X86& cpu, std::uint32_t dev, std::uint32_t prim, s
     if (!requireMachine(cpu, &m, why)) return kInvalidCall;
     DrawContext ctx;
     if (!prepareContext(cpu, "DrawPrimitiveUP", dev, pe, &ctx, why)) return kInvalidCall;
+    // ★ A 单：VS 路分流（见 `drawPrimitive` 的同一处）
+    const VsProgram vs = vsProgramOf(ctx);
+    if (!vsProgramPrecheck(vs, fvf, "DrawPrimitiveUP", why)) return kInvalidCall;
     const std::uint8_t* base = reinterpret_cast<const std::uint8_t*>(cpu.mem->host(data_ea));
     if (!base) {
         if (why) *why = "D3D9 流水线：UP 顶点数据的宿主映射为空";
@@ -5642,7 +5743,7 @@ std::uint32_t drawPrimitiveUP(X86& cpu, std::uint32_t dev, std::uint32_t prim, s
     const math::Mat4d proj = readMatrix(cpu, pe + kPlTransforms + kTsProjection * 64u);
     // ★ 复用缓冲（第 3 项）：`gatherVertices` 内部先 `clear()` 再 `reserve(count)`。
     static thread_local std::vector<CVertex> verts;
-    if (!gatherVertices(cpu, pe, fvf, base, stride, 0u, vertex_count, world, view, proj, &verts, why)) {
+    if (!gatherVertices(cpu, pe, fvf, base, stride, 0u, vertex_count, world, view, proj, vs, &verts, why)) {
         return kInvalidCall;
     }
     std::uint32_t tris = 0;
@@ -5707,6 +5808,9 @@ std::uint32_t drawIndexedPrimitiveUP(X86& cpu, std::uint32_t dev, std::uint32_t 
     if (!requireMachine(cpu, &m, why)) return kInvalidCall;
     DrawContext ctx;
     if (!prepareContext(cpu, "DrawIndexedPrimitiveUP", dev, pe, &ctx, why)) return kInvalidCall;
+    // ★ A 单：VS 路分流（见 `drawPrimitive` 的同一处）
+    const VsProgram vs = vsProgramOf(ctx);
+    if (!vsProgramPrecheck(vs, fvf, "DrawIndexedPrimitiveUP", why)) return kInvalidCall;
     const std::uint8_t* ibase = reinterpret_cast<const std::uint8_t*>(cpu.mem->host(index_ea));
     const std::uint8_t* vbase = reinterpret_cast<const std::uint8_t*>(cpu.mem->host(data_ea));
     if (!ibase || !vbase) {
@@ -5739,7 +5843,7 @@ std::uint32_t drawIndexedPrimitiveUP(X86& cpu, std::uint32_t dev, std::uint32_t 
         }
         CVertex v;
         transformVertexOnce(xform_cache, cpu, pe, fvf, vbase + static_cast<std::size_t>(idx) * stride,
-                            static_cast<std::uint32_t>(idx - min_index), idx, world, view, proj, &v);
+                            static_cast<std::uint32_t>(idx - min_index), idx, world, view, proj, vs, &v);
         verts.push_back(v);
     }
     std::uint32_t tris = 0;
