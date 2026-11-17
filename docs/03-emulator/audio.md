@@ -77,3 +77,15 @@ fill_max_ms=1016.04  fill_slow=1  fill_overlapped=5
   所以**音乐整体节奏不会变**，只是偶发空档。
 - 对照：解释器时代（含已退役的 per-EA override）是 **200–250 ms/刀**。
 - 归因未做（feeder 没有 per-thread profile）⇒ 单子 `REQ-01M7N0G…`（先测再优化）。
+
+### 4.1 那 1.0 s 一刀最可能是什么：**令牌头阻塞**（不是 decode 慢）
+
+`guest_token.h` 的口径：令牌是**容器锁**（GuestHeap / HandleTable / Vfs / ComRegistry / SurfaceArena / 内存账本），
+**不是执行锁** —— 所以音频 feeder 与渲染/业务主线程会在 **shim 边界**上互相等。
+
+历史读数（解释器时代，`REQ-01M75VZXV4SDMVVM1Z72G009XJ`，已 dropped）：
+"feeder 在 shim 边界被主线程长时间挡在令牌外（**单刀 1.3–1.7 s 全是 shimtok**）⇒ 静音晚到 ⇒ 尾声重播 2–3 次"。
+它的 `dropped_reason` 写明"AOT 接音频后若再现，按'与暂停/令牌的配合'重新立单" ⇒ 现在 AOT 有 feeder、读数形状一致 ⇒ 已重开
+（`REQ-01M7N0G…`，判据：先量 `t_shim_token_wait_ns` 占那 1.0 s 的比例）。
+
+⇒ 在量出这个比例之前，⛔ 不要先优化 Vorbis 解码（`REQ-01M7N0G…` 与解码吞吐单分开）。
