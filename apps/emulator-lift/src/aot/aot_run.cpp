@@ -27,6 +27,7 @@
 
 #include "aot/aot_dispatch.h"
 #include "runtime/control.h"  // Control（PIMPL 门面：⛔ 不含 beast / nlohmann / guest 头）
+#include "runtime/guest_token.h"  // Phase-0 的 `arm()`（与解释器 `Machine::run` 同一个单例）
 
 namespace lift {
 namespace aot {
@@ -350,6 +351,13 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         r.detail = "没有生成物（构建期缺 clang / 执行源 / closure.txt）⇒ 派发表为空，无法执行任何 guest 指令";
         return r;
     }
+    // ★ Phase-0 令牌读数（REQ-01M75WWEDC20GEH7QVSHPHH4GP）：与解释器 `machine.cpp:957` **同口径**，
+    //   **每轮一次**。`arm()` 自己清上一轮的账，并把 `LIFT_AUDIO_TRACE` 或上 `opts.profile`（唯一读点）。
+    //   ⇒ 缺省档（不给 `--profile`、不设该 env）`phase0_enabled_` 仍是 false：热路径只多一次 bool 读、
+    //   不读时钟，摘要一行不加（默认档 stdout 逐字不变）。
+    //   ★ 之前**只有** `Machine::run` 调它 ⇒ AOT 臂的 `tokenhold/holdhist/waithist/shimmax` 永远是 0/不打印；
+    //     而音频 feeder 只在 AOT 上跑，那正是要量的地方。
+    guestToken().arm(opts.profile);
     // ★ 派发表**预热**：音频真 feeder 线程（`--audio sdl` + 墙钟）会在自己的线程上查找派发表
     //   （`src/aot/aot_feeder.cpp`）⇒ 把"第一次摊表"钉在**起线程之前**，不依赖"主线程恰好先查过一次"
     //   的时序（摊表本身已 `std::call_once`，这里只是把 happens-before 提前）。⛔ 不写任何计数。

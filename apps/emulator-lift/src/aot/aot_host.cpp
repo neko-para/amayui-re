@@ -36,6 +36,8 @@
 #include "aot/aot_feeder.h"       // feeder 的 IR 执行器（音频真线程用）
 #include "runtime/control.h"       // 控制层 Present 闸门 / Context（轻头：⛔ 无 beast / nlohmann）
 #include "runtime/decode_cache.h"  // `liftOneDecodeCache()`：只读命中率（`decode-cache:` 行）
+#include "runtime/guest_token.h"   // Phase-0（`arm()` 在 `AotHost::run`；这里只读）
+#include "runtime/token_phase0_report.h"  // tokenhold/holdhist/waithist/shimmax 的唯一打印点
 #include "shims/register.h"
 
 namespace lift {
@@ -618,6 +620,11 @@ void AotHost::printRunSummary(const AotRunResult& r, std::FILE* out) const {
                      static_cast<unsigned long long>(a.lead_bytes),
                      static_cast<unsigned>(a.dev_sample_frames));
     }
+    // ★ Phase-0 四行（`tokenhold / holdhist / waithist / shimmax`）：**只读计量**，与解释器
+    //   `Machine::dumpRunSummary` 调的是**同一个** `dumpTokenPhase0`（唯一实现 = 唯一格式）。
+    //   开关由 `AotHost::run` 里的 `guestToken().arm(opts.profile)` 决定（`--profile` ∪ `LIFT_AUDIO_TRACE`）
+    //   ⇒ 缺省档 `phase0Enabled()==false` ⇒ **一行不加**（默认档 stdout 逐字不变）。
+    if (guestToken().phase0Enabled()) dumpTokenPhase0(out, shims_.all());
     // ---- `--profile` 的整块读数（**关档时一行都不打** ⇒ 全文与基线逐字相同）----
     // ★ 落点为什么在这里：`aot_main.cpp` 在 `printRunSummary` 之后只有 stderr 回声 + `return`，
     //   所以这里就是"stdout 末尾（进程退出前）"。⛔ 不改 main 的打印顺序。

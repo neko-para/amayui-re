@@ -23,6 +23,7 @@
 #include "runtime/message_box.h"
 #include "runtime/present.h"
 #include "runtime/sha256.h"
+#include "runtime/token_phase0_report.h"  // Phase-0 四行的唯一实现（AOT 臂也调它）
 #include "runtime/watch.h"
 #include "shims/register.h"
 
@@ -2834,79 +2835,10 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out, SummaryMode mod
                      avg_us);
     }
     // ★ Phase-0 四读数（REQ-01M75WWEDC20GEH7QVSHPHH4GP）：**只在记账打开时打印**。
-    //   口径（细节见 `guest_token.h` 的 Phase-0 那一组）：
-    //     · `hold` = 持令牌的累计墙钟；`span` = 本轮首个持有 → 最后一次释放；
-    //       `duty` = hold / span ⇒ 需求单第 1 项"持有占空"。⛔ 分母是**令牌观测窗口**，
-    //       不是 `run()` 的墙钟（后者在 `dumpProfile` 的窗口表里；两者差 boot 前后那一点点）。
-    //     · `max` = **最长一次不间断持有**（Yield 会把一段切成两段）⇒ 它回答"一次交接最坏等多久"。
-    //     · 五桶 = <1 / 1–5 / 5–20 / 20–50 / >50 **ms**（宿主墙钟）。
-    //     · 角色 0 = 主循环线程（`Machine::run` 的调用者），角色 1 = 其它执行流（音频 feeder）。
-    //   ⛔ 这些都是计量，不是判据（数值随机器 / 调度变；见 guest_token.h 的同一句）。
-    if (guestToken().phase0Enabled()) {
-        const GuestToken::Phase0Readings mainr = guestToken().phase0Readings(GuestToken::kPhase0RoleMain);
-        const GuestToken::Phase0Readings other = guestToken().phase0Readings(GuestToken::kPhase0RoleOther);
-        const std::uint64_t span_ns = guestToken().phase0SpanNs();
-        const double duty =
-            span_ns != 0 ? 100.0 * static_cast<double>(mainr.hold_ns) / static_cast<double>(span_ns) : 0.0;
-        std::fprintf(out,
-                     "tokenhold : main hold %.1f ms / span %.1f ms = %.1f%% max %.3f ms segs %llu | "
-                     "other hold %.1f ms max %.3f ms segs %llu\n",
-                     static_cast<double>(mainr.hold_ns) / 1e6, static_cast<double>(span_ns) / 1e6, duty,
-                     static_cast<double>(mainr.hold_max_ns) / 1e6, (unsigned long long)mainr.hold_count,
-                     static_cast<double>(other.hold_ns) / 1e6, static_cast<double>(other.hold_max_ns) / 1e6,
-                     (unsigned long long)other.hold_count);
-        std::fprintf(out,
-                     "holdhist  : main <1ms %llu | 1-5ms %llu | 5-20ms %llu | 20-50ms %llu | >50ms %llu\n",
-                     (unsigned long long)mainr.hold_hist[0], (unsigned long long)mainr.hold_hist[1],
-                     (unsigned long long)mainr.hold_hist[2], (unsigned long long)mainr.hold_hist[3],
-                     (unsigned long long)mainr.hold_hist[4]);
-        std::fprintf(out,
-                     "waithist  : main <1ms %llu | 1-5ms %llu | 5-20ms %llu | 20-50ms %llu | >50ms %llu | "
-                     "other <1ms %llu | 1-5ms %llu | 5-20ms %llu | 20-50ms %llu | >50ms %llu\n",
-                     (unsigned long long)mainr.wait_hist[0], (unsigned long long)mainr.wait_hist[1],
-                     (unsigned long long)mainr.wait_hist[2], (unsigned long long)mainr.wait_hist[3],
-                     (unsigned long long)mainr.wait_hist[4], (unsigned long long)other.wait_hist[0],
-                     (unsigned long long)other.wait_hist[1], (unsigned long long)other.wait_hist[2],
-                     (unsigned long long)other.wait_hist[3], (unsigned long long)other.wait_hist[4]);
-        // 第 4 项：每个 shim 的**最长一次**宿主墙钟（点出"哪一类 shim 是长活"）。
-        // 排序与 `--profile` 的 shim 表同口径（max desc → calls desc → module asc → name asc），
-        // 只列有读数的项（没被调用过的是 0，没有解释价值）。
-        struct ShimMaxRow {
-            const ShimDef* def = nullptr;
-            std::uint64_t max_ns = 0;
-            std::uint64_t calls = 0;
-        };
-        std::vector<ShimMaxRow> rows;
-        rows.reserve(shims_.all().size());
-        for (const ShimDef& d : shims_.all()) {
-            const std::uint64_t mx = guestToken().shimMaxNs(d.id);
-            if (mx == 0) continue;
-            rows.push_back(ShimMaxRow{&d, mx, guestToken().shimMaxCalls(d.id)});
-        }
-        std::sort(rows.begin(), rows.end(), [](const ShimMaxRow& a, const ShimMaxRow& b) {
-            if (a.max_ns != b.max_ns) return a.max_ns > b.max_ns;
-            if (a.calls != b.calls) return a.calls > b.calls;
-            if (a.def->module != b.def->module) return a.def->module < b.def->module;
-            return a.def->name < b.def->name;
-        });
-        constexpr std::size_t kShimMaxTop = 8;
-        const std::size_t shown = rows.size() < kShimMaxTop ? rows.size() : kShimMaxTop;
-        std::fprintf(out,
-                     "shimmax   : top %zu / %zu shims by max_ns（shim 实现自身；累计见 --profile 的 shims 表）\n",
-                     shown, rows.size());
-        for (std::size_t i = 0; i < shown; ++i) {
-            const ShimMaxRow& row = rows[i];
-            const std::string label = row.def->module + "!" + row.def->name;
-            std::fprintf(out, "            %2zu. %-46s max %9.3f ms calls=%llu\n", i + 1, label.c_str(),
-                         static_cast<double>(row.max_ns) / 1e6, (unsigned long long)row.calls);
-        }
-        const std::uint64_t overflow = guestToken().shimMaxOverflow();
-        if (overflow != 0) {
-            // ⛔ 不静默丢：超出记账表容量的 id 在这里点名（正常工况恒 0）。
-            std::fprintf(out, "            overflow %llu（shim id 超出记账表容量 ⇒ 这几条没记到 max）\n",
-                         (unsigned long long)overflow);
-        }
-    }
+    //   实现的**唯一一份**在 `runtime/token_phase0_report.cpp`（口径注释也在那里；AOT 臂
+    //   `AotHost::printRunSummary` 调同一个函数 ⇒ 两臂这四行逐字同源）。
+    //   ⛔ 不要把这段再复制回本文件：两份格式迟早分叉，而又没有守卫能发现。
+    if (guestToken().phase0Enabled()) dumpTokenPhase0(out, shims_.all());
     std::fprintf(out, "committed : %llu KiB\n", (unsigned long long)(mem_.committedBytes() / 1024));
     std::fprintf(out, "heap      : in_use %u peak %u allocs %u\n", heap_.bytesInUse(), heap_.peak(),
                  heap_.allocCount());

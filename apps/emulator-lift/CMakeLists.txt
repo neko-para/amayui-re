@@ -95,6 +95,10 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/machine.cpp
     # ★ 单令牌（guest 执行互斥）：主线程按块取、音频 feeder 每块取；违规计数见 guest_token.h
     src/runtime/guest_token.cpp
+    # ★ Phase-0 四行读数（tokenhold / holdhist / waithist / shimmax）的**唯一**实现：
+    #   解释器 `Machine::dumpRunSummary` 与 AOT `AotHost::printRunSummary` 都调它
+    #   （2026-11-18：AOT 臂以前根本没有这四行 —— 而音频 feeder 只在 AOT 上跑）。
+    src/runtime/token_phase0_report.cpp
     src/runtime/exec.cpp
     src/runtime/exec_integer.cpp
     src/runtime/exec_control.cpp
