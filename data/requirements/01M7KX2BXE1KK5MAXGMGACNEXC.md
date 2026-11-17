@@ -1,4 +1,4 @@
-# AOT LTO / single-LL 对照：默认保持 split8-O2（LTO 今天零收益）
+# AOT LTO / single-LL 对照：默认保持 split8-O2（已被 REQ-01M7M1B… 取代）
 
 - id: REQ-01M7KX2BXE1KK5MAXGMGACNEXC
 - type: spike
@@ -31,3 +31,11 @@ AOT 是否该开 LTO（跨 IR + shim）或改回 single LL？默认形状是否�
 
 `docs/03-emulator/aot-lto-evaluation.md`（命令 / 读数 / 语义指纹 / 复核；§5.2 已按“函数属性 vs codegen feature”校正）。
 实验用的 opt-in 补丁**未入库**，留档 `.tmp/lto/opt-in.patch`；默认档保持 HEAD 的 `-c -O2` + `-flto` 硬闸。
+
+## 后续（2026-11-17）
+
+上面"默认保持 split8-O2"已被 `REQ-01M7M1BSZD1HTGQW1M6PENE2TB` 取代：`253cbe0` 让生成物发射
+`target-cpu` / `target-features` 函数属性之后，`areInlineCompatible()` 的闸解开，`_lift_tick` 站点
+**−86.4%**、`_lift_note_write` **−100%**，FELLOW init 窗口墙钟 **−12.61%**（5/5 对全负）⇒ mac 默认
+改成 LTO（`LIFT_AOT_LTO=ON`，shape `split8-O2-lto-abi`）。读数与实际配方见
+`docs/03-emulator/aot-lto-evaluation.md` §10。本单正文与读数保留为历史快照，⛔ 不改写。
