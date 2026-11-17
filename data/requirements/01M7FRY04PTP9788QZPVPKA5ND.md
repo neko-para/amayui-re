@@ -1,4 +1,4 @@
-# M-lift-4 · 欠账：lift_tick / lift_note_write 归零 + guest 寄存器跨块 SSA（M-lift-2 判据 2-3 降级项）
+# M-lift-4 · 欠账：lift_note_write 的 SMC 缺口 + guest 寄存器跨块 SSA（tick 归零已收口）
 
 - id: REQ-01M7FRY04PTP9788QZPVPKA5ND
 - type: req
@@ -13,15 +13,17 @@
 ⇒ 这几项**不再是速度杠杆**（合计 ≤1–2% 墙钟），但它们是"交付物里没有解释器 / 真翻译形态"的字面判据，
 所以单独挂账、而不是丢掉。
 
-## 欠的三笔（每笔都带判据与已知难点）
+## 欠的三笔（第 1、2 笔的"归零"已随 LTO 完成；SMC 缺口与 SSA 未做）
 
-1. **`lift_tick` 归零**：生成物里 **125,860** 个调用点（`insns += n` 的宿主调用）。收益 ≈0.4 s。
-   - 难点：`insns` 的读点必须在观测时刻**精确**（`--max-insns` / `--time-limit` / 定时器泵节流 / 停机诊断）。
-     已知支点：`insns` 的 10 个读点**全在派发边界**，没有一个落在 `lift_cc_*` 执行中间。
-   - 形状：把"本块静态条数"累加成 SSA 值，在**函数出口 + 任何宿主调用之前**各落一次。
-     ⚠ S7 之后多了"宿主 `call` 到另一个生成函数"这条边 ⇒ 被调方必须在自己出口先落账，否则观测点会少算调用方的进度。
-2. **`lift_note_write` 归零 + 补上被它掩盖的 SMC 缺口**：**37,093** 个调用点，且它在 AOT 臂里是 **no-op**
-   （`cpu.cache == nullptr`）⇒ 纯浪费 + 静默缺口（guest 写代码页时，已发射的 lifted IR 仍执行旧语义）。
+1. ✅ **`lift_tick` 归零 —— 2026-11-17 完成（不需要 IR 记账改造）。**
+   生成物里 `@lift_tick` 的调用点 **0**：253cbe0 发射 target 函数属性 ⇒ LTO 真内联
+   （native `bl` 101,765 → 13,893）⇒ 去判空（13,893 → **0**，`_lift_tick` 符号被删）。
+   `__text` 14,852,376 → **13,903,808 B（−6.39%）**，比 LTO OFF 的 14,399,532 B 还小 3.44%。
+   读数与 census：`docs/03-emulator/aot-lto-evaluation.md` §10 / §11。
+   原来的"难点 / 形状"（SSA 累加 + 函数出口落账）**不再需要**：整个 callee 被内联进每个站点。
+2. **`lift_note_write` 归零 ✅（随同一轮 LTO）+ 补上被它掩盖的 SMC 缺口 ⬜**：调用点
+   38,535 → **0**（符号被删；内联体改调 `noteGuestWrite`，38,698 站点）。但它在 AOT 臂里仍是
+   **no-op**（`cpu.cache == nullptr`）⇒ guest 写代码页时，已发射的 lifted IR 仍执行旧语义。
    - 已裁决的形状（`docs` 内部的 D50）：**可执行节宿主页设只读 + VEH 归类成 SMC 响亮停**。
      代价 ≈0 B/站点、−6.94%，且覆盖**四层**（翻译器 store / push-pop / `lift_one` 内部的 `rep movs`·SSE / shim 裸 `wr32`）。
    - 前提可证：8 个节的 begin/end **全部 4 KiB 对齐** ⇒ 4 KiB 宿主页上"可执行页集合"逐页精确。
@@ -35,7 +37,11 @@
 
 ## 判据
 
-- 生成物里 `@lift_tick` / `@lift_note_write` 的调用点 **= 0**（用 `grep -c` 给数）；
+- ✅ 生成物里 `@lift_tick` 的调用点 **= 0**、`@lift_note_write` 的调用点 **= 0**（2026-11-17 读数：
+  `llvm-objdump -d | rg -c 'bl\s+.*_lift_tick'` = 0，`llvm-nm | rg _lift_tick` 为空；§11）。
+  ⚠ 这一条**只能当读数**：它依赖 LTO 形状（`-DLIFT_AOT_LTO=OFF` 时调用点必然回来），
+  没有可移植的 CTest 锚；⛔ 不要为它写一条依赖 shape 的测试。
+- ⬜ SMC 缺口（第 2 笔的后半）未做；寄存器 SSA（第 3 笔）未做。
 - 寄存器：`objdump -d` 里热函数体内不再出现那组 9 槽收尾的 `mov [rXX+off], reg`；
 - 语义不变量：`exit` / `frames` / `stop @` / arena / `misses` 逐位相同；`ctest` 全绿；
 - 每一笔都要有**能红**的守卫 + 变异条目（⛔ 不要断言当前数字）。
@@ -55,8 +61,8 @@
 - 第 1 笔（tick 归零/内联）的静态依据；第 2 笔（note 归零）的 297 连发是音频卡顿的头号静态线索（<待核>：`noteGuestWrite` 实际成本）。
 - 口径：arm64 静态数，⛔ 不是 win x64 墙钟；`27.71%` 不能拿去复核 profile 的 `boundary 29%`（不是同一个量，见报告 §5）。
 
-## tick 判空（2026-11-17 复核）
+## tick 判空（2026-11-17 复核 → 已落地）
 
-- `lift_tick` 的唯一调用方 = 生成物（101,765 个 `bl`）；runtime/tests **零调用**，没有任何测试断言 null；`cpu` 恒为 `&AotRunner::cpu_`。
-- 删 `if (!cpu_ptr)` 只省 1 条 `cbz`（callee 5→4）、`__text` −64 B；3 对交错 768 vs 763 ms（噪声），60 帧指纹相同。
-- **现在保留**；等本单第 1 笔（tick 归零/内联）时一起改成 `#ifndef NDEBUG` 断言（Release 无分支、Debug 仍响亮）。⛔ 不为 64 B 单独开单。
+- `lift_tick` 的唯一调用方 = 生成物；runtime/tests 零调用，没有任何测试断言 null；`cpu` 恒为 `&AotRunner::cpu_`。
+- **已按此口径落地（14d331a）**：`if (!cpu_ptr)` 删除、改 `assert(cpu_ptr != nullptr)`；
+  `lift_one` / `lift_shim` 的判空保留。读数见 `docs/03-emulator/aot-lto-evaluation.md` §11。
