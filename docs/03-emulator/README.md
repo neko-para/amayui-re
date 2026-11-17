@@ -13,6 +13,7 @@
 | **"曾经有 bug Y"**（现象 / 根因 / 修法 / 代表守卫 / 复现命令） | `defects.md` |
 | **数字怎么比**（profiler 口径、墙钟在哪个 build 上可比、音频 underrun 判据） | `measurement.md` |
 | **AOT lift 的静态指令预算**（host/guest、块边界税、循环/派发上界；一次性读数与复核命令） | `aot-instruction-budget.md` |
+| **AOT 该不该开 LTO / 改回 single LL**（A/B0/B1/B2/C 对照；一次性读数、LSP 污染标注与复核命令） | `aot-lto-evaluation.md` |
 | **"为什么这么实现"**（内部取舍 = L3，重写实现时可自由改，但要保住它列出的可观察现象） | `design-notes.md` |
 | **我们依赖哪些外部文档**，以及**我们偏离文档的地方**（偏在哪 / 为什么 / 谁受益） | `external-docs.md` |
 | **仓库自己的机械装置还成立吗**（素材清单 / 语料定位 / 台账 / shape / spec / 写路径 / 插件闭接口） | `repo-guards.md` |
