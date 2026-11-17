@@ -350,6 +350,10 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         r.detail = "没有生成物（构建期缺 clang / 执行源 / closure.txt）⇒ 派发表为空，无法执行任何 guest 指令";
         return r;
     }
+    // ★ 派发表**预热**：音频真 feeder 线程（`--audio sdl` + 墙钟）会在自己的线程上查找派发表
+    //   （`src/aot/aot_feeder.cpp`）⇒ 把"第一次摊表"钉在**起线程之前**，不依赖"主线程恰好先查过一次"
+    //   的时序（摊表本身已 `std::call_once`，这里只是把 happens-before 提前）。⛔ 不写任何计数。
+    ensureDispatchTable();
 
     // ★ **S2 生命周期 · begin**（与解释器 `machine.cpp:1056-1062` 同口径）：打开 SDL 设备 / dump 文件；
     //   失败**只降级，不阻止 boot**（与解释器一致：`begin` 失败只打一行 stderr）。
@@ -741,6 +745,15 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         //     `facts` 的计算提到这层 if **外面**：那是每块边界都要付的（300 帧 ≈ 5.4e7 次），
         //     而 `--audio off` 是**缺省档** ⇒ 它的 penalty 必须是"零"级，不是"几纳秒"。
         if (audio_.enabled()) {
+            // ★ thread 档的**失败面**：`AudioPumpGate::due()` 在 thread 档恒假 ⇒ 下面那条
+            //   `audio_.pump()` 永远不会被调 ⇒ `pump()` 里的 `feeder_error_` 早退在 AOT **不可达**。
+            //   ⇒ 这里补一条只读判据（原子读，只在音频开启时付）：feeder 挂了必须**停**并点名，
+            //   ⛔ 不许变成"继续跑但没声"。解释器臂仍走 `pump() == Error`，两条臂的失败面同一条。
+            if (audio_.threadMode() && audio_.feederFailed()) {
+                r.reason = AotStop::Unimplemented;
+                r.detail = "音频 feeder 线程失败：" + audio_.feederErrorText();
+                break;
+            }
             AudioPumpFacts pf;
             pf.enabled = audio_.enabled();
             pf.thread_mode = audio_.threadMode();

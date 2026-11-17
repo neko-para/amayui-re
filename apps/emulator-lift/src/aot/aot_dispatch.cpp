@@ -19,6 +19,8 @@
 //     ⛔ 没有 fallback、⛔ 没有"哈希没中就去线性扫一遍"。
 #include "aot/aot_dispatch.h"
 
+#include <mutex>
+
 namespace lift {
 namespace aot {
 namespace {
@@ -105,30 +107,38 @@ constexpr std::size_t slotOf(std::uint32_t ea) {
 
 Slot g_slots[kSlotCount];     // 静态零初始化 ⇒ 全空槽（BSS；⛔ 不进 exe 的 .rdata，见 D28 的取舍）
 unsigned g_buildMaxProbes = 0;
-bool g_slotsReady = false;
 
 // 首次查找时摊表（一次性；⛔ 不在每次 lookup 里摊销，也⛔ 不"边查边建"）。
-// ★ 线程口径：AOT 的派发是**单线程**（`AotRun::run` 的执行循环；本臂没有音频喂料线程）⇒
-//   这里不需要锁。若将来有第二个线程调 `lookup`，必须改成 `std::once_flag`（记在这里，不提前付代价）。
-void buildSlots() {
-    std::uint32_t worst = 0;
-    for (std::size_t i = 0; i < kTableSize; ++i) {
-        const std::uint32_t ea = kTablePtr[i].ea;
-        std::size_t h = slotOf(ea);
-        std::uint32_t probes = 1;
-        while (g_slots[h].ea != 0) {
-            h = (h + 1) & kSlotMask;
-            ++probes;
+// ★ 线程口径（2026-11-17 改）：AOT 的派发现在**不止主线程** —— 音频 feeder 的 IR 执行器
+//   （`src/aot/aot_feeder.cpp`）也会调 `lookupUncounted`。⇒ 摊表必须 `std::call_once`：
+//   两个线程同时第一次查找时，只有一个摊表，另一个在 `call_once` 上等它完成
+//   （`call_once` 的完成与后续调用的返回之间是 happens-before ⇒ 之后读槽数组不需要锁）。
+//   ★ 另外 `AotHost::run()` 还会**主动预热**一次（`ensureDispatchTable()`，见下），
+//     让"表已建好"发生在起 feeder 线程之前，不依赖"主线程恰好先查过一次"这种时序。
+std::once_flag g_slotsOnce;
+void buildSlotsOnce() {
+    std::call_once(g_slotsOnce, [] {
+        std::uint32_t worst = 0;
+        for (std::size_t i = 0; i < kTableSize; ++i) {
+            const std::uint32_t ea = kTablePtr[i].ea;
+            std::size_t h = slotOf(ea);
+            std::uint32_t probes = 1;
+            while (g_slots[h].ea != 0) {
+                h = (h + 1) & kSlotMask;
+                ++probes;
+            }
+            g_slots[h].ea = ea;
+            g_slots[h].fn = kTablePtr[i].fn;
+            if (probes > worst) worst = probes;
         }
-        g_slots[h].ea = ea;
-        g_slots[h].fn = kTablePtr[i].fn;
-        if (probes > worst) worst = probes;
-    }
-    g_buildMaxProbes = worst;
-    g_slotsReady = true;
+        g_buildMaxProbes = worst;
+    });
 }
 
-DispatchStats g_stats;
+// ★ **每线程一份**的派发统计：feeder 的查找不能并发写主线程的计数（那是数据竞争），
+//   也不该把它的查找混进 `probe :` / `table :` 的读数（那些是**主线程**执行循环的归因）。
+//   `resetDispatchStats()` / `printProbeLine()` 只作用于调用线程 = 主线程 ⇒ 摘要口径不变。
+thread_local DispatchStats g_stats;
 
 }  // namespace
 
@@ -182,6 +192,8 @@ std::uint64_t pinnedFunctions() {
 
 std::size_t tableSize() { return kTableSize; }
 
+void ensureDispatchTable() { buildSlotsOnce(); }
+
 std::size_t tableCapacity() { return kTablePtr != nullptr ? kSlotCount : 0; }
 
 double tableLoadFactor() {
@@ -196,7 +208,7 @@ LiftFn lookup(std::uint32_t ea, std::uint64_t* comparisons) {
     std::uint64_t probes = 0;
     LiftFn found = nullptr;
     // ---- 首次使用 ⇒ 摊表（这一次分支在 6,200 万次查找里只有第一次为真，分支预测吃得下）----
-    if (!g_slotsReady) buildSlots();
+    buildSlotsOnce();
     std::size_t h = slotOf(ea);
     for (;;) {
         const Slot& s = g_slots[h];
@@ -225,7 +237,7 @@ LiftFn lookup(std::uint32_t ea, std::uint64_t* comparisons) {
 // ★ S7：与 `lookup` **逐字相同**的查找，只是不记 trampoline 的派发账（改记 `lift_dyn_*`）。
 //   ⛔ 不要把它实现成"调 lookup 再减计数"：那会同时弄脏 max_probes / comparisons。
 LiftFn lookupUncounted(std::uint32_t ea) {
-    if (!g_slotsReady) buildSlots();
+    buildSlotsOnce();
     ++g_stats.lift_dyn_lookups;
     std::size_t h = slotOf(ea);
     LiftFn found = nullptr;

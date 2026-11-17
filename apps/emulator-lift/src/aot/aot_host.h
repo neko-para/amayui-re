@@ -46,6 +46,7 @@
 #include "runtime/clock.h"
 #include "runtime/com.h"
 #include "runtime/control_snapshot.h"  // 控制层快照的值类型 + `ControlHostSide`（⛔ 无 beast）
+#include "runtime/critical_sections.h"  // guest CRITICAL_SECTION ↔ 宿主递归锁（feeder 的硬前提）
 #include "runtime/decode.h"
 #include "runtime/engine_marker.h"  // 控制层 `sample` 的脚本身份采样器
 #include "runtime/font.h"
@@ -417,6 +418,11 @@ private:
     // `regs` ↔ `cpu` 的同步（lifted 侧的状态真源是 `regs`；宿主侧逻辑读 `cpu`）。
     void syncCpuFromRegs();
     void syncRegsFromCpu();
+    // ★ 音频 feeder 的 guest 执行器 thunk（`AudioEngine::FeederGuestRunner` 的形状）：
+    //   `ctx` = 本宿主；把 `entry/return` 转给 `aot::runAotFeederGuest`（**IR 派发**，⛔ 不走解释器）。
+    //   契约与语义见 `src/aot/aot_feeder.h`；⛔ 不要在这里写 guest 语义。
+    static bool feederRunnerThunk(void* ctx, X86& cpu, std::uint32_t entry_ea, std::uint32_t return_ea,
+                                  std::string* err);
 
     // ★ 顺序 = 依赖顺序（`cpu_` 里的服务指针指向下面这些对象 ⇒ 它们必须先存在）。
     GuestMemory mem_;
@@ -429,6 +435,11 @@ private:
     GuestLayout layout_;
     ProcessSetup setup_;
     HandleTable handles_;
+    // ★ guest `CRITICAL_SECTION` ↔ 宿主递归锁（与解释器 `Machine` 的 `critical_sections_` 同形）。
+    //   真 feeder 线程的**硬前提**：没有它，`guestTryEnterCriticalSectionAs` 会走"guest 字段当锁"
+    //   的退化路径（争用时返回**非空 err** ⇒ `AudioEngine::feederEvent` 当致命 ⇒ 第一次并发就打死
+    //   feeder；guest 自己的 Enter/Leave 也没有真正互斥）。`init()` 里接 `cpu_.cs_table = &cs_`。
+    CriticalSectionTable cs_;
     VirtualClock clock_;
     ComRegistry com_;
     GuestCallStack calls_;

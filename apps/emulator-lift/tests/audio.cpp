@@ -33,6 +33,7 @@
 
 #include "check.h"
 #include "runtime/machine.h"
+#include "runtime/sync_guest.h"
 
 namespace {
 
@@ -1289,6 +1290,120 @@ void testGenerateToOverflowCounted() {
     std::remove(dump.c_str());
 }
 
+// ★ BUG-22 的回归口（结构面）：feeder 必须有自己的 TEB / 栈，且 `fs_base` 指向它，**不是**主线程的。
+//   `setupFeederContextForTest()` 与 thread 档的 `setupFeederContext()` 是**同一份实现**（不建线程、
+//   不开设备）⇒ 这条用例在 pure 档可跑（设备档 `audio-device` 只有在 `Sdl` + 墙钟才起真线程）。
+void testFeederTebIsOwn() {
+    lift_test::g_current_case = "audio-device/feeder-teb-is-own";
+    std::string err;
+    lift::Machine m;
+    if (!initMachine(m, &err)) {
+        LIFT_CHECK(false);
+        return;
+    }
+    const std::uint32_t teb = m.layout().feeder_teb;
+    const std::uint32_t stack_top = m.layout().feeder_stack_top;
+    const std::uint32_t stack_size = m.layout().feeder_stack_size;
+    // ★ `initBare` 没有 PE ⇒ 不会跑 `setupProcessStructures`（主 TEB 未提交）。这里自己铺一页
+    //   与它**同形状**的主 TEB 并把 `cpu_.fs_base` 指过去：这样 `setupFeederContext` 的
+    //   "抄主 TEB 通用字段" 与 "fs_base 指回主 TEB" 两条路径都被真的走到（BUG-22 的判据面）。
+    const std::uint32_t main_teb = m.layout().teb_ea;
+    LIFT_CHECK(m.mem().commitZeroed(main_teb, 0x1000, lift::RegionKind::Teb, "teb"));
+    m.mem().wr32(main_teb + 0x00u, 0xFFFFFFFFu);  // 主线程自己的 SEH 链头
+    m.mem().wr32(main_teb + 0x18u, main_teb);      // Self
+    m.cpu().fs_base = main_teb;
+    // 调用前：feeder 页**必须是空页**（布局冲突判据）；主栈已由 `prepareStack` 提交。
+    LIFT_CHECK(m.mem().regionOf(teb) == nullptr);
+    LIFT_CHECK(!m.mem().committed(teb, 0x1000));
+    LIFT_CHECK(m.mem().committed(m.layout().stack_top - m.layout().stack_size, 0x1000));
+    LIFT_CHECK(stack_top != m.layout().stack_top);  // feeder 不借主栈
+
+    LIFT_CHECK(m.audio().setupFeederContextForTest(&err));
+    // 区域归属（读数的身份：谁提交、什么 kind、什么名字）。
+    const lift::Region* r = m.mem().regionOf(teb);
+    LIFT_CHECK(r != nullptr);
+    if (r != nullptr) {
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r->kind),
+                          static_cast<std::uint32_t>(lift::RegionKind::Teb));
+        LIFT_CHECK(std::strcmp(r->name, "feeder-teb") == 0);
+    }
+    const lift::Region* rs = m.mem().regionOf(stack_top - 4u);
+    LIFT_CHECK(rs != nullptr);
+    if (rs != nullptr) {
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(rs->kind),
+                          static_cast<std::uint32_t>(lift::RegionKind::Stack));
+        LIFT_CHECK(std::strcmp(rs->name, "audio-feeder-stack") == 0);
+    }
+    // TEB 的每线程字段（真 Windows 每线程一个 TEB；链头 / 栈界 / Self 是每线程的）。
+    LIFT_CHECK_EQ_U32(m.mem().rd32(teb + 0x00u), 0xFFFFFFFFu);  // 自己的 SEH 链头（不是主线程的链）
+    LIFT_CHECK_EQ_U32(m.mem().rd32(teb + 0x04u), stack_top);    // StackBase
+    LIFT_CHECK_EQ_U32(m.mem().rd32(teb + 0x08u), stack_top - stack_size);  // StackLimit
+    LIFT_CHECK_EQ_U32(m.mem().rd32(teb + 0x18u), teb);          // Self
+    // ★ 核心判据（BUG-22）：feeder 的 fs_base = 它自己的 TEB，且 ≠ 主线程的 fs_base。
+    LIFT_CHECK_EQ_U32(m.audio().feederFsBaseForTest(), teb);
+    LIFT_CHECK(m.audio().feederFsBaseForTest() != m.cpu().fs_base);
+    LIFT_CHECK_EQ_U32(m.audio().feederStackTopForTest(), stack_top);
+    // 主 TEB 的链头没被 feeder 的上下文改动（两页独立；feeder 的 TEB 在自己的页上）。
+    LIFT_CHECK_EQ_U32(m.mem().rd32(main_teb + 0x00u), 0xFFFFFFFFu);
+    LIFT_CHECK(m.mem().regionOf(main_teb) != m.mem().regionOf(teb));
+}
+
+// ★ `CriticalSectionTable` 的阻塞语义（方案 C 的硬前提）：两条宿主线程抢同一 guest CS 时，
+//   `tryEnter` 必须**拿不到**且 `err` 为**空**（= 可重试的争用）。没有 `cs_table` 时
+//   `guestTryEnterCriticalSectionAs` 会走"guest 字段当锁"的退化路径：
+//   它把"已被 thread 0x… 持有"写进 `err`（非空）⇒ `feederEvent` 把非空 err 当**致命**
+//   ⇒ 第一次并发就打死 feeder。⇒ 这条用例就是那段退化路径的机械判据。
+void testCsTableBlocksAcrossThreads() {
+    lift_test::g_current_case = "audio-device/cs-table-blocks-across-threads";
+    std::string err;
+    lift::Machine m;
+    if (!initMachine(m, &err)) {
+        LIFT_CHECK(false);
+        return;
+    }
+    // `Machine::wire()` 接的表；AOT 侧 `AotHost::init` 必须有同一条断言（见 aot_host.cpp）。
+    LIFT_CHECK(m.cpu().cs_table != nullptr);
+    if (m.cpu().cs_table == nullptr) return;
+    const std::uint32_t cs_ea = 0x00430000u;
+    std::vector<std::uint8_t> zeros(0x40, 0);
+    LIFT_CHECK(m.placeData(cs_ea, zeros.data(), zeros.size(), &err));
+    m.cpu().cs_table->ensure(cs_ea);
+
+    lift::X86 cpu_a = m.cpu();
+    lift::X86 cpu_b = m.cpu();
+    std::atomic<bool> a_entered{false};
+    std::atomic<bool> release_a{false};
+    std::atomic<int> b_try_result{-1};
+    std::string b_err;
+    std::thread ta([&] {
+        std::string e;
+        a_entered.store(lift::guestEnterCriticalSectionAs(cpu_a, cs_ea, 0x00001008u, &e));
+        while (!release_a.load()) std::this_thread::yield();
+        lift::guestLeaveCriticalSectionAs(cpu_a, cs_ea, 0x00001008u, &e);
+    });
+    for (int i = 0; i < 2000 && !a_entered.load(); ++i) std::this_thread::yield();
+    LIFT_CHECK(a_entered.load());
+    if (a_entered.load()) {
+        std::thread tb([&] {
+            std::string e;
+            const bool ok = lift::guestTryEnterCriticalSectionAs(cpu_b, cs_ea, 0x0000100Cu, &e);
+            b_try_result.store(ok ? 1 : 0);
+            b_err = e;
+            if (ok) lift::guestLeaveCriticalSectionAs(cpu_b, cs_ea, 0x0000100Cu, &e);
+        });
+        tb.join();
+        // ★ 争用 ⇒ 拿不到 + err 为空（可重试）。非空 err = 退化路径（致命），当场红。
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(b_try_result.load()), 0);
+        LIFT_CHECK(b_err.empty());
+    }
+    release_a.store(true);
+    ta.join();
+    // 放开之后能再进（宿主锁真的被放掉了）—— 否则"拿不到"也可能只是"永远拿不到"。
+    std::string e2;
+    LIFT_CHECK(lift::guestTryEnterCriticalSectionAs(cpu_b, cs_ea, 0x0000100Cu, &e2));
+    lift::guestLeaveCriticalSectionAs(cpu_b, cs_ea, 0x0000100Cu, &e2);
+}
+
 }  // namespace
 
 int main() {
@@ -1311,5 +1426,7 @@ int main() {
     testUnderrunSilenceGuestZeros();
     testEpochRelativeCursor();
     testGenerateToOverflowCounted();
+    testFeederTebIsOwn();
+    testCsTableBlocksAcrossThreads();
     return lift_test::finish("audio-device");
 }

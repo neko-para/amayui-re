@@ -34,12 +34,14 @@ const DecodeCache& liftOneDecodeCache() { return g_liftOneDecodeCache; }
 // ---------------------------------------------------------------------------------------
 // 采样式内部 profile 的**唯一接缝**（AOT 的 `--profile`；契约见 `lift_abi.h`）
 // ★ 默认 `nullptr`：`lift_one` 里只有一次指针判空（关档零成本）。
+//   ★ **每线程一份**（`thread_local`）：`lift_one` 可能在两条宿主线程上被调（AOT 主线程 +
+//     音频 feeder 的 IR 执行器）。feeder 的副本恒空 ⇒ 不采样、不写主线程的 `AotProfile`。
 //   ★ 解释器臂（`emulator-lift`）永远不设它；这里的计数器也只在钩子非空时才被推进。
 // ---------------------------------------------------------------------------------------
 namespace lift {
-LiftOneProfileHook liftOneProfileHook = nullptr;
+thread_local LiftOneProfileHook liftOneProfileHook = nullptr;
 namespace {
-std::uint64_t g_liftOneProfileCount = 0;
+thread_local std::uint64_t g_liftOneProfileCount = 0;
 }
 bool liftOneProfileSampleDue() {
     // 只在 `liftOneProfileHook != nullptr` 时被调用（调用点用 `&&` 短路）。
@@ -415,10 +417,12 @@ namespace lift {
 LiftDynLookup liftDynLookup = nullptr;
 }  // namespace lift
 
-// ★ 窗口 profile 的计数（缺省关 ⇒ `lift_dyn` 里只多一次 bool 判断）。
+// ★ 窗口 profile 的计数（缺省关 ⇒ `lift_dyn` 里只多一次 relaxed load）。
 //   ⚠ 定义在**全局**作用域：声明在 `lift_abi.h` 的 `extern "C" lift_dyn` 旁边（同名一处）。
-bool liftDynCountOn = false;
-std::uint64_t liftDynCalls = 0;
+//   ★ 原子：`lift_dyn` 可能在主线程与音频 feeder 的 IR 执行器上**并发**执行，而
+//     `liftDynCountOn` 由主线程的窗口 profile 在运行中开/关（见 lift_abi.h 的注记）。
+std::atomic<bool> liftDynCountOn{false};
+std::atomic<std::uint64_t> liftDynCalls{0};
 
 extern "C" std::uint32_t lift_dyn(void* cpu_ptr, LiftRegs* st, std::uint32_t ea) {
     if (!cpu_ptr || !st) {
@@ -428,9 +432,11 @@ extern "C" std::uint32_t lift_dyn(void* cpu_ptr, LiftRegs* st, std::uint32_t ea)
         std::_Exit(4);  // 宿主自身 bug（与 lift_shim / lift_one 同一档退出码）
     }
     lift::X86& cpu = *static_cast<lift::X86*>(cpu_ptr);
-    // ★ 窗口 profile：只计数（闸门是 bool ⇒ 缺省档一次判断）。位置在查表**之前** —— 查表失败
-    //   （EA 不在表里 ⇒ 原样返回给 trampoline 裁决）那次也算一次动态入口。
-    if (liftDynCountOn) ++liftDynCalls;
+    // ★ 窗口 profile：只计数（闸门是 atomic<bool> ⇒ 缺省档一次 relaxed load）。位置在查表**之前**
+    //   —— 查表失败（EA 不在表里 ⇒ 原样返回给 trampoline 裁决）那次也算一次动态入口。
+    if (liftDynCountOn.load(std::memory_order_relaxed)) {
+        liftDynCalls.fetch_add(1, std::memory_order_relaxed);
+    }
     const lift::LiftDynLookup lookup = lift::liftDynLookup;
     if (lookup == nullptr) {
         std::fprintf(stderr,

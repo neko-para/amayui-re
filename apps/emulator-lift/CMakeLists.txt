@@ -522,6 +522,7 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
     endif()
     target_sources(emulator-lift-aot PRIVATE
         src/aot/aot_dispatch.cpp
+        src/aot/aot_feeder.cpp
         src/aot/aot_run.cpp
         ${LIFT_AOT_OBJS})
     # ★ `aot_dispatch.cpp` `#include "lift_table.inc"`（生成物）⇒ 必须显式声明文件级依赖，
@@ -559,7 +560,7 @@ else()
     message(STATUS
         "emulator-lift-aot: 缺 clang / 执行源（${LIFT_AOT_AGE_EXE}）/ closure.txt ⇒ 替身 TU："
         "构建不断，但 AOT 启动时会响亮报告「没有生成物」并 exit 1")
-    target_sources(emulator-lift-aot PRIVATE src/aot/aot_dispatch.cpp src/aot/aot_run.cpp)
+    target_sources(emulator-lift-aot PRIVATE src/aot/aot_dispatch.cpp src/aot/aot_feeder.cpp src/aot/aot_run.cpp)
 endif()
 
 # =====================================================================================

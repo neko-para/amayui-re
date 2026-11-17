@@ -20,9 +20,13 @@
 // ★ 本头**纯**：只 `<cstdint>`，不 include audio.h / x86 / guest 头 ⇒ 无分配、无设备、无锁。
 //   ⛔ 不要在这里 include `runtime/audio.h`（那会把 SDL / guest 头拖进 pure 用例）。
 //
-// ★ 与 S0 的关系：`thread_mode` 这一格就是 `audioThreadMode()` 的输出（`runtime/audio_policy.h`）。
-//   AOT 臂 `cpu_.machine == nullptr` ⇒ 恒 false ⇒ 恒"主线程 D 泵"；thread 档下喂料由 feeder
-//   线程自己做，主线程**不该**再泵（解释器里那也是 `pump()` 一进来就 `return Idle` 的无用功）。
+// ★ 与 S0 的关系：`thread_mode` 这一格就是 `audioThreadMode(mode, realTime)` 的输出
+//   （`runtime/audio_policy.h`，两个事实；"宿主给没给 GuestLayout"由 `attach` 的引用在装配期钉死）。
+//   AOT 在 `--audio sdl` + 墙钟 + 设备真的打开时**会**是真 feeder 线程（这是用户裁决的形状），
+//   `--audio virtual` / 设备回退仍是主线程 D 泵。thread 档下喂料由 feeder 线程自己做，
+//   主线程**不该**再泵（解释器里那也是 `pump()` 一进来就 `return Idle` 的无用功）。
+//   ★ 本闸门**不表达** feeder 的失败面：thread 档 `due()` 恒假 ⇒ `pump()` 里的 `feeder_error_`
+//     早退不可达 ⇒ AOT 的块边界必须直接看 `AudioEngine::feederFailed()`。
 #pragma once
 
 #include <cstdint>
@@ -33,7 +37,7 @@ namespace lift {
 struct AudioPumpFacts {
     // `AudioEngine::enabled()`（档位 != Off）。★ **这一格为假 ⇒ 一次都不许调 pump()**。
     bool enabled = false;
-    // `AudioEngine::threadMode()`（= S0 谓词 `audioThreadMode(mode, realTime, hasMachine)` 的输出）。
+    // `AudioEngine::threadMode()`（= S0 谓词 `audioThreadMode(mode, realTime)` 的输出）。
     bool thread_mode = false;
     // 嵌套 guest 执行进行中：`calls_.active()`（GuestCallStack 帧）/ winmm 定时器回调 / SEH 派发。
     bool nested_guest_active = false;

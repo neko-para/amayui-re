@@ -1,14 +1,19 @@
-// emulator-lift · 音频设备模型 + 真 feeder 线程（方案 C；virtual/无 real-time 回退方案 D 泵）
+// emulator-lift · 音频设备模型 + 两条喂料路线（方案 C 真 feeder 线程 / 方案 D 主线程泵）
 //
-// ★ 口径（docs/thread-model-feasibility.md §5.1 / docs/audio-feasibility.md）：
-//   - 引擎的音频喂料线程 `sub_4B5AA0` **不真跑**：`CreateThread(0x4B5AA0)` 只登记身份，
+// ★ 口径（`docs/03-emulator/audio.md` §1；判据只有一份 = `runtime/audio_policy.h`）：
+//   - 引擎的音频喂料线程 `sub_4B5AA0` **不执行它的线程体**：`CreateThread(0x4B5AA0)` 只登记身份，
 //     `ResumeThread` 把泵置为 runnable；线程体里的 12 段 native + 1 段 guest
-//     （`0x4B5B03 call sub_4B6C30`）由本类在 **dispatcher 块边界**重新排成泵。
-//   - ⛔ 不建第二宿主线程、不建第二 guest 栈 ⇒ 没有并发访存，arm64 与 x86 同结果。
+//     （`0x4B5B03 call sub_4B6C30`）由本类在**块边界**重新排成喂料。
+//   - **thread 档**（`Sdl` + 墙钟）：feeder 是**真宿主线程**，有自己的 guest 栈 / TEB / 寄存器现场；
+//     `sub_4B6C30` 由引擎注入的 guest 执行器跑（解释器臂 = 本文件的 `runFeederGuest`；
+//     AOT 臂 = `FeederGuestRunner`，由宿主注入，见下）。lead = 100 ms。
+//   - **D 档**（`Virtual` / 设备回退 / 无墙钟）：没有第二宿主线程，`sub_4B6C30` 由主线程在块边界
+//     经 `startNestedGuestCall()` 铺帧。lead = 600 ms（D 在一次 fill 期间暂停混音，见 audio_policy.h）。
 //   - 设备模型（游标 / 4 个位置通知 / 状态机 / 混音）在宿主；PCM 仍由 guest 解码器产生。
-//   - `sub_4B6C30` 用现有 `startNestedGuestCall()` 调（thiscall，ECX=stream，1 个栈参数 quarter）。
 //   - 泵在进入/退出一次 fill 时做**整份 guest 上下文交换**（GPR / EFLAGS / x87 / XMM / 段 /
 //     fs/gs / thread_id / last_error）。⛔ 只存 8 个 GPR 不够（Ogg 解码用浮点）。
+//   - ★ feeder 有**自己的 TEB**（`GuestLayout::feeder_teb`），⛔ 不与主线程共用：共用会让 feeder 的
+//     SEH prologue 改写主线程的 `fs:[0]`（BUG-22：Quit 的 C++ throw 派发到已复用的 record）。
 //
 // ★ 时钟档：
 //   - `Virtual`：游标由 `VirtualClock` 驱动（100ns × 44100 / 10^7），确定性；CTest / dump 用。
@@ -41,7 +46,21 @@ class GuestMemory;
 class VirtualClock;
 class Decoder;
 class BlockCache;
+struct GuestLayout;
 enum class LogLevel : int;
+
+// ★ AOT 臂的 feeder guest 执行器（**引擎只转发**；⛔ `audio.cpp` 不 include 任何 aot 头）。
+//   · 缺省 `nullptr` ⇒ 引擎走本文件的解释器路径 `runFeederGuest()`（解释器臂逐字不变）；
+//   · AOT 宿主管 `ctx` 指向自己，`run` 用 **AOT 派发循环**执行 guest（`AGENTS.md` §12.8：
+//     AOT 的执行来源只有 IR + shim，⛔ 不走解释器）。
+//   · `entry_ea` / `return_ea` **由引擎传入**（`kSub4B6C30` / `kFeederReturnEa` 的唯一来源在
+//     `audio.cpp`）⇒ ⛔ 不要在宿主侧另写 `0x7FFEF00C`。
+//   · 返回 false + `*err` ⇒ 调用方置 `feeder_error_`（与解释器路径同一条失败面，不是静默）。
+struct FeederGuestRunner {
+    bool (*run)(void* ctx, X86& cpu, std::uint32_t entry_ea, std::uint32_t return_ea,
+                std::string* err) = nullptr;
+    void* ctx = nullptr;
+};
 
 // ★ `AudioMode` / `audioModeName` / `audioThreadMode`（S0 定档谓词）/ `parseAudioMode`（S1 参数面）
 //   只有一份：`runtime/audio_policy.h`（纯头，可被 pure CTest 直接驱动）。⛔ 不要在这里再写一份。
@@ -157,8 +176,18 @@ public:
     AudioEngine(const AudioEngine&) = delete;
     AudioEngine& operator=(const AudioEngine&) = delete;
 
-    // `Machine::wire()` 调用：之后所有方法都假定 cpu/mem/clock 已装配。
+    // 宿主装配：之后所有方法都假定 cpu/mem/clock 已装配。
+    // ★ **feeder 布局是结构前提**（不是运行时选项）：真 feeder 线程要自己的一页 TEB +
+    //   一段专用 guest 栈，二者都来自 `GuestLayout`（`GuestLayout::feeder_teb` /
+    //   `feeder_stack_top` / `feeder_stack_size`，唯一真源在 `runtime/image.h`）。
+    //   `AudioEngine::attach(..., const GuestLayout&)` 把它**拷进引擎**（不存指针：`Machine` 的
+    //   `audio_` 声明在 `layout_` 之前，析构逆序会让指针悬垂）。
+    //   ⇒ "能不能起 feeder"在编译期由这个引用钉死；⛔ 不再有 `has_machine` / 能力位那种
+    //     可以"声明 true 而实际为空"的布尔。
+    //   ★ 三参重载是**过渡期兼容**（AOT 装配尚未接布局）：它等价于"宿主没有布局" ⇒ `begin()`
+    //     会**显式 Warn 并走 D 泵**（不是静默）。最终形态只有四参版本。
     void attach(X86* cpu, GuestMemory* mem, VirtualClock* clock);
+    void attach(X86* cpu, GuestMemory* mem, VirtualClock* clock, const GuestLayout& layout);
 
     // 由 `Machine::configureAudio()` / CLI 调用；可在 run 前反复调用（run 开始后改无效）。
     // ★ `sound=false`（缺省）= 静音：设备 / 混音 / 喂料 / guest 的 DS 调用全部照跑，
@@ -178,8 +207,18 @@ public:
     // 缺省 true = 静音；`--sound` 时 false。与后端（`--audio`）正交。
     bool muted() const { return mute_; }
     bool threadMode() const { return thread_mode_; }
+    // ★ 本引擎当前生效的预读 lead（字节）。`mixStep()` 与 `begin()` 的日志行**只调这个**
+    //   （判据 = `audio_policy.h` 的 `leadBytesFor(thread_mode)`，唯一一份）。
+    std::uint64_t leadBytes() const { return leadBytesFor(thread_mode_); }
     const AudioStats& stats() const { return stats_; }
     const std::string& lastError() const { return last_error_; }
+    // ★ thread 档的 feeder 失败面（只读）：AOT 的块边界**必须**看它（`AudioPumpGate::due()` 在
+    //   thread 档恒假 ⇒ `pump()` 里那条 `feeder_error_` 早退在 AOT 不可达）。解释器臂照旧走
+    //   `pump() == Error`。`feederErrorText()` 走独立小锁（文字由 feeder 线程写、主线程读）。
+    bool feederFailed() const { return feeder_error_.load(); }
+    std::string feederErrorText() const;
+    // ★ 注入 guest 执行器（缺省 nullptr = 走本文件的解释器 `runFeederGuest`）。只能在 begin 之前调。
+    void setFeederGuestRunner(const FeederGuestRunner& runner) { runner_ = runner; }
 
     // ---- 设备 / 缓冲（由 dsound shim 调）----
     void addBuffer(std::uint32_t state_ea, std::uint32_t obj_ea, std::uint32_t data_ea, std::uint32_t bytes,
@@ -235,7 +274,8 @@ public:
         std::uint64_t fills = 0;
         // ★ S3（`REQ-01M7JZM1QQ728KX1C0G2F232T1` 的缺口 #3/#4）：喂料 / 交付的**字节账**。
         //   `fills` 只回答"跑了几刀"，回答不了"喂了多少"；`fill_bytes` 之前只有 `feederEvent`
-        //   那条记（AOT 恒 D 泵 ⇒ 唯一可达档里恒 0）。⇒ 两个量都进快照，供摘要的一行读数用。
+        //   那条记（AOT 当时恒 D 泵 ⇒ 那一档里恒 0）。⇒ 两个量都进快照，供摘要的一行读数用；
+        //   两条喂料路径（feeder 线程 / 主线程 D 泵）记的是**同一个量**（环长 L / 4）。
         //   口径与 `dumpSummary` 的 `fill_bytes=` / `played=` 同一份 `stats_`（⛔ 不另算）。
         std::uint64_t fill_bytes = 0;
         std::uint64_t pushed_bytes = 0;
@@ -247,6 +287,14 @@ public:
         std::uint64_t underrun_silence_events = 0;
         std::uint64_t fill_overlapped = 0;
         std::uint64_t fill_witnessed = 0;
+        // ★ 本轮新增的三个**只读**读数（放在末尾；⛔ 不动 `dumpSummary` 的字段 —— 那一行是
+        //   两臂共用的口径）。AOT 的 `audio-pump:` 行用它们报 `feeder=` / `lead=` / `dev_frames=`。
+        //   · `thread_mode` = `threadMode()`（真 feeder 线程 vs 主线程 D 泵）；
+        //   · `lead_bytes`  = `leadBytesFor(thread_mode)`（100 ms / 600 ms 的字节数）；
+        //   · `dev_sample_frames` = SDL 设备缓冲的帧数（**设备延迟**，与 lead 是两笔账）。
+        bool thread_mode = false;
+        std::uint64_t lead_bytes = 0;
+        std::uint32_t dev_sample_frames = 0;
     };
     Snapshot snapshot() const;
     // 真线程 feeder 的 shim 块按需装进私有 cache（ComRegistry 新建 vtable 时会调）。
@@ -283,6 +331,17 @@ public:
     //   "只能主线程进模态"的 shim 必须能在**不碰 wm/presenter** 的前提下先判自己在哪条线程上
     //   （`runtime/message_box.cpp` / `shims/user32_menu.cpp`）。⛔ 不是新状态、不改任何行为。
     bool onFeederThread() const { return isFeederThread(); }
+
+    // ---- 仅夹具：feeder 的 TEB / 栈 / 执行器 ----
+    // ★ 存在理由（BUG-22 回归口）：`setupFeederContext` 只在 thread 档（`Sdl` + 墙钟）被
+    //   `resumeFeeder` 调到，而 pure CTest 没有设备 ⇒ 造不出那条路径。这两个入口让"feeder 有
+    //   自己的 TEB（≠ 主线程 TEB）"变成一条**不需要设备**的结构断言；⛔ 不进生产路径。
+    //   `setupFeederContextForTest` 只做上下文（不建线程、不开设备），与 `setupFeederContext` 同一份实现。
+    bool setupFeederContextForTest(std::string* err);
+    std::uint32_t feederTebForTest() const { return feeder_teb_; }
+    std::uint32_t feederFsBaseForTest() const { return audio_cpu_.fs_base; }
+    std::uint32_t feederStackTopForTest() const { return audio_stack_top_; }
+    bool feederLayoutGivenForTest() const { return feeder_layout_given_; }
 
 private:
     struct Buffer {
@@ -403,6 +462,9 @@ private:
     void closeDump();
     void writeDump(const std::uint8_t* pcm, std::size_t n);
     void logAt(lift::LogLevel level, const char* fmt, ...) const;
+    // ★ feeder 的失败面（feeder 线程调；文字在 `feeder_err_mutex_` 下写、主线程经
+    //   `feederErrorText()` 读）。`feeder_error_` 是 atomic ⇒ AOT 的块边界可以无锁轮询。
+    void setFeederError(std::string text);
 
     X86* cpu_ = nullptr;
     GuestMemory* mem_ = nullptr;
@@ -484,7 +546,12 @@ private:
     std::atomic<std::thread::id> feeder_tid_{};
     bool stop_requested_ = false;
     std::atomic<bool> feeder_error_{false};
+    // ★ 失败文字：feeder 线程写、主线程（AOT 块边界 / 摘要）读 ⇒ 必须走这把独立小锁。
+    //   ⛔ 不要裸读/裸写这个 `std::string`（那是数据竞争）；锁序上它与 audio 的锁无关。
     std::string feeder_error_text_;
+    mutable std::mutex feeder_err_mutex_;
+    // ★ 注入的 guest 执行器（缺省 nullptr = 解释器 `runFeederGuest`；AOT 宿主管这个指针）。
+    FeederGuestRunner runner_;
     // 独立 mixer 线程（方案 C）：主线程卡在 Present/长 shim 时仍持续把 guest 环送设备。
     std::thread mix_thread_;
     std::mutex mix_wait_mutex_;
@@ -506,8 +573,17 @@ private:
     std::unique_ptr<BlockCache> audio_cache_;
     // 只保护私有 cache 的装/取；⛔ 不要用设备模型的 mutex_（主线程混音会长时间持有它）。
     std::mutex feeder_cache_mutex_;
+    // ★ feeder 的布局（**拷贝**，不存指针）：`attach(..., const GuestLayout&)` 写入。
+    //   `feeder_layout_given_ == false` = 三参过渡重载 ⇒ `begin()` 显式 Warn + D 泵；
+    //   `feeder_layout_invalid_ == true` = 宿主给了布局但值不可用（0）⇒ `begin()` **响亮失败**。
+    std::uint32_t feeder_teb_ = 0;
+    std::uint32_t feeder_stack_top_ = 0;
+    std::uint32_t feeder_stack_size_ = 0;
+    bool feeder_layout_given_ = false;
+    bool feeder_layout_invalid_ = false;
     std::uint32_t audio_stack_top_ = 0;
-    static constexpr std::uint32_t kAudioStackSize = 0x00100000u;
+    // SDL 设备缓冲的帧数（`SDL_GetAudioDeviceFormat`；**设备延迟**的账，与 lead 分开报）。
+    std::uint32_t dev_sample_frames_ = 0;
 
     void startFeederThread();
     void feederThreadMain();

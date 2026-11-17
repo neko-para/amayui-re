@@ -52,9 +52,18 @@ std::uint64_t pinnedFunctions();
 // 表长（= 入口 EA 数）。
 std::size_t tableSize();
 
+// ★ 预热派发表（**主线程**调，起第二条线程之前）：把"第一次摊表"显式钉在起 feeder 之前，
+//   而不是依赖"主线程恰好先查过一次"的时序。
+//   · 摊表本身已经是 `std::call_once`（feeder 的 IR 执行器也会查找，见 .cpp 的线程口径注记）；
+//   · 本函数**不写任何计数**（它不是一次查找，⛔ 不要实现成 `lookup(0)` —— 那会污染
+//     `probe :` / `table :` 的读数）。
+void ensureDispatchTable();
+
 // EA → LiftFn。返回 nullptr = **不在表里**（调用方必须响亮停机，⛔ 不返回哨兵函数）。
 // `comparisons`（可空）= 这一次查找做了几次**关键字比较**（哈希表里 = 探测次数：每次探测比较一次
 //   槽里的 EA；⛔ 那是"查找成本"的读数，不是二分那种 log2 比较）。
+// ★ 统计是**每线程一份**（`thread_local DispatchStats`）：feeder 的查找不写主线程的账，
+//   也不并发写同一份非原子计数 ⇒ 摘要里的 `probe :` / `table :` 仍只反映主线程。
 LiftFn lookup(std::uint32_t ea, std::uint64_t* comparisons);
 
 // ★ S7（D53）：**同一条查找路径、但不计 trampoline 的派发账**。给生成代码的 `lift_dyn` 用

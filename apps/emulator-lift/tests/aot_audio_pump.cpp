@@ -17,7 +17,10 @@
 //      stride：fill 迟到 4096 条指令以上是真的会欠料）。
 //      红了 ⇒ 要么在别人的 guest 上下文里铺了一帧（改坏仍在跑的现场），要么欠料。
 //   ④ **thread 档不泵**：`thread_mode == true` 时恒假（喂料由 feeder 线程自己做 —— 这一格就是
-//      S0 谓词 `audioThreadMode()` 的输出，AOT 恒 false，但闸门必须表达它）。
+//      S0 谓词 `audioThreadMode(mode, realTime)` 的输出）。★ 注意：新谓词下 AOT 的
+//      `--audio sdl` + 墙钟**会**是真 feeder 线程 ⇒ 这一格在 AOT 上不再恒 false；
+//      闸门行为本身（thread 档不 due）不变，变的是"谁会进 thread 档"。
+//      ⛔ 不要把"thread 档不 due"读成"AOT 永远不 due"：`--audio virtual` / 设备回退仍走 D 泵。
 //
 // ★ 为什么是 pure 档：`add_test` 在 CMakeLists 最外层（`AGENTS.md` §12.4 判据 = 注册位置）
 //   ⇒ 默认 `ctest` 就跑；本文件只 include 一个**纯头**（`<cstdint>`），不碰 SDL / 设备 / guest 内存 /
@@ -26,6 +29,8 @@
 //   （assets 档、几十秒），且 off 档按定义**不许有输出** ⇒ 在那一面没有观察点。运行时的
 //   "off 档 calls == 0" 由**进程级**读数补（`LIFT_AOT_AUDIO_TRACE=1` 的 `[audio-pump] calls=…`，
 //   见交付报告）；本文件钉的是那条读数**为什么**会是 0。
+// ★ thread 档的失败面**不在这个头里**：`due()` 恒假 ⇒ `pump()` 的 `feeder_error_` 早退在 AOT
+//   不可达 ⇒ AOT 的块边界必须直接看 `AudioEngine::feederFailed()`（见 `aot_run.cpp` 的音频块）。
 #include <cstdint>
 #include <initializer_list>
 
@@ -123,7 +128,7 @@ void testNestedSuppressesThenCatchesUp() {
     LIFT_CHECK(gate.due(facts(true, false, /*nested=*/false, 100000)));
 }
 
-// ==== ④ thread 档恒不泵（S0 谓词那一格；AOT 恒 false，但闸门必须表达它）====
+// ==== ④ thread 档恒不泵（S0 谓词那一格；闸门必须表达它，与谁进 thread 档无关）====
 void testThreadModeNeverPumps() {
     lift_test::g_current_case = "s3-pump-gate-thread-mode-never-due";
     lift::AudioPumpGate gate;

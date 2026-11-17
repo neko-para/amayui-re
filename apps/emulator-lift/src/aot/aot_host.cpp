@@ -33,6 +33,7 @@
 #endif
 
 #include "aot/aot_dispatch.h"
+#include "aot/aot_feeder.h"       // feeder 的 IR 执行器（音频真线程用）
 #include "runtime/control.h"       // 控制层 Present 闸门 / Context（轻头：⛔ 无 beast / nlohmann）
 #include "runtime/decode_cache.h"  // `liftOneDecodeCache()`：只读命中率（`decode-cache:` 行）
 #include "shims/register.h"
@@ -81,6 +82,10 @@ bool AotHost::init(std::string* err) {
     cpu_.cache = nullptr;    // ★ AOT 没有 BlockCache（块缓存是解释器的执行件）
     cpu_.lst = nullptr;      // `.lst` 是诊断/对照语料，执行不需要
     cpu_.machine = nullptr;  // ★ AOT **有意**没有 Machine：`machineOf()` 就是 nullptr，⛔ 不伪造
+    // ★ guest `CRITICAL_SECTION` ↔ 宿主递归锁（与 `Machine::wire` 的 `cpu_.cs_table = &critical_sections_`
+    //   同形）。这是音频**真 feeder 线程**的硬前提：没有它，`guestTryEnterCriticalSectionAs` 会走
+    //   "guest 字段当锁"的退化路径（争用时返回非空 err ⇒ `feederEvent` 当致命 ⇒ 第一次并发就打死 feeder）。
+    cpu_.cs_table = &cs_;
     // ★ 宿主服务视图（`runtime/host_services.h`）：`AotHost` 自己实现那份接口 ⇒ shim 侧
     //   `hostOf(cpu)` / `hostOf(cpu)->ownsCpu(cpu)` 的判据对 AOT 成立（D4 的解耦面）。
     cpu_.host = this;
@@ -90,7 +95,14 @@ bool AotHost::init(std::string* err) {
     //   ★ CLI 的 `--audio` / `--audio-dump` / `--sound` 由 `aot_main` 在 `init()` 之后调
     //     `configureAudio()` 覆盖（`configure` 只要求"还没 begin"）；缺省档不会走到那一步的差异上。
     //   ★ 生命周期（begin / end）在 `run()` 的入口 / 出口（与解释器 `machine.cpp:1059` / `:1854` 同口径）。
-    audio_.attach(&cpu_, &mem_, &clock_);
+    //   ★ **四参 attach**：feeder 的 TEB / 专用 guest 栈来自 `GuestLayout`（`runtime/image.h` 唯一真源）。
+    //     这是结构前提（不是运行时选项）⇒ `audioThreadMode()` 只剩"档位 / 时钟"两个事实；
+    //     ⛔ 不要再退回"按 `cpu_.machine != nullptr` 判能不能起 feeder"（AOT 有意没有 Machine）。
+    audio_.attach(&cpu_, &mem_, &clock_, layout_);
+    // ★ 音频 feeder 的 guest 执行器 = **AOT IR 派发**（`AGENTS.md` §12.8：执行来源只有 IR + shim）。
+    //   `entry/return` 常量由 `AudioEngine` 传入（`kSub4B6C30` / `kFeederReturnEa` 的唯一来源在 audio.cpp）。
+    //   ⛔ 不要在这里注入解释器路径（那会让 AOT 臂长出第三份执行来源）。
+    audio_.setFeederGuestRunner(FeederGuestRunner{&AotHost::feederRunnerThunk, this});
     {
         std::string audio_err;
         if (!audio_.configure(AudioMode::Off, std::string(), false, &audio_err) && err != nullptr) {
@@ -107,8 +119,26 @@ bool AotHost::init(std::string* err) {
     // ★ SEH 状态机与 x87 现场：与 `Machine::wire` 一样在装配末尾复位一次。
     seh_.reset();
     cpu_.fpu.reset();
+    // ★ 音频 feeder 的**硬前提**自检：没有 `cs_table` 时 guest CS 会走退化路径（见上面的接线）。
+    //   这里只做一次判空（装配顺序错 ⇒ 响亮失败，而不是等到第一次并发才炸）。
+    if (cpu_.cs_table == nullptr) {
+        if (err != nullptr) *err = "AOT 装配不完整：cpu_.cs_table 为空（音频 feeder 需要宿主临界区表）";
+        return false;
+    }
     initialized_ = true;
     return true;
+}
+
+bool AotHost::feederRunnerThunk(void* ctx, X86& cpu, std::uint32_t entry_ea, std::uint32_t return_ea,
+                                std::string* err) {
+    // ★ 只转发：guest 语义在生成物（IR）与 shim 里，本函数一行语义都不写。
+    //   `ctx` 是本宿主（`init()` 里注入）；`mem_` / `shims_` 都是**同一台宿主**的那一份。
+    auto* host = static_cast<AotHost*>(ctx);
+    if (host == nullptr) {
+        if (err != nullptr) *err = "音频 feeder：执行器 ctx 为空";
+        return false;
+    }
+    return runAotFeederGuest(cpu, host->mem_, host->shims_, entry_ea, return_ea, err);
 }
 
 bool AotHost::configureAudio(AudioMode mode, const std::string& dump_path, bool sound, std::string* err) {
@@ -289,6 +319,14 @@ bool AotHost::loadAgercModule(const std::string& path, std::string* err) {
     addRange(layout_.argv_block, static_cast<std::uint64_t>(layout_.argv_block) + 0x1000u);
     addRange(layout_.shim_page, static_cast<std::uint64_t>(layout_.shim_page) +
                                     static_cast<std::uint64_t>(layout_.shim_slots) * 4u);
+    // ★ 音频 feeder 的两页（`GuestLayout::feeder_teb` / `feeder_stack_top-size..top`）也是"已用区间"：
+    //   `AudioEngine::setupFeederContext()` 会在**运行中**提交它们（装配期 AGERC 已经选完基址，
+    //   但"谁占哪段"的清单必须完整 —— 否则 AGERC 恰好落在 feeder 页时只能靠 commit 时的占用检查兜底）。
+    addRange(layout_.feeder_teb, static_cast<std::uint64_t>(layout_.feeder_teb) + 0x1000u);
+    if (layout_.feeder_stack_size != 0) {
+        addRange(static_cast<std::uint64_t>(layout_.feeder_stack_top) - layout_.feeder_stack_size,
+                 layout_.feeder_stack_top);
+    }
     addRange(cpu_.shim.va_cursor, cpu_.shim.va_limit);
     // 假模块句柄空间（kernel32_process.cpp 的 `0x7F000000 + 序号*64KiB`）⇒ AGERC 的 base 不能落在里面。
     addRange(0x7F000000u, 0x7FF00000u);
@@ -564,11 +602,21 @@ void AotHost::printRunSummary(const AotRunResult& r, std::FILE* out) const {
         //   ★ 判据面：`fills>0 && fill_bytes>0 && pushed>0` = "通知真被消费、字节真的喂进去了"；
         //     `calls=0` 只在 off 档成立，而 off 档根本不打这一行 ⇒ 两者不会互相冒充。
         const AudioEngine::Snapshot a = audio_.snapshot();
-        std::fprintf(out, "audio-pump: calls=%llu fills=%llu fill_bytes=%llu pushed=%llu\n",
+        // ★ 本轮新增的三个只读字段（**放在行尾**，⛔ 不动前面已有的顺序/语义）：
+        //   · `feeder=host-thread` / `main-pump` = 真 feeder 线程 vs 主线程 D 泵（`Snapshot.thread_mode`）；
+        //   · `lead=` = 该档的预读字节数（`Snapshot.lead_bytes`：19200 / 115200，判据在 `audio_policy.h`）；
+        //   · `dev_frames=` = SDL **设备缓冲帧数**（`Snapshot.dev_sample_frames`；与 lead 是**两笔账**：
+        //     一笔是"提前垫多少内容"，一笔是"设备一次取走多少"，⛔ 不要相加成一个"总延迟"）。
+        std::fprintf(out,
+                     "audio-pump: calls=%llu fills=%llu fill_bytes=%llu pushed=%llu"
+                     " feeder=%s lead=%llu dev_frames=%u\n",
                      static_cast<unsigned long long>(audio_pump_.calls()),
                      static_cast<unsigned long long>(a.fills),
                      static_cast<unsigned long long>(a.fill_bytes),
-                     static_cast<unsigned long long>(a.pushed_bytes));
+                     static_cast<unsigned long long>(a.pushed_bytes),
+                     a.thread_mode ? "host-thread" : "main-pump",
+                     static_cast<unsigned long long>(a.lead_bytes),
+                     static_cast<unsigned>(a.dev_sample_frames));
     }
     // ---- `--profile` 的整块读数（**关档时一行都不打** ⇒ 全文与基线逐字相同）----
     // ★ 落点为什么在这里：`aot_main.cpp` 在 `printRunSummary` 之后只有 stderr 回声 + `return`，

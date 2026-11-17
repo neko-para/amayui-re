@@ -106,6 +106,15 @@ struct GuestLayout {
     //   0x7FFD4000 = argv、0x7FFD5000 = 纯档夹具 argv、0x7FFFC000 = ddraw device、0x7FFFD000 = locale。
     //   ⛔ 不要在别处再抄一份这个地址：布局常量只留这里。
     std::uint32_t feeder_teb = 0x7FFD6000u;
+    // ★ 音频 feeder 的**专用 guest 栈**（1 MiB，向下增长）：主栈在 `stack_top-size..stack_top`，
+    //   feeder 用**再下面**的 1 MiB（`0x6FD00000..0x6FE00000`），与主栈 guard 页相邻但不重叠。
+    //   ★ 以前这个地址是 `audio.cpp` 里的字面量（`audio_stack_top_ = 0x6FE00000`）⇒ "feeder 从哪来"
+    //     有两个答案，而 AGERC 选基址的冲突表（`AotHost::loadAgercModule` / `Machine::loadAgercModule`）
+    //     也需要把这段算进"已用区间"。⇒ 搬进布局常量，**只留这一份**。
+    //   ★ 判据：`feeder_stack_top - feeder_stack_size == 0x6FD00000`，且
+    //     `feeder_stack_top <= stack_top - stack_size - stack_guard`（与主栈/guard 不重叠）。
+    std::uint32_t feeder_stack_top = 0x6FE00000u;
+    std::uint32_t feeder_stack_size = 0x00100000u;  // 1 MiB（与主栈同尺寸）
 };
 
 struct ProcessSetup {

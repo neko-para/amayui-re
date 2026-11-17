@@ -3572,23 +3572,6 @@ const MUTATIONS = [
   //   ★ 这一对代表"档位判定 / 参数面**静默**失效"这一类错：两者都不会崩、不会改指纹，
   //     只会让"以为有声"或"以为有仪表"变成假的。
   {
-    // S0：退回"没有 hasMachine 这一条"⇒ AOT（`cpu_.machine == nullptr`）会先起 mixer 线程、
-    //   再靠 `setupFeederContext` 失败**回退**成 D 泵（并打一条误导性 Warn）—— 正是本单要删掉的形态。
-    file: 'apps/emulator-lift/src/runtime/audio_policy.h',
-    from: '    return mode == AudioMode::Sdl && real_time_clock && has_machine;',
-    // ⚠ 变异形态**必须吃掉参数**（`(void)has_machine;`）：本工程 `/W4 /WX`，直接删掉最后一元会让
-    //   `has_machine` 变成 unused parameter ⇒ **编不过** ⇒ 工具记「不可判定（构建失败）」而不是「守卫红了」
-    //   （实测 2026-11-17：第一次就是这么写的，1/2 条按预期变红 + 1 条不可判定）。
-    to: '    (void)has_machine;\n    return mode == AudioMode::Sdl && real_time_clock;  // 变异：丢掉 hasMachine',
-    guard: 'ctest:aot-audio-flags',
-    ctest: 'aot-audio-flags',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-aot-audio-flags',
-    what:
-      'S0 定档谓词丢掉 `hasMachine` ⇒ AOT 又回到"起线程再失败回退"（`pump()` 在回退前恒 Idle + 每条 run 一条' +
-      '误导性 Warn）⇒ `aot-audio-flags` 的真值表 `(Sdl, rt, hasMachine=false) ⇒ 0` 当场红',
-  },
-  {
     // S1：合法值被解析成 Off ⇒ "认不出就当 off" 那类静默失效（`--audio sdl` 等于没给）。
     file: 'apps/emulator-lift/src/runtime/audio_policy.h',
     from: '    if (audioTextEquals(value, "sdl")) return {true, AudioMode::Sdl, nullptr};',
@@ -3697,6 +3680,67 @@ const MUTATIONS = [
     what:
       'D 泵（主线程）那一刀不记 `fill_bytes` ⇒ AOT（恒 D 泵）"喂了多少字节"恒 0，而 `fills>0` 让人以为账是全的' +
       ' ⇒ `audio-device` 的 `audio-device/d-pump-fill-bytes` 红（实测改动前 2 failures）',
+  },
+  // ── AOT 真 feeder 线程（`REQ-01M7MHEZRQJSMAAWPESVW44DSK`；守卫 = `aot-audio-flags` / `audio-device`）──
+  //   ★ 这四条代表本单最贵的四种**静默破法**：
+  //     ① "AOT 形状（Sdl + 墙钟）不再进 thread 档" ⇒ 恒 D 泵、预读 600 ms（用户实测的 0.6 s 延迟）；
+  //     ② thread 档仍用 600 ms 的 lead ⇒ 修了定档却没修延迟；
+  //     ③ feeder 与主线程共用 TEB ⇒ `fs:[0]` 被另一条线程改写（BUG-22：Quit 的 C++ throw 派发到
+  //        已复用的 record、eip 落到 guest 堆）；
+  //     ④ 宿主给的布局不可用（0）时不再响亮失败 ⇒ 退回"静默 D 泵"（旧 bug 的形状）。
+  {
+    // ① 谓词：`audioThreadMode` 不再认 AOT 形状。
+    file: 'apps/emulator-lift/src/runtime/audio_policy.h',
+    from: '    return mode == AudioMode::Sdl && real_time_clock;',
+    to: '    return mode == AudioMode::Sdl && real_time_clock && false;  // 变异：AOT 形状不再进 thread 档',
+    guard: 'ctest:aot-audio-flags',
+    ctest: 'aot-audio-flags',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-aot-audio-flags',
+    what:
+      '[audio-feeder-shape] 谓词不再认 AOT 形状（`audioThreadMode(Sdl,true)` 变 false）⇒ AOT 恒主线程 D 泵、预读 600 ms' +
+      ' ⇒ `aot-audio-flags` 的 `s0-thread-mode-truth-table` 红（`(Sdl,true)` 那一格 want=1 / got=0）',
+  },
+  {
+    // ② lead：thread 档仍用泵档的 600 ms。
+    file: 'apps/emulator-lift/src/runtime/audio_policy.h',
+    from: '    return thread_mode ? kThreadLeadBytes : kLeadBytes;',
+    to: '    return thread_mode ? kLeadBytes : kLeadBytes;  // 变异：thread 档也用 600ms',
+    guard: 'ctest:aot-audio-flags',
+    ctest: 'aot-audio-flags',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-aot-audio-flags',
+    what:
+      '[audio-feeder-lead] `leadBytesFor(true)` 返回 115200（600 ms）而不是 19200（100 ms）⇒ thread 档的预读退回 600 ms' +
+      ' ⇒ `aot-audio-flags` 的 `s0-lead-bytes-by-thread-mode` 红（19200 那两格）',
+  },
+  {
+    // ③ BUG-22 回归口：feeder 与主线程共用 TEB。
+    file: 'apps/emulator-lift/src/runtime/audio.cpp',
+    from: '        audio_cpu_.fs_base = feeder_teb;',
+    to: '        audio_cpu_.fs_base = cpu_->fs_base;  // 变异：共用主线程 TEB（BUG-22）',
+    guard: 'ctest:audio-device',
+    ctest: 'audio-device',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-audio',
+    what:
+      '[audio-feeder-teb] feeder 的 `fs_base` 指回主线程 TEB ⇒ 共用 `fs:[0]`（SEH 链头）⇒ BUG-22 复发' +
+      ' ⇒ `audio-device` 的 `audio-device/feeder-teb-is-own` 红（`feederFsBaseForTest() != cpu.fs_base`）',
+  },
+  {
+    // ④ 布局不可用不再响亮失败（旧 bug：静默退回 D 泵）。
+    file: 'apps/emulator-lift/src/runtime/audio.cpp',
+    from:
+      '    feeder_layout_invalid_ = layout.feeder_teb == 0 || layout.feeder_stack_top == 0 ||\n' +
+      '                             layout.feeder_stack_size == 0;',
+    to: '    feeder_layout_invalid_ = false;  // 变异：布局不可用不再响亮失败（静默 D 泵）',
+    guard: 'ctest:aot-audio-flags',
+    ctest: 'aot-audio-flags',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-aot-audio-flags',
+    what:
+      '[audio-feeder-attach] 宿主给的 `GuestLayout` 不可用（feeder_teb=0）时 `begin(Sdl,墙钟)` 不再返回 false' +
+      ' ⇒ 变成静默 D 泵（旧 bug 的形状）⇒ `aot-audio-flags` 的 `s0-feeder-layout-is-structural` 红',
   },
   // ── AOT 音频接线（`REQ-01M7K04EY6D3GQNB5DRWP0DYJ8` 洞 6；守卫 = `aot-audio-wiring`）──
   //   ★ 代表"**接线断了**"这类**自证式断言抓不到**的静默失效：`--sound` 从 CLI→引擎的路上被摘掉，

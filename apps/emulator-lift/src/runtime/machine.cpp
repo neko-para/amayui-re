@@ -355,7 +355,10 @@ void Machine::wire() {
     //   ⚠ `cpu_` 声明在 `presenter_` **之后** ⇒ 先析构；但 presenter 只在 `present()` 里解引用，
     //   而那时 Machine 还活着 ⇒ 不悬垂（⛔ 不要在 `~Machine` 里补摘指针的"保险"）。
     presenter_.setInsnSource(&cpu_.insns);
-    audio_.attach(&cpu_, &mem_, &clock_);
+    // ★ 四参 attach：feeder 的 TEB / 专用栈来自 `GuestLayout`（`image.h` 的唯一真源）。
+    //   这是**结构前提**（不是运行时选项）⇒ `audioThreadMode()` 只剩"档位 / 时钟"两个事实；
+    //   ⛔ 不要再退回"按 `cpu_.machine != nullptr` 判能不能起 feeder"（AOT 没有 Machine）。
+    audio_.attach(&cpu_, &mem_, &clock_, layout_);
     cpu_.audio = &audio_;
     cpu_.cs_table = &critical_sections_;
     cpu_.native_overrides = &overrides_;
@@ -447,6 +450,13 @@ bool Machine::loadAgercModule(const std::string& path, std::string* err) {
     addRange(layout_.argv_block, static_cast<std::uint64_t>(layout_.argv_block) + 0x1000u);
     addRange(layout_.shim_page, static_cast<std::uint64_t>(layout_.shim_page) +
                                     static_cast<std::uint64_t>(layout_.shim_slots) * 4u);
+    // ★ 音频 feeder 的两页（`GuestLayout::feeder_teb` / `feeder_stack_top-size..top`）也算已用区间：
+    //   `AudioEngine::setupFeederContext()` 会在运行中提交它们 ⇒ AGERC 的基址不能落进去。
+    addRange(layout_.feeder_teb, static_cast<std::uint64_t>(layout_.feeder_teb) + 0x1000u);
+    if (layout_.feeder_stack_size != 0) {
+        addRange(static_cast<std::uint64_t>(layout_.feeder_stack_top) - layout_.feeder_stack_size,
+                 layout_.feeder_stack_top);
+    }
     addRange(cpu_.shim.va_cursor, cpu_.shim.va_limit);
     // 假模块句柄空间（kernel32_process.cpp 的 `0x7F000000 + 序号*64KiB`）：AGERC 的 base 不能落在
     // 里面，否则 `GetProcAddress` 的"句柄 → 模块"反查会与某个假句柄撞（同一个整数两种含义）。

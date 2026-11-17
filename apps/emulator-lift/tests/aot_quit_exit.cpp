@@ -235,5 +235,5 @@ int main(int argc, char** argv) {
     }
 
     fs::remove_all(root, ec);
-    return finish("lift-aot-quit-exit");
+    return finish("aot-quit-exit");  // 与 CTest 注册名一致（cmake-test-entry 守卫的判据）
 }

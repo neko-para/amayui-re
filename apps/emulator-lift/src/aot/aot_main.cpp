@@ -26,6 +26,7 @@
 #include "runtime/host_cursor.h"      // `--cursor-warp` 的平台闸门（与解释器臂同一条判据）
 #include "runtime/host_encoding.h"
 #include "runtime/input_plan.h"       // `--input-plan`（S4：AOT 臂唯一的输入控制面）
+#include "runtime/log.h"              // `--log-level`（缺省 warn；AOT 臂过去没有这个开关）
 #include "runtime/present_flags.h"    // `--cursor-warp` / `--sound` 的**唯一**一份判据 + 文案
 #include "runtime/present_sdl.h"
 #include "runtime/vfs.h"  // openHostFileUtf8（Windows 的 UTF-8 路径）
@@ -102,6 +103,9 @@ void usage() {
         "                      ★ `wait` 没有守卫（固定时长）⇒ 卡住由 --time-limit / --max-frames 报。\n"
         "                      解析失败 ⇒ exit 2 + 行号\n"
         "%s"
+        "  --log-level <L>     日志级别：quiet|error|warn|info|debug|trace（**缺省 warn** ⇒ 默认档输出\n"
+        "                      逐字不变）。★ `[audio] mode=… feeder=… lead=…` 与 `LIFT_AUDIO_TRACE` 的\n"
+        "                      `play state=…` 都是 **info** 级 ⇒ 要看它们就给 `--log-level info`。\n"
         "  --dump-frame <path> 每次 Present 导出一份 guest 后缓冲 BMP（{frame} = 4 位帧号）\n"
         "  --profile           采样式内部 profile（**缺省关**）：每帧时间戳 + 派发 / lift_one / shim\n"
         "                      归因 + 机器频率校准；采样率 = dispatch 1/4096、lift_one 1/1024、\n"
@@ -314,6 +318,20 @@ int main(int argc, char** argv) {
         } else if (a == "--dump-frame") {
             // ★ 与 `src/main.cpp:1157` 同一个字段（`cpu.shim.frame_dump`）；D3D9 Present 消费。
             if (!needValue("--dump-frame", &frame_dump)) return 2;
+        } else if (a == "--log-level") {
+            // ★ 日志级别（**缺省 warn** ⇒ 默认档输出逐字不变）。AOT 臂过去没有这个开关，
+            //   于是 `[audio] mode=…`（Info）与 `LIFT_AUDIO_TRACE` 的 `play state=` 在 AOT 上
+            //   永远看不见 —— 那会让音频验收的"读数面"假绿。值域 = `runtime/log.h` 的
+            //   `logParseLevel`（唯一一份），⛔ 不在这里另写一份字符串表。
+            std::string level;
+            if (!needValue("--log-level", &level)) return 2;
+            if (!lift::logSetLevel(level.c_str())) {
+                std::fprintf(stderr,
+                             "emulator-lift-aot: --log-level 的值非法：`%s`"
+                             "（只能是 quiet / error / warn / info / debug / trace）\n",
+                             level.c_str());
+                return 2;
+            }
         } else if (a == "--profile") {
             // ★ 采样式内部 profile（缺省关；采样率与三条硬口径见 `aot_host.h` 的 `AotProfile`）。
             run_opts.profile = true;

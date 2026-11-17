@@ -15,6 +15,7 @@
 //   · `lift_shim`（阶段 B）：走进一个导入桩。
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
@@ -100,9 +101,15 @@ struct LiftOneProfileSample {
     std::uint64_t phase_ns[4] = {};  // A / B / C / D
 };
 using LiftOneProfileHook = void (*)(const LiftOneProfileSample&);
-extern LiftOneProfileHook liftOneProfileHook;
+// ★ `thread_local`：`lift_one` 可能在**两条宿主线程**上被调（AOT 主线程 + 音频 feeder 的 IR
+//   执行器）。采样钩子与它的计数器都必须**每线程一份**：
+//   · 主线程（`AotHost::beginProfile` 设置）照常采样，读数只反映主线程的 lifted 代码；
+//   · feeder 线程的副本恒为 nullptr ⇒ 不采样、不写主线程的 `AotProfile`（否则是数据竞争）。
+//   ⛔ 不要改回全局：那会让"窗口 profile 与音频同开"变成 UB 级隐患。
+extern thread_local LiftOneProfileHook liftOneProfileHook;
 inline constexpr std::uint64_t kLiftOneProfileStride = 1024;
 // 只在钩子非空时被调用（关档不执行）：这一次调用是否该采样 / 采样用的单调时钟（ns）。
+// ★ 计数器也每线程一份（见上）：feeder 的 `lift_one` 调用不推进主线程的采样相位。
 bool liftOneProfileSampleDue();
 std::uint64_t liftOneProfileNowNs();
 }  // namespace lift
@@ -166,8 +173,12 @@ extern "C" std::uint32_t lift_dyn(void* cpu, LiftRegs* st, std::uint32_t ea);
 //     含目标函数体，与 `lift` 桶重复 ⇒ 报时间会双计。计数则是**精确**的（每次调用一次 `++`）。
 //   ★ 为什么今天必须有它：S7 之前 `lift_dyn` 是"完全无读数"的（不计 dispatch、不进 liftone 采样）
 //     ⇒ 间接跳转那一大批派发在任何表里都没有一行。
-extern bool liftDynCountOn;
-extern std::uint64_t liftDynCalls;
+//   ★ 为什么是 `std::atomic`：`lift_dyn` 可能在**两条宿主线程**上执行（主线程 + 音频 feeder 的
+//     IR 执行器）；而 `liftDynCountOn` 由主线程的窗口 profile 在**运行中**开/关
+//     （`AotHost::beginWindow/endWindow`）⇒ 读写都必须原子（relaxed：它只是计数，不是同步点）。
+//     ⛔ 不要改回裸 `bool` / `uint64_t`：窗口 profile 与音频同开是既有用法（`sn0000.plan`）。
+extern std::atomic<bool> liftDynCountOn;
+extern std::atomic<std::uint64_t> liftDynCalls;
 
 // 走进一个 shim（阶段 B 的 ④）。语义**全部**在 `lift_abi.cpp`，这里只钉契约：
 //   ① `liftRegsToCpu(*st, cpu)`（8 GPR + eflags 物化；`cpu.eip = stub_ea`，与解释器 dispatcher
