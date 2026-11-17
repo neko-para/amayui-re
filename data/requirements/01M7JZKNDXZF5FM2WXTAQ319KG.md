@@ -59,3 +59,12 @@ base gap 桩）⇒ guest 视角就是"这个 API 不存在"，停机原因是 `U
 1. 每条接口的语义按**微软文档**，⛔ 不按观察；文档没写的写 `<待核>`，不许猜。
 2. 每条新增接口必须有一条**顶层** CTest（pure 档，§12.4）+ 至少一条**能红**的变异条目。
 3. ⛔ 不改 guest 可见语义的既有部分：`exit` / `frames` / `stop @` / arena 三项 / `table misses` 逐位不变。
+
+## 第 2/3 步评估（2026-11-17 / macOS 只读）
+
+- 完整：`.tmp/sc0000/assessment-mac.md`（390 行）；脚本级落点 `docs/03-emulator/scripts/SC0000.md` 的「第 2/3 步评估」。
+- 第 1 步之后最可能仍停 `D3DXLoadSurfaceFromSurface` 本身（5 站点 `ColorKey=0` / `Filter∈{1,-1}` ⇒ 只剩缩放或 16↔32/不同 16bpp 对）；`0x4B4D6E` 可静态排除（先撞 `+0x70 CreateRenderTarget`）。
+- `D3DXCreateEffectFromResourceA` 被 `PixelShaderVersion` 门控（`Engine+46668=0`）⇒ 当前不可达；补 caps 会点亮 FX 执行，另单。
+- `i238` 是 AGE 脚本 opcode（handler `sub_4248C0`），不是 lift 缺口。
+- 第 2 步先决 = 一次读数 run（`LIFT_AOT_SHIM_TRACE=1`；`--import-gaps` 不存在）；本机 `links/install` 是另一修订版，未到达 SC0000 ⇒ 等原版树/可对齐读数。
+- A-1/A-2 与第 1 步「只做 1:1 / 不猜转换」冲突；未实现，等裁决。
