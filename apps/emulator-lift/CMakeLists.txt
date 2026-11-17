@@ -659,6 +659,13 @@ target_sources(emulator-lift-runtime PRIVATE
 target_sources(emulator-lift-runtime PRIVATE
     src/runtime/d3dx9_sprite.cpp
     src/shims/d3dx9.cpp)
+# ★ GPU 路线 P0/P1：`d3dx9.cpp` 的 `registerD3DX9Shims` **无条件**调
+#   `d3dx9::registerD3DX9EffectShims` ⇒ 实现必须**无条件**进 runtime。
+#   ⛔ 不能只挂在 `LIFT_BUILD_TESTS` 里：体验版 `-DLIFT_BUILD_TESTS=OFF` 会在链接
+#   `emulator-lift-aot` 时 `undefined symbol: lift::d3dx9::registerD3DX9EffectShims`
+#   （2026-11-18 实测；`out-user` 的 runtime lib 里只有 `d3dx9.cpp.obj`，没有 effect 的 obj）。
+target_sources(emulator-lift-runtime PRIVATE
+    src/shims/d3dx9_effect.cpp)
 # =====================================================================================
 # M2 · D3D9 fixed-function 流水线（设备状态机 + 软件光栅 → 第一帧）
 # ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
@@ -2229,10 +2236,10 @@ endif()
 # ★ CTest 顶层无条件注册 ⇒ pure 档（§12.4 判据 = 注册位置）。语料路径由 CMake 注入；缺了由用例
 #   自己判（caps 映射 / 自造 PE 的响亮停两条**不读语料**；4 份字节 / COM 面两条 SKIP 77）。
 # ★ 变异清单条目见 `tools/mutate-check.mjs` 的 `--match 'd3dx9_effect'`（资源读取器 id 改坏 ⇒ 红）。
+# ★ 实现已**无条件**加进 runtime（见上面的 d3dx9 簇）；这里只注册 CTest。
+#   ⛔ 不要把 `target_sources(... d3dx9_effect.cpp)` 放回 `if(LIFT_BUILD_TESTS)`：
+#      tests OFF 的体验版会在链接 `emulator-lift-aot` 时 undefined（2026-11-18 实测）。
 # =====================================================================================
-target_sources(emulator-lift-runtime PRIVATE
-    src/shims/d3dx9_effect.cpp)
-
 add_executable(lift-d3dx9-effect tests/d3dx9_effect.cpp)
 target_link_libraries(lift-d3dx9-effect PRIVATE emulator-lift-runtime)
 add_test(NAME d3dx9-effect COMMAND lift-d3dx9-effect)
