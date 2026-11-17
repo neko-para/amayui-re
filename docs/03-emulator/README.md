@@ -14,8 +14,12 @@
 | **数字怎么比**（profiler 口径、墙钟在哪个 build 上可比、音频 underrun 判据） | `measurement.md` |
 | **AOT lift 的静态指令预算**（host/guest、块边界税、循环/派发上界；一次性读数与复核命令） | `aot-instruction-budget.md` |
 | **AOT 该不该开 LTO / 改回 single LL**（A/B0/B1/B2/C 对照；一次性读数、LSP 污染标注与复核命令） | `aot-lto-evaluation.md` |
+| **blind wipe（场景命令族 kind 2）转场为什么卡**（身份 EA · 每帧工作量模型 · H1–H6 · `--until` 盲区 · 配方 `scripts/recipes/sc0000-wipe.plan` · timed 读数与未定的仪器缺口） | `wipe-profile.md` |
 | **D3DX math 的语义从哪来**（`D3DXMatrixDecompose` 的 native 对拍表 / 134 例 / 引擎 5 个调用点 EA / 容差与复现命令） | `d3dx-math.md` |
+| **caps 声明什么、凭什么、缺一个会怎样**（目标值 2.0/1.0 · 为什么 VS 必须报 1.0 · 硬等式 `required == implemented` · 会建的程序集 · 待核） | `caps.md` |
 | **"为什么这么实现"**（内部取舍 = L3，重写实现时可自由改，但要保住它列出的可观察现象） | `design-notes.md` |
+| **overlay / UI 宿主的设计裁决**（一个 host + 同一套 API、插件化、每帧 display list、1280×720 声明 + 窗口像素合成、单一输入 router、失败口径） | `overlay.md` |
+| **overlay 的 QuickJS 绑定**（Maa 封装可复用的形状 / QuickJS-ng v0.10.1 与预算 API / 沙箱 intrinsic 白名单 / 值转换 / TS 作者体验 / 静态链） | `overlay-quickjs.md` |
 | **我们依赖哪些外部文档**，以及**我们偏离文档的地方**（偏在哪 / 为什么 / 谁受益） | `external-docs.md` |
 | **仓库自己的机械装置还成立吗**（素材清单 / 语料定位 / 台账 / shape / spec / 写路径 / 插件闭接口） | `repo-guards.md` |
 | **一条 opcode / 一个 EA 的取证** | 技能 `amayui-re-engine`（知识层，不在这里） |

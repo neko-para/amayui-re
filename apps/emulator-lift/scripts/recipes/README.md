@@ -50,6 +50,7 @@ click 1186 373                          # ⛔ 不带 timeout（点击没有可�
 | `sn0000-save-profile.plan` | 与 `sn0000-save.plan` 同路径，两处 `profile_begin/end` 窗（`fellow-enter` / `save-confirm`） | `docs/03-emulator/observations.md`（区间 profiler 读数）· `01M7A5VFKB7VYHEXVXB67QDNST`（`done_reason` 里的复跑命令） |
 | `sn0000-quit.plan` | TITLE → GAMESTART → ADV → 右键 → FELLOW → SAVE → 回 TITLE → Quit | **repro 锚** `01M78A0V0X1X1PCK7MP71Q1J81#click 1186 373` **与** `01M77MC1374HXC2JR7E0ZYSHQJ#click 1180 640` · `docs/03-emulator/defects.md`（quit 不是正常退出那张单的复现面）· `01M7A5VFKB7VYHEXVXB67QDNST` |
 | `title-loaddata.plan` | TITLE → 点 LoadData（1070,480）→ 留 20 s 看结局（进加载界面 / 干净退出） | **repro 锚** `01M75SDKZGY87B8SK7GBP92PXD#click 1070 480` · `docs/03-emulator/defects.md` · `01M7GA4B8T9JXFDAYK46YHNH7K`（AOT 侧手写 plan 的对照） |
+| `sc0000-wipe.plan` | 加载第 4 槽（`click 300 269` = SAVE03）+ **1 次**推进点击 → blind wipe；`profile_begin/end pre` 与 `wipe` 两窗（三档 headless / window vsync0 / vsync1） | `docs/03-emulator/wipe-profile.md`（逐帧 timed 读数与 H1–H6）· `docs/03-emulator/scripts/SC0000.md`（wipe 转场静态定位）· `docs/03-emulator/scripts/SAVE.md`（槽位行 y 实测） |
 
 ★ 单号都是 `data/requirements/<ID>.md`。**改这里的路径 ⇒ 那 6 条 `repro:` 锚要一起改**（那是父级的活；
 本轮只搬家，没改需求树）。
