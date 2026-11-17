@@ -148,14 +148,16 @@ extra       = implemented \ required                                  // 声明�
    `required` 取全 4 个正是为了**不依赖**它；若将来观测到缺省返回会压等级，再改这条口径。
 4. **`MaxPixelShaderValue = 8.0f`**：D3D 对 ps_2_0 的常见值，引擎零读点 ⇒ 只为自洽，不是取证值。
 5. **202 在正常 play 里是否可达**（雪景 / `opcode 0x326` 是否被执行）：既有 E2E 读数只记到 201/203 创建，
-   **没有 202 创建记录** ⇒ run 级可达性未观测。一次可跑的判据：`--until 0x00418340`（`Set3DEffectSnow` 的函数入口，
-   `--until` 只在块边界停）；出现 `stop: until-ea @ eip=00418340` ⇒ 可达。
+   **没有 202 创建记录** ⇒ run 级可达性未观测。⚠ `0x00418340` 是 `Set3DEffectSnow` 的**函数入口**，
+   但**不是派发块入口**（`out/aot/lift_table.inc` 里没有）⇒ 直接 `--until 0x00418340` 永远不命中（BUG-31）。
+   可达性配方归 **N1**（`REQ-01M7NNNMPFB1GDB52J662Y1CMZ`），⛔ 不要用"没命中"当"不可达"。
 
 ## 8. 读数（2026-11-18 / win32 / RelWithDebInfo / `windows-x64`）
 
 - **目标档 ctest**：`cd apps/emulator-lift && ctest --test-dir out -R 'caps|d3dx9-effect|d3d9'`
   ⇒ **6/6 通过**（`d3d9` · `d3d9-gpu` · `d3d9-pipeline` · `d3d9-pipeline-gpu` · `d3d9-mip` ·
-  `d3dx9-effect`）。全量 `ctest` ⇒ **107/107 通过**（同一读数口径见 `.tmp/caps-p4/impl-report.md`）。
+  `d3dx9-effect`）。全量 `ctest` ⇒ P4 当时 **107/107**；合入 dev 的 `--scale` / `kernel32-time` 后 **109/109**
+  （两者同一读数口径，数字随树变，不进 test）。
 - **启动 readout（真镜像）**：`LIFT_AGE_EXE=corpus/assets/age/AGE.EXE__dumped.sectfix.EXE` 跑
   `out/tests/lift-d3dx9-effect.exe`，stdout 原文（一次）：
   `caps      : PixelShaderVersion=0xFFFF0200 VertexShaderVersion=0xFFFE0100 ⇒ 等级 2 ⇒ 会建 200/201/202/203；`

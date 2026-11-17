@@ -175,12 +175,13 @@ node tools/mutate-check.mjs --match 'GPU 顶点不带逐顶点'
   ```bash
   cd apps/emulator-lift
   ./out/emulator-lift-aot --exe ../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE \
-    --game-dir ../../links/install --appdata ../../.tmp/gpu-perspective/appdata2 \
+    --game-dir ../../links/install --appdata <本树 .tmp 下的专用副本> \
     --skip-logo --audio off --present window --present-hidden \
-    --input-plan scripts/recipes/sn0000-save-profile.plan \
-    --until 0x00418340 --max-frames 8000 --time-limit 400
+    --input-plan scripts/recipes/sc0000-wipe.plan \
+    --max-frames 8000 --time-limit 400
   ```
-
+  ★ `--until` 只能用**派发块入口**（`out/aot/lift_table.inc` 里有的 EA）；`0x00418340` 不是块入口（BUG-31）。
+  202 的可达配方归 N1（`REQ-01M7NNNMPFB1GDB52J662Y1CMZ`），本文件不把它写成"已到达"。
 - 读数（2026-11-18；两次：`sn0000.plan` 4000 帧 + `sn0000-save-profile.plan` **8000 帧 / 配方走完**）：
   `stop: max-frames`、`input-plan: steps=21 fired=6 pending=0`、`raster: sdl-gpu/direct3d12/DXBC`。
   `--until 0x00418340`（`sub_418340` = `Set3DEffectSnow` 的入口）**一次都没命中** ⇒ 这条路径里
