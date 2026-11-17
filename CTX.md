@@ -23,6 +23,28 @@
 
 ---
 
+## A2. 音频性能：令牌头阻塞（本轮新发现，已立两单）
+
+真 feeder 落地后，**解释器时代那条尖峰又回来了**：转场 90 s run 里最坏 **一刀 1.0 s**（`fill_max_ms=1016.04`）⇒
+**2 次 underrun**（各插 ~0.32 s 静音；机制是"插静音、时间轴不漂"，所以**音乐节奏不会歪**，只是偶发空档）。
+平均 484 ms/刀（每刀产出 ~0.5 s 音频）⇒ **平均没余量、尖峰就破**。
+
+★ **最可能的因：令牌头阻塞，不是解码慢**。`GuestToken` 是**容器锁**（`GuestHeap` / `HandleTable` / `Vfs` /
+`ComRegistry` / `SurfaceArena` / 内存账本），**不是执行锁**；而这些容器是**全局的** ⇒ 音频 feeder 会排在
+渲染/业务主线程的一次重活后面。历史读数（解释器时代，已 dropped 的 `REQ-01M75VZXV4SDMVVM1Z72G009XJ`）：
+"feeder 在 shim 边界被主线程长时间挡在令牌外（**单刀 1.3–1.7 s 全是 shimtok**）"；它的 `dropped_reason` 写明
+"AOT 接音频后若再现，按'与暂停/令牌的配合'重新立单" ⇒ 已按原话重开：
+
+| 单 | 内容 |
+|---|---|
+| `REQ-01M7N0DH4VM06AV8EMTFS7YW35` | **令牌头阻塞（S2，已重开）**：判据第一条 = 先量最坏那刀里 `t_shim_token_wait_ns` 占多少；修法 M0（把阻塞等待/宿主重活移出令牌）→ M1（作用域缩到容器区域） |
+| `REQ-01M7N07T5GK8V7P4D0BNP167X6` | **feeder 吞吐**（平均跟得上、最坏 1.0 s）：判据 = 120 s 转场 `underruns=0` 或 `fill_max_ms < 500` |
+
+★ **顺序不能倒**：先量令牌等待占比 ⇒ 若占大头就做 M0（不是优化 Vorbis 解码）；若占很小，才转解码优化。
+⛔ `LIFT_TOKEN_DIAG_SKIP_LOCK` 是诊断臂（只允许单线程工况），**不能当修法**。
+
+---
+
 ## B. 现在最要紧的一件事（用户口径，2026-11-17）
 
 **不再考虑 `PixelShaderVersion = 0` 的配置。** ⇒ 下一单 **P4**（`REQ-01M7MQ…` 见 C）：
@@ -63,7 +85,9 @@
 
 1. **P4**：取消 opt-in + caps 固定 2.0 + 删 psver=0 的测试面 + "声明⇔实现"守卫（依赖 D1 的裁决）。
 2. **202**（若裁决=实现）：`vs_1_0` 预转写 → CPU 顶点阶段。
-3. `REQ-01M7MW746DSB2G7NCBSJC6XV92`（profile 按帧区间）—— 只在需要解释"某段每帧 1.3e8 条"时才做。
+3. **音频性能（A2）**：先量 `t_shim_token_wait_ns` 占最坏一刀的比例 → 若占大头，做 M0（把 Present / 纹理上传 / 文件 I/O /
+   大 memcpy 移出令牌作用域，守 `Yield` 后重校验）。判据 = 转场 120 s `underruns=0` 或 `fill_max_ms < 500`。
+4. `REQ-01M7MW746DSB2G7NCBSJC6XV92`（profile 按帧区间）—— 只在需要解释"某段每帧 1.3e8 条"时才做。
 
 ---
 
@@ -78,6 +102,9 @@
 - `effectResourcePins()` 的 `kPins[]` 必须带**终止项**（P2 修过一次越界读）。
 - `Machine::gpuRaster()` 生产路径是 `SdlWindow` 转发包装 ⇒ 对包装 `dynamic_cast` 永远失败；effect 走 `d3d9_effect_gpu.h` 的交付入口。
 - 直接写 guest 纹理像素**不推进内容版本** ⇒ GPU 上传缓存看不到。
+- **令牌是容器锁、不是执行锁**：一次 shim 调用在令牌里跑完（含 Present/上传这类重活）⇒ 音频 feeder 会被挡。
+  量它用 `t_shim_token_wait_ns`（`shims.cpp`），⛔ 别拿 `LIFT_TOKEN_DIAG_SKIP_LOCK` 当修法。
+- 音频 underrun 走"插静音、时间轴不漂"（`underrun_silence_*`）⇒ **偶发断音 ≠ 节奏漂移**，两者别混。
 
 ---
 
