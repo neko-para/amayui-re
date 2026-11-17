@@ -2,8 +2,10 @@
 
 - id: REQ-01M7K04EY6D3GQNB5DRWP0DYJ8
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M7JHSD5MWTB9N8WJC2Y2T69M
+- verify: apps/emulator-lift/tests/d3dx9_load_surface.cpp#d3dx9/load-surface+contract
+- done_reason: 7 洞收口（commit 7242968）：洞1 22→21 改响亮停 · 洞2 自拷贝拒 · 洞3 ColorKey 文案按文档 · 洞4/5 文案按实测 · 洞6 自证式断言换成读引擎 muted= · 洞7 声明 abort 后 dump 不可信。洞5 的根因已拆成独立缺陷单（REQ-01M7JZM1QQ728KX1C0G2F232T1 的子单）。
 - tags: [emulator-lift, review, d3dx9, audio]
 
 ## 一句话
@@ -68,8 +70,7 @@
 
 ## 判不了（不要在这张单里猜）
 
-`22→21` 是否真被游戏走到（缺两个 surface 的 `D3DFORMAT` 机械记录）· 行尾 padding 无夹具（代码对，只能读代码判）·
-32/33 与跨序臂只有纯函数守卫（`formatForD3dFormat` 不认 32/33 ⇒ 建不出真 surface）· `D3DX_FILTER_SRGB_IN/OUT` 在 1:1 里要不要拒绝。
+`22→21` 是否真被游戏走到（缺两个 surface 的 `D3DFORMAT` 机械记录）· 行尾 padding 无夹具（代码对，只能读代码判）·32/33 与跨序臂只有纯函数守卫（`formatForD3dFormat` 不认 32/33 ⇒ 建不出真 surface）· `D3DX_FILTER_SRGB_IN/OUT` 在 1:1 里要不要拒绝。
 
 ## 判据
 
