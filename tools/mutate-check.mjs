@@ -3910,6 +3910,41 @@ const MUTATIONS = [
       '把未对齐 imm32 扫描退化成 4 字节对齐（`++i` → `i += 4`）⇒ 0x004F80E0 / 0x00513B90 / ' +
       '0x0041389A 的候选消失、派发表缺这三行 ⇒ `lift-closure-imm32` 当场红',
   },
+
+  // ── GPU 路线 P0 · effect 资源读取器（`src/shims/d3dx9_effect.cpp`；守卫 = `tests/d3dx9_effect.cpp`）──
+  //   故障形态：`findEntry` 的 id 偏一格（`id` → `id + 1`）。这是**最像"能跑"的**破坏：
+  //   读取照样成功、目录树照样解析，只是取到的**是邻居的字节**（200 拿到 201 的 1077 B）。
+  //   ⇒ 判据必须是**内容**（大小 + 首两字节 `//` + sha256），"读到了非空字节"永远发现不了它。
+  {
+    file: 'apps/emulator-lift/src/shims/d3dx9_effect.cpp',
+    from: '    if (!res.findEntry(kRtRcData, id, &entry, &err)) {',
+    to: '    if (!res.findEntry(kRtRcData, id + 1u, &entry, &err)) {  // 变异：id 偏一格',
+    guard: 'ctest:d3dx9-effect',
+    ctest: 'd3dx9-effect',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3dx9-effect',
+    what:
+      'RT_RCDATA 的 findEntry id 偏一格（`id` → `id+1`）⇒ 200 拿到 201 的字节（大小 1077 ≠ 892、' +
+      'sha256 不符）⇒ `d3dx9-effect` 的 resources-pinned 当场红（"读到非空字节"发现不了这种破坏）',
+  },
+
+  // ── GPU 路线 P1 · effect 绑定 + shader 未执行 ⇒ 整批拒绝（`src/runtime/d3d9_pipeline.cpp`）──
+  //   故障形态：把 `gpuEligible` 的第一条判据短路掉（`if (false && …)`）。这是**最像"能跑"的**
+  //   那类破坏：draw 照旧被拒（本夹具没有 GPU 后端），只是**原因换了**、bit44 不再置位
+  //   ⇒ 只要守卫断言"原因串 + 记账位"就一定会红（只断言 HRESULT != 0 则会**假绿**）。
+  {
+    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
+    from: '        if (d3d9::effectDrawNotExecuted(&effect_why)) {',
+    to: '        if (false && d3d9::effectDrawNotExecuted(&effect_why)) {  // 变异：短路掉 effect 拒绝',
+    guard: 'ctest:d3dx9-effect',
+    ctest: 'd3dx9-effect',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3dx9-effect',
+    what:
+      '`gpuEligible` 的 effect 拒绝被短路 ⇒ 这笔 draw 落到"没有 GPU 后端"那条（原因串换了、bit44 不置位）' +
+      '⇒ `d3dx9-effect` 的 effect-draw-refused 在"原因串含 id/technique/pass"与"bit44 置位"两条上红；' +
+      '★ 只断言 HRESULT != 0 会假绿（两条路都返回 INVALIDCALL）',
+  },
 ];
 
 let mutationRunSeq = 0;

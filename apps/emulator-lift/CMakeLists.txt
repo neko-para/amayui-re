@@ -2217,4 +2217,22 @@ if(DEFINED ENV{LIFT_AUDIO_SDL_DEVICE})
     set_tests_properties(audio-sdl-device PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
+# =====================================================================================
+# GPU 路线 P0/P1 · D3DX effect（RT_RCDATA 字节 + `D3DXCreateEffectFromResourceA` + ID3DXEffect 9 槽）
+# ★ 纯追加块：不改上面任何一行（并发编辑协议：另一个代理同时在改本文件）。
+# ★ 实现 = `src/shims/d3dx9_effect.cpp`（读 RT_RCDATA 走 `X86::image` 的**既有** PeResources；
+#   ⛔ 不新写 PE 解析、⛔ 不从 guest 可写内存重解析）。取法与"为什么是确定的"见该文件头。
+# ★ CTest 顶层无条件注册 ⇒ pure 档（§12.4 判据 = 注册位置）。语料路径由 CMake 注入；缺了由用例
+#   自己判（caps 映射 / 自造 PE 的响亮停两条**不读语料**；4 份字节 / COM 面两条 SKIP 77）。
+# ★ 变异清单条目见 `tools/mutate-check.mjs` 的 `--match 'd3dx9_effect'`（资源读取器 id 改坏 ⇒ 红）。
+# =====================================================================================
+target_sources(emulator-lift-runtime PRIVATE
+    src/shims/d3dx9_effect.cpp)
+
+add_executable(lift-d3dx9-effect tests/d3dx9_effect.cpp)
+target_link_libraries(lift-d3dx9-effect PRIVATE emulator-lift-runtime)
+add_test(NAME d3dx9-effect COMMAND lift-d3dx9-effect)
+set_tests_properties(d3dx9-effect PROPERTIES
+    ENVIRONMENT "LIFT_AGE_EXE=${AGE_SECTFIX_EXE}" SKIP_RETURN_CODE 77)
+
 endif() # LIFT_BUILD_TESTS

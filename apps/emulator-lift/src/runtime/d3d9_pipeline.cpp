@@ -259,6 +259,13 @@ enum UnsupportedBit : std::uint32_t {
     //     == 本批要写的颜色目标像素基址" ⇒ 跳过这一条 + 记这一位。⛔ 不是"未实现"，
     //     是**表达不了**（GPU 采样读上传缓存）⇒ 与 draw 路同一种拒绝语义。
     kUnSpriteRtFeedbackLoop = 43,
+    // ---- 44：GPU 路线 P1 的**临时**拒绝（effect 的 shader 尚未实现执行）----
+    //   ★ 为什么不复用 33（stage>=1）：33 是"多级纹理表达不了"，触发条件 = stage1 绑了纹理 / op 未
+    //     DISABLE；而本条的触发条件 = **guest 正在某个 ID3DXEffect 的 pass 里**（D3DX 宿主状态），
+    //     两者可独立发生（实测：203 的 blur draw 只绑 Tex0 ⇒ 33 不触发，但 shader 没执行）。
+    //   ★ **P2 真执行 shader 之后这一位应当消失**（连同 `gpuEligible` 的第一条判据与用例
+    //     `d3dx9-effect/effect-draw-refused` 一起翻面），⛔ 不要把它当永久契约。
+    kUnEffectShaderNotExecuted = 44,
 };
 
 // ★ 合法 D3DRS 的**唯一**判据（`REQ-01M7A3M73R3XYMM7J4KNQ1VNV7`）：
@@ -391,6 +398,13 @@ void pipeLog(const char* what, const char* fmt, ...) {
     va_start(ap, fmt);
     logV(LogLevel::Info, LogD3d9, prefix, fmt, ap);
     va_end(ap);
+}
+
+// ★ P1 **临时**：effect draw 的具名拒绝必须**每批**可见（⛔ 不许静默接受；P2 执行 shader 后删）。
+//   为什么不用 `pipeWarn`：那条按 (调用点, 类别) 限流（前 4 次）⇒ "每批一条"做不到；而这一条
+//   的含义是"这一批本该由 shader 画却没人画"——必须逐批落账（只在开档跑得出来，见 d3d9.h）。
+void effectDrawWarn(const std::string& note) {
+    logAt(LogLevel::Warn, LogD3d9, "[d3d9] effect: ", "%s", note.c_str());
 }
 
 // ★ **默认级别可见**的告警（`warn` 是默认日志级别；`LogLevel::Info` 默认看不见 ⇒ ⛔ 不能拿
@@ -652,6 +666,7 @@ const char* unsupportedBitName(std::uint32_t bit) {
     if (bit == kUnRenderStateStored) return "合法 D3DRS（只存）";
     if (bit == kUnDepthClearZ) return "Clear(ZBUFFER) 的 z 越界";
     if (bit == kUnSpriteRtFeedbackLoop) return "sprite 反馈环";
+    if (bit == kUnEffectShaderNotExecuted) return "effect shader 尚未实现执行（P1 临时）";
     return "未分配";
 }
 
@@ -4035,6 +4050,19 @@ bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why, U
         if (skip_bit) *skip_bit = bit;
         return false;
     };
+    // ★ GPU 路线 P1 的**临时**第一条判据（口径见 `d3d9.h` 的 `EffectDrawScope`）：
+    //   guest 正在某个 `ID3DXEffect` 的 BeginPass..EndPass 之间提交 draw，而本段**只记状态、
+    //   不执行 shader** ⇒ **整批拒绝** + 具名位 44 + 每批一条 Warn。
+    //   ⛔ 绝不能落到下面按固定功能画：那会写出**错误像素**而账上一个具名位都没有（本仓最贵的
+    //   静默错）。⚠ P2 执行 shader 后：删掉这一段 + 翻面 `d3dx9-effect/effect-draw-refused`。
+    {
+        std::string effect_why;
+        if (d3d9::effectDrawNotExecuted(&effect_why)) {
+            if (why) *why = effect_why;
+            effectDrawWarn(effect_why);
+            return deny(kUnEffectShaderNotExecuted);
+        }
+    }
     if (plan == nullptr) {
         if (why) *why = "GPU 准入：plan 为空";
         return deny(kUnGpuNoBackend);

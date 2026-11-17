@@ -264,6 +264,96 @@ constexpr std::uint32_t kCapsCursorClaim = 0x00000000u;
 //   ⛔ TEXGEN(0x1) / MATERIALSOURCE7(0x2) / LOCALVIEWER(0x20) / TWEENING(0x40)。
 constexpr std::uint32_t kCapsVertexProcessingClaim = 0x00000018u;
 
+// =====================================================================================
+// 开发用 opt-in：`LIFT_D3D9_PS_VERSION`（GPU 路线 P1 的 E2E 入口；⛔ **不改缺省值**）
+//
+// ★ 为什么需要它：caps 缺省把 `PixelShaderVersion` 报 0 ⇒ 引擎的效果等级恒 0
+//   （`0x4A6FDD mov [esi+0B64Ch], 0`），**永远走不到** `D3DXCreateEffectFromResourceA` ⇒
+//   P1 的实现没有 E2E 观测面。这是**开发用**开关：缺省不存在该 env ⇒ `fillCaps` 逐字节不变。
+// ★ 为什么 P1 就够用（不必等 P2/P3/P4）：等级只决定"引擎会不会去建 effect"，而着色器的**执行**
+//   依赖 P2/P3；本段允许画面不对（effect draw 会被 `gpuEligible` 的 stage≥1 整批拒绝，具名可见）。
+//
+// ★ 取证（父级 2026-11-17 复核；EA 全在同一份 `.lst`）：
+//   · 引擎只读 **5 个** D3DCAPS9 字段：`+0x58/+0x5C` MaxTextureWidth/Height（0x499128/0x49912E）·
+//     `+0xCC` **PixelShaderVersion**（0x4A6FB4）· `+0xAC` MaxVertexBlendMatrixIndex（0x47A579）·
+//     `+0x0C` Caps2（0x488B55，死读）。其余字段**零读点** ⇒ 本开关**只**改 `+0xCC`（外加两个
+//     shader 常量数按版本给自洽值，但它们没有消费点 —— ⛔ 不要为它们编语义）。
+//   · 等级判据（`sub_4A6xxx`，`Engine+0xB64C`）：`0x4A6FB7 cmp eax,0FFFF0200h / jb` ⇒ 等级 2；
+//     `0x4A6FCA cmp eax,0FFFF0100h / jb` ⇒ 等级 1；否则 0。写回点 `0x4A6FBE/0x4A6FD1/0x4A6FDD`。
+//     消费：等级 1 ⇒ 建资源 200；≥2 ⇒ 建 201 与 203；0 ⇒ `0x4B072D jl` 跳过 FX 路；
+//     <2 ⇒ 软件模糊；≥1 且 `[this+0xB590] != 0` ⇒ `SetTechnique("Fade")`。
+//     ⚠ `Engine+0xB590` 就是本模块 `D3DXCreateEffectFromResourceA` 的 `ppEffect` 出参。
+//   · ⚠ 等级还有**第 2 入口**：`0x4A6FA2 mov eax,[ebp+arg_4]`，arg_4 ∈ [-1..2] 且 ≠ -1 时
+//     **直接覆盖** `[Engine+0xB64C]`（`0x4A6FE9`）⇒ "caps=2.0 ⇒ 等级一定 2"有例外；E2E 里若看到
+//     等级被覆盖，如实记，别硬解释。
+// =====================================================================================
+// D3DPS_VERSION(major,minor) 的低 16 位（`D3DPS_VERSION(1,1) = 0xFFFF0100` 等）。
+constexpr std::uint32_t kPsVersionCompat1_1 = 0x100u;  // 引擎判"等级 ≥1"
+constexpr std::uint32_t kPsVersion2_0 = 0x200u;        // 引擎判"等级 2"（0x4A6FB7 的 0xFFFF0200）
+constexpr std::uint32_t kPsVersion3_0 = 0x300u;        // 同样 ≥ 0xFFFF0200 ⇒ 等级 2
+
+// 把 `LIFT_D3D9_PS_VERSION` 的**取值**映射成 caps 的两个字段。
+//   · 合法值只有 0 / 0x100 / 0x200 / 0x300（0 = 缺省，两字段都 0）；
+//   · 返回 false ⇒ 非法（⛔ 调用方必须响亮停，不许"认不出就当 0"）；
+//   · `caps_pixel_shader_version` = `0xFFFF0000 | version`（D3DCAPS9 的 +0xCC 布局）；
+//   · `caps_max_pixel_shader_value` = 1.0（ps_1_x）/ 8.0（ps_2_0、ps_3_0）—— ⛔ 无读点，仅为自洽。
+//   ★ 纯函数（不读 env）：守卫直测值域与映射，E2E 测真接线。
+bool shaderCapsForPixelShaderVersion(std::uint32_t requested, std::uint32_t* caps_pixel_shader_version,
+                                     float* caps_max_pixel_shader_value);
+
+// `LIFT_D3D9_PS_VERSION` 的**进程内一次**解析结果（第一次问 caps 时读 env 并打一行 readout）。
+struct PixelShaderVersionOverride {
+    bool present = false;       // env 存在 = 开档
+    bool valid = true;          // 值域合法
+    std::uint32_t version = 0;  // 0 / 0x100 / 0x200 / 0x300
+    std::string text;           // env 原文（诊断 / 错误消息用）
+};
+// 读 env（只读一次）。开档时向 stdout 打**一行** readout（含"等级 = N ⇒ 会建哪些 FX"）；
+// 非法值 ⇒ 向 stderr 打一行点名合法值，`valid=false`（调用方负责硬停）。
+const PixelShaderVersionOverride& pixelShaderVersionOverride();
+
+// =====================================================================================
+// effect draw 作用域（GPU 路线 **P1 的临时口径** —— P2 真执行 shader 后**删掉这条判据**）
+//
+// ★ 事实：引擎会在 `ID3DXEffect::Begin` → `BeginPass` → `CommitChanges` → `DrawPrimitive`
+//   → `EndPass` → `End` 之间提交 draw（S0 §3.2/§3.3；本次 E2E 实测 718 个循环）。这些批**本该由
+//   effect 的 shader 画**，而 P1 **只记状态、不执行 shader**。
+// ★ 为什么必须整批拒绝（⛔ 不许"当作固定功能画"）：那样这条 draw 会被 stage0 的固定功能管线
+//   **接受**并写出错误像素，而账本上**一个具名位都没有** —— 正是本仓最贵的"画面错但没人知道"。
+//   ⇒ `gpuEligible` 的**第一条**判据：`effectDrawNotExecuted()` 成立 ⇒ 整批拒绝 + 具名位
+//   （`kUnEffectShaderNotExecuted = 44`，见 `d3d9_pipeline.cpp`）+ 每批一条 Warn。
+// ★ 为什么记录放在这一层：D3D9 的 Draw 只看得到设备状态，看不到"guest 正在某个 effect 的 pass 里"
+//   （那是 D3DX 的宿主状态）⇒ 由 `shims/d3dx9_effect.cpp` 在 Begin/BeginPass/EndPass/End/销毁的
+//   **唯一边界**上报，这里只存值。
+// ★ 纯宿主、无锁（单线程解释器；与 `g_unsupported_mirror` 同口径）；⛔ 不写 guest 内存。
+// =====================================================================================
+struct EffectDrawScope {
+    bool active = false;   // 有 effect 在 Begin..End 之间
+    bool in_pass = false;  // 且在 BeginPass..EndPass 之间（这次 Draw 本该由该 pass 画）
+    std::uint32_t state = 0;          // 状态块 EA（销毁时用来判"是不是同一个 effect"）
+    std::uint32_t effect_object = 0;  // ID3DXEffect 对象 EA（日志）
+    std::uint32_t resource_id = 0;    // RT_RCDATA 的 id（日志）
+    std::uint32_t pass_index = 0;     // 最近一次 BeginPass 的索引（日志）
+    std::uint32_t serial = 0;         // 每次 Begin 单调 +1（批次归属 / 去重）
+    std::string technique;            // 当前 technique 名（空 = 没设）
+};
+EffectDrawScope effectDrawScope();
+
+// Begin / BeginPass / EndPass / End / 销毁的**唯一**上报口（由 effect shim 调）。
+void noteEffectDrawBegin(std::uint32_t state, std::uint32_t effect_object, std::uint32_t resource_id,
+                         const std::string& technique);
+void noteEffectDrawTechnique(const std::string& technique);  // Begin 期间 SetTechnique
+void noteEffectDrawBeginPass(std::uint32_t pass_index);
+void noteEffectDrawEndPass();
+void noteEffectDrawEnd();
+void noteEffectDrawDestroyed(std::uint32_t state);
+
+// 这次 Draw 是否落在"effect 已 Begin+BeginPass、而 shader **尚未实现执行**"的作用域里。
+//   true ⇒ 调用方必须整批拒绝（`gpuEligible` 的第一条判据），`note` 是**具名原因**：
+//   `effect 的 shader 尚未实现执行（资源 id=… technique="…" pass=…）`。
+//   ⚠ 措辞是"尚未实现执行"（P1 的临时状态），⛔ 不是"不支持"。
+bool effectDrawNotExecuted(std::string* note);
+
 // ---- 适配器（虚拟显示器）----
 struct AdapterMode {
     int width = 0;

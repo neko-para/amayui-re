@@ -35,6 +35,7 @@
 #include "runtime/memory.h"
 #include "runtime/png_decode.h"
 #include "runtime/x86.h"
+#include "shims/d3dx9_effect.h"
 #include "shims/d3dx9_surface.h"
 #include "shims/register.h"
 
@@ -1687,6 +1688,10 @@ void registerD3DX9Shims(ShimRegistry& shims) {
     shims.add("d3dx9_43", "D3DXMatrixLookAtLH", Conv::Stdcall, 4, &shimD3DXMatrixLookAtLH);
     shims.add("d3dx9_43", "D3DXVec4Transform", Conv::Stdcall, 3, &shimD3DXVec4Transform);
     shims.add("d3dx9_43", "D3DXVec3Normalize", Conv::Stdcall, 2, &shimD3DXVec3Normalize);
+    // ---- effect 簇（GPU 路线 P1）：`D3DXCreateEffectFromResourceA`（9 参）+ `ID3DXEffect` 的 9 槽 ----
+    // ★ 从 `register_import_gaps.cpp` 的 addUnimplemented 搬来真实现（那一行由
+    //   `pnpm tools lift sync --write` 重生成时消失）；只记状态、⛔ 不执行 shader。
+    d3dx9::registerD3DX9EffectShims(shims);
 }
 
 }  // namespace lift
