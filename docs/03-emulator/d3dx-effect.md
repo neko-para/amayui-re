@@ -85,3 +85,59 @@
 3. 剩下的 ~1.1e11 是 **frames ≈8500–9800 的持续段**（每帧 ≈1.3e8，profile 分散：top 仅 4.5%，
    含 `sub_4904D0` 文本查找）⇒ 更像**转场之后的正文内容**，与转场/模糊无关，是另一条性能问题（不在本路线内）。
    ⚠ 归因工具缺口：`--profile` 只有**整跑聚合**、没有按帧区间归因 ⇒ 那段"到底谁贵"今天给不出读数。
+
+## 8. P2 · Fade 真画（2026-11-17）
+
+- **A · pass 解析**：`parseEffectSource` → `FxModule`（常量 / `sampler_state` / shader 函数 / technique / pass）。
+  4 份文本的 pass 块里**只有** `PixelShader` / `VertexShader` 两条赋值 ⇒ **没有 D3D9 渲染状态**要应用
+  （出现未建模的名字 ⇒ `UnsupportedState` 并点名，⛔ 不静默忽略）。`Begin` 的 `*pPasses` 从 P1 的结构性常数 1 改成解析结果。
+- **B/C · 后端**：新 `src/runtime/d3d9_effect_gpu.h`（可选接口 `GpuEffectRaster` + `GpuEffectDraw`）；
+  `d3d9_gpu.cpp` 增 **MSL + DXBC 双源**（`FxVSMain` 带**第二套 UV 属性**；`PSMainFade` ps_2_0 / `PSMainFadeLinear` ps_1_0；
+  常量表 + 2 sampler + 独立 pipeline 缓存；flush 里按字节偏移绑顶点 + 2 纹理 + 逐 draw 推 fragment uniform）。
+  顶点仍是 CPU 变换后的屏幕空间三角形（`L3-tl-01`）。
+- **D · 像素 oracle**（真 D3D9 + 纹理 RT + `GetRenderTargetData`）：
+
+| `Alpha` | 读回 | 与 C++ 参考 |
+|---|---|---|
+| 0 | `(R255, A128)` | 一致 |
+| 0.5 | `(R255, G170, A191)` | 一致（最大误差 **1 LSB/通道**） |
+| 1 | `(R255, G255, A255)` | 一致 |
+
+- **NaN 档**（两图全透明 + `Alpha=0.5` ⇒ `ColRate = 0/0`）：输出缓冲与未画前**逐字节相同**；先跑**控制行**
+  （同 blend/路径、纹理不透明 ⇒ 目标**必须**变，实测变了）证明不是恒真。⇒ 结论是「**不可观测**」
+  （SRCALPHA/INVSRCALPHA 下 `ret.a=0` ⇒ 源因子 0），⛔ 不是"我们定义了 NaN 语义"：shader 里没有特判。
+- **E · 翻面（按 technique 分流）**：删 P1 的 `kUnEffectShaderNotExecuted` / 每批判据 / `effectDrawWarn`；
+  同号新语义 **`kUnEffectProgramNotExecuted`**（"effect 的 pass 程序不在实现集里"）。
+  Fade(201) ⇒ `recorded`（后端收到一条队列条目：program=`FadePs20`、Alpha、2 纹理、uv1）；
+  203 SlideBlur / 202 ⇒ 仍 `INVALIDCALL` + 具名位 + 原因串（id/technique/pass）。E2E 里 `尚未实现执行` **0 条**（改前 1232）。
+
+### 8.1 转场窗口读数（机械规则，不拿"帧号"当真理）
+
+规则 = 一段连续帧：① 每帧 hash 都与前一帧不同 ② 段长 ≥10 ③ 每帧 insns 中位数 >5e7；取 boot 之后第一段。
+⚠ 这条只能筛出"逐帧推进且很贵"，**不能**证明段里就是"渐变到黑"（hash 读不出像素）。
+
+| | caps=0 | caps=0x200 |
+|---|---|---|
+| 窗口 | 278–307（30 帧） | 299–327（29 帧） |
+| per-frame 中位 / 总和 | 129.5M / 3.255e9 | 131.3M / 3.385e9 |
+| hash 形状 | **8 帧周期循环**（×3 轮） | **8 帧周期循环**（×3 轮） |
+
+⇒ 该窗口两跑几乎相同，且**都不是单调推进**（是 8 帧周期）。★ 真正的分路证据在别处：caps=0 有 **帧 3198–3209**
+（12 帧、中位 **1.03e9**/帧、合计 **29.9e9**）的软件模糊窗；caps=0x200 **同时间带没有任何 >5e7 的帧**。
+
+### 8.2 两跑都有的长尾（与 caps / effect 无关）
+
+caps=0x200：帧 8980–9800 / 821 帧 / 109.3e9 / 中位 135M；caps=0：帧 7981–8651 / 671 帧 / 89.4e9 / 中位 134M
+⇒ 每帧速率一样 ⇒ 是**转场之后的正文内容**，不是转场；归因需要 `REQ-01M7MW746DSB2G7NCBSJC6XV92`（profile 按帧区间）。
+
+### 8.3 顺手修掉一个既有越界读
+
+`effectResourcePins()` 的 `kPins[]` 缺终止项（头文件写了契约、表里没有）⇒ `pins[4].id == 0` **一直越界读**；
+P2 新增 constexpr 表后当场红 ⇒ 补终止项 + `effectResourcePinBySha` 在终止项 `break`。
+
+### 8.4 两个坑（给后来者）
+
+1. `Machine::gpuRaster()` 生产路径给的是 **`SdlWindow` 的转发包装** ⇒ 对包装 `dynamic_cast<GpuEffectRaster*>` **永远失败**
+   （第一版把真 GPU 的 effect draw 全拒了）。⛔ 不许改 `present_sdl` / `gpu_raster.h` ⇒ 用
+   `d3d9_effect_gpu.h` 的两个交付入口 + "活着的那个后端"回落。
+2. 直接写 guest 纹理像素**不推进内容版本** ⇒ GPU 上传缓存看不到（oracle 第一版踩过）。
