@@ -2,31 +2,35 @@
 
 - id: REQ-01M7MGH13Y2JZ1ABT867VQGYF8
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M7CZQZ5RR0WV8CQE2ZEKJHHQ
+- verify: apps/emulator-lift/tests/closure_imm32.cpp#closure-imm32/manual-root-removed
 - tags: [emulator-lift, aot, closure]
 
-## 现象
+## 一句话
 
-`aot/closure.txt` 是**生成物**（`closure_build.cpp` 的 D14/D15/D17/D21/D26 扫出来的根）。
-`0x004F80E0`（`EnumSystemLocalesA` 的回调 EA，`LanguageEnumProc`）只以 `push $0x4F80E0` 的
-**未对齐立即数**出现在 `0x4F822B`（客侧 CRT 的 `___get_qualified_locale` 的"只有语言、没有国家"分支）
-⇒ **D26 只扫 4 字节对齐 dword，抓不到它**。修好 `bt` 内存形（BUG-27）后第一次走到它就
-`stop: decode-error @ eip=004F80E0`。
+`aot/closure.txt` 是生成物（`closure_build` 的 D14/D15/D17/D26 扫出来的根）。`0x004F80E0`
+（`EnumSystemLocalesA` 的回调 EA）只以 `push $0x4F80E0` 的**未对齐立即数**出现在 `0x4F822B`
+⇒ 旧的 D26 只扫 4 字节对齐 dword，抓不到它，当时是手工补了一行根。
 
-本轮是**手工**往 `closure.txt` 补了一行（`# why: indirect-entry…`）。⚠ 下一次跑 census 会把它抹掉，
-而症状是"只有走那条 CRT 分支才炸"（默认路径看不见）。
+## 修法（本轮，根治）
 
-## 要做什么（二选一或都做）
+- 新 `apps/emulator-lift/src/aot/closure_scan.h`：`scanInstructionImmediates()` 扫**可执行节里任意偏移**的
+  `68 imm32`（push）/ `B8..BF imm32`（mov r32）/ `C7 /0 imm32`，候选**并入** D26 的 `jumptab_seeds_`，
+  与对齐 dword 的候选**并集**后走 `offerSoftRoot` 同一套收/丢判据（⛔ 不新增 SoftKind、⛔ 不给某个 EA 开特判）。
+- 生成器与守卫（`tests/closure_imm32.cpp`）**共用同一份扫描实现** ⇒ "守卫绿"才等于"生成器收得到"。
+- `aot/closure.txt` 的 `0x004F80E0` 手工根**已删除**，仍由扫描收进（派发表有 `LIFT_AOT_ENTRY(0x004F80E0u,…)`）。
 
-1. **守卫（便宜、先做）**：一条 pure CTest/`tools/` 用例断言 `closure.txt` 里 `byEa(0x004F80E0)` 非空
-   （或更一般：`EnumSystemLocalesA` 的回调 EA 在根集合里）⇒ 手工行被抹掉时**当场红**，
-   ⛔ 不要断言"当前行数"。
-2. **生成器（根治）**：让 D15/D26 的扫描也认**未对齐立即数**的 `push imm32` / `mov r32, imm32`
-   形态（按指令解码而不是按 4 字节对齐 dword 扫），并把 `0x4F822B` 这个站点当证据写进
-   `closure_build.cpp` 的头注。
+## 读数（2026-11-17 / mac arm64）
+
+- 站点 20482（push 7462 / mov 13020）· 值落在可执行节 969 · 不同候选 665（**仅本扫描发现 608**）·
+  D26 `soft-roots=667`。
+- 同一条扫描还收进了 `0x00513B90`（Quit 的 EH handler chunk）与 `0x0041389A`（catch 续延）——
+  见 `REQ-01M7HR6N2D971KV88J1JR6TPG7`。
+- 变异：`++i → i += 4` ⇒ `closure-imm32/candidates` / `dispatch-table` / `emitted-blocks` 共 9 处红；
+  还原后默认档 106/106 绿。
 
 ## 判据
 
-- 删掉手工行后 `--closure-gate` 或新守卫必须红；补回后绿。
-- ⛔ 不放宽其它五条闭包判据；⛔ 不把 `0x004F80E0` 写成"下一跳"式的特判。
+- 删掉手工根后守卫必须绿（手工根已删，现在就是这个状态）；
+- 把"任意偏移"退化成"4 字节对齐" ⇒ 守卫必须红（变异已实测）。
