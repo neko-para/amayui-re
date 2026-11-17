@@ -81,6 +81,10 @@ add_library(emulator-lift-runtime STATIC
     # ★ 画面 ↔ 窗口客户区的 letterbox 映射的**唯一一份**（鼠标事件入 + 宿主光标 warp 出共用；
     #   `--cursor-warp` 的几何判据在 `tests/cursor_warp.cpp` 的 `cursor-map/*`）。
     src/runtime/cursor_map.cpp
+    # ★ `--scale <auto|数值>` 的**唯一一份**口径（窗口客户区尺寸 / auto 的 DPI→scale / 启动
+    #   readout 文案）。`aot_main.cpp`（解析 + 打印）与 `present_sdl.cpp`（建窗口）都只调它；
+    #   pure CTest = `tests/window_scale.cpp`（用例 `window-scale/*`）。
+    src/runtime/window_scale.cpp
     # ★ 宿主光标原语（`--cursor-warp` 的唯一 OS 出口；单 TU 按 `#ifdef` 选平台实现）。
     src/runtime/host_cursor.cpp
     # ★ 窗口调试叠层（`--overlay`）：纯逻辑（5×7 位图字体 + 行格式化 + RGBA8 矩形绘制），无 SDL 类型。
@@ -885,6 +889,18 @@ set_tests_properties(lift/no-gpu-refuses-start PROPERTIES
 add_executable(lift-cursor-warp tests/cursor_warp.cpp)
 target_link_libraries(lift-cursor-warp PRIVATE emulator-lift-runtime)
 add_test(NAME cursor-warp COMMAND lift-cursor-warp)
+
+# ---- pure：`--scale <auto|数值>` 的窗口尺寸 / DPI / readout / 鼠标映射 ----
+# 判据见 tests/window_scale.cpp 的头注释：① 缺省 1.0 = 1280×720（readout 逐字）；
+# ② 数值倍率 round(1280×s)×round(720×s)（1.25 / 1.5 / 1.33 的取整与非 16:9 残差）；
+# ③ 鼠标映射只走 `cursor_map.h` 的既有公式（与 control_endpoint 判据 4 的参考点互逆）；
+# ④ auto 的 DPI→scale 纯函数（取不到 ⇒ 1.0，readout 写明原因）；⑤ parse 的拒绝口径；
+# ⑥ `--present headless` 下 readout 明说"不生效"。
+# ★ 夹具 = 纯头（`window_scale.h` / `cursor_map.h`）：不建窗口、不碰 GPU、不读资产
+#   ⇒ 顶层无条件注册 = pure 档（判据 = 注册位置，见 AGENTS.md §12.4）。
+add_executable(lift-window-scale tests/window_scale.cpp)
+target_link_libraries(lift-window-scale PRIVATE emulator-lift-runtime)
+add_test(NAME window-scale COMMAND lift-window-scale)
 
 # ---- pure：**AOT 臂**的 `--cursor-warp` / `--sound` 参数面（CLI 级 + 真子进程）----
 # 判据见 tests/cli_aot_flags.cpp：① `--help` 里两个 flag 都在；② `--cursor-warp --present headless`

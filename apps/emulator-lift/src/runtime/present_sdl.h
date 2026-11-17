@@ -21,6 +21,7 @@
 
 #include "runtime/message_box.h"
 #include "runtime/present.h"
+#include "runtime/window_scale.h"
 
 namespace lift {
 
@@ -45,6 +46,11 @@ struct SdlWindowOptions {
     //   （虚拟光标 / `GetCursorPos` / `WM_MOUSEMOVE` 的 lParam 一律不变）。
     //   实际生效还要求窗口可见（运行时 `windowHidden()` 判据）——见 `hostCursorWarpEnabled`。
     bool cursor_warp = false;
+    // ★ `--scale <auto|数值>`（缺省 `Fixed 1.0` = 窗口客户区 1280×720，逐字节不变）。
+    //   口径**唯一一份**在 `runtime/window_scale.h`（窗口尺寸 / auto 的 DPI / readout 文案）。
+    //   ⛔ 只由**窗口档**设置：`--present headless` 的调用方不要设它（`--scale` 对 headless
+    //   无副作用：隐藏离屏窗口仍是 1280×720，也不去查 DPI —— 那会让"只是拿 GPU device"多一次平台依赖）。
+    ScaleSpec scale;
 };
 
 class SdlWindow final : public PresentSink, public GpuRaster {
@@ -141,6 +147,12 @@ public:
     // ★ 「走的是不是 SDL_GPU」在两条路径上都成立：renderer 路径看 `SDL_GetGPURendererDevice()`，
     //   直出路径看 swapchain 所用的 GPU device（`present=direct/<mode>` 是正证据）。
     bool isGpuRenderer() const;
+    // ★ `--scale` 的一次性 readout 数据（`runtime/window_scale.h` 的 `ScaleReport`）：
+    //   `window_w/h` 是**建完窗口之后 `SDL_GetWindowSize` 回读**的客户区尺寸（⛔ 不是把请求值
+    //   抄回来 —— 窗口管理器可能约束尺寸）。`applied` 由 caller 按档位决定：`--present headless`
+    //   时 sink 建的只是隐藏离屏窗口，`--scale` 没生效 ⇒ caller 把它置 false 再打。
+    //   窗口没建（init 失败）⇒ 缺省 1280×720。
+    ScaleReport scaleReport() const;
     // ★ 调试叠层开关（`--overlay`）。`init()` 之后也能改：关掉时立刻把已建的叠层纹理丢掉。
     //   默认关；只影响窗口像素（⛔ 不碰 guest 内存）。
     void setOverlay(bool on);

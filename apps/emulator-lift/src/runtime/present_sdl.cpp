@@ -2,6 +2,16 @@
 
 #include <SDL3/SDL.h>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -18,9 +28,31 @@
 #include "runtime/log.h"
 #include "runtime/overlay.h"
 #include "runtime/warp_echo.h"
+#include "runtime/window_scale.h"
 
 namespace lift {
 namespace {
+
+// ★ `--scale auto` 的**前提**：进程必须是 DPI aware。不 aware 时 Windows 会把显示内容缩放
+//   虚拟化 ⇒ `SDL_GetDisplayContentScale` 恒报 1.0，`auto` 就静默退化成 1.0（正是"取不到"的
+//   形状，但原因被藏起来了）。
+//   SDL3 在 `SDL_Init(VIDEO)` 里自己会设 per-monitor v2，但那是**版本行为**；这里在 `SDL_Init`
+//   **之前**显式设一次，让 auto 的口径不依赖 SDL 的实现细节（换 SDL 版本不改变这件事）。
+//   · 已由 manifest / 更早的调用设过 ⇒ `SetProcessDpiAwarenessContext` 返回 FALSE +
+//     ERROR_ACCESS_DENIED —— 那**不是**失败（awareness 已经是对的），⛔ 不打日志。
+//   · 其它失败只记一条 info（⛔ 不拦启动：窗口照建；auto 的 readout 会把结果的数打出来）。
+void ensureProcessDpiAware() {
+#if defined(_WIN32) && defined(WINVER) && WINVER >= 0x0605
+    if (::SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) return;
+    const DWORD e = ::GetLastError();
+    if (e != ERROR_ACCESS_DENIED) {
+        lift::logAt(lift::LogLevel::Info, lift::LogVideo, "[present] ",
+                    "SetProcessDpiAwarenessContext(per-monitor-v2) 失败（error=%lu）⇒ 沿用当前 awareness；"
+                    "--scale auto 可能因此报 1.0",
+                    static_cast<unsigned long>(e));
+    }
+#endif
+}
 
 SDL_PixelFormat sdlFormatFor(frame_blit::HostPixelFormat fmt) {
     switch (fmt) {
@@ -151,6 +183,9 @@ struct SdlWindow::Impl {
     std::uint64_t screenshot_frame = 0;  // 0 = 每帧；N = 只在第 N 个 Present 回读
     std::string renderer_name;
     std::string video_driver;
+    // ★ `--scale` 的落点与一次性 readout 的数据（`runtime/window_scale.h`）：`init()` 里定稿，
+    //   此后只读（`scaleReport()`）。缺省 = Fixed 1.0 ⇒ 1280×720（逐字节不变）。
+    ScaleReport scale_report;
     std::string gpu_driver;
     std::string raster_name;
     std::vector<std::uint32_t> capture_argb;
@@ -702,6 +737,8 @@ bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
     impl_->cursor_warp = options.cursor_warp;
     impl_->warp_selfcheck_done = false;
 
+    // ★ `--scale auto` 的 DPI awareness 必须在 SDL 起视频子系统**之前**定（见 `ensureProcessDpiAware`）。
+    ensureProcessDpiAware();
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         if (err) *err = std::string("SDL_Init(VIDEO) 失败：") + SDL_GetError();
         return false;
@@ -734,13 +771,53 @@ bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
     }
     impl_->video_driver = SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "(unknown)";
 
+    // ---- `--scale <auto|数值>`：窗口客户区 = round(1280×s) × round(720×s) ----
+    // ★ 公式 / auto 判据 / readout 文案的**唯一一份**在 `runtime/window_scale.h`（pure CTest 直接测它）。
+    //   这里只做两件事：① 取数（auto ⇒ SDL 的 display content scale）；② 把**建完窗口之后**
+    //   回读到的客户区尺寸写进 `scale_report`（⛔ 不把请求值抄回去冒充事实）。
+    // ★ 缺省档：`options.scale` 是 Fixed 1.0 ⇒ 下面算出的就是 1280×720 ⇒ `SDL_CreateWindow` 的实参
+    //   与改动前逐字节相同（这就是"缺省行为不变"的机械判据）。
+    // ★ `auto` 取不到（SDL 返回 0 / NaN / 离谱值）⇒ 回 1.0，但 `auto_fallback` 会被 CLI 打出来
+    //   （⛔ 不静默退回缺省）。
+    {
+        ScaleReport report;
+        report.image_w = kBaseWindowW;  // 被呈现的画面尺寸（guest 后缓冲）；窗口尺寸不改变它
+        report.image_h = kBaseWindowH;
+        if (options.scale.kind == ScaleSpec::Kind::Auto) {
+            report.auto_requested = true;
+            const SDL_DisplayID primary = SDL_GetPrimaryDisplay();
+            // 取不到 display（无桌面 / 无显示）时 `SDL_GetDisplayContentScale` 也拿不到 ⇒ 当 0 处理。
+            const double raw = primary != 0 ? static_cast<double>(SDL_GetDisplayContentScale(primary)) : 0.0;
+            report.auto_content_scale = raw;
+            report.auto_fallback = !autoContentScaleUsable(raw);
+            report.scale = autoScaleFromContentScale(raw);
+        } else {
+            report.scale = options.scale.value;
+        }
+        const WindowSize size = windowSizeForScale(report.scale);
+        report.window_w = size.w;
+        report.window_h = size.h;
+        impl_->scale_report = report;
+    }
+
     SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE;
     if (options.hidden) flags |= SDL_WINDOW_HIDDEN;
-    impl_->window = SDL_CreateWindow(options.title.c_str(), 1280, 720, flags);
+    impl_->window = SDL_CreateWindow(options.title.c_str(), impl_->scale_report.window_w,
+                                     impl_->scale_report.window_h, flags);
     if (impl_->window == nullptr) {
         if (err) *err = std::string("SDL_CreateWindow 失败：") + SDL_GetError();
         shutdown();
         return false;
+    }
+    // ★ readout 的事实 = **建完之后回读**的客户区尺寸（窗口管理器可能约束尺寸；隐藏窗口也一样）。
+    {
+        int actual_w = 0;
+        int actual_h = 0;
+        SDL_GetWindowSize(impl_->window, &actual_w, &actual_h);
+        if (actual_w > 0 && actual_h > 0) {
+            impl_->scale_report.window_w = actual_w;
+            impl_->scale_report.window_h = actual_h;
+        }
     }
 
     // ★ 窗口创建之后才可能 claim swapchain ⇒ GPU 直出的 attach 必须在这里，不能在 init 开头。
@@ -878,6 +955,8 @@ void SdlWindow::shutdown() {
     impl_->renderer_name.clear();
     impl_->video_driver.clear();
     impl_->gpu_driver.clear();
+    // `--scale` 的落点也回缺省（`--present auto` 的重试会再 init 一次，⛔ 不带着上一轮的数）。
+    impl_->scale_report = ScaleReport{};
     impl_->capture_argb.clear();
     impl_->capture_w = 0;
     impl_->capture_h = 0;
@@ -1250,6 +1329,10 @@ std::string SdlWindow::describe() const {
 }
 
 bool SdlWindow::isGpuRenderer() const { return !impl_->gpu_driver.empty(); }
+
+// `--scale` 的一次性 readout 数据：窗口档 = `init()` 建完窗口后的实测客户区；没建窗口 ⇒ 缺省 1280×720。
+// ⛔ 这里不做任何换算（公式与文案在 `runtime/window_scale.h`），只把事实交出去。
+ScaleReport SdlWindow::scaleReport() const { return impl_->scale_report; }
 
 bool SdlWindow::directPresentActive() const { return impl_->direct_present && impl_->direct != nullptr; }
 

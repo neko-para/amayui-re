@@ -1626,6 +1626,28 @@ const MUTATIONS = [
       '闭式（wall = lift+boundary+shim+partial+instrument）当场不成立',
   },
 
+  // ── `--scale <auto|数值>` 的窗口尺寸公式（`src/runtime/window_scale.cpp`；守卫 = CTest `window-scale`）──
+  //   故障形态：`round(1280×s)` / `round(720×s)` 退化成**截断**。这是最像"能跑"的破坏 ——
+  //   1.5 / 1.25 这些乘积本来就是整数的档位**完全不变**（1280×1.5、720×1.5、720×1.25 都是整），
+  //   只有 1.33 这类非整数倍率的客户区各少 1 px；画面照显、鼠标只有零点几像素偏移。
+  //   ⇒ 判据必须是**公式**（`window-scale/fixed-sizes` 的 1.33 ⇒ 1702×958），
+  //     ⛔ 不是"窗口建出来了"（那在截断档上照样成立，会假绿）。
+  {
+    file: 'apps/emulator-lift/src/runtime/window_scale.cpp',
+    from: '    const double v = roundHalfAway(static_cast<double>(base) * scale);',
+    to:
+      '    const double v = static_cast<double>(static_cast<int>(static_cast<double>(base) * scale));  // 变异：截断',
+    guard: 'ctest:window-scale',
+    ctest: 'window-scale',
+    buildDir: 'apps/emulator-lift/out',
+    // ★ 只重建守卫的 target（runtime 是静态库 ⇒ 全量构建会把 15 MB 的 AOT 产品臂也重链，
+    //   这对本判据没用）；安全性由「一轮结束的全量重建回基线」兜底（`finalizeBuildDirs`）。
+    buildTarget: 'lift-window-scale',
+    what:
+      '窗口尺寸从四舍五入退化成截断 ⇒ 1.33 倍时客户区 1702×957（应 1702×958）⇒ ' +
+      '`window-scale/fixed-sizes` 的 1.33 用例红；★ 1.5 / 1.25 的乘积是整数 ⇒ 只钉"窗口建出来了"会假绿',
+  },
+
   // ── 🐞S2 `emu-ctl screenshot` 全黑（`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`；守卫 = `tests/control_snapshot.cpp`）──
   //   ★ 代表"截图读的不是最后呈现的那一帧"这一类静默失效：
   //     present **不冻结** ⇒ `dumpLastFrame` 退回写现场后缓冲（下一帧的 Clear(0) 之后 = 全黑 = 本缺陷形态）。
