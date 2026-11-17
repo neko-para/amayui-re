@@ -361,3 +361,22 @@
 - **为什么 sprite 需要自己的一条闸**：sprite 的合成**不经** `gpuEligible`（`d3dx9_sprite.cpp` 直接调 `GpuRaster::rasterQueue`）⇒ draw 路那条 `kUnRtFeedbackLoop`（bit28）管不到它；而 `REQ-01M79V2TVJH98BKH0C0WQV2FET`（sprite→RT）之后，"同一批 sprite 采样自己正在写的 RT"变成**新可达** ⇒ GPU 读上传缓存 / guest 未读回，两个来源都可能是旧像素，且看不出来。
 - **备选**：① 放过去（继续画）；② 整批跳过；③ 整帧丢弃；④ 复用 draw 路的 bit28。**没选** ①：静默旧像素正是本单要消除的那类错。**没选** ②③：一批里各条目采各自的纹理，`tbase == base` 是**逐条目**属性 ⇒ 丢掉正确条目（②）或把"一条坏 sprite"放大成"整帧空/黑"（③），与 `REQ-01M7A74YG08R65NJBFXF7DEJDK` 的"跳过而不是回退/整帧重来"口径冲突。**没选** ④：复用会让"draw 路命中"与"sprite 路命中"在位图 / 摘要里分不开，两条守卫互成恒真。
 - **重写必须保持不变**：① 判据只有一份（`compositeBatch` 的 `tbase == base`），⛔ 不在 `gpuEligible` 里再判一遍 sprite；② 触发时**像素零写入** + 账上一定看得见（具名位 + `sprite_skipped` + 原因），⛔ 不许静默；③ 采**别的**纹理必须照常入队（反向条款，防过度收紧）；④ 位号 43 不与 28 合并（合并 = 两条守卫互成恒真）；⑤ 守卫 = `gpu_batch.cpp` 的 `d3d9p/sprite-feedback-loop`（CTest `gpu-batch-order`），变异 = 判据换成永不成立（`tools/mutate-check.mjs`）。
+
+### L3-tl-01 · 顶点处理（T&L / 裁剪 / 状态机）留在 CPU、GPU 只吃**屏幕空间**三角形 —— 是 2026-11 的**分期**取舍，不是"两套实现"
+
+- **为什么**：GPU 光栅化后端是**分期**接的。phase 1 的边界写死在 `REQ-01M6PAXW7EFCERJR6G2EEDN2A0`：
+  "GPU 只做光栅，**T&L/裁剪/状态机/失败码留在 CPU**"，理由是当时实测到的墙钟收益全在光栅化
+  （100 帧 boot：103.7 s → 31.8 s；瓶颈是 D3DXSprite 的逐像素合成 0.41 s/帧）。
+  ⇒ 顶点这一层从来只有**一份**实现（`d3d9_pipeline.cpp` 的 `transformVertex` / `applyLighting` / 裁剪 / `toScreen`），
+  所以它不违反"不维护两套实现"（那条是 `REQ-01M78BF1FNNH6K8N8GEY6GQYXX`，讲的是**光栅/像素**层，CPU 光栅已退休）。
+- **今天仍成立，因为它是分期留下的位置，而不是被重新评估过的取舍**：CPU 光栅退休时没有人回头动 T&L。
+  代价有两条，都要知道：
+  ① 顶点/光照/裁剪的墙钟在宿主 CPU（ADV 场景每帧 ~60 笔 sprite × 4 顶点 ⇒ 没有读数表明它占主导，⛔ 不要凭感觉优化）；
+  ② **设备 vtable 里没有 `Create/SetVertexShader`**（`+0x16C/+0x170`）⇒ 任何 `vs_*`（202 的 Snow 是 `vs_1_0`，
+  3D 场景是 `vs_3_0`）今天**无法执行**，撞到就是 `comUnsupported` 响停。
+- **要保住的可观察现象**：D3D9 fixed-function 的顶点语义（变换顺序、光照公式、裁剪、`XYZRHW` 直通、fog 记账）
+  与"每笔 draw 的失败码"必须仍然只有一个来源。
+- **什么时候该回头动它**：需要执行 `vs_*` 时。两条路，按 ADR `REQ-01M7MNYPDXM2NEQR77DXYZM3CJ` 的预转写口径：
+  ① `vs_1_0` 这类**有限固定**的顶点程序 → 构建期转成 C++，仍在 CPU 顶点阶段跑（保持一份实现，推荐先走这条）；
+  ② 一般的 `vs_3_0`（战斗/3D 场景）→ 才考虑 GPU 顶点着色 + shader 落后端，那是独立的大单。
+  ⛔ 不要为了"看起来更像 GPU 渲染"而在没有顶点着色需求时把 T&L 搬上 GPU —— 那会立刻产生第二份语义实现。
