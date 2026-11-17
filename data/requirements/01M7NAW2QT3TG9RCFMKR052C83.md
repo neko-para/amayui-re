@@ -2,8 +2,9 @@
 
 - id: REQ-01M7NAW2QT3TG9RCFMKR052C83
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M7MNPGETP2CQJ3ACMCGEHKF5
+- verify: apps/emulator-lift/tests/d3dx9_effect.cpp#d3dx9-effect/effect-draw-snow-recorded
 - tags: [emulator-lift, d3d9, effect]
 
 ## 一句话
