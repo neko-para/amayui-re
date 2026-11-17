@@ -32,6 +32,7 @@
 //   · 点 / 线：**只做无纹理**（顶点色 + z 按段参数 t 插值），展开成 1px 宽的三角形交给同一个 GPU
 //     管线（深度 / alpha test / 混合 / 写掩码都映射成 GPU 状态）；线宽恒 1px（⛔ 不做 diamond-exit）。
 //     带纹理或 COLOROP/ALPHAOP 需要采样的点 / 线**响亮拒绝**（见 `admitLinePointDraw`）。
+#include "runtime/d3d9_effect_gpu.h"  // ★ P2：effect draw 的后端表达（GpuEffectRaster / GpuEffectDraw）
 #include "runtime/d3d9_pipeline.h"
 
 #include <chrono>
@@ -259,13 +260,17 @@ enum UnsupportedBit : std::uint32_t {
     //     == 本批要写的颜色目标像素基址" ⇒ 跳过这一条 + 记这一位。⛔ 不是"未实现"，
     //     是**表达不了**（GPU 采样读上传缓存）⇒ 与 draw 路同一种拒绝语义。
     kUnSpriteRtFeedbackLoop = 43,
-    // ---- 44：GPU 路线 P1 的**临时**拒绝（effect 的 shader 尚未实现执行）----
-    //   ★ 为什么不复用 33（stage>=1）：33 是"多级纹理表达不了"，触发条件 = stage1 绑了纹理 / op 未
-    //     DISABLE；而本条的触发条件 = **guest 正在某个 ID3DXEffect 的 pass 里**（D3DX 宿主状态），
-    //     两者可独立发生（实测：203 的 blur draw 只绑 Tex0 ⇒ 33 不触发，但 shader 没执行）。
-    //   ★ **P2 真执行 shader 之后这一位应当消失**（连同 `gpuEligible` 的第一条判据与用例
-    //     `d3dx9-effect/effect-draw-refused` 一起翻面），⛔ 不要把它当永久契约。
-    kUnEffectShaderNotExecuted = 44,
+    // ---- 44：`REQ-01M7MSGRRHCA23RAX1QGDAYJ3X`（GPU 路线 P2）----
+    //   ★ 语义（P2 翻面后的口径）：**这一批该由 effect 的 pass 程序画，但那个程序不在实现集里**
+    //     —— 203 的 SlideBlur/ZoomBlur（P3 才做 10-tap）、202 的 Snow（vs_1_0，不做 GPU 顶点着色）、
+    //     以及"technique 不在资源文本里 / SetTexture 没绑 / 纹理对象解析不了"这类具名缺口。
+    //     P2 实现集内的程序（Fade 的 ps_2_0 / ps_1_0）**不再经过这一位**：它们真的被 GPU 画出来。
+    //   ★ 为什么不复用 33（stage>=1）：33 的触发条件是**固定功能**的多级纹理（stage1 绑了纹理 /
+    //     op 未 DISABLE）；effect draw 的纹理**不经过** device 的 stage 状态（它来自 effect 的
+    //     `SetTexture`）⇒ 两条可以独立发生（实测：203 的 blur 只绑 Tex0 ⇒ 33 不触发）。
+    //   ★ P1 的临时位（`kUnEffectShaderNotExecuted`，"只记状态不执行"）**已删**：那一位在 P2 之后
+    //     永远不会被置起（Fade 走 GPU、其余在这里具名）⇒ 留着它就是一条恒假的契约。
+    kUnEffectProgramNotExecuted = 44,
 };
 
 // ★ 合法 D3DRS 的**唯一**判据（`REQ-01M7A3M73R3XYMM7J4KNQ1VNV7`）：
@@ -398,13 +403,6 @@ void pipeLog(const char* what, const char* fmt, ...) {
     va_start(ap, fmt);
     logV(LogLevel::Info, LogD3d9, prefix, fmt, ap);
     va_end(ap);
-}
-
-// ★ P1 **临时**：effect draw 的具名拒绝必须**每批**可见（⛔ 不许静默接受；P2 执行 shader 后删）。
-//   为什么不用 `pipeWarn`：那条按 (调用点, 类别) 限流（前 4 次）⇒ "每批一条"做不到；而这一条
-//   的含义是"这一批本该由 shader 画却没人画"——必须逐批落账（只在开档跑得出来，见 d3d9.h）。
-void effectDrawWarn(const std::string& note) {
-    logAt(LogLevel::Warn, LogD3d9, "[d3d9] effect: ", "%s", note.c_str());
 }
 
 // ★ **默认级别可见**的告警（`warn` 是默认日志级别；`LogLevel::Info` 默认看不见 ⇒ ⛔ 不能拿
@@ -666,7 +664,7 @@ const char* unsupportedBitName(std::uint32_t bit) {
     if (bit == kUnRenderStateStored) return "合法 D3DRS（只存）";
     if (bit == kUnDepthClearZ) return "Clear(ZBUFFER) 的 z 越界";
     if (bit == kUnSpriteRtFeedbackLoop) return "sprite 反馈环";
-    if (bit == kUnEffectShaderNotExecuted) return "effect shader 尚未实现执行（P1 临时）";
+    if (bit == kUnEffectProgramNotExecuted) return "effect 的 pass 程序不在实现集里（P2 只实现 Fade）";
     return "未分配";
 }
 
@@ -1181,6 +1179,15 @@ struct DrawContext {
     std::uint32_t color_write = 0xF;
     std::uint32_t texture_factor = 0xFFFFFFFFu;
     TextureView textures[kMaxTextureStages];
+    // ---- effect draw（P2）----
+    // `effect_draw` = guest 正处在某个 `ID3DXEffect` 的 BeginPass..EndPass 之间（这批由 FX 程序画）。
+    // ★ 快照在 prepareContext 里取：程序（`d3d9::EffectDrawScope::program`）+ **已解析**的纹理视图
+    //   （`SetTexture` 记的是 guest 纹理对象 EA，这里换成像素/尺寸/格式；解析失败的原因进
+    //   `effect_texture_error`，由 `gpuEligible` 具名拒绝）。
+    bool effect_draw = false;
+    d3d9::EffectDrawScope effect;
+    TextureView effect_textures[d3d9::kEffectMaxTextures];
+    std::string effect_texture_error;
     // ★ 每次 Draw 的快照（prepareContext 里一次读完；像素循环只读这里）
     TextureStageSnapshot stages[kMaxTextureStages];
     SamplerSnapshot samplers[kMaxTextureStages];
@@ -3758,6 +3765,29 @@ bool prepareContext(X86& cpu, const char* what, std::uint32_t dev, std::uint32_t
             return false;
         }
     }
+    // ---- effect draw（P2）：作用域快照 + 把 `SetTexture` 的 EA 解析成纹理视图 ----
+    //   ★ 解析放在这里（不在 `gpuEligible`）：这里拿得到 `HostServices`（`resolveTexture` 要它）。
+    //   ★ 解析失败**不停机**：把原因记下来，`gpuEligible` 该批具名拒绝（bit 44）—— 一条 draw 的
+    //     坏纹理不该让整个进程死掉（与 `prepareContext` 里 device 级状态错误的处置不同）。
+    ctx->effect = d3d9::effectDrawScope();
+    ctx->effect_draw = ctx->effect.active && ctx->effect.in_pass;
+    if (ctx->effect_draw) {
+        const std::uint32_t n = ctx->effect.program.texture_count;
+        for (std::uint32_t i = 0; i < n && i < d3d9::kEffectMaxTextures; ++i) {
+            std::string terr;
+            if (!resolveTexture(cpu, m, ctx->effect.program.textures[i], &ctx->effect_textures[i], &terr)) {
+                if (ctx->effect_texture_error.empty()) {
+                    ctx->effect_texture_error =
+                        "effect 的纹理参数 #" + std::to_string(i) + "（EA=0x" +
+                        std::to_string(ctx->effect.program.textures[i]) + "）解析不了：" + terr;
+                }
+            } else if (!ctx->effect_textures[i].present) {
+                if (ctx->effect_texture_error.empty()) {
+                    ctx->effect_texture_error = "effect 的纹理参数 #" + std::to_string(i) + " 没有像素";
+                }
+            }
+        }
+    }
     // ★ 偏差 #4 的消除点：纹理级 / 采样器状态在这里**读一遍**（guest 在 Draw 期间不执行，
     //   所以这份快照就是整个光栅阶段看到的全部状态）。像素循环只读 ctx->stages / ctx->samplers。
     //   可观察量：kPlStageSnapshots 每次 Draw 只 +1（⛔ 不随三角形/像素增长）。
@@ -3904,6 +3934,12 @@ struct GpuBatchPlan {
     // stage 0 用了 TFACTOR ⇒ 顶点色整批替换成 D3DRS_TEXTUREFACTOR（常量色，不依赖插值）。
     bool tex_color_from_tfactor = false;
     GpuRasterTexture texture;
+    // ---- effect draw（P2）：这一批由 FX pass 程序画（`textured` / `texture` / `tex_mode` 不参与）----
+    bool effect = false;
+    GpuEffectDraw effect_draw;
+    // 这一批的纹理坐标来自 FVF 的**哪一套**（FVF 0x244 有 TEXCOORD0/1；程序按 uv_set 取）。
+    // ★ 只在 effect 档用：`uv1` 数组要按这套坐标填（Fade 的 Tex1UV = TEXCOORD1）。
+    std::uint32_t effect_uv1_set = 1;
 };
 
 bool gpuAddressFor(std::uint32_t mode, GpuAddress* out) {
@@ -4050,19 +4086,6 @@ bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why, U
         if (skip_bit) *skip_bit = bit;
         return false;
     };
-    // ★ GPU 路线 P1 的**临时**第一条判据（口径见 `d3d9.h` 的 `EffectDrawScope`）：
-    //   guest 正在某个 `ID3DXEffect` 的 BeginPass..EndPass 之间提交 draw，而本段**只记状态、
-    //   不执行 shader** ⇒ **整批拒绝** + 具名位 44 + 每批一条 Warn。
-    //   ⛔ 绝不能落到下面按固定功能画：那会写出**错误像素**而账上一个具名位都没有（本仓最贵的
-    //   静默错）。⚠ P2 执行 shader 后：删掉这一段 + 翻面 `d3dx9-effect/effect-draw-refused`。
-    {
-        std::string effect_why;
-        if (d3d9::effectDrawNotExecuted(&effect_why)) {
-            if (why) *why = effect_why;
-            effectDrawWarn(effect_why);
-            return deny(kUnEffectShaderNotExecuted);
-        }
-    }
     if (plan == nullptr) {
         if (why) *why = "GPU 准入：plan 为空";
         return deny(kUnGpuNoBackend);
@@ -4075,6 +4098,8 @@ bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why, U
     //   变异的 `from` 就取下面这一行（改回无条件拒 ⇒ `d3d9p/render-to-texture` 当场红）。
     if (ctx.color_surface != 0) {
         // ① 反馈环：同批把 RT 当采样纹理 ⇒ 拒 + 记账（bit26 是这条闸专用的未占用位）。
+        //    ★ effect draw（P2）**也要查**：它的采样源来自 effect 的 `SetTexture`（不是 device 的
+        //      stage 状态）⇒ 两条来源各查一遍，⛔ 不能只查固定功能那一条。
         for (std::uint32_t s = 0; s < kMaxTextureStages; ++s) {
             const bool rt_sampled = ctx.textures[s].present && ctx.color_base != nullptr &&
                                     ctx.textures[s].pixels == ctx.color_base;
@@ -4082,6 +4107,22 @@ bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why, U
                 char buf[256];
                 std::snprintf(buf, sizeof(buf),
                               "纹理当渲染目标的同时在 stage %u 被采样（同一批）：GPU 采样读的是上传缓存，"
+                              "读不到本批刚画的像素 ⇒ 不接受该批",
+                              s);
+                if (ctx.cpu != nullptr) recordUnsupported(*ctx.cpu, ctx.pe, kUnRtFeedbackLoop, buf, s);
+                pipeWarn(PipeWarnCategory::Other, "渲染到纹理", "%s", buf);
+                if (why) *why = buf;
+                return deny(kUnRtFeedbackLoop);
+            }
+        }
+        for (std::uint32_t s = 0; s < d3d9::kEffectMaxTextures && ctx.effect_draw; ++s) {
+            if (s >= ctx.effect.program.texture_count) break;
+            const bool rt_sampled = ctx.effect_textures[s].present && ctx.color_base != nullptr &&
+                                    ctx.effect_textures[s].pixels == ctx.color_base;
+            if (rt_sampled) {
+                char buf[256];
+                std::snprintf(buf, sizeof(buf),
+                              "effect 的纹理参数 #%u 就是本批的渲染目标（同一批）：GPU 采样读的是上传缓存，"
                               "读不到本批刚画的像素 ⇒ 不接受该批",
                               s);
                 if (ctx.cpu != nullptr) recordUnsupported(*ctx.cpu, ctx.pe, kUnRtFeedbackLoop, buf, s);
@@ -4119,6 +4160,137 @@ bool gpuEligible(const DrawContext& ctx, GpuBatchPlan* plan, std::string* why, U
         std::snprintf(buf, sizeof(buf), "GPU 不认识的 color write mask 0x%X", ctx.color_write);
         if (why) *why = buf;
         return deny(kUnGpuColorWrite);
+    }
+    // ---- effect draw（P2）：这批由 FX pass 程序画 ⇒ **不看** device 的 stage 状态 ----
+    //   ★ 这里判定的是"能不能真的画"：程序在实现集里 + 后端支持 effect 队列 + 纹理解析得了。
+    //     任何一条不满足 ⇒ **整批拒绝 + 具名位 44**（⛔ 不落回固定功能画 —— 那会写出错误像素而
+    //     账上一个具名位都没有）。
+    if (ctx.effect_draw) {
+        const d3d9::EffectDrawProgram& prog = ctx.effect.program;
+        // ★ 默认可见：effect 的**每一条**拒批都走 `pipeWarn`（配额 4 次 + 一行汇总，汇总行带**总次数**）。
+        //   ⛔ 不再用 P1 的 `effectDrawWarn`（每批一条、无预算）—— P2 之后这是**普通**的准入拒绝，
+        //   与其它 bit 同一档；但⛔ 不许"静默拒绝"：AOT 摘要**不打印** GPU 覆盖账，这里是唯一的默认消息面。
+        const auto deny_effect = [&](const char* reason) {
+            if (why) *why = reason;
+            pipeWarn(PipeWarnCategory::Other, "effect", "%s", reason);
+            return deny(kUnEffectProgramNotExecuted);
+        };
+        if (!prog.implemented) {
+            char buf[640];
+            std::snprintf(buf, sizeof(buf), "effect 的 pass 程序没有实现执行：%s", prog.reason.c_str());
+            return deny_effect(buf);
+        }
+        if (!gpuSupportsEffectDraw(ctx.gpu)) {
+            return deny_effect("这个 GPU 后端没有 effect 管线（每 draw 一个 shader + 常量 + 2 纹理）"
+                               "⇒ 不接受该批");
+        }
+        if (prog.texture_count == 0 || prog.texture_count > d3d9::kEffectMaxTextures ||
+            prog.texture_count > kGpuEffectMaxTextures) {
+            char buf[192];
+            std::snprintf(buf, sizeof(buf), "effect 程序的纹理数 %u 不在 1..%u 之间",
+                          prog.texture_count, d3d9::kEffectMaxTextures);
+            return deny_effect(buf);
+        }
+        if (!ctx.effect_texture_error.empty()) {
+            return deny_effect(ctx.effect_texture_error.c_str());
+        }
+        GpuBatchPlan e;
+        e.state.viewport_x = ctx.viewport_x;
+        e.state.viewport_y = ctx.viewport_y;
+        e.state.viewport_w = ctx.viewport_w;
+        e.state.viewport_h = ctx.viewport_h;
+        e.state.scissor_x0 = ctx.scissor_x0;
+        e.state.scissor_y0 = ctx.scissor_y0;
+        e.state.scissor_x1 = ctx.scissor_x1;
+        e.state.scissor_y1 = ctx.scissor_y1;
+        e.state.scissor_enabled = ctx.scissor_x0 != 0 || ctx.scissor_y0 != 0 ||
+                                  ctx.scissor_x1 != ctx.color_width || ctx.scissor_y1 != ctx.color_height;
+        e.state.depth_test = ctx.z_enable;
+        e.state.depth_write = ctx.z_write;
+        e.state.depth_func = ctx.z_func;
+        e.state.color_write = static_cast<std::uint8_t>(ctx.color_write & 0xFu);
+        if (!gpuBlendStateFor(ctx.src_blend, ctx.dst_blend, ctx.blend_op, ctx.separate_alpha_blend,
+                              ctx.src_blend_a, ctx.dst_blend_a, ctx.blend_op_a, ctx.blend, &e.state, why)) {
+            return deny(kUnGpuBlendMap);
+        }
+        e.effect = true;
+        switch (prog.program) {
+            case d3d9::EffectProgram::FadePs20: e.effect_draw.program = GpuEffectProgram::FadePs20; break;
+            case d3d9::EffectProgram::FadePs10: e.effect_draw.program = GpuEffectProgram::FadePs10; break;
+            default:
+                return deny_effect("effect 程序号不在后端的实现集里");
+        }
+        e.effect_draw.constant_count = prog.constant_count;
+        for (std::uint32_t i = 0; i < prog.constant_count && i < kGpuEffectMaxConstants; ++i) {
+            e.effect_draw.constants[i] = prog.constants[i];
+        }
+        e.effect_draw.texture_count = prog.texture_count;
+        for (std::uint32_t i = 0; i < prog.texture_count; ++i) {
+            const TextureView& tv = ctx.effect_textures[i];
+            if (tv.format.bpp != 32) {
+                char buf[128];
+                std::snprintf(buf, sizeof(buf), "effect 的纹理参数 #%u 是 %u bpp（GPU 只支持 32bpp）", i,
+                              static_cast<unsigned>(tv.format.bpp));
+                return deny_effect(buf);
+            }
+            GpuEffectTexture& dst = e.effect_draw.textures[i];
+            dst.texture.pixels = tv.pixels;
+            dst.texture.pitch = tv.pitch;
+            dst.texture.width = tv.width;
+            dst.texture.height = tv.height;
+            dst.texture.format = tv.format;
+            dst.texture.key = tv.pixels;
+            dst.texture.generation = tv.version;
+            dst.texture.serial = tv.serial;
+            dst.texture.content_change_known = tv.write_version != 0 && tv.write_version == tv.version;
+            dst.texture.content_change_rect = GpuTexelRect{tv.write_rect[0], tv.write_rect[1],
+                                                           tv.write_rect[2] - tv.write_rect[0],
+                                                           tv.write_rect[3] - tv.write_rect[1]};
+            dst.texture.content_change_version = tv.write_version;
+            dst.texture.content_change_prev_version = tv.prev_write_version;
+            // 采样器：FX 文本的 sampler_state（值是 D3D9 枚举原值）⇒ 后端 sampler
+            const auto map_address = [](std::uint32_t v, GpuAddress* out) {
+                switch (v) {
+                    case 1u: *out = GpuAddress::Wrap; return true;
+                    case 2u: *out = GpuAddress::Mirror; return true;
+                    case 3u: *out = GpuAddress::Clamp; return true;
+                    default: return false;
+                }
+            };
+            const auto map_filter = [](std::uint32_t v, GpuFilter* out) {
+                switch (v) {
+                    case 1u: *out = GpuFilter::Point; return true;
+                    case 2u: *out = GpuFilter::Linear; return true;
+                    case 3u: *out = GpuFilter::Linear; return true;  // ANISOTROPIC 按 LINEAR 近似（同 FF 口）
+                    default: return false;
+                }
+            };
+            if (!map_address(prog.address_u[i], &dst.texture.sampler.address_u) ||
+                !map_address(prog.address_v[i], &dst.texture.sampler.address_v) ||
+                !map_filter(prog.mag_filter[i], &dst.texture.sampler.mag_filter) ||
+                !map_filter(prog.min_filter[i], &dst.texture.sampler.min_filter)) {
+                char buf[192];
+                std::snprintf(buf, sizeof(buf), "effect 的 sampler #%u 的寻址/过滤表达不了", i);
+                return deny_effect(buf);
+            }
+            // D3DTEXF_NONE = 关掉 mipmap ⇒ 只采 level 0（与固定功能口同一条判据）。
+            dst.texture.sampler.mipmap = prog.mip_filter[i] != 0u;
+            dst.uv_set = prog.uv_set[i];
+            // ★ 后端 shader 的输入布局是固定的：slot #0 采 TEXCOORD0（uv0）、slot #1 采 TEXCOORD1（uv1）
+            //   ⇒ 程序里"哪张纹理用哪一套 UV"必须正是这个次序（Fade 的 Tex0UV/Tex1UV 就是）。
+            //   ⛔ 不一致就**具名拒绝**（不把两张纹理的坐标偷偷换成同一套 —— 那会静默画错）。
+            if (dst.uv_set != i) {
+                char buf[224];
+                std::snprintf(buf, sizeof(buf),
+                              "effect 程序的 UV 布局与后端 shader 不一致：纹理 #%u 用 TEXCOORD%u"
+                              "（后端固定 #0⇒TEXCOORD0 / #1⇒TEXCOORD1）",
+                              i, dst.uv_set);
+                return deny_effect(buf);
+            }
+        }
+        e.effect_uv1_set = prog.texture_count > 1u ? prog.uv_set[1] : 0u;
+        *plan = e;
+        return true;
     }
     // ---- 纹理级：只接受 stage 0；其余级必须 DISABLE；不允许 stage 1.. 的纹理 ----
     for (std::uint32_t s = 1; s < kMaxTextureStages; ++s) {
@@ -4317,7 +4489,11 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
     };
     static thread_local std::vector<GpuRasterVertex> gpu_vertices;
     static thread_local std::vector<SavedTri> saved_tris;
+    // ★ effect draw（P2）：第二套纹理坐标（FVF 的 TEXCOORD1）。与 `gpu_vertices` 同序、同生命周期
+    //   ⇒ 后端在入队那一刻拷走（`rasterQueueEffect` 的 `uv1` 参数）。
+    static thread_local std::vector<float> gpu_uv1;
     gpu_vertices.clear();
+    gpu_uv1.clear();
     saved_tris.clear();
     bool gpu_invw_ok = true;
     g_gpu_alpha_agg = AlphaAgg{};
@@ -4377,6 +4553,11 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
             g.u = static_cast<float>(v.u[gpu_tex_coord]);
             g.v = static_cast<float>(v.v[gpu_tex_coord]);
             gpu_vertices.push_back(g);
+            if (plan.effect) {
+                const std::uint32_t uv1 = plan.effect_uv1_set < kMaxTexCoords ? plan.effect_uv1_set : 1u;
+                gpu_uv1.push_back(static_cast<float>(v.u[uv1]));
+                gpu_uv1.push_back(static_cast<float>(v.v[uv1]));
+            }
         };
         add(a);
         add(b);
@@ -4584,7 +4765,12 @@ bool submitPrimitives(X86& cpu, std::uint32_t pe, std::uint32_t prim, const std:
             gpuRasterSetBatchTag(gpu_batch_tag);
             // ★ 合批：**只入队**（End/Present/Clear 才 flush）。⛔ 不再有"诊断模式立刻 flush"的分支
             //   （`LIFT_GPU_VERIFY` 的 CPU oracle 已删，见 `REQ-01M7A74YG08R65NJBFXF7DEJDK`）。
-            if (plan.textured) {
+            if (plan.effect) {
+                // ★ effect draw：每 draw 一个 shader + 常量表 + 最多 2 张纹理（`uv1` 是第二套坐标）。
+                //   准入时已确认后端实现 `GpuEffectRaster`（否则那一批在 `gpuEligible` 就拒了）。
+                ok = gpuQueueEffectDraw(gpu, gpu_vertices.data(), gpu_vertices.size(), gpu_uv1.data(),
+                                        plan.effect_draw, plan.state, &gerr);
+            } else if (plan.textured) {
                 ok = gpu->rasterQueue(gpu_vertices.data(), gpu_vertices.size(), &plan.texture, plan.state, &gerr);
             } else {
                 ok = gpu->rasterQueue(gpu_vertices.data(), gpu_vertices.size(), nullptr, plan.state, &gerr);

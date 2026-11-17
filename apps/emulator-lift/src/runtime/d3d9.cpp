@@ -511,18 +511,9 @@ void noteEffectDrawDestroyed(std::uint32_t state) {
     if (state == 0 || g_effect_scope.state == state) g_effect_scope = EffectDrawScope{};
 }
 
-bool effectDrawNotExecuted(std::string* note) {
-    if (!g_effect_scope.active || !g_effect_scope.in_pass) return false;
-    if (note != nullptr) {
-        char buf[256];
-        std::snprintf(buf, sizeof(buf),
-                     "effect 的 shader 尚未实现执行（资源 id=%u technique=\"%s\" pass=%u；"
-                     "P1 只记状态 ⇒ 整批拒绝，⛔ 不当作固定功能画）",
-                      g_effect_scope.resource_id, g_effect_scope.technique.c_str(),
-                      g_effect_scope.pass_index);
-        *note = buf;
-    }
-    return true;
+void noteEffectDrawProgram(const EffectDrawProgram& program) {
+    if (!g_effect_scope.active) return;
+    g_effect_scope.program = program;
 }
 
 // ---------------------------------------------------------------------------------------

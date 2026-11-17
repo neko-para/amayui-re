@@ -313,29 +313,63 @@ struct PixelShaderVersionOverride {
 const PixelShaderVersionOverride& pixelShaderVersionOverride();
 
 // =====================================================================================
-// effect draw 作用域（GPU 路线 **P1 的临时口径** —— P2 真执行 shader 后**删掉这条判据**）
+// effect draw 作用域（GPU 路线 P2：**pass 的程序真的执行**）
 //
 // ★ 事实：引擎会在 `ID3DXEffect::Begin` → `BeginPass` → `CommitChanges` → `DrawPrimitive`
-//   → `EndPass` → `End` 之间提交 draw（S0 §3.2/§3.3；本次 E2E 实测 718 个循环）。这些批**本该由
-//   effect 的 shader 画**，而 P1 **只记状态、不执行 shader**。
-// ★ 为什么必须整批拒绝（⛔ 不许"当作固定功能画"）：那样这条 draw 会被 stage0 的固定功能管线
-//   **接受**并写出错误像素，而账本上**一个具名位都没有** —— 正是本仓最贵的"画面错但没人知道"。
-//   ⇒ `gpuEligible` 的**第一条**判据：`effectDrawNotExecuted()` 成立 ⇒ 整批拒绝 + 具名位
-//   （`kUnEffectShaderNotExecuted = 44`，见 `d3d9_pipeline.cpp`）+ 每批一条 Warn。
-// ★ 为什么记录放在这一层：D3D9 的 Draw 只看得到设备状态，看不到"guest 正在某个 effect 的 pass 里"
-//   （那是 D3DX 的宿主状态）⇒ 由 `shims/d3dx9_effect.cpp` 在 Begin/BeginPass/EndPass/End/销毁的
-//   **唯一边界**上报，这里只存值。
+//   → `EndPass` → `End` 之间提交 draw（S0 §3.2/§3.3；E2E 实测 718 个循环/120 s）。这些批**由
+//   effect 的 pass 程序画**：`gpuEligible` 把它们交给 GPU 的 **effect 管线**（每 draw 一个 shader
+//   + 常量表 + 最多 2 张纹理，见 `runtime/d3d9_effect_gpu.h`），⛔ 不再按固定功能的 stage 状态画。
+// ★ 为什么作用域记在**这一层**：D3D9 的 Draw 只看得到设备状态，看不到"guest 正在某个 effect 的
+//   pass 里"（那是 D3DX 的宿主状态）⇒ 由 `shims/d3dx9_effect.cpp` 在 Begin/BeginPass/CommitChanges/
+//   EndPass/End/销毁的**唯一边界**上报，这里只存值。**程序解析也在那一层**（它读得到 FX 文本），
+//   这里只存一份"这一批该怎么画"的快照。
+// ★ P2 的实现集 = **Fade（`ps_2_0` 201 / `ps_1_0` 200）**。不在实现集里的程序（203 的
+//   SlideBlur/ZoomBlur、202 的 Snow）⇒ `program.implemented == false` + `program.reason`，
+//   调用方**具名拒绝该批**（bit 44），⛔ 不静默降级成固定功能、⛔ 也不静默接受。
 // ★ 纯宿主、无锁（单线程解释器；与 `g_unsupported_mirror` 同口径）；⛔ 不写 guest 内存。
 // =====================================================================================
+// FX 文本里已实现的 shader 程序（与 `runtime/d3d9_effect_gpu.h` 的 `GpuEffectProgram` 一一对应；
+// ★ 这里是跨层的**中性名字**：D3D9 层不认识后端枚举，后端也不认识 FX 资源 —— 两边只认这个数）。
+enum class EffectProgram : std::uint32_t {
+    None = 0,
+    FadePs20 = 1,  // 资源 201 `technique Fade` / `compile ps_2_0`（alpha 归一化）
+    FadePs10 = 2,  // 资源 200 同一 technique / `compile ps_1_0`（逐通道直接 lerp）
+};
+
+constexpr std::uint32_t kEffectMaxConstants = 8;  // 与后端 uniform 容量同源
+constexpr std::uint32_t kEffectMaxTextures = 2;   // Fade 的 Tex0/Tex1
+
+// 这一批 effect draw 的**画法快照**（由 effect shim 在 Begin/BeginPass/CommitChanges 刷新）。
+struct EffectDrawProgram {
+    bool implemented = false;  // 本 pass 的程序在实现集里（⇒ 走后端 effect 管线）
+    EffectProgram program = EffectProgram::None;
+    // 常量：按 FX 源文本的**声明顺序**（`float Alpha;` ⇒ [0]）；没 SetFloat 过 ⇒ 0。
+    std::uint32_t constant_count = 0;
+    float constants[kEffectMaxConstants] = {};
+    // 纹理：`SetTexture` 记下的**guest 纹理对象 EA**（0 = 没有绑）+ 它采哪一套 UV。
+    std::uint32_t texture_count = 0;
+    std::uint32_t textures[kEffectMaxTextures] = {};
+    std::uint32_t uv_set[kEffectMaxTextures] = {};
+    // FX 文本里 `sampler_state { … }` 的**采样器状态**（值是 D3D9 枚举原值 ⇒ 与 `d3d9_pipeline.h`
+    // 的 `kTexf*` / `kAddress*` 同源；缺省 = D3D9 的缺省 WRAP/WRAP/POINT/POINT/NONE）。
+    std::uint32_t address_u[kEffectMaxTextures] = {1u, 1u};
+    std::uint32_t address_v[kEffectMaxTextures] = {1u, 1u};
+    std::uint32_t mag_filter[kEffectMaxTextures] = {1u, 1u};
+    std::uint32_t min_filter[kEffectMaxTextures] = {1u, 1u};
+    std::uint32_t mip_filter[kEffectMaxTextures] = {0u, 0u};
+    std::string reason;  // implemented == false 时的**具名原因**（资源 id / technique / pass / 程序）
+};
+
 struct EffectDrawScope {
     bool active = false;   // 有 effect 在 Begin..End 之间
-    bool in_pass = false;  // 且在 BeginPass..EndPass 之间（这次 Draw 本该由该 pass 画）
+    bool in_pass = false;  // 且在 BeginPass..EndPass 之间（这次 Draw 由该 pass 的程序画）
     std::uint32_t state = 0;          // 状态块 EA（销毁时用来判"是不是同一个 effect"）
     std::uint32_t effect_object = 0;  // ID3DXEffect 对象 EA（日志）
     std::uint32_t resource_id = 0;    // RT_RCDATA 的 id（日志）
     std::uint32_t pass_index = 0;     // 最近一次 BeginPass 的索引（日志）
     std::uint32_t serial = 0;         // 每次 Begin 单调 +1（批次归属 / 去重）
     std::string technique;            // 当前 technique 名（空 = 没设）
+    EffectDrawProgram program;        // 这一批该怎么画（见上）
 };
 EffectDrawScope effectDrawScope();
 
@@ -344,15 +378,10 @@ void noteEffectDrawBegin(std::uint32_t state, std::uint32_t effect_object, std::
                          const std::string& technique);
 void noteEffectDrawTechnique(const std::string& technique);  // Begin 期间 SetTechnique
 void noteEffectDrawBeginPass(std::uint32_t pass_index);
+void noteEffectDrawProgram(const EffectDrawProgram& program);  // Begin/BeginPass/CommitChanges 刷新
 void noteEffectDrawEndPass();
 void noteEffectDrawEnd();
 void noteEffectDrawDestroyed(std::uint32_t state);
-
-// 这次 Draw 是否落在"effect 已 Begin+BeginPass、而 shader **尚未实现执行**"的作用域里。
-//   true ⇒ 调用方必须整批拒绝（`gpuEligible` 的第一条判据），`note` 是**具名原因**：
-//   `effect 的 shader 尚未实现执行（资源 id=… technique="…" pass=…）`。
-//   ⚠ 措辞是"尚未实现执行"（P1 的临时状态），⛔ 不是"不支持"。
-bool effectDrawNotExecuted(std::string* note);
 
 // ---- 适配器（虚拟显示器）----
 struct AdapterMode {

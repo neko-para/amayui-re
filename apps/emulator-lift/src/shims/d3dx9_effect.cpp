@@ -8,6 +8,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -39,6 +40,10 @@ constexpr EffectResourcePin kPins[] = {
      "Snow（vs_1_0 + ps_1_0）"},
     {kEffectIdBlurPs20, 1776, "0ec494f035f7a6678b0b8aea1ec25a3ed8b4967b6084b8e4469a3e94ec5847bd",
      "SlideBlur / ZoomBlur（ps_2_0）"},
+    // ★ 终止项（`id == 0`）：头文件早就把它写进契约（"4 条 + 终止项"），但表里一直**没有** ——
+    //   用例 `resources-pinned` 的 `pins[4].id == 0` 因此是在**越界读**（P1 时侥幸读到 0 才绿）。
+    //   P2 加了一张新的 constexpr 表之后 `.rodata` 的相邻内容变了，这条当场红 ⇒ 把契约补齐。
+    {0u, 0u, "", nullptr},
 };
 
 constexpr std::uint32_t kFxMagicValue = 0x31305846u;  // 'FX01'
@@ -199,6 +204,7 @@ const EffectResourcePin* effectResourcePins() {
 const EffectResourcePin* effectResourcePinBySha(const std::string& sha256) {
     const std::string want = toLower(sha256);
     for (const EffectResourcePin& pin : kPins) {
+        if (pin.id == 0) break;  // 终止项（⛔ 不让空 sha256 命中它）
         if (want == pin.sha256) return &pin;
     }
     return nullptr;
@@ -213,6 +219,743 @@ std::string effectSourceNote(const EffectSource& src) {
         note += buf;
     }
     return note;
+}
+
+// =======================================================================================
+// FX 源文本解析（P2）—— 4 份资源里出现过的语法子集
+// =======================================================================================
+// ★ 口径：**认识的就解析，不认识的就点名**。⛔ 没有"跳过这一行继续"的分支 —— 那会让
+//   "文本里有个我们没建模的状态"变成静默接受（本仓最贵的一类错）。
+namespace {
+
+// 去注释后的源码 + 每个字节的**行号**（诊断只认行号：`why` 里不带字节偏移）。
+struct FxText {
+    std::string code;
+    std::vector<std::uint32_t> line_of;
+};
+
+bool stripFxComments(const std::string& in, FxText* out, std::string* why) {
+    out->code.clear();
+    out->line_of.clear();
+    out->code.reserve(in.size());
+    out->line_of.reserve(in.size());
+    std::uint32_t line = 1;
+    const auto put = [&](char c) {
+        out->code.push_back(c);
+        out->line_of.push_back(line);
+    };
+    for (std::size_t i = 0; i < in.size();) {
+        const char c = in[i];
+        if (c == '\n') {
+            put('\n');
+            ++line;
+            ++i;
+            continue;
+        }
+        if (c == '/' && i + 1 < in.size() && in[i + 1] == '/') {
+            while (i < in.size() && in[i] != '\n') {
+                put(' ');
+                ++i;
+            }
+            continue;
+        }
+        if (c == '/' && i + 1 < in.size() && in[i + 1] == '*') {
+            i += 2;
+            bool closed = false;
+            while (i < in.size()) {
+                if (in[i] == '*' && i + 1 < in.size() && in[i + 1] == '/') {
+                    i += 2;
+                    closed = true;
+                    break;
+                }
+                if (in[i] == '\n') {
+                    put('\n');
+                    ++line;
+                } else {
+                    put(' ');
+                }
+                ++i;
+            }
+            if (!closed) {
+                if (why) *why = "FX 源码：/* 注释没有闭合";
+                return false;
+            }
+            continue;
+        }
+        put(c);
+        ++i;
+    }
+    return true;
+}
+
+bool fxIdentStart(char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+}
+bool fxIdentChar(char c) {
+    return fxIdentStart(c) || (c >= '0' && c <= '9');
+}
+
+struct FxScan {
+    const FxText& t;
+    std::size_t i = 0;
+
+    explicit FxScan(const FxText& text) : t(text) {}
+    bool eof() const { return i >= t.code.size(); }
+    char peek() const { return i < t.code.size() ? t.code[i] : '\0'; }
+    char peekAt(std::size_t k) const { return i + k < t.code.size() ? t.code[i + k] : '\0'; }
+    std::uint32_t line() const { return i < t.line_of.size() ? t.line_of[i] : (t.line_of.empty() ? 1u : t.line_of.back()); }
+    void skipWs() {
+        while (!eof()) {
+            const char c = peek();
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\v') {
+                ++i;
+                continue;
+            }
+            break;
+        }
+    }
+    // 当前行开头的可见片段（错误消息里带一点上下文）
+    std::string lineSnippet() const {
+        const std::uint32_t want = line();
+        std::size_t begin = i;
+        while (begin > 0 && t.line_of[begin - 1] == want) --begin;
+        std::size_t end = i;
+        while (end < t.code.size() && t.line_of[end] == want) ++end;
+        std::string s = t.code.substr(begin, end - begin);
+        while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r')) s.pop_back();
+        while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.erase(s.begin());
+        if (s.size() > 96) s = s.substr(0, 96) + "…";
+        return s;
+    }
+    bool readIdent(std::string* out) {
+        skipWs();
+        if (eof() || !fxIdentStart(peek())) return false;
+        const std::size_t begin = i;
+        while (!eof() && fxIdentChar(peek())) ++i;
+        if (out != nullptr) *out = t.code.substr(begin, i - begin);
+        return true;
+    }
+    bool acceptWord(const char* w) {
+        skipWs();
+        const std::size_t n = std::strlen(w);
+        if (t.code.compare(i, n, w) != 0) return false;
+        // 词边界
+        if (i + n < t.code.size() && fxIdentChar(t.code[i + n])) return false;
+        if (i > 0 && fxIdentChar(t.code[i - 1])) return false;
+        i += n;
+        return true;
+    }
+    bool acceptChar(char c) {
+        skipWs();
+        if (peek() != c) return false;
+        ++i;
+        return true;
+    }
+    bool expectChar(char c, std::string* why, const char* what) {
+        if (acceptChar(c)) return true;
+        if (why) {
+            *why = std::string("FX 源码第 ") + std::to_string(line()) + " 行：期待 " + std::string(1, c) +
+                   "（" + what + "），实际是「" + lineSnippet() + "」";
+        }
+        return false;
+    }
+    bool expectSemi(std::string* why, const char* what) { return expectChar(';', why, what); }
+};
+
+bool fxFail(FxScan& s, FxParseStatus* st, FxParseStatus want, std::string* why, const std::string& msg) {
+    if (why) *why = "FX 源码第 " + std::to_string(s.line()) + " 行：" + msg + "（「" + s.lineSnippet() + "」）";
+    if (st) *st = want;
+    return false;
+}
+
+// 顶层类型名：常量 / 纹理 / 函数返回类型
+bool fxTypeName(const std::string& id) {
+    static const char* const kTypes[] = {"float", "float2", "float3", "float4", "float4x4", "int", "bool",
+                                         "void", "texture", "sampler", "half", "half4", "matrix"};
+    for (const char* t : kTypes) {
+        if (id == t) return true;
+    }
+    return false;
+}
+
+bool fxIsTextureType(const std::string& id) { return id == "texture"; }
+bool fxIsSamplerType(const std::string& id) { return id == "sampler"; }
+
+// `static const <type> <name>` 的初始化式：整段跳过（到 `;` 为止，括号/花括号配对）
+bool skipInitializer(FxScan& s, FxParseStatus* st, std::string* why) {
+    int depth = 0;
+    while (!s.eof()) {
+        const char c = s.peek();
+        if (c == '(' || c == '{' || c == '[') ++depth;
+        if (c == ')' || c == '}' || c == ']') --depth;
+        if (c == ';' && depth <= 0) {
+            ++s.i;
+            return true;
+        }
+        ++s.i;
+    }
+    return fxFail(s, st, FxParseStatus::Error, why, "初始化式没有以 `;` 结束");
+}
+
+// sampler_state 里**建模**的六项（D3DSAMP_*）。别的键 ⇒ UnsupportedState（⛔ 不静默忽略）。
+bool fxSamplerKey(const std::string& key) {
+    return key == "Texture" || key == "AddressU" || key == "AddressV" || key == "MinFilter" ||
+           key == "MagFilter" || key == "MipFilter";
+}
+
+bool parseParamList(FxScan& s, std::vector<FxParam>* out, FxParseStatus* st, std::string* why) {
+    if (s.acceptChar(')')) return true;  // 空形参表
+    while (true) {
+        FxParam p;
+        // `in` / `out` / `inout` 修饰符不是类型
+        s.skipWs();
+        const std::size_t save = s.i;
+        std::string word;
+        if (!s.readIdent(&word)) return fxFail(s, st, FxParseStatus::Error, why, "形参表里期待类型名");
+        if (word == "in" || word == "out" || word == "inout") {
+            if (!s.readIdent(&word)) return fxFail(s, st, FxParseStatus::Error, why, "修饰符后面期待类型名");
+        } else {
+            s.i = save;
+            if (!s.readIdent(&word)) return fxFail(s, st, FxParseStatus::Error, why, "形参表里期待类型名");
+        }
+        p.type = word;
+        if (!s.readIdent(&p.name)) return fxFail(s, st, FxParseStatus::Error, why, "形参名缺失");
+        if (s.acceptChar(':')) {
+            // ★ `TEXCOORD0` / `COLOR0` 的数字后缀**是语义的一部分** ⇒ 必须整段读进来
+            //   （`readIdent` 的 `fxIdentChar` 允许数字，所以 `TEXCOORD0` 一次读完）。
+            if (!s.readIdent(&p.semantic)) return fxFail(s, st, FxParseStatus::Error, why, "语义名缺失");
+        }
+        out->push_back(p);
+        if (s.acceptChar(',')) continue;
+        if (s.acceptChar(')')) return true;
+        return fxFail(s, st, FxParseStatus::Error, why, "形参表里期待 `,` 或 `)`");
+    }
+}
+
+// shader 函数体：配对花括号（内容原样进 `FxShader::body`，供 tex2D 的 UV 语义读）
+bool parseShaderBody(FxScan& s, std::string* out) {
+    s.skipWs();
+    if (s.peek() != '{') return false;
+    const std::size_t begin = s.i;
+    int depth = 0;
+    while (!s.eof()) {
+        const char c = s.peek();
+        if (c == '{') ++depth;
+        if (c == '}') {
+            --depth;
+            ++s.i;
+            if (depth == 0) {
+                *out = s.t.code.substr(begin + 1, s.i - begin - 2);
+                return true;
+            }
+            continue;
+        }
+        ++s.i;
+    }
+    return false;
+}
+
+bool parseTechnique(FxScan& s, FxModule* m, FxParseStatus* st, std::string* why) {
+    FxTechnique tech;
+    if (!s.readIdent(&tech.name)) return fxFail(s, st, FxParseStatus::Error, why, "technique 名缺失");
+    if (!s.expectChar('{', why, "technique 体")) return false;
+    while (!s.acceptChar('}')) {
+        if (!s.acceptWord("pass")) {
+            return fxFail(s, st, FxParseStatus::Error, why, "technique 体里只接受 `pass <名字> { … }`");
+        }
+        FxPass pass;
+        if (!s.readIdent(&pass.name)) return fxFail(s, st, FxParseStatus::Error, why, "pass 名缺失");
+        if (!s.expectChar('{', why, "pass 体")) return false;
+        while (!s.acceptChar('}')) {
+            std::string key;
+            if (!s.readIdent(&key)) return fxFail(s, st, FxParseStatus::Error, why, "pass 体里期待一个状态名");
+            // ★ 只有两条 pass 状态被建模（4 份文本里也只出现这两条）。其余一律点名拒绝。
+            const bool is_ps = key == "PixelShader";
+            const bool is_vs = key == "VertexShader";
+            if (!is_ps && !is_vs) {
+                return fxFail(s, st, FxParseStatus::UnsupportedState, why,
+                              "pass 里的状态 `" + key + "` 尚未建模（本模块只认识 PixelShader / VertexShader）");
+            }
+            if (!s.expectChar('=', why, "状态赋值")) return false;
+            if (!s.acceptWord("compile")) {
+                return fxFail(s, st, FxParseStatus::UnsupportedState, why,
+                              key + " 不是 `compile <profile> <entry>()` 形式 ⇒ 尚未建模");
+            }
+            std::string profile;
+            if (!s.readIdent(&profile)) return fxFail(s, st, FxParseStatus::Error, why, "shader profile 缺失");
+            std::string entry;
+            if (!s.readIdent(&entry)) return fxFail(s, st, FxParseStatus::Error, why, "shader 入口名缺失");
+            if (!s.expectChar('(', why, "入口调用")) return false;
+            if (!s.expectChar(')', why, "入口调用（本线不接受实参）")) return false;
+            if (!s.expectSemi(why, "shader 赋值")) return false;
+            if (is_ps) {
+                if (pass.has_pixel_shader) {
+                    return fxFail(s, st, FxParseStatus::UnsupportedState, why,
+                                  "同一个 pass 里出现两次 PixelShader 赋值 ⇒ 后一条会覆盖前一条");
+                }
+                pass.has_pixel_shader = true;
+                pass.pixel_entry = entry;
+                pass.pixel_profile = profile;
+            } else {
+                if (pass.has_vertex_shader) {
+                    return fxFail(s, st, FxParseStatus::UnsupportedState, why,
+                                  "同一个 pass 里出现两次 VertexShader 赋值 ⇒ 后一条会覆盖前一条");
+                }
+                pass.has_vertex_shader = true;
+                pass.vertex_entry = entry;
+                pass.vertex_profile = profile;
+            }
+        }
+        tech.passes.push_back(pass);
+    }
+    m->techniques.push_back(tech);
+    return true;
+}
+
+bool parseSamplerDecl(FxScan& s, FxModule* m, FxParseStatus* st, std::string* why) {
+    FxSampler smp;
+    if (!s.readIdent(&smp.name)) return fxFail(s, st, FxParseStatus::Error, why, "sampler 名缺失");
+    if (!s.expectChar('=', why, "sampler 赋值")) return false;
+    if (!s.acceptWord("sampler_state")) {
+        return fxFail(s, st, FxParseStatus::UnsupportedState, why, "sampler 的右值不是 sampler_state");
+    }
+    if (!s.expectChar('{', why, "sampler_state 体")) return false;
+    while (!s.acceptChar('}')) {
+        std::string key;
+        if (!s.readIdent(&key)) return fxFail(s, st, FxParseStatus::Error, why, "sampler_state 里期待键名");
+        if (!fxSamplerKey(key)) {
+            return fxFail(s, st, FxParseStatus::UnsupportedState, why,
+                          "sampler_state 的键 `" + key + "` 尚未建模（只建模 Texture / AddressU / AddressV / "
+                          "MinFilter / MagFilter / MipFilter）");
+        }
+        if (!s.expectChar('=', why, "sampler_state 赋值")) return false;
+        std::string value;
+        if (s.acceptChar('<')) {
+            if (!s.readIdent(&value)) return fxFail(s, st, FxParseStatus::Error, why, "`<` 后面期待参数名");
+            if (!s.expectChar('>', why, "`<参数名>`")) return false;
+        } else if (!s.readIdent(&value)) {
+            return fxFail(s, st, FxParseStatus::Error, why, "sampler_state 的值缺失");
+        }
+        if (!s.expectSemi(why, "sampler_state 赋值")) return false;
+        if (key == "Texture") smp.texture = value;
+        else if (key == "AddressU") smp.address_u = value;
+        else if (key == "AddressV") smp.address_v = value;
+        else if (key == "MinFilter") smp.min_filter = value;
+        else if (key == "MagFilter") smp.mag_filter = value;
+        else if (key == "MipFilter") smp.mip_filter = value;
+    }
+    if (!s.expectSemi(why, "sampler 声明")) return false;
+    if (smp.texture.empty()) {
+        return fxFail(s, st, FxParseStatus::UnsupportedState, why,
+                      "sampler `" + smp.name + "` 没有 `Texture=<…>`（本线不做「未绑定采样器」）");
+    }
+    m->samplers.push_back(smp);
+    return true;
+}
+
+bool parseModuleInner(FxScan& s, FxModule* m, FxParseStatus* st, std::string* why) {
+    while (true) {
+        s.skipWs();
+        if (s.eof()) return true;
+        if (s.acceptChar(';')) continue;  // 空语句
+        if (s.acceptWord("static")) {
+            // `static const <type> <name> [ '[' n ']' ] = <初始化式> ;`
+            if (!s.acceptWord("const")) {
+                return fxFail(s, st, FxParseStatus::UnsupportedState, why, "`static` 后面只建模 `const`");
+            }
+            std::string type;
+            std::string name;
+            if (!s.readIdent(&type)) return fxFail(s, st, FxParseStatus::Error, why, "static const 的类型缺失");
+            if (!s.readIdent(&name)) return fxFail(s, st, FxParseStatus::Error, why, "static const 的名字缺失");
+            if (s.acceptChar('[')) {
+                while (!s.eof() && s.peek() != ']') ++s.i;
+                if (!s.expectChar(']', why, "数组维度")) return false;
+            }
+            s.skipWs();
+            if (!s.expectChar('=', why, "static const 初始化")) return false;
+            if (!skipInitializer(s, st, why)) return false;
+            continue;
+        }
+        if (s.acceptWord("technique")) {
+            if (!parseTechnique(s, m, st, why)) return false;
+            continue;
+        }
+        std::string type;
+        if (!s.readIdent(&type)) {
+            return fxFail(s, st, FxParseStatus::Error, why, "顶层声明里期待类型名 / technique / static");
+        }
+        if (!fxTypeName(type)) {
+            return fxFail(s, st, FxParseStatus::Error, why, "不认识的顶层类型 `" + type + "`");
+        }
+        if (fxIsSamplerType(type)) {
+            if (!parseSamplerDecl(s, m, st, why)) return false;
+            continue;
+        }
+        std::string name;
+        if (!s.readIdent(&name)) return fxFail(s, st, FxParseStatus::Error, why, "声明名缺失");
+        s.skipWs();
+        if (s.peek() == '(') {
+            // shader / 辅助函数
+            FxShader sh;
+            sh.name = name;
+            sh.return_type = type;
+            if (!s.expectChar('(', why, "函数形参表")) return false;
+            if (!parseParamList(s, &sh.params, st, why)) return false;
+            if (s.acceptChar(':')) {
+                if (!s.readIdent(&sh.return_semantic)) {
+                    return fxFail(s, st, FxParseStatus::Error, why, "返回值语义缺失");
+                }
+                while (!s.eof() && fxIdentChar(s.peek())) ++s.i;
+            }
+            if (!parseShaderBody(s, &sh.body)) {
+                return fxFail(s, st, FxParseStatus::Error, why, "函数体没有配对的花括号");
+            }
+            m->shaders.push_back(sh);
+            continue;
+        }
+        if (!s.expectSemi(why, "变量声明")) return false;
+        if (!fxIsTextureType(type)) {
+            FxConstant c;
+            c.type = type;
+            c.name = name;
+            m->constants.push_back(c);
+        } else {
+            // texture 参数：进常量表？不进 —— 它是纹理参数，由 sampler 的 `Texture=<名字>` 引用。
+            // 单独记一份"存在的纹理参数名"，好让绑定器报"SetTexture 没绑"时有名字可点。
+            FxConstant t;
+            t.type = type;
+            t.name = name;
+            m->constants.push_back(t);
+        }
+    }
+}
+
+}  // namespace
+
+FxParseStatus parseEffectSource(const std::string& text, FxModule* out, std::string* why) {
+    if (out == nullptr) {
+        if (why) *why = "FX 源码：parseEffectSource 的 out 为空";
+        return FxParseStatus::Error;
+    }
+    *out = FxModule{};
+    FxText stripped;
+    if (!stripFxComments(text, &stripped, why)) return FxParseStatus::Error;
+    FxScan scan(stripped);
+    FxParseStatus st = FxParseStatus::Ok;
+    std::string err;
+    if (!parseModuleInner(scan, out, &st, &err)) {
+        if (why) *why = err;
+        return st == FxParseStatus::Ok ? FxParseStatus::Error : st;
+    }
+    if (out->techniques.empty()) {
+        if (why) *why = "FX 源码：解析完没有任何 technique（本线不画「没有 technique 的 effect」）";
+        return FxParseStatus::Error;
+    }
+    if (why) why->clear();
+    return FxParseStatus::Ok;
+}
+
+const FxPass* fxPassAt(const FxModule& module, const std::string& technique, std::uint32_t pass) {
+    for (const FxTechnique& t : module.techniques) {
+        if (t.name != technique) continue;
+        if (pass >= t.passes.size()) return nullptr;
+        return &t.passes[pass];
+    }
+    return nullptr;
+}
+
+// ---------------------------------------------------------------------------------------
+// 模块缓存 + 程序解析
+// ---------------------------------------------------------------------------------------
+namespace {
+
+// ★ 用 `std::map`（节点稳定）：`effectModuleOf` 返回的指针会在后续解析里继续用，
+//   `std::vector` 的扩容会让它失效。
+std::map<std::string, FxModule>& fxModuleCache() {
+    static std::map<std::string, FxModule> cache;
+    return cache;
+}
+
+const FxShader* fxFindShader(const FxModule& m, const std::string& name) {
+    for (const FxShader& s : m.shaders) {
+        if (s.name == name) return &s;
+    }
+    return nullptr;
+}
+
+const FxConstant* fxFindParam(const FxModule& m, const std::string& name) {
+    for (const FxConstant& c : m.constants) {
+        if (c.name == name) return &c;
+    }
+    return nullptr;
+}
+
+// 从 body 里读 `tex2D(<sampler>, <uv 实参>)` 的第二个实参（⛔ 不硬编码 UV 映射）。
+bool fxSamplerUvArg(const FxShader& shader, const std::string& sampler, std::string* uv_param) {
+    const std::string& b = shader.body;
+    std::size_t pos = 0;
+    while ((pos = b.find("tex2D", pos)) != std::string::npos) {
+        std::size_t p = pos + 5;
+        while (p < b.size() && (b[p] == ' ' || b[p] == '\t' || b[p] == '\n' || b[p] == '\r')) ++p;
+        if (p >= b.size() || b[p] != '(') {
+            pos = p;
+            continue;
+        }
+        ++p;
+        while (p < b.size() && (b[p] == ' ' || b[p] == '\t' || b[p] == '\n' || b[p] == '\r')) ++p;
+        std::string name;
+        while (p < b.size() && fxIdentChar(b[p])) name.push_back(b[p++]);
+        while (p < b.size() && (b[p] == ' ' || b[p] == '\t' || b[p] == '\n' || b[p] == '\r')) ++p;
+        if (p >= b.size() || b[p] != ',') {
+            pos = p;
+            continue;
+        }
+        ++p;
+        while (p < b.size() && (b[p] == ' ' || b[p] == '\t' || b[p] == '\n' || b[p] == '\r')) ++p;
+        std::string uv;
+        while (p < b.size() && fxIdentChar(b[p])) uv.push_back(b[p++]);
+        if (name == sampler) {
+            if (uv_param) *uv_param = uv;
+            return !uv.empty();
+        }
+        pos = p;
+    }
+    return false;
+}
+
+// `TEXCOORDn` ⇒ n（不是这个前缀 ⇒ false）。
+bool fxSemanticIndex(const std::string& semantic, std::uint32_t* out) {
+    const std::string prefix = "TEXCOORD";
+    if (semantic.size() <= prefix.size()) return false;
+    if (semantic.compare(0, prefix.size(), prefix) != 0) return false;
+    std::uint32_t v = 0;
+    for (std::size_t i = prefix.size(); i < semantic.size(); ++i) {
+        const char c = semantic[i];
+        if (c < '0' || c > '9') return false;
+        v = v * 10u + static_cast<std::uint32_t>(c - '0');
+        if (v > 7u) return false;
+    }
+    if (out) *out = v;
+    return true;
+}
+
+// SetFloat 记录里按名字取值（没有 ⇒ false）
+bool fxFloatValue(X86& cpu, std::uint32_t state, const std::string& name, float* value) {
+    const std::uint32_t count = cpu.mem->rd32(state + kFxFloatCount);
+    const std::uint32_t table = cpu.mem->rd32(state + kFxFloatTable);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const std::uint32_t entry = table + i * kFxEntryBytes;
+        const std::uint32_t name_ea = cpu.mem->rd32(entry);
+        if (name_ea == 0) continue;
+        if (cpu.mem->readCString(name_ea) != name) continue;
+        const std::uint32_t bits = cpu.mem->rd32(entry + 4);
+        if (value != nullptr) std::memcpy(value, &bits, sizeof(float));
+        return true;
+    }
+    return false;
+}
+
+std::uint32_t fxTextureValue(X86& cpu, std::uint32_t state, const std::string& name) {
+    const std::uint32_t count = cpu.mem->rd32(state + kFxTexCount);
+    const std::uint32_t table = cpu.mem->rd32(state + kFxTexTable);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const std::uint32_t entry = table + i * kFxEntryBytes;
+        const std::uint32_t name_ea = cpu.mem->rd32(entry);
+        if (name_ea == 0) continue;
+        if (cpu.mem->readCString(name_ea) == name) return cpu.mem->rd32(entry + 4);
+    }
+    return 0;
+}
+
+constexpr EffectProgramBinding kBindings[] = {
+    // 资源 201：`technique Fade { pass P0 { PixelShader=compile ps_2_0 FadePS(); } }`
+    {kEffectIdFadePs20, "Fade", "FadePS", "ps_2_0", d3d9::EffectProgram::FadePs20},
+    // 资源 200：同一份文本、`compile ps_1_0`（逐通道直接 lerp）
+    {kEffectIdFadePs10, "Fade", "FadePS", "ps_1_0", d3d9::EffectProgram::FadePs10},
+    {0u, nullptr, nullptr, nullptr, d3d9::EffectProgram::None},
+};
+
+}  // namespace
+
+const EffectProgramBinding* effectProgramBindings() { return kBindings; }
+
+const FxModule* effectModuleForSha(const std::string& sha256, const std::string& text, std::string* why) {
+    const std::string want = toLower(sha256);
+    auto it = fxModuleCache().find(want);
+    if (it != fxModuleCache().end()) return &it->second;
+    FxModule module;
+    std::string err;
+    const FxParseStatus st = parseEffectSource(text, &module, &err);
+    if (st != FxParseStatus::Ok) {
+        if (why) *why = err;
+        return nullptr;
+    }
+    auto ins = fxModuleCache().emplace(want, std::move(module));
+    return &ins.first->second;
+}
+
+const FxModule* effectModuleOf(X86& cpu, std::uint32_t state, std::string* why) {
+    std::string state_why;
+    if (!stateOk(cpu, state, &state_why)) {
+        if (why) *why = state_why;
+        return nullptr;
+    }
+    const std::uint32_t sha_ea = cpu.mem->rd32(state + kFxSha);
+    if (sha_ea == 0) {
+        if (why) *why = "D3DX9 effect：状态块没有 sha256（创建时没记），拿不到 FX 文本";
+        return nullptr;
+    }
+    const std::string sha = toLower(cpu.mem->readCString(sha_ea));
+    auto it = fxModuleCache().find(sha);
+    if (it == fxModuleCache().end()) {
+        if (why) *why = "D3DX9 effect：sha256=" + sha + " 的 FX 文本还没解析过（创建路径必须解析）";
+        return nullptr;
+    }
+    return &it->second;
+}
+
+bool effectDrawProgram(X86& cpu, std::uint32_t state, d3d9::EffectDrawProgram* out, std::string* why) {
+    if (out == nullptr) {
+        if (why) *why = "D3DX9 effect：effectDrawProgram 的 out 为空";
+        return false;
+    }
+    *out = d3d9::EffectDrawProgram{};
+    const FxModule* module = effectModuleOf(cpu, state, why);
+    if (module == nullptr) return false;
+    const std::uint32_t resource_id = cpu.mem->rd32(state + kFxResourceId);
+    const std::uint32_t tech_ea = cpu.mem->rd32(state + kFxTech);
+    const std::string technique = tech_ea != 0 ? cpu.mem->readCString(tech_ea) : std::string();
+    const std::uint32_t pass_index = cpu.mem->rd32(state + kFxPassIndex);
+    const auto unimplemented = [out](const std::string& reason) {
+        out->implemented = false;
+        out->program = d3d9::EffectProgram::None;
+        out->constant_count = 0;
+        out->texture_count = 0;
+        out->reason = reason;
+        return true;
+    };
+    const FxPass* pass = fxPassAt(*module, technique, pass_index);
+    if (pass == nullptr) {
+        return unimplemented("资源 id=" + std::to_string(resource_id) + " technique=\"" + technique +
+                             "\" 的第 " + std::to_string(pass_index) +
+                             " 个 pass 不在 FX 文本里（technique 表与 pass 数都由文本解析得出）");
+    }
+    if (pass->has_vertex_shader) {
+        return unimplemented("pass 带 VertexShader（" + pass->vertex_profile + " " + pass->vertex_entry +
+                             "）⇒ 本线不做 GPU 顶点着色（T&L 留在 CPU，见 design-notes 的 L3-tl-01）");
+    }
+    if (!pass->has_pixel_shader) {
+        return unimplemented("pass 没有 PixelShader 赋值（本模块只建模 PixelShader / VertexShader 两条 pass 状态）");
+    }
+    const EffectProgramBinding* binding = nullptr;
+    for (const EffectProgramBinding* b = kBindings; b->resource_id != 0; ++b) {
+        if (b->resource_id != resource_id) continue;
+        if (technique != b->technique) continue;
+        if (pass->pixel_entry != b->pixel_entry) continue;
+        if (pass->pixel_profile != b->pixel_profile) continue;
+        binding = b;
+        break;
+    }
+    if (binding == nullptr) {
+        return unimplemented("shader 程序不在实现集里：资源 id=" + std::to_string(resource_id) +
+                             " technique=\"" + technique + "\" pass=" + std::to_string(pass_index) +
+                             " entry=" + pass->pixel_entry + " profile=" + pass->pixel_profile +
+                             "（P2 只实现了 Fade 的 ps_2_0 / ps_1_0）");
+    }
+    const FxShader* shader = fxFindShader(*module, pass->pixel_entry);
+    if (shader == nullptr) {
+        return unimplemented("pass 引用的 " + pass->pixel_entry + "() 在 FX 文本里没有定义");
+    }
+    // ---- 常量表：按**声明顺序**（uniform；`texture` 参数不算常量）----
+    std::uint32_t constant_count = 0;
+    for (const FxConstant& c : module->constants) {
+        if (fxIsTextureType(c.type)) continue;
+        if (constant_count >= d3d9::kEffectMaxConstants) {
+            return unimplemented("FX 文本的 uniform 常量超过后端容量 " +
+                                 std::to_string(d3d9::kEffectMaxConstants) + "（⛔ 不截断）");
+        }
+        float value = 0.0f;  // D3D 的 uniform 初值 = 0
+        fxFloatValue(cpu, state, c.name, &value);
+        out->constants[constant_count] = value;
+        ++constant_count;
+    }
+    out->constant_count = constant_count;
+    // ---- 纹理：sampler 声明顺序 → `tex2D` 的 UV 实参 → 它的 TEXCOORDn ----
+    std::uint32_t texture_count = 0;
+    for (const FxSampler& smp : module->samplers) {
+        std::string uv_arg;
+        if (!fxSamplerUvArg(*shader, smp.name, &uv_arg)) continue;  // 这个 shader 没用它
+        const FxParam* uv_param = nullptr;
+        for (const FxParam& p : shader->params) {
+            if (p.name == uv_arg) uv_param = &p;
+        }
+        if (uv_param == nullptr) {
+            return unimplemented("sampler `" + smp.name + "` 的 UV 实参 `" + uv_arg +
+                                 "` 不是 " + pass->pixel_entry + " 的形参");
+        }
+        std::uint32_t uv_set = 0;
+        if (!fxSemanticIndex(uv_param->semantic, &uv_set)) {
+            return unimplemented("形参 `" + uv_arg + "` 的语义是 \"" + uv_param->semantic +
+                                 "\"，不是 TEXCOORDn ⇒ 本线只建模纹理坐标输入");
+        }
+        if (texture_count >= d3d9::kEffectMaxTextures) {
+            return unimplemented("shader 采样的纹理超过后端容量 " +
+                                 std::to_string(d3d9::kEffectMaxTextures) + "（⛔ 不截断）");
+        }
+        const FxConstant* tex_param = fxFindParam(*module, smp.texture);
+        if (tex_param == nullptr || !fxIsTextureType(tex_param->type)) {
+            return unimplemented("sampler `" + smp.name + "` 的 `Texture=<" + smp.texture +
+                                 ">` 不是 FX 文本里的 texture 参数");
+        }
+        const std::uint32_t ea = fxTextureValue(cpu, state, smp.texture);
+        if (ea == 0) {
+            return unimplemented("shader 要采样纹理参数 \"" + smp.texture +
+                                 "\"，但 `SetTexture` 没有绑（⛔ 不猜「没有纹理时采到什么」）");
+        }
+        // 采样器状态：把 FX 文本里的名字翻成 **D3D9 枚举原值**（`d3d9_pipeline.h` 的 kTexf* / kAddress*
+        // 就是这套值）。⛔ 认不出的名字 ⇒ 具名拒绝（不猜"大概等于 LINEAR"）。
+        // ★ 大小写不敏感：4 份文本里 200/201 写 `LINEAR`、203 写 `Linear`（同一枚举的两种写法）。
+        const auto filter_value = [](const std::string& raw, std::uint32_t* out) {
+            const std::string v = toLower(raw);
+            if (v == "none") { *out = 0u; return true; }
+            if (v == "point") { *out = 1u; return true; }
+            if (v == "linear") { *out = 2u; return true; }
+            if (v == "anisotropic") { *out = 3u; return true; }
+            return false;
+        };
+        const auto address_value = [](const std::string& raw, std::uint32_t* out) {
+            const std::string v = toLower(raw);
+            if (v == "wrap") { *out = 1u; return true; }
+            if (v == "mirror") { *out = 2u; return true; }
+            if (v == "clamp") { *out = 3u; return true; }
+            return false;
+        };
+        std::uint32_t address_u = 1u, address_v = 1u, mag_filter = 1u, min_filter = 1u, mip_filter = 0u;
+        if (!address_value(smp.address_u, &address_u) || !address_value(smp.address_v, &address_v)) {
+            return unimplemented("sampler `" + smp.name + "` 的 AddressU/V（\"" + smp.address_u + "\"/\"" +
+                                 smp.address_v + "\"）不在本线建模的 WRAP/MIRROR/CLAMP 里");
+        }
+        if (!filter_value(smp.mag_filter, &mag_filter) || !filter_value(smp.min_filter, &min_filter) ||
+            !filter_value(smp.mip_filter, &mip_filter)) {
+            return unimplemented("sampler `" + smp.name + "` 的过滤（Mag=" + smp.mag_filter + " Min=" +
+                                 smp.min_filter + " Mip=" + smp.mip_filter +
+                                 "）不在本线建模的 NONE/POINT/LINEAR/ANISOTROPIC 里");
+        }
+        out->textures[texture_count] = ea;
+        out->uv_set[texture_count] = uv_set;
+        out->address_u[texture_count] = address_u;
+        out->address_v[texture_count] = address_v;
+        out->mag_filter[texture_count] = mag_filter;
+        out->min_filter[texture_count] = min_filter;
+        out->mip_filter[texture_count] = mip_filter;
+        ++texture_count;
+    }
+    out->texture_count = texture_count;
+    out->program = binding->program;
+    out->implemented = true;
+    out->reason.clear();
+    if (why) why->clear();
+    return true;
 }
 
 namespace {
@@ -311,6 +1054,16 @@ std::uint32_t createEffectState(X86& cpu, std::uint32_t device_object, const Eff
     if (cpu.mem == nullptr || cpu.heap == nullptr || !cpu.heap->ready()) {
         if (why) *why = "D3DX9 effect：需要 guest 内存 + 就绪的 guest 堆（状态块放在 guest 堆上）";
         return 0;
+    }
+    // ★ P2：创建时就**解析** FX 文本（唯一的解析时机）。解析失败 / 出现没建模的状态 ⇒ 这里就失败
+    //   ⇒ 调用方响亮停（⛔ 不建一个"看起来成功"的对象、⛔ 不留到 Begin 才炸）。
+    {
+        const std::string text(reinterpret_cast<const char*>(src.bytes.data()), src.bytes.size());
+        std::string parse_why;
+        if (effectModuleForSha(src.sha256, text, &parse_why) == nullptr) {
+            if (why) *why = "FX 文本解析失败：" + parse_why;
+            return 0;
+        }
     }
     const std::uint32_t state = cpu.heap->alloc(kFxBytes, /*zero=*/true);
     if (state == 0) {
@@ -557,10 +1310,18 @@ std::uint32_t effectBegin(X86& cpu, std::uint32_t state, std::uint32_t passes_ea
     if (cpu.mem->rd32(state + kFxActive) != 0) {
         fxWarn("ID3DXEffect::Begin", "上一次 Begin 还没 End ⇒ 仍然推进（只记状态）");
     }
-    // ★ 本段不解析 FX 文本：按 S0 已读到的 4 份资源文本（每个 technique 恰好一个 `pass P0`）
-    //   报 1 个 pass。⛔ 不宣称这是解析结果；P2 才真的解析。理由：引擎的 pass 循环必须至少跑一次，
-    //   否则 BeginPass/CommitChanges/EndPass 与那条 draw 根本不会发生（P1 的观测面就空了）。
-    constexpr std::uint32_t kPassesReported = 1u;
+    // ★ P2：`*pPasses` = **FX 文本解析出来的** pass 数（P1 的常量 1 已退役）。
+    //   technique 没设 / 名字不在文本里 ⇒ 0 个 pass（真机同样不会跑 pass 循环）⇒ 之后任何"在这段
+    //   作用域里提交的 draw"都会因 `effectDrawProgram` 的具名原因被拒（bit 44）—— ⛔ 没有静默接受。
+    const FxModule* module = effectModuleOf(cpu, state, nullptr);
+    std::uint32_t kPassesReported = 0u;
+    const std::uint32_t tech_ea = cpu.mem->rd32(state + kFxTech);
+    if (module != nullptr && tech_ea != 0) {
+        const std::string technique = cpu.mem->readCString(tech_ea);
+        for (const FxTechnique& t : module->techniques) {
+            if (t.name == technique) kPassesReported = static_cast<std::uint32_t>(t.passes.size());
+        }
+    }
     cpu.mem->wr32(state + kFxPassesReported, kPassesReported);
     if (passes_ea != 0) {
         if (!cpu.mem->committed(passes_ea, 4)) {
@@ -582,11 +1343,9 @@ std::uint32_t effectBeginPass(X86& cpu, std::uint32_t state, std::uint32_t index
     if (cpu.mem->rd32(state + kFxActive) == 0) {
         fxWarn("ID3DXEffect::BeginPass", "不在 Begin..End 之间（仍推进状态）");
     }
-    if (index != 0) {
-        // 本段只报 1 个 pass（见 begin 的注释）⇒ 其它索引是**没被记录的语义**，别静默接受。
-        fxWarn("ID3DXEffect::BeginPass", "index=%u 超出本段记录的唯一 pass（0）⇒ 记账但不改像素",
-               index);
-    }
+    // ★ index 越界的判定不在这里：`effectDrawProgram` 按**文本解析出的** pass 表取 pass，
+    //   取不到 ⇒ 该批带具名原因被拒（bit 44）。这里只推进状态。
+
     cpu.mem->wr32(state + kFxInPass, 1u);
     cpu.mem->wr32(state + kFxPassIndex, index);
     bump32(cpu, state + kFxBeginPasses);
@@ -635,6 +1394,22 @@ std::uint32_t requireEffect(X86& cpu, ShimCall& call, const char* method) {
         return 0;
     }
     return state;
+}
+
+// ★ P2：把"这一批该怎么画"（程序 + 常量表 + 纹理 EA）推进 `d3d9` 的 effect 作用域。
+//   ⛔ 解析失败 / 不在实现集**不**在这里停：那要按**每一批**记账（bit 44 + 具名原因），
+//   由 `gpuEligible` 统一做（它会读 `EffectDrawScope::program.reason`）。
+void publishDrawProgram(X86& cpu, std::uint32_t state) {
+    const d3d9::EffectDrawScope scope = d3d9::effectDrawScope();
+    if (!scope.active || scope.state != state) return;
+    d3d9::EffectDrawProgram program;
+    std::string why;
+    if (!d3dx9::effectDrawProgram(cpu, state, &program, &why)) {
+        program = d3d9::EffectDrawProgram{};
+        program.implemented = false;
+        program.reason = "effect 程序解析失败（" + why + "）";
+    }
+    d3d9::noteEffectDrawProgram(program);
 }
 
 // 方法失败的统一出口：`kOutOfMemory` ⇒ 资源耗尽硬停；其余 ⇒ warn 后把 HRESULT 交回 guest。
@@ -744,6 +1519,7 @@ void shimEffectSetFloat(X86& cpu, ShimCall& call) {
     std::memcpy(&value, &bits, sizeof(value));
     std::string why;
     const std::uint32_t hr = d3dx9::effectSetFloat(cpu, state, name, value, &why);
+    if (hr == d3dx9::kOk) publishDrawProgram(cpu, state);
     call.result = hr == d3dx9::kOk ? hr : reportMethodFailure(cpu, "ID3DXEffect::SetFloat", hr, why);
 }
 
@@ -757,6 +1533,7 @@ void shimEffectSetTexture(X86& cpu, ShimCall& call) {
     const std::uint32_t texture = call.u32(2);
     std::string why;
     const std::uint32_t hr = d3dx9::effectSetTexture(cpu, state, name, texture, &why);
+    if (hr == d3dx9::kOk) publishDrawProgram(cpu, state);
     call.result = hr == d3dx9::kOk ? hr : reportMethodFailure(cpu, "ID3DXEffect::SetTexture", hr, why);
 }
 
@@ -772,7 +1549,10 @@ void shimEffectSetTechnique(X86& cpu, ShimCall& call) {
                                           : stringArg(cpu, name_ea, "ID3DXEffect::SetTechnique(+0xE8)");
     std::string why;
     const std::uint32_t hr = d3dx9::effectSetTechnique(cpu, state, name, &why);
-    if (hr == d3dx9::kOk) d3d9::noteEffectDrawTechnique(name);
+    if (hr == d3dx9::kOk) {
+        d3d9::noteEffectDrawTechnique(name);
+        publishDrawProgram(cpu, state);
+    }
     call.result = hr == d3dx9::kOk ? hr : reportMethodFailure(cpu, "ID3DXEffect::SetTechnique", hr, why);
 }
 
@@ -791,6 +1571,7 @@ void shimEffectBegin(X86& cpu, ShimCall& call) {
         std::string info_why;
         if (effectInfoOfState(cpu, state, &info, &info_why)) {
             d3d9::noteEffectDrawBegin(state, call.u32(0), info.resource_id, info.technique);
+            publishDrawProgram(cpu, state);
         }
     }
     call.result = hr == d3dx9::kOk ? hr : reportMethodFailure(cpu, "ID3DXEffect::Begin", hr, why);
@@ -804,7 +1585,10 @@ void shimEffectBeginPass(X86& cpu, ShimCall& call) {
     }
     std::string why;
     const std::uint32_t hr = d3dx9::effectBeginPass(cpu, state, call.u32(1), &why);
-    if (hr == d3dx9::kOk) d3d9::noteEffectDrawBeginPass(call.u32(1));
+    if (hr == d3dx9::kOk) {
+        d3d9::noteEffectDrawBeginPass(call.u32(1));
+        publishDrawProgram(cpu, state);
+    }
     call.result = hr == d3dx9::kOk ? hr : reportMethodFailure(cpu, "ID3DXEffect::BeginPass", hr, why);
 }
 
@@ -816,6 +1600,9 @@ void shimEffectCommitChanges(X86& cpu, ShimCall& call) {
     }
     std::string why;
     const std::uint32_t hr = d3dx9::effectCommitChanges(cpu, state, &why);
+    // ★ 引擎的次序是 BeginPass → CommitChanges → Draw（S0 §5 待核 #2）⇒ 参数/纹理在这一步再刷一次
+    //   快照，draw 时读到的就是**提交后**的那一份（⛔ 不假设 CommitChanges 在 Begin 之前）。
+    if (hr == d3dx9::kOk) publishDrawProgram(cpu, state);
     call.result = hr == d3dx9::kOk ? hr : reportMethodFailure(cpu, "ID3DXEffect::CommitChanges", hr, why);
 }
 
@@ -977,7 +1764,7 @@ void shimD3DXCreateEffectFromResourceA(X86& cpu, ShimCall& call) {
         if (out_of_memory) {
             fxResourceStop(cpu, kApi, "%s", why.c_str());
         } else {
-            fxTrap(cpu, kApi, "建 effect 状态块失败：%s", why.c_str());
+            fxTrap(cpu, kApi, "建 effect 失败：%s", why.c_str());
         }
         call.result = d3dx9::kFail;
         return;

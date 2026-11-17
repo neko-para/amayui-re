@@ -15,6 +15,16 @@
 //      EndPass/End 只推进计数并写 `*pPasses = 1`；Release 到 0 ⇒ 对象 + 状态块 + 参数表全部回收
 //      （guest 堆回到基线）；QueryInterface(IUnknown) 成功、别的 IID ⇒ E_NOINTERFACE；
 //      **没取证的槽**（+0x110 GetDevice）⇒ `comUnsupported` 的 loud trap（机器停 + 具名原因）。
+//   ★ P2（`REQ-01M7MSGRRHCA23RAX1QGDAYJ3X`）追加的判据：
+//   ⑤ `d3dx9-effect/fx-parse`：4 份 FX 文本的 technique/pass/profile/常量/sampler/形参语义逐条读出，
+//      **没建模的 pass 状态 / sampler_state 键 ⇒ `UnsupportedState` + 点名**。
+//   ⑥ `d3dx9-effect/effect-draw-recorded`：Fade（201）的 draw **不再被拒绝** ⇒ 后端收到一条 effect
+//      队列条目（程序 / 常量表 / 两张纹理 / 第二套 UV 都是文本说的那一份）；出 pass 后回到固定功能。
+//      ★ 这是 P1 用例 `d3dx9-effect/effect-draw-refused` 的**翻面**（那条"必须拒绝"的断言已删）。
+//   ⑦ `d3dx9-effect/effect-draw-unimplemented`：203 的 SlideBlur（P3 才做）**仍然具名拒绝**
+//      （bit 44 + 原因串）—— P2 的翻面没有把"没实现的"变成"静默接受"。
+//   ⑧ `d3dx9-effect/fade-pixels`（要 GPU）：两张已知纹理 + `Alpha ∈ {0,0.5,1}` 的像素 oracle
+//      （容差 ≤1 LSB/通道）+ 「两图全透明 ⇒ `ret.a==0` ⇒ 目标逐字节不变」的**不可观测**档。
 //
 // ★ 输入：`LIFT_AGE_EXE`（CMake 注入 `${AGE_SECTFIX_EXE}`；缺 ⇒ LIFT_SKIP 77）。
 //   ①② 不读语料 ⇒ 没有语料时它们**已经跑过**，`SKIP` 只表示剩下两条没跑。
@@ -28,7 +38,10 @@
 #include "check.h"
 #include "fixture.h"
 #include "runtime/d3d9.h"
+#include "runtime/d3d9_effect_gpu.h"
 #include "runtime/d3d9_pipeline.h"
+#include "runtime/gpu_raster.h"
+#include "runtime/present_sdl.h"
 #include "runtime/d3dx9_sprite.h"  // HRESULT 常量（kOk / kInvalidCall / kNoInterface / kFail）
 #include "runtime/exec.h"
 #include "runtime/image.h"
@@ -420,20 +433,238 @@ bool createDevice(lift_fixture::Fixture& f, std::uint32_t d3d9, std::uint32_t* o
     return *out != 0;
 }
 
-std::uint64_t effectRefusalCount(const std::string** reason_out) {
-    const lift::d3d9::GpuCoverage& cov = lift::d3d9::gpuCoverage();
-    std::uint64_t n = 0;
-    for (const auto& kv : cov.skipped_reasons) {
-        if (kv.first.find("尚未实现执行") != std::string::npos) {
-            n = kv.second;
-            if (reason_out != nullptr) *reason_out = &kv.first;
+
+// =======================================================================================
+// ⑥ P2 · FX 文本解析（资源 200/201/202/203；逐条对文本的读数）
+//
+// 红了意味着什么：解析器把**文本里没有的东西**读出来了（或把有的东西读丢了）——
+//   之后 technique/pass/常量/纹理的绑定就全跟着错，而且是静默的（像素只是"看着不对"）。
+// 判据：
+//   ① 4 份资源的 technique / pass / profile / entry 与源文本逐条一致；
+//   ② 常量表**按声明顺序**（201 = [Alpha]；203 = [Length,Width,Height,Angle,CenterU,CenterV]）；
+//   ③ sampler_state 的六项（Texture/AddressU/AddressV/Min/Mag/Mip）读了出来（201 = LINEAR×3）；
+//   ④ shader 形参的语义（TEXCOORD0/1）读了出来 —— 纹理用哪套 UV 就靠它；
+//   ⑤ **没建模的 pass/sampler_state 状态名 ⇒ `UnsupportedState` + 点名**（⛔ 不静默忽略）。
+// =======================================================================================
+void caseFxParse(const lift::PeImage& img) {
+    lift_test::g_current_case = "d3dx9-effect/fx-parse";
+    const auto module_of = [&img](std::uint32_t id) -> lift::d3dx9::FxModule {
+        lift::d3dx9::EffectSource src;
+        std::string why;
+        lift::d3dx9::FxModule m;
+        LIFT_CHECK(lift::d3dx9::readEffectSource(img, id, &src, &why) ==
+                   lift::d3dx9::EffectSourceStatus::Ok);
+        const std::string text(reinterpret_cast<const char*>(src.bytes.data()), src.bytes.size());
+        const lift::d3dx9::FxParseStatus st = lift::d3dx9::parseEffectSource(text, &m, &why);
+        if (st != lift::d3dx9::FxParseStatus::Ok) {
+            lift_test::failf(__FILE__, __LINE__, "id=%u 解析失败：%s", id, why.c_str());
         }
+        return m;
+    };
+
+    // ---- 201：Fade / ps_2_0 ----
+    {
+        const lift::d3dx9::FxModule m = module_of(201);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.constants.size()), 3u);  // Alpha / Tex0 / Tex1
+        LIFT_CHECK(m.constants[0].name == "Alpha" && m.constants[0].type == "float");
+        LIFT_CHECK(m.constants[1].name == "Tex0" && m.constants[1].type == "texture");
+        LIFT_CHECK(m.constants[2].name == "Tex1" && m.constants[2].type == "texture");
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.samplers.size()), 2u);
+        LIFT_CHECK(m.samplers[0].name == "Tex0Smp" && m.samplers[0].texture == "Tex0");
+        LIFT_CHECK(m.samplers[1].name == "Tex1Smp" && m.samplers[1].texture == "Tex1");
+        for (const auto& smp : m.samplers) {
+            LIFT_CHECK(smp.mag_filter == "LINEAR" && smp.min_filter == "LINEAR" && smp.mip_filter == "LINEAR");
+            LIFT_CHECK(smp.address_u == "Wrap" && smp.address_v == "Wrap");  // 文本没写 ⇒ D3D9 缺省
+        }
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.shaders.size()), 1u);
+        const auto& sh = m.shaders[0];
+        LIFT_CHECK(sh.name == "FadePS" && sh.return_semantic == "COLOR");
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(sh.params.size()), 3u);
+        LIFT_CHECK(sh.params[0].name == "Col" && sh.params[0].semantic == "COLOR0");
+        LIFT_CHECK(sh.params[1].name == "Tex0UV" && sh.params[1].semantic == "TEXCOORD0");
+        LIFT_CHECK(sh.params[2].name == "Tex1UV" && sh.params[2].semantic == "TEXCOORD1");
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.techniques.size()), 1u);
+        LIFT_CHECK(m.techniques[0].name == "Fade");
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.techniques[0].passes.size()), 1u);
+        const auto& pass = m.techniques[0].passes[0];
+        LIFT_CHECK(pass.name == "P0");
+        LIFT_CHECK(pass.has_pixel_shader && !pass.has_vertex_shader);
+        LIFT_CHECK(pass.pixel_entry == "FadePS" && pass.pixel_profile == "ps_2_0");
+        LIFT_CHECK(lift::d3dx9::fxPassAt(m, "Fade", 0u) != nullptr);
+        LIFT_CHECK(lift::d3dx9::fxPassAt(m, "Fade", 1u) == nullptr);
+        LIFT_CHECK(lift::d3dx9::fxPassAt(m, "ZoomBlur", 0u) == nullptr);
+        std::printf("201: constants=%zu samplers=%zu shaders=%zu techniques=%zu（Fade/ps_2_0）\n",
+                    m.constants.size(), m.samplers.size(), m.shaders.size(), m.techniques.size());
     }
-    return n;
+    // ---- 200：同一个 Fade，ps_1_0 ----
+    {
+        const lift::d3dx9::FxModule m = module_of(200);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.techniques.size()), 1u);
+        LIFT_CHECK(m.techniques[0].passes[0].pixel_profile == "ps_1_0");
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.constants.size()), 3u);
+    }
+    // ---- 202：Snow（vs_1_0 + ps_1_0）----
+    {
+        const lift::d3dx9::FxModule m = module_of(202);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.constants.size()), 3u);  // Proj / Color / Tex
+        LIFT_CHECK(m.constants[0].name == "Proj" && m.constants[0].type == "float4x4");
+        LIFT_CHECK(m.constants[1].name == "Color" && m.constants[1].type == "float4");
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.shaders.size()), 2u);
+        LIFT_CHECK(m.shaders[0].name == "SnowVS" && m.shaders[1].name == "SnowPS");
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.techniques.size()), 1u);
+        const auto& pass = m.techniques[0].passes[0];
+        LIFT_CHECK(pass.has_vertex_shader && pass.has_pixel_shader);
+        LIFT_CHECK(pass.vertex_profile == "vs_1_0" && pass.pixel_profile == "ps_1_0");
+    }
+    // ---- 203：SlideBlur / ZoomBlur（两个 technique，各自一个 pass）----
+    {
+        const lift::d3dx9::FxModule m = module_of(203);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.constants.size()), 7u);  // 6 个 float + Tex0
+        const char* want[] = {"Length", "Width", "Height", "Angle", "CenterU", "CenterV", "Tex0"};
+        for (std::size_t i = 0; i < 7; ++i) LIFT_CHECK(m.constants[i].name == want[i]);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.samplers.size()), 1u);
+        LIFT_CHECK(m.samplers[0].name == "SrcTexSampler" && m.samplers[0].texture == "Tex0");
+        LIFT_CHECK(m.samplers[0].address_u == "Clamp" && m.samplers[0].address_v == "Clamp");
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(m.techniques.size()), 2u);
+        LIFT_CHECK(m.techniques[0].name == "SlideBlur" && m.techniques[1].name == "ZoomBlur");
+        LIFT_CHECK(m.techniques[0].passes[0].pixel_entry == "SlideBlurPS");
+        LIFT_CHECK(m.techniques[1].passes[0].pixel_entry == "ZoomBlurPS");
+        std::printf("203: constants=%zu techniques=%zu（SlideBlur/ZoomBlur）\n", m.constants.size(),
+                    m.techniques.size());
+    }
+    // ---- ⑤ 没建模的状态名 ⇒ 点名拒绝（三条：pass 状态 / sampler_state 键 / 不认识的顶层类型）----
+    {
+        const std::string with_pass_state =
+            "float Alpha;\ntechnique T { pass P0 { ZEnable = 1; PixelShader=compile ps_2_0 F(); } }\n";
+        lift::d3dx9::FxModule m;
+        std::string why;
+        LIFT_CHECK(lift::d3dx9::parseEffectSource(with_pass_state, &m, &why) ==
+                   lift::d3dx9::FxParseStatus::UnsupportedState);
+        LIFT_CHECK(why.find("ZEnable") != std::string::npos);
+        LIFT_CHECK(why.find("尚未建模") != std::string::npos);
+
+        const std::string with_sampler_key =
+            "texture Tex0;\nsampler S = sampler_state { Texture=<Tex0>; AddressW = Clamp; };\n"
+            "technique T { pass P0 { PixelShader=compile ps_2_0 F(); } }\n";
+        LIFT_CHECK(lift::d3dx9::parseEffectSource(with_sampler_key, &m, &why) ==
+                   lift::d3dx9::FxParseStatus::UnsupportedState);
+        LIFT_CHECK(why.find("AddressW") != std::string::npos);
+
+        const std::string with_unknown_type =
+            "Texture2D Tex0;\ntechnique T { pass P0 { PixelShader=compile ps_2_0 F(); } }\n";
+        LIFT_CHECK(lift::d3dx9::parseEffectSource(with_unknown_type, &m, &why) ==
+                   lift::d3dx9::FxParseStatus::Error);
+        LIFT_CHECK(why.find("Texture2D") != std::string::npos);
+        std::printf("未建模状态点名：%s\n", why.c_str());
+    }
 }
 
-void caseEffectDrawRefused(const lift::PeImage& img) {
-    lift_test::g_current_case = "d3dx9-effect/effect-draw-refused";
+// =======================================================================================
+// ⑦ P2 · effect draw **真的执行**（翻面 P1 的"必须拒绝"）
+//
+// 判据（红了意味着什么）：
+//   ① 在 `ID3DXEffect::Begin/BeginPass` 之内、technique=Fade（资源 201）时提交的 draw
+//      **不再被拒绝**：HRESULT = S_OK、`skipped_draws` 不涨、后端收到**一条 effect 队列条目**；
+//   ② 后端收到的东西**正是文本说的那一份**：program = FadePs20、常量表 = SetFloat("Alpha") 的值、
+//      两张纹理 = SetTexture 记的 EA（换成像素/尺寸）、第二套 UV = 顶点的 TEXCOORD1；
+//   ③ 离开 BeginPass..EndPass 之后**回到固定功能**（同一个 FVF 的 draw 不再是 effect 档）。
+// ★ 用 Mock 后端（不碰 SDL/GPU）⇒ pure 档；像素正确性在 ⑧（要真 GPU）。
+// =======================================================================================
+class EffectMockRaster final : public lift::GpuRaster, public lift::GpuEffectRaster {
+public:
+    bool rasterActive() const override { return true; }
+    const char* rasterName() const override { return "mock-effect"; }
+    bool rasterPrepare(const lift::SurfaceFormat&, int, int, std::string*, const std::uint8_t*) override {
+        return true;
+    }
+    bool rasterSyncFromGuest(const std::uint8_t*, std::uint32_t, int, int, std::string*) override {
+        return tags.empty();
+    }
+    bool rasterSyncToGuest(std::uint8_t*, std::uint32_t, int, int, std::string* err) override {
+        return rasterFlush(err);
+    }
+    bool rasterDraw(const lift::GpuRasterVertex*, std::size_t, const lift::GpuRasterState&,
+                    std::string*) override {
+        ++plain_draws;
+        return true;
+    }
+    bool rasterDrawTextured(const lift::GpuRasterVertex*, std::size_t, const lift::GpuRasterTexture&,
+                            const lift::GpuRasterState&, std::string*) override {
+        ++plain_draws;
+        return true;
+    }
+    bool rasterQueue(const lift::GpuRasterVertex*, std::size_t, const lift::GpuRasterTexture*,
+                     const lift::GpuRasterState&, std::string*) override {
+        ++plain_queued;
+        tags.push_back(lift::gpuRasterBatchTag());
+        return true;
+    }
+    bool rasterQueueEffect(const lift::GpuRasterVertex* vertices, std::size_t count, const float* uv1,
+                           const lift::GpuEffectDraw& effect, const lift::GpuRasterState& state,
+                           std::string*) override {
+        ++effect_queued;
+        last = effect;
+        last_state = state;
+        vertex_count = count;
+        uv1_values.assign(uv1, uv1 + count * 2u);
+        tags.push_back(lift::gpuRasterBatchTag());
+        return true;
+    }
+    bool rasterFlush(std::string*) override {
+        for (std::uint64_t tag : tags) {
+            if (tag != 0) lift::gpuLedgerNoteRecordedDraw(tag);
+        }
+        tags.clear();
+        flush_count += 1;
+        return true;
+    }
+    bool rasterDirty() const override { return !tags.empty(); }
+    void rasterDiscardTarget() override {}
+    void rasterRequestDepthClear(float) override {}
+    lift::GpuEffectDraw last;
+    lift::GpuRasterState last_state;
+    std::vector<float> uv1_values;
+    std::size_t vertex_count = 0;
+    std::uint32_t effect_queued = 0;
+    std::uint32_t plain_queued = 0;
+    std::uint32_t plain_draws = 0;
+    std::uint32_t flush_count = 0;
+    std::vector<std::uint64_t> tags;
+};
+
+// 一张 32bpp 纹理（D3DXCreateTexture：w/h/1 level/usage/format/pool 0/&out）
+std::uint32_t createTexture(lift_fixture::Fixture& f, std::uint32_t proc, std::uint32_t device, std::uint32_t w,
+                            std::uint32_t h, std::uint32_t usage, std::uint32_t format, std::uint32_t* out) {
+    const std::uint32_t out_ea = f.u32data(0xDEADBEEFu);
+    const std::uint32_t hr = f.call(proc, {device, w, h, 1u, usage, format, 0u, out_ea});
+    *out = f.m.mem().rd32(out_ea);
+    return hr;
+}
+
+// 把这张纹理的 level-0 像素拷成 BGRA 行（w*4 紧密），只读
+std::vector<std::uint8_t> texturePixels(lift_fixture::Fixture& f, std::uint32_t texture, int* w, int* h) {
+    lift::d3d9::TextureInfo ti;
+    std::vector<std::uint8_t> out;
+    if (!lift::d3d9::textureInfo(f.m.cpu(), texture, &ti, nullptr)) return out;
+    lift::GuestSurface* gs = f.m.surfaces().find(ti.arena);
+    if (gs == nullptr) return out;
+    *w = static_cast<int>(gs->width);
+    *h = static_cast<int>(gs->height);
+    const std::uint8_t* px = f.m.surfaces().pixels(*gs);
+    out.assign(px, px + static_cast<std::size_t>(gs->pitch) * gs->height);
+    return out;
+}
+
+// 纹理 level 0 的 surface（IDirect3DTexture9::GetSurfaceLevel，槽 +0x48）
+std::uint32_t textureSurface(lift_fixture::Fixture& f, std::uint32_t texture) {
+    const std::uint32_t out_ea = f.u32data(0xDEADBEEFu);
+    const std::uint32_t hr = callMethod(f, texture, 0x48u, {0u, out_ea});
+    LIFT_CHECK_EQ_U32(hr, 0u);
+    return f.m.mem().rd32(out_ea);
+}
+
+void caseEffectDrawRecorded(const lift::PeImage& img) {
+    lift_test::g_current_case = "d3dx9-effect/effect-draw-recorded";
     lift_fixture::Fixture f;
     LIFT_CHECK(f.ok);
     if (!f.ok) return;
@@ -441,7 +672,153 @@ void caseEffectDrawRefused(const lift::PeImage& img) {
     f.m.cpu().image = &img;
 
     const std::uint32_t proc3d = f.use("d3d9", "Direct3DCreate9");
-    LIFT_CHECK_NE_U32(proc3d, 0u);
+    const std::uint32_t d3d9 = f.call(proc3d, {lift::d3d9::kSdkVersion});
+    LIFT_CHECK_NE_U32(d3d9, 0u);
+    if (d3d9 == 0) return;
+    std::uint32_t device = 0;
+    LIFT_CHECK(createDevice(f, d3d9, &device));
+    if (device == 0) return;
+
+    EffectMockRaster mock;
+    f.m.setGpuRaster(&mock);
+
+    // 两张纹理（内容只要是非空 32bpp；像素值在 ⑧ 的 oracle 里才是判据）
+    const std::uint32_t proc_tex = f.use("d3dx9_43", "D3DXCreateTexture");
+    std::uint32_t tex0 = 0;
+    std::uint32_t tex1 = 0;
+    LIFT_CHECK_EQ_U32(createTexture(f, proc_tex, device, 2u, 1u, 0u, lift::d3d9::kFmtA8R8G8B8, &tex0),
+                      lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(createTexture(f, proc_tex, device, 2u, 1u, 0u, lift::d3d9::kFmtA8R8G8B8, &tex1),
+                      lift::d3dx9::kOk);
+    LIFT_CHECK_NE_U32(tex0, 0u);
+    LIFT_CHECK_NE_U32(tex1, 0u);
+    if (tex0 == 0 || tex1 == 0) return;
+
+    // effect（201 = Fade ps_2_0）
+    const std::uint32_t proc_fx = f.use("d3dx9_43", "D3DXCreateEffectFromResourceA");
+    const std::uint32_t out_ea = f.u32data(0);
+    LIFT_CHECK_EQ_U32(f.call(proc_fx, {device, 0u, 201u, 0u, 0u, 0u, 0u, out_ea, 0u}), lift::d3dx9::kOk);
+    const std::uint32_t effect = f.m.mem().rd32(out_ea);
+    LIFT_CHECK_NE_U32(effect, 0u);
+    if (effect == 0) return;
+
+    const std::uint32_t s_fade = f.cstr("Fade");
+    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xE8u, {s_fade}), lift::d3dx9::kOk);
+    const std::uint32_t s_alpha = f.cstr("Alpha");
+    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x78u, {s_alpha, floatBits(0.5f)}), lift::d3dx9::kOk);
+    const std::uint32_t s_tex0 = f.cstr("Tex0");
+    const std::uint32_t s_tex1 = f.cstr("Tex1");
+    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xD0u, {s_tex0, tex0}), lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xD0u, {s_tex1, tex1}), lift::d3dx9::kOk);
+    // Begin 报**解析出来的** pass 数（Fade 文本里恰好 1 个 pass）
+    const std::uint32_t passes_ea = f.u32data(0xDEADBEEFu);
+    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xFCu, {passes_ea, 0u}), lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(passes_ea), 1u);
+    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x100u, {0u}), lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x104u, {}), lift::d3dx9::kOk);
+
+    // 作用域里上报的画法快照：程序 + 常量 + 两张纹理 + UV 集
+    {
+        const lift::d3d9::EffectDrawScope sc = lift::d3d9::effectDrawScope();
+        LIFT_CHECK(sc.active && sc.in_pass);
+        if (!sc.program.implemented) {
+            std::fprintf(stderr, "（未实现的原因）= %s\n", sc.program.reason.c_str());
+        }
+        LIFT_CHECK(sc.program.implemented);
+        LIFT_CHECK(sc.program.program == lift::d3d9::EffectProgram::FadePs20);
+        LIFT_CHECK_EQ_U32(sc.program.constant_count, 1u);
+        LIFT_CHECK(sc.program.constants[0] == 0.5f);
+        LIFT_CHECK_EQ_U32(sc.program.texture_count, 2u);
+        LIFT_CHECK_EQ_U32(sc.program.textures[0], tex0);
+        LIFT_CHECK_EQ_U32(sc.program.textures[1], tex1);
+        LIFT_CHECK_EQ_U32(sc.program.uv_set[0], 0u);
+        LIFT_CHECK_EQ_U32(sc.program.uv_set[1], 1u);
+        // 文本写 LINEAR×3 ⇒ D3D9 的 D3DTEXF_LINEAR(2)；Address 没写 ⇒ WRAP(1)
+        LIFT_CHECK_EQ_U32(sc.program.mag_filter[0], 2u);
+        LIFT_CHECK_EQ_U32(sc.program.min_filter[1], 2u);
+        LIFT_CHECK_EQ_U32(sc.program.mip_filter[0], 2u);
+        LIFT_CHECK_EQ_U32(sc.program.address_u[0], 1u);
+    }
+
+    // FVF = XYZRHW(0x004) | DIFFUSE(0x040) | TEX2(0x200) = 0x244 ⇒ 36 B/顶点
+    std::vector<std::uint8_t> vb(3u * 36u, 0);
+    const float uv0[3][2] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}};
+    const float uv1[3][2] = {{0.0f, 0.0f}, {0.5f, 0.0f}, {0.0f, 0.5f}};
+    for (std::uint32_t i = 0; i < 3u; ++i) {
+        // 三个**不共线**的顶点（共线 ⇒ 退化三角形 ⇒ 一个顶点都进不了 GPU）
+        const float pos[4] = {10.0f + 10.0f * static_cast<float>(i),
+                              (i == 2u) ? 20.0f : 10.0f, 0.5f, 1.0f};
+        std::uint8_t* base = vb.data() + i * 36u;
+        std::memcpy(base + 0u, pos, sizeof(pos));
+        const std::uint32_t color = 0xFFFFFFFFu;
+        std::memcpy(base + 16u, &color, 4);
+        std::memcpy(base + 20u, uv0[i], sizeof(uv0[i]));  // TEXCOORD0
+        std::memcpy(base + 28u, uv1[i], sizeof(uv1[i]));  // TEXCOORD1
+    }
+    const std::uint32_t vtx = f.data(vb.data(), vb.size());
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x164u, {0x0244u}), lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA4u, {}), lift::d3dx9::kOk);   // BeginScene
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x94u, {0u, 0u}), lift::d3dx9::kOk);  // SetRenderTarget(0, NULL)
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsZEnable, 0u}), lift::d3dx9::kOk);
+    // ★ 剔除：夹具的三角形绕序与 D3D9 缺省（CCW 剔除）相反 ⇒ 不关剔除就一个顶点都进不了 GPU。
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsCullMode, lift::d3d9::kCullNone}),
+                      lift::d3dx9::kOk);
+
+    const std::uint64_t skipped_before = lift::d3d9::gpuCoverage().skipped_draws;
+    const std::uint32_t hr =
+        callMethod(f, device, 0x14Cu, {lift::d3d9::kPtTriangleList, 1u, vtx, 36u});
+    // ① 不再被拒绝
+    LIFT_CHECK_EQ_U32(hr, lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::d3d9::gpuCoverage().skipped_draws),
+                      static_cast<std::int64_t>(skipped_before));
+    LIFT_CHECK_EQ_U32(mock.effect_queued, 1u);
+    LIFT_CHECK_EQ_U32(mock.plain_queued, 0u);
+    // ② 后端收到的是文本说的那一份
+    LIFT_CHECK(mock.last.program == lift::GpuEffectProgram::FadePs20);
+    LIFT_CHECK_EQ_U32(mock.last.constant_count, 1u);
+    LIFT_CHECK(mock.last.constants[0] == 0.5f);
+    LIFT_CHECK_EQ_U32(mock.last.texture_count, 2u);
+    LIFT_CHECK_EQ_U32(mock.last.textures[0].uv_set, 0u);
+    LIFT_CHECK_EQ_U32(mock.last.textures[1].uv_set, 1u);
+    LIFT_CHECK_EQ_U32(mock.last.textures[0].texture.width, 2);
+    LIFT_CHECK(mock.last.textures[0].texture.sampler.mag_filter == lift::GpuFilter::Linear);
+    LIFT_CHECK(mock.last.textures[0].texture.sampler.mipmap);  // MipFilter=LINEAR ⇒ 有 mip
+    LIFT_CHECK_EQ_U32(mock.vertex_count, 3u);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(mock.uv1_values.size()), 6u);
+    LIFT_CHECK(mock.uv1_values[0] == 0.0f && mock.uv1_values[1] == 0.0f);
+    LIFT_CHECK(mock.uv1_values[2] == 0.5f && mock.uv1_values[3] == 0.0f);  // 第二套 UV 真的传下来了
+    LIFT_CHECK(mock.uv1_values[4] == 0.0f && mock.uv1_values[5] == 0.5f);
+    std::printf("effect draw recorded：program=FadePs20 Alpha=%g textures=%u uv1=(%g,%g)\n",
+                static_cast<double>(mock.last.constants[0]), mock.last.texture_count,
+                static_cast<double>(mock.uv1_values[2]), static_cast<double>(mock.uv1_values[3]));
+
+    // ③ 出 pass 之后回到固定功能（同一个 draw 不再是 effect 档）
+    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x108u, {}), lift::d3dx9::kOk);  // EndPass
+    const std::uint32_t hr_plain =
+        callMethod(f, device, 0x14Cu, {lift::d3d9::kPtTriangleList, 1u, vtx, 36u});
+    LIFT_CHECK_EQ_U32(hr_plain, lift::d3dx9::kOk);  // 固定功能：无纹理 stage0 ⇒ 顶点色
+    LIFT_CHECK_EQ_U32(mock.effect_queued, 1u);
+    LIFT_CHECK_EQ_U32(mock.plain_queued, 1u);
+    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x10Cu, {}), lift::d3dx9::kOk);  // End
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA8u, {}), lift::d3dx9::kOk);   // EndScene
+    f.m.setGpuRaster(nullptr);
+}
+
+// =======================================================================================
+// ⑧ P2 · **没实现的 pass 程序仍然具名拒绝**（bit 44 覆盖到 P2 之外）
+//
+// 红了意味着什么：203 的 SlideBlur（P3 才做）被"静默接受"了 —— 那会按固定功能写出错误像素
+//   而账上一个位都没有（本仓最贵的一类错）。
+// 判据：HRESULT = D3DERR_INVALIDCALL ∧ `skipped_draws +1` ∧ 原因串含 id=203/SlideBlur/pass=0 ∧ bit44 置位。
+// =======================================================================================
+void caseEffectDrawUnimplemented(const lift::PeImage& img) {
+    lift_test::g_current_case = "d3dx9-effect/effect-draw-unimplemented";
+    lift_fixture::Fixture f;
+    LIFT_CHECK(f.ok);
+    if (!f.ok) return;
+    LIFT_CHECK(setupMachine(f));
+    f.m.cpu().image = &img;
+    const std::uint32_t proc3d = f.use("d3d9", "Direct3DCreate9");
     const std::uint32_t d3d9 = f.call(proc3d, {lift::d3d9::kSdkVersion});
     LIFT_CHECK_NE_U32(d3d9, 0u);
     if (d3d9 == 0) return;
@@ -449,51 +826,30 @@ void caseEffectDrawRefused(const lift::PeImage& img) {
     LIFT_CHECK(createDevice(f, d3d9, &device));
     if (device == 0) return;
     const std::uint32_t dev_state = f.m.cpu().com->userOf(device);
-    LIFT_CHECK_NE_U32(dev_state, 0u);
+    EffectMockRaster mock;
+    f.m.setGpuRaster(&mock);
 
-    // ① effect（用**真**设备 EA —— 只记状态，不校验；这里与 E2E 同形）
-    const std::uint32_t proc = f.use("d3dx9_43", "D3DXCreateEffectFromResourceA");
+    const std::uint32_t proc_fx = f.use("d3dx9_43", "D3DXCreateEffectFromResourceA");
     const std::uint32_t out_ea = f.u32data(0);
-    LIFT_CHECK_EQ_U32(f.call(proc, {device, 0u, 201u, 0u, 0u, 0u, 0u, out_ea, 0u}),
-                      lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(f.call(proc_fx, {device, 0u, 203u, 0u, 0u, 0u, 0u, out_ea, 0u}), lift::d3dx9::kOk);
     const std::uint32_t effect = f.m.mem().rd32(out_ea);
     LIFT_CHECK_NE_U32(effect, 0u);
     if (effect == 0) return;
-
-    // ② 作用域：没 Begin ⇒ 不适用；Begin 但没 BeginPass ⇒ 仍不适用；BeginPass 之后才成立
-    {
-        std::string note;
-        LIFT_CHECK(!lift::d3d9::effectDrawNotExecuted(&note));
-        LIFT_CHECK(lift::d3d9::effectDrawScope().active == false);
-    }
-    const std::uint32_t s_tech = f.cstr("ZoomBlur");
+    const std::uint32_t s_tech = f.cstr("SlideBlur");
     LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xE8u, {s_tech}), lift::d3dx9::kOk);
     const std::uint32_t passes_ea = f.u32data(0);
     LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xFCu, {passes_ea, 0u}), lift::d3dx9::kOk);
-    {
-        const lift::d3d9::EffectDrawScope sc = lift::d3d9::effectDrawScope();
-        LIFT_CHECK(sc.active);
-        LIFT_CHECK(!sc.in_pass);  // 只在 Begin 里、还没进 pass ⇒ 不算"这一批该由 shader 画"
-        std::string note;
-        LIFT_CHECK(!lift::d3d9::effectDrawNotExecuted(&note));
-    }
+    LIFT_CHECK_EQ_U32(f.m.mem().rd32(passes_ea), 1u);
     LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x100u, {0u}), lift::d3dx9::kOk);
     {
         const lift::d3d9::EffectDrawScope sc = lift::d3d9::effectDrawScope();
         LIFT_CHECK(sc.active && sc.in_pass);
-        LIFT_CHECK_EQ_U32(sc.resource_id, 201u);
-        LIFT_CHECK(sc.technique == "ZoomBlur");
-        LIFT_CHECK_EQ_U32(sc.pass_index, 0u);
+        LIFT_CHECK(!sc.program.implemented);
+        LIFT_CHECK(sc.program.reason.find("SlideBlur") != std::string::npos);
+        LIFT_CHECK(sc.program.reason.find("203") != std::string::npos);
+        LIFT_CHECK(sc.program.reason.find("不在实现集里") != std::string::npos);
+        std::printf("具名原因 = %s\n", sc.program.reason.c_str());
     }
-    std::string note;
-    LIFT_CHECK(lift::d3d9::effectDrawNotExecuted(&note));
-    LIFT_CHECK(note.find("尚未实现执行") != std::string::npos);
-    LIFT_CHECK(note.find("id=201") != std::string::npos);
-    LIFT_CHECK(note.find("ZoomBlur") != std::string::npos);
-    LIFT_CHECK(note.find("pass=0") != std::string::npos);
-    std::printf("具名原因 = %s\n", note.c_str());
-
-    // ③ 真提交一笔 draw（FVF = XYZRHW|DIFFUSE 0x0044；3 顶点 × 20 B）
     std::vector<std::uint8_t> vb(3u * 20u, 0);
     for (std::uint32_t i = 0; i < 3u; ++i) {
         const float xyzw[4] = {10.0f + 10.0f * static_cast<float>(i), 10.0f, 0.5f, 1.0f};
@@ -502,50 +858,366 @@ void caseEffectDrawRefused(const lift::PeImage& img) {
         std::memcpy(vb.data() + i * 20u + 16u, &color, 4);
     }
     const std::uint32_t vtx = f.data(vb.data(), vb.size());
-    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x164u, {0x0044u}), lift::d3d9::kOk);  // SetFVF
-    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA4u, {}), lift::d3d9::kOk);         // BeginScene
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x164u, {0x0044u}), lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA4u, {}), lift::d3dx9::kOk);
     const std::uint64_t skipped_before = lift::d3d9::gpuCoverage().skipped_draws;
-    const std::uint32_t hr =
-        callMethod(f, device, 0x14Cu, {lift::d3d9::kPtTriangleList, 1u, vtx, 20u});
-    LIFT_CHECK_EQ_U32(hr, lift::d3d9::kInvalidCall);
-    const lift::d3d9::GpuCoverage& cov = lift::d3d9::gpuCoverage();
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(cov.skipped_draws),
+    const std::uint32_t hr = callMethod(f, device, 0x14Cu, {lift::d3d9::kPtTriangleList, 1u, vtx, 20u});
+    LIFT_CHECK_EQ_U32(hr, lift::d3dx9::kInvalidCall);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::d3d9::gpuCoverage().skipped_draws),
                       static_cast<std::int64_t>(skipped_before + 1u));
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(effectRefusalCount(nullptr)), 1);
-    const std::string* reason = nullptr;
-    effectRefusalCount(&reason);
-    LIFT_CHECK(reason != nullptr);
-    if (reason != nullptr) {
-        LIFT_CHECK(reason->find("id=201") != std::string::npos);
-        LIFT_CHECK(reason->find("ZoomBlur") != std::string::npos);
-        LIFT_CHECK(reason->find("pass=0") != std::string::npos);
+    LIFT_CHECK_EQ_U32(mock.effect_queued, 0u);
+    std::string reason;
+    std::uint64_t count = 0;
+    for (const auto& kv : lift::d3d9::gpuCoverage().skipped_reasons) {
+        if (kv.first.find("不在实现集里") != std::string::npos) {
+            reason = kv.first;
+            count = kv.second;
+        }
     }
-    // ④ 记账位（bit44 = `kUnEffectShaderNotExecuted`）
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(count), 1);
+    LIFT_CHECK(reason.find("id=203") != std::string::npos);
+    LIFT_CHECK(reason.find("SlideBlur") != std::string::npos);
+    LIFT_CHECK(reason.find("pass=0") != std::string::npos);
     {
         lift::d3d9::PipelineInfo info;
         LIFT_CHECK(lift::d3d9::pipelineInfoOfDevice(f.m.cpu(), dev_state, &info, nullptr));
         constexpr std::uint32_t kEffectBit = 44u;
         LIFT_CHECK((info.unsupported[kEffectBit / 32u] & (1u << (kEffectBit % 32u))) != 0);
-        std::printf("bit%u 置位（skip 原因 = %s）\n", kEffectBit, reason ? reason->c_str() : "?");
     }
-
-    // ⑤ EndPass + End ⇒ 作用域关；同一笔 draw 不再记这条原因（拒绝是作用域相关的）
     LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x108u, {}), lift::d3dx9::kOk);
     LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x10Cu, {}), lift::d3dx9::kOk);
-    {
-        std::string n2;
-        LIFT_CHECK(!lift::d3d9::effectDrawNotExecuted(&n2));
-        LIFT_CHECK(!lift::d3d9::effectDrawScope().active);
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA8u, {}), lift::d3dx9::kOk);
+    f.m.setGpuRaster(nullptr);
+}
+
+// =======================================================================================
+// ⑨ P2 · **像素 oracle**：两张已知纹理 + `Alpha ∈ {0, 0.5, 1}`（真 GPU + RTT 读回）
+//
+// 判据（红了意味着什么）：
+//   ① 读回的像素与**C++ 参考实现**（照 ps_2_0 的源文本逐句）一致（容差 ≤ 1 LSB/通道）；
+//   ② 两张纹理**各自的 texel** 真的被采到（四张 texel 两两不同 ⇒ 用错 UV 必红）；
+//   ③ **NaN 那一档**（两图全透明 ⇒ `ret.a == 0` ⇒ `ColRate = 0/0`）：输出缓冲与**未画前逐字节相同**。
+//      ★ 这**不是**"我们定义了 NaN 语义"，而是**不可观测**：引擎设 `ALPHABLENDENABLE=1` +
+//        `SRCALPHA/INVSRCALPHA`，`ret.a == 0` ⇒ 源因子 = 0、目标因子 = 1 ⇒ 该像素对目标**没有任何
+//        贡献**（ps_2_0 的 NaN 位模式与 Metal 的 clamp 是否一致，因此在画面是**观测不到**的）。
+//        ⛔ 我们不猜 ps_2_0 的 NaN 位模式，也不在 shader 里为它加特判（那是"定义语义"）。
+//      ★ 为了让"逐字节相同"不是恒真，同一档还跑一条**控制行**：同样的 blend / 同样的路径，
+//        但纹理不透明 ⇒ 目标**必须**变化（否则说明这条 draw 压根没画）。
+//   ★ 没有 SDL_GPU 设备 / 没有显示系统 ⇒ SKIP 77（⛔ 不拿纯档夹具冒充像素判据）。
+// =======================================================================================
+namespace {
+
+struct Bgra8 {
+    std::uint8_t b = 0, g = 0, r = 0, a = 255;
+};
+
+Bgra8 pixelAtBgra(const std::vector<std::uint8_t>& px, std::uint32_t pitch, int x, int y) {
+    Bgra8 out;
+    const std::size_t off = static_cast<std::size_t>(y) * pitch + static_cast<std::size_t>(x) * 4u;
+    if (off + 3 < px.size()) {
+        out.b = px[off + 0];
+        out.g = px[off + 1];
+        out.r = px[off + 2];
+        out.a = px[off + 3];
     }
-    const std::uint32_t hr2 =
-        callMethod(f, device, 0x14Cu, {lift::d3d9::kPtTriangleList, 1u, vtx, 20u});
-    // 本夹具没有 GPU 后端 ⇒ 仍然拒，但**不是**我们这条原因（⛔ 作用域关了以后不许再记它）。
-    //   ★ `gpuCoverage` 每次 `Machine::run()` 都 reset（夹具一次 guest 调用 = 一次 run）⇒ 这里
-    //     读的是**这一笔 draw 所在 run** 的账：skipped=1（no-backend），我们的原因 = 0。
-    LIFT_CHECK_EQ_U32(hr2, lift::d3d9::kInvalidCall);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::d3d9::gpuCoverage().skipped_draws), 1);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(effectRefusalCount(nullptr)), 0);
-    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA8u, {}), lift::d3d9::kOk);  // EndScene
+    return out;
+}
+
+// ps_2_0 的参考实现（逐句照资源 201 的源文本）：
+//   ret.a = c0.a*(1-Alpha) + c1.a*Alpha
+//   ColRate = clamp(c1.a*Alpha/ret.a, 0, 1)
+//   ret.rgb = c0.rgb*(1-ColRate) + c1.rgb*ColRate
+Bgra8 referenceFade(const Bgra8& c0, const Bgra8& c1, float alpha) {
+    const double a0 = c0.a / 255.0;
+    const double a1 = c1.a / 255.0;
+    const double A = static_cast<double>(alpha);
+    const double ra = a0 * (1.0 - A) + a1 * A;
+    // ★ `ra == 0` 时**不**在这里定义 NaN 行为：这一档由"不可观测"用例覆盖（见上）。
+    double col_rate = 0.0;
+    if (ra != 0.0) {
+        col_rate = (a1 * A) / ra;
+        if (col_rate < 0.0) col_rate = 0.0;
+        if (col_rate > 1.0) col_rate = 1.0;
+    }
+    const auto ch = [&](std::uint8_t x0, std::uint8_t x1) {
+        const double v = (x0 / 255.0) * (1.0 - col_rate) + (x1 / 255.0) * col_rate;
+        double q = v * 255.0;
+        q = q < 0.0 ? 0.0 : (q > 255.0 ? 255.0 : q);
+        return static_cast<std::uint8_t>(q + 0.5);
+    };
+    Bgra8 out;
+    out.b = ch(c0.b, c1.b);
+    out.g = ch(c0.g, c1.g);
+    out.r = ch(c0.r, c1.r);
+    out.a = static_cast<std::uint8_t>((ra <= 0.0 ? 0.0 : (ra >= 1.0 ? 1.0 : ra)) * 255.0 + 0.5);
+    return out;
+}
+
+int channelDiff(std::uint8_t a, std::uint8_t b) {
+    const int d = static_cast<int>(a) - static_cast<int>(b);
+    return d < 0 ? -d : d;
+}
+
+}  // namespace
+
+int caseFadePixels(const lift::PeImage& img) {
+    lift_test::g_current_case = "d3dx9-effect/fade-pixels";
+    lift_fixture::Fixture f;
+    LIFT_CHECK(f.ok);
+    if (!f.ok) return 1;
+    LIFT_CHECK(setupMachine(f));
+    f.m.cpu().image = &img;
+
+    const std::uint32_t proc3d = f.use("d3d9", "Direct3DCreate9");
+    const std::uint32_t d3d9 = f.call(proc3d, {lift::d3d9::kSdkVersion});
+    LIFT_CHECK_NE_U32(d3d9, 0u);
+    if (d3d9 == 0) return 1;
+    std::uint32_t device = 0;
+    LIFT_CHECK(createDevice(f, d3d9, &device));
+    if (device == 0) return 1;
+
+    lift::SdlWindow win;
+    lift::SdlWindowOptions opt;
+    opt.title = "emulator-lift d3dx9 fade oracle";
+    opt.driver_list = "software";
+    opt.hidden = true;
+    opt.raster_gpu = true;
+    std::string werr;
+    if (!win.init(opt, &werr)) LIFT_SKIP(werr.c_str());
+    if (!win.rasterActive()) {
+        win.shutdown();
+        LIFT_SKIP("rasterActive == false（建不出 SDL_GPU 设备）");
+    }
+    f.m.setGpuRaster(win.gpuRaster());
+
+    const std::uint32_t proc_tex = f.use("d3dx9_43", "D3DXCreateTexture");
+    const int kW = 64;
+    const int kH = 64;
+    // 两张 2×1 纹理：左右 texel 不同 ⇒ "用错 UV 套"一定算错像素。
+    //   uv0 = 0.25（左 texel）、uv1 = 0.75（右 texel）
+    std::uint32_t tex0 = 0;
+    std::uint32_t tex1 = 0;
+    LIFT_CHECK_EQ_U32(createTexture(f, proc_tex, device, 2u, 1u, 0u, lift::d3d9::kFmtA8R8G8B8, &tex0),
+                      lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(createTexture(f, proc_tex, device, 2u, 1u, 0u, lift::d3d9::kFmtA8R8G8B8, &tex1),
+                      lift::d3dx9::kOk);
+    std::uint32_t rt = 0;
+    LIFT_CHECK_EQ_U32(createTexture(f, proc_tex, device, static_cast<std::uint32_t>(kW),
+                                    static_cast<std::uint32_t>(kH), 0x1u, lift::d3d9::kFmtA8R8G8B8, &rt),
+                      lift::d3dx9::kOk);
+    LIFT_CHECK_NE_U32(tex0, 0u);
+    LIFT_CHECK_NE_U32(tex1, 0u);
+    LIFT_CHECK_NE_U32(rt, 0u);
+    if (tex0 == 0 || tex1 == 0 || rt == 0) return 1;
+
+    // 左 texel = 红 α=128；右 texel = 绿（⛔ 与 tex1 的不同 ⇒ UV 一定要用对）
+    const Bgra8 t0_left{0, 0, 255, 128};
+    const Bgra8 t0_right{0, 255, 0, 255};
+    // tex1：左 texel = 蓝；右 texel = 黄（R=255,G=255）
+    const Bgra8 t1_left{255, 0, 0, 255};
+    const Bgra8 t1_right{0, 255, 255, 255};
+
+    // ---- effect（201 = Fade ps_2_0）+ 两张纹理 ----
+    const std::uint32_t proc_fx = f.use("d3dx9_43", "D3DXCreateEffectFromResourceA");
+    const std::uint32_t out_ea = f.u32data(0);
+    LIFT_CHECK_EQ_U32(f.call(proc_fx, {device, 0u, 201u, 0u, 0u, 0u, 0u, out_ea, 0u}), lift::d3dx9::kOk);
+    const std::uint32_t effect = f.m.mem().rd32(out_ea);
+    LIFT_CHECK_NE_U32(effect, 0u);
+    if (effect == 0) return 1;
+    const std::uint32_t s_fade = f.cstr("Fade");
+    const std::uint32_t s_alpha = f.cstr("Alpha");
+    const std::uint32_t s_tex0 = f.cstr("Tex0");
+    const std::uint32_t s_tex1 = f.cstr("Tex1");
+    LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xE8u, {s_fade}), lift::d3dx9::kOk);
+    // ★ 每一行**新建**两张纹理再绑：直接改 guest 像素**不会**推进内容版本（`TextureInfo::version`），
+    //   GPU 的上传缓存按版本走快路径 ⇒ 改了像素也看不到（第一版实现踩过：NaN 档读到的还是旧内容）。
+    const auto bind_texels = [&](Bgra8 l0, Bgra8 r0, Bgra8 l1, Bgra8 r1) -> bool {
+        std::uint32_t a = 0;
+        std::uint32_t b = 0;
+        if (createTexture(f, proc_tex, device, 2u, 1u, 0u, lift::d3d9::kFmtA8R8G8B8, &a) != lift::d3dx9::kOk) {
+            return false;
+        }
+        if (createTexture(f, proc_tex, device, 2u, 1u, 0u, lift::d3d9::kFmtA8R8G8B8, &b) != lift::d3dx9::kOk) {
+            return false;
+        }
+        const auto fill = [&f](std::uint32_t texture, Bgra8 left, Bgra8 right) {
+            lift::d3d9::TextureInfo ti;
+            if (!lift::d3d9::textureInfo(f.m.cpu(), texture, &ti, nullptr)) return false;
+            lift::GuestSurface* gs = f.m.surfaces().find(ti.arena);
+            if (gs == nullptr) return false;
+            std::uint8_t* px = f.m.surfaces().pixels(*gs);
+            const Bgra8 texels[2] = {left, right};
+            for (int x = 0; x < 2; ++x) {
+                std::uint8_t* dst = px + static_cast<std::size_t>(x) * 4u;
+                dst[0] = texels[x].b;
+                dst[1] = texels[x].g;
+                dst[2] = texels[x].r;
+                dst[3] = texels[x].a;
+            }
+            return true;
+        };
+        if (!fill(a, l0, r0) || !fill(b, l1, r1)) return false;
+        return callMethod(f, effect, 0xD0u, {s_tex0, a}) == lift::d3dx9::kOk &&
+               callMethod(f, effect, 0xD0u, {s_tex1, b}) == lift::d3dx9::kOk;
+    };
+
+    const std::uint32_t rt_surface = textureSurface(f, rt);
+    LIFT_CHECK_NE_U32(rt_surface, 0u);
+    if (rt_surface == 0) return 1;
+
+    // 全屏四边形（屏幕空间，覆盖 64×64）：uv0 = 0.25（左 texel）/ uv1 = 0.75（右 texel）
+    std::vector<std::uint8_t> vb(6u * 36u, 0);
+    const float corners[6][2] = {{0, 0}, {64, 0}, {64, 64}, {0, 0}, {64, 64}, {0, 64}};
+    for (int i = 0; i < 6; ++i) {
+        const float pos[4] = {corners[i][0], corners[i][1], 0.0f, 1.0f};
+        std::uint8_t* base = vb.data() + static_cast<std::size_t>(i) * 36u;
+        std::memcpy(base + 0u, pos, sizeof(pos));
+        const std::uint32_t color = 0xFFFFFFFFu;
+        std::memcpy(base + 16u, &color, 4);
+        const float uvs[2][2] = {{0.25f, 0.5f}, {0.75f, 0.5f}};
+        std::memcpy(base + 20u, uvs[0], sizeof(uvs[0]));  // TEXCOORD0
+        std::memcpy(base + 28u, uvs[1], sizeof(uvs[1]));  // TEXCOORD1
+    }
+    const std::uint32_t vtx = f.data(vb.data(), vb.size());
+
+    // ---- 读回：GetRenderTargetData → 离屏 surface → LockRect ----
+    // 读回：CreateOffscreenPlainSurface(+0x90, SYSTEMMEM) → GetRenderTargetData(+0x80) → LockRect(+0x34)
+    const auto readback = [&](std::vector<std::uint8_t>* out, std::uint32_t* pitch_out) {
+        const std::uint32_t offs_out = f.u32data(0xDEADBEEFu);
+        if (callMethod(f, device, 0x90u,
+                       {static_cast<std::uint32_t>(kW), static_cast<std::uint32_t>(kH),
+                        lift::d3d9::kFmtA8R8G8B8, 2u, offs_out, 0u}) != 0) {
+            return false;
+        }
+        const std::uint32_t offs = f.m.mem().rd32(offs_out);
+        if (offs == 0) return false;
+        if (callMethod(f, device, 0x80u, {rt_surface, offs}) != 0) return false;
+        const std::uint32_t lr_ea = f.zeroData(8u);
+        if (callMethod(f, offs, 0x34u, {lr_ea, 0u, 0u}) != 0) return false;
+        const std::uint32_t pitch = f.m.mem().rd32(lr_ea + 0u);
+        const std::uint32_t bits = f.m.mem().rd32(lr_ea + 4u);
+        if (bits == 0 || pitch == 0) return false;
+        out->assign(static_cast<std::size_t>(pitch) * static_cast<std::size_t>(kH), 0u);
+        f.m.mem().readBytes(bits, out->data(), out->size());
+        callMethod(f, offs, 0x38u, {});
+        *pitch_out = pitch;
+        return true;
+    };
+
+    const auto draw_fade = [&](float alpha) {
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x78u, {s_alpha, floatBits(alpha)}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0xFCu, {0u, 0u}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x100u, {0u}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x104u, {}), lift::d3dx9::kOk);
+        const std::uint32_t dhr = callMethod(f, device, 0x14Cu, {lift::d3d9::kPtTriangleList, 2u, vtx, 36u});
+        if (dhr != lift::d3dx9::kOk) {
+            for (const auto& kv : lift::d3d9::gpuCoverage().skipped_reasons) {
+                std::fprintf(stderr, "[oracle-skip] %llu × %s\n", (unsigned long long)kv.second,
+                             kv.first.c_str());
+            }
+        }
+        LIFT_CHECK_EQ_U32(dhr, lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x108u, {}), lift::d3dx9::kOk);
+        LIFT_CHECK_EQ_U32(callMethod(f, effect, 0x10Cu, {}), lift::d3dx9::kOk);
+    };
+
+    // 一批"公共状态"：不透明覆盖（blend 关）⇒ 读回的就是 shader 输出
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA4u, {}), lift::d3dx9::kOk);          // BeginScene
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x94u, {0u, rt_surface}), lift::d3dx9::kOk);  // 绑 RT
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xBCu, {f.data(std::array<std::uint32_t, 6>{0u, 0u, 64u, 64u, 0x3F800000u, 0u}.data(), 24u)}),
+                      lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x164u, {0x0244u}), lift::d3dx9::kOk);  // SetFVF(TEX2)
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsZEnable, 0u}), lift::d3dx9::kOk);
+    // ★ 剔除：夹具的三角形绕序与 D3D9 缺省（CCW 剔除）相反 ⇒ 不关剔除就一个顶点都进不了 GPU。
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsCullMode, lift::d3d9::kCullNone}),
+                      lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsAlphaBlendEnable, 0u}), lift::d3dx9::kOk);
+
+    // ---- ①② 三档 Alpha 的像素 oracle ----
+    const float alphas[3] = {0.0f, 0.5f, 1.0f};
+    int worst = -1;
+    for (int i = 0; i < 3; ++i) {
+        LIFT_CHECK(bind_texels(t0_left, t0_right, t1_left, t1_right));
+        LIFT_CHECK_EQ_U32(callMethod(f, device, 0xACu, {0u, 0u, 1u, 0xFF000000u, 0x3F800000u, 0u}),
+                          lift::d3dx9::kOk);  // Clear(TARGET)
+        draw_fade(alphas[i]);
+        std::vector<std::uint8_t> px;
+        std::uint32_t pitch = 0;
+        LIFT_CHECK(readback(&px, &pitch));
+        const Bgra8 got = pixelAtBgra(px, pitch, kW / 2, kH / 2);
+        const Bgra8 want = referenceFade(t0_left, t1_right, alphas[i]);
+        const int d = std::max({channelDiff(got.r, want.r), channelDiff(got.g, want.g),
+                                channelDiff(got.b, want.b), channelDiff(got.a, want.a)});
+        if (d > worst) worst = d;
+        if (d > 1) {
+            lift_test::failf(__FILE__, __LINE__,
+                             "Alpha=%g 像素不符：got(B=%u G=%u R=%u A=%u) want(B=%u G=%u R=%u A=%u) 误差=%d",
+                             static_cast<double>(alphas[i]), got.b, got.g, got.r, got.a, want.b, want.g,
+                             want.r, want.a, d);
+        }
+        std::printf("Alpha=%.1f：像素 B=%u G=%u R=%u A=%u（参考 B=%u G=%u R=%u A=%u，误差 %d）\n",
+                    static_cast<double>(alphas[i]), got.b, got.g, got.r, got.a, want.b, want.g, want.r,
+                    want.a, d);
+    }
+    LIFT_CHECK(worst >= 0 && worst <= 1);
+    std::printf("像素 oracle：三档最大误差 = %d LSB/通道\n", worst);
+
+    // ---- ③ NaN 档：两图全透明 ⇒ ret.a == 0 ⇒ 对目标**没有贡献**（不可观测）----
+    //   引擎的混合设置：ALPHABLENDENABLE=1 + SRCBLEND=SRCALPHA + DESTBLEND=INVSRCALPHA。
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsAlphaBlendEnable, 1u}), lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsSrcBlend, lift::d3d9::kBlendSrcAlpha}),
+                      lift::d3dx9::kOk);
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xE4u, {lift::d3d9::kRsDestBlend, lift::d3d9::kBlendInvSrcAlpha}),
+                      lift::d3dx9::kOk);
+    // ★ 控制行：同样的混合 / 同样的路径，但纹理**不透明** ⇒ 目标必须变化（否则"逐字节相同"是恒真）
+    LIFT_CHECK(bind_texels(Bgra8{10, 20, 30, 255}, Bgra8{40, 50, 60, 255}, Bgra8{70, 80, 90, 255},
+                           Bgra8{100, 110, 120, 255}));
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xACu, {0u, 0u, 1u, 0xFF112233u, 0x3F800000u, 0u}),
+                      lift::d3dx9::kOk);
+    std::vector<std::uint8_t> before;
+    std::uint32_t before_pitch = 0;
+    LIFT_CHECK(readback(&before, &before_pitch));
+    draw_fade(0.5f);
+    std::vector<std::uint8_t> after_opaque;
+    LIFT_CHECK(readback(&after_opaque, &before_pitch));
+    LIFT_CHECK(after_opaque != before);  // 控制行：真的画上了
+
+    // 现在把两张纹理换成**全透明**：ret.a == 0 ⇒ 目标必须与"未画前"逐字节相同。
+    LIFT_CHECK(bind_texels(Bgra8{10, 20, 30, 0}, Bgra8{40, 50, 60, 0}, Bgra8{70, 80, 90, 0},
+                           Bgra8{100, 110, 120, 0}));
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xACu, {0u, 0u, 1u, 0xFF112233u, 0x3F800000u, 0u}),
+                      lift::d3dx9::kOk);
+    std::vector<std::uint8_t> nan_before;
+    std::uint32_t nan_pitch = 0;
+    LIFT_CHECK(readback(&nan_before, &nan_pitch));
+    draw_fade(0.5f);
+    std::vector<std::uint8_t> nan_after;
+    LIFT_CHECK(readback(&nan_after, &nan_pitch));
+    // ★ 判据 = 逐字节相同（原因见文件头：**不可观测**，⛔ 不是我们定义了 NaN 语义）
+    bool same = nan_after.size() == nan_before.size();
+    std::size_t first_diff = 0;
+    for (std::size_t i = 0; same && i < nan_before.size(); ++i) {
+        if (nan_before[i] != nan_after[i]) {
+            same = false;
+            first_diff = i;
+        }
+    }
+    if (!same) {
+        lift_test::failf(__FILE__, __LINE__,
+                         "ret.a==0 的那一档改动了目标（第一处差异 = 字节 %zu）：引擎的 SRCALPHA/INVSRCALPHA 下"
+                         "源因子=0 ⇒ 该像素对目标没有贡献（不可观测）",
+                         first_diff);
+    }
+    LIFT_CHECK(same);
+    const Bgra8 nan_px = pixelAtBgra(nan_before, nan_pitch, kW / 2, kH / 2);
+    std::printf("NaN 档（两图全透明 + Alpha=0.5）：输出缓冲与未画前 %s（采样点 B=%u G=%u R=%u A=%u）\n",
+                same ? "逐字节相同" : "不同", nan_px.b, nan_px.g, nan_px.r, nan_px.a);
+
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0xA8u, {}), lift::d3dx9::kOk);  // EndScene
+    LIFT_CHECK_EQ_U32(callMethod(f, device, 0x94u, {0u, 0u}), lift::d3dx9::kOk);  // 解绑 RT
+    f.m.setGpuRaster(nullptr);
+    win.shutdown();
+    return 0;
 }
 
 // =======================================================================================
@@ -716,6 +1388,9 @@ int main() {
 
     caseResources(img);      // ③
     caseObjectSlots(img);    // ④
-    caseEffectDrawRefused(img);  // ⑤（P1 临时判据）
+    caseFxParse(img);        // ⑤（P2：FX 文本解析）
+    caseEffectDrawRecorded(img);       // ⑥（P2：翻面 P1 的"必须拒绝"）
+    caseEffectDrawUnimplemented(img);  // ⑦（P2：203/202 仍然具名拒绝）
+    if (caseFadePixels(img) != 0) return 1;  // ⑧（P2：像素 oracle；没有 GPU ⇒ SKIP 77）
     return finish("d3dx9-effect");
 }

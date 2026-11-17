@@ -51,6 +51,7 @@
 #include <vector>
 
 #include "runtime/gpu_raster.h"
+#include "runtime/d3d9_effect_gpu.h"  // ★ P2：effect draw 的"每 draw 一个 shader + 常量 + 2 纹理"
 #include "runtime/d3d9.h"  // 派生 mip 的尺寸 / 偏移 / box filter（唯一一份实现，见 d3d9.cpp）
 #include "runtime/guest_token.h"  // ★ M0：GPU 的阻塞型宿主等待要放令牌（见下面那条总口径）
 #include "runtime/pixel_format.h"
@@ -97,6 +98,12 @@ namespace {
 // ★ 进程级诊断计数（理由见 gpu_raster.h 的 `GpuRasterStats`）：同一时刻只有一个 SDL_GPU 后端。
 GpuRasterStats g_stats;
 
+// ★ "当前活着的 effect 后端"：`Machine::gpuRaster()` 在生产路径上给的是 `SdlWindow`（转发包装）
+//   ⇒ `dynamic_cast<GpuEffectRaster*>` 对它永远失败。同一条"只有一个后端"的口径让我们可以按
+//   **活着的那个**解析（`SdlGpuRaster::init` 登记、`shutdown` 清掉）。⛔ 只用于 `SdlWindow` 包装，
+//   别的 GpuRaster 实现不经过它（见 `gpuSupportsEffectDraw`）。
+GpuEffectRaster* g_live_effect_raster = nullptr;
+
 #if defined(_WIN32)
 const char* kShaderSource = R"(
 struct VSIn { float3 pos : TEXCOORD0; float4 color : TEXCOORD1; float2 uv : TEXCOORD2; };
@@ -124,6 +131,39 @@ float4 PSMainTexModAlphaDiff(VSOut i) : SV_Target {
 // 5: 颜色取纹理，alpha 取 diffuse
 float4 PSMainTexSelAlphaDiff(VSOut i) : SV_Target {
     float4 t = g_tex.Sample(g_samp, i.uv); float4 c = t; c.a = i.color.a; return c;
+}
+
+// =====================================================================================
+// effect draw（P2）：每 draw 一个 shader + 常量表 + 2 张纹理。⛔ 与上面 6 档固定功能置换无关。
+// ★ 顶点仍是 CPU 变换后的屏幕空间三角形（design-notes 的 L3-tl-01）⇒ 这里只有一个直通 VS，
+//   它**多带一套纹理坐标**（uv1 = FVF 的 TEXCOORD1；⛔ 不与 uv0 合并）。
+// ★ 绑定约定 = SDL_GPU 的 DXBC 规则（片元：t/s 在 space2、uniform 在 space3）。
+//   ⚠ 本文件在 mac 上只编 MSL 分支；DXBC 这一支**在 win32 上首次运行时才会被 D3DCompile 编译**
+//     （本轮的读数全部来自 Metal ⇒ DXBC 侧只有"照同一份语义写"的保证，没有运行时读数）。
+// =====================================================================================
+struct FxVSIn { float3 pos : TEXCOORD0; float4 color : TEXCOORD1; float2 uv0 : TEXCOORD2; float2 uv1 : TEXCOORD3; };
+struct FxVSOut { float4 pos : SV_Position; float4 color : TEXCOORD0; float2 uv0 : TEXCOORD1; float2 uv1 : TEXCOORD2; };
+FxVSOut FxVSMain(FxVSIn i) { FxVSOut o; o.pos = float4(i.pos, 1.0); o.color = i.color; o.uv0 = i.uv0; o.uv1 = i.uv1; return o; }
+Texture2D g_fx_tex0 : register(t0, space2);
+Texture2D g_fx_tex1 : register(t1, space2);
+SamplerState g_fx_smp0 : register(s0, space2);
+SamplerState g_fx_smp1 : register(s1, space2);
+cbuffer FxConstants : register(b0, space3) { float4 g_fx[2]; };
+// 资源 201 `technique Fade` 的 `compile ps_2_0 FadePS()`（逐句照源文本）
+float4 PSMainFade(FxVSOut i) : SV_Target {
+    float Alpha = g_fx[0].x;
+    float4 c0 = g_fx_tex0.Sample(g_fx_smp0, i.uv0);
+    float4 c1 = g_fx_tex1.Sample(g_fx_smp1, i.uv1);
+    float4 ret = float4(0.0, 0.0, 0.0, 0.0);   // 源文本：float4 ret = 0;
+    ret.a = c0.a * (1.0 - Alpha) + c1.a * Alpha;
+    float ColRate = clamp(c1.a * Alpha / ret.a, 0.0, 1.0);
+    ret.rgb = c0.rgb * (1.0 - ColRate) + c1.rgb * ColRate;
+    return ret;
+}
+// 资源 200 同一 technique 的 `compile ps_1_0 FadePS()`：逐通道直接 lerp（没有 alpha 归一化）
+float4 PSMainFadeLinear(FxVSOut i) : SV_Target {
+    float Alpha = g_fx[0].x;
+    return g_fx_tex0.Sample(g_fx_smp0, i.uv0) * (1.0 - Alpha) + g_fx_tex1.Sample(g_fx_smp1, i.uv1) * Alpha;
 }
 )";
 constexpr SDL_GPUShaderFormat kShaderFormat = SDL_GPU_SHADERFORMAT_DXBC;
@@ -213,6 +253,64 @@ fragment float4 PSMainTexSelAlphaDiff(FSIn in [[stage_in]],
     c.a = in.color.a;
     return c;
 }
+
+// =====================================================================================
+// effect draw（P2）：每 draw 一个 shader + 常量表 + 2 张纹理（与上面 6 档固定功能置换无关）。
+// ★ 顶点仍是 CPU 变换后的屏幕空间三角形 ⇒ 只有一个直通 VS；它多带一套纹理坐标（uv1）。
+// ★ 绑定约定 = SDL_GPU 的 MSL 规则：[[texture(n)]] / [[sampler(n)]] / uniform 在 [[buffer(0)]]。
+// =====================================================================================
+struct FxVSIn {
+    float3 pos [[attribute(0)]];
+    float4 color [[attribute(1)]];
+    float2 uv0 [[attribute(2)]];
+    float2 uv1 [[attribute(3)]];
+};
+struct FxVSOut {
+    float4 pos [[position]];
+    float4 color [[user(locn0)]];
+    float2 uv0 [[user(locn1)]];
+    float2 uv1 [[user(locn2)]];
+};
+vertex FxVSOut FxVSMain(FxVSIn in [[stage_in]]) {
+    FxVSOut out;
+    out.pos = float4(in.pos, 1.0);
+    out.color = in.color;
+    out.uv0 = in.uv0;
+    out.uv1 = in.uv1;
+    return out;
+}
+struct FxUniforms { float4 c[2]; };
+struct FxFSIn {
+    float4 color [[user(locn0)]];
+    float2 uv0 [[user(locn1)]];
+    float2 uv1 [[user(locn2)]];
+};
+// 资源 201 `technique Fade` 的 `compile ps_2_0 FadePS()`（逐句照源文本）
+fragment float4 PSMainFade(FxFSIn in [[stage_in]],
+                           texture2d<float> tex0 [[texture(0)]],
+                           sampler smp0 [[sampler(0)]],
+                           texture2d<float> tex1 [[texture(1)]],
+                           sampler smp1 [[sampler(1)]],
+                           constant FxUniforms& u [[buffer(0)]]) {
+    const float Alpha = u.c[0].x;
+    float4 c0 = tex0.sample(smp0, in.uv0);
+    float4 c1 = tex1.sample(smp1, in.uv1);
+    float4 ret = float4(0.0, 0.0, 0.0, 0.0);   // 源文本：float4 ret = 0;
+    ret.a = c0.a * (1.0 - Alpha) + c1.a * Alpha;
+    float ColRate = clamp(c1.a * Alpha / ret.a, 0.0, 1.0);
+    ret.rgb = c0.rgb * (1.0 - ColRate) + c1.rgb * ColRate;
+    return ret;
+}
+// 资源 200 同一 technique 的 `compile ps_1_0 FadePS()`：逐通道直接 lerp（没有 alpha 归一化）
+fragment float4 PSMainFadeLinear(FxFSIn in [[stage_in]],
+                                 texture2d<float> tex0 [[texture(0)]],
+                                 sampler smp0 [[sampler(0)]],
+                                 texture2d<float> tex1 [[texture(1)]],
+                                 sampler smp1 [[sampler(1)]],
+                                 constant FxUniforms& u [[buffer(0)]]) {
+    const float Alpha = u.c[0].x;
+    return tex0.sample(smp0, in.uv0) * (1.0 - Alpha) + tex1.sample(smp1, in.uv1) * Alpha;
+}
 )MSL";
 constexpr SDL_GPUShaderFormat kShaderFormat = SDL_GPU_SHADERFORMAT_MSL;
 constexpr const char* kShaderFormatName = "MSL";
@@ -232,6 +330,10 @@ constexpr TexEntry kTexEntries[] = {
     {"PSMainTexSelAlphaDiff", GpuTexMode::SelectColorDiffuseAlpha},
 };
 constexpr std::size_t kTexEntryCount = sizeof(kTexEntries) / sizeof(kTexEntries[0]);
+
+// effect 程序的 entry point 表（下标 = `GpuEffectProgram` 的整数值；★ 与 FX 文本的对应关系见
+// `shims/d3dx9_effect.h` 的 `EffectProgramBinding`：201 的 ps_2_0 ⇒ FadePs20、200 的 ps_1_0 ⇒ FadePs10）。
+constexpr const char* kFxEntries[2] = {"PSMainFade", "PSMainFadeLinear"};
 
 // ★ 诊断用：到目前为止入队的**带批号** draw 数（`LIFT_GPU_FF_TEX` 的 `[gpu-depth]` 用它定位
 //   `Clear(ZBUFFER)` 落在哪两批之间）。只在探针开启时被读，⛔ 不参与任何判据。
@@ -307,7 +409,7 @@ SDL_GPUColorComponentFlags sdlColorMask(std::uint8_t mask) {
     return out;
 }
 
-class SdlGpuRaster final : public GpuRaster, public GpuDirectPresenter {
+class SdlGpuRaster final : public GpuRaster, public GpuDirectPresenter, public GpuEffectRaster {
 public:
     ~SdlGpuRaster() override { shutdown(); }
 
@@ -321,6 +423,7 @@ public:
         const char* drv = SDL_GetGPUDeviceDriver(device_);
         name_ = std::string("sdl-gpu/") + (drv ? drv : "?") + "/" + kShaderFormatName;
         if (!createShaders(err)) return false;
+        g_live_effect_raster = this;  // ★ P2：effect 队列的"活着的那个后端"（见文件顶的同名注释）
         return true;
 #else
         if (err) *err = "SDL_GPU 光栅化后端：当前平台没有内置 shader 后端（Windows=DXBC / macOS=MSL）";
@@ -656,8 +759,10 @@ public:
         // ★ pipeline 在入队时解析：flush 里只剩"录命令"，把可失败点前移（失败 ⇒ 调用方回退 CPU）。
         draw.pipeline = pipelineFor(state, draw.textured, err);
         if (draw.pipeline == nullptr) return false;
-        // 顶点缓冲在入队时就长够（flush 里不再创建 GPU 缓冲）。
-        const std::uint64_t need_bytes = (static_cast<std::uint64_t>(queued_vertices_) + count) * sizeof(Vertex);
+        // 顶点缓冲在入队时就长够（flush 里不再创建 GPU 缓冲）。★ 按**字节**记账：
+        // effect draw 的顶点是 `FxVertex`（44 B），与固定功能的 `Vertex`（36 B）混在一条缓冲里。
+        const std::uint64_t need_bytes = static_cast<std::uint64_t>(queued_vertex_bytes_) +
+                                         static_cast<std::uint64_t>(count) * sizeof(Vertex);
         if (need_bytes > 0xFFFFFFFFull) {
             if (err) *err = "SDL_GPU：一批顶点的总字节数超过 4 GiB";
             return false;
@@ -678,7 +783,9 @@ public:
             if (draw.sampler == nullptr) return false;
         }
         draw.vertex_offset = static_cast<std::uint32_t>(queued_vertices_);
+        draw.vertex_byte_offset = static_cast<std::uint32_t>(queued_vertex_bytes_);
         queued_vertices_ += count;
+        queued_vertex_bytes_ += static_cast<std::size_t>(count) * sizeof(Vertex);
         // ★ 批号在**入队那一刻**取值（生产者随队列设/清）；flush 时按条目回报，⛔ 不读全局当前值。
         draw.batch_tag = gpuRasterBatchTag();
         // ★ 诊断探针（`LIFT_GPU_FF_TEX=1`）：装不装、采哪个 texel 全由纯函数判（`gpu_raster.h`）。
@@ -782,6 +889,60 @@ public:
         return true;
     }
 
+    // ★ effect draw（P2）：**每 draw 一个 shader + 常量表 + 最多 2 张纹理**。与 `rasterQueue` 同契约：
+    //   只入队、顶点/UV/纹理像素都在入队那一刻拷走、状态逐条保留。
+    bool rasterQueueEffect(const GpuRasterVertex* vertices, std::size_t count, const float* uv1,
+                           const GpuEffectDraw& effect, const GpuRasterState& state,
+                           std::string* err) override {
+        if (count == 0) return true;
+        if (target_ == nullptr || depth_ == nullptr) {
+            if (err) *err = "SDL_GPU target 未准备";
+            return false;
+        }
+        if (effect.constant_count > kGpuEffectMaxConstants) {
+            if (err) *err = "SDL_GPU：effect 常量超过 uniform 容量";
+            return false;
+        }
+        if (effect.texture_count == 0 || effect.texture_count > kGpuEffectMaxTextures) {
+            if (err) *err = "SDL_GPU：effect draw 的纹理数不在 1..2 之间";
+            return false;
+        }
+        if (uv1 == nullptr) {
+            if (err) *err = "SDL_GPU：effect draw 缺第二套 UV（TEXCOORD1）";
+            return false;
+        }
+        QueuedDraw draw;
+        draw.vertices.assign(vertices, vertices + count);
+        draw.state = state;
+        draw.textured = false;
+        draw.effect = true;
+        draw.fx = effect;
+        draw.fx_uv1.assign(uv1, uv1 + count * 2u);
+        draw.pipeline = pipelineForEffect(effect.program, state, err);
+        if (draw.pipeline == nullptr) return false;
+        const std::uint64_t need_bytes = static_cast<std::uint64_t>(queued_vertex_bytes_) +
+                                         static_cast<std::uint64_t>(count) * sizeof(FxVertex);
+        if (need_bytes > 0xFFFFFFFFull) {
+            if (err) *err = "SDL_GPU：一批 effect 顶点的字节数超过 4 GiB";
+            return false;
+        }
+        if (!ensureVertexBuffer(static_cast<Uint32>(need_bytes), err)) return false;
+        draw.vertex_byte_offset = static_cast<std::uint32_t>(queued_vertex_bytes_);
+        draw.vertex_offset = static_cast<std::uint32_t>(queued_vertices_);
+        queued_vertex_bytes_ += static_cast<std::size_t>(count) * sizeof(FxVertex);
+        queued_vertices_ += count;
+        for (std::uint32_t i = 0; i < effect.texture_count; ++i) {
+            const GpuEffectTexture& et = effect.textures[i];
+            if (!ensureTexture(et.texture, &draw.fx_texture[i], err)) return false;
+            draw.fx_sampler[i] = samplerFor(et.texture.sampler, err);
+            if (draw.fx_sampler[i] == nullptr) return false;
+        }
+        draw.fx_texture_count = effect.texture_count;
+        draw.batch_tag = gpuRasterBatchTag();
+        queue_.push_back(std::move(draw));
+        return true;
+    }
+
     // ★ 一次 flush = **一个** command buffer，内部按段 `[copy 上传][render 画]` 交替，最后只 Submit 一次。
     //   · 队列为空且没有待上传内容 ⇒ 零成本 true（⛔ 不提交空 command buffer）；
     //   · depth 只在**本次 flush 的第一个 render pass** 清（一帧一次；分段后第二段起必须 LOAD，
@@ -847,7 +1008,7 @@ public:
         }
 
         // ---- 2) 所有顶点合到**一个** transfer buffer（在第一个 copy pass 里上传）----
-        const std::size_t vertex_bytes = static_cast<std::size_t>(queued_vertices_) * sizeof(Vertex);
+        const std::size_t vertex_bytes = queued_vertex_bytes_;
         if (vertex_bytes > 0) {
             SDL_GPUTransferBufferCreateInfo ti{};
             ti.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
@@ -858,13 +1019,12 @@ public:
                 if (err) *err = std::string("SDL_CreateGPUTransferBuffer(vertices) 失败：") + SDL_GetError();
                 return false;
             }
-            auto* mapped = static_cast<Vertex*>(SDL_MapGPUTransferBuffer(device_, vtx_tb, false));
+            auto* mapped = static_cast<std::uint8_t*>(SDL_MapGPUTransferBuffer(device_, vtx_tb, false));
             if (mapped == nullptr) {
                 release_tbs();
                 if (err) *err = "SDL_MapGPUTransferBuffer(vertices) 失败";
                 return false;
             }
-            Vertex* dst = mapped;
             for (const QueuedDraw& d : queue_) {
                 // ★ 屏幕空间 → NDC 必须用**这一批的视口矩形**换算（与下面 render pass 的
                 //   `SDL_SetGPUViewport`（NDC→窗口）互逆）。⛔ 不能用 target 尺寸：
@@ -877,6 +1037,29 @@ public:
                                                           : static_cast<float>(width_);
                 const float vp_h = d.state.viewport_h > 0 ? static_cast<float>(d.state.viewport_h)
                                                           : static_cast<float>(height_);
+                if (d.effect) {
+                    auto* dst = reinterpret_cast<FxVertex*>(mapped + d.vertex_byte_offset);
+                    const bool have_uv1 = d.fx_uv1.size() == d.vertices.size() * 2u;
+                    for (std::size_t vi = 0; vi < d.vertices.size(); ++vi) {
+                        const GpuRasterVertex& v = d.vertices[vi];
+                        dst->x = (v.x - vp_x) / vp_w * 2.0f - 1.0f;
+                        dst->y = 1.0f - (v.y - vp_y) / vp_h * 2.0f;
+                        dst->z = v.z;
+                        dst->r = v.r;
+                        dst->g = v.g;
+                        dst->b = v.b;
+                        dst->a = v.a;
+                        dst->u0 = v.u;
+                        dst->v0 = v.v;
+                        // ★ 第二套 UV 缺了不猜：入队时已经查过（`fx_uv1.size()` 必须 = 2×顶点数），
+                        //   这里只是把值搬过去；缺失 ⇒ 0（不会发生，入队处拒绝）。
+                        dst->u1 = have_uv1 ? d.fx_uv1[vi * 2u] : 0.0f;
+                        dst->v1 = have_uv1 ? d.fx_uv1[vi * 2u + 1u] : 0.0f;
+                        ++dst;
+                    }
+                    continue;
+                }
+                auto* dst = reinterpret_cast<Vertex*>(mapped + d.vertex_byte_offset);
                 for (const GpuRasterVertex& v : d.vertices) {
                     dst->x = (v.x - vp_x) / vp_w * 2.0f - 1.0f;
                     dst->y = 1.0f - (v.y - vp_y) / vp_h * 2.0f;
@@ -1008,6 +1191,23 @@ public:
                 SDL_GPUBufferBinding binding{vertex_buffer_,
                                              d.vertex_offset * static_cast<Uint32>(sizeof(Vertex))};
                 SDL_BindGPUVertexBuffers(pass, 0, &binding, 1);
+                if (d.effect) {
+                    // ★ effect draw：顶点缓冲按**字节**偏移（stride = FxVertex）+ 两张纹理/采样器
+                    //   + 一次 uniform push（常量表；`SDL_PushGPU*UniformData` 的契约是"后续 draw 用
+                    //   这份数据" ⇒ 逐 draw 推是合法的，⛔ 不要每帧只推一次）。
+                    SDL_GPUBufferBinding effect_binding{vertex_buffer_, d.vertex_byte_offset};
+                    SDL_BindGPUVertexBuffers(pass, 0, &effect_binding, 1);
+                    SDL_GPUTextureSamplerBinding fx_tsb[kGpuEffectMaxTextures]{};
+                    for (std::uint32_t ti = 0; ti < d.fx_texture_count && ti < kGpuEffectMaxTextures; ++ti) {
+                        fx_tsb[ti].texture = d.fx_texture[ti];
+                        fx_tsb[ti].sampler = d.fx_sampler[ti];
+                    }
+                    SDL_BindGPUFragmentSamplers(pass, 0, fx_tsb, d.fx_texture_count);
+                    SDL_PushGPUFragmentUniformData(cmd, 0, d.fx.constants,
+                                                   static_cast<Uint32>(sizeof(float) * kGpuEffectMaxConstants));
+                    SDL_DrawGPUPrimitives(pass, static_cast<Uint32>(d.vertices.size()), 1, 0, 0);
+                    continue;
+                }
                 if (d.textured) {
                     SDL_GPUTextureSamplerBinding tsb{d.texture, d.sampler};
                     SDL_BindGPUFragmentSamplers(pass, 0, &tsb, 1);
@@ -1094,6 +1294,7 @@ public:
         staging_used_ = 0;  // 已全部落进 transfer buffer ⇒ arena 还给下一帧（容量留着）
         queue_.clear();
         queued_vertices_ = 0;
+        queued_vertex_bytes_ = 0;
         // ★ 只有本次 flush **真的录过 render pass** 才算"深度已经清过"：只录 copy pass 的 flush
         //   （上传批次没配成 draw 的失败边）不许把 pending 的深度清吃掉。
         if (encoded_render_pass) need_depth_clear_ = false;
@@ -1138,6 +1339,7 @@ public:
         // ★ 设备销毁前调用：队列与镜像都指向即将释放的 guest 像素 ⇒ 丢掉，⛔ 不回读。
         queue_.clear();
         queued_vertices_ = 0;
+        queued_vertex_bytes_ = 0;
         segments_.assign(1, Segment{});
         staging_used_ = 0;
         staging_.clear();
@@ -1788,6 +1990,16 @@ private:
     };
     static_assert(sizeof(Vertex) == 36, "vertex stride");
 
+    // ★ effect draw 的顶点：与上面同一份屏幕空间数据 + **第二套纹理坐标**（FVF 的 TEXCOORD1）。
+    //   两条流共用一个 GPU 顶点缓冲（按字节偏移排），但 pipeline 的 stride / 属性表各自声明。
+    struct FxVertex {
+        float x, y, z;
+        float r, g, b, a;
+        float u0, v0;
+        float u1, v1;
+    };
+    static_assert(sizeof(FxVertex) == 44, "effect vertex stride");
+
     struct TextureEntry {
         SDL_GPUTexture* texture = nullptr;
         // 整幅内容哈希（0 = 不可用）。★ 只在"上次上传的是整幅"或"算过整幅哈希"时有效：
@@ -1849,6 +2061,24 @@ private:
         // 这条 draw 采样到的 texel 区域（`gpuDrawSampleRect`；textured 且非空）——切段判据用它。
         GpuTexelRect sample_rect;
         std::uint32_t vertex_offset = 0;  // 在 flush 的顶点缓冲里（单位 = Vertex）
+        std::uint32_t vertex_byte_offset = 0;  // 同上，**字节**（effect draw 的 stride 是 44）
+        // ---- effect draw（P2）：这一条不是固定功能批，而是某个 FX pass 程序 ----
+        //   `textured` / `tex_mode` / `texture` / `sample_rect` 在这一档**不参与**（程序自带纹理）。
+        bool effect = false;
+        GpuEffectDraw fx;                                     // 程序 + 常量 + 纹理描述
+        std::vector<float> fx_uv1;                            // 第二套 UV（与 vertices 同序）
+        SDL_GPUTexture* fx_texture[kGpuEffectMaxTextures] = {nullptr, nullptr};
+        SDL_GPUSampler* fx_sampler[kGpuEffectMaxTextures] = {nullptr, nullptr};
+        std::uint32_t fx_texture_count = 0;
+        // ★ 切段判据用**整幅**（保守）：effect 的两张纹理各有自己的 UV 集，逐张算采样矩形会把
+        //   "哪张对应哪套 UV"再抄一遍 ⇒ 这里宁可多切一段（正确性优先），⛔ 不猜采样区域。
+        bool fxSamplesTexture(const SDL_GPUTexture* tex) const {
+            if (tex == nullptr) return false;
+            for (std::uint32_t i = 0; i < fx_texture_count; ++i) {
+                if (fx_texture[i] == tex) return true;
+            }
+            return false;
+        }
         // ★ 覆盖账本的批号（入队那一刻的 `gpuRasterBatchTag()`；0 = 生产者没标）。
         //   flush **提交成功之后**用它回报"这条 draw 真的进了 render pass"。
         std::uint64_t batch_tag = 0;
@@ -2027,6 +2257,15 @@ private:
             const Segment& seg = segments_.back();
             for (std::size_t i = seg.first_draw; i < queue_.size(); ++i) {
                 const QueuedDraw& d = queue_[i];
+                if (d.effect) {
+                    // ★ effect draw 的两张纹理各有自己的 UV 集 ⇒ 采样区域取**整幅**（保守）：
+                    //   只要这张纹理的内容在本段里变过 ⇒ 切段（正确性优先，⛔ 不猜采样区域）。
+                    if (d.fxSamplesTexture(tex)) {
+                        need_cut = true;
+                        break;
+                    }
+                    continue;
+                }
                 if (!d.textured || d.texture != tex) continue;
                 // ★ 有 mip 链时内容一变就等于**整张**变（派生级要整级重传）⇒ 一律切段；
                 //   ⛔ 不能只按 dirty.rect 判交（那会让更早的 draw 采到旧的上层 mip）。
@@ -2236,6 +2475,8 @@ private:
         depth_h_ = 0;
         for (auto& [k, p] : pipelines_) SDL_ReleaseGPUGraphicsPipeline(device_, p);
         pipelines_.clear();
+        for (auto& [k, p] : fx_pipelines_) SDL_ReleaseGPUGraphicsPipeline(device_, p);
+        fx_pipelines_.clear();
     }
 
     static std::uint64_t pipelineKey(const GpuRasterState& s, bool textured) {
@@ -2262,10 +2503,11 @@ private:
         return k;
     }
 
-    SDL_GPUGraphicsPipeline* pipelineFor(const GpuRasterState& state, bool textured, std::string* err) {
-        const std::uint64_t key = pipelineKey(state, textured);
-        auto it = pipelines_.find(key);
-        if (it != pipelines_.end()) return it->second;
+    // 建一条 graphics pipeline（固定功能批与 effect 批共用这一份：只差 shader / 属性表 / stride）。
+    SDL_GPUGraphicsPipeline* buildPipeline(SDL_GPUShader* vs, SDL_GPUShader* ps,
+                                          const SDL_GPUVertexAttribute* attrs, Uint32 attr_count,
+                                          Uint32 stride, const GpuRasterState& state, const char* what,
+                                          std::string* err) {
         SDL_GPUColorTargetDescription color{};
         color.format = SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
         if (state.blend) {
@@ -2293,31 +2535,18 @@ private:
         color.blend_state.color_write_mask = sdlColorMask(state.color_write);
         SDL_GPUVertexBufferDescription vb{};
         vb.slot = 0;
-        vb.pitch = sizeof(Vertex);
+        vb.pitch = stride;
         vb.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
-        SDL_GPUVertexAttribute attrs[3]{};
-        attrs[0].location = 0;
-        attrs[0].buffer_slot = 0;
-        attrs[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3;
-        attrs[0].offset = 0;
-        attrs[1].location = 1;
-        attrs[1].buffer_slot = 0;
-        attrs[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
-        attrs[1].offset = sizeof(float) * 3;
-        attrs[2].location = 2;
-        attrs[2].buffer_slot = 0;
-        attrs[2].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
-        attrs[2].offset = sizeof(float) * 7;
         SDL_GPUVertexInputState vin{};
         vin.vertex_buffer_descriptions = &vb;
         vin.num_vertex_buffers = 1;
         vin.vertex_attributes = attrs;
-        vin.num_vertex_attributes = 3;
+        vin.num_vertex_attributes = attr_count;
         SDL_GPUGraphicsPipelineCreateInfo ci{};
-        ci.vertex_shader = vertex_shader_;
-        ci.fragment_shader = textured ? texShaderFor(state.tex_mode) : pixel_shader_;
-        if (ci.fragment_shader == nullptr) {
-            if (err) *err = "SDL_GPU 纹理片元置换不可用";
+        ci.vertex_shader = vs;
+        ci.fragment_shader = ps;
+        if (ci.vertex_shader == nullptr || ci.fragment_shader == nullptr) {
+            if (err) *err = std::string("SDL_GPU ") + what + " 程序不可用";
             return nullptr;
         }
         ci.vertex_input_state = vin;
@@ -2338,8 +2567,71 @@ private:
             if (err) *err = std::string("SDL_CreateGPUGraphicsPipeline 失败：") + SDL_GetError();
             return nullptr;
         }
-        pipelines_[key] = p;
         ++g_stats.pipelines_created;
+        return p;
+    }
+
+    // 固定功能批的 pipeline（顶点 = `Vertex`：pos / color / 一套 uv）。
+    SDL_GPUGraphicsPipeline* pipelineFor(const GpuRasterState& state, bool textured, std::string* err) {
+        const std::uint64_t key = pipelineKey(state, textured);
+        auto it = pipelines_.find(key);
+        if (it != pipelines_.end()) return it->second;
+        SDL_GPUVertexAttribute attrs[3]{};
+        attrs[0].location = 0;
+        attrs[0].buffer_slot = 0;
+        attrs[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3;
+        attrs[0].offset = 0;
+        attrs[1].location = 1;
+        attrs[1].buffer_slot = 0;
+        attrs[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
+        attrs[1].offset = sizeof(float) * 3;
+        attrs[2].location = 2;
+        attrs[2].buffer_slot = 0;
+        attrs[2].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
+        attrs[2].offset = sizeof(float) * 7;
+        SDL_GPUShader* ps = textured ? texShaderFor(state.tex_mode) : pixel_shader_;
+        SDL_GPUGraphicsPipeline* p =
+            buildPipeline(vertex_shader_, ps, attrs, 3, sizeof(Vertex), state, "纹理片元置换", err);
+        if (p == nullptr) return nullptr;
+        pipelines_[key] = p;
+        return p;
+    }
+
+    // ★ effect draw 的 pipeline（P2）：顶点 = `FxVertex`（两套 uv），片元 = FX pass 程序，
+    //   2 个 sampler + 1 个 uniform（常量表）。★ 与固定功能 pipeline **不共用缓存键**
+    //   （分开的 map ⇒ 不可能撞）。
+    SDL_GPUGraphicsPipeline* pipelineForEffect(GpuEffectProgram program, const GpuRasterState& state,
+                                               std::string* err) {
+        const std::uint64_t key = pipelineKey(state, /*textured=*/false) * 4u +
+                                  static_cast<std::uint64_t>(program) + 1u;
+        auto it = fx_pipelines_.find(key);
+        if (it != fx_pipelines_.end()) return it->second;
+        const std::uint32_t index = static_cast<std::uint32_t>(program);
+        if (index >= 2u) {
+            if (err) *err = "SDL_GPU：未知的 effect 程序";
+            return nullptr;
+        }
+        SDL_GPUVertexAttribute attrs[4]{};
+        attrs[0].location = 0;
+        attrs[0].buffer_slot = 0;
+        attrs[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3;
+        attrs[0].offset = 0;
+        attrs[1].location = 1;
+        attrs[1].buffer_slot = 0;
+        attrs[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
+        attrs[1].offset = sizeof(float) * 3;
+        attrs[2].location = 2;
+        attrs[2].buffer_slot = 0;
+        attrs[2].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
+        attrs[2].offset = sizeof(float) * 7;
+        attrs[3].location = 3;
+        attrs[3].buffer_slot = 0;
+        attrs[3].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
+        attrs[3].offset = sizeof(float) * 9;
+        SDL_GPUGraphicsPipeline* p = buildPipeline(fx_vertex_shader_, fx_pixel_shaders_[index], attrs, 4,
+                                                   sizeof(FxVertex), state, "effect", err);
+        if (p == nullptr) return nullptr;
+        fx_pipelines_[key] = p;
         return p;
     }
 
@@ -2413,7 +2705,8 @@ private:
             return false;
         }
         if (errors) { errors->Release(); errors = nullptr; }
-        auto make = [&](ID3DBlob* b, SDL_GPUShaderStage stage, const char* entry, Uint32 samplers) -> SDL_GPUShader* {
+        auto make = [&](ID3DBlob* b, SDL_GPUShaderStage stage, const char* entry, Uint32 samplers,
+                        Uint32 uniforms = 0) -> SDL_GPUShader* {
             SDL_GPUShaderCreateInfo ci{};
             ci.code = static_cast<const Uint8*>(b->GetBufferPointer());
             ci.code_size = b->GetBufferSize();
@@ -2421,6 +2714,7 @@ private:
             ci.format = kShaderFormat;
             ci.stage = stage;
             ci.num_samplers = samplers;
+            ci.num_uniform_buffers = uniforms;
             return SDL_CreateGPUShader(device_, &ci);
         };
         vertex_shader_ = make(vsb, SDL_GPU_SHADERSTAGE_VERTEX, "VSMain", 0);
@@ -2450,6 +2744,36 @@ private:
             ps->Release();
             if (pixel_shaders_tex_[i] == nullptr) ok = false;
         }
+        // ---- effect 程序（P2）：2 个 sampler + 1 个 uniform（常量表）----
+        {
+            ID3DBlob* fxvs = nullptr;
+            if (FAILED(D3DCompile(kShaderSource, std::strlen(kShaderSource), "d3d9_gpu.hlsl", nullptr, nullptr,
+                                  "FxVSMain", "vs_5_1", flags, 0, &fxvs, &errors))) {
+                if (err) *err = std::string("D3DCompile(FxVSMain) 失败：") +
+                                (errors ? static_cast<const char*>(errors->GetBufferPointer()) : "");
+                if (errors) errors->Release();
+                return false;
+            }
+            if (errors) { errors->Release(); errors = nullptr; }
+            fx_vertex_shader_ = make(fxvs, SDL_GPU_SHADERSTAGE_VERTEX, "FxVSMain", 0);
+            fxvs->Release();
+            if (fx_vertex_shader_ == nullptr) ok = false;
+        }
+        for (std::size_t i = 0; i < 2; ++i) {
+            ID3DBlob* ps = nullptr;
+            if (FAILED(D3DCompile(kShaderSource, std::strlen(kShaderSource), "d3d9_gpu.hlsl", nullptr, nullptr,
+                                  kFxEntries[i], "ps_5_1", flags, 0, &ps, &errors))) {
+                if (err) *err = std::string("D3DCompile(") + kFxEntries[i] + ") 失败：" +
+                                (errors ? static_cast<const char*>(errors->GetBufferPointer()) : "");
+                if (errors) errors->Release();
+                ok = false;
+                continue;
+            }
+            if (errors) { errors->Release(); errors = nullptr; }
+            fx_pixel_shaders_[i] = make(ps, SDL_GPU_SHADERSTAGE_FRAGMENT, kFxEntries[i], 2, 1);
+            ps->Release();
+            if (fx_pixel_shaders_[i] == nullptr) ok = false;
+        }
         if (!ok) {
             if (err && err->empty()) *err = std::string("SDL_CreateGPUShader(DXBC) 失败：") + SDL_GetError();
             return false;
@@ -2458,7 +2782,8 @@ private:
     }
 #elif defined(__APPLE__)
     bool createShaders(std::string* err) {
-        auto make = [&](const char* entry, SDL_GPUShaderStage stage, Uint32 samplers) -> SDL_GPUShader* {
+        auto make = [&](const char* entry, SDL_GPUShaderStage stage, Uint32 samplers,
+                        Uint32 uniforms = 0) -> SDL_GPUShader* {
             SDL_GPUShaderCreateInfo ci{};
             ci.code = reinterpret_cast<const Uint8*>(kShaderSource);
             ci.code_size = std::strlen(kShaderSource);
@@ -2466,6 +2791,7 @@ private:
             ci.format = kShaderFormat;
             ci.stage = stage;
             ci.num_samplers = samplers;
+            ci.num_uniform_buffers = uniforms;
             return SDL_CreateGPUShader(device_, &ci);
         };
         vertex_shader_ = make("VSMain", SDL_GPU_SHADERSTAGE_VERTEX, 0);
@@ -2474,6 +2800,13 @@ private:
         for (std::size_t i = 0; i < kTexEntryCount; ++i) {
             pixel_shaders_tex_[i] = make(kTexEntries[i].entry, SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
             if (pixel_shaders_tex_[i] == nullptr) ok = false;
+        }
+        // ---- effect 程序（P2）：2 个 sampler + 1 个 uniform（常量表）----
+        fx_vertex_shader_ = make("FxVSMain", SDL_GPU_SHADERSTAGE_VERTEX, 0);
+        if (fx_vertex_shader_ == nullptr) ok = false;
+        for (std::size_t i = 0; i < 2; ++i) {
+            fx_pixel_shaders_[i] = make(kFxEntries[i], SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 1);
+            if (fx_pixel_shaders_[i] == nullptr) ok = false;
         }
         if (!ok) {
             if (err) *err = std::string("SDL_CreateGPUShader(MSL) 失败：") + SDL_GetError();
@@ -2491,6 +2824,7 @@ private:
         //   设备销毁也必须在 release 之后。
         queue_.clear();
         queued_vertices_ = 0;
+        queued_vertex_bytes_ = 0;
         segments_.assign(1, Segment{});
         staging_used_ = 0;
         staging_.clear();
@@ -2515,6 +2849,13 @@ private:
             if (ps != nullptr) SDL_ReleaseGPUShader(device_, ps);
             ps = nullptr;
         }
+        if (fx_vertex_shader_ != nullptr) SDL_ReleaseGPUShader(device_, fx_vertex_shader_);
+        for (SDL_GPUShader*& ps : fx_pixel_shaders_) {
+            if (ps != nullptr) SDL_ReleaseGPUShader(device_, ps);
+            ps = nullptr;
+        }
+        fx_vertex_shader_ = nullptr;
+        if (g_live_effect_raster == this) g_live_effect_raster = nullptr;
         vertex_shader_ = nullptr;
         pixel_shader_ = nullptr;
         SDL_DestroyGPUDevice(device_);
@@ -2525,11 +2866,15 @@ private:
     SDL_GPUShader* vertex_shader_ = nullptr;
     SDL_GPUShader* pixel_shader_ = nullptr;
     SDL_GPUShader* pixel_shaders_tex_[kTexEntryCount] = {};
+    // ★ P2：effect 的程序（下标 = `GpuEffectProgram` 的整数值）+ 直通 VS（带第二套 UV 属性）。
+    SDL_GPUShader* fx_vertex_shader_ = nullptr;
+    SDL_GPUShader* fx_pixel_shaders_[2] = {nullptr, nullptr};
     SDL_GPUTexture* target_ = nullptr;
     SDL_GPUTexture* depth_ = nullptr;
     SDL_GPUBuffer* vertex_buffer_ = nullptr;
     Uint32 vertex_capacity_ = 0;
     std::map<std::uint64_t, SDL_GPUGraphicsPipeline*> pipelines_;
+    std::map<std::uint64_t, SDL_GPUGraphicsPipeline*> fx_pipelines_;  // effect 程序（与上面分开，⛔ 不撞键）
     std::map<std::uint64_t, TextureEntry> textures_;
     std::map<std::uint32_t, SDL_GPUSampler*> samplers_;
     std::uint64_t texture_use_ = 0;
@@ -2565,6 +2910,7 @@ private:
     //   ⛔ 不放 staging_（staging 只放**要上传的字节**，混用会让 offset 记账变复杂）。
     std::vector<std::uint8_t> mip_scratch_;
     std::size_t queued_vertices_ = 0;
+    std::size_t queued_vertex_bytes_ = 0;  // 顶点缓冲里已经排到的**字节**位置（两种 stride 混排）
     bool need_depth_clear_ = true;
     // ★ 清深度用的 z（`REQ-01M6RMVJTTM8PDNXB39TVJ40WN`）：由 `rasterRequestDepthClear(z)` 逐位存下，
     //   flush 时**原样**进第一个 render pass 的 `clear_depth`。缺省 1.0 = D3D9 / 新建深度附件的初值
@@ -2617,6 +2963,30 @@ std::unique_ptr<GpuRaster> createSdlGpuRaster(std::string* err) {
     auto r = std::make_unique<SdlGpuRaster>();
     if (!r->init(err)) return nullptr;
     return r;
+}
+
+
+// ---------------------------------------------------------------------------------------
+// effect draw 的交付入口（P2）：见 `d3d9_effect_gpu.h` 的同名注释
+// ---------------------------------------------------------------------------------------
+bool gpuSupportsEffectDraw(GpuRaster* gpu) {
+    if (gpu == nullptr) return false;
+    if (dynamic_cast<GpuEffectRaster*>(gpu) != nullptr) return true;
+    // 生产路径：`SdlWindow` 是转发包装 ⇒ 看"活着的那个"后端在不在。
+    if (dynamic_cast<SdlWindow*>(gpu) != nullptr) return g_live_effect_raster != nullptr;
+    return false;  // ⛔ 其它实现不猜（没有 effect 管线就是没有）
+}
+
+bool gpuQueueEffectDraw(GpuRaster* gpu, const GpuRasterVertex* vertices, std::size_t count,
+                        const float* uv1, const GpuEffectDraw& effect, const GpuRasterState& state,
+                        std::string* err) {
+    GpuEffectRaster* fx = dynamic_cast<GpuEffectRaster*>(gpu);
+    if (fx == nullptr && dynamic_cast<SdlWindow*>(gpu) != nullptr) fx = g_live_effect_raster;
+    if (fx == nullptr) {
+        if (err) *err = "没有 effect 管线（每 draw 一个 shader + 常量表 + 2 纹理）的后端";
+        return false;
+    }
+    return fx->rasterQueueEffect(vertices, count, uv1, effect, state, err);
 }
 
 }  // namespace lift

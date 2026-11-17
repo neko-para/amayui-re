@@ -3928,22 +3928,48 @@ const MUTATIONS = [
       'sha256 不符）⇒ `d3dx9-effect` 的 resources-pinned 当场红（"读到非空字节"发现不了这种破坏）',
   },
 
-  // ── GPU 路线 P1 · effect 绑定 + shader 未执行 ⇒ 整批拒绝（`src/runtime/d3d9_pipeline.cpp`）──
-  //   故障形态：把 `gpuEligible` 的第一条判据短路掉（`if (false && …)`）。这是**最像"能跑"的**
-  //   那类破坏：draw 照旧被拒（本夹具没有 GPU 后端），只是**原因换了**、bit44 不再置位
-  //   ⇒ 只要守卫断言"原因串 + 记账位"就一定会红（只断言 HRESULT != 0 则会**假绿**）。
+  // ⚠ P1 的那条变异（短路 `gpuEligible` 的 `effectDrawNotExecuted`）**已随 P1 的临时判据一起删除**：
+  //   那个函数在 P2 不存在了 ⇒ 条目留着只会让 `--list` 的静态检查红（"from 片段已不存在"）。
+  //   翻面后的两条在下（P2 的两条代表：**常量绑定** 与 **shader 算术**）。
+
+  // ── GPU 路线 P2 ① · effect 的**常量表**没绑上（`src/shims/d3dx9_effect.cpp`）──
+  //   故障形态：`effectDrawProgram` 把 `SetFloat("Alpha")` 的值丢成 0（`= value` → `= 0.0f`）。
+  //   这是最像"能跑"的破坏：程序、纹理、UV、账本全对，只有 Alpha 恒 0 ⇒ 像素只是"颜色不对"。
+  //   ⇒ 判据必须是**像素**（`fade-pixels` 的 Alpha=0.5/1 两档）与**常量表读数**（`effect-draw-recorded`）。
   {
-    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
-    from: '        if (d3d9::effectDrawNotExecuted(&effect_why)) {',
-    to: '        if (false && d3d9::effectDrawNotExecuted(&effect_why)) {  // 变异：短路掉 effect 拒绝',
+    file: 'apps/emulator-lift/src/shims/d3dx9_effect.cpp',
+    from: '        out->constants[constant_count] = value;',
+    to: '        out->constants[constant_count] = 0.0f;  // 变异：常量没绑上（Alpha 恒 0）',
     guard: 'ctest:d3dx9-effect',
     ctest: 'd3dx9-effect',
     buildDir: 'apps/emulator-lift/out',
     buildTarget: 'lift-d3dx9-effect',
     what:
-      '`gpuEligible` 的 effect 拒绝被短路 ⇒ 这笔 draw 落到"没有 GPU 后端"那条（原因串换了、bit44 不置位）' +
-      '⇒ `d3dx9-effect` 的 effect-draw-refused 在"原因串含 id/technique/pass"与"bit44 置位"两条上红；' +
-      '★ 只断言 HRESULT != 0 会假绿（两条路都返回 INVALIDCALL）',
+      'effect 的常量表不绑 `SetFloat` 的值（Alpha 恒 0）⇒ `d3dx9-effect` 的 fade-pixels 在 Alpha=0.5/1 ' +
+      '两档像素上红、effect-draw-recorded 在 `constants[0]==0.5` 上红；★ 只断言"draw 成功了"会假绿',
+  },
+
+  // ── GPU 路线 P2 ② · Fade 的 `1-Alpha` 写成 `Alpha`（`src/runtime/d3d9_gpu.cpp` 的 **MSL** 块）──
+  //   故障形态：alpha 归一化的插值方向反了（`c0.a*(1-Alpha)` → `c0.a*Alpha`）。
+  //   ★ `from` 特意带上前一行 `tex1.sample(...)`：DXBC 块里有**同样三行**算术（两份源必须逐句一致），
+  //     不带上下文就会命中 DXBC 那份 ⇒ 在 mac 上（只编 MSL）**假绿**。
+  {
+    file: 'apps/emulator-lift/src/runtime/d3d9_gpu.cpp',
+    from:
+      '    float4 c1 = tex1.sample(smp1, in.uv1);\n' +
+      '    float4 ret = float4(0.0, 0.0, 0.0, 0.0);   // 源文本：float4 ret = 0;\n' +
+      '    ret.a = c0.a * (1.0 - Alpha) + c1.a * Alpha;',
+    to:
+      '    float4 c1 = tex1.sample(smp1, in.uv1);\n' +
+      '    float4 ret = float4(0.0, 0.0, 0.0, 0.0);   // 源文本：float4 ret = 0;\n' +
+      '    ret.a = c0.a * Alpha + c1.a * Alpha;  // 变异：1-Alpha 写成 Alpha',
+    guard: 'ctest:d3dx9-effect',
+    ctest: 'd3dx9-effect',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3dx9-effect',
+    what:
+      'Fade 的 MSL 片元把 `c0.a*(1-Alpha)` 写成 `c0.a*Alpha` ⇒ ret.a / ColRate 全偏 ⇒ ' +
+      '`d3dx9-effect` 的 fade-pixels 在三档像素上都红（容差 1 LSB 抓得住）；★ 只比"画没画"会假绿',
   },
 ];
 

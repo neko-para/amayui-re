@@ -1,6 +1,15 @@
-// emulator-lift · D3DX9 **effect 资源读取 + ID3DXEffect 最小 COM 面**（GPU 路线 P0/P1）
+// emulator-lift · D3DX9 **effect 资源读取 + FX 文本解析 + ID3DXEffect 最小 COM 面**（GPU 路线 P0/P1/P2）
 //
-// ★ 范围（本段 = 路线单 `REQ-01M7MNPGETP2CQJ3ACMCGEHKF5` 的 P0 + P1）：
+// ★ P2（`REQ-01M7MSGRRHCA23RAX1QGDAYJ3X`）在本模块新加的东西：
+//   ① **FX 源文本解析**（`parseEffectSource`）：4 份资源里出现过的语法子集（常量 / sampler_state /
+//      shader 函数 / technique / pass）；pass 块里**只建模** `PixelShader` / `VertexShader` 两条
+//      赋值 —— 出现任何别的状态名 ⇒ `UnsupportedState` + **具名原因**（⛔ 不静默忽略）。
+//   ② **程序解析**（`effectDrawProgram`）：把"当前 technique + pass"翻成
+//      `d3d9::EffectDrawProgram`（实现集内的程序 + 按声明顺序的常量表 + SetTexture 记下的纹理 EA）。
+//      不在实现集里的程序（203 / 202）⇒ `implemented=false` + 具名原因 ⇒ 调用方整批拒绝（bit 44）。
+//   ③ `Begin` 的 `*pPasses` 改成**解析结果**（P1 的常量 1 退役）。
+//
+// ★ 范围（P0 + P1 原样保留）：
 //   ① **P0**：从 PE `.rsrc` 的 **RT_RCDATA** 按 id / 字符串名取 200/201/202/203 的字节
 //      （`readEffectSource`）。字节真源 = **拆壳件**（AOT 臂 pin 的那份执行源
 //      `corpus/assets/age/AGE.EXE__dumped.sectfix.EXE`；S0 已证明原版 `links/raw/AGE.EXE` 的
@@ -34,13 +43,16 @@
 //   其余槽（0x0C..0x74 / 0x7C..0xCC 之间的 SetInt/SetBool/SetMatrix/Get* 等）由
 //   `ComRegistry::createObject` 统一填成 `unsupported+0xNN` 的 loud trap（同一约定）。
 //
-// ★ 语义（P1 = **只记状态**）：
-//   · `SetFloat` / `SetTexture` / `SetTechnique` 把"参数名 → 值"记进 guest 堆上的状态块；
-//     **不**执行 shader、**不**碰 GPU、**不**提交 draw。
-//   · `Begin` 写 `*pPasses`：本段**不解析 FX 文本**，按 S0 读到的 4 份资源文本（每个 technique
-//     恰好一个 `pass P0`）报 **1**。⚠ 这是"引擎必须至少跑一次 pass 循环"的**结构性下限**，
-//     ⛔ 不宣称它是解析结果（P2 才真的解析 technique/pass）。
-//   · `BeginPass` / `CommitChanges` / `EndPass` / `End` 只推进状态并返回 `S_OK`；乱序只 warn。
+// ★ 语义（**P2**：pass 真的执行）：
+//   · `SetFloat` / `SetTexture` / `SetTechnique` 把"参数名 → 值"记进 guest 堆上的状态块
+//     （P1 原样保留：这一层仍**不**碰 GPU、**不**提交 draw）。
+//   · `Begin` 的 `*pPasses` = **FX 文本解析出来的** pass 数（P1 的常量 1 已退役）；technique 没设 /
+//     名字不在文本里 ⇒ **0**（该作用域里的任何 draw 都会带具名原因被拒，⛔ 不静默接受）。
+//   · `Begin` / `BeginPass` / `CommitChanges`（以及作用域内的 `SetFloat`/`SetTexture`/`SetTechnique`）
+//     会把"这一批该怎么画"（`d3d9::EffectDrawProgram`：程序 + 常量表 + 纹理 EA + UV 集 + sampler 状态）
+//     推给 `d3d9` 的 effect 作用域 —— `gpuEligible` 据此走后端 effect 管线（每 draw 一个 shader +
+//     常量表 + 最多 2 张纹理，见 `runtime/d3d9_effect_gpu.h`）。
+//   · `EndPass` / `End` 只推进状态并返回 `S_OK`；乱序只 warn。
 //
 // ★ 未收录 / 解析不了 ⇒ **响亮停**（ADR `REQ-01M7MNYPDXM2NEQR77DXYZM3CJ` 的第 2 条后果）：
 //   导出层打印**资源 id + sha256 + 前 32 字节**，并 `cpu.running=false`（`HostStopKind::Trap`）。
@@ -54,6 +66,8 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+
+#include "runtime/d3d9.h"  // `d3d9::EffectDrawProgram` / `EffectProgram`（跨层的中性名字）
 
 namespace lift {
 
@@ -112,6 +126,98 @@ EffectSourceStatus readEffectSourceByName(const PeImage& img, const std::string&
 
 // "id + 大小 + sha256 + 前 32 字节" 的一行文本（响亮停 / 日志共用**一份**格式）。
 std::string effectSourceNote(const EffectSource& src);
+
+// ---------------------------------------------------------------------------------------
+// FX 源文本模型（P2）—— 4 份资源里出现过的语法子集，**逐条**有语义
+// ---------------------------------------------------------------------------------------
+// ★ 为什么要有这一层：引擎的资源是 **HLSL 源码**（S0 §2.3），不是编译后的 FX 二进制 ⇒ "这一批该
+//   怎么画"必须从文本读出来（technique → pass → `compile ps_2_0 FadePS()`），⛔ 不能靠"资源 id ⇒ 程序"
+//   的硬编码（那会与文本分叉且没人发现）。硬编码只允许出现在**最后一跳**（entry + profile ⇒ 后端
+//   shader 程序，见下面的 `EffectProgramBinding`）。
+struct FxConstant {           // uniform 常量（`float Alpha;` / `float4 Color;` / `float4x4 Proj;`）
+    std::string type;
+    std::string name;
+};
+struct FxSampler {
+    std::string name;
+    std::string texture;                  // `Texture = <Tex0>` ⇒ "Tex0"
+    // D3D9 `D3DSAMPLERSTATETYPE` 的缺省值（D3DTEXF_POINT / D3DTADDRESS_WRAP），文本里覆盖成什么就记什么。
+    std::string address_u = "Wrap";
+    std::string address_v = "Wrap";
+    std::string min_filter = "Point";
+    std::string mag_filter = "Point";
+    std::string mip_filter = "None";
+};
+struct FxParam {              // shader / 函数形参
+    std::string type;
+    std::string name;
+    std::string semantic;     // 冒号后的语义（COLOR0 / TEXCOORD0…；无 ⇒ 空）
+};
+struct FxShader {
+    std::string name;
+    std::string return_type;
+    std::string return_semantic;
+    std::vector<FxParam> params;
+    // 函数体原文（注释已剥离）。★ 只给"哪张纹理用哪套 UV"这一处用：绑定器从 `tex2D(<sampler>,
+    // <uv>)` 里读第二个实参、再查它的语义（TEXCOORDn）⇒ ⛔ 不把映射硬编码进程序表。
+    std::string body;
+};
+struct FxPass {
+    std::string name;
+    bool has_pixel_shader = false;
+    std::string pixel_entry;
+    std::string pixel_profile;   // ps_2_0 / ps_1_0
+    bool has_vertex_shader = false;
+    std::string vertex_entry;
+    std::string vertex_profile;  // vs_1_0
+};
+struct FxTechnique {
+    std::string name;
+    std::vector<FxPass> passes;
+};
+struct FxModule {
+    std::vector<FxConstant> constants;  // **声明顺序** = 常量表顺序
+    std::vector<FxSampler> samplers;
+    std::vector<FxShader> shaders;
+    std::vector<FxTechnique> techniques;
+    // 诊断：文本里出现过、但本模块**没有建模**的东西（非空 ⇒ 解析失败，⛔ 不静默跳过）
+    std::vector<std::string> unmodeled;
+};
+enum class FxParseStatus {
+    Ok,
+    Error,             // 语法不认识（why 带行号 + 那一行的开头）
+    UnsupportedState,  // pass / sampler_state 里出现**没建模**的状态名（why 点名）
+};
+// 解析一份 FX 源码。`why` 在非 Ok 时带**行号**与点名（响亮停用）。
+FxParseStatus parseEffectSource(const std::string& text, FxModule* out, std::string* why);
+// 取某个 technique 的第 `pass` 个 pass（找不到 ⇒ nullptr）。
+const FxPass* fxPassAt(const FxModule& module, const std::string& technique, std::uint32_t pass);
+
+// ---------------------------------------------------------------------------------------
+// 程序解析（P2）：FX 文本 + `SetFloat`/`SetTexture` 的记录 ⇒ `d3d9::EffectDrawProgram`
+// ---------------------------------------------------------------------------------------
+// ★ 实现集（"entry + profile ⇒ 后端程序"）是**唯一**一张表；它只做最后一跳的映射，
+//   门牌（technique / pass / 参数名 / 纹理名 / UV 语义）全部来自 `FxModule`。
+struct EffectProgramBinding {
+    std::uint32_t resource_id;     // 200 / 201
+    const char* technique;         // "Fade"
+    const char* pixel_entry;       // "FadePS"
+    const char* pixel_profile;     // "ps_2_0" / "ps_1_0"
+    d3d9::EffectProgram program;   // 后端要画的那一档
+};
+const EffectProgramBinding* effectProgramBindings();  // 以 `resource_id == 0` 的项终止
+
+// 解析出的模块（进程内缓存：4 份资源的文本来自**不可变**的 PE 字节，按内容 sha256 缓存；
+// 同一份 sha256 ⇒ 同一份模型）。`effectModuleOf` 的失败原因写 `why`。
+const FxModule* effectModuleForSha(const std::string& sha256, const std::string& text, std::string* why);
+const FxModule* effectModuleOf(X86& cpu, std::uint32_t state, std::string* why);
+
+// 一次 Begin/BeginPass/CommitChanges 的"这批该怎么画"快照：程序 + 常量表 + 纹理 EA。
+//   · `implemented == false` ⇒ `out->reason` 有名有姓（资源 id / technique / pass / entry / profile）；
+//   · 常量按 `FxModule::constants` 的**声明顺序**取值（没 SetFloat 过 ⇒ 0，D3D 的 uniform 初值）；
+//   · 纹理按 sampler → texture 参数名 → `SetTexture` 的 EA（未绑 ⇒ 0 + count 仍然算上，好让
+//     调用方**具名拒绝**"shader 要两张纹理但只绑了一张"）。
+bool effectDrawProgram(X86& cpu, std::uint32_t state, d3d9::EffectDrawProgram* out, std::string* why);
 
 // ---------------------------------------------------------------------------------------
 // 状态块 / 对象
