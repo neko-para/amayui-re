@@ -43,11 +43,11 @@ alpha test(bit30) · FLAT(31) · **stage≥1(33)** · 多 bpp(36) · 寻址(37) 
 
 ## 阶段（每段都要有可再校验判据；⛔ 不许"看起来像"）
 
-- **P0**：`PeResources` 读 `RT_RCDATA` 的 `effectSource(id)` + **pure** 用例钉 4 份字节（大小 / 首两字节 `//` / sha256），
-  且 gap 登记**仍在**（本段不实现导出）。
-- **P1**：`D3DXCreateEffectFromResourceA`（9 参）+ 9 槽 `ID3DXEffect`（**只记状态、不执行**）。
-  判据：真游戏不再停 `eip=7FFE0060`、配方 `pending=0`、stderr `unimplemented`/`comUnsupported` 各 0 次；
-  本段**允许画面不对**（effect draw 仍被 stage≥1 整批拒绝，但必须**具名响亮**）。
+- ✅ **P0**（已收口，子单 `REQ-01M7MSGRJCEPAE8NS323WEG0SG`）：`PeResources` 读 `RT_RCDATA` + pure 用例钉 4 份字节与 sha256；
+  `d3dx9-effect/resources-pinned`。
+- ✅ **P1**（已收口，同子单）：导出 9 参 + 9 槽 `ID3DXEffect` 只记状态；E2E `exit 0 / pending=0 / unimplemented=0`；
+  ★ 实测**推翻**了"effect draw 会被 stage≥1 拒绝"的预期（203 只绑 Tex0 ⇒ bit33 不触发）⇒ 新增临时具名位 **44**
+  `effect shader 尚未实现执行`，每批一条 warn（E2E 1195 批）。P2 要把它翻面。
 - **P2**：Fade(201) 的 MSL + DXBC(SM5.1) 双源 + 后端"每 draw 一个 shader + 常量 + 2 纹理" + 只对 effect draw 开口子。
   判据：两张已知纹理 + `Alpha∈{0,0.5,1}` 的像素 oracle；账本 `recorded` 非 `skipped`。
 - **P3**：203 两个 technique（10-tap）。判据：转场单帧 2e10 → 1e6–1e7 + 帧 hash 出现多级灰阶。
