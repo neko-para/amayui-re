@@ -2,10 +2,11 @@
 
 - id: REQ-01M7N0DH4VM06AV8EMTFS7YW35
 - type: bug
-- status: open
+- status: dropped
 - parent: REQ-01M7JHSDH16HCVEV4BA6NKSHN2
 - repro: apps/emulator-lift/src/runtime/shims.cpp#t_shim_token_wait_ns
 - severity: S2
+- dropped_reason: 2026-11-18 复测（当前 HEAD 00af635，mac arm64）：转场 90 s run 两跑 underruns=0、fill_max_ms=18.99/351.85、fill_wait_ms=0.00/9.00 ⇒ **令牌等待不是当前瓶颈**。原先那 1.0 s 一刀是缺省 caps=0 时"渲染落在 CPU"的产物（软件模糊 6 帧），P4 把 caps 固定 2.0 后不再出现。若将来在更重场景复现（fill_max 逼近 500 ms 且 fill_wait_ms 占大头），按本单正文 M0/M1 重新立案。
 - tags: [emulator-lift, audio, token, performance]
 
 ## 一句话

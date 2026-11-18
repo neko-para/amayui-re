@@ -185,3 +185,17 @@ Remove-Item Env:LIFT_AUDIO_TRACE
 2. §4 那次构建是否已含 `732e503`（AOT feeder 走 **IR 派发**）—— 若那次 feeder 走的是解释器路径，20× 的量级差
    与令牌无关。
 
+## 5. 复测（2026-11-18 · 当前 HEAD `00af635` · mac arm64 M3）
+
+**之前那 1.0 s 一刀 / 2 次 underrun 在当前代码上不复现**：
+
+| run | underruns | fill_max_ms | fill_wait_ms | insns | frames |
+|---|---|---|---|---|---|
+| `--audio sdl --sound --log-level info`（90 s） | **0** | **351.85** | 9.00 | 6.687e9 | 2711 |
+| `--audio sdl --sound`（90 s，`--frame-log`） | **0** | **18.99** | 0.00 | 79.18e9 | 9344 |
+| `--profile` 第三次（关音频，测时间轴） | — | — | — | — | 黑区间 **2.60 s**（帧 1761–2671 / 911 帧） |
+
+★ 差异的来源：当前缺省 `PixelShaderVersion=0xFFFF0200` / `VertexShaderVersion=0xFFFE0100`（等级 2），
+`required = 5 pixel + 1 vertex` 全部 `implemented` ⇒ 转场走 **FX 路径**，CPU 侧那 6 个重帧消失 ⇒ feeder 不再被饿/被挡。
+⇒ 之前那条"令牌头阻塞"与"feeder 吞吐"两单按复测读数**已 dropped**（保留读数；若将来 `fill_max_ms` 逼近 500 ms
+且 `fill_wait_ms` 占大头，按原 M0/M1 重新立案）。
