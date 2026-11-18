@@ -522,9 +522,11 @@ git config --get core.hooksPath                     # 应打印 .githooks ——
   dev 上 `git merge --no-ff main` ⇒ **exit 1**（三行提示都在，且**不产生** merge commit）；
   dev 上 `git merge --ff-only main` ⇒ **exit 0**，`git log --oneline` 线性（无 merge commit）；
   main 上 `git merge --no-ff dev` ⇒ **exit 0**（放行，真 merge commit 产生）。
-  ⇒ 真树（dev 上）的读数现在**拿不到**（dev 车道占用）：`<待实测：dev 空闲后、且 dev 与 main 分叉（或落后）时跑 git -C E:\Projects\amayui-re-dev merge --no-ff main 应 exit 1>`。
-  命令：`git -C E:\Projects\amayui-re-dev merge --no-ff main`（应 exit 1、不产生提交；之后 `git -C E:\Projects\amayui-re-dev status` 应干净）。
-  ⚠ 前提：**dev == main（或 dev 领先且 main 没动）时该命令是 `Already up to date` ⇒ exit 0、hook 根本不跑** —— 那是"无事可做"，不是放行。
+  ⇒ **真树读数（2026-11-19 补齐）**：dev `1345345` 落后 main `7071e0e` 时跑
+  `git -C E:\Projects\amayui-re-dev merge --no-ff main` ⇒ **exit 1**（三行提示都在、HEAD 不变、
+  `merge --abort` 后 `status` 干净）—— 与 scratch 一致 ⇒ **执行器在真树上生效**。
+  ⚠ 前提不变：**dev == main 时该命令是 `Already up to date` ⇒ exit 0、hook 根本不跑** —— 那是"无事可做"，不是放行。
+  ⚠ 另注：dev 要先 FF 到"包含这个 hook 文件"的提交，hook 才在它那棵树里存在（"注册了不等于生效"，见上一条）。
 
 ---
 
