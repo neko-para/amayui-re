@@ -4,7 +4,7 @@
 - type: bug
 - status: open
 - parent: REQ-01M7JHSD5MWTB9N8WJC2Y2T69M
-- repro: apps/emulator-lift/src/runtime/d3dx9_sprite.cpp#gs_state.blend
+- repro: docs/03-emulator/save05-black-rect.md#复现
 - severity: S2
 - tags: [emulator-lift, d3dx9, sprite, blend, render]
 
@@ -14,7 +14,7 @@ SAVE05 是 SC0000 第一个地图中的一个场景：点击宝藏（参考坐�
 实际看到的是：**特效所在位置是一个黑色矩形，而且整个特效出现期间一直是黑的**；特效播完后画面变成交互对话框。
 （"没了"= 特效播完、渲染出对话框，不是黑框自己消失。）
 
-## 已核事实（都可再跑；`.tmp/save05-black/report.md`）
+## 已核事实（都可再跑；`docs/03-emulator/save05-black-rect.md`）
 
 - 黑框 **120×120**，跟着宝藏坐标走；它在 **guest 后缓冲**里（`screenshot.source=guest-backbuffer` +
   `hash_still_matches=true`，帧 2857 / 2867 每一张都是）⇒ 不是窗口合成 / letterbox / HUD。
