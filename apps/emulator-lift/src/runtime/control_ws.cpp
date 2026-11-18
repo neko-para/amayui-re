@@ -27,7 +27,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cfloat>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <ctime>
@@ -50,7 +52,8 @@
 #include <nlohmann/json.hpp>
 
 #include "runtime/clock.h"
-#include "runtime/cursor_map.h"  // kReferenceFrameW/H（`click` 的参考系上界；⛔ 这里不做除法）
+#include "runtime/control_global.h"  // global-get/set 的请求形状 + 十六进制口径（实现只在本 TU）
+#include "runtime/cursor_map.h"      // kReferenceFrameW/H（`click` 的参考系上界；⛔ 这里不做除法）
 #include "runtime/host_window.h"
 #include "runtime/input_plan.h"  // M1：`click` 入的是**同一个** InputPlan 的立即队列
 
@@ -128,6 +131,112 @@ std::chrono::milliseconds toMs(double seconds) {
     return std::chrono::milliseconds(static_cast<long long>(capped));
 }
 
+// =====================================================================================
+// script global：控制层口径的参数解析（**只认 0x 十六进制**；父级 2026-11-19 追加裁决）
+// =====================================================================================
+// ★ 纯十进制一律拒：脚本里 global 的 id / int 值都是 hex raw，支持十进制只会制造
+//   "0xB1B6 到底是 hex 还是十进制"的歧义。float 是唯一例外（JSON number，见下）。
+int hexDigit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// 只认 `0x` / `0X` 前缀；1..任意位十六进制，值必须落在 32 位内（溢出即拒，⛔ 不静默截断）。
+bool parseHex32Text(const std::string& text, std::uint32_t* out) {
+    if (text.size() <= 2) return false;
+    if (text[0] != '0' || (text[1] != 'x' && text[1] != 'X')) return false;
+    std::uint64_t value = 0;
+    for (std::size_t i = 2; i < text.size(); ++i) {
+        const int d = hexDigit(text[i]);
+        if (d < 0) return false;
+        value = (value << 4) | static_cast<std::uint64_t>(d);
+        if (value > 0xFFFFFFFFull) return false;
+    }
+    *out = static_cast<std::uint32_t>(value);
+    return true;
+}
+
+// JSON 对象 → 请求（**唯一的字段解析实现**；`parseControlGlobalRequest` 与 `parseCommand` 共用）。
+ControlGlobalRequest parseControlGlobalFields(const json& j, bool want_value) {
+    ControlGlobalRequest r;
+    auto fail = [&r](const char* detail) {
+        r.error = GlobalError::TypeMismatch;
+        r.detail = detail;
+        return r;
+    };
+
+    const auto kind_it = j.find("kind");
+    if (kind_it == j.end() || !kind_it->is_string()) {
+        return fail("kind 必须是字符串 int / uint / float（string 留第二期）");
+    }
+    const std::string kind_name = kind_it->get<std::string>();
+    if (kind_name == "int") {
+        r.kind = GlobalKind::Int;
+    } else if (kind_name == "uint") {
+        r.kind = GlobalKind::Uint;
+    } else if (kind_name == "float") {
+        r.kind = GlobalKind::Float;
+    } else if (kind_name == "string") {
+        return fail("kind=string 未实现（第二期：字符串池的记录布局不在本单范围）");
+    } else {
+        return fail("kind 必须是 int / uint / float（string 留第二期）");
+    }
+
+    // ★ index 是**字符串字面量**（JSON number 无法表达 0x 前缀）⇒ 数字形式一律拒。
+    const auto index_it = j.find("index");
+    if (index_it == j.end() || !index_it->is_string()) {
+        r.error = GlobalError::TypeMismatch;
+        r.detail = "index 必须是字符串形式的十六进制字面量（如 \"0xb1b6\"），⛔ 不接受 JSON number";
+        return r;
+    }
+    if (!parseHex32Text(index_it->get<std::string>(), &r.index)) {
+        r.error = GlobalError::TypeMismatch;
+        r.detail = "index 必须是十六进制且带 0x 前缀（如 0xb1b6），⛔ 不接受十进制";
+        return r;
+    }
+
+    if (!want_value) return r;  // global-get：value 字段忽略（未知字段一律忽略的既有协议口径）
+
+    const auto value_it = j.find("value");
+    if (value_it == j.end()) {
+        r.error = GlobalError::TypeMismatch;
+        r.detail = "global-set 需要 value";
+        return r;
+    }
+    if (r.kind == GlobalKind::Float) {
+        // ★ float 是**唯一**收十进制字面量的 kind：它不是脚本字段编码，而是 IEEE 裸 32 位的语义值。
+        if (!value_it->is_number()) {
+            r.error = GlobalError::TypeMismatch;
+            r.detail = "float 的 value 必须是 JSON number（十进制浮点字面量，如 1.5）";
+            return r;
+        }
+        const double d = value_it->get<double>();
+        if (!std::isfinite(d) || std::fabs(d) > static_cast<double>(FLT_MAX)) {
+            r.error = GlobalError::EncodeFailed;
+            r.detail = "float 的 value 必须是有限且落在 IEEE-754 32 位范围内的数";
+            return r;
+        }
+        r.f64 = d;
+        r.has_value = true;
+        return r;
+    }
+    // int / uint：32 位**位模式**，只收 0x 十六进制字符串（十进制 / JSON number 都拒）。
+    if (!value_it->is_string()) {
+        r.error = GlobalError::TypeMismatch;
+        r.detail = "int / uint 的 value 必须是十六进制字符串（如 \"0x80000010\"），⛔ 不接受 JSON number";
+        return r;
+    }
+    if (!parseHex32Text(value_it->get<std::string>(), &r.u32)) {
+        r.error = GlobalError::TypeMismatch;
+        r.detail = "int / uint 的 value 必须是十六进制且带 0x 前缀（如 0x80000010），⛔ 不接受十进制";
+        return r;
+    }
+    r.has_value = true;
+    return r;
+}
+
 // 控制线程解析出来的命令（只含值；主线程执行）。`for_*` 只对 `resume` 有意义。
 struct Command {
     ControlOp op = ControlOp::None;
@@ -141,6 +250,9 @@ struct Command {
     int x = 0;
     int y = 0;
     MouseButton button = MouseButton::Left;
+    // `global-get` / `global-set`：控制层口径的请求（JSON 已在控制线程解析 / 校验）。
+    //   ★ 只搬值（`ControlGlobalRequest` 没有 guest 指针）⇒ 主线程执行时不碰 JSON。
+    ControlGlobalRequest global;
 };
 
 // 主线程填、控制线程序列化的答复（⛔ 不含 guest 指针 / 不含自由文本错误码）。
@@ -149,6 +261,9 @@ struct Command {
 struct Reply {
     ControlError error = ControlError::None;
     std::string error_detail;
+    // ★ `global-*` 的**机器可读**错误 reason（闭集：`id_out_of_range` / `type_mismatch` /
+    //   `encode_failed`；nullptr = 没有）。`code` 仍是既有枚举（`bad_request`）。
+    const char* error_reason = nullptr;
     bool paused = false;
     const char* paused_at = "";
     std::uint64_t state_seq = 0;
@@ -165,9 +280,58 @@ struct Reply {
     int click_y = 0;
     const char* click_button = "left";
     std::size_t click_queued = 0;
+    // `global-get` / `global-set`：读 / 写的**值**（主线程填；控制线程只序列化）。
+    bool has_global = false;
+    GlobalValue global;
 };
 
 }  // namespace
+
+// =====================================================================================
+// script global：控制层口径的十六进制解析 + JSON（**唯一实现**；pure CTest 直接驱动）
+// =====================================================================================
+GlobalError parseGlobalIndexLiteral(const std::string& text, std::uint32_t* out) {
+    return parseHex32Text(text, out) ? GlobalError::None : GlobalError::TypeMismatch;
+}
+
+GlobalError parseGlobalValueLiteral(const std::string& text, std::uint32_t* out) {
+    return parseHex32Text(text, out) ? GlobalError::None : GlobalError::TypeMismatch;
+}
+
+ControlGlobalRequest parseControlGlobalRequest(const std::string& json_text, bool want_value) {
+    const json j = json::parse(json_text, nullptr, false);
+    if (j.is_discarded() || !j.is_object()) {
+        ControlGlobalRequest r;
+        r.error = GlobalError::TypeMismatch;
+        r.detail = "请求不是 JSON 对象";
+        return r;
+    }
+    return parseControlGlobalFields(j, want_value);
+}
+
+std::string controlGlobalJson(const GlobalValue& value) {
+    json j;
+    j["kind"] = globalKindName(value.kind);
+    char index_hex[16];
+    std::snprintf(index_hex, sizeof(index_hex), "0x%08X", value.index);
+    j["index"] = index_hex;
+    char raw_hex[16];
+    std::snprintf(raw_hex, sizeof(raw_hex), "0x%08X", value.raw);
+    j["raw"] = raw_hex;
+    if (value.kind == GlobalKind::Float) {
+        // ★ 非有限值不是 JSON number：`value:null`，位模式看 `raw`（⛔ 不谎报一个十进制数）。
+        if (std::isfinite(value.f64)) {
+            j["value"] = value.f64;
+        } else {
+            j["value"] = nullptr;
+        }
+    } else {
+        char value_hex[16];
+        std::snprintf(value_hex, sizeof(value_hex), "0x%08X", value.u32);
+        j["value"] = value_hex;
+    }
+    return j.dump();
+}
 
 // =====================================================================================
 // Impl
@@ -200,6 +364,8 @@ struct Control::Impl {
     int req_x = 0;
     int req_y = 0;
     MouseButton req_button = MouseButton::Left;
+    // `global-get` / `global-set`（只在这一条命令被消费时读）。
+    ControlGlobalRequest req_global;
     Reply reply;
     bool reply_ready = false;
     bool client_connected = false;
@@ -314,8 +480,9 @@ std::string Control::Impl::helloJson() const {
     j["started_utc"] = started_utc;
     j["exe_sha256"] = opts.exe_sha256;
     j["shape"] = opts.shape;
-    // ★ 只列**真的实现了**的（S0+S1+S2+S3+S4 + M1 的 `click`；`key` 本轮不做 ⇒ 不列）。
-    j["capabilities"] = json::array({"pause", "resume", "sample", "screenshot", "click", "quit"});
+    // ★ 只列**真的实现了**的（S0+S1+S2+S3+S4 + M1 的 `click` + typed global；`key` 本轮不做 ⇒ 不列）。
+    j["capabilities"] = json::array(
+        {"pause", "resume", "sample", "screenshot", "click", "global-get", "global-set", "quit"});
     // ★ 判据 2 的裁决（父级 2026-11-16）：`present` 在**顶层**（⛔ 不塞进 `control`）：
     //   它是**连接时的事实**，值取 `windowHidden()` / `describe()` 那条既有判据（⛔ 不由 --present 推）。
     j["present"] = opts.present;
@@ -345,6 +512,9 @@ std::string Control::Impl::resJson(const std::string& id, const Reply& r) const 
     if (r.error != ControlError::None) {
         j["ok"] = false;
         json err{{"code", controlErrorName(r.error)}};
+        // ★ `reason` = `global-*` 的闭集（`id_out_of_range` / `type_mismatch` / `encode_failed`）；
+        //   没有这一项时（其它命令）字段不出现 —— ⛔ 不编一个 "none"。
+        if (r.error_reason != nullptr) err["reason"] = r.error_reason;
         // ★ `code` 是枚举（判据 / 客户端分支）；`message` 只给**人**看（⛔ 不许客户端按它分支）。
         if (!r.error_detail.empty()) err["message"] = r.error_detail;
         j["error"] = err;
@@ -376,6 +546,10 @@ std::string Control::Impl::resJson(const std::string& id, const Reply& r) const 
                              {"y", r.click_y},
                              {"button", r.click_button},
                              {"queued", r.click_queued}};
+    }
+    if (r.has_global) {
+        // ★ 序列化是**纯函数**（`controlGlobalJson`）：`{kind,index,value,raw}`，value/raw 是 0x 位模式。
+        data["global"] = json::parse(controlGlobalJson(r.global), nullptr, false);
     }
     j["data"] = data;
     return j.dump();
@@ -695,6 +869,8 @@ bool Control::Impl::parseCommand(const json& j, const std::string& id, Command* 
     else if (op_name == "sample") out->op = ControlOp::Sample;
     else if (op_name == "screenshot") out->op = ControlOp::Screenshot;
     else if (op_name == "click") out->op = ControlOp::Click;
+    else if (op_name == "global-get") out->op = ControlOp::GlobalGet;
+    else if (op_name == "global-set") out->op = ControlOp::GlobalSet;
     else if (op_name == "quit") out->op = ControlOp::Quit;
     else {
         *err = ControlError::UnknownOp;  // ★ 未知 op ⇒ 枚举错误，⛔ 不静默
@@ -774,6 +950,13 @@ bool Control::Impl::parseCommand(const json& j, const std::string& id, Command* 
             }
         }
     }
+    // ---- `global-get <kind> <0x id>` / `global-set ... <0x value>` ----
+    //   ★ 字段解析 / 十六进制口径在 `parseControlGlobalFields`（唯一实现；pure CTest 也走它）。
+    //   ★ 解析错误**不在这里**拒帧：命令照旧到主线程，由 `serve()` 统一回
+    //     `bad_request` + `reason`（三类的机器可读面在协议里，不在 `message`）。
+    if (out->op == ControlOp::GlobalGet || out->op == ControlOp::GlobalSet) {
+        out->global = parseControlGlobalFields(j, out->op == ControlOp::GlobalSet);
+    }
     return true;
 }
 
@@ -805,6 +988,7 @@ void Control::Impl::handleFrame(const std::string& text) {
         req_x = cmd.x;
         req_y = cmd.y;
         req_button = cmd.button;
+        req_global = cmd.global;
         reply_ready = false;
         has_req = true;
         last_activity = Clock::now();
@@ -1000,6 +1184,7 @@ bool Control::Impl::serve(Context& ctx) {
         int click_x = 0;
         int click_y = 0;
         MouseButton click_button = MouseButton::Left;
+        ControlGlobalRequest greq;
         {
             std::unique_lock<std::mutex> lk(mu);
             // ---- ⓪ 已武装的重停谓词先轮询（只有它 armed 时才会走到这条分支）----
@@ -1073,6 +1258,8 @@ bool Control::Impl::serve(Context& ctx) {
             click_x = req_x;
             click_y = req_y;
             click_button = req_button;
+            greq = req_global;
+            req_global = ControlGlobalRequest{};
             req_for_frames = false;
             req_for_ms = false;
             req_path.clear();
@@ -1233,6 +1420,44 @@ bool Control::Impl::serve(Context& ctx) {
                 rep.click_queued = plan->queuedClicks();
                 break;
             }
+            case ControlOp::GlobalGet:
+            case ControlOp::GlobalSet: {
+                // ★ **哑原语**：不要求暂停（主线程块边界执行）；处理完按进入时的状态放行 guest
+                //   （`leave_paused = !paused`）—— 运行态 ⛔ 不把进程卡在 `serve()` 里；
+                //   已暂停则留在暂停态（与 `pause` / `sample` 同一条状态机）。
+                leave_paused = !paused;
+                const bool is_get = op == ControlOp::GlobalGet;
+                if (greq.error != GlobalError::None) {
+                    // 控制线程已解析 / 校验过请求：这里只把 reason + 人话发回去。
+                    rep.error = ControlError::BadRequest;
+                    rep.error_reason = globalErrorName(greq.error);
+                    rep.error_detail = greq.detail.empty() ? globalErrorDetail(greq.error) : greq.detail;
+                    break;
+                }
+                if (ctx.host == nullptr) {
+                    rep.error = ControlError::Unavailable;
+                    rep.error_detail = "这个宿主没有接 script global 读写口";
+                    break;
+                }
+                GlobalValue value;
+                value.kind = greq.kind;
+                value.index = greq.index;
+                value.u32 = greq.u32;
+                value.f64 = greq.f64;
+                const GlobalError ge = is_get ? ctx.host->controlGlobalGet(greq.kind, greq.index, &value)
+                                              : ctx.host->controlGlobalSet(greq.kind, greq.index, value);
+                if (ge != GlobalError::None) {
+                    // ★ 模块的错误 → 既有 `bad_request` 码 + 闭集 `reason`（⛔ 不扩客户端退出码）。
+                    rep.error = ControlError::BadRequest;
+                    rep.error_reason = globalErrorName(ge);
+                    rep.error_detail = globalErrorDetail(ge);
+                    break;
+                }
+                rep = stateReply();
+                rep.has_global = true;
+                rep.global = value;
+                break;
+            }
             case ControlOp::Quit:
             default: {
                 if (paused) {
@@ -1353,6 +1578,8 @@ const char* controlOpName(ControlOp op) {
         case ControlOp::Sample: return "sample";
         case ControlOp::Screenshot: return "screenshot";
         case ControlOp::Click: return "click";
+        case ControlOp::GlobalGet: return "global-get";
+        case ControlOp::GlobalSet: return "global-set";
         case ControlOp::Quit: return "quit";
     }
     return "none";

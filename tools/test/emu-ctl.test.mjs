@@ -149,6 +149,103 @@ test('clickFrame：请求帧是顶层 x/y/button（⛔ 不包 args）', () => {
   assert.equal(L.REFERENCE_H, 720);
 });
 
+// =====================================================================================
+// typed global（父级 2026-11-19 追加裁决：index 与 int/uint value **只收 0x 十六进制**）
+// =====================================================================================
+
+test('argv：global-* 的 --index / int-uint --value 只收 0x 十六进制；纯十进制 ⇒ 退出码 2', () => {
+  const g = L.parseArgv(['global-get', '--kind', 'int', '--index', '0xb1b6']);
+  assert.equal(g.op, 'global-get');
+  assert.equal(g.globalKind, 'int');
+  assert.equal(g.globalIndex, '0xb1b6');
+  assert.equal(g.globalValue, null);
+  // 隐藏 flag 形式 + 大小写 / 前导零归一化
+  assert.equal(L.parseArgv(['--global-get', '--kind', 'uint', '--index', '0x0000B1B6']).globalIndex, '0xb1b6');
+
+  // int / uint：value 是 0x 字符串
+  assert.equal(
+    L.parseArgv(['global-set', '--kind', 'int', '--index', '0xb1b6', '--value', '0x80000010']).globalValue,
+    '0x80000010',
+  );
+  // float：value 是十进制 number（**唯一例外**）；-0.0 的符号要留住
+  assert.equal(L.parseArgv(['global-set', '--kind', 'float', '--index', '0x1', '--value', '1.5']).globalValue, 1.5);
+  assert.equal(
+    Object.is(L.parseArgv(['global-set', '--kind', 'float', '--index', '0x1', '--value', '-0.0']).globalValue, -0),
+    true,
+  );
+  // string：本地放行（由服务端回"未实现"的 type_mismatch），不做第二份裁决
+  assert.equal(L.parseArgv(['global-get', '--kind', 'string', '--index', '0xb1b6']).globalKind, 'string');
+
+  // ★ 错误信息要**教人怎么写**（0x 前缀 + 例值）
+  assert.throws(
+    () => L.parseArgv(['global-get', '--kind', 'int', '--index', '45494']),
+    /0x 前缀.*0xb1b6/,
+    '纯十进制 index 必须点名"要 0x 前缀"',
+  );
+
+  const bad = [
+    ['global-get', '--kind', 'int', '--index', '45494'], // ★ 纯十进制（追加裁决）
+    ['global-get', '--kind', 'int', '--index', 'b1b6'], // 缺 0x
+    ['global-set', '--kind', 'int', '--index', '0x1', '--value', '16'], // ★ 纯十进制 value
+    ['global-set', '--kind', 'uint', '--index', '0x1', '--value', '-1'],
+    ['global-set', '--kind', 'float', '--index', '0x1', '--value', '0x10'], // float 不收 hex
+    ['global-set', '--kind', 'float', '--index', '0x1', '--value', '1e40'], // 超 float32
+    ['global-get', '--kind', 'int'], // 缺 index
+    ['global-get', '--kind', 'int', '--index', '0x1', '--value', '0x1'], // get 不收 value
+    ['global-set', '--kind', 'int', '--index', '0x1'], // 缺 value
+    ['global-get', '--kind', 'int32', '--index', '0x1'], // 未知 kind
+    ['global-get', '--index', '0x1'], // 缺 kind
+    ['global-get', '--kind', 'int', '--index', '0x100000000'], // > 32 位
+    ['pause', '--index', '0x1'], // global 参数不能给别的 op
+  ];
+  for (const argv of bad) {
+    assert.throws(
+      () => L.parseArgv(argv),
+      (err) => err instanceof L.UsageError && err.exitCode === 2,
+      `应当拒：${argv.join(' ')}`,
+    );
+  }
+});
+
+test('globalFrame：顶层 {op,kind,index,value}；index / int-uint value 是字符串 0x，float 是 number', () => {
+  assert.deepEqual(L.globalFrame('global-get', 'int', '0xb1b6'), {
+    op: 'global-get',
+    kind: 'int',
+    index: '0xb1b6',
+  });
+  assert.deepEqual(L.globalFrame('global-set', 'int', '0xb1b6', '0x80000010'), {
+    op: 'global-set',
+    kind: 'int',
+    index: '0xb1b6',
+    value: '0x80000010',
+  });
+  assert.deepEqual(L.globalFrame('global-set', 'float', '0x1', 1.5), {
+    op: 'global-set',
+    kind: 'float',
+    index: '0x1',
+    value: 1.5,
+  });
+  assert.equal(Object.hasOwn(L.globalFrame('global-get', 'int', '0x1'), 'value'), false);
+  assert.equal(Object.hasOwn(L.globalFrame('global-get', 'int', '0x1'), 'args'), false);
+});
+
+test('formatGlobalLine：kind/index/value/raw 按服务端 0x 位模式打印；float 的 null 不冒充 0', () => {
+  assert.equal(
+    L.formatGlobalLine('global-get', {
+      ok: true,
+      data: { global: { kind: 'int', index: '0x0000B1B6', value: '0x80000010', raw: '0x79A66695' } },
+    }),
+    'global-get ok kind=int index=0x0000B1B6 value=0x80000010 raw=0x79A66695',
+  );
+  assert.equal(
+    L.formatGlobalLine('global-get', {
+      ok: true,
+      data: { global: { kind: 'float', index: '0x00000002', value: null, raw: '0x7FC00001' } },
+    }),
+    'global-get ok kind=float index=0x00000002 value=null raw=0x7FC00001',
+  );
+});
+
 test('argv：非法组合与非法数值都在客户端挡住（退出码 2）', () => {
   const bad = [
     () => L.parseArgv([]),
@@ -492,14 +589,32 @@ test('resultJson / listJson：--json 是**一个**对象（list 条目就是 lis
 // 自描述（mutates 逐条标；M1 不在实现里）
 // =====================================================================================
 
-test('OPERATIONS 的 mutates 逐条正确；sample/click/gc 会写；key 不在实现里', () => {
+test('OPERATIONS 的 mutates 逐条正确；sample/click/global-set/gc 会写；key 不在实现里', () => {
   const byName = Object.fromEntries(L.OPERATIONS.map((o) => [o.name, o]));
-  assert.deepEqual(Object.keys(byName).sort(), ['click', 'gc', 'list', 'pause', 'quit', 'resume', 'sample', 'screenshot', 'wait']);
+  assert.deepEqual(Object.keys(byName).sort(), [
+    'click',
+    'gc',
+    'global-get',
+    'global-set',
+    'list',
+    'pause',
+    'quit',
+    'resume',
+    'sample',
+    'screenshot',
+    'wait',
+  ]);
   assert.equal(byName.list.mutates, false);
   assert.equal(byName.click.mutates, true);
   assert.match(byName.click.summary, /入队 ≠ 施加/);
   assert.match(byName.click.summary, /1280×720/);
   assert.match(byName.click.summary, /64 条/);
+  // ★ typed global：get 只读；set 写一个 guest 数据槽；两者都必须点名"必须 0x 十六进制"
+  assert.equal(byName['global-get'].mutates, false);
+  assert.equal(byName['global-set'].mutates, true);
+  assert.match(byName['global-get'].summary, /0x 十六进制/);
+  assert.match(byName['global-set'].summary, /0x 十六进制/);
+  assert.match(byName['global-set'].summary, /十进制浮点/);
   // ★ sample 会 freeze + ++state_seq（停在汇点才能采样）⇒ 契约上是"会写"
   assert.equal(byName.sample.mutates, true);
   assert.equal(byName.sample.summary.includes('停在汇点才能采样'), true);
@@ -529,4 +644,9 @@ test('describeText：写明同名陷阱（控制层 wait ≠ --input-plan 的 wa
   assert.match(text, /含当前冻结区间/);
   assert.match(text, /\(会写\)/);
   assert.match(text, /\(只读\)/);
+  // ★ typed global 的口径必须自描述（哑原语 / 只收 0x / float 例外 / 三类 reason）
+  assert.match(text, /global-get \/ global-set（哑原语/);
+  assert.match(text, /纯十进制一律拒/);
+  assert.match(text, /唯一例外/);
+  assert.match(text, /id_out_of_range, type_mismatch, encode_failed/);
 });

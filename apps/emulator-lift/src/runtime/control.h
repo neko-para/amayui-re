@@ -10,10 +10,15 @@
 // ★ 热路径成本：`pending()` = **一次 atomic load**；调用方先判 `Control* == nullptr`
 //   ⇒ 不带 `--control-root` 的进程连这次原子读都不付（与 `presenter_` 的空指针判据同形）。
 //
-// ★ 能力面（S0+S1+S2+S3+S4 + M1 的 `click`）= `pause` / `resume`（含 `--for-ms` / `--for frames`）/
-//   `sample` / `screenshot` / `click` / `quit`；`capabilities` 只列**真的实现了**的（`hello` 如实报这一份）。
+// ★ 能力面（S0+S1+S2+S3+S4 + M1 的 `click` + typed global）= `pause` / `resume`（含 `--for-ms` /
+//   `--for frames`）/ `sample` / `screenshot` / `click` / `global-get` / `global-set` / `quit`；
+//   `capabilities` 只列**真的实现了**的（`hello` 如实报这一份）。
 //   ★ `click` = **暂停态入队**，由**下一个 guest 读点**（`InputPlan::atPoint`）施加 —— 控制线程与
 //     `serve()` 都**不碰** guest 状态；⛔ 也不推进配方（判据 2）。`key` 本轮**不做** ⇒ `unknown_op`。
+//   ★ `global-get` / `global-set` = **哑原语**：按 id + 显式 kind 读写一格 script global。
+//     寻址 / ENC-DEC / 类型编码在 `runtime/script_globals.h`（**AGE 引擎层**，可替换；QJS 侧将来共用）；
+//     本层只做「JSON → 参数校验（含 0x 十六进制口径）→ 调模块 → 组返回」。
+//     ⛔ 不猜类型 / ⛔ 不挑时机 / ⛔ 不重试 / ⛔ 不写后校验 / ⛔ 不为任何 global 开特例。
 // ★ 快照的值类型与"主线程取数口"在 `runtime/control_snapshot.h`（只含值，⛔ 无 guest 指针 /
 //   无 beast / 无 nlohmann）⇒ 控制线程拿到的是一份拷贝。
 #pragma once
@@ -45,7 +50,17 @@ enum class ControlError : std::uint8_t {
 const char* controlErrorName(ControlError e);
 
 // 命令（控制线程解析成枚举；主线程执行）。
-enum class ControlOp : std::uint8_t { None = 0, Pause, Resume, Sample, Screenshot, Click, Quit };
+enum class ControlOp : std::uint8_t {
+    None = 0,
+    Pause,
+    Resume,
+    Sample,
+    Screenshot,
+    Click,
+    GlobalGet,  // 读一格 script global（id + 显式 kind；哑原语）
+    GlobalSet,  // 写一格 script global（只写一个数据槽；⛔ 不写 cpu_/regs_）
+    Quit,
+};
 const char* controlOpName(ControlOp op);
 
 // =====================================================================================
@@ -76,7 +91,10 @@ public:
     //     ⇒ 入的是**同一个** `InputPlan`，施加点是它自己的 guest 读点（⛔ 控制层不施加）；
     //   · `stop_requested` = 置停（主线程每个块边界读；本轮由 `serve()` 的返回值同时表达）；
     //   · `paused_at` = 本汇点的名字（`"block"` / `"present"`）—— 由**调用点**填，⛔ Control 不猜；
-    //   · `host`     = 快照 / 截图 / resume 的宿主取数口（S2/S3/S4；nullptr ⇒ 该能力 `unavailable`）。
+    //   · `host`     = 快照 / 截图 / resume / **global 读写**的宿主取数口（S2/S3/S4；nullptr ⇒ 该能力 `unavailable`）。
+    //     ★ `global-set` 是唯一会**写 guest 数据槽**的命令：`serve()` 在主线程块边界调
+    //       `ControlHostSide::controlGlobalSet`（→ `runtime/script_globals.h`）；⛔ 不写 cpu_/regs_、
+    //       ⛔ 不改执行流，下一块自然重新从内存加载 ⇒ 写完立刻对引擎可见。
     struct Context {
         VirtualClock* clock = nullptr;
         WindowManager* windows = nullptr;

@@ -11,6 +11,7 @@
 #include "corpus/lst_index.h"
 #include "runtime/memory.h"
 #include "runtime/native_huffman.h"
+#include "runtime/value_codec.h"  // `sortKeyOf` = `decodeInt`（唯一公式，见该头）
 #include "runtime/x86.h"
 
 namespace lift {
@@ -819,10 +820,10 @@ bool sortSegSpansOverlap(std::uint64_t a0, std::uint64_t a1, std::uint64_t b0, s
 
 std::uint32_t sortKeyOf(std::uint32_t seed, std::uint32_t v) {
     // 逐字：`0x42F610 rol eax,0Bh` → `0x42F613 xor eax,[ebp+var_14]` → `0x42F616 ror eax,19h`。
-    // ★ 每一步都是**32 位**：`v << 11` 与 `mixed << 7` 都在 uint32 上回绕，⛔ 不许先扩到 64 位再 `|`。
-    const std::uint32_t rolled = (v << 11) | (v >> 21);  // rol32(v, 11)
-    const std::uint32_t mixed = rolled ^ seed;
-    return (mixed >> 25) | (mixed << 7);                 // ror32(x, 25)
+    // ★ 公式 = `ror32(seed ^ rol32(v, 11), 25)` = **DEC**（`runtime/value_codec.h`）。
+    //   ⇒ 转发 `decodeInt(v, seed)`：script global 的 int codec 与这里是**同一份实现**
+    //   （2026-11-19；⛔ 不要再抄一份旋转公式到这里 —— 两处会分叉，而变异只测得到一处）。
+    return decodeInt(v, seed);
 }
 
 std::uint64_t sortSegReplacedInsns(std::uint32_t comparisons, bool stopped) {

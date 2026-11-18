@@ -39,11 +39,13 @@ const HELP = `tools/emu-ctl.mjs — AOT 控制层客户端（Node 内置 WebSock
   node tools/emu-ctl.mjs sample [--json] [--session <id>] [--timeout <s>]
   node tools/emu-ctl.mjs screenshot <path> [--json] [--session <id>] [--timeout <s>]
   node tools/emu-ctl.mjs click <x> <y> [left|right] [--json] [--session <id>] [--timeout <s>]
+  node tools/emu-ctl.mjs global-get --kind <int|uint|float> --index <0x…> [--json] [--session <id>] [--timeout <s>]
+  node tools/emu-ctl.mjs global-set --kind <int|uint|float> --index <0x…> --value <0x…|十进制浮点> [--json] [--session <id>] [--timeout <s>]
   node tools/emu-ctl.mjs wait <ms> [--json] [--session <id>] [--timeout <s>]
   node tools/emu-ctl.mjs quit [--json] [--session <id>] [--timeout <s>]
   node tools/emu-ctl.mjs gc [--dry-run] [--json] [--control-root <dir>]
   node tools/emu-ctl.mjs --describe [--json] | --help
-  pnpm tools emu-ctl <list|pause|resume|sample|screenshot|click|wait|quit|gc> [args…]
+  pnpm tools emu-ctl <list|pause|resume|sample|screenshot|click|global-get|global-set|wait|quit|gc> [args…]
 
   --control-root <dir>   端点目录（缺省 <repo>/.tmp/emu-ctl；与服务端 --control-root 同一个）
   --session <id>         精确选中一个实例；缺省时**恰好一个 alive** 才自动选中
@@ -57,10 +59,11 @@ const HELP = `tools/emu-ctl.mjs — AOT 控制层客户端（Node 内置 WebSock
 退出码
   0  成功（含 sample.script.available:false —— 数据缺失不是错误）
   1  端点回 ok:false（或连接在答复前断开）
-  2  参数 / 协议错（含 nonce 不一致、click 坐标/按钮非法、key = M1 未实现、gc 的 root 不可读 / 删除失败）
+  2  参数 / 协议错（含 nonce 不一致、click 坐标/按钮非法、global 的 index/value 不是 0x 十六进制、
+     key = M1 未实现、gc 的 root 不可读 / 删除失败）
   3  超时（端点仍活）
-  4  找不到 / 多个实例（**仅"要挑一个实例"的 op**：pause/resume/sample/screenshot/click/wait/quit；
-     不猜，用 --session <id> 精确选中；⛔ \`list\` 恒 0，多实例也 0）
+  4  找不到 / 多个实例（**仅"要挑一个实例"的 op**：pause/resume/sample/screenshot/click/global-get/
+     global-set/wait/quit；不猜，用 --session <id> 精确选中；⛔ \`list\` 恒 0，多实例也 0）
 
 ★ \`list\` 的 why ∈ {ok, refused, timeout, nonce_mismatch, bad_file}
   · kill -9 的残留文件 ⇒ alive:false, why:"refused"，**文件仍在**（list 不删；要清就用 gc）
@@ -72,6 +75,17 @@ const HELP = `tools/emu-ctl.mjs — AOT 控制层客户端（Node 内置 WebSock
   只把一条点击放进**立即队列**，施加点是**下一个 guest 读点** ⇒ **只接受暂停态**（运行态端点回
   \`not_paused\` ⇒ 退出码 1）。队列上界 **64 条/次**，满了端点回 \`bad_request\`（⇒ 退出码 1）。
   本地坐标/按钮非法 ⇒ 退出码 2（省一次往返）。请求帧是顶层 \`{op:"click",x,y,button}\`（⛔ 不包 args）。
+
+★ global-get / global-set（**哑原语**：按 id + 显式 kind 读写一格 script global）：
+  \`--index\` 与 int/uint 的 \`--value\` **必须是带 0x 前缀的十六进制**（脚本里 global 的 id 就是 hex raw，
+  如 \`0xb1b6\`；⛔ 纯十进制一律拒 —— 本工具不猜"它是 hex 还是十进制"）。
+  \`--kind int|uint|float\`（string 第二期未实现，服务端回 type_mismatch）；int/uint 写的是 **32 位位模式**，
+  槽里过 ENC（不是明文）；float 是 IEEE-754 裸 32 位，\`--value\` 是**唯一收十进制**的 global 输入。
+  输出 \`data.global{kind,index,value,raw}\`：int/uint 的 value/raw 与 index 都是 \`0x%08X\`；
+  float 的 value 是十进制 number（非有限 ⇒ null，位模式看 raw）。
+  失败：\`error.code:"bad_request"\` + \`error.reason ∈ {id_out_of_range,type_mismatch,encode_failed}\`（退出码 1）。
+  ⛔ 不猜类型 / 不挑时机 / 不重试 / 不写后校验 / 不为任何 global 开特例；读-改-写由调用方自己发两条命令
+  （工具不保证两条之间值不变）。写的是运行中的 guest 槽 ⇒ 之后的 save-int 可能把它写进存档（用私有 --appdata）。
 
 ★ gc（**只删残留端点文件**，⛔ 不动其它文件）：
   删 = ① connect 判死（refused/timeout）② 文件里的 pid 不存活（kill(pid,0)；pid 复用 ⇒ pid 只是辅助）
@@ -91,7 +105,7 @@ const HELP = `tools/emu-ctl.mjs — AOT 控制层客户端（Node 内置 WebSock
   ★ 截图是 present 时冻结的那一帧；\`hash_still_matches\` 只回答"冻结有没有生效"，⛔ 别拿它当判据
     （判内容要判非全黑 / 与同帧 \`--dump-frame\` 对照）。
 
-⛔ 未实现：key（M1 的剩余能力，服务端还没有这个 op）· "自动挑一个"实例（要挑实例的 op 在多个 alive 时 ⇒ 退出码 4；\`list\` 恒 0）
+⛔ 未实现：key（M1 的剩余能力，服务端还没有这个 op）· global 的 string 种类（第二期）· "自动挑一个"实例（要挑实例的 op 在多个 alive 时 ⇒ 退出码 4；\`list\` 恒 0）
 `;
 
 /** 客户端侧失败（不是服务端的 `ok:false`）。`kind` 决定退出码（见 lib 的 `exitCodeForError`）。 */
@@ -485,6 +499,14 @@ function buildCommand(parsed) {
     // ★ 顶层字段（服务端 parseCommand 只读顶层；⛔ 不包 args）。
     return L.clickFrame(parsed.click.x, parsed.click.y, parsed.click.button);
   }
+  if (parsed.op === 'global-get') {
+    // ★ 顶层 `{op,kind,index}`；index 是**字符串** 0x 十六进制（本地已校验 / 归一化）。
+    return L.globalFrame('global-get', parsed.globalKind, parsed.globalIndex);
+  }
+  if (parsed.op === 'global-set') {
+    // ★ int/uint 的 value 是 0x 字符串；float 的 value 是 JSON number（本地已按 kind 校验）。
+    return L.globalFrame('global-set', parsed.globalKind, parsed.globalIndex, parsed.globalValue);
+  }
   if (parsed.op === 'wait') return { op: 'resume', for_ms: parsed.waitMs };
   if (parsed.op === 'resume') {
     if (parsed.forMs !== null) return { op: 'resume', for_ms: parsed.forMs };
@@ -745,6 +767,8 @@ async function cmdOne(parsed) {
       say(L.formatSampleLine(reply.data?.sample));
     } else if (parsed.op === 'click') {
       say(L.formatClickLine(reply));
+    } else if (parsed.op === 'global-get' || parsed.op === 'global-set') {
+      say(L.formatGlobalLine(parsed.op, reply));
     } else if (parsed.op === 'screenshot') {
       say(L.formatScreenshotLine(reply.data?.screenshot));
     } else if (parsed.op === 'quit') {

@@ -640,9 +640,11 @@ void caseEndpointSurface() {
     const std::string hello_control = jsonObject(hello, "control");
     LIFT_CHECK(!hello_control.empty());
     LIFT_CHECK(hello_control.find("\"present\"") == std::string::npos);  // 从 control 挪走了
-    // `capabilities` 只列真的实现了的（S2/S3 之后含 `sample` / `screenshot`；M1 之后含 `click`）
-    LIFT_CHECK(hello.find("\"capabilities\":[\"pause\",\"resume\",\"sample\",\"screenshot\",\"click\",\"quit\"]") !=
-               std::string::npos);
+    // `capabilities` 只列真的实现了的（S2/S3 之后含 `sample` / `screenshot`；M1 之后含 `click`；
+    // typed global 之后含 `global-get` / `global-set`）
+    LIFT_CHECK(hello.find(
+                   "\"capabilities\":[\"pause\",\"resume\",\"sample\",\"screenshot\",\"click\",\"global-get\","
+                   "\"global-set\",\"quit\"]") != std::string::npos);
 
     // ⑤ 未知 op ⇒ unknown_op（`sample` 本轮没实现 ⇒ 它必须被拒）；每条 res 的 nonce 回显
     struct Res {

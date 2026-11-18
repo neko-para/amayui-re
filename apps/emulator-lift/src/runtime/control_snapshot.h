@@ -17,6 +17,8 @@
 #include <cstdint>
 #include <string>
 
+#include "runtime/script_globals.h"  // GlobalKind / GlobalValue / GlobalError（值类型；⛔ 无 guest 指针）
+
 namespace lift {
 
 // =====================================================================================
@@ -100,6 +102,22 @@ public:
     virtual void controlOnResume() {}
     // 当前 Present 帧号（`resume --for frames` 的谓词用；没有呈现层 ⇒ 0）。
     virtual std::uint64_t controlPresentFrame() const { return 0; }
+    // `global-get` / `global-set` 的主线程执行口（`runtime/script_globals.h` 是唯一实现）。
+    // ★ 默认 = 这个宿主没接（只会出现在测试假宿主上）⇒ 控制层按 `type_mismatch` 回；
+    //   `AotHost` 覆写为直接调模块（`readGlobal` / `writeGlobal`）。
+    // ★ ⛔ 实现里不许碰 `cpu_` / `regs_`：写的是**一个 guest 数据槽**，不是执行流。
+    virtual GlobalError controlGlobalGet(GlobalKind kind, std::uint32_t id, GlobalValue* out) {
+        (void)kind;
+        (void)id;
+        (void)out;
+        return GlobalError::TypeMismatch;
+    }
+    virtual GlobalError controlGlobalSet(GlobalKind kind, std::uint32_t id, const GlobalValue& value) {
+        (void)kind;
+        (void)id;
+        (void)value;
+        return GlobalError::TypeMismatch;
+    }
 };
 
 // ★ 脚本位置 + 身份 + `script_sha` 的**唯一**填充点（主线程调）。

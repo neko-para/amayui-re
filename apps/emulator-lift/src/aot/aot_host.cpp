@@ -38,6 +38,7 @@
 #include "runtime/decode_cache.h"  // `liftOneDecodeCache()`：只读命中率（`decode-cache:` 行）
 #include "runtime/fault_state.h"   // guest fault 现场（AOT 没有 Machine ⇒ 本臂自己登记；见该头注）
 #include "runtime/guest_token.h"   // Phase-0（`arm()` 在 `AotHost::run`；这里只读）
+#include "runtime/script_globals.h"  // `global-get/set` 的 AGE 引擎层实现（控制层只转发）
 #include "runtime/token_phase0_report.h"  // tokenhold/holdhist/waithist/shimmax 的唯一打印点
 #include "shims/register.h"
 
@@ -1158,8 +1159,9 @@ void AotHost::printSlowFrames(std::FILE* out) const {
 }
 
 // =====================================================================================
-// 控制层（S2/S3/S4）的**主线程取数口**：全部在主线程被调（`Control::serve` 在汇点里跑）
-//   ★ 这里只**读**宿主 / guest；⛔ 不改 guest 状态、⛔ 不进执行循环。
+// 控制层（S2/S3/S4 + typed global）的**主线程取数口**：全部在主线程被调（`Control::serve` 在汇点里跑）
+//   ★ 这里只**读**宿主 / guest；唯一的写 = `controlGlobalSet`（一个 global 数据槽，经
+//     `runtime/script_globals.h`）。⛔ 不改 `cpu_` / `regs_`、⛔ 不进执行循环。
 // =====================================================================================
 bool AotHost::presentGateThunk(void* user) {
     auto* self = static_cast<AotHost*>(user);
@@ -1228,6 +1230,23 @@ ControlShotStatus AotHost::controlScreenshot(const std::string& path, ControlScr
 }
 
 void AotHost::controlOnResume() { presenter_.noteControlResume(); }
+
+// =====================================================================================
+// `global-get` / `global-set`（控制层的主线程执行口）
+//   ★ 唯一实现在 `runtime/script_globals.cpp`（寻址 / ENC-DEC / 类型编码）；这里只转发 `mem_`。
+//   ★ 写的是**一个 guest 数据槽**：⛔ 不碰 `cpu_` / `regs_`，下一块从内存重新加载。
+// =====================================================================================
+GlobalError AotHost::controlGlobalGet(GlobalKind kind, std::uint32_t id, GlobalValue* out) {
+    GlobalError err = GlobalError::None;
+    if (!readGlobal(mem_, id, kind, out, &err)) return err;
+    return GlobalError::None;
+}
+
+GlobalError AotHost::controlGlobalSet(GlobalKind kind, std::uint32_t id, const GlobalValue& value) {
+    GlobalError err = GlobalError::None;
+    if (!writeGlobal(mem_, id, kind, value, &err)) return err;
+    return GlobalError::None;
+}
 
 // =====================================================================================
 // 窗口 profile（`profile_begin/end` 驱动；桶与闭式在 `aot/window_prof.h`，这里只做

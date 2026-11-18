@@ -4576,6 +4576,52 @@ const MUTATIONS = [
       '把白名单判定改成恒 `true` ⇒ DEFAULT(0) / ONE(1) / TWO(2) / FOUR(4) / EIGHT(8) 全被接受 ⇒ ' +
       'present-interval 的 10 条 `!presentIntervalSupported(v)` 断言当场红',
   },
+
+  // ── typed global：int 槽写成**明文**（守卫 = `tests/control_globals.cpp`）──
+  //   ★ 代表"写了但没生效"这一类**静默**缺陷：引擎读到的是它 DEC 后的垃圾位模式 —— 工具回 ok:true、
+  //     脚本里那个 global 却没有任何变化，而日志 / 截图都不会喊。analysis §2.4 / §3.3(d) 第 6 条。
+  //   ★ 为什么落在**写**而不是读：读错只影响诊断；写错会**改坏 guest 状态**，而且看起来成功了。
+  {
+    file: 'apps/emulator-lift/src/runtime/script_globals.cpp',
+    from: '    mem.wr32(slot.addr, encodeInt(value.u32, key));  // ★ ENC，⛔ 不是明文',
+    to: '    mem.wr32(slot.addr, value.u32);  // 变异：写明文（引擎 DEC 出垃圾 ⇒ "写了但没生效"）',
+    guard: 'ctest:lift-control-globals',
+    ctest: 'lift-control-globals',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-control-globals',
+    what:
+      'script-globals-int-enc-plaintext：把 int/uint 的写入从 `ENC(value, key)` 换成**明文** ⇒ ' +
+      'lift-control-globals 的 "槽里必须是 ENC / 读回原值"断言当场红（NaN 与 float 不受影响 ⇒ 红点必须点名 int 往返）',
+  },
+
+  // ── typed global：十六进制口径退回"自动识别十进制"（守卫 = `tests/control_globals.cpp`）──
+  //   ★ 父级 2026-11-19 追加裁决：index / int-uint value **只收带 0x 前缀的十六进制**，纯十进制一律拒。
+  //   ★ 为什么这是判据而不是风格：`b1b6` 是 hex raw，支持十进制就会把 `45494` 与 `0xb1b6` 当成两个
+  //     都可能的意思（"0xB1B6 到底是 hex 还是十进制"的歧义回来）—— 静默写错槽比报错更糟。
+  {
+    file: 'apps/emulator-lift/src/runtime/control_ws.cpp',
+    from: "    if (text[0] != '0' || (text[1] != 'x' && text[1] != 'X')) return false;",
+    to:
+      '    // 变异：退回到"自动识别十进制"（父级 2026-11-19 已裁决只收 0x 前缀）\n' +
+      "    if (!(text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))) {\n" +
+      '        try {\n' +
+      '            std::size_t used = 0;\n' +
+      '            const unsigned long v = std::stoul(text, &used, 10);\n' +
+      '            if (used != text.size() || v > 0xFFFFFFFFul) return false;\n' +
+      '            *out = static_cast<std::uint32_t>(v);\n' +
+      '            return true;\n' +
+      '        } catch (...) {\n' +
+      '            return false;\n' +
+      '        }\n' +
+      '    }',
+    guard: 'ctest:lift-control-globals',
+    ctest: 'lift-control-globals',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-control-globals',
+    what:
+      'control-global-hex-only：把 `parseHex32Text` 的"只认 0x 前缀"改成"0x 或十进制都吃" ⇒ ' +
+      'lift-control-globals 的 `parseGlobalIndexLiteral("45494") == type_mismatch` 断言当场红（十进制 index 被静默接受）',
+  },
 ];
 
 let mutationRunSeq = 0;

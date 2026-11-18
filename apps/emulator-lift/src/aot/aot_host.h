@@ -311,6 +311,11 @@ public:
                                         std::string* err) override;
     void controlOnResume() override;
     std::uint64_t controlPresentFrame() const override { return presenter_.frameCount(); }
+    // ★ `global-get` / `global-set`：直接转发到 `runtime/script_globals.h` 的 **AGE 引擎层实现**
+    //   （控制层只搬 JSON / 值；寻址 + ENC/DEC 不在这里）。只在主线程被调；写的是一个 guest 数据槽，
+    //   ⛔ 不写 `cpu_` / `regs_`；下一块自然重新从内存加载 ⇒ 写完立刻对引擎可见。
+    GlobalError controlGlobalGet(GlobalKind kind, std::uint32_t id, GlobalValue* out) override;
+    GlobalError controlGlobalSet(GlobalKind kind, std::uint32_t id, const GlobalValue& value) override;
     // 宿主时钟（控制层的 freeze/unfreeze 与 `guest_ms` 读数都要它；解释器臂同形 `Machine::clock()`）。
     VirtualClock& clock() { return clock_; }
     const VirtualClock& clock() const { return clock_; }

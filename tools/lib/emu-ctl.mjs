@@ -42,7 +42,16 @@ export const EXIT = Object.freeze({
 });
 
 /** 本客户端实现的操作（`click` 已解锁；⛔ `key` 仍是 M1 未实现；`gc` 只删残留端点文件）。 */
-export const OPS = Object.freeze(['list', 'pause', 'resume', 'sample', 'screenshot', 'click', 'wait', 'quit', 'gc']);
+export const OPS = Object.freeze([
+  'list', 'pause', 'resume', 'sample', 'screenshot', 'click',
+  'global-get', 'global-set', 'wait', 'quit', 'gc',
+]);
+
+/** `global-get` / `global-set` 的 kind（`string` 第二期未实现；服务端会回 type_mismatch）。 */
+export const GLOBAL_KINDS = Object.freeze(['int', 'uint', 'float', 'string']);
+
+/** IEEE-754 单精度最大值（`float` 的 `--value` 上界；服务端 `parseCommand` 同一条边界）。 */
+export const FLOAT32_MAX = 3.4028234663852886e38;
 
 /** M1 的**剩余**能力：传了就明确回"未实现"（退出码 2），⛔ 不当 `unknown_op` 静默掉。`click` 已解锁。 */
 export const M1_OPS = Object.freeze(['key']);
@@ -91,6 +100,8 @@ const OP_FLAG = Object.freeze({
   '--wait': 'wait',
   '--quit': 'quit',
   '--click': 'click',
+  '--global-get': 'global-get',
+  '--global-set': 'global-set',
   '--gc': 'gc',
 });
 
@@ -98,6 +109,10 @@ const TAKES_VALUE = Object.freeze({
   '--session': 'session',
   '--timeout': 'timeout',
   '--control-root': 'root',
+  // `global-*` 的参数先原样收集，**op 确定之后**再按 kind 校验（`--value` 的规则随 kind 变）。
+  '--kind': 'gkind',
+  '--index': 'gindex',
+  '--value': 'gvalue',
 });
 
 function parsePositiveNumber(raw, flag) {
@@ -143,6 +158,58 @@ export function parseClickButton(raw) {
   return button;
 }
 
+/**
+ * `global-*` 的 `--kind`：`int` / `uint` / `float`（`string` 第二期未实现，**不在本地拦**：
+ * 让服务端回它的 `type_mismatch` + message，客户端不替服务端裁决）。
+ */
+export function parseGlobalKind(raw) {
+  const kind = String(raw).toLowerCase();
+  if (!GLOBAL_KINDS.includes(kind)) {
+    throw new UsageError(
+      `--kind 只能是 int / uint / float（string 留第二期），收到 ${JSON.stringify(String(raw))}`,
+    );
+  }
+  return kind;
+}
+
+/**
+ * `global-*` 的 `--index` 与 int/uint 的 `--value`：**只认 `0x` 前缀十六进制**。
+ * ★ 父级 2026-11-19 追加裁决：⛔ 不支持十进制（脚本里这些字段全是 hex raw；支持十进制只会造成歧义）。
+ * ★ 归一化成小写 `0x…`（服务端解析大小写不敏感；线上是字符串，不是 JSON number）。
+ */
+export function parseGlobalHexLiteral(raw, flag = '--index') {
+  const text = String(raw);
+  const example = flag === '--index' ? '0xb1b6' : '0x80000010';
+  if (!/^0[xX][0-9a-fA-F]+$/.test(text)) {
+    throw new UsageError(
+      `${flag} 必须是十六进制且带 0x 前缀（如 ${example}），收到 ${JSON.stringify(text)}`,
+    );
+  }
+  const value = BigInt(text);
+  if (value > 0xffffffffn) {
+    throw new UsageError(`${flag} 必须落在 32 位内（0x00000000..0xFFFFFFFF），收到 ${JSON.stringify(text)}`);
+  }
+  return `0x${value.toString(16)}`;
+}
+
+/**
+ * `global-set --kind float --value <十进制浮点字面量>`：**唯一收十进制的 global 输入**。
+ * ★ 理由：float 不是脚本字段编码，而是 IEEE-754 裸 32 位的语义值（服务端也只收 JSON number）。
+ */
+export function parseGlobalFloatValue(raw) {
+  const text = String(raw);
+  if (/^[+-]?0x/i.test(text.trim())) {
+    throw new UsageError(`--value（kind=float）收十进制浮点字面量（如 1.5），⛔ 不收 0x 十六进制：${JSON.stringify(text)}`);
+  }
+  const n = Number(text);
+  if (text.trim() === '' || !Number.isFinite(n) || Math.abs(n) > FLOAT32_MAX) {
+    throw new UsageError(
+      `--value（kind=float）必须是有限的十进制浮点数且落在 IEEE-754 32 位范围内，收到 ${JSON.stringify(text)}`,
+    );
+  }
+  return n;
+}
+
 export function parsePositiveFrames(raw, flag = '--for frames') {
   if (!/^\d+$/.test(String(raw))) {
     throw new UsageError(`${flag} 需要一个正整数（实际：${JSON.stringify(raw)}）`);
@@ -171,6 +238,10 @@ export function parseArgv(argv = []) {
     root: DEFAULT_CONTROL_ROOT,
     screenshotPath: null,
     click: null,
+    // `global-get` / `global-set`：先收原始字符串，op 确定后按 kind 校验（见 parseArgv 末尾）。
+    globalKind: null,
+    globalIndex: null,
+    globalValue: null,
     waitMs: null,
     forMs: null,
     forFrames: null,
@@ -202,6 +273,9 @@ export function parseArgv(argv = []) {
       i += 1;
       if (key === 'session') out.session = String(value);
       else if (key === 'root') out.root = String(value);
+      else if (key === 'gkind') out.globalKind = String(value);
+      else if (key === 'gindex') out.globalIndex = String(value);
+      else if (key === 'gvalue') out.globalValue = String(value);
       else out.timeoutSec = parsePositiveNumber(value, a);
     } else if (a === '--for-ms') {
       const value = argv[i + 1];
@@ -234,7 +308,7 @@ export function parseArgv(argv = []) {
     }
     if (!OPS.includes(name)) {
       throw new UsageError(
-        `未知操作：${name}。可用：${OPS.join(' / ')}（M1 的 click/key 未实现；gc 只删残留端点文件）`,
+        `未知操作：${name}。可用：${OPS.join(' / ')}（M1 的 key 未实现；gc 只删残留端点文件）`,
       );
     }
     out.op = name;
@@ -257,6 +331,32 @@ export function parseArgv(argv = []) {
     out.waitMs = parsePositiveMs(pos.shift(), 'wait');
   }
   if (pos.length > 0) throw new UsageError(`多余的参数：${pos.join(' ')}（--help 看用法）`);
+
+  // ---- `global-get` / `global-set`：op 确定后才校验参数（`--value` 的规则随 kind 变）----
+  if (out.op === 'global-get' || out.op === 'global-set') {
+    const isSet = out.op === 'global-set';
+    if (out.globalKind === null) throw new UsageError(`${out.op} 需要 --kind（int / uint / float）`);
+    if (out.globalIndex === null) {
+      throw new UsageError(`${out.op} 需要 --index（0x 十六进制池下标，如 0xb1b6）`);
+    }
+    out.globalKind = parseGlobalKind(out.globalKind);
+    out.globalIndex = parseGlobalHexLiteral(out.globalIndex, '--index');
+    if (!isSet) {
+      if (out.globalValue !== null) {
+        throw new UsageError('global-get 不接受 --value（要写就用 global-set）');
+      }
+    } else if (out.globalValue === null) {
+      throw new UsageError('global-set 需要 --value');
+    } else if (out.globalKind === 'string') {
+      // 第二期未实现：原样透传，由服务端回 `type_mismatch` + "未实现"（⛔ 客户端不替它裁决）。
+    } else if (out.globalKind === 'float') {
+      out.globalValue = parseGlobalFloatValue(out.globalValue);  // 唯一收十进制的那条
+    } else {
+      out.globalValue = parseGlobalHexLiteral(out.globalValue, '--value');
+    }
+  } else if (out.globalKind !== null || out.globalIndex !== null || out.globalValue !== null) {
+    throw new UsageError('--kind / --index / --value 只能与 global-get / global-set 一起用');
+  }
 
   // --for-* 只对 resume 有意义（且两者互斥）
   if (out.forMs !== null && out.forFrames !== null) {
@@ -535,6 +635,17 @@ export function clickFrame(x, y, button = 'left') {
   return { op: 'click', x, y, button };
 }
 
+/**
+ * `global-*` 的请求帧：**顶层** `{op,kind,index,value}`（服务端 `parseCommand` 只读顶层）。
+ * ★ `index` 与 int/uint 的 `value` 是**字符串** 0x 十六进制（JSON number 表达不了 0x 前缀）；
+ *   float 的 `value` 是 JSON number（十进制浮点字面量，唯一例外）。
+ */
+export function globalFrame(op, kind, index, value) {
+  const frame = { op, kind, index };
+  if (op === 'global-set') frame.value = value;
+  return frame;
+}
+
 /** `pause` / `resume` / `wait` 的人读行。 */
 export function formatStateLine(op, reply) {
   const d = isObj(reply) && isObj(reply.data) ? reply.data : {};
@@ -547,6 +658,17 @@ export function formatClickLine(reply) {
   const d = isObj(reply) && isObj(reply.data) ? reply.data : {};
   const c = isObj(d.click) ? d.click : {};
   return `click ok x=${c.x} y=${c.y} button=${c.button} queued=${c.queued} state_seq=${d.state_seq}`;
+}
+
+/**
+ * `global-get` / `global-set` 的人读行：kind / index / value / raw 全部按服务端的 0x 位模式打印。
+ * ★ float 的 `value` 是十进制 number（非有限 ⇒ 服务端回 `null`；位模式看 `raw`）。
+ */
+export function formatGlobalLine(op, reply) {
+  const d = isObj(reply) && isObj(reply.data) ? reply.data : {};
+  const g = isObj(d.global) ? d.global : {};
+  const value = g.value === undefined ? '-' : g.value;
+  return `${op} ok kind=${g.kind} index=${g.index} value=${value === null ? 'null' : value} raw=${g.raw}`;
 }
 
 /** `list` 的一行（人读）。JSON 版是 `listRow()` 的对象。 */
@@ -611,14 +733,16 @@ export function listJson(root, rows) {
 
 export const DOMAIN = {
   id: 'emu-ctl',
-  title: 'AOT 控制层**客户端**（`--control-root` 下的 `ctl.*.json`；停 / 采样 / 截图 / 点击 / 继续 / 收口 / 清残留）',
+  title:
+    'AOT 控制层**客户端**（`--control-root` 下的 `ctl.*.json`；停 / 采样 / 截图 / 点击 / typed global / 继续 / 收口 / 清残留）',
   data: [
     '`<--control-root>/ctl.<pid>.<nonce8>.json`（端点写的身份文件；`list` 只读判活，`gc` **只删残留的那一个**）',
     '`screenshot <path>` 的**客户端指定路径**（BMP；写文件 ⇒ mutates）',
     '`click <x> <y> [left|right]` 的**入队回执**（参考坐标 1280×720；⛔ 入队 ≠ 施加）',
+    '`global-get` / `global-set` 读写的 **script global 槽**（guest 内存；id = raw 池下标，如 `0xb1b6`）',
   ],
   access:
-    '`list` 只读；`gc` 只删"连接判死 + pid 不存活 + 文件名严格匹配"的残留端点文件（⛔ 不碰 `keep.txt` / 目录 / 别的文件）；`screenshot` 写客户端给的路径；`click` 只向端点的立即队列投一条（⛔ 不改 guest 状态）；`quit` 只请求端点自己收口',
+    '`list` 只读；`gc` 只删"连接判死 + pid 不存活 + 文件名严格匹配"的残留端点文件（⛔ 不碰 `keep.txt` / 目录 / 别的文件）；`screenshot` 写客户端给的路径；`click` 只向端点的立即队列投一条（⛔ 不改 guest 状态）；`global-get` 只读一格、`global-set` 只写**一个** guest 数据槽（int/uint 过 ENC；⛔ 不改执行流 / cpu / regs）；`quit` 只请求端点自己收口',
   tool: 'tools/emu-ctl.mjs',
 };
 
@@ -629,6 +753,8 @@ export const OPERATIONS = Object.freeze([
   { name: 'sample', argv: ['--sample'], mutates: true, summary: '暂停（若未停）+ 快照（停在汇点才能采样；freeze + state_seq +1 ⇒ 会写状态）；人读一行 `TITLE.BIN:0x039C paused_at=… frame=…`（`script.available:false` 仍是 0）' },
   { name: 'screenshot', argv: ['--screenshot'], mutates: true, summary: '暂停（服务端 Screenshot 分支会停在汇点；客户端先发幂等 pause 兜底）+ 写"最后呈现那帧"到指定路径（BMP）' },
   { name: 'click', argv: ['--click'], mutates: true, summary: '投一条点击到立即队列（参考坐标 1280×720：x 0..1279 / y 0..719、button ∈ {left,right} 缺省 left）；**入队 ≠ 施加**：只接受暂停态（运行态 ⇒ not_paused / 退出码 1），施加在下一个 guest 读点，队列上界 64 条/次' },
+  { name: 'global-get', argv: ['--global-get'], mutates: false, summary: '按 id + 显式 kind 读一格 script global（哑原语：⛔ 不猜类型 / ⛔ 不挑时机 / ⛔ 不重试 / ⛔ 不写后校验）；`--index` **必须 0x 十六进制**（如 0xb1b6，⛔ 十进制）；返回 data.global{kind,index,value,raw}，int/uint 的 value/raw 是 0x 位模式' },
+  { name: 'global-set', argv: ['--global-set'], mutates: true, summary: '按 id + 显式 kind 写一格（int/uint 过 ENC；float 是裸 32 位；运行态也在主线程块边界执行，不要求暂停、写完不校验）；`--index` 与 int/uint 的 `--value` 都是 0x 十六进制，`float` 的 `--value` 是十进制浮点（唯一例外）；string 第二期未实现' },
   { name: 'wait', argv: ['--wait'], mutates: true, summary: '糖：等价于 `resume --for-ms <ms>`（控制层 wait = 让 guest 跑 N ms 后重停；⛔ 与 --input-plan 的 wait 不是一回事）' },
   { name: 'quit', argv: ['--quit'], mutates: true, summary: '请求收口，等到 bye 或连接断（bye.reason / requested_by 是读数）' },
   { name: 'gc', argv: ['--gc'], mutates: true, summary: '只删残留端点文件：connect 判死（refused/timeout）+ pid 不存活 + 文件名严格匹配 ctl.<pid>.<8hex>.json；⛔ 不动 keep.txt 等其它文件；`--dry-run` 只报不删' },
@@ -640,10 +766,10 @@ export function describe() {
     operations: OPERATIONS.map((o) => ({ name: o.name, mutates: o.mutates, summary: o.summary })),
     exitCodes: {
       '0': '成功（含 script.available:false）',
-      '1': '端点回 ok:false',
-      '2': '参数 / 协议错（含 click 坐标/按钮非法、key 仍是 M1 未实现、gc 的 root 不可读 / 删除失败）',
+      '1': '端点回 ok:false（含 global 的 id_out_of_range / type_mismatch / encode_failed）',
+      '2': '参数 / 协议错（含 click 坐标/按钮非法、global 的 index/value 不是 0x 十六进制、key 仍是 M1 未实现、gc 的 root 不可读 / 删除失败）',
       '3': '超时（端点仍活）',
-      '4': '找不到 / 多个实例（**仅"要挑一个实例"的 op**：pause/resume/sample/screenshot/click/wait/quit；⛔ `list` 恒 0，多实例也 0）',
+      '4': '找不到 / 多个实例（**仅"要挑一个实例"的 op**：pause/resume/sample/screenshot/click/global-get/global-set/wait/quit；⛔ `list` 恒 0，多实例也 0）',
     },
     listWhy: WHY,
     selection:
@@ -660,6 +786,23 @@ export function describe() {
       queue:
         '**入队 ≠ 施加**：`click` 只把一条立即点击放进队列；施加点是**下一个 guest 读点**。⇒ 它**只接受暂停态**（运行态服务端回 `not_paused` ⇒ 退出码 1）；队列上界 **64 条/次**，满了服务端回 `bad_request`（⇒ 退出码 1）。回执里的 `queued` 是入队后的深度，不是"已施加"。',
       frame: '请求帧是**顶层字段** `{op:"click",x,y,button}`（服务端 `parseCommand` 只读顶层；⛔ 不包 `{"args":{…}}`）。',
+    },
+    global: {
+      ops: '`global-get` / `global-set` = **哑原语**：按 id + 显式 kind 读写一格 script global。',
+      kinds:
+        '`int` / `uint` 是**同一个 32 位槽、同一份 ENC/DEC**（uint 只是无符号解释；脚本里的位模式两者相同）；`float` 是 IEEE-754 裸 32 位（不过编解码）；`string` 第二期未实现（服务端回 `type_mismatch` + "未实现"）。',
+      hexOnly:
+        '★ `--index` 与 int/uint 的 `--value` **必须带 `0x` 前缀**（如 `0xb1b6` / `0x80000010`）；**纯十进制一律拒**（脚本里这些字段就是 hex raw，支持十进制只会造成"b1b6 是 hex 还是十进制"的歧义）。▸ **唯一例外**：`float` 的 `--value` 收十进制浮点字面量（它不是脚本字段编码，而是 IEEE 裸 32 位的语义值）。',
+      wire:
+        '请求是**顶层** `{op,kind,index,value}`；`index` 与 int/uint 的 `value` 在线上是**字符串**（JSON number 表达不了 0x 前缀），float 的 `value` 是 JSON number。',
+      output:
+        '`data.global{kind,index,value,raw}`；int/uint 的 `value` 与 `raw`、以及 `index` 一律 `0x%08X`（便于与脚本 / 日志逐位对照）；float 的 `value` 是十进制 number（非有限 ⇒ `null`，位模式看 `raw`）。',
+      errors:
+        '失败时 `error.code = "bad_request"` + `error.reason ∈ {id_out_of_range, type_mismatch, encode_failed}`（退出码 1）；`type_mismatch` **只在能判定时报**（槽本身没有运行期类型标签，判不了就放过）。',
+      dumb:
+        '⛔ 不猜类型（kind 必须显式给）/ ⛔ 不挑时机（不等 TITLE、不等配置加载）/ ⛔ 不重试 / ⛔ 不写后校验 / ⛔ 不为任何 global 或选项开特例。要"读-改-写一个位"由**调用方**自己发两条命令（工具不保证两条之间值不变）。',
+      persistence:
+        '写的是**运行中**的 guest 槽：游戏之后的 `save-int` 可能把它写进配置库（下次启动 `LOADCONFIG` 会读回）。不想污染存档就用私有 `--appdata`。',
     },
     clockSemantics: {
       sample: '`sample.data.sample.clock.paused_total_ms` 是**已结算**口径（`pausedCommittedMs()`，**不含**当前这段未结束的冻结区间）——判据 3b 要求同一暂停点连采两次逐字节相同。',
@@ -710,6 +853,15 @@ export function describeText() {
   L.push(`  队列：${d.click.queue}`);
   L.push(`  帧：${d.click.frame}`);
   L.push('');
+  L.push('global-get / global-set（哑原语：按 id + 显式 kind 读写一格；⛔ 不猜类型 / 不挑时机 / 不重试 / 不写后校验）');
+  L.push(`  种类：${d.global.kinds}`);
+  L.push(`  十六进制：${d.global.hexOnly}`);
+  L.push(`  线上：${d.global.wire}`);
+  L.push(`  输出：${d.global.output}`);
+  L.push(`  错误：${d.global.errors}`);
+  L.push(`  纪律：${d.global.dumb}`);
+  L.push(`  持久化：${d.global.persistence}`);
+  L.push('');
   L.push('时钟口径（同名不同口径）');
   L.push(`  sample：${d.clockSemantics.sample}`);
   L.push(`  pause/resume：${d.clockSemantics.pauseResume}`);
@@ -723,6 +875,6 @@ export function describeText() {
   L.push(`  ${d.traps.wait}`);
   L.push(`  ${d.traps.criteria}`);
   L.push('');
-  L.push('⛔ 未实现：key（M1 的剩余能力，服务端还没有；传了 ⇒ 退出码 2）· "自动挑一个"实例（要挑实例的 op 在多个 alive 时 ⇒ 退出码 4；`list` 恒 0）');
+  L.push('⛔ 未实现：key（M1 的剩余能力，服务端还没有；传了 ⇒ 退出码 2）· global 的 string 种类（第二期；服务端回 type_mismatch）· "自动挑一个"实例（要挑实例的 op 在多个 alive 时 ⇒ 退出码 4；`list` 恒 0）');
   return `${L.join('\n')}\n`;
 }

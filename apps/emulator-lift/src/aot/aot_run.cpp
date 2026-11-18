@@ -583,8 +583,10 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         // ---- ⓪− 控制层闸门（`--control-root`；缺省 nullptr ⇒ 只有一次判空）----
         //   ★ 位置 = 寄存器同步之后、合成 EA 泵之前（`design-review.md` §1 第 2 条的裁决）：
         //     此刻 `cpu_` 已与 lifted 侧一致、`ea` = 本轮块入口、没有 in-flight shim。
-        //   ★ **只读语义**：`serve()` 只动宿主对象（时钟冻结 / `postQuit` / 置停标志），
-        //     ⛔ 不写 `cpu_` / `regs_` ⇒ 返回后**不需要**反向同步；暂停对 guest 不可见。
+        //   ★ **只写一个数据槽的语义**：`serve()` 动宿主对象（时钟冻结 / `postQuit` / 置停标志），
+        //     唯一会改 guest 内存的是 `global-set`（主线程在这里写**一个** global 数据槽；⛔ 不写
+        //     `cpu_` / `regs_`）⇒ 返回后**不需要**反向同步；下一块从内存重新加载，写完立刻可见。
+        //     暂停对 guest 不可见（寄存器现场没被改）。
         //   ★ 返回 true = 已置停（客户端 `quit` / idle / orphan）⇒ 立即收口，⛔ 不再进下一块。
         if (control_ != nullptr &&
             (control_->pending() || (control_->watching() && cpu_.insns >= next_control_check))) {

@@ -2501,3 +2501,25 @@ if(LIFT_BUILD_TESTS)
     target_link_libraries(lift-present-interval PRIVATE emulator-lift-runtime)
     add_test(NAME present-interval COMMAND lift-present-interval)
 endif()
+
+# =====================================================================================
+# H · script global 的 **typed 读写**（`runtime/script_globals.{h,cpp}` = AGE 引擎层）
+#
+# ★ 不变量：`global-get` / `global-set` 的「寻址 + ENC/DEC + 类型编码」只有**一份**实现，且它在
+#   `src/runtime/` 的 **AGE 引擎层**（控制层与将来的 QJS 侧共用同一份；⚠ 是否被其它 AGE 作品复用
+#   = 待证，本模块只承诺"可替换"）。⛔ 不焊在控制层、⛔ 不依赖 quickjs。
+#   红了意味着：int 槽里被写成了**明文**（引擎 DEC 出来是垃圾 ⇒ "写了但没生效"）、或 id 越界被静默
+#   放过、或十六进制口径退回"自动识别十进制"（`0xB1B6` 的歧义回来）。
+# ★ **顶层** `if(LIFT_BUILD_TESTS)` ⇒ `cmakeTestTier()` 透明 ⇒ pure 档（AGENTS.md §12.4）。
+#   夹具 = 裸 `GuestMemory` + 假 Engine / 假池基址 / 假 key，⛔ 不读游戏安装 / LFS / 不起 socket。
+# ★ 变异：`tools/mutate-check.mjs` 末尾两条 ——
+#   ① `script-globals-int-enc-plaintext`：ENC → 明文写 ⇒ 往返用例红；
+#   ② `control-global-hex-only`：十六进制解析改回自动识别十进制 ⇒ 十进制拒绝用例红。
+# =====================================================================================
+target_sources(emulator-lift-runtime PRIVATE src/runtime/script_globals.cpp)
+
+if(LIFT_BUILD_TESTS)
+    add_executable(lift-control-globals tests/control_globals.cpp)
+    target_link_libraries(lift-control-globals PRIVATE emulator-lift-runtime)
+    add_test(NAME lift-control-globals COMMAND lift-control-globals)
+endif()
