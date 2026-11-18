@@ -2302,6 +2302,105 @@ int caseDoNotAddRefStaleTexture(bool gpu) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------------------
+// ⑩ BUG-32 回归：批次数组 `realloc` **移动**之后，第 count 条必须写进**当前** base
+//
+// 根因（父级 `LIFT_WATCH` 钉死）：`reserveBatch` 扩容时只把新 base / capacity 写回 guest 状态块，
+//   调用方 `draw()` 仍用**旧的** `s.batch` 算第 count 条的地址；而 `GuestHeap::realloc` 在
+//   `need > 旧块` 时**总是** alloc 新块 + 拷贝 + free 旧块 ⇒ 容量 16→32 那一趟**必然移动**。
+//   于是第 17 条（index 16）写进**旧块末尾**，即紧邻块（真实 run 里是相邻纹理对象，P-8 正好是
+//   它的块头）的头 8 B + 头 64 B —— `'LIFT'` 块头与 vtable 被覆盖成批次条目，guest 随后在
+//   `End` 里读到 `[vtable]=0` 的 fault。
+//
+// 判据（红了意味着什么）：
+//   ① 第 17 条（index 16）在**当前** `kSpBatch` 的新 base + 16*72 处，`kBeTexture` = 该纹理、
+//      `kBeFlags` = HAS_SRC_RECT|HAS_POSITION（0x5）⇒ 条目真的排进了新数组（修前这里是未初始化
+//      的新块，纹理 / flags 都对不上）；
+//   ② 旧 base + 16*72 起 `kBatchEntryBytes` 字节**逐字节未变**，且那个块头仍被 guest 堆认作合法
+//      块（`sizeOf` 不变）：夹具里紧邻块 = Sprite 自己的 vtable 块（`ComRegistry::createObject`
+//      先 alloc vtable 再 alloc obj，两者都在 `createSpriteState` 的 state / batch 之后 ⇒
+//      块序 state, batch, vtable, obj）；真实 run 里同一个地址命中的是相邻纹理对象块头。
+//      ⇒ 修前"写穿到相邻块"这条当场红（第 17 条的 72 B 覆盖在上面）。
+//   ③ realloc 真的移动了（new base ≠ old base）、capacity 16 → 32、count = 17。
+// ★ 布局前提**硬断言**（`vtable == 旧 base + 16*72 + 8`）：不成立就红 —— ⛔ 不是静默放过；
+//   先按 `runtime/heap.cpp` 的块头 / 切分规则重造夹具（同别的用例的"前提"口径）。
+// ---------------------------------------------------------------------------------------
+void caseSpriteBatchReallocMove() {
+    lift_test::g_current_case = "d3dx9/sprite-batch-realloc-move";
+    Rig r;
+    LIFT_CHECK(r.withSprite());
+    if (r.sprite == 0) return;
+    lift::ComRegistry* com = r.f.m.cpu().com;
+    LIFT_CHECK(com != nullptr);
+    if (com == nullptr) return;
+    const std::uint32_t state = com->userOf(r.sprite);
+    LIFT_CHECK_NE_U32(state, 0u);
+    if (state == 0) return;
+
+    // 一张 4×4 纹理：让第 17 条有条目内容可对（纹理身份 / flags 都判）。
+    std::uint32_t tex = 0;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.dev.object, 4u, 4u, 1u, 0u, lift::d3d9::kFmtA8R8G8B8, 1u, &tex), 0u);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return;
+
+    // ★ `kSpBatch` = 80（`d3dx9_sprite.cpp` 的 `SpriteOff`；状态块布局是本簇私有的）。
+    //   `SpriteInfo` 只导出 count / capacity，**不导出 base** ⇒ base 只能从状态块读。
+    constexpr std::uint32_t kSpBatchOff = 80u;
+
+    lift::d3dx9::SpriteInfo info;
+    LIFT_CHECK(lift::d3dx9::spriteInfo(r.f.m.cpu(), r.sprite, &info, nullptr));
+    LIFT_CHECK_EQ_U32(info.batch_capacity, 16u);  // 前提：初始容量 = kInitialBatchCapacity
+
+    const std::uint32_t old_base = r.f.m.mem().rd32(state + kSpBatchOff);
+    LIFT_CHECK_NE_U32(old_base, 0u);
+    if (old_base == 0) return;
+    // 修前"第 17 条"会被写到的地址 = 旧批次载荷末尾 = 紧邻块的块头
+    const std::uint32_t stale_ea = old_base + 16u * lift::d3dx9::kBatchEntryBytes;
+    // 紧邻块 = Sprite 对象的 vtable 块（块头 8 B + 载荷）
+    const std::uint32_t vtable = r.f.m.mem().rd32(r.sprite);
+    LIFT_CHECK_NE_U32(vtable, 0u);
+    LIFT_CHECK_EQ_U32(vtable, stale_ea + 8u);  // 前提：旧批次块之后就是 vtable 块（heap 块头 8 B）
+    const std::uint32_t vtable_size = r.f.m.heap().sizeOf(vtable);
+    LIFT_CHECK_NE_U32(vtable_size, 0xFFFFFFFFu);
+    // 快照：修前第 17 条的写穿范围（整条 72 B）—— 修后必须逐字节不变
+    std::uint8_t stale_before[lift::d3dx9::kBatchEntryBytes];
+    for (std::uint32_t k = 0; k < lift::d3dx9::kBatchEntryBytes; ++k)
+        stale_before[k] = r.f.m.mem().rd8(stale_ea + k);
+
+    // 连续 17 次 Draw（> kInitialBatchCapacity = 16）：第 17 次触发扩容 16 → 32
+    LIFT_CHECK_EQ_U32(r.begin(lift::d3dx9::kSpriteAlphaBlend), 0u);
+    const std::uint32_t rect = r.f.placeRect(0, 0, 4, 4);
+    const std::uint32_t pos = r.f.placeVec3(4.0f, 4.0f, 0.0f);
+    for (int i = 0; i < 17; ++i)
+        LIFT_CHECK_EQ_U32(r.drawTex(tex, rect, 0u, pos, 0xFFFFFFFFu), 0u);
+
+    // ---- ① 新 base + 16*72 处的第 17 条 ----
+    const std::uint32_t new_base = r.f.m.mem().rd32(state + kSpBatchOff);
+    LIFT_CHECK_NE_U32(new_base, old_base);  // 旧块 1152 B < 新块 2304 B ⇒ realloc 必然移动
+    LIFT_CHECK(lift::d3dx9::spriteInfo(r.f.m.cpu(), r.sprite, &info, nullptr));
+    LIFT_CHECK_EQ_U32(info.batch_capacity, 32u);
+    LIFT_CHECK_EQ_U32(info.batch_count, 17u);
+    const std::uint32_t entry = new_base + 16u * lift::d3dx9::kBatchEntryBytes;
+    LIFT_CHECK_EQ_U32(r.f.m.mem().rd32(entry + lift::d3dx9::kBeTexture), tex);
+    LIFT_CHECK_EQ_U32(r.f.m.mem().rd32(entry + lift::d3dx9::kBeFlags),
+                      lift::d3dx9::kBeHasSrcRect | lift::d3dx9::kBeHasPosition);
+
+    // ---- ② 旧 base 之后（紧邻块头 + 头 64 B）逐字节未变 ----
+    std::uint32_t stale_diff = 0xFFFFFFFFu;
+    for (std::uint32_t k = 0; k < lift::d3dx9::kBatchEntryBytes; ++k) {
+        if (r.f.m.mem().rd8(stale_ea + k) != stale_before[k]) {
+            stale_diff = k;
+            break;
+        }
+    }
+    LIFT_CHECK_EQ_U32(stale_diff, 0xFFFFFFFFu);  // 失败时打印第一个被改动的字节偏移
+    LIFT_CHECK_EQ_U32(r.f.m.heap().sizeOf(vtable), vtable_size);  // 块头仍被 guest 堆认作合法块
+
+    // 收尾：vtable 完好时才调 End（修前写穿会把 vtable 的方法槽改成批次条目 ⇒ 再走一次 guest
+    //   方法调用会跳到野 EA，多制造一次 fault；上面的断言已经红了，不需要那一次级联）。
+    if (r.f.m.heap().sizeOf(vtable) != 0xFFFFFFFFu) LIFT_CHECK_EQ_U32(r.end(), 0u);
+}
+
 int main(int argc, char** argv) {
     using namespace lift_test;
     const bool gpu_arm = argc > 1 && std::string(argv[1]) == "--gpu";
@@ -2337,6 +2436,7 @@ int main(int argc, char** argv) {
         caseSpriteReleaseQueuedStaleTexture();
         caseSpriteEarlyExitStaleTexture();
         if (caseDoNotAddRefStaleTexture(false) != 0) return 1;
+        caseSpriteBatchReallocMove();
         caseMatrix();
         caseMatrixDecompose();
         caseTraps();

@@ -800,48 +800,48 @@
 - **复现**：`--until 0x4B21DB` 的 blind wipe mode 探针（命令见 `docs/03-emulator/wipe-profile.md`）⇒ time-limit；
   `--until 0x4B06D0` 同配方 ⇒ `until-ea` 命中。
 
-### BUG-32 · 加载 SAVE04 → 教程询问选「否」→ guest mem fault（SC4000 wipe；`WRITE 0x1005BA8C`）
+### BUG-32 · 加载 SAVE04 → 教程询问选「否」→ 槽 0x24 纹理 vtable=0（fault EA 0x20；已修）
 
-- **现象**（用户口径 2026-11-18，win 上；mac 上 1/1 复现）：加载 `saves/SAVE04.DAT`（第 5 槽）→ 进入地图 →
+- **现象**（用户口径 2026-11-18，win 上；mac 1/1 复现）：加载 `saves/SAVE04.DAT`（第 5 槽）→ 进入地图 →
   「要接受迷宫教程吗？」选**不接受** → 进地图的 blind wipe / blur 转场里 `exit 3` +
-  `=== guest memory fault ===`；`access: WRITE 0x1005BA8C size=4`、`region(ea): heap`、
-  `why: SIGSEGV @ host 0x300000020（guest 空间内未提交页）`。
-- **复现（macOS arm64 / `--present headless` / RelWithDebInfo；交互式，1/1）**：
-  ```bash
-  cd /Users/nekosu/Documents/Projects/amayui-re
-  .tmp/save04-tutorial/bin/emulator-lift-aot --present headless --skip-logo --audio off \
-    --game-dir links/install --appdata .tmp/save04-tutorial/appdata \
-    --control-root .tmp/save04-tutorial/ctl --control-idle-timeout 1800 --control-orphan-timeout 0 \
-    --time-limit 900 --log-level info > .tmp/save04-tutorial/logs/run1.log 2>&1
-  ```
-  逐步：`emu-ctl click 1070 480`（TITLE→加载屏）· `click 300 328`（第 5 槽 SAVE04）·
-  `click 640 323` + `resume` + `click 690 323`（SBUNKI 三次回调确认）· 等 `SC4000` ·
-  `click 500 500` 推进到 `SC4000:0x5948` · 等 `BUNKI.BIN:0xB94`（教程询问）· `click 640 393`（不接受）·
-  继续 `click 500 500` 推进 → 崩溃。完整读数见 `.tmp/save04-tutorial/report.md` §3。
-- **读数**：存档 `saves/SAVE04.DAT` sha256 `e8a6dbf3…`；执行源副本 `888d0b7b…`；
-  崩溃前最后 sample = **`SC4000.BIN:0x00010D88` frame 1232 `state_seq=41` `guest_ms=177402417`**；
-  崩溃帧 **1264**：同帧先建 `D3DXCreateEffectFromResourceA id=201`（Fade ps_2_0）与 `id=203`
-  （SlideBlur/ZoomBlur ps_2_0），随后 fault。`0x1005BA8C = 0x1005BA80 + 0xC`；静态 203 调用有
-  `lea eax,[ebx+0B59Ch]`（`loc_4B07D9`），但 **fault 时 `ebx` 没有读数** ⇒ 只作线索，⛔ 不作结论。
-- **配方复现（2026-11-18 / 一次 run，已通过）**：
+  `=== guest memory fault ===`。★ **真实 fault 是 READ `0x00000020`**：
+  `fault ea : 0x00000020 (host 0x300000020 - base 0x300000000)`；旧记录的
+  `access: WRITE 0x1005BA8C` 是 AOT lifted 访存不更新 `g_access` 留下的**最近一次 shim 侧写**，不是本次 fault。
+  原生 PC `lift_cc_4A50C0+3124 ldr w2,[x22,w9]`（x22=`mem`，w9=0x20）= `0x4A5125 mov eax,[edx+20h]`，`edx=0`。
+- **根因（2026-11-18 父级 + `LIFT_WATCH` 实测）**：
+  - 槽 0x24（`this+0xA5D8+0x24*4 = 0x1005AB58`）= P（1280×720 `$1$EVT90$` NormalTexture；`P+0x450` 的下一块头
+    `'LIFT'+0x450` 完好，槽 0x25 的 vtable `0x528BE8` 正常）⇒ 只有槽 36 被就地写坏，不是悬空/复用。
+  - `ID3DXSprite::Draw` 批次：`CreateSprite` 批次 base `0x10200D58`、容量 16、`kBatchEntryBytes=72`。
+    `reserveBatch` 扩容到 32 时 `GuestHeap::realloc` **移动**块，但 `reserveBatch(X86&, const State&)` 只把新 base
+    写回 **guest 状态块**，`draw()` 仍用旧 `s.batch` 写第 17 条（`count=16`）：
+    `旧 base + 16*72 = 0x10200D58+0x480 = 0x102011D8 = P-8`。
+  - 四条 4 字节写 `{pTexture, flags=5, 0, 0}` 覆盖 P 的块头与 `[P]/[P+4]`（vtable/base=0）；新批次第 17 条
+    未初始化 ⇒ `End` 读到垃圾纹理 `0x0BED9FE3`（日志 `第 16 条 Draw 的纹理 … 已不是本模块的纹理对象`）。
+  - watch 读数（`LIFT_WATCH='0x1005AB58:4>follow'`，`.tmp/bug32/logs/watch2.log`）：
+    `WRITE 0x1005AB58 block=lift_cc_004A2CCF` → `follow → ptr=P` →
+    `WRITE P-8 n=4 shim=ID3DXSprite::Draw`（连续四条）。
+- **修复**：`reserveBatch(State&)` 成功后 `s.batch=np; s.capacity=cap;`（`src/runtime/d3dx9_sprite.cpp`）；
+  `draw()` 用更新后的 base；另加"批次 base 不是活块/越界"只 warn 不 trap 的防御判据。
+- **守卫**：`apps/emulator-lift/tests/d3dx9.cpp#d3dx9/sprite-batch-realloc-move`（Draw 17 次；断言新 base 的第 17 条、
+  旧 base 之后未被写；修前 835 checks / 4 failures，修后 **836 / 0**）。
+- **复现 / 验收**（macOS arm64 / `--present headless` / RelWithDebInfo）：
   ```bash
   cd apps/emulator-lift
   ./out/emulator-lift-aot --present headless --skip-logo --audio off \
     --game-dir ../../links/install --appdata <私有副本> \
-    --input-plan scripts/recipes/save04-fault.plan --max-frames 4000 --time-limit 300
+    --input-plan scripts/recipes/save04-fault.plan --max-frames 12000 --time-limit 900
   ```
-  ⇒ **exit 3** + fault；父级复跑读数 `eip=004A50C0` / `lift_cc_004A50C0` /
-  `eax=10050004 ecx=10222920 edx=00000000 ebx=00000024` / `esp=6FFFD4A0 ebp=6FFFD4AC` /
-  `esi=100504F0 edi=100AE330` / 32 字栈 + ebp 链；fault 文本里同时有
-  `input-plan: steps=38 fired=10 pending=7 outcome=running`。`pending=7` 是 `_Exit(3)` 的正常形状。
-  ★ 旧 `.tmp` 版的 `await position SC4000 0x5900 0x5960` 是**错的**：SC4000 停在 `0x5828`
-  等输入，只有点了才会到 `0x5948` ⇒ 正确门是 `[0x5800,0x5860)`；配方已按此转正。
-- **`--input-plan` 点击前提（已推翻）**：trace 证明配方 click **被消费**（`await script SC4000` 在
-  f1259/f1398 成立；无 click 对照 60 s 不成立），emu-ctl 同屏 click 的施加形状逐项相同
-  （`at=PeekMessage` + `reason=forced`）⇒ `releaseDue` / `sampled` 不是根因，**未改 release 语义**。
-- **未定**：根因（fault 现场已有；`eip=004A50C0` 与 `0x1005BA8C` 的写者 / 对象尚未定位）；
-  没有跑“选是”的对照；win 侧未比对。
-- **工具缺口（已由 `REQ-01M7PG086DG4BBPA40VCVZTP4X` 落地）**：AOT fault 现场（EIP/寄存器/栈）·
-  `--input-plan-trace` · fault 路径 `input-plan` 摘要。真实 fault 的 eip/寄存器/栈即上面读数。
-- **代表守卫**：配方 `apps/emulator-lift/scripts/recipes/save04-fault.plan`（exit 3 是判据；⛔ 不写
-  “到达某界面”的业务判据）。
+  - 修前：**exit 3** + fault（`eip=004A50C0` / `lift_cc_004A50C0`；`input-plan: fired=10 pending=7` 是 `_Exit(3)` 的形状）。
+  - 修后：**不再 fault**；plan 走过 wipe 到 **AIM**（地图）第 2982 帧；配方尾部 `SC4000 0x10D00` 门是
+    fault 路径专用的 ⇒ exit 5（**不是** fault，也没有 `End: 第 16 条 Draw` 告警）。
+    `LIFT_WATCH` 修后没有 `P-8` 写（`.tmp/bug32/logs/watch3-fixed.log` / `watch4-fixed.log`）。
+  - 门禁：`ctest -R '^(fault-report|d3dx9)$'` 2/2。
+- **历史读数（修前，保留）**：交互式 `emu-ctl` 逐步 1/1；存档 sha256 `e8a6dbf3…`；
+  崩溃前最后 sample `SC4000.BIN:0x00010D88` frame 1232；崩溃帧先建 effect 201/203。
+  `.tmp/save04-tutorial/report.md` §3。★ 旧 `.tmp` 的 `await position SC4000 0x5900 0x5960` 是错的：
+  正确门是 `[0x5800,0x5860)`（SC4000 停在 `0x5828` 等输入）。
+- **`--input-plan` 点击前提（已推翻）**：trace 证明配方 click 被消费（无 click 对照 60 s 不成立），
+  emu-ctl 同屏 click 施加形状相同（`at=PeekMessage` + `reason=forced`）⇒ `releaseDue`/`sampled` 不是根因，
+  **未改 release 语义**。配方对教程“否”的 click 仍有时序敏感性（`wait 2000` 档成功率高，但不保证）。
+- **未做**：win32 未跑（分支未编译）；watch 的 follow pending 是 `thread_local`（跨线程会漏）；
+  `writeBytes/fillBytes/wr8/16/64` 的 watch 接线无正例（低风险跟进）；dump 在信号上下文逐字节 `fprintf`。

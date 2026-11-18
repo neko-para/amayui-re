@@ -271,7 +271,13 @@ bool entryTextureIsCurrent(X86& cpu, std::uint32_t tex, std::uint32_t serial, st
 }
 
 // 批次容量增长（guest 堆 realloc；新条目由调用方整条写入，所以不清零）
-bool reserveBatch(X86& cpu, const State& s, std::uint32_t need, std::string* why) {
+// ★ **必须同时更新本地 `s`**（`BUG-32`）：`GuestHeap::realloc` 在 `need > 旧块` 时**总是**
+//   alloc 新块 + 拷贝 + free 旧块（`heap.cpp`），所以容量 16→32 这一趟**必然移动**。
+//   只把新 base / capacity 写回 guest 状态块、却让调用方继续用旧的 `s.batch`，第 count 条就会
+//   写进**旧块末尾** —— 那是紧邻块（真实 run 里是相邻纹理对象，P-8 正好是它的块头）的
+//   `'LIFT'` 块头 + 头 64 B，被覆盖成一条批次条目之后，guest 在 `End` 里读到 `[vtable]=0` 的
+//   fault。⇒ guest 状态块与本地 `s` 是**同一次**更新的两个视图，⛔ 不许只更新一个。
+bool reserveBatch(X86& cpu, State& s, std::uint32_t need, std::string* why) {
     if (need <= s.capacity) return true;
     std::uint32_t cap = s.capacity ? s.capacity : kInitialBatchCapacity;
     while (cap < need) {
@@ -302,6 +308,10 @@ bool reserveBatch(X86& cpu, const State& s, std::uint32_t need, std::string* why
     }
     cpu.mem->wr32(s.state + kSpBatch, np);
     cpu.mem->wr32(s.state + kSpCapacity, cap);
+    // ★ 本地视图（调用方紧接着要用它算第 count 条的地址）：不给这一句，realloc 移动之后
+    //   第 count 条就写进旧块末尾 —— `BUG-32` 的根因。
+    s.batch = np;
+    s.capacity = cap;
     return true;
 }
 
@@ -589,6 +599,28 @@ std::uint32_t draw(X86& cpu, std::uint32_t state, std::uint32_t texture, std::ui
         return kFail;
     }
     const std::uint32_t ea = s.batch + s.count * kBatchEntryBytes;
+    // ★ 防御性判据（**只在越界时 warn，不改行为**）：用 guest 堆的实际载荷大小核对
+    //   "第 count 条"是否真的落在**当前**批次数组里。上一个写穿（`BUG-32`）就是"realloc 之后
+    //   用了旧 base" ⇒ 把"条目越界"变成一条默认级别可见的告警，而不是等相邻对象在别处炸。
+    //   两种形状都报：① base 根本不是 guest 堆里的活块 —— `GuestHeap::realloc` 移动时**先 alloc
+    //   新块、再 free 旧块**，所以拿旧 base 去查 `sizeOf` 时它已经是 0xFFFFFFFF（`BUG-32` 的
+    //   现场正是这一种）；② base 是活块、但第 count 条超出它的载荷（旧块已被别的对象复用）。
+    //   ⛔ 不 trap / 不拒绝排队：D3DX 的语义不看我们私有的批次数组布局，越界是**我们的**簿记错误，
+    //   不该改变 guest 可见行为（否则就成了"用一个内部 bug 换一个 guest 可见错误"）。
+    if (cpu.heap) {
+        const std::uint32_t payload = cpu.heap->sizeOf(s.batch);
+        const std::uint64_t need_bytes =
+            static_cast<std::uint64_t>(s.count) * kBatchEntryBytes + kBatchEntryBytes;
+        const bool base_gone = payload == 0xFFFFFFFFu;
+        if (base_gone || need_bytes > payload) {
+            spriteWarn("Draw",
+                       "%s：state=0x%08X batch=0x%08X size=%u count=%u capacity=%u ea=0x%08X"
+                       "（第 %u 条；⛔ 仍按 D3DX 语义排队，不 trap）",
+                       base_gone ? "批次 base 不是 guest 堆里的活块（realloc 之后没更新本地 base？）"
+                                 : "批次条目越界",
+                       state, s.batch, payload, s.count, s.capacity, ea, s.count);
+        }
+    }
     cpu.mem->wr32(ea + kBeTexture, in.texture);
     cpu.mem->wr32(ea + kBeFlags, in.flags);
     cpu.mem->wr32(ea + kBeSrc + 0, static_cast<std::uint32_t>(in.left));
