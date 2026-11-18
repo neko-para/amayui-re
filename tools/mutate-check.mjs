@@ -1941,6 +1941,40 @@ const MUTATIONS = [
       'gdi-font 的 `metrics-size-change` / `metrics-bold-differs` 当场红',
   },
 
+  // ── 基线补偿：按像素字号表（同字号统一，⛔ 不做逐字型夹取；`REQ-01M7Q9C16JR9ATFJK11A873B26`）──
+  //   ① 表值退化：`{16, 1}` → `{16, 2}`（小字号又吃回旧常量）⇒ 10px 注音的目标值从 1 变 2，
+  //      origin_y 会越出行框顶 1px（真字体档的读数见 `docs/03-emulator/fonts.md` §3.1）。
+  //      守卫选 **pure** 的 `tests/gdi.cpp#baseline-lift-table`：表是纯函数（只读 `fontConfig()`），
+  //      不需要字体就能红 ⇒ 这一条不依赖任何资产。`from` 必须与 `font.h` 的表行逐字一致。
+  {
+    file: 'apps/emulator-lift/src/runtime/font.h',
+    from: '    {16, 1},',
+    to: '    {16, 2},',
+    guard: 'ctest:gdi',
+    ctest: 'gdi',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-gdi',
+    what:
+      '按像素字号表的 baseline 目标值退化（`{16,1}` → `{16,2}`）⇒ 10px / 16px 的目标从 1 变 2 ⇒ ' +
+      'gdi 的 `baseline-lift-table`（`L(10) == 1`、`L(16) == 1`）当场红',
+  },
+
+  //   ② 合成字形档偷吃补偿：`origin_y = black_box_y` 被写成 `black_box_y + 配置量` ⇒ 格式算术契约
+  //      被视觉策略污染（`tests/gdi.cpp` 的 `gmptGlyphOrigin.y == 20 @20px` 是它的守卫）。
+  //      `from` 必须与 `font.cpp` 的合成档那一行逐字一致。
+  {
+    file: 'apps/emulator-lift/src/runtime/font.cpp',
+    from: '    m.origin_y = m.black_box_y;',
+    to: '    m.origin_y = m.black_box_y + fontConfig().baseline_lift;',
+    guard: 'ctest:gdi',
+    ctest: 'gdi',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-gdi',
+    what:
+      '`syntheticMask` 的 origin_y 从 black_box_y 变成 black_box_y + 2（偷吃宿主补偿量）⇒ gdi 的 ' +
+      'ggo-needed-and-metrics（gmptGlyphOrigin.y 必须是 20 @20px）当场红',
+  },
+
   {
     // ★ 代表 "点/线的 GPU 展开退化成零宽" 这一类错（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：
     //   把 1px 宽 quad 的**半宽**写成 0 ⇒ 每秒线展开出的两个三角形都退化成线（面积 0，被退化判据丢掉）

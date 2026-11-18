@@ -132,10 +132,30 @@ guest 字节（CP932）
 - 度量来自 FreeType 的 `face->size->metrics`，缓存键是 `(clamp 后像素字号, bold, 字体路径)`，
   `weight / italic / underlined / struck_out` 不进缓存、只由 `gdiTextMetrics` 从 `LOGFONT`
   覆盖（`font.cpp:492` 起）。`--profile` 会打印 `font!TEXTMETRIC-cache hits=… misses=…`。
-- **基线补偿是宿主视觉策略，不是引擎语义**：`kBaselineLift = 2` 只在
-  `FontEngine::glyph()` 里加到 `gmptGlyphOrigin.y`（`font.cpp:430`），**不改度量**；
-  `--baseline-lift 0` 关掉，`--baseline-lift N` 改 N。⛔ 不要写进 `tmAscent`，也不要
-  在 `gdiDrawText` 里再减一次（否则抬 2N px）。理由与回退口径见 `SCOPE.md` §5.1。
+- **基线补偿是宿主视觉策略，不是引擎语义**：**按像素字号查表**，值只加在
+  `FontEngine::glyph()` 的 `gmptGlyphOrigin.y`（`font.cpp` 的 `buildMaskFromSlot`），**不改度量**。
+  `baseline_lift == 0` ⇒ 全字号 0；`baseline_lift_by_size == false` ⇒ 全字号 `baseline_lift`（旧行为）；
+  缺省 `baseline_lift_by_size == true` ⇒ 查表。⛔ 不要写进 `tmAscent`，也不要在 `gdiDrawText`
+  里再减一次（否则抬 2N px）。理由与回退口径见 `SCOPE.md` §5.2。
+  - **表**（`font.h` 的 `kBaselineLiftBySize`，键 = 字形缓存键里 clamp 到 `1..512` 的像素字号）：
+    `≤16px → 1`、`>16px → baseline_lift`（缺省 `kBaselineLift = 2`，**派生**、⛔ 不抄字面 2）。
+    `px == 16` 含在小区间里（边界由 `gdi` 的 `baseline-lift-table` 钉住）。
+  - ★ **不做逐字型夹取**（用户 2026-11-18 裁决）：同一字号下**所有字形**的位移必须完全一致 ——
+    按 `ascent − bitmap_top` 逐字型收紧会让同一行里的「天」与「結」抬不同的量，基线错位比顶部被裁更糟。
+    行框余量只作**采样读数**，不进产品判定。
+  - **为什么 10px 必须 ≤1**（判据只用**像素事实**；`.tmp/font-ruby/evidence.md` §6.3–§6.5 的屏幕读数）：
+    10px 注音行「天」的墨迹顶在 lift0/1/2 = **611 / 610 / 609（丢）**；裁剪上沿固定 = **610（含）**，
+    被丢行数 = `max(0, lift − 1)` ⇒ lift=1 时顶横正好落在上沿（可见），lift=2 时整行被裁（「天」读作「大」）。
+    30px 正文首行 lift0/2 = 627 / 625、四臂都不裁；20px 标签**只抽了一处**、四臂都不裁（未做全帧普查）。
+  - **行框口径 ≈9px `<待核>`**：由「裁剪上沿 y=610（含）+ 反推基线 619」得到，**不是**
+    `metrics().ascent`（后者实测 = 10；`gdi-font#baseline-lift-by-size` 的 10/16/20/30 读数 = 10/16/20/30）。
+    两者差 1 的口径来源**未证**（`evidence.md` §10：裁剪盒来源不可区分）；若 guest 真的用 `tmAscent = 10`，
+    行框顶应是 609，而实测是 610 ⇒ 这个反推量 **≠ `tmAscent`**。⛔ 不要把它写成 `tm.ascent`，也不要
+    用它做产品判定（表值只由屏幕采样 + `gdi-font` 的 10/16/20/30 读数支撑）。
+  - ⚠ **仓内旧读数**：`docs/02-engine/ops-forensics-2026-10-title-option.md` §42 记的 20/28px
+    ascender（20 / 28）与同文 §28 的 19 是**两种口径**：20px 的「20」与产品 `metrics().ascent`
+    （`font.cpp` 的 `sm.ascender >> 6`，实测 20）一致；「19」是 hhea 969/1000 的手算口径。
+    **表值只由屏幕采样 + `gdi-font#baseline-lift-by-size` 的 10/16/20/30 读数支撑**，不从任一手算值推。
 
 ### 3.2 谁接管了 Win32 形状
 
@@ -144,7 +164,7 @@ guest 字节（CP932）
 | `apps/emulator-lift/src/shims/gdi32_font.cpp` | `CreateFontIndirectA` / `GetTextMetricsA` / `GetGlyphOutlineA` / `GetTextExtentPoint32A` / `TextOutA` / `EnumFontFamiliesExA` / `AddFontMemResourceEx` |
 | `apps/emulator-lift/src/runtime/font.cpp` / `font.h` | FreeType 桥、字形 / 度量、GGO 打包、文本绘制、`FontConfig` / `kBaselineLift` |
 | `apps/emulator-lift/src/runtime/cp932.cpp` / `cp932_table.h` | CP932 ⇄ UTF-16；表是派生文件，⛔ 不手改（生成器 `tools/lift-cp932-gen.mjs`） |
-| `apps/emulator-lift/src/main.cpp` | `--font` / `--baseline-lift` / `--font-engine-name`（`:549` / `:557` / `:563`） |
+| `apps/emulator-lift/src/aot/aot_main.cpp` | `--baseline-lift` / `--baseline-lift-by-size`（解释器臂的 `--font` / `--font-engine-name` 仍缺，见 §6.1） |
 | `apps/emulator-lift/CMakeLists.txt` | `LIFT_HOST_FONT_PATH` 的缺省注入（`:204`） |
 
 字体来源的硬口径（用户裁决，登记在 `apps/emulator-lift/SCOPE.md` §5）：
@@ -159,8 +179,10 @@ guest 字节（CP932）
   `font!glyph-fallback` 行（字段口径见 `apps/emulator-lift/README.md` §4.3.1；逐次来路用 `LIFT_TEXT_TRACE` 看，§3.4）。
 - 没有可用字体时，`GetTextMetricsA` / `GetGlyphOutlineA` / `GetTextExtentPoint32A` /
   `TextOutA` **明确失败**（0 / `GDI_ERROR` + 一行日志），⛔ 不画空白冒充成功。
-- 实际生效的路径看启动日志的 `font :` 行，或 `./out/emulator-lift --help` 的
-  `--font` / `--baseline-lift` 说明；不要只看 CMake。
+- 实际生效的路径看启动日志的 `font :` 行，或 `cd apps/emulator-lift && ./out/emulator-lift-aot --help`
+  的 `--baseline-lift` / `--baseline-lift-by-size` 说明；不要只看 CMake。
+  ★ 宿主字体路径 `--font` / `--font-engine-name` **AOT 臂还没有**（随解释器退役被删，另单）；
+  缺省字体由 CMake 的 `LIFT_HOST_FONT_PATH` 注入。
 
 ### 3.3 字体名表不是字形来源
 
@@ -315,7 +337,8 @@ cp=U+2661 glyphID=1815 load_err=0 bitmap=18x16 advance26.6=1280
 | 只比 `GetTextExtentPoint32A` 的宽，不与 GGO / `TextOutA` 交叉核对 | CJK 等宽下 extent 对但字形可能全错；advance 的 floor/round 也会漂 | `font.cpp:688` / `:803`；`gdi.cpp / extent-advance-self-consistency` |
 | 把 PUA（`U+E000` 区）当普通字 | CP932 用户定义区 → PUA；Amayui CN 无 cmap ⇒ 交给缺字后备（若已登记游戏字体），主字体与后备都缺才画 `.notdef`，且 `FT_Load_Char` 不报错 | `cp932_table.h`；bug `REQ-01M79N1ZV391BCM7MYSKK0GVV0` |
 | 只看 `FT_Load_Char` 返回值判断「字形存在」 | glyph 0 / `.notdef` 也返回 0；缺字被缓存成正常字形 | `font.cpp` 的 `glyphIndexFor()` / `glyph()`；同上 bug 单 |
-| 把基线补偿写进 `tmAscent`，或在 `gdiDrawText` 里再减一次 | 行距变 / 墨迹抬 2N px；`TEXTMETRICA` 不再逐字节稳定 | `font.h:35`、`font.cpp:430`；口径见 `docs/03-emulator/defects.md` BUG-08（原 CTest `text-baseline-lift` 已删，复现命令见该条） |
+| 把基线补偿写进 `tmAscent`，或在 `gdiDrawText` 里再减一次 | 行距变 / 墨迹抬 2N px；`TEXTMETRICA` 不再逐字节稳定 | `font.h` 的 `kBaselineLift` / `font.cpp` 的 `buildMaskFromSlot`；口径见 `docs/03-emulator/defects.md` BUG-08（原 CTest `text-baseline-lift` 已删，复现命令见该条） |
+| 按字形 `ascent − bitmap_top` **逐字型夹**基线补偿 | 同一行里「天」与「結」抬不同的量 ⇒ 基线错位（比顶部被裁更糟）；用户 2026-11-18 已裁决禁止 | `font.cpp` 的 `buildMaskFromSlot`（只查表）；`gdi-font / baseline-lift-by-size`（uniform 不变量） |
 | 把 `tmCharSet` 恒 0 当成「引擎请求的 charset」 | 枚举路径若回 0，引擎回调过滤掉所有族名 ⇒ 字体名表空 ⇒ `std::out_of_range` | `gdi32_font.cpp:96` vs `:503`；`gdi.cpp / enum-font-families` |
 | `EnumFontFamiliesExA` 回调极性写成「非 0 = 停止」 | 只报 1 条族名；引擎查 `ＭＳ ゴシック` 返回 -1 ⇒ 崩 | `gdi32_font.cpp:464`；`gdi.cpp / enum-font-families-stop` |
 | 直接手改 / 覆盖 `corpus/assets/fonts/Amayui-CN_cnjp*.ttf` | 校验基准被破坏；`pnpm tools fonts verify` 红；无法从「基底 + 字典」复现 | `tools/fonts.md`；`tools/test/fonts.test.mjs` |
@@ -326,24 +349,56 @@ cp=U+2661 glyphID=1815 load_err=0 bitmap=18x16 advance26.6=1280
 
 ## 6. 改字体 / 换字体
 
-### 6.1 只做调试：换路径 / 关补偿 / A/B 上报
+### 6.1 只做调试：关补偿 / 按字号表 A/B
 
 ```bash
 cd apps/emulator-lift
-./out/emulator-lift --help | rg -- '--font|--baseline-lift|--font-engine-name'
+./out/emulator-lift-aot --help | rg -- '--baseline-lift'
 ```
 
 ```text
-  --font <path>       宿主字体（缺省：CMake 注入的 Amayui CN；调试覆盖）
-  --baseline-lift <N> 宿主基线补偿像素（缺省 2；0 = 关；★ 宿主视觉策略，不是引擎语义）
-  --font-engine-name  字体 A/B 对照档：上报引擎字面名（字形仍来自宿主 Amayui CN）
+  --baseline-lift <N> 宿主基线补偿**默认字号的值**像素（0..64；0 = 关；缺省 = 编译期
+                      `kBaselineLift`）。★ 宿主视觉策略（⛔ 不是引擎语义）：≤16px 按表给 1，
+                      同一字号下所有字形位移完全一致（⛔ 不做逐字型夹取）。
+  --baseline-lift-by-size <0|1>
+                      1（缺省）= 按像素字号查表；0 = 旧行为（全字号恒 `--baseline-lift`，
+                      A/B 对照用）。`--baseline-lift 0` 恒关。
 ```
 
-- `--font <ttf>` 只覆盖 `regular_path`，并清空 `bold_path`；`fontSetConfig()` 会用
-  `boldPathFor()` 派生 `-Bold.ttf`（只认 `.ttf` 后缀；其它后缀会回退同一份，`font.cpp:74`）。
-- `--baseline-lift 0` 关补偿；`N` 改 N（0..64）。
-- `--font-engine-name` **只影响上报族名**，不换字形。真正换字形要改分发字体或实现，
-  不要指望这个开关。
+- `--baseline-lift 0`：全字号关补偿（逐字节等于"没有补偿"）。A/B 的 **off** 臂。
+- `--baseline-lift N`（0..64）：**默认字号（>16px）**的值；≤16px 仍按表给 1。
+- `--baseline-lift-by-size 0`：旧行为（全字号恒 N），A/B 的 **legacy** 臂（复现修前视觉）。
+- 宿主字体路径 `--font` / `--font-engine-name` **AOT 臂还没有**（随 2026-11-16 解释器退役删除，另单）；
+  缺省字体由 CMake 注入。真正换字形要改分发字体或实现（§6.2 / §6.3）。
+- **三臂 A/B 命令**（2026-11-18 实跑）。`--input-plan` 用的是 4 行**本地取证配方**
+  （`<repo>/.tmp/font-ruby/to-config.plan`，`.tmp` 不入库 —— 内容就是下面这 4 行；⚠ **门与 click
+  之间不能夹 wait**，否则 click 会落在 TITLE 的轮询体里被吃掉）：
+
+```text
+await position TITLE 0x0460 0x0520 timeout 30000
+click 812 615
+wait 5000
+quit
+```
+
+```bash
+# 在仓根跑；<plan> = 上面 4 行落成的本地文件；<arm> ∈ {default, off, legacy}
+# 每臂用**全新私有** --appdata
+./apps/emulator-lift/out/emulator-lift-aot \
+  --exe corpus/assets/age/AGE.EXE__dumped.sectfix.EXE --game-dir links/install \
+  --appdata <fresh> --skip-logo --audio off --present headless \
+  --input-plan <plan> --max-frames 900 --time-limit 180 --dump-frame <arm>.bmp \
+  <arm flags>      # default: --baseline-lift 2
+                   # off:     --baseline-lift 0
+                   # legacy:  --baseline-lift 2 --baseline-lift-by-size 0
+```
+
+读数（2026-11-18 / macOS arm64 / RelWithDebInfo，`--dump-frame` 的 CONFIG1 帧；阈值 `ink = 亮度 ≥ 150`，
+统计区 `x 430..700`）：10px 注音行「天」的顶横 **default → y=610（x=446..453，10 px）· legacy → 丢
+（y=609 全行 0）· off → y=611**；30px 正文首行 **default / legacy → y=625 · off → y=627**。
+`fixed-off` 与 `fixed-legacy` 两张帧分别与修前取证帧（`frame-lift0` / `frame-lift2`）**逐像素相同**
+（1280×720，diff=0）；`fixed-default` 的注音区与 `frame-lift1` 逐像素相同、正文区与 `frame-lift2`
+逐像素相同（= 10px 让到 1、30px 保持 2）。
 
 ### 6.2 换分发字体（产品决策，不是调试）
 
@@ -386,22 +441,25 @@ pnpm tools fonts build --write   # 只写 dist/fonts/（生成物）；不覆盖
 | 取字 / 度量 / GGO / 绘制 | `apps/emulator-lift/src/runtime/font.cpp` | 见本节末的命令 |
 | Win32 形状 / 参数解包 | `apps/emulator-lift/src/shims/gdi32_font.cpp` | 同上（`gdi` 是 pure；`gdi-font` 要宿主字体，缺字体时 SKIP 77） |
 | CP932 表 | `apps/emulator-lift/src/runtime/cp932_table.h` + 生成器 `tools/lift-cp932-gen.mjs` | 按生成器头注释重生成（⛔ 不手改派生表）；CTest `codepage` / `strfmt` |
-| 字体路径 / 基线常量 | `apps/emulator-lift/CMakeLists.txt:204`、`font.h:35` | 重新 configure + build；基线补偿的复现命令见 `docs/03-emulator/defects.md` BUG-08 |
+| 字体路径 / 基线表 | `apps/emulator-lift/CMakeLists.txt:204`、`font.h` 的 `kBaselineLift` / `kBaselineLiftBySize` | 重新 configure + build；基线补偿的复现命令见 `docs/03-emulator/defects.md` BUG-08 / §6.1 |
 
 守卫用例名（**CTest 测试名** + 测试内部的用例名；`-R` 只能匹配前者，内部用例名要跑整个
 CTest 才会打印）：
 
 - CTest `gdi`（pure）：`enum-font-families`、`enum-font-families-stop`、
-  `extent-advance-self-consistency`、`pack-mono-row-align` / `pack-gray4-range` / `pack-gray8-range`；
-- CTest `gdi-font`（assets）：`ggo-formats`、`extent-advance`、`metrics-stable`、
+  `extent-advance-self-consistency`、`pack-mono-row-align` / `pack-gray4-range` / `pack-gray8-range`、
+  `baseline-lift-table`（★ 2026-11-18 新增：纯函数表结构 —— `≤16 → 1`、`>16 → baseline_lift`、
+  `0` = 全 0、`by_size=false` = 全常量、1..64 单调）；
+- CTest `gdi-font`（pure；缺字体 ⇒ SKIP 77）：`ggo-formats`、`extent-advance`、`metrics-stable`、
   `metrics-size-change`（★ 换字号后度量必须变 —— 2026-11-13 从已删的 `gdi-font-metrics-cache` 搬来
-  的**真 GDI 合同**）；缓存键 / hit-miss 计数那一类断言已按 `defects.md` BUG-14 删除（内部取舍），
-  知识落在 `design-notes.md` 的 L3-gdi-01。
-- **基线补偿（`baseline_lift == 2`）没有 CTest 了**：它是**我方视觉策略**，不是引擎语义、也不是接口合同
-  ⇒ 原 CTest `text-baseline-lift`（`lift/origin-delta` / `lift/metrics-unchanged` / `lift/pixels`）
-  已按测试模型于 2026-11-14 **删除**（业务/策略正确性不作判据）。**判据留在这里**：补偿只加在
-  `gmptGlyphOrigin.y`、**不改度量**（`TEXTMETRICA` 逐字段稳定）、方向是墨迹**上**移 2 px；
-  复现命令见 `docs/03-emulator/defects.md` BUG-08（`--baseline-lift 0` 与 `2` 两臂逐帧 BMP 比）。
+  的**真 GDI 合同**）、`baseline-lift-by-size`（★ 2026-11-18 新增：**同字号全部 probe 的
+  `origin_y` 增量 == 表值**（uniform）+ 10px「天」`origin_y < ascent` 的定点判据（严格小于）+ `by_size=false`
+  时增量恒 `baseline_lift` + 度量跨配置逐字段不变）；缓存键 / hit-miss 计数那一类断言已按
+  `defects.md` BUG-14 删除（内部取舍），知识落在 `design-notes.md` 的 L3-gdi-01。
+- **基线补偿的判据边界（2026-11-18 起）**：原 CTest `text-baseline-lift`（断言"补偿必须 = 2"）
+  仍**不复活**（业务/策略正确性不作判据）。新加的两条守的是**可观测不变量**：按字号的位移关系
+  （表结构 + 同字号 uniform + 10px 不越行框顶）与"补偿不写度量"。表的**具体值**（1 / 2）是用户裁决，
+  换一份实现不必逐字复刻，但"10px 不再丢顶横、20/30px 视觉不变、`0` 逐字节关补偿"这三条要保持。
 
 ```bash
 ctest --test-dir apps/emulator-lift/out -R '^(gdi|gdi-font)$' --output-on-failure
@@ -415,6 +473,7 @@ ctest --test-dir apps/emulator-lift/out -R '^(gdi|gdi-font)$' --output-on-failur
 pnpm tools requirements show 01M6KHDTBREGT6Z90E4EHPKE6M   # GDI 字体/文本：宿主 Amayui CN + 三档 GGO
 pnpm tools requirements show 01M72G8JY1Y989H9H8M02DJ2PX   # 字体名表 / EnumFontFamiliesExA
 pnpm tools requirements show 01M6WXEDGGJY1Q1YDEM07S1YR3   # 度量缓存 + 基线补偿
+pnpm tools requirements show 01M7Q9C16JR9ATFJK11A873B26   # 10px 注音丢顶横：按字号表 + AOT 两个 flag（bug）
 pnpm tools requirements show 01M79N1ZV391BCM7MYSKK0GVV0   # U+E010 / PUA 字形（bug）
 pnpm tools requirements show 01M79N24Y09F5G9Y40QV3SVFDG   # 本文档的落点单
 ```

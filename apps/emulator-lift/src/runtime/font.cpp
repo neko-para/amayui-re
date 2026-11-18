@@ -188,6 +188,20 @@ void fontSetConfig(const FontConfig& cfg) {
 
 const FontConfig& fontConfig() { return g_config; }
 
+int fontBaselineLiftForPixelSize(int pixel_size) {
+    // ★ 返回值**就是**施加量：同一字号下所有字形共用它（⛔ 不按字形的 `ascent − bitmap_top`
+    //   再夹一次 —— 用户 2026-11-18 裁决：基线一致性优先于绝对不裁）。
+    const FontConfig& cfg = fontConfig();
+    if (cfg.baseline_lift == 0) return 0;                      // 0 = 关：逐字号都 0（A/B 的 off 臂）
+    if (!cfg.baseline_lift_by_size) return cfg.baseline_lift;  // 旧行为：全字号常量（A/B 的 legacy 臂）
+    // ★ 表键 = `glyph()` 里 clamp 后的 size（与字形缓存键同一维；⛔ 不用裸 lfHeight）。
+    const int px = std::clamp(pixel_size, 1, 512);
+    for (const BaselineLiftRow& row : kBaselineLiftBySize) {
+        if (px <= row.max_px) return row.lift;
+    }
+    return cfg.baseline_lift;  // 默认行**派生**自配置（⛔ 不抄字面 2）
+}
+
 // =======================================================================================
 // FontEngine
 // =======================================================================================
@@ -354,16 +368,20 @@ GlyphMask syntheticMask(char32_t cp, int pixel_size) {
 }
 
 // 把一个已渲染的 FT glyph slot 拷成 `GlyphMask`（连续覆盖率 + 黑框/origin/advance）。
-// ★ 真字体档的**唯一**位移点在这里（基线补偿 `kBaselineLift` / `--baseline-lift`）：主 face 与
-//   后备 face 都走同一个位移，否则同一行里的 ♡ 会比相邻汉字低 N px（"位移只在一处"这条口径不变）。
-bool buildMaskFromSlot(const FT_GlyphSlot slot, GlyphMask* out) {
+// ★ 真字体档的**唯一**位移点在这里（基线补偿）：主 face 与后备 face 都走同一个位移，否则同一行里的
+//   ♡ 会比相邻汉字低 N px（"位移只在一处"这条口径不变）。
+// ★ 施加量 = **按像素字号查表**（`fontBaselineLiftForPixelSize`），同一字号下所有字形完全一致。
+//   ⛔ **不做逐字型夹取**（用户 2026-11-18 裁决，`REQ-01M7Q9C16JR9ATFJK11A873B26`）：
+//   按 `ascent − bitmap_top` 逐字型收紧会让同一行里的「天」与「結」抬不同的量 ⇒ 基线错位，
+//   比顶部被裁更糟。行框余量只在**测试 / 文档**里当采样读数用，⛔ 不进产品判定。
+bool buildMaskFromSlot(const FT_GlyphSlot slot, int pixel_size, GlyphMask* out) {
     if (slot == nullptr || out == nullptr) return false;
     const FT_Bitmap& bitmap = slot->bitmap;
     GlyphMask m;
     m.black_box_x = static_cast<int>(bitmap.width);
     m.black_box_y = static_cast<int>(bitmap.rows);
     m.origin_x = slot->bitmap_left;
-    m.origin_y = slot->bitmap_top + fontConfig().baseline_lift;
+    m.origin_y = slot->bitmap_top + fontBaselineLiftForPixelSize(pixel_size);
     // ★ 推进 = **floor**(26.6)：`>> 6`（不是四舍五入）。extent / GGO / TextOut 共用它。
     m.advance = advancePixels(slot->advance.x);
     const std::size_t count =
@@ -411,12 +429,11 @@ bool loadGlyphFor(FontEngine::Impl& impl, FT_Face face, int slot, char32_t cp, i
         return src.load != nullptr && src.load(src.user, slot, cp, size, bold, out);
     }
     if (face == nullptr) return false;
-    (void)size;  // 真字体档的字号已在 `faceForSize` / 后备登记时设好
     (void)bold;  // 粗体是"用哪份 face"的选择，不是单次 load 的参数
     if (FT_Load_Char(face, static_cast<FT_ULong>(cp), FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL) != 0) {
         return false;
     }
-    return buildMaskFromSlot(face->glyph, out);
+    return buildMaskFromSlot(face->glyph, size, out);
 }
 
 }  // namespace

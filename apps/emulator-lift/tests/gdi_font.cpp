@@ -14,6 +14,11 @@
 //      → `GetTextMetricsA`，与常规 face 的 TEXTMETRIC 在**FT 派生格**上至少一字段不同
 //      （height / ascent / descent / internal·external leading / ave·max char width / overhang）。
 //      ⛔ 不锁 `tmWeight` "永远来自本次 desc"—— 那是缓存键 / desc 覆盖行为（BUG-14 反模式）。
+//   ⑧ **基线补偿按像素字号表**（`REQ-01M7Q9C16JR9ATFJK11A873B26`）：
+//      off 臂（`baseline_lift=0`）的 `origin_y` = 裸 `bitmap_top`；on 臂同字号**全部** probe 的
+//      增量都恰好等于表值（uniform，⛔ 不做逐字型夹取）；legacy 臂（`by_size=false`）的增量恒等于
+//      `baseline_lift`；两种配置下 FT 派生的度量逐字段不变。定点判据：10px「天」`origin_y < ascent`
+//      （严格小于：等号不构成"在行框内"的判据；表值退化的主判据是 uniform + `gdi#baseline-lift-table`）。
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -483,6 +488,91 @@ int main() {
         }
         // ★ 至少一字段不同 ⇒ bold 真的给出了另一份度量（⛔ 不是把常规那份原样返回）。
         LIFT_CHECK(changed > 0);
+    }
+
+    // ---- ⑧ 基线补偿：按像素字号查表（同字号全部字形位移一致；`REQ-01M7Q9C16JR9ATFJK11A873B26`）----
+    //   ★ 主不变量 = **uniform**：同字号下 probe 集（天 / 結 / あ / |）的
+    //     `origin_y − mask0.origin_y` **全部等于**该字号的表值（off 臂的 origin_y = 裸 bitmap_top）。
+    //     ⇒ 同一行里的不同字型不会被抬成不同的量（用户 2026-11-18 裁决：基线一致性优先于绝对不裁；
+    //     ⛔ 不做按 `ascent − bitmap_top` 的逐字型夹取）。
+    //   ★ **定点**判据（本缺陷的可观测面）：10px `U+5929` 的 `origin_y < ascent` —— 注音「天」的
+    //     顶横不再被推出行框顶。★ **严格小于**：等号（lift=2 时 8+2 == 10）不构成"在行框内"的判据，
+    //     用 `<=` 会让这条断言在缺陷值上照样绿。⛔ 不对全部 probe / 字号断言这条：满高 `|` 在 lift 0
+    //     时就可能越界（把表逼成 0 是错的）。`ascent` 只当**采样读数**（`metrics()` 的 FT 派生值），
+    //     不进产品判定；表值退化的主判据仍是 uniform 增量 + `gdi#baseline-lift-table`。
+    //   ★ `by_size=false`（旧行为）⇒ 同字号全部字形 delta 恒等于 `baseline_lift`（没有夹取）。
+    //   ★ 度量（height / ascent / descent / …）跨配置逐字段不变。
+    g_current_case = "baseline-lift-by-size";
+    {
+        const lift::FontConfig saved = lift::fontConfig();
+        const char32_t probes[] = {U'\u5929', U'\u7D50', U'\u3042', U'\u007C'};  // 天 / 結 / あ / |
+        const int kProbeCount = 4;
+        const int sizes[] = {10, 16, 20, 30};
+        for (const int size : sizes) {
+            const int table = size <= 16 ? 1 : lift::kBaselineLift;  // 裁决的表值（≤16 → 1）
+
+            // ① off 臂：`baseline_lift = 0` ⇒ mask0.origin_y 就是裸 bitmap_top。
+            lift::FontConfig off = lift::fontDefaultConfig();
+            off.baseline_lift = 0;
+            lift::fontSetConfig(off);
+            lift::HostTextMetrics tm_off;
+            LIFT_CHECK(m.fonts().metrics(size, /*bold=*/false, &tm_off));
+            LIFT_CHECK(tm_off.ascent > 0);
+            lift::GlyphMask mask0[kProbeCount];
+            for (int i = 0; i < kProbeCount; ++i) {
+                LIFT_CHECK(m.fonts().glyph(probes[i], size, /*bold=*/false, &mask0[i]));
+            }
+
+            // ② on 臂：缺省配置（by_size=true）。
+            lift::fontSetConfig(lift::fontDefaultConfig());
+            lift::HostTextMetrics tm_on;
+            LIFT_CHECK(m.fonts().metrics(size, /*bold=*/false, &tm_on));
+            // 度量不动：FT 派生段逐字段相同（补偿只进 origin_y）。
+            LIFT_CHECK_EQ_I64(tm_on.height, tm_off.height);
+            LIFT_CHECK_EQ_I64(tm_on.ascent, tm_off.ascent);
+            LIFT_CHECK_EQ_I64(tm_on.descent, tm_off.descent);
+            LIFT_CHECK_EQ_I64(tm_on.internal_leading, tm_off.internal_leading);
+            LIFT_CHECK_EQ_I64(tm_on.external_leading, tm_off.external_leading);
+            LIFT_CHECK_EQ_I64(tm_on.ave_char_width, tm_off.ave_char_width);
+            LIFT_CHECK_EQ_I64(tm_on.max_char_width, tm_off.max_char_width);
+            LIFT_CHECK_EQ_I64(tm_on.overhang, tm_off.overhang);
+
+            int on_delta[kProbeCount] = {};
+            for (int i = 0; i < kProbeCount; ++i) {
+                lift::GlyphMask mask;
+                LIFT_CHECK(m.fonts().glyph(probes[i], size, /*bold=*/false, &mask));
+                on_delta[i] = mask.origin_y - mask0[i].origin_y;
+                // ★ 主不变量：同字号下每个字型都恰好抬表值那么多（uniform，⛔ 不逐字型夹）。
+                LIFT_CHECK_EQ_I64(on_delta[i], table);
+                if (size == 10 && probes[i] == U'\u5929') {
+                    // ★ 本缺陷的定点判据：10px「天」的 origin_y 严格在行框顶之上 ⇒ 顶横留在行内。
+                    //   ⛔ 不用 `<=`：lift=2 时 8+2 == ascent 会让缺陷值也绿（等号不符"在框内"）。
+                    LIFT_CHECK(mask.origin_y < tm_off.ascent);
+                }
+            }
+
+            // ③ legacy 臂（`by_size=false` = 旧行为）：全字号恒 `baseline_lift`。
+            lift::FontConfig legacy = lift::fontDefaultConfig();
+            legacy.baseline_lift = lift::kBaselineLift;
+            legacy.baseline_lift_by_size = false;
+            lift::fontSetConfig(legacy);
+            int legacy_delta[kProbeCount] = {};
+            for (int i = 0; i < kProbeCount; ++i) {
+                lift::GlyphMask mask;
+                LIFT_CHECK(m.fonts().glyph(probes[i], size, /*bold=*/false, &mask));
+                legacy_delta[i] = mask.origin_y - mask0[i].origin_y;
+                LIFT_CHECK_EQ_I64(legacy_delta[i], lift::kBaselineLift);
+            }
+            // 读数（文档 / 报告用，不是判据）。
+            std::printf(
+                "baseline-lift-by-size: size=%2d ascent=%2d top=[%d,%d,%d,%d] on-delta=[%d,%d,%d,%d] "
+                "legacy-delta=[%d,%d,%d,%d]\n",
+                size, tm_off.ascent, mask0[0].origin_y, mask0[1].origin_y, mask0[2].origin_y,
+                mask0[3].origin_y, on_delta[0], on_delta[1], on_delta[2], on_delta[3], legacy_delta[0],
+                legacy_delta[1], legacy_delta[2], legacy_delta[3]);
+        }
+        // 收尾：恢复进程级配置（⛔ 不把 on/legacy 档留给后面的用例）。
+        lift::fontSetConfig(saved);
     }
 
     return finish("gdi-font");

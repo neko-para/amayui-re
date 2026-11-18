@@ -23,6 +23,7 @@
 #include "aot/aot_host.h"
 #include "runtime/control.h"          // 控制层端点（`--control-root`；PIMPL，⛔ 不含 beast / nlohmann）
 #include "runtime/guest_exit.h"       // guest 退出码 → 宿主退出码（与解释器臂**同一份**映射；纯头）
+#include "runtime/font.h"             // `--baseline-lift` / `--baseline-lift-by-size`（任何 FontEngine 之前）
 #include "runtime/host_cursor.h"      // `--cursor-warp` 的平台闸门（与解释器臂同一条判据）
 #include "runtime/host_encoding.h"
 #include "runtime/input_plan.h"       // `--input-plan`（S4：AOT 臂唯一的输入控制面）
@@ -202,6 +203,12 @@ void usage() {
         "                      对 `--scale` **无副作用**：接受但不生效（隐藏离屏窗口仍是\n"
         "                      1280×720，也不查 DPI）。非 auto 且非正数 / NaN / 垃圾 ⇒ exit 2\n"
         "                      并点名本参数\n"
+        "  --baseline-lift <N> 宿主基线补偿**默认字号的值**像素（0..64；0 = 关；缺省 = 编译期\n"
+        "                      `kBaselineLift`）。★ 宿主视觉策略（⛔ 不是引擎语义）：≤16px 按表给 1，\n"
+        "                      同一字号下所有字形位移完全一致（⛔ 不做逐字型夹取）。\n"
+        "  --baseline-lift-by-size <0|1>\n"
+        "                      1（缺省）= 按像素字号查表；0 = 旧行为（全字号恒 `--baseline-lift`，\n"
+        "                      A/B 对照用）。`--baseline-lift 0` 恒关。\n"
         "%s"
         "  env LIFT_FAULT_DUMP=<spec>\n"
         "                      **opt-in**（缺省不设 = fault 文本一条 dump 行都不多）：guest fault 时按\n"
@@ -296,6 +303,16 @@ int main(int argc, char** argv) {
     // ★ `--sound`（缺省关）：**真的**进 `AudioEngine` 的静音门（`mute_ = !sound`）—— 不再是
     //   `aot_host.cpp` 里的硬写 false（b-3）。文案与口径见 `runtime/present_flags.h`。
     bool sound = false;
+    // ★ `--baseline-lift <N>` / `--baseline-lift-by-size <0|1>`（宿主视觉策略；⛔ 不是引擎语义）：
+    //   随解释器退役被删过一次，本轮装回（`REQ-01M7Q9C16JR9ATFJK11A873B26`）。
+    //   ★ 缺省**不覆盖**：`FontConfig` 的缺省值来自 `fontDefaultConfig()`（`kBaselineLift` + by_size=true）
+    //     ⇒ 不给这两个参数时行为与"只改代码、不动配置"逐位相同。
+    //   ★ 值在 `SdlWindow::init` / `AotHost` 之前落地（HUD 文本也会走 `FontEngine::glyph`）：
+    //     见下面的 `fontSetConfig` 调用，位置在 GPU bring-up 之前。
+    int baseline_lift = 0;
+    bool baseline_lift_set = false;
+    bool baseline_lift_by_size = true;
+    bool baseline_lift_by_size_set = false;
     // ★ `--profile-slow-frames <ms>`（缺省不给 = 关；**必须与 `--profile` 同给** ⇒ 见下面的校验）。
     //   为什么单独记一个 bool：值 0 也是"给了这个 flag"（= 显式关），⛔ 不要靠 `!= 0` 判"给没给"。
     bool profile_slow_frames_set = false;
@@ -411,6 +428,40 @@ int main(int argc, char** argv) {
             // ★ `--sound` 只置一个 bool：它经 `host.configureAudio(...)` 进 `AudioEngine` 的静音门
             //   （`mute_ = !sound`），并由下面那条一次性说明与代码同形地报出来。
             sound = true;
+        } else if (a == "--baseline-lift") {
+            // ★ 0..64 的十进制整数（范围与 `docs/03-emulator/fonts.md` 的文档口径一致）；
+            //   非数字 / 越界 ⇒ exit 2 并**点名本参数**（⛔ 不静默当成缺省）。
+            std::string v;
+            if (!needValue("--baseline-lift", &v)) return 2;
+            bool digits_only = !v.empty();
+            for (const char c : v) {
+                if (c < '0' || c > '9') {
+                    digits_only = false;
+                    break;
+                }
+            }
+            char* endp = nullptr;
+            const unsigned long long n = digits_only ? std::strtoull(v.c_str(), &endp, 10) : 0ull;
+            if (!digits_only || endp == v.c_str() || *endp != '\0' || n > 64ull) {
+                std::fprintf(stderr,
+                             "emulator-lift-aot: --baseline-lift 需要 0..64 的整数：`%s`\n",
+                             v.c_str());
+                return 2;
+            }
+            baseline_lift = static_cast<int>(n);
+            baseline_lift_set = true;
+        } else if (a == "--baseline-lift-by-size") {
+            // ★ 只收 0 / 1（= 关 / 开按字号查表）；其它值 ⇒ exit 2 并点名（⛔ 不把垃圾当真）。
+            std::string v;
+            if (!needValue("--baseline-lift-by-size", &v)) return 2;
+            if (v != "0" && v != "1") {
+                std::fprintf(stderr,
+                             "emulator-lift-aot: --baseline-lift-by-size 只收 0 / 1：`%s`\n",
+                             v.c_str());
+                return 2;
+            }
+            baseline_lift_by_size = v == "1";
+            baseline_lift_by_size_set = true;
         } else if (a == "--skip-logo") {
             // ★ 与已退役解释器臂同一条：只置一个 bool（一次性 latch，语义在 aot_run.cpp）。
             run_opts.skip_logo = true;
@@ -685,6 +736,19 @@ int main(int argc, char** argv) {
     if (overlay && ui_script.empty()) {
         const std::string candidate = exeDirOf(args.empty() ? std::string() : args[0]) + "scripts/ui/hud.js";
         if (fileExists(candidate)) ui_script = candidate;
+    }
+
+    // ---- 宿主字体配置：`--baseline-lift` / `--baseline-lift-by-size` **落在这里** ----
+    //   ★ 必须在**任何** `FontEngine` / `SdlWindow` 使用之前：`SdlWindow::init` 会为 `--overlay`
+    //     建 HUD 的 `FontEngine`（R5），`AotHost` 里也有引擎 ⇒ 晚于它就不再是"缺省配置"。
+    //   ★ 缺省（两个参数都不给）⇒ **不调用** `fontSetConfig`：进程里生效的就是 `fontDefaultConfig()`
+    //     那一份（`kBaselineLift` + by_size=true），与"只改代码不动配置"逐位相同。
+    //   ★ `fontSetConfig` 自己 bump 代际 ⇒ 已存在的引擎会在下次取字 / 度量时清缓存（`syncConfigEpoch`）。
+    if (baseline_lift_set || baseline_lift_by_size_set) {
+        lift::FontConfig cfg = lift::fontDefaultConfig();
+        if (baseline_lift_set) cfg.baseline_lift = baseline_lift;
+        if (baseline_lift_by_size_set) cfg.baseline_lift_by_size = baseline_lift_by_size;
+        lift::fontSetConfig(cfg);
     }
 
     // =====================================================================================

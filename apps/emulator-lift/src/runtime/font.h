@@ -6,7 +6,9 @@
 //   · `AddFontMemResourceEx` 送进来的内存**只当缺字后备**（`REQ-01M79N1ZV391BCM7MYSKK0GVV0`）：
 //     主字体有该码位的字形时**永不**用到它 —— ⛔ 不按 `lfFaceName` 路由（引擎把 `AGE Extend`
 //     硬编码给所有文本，按名字路由会把全部中文切回日文字形，那是倒退）。
-//   · **基线补偿 +2px** 是**宿主视觉策略**（⛔ 不是引擎语义，登记在 `SCOPE.md`），0 = 关。
+//   · **基线补偿**是**宿主视觉策略**（⛔ 不是引擎语义，登记在 `SCOPE.md`），0 = 关；
+//     2026-11-18 起按像素字号查表（≤16px 给 1、其余 `kBaselineLift`），同字号全部字形统一
+//     （⛔ 不做逐字型夹取；用户裁决：基线一致性优先于绝对不裁）。`REQ-01M7Q9C16JR9ATFJK11A873B26`。
 //   · GGO 的**格式**（1 位 / 17 级 / 65 级）与行对齐是**引擎合同**；1px 级栅格差按平台 discard。
 // ★ 本文件 = "宿主字体 + GDI 对象状态"的叶子层；`src/shims/gdi32_*.cpp` 只做 Win32 形状与参数解包。
 // ★ 自洽判据（plan §5 B3）的**唯一**取字/推进路径是 `gdiGlyph()`：
@@ -28,21 +30,52 @@
 namespace lift {
 
 // =======================================================================================
-// 宿主字体配置（CLI `--font` / `--baseline-lift` / `--font-engine-name`；main.cpp 调一次）
+// 宿主字体配置（CLI `--baseline-lift` / `--baseline-lift-by-size`；AOT 臂 `aot_main.cpp` 调一次）
 // =======================================================================================
-// ★ **基线补偿量**（宿主视觉策略，⛔ 不是引擎语义）：**唯一一处常量**，名字对齐 cxx 的对应量。
+// ★ **基线补偿量**（宿主视觉策略，⛔ 不是引擎语义）：**默认字号的目标值 / 旧行为常量**，
+//   名字对齐 cxx 的对应量。
 //   cxx 真源 = `apps/emulator-cxx/src/core/text_raster.cpp:647` 的 `lift = 2`
 //   （env 覆盖 `EMULATOR_CXX_BASELINE_LIFT` 在 `:648-651`；**唯一应用点** `:675`
 //   `baseline = y_effective + current_ascent - lift`；生效条件 `:643-646` = "宿主字体在用"）。
 //   这里是**缺省值**；运行时以 `--baseline-lift`（`FontConfig::baseline_lift`）为准，`0` = 关。
+//   ★ 自 2026-11-18（`REQ-01M7Q9C16JR9ATFJK11A873B26`）起，它**不再是所有字号的值**：
+//     小字号走 `kBaselineLiftBySize`（目标 1），超过表内最大 px 才回落到这个值。
+//     ★ **只按字号查表、不做逐字型夹取**（用户 2026-11-18 裁决）：同一字号下所有字形的
+//       位移必须**完全一致**（基线一致性优先于"绝对不裁"）。
 constexpr int kBaselineLift = 2;
+
+// ★ **按像素字号的目标值表**（`REQ-01M7Q9C16JR9ATFJK11A873B26`）：按 `max_px` **升序**，
+//   首个 `px <= max_px` 的行生效；都不命中 ⇒ 用 `FontConfig::baseline_lift`（默认行，**派生**，
+//   ⛔ 不在这里抄字面 2）。表值就是**最终施加量** —— ⛔ 不再按字形的 `ascent − bitmap_top` 逐字型夹取
+//   （那会让同一行里的「天」与「結」抬不同的量；用户裁决：基线一致性优先）。
+//   为什么 ≤16px 只给 1（**判据只用像素事实**）：10px 注音「天」的墨迹顶 lift0/1/2 = 611 / 610 / 609（丢），
+//   裁剪上沿固定 610（含）⇒ 旧常量 +2 把顶横整行推出框外（读数见 `docs/03-emulator/fonts.md` §3.1）；
+//   20/30px 回落到 `kBaselineLift`（= 2）时与修前视觉一致。
+//   ★ 行框口径 ≈9px `<待核>`：由「上沿 610 + 反推基线 619」得到，**不是** `metrics().ascent`（实测 10）；
+//     差 1 的来源未证，⛔ 不用它做产品判定（表值只由屏幕采样 + `gdi-font` 的 10/16/20/30 读数支撑）。
+struct BaselineLiftRow {
+    int max_px;  // 这一行覆盖的像素字号上界（含）
+    int lift;    // 这个字号区间统一施加的补偿像素
+};
+constexpr BaselineLiftRow kBaselineLiftBySize[] = {
+    {16, 1},  // ≤16px（注音 / 小字）：1；>16px 回落到 `FontConfig::baseline_lift`
+};
 
 struct FontConfig {
     std::string regular_path;      // 宿主常规字体（CMake 注入 `LIFT_HOST_FONT_PATH`）
     std::string bold_path;         // 同上 `-Bold.ttf`（空 = 由 regular_path 派生）
-    int baseline_lift = kBaselineLift;  // 宿主视觉策略：把墨迹整体抬 N px（0 = 关；见 `kBaselineLift`）
+    int baseline_lift = kBaselineLift;  // 补偿量：默认字号的目标值 / `by_size=false` 的全字号常量（0 = 关）
+    // ★ `true`（缺省）= 按字号查 `kBaselineLiftBySize`（小字号 1、其余 `baseline_lift`）；
+    //   `false` = 旧行为（全字号恒 `baseline_lift`，A/B 对照用）；`baseline_lift == 0` 恒关（逐字号 0）。
+    bool baseline_lift_by_size = true;
     bool use_engine_name = false;  // A/B 对照档：按引擎字面名取字（默认关）
 };
+
+// ★ 按**像素字号**取基线补偿量（0 = 关）。纯函数：只读 `fontConfig()`，不碰 FT。
+//   返回值**就是**施加量（同一字号下所有字形共用；⛔ 不为某个字形再夹）。
+//   ★ 表键 = `glyph()` 里 clamp 到 `1..512` 后的那个 size（与字形缓存键同一维）。
+//   合成字形档不经过它（`syntheticMask` 的 `origin_y = black_box_y` 是格式算术契约）。
+int fontBaselineLiftForPixelSize(int pixel_size);
 
 FontConfig fontDefaultConfig();          // CMake 注入的那一份（不含 CLI 覆盖）
 void fontSetConfig(const FontConfig&);   // CLI 覆盖（进程级；在任何 FontEngine 使用前调用）

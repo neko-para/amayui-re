@@ -12,6 +12,10 @@
 //   ④ **自洽**：`GetTextExtentPoint32A(s)` 的宽 == Σ `GetGlyphOutlineA` 的 gmCellIncX == `TextOutA`
 //      实际推进；三条走同一条取字/推进路径（`gdiGlyph`）。
 //   ⑤ 表面 DC：`gdiDrawText` 真的写进 guest surface 的像素（裁剪 / 文字色 / bk mode），两次渲染字节相同。
+//   ⑥ 基线补偿的**按像素字号表**（`fontBaselineLiftForPixelSize`，纯函数）：≤16px 目标 1、
+//      >16px 回落到 `baseline_lift`（默认行派生）、`0` = 全字号 0、`by_size=false` = 全字号常量、
+//      单调非减。★ 表值就是施加量（同字号全部字形统一，⛔ 不做逐字型夹取）；真字体档的
+//      `gdi-font#baseline-lift-by-size` 验证「位移 == 表值」这条 uniform 不变量。
 //
 // ★ 为什么用合成字形源：pure 档不能依赖 corpus 字体（那属于 assets 档）；这里要测的是**格式算术**，
 //   合成源给出确定的黑框 / origin / advance（advance = 6 = floor(6.5px)，变异"floor→round"会变 7）。
@@ -271,6 +275,55 @@ int main() {
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::gdiCp932Char(0x41u)), 0x41u);
         // 0x82A0（CP932 前导字节在高位）⇒ あ U+3042
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(lift::gdiCp932Char(0x82A0u)), 0x3042u);
+    }
+    {
+        // ★ 基线补偿的**按字号表**（`REQ-01M7Q9C16JR9ATFJK11A873B26`；纯函数，不需要字体）。
+        //   判据是**关系**：≤16px 目标 1、>16px 回落到 `baseline_lift`（默认行**派生**，⛔ 不抄 2）；
+        //   `0` = 全字号 0（off 臂）；`by_size=false` = 全字号常量（legacy 臂）；单调非减。
+        //   ★ 表值就是**最终施加量**（同字号下全部字形统一；用户 2026-11-18 裁决：⛔ 不做逐字型
+        //   夹取）。真字体档的 `gdi-font#baseline-lift-by-size` 验证「位移 == 表值」这条 uniform 不变量。
+        g_current_case = "baseline-lift-table";
+        const lift::FontConfig saved = lift::fontConfig();
+        const auto liftFor = [](int px) { return lift::fontBaselineLiftForPixelSize(px); };
+
+        lift::fontSetConfig(lift::fontDefaultConfig());
+        LIFT_CHECK_EQ_I64(liftFor(10), 1);                  // ≤16px 的目标值
+        LIFT_CHECK_EQ_I64(liftFor(16), 1);                  // 边界（含 16）
+        LIFT_CHECK_EQ_I64(liftFor(17), lift::kBaselineLift);  // 边界外 ⇒ 默认行
+        LIFT_CHECK_EQ_I64(liftFor(20), lift::kBaselineLift);  // SCOPE 的默认字号
+        LIFT_CHECK_EQ_I64(liftFor(30), lift::kBaselineLift);  // 正文行字号
+
+        {
+            // `0` = 关：逐字号 0（A/B 的 off 臂必须逐字节等于"没有补偿"）。
+            lift::FontConfig off = lift::fontDefaultConfig();
+            off.baseline_lift = 0;
+            lift::fontSetConfig(off);
+            for (int px = 1; px <= 64; ++px) LIFT_CHECK_EQ_I64(liftFor(px), 0);
+        }
+        {
+            // `by_size=false` = 旧行为：全字号恒 `baseline_lift`（A/B 的 legacy 臂）。
+            lift::FontConfig legacy = lift::fontDefaultConfig();
+            legacy.baseline_lift = 3;
+            legacy.baseline_lift_by_size = false;
+            lift::fontSetConfig(legacy);
+            for (int px = 1; px <= 64; ++px) LIFT_CHECK_EQ_I64(liftFor(px), 3);
+        }
+        {
+            // `by_size=true` + N=3：小字号仍是目标 1，大字号回落到 N（不是被 N 盖掉）。
+            lift::FontConfig sized = lift::fontDefaultConfig();
+            sized.baseline_lift = 3;
+            sized.baseline_lift_by_size = true;
+            lift::fontSetConfig(sized);
+            LIFT_CHECK_EQ_I64(liftFor(10), 1);
+            LIFT_CHECK_EQ_I64(liftFor(30), 3);
+        }
+        // 单调非减：字号变大时目标值不许变小（默认配置）。
+        lift::fontSetConfig(lift::fontDefaultConfig());
+        for (int px = 1; px < 64; ++px) {
+            LIFT_CHECK(liftFor(px + 1) >= liftFor(px));
+        }
+        // 收尾：恢复进程级配置（同进程后续用例 / 别的测试文件都读这一份）。
+        lift::fontSetConfig(saved);
     }
 
     // =====================================================================================

@@ -114,7 +114,7 @@
 | **平台偏差（用户裁决）** | **字体来源 = 宿主 Amayui CN** | 一律取 `corpus/assets/fonts/Amayui-CN_cnjp.ttf`（粗体同目录 `-Bold.ttf`，CMake 注入 `LIFT_HOST_FONT_PATH`；`--font` 只是调试覆盖）。`CreateFontIndirectA` 的**字面名忽略**；`AddFontMemResourceEx` 送进来的内存**会被拷贝并登记为缺字后备**（`FT_New_Memory_Face`；成功后返回非 0 句柄 + `*pNumFonts = 1`，登记失败返回 0 + `*pNumFonts = 0`）。**主字体仍是宿主 Amayui CN**，只有主 face 缺该码位时才按登记顺序试后备（游戏自带 `AGE Extend`，在 `SYS4INI.BIN` 的 ALF 里）。`--font-engine-name` 是显式 A/B 对照档 | 与真机（= 引擎字面名那份 MS Gothic）字形不同；简体字形由 Amayui 覆盖；游戏自带字体只补主字体缺的码位 | 字体对象的 `lfHeight` / `lfWeight` / 斜体等**请求形态**；`GetTextMetricsA` 的各格由 FT face 的 `size` 算；`SelectObject` / `DeleteObject` / `GetCurrentObject` 的对象语义 |
 | 平台偏差 | **A/B 对照档只到"上报族名"为止** | `--font-engine-name` 打开时，`EnumFontFamiliesExA` 上报引擎字面名；字形仍来自宿主文件（lift 没有"按系统族名查字"的平台入口；⛔ 不造第二条取字路径） | 对照档不能真的画出 MS Gothic | 默认档完全不受影响 |
 | **平台偏差（2026-11-10 新增）** | **枚举时把引擎硬编码的族名全部报出（字形仍以 Amayui CN 为主）** | `EnumFontFamiliesExA` 按**固定名单逐条回调**（第一条 = 宿主 `Amayui CN`）：`ＭＳ ゴシック`（EA `0x52686C`）、引擎配置里的 `ＭＳ 明朝`、`AGE Extend`（EA `0x5208D8` = `aAgeExtend`；`@AGE Extend` @`0x5268F8` 是竖排变体、不报。引擎经 `AddFontMemResourceEx` 送进来的字体）、`IPA Pゴシック`（EA `0x5268CC`）/ `IPA P明朝`（EA `0x5268C0`）、以及 `.data` 那 10 条已知族名（EA `0x52985C` 起：MS PMincho / MS Mincho / MS UI Gothic / MS PGothic MC / MS PGothic / MS Gothic / Meiryo UI Bold / Meiryo UI / Meiryo Bold / Meiryo，`sub_491060` 用它过滤 `FontLink\SystemLink`）。**字形来源仍以宿主 Amayui CN 为主**（主 face 缺码位时走「字体来源」那条的后备，与族名无关）—— 名字只是**标签**（`lfCharSet` 回显请求值；`@` 开头的竖排族名不报，见下）。名单在 `src/shims/gdi32_font.cpp` 的 `kEnumFamilyNames`，⛔ 不解析 TTF 的 name 表、⛔ 不枚举宿主系统字体（名字不对且不确定） | "按字面名查系统字体"被替换成"名单里的名字都落到同一份宿主字形" ⇒ 真机上会出现的字体差异在这里不出现 | **名字表的填充本身**（引擎 boot 时用它建字体名表 `this+0x313C0..0x313C4`，运行期 `sub_4581F0` 按自己配置里的字面名查 `sub_428990`）；缺一条 ⇒ 查表返回 `-1` ⇒ `0x4586AA` 抛 `std::out_of_range`（`TITLE→OPTION→ADV设定` 与 `TITLE→GameStart` 都崩，2026-11-10 实测）。**回调极性**：返回 **0** 才停、非 0 **继续**（MSDN `EnumFontFamExProc`；引擎的 `Proc` EA `0x45EAC0` 所有路径都返回 1） |
-| **平台偏差（宿主视觉策略）** | **基线补偿 +2px** | 画字前把基线抬 `--baseline-lift`（缺省 **2**；`0` = 关）。理由：Amayui 的 ascent 比引擎的参考字体「ＭＳ ゴシック」大（emulator-cxx 实测 20px 20 / 28px 28 vs 17 / 24），墨迹整体偏低 | 行高 / 基线与真机可能差 1–2px | `tmAscent` 仍是 FT 的真值（补偿**不**写进度量）；`GetTextExtentPoint32A` / GGO 的 advance 与补偿无关 |
+| **平台偏差（宿主视觉策略）** | **基线补偿 +2px** | 画字前把基线抬 `--baseline-lift`（缺省 **2**；`0` = 关）。理由：Amayui 的 ascent 比引擎的参考字体「ＭＳ ゴシック」大（emulator-cxx 实测 20px 20 / 28px 28 vs 17 / 24），墨迹整体偏低。★ 2026-11-18 起改为**按像素字号查表**（≤16px → 1、其余 `baseline_lift`；同字号全部字形统一，⛔ 不做逐字型夹取）—— 见 §5.2 | 行高 / 基线与真机可能差 1–2px | `tmAscent` 仍是 FT 的真值（补偿**不**写进度量）；`GetTextExtentPoint32A` / GGO 的 advance 与补偿无关 |
 | 平台偏差 | **GGO 位图布局按 Wine 的实测口径** | `GGO_BITMAP`：1bpp、行 = `((w+31)>>5)<<2`（DWORD 对齐）、覆盖率 ≥ 128 置位；`GGO_GRAY4/8`：**每像素 1 字节**、行 = `(w+3)&~3`、值域 0..16 / 0..64（17 / 65 级，满覆盖 = 16 / 64）；`cbBuffer == 0` ⇒ 返回所需字节数 | 灰度档的字节布局与"4bpp"的常见误解不同（按 Wine `win32u/freetype.c` 的 `max_level` 口径，见 ops-forensics §35） | 行对齐 / 值域 / 返回字节数 / `gmBlackBoxX·Y` / `gmptGlyphOrigin` / `gmCellIncX` 的自洽（`tests/gdi.cpp` 逐条钉住） |
 | 平台偏差 | **`TextOutA` 用 FT 连续覆盖率混合** | 屏幕 DC 只记账（不写宿主窗口）；表面 DC 写 guest surface 的像素（通道掩码解码 + 裁剪 + 文字色 + bk mode） | GDI 自己的文字默认是 1 位（`font_smoothing = GGO_BITMAP`）；1px 级栅格差按平台 discard | 文字色 / 背景模式 / 裁剪 / 推进（`advance` = `Σ gmCellIncX`） |
 | **未做 / loud 失败** | **未实现的字形形态** | `GGO_NATIVE` / `GGO_GRAY2` / `GGO_LCD` ⇒ `GDI_ERROR` + 一行日志；**非单位 MAT2** ⇒ 拒绝（`GDI_ERROR` + 日志）；`GGO_UNHINTED` 位剥掉后按正常字形（hinting 差属平台 discard） | 引擎若真发这些形态会看到"字形取不到"（不会画错） | `GGO_METRICS`(0) / `GGO_BITMAP`(1) / `GGO_GRAY4`(5) / `GGO_GRAY8`(6) |
@@ -195,3 +195,46 @@
 
 ★ **测试档位不变**：`tests/gdi_font_metrics_cache.cpp` 顶层注册（pure）；`tests/text_baseline_lift.cpp`
 在 `if(EXISTS "${LIFT_HOST_FONT_PATH}")` 里（assets，`SKIP_RETURN_CODE 77`）。
+
+## 5.2 修订（2026-11-18）：基线补偿改成**按像素字号查表**（同字号统一，⛔ 不做逐字型夹取）
+
+> ★ 本节**追加**，不改上面任何一行原文；与 §5 / §5.1 冲突时以本节为准（补偿仍是宿主视觉策略、
+> 仍只加在 `gmptGlyphOrigin.y`、仍不写度量 —— 改的是**施加多少**）。
+> 单：`REQ-01M7Q9C16JR9ATFJK11A873B26`（S2）。证据：`.tmp/font-ruby/evidence.md` §6 / §7、
+> `.tmp/font-ruby/design.md` §3 / §4（本机复算；不入库）。
+
+**为什么 10px 必须 ≤1**
+
+- CONFIG1 底部 ADV 预览的 **10px 注音行**（正文「天結」二字的 10px 版本）在旧常量 +2 下把「天」的
+  **顶横整行**推出 guest 的行框顶 ⇒ 屏幕读作「大」。**判据只用像素事实**（`ink = 亮度 ≥ 150`，x 430..700）：
+  lift0/1/2/3 的注音墨迹顶 = **611 / 610 / 609（丢）/ 608（丢 2 行）**，裁剪上沿固定 = **610（含）**；
+  被丢行数 = `max(0, lift − 1)`。同帧 30px 正文、20px 标签在四臂里都不裁（20px **只抽了一处**，未全帧普查）。
+- **行框口径 ≈9px `<待核>`**：由「裁剪上沿 610（含）+ 反推基线 619」得到，**不是** `metrics().ascent`
+  （后者实测 = 10；`gdi-font` 的 10/16/20/30 读数 = 10/16/20/30）。差 1 的来源**未证**
+  （`evidence.md` §10：裁剪盒来源不可区分）；若 guest 真的用 `tmAscent = 10`，行框顶应是 609 而实测是 610
+  ⇒ 该反推量 **≠ `tmAscent`**。⛔ 不用它做产品判定。
+  ⇒ 表值 = `≤16px → 1`、`>16px → baseline_lift`（缺省 2）；表值只由**屏幕采样 + `gdi-font` 的
+  10 / 16 / 20 / 30 读数**支撑。
+
+**同字号统一，⛔ 不做逐字型夹取**（用户 2026-11-18 裁决）
+
+- 曾考虑过 `lift = min(表值, ascent − bitmap_top)` 的逐字型夹取；**已撤销**：同一行里不同字型会被夹到
+  不同的 lift（例如 10px 的「天」top=8、「結」top=9 ⇒ 一个抬 1、一个抬 0）⇒ **基线错位**，
+  比顶部被裁更糟。**基线一致性优先于"绝对不裁"**。
+- 所以 `ascent` / `bitmap_top` 只出现在**测试与文档的采样读数**里，⛔ 不进产品判定。
+  产品侧只有一处：`font.cpp` 的 `buildMaskFromSlot` 里
+  `origin_y = bitmap_top + fontBaselineLiftForPixelSize(pixel_size)`（`pixel_size` = 缓存键里 clamp 后的那个）。
+- 这不是引擎语义（引擎从不"按字号补偿"）：它是一张**宿主视觉策略表**，登记在这里、⛔ 不写进 `data/spec/`。
+
+**可回归的判据**
+
+- `gdi`（pure）的 `baseline-lift-table`：表结构（`≤16 → 1`、`>16 → baseline_lift`、`0` = 全 0、
+  `by_size=false` = 全常量、1..64 单调）—— `from` 改坏表行会红（变异条目 `--match baseline`）。
+- `gdi-font` 的 `baseline-lift-by-size`（真字体；缺字体 SKIP 77）：**同字号全部 probe（天/結/あ/|）的
+  位移 == 表值**（uniform）+ 10px「天」`origin_y < ascent` 的定点判据（严格小于）+ legacy 全字号 == N +
+  度量跨配置逐字段不变。
+- A/B 三臂（装回 CLI 后**同一份产品二进制**，2026-11-18 mac 实跑）：缺省 / `--baseline-lift 0` /
+  `--baseline-lift 2 --baseline-lift-by-size 0`。读数：注音顶横 **610 / 611 / 丢（y=609）**，
+  正文首行 **625 / 627 / 625**。`off` 与 `legacy` 两帧分别与修前取证帧 `frame-lift0` / `frame-lift2`
+  **逐像素相同**（diff=0/1280×720）；缺省帧的注音区 == `frame-lift1`、正文区 == `frame-lift2`。
+- 回退：`--baseline-lift-by-size 0`（逐字节回到旧的全字号常量行为；`--baseline-lift 0` 仍是全关）。

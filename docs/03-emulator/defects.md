@@ -74,8 +74,9 @@
 - **修法**：**先别改**。要常量一致 ⇒ 已一致（零改动）；要正文墨迹对齐 ⇒ 只能动 guest 可见的 ascent，而那会破 `tests/gdi_font.cpp:228`（`tm_height == tm_ascent + tm_descent`）、`tests/gdi.cpp:432-434`（合成 22/20/2）与 `apps/emulator-lift/SCOPE.md:111`（"补偿**不**写进度量"）⇒ 两条案都要人裁决（`.tmp/task3-report.md` §6）。
 - **何时 / 谁发现**：2026-11-08，`.tmp/task3-report.md` §4（常量来源 `apps/emulator-cxx/src/core/text_raster.cpp:647` 的 `lift = 2`）。
 - **代表守卫**：原 CTest `text-baseline-lift`（`assets` 档，需安装树；断言"关掉补偿后墨迹顶正好低 2px"）**已删**（2026-11-14，测试模型：断的是我方视觉策略 `baseline_lift==2`，不作判据）—— 口径留在 `fonts.md`，复现命令见下行；`SCOPE.md:111` 的声明本身仍在。
-- `text-baseline-lift`：`./out/emulator-lift --game-dir ../../links/install --appdata <全新私有 tmp> --skip-logo --audio off --font corpus/assets/fonts/Amayui-CN_cnjp.ttf --baseline-lift 2 --present headless --max-frames 1 --dump-frame <lift2.bmp>`，再用 `--baseline-lift 0` 跑同一条命令得 `<lift0.bmp>` ⇒ 两幅逐像素比：`baseline_lift==2` 的墨迹顶比 `0` 高 2 px，且两次 `TEXTMETRICA` 逐字段相同（⛔ 业务 / 策略正确性不作判据，这是复现命令，不是门禁）。
+- `text-baseline-lift`：**原命令已不可按原样复现** —— 它用已退役的 `./out/emulator-lift` 与 `--font`（另单 `REQ-01M7Q9D7NMFVKAN4PY57B5Y5MM`）。换成 AOT 臂后 `--max-frames 1` 只 dump 到近黑首帧（lift2 vs lift0 = 0 px），不能复现"墨迹顶高 2 px"。现行复现改用 `docs/03-emulator/fonts.md` §6.1 的 CONFIG 配方 + 10px 注音区域比对：`ink` 顶在 `--baseline-lift 0 / 2` 下 = 611 / 609（后者丢顶横），见 `REQ-01M7Q9C16JR9ATFJK11A873B26`。
 - **复现**：`.tmp/task3-report.md` §4 的 4 条路径对照；`--baseline-lift 0` 与缺省各跑一次逐帧 BMP 比对。
+- **后续（2026-11-18）**：新缺陷单 `REQ-01M7Q9C16JR9ATFJK11A873B26` 接在这一条之后 —— 补偿改成**按像素字号查表**（≤16px → 1、其余 `baseline_lift`；同字号统一、⛔ 不做逐字型夹取），并把 `--baseline-lift` / `--baseline-lift-by-size` 装回 AOT 臂（`./out/emulator-lift-aot`，旧 `./out/emulator-lift` 已不存在）。10px 注音行不再丢顶横；`--baseline-lift-by-size 0` 可逐字节复现旧行为。口径见 `apps/emulator-lift/SCOPE.md` §5.2。
 
 ### BUG-09 · GPU 合批在"纹理内容变化"时退化成**逐条提交**（136 次/帧）
 - **现象**：OPTION 装载帧 87.4 ms 里几乎全是提交开销；`--profile` 窗口表里 `ID3DXSprite::End` 一条占大头，而 draw 数并不多。
