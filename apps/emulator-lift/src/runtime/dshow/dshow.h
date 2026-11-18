@@ -261,9 +261,13 @@ class Graph {
     Graph &operator=(const Graph &) = delete;
 
     // 图管理器对象（guest 侧的 `IGraphBuilder`/`IFilterGraph` 视图 EA）。
-    // ★ 只用于 `IBaseFilter::JoinFilterGraph(pGraph, pName)`：`CBaseFilter::Pause/Run` 会
-    //   `mov eax,[filter+0x6C]; cmp dword ptr [eax+18h],0`（`0x4D5896`/`0x4D59C6`）——
-    //   `[filter+0x6C]` 为 0 ⇒ **guest 读 [0+0x18] 直接 fault**。引擎自己 AddFilter 之后不会替我们 join。
+    // ★ 只用于 `IBaseFilter::JoinFilterGraph(pGraph, pName)`：它把 pGraph 无条件写进
+    //   `[filter+0x34]`（`m_pGraph`，`0x4D02ED`）。引擎自己 AddFilter 之后不会替我们 join。
+    // ★ ⛔ 别把 `[filter+0x34]` 和 `[filter+0x6C]` 混了：后者是 `CBaseRenderer` 缓存的**输入 pin**
+    //   （`GetPin` 懒建，`0x4D5B3C`），不是 m_pGraph。`Pause`/`Run` 的
+    //   `mov eax,[filter+0x6C]; cmp dword ptr [eax+0x18],0`（`0x4D58B8`/`0x4D59C8`）读的是那个
+    //   pin ⇒ pin 为 0 才是**真**的 `[0+0x18]` fault；那条检查在第一次 Pause/Run 之前
+    //   （`guardRendererPin`），⛔ 不在 AddFilter 里（那时 pin 按设计就是 0）。
     void setGraphUnknown(std::uint32_t ea) {
         graph_unknown_ = ea;
     }
@@ -336,6 +340,12 @@ class Graph {
     bool continueChain(std::uint32_t result, std::uint32_t *shim_result);
     bool stepLaunch(std::string *err);
     bool finishChain();
+    // `render()` 的早退原因（只给 tripwire 用；一次性，不进任何判据）
+    void setRenderBail(const char *fmt, ...);
+    // ★ 第一次转发 `Pause`/`Run` 之前的真险情 tripwire：`[renderer+0x6C]`（输入 pin）为 0 ⇒
+    //   guest 的 `CBaseRenderer::Pause/Run` 会读 `[0+0x18]` fault ⇒ **响亮停**（`running=false` +
+    //   `stop_why`），⛔ 不静默跳过。pin 非 0 时零输出、零行为变化（见 graph.cpp 的实现注释）。
+    bool guardRendererPin(const char *api);
     // 「源读取」阶段的下一步（同一套链；在续延里调用）。
     bool startSourceRead(std::string *err);
     // 源读完之后：组 media type / 分配像素缓冲 / 填 stats —— **不**发起 guest 调用。
@@ -369,6 +379,7 @@ void pumpAudio(std::int64_t now_100ns);
     std::uint32_t graph_unknown_ = 0;       // JoinFilterGraph 的 pGraph（见 setGraphUnknown）
     std::uint32_t addfilter_join_ea_ = 0;   // 正在补 JoinFilterGraph 的 filter
     std::uint32_t addfilter_join_name_ = 0; // 它的 LPCWSTR
+    std::string render_bail_;               // `render()` 的早退原因（tripwire 报错里点名用）
 
     // ---- 源读取现场 ----
     std::uint32_t source_pin_ = 0;       // 引擎给的 IPin*（0x489645 的入参）

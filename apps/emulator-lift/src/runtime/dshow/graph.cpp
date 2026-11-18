@@ -35,10 +35,19 @@ constexpr std::uint32_t kFilterRun = 0x18;
 constexpr std::uint32_t kFilterSetSyncSource = 0x20; // `sub_4CFD60`（retn 8 = this + clock）
 constexpr std::uint32_t kFilterEnumPins = 0x28;
 // ★ `IBaseFilter::JoinFilterGraph(IFilterGraph*, LPCWSTR)` = `sub_4D02B0`（`retn 0Ch` = this + 2 参）。
-//   `CBaseFilter::Pause` 在 `0x4D5896` 读 `[filter+0x6C]` 再 `cmp dword ptr [eax+18h],0`；
-//   `Run` 在 `0x4D59C6` 同形。`[filter+0x6C]` 由这里写入 ⇒ 不 join 就是 guest 读 [0+0x18] fault。
+//   ★ 这里有两个 **0x34**，是**两件事**，⛔ 别合并成一条解释：
+//     · `kFilterJoinFilterGraph` = vtable 的**槽偏移**（IBaseFilter 的 ABI 固定槽序）；
+//     · `kFilterGraphField`     = 对象里的 **`m_pGraph` 成员偏移** —— `0x4D02ED mov [edi+34h],eax`
+//       （**无条件**写，早于 `cmp eax,esi` 的分支）⇒ join 成功的唯一落盘证据。
 constexpr std::uint32_t kFilterJoinFilterGraph = 0x34;
-constexpr std::uint32_t kFilterGraphField = 0x6C; // m_pGraph（EA 见上）
+constexpr std::uint32_t kFilterGraphField = 0x34; // m_pGraph（EA 锚 0x4D02ED）
+// ★ **另一个**偏移，别和上面混：`[filter+0x6C]` = `CBaseRenderer` 缓存的输入 pin
+//   （`m_pInputPin`；`this = obj+0xC`、字段在 `obj+0x78`）。写点只有 `GetPin`
+//   （`0x4D5B3C mov [esi+78h],eax`，构造清零 `0x4D38F3`），**JoinFilterGraph 从不碰它**。
+//   `Pause` / `Run` 在 `0x4D58B8` / `0x4D59C8` 读它再 `cmp dword ptr [eax+18h],0`（[pin+0x18] =
+//   `m_Connected`，`ReceiveConnection` 写 `0x4D0E15`）⇒ pin 为 0 时 guest 读地址 0x18 = fault。
+//   真险情的 tripwire 见 `Graph::guardRendererPin`（⚠ 只在 pin==0 时出声）。
+constexpr std::uint32_t kRendererInputPinField = 0x6C;
 // IPin vtable @`.data:0x52F57C`：+0x0C Connect(sub_4D2C70)、+0x10 ReceiveConnection(sub_4D0D00)、
 // +0x24 QueryDirection(sub_4D1060)。
 constexpr std::uint32_t kPinQueryInterface = 0x00;
@@ -285,26 +294,27 @@ bool Graph::addFilter(std::uint32_t filter_obj, std::uint32_t name_ea, std::stri
         source_ = 0;
         dshowLog(LogLevel::Warn, "AddFilter: 源与渲染器识别成了同一个对象（0x%08X）⇒ 清空源", renderer_);
     }
-    // ★ 第一件必须解决的事：`CBaseFilter::Pause/Run` 会 `mov eax,[filter+0x6C]; cmp dword ptr [eax+18h],0`
-    //   （`0x4D5896` / `0x4D59C6`）。`[filter+0x6C]` = m_pGraph，只有 `JoinFilterGraph`（+0x34）会写它。
-    //   引擎自己 AddFilter 之后**不会**替我们 join ⇒ 为 0 时必须由宿主补（否则 guest 读 [0+0x18] fault）。
+    // ★ 引擎自己 AddFilter 之后**不会**替我们 join ⇒ `m_pGraph`（`[filter+0x34]`，写点只有
+    //   `0x4D02ED`）为 0 时必须由宿主补 `JoinFilterGraph`。⛔ 别把这里换成 `[filter+0x6C]`：
+    //   那是渲染器的输入 pin（`GetPin` 懒建，`0x4D5B3C`），AddFilter 这个时刻按设计就是 0。
     const std::uint32_t graph_field = cpu_.mem->committed(filter_obj + kFilterGraphField, 4u)
                                           ? cpu_.mem->rd32(filter_obj + kFilterGraphField)
                                           : 0u;
     dshowLog(LogLevel::Info,
              "AddFilter(pFilter=0x%08X, name=\"%s\") ⇒ 共 %zu 个 filter；渲染器=0x%08X 源=0x%08X；"
-             "[filter+0x6C]=0x%08X",
+             "[filter+0x34]=0x%08X",
              filter_obj, n.empty() ? "(NULL)" : n.c_str(), filters_.size(), renderer_, source_, graph_field);
     if (graph_field == 0) {
         if (graph_unknown_ == 0) {
             dshowLog(LogLevel::Warn,
-                     "AddFilter(0x%08X): [filter+0x6C]==0 且没有图对象 EA ⇒ 无法 JoinFilterGraph；"
-                     "guest 的 Pause/Run 会读 [0+0x18] fault",
+                     "AddFilter(0x%08X): [filter+0x34]==0（m_pGraph）且没有图对象 EA ⇒ 无法 "
+                     "JoinFilterGraph；filter 不知道自己属于哪个图",
                      filter_obj);
             return true;
         }
         dshowLog(LogLevel::Info,
-                 "AddFilter(0x%08X): [filter+0x6C]==0 ⇒ JoinFilterGraph(filter, graph=0x%08X, name=%s)",
+                 "AddFilter(0x%08X): [filter+0x34]==0（m_pGraph）⇒ JoinFilterGraph(filter, graph=0x%08X, "
+                 "name=%s)",
                  filter_obj, graph_unknown_, name_ea ? "LPCWSTR" : "NULL");
         addfilter_join_ea_ = filter_obj;
         addfilter_join_name_ = name_ea;
@@ -314,27 +324,42 @@ bool Graph::addFilter(std::uint32_t filter_obj, std::uint32_t name_ea, std::stri
         step_ = StepAddFilterJoin;
         return startChain(StepAddFilterAddRef, "IBaseFilter::AddRef");
     }
-    dshowLog(LogLevel::Info, "AddFilter(0x%08X): [filter+0x6C]=0x%08X 已非 0 ⇒ 不重复 JoinFilterGraph",
+    dshowLog(LogLevel::Info, "AddFilter(0x%08X): [filter+0x34]=0x%08X（m_pGraph）已非 0 ⇒ 不重复 JoinFilterGraph",
              filter_obj, graph_field);
     return true;
 }
 // =====================================================================================
 // Render（D1）
 // =====================================================================================
+// `render()` 的早退原因（只给 tripwire 用；一次性、不进任何判据）。
+// ★ 为什么要记：`Pause/Run` 的 tripwire 发现渲染器输入 pin 为 0 时，光说"pin 是 0"不够 ——
+//   要能一眼看出 `render()` 在哪一步收手的（源 QI 失败 / 源 pin=0 / feed info 失败 / EnumPins 失败…）。
+void Graph::setRenderBail(const char *fmt, ...) {
+    char buf[192];
+    va_list ap;
+    va_start(ap, fmt);
+    std::vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    render_bail_ = buf;
+}
 bool Graph::render(std::uint32_t source_pin, std::string *err) {
     if (suspended_) {
         if (err)
             *err = "Render: 上一次 guest 调用还没结束";
         return false;
     }
+    render_bail_.clear();
     if (renderer_ == 0) {
         if (err)
             *err = "Render: 还没有渲染器 filter（AddFilter 先调）";
+        setRenderBail("renderer filter 为 0（AddFilter 没被调 / 没识别出渲染器）");
         dshowLog(LogLevel::Warn, "Render: 渲染器 filter 为 0 ⇒ 无法接线（引擎不会发现，只有这条日志）");
         return false;
     }
-    if (!ensureObjects(err))
+    if (!ensureObjects(err)) {
+        setRenderBail("ensureObjects 失败（宿主对象 / 暂存分配）");
         return false;
+    }
     source_pin_ = source_pin;
     // ★ 帧源策略：
     //   · 注入（pure 测试）⇒ **完全不碰源 pin**（旧用例的 D1 判据，doc §2-D）。
@@ -347,6 +372,7 @@ bool Graph::render(std::uint32_t source_pin, std::string *err) {
     if (source_pin == 0) {
         if (err)
             *err = "Render: source_pin 为 NULL ⇒ 没有字节来路";
+        setRenderBail("source_pin 为 NULL（没有字节来路）");
         dshowLog(LogLevel::Warn, "Render: source_pin 为 NULL ⇒ 无帧（引擎不看 Render 的 HRESULT）");
         return false;
     }
@@ -362,6 +388,7 @@ bool Graph::prepareWiring(std::string *err) {
         if (err)
             *err = "Render: 帧源 info() 失败或宽高为 0 ⇒ 组不出 media type";
         stats_.connect_hr = kEFail;
+        setRenderBail("prepareWiring: 帧源 info() 失败 / 宽高为 0（组不出 media type）");
         dshowLog(LogLevel::Error, "Render: 帧源 info() 失败/宽高为 0 ⇒ 接线失败（引擎不会报）");
         return false;
     }
@@ -378,12 +405,16 @@ bool Graph::prepareWiring(std::string *err) {
         video_info_ = 0;
     }
     MediaTypeBlock mt;
-    if (!buildVideoMediaType(cpu_, w, h, kDefaultAvgTimePerFrame100ns, &mt, err))
+    if (!buildVideoMediaType(cpu_, w, h, kDefaultAvgTimePerFrame100ns, &mt, err)) {
+        setRenderBail("prepareWiring: buildVideoMediaType 失败（%s）", err && !err->empty() ? err->c_str() : "?");
         return false;
+    }
     media_type_ = mt.media_type_ea;
     video_info_ = mt.video_info_ea;
-    if (!objs_->prepareBuffer(cpu_, stride_ * h, err))
+    if (!objs_->prepareBuffer(cpu_, stride_ * h, err)) {
+        setRenderBail("prepareWiring: prepareBuffer 失败（%s）", err && !err->empty() ? err->c_str() : "?");
         return false;
+    }
     objs_->setSampleMediaType(cpu_, media_type_);
     stats_.pin_count = 0;
     stats_.connect_hr = kEFail; // 没走到 ReceiveConnection 之前的缺省（不是"成功"）
@@ -591,28 +622,28 @@ bool Graph::continueChain(std::uint32_t result, std::uint32_t *shim_result) {
     }
 
     case StepAddFilterJoin: {
-
+        // ★ 判据只认一件事：`[filter+0x34]`（`m_pGraph`）是不是**我们传进去的那个 graph EA**。
+        //   `sub_4D02B0` 的返回值恒为 0（`0x4D0375 xor eax,eax`）⇒ 它不携带任何信息，别拿它当判据。
         const std::uint32_t field = cpu_.mem->committed(addfilter_join_ea_ + kFilterGraphField, 4u)
                                         ? cpu_.mem->rd32(addfilter_join_ea_ + kFilterGraphField)
                                         : 0u;
-
-        dshowLog(result == kSOk ? LogLevel::Info : LogLevel::Warn,
-                 "JoinFilterGraph(filter=0x%08X, graph=0x%08X) = 0x%08X ⇒ [filter+0x6C]=0x%08X",
-
-                 addfilter_join_ea_, graph_unknown_, result, field);
-
-        if (field == 0) {
-
+        const bool joined = (graph_unknown_ != 0 && field == graph_unknown_);
+        if (joined) {
+            // 成功路径**只留 Info**：这里没有可报的东西（旧实现把这条判成 Error，每次播片必报）。
+            dshowLog(LogLevel::Info,
+                     "JoinFilterGraph(filter=0x%08X, graph=0x%08X) = 0x%08X ⇒ [filter+0x34]=0x%08X"
+                     "（= m_pGraph，join 已落盘）",
+                     addfilter_join_ea_, graph_unknown_, result, field);
+        } else {
+            // ★ 这条 Error 必须自带 EA：默认档 warn 只看得到 Error，**带 EA 的 Info 行会被压掉** ——
+            //   看不到 filter 是谁，这个报错就没法查。
             dshowLog(LogLevel::Error,
-                     "JoinFilterGraph 返回 0x%08X 但 [filter+0x6C] 仍是 0 ⇒ guest 的 Pause/Run 会读 [0+0x18] "
-                     "fault",
-                     result);
+                     "JoinFilterGraph(filter=0x%08X, graph=0x%08X) 返回 0x%08X，但 [filter+0x34]=0x%08X "
+                     "≠ graph 0x%08X ⇒ join 没落盘（m_pGraph 的唯一写点是 0x4D02ED）",
+                     addfilter_join_ea_, graph_unknown_, result, field, graph_unknown_);
         }
-
         addfilter_join_ea_ = 0;
-
         addfilter_join_name_ = 0;
-
         return finishChain();
     }
 
@@ -631,6 +662,7 @@ bool Graph::continueChain(std::uint32_t result, std::uint32_t *shim_result) {
 
             // ★ 失败不静默：保持"零长"行为（不崩、boot 继续），但**无帧**。
 
+            setRenderBail("源 pin QI(IAsyncReader) = 0x%08X 出参=0x%08X（取不到源字节）", result, ia);
             dshowLog(LogLevel::Warn,
                      "源 pin QI(IAsyncReader{56A868AA-0AD4-11CE-B03A-0020AF0BA770}) = 0x%08X 出参=0x%08X"
                      " ⇒ 取不到源字节，无帧（引擎不看 Render 的 HRESULT）",
@@ -712,6 +744,7 @@ bool Graph::continueChain(std::uint32_t result, std::uint32_t *shim_result) {
             }
         }
         if (read_buf_ == 0) {
+            setRenderBail("源读取：guest 堆分配读缓冲失败（%s）", cpu_.heap->lastError());
             dshowLog(LogLevel::Warn, "源读取：guest 堆分配读缓冲失败（%s）⇒ 无帧", cpu_.heap->lastError());
             step_ = StepSourceRelease;
             return stepLaunch(&err);
@@ -807,6 +840,7 @@ bool Graph::continueChain(std::uint32_t result, std::uint32_t *shim_result) {
 
         if (stats_.source_bytes_read == 0) {
 
+            setRenderBail("源读取到 0 字节（SyncRead 全失败 / 源为空）");
             dshowLog(LogLevel::Warn, "源读取到 0 字节 ⇒ 无帧");
 
             stats_.connect_hr = kEFail; // 没接线（不是"成功"）
@@ -815,6 +849,7 @@ bool Graph::continueChain(std::uint32_t result, std::uint32_t *shim_result) {
         std::string ferr;
         owned_feed_ = makeDecoderFeed(std::move(source_bytes_), &ferr);
         if (!owned_feed_) {
+            setRenderBail("MovieDecoder::open 失败：%s", ferr.c_str());
             dshowLog(LogLevel::Warn, "MovieDecoder::open 失败：%s ⇒ 无帧（引擎不看 Render 的 HRESULT）",
                      ferr.c_str());
             stats_.connect_hr = kEFail; // 没接线
@@ -842,6 +877,7 @@ bool Graph::continueChain(std::uint32_t result, std::uint32_t *shim_result) {
 
         if (result != kSOk) {
 
+            setRenderBail("EnumPins 返回 0x%08X", result);
             dshowLog(LogLevel::Warn, "EnumPins 返回 0x%08X ⇒ 接线失败", result);
 
             stats_.connect_hr = result;
@@ -853,6 +889,7 @@ bool Graph::continueChain(std::uint32_t result, std::uint32_t *shim_result) {
 
         if (renderer_enum_ == 0) {
 
+            setRenderBail("EnumPins 成功但出参为 NULL");
             dshowLog(LogLevel::Warn, "EnumPins 成功但出参为 NULL ⇒ 接线失败");
 
             stats_.connect_hr = kEFail;
@@ -869,6 +906,7 @@ bool Graph::continueChain(std::uint32_t result, std::uint32_t *shim_result) {
 
         if (result != kSOk) {
 
+            setRenderBail("IEnumPins::Next 返回 0x%08X（枚举不到输入 pin）", result);
             dshowLog(LogLevel::Warn, "IEnumPins::Next 返回 0x%08X ⇒ 接线失败", result);
 
             stats_.connect_hr = result;
@@ -884,6 +922,7 @@ bool Graph::continueChain(std::uint32_t result, std::uint32_t *shim_result) {
 
         if (fetched == 0 || candidate_pin_ == 0) {
 
+            setRenderBail("渲染器枚举完 %u 个 pin 都没有输入 pin", stats_.pin_count);
             dshowLog(LogLevel::Warn, "渲染器枚举完 %u 个 pin 都没找到输入 pin ⇒ 接线失败", stats_.pin_count);
 
             stats_.connect_hr = kVfwETypeNotAccepted;
@@ -1277,6 +1316,36 @@ bool Graph::endStopChain() {
     }
     return finishChain();
 }
+// =====================================================================================
+// 真险情 tripwire：渲染器输入 pin（⛔ 只在 pin==0 时触发）
+// =====================================================================================
+// ★ 为什么要在**这里**（第一次转发 Pause/Run 之前）查，而不是在 AddFilter 里：
+//   `[renderer+0x6C]` 是 `GetPin` 懒建的 pin（`0x4D5B3C`），AddFilter 那个时刻按设计就是 0 ——
+//   在那里查只会得到一条**每次播片必报**的假 error（那正是这次要修掉的东西）。
+//   真险情只有一个时刻：**Pause/Run 已经要发出去、而 pin 还不存在** ⇒ 那时 guest 的
+//   `0x4D58B8 / 0x4D59C8` 会 `mov eax,[…+6Ch]; cmp dword ptr [eax+18h],0` ⇒ 读地址 0x18 fault。
+// ★ 处置 = **响亮停**（本仓"停机原因"口径：`cpu.running=false` + `stop_why`，与
+//   `endStopChain` 的 `LIFT_STOP_AFTER_MOVIE` 同形）：
+//   ⛔ 不静默跳过 Pause/Run（那会让播放卡死且没有症状）；
+//   ⛔ 也不是"打一行日志然后继续"（那就是今天这个"抓到看不到"的状态）。
+bool Graph::guardRendererPin(const char *api) {
+    if (renderer_ == 0)
+        return true; // 没有渲染器 ⇒ 只对源发 Pause/Run；基类 `CBaseFilter::Pause` 枚举 pin，不读这个槽
+    const std::uint32_t pin = cpu_.mem->committed(renderer_ + kRendererInputPinField, 4u)
+                                  ? cpu_.mem->rd32(renderer_ + kRendererInputPinField)
+                                  : 0u;
+    if (pin != 0)
+        return true; // ★ 正常路径：零输出、零行为变化
+    const char *why = render_bail_.empty() ? "render() 没有跑 / 没有给出原因" : render_bail_.c_str();
+    dshowLog(LogLevel::Error,
+             "%s: 渲染器 filter=0x%08X 的输入 pin（[renderer+0x6C]）为 0 ⇒ render() 早退：%s；"
+             "CBaseRenderer::Pause/Run（0x4D58B8 / 0x4D59C8）会 `mov eax,[filter+0x6C]; cmp dword ptr "
+             "[eax+0x18],0` ⇒ guest 读地址 0x18 fault。⇒ 就此结束本次运行（⛔ 不静默跳过 Pause/Run）",
+             api, renderer_, why);
+    cpu_.running = false;
+    cpu_.stop_why = "dshow: 渲染器输入 pin 为 0（render 早退）⇒ Pause/Run 会读 [0+0x18] fault";
+    return false;
+}
 void Graph::run() {
     if (suspended_) {
         dshowLog(LogLevel::Warn, "IMediaControl::Run: 上一次 guest 调用还没结束 ⇒ 忽略");
@@ -1289,6 +1358,10 @@ void Graph::run() {
         last_pump_100ns_ = 0;
         return;
     }
+    // ★ 第一次转发 Pause/Run 之前的**真险情**检查（pin 为 0 ⇒ guest 会读 [0+0x18]）：
+    //   见 guardRendererPin。⛔ 只在 pin==0 时触发；正常路径零输出、零行为变化。
+    if (!guardRendererPin("IMediaControl::Run"))
+        return;
     if (!wired_) {
         dshowLog(LogLevel::Warn,
                  "IMediaControl::Run: 接线没成功（connect=0x%08X notify=0x%08X）⇒ 仍按协议驱动 filter，"
@@ -1311,6 +1384,9 @@ void Graph::pause() {
         state_ = 1;
         return;
     }
+    // ★ 同 run()：Pause 也会让 guest 的 `CBaseRenderer::Pause`（0x4D58B8）读 [renderer+0x6C]。
+    if (!guardRendererPin("IMediaControl::Pause"))
+        return;
     const int first = renderer_ != 0 ? StepPausePauseRenderer : StepPausePauseSource;
     if (!startChain(first, "IMediaControl::Pause"))
         endPauseChain();

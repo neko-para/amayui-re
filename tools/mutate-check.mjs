@@ -4519,6 +4519,27 @@ const MUTATIONS = [
       '把 usage 首行改回中文（原缺陷形态）⇒ `--help` 的 stdout 出现非 ASCII 字节 ⇒ ' +
       'gen-ascii-output 的"每个字节 < 0x80"断言当场红',
   },
+
+  // ── DirectShow：`JoinFilterGraph` 的**成员槽**（守卫 = `tests/dshow_graph.cpp` 的
+  //    `dshow-join-filter-graph`）──
+  //   ★ 代表"看错字段"这一类**静默**失效（2026-11-19 的现场）：`[filter+0x34]` 是 m_pGraph
+  //     （唯一写点 `0x4D02ED mov [edi+34h],eax`），`[filter+0x6C]` 是渲染器缓存的**输入 pin**
+  //     （`GetPin` 懒建，`0x4D5B3C`）—— 在 AddFilter 里检查后者必然为 0 ⇒ 每次播片报一条假 Error。
+  //   ★ 为什么改回 `0x6C` 能红（且不是恒真）：join 真的把 graph 写进了 `+0x34`，产品却去读
+  //     `+0x6C`（那时 pin 还没建）⇒ 判定"join 没落盘" ⇒ 那条 Error 回来 ⇒
+  //     `dshow-join-filter-graph` 的 `!hasErrorLine(log, "JoinFilterGraph")` 落空。
+  {
+    file: 'apps/emulator-lift/src/runtime/dshow/graph.cpp',
+    from: 'constexpr std::uint32_t kFilterGraphField = 0x34; // m_pGraph（EA 锚 0x4D02ED）',
+    to: 'constexpr std::uint32_t kFilterGraphField = 0x6C; // 变异：看错槽（那是 GetPin 缓存的输入 pin）',
+    guard: 'ctest:dshow-graph',
+    ctest: 'dshow-graph',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-dshow-graph',
+    what:
+      '`kFilterGraphField` 0x34→0x6C（把 m_pGraph 看成渲染器的输入 pin）⇒ join 已落盘的 +0x34 读不到、' +
+      'AddFilter 之后每条 JoinFilterGraph 都误报"没落盘" ⇒ dshow-join-filter-graph 红',
+  },
 ];
 
 let mutationRunSeq = 0;

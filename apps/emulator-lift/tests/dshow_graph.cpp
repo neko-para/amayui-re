@@ -12,6 +12,11 @@
 //   ⑤ 分配器忙（不 ReleaseBuffer）：第二次 Receive 不阻塞，`dropped_busy` 增长。
 //   ⑥ 「会红」自检：同一批判据在**坏接线**（QI(IMemInputPin) 失败）与**逐字段改坏**的记录上
 //      必须返回 false —— 否则上面那些绿是恒真的。
+//   ⑦ 真源读取（假 IAsyncReader）。
+//   ⑧ `JoinFilterGraph` 的**正确槽**：`[filter+0x34]`（m_pGraph，`0x4D02ED`）—— 正常路径
+//      **不再产生**那条 "… [filter+0x6C] 仍是 0" 的假 Error；`+0x34` 回读成 graph EA。
+//   ⑨ 真险情 tripwire：`[renderer+0x6C]`（输入 pin）为 0 时，第一次 Pause/Run 必须**响亮停**
+//      （`running=false` + `stop_why`），⛔ 不静默跳过；正常路径（pin 非 0）零输出。
 //
 // ★ 为什么假 renderer 的 `Receive` 不自己再调一次 `GetPointer`：本模块的泵已经在一条
 //   `GuestCallStack` 链里，链的 callee 里再起 guest 调用会打乱帧纪律（见 guest_invoke.h）。
@@ -25,12 +30,19 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#include <io.h>  // _dup / _dup2 / _fileno / _close / _read / _write（stderr tee 用）
+#else
+#include <unistd.h>  // dup / dup2 / fileno / close / read / write
+#endif
+
 #include "check.h"
 #include "fixture.h"
 #include "runtime/com.h"
 #include "runtime/dshow/dshow.h"
 #include "runtime/guest_call.h"
 #include "runtime/machine.h"
+#include "runtime/x86.h"
 
 namespace {
 
@@ -38,6 +50,105 @@ using lift_fixture::Fixture;
 using lift::ShimCall;
 using lift::X86;
 using lift::dshow::Guid;
+
+// ---- stderr **tee**（"正常路径不再产生那条 Error"的判据用；形态照 `tests/dsound.cpp`）----
+// ★ 为什么是 tee 而不是"最后一次性读出来"：红了以后要能立刻在旁边看到现场；
+//   而且 `Error` 是**永远显示**的（log.h:131-136），这条判据测的就是"它还出不出来"。
+//   `pump()` 把新增的一段同时写进内存 log 与**真 stderr**。
+#ifdef _WIN32
+using FdT = int;
+int dupFd(int fd) { return _dup(fd); }
+int dup2Fd(int src, int dst) { return _dup2(src, dst); }
+int filenoOf(std::FILE* f) { return _fileno(f); }
+void closeFd(int fd) { _close(fd); }
+int writeFd(int fd, const void* buf, unsigned n) { return _write(fd, buf, n); }
+#else
+using FdT = int;
+int dupFd(int fd) { return ::dup(fd); }
+int dup2Fd(int src, int dst) { return ::dup2(src, dst); }
+int filenoOf(std::FILE* f) { return ::fileno(f); }
+void closeFd(int fd) { ::close(fd); }
+int writeFd(int fd, const void* buf, unsigned n) { return static_cast<int>(::write(fd, buf, n)); }
+#endif
+
+struct StderrTee {
+    std::FILE* tmp = nullptr;
+    FdT saved = -1;
+    bool active = false;
+    std::size_t moved = 0;
+    std::string log;
+
+    bool begin() {
+#ifdef _WIN32
+        // `tmpfile` 在 MSVC 上是 deprecated（本仓口径：不留废弃告警）⇒ 用 `tmpfile_s`。
+        if (tmpfile_s(&tmp) != 0) return false;
+#else
+        tmp = std::tmpfile();
+#endif
+        if (!tmp) return false;
+        std::fflush(stderr);
+        saved = static_cast<FdT>(dupFd(2));
+        if (saved < 0) return false;
+        if (dup2Fd(filenoOf(tmp), 2) < 0) return false;
+        active = true;
+        return true;
+    }
+    void pump() {
+        if (!active || !tmp) return;
+        std::fflush(stderr);
+        std::fseek(tmp, 0, SEEK_END);
+        const long size = std::ftell(tmp);
+        if (size < 0) return;
+        const std::size_t total = static_cast<std::size_t>(size);
+        if (total <= moved) return;
+        std::fseek(tmp, static_cast<long>(moved), SEEK_SET);
+        std::vector<char> chunk(total - moved);
+        const std::size_t got = std::fread(chunk.data(), 1, chunk.size(), tmp);
+        if (got == 0) return;
+        log.append(chunk.data(), got);
+        if (saved >= 0) {
+            std::size_t off = 0;
+            while (off < got) {
+                const int n = writeFd(saved, chunk.data() + off, static_cast<unsigned>(got - off));
+                if (n <= 0) break;
+                off += static_cast<std::size_t>(n);
+            }
+        }
+        moved += got;
+    }
+    std::string finish() {
+        if (!active) return log;
+        pump();
+        dup2Fd(saved, 2);
+        closeFd(saved);
+        saved = -1;
+        active = false;
+        if (tmp) {
+            std::fclose(tmp);
+            tmp = nullptr;
+        }
+        return log;
+    }
+};
+
+// 一行 `[error] ...` 里是否出现某个子串（"那条假 error 又出现了"的判据）。
+bool hasErrorLine(const std::string& log, const char* needle) {
+    std::size_t pos = 0;
+    while ((pos = log.find("[error]", pos)) != std::string::npos) {
+        const std::size_t end = log.find('\n', pos);
+        const std::string line = log.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+        if (line.find(needle) != std::string::npos) return true;
+        if (end == std::string::npos) break;
+        pos = end;
+    }
+    return false;
+}
+
+std::string hexEa(std::uint32_t v) {
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "0x%08X", v);
+    return buf;
+}
 
 constexpr std::uint32_t kStubPage = 0x7FF80000u;
 
@@ -153,6 +264,11 @@ struct FakeState {
     int receive_calls = 0;
     int source_pin_calls = 0;
     RawGuid last_qi_iid;
+    // ---- JoinFilterGraph（`[filter+0x34]` = m_pGraph；`0x4D02ED`）----
+    int join_calls = 0;
+    std::uint32_t last_join_graph = 0;
+    std::uint32_t last_join_name = 0;
+    bool join_uncommitted = false;  // 夹具的存储块没铺到 +0x34（夹具错误，不是产品判据）
 };
 
 FakeState g;
@@ -204,6 +320,11 @@ void fakeQueryInterfaceSelf(X86& cpu, ShimCall& call) {
 void fakeNotImpl(X86&, ShimCall& call) { call.result = kENotImpl; }
 
 // ---- IBaseFilter ----
+// ★ 假 filter 的 `this` 是**夹具自己分配的存储块**（见 buildFakeEngine 的说明），不是 ComRegistry
+//   登记过的对象 ⇒ AddRef/Release 不走 refcount 表（表里查不到会打一行 Warn，且返回 0）。
+//   产品路径只用它们记账，不依赖引用计数。
+void fakeFilterAddRef(X86&, ShimCall& call) { call.result = 1; }
+void fakeFilterRelease(X86&, ShimCall& call) { call.result = 0; }
 void fakeFilterPause(X86&, ShimCall& call) {
     pushCall(call.u32(0) == g.renderer ? "pause:renderer" : "pause:source");
     call.result = kSOk;
@@ -218,6 +339,23 @@ void fakeFilterStop(X86&, ShimCall& call) {
 }
 // IBaseFilter::SetSyncSource(+0x20)：真图在 Run 之前对每个 filter 调它（doc §8.10）。
 void fakeFilterSetSyncSource(X86&, ShimCall& call) { call.result = kSOk; }
+// ★ `IBaseFilter::JoinFilterGraph(IFilterGraph*, LPCWSTR)` = +0x34（`.data:0x528570` / `sub_4D02B0`）。
+//   真的实现**无条件**把 pGraph 写进 `[this+0x34]`（`0x4D02ED mov [edi+34h],eax`）并恒返回 0
+//   （`0x4D0375 xor eax,eax`）—— 夹具逐字照抄这两条，否则"产品读哪个槽"就无从判定。
+void fakeFilterJoinGraph(X86& cpu, ShimCall& call) {
+    const std::uint32_t self = call.u32(0);
+    const std::uint32_t graph = call.u32(1);
+    pushCall(self == g.renderer ? "join:renderer" : "join:source");
+    ++g.join_calls;
+    g.last_join_graph = graph;
+    g.last_join_name = call.u32(2);
+    if (cpu.mem->committed(self + 0x34u, 4u)) {
+        cpu.mem->wr32(self + 0x34u, graph);
+    } else {
+        g.join_uncommitted = true;  // 夹具自己的存储块不够大（不是产品判据）
+    }
+    call.result = kSOk;  // 真函数恒返回 0（0x4D0375）
+}
 
 // ---- IEnumPins ----
 void fakeEnumNext(X86& cpu, ShimCall& call) {
@@ -235,6 +373,11 @@ void fakeEnumNext(X86& cpu, ShimCall& call) {
     if (state != 0) cpu.mem->wr32(state, 1u);
     cpu.mem->wr32(out_ea, g.input_pin);
     cpu.mem->wr32(fetched_ea, 1u);
+    // ★ 真 `IEnumPins::Next` 里 `CEnumPins::GetPin` 会**懒建**输入 pin 并把它缓存进 filter 的
+    //   `[filter+0x6C]`（`0x4D30FC -0xC` → `0x4D5B3C mov [esi+78h],eax`）。夹具照抄这一步：
+    //   `Pause`/`Run` 的 tripwire（`[renderer+0x6C]==0` ⇒ `[0+0x18]` fault）读的就是它。
+    if (g.renderer != 0 && cpu.mem->committed(g.renderer + 0x6Cu, 4u))
+        cpu.mem->wr32(g.renderer + 0x6Cu, g.input_pin);
     call.result = kSOk;
 }
 
@@ -485,6 +628,23 @@ struct Harness {
 
 void resetFake() { g = FakeState{}; }
 
+// 假 filter 的存储块：真对象的成员在 `IBaseFilter*+0x34`（`m_pGraph`）与 `+0x6C`（输入 pin），
+// 而 `ComRegistry` 的对象只有 **8–12 字节**（`com.cpp` 的 `kObjectBytes`）—— 把这两个偏移写进
+// 对象后面会落进相邻堆块的 8 字节头里。所以夹具用**自己的 0x80 字节块**当 filter：
+// `[0] = 借来的 vtable`，`+0x34`/`+0x6C` 归夹具。`ComRegistry::dispatch` 按**桩 EA** 路由，
+// `this` 有没有登记只影响一行 Info 诊断（`com.cpp` 的 `known_this`）⇒ 这条路成立。
+std::uint32_t makeFakeFilter(Harness& h, const char* what, std::uint32_t vtable_holder) {
+    X86& cpu = h.cpu();
+    const std::uint32_t storage = h.f.m.heap().alloc(0x80u, /*zero=*/true);
+    if (storage == 0) {
+        h.f.ok = false;
+        h.f.err = std::string("假 filter（") + what + "）的存储块分配失败";
+        return 0;
+    }
+    cpu.mem->wr32(storage, cpu.mem->rd32(vtable_holder));
+    return storage;
+}
+
 void buildFakeEngine(Harness& h) {
     resetFake();
     X86& cpu = h.cpu();
@@ -504,23 +664,30 @@ void buildFakeEngine(Harness& h) {
     };
     static const std::vector<lift::ComMethod> renderer_methods = {
         {0x00, "QueryInterface", lift::Conv::Stdcall, 2, &fakeQueryInterfaceSelf},
-        {0x04, "AddRef", lift::Conv::Stdcall, 0, &fakeAddRef},
-        {0x08, "Release", lift::Conv::Stdcall, 0, &fakeRelease},
+        // ★ 不走 `fakeAddRef`/`fakeRelease`：下面这个 `this` 是夹具自己的存储块（不是 ComRegistry
+        //   对象），见 makeFakeFilter 的说明。
+        {0x04, "AddRef", lift::Conv::Stdcall, 0, &fakeFilterAddRef},
+        {0x08, "Release", lift::Conv::Stdcall, 0, &fakeFilterRelease},
         {0x10, "Stop", lift::Conv::Stdcall, 0, &fakeFilterStop},
         {0x14, "Pause", lift::Conv::Stdcall, 0, &fakeFilterPause},
         {0x18, "Run", lift::Conv::Stdcall, 2, &fakeFilterRun},  // this + REFERENCE_TIME(8)
         {0x20, "SetSyncSource", lift::Conv::Stdcall, 1, &fakeFilterSetSyncSource},
         {0x28, "EnumPins", lift::Conv::Stdcall, 1, &fakeEnumPins},
         {0x2C, "FindPin", lift::Conv::Stdcall, 2, &fakeNotImpl},
+        // ★ `IBaseFilter` 的 JoinFilterGraph 在 **+0x34**（`.data:0x528570` → `sub_4D02B0`；
+        //   渲染器的派生 override 是 `.data:0x52857C+0x34` → `sub_4D5580`）。它的实现写
+        //   `[this+0x34]`（m_pGraph）—— 这正是产品该读的那个槽。
+        {0x34, "JoinFilterGraph", lift::Conv::Stdcall, 2, &fakeFilterJoinGraph},
     };
     static const std::vector<lift::ComMethod> source_methods = {
         {0x00, "QueryInterface", lift::Conv::Stdcall, 2, &fakeQueryInterfaceSelf},
-        {0x04, "AddRef", lift::Conv::Stdcall, 0, &fakeAddRef},
-        {0x08, "Release", lift::Conv::Stdcall, 0, &fakeRelease},
+        {0x04, "AddRef", lift::Conv::Stdcall, 0, &fakeFilterAddRef},
+        {0x08, "Release", lift::Conv::Stdcall, 0, &fakeFilterRelease},
         {0x10, "Stop", lift::Conv::Stdcall, 0, &fakeFilterStop},
         {0x14, "Pause", lift::Conv::Stdcall, 0, &fakeFilterPause},
         {0x18, "Run", lift::Conv::Stdcall, 2, &fakeFilterRun},
         {0x20, "SetSyncSource", lift::Conv::Stdcall, 1, &fakeFilterSetSyncSource},
+        {0x34, "JoinFilterGraph", lift::Conv::Stdcall, 2, &fakeFilterJoinGraph},
     };
     static const std::vector<lift::ComMethod> srcpin_methods = {
         {0x00, "QueryInterface", lift::Conv::Stdcall, 2, &fakeSourcePinQueryInterface},
@@ -547,8 +714,13 @@ void buildFakeEngine(Harness& h) {
 
     g.input_pin = h.com.createObject(cpu, "FakePin", pin_methods);
     g.mem_input = h.com.createObject(cpu, "FakeMemInputPin", meminput_methods);
-    g.renderer = h.com.createObject(cpu, "FakeRenderer", renderer_methods);
-    g.source_filter = h.com.createObject(cpu, "FakeSourceFilter", source_methods);
+    // ★ vtable 交给 ComRegistry 发（槽 → 桩 EA 的路由表只在那里建）；`this` 用夹具自己的存储块。
+    const std::uint32_t renderer_vtable =
+        h.com.createObject(cpu, "FakeRendererVtable", renderer_methods);
+    const std::uint32_t source_vtable =
+        h.com.createObject(cpu, "FakeSourceFilterVtable", source_methods);
+    g.renderer = makeFakeFilter(h, "渲染器", renderer_vtable);
+    g.source_filter = makeFakeFilter(h, "源 filter", source_vtable);
     g.source_pin = h.com.createObject(cpu, "FakeSourcePin", srcpin_methods);
     g.async_reader = h.com.createObject(cpu, "FakeAsyncReader", async_methods);
 }
@@ -987,6 +1159,95 @@ int main() {
         LIFT_CHECK(!graph2.stats().decoder_opened);                               // 垃圾字节打不开
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(graph2.stats().samples_delivered), 0u);
         LIFT_CHECK_EQ_U32(graph2.stats().connect_hr, kEFail);  // 无帧源 ⇒ 没接线（但没崩）
+    }
+
+    // -- ⑧ JoinFilterGraph 的**正确槽**：`[filter+0x34]` 才是 m_pGraph（`+0x6C` 是输入 pin）--
+    //    判据（analysis.md §5.2 候选 A：修的是**诊断**，不是 join）：
+    //      · 正常路径**不再产生** "JoinFilterGraph … [filter+0x6C] 仍是 0" 那条假 Error；
+    //      · `[filter+0x34]` 被回读成我们传进去的 graph EA（渲染器 + 源各一次）。
+    //    ★「改前会红」：把产品里的 `kFilterGraphField` 改回 `0x6C` ⇒ 这条 Error 回来 ⇒ 本用例红
+    //      （`[filter+0x34]` 的内存断言仍绿 —— 它钉的是**夹具**写对了槽，分辨力在日志断言上）。
+    //    ★ 正常路径的收尾：render() → EnumPins/Next（夹具照抄 `0x4D5B3C`）⇒ pin 落到
+    //      `[renderer+0x6C]`，这正是 ⑨ 的 tripwire 在正常路径上**不出声**的前提。
+    {
+        g_current_case = "dshow-join-filter-graph";
+        resetFake();
+        buildFakeEngine(h);
+        const std::uint32_t graph_ea = h.f.zeroData(4);  // 我们的 IGraphBuilder 视图 EA
+        lift::dshow::Graph graph3(h.cpu(), [&clock100ns]() { return clock100ns; }, &feed);
+        graph3.setGraphUnknown(graph_ea);
+        // = quartz_video 的 AddFilter 口径：4 + call.stdcall_bytes = 4 + (this+2 参)*4。
+        graph3.setHostCallCleanup(4u + 3u * 4u);
+
+        StderrTee tee;
+        LIFT_CHECK(tee.begin());
+        LIFT_CHECK(h.drive([&] { graph3.addFilter(g.renderer, renderer_name_ea, &h.f.err); }));
+        LIFT_CHECK(h.drive([&] { graph3.addFilter(g.source_filter, 0, &h.f.err); }));
+        const std::string log = tee.finish();
+
+        LIFT_CHECK(h.f.ok);
+        LIFT_CHECK(!graph3.suspended());
+        LIFT_CHECK(!g.join_uncommitted);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(g.join_calls), 2u);
+        LIFT_CHECK_EQ_U32(g.last_join_graph, graph_ea);
+        // guest（夹具）真的把 m_pGraph 写进了 +0x34
+        LIFT_CHECK_EQ_U32(h.f.m.mem().rd32(g.renderer + 0x34u), graph_ea);
+        LIFT_CHECK_EQ_U32(h.f.m.mem().rd32(g.source_filter + 0x34u), graph_ea);
+        // ★ 那条假 error **不出现**（旧实现在这里必报：它看的是 +0x6C，而 pin 那时还没建）
+        LIFT_CHECK(!hasErrorLine(log, "JoinFilterGraph"));
+
+        // 正常路径继续：接线 ⇒ EnumPins/Next 建 pin，并把它缓存进 [renderer+0x6C]
+        graph3.setHostCallCleanup(kCleanupOneArg);
+        LIFT_CHECK(h.drive([&] { graph3.render(g.source_pin, &h.f.err); }));
+        LIFT_CHECK_EQ_U32(graph3.stats().connect_hr, kSOk);
+        LIFT_CHECK_EQ_U32(h.f.m.mem().rd32(g.renderer + 0x6Cu), g.input_pin);
+    }
+
+    // -- ⑨ 真险情的 tripwire：第一次转发 Pause/Run 之前 `[renderer+0x6C]`(输入 pin)==0 ⇒
+    //    **响亮停**（本仓"停机原因"口径：`cpu.running=false` + `stop_why`），⛔ 不静默跳过。
+    //    这条险情是真的：`CBaseRenderer::Pause/Run`（`0x4D58B8`/`0x4D59C8`）会
+    //    `mov eax,[filter+0x6C]; cmp dword ptr [eax+18h],0` ⇒ pin==0 就是 guest 读地址 0x18 fault。
+    //    这里的 pin==0 是**故意**造出来的：feed=nullptr + `render(0)` ⇒ render() 在
+    //    "source_pin 为 NULL" 处早退，EnumPins 从未跑 ⇒ pin 从没被建。
+    //    ★「改前会红」：旧产品没有这条 tripwire ⇒ run() 照常转发 Pause（`pause:renderer` 出现）
+    //      且机器不置停 ⇒ 本用例三条断言（calls 不变 / running==false / Error 带 EA）全红。
+    //    ★「正常路径零输出」由 ③ `dshow-control-order` 守着（pin 非 0 ⇒ 一切照旧）。
+    {
+        g_current_case = "dshow-pin-tripwire";
+        resetFake();
+        buildFakeEngine(h);
+        const std::uint32_t graph_ea = h.f.zeroData(4);
+        lift::dshow::Graph graph4(h.cpu(), [&clock100ns]() { return clock100ns; }, /*feed=*/nullptr);
+        graph4.setGraphUnknown(graph_ea);
+        graph4.setHostCallCleanup(4u + 3u * 4u);
+        LIFT_CHECK(h.drive([&] { graph4.addFilter(g.renderer, renderer_name_ea, &h.f.err); }));
+        graph4.setHostCallCleanup(kCleanupOneArg);
+        LIFT_CHECK(!graph4.render(0, &h.f.err));  // 早退：source_pin 为 NULL（无字节来路）
+        LIFT_CHECK_EQ_U32(h.f.m.mem().rd32(g.renderer + 0x6Cu), 0u);  // pin 从没被建
+
+        const std::size_t calls_before = g.calls.size();
+        const bool running_before = h.cpu().running;
+        StderrTee tee;
+        LIFT_CHECK(tee.begin());
+        h.drive([&] { graph4.run(); });  // ★ tripwire 在这里；run() **不**发起任何 guest 调用
+        const std::string log = tee.finish();
+
+        // ① 响亮停：停机原因进 `stop_why`（与 `endStopChain` 的 LIFT_STOP_AFTER_MOVIE 同形）
+        LIFT_CHECK(!h.cpu().running);
+        LIFT_CHECK(h.cpu().stop_why != nullptr);
+        LIFT_CHECK(std::string(h.cpu().stop_why ? h.cpu().stop_why : "").find("输入 pin") != std::string::npos);
+        // ② 那条 Error 必须自带**渲染器 EA** 与 **render() 的早退原因**
+        //    （默认档 warn 下，带 EA 的 JoinFilterGraph Info 行看不见 ⇒ 只能靠这条 Error）
+        LIFT_CHECK(hasErrorLine(log, "输入 pin"));
+        LIFT_CHECK(hasErrorLine(log, hexEa(g.renderer).c_str()));
+        LIFT_CHECK(hasErrorLine(log, "source_pin 为 NULL"));
+        // ③ ⛔ 没有"静默跳过"：一条 Pause/Run 都没转发
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(g.calls.size() - calls_before), 0u);
+        LIFT_CHECK(indexOfCall("pause:renderer") < 0);
+        LIFT_CHECK(indexOfCall("run:renderer") < 0);
+
+        h.cpu().running = running_before;  // 还原机器状态（后面不再用它，但保持夹具干净）
+        h.cpu().stop_why = nullptr;
     }
 
     return finish("dshow-graph");
