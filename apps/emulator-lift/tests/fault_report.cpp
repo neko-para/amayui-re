@@ -304,6 +304,16 @@ struct ChildRun {
     std::string stderr_text;
 };
 
+// 子进程 stderr 的字节 → `stderr_text`。
+// ★ Windows 上子进程的 stderr 是 CRT **文本模式**（继承的文件句柄也一样）⇒ 每个 `\n` 被翻成
+//   `\r\n`，而断言按 POSIX 的 `\n` 写。`\r` 只可能来自这次翻译 ⇒ 统一剥掉。
+//   ⛔ 不改产品输出、⛔ 不改断言（父级裁决 2026-11-18：只改测试的捕获侧）。
+void appendChildStderr(ChildRun& r, const char* data, std::size_t size) {
+    for (std::size_t i = 0; i < size; ++i) {
+        if (data[i] != '\r') r.stderr_text.push_back(data[i]);
+    }
+}
+
 #if defined(_WIN32)
 
 // 子进程 = **同一个 exe** 加 `--child-<mode>` 再启动一次（Windows 没有 fork）。
@@ -381,7 +391,7 @@ ChildRun runChild(const wchar_t* mode) {
         char buf[4096];
         DWORD n = 0;
         while (::ReadFile(in, buf, static_cast<DWORD>(sizeof(buf)), &n, nullptr) != 0 && n > 0) {
-            r.stderr_text.append(buf, static_cast<std::size_t>(n));
+            appendChildStderr(r, buf, static_cast<std::size_t>(n));
         }
         ::CloseHandle(in);
     }
@@ -421,7 +431,7 @@ ChildRun runChild(void (*fn)()) {
     ::close(fds[1]);
     char buf[4096];
     ssize_t n = 0;
-    while ((n = ::read(fds[0], buf, sizeof(buf))) > 0) r.stderr_text.append(buf, static_cast<std::size_t>(n));
+    while ((n = ::read(fds[0], buf, sizeof(buf))) > 0) appendChildStderr(r, buf, static_cast<std::size_t>(n));
     ::close(fds[0]);
     int status = 0;
     if (::waitpid(pid, &status, 0) != pid) {
