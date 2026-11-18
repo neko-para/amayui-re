@@ -884,8 +884,15 @@
 - **口径**：真 D3DX9 的 `Begin(D3DXSPRITE_ALPHABLEND)` 自己设 `ALPHABLENDENABLE=1` / `SRCBLEND=SRCALPHA(5)` /
   `DESTBLEND=INVSRCALPHA(6)`，`End` 恢复它改过的状态 ⇒ 我们漏了这一步。⛔ 不是"因子要从状态读"错了
   （那是对的，BUG-33），⛔ 也不能退回写死 5/6。
-- **需求单**：`REQ-01M7R3YPQPNPBZ327H89Q8RTEE`（S2）。判据 = `Begin` 设 5/6/1、`End` 逐字恢复 +
-  "透明 texel 不许把目标写成黑"的像素用例；证据 `.tmp/bug33-e2e/report.md`。
+- **修复**（dev `a0fd69e`）：`d3d9::writeRenderState`（与 `rsOf`/`setRs` 同源）；`Begin(ALPHABLEND)` 保存设备
+  `27/19/20` 并写 `1/5/6`，`End` 恢复（`Flush` 不恢复）；取不到设备 ⇒ `saved_valid=0` + 告警、不改返回码。
+  因子仍只从设备状态**读**（BUG-33 未回退）。
+- **守卫**：`d3dx9-sprite-blend` **400 checks**，新增 `…/begin-restores-blend-state` 与
+  `…/pixel-transparent-texel`（`blackened==0` / `unchanged==255` / `red_written==1`）；变异
+  `sprite-begin-alphablend-state-writes` ⇒ 12 failures 当场红。全量 ctest **127/127**、`pnpm test` 587/587。
+- **e2e**（SAVE05，warn 档 frames=808，正常结局）：对话框全屏黑 **1.23%**（回归时 33.70%，修前也 1.23%）
+  且**有边框花纹**；特效帧黑 1.14–1.15%、**120×120 黑块不在**、白星可见、走廊石地可见。
+- **需求单**：`REQ-01M7R3YPQPNPBZ327H89Q8RTEE`（S2，done）。
 
 ### BUG-34 · 同一现场：影片 0.8 s × 30 fps 只送出 **1** 帧（**未修** · S3 · 影响未证）
 

@@ -2,8 +2,9 @@
 
 - id: REQ-01M7R3YPQPNPBZ327H89Q8RTEE
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M7JHSD5MWTB9N8WJC2Y2T69M
+- verify: apps/emulator-lift/tests/d3dx9_sprite_blend.cpp#d3dx9-sprite-blend
 - repro: docs/03-emulator/save05-black-rect.md#复现
 - severity: S2
 - tags: [emulator-lift, d3dx9, sprite, blend, regression]
@@ -31,26 +32,37 @@
 我们把"混合因子来自设备状态"实现对了（BUG-33），但**漏了 D3DX 自己在 `Begin` 里改状态这一步**：
 引擎不会替 sprite 设 `5/6`，它只会在需要加性的那一条之前补 `5/2`。
 
-## 要做什么
+## 修法（2026-11-19 落地，dev `a0fd69e`）
 
-1. `d3dx9::Begin`：带 `D3DXSPRITE_ALPHABLEND` 时，按真 D3DX 的语义**写设备状态**
-   （至少 `kRsAlphaBlendEnable=1` / `kRsSrcBlend=5` / `kRsDestBlend=6`；其余 D3DX 会改的状态项按现有实现边界决定，
-   ⛔ 不要顺手扩到无关状态），并把**原值**存进 sprite 状态块；`End` 时恢复（含 `Flush` 不恢复）。
-2. 加性那条不动：引擎在 `Begin` 之后、`End` 之前写 `19=5` / `20=2` ⇒ `End` 读到的仍是 `5/2`。
-3. ⛔ 不要退回"sprite 路写死 5/6"（那就又把 BUG-33 修回去）。
+- `d3d9_pipeline.{h,cpp}`：新增写入口 `writeRenderState(X86&, dev_state, state, value, why)`
+  （`pipelineOf` + `setRs` 同源，⛔ 不另写偏移）。
+- `d3dx9_sprite.cpp`：sprite 状态块末尾追加 `saved_valid` / `saved_alpha_blend_enable` /
+  `saved_src_blend` / `saved_dst_blend`（`kSpBytes` 128 → 140；这块是**我们自己**分配的对象，不是 guest ABI）。
+  `Begin(ALPHABLEND)`：读设备 `27/19/20` 落盘原值 → 写 `27=1 / 19=5 / 20=6`；`End` 恢复，`Flush` 不恢复。
+  取不到设备 / 没有流水线状态块 ⇒ `saved_valid=0` + 一条告警、**不改** Begin 的返回码。
+- 因子仍然只从设备状态**读**（`readBlendState` + `gpuBlendStateFor` 一行未改）⇒ BUG-33 没有回退。
+- 边界（本轮不动）：`D3DXSPRITE_DO_NOT_SAVE_STATE` / `DO_NOT_MODIFY_RENDER_STATE` 仍"记录并忽略"；
+  Begin/End 之间销毁 sprite 或 `OnLostDevice` 不做恢复；⛔ 不扩到 `ALPHATESTENABLE` / `ZENABLE` / `LIGHTING`。
 
-## 判据（守卫）
+## 守卫 / 读数（2026-11-19 / win32 / RelWithDebInfo）
 
-- pure/单元：`Begin(ALPHABLEND)` 之后设备状态块里 `19==5`、`20==6`；`End` 之后**恢复**到 `Begin` 前那对值
-  （夹具给一对非 5/6 的初值，断言逐字回原）。
-- **像素回归**：一张 16×16 源图（`alpha=0` 的黑色 texel 铺满，中间一个 `alpha=255` 的红点）画到
-  纯色后缓冲上 ⇒ 背景像素**一个都不许变成黑**，只有红点被写下（修前写法靠 5/6 能过，现在必须靠 Begin 设状态）。
-- 反例守护：把 `Begin` 里那几句状态写删掉 ⇒ 上面两条**当场红**（这正是本次回归的形态）。
-- e2e（不进默认门禁）：SAVE05 里走廊地面 / 对话框底板**不再是黑块**，同时 120×120 黑块**仍然没有**。
+- CTest `d3dx9-sprite-blend`（**400 checks**）新增两条子用例：
+  `d3dx9-sprite-blend/begin-restores-blend-state`（Begin 后 27/19/20 = 1/5/6；End 逐字回夹具初值 0/3/9；
+  第二次可重复）、`d3dx9-sprite-blend/pixel-transparent-texel`（16×16 源图 = alpha0 黑铺满 + 中心 a255 红点，
+  按 D3D9 混合方程作用到纯色后缓冲：`blackened==0` / `unchanged==255` / `red_written==1`，附 ONE/ZERO 负例）。
+  `d3dx9-sprite-blend/wiring` 同名改判据：引擎在 Begin 之后写 5/2 ⇒ 仍加性。
+- 变异 `sprite-begin-alphablend-state-writes`（禁掉 Begin 的三句写）⇒ **400 checks / 12 failures**，当场红；
+  还原后 400 / 0。全量 ctest **127/127**（139.99 s）；`pnpm test` 587/587。
 
-## 复现（e2e 读数出处）
+## e2e（SAVE05，私有 appdata，`saves/` 未动；warn 档 frames=808，正常结局）
 
-`docs/03-emulator/save05-black-rect.md#复现`；对照图 `.tmp/bug33-e2e/shots/{cmp-b011-vs-fx1,fx1,fx6,B06,B09}.png`。
+| 帧段 | 全屏黑 | 对照 |
+|---|---|---|
+| 对话框（`MES` 772–808） | **1.23%** | 回归时 33.70% / 修前 1.23%；**有边框花纹** |
+| 特效（`FIELD 0x3E118`，742–766） | 1.14–1.15%，搜索区 1.0–1.18% | **120×120 黑块不在**，白星在宝藏上可见；走廊石地可见 |
+
+截图：dev `.tmp/sprite-begin-e2e/shots/f3.png`（特效）/ `f8.png`（对话框）。
+⚠ 本轮 warn 档，未重做逐批次 19/20 普查；机制判据是单测（含红读数）。
 
 ## 边界
 
