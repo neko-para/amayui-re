@@ -32,6 +32,7 @@
 #include "runtime/vfs.h"  // openHostFileUtf8（Windows 的 UTF-8 脚本路径）
 #include "runtime/warp_echo.h"
 #include "runtime/window_scale.h"
+#include "ui/hit.h"
 #include "ui/present_ui.h"
 #include "ui/script.h"
 
@@ -255,6 +256,11 @@ struct SdlWindow::Impl {
     // ★ 帧列表读数源（`game.local_frames()`；非 owning，生命周期 = 调用方 = Machine / AotHost）。
     //   `nullptr` = 没接 ⇒ 脚本侧 `undefined`。⛔ 不在这里推表：脚本**按需**查询。
     lift::ui::UiFrameSource* ui_frame_source = nullptr;
+    // ★ 命中 / 捕获路由（`REQ-01M7QF01A00F9946DX0GPH23JQ` 切片 2 后半；`ui/hit.h` 的纯状态机）。
+    //   · 命中表 = **上一帧成功 present** 的 display list 的 resolved rect（绘制序）；
+    //   · 左键 down 命中 ⇒ 吞 + capture；捕获中的 up 无条件吞，抬在同一条 rect 内才产一次性 click；
+    //   · ⛔ handleEvent 只调这里记 pending：不跑 JS、不开 profile、不写剪贴板。
+    lift::ui::ClickRouter click_router;
     // ★ 宿主真光标（`--cursor-warp`，默认关）：只加宿主副作用，⛔ 不改 guest 可见状态。
     bool cursor_warp = false;
     // ★ `--cursor-warp` 的回灌抑制队列（**窗口客户区像素**的 FIFO；判据与为什么见
@@ -296,6 +302,9 @@ struct SdlWindow::Impl {
     void handleEvent(const SDL_Event& event);
     void pumpEvents(int wait_ms);
     void mapMouse(float mx, float my, std::int32_t* gx, std::int32_t* gy) const;
+    // ★ 指针的 SDL **窗口点** → **窗口像素**（命中表 = `presentGeometry` 的像素空间）。
+    //   ⛔ 不复用 `mapMouse`：它映射到 **guest 客户区**（画面内 0..image-1），那是另一个空间。
+    void pointerWindowPixels(float px, float py, int* x, int* y) const;
     // 本帧要不要回读（截图 / 测试捕获）。frame_no 必须已经自增。
     bool shotWanted() const;
     // 截图 + 捕获（两条呈现路径共用；`shot` 归调用方销毁）。frame_no 必须已经自增。
@@ -464,6 +473,8 @@ bool SdlWindow::Impl::loadUiScript(std::string* err) {
 void SdlWindow::Impl::disableOverlay(const char* why) {
     std::fprintf(stderr, "[overlay] 叠层不可用 ⇒ 关掉（呈现照旧）：%s\n", why != nullptr ? why : "(unknown)");
     overlay = false;
+    // ★ 屏幕上已经没有这层叠层了 ⇒ 命中表 / capture 一起作废（⛔ 留着旧按钮继续吃点击）。
+    click_router.clearFrame();
     ui_script.reset();
     // ★ 不立即销毁：上一帧的 draw 可能仍在 GPU 队列里（提前释放 ⇒ 部分/整块叠层丢失）。
     //   退役到 `retired_overlay_tex`，由 `shutdown()` 统一释放。
@@ -524,9 +535,61 @@ bool SdlWindow::drawOverlay(std::string* err) {
     // ★ 帧列表读数源（`game.local_frames()`）：**按需查询** —— 这里只把指针交出去，
     //   本帧脚本不调用它就一次 guest 读都不发生（⛔ 宿主不每帧重建表）。
     readings.frames = impl_->ui_frame_source;
+    // ★ 命中 / 捕获（切片 2 后半）：全部读自**上一帧成功 present** 的命中表（= 屏幕上真正画着
+    //   的东西）+ 本帧指针位置。⛔ 这里只读：不跑 JS、不改 capture。
+    {
+        std::string hover;
+        // 指针在**本窗口**上时才算 hover（没有鼠标焦点 ⇒ 空；⛔ 不拿别的窗口的坐标猜）。
+        if (impl_->window != nullptr && SDL_GetMouseFocus() == impl_->window) {
+            float mouse_x = 0.0f;
+            float mouse_y = 0.0f;
+            SDL_GetMouseState(&mouse_x, &mouse_y);
+            int hit_x = 0;
+            int hit_y = 0;
+            impl_->pointerWindowPixels(mouse_x, mouse_y, &hit_x, &hit_y);
+            hover = impl_->click_router.hoverKey(hit_x, hit_y);
+        }
+        readings.hover_key = std::move(hover);
+        readings.active_key = impl_->click_router.activeKey();
+        // ★ click **一次性**：这一次 render 之前取走 ⇒ 下一次 render 就是 undefined
+        //   （需求单「设计」第 3 条；判据在 `ui-click-router` 与 `ui-script-quickjs/key-on-rect`）。
+        lift::ui::UiClick click;
+        if (impl_->click_router.takeClick(&click)) {
+            readings.click_ok = true;
+            readings.click_key = std::move(click.key);
+            readings.click_x = click.x;
+            readings.click_y = click.y;
+        }
+    }
     // ★ 预算 = 这一帧的墙钟上限 + 字节码条数上限（`UiScript::setBudget` 的绝对 ns 口径）。
     impl_->ui_script->setBudget(steadyNowNs() + kUiScriptBudgetNs, kUiScriptOpLimit);
-    return lift::ui::presentUi(this, *impl_->ui_font, *impl_->ui_script, readings, err);
+    lift::ui::UiPresentedFrame presented;
+    const bool ok =
+        lift::ui::presentUi(this, *impl_->ui_font, *impl_->ui_script, readings, &presented, err);
+    // ★ 只有**成功 present** 的那一帧才更新命中表：没有几何 / 空 list / 合成失败 ⇒ 屏幕上仍是
+    //   上一次的叠层，命中表必须跟着它（⛔ 不清空：那会让"画着按钮但点不中"）。
+    if (ok && presented.presented) impl_->click_router.commitFrame(std::move(presented.hits));
+    return ok;
+}
+
+void SdlWindow::Impl::pointerWindowPixels(float px, float py, int* x, int* y) const {
+    *x = static_cast<int>(std::lround(px));
+    *y = static_cast<int>(std::lround(py));
+    if (window == nullptr) return;
+    // ★ SDL 的指针事件坐标是**窗口点**（逻辑坐标），而 `presentGeometry` 给的画面矩形是
+    //   **窗口像素**（`SDL_GetWindowSizeInPixels`）⇒ 按两者比值换算（DPR != 1 时必须）。
+    //   取不到任一尺寸 ⇒ 原样返回（⛔ 不猜一个 DPI 比例）。
+    int pixel_w = 0;
+    int pixel_h = 0;
+    int logical_w = 0;
+    int logical_h = 0;
+    if (!SDL_GetWindowSizeInPixels(window, &pixel_w, &pixel_h)) return;
+    if (!SDL_GetWindowSize(window, &logical_w, &logical_h)) return;
+    if (pixel_w <= 0 || pixel_h <= 0 || logical_w <= 0 || logical_h <= 0) return;
+    const double sx = static_cast<double>(pixel_w) / static_cast<double>(logical_w);
+    const double sy = static_cast<double>(pixel_h) / static_cast<double>(logical_h);
+    *x = static_cast<int>(std::lround(static_cast<double>(px) * sx));
+    *y = static_cast<int>(std::lround(static_cast<double>(py) * sy));
 }
 
 void SdlWindow::Impl::mapMouse(float mx, float my, std::int32_t* gx, std::int32_t* gy) const {
@@ -562,6 +625,7 @@ void SdlWindow::Impl::handleEvent(const SDL_Event& event) {
             //   决定要不要退（否则 guest 一条指令都跑不到，确认框永远建不出来）。
             //   纯映射见 `runtime/present.h` 的 `hostQuitAction`（判据在 tests/messagebox.cpp）。
             if (hostQuitAction(HostQuitSource::AppQuit, close_pending) == HostQuitAction::StopRun) {
+                click_router.focusLost();  // 退出 ⇒ capture 作废（⛔ 不跨窗口会话留着）
                 requestStop("sdl-quit");
             }
             break;
@@ -570,6 +634,8 @@ void SdlWindow::Impl::handleEvent(const SDL_Event& event) {
             if (window != nullptr && event.window.windowID == SDL_GetWindowID(window) &&
                 hostQuitAction(HostQuitSource::WindowCloseRequested, close_pending) ==
                     HostQuitAction::PostWmClose) {
+                // ★ 关窗 = 交互结束 ⇒ 清 capture（判据：需求单「设计」第 4 条）。
+                click_router.focusLost();
                 requestClose();
             }
             break;
@@ -577,6 +643,8 @@ void SdlWindow::Impl::handleEvent(const SDL_Event& event) {
             // ★ 焦点丢失只清 **OS 拥有** 的键 / 按钮（见 host_window.h 的 InputSource）：
             //   脚本注入的按下不因窗口失焦而丢 —— 那正是"注入不依赖焦点"的一半。
             if (windows != nullptr) windows->clearOsInput();
+            // ★ 叠层的 capture 也清（失焦 ⇒ 这次按住不算数；抬起时放行给 guest，不发 click）。
+            click_router.focusLost();
             break;
         case SDL_EVENT_KEY_DOWN:
         case SDL_EVENT_KEY_UP: {
@@ -618,6 +686,26 @@ void SdlWindow::Impl::handleEvent(const SDL_Event& event) {
             const bool down = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
             MouseButton b = MouseButton::Left;
             if (!mouseButtonFromSdl(event.button.button, &b)) break;
+            // ★ **叠层命中 / 捕获**（切片 2 后半）：坐标用**窗口像素**（命中表同一空间），
+            //   ⛔ 不是下面 `mapMouse` 的 guest 客户区坐标。⛔ 这里只把 pending 记进 router，
+            //   不跑 JS、不开 profile、不写剪贴板（裁决 4）。
+            if (overlay && window != nullptr && event.button.windowID == SDL_GetWindowID(window)) {
+                int hit_x = 0;
+                int hit_y = 0;
+                pointerWindowPixels(event.button.x, event.button.y, &hit_x, &hit_y);
+                lift::ui::UiPointerButton hit_button = lift::ui::UiPointerButton::Left;
+                if (b == MouseButton::Right) {
+                    hit_button = lift::ui::UiPointerButton::Right;
+                } else if (b == MouseButton::Middle) {
+                    hit_button = lift::ui::UiPointerButton::Middle;
+                }
+                const lift::ui::UiPointerDecision decision = click_router.handlePointer(
+                    down ? lift::ui::UiPointerPhase::Down : lift::ui::UiPointerPhase::Up, hit_button, hit_x,
+                    hit_y);
+                // ★ 吞掉 = 这条事件**不进 guest**（判定全在纯状态机里；见 `ui/hit.h`）：
+                //   左键 down 命中 / 捕获中的左键 up。
+                if (decision.swallow) break;
+            }
             std::int32_t x = 0;
             std::int32_t y = 0;
             mapMouse(event.button.x, event.button.y, &x, &y);
@@ -980,6 +1068,8 @@ void SdlWindow::shutdown() {
     impl_->ui_script_path.clear();
     impl_->present_times_ns.clear();
     impl_->ui_readings = UiReadings{};
+    // ★ 命中表 / capture 也不跨 init 会话（旧 key / rect 已经不代表屏幕上的东西）。
+    impl_->click_router.clearFrame();
     // 宿主光标开关 / 一次性自检（下一轮 init 会按新 options 重设）。
     impl_->cursor_warp = false;
     impl_->warp_selfcheck_done = false;
@@ -1485,6 +1575,8 @@ const char* SdlWindow::rendererName() const { return impl_->renderer_name.c_str(
 // 下一帧起窗口像素恢复成"只有画面"。默认关（`--overlay` / `--ui` 才打开）。
 void SdlWindow::setOverlay(bool on) {
     impl_->overlay = on;
+    // ★ 命中表 / capture 不跨叠层会话：新的脚本 / 新的一次开着，旧的 key 与 rect 都不再有效。
+    impl_->click_router.clearFrame();
     if (on) {
         // ★ 生产路径在 `init()` 就装好字体 + 脚本（失败 ⇒ 硬错）；这里只兜"运行时再开"这条
         //   （测试 / 未来开关）：装不上 ⇒ **一次性 stderr + 保持关**（⛔ 不静默画空白、

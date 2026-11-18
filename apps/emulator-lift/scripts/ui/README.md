@@ -1,7 +1,8 @@
 # `scripts/ui` —— HUD 脚本（`--overlay` / `--ui`）
 
 `--overlay` 的左上角 HUD **不是 C++ 画出来的**：它由这份目录里的 JS 脚本经 QuickJS **同步**跑出
-一份 display list，宿主再交给宿主字体栅格化、合成进窗口像素。默认脚本就是 `hud.js`。
+一份 display list，宿主再交给宿主字体栅格化、合成进窗口像素。默认脚本就是 `hud.js`；
+按钮之类的外观 / 状态 / 主题在组件库 `kit.js`（module 脚本可以 `import` 它）。
 
 ★ 脚本是**外置文件、运行时读**的：改完直接重跑，**不需要重编**（也⛔ 不要把 JS 抄进 C++）。
 
@@ -15,6 +16,10 @@ emulator-lift-aot --present window --overlay ...
 emulator-lift-aot --present window --ui E:\my-hud.js ...
 ```
 
+`--ui <path>` 的脚本可以 `import` **它自己所在目录的子树**里的相对模块（例如把 `kit.js` 拷到
+旁边，然后 `import { Button } from './kit.js'`）。⛔ bare specifier（`react`）/ 绝对路径 /
+`data:` URL / `..` 逃出脚本目录一律**加载期拒绝**（`--ui` 在启动期就 exit 2）。
+
 `--overlay` 且没给 `--ui` 时的解析顺序：
 
 1. `<exe 所在目录>/scripts/ui/hud.js` —— **发行布局**（`aot_main` 从 `argv[0]` 取目录）；
@@ -27,13 +32,17 @@ emulator-lift-aot --present window --ui E:\my-hud.js ...
 
 ## 脚本形状
 
-* UTF-8、单文件、**无 `import`**、strict 语义；
+* UTF-8、strict 语义；两种形状（宿主**自动识别**，旧 `--ui` 的 classic 语义逐字不变）：
+  * **classic**：顶层 `function render() { … }`（或 `globalThis.render = …`），⛔ 没有 `import`；
+  * **module**：带 `import` / 顶层 `await` / `import.meta` 的脚本走 ES module loader。相对
+    specifier 按**脚本自己所在目录**解析（不是 cwd），且只能在该目录的子树里；
 * 入口必须是**显式赋值**：
 
   ```js
   globalThis.render = function render() { /* 每帧调用一次 */ };
   ```
 
+  ★ module 里顶层的声明**不会**挂到 `globalThis` ⇒ 即便用 `import`，入口也**必须**显式写这一行。
 * `render()` 里只能用两个宿主全局：`ui`（画 list）与 `game`（读这一帧的读数）。
   类型声明见同目录的 `ui.d.ts`（随发行分发，⛔ 不参与构建）。
 * 每次调用前宿主已经清空 display list ⇒ `render` 只**追加**，不要保存状态。
@@ -50,12 +59,47 @@ globalThis.render = function render() {
 
 | 成员 | 说明 |
 |---|---|
-| `ui.rect({ x, y, w, h, fill, z? })` | 参考像素（1280×720）的轴对齐矩形；`fill` = `#RRGGBB` / `#RRGGBBAA`，缺省 `#000000FF` |
+| `ui.rect({ x, y, w, h, fill, z?, key? })` | 参考像素（1280×720）的轴对齐矩形；`fill` = `#RRGGBB` / `#RRGGBBAA`，缺省 `#000000FF`。`key` **非空** ⇒ 这个矩形是一个命中区（见下），缺省 = 纯背景 |
 | `ui.text({ x, y, text, size?, color?, bold?, z? })` | 一行 UTF-8 文本；`size` 缺省 16，`color` 缺省 `#FFFFFFFF`，`bold` 缺省 false |
 | `ui.measure(text, size) -> { w, h }` | 走宿主字体度量（`FontEngine`）；宿主没有字体 ⇒ `TypeError` |
 
-`x/y/w/h/size` 必须是可转成 32 位整数的有限数字；`text` 必须是 UTF-8 字符串；颜色只认 `#` 开头
-的 6 / 8 位 hex。未知键**暂时忽略**（校验表还没做，见需求单）。
+`x/y/w/h/size` 必须是可转成 32 位整数的有限数字；`text` / `key` 必须是可转成 UTF-8 的字符串；
+颜色只认 `#` 开头的 6 / 8 位 hex。未知键**暂时忽略**（校验表还没做，见需求单）。
+
+### 命中 / 按钮原语（`key` 在 `ui.rect` 上）
+
+C++ 侧**只有原语**（⛔ 没有 `ui.button`，也⛔ 没有 `ui.hit`）：`ui.rect({key})` 的 **resolved
+rect**（缩放 / 居中 / DPR 之后的最终窗口像素）就是命中区。
+
+* **命中顺序** = 上一帧**成功 present** 的绘制序**逆序**（后画的先命中）；没有成功帧 ⇒ 不命中。
+* `game.click` = **一次性**对象 `{ key, x, y }`（`x/y` = 抬起点）：只在点击发生的那一帧有值，
+  下一次 `render` 就是 `undefined`。⛔ 不要缓存它跨帧用。
+* `game.hover` / `game.active` = 只读 key：指针下的 key / 当前被捕获的 key（没有 ⇒ `undefined`）。
+* 事件边界：左键 down 命中 ⇒ **吞掉**并捕获；左键 up（捕获中）**无条件吞掉**，只有抬起点仍在
+  同一条 rect 内才发一次 click；拖出 ⇒ 取消；motion / wheel / 右键**放行给 guest**；
+  失焦 / 关窗 / 新的左键 down ⇒ 清捕获。
+
+按钮的外观 / 状态在这上面用 JS 写，见 `kit.js`：
+
+```js
+import { Button } from './kit.js';
+
+globalThis.render = function render() {
+  Button({
+    key: 'profile',
+    rect: { x: 8, y: 8, w: 96, h: 28 },   // 参考像素；几何由调用方给
+    label: 'PROFILE',
+    on: {
+      click: function (ev) { /* ev.key / ev.x / ev.y */ },
+      hover: function (on) { /* 指针是否在这个 key 上 */ },
+    },
+  });
+};
+```
+
+`Button` 返回当前状态（`'idle'` / `'hover'` / `'active'` / `'disabled'`）；`disabled: true` 的按钮
+**不挂 key**（不可命中，宿主不会给它发 click）。★ 组件库只做**外观 / 状态 / 主题**：⛔ 不做通用
+布局系统、不做窗口管理；`rect` 的 x/y/w/h 由调用方给。
 
 ### `game`（只读 getter；这一帧没有值 ⇒ `undefined`，⛔ 不是 0）
 
@@ -67,6 +111,9 @@ globalThis.render = function render() {
 | `game.script` | `string \| undefined` | 采到脚本身份且非空 |
 | `game.worst` | `{ wall_ms, guest_ms?, shim_ms } \| undefined` | 最近 3 s 有样本；`guest_ms` **没开块计时时没有这个键** |
 | `game.local_frames()` | `FrameInfo[] \| undefined` | 见下 |
+| `game.click` | `{ key, x, y } \| undefined` | 这一帧有一次"命中并抬起"（**一次性**） |
+| `game.hover` | `string \| undefined` | 指针在某个命中区上 |
+| `game.active` | `string \| undefined` | 左键在某个命中区上按下、还没抬起 |
 
 属性是 getter（无 setter）：strict 下赋值抛 `TypeError`。`game.local_frames()` 是 `game` 上**唯一**的
 **方法**（不可写 / 不可枚举 / 不可配置，strict 下赋值同样抛 `TypeError`）。
@@ -102,8 +149,10 @@ FrameInfo = {
 
 脚本跑在**裁剪过的** QuickJS 上下文里，⛔ 没有：`eval`、`Function`（含
 `Function.prototype.constructor`）、`Date`、`Math.random`、`RegExp`、`Proxy`、`Map/Set`、
-`TypedArray`、`Promise`、`BigInt`、`WeakRef`、`performance`、`JSON`；⛔ 没有文件 / 网络 / 进程 /
-`print`。所以同一份读数**必然**产出同一份 list（可测）。
+`TypedArray`、`WeakRef`、`performance`、`JSON`；⛔ 没有文件 / 网络 / 进程 / `print`。
+★ `Promise` **有**（module 求值是 Promise；用户 2026-11-19 裁决"加而不删"），`BigInt` 是 0.18.0
+`BaseObjects` 自带的当前表面 —— 保留的删除只有**功能目的**（`Math.random` 的确定性，
+`eval` / `Function` / `.constructor` 的禁动态编译）。同一份读数**必然**产出同一份 list（可测）。
 
 预算：内存 16 MiB、栈 512 KiB、每帧墙钟 20 ms + 100 万条字节码（超了 ⇒ 本帧失败，宿主关掉叠层
 并照旧呈现）。这些上限**不是**给你写重活的：HUD 是诊断层，⛔ 不要在 `render` 里做耗时计算。
@@ -124,8 +173,11 @@ pnpm exec tsc -p apps/emulator-lift/scripts/ui   # exit 0、无输出 = 干净
 ## 现在**没有**的
 
 * **热重载**：脚本在装叠层时编译一次（`--ui` 换文件要重启；`--overlay` 每次启动重读）。
-* 布局 / 锚点 / 百分比 / 命中测试 / 多文件 import（`ui` 目前只有 `rect` / `text` / `measure`）。
+* 通用布局 / 锚点 / 百分比 / 窗口管理：组件库只按调用方给的 `rect` 画，命中区是宿主从
+  `ui.rect({key})` 的 resolved rect 算的（`ui` 目前只有 `rect` / `text` / `measure`）。
 * 校验表（未知键被忽略，不报错）。
+* 发行打包规则（`release/` 目前没有"复制 `scripts/ui/*`"的步骤）：发行时 `hud.js` / `kit.js`
+  必须一起放到 `<exe 所在目录>/scripts/ui/`（缺 kit 与缺 hud 同属硬失败）。
 
 `hud.js` 的版式（内边距 8 / 字号 16 / 行序 / 颜色 `#101820CC` 80% 半透明底 + `#EBFFEB` 不透明字）
 就是 `tests/ui_hud_script.cpp` 的判据：改它要么同步改用例，要么那条用例会红。

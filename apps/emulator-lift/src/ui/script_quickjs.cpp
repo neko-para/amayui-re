@@ -67,7 +67,10 @@
 //     reason 按同一 err 形状报出来（⛔ 不许静默吞）；PENDING ⇒ 顶层 await 没有可执行来源，报错。
 //     成功路径不留 job / 不持有 promise（值走 `qjs::Value`）。
 //   · ★ module loader **只在 module 路径**装：classic 脚本仍没有 `import()`（旧行为不变）。
-//   · ⛔ 本文件不实现 `kit.js` / 命中 / 剪贴板（切片 2 后半与切片 3）。
+//   · ★ 命中 / 捕获（切片 2 后半）：`ui.rect({key})` 把 key 挂进 `Element`（命中区 = resolved
+//     rect，`ui/hit.h`）；`game.click`（一次性 `{key,x,y}`）/ `game.hover` / `game.active` 是三个
+//     只读 getter，读宿主每帧注入的快照。⛔ 本文件不实现 `kit.js`（JS 组件库）与剪贴板 / profile
+//     接线（切片 3）。
 #include "ui/script_quickjs.h"
 
 #include "ui/quickjs_value.h"  // ★ 唯一 include quickjs.h 的头（本文件是它唯一的消费者）
@@ -426,6 +429,26 @@ bool readText(JSContext* ctx, JSValueConst obj, const char* name, std::string* o
     return true;
 }
 
+// 可选文本（`ui.rect` 的 `key`）：缺省 / `undefined` ⇒ 空串（= 不可命中）；其余同 `readText`。
+bool readOptionalText(JSContext* ctx, JSValueConst obj, const char* name, std::string* out, std::string* why) {
+    Value v = qjs::getProperty(ctx, obj, name);
+    if (v.isException()) {
+        qjs::clearException(ctx);
+        *why = std::string(name) + " 读取失败";
+        return false;
+    }
+    if (v.isUndefined() || v.isNull()) {
+        out->clear();
+        return true;
+    }
+    if (!qjs::toString(ctx, v.raw(), out)) {
+        qjs::clearException(ctx);
+        *why = std::string(name) + " 无法转成 UTF-8 字符串";
+        return false;
+    }
+    return true;
+}
+
 // =======================================================================================
 // 宿主函数：ui.rect / ui.text / ui.measure（三个 static C trampoline，全部在边界上 catch(...)）
 // =======================================================================================
@@ -445,12 +468,16 @@ JSValue jsUiRect(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueCon
         std::int32_t h = 0;
         std::int32_t z = 0;
         Color fill;
+        std::string key;
         std::string why;
         bool ok = readInt32(ctx, arg, "x", true, 0, &x, &why);
         if (ok) ok = readInt32(ctx, arg, "y", true, 0, &y, &why);
         if (ok) ok = readInt32(ctx, arg, "w", true, 0, &w, &why);
         if (ok) ok = readInt32(ctx, arg, "h", true, 0, &h, &why);
         if (ok) ok = readInt32(ctx, arg, "z", false, 0, &z, &why);
+        // ★ 命中键（切片 2 后半）：缺省 = 空 = 不可命中。字符串原样进 Element.key，命中区 =
+        //   本元素 resolved rect（`ui/hit.h`）。⛔ 这里不做按钮：外观 / 状态在 `scripts/ui/kit.js`。
+        if (ok) ok = readOptionalText(ctx, arg, "key", &key, &why);
         if (ok) {
             Value fill_v = qjs::getProperty(ctx, arg, "fill");
             if (fill_v.isException()) {
@@ -462,7 +489,8 @@ JSValue jsUiRect(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueCon
             }
         }
         if (!ok) return JS_ThrowTypeError(ctx, "ui.rect: %s", why.c_str());
-        impl->builder->rect(x, y, w, h, fill, z);
+        Element& element = impl->builder->rect(x, y, w, h, fill, z);
+        element.key = std::move(key);
         return JS_UNDEFINED;
     } catch (...) {
         return JS_ThrowTypeError(ctx, "ui.rect: 宿主异常（C++ exception at script boundary）");
@@ -563,13 +591,28 @@ JSValue jsUiMeasure(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValue
 // game.* 的 getter（context §4）：读数由 render 的 readings 当帧注入，getter 读 Impl::current。
 // ★ 只在 render 期间有值；不可用 ⇒ undefined（⛔ 不编 0）；mouse / worst 每次调用新建对象。
 // =======================================================================================
-enum class GameProp : int { Frame = 0, Fps = 1, Mouse = 2, Script = 3, Worst = 4 };
+enum class GameProp : int { Frame = 0, Fps = 1, Mouse = 2, Script = 3, Worst = 4, Click = 5, Hover = 6, Active = 7 };
 
 Value makeMouseObject(JSContext* ctx, const UiFrameReadings& r) {
     Value obj = qjs::newObject(ctx);
     if (obj.isException()) return obj;
     if (!qjs::setProperty(ctx, obj.raw(), "x", qjs::newInt32(ctx, r.mouse_x)) ||
         !qjs::setProperty(ctx, obj.raw(), "y", qjs::newInt32(ctx, r.mouse_y))) {
+        qjs::clearException(ctx);
+        return Value::exception(ctx);
+    }
+    return obj;
+}
+
+// `game.click` 的**一次性**载荷 `{key,x,y}`（x/y = 抬起点，窗口像素）。
+// ★ 一次性由**宿主**保证：每一帧的 `UiFrameReadings::click_ok` 只在这一帧为真（`takeClick`）。
+//   本 getter 不缓存、不置空 —— 同一帧里读两次拿到的是同一份快照（两次都是新对象、值相同）。
+Value makeClickObject(JSContext* ctx, const UiFrameReadings& r) {
+    Value obj = qjs::newObject(ctx);
+    if (obj.isException()) return obj;
+    if (!qjs::setProperty(ctx, obj.raw(), "key", qjs::newString(ctx, r.click_key)) ||
+        !qjs::setProperty(ctx, obj.raw(), "x", qjs::newInt32(ctx, r.click_x)) ||
+        !qjs::setProperty(ctx, obj.raw(), "y", qjs::newInt32(ctx, r.click_y))) {
         qjs::clearException(ctx);
         return Value::exception(ctx);
     }
@@ -698,6 +741,18 @@ JSValue jsGameProperty(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/, 
             case GameProp::Worst:
                 if (!r.worst_ok) return JS_UNDEFINED;
                 return makeWorstObject(ctx, r).take();
+            case GameProp::Click:
+                // 一次性：宿主没交来 click 的这一帧 ⇒ undefined（⛔ 不编空对象）。
+                if (!r.click_ok) return JS_UNDEFINED;
+                return makeClickObject(ctx, r).take();
+            case GameProp::Hover:
+                // 只读 key：指针不在任何命中区上 ⇒ undefined（⛔ 不编空字符串）。
+                if (r.hover_key.empty()) return JS_UNDEFINED;
+                return qjs::newString(ctx, r.hover_key).take();
+            case GameProp::Active:
+                // 只读 key：当前被捕获的那个（没有捕获 ⇒ undefined）。
+                if (r.active_key.empty()) return JS_UNDEFINED;
+                return qjs::newString(ctx, r.active_key).take();
         }
         return JS_UNDEFINED;
     } catch (...) {
@@ -777,6 +832,15 @@ bool installHostApi(Impl& impl, std::string* err) {
         }
         if (ok) ok = defineGetterOnly(ctx, game.raw(), "worst", nullptr, jsGameProperty,
                                           static_cast<int>(GameProp::Worst), err);
+        // ★ 命中 / 捕获（切片 2 后半）：三个只读 getter，值与其它读数一样**每帧注入**。
+        //   `click` 是**一次性**对象（宿主 `takeClick` 每帧只交一次）；`hover` / `active` 是 key。
+        //   变异：把它们注册成普通数据属性 / 删掉注册 ⇒ `ui-script-quickjs` 的 key-on-rect 红。
+        if (ok) ok = defineGetterOnly(ctx, game.raw(), "click", nullptr, jsGameProperty,
+                                          static_cast<int>(GameProp::Click), err);
+        if (ok) ok = defineGetterOnly(ctx, game.raw(), "hover", nullptr, jsGameProperty,
+                                          static_cast<int>(GameProp::Hover), err);
+        if (ok) ok = defineGetterOnly(ctx, game.raw(), "active", nullptr, jsGameProperty,
+                                          static_cast<int>(GameProp::Active), err);
         // ★ `local_frames` 是**方法**（全对象唯一的非 getter 属性）：按需查询帧列表，宿主不推表。
         //   `JS_DefinePropertyValueStr(..., 0)` ⇒ 不可写 / 不可枚举 / 不可配置（strict 赋值 ⇒ TypeError）。
         //   变异：把它改成普通数据属性 / 删掉注册 ⇒ `ui-frames` 的 JS 面用例红。

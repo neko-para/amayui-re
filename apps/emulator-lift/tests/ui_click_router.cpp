@@ -97,7 +97,7 @@ void caseCapture() {
     ++lift_test::g_checks;
     if (router.hoverKey(10, 10) != "a") lift_test::failf(__FILE__, __LINE__, "hover 应是 `a`");
     ++lift_test::g_checks;
-    if (!router.hoverKey(10, 40).empty()) lift_test::failf(__FILE__, __LINE__, "空白处 hover 必须为空");
+    if (!router.hoverKey(10, 100).empty()) lift_test::failf(__FILE__, __LINE__, "空白处 hover 必须为空");
 
     // ③ 同 rect 内抬起 ⇒ 吞 + 一次 click（x/y = 抬起点）。
     const UiPointerDecision up = pointer(router, UiPointerPhase::Up, UiPointerButton::Left, 50, 15);

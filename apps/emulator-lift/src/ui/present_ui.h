@@ -12,7 +12,9 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
+#include "ui/hit.h"
 #include "ui/script.h"
 
 namespace lift {
@@ -32,7 +34,18 @@ inline constexpr int kUiFontRefPx = 16;
 // 两条呈现路径由 sink 自己选（renderer / GPU 直出）。
 // ★ 返回值：`false` = **脚本失败 / 栅格化失败 / 合成失败**（`err` 必须填）。
 //   "这一帧没有几何 / 脚本产出空 list" 是**正常**情况 ⇒ `true`（⛔ 不当错误）。
+//
+// ★ **命中表**（`REQ-01M7QF01A00F9946DX0GPH23JQ` 切片 2 后半）：`presented` 记录"这一帧真的
+//   交给 sink 且 **成功**"；只有那时 `hits` 才是新命中表（绘制序，含 resolved rect）。
+//   ⛔ 不清空调用方手里的旧表：没有几何 / 空 list / 合成失败 ⇒ `presented == false`，
+//   调用方保留**上一次成功 present** 的命中表（那才是屏幕上真正画着的东西）。
+//   `frame == nullptr` ⇒ 不产出命中表（老调用方的零成本路径）。
+struct UiPresentedFrame {
+    bool presented = false;
+    std::vector<HitRegion> hits;
+};
+
 bool presentUi(PresentSink* sink, FontEngine& font, UiScript& script, const UiFrameReadings& readings,
-               std::string* err);
+               UiPresentedFrame* frame, std::string* err);
 
 }  // namespace lift::ui

@@ -5,9 +5,15 @@
  * 它只是给写 `scripts/ui/*.ts`（产出单个 `.js`）的作者的编辑器提示，真源 = `src/ui/script.h`
  * 与 `src/ui/script_quickjs.cpp` 的宿主函数。改运行时名字时**同时**改这里（⛔ 不是反过来）。
  *
- * 入口约定：脚本是 UTF-8、单文件、strict、无 `import`；入口必须是
+ * 入口约定：脚本是 UTF-8、strict；入口必须是
  *
  *     globalThis.render = function render() { … };
+ *
+ * 两种脚本形状（宿主自动识别，旧 `--ui` 的 classic 语义逐字不变）：
+ * - **classic**：顶层 `function render(){}` 那种老写法；⛔ 没有 `import`。
+ * - **module**：`import { Button } from './kit.js';` —— 相对路径、只能在本脚本所在目录的子树里；
+ *   bare specifier / 绝对路径 / `data:` / `..` 逃逸一律加载期拒绝。module 里**仍要显式**写
+ *   `globalThis.render = …`。
  *
  * `scripts/ui/ui.d.ts` 声明宿主全局 `ui` 与 `game`，外加入口 `render` 的**类型**（供 `jsconfig.json`
  * 的 `checkJs` 用；运行时 `render` 由脚本自己赋值，不是宿主注入的值）。
@@ -27,6 +33,14 @@ interface UiRectOptions {
   fill?: string;
   /** 绘制序（同 z 按调用序）；缺省 0 */
   z?: number;
+  /**
+   * 命中键（切片 2 后半）：**非空** ⇒ 这个矩形是一个命中区，命中区 = 它的 **resolved rect**
+   * （缩放 / 居中 / DPR 之后的最终窗口像素）。空 / 缺省 = 不可命中（纯背景）。
+   *
+   * ★ 命中顺序 = 上一帧**成功 present** 的绘制序**逆序**（后画的先命中）；没有成功帧 ⇒ 不命中。
+   * ★ 这里只是原语：按钮的外观 / 布局 / 状态在 `./kit.js` 的 `Button`。
+   */
+  key?: string;
 }
 
 /** `ui.text({ … })`：一行 UTF-8 文本（字形来自宿主字体）。 */
@@ -53,6 +67,16 @@ interface UiSize {
 interface UiMouse {
   x: number;
   y: number;
+}
+
+/**
+ * `game.click` 的载荷：**一次性**对象（宿主每帧最多交来一次；`click_ok` 为真的那一帧才有值，
+ * 下一次 render 就是 `undefined`）。`x` / `y` = **抬起点**（窗口像素，与命中区同一空间）。
+ */
+interface UiClick {
+  readonly key: string;
+  readonly x: number;
+  readonly y: number;
 }
 
 /** `game.worst`：最近 3 s 的最坏一帧（墙上 / guest / shim 三段）。 */
@@ -103,6 +127,18 @@ interface UiFrameReadings {
    * 这是 `game` 上**唯一**的方法（其余是只读 getter）；它是不可写 / 不可枚举 / 不可配置的。
    */
   local_frames(): FrameInfo[] | undefined;
+  /**
+   * 一次性点击（切片 2 后半）：**这一帧**有一次"在某个 key 上按下并在同一 rect 内抬起"才有值。
+   * 消费点 = 那次 render；下一次 render 一定是 `undefined`（⛔ 不要缓存后跨帧用）。
+   */
+  readonly click: UiClick | undefined;
+  /**
+   * 指针当前在哪个 key 的命中区上（只读 key；空白处 ⇒ `undefined`）。
+   * ⛔ 不是"鼠标坐标"（那是 `game.mouse`，guest 客户区像素）。
+   */
+  readonly hover: string | undefined;
+  /** 当前**被捕获**的 key（左键在这个 key 上按下、还没抬起 ⇒ 有值；否则 `undefined`）。 */
+  readonly active: string | undefined;
 }
 
 /** display list 的构造入口（只有两个）。 */
