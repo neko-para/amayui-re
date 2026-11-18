@@ -4539,6 +4539,29 @@ const MUTATIONS = [
       'module 求值返回的 Promise 的 rejection 检查改成恒 false ⇒ module 顶层的异常被静默吞掉 ⇒ ' +
       'ui-script-modules 的 module-throw-surfaced 在 err 里看不到 `module-boom` ⇒ 红',
   },
+
+  // ── 注入闸门（2026-11-19 裁决；守卫 = `tests/input_inject_visible.cpp` +
+  //    `tests/input_plan.cpp`）──
+  //   ★ 代表"按下没被按键电平读到就抬起"这一类**静默**失效：`inputSampleCount()` 把 `GetCursorPos`
+  //     也算样本 ⇒ 位置读点满足闸门、`GetAsyncKeyState` 一次都没读过按下（现场读数
+  //     `reason=forced samples==press_samples`）。这正是本轮要修掉的根因。
+  //   ★ 判据不变的红/绿：改回总样本数之后，喂 ≥2 个**位置**读点（每个都 `noteInputSample` +1）
+  //     就会抬起 ⇒ `inject/click-two-phase` 的"位置读点再多也不许抬起"当场红
+  //     （`input-plan-read-points` 的 `gates-and-releases` ⑤ 同步红）。
+  {
+    file: 'apps/emulator-lift/src/runtime/input_plan.cpp',
+    from: '        const bool key_seen = deliverCalls(InputPoint::KeyLevel) >=\n' +
+          '                              r.press_key_reads + kKeyLevelReadsBeforeRelease;',
+    to: '        const bool key_seen = wm.inputSampleCount() > r.press_samples + 1;  // 变异：闸门退回"总样本数"',
+    guard: 'ctest:input-inject-visible',
+    ctest: 'input-inject-visible',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-input-inject-visible',
+    what:
+      '抬起闸门从"按下之后至少 N 个 **KeyLevel** 读点"退回"总样本数前进两拍"（`inputSampleCount`，' +
+      '它把 `GetCursorPos` 也算样本）⇒ 位置读点就能满足抬起 ⇒ input-inject-visible 的 ' +
+      '`inject/click-two-phase`（位置读点再多也不许抬起）当场红',
+  },
 ];
 
 let mutationRunSeq = 0;

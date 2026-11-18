@@ -2,7 +2,7 @@
 /**
  * tools/emu-ctl.mjs — **AOT 控制层的独立客户端**（`apps/emulator-lift-aot --control-root` 的对面）
  *
- *   经派发器：`pnpm tools emu-ctl <list|pause|resume|sample|screenshot|click|wait|quit|gc> [args…]`
+ *   经派发器：`pnpm tools emu-ctl <list|pause|resume|sample|screenshot|move|click|wait|quit|gc> [args…]`
  *   也可独立跑：`node tools/emu-ctl.mjs list`
  *
  * ★ 边界（这是本文件唯一做的事）：
@@ -38,12 +38,13 @@ const HELP = `tools/emu-ctl.mjs — AOT 控制层客户端（Node 内置 WebSock
   node tools/emu-ctl.mjs resume [--for-ms N | --for frames N] [--json] [--session <id>] [--timeout <s>]
   node tools/emu-ctl.mjs sample [--json] [--session <id>] [--timeout <s>]
   node tools/emu-ctl.mjs screenshot <path> [--json] [--session <id>] [--timeout <s>]
+  node tools/emu-ctl.mjs move <x> <y> [--json] [--session <id>] [--timeout <s>]
   node tools/emu-ctl.mjs click <x> <y> [left|right] [--json] [--session <id>] [--timeout <s>]
   node tools/emu-ctl.mjs wait <ms> [--json] [--session <id>] [--timeout <s>]
   node tools/emu-ctl.mjs quit [--json] [--session <id>] [--timeout <s>]
   node tools/emu-ctl.mjs gc [--dry-run] [--json] [--control-root <dir>]
   node tools/emu-ctl.mjs --describe [--json] | --help
-  pnpm tools emu-ctl <list|pause|resume|sample|screenshot|click|wait|quit|gc> [args…]
+  pnpm tools emu-ctl <list|pause|resume|sample|screenshot|move|click|wait|quit|gc> [args…]
 
   --control-root <dir>   端点目录（缺省 <repo>/.tmp/emu-ctl；与服务端 --control-root 同一个）
   --session <id>         精确选中一个实例；缺省时**恰好一个 alive** 才自动选中
@@ -57,9 +58,9 @@ const HELP = `tools/emu-ctl.mjs — AOT 控制层客户端（Node 内置 WebSock
 退出码
   0  成功（含 sample.script.available:false —— 数据缺失不是错误）
   1  端点回 ok:false（或连接在答复前断开）
-  2  参数 / 协议错（含 nonce 不一致、click 坐标/按钮非法、key = M1 未实现、gc 的 root 不可读 / 删除失败）
+  2  参数 / 协议错（含 nonce 不一致、click/move 坐标非法、click 按钮非法、key = M1 未实现、gc 的 root 不可读 / 删除失败）
   3  超时（端点仍活）
-  4  找不到 / 多个实例（**仅"要挑一个实例"的 op**：pause/resume/sample/screenshot/click/wait/quit；
+  4  找不到 / 多个实例（**仅"要挑一个实例"的 op**：pause/resume/sample/screenshot/move/click/wait/quit；
      不猜，用 --session <id> 精确选中；⛔ \`list\` 恒 0，多实例也 0）
 
 ★ \`list\` 的 why ∈ {ok, refused, timeout, nonce_mismatch, bad_file}
@@ -69,9 +70,17 @@ const HELP = `tools/emu-ctl.mjs — AOT 控制层客户端（Node 内置 WebSock
 
 ★ click（**入队 ≠ 施加**；参考坐标 1280×720）：
   \`click <x> <y> [left|right]\`：x ∈ [0,1279]、y ∈ [0,719] 的整数（闭区间），button ∈ {left,right} 缺省 left；
-  只把一条点击放进**立即队列**，施加点是**下一个 guest 读点** ⇒ **只接受暂停态**（运行态端点回
+  只把一条点击放进**立即队列**，落地点是**下一个 guest 读点** ⇒ **只接受暂停态**（运行态端点回
   \`not_paused\` ⇒ 退出码 1）。队列上界 **64 条/次**，满了端点回 \`bad_request\`（⇒ 退出码 1）。
   本地坐标/按钮非法 ⇒ 退出码 2（省一次往返）。请求帧是顶层 \`{op:"click",x,y,button}\`（⛔ 不包 args）。
+  ★ 落地**形状**（2026-11-19）：move（只写光标）→ 跨一个读点 → down → 等 **2 个按键电平读点**
+    （\`GetAsyncKeyState\`）→ up。⛔ 不再是"move 与 down 同一读点"。
+    ⇒ 一次 click 至少要跨 **2 个 guest 读点**（多一个位置读点更稳）才走完。
+
+★ move（**纯 move**，⛔ 不按键；参考坐标 1280×720）：
+  \`move <x> <y>\`：只请求"把光标放到 (x,y)"，落地 = 下一个 guest 读点**只**发 \`WM_MOUSEMOVE\`
+  + 写虚拟光标（⛔ 不动按键电平、⛔ 不发 \`WM_LBUTTONDOWN\`）。同样**只接受暂停态**、同一个立即队列
+  （上界 64 条/次）。用途 = 显式悬停（"先到位、过一个读点、再 click"），A/B 对照的 A 组。
 
 ★ gc（**只删残留端点文件**，⛔ 不动其它文件）：
   删 = ① connect 判死（refused/timeout）② 文件里的 pid 不存活（kill(pid,0)；pid 复用 ⇒ pid 只是辅助）
@@ -485,6 +494,10 @@ function buildCommand(parsed) {
     // ★ 顶层字段（服务端 parseCommand 只读顶层；⛔ 不包 args）。
     return L.clickFrame(parsed.click.x, parsed.click.y, parsed.click.button);
   }
+  if (parsed.op === 'move') {
+    // ★ 纯 move：顶层 `{op,x,y}`（⛔ 不带 button —— 服务端对 move 的 button 字段回 bad_request）。
+    return L.moveFrame(parsed.move.x, parsed.move.y);
+  }
   if (parsed.op === 'wait') return { op: 'resume', for_ms: parsed.waitMs };
   if (parsed.op === 'resume') {
     if (parsed.forMs !== null) return { op: 'resume', for_ms: parsed.forMs };
@@ -745,6 +758,8 @@ async function cmdOne(parsed) {
       say(L.formatSampleLine(reply.data?.sample));
     } else if (parsed.op === 'click') {
       say(L.formatClickLine(reply));
+    } else if (parsed.op === 'move') {
+      say(L.formatMoveLine(reply));
     } else if (parsed.op === 'screenshot') {
       say(L.formatScreenshotLine(reply.data?.screenshot));
     } else if (parsed.op === 'quit') {

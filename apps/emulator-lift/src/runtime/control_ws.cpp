@@ -165,6 +165,11 @@ struct Reply {
     int click_y = 0;
     const char* click_button = "left";
     std::size_t click_queued = 0;
+    // `move`：同一个立即队列的回执（`queued` = 入队深度；⛔ 不是"光标已经到位"）。
+    bool has_move = false;
+    int move_x = 0;
+    int move_y = 0;
+    std::size_t move_queued = 0;
 };
 
 }  // namespace
@@ -314,8 +319,9 @@ std::string Control::Impl::helloJson() const {
     j["started_utc"] = started_utc;
     j["exe_sha256"] = opts.exe_sha256;
     j["shape"] = opts.shape;
-    // ★ 只列**真的实现了**的（S0+S1+S2+S3+S4 + M1 的 `click`；`key` 本轮不做 ⇒ 不列）。
-    j["capabilities"] = json::array({"pause", "resume", "sample", "screenshot", "click", "quit"});
+    // ★ 只列**真的实现了**的（S0+S1+S2+S3+S4 + M1 的 `click` + 2026-11-19 的 `move`；
+    //   `key` 本轮不做 ⇒ 不列）。
+    j["capabilities"] = json::array({"pause", "resume", "sample", "screenshot", "move", "click", "quit"});
     // ★ 判据 2 的裁决（父级 2026-11-16）：`present` 在**顶层**（⛔ 不塞进 `control`）：
     //   它是**连接时的事实**，值取 `windowHidden()` / `describe()` 那条既有判据（⛔ 不由 --present 推）。
     j["present"] = opts.present;
@@ -376,6 +382,10 @@ std::string Control::Impl::resJson(const std::string& id, const Reply& r) const 
                              {"y", r.click_y},
                              {"button", r.click_button},
                              {"queued", r.click_queued}};
+    }
+    if (r.has_move) {
+        // ★ 与 click 同一条立即队列（`queued` 是同一个深度）⇒ "click 前面先排一条 move"在回执上能看到。
+        data["move"] = json{{"x", r.move_x}, {"y", r.move_y}, {"queued", r.move_queued}};
     }
     j["data"] = data;
     return j.dump();
@@ -694,6 +704,7 @@ bool Control::Impl::parseCommand(const json& j, const std::string& id, Command* 
     else if (op_name == "resume") out->op = ControlOp::Resume;
     else if (op_name == "sample") out->op = ControlOp::Sample;
     else if (op_name == "screenshot") out->op = ControlOp::Screenshot;
+    else if (op_name == "move") out->op = ControlOp::Move;
     else if (op_name == "click") out->op = ControlOp::Click;
     else if (op_name == "quit") out->op = ControlOp::Quit;
     else {
@@ -735,10 +746,10 @@ bool Control::Impl::parseCommand(const json& j, const std::string& id, Command* 
         }
         out->path = p->get<std::string>();
     }
-    // ---- `click <x> <y> [button]`（**1280×720 参考坐标**；整数、在界内；按钮缺省 left）----
-    //   ★ 这里**只校验参考坐标**，不映射：映射的唯一落点是施加那一刻的
+    // ---- `click <x> <y> [button]` / `move <x> <y>`（**1280×720 参考坐标**；整数、在界内；按钮缺省 left）----
+    //   ★ 这里**只校验参考坐标**，不映射：映射的唯一落点是落地那一刻的
     //     `cursor_map.h::referenceToClientPixel`（⛔ 控制层不写第二份坐标换算）。
-    if (out->op == ControlOp::Click) {
+    if (out->op == ControlOp::Click || out->op == ControlOp::Move) {
         auto readCoord = [&j](const char* key, int limit, int* out) -> bool {
             const auto it = j.find(key);
             if (it == j.end() || !it->is_number_integer()) return false;  // 浮点 / 字符串 / 缺省 = 非法
@@ -758,7 +769,13 @@ bool Control::Impl::parseCommand(const json& j, const std::string& id, Command* 
             return false;
         }
         const auto b = j.find("button");
-        if (b != j.end()) {
+        if (out->op == ControlOp::Move) {
+            // ★ `move` 不按键 ⇒ `button` 是错帧（⛔ 静默忽略一个用户以为生效的字段）。
+            if (b != j.end()) {
+                *err = ControlError::BadRequest;
+                return false;
+            }
+        } else if (b != j.end()) {
             if (!b->is_string()) {
                 *err = ControlError::BadRequest;
                 return false;
@@ -1199,6 +1216,36 @@ bool Control::Impl::serve(Context& ctx) {
                 rep.has_screenshot = true;
                 break;
             }
+            case ControlOp::Move: {
+                // ★ 与 `click` **同一条**时态：只接受暂停态入队，落点 = 下一个 guest 读点，
+                //   走**同一个** `InputPlan` 的立即队列（⛔ 不另造一条施加路径 / 不在控制线程碰 guest）。
+                if (!paused) {
+                    rep.error = ControlError::NotPaused;
+                    rep.error_detail = "当前没有暂停（`move` 只在暂停态入队：先 `pause` 再投）";
+                    break;
+                }
+                InputPlan* plan = ctx.windows != nullptr ? ctx.windows->inputPlan() : nullptr;
+                if (plan == nullptr) {
+                    rep.error = ControlError::Unavailable;
+                    rep.error_detail = "这个宿主没有接输入投递层（没有可施加 move 的 guest 读点）";
+                    break;
+                }
+                if (!plan->enqueueMove(click_x, click_y)) {
+                    rep.error = ControlError::BadRequest;
+                    char msg[128];
+                    std::snprintf(msg, sizeof(msg),
+                                  "立即队列已满（上限 %zu 条；等下一个 guest 读点消费后再投）",
+                                  InputPlan::kImmediateClickCapacity);
+                    rep.error_detail = msg;
+                    break;
+                }
+                rep = stateReply();
+                rep.has_move = true;
+                rep.move_x = click_x;
+                rep.move_y = click_y;
+                rep.move_queued = plan->queuedClicks();
+                break;
+            }
             case ControlOp::Click: {
                 // ★ 判据 3：`click` **只**在暂停态入队（未暂停 ⇒ `not_paused`；⛔ 静默丢）。
                 if (!paused) {
@@ -1352,6 +1399,7 @@ const char* controlOpName(ControlOp op) {
         case ControlOp::Resume: return "resume";
         case ControlOp::Sample: return "sample";
         case ControlOp::Screenshot: return "screenshot";
+        case ControlOp::Move: return "move";
         case ControlOp::Click: return "click";
         case ControlOp::Quit: return "quit";
     }
