@@ -1779,6 +1779,19 @@ target_link_libraries(lift-aot-window-profile PRIVATE emulator-lift-runtime)
 add_test(NAME aot-window-profile COMMAND lift-aot-window-profile)
 
 # =====================================================================================
+# **AOT 窗口报告文本 + 状态位**（`formatWindowReportText` / `AotWindowProf::beginWindow` 的 pure 判据）
+# ★ 判据见 tests/window_prof.cpp 文件头：① 文本与**旧 `endWindow()` printf 块**的金样逐字节相同
+#   （= "抽函数不改 stdout"的机械证据）；② 段落闭合（wall/lift/.../verdict 每段都在）；
+#   ③ Top-8 + `(rest)`；④ `sampled==0` / `coverage` 越界 ⇒ 文本含 `INVALID`；⑤ 总行数 ≤ 20；
+#   ⑥ 重复 `beginWindow()` ⇒ false 且**不 reset**（⛔ 不静默重开）。
+# ★ 顶层无条件注册 ⇒ pure 档（判据 = 注册位置，AGENTS.md §12.4）；不碰 GPU / 资产 / 真进程。
+# =====================================================================================
+add_executable(lift-aot-window-report tests/window_prof.cpp)
+target_link_libraries(lift-aot-window-report PRIVATE emulator-lift-runtime)
+add_test(NAME aot-window-report-text COMMAND lift-aot-window-report)
+add_test(NAME aot-window-state COMMAND lift-aot-window-report state)
+
+# =====================================================================================
 # **AOT 按帧 shim 分桶**（`--profile-slow-frames <ms>`；pure：纯算术夹具 + 名字表，不取时）
 # ★ 判据见 tests/aot_frame_bucket.cpp 文件头：① 名字合并（同名 id 相加）+ 有界 top-N；
 #   ② 阈值门（**只**存 ≥ 阈值的帧，且每帧的账不跨帧漏）；
@@ -2448,4 +2461,26 @@ if(LIFT_BUILD_TESTS)
     add_executable(lift-ui-frames tests/ui_frames.cpp)
     target_link_libraries(lift-ui-frames PRIVATE emulator-lift-runtime)
     add_test(NAME ui-frames COMMAND lift-ui-frames)
+endif()
+
+# =====================================================================================
+# F · `emulator-lift-gen` 的输出字节恒为 ASCII（构建期工具 ⇒ 构建日志的编码不可知）
+# ★ 不变量：`lift-gen` 在**不依赖资产**的入口路径上（`--help` / 参数错误 / skip），stdout +
+#   stderr 的每个字节都 < 0x80。红了 ⇒ ninja 捕获回放 / 管道 / 重定向消费者按本地码页解码就是
+#   乱码（本单的缺陷面：构建期 UTF-8 被 936 解）。
+# ★ 为什么是**运行时**守卫（而不是扫 `lift_gen.cpp` 的字面量）：断言的是**字节**，不是源码形状；
+#   源码里写 ASCII 但经 `%s` 带进非 ASCII 时扫描看不出来。重定向走**文件**（⛔ 不用管道：
+#   本仓有 `spawn EPERM` 先例）。
+# ★ 不读 AGE.EXE / LFS / 安装树 ⇒ 顶层 `if(LIFT_BUILD_TESTS)` 注册 = **pure** 档
+#   （AGENTS.md §12.4：判据 = 注册位置）。
+# ★ `add_dependencies(... emulator-lift-gen)` 是**变异不会假绿**的前提：本用例 spawn 的是产品
+#   exe（`$<TARGET_FILE:...>`）⇒ `cmake --build --target lift-gen-ascii-output` 必须把它一起重建，
+#   否则变异（改回中文）落在产品 TU 里、守卫跑的是变异前的二进制。
+# ★ 变异：`tools/mutate-check.mjs` 的 `gen-ascii-output-help-cjk` 把 usage 首行改回中文 ⇒ 本用例红。
+# =====================================================================================
+if(LIFT_BUILD_TESTS)
+    add_executable(lift-gen-ascii-output tests/lift_gen_ascii_output.cpp)
+    target_link_libraries(lift-gen-ascii-output PRIVATE emulator-lift-runtime)
+    add_dependencies(lift-gen-ascii-output emulator-lift-gen)
+    add_test(NAME gen-ascii-output COMMAND lift-gen-ascii-output $<TARGET_FILE:emulator-lift-gen>)
 endif()

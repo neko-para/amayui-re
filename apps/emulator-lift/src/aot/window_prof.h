@@ -34,6 +34,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -108,6 +109,17 @@ struct AotWindowProf {
     double span_overhead_ns = 0.0;
 
     void reset() { *this = AotWindowProf{}; }
+
+    // ---- 状态位（pure；`AotHost::beginWindow` 的唯一开窗判据）----
+    // ★ 为什么把"开关窗"也放在这里：`on` 是窗口账的**状态真源**（`aot_run.cpp` 的未闭合收口、
+    //   `AotHost::endWindow` 的幂等早退都读它）。把"已开 ⇒ 不 reset"这条判据放进行本文件，
+    //   才能被 pure CTest（`aot-window-state`）直接驱动 —— ⛔ 不要让宿主各自判一遍。
+    // ★ 已开 ⇒ 返回 false 且**一个字节都不动**（⛔ 不再静默 reset：那会把上一段的账静默抹掉，
+    //   而配方里重复 `profile_begin` 是用户可见的错，必须能看见 false）。
+    bool beginWindow();
+    // 关窗（幂等）：未开 ⇒ false（调用方据此决定"有没有表可打"）。
+    bool closeWindow();
+    bool profileOpen() const { return on; }
 
     // 一次实测区间的**净工作**：区间里含一次取时（时间戳在取时调用里读，剩下的调用开销
     // 落在区间内）⇒ 扣掉一次 `span_overhead_ns`。
@@ -212,6 +224,23 @@ struct AotWindowProf {
         return Rank::Noise;
     }
 };
+
+// shim id → 显示名（`module!name`）。★ 只接受"给 id 取名字"这一个依赖，⛔ 不在本头 include
+// `runtime/shims.h`：窗口账是 pure 的，名字表由调用方（宿主 / 测试夹具）注入。
+using ShimNameFn = std::function<std::string(std::uint32_t id)>;
+
+// =====================================================================================
+// 窗口报告文本（**pure**：不写 stdout / 不读时钟 / 不读全局；同一份 `AotWindowProf` ⇒ 同一份字节）
+//
+// ★ 这是 `AotHost::endWindow()` 曾经那一段 `printf` 的**唯一**文本实现（重构，不是改口径）：
+//   `endWindow` 现在只做 `std::fputs(formatWindowReportText(...).c_str(), stdout)` ⇒ stdout 逐字不变。
+// ★ 行数上限 `kMaxReportLines = 20`（需求单 REQ-01M7QF01A00F9946DX0GPH23JQ 设计第 1 条）：
+//   `top` 是**具名行**上限（缺省 8），但总行数永远 ≤ 20 —— 预算不够时（例如 `present` 子行在场）
+//   先减具名行、把余下并进 `(rest)`，⛔ 不靠"少打一段"来省行。
+// ★ 空 / 边界：`sampled == 0`、`unaccounted` 超 3%、`coverage` 出 [0.5, 2] ⇒ `unaccounted` 行含
+//   `INVALID`（需求单已裁决"仍复制"；本函数只保证文本里有它，剪贴板是切片 3 的事）。
+// =====================================================================================
+std::string formatWindowReportText(const AotWindowProf& w, const ShimNameFn& shimName, int top = 8);
 
 }  // namespace lift::aot
 

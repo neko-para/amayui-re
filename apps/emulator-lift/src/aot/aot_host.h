@@ -347,10 +347,15 @@ public:
 
     // ---- 窗口 profile（`profile_begin/end` 驱动；**零新 CLI**）----
     // 开窗：清账、快照 insns/frames/lift_dyn、实测一次取时开销（~10 µs）、打开 `lift_dyn` 计数闸门。
-    void beginWindow(const char* label);
+    // ★ 返回 false = **已经有一段窗口开着**：此时一个字节都不动（⛔ 不静默 reset —— 重复 `profile_begin`
+    //   在配方里是用户可见的错）。判据的唯一实现在 `AotWindowProf::beginWindow()`（pure，可被 CTest
+    //   直接驱动）；这里只做宿主侧快照。
+    bool beginWindow(const char* label);
     // 收窗：算两个边沿 sliver、打表（含 `unaccounted` 与 `INVALID` 判定）、关闸门。
     // ★ 未闭合（配方只写 `profile_begin`）时由 `run()` 的收口路径调它 ⇒ ⛔ 不静默丢数据。
     void endWindow();
+    // 状态位（`REQ-01M7QF01A00F9946DX0GPH23JQ` 设计第 2 条的只读半边；`endWindowText` 是切片 3）。
+    bool profileOpen() const { return win_.profileOpen(); }
     // 窗口标记的落点（`InputPlan::ProfileMarkHook` 的 thunk）：begin ⇒ 开窗，end ⇒ 打表 + 关窗。
     // ★ 静态 + `void*` 上下文 = 与 `InputPlan` 的 C 形状钩子对齐（⛔ 不用 std::function：
     //   那会在每个读点付一次间接跳转，而"缺省零成本"是硬口径）。`aot_main.cpp` 取它的地址。

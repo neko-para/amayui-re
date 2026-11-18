@@ -186,10 +186,23 @@ std::vector<std::string> argvUtf8(int argc, char** argv) {
 
 void initConsoleUtf8() {
 #if defined(_WIN32)
-    // ★ 判据用 `GetConsoleOutputCP()` 而不是 `GetConsoleMode(stdout)`：控制台句柄可能只有
-    //   写权限（`GetConsoleMode` 会因缺 GENERIC_READ 失败），而码页是**整个控制台**的属性。
-    //   非 0 = 进程挂着一个控制台；0 = 没有（纯重定向 / 服务）⇒ 不动字节。
-    if (::GetConsoleOutputCP() == 0) return;
+    // ★ 判据 = **stdout 真的是 console**（`GetConsoleMode(STD_OUTPUT_HANDLE)`），⛔ 不是
+    //   "进程挂着 console"（旧的 `GetConsoleOutputCP() != 0`）。
+    //   为什么必须换：`GetConsoleOutputCP()` 是 console 的**共享属性**，它非 0 只说明进程挂着
+    //   一个 console，**不说明 stdout 就是它**。stdout 被重定向到文件 / 管道时，旧判据照样把
+    //   **共享 console** 的码页拨到 65001、退出再拨回 —— 对字节一个都不救（printf 不转码），
+    //   却和父进程 / 并行构建步抢全局状态（实测 `cp-redir`：stdout→文件时码页序列 936,65001,936）。
+    //   ★ 行为差异（这就是本单要的口径）：
+    //     · stdout = console   ⇒ 照旧切 65001（真实 console 下中文逐字正确；RAII 恢复不变）；
+    //     · stdout = 文件/管道 ⇒ **不再动**共享 console 的码页（副作用消失）；写出的字节仍是
+    //       UTF-8 —— 那是正确口径：机器消费的字节不因终端而变（编码不可知的消费方自己按自己的
+    //       规则解码，本仓不改字节）。
+    //   ★ 只用 `GetConsoleMode` 探测，⛔ 不用 `GetFileType`：后者对"真 console"与"被 ConPTY
+    //     包装的 console"都给 FILE_TYPE_CHAR，判不出"是不是那个 console"；`GetConsoleMode`
+    //     只在句柄**确实是 console 缓冲区**时成功。
+    const HANDLE out = ::GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    if (out == nullptr || out == INVALID_HANDLE_VALUE || ::GetConsoleMode(out, &mode) == 0) return;
     ConsoleCpGuard& guard = consoleCpGuard();
     if (guard.changed) return;
     guard.old_output = ::GetConsoleOutputCP();

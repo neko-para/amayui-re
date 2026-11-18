@@ -4481,6 +4481,44 @@ const MUTATIONS = [
       '呈现汇点把窗口尺寸设回**帧尺寸**（丢掉 `--scale` 乘子）⇒ 第一帧 Present 之后窗口 1280×720 ' +
       '而不是 1920×1080（scale-window-follows-frame 的 ww/wh 与 960×720 四条断言红）',
   },
+
+  // ── 窗口报告文本化（`REQ-01M7QF01A00F9946DX0GPH23JQ` 切片 1；守卫 = `tests/window_prof.cpp`）──
+  //   ★ 代表"抽函数时漏掉一段"这一类静默失效：`endWindow()` 的文本现在只有一份实现
+  //     （`formatWindowReportText`），少打一行 ⇒ 金样逐字节断言 + 段落闭合断言同时点名。
+  //   ★ 为什么落在 `window_prof.cpp`：文本的唯一实现在那里（头文件里改会重编整条 AOT 臂）。
+  {
+    file: 'apps/emulator-lift/src/aot/window_prof.cpp',
+    from: '    out += formatLine("instrument  : %10.3f ms  %5.1f%%  （%.1f ns/取时 × %llu 次）\\n",\n                      ms(t.instrument), pct(t.instrument), w.clock_read_ns,\n                      static_cast<unsigned long long>(w.sampled * 3 + w.shim_calls * 2));',
+    to: '    // 变异：删掉 instrument 行（报告少一段）',
+    guard: 'ctest:aot-window-report-text',
+    ctest: 'aot-window-report-text',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-aot-window-report',
+    what:
+      '删掉 `instrument` 行 ⇒ 报告文本少一段 ⇒ `aot-window-report-text` 的金样逐字节断言与' +
+      '段落闭合断言当场红（stdout 逐字不变的证据失效）',
+  },
+
+  // ── `emulator-lift-gen` 的输出字节恒为 ASCII（F；守卫 = `tests/lift_gen_ascii_output.cpp`）──
+  //   ★ 代表"构建期工具吐非 ASCII ⇒ ninja 捕获回放 / 管道 / 重定向消费者按本地码页解码 = 乱码"
+  //     这一类**静默**缺陷：构建成功、退出码 0，只有日志不可读。
+  //   ★ 为什么改 usage 首行：它在 `--help` 的**第一条**输出里（守卫的 ① 路径必然打到），且
+  //     改回中文是**原缺陷的形态**（不是人造破坏）；`--help` 不需要任何资产 ⇒ 变异跑得起。
+  //   ★ `buildTarget` 指**测试 target**（`ctestCommandTarget` 的唯一权威），而它
+  //     `add_dependencies(... emulator-lift-gen)` ⇒ 产品 exe 会一起重建（否则变异落在产品 TU 里、
+  //     守卫跑变异前的二进制 = 假绿；静态检查 `checkSpawnDependencies` 也钉着这一行）。
+  {
+    file: 'apps/emulator-lift/src/aot/lift_gen.cpp',
+    from: '        "emulator-lift-gen - Shape A / T1a: entry EA set + PE bytes -> LLVM IR (`.ll`)\\n"',
+    to: '        "emulator-lift-gen —— Shape A / T1a：入口 EA 集合 + PE 字节 → LLVM IR（`.ll`）\\n"',
+    guard: 'ctest:gen-ascii-output',
+    ctest: 'gen-ascii-output',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-gen-ascii-output',
+    what:
+      '把 usage 首行改回中文（原缺陷形态）⇒ `--help` 的 stdout 出现非 ASCII 字节 ⇒ ' +
+      'gen-ascii-output 的"每个字节 < 0x80"断言当场红',
+  },
 ];
 
 let mutationRunSeq = 0;
