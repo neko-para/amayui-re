@@ -2,7 +2,7 @@
 
 - id: REQ-01M7QYCYA8XBG7G78SZBS3QGG5
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M7HC1WJ9X0QCQ51Q9F01988W
 - verify: apps/emulator-lift/tests/control_globals.cpp#lift-control-globals
 - tags: [emulator-lift, control, global, emu-ctl]
@@ -54,3 +54,18 @@
 - `string` 类型（28 B 记录布局在 shape `T_stdstring`，spec 明确排除在 spec 之外）。
 - 池容量数值（运行期计数）未进 spec ⇒ 越界判定按运行期容量读，**值本身不作断言**。
 - ⛔ 不做"等 TITLE / 判断配置加载完 / 写后校验 / 自动重试"——那是调用方的知识。
+
+## 手工验收读数（2026-11-19 / win32 / main `234d887`）
+
+真游戏端到端（SAVE05 场景内，`.tmp/save05-black/report.md` §4）：
+
+```
+global-get --kind int --index 0xb1b6  ⇒ value=0x00000000 raw=0x71C7CBC6
+global-set --kind int --index 0xb1b6 --value 0x00000010  ⇒ ok
+global-get 读回                        ⇒ value=0x00000010 raw=0x71C3CBC6
+```
+
+⇒ 三条都成立：① 寻址对（读到的 raw 能 DEC 出 0）；② 写的是 **ENC 后的位模式**（raw 不是明文 0x10，
+而是 `0x71C3CBC6`，与引擎下一拍的 DEC 一致）；③ 读回立即可见（下一拍就是新值）。
+反向对照（`& ~0x10`）与"关掉 SO033A 覆盖图"的 A/B 在同报告 §4；**该覆盖图与 SAVE05 的黑矩形无关**。
+`string` 仍是第二期；QJS 侧接法见 `.tmp/emu-ctl-globals/report.md`（同一份引擎层实现）。
