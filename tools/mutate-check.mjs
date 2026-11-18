@@ -4279,6 +4279,39 @@ const MUTATIONS = [
       '`uiCanvasOrigin` 丢掉 `((pic−ref·s)/2)` 的居中偏移 ⇒ 非 16:9 的 320×240 / 1024×768 用例' +
       '期望 (0,30)/(0,96) 得 (0,0) ⇒ ui-canvas 当场红；★ 16:9 用例仍绿（这正是"只测 16:9 会假绿"）',
   },
+
+  // ── AOT fault 现场（`REQ-01M7PG086DG4BBPA40VCVZTP4X` A；守卫 = `tests/fault_report.cpp`）──
+  //   ★ 代表"现场只打一部分"这一类错（BUG-32 的原始症状就是 fault 只有 3 行）：把 32 字栈缩成
+  //     4 字 ⇒ 第 32 个字不见了 ⇒ `fault-report` 的 `A000001F` 断言当场红。寄存器 / eip / 块 EA
+  //     的断言在同一个用例里，它们各自也能单独红。
+  {
+    file: 'apps/emulator-lift/src/runtime/fault_state.cpp',
+    from: '    dumpGuestStack(cpu, out, 32);',
+    to: '    dumpGuestStack(cpu, out, 4);  // 变异：32 字栈只打 4 字',
+    guard: 'ctest:fault-report',
+    ctest: 'fault-report',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-fault-report',
+    what:
+      'AOT fault 现场的栈只打 4 字（32 → 4）⇒ 第 32 个栈字 `A000001F` 消失 ⇒ ' +
+      'fault-report 的合成 AOT 现场断言红（BUG-32 的"现场信息不全"同类）',
+  },
+
+  // ── `--input-plan-trace`（`REQ-01M7PG086DG4BBPA40VCVZTP4X` B；守卫 = `tests/input_plan.cpp`）──
+  //   ★ 代表"开档退化成关档"这一类错：门写反 / 被吞 ⇒ 诊断时**没有任何读数**，而配方照旧施加
+  //     （`fired` 会涨、屏幕不动）—— 正是"配方 click 不被消费"查不出来的形状。
+  {
+    file: 'apps/emulator-lift/src/runtime/input_plan.cpp',
+    from: '    if (trace_out_ == nullptr) return;  // 缺省档：一次判空、零输出',
+    to: '    return;  // 变异：trace 永不打（开档退化成关档）',
+    guard: 'ctest:input-plan-read-points',
+    ctest: 'input-plan-read-points',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-input-plan-read-points',
+    what:
+      '`--input-plan-trace` 的 step 事件一行都不打 ⇒ input-plan-read-points 的 trace 用例' +
+      '（开档有行 / 关档零行）当场红',
+  },
 ];
 
 let mutationRunSeq = 0;

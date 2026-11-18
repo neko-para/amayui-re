@@ -42,6 +42,30 @@ std::uint64_t hostNowMs() {
 
 std::string u64s(std::uint64_t v) { return std::to_string(static_cast<unsigned long long>(v)); }
 
+// `--input-plan-trace` 的 `kind=` 词表（**单 token**，⛔ 不用 `stepKindName` 的空格式：
+// trace 行要能被 `grep kind=click` 这类机械判据切）。
+const char* traceKindToken(StepKind k) {
+    switch (k) {
+        case StepKind::AwaitScript: return "await-script";
+        case StepKind::AwaitPosition: return "await-position";
+        case StepKind::Wait: return "wait";
+        case StepKind::Click: return "click";
+        case StepKind::ProfileBegin: return "profile-begin";
+        case StepKind::ProfileEnd: return "profile-end";
+        case StepKind::Quit: return "quit";
+    }
+    return "?";
+}
+
+const char* mouseButtonToken(MouseButton b) {
+    switch (b) {
+        case MouseButton::Left: return "left";
+        case MouseButton::Right: return "right";
+        case MouseButton::Middle: return "middle";
+    }
+    return "?";
+}
+
 }  // namespace
 
 const char* inputPointName(InputPoint point) {
@@ -158,12 +182,12 @@ void InputPlan::atPoint(WindowManager& wm, InputPoint point) {
     //   （队列恒空时这里与改动前逐位相同 ⇒ 默认档不变）。
     if (!recipe_.active() && pending_.empty() && immediate_.empty()) return;
     // ① 到期 / 兜底的**待抬起**先落地（同一次读点内、读之前）。
-    releaseDue(wm);
+    releaseDue(wm, point);
     // ①' ★ **立即队列先于配方当步**（判据 2 的前半）：控制层的 click 在这里施加，
     //    走**同一段** `applyClickAt`、计入 `fired_`，但**不动** `next_` / `applied_` / 守卫账。
     //    放在 `quit_requested_` / `failed_` 的早退**之前**：控制层已经对客户端答了 `ok:true`，
     //    不该因为**配方自己的**失败 / quit 把它静默丢掉（它只等下一个读点）。
-    drainImmediate(wm);
+    drainImmediate(wm, point);
     // ② `quit` 之后不再推进；守卫到期之后同样不再推进（⛔ 不许"失败后继续点"）。
     if (quit_requested_ || failed_) return;
     // ③ flush-before-read：按文件顺序把到期指令消费到 `WindowManager`（⛔ 不越过未到期的指令）。
@@ -224,6 +248,9 @@ void InputPlan::atPoint(WindowManager& wm, InputPoint point) {
         } else if (s.kind == StepKind::Click) {
             applyClick(wm, s);
             ++fired_;
+            // trace 的 `plan:<文件>:<行>` 要指向**施加它的那条 step** ⇒ 记在待抬起的记录上
+            // （抬起那一行因此也能点名同一个 `文件:行`；立即队列的 click 没有 step ⇒ 0）。
+            if (!pending_.empty()) pending_.back().line = s.line;
         } else if (s.kind == StepKind::ProfileBegin || s.kind == StepKind::ProfileEnd) {
             applyProfileMark(s, nowMs());
         } else {  // Quit
@@ -232,6 +259,7 @@ void InputPlan::atPoint(WindowManager& wm, InputPoint point) {
         ++applied_;
         ++next_;
         guard_armed_ = false;  // 下一条指令重新起算（同一次读点内继续 flush）
+        traceStepConsumed(s, wm.inputSampleCount(), point, "");  // ★ opt-in（缺省 nullptr ⇒ 一次判空、零输出）
         // ★ `quit` 之后不再推进（`InputScript` 的 `if (quit_requested_) continue` 同口径）：
         //   但它**自己**已经算走完 ⇒ 末尾的 `quit` 不会让 pending 变非 0。
         if (quit_requested_) return;
@@ -251,7 +279,7 @@ bool InputPlan::enqueueClick(int ref_x, int ref_y, MouseButton button) {
     return true;
 }
 
-void InputPlan::drainImmediate(WindowManager& wm) {
+void InputPlan::drainImmediate(WindowManager& wm, InputPoint point) {
     // ★ 只消费立即队列：**不碰** `next_` / `applied_` / `wait_started_` / 守卫账 ⇒ 配方里未到期的门
     //   照旧等（判据 2 的"步进指针不动"）。每条 +1 `fired_`（与配方 click 同一读数口径）。
     while (!immediate_.empty()) {
@@ -259,6 +287,15 @@ void InputPlan::drainImmediate(WindowManager& wm) {
         immediate_.erase(immediate_.begin());
         applyClickAt(wm, c.x, c.y, c.button);
         ++fired_;
+        // ★ trace（opt-in）：控制层的 click 与配方 click 走同一段施加核心 ⇒ 读数也要能直接对齐
+        //   （D 的判据面：同一屏上"控制层 click 落在哪种读点"是唯一能解释两边差异的读数）。
+        //   行里 `origin=control` + `plan:<文件>:0`（0 = 不是配方 step）点名它。
+        if (trace_out_ != nullptr) {
+            Step control_step;
+            control_step.kind = StepKind::Click;
+            control_step.line = 0;
+            traceStepConsumed(control_step, wm.inputSampleCount(), point, " origin=control");
+        }
     }
 }
 
@@ -359,7 +396,7 @@ void InputPlan::failTimeout(std::size_t index, std::uint64_t elapsed_ms, std::ui
     failed_guard_ms_ = guard_ms;
 }
 
-void InputPlan::releaseDue(WindowManager& wm) {
+void InputPlan::releaseDue(WindowManager& wm, InputPoint point) {
     for (std::size_t i = 0; i < pending_.size();) {
         const PendingRelease& r = pending_[i];
         // ① guest 至少又**采样**过一拍（与 `input_script` 的 auto hold 同一条"一次按下一定被
@@ -371,6 +408,9 @@ void InputPlan::releaseDue(WindowManager& wm) {
             ++i;
             continue;
         }
+        // ★ trace（opt-in）：抬起走的是哪条腿 = "guest 到底有没有机会看到按下"的唯一读数
+        //   （D 的判据面：`reason=forced` + `samples==press_samples` ⇒ 兜底先于任何一次采样）。
+        traceRelease(r, sampled, forced, wm.inputSampleCount(), point);
         emitRelease(wm, r);
         pending_.erase(pending_.begin() + static_cast<std::ptrdiff_t>(i));
         --releases_pending_;
@@ -392,6 +432,84 @@ std::size_t InputPlan::releaseAll(WindowManager& wm) {
     pending_.clear();
     releases_pending_ = 0;
     return n;
+}
+
+// ---------------------------------------------------------------------------------------
+// `--input-plan-trace`（opt-in；口径见 `input_plan.h` 的 `setTrace`）
+// ---------------------------------------------------------------------------------------
+void InputPlan::traceStepConsumed(const Step& s, std::uint64_t samples_now, InputPoint point,
+                                  const char* extra_tag) {
+    if (trace_out_ == nullptr) return;  // 缺省档：一次判空、零输出
+    // ★ 只在开档时**额外**采一次身份 / 位置（缺省档一步也不多读 guest 内存）。
+    //   门那一步刚刚采过（缓存命中）；动作那一步在这里采 ⇒ `click` 的行也有 script/pos。
+    refreshIdentity();
+    ScriptPositionSample pos;
+    if (mem_ != nullptr && identity_.valid) pos = readScriptPositionSample(*mem_, identity_);
+    char pos_text[16];
+    if (pos.valid) {
+        std::snprintf(pos_text, sizeof(pos_text), "%08X", pos.pos);
+    } else {
+        std::snprintf(pos_text, sizeof(pos_text), "?");
+    }
+    char seq_text[24];
+    if (state_seq_fn_ != nullptr) {
+        std::snprintf(seq_text, sizeof(seq_text), "%llu",
+                      static_cast<unsigned long long>(state_seq_fn_(state_seq_ctx_)));
+    } else {
+        std::snprintf(seq_text, sizeof(seq_text), "-");  // 没开控制层 ⇒ 没有这个数（⛔ 不编造 0）
+    }
+    std::fprintf(trace_out_,
+                 "plan:%s:%d applied kind=%s%s script=%s pos=%s frame=%llu state_seq=%s reads=%llu "
+                 "samples=%llu at=%s held=%zu\n",
+                 recipe_.origin().empty() ? "(control)" : recipe_.origin().c_str(), s.line,
+                 traceKindToken(s.kind), extra_tag != nullptr ? extra_tag : "",
+                 identity_.valid ? identity_.name.c_str() : "?", pos_text,
+                 static_cast<unsigned long long>(presenting()), seq_text,
+                 static_cast<unsigned long long>(read_points_), static_cast<unsigned long long>(samples_now),
+                 inputPointName(point), pending_.size());
+    std::fflush(trace_out_);
+}
+
+void InputPlan::traceRelease(const PendingRelease& r, bool sampled, bool forced, std::uint64_t samples_now,
+                             InputPoint point) {
+    if (trace_out_ == nullptr) return;
+    // 两条腿都成立时 `reason` 写 `sampled+forced`（读数要能看出"是采样先到还是兜底先到"）。
+    const char* reason = sampled && forced ? "sampled+forced" : (sampled ? "sampled" : "forced");
+    // ★ `samples=` 是 `WindowManager::inputSampleCount()` 的**当前值**（不是读点数）：
+    //   `samples == press_samples` ⇒ guest 在按下之后**一次也没有**采样 ⇒ 它永远看不到那个电平；
+    //   `samples == press_samples+1` ⇒ 它看过按下，但兜底还是先到了（`sampled` 那条腿要 +2）。
+    std::fprintf(trace_out_,
+                 "plan:%s:%d release kind=click button=%s reason=%s samples=%llu press_samples=%llu "
+                 "reads=%llu press_reads=%llu at=%s\n",
+                 recipe_.origin().empty() ? "(control)" : recipe_.origin().c_str(), r.line,
+                 mouseButtonToken(r.button), reason,
+                 static_cast<unsigned long long>(samples_now),
+                 static_cast<unsigned long long>(r.press_samples), static_cast<unsigned long long>(read_points_),
+                 static_cast<unsigned long long>(r.press_reads), inputPointName(point));
+    std::fflush(trace_out_);
+}
+
+void InputPlan::printFaultSummary(std::FILE* out) const {
+    // ★ 零分配（fault 在信号上下文里；见 `memory.h` 的 `FaultTextHook`）：只用 fputs / snprintf 定长缓冲。
+    //   数字与 `summary()` / `outcome()` **同一份** ⇒ fault 文本与正常收口的读数可以直接对账。
+    if (!recipe_.active() || out == nullptr) return;
+    char buf[384];
+    std::snprintf(buf, sizeof(buf),
+                  "  input-plan: steps=%llu fired=%llu pending=%llu presents=%llu released=%llu held=%zu "
+                  "outcome=%s\n",
+                  static_cast<unsigned long long>(steps()), static_cast<unsigned long long>(fired_),
+                  static_cast<unsigned long long>(pending()), static_cast<unsigned long long>(presenting()),
+                  static_cast<unsigned long long>(released_), pending_.size(),
+                  recipeOutcomeName(outcome()));
+    std::fputs(buf, out);
+    const Step* s = currentStep();
+    if (s != nullptr) {
+        char step_buf[256];
+        std::snprintf(step_buf, sizeof(step_buf), "  plan-step  : %s:%d kind=%s（%s）\n",
+                      recipe_.origin().c_str(), s->line, stepKindName(s->kind),
+                      failed_ ? "守卫到期" : "还没消费");
+        std::fputs(step_buf, out);
+    }
 }
 
 void InputPlan::note(PlanEventKind kind) {

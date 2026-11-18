@@ -40,6 +40,11 @@ add_subdirectory(third_party/berkeley-softfloat)
 # ---- 运行时 ----
 add_library(emulator-lift-runtime STATIC
     src/runtime/memory.cpp
+    # ★ AOT 臂的 guest fault 现场（`runtime/fault_state.h` 的唯一实现）：`guestFault` 的钩子在这里，
+    #   打印 eip / 当前块 EA / 8 GPR + eflags / 32 字 guest 栈。归属本 target 而不是 AOT target：
+    #   纯 CTest `fault-report` 只链本 target（合成 fault 直接驱动打印函数），AOT 臂也链它
+    #   ⇒ **一份实现两处用**（⛔ 只放进 AOT target 会让测试链接失败）。
+    src/runtime/fault_state.cpp
     # ★ 窗口 profile 的**闭式实现**（`aot/window_prof.h` 的唯一 out-of-line 部分）。
     #   归属本 target 而不是 AOT target：纯 CTest `lift-aot-window-profile` 只链本 target，
     #   AOT 臂也链它 ⇒ **一份实现两处用**。⛔ 只放进 AOT target 会让测试链接失败。

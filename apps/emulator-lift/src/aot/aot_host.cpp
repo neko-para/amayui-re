@@ -36,6 +36,7 @@
 #include "aot/aot_feeder.h"       // feeder 的 IR 执行器（音频真线程用）
 #include "runtime/control.h"       // 控制层 Present 闸门 / Context（轻头：⛔ 无 beast / nlohmann）
 #include "runtime/decode_cache.h"  // `liftOneDecodeCache()`：只读命中率（`decode-cache:` 行）
+#include "runtime/fault_state.h"   // guest fault 现场（AOT 没有 Machine ⇒ 本臂自己登记；见该头注）
 #include "runtime/guest_token.h"   // Phase-0（`arm()` 在 `AotHost::run`；这里只读）
 #include "runtime/token_phase0_report.h"  // tokenhold/holdhist/waithist/shimmax 的唯一打印点
 #include "shims/register.h"
@@ -127,6 +128,10 @@ bool AotHost::init(std::string* err) {
         if (err != nullptr) *err = "AOT 装配不完整：cpu_.cs_table 为空（音频 feeder 需要宿主临界区表）";
         return false;
     }
+    // ★ guest fault 现场（`runtime/fault_state.h`）：解释器臂在 `Machine::init` 装自己的钩子，AOT 臂
+    //   没有 Machine ⇒ 必须在这里装一次（`guestFault` 的 `g_hook` 是同一个槽位）。**只装钩子**；
+    //   现场数据由 `run()` 在入口登记（⛔ 不是每块 / 每帧 ⇒ 执行循环零成本）。
+    installAotFaultHook();
     initialized_ = true;
     return true;
 }

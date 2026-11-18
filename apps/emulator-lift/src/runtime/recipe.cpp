@@ -235,6 +235,15 @@ int recipeOutcomeExitCode(RecipeOutcome o) {
     return o == RecipeOutcome::Done ? 0 : kRecipeIncompleteExitCode;
 }
 
+const char* recipeOutcomeName(RecipeOutcome o) {
+    switch (o) {
+        case RecipeOutcome::Running: return "running";
+        case RecipeOutcome::Done: return "done";
+        case RecipeOutcome::TimedOut: return "timedout";
+    }
+    return "?";
+}
+
 void Recipe::clear() {
     steps_.clear();
     origin_.clear();

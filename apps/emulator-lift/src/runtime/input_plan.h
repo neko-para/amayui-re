@@ -76,6 +76,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -168,6 +169,27 @@ public:
         mark_fn_ = fn;
     }
 
+    // =====================================================================================
+    // ★ `--input-plan-trace`（opt-in；`REQ-01M7PG086DG4BBPA40VCVZTP4X` B）
+    //   · 缺省 `nullptr` ⇒ **一条都不打**（默认档输出逐字节不变）；
+    //   · 非空 ⇒ 每条 step **成立 / 施加**时打一行：`plan:<文件>:<行> kind=… script=… pos=…
+    //     frame=… state_seq=…`；外加 click 的**抬起**一行（`reason=sampled|forced`，D 的判据面）。
+    //   · ⛔ 不每帧 / 不每块打（只有 step 事件 + 每个 click 的抬起）⇒ 一次性读数的纪律不变。
+    //   ★ `frame=` 的来源 = `presenting()`（`present.cpp` 在 `++frame_count_` 同一刻推的读数）
+    //     ⇒ 与 `--frame-log` / 摘要里的帧号同一个数。
+    //   ★ `state_seq=` 只有开了 `--control-root` 才有（`Control::stateSeq()`）；没开 ⇒ `-`（⛔ 不编造）。
+    void setTrace(std::FILE* out) { trace_out_ = out; }
+    using StateSeqFn = std::uint64_t (*)(void* ctx);
+    void setStateSeqSource(void* ctx, StateSeqFn fn) {
+        state_seq_ctx_ = ctx;
+        state_seq_fn_ = fn;
+    }
+
+    // ★ fault 路径的摘要（`guestFault` 的文本钩子调它；`REQ-01M7PG086DG4BBPA40VCVZTP4X` C）：
+    //   **零分配**（fault 在信号上下文里；⛔ 不构造 std::string），数字与 `summary()` / `outcome()`
+    //   同一份，再加 `outcome=` 与"卡住的那一条"（`文件:行` + kind）。没有配方 ⇒ 一条不打。
+    void printFaultSummary(std::FILE* out) const;
+
     // ★ **唯一**能施加 step 的入口（也只经 `runtime/input.h` 的四个投递入口到达）。
     //   flush-before-read：先把到期 step 落地到 `WindowManager`，**再**让 shim 去读。
     //   ★ 同一个读点内的顺序：待抬起 → **立即队列（控制层 `click`）** → 配方当步。
@@ -253,6 +275,7 @@ private:
         int y = 0;
         std::uint64_t press_samples = 0;  // 按下那一刻的 `inputSampleCount`
         std::uint64_t press_reads = 0;    // 按下那一刻的读点序号（兜底抬起用）
+        int line = 0;                     // 施加它的 step 行（trace 的 `plan:<文件>:<行>`）
     };
 
     // 立即队列的一条：**1280×720 参考坐标**（⛔ 还没映射 —— 映射只发生在施加那一刻的那一次）。
@@ -271,15 +294,20 @@ private:
     // 配方 step 的壳：只把 `Step` 的三个值交给上面那一段（⛔ 不复制映射 / 记账）。
     void applyClick(WindowManager& wm, const Step& s);
     // 立即队列消费（同一次读点内、配方之前；⛔ 不碰 `next_` / `applied_`）。
-    void drainImmediate(WindowManager& wm);
+    void drainImmediate(WindowManager& wm, InputPoint point);
     // 区间边界的**本臂落点**（没有窗口 profiler ⇒ 一次性两行宿主墙钟读数）。
     void applyProfileMark(const Step& s, std::uint64_t now_ms);
     // `quit` 的**本臂落点**：与解释器臂同一个交付点 = `WindowManager::postQuit(0)`。
     void applyQuit(WindowManager& wm);
     // 某一步的守卫到期 ⇒ 记下是哪一条（下标）/ 等了多久（**唯一**失败面；⛔ 不 warning-only）。
     void failTimeout(std::size_t index, std::uint64_t elapsed_ms, std::uint64_t guard_ms);
-    void releaseDue(WindowManager& wm);
+    void releaseDue(WindowManager& wm, InputPoint point);
     void emitRelease(WindowManager& wm, const PendingRelease& r);
+    // `--input-plan-trace` 的两个出口（缺省 `trace_out_ == nullptr` ⇒ 各自只有一次判空）。
+    void traceStepConsumed(const Step& s, std::uint64_t samples_now, InputPoint point,
+                           const char* extra_tag);
+    void traceRelease(const PendingRelease& r, bool sampled, bool forced, std::uint64_t samples_now,
+                      InputPoint point);
 
     Recipe recipe_;
     std::vector<PendingRelease> pending_;
@@ -322,6 +350,10 @@ private:
     // ★ 窗口 profile 的标记钩子（缺省 nullptr ⇒ 每个读点一次判空；见 `setProfileMarkHook`）
     void* mark_ctx_ = nullptr;
     ProfileMarkHook mark_fn_ = nullptr;
+    // ★ `--input-plan-trace`（缺省 nullptr ⇒ 不打；见 `setTrace`）
+    std::FILE* trace_out_ = nullptr;
+    void* state_seq_ctx_ = nullptr;
+    StateSeqFn state_seq_fn_ = nullptr;
     std::array<std::uint64_t, kInputPointCount> deliver_calls_{};
     std::array<std::uint64_t, kPlanEventCount> event_calls_{};
 };

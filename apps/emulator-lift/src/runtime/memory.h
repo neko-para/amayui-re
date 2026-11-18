@@ -51,6 +51,16 @@ using FaultHook = void (*)(const AccessSite& site);
 void setGuestFaultHook(FaultHook hook);
 [[noreturn]] void guestFault(const AccessSite& site, const char* why);
 
+// fault 文本钩子：fault 路径上**追加**一段一次性文本（`REQ-01M7PG086DG4BBPA40VCVZTP4X` C）。
+// ★ 为什么需要它：`--input-plan` 的摘要原来只在 `host.run()` 返回之后打；guest fault 走
+//   `std::_Exit(3)`（不返回）⇒ 复现跑读不到 `steps/fired/pending`。钩子让"同一个结论"在
+//   fault 文本里也出现一次。
+// ★ 与 `FaultHook` 同一条上下文约束：**零分配**、只许 fprintf / 写定长缓冲。
+// ★ **每线程**（`thread_local`）：生产者只有主线程的 `aot_main`；音频 feeder 线程的 fault 不该
+//   去读主线程的计划对象（那是数据竞争）。没有登记 ⇒ 一条也不打 ⇒ 默认档的 fault 文本不变。
+using FaultTextHook = void (*)(void* ctx, std::FILE* out);
+void setGuestFaultTextHook(void* ctx, FaultTextHook hook);
+
 // ---- fault 归因（两个平台的 handler 共用；纯函数，便于单测）----
 // ★ 判据是**异常地址**：落在 guest 空间 `[guest_base, guest_base + GuestMemory::kSpace)` 内 ⇒ guest fault
 //   （EA / 宽度 / 方向 + `_Exit(3)`，行为不变）；不在 ⇒ 宿主自己的 bug ⇒ `hostFault`。

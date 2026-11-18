@@ -27,6 +27,7 @@
 
 #include "aot/aot_dispatch.h"
 #include "runtime/control.h"  // Control（PIMPL 门面：⛔ 不含 beast / nlohmann / guest 头）
+#include "runtime/fault_state.h"  // guest fault 现场（AOT 没有 Machine；只登记 / 清除，零周期输出）
 #include "runtime/guest_token.h"  // Phase-0 的 `arm()`（与解释器 `Machine::run` 同一个单例）
 
 namespace lift {
@@ -524,6 +525,16 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         return due;
     };
     std::uint32_t ea = cpu_.eip;
+    // ★ guest fault 现场（`runtime/fault_state.h`）：**入口登记一次**（⛔ 不是每块 / 每帧）。
+    //   `block_ea` 指向本函数的 `ea` ⇒ fault 时读到的就是当前派发块的 EA（lifted 代码不逐条更新
+    //   `cpu_.eip`）；寄存器真源在 `regs_`（块边界同步的那一份）。收口处清除。
+    GuestFaultSite fault_site;
+    fault_site.cpu = &cpu_;
+    fault_site.regs = &regs_;
+    fault_site.block_ea = &ea;
+    fault_site.stub_page = stub_page;
+    fault_site.stub_span = stub_span;
+    setGuestFaultSite(fault_site);
 
     // ★ `--profile` ②：**派发归因**（自计时间隔法 / self-time）。
     //   每 `kDispatchStride` 次派发取一次 TSC，把"距上次采样之间消耗的 ticks"整笔记到
@@ -965,6 +976,9 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     }
 
     // ---- 收口（只留 guest 语义的读数；真源 machine.cpp:1806-1826）----
+    // ★ fault 现场到这里失效（`ea` 是栈上局部变量）⇒ 先摘掉，⛔ 不让收口之后的宿主侧 fault
+    //   读到一份悬垂的块 EA / 过期的寄存器。
+    clearGuestFaultSite();
     syncCpuFromRegs();
     // ★ 窗口 profile：配方只写了 `profile_begin` 而没写 `profile_end`（或 run 在窗口中途收口）
     //   ⇒ **照样打表 + 关闸门**（⛔ 不静默丢数据；与解释器"未闭合也打印"同口径）。

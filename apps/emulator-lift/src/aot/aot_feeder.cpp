@@ -7,6 +7,7 @@
 #include <cstdio>
 
 #include "aot/aot_dispatch.h"
+#include "runtime/fault_state.h"  // guest fault 现场（这条线程的登记 / 清除）
 #include "runtime/lift_abi.h"
 #include "runtime/memory.h"
 #include "runtime/shims.h"
@@ -25,6 +26,16 @@ bool runAotFeederGuest(X86& cpu, GuestMemory& mem, const ShimRegistry& shims, st
     const std::uint32_t stub_page = shims.stubPage();
     const std::uint32_t stub_span = shims.stubSlots() * 4u;
     std::uint32_t ea = entry_ea;
+    // ★ guest fault 现场（`runtime/fault_state.h`）：feeder 跑在自己的宿主线程上 ⇒ 主线程那份
+    //   thread_local 现场在这里是空的。**入口登记一次**（不是每块）⇒ 这条线程上的 guest fault
+    //   也能打出 eip / 块 EA / 寄存器 / 栈，而不是只有 3 行。
+    GuestFaultSite fault_site;
+    fault_site.cpu = &cpu;
+    fault_site.regs = &st;
+    fault_site.block_ea = &ea;
+    fault_site.stub_page = stub_page;
+    fault_site.stub_span = stub_span;
+    setGuestFaultSite(fault_site);
     bool ok = true;
     for (;;) {
         // ★ 返回哨兵：**必须在查表之前**（主循环不认识它；见 aot_feeder.h 的注释）。
@@ -85,6 +96,7 @@ bool runAotFeederGuest(X86& cpu, GuestMemory& mem, const ShimRegistry& shims, st
     }
     // 把 `LiftRegs` 物化回 `X86`：失败面（诊断 / `abortFill` 的上下文恢复）要看寄存器现场。
     liftRegsToCpu(st, cpu);
+    clearGuestFaultSite();  // 这把线程的现场在本次 feeder 调用结束后就失效了
     return ok;
 }
 

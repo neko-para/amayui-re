@@ -197,6 +197,10 @@ int main(int argc, char** argv) {
         LIFT_CHECK(r.out.find("不可信") != std::string::npos);
         // ★ S4：`--input-plan` 必须在 help 里（否则用户不知道 AOT 臂有输入控制面）。
         LIFT_CHECK(r.out.find("--input-plan") != std::string::npos);
+        // ★ 诊断档 `--input-plan-trace` 也必须在 help 里（否则"配方 click 不被消费"只能靠猜；
+        //   见 `REQ-01M7PG086DG4BBPA40VCVZTP4X` B）。⚠ 本用例在 POSIX 上 skip（CreateProcessW
+        //   是 Windows 专有）⇒ mac 侧的等价判据在 `docs` / 手工命令，⛔ 不要因此删掉这一条。
+        LIFT_CHECK(r.out.find("--input-plan-trace") != std::string::npos);
         // ★ `--profile-slow-frames` 必须在 help 里（否则"按帧的 shim 分桶"这条仪器等于不存在，
         //   而 wipe 剖面的最大缺口正是它 —— 见 `docs/03-emulator/wipe-profile.md`）。
         LIFT_CHECK(r.out.find("--profile-slow-frames") != std::string::npos);

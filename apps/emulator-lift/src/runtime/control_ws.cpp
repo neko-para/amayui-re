@@ -1307,6 +1307,12 @@ std::string Control::localEndpoint() const {
 }
 
 std::uint16_t Control::localPort() const { return impl_ ? impl_->port : 0; }
+
+std::uint64_t Control::stateSeq() const {
+    // 主线程独占字段（写入点 = `serve()` / `requestQuit`，都是主线程）⇒ 只读、不加锁。
+    // 没启动 / 没暂停过 ⇒ 0（与快照里的 `state_seq` 同一个数）。
+    return impl_ ? impl_->state_seq : 0;
+}
 const std::string& Control::nonce() const {
     static const std::string kEmpty;
     return impl_ ? impl_->nonce : kEmpty;

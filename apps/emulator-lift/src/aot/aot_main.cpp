@@ -27,6 +27,7 @@
 #include "runtime/host_encoding.h"
 #include "runtime/input_plan.h"       // `--input-plan`（S4：AOT 臂唯一的输入控制面）
 #include "runtime/log.h"              // `--log-level`（缺省 warn；AOT 臂过去没有这个开关）
+#include "runtime/memory.h"           // setGuestFaultTextHook（fault 路径的 `input-plan` 摘要；C）
 #include "runtime/present_flags.h"    // `--cursor-warp` / `--sound` 的**唯一**一份判据 + 文案
 #include "runtime/present_sdl.h"
 #include "runtime/vfs.h"  // openHostFileUtf8（Windows 的 UTF-8 路径）
@@ -46,6 +47,21 @@ bool fileExists(const std::string& p) {
 std::string envOr(const char* name) {
     const char* v = std::getenv(name);
     return v ? v : "";
+}
+
+// `--input-plan` 的 fault 摘要钩子（`memory.h` 的 `FaultTextHook`；`ctx` = `lift::InputPlan*`）：
+// ★ guest fault 走 `std::_Exit(3)`，`host.run()` 不会返回 ⇒ 正常收口那一行摘要读不到。
+//   这个钩子让 fault 文本里出现**同一份** `steps/fired/pending` + `outcome`（C 的要求）。
+// ★ 零分配：`printFaultSummary` 只用定长缓冲（fault 在信号上下文里，见 `memory.h`）。
+void faultPlanSummary(void* ctx, std::FILE* out) {
+    auto* plan = static_cast<lift::InputPlan*>(ctx);
+    if (plan != nullptr) plan->printFaultSummary(out);
+}
+
+// `--input-plan-trace` 的 `state_seq` 源：唯一生产者 = 控制层（没开 `--control-root` ⇒ 不装 ⇒ trace 打 `-`）。
+std::uint64_t controlStateSeq(void* ctx) {
+    auto* control = static_cast<lift::Control*>(ctx);
+    return control != nullptr ? control->stateSeq() : 0;
 }
 
 void usage() {
@@ -103,6 +119,12 @@ void usage() {
         "                      `文件:行` + 门/动作 并 **exit 5**（⛔ 不许只警告仍 exit 0）；\n"
         "                      ★ `wait` 没有守卫（固定时长）⇒ 卡住由 --time-limit / --max-frames 报。\n"
         "                      解析失败 ⇒ exit 2 + 行号\n"
+        "  --input-plan-trace  **opt-in**（缺省关）：每条 step **成立 / 施加**时打一行\n"
+        "                      `plan:<文件>:<行> applied kind=… script=… pos=… frame=… state_seq=… reads=…`，\n"
+        "                      click 的抬起再打一行（`reason=sampled|forced` ⇒ guest 到底有没有机会\n"
+        "                      看到按下）；`frame` = 已 Present 帧数，`state_seq` 只有开 --control-root\n"
+        "                      才有（否则 `-`）。⛔ 不每帧 / 不每块打；缺省档一条都不打\n"
+        "                      （缺 --input-plan 时本参数无输出，⛔ 不报错）\n"
         "%s"
         "  --log-level <L>     日志级别：quiet|error|warn|info|debug|trace（**缺省 warn** ⇒ 默认档输出\n"
         "                      逐字不变）。★ `[audio] mode=… feeder=… lead=…` 与 `LIFT_AUDIO_TRACE` 的\n"
@@ -231,6 +253,9 @@ int main(int argc, char** argv) {
     // ★ `--input-plan <file>`（S4）：AOT 臂的**唯一**输入控制面（`runtime/input_plan.h`）。
     //   缺省空 = 不给 ⇒ 输出与行为逐字节不变（含那 57 行 stdout）。
     std::string input_plan_path;
+    // ★ `--input-plan-trace`（opt-in，缺省关；`REQ-01M7PG086DG4BBPA40VCVZTP4X` B）：只影响
+    //   `InputPlan` 的 step 事件输出（`plan:<文件>:<行> …`），⛔ 不改任何 guest 可见状态。
+    bool input_plan_trace = false;
     std::string audio_mode = "off";  // ★ 本臂缺省 off（不开设备 / 不跑混音：与改动前逐位相同）
     // ★ S1：`--audio-dump <path>`（缺省空 = 不写 WAV）。给了它而档位是 off ⇒ 引擎把档位提升成
     //   virtual（`AudioEngine::configure` 的唯一规则；⛔ 不在这里另写一份）。
@@ -295,6 +320,10 @@ int main(int argc, char** argv) {
             if (!needValue("--guest-root", &guest_root)) return 2;
         } else if (a == "--input-plan") {
             if (!needValue("--input-plan", &input_plan_path)) return 2;
+        } else if (a == "--input-plan-trace") {
+            // ★ 纯开关（不带值）。没有 `--input-plan` 时本参数只是"没有 step 事件可打"——
+            //   ⛔ 不报错、⛔ 不静默改成别的语义（配方是唯一的生产者，见 `InputPlan::setTrace`）。
+            input_plan_trace = true;
         } else if (a == "--max-frames") {
             std::string v;
             if (!needValue("--max-frames", &v)) return 2;
@@ -746,6 +775,13 @@ int main(int argc, char** argv) {
         // ★ 暂停补偿（S1）：配方的每步守卫钟 = 宿主单调毫秒 − 累计暂停毫秒。
         //   缺省（没有控制层 / 没暂停过）`pausedTotalMs() == 0` ⇒ 与改动前逐位相同。
         input_plan.attachClock(&host.clock());
+        // ★ `--input-plan-trace`（opt-in）：缺省 `nullptr` ⇒ 一条都不打（默认档输出逐字节不变）。
+        if (input_plan_trace) input_plan.setTrace(stderr);
+        // ★ fault 路径的摘要（C）：只有**有配方**时才装 ⇒ 没有配方的 fault 文本逐字不变。
+        //   位置与其余装配点同处（`guestFault` 在本进程里随时可能发生；run 之前装好）。
+        if (input_plan.armed()) {
+            lift::setGuestFaultTextHook(&input_plan, &faultPlanSummary);
+        }
         host.cpu().windows->setInputPlan(&input_plan);
         // `present.cpp` 的 `note(Frame)` 保留：它只是摘要 `presents=` 的读数，⛔ 不再是门。
         host.presenter().setInputPlan(&input_plan);
@@ -903,6 +939,9 @@ int main(int argc, char** argv) {
         }
         control_started = true;
         host.setControl(&control);
+        // ★ `--input-plan-trace` 的 `state_seq=` 来源（唯一生产者 = 控制层）。装在这里是因为
+        //   `control` 要到上面 `start()` 之后才存在；没开控制层 ⇒ 不装 ⇒ trace 打 `-`（⛔ 不编造）。
+        if (input_plan_trace) input_plan.setStateSeqSource(&control, &controlStateSeq);
         // ★ `present` 的事实来源只有一处（`windowHidden()`，⛔ 不由 `--present` 推：`auto` 会静默
         //   回落隐藏窗）。`hello.present` 与 `sample.present` 都读它。
         host.setPresentState(copts.present);

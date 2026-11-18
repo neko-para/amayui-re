@@ -37,6 +37,11 @@ namespace {
 FaultHook g_hook = nullptr;
 GuestMemory* g_memory = nullptr;  // 当前活动实例（guest 是单线程的，见 README §2.5）
 
+// ★ fault 文本钩子（每线程；见 memory.h）：生产者只有主线程的 `aot_main`（`--input-plan` 摘要）。
+//   fault 在**信号上下文**里发生 ⇒ 这里只有一次裸指针判空 + 一次函数调用，不分配、不加锁。
+thread_local FaultTextHook g_text_hook = nullptr;
+thread_local void* g_text_ctx = nullptr;
+
 std::uint64_t g_fault_count = 0;
 }  // namespace
 
@@ -80,6 +85,11 @@ std::uint32_t hostPageSize() {
 
 void setGuestFaultHook(FaultHook hook) { g_hook = hook; }
 
+void setGuestFaultTextHook(void* ctx, FaultTextHook hook) {
+    g_text_ctx = ctx;
+    g_text_hook = hook;
+}
+
 const char* regionKindName(RegionKind kind) {
     switch (kind) {
         case RegionKind::Image: return "image";
@@ -117,6 +127,9 @@ void dumpRegions(const std::vector<Region>& regions, std::FILE* out) {
                      r ? regionKindName(r->kind) : "(未登记：这段不属于任何已声明的区域)");
     }
     if (g_hook) g_hook(site);
+    // ★ 追加文本（`--input-plan` 的摘要；没有登记 ⇒ 一条也不打 ⇒ 缺省档的 fault 文本逐字不变）。
+    //   放在现场钩子之后：现场先出（人第一眼要的是寄存器 / 栈），配方进度随后。
+    if (g_text_hook != nullptr) g_text_hook(g_text_ctx, stderr);
     std::fflush(nullptr);
     restoreConsoleUtf8();  // _Exit 不跑析构；控制台码页必须显式恢复
     // 用 _Exit 而不是 abort：不弹调试器对话框、不留半写的宿主缓冲（诊断已经 flush）

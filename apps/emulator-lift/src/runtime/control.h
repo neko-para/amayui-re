@@ -122,6 +122,10 @@ public:
     const std::string& nonce() const;
     const std::string& token() const;
     const std::string& controlFilePath() const;
+    // ★ `state_seq` 的只读口（`--input-plan-trace` 的 `state_seq=`；`REQ-01M7PG086DG4BBPA40VCVZTP4X` B）。
+    //   语义不变：只在进入 / 离开暂停时 +1（`control_snapshot.h` 的头注）。**只在主线程读**
+    //   （写入点也都在主线程的 `serve()` / `requestQuit`）⇒ 不加锁；没启动 / 没暂停过 ⇒ 0。
+    std::uint64_t stateSeq() const;
 
 private:
     struct Impl;

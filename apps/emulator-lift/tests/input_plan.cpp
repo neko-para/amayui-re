@@ -694,6 +694,113 @@ void caseForcedRelease() {
     LIFT_CHECK(plan.releases() >= 1);
 }
 
+// =====================================================================================
+// `--input-plan-trace`（opt-in；`REQ-01M7PG086DG4BBPA40VCVZTP4X` B）
+//
+// 判据（红了意味着什么）：
+//   ① **开档有行**：每条 step 成立 / 施加时**恰好一行**，且行里有 `plan:<文件>:<行>` +
+//      `kind=` + `script=` + `pos=` + `frame=`（缺一个 ⇒ 诊断"配方 click 不被消费"时又只能猜）；
+//   ② **关档零行**（缺省档输出逐字节不变 —— 这是"opt-in"的唯一机械判据）；
+//   ③ click 的**抬起**也有一行，且 `reason=sampled|forced` 如实区分两条腿
+//      （`forced` 且 `samples==press_samples` = "guest 一次也没机会看到按下"，这正是 D 的判据面）；
+//   ④ `frame=` 的来源 = `presenting()`（`note(Frame)` 的累计数）⇒ 这里推 3 次断言 `frame=3`，
+//      ⛔ 不许抄成一个自造的常数。
+// =====================================================================================
+std::string readSink(std::FILE* fp) {
+    std::fflush(fp);
+    std::rewind(fp);
+    std::string out;
+    char buf[512];
+    std::size_t n = 0;
+    while ((n = std::fread(buf, 1, sizeof(buf), fp)) > 0) out.append(buf, n);
+    return out;
+}
+
+void caseTrace() {
+    lift_test::g_current_case = "input-plan/trace";
+    lift_fixture::Fixture f;
+    LIFT_CHECK(f.ok);
+    if (!f.ok) return;
+    lift::WindowManager* wm = f.m.cpu().windows;
+    LIFT_CHECK(wm != nullptr);
+    if (wm == nullptr) return;
+    LIFT_CHECK(wm->createWindow("PlanTest", 0u, 0u, 0u, 0u, 1280, 720, 0u) != 0);
+    LIFT_CHECK(publishEngine(f.m, "TITLE.BIN", 42u));
+    std::string err;
+
+    // ---- ① 开档：两条 step 各一行（门 + click），行里有文件:行 / kind / script / pos / frame ----
+    std::FILE* sink = std::tmpfile();
+    LIFT_CHECK(sink != nullptr);
+    if (sink == nullptr) return;
+    {
+        lift::InputPlan plan;
+        plan.setClockForTest(&testNowMs);
+        plan.attachGuestMemory(&f.m.mem());
+        LIFT_CHECK(plan.loadText("await script title\nclick 10 20\n", "mem", &err));
+        plan.setTrace(sink);
+        wm->setInputPlan(&plan);
+        plan.note(lift::PlanEventKind::Frame);  // Present 读数 ⇒ frame=3（判据 ④）
+        plan.note(lift::PlanEventKind::Frame);
+        plan.note(lift::PlanEventKind::Frame);
+        plan.atPoint(*wm, lift::InputPoint::CursorPos);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 2);
+        const std::string t = readSink(sink);
+        LIFT_CHECK(t.find("plan:mem:1 applied kind=await-script") != std::string::npos);
+        LIFT_CHECK(t.find("plan:mem:2 applied kind=click") != std::string::npos);
+        LIFT_CHECK(t.find("script=TITLE.BIN") != std::string::npos);
+        LIFT_CHECK(t.find("pos=") != std::string::npos);
+        LIFT_CHECK(t.find("frame=3") != std::string::npos);
+        LIFT_CHECK(t.find("state_seq=-") != std::string::npos);  // 没开控制层 ⇒ 不编造 0
+        // ---- ③ sampled 腿：guest 采样前进两拍 ⇒ 抬起那一行 `reason=sampled` ----
+        wm->noteInputSample(0);
+        plan.atPoint(*wm, lift::InputPoint::CursorPos);
+        wm->noteInputSample(0);
+        plan.atPoint(*wm, lift::InputPoint::CursorPos);
+        const std::string t2 = readSink(sink);
+        LIFT_CHECK(t2.find("release kind=click") != std::string::npos);
+        LIFT_CHECK(t2.find("reason=sampled") != std::string::npos);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 0);
+    }
+    // ---- ② 关档（缺省）：同一份配方跑完 ⇒ sink 里**零字节** ----
+    {
+        std::FILE* quiet_sink = std::tmpfile();
+        LIFT_CHECK(quiet_sink != nullptr);
+        if (quiet_sink == nullptr) return;
+        lift::InputPlan quiet;
+        quiet.setClockForTest(&testNowMs);
+        quiet.attachGuestMemory(&f.m.mem());
+        LIFT_CHECK(quiet.loadText("await script title\nclick 30 40\n", "mem", &err));
+        // ⛔ 不调 setTrace：缺省档
+        for (int i = 0; i < 20; ++i) quiet.atPoint(*wm, lift::InputPoint::CursorPos);
+        const std::string q = readSink(quiet_sink);
+        LIFT_CHECK(q.empty());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(quiet.fired()), 1);  // 配方本身照旧施加
+        (void)quiet.releaseAll(*wm);
+        std::fclose(quiet_sink);
+    }
+    // ---- ③ forced 腿：不推进采样 ⇒ 兜底抬起那一行 `reason=forced`（+ 采样数没动）----
+    {
+        std::FILE* fsink = std::tmpfile();
+        LIFT_CHECK(fsink != nullptr);
+        if (fsink == nullptr) return;
+        lift::InputPlan forced;
+        forced.setClockForTest(&testNowMs);
+        LIFT_CHECK(forced.loadText("click 5 6\n", "mem", &err));
+        forced.setTrace(fsink);
+        forced.atPoint(*wm, lift::InputPoint::GetMsg);  // 第一拍：click 施加 + 待抬起
+        for (int i = 0; i < 20 && forced.pendingReleases() > 0; ++i) {
+            forced.atPoint(*wm, lift::InputPoint::GetMsg);
+        }
+        const std::string t3 = readSink(fsink);
+        LIFT_CHECK(t3.find("plan:mem:1 applied kind=click") != std::string::npos);
+        LIFT_CHECK(t3.find("reason=forced") != std::string::npos);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(forced.pendingReleases()), 0);
+        std::fclose(fsink);
+    }
+    std::fclose(sink);
+}
+
+
 
 // =====================================================================================
 // 判据 ⑥ · 能力面只有一份：行尾 `timeout` 在本臂（读点臂）**到期** ⇒ 失败并点名
@@ -971,5 +1078,6 @@ int main() {
     caseParseErrors();
     caseCoordinateScale();
     caseForcedRelease();
+    caseTrace();
     return lift_test::finish("input-plan-read-points");
 }

@@ -162,5 +162,7 @@ enum class RecipeOutcome : std::uint8_t {
 //   ⛔ 不许只打一行警告仍 exit 0 —— 那正是"配方没走完"变成假绿面的形状。
 constexpr int kRecipeIncompleteExitCode = 5;
 int recipeOutcomeExitCode(RecipeOutcome o);
+// 名字（fault 摘要 / 失败报告用；**唯一一份**）。`Running` = "跑完了但还有指令没消费"。
+const char* recipeOutcomeName(RecipeOutcome o);
 
 }  // namespace lift
