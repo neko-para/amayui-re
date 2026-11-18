@@ -43,7 +43,574 @@ thread_local FaultTextHook g_text_hook = nullptr;
 thread_local void* g_text_ctx = nullptr;
 
 std::uint64_t g_fault_count = 0;
+
+// ---- fault 时的 guest 内存 dump（`LIFT_FAULT_DUMP`；进程级，启动期写一次、之后只读）----
+// ★ 为什么不加锁 / 不用 atomic：写发生在起音频线程（`AotHost::init`）之前（`aot_main` 的调用点），
+//   thread 创建即 happens-before；fault 路径只读。⚠ 若将来有人把安装挪进 `run()`，这条要重审。
+FaultDumpProgram g_dump{};
 }  // namespace
+
+// ---------------------------------------------------------------------------------------
+// fault 诊断的两块新输出（BUG-32）：`fault ea` 行 + opt-in guest 内存 dump
+// ★ 约束：两者都可能在**信号上下文**里被调用 ⇒ 只 fprintf / committed() / memcpy（无分配、无锁）。
+// ---------------------------------------------------------------------------------------
+namespace {
+
+const char* faultAccessName(FaultAccess access) {
+    switch (access) {
+        case FaultAccess::Read: return "READ";
+        case FaultAccess::Write: return "WRITE";
+        case FaultAccess::Execute: return "EXEC";
+        case FaultAccess::Unknown: break;
+    }
+    return "unknown";
+}
+
+// `fault ea` 行：平台异常地址 → guest EA（host − base），并把**换算依据**打在同一行（人复核用）。
+// ★ 没有 guest 空间 / 地址不在其中 ⇒ 如实打一句，⛔ 不编造 0（0 是合法 EA，编造会把排查带偏）。
+void printFaultEa(const PlatformFault* plat, std::FILE* out) {
+    const void* const base =
+        (g_memory && g_memory->reserved()) ? static_cast<const void*>(g_memory->host(0)) : nullptr;
+    if (plat == nullptr || !inGuestSpace(base, plat->host_addr)) {
+        std::fprintf(out, "  fault ea   : (平台 fault 地址无法换算成 guest EA)\n");
+        return;
+    }
+    const std::uintptr_t host_base = reinterpret_cast<std::uintptr_t>(base);
+    // inGuestSpace 保证差值 < 4 GiB ⇒ 截断成 uint32_t 安全（64 位 guest 空间要重审）。
+    const std::uint32_t ea = static_cast<std::uint32_t>(plat->host_addr - host_base);
+    const Region* const region = g_memory->regionOf(ea);
+    std::fprintf(out, "  fault ea   : 0x%08X  (host 0x%llX - base 0x%llX)  region=%s  dir=%s\n",
+                 static_cast<unsigned>(ea), static_cast<unsigned long long>(plat->host_addr),
+                 static_cast<unsigned long long>(host_base),
+                 region != nullptr ? regionKindName(region->kind) : "(未登记：这段不属于任何已声明的区域)",
+                 faultAccessName(plat->access));
+}
+
+// hexdump：16 B/行（最多 64 行 = 1024 B 的上限）；字节用大写 hex，EA 用 8 位。
+void printDumpBytes(std::FILE* out, std::uint32_t ea, const std::uint8_t* data, std::uint32_t len) {
+    for (std::uint32_t off = 0; off < len; ++off) {
+        if (off % 16u == 0) {
+            if (off != 0) std::fputc('\n', out);
+            std::fprintf(out, "%08X: ", static_cast<unsigned>(ea + off));
+        } else {
+            std::fputc(' ', out);
+        }
+        std::fprintf(out, "%02X", static_cast<unsigned>(data[off]));
+    }
+    std::fputc('\n', out);
+}
+
+// EA：纯 hex（`0x` 可省）——与 `aot_main.cpp` 的 `parseU32Hex` 同口径（那份在匿名 namespace）。
+bool parseHexU32(const char* s, std::uint32_t* out) {
+    if (s == nullptr || s[0] == '\0') return false;
+    char* end = nullptr;
+    const unsigned long long v = std::strtoull(s, &end, 16);
+    if (end == s || *end != '\0' || v > 0xFFFFFFFFull) return false;
+    *out = static_cast<std::uint32_t>(v);
+    return true;
+}
+
+// LEN：十进制；`0x` 前缀 = hex。
+bool parseDecU32(const char* s, std::uint32_t* out) {
+    if (s == nullptr || s[0] == '\0') return false;
+    const int base = (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) ? 16 : 10;
+    char* end = nullptr;
+    const unsigned long long v = std::strtoull(s, &end, base);
+    if (end == s || *end != '\0' || v > 0xFFFFFFFFull) return false;
+    *out = static_cast<std::uint32_t>(v);
+    return true;
+}
+
+}  // namespace
+
+void setFaultDumpProgram(const FaultDumpProgram& p) { g_dump = p; }
+
+bool parseFaultDumpSpec(const char* spec, FaultDumpProgram* out, char* err, std::size_t err_len) {
+    if (out == nullptr) return false;
+    *out = FaultDumpProgram{};
+    if (spec == nullptr || spec[0] == '\0') return true;  // 空 spec = 不 dump（shell 里 `VAR=` 常见）
+    const std::string text(spec);
+    constexpr std::size_t kMaxSpecChars = 1024;
+    if (text.size() > kMaxSpecChars) {
+        if (err != nullptr && err_len != 0) {
+            std::snprintf(err, err_len, "LIFT_FAULT_DUMP: spec 超过 %zu 字符（收到 %zu）", kMaxSpecChars,
+                          text.size());
+        }
+        return false;
+    }
+    std::uint32_t total = 0;
+    std::size_t begin = 0;
+    std::uint32_t index = 0;
+    while (true) {
+        const std::size_t comma = text.find(',', begin);
+        const std::string seg =
+            text.substr(begin, comma == std::string::npos ? std::string::npos : comma - begin);
+        ++index;
+        if (index > FaultDumpProgram::kMaxRanges) {
+            if (err != nullptr && err_len != 0) {
+                std::snprintf(err, err_len, "LIFT_FAULT_DUMP: 第 %u 段：段数超过 %u",
+                              static_cast<unsigned>(index),
+                              static_cast<unsigned>(FaultDumpProgram::kMaxRanges));
+            }
+            return false;
+        }
+        const std::size_t colon = seg.find(':');
+        if (colon == std::string::npos) {
+            if (err != nullptr && err_len != 0) {
+                std::snprintf(err, err_len,
+                              "LIFT_FAULT_DUMP: 第 %u 段缺少 ':'（形如 0x1005AB58:64 / 0x1005AB58:*64）",
+                              static_cast<unsigned>(index));
+            }
+            return false;
+        }
+        const std::string ea_text = seg.substr(0, colon);
+        // 冒号之后 = `<LEN>` / `*<LEN>` / `*<delta>:<LEN>` / `4*<LEN>`
+        std::string tail = seg.substr(colon + 1);
+        bool follow = false;
+        std::int32_t delta = 0;
+        if (!tail.empty() && tail[0] == '*') {
+            follow = true;
+            tail.erase(0, 1);
+            // `*<delta>:<LEN>`：delta 是**十进制带符号**整数；没有第二个冒号 ⇒ 老语法 `*LEN`（delta=0）
+            const std::size_t sep = tail.find(':');
+            if (sep != std::string::npos) {
+                const std::string delta_text = tail.substr(0, sep);
+                char* dend = nullptr;
+                const long long d = std::strtoll(delta_text.c_str(), &dend, 10);
+                if (delta_text.empty() || dend == delta_text.c_str() || *dend != '\0') {
+                    if (err != nullptr && err_len != 0) {
+                        std::snprintf(err, err_len,
+                                      "LIFT_FAULT_DUMP: 第 %u 段：delta 不是合法十进制整数（`%s`）",
+                                      static_cast<unsigned>(index), seg.c_str());
+                    }
+                    return false;
+                }
+                if (d < -FaultDumpProgram::kMaxFollowDelta || d > FaultDumpProgram::kMaxFollowDelta) {
+                    if (err != nullptr && err_len != 0) {
+                        std::snprintf(err, err_len,
+                                      "LIFT_FAULT_DUMP: 第 %u 段：delta 必须在 -%d..+%d（收到 `%s`）",
+                                      static_cast<unsigned>(index),
+                                      static_cast<int>(FaultDumpProgram::kMaxFollowDelta),
+                                      static_cast<int>(FaultDumpProgram::kMaxFollowDelta), seg.c_str());
+                    }
+                    return false;
+                }
+                delta = static_cast<std::int32_t>(d);
+                tail = tail.substr(sep + 1);
+            }
+        } else {
+            const std::size_t star = tail.find('*');
+            if (star != std::string::npos) {
+                // `EA:4*LEN` 是 `EA:*LEN` 的别名（只许 4、只许 delta=0；`4*-8:64` 不是合法写法）
+                if (tail.compare(0, star, "4") != 0 || tail.find(':', star + 1) != std::string::npos) {
+                    if (err != nullptr && err_len != 0) {
+                        std::snprintf(err, err_len, "LIFT_FAULT_DUMP: 第 %u 段：EA/长度不是合法数字（`%s`）",
+                                      static_cast<unsigned>(index), seg.c_str());
+                    }
+                    return false;
+                }
+                follow = true;
+                tail.erase(0, star + 1);
+            }
+        }
+        std::uint32_t ea = 0;
+        std::uint32_t len = 0;
+        if (!parseHexU32(ea_text.c_str(), &ea) || !parseDecU32(tail.c_str(), &len)) {
+            if (err != nullptr && err_len != 0) {
+                std::snprintf(err, err_len, "LIFT_FAULT_DUMP: 第 %u 段：EA/长度不是合法数字（`%s`）",
+                              static_cast<unsigned>(index), seg.c_str());
+            }
+            return false;
+        }
+        if (len < 1 || len > FaultDumpProgram::kMaxRangeLen) {
+            if (err != nullptr && err_len != 0) {
+                std::snprintf(err, err_len, "LIFT_FAULT_DUMP: 第 %u 段：长度必须在 1..%u（收到 %u）",
+                              static_cast<unsigned>(index),
+                              static_cast<unsigned>(FaultDumpProgram::kMaxRangeLen),
+                              static_cast<unsigned>(len));
+            }
+            return false;
+        }
+        if (static_cast<std::uint64_t>(ea) + len > GuestMemory::kSpace) {
+            if (err != nullptr && err_len != 0) {
+                std::snprintf(err, err_len, "LIFT_FAULT_DUMP: 第 %u 段：EA+LEN 超过 4 GiB",
+                              static_cast<unsigned>(index));
+            }
+            return false;
+        }
+        total += len;
+        if (total > FaultDumpProgram::kMaxTotalBytes) {
+            if (err != nullptr && err_len != 0) {
+                std::snprintf(err, err_len, "LIFT_FAULT_DUMP: 第 %u 段：总字节数超过 %u",
+                              static_cast<unsigned>(index),
+                              static_cast<unsigned>(FaultDumpProgram::kMaxTotalBytes));
+            }
+            return false;
+        }
+        out->ranges[out->count].ea = ea;
+        out->ranges[out->count].len = len;
+        out->ranges[out->count].follow = follow;
+        out->ranges[out->count].delta = delta;
+        ++out->count;
+        if (comma == std::string::npos) break;
+        begin = comma + 1;
+    }
+    return true;
+}
+
+bool initFaultDumpFromEnv(char* err, std::size_t err_len) {
+    const char* const spec = std::getenv("LIFT_FAULT_DUMP");
+    FaultDumpProgram program{};
+    if (spec != nullptr && spec[0] != '\0') {
+        if (!parseFaultDumpSpec(spec, &program, err, err_len)) return false;
+    }
+    setFaultDumpProgram(program);
+    return true;
+}
+
+void printFaultDump(std::FILE* out) {
+    if (out == nullptr || g_dump.count == 0) return;
+    if (!g_memory || !g_memory->reserved()) {
+        std::fprintf(out, "  dump       : (guest 空间未预留，无法 dump)\n");
+        return;
+    }
+    for (std::uint32_t i = 0; i < g_dump.count; ++i) {
+        const FaultDumpRange& range = g_dump.ranges[i];
+        const std::uint32_t len = range.len;
+        // ★ 每段都先 committed(...) 再 memcpy：一段坏线索不能吞掉其余线索（失败只打一行 ✗ 并继续）。
+        if (range.follow) {
+            // 段描述（fault 上下文：定长缓冲 + snprintf，不分配）：delta=0 时与老语法逐字相同。
+            char desc[48];
+            if (range.delta != 0) {
+                std::snprintf(desc, sizeof(desc), "0x%08X:*%d:%u", static_cast<unsigned>(range.ea),
+                              static_cast<int>(range.delta), static_cast<unsigned>(len));
+            } else {
+                std::snprintf(desc, sizeof(desc), "0x%08X:*%u", static_cast<unsigned>(range.ea),
+                              static_cast<unsigned>(len));
+            }
+            if (!g_memory->committed(range.ea, 4)) {
+                std::fprintf(out, "  dump       : [%u] %s  ✗ 指针所在页未提交（不跟随）\n",
+                             static_cast<unsigned>(i), desc);
+                continue;
+            }
+            std::uint32_t ptr = 0;
+            std::memcpy(&ptr, g_memory->host(range.ea), 4);
+            if (ptr == 0) {
+                std::fprintf(out, "  dump       : [%u] %s  ✗ 指针为 0（不跟随）\n", static_cast<unsigned>(i),
+                             desc);
+                continue;
+            }
+            // ★ `ptr + delta` 按**无符号 32 位**目标判定：下溢 / 越过 4 GiB ⇒ ✗ 并继续
+            //   （⛔ 不让一个坏线索把整条 dump 变成二次 fault）。
+            const std::int64_t target64 = static_cast<std::int64_t>(ptr) + range.delta;
+            if (target64 < 0 || target64 + static_cast<std::int64_t>(len) >
+                                    static_cast<std::int64_t>(GuestMemory::kSpace)) {
+                std::fprintf(out, "  dump       : [%u] %s  ✗ ptr+delta 越界（不跟随）\n",
+                             static_cast<unsigned>(i), desc);
+                continue;
+            }
+            const std::uint32_t target = static_cast<std::uint32_t>(target64);
+            if (!g_memory->committed(target, len)) {
+                std::fprintf(out, "  dump       : [%u] %s  ✗ 指针 0x%08X 指向未提交页（不跟随）\n",
+                             static_cast<unsigned>(i), desc, static_cast<unsigned>(target));
+                continue;
+            }
+            if (range.delta != 0) {
+                std::fprintf(out, "  dump       : [%u] %s  → ptr=0x%08X delta=%d\n", static_cast<unsigned>(i),
+                             desc, static_cast<unsigned>(ptr), static_cast<int>(range.delta));
+            } else {
+                std::fprintf(out, "  dump       : [%u] %s  → ptr=0x%08X\n", static_cast<unsigned>(i), desc,
+                             static_cast<unsigned>(ptr));
+            }
+            std::uint8_t buf[FaultDumpProgram::kMaxRangeLen];
+            std::memcpy(buf, g_memory->host(target), len);
+            printDumpBytes(out, target, buf, len);
+        } else {
+            if (!g_memory->committed(range.ea, len)) {
+                std::fprintf(out, "  dump       : [%u] 0x%08X + %u  ✗ 未提交（整段拒绝读）\n",
+                             static_cast<unsigned>(i), static_cast<unsigned>(range.ea),
+                             static_cast<unsigned>(len));
+                continue;
+            }
+            std::fprintf(out, "  dump       : [%u] 0x%08X + %u\n", static_cast<unsigned>(i),
+                         static_cast<unsigned>(range.ea), static_cast<unsigned>(len));
+            std::uint8_t buf[FaultDumpProgram::kMaxRangeLen];
+            std::memcpy(buf, g_memory->host(range.ea), len);
+            printDumpBytes(out, range.ea, buf, len);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// opt-in 的 guest / shim **写观察**（`LIFT_WATCH`；BUG-32 的"谁在 P-8 写了那 16 字节"）
+// ★ 与 dump 同一条启动期口径：解析 / 安装全部在起线程之前完成；热路径只有一次 `watchOn()` 判断。
+// ★ follow 的观察段是**运行期**追加的（只增不改）⇒ release/acquire 发布：读者看到 count 就一定
+//   看到该段的字段（写者在 `count.store` 之前写好字段）。追加只发生在 follow 命中时（罕见），
+//   用一把进程级 spinlock 串行化两个线程同时追加。
+// ★ 为什么 pending 是 `thread_local`：命中 follow 的那次 store 与"下一次写"必须在**同一线程**上
+//   才谈得上 happens-before（guest store 全部在主线程；feeder 的 shim 写各自一份 pending）。
+// ---------------------------------------------------------------------------------------
+std::atomic<std::uint32_t> g_watch_count{0};
+
+namespace {
+
+FaultWatchRange g_watch_ranges[FaultWatchProgram::kMax];
+std::atomic_flag g_watch_append_lock = ATOMIC_FLAG_INIT;
+thread_local bool t_watch_pending = false;          // follow 待补读（store 还没发生）
+thread_local std::uint32_t t_watch_pending_ea = 0;  // 要补读的那个 EA（follow 段的 EA）
+// 当前 shim 名（`ShimRegistry::invoke` 在 `def->fn` 前后设置/恢复；见 memory.h 的契约）。
+// 只在 `LIFT_WATCH` 开档时被写 ⇒ 缺省档一次都不碰。
+thread_local const char* t_watch_shim_name = nullptr;
+
+void watchLock() {
+    while (g_watch_append_lock.test_and_set(std::memory_order_acquire)) {
+    }
+}
+void watchUnlock() { g_watch_append_lock.clear(std::memory_order_release); }
+
+// `[ea, ea+n)` 与 `[r.ea, r.ea+r.len)` 相交吗（用 64 位算 ea+n，⛔ 不让 32 位回绕）
+bool watchIntersects(std::uint32_t ea, std::uint32_t n, const FaultWatchRange& r) {
+    const std::uint64_t wbeg = ea;
+    const std::uint64_t wend = static_cast<std::uint64_t>(ea) + n;
+    const std::uint64_t rbeg = r.ea;
+    const std::uint64_t rend = static_cast<std::uint64_t>(r.ea) + r.len;
+    return wbeg < rend && rbeg < wend;
+}
+
+bool watchAnyHit(std::uint32_t ea, std::uint32_t n) {
+    const std::uint32_t count = g_watch_count.load(std::memory_order_acquire);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        if (g_watch_ranges[i].armed && watchIntersects(ea, n, g_watch_ranges[i])) return true;
+    }
+    return false;
+}
+
+const FaultWatchRange* watchFollowHit(std::uint32_t ea, std::uint32_t n) {
+    const std::uint32_t count = g_watch_count.load(std::memory_order_acquire);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const FaultWatchRange& r = g_watch_ranges[i];
+        if (r.armed && r.follow && watchIntersects(ea, n, r)) return &r;
+    }
+    return nullptr;
+}
+
+// 追加一段（follow 命中时）。返回 false = 观察集已满（`kMax` = 8 段）⇒ 调用方如实打 ✗。
+// 已 armed 的同一段 ⇒ 幂等返回 true（重复写同一个槽不该把 8 段预算吃光）。
+bool watchArmRange(std::uint32_t ea, std::uint32_t len) {
+    watchLock();
+    const std::uint32_t count = g_watch_count.load(std::memory_order_relaxed);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        if (g_watch_ranges[i].ea == ea && g_watch_ranges[i].len == len) {
+            watchUnlock();
+            return true;
+        }
+    }
+    if (count >= FaultWatchProgram::kMax) {
+        watchUnlock();
+        return false;
+    }
+    g_watch_ranges[count] = FaultWatchRange{ea, len, false, true};
+    g_watch_count.store(count + 1, std::memory_order_release);  // 字段先写好，再发布
+    watchUnlock();
+    return true;
+}
+
+// follow 的补读：在**本次写的最开头**调用（上一次命中时的 store 现在已经完成）。
+// ★ 只读 `committed()` 之后的 `host()`，⛔ 不经过 `rd32`（那会写 `g_access`，把 fault 归因弄脏）。
+void watchCompleteFollow() {
+    if (!t_watch_pending) return;
+    t_watch_pending = false;
+    const std::uint32_t slot = t_watch_pending_ea;
+    if (!g_memory || !g_memory->reserved() || !g_memory->committed(slot, 4)) {
+        std::fprintf(stderr, "watch      : follow 0x%08X → ✗ 槽所在页未提交（不 arm）\n",
+                     static_cast<unsigned>(slot));
+        return;
+    }
+    std::uint32_t ptr = 0;
+    std::memcpy(&ptr, g_memory->host(slot), 4);
+    if (ptr == 0) {
+        std::fprintf(stderr, "watch      : follow 0x%08X → ✗ 指针为 0（不 arm）\n",
+                     static_cast<unsigned>(slot));
+        return;
+    }
+    // P-8 是块的**头**、P+8 是对象首 4 字节之后 ⇒ 两边都必须落在 guest 空间内（32 位无符号）。
+    if (ptr < 8u || static_cast<std::uint64_t>(ptr) + 8u > GuestMemory::kSpace) {
+        std::fprintf(stderr, "watch      : follow 0x%08X → ptr=0x%08X  ✗ P-8/P+8 越过 guest 空间（不 arm）\n",
+                     static_cast<unsigned>(slot), static_cast<unsigned>(ptr));
+        return;
+    }
+    const std::uint32_t begin = ptr - 8u;
+    const std::uint32_t end = ptr + 8u;
+    if (!g_memory->committed(begin, 16)) {
+        std::fprintf(stderr,
+                     "watch      : follow 0x%08X → ptr=0x%08X  ✗ [0x%08X,0x%08X) 未提交（不 arm）\n",
+                     static_cast<unsigned>(slot), static_cast<unsigned>(ptr), static_cast<unsigned>(begin),
+                     static_cast<unsigned>(end));
+        return;
+    }
+    if (!watchArmRange(begin, 16)) {
+        std::fprintf(stderr,
+                     "watch      : follow 0x%08X → ptr=0x%08X  ✗ 观察区间已满（%u 段，不 arm）\n",
+                     static_cast<unsigned>(slot), static_cast<unsigned>(ptr),
+                     static_cast<unsigned>(FaultWatchProgram::kMax));
+        return;
+    }
+    std::fprintf(stderr, "watch      : follow 0x%08X → ptr=0x%08X; arm [0x%08X,0x%08X)\n",
+                 static_cast<unsigned>(slot), static_cast<unsigned>(ptr), static_cast<unsigned>(begin),
+                 static_cast<unsigned>(end));
+}
+
+// 两个观察点的共同实现（`guest` 只决定 `block=` 那一截：guest 打 `lift_cc_<块EA>`，shim 打 `shim`）。
+void watchWrite(std::uint32_t block_ea, std::uint32_t ea, std::uint32_t n, bool guest) {
+    if (n == 0) return;
+    // ① 先补上一次 follow（它的 store 已经完成）——顺序就是判据：**先** arm，**再**判本次写。
+    watchCompleteFollow();
+    // ② 本次写命中 follow 段 ⇒ 只记 pending（store 还没发生，此刻读到的还是旧值）。
+    if (const FaultWatchRange* const f = watchFollowHit(ea, n); f != nullptr) {
+        t_watch_pending = true;
+        t_watch_pending_ea = f->ea;
+        std::fprintf(stderr,
+                     "watch      : follow pending 0x%08X（store 前记账；下一次写开头补读新值）\n",
+                     static_cast<unsigned>(f->ea));
+    }
+    // ③ 用（可能刚更新过的）观察集判本次写。
+    if (!watchAnyHit(ea, n)) return;
+    if (guest) {
+        std::fprintf(stderr, "watch      : WRITE 0x%08X n=%u block=lift_cc_%08X\n",
+                     static_cast<unsigned>(ea), static_cast<unsigned>(n),
+                     static_cast<unsigned>(block_ea));
+    } else {
+        // 名字由 `ShimRegistry::invoke` 设（嵌套时恢复上一层）；未设 / 空 ⇒ `?`（⛔ 不编造名字）。
+        std::fprintf(stderr, "watch      : WRITE 0x%08X n=%u shim=%s\n", static_cast<unsigned>(ea),
+                     static_cast<unsigned>(n), t_watch_shim_name != nullptr ? t_watch_shim_name : "?");
+    }
+}
+
+}  // namespace
+
+void watchGuestWrite(std::uint32_t block_ea, std::uint32_t ea, std::uint32_t n) {
+    watchWrite(block_ea, ea, n, true);
+}
+void watchShimWrite(std::uint32_t ea, std::uint32_t n) { watchWrite(0, ea, n, false); }
+
+void setWatchShimName(const char* name) {
+    // 空串与 nullptr 同义（⛔ 不让 `shim=` 后面空着：那在日志里看起来像"名字丢了"）。
+    t_watch_shim_name = (name != nullptr && name[0] != '\0') ? name : nullptr;
+}
+const char* watchShimName() { return t_watch_shim_name; }
+
+void setFaultWatchProgram(const FaultWatchProgram& p) {
+    watchLock();
+    std::uint32_t n = 0;
+    const std::uint32_t limit = p.count < FaultWatchProgram::kMax ? p.count : FaultWatchProgram::kMax;
+    for (std::uint32_t i = 0; i < limit; ++i) {
+        if (!p.r[i].armed) continue;  // `armed` 是唯一判据（解析出的段恒 true）
+        g_watch_ranges[n++] = p.r[i];
+    }
+    g_watch_count.store(n, std::memory_order_release);
+    watchUnlock();
+    t_watch_pending = false;  // 换程序 ⇒ 本线程的待补读作废（其它线程各自那份在下次命中时覆盖）
+}
+
+bool parseFaultWatchSpec(const char* spec, FaultWatchProgram* out, char* err, std::size_t err_len) {
+    if (out == nullptr) return false;
+    *out = FaultWatchProgram{};
+    if (spec == nullptr || spec[0] == '\0') return true;  // 空 spec = 关闭（shell 里 `VAR=` 常见）
+    const std::string text(spec);
+    constexpr std::size_t kMaxSpecChars = 1024;
+    if (text.size() > kMaxSpecChars) {
+        if (err != nullptr && err_len != 0) {
+            std::snprintf(err, err_len, "LIFT_WATCH: spec 超过 %zu 字符（收到 %zu）", kMaxSpecChars,
+                          text.size());
+        }
+        return false;
+    }
+    std::size_t begin = 0;
+    std::uint32_t index = 0;
+    while (true) {
+        const std::size_t comma = text.find(',', begin);
+        const std::string seg =
+            text.substr(begin, comma == std::string::npos ? std::string::npos : comma - begin);
+        ++index;
+        if (index > FaultWatchProgram::kMax) {
+            if (err != nullptr && err_len != 0) {
+                std::snprintf(err, err_len, "LIFT_WATCH: 第 %u 段：段数超过 %u", static_cast<unsigned>(index),
+                              static_cast<unsigned>(FaultWatchProgram::kMax));
+            }
+            return false;
+        }
+        const std::size_t colon = seg.find(':');
+        if (colon == std::string::npos) {
+            if (err != nullptr && err_len != 0) {
+                std::snprintf(err, err_len,
+                              "LIFT_WATCH: 第 %u 段缺少 ':'（形如 0x1005AB58:4 / 0x1005AB58:4>follow）",
+                              static_cast<unsigned>(index));
+            }
+            return false;
+        }
+        std::string len_text = seg.substr(colon + 1);
+        bool follow = false;
+        const std::size_t gt = len_text.find('>');
+        if (gt != std::string::npos) {
+            // `>follow` 只许出现在末尾且拼写完整（⛔ 不静默当成普通段：那会把"跟随一层"静默关掉）。
+            if (len_text.compare(gt + 1, std::string::npos, "follow") != 0) {
+                if (err != nullptr && err_len != 0) {
+                    std::snprintf(err, err_len, "LIFT_WATCH: 第 %u 段：'>' 之后只许是 follow（`%s`）",
+                                  static_cast<unsigned>(index), seg.c_str());
+                }
+                return false;
+            }
+            follow = true;
+            len_text.erase(gt);
+        }
+        std::uint32_t ea = 0;
+        std::uint32_t len = 0;
+        if (!parseHexU32(seg.substr(0, colon).c_str(), &ea) || !parseDecU32(len_text.c_str(), &len)) {
+            if (err != nullptr && err_len != 0) {
+                std::snprintf(err, err_len, "LIFT_WATCH: 第 %u 段：EA/长度不是合法数字（`%s`）",
+                              static_cast<unsigned>(index), seg.c_str());
+            }
+            return false;
+        }
+        if (len < 1 || len > FaultWatchProgram::kMaxLen) {
+            if (err != nullptr && err_len != 0) {
+                std::snprintf(err, err_len, "LIFT_WATCH: 第 %u 段：长度必须在 1..%u（收到 %u）",
+                              static_cast<unsigned>(index),
+                              static_cast<unsigned>(FaultWatchProgram::kMaxLen), static_cast<unsigned>(len));
+            }
+            return false;
+        }
+        if (follow && len != 4) {
+            if (err != nullptr && err_len != 0) {
+                std::snprintf(err, err_len, "LIFT_WATCH: 第 %u 段：follow 只支持 LEN=4（收到 %u）",
+                              static_cast<unsigned>(index), static_cast<unsigned>(len));
+            }
+            return false;
+        }
+        if (static_cast<std::uint64_t>(ea) + len > GuestMemory::kSpace) {
+            if (err != nullptr && err_len != 0) {
+                std::snprintf(err, err_len, "LIFT_WATCH: 第 %u 段：EA+LEN 超过 4 GiB",
+                              static_cast<unsigned>(index));
+            }
+            return false;
+        }
+        out->r[out->count] = FaultWatchRange{ea, len, follow, true};
+        ++out->count;
+        if (comma == std::string::npos) break;
+        begin = comma + 1;
+    }
+    return true;
+}
+
+bool initFaultWatchFromEnv(char* err, std::size_t err_len) {
+    const char* const spec = std::getenv("LIFT_WATCH");
+    FaultWatchProgram program{};
+    if (spec != nullptr && spec[0] != '\0') {
+        if (!parseFaultWatchSpec(spec, &program, err, err_len)) return false;
+    }
+    setFaultWatchProgram(program);
+    return true;
+}
 
 // ★ 进程级关掉"崩了就弹窗"（见 memory.h 的注释）。幂等；POSIX 上是空操作。
 //   ★ 关键：`_set_abort_behavior(0, …)` 关的是**整个进程**的 abort 行为 ⇒ 只调一次就覆盖
@@ -115,17 +682,28 @@ void dumpRegions(const std::vector<Region>& regions, std::FILE* out) {
 // ---------------------------------------------------------------------------------------
 // fault：打印诊断 → 退出。**不是**可恢复的异常（M1 不做 SEH 展开，见 plan §9 R1）。
 // ---------------------------------------------------------------------------------------
-[[noreturn]] void guestFault(const AccessSite& site, const char* why) {
+[[noreturn]] void guestFault(const AccessSite& site, const char* why, const PlatformFault* plat) {
     ++g_fault_count;
     std::fprintf(stderr, "\n=== guest memory fault ===\n");
     std::fprintf(stderr, "  why        : %s\n", why ? why : "(unspecified)");
-    std::fprintf(stderr, "  access     : %s 0x%08X  size=%u\n", site.write ? "WRITE" : "READ", site.ea,
-                 static_cast<unsigned>(site.size));
+    // ★ `access` 行**逐字不变**（safe-mode / shim 路径照旧）；**只有平台 fault** 时追加后缀：
+    //   那种场合 `g_access` 是"最近一次 shim 侧访存"，带着它冒充 fault 会把排查方向带偏。
+    const char* const access_suffix =
+        plat != nullptr
+            ? "  ← 最近一次 guest 访存（shim 侧记录）；不是本次 fault（本次见 fault ea）"
+            : "";
+    std::fprintf(stderr, "  access     : %s 0x%08X  size=%u%s\n", site.write ? "WRITE" : "READ", site.ea,
+                 static_cast<unsigned>(site.size), access_suffix);
     if (g_memory) {
         const Region* r = g_memory->regionOf(site.ea);
         std::fprintf(stderr, "  region(ea) : %s\n",
                      r ? regionKindName(r->kind) : "(未登记：这段不属于任何已声明的区域)");
     }
+    // ★ 本次 fault 的 guest EA（只有平台 handler 知道异常地址 ⇒ `plat != nullptr` 是结构性条件；
+    //   ⛔ 不要改成无条件调用：safe-mode 没有平台地址，打了就是编造一行假的现场）。
+    if (plat != nullptr) printFaultEa(plat, stderr);
+    // ★ opt-in 内存 dump（缺省 count=0 ⇒ 一条都不多打）。
+    if (g_dump.count != 0) printFaultDump(stderr);
     if (g_hook) g_hook(site);
     // ★ 追加文本（`--input-plan` 的摘要；没有登记 ⇒ 一条也不打 ⇒ 缺省档的 fault 文本逐字不变）。
     //   放在现场钩子之后：现场先出（人第一眼要的是寄存器 / 栈），配方进度随后。
@@ -222,7 +800,19 @@ LONG CALLBACK vectoredHandler(EXCEPTION_POINTERS* info) {
     if (inGuestSpace(guest_base, fault_addr)) {
         std::snprintf(why, sizeof(why), "平台异常 0x%08lX @ host 0x%llX（guest 空间内未提交页）",
                       static_cast<unsigned long>(code), static_cast<unsigned long long>(fault_addr));
-        guestFault(g_access, why);
+        // ★ 方向只有 Windows 给得出：ExceptionInformation[0] = 0 读 / 1 写 / 8 执行。
+        //   `NumberParameters < 2` ⇒ 连 ExceptionInformation[1]（异常地址）都不可信 ⇒ 方向也标 unknown。
+        FaultAccess access = FaultAccess::Unknown;
+        if (info->ExceptionRecord->NumberParameters >= 2) {
+            switch (info->ExceptionRecord->ExceptionInformation[0]) {
+                case 0: access = FaultAccess::Read; break;
+                case 1: access = FaultAccess::Write; break;
+                case 8: access = FaultAccess::Execute; break;
+                default: break;  // 其它/未知 ⇒ unknown（⛔ 不折叠成 READ）
+            }
+        }
+        const PlatformFault plat{fault_addr, access};
+        guestFault(g_access, why, &plat);
     }
     // 不在 guest 空间 ⇒ 宿主自己的 bug：走 host 诊断并 `_Exit(4)`。
     // ⛔ 不 return EXCEPTION_CONTINUE_SEARCH：那等于把 AV 再抛回系统（与本 handler 的语义不一致），
@@ -265,7 +855,10 @@ void segvHandler(int sig, siginfo_t* info, void*) {
     if (inGuestSpace(guest_base, fault_addr)) {
         std::snprintf(why, sizeof(why), "SIGSEGV @ host %p（guest 空间内未提交页）",
                       reinterpret_cast<const void*>(fault_addr));
-        guestFault(g_access, why);
+        // POSIX 的信号上下文没有访存方向（`si_code` 只区分 MAPERR / ACCERR，不区分读/写/执行）
+        // ⇒ 恒 unknown（⛔ 不猜成 READ）。
+        const PlatformFault plat{fault_addr, FaultAccess::Unknown};
+        guestFault(g_access, why, &plat);
     }
     // 不在 guest 空间 ⇒ 宿主自己的 bug：走 host 诊断并 `_Exit(4)`。
     // ⛔ 不 return（返回会回到同一条 fault 指令 ⇒ 无限重入）。
@@ -496,12 +1089,16 @@ void GuestMemory::readBytes(std::uint32_t ea, void* dst, std::size_t n) {
 void GuestMemory::writeBytes(std::uint32_t ea, const void* src, std::size_t n) {
     g_access = {ea, static_cast<std::uint8_t>(n > 255 ? 255 : n), 1};
     if (safe_ && !committed(ea, n)) guestFault(g_access, "writeBytes 越过未提交页 (safe mode)");
+    // ★ opt-in 写观察（`LIFT_WATCH`；缺省 = 一次 load + 分支）：必须在 memcpy **之前** ——
+    //   follow 的 pending 要靠"下一次写在 store 之后开头补读"才看得到新值（见 memory.h 的契约）。
+    if (watchOn()) watchShimWrite(ea, static_cast<std::uint32_t>(n > 0xFFFFFFFFull ? 0xFFFFFFFFu : n));
     std::memcpy(base_ + ea, src, n);
 }
 
 void GuestMemory::fillBytes(std::uint32_t ea, std::uint8_t value, std::size_t n) {
     g_access = {ea, static_cast<std::uint8_t>(n > 255 ? 255 : n), 1};
     if (safe_ && !committed(ea, n)) guestFault(g_access, "fillBytes 越过未提交页 (safe mode)");
+    if (watchOn()) watchShimWrite(ea, static_cast<std::uint32_t>(n > 0xFFFFFFFFull ? 0xFFFFFFFFu : n));
     std::memset(base_ + ea, value, n);
 }
 

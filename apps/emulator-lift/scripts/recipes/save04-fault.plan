@@ -1,14 +1,15 @@
 # save04-fault.plan —— 加载 04 存档（第 5 槽）→ 教程询问选“否” → guest mem 越界（BUG-32）
 #
-# 判据：本次 run **exit 3** + `=== guest memory fault ===`（WRITE 0x1005BA8C，SC4000 wipe）。
-#   fault 文本含 eip / `lift_cc_<EA>` / 8 GPR+eflags / 32 字栈 / ebp 链 / `input-plan:` 摘要。
-#   崩溃发生在最后一个 `await position … 0x10D00` 之后的 wipe 里 ⇒ 末尾指令不再消费
-#   （`pending != 0` 是 `_Exit(3)` 的正常形状，⛔ 不是配方写错；`--time-limit` 只是看门狗）。
+# 判据：本次 run **exit 3** + `=== guest memory fault ===`。
+#   ★ 本次 fault 的 guest EA = **0x20**（`fault ea` 行；[纹理对象 vtable=0] + 0x20 的读），
+#     ⛔ 不是 `access` 行的 0x1005BA8C —— 那一行是"最近一次 shim 侧访存"（AOT lifted 访存不更新 g_access）。
+#   崩溃发生在 wipe 里；`pending != 0` 是 `_Exit(3)` 的正常形状，⛔ 不是配方写错（`--time-limit` 只是看门狗）。
+#   fault 前的最后一个门/待消费步骤见 fault 文本的 `plan-step`（⛔ 不要在这里硬编码一个会漂的位置）。
 #
 # 跑法（macOS / win32 同一份；每次全新 `--appdata`，存档从 `saves/` 复制）：
 #   cd apps/emulator-lift && ./out/emulator-lift-aot --present headless --skip-logo --audio off \
 #     --game-dir ../../links/install --appdata <私有副本> \
-#     --input-plan scripts/recipes/save04-fault.plan --max-frames 4000 --time-limit 300
+#     --input-plan scripts/recipes/save04-fault.plan --max-frames 12000 --time-limit 900
 #
 # ★ 门都落在**停点**上：SC4000 的第一道门是 `[0x5800,0x5860)`（它停在这里等输入），
 #   ⛔ 不是 `[0x5900,0x5960)`（那个位置只有点了才会到；历史配方就卡在这）。
@@ -35,6 +36,9 @@ await position SC4000 0x5920 0x5960 timeout 60000
 wait 2000
 click 500 500
 await position BUNKI 0x0B00 0x0C00 timeout 120000
+# ★ 门成立时脚本在 0x0B3C（对话框）。立刻点（run6）走 `release reason=forced`（guest 没采样到按下）；
+#   `wait 5000`（run5）会等到脚本走到 0x0AF8（对话框已不在）；`wait 2000` 是 run2/run3 成功的那一档，
+#   但 run4 仍失败 ⇒ 本配方对输入轮询时序敏感（已知偏差，见 defects#BUG-32；⛔ 不要把它当判据）。
 wait 2000
 click 640 393
 await position SC4000 0x6B00 0x6B80 timeout 120000

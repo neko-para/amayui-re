@@ -103,6 +103,12 @@ static_assert(lift::x87layout::kSegStride == sizeof(lift::X86::seg[0]),
 
 extern "C" void lift_note_write(void* cpu, std::uint32_t ea, std::uint32_t n) {
     if (!cpu) return;  // 与 noteGuestWrite 的 cache==nullptr 同口径（no-op）
+    // ★ opt-in 的 guest **写观察**（`LIFT_WATCH`；BUG-32 的"谁在 P-8 写了那 16 字节"）。
+    //   热路径只有一次 `watchOn()`（relaxed load + 分支）；缺省关闭 ⇒ 一个字节的输出都不多。
+    //   必须在 store **之前**（生成代码在 store 前 call 本函数）⇒ follow 的 pending 靠
+    //   "下一次写在 store 之后开头补读"才拿得到新值（契约见 `runtime/memory.h`）。
+    //   `cpu->eip` = 当前块 EA（lifted 代码不逐条更新 eip）⇒ 打出来就是 `lift_cc_<块EA>`。
+    if (lift::watchOn()) lift::watchGuestWrite(static_cast<lift::X86*>(cpu)->eip, ea, n);
     lift::noteGuestWrite(static_cast<lift::X86*>(cpu)->cache, ea, n);
 }
 

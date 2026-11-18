@@ -39,6 +39,28 @@ bool audioTraceEnabled() {
     static const bool on = std::getenv("LIFT_AUDIO_TRACE") != nullptr;
     return on;
 }
+
+// ★ `LIFT_WATCH` 的 shim 名作用域（契约见 `memory.h` 的 `setWatchShimName`）：
+//   `watchShimWrite` 的命中行要能回答"**哪个 shim** 写的"，所以 invoke 在 `def->fn` 前后
+//   设置/恢复本线程的名字（`def->name`；COM 方法也走这里 ⇒ 形如 `com!...::...`）。
+//   · 只在开档（`watchOn()`）时构造 ⇒ 缺省档除一次 load 外零成本；
+//   · 析构恢复**上一层**名字 ⇒ 嵌套 shim（shim 里回调 guest，guest 再调 shim）返回后
+//     外层名字仍然正确；异常路径也走析构（⛔ 不留一个悬垂/错误的名字）。
+//   ⛔ 不改 invoke 的任何语义 / 返回值：只写本线程的 `thread_local const char*`。
+struct WatchShimNameScope {
+    bool on = false;
+    const char* prev = nullptr;
+    WatchShimNameScope(bool enabled, const char* name) : on(enabled) {
+        if (!on) return;
+        prev = watchShimName();
+        setWatchShimName(name);
+    }
+    ~WatchShimNameScope() {
+        if (on) setWatchShimName(prev);
+    }
+    WatchShimNameScope(const WatchShimNameScope&) = delete;
+    WatchShimNameScope& operator=(const WatchShimNameScope&) = delete;
+};
 }  // namespace
 
 const char* convName(Conv c) {
@@ -558,6 +580,8 @@ void ShimRegistry::invoke(X86& cpu, ShimDef& def) {
         guestToken().check("shim.invoke");
         // ★ M1：计时起点在**取到令牌之后**（等令牌的时间⛔ 不进 ns，见上方注释）。
         if (shim_max_wanted) time_begin = std::chrono::steady_clock::now();
+        // ★ 给 `LIFT_WATCH` 的命中行带上"哪个 shim"（只在开档时生效；见上面的 WatchShimNameScope）。
+        const WatchShimNameScope watch_shim_name(watchOn(), local.name.c_str());
         local.fn(cpu, call);
     }
     if (shim_max_wanted) {

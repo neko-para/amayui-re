@@ -13,6 +13,7 @@
 //   这是**故意**的性能让步：先要"红得有意义"，S8 的 bench 再谈快。
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -42,6 +43,16 @@ struct AccessSite {
 
 extern thread_local AccessSite g_access;
 
+// ---- 平台 fault 地址（BUG-32 诊断：`fault ea` 行）----
+// ★ 为什么用**参数**传而不是 `thread_local`：① safe-mode 调用点没有平台地址可传 ⇒ "只在有平台地址时
+//   打 fault ea"是**结构性**保证，不靠清标志；② 不会跨 fault 留下陈旧值；③ 地址活在 handler 栈上，
+//   `_Exit(3)` 后自然消失；④ 测试可以直接驱动 `guestFault`（不必每次真崩）。
+enum class FaultAccess : std::uint8_t { Unknown = 0, Read, Write, Execute };
+struct PlatformFault {
+    std::uintptr_t host_addr = 0;  // handler 拿到的异常地址（宿主坐标）
+    FaultAccess access = FaultAccess::Unknown;
+};
+
 // fault 诊断钩子：由 Machine 安装，负责打印 EA + `.lst` 文本 + 寄存器 + guest 返回栈。
 // ★ 它会在**平台异常 / 信号上下文**里被调用 ⇒ 不许抛异常，**不许分配**（`std::string` / `new` /
 //   任何会增长缓冲的容器都不行）：只许 fprintf / 写**调用方给的**定长缓冲 / 读已加载的只读表。
@@ -49,7 +60,9 @@ extern thread_local AccessSite g_access;
 //   钩子一进异常上下文就分配。fault 侧改用 `LstIndex::textPtr`（返回内部指针，零分配）。
 using FaultHook = void (*)(const AccessSite& site);
 void setGuestFaultHook(FaultHook hook);
-[[noreturn]] void guestFault(const AccessSite& site, const char* why);
+// `plat` 缺省 `nullptr` ⇒ 现有调用点（safe mode / readBytes 等）一字不改、输出逐字不变；
+// 非空 ⇒ 追加 `fault ea` 行，并给 `access` 行加"不是本次 fault"的后缀（见 memory.cpp）。
+[[noreturn]] void guestFault(const AccessSite& site, const char* why, const PlatformFault* plat = nullptr);
 
 // fault 文本钩子：fault 路径上**追加**一段一次性文本（`REQ-01M7PG086DG4BBPA40VCVZTP4X` C）。
 // ★ 为什么需要它：`--input-plan` 的摘要原来只在 `host.run()` 返回之后打；guest fault 走
@@ -60,6 +73,87 @@ void setGuestFaultHook(FaultHook hook);
 //   去读主线程的计划对象（那是数据竞争）。没有登记 ⇒ 一条也不打 ⇒ 默认档的 fault 文本不变。
 using FaultTextHook = void (*)(void* ctx, std::FILE* out);
 void setGuestFaultTextHook(void* ctx, FaultTextHook hook);
+
+// ---- fault 时的 guest 内存 dump（opt-in：`LIFT_FAULT_DUMP=<spec>`；缺省**零输出**）----
+// ★ 解析全部在**启动期**完成（`aot_main` 早于 `AotHost::init` / 音频线程）；fault 上下文只
+//   `fprintf` + `committed()` + `memcpy` ⇒ 无分配 / 无锁（与 `FaultHook` 同一条约束）。
+// ★ 程序是**进程级**、启动期写一次：音频 feeder 线程的 fault 也要能 dump（线程创建即 happens-before，
+//   之后只读 ⇒ 不需要 atomic）。
+// ★ 为什么会缺一行也不静默：dump 被截断会让人误以为"看到的就是全部" ⇒ 超限一律启动期 exit 2。
+struct FaultDumpRange {
+    std::uint32_t ea = 0;
+    std::uint32_t len = 0;
+    bool follow = false;      // true = 先读 EA 处 4 字节当 guest 指针，再 dump `ptr + delta` 处的 len 字节
+    std::int32_t delta = 0;   // follow 时的有符号偏移（BUG-32 用 `*-8` 看块头；0 与老语法等价）
+};
+struct FaultDumpProgram {
+    static constexpr std::uint32_t kMaxRanges = 8;
+    static constexpr std::uint32_t kMaxRangeLen = 256;
+    static constexpr std::uint32_t kMaxTotalBytes = 1024;
+    static constexpr std::int32_t kMaxFollowDelta = 1024 * 1024;  // `*<delta>:` 的 |delta| 上限
+    FaultDumpRange ranges[kMaxRanges] = {};
+    std::uint32_t count = 0;
+};
+// spec = 逗号分隔的段：`EA:LEN`（EA 纯 hex，`0x` 可省；LEN 十进制，`0x` 前缀 = hex）·
+// `EA:*LEN`（跟随一层指针，delta=0）· `EA:*<delta>:LEN`（跟随并把指针加有符号 delta，|delta| ≤ 1 MiB；
+// `*-8:16` = 从 ptr-8 起 dump）· `EA:4*LEN`（`*` 的别名，只许 delta=0）。空 spec ⇒ true + count=0。
+// 失败 ⇒ false，并把**第几段 / 原因**写进 `err`（上限见 FaultDumpProgram；⛔ 不静默截断）。
+bool parseFaultDumpSpec(const char* spec, FaultDumpProgram* out, char* err, std::size_t err_len);
+// 读 env `LIFT_FAULT_DUMP` 并安装（未设 / 空 ⇒ true + count=0）。失败 ⇒ false + err（调用方 exit 2）。
+bool initFaultDumpFromEnv(char* err, std::size_t err_len);
+void setFaultDumpProgram(const FaultDumpProgram& p);  // 启动期一次（早于任何 fault）
+void printFaultDump(std::FILE* out);                  // fault 上下文；测试可直接调用
+
+// ---- opt-in 的 guest / shim **写观察**（`LIFT_WATCH=<spec>`；缺省**零输出**）----
+// ★ 解决什么（BUG-32）：要回答"谁在 P-8 写了那 16 字节"。AOT 臂的 lifted store **不经过**任何
+//   可打的宿主函数（IR 直接发 store；只有 `lift_note_write` 做 SMC 记账）⇒ 观察点只能挂在
+//   `lift_note_write`（guest store）与 `GuestMemory::writeBytes/fillBytes/wr8..wr64`（shim 写）。
+//   ⛔ 读路径不挂（`rd*` / `readBytes` 一行都不加）。
+// ★ 语义：某次写的区间 `[ea, ea+n)` 与任一 **armed** 观察段 `[r.ea, r.ea+r.len)` 相交 ⇒ stderr 打
+//   `watch      : WRITE 0x<EA> n=<N> block=lift_cc_<块EA>`（guest）或 `... shim=<名字>`（shim 侧；
+//   名字由 `ShimRegistry::invoke` 设，未设 ⇒ `?`）。
+// ★ `follow`（只许 LEN=4）：`lift_note_write` 在 store **之前**被调用 ⇒ 那一刻读到的还是**旧值**，
+//   所以命中时不读：只把该段的 EA 记成 pending。**下一次** `watchGuestWrite` / `watchShimWrite`
+//   的**最开头**再读该 EA 的 4 字节（此时 store 已完成）得到 P，把 `[P-8, P+8)` 追加进观察集
+//   （P != 0 且该 16 字节已提交），然后用**更新后**的观察集判**本次**写。
+//   ⇒ 这正是"槽写 → 下一次写（BUG-32 里就是落在 P-8 的 16 字节写）"的判据。
+// ★ 上限：8 段 / spec ≤1024 字符；超限 ⇒ 启动期 `exit 2`（⛔ 不静默截断）。
+//   `armed` = 参与命中判定（解析出的段恒 true；follow 追加的段也是 true，可用它显式关掉一段）。
+struct FaultWatchRange {
+    std::uint32_t ea = 0;
+    std::uint32_t len = 0;   // 1..kMaxLen
+    bool follow = false;     // true = 命中后把"下一次写开头读到的 P"的 [P-8,P+8) 加进观察集
+    bool armed = false;      // 参与命中判定
+};
+struct FaultWatchProgram {
+    static constexpr std::uint32_t kMax = 8;      // 最多 8 段
+    static constexpr std::uint32_t kMaxLen = 16;  // 每段 1..16 字节
+    FaultWatchRange r[kMax] = {};
+    std::uint32_t count = 0;
+};
+// spec = 逗号分隔的段：`EA:LEN`（EA 纯 hex，`0x` 可省；LEN 十进制 1..16）· `EA:LEN>follow`（仅 LEN=4）。
+// 空 spec ⇒ true + count=0（shell 里 `LIFT_WATCH=` 常见，不当错误）。失败 ⇒ false + err（第几段 / 原因）。
+bool parseFaultWatchSpec(const char* spec, FaultWatchProgram* out, char* err, std::size_t err_len);
+// 读 env `LIFT_WATCH` 并安装（未设 / 空 ⇒ true + count=0）。失败 ⇒ false + err（调用方 exit 2）。
+bool initFaultWatchFromEnv(char* err, std::size_t err_len);
+void setFaultWatchProgram(const FaultWatchProgram& p);  // 启动期一次（早于任何写观察）
+// ★ 热路径的**启用门**：已 armed 的段数（0 = 关闭）。缺省档每次写只多一次 relaxed load + 分支。
+//   之所以把计数单独暴露：`wr32/wr16/wr8/wr64` 是内联 helper（shim 侧大量使用），门必须内联，
+//   否则每次 shim 写都要付一次跨 TU 调用。
+extern std::atomic<std::uint32_t> g_watch_count;
+inline bool watchOn() { return g_watch_count.load(std::memory_order_relaxed) != 0; }
+// 观察点（调用方先过 `watchOn()`；实现都在 memory.cpp，与 dump 同一条"启动期解析"口径）：
+// guest 写（`lift_note_write`，`block_ea` = `cpu->eip`）/ shim 写（`writeBytes` / `fillBytes` / `wr*`）。
+void watchGuestWrite(std::uint32_t block_ea, std::uint32_t ea, std::uint32_t n);
+void watchShimWrite(std::uint32_t ea, std::uint32_t n);
+// ★ `watchShimWrite` 命中行里的**当前 shim 名**（`shim=<name>`）：由 `ShimRegistry::invoke` 在
+//   `def->fn` 前后设置/恢复（传 `def->name`；COM 方法也走同一条路 ⇒ 形如 `com!...::...`）。
+//   **每线程一份**（`thread_local`）：主线程与音频 feeder 各自一份；嵌套 shim 由调用方保存/恢复
+//   上一层名字（`watchShimName()` 就是给它读的）。名字指针必须活到下一次设置为止
+//   （`invoke` 传的是它自己 `std::string` 拷贝的 `c_str()`，活到 `fn` 返回）。
+//   未设 / 空 ⇒ 命中行打 `shim=?`（⛔ 不编造名字）。
+void setWatchShimName(const char* name);
+const char* watchShimName();
 
 // ---- fault 归因（两个平台的 handler 共用；纯函数，便于单测）----
 // ★ 判据是**异常地址**：落在 guest 空间 `[guest_base, guest_base + GuestMemory::kSpace)` 内 ⇒ guest fault
@@ -251,21 +345,25 @@ public:
     void wr8(std::uint32_t ea, std::uint8_t v) {
         g_access = {ea, 1, 1};
         if (safe_ && !committed(ea, 1)) guestFault(g_access, "写未提交页 (safe mode)");
+        if (watchOn()) watchShimWrite(ea, 1);  // ★ opt-in 写观察（缺省 = 一次 load + 分支）
         base_[ea] = v;
     }
     void wr16(std::uint32_t ea, std::uint16_t v) {
         g_access = {ea, 2, 1};
         if (safe_ && !committed(ea, 2)) guestFault(g_access, "写未提交页 (safe mode)");
+        if (watchOn()) watchShimWrite(ea, 2);
         std::memcpy(base_ + ea, &v, 2);
     }
     void wr32(std::uint32_t ea, std::uint32_t v) {
         g_access = {ea, 4, 1};
         if (safe_ && !committed(ea, 4)) guestFault(g_access, "写未提交页 (safe mode)");
+        if (watchOn()) watchShimWrite(ea, 4);
         std::memcpy(base_ + ea, &v, 4);
     }
     void wr64(std::uint32_t ea, std::uint64_t v) {
         g_access = {ea, 8, 1};
         if (safe_ && !committed(ea, 8)) guestFault(g_access, "写未提交页 (safe mode)");
+        if (watchOn()) watchShimWrite(ea, 8);
         std::memcpy(base_ + ea, &v, 8);
     }
 

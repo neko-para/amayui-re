@@ -189,6 +189,25 @@ void usage() {
         "                      1280×720，也不查 DPI）。非 auto 且非正数 / NaN / 垃圾 ⇒ exit 2\n"
         "                      并点名本参数\n"
         "%s"
+        "  env LIFT_FAULT_DUMP=<spec>\n"
+        "                      **opt-in**（缺省不设 = fault 文本一条 dump 行都不多）：guest fault 时按\n"
+        "                      spec dump 内存。每段 = `EA:LEN`（EA 纯 hex，0x 可省；LEN 十进制，\n"
+        "                      0x 前缀 = hex）或 `EA:*LEN`（先读 EA 处 4 字节当 guest 指针再 dump；\n"
+        "                      `EA:4*LEN` 同义）或 `EA:*<delta>:LEN`（跟随并把指针加有符号 delta，\n"
+        "                      |delta| ≤ 1 MiB，如 `*-8:16` 从 ptr-8 起 dump），逗号分隔。上限 =\n"
+        "                      8 段 / 每段 1..256 B / 总 ≤1024 B / spec ≤1024 字符，超限 ⇒ **exit 2**\n"
+        "                      （⛔ 不静默截断）。\n"
+        "                      例：LIFT_FAULT_DUMP=0x1005AB58:64,0x10050000:*32,0x1005AB58:*-8:16\n"
+        "  env LIFT_WATCH=<spec>\n"
+        "                      **opt-in**（缺省不设 = 一条 watch 行都不打，零输出）：观察 guest 侧\n"
+        "                      写入（`lift_note_write`）与 shim 侧写入（writeBytes / fillBytes /\n"
+        "                      wr8..wr64）。每段 = `EA:LEN`（EA 纯 hex，0x 可省；LEN 十进制 1..16）\n"
+        "                      或 `EA:LEN>follow`（仅 LEN=4：命中后把**下一次写**开头读到的指针 P 的\n"
+        "                      [P-8,P+8) 加进观察集 —— 用来点名\"谁在 P-8 写了那 16 字节\"），\n"
+        "                      逗号分隔。上限 = 8 段 / spec ≤1024 字符，超限 ⇒ **exit 2**（⛔ 不静默\n"
+        "                      截断）。命中打一行 `watch      : WRITE 0x<EA> n=<N> block=lift_cc_<EA>`\n"
+        "                      （guest）或 `... shim=<名字>`（shim 侧；名字由 shim 调用点设，未设 ⇒ `?`）。\n"
+        "                      例：LIFT_WATCH=0x1005AB58:4>follow\n"
         "  --help              这份说明\n"
         "\n"
         "★ 执行模型：入口 EA → 构建期生成的派发表（`lift_cc_<EA>`）；shim 桩 EA → `lift_shim`；\n"
@@ -573,6 +592,28 @@ int main(int argc, char** argv) {
     //   ★ 打印点**只有这里**（parse 之后、GPU bring-up 之前）⇒ 一次，且命令行一给就能判
     //     （守卫 `cli-aot-flags` 因此不需要 GPU）。
     if (sound) std::fputs(lift::kAotSoundNotice, stderr);
+
+    // ---- `LIFT_FAULT_DUMP`：**解析在启动期**（早于 `AotHost::init` / 音频线程；fault 上下文只允许
+    //   fprintf + committed() + memcpy）----
+    // ★ 超限 ⇒ exit 2（⛔ 不静默截断：截断会让人以为 dump 完整）。未设 / 空 ⇒ count=0 ⇒ 零新增输出。
+    {
+        char dump_err[256] = {};
+        if (!lift::initFaultDumpFromEnv(dump_err, sizeof(dump_err))) {
+            std::fprintf(stderr, "emulator-lift-aot: %s\n", dump_err);
+            return 2;
+        }
+    }
+
+    // ---- `LIFT_WATCH`：同一条启动期口径（**早于** `AotHost::init` / 音频线程）----
+    // ★ 超限 / 语法错 ⇒ exit 2 并点名第几段与原因（⛔ 不静默截断 / 不静默当成普通段）。
+    //   未设 / 空 ⇒ count=0 ⇒ 一条 watch 行都不打（热路径只剩一次 load + 分支）。
+    {
+        char watch_err[256] = {};
+        if (!lift::initFaultWatchFromEnv(watch_err, sizeof(watch_err))) {
+            std::fprintf(stderr, "emulator-lift-aot: %s\n", watch_err);
+            return 2;
+        }
+    }
 
     // ---- `--input-plan`：**解析在 GPU bring-up 之前**（CLI 判据不需要 GPU）----
     //   ★ 文件不存在 / 语法错 / 门种类不支持 ⇒ **exit 2 + 点名行号与原因**（⛔ 不许静默忽略）。

@@ -25,7 +25,8 @@
 #include "runtime/input_plan.h"   // fault 文本里的 `input-plan` 摘要（C）
 #include "runtime/lift_abi.h"     // LiftRegs
 #include "runtime/memory.h"
-#include "runtime/x86.h"          // X86（fault 现场的 cpu）
+#include "runtime/shims.h"       // ShimRegistry::invoke（`LIFT_WATCH` 的 shim 名接线）
+#include "runtime/x86.h"         // X86（fault 现场的 cpu）
 
 #if defined(_WIN32)
 #include <cwchar>  // std::swprintf（check.h 已经带 <windows.h>：NOMINMAX / WIN32_LEAN_AND_MEAN）
@@ -60,6 +61,72 @@ void dirtyGuestAccess() { g_mem->wr32(kCommitted, 0xA5A5A5A5u); }
     g_mem->setSafeMode(true);
     (void)g_mem->rd32(kUncommitted);
     std::_Exit(91);  // 没 fault ⇒ 用例红
+}
+
+// 直接读 guest 映射的宿主字节（**绕过** rd*/wr* 的 g_access 记账）⇒ 未提交页 = 真平台 fault。
+// ★ 为什么不用 `rd32(kUncommitted)`：`rd32` 会先把 `g_access` 改成 `READ 0x20000000`，
+//   于是 `access` 行与 `fault ea` 行恰好同值 —— 证明不了"两行不互相冒充"（本条用例的判据）。
+[[noreturn]] void rawGuestReadFault(std::uint32_t ea) {
+    const volatile std::uint32_t* const p =
+        reinterpret_cast<const volatile std::uint32_t*>(g_mem->host(ea));
+    const volatile std::uint32_t v = *p;
+    (void)v;
+    std::_Exit(95);  // 没 fault ⇒ 用例红
+}
+
+// 子进程：**不开 safe mode** 的真平台 guest fault（异常地址 = host(0)+0x20000000）。
+// 先弄脏 g_access（WRITE kCommitted），再裸读未提交页 ⇒ `access` 行必须仍是**旧值** + 显式后缀。
+[[noreturn]] void childFaultPlatform() {
+    dirtyGuestAccess();
+    rawGuestReadFault(kUncommitted);
+}
+
+// ---- `LIFT_FAULT_DUMP`：opt-in 的 fault 内存 dump（BUG-32 的根因定位面）----
+constexpr std::uint32_t kDumpPage = 0x00402000u;      // 已提交的 dump 页（DE AD BE EF 模式）
+constexpr std::uint32_t kDumpFollow = 0x00402040u;    // 这个 dword = 指向 kDumpPage 的指针
+constexpr std::uint32_t kDumpZeroPtr = 0x00402048u;   // 这个 dword = 0
+constexpr std::uint32_t kDumpBadPtr = 0x0040204Cu;    // 这个 dword = kUncommitted（未提交）
+constexpr std::uint32_t kDumpDeltaSlot = 0x00402050u;  // 这个 dword = kDumpObj（`*-8` 跟随用）
+constexpr std::uint32_t kDumpOverflowSlot = 0x00402054u;  // 这个 dword = 4（`*-8` 下溢）
+constexpr std::uint32_t kDumpObj = 0x00402080u;        // 假对象 P：P-8 = 活块头（'LIFT' + 0x450）
+
+void setFaultDumpEnv(const char* spec) {
+#if defined(_WIN32)
+    _putenv_s("LIFT_FAULT_DUMP", spec);
+#else
+    ::setenv("LIFT_FAULT_DUMP", spec, 1);
+#endif
+}
+
+// 子进程：自己装 `LIFT_FAULT_DUMP`（env → 解析 → 安装这条启动期链路），再制造真平台 fault。
+// ★ spec 的 8 段覆盖：已提交 / 未提交（整段拒绝） / `*` 跟随命中 / 指针=0 / 指针→未提交 /
+//   失败段**之后**的已提交段（"一段失败不影响后段"） / `*-8` 下溢 / `*-8` 打块头（增量）。
+[[noreturn]] void childFaultDump() {
+    if (!g_mem->commit(kDumpPage, lift::GuestMemory::kPage, lift::RegionKind::Heap, "fault-report-dump")) {
+        std::fprintf(stderr, "提交 dump 页失败：%s\n", g_mem->lastError());
+        std::_Exit(96);
+    }
+    const std::uint8_t pat[4] = {0xDE, 0xAD, 0xBE, 0xEF};
+    for (std::uint32_t i = 0; i < 32; ++i) g_mem->wr8(kDumpPage + i, pat[i % 4u]);
+    g_mem->wr32(kDumpFollow, kDumpPage);
+    g_mem->wr32(kDumpZeroPtr, 0);
+    g_mem->wr32(kDumpBadPtr, kUncommitted);
+    // 增量：`*-8` 读块头。P-8 = magic 'LIFT'（小端字节序 54 46 49 4C）+ 请求字节数 0x450。
+    g_mem->wr32(kDumpDeltaSlot, kDumpObj);
+    g_mem->wr32(kDumpObj - 8u, 0x4C494654u);  // magic 'LIFT'
+    g_mem->wr32(kDumpObj - 4u, 0x450u);       // 请求字节数（活块）
+    g_mem->wr32(kDumpObj, 0x00528BE8u);       // 假 vtable（对象首 dword）
+    g_mem->wr32(kDumpOverflowSlot, 4u);       // ptr=4 + delta=-8 ⇒ 32 位下溢 ⇒ ✗ 且继续
+    setFaultDumpEnv(
+        "0x00402000:16,0x20000000:8,0x00402040:*16,0x00402048:*16,0x0040204C:*16,0x00402010:16,"
+        "0x00402054:*-8:16,0x00402050:*-8:16");
+    char derr[256] = {};
+    if (!lift::initFaultDumpFromEnv(derr, sizeof(derr))) {
+        std::fprintf(stderr, "LIFT_FAULT_DUMP 解析失败：%s\n", derr);
+        std::_Exit(97);
+    }
+    dirtyGuestAccess();
+    rawGuestReadFault(kUncommitted);
 }
 
 // =====================================================================================
@@ -121,6 +188,114 @@ void faultPlanText(void* ctx, std::FILE* out) {
     g_mem->setSafeMode(true);
     (void)g_mem->rd32(kUncommitted);  // ⇒ guestFault ⇒ 两个钩子 ⇒ _Exit(3)
     std::_Exit(94);
+}
+
+// =====================================================================================
+// `LIFT_WATCH`：opt-in 的 guest / shim **写观察**（BUG-32 的"谁在 P-8 写了 16 字节"）
+// ★ 三层判据：① 解析器（进程内）；② 走 `lift_note_write`（AOT 臂的**唯一** guest store 观察点）
+//   证明 follow 的时序 —— 命中时只 pending，**下一次写的最开头**才读 P，然后用**更新后**的观察集
+//   判本次写；③ shim 侧写入（`wr32`）也要命中，且不在观察集的写**一行都不多**。
+// =====================================================================================
+constexpr std::uint32_t kWatchSlot = 0x1005AB58u;    // BUG-32 的槽 EA（真值；槽里放合成指针 P）
+constexpr std::uint32_t kWatchObj = 0x1005C008u;     // 合成对象 P ⇒ [P-8,P+8) = [0x1005C000,0x1005C010)
+constexpr std::uint32_t kWatchBlockA = 0x004A5115u;  // 写槽的块 EA（`mov ecx,[esi+ebx*4+0A5D8h]`）
+constexpr std::uint32_t kWatchBlockB = 0x004A5125u;  // 写 P-8 的块 EA（fault 候选 `mov eax,[edx+20h]`）
+constexpr std::uint32_t kWatchShimEa = 0x00405000u;  // shim 侧的观察段（已提交页）
+
+void setFaultWatchEnv(const char* spec) {
+#if defined(_WIN32)
+    _putenv_s("LIFT_WATCH", spec);
+#else
+    ::setenv("LIFT_WATCH", spec, 1);
+#endif
+}
+
+// 子进程：guest store 走 `lift_note_write`，证明 follow 的**时序**：
+// ① 命中 follow 段时只挂 pending（那一刻槽里还是旧值）；② 槽被 store 之后，下一次写的最开头才读 P；
+// ③ 把 [P-8,P+8) 加进观察集，并用**更新后的**观察集判本次写（⇒ 点名写 P-8 的块 EA）。
+[[noreturn]] void childWatchFollow() {
+    setFaultWatchEnv("0x1005AB58:4>follow");
+    char werr[256] = {};
+    if (!lift::initFaultWatchFromEnv(werr, sizeof(werr))) {
+        std::fprintf(stderr, "LIFT_WATCH 解析失败：%s\n", werr);
+        std::_Exit(98);
+    }
+    if (!g_mem->commit(kWatchSlot, 16, lift::RegionKind::Heap, "fault-report-watch-slot") ||
+        !g_mem->commit(kWatchObj, lift::GuestMemory::kPage, lift::RegionKind::Heap,
+                       "fault-report-watch-obj")) {
+        std::fprintf(stderr, "提交 watch 页失败：%s\n", g_mem->lastError());
+        std::_Exit(96);
+    }
+    lift::X86 cpu{};
+    cpu.mem = g_mem;
+    cpu.cache = nullptr;  // SMC 记账 no-op ⇒ 本用例只看 watch 接线（不建 BlockCache）
+    cpu.eip = kWatchBlockA;
+    lift_note_write(&cpu, kWatchSlot, 4);  // ① 命中 follow 段（store 还没发生）
+    const std::uint32_t obj = kWatchObj;
+    // ② store 完成：**绕过** wr*（否则 shim 观察会冒充"下一次写"，正好吃掉本条判据）
+    std::memcpy(g_mem->host(kWatchSlot), &obj, 4);
+    cpu.eip = kWatchBlockB;
+    lift_note_write(&cpu, kWatchObj - 8u, 16);  // ③ 开头补读 P ⇒ arm ⇒ 再判本次写
+    std::_Exit(0);
+}
+
+// 被 `ShimRegistry::invoke` 调用的探针：写一次 guest 内存（⇒ `watchShimWrite` 命中）。
+void watchProbeShim(lift::X86& cpu, lift::ShimCall&) { cpu.mem->wr32(kWatchShimEa + 12u, 0xCAFEBABEu); }
+constexpr std::uint32_t kWatchShimStack = 0x00406000u;  // invoke 从 [esp] 读返回地址
+
+// 子进程：shim 侧的写（`wr32` 内联 helper）也要命中；命中行带**当前 shim 名**；不在观察集的写零行。
+[[noreturn]] void childWatchShim() {
+    setFaultWatchEnv("0x00405000:16");
+    char werr[256] = {};
+    if (!lift::initFaultWatchFromEnv(werr, sizeof(werr))) {
+        std::fprintf(stderr, "LIFT_WATCH 解析失败：%s\n", werr);
+        std::_Exit(98);
+    }
+    if (!g_mem->commit(kWatchShimEa, 16, lift::RegionKind::Heap, "fault-report-watch-shim") ||
+        !g_mem->commit(kWatchShimStack, lift::GuestMemory::kPage, lift::RegionKind::Stack,
+                       "fault-report-watch-shim-stack")) {
+        std::fprintf(stderr, "提交 watch 页失败：%s\n", g_mem->lastError());
+        std::_Exit(96);
+    }
+    g_mem->wr32(kWatchShimEa, 0x12345678u);  // 未设名字 ⇒ `shim=?`（⛔ 不编造名字）
+    lift::setWatchShimName("test-shim");
+    g_mem->wr32(kWatchShimEa + 4u, 0x9ABCDEF0u);  // ⇒ `shim=test-shim`
+    lift::setWatchShimName(nullptr);
+    g_mem->wr32(kWatchShimEa + 8u, 0x0BADF00Du);  // 名字清掉 ⇒ 回到 `shim=?`
+    // ★ 走**真实** `ShimRegistry::invoke`：名字由 invoke 从 `def->name` 设（测试**不**自己设）⇒
+    //   钉住 `shims.cpp` 的接线（去掉那行 ⇒ `shim=?` 而不是 `registered-shim` ⇒ 本用例红）。
+    lift::ShimRegistry shims;
+    lift::ShimDef def;
+    def.module = "test";
+    def.name = "registered-shim";
+    def.conv = lift::Conv::Stdcall;
+    def.argc = 0;
+    def.fn = &watchProbeShim;
+    g_mem->wr32(kWatchShimStack, 0xFFFFFFFFu);  // invoke 从 [esp] 读返回地址（不真的跳回去）
+    lift::X86 cpu{};
+    cpu.mem = g_mem;
+    cpu.esp() = kWatchShimStack;
+    shims.invoke(cpu, def);  // ⇒ 探针写 +12 ⇒ `shim=registered-shim`
+    g_mem->wr32(kCommitted, 0x0BADF00Du);  // 不在观察集 ⇒ 不许多一行
+    std::_Exit(0);
+}
+
+// 子进程：**不设** `LIFT_WATCH`（显式清掉 —— 开发机的 shell 可能设过）⇒ 一条 `watch      :` 都不打。
+[[noreturn]] void childWatchOff() {
+    setFaultWatchEnv("");
+    char werr[256] = {};
+    if (!lift::initFaultWatchFromEnv(werr, sizeof(werr))) {
+        std::fprintf(stderr, "LIFT_WATCH 解析失败：%s\n", werr);
+        std::_Exit(98);
+    }
+    lift::X86 cpu{};
+    cpu.mem = g_mem;
+    cpu.cache = nullptr;
+    cpu.eip = kWatchBlockA;
+    lift_note_write(&cpu, kWatchSlot, 4);           // guest store（观察点被关档门挡住）
+    g_mem->wr32(kCommitted, 0x12345678u);           // shim 侧 wr*
+    g_mem->writeBytes(kCommitted + 4u, "abcd", 4);  // shim 侧 bulk 写
+    std::_Exit(0);
 }
 
 struct ChildRun {
@@ -283,6 +458,273 @@ void checkAotFault(const ChildRun& r) {
     LIFT_CHECK(r.stderr_text.find("plan-step  : mem:1") != std::string::npos);
 }
 
+// ⑤ 真平台 guest fault 的判据（两个平台的子进程跑完都走这一份）。
+// ★ 一条用例同时钉两件事：① `fault ea` 的**数值**（host − base）算对；② `access` 行不会冒充本次
+//   fault —— 它仍是上一条 shim 侧写（WRITE 0x00401000），只是行尾多了显式后缀。
+void checkPlatformFault(const ChildRun& r) {
+    LIFT_CHECK(r.exited);
+    LIFT_CHECK_EQ_I64(r.exit_code, 3);
+    LIFT_CHECK(r.stderr_text.find("=== guest memory fault") != std::string::npos);
+    // ① 本次 fault 的 guest EA（host 0x…20000020 − base 0x…20000000 = 0x20000000）
+    LIFT_CHECK(r.stderr_text.find("fault ea   : 0x20000000") != std::string::npos);
+    // 换算依据必须在同一行（人复核用；⛔ 不是"只给结论"）
+    LIFT_CHECK(r.stderr_text.find(" - base 0x") != std::string::npos);
+    LIFT_CHECK(r.stderr_text.find("region=(未登记") != std::string::npos);
+#if defined(_WIN32)
+    LIFT_CHECK(r.stderr_text.find("dir=READ") != std::string::npos);  // ExceptionInformation[0] == 0
+#else
+    LIFT_CHECK(r.stderr_text.find("dir=unknown") != std::string::npos);  // 信号上下文没有方向
+#endif
+    // ② 两行不互相冒充：access = 最近一次 shim 侧访存（这次是 WRITE 0x00401000），带后缀
+    LIFT_CHECK(r.stderr_text.find("access     : WRITE 0x00401000") != std::string::npos);
+    LIFT_CHECK(r.stderr_text.find("← 最近一次 guest 访存（shim 侧记录）；不是本次 fault（本次见 fault ea）") !=
+               std::string::npos);
+}
+
+// ⑥ fault 时的 opt-in dump（`LIFT_FAULT_DUMP`）：已提交 / 未提交 / 跟随一层 / 指针=0 /
+//   指针→未提交 / 失败段之后的段仍继续。
+void checkDumpAtFault(const ChildRun& r) {
+    LIFT_CHECK(r.exited);
+    LIFT_CHECK_EQ_I64(r.exit_code, 3);
+    LIFT_CHECK(r.stderr_text.find("fault ea   : 0x20000000") != std::string::npos);
+    // [0] 已提交段：DE AD BE EF 模式（hexdump 逐字节）
+    LIFT_CHECK(r.stderr_text.find("  dump       : [0] 0x00402000 + 16") != std::string::npos);
+    LIFT_CHECK(r.stderr_text.find("00402000: DE AD BE EF DE AD BE EF DE AD BE EF DE AD BE EF") !=
+               std::string::npos);
+    // [1] 未提交整段 ⇒ 一行 ✗，不尝试读
+    LIFT_CHECK(r.stderr_text.find("  dump       : [1] 0x20000000 + 8  ✗ 未提交（整段拒绝读）") !=
+               std::string::npos);
+    // [2] `*` 跟随一层：先读 0x00402040 处的 dword（= kDumpPage）再 dump
+    LIFT_CHECK(r.stderr_text.find("  dump       : [2] 0x00402040:*16  → ptr=0x00402000") !=
+               std::string::npos);
+    // [3] 指针为 0 ⇒ 不跟随
+    LIFT_CHECK(r.stderr_text.find("  dump       : [3] 0x00402048:*16  ✗ 指针为 0（不跟随）") !=
+               std::string::npos);
+    // [4] 指针指向未提交页 ⇒ 不跟随（且把指针值打出来）
+    LIFT_CHECK(r.stderr_text.find(
+                   "  dump       : [4] 0x0040204C:*16  ✗ 指针 0x20000000 指向未提交页（不跟随）") !=
+               std::string::npos);
+    // [5] 失败段之后仍继续：最后一段照常 dump（"一段失败不影响后段"）
+    LIFT_CHECK(r.stderr_text.find("  dump       : [5] 0x00402010 + 16") != std::string::npos);
+    LIFT_CHECK(r.stderr_text.find("00402010: DE AD BE EF") != std::string::npos);
+    // [6] 增量：ptr=4 + delta=-8 ⇒ 32 位下溢 ⇒ ✗（不崩、不静默）
+    LIFT_CHECK(r.stderr_text.find("  dump       : [6] 0x00402054:*-8:16  ✗ ptr+delta 越界（不跟随）") !=
+               std::string::npos);
+    // [7] 增量：`*-8` 打块头（活块 = magic 'LIFT' + 请求字节数 0x450），且 [6] 失败后仍继续
+    LIFT_CHECK(r.stderr_text.find("  dump       : [7] 0x00402050:*-8:16  → ptr=0x00402080 delta=-8") !=
+               std::string::npos);
+    LIFT_CHECK(r.stderr_text.find("00402078: 54 46 49 4C 50 04 00 00") != std::string::npos);
+}
+
+// ⑦ 缺省档 / safe-mode 的"不多打"反向断言（find == npos 才是判据 —— 少一行不是"看起来像没打"）。
+void checkDefaultFaultText(const ChildRun& safe, const ChildRun& platform) {
+    // safe-mode（没有平台地址 ⇒ 结构性不打 `fault ea`）
+    LIFT_CHECK(safe.exited);
+    LIFT_CHECK_EQ_I64(safe.exit_code, 3);
+    LIFT_CHECK(safe.stderr_text.find("fault ea") == std::string::npos);
+    LIFT_CHECK(safe.stderr_text.find("dump       :") == std::string::npos);
+    // `access` 行**整行（含换行）逐字**：safe-mode 没有任何后缀
+    LIFT_CHECK(safe.stderr_text.find("access     : READ 0x20000000  size=4\n") != std::string::npos);
+    // 平台 fault（不设 env）：旧三行照旧在（"只新增行、不改旧行"），但 dump 一条都不多
+    LIFT_CHECK(platform.exited);
+    LIFT_CHECK_EQ_I64(platform.exit_code, 3);
+    LIFT_CHECK(platform.stderr_text.find("why        :") != std::string::npos);
+    LIFT_CHECK(platform.stderr_text.find("access     :") != std::string::npos);
+    LIFT_CHECK(platform.stderr_text.find("region(ea) :") != std::string::npos);
+    LIFT_CHECK(platform.stderr_text.find("dump       :") == std::string::npos);
+}
+
+// ①' 解析器（进程内；两个平台同一份判据）：合法 / 空串 / 缺冒号 / 坏 hex / 长度边界 /
+//   段数 / 总字节 / EA+LEN 越 4 GiB / spec 本身超长。
+void checkFaultDumpParser() {
+    lift::FaultDumpProgram p{};
+    char err[256] = {};
+    // 合法：`*` 跟随 + 普通段
+    LIFT_CHECK(lift::parseFaultDumpSpec("0x1005AB58:*64,0x10050000:32", &p, err, sizeof(err)));
+    LIFT_CHECK_EQ_U32(p.count, 2u);
+    LIFT_CHECK_EQ_U32(p.ranges[0].ea, 0x1005AB58u);
+    LIFT_CHECK_EQ_U32(p.ranges[0].len, 64u);
+    LIFT_CHECK(p.ranges[0].follow);
+    LIFT_CHECK_EQ_U32(p.ranges[1].ea, 0x10050000u);
+    LIFT_CHECK_EQ_U32(p.ranges[1].len, 32u);
+    LIFT_CHECK(!p.ranges[1].follow);
+    // `EA:4*LEN` 是 `EA:*LEN` 的别名（EA 的 0x 可省）
+    LIFT_CHECK(lift::parseFaultDumpSpec("10000000:4*16", &p, err, sizeof(err)));
+    LIFT_CHECK_EQ_U32(p.count, 1u);
+    LIFT_CHECK_EQ_U32(p.ranges[0].ea, 0x10000000u);
+    LIFT_CHECK_EQ_U32(p.ranges[0].len, 16u);
+    LIFT_CHECK(p.ranges[0].follow);
+    LIFT_CHECK_EQ_I64(p.ranges[0].delta, 0);
+    // 增量：`*<delta>:<LEN>`（十进制带符号）；`*LEN` / `4*LEN` 的 delta 恒 0
+    LIFT_CHECK(lift::parseFaultDumpSpec("0x1000:*-8:16", &p, err, sizeof(err)));
+    LIFT_CHECK_EQ_U32(p.count, 1u);
+    LIFT_CHECK_EQ_U32(p.ranges[0].ea, 0x1000u);
+    LIFT_CHECK_EQ_U32(p.ranges[0].len, 16u);
+    LIFT_CHECK(p.ranges[0].follow);
+    LIFT_CHECK_EQ_I64(p.ranges[0].delta, -8);
+    LIFT_CHECK(lift::parseFaultDumpSpec("0x1000:*+0:8", &p, err, sizeof(err)));
+    LIFT_CHECK(p.ranges[0].follow);
+    LIFT_CHECK_EQ_I64(p.ranges[0].delta, 0);
+    LIFT_CHECK_EQ_U32(p.ranges[0].len, 8u);
+    LIFT_CHECK(lift::parseFaultDumpSpec("0x1000:*64", &p, err, sizeof(err)));
+    LIFT_CHECK(p.ranges[0].follow);
+    LIFT_CHECK_EQ_I64(p.ranges[0].delta, 0);
+    LIFT_CHECK_EQ_U32(p.ranges[0].len, 64u);
+    // 非法：`4*-8:64`（别名只许 delta=0） / delta 越 ±1 MiB / `*-8:0` / `*--8:8`
+    LIFT_CHECK(!lift::parseFaultDumpSpec("0x1000:4*-8:64", &p, err, sizeof(err)));
+    LIFT_CHECK(std::strstr(err, "第 1 段") != nullptr);
+    LIFT_CHECK(!lift::parseFaultDumpSpec("0x1000:*-1048577:8", &p, err, sizeof(err)));
+    LIFT_CHECK(std::strstr(err, "第 1 段") != nullptr);
+    LIFT_CHECK(!lift::parseFaultDumpSpec("0x1000:*1048577:8", &p, err, sizeof(err)));
+    LIFT_CHECK(std::strstr(err, "第 1 段") != nullptr);
+    LIFT_CHECK(!lift::parseFaultDumpSpec("0x1000:*-8:0", &p, err, sizeof(err)));
+    LIFT_CHECK(std::strstr(err, "第 1 段") != nullptr);
+    LIFT_CHECK(!lift::parseFaultDumpSpec("0x1000:*--8:8", &p, err, sizeof(err)));
+    LIFT_CHECK(std::strstr(err, "第 1 段") != nullptr);
+    // 空串 = 不 dump（shell 里 `LIFT_FAULT_DUMP=` 常见，不当错误）
+    LIFT_CHECK(lift::parseFaultDumpSpec("", &p, err, sizeof(err)));
+    LIFT_CHECK_EQ_U32(p.count, 0u);
+    // 缺冒号
+    LIFT_CHECK(!lift::parseFaultDumpSpec("0x1005AB58", &p, err, sizeof(err)));
+    LIFT_CHECK(std::strstr(err, "第 1 段") != nullptr);
+    // 坏 hex
+    LIFT_CHECK(!lift::parseFaultDumpSpec("0xZZ:4", &p, err, sizeof(err)));
+    LIFT_CHECK(std::strstr(err, "第 1 段") != nullptr);
+    LIFT_CHECK(std::strstr(err, "不是合法数字") != nullptr);
+    // 长度 0 / 257
+    LIFT_CHECK(!lift::parseFaultDumpSpec("0x1005AB58:0", &p, err, sizeof(err)));
+    LIFT_CHECK(std::strstr(err, "256") != nullptr);
+    LIFT_CHECK(!lift::parseFaultDumpSpec("0x1005AB58:257", &p, err, sizeof(err)));
+    LIFT_CHECK(std::strstr(err, "256") != nullptr);
+    // 9 段（上限 8）
+    std::string nine;
+    for (int i = 0; i < 9; ++i) {
+        if (i != 0) nine += ',';
+        nine += "0x10000000:1";
+    }
+    LIFT_CHECK(!lift::parseFaultDumpSpec(nine.c_str(), &p, err, sizeof(err)));
+    LIFT_CHECK(std::strstr(err, "第 9 段") != nullptr);
+    // 总 1025 B（4×256 + 1）
+    std::string big;
+    for (int i = 0; i < 4; ++i) {
+        if (i != 0) big += ',';
+        big += "0x10000000:256";
+    }
+    big += ",0x10000000:1";
+    LIFT_CHECK(!lift::parseFaultDumpSpec(big.c_str(), &p, err, sizeof(err)));
+    LIFT_CHECK(std::strstr(err, "1024") != nullptr);
+    // EA+LEN 越过 4 GiB
+    LIFT_CHECK(!lift::parseFaultDumpSpec("0xFFFFFFF0:32", &p, err, sizeof(err)));
+    LIFT_CHECK(std::strstr(err, "4 GiB") != nullptr);
+    // spec 本身超过 1024 字符
+    const std::string long_spec(1025, '0');
+    LIFT_CHECK(!lift::parseFaultDumpSpec(long_spec.c_str(), &p, err, sizeof(err)));
+    LIFT_CHECK(std::strstr(err, "1024") != nullptr);
+}
+
+// ①'' `LIFT_WATCH` 的解析器（进程内；两个平台同一份判据）：合法 / 空串 / 缺冒号 / 坏 hex /
+//   LEN 边界 / follow 只许 LEN=4 / 段数 / spec 本身超长。
+void checkFaultWatchParser() {
+    lift::FaultWatchProgram p{};
+    char err[256] = {};
+    // 合法：follow 段（BUG-32 的槽）+ 普通段
+    LIFT_CHECK(lift::parseFaultWatchSpec("0x1005AB58:4>follow", &p, err, sizeof(err)));
+    LIFT_CHECK_EQ_U32(p.count, 1u);
+    LIFT_CHECK_EQ_U32(p.r[0].ea, 0x1005AB58u);
+    LIFT_CHECK_EQ_U32(p.r[0].len, 4u);
+    LIFT_CHECK(p.r[0].follow);
+    LIFT_CHECK(p.r[0].armed);
+    LIFT_CHECK(lift::parseFaultWatchSpec("0x1000:16", &p, err, sizeof(err)));
+    LIFT_CHECK_EQ_U32(p.count, 1u);
+    LIFT_CHECK_EQ_U32(p.r[0].len, 16u);
+    LIFT_CHECK(!p.r[0].follow);
+    LIFT_CHECK(lift::parseFaultWatchSpec("10000000:1,0x20000000:8", &p, err, sizeof(err)));
+    LIFT_CHECK_EQ_U32(p.count, 2u);
+    LIFT_CHECK_EQ_U32(p.r[0].ea, 0x10000000u);
+    LIFT_CHECK_EQ_U32(p.r[1].ea, 0x20000000u);
+    LIFT_CHECK_EQ_U32(p.r[1].len, 8u);
+    // 空串 = 关闭（shell 里 `LIFT_WATCH=` 常见，不当错误）
+    LIFT_CHECK(lift::parseFaultWatchSpec("", &p, err, sizeof(err)));
+    LIFT_CHECK_EQ_U32(p.count, 0u);
+    // 缺冒号
+    LIFT_CHECK(!lift::parseFaultWatchSpec("0x1005AB58", &p, err, sizeof(err)));
+    LIFT_CHECK(std::strstr(err, "第 1 段") != nullptr);
+    // 坏 hex
+    LIFT_CHECK(!lift::parseFaultWatchSpec("0xZZ:4", &p, err, sizeof(err)));
+    LIFT_CHECK(std::strstr(err, "第 1 段") != nullptr);
+    LIFT_CHECK(std::strstr(err, "不是合法数字") != nullptr);
+    // LEN 0 / 17（上限 16）
+    LIFT_CHECK(!lift::parseFaultWatchSpec("0x1000:0", &p, err, sizeof(err)));
+    LIFT_CHECK(std::strstr(err, "1..16") != nullptr);
+    LIFT_CHECK(!lift::parseFaultWatchSpec("0x1000:17", &p, err, sizeof(err)));
+    LIFT_CHECK(std::strstr(err, "1..16") != nullptr);
+    // follow 只许 LEN=4（8 字节的槽没有"下一次写读 4 字节当指针"的语义）
+    LIFT_CHECK(!lift::parseFaultWatchSpec("0x1000:8>follow", &p, err, sizeof(err)));
+    LIFT_CHECK(std::strstr(err, "follow") != nullptr);
+    LIFT_CHECK(std::strstr(err, "4") != nullptr);
+    // `>follow` 拼错也算坏（⛔ 不静默当普通段）
+    LIFT_CHECK(!lift::parseFaultWatchSpec("0x1000:4>follo", &p, err, sizeof(err)));
+    LIFT_CHECK(std::strstr(err, "第 1 段") != nullptr);
+    // 9 段（上限 8）
+    std::string nine;
+    for (int i = 0; i < 9; ++i) {
+        if (i != 0) nine += ',';
+        nine += "0x10000000:1";
+    }
+    LIFT_CHECK(!lift::parseFaultWatchSpec(nine.c_str(), &p, err, sizeof(err)));
+    LIFT_CHECK(std::strstr(err, "第 9 段") != nullptr);
+    // EA+LEN 越过 4 GiB
+    LIFT_CHECK(!lift::parseFaultWatchSpec("0xFFFFFFF8:16", &p, err, sizeof(err)));
+    LIFT_CHECK(std::strstr(err, "4 GiB") != nullptr);
+    // spec 本身超过 1024 字符
+    const std::string long_spec(1025, '0');
+    LIFT_CHECK(!lift::parseFaultWatchSpec(long_spec.c_str(), &p, err, sizeof(err)));
+    LIFT_CHECK(std::strstr(err, "1024") != nullptr);
+}
+
+// ⑧ follow 的时序（走 `lift_note_write` = AOT 臂的真实接线）。
+void checkWatchFollow(const ChildRun& r) {
+    LIFT_CHECK(r.exited);
+    LIFT_CHECK_EQ_I64(r.exit_code, 0);
+    // ① 命中 follow 段 ⇒ 只挂 pending（store 还没发生，⛔ 此刻读槽会读到旧值）
+    LIFT_CHECK(r.stderr_text.find("watch      : follow pending 0x1005AB58") != std::string::npos);
+    // ② 槽写本身也被点名（它命中的就是这个段；块 EA 来自 `cpu->eip`）
+    LIFT_CHECK(r.stderr_text.find("watch      : WRITE 0x1005AB58 n=4 block=lift_cc_004A5115") !=
+               std::string::npos);
+    // ③ 下一次写的最开头补读 P（store 已完成）⇒ ptr= 与 arm 区间
+    LIFT_CHECK(r.stderr_text.find("watch      : follow 0x1005AB58 → ptr=0x1005C008") != std::string::npos);
+    LIFT_CHECK(r.stderr_text.find("; arm [0x1005C000,0x1005C010)") != std::string::npos);
+    // ④ 用**更新后**的观察集判本次写 ⇒ 16 字节块头写被点名（这就是"谁在 P-8 写了 16 字节"）
+    LIFT_CHECK(r.stderr_text.find("watch      : WRITE 0x1005C000 n=16 block=lift_cc_004A5125") !=
+               std::string::npos);
+    // ⑤ 反向：P-8 这次写**不是** follow 段（⛔ 不许把新 arm 的段又当 follow）
+    LIFT_CHECK(r.stderr_text.find("follow pending 0x1005C000") == std::string::npos);
+}
+
+// ⑨ shim 侧写入（`wr32` 内联 helper）：命中打 `... shim`，不在观察集的写零输出。
+void checkWatchShim(const ChildRun& r) {
+    LIFT_CHECK(r.exited);
+    LIFT_CHECK_EQ_I64(r.exit_code, 0);
+    // 旧断言保：未设名字的命中行是它的前缀
+    LIFT_CHECK(r.stderr_text.find("watch      : WRITE 0x00405000 n=4 shim") != std::string::npos);
+    // 未设名字 ⇒ `?`（⛔ 不编造名字）/ 设了名字 ⇒ 名字 / 清掉 ⇒ 回到 `?`
+    LIFT_CHECK(r.stderr_text.find("watch      : WRITE 0x00405000 n=4 shim=?") != std::string::npos);
+    LIFT_CHECK(r.stderr_text.find("watch      : WRITE 0x00405004 n=4 shim=test-shim") != std::string::npos);
+    LIFT_CHECK(r.stderr_text.find("watch      : WRITE 0x00405008 n=4 shim=?") != std::string::npos);
+    // 真实 `ShimRegistry::invoke`：名字来自 `def->name`（⛔ 不是测试自己设的）⇒ 钉住 shims.cpp 的接线
+    LIFT_CHECK(r.stderr_text.find("watch      : WRITE 0x0040500C n=4 shim=registered-shim") !=
+               std::string::npos);
+    // 不在观察集的写零行（反向断言）
+    LIFT_CHECK(r.stderr_text.find("WRITE 0x00401000") == std::string::npos);
+}
+
+// ⑩ 缺省档（不设 `LIFT_WATCH`）⇒ 一条 `watch      :` 都不打（反向断言：find == npos）。
+void checkWatchOff(const ChildRun& r) {
+    LIFT_CHECK(r.exited);
+    LIFT_CHECK_EQ_I64(r.exit_code, 0);
+    LIFT_CHECK(r.stderr_text.find("watch      :") == std::string::npos);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -305,6 +747,11 @@ int main(int argc, char** argv) {
     if (std::strcmp(mode, "--child-host-av") == 0) childFaultHost();
     if (std::strcmp(mode, "--child-guest-fault") == 0) childFaultGuest();
     if (std::strcmp(mode, "--child-aot-fault") == 0) childFaultAot();
+    if (std::strcmp(mode, "--child-platform-fault") == 0) childFaultPlatform();
+    if (std::strcmp(mode, "--child-fault-dump") == 0) childFaultDump();
+    if (std::strcmp(mode, "--child-watch-follow") == 0) childWatchFollow();
+    if (std::strcmp(mode, "--child-watch-shim") == 0) childWatchShim();
+    if (std::strcmp(mode, "--child-watch-off") == 0) childWatchOff();
 
     // ① 纯函数（两平台都跑）
     g_current_case = "in-guest-space-pure-function";
@@ -316,6 +763,14 @@ int main(int argc, char** argv) {
     LIFT_CHECK(!lift::inGuestSpace(guest_base, host_base + lift::GuestMemory::kSpace));      // 右开区间
     LIFT_CHECK(!lift::inGuestSpace(guest_base, 0x1u));                                        // 宿主低地址 ⇒ host
     LIFT_CHECK(!lift::inGuestSpace(nullptr, host_base));                                      // 未预留 ⇒ 不归因 guest
+
+    // ①' `LIFT_FAULT_DUMP` 的解析器（进程内；两个平台同一份判据）
+    g_current_case = "fault-dump-spec-parser";
+    checkFaultDumpParser();
+
+    // ①'' `LIFT_WATCH` 的解析器（进程内；两个平台同一份判据）
+    g_current_case = "fault-watch-spec-parser";
+    checkFaultWatchParser();
 
 #if defined(_WIN32)
     // ④ 宿主页大小以系统为准（⛔ 不许硬编码 0x1000）。
@@ -355,6 +810,38 @@ int main(int argc, char** argv) {
     const ChildRun aot = runChild(L"aot-fault");
     checkAotFault(aot);
 
+    // ⑤ 真平台 guest fault：`fault ea` 行（host − base）+ `access` 行的"不是本次 fault"后缀
+    //   ★ 修前红：本条断言 `fault ea   : 0x20000000` 在实现缺失时**运行期**红（不是链接红）。
+    g_current_case = "platform-guest-fault-ea";
+    const ChildRun plat = runChild(L"platform-fault");
+    checkPlatformFault(plat);
+
+    // ⑥ fault 时的 opt-in dump（env → 解析 → 安装 → dump；6 段覆盖成功/失败/继续）
+    g_current_case = "fault-dump-at-fault";
+    const ChildRun dump = runChild(L"fault-dump");
+    checkDumpAtFault(dump);
+
+    // ⑦ 缺省档 / safe-mode 的"不多打"（反向断言：find == npos）
+    g_current_case = "default-fault-text-unchanged";
+    const ChildRun safe = runChild(L"guest-fault");
+    const ChildRun plat_default = runChild(L"platform-fault");
+    checkDefaultFaultText(safe, plat_default);
+
+    // ⑧ `LIFT_WATCH` follow 的时序（走 `lift_note_write`：槽写 → 下一次写补读 P → arm → 点名本次写）
+    g_current_case = "fault-watch-follow";
+    const ChildRun watch_follow = runChild(L"watch-follow");
+    checkWatchFollow(watch_follow);
+
+    // ⑨ shim 侧写入（`wr32`）+ 不在观察集的写零输出
+    g_current_case = "fault-watch-shim";
+    const ChildRun watch_shim = runChild(L"watch-shim");
+    checkWatchShim(watch_shim);
+
+    // ⑩ 缺省档（不设 env）⇒ 一条 `watch      :` 都不打
+    g_current_case = "fault-watch-off";
+    const ChildRun watch_off = runChild(L"watch-off");
+    checkWatchOff(watch_off);
+
     return finish("fault-report");
 #else
     // ② 宿主 AV：先弄脏 g_access，再解引用 0x1 ⇒ 必须是 host fault（不许报成 guest 访存）
@@ -383,6 +870,37 @@ int main(int argc, char** argv) {
     g_current_case = "aot-fault-site-and-plan-summary";
     const ChildRun aot = runChild(&childFaultAot);
     checkAotFault(aot);
+
+    // ⑤ 真平台 guest fault：`fault ea` 行（host − base）+ `access` 行的"不是本次 fault"后缀
+    g_current_case = "platform-guest-fault-ea";
+    const ChildRun plat = runChild(&childFaultPlatform);
+    checkPlatformFault(plat);
+
+    // ⑥ fault 时的 opt-in dump（env → 解析 → 安装 → dump；6 段覆盖成功/失败/继续）
+    g_current_case = "fault-dump-at-fault";
+    const ChildRun dump = runChild(&childFaultDump);
+    checkDumpAtFault(dump);
+
+    // ⑦ 缺省档 / safe-mode 的"不多打"（反向断言：find == npos）
+    g_current_case = "default-fault-text-unchanged";
+    const ChildRun safe = runChild(&childFaultGuest);
+    const ChildRun plat_default = runChild(&childFaultPlatform);
+    checkDefaultFaultText(safe, plat_default);
+
+    // ⑧ `LIFT_WATCH` follow 的时序（走 `lift_note_write`：槽写 → 下一次写补读 P → arm → 点名本次写）
+    g_current_case = "fault-watch-follow";
+    const ChildRun watch_follow = runChild(&childWatchFollow);
+    checkWatchFollow(watch_follow);
+
+    // ⑨ shim 侧写入（`wr32`）+ 不在观察集的写零输出
+    g_current_case = "fault-watch-shim";
+    const ChildRun watch_shim = runChild(&childWatchShim);
+    checkWatchShim(watch_shim);
+
+    // ⑩ 缺省档（不设 env）⇒ 一条 `watch      :` 都不打
+    g_current_case = "fault-watch-off";
+    const ChildRun watch_off = runChild(&childWatchOff);
+    checkWatchOff(watch_off);
 
     return finish("fault-report");
 #endif

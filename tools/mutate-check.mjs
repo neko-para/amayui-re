@@ -4297,6 +4297,20 @@ const MUTATIONS = [
       'fault-report 的合成 AOT 现场断言红（BUG-32 的"现场信息不全"同类）',
   },
 
+  //   ★ 代表"fault 行只在有平台地址时出现"这一条结构性判据被去掉（BUG-32 的诊断缺口修反了）：
+  //     safe-mode 也调 `printFaultEa(nullptr, …)` ⇒ 多出一条"无法换算"的 `fault ea` 行 ⇒
+  //     `default-fault-text-unchanged` 的 `find("fault ea") == npos` 当场红（不是链接红）。
+  {
+    file: 'apps/emulator-lift/src/runtime/memory.cpp',
+    from: '    if (plat != nullptr) printFaultEa(plat, stderr);',
+    to: '    printFaultEa(plat, stderr);  // 变异：safe-mode 也打 fault ea',
+    guard: 'ctest:fault-report',
+    ctest: 'fault-report',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-fault-report',
+    what: '「只有平台地址才打 fault ea」的门被去掉 ⇒ safe-mode 也多一条 fault ea ⇒ default-fault-text-unchanged 红',
+  },
+
   // ── `--input-plan-trace`（`REQ-01M7PG086DG4BBPA40VCVZTP4X` B；守卫 = `tests/input_plan.cpp`）──
   //   ★ 代表"开档退化成关档"这一类错：门写反 / 被吞 ⇒ 诊断时**没有任何读数**，而配方照旧施加
   //     （`fired` 会涨、屏幕不动）—— 正是"配方 click 不被消费"查不出来的形状。
@@ -4311,6 +4325,26 @@ const MUTATIONS = [
     what:
       '`--input-plan-trace` 的 step 事件一行都不打 ⇒ input-plan-read-points 的 trace 用例' +
       '（开档有行 / 关档零行）当场红',
+  },
+
+  // ── `LIFT_WATCH`（BUG-32 的"谁在 P-8 写了 16 字节"；守卫 = `tests/fault_report.cpp`）──
+  //   ★ 代表"watch 关闭门写反 ⇒ 开档退化成关档"这一类错：guest store 的观察点整条断掉，
+  //     配方照旧跑、`follow` / `WRITE` 一条都不打 —— 诊断时会误读成"没人写那个槽"。
+  //   ★ 为什么把门放在 `lift_note_write`：它是 AOT 臂**唯一**的 guest store 观察点（lifted store
+  //     不经过任何可打的宿主函数）；shim 侧那条门在 `memory.h` 的内联 helper 里（同一条判据，但
+  //     本条变异**不动**它 ⇒ `fault-watch-shim` 仍绿，正是"只有 guest 观察点断了"的形状）。
+  {
+    file: 'apps/emulator-lift/src/runtime/lift_abi.cpp',
+    from: '    if (lift::watchOn()) lift::watchGuestWrite(static_cast<lift::X86*>(cpu)->eip, ea, n);',
+    to: '    if (!lift::watchOn()) lift::watchGuestWrite(static_cast<lift::X86*>(cpu)->eip, ea, n);  // 变异：启用门反转',
+    guard: 'ctest:fault-report',
+    ctest: 'fault-report',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-fault-report',
+    what:
+      '`LIFT_WATCH` 的 watch 关闭门被反转（`if (watchOn())` → `if (!watchOn())`）⇒ 开档时 ' +
+      '`lift_note_write` 的 follow / WRITE 一条都不打 ⇒ fault-report 的 `fault-watch-follow` 红' +
+      '（断言 `follow pending` / `arm [P-8,P+8)` / `block=lift_cc_<块B>` 全部落空）',
   },
 ];
 
