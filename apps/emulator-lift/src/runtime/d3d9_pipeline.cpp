@@ -6115,6 +6115,27 @@ bool readBlendState(X86& cpu, std::uint32_t dev_state, BlendStateSnapshot* out, 
     return true;
 }
 
+// 设备渲染状态 → 写回（D3DX 自己的 Begin/End 用；见头文件的 `writeRenderState` 段）。
+// ★ 上界先于任何写（与 `setRenderState` 同一条理由）：`setRs` 直接拿 state 当索引算
+//   `kPlRenderStates + state*4`，越界会写穿状态块。
+bool writeRenderState(X86& cpu, std::uint32_t dev_state, std::uint32_t state, std::uint32_t value,
+                      std::string* why) {
+    if (state > kLastD3dRenderState) {
+        if (why) {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf),
+                          "writeRenderState 的 State=%u > %u（不是 D3DRS 值）⇒ ⛔ 不写状态块", state,
+                          kLastD3dRenderState);
+            *why = buf;
+        }
+        return false;
+    }
+    std::uint32_t pe = 0;
+    if (!pipelineOf(cpu, dev_state, &pe, why)) return false;
+    setRs(cpu, pe, state, value);
+    return true;
+}
+
 bool gpuBlendStateFor(std::uint32_t src_color, std::uint32_t dst_color, std::uint32_t color_op,
                       bool separate_alpha, std::uint32_t src_alpha, std::uint32_t dst_alpha,
                       std::uint32_t alpha_op, bool blend_enabled, GpuRasterState* out, std::string* why) {

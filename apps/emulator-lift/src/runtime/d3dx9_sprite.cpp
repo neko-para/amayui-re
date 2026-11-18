@@ -8,6 +8,10 @@
 //     颜色目标**（未绑 RT = 后缓冲；绑了纹理 RT = 那张纹理的像素块）；`Begin` 的 ALPHABLEND
 //     只决定"开不开"混合，**因子 / op 一律来自设备渲染状态**（`D3DRS_SRCBLEND` / `DESTBLEND` /
 //     `BLENDOP` 与 separate-alpha 三项；与 fixed-function 同一份映射）。⛔ 不从 flags 推因子。
+//     ★ `Begin(ALPHABLEND)` 还补上真 D3DX **自己**做的那一步：保存并把
+//     `ALPHABLENDENABLE` / `SRCBLEND` / `DESTBLEND` 设成 `1` / `SRCALPHA(5)` / `INVSRCALPHA(6)`，
+//     `End` 恢复（`REQ-01M7R3YPQPNPBZ327H89Q8RTEE`）。没有这一步，普通批次读到的是引擎残留的
+//     `ONE/ZERO` ⇒ 透明黑 texel 被不透明写进后缓冲（走廊 / 对话框底板变黑的回归）。
 // ★ **光栅只有 GPU 一条实现**（`REQ-01M7AAXNJY2PACYJHYVRV620Q5`）：原来那份"CPU 逐像素写后缓冲"
 //   的兜底已删 —— GPU 不可用 / 表达不了这一条 ⇒ **记账（`skipped`）+ 跳过**，⛔ 不静默画。
 //   本文件**没有**任何写 `dev.arena` / 目标像素的代码；"写了多少像素"这个数只为状态块的
@@ -64,7 +68,16 @@ enum SpriteOff : std::uint32_t {
     kSpResets = 112,
     kSpIgnoredFlags = 116,  // 最近一次 Begin 里本线不建模的位
     kSpComposedPixels = 120,
-    kSpBytes = 128,
+    // ---- `REQ-01M7R3YPQPNPBZ327H89Q8RTEE`：`Begin(ALPHABLEND)` 像真 D3DX 那样
+    //      **保存并改动** `ALPHABLENDENABLE` / `SRCBLEND` / `DESTBLEND`，`End` 恢复。
+    //      ★ `saved_valid` = "本次 Begin 接管了那三项"（0 = 没接管：Begin(无 ALPHABLEND) /
+    //      取不到设备 / 没有流水线状态块）；⛔ 它区分的是"接管了"与"这次没接管"，
+    //      不是"值是否等于 5/6"。
+    kSpSavedValid = 124,             // 1 = End 要恢复下面三项
+    kSpSavedAlphaBlendEnable = 128,  // Begin 之前的 D3DRS_ALPHABLENDENABLE（0/1）
+    kSpSavedSrcBlend = 132,          // Begin 之前的 D3DRS_SRCBLEND
+    kSpSavedDstBlend = 136,          // Begin 之前的 D3DRS_DESTBLEND
+    kSpBytes = 140,
 };
 constexpr std::uint32_t kSpMagicValue = 0x31525053u;  // 'SPR1'
 
@@ -176,6 +189,10 @@ struct State {
     std::uint32_t resets = 0;
     std::uint32_t ignored_flags = 0;
     std::uint32_t composed_pixels = 0;
+    std::uint32_t saved_valid = 0;  // 1 = 本批 Begin 改过 27/19/20，End 要恢复
+    std::uint32_t saved_alpha_blend_enable = 0;
+    std::uint32_t saved_src_blend = 0;
+    std::uint32_t saved_dst_blend = 0;
     float matrix[16] = {0};
 };
 
@@ -212,6 +229,10 @@ bool readState(X86& cpu, std::uint32_t state, State* out, std::string* why) {
     s.resets = cpu.mem->rd32(state + kSpResets);
     s.ignored_flags = cpu.mem->rd32(state + kSpIgnoredFlags);
     s.composed_pixels = cpu.mem->rd32(state + kSpComposedPixels);
+    s.saved_valid = cpu.mem->rd32(state + kSpSavedValid);
+    s.saved_alpha_blend_enable = cpu.mem->rd32(state + kSpSavedAlphaBlendEnable);
+    s.saved_src_blend = cpu.mem->rd32(state + kSpSavedSrcBlend);
+    s.saved_dst_blend = cpu.mem->rd32(state + kSpSavedDstBlend);
     *out = s;
     return true;
 }
@@ -328,6 +349,46 @@ struct DrawInput {
     float position[3] = {0, 0, 0};
     std::uint32_t color = 0;
 };
+
+// ---------------------------------------------------------------------------------------
+// `Begin(ALPHABLEND)` 的保存/恢复（`REQ-01M7R3YPQPNPBZ327H89Q8RTEE`；真 D3DX 的语义）
+// ---------------------------------------------------------------------------------------
+// ★ 真 D3DX9：`Begin(D3DXSPRITE_ALPHABLEND)` **自己**把 `ALPHABLENDENABLE=1` /
+//   `SRCBLEND=SRCALPHA(5)` / `DESTBLEND=INVSRCALPHA(6)` 写进设备，并在 `End` 把**它改过的**
+//   三项恢复。引擎**不会**替 sprite 设 5/6（它只在需要加性的那一条之前补 5/2）⇒ 缺了这一步，
+//   普通批次读到的就是设备里残留的 `ONE/ZERO`（不透明拷贝，透明黑 texel 写进后缓冲）。
+// ★ ⛔ 这**不是**"从 flags 推因子"：因子仍然只从设备状态**读**（`compositeBatch` 的
+//   `readBlendState` + `gpuBlendStateFor`）——`REQ-01M7R1ABAP86QVMNBZ5S4EDKD5` 的修法不变。
+// ★ 恢复**只**看 `saved_valid`：Begin 没接管（无 ALPHABLEND / 取不到设备 / 没有流水线块）⇒ 0，
+//   End 一项都不碰。`Flush` **不**恢复（它只提交批次，Begin 还开着）。
+bool restoreBeginSavedState(X86& cpu, std::uint32_t state, const State& s) {
+    if (s.saved_valid == 0) return true;
+    // 先清标记：恢复失败也**不**重试（同一台设备上重试不会有不同结果；⛔ 不每次 End 重复告警）。
+    cpu.mem->wr32(state + kSpSavedValid, 0u);
+    std::string why;
+    d3d9::DeviceInfo dev;
+    if (!d3d9::deviceInfo(cpu, s.device, &dev, &why)) {
+        spriteWarn("End", "ALPHABLEND 批次收尾：取不到设备（%s）⇒ ⛔ 恢复不了 27/19/20", why.c_str());
+        return false;
+    }
+    // 三项互不依赖，顺序随意；值来源 = Begin 时**读到的原值**。
+    const std::uint32_t ids[3] = {d3d9::kRsAlphaBlendEnable, d3d9::kRsSrcBlend, d3d9::kRsDestBlend};
+    const std::uint32_t values[3] = {s.saved_alpha_blend_enable, s.saved_src_blend, s.saved_dst_blend};
+    bool ok = true;
+    for (int i = 0; i < 3; ++i) {
+        std::string write_why;
+        if (!d3d9::writeRenderState(cpu, dev.state, ids[i], values[i], &write_why)) {
+            spriteWarn("End", "ALPHABLEND 批次收尾：恢复 D3DRS %u=%u 失败（%s）", ids[i], values[i],
+                       write_why.c_str());
+            ok = false;
+        }
+    }
+    if (ok) {
+        spriteLog("End", "ALPHABLEND 批次收尾：设备混合状态恢复成 27=%u / 19=%u / 20=%u", values[0],
+                  values[1], values[2]);
+    }
+    return ok;
+}
 
 }  // namespace
 
@@ -457,6 +518,58 @@ std::uint32_t begin(X86& cpu, std::uint32_t state, std::uint32_t flags, std::str
     cpu.mem->wr32(state + kSpDrawing, 1u);
     cpu.mem->wr32(state + kSpCount, 0u);  // 新批次从空开始（上一次的残留不跨 Begin）
     cpu.mem->wr32(state + kSpBegins, s.begins + 1u);
+    // ---- 真 D3DX 的 Begin 副作用（`REQ-01M7R3YPQPNPBZ327H89Q8RTEE`）----
+    // ★ 只补 D3DX 自己会做的那一步：带 `ALPHABLEND` 时**先保存**设备里的
+    //   `ALPHABLENDENABLE(27)` / `SRCBLEND(19)` / `DESTBLEND(20)`，再**写**成
+    //   `1` / `SRCALPHA(5)` / `INVSRCALPHA(6)`；`End` 恢复（`Flush` 不恢复）。
+    //   ⛔ 因子仍然只从设备状态**读**（`compositeBatch` 的快照）—— 本步只决定"读到什么"，
+    //   不是"跳过读取、从 flags 推因子"（那会把 BUG-33 修回去）。
+    // ★ 边界（本轮**不动**）：`kSpriteDoNotSaveState` / `kSpriteDoNotModifyRenderState` 仍按既有
+    //   口径"记录并忽略"；它们只影响真 D3DX 的保存/改动范围，而本线本轮只补 ALPHABLEND 的
+    //   默认因子这一步。⛔ 不顺手扩到 `ALPHATESTENABLE` / `ZENABLE` / `LIGHTING` 等其它状态。
+    // ★ 失败语义沿用既有边界：取不到设备 / 没有流水线状态块 ⇒ **不改 Begin 的返回码**，只记一条
+    //   默认级别可见的告警，并让 `saved_valid=0`（End 一项都不恢复，⛔ 不假装接管了）。
+    {
+        bool took = false;
+        if ((flags & kSpriteAlphaBlend) != 0) {
+            d3d9::DeviceInfo dev;
+            d3d9::BlendStateSnapshot rs;
+            std::string why_dev;
+            if (!d3d9::deviceInfo(cpu, s.device, &dev, &why_dev)) {
+                spriteWarn("Begin", "ALPHABLEND：取不到设备状态（%s）⇒ ⛔ 不接管 27/19/20",
+                           why_dev.c_str());
+            } else if (dev.pipeline == 0) {
+                spriteWarn("Begin", "ALPHABLEND：设备没有流水线状态块（'DL01'）⇒ ⛔ 不接管 27/19/20");
+            } else if (!d3d9::readBlendState(cpu, dev.state, &rs, &why_dev)) {
+                spriteWarn("Begin", "ALPHABLEND：读不到设备混合状态（%s）⇒ ⛔ 不接管 27/19/20",
+                           why_dev.c_str());
+            } else {
+                // 先把"原值 + 已接管"落盘，再写三项：即使某一写失败，End 仍会按这份原值恢复。
+                // ★ ALPHABLENDENABLE 是真布尔状态（`setRenderState` 只收 0/1）⇒ 存 0/1 即逐字原值。
+                cpu.mem->wr32(state + kSpSavedAlphaBlendEnable, rs.blend ? 1u : 0u);
+                cpu.mem->wr32(state + kSpSavedSrcBlend, rs.src_color);
+                cpu.mem->wr32(state + kSpSavedDstBlend, rs.dst_color);
+                cpu.mem->wr32(state + kSpSavedValid, 1u);
+                took = true;
+                const std::uint32_t ids[3] = {d3d9::kRsAlphaBlendEnable, d3d9::kRsSrcBlend,
+                                              d3d9::kRsDestBlend};
+                const std::uint32_t values[3] = {1u, d3d9::kBlendSrcAlpha, d3d9::kBlendInvSrcAlpha};
+                for (int i = 0; i < 3; ++i) {
+                    std::string write_why;
+                    if (!d3d9::writeRenderState(cpu, dev.state, ids[i], values[i], &write_why)) {
+                        spriteWarn("Begin", "ALPHABLEND：写 D3DRS %u=%u 失败（%s）⇒ End 仍会恢复原值",
+                                   ids[i], values[i], write_why.c_str());
+                    }
+                }
+                spriteLog("Begin",
+                          "ALPHABLEND：按 D3DX 语义设 27=1 / 19=%u / 20=%u（原值 27=%u / 19=%u / 20=%u，"
+                          "End 恢复）",
+                          d3d9::kBlendSrcAlpha, d3d9::kBlendInvSrcAlpha, rs.blend ? 1u : 0u, rs.src_color,
+                          rs.dst_color);
+            }
+        }
+        if (!took) cpu.mem->wr32(state + kSpSavedValid, 0u);
+    }
     if (flags & ~kSpriteKnownFlags) {
         spriteLog("Begin", "Flags=0x%08X 含**未定义**位 0x%08X ⇒ 记录并忽略（不失败）", flags,
                   flags & ~kSpriteKnownFlags);
@@ -703,6 +816,8 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
     // ---- 混合：每**批**读一次设备渲染状态（⛔ 不是每条 draw 读一遍）----
     // ★ `Begin` 的 flags 只决定"开不开"；因子 / op 一律来自设备状态，判据与 fixed-function
     //   **同一份**读法（`d3d9::readBlendState`）与**同一份**映射（`gpuBlendStateFor`）。
+    //   ★ 带 `ALPHABLEND` 的 `Begin` 已经把 27/19/20 设成 `1/5/6`（真 D3DX 的语义）⇒ 引擎没改过时
+    //   这里读到的就是 5/6；引擎在 Begin 之后写 5/2（加性）⇒ 这里读到 5/2。两条都对。
     //   `REQ-01M7R1ABAP86QVMNBZ5S4EDKD5` 之前这里只有一句 `gs_state.blend = blend;` ⇒ 落到
     //   `gpu_raster.h` 的缺省 SrcAlpha/InvSrcAlpha，引擎的加性（SRCALPHA/ONE）被丢掉。
     const bool alpha_blend_flag = (s.flags & kSpriteAlphaBlend) != 0;
@@ -1081,6 +1196,10 @@ std::uint32_t end(X86& cpu, std::uint32_t state, std::string* why) {
     std::uint32_t entries = 0;
     std::uint64_t pixels = 0;
     if (!compositeBatch(cpu, state, &entries, &pixels, why)) return kFail;
+    // ★ 真 D3DX 的语义：`End` 把 `Begin(ALPHABLEND)` **改过的** 27/19/20 恢复（`Flush` 不恢复）。
+    //   `saved_valid=0`（Begin 没接管）⇒ 这里一项都不碰。恢复失败只告警，**不改** End 的返回码：
+    //   批次已经合成完，把一次状态恢复失败升级成"整批失败"会丢掉已经画出来的像素。
+    if (s.saved_valid != 0) (void)restoreBeginSavedState(cpu, state, s);
     cpu.mem->wr32(state + kSpDrawing, 0u);
     cpu.mem->wr32(state + kSpEnds, s.ends + 1u);
     spriteLog("End", "合成 %u 条 Draw / %llu 个覆盖格（四边形包围盒）⇒ 批次关闭", entries,
