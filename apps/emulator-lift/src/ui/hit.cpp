@@ -56,8 +56,10 @@ void ClickRouter::commitFrame(std::vector<HitRegion> regions) {
 void ClickRouter::clearFrame() {
     regions_.clear();
     frame_committed_ = false;
-    // 命中区已经不在屏幕上了 ⇒ capture 也作废（它的 rect 只是一份快照）。
+    // 命中区已经不在屏幕上了 ⇒ capture 也作废（它的 rect 只是一份快照），欠着的 up 也不再收
+    // （叠层都关了 = 路由不在，放行才是"既有语义"）。
     active_.reset();
+    up_owed_ = false;
 }
 
 UiPointerDecision ClickRouter::handlePointer(UiPointerPhase phase, UiPointerButton button, int px, int py) {
@@ -70,18 +72,22 @@ UiPointerDecision ClickRouter::handlePointer(UiPointerPhase phase, UiPointerButt
         // ★ 新的左键 down **无条件**清 capture（不论是命中还是落到空白）：按住 A 时再按 B，
         //   capture 必须换成 B，抬起时只发 B。
         active_.reset();
+        up_owed_ = false;  // 新的 down 重新决定"这次抬起归谁"
         const HitRegion* hit = hitTest(regions_, px, py);
         if (hit == nullptr) return decision;  // 没命中 ⇒ 放行给 guest（HUD 之外的地方必须能玩）
         active_ = *hit;
+        up_owed_ = true;  // 这次 down 被我们接了 ⇒ 它的 up 必须由我们收掉
         decision.swallow = true;
         return decision;
     }
 
-    // Up：只有"这次 down 是我们接的"才吞。没 capture 的 up 必须放行 —— 否则 guest 的那个 down
-    // 永远等不到配对的 up（按住状态卡住）。
-    if (!active_) return decision;
-    decision.swallow = true;  // ★ 捕获中的 up **无条件**吞掉（哪怕抬起点已在 rect 外）
-    if (active_->contains(px, py)) {
+    // Up：**只要这次 down 是我们接的**就吞（哪怕抬起点已在 rect 外、哪怕 capture 已被失焦清掉）。
+    // ★ 不能改回"看 active_ 有没有值"：失焦清 capture 之后那次 up 若放行，guest 会收到一个
+    //   **没有 down 的 up**（菜单类界面常在 up 上触发）。
+    if (!up_owed_) return decision;
+    decision.swallow = true;
+    up_owed_ = false;
+    if (active_ && active_->contains(px, py)) {
         UiClick click;
         click.key = active_->key;
         click.x = px;
@@ -94,7 +100,11 @@ UiPointerDecision ClickRouter::handlePointer(UiPointerPhase phase, UiPointerButt
     return decision;
 }
 
-void ClickRouter::focusLost() { active_.reset(); }
+void ClickRouter::focusLost() {
+    // 失焦 ⇒ **取消这次点击**（capture 清空 ⇒ up 时不会发 click），但 up 仍由我们收掉
+    // （`up_owed_` 不清）：⛔ 不把"没有 down 的 up"漏给 guest。
+    active_.reset();
+}
 
 std::string ClickRouter::activeKey() const { return active_ ? active_->key : std::string(); }
 

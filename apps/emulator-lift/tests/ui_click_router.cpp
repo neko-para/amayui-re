@@ -167,13 +167,21 @@ void caseCapture() {
     expectClick(router, "b", 10, 40, "新的 down 之后只发 b 的 click");
     expectNoClick(router, "a 的 click 不会补发");
 
-    // ⑧ 失焦 ⇒ 清 capture；之后的 up 放行（guest 从没见过这次 down）。
+    // ⑧ 失焦 ⇒ 清 capture（**取消这次点击**），但这次 down 是我们接的 ⇒ up 仍须吞掉
+    //    （⛔ 不让 guest 收到一个没有 down 的 up：菜单类界面常在 up 上触发）。
     expectSwallow(pointer(router, UiPointerPhase::Down, UiPointerButton::Left, 10, 10), true, "失焦前按住 a");
     router.focusLost();
     expectActive(router, "", "失焦必须清 capture");
-    expectSwallow(pointer(router, UiPointerPhase::Up, UiPointerButton::Left, 10, 10), false,
-                  "失焦后的 up 必须放行");
+    {
+        const UiPointerDecision up = pointer(router, UiPointerPhase::Up, UiPointerButton::Left, 10, 10);
+        expectSwallow(up, true, "失焦后的 up 仍须吞掉（这次 down 是我们接的）");
+        ++lift_test::g_checks;
+        if (up.emit_click) lift_test::failf(__FILE__, __LINE__, "失焦取消不许发 click");
+    }
     expectNoClick(router, "失焦取消不产生 click");
+    // 没有欠着的 down 的 up 必须放行（guest 自己的 down/up 必须对称）。
+    expectSwallow(pointer(router, UiPointerPhase::Up, UiPointerButton::Left, 10, 10), false,
+                  "没有欠 down 的 up 必须放行");
 
     // ⑧ 命中表被清掉（叠层关）⇒ 不命中、不吞、没有 hover。
     router.clearFrame();

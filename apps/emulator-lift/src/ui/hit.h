@@ -13,8 +13,8 @@
 //
 // ★ 事件边界（需求单「设计」第 4 条；判据在 `tests/ui_click_router.cpp`）：
 //   · 左键 down **命中** ⇒ 吞掉 + 记 capture；没命中 ⇒ 放行给 guest；
-//   · 左键 up **在捕获中** ⇒ 无条件吞掉（哪怕抬起点已在 rect 外）；不在捕获中 ⇒ 放行
-//     （这次 down 是 guest 的，吞掉 up 会让 guest 卡住"按住"）；
+//   · 左键 up：**只要这次 down 是我们接的** ⇒ 无条件吞掉（哪怕抬起点已在 rect 外，哪怕 capture
+//     已被失焦清掉）。⛔ 不让 guest 收到一个**没有 down 的 up**（菜单类界面常在 up 上触发）；
 //   · 抬起点仍在 capture 那条 rect 内 ⇒ 产**一次** click（`{key,x,y}`，x/y = 抬起点）；
 //   · motion / wheel / 右键 / 中键 ⇒ 一律放行；
 //   · 失焦 / 关窗 / 新的左键 down ⇒ 清 capture（拖出 ⇒ 抬起时自然取消，不发 click）。
@@ -107,6 +107,10 @@ private:
     // 版式（HUD 面板宽度）会逐帧变，down / up 必须用**同一个**矩形判定，否则"按住时面板长了
     // 一格"会让抬起点凭空落到外面（点击静默丢失）。
     std::optional<HitRegion> active_;
+    // ★ "这次左键 down 是我们接的、它的 up 还没到"（欠一个 up）。
+    //   与 `active_` 分开：失焦 / 关窗清 capture（= 取消 click），但**不**把这次 up 还给 guest
+    //   （否则 guest 收到没有 down 的 up）。新的左键 down 重新决定它。
+    bool up_owed_ = false;
     std::optional<UiClick> pending_;
 };
 
