@@ -4540,6 +4540,21 @@ const MUTATIONS = [
       '`kFilterGraphField` 0x34→0x6C（把 m_pGraph 看成渲染器的输入 pin）⇒ join 已落盘的 +0x34 读不到、' +
       'AddFilter 之后每条 JoinFilterGraph 都误报"没落盘" ⇒ dshow-join-filter-graph 红',
   },
+
+  // ── CMake 打印面：把一条 `message()` 改回中文（守卫 = `tools/test/cmake-print-ascii.test.mjs`）──
+  //   ★ 这是"936 乱码"那一类缺陷的**原缺陷形态**（2026-11-19 现场：`build.ninja` 的 `DESC =` 直出 UTF-8）。
+  //   ★ ⛔ **不需要 `buildTarget` / `buildDir`**：该守卫是 pure `.mjs`（只读仓库内文本），
+  //     变异走 `node --test <file>`、不编 C++、不跑 ctest ⇒ 按 CTest 条目的形状填 `buildTarget` 反而会让
+  //     `staticManifestCheck` 去找一个不存在的 `add_test`（那是给 CTest 条目用的映射）。
+  {
+    file: 'apps/emulator-lift/CMakeLists.txt',
+    from: '        message(STATUS "input inventory: present  ${_lift_abs}")',
+    to: '        message(STATUS "输入盘点：present  ${_lift_abs}")',
+    guard: 'tools/test/cmake-print-ascii.test.mjs',
+    what:
+      '把 configure 期的 `input inventory: present` 那条 `message()` 改回中文（原缺陷形态）⇒ ' +
+      'CMake 会打印的引号实参里又出现 UTF-8 ⇒ cmake-print-ascii 的"每字节 < 0x80"断言当场红',
+  },
 ];
 
 let mutationRunSeq = 0;

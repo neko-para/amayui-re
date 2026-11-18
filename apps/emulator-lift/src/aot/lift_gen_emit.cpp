@@ -5634,7 +5634,7 @@ bool emitBodies(const std::vector<GenComponent>& components,
     for (const std::uint32_t hook : structure.hook_eas) {
         if (entry_owner.count(hook) == 0) {
             std::fprintf(stderr,
-                         "emulator-lift-gen: 宿主钩子 EA %08X 不在入口集（S7 之下无法保持在派发边界）\n",
+                         "emulator-lift-gen: host hook EA %08X is not in the entry set (S7 cannot stay on a dispatch boundary)\n",
                          hook);
             return false;
         }
@@ -5645,7 +5645,7 @@ bool emitBodies(const std::vector<GenComponent>& components,
     {
         std::string liveness_err;
         if (!computeFlagsLiveness(components, entry_set, &block_flags, stats, &liveness_err)) {
-            std::fprintf(stderr, "emulator-lift-gen: flags 活性计算失败：%s\n", liveness_err.c_str());
+            std::fprintf(stderr, "emulator-lift-gen: flags liveness computation failed: %s\n", liveness_err.c_str());
             return false;
         }
     }
@@ -5656,7 +5656,7 @@ bool emitBodies(const std::vector<GenComponent>& components,
         if (emit.failed()) {
             // ★ S3-a：生成期硬错（"读了/要物化一个 Poison 位"= flags 活性自相矛盾）。
             //   ⛔ 不降级成警告：产物一旦带着错的 flags 状态出去，就是**静默**错。
-            std::fprintf(stderr, "emulator-lift-gen: flags 生成期硬错：%s（分量根 0x%08X）\n",
+            std::fprintf(stderr, "emulator-lift-gen: hard error during flags emission: %s (component root 0x%08X)\n",
                          emit.failWhy().c_str(), comp.root);
             return false;
         }

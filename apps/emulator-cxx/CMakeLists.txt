@@ -21,16 +21,16 @@ option(EMULATOR_CXX_WITH_VIDEO "Link FFmpeg (vcpkg feature: video)" OFF)
 # ⇒ 打开开关时给一句人话，而不是让 find_package 抛一句难懂的错。
 if(APPLE AND EMULATOR_CXX_WITH_SHADER)
     message(WARNING
-        "macOS 走 MSL 源（Metal 运行时编译），不需要 shadercross；"
-        "已忽略 EMULATOR_CXX_WITH_SHADER（sdl3-shadercross 依赖 directx-dxc，只在 windows / linux-x64 有）。")
+        "macOS uses MSL sources (compiled by Metal at runtime), so shadercross is not needed;"
+        "EMULATOR_CXX_WITH_SHADER ignored (sdl3-shadercross depends on directx-dxc, only available on windows / linux-x64).")
     set(EMULATOR_CXX_WITH_SHADER OFF)
 endif()
 
 # vcpkg 通过 toolchain 注入前缀；这里只做显式检查，缺依赖时给出可读的失败信息。
 if(NOT DEFINED VCPKG_TARGET_TRIPLET AND NOT DEFINED ENV{VCPKG_ROOT})
     message(WARNING
-        "没有检测到 vcpkg toolchain。请通过 CMakePresets.json 配置 VCPKG_ROOT，"
-        "或用 -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake。")
+        "no vcpkg toolchain detected. Configure VCPKG_ROOT through CMakePresets.json,"
+        "or pass -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake.")
 endif()
 
 find_package(SDL3 CONFIG REQUIRED)

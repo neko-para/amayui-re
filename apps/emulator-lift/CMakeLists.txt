@@ -24,8 +24,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # vcpkg 由 CMakePresets 的 toolchain 注入；这里只做显式检查，缺依赖时给可读的失败信息。
 if(NOT DEFINED VCPKG_TARGET_TRIPLET AND NOT DEFINED ENV{VCPKG_ROOT})
     message(WARNING
-        "没有检测到 vcpkg toolchain。请用 CMakePresets.json（跨目录复用 ../emulator-cxx/vcpkg），"
-        "或用 -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake。")
+        "no vcpkg toolchain detected. Use CMakePresets.json (it reuses ../emulator-cxx/vcpkg across directories),"
+        "or pass -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake.")
 endif()
 
 # SDL_GetGPURendererDevice / SDL_CreateRenderer("gpu") 需要 SDL >= 3.4；
@@ -320,7 +320,7 @@ find_program(LIFT_AOT_IR_CLANG NAMES clang clang.exe)
 #     依据与读数：`.tmp/aot/irsplit/design.md` §3.3 / `.tmp/aot/irsplit/impl-report.md`。
 # =====================================================================================
 set(LIFT_AOT_SPLIT 8 CACHE STRING
-    "AOT IR 拆成几份：1 = 单份路径（今天的形状）；N>1 = 按分量根 EA 升序贪心分桶（N = 8 是裁决值）")
+    "How many pieces to split the AOT IR into: 1 = single-file path (today's shape); N>1 = greedy buckets over component-root EA ascending (N = 8 is the decided value)")
 # =====================================================================================
 # ★ LTO 档：**APPLE + WIN32 默认 ON**（2026-11-17 用户裁决：只要有可见优化就接受默认开；2026-11-18 win32 验证通过），
 #   Linux 默认 OFF（未验证）。
@@ -363,13 +363,13 @@ if(APPLE OR WIN32)
 else()
     set(_LIFT_AOT_LTO_DEFAULT OFF)
 endif()
-option(LIFT_AOT_LTO "AOT IR + 最终链接用 -flto（APPLE / WIN32 默认 ON；Linux 默认 OFF = 未验证）"
+option(LIFT_AOT_LTO "AOT IR + final link use -flto (APPLE / WIN32 default ON; Linux default OFF = unverified)"
        ${_LIFT_AOT_LTO_DEFAULT})
-option(LIFT_AOT_LTO_ABI "LTO 档下把 src/runtime/lift_abi.cpp 也编成 bitcode（tick/note/dyn 可被内联）" ON)
-option(LIFT_AOT_LTO_RUNTIME "LTO 档下整个 emulator-lift-runtime（含 shim）也编成 bitcode" OFF)
+option(LIFT_AOT_LTO_ABI "Under LTO, also compile src/runtime/lift_abi.cpp as bitcode (tick/note/dyn can be inlined)" ON)
+option(LIFT_AOT_LTO_RUNTIME "Under LTO, compile the whole emulator-lift-runtime (incl. shims) as bitcode" OFF)
 if(NOT APPLE AND NOT WIN32 AND NOT LIFT_AOT_LTO)
     message(STATUS
-        "emulator-lift-aot: LTO 在 Linux 上默认 OFF（未验证）；要开用 -DLIFT_AOT_LTO=ON（未验证）")
+        "emulator-lift-aot: LTO defaults to OFF on Linux (unverified); enable it with -DLIFT_AOT_LTO=ON (unverified)")
 endif()
 
 # ★ IR 的编译参数**唯一落点**（configure 期断言盯的就是这一行；OFF 档一字不动）。
@@ -399,10 +399,10 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
     #   好看却在运行期变慢的自欺路径；这类改动必须**当场**失败，而不是构建出来再比读数。
     # =================================================================================
     if(LIFT_AOT_SINGLE_TU AND LIFT_AOT_SPLIT GREATER 1)
-        message(FATAL_ERROR "LIFT_AOT_SINGLE_TU 与 LIFT_AOT_SPLIT=${LIFT_AOT_SPLIT} 互斥")
+        message(FATAL_ERROR "LIFT_AOT_SINGLE_TU is mutually exclusive with LIFT_AOT_SPLIT=${LIFT_AOT_SPLIT}")
     endif()
     if(LIFT_AOT_SPLIT GREATER 100)
-        message(FATAL_ERROR "LIFT_AOT_SPLIT=${LIFT_AOT_SPLIT} 超出口令范围（≤ 100）")
+        message(FATAL_ERROR "LIFT_AOT_SPLIT=${LIFT_AOT_SPLIT} is out of range (<= 100)")
     endif()
     if(LIFT_AOT_SPLIT GREATER 1)
         # ★ 硬闸按档位分叉（两档都要断言）：OFF ⇒ `-c -O2` 且 `-flto/-flto=thin` 一律失败；
@@ -416,13 +416,13 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
         endif()
         if(NOT "${LIFT_AOT_CLANG_FLAGS}" STREQUAL "${_LIFT_AOT_EXPECT}")
             message(FATAL_ERROR
-                "LIFT_AOT_SPLIT=${LIFT_AOT_SPLIT} 时 AOT IR 的参数必须仍是 `${_LIFT_AOT_EXPECT}`，"
-                "实际 = `${LIFT_AOT_CLANG_FLAGS}`（⛔ 不许降 -O1/-O0；⛔ OFF 档不许 LTO）")
+                "with LIFT_AOT_SPLIT=${LIFT_AOT_SPLIT} the AOT IR flags must still be `${_LIFT_AOT_EXPECT}`,"
+                "actual = `${LIFT_AOT_CLANG_FLAGS}` (no -O1/-O0 downgrades; no LTO in the OFF profile)")
         endif()
         foreach(_bad IN ITEMS ${_LIFT_AOT_BAD})
             if("${LIFT_AOT_CLANG_FLAGS}" MATCHES "(^|;)${_bad}(;|$)")
                 message(FATAL_ERROR
-                    "LIFT_AOT_SPLIT=${LIFT_AOT_SPLIT} 时 AOT IR 的参数里出现 `${_bad}`（⛔ 禁止）")
+                    "with LIFT_AOT_SPLIT=${LIFT_AOT_SPLIT} the AOT IR flags contain `${_bad}` (forbidden)")
             endif()
         endforeach()
     endif()
@@ -463,7 +463,7 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
         ERROR_VARIABLE LIFT_AOT_PROBE_ERR)
     if(NOT LIFT_AOT_PROBE_RC EQUAL 0)
         message(FATAL_ERROR
-            "IR target 探针编不过（clang=${LIFT_AOT_IR_CLANG} rc=${LIFT_AOT_PROBE_RC}）："
+            "IR target probe failed to compile (clang=${LIFT_AOT_IR_CLANG} rc=${LIFT_AOT_PROBE_RC}):"
             "`${LIFT_AOT_PROBE_ERR}`")
     endif()
     file(READ "${LIFT_AOT_DIR}/ir_target_probe.ll" _LIFT_AOT_PROBE_LL)
@@ -479,12 +479,12 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
         # ★ 这里必须**当场**失败：探针没拿到 target 属性 ⇒ 生成物与运行库的 LTO 属性会对不上 ⇒
         #   LTO 静默不内联（构建照绿、产物照跑，只是没有收益）。那是**没有任何症状**的失效。
         message(FATAL_ERROR
-            "IR target 探针没拿到 target 属性（cpu=`${LIFT_AOT_IR_TARGET_CPU}`；"
-            "features=`${LIFT_AOT_IR_TARGET_FEATURES}`）⇒ 生成物与运行库的 LTO 属性会对不上 ⇒ "
-            "areInlineCompatible 判不相容、lift_tick / lift_note_write 静默不内联。"
-            "探针产物见 `${LIFT_AOT_DIR}/ir_target_probe.ll`（clang=${LIFT_AOT_IR_CLANG}）")
+            "IR target probe got no target attributes (cpu=`${LIFT_AOT_IR_TARGET_CPU}`;"
+            "features=`${LIFT_AOT_IR_TARGET_FEATURES}`) => generated IR and runtime LTO attributes would mismatch =>"
+            "areInlineCompatible reports incompatibility and lift_tick / lift_note_write silently never inline."
+            "probe output: `${LIFT_AOT_DIR}/ir_target_probe.ll` (clang=${LIFT_AOT_IR_CLANG})")
     endif()
-    message(STATUS "emulator-lift-aot: IR target 属性 = cpu `${LIFT_AOT_IR_TARGET_CPU}` / features `${LIFT_AOT_IR_TARGET_FEATURES}`（configure 期探针）")
+    message(STATUS "emulator-lift-aot: IR target attributes = cpu `${LIFT_AOT_IR_TARGET_CPU}` / features `${LIFT_AOT_IR_TARGET_FEATURES}` (configure-time probe)")
 
     # ① 生成物：一次 custom command 写全部 `.ll`（N=1 = 一份）+ 分片清单（N>1）+ pin + 派发表。
     #    ★ `--closure-gate` = **构建期硬闸**（`--check` 的五条校验、同一行汇总）在**生成这一趟**
@@ -535,7 +535,7 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
         # ★ 一条命令做完"硬闸 + 生成"：`--closure-gate` 与 `--check` 共用同一份五条校验实现。
         COMMAND $<TARGET_FILE:emulator-lift-gen> ${LIFT_AOT_GEN_STEP2}
         DEPENDS emulator-lift-gen "${LIFT_AOT_CLOSURE}" "${LIFT_AOT_AGE_EXE}"
-        COMMENT "lift-aot: closure-gate + roots/PE -> out/aot/lift_aot*.ll（split=${LIFT_AOT_SPLIT}）+ lift_pin.h + lift_table.inc"
+        COMMENT "lift-aot: closure-gate + roots/PE -> out/aot/lift_aot*.ll (split=${LIFT_AOT_SPLIT}) + lift_pin.h + lift_table.inc"
         VERBATIM)
     # ② `clang -c -O2` 每份一条（无 llc；`-Wno-override-module` = 这份 IR 是目标无关的，triple 交给驱动）
     #    ★ 这些 custom command **互不依赖**（只依赖自己的 `.ll`）⇒ ninja 天然并行、没有假串行。
@@ -546,14 +546,14 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
             COMMAND ${LIFT_AOT_IR_CLANG} ${LIFT_AOT_CLANG_FLAGS} ${LIFT_AOT_TARGET_FLAGS}
                     -Wno-override-module -o "${_obj}" "${_ll}"
             DEPENDS "${_ll}"
-            COMMENT "lift-aot: ${_ll} -> ${_obj}（clang ${LIFT_AOT_CLANG_FLAGS}，无 llc）")
+            COMMENT "lift-aot: ${_ll} -> ${_obj} (clang ${LIFT_AOT_CLANG_FLAGS}; no llc)")
         set_source_files_properties("${_obj}" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
     endforeach()
     list(LENGTH LIFT_AOT_OBJS LIFT_AOT_OBJ_COUNT)
     if(LIFT_AOT_SPLIT GREATER 1 AND NOT LIFT_AOT_OBJ_COUNT EQUAL LIFT_AOT_SPLIT)
         # 守卫 3-③：obj 数 != 份数 ⇒ 链接期缺符号 / 多一份孤儿（⛔ 不许静默）。
         message(FATAL_ERROR
-            "AOT 形状自相矛盾：LIFT_AOT_SPLIT=${LIFT_AOT_SPLIT} 但 obj 数=${LIFT_AOT_OBJ_COUNT}")
+            "AOT shape is self-contradictory: LIFT_AOT_SPLIT=${LIFT_AOT_SPLIT} but obj count=${LIFT_AOT_OBJ_COUNT}")
     endif()
     target_sources(emulator-lift-aot PRIVATE
         src/aot/aot_dispatch.cpp
@@ -590,11 +590,11 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
         LIFT_AOT_HAS_GENERATED=1
         LIFT_AOT_SHAPE="${LIFT_AOT_SHAPE}"
         LIFT_AOT_SPLIT=${LIFT_AOT_SPLIT})
-    message(STATUS "emulator-lift-aot: 执行源 = ${LIFT_AOT_OBJS}（shape=${LIFT_AOT_SHAPE}；clang = ${LIFT_AOT_IR_CLANG}）")
+    message(STATUS "emulator-lift-aot: execution sources = ${LIFT_AOT_OBJS} (shape=${LIFT_AOT_SHAPE}; clang = ${LIFT_AOT_IR_CLANG})")
 else()
     message(STATUS
-        "emulator-lift-aot: 缺 clang / 执行源（${LIFT_AOT_AGE_EXE}）/ closure.txt ⇒ 替身 TU："
-        "构建不断，但 AOT 启动时会响亮报告「没有生成物」并 exit 1")
+        "emulator-lift-aot: missing clang / execution source (${LIFT_AOT_AGE_EXE}) / closure.txt => stub TU:"
+        "the build continues, but the AOT exe will loudly report 'no generated artifacts' at startup and exit 1")
     target_sources(emulator-lift-aot PRIVATE src/aot/aot_dispatch.cpp src/aot/aot_feeder.cpp src/aot/aot_run.cpp)
 endif()
 
@@ -617,8 +617,8 @@ endif()
 if(LIFT_AOT_LTO)
     if(NOT APPLE AND NOT WIN32)
         message(WARNING
-            "LIFT_AOT_LTO=ON 在 Linux 上**未验证**（ld.lld）：很可能链接失败。"
-            "默认档只在 mac / win32 开；这里按你的显式要求继续。")
+            "LIFT_AOT_LTO=ON is UNVERIFIED on Linux (ld.lld): linking will very likely fail."
+            "the default profile only enables it on mac / win32; continuing because you asked for it explicitly.")
     endif()
     if(LIFT_AOT_LTO_ABI)
         # ★ win32 的结构性障碍与修正（2026-11-18，读数见 `docs/03-emulator/aot-lto-evaluation.md` §12）：
@@ -645,7 +645,7 @@ if(LIFT_AOT_LTO)
     # AOT 臂自己的链接行：8 份 `.obj` 是 bitcode ⇒ 必须带 `-flto`。
     target_link_options(emulator-lift-aot PRIVATE -flto)
     message(STATUS
-        "LIFT_AOT_LTO: ON（ABI=${LIFT_AOT_LTO_ABI} RUNTIME=${LIFT_AOT_LTO_RUNTIME}；shape=${LIFT_AOT_SHAPE}）")
+        "LIFT_AOT_LTO: ON (ABI=${LIFT_AOT_LTO_ABI} RUNTIME=${LIFT_AOT_LTO_RUNTIME}; shape=${LIFT_AOT_SHAPE})")
 endif()
 
 # =====================================================================================
@@ -1050,7 +1050,7 @@ set_tests_properties(lift-host-services-owns-cpu PROPERTIES SKIP_RETURN_CODE 77)
 #   ⛔ 它只决定"去哪找安装树"，**不决定档位**：档位只由用途（接口合同 / 压力与效率）决定。
 #   显式覆盖：`cmake --preset <preset> -DLIFT_STRESS_GAME_DIR=<含 SYS4INI.BIN 的目录>`。
 set(LIFT_STRESS_GAME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../links/install"
-    CACHE PATH "LIFT_STRESS 档的安装根（含 SYS4INI.BIN）")
+    CACHE PATH "install root for the LIFT_STRESS profile (must contain SYS4INI.BIN)")
 # LFS 语料：执行源（拆壳件）+ 反汇编 `.lst`（符号 / 对照 / 覆盖真源）。
 set(AGE_SECTFIX_EXE "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE")
 set(AGE_LST "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/disasm/files/AGE.EXE__dumped.sectfix.EXE.lst")
@@ -1069,9 +1069,9 @@ foreach(_lift_input
     # 盘点行要写**全路径**（`..` 也归一化掉）：出问题时能直接复制去查。
     get_filename_component(_lift_abs "${_lift_input}" ABSOLUTE)
     if(EXISTS "${_lift_abs}")
-        message(STATUS "输入盘点：present  ${_lift_abs}")
+        message(STATUS "input inventory: present  ${_lift_abs}")
     else()
-        message(STATUS "输入盘点：MISSING  ${_lift_abs}")
+        message(STATUS "input inventory: MISSING  ${_lift_abs}")
     endif()
 endforeach()
 
@@ -1084,13 +1084,13 @@ if(DEFINED ENV{LIFT_STRESS})
             "${AGE_LST}")
         if(NOT EXISTS "${_lift_required}")
             message(FATAL_ERROR
-                "按用途显式打开了 LIFT_STRESS（它要真跑一遍安装树），但输入缺失：\n"
+                "LIFT_STRESS was explicitly enabled for its purpose (it really runs the install tree), but inputs are missing:\n"
                 "  MISSING  ${_lift_required}\n"
-                "怎么补：\n"
-                "  · 安装树：把真实游戏安装目录链到仓库根的 `links/install`（该目录含 SYS4INI.BIN），或\n"
-                "    `cmake --preset <preset> -DLIFT_STRESS_GAME_DIR=<含 SYS4INI.BIN 的目录>`；\n"
-                "  · LFS 语料：`git lfs install && git lfs pull`（清单见 `corpus/assets.json`）。\n"
-                "⛔ 不要靠关掉输入让 configure 过：档位按用途，输入是假定在场的。")
+                "how to fix:\n"
+                "  - install tree: link the real game install dir to `links/install` at the repo root (it must contain SYS4INI.BIN), or\n"
+                "    `cmake --preset <preset> -DLIFT_STRESS_GAME_DIR=<dir containing SYS4INI.BIN>`;\n"
+                "  - LFS corpus: `git lfs install && git lfs pull` (manifest: `corpus/assets.json`).\n"
+                "do not disable inputs to make configure pass: the profile is chosen by purpose, and its inputs are assumed present.")
         endif()
     endforeach()
     # ★ TITLE→Quit 的 E2E 要的是**原版**安装树（`links/raw`），不是 `LIFT_STRESS_GAME_DIR`（缺省
@@ -1099,11 +1099,11 @@ if(DEFINED ENV{LIFT_STRESS})
     set(_LIFT_STRESS_RAW_GAME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../links/raw")
     if(NOT EXISTS "${_LIFT_STRESS_RAW_GAME_DIR}/AGE.EXE")
         message(FATAL_ERROR
-            "按用途显式打开了 LIFT_STRESS，但 TITLE→Quit 的 E2E 需要**原版**安装树：\n"
+            "LIFT_STRESS was explicitly enabled for its purpose, but the TITLE->Quit E2E needs the ORIGINAL install tree:\n"
             "  MISSING  ${_LIFT_STRESS_RAW_GAME_DIR}/AGE.EXE\n"
-            "怎么补：把原版游戏安装目录链到仓库根的 `links/raw`（不是 `links/install`：后者是汉化修订版，\n"
-            "        脚本偏移会漂，退出路径的坐标/字节都不可比）。\n"
-            "⛔ 不要靠关掉输入让 configure 过：stress 档的输入是假定在场的。")
+            "how to fix: link the original game install dir to `links/raw` at the repo root (not `links/install`: that one is the localized build,\n"
+            "        its script offsets drift, so the exit-path coordinates/bytes are not comparable).\n"
+            "do not disable inputs to make configure pass: the stress profile's inputs are assumed present.")
     endif()
 endif()
 
@@ -1963,10 +1963,10 @@ if(LIFT_IR_CLANG)
         COMMAND ${LIFT_IR_CLANG} -c -O2 ${LIFT_IR_TARGET_FLAGS} -Wno-override-module
                 -o "${LIFT_IR_OBJ}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/ir/lift_436D00.ll"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/ir/lift_436D00.ll"
-        COMMENT "lift-ir-proto: tests/ir/lift_436D00.ll -> .obj（clang -c -O2，无 llc）")
+        COMMENT "lift-ir-proto: tests/ir/lift_436D00.ll -> .obj (clang -c -O2; no llc)")
     set(LIFT_IR_SRC "${LIFT_IR_OBJ}")
 else()
-    message(STATUS "lift-ir-proto: 没找到 clang ⇒ 链 tests/ir/lift_stub.cpp（测试体 SKIP 77）")
+    message(STATUS "lift-ir-proto: clang not found => link tests/ir/lift_stub.cpp (test body SKIPs 77)")
     set(LIFT_IR_SRC "${CMAKE_CURRENT_SOURCE_DIR}/tests/ir/lift_stub.cpp")
 endif()
 add_executable(lift-ir-proto tests/lift_ir_proto.cpp ${LIFT_IR_SRC})
@@ -1997,10 +1997,10 @@ if(LIFT_IR_CLANG)
         COMMAND ${LIFT_IR_CLANG} -c -O2 ${LIFT_IR_TARGET_FLAGS} -Wno-override-module
                 -o "${LIFT_IR_SHIM_OBJ}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/ir/lift_4D4B40.ll"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/ir/lift_4D4B40.ll"
-        COMMENT "lift-ir-shim: tests/ir/lift_4D4B40.ll -> .obj（clang -c -O2，无 llc）")
+        COMMENT "lift-ir-shim: tests/ir/lift_4D4B40.ll -> .obj (clang -c -O2; no llc)")
     set(LIFT_IR_SHIM_SRC "${LIFT_IR_OBJ}" "${LIFT_IR_SHIM_OBJ}")
 else()
-    message(STATUS "lift-ir-shim: 没找到 clang ⇒ 链 tests/ir/lift_stub.cpp + 测试体内的 4D4B40 替身（SKIP 77）")
+    message(STATUS "lift-ir-shim: clang not found => link tests/ir/lift_stub.cpp + the in-test 4D4B40 stand-in (SKIP 77)")
     set(LIFT_IR_SHIM_SRC "${CMAKE_CURRENT_SOURCE_DIR}/tests/ir/lift_stub.cpp")
 endif()
 add_executable(lift-ir-shim tests/lift_ir_shim.cpp ${LIFT_IR_SHIM_SRC})
@@ -2039,20 +2039,20 @@ if(LIFT_IR_CLANG AND EXISTS "${LIFT_GEN_AGE_EXE}")
                 --out "${LIFT_GEN_DIR}/golden_gen.ll"
                 --no-close-calls --no-close-stores --no-close-data --no-close-jmptab --no-s7
         DEPENDS emulator-lift-gen "${LIFT_GEN_ROOTS}" "${LIFT_GEN_AGE_EXE}"
-        COMMENT "lift-gen: roots + PE -> out/aot/golden_gen.ll（T1a；不 commit）"
+        COMMENT "lift-gen: roots + PE -> out/aot/golden_gen.ll (T1a; not committed)"
         VERBATIM)
     add_custom_command(OUTPUT "${LIFT_GEN_DIR}/golden_gen.obj"
         COMMAND ${LIFT_IR_CLANG} -c -O2 ${LIFT_IR_TARGET_FLAGS} -Wno-override-module
                 -o "${LIFT_GEN_DIR}/golden_gen.obj" "${LIFT_GEN_DIR}/golden_gen.ll"
         DEPENDS "${LIFT_GEN_DIR}/golden_gen.ll"
-        COMMENT "lift-gen: golden_gen.ll -> .obj（clang -c -O2，无 llc）")
+        COMMENT "lift-gen: golden_gen.ll -> .obj (clang -c -O2; no llc)")
     set(LIFT_GEN_SRC "${LIFT_GEN_DIR}/golden_gen.obj")
     # ★ T1c：生成物在块边界发 `@lift_tick`（D2）⇒ lifted 臂与解释器**同一口径**记账；
     #   手写 golden（`tests/ir/lift_*.ll`）没有 tick ⇒ 两份测试体用这个宏区分"期望的 lifted 侧条数"。
     set(LIFT_GEN_DEFINE LIFT_IR_CLANG=1 LIFT_GEN_TICKS=1)
 else()
     message(STATUS
-        "lift-gen goldens: 缺 clang 或执行源（${LIFT_GEN_AGE_EXE}）⇒ 链 tests/ir/lift_stub.cpp（用例 SKIP 77）")
+        "lift-gen goldens: missing clang or execution source (${LIFT_GEN_AGE_EXE}) => link tests/ir/lift_stub.cpp (test SKIPs 77)")
     set(LIFT_GEN_SRC "${CMAKE_CURRENT_SOURCE_DIR}/tests/ir/lift_stub.cpp")
     set(LIFT_GEN_DEFINE "")
 endif()
@@ -2108,7 +2108,7 @@ if(LIFT_IR_CLANG AND EXISTS "${LIFT_GEN_AGE_EXE}")
         COMMAND ${LIFT_IR_CLANG} -c -O2 ${LIFT_IR_TARGET_FLAGS} -Wno-override-module
                 -o "${LIFT_X87_DIR}/lift_aot.obj" "${LIFT_X87_DIR}/lift_aot.ll"
         DEPENDS "${LIFT_X87_DIR}/lift_aot.ll"
-        COMMENT "lift-x87-diff: lift_aot.ll -> .obj（clang -c -O2）")
+        COMMENT "lift-x87-diff: lift_aot.ll -> .obj (clang -c -O2)")
     set_source_files_properties("${LIFT_X87_DIR}/lift_aot.obj"
         PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
     add_executable(lift-x87-diff tests/x87_diff.cpp src/aot/aot_dispatch.cpp
@@ -2121,7 +2121,7 @@ if(LIFT_IR_CLANG AND EXISTS "${LIFT_GEN_AGE_EXE}")
     set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/aot/aot_dispatch.cpp"
         PROPERTIES OBJECT_DEPENDS "${LIFT_X87_DIR}/lift_table.inc")
 else()
-    message(STATUS "lift-x87-diff: 缺 clang 或执行源（${LIFT_GEN_AGE_EXE}）⇒ 不链生成物（用例 SKIP 77）")
+    message(STATUS "lift-x87-diff: missing clang or execution source (${LIFT_GEN_AGE_EXE}) => generated output is not linked (test SKIPs 77)")
     add_executable(lift-x87-diff tests/x87_diff.cpp)
 endif()
 target_link_libraries(lift-x87-diff PRIVATE emulator-lift-runtime)
@@ -2160,7 +2160,7 @@ if(LIFT_IR_CLANG AND EXISTS "${LIFT_GEN_AGE_EXE}")
         COMMAND ${LIFT_IR_CLANG} -c -O2 ${LIFT_IR_TARGET_FLAGS} -Wno-override-module
                 -o "${LIFT_OPS_DIR}/lift_aot.obj" "${LIFT_OPS_DIR}/lift_aot.ll"
         DEPENDS "${LIFT_OPS_DIR}/lift_aot.ll"
-        COMMENT "lift-ops-diff: lift_aot.ll -> .obj（clang -c -O2）")
+        COMMENT "lift-ops-diff: lift_aot.ll -> .obj (clang -c -O2)")
     set_source_files_properties("${LIFT_OPS_DIR}/lift_aot.obj"
         PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
     add_executable(lift-ops-diff tests/ops_diff.cpp src/aot/aot_dispatch.cpp
@@ -2171,7 +2171,7 @@ if(LIFT_IR_CLANG AND EXISTS "${LIFT_GEN_AGE_EXE}")
     set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/aot/aot_dispatch.cpp"
         PROPERTIES OBJECT_DEPENDS "${LIFT_OPS_DIR}/lift_table.inc")
 else()
-    message(STATUS "lift-ops-diff: 缺 clang 或执行源（${LIFT_GEN_AGE_EXE}）⇒ 不链生成物（用例 SKIP 77）")
+    message(STATUS "lift-ops-diff: missing clang or execution source (${LIFT_GEN_AGE_EXE}) => generated output is not linked (test SKIPs 77)")
     add_executable(lift-ops-diff tests/ops_diff.cpp)
 endif()
 target_link_libraries(lift-ops-diff PRIVATE emulator-lift-runtime)
@@ -2212,7 +2212,7 @@ if(LIFT_IR_CLANG AND EXISTS "${LIFT_GEN_AGE_EXE}")
         COMMAND ${LIFT_IR_CLANG} -c -O2 ${LIFT_IR_TARGET_FLAGS} -Wno-override-module
                 -o "${LIFT_S7_DIR}/lift_aot.obj" "${LIFT_S7_DIR}/lift_aot.ll"
         DEPENDS "${LIFT_S7_DIR}/lift_aot.ll"
-        COMMENT "lift-s7-structured: lift_aot.ll -> .obj（clang -c -O2）")
+        COMMENT "lift-s7-structured: lift_aot.ll -> .obj (clang -c -O2)")
     set_source_files_properties("${LIFT_S7_DIR}/lift_aot.obj"
         PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
     add_executable(lift-s7-structured tests/s7_structured.cpp src/aot/aot_dispatch.cpp
@@ -2225,7 +2225,7 @@ if(LIFT_IR_CLANG AND EXISTS "${LIFT_GEN_AGE_EXE}")
     set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/aot/aot_dispatch.cpp"
         PROPERTIES OBJECT_DEPENDS "${LIFT_S7_DIR}/lift_table.inc")
 else()
-    message(STATUS "lift-s7-structured: 缺 clang 或执行源（${LIFT_GEN_AGE_EXE}）⇒ 不链生成物（用例 SKIP 77）")
+    message(STATUS "lift-s7-structured: missing clang or execution source (${LIFT_GEN_AGE_EXE}) => generated output is not linked (test SKIPs 77)")
     add_executable(lift-s7-structured tests/s7_structured.cpp)
     target_compile_definitions(lift-s7-structured PRIVATE LIFT_S7_CALLER_EA=0 LIFT_S7_CALLEE_EA=0)
 endif()
