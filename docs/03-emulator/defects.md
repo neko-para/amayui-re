@@ -846,3 +846,26 @@
   **未改 release 语义**。配方对教程“否”的 click 仍有时序敏感性（`wait 2000` 档成功率高，但不保证）。
 - **未做**：win32 未跑（分支未编译）；watch 的 follow pending 是 `thread_local`（跨线程会漏）；
   `writeBytes/fillBytes/wr8/16/64` 的 watch 接线无正例（低风险跟进）；dump 在信号上下文逐字节 `fprintf`。
+
+### BUG-33 · SAVE05 宝藏「闪光」位置是个 120×120 黑矩形：`ID3DXSprite` 批次丢掉 `SRCBLEND`/`DESTBLEND`（**未修**）
+
+- **现象**（用户口径 2026-11-19）：加载 `saves/SAVE05.DAT` → 点宝藏（参考 740,355）→ 本该闪的地方是黑矩形，
+  且整个特效期间一直黑；特效播完出现交互对话框（那才是"结束"的判据）。
+- **归因**（2026-11-19 / win32 / `234d887`，全文 `save05-black-rect.md`）：引擎用**加性**
+  （`State=19⇒SRCALPHA(5)` + `State=20⇒DESTBLEND=ONE(2)`，帧 49 唯一一条）把 **DirectShow 影片纹理**
+  （`tex movie #1 w=120 h=120 nonzero=14 sampled=225`）画上去；而 sprite 合成路只认 `Begin` 的 ALPHABLEND 位，
+  因子写死 `SrcAlpha/InvSrcAlpha`（`d3dx9_sprite.cpp` 的 `gs_state.blend = blend;` 是唯一一句，
+  `rg kRsSrcBlend|kRsDestBlend` 零命中；fixed-function 路会读）⇒ 影片黑底被**不透明**盖成黑方块。
+- **排除**：DDraw（三帧切片命中 0）· HUD（未开 `--overlay`）· 窗口合成（`source=guest-backbuffer` +
+  `hash_still_matches=true`）· SO033A 导航覆盖图（`b1b6` 置 bit4 后黑框仍在：帧 604 黑 11.19% vs A 组 8.91%）。
+- **需求单**：`REQ-01M7R1ABAP86QVMNBZ5S4EDKD5`（S2）。**未修**；判据 = sprite 路按引擎状态映射混合因子，
+  pure 用例断言加性结果、变异改回 bool ⇒ 红。
+
+### BUG-34 · 同一现场：影片 0.8 s × 30 fps 只送出 **1** 帧（**未修**）
+
+- **读数**：`MovieDecoder open：80x80 fps=30.000 时长=0.800s` · `tex movie #1 …`（只有 `#1`）·
+  `completed=true：影片结束（已送 1 帧，最后 pts=0）` · `到达片长 0.800 s ⇒ 泵停`。
+- **后果**：闪光不成长（"整段都是同一块"）。**注意**：这条与 BUG-33 是**两条独立缺陷** —— 只修 33 黑框会消失但
+  闪光仍只有一帧；只修 34 黑框还在。
+- **未定论**：源本身是否只有 1 帧 / 泵的时钟取自哪里 / `completed` 判据 —— 三条候选都要先取读数（逐帧 pts、
+  `Receive` 次数）。**需求单**：`REQ-01M7R1AR688T09G2T65GY8SZGG`（S2）。
