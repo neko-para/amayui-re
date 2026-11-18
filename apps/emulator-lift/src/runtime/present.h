@@ -29,11 +29,39 @@ class InputPlan;
 // ★ 系统对话框的数据（定义在 `runtime/message_box.h`；本头只前向声明 ⇒ 保持 SDL-free）。
 struct ModalSpec;
 
+// ★ **呈现几何**（窗口像素；`PresentSink::presentGeometry` 的返回值）：
+//   `window_w/h` = 窗口（客户区）像素；`picture_*` = letterbox 之后**画面矩形**。
+//   ★ 这是 UI 画布原点的唯一输入（`uiCanvasOrigin(picture_w,picture_h)`）：画面矩形原点 + 居中偏移
+//     = 画布原点（16:9 时偏移为 0）。⛔ 不要让 UI 层自己再算一遍 letterbox。
+struct PresentGeometry {
+    int window_w = 0;
+    int window_h = 0;
+    int picture_x = 0;
+    int picture_y = 0;
+    int picture_w = 0;
+    int picture_h = 0;
+};
+
 class PresentSink {
 public:
     virtual ~PresentSink() = default;
     // 只读消费 guest 像素；false = 这一帧没送出去（err 必须填）。不得修改 guest 内存。
     virtual bool submitFrame(const SurfaceArena& arena, const GuestSurface& surface, std::string* err) = 0;
+    // ★ **本帧的呈现几何**（窗口像素；M0 新增）：窗口尺寸 + letterbox 之后**画面矩形**。
+    //   UI 层用它算画布原点（`uiCanvasOrigin(picture_w,picture_h)`，`overlay.md` B2/D5）。
+    //   false = 没有几何（headless / 测试替身 / 窗口最小化到 0）⇒ 这一帧不画 UI（⛔ 不猜）。
+    //   ⛔ 本接口保持 SDL-free（纯 POD，零 SDL 类型）。
+    virtual bool presentGeometry(PresentGeometry* /*out*/) const { return false; }
+    // ★ **统一合成入口**（M0 新增；`overlay.md` D12）：把一块 RGBA8 叠层按**窗口像素 1:1**
+    //   画到 (x,y)（= UI 层算好的画布原点），⛔ 不缩放、超出窗口裁掉。
+    //   两条呈现路径（SDL_Renderer / GPU 直出）都在 sink 内部分派到同一个入口后的实现。
+    //   ★ 契约：`rgba` **只在本次调用内有效**（sink 自己拷走所需字节：`SDL_UpdateTexture` / GPU 上传）。
+    //   ★ 默认 no-op（headless / 测试替身不画叠层）⇒ false + err；调用方只在 `overlayEnabled()` 时才会走到它。
+    virtual bool presentOverlay(const std::uint8_t* /*rgba*/, int /*w*/, int /*h*/, int /*x*/, int /*y*/,
+                                std::string* err) {
+        if (err) *err = "本 PresentSink 不支持 presentOverlay";
+        return false;
+    }
     // 帧边界 / 块边界的事件泵（headless 无 sink 时不会调用）。
     virtual void pumpHostEvents() {}
     // 用户关窗（或平台 quit）；false = 继续跑。

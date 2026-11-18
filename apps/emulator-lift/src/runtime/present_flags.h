@@ -89,13 +89,13 @@ inline constexpr const char* kCursorWarpHiddenWarn =
 /** `--present headless` 拒绝窗口参数那句（`%s` = 这条臂**自己支持**的窗口参数清单）。 */
 inline constexpr const char* kHeadlessRejectsWindowFlagsFormat = "--present headless 不接受窗口参数（%s）\n";
 
-/** 解释器臂支持的窗口参数清单（AOT 臂没有 `--overlay`，所以清单是参数、句子只有一份）。 */
+/** 解释器臂支持的窗口参数清单（该臂已退役；保留为历史口径的唯一一份参数串）。 */
 inline constexpr const char* kWindowFlagsInterpreter =
     "--present-driver / --present-vsync / --present-hidden / --present-screenshot / --overlay / --cursor-warp";
 
-/** AOT 臂支持的窗口参数清单。 */
+/** AOT 臂支持的窗口参数清单（M0 起含 `--overlay`）。 */
 inline constexpr const char* kWindowFlagsAot =
-    "--present-driver / --present-vsync / --present-hidden / --present-screenshot / --cursor-warp";
+    "--present-driver / --present-vsync / --present-hidden / --present-screenshot / --overlay / --cursor-warp";
 
 // =====================================================================================
 // `--sound`：**接受 + 一条与代码同形的一次性说明**

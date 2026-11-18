@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "runtime/cursor_map.h"
+#include "runtime/font.h"
 #include "runtime/frame_blit.h"
 #include "runtime/guest_token.h"  // ★ M0：SDL_RenderPresent 的宿主等待要放令牌（见 submitFrame）
 #include "runtime/host_cursor.h"
@@ -29,6 +30,7 @@
 #include "runtime/overlay.h"
 #include "runtime/warp_echo.h"
 #include "runtime/window_scale.h"
+#include "ui/hud.h"
 
 namespace lift {
 namespace {
@@ -136,15 +138,6 @@ constexpr std::uint64_t kOverlayFpsWindowNs = 1000ull * 1000ull * 1000ull;
 //   100 ms 对 fps / frame 的滞后上限；鼠标位置变化**不受**这个节流（见 `overlayRefreshDue`）。
 constexpr std::uint64_t kOverlayRefreshNs = 100ull * 1000ull * 1000ull;  // 100 ms
 
-std::string joinOverlayLines(const std::vector<std::string>& lines) {
-    std::string key;
-    for (const std::string& line : lines) {
-        key += line;
-        key.push_back('\n');
-    }
-    return key;
-}
-
 // `worst` 行的数值按 `%.1f` 显示 ⇒ 只有**这一位小数**变了才算"文本变了"
 // （否则每帧一个微小差值都会让 dirty 恒真，节流形同虚设，见 `kOverlayRefreshNs`）。
 bool sameTenth(double a, double b) {
@@ -167,6 +160,9 @@ bool overlayStatusTextChanged(const OverlayStatus& a, const OverlayStatus& b) {
 }  // namespace
 
 struct SdlWindow::Impl {
+    // ★ 指回拥有者：`Impl` 的路径（`submitDirect`）要调 `SdlWindow::drawOverlay`（M0 唯一 HUD 入口）。
+    //   对象生命周期 = 拥有者（`impl_` 是 SdlWindow 的成员）⇒ 非拥有指针恒有效。
+    SdlWindow* owner = nullptr;
     SDL_Window* window = nullptr;
     SDL_Renderer* renderer = nullptr;
     SDL_Texture* texture = nullptr;
@@ -233,18 +229,18 @@ struct SdlWindow::Impl {
     const char* control_stop_reason = nullptr;
 
     // ---- 调试叠层（`--overlay`，默认关）----
-    // ★ 两条呈现路径共用**同一份**行 / 尺寸（`overlayLines`），只有上传方式不同。
-    //   SDL_Renderer 路径：一张 STREAMING 小纹理；GPU 直出路径：后端 device 上的纹理
-    //   （`GpuDirectPresenter::directOverlay`）。
+    // ★ M0 起：HUD 是**最终模型子集**的 display list（`ui/hud.h`），两条呈现路径共用
+    //   `PresentSink::presentOverlay` 一个合成入口；文本由**宿主字体**（`hud_font`）按最终像素
+    //   栅格化（支持中文）。⛔ 不再有"renderer 一套 / 直出一套"的绘制代码。
     bool overlay = false;
-    bool overlay_dirty = true;        // 开关变化 / 上帧失败后强制重传
-    std::string overlay_text_key;     // 上一次**上传**的内容；相同就不重传
-    SDL_Texture* overlay_tex = nullptr;  // 只有 SDL_Renderer 路径用
+    bool overlay_dirty = true;          // 开关变化 / status 文本变化 ⇒ 立刻重建行
+    std::vector<std::string> overlay_lines;  // 最近一次生成的 HUD 文本（节流窗口内复用）
+    SDL_Texture* overlay_tex = nullptr;      // renderer 路径的流式纹理（`presentOverlay` 建 / 用）
     int overlay_tex_w = 0;
     int overlay_tex_h = 0;
-    int overlay_w = 0;  // 直出路径上次上传的尺寸
-    int overlay_h = 0;
-    // ★ 节流：文本（`frame` 每帧都变）最多每 `kOverlayRefreshNs` 重建 / 上传一次；
+    // 宿主字体：**只在 `--overlay` 时构造**（默认档零成本）；字体不可用 ⇒ init 硬失败（R5）。
+    std::unique_ptr<lift::FontEngine> hud_font;
+    // ★ 节流：文本（`frame` 每帧都变）最多每 `kOverlayRefreshNs` 重建一次；
     //   鼠标位置变了**立即**重建（用户可感知的那一项优先）。fps / frame 允许滞后 ≤ 100 ms。
     std::uint64_t overlay_last_build_ns = 0;  // 0 = 还没生成过
     int overlay_last_mouse_x = 0;
@@ -275,8 +271,6 @@ struct SdlWindow::Impl {
     bool overlayRefreshDue(int mx, int my, bool mouse_ok, std::uint64_t now_ns) const;
     void overlayMarkBuilt(int mx, int my, bool mouse_ok, std::uint64_t now_ns);
     std::vector<std::string> overlayLines() const;
-    bool drawOverlayRenderer(std::string* err);
-    bool drawOverlayDirect(std::string* err);
     // 叠层画不出来 ⇒ 只告警 + 关掉叠层，呈现照旧（⛔ 不因为诊断层让整帧失败）。
     void disableOverlay(const char* why);
 
@@ -436,9 +430,7 @@ void SdlWindow::Impl::disableOverlay(const char* why) {
     std::fprintf(stderr, "[overlay] 叠层不可用 ⇒ 关掉（呈现照旧）：%s\n", why != nullptr ? why : "(unknown)");
     overlay = false;
     overlay_dirty = true;
-    overlay_text_key.clear();
-    overlay_w = 0;
-    overlay_h = 0;
+    overlay_lines.clear();
     if (overlay_tex != nullptr) {
         SDL_DestroyTexture(overlay_tex);
         overlay_tex = nullptr;
@@ -447,99 +439,28 @@ void SdlWindow::Impl::disableOverlay(const char* why) {
     overlay_tex_h = 0;
     if (direct != nullptr) {
         std::string ignored;
-        direct->directOverlay(nullptr, 0, 0, &ignored);
+        direct->directOverlay(nullptr, 0, 0, 0, 0, &ignored);
     }
 }
 
-// SDL_Renderer 路径：小纹理（尺寸随文本变）+ 节流后才 `SDL_UpdateTexture`，画在主纹理之后。
-// ★ 没到重建时间也要**每帧画**（纹理还在，画面每帧都要有叠层）；重建/上传按 `overlayRefreshDue`。
-bool SdlWindow::Impl::drawOverlayRenderer(std::string* err) {
-    if (renderer == nullptr) return true;
-    int mx = 0;
-    int my = 0;
-    const bool mouse_ok = overlayMousePos(&mx, &my);
-    const std::uint64_t now = SDL_GetTicksNS();
-    if (overlayRefreshDue(mx, my, mouse_ok, now)) {
-        const std::vector<std::string> lines = overlayLines();
-        const OverlaySize size = overlaySize(lines);
-        if (size.w <= 0 || size.h <= 0) {
-            overlayMarkBuilt(mx, my, mouse_ok, now);
-            return true;
-        }
-        if (overlay_tex == nullptr || overlay_tex_w != size.w || overlay_tex_h != size.h) {
-            if (overlay_tex != nullptr) SDL_DestroyTexture(overlay_tex);
-            // ★ 字节序：叠层图像是**内存序 RGBA8**（`renderOverlay` 写 R,G,B,A）。
-            //   SDL 的像素格式名按 u32 的位序定义 ⇒ 内存序 R,G,B,A 对应 `ABGR8888`
-            //   （A 在最高位 ⇒ 小端内存里的字节序是 R,G,B,A）。用 `RGBA8888` 会变成
-            //   A,B,G,R ⇒ 颜色整体错位（实测：深底 0x101820 被读成 0xFF2018）。
-            overlay_tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING,
-                                            size.w, size.h);
-            if (overlay_tex == nullptr) {
-                if (err) *err = std::string("SDL_CreateTexture(overlay) 失败：") + SDL_GetError();
-                return false;
-            }
-            // ★ 不透明底：混合模式必须是 NONE（默认混合会按 alpha 混，深底就变半透明了）。
-            if (!SDL_SetTextureBlendMode(overlay_tex, SDL_BLENDMODE_NONE)) {
-                if (err) *err = std::string("SDL_SetTextureBlendMode(overlay, NONE) 失败：") + SDL_GetError();
-                return false;
-            }
-            if (!SDL_SetTextureScaleMode(overlay_tex, SDL_SCALEMODE_NEAREST)) {
-                if (err) *err = std::string("SDL_SetTextureScaleMode(overlay, NEAREST) 失败：") + SDL_GetError();
-                return false;
-            }
-            overlay_tex_w = size.w;
-            overlay_tex_h = size.h;
-            overlay_text_key.clear();  // 新纹理 ⇒ 必须重传
-        }
-        const std::string key = joinOverlayLines(lines);
-        if (key != overlay_text_key) {
-            const std::vector<std::uint8_t> image = renderOverlayImage(lines, nullptr, nullptr);
-            if (image.empty() || !SDL_UpdateTexture(overlay_tex, nullptr, image.data(), size.w * 4)) {
-                if (err) *err = std::string("SDL_UpdateTexture(overlay) 失败：") + SDL_GetError();
-                return false;
-            }
-            overlay_text_key = key;
-        }
-        overlayMarkBuilt(mx, my, mouse_ok, now);
-    }
-    if (overlay_tex == nullptr || overlay_tex_w <= 0 || overlay_tex_h <= 0) return true;
-    // ★ 逻辑坐标 (0,0) = **呈现画面**左上角（`SDL_SetRenderLogicalPresentation(LETTERBOX)` 生效时
-    //   窗口像素 ≠ 逻辑坐标；这里要的是叠在画面上，不是叠在黑边里）。
-    const SDL_FRect dst{0.0f, 0.0f, static_cast<float>(overlay_tex_w), static_cast<float>(overlay_tex_h)};
-    if (!SDL_RenderTexture(renderer, overlay_tex, nullptr, &dst)) {
-        if (err) *err = std::string("SDL_RenderTexture(overlay) 失败：") + SDL_GetError();
+// ★ M0 的唯一 HUD 绘制入口：文本节流（`overlayRefreshDue`）→ 最终模型子集的 display list
+//   → 宿主字体按最终像素栅格化 → `PresentSink::presentOverlay`（两条呈现路径由 sink 内部选）。
+//   ⛔ 这里不再有"renderer 一套 / 直出一套"的绘制代码（M0 的统一合成）。
+bool SdlWindow::drawOverlay(std::string* err) {
+    if (!impl_->overlay) return true;
+    if (impl_->hud_font == nullptr) {
+        if (err) *err = "HUD 宿主字体未初始化（--overlay 需要 FontEngine）";
         return false;
     }
-    return true;
-}
-
-// GPU 直出路径：把同一份 RGBA8 图像交给后端（同一 device / swapchain 格式纹理）；
-// 真正的绘制在 `directPresent` 的 letterbox blit 之后。节流见 `overlayRefreshDue`。
-bool SdlWindow::Impl::drawOverlayDirect(std::string* err) {
-    if (direct == nullptr) return true;
     int mx = 0;
     int my = 0;
-    const bool mouse_ok = overlayMousePos(&mx, &my);
+    const bool mouse_ok = impl_->overlayMousePos(&mx, &my);
     const std::uint64_t now = SDL_GetTicksNS();
-    if (overlayRefreshDue(mx, my, mouse_ok, now)) {
-        const std::vector<std::string> lines = overlayLines();
-        const OverlaySize size = overlaySize(lines);
-        if (size.w <= 0 || size.h <= 0) {
-            overlayMarkBuilt(mx, my, mouse_ok, now);
-            return true;
-        }
-        const std::string key = joinOverlayLines(lines);
-        if (overlay_dirty || key != overlay_text_key || overlay_w != size.w || overlay_h != size.h) {
-            const std::vector<std::uint8_t> image = renderOverlayImage(lines, nullptr, nullptr);
-            if (image.empty()) return true;
-            if (!direct->directOverlay(image.data(), size.w, size.h, err)) return false;
-            overlay_w = size.w;
-            overlay_h = size.h;
-            overlay_text_key = key;
-        }
-        overlayMarkBuilt(mx, my, mouse_ok, now);
+    if (impl_->overlayRefreshDue(mx, my, mouse_ok, now)) {
+        impl_->overlay_lines = impl_->overlayLines();
+        impl_->overlayMarkBuilt(mx, my, mouse_ok, now);
     }
-    return true;
+    return lift::ui::presentHud(this, *impl_->hud_font, impl_->overlay_lines, err);
 }
 
 void SdlWindow::Impl::mapMouse(float mx, float my, std::int32_t* gx, std::int32_t* gy) const {
@@ -723,7 +644,7 @@ void SdlWindow::Impl::pumpEvents(int wait_ms) {
     if (close_pending && !stop && SDL_GetTicksNS() >= close_deadline_ns) requestStop("close-deadline");
 }
 
-SdlWindow::SdlWindow() : impl_(std::make_unique<Impl>()) {}
+SdlWindow::SdlWindow() : impl_(std::make_unique<Impl>()) { impl_->owner = this; }
 SdlWindow::~SdlWindow() { shutdown(); }
 
 bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
@@ -733,6 +654,23 @@ bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
     impl_->raster_gpu = options.raster_gpu;
     impl_->overlay = options.overlay;
     impl_->overlay_dirty = true;
+    // ★ M0 / U1：`--overlay` 的 HUD 文本走**宿主字体**（FreeType；支持中文）。
+    //   字体缺失 ⇒ **启动硬错**（R5 / `overlay.md`）：⛔ 不静默退回 5×7 点阵、⛔ 不画空白。
+    //   ★ 只在 overlay 打开时构造 FontEngine ⇒ 默认档零成本。
+    if (impl_->overlay) {
+        impl_->hud_font = std::make_unique<lift::FontEngine>();
+        lift::HostTextMetrics metrics;
+        if (!impl_->hud_font->metrics(lift::ui::kHudFontRefPx, false, &metrics)) {
+            if (err) {
+                *err =
+                    "宿主字体不可用（LIFT_HOST_FONT_PATH）⇒ --overlay 拒绝启动"
+                    "（R5：⛔ 不静默退回 5×7 点阵）";
+            }
+            impl_->hud_font.reset();
+            impl_->overlay = false;
+            return false;
+        }
+    }
     // ★ `--cursor-warp`：开关归 sink（实际生效还要看窗口是否可见，见 `hostCursorWarpEnabled`）。
     impl_->cursor_warp = options.cursor_warp;
     impl_->warp_selfcheck_done = false;
@@ -963,11 +901,10 @@ void SdlWindow::shutdown() {
     // 叠层状态（纹理已在 renderer 之前释放；直出那一份随 `directDetachWindow` 释放）。
     impl_->overlay_tex_w = 0;
     impl_->overlay_tex_h = 0;
-    impl_->overlay_w = 0;
-    impl_->overlay_h = 0;
     impl_->overlay = false;
     impl_->overlay_dirty = true;
-    impl_->overlay_text_key.clear();
+    impl_->overlay_lines.clear();
+    impl_->hud_font.reset();
     impl_->present_times_ns.clear();
     impl_->overlay_status = OverlayStatus{};
     // 宿主光标开关 / 一次性自检（下一轮 init 会按新 options 重设）。
@@ -1054,9 +991,10 @@ bool SdlWindow::submitFrame(const SurfaceArena& arena, const GuestSurface& surfa
     impl_->notePresentTime();
     // ★ 叠层画在主纹理**之后**、截图**之前** ⇒ `--present-screenshot` 里可见（窗口像素）。
     //   ⛔ `--dump-frame` 读的是 guest arena，天然不含它。
+    //   ★ M0：唯一入口 `drawOverlay`（display list → 宿主字体 → `presentOverlay`）。
     if (impl_->overlay) {
         std::string oerr;
-        if (!impl_->drawOverlayRenderer(&oerr)) impl_->disableOverlay(oerr.c_str());
+        if (!drawOverlay(&oerr)) impl_->disableOverlay(oerr.c_str());
     }
 
     if (impl_->shotWanted()) {
@@ -1086,6 +1024,102 @@ bool SdlWindow::submitFrame(const SurfaceArena& arena, const GuestSurface& surfa
         return false;
     }
     pumpHostEvents();
+    return true;
+}
+
+// ★ `PresentSink`（M0）：本帧几何 = 窗口像素尺寸 + letterbox 之后的**画面矩形**。
+//   UI 层只用它算画布原点（`uiCanvasOrigin(picture_w,picture_h)`）；⛔ 这里不碰叠层。
+//   ★ 画面尺寸取**最近一次 Present 的帧尺寸**（与 `mapMouse` / 光标 warp 同一份 `frameImageW/H`）。
+//   ★ `picture_*` 用与直出 `layoutLetterbox` **相同的整数除法**（(window−picture)/2）⇒ 同一份几何。
+bool SdlWindow::presentGeometry(PresentGeometry* out) const {
+    if (out == nullptr || impl_->window == nullptr) return false;
+    int ww = 0;
+    int wh = 0;
+    if (!SDL_GetWindowSizeInPixels(impl_->window, &ww, &wh)) return false;
+    if (ww <= 0 || wh <= 0) return false;
+    const int iw = impl_->frameImageW();
+    const int ih = impl_->frameImageH();
+    const LetterboxMap map = letterboxFor(ww, wh, iw, ih);
+    if (map.scale <= 0.0) return false;
+    const int pw = static_cast<int>(std::lround(static_cast<double>(iw) * map.scale));
+    const int ph = static_cast<int>(std::lround(static_cast<double>(ih) * map.scale));
+    if (pw <= 0 || ph <= 0) return false;
+    out->window_w = ww;
+    out->window_h = wh;
+    out->picture_x = (ww - pw) / 2;
+    out->picture_y = (wh - ph) / 2;
+    out->picture_w = pw;
+    out->picture_h = ph;
+    return true;
+}
+
+// ★ `PresentSink`（M0）：统一合成入口。输入是 UI 层已经栅格化好的 RGBA8（内存序 R,G,B,A）
+//   与**画布原点**（窗口像素，`uiCanvasOrigin` 的结果）。两条路径在这里分派：
+//     · GPU 直出：交给后端（`directOverlay`），真正的 blit 在 `directPresent` 的 letterbox 之后；
+//     · SDL_Renderer：流式纹理 + **一次** 1:1 draw（B1：这次 draw 前后临时关掉 LETTERBOX，
+//       画完立刻恢复 —— 因为叠层是本帧最后一次 draw，风险面最小；⛔ 不做逆缩放）。
+//   ⛔ 不写 guest、⛔ 不进 `--dump-frame`；`rgba` 只在本次调用内有效（这里自己拷进纹理 / GPU）。
+bool SdlWindow::presentOverlay(const std::uint8_t* rgba, int w, int h, int x, int y, std::string* err) {
+    if (!impl_->overlay) return true;  // 关掉时一次判空
+    if (rgba == nullptr || w <= 0 || h <= 0) return true;
+    if (impl_->direct_present && impl_->direct != nullptr) {
+        return impl_->direct->directOverlay(rgba, w, h, x, y, err);
+    }
+    if (impl_->renderer == nullptr) {
+        if (err) *err = "SDL 窗口未初始化";
+        return false;
+    }
+    if (impl_->overlay_tex == nullptr || impl_->overlay_tex_w != w || impl_->overlay_tex_h != h) {
+        if (impl_->overlay_tex != nullptr) SDL_DestroyTexture(impl_->overlay_tex);
+        // ★ 字节序：图像是**内存序 RGBA8**；SDL 的格式名按 u32 位序定义 ⇒ 内存序 R,G,B,A = `ABGR8888`
+        //   （用 `RGBA8888` 会变成 A,B,G,R ⇒ 颜色整体错位：深底 0x101820 被读成 0xFF2018）。
+        impl_->overlay_tex = SDL_CreateTexture(impl_->renderer, SDL_PIXELFORMAT_ABGR8888,
+                                               SDL_TEXTUREACCESS_STREAMING, w, h);
+        if (impl_->overlay_tex == nullptr) {
+            if (err) *err = std::string("SDL_CreateTexture(overlay) 失败：") + SDL_GetError();
+            return false;
+        }
+        // ★ 不透明底：混合模式必须是 NONE（默认混合会按 alpha 混，深底就变半透明了）。
+        if (!SDL_SetTextureBlendMode(impl_->overlay_tex, SDL_BLENDMODE_NONE)) {
+            if (err) *err = std::string("SDL_SetTextureBlendMode(overlay, NONE) 失败：") + SDL_GetError();
+            return false;
+        }
+        if (!SDL_SetTextureScaleMode(impl_->overlay_tex, SDL_SCALEMODE_NEAREST)) {
+            if (err) *err = std::string("SDL_SetTextureScaleMode(overlay, NEAREST) 失败：") + SDL_GetError();
+            return false;
+        }
+        impl_->overlay_tex_w = w;
+        impl_->overlay_tex_h = h;
+    }
+    if (!SDL_UpdateTexture(impl_->overlay_tex, nullptr, rgba, w * 4)) {
+        if (err) *err = std::string("SDL_UpdateTexture(overlay) 失败：") + SDL_GetError();
+        return false;
+    }
+    // ---- B1：叠层这一 draw 用**窗口像素**（临时关掉 LETTERBOX，画完恢复）----
+    const bool disabled =
+        SDL_SetRenderLogicalPresentation(impl_->renderer, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
+    bool drawn = false;
+    if (disabled) {
+        const SDL_FRect dst{static_cast<float>(x), static_cast<float>(y), static_cast<float>(w),
+                            static_cast<float>(h)};
+        drawn = SDL_RenderTexture(impl_->renderer, impl_->overlay_tex, nullptr, &dst);
+    }
+    // ★ 无论这次 draw 成败都要把逻辑呈现恢复成 LETTERBOX（否则下一帧的画面不再 letterbox，
+    //   那是 B1 最危险的副作用；恢复用**当前帧**的 tex_w/tex_h）。
+    const bool restored = SDL_SetRenderLogicalPresentation(
+        impl_->renderer, impl_->tex_w, impl_->tex_h, SDL_LOGICAL_PRESENTATION_LETTERBOX);
+    if (!disabled) {
+        if (err) *err = std::string("SDL_SetRenderLogicalPresentation(DISABLED, overlay) 失败：") + SDL_GetError();
+        return false;
+    }
+    if (!drawn) {
+        if (err) *err = std::string("SDL_RenderTexture(overlay) 失败：") + SDL_GetError();
+        return false;
+    }
+    if (!restored) {
+        if (err) *err = std::string("SDL_SetRenderLogicalPresentation(LETTERBOX 恢复) 失败：") + SDL_GetError();
+        return false;
+    }
     return true;
 }
 
@@ -1150,11 +1184,12 @@ bool SdlWindow::Impl::submitDirect(const SurfaceArena& arena, const GuestSurface
     }
     ++frame_no;
     notePresentTime();
-    // ★ 叠层：先把 RGBA8 交给后端（文本不变不重传），真正的 blit 在 `directPresent` 的
-    //   letterbox 之后。画不出来 ⇒ 关掉叠层，呈现照旧（⛔ 不因为诊断层让整帧失败）。
+    // ★ 叠层（M0 统一入口）：同一份 display list → 宿主字体 → `presentOverlay`；
+    //   直出路径的 `directOverlay` 只记下画布原点 + 上传 RGBA8，真正的 blit 在
+    //   `directPresent` 的 letterbox 之后。画不出来 ⇒ 关掉叠层，呈现照旧。
     if (overlay) {
         std::string oerr;
-        if (!drawOverlayDirect(&oerr)) disableOverlay(oerr.c_str());
+        if (!owner->drawOverlay(&oerr)) disableOverlay(oerr.c_str());
     }
     if (!direct->directPresent(err)) return false;
     // 一帧用过就消费掉：下一位调用方（DDraw Flip / 直接 submitFrame）仍然会先上传 guest。
@@ -1351,10 +1386,22 @@ void SdlWindow::setOverlay(bool on) {
     // 开关变化 ⇒ 丢掉节流状态：下次开启时立刻重建，不受上一轮 100 ms 窗口影响。
     impl_->overlay_last_build_ns = 0;
     impl_->overlay_last_mouse_valid = false;
-    if (on) return;
-    impl_->overlay_text_key.clear();
-    impl_->overlay_w = 0;
-    impl_->overlay_h = 0;
+    if (on) {
+        // ★ 生产路径在 `init()` 就构造并验证字体（缺失 ⇒ 硬错）；这里只兜"运行时再开"这条
+        //   （测试 / 未来 `--ui` 的开关）：字体不可用 ⇒ 拒绝启用并**响亮**一次（⛔ 不静默退回点阵）。
+        if (impl_->hud_font == nullptr) {
+            auto font = std::make_unique<lift::FontEngine>();
+            lift::HostTextMetrics metrics;
+            if (!font->metrics(lift::ui::kHudFontRefPx, false, &metrics)) {
+                std::fprintf(stderr, "[overlay] 宿主字体不可用 ⇒ 拒绝启用（R5；⛔ 不退回 5×7 点阵）\n");
+                impl_->overlay = false;
+                return;
+            }
+            impl_->hud_font = std::move(font);
+        }
+        return;
+    }
+    impl_->overlay_lines.clear();
     if (impl_->overlay_tex != nullptr) {
         SDL_DestroyTexture(impl_->overlay_tex);
         impl_->overlay_tex = nullptr;
@@ -1363,7 +1410,7 @@ void SdlWindow::setOverlay(bool on) {
     impl_->overlay_tex_h = 0;
     if (impl_->direct != nullptr) {
         std::string ignored;
-        impl_->direct->directOverlay(nullptr, 0, 0, &ignored);
+        impl_->direct->directOverlay(nullptr, 0, 0, 0, 0, &ignored);
     }
 }
 

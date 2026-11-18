@@ -1748,14 +1748,14 @@ public:
         info.cycle = false;
         layoutLetterbox(static_cast<int>(sw), static_cast<int>(sh), &info.destination);
         SDL_BlitGPUTexture(cmd, &info);
-        // ★ 调试叠层（`--overlay`）：letterbox blit **之后**再 blit 一次，落到**画面**矩形的
-        //   左上角（= `info.destination.x/y`；⛔ 不是窗口左上角 —— 否则窗口 resize / 出现黑边时
-        //   叠层会落在黑边里）。叠层保持 **1:1 窗口像素**（不随画面缩放）。
+        // ★ 统一合成入口（M0）：letterbox blit **之后**再 blit 一次叠层，落到 UI 层算好的
+        //   **画布原点**（`overlay_dst_x_/y_`，由 `directOverlay` 传入；⛔ 不是窗口左上角，
+        //   ⛔ 也不再在这里从 letterbox 的 destination 推 —— 那个是画面矩形原点，非 16:9 时
+        //   与画布原点差一个居中偏移，B2/`uiCanvasOrigin` 才是唯一一份算术）。
+        //   叠层保持 **1:1 窗口像素**（不随画面缩放）。
         //   `LOADOP_LOAD` 是承重墙（CLEAR 会把刚画上去的画面清掉）。
         //   ⛔ 叠层只画进 swapchain，⛔ 不碰光栅化 target（否则会经 rasterSyncToGuest 写回 guest）。
         if (overlay_visible_ && overlay_tex_ != nullptr) {
-            overlay_dst_x_ = static_cast<int>(info.destination.x);
-            overlay_dst_y_ = static_cast<int>(info.destination.y);
             overlay_dst_valid_ = true;
             blitOverlay(cmd, swap, overlay_dst_x_, overlay_dst_y_, static_cast<int>(sw), static_cast<int>(sh));
         } else {
@@ -1831,14 +1831,15 @@ public:
                 d[3] = 0;  // XRGB 的 X 字节没有语义（guest X8 的归一化口径见 rasterSyncToGuest）
             }
         }
-        // ★ 调试叠层：与 `directPresent` **同一块矩形**合成进回读像素 —— 原点是 letterbox 之后
-        //   **画面**矩形的左上角（`rect.x/rect.y`），⛔ 不是窗口左上角（否则 resize 时叠层落进黑边）。
+        // ★ 统一合成入口（M0）：与 `directPresent` **同一个 origin / 同一块矩形**合成进回读像素
+        //   —— 原点是 `directOverlay` 传进来的**画布原点**（`overlay_dst_x_/y_`），⛔ 不再从 letterbox
+        //   的 rect 推（非 16:9 时那是画面原点，会差一个居中偏移）。
         //   swapchain 是 write-only ⇒ 窗口像素只能由 target + 同一份叠层重建；这里只改**回读缓冲**，
         //   ⛔ 不碰 target、⛔ 不碰 guest 像素。
         if (overlay_visible_ && overlay_w_ > 0 && overlay_h_ > 0 &&
             overlay_rgba_.size() >= static_cast<std::size_t>(overlay_w_) * static_cast<std::size_t>(overlay_h_) * 4u) {
-            const int ox = static_cast<int>(rect.x);
-            const int oy = static_cast<int>(rect.y);
+            const int ox = overlay_dst_x_;
+            const int oy = overlay_dst_y_;
             int ow = overlay_w_;
             int oh = overlay_h_;
             if (ox + ow > sw) ow = sw - ox;
@@ -1866,14 +1867,16 @@ public:
     }
 
     // -----------------------------------------------------------------------------------
-    // 调试叠层（`--overlay`）：RGBA8 → **同一 device** 上的一张 swapchain 格式纹理。
-    // ★ 真正的"画到窗口"发生在 `directPresent` 的 letterbox blit 之后（`LOADOP_LOAD`）；
-    //   这里只负责建纹理 + 上传。文本不变时调用方不会重复调用（省掉每帧一次上传）。
+    // 统一合成入口（M0）：RGBA8 → **同一 device** 上的一张 swapchain 格式纹理 + 记下 (x,y)。
+    // ★ (x,y) = **画布原点**（窗口像素；由 `PresentSink::presentGeometry` + `uiCanvasOrigin` 算好）。
+    //   真正的"画到窗口"发生在 `directPresent` 的 letterbox blit 之后（`LOADOP_LOAD`），
+    //   `directReadback` 用**同一个 origin** 合成回读像素。
+    //   文本不变时调用方仍会每帧调用（上传可复用同尺寸纹理；节流在调用方）。
     // ★ 格式取 `SDL_GetGPUSwapchainTextureFormat` 的**实际值**（`swapchain_format_`）：
     //   blit 源/目的的兼容性由后端决定，用实际 swapchain 格式是唯一能保证的组合；
     //   不支持 SAMPLER 用法就如实失败，⛔ 不硬上。
     // -----------------------------------------------------------------------------------
-    bool directOverlay(const std::uint8_t* rgba, int w, int h, std::string* err) override {
+    bool directOverlay(const std::uint8_t* rgba, int w, int h, int x, int y, std::string* err) override {
         if (rgba == nullptr || w <= 0 || h <= 0) {
             // ★ 关掉叠层 = **释放** GPU 纹理（⛔ 不许只把 visible 置 false 把纹理留在 device 上：
             //   那是一次真实的泄漏，而且下次开叠层会再多一张）。
@@ -1962,12 +1965,15 @@ public:
         ++g_stats.submits_upload;
         // CPU 侧副本（`directReadback` 合成同一块叠层用；⛔ 不进 guest、⛔ 不进 target）。
         overlay_rgba_.assign(rgba, rgba + bytes);
+        overlay_dst_x_ = x;
+        overlay_dst_y_ = y;
         overlay_visible_ = true;
         return true;
     }
 
-    // 诊断 / 夹具：上一次直出帧里叠层 blit 的 dst 原点（窗口像素；= letterbox 之后画面矩形原点）。
-    // ★ 这是 B1 的回归守卫取数口：测试断言它与"画面 rect 的原点"相等（⛔ 不是恒 0）。
+    // 诊断 / 夹具：上一次直出帧里叠层 blit 的 dst 原点（窗口像素；= **画布原点**）。
+    // ★ 这是 B2 的回归守卫取数口：测试断言它与 `uiCanvasOrigin(pic_w,pic_h)` 算出的画布原点相等
+    //   （⛔ 不是恒 0，⛔ 也不是非 16:9 时的画面矩形原点）。
     bool directLastOverlayOrigin(int* x, int* y) const override {
         if (!overlay_dst_valid_) return false;
         if (x != nullptr) *x = overlay_dst_x_;
@@ -3111,7 +3117,7 @@ private:
     int overlay_w_ = 0;
     int overlay_h_ = 0;
     bool overlay_visible_ = false;           // `directPresent` 是否要在 letterbox 之后再 blit 一次
-    int overlay_dst_x_ = 0;                  // 上一次叠层 blit 的 dst 原点（窗口像素 = 画面 rect 原点）
+    int overlay_dst_x_ = 0;                  // 叠层 dst 原点（窗口像素 = **画布原点**；由 directOverlay 传入）
     int overlay_dst_y_ = 0;
     bool overlay_dst_valid_ = false;         // false = 上一帧没画叠层（隐藏 / 还没 present 过）
     std::vector<std::uint8_t> overlay_rgba_;  // CPU 副本：`directReadback` 合成用（RGBA8）

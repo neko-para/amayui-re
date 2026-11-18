@@ -3138,10 +3138,10 @@ const MUTATIONS = [
     file: 'apps/emulator-lift/src/aot/aot_main.cpp',
     from:
       '    const bool present_window_flag = present_driver_set || present_vsync_set || present_hidden ||\n' +
-      '                                     present_screenshot_set || cursor_warp;',
+      '                                     present_screenshot_set || cursor_warp || overlay;',
     to:
       '    const bool present_window_flag = present_driver_set || present_vsync_set || present_hidden ||\n' +
-      '                                     present_screenshot_set;  // 变异：cursor_warp 不算窗口参数',
+      '                                     present_screenshot_set || overlay;  // 变异：cursor_warp 不算窗口参数',
     guard: 'ctest:cli-aot-flags',
     ctest: 'cli-aot-flags',
     buildDir: 'apps/emulator-lift/out',
@@ -4260,6 +4260,24 @@ const MUTATIONS = [
       'GetSystemTime 退回 `now100ns()`（宿主 uptime）⇒ 注入的墙钟 2024-03-05T12:34:56.789Z 被展开成 ' +
       '1970-01-01 + 1 h ⇒ `kernel32-time` 的 wall-vs-uptime-split 在年份 / 月日 / 时分秒上红' +
       '（uptime 那一半仍绿，正是 BUG-30 的修前形状）',
+  },
+
+  // ── M0 · UI 画布原点（`REQ-01M7PEG94GXE2V10DZYCZ0B5SR`；守卫 = `tests/ui_canvas.cpp`）──
+  //   ★ 代表"把 B2 的居中偏移丢掉"这一类静默错：16:9 时偏移本来就是 0，所以**只有**
+  //     非 16:9 的两条断言会红（320×240 ⇒ (0,30)、1024×768 ⇒ (0,96)）。
+  //     实现里把画布锚到画面左上角的那一刻，HUD 在 4:3 画面下会贴到黑边上沿 ——
+  //     窗口像素测试也能看见，但这条纯函数是**最早**能红的一层（无 SDL / 无 GPU）。
+  {
+    file: 'apps/emulator-lift/src/ui/canvas.h',
+    from: '    const int ox = (pic_w - cw) / 2;\n    const int oy = (pic_h - ch) / 2;',
+    to: '    const int ox = 0;  // 变异：丢掉居中偏移\n    const int oy = 0;',
+    guard: 'ctest:ui-canvas',
+    ctest: 'ui-canvas',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-ui-canvas',
+    what:
+      '`uiCanvasOrigin` 丢掉 `((pic−ref·s)/2)` 的居中偏移 ⇒ 非 16:9 的 320×240 / 1024×768 用例' +
+      '期望 (0,30)/(0,96) 得 (0,0) ⇒ ui-canvas 当场红；★ 16:9 用例仍绿（这正是"只测 16:9 会假绿"）',
   },
 ];
 

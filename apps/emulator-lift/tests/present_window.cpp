@@ -9,11 +9,14 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include "check.h"
+#include "runtime/font.h"
 #include "runtime/host_window.h"
 #include "runtime/machine.h"
 #include "runtime/memory.h"
+#include "runtime/overlay.h"
 #include "runtime/present_sdl.h"
 #include "runtime/surface.h"
 
@@ -246,6 +249,69 @@ void caseControlResumeStaleEvents() {
         LIFT_CHECK(!wm.keyDown(0x1B));  // ⛔ 进 guest 的键盘状态没被改
         win.shutdown();
     }
+}
+
+// =====================================================================================
+// M0 · 统一合成：`--overlay` 在**窗口像素**上按画布原点 1:1 落位（renderer / 直出两条路径都过）
+//
+// 判据：16:9 帧（640×360）⇒ 画布原点 == 画面原点 (0,0)，那一个像素是 HUD 底色 `kOverlayBg`；
+//       窗口右下角仍是 guest 后缓冲的颜色（⛔ 叠层没有铺满整窗）；guest 像素逐字节不变。
+//       ★ `gpu=true` 变体必须真的走**直出**：`opt.raster_gpu = true` 才会建 `GpuDirectPresenter`
+//         （缺这一行 ⇒ `directPresentActive()` 恒 false ⇒ 本用例一条断言都跑不到）。
+//       缺宿主字体 / 无 GPU 直出 ⇒ **返回 false**，由调用方 `LIFT_SKIP`（exit 77）。
+//       ⛔ 不许"打印一行然后 return 0"：那在 CTest 输出里跟跑绿了长得一样（`check.h` 文件头）。
+// =====================================================================================
+bool caseOverlayCanvasComposition(bool gpu, std::string* skip_why) {
+    ::lift_test::g_current_case = "overlay-canvas-1to1";
+    lift::FontEngine font;
+    if (!font.fontFileAvailable(false)) {
+        *skip_why = "缺宿主字体（LIFT_HOST_FONT_PATH）⇒ overlay-canvas-1to1 无法判定";
+        return false;
+    }
+    Fx f;
+    if (!make(f, 640, 360, format32(0))) {
+        LIFT_CHECK(false);
+        return true;
+    }
+    fill32(f, 0x008040C0u, 0xFF000000u);
+    const auto* p = f.arena.pixels(*f.s);
+    const std::vector<std::uint8_t> before(p, p + static_cast<std::size_t>(f.s->pitch) * f.s->height);
+
+    lift::SdlWindow win;
+    lift::SdlWindowOptions opt;
+    opt.title = "emulator-lift overlay canvas test";
+    opt.driver_list = gpu ? "gpu" : "software";
+    opt.raster_gpu = gpu;  // ★ 直出变体必须真建 GPU 直出（否则 directPresentActive() 恒 false）
+    opt.hidden = true;
+    opt.overlay = true;
+    win.setCaptureForTest(true);
+    std::string err;
+    if (!win.init(opt, &err)) {
+        if (gpu) {
+            *skip_why = "gpu 窗口 / GPU device 不可用：" + err;
+            return false;
+        }
+        LIFT_CHECK(false);  // 软件 / dummy 档是机械守卫：打不开就是红（⛔ 不 SKIP）
+        return true;
+    }
+    if (gpu && !win.directPresentActive()) {
+        *skip_why = std::string("gpu 直出未成立：") + win.describe();
+        win.shutdown();
+        return false;
+    }
+    LIFT_CHECK(win.overlayEnabled());
+    LIFT_CHECK(win.submitFrame(f.arena, *f.s, &err));
+    const std::uint32_t bg = (static_cast<std::uint32_t>(lift::kOverlayBg[0]) << 16) |
+                             (static_cast<std::uint32_t>(lift::kOverlayBg[1]) << 8) | lift::kOverlayBg[2];
+    std::uint32_t px = 0;
+    LIFT_CHECK(win.readbackPixel(0, 0, &px, &err));
+    LIFT_CHECK_EQ_U32(px & 0x00FFFFFFu, bg);  // 16:9 ⇒ 画布原点 == 画面原点
+    LIFT_CHECK(win.readbackPixel(639, 359, &px, &err));
+    LIFT_CHECK_EQ_U32(px & 0x00FFFFFFu, 0x8040C0u);  // 右下角仍是 guest
+    const auto* after = f.arena.pixels(*f.s);
+    LIFT_CHECK(before == std::vector<std::uint8_t>(after, after + static_cast<std::size_t>(f.s->pitch) * f.s->height));
+    win.shutdown();
+    return true;
 }
 
 }  // namespace
@@ -683,6 +749,11 @@ int main(int argc, char** argv) {
     }
 
     LIFT_CHECK_EQ_U32(SDL_WasInit(SDL_INIT_VIDEO), 0u);
+    {
+        // ★ 缺字体 / 无 GPU 直出 ⇒ **CTest SKIP 77**（用例无法判定），⛔ 不用"return 0"装 Passed。
+        std::string skip_why;
+        if (!caseOverlayCanvasComposition(gpu, &skip_why)) LIFT_SKIP(skip_why.c_str());
+    }
     caseControlResumeStaleEvents();
     return lift_test::finish("present-window");
 }

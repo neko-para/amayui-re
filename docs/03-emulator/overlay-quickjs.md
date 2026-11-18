@@ -13,25 +13,28 @@ Maa 的 NodeJS binding 不是一份绑定，而是一层与语言无关的薄抽
 | 层 | 符号 | 处置 |
 |---|---|---|
 | 值容器 | `spec/quickjs/wrapper.h:QjsValue`（拷贝 `JS_DupValue`、move 置 `JS_UNDEFINED`、析构 `JS_FreeValue`、`As<T>()` dup、`take()` 转移）+ 子类型 | ✅ 形状照抄：一个 `JSValue` 一个所有者；只取 bool / number / string / array / object |
-| 值转换 | `spec/convert.h:JSConvert<T>` 全特化（bool/string/int32/uint32/int64/uintptr/vector/array/tuple/variant/optional/OptionalParam/NativeObject）+ `DumpValue` / `TypeOf` | ✅ 只取 bool / number / string / array / object / function（见 §3）；❌ tuple / variant / optional / nativeobject |
+| 值转换 | `spec/convert.h:JSConvert<T>` 全特化（22 条：bool/string/int32/uint32/int64/**uint64**/uintptr/vector/array/tuple/variant/optional/OptionalParam/NativeObject…）+ `DumpValue` / `TypeOf` | ✅ 只取 bool / number / string / array / object / function（见 §3）；❌ tuple / variant / optional / nativeobject |
 | 参数解包 | `spec/wrapper.h:UnWrapArgs` / `OptionalCount`（错误里追加 `Sig:` / `Got:`）；`spec/traits.h:FuncTraits` | ⚠ 函数少，手写 `argc` 检查更短；只留 `Sig:` 诊断那一招 |
 | 函数注册 | `spec/utils.h:MAA_BIND_FUNC` → `WrapFunctionHelper` → `spec/quickjs/instric.impl.h:MakeFunction`（`JS_NewCFunctionData` 把 `std::function` 塞进 `func_data[0]`） | ✅ 机制可借；⚠ 别抄它硬编码 `55 /* JS_ATOM_name */`，我们 `JS_NewAtom("name")` |
 | 类注册 / GC | `spec/quickjs/class.h:NativeClass<T>::init`（`JS_NewClassID` / `JS_NewClass`、finalizer=delete、gc_mark、`JS_SetConstructor`…） | ❌ 整套不要（没有 host 句柄类）；✅ 只学原理：宿主把 JSValue 要么每次 `JS_DupValue` 临时保，要么挂在 runtime 内对象上被 mark |
 | 模块注册 | `apis/loader.cpp:init_module_maa` 把全局 `maa` 挂 `globalThis`，内部逐命名空间建对象 | ✅ 同样挂三个全局对象；❌ ESM |
 | 错误 | `spec/tools.h:MaaError : std::exception`（只在本侧 throw/catch，不过 FFI）；跨到 JS = `JS_ThrowTypeError` + 返 `JS_EXCEPTION` | ✅ 同一分工 |
 | 生命周期 | `plugin/runtime.cpp`：`JS_NewRuntime` → `JS_NewContext` → `JS_SetDumpFlags(JS_DUMP_LEAKS)` → `JS_SetRuntimeOpaque`；析构 `JS_FreeContext` → `JS_FreeRuntime`；`JS_Eval(..., "index.js", JS_EVAL_FLAG_STRICT)`；`JS_ExecutePendingJob` | ✅ 骨架；❌ job 泵（无 Promise） |
-| 多线程 / NAPI / 业务 | `plugin/entry.cpp` 的 detached `std::thread`、`plugin/runtime.cpp` 的 mutex/cv/`push_task`、`spec/async.h:AsyncWork`、`apis/` 40+ 文件 | ❌ 全丢 |
+| 多线程 / NAPI / 业务 | `plugin/entry.cpp` 的 detached `std::thread`、`plugin/runtime.cpp` 的 mutex/cv/`push_task`、`AsyncWork`（实在 `spec/quickjs/async.h:14` 与 `spec/nodejs/async.h:10`；`spec/async.h` 只是转发头）、`apis/` 40+ 文件 | ❌ 全丢 |
 
 **一句话**：拿"值所有权 + 转换表 + 一个 C 函数注册口 + 错误分工"，其余（类体系 / 异步 / 多线程 / 业务）都不进。
 
 ## 2. QuickJS-ng v0.10.1：来源、预算、沙箱
 
 - 来源 = **quickjs-ng**（不是 bellard 仓），v0.10.1（Maa 仓里 pin 到该 tag；`git submodule status` 可复现），MIT。
-  CMake target `qjs` = STATIC，5 个 C 源：`cutils.c libregexp.c libunicode.c quickjs.c xsum.c`。
-- 预算 API 三件（0.10.1 与 0.16.2 都在，逐行核过两版 `quickjs.h`）：
+  CMake target `qjs` **缺省静态**（`BUILD_SHARED_LIBS` 缺省 OFF；Maa 没有显式 `STATIC` 字样），
+  5 个 C 源：`cutils.c libregexp.c libunicode.c quickjs.c xsum.c`。
+- 预算 API 三件（0.10.1 已核：`quickjs.h:440` / `:446` / `:1031`；0.16.2 本机没有 checkout ⇒ **未复核**）：
   `JS_SetMemoryLimit` / `JS_SetMaxStackSize` / `JS_SetInterruptHandler`。
-- **Maa 没有沙箱也没有预算**：全仓只用 `JS_NewRuntime` / `JS_NewContext` / `JS_SetDumpFlags(JS_DUMP_LEAKS)` /
-  `JS_SetRuntimeOpaque`，**零处** `JS_SetMemoryLimit` / `JS_SetMaxStackSize` / `JS_SetInterruptHandler`；
+- **Maa 没有沙箱也没有预算**：**预算 / 中断面**零使用 —— 用
+  `rg 'JS_SetMemoryLimit|JS_SetMaxStackSize|JS_SetInterruptHandler'` 在 `source/binding/NodeJS/src` 与
+  `source/ include/ tools/ sample/ test/` 都零命中（生命周期那四个 API 照旧用；另有 `JS_SetOpaque` /
+  `JS_SetContextOpaque` / `JS_SetClassProto` / `JS_SetConstructor(Bit)`，都不涉预算 / 中断）；
   且 `apis/loader.cpp:init_module_sys` 直接给脚本 `print/readFile/writeFile/exit`。
   ⇒ 这两面**没有先例可抄**，必须按下面自己立。
 
@@ -45,8 +48,12 @@ Promise / BigInt / WeakRef / `performance` 的来源（`quickjs.c:2318-2345` vs 
    Math / Reflect / Iterator / Symbol / `parseInt` / `isNaN`）+ 可选 `MapSet` / `JSON`。
 3. ⛔ 不加 `Date`（墙钟）、`Eval`、`RegExp`、`Proxy`、`TypedArrays`、`Promise`、`BigInt`、`WeakRef`、
    `JS_AddPerformance`（`Date.now` 派生）。
-4. **删两个**（`BaseObjects` 装进来的）：`globalThis.Function`（`new Function(src)` = 运行期编译，
-   绕过 `origin:行:列` 与"离线转译"契约）、`Math.random`（种子 = `js__gettimeofday_us()`，逐进程不同）。
+4. **删两个**（`BaseObjects` 装进来的）：`globalThis.Function`、`Math.random`（种子 =
+   `js__gettimeofday_us()`，逐 **context** 不同 ⇒ 不可复现）。
+   ★ **真正的门是"不加 Eval"**：`new Function(src)` 与 `eval(src)` 都走 `JS_EvalInternal`，而它在
+   `quickjs.c:35012` 先判 `ctx->eval_internal`（只由 `JS_AddIntrinsicEval` 设置）⇒ 本形状不加 Eval 时
+   **两者在调用期就抛 TypeError、不会编译**；`globalThis.eval` 由 `BaseObjects` 装进来，被**同一道门**罩住。
+   ⇒ 删 `Function` 是**纵深防御 + 更清楚的报错 + 不留 API 面**，⛔ 不是"绕过 `origin:行:列` 契约"的唯一防线。
 5. 无 `std` / `os`：那是 `quickjs-libc.c` 的模块；不设 `JS_SetModuleLoaderFunc` ⇒ `import` 失败。
 6. 无 host 反射：不学 `NativeObject<T>` / `NativePointerHolder`，⛔ 不给脚本任何 native 指针 / 句柄。
 
@@ -124,7 +131,7 @@ class UiScript {   // init / update(dt,frame) / render(UiBuilder&) / on_click / 
 
 ## 5. 静态链接与发行
 
-- QuickJS **静态链进 exe**（`qjs` = STATIC）。宿主被 AOT `main` 无条件引用 ⇒ **没开 `--ui` 也在 exe 里**；
+- QuickJS **静态链进 exe**（`qjs` 缺省静态：`BUILD_SHARED_LIBS` 缺省 OFF）。宿主被 AOT `main` 无条件引用 ⇒ **没开 `--ui` 也在 exe 里**；
   换不到"按需加载 DLL"，发行树也**不多一个 DLL**。这是设计的代价，不是可选项。
 - **体积未实测**（源 ≈ 2.1 MB；官方 hello-world 210 KiB x86 code ⇒ x64 估 0.3–0.6 MB）。
   ⛔ 不把估计写进判据；用 `overlay.md` §5 的读数用例实测。
@@ -136,8 +143,11 @@ class UiScript {   // init / update(dt,frame) / render(UiBuilder&) / on_click / 
 
 1. clang-cl 编译：上游只给 MSVC / ClangCL 的 `/wd…` 与 `/experimental:c11atomics`；`check_c_compiler_flag`
    不认它时**静默不生效**（C11 atomics 走 `__STDC_NO_ATOMICS__` 分支）。首次构建要看实际生效了什么。
-2. mac：`quickjs/CMakeLists.txt` 对非 MSVC 非 IOS 开 `-Werror`（target 级）⇒ 新 clang 一条新告警就整仓红；
-   放宽只能 `set_property(TARGET qjs APPEND PROPERTY COMPILE_OPTIONS -Wno-error)`。**未实测**。
+2. mac：`quickjs/CMakeLists.txt` 对非 MSVC 非 IOS 开 `-Werror`（**目录级 `add_compile_options`**：
+   宏 `xcheck_add_c_compiler_flag` 在 `quickjs/CMakeLists.txt:32-38`，`-Werror` 在 `if(NOT MSVC AND NOT IOS)`
+   的 `:41-42`；⛔ 不是 target 级）⇒ 新 clang 一条新告警就整仓红；
+   放宽只能 `set_property(TARGET qjs APPEND PROPERTY COMPILE_OPTIONS -Wno-error)`（target 选项排在
+   目录选项**之后** ⇒ 会生效）。**未实测**。
 3. `JSValue` 泄漏：唯一正确形状 = 每个 `JSValue` 有唯一所有者；开发构建开 `JS_DUMP_LEAKS`，产品构建关。
 4. GC 与宿主生命周期：宿主只在 runtime 内持句柄，跨调用 `JS_DupValue`；热重载换 runtime 后旧句柄必须失效。
 5. 体积 / 首帧开销：仍是估计；实测落 `observations.md`，阈值由读数定。

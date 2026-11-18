@@ -2,7 +2,7 @@
 //
 // ★ 本文件是**新的** main：⛔ 不 include `machine.h`、⛔ 不实例化 `Machine`、⛔ 不调用
 //   `Machine::run` / `BlockCache::get`。它只做四件事：
-//     ① 定位执行源（**照 `src/main.cpp` 的默认 / 环境变量口径**，⛔ 不自己编路径）；
+//     ① 定位执行源（**照已退役解释器臂 `main.cpp` 的默认 / 环境变量口径**，⛔ 不自己编路径）；
 //     ② 调 `AotHost` 做平台 bring-up（映射 PE、建 guest 栈 / 堆 / TEB、装配宿主服务、注册并 bind shim）；
 //        —— 其中 `loadImage` **先核对构建期 pin**（D1：sha256 + entry），不一致 ⇒ 打印两个哈希 + exit 2；
 //     ③ 调 `AotHost::run` 跑到停机判据（`--max-frames` / `--max-insns` / `--until` / 停因）；
@@ -10,7 +10,7 @@
 //
 // ★ 为什么执行源要跟解释器臂同一套解析：读数（base / entry / 节表 / 导入数）必须与
 //   `emulator-lift` 报的是**同一份字节**，否则两边对不上时无法判断"是 lift 的问题还是喂了别的 exe"。
-// ★ `getenv` 在 MSVC 口径里是 deprecated 警告（不是问题）；与 `src/main.cpp` 同一条处置。
+// ★ `getenv` 在 MSVC 口径里是 deprecated 警告（不是问题）；与已退役解释器臂 `main.cpp` 同一条处置。
 #define _CRT_SECURE_NO_WARNINGS
 #include <cstdio>
 #include <cstdlib>
@@ -34,7 +34,7 @@
 
 namespace {
 
-// ★ 与 `src/main.cpp` 的 `fileExists` 同一口径：Windows 上窄 `fopen` 按 ANSI 码页解释路径，
+// ★ 与已退役解释器臂的 `fileExists` 同一口径：Windows 上窄 `fopen` 按 ANSI 码页解释路径，
 //   日文目录会打不开 ⇒ 必须走宽字符版。
 bool fileExists(const std::string& p) {
     std::FILE* f = lift::openHostFileUtf8(p, "rb");
@@ -151,6 +151,9 @@ void usage() {
         "  --present-driver LIST     SDL 渲染驱动列表（只对 window/auto 生效）\n"
         "  --present-vsync 0|1       垂直同步（缺省 0）\n"
         "  --present-hidden          强制隐藏窗口（仍必须显式 --present window/auto）\n"
+        "  --overlay                 左上角调试 HUD（游戏内小窗 / 帧读数；只进窗口像素与\n"
+        "                            --present-screenshot，⛔ 不进 --dump-frame / arena.hash）。\n"
+        "                            文本走宿主字体（支持中文）；字体缺失 ⇒ 拒绝启动（R5）\n"
         "  --present-screenshot <path>      每次可见窗口 Present 后存一张窗口 BMP（{frame} 可用）\n"
         "  --present-screenshot-frame N     只回读第 N 帧（1 起；0 = 每帧都写）\n"
         "  --scale auto|数值  窗口客户区 = round(1280×s) × round(720×s)。★ **只改窗口、不改帧**：\n"
@@ -171,7 +174,7 @@ void usage() {
         lift::kAotSoundHelp, lift::kCursorWarpHelp);
 }
 
-// ★ 执行源定位**照抄** `src/main.cpp` 的四处顺序（--exe → env → 仓库内入库件 → 拒绝启动）。
+// ★ 执行源定位**照抄**已退役解释器臂的四处顺序（--exe → env → 仓库内入库件 → 拒绝启动）。
 //   ⛔ 不回退到游戏安装目录里的原版 exe（那是加壳件，节表未还原）。
 bool resolveExePath(const std::string& explicit_path, std::string* out, std::vector<std::string>* tried) {
     if (!explicit_path.empty()) {
@@ -213,7 +216,7 @@ bool parseU32Hex(const std::string& s, std::uint32_t* out) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    // ★ 进程入口三件事，顺序与 `src/main.cpp` 相同（理由见 runtime/memory.h / host_encoding.h）：
+    // ★ 进程入口三件事，顺序与已退役解释器臂 `main.cpp` 相同（理由见 runtime/memory.h / host_encoding.h）：
     //   ① 关掉 Windows 上"崩了就弹模态框"的默认行为（无人值守的整轮会被挂死）；
     //   ② 控制台输出码页 → UTF-8；
     //   ③ argv 一律按 UTF-8 取（CRT 的 char** 是 ANSI 码页）。
@@ -239,14 +242,18 @@ int main(int argc, char** argv) {
     //   为什么单独记一个 bool：值 0 也是"给了这个 flag"（= 显式关），⛔ 不要靠 `!= 0` 判"给没给"。
     bool profile_slow_frames_set = false;
     lift::aot::AotRunOptions run_opts;
-    // ---- 呈现档位（取值 / 缺省 / 使用门槛**照 `src/main.cpp:226-227`、`:357-394`、`:637-663`）----
+    // ---- 呈现档位（取值 / 缺省 / 使用门槛**照已退役解释器臂 `main.cpp` 的同一条顺序**）----
     std::string present_mode = "headless";  // 与解释器同缺省
     std::string present_driver = lift::SdlWindowOptions{}.driver_list;
     bool present_driver_set = false;
     std::uint32_t present_vsync = 0;
     bool present_vsync_set = false;
     bool present_hidden = false;
-    // ★ 宿主真光标（`--cursor-warp`，缺省关；与 `src/main.cpp:233` 同一个值）：只加宿主副作用，
+    // ★ `--overlay`（M0；缺省关）：AOT 臂第一次有调试 HUD。只改**宿主送显的窗口像素**
+    //   （`--present-screenshot` 含它；`--dump-frame` / `arena.hash` 不含）。文本走宿主字体
+    //   （`FontEngine`；支持中文）⇒ 字体缺失时 `SdlWindow::init` 硬失败（R5）。
+    bool overlay = false;
+    // ★ 宿主真光标（`--cursor-warp`，缺省关；与已退役解释器臂同一个值）：只加宿主副作用，
     //   ⛔ 不改 guest 可见状态。只在 `--present window/auto` 且窗口可见时才真的挪（见
     //   `runtime/present_flags.h` 的 `cursorWarpState`）。
     bool cursor_warp = false;
@@ -339,10 +346,10 @@ int main(int argc, char** argv) {
             //   （`mute_ = !sound`），并由下面那条一次性说明与代码同形地报出来。
             sound = true;
         } else if (a == "--skip-logo") {
-            // ★ 与 `src/main.cpp:301-302` 同一条：只置一个 bool（一次性 latch，语义在 aot_run.cpp）。
+            // ★ 与已退役解释器臂同一条：只置一个 bool（一次性 latch，语义在 aot_run.cpp）。
             run_opts.skip_logo = true;
         } else if (a == "--dump-frame") {
-            // ★ 与 `src/main.cpp:1157` 同一个字段（`cpu.shim.frame_dump`）；D3D9 Present 消费。
+            // ★ 与已退役解释器臂同一个字段（`cpu.shim.frame_dump`）；D3D9 Present 消费。
             if (!needValue("--dump-frame", &frame_dump)) return 2;
         } else if (a == "--log-level") {
             // ★ 日志级别（**缺省 warn** ⇒ 默认档输出逐字不变）。AOT 臂过去没有这个开关，
@@ -455,8 +462,11 @@ int main(int argc, char** argv) {
             present_vsync_set = true;
         } else if (a == "--present-hidden") {
             present_hidden = true;
+        } else if (a == "--overlay") {
+            // ★ M0：窗口参数（`--present headless` 下由 `present_window_flag` 拒绝）。
+            overlay = true;
         } else if (a == "--cursor-warp") {
-            // ★ 与 `src/main.cpp:398-400` 同一条：只置一个 bool。窗口参数（headless 下 exit 2
+            // ★ 与已退役解释器臂同一条：只置一个 bool。窗口参数（headless 下 exit 2
             //   —— 没有可见窗口可映射）。
             cursor_warp = true;
         } else if (a == "--present-screenshot") {
@@ -546,7 +556,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    // ---- 呈现后端参数校验（口径**逐条**照 `src/main.cpp:637-676`；⛔ 不发明第三种语义）----
+    // ---- 呈现后端参数校验（口径**逐条**照已退役解释器臂的参数校验；⛔ 不发明第三种语义）----
     // ★ `--cursor-warp` 是**平台**能力：Linux / 其它平台没有实现 ⇒ 启动即拒绝（exit 2）。
     //   判据与文案与解释器臂**同一处**（`runtime/present_flags.h`），⛔ 不在这里另写一句。
     if (cursor_warp && !lift::hostCursorPlatformSupported()) {
@@ -560,7 +570,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     const bool present_window_flag = present_driver_set || present_vsync_set || present_hidden ||
-                                     present_screenshot_set || cursor_warp;
+                                     present_screenshot_set || cursor_warp || overlay;
     if (present_screenshot_frame != 0 && present_screenshot.empty()) {
         std::fprintf(stderr, "--present-screenshot-frame 需要同时给 --present-screenshot <path>\n");
         return 2;
@@ -576,10 +586,10 @@ int main(int argc, char** argv) {
     }
 
     // =====================================================================================
-    // 显示 / GPU 光栅化后端（真源 `src/main.cpp:720-786` 的**同一条**路径）
+    // 显示 / GPU 光栅化后端（真源是已退役解释器臂的**同一条**路径）
     //
     // ★ `--present headless` **不是"没有窗口"**：解释器也建一个**隐藏**窗口来拿 GPU device
-    //   （`main.cpp:724-726`），因为 GPU 是**唯一**的光栅实现 —— 拿不到它，`d3d9_pipeline.cpp:3983`
+    //   （已退役解释器臂的同一条），因为 GPU 是**唯一**的光栅实现 —— 拿不到它，`d3d9_pipeline.cpp:3983`
     //   会整批拒批，3D 一个像素都不画（W0 C10 Ⓐ）。⇒ 本臂两个档位都建窗口，只有 visible/hidden 之分。
     // ★ 无 GPU ⇒ **拒绝启动**（与解释器同一条硬失败，⛔ 没有"这一轮先不画"的降级）。
     // =====================================================================================
@@ -593,9 +603,12 @@ int main(int argc, char** argv) {
         wopt.hidden = present_mode == "headless" || present_hidden;
         wopt.screenshot_path = present_screenshot;
         wopt.screenshot_frame = present_screenshot_frame;
-        // ★ 与解释器臂同一个字段（`main.cpp:742`）：缺这一行 ⇒ sink 恒 `cursor_warp=false`
+        // ★ 与解释器臂同一个字段（已退役解释器臂同一个字段）：缺这一行 ⇒ sink 恒 `cursor_warp=false`
         //   ⇒ `hostCursorWarpEnabled()` 恒假 ⇒ shim 只改虚拟光标（用户看到的"不会移动鼠标"）。
         wopt.cursor_warp = cursor_warp;
+        // ★ M0：`--overlay` 的唯一接线点（`SdlWindow` 内部两条呈现路径统一到 `presentOverlay`）。
+        //   `--present headless` 已在上面按 `present_window_flag` 拒绝。
+        wopt.overlay = overlay;
         // ★ `--scale` 只交给**窗口档**：`--present headless` 的隐藏离屏窗口保持 1280×720
         //   （= `--scale` 对 headless 无副作用；不设它 ⇒ 不查 DPI、不改窗口尺寸）。
         if (present_mode != "headless") wopt.scale = scale_spec;
@@ -617,25 +630,36 @@ int main(int argc, char** argv) {
         }
         // ★ "我开了但没生效"必须响亮一次（与解释器臂同一句话、同一判据；见
         //   `runtime/present_flags.h`）：`--present-hidden` 与 auto 的隐藏回退走同一条 stderr warn。
-        //   ⛔ 不改成 exit 2：隐藏窗口是有意的无窗口复现档（`main.cpp:761-764` 的同一裁决）。
+        //   ⛔ 不改成 exit 2：隐藏窗口是有意的无窗口复现档（已退役解释器臂的同一裁决）。
         if (ok && lift::cursorWarpState(cursor_warp, lift::hostCursorPlatformSupported(), wopt.hidden) ==
                       lift::CursorWarpState::OnButHidden) {
             std::fputs(lift::kCursorWarpHiddenWarn, stderr);
         }
-        if (ok && !sdl->rasterActive()) {
-            werr = "GPU device 建出来了，但光栅化后端未激活（`rasterActive()==false`）";
-        }
         if (!ok || !sdl->rasterActive()) {
+            // ★ 标题按 `ok` 分（原因行照打，⛔ 不吞）：
+            //   · `!ok` = `SdlWindow::init` 拒绝 ⇒ 窗口 / 字体（`--overlay` 的宿主字体，R5）/ GPU device；
+            //   · `ok && !rasterActive` = device 建出来了但光栅后端没激活 ⇒ 这才是"没有可用的 GPU 后端"。
+            //   ⛔ 不改 exit 2、不改判据（`lift/no-gpu-refuses-start` 仍靠"拒绝启动" + 原因里的 GPU 文案）。
+            if (!ok) {
+                std::fprintf(stderr,
+                             "emulator-lift-aot: 拒绝启动 —— 窗口/字体初始化失败\n"
+                             "  原因：%s\n"
+                             "  请检查：\n"
+                             "    · `--overlay` 需要宿主字体（`LIFT_HOST_FONT_PATH`，缺 ⇒ 硬错、⛔ 不退回 5×7 点阵）；\n"
+                             "    · 窗口 / GPU device 是否建得出来（Windows: D3D12 / Vulkan；macOS: Metal）；\n"
+                             "    · 是否在**没有桌面**的环境里跑（远程会话 / 服务 / `SDL_VIDEODRIVER=dummy`）。\n",
+                             werr.empty() ? "窗口初始化失败（SDL 没有给出原因）" : werr.c_str());
+                return 2;
+            }
             std::fprintf(stderr,
                          "emulator-lift-aot: 拒绝启动 —— 没有可用的 GPU 光栅化后端\n"
-                         "  原因：%s\n"
+                         "  原因：GPU device 建出来了，但光栅化后端未激活（`rasterActive()==false`）\n"
                          "  本线只有 GPU 一个光栅实现（CPU 光栅已退休）；没有 GPU 就不启动。\n"
                          "  请检查：\n"
                          "    · 图形后端 / 驱动是否可用（Windows: D3D12 / Vulkan；macOS: Metal）；\n"
                          "    · 是否在**没有桌面**的环境里跑（远程会话 / 服务 / `SDL_VIDEODRIVER=dummy`）：\n"
                          "      SDL 必须先初始化视频子系统才能建 GPU device ⇒ 这种环境请换到有桌面的会话里跑。\n"
-                         "  ⛔ 本线不提供无 GPU 时的降级路径（`--present headless` 也要 GPU）。\n",
-                         werr.empty() ? "GPU 后端创建失败（SDL 没有给出原因）" : werr.c_str());
+                         "  ⛔ 本线不提供无 GPU 时的降级路径（`--present headless` 也要 GPU）。\n");
             return 2;
         }
         display = std::move(sdl);
@@ -681,7 +705,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "emulator-lift-aot: 音频后端 configure 失败：%s\n", err.c_str());
         return 1;
     }
-    // ★ GPU 光栅化后端：**必须在第一条 guest 指令之前**接到宿主服务上（口径 `main.cpp:1171` 的
+    // ★ GPU 光栅化后端：**必须在第一条 guest 指令之前**接到宿主服务上（口径已退役解释器臂的
     //   `machine.setGpuRaster(display->gpuRaster())`）。d3d9 / DDraw 的第一件事就是查它；
     //   拿不到 ⇒ `d3d9_pipeline.cpp:3983` 整批拒批（3D 一个像素都不画，`~4544` 不再 CPU 重放）。
     host.setGpuRaster(sdl_display->gpuRaster());
@@ -735,7 +759,7 @@ int main(int argc, char** argv) {
         run_opts.stop_requested = input_plan.quitFlag();
     }
 
-    // ---- ③' AGERC.DLL：真实 guest 模块（口径同 `src/main.cpp`：`--game-dir` 下那份，走 VFS 解析）----
+    // ---- ③' AGERC.DLL：真实 guest 模块（口径同已退役解释器臂 `main.cpp`：`--game-dir` 下那份，走 VFS 解析）----
     //   ★ 缺它不是"可选项"：guest 启动早期就 `LoadLibraryA("AGERC.DLL")`，没有镜像 ⇒ 返回 0 + 126
     //     ⇒ guest 走错误对话框路径（实测停在 `poly:005C3627 = j_MessageBoxA_15`）。
     //   ⛔ 与解释器臂同口径：**降级但不假装成功**（打一行 warn，LoadLibrary 自己会返回 0 + 126）。
@@ -787,7 +811,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    // ---- 宿主诊断配置：帧导出 / 帧数上限（口径同 `src/main.cpp:1156-1162`；不进 guest 语义）----
+    // ---- 宿主诊断配置：帧导出 / 帧数上限（口径同已退役解释器臂 `main.cpp`；不进 guest 语义）----
     host.cpu().shim.frame_dump = frame_dump;
     host.cpu().shim.max_frames = run_opts.max_frames;
     if (!frame_dump.empty()) {
@@ -795,7 +819,7 @@ int main(int argc, char** argv) {
                     frame_dump.c_str());
     }
 
-    // ---- ⑤ 窗口 sink 装配（只在 `--present window/auto`；口径 `src/main.cpp:1199-1220`）----
+    // ---- ⑤ 窗口 sink 装配（只在 `--present window/auto`；口径同已退役解释器臂 `main.cpp`）----
     //   ★ 三件事缺一不可（W0 B7）：
     //     ① `presenter().setSink(...)`：像素真的送到窗口；
     //     ② `attachWindowManager`：SDL 事件才翻得成 guest 的 `WM_*`（没有它事件只更新 stop）；
@@ -807,7 +831,7 @@ int main(int argc, char** argv) {
             std::printf("present   : 注意：driver=%s 是 GPU API 路径，但不是 SDL_GPU（gpu driver）\n",
                         sdl_display->rendererName());
         }
-        host.presenter().setSink(std::move(display));  // 所有权转给 presenter（与 main.cpp:1208 同）
+        host.presenter().setSink(std::move(display));  // 所有权转给 presenter（与已退役解释器臂同）
         sdl_display->attachWindowManager(host.cpu().windows);
         // ★ AOT 没有输入脚本 / 交互图（那是解释器臂的宿主控制面）⇒ 泵里只有 SDL 事件。
         host.cpu().windows->setHostEventPump(
@@ -893,7 +917,7 @@ int main(int argc, char** argv) {
 
     // ---- ⑥ 执行 ----
     const lift::aot::AotRunResult r = host.run(run_opts);
-    // ★ 与解释器 `main.cpp:1269` 同一条收口：先摘事件泵，再打摘要（⛔ 不让泵在收口后碰窗口）。
+    // ★ 与已退役解释器臂同一条收口：先摘事件泵，再打摘要（⛔ 不让泵在收口后碰窗口）。
     if (present_window_active) host.cpu().windows->clearHostEventPump();
     // ---- ⑥'' 控制层收口：**摘要之前**（design-ws §2.3 第 6 条：⛔ 不先打摘要再 join，
     //   那会让"端点已消失"这句话晚于摘要出去，人就会读到假象）。

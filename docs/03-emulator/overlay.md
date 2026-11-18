@@ -7,6 +7,9 @@
 
 ## 1. 能力盘点（读代码得到的事实）
 
+> ★ **本节是 M0 前（2026-11-18）的盘点快照**，保留下来是为了说明"为什么要改"；逐条标了"M0 前 / M0 起"的时点。
+> 当前实现的判据不在这里（见 §4）。
+
 ### 1.1 唯一一份 overlay 实现
 
 | 项 | 事实 | 落点 |
@@ -17,7 +20,7 @@
 | 形状 | 一块不透明深底矩形 + 亮字；1 px 内边距 / 字距 / 行距；矩形外一个字节都不动（哨兵缓冲守卫） | `overlay.cpp:overlaySize/renderOverlay`、`tests/overlay.cpp` |
 | 输入 | **零**：`handleEvent` 把键 / 鼠 / 轮全部交给 `input::*` | `present_sdl.cpp:SdlWindow::Impl::handleEvent` |
 | 可见性 / 条件 | 只有全局 bool（默认关）；没有 `when` / 元素 / 布局（内容由 C++ 固定） | `present_sdl.h:SdlWindow::setOverlay`、`present.h:PresentSink::overlayEnabled` |
-| 节流 | 文本最多 100 ms 重建一次；鼠标位置变化立即；内容不变不重传 | `present_sdl.cpp:kOverlayRefreshNs` |
+| 节流 | 文本最多 100 ms 重建一次；鼠标位置变化立即；**M0 前**：内容不变不重传。★ **M0 起**：sink 侧每帧重新栅格化 / 重上传（只有"文本重建"被 100 ms 节流；dirty-upload 留 M1/M2） | `present_sdl.cpp:kOverlayRefreshNs` |
 
 **能**：在画面矩形左上角显示一块 ASCII 文本（鼠标 / 脚本身份 / fps / 帧号 / 光栅后端 / 呈现路径 / 最近 3 s 每帧最大值）；只改宿主送显像素；两条呈现路径都画；有守卫。
 **不能**：面板 / 边框 / 图片、任意位置 / 锚点 / 缩放、中文、按 `script+pos` 显隐、多块界面 / z-order / 裁剪、点击命中与吞掉、插件化 / 热重载、任何声明式或脚本描述。
@@ -29,14 +32,17 @@
 | SDL_Renderer | 主纹理之后、`--present-screenshot` 之前 | **逻辑坐标 (0,0) = 画面左上角**，随 `LETTERBOX` 缩放（`present_sdl.cpp:Impl::drawOverlayRenderer` 的 `SDL_RenderTexture(..., {0,0,w,h})`） |
 | GPU 直出 | `letterbox` blit **之后** | 锚在画面矩形左上角，**1:1 窗口像素、不缩放**，超出 swapchain 裁掉（`d3d9_gpu.cpp:Impl::directPresent` → `Impl::blitOverlay`；回读时 `Impl::directReadback` 把同一块从 CPU 副本合成进窗口像素 —— swapchain 是 write-only） |
 
-⇒ 同一份行、两种大小。新 UI 层必须先裁决掉它（D5）。
+⇒ **M0 前**：同一份行、两种大小（M0 起两条路径已统一到 `presentOverlay` 的画布原点，见 §4 B1/B2）。新 UI 层必须先裁决掉它（D5）。
 
 ### 1.3 CLI 可达性与其它树
 
-- `--overlay` **只在解释器臂**的窗口参数清单里（`runtime/present_flags.h:kWindowFlagsInterpreter`）；
+- **M0 之前**：`--overlay` 只在解释器臂的窗口参数清单里（`runtime/present_flags.h:kWindowFlagsInterpreter`）；
   AOT 臂的清单不含它（`present_flags.h:kWindowFlagsAot`），且解释器的 `main.cpp` 已删
-  （`git log --oneline -- apps/emulator-lift/src/main.cpp`）⇒ **生产上不可达**，只有 CTest
+  （`git log --oneline -- apps/emulator-lift/src/main.cpp`）⇒ 生产上不可达，只有 CTest
   通过 `SdlWindow::setOverlay` 能打开它（`tests/overlay.cpp`）。
+- **M0 起**：`kWindowFlagsAot` 已含 `--overlay`（AOT 臂 `aot_main.cpp` 解析并接线），
+  `--present window --present-hidden --overlay --max-frames 2` ⇒ exit 0（`tests/aot_overlay.cpp`）；
+  `--present headless` 仍按窗口参数拒绝它。
 - `apps/emulator` / `apps/emulator-new` **没有宿主 overlay**：前者只命中一条 VFS 注释（`src/host/fs.ts`）；
   后者的 `KIND_TEXTURE_OVERLAY` / `KIND_MOVIE_OVERLAY` 是 **guest 场景绘制**，不是宿主叠层
   （`src/platform/electron/renderer/scene-command-plan.ts`）。
@@ -78,7 +84,8 @@
 嵌套子元素相对父内容区、`clip` 缺省 on。
 
 **样式**（最小集，未知键 = 启动硬错）：`fill` / `border` / `radius` / `padding` / `color` / `align` /
-`line_height` / `font` / `opacity`。`text.size` 单位是**参考像素**，实际字形像素 = `round(size * s)`。
+`line_height` / `font` / `opacity`。`text.size` 单位是**参考像素**，实际字形像素 = `round(size * s)`；
+字形由**宿主字体**（FreeType）按最终像素取字（D5 / U1：支持中文，⛔ 不放大位图、⛔ 不退回 5×7 点阵）。
 
 ### 3.2 `when`（宿主要值的声明式门）
 
@@ -145,18 +152,43 @@ Present → beginFrame(geometry, frameState) → 投递输入（按 seq）→ up
 
 ### M0 — 接线与统一合成（无脚本、无输入）
 
-新开 AOT 臂的 `--overlay` CLI 面（`kWindowFlagsAot` 不含它）；`PresentSink` 加
-`presentOverlay(rgba,w,h,x,y)` 与 `presentGeometry`；两条路径都改成"窗口像素 + origin"；HUD 内容先用
-**临时的 C++ display list**（走同一条通用合成路径，⛔ 不是第二套渲染器）。
+新开 AOT 臂的 `--overlay` CLI 面（`kWindowFlagsAot` 加它）；`PresentSink` 加
+`presentOverlay(rgba,w,h,x,y)` 与 `presentGeometry`；两条路径都改成"窗口像素 + origin"；HUD 内容用
+**最终模型子集**的 C++ display list（`src/ui/element.h` 的 POD + `UiBuilder` + 只做绝对 `at`/`size` 的
+最小 resolve；走同一条通用合成路径，⛔ 不是第二套渲染器，⛔ 不是一次性 `vector<rect/text>`）。
+M1 只加能力（layout / when / hit / clip），不改模型（N1）。
+
+**B1（SDL_Renderer 路径的 1:1 合成，已裁决）**：画叠层的那一次 draw 前后临时
+`SDL_SetRenderLogicalPresentation(renderer, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED)`，画完恢复
+`(帧 w, 帧 h, SDL_LOGICAL_PRESENTATION_LETTERBOX)`；⛔ 不做逆缩放。若实测有副作用（present 读数 / 状态），
+**显式**把判据 2 降为"原点 ±1 px + 采样中心色"并写进 `observations.md`，⛔ 不许静默降级。
+
+**B2（HUD 的参考系，已裁决）**：M0 HUD 走 D5 的 1280×720 参考系；判据 2 的"原点"是**画布原点**
+（= 画面矩形原点 + `((pic_w−1280s)/2,(pic_h−720s)/2)`，`s = min(pic_w/1280, pic_h/720)`），
+⛔ 不是画面矩形原点（非 16:9 时两者差居中偏移）。`uiCanvasOrigin(pic_w,pic_h) -> (s,ox,oy)` 是纯函数；
+用例：16:9（如 640×360 ⇒ offset 0）+ 非 16:9（如 320×240 ⇒ `(0,30)`）各一条。
+
+**U1（文本字形，已裁决）**：生产 HUD / UI 文本走**宿主字体**（`runtime/font.h:FontEngine` / FreeType，
+`LIFT_HOST_FONT_PATH`），按**最终像素**重绘（D5），**必须支持中文 / 日文**；⛔ 不用旧 5×7 点阵当生产字形
+（旧点阵只作 M2 的 `--ui-glyphs bitmap` 显式测试档）。M0 判据：中文串（如 `天結`）经宿主字体栅格出
+**非空覆盖率**；字体缺失 ⇒ **启动硬错**（R5），⛔ 不静默退回点阵、⛔ 不画空白。
 
 1. `--present window --present-hidden --overlay --max-frames 2` ⇒ `exit 0`（AOT 臂第一次有叠层）。
-2. 截图：叠层 bbox 原点 == 画面矩形原点，颜色精确值命中（沿用 `tests/overlay.cpp` 的判据形状）。
+2. 截图：叠层 bbox 原点 == **画布原点**（见 B2），颜色精确值命中（沿用 `tests/overlay.cpp` 的判据形状）；
+   16:9 与非 16:9 各一条（非 16:9 断言居中偏移）。
+2b. 文本：宿主字体栅格（⛔ 点阵生产路径）；中文串（如 `天結`）经宿主字体得到**非空覆盖率**；
+   字体缺失 ⇒ 启动硬错（R5）。
 3. 关掉 `--overlay` ⇒ 窗口像素逐位等于"没有 UI"。
-4. `--dump-frame` 逐字节不变、`arena.hash` 不变。
+4. `--dump-frame` 逐字节不变、`arena.hash` 不变（对照用 **1 帧**；`--max-frames 2` 的第二帧随真实时钟变化，
+   两轮**纯对照**也不同 ⇒ 2 帧不能当逐字节判据）。
 5. 默认档整轮 stderr 无 `[ui]` / `[overlay]` 周期行。
 6. 两条呈现路径都过；直出无 GPU ⇒ SKIP 77（⛔ 拿 renderer 假绿）。
 
-★ 旧的"真窗口 + 真落盘"覆盖已删 ⇒ M0 要重新立"带 `--overlay` 的子进程跑两帧 + BMP 出现精确色块"（assets 档），⛔ 不靠 `tests/overlay.cpp` 的窗口用例冒充。
+★ 旧的"真窗口 + 真落盘"覆盖已删 ⇒ M0 重新立了"带 `--overlay` 的 AOT 子进程跑两帧 + 窗口 BMP 在
+画布原点出现精确色块 + `--dump-frame` 两次逐字节相同"（`tests/aot_overlay.cpp`；缺资产 ⇒ SKIP 77），
+⛔ 不靠 `tests/overlay.cpp` 的窗口用例冒充。
+★ **`aot-overlay` 在 mac / Linux 恒 SKIP 77**：它用 `CreateProcessW` 起子进程（Windows 专有）⇒ 非 win32
+永远是 SKIP，⛔ **不当绿**；判据 1 / 4 / 5 的端到端证据留给 **win32 验收**。
 
 ### M1 — `ui_core` + display list + 布局 / 条件 / 命中（无语言运行时）
 
@@ -217,9 +249,16 @@ AOT 块入口采样门；`game.script/pos` + `when` 的端到端；`global/local
 | assets | AOT 子进程 + `--max-frames 2` + `--present-screenshot` | 端到端"叠层真的上屏"、`--dump-frame` 不含 UI、无周期行 |
 | 读数 | `lift-ui-script-bench`（独立 exe 或 `--bench` 档） | 墙钟 / 内存；进 `observations.md`，⛔ 不作门槛 |
 
+★ **M0 已落地的用例名**（上表是建议；实际文件与 CTest 名）：`tests/ui_canvas.cpp`（`ui-canvas`，纯函数
+`uiCanvasOrigin`）· `tests/ui_text.cpp`（`ui-text`，宿主字体中文覆盖率 + 字体缺失硬失败）·
+`tests/overlay.cpp`（`overlay` / `overlay-gpu`，两条路径的画布原点 / 颜色 / 关掉后逐像素）·
+`tests/present_window.cpp`（`present-window` 走 software、16:9 的 1:1 原点 / 颜色；`-gpu` 变体在
+直出成立时才断言，否则 SKIP 77 —— 直出面的主证据是 `overlay-gpu`）·
+`tests/aot_overlay.cpp`（`aot-overlay`，AOT 子进程 + 窗口截图 + `--dump-frame` 对照）。
+
 **变异自检**（每类一条代表，`tools/mutate-check.mjs`）：`when` 的 `pos` 比较 `>=`→`>` ⇒ `ui_when` 红 ·
 router 的"down 放 ⇒ up 放"改掉 ⇒ `ui_hit` 红 · 采样门少一个 EA ⇒ `ui_marker_gate` 红 ·
-`presentOverlay` 的 origin 回 0 ⇒ 窗口用例红 · `seq` 排序改成按 id ⇒ `ui_seq_order` 红。
+`uiCanvasOrigin` 丢掉居中偏移 ⇒ `ui-canvas` 红（M0 已加进清单）· `seq` 排序改成按 id ⇒ `ui_seq_order` 红。
 
 ## 6. 风险
 
@@ -237,11 +276,26 @@ router 的"down 放 ⇒ up 放"改掉 ⇒ `ui_hit` 红 · 采样门少一个 EA 
 ## 待核
 
 1. `--scale` 车道的最终接口：改窗口、改帧、还是改参考系？本设计只兼容前两种。
-2. AOT 的 `0x4123F0` / `0x4123E5` 是否真出现在派发边界（闭包是否覆盖、派发表是否含这两个 EA）。
-3. `LOCAL_POOL_SLOTS` 的 count 单位（元素个数 vs 字节数）需逐字取证；`global` 池常量要不要进 `engine_marker.h`
-   （现在在 `packages/age-format`，`Engine+0x5D800` 一族）。
-4. `SDL_SetRenderLogicalPresentation(…, DISABLED)` 与 letterbox 的往返是否影响 present 读数 / 有无状态副作用。
+2. ~~AOT 的 `0x4123F0` / `0x4123E5` 是否真出现在派发边界~~ **已证（2026-11-18）**：两个 EA **不在**派发表
+   （`out/aot/lift_table.inc` 零命中；`lift_cc_4122E0` 的最后一个 case 是 `0x004123E3`），但在**闭包**
+   （`aot/closure.txt:131` 的分量根 `0x00412290`）与**已生成 IR**（`bb_4123F0` / `bb_4123E5`）里。
+   它们是分量函数体**内部**的基本块，只能由内部 `br` 进入 ⇒ M3 的采样门要**在发射 IR 时于这两个 bb 入口
+   插钩子**，⛔ 不挂派发边界。
+3. `LOCAL_POOL_SLOTS` 的 `count` 单位 **已闭合**：它是**记录内"计数槽"的字节偏移**（`0x08+4i`），
+   不是元素个数、也不是字节数（review N11；佐证 `packages/age-format/src/engine/layout.mts:232-239`）。
+   剩下"`global` 池常量要不要进 `engine_marker.h`"（现在在 `packages/age-format`，`Engine+0x5D800` 一族）
+   由 M3 决定，非阻塞。
+4. ~~`SDL_SetRenderLogicalPresentation(…, DISABLED)` 与 letterbox 的往返是否影响 present 读数 / 有无状态副作用~~
+   **仅 identity 情形已实测（2026-11-18 / macOS arm64 / M0）**：renderer 用例（`tests/overlay.cpp` 的
+   `overlay/renderer-window`）是**窗口 == 帧（640×360）**，逻辑呈现恒 identity ⇒ 它只钉住了
+   "画布原点 / 颜色 / 矩形外 guest 色"的读数；**DISABLED↔LETTERBOX 的往返本身在非 identity 窗口上未证**
+   —— 实测把整句 DISABLED 删掉的变异 **4/4 全绿**（`overlay` / `overlay-gpu` / `present-window` /
+   `present-window-gpu`），即现有用例**对往返没有区分力**。⇒ 副作用面**未证**，⛔ 不要读成"往返无副作用"。
+   M1 补"**强制 1000×1000 窗口**（窗口 ≠ 帧）+ 连提两帧"用例后再判；在那之前判据 2 仍是 identity 精确值。
+   ★ 换 SDL 版本后要重测这一条（它依赖 SDL 内部 viewport 的往返行为）。
 5. 文字编码：脚本是 UTF-8、字体 `cmap` 是 CP932 码位（`fonts.md`）—— 中文码位直查是否成立，不成立要过 `cp932Encode`。
+   ★ M0 已落"宿主字体按 UTF-8 码位取字"（`ui/raster.cpp` + `tests/ui_text.cpp` 的 `天結` 非空覆盖率），
+   但**游戏脚本文本**的 CP932→UTF-8 转换仍在 `runtime/cp932.h`（M3 接数据面时再核这一条）。
 6. 控制层协议增量（`ui_*` / `consumed_by_ui`）的 `capabilities` 与客户端兼容。
 7. HUD 的 `worst` 行在 AOT 臂：补"每帧 wall"宿主采样，还是整行省略（缺省取后者）；元素数 / 文本长度 /
    图片像素上限先给起点，读数用例之后定。
@@ -252,7 +306,7 @@ router 的"down 放 ⇒ up 放"改掉 ⇒ `ui_hit` 红 · 采样门少一个 EA 
 rg -n 'OverlayState|formatOverlayLines|kOverlayGlyphW' apps/emulator-lift/src/runtime/overlay.h
 rg -n 'kWindowFlagsInterpreter|kWindowFlagsAot' apps/emulator-lift/src/runtime/present_flags.h
 git log --oneline -1 -- apps/emulator-lift/src/main.cpp      # 解释器 main 已删 ⇒ 生产不可达
-rg -n 'drawOverlayRenderer|SDL_RenderTexture\(renderer, overlay_tex' apps/emulator-lift/src/runtime/present_sdl.cpp
+rg -n 'drawOverlay|presentOverlay|directOverlay' apps/emulator-lift/src/runtime/present_sdl.cpp
 rg -n 'blitOverlay|不随画面缩放' apps/emulator-lift/src/runtime/d3d9_gpu.cpp
 rg -i -n 'overlay|hud' apps/emulator/src                   # 只应命中 VFS 注释（没有宿主叠层）
 rg -n 'KIND_TEXTURE_OVERLAY|KIND_MOVIE_OVERLAY' apps/emulator-new/src/platform/electron/renderer/scene-command-plan.ts

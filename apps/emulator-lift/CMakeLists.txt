@@ -93,7 +93,14 @@ add_library(emulator-lift-runtime STATIC
     # ★ 宿主光标原语（`--cursor-warp` 的唯一 OS 出口；单 TU 按 `#ifdef` 选平台实现）。
     src/runtime/host_cursor.cpp
     # ★ 窗口调试叠层（`--overlay`）：纯逻辑（5×7 位图字体 + 行格式化 + RGBA8 矩形绘制），无 SDL 类型。
+    #   ⚠ M0 起它是**旧实现**（生产 HUD 走宿主字体 + display list，见下面 `src/ui/` 两条）；
+    #     保留到 M2（`formatOverlayLines` / `OverlayState` / `OverlayStatus` 在 M2 删）。
     src/runtime/overlay.cpp
+    # ★ M0：UI display list 的最终模型子集（`ui/element.h` 的 POD + `UiBuilder`）、宿主字体文本
+    #   栅格化（`ui/raster.cpp`；唯一外部依赖 FontEngine / FreeType，支持中文）、内置 HUD 与统一
+    #   合成入口（`ui/hud.cpp` → `PresentSink::presentOverlay`）。⛔ 不另开 HUD 专用渲染路径（D12）。
+    src/ui/raster.cpp
+    src/ui/hud.cpp
     # ★ 宿主自绘模态框（MessageBox；`REQ-01M75S724...` / `REQ-01M75T14...`）：
     #   纯逻辑（uType→spec / 布局 / 命中 / 状态机）+ 唯一一处模态循环 + CPU 合成一整幅 RGBA8。
     src/runtime/message_box.cpp
@@ -1394,6 +1401,22 @@ set_tests_properties(overlay PROPERTIES
 add_test(NAME overlay-gpu COMMAND lift-overlay --gpu)
 set_tests_properties(overlay-gpu PROPERTIES SKIP_RETURN_CODE 77)
 
+# =====================================================================================
+# M0 · UI 画布原点（`ui/canvas.h`）+ 宿主字体文本栅格化（`ui/raster.cpp` / `ui/hud.cpp`）
+# =====================================================================================
+# ★ `ui-canvas`：纯函数 `uiCanvasOrigin`（B2 的唯一一份算术）—— 顶层无条件注册 ⇒ **pure** 档。
+#   红了 = 16:9 偏移非 0 / 非 16:9 的居中偏移丢了（HUD 会落到黑边里或贴边）。
+add_executable(lift-ui-canvas tests/ui_canvas.cpp)
+target_link_libraries(lift-ui-canvas PRIVATE emulator-lift-runtime)
+add_test(NAME ui-canvas COMMAND lift-ui-canvas)
+
+# ★ `ui-text`：中文（`天結`）经宿主字体出字 + display list 栅格化 + 字体缺失 = 硬失败。
+#   顶层无条件注册 ⇒ pure 档；**缺字体文件 ⇒ SKIP 77**（与 `gdi-font` 同一档，⛔ 不假绿）。
+add_executable(lift-ui-text tests/ui_text.cpp)
+target_link_libraries(lift-ui-text PRIVATE emulator-lift-runtime)
+add_test(NAME ui-text COMMAND lift-ui-text)
+set_tests_properties(ui-text PROPERTIES SKIP_RETURN_CODE 77)
+
 # ---- GPU 光栅化（唯一实现）：独立 SDL_GPUDevice + 离屏 target + 读回 ----
 # 两档都要求真的 GPU 设备：dummy 视频下建不出设备 ⇒ 返回 77（SKIP），⛔ 不是"跑绿"。
 add_executable(lift-gpu-raster tests/gpu_raster.cpp)
@@ -2297,6 +2320,22 @@ add_dependencies(lift-aot-audio-wiring emulator-lift-aot)
 add_test(NAME aot-audio-wiring
     COMMAND lift-aot-audio-wiring $<TARGET_FILE:emulator-lift-aot> "${AGE_SECTFIX_EXE}")
 set_tests_properties(aot-audio-wiring PROPERTIES SKIP_RETURN_CODE 77)
+
+# ---- M0：AOT `--overlay` 的端到端（真子进程 + 窗口截图 + guest 帧对照）-----------------------
+# ★ 判据：`--present window --present-hidden --overlay --max-frames 2` ⇒ exit 0；窗口截图在
+#   **画布原点**出现 HUD 底色；同一命令关掉 `--overlay` ⇒ 那个像素是 guest 色；
+#   `--dump-frame` 两次逐字节相同（⛔ UI 不进 guest 后缓冲）；`present : … lastHash=` 相同；
+#   stderr 里 `[overlay]` / `[ui]` 至多一条（一次性收口行允许）。
+# ★ 缺 GPU / 生成物 / 执行源 / 宿主字体 ⇒ 测试体自己 `LIFT_SKIP(77)`；`add_test` 在最外层
+#   ⇒ 档位 = pure（`AGENTS.md` §12.4：输入假定在场，缺了不改变档位）。
+# ★ 子进程 spawn 产品 exe ⇒ 必须带 `add_dependencies`（否则 `--target lift-aot-overlay` 只重建
+#   守卫 exe，产品 exe 停在变异前 ⇒ 变异自检假绿；同形坑见 `aot-audio-wiring`）。
+add_executable(lift-aot-overlay tests/aot_overlay.cpp)
+target_link_libraries(lift-aot-overlay PRIVATE emulator-lift-runtime)
+add_dependencies(lift-aot-overlay emulator-lift-aot)
+add_test(NAME aot-overlay
+    COMMAND lift-aot-overlay $<TARGET_FILE:emulator-lift-aot> "${AGE_SECTFIX_EXE}" "${LIFT_STRESS_GAME_DIR}")
+set_tests_properties(aot-overlay PROPERTIES SKIP_RETURN_CODE 77)
 
 if(DEFINED ENV{LIFT_AUDIO_SDL_DEVICE})
     add_executable(lift-audio-sdl-device tests/audio_sdl_device.cpp)

@@ -33,10 +33,10 @@ struct SdlWindowOptions {
     bool vsync = false;
     bool hidden = false;
     bool raster_gpu = false;  // 同一 SDL_GPUDevice 上的 GPU 光栅化（GPU 是唯一光栅实现）
-    // ★ 左上角调试叠层（`--overlay`，默认关）：鼠标 guest 客户区坐标 / fps / frame / raster / present。
-    //   只改**宿主送显的那一份像素** —— ⛔ 不写 guest 内存、⛔ 不进 `--dump-frame`。
-    //   两条呈现路径各自绘制（见 present_sdl.cpp）：SDL_Renderer 用小纹理；GPU 直出在
-    //   letterbox blit 之后再 blit 一次。
+    // ★ 左上角调试叠层（`--overlay`，默认关）：HUD 走**最终模型子集**的 display list，文本用
+    //   **宿主字体**（`FontEngine` / FreeType；支持中文）按最终像素栅格化，两条呈现路径统一到
+    //   `PresentSink::presentOverlay`。只改**宿主送显的那一份像素** —— ⛔ 不写 guest 内存、
+    //   ⛔ 不进 `--dump-frame`。字体不可用 ⇒ `init()` 硬失败（R5；⛔ 不静默退回点阵）。
     bool overlay = false;
     std::string screenshot_path;  // 支持 {frame}
     // ★ 只回读**这一帧**（1 起；0 = 每帧都写）。配合 `--max-frames N` 就是"定帧截图"：
@@ -64,6 +64,13 @@ public:
     void shutdown();
 
     bool submitFrame(const SurfaceArena& arena, const GuestSurface& surface, std::string* err) override;
+    // ★ `PresentSink`（M0）：本帧几何（窗口像素 + letterbox 之后画面矩形）→ UI 层算画布原点。
+    bool presentGeometry(PresentGeometry* out) const override;
+    // ★ `PresentSink`（M0）：**统一合成入口** —— 一块 RGBA8 叠层按窗口像素 1:1 画到 (x,y)。
+    //   renderer 路径在画叠层那一次 draw 前后临时关掉 LETTERBOX（B1；画完恢复）；
+    //   GPU 直出路径把同一块交给后端（`GpuDirectPresenter::directOverlay`），在 letterbox blit
+    //   之后用**同一个 origin**合成。⛔ 不缩放 / 不写 guest。
+    bool presentOverlay(const std::uint8_t* rgba, int w, int h, int x, int y, std::string* err) override;
     void pumpHostEvents() override;
     // ★ P3：GetMessageA 的事件源。wait_ms>0 时用 SDL_WaitEventTimeout(≈1..10ms) 等一个事件；
     //   没有事件源时 PresentSink 的 0ms 轮询语义不变。
@@ -170,6 +177,8 @@ public:
 
 private:
     struct Impl;
+    // ★ M0：唯一的 HUD 绘制入口（文本节流 → display list → 宿主字体栅格化 → `presentOverlay`）。
+    bool drawOverlay(std::string* err);
     std::unique_ptr<Impl> impl_;
 };
 

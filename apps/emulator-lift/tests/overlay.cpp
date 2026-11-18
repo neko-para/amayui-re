@@ -11,19 +11,21 @@
 //   ③ **只写矩形**：给一块 0xCC 哨兵缓冲，画完之后叠层矩形**外**逐字节不变；矩形内每个像素都
 //      不透明（深底），且存在亮字像素。★ 把矩形写宽 1 像素 ⇒ 这条当场红（见测试记录）。
 //   ④ **renderer 路径**（`--present window`、SDL_Renderer 上传）：`SdlWindow` 用 software 渲染器
-//      提交一帧 ⇒ 窗口像素左上角出现叠层（深底 + 亮字），矩形外仍是 guest 后缓冲的颜色；
-//      关掉 `setOverlay(false)` ⇒ 恢复成纯画面；两种情况下 **guest 像素逐字节不变**。
+//      提交一帧 ⇒ 窗口像素的**画布原点**（16:9 帧 ⇒ == 画面原点）出现宿主字体 HUD（深底 + 亮字），
+//      矩形外仍是 guest 后缓冲的颜色；关掉 `setOverlay(false)` ⇒ 恢复成纯画面（逐像素）；
+//      两种情况下 **guest 像素逐字节不变**。
 //   ⑤ **直出路径**（`--present window`）：claim 成功 ⇒ 同一组断言在 GPU 直出上成立
-//      （窗口不可 claim / 没有 GPU ⇒ SKIP 77 + 实测原因，⛔ 不拿 renderer 假绿）。
-//   ⑤b **直出 letterbox**（B1 回归守卫）：把窗口强制成 1000×1000（target 320×240 ⇒ 画面居中、
-//      上下有黑边）⇒ 叠层 blit 的 dst 原点必须 == **画面**矩形的左上角，且窗口 (0,0) 是黑边。
-//      ⛔ 不是"窗口 (0,0)"；⛔ 不依赖真实鼠标 / 真实分辨率。
+//      （窗口不可 claim / 没有 GPU / 缺宿主字体 ⇒ SKIP 77 + 实测原因，⛔ 不拿 renderer 假绿）。
+//   ⑤b **直出 letterbox / 画布原点**（B2 回归守卫）：把窗口强制成 1000×1000（target 320×240 ⇒
+//      画面居中、上下有黑边）⇒ 叠层 blt 的 dst 原点必须 == **画布原点**
+//      （画面原点 + `uiCanvasOrigin` 的居中偏移 `(0,93)` ⇒ `(0,218)`），窗口 (0,0) 是黑边。
+//      ⛔ 不是"窗口 (0,0)"，⛔ 也不是"画面矩形原点"；⛔ 不依赖真实鼠标 / 真实分辨率。
 // ★ 原来的 ⑥「CLI smoke（assets 档：两次真 boot + BMP 左上角色块）」已于 2026-11-13 随 CTest
-//   瘦身删除（CTest `overlay-window-smoke`）：叠层是否被画出来由本文件的 ③④ 逐像素覆盖，
-//   而"带 `--overlay` 的真 boot 不崩"在起子进程的其它 CTest 里已经覆盖。
+//   瘦身删除（CTest `overlay-window-smoke`）：叠层是否被画出来由本文件的 ③④ 逐像素覆盖；
+//   端到端"AOT `--overlay` 上屏 / `--dump-frame` 不含 UI"由 `tests/aot_overlay.cpp` 覆盖。
 //
 // ★ 本文件的断言只写**不变量**（行格式 / 矩形边界 / 颜色精确值），⛔ 不断言 fps 或帧号
-//   的具体数值（那是读数，不是契约）。
+//   的具体数值（那是读数，不是契约）。★ 生产字形 = **宿主字体**（U1）：缺字体 ⇒ SKIP 77。
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -35,11 +37,14 @@
 #include <vector>
 
 #include "check.h"
+#include "runtime/font.h"
 #include "runtime/host_encoding.h"
 #include "runtime/memory.h"
 #include "runtime/overlay.h"
 #include "runtime/present_sdl.h"
 #include "runtime/surface.h"
+#include "ui/canvas.h"
+#include "ui/hud.h"
 
 #include <SDL3/SDL.h>
 
@@ -415,8 +420,8 @@ bool make(Fx& f, int w, int h, std::uint32_t argb) {
 constexpr std::uint32_t kGuestArgb = 0x008040C0u;  // R=80 G=40 B=C0（X8R8G8B8）
 constexpr std::uint32_t kGuestRgb = kGuestArgb & 0x00FFFFFFu;
 
-// 扫窗口像素左上角一块（覆盖叠层）；返回统计。⛔ 不依赖文字内容的具体长度 ——
-// 这里只问"深底占了这块、亮字出现了、矩形外还是 guest 色"。
+// 扫窗口像素里叠层覆盖的那块区域（起点 = **画布原点**）；返回统计。⛔ 不依赖文字内容的具体
+// 长度 —— 这里只问"深底占了这块、亮字出现了、矩形外还是 guest 色"。
 struct TopLeftScan {
     long bg = 0;
     long fg = 0;
@@ -424,9 +429,9 @@ struct TopLeftScan {
     long other = 0;
 };
 
-bool scanTopLeft(lift::SdlWindow& win, int w, int h, TopLeftScan* out, std::string* err) {
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
+bool scanRegion(lift::SdlWindow& win, int x0, int y0, int w, int h, TopLeftScan* out, std::string* err) {
+    for (int y = y0; y < y0 + h; ++y) {
+        for (int x = x0; x < x0 + w; ++x) {
             std::uint32_t argb = 0;
             if (!win.readbackPixel(x, y, &argb, err)) return false;
             const std::uint32_t rgb = argb & 0x00FFFFFFu;
@@ -446,10 +451,10 @@ bool scanTopLeft(lift::SdlWindow& win, int w, int h, TopLeftScan* out, std::stri
     return true;
 }
 
-// 矩形外必须**逐像素**还是 guest 色（叠层"只占左上角"，⛔ 不遮别的区域）。
-// ★ `rect` = `overlaySize()` 算出的**实际**矩形（⛔ 不要用一个拍脑袋的 120×60 —— 那可能比
+// 矩形外必须**逐像素**还是 guest 色（叠层"只占画布原点那块"，⛔ 不遮别的区域）。
+// ★ `rect` = `expectedPanel()` 算出的**实际**叠层矩形（⛔ 不要拍脑袋给一个 120×60 —— 那可能比
 //   实际叠层更大，等于放过"叠层画到矩形外"的回归）。
-void expectGuestUntouched(lift::SdlWindow& win, const lift::GuestSurface& s, const lift::OverlaySize& rect) {
+void expectGuestUntouched(lift::SdlWindow& win, const lift::GuestSurface& s, int ox, int oy, int rw, int rh) {
     std::string err;
     for (int y = 0; y < s.height; y += 7) {
         for (int x = 0; x < s.width; x += 11) {
@@ -460,7 +465,7 @@ void expectGuestUntouched(lift::SdlWindow& win, const lift::GuestSurface& s, con
             }
             if ((argb & 0x00FFFFFFu) != kGuestRgb) {
                 // 叠层实际矩形内会被覆盖 ⇒ 那里不要求 guest 色
-                if (x < rect.w && y < rect.h) continue;
+                if (x >= ox && x < ox + rw && y >= oy && y < oy + rh) continue;
                 lift_test::failf(__FILE__, __LINE__, "(%d,%d) 被遮住了：expected %06X, got %06X", x, y, kGuestRgb,
                                  argb & 0xFFFFFFu);
                 ++lift_test::g_checks;
@@ -471,9 +476,11 @@ void expectGuestUntouched(lift::SdlWindow& win, const lift::GuestSurface& s, con
     }
 }
 
-// 第一帧（frame=1 / fps=1.0 / 无 guest 窗口 ⇒ 无 mouse 行）的叠层矩形。
-// ★ 与实现走**同一份** `formatOverlayLines` + `overlaySize`（⛔ 不猜宽度）。
-lift::OverlaySize expectedFirstFrameSize(const char* raster, const char* present) {
+// 第一帧（frame=1 / fps=1.0 / 无 guest 窗口 ⇒ 无 mouse 行）的叠层矩形，**按生产的 display list
+// 构建路径算出来**（⛔ 不猜宽度；面板尺寸由宿主字体度量决定）。
+// ★ `frame_w/h` = 被呈现的帧尺寸（画布 `s` 从 `uiCanvasOrigin` 取）。
+bool expectedPanel(const char* raster, const char* present, lift::FontEngine& font, int frame_w, int frame_h,
+                   int* ox, int* oy, int* w, int* h) {
     lift::OverlayState st;
     st.fps_available = true;
     st.fps = 1.0;
@@ -481,7 +488,20 @@ lift::OverlaySize expectedFirstFrameSize(const char* raster, const char* present
     st.frame = 1;
     st.raster = raster;
     st.present = present;
-    return lift::overlaySize(lift::formatOverlayLines(st, lift::OverlayStatus{}));
+    const std::vector<std::string> lines = lift::formatOverlayLines(st, lift::OverlayStatus{});
+    lift::ui::UiBuilder builder;
+    std::string err;
+    if (!lift::ui::buildHud(builder, font, lines, &err)) return false;
+    if (builder.elements().empty()) return false;
+    const lift::ui::CanvasOrigin canvas = lift::ui::uiCanvasOrigin(frame_w, frame_h);
+    const lift::ui::Element& panel = builder.elements().front();
+    *ox = canvas.offset_x;  // 画面原点 = (0,0)（窗口 = 帧尺寸）
+    *oy = canvas.offset_y;
+    *w = static_cast<int>(static_cast<long long>(panel.w) * canvas.scale + 0.5);
+    *h = static_cast<int>(static_cast<long long>(panel.h) * canvas.scale + 0.5);
+    if (*w < 1) *w = 1;
+    if (*h < 1) *h = 1;
+    return true;
 }
 
 constexpr std::uint32_t kOverlayBgRgb = (static_cast<std::uint32_t>(lift::kOverlayBg[0]) << 16) |
@@ -494,11 +514,17 @@ std::vector<std::uint8_t> guestBytes(Fx& f) {
 }
 
 // ④ renderer 路径：software 渲染器（CTest 里配 SDL_VIDEODRIVER=dummy）。
-// 返回 false **只**表示环境不可用（没有窗口系统）；真实回归用 LIFT_CHECK 记红。
+// 返回 false **只**表示环境不可用（没有窗口系统 / 缺宿主字体）；真实回归用 LIFT_CHECK 记红。
 bool caseRendererWindow(std::string* skip_why) {
     lift_test::g_current_case = "overlay/renderer-window";
+    lift::FontEngine font;
+    if (!font.fontFileAvailable(false)) {
+        *skip_why = "缺宿主字体 Amayui-CN_cnjp.ttf（LIFT_HOST_FONT_PATH / corpus/assets/fonts）";
+        return false;
+    }
+    // ★ 16:9 帧 ⇒ 画布原点 == 画面矩形原点（B2 的第一条用例）。
     Fx f;
-    if (!make(f, 256, 128, kGuestArgb)) {
+    if (!make(f, 640, 360, kGuestArgb)) {
         LIFT_CHECK(false);
         return true;
     }
@@ -517,35 +543,65 @@ bool caseRendererWindow(std::string* skip_why) {
         return false;
     }
     LIFT_CHECK(win.overlayEnabled());
+    int ox = 0;
+    int oy = 0;
+    int rw = 0;
+    int rh = 0;
+    if (!expectedPanel("cpu", "renderer", font, 640, 360, &ox, &oy, &rw, &rh)) {
+        LIFT_CHECK(false);
+        win.shutdown();
+        return true;
+    }
+    LIFT_CHECK_EQ_I64(ox, 0);  // 16:9 ⇒ 居中偏移 0
+    LIFT_CHECK_EQ_I64(oy, 0);
     if (!win.submitFrame(f.arena, *f.s, &err)) {
         LIFT_CHECK(false);
         win.shutdown();
         return true;
     }
     TopLeftScan scan;
-    if (!scanTopLeft(win, 80, 30, &scan, &err)) LIFT_CHECK(false);
-    // 深底实心 + 亮字真的出现（80×30 完全落在叠层里：最长行 ≤ 16 字符 ⇒ 宽 97 / 高 33）
+    if (!scanRegion(win, ox, oy, rw, rh, &scan, &err)) LIFT_CHECK(false);
+    // 深底实心 + 亮字真的出现（扫描范围 = 生产 display list 算出的面板矩形）
     LIFT_CHECK(scan.bg > 0);
     LIFT_CHECK(scan.fg > 0);
     LIFT_CHECK(scan.other == 0);
-    expectGuestUntouched(win, *f.s, expectedFirstFrameSize("cpu", "renderer"));
+    LIFT_CHECK(scan.guest == 0);
+    // 画布原点那一个像素是底（不是 guest / 不是黑）—— B2 的"原点 == 画布原点"像素级证据。
+    std::uint32_t argb = 0;
+    LIFT_CHECK(win.readbackPixel(ox, oy, &argb, &err));
+    LIFT_CHECK_EQ_U32(argb & 0x00FFFFFFu, kOverlayBgRgb);
+    expectGuestUntouched(win, *f.s, ox, oy, rw, rh);
     LIFT_CHECK(guestBytes(f) == before);  // ⛔ 叠层不写 guest 像素
 
-    // 关掉开关 ⇒ 左上角恢复纯画面（证明"默认关 / 可关"，不是一直在画）
+    // 关掉开关 ⇒ 整窗**逐像素**恢复成纯画面（证明"默认关 / 可关"，不是一直在画）
     win.setOverlay(false);
     LIFT_CHECK(!win.overlayEnabled());
     if (!win.submitFrame(f.arena, *f.s, &err)) LIFT_CHECK(false);
-    std::uint32_t argb = 0;
-    LIFT_CHECK(win.readbackPixel(0, 0, &argb, &err));
-    LIFT_CHECK_EQ_U32(argb & 0x00FFFFFFu, kGuestRgb);
+    long not_guest = 0;
+    for (int y = 0; y < f.s->height; ++y) {
+        for (int x = 0; x < f.s->width; ++x) {
+            if (!win.readbackPixel(x, y, &argb, &err)) {
+                ++not_guest;
+                continue;
+            }
+            if ((argb & 0x00FFFFFFu) != kGuestRgb) ++not_guest;
+        }
+    }
+    LIFT_CHECK_EQ_I64(not_guest, 0);
     LIFT_CHECK(guestBytes(f) == before);
     win.shutdown();
     return true;
 }
 
 // ⑤ 直出路径：真 GPU claim（没有 GPU / claim 不成立 ⇒ SKIP，⛔ 不拿 renderer 假绿）。
+// ★ 帧用 **4:3（320×240）**：画布纵向居中偏移 30 px ⇒ 同时钉住 B2 的非 16:9 分支。
 bool caseDirectWindow(std::string* skip_why) {
     lift_test::g_current_case = "overlay/direct-window";
+    lift::FontEngine font;
+    if (!font.fontFileAvailable(false)) {
+        *skip_why = "缺宿主字体 Amayui-CN_cnjp.ttf（LIFT_HOST_FONT_PATH / corpus/assets/fonts）";
+        return false;
+    }
     Fx f;
     if (!make(f, 320, 240, kGuestArgb)) {
         LIFT_CHECK(false);
@@ -571,27 +627,53 @@ bool caseDirectWindow(std::string* skip_why) {
         return false;
     }
     LIFT_CHECK(win.overlayEnabled());
+    int ox = 0;
+    int oy = 0;
+    int rw = 0;
+    int rh = 0;
+    if (!expectedPanel("gpu", "direct", font, 320, 240, &ox, &oy, &rw, &rh)) {
+        LIFT_CHECK(false);
+        win.shutdown();
+        return true;
+    }
+    LIFT_CHECK_EQ_I64(ox, 0);
+    LIFT_CHECK_EQ_I64(oy, 30);  // 4:3 ⇒ 画布纵向居中 30 px（B2）
     if (!win.submitFrame(f.arena, *f.s, &err)) {
         LIFT_CHECK(false);
         win.shutdown();
         return true;
     }
     TopLeftScan scan;
-    if (!scanTopLeft(win, 80, 30, &scan, &err)) LIFT_CHECK(false);
+    if (!scanRegion(win, ox, oy, rw, rh, &scan, &err)) LIFT_CHECK(false);
     LIFT_CHECK(scan.bg > 0);
     LIFT_CHECK(scan.fg > 0);
     LIFT_CHECK(scan.other == 0);
-    expectGuestUntouched(win, *f.s, expectedFirstFrameSize("gpu", "direct"));
+    LIFT_CHECK(scan.guest == 0);
+    std::uint32_t argb = 0;
+    LIFT_CHECK(win.readbackPixel(ox, oy, &argb, &err));
+    LIFT_CHECK_EQ_U32(argb & 0x00FFFFFFu, kOverlayBgRgb);
+    // 画布原点上方（画面原点那一块）仍是 guest 色 ⇒ 证明原点不是恒 0、也不是画面原点。
+    LIFT_CHECK(win.readbackPixel(0, 0, &argb, &err));
+    LIFT_CHECK_EQ_U32(argb & 0x00FFFFFFu, kGuestRgb);
+    expectGuestUntouched(win, *f.s, ox, oy, rw, rh);
     LIFT_CHECK(guestBytes(f) == before);
 
     win.setOverlay(false);
     if (!win.submitFrame(f.arena, *f.s, &err)) LIFT_CHECK(false);
-    std::uint32_t argb = 0;
-    LIFT_CHECK(win.readbackPixel(0, 0, &argb, &err));
-    LIFT_CHECK_EQ_U32(argb & 0x00FFFFFFu, kGuestRgb);
+    long not_guest = 0;
+    for (int y = 0; y < f.s->height; ++y) {
+        for (int x = 0; x < f.s->width; ++x) {
+            if (!win.readbackPixel(x, y, &argb, &err)) {
+                ++not_guest;
+                continue;
+            }
+            if ((argb & 0x00FFFFFFu) != kGuestRgb) ++not_guest;
+        }
+    }
+    LIFT_CHECK_EQ_I64(not_guest, 0);
     LIFT_CHECK(guestBytes(f) == before);
 
-    // ---- B1 回归守卫：窗口 > 画面 ⇒ letterbox；叠层必须锚在**画面**矩形左上角 ----
+    // ---- B2 回归守卫：窗口 > 画面 ⇒ letterbox；叠层必须锚在**画布原点** ----
     // ★ 用 SDL 自己的窗口 API 强制一个与 target 不同尺寸的窗口（test-only，不改生产路径；
     //   `submitDirect` 只在 **surface 尺寸变化** 时跟随窗口 ⇒ 这里窗口会保持 1000×1000）。
     win.setOverlay(true);
@@ -608,7 +690,7 @@ bool caseDirectWindow(std::string* skip_why) {
         int ph = 0;
         SDL_GetWindowSizeInPixels(sdl_window, &pw, &ph);
         LIFT_CHECK(pw > 320 && ph > 240);
-        // "画面矩形原点"独立算一遍：letterbox(320×240 → 窗口像素 pw×ph)。
+        // ① 画面矩形（letterbox 320×240 → 窗口像素 pw×ph）独立算一遍。
         const double sx = static_cast<double>(pw) / 320.0;
         const double sy = static_cast<double>(ph) / 240.0;
         const double scale = sx < sy ? sx : sy;
@@ -617,19 +699,26 @@ bool caseDirectWindow(std::string* skip_why) {
         const int ex = (pw - dw) / 2;
         const int ey = (ph - dh) / 2;
         LIFT_CHECK(ex > 0 || ey > 0);  // 真的出现黑边（否则这条断言没有区分力）
+        // ② 画布原点 = 画面原点 + `uiCanvasOrigin(画面宽,画面高)` 的居中偏移（**唯一一份**算术）。
+        const lift::ui::CanvasOrigin canvas = lift::ui::uiCanvasOrigin(dw, dh);
+        const int want_x = ex + canvas.offset_x;
+        const int want_y = ey + canvas.offset_y;
+        LIFT_CHECK(want_y > ey);  // 4:3 ⇒ 画布原点真的低于画面原点（否则区分不了两个口径）
         lift::GpuDirectPresenter* dp = win.directPresenter();
         LIFT_CHECK(dp != nullptr);
-        int ox = -1;
-        int oy = -1;
-        LIFT_CHECK(dp != nullptr && dp->directLastOverlayOrigin(&ox, &oy));
-        std::printf("letterbox: window=%dx%d picture_origin=(%d,%d) overlay_origin=(%d,%d)\n", pw, ph, ex, ey, ox,
-                    oy);
-        LIFT_CHECK_EQ_I64(ox, ex);
-        LIFT_CHECK_EQ_I64(oy, ey);
-        // 像素级证据：叠层底色在**画面**原点；窗口原点 (0,0) 是黑边（⛔ 不是叠层）。
+        int got_x = -1;
+        int got_y = -1;
+        LIFT_CHECK(dp != nullptr && dp->directLastOverlayOrigin(&got_x, &got_y));
+        std::printf("letterbox: window=%dx%d picture=(%d,%d %dx%d) canvas_origin=(%d,%d) overlay_origin=(%d,%d)\n",
+                    pw, ph, ex, ey, dw, dh, want_x, want_y, got_x, got_y);
+        LIFT_CHECK_EQ_I64(got_x, want_x);
+        LIFT_CHECK_EQ_I64(got_y, want_y);
+        // ③ 像素级证据：叠层底色在**画布原点**；画面原点处仍是 guest 色；窗口原点 (0,0) 是黑边。
         std::uint32_t px = 0;
-        LIFT_CHECK(win.readbackPixel(ex, ey, &px, &err));
+        LIFT_CHECK(win.readbackPixel(want_x, want_y, &px, &err));
         LIFT_CHECK_EQ_U32(px & 0x00FFFFFFu, kOverlayBgRgb);
+        LIFT_CHECK(win.readbackPixel(ex, ey, &px, &err));
+        LIFT_CHECK_EQ_U32(px & 0x00FFFFFFu, kGuestRgb);
         LIFT_CHECK(win.readbackPixel(0, 0, &px, &err));
         LIFT_CHECK_EQ_U32(px & 0x00FFFFFFu, 0u);
         LIFT_CHECK(guestBytes(f) == before);
