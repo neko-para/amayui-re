@@ -799,3 +799,35 @@
 - **代表守卫**：无（`--until` 目前只有 CLI 行为，无 CTest 钉"跳转表 case 能停"）。
 - **复现**：`--until 0x4B21DB` 的 blind wipe mode 探针（命令见 `docs/03-emulator/wipe-profile.md`）⇒ time-limit；
   `--until 0x4B06D0` 同配方 ⇒ `until-ea` 命中。
+
+### BUG-32 · 加载 SAVE04 → 教程询问选「否」→ guest mem fault（SC4000 wipe；`WRITE 0x1005BA8C`）
+
+- **现象**（用户口径 2026-11-18，win 上；mac 上 1/1 复现）：加载 `saves/SAVE04.DAT`（第 5 槽）→ 进入地图 →
+  「要接受迷宫教程吗？」选**不接受** → 进地图的 blind wipe / blur 转场里 `exit 3` +
+  `=== guest memory fault ===`；`access: WRITE 0x1005BA8C size=4`、`region(ea): heap`、
+  `why: SIGSEGV @ host 0x300000020（guest 空间内未提交页）`。
+- **复现（macOS arm64 / `--present headless` / RelWithDebInfo；交互式，1/1）**：
+  ```bash
+  cd /Users/nekosu/Documents/Projects/amayui-re
+  .tmp/save04-tutorial/bin/emulator-lift-aot --present headless --skip-logo --audio off \
+    --game-dir links/install --appdata .tmp/save04-tutorial/appdata \
+    --control-root .tmp/save04-tutorial/ctl --control-idle-timeout 1800 --control-orphan-timeout 0 \
+    --time-limit 900 --log-level info > .tmp/save04-tutorial/logs/run1.log 2>&1
+  ```
+  逐步：`emu-ctl click 1070 480`（TITLE→加载屏）· `click 300 328`（第 5 槽 SAVE04）·
+  `click 640 323` + `resume` + `click 690 323`（SBUNKI 三次回调确认）· 等 `SC4000` ·
+  `click 500 500` 推进到 `SC4000:0x5948` · 等 `BUNKI.BIN:0xB94`（教程询问）· `click 640 393`（不接受）·
+  继续 `click 500 500` 推进 → 崩溃。完整读数见 `.tmp/save04-tutorial/report.md` §3。
+- **读数**：存档 `saves/SAVE04.DAT` sha256 `e8a6dbf3…`；执行源副本 `888d0b7b…`；
+  崩溃前最后 sample = **`SC4000.BIN:0x00010D88` frame 1232 `state_seq=41` `guest_ms=177402417`**；
+  崩溃帧 **1264**：同帧先建 `D3DXCreateEffectFromResourceA id=201`（Fade ps_2_0）与 `id=203`
+  （SlideBlur/ZoomBlur ps_2_0），随后 fault。`0x1005BA8C = 0x1005BA80 + 0xC`；静态 203 调用有
+  `lea eax,[ebx+0B59Ch]`（`loc_4B07D9`），但 **fault 时 `ebx` 没有读数** ⇒ 只作线索，⛔ 不作结论。
+- **配方状态**：`.tmp/save04-tutorial/save04-tutorial-no.plan` **未通过** —— 配方卡在 SC0000 首句
+  （同一坐标 `click 500 500` 用 emu-ctl 能推进，用 `--input-plan` 不推进）⇒ `pending=19/20`、exit 5。
+  ⛔ 不要把“配方没跑通”写成“不复现”：交互式已复现。
+- **未定**：根因（fault 时无 EIP / 寄存器 / 栈；AOT 臂没有 `Machine` ⇒ `liftFaultHook` 未装）；
+  没有跑“选是”的对照；win 侧未比对；`0x1005BA8C` 的写者未定位。
+- **工具缺口**（父级另派）：AOT guest fault 打 EIP/寄存器/栈 · `--input-plan-trace` · fault 路径打
+  `input-plan` 摘要 · `InputPlan` 的 click 在 SC0000 不被消费（与 emu-ctl 同坐标不同效）。
+- **代表守卫**：无（先要能定位；⛔ 在根因未明前写“到达某界面”的业务判据）。
