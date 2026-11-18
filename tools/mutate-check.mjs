@@ -4622,6 +4622,49 @@ const MUTATIONS = [
       'control-global-hex-only：把 `parseHex32Text` 的"只认 0x 前缀"改成"0x 或十进制都吃" ⇒ ' +
       'lift-control-globals 的 `parseGlobalIndexLiteral("45494") == type_mismatch` 断言当场红（十进制 index 被静默接受）',
   },
+
+  // ── UI 脚本 ES module 的 rejection 面（切片 2 前半；守卫 = `tests/ui_script_modules.cpp`）──
+  //   ★ 代表"module 求值返回的 Promise 没人查 rejection"这一类**静默**失效：脚本明明在顶层抛了，
+  //     overlay 只是"不画"（load 走到入口检查才报一句没有 render），没有任何人看见真正的异常。
+  //   ★ 为什么落在这一行：drain / rejection 检查是本单**唯一**把 module 异常带回宿主 err 的地方；
+  //     `JS_Eval(MODULE)` 的失败在正常路径上是 rejected Promise 而不是 JS_EXCEPTION。
+  //   ★ 判据不变的红/绿：改成恒 false 后 `thrower.js` 的 `module-boom` 不会出现在 err 里
+  //     （改为入口缺失的错误）⇒ `module-throw-surfaced` 的 err 子串断言落空。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from: '            if (state == JS_PROMISE_REJECTED) {',
+    to: '            if (false && state == JS_PROMISE_REJECTED) {  // 变异：静默吞掉 module 的 rejection',
+    guard: 'ctest:ui-script-modules',
+    ctest: 'ui-script-modules',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-ui-script-modules',
+    what:
+      'module 求值返回的 Promise 的 rejection 检查改成恒 false ⇒ module 顶层的异常被静默吞掉 ⇒ ' +
+      'ui-script-modules 的 module-throw-surfaced 在 err 里看不到 `module-boom` ⇒ 红',
+  },
+
+  // ── 注入闸门（2026-11-19 裁决；守卫 = `tests/input_inject_visible.cpp` +
+  //    `tests/input_plan.cpp`）──
+  //   ★ 代表"按下没被按键电平读到就抬起"这一类**静默**失效：`inputSampleCount()` 把 `GetCursorPos`
+  //     也算样本 ⇒ 位置读点满足闸门、`GetAsyncKeyState` 一次都没读过按下（现场读数
+  //     `reason=forced samples==press_samples`）。这正是本轮要修掉的根因。
+  //   ★ 判据不变的红/绿：改回总样本数之后，喂 ≥2 个**位置**读点（每个都 `noteInputSample` +1）
+  //     就会抬起 ⇒ `inject/click-two-phase` 的"位置读点再多也不许抬起"当场红
+  //     （`input-plan-read-points` 的 `gates-and-releases` ⑤ 同步红）。
+  {
+    file: 'apps/emulator-lift/src/runtime/input_plan.cpp',
+    from: '        const bool key_seen = deliverCalls(InputPoint::KeyLevel) >=\n' +
+          '                              r.press_key_reads + kKeyLevelReadsBeforeRelease;',
+    to: '        const bool key_seen = wm.inputSampleCount() > r.press_samples + 1;  // 变异：闸门退回"总样本数"',
+    guard: 'ctest:input-inject-visible',
+    ctest: 'input-inject-visible',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-input-inject-visible',
+    what:
+      '抬起闸门从"按下之后至少 N 个 **KeyLevel** 读点"退回"总样本数前进两拍"（`inputSampleCount`，' +
+      '它把 `GetCursorPos` 也算样本）⇒ 位置读点就能满足抬起 ⇒ input-inject-visible 的 ' +
+      '`inject/click-two-phase`（位置读点再多也不许抬起）当场红',
+  },
 ];
 
 let mutationRunSeq = 0;

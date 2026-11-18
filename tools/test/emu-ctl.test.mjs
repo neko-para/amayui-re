@@ -246,6 +246,34 @@ test('formatGlobalLine：kind/index/value/raw 按服务端 0x 位模式打印；
   );
 });
 
+// =====================================================================================
+// move（纯 move：只把光标放到参考坐标，⛔ 不按键）
+// =====================================================================================
+
+test('moveFrame：请求帧是顶层 x/y（⛔ 不带 button、⛔ 不包 args）', () => {
+  assert.deepEqual(L.moveFrame(740, 355), { op: 'move', x: 740, y: 355 });
+  assert.equal(Object.hasOwn(L.moveFrame(1, 2), 'button'), false);
+  assert.equal(Object.hasOwn(L.moveFrame(1, 2), 'args'), false);
+});
+
+test('argv：move 已解锁（合法坐标），且与 click 共用同一条坐标边界', () => {
+  const m = L.parseArgv(['move', '740', '355']);
+  assert.equal(m.op, 'move');
+  assert.deepEqual(m.move, { x: 740, y: 355 });
+  assert.deepEqual(L.parseArgv(['--move', '1279', '719']).move, { x: 1279, y: 719 });
+  assert.deepEqual(L.parseArgv(['move', '0', '0']).move, { x: 0, y: 0 });
+  for (const fn of [
+    () => L.parseArgv(['move']),
+    () => L.parseArgv(['move', '10']),
+    () => L.parseArgv(['move', '1280', '0']),
+    () => L.parseArgv(['move', '0', '720']),
+    () => L.parseArgv(['move', '-1', '0']),
+    () => L.parseArgv(['move', '1.5', '0']),
+    () => L.parseArgv(['move', '10', '20', 'left']), // move 没有按钮参数
+  ]) {
+    assert.throws(fn, (err) => err instanceof L.UsageError && err.exitCode === 2);
+  }
+});
 test('argv：非法组合与非法数值都在客户端挡住（退出码 2）', () => {
   const bad = [
     () => L.parseArgv([]),
@@ -589,7 +617,7 @@ test('resultJson / listJson：--json 是**一个**对象（list 条目就是 lis
 // 自描述（mutates 逐条标；M1 不在实现里）
 // =====================================================================================
 
-test('OPERATIONS 的 mutates 逐条正确；sample/click/global-set/gc 会写；key 不在实现里', () => {
+test('OPERATIONS 的 mutates 逐条正确；sample/click/move/global-set/gc 会写；key 不在实现里', () => {
   const byName = Object.fromEntries(L.OPERATIONS.map((o) => [o.name, o]));
   assert.deepEqual(Object.keys(byName).sort(), [
     'click',
@@ -597,6 +625,7 @@ test('OPERATIONS 的 mutates 逐条正确；sample/click/global-set/gc 会写；
     'global-get',
     'global-set',
     'list',
+    'move',
     'pause',
     'quit',
     'resume',
@@ -609,6 +638,11 @@ test('OPERATIONS 的 mutates 逐条正确；sample/click/global-set/gc 会写；
   assert.match(byName.click.summary, /入队 ≠ 施加/);
   assert.match(byName.click.summary, /1280×720/);
   assert.match(byName.click.summary, /64 条/);
+  // ★ move = 纯 move（⛔ 不按键）：同一条立即队列、同样只接受暂停态
+  assert.equal(byName.move.mutates, true);
+  assert.match(byName.move.summary, /纯 move/);
+  assert.match(byName.move.summary, /不按键/);
+  assert.match(byName.move.summary, /1280×720/);
   // ★ typed global：get 只读；set 写一个 guest 数据槽；两者都必须点名"必须 0x 十六进制"
   assert.equal(byName['global-get'].mutates, false);
   assert.equal(byName['global-set'].mutates, true);
@@ -637,6 +671,7 @@ test('describeText：写明同名陷阱（控制层 wait ≠ --input-plan 的 wa
   assert.match(text, /--input-plan/);
   assert.match(text, /不是一回事/);
   assert.match(text, /click（入队 ≠ 施加；参考坐标 1280×720）/);
+  assert.match(text, /move（纯 move，⛔ 不按键；参考坐标 1280×720）/);
   assert.match(text, /未实现：key/);
   assert.match(text, /gc（只删残留端点文件，⛔ 不动其它文件）/);
   assert.match(text, /keep\.txt/);

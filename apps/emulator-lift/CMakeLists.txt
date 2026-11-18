@@ -1276,6 +1276,19 @@ add_executable(lift-input-plan-read-points tests/input_plan.cpp)
 target_link_libraries(lift-input-plan-read-points PRIVATE emulator-lift-runtime)
 add_test(NAME input-plan-read-points COMMAND lift-input-plan-read-points)
 
+# ---- pure：**注入真的能被引擎看见**（2026-11-19 裁决；`tests/input_inject_visible.cpp`）----
+# ★ 判据（红了意味着什么）：
+#   ① click 的**两段形状**回来了吗（move 与 down 同读点 = 引擎用的还是 move 之前的锁存位置）；
+#   ② 抬起闸门是不是"按下之后至少 N 个 **KeyLevel** 读点"（换回 `inputSampleCount()` 就红 ——
+#      那个计数把 `GetCursorPos` 也算样本，位置读点能满足它而按键一次都没被读到，2026-11-19 的根因）；
+#   ③ 两条墙钟兜底（不读位置 ⇒ 一定按下；不读按键 ⇒ 一定抬起，且到期之前不许动作）；
+#   ④ 注入会话结束（配方走完 / `releaseAll`）⇒ 光标所有权交还 OS（真鼠标重新生效）。
+# ★ 顶层无条件注册 ⇒ **pure** 档（不建 SDL 窗口、不需要游戏 / LFS）。
+# ⚠ "引擎会不会命中那个宝藏"不在这里（那是人工 SAVE05 的事）；本用例只判注入层的时序与所有权。
+add_executable(lift-input-inject-visible tests/input_inject_visible.cpp)
+target_link_libraries(lift-input-inject-visible PRIVATE emulator-lift-runtime)
+add_test(NAME input-inject-visible COMMAND lift-input-inject-visible)
+
 # ---- 2026-11-14：`interaction-graph`（`tests/interaction_graph.cpp`）已按测试模型删除 ----
 # 判据是"交互图走通 / 等一屏 → 点一下"这类**业务正确性**（测试模型单
 # `REQ-01M7ATAB5A18W7XBCKFBEQS7HB` 点名取消）；它**不进测试**。复现命令见
@@ -2461,6 +2474,24 @@ if(LIFT_BUILD_TESTS)
     add_executable(lift-ui-frames tests/ui_frames.cpp)
     target_link_libraries(lift-ui-frames PRIVATE emulator-lift-runtime)
     add_test(NAME ui-frames COMMAND lift-ui-frames)
+endif()
+
+# =====================================================================================
+# G · UI 脚本层的 ES module（`REQ-01M7QF01A00F9946DX0GPH23JQ` 切片 2 前半）
+# ★ 判据 = `tests/ui_script_modules.cpp`：相对 import / 嵌套 / 拒绝 bare + 绝对 + `data:` +
+#   `..` 逃逸 / module 顶层抛错不被吞 / classic 路径不变 / 缓存 / 混合 load（见该文件头的 ①–⑩）。
+# ★ 夹具 = `tests/ui_modules/`（跟着测试走；⛔ 不是发行的 `scripts/ui/`；切片 2 后半才放发行件）。
+#   绝对路径由 CMake 注入（`LIFT_UI_MODULES_DIR`），用例不依赖 ctest 的 cwd。
+# ★ **顶层** `if(LIFT_BUILD_TESTS)` ⇒ `cmakeTestTier()` 透明 ⇒ pure 档（AGENTS.md §12.4）。
+# ★ 变异：`tools/mutate-check.mjs` 末尾那条把 module 求值的 rejection 检查改成恒 false
+#   ⇒ module 顶层的异常被静默吞掉 ⇒ 本用例当场红。
+# =====================================================================================
+if(LIFT_BUILD_TESTS)
+    add_executable(lift-ui-script-modules tests/ui_script_modules.cpp)
+    target_link_libraries(lift-ui-script-modules PRIVATE emulator-lift-runtime)
+    target_compile_definitions(lift-ui-script-modules PRIVATE
+        LIFT_UI_MODULES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/ui_modules")
+    add_test(NAME ui-script-modules COMMAND lift-ui-script-modules)
 endif()
 
 # =====================================================================================

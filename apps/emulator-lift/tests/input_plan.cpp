@@ -12,7 +12,9 @@
 //      · `wait` 的 deadline 用**注入时钟**判（不需要真睡）：未到期不施加、到期才施加；
 //      · 未知指令 / 旧指令 / 缺参数 / 负毫秒 / `=left` ⇒ `loadText` 失败且点名 `origin:行:`；
 //      · `click` 的坐标从 **1280×720 参考系**缩放到客户区，`mouseMove` / `mouseButton` /
-//        抬起用**同一个**映射结果；抬起语义的 sampled / forced 两条腿都在 **click** 上验。
+//        抬起用**同一个**映射结果；★ 注入形状（2026-11-19）= move（臂上，**只**写光标）→
+//        跨一个**已完成**的位置读点 ⇒ down → 按下之后**至少 2 个 KeyLevel 读点** ⇒ up
+//        （闸门常量见 `input_plan.h`；两条腿 = `keylevel` / `wallclock`）。
 //   ⑤ 第四条指令 `await position`（**脚本内位置**的电平门，半开区间 `[FROM, TO)`）：
 //      · 命中 / 边界（`pos == FROM` 命中、`pos == TO` 不命中）/ 区间外继续等；
 //      · `base==0` / `pc < base` / `pc` 未提交 / `pc − base` 越上界 ⇒ 不满足、不崩、不施加；
@@ -288,20 +290,45 @@ void caseInstructionsAndClock() {
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.fired()), 0);
     LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);
 
-    // ---- ③ 到期 ⇒ 同一次读点里 wait 被消费、click 被施加 ----
+    // ---- ③ 到期 ⇒ 同一次读点里 wait 被消费、click **臂上**（只 move、⛔ 还没按下）----
     g_now_ms = 1500;
     plan.atPoint(*wm, lift::InputPoint::CursorPos);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 3);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.fired()), 1);
+    LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);  // ★ 2026-11-19：move 与 down 不再同一读点
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.armedPresses()), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 0);
+    int cur_x = 0;
+    int cur_y = 0;
+    wm->cursorClientPos(hwnd, &cur_x, &cur_y);
+    LIFT_CHECK_EQ_I64(cur_x, 100);  // 虚拟光标**立刻**到位（`GetCursorPos` 读得到）
+    LIFT_CHECK_EQ_I64(cur_y, 200);
+
+    // ---- ④ 跨过一个**已完成的位置读点** ⇒ 按下（阶段 ②）----
+    g_now_ms = 1501;
+    plan.atPoint(*wm, lift::InputPoint::CursorPos);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.armedPresses()), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 1);
     LIFT_CHECK_EQ_U32(wm->mouseButtons(), lift::input::kMkLButton);
+
+    // ---- ⑤ ★ 位置读点**不能**满足抬起闸门（旧实现把 `GetCursorPos` 也算样本 ⇒ 就在这里抬起）----
+    for (int i = 0; i < 4; ++i) {
+        wm->noteInputSample(0);  // 真 shim 在 `GetCursorPos` 里 +1：总样本数继续涨
+        g_now_ms += 1;
+        plan.atPoint(*wm, lift::InputPoint::CursorPos);
+    }
+    LIFT_CHECK(wm->inputSampleCount() >= 4);  // 位置采样确实在前进
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 1);  // ⛔ 但**还没**抬起
+    LIFT_CHECK_EQ_U32(wm->mouseButtons(), lift::input::kMkLButton);
+
+    // ---- ⑥ 一个 KeyLevel 读点还不够：N=2（抬起落在读之前 ⇒ N=1 时 guest 一次也看不到按下）----
+    g_now_ms += 1;
+    plan.atPoint(*wm, lift::InputPoint::KeyLevel);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 1);
 
-    // ---- ④ sampled 腿：guest 采样前进过一拍 ⇒ 自动抬起（click 上验，⛔ 不再靠 key）----
-    wm->noteInputSample(0);
-    plan.atPoint(*wm, lift::InputPoint::CursorPos);  // 计数刚 +1（还没"观察过按下之后再一拍"）
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 1);
-    wm->noteInputSample(0);
-    plan.atPoint(*wm, lift::InputPoint::CursorPos);
+    // ---- ⑦ 第二个 KeyLevel 读点 ⇒ 按下真的被读过 ⇒ 抬起 ----
+    g_now_ms += 1;
+    plan.atPoint(*wm, lift::InputPoint::KeyLevel);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 0);
     LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);
     LIFT_CHECK(plan.releases() >= 1);
@@ -352,11 +379,11 @@ void caseScriptGate() {
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(waiting.fired()), 0);
     LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);
 
-    // ---- ③ 身份恢复 ⇒ 门成立、click 施加 ----
+    // ---- ③ 身份恢复 ⇒ 门成立、click **落地**（阶段 ①：光标到位；按下要等一个位置读点）----
     put32(f.m, kEngineGlobal, kEngineBase);
     waiting.atPoint(*wm, lift::InputPoint::CursorPos);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(waiting.fired()), 1);
-    LIFT_CHECK(wm->mouseButtons() != 0u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(waiting.armedPresses()), 1);
 
     // ---- ④ 没有挂内存来源 ⇒ 门也永远不成立（⛔ 不假装通过）----
     lift::InputPlan detached;
@@ -414,7 +441,8 @@ void casePositionGate() {
     plan.atPoint(*wm, lift::InputPoint::PeekMsg);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.fired()), 1);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 2);
-    LIFT_CHECK_EQ_U32(wm->mouseButtons(), lift::input::kMkLButton);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.armedPresses()), 1);  // 阶段 ①：只 move
+    LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);
     (void)plan.releaseAll(*wm);
     LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);
 
@@ -476,7 +504,7 @@ void casePositionGate() {
     setPc(0x0400);
     robust.atPoint(*wm, lift::InputPoint::PeekMsg);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(robust.fired()), 1);
-    LIFT_CHECK_EQ_U32(wm->mouseButtons(), lift::input::kMkLButton);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(robust.armedPresses()), 1);  // 阶段 ①：只 move
     (void)robust.releaseAll(*wm);
     LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);
 }
@@ -616,8 +644,12 @@ void caseCoordinateScale() {
     std::string err;
     LIFT_CHECK(plan.loadText("click 1070 480 right\n", "mem", &err));
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.fired()), 0);
-    plan.atPoint(*wm, lift::InputPoint::CursorPos);
+    plan.atPoint(*wm, lift::InputPoint::CursorPos);  // 阶段 ①：臂上（只 move）
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.fired()), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.armedPresses()), 1);
+    LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);  // ⛔ 同一次读点里**没有**按下
+    plan.atPoint(*wm, lift::InputPoint::CursorPos);  // 阶段 ②：跨过一个完成的位置读点 ⇒ 按下
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 1);
 
     const std::size_t q0 = 0;
     lift::WinMessage move_msg;
@@ -659,7 +691,9 @@ void caseCoordinateScale() {
     lift::InputPlan plan2;
     LIFT_CHECK(plan2.loadText("click 1070 480\n", "mem", &err));
     const std::size_t q1 = wm->queueSize();
-    plan2.atPoint(*wm, lift::InputPoint::CursorPos);
+    plan2.atPoint(*wm, lift::InputPoint::CursorPos);  // 臂上（只 move）
+    LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);
+    plan2.atPoint(*wm, lift::InputPoint::CursorPos);  // 跨过一个完成的位置读点 ⇒ 按下
     lift::WinMessage d2;
     LIFT_CHECK(findMessage(*wm, q1, kWmLButtonDown, &d2));  // 省略按钮词 = left
     decodeMouseLParam(d2.lparam, &down_x, &down_y);
@@ -669,10 +703,15 @@ void caseCoordinateScale() {
 }
 
 // =====================================================================================
-// 判据 5（forced 腿）· 连续读点兜底抬起（click 上验：队列类读点不采样也不会永远按着）
+// 判据 5（墙钟兜底腿）· 没人读按键电平 ⇒ 按下之后 `kReleaseFallbackMs` 到期仍然抬起
+//
+// 判据（红了意味着什么）：
+//   ① 这个屏**一次也不调** `GetAsyncKeyState`（注入了一个纯消息型屏）⇒ 按键闸门永远不成立；
+//   ② 但按下**不能**因此永久挂着 ⇒ 宿主墙钟到期必须抬起（否则下一次 run 会看到"按钮一直按着"）；
+//   ③ 到期之前**不许**提前抬起（提前抬起 = 按下从没被看见，正是 2026-11-19 的失效形状）。
 // =====================================================================================
 void caseForcedRelease() {
-    lift_test::g_current_case = "input-plan/forced-release";
+    lift_test::g_current_case = "input-plan/wallclock-release";
     lift_fixture::Fixture f;
     LIFT_CHECK(f.ok);
     if (!f.ok) return;
@@ -682,13 +721,25 @@ void caseForcedRelease() {
     LIFT_CHECK(wm->createWindow("PlanTest", 0u, 0u, 0u, 0u, 1280, 720, 0u) != 0);
 
     lift::InputPlan plan;
+    plan.setClockForTest(&testNowMs);
     std::string err;
     LIFT_CHECK(plan.loadText("click 10 20\n", "mem", &err));
-    plan.atPoint(*wm, lift::InputPoint::CursorPos);
+    g_now_ms = 10000;
+    plan.atPoint(*wm, lift::InputPoint::CursorPos);  // 臂上
+    plan.atPoint(*wm, lift::InputPoint::CursorPos);  // 按下（跨过一个完成的位置读点）
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.fired()), 1);
     LIFT_CHECK_EQ_U32(wm->mouseButtons(), lift::input::kMkLButton);
-    // ⛔ 不推进采样计数：只靠"连续 kForceReleaseReads 个读点"这一条兜底。
-    for (int i = 0; i < 20 && plan.pendingReleases() > 0; ++i) plan.atPoint(*wm, lift::InputPoint::GetMsg);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 1);
+
+    // ⛔ 没有一次 KeyLevel 读点、时钟只走了兜底窗口的 1/5 ⇒ **不**抬起。
+    g_now_ms += lift::InputPlan::kReleaseFallbackMs / 5;
+    for (int i = 0; i < 20; ++i) plan.atPoint(*wm, lift::InputPoint::GetMsg);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 1);
+    LIFT_CHECK_EQ_U32(wm->mouseButtons(), lift::input::kMkLButton);
+
+    // 墙钟越过兜底窗口 ⇒ 下一个读点抬起（定数、非读点计数）。
+    g_now_ms += lift::InputPlan::kReleaseFallbackMs;
+    plan.atPoint(*wm, lift::InputPoint::GetMsg);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 0);
     LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);
     LIFT_CHECK(plan.releases() >= 1);
@@ -701,8 +752,8 @@ void caseForcedRelease() {
 //   ① **开档有行**：每条 step 成立 / 施加时**恰好一行**，且行里有 `plan:<文件>:<行>` +
 //      `kind=` + `script=` + `pos=` + `frame=`（缺一个 ⇒ 诊断"配方 click 不被消费"时又只能猜）；
 //   ② **关档零行**（缺省档输出逐字节不变 —— 这是"opt-in"的唯一机械判据）；
-//   ③ click 的**抬起**也有一行，且 `reason=sampled|forced` 如实区分两条腿
-//      （`forced` 且 `samples==press_samples` = "guest 一次也没机会看到按下"，这正是 D 的判据面）；
+//   ③ click 的**抬起**也有一行，且 `reason=keylevel|wallclock` 如实区分两条腿
+//      （`wallclock` + `key_reads==press_key_reads` = "guest 一次也没读到按下电平"，这正是 D 的判据面）；
 //   ④ `frame=` 的来源 = `presenting()`（`note(Frame)` 的累计数）⇒ 这里推 3 次断言 `frame=3`，
 //      ⛔ 不许抄成一个自造的常数。
 // =====================================================================================
@@ -751,14 +802,19 @@ void caseTrace() {
         LIFT_CHECK(t.find("pos=") != std::string::npos);
         LIFT_CHECK(t.find("frame=3") != std::string::npos);
         LIFT_CHECK(t.find("state_seq=-") != std::string::npos);  // 没开控制层 ⇒ 不编造 0
-        // ---- ③ sampled 腿：guest 采样前进两拍 ⇒ 抬起那一行 `reason=sampled` ----
-        wm->noteInputSample(0);
-        plan.atPoint(*wm, lift::InputPoint::CursorPos);
-        wm->noteInputSample(0);
-        plan.atPoint(*wm, lift::InputPoint::CursorPos);
+        // ---- ③ keylevel 腿：跨一个位置读点按下，再喂 2 个 KeyLevel 读点 ⇒ 抬起那一行 ----
+        g_now_ms = 20000;
+        plan.atPoint(*wm, lift::InputPoint::CursorPos);  // 阶段 ②：按下
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 1);
+        plan.atPoint(*wm, lift::InputPoint::KeyLevel);  // 1/2
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 1);
+        plan.atPoint(*wm, lift::InputPoint::KeyLevel);  // 2/2 ⇒ 抬起
         const std::string t2 = readSink(sink);
         LIFT_CHECK(t2.find("release kind=click") != std::string::npos);
-        LIFT_CHECK(t2.find("reason=sampled") != std::string::npos);
+        LIFT_CHECK(t2.find("reason=keylevel") != std::string::npos);
+        // 抬起行必须带**闸门**的读数（key_reads / press_key_reads）——"按键被看见没有"的唯一读数面
+        LIFT_CHECK(t2.find("key_reads=") != std::string::npos);
+        LIFT_CHECK(t2.find("press_key_reads=") != std::string::npos);
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 0);
     }
     // ---- ② 关档（缺省）：同一份配方跑完 ⇒ sink 里**零字节** ----
@@ -778,7 +834,7 @@ void caseTrace() {
         (void)quiet.releaseAll(*wm);
         std::fclose(quiet_sink);
     }
-    // ---- ③ forced 腿：不推进采样 ⇒ 兜底抬起那一行 `reason=forced`（+ 采样数没动）----
+    // ---- ③ 墙钟兜底腿：不推进 KeyLevel 读点 ⇒ 兜底抬起那一行 `reason=wallclock` ----
     {
         std::FILE* fsink = std::tmpfile();
         LIFT_CHECK(fsink != nullptr);
@@ -787,13 +843,18 @@ void caseTrace() {
         forced.setClockForTest(&testNowMs);
         LIFT_CHECK(forced.loadText("click 5 6\n", "mem", &err));
         forced.setTrace(fsink);
-        forced.atPoint(*wm, lift::InputPoint::GetMsg);  // 第一拍：click 施加 + 待抬起
-        for (int i = 0; i < 20 && forced.pendingReleases() > 0; ++i) {
+        g_now_ms = 30000;
+        forced.atPoint(*wm, lift::InputPoint::CursorPos);  // 阶段 ①：臂上
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(forced.armedPresses()), 1);
+        forced.atPoint(*wm, lift::InputPoint::CursorPos);  // 阶段 ②：按下
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(forced.pendingReleases()), 1);
+        g_now_ms += lift::InputPlan::kReleaseFallbackMs;
+        for (int i = 0; i < 3 && forced.pendingReleases() > 0; ++i) {
             forced.atPoint(*wm, lift::InputPoint::GetMsg);
         }
         const std::string t3 = readSink(fsink);
         LIFT_CHECK(t3.find("plan:mem:1 applied kind=click") != std::string::npos);
-        LIFT_CHECK(t3.find("reason=forced") != std::string::npos);
+        LIFT_CHECK(t3.find("reason=wallclock") != std::string::npos);
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(forced.pendingReleases()), 0);
         std::fclose(fsink);
     }

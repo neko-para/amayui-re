@@ -34,7 +34,8 @@
 //   六条指令 + 行尾 `timeout` 全认：`await script` / `await position` / `wait <ms>` /
 //   `click x y [l|r]` / `profile_begin|end <label>` / `quit`（`timeout <ms>` 只能写在两个 `await`
 //   那一行的末尾）。本臂只决定它们**落在哪个宿主对象**上：
-//   · `click` → `input::mouseMove` / `mouseButton`（唯一施加路径）+ 待抬起队列；
+//   · `click` → **两段**：先 `input::mouseMove`（只有光标落地），**跨过一个已完成的位置读点**
+//     之后才 `input::mouseButton(down)`（唯一施加路径）+ 待抬起队列 —— 见下面的"注入形状"三条闸门；
 //   · `wait` → 非阻塞 deadline（宿主单调毫秒），到期由**下一个读点**消费（★ 固定时长、没有守卫）；
 //   · 门上的 `timeout` → 本臂**唯一**的尺 = 宿主墙钟（`stepTimeoutMs` 给宽度；本臂不给缺省值 ⇒
 //     没写 `timeout` 就没有守卫，卡住由 `--time-limit` / `--max-frames` 这层看门狗报）；
@@ -55,7 +56,7 @@
 // ★ **第二条生产者 = 控制层的立即队列**（M1 · `REQ-01M7J2P5S27VX7WMRR3ZC9K2E8`）：
 //   控制层的 `click` 在**暂停态**入队（`enqueueClick`），由**下一个 guest 读点**（`atPoint`）
 //   **先于**配方当步施加。它 **不推进** 配方的 `next_` / `applied_`（配方里未到期的门照旧等），
-//   但走**同一段**施加核心（`applyClickAt` ⇒ 同一份 `referenceToClientPixel` + 同一份
+//   但走**同一段**施加核心（`armClickAt` ⇒ 同一份 `referenceToClientPixel` + 同一份
 //   `input::*` + 同一份 down→待抬起记账），并计入 `fired()`。⛔ 不许为它复制第二套坐标映射 /
 //   第二套按钮记账 / 第二个施加点（守卫：`lift-control-endpoint` 的 click 用例）。
 //
@@ -173,7 +174,7 @@ public:
     // ★ `--input-plan-trace`（opt-in；`REQ-01M7PG086DG4BBPA40VCVZTP4X` B）
     //   · 缺省 `nullptr` ⇒ **一条都不打**（默认档输出逐字节不变）；
     //   · 非空 ⇒ 每条 step **成立 / 施加**时打一行：`plan:<文件>:<行> kind=… script=… pos=…
-    //     frame=… state_seq=…`；外加 click 的**抬起**一行（`reason=sampled|forced`，D 的判据面）。
+    //     frame=… state_seq=…`；外加 click 的**抬起**一行（`reason=keylevel|wallclock`，D 的判据面）。
     //   · ⛔ 不每帧 / 不每块打（只有 step 事件 + 每个 click 的抬起）⇒ 一次性读数的纪律不变。
     //   ★ `frame=` 的来源 = `presenting()`（`present.cpp` 在 `++frame_count_` 同一刻推的读数）
     //     ⇒ 与 `--frame-log` / 摘要里的帧号同一个数。
@@ -200,7 +201,7 @@ public:
     //   · 生产者 = 控制层（**主线程**的 `Control::serve()`，只在暂停态）；
     //   · 消费者 = 本层：下一个 guest 读点（`atPoint`），**先于**配方当步；
     //   · ⛔ 不推进配方（`next_` / `applied_` / 守卫账一位不动）⇒ 未到期的门照旧等；
-    //   · 施加走 `applyClickAt`（与配方 `click` **同一段**代码）并计入 `fired()`；
+    //   · 施加走 `armClickAt`（与配方 `click` **同一段**代码）并计入 `fired()`；
     //   · **有界**：满了 `enqueueClick` 返回 false ⇒ 控制层回 `bad_request`（⛔ 静默丢）。
     //   ★ 没有控制层时这条队列**恒空** ⇒ `atPoint` 的早退条件与默认档逐字节不变。
     // =====================================================================================
@@ -208,7 +209,42 @@ public:
     // `ref_x` / `ref_y` = **1280×720 参考坐标**（与配方 `click x y` 同一口径；已由控制层校验）。
     // 返回 false = 队列已满（⛔ 不排队、不丢旧的）。
     bool enqueueClick(int ref_x, int ref_y, MouseButton button);
+    // ★ **纯 move**（不按键）：控制层的 `move <x> <y>`（`tools/emu-ctl.mjs move`）。
+    //   走**同一段** `input::mouseMove`（⛔ 不复制坐标映射 / 不复制施加路径），同样在下一个读点落地。
+    //   ⇒ "先把光标放到目标上、等一帧、再点"终于能在命令面上表达（这条就是 H3′ 的 A/B 前提）。
+    bool enqueueMove(int ref_x, int ref_y);
+    // 立即队列深度 = 还没在 guest 读点上落地的 click + move 条数（回执的 `queued`）。
     std::size_t queuedClicks() const { return immediate_.size(); }
+
+    // =====================================================================================
+    // ★ **注入形状**（2026-11-19 裁决；锚 = `GetAsyncKeyState` 电平读点，⛔ 不是总采样数）
+    //
+    // 为什么闸门必须按 KeyLevel 读点：引擎的按键**只从电平读**（`GetAsyncKeyState`，
+    //   EA `0x477241 / 0x47725D`），而 `WM_LBUTTONDOWN/UP` 在 WndProc 里只写一个**全语料无读者**
+    //   的 dword（`+0x1620`，EA `0x4B8DE6`）+ 清去重锁存（`+0x1E70`）⇒ **消息路不能产生点击**。
+    //   而 `WindowManager::inputSampleCount()` 把 `GetCursorPos` 也算作样本 ⇒ 位置读点能满足
+    //   "等两拍"、按键却一次都没被读到 —— 那正是 2026-11-19 查出来的失效根因（现场读数
+    //   `reason=forced samples==press_samples`）⇒ ⛔ **不许**再拿总样本数当闸门。
+    // 唯一答案 = 本类的 `deliverCalls(InputPoint::KeyLevel)`：它就是"guest 真的读过按键电平"的计数
+    //   （唯一来源 = `atPoint` 的第一句 ⇒ 没有第二份账）。
+    // -------------------------------------------------------------------------------------
+    // ① 按下之后至少**跨过**这么多个 KeyLevel 读点才抬起。
+    //   ★ 为什么是 2 而不是 1：计数在 `atPoint` 的**第一句** +1，而抬起是**读之前** flush 的
+    //     （flush-before-read）⇒ N=1 时抬起落在那个读点自己的读**之前**，guest 一次也看不到按下；
+    //     N=2 才留下**至少一次** KeyLevel 读**真的读到**按下电平（读数 N=2 ⇒ 1 次观察；
+    //     若按下那次本身是 KeyLevel 读点则 2 次）。
+    static constexpr std::uint64_t kKeyLevelReadsBeforeRelease = 2;
+    // ② 抬起墙钟兜底：按下之后这么久（宿主单调毫秒，扣暂停）还没够 ①的读点 ⇒ **仍然抬起**。
+    //   ★ 为什么 500 ms：实测输入心跳 = `GetCursorPos` **20.02 Hz**（OBS-20261108-07，≈50 ms）
+    //     ⇒ 500 ms ≈ **10 个周期**，还在轮询按键的屏都会在兜底之前满足 ①；它只防"这个屏根本
+    //     不读按键"（那种屏上按键本来就不可能被看见）⇒ 行为与改动前相同，⛔ 不会永久按住。
+    static constexpr std::uint64_t kReleaseFallbackMs = 500;
+    // ③ 按下之前：光标必须先落地、且**至少跨过一个读点**（⛔ move 与 down 同读点）。
+    //   · 判据 = 臂上之后**完成过**至少一次 `InputPoint::CursorPos` 读点：引擎的位置样本被
+    //     `+0x74A4` 锁存，只有它**真的调了** `GetCursorPos` 才会把锁存刷新到新位置
+    //     （EA `0x404029 / 0x4040A9`；清零只在注册热点 `0x403BBE / 0x403C39`）；
+    //   · 有的屏整屏不读位置 ⇒ 墙钟兜底（250 ms ≈ 5 个周期）保证 click **一定会按下**。
+    static constexpr std::uint64_t kPressFallbackMs = 250;
 
     // ★ 记账函数：**不接受 `WindowManager`**、不持有计划指针、只能累加计数。
     //   ⇒ 它**不可能**施加到期 step；到期 step 只能由**下一个读点**消费。
@@ -241,6 +277,8 @@ public:
         return event_calls_[static_cast<std::size_t>(PlanEventKind::Frame)];
     }
     std::size_t pendingReleases() const { return releases_pending_; }
+    // 光标已落地、还没按下的 click 数（阶段 ① 与阶段 ② 之间；守卫 / 诊断读数）。
+    std::size_t armedPresses() const { return armed_.size(); }
     // 已**正常收口**的区间数（`profile_begin` + `profile_end` 配对；读数，⛔ 不是性能判据）。
     std::uint64_t profileWindows() const { return profile_windows_; }
     bool profileOpen() const { return profile_open_; }
@@ -269,17 +307,33 @@ public:
     bool quitRequested() const { return quit_requested_; }
 
 private:
+    // **已按下**、等抬起的按钮（闸门 = `kKeyLevelReadsBeforeRelease` 个 KeyLevel 读点 / 墙钟兜底）。
     struct PendingRelease {
         MouseButton button = MouseButton::Left;
         int x = 0;                       // **已缩放**的客户区坐标（move / down / up 共用）
         int y = 0;
-        std::uint64_t press_samples = 0;  // 按下那一刻的 `inputSampleCount`
-        std::uint64_t press_reads = 0;    // 按下那一刻的读点序号（兜底抬起用）
+        std::uint64_t press_samples = 0;      // 按下那一刻的 `inputSampleCount`（**只是读数**，⛔ 不是闸门）
+        std::uint64_t press_key_reads = 0;    // 按下那一刻的 KeyLevel 读点数 ⇒ **闸门 ①**
+        std::uint64_t press_ms = 0;           // 按下那一刻的宿主墙钟 ⇒ **兜底 ②**
+        std::uint64_t press_reads = 0;        // 按下那一刻的读点序号（trace 读数）
         int line = 0;                     // 施加它的 step 行（trace 的 `plan:<文件>:<行>`）
     };
 
-    // 立即队列的一条：**1280×720 参考坐标**（⛔ 还没映射 —— 映射只发生在施加那一刻的那一次）。
-    struct ImmediateClick {
+    // **臂上**（光标已落地、还没按下）的一条 click：等"完成过一次 CursorPos 读点"后才按下。
+    struct ArmedPress {
+        MouseButton button = MouseButton::Left;
+        int x = 0;  // **已缩放**的客户区坐标（按下 / 抬起共用；⛔ 不重新映射）
+        int y = 0;
+        std::uint64_t arm_reads = 0;           // 臂上时的读点序号（trace 读数）
+        std::uint64_t arm_cursor_done = 0;     // 臂上时**已完成**的 CursorPos 读点数 ⇒ 闸门 ③
+        std::uint64_t arm_ms = 0;              // 臂上时的宿主墙钟 ⇒ 兜底 ③
+        int line = 0;
+    };
+
+    // 立即队列的一条（click 或 move）：**1280×720 参考坐标**（⛔ 还没映射 —— 映射只发生在
+    // 落地那一刻的那一次）。
+    struct ImmediateOp {
+        bool is_move = false;
         int x = 0;
         int y = 0;
         MouseButton button = MouseButton::Left;
@@ -288,9 +342,13 @@ private:
     // 采一次身份（同 `(cur,id)` + 名字表签名不变 ⇒ 复用缓存的名字，不重解析）。
     void refreshIdentity();
     std::uint64_t nowMs() const;
-    // ★ **唯一**的 click 施加核心：配方 step 与立即队列**都**走它
-    //   （同一份 `referenceToClientPixel` + 同一份 `input::*` + 同一份 down→待抬起记账）。
-    void applyClickAt(WindowManager& wm, int ref_x, int ref_y, MouseButton button);
+    // ★ **唯一**的 click 施加核心（阶段 ①）：映射坐标 + `input::mouseMove` + 进 `armed_`。
+    //   配方 step 与立即队列**都**走它（同一份 `referenceToClientPixel` + 同一份 `input::*`）。
+    void armClickAt(WindowManager& wm, int ref_x, int ref_y, MouseButton button);
+    // ★ 纯 move 的落地点（`move` 命令 / click 的第一段共用同一份映射与 `input::mouseMove`）。
+    void armMoveAt(WindowManager& wm, int ref_x, int ref_y);
+    // ★ 阶段 ②：把到期的 `armed_` 按下（`input::mouseButton(down)`）并转进 `pending_`。
+    void pressDue(WindowManager& wm);
     // 配方 step 的壳：只把 `Step` 的三个值交给上面那一段（⛔ 不复制映射 / 记账）。
     void applyClick(WindowManager& wm, const Step& s);
     // 立即队列消费（同一次读点内、配方之前；⛔ 不碰 `next_` / `applied_`）。
@@ -303,16 +361,22 @@ private:
     void failTimeout(std::size_t index, std::uint64_t elapsed_ms, std::uint64_t guard_ms);
     void releaseDue(WindowManager& wm, InputPoint point);
     void emitRelease(WindowManager& wm, const PendingRelease& r);
+    // ★ **会话收口**：配方走完 / `quit` 且没有未收口的 click ⇒ `releaseScriptOwnership()`
+    //   （与解释器臂 `InputScript::tick` 的 `finished() || quit_requested_` **同一处**）。
+    void closeSessionIfDone(WindowManager& wm);
     // `--input-plan-trace` 的两个出口（缺省 `trace_out_ == nullptr` ⇒ 各自只有一次判空）。
+    //   ★ `kind_token` = nullptr ⇒ 用 `s.kind` 的词；控制层的 `move` 没有 StepKind（⛔ 不改配方语法）
+    //     ⇒ 在这里显式给 `"move"`（否则 trace 会把一次 move 说成 click）。
     void traceStepConsumed(const Step& s, std::uint64_t samples_now, InputPoint point,
-                           const char* extra_tag);
-    void traceRelease(const PendingRelease& r, bool sampled, bool forced, std::uint64_t samples_now,
+                           const char* kind_token, const char* extra_tag);
+    void traceRelease(const PendingRelease& r, bool key_seen, bool wallclock, std::uint64_t samples_now,
                       InputPoint point);
 
     Recipe recipe_;
-    std::vector<PendingRelease> pending_;
-    // 控制层投进来的 click（**第二条生产者**；有界，见 `kImmediateClickCapacity`）。
-    std::vector<ImmediateClick> immediate_;
+    std::vector<PendingRelease> pending_;  // 已按下、等抬起
+    std::vector<ArmedPress> armed_;        // 光标已落地、等"一次完成的位置采样"再按下
+    // 控制层投进来的 click / move（**第二条生产者**；有界，见 `kImmediateClickCapacity`）。
+    std::vector<ImmediateOp> immediate_;
     const GuestMemory* mem_ = nullptr;  // 装配点挂；nullptr ⇒ 门恒不成立
     MarkerSampler marker_sampler_;
     MarkerSample identity_;             // 最近一次采样（名字按上面那条规则缓存）
@@ -323,8 +387,12 @@ private:
     std::uint64_t fired_ = 0;           // 已施加 click 数
     std::uint64_t released_ = 0;
     std::uint64_t position_misses_ = 0;  // 位置门读不到位置的次数（诊断；缺省不打印）
-    std::uint64_t read_points_ = 0;     // 读点序号（待抬起的兜底刻度）
+    std::uint64_t read_points_ = 0;     // 读点序号（trace / profile 读数）
+    // 本读点**之前**已经完成过的 CursorPos 读点数（"位置样本的年龄"刻度；见 `kPressFallbackMs`）。
+    std::uint64_t cursor_reads_done_ = 0;
     std::size_t releases_pending_ = 0;
+    // 本次注入会话是否已经把光标所有权交还过（`closeSessionIfDone` 只做一次；新的注入会清掉它）。
+    bool session_closed_ = true;
     // `wait` 的 deadline（宿主毫秒；起点 = 第一次到达这条指令的那个读点）
     bool wait_started_ = false;
     std::uint64_t wait_deadline_ms_ = 0;

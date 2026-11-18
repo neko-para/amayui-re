@@ -2,9 +2,11 @@
 //
 // 判据（红了意味着什么）：
 //   ① sandbox：脚本拿不到编译 / 随机 / 墙钟入口 —— `eval` / `Function` / `Date` / `JSON` /
-//      `Promise` / `RegExp` / `Proxy` 都是 undefined，`Math.random` 不存在；`eval(...)` 抛
+//      `RegExp` / `Proxy` / `WeakRef` 都是 undefined，`Math.random` 不存在；`eval(...)` 抛
 //      ReferenceError，`(function(){}).constructor('return 1')()` 与
 //      `globalThis.constructor.constructor('return 1')()` 都抛 TypeError。
+//      ★ `Promise` **是 function**（0.18.0 的实测表面；module 求值需要它，用户 2026-11-19 裁决
+//        "加而不删" —— 沙箱不是安全边界，⛔ 不为表面最小化删内建）。
 //      红了 ⇒ 沙箱洞（脚本能重新编译源码 / 拿到不确定的随机或时间）；`Function` 的
 //      `Function.prototype.constructor` 清除是**承重**的（tools/mutate-check.mjs 的
 //      `ui-script-quickjs-fn-ctor` 就施加在那里）。
@@ -153,6 +155,14 @@ void caseSandbox() {
             expectText(texts, i, "BigInt=function", "BigInt 的当前表面（0.18.0 BaseObjects 自带，不是合同）");
             continue;
         }
+        // ★ `Promise` 的当前表面（用户裁决 2026-11-19）：JS_AddIntrinsicPromise 之后**不删**
+        //   globalThis.Promise。沙箱**不是安全边界**（用户裁决 2026-11-18/19）；保留的删除只有
+        //   功能目的 —— `Math.random`（确定性 / replay）、`eval` / `Function` / `.constructor`
+        //   （禁动态编译）；⛔ 不追删其它内建（WeakRef / performance 之类同样不在删除清单里）。
+        if (std::string(undefineds[i]) == "Promise") {
+            expectText(texts, i, "Promise=function", "Promise 的当前表面（module 求值需要它，不删）");
+            continue;
+        }
         expectText(texts, i, std::string(undefineds[i]) + "=undefined", "沙箱：不应存在的内建");
     }
     expectText(texts, 12, "Math.random=undefined", "沙箱：Math.random 必须删掉（种子是宿主时间）");
@@ -160,8 +170,10 @@ void caseSandbox() {
     expectText(texts, 14, "fn-ctor=TypeError", "沙箱：.constructor 不能再编译源码");
     expectText(texts, 15, "global-ctor=TypeError", "沙箱：globalThis.constructor.constructor 也不能");
 
-    // ★ `import` 是**编译期**就不可用（无 module loader；也没有 Promise）。⛔ 不跑动态 `import('x')`：
-    //   实测 0.10.1 里它会留下一个 GC 对象（JS_FreeRuntime 的 assert 会红），而静态 import 是可判的。
+    // ★ `import` 现在走 **module 路径**（`ui-script-modules` 单）；这里钉的是**边界**：`'y'` 是
+    //   bare specifier ⇒ module loader 拒绝 ⇒ load 失败，且 err 带 `origin:line:col`。
+    //   ⛔ 本用例不跑动态 `import('x')`：module 路径的 drain 在 load 里做（`ui-script-modules`
+    //   已覆盖 module 求值）；classic 路径**不装** loader（旧语义：动态 import 不可用）。
     std::string err;
     std::unique_ptr<UiScript> imported = runtime->load("import x from 'y';\n", "import.js", nullptr, &err);
     ++lift_test::g_checks;

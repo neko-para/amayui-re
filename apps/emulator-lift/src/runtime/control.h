@@ -50,12 +50,15 @@ enum class ControlError : std::uint8_t {
 const char* controlErrorName(ControlError e);
 
 // 命令（控制线程解析成枚举；主线程执行）。
+//   ★ `Move`（2026-11-19）= **纯 move**（只把光标放到参考坐标，⛔ 不按键）：`click` 的第一段
+//     必须能与按下分开表达 —— "先悬停、过一个读点、再按"是引擎位置锁存（`+0x74A4`）要求的形状。
 enum class ControlOp : std::uint8_t {
     None = 0,
     Pause,
     Resume,
     Sample,
     Screenshot,
+    Move,
     Click,
     GlobalGet,  // 读一格 script global（id + 显式 kind；哑原语）
     GlobalSet,  // 写一格 script global（只写一个数据槽；⛔ 不写 cpu_/regs_）

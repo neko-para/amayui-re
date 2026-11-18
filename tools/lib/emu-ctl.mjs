@@ -41,10 +41,20 @@ export const EXIT = Object.freeze({
   instance: 4, // 找不到 / 多个实例（**仅"要挑一个实例"的 op**；`list` 恒 0）
 });
 
-/** 本客户端实现的操作（`click` 已解锁；⛔ `key` 仍是 M1 未实现；`gc` 只删残留端点文件）。 */
+/** 本客户端实现的操作（`click` / `move` 已解锁；⛔ `key` 仍是 M1 未实现；`gc` 只删残留端点文件）。 */
 export const OPS = Object.freeze([
-  'list', 'pause', 'resume', 'sample', 'screenshot', 'click',
-  'global-get', 'global-set', 'wait', 'quit', 'gc',
+  'list',
+  'pause',
+  'resume',
+  'sample',
+  'screenshot',
+  'move',
+  'click',
+  'global-get',
+  'global-set',
+  'wait',
+  'quit',
+  'gc',
 ]);
 
 /** `global-get` / `global-set` 的 kind（`string` 第二期未实现；服务端会回 type_mismatch）。 */
@@ -100,6 +110,7 @@ const OP_FLAG = Object.freeze({
   '--wait': 'wait',
   '--quit': 'quit',
   '--click': 'click',
+  '--move': 'move',
   '--global-get': 'global-get',
   '--global-set': 'global-set',
   '--gc': 'gc',
@@ -224,8 +235,8 @@ export function parsePositiveFrames(raw, flag = '--for frames') {
 /**
  * 解析 argv（位置 op 与隐藏 flag 两种入口都接受）。
  * @returns {{op:string|null, describe:boolean, help:boolean, json:boolean, session:string|null,
- *   timeoutSec:number, root:string, screenshotPath:string|null, waitMs:number|null,
- *   forMs:number|null, forFrames:number|null, dryRun:boolean}}
+ *   timeoutSec:number, root:string, screenshotPath:string|null, waitMs:number|null, click:object|null,
+ *   move:object|null, forMs:number|null, forFrames:number|null, dryRun:boolean}}
  */
 export function parseArgv(argv = []) {
   const out = {
@@ -238,6 +249,7 @@ export function parseArgv(argv = []) {
     root: DEFAULT_CONTROL_ROOT,
     screenshotPath: null,
     click: null,
+    move: null,
     // `global-get` / `global-set`：先收原始字符串，op 确定后按 kind 校验（见 parseArgv 末尾）。
     globalKind: null,
     globalIndex: null,
@@ -308,7 +320,7 @@ export function parseArgv(argv = []) {
     }
     if (!OPS.includes(name)) {
       throw new UsageError(
-        `未知操作：${name}。可用：${OPS.join(' / ')}（M1 的 key 未实现；gc 只删残留端点文件）`,
+        `未知操作：${name}。可用：${OPS.join(' / ')}（key 仍是 M1 未实现；gc 只删残留端点文件）`,
       );
     }
     out.op = name;
@@ -325,6 +337,12 @@ export function parseArgv(argv = []) {
     const y = parseClickCoord(pos.shift(), 'click y', REFERENCE_H - 1);
     const button = pos.length > 0 ? parseClickButton(pos.shift()) : 'left';
     out.click = { x, y, button };
+  }
+  if (out.op === 'move' && out.move === null) {
+    if (pos.length < 2) throw new UsageError('move 需要坐标：`move <x> <y>`');
+    const x = parseClickCoord(pos.shift(), 'move x', REFERENCE_W - 1);
+    const y = parseClickCoord(pos.shift(), 'move y', REFERENCE_H - 1);
+    out.move = { x, y };
   }
   if (out.op === 'wait' && out.waitMs === null) {
     if (pos.length === 0) throw new UsageError('wait 需要一个毫秒数：`wait <ms>`');
@@ -636,6 +654,15 @@ export function clickFrame(x, y, button = 'left') {
 }
 
 /**
+ * `move` 的请求帧：**顶层** `x` / `y`（⛔ 不带 `button` —— 服务端对 `move` 收到 `button` 会回
+ * `bad_request`，因为"移动"不该有一个被静默忽略的按钮字段）。
+ * ★ 语义 = **纯 move**：只把光标放到参考坐标，⛔ 不按下、⛔ 不抬起。
+ */
+export function moveFrame(x, y) {
+  return { op: 'move', x, y };
+}
+
+/**
  * `global-*` 的请求帧：**顶层** `{op,kind,index,value}`（服务端 `parseCommand` 只读顶层）。
  * ★ `index` 与 int/uint 的 `value` 是**字符串** 0x 十六进制（JSON number 表达不了 0x 前缀）；
  *   float 的 `value` 是 JSON number（十进制浮点字面量，唯一例外）。
@@ -658,6 +685,13 @@ export function formatClickLine(reply) {
   const d = isObj(reply) && isObj(reply.data) ? reply.data : {};
   const c = isObj(d.click) ? d.click : {};
   return `click ok x=${c.x} y=${c.y} button=${c.button} queued=${c.queued} state_seq=${d.state_seq}`;
+}
+
+/** `move` 的人读行：坐标 / **入队深度**（`queued` ≠ 已落地；落地在下一个 guest 读点）。 */
+export function formatMoveLine(reply) {
+  const d = isObj(reply) && isObj(reply.data) ? reply.data : {};
+  const m = isObj(d.move) ? d.move : {};
+  return `move ok x=${m.x} y=${m.y} queued=${m.queued} state_seq=${d.state_seq}`;
 }
 
 /**
@@ -734,15 +768,15 @@ export function listJson(root, rows) {
 export const DOMAIN = {
   id: 'emu-ctl',
   title:
-    'AOT 控制层**客户端**（`--control-root` 下的 `ctl.*.json`；停 / 采样 / 截图 / 点击 / typed global / 继续 / 收口 / 清残留）',
+    'AOT 控制层**客户端**（`--control-root` 下的 `ctl.*.json`；停 / 采样 / 截图 / 移光标 / 点击 / typed global / 继续 / 收口 / 清残留）',
   data: [
     '`<--control-root>/ctl.<pid>.<nonce8>.json`（端点写的身份文件；`list` 只读判活，`gc` **只删残留的那一个**）',
     '`screenshot <path>` 的**客户端指定路径**（BMP；写文件 ⇒ mutates）',
-    '`click <x> <y> [left|right]` 的**入队回执**（参考坐标 1280×720；⛔ 入队 ≠ 施加）',
+    '`move <x> <y>` / `click <x> <y> [left|right]` 的**入队回执**（参考坐标 1280×720；⛔ 入队 ≠ 施加）',
     '`global-get` / `global-set` 读写的 **script global 槽**（guest 内存；id = raw 池下标，如 `0xb1b6`）',
   ],
   access:
-    '`list` 只读；`gc` 只删"连接判死 + pid 不存活 + 文件名严格匹配"的残留端点文件（⛔ 不碰 `keep.txt` / 目录 / 别的文件）；`screenshot` 写客户端给的路径；`click` 只向端点的立即队列投一条（⛔ 不改 guest 状态）；`global-get` 只读一格、`global-set` 只写**一个** guest 数据槽（int/uint 过 ENC；⛔ 不改执行流 / cpu / regs）；`quit` 只请求端点自己收口',
+    '`list` 只读；`gc` 只删"连接判死 + pid 不存活 + 文件名严格匹配"的残留端点文件（⛔ 不碰 `keep.txt` / 目录 / 别的文件）；`screenshot` 写客户端给的路径；`move` / `click` 只向端点的立即队列投一条（⛔ 不改 guest 状态）；`global-get` 只读一格、`global-set` 只写**一个** guest 数据槽（int/uint 过 ENC；⛔ 不改执行流 / cpu / regs）；`quit` 只请求端点自己收口',
   tool: 'tools/emu-ctl.mjs',
 };
 
@@ -752,7 +786,8 @@ export const OPERATIONS = Object.freeze([
   { name: 'resume', argv: ['--resume'], mutates: true, summary: '放行；`--for-ms N` / `--for frames N` ⇒ 放行后按谓词重停' },
   { name: 'sample', argv: ['--sample'], mutates: true, summary: '暂停（若未停）+ 快照（停在汇点才能采样；freeze + state_seq +1 ⇒ 会写状态）；人读一行 `TITLE.BIN:0x039C paused_at=… frame=…`（`script.available:false` 仍是 0）' },
   { name: 'screenshot', argv: ['--screenshot'], mutates: true, summary: '暂停（服务端 Screenshot 分支会停在汇点；客户端先发幂等 pause 兜底）+ 写"最后呈现那帧"到指定路径（BMP）' },
-  { name: 'click', argv: ['--click'], mutates: true, summary: '投一条点击到立即队列（参考坐标 1280×720：x 0..1279 / y 0..719、button ∈ {left,right} 缺省 left）；**入队 ≠ 施加**：只接受暂停态（运行态 ⇒ not_paused / 退出码 1），施加在下一个 guest 读点，队列上界 64 条/次' },
+  { name: 'move', argv: ['--move'], mutates: true, summary: '投一条**纯 move**（参考坐标 1280×720，⛔ 不按键）到立即队列；**入队 ≠ 已落地**（落地在下一个 guest 读点，只发 WM_MOUSEMOVE）；只接受暂停态；与 click 共用同一个队列（上界 64 条/次）' },
+  { name: 'click', argv: ['--click'], mutates: true, summary: '投一条点击到立即队列（参考坐标 1280×720：x 0..1279 / y 0..719、button ∈ {left,right} 缺省 left）；**入队 ≠ 施加**：只接受暂停态（运行态 ⇒ not_paused / 退出码 1），落地在下一个 guest 读点（形状 = move → 跨一个读点 → down → 等 2 个按键电平读点 → up），队列上界 64 条/次' },
   { name: 'global-get', argv: ['--global-get'], mutates: false, summary: '按 id + 显式 kind 读一格 script global（哑原语：⛔ 不猜类型 / ⛔ 不挑时机 / ⛔ 不重试 / ⛔ 不写后校验）；`--index` **必须 0x 十六进制**（如 0xb1b6，⛔ 十进制）；返回 data.global{kind,index,value,raw}，int/uint 的 value/raw 是 0x 位模式' },
   { name: 'global-set', argv: ['--global-set'], mutates: true, summary: '按 id + 显式 kind 写一格（int/uint 过 ENC；float 是裸 32 位；运行态也在主线程块边界执行，不要求暂停、写完不校验）；`--index` 与 int/uint 的 `--value` 都是 0x 十六进制，`float` 的 `--value` 是十进制浮点（唯一例外）；string 第二期未实现' },
   { name: 'wait', argv: ['--wait'], mutates: true, summary: '糖：等价于 `resume --for-ms <ms>`（控制层 wait = 让 guest 跑 N ms 后重停；⛔ 与 --input-plan 的 wait 不是一回事）' },
@@ -767,9 +802,9 @@ export function describe() {
     exitCodes: {
       '0': '成功（含 script.available:false）',
       '1': '端点回 ok:false（含 global 的 id_out_of_range / type_mismatch / encode_failed）',
-      '2': '参数 / 协议错（含 click 坐标/按钮非法、global 的 index/value 不是 0x 十六进制、key 仍是 M1 未实现、gc 的 root 不可读 / 删除失败）',
+      '2': '参数 / 协议错（含 click/move 坐标非法、click 按钮非法、global 的 index/value 不是 0x 十六进制、key 仍是 M1 未实现、gc 的 root 不可读 / 删除失败）',
       '3': '超时（端点仍活）',
-      '4': '找不到 / 多个实例（**仅"要挑一个实例"的 op**：pause/resume/sample/screenshot/click/global-get/global-set/wait/quit；⛔ `list` 恒 0，多实例也 0）',
+      '4': '找不到 / 多个实例（**仅"要挑一个实例"的 op**：pause/resume/sample/screenshot/move/click/global-get/global-set/wait/quit；⛔ `list` 恒 0，多实例也 0）',
     },
     listWhy: WHY,
     selection:
@@ -786,6 +821,11 @@ export function describe() {
       queue:
         '**入队 ≠ 施加**：`click` 只把一条立即点击放进队列；施加点是**下一个 guest 读点**。⇒ 它**只接受暂停态**（运行态服务端回 `not_paused` ⇒ 退出码 1）；队列上界 **64 条/次**，满了服务端回 `bad_request`（⇒ 退出码 1）。回执里的 `queued` 是入队后的深度，不是"已施加"。',
       frame: '请求帧是**顶层字段** `{op:"click",x,y,button}`（服务端 `parseCommand` 只读顶层；⛔ 不包 `{"args":{…}}`）。',
+    },
+    move: {
+      reference: '参考坐标同 click（**1280×720**：`x ∈ [0,1279]`、`y ∈ [0,719]` 的整数；⛔ 不 clamp、⛔ 不猜）；本地校验失败 ⇒ 退出码 2。',
+      shape:
+        '**纯 move**（⛔ 不按键）：请求帧是顶层 `{op:"move",x,y}`（⛔ 不带 `button` —— 服务端收到会回 `bad_request`）；只接受暂停态；落地 = 下一个 guest 读点只发 `WM_MOUSEMOVE` + 写虚拟光标。★ 用途 = 把 "move → 跨一个读点 → click" 这个形状表达出来（引擎的位置样本被 `+0x74A4` 锁存，move 与 down 同读点时命中链可能用的是旧位置）；`click` 自己**已经**是这个两段形状，`move` 用于显式悬停 / A-B 对照。',
     },
     global: {
       ops: '`global-get` / `global-set` = **哑原语**：按 id + 显式 kind 读写一格 script global。',
@@ -861,6 +901,10 @@ export function describeText() {
   L.push(`  错误：${d.global.errors}`);
   L.push(`  纪律：${d.global.dumb}`);
   L.push(`  持久化：${d.global.persistence}`);
+  L.push('');
+  L.push('move（纯 move，⛔ 不按键；参考坐标 1280×720）');
+  L.push(`  坐标：${d.move.reference}`);
+  L.push(`  形状：${d.move.shape}`);
   L.push('');
   L.push('时钟口径（同名不同口径）');
   L.push(`  sample：${d.clockSemantics.sample}`);
