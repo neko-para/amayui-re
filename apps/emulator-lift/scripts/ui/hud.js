@@ -1,3 +1,4 @@
+// @ts-check
 // emulator-lift · 默认 HUD（`--overlay` 的脚本；随发行分发，运行时读）
 //
 // ★ 入口约定（`src/ui/script.h`）：脚本是 UTF-8、单文件、strict、无 import；入口必须**显式**

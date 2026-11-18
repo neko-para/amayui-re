@@ -228,8 +228,18 @@ struct SdlWindow::Impl {
     //   C++ 侧的文本格式化 / 100 ms 节流 / 文本缓存。
     bool overlay = false;
     SDL_Texture* overlay_tex = nullptr;  // renderer 路径的流式纹理（`presentOverlay` 建 / 用）
+    // ★ `overlay_tex_w/h` 是**已用**尺寸（每帧 = 本帧叠层），`overlay_tex_cap_w/h` 是纹理**容量**
+    //   （grow-only）。面板宽度随 `fps/worst/frame` 文本变化 ⇒ 高帧率下几乎每帧尺寸都变；按已用
+    //   尺寸重建纹理会把上一帧可能仍在 GPU 队列里的 draw 的源纹理提前销毁 ⇒ 叠层部分/整块丢失。
+    //   ⇒ 只有 `w > cap_w || h > cap_h` 才新建（容量至少 1024×512，典型 HUD 极少扩容）。
     int overlay_tex_w = 0;
     int overlay_tex_h = 0;
+    int overlay_tex_cap_w = 0;
+    int overlay_tex_cap_h = 0;
+    // ★ 扩容 / 关叠层 / `disableOverlay` 退役下来的旧纹理：**不立即销毁**（上一帧的 draw 可能
+    //   仍在 GPU 队列里）。增长次数有界 ⇒ 只留到 `shutdown()`（renderer 销毁前）统一
+    //   `SDL_DestroyTexture`。⛔ 不许在 `presentOverlay` / `setOverlay(false)` 里直接销毁。
+    std::vector<SDL_Texture*> retired_overlay_tex;
     // 宿主字体：**只在 `--overlay` 时构造**（默认档零成本）；字体不可用 ⇒ init 硬失败（R5）。
     std::unique_ptr<lift::FontEngine> ui_font;
     // 脚本内核 + 这一份脚本（`--ui <path>` 或随发行的 `scripts/ui/hud.js`）。空 = 没装 / 已关。
@@ -269,6 +279,9 @@ struct SdlWindow::Impl {
     bool loadUiScript(std::string* err);
     // 叠层画不出来 ⇒ 只告警 + 关掉叠层，呈现照旧（⛔ 不因为诊断层让整帧失败）。
     void disableOverlay(const char* why);
+    // ★ 统一释放退役叠层纹理（**只在** `shutdown()`、`SDL_DestroyRenderer` 之前调用）：
+    //   扩容 / 关叠层留下的旧纹理会到这里一次性销毁（增长次数有界，内存可接受）。
+    void releaseRetiredOverlayTextures();
 
     void postMessage(std::uint32_t message, std::uint32_t wparam, std::uint32_t lparam);
     // ★ `why` 是"这次为什么收 run"的**唯一指纹**（info 档一行）：`sdl-quit` / `grace-expired` /
@@ -452,16 +465,28 @@ void SdlWindow::Impl::disableOverlay(const char* why) {
     std::fprintf(stderr, "[overlay] 叠层不可用 ⇒ 关掉（呈现照旧）：%s\n", why != nullptr ? why : "(unknown)");
     overlay = false;
     ui_script.reset();
+    // ★ 不立即销毁：上一帧的 draw 可能仍在 GPU 队列里（提前释放 ⇒ 部分/整块叠层丢失）。
+    //   退役到 `retired_overlay_tex`，由 `shutdown()` 统一释放。
     if (overlay_tex != nullptr) {
-        SDL_DestroyTexture(overlay_tex);
+        retired_overlay_tex.push_back(overlay_tex);
         overlay_tex = nullptr;
     }
     overlay_tex_w = 0;
     overlay_tex_h = 0;
+    overlay_tex_cap_w = 0;
+    overlay_tex_cap_h = 0;
     if (direct != nullptr) {
         std::string ignored;
         direct->directOverlay(nullptr, 0, 0, 0, 0, &ignored);
     }
+}
+
+void SdlWindow::Impl::releaseRetiredOverlayTextures() {
+    for (SDL_Texture*& tex : retired_overlay_tex) {
+        if (tex != nullptr) SDL_DestroyTexture(tex);
+        tex = nullptr;
+    }
+    retired_overlay_tex.clear();
 }
 
 // ★ B 的唯一 HUD 绘制入口：把这一帧的读数打包成 `UiFrameReadings` → 脚本产出 display list
@@ -896,10 +921,12 @@ void SdlWindow::shutdown() {
         impl_->texture = nullptr;
     }
     // ★ 叠层纹理属于 renderer ⇒ 必须在 `SDL_DestroyRenderer` **之前**释放。
+    //   当前纹理 + 退役纹理（扩容 / 关叠层留下的）**只在这里**销毁 —— 别处一律只退役。
     if (impl_->overlay_tex != nullptr) {
-        SDL_DestroyTexture(impl_->overlay_tex);
+        impl_->retired_overlay_tex.push_back(impl_->overlay_tex);
         impl_->overlay_tex = nullptr;
     }
+    impl_->releaseRetiredOverlayTextures();
     if (impl_->renderer != nullptr) {
         SDL_DestroyRenderer(impl_->renderer);
         impl_->renderer = nullptr;
@@ -938,9 +965,13 @@ void SdlWindow::shutdown() {
     impl_->capture_argb.clear();
     impl_->capture_w = 0;
     impl_->capture_h = 0;
-    // 叠层状态（纹理已在 renderer 之前释放；直出那一份随 `directDetachWindow` 释放）。
+    // 叠层状态（纹理已在 renderer 之前统一释放；直出那一份随 `directDetachWindow` 移交 retired）。
     impl_->overlay_tex_w = 0;
     impl_->overlay_tex_h = 0;
+    impl_->overlay_tex_cap_w = 0;
+    impl_->overlay_tex_cap_h = 0;
+    // ★ 退役纹理已在上面的 `releaseRetiredOverlayTextures()` 清空；这里再兜一次（措辞见字段注释）。
+    impl_->retired_overlay_tex.clear();
     impl_->overlay = false;
     // ★ 脚本 / 内核 / 字体 / 读数一起放掉（下一轮 init 或 `setOverlay(true)` 会按新 options 重装）。
     impl_->ui_script.reset();
@@ -1115,31 +1146,44 @@ bool SdlWindow::presentOverlay(const std::uint8_t* rgba, int w, int h, int x, in
         if (err) *err = "SDL 窗口未初始化";
         return false;
     }
-    if (impl_->overlay_tex == nullptr || impl_->overlay_tex_w != w || impl_->overlay_tex_h != h) {
-        if (impl_->overlay_tex != nullptr) SDL_DestroyTexture(impl_->overlay_tex);
+    // ★ **grow-only 容量**：面板宽随 fps/worst/frame 文本变化 ⇒ 高帧率下几乎每帧尺寸都变。
+    //   只有**超过当前容量**才新建；旧纹理**不销毁**（上一帧的 draw 可能还在 GPU 队列里）⇒
+    //   退役到 `retired_overlay_tex`，`shutdown()` 统一释放。`overlay_tex_w/h` 只是**已用**尺寸。
+    if (impl_->overlay_tex == nullptr || w > impl_->overlay_tex_cap_w || h > impl_->overlay_tex_cap_h) {
+        const int cap_w = std::max(w, 1024);
+        const int cap_h = std::max(h, 512);
         // ★ 字节序：图像是**内存序 RGBA8**；SDL 的格式名按 u32 位序定义 ⇒ 内存序 R,G,B,A = `ABGR8888`
         //   （用 `RGBA8888` 会变成 A,B,G,R ⇒ 颜色整体错位：深底 0x101820 被读成 0xFF2018）。
-        impl_->overlay_tex = SDL_CreateTexture(impl_->renderer, SDL_PIXELFORMAT_ABGR8888,
-                                               SDL_TEXTUREACCESS_STREAMING, w, h);
-        if (impl_->overlay_tex == nullptr) {
+        SDL_Texture* fresh = SDL_CreateTexture(impl_->renderer, SDL_PIXELFORMAT_ABGR8888,
+                                                SDL_TEXTUREACCESS_STREAMING, cap_w, cap_h);
+        if (fresh == nullptr) {
             if (err) *err = std::string("SDL_CreateTexture(overlay) 失败：") + SDL_GetError();
             return false;
         }
         // ★ **按 alpha 混合**（用户 2026-11-18：HUD 背景 80% 半透明）：
         //   脚本的底是 `#101820CC`（alpha 204）⇒ 这里必须 BLEND，否则半透明底会被当成不透明画上去。
         //   文本像素的 alpha 是 255 ⇒ 混合后仍是字色本身（⛔ 不会把字也变淡）。
-        if (!SDL_SetTextureBlendMode(impl_->overlay_tex, SDL_BLENDMODE_BLEND)) {
+        if (!SDL_SetTextureBlendMode(fresh, SDL_BLENDMODE_BLEND)) {
             if (err) *err = std::string("SDL_SetTextureBlendMode(overlay, BLEND) 失败：") + SDL_GetError();
+            SDL_DestroyTexture(fresh);  // 刚建、一次 draw 都没被引用 ⇒ 可以立即销毁
             return false;
         }
-        if (!SDL_SetTextureScaleMode(impl_->overlay_tex, SDL_SCALEMODE_NEAREST)) {
+        if (!SDL_SetTextureScaleMode(fresh, SDL_SCALEMODE_NEAREST)) {
             if (err) *err = std::string("SDL_SetTextureScaleMode(overlay, NEAREST) 失败：") + SDL_GetError();
+            SDL_DestroyTexture(fresh);
             return false;
         }
-        impl_->overlay_tex_w = w;
-        impl_->overlay_tex_h = h;
+        // ★ 旧纹理**退役**（⛔ 不 SDL_DestroyTexture）：本帧之前的 draw 可能仍在队列里。
+        if (impl_->overlay_tex != nullptr) impl_->retired_overlay_tex.push_back(impl_->overlay_tex);
+        impl_->overlay_tex = fresh;
+        impl_->overlay_tex_cap_w = cap_w;
+        impl_->overlay_tex_cap_h = cap_h;
     }
-    if (!SDL_UpdateTexture(impl_->overlay_tex, nullptr, rgba, w * 4)) {
+    impl_->overlay_tex_w = w;
+    impl_->overlay_tex_h = h;
+    // ★ **子矩形**上传：纹理容量可能大于本帧叠层（grow-only）⇒ 只写左上 w×h，pitch 按 w。
+    const SDL_Rect src_rect{0, 0, w, h};
+    if (!SDL_UpdateTexture(impl_->overlay_tex, &src_rect, rgba, w * 4)) {
         if (err) *err = std::string("SDL_UpdateTexture(overlay) 失败：") + SDL_GetError();
         return false;
     }
@@ -1148,9 +1192,12 @@ bool SdlWindow::presentOverlay(const std::uint8_t* rgba, int w, int h, int x, in
         SDL_SetRenderLogicalPresentation(impl_->renderer, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
     bool drawn = false;
     if (disabled) {
+        // ★ src = 本帧**已用**的子矩形（⛔ 不取整张容量：那会把未写区域 / 上一帧的旧像素采样进去），
+        //   dst = 同一块 w×h（1:1，⛔ 不缩放）。
+        const SDL_FRect src{0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h)};
         const SDL_FRect dst{static_cast<float>(x), static_cast<float>(y), static_cast<float>(w),
                             static_cast<float>(h)};
-        drawn = SDL_RenderTexture(impl_->renderer, impl_->overlay_tex, nullptr, &dst);
+        drawn = SDL_RenderTexture(impl_->renderer, impl_->overlay_tex, &src, &dst);
     }
     // ★ 无论这次 draw 成败都要把逻辑呈现恢复成 LETTERBOX（否则下一帧的画面不再 letterbox，
     //   那是 B1 最危险的副作用；恢复用**当前帧**的 tex_w/tex_h）。
@@ -1425,8 +1472,9 @@ const char* SdlWindow::directPresentMode() const {
 
 const char* SdlWindow::rendererName() const { return impl_->renderer_name.c_str(); }
 
-// 调试叠层开关：关掉时**立刻**把两条路径的叠层状态都释放（renderer 纹理 / 直出纹理 + CPU 副本
-// —— 直出那一份由后端 `directOverlay(nullptr,...)` **真的释放** GPU 纹理，不是只置 flag），
+// 调试叠层开关：关掉时把两条路径的叠层状态都**退役**（renderer 纹理进 `retired_overlay_tex`，
+// 由 `shutdown()` 统一销毁；直出那一份由后端 `directOverlay(nullptr,...)` 移交 retired ——
+// ⛔ 都不在关的这一下立即释放：上一帧的 draw 可能仍在 GPU 队列里，提前释放会让叠层撕裂/丢失）。
 // 下一帧起窗口像素恢复成"只有画面"。默认关（`--overlay` / `--ui` 才打开）。
 void SdlWindow::setOverlay(bool on) {
     impl_->overlay = on;
@@ -1442,12 +1490,15 @@ void SdlWindow::setOverlay(bool on) {
     }
     // ★ 关 ⇒ 丢掉这一份脚本（下次开会按 `ui_script_path` 重新装：`--ui` 可能换过内容）。
     impl_->ui_script.reset();
+    // ★ 纹理只退役、不立即销毁（见字段注释）；保留到 `shutdown()` 的代价有界（关叠层次数很少）。
     if (impl_->overlay_tex != nullptr) {
-        SDL_DestroyTexture(impl_->overlay_tex);
+        impl_->retired_overlay_tex.push_back(impl_->overlay_tex);
         impl_->overlay_tex = nullptr;
     }
     impl_->overlay_tex_w = 0;
     impl_->overlay_tex_h = 0;
+    impl_->overlay_tex_cap_w = 0;
+    impl_->overlay_tex_cap_h = 0;
     if (impl_->direct != nullptr) {
         std::string ignored;
         impl_->direct->directOverlay(nullptr, 0, 0, 0, 0, &ignored);

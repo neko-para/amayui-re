@@ -108,6 +108,19 @@ FrameInfo = {
 预算：内存 16 MiB、栈 512 KiB、每帧墙钟 20 ms + 100 万条字节码（超了 ⇒ 本帧失败，宿主关掉叠层
 并照旧呈现）。这些上限**不是**给你写重活的：HUD 是诊断层，⛔ 不要在 `render` 里做耗时计算。
 
+## 编辑器
+
+目录里的 `tsconfig.json` 是**编辑器 / 手动检查**用的工程（`allowJs` + `checkJs` + `strict`）：
+VS Code 打开 `scripts/ui` 就按它检查，`ui` / `game` / `render` 的类型与跳转来自同目录的 `ui.d.ts`。
+
+```bash
+pnpm exec tsc -p apps/emulator-lift/scripts/ui   # exit 0、无输出 = 干净
+```
+
+★ 它**不进** `pnpm typecheck` 的六份工程：它是脚本作者的编辑器提示，不是仓库构建门禁
+（`ui.d.ts` 也不参与构建 / 不进发行 exe）。★ `tsconfig*.json` 属生态配置，不需要同名 `.md`
+（`tools/test/json-docs.test.mjs` 的排除项）。
+
 ## 现在**没有**的
 
 * **热重载**：脚本在装叠层时编译一次（`--ui` 换文件要重启；`--overlay` 每次启动重读）。

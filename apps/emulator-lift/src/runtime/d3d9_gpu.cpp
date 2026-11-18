@@ -1917,8 +1917,10 @@ public:
     // -----------------------------------------------------------------------------------
     bool directOverlay(const std::uint8_t* rgba, int w, int h, int x, int y, std::string* err) override {
         if (rgba == nullptr || w <= 0 || h <= 0) {
-            // ★ 关掉叠层 = **释放** GPU 纹理（⛔ 不许只把 visible 置 false 把纹理留在 device 上：
-            //   那是一次真实的泄漏，而且下次开叠层会再多一张）。
+            // ★ 关掉叠层 = 把当前 GPU 纹理**退役**（`releaseOverlayTexture` 只移入
+            //   `retired_overlay_tex_`，⛔ 不立即 `SDL_ReleaseGPUTexture`：上一帧的 draw 可能仍在
+            //   GPU 队列里）。真正的释放只在 `shutdown()`（设备销毁之前）统一做，
+            //   `overlay_rgba_` 这个 CPU 副本也一起清掉（⛔ 不是泄漏）。
             releaseOverlayTexture();
             return true;
         }
@@ -1931,14 +1933,19 @@ public:
             if (err) *err = "swapchain 格式不支持 SAMPLER 用法（叠层不能作为 blit 源）";
             return false;
         }
-        if (overlay_tex_ == nullptr || overlay_w_ != w || overlay_h_ != h) {
-            releaseOverlayTexture();
+        // ★ **grow-only 容量**（与 renderer 路径同一口径）：HUD 面板宽随文本变化 ⇒ 高帧率下
+        //   几乎每帧尺寸都变。只有超过容量才新建；旧纹理退役到 `retired_overlay_tex_`，
+        //   ⛔ 不在 `directOverlay` 里立即释放。`overlay_w_/h_` 只是**已用**尺寸。
+        if (overlay_tex_ == nullptr || w > overlay_cap_w_ || h > overlay_cap_h_) {
+            releaseOverlayTexture();  // 旧纹理移入 retired（⛔ 不销毁）
+            const int cap_w = std::max(w, 1024);
+            const int cap_h = std::max(h, 512);
             SDL_GPUTextureCreateInfo ci{};
             ci.type = SDL_GPU_TEXTURETYPE_2D;
             ci.format = swapchain_format_;
             ci.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
-            ci.width = static_cast<Uint32>(w);
-            ci.height = static_cast<Uint32>(h);
+            ci.width = static_cast<Uint32>(cap_w);
+            ci.height = static_cast<Uint32>(cap_h);
             ci.layer_count_or_depth = 1;
             ci.num_levels = 1;
             ci.sample_count = SDL_GPU_SAMPLECOUNT_1;
@@ -1947,9 +1954,12 @@ public:
                 if (err) *err = std::string("SDL_CreateGPUTexture(overlay) 失败：") + SDL_GetError();
                 return false;
             }
-            overlay_w_ = w;
-            overlay_h_ = h;
+            overlay_cap_w_ = cap_w;
+            overlay_cap_h_ = cap_h;
         }
+        // ★ 已用尺寸 = 本帧叠层（容量可能更大）；上传 / 采样都只碰左上 w×h 这一块。
+        overlay_w_ = w;
+        overlay_h_ = h;
         // RGBA8 → swapchain 的字节序（B8G8R8A8 = 交换 R/B；R8G8B8A8 = verbatim）。
         const bool bgra = swapchain_format_ == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
         const std::size_t bytes = static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4u;
@@ -1983,6 +1993,8 @@ public:
             return false;
         }
         SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+        // ★ **子矩形**上传：纹理容量可能大于本帧叠层（grow-only）⇒ 只写左上 w×h 一块
+        //   （`pixels_per_row` / `rows_per_layer` / `dst.w/h` 都按**已用**尺寸，⛔ 不是 cap）。
         SDL_GPUTextureTransferInfo src{};
         src.transfer_buffer = tb;
         src.pixels_per_row = static_cast<Uint32>(w);
@@ -2212,9 +2224,11 @@ private:
         const float x1 = 2.0f * static_cast<float>(dst_x + dw) / static_cast<float>(sw) - 1.0f;
         const float y0 = 1.0f - 2.0f * static_cast<float>(dst_y) / static_cast<float>(sh);
         const float y1 = 1.0f - 2.0f * static_cast<float>(dst_y + dh) / static_cast<float>(sh);
-        // 裁剪后的 uv 上限（源 = 叠层纹理左上块）。
-        const float u1 = static_cast<float>(dw) / static_cast<float>(overlay_w_);
-        const float v1 = static_cast<float>(dh) / static_cast<float>(overlay_h_);
+        // 裁剪后的 uv 上限（源 = 叠层纹理**左上已用块**）。
+        // ★ 分母是**容量**（纹理比用到的大：grow-only 的 cap ≥ used）⇒ 只采左上 dw×dh，
+        //   ⛔ 不会把未写区域（或上一帧的旧像素）采进来；片段中心落在 [0, dw) 内，不会越界。
+        const float u1 = overlay_cap_w_ > 0 ? static_cast<float>(dw) / static_cast<float>(overlay_cap_w_) : 0.0f;
+        const float v1 = overlay_cap_h_ > 0 ? static_cast<float>(dh) / static_cast<float>(overlay_cap_h_) : 0.0f;
         Vertex vtx[6];
         auto put = [](Vertex& v, float x, float y, float u, float vv) {
             v.x = x;
@@ -2308,15 +2322,33 @@ private:
         overlay_gpu_unavailable_ = false;
     }
 
-    // 释放叠层纹理 + CPU 侧副本（device 销毁 / 解 claim / 关掉叠层之前必须调用）。
+    // ★ 把当前叠层纹理**退役**（⛔ 不 `SDL_ReleaseGPUTexture`）：扩容 / 关叠层 / 解 claim 时，
+    //   上一帧的 draw 可能仍在 GPU 队列里，提前释放会让叠层部分/整块丢失。
+    //   真正的释放只在 `shutdown()`（设备销毁之前）由 `releaseRetiredOverlayTextures()` 统一做。
     void releaseOverlayTexture() {
-        if (overlay_tex_ != nullptr && device_ != nullptr) SDL_ReleaseGPUTexture(device_, overlay_tex_);
+        if (overlay_tex_ != nullptr) retired_overlay_tex_.push_back(overlay_tex_);
         overlay_tex_ = nullptr;
         overlay_w_ = 0;
         overlay_h_ = 0;
+        overlay_cap_w_ = 0;
+        overlay_cap_h_ = 0;
         overlay_visible_ = false;
         overlay_dst_valid_ = false;
         overlay_rgba_.clear();
+    }
+
+    // ★ 统一释放退役叠层纹理：**只在** `shutdown()`、`SDL_DestroyGPUDevice` 之前调用。
+    //   （扩容次数有界；关叠层后保留到进程末尾，内存可接受。）
+    void releaseRetiredOverlayTextures() {
+        if (device_ == nullptr) {
+            retired_overlay_tex_.clear();
+            return;
+        }
+        for (SDL_GPUTexture*& tex : retired_overlay_tex_) {
+            if (tex != nullptr) SDL_ReleaseGPUTexture(device_, tex);
+            tex = nullptr;
+        }
+        retired_overlay_tex_.clear();
     }
 
     // guest 后缓冲 → target（逐行 verbatim；X8 的 X 字节按 guest 原样，与 rasterSyncToGuest 的归一化对称）
@@ -3297,8 +3329,10 @@ private:
         for (auto& kv : textures_) {
             kv.second.pending = false;
         }
-        directDetachWindow();
+        directDetachWindow();   // 当前叠层纹理在这里退役（⛔ 不释放）
         destroyTargets();
+        // ★ 退役叠层纹理的**唯一**释放点：设备销毁之前（当前 + 扩容 / 关叠层留下的全部）。
+        releaseRetiredOverlayTextures();
         if (vertex_buffer_ != nullptr) SDL_ReleaseGPUBuffer(device_, vertex_buffer_);
         vertex_buffer_ = nullptr;
         for (auto& [k, e] : textures_) {
@@ -3400,8 +3434,14 @@ private:
     // ---- 调试叠层（`--overlay`；只存在于宿主送显的那一份像素里）----
     // ★ 纹理建在**同一 device**、格式 = 实际 swapchain 格式（blit 源/目的兼容的唯一保证）。
     SDL_GPUTexture* overlay_tex_ = nullptr;
+    // ★ `overlay_w_/h_` 是**已用**尺寸，`overlay_cap_w_/h_` 是纹理**容量**（grow-only）。
+    //   面板宽随 fps/worst/frame 文本变化 ⇒ 按已用尺寸重建会把在飞的 draw 源纹理提前释放。
     int overlay_w_ = 0;
     int overlay_h_ = 0;
+    int overlay_cap_w_ = 0;
+    int overlay_cap_h_ = 0;
+    // ★ 扩容 / 关叠层 / 解 claim 退役下来的旧纹理：只在 `shutdown()`（设备销毁前）统一释放。
+    std::vector<SDL_GPUTexture*> retired_overlay_tex_;
     bool overlay_visible_ = false;           // `directPresent` 是否要在 letterbox 之后再 blit 一次
     int overlay_dst_x_ = 0;                  // 叠层 dst 原点（窗口像素 = **画布原点**；由 directOverlay 传入）
     int overlay_dst_y_ = 0;

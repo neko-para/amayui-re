@@ -15,6 +15,11 @@
 //      画面居中、上下有黑边）⇒ 叠层 blt 的 dst 原点必须 == **画布原点**
 //      （画面原点 + `uiCanvasOrigin` 的居中偏移 `(0,93)` ⇒ `(0,218)`），窗口 (0,0) 是黑边。
 //      ⛔ 不是"窗口 (0,0)"，⛔ 也不是"画面矩形原点"；⛔ 不依赖真实鼠标 / 真实分辨率。
+//   ⑤ **尺寸 churn**（`overlay/size-churn`，renderer 与 `--gpu` 都跑）：`worst` 在
+//      `wall=9.9` / `wall=100.0` 之间交替 + `frame` 每帧变 ⇒ HUD 面板宽每几帧就变一次；
+//      连提 **200 帧**，每 10 帧回读**画布原点** = 期望 blend。红了 = 尺寸变化后叠层丢了 /
+//      错位了（叠层纹理按尺寸销毁重建 ⇒ 在飞的 draw 源被提前释放的回归）。
+//      ★ 这条**不**断言具体面板尺寸（`fps` 是本机读数）；只钉"原点必须还是那块混合底"。
 //
 // ★ B（2026-11-18）：HUD 的**内容**由外置脚本 `scripts/ui/hud.js` 产出（QuickJS 同步跑），
 //   C++ 侧只剩"读数 → 脚本 → 栅格化 → `presentOverlay`"。⇒ **期望面板**只能由**同一个脚本 +
@@ -549,6 +554,90 @@ bool caseDirectWindow(std::string* skip_why) {
     return true;
 }
 
+// ⑤ 尺寸 churn（renderer 与直出共用）：`worst` 交替 + `frame` 变化 ⇒ 面板宽度每几帧变一次。
+// ★ 期望值 = **画布原点那一个像素**的混合底（与 ③④ 同一条整数公式）；⛔ 不猜面板尺寸，
+//   也⛔ 不断言 fps（那是本机读数）—— 只问"尺寸变过之后原点还是不是那块 80% 混合底"。
+bool caseSizeChurn(bool gpu, std::string* skip_why) {
+    lift_test::g_current_case = "overlay/size-churn";
+    lift::FontEngine font;
+    if (!font.fontFileAvailable(false)) {
+        *skip_why = "缺宿主字体 Amayui-CN_cnjp.ttf（LIFT_HOST_FONT_PATH / corpus/assets/fonts）";
+        return false;
+    }
+    const int frame_w = gpu ? 320 : 640;
+    const int frame_h = gpu ? 240 : 360;
+    Fx f;
+    if (!make(f, frame_w, frame_h, kGuestArgb)) {
+        LIFT_CHECK(false);
+        return true;
+    }
+    const std::vector<std::uint8_t> before = guestBytes(f);
+
+    lift::SdlWindow win;
+    lift::SdlWindowOptions opt;
+    opt.title = gpu ? "emulator-lift overlay churn (direct)" : "emulator-lift overlay churn (renderer)";
+    if (!gpu) opt.driver_list = "software";
+    opt.hidden = true;
+    opt.raster_gpu = gpu;
+    opt.overlay = true;  // ui_script 空 ⇒ 走开发回退（`LIFT_UI_SCRIPT_DIR/hud.js`）
+    win.setCaptureForTest(true);
+    std::string err;
+    if (!win.init(opt, &err)) {
+        *skip_why = "窗口系统 / HUD 脚本不可用：" + err;
+        return false;
+    }
+    if (gpu && !win.directPresentActive()) {
+        *skip_why = std::string("GPU 直出未成立：") + win.describe();
+        win.shutdown();
+        return false;
+    }
+    LIFT_CHECK(win.overlayEnabled());
+
+    // 画布原点：窗口 == 帧尺寸 ⇒ 画面原点 (0,0) + `uiCanvasOrigin` 的居中偏移（与 ③④ 同一份算术）。
+    const lift::ui::CanvasOrigin canvas = lift::ui::uiCanvasOrigin(frame_w, frame_h);
+    const std::uint32_t want_bg = blendOver(kOverlayBgRgb, kGuestRgb, kOverlayBgAlpha);
+    LIFT_CHECK(want_bg != kOverlayBgRgb);  // 有区分力：与"半透明没生效"的不透明值不同
+    int sampled = 0;
+    int wrong = 0;
+    std::uint32_t first = 0;
+    for (int i = 1; i <= 200; ++i) {
+        lift::UiReadings readings;
+        readings.has_worst = true;
+        // 面板宽变：偶数帧 `wall=100.0ms`、奇数帧 `9.9ms`；`frame` 本身每帧都变（位数 1→2→3）。
+        readings.wall_max_ms = (i % 2 == 0) ? 100.0 : 9.9;
+        readings.shim_max_ms = (i % 3 == 0) ? 10.0 : 1.0;
+        // `guest=--`（4 个字符）与 `guest=3.3ms`（5 个字符）交替 ⇒ 再变一次宽度。
+        readings.has_guest = (i % 5 == 0);
+        readings.guest_max_ms = 3.3;
+        win.setUiReadings(readings);
+        if (!win.submitFrame(f.arena, *f.s, &err)) {
+            LIFT_CHECK(false);
+            break;
+        }
+        if (i % 10 != 0) continue;
+        std::uint32_t argb = 0;
+        if (!win.readbackPixel(canvas.offset_x, canvas.offset_y, &argb, &err)) {
+            LIFT_CHECK(false);
+            continue;
+        }
+        ++sampled;
+        if (i == 10) first = argb & 0x00FFFFFFu;
+        if (!nearRgb(argb & 0x00FFFFFFu, want_bg, 1)) ++wrong;
+        LIFT_CHECK(nearRgb(argb & 0x00FFFFFFu, want_bg, 1));
+    }
+    std::printf(
+        "overlay/size-churn (%s): 200 frames, sampled=%d canvas_origin=(%d,%d) 首读=#%06X 期望=#%06X 错=%d\n",
+        gpu ? "direct" : "renderer", sampled, canvas.offset_x, canvas.offset_y, first, want_bg, wrong);
+    LIFT_CHECK_EQ_I64(sampled, 20);
+    LIFT_CHECK_EQ_I64(wrong, 0);
+    // churn 200 帧之后叠层仍然**活着**（⛔ 不是失败后被 `disableOverlay` 静默关掉）。
+    LIFT_CHECK(win.overlayEnabled());
+    LIFT_CHECK(guestBytes(f) == before);  // ⛔ 叠层不写 guest 像素
+
+    win.shutdown();
+    return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -562,8 +651,10 @@ int main(int argc, char** argv) {
     std::string skip_why;
     if (gpu) {
         if (!caseDirectWindow(&skip_why)) LIFT_SKIP(skip_why.c_str());
+        if (!caseSizeChurn(true, &skip_why)) LIFT_SKIP(skip_why.c_str());
     } else {
         if (!caseRendererWindow(&skip_why)) LIFT_SKIP(skip_why.c_str());
+        if (!caseSizeChurn(false, &skip_why)) LIFT_SKIP(skip_why.c_str());
     }
     return finish("overlay");
 }

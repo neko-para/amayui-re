@@ -9,7 +9,8 @@
  *
  *     globalThis.render = function render() { … };
  *
- * `scripts/ui/ui.d.ts` 只声明两个宿主全局：`ui` 与 `game`。
+ * `scripts/ui/ui.d.ts` 声明宿主全局 `ui` 与 `game`，外加入口 `render` 的**类型**（供 `jsconfig.json`
+ * 的 `checkJs` 用；运行时 `render` 由脚本自己赋值，不是宿主注入的值）。
  */
 
 /** `ui.rect({ … })`：参考像素（1280×720 画布）的轴对齐矩形。 */
@@ -114,3 +115,11 @@ declare const ui: {
 
 /** 只读读数。属性是 getter（无 setter）⇒ strict 下赋值抛 TypeError。 */
 declare const game: UiFrameReadings;
+
+/**
+ * 入口（脚本必须显式赋给 `globalThis.render`）。宿主**每帧**调一次；调用前 display list 已清空。
+ *
+ * ★ 只是类型声明：`jsconfig.json` 的 `checkJs` 用它，让 `globalThis.render = function …` 类型通过。
+ *   运行时这个全局**不存在**（脚本自己赋；宿主没赋 ⇒ 加载期硬失败）。
+ */
+declare var render: () => void;

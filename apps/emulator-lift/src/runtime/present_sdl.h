@@ -164,8 +164,9 @@ public:
     //   时 sink 建的只是隐藏离屏窗口，`--scale` 没生效 ⇒ caller 把它置 false 再打。
     //   窗口没建（init 失败）⇒ 缺省 1280×720。
     ScaleReport scaleReport() const;
-    // ★ 调试叠层开关（`--overlay` / `--ui`）。`init()` 之后也能改：关掉时立刻把已建的叠层纹理
-    //   丢掉；再打开时按 `ui_script` 重新装脚本（**失败 ⇒ 一次性 stderr + 保持关**，⛔ 不崩）。
+    // ★ 调试叠层开关（`--overlay` / `--ui`）。`init()` 之后也能改：关掉时把已建的叠层纹理
+    //   **退役**（不立即销毁 —— 在飞的 draw 可能还在 GPU 队列里；`shutdown()` 统一释放）；
+    //   再打开时按 `ui_script` 重新装脚本（**失败 ⇒ 一次性 stderr + 保持关**，⛔ 不崩）。
     //   默认关；只影响窗口像素（⛔ 不碰 guest 内存）。
     void setOverlay(bool on);
     // ★ `PresentSink`：`Machine` 每帧 / 身份变化时推过来的只读读数（`script` / `worst`）。

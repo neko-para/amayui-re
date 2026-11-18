@@ -22,21 +22,17 @@
 
 ## 已核（2026-11-18 / main / macOS arm64）
 
-- `JS_Eval` 走 `JS_EvalInternal`，要求 `ctx->eval_internal` 非空（只由 `JS_AddIntrinsicEval` 设）
-  ⇒ 宿主要编译脚本就必须加 Eval；砂箱的门是**加完再删** `eval` / `Function` /
-  `Function.prototype.constructor`（实测删后 `eval('1')` = ReferenceError、
-  `.constructor('return 1')` = TypeError；只删全局 `Function` 不够）。
+- `JS_Eval` 要求 `ctx->eval_internal`（只由 `JS_AddIntrinsicEval` 设）⇒ 必须加 Eval；
+  砂箱的门是**加完再删** `eval` / `Function` / `Function.prototype.constructor`（只删全局不够）。
 - 语法错 / 运行期错的 `message` + `stack` 都带 `<origin>:<line>:<col>`。
-- 帧列表：`Engine+0x5D894` 40 槽 × `0x78`；活动 = `record+0x00 != 0` 且已提交；`parent = +0x38`；
-  `top = slot == cur`（`cur` 是执行点，引擎没有独立栈顶变量）；名字复用 `MarkerSampler`
-  （`.tmp/ui-qjs/frames-research.md`，14 条已证 / 8 条未证）。
+- 帧列表：40 槽 × `0x78`；活动 = `record+0x00 != 0` 且已提交；`parent=+0x38`；`top=slot==cur`；
+  名字复用 `MarkerSampler`（`.tmp/ui-qjs/frames-research.md`，14 证 / 8 未证）。
 
 ## 范围
 
 - `third_party/quickjs-ng`（v0.10.1 / `3c9afc9…` / MIT / 原样 vendor + README + 本仓 CMake）。
 - `src/ui/script.h` / `script_quickjs.{h,cpp}` / `quickjs_value.h`（RAII 值包装；公开头零 qjs 类型）。
-- `src/ui/present_ui.{h,cpp}`；删 `src/ui/hud.{h,cpp}`、`src/runtime/overlay.{h,cpp}`；
-  `src/runtime/ui_readings.h`。
+- `src/ui/present_ui.{h,cpp}`；删 `hud.{h,cpp}` / `overlay.{h,cpp}`；`src/runtime/ui_readings.h`。
 - `scripts/ui/{hud.js,ui.d.ts,README.md}`：**外置**默认 HUD（⛔ 不编进 exe）；解析
   `<exe_dir>/scripts/ui/hud.js` → `LIFT_UI_SCRIPT_DIR/hud.js` → 硬错。
 - `src/runtime/engine_frames.{h,cpp}` + `game.local_frames()` + HUD 栈顶行；`present.h` /
@@ -48,9 +44,8 @@
 
 ## 判据
 
-1. `ui-script-quickjs`：砂箱（eval / Function / `.constructor` / Math.random / Date / performance /
-   import 不可用）、预算（死循环不可 catch、OOM 不崩）、`ui.rect/text/measure`、`game` 只读 getter、
-   错误带 `origin:line:col` 且下一次 render 仍成功、缺 `globalThis.render` ⇒ load 失败。
+1. `ui-script-quickjs`：砂箱（eval/Function/`.constructor`/Math.random/Date/performance/import）、
+   预算（死循环不可 catch、OOM 不崩）、`ui.*`、`game` getter、错误带 `origin:line:col`、缺入口失败。
 2. `ui-hud-script`：外置 `hud.js` 的行序 = mouse / script / fps / frame / worst（**无 raster/present**）、
    底 alpha 204 / 字 255；`local_frames()` 里 `top=true` 的项压过 `game.script`（无 top 回退）。
 3. `ui-frames`：活动槽 / `cur` 第一 / `top` / 空槽跳过 / `parent` 原样 / 6 种不可用 ⇒ err + 空表 /
@@ -64,16 +59,20 @@
 
 - 全量 ctest **116/116**（4 条既有 SKIP）；`ui-script-quickjs` 91/0、`ui-hud-script` 59/0、
   `ui-frames` 357/0、`overlay` 3090/0、`overlay-gpu` 1106/0、`aot-overlay` 36/0。
-- 真 boot（`--overlay --max-frames 2`）：`local_frames()` len=8，`[0] slot=1 TITLE.BIN(id=21092,
-  parent=0,top=true)`，无 `[frames] why=`；其余槽号降序 37/31/30/29/28/26/0。
+- 真 boot：`local_frames()` len=8，`[0] slot=1 TITLE.BIN(id=21092,parent=0,top=true)`，无 why。
 - 直出 `(0,0)=#262040` = `blend(#101820,#8040C0,204)`；BMP `(13,19,26)`；win32 未验证。
 
 ## 未做
 
-- M1 的 layout / anchor / 百分比 / when / hit / clip / 校验表；M2 的点击路由 / `--ui-input` /
-  捕获状态机 / `--ui-strict` / 热重载。
-- `host.log` / `time_budget_ms` / `probe` / `global`·`local` 数据面（M3）。
-- `local_frames()` 只给最小版（不做 parent 链 / depth / in_chain）；`+0x5C` / `+0x64..6C` / 三组表
-  语义未取证；控制层 `sample.frames` 另单。
-- 发行打包带上 `scripts/ui/`（发行前补）；`.d.ts` 漂移守卫；体积 / 首帧开销读数。
-- win32 未跑（合入前补 `ctest -R '^(ui-script-quickjs|ui-frames|overlay|aot-overlay)$'`）。
+- M1 布局 / when / hit / 校验表；M2 点击路由 / `--ui-input` / `--ui-strict` / 热重载；
+  M3 的 `host.log` / `probe` / `global`·`local` 数据面。
+- `local_frames()` 只给最小版（无 parent 链 / depth）；`+0x5C` / `+0x64..6C` / 三组表未取证；
+  控制层 `sample.frames` 另单。
+- 发行打包 `scripts/ui/`；`.d.ts` 漂移守卫；体积 / 首帧开销读数；win32 未跑
+  （合入前补 `ctest -R '^(ui-script-quickjs|ui-frames|overlay|aot-overlay)$'`）。
+
+## 补充（2026-11-18 晚）
+
+- **高帧率 overlay 部分丢失**：纹理在尺寸变化时被立即 `Destroy/Release`（上一帧 draw 可能仍在飞）
+  ⇒ grow-only 容量 + 退役列表（只在 shutdown 释放）+ 子矩形上传；`overlay/size-churn` 200 帧守卫。
+- **脚本编辑器**：`scripts/ui/tsconfig.json`（`allowJs/checkJs/strict`）；`tsc -p` 绿，不进 typecheck。
