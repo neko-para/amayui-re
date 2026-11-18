@@ -400,16 +400,23 @@ ctest --test-dir out --output-on-failure
   `apps/emulator-lift/CMakeLists.txt` 与 `tools/mutate-check.mjs` ⇒ 各自**追加在自己的段尾**，撞了由父级手工解。
   开新车道前先看另一棵树：`git -C <另一棵> status --porcelain` + `git -C <另一棵> diff --name-only`。
 - ★ **真相件始终只在 main**（需求单 / `AGENTS.md` / `CTX.md` / `corpus/**`）：这是"真相只有一份"，与并行无关。
-- ★ **合并方向：只有 `dev → main`**（用户 2026-11-17 口径）。`git merge dev` 把 dev 车道的成果收口进真相仓；
-  ⛔ **不把 main 的代码 merge 进 dev**（那样合并方向就乱了，也说不清哪棵树是整合点）。
-  ⇒ 真相件（需求单 / `AGENTS.md` / `docs`）**天然只能在 main 产出** ⇒ dev 仍要 `git merge main` 拿它们 ——
-  这不是"代码合并"，是**同步真相**；为了把冲突面压到最小，真相件改动集中在 main 并尽快 sync。
+- ★ **合并方向：`dev → main` 收口，`main → dev` 只允许 fast-forward**（用户 2026-11-19 口径）。
+  ⇒ 收口：`git -C <main 树> merge dev` 把 dev 车道的成果收口进真相仓。
+  ⇒ 同步：**main → dev 只允许 fast-forward**：`git -C <dev> merge --ff-only main`。
+  ⛔ `--no-ff` 与任何在 dev 上造出的 merge commit 都不许（`.githooks/pre-merge-commit` 会拒）——
+  整合点只有一个（`main`），dev 的历史必须**线性**（= main 的历史 + dev 独有的提交）。
+- ⇒ 真相件（需求单 / `AGENTS.md` / `docs`）**天然只能在 main 产出** ⇒ dev 仍要拿它们；
+  但 **dev 与 main 分叉时**（dev 有 main 没有的提交，**且** main 又往前走了）`--ff-only` 会失败 ——
+  这不是异常，是策略（⚠ 精确口径：dev 只是**领先**、main 没动 ⇒ `Already up to date` / exit 0，**不是**失败）：
+  先把 dev 的成果在 main 收口（上面那条 `git merge dev`），再在 dev `git merge --ff-only main`。
+  ⛔ 不要为了"现在就想同步"去 `rebase`（改写历史）或造 merge commit。
+  而 `--ff-only` 不是"代码合并"，是**同步真相**；为了把冲突面压到最小，真相件改动集中在 main 并尽快 sync。
 - ★ 由上面那条派生出**分派规则**（判据是**依赖**，⛔ 不是任务长度）：
   - **dev 将来会需要的代码 ⇒ 必须放 dev**（否则它永远到不了 dev）；
   - **dev 不需要的代码 ⇒ 放哪都行 —— 优先放当前空闲的那棵树**，让两路真并行；
     ⛔ 不要把"长任务"整个堆到 dev：那会把两条车道退化成一条（用户 2026-11-17 口径）。
   - 若 dev 的新任务依赖 main 上还没做完的代码 ⇒ **阻塞等待**（用户已接受这种等待），
-    ⛔ 不要为此造 main→dev 的代码合并。
+    ⛔ 不要为此把 main 的代码搬到 dev（ff-only 只移动指针，不会产生内容合并）—— 阻塞等待即可。
   - ⚠ **两条车道都要墙钟 A/B 时会互相污染**（§12.6）：要么错开测，要么先把实现做完、把 A/B 留到独占窗口。
 - ★ **要墙钟读数的车道独占机器**：两条车道同时 `cmake --build` 会互相污染时序读数（§12.6）。
   功能类验收（红/绿、停点名字、`insns`）不受影响 ⇒ 并行时把"性能结论"让给独占用例。
@@ -426,7 +433,7 @@ ctest --test-dir out --output-on-failure
 - ⛔ **已提交的东西不许回退 / 改写**：已合进 `main` 或已推送的提交 ⛔ `reset --hard` · ⛔ `commit --amend` ·
   ⛔ `rebase` · ⛔ `push --force` / `--force-with-lease`。提交坏了 ⇒ **往前修**（再来一条修复提交；`git revert` 也生成新提交）。
   **历史只追加。**
-- dev 上**尚未合进 main** 的最后一条提交可以 `--amend`；⛔ main 上一律新提交（main 的历史是审计面）。
+- ⛔ `--amend` 一律不许（**含 dev 上尚未合入的最后一条**）：历史只追加，提交坏了就再来一条修复提交。
 - 提交说明沿用现有风格（`feat:` / `fix:` / `chore:` / `docs:` / `test:`），一条提交一件事。
 - 推送默认**不做**，要用户点头。
 - ★ 两棵树**各自的 index 是分开的**（`git worktree` 自带）⇒ 两个会话同时 `git add` / `commit` 不互踩；
@@ -435,14 +442,17 @@ ctest --test-dir out --output-on-failure
 ### 14.2 合并：只 `merge`，不 `rebase`、不 `squash`
 
 ```bash
-cd E:\Projects\amayui-re && git merge dev      # ★ 唯一方向：把 dev 车道的成果收口进真相仓
+cd E:\Projects\amayui-re && git merge dev      # ★ 收口（唯一方向）：把 dev 车道的成果收口进真相仓
+
+# ★ 同步（只许 ff）：git -C <dev> merge --ff-only main
+git -C E:\Projects\amayui-re-dev merge --ff-only main
 ```
 
 - ⛔ 不要 `rebase` 把 dev 挪到 main 顶上（那会改写已提交历史，撞 14.1 红线）。
 - 合并后在 **main** 上跑门禁：`pnpm test` / `pnpm verify` / `node tools/requirements.mjs --validate`。
 - **集成问题（冲突 / 门禁红）一律回 dev 修**，再 `git merge dev`。
-  ⛔ 不要走"在 main 上改一行再 merge 进 dev"那条路 —— 那就是 main→dev 的代码合并，被本节禁止。
-  （唯一例外：14.1 提到的"提交坏了往前修"，那是**修复提交**，不是把 main 的代码搬进 dev。）
+  ⛔ 不要走"在 main 上改一行再想办法搬回 dev"那条路 —— ff-only 只移动指针、不搬运内容；集成问题就在 dev 修，收口后再 `git merge --ff-only main`。
+  （"提交坏了往前修"= 再来一条**修复提交**，不是 amend / rebase，也不是把 main 的代码搬进 dev。）
 
 ### 14.3 `data/**` 只在 main 改
 
@@ -479,16 +489,22 @@ cd E:\Projects\amayui-re && git merge dev      # ★ 唯一方向：把 dev 车�
 
 ### 14.6 活政策 vs 快照：`AGENTS.md` 要维护，`CTX.md` **不**维护
 
-- `AGENTS.md` 是**活政策**，只在 main 改；dev 要新政策 ⇒ 先在 main 改，再 `git merge main` 进 dev。
+- `AGENTS.md` 是**活政策**，只在 main 改；dev 要新政策 ⇒ 先在 main 改，再 `git merge --ff-only main` 进 dev。
 - `CTX.md` **不是需要维护的文档**：它是"准备切换设备"那一刻的**交接快照**。
   ⇒ ⛔ 平时不要顺手更新它、不要跟着代码补数字（那会变成一份永远过期的状态表）；
   只有用户说"要换设备 / 看交接"时才重建。
 - 两者共同的硬线：**同一句话不许在两个工作树里各有一份**（副本一分叉就是两条规则）。
 
-### 14.7 执行器：`.githooks/pre-commit`（【win】已在跑）
+### 14.7 执行器：`.githooks/pre-commit` + `.githooks/pre-merge-commit`（【win】已在跑）
 
-★ 本节的口径不靠自觉：**`.githooks/pre-commit`** 是入库件，**非 `main` 分支上提交控制层文件即拒**
-（`data/**` · `corpus/**` · `AGENTS.md` · `CTX.md`）；合并 / `cherry-pick` / `revert` 产生的提交放行（它们在做**同步**，不是新建真相）。
+★ 本节的口径不靠自觉，**两个执行器**都是入库件：
+
+- **`.githooks/pre-commit`**：非 `main` 分支上**提交控制层文件即拒**（`data/**` · `corpus/**` · `AGENTS.md` · `CTX.md`），
+  **补完 merge commit 也拒**（堵 `pre-merge-commit` 拒绝后 `git commit --no-edit` 那条路 —— 两道闸）；
+  `cherry-pick` / `revert` 产生的提交放行（它们在做**同步**，不是新建真相）。
+- **`.githooks/pre-merge-commit`**：**非 `main` 分支上造 merge commit 即拒** —— §14.2 的"main → dev 只允许 `--ff-only`"由此落地。
+  它只在 git **将要创建 merge commit** 时才跑 ⇒ `--ff-only` 成功 / 已经最新（不造 commit）⇒ 不跑 ⇒ 天然放行；
+  `main` 上的 merge commit（`git merge dev`）照旧放行。
 
 ```bash
 git config core.hooksPath .githooks                 # 每个 clone / 每台机器一次（worktree 共用同一份 config）
@@ -497,10 +513,18 @@ git config --get core.hooksPath                     # 应打印 .githooks ——
 
 - ⛔ 反向（main 上别长代码）**故意不做执行器**：14.2 留了"集成问题可在 main 直接修"的口子，硬拦会把它堵死。
 - ⛔ `git commit --no-verify` 是后门：绕过它就等于明知故犯让真相分两份；真绕了要在提交说明里写明原因。
+  `git merge --no-verify` 对 `pre-merge-commit` 同理（绕过 = 明知故犯违反 §14.2 的 ff-only 口径）。
 - ★ **注册了不等于生效**：2026-11-17 实测 —— 先在 main 建了 hook 文件、dev 还没拿到它，dev 上提交 `data/.hooktest`
   **照样成功**（hook 文件不在那棵树的 cwd 下）。⇒ 判定口径是"每棵树各实测**一次真提交被拒**"，不是看 `git config` 有值。
 - 读数（2026-11-17 / win32 / git 2.x）：dev 上 `git add data/.zz-hooktest` + `commit` ⇒ **exit 1** 并列名该文件、
-  索引保持不变；dev 上 `git merge --no-ff main` ⇒ **放行**；dev 上改 `tools/**` 提交 ⇒ **放行**。
+  索引保持不变；dev 上 `git merge --no-ff main` ⇒ **放行**（当时该 hook 尚未存在）；dev 上改 `tools/**` 提交 ⇒ **放行**。
+- 读数（2026-11-19 / win32 / git 2.41.0 / **一次性 scratch 仓** —— ⛔ 不在真树里造 merge commit 做试验）：
+  dev 上 `git merge --no-ff main` ⇒ **exit 1**（三行提示都在，且**不产生** merge commit）；
+  dev 上 `git merge --ff-only main` ⇒ **exit 0**，`git log --oneline` 线性（无 merge commit）；
+  main 上 `git merge --no-ff dev` ⇒ **exit 0**（放行，真 merge commit 产生）。
+  ⇒ 真树（dev 上）的读数现在**拿不到**（dev 车道占用）：`<待实测：dev 空闲后、且 dev 与 main 分叉（或落后）时跑 git -C E:\Projects\amayui-re-dev merge --no-ff main 应 exit 1>`。
+  命令：`git -C E:\Projects\amayui-re-dev merge --no-ff main`（应 exit 1、不产生提交；之后 `git -C E:\Projects\amayui-re-dev status` 应干净）。
+  ⚠ 前提：**dev == main（或 dev 领先且 main 没动）时该命令是 `Already up to date` ⇒ exit 0、hook 根本不跑** —— 那是"无事可做"，不是放行。
 
 ---
 

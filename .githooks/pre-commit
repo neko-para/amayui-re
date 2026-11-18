@@ -1,15 +1,20 @@
 #!/bin/sh
-# .githooks/pre-commit —— 「双工作树分家」的执行器（AGENTS.md §14.7）
+# .githooks/pre-commit —— 「双工作树分家 + main → dev 只许 ff」的执行器（AGENTS.md §14.3 / §14.6 / §14.7）
 #
-# 拒绝：在 **非 main 分支**上提交控制层文件（data/** · corpus/** · AGENTS.md · CTX.md）。
-# 理由：需求树 / 语料 / 政策只有**一份**真相（main 工作树）；在 dev 上改它 = 两份真相 + merge 必冲突。
+# 拒绝（非 main 分支上）：
+#   ① merge commit —— 与 `.githooks/pre-merge-commit` 是**两道闸**：第一道在 `git merge` 将要造 commit 时拒；
+#      这一段堵"被它拒了之后 MERGE_HEAD 留在树里、普通 `git commit --no-edit` 把 merge commit 补完"的路。
+#      理由：整合点只有一个（main），dev 的历史必须线性 —— main → dev 只许 `git merge --ff-only main`（§14.2）。
+#   ② 控制层文件（data/** · corpus/** · AGENTS.md · CTX.md）。
+#      理由：需求树 / 语料 / 政策只有**一份**真相（main 工作树）；在 dev 上改它 = 两份真相 + merge 必冲突。
 #
 # 放行：
-#   · main 分支上的任何提交（真相仓本来就该改这些）
-#   · 合并 / cherry-pick / revert 产生的提交（它们在**同步**，不是新建一条真相）
+#   · main 分支上的任何提交（真相仓本来就该改这些；`git merge dev` 是正常整合）
+#   · cherry-pick / revert 产生的提交（它们在**同步**，不是新建一条真相）
 #   · 空索引
 #
-# 绕过：`git commit --no-verify`（有意留的后门；绕了 = 明知故犯让真相分两份）
+# 绕过：`git commit --no-verify` / `git merge --no-verify`（有意留的后门；绕了 = 明知故犯 ——
+#       前者让真相分两份，后者违反 §14.2 的 ff-only 口径，都要在提交说明里写明原因）。
 # 注册：`git config core.hooksPath .githooks`（每个 clone 一次；worktree 共用同一份 config）
 
 set -u
@@ -17,8 +22,16 @@ set -u
 branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
 [ "$branch" = "main" ] && exit 0
 
-# 合并 / 拣选 / 回退：放行（同步语义）
-for ref in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD; do
+# 非 main 分支上不许有 merge commit（AGENTS.md §14.2 的 ff-only）。
+# `pre-merge-commit` 是第一道闸；这一段堵"被它拒了之后 git commit --no-edit 补完"的路。
+if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+    echo "⛔ $branch 上不许有 merge commit（AGENTS.md §14.2，2026-11-19 口径）。" >&2
+    echo "   同步 main 的真相：git merge --ff-only main；要放弃这次合并：git merge --abort" >&2
+    exit 1
+fi
+
+# 拣选 / 回退：放行（同步语义）
+for ref in CHERRY_PICK_HEAD REVERT_HEAD; do
     if git rev-parse -q --verify "$ref" >/dev/null 2>&1; then
         exit 0
     fi

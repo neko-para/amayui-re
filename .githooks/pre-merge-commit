@@ -1,0 +1,32 @@
+#!/bin/sh
+# .githooks/pre-merge-commit —— 「main → dev 只许 fast-forward」的执行器（AGENTS.md §14.2 / §14.7）
+#
+# 拒绝：在**非 main 分支**上创建 merge commit（`git merge --no-ff main` · `git merge main` 走非 ff 路径
+#       · 任何在 dev 上落出一个 merge commit 的操作）。
+# 理由：整合点只有一个（`main`）；dev 的历史必须**线性**（= main 的历史 + dev 独有的提交）。
+#       main → dev 只允许 `git merge --ff-only main` —— 它不造 merge commit，所以本 hook 天然放行。
+#
+# 触发时机：只有 git **将要创建 merge commit** 时才跑（`git merge` 走到"该造 merge commit"的那一步）。
+#   ⇒ `git merge --ff-only main` 成功 / 已经是最新（Already up to date）⇒ 根本不创建 commit
+#     ⇒ 本 hook 不跑 ⇒ 天然放行（这就是为什么 ff-only 这条策略能只靠本 hook 落地）。
+#   ⇒ 冲突停下来等你解的时候也还没到造 commit 那一步；解完 `git commit` 时才跑。
+#
+# 放行：main 分支上的 merge commit（在 main 上 `git merge dev` 是正常整合，§14.2 的收口方向）。
+# 判分支：只靠 `git rev-parse --abbrev-ref HEAD`。
+#   ⛔ 不要改成去读 `.git/MERGE_HEAD` 那条路径 —— worktree 下 `.git` 是**文件**不是目录（§14.5）。
+#
+# 绕过：`git merge --no-verify`（有意留的后门；绕了 = 明知故犯违反 §14.2 的 ff-only 口径，
+#       要在提交说明里写明原因）。
+# 注册：`git config core.hooksPath .githooks`（每个 clone 一次；worktree 共用同一份 config）
+
+set -u
+
+branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
+
+# main 上合并 dev 是正常整合 ⇒ 放行
+[ "$branch" = "main" ] && exit 0
+
+echo "⛔ $branch 上不许造 merge commit（AGENTS.md §14.2，2026-11-19 口径）" >&2
+echo "   同步 main 的真相：git merge --ff-only main" >&2
+echo "   若 --ff-only 失败（$branch 领先）：先回 main 收口 —— git -C <main 树> merge $branch" >&2
+exit 1
