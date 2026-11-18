@@ -25,6 +25,10 @@
 **能**：在画面矩形左上角显示一块 ASCII 文本（鼠标 / 脚本身份 / fps / 帧号 / 光栅后端 / 呈现路径 / 最近 3 s 每帧最大值）；只改宿主送显像素；两条呈现路径都画；有守卫。
 **不能**：面板 / 边框 / 图片、任意位置 / 锚点 / 缩放、中文、按 `script+pos` 显隐、多块界面 / z-order / 裁剪、点击命中与吞掉、插件化 / 热重载、任何声明式或脚本描述。
 
+★ **2026-11-18 用户裁决（M2a）**：HUD 的 `raster` / `present` 两行**去掉** —— 开 overlay 时是人在体验，
+这两个开关信息没有价值（不是"暂时隐藏"，是**不再产出**）。同一裁决下 HUD 改由
+`scripts/ui/hud.js` 经 QuickJS 产出（见 `overlay-quickjs.md`），行顺序 = mouse / script / fps / frame / worst。
+
 ### 1.2 两条呈现路径的坐标语义已经不一致
 
 | 路径 | 合成点 | 坐标语义 |
@@ -62,7 +66,7 @@
 | D9 | **默认档零成本、零周期输出**：没有 `--ui` ⇒ 一次 bool 判空；有插件但本帧无可见元素 ⇒ 不布局 / 不栅格 / 不上传 / 不打印；`[ui]` 行按（插件, 错误种类）去重 | `AGENTS.md` §12.8；一次性收口行不收 |
 | D10 | ⛔ **无 Promise / async**：`render` 必须**同步**产出 display list；宿主没有 job 队列 | 一帧的 UI 由这一帧的输入决定，异步会让帧序不可复现 |
 | D11 | AOT 的 `script/pos` **块入口采样门是新增面**，不是"接上已有的" | 解释器有 `Machine::sampleMarker`；AOT 只有控制层 `sample` 时读一次（`aot_host.h:control_marker_`） |
-| D12 | **不保留第二套**：M0 把两条绘制路径合并成 `presentOverlay`；M2 删 `formatOverlayLines` / `OverlayState` / `OverlayStatus`；`--overlay` 从 M2 起只是 `--ui builtin:hud` 的参数别名 | 两套实现必然漂移；旧 5×7 只留 `--ui-glyphs bitmap` 测试档 |
+| D12 | **不保留第二套**：M0 把两条绘制路径合并成 `presentOverlay`；M2 删 `formatOverlayLines` / `OverlayState` / `OverlayStatus`；`--overlay` 从 M2 起只是**外置** `scripts/ui/hud.js` 的参数别名（`--ui <path>` 打开任意脚本） | 两套实现必然漂移；旧 5×7 点阵随 M2 一起删（`--ui-glyphs bitmap` 测试档本切片不开） |
 
 ## 3. 数据模型与 API
 
@@ -126,6 +130,14 @@ when: { script: ["SC00*", "TITLE"] }                 // 多个候选 = 或
 | `ui` | `screen/panel/rect/text/image`、`measure(text,size)`、`show/hide/toggle`、`log(level,msg)` | 唯一绘制入口；`log` 有界去重 |
 | `host` | `reload()`、`time_budget_ms()` | 请求热重载 / 读本帧剩余预算 |
 | `probe` | `read_u32(ea)`、`read_bytes(ea,n)` | **只读**、有上界、越界即错；必须显式 `--ui-probe`，启动打一行警告 |
+
+★ **M2a 已落地的子集**（2026-11-18）：`game` = `frame` / `fps` / `mouse{x,y}` / `script` /
+`worst{wall_ms, guest_ms?, shim_ms}`（不可用 ⇒ `undefined`，⛔ 不编 0）；`ui` = `rect` / `text` / `measure`
+（绝对参考像素；未知键**暂时忽略**，M1 的校验表之后接）。`insns` / `guest_ms` / `pos` / `script_id` /
+`metrics()`、`host` / `probe`、`show/hide/toggle/log`、`local/global` 未接（M3）。
+★ `game.local_frames()` 是**方法**（不是 getter）：返回活动帧数组（top-first；字段
+`slot / script_id / parent / script / name_degraded / top`），不可用 ⇒ `undefined`；
+证据与安全读取见 `.tmp/ui-qjs/frames-research.md`。
 
 `global/local` 的实现边界（读之前先检查前置条件）：
 
@@ -208,6 +220,15 @@ win32 取。
 
 ### M2 — QuickJS 宿主 + HUD 迁脚本 + 点击路由
 
+★ **M2a 已落地（2026-11-18；本切片只做 QuickJS 宿主 + HUD 迁脚本，点击路由仍属 M2）**：
+`--overlay` 的 HUD 由**外置** `scripts/ui/hud.js` 经 QuickJS 同步产出；`--ui <path>` 打开任意脚本
+（显式优先、隐含 overlay）；`game` 注入 `frame / fps / mouse / script / worst` + 按需方法
+`local_frames()`（帧区 40 槽的只读视图，top-first，`top = slot == cur`；证据
+`.tmp/ui-qjs/frames-research.md`；HUD 的 `script` 行取 `top=true` 的项（没有 top 就回退 `game.script`））；`raster` / `present` 两行**已删**；底 `#101820CC`（80% 不透明，
+renderer 路径 `SDL_BLENDMODE_BLEND`，直出也混合（D 单，`SDL_DrawGPUPrimitives`；win32 未验证））；旧 `OverlayState` / `OverlayStatus` /
+`formatOverlayLines` / 5×7 点阵 / `buildHud` / `presentHud` 已删。M1 的布局 / when / 命中 / 校验表、
+M2 的点击路由、M3 的数据面仍未做。
+
 落 `overlay-quickjs.md` 的适配器；HUD 变成 `scripts/ui/hud.js`；display list 成为脚本唯一出口；
 `UiClickRouter` 接进 `present_sdl.cpp:Impl::handleEvent` 与 `input_plan.cpp`；`--ui-input` / `--ui-strict`。
 
@@ -258,6 +279,9 @@ AOT 块入口采样门；`game.script/pos` + `when` 的端到端；`global/local
 `tests/present_window.cpp`（`present-window` 走 software、16:9 的 1:1 原点 / 颜色；`-gpu` 变体在
 直出成立时才断言，否则 SKIP 77 —— 直出面的主证据是 `overlay-gpu`）·
 `tests/aot_overlay.cpp`（`aot-overlay`，AOT 子进程 + 窗口截图 + `--dump-frame` 对照）。
+★ **M2a 落地的用例**：`tests/ui_script_quickjs.cpp`（`ui-script-quickjs`，沙箱 / 预算 / api / readings / error / entry）·
+`tests/ui_hud_script.cpp`（`ui-hud-script`，外置 `hud.js` 的行序 / 颜色 / 80% alpha / 无 raster·present）·
+`tests/ui_frames.cpp`（`ui-frames`，帧列表活动判据 / top / 降级 / `game.local_frames()`）。
 
 **变异自检**（每类一条代表，`tools/mutate-check.mjs`）：`when` 的 `pos` 比较 `>=`→`>` ⇒ `ui_when` 红 ·
 router 的"down 放 ⇒ up 放"改掉 ⇒ `ui_hit` 红 · 采样门少一个 EA ⇒ `ui_marker_gate` 红 ·
@@ -274,7 +298,9 @@ router 的"down 放 ⇒ up 放"改掉 ⇒ `ui_hit` 红 · 采样门少一个 EA 
 | R5 | 字体依赖（`LIFT_HOST_FONT_PATH` 不在 ⇒ 启动硬错） | `--ui-glyphs bitmap` 显式测试档；生产默认仍是字体，⛔ 不静默降级 |
 | R6 | "guest 客户区 == 帧尺寸"是既有假设；`--scale` 车道最终形状未知 | 先按相等验收；不等 / 变了记 observations，⛔ 不猜；`--scale` 只在 `letterboxFor` 之上接 |
 | R7 | 插件绕过 API 改 guest | API 无写入口 + 形态守卫（`src/ui/**` 不出现 guest 写 API）+ 逐位断言 |
-| R8 | QuickJS 内存 / 沙箱 / GC 与引用计数 / 静态链体积 / TS 产物（`.js` 与 `.d.ts` 漂移） | 见 `overlay-quickjs.md` §2、§5；体积是**估**，⛔ 不进判据；`.d.ts` 漂移由一条守卫钉住 |
+| R8 | QuickJS 内存 / 沙箱 / GC 与引用计数 / 静态链体积 / TS 产物（`.js` 与 `.d.ts` 漂移） | 见 `overlay-quickjs.md` §2、§5；体积是**估**，⛔ 不进判据；`.d.ts` 漂移守卫**未做**（M2a 只有声明文件） |
+| R9 | **80% 半透明在 GPU 直出上不生效**：`SDL_BlitGPUTexture` 是拷贝、不混合 | 已解决（D，2026-11-18）：直出改为专用混合绘制管线（`SDL_DrawGPUPrimitives` + `SRC_ALPHA/ONE_MINUS_SRC_ALPHA`），`directReadback` 同公式；win32 未验证 |
+| R10 | 外置 `scripts/ui/hud.js` 不在发行树 ⇒ `--overlay` 启动硬错 | 发行打包把 `scripts/ui/{hud.js,ui.d.ts,README.md}` 一起带上（`release/` 待补）；开发回退 `LIFT_UI_SCRIPT_DIR` |
 
 ## 待核
 

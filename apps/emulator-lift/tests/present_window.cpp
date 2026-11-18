@@ -16,7 +16,6 @@
 #include "runtime/host_window.h"
 #include "runtime/machine.h"
 #include "runtime/memory.h"
-#include "runtime/overlay.h"
 #include "runtime/present_sdl.h"
 #include "runtime/surface.h"
 
@@ -31,6 +30,31 @@
 #include <SDL3/SDL.h>
 
 namespace {
+
+// HUD 底色（与 `scripts/ui/hud.js` 的 `BG = "#101820CC"` 一致）。★ B 起 C++ 侧不再有这份常量：
+// 颜色是**脚本**的版式，生产头里只剩 `ui_readings.h`（读数）与 `present_ui.h`（合成入口）。
+constexpr std::uint32_t kOverlayBgRgb = 0x101820u;  // #101820
+constexpr int kOverlayBgAlpha = 204;                // #101820CC ⇒ 80% 不透明
+
+// 半透明底与底下画面的整数混合（与 `tests/overlay.cpp` / `d3d9_gpu.cpp` 的 CPU 混合同一条公式）：
+//     d = (s*a + d*(255-a) + 127) / 255
+constexpr std::uint32_t blendChannel(std::uint32_t s, std::uint32_t d, int a) {
+    return (s * static_cast<std::uint32_t>(a) + d * static_cast<std::uint32_t>(255 - a) + 127u) / 255u;
+}
+constexpr std::uint32_t blendOver(std::uint32_t src_rgb, std::uint32_t dst_rgb, int a) {
+    return (blendChannel((src_rgb >> 16) & 0xFFu, (dst_rgb >> 16) & 0xFFu, a) << 16) |
+           (blendChannel((src_rgb >> 8) & 0xFFu, (dst_rgb >> 8) & 0xFFu, a) << 8) |
+           blendChannel(src_rgb & 0xFFu, dst_rgb & 0xFFu, a);
+}
+// ±`tol` 逐通道相等（GPU / 软件 blend 的舍入可能与本文件的整数公式差 1）。
+constexpr bool nearRgb(std::uint32_t got, std::uint32_t want, int tol) {
+    for (int shift = 0; shift <= 16; shift += 8) {
+        const long a = static_cast<long>((got >> shift) & 0xFFu);
+        const long b = static_cast<long>((want >> shift) & 0xFFu);
+        if (a - b > tol || b - a > tol) return false;
+    }
+    return true;
+}
 
 struct Fx {
     lift::GuestMemory mem;
@@ -301,11 +325,20 @@ bool caseOverlayCanvasComposition(bool gpu, std::string* skip_why) {
     }
     LIFT_CHECK(win.overlayEnabled());
     LIFT_CHECK(win.submitFrame(f.arena, *f.s, &err));
-    const std::uint32_t bg = (static_cast<std::uint32_t>(lift::kOverlayBg[0]) << 16) |
-                             (static_cast<std::uint32_t>(lift::kOverlayBg[1]) << 8) | lift::kOverlayBg[2];
+    // ★ HUD 底是 `#101820CC`（alpha 204 ⇒ 80% 不透明）：**两条路径都按 alpha 与画面混合**
+    //   · renderer 路径走 `SDL_BLENDMODE_BLEND`；
+    //   · 直出（`gpu` 变体）走 D 单的 `SRC_ALPHA / ONE_MINUS_SRC_ALPHA` 混合管线
+    //     （⛔ 不再是 `SDL_BlitGPUTexture` 拷贝）。
+    //   ⇒ 期望同值 = `blend(#101820, guest, 204)`，±1 舍入。
+    const std::uint32_t guest_rgb = 0x8040C0u;  // `fill32(f, 0x008040C0u, ...)` 的 RGB
+    const std::uint32_t bg = blendOver(kOverlayBgRgb, guest_rgb, kOverlayBgAlpha);
     std::uint32_t px = 0;
     LIFT_CHECK(win.readbackPixel(0, 0, &px, &err));
-    LIFT_CHECK_EQ_U32(px & 0x00FFFFFFu, bg);  // 16:9 ⇒ 画布原点 == 画面原点
+    // ★ 读数（不是断言）：`ctest -V` 直接看到混合后的实际值与期望值。
+    std::printf("overlay-canvas-1to1: (0,0)=#%06X 期望 #%06X（%s，tol=1）\n", px & 0x00FFFFFFu, bg,
+                gpu ? "直出：80% 混合" : "renderer：80% 混合");
+    // 16:9 ⇒ 画布原点 == 画面原点。混合侧给 1 的容差。
+    LIFT_CHECK(nearRgb(px & 0x00FFFFFFu, bg, 1));
     LIFT_CHECK(win.readbackPixel(639, 359, &px, &err));
     LIFT_CHECK_EQ_U32(px & 0x00FFFFFFu, 0x8040C0u);  // 右下角仍是 guest
     const auto* after = f.arena.pixels(*f.s);

@@ -45,15 +45,19 @@ Promise / BigInt / WeakRef / `performance` 的来源（`quickjs.c:2318-2345` vs 
 
 1. `JS_NewContextRaw`（只建原型与空全局对象，不装任何构造器）。
 2. 只加 `JS_AddIntrinsicBaseObjects`（Object / Function / Array / String / Number / Boolean / Error 族 /
-   Math / Reflect / Iterator / Symbol / `parseInt` / `isNaN`）+ 可选 `MapSet` / `JSON`。
-3. ⛔ 不加 `Date`（墙钟）、`Eval`、`RegExp`、`Proxy`、`TypedArrays`、`Promise`、`BigInt`、`WeakRef`、
-   `JS_AddPerformance`（`Date.now` 派生）。
-4. **删两个**（`BaseObjects` 装进来的）：`globalThis.Function`、`Math.random`（种子 =
-   `js__gettimeofday_us()`，逐 **context** 不同 ⇒ 不可复现）。
-   ★ **真正的门是"不加 Eval"**：`new Function(src)` 与 `eval(src)` 都走 `JS_EvalInternal`，而它在
-   `quickjs.c:35012` 先判 `ctx->eval_internal`（只由 `JS_AddIntrinsicEval` 设置）⇒ 本形状不加 Eval 时
-   **两者在调用期就抛 TypeError、不会编译**；`globalThis.eval` 由 `BaseObjects` 装进来，被**同一道门**罩住。
-   ⇒ 删 `Function` 是**纵深防御 + 更清楚的报错 + 不留 API 面**，⛔ 不是"绕过 `origin:行:列` 契约"的唯一防线。
+   Math / Reflect / Iterator / Symbol / `parseInt` / `isNaN`）——本切片**不**加 `MapSet` / `JSON`。
+3. ⛔ 不加 `Date`（墙钟）、`RegExp`、`Proxy`、`TypedArrays`、`Promise`、`BigInt`、`WeakRef`、
+   `JS_AddPerformance`（`Date.now` 派生）；本切片连 `JSON` / `MapSet` 也不加（HUD 用不到）。
+4. ★ **必须加 `JS_AddIntrinsicEval`**，但只为**宿主**能编译脚本：宿主 `JS_Eval` 走
+   `JS_EvalThis2` → `JS_EvalInternal`，而它在 `quickjs.c:35012` 先判 `ctx->eval_internal`
+   （只由 `JS_AddIntrinsicEval` 设置）⇒ 不加它宿主自己就 `TypeError: eval is not supported`
+   （2026-11-18 实测）。**沙箱的门因此不是"不加 Eval"，而是加完之后删干净**：
+   `globalThis.eval`、`globalThis.Function`、**`Function.prototype.constructor`**、
+   `Math.random`（种子 = `js__gettimeofday_us()`，逐 **context** 不同 ⇒ 不可复现）。
+   ★ 只删 `globalThis.Function` **不够**：实测 `(function(){}).constructor('return 1')()`
+   在只删全局 `Function` 后仍可用；删掉 `Function.prototype.constructor` 后才抛 `TypeError`。
+   `eval` 全局删掉后是 `ReferenceError: eval is not defined`。
+   ⇒ 这一段推翻本节早先的"不加 Eval"写法（同一条实测，2026-11-18）。
 5. 无 `std` / `os`：那是 `quickjs-libc.c` 的模块；不设 `JS_SetModuleLoaderFunc` ⇒ `import` 失败。
 6. 无 host 反射：不学 `NativeObject<T>` / `NativePointerHolder`，⛔ 不给脚本任何 native 指针 / 句柄。
 
@@ -62,8 +66,8 @@ Promise / BigInt / WeakRef / `performance` 的来源（`quickjs.c:2318-2345` vs 
 | 资源 | 设置 | 失败面 |
 |---|---|---|
 | 内存 | `JS_SetMemoryLimit(rt, N)`（0 = 关）；超限 ⇒ 分配返 NULL ⇒ 抛错 | **插件致命**（OOM 后 ctx 不可信）⇒ 卸载，旧实例继续 |
-| 栈 | `JS_SetMaxStackSize(rt, 256 KiB)`（默认 1 MiB；Windows exe 默认栈 reserve 也是 1 MiB ⇒ 不调小会先打穿宿主栈再报溢出） | 同上 |
-| CPU | `JS_SetInterruptHandler(rt, cb, opaque)`：返非 0 ⇒ `JS_ThrowInterrupted` + `JS_SetUncatchableError` ⇒ 脚本 `try/catch` 吞不掉 | 本帧不上屏 + 一次响亮；连续 3 次 ⇒ 卸载 |
+| 栈 | `JS_SetMaxStackSize(rt, 512 KiB)`（默认 1 MiB；Windows exe 默认栈 reserve 也是 1 MiB ⇒ 不调小会先打穿宿主栈再报溢出；M2a 实值 512 KiB，见 `script_quickjs.cpp`） | 同上 |
+| CPU | `JS_SetInterruptHandler(rt, cb, opaque)`：回调返非 0 ⇒ 上游走 `JS_ThrowInternalError("interrupted")` + `JS_SetUncatchableError` ⇒ 脚本 `try/catch` 吞不掉（★ 0.10.1 的 `JS_ThrowInterrupted` 是 `quickjs.c` 的 static，头里没有，⛔ 不要直接调） | 本帧不上屏 + 一次响亮；连续 3 次 ⇒ 卸载 |
 
 ★ 中断粒度 = 每 `JS_INTERRUPT_COUNTER_INIT`（10000）条字节码 ⇒ 回调里**只查 deadline**，
 ⛔ 不要在回调里数 op。
@@ -116,28 +120,32 @@ class UiScript {   // init / update(dt,frame) / render(UiBuilder&) / on_click / 
 - ⛔ 无 Promise / async / job 泵：`render` 必须同步出 display list（`overlay.md` D10）。
 - `game` 定死为 **getter 字段**：带下标的只能是函数（`local_int(3)` 等）；⛔ 字段与函数两种形态不并存。
 
-## 4. TS 作者体验
+## 4. JS 作者体验（M2a 实况）
 
-- 插件是**单个 `.js`**（ES2022、无 `import`）；作者写 `.ts`，仓内工具跑 `tsc` 出 `.js`。
-  根 `devDependencies.typescript` 已在，⛔ 不往产品侧加依赖；单文件不需要 bundler。
-- `.d.ts` 落 `apps/emulator-lift/scripts/ui/types/overlay.d.ts`（`declare const ui/game/host`）+
-  同目录 `tsconfig.json`（`"lib":["ES2022"]`、`"types":[]`、`"noEmit":true`）。
-  **不进产品、不进 vcpkg、不进 CMake、不进 `pnpm typecheck` 的六份工程**。
-- **漂移守卫**（一条）：`tools/test/ui-dts.test.mjs` 从 `script_quickjs.cpp` 抽
-  `JS_SetPropertyStr(tbl,"<name>",…)` 与 `JS_DefinePropertyGetSet(...)` 的名字集合，与 `.d.ts` 的成员名比对；
-  红 = "作者看到的名字"与"运行时有的名字"分叉。
-- 模板：`scripts/ui/hud.ts` → `scripts/ui/hud.js`；`--ui <path>` 只吃 `.js`，
-  启动期校验"文件在 + 编译过 + `render` 是函数"，失败 = `exit 2`。
+- 默认 HUD = **外置** `apps/emulator-lift/scripts/ui/hud.js`（UTF-8、单文件、无 `import`、strict；
+  入口必须**显式** `globalThis.render = function render() { … }`；`render` 每次只往 display list 追加）。
+- 随发行分发 `scripts/ui/{hud.js, ui.d.ts, README.md}`。`--overlay` 的解析顺序：
+  ① `<exe 目录>/scripts/ui/hud.js`（发行布局）→ ② `LIFT_UI_SCRIPT_DIR/hud.js`（开发回退，
+  CMake 把源码目录以 `target_compile_definitions(... PUBLIC ...)` 注入）→ ③ 硬错（err 点名两个路径）。
+- `--ui <path>` 只吃 `.js`；显式优先且隐含 `--overlay`。启动期校验"文件在 + 编译过 + `render` 是函数"，
+  失败 = `exit 2` + `<path>:<行>:<列>`。
+- `scripts/ui/ui.d.ts` 是作者声明（`declare const ui` / `game`，含 `game.local_frames()`）；
+  **不参与构建、不进 `pnpm typecheck`**；本切片**没有** tsconfig / `tsc` 产物 / 漂移守卫
+  （`tools/test/ui-dts.test.mjs` 未做，见 `## 未做`）。
+- 模板：`scripts/ui/hud.js` 本身就是模板（版式常量 PAD/SIZE/BG/FG 在文件头）。
 
 ## 5. 静态链接与发行
 
-- QuickJS **静态链进 exe**（`qjs` 缺省静态：`BUILD_SHARED_LIBS` 缺省 OFF）。宿主被 AOT `main` 无条件引用 ⇒ **没开 `--ui` 也在 exe 里**；
-  换不到"按需加载 DLL"，发行树也**不多一个 DLL**。这是设计的代价，不是可选项。
-- **体积未实测**（源 ≈ 2.1 MB；官方 hello-world 210 KiB x86 code ⇒ x64 估 0.3–0.6 MB）。
-  ⛔ 不把估计写进判据；用 `overlay.md` §5 的读数用例实测。
-- **版本 pin**：submodule 打 tag `v0.10.1`；configure 期对 `QJS_VERSION_*` 做 `static_assert`。
-- **LTO**：`LIFT_AOT_LTO` 在 WIN32 默认 ON ⇒ vendored C 一起 LTO，首次构建时间涨；
-  ⛔ 不给 `qjs` 加 `-fno-lto`（混用未验证）。
+- QuickJS **vendor** 进 `apps/emulator-lift/third_party/quickjs-ng`（tag **v0.10.1** / commit
+  `3c9afc99…`；MIT；5 个 C 源 + 头 + `LICENSE` + 本仓 `README.md` + 本仓 `CMakeLists.txt` 建 `lift-qjs`）。
+  ⛔ 不是 git submodule（本仓 `third_party/` 的惯例 = 原样副本 + README 记录来源 / 清单 / 怎么升级）。
+- `lift-qjs` **静态链进 exe**（`emulator-lift-runtime` PUBLIC 链接）⇒ 没开 `--ui` 也在 exe 里。
+  ★ **默认 HUD 的 JS 是外置文件**（不编进 exe）：发行时 `scripts/ui/` 与 exe 一起放。
+- **版本 pin**：`script_quickjs.cpp` 对 `QJS_VERSION_MAJOR/MINOR/PATCH == 0/10/1` 做 `static_assert`；
+  升级要同时改 `third_party/quickjs-ng/README.md`。
+- **LTO**：`lift-qjs` 是独立 target，未加 `-flto`（与 `LIFT_AOT_LTO` 的 runtime / AOT 目标分开；
+  "vendored C 一起 LTO"是原始设想，本切片**未验证 / 未启用**）。
+- **体积 / 首帧开销未实测**（`## 未做`）；⛔ 不把估计写进判据。
 
 ## 待核
 

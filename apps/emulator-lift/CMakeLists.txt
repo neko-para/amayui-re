@@ -97,15 +97,13 @@ add_library(emulator-lift-runtime STATIC
     src/runtime/window_scale.cpp
     # ★ 宿主光标原语（`--cursor-warp` 的唯一 OS 出口；单 TU 按 `#ifdef` 选平台实现）。
     src/runtime/host_cursor.cpp
-    # ★ 窗口调试叠层（`--overlay`）：纯逻辑（5×7 位图字体 + 行格式化 + RGBA8 矩形绘制），无 SDL 类型。
-    #   ⚠ M0 起它是**旧实现**（生产 HUD 走宿主字体 + display list，见下面 `src/ui/` 两条）；
-    #     保留到 M2（`formatOverlayLines` / `OverlayState` / `OverlayStatus` 在 M2 删）。
-    src/runtime/overlay.cpp
-    # ★ M0：UI display list 的最终模型子集（`ui/element.h` 的 POD + `UiBuilder`）、宿主字体文本
-    #   栅格化（`ui/raster.cpp`；唯一外部依赖 FontEngine / FreeType，支持中文）、内置 HUD 与统一
-    #   合成入口（`ui/hud.cpp` → `PresentSink::presentOverlay`）。⛔ 不另开 HUD 专用渲染路径（D12）。
+    # ★ M0 / B：UI display list 的最终模型子集（`ui/element.h` 的 POD + `UiBuilder`）、宿主字体文本
+    #   栅格化（`ui/raster.cpp`；唯一外部依赖 FontEngine / FreeType，支持中文）、统一合成入口
+    #   （`ui/present_ui.cpp` → `PresentSink::presentOverlay`）。⛔ 不另开 HUD 专用渲染路径（D12）。
+    #   ★ HUD 的**内容**不再在 C++ 里：它由外置脚本 `scripts/ui/hud.js` 产出（`--overlay` / `--ui`）。
     src/ui/raster.cpp
-    src/ui/hud.cpp
+    # ★ B：唯一的"脚本 → 窗口像素"入口（几何 → 画布原点 → `UiScript::render` → 栅格化 → sink）。
+    src/ui/present_ui.cpp
     # ★ 宿主自绘模态框（MessageBox；`REQ-01M75S724...` / `REQ-01M75T14...`）：
     #   纯逻辑（uType→spec / 布局 / 命中 / 状态机）+ 唯一一处模态循环 + CPU 合成一整幅 RGBA8。
     src/runtime/message_box.cpp
@@ -2368,3 +2366,85 @@ set_tests_properties(d3dx9-effect PROPERTIES
     ENVIRONMENT "LIFT_AGE_EXE=${AGE_SECTFIX_EXE}" SKIP_RETURN_CODE 77)
 
 endif() # LIFT_BUILD_TESTS
+
+# =====================================================================================
+# A · UI 脚本内核（QuickJS-ng v0.10.1 vendor + 语言无关适配器）
+# ★ 纯追加块：不改上面任何一行，也不改 runtime 的既有 source 列表（本单的边界）。
+# ★ 接口 = `src/ui/script.h`（⛔ 不 include quickjs.h）；唯一 include 它的 TU =
+#   `src/ui/script_quickjs.cpp`；PIMPL 边界见 `src/ui/script_quickjs.h`。
+# ★ vendor 的原样文件 / commit / 升级口径见 `third_party/quickjs-ng/README.md`；它的
+#   `CMakeLists.txt` 建 `lift-qjs`（5 个 C 源、C11、`_GNU_SOURCE`、非 MSVC `-funsigned-char`）。
+# =====================================================================================
+add_subdirectory(third_party/quickjs-ng)
+
+# ★ runtime 的 source 列表在上面（且归并发编辑协议的"别改"区）⇒ 用 `target_sources` 追加；
+#   `PUBLIC lift-qjs` 让最终 exe（AOT 臂 / 本单的 CTest）自动链上静态库。
+target_sources(emulator-lift-runtime PRIVATE src/ui/script_quickjs.cpp)
+target_link_libraries(emulator-lift-runtime PUBLIC lift-qjs)
+
+# ★ `ui-script-quickjs`：语言无关脚本适配器的 pure 判据（沙箱 / 预算 / api / readings /
+#   error / entry）。**顶层**注册 ⇒ pure 档（AGENTS.md §12.4：判据 = 注册位置）。
+#   ★ 外面这层 `if(LIFT_BUILD_TESTS)` 只包**测试 target 本身**（`OFF` 的语义 = 不编测试 target，
+#     与文件顶部的开关一致）；`cmakeTestTier()` 对"唯一条件 `if(LIFT_BUILD_TESTS)`"是**透明**的
+#     （`tools/lib/ledger.mjs:718`）⇒ 档位仍是 pure，不是 assets。
+#   ★ `add_subdirectory` / `target_sources` / runtime 的 `PUBLIC lift-qjs` 留在**外面**：
+#     产品构建（tests OFF）照样编脚本内核并链进 exe。
+# ★ 变异：`tools/mutate-check.mjs` 的 `ui-script-quickjs-fn-ctor` 删掉
+#   `script_quickjs.cpp` 里对 `Function.prototype.constructor` 的清除 ⇒ 本用例当场红。
+if(LIFT_BUILD_TESTS)
+    add_executable(lift-ui-script-quickjs tests/ui_script_quickjs.cpp)
+    target_link_libraries(lift-ui-script-quickjs PRIVATE emulator-lift-runtime)
+    add_test(NAME ui-script-quickjs COMMAND lift-ui-script-quickjs)
+endif()
+
+# =====================================================================================
+# B · `--overlay` 的 HUD 迁到**外置脚本**（`scripts/ui/hud.js`，QuickJS 同步产出 display list）
+# ★ 纯追加块：不改上面任何一行（除 B 的边界：runtime 源列表里的 overlay.cpp / hud.cpp 已换成
+#   `src/ui/present_ui.cpp`）。
+# ★ 为什么脚本**外置**（用户 2026-11-18 裁决）：JS 是**用户可自行发挥的 feature**，
+#   `scripts/ui/ui.d.ts` 随发行分发 ⇒ ⛔ 不把 `hud.js` 编进 exe（否则用户改了也不生效）。
+#   解析顺序（`--overlay` 且没给 `--ui`）：
+#     ① `<exe 所在目录>/scripts/ui/hud.js`（发行布局；`aot_main` 从 argv[0] 取目录来解析）
+#     ② `LIFT_UI_SCRIPT_DIR/hud.js`（**开发回退**，本文件注入的源码树路径；`SdlWindow` 做）
+#     ③ 都不在 ⇒ **启动硬错**（err 点名试过的两个路径，⛔ 不静默回退空 HUD）
+#   ⇒ `scripts/ui/hud.js` 是**运行时读**的文件：改它**不需要重编**（只重跑）。
+# ★ `--ui <path>` 显式优先，且隐含 `--overlay`（与 `--overlay` 同给时 `--ui` 赢）。
+# =====================================================================================
+target_compile_definitions(emulator-lift-runtime PUBLIC
+    LIFT_UI_SCRIPT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scripts/ui")
+
+# ★ `ui-hud-script`：默认 HUD 脚本（`scripts/ui/hud.js`）的**内容判据** —— 行序（mouse / script /
+#   fps / frame / worst）、⛔ 没有 raster / present 两行、颜色精确值、缺省项整行省略。
+#   直接读 `LIFT_UI_SCRIPT_DIR "/hud.js"` ⇒ 改脚本就会让这条用例看见（改错 ⇒ 红）。
+#   **顶层** `if(LIFT_BUILD_TESTS)` ⇒ `cmakeTestTier()` 透明 ⇒ pure 档（AGENTS.md §12.4）。
+#   缺宿主字体 ⇒ 用例自己 `LIFT_SKIP(77)`（`SKIP_RETURN_CODE 77`）。
+# ★ 变异：`tools/mutate-check.mjs` 的 `ui-hud-script-no-frame` 删掉 `frame` 那一行 ⇒ 本用例当场红。
+if(LIFT_BUILD_TESTS)
+    add_executable(lift-ui-hud-script tests/ui_hud_script.cpp)
+    target_link_libraries(lift-ui-hud-script PRIVATE emulator-lift-runtime)
+    add_test(NAME ui-hud-script COMMAND lift-ui-hud-script)
+    set_tests_properties(ui-hud-script PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+# =====================================================================================
+# E · `game.local_frames()`（帧列表 / 栈顶脚本名）
+# ★ 语义真源 = `.tmp/ui-qjs/frames-research.md`（C1–C14 已证 / U1–U8 未证）：
+#   活动 = `record+0x00 != 0` 且已提交；`top = (slot == cur)`；顺序 = top-first
+#   （`cur` 若活动第一，其余按槽号降序；最小版**不走 parent 链**）。
+# ★ 落点：`src/runtime/engine_frames.{h,cpp}`（`EngineFrameSource`，只读 guest）+
+#   `src/ui/script.h` 的 `UiFrameInfo` / `UiFrameSource` + `script_quickjs.cpp` 的**方法**注入
+#   （`game` 上唯一不用 getter 的属性）+ `PresentSink::setUiFrameSource`（非 owning 指针）。
+# ★ 为什么用 `target_sources` 追加而不是改上面的 source 列表：与 A 的 `script_quickjs.cpp` 同一条
+#   并发编辑口径（大列表是"别改"区；本单只在文件末尾追加自己的块）。
+# ★ `ui-frames`：**顶层** `if(LIFT_BUILD_TESTS)` ⇒ `cmakeTestTier()` 透明 ⇒ pure 档
+#   （AGENTS.md §12.4：判据 = 注册位置）。夹具 = 裸 `GuestMemory` + `MarkerSampler` 合成 Engine，
+#   ⛔ 不依赖游戏安装 / LFS / 真实窗口。
+# ★ 变异：`tools/mutate-check.mjs` 末尾那条把 `top = (slot == cur)` 改成 `top = false` ⇒ 本用例红。
+# =====================================================================================
+target_sources(emulator-lift-runtime PRIVATE src/runtime/engine_frames.cpp)
+
+if(LIFT_BUILD_TESTS)
+    add_executable(lift-ui-frames tests/ui_frames.cpp)
+    target_link_libraries(lift-ui-frames PRIVATE emulator-lift-runtime)
+    add_test(NAME ui-frames COMMAND lift-ui-frames)
+endif()

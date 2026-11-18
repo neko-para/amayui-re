@@ -25,6 +25,7 @@
 #include "runtime/screen_sample.h"
 #include "runtime/surface.h"
 #include "runtime/decode.h"
+#include "runtime/engine_frames.h"
 #include "runtime/engine_marker.h"
 #include "runtime/guest_call.h"
 #include "runtime/guest_exit.h"
@@ -328,6 +329,11 @@ public:
     bool sampleMarker();
     const MarkerSample& lastMarkerSample() const { return last_marker_sample_; }
     const MarkerSampler& markerSampler() const { return marker_sampler_; }
+    // ★ 帧列表读数源（`game.local_frames()` 的宿主取数口；报告的最小版实现）。
+    //   生命周期 = 本对象；`run()` 在叠层打开时把它交给 sink（⛔ 不每帧推表）。
+    //   ★ 公开它只为测试 / 未来的控制层读数；生产消费点在 `SdlWindow::drawOverlay`。
+    ui::UiFrameSource* frameSource() { return &frame_source_; }
+    const ui::UiFrameSource* frameSource() const { return &frame_source_; }
     // 每个块边界推进一次注入时间线（`Machine::run` 内部调用）。★ 2026-11-16 起没有 CLI 入口：
     // 它服务的是 pure CTest 夹具与宿主内嵌（交互配方的 actuator 走 `pumpScript`，不经过这里）。
     void tickInputScript(X86& cpu);
@@ -489,6 +495,10 @@ private:
     //   任一成立时才会被 run 钩子调用）。
     MarkerSampler marker_sampler_;
     MarkerSample last_marker_sample_;
+    // ★ 帧列表读数源（`game.local_frames()`；报告的最小版 = 活动槽 + `top = (slot == cur)`）。
+    //   在 `init()` / `initBare()` 里 `bind(&mem_, &marker_sampler_)`；`run()` 在叠层打开时
+    //   交给 sink（⛔ 不每帧推表 —— 脚本按需查询）。⛔ 它不参与 `script` 行的既有口径。
+    EngineFrameSource frame_source_;
     // ★ 诊断（`LIFT_LOG_MARKERS`）：身份**变化**时打一行 `[marker] …`（发现路径：没有它，
     //   写 `script <名字>` 只能靠猜）。**存在即开**（`=0` 也算开 —— 与 `LIFT_FRAME_TRACE` 同口径）。
     //   下面几个字段只是"上一次打过的身份"（稳态不刷屏的判据）。
@@ -575,7 +585,7 @@ private:
     std::uint64_t frame_trace_prev_gpu_draws_ = 0;
     std::uint64_t frame_trace_prev_sprite_total_ = 0;
     std::uint64_t frame_trace_prev_sprite_skipped_ = 0;
-    // ★ 调试叠层（`--overlay`）的两行数据（`script` 身份 / `worst` 最近 3 s 每帧最大值）。
+    // ★ 调试叠层（`--overlay` / `--ui`）的每帧读数（`script` 身份 / `worst` 最近 3 s 每帧最大值）。
     //   `overlay_on_` 在 `run()` 开头从 sink 读**一次**（sink 是"叠层开没开"的唯一真源；
     //   块入口热路径只读这个 bool，⛔ 不每块问 sink）。它同时决定：
     //   ① 身份采样门控（`script` 要名字）；② `shims_.setTiming`（`worst` 的 shim 列）。
@@ -588,8 +598,8 @@ private:
     //   理由：第一个样本 = run 开始 → 第一次 Present，**不是一帧**（会把 boot 的几十秒塞进 3 s
     //   窗口 ⇒ 开头必然显示那个大数，误导"卡顿点"）。⛔ `frame_trace_` 的 n=1 行照旧保留这段。
     bool overlay_have_prev_frame_ = false;
-    OverlayStatus overlay_status_;
-    std::deque<OverlayFrameSample> overlay_worst_;  // 最近 3 s 的每帧样本（push 时丢旧）
+    UiReadings overlay_status_;
+    std::deque<UiFrameSample> overlay_worst_;  // 最近 3 s 的每帧样本（push 时丢旧）
 };
 
 // 纯档夹具用：`Machine` 的全局实例指针（fault 诊断要拿到寄存器与 `.lst`）

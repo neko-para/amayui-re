@@ -17,8 +17,14 @@
 #include <vector>
 
 #include "runtime/gpu_raster.h"
-#include "runtime/overlay.h"
 #include "runtime/surface.h"
+#include "runtime/ui_readings.h"
+
+namespace lift::ui {
+// ★ 帧列表读数源（`game.local_frames()`；`ui/script.h` 的 `UiFrameSource`）。
+//   ⛔ 本头不 include `ui/script.h` —— 只前向声明，保持 present.h 的轻量 / SDL-free。
+class UiFrameSource;
+}  // namespace lift::ui
 
 namespace lift {
 
@@ -75,11 +81,17 @@ public:
     virtual std::string describe() const { return {}; }
     // 可选：同一 SDL_GPUDevice 上的 GPU 光栅化后端（生产路径恒非空：无 GPU ⇒ 拒绝启动）。
     virtual GpuRaster* gpuRaster() { return nullptr; }
-    // ★ 调试叠层（`--overlay`）的两行数据（`script` 身份 / `worst` 3 s 最大值）。
+    // ★ 调试叠层（`--overlay` / `--ui`）的**每帧只读读数**（`script` 身份 / `worst` 3 s 最大值）。
     //   **默认 no-op**：headless / 测试替身不画叠层，⛔ 不给它们加负担。
-    //   叠层开关只有 sink 知道（文本 / 纹理 / 直出都归它）⇒ `Machine` 在 `run()` 开头问一次。
-    //   ⛔ 本接口保持 SDL-free（`OverlayStatus` 来自 `runtime/overlay.h`，零 SDL 类型）。
-    virtual void setOverlayStatus(const OverlayStatus& /*status*/) {}
+    //   叠层开关只有 sink 知道（脚本 / 字体 / 纹理 / 直出都归它）⇒ `Machine` 在 `run()` 开头问一次。
+    //   ★ 只存值、不重建文本：HUD 是 `scripts/ui/hud.js` 每帧重画（⛔ 没有 dirty / 节流那一层）。
+    //   ⛔ 本接口保持 SDL-free（`UiReadings` 来自 `runtime/ui_readings.h`，零 SDL 类型）。
+    virtual void setUiReadings(const UiReadings& /*readings*/) {}
+    // ★ **帧列表读数源**（`game.local_frames()` 的宿主取数口；非 owning，生命周期 = 调用方）。
+    //   `nullptr` = 不接（headless / 测试替身）⇒ 脚本侧 `undefined`。
+    //   ⛔ 默认 no-op；只有窗口 sink 存指针，并在渲染那一帧塞进 `UiFrameReadings::frames`。
+    //   调用点：`Machine::run()` / `aot_main` 在叠层打开时接一次（⛔ 不每帧推表）。
+    virtual void setUiFrameSource(ui::UiFrameSource* /*src*/) {}
     virtual bool overlayEnabled() const { return false; }
     // ★ **系统对话框**（`runtime/message_box.h` 的 `ModalSpec`）：唯一的宿主呈现缝。
     //   窗口 sink 用 `SDL_ShowMessageBox` 实现（会阻塞；实现方负责把阻塞放进 `GuestToken::YieldGuard`），

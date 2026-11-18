@@ -379,6 +379,10 @@ bool Machine::init(std::string* err) {
         return false;
     }
     wire();
+    // ★ 帧列表读数源（`game.local_frames()`）：装配期只 bind 两个非 owning 指针
+    //   （`mem_` 已 reserve；`marker_sampler_` 是成员 ⇒ 同一生命周期）。
+    //   ⛔ 这里不读 guest；真正的读发生在脚本调用那一下（`run()` 里把指针交给 sink）。
+    frame_source_.bind(&mem_, &marker_sampler_);
     setActiveMachine(this);
     setGuestFaultHook(&liftFaultHook);
     initialized_ = true;
@@ -545,6 +549,8 @@ bool Machine::prepare(std::uint32_t entry_override, std::string* err) {
 
 bool Machine::initBare(std::string* err) {
     if (!init(err)) return false;
+    // ★ 显式再 bind 一次（`init()` 已经做过）：纯档夹具不走 init 的另一条路径也能拿到帧源。
+    frame_source_.bind(&mem_, &marker_sampler_);
     bare_ = true;
     return true;
 }
@@ -669,7 +675,7 @@ void Machine::flushFrameTrace() {
 
     // ★ 叠层 `worst` 行（最近 3 s 每帧最大值）：与 trace 的打印**无关** —— 叠层开着就记。
     //   窗口口径 = 每帧 = 相邻两次 Present 的 steady_clock 间隔（本函数的 `wall_ms`），
-    //   样本由 `overlayWorstPush` 丢出 3 s 外的旧帧。`has_guest` 只读**本轮快照**（⛔ 不碰 opts）。
+    //   样本由 `uiWorstPush` 丢出 3 s 外的旧帧。`has_guest` 只读**本轮快照**（⛔ 不碰 opts）。
     if (overlay_on_) {
         // ★ 第一个样本 = run 开始 → 第一次 Present，**不是一帧** ⇒ **丢弃**（它会把 boot 的
         //   几十秒塞进 3 s 窗口：`worst` 在开头必然显示那个大数，误导"卡顿点"）。
@@ -677,21 +683,21 @@ void Machine::flushFrameTrace() {
         //   ★ 这一次调用仍然把 `frame_trace_last_` 推到"第一次 Present"（本函数开头），
         //     所以下一次 flush 的 `wall_ms` 就是真正的"相邻两次 Present 间隔"。
         if (overlay_have_prev_frame_) {
-            OverlayFrameSample sample;
+            UiFrameSample sample;
             sample.at = now;
             sample.wall_ms = wall_ms;
             sample.guest_ms = static_cast<double>(guest_ns) / 1e6;
             sample.shim_ms = static_cast<double>(shim_ns) / 1e6;
-            overlayWorstPush(overlay_worst_, sample);
-            const OverlayWorst worst = overlayWorstMax(overlay_worst_);
+            uiWorstPush(overlay_worst_, sample);
+            const UiWorst worst = uiWorstMax(overlay_worst_);
             overlay_status_.has_worst = worst.has_worst;
             overlay_status_.wall_max_ms = worst.wall_max_ms;
             overlay_status_.guest_max_ms = worst.guest_max_ms;
             overlay_status_.shim_max_ms = worst.shim_max_ms;
-            // ★ 块计时没开 ⇒ guest 这一列没有值：窗口 sink 会写 `guest=--`（⛔ 不编 0.0）。
+            // ★ 块计时没开 ⇒ guest 这一列没有值：HUD 会写 `guest=--`（⛔ 不编 0.0）。
             overlay_status_.has_guest = overlay_guest_timed_;
             // 两行数据用**同一份** `overlay_status_` 整体下发（script 那一处也改它 ⇒ 不会互相覆盖）。
-            if (PresentSink* sink = presenter_.sink()) sink->setOverlayStatus(overlay_status_);
+            if (PresentSink* sink = presenter_.sink()) sink->setUiReadings(overlay_status_);
         }
         overlay_have_prev_frame_ = true;
     }
@@ -889,9 +895,9 @@ bool Machine::sampleMarker() {
     //   ⛔ 从未采到身份 ⇒ 什么都不推 ⇒ 窗口那边整行省略（不是 "script ?"）。
     if (overlay_on_ && last_marker_sample_.valid) {
         overlay_status_.has_script = true;
-        overlay_status_.script = overlayScriptPayload(last_marker_sample_.name, last_marker_sample_.name_degraded,
-                                                      last_marker_sample_.id);
-        if (PresentSink* sink = presenter_.sink()) sink->setOverlayStatus(overlay_status_);
+        overlay_status_.script = uiScriptPayload(last_marker_sample_.name, last_marker_sample_.name_degraded,
+                                                 last_marker_sample_.id);
+        if (PresentSink* sink = presenter_.sink()) sink->setUiReadings(overlay_status_);
     }
     // ★ 身份**发现路径**（`LIFT_LOG_MARKERS`；见 `Machine::run`）：每次身份变化打一行，
     //   稳态不刷屏（同一 `(cur,id)` 与同一名字不重复打）。它回答"现在脚本名是什么" ——
@@ -984,15 +990,20 @@ RunResult Machine::run(const RunOptions& opts) {
     input_script_.resetMarkerState();
     marker_sampler_.resetCounters();
     last_marker_sample_ = MarkerSample{};
-    // ★ 调试叠层（`--overlay`）：sink 是"叠层开没开"的**唯一真源**（`main` 在 `run()` 之前
-    //   `setSink`）。这里读一次 ⇒ 块入口热路径只读 `overlay_on_` 这个 bool（⛔ 不每块问 sink）。
+    // ★ 调试叠层（`--overlay` / `--ui`）：sink 是"叠层开没开"的**唯一真源**（`main` 在 `run()`
+    //   之前 `setSink`）。这里读一次 ⇒ 块入口热路径只读 `overlay_on_` 这个 bool（⛔ 不每块问 sink）。
     //   它要两样东西：① 身份采样（`script`）；② shim 计时（`worst` 的 shim 列）。
     //   ⛔ **不**打开块计时 —— 那会改变被观测的性能本身；guest 没值就写 `guest=--`。
     overlay_on_ = false;
-    if (PresentSink* sink = presenter_.sink()) overlay_on_ = sink->overlayEnabled();
+    if (PresentSink* sink = presenter_.sink()) {
+        overlay_on_ = sink->overlayEnabled();
+        // ★ 帧列表读数源（`game.local_frames()`）：叠层打开时接一次（脚本按需查询，⛔ 不每帧推表）；
+        //   关掉时清成 nullptr ⇒ 脚本侧 `undefined`，也避免同一 sink 换 run 后留旧源。
+        sink->setUiFrameSource(overlay_on_ ? &frame_source_ : nullptr);
+    }
     overlay_worst_.clear();
     overlay_have_prev_frame_ = false;
-    overlay_status_ = OverlayStatus{};
+    overlay_status_ = UiReadings{};
     // ★ `has_guest` 的判据 = 本轮块计时是否打开（与循环里 `b->ns += block_ns` 的条件同源）。
     //   在这里快照一次 —— `flushFrameTrace` 绝不读 opts（同一台 Machine 会换 opts 再跑）。
     overlay_guest_timed_ = opts.profile || window_prof_.armed();

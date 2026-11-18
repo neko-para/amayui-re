@@ -44,6 +44,15 @@ bool fileExists(const std::string& p) {
     return true;
 }
 
+// `argv[0]`（UTF-8）的**目录部分**，含结尾分隔符；没有分隔符（PATH 搜索 / 只有文件名）⇒ 空串。
+// ★ 只做字符串切分：这里要的是"**发行布局**里脚本在哪"这一跳，⛔ 不解析符号链接 / 不查 cwd
+//   （aot 臂拿到的 argv[0] 是 `$<TARGET_FILE:…>` 那种绝对路径，测试与发行都覆盖）。
+std::string exeDirOf(const std::string& argv0) {
+    const std::size_t at = argv0.find_last_of("/\\");
+    if (at == std::string::npos) return std::string();
+    return argv0.substr(0, at + 1);
+}
+
 std::string envOr(const char* name) {
     const char* v = std::getenv(name);
     return v ? v : "";
@@ -175,7 +184,12 @@ void usage() {
         "  --present-hidden          强制隐藏窗口（仍必须显式 --present window/auto）\n"
         "  --overlay                 左上角调试 HUD（游戏内小窗 / 帧读数；只进窗口像素与\n"
         "                            --present-screenshot，⛔ 不进 --dump-frame / arena.hash）。\n"
-        "                            文本走宿主字体（支持中文）；字体缺失 ⇒ 拒绝启动（R5）\n"
+        "                            HUD 由**随发行分发的脚本** `scripts/ui/hud.js` 经 QuickJS 同步\n"
+        "                            产出 display list（脚本外置：改脚本不用重编）；文本走宿主字体\n"
+        "                            （支持中文）；字体缺失 / 脚本加载失败 ⇒ 拒绝启动（R5）\n"
+        "  --ui <path>               用这份 JS 脚本当 HUD（**隐含 --overlay**；与 --overlay 同给\n"
+        "                            时以 --ui 为准）；脚本错误点名 `<path>:<行>:<列>`。\n"
+        "                            字体缺失 / 脚本编译失败 ⇒ 拒绝启动（exit 2）\n"
         "  --present-screenshot <path>      每次可见窗口 Present 后存一张窗口 BMP（{frame} 可用）\n"
         "  --present-screenshot-frame N     只回读第 N 帧（1 起；0 = 每帧都写）\n"
         "  --scale auto|数值  窗口客户区 = round(1280×s) × round(720×s)。★ **只改窗口、不改帧**：\n"
@@ -294,9 +308,13 @@ int main(int argc, char** argv) {
     bool present_vsync_set = false;
     bool present_hidden = false;
     // ★ `--overlay`（M0；缺省关）：AOT 臂第一次有调试 HUD。只改**宿主送显的窗口像素**
-    //   （`--present-screenshot` 含它；`--dump-frame` / `arena.hash` 不含）。文本走宿主字体
-    //   （`FontEngine`；支持中文）⇒ 字体缺失时 `SdlWindow::init` 硬失败（R5）。
+    //   （`--present-screenshot` 含它；`--dump-frame` / `arena.hash` 不含）。HUD 由**脚本**
+    //   （默认**外置** `scripts/ui/hud.js`，或 `--ui <path>`）经 QuickJS 产出 display list；文本走宿主字体
+    //   （`FontEngine`；支持中文）⇒ 字体缺失 / 脚本加载失败时 `SdlWindow::init` 硬失败（R5）。
     bool overlay = false;
+    // ★ `--ui <path>`（B；缺省空 = 默认外置 hud.js）：**隐含** `--overlay`（脚本是叠层的实现）。
+    //   ★ 与 `--overlay` 同给时以 `--ui` 为准（就是这一个字段：非空 ⇒ 用这份脚本）。
+    std::string ui_script;
     // ★ 宿主真光标（`--cursor-warp`，缺省关；与已退役解释器臂同一个值）：只加宿主副作用，
     //   ⛔ 不改 guest 可见状态。只在 `--present window/auto` 且窗口可见时才真的挪（见
     //   `runtime/present_flags.h` 的 `cursorWarpState`）。
@@ -513,6 +531,10 @@ int main(int argc, char** argv) {
         } else if (a == "--overlay") {
             // ★ M0：窗口参数（`--present headless` 下由 `present_window_flag` 拒绝）。
             overlay = true;
+        } else if (a == "--ui") {
+            // ★ B：`--ui <path>` 隐含 `--overlay`（总开关仍是 overlay）。也是窗口参数。
+            if (!needValue("--ui", &ui_script)) return 2;
+            overlay = true;
         } else if (a == "--cursor-warp") {
             // ★ 与已退役解释器臂同一条：只置一个 bool。窗口参数（headless 下 exit 2
             //   —— 没有可见窗口可映射）。
@@ -640,7 +662,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     const bool present_window_flag = present_driver_set || present_vsync_set || present_hidden ||
-                                     present_screenshot_set || cursor_warp || overlay;
+                                     present_screenshot_set || cursor_warp || overlay || !ui_script.empty();
     if (present_screenshot_frame != 0 && present_screenshot.empty()) {
         std::fprintf(stderr, "--present-screenshot-frame 需要同时给 --present-screenshot <path>\n");
         return 2;
@@ -653,6 +675,16 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "emulator-lift-aot: ⚠ --present-driver 含 software ⇒ 这是**软件渲染**，不是 GPU 路径"
                      "（只用于测试 / 诊断）\n");
+    }
+
+    // ★ B：`--overlay` 的默认 HUD 是**外置脚本**（⛔ 不编进 exe：脚本是用户可自行发挥的 feature）。
+    //   解析顺序：① `<exe 所在目录>/scripts/ui/hud.js`（发行布局，**这里**做）
+    //             ② `LIFT_UI_SCRIPT_DIR/hud.js`（开发回退，`SdlWindow::loadUiScript` 做）
+    //             ③ 都不在 ⇒ 启动硬错（err 点名两个路径；⛔ 不静默回退空 HUD）。
+    //   ★ `--ui <path>` 显式给的一律优先：它已经被解析进 `ui_script`，这一步就跳过。
+    if (overlay && ui_script.empty()) {
+        const std::string candidate = exeDirOf(args.empty() ? std::string() : args[0]) + "scripts/ui/hud.js";
+        if (fileExists(candidate)) ui_script = candidate;
     }
 
     // =====================================================================================
@@ -677,8 +709,10 @@ int main(int argc, char** argv) {
         //   ⇒ `hostCursorWarpEnabled()` 恒假 ⇒ shim 只改虚拟光标（用户看到的"不会移动鼠标"）。
         wopt.cursor_warp = cursor_warp;
         // ★ M0：`--overlay` 的唯一接线点（`SdlWindow` 内部两条呈现路径统一到 `presentOverlay`）。
+        //   ★ B：`ui_script` 非空 = 用 `--ui <path>` 那份脚本；空 = 默认外置 `scripts/ui/hud.js`。
         //   `--present headless` 已在上面按 `present_window_flag` 拒绝。
         wopt.overlay = overlay;
+        wopt.ui_script = ui_script;
         // ★ `--scale` 只交给**窗口档**：`--present headless` 的隐藏离屏窗口保持 1280×720
         //   （= `--scale` 对 headless 无副作用；不设它 ⇒ 不查 DPI、不改窗口尺寸）。
         if (present_mode != "headless") wopt.scale = scale_spec;
@@ -715,7 +749,9 @@ int main(int argc, char** argv) {
                              "emulator-lift-aot: 拒绝启动 —— 窗口/字体初始化失败\n"
                              "  原因：%s\n"
                              "  请检查：\n"
-                             "    · `--overlay` 需要宿主字体（`LIFT_HOST_FONT_PATH`，缺 ⇒ 硬错、⛔ 不退回 5×7 点阵）；\n"
+                             "    · `--overlay` / `--ui` 需要宿主字体（`LIFT_HOST_FONT_PATH`，缺 ⇒ 硬错、\n"
+                             "      ⛔ 不静默画空白）与可用的 HUD 脚本（`--ui` 的语法错 / 找不到入口\n"
+                             "      也走这一处）；\n"
                              "    · 窗口 / GPU device 是否建得出来（Windows: D3D12 / Vulkan；macOS: Metal）；\n"
                              "    · 是否在**没有桌面**的环境里跑（远程会话 / 服务 / `SDL_VIDEODRIVER=dummy`）。\n",
                              werr.empty() ? "窗口初始化失败（SDL 没有给出原因）" : werr.c_str());
@@ -910,6 +946,11 @@ int main(int argc, char** argv) {
         }
         host.presenter().setSink(std::move(display));  // 所有权转给 presenter（与已退役解释器臂同）
         sdl_display->attachWindowManager(host.cpu().windows);
+        // ★ 帧列表读数源（`game.local_frames()`）：叠层打开时接一次（脚本按需查询，⛔ 不每帧推表）。
+        //   `sink()` 可能为空（`setSink` 失败 / 被换掉）⇒ 判空。
+        if (overlay) {
+            if (lift::PresentSink* sink = host.presenter().sink()) sink->setUiFrameSource(host.frameSource());
+        }
         // ★ AOT 没有输入脚本 / 交互图（那是解释器臂的宿主控制面）⇒ 泵里只有 SDL 事件。
         host.cpu().windows->setHostEventPump(
             [sdl_display](lift::X86& /*cpu*/) { sdl_display->pumpHostEvents(5); });

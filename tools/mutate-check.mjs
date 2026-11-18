@@ -3138,10 +3138,10 @@ const MUTATIONS = [
     file: 'apps/emulator-lift/src/aot/aot_main.cpp',
     from:
       '    const bool present_window_flag = present_driver_set || present_vsync_set || present_hidden ||\n' +
-      '                                     present_screenshot_set || cursor_warp || overlay;',
+      '                                     present_screenshot_set || cursor_warp || overlay || !ui_script.empty();',
     to:
       '    const bool present_window_flag = present_driver_set || present_vsync_set || present_hidden ||\n' +
-      '                                     present_screenshot_set || overlay;  // 变异：cursor_warp 不算窗口参数',
+      '                                     present_screenshot_set || overlay || !ui_script.empty();  // 变异：cursor_warp 不算窗口参数',
     guard: 'ctest:cli-aot-flags',
     ctest: 'cli-aot-flags',
     buildDir: 'apps/emulator-lift/out',
@@ -4345,6 +4345,85 @@ const MUTATIONS = [
       '`LIFT_WATCH` 的 watch 关闭门被反转（`if (watchOn())` → `if (!watchOn())`）⇒ 开档时 ' +
       '`lift_note_write` 的 follow / WRITE 一条都不打 ⇒ fault-report 的 `fault-watch-follow` 红' +
       '（断言 `follow pending` / `arm [P-8,P+8)` / `block=lift_cc_<块B>` 全部落空）',
+  },
+
+  // ── UI 脚本沙箱（A；守卫 = `tests/ui_script_quickjs.cpp` 的 sandbox 用例）──
+  //   ★ 代表"漏掉 `Function.prototype.constructor` 的清除"这一类**静默沙箱洞**：只删
+  //     `globalThis.Function` 时，脚本仍可 `(function(){}).constructor('return 1')()` 重新编译源码
+  //     （0.10.1 实测）—— 界面照常画、没有崩溃、没有任何症状。
+  //   ★ 为什么选这一条：它是"删一家不够"的唯一一处；其它几项（eval / Function / Math.random）
+  //     各自删掉都会让 sandbox 用例的不同断言红，但只有这一条会把"能编译"重新打开。
+  //   ★ 判据不变的红/绿：不删时 `(function(){}).constructor === Function` ⇒ 测试里那句
+  //     `('return 1')()` 成功返回 1 ⇒ 记到的值不是 TypeError ⇒ 用例退出码非 0。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from: '        if (!deleteProperty(ctx, function_proto.raw(), "constructor", err)) ok = false;',
+    to: '        // 变异：不清 Function.prototype.constructor（沙箱洞：.constructor 仍是 Function）',
+    guard: 'ctest:ui-script-quickjs',
+    ctest: 'ui-script-quickjs',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-ui-script-quickjs',
+    what:
+      '沙箱漏清 `Function.prototype.constructor` ⇒ `(function(){}).constructor` 仍是 Function 构造器 ⇒ ' +
+      '脚本用 `("return 1")()` 重新编译源码（ui-script-quickjs 的 fn-ctor / global-ctor 断言不是 TypeError）⇒ 红',
+  },
+
+  // ── 默认 HUD 脚本（B；守卫 = `tests/ui_hud_script.cpp` 的逐行文案断言）──
+  //   ★ 代表"HUD 少一行 / 版式漂了"这一类**静默**错误：窗口照开、底色照画、一条都不报，
+  //     只是玩家少看到一条读数（`frame`）。判据只能是"脚本产出的文本逐行相等"。
+  //   ★ 脚本是**运行时读**的外置文件（`scripts/ui/hud.js`）⇒ 变异不需要重编产品；但 mutation
+  //     仍会建该 CTest 的可执行 target（`buildTarget`），这是可接受的代价。
+  //   ★ 为什么是这一行：它**总是**存在（其它行都带"拿到才写"的开关），删掉必然让行数从 5 变 4
+  //     ⇒ 断言立刻落空；改颜色（BG）则会同时让窗口像素判据红（那是另一条判据线）。
+  {
+    file: 'apps/emulator-lift/scripts/ui/hud.js',
+    from: '  lines.push("frame " + game.frame);\n',
+    to: '  // 变异：删掉 frame 那一行（HUD 少一条读数，界面照旧）\n',
+    guard: 'ctest:ui-hud-script',
+    ctest: 'ui-hud-script',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-ui-hud-script',
+    what: '默认 HUD 少掉 `frame` 那一行 ⇒ 4 行而不是 5 行（ui-hud-script 的逐行断言落空）⇒ 红',
+  },
+
+  // ── 帧列表 / 栈顶脚本名（E；守卫 = `tests/ui_frames.cpp` 的 top / 顺序断言）──
+  //   ★ 代表"栈顶定义漂成别的判据"这一类**静默**错误：列表照出、名字照解析、HUD 照画，
+  //     只是 `top` 再也不是 `slot == cur`（例如"最高活动槽" / 恒 false）—— 玩家看到的脚本名
+  //     会在槽乱序装载时变成另一格，而没有任何报错。
+  //   ★ 为什么是这一行：`top` 是**唯一**把 `cur` 与列表连起来的判据；`engine_frames.cpp` 的
+  //     其它行（活动判据 / 排序 / err 分支）各有独立断言，但只有这一行是"产品口径"本身
+  //     （报告 U5：`top = cur` 是用户裁决，不是引擎事实）。改成恒 false 后
+  //     `ui-frames` 的 `active-slots-and-names` 立刻在 `expectList` 的 top 列落空。
+  {
+    file: 'apps/emulator-lift/src/runtime/engine_frames.cpp',
+    from: '        info.top = (slot == cur);',
+    to: '        info.top = false;  // 变异：栈顶判据失效（列表照给，top 恒 false）',
+    guard: 'ctest:ui-frames',
+    ctest: 'ui-frames',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-ui-frames',
+    what:
+      '`top = (slot == cur)` 改成 `top = false` ⇒ 没有任何一项是栈顶（ui-frames 的 top 列断言落空）⇒ 红',
+  },
+
+  // ── 栅格化的宿主级 OOM 上界（P1；守卫 = `tests/ui_text.cpp` 的 `ui-text/huge-rect-rejected`）──
+  //   ★ 代表"--ui 脚本给一个超大 w/h 就能触发**宿主级**超大分配"这一类**用户可触发**的错误：
+  //     没有上界时 `ui.rect({w:2e9,h:2e9})` 抛 std::length_error（异常穿到 presenter ⇒ latch、
+  //     停止提交），`1e6×1e6`（4 TB）则直接被系统 SIGKILL。这不是"画不出来"，是**宿主进程**的风险。
+  //   ★ 为什么是这条常量：`rasterize` 分配前有**两道**门 —— 单边 8192 与总字节 64 MiB。
+  //     面积型（1e6×1e6）会被第二道兜住 ⇒ 只放宽单边时它仍是 false（变异假绿）。
+  //     所以用例另有一条 **1e6×1**（4 MB，面积远小于 64 MiB）的 witness：单边上限一旦放宽，
+  //     它就真的栅格化成功 ⇒ `!rasterized` 落空。变异跑起来也**不会**去申请 4 TB
+  //     （① 仍被 64 MiB 门拦住，② 只申请 4 MB）。
+  {
+    file: 'apps/emulator-lift/src/ui/raster.cpp',
+    from: 'constexpr int kMaxRasterDim = 8192;',
+    to: 'constexpr int kMaxRasterDim = 1 << 20;  // 变异：单边上限放宽 128 倍（面积上限仍在）',
+    guard: 'ctest:ui-text',
+    ctest: 'ui-text',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-ui-text',
+    what: '单边上限 8192 放宽到 1<<20 ⇒ 1e6×1（4 MB）的 rect 被接受并栅格化 ⇒ huge-rect-rejected 的 `!rasterized` 落空 ⇒ 红',
   },
 ];
 

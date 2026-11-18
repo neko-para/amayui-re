@@ -93,9 +93,10 @@ inline constexpr const char* kHeadlessRejectsWindowFlagsFormat = "--present head
 inline constexpr const char* kWindowFlagsInterpreter =
     "--present-driver / --present-vsync / --present-hidden / --present-screenshot / --overlay / --cursor-warp";
 
-/** AOT 臂支持的窗口参数清单（M0 起含 `--overlay`）。 */
+/** AOT 臂支持的窗口参数清单（M0 起含 `--overlay`；B 起含 `--ui <path>`）。 */
 inline constexpr const char* kWindowFlagsAot =
-    "--present-driver / --present-vsync / --present-hidden / --present-screenshot / --overlay / --cursor-warp";
+    "--present-driver / --present-vsync / --present-hidden / --present-screenshot / --overlay / --ui <path> / "
+    "--cursor-warp";
 
 // =====================================================================================
 // `--sound`：**接受 + 一条与代码同形的一次性说明**

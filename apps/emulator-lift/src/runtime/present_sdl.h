@@ -33,11 +33,15 @@ struct SdlWindowOptions {
     bool vsync = false;
     bool hidden = false;
     bool raster_gpu = false;  // 同一 SDL_GPUDevice 上的 GPU 光栅化（GPU 是唯一光栅实现）
-    // ★ 左上角调试叠层（`--overlay`，默认关）：HUD 走**最终模型子集**的 display list，文本用
-    //   **宿主字体**（`FontEngine` / FreeType；支持中文）按最终像素栅格化，两条呈现路径统一到
-    //   `PresentSink::presentOverlay`。只改**宿主送显的那一份像素** —— ⛔ 不写 guest 内存、
-    //   ⛔ 不进 `--dump-frame`。字体不可用 ⇒ `init()` 硬失败（R5；⛔ 不静默退回点阵）。
+    // ★ 左上角调试叠层（`--overlay` / `--ui`，默认关）：HUD 由**脚本**（`scripts/ui/hud.js`，
+    //   QuickJS 同步跑）产出 display list，文本用**宿主字体**（`FontEngine` / FreeType；支持中文）
+    //   按最终像素栅格化，两条呈现路径统一到 `PresentSink::presentOverlay`。只改**宿主送显的那一份
+    //   像素** —— ⛔ 不写 guest 内存、⛔ 不进 `--dump-frame`。字体不可用 ⇒ `init()` 硬失败
+    //   （R5；⛔ 不静默画空白）。脚本加载失败同样硬失败（AOT 侧 exit 2）。
     bool overlay = false;
+    // ★ `--ui <path>`：叠层用**这份** JS 脚本代替默认的 `scripts/ui/hud.js`（空 = 默认）。
+    //   ★ 它**不**是总开关 —— 总开关仍是 `overlay`（CLI 里 `--ui` 会一并把 overlay 打开）。
+    std::string ui_script;
     std::string screenshot_path;  // 支持 {frame}
     // ★ 只回读**这一帧**（1 起；0 = 每帧都写）。配合 `--max-frames N` 就是"定帧截图"：
     //   `--present-screenshot out.bmp --present-screenshot-frame N --max-frames N` 只产出一张。
@@ -160,13 +164,16 @@ public:
     //   时 sink 建的只是隐藏离屏窗口，`--scale` 没生效 ⇒ caller 把它置 false 再打。
     //   窗口没建（init 失败）⇒ 缺省 1280×720。
     ScaleReport scaleReport() const;
-    // ★ 调试叠层开关（`--overlay`）。`init()` 之后也能改：关掉时立刻把已建的叠层纹理丢掉。
+    // ★ 调试叠层开关（`--overlay` / `--ui`）。`init()` 之后也能改：关掉时立刻把已建的叠层纹理
+    //   丢掉；再打开时按 `ui_script` 重新装脚本（**失败 ⇒ 一次性 stderr + 保持关**，⛔ 不崩）。
     //   默认关；只影响窗口像素（⛔ 不碰 guest 内存）。
     void setOverlay(bool on);
-    // ★ `PresentSink`：`Machine` 每帧 / 身份变化时推过来的两行数据（`script` / `worst`）。
-    //   文本变化才让 dirty（script 名字变 / worst 的**一位小数**变）；其余交给既有的 100 ms 节流，
-    //   ⛔ 不每帧重建纹理。
-    void setOverlayStatus(const OverlayStatus& status) override;
+    // ★ `PresentSink`：`Machine` 每帧 / 身份变化时推过来的只读读数（`script` / `worst`）。
+    //   ★ 只**存值**：HUD 是 `scripts/ui/hud.js` 每帧重画（⛔ 没有 dirty / 100 ms 节流 / 文本缓存）。
+    void setUiReadings(const UiReadings& readings) override;
+    // ★ `PresentSink`：帧列表读数源（`game.local_frames()`；非 owning，生命周期 = 调用方）。
+    //   ⛔ 只存指针：`drawOverlay` 每帧把它塞进 `UiFrameReadings::frames`，脚本**按需**查询。
+    void setUiFrameSource(ui::UiFrameSource* src) override;
     bool overlayEnabled() const override;
     const char* rendererName() const;    // 直出时是 `gpu-direct`
     // GPU 直出是否成立（窗口已 claim 给光栅化的 device）。false ⇒ 呈现走 SDL_Renderer 上传。
@@ -177,7 +184,8 @@ public:
 
 private:
     struct Impl;
-    // ★ M0：唯一的 HUD 绘制入口（文本节流 → display list → 宿主字体栅格化 → `presentOverlay`）。
+    // ★ M0 / B：唯一的 HUD 绘制入口（打包读数 → 脚本产出 display list → 宿主字体栅格化 →
+    //   `presentOverlay`）。脚本每帧重画 ⇒ ⛔ 这里没有节流 / 文本缓存。
     bool drawOverlay(std::string* err);
     std::unique_ptr<Impl> impl_;
 };

@@ -54,6 +54,13 @@ char32_t nextCodepoint(const std::string& s, std::size_t* i) {
 // ⚠ 这不是最终排版质量（M4 由宿主字体重绘时再谈抗锯齿）；M0 的承诺只是"中文经宿主字体出字"。
 constexpr std::uint8_t kCoverageThreshold = 128;
 
+// ★ 防宿主级 OOM：`--ui` 脚本可以直接给 `ui.rect` 的 w/h，而 `out->rgba.assign(w*h*4)`
+//   没有上界时，`ui.rect({w:2e9,h:2e9})` 会让 `std::vector::assign` 抛 `std::length_error`
+//   （异常穿到 presenter ⇒ 连续 3 帧后 latch、停止提交），`1e6×1e6`（4 TB）则直接被系统 SIGKILL。
+//   ⇒ 在**分配之前**硬失败：这一帧 UI 失败（宿主关叠层 + 一次性 stderr），呈现照旧。
+constexpr int kMaxRasterDim = 8192;  // 单边像素上限（窗口像素；真实的窗口 / 参考系远小于它）
+constexpr std::uint64_t kMaxRasterBytes = 64ull * 1024ull * 1024ull;  // 像素缓冲上限（64 MiB）
+
 struct Box {
     int x = std::numeric_limits<int>::max();
     int y = std::numeric_limits<int>::max();
@@ -190,21 +197,55 @@ bool rasterize(const std::vector<Element>& elements, const CanvasOrigin& canvas,
     }
 
     // ① resolve：顺序数组 → 窗口像素 rect（⛔ 不做布局；M0 只有绝对 at/size）。
+    //   ★ 每个元素**先**判 w/h 再累加 bbox：否则 `r.x + r.w` 的 int 溢出会先于后面的
+    //     "包围盒过大"发生（`ui.rect({w:2e9})` 就是这条路径）。
     std::vector<Resolved> resolved;
     resolved.reserve(elements.size());
     Box box;
     for (const Element& e : elements) {
         Resolved r;
         if (!resolveOne(e, canvas, picture_x, picture_y, font, &r, err)) return false;
-        box.include(r.x, r.y, r.x + r.w, r.y + r.h);
+        if (r.w > kMaxRasterDim || r.h > kMaxRasterDim) {
+            if (err) {
+                *err = "rasterize: 元素包围盒过大（w=" + std::to_string(r.w) + " h=" + std::to_string(r.h) +
+                       "；单边上限 " + std::to_string(kMaxRasterDim) + " 像素）";
+            }
+            return false;
+        }
+        const long long right = static_cast<long long>(r.x) + r.w;
+        const long long bottom = static_cast<long long>(r.y) + r.h;
+        if (right < std::numeric_limits<int>::min() || right > std::numeric_limits<int>::max() ||
+            bottom < std::numeric_limits<int>::min() || bottom > std::numeric_limits<int>::max()) {
+            if (err) *err = "rasterize: 元素包围盒过大（坐标 + 尺寸超出 int 范围）";
+            return false;
+        }
+        box.include(r.x, r.y, static_cast<int>(right), static_cast<int>(bottom));
         resolved.push_back(r);
     }
     if (box.empty()) return true;
+    // ★ 分配**之前**的硬上界（防宿主级 OOM）：单边 + 总字节两条都要过。
+    const long long box_w = static_cast<long long>(box.right) - box.x;
+    const long long box_h = static_cast<long long>(box.bottom) - box.y;
+    if (box_w <= 0 || box_h <= 0 || box_w > kMaxRasterDim || box_h > kMaxRasterDim) {
+        if (err) {
+            *err = "rasterize: 元素包围盒过大（w=" + std::to_string(box_w) + " h=" + std::to_string(box_h) +
+                   "；单边上限 " + std::to_string(kMaxRasterDim) + " 像素）";
+        }
+        return false;
+    }
+    const std::uint64_t bytes = static_cast<std::uint64_t>(box_w) * static_cast<std::uint64_t>(box_h) * 4u;
+    if (bytes > kMaxRasterBytes) {
+        if (err) {
+            *err = "rasterize: 元素包围盒过大（" + std::to_string(bytes / (1024u * 1024u)) + " MiB > " +
+                   std::to_string(kMaxRasterBytes / (1024u * 1024u)) + " MiB）";
+        }
+        return false;
+    }
     out->x = box.x;
     out->y = box.y;
-    out->w = box.right - box.x;
-    out->h = box.bottom - box.y;
-    out->rgba.assign(static_cast<std::size_t>(out->w) * static_cast<std::size_t>(out->h) * 4u, 0u);
+    out->w = static_cast<int>(box_w);
+    out->h = static_cast<int>(box_h);
+    out->rgba.assign(static_cast<std::size_t>(bytes), 0u);
 
     // ② 绘制序：z 升序、同 z 按 seq 升序（稳定排序；M0 的 z 全 0 ⇒ 纯构造序）。
     std::stable_sort(resolved.begin(), resolved.end(), [](const Resolved& a, const Resolved& b) {

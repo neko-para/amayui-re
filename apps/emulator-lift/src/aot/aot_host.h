@@ -49,6 +49,7 @@
 #include "runtime/control_snapshot.h"  // 控制层快照的值类型 + `ControlHostSide`（⛔ 无 beast）
 #include "runtime/critical_sections.h"  // guest CRITICAL_SECTION ↔ 宿主递归锁（feeder 的硬前提）
 #include "runtime/decode.h"
+#include "runtime/engine_frames.h"  // 帧列表读数源（`game.local_frames()`；纯读 guest）
 #include "runtime/engine_marker.h"  // 控制层 `sample` 的脚本身份采样器
 #include "runtime/font.h"
 #include "runtime/guest_call.h"
@@ -366,6 +367,10 @@ public:
     const ShimRegistry& shims() const { return shims_; }
     const GuestMemory& mem() const { return mem_; }
     const GuestHeap& heap() const { return heap_; }
+    // ★ 帧列表读数源（`game.local_frames()` 的宿主取数口）：`init()` 里 bind `&mem_ / &control_marker_`；
+    //   `aot_main` 在 `--overlay` 打开时把它交给 sink（⛔ 不每帧推表 —— 脚本按需查询）。
+    ui::UiFrameSource* frameSource() { return &frame_source_; }
+    const ui::UiFrameSource* frameSource() const { return &frame_source_; }
     // ★ `surfaces()` / `presenter()` / `seh()` 只在 `HostServices` 那一节实现一次（`override`）——
     //   ⛔ 这里不再写第二份 const 访问器：同签名重复声明是编译错，而"两份取用面"本身也是漂的来源。
     // ★ VFS 的**可写**入口：`--game-dir` / `--appdata` / `--guest-root` 只能在 `init()` 之后、
@@ -502,6 +507,9 @@ private:
     Control* control_ = nullptr;
     // 控制层快照的脚本身份采样器（有状态：名字解析缓存 / 一次告警去重；只有 `sample` 会驱动它）。
     MarkerSampler control_marker_;
+    // ★ 帧列表读数源（`game.local_frames()`；报告的最小版）。`init()` 里 bind `&mem_ / &control_marker_`。
+    //   ⛔ 它不改变 `control_marker_` 的既有采样点 / 计数器口径（只共用名字解析器）。
+    EngineFrameSource frame_source_;
     // `visible` | `hidden`（连接时的事实；`setPresentState` 写一次）。
     std::string present_state_ = "hidden";
     // ★ 控制层 `quit` 的置停标志（`serve()` 也直接返回 true；这个 bool 是"下单点"的事实面）：

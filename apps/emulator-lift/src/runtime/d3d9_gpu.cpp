@@ -1755,9 +1755,31 @@ public:
         //   叠层保持 **1:1 窗口像素**（不随画面缩放）。
         //   `LOADOP_LOAD` 是承重墙（CLEAR 会把刚画上去的画面清掉）。
         //   ⛔ 叠层只画进 swapchain，⛔ 不碰光栅化 target（否则会经 rasterSyncToGuest 写回 guest）。
+        // ★ D 单：叠层底是 `#101820CC`（alpha 204）⇒ 必须**混合**，⛔ 不能再用
+        //   `SDL_BlitGPUTexture`（那是拷贝、不做混合）。这里走一条**专用混合管线**的 draw
+        //   （`SRC_ALPHA / ONE_MINUS_SRC_ALPHA`），与 `directReadback` 的整数公式同值（±1 舍入）。
+        //   管线 / 顶点缓冲 / sampler 懒创建；建不出来 ⇒ 一次性 stderr + 回退旧的拷贝 blit
+        //   （不静默，⛔ 不是"看起来一样就不报"）。
+        SDL_GPUTransferBuffer* overlay_tb = nullptr;
         if (overlay_visible_ && overlay_tex_ != nullptr) {
             overlay_dst_valid_ = true;
-            blitOverlay(cmd, swap, overlay_dst_x_, overlay_dst_y_, static_cast<int>(sw), static_cast<int>(sh));
+            std::string oerr;
+            bool drawn = false;
+            if (ensureOverlayGpu(&oerr)) {
+                drawn = drawOverlayBlend(cmd, swap, overlay_dst_x_, overlay_dst_y_, static_cast<int>(sw),
+                                         static_cast<int>(sh), &oerr, &overlay_tb);
+            }
+            if (!drawn) {
+                if (!overlay_fallback_reported_) {
+                    overlay_fallback_reported_ = true;
+                    std::fprintf(stderr,
+                                 "[overlay] GPU 混合绘制不可用（%s）⇒ 回退为不透明 blit（叠层底按 #101820 落地）\n",
+                                 oerr.empty() ? "未知原因" : oerr.c_str());
+                }
+                // ★ transfer buffer 不在这里释放：它可能已经被**录进**本命令缓冲的上传段
+                //   （`drawOverlayBlend` 在 copy pass 之后就把它交给调用方）⇒ 统一在 submit 之后释放。
+                blitOverlay(cmd, swap, overlay_dst_x_, overlay_dst_y_, static_cast<int>(sw), static_cast<int>(sh));
+            }
         } else {
             overlay_dst_valid_ = false;
         }
@@ -1773,6 +1795,9 @@ public:
             GuestToken::YieldGuard yield(guestToken());
             submitted = SDL_SubmitGPUCommandBuffer(cmd);
         }
+        // ★ 叠层的顶点是**每帧**一小块（240 B）transfer buffer 上传的：它必须活到命令缓冲提交之后
+        //   （SDL_GPU 的契约：release 只是"提交完成后再真正释放"）⇒ 在这里、两个出口之前释放。
+        if (overlay_tb != nullptr && device_ != nullptr) SDL_ReleaseGPUTransferBuffer(device_, overlay_tb);
         if (!submitted) {
             if (err) *err = std::string("SDL_SubmitGPUCommandBuffer 失败：") + SDL_GetError();
             return false;
@@ -1853,9 +1878,23 @@ public:
                     for (int x = 0; x < ow; ++x) {
                         const std::uint8_t* s = srow + static_cast<std::size_t>(x) * 4u;
                         std::uint8_t* d = drow + static_cast<std::size_t>(ox + x) * 4u;
-                        d[0] = s[2];  // RGBA8 → XRGB8888 的字节序（B,G,R,X）
-                        d[1] = s[1];
-                        d[2] = s[0];
+                        // ★ D 单：与 GPU 混合管线（`SRC_ALPHA / ONE_MINUS_SRC_ALPHA`）**同一条**
+                        //   8 位整数公式 `d = (s*a + d*(255-a) + 127) / 255` ⇒ 截图 / 窗口回读与
+                        //   屏幕同值（±1 舍入）。a==255（字）直通、a==0 跳过（底下像素原样）。
+                        const unsigned a = s[3];
+                        if (a == 0u) continue;  // d[3] 已经是 0
+                        if (a == 255u) {
+                            d[0] = s[2];  // RGBA8 → XRGB8888 的字节序（B,G,R,X）
+                            d[1] = s[1];
+                            d[2] = s[0];
+                        } else {
+                            auto mix = [a](unsigned sc, unsigned dc) {
+                                return static_cast<std::uint8_t>((sc * a + dc * (255u - a) + 127u) / 255u);
+                            };
+                            d[0] = mix(s[2], d[0]);
+                            d[1] = mix(s[1], d[1]);
+                            d[2] = mix(s[0], d[2]);
+                        }
                         d[3] = 0;
                     }
                 }
@@ -2022,6 +2061,251 @@ private:
         oi.filter = SDL_GPU_FILTER_NEAREST;
         oi.cycle = false;
         SDL_BlitGPUTexture(cmd, &oi);
+    }
+
+    // -----------------------------------------------------------------------------------
+    // ★ D 单：直出叠层的**混合**管线（`SRC_ALPHA / ONE_MINUS_SRC_ALPHA`）。
+    //   为什么不能沿用 `blitOverlay`：`SDL_BlitGPUTexture` 是**拷贝**，不做混合 ⇒ 底是
+    //   `#101820CC`（alpha 204）时直出会按不透明落地（与 renderer 路径的 80% 不一致）。
+    //   这里复用现有 shader，⛔ 不新增 shader 文件 / 不引依赖：
+    //     · 顶点 = `VSMain` + `Vertex`（40 B：pos3 / color4 / uv2 / invw1），属性表与 `pipelineFor` 逐字段一致；
+    //     · 片元 = `PSMainTexSelect`（`kTexEntries[1]`，1 个 sampler；`g_tex.Sample(g_samp, i.uv / i.invw)`）；
+    //     · 顶点带 `invw=1`、`color=(1,1,1,1)`、`uv` 0..1 ⇒ PS 原样输出 texel 的 RGBA（颜色与 alpha 都取纹理）
+    //       ⇒ 混合公式完全由 blend_state 决定。
+    //   ★ 懒创建（首次 `directPresent` 且 `overlay_visible_`）：管线只依赖**swapchain 格式**，
+    //     ⛔ 不依赖 `target_` ⇒ 换 target / RTT 不需要重建它。建不出来 ⇒ 调用方回退 `blitOverlay`
+    //     （一次性 stderr，⛔ 不静默）。
+    // -----------------------------------------------------------------------------------
+    bool ensureOverlayGpu(std::string* err) {
+        if (overlay_gpu_ready_) return true;
+        if (overlay_gpu_unavailable_) return false;  // 已经失败过：不再每帧重试 / 再刷屏
+        if (device_ == nullptr) {
+            if (err) *err = "GPU device 未就绪";
+            return false;
+        }
+        // 顶点属性与 `pipelineFor` **逐字段一致**（同一个 `VSMain` / 同一个 stride）：
+        // 少一条 / 偏移不同都会在 SDL_GPU 校验里炸（或者更糟：静默读错字段）。
+        SDL_GPUVertexAttribute attrs[4]{};
+        attrs[0].location = 0;
+        attrs[0].buffer_slot = 0;
+        attrs[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3;
+        attrs[0].offset = 0;
+        attrs[1].location = 1;
+        attrs[1].buffer_slot = 0;
+        attrs[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
+        attrs[1].offset = sizeof(float) * 3;
+        attrs[2].location = 2;
+        attrs[2].buffer_slot = 0;
+        attrs[2].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
+        attrs[2].offset = sizeof(float) * 7;
+        attrs[3].location = 3;
+        attrs[3].buffer_slot = 0;
+        attrs[3].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT;
+        attrs[3].offset = sizeof(float) * 9;
+        SDL_GPUColorTargetDescription color{};
+        // ★ 目的格式 = **实际** swapchain 格式（同一台 device 上唯一保证兼容的组合；与叠层纹理同源）。
+        color.format = swapchain_format_;
+        // D3D9 的 `SRCALPHA / INVSRCALPHA`；alpha 通道同形（swapchain 的 alpha 不参与显示，
+        // 但保持与颜色通道一致，⛔ 不留半边未定义）。
+        color.blend_state.enable_blend = true;
+        color.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+        color.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        color.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+        color.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+        color.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        color.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+        SDL_GPUVertexBufferDescription vb{};
+        vb.slot = 0;
+        vb.pitch = static_cast<Uint32>(sizeof(Vertex));
+        vb.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+        SDL_GPUVertexInputState vin{};
+        vin.vertex_buffer_descriptions = &vb;
+        vin.num_vertex_buffers = 1;
+        vin.vertex_attributes = attrs;
+        vin.num_vertex_attributes = 4;
+        SDL_GPUShader* ps = texShaderFor(GpuTexMode::SelectTextureBoth);
+        if (vertex_shader_ == nullptr || ps == nullptr) {
+            if (err) *err = "叠层混合管线的 shader 不可用（VSMain / PSMainTexSelect）";
+            overlay_gpu_unavailable_ = true;
+            return false;
+        }
+        SDL_GPUGraphicsPipelineCreateInfo ci{};
+        ci.vertex_shader = vertex_shader_;
+        ci.fragment_shader = ps;
+        ci.vertex_input_state = vin;
+        ci.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+        ci.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+        ci.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;  // 两个三角形都正面可见（⛔ 不靠绕序）
+        ci.rasterizer_state.front_face = SDL_GPU_FRONTFACE_CLOCKWISE;
+        ci.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+        // ★ 无深度附件：叠层的先后关系由**调用顺序**决定（同一条 render pass 里只画它）。
+        ci.depth_stencil_state.enable_depth_test = false;
+        ci.depth_stencil_state.enable_depth_write = false;
+        ci.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_ALWAYS;
+        ci.target_info.color_target_descriptions = &color;
+        ci.target_info.num_color_targets = 1;
+        ci.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_INVALID;
+        ci.target_info.has_depth_stencil_target = false;
+        SDL_GPUGraphicsPipeline* p = SDL_CreateGPUGraphicsPipeline(device_, &ci);
+        if (p == nullptr) {
+            if (err) *err = std::string("SDL_CreateGPUGraphicsPipeline(overlay-blend) 失败：") + SDL_GetError();
+            overlay_gpu_unavailable_ = true;
+            return false;
+        }
+        ++g_stats.pipelines_created;
+        overlay_pipeline_ = p;
+        // sampler：与 `blitOverlay` 同一口径（NEAREST / CLAMP_TO_EDGE，只采 level 0）。
+        SDL_GPUSamplerCreateInfo si{};
+        si.min_filter = SDL_GPU_FILTER_NEAREST;
+        si.mag_filter = SDL_GPU_FILTER_NEAREST;
+        si.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+        si.min_lod = 0.0f;
+        // 与 `samplerFor` 的 `kNoMipMaxLod` 同一理由：`max_lod = 0` 会把缩小采样也钳成 MAG 过滤。
+        si.max_lod = 0.49f;
+        si.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        si.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        si.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        overlay_sampler_ = SDL_CreateGPUSampler(device_, &si);
+        if (overlay_sampler_ == nullptr) {
+            if (err) *err = std::string("SDL_CreateGPUSampler(overlay-blend) 失败：") + SDL_GetError();
+            SDL_ReleaseGPUGraphicsPipeline(device_, overlay_pipeline_);
+            overlay_pipeline_ = nullptr;
+            overlay_gpu_unavailable_ = true;
+            return false;
+        }
+        // 6 个顶点 = 240 B 的**专用**顶点缓冲（⛔ 不进 `vertex_buffer_`：那是 guest 批的合批缓冲）。
+        SDL_GPUBufferCreateInfo bi{};
+        bi.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
+        bi.size = static_cast<Uint32>(6u * sizeof(Vertex));
+        overlay_vbuf_ = SDL_CreateGPUBuffer(device_, &bi);
+        if (overlay_vbuf_ == nullptr) {
+            if (err) *err = std::string("SDL_CreateGPUBuffer(overlay-blend) 失败：") + SDL_GetError();
+            releaseOverlayGpu();
+            overlay_gpu_unavailable_ = true;
+            return false;
+        }
+        overlay_gpu_ready_ = true;
+        return true;
+    }
+
+    // 叠层纹理 → swapchain 的**混合**绘制（D 单）：`SRC_ALPHA / ONE_MINUS_SRC_ALPHA`。
+    // ★ 必须在 letterbox blit 之后、**同一条** command buffer 里：`LOADOP_LOAD` 保留画面；
+    //   ⛔ 不碰 `target_`（否则会经 `rasterSyncToGuest` 写回 guest）。
+    // ★ 与 `blitOverlay` 同一套裁剪规则：`dw/dh` 先按 swap 边界 clamp（1:1，⛔ 不缩放）；
+    //   裁剪时 uv 只取纹理左上块（= blitOverlay 的 `source.w/h`）。
+    // ★ 顶点是**每帧** 240 B 的 transfer buffer 上传（诊断层，可接受；⛔ 不为它建大缓存）。
+    //   `out_tb` 由调用方**在命令缓冲提交之后**释放（SDL_GPU 契约）。
+    bool drawOverlayBlend(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* swap, int dst_x, int dst_y, int sw, int sh,
+                          std::string* err, SDL_GPUTransferBuffer** out_tb) {
+        if (out_tb == nullptr) {
+            if (err) *err = "drawOverlayBlend 的 out_tb 为空（调用方契约）";
+            return false;
+        }
+        int dw = overlay_w_;
+        int dh = overlay_h_;
+        if (dst_x + dw > sw) dw = sw - dst_x;
+        if (dst_y + dh > sh) dh = sh - dst_y;
+        if (dw <= 0 || dh <= 0) return true;  // 整块在窗口外：这一帧没有可画的像素（⛔ 不算失败）
+        if (sw <= 0 || sh <= 0) return false;
+        // 窗口像素 → NDC（y 翻转；与 flush 的 `1 - (y - vp_y) / vp_h * 2` 同一口径）。
+        const float x0 = 2.0f * static_cast<float>(dst_x) / static_cast<float>(sw) - 1.0f;
+        const float x1 = 2.0f * static_cast<float>(dst_x + dw) / static_cast<float>(sw) - 1.0f;
+        const float y0 = 1.0f - 2.0f * static_cast<float>(dst_y) / static_cast<float>(sh);
+        const float y1 = 1.0f - 2.0f * static_cast<float>(dst_y + dh) / static_cast<float>(sh);
+        // 裁剪后的 uv 上限（源 = 叠层纹理左上块）。
+        const float u1 = static_cast<float>(dw) / static_cast<float>(overlay_w_);
+        const float v1 = static_cast<float>(dh) / static_cast<float>(overlay_h_);
+        Vertex vtx[6];
+        auto put = [](Vertex& v, float x, float y, float u, float vv) {
+            v.x = x;
+            v.y = y;
+            v.z = 0.0f;  // 无深度附件 ⇒ z 不参与（⛔ 不写 1.0 让 D3D9 的口径混淆）
+            v.r = 1.0f;
+            v.g = 1.0f;
+            v.b = 1.0f;
+            v.a = 1.0f;
+            v.u = u;
+            v.v = vv;
+            v.invw = 1.0f;  // w = 1 ⇒ PS 的 `uv / invw` 是恒等
+        };
+        // 两个三角形（TL/TR/BL + TR/BR/BL）；cull = NONE ⇒ 绕序不参与。
+        put(vtx[0], x0, y0, 0.0f, 0.0f);
+        put(vtx[1], x1, y0, u1, 0.0f);
+        put(vtx[2], x0, y1, 0.0f, v1);
+        put(vtx[3], x1, y0, u1, 0.0f);
+        put(vtx[4], x1, y1, u1, v1);
+        put(vtx[5], x0, y1, 0.0f, v1);
+        SDL_GPUTransferBufferCreateInfo ti{};
+        ti.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        ti.size = static_cast<Uint32>(sizeof(vtx));
+        SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(device_, &ti);
+        if (tb == nullptr) {
+            if (err) *err = std::string("SDL_CreateGPUTransferBuffer(overlay-blend) 失败：") + SDL_GetError();
+            return false;
+        }
+        void* mapped = SDL_MapGPUTransferBuffer(device_, tb, false);
+        if (mapped == nullptr) {
+            SDL_ReleaseGPUTransferBuffer(device_, tb);
+            if (err) *err = "SDL_MapGPUTransferBuffer(overlay-blend) 失败";
+            return false;
+        }
+        std::memcpy(mapped, vtx, sizeof(vtx));
+        SDL_UnmapGPUTransferBuffer(device_, tb);
+        // ① 上传 240 B 顶点（cycle = true：整块覆盖，⛔ 不读旧内容）
+        SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+        SDL_GPUTransferBufferLocation src{};
+        src.transfer_buffer = tb;
+        src.offset = 0;
+        SDL_GPUBufferRegion dst{};
+        dst.buffer = overlay_vbuf_;
+        dst.offset = 0;
+        dst.size = static_cast<Uint32>(sizeof(vtx));
+        SDL_UploadToGPUBuffer(copy, &src, &dst, true);
+        SDL_EndGPUCopyPass(copy);
+        // ★ 从这一句起 tb 已经**录进命令缓冲**（copy pass 引用它）⇒ 所有权交给调用方，
+        //   由它在 `SDL_SubmitGPUCommandBuffer` **之后**释放（⛔ 不在这里提前释放：那可能是一次
+        //   use-after-release；SDL 的 release 只对"已提交完的帧"延迟回收）。
+        *out_tb = tb;
+        // ② render pass（swapchain，LOAD 保留 letterbox 画面；⛔ 无深度附件）
+        SDL_GPUColorTargetInfo color{};
+        color.texture = swap;
+        color.load_op = SDL_GPU_LOADOP_LOAD;
+        color.store_op = SDL_GPU_STOREOP_STORE;
+        SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(cmd, &color, 1, nullptr);
+        if (pass == nullptr) {
+            if (err) *err = std::string("SDL_BeginGPURenderPass(overlay-blend) 失败：") + SDL_GetError();
+            return false;  // tb 已交给调用方（submit 之后释放）
+        }
+        SDL_BindGPUGraphicsPipeline(pass, overlay_pipeline_);
+        SDL_GPUViewport vp{};
+        vp.x = 0.0f;
+        vp.y = 0.0f;
+        vp.w = static_cast<float>(sw);
+        vp.h = static_cast<float>(sh);
+        vp.min_depth = 0.0f;
+        vp.max_depth = 1.0f;
+        SDL_SetGPUViewport(pass, &vp);
+        SDL_Rect scissor{0, 0, sw, sh};
+        SDL_SetGPUScissor(pass, &scissor);
+        SDL_GPUBufferBinding binding{overlay_vbuf_, 0};
+        SDL_BindGPUVertexBuffers(pass, 0, &binding, 1);
+        SDL_GPUTextureSamplerBinding tsb{overlay_tex_, overlay_sampler_};
+        SDL_BindGPUFragmentSamplers(pass, 0, &tsb, 1);
+        SDL_DrawGPUPrimitives(pass, 6, 1, 0, 0);
+        SDL_EndGPURenderPass(pass);
+        return true;
+    }
+
+    // 释放**混合绘制**的三个 device 对象（管线只依赖 swapchain 格式 ⇒ `releaseOverlayTexture` 不毁它）。
+    void releaseOverlayGpu() {
+        if (overlay_pipeline_ != nullptr && device_ != nullptr) SDL_ReleaseGPUGraphicsPipeline(device_, overlay_pipeline_);
+        overlay_pipeline_ = nullptr;
+        if (overlay_vbuf_ != nullptr && device_ != nullptr) SDL_ReleaseGPUBuffer(device_, overlay_vbuf_);
+        overlay_vbuf_ = nullptr;
+        if (overlay_sampler_ != nullptr && device_ != nullptr) SDL_ReleaseGPUSampler(device_, overlay_sampler_);
+        overlay_sampler_ = nullptr;
+        overlay_gpu_ready_ = false;
+        overlay_gpu_unavailable_ = false;
     }
 
     // 释放叠层纹理 + CPU 侧副本（device 销毁 / 解 claim / 关掉叠层之前必须调用）。
@@ -2643,6 +2927,8 @@ private:
         pipelines_.clear();
         for (auto& [k, p] : fx_pipelines_) SDL_ReleaseGPUGraphicsPipeline(device_, p);
         fx_pipelines_.clear();
+        // ★ 叠层混合绘制的 device 对象（管线只依赖 swapchain 格式，见 `releaseOverlayGpu` 的注释）。
+        releaseOverlayGpu();
     }
 
     static std::uint64_t pipelineKey(const GpuRasterState& s, bool textured) {
@@ -3121,6 +3407,15 @@ private:
     int overlay_dst_y_ = 0;
     bool overlay_dst_valid_ = false;         // false = 上一帧没画叠层（隐藏 / 还没 present 过）
     std::vector<std::uint8_t> overlay_rgba_;  // CPU 副本：`directReadback` 合成用（RGBA8）
+    // ★ D 单：直出叠层的**混合**绘制（`SRC_ALPHA / ONE_MINUS_SRC_ALPHA`；懒创建）。
+    //   只依赖 `swapchain_format_` / 固定功能 shader ⇒ ⛔ 不随 `target_` 重建
+    //   （`releaseOverlayTexture` 不毁它们；只有 `destroyTargets` / 设备销毁才释放）。
+    SDL_GPUGraphicsPipeline* overlay_pipeline_ = nullptr;
+    SDL_GPUBuffer* overlay_vbuf_ = nullptr;   // 6 顶点 = 240 B（每帧 upload 覆盖）
+    SDL_GPUSampler* overlay_sampler_ = nullptr;  // NEAREST / CLAMP_TO_EDGE（与 blitOverlay 同口径）
+    bool overlay_gpu_ready_ = false;
+    bool overlay_gpu_unavailable_ = false;    // 懒创建失败过：⛔ 不每帧重试
+    bool overlay_fallback_reported_ = false;  // 一次性 stderr（回退到不透明 blit 时）
 };
 
 }  // namespace

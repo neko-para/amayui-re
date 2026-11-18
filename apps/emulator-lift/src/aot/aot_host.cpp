@@ -132,6 +132,9 @@ bool AotHost::init(std::string* err) {
     //   没有 Machine ⇒ 必须在这里装一次（`guestFault` 的 `g_hook` 是同一个槽位）。**只装钩子**；
     //   现场数据由 `run()` 在入口登记（⛔ 不是每块 / 每帧 ⇒ 执行循环零成本）。
     installAotFaultHook();
+    // ★ 帧列表读数源（`game.local_frames()`）：装配期只 bind 两个非 owning 指针
+    //   （`mem_` 已 reserve；`control_marker_` 是成员 ⇒ 同一生命周期）。⛔ 这里不读 guest。
+    frame_source_.bind(&mem_, &control_marker_);
     initialized_ = true;
     return true;
 }

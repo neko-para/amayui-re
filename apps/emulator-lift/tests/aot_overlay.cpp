@@ -4,8 +4,12 @@
 //   ① `--present window --present-hidden --overlay --max-frames 2` ⇒ **exit 0**（M0 判据 1）。
 //      红了 ⇒ AOT 臂的 `--overlay` 参数面 / 接线没通（用户给了参数却跑不起来）。
 //   ② `--present-screenshot` 的窗口 BMP 在**画布原点**（1280×720 帧 / 窗口 ⇒ (0,0)）是
-//      HUD 底色 `#101820`（BMP 里是 BGR = 20 18 10）；同一条命令**不带** `--overlay` 时
-//      那个像素是 guest 后缓冲的颜色（首帧 = 黑）。红了 ⇒ 叠层没有真的上屏，或原点错了。
+//      HUD 底色 `#101820CC` 与底层画面混合后的值：直出（D 单起走 `SRC_ALPHA / ONE_MINUS_SRC_ALPHA`
+//      的混合管线）与 renderer（`SDL_BLENDMODE_BLEND`）**都是** 80% 混合 ⇒ 首帧 guest 是黑 ⇒
+//      `blend(#101820, #000000, 204)` = `(13,19,26)`（两条路径同一个期望，±1 舍入）。
+//      同一条命令**不带** `--overlay` 时那个像素是 guest 后缓冲的颜色（首帧 = 黑）。
+//      红了 ⇒ 叠层没有真的上屏，或原点 / 半透明度错了。
+//   ★ 另：`--ui <path>` 的**语法错** ⇒ 子进程 exit 2 + stderr 点名 `<path>:<行>:<列>`。
 //   ③ `--dump-frame` 的 guest 帧 BMP 在开 / 关 `--overlay` 两次运行里**逐字节相同**（M0 判据 4）。
 //      红了 ⇒ UI 被写进了 guest 像素 / 后缓冲（那是硬边界：⛔ 不写 guest）。
 //      ★ 口径：用 **1 帧** 运行做对照 —— 2 帧时第二帧的画面内容随真实时钟变化，两轮之间本来就
@@ -288,6 +292,22 @@ struct BmpPixel {
     std::uint8_t r = 0;
 };
 
+// ★ HUD 的底是 `#101820CC`（alpha 204 ⇒ 80% 不透明）。**两条呈现路径都与底下的画面混合**
+//   （renderer = `SDL_BLENDMODE_BLEND`；直出 = D 单的 `SRC_ALPHA / ONE_MINUS_SRC_ALPHA` 混合管线）⇒
+//   首帧 guest 是黑 ⇒ 期望 = `(s*a + 127)/255`（整数、四舍五入）= `#0D131A` = (13,19,26)。
+constexpr std::uint32_t blendOverBlack(std::uint32_t src_rgb, int a) {
+    const std::uint32_t r = ((src_rgb >> 16) & 0xFFu) * static_cast<std::uint32_t>(a);
+    const std::uint32_t g = ((src_rgb >> 8) & 0xFFu) * static_cast<std::uint32_t>(a);
+    const std::uint32_t b = (src_rgb & 0xFFu) * static_cast<std::uint32_t>(a);
+    return (((r + 127u) / 255u) << 16) | (((g + 127u) / 255u) << 8) | ((b + 127u) / 255u);
+}
+
+// 逐通道 `|got - want| <= tol`（混合侧给 1 的容差：GPU / 软件 blend 的舍入）。
+bool nearByte(std::uint8_t got, std::uint32_t want, int tol) {
+    const int d = static_cast<int>(got) - static_cast<int>(want);
+    return d <= tol && -d <= tol;
+}
+
 std::uint32_t le32(const std::string& b, std::size_t off) {
     if (b.size() < off + 4) return 0xFFFFFFFFu;
     return static_cast<std::uint32_t>(static_cast<unsigned char>(b[off])) |
@@ -360,6 +380,38 @@ int main(int argc, char** argv) {
     common.push_back(game_dir.native());
     for (const char* a : {"--skip-logo", "--present", "window", "--present-hidden", "--time-limit", "60"}) {
         common.push_back(argFromAscii(a));
+    }
+
+    // ---- `--ui <path>` 的语法错 ⇒ **exit 2** + stderr 点名 `<path>:<行>:<列>`（B）--------
+    // ★ 判据是**启动硬错**：脚本编译失败必须让 AOT 臂拒绝启动（exit 2），且错误里带文件名与行号
+    //   （用户据此改自己的脚本）。输入是自造的：`bad.js` 第 2 行少一个值 ⇒ 语法错落在第 2 行。
+    // ★ 这一步在 GPU bring-up **之前**就返回（脚本加载在 `SdlWindow::init` 的头部）⇒ 不依赖 GPU；
+    //   但**依赖宿主字体**（字体缺失 ⇒ 先在字体上失败）⇒ 那一条按 SKIP 处理（⛔ 不假红）。
+    {
+        g_current_case = "ui-syntax-error";
+        const fs::path bad = root / "bad.js";
+        {
+            std::ofstream out(bad, std::ios::binary | std::ios::trunc);
+            out << "// 第 1 行：注释（让语法错落在第 2 行）\n"
+                   "ui.rect({ x: 0, y: });\n";
+        }
+        const fs::path appdata = root / "appdata-ui-syntax";
+        fs::create_directories(appdata, ec);
+        std::vector<Arg> args = common;
+        args.push_back(argFromAscii("--appdata"));
+        args.push_back(appdata.native());
+        args.push_back(argFromAscii("--ui"));
+        args.push_back(bad.native());
+        const ChildRun r = runChild(exe, args, root, root / "ui-syntax.out", root / "ui-syntax.err");
+        LIFT_CHECK(r.started);
+        std::printf("--ui 语法错：exit=%d\n", r.exit_code);
+        if (r.err.find("宿主字体不可用") != std::string::npos) LIFT_SKIP("缺宿主字体（LIFT_HOST_FONT_PATH）");
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.exit_code), 2u);
+        // ★ 只锁"文件 + 行"（`bad.js:2:`）；列号交给 QuickJS 的版本，⛔ 不在这里钉死。
+        LIFT_CHECK(r.err.find("bad.js:2:") != std::string::npos);
+        if (r.err.find("bad.js:2:") == std::string::npos) {
+            std::fprintf(stderr, "  stderr:\n%s\n", r.err.c_str());
+        }
     }
 
     // ★ 四次 run：① 判据 1（两帧，exit 0）；②/③ 用 **1 帧** 做开/关对照；④ 是 ③ 的**纯对照复制**
@@ -452,10 +504,19 @@ int main(int argc, char** argv) {
                 static_cast<unsigned>(with_overlay.g), static_cast<unsigned>(with_overlay.b),
                 static_cast<unsigned>(without_overlay.r), static_cast<unsigned>(without_overlay.g),
                 static_cast<unsigned>(without_overlay.b));
-    // `kOverlayBg = {16,24,32}` ⇒ BMP 的 BGR 字节 = 32,24,16。
-    LIFT_CHECK_EQ_U32(with_overlay.b, 32u);
-    LIFT_CHECK_EQ_U32(with_overlay.g, 24u);
-    LIFT_CHECK_EQ_U32(with_overlay.r, 16u);
+    // ★ 期望的底色**两条路径相同**（子进程自己在启动 readout 里报走的是哪条：
+    //   `present   : … present=direct/<mode>`，见 `SdlWindow::describe`）：
+    //     · 直出：D 单起走 `SRC_ALPHA / ONE_MINUS_SRC_ALPHA` 混合管线 ⇒ 与首帧 guest（黑）混合；
+    //     · renderer：`SDL_BLENDMODE_BLEND` ⇒ 同样与首帧 guest（黑）混合。
+    //   ⇒ 都是 `#101820CC` 的 80% = `blend(#101820, #000000, 204)`，±1 舍入。
+    const bool direct = outs[1].run.out.find("present=direct") != std::string::npos;
+    const std::uint32_t want_rgb = blendOverBlack(0x101820u, 204);
+    const int tol = 1;
+    std::printf("② 呈现路径：%s ⇒ 期望底色 #%06X（tol=%d）\n", direct ? "direct（80% 混合）" : "renderer（80% 混合）",
+                want_rgb, tol);
+    LIFT_CHECK(nearByte(with_overlay.r, (want_rgb >> 16) & 0xFFu, tol));
+    LIFT_CHECK(nearByte(with_overlay.g, (want_rgb >> 8) & 0xFFu, tol));
+    LIFT_CHECK(nearByte(with_overlay.b, want_rgb & 0xFFu, tol));
     LIFT_CHECK(with_overlay.b != without_overlay.b || with_overlay.g != without_overlay.g ||
                with_overlay.r != without_overlay.r);
 

@@ -13,10 +13,12 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "runtime/cursor_map.h"
@@ -27,10 +29,11 @@
 #include "runtime/host_window.h"
 #include "runtime/input.h"
 #include "runtime/log.h"
-#include "runtime/overlay.h"
+#include "runtime/vfs.h"  // openHostFileUtf8（Windows 的 UTF-8 脚本路径）
 #include "runtime/warp_echo.h"
 #include "runtime/window_scale.h"
-#include "ui/hud.h"
+#include "ui/present_ui.h"
+#include "ui/script.h"
 
 namespace lift {
 namespace {
@@ -131,30 +134,20 @@ bool mouseButtonFromSdl(Uint8 button, MouseButton* out) {
     }
 }
 
-// ---- 调试叠层（`--overlay`）----
+// ---- 调试叠层（`--overlay` / `--ui`）----
 // ★ fps 的滚动窗口 = 最近 1 s；`kOverlayFpsWindowNs` 是这条口径的唯一定义。
 constexpr std::uint64_t kOverlayFpsWindowNs = 1000ull * 1000ull * 1000ull;
-// ★ 文本重建 / 上传的节流间隔：`frame` 每帧都变，不节流就每帧重传（直出还会多一次 submit）。
-//   100 ms 对 fps / frame 的滞后上限；鼠标位置变化**不受**这个节流（见 `overlayRefreshDue`）。
-constexpr std::uint64_t kOverlayRefreshNs = 100ull * 1000ull * 1000ull;  // 100 ms
+// ★ 脚本每帧的**墙钟预算**（HUD 是诊断层：它超时 ⇒ 关掉叠层，⛔ 不拖慢 guest）。
+//   `kUiScriptBudgetNs` = 每次 `render` 能用的墙钟上限；`kUiScriptOpLimit` = 字节码条数上限
+//   （两个都是**上限**：正常 HUD 远小于它们）。
+constexpr std::uint64_t kUiScriptBudgetNs = 20ull * 1000ull * 1000ull;  // 20 ms
+constexpr std::uint32_t kUiScriptOpLimit = 1000000u;
 
-// `worst` 行的数值按 `%.1f` 显示 ⇒ 只有**这一位小数**变了才算"文本变了"
-// （否则每帧一个微小差值都会让 dirty 恒真，节流形同虚设，见 `kOverlayRefreshNs`）。
-bool sameTenth(double a, double b) {
-    char ba[32];
-    char bb[32];
-    std::snprintf(ba, sizeof(ba), "%.1f", a);
-    std::snprintf(bb, sizeof(bb), "%.1f", b);
-    return std::strcmp(ba, bb) == 0;
-}
-
-// 推来的 status 会不会改变**画出来的文本**（⛔ 不是"结构体字节变没变"）。
-bool overlayStatusTextChanged(const OverlayStatus& a, const OverlayStatus& b) {
-    if (a.has_script != b.has_script || a.script != b.script) return true;
-    if (a.has_worst != b.has_worst || a.has_guest != b.has_guest) return true;
-    if (!a.has_worst) return false;
-    return !sameTenth(a.wall_max_ms, b.wall_max_ms) || !sameTenth(a.guest_max_ms, b.guest_max_ms) ||
-           !sameTenth(a.shim_max_ms, b.shim_max_ms);
+// steady_clock 的绝对纳秒（`UiScript::setBudget` 的 deadline 口径；0 不用 —— 0 表示"不限"）。
+std::uint64_t steadyNowNs() {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count());
 }
 
 }  // namespace
@@ -228,28 +221,30 @@ struct SdlWindow::Impl {
     //   `"window-closed"`，其余停机原因保持 nullptr（⛔ 不冒充控制层口径）。
     const char* control_stop_reason = nullptr;
 
-    // ---- 调试叠层（`--overlay`，默认关）----
-    // ★ M0 起：HUD 是**最终模型子集**的 display list（`ui/hud.h`），两条呈现路径共用
-    //   `PresentSink::presentOverlay` 一个合成入口；文本由**宿主字体**（`hud_font`）按最终像素
-    //   栅格化（支持中文）。⛔ 不再有"renderer 一套 / 直出一套"的绘制代码。
+    // ---- 调试叠层（`--overlay` / `--ui`，默认关）----
+    // ★ HUD 是**脚本**产出的 display list（`scripts/ui/hud.js`，QuickJS 同步跑）；两条呈现路径共用
+    //   `PresentSink::presentOverlay` 一个合成入口；文本由**宿主字体**（`ui_font`）按最终像素
+    //   栅格化（支持中文）。⛔ 不再有"renderer 一套 / 直出一套"的绘制代码，⛔ 也没有
+    //   C++ 侧的文本格式化 / 100 ms 节流 / 文本缓存。
     bool overlay = false;
-    bool overlay_dirty = true;          // 开关变化 / status 文本变化 ⇒ 立刻重建行
-    std::vector<std::string> overlay_lines;  // 最近一次生成的 HUD 文本（节流窗口内复用）
-    SDL_Texture* overlay_tex = nullptr;      // renderer 路径的流式纹理（`presentOverlay` 建 / 用）
+    SDL_Texture* overlay_tex = nullptr;  // renderer 路径的流式纹理（`presentOverlay` 建 / 用）
     int overlay_tex_w = 0;
     int overlay_tex_h = 0;
     // 宿主字体：**只在 `--overlay` 时构造**（默认档零成本）；字体不可用 ⇒ init 硬失败（R5）。
-    std::unique_ptr<lift::FontEngine> hud_font;
-    // ★ 节流：文本（`frame` 每帧都变）最多每 `kOverlayRefreshNs` 重建一次；
-    //   鼠标位置变了**立即**重建（用户可感知的那一项优先）。fps / frame 允许滞后 ≤ 100 ms。
-    std::uint64_t overlay_last_build_ns = 0;  // 0 = 还没生成过
-    int overlay_last_mouse_x = 0;
-    int overlay_last_mouse_y = 0;
-    bool overlay_last_mouse_valid = false;
-    // 最近 1 s 的 Present 时刻（单调 ns；只用于 fps 那一行；叠层关闭时一次也不记）
+    std::unique_ptr<lift::FontEngine> ui_font;
+    // 脚本内核 + 这一份脚本（`--ui <path>` 或随发行的 `scripts/ui/hud.js`）。空 = 没装 / 已关。
+    std::unique_ptr<lift::ui::ScriptRuntime> ui_runtime;
+    std::unique_ptr<lift::ui::UiScript> ui_script;
+    // `--ui <path>` 的原样路径；空 = 默认 HUD（走 `LIFT_UI_SCRIPT_DIR/hud.js` 开发回退，
+    // 发行布局那一跳由 `aot_main` 先解析好塞进来）。origin = 这一个路径串。
+    std::string ui_script_path;
+    // 最近 1 s 的 Present 时刻（单调 ns；只用于 fps 那一项；叠层关闭时一次也不记）
     std::vector<std::uint64_t> present_times_ns;
-    // ★ `Machine` 推来的两行数据（`script` 身份 / `worst` 3 s 最大值）；不画叠层时也只是几个字节。
-    OverlayStatus overlay_status;
+    // ★ `Machine` 推来的只读读数（`script` 身份 / `worst` 3 s 最大值）；脚本每帧读一次。
+    UiReadings ui_readings;
+    // ★ 帧列表读数源（`game.local_frames()`；非 owning，生命周期 = 调用方 = Machine / AotHost）。
+    //   `nullptr` = 没接 ⇒ 脚本侧 `undefined`。⛔ 不在这里推表：脚本**按需**查询。
+    lift::ui::UiFrameSource* ui_frame_source = nullptr;
     // ★ 宿主真光标（`--cursor-warp`，默认关）：只加宿主副作用，⛔ 不改 guest 可见状态。
     bool cursor_warp = false;
     // ★ `--cursor-warp` 的回灌抑制队列（**窗口客户区像素**的 FIFO；判据与为什么见
@@ -268,9 +263,10 @@ struct SdlWindow::Impl {
 
     void notePresentTime();
     bool overlayMousePos(int* x, int* y) const;
-    bool overlayRefreshDue(int mx, int my, bool mouse_ok, std::uint64_t now_ns) const;
-    void overlayMarkBuilt(int mx, int my, bool mouse_ok, std::uint64_t now_ns);
-    std::vector<std::string> overlayLines() const;
+    // ★ 装脚本：`ui_script_path` 非空 = `--ui <path>`；空 = 默认 HUD 的开发回退
+    //   （`LIFT_UI_SCRIPT_DIR/hud.js`）。★ 幂等：已有 `ui_script` 时直接 true。
+    //   false ⇒ `err` 必须填（字体 / 读文件 / 脚本编译 / 入口缺失）。
+    bool loadUiScript(std::string* err);
     // 叠层画不出来 ⇒ 只告警 + 关掉叠层，呈现照旧（⛔ 不因为诊断层让整帧失败）。
     void disableOverlay(const char* why);
 
@@ -379,58 +375,83 @@ bool SdlWindow::Impl::overlayMousePos(int* x, int* y) const {
     return true;
 }
 
-// ★ 节流判据（两条路径共用同一份口径）：
-//   ① 开关刚变 / 还没生成过 ⇒ 立刻；
-//   ② **鼠标位置变了** ⇒ 立刻（用户可感知的那一项优先）；
-//   ③ 否则最多每 `kOverlayRefreshNs`（100 ms）重建 / 上传一次 —— `frame` 每帧都变，
-//      不节流就是每帧一次 CPU 栅格化 + 一次纹理上传（直出还多一次 submit）。
-bool SdlWindow::Impl::overlayRefreshDue(int mx, int my, bool mouse_ok, std::uint64_t now_ns) const {
-    if (overlay_dirty || overlay_last_build_ns == 0) return true;
-    if (mouse_ok != overlay_last_mouse_valid) return true;
-    if (mouse_ok && (mx != overlay_last_mouse_x || my != overlay_last_mouse_y)) return true;
-    return now_ns - overlay_last_build_ns >= kOverlayRefreshNs;
-}
-
-void SdlWindow::Impl::overlayMarkBuilt(int mx, int my, bool mouse_ok, std::uint64_t now_ns) {
-    overlay_last_build_ns = now_ns;
-    overlay_last_mouse_valid = mouse_ok;
-    overlay_last_mouse_x = mx;
-    overlay_last_mouse_y = my;
-    overlay_dirty = false;
-}
-
-std::vector<std::string> SdlWindow::Impl::overlayLines() const {
-    OverlayState st;
-    // frame = Present 计数（`frame_no`；调用方已经自增过这一帧）。
-    st.frame_available = true;
-    st.frame = frame_no;
-    if (windows != nullptr) {
-        const std::uint32_t hwnd = windows->primaryWindow();
-        if (hwnd != 0) {
-            int mx = 0;
-            int my = 0;
-            windows->cursorClientPos(hwnd, &mx, &my);
-            st.mouse_available = true;
-            st.mouse_x = mx;
-            st.mouse_y = my;
+// ★ 装脚本（B 的唯一加载点）。
+//   · `ui_script_path` 非空 = `--ui <path>`（**显式优先**；origin = 原样路径，错误里因此点名
+//     文件与行号）；
+//   · 空 = `--overlay` 的默认 HUD：先试**开发回退** `LIFT_UI_SCRIPT_DIR/hud.js`（CMake 注入的
+//     源码树路径）。★ 发行布局（`<exe 目录>/scripts/ui/hud.js`）由 `aot_main` **先**解析好再传进
+//     `ui_script_path`（sink 不知道 argv[0]）。
+//   · 两条都不在 ⇒ **硬失败**，err 里点名试过的两个路径（⛔ 不静默回退空 HUD）。
+//   ★ 字体是**先决条件**（脚本的 `ui.measure` 走宿主字体）：没有字体 ⇒ 这里就失败（R5）。
+//   ★ 幂等：已经装好 ⇒ 直接 true（`setOverlay(true)` 重复调用不会重建 context）。
+bool SdlWindow::Impl::loadUiScript(std::string* err) {
+    if (ui_script != nullptr) return true;
+    // ① 宿主字体（`ui.measure` 的唯一来源）。缺失 ⇒ 硬失败（⛔ 不静默画空白）。
+    if (ui_font == nullptr) {
+        auto font = std::make_unique<lift::FontEngine>();
+        lift::HostTextMetrics metrics;
+        if (!font->metrics(lift::ui::kUiFontRefPx, false, &metrics)) {
+            if (err) {
+                *err = "宿主字体不可用（LIFT_HOST_FONT_PATH）⇒ --overlay / --ui 拒绝启动"
+                       "（R5：⛔ 不静默画空白）";
+            }
+            return false;
+        }
+        ui_font = std::move(font);
+    }
+    // ② 路径：显式 `--ui` 优先；否则开发回退（`LIFT_UI_SCRIPT_DIR`，编译期注入）。
+    std::string path = ui_script_path;
+    if (path.empty()) {
+        path = std::string(LIFT_UI_SCRIPT_DIR) + "/hud.js";
+        // ★ 存在性 = 能不能打开（同一份 UTF-8 路径口径；⛔ 不用 std::filesystem 的第二套编码规则）。
+        std::FILE* probe = lift::openHostFileUtf8(path, "rb");
+        if (probe == nullptr) {
+            if (err) {
+                *err = std::string("HUD 脚本不在：试过 <exe 所在目录>/scripts/ui/hud.js（发行布局，") +
+                       "aot 臂会先找它）与 " + path +
+                       "（开发回退 LIFT_UI_SCRIPT_DIR）；用 --ui <path> 指定脚本";
+            }
+            return false;
+        }
+        std::fclose(probe);
+    }
+    // ③ 读源码（UTF-8 路径走宿主宽字符 API ⇒ Windows 上的非 ASCII 路径也对）。
+    std::string source;
+    {
+        std::FILE* f = lift::openHostFileUtf8(path, "rb");
+        if (f == nullptr) {
+            if (err) *err = "--ui 读不到脚本：" + path;
+            return false;
+        }
+        char buf[8192];
+        std::size_t n = 0;
+        while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) source.append(buf, n);
+        const bool read_bad = std::ferror(f) != 0;
+        std::fclose(f);
+        if (read_bad) {
+            if (err) *err = "--ui 读脚本失败：" + path;
+            return false;
         }
     }
-    if (!present_times_ns.empty()) {
-        st.fps_available = true;
-        st.fps = static_cast<double>(present_times_ns.size());  // 最近 1 s 的 Present 次数
+    // ④ 脚本内核（建一次；换脚本时复用同一个 runtime）+ 编译 + 抓入口。
+    if (ui_runtime == nullptr) ui_runtime = lift::ui::makeQuickJsRuntime();
+    if (ui_runtime == nullptr) {
+        if (err) *err = "脚本内核不可用（QuickJS runtime 创建失败）";
+        return false;
     }
-    // raster = 这一帧**真的**由谁光栅化（不是"想要谁"）：后端未激活就如实写 cpu。
-    const GpuRaster* r = raster();
-    st.raster = (r != nullptr && r->rasterActive()) ? "gpu" : "cpu";
-    st.present = (direct_present && direct != nullptr) ? "direct" : "renderer";
-    return formatOverlayLines(st, overlay_status);
+    std::string load_err;
+    ui_script = ui_runtime->load(source, path, ui_font.get(), &load_err);
+    if (ui_script == nullptr) {
+        if (err) *err = load_err.empty() ? (path + ": 脚本加载失败") : load_err;
+        return false;
+    }
+    return true;
 }
 
 void SdlWindow::Impl::disableOverlay(const char* why) {
     std::fprintf(stderr, "[overlay] 叠层不可用 ⇒ 关掉（呈现照旧）：%s\n", why != nullptr ? why : "(unknown)");
     overlay = false;
-    overlay_dirty = true;
-    overlay_lines.clear();
+    ui_script.reset();
     if (overlay_tex != nullptr) {
         SDL_DestroyTexture(overlay_tex);
         overlay_tex = nullptr;
@@ -443,24 +464,44 @@ void SdlWindow::Impl::disableOverlay(const char* why) {
     }
 }
 
-// ★ M0 的唯一 HUD 绘制入口：文本节流（`overlayRefreshDue`）→ 最终模型子集的 display list
+// ★ B 的唯一 HUD 绘制入口：把这一帧的读数打包成 `UiFrameReadings` → 脚本产出 display list
 //   → 宿主字体按最终像素栅格化 → `PresentSink::presentOverlay`（两条呈现路径由 sink 内部选）。
-//   ⛔ 这里不再有"renderer 一套 / 直出一套"的绘制代码（M0 的统一合成）。
+//   ★ **每帧都跑脚本**（⛔ 没有 100 ms 节流 / 文本缓存）：`frame` 本来每帧都变，脚本就是真源。
+//   ★ 失败（脚本抛错 / 超预算 / 栅格化失败 / 合成失败）⇒ false + err，由调用方 `disableOverlay`
+//     一次并照旧呈现（⛔ 不让诊断层把整帧打死）。
 bool SdlWindow::drawOverlay(std::string* err) {
     if (!impl_->overlay) return true;
-    if (impl_->hud_font == nullptr) {
-        if (err) *err = "HUD 宿主字体未初始化（--overlay 需要 FontEngine）";
+    if (impl_->ui_script == nullptr || impl_->ui_font == nullptr) {
+        if (err) *err = "HUD 脚本未初始化（--overlay / --ui 需要 UiScript + FontEngine）";
         return false;
     }
+    lift::ui::UiFrameReadings readings;
+    readings.frame = impl_->frame_no;
     int mx = 0;
     int my = 0;
-    const bool mouse_ok = impl_->overlayMousePos(&mx, &my);
-    const std::uint64_t now = SDL_GetTicksNS();
-    if (impl_->overlayRefreshDue(mx, my, mouse_ok, now)) {
-        impl_->overlay_lines = impl_->overlayLines();
-        impl_->overlayMarkBuilt(mx, my, mouse_ok, now);
+    if (impl_->overlayMousePos(&mx, &my)) {
+        readings.mouse_ok = true;
+        readings.mouse_x = mx;
+        readings.mouse_y = my;
     }
-    return lift::ui::presentHud(this, *impl_->hud_font, impl_->overlay_lines, err);
+    if (!impl_->present_times_ns.empty()) {
+        readings.fps_ok = true;
+        readings.fps = static_cast<double>(impl_->present_times_ns.size());  // 最近 1 s 的 Present 次数
+    }
+    const UiReadings& r = impl_->ui_readings;
+    readings.script_ok = r.has_script;
+    readings.script = r.script;
+    readings.worst_ok = r.has_worst;
+    readings.worst_wall_ms = r.wall_max_ms;
+    readings.worst_guest_ms = r.guest_max_ms;
+    readings.worst_guest_ok = r.has_guest;  // 块计时没开 ⇒ 脚本侧**没有** guest_ms 这个键
+    readings.worst_shim_ms = r.shim_max_ms;
+    // ★ 帧列表读数源（`game.local_frames()`）：**按需查询** —— 这里只把指针交出去，
+    //   本帧脚本不调用它就一次 guest 读都不发生（⛔ 宿主不每帧重建表）。
+    readings.frames = impl_->ui_frame_source;
+    // ★ 预算 = 这一帧的墙钟上限 + 字节码条数上限（`UiScript::setBudget` 的绝对 ns 口径）。
+    impl_->ui_script->setBudget(steadyNowNs() + kUiScriptBudgetNs, kUiScriptOpLimit);
+    return lift::ui::presentUi(this, *impl_->ui_font, *impl_->ui_script, readings, err);
 }
 
 void SdlWindow::Impl::mapMouse(float mx, float my, std::int32_t* gx, std::int32_t* gy) const {
@@ -653,20 +694,19 @@ bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
     impl_->screenshot_frame = options.screenshot_frame;
     impl_->raster_gpu = options.raster_gpu;
     impl_->overlay = options.overlay;
-    impl_->overlay_dirty = true;
-    // ★ M0 / U1：`--overlay` 的 HUD 文本走**宿主字体**（FreeType；支持中文）。
-    //   字体缺失 ⇒ **启动硬错**（R5 / `overlay.md`）：⛔ 不静默退回 5×7 点阵、⛔ 不画空白。
-    //   ★ 只在 overlay 打开时构造 FontEngine ⇒ 默认档零成本。
+    impl_->ui_script_path = options.ui_script;
+    // ★ B：`--overlay` / `--ui` 的叠层由**脚本**产出 display list（`scripts/ui/hud.js` 或 `--ui`）。
+    //   装脚本 = ① 宿主字体（`ui.measure` 的来源，缺失 ⇒ 硬失败 R5）② 源码（默认 / `--ui` 文件）
+    //   ③ QuickJS 编译 + 抓 `globalThis.render`。任何一步失败 ⇒ **启动硬错**（AOT 侧 exit 2；
+    //   ⛔ 不静默画空白、⛔ 不退回 5×7 点阵）。
+    //   ★ 只在 overlay 打开时构造 FontEngine / runtime ⇒ 默认档零成本。
     if (impl_->overlay) {
-        impl_->hud_font = std::make_unique<lift::FontEngine>();
-        lift::HostTextMetrics metrics;
-        if (!impl_->hud_font->metrics(lift::ui::kHudFontRefPx, false, &metrics)) {
-            if (err) {
-                *err =
-                    "宿主字体不可用（LIFT_HOST_FONT_PATH）⇒ --overlay 拒绝启动"
-                    "（R5：⛔ 不静默退回 5×7 点阵）";
-            }
-            impl_->hud_font.reset();
+        std::string script_err;
+        if (!impl_->loadUiScript(&script_err)) {
+            if (err) *err = script_err;
+            impl_->ui_script.reset();
+            impl_->ui_runtime.reset();
+            impl_->ui_font.reset();
             impl_->overlay = false;
             return false;
         }
@@ -902,11 +942,13 @@ void SdlWindow::shutdown() {
     impl_->overlay_tex_w = 0;
     impl_->overlay_tex_h = 0;
     impl_->overlay = false;
-    impl_->overlay_dirty = true;
-    impl_->overlay_lines.clear();
-    impl_->hud_font.reset();
+    // ★ 脚本 / 内核 / 字体 / 读数一起放掉（下一轮 init 或 `setOverlay(true)` 会按新 options 重装）。
+    impl_->ui_script.reset();
+    impl_->ui_runtime.reset();
+    impl_->ui_font.reset();
+    impl_->ui_script_path.clear();
     impl_->present_times_ns.clear();
-    impl_->overlay_status = OverlayStatus{};
+    impl_->ui_readings = UiReadings{};
     // 宿主光标开关 / 一次性自检（下一轮 init 会按新 options 重设）。
     impl_->cursor_warp = false;
     impl_->warp_selfcheck_done = false;
@@ -991,7 +1033,7 @@ bool SdlWindow::submitFrame(const SurfaceArena& arena, const GuestSurface& surfa
     impl_->notePresentTime();
     // ★ 叠层画在主纹理**之后**、截图**之前** ⇒ `--present-screenshot` 里可见（窗口像素）。
     //   ⛔ `--dump-frame` 读的是 guest arena，天然不含它。
-    //   ★ M0：唯一入口 `drawOverlay`（display list → 宿主字体 → `presentOverlay`）。
+    //   ★ B：唯一入口 `drawOverlay`（读数 → 脚本产出 display list → 宿主字体 → `presentOverlay`）。
     if (impl_->overlay) {
         std::string oerr;
         if (!drawOverlay(&oerr)) impl_->disableOverlay(oerr.c_str());
@@ -1053,11 +1095,15 @@ bool SdlWindow::presentGeometry(PresentGeometry* out) const {
     return true;
 }
 
-// ★ `PresentSink`（M0）：统一合成入口。输入是 UI 层已经栅格化好的 RGBA8（内存序 R,G,B,A）
+// ★ `PresentSink`：统一合成入口。输入是 UI 层已经栅格化好的 RGBA8（内存序 R,G,B,A）
 //   与**画布原点**（窗口像素，`uiCanvasOrigin` 的结果）。两条路径在这里分派：
-//     · GPU 直出：交给后端（`directOverlay`），真正的 blit 在 `directPresent` 的 letterbox 之后；
+//     · GPU 直出：交给后端（`directOverlay`），真正的绘制在 `directPresent` 的 letterbox 之后。
+//       ★ D 单起直出走的是一条**混合绘制管线**（`SDL_DrawGPUPrimitives` + SRC_ALPHA /
+//         ONE_MINUS_SRC_ALPHA）⇒ 与 renderer 路径一样按 alpha 混合；`directReadback` 用同一整数公式
+//         做 CPU 合成。
 //     · SDL_Renderer：流式纹理 + **一次** 1:1 draw（B1：这次 draw 前后临时关掉 LETTERBOX，
 //       画完立刻恢复 —— 因为叠层是本帧最后一次 draw，风险面最小；⛔ 不做逆缩放）。
+//       ★ 这一条走 `SDL_BLENDMODE_BLEND` ⇒ 半透明底**真的**与画面混合（文本 alpha=255 不变淡）。
 //   ⛔ 不写 guest、⛔ 不进 `--dump-frame`；`rgba` 只在本次调用内有效（这里自己拷进纹理 / GPU）。
 bool SdlWindow::presentOverlay(const std::uint8_t* rgba, int w, int h, int x, int y, std::string* err) {
     if (!impl_->overlay) return true;  // 关掉时一次判空
@@ -1079,9 +1125,11 @@ bool SdlWindow::presentOverlay(const std::uint8_t* rgba, int w, int h, int x, in
             if (err) *err = std::string("SDL_CreateTexture(overlay) 失败：") + SDL_GetError();
             return false;
         }
-        // ★ 不透明底：混合模式必须是 NONE（默认混合会按 alpha 混，深底就变半透明了）。
-        if (!SDL_SetTextureBlendMode(impl_->overlay_tex, SDL_BLENDMODE_NONE)) {
-            if (err) *err = std::string("SDL_SetTextureBlendMode(overlay, NONE) 失败：") + SDL_GetError();
+        // ★ **按 alpha 混合**（用户 2026-11-18：HUD 背景 80% 半透明）：
+        //   脚本的底是 `#101820CC`（alpha 204）⇒ 这里必须 BLEND，否则半透明底会被当成不透明画上去。
+        //   文本像素的 alpha 是 255 ⇒ 混合后仍是字色本身（⛔ 不会把字也变淡）。
+        if (!SDL_SetTextureBlendMode(impl_->overlay_tex, SDL_BLENDMODE_BLEND)) {
+            if (err) *err = std::string("SDL_SetTextureBlendMode(overlay, BLEND) 失败：") + SDL_GetError();
             return false;
         }
         if (!SDL_SetTextureScaleMode(impl_->overlay_tex, SDL_SCALEMODE_NEAREST)) {
@@ -1184,7 +1232,7 @@ bool SdlWindow::Impl::submitDirect(const SurfaceArena& arena, const GuestSurface
     }
     ++frame_no;
     notePresentTime();
-    // ★ 叠层（M0 统一入口）：同一份 display list → 宿主字体 → `presentOverlay`；
+    // ★ 叠层（B 的统一入口）：同一份脚本 display list → 宿主字体 → `presentOverlay`；
     //   直出路径的 `directOverlay` 只记下画布原点 + 上传 RGBA8，真正的 blit 在
     //   `directPresent` 的 letterbox 之后。画不出来 ⇒ 关掉叠层，呈现照旧。
     if (overlay) {
@@ -1379,29 +1427,21 @@ const char* SdlWindow::rendererName() const { return impl_->renderer_name.c_str(
 
 // 调试叠层开关：关掉时**立刻**把两条路径的叠层状态都释放（renderer 纹理 / 直出纹理 + CPU 副本
 // —— 直出那一份由后端 `directOverlay(nullptr,...)` **真的释放** GPU 纹理，不是只置 flag），
-// 下一帧起窗口像素恢复成"只有画面"。默认关（`--overlay` 才打开）。
+// 下一帧起窗口像素恢复成"只有画面"。默认关（`--overlay` / `--ui` 才打开）。
 void SdlWindow::setOverlay(bool on) {
     impl_->overlay = on;
-    impl_->overlay_dirty = true;
-    // 开关变化 ⇒ 丢掉节流状态：下次开启时立刻重建，不受上一轮 100 ms 窗口影响。
-    impl_->overlay_last_build_ns = 0;
-    impl_->overlay_last_mouse_valid = false;
     if (on) {
-        // ★ 生产路径在 `init()` 就构造并验证字体（缺失 ⇒ 硬错）；这里只兜"运行时再开"这条
-        //   （测试 / 未来 `--ui` 的开关）：字体不可用 ⇒ 拒绝启用并**响亮**一次（⛔ 不静默退回点阵）。
-        if (impl_->hud_font == nullptr) {
-            auto font = std::make_unique<lift::FontEngine>();
-            lift::HostTextMetrics metrics;
-            if (!font->metrics(lift::ui::kHudFontRefPx, false, &metrics)) {
-                std::fprintf(stderr, "[overlay] 宿主字体不可用 ⇒ 拒绝启用（R5；⛔ 不退回 5×7 点阵）\n");
-                impl_->overlay = false;
-                return;
-            }
-            impl_->hud_font = std::move(font);
+        // ★ 生产路径在 `init()` 就装好字体 + 脚本（失败 ⇒ 硬错）；这里只兜"运行时再开"这条
+        //   （测试 / 未来开关）：装不上 ⇒ **一次性 stderr + 保持关**（⛔ 不静默画空白、
+        //   ⛔ 不让一个诊断层把 run 打死）。
+        if (!impl_->loadUiScript(nullptr)) {
+            std::fprintf(stderr, "[overlay] 脚本 / 宿主字体不可用 ⇒ 拒绝启用（--overlay / --ui；R5）\n");
+            impl_->overlay = false;
         }
         return;
     }
-    impl_->overlay_lines.clear();
+    // ★ 关 ⇒ 丢掉这一份脚本（下次开会按 `ui_script_path` 重新装：`--ui` 可能换过内容）。
+    impl_->ui_script.reset();
     if (impl_->overlay_tex != nullptr) {
         SDL_DestroyTexture(impl_->overlay_tex);
         impl_->overlay_tex = nullptr;
@@ -1416,15 +1456,13 @@ void SdlWindow::setOverlay(bool on) {
 
 bool SdlWindow::overlayEnabled() const { return impl_->overlay; }
 
-// ★ `Machine` → 窗口 sink 的两行数据（`script` / `worst`）。只在**文本会变**时让 dirty：
-//   · 身份（script 名字 / 有-无）变了 ⇒ 立刻重建（用户可感知的那一项优先，与鼠标同一档）；
-//   · `worst` 的三个最大值**按显示精度**（一位小数）变了 ⇒ 重建；
-//   · 其余情况**不**动 dirty ⇒ 仍走既有的 100 ms 节流（⛔ 不每帧重传纹理）。
-//   ★ 这里只存数据、不重建文本：两条呈现路径下一帧都会走 `overlayLines()`（同一份格式化）。
-void SdlWindow::setOverlayStatus(const OverlayStatus& status) {
-    if (overlayStatusTextChanged(impl_->overlay_status, status)) impl_->overlay_dirty = true;
-    impl_->overlay_status = status;
-}
+// ★ `Machine` → 窗口 sink 的每帧只读读数（`script` / `worst`）。
+//   ★ **只存值**：HUD 是 `scripts/ui/hud.js` 每帧重画 ⇒ 这里没有 dirty / 文本缓存可言。
+void SdlWindow::setUiReadings(const UiReadings& readings) { impl_->ui_readings = readings; }
+
+// ★ `Machine` / `AotHost` → 窗口 sink 的**帧列表读数源**（`game.local_frames()`）。
+//   只存指针（非 owning）：真正的读发生在脚本调用那一下；⛔ 宿主不推表、不缓存。
+void SdlWindow::setUiFrameSource(ui::UiFrameSource* src) { impl_->ui_frame_source = src; }
 
 void SdlWindow::setCaptureForTest(bool on) { impl_->capture = on; }
 
