@@ -19,7 +19,9 @@
 // ★ 缺 GPU / 生成物 / 执行源 / 安装树（`--game-dir`）/ 宿主字体 ⇒ `LIFT_SKIP(77)`（⛔ 不假绿）。
 // ★ 子进程 cwd / `--appdata` 都指到临时目录 ⇒ 不往仓库 / 真 AppData 写东西。
 // ★ 注册：顶层 `add_test` + `SKIP_RETURN_CODE 77`（与 `aot-audio-wiring` 同形；输入假定在场）。
-//   ⚠ 子进程用 `CreateProcessW`（Windows 专有）⇒ 其它平台 `LIFT_SKIP`。
+// ★ 脚手架**跨平台**（Windows `CreateProcessW` / POSIX `fork+execv`，同一 `runChild` 签名）：
+//   参数构造只有一份（`Arg = fs::path::string_type`：win = 宽字符，POSIX = 字节），⛔ 不拼 shell
+//   字符串、⛔ 不用 `system("timeout …")`（路径含空格 / 引号会错）。非「资产 / GPU 缺口」不再 SKIP。
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -40,16 +42,35 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#else
+#include <cerrno>
+#include <chrono>
+#include <csignal>
+#include <ctime>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 namespace {
 
-#if defined(_WIN32)
-
 namespace fs = std::filesystem;
 
+// ★ 参数类型 = `fs::path::string_type`：Windows 上是 `std::wstring`（`CreateProcessW` + `cmdline.h`
+//   的 MSVC 引用规则），POSIX 上是 `std::string`（`execv` 直接吃字节；本仓路径口径是 UTF-8）。
+//   ⇒ 两个后端共用**同一条参数构造路径**，⛔ 不各写一套转义 / 拼串。
+using Arg = fs::path::string_type;
+
+/** ASCII 字面量 ⇒ `Arg`（两个平台都只走 ASCII；路径一律用 `fs::path::native()`）。 */
+Arg argFromAscii(const char* s) {
+    Arg out;
+    for (const char* p = s; *p != '\0'; ++p) out.push_back(static_cast<typename Arg::value_type>(*p));
+    return out;
+}
+
 struct ChildRun {
-    DWORD exit_code = 0xFFFFFFFFu;
+    int exit_code = -1;
     bool started = false;
     bool timed_out = false;
     std::string out;
@@ -62,7 +83,9 @@ std::string readAllBytes(const fs::path& p) {
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
-ChildRun runChild(const fs::path& exe, const std::wstring& args, const fs::path& cwd, const fs::path& out_path,
+#if defined(_WIN32)
+
+ChildRun runChild(const fs::path& exe, const std::vector<Arg>& args, const fs::path& cwd, const fs::path& out_path,
                   const fs::path& err_path) {
     ChildRun r;
     SECURITY_ATTRIBUTES sa{};
@@ -83,7 +106,12 @@ ChildRun runChild(const fs::path& exe, const std::wstring& args, const fs::path&
     si.hStdOutput = h_out;
     si.hStdError = h_err;
     PROCESS_INFORMATION pi{};
-    std::wstring cmd = lift_test::quoteArg(exe.wstring()) + L" " + args;
+    // ★ 命令行拼装只有一份实现（`tests/cmdline.h`）：结尾反斜杠 / 内嵌引号 / 空串都按 MSVC 规则转义。
+    std::vector<std::wstring> argv;
+    argv.reserve(args.size() + 1);
+    argv.push_back(exe.native());
+    argv.insert(argv.end(), args.begin(), args.end());
+    std::wstring cmd = lift_test::joinCommandLine(argv);
     const BOOL ok = ::CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
                                      cwd.c_str(), &si, &pi);
     ::CloseHandle(h_out);
@@ -96,7 +124,9 @@ ChildRun runChild(const fs::path& exe, const std::wstring& args, const fs::path&
         ::TerminateProcess(pi.hProcess, 991u);
         ::WaitForSingleObject(pi.hProcess, 5000u);
     }
-    ::GetExitCodeProcess(pi.hProcess, &r.exit_code);
+    DWORD code = 0xFFFFFFFFu;
+    ::GetExitCodeProcess(pi.hProcess, &code);
+    r.exit_code = static_cast<int>(code);
     ::CloseHandle(pi.hThread);
     ::CloseHandle(pi.hProcess);
     r.out = readAllBytes(out_path);
@@ -104,26 +134,145 @@ ChildRun runChild(const fs::path& exe, const std::wstring& args, const fs::path&
     return r;
 }
 
-/** 第一行以 `prefix` 开头的行（没有 ⇒ 空串）。 */
-std::string firstLineStartingWith(const std::string& text, const std::string& prefix) {
+#else  // POSIX
+
+// 子进程里只做 async-signal-safe 的事；这几条系统调用都可能被信号打断 ⇒ EINTR 重试
+// （⛔ 不把 EINTR 当失败：那会让一次信号变成 `_exit(127)` 的假红）。
+int openRetry(const char* path, int flags) {
+    int fd = -1;
+    do {
+        fd = ::open(path, flags, 0600);
+    } while (fd < 0 && errno == EINTR);
+    return fd;
+}
+
+int dup2Retry(int from, int to) {
+    int rc = -1;
+    do {
+        rc = ::dup2(from, to);
+    } while (rc < 0 && errno == EINTR);
+    return rc;
+}
+
+int chdirRetry(const char* path) {
+    int rc = -1;
+    do {
+        rc = ::chdir(path);
+    } while (rc < 0 && errno == EINTR);
+    return rc;
+}
+
+ChildRun runChild(const fs::path& exe, const std::vector<Arg>& args, const fs::path& cwd, const fs::path& out_path,
+                  const fs::path& err_path) {
+    ChildRun r;
+    // argv 在**父进程**里先建好（fork 之后子进程不再分配内存；指针在 fork 后仍有效）。
+    std::vector<char*> argv;
+    argv.reserve(args.size() + 2);
+    argv.push_back(const_cast<char*>(exe.c_str()));
+    for (const Arg& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+    argv.push_back(nullptr);
+    const pid_t pid = ::fork();
+    if (pid < 0) return r;
+    if (pid == 0) {
+        // ---- 子进程 ----
+        // ★ 只做 async-signal-safe 的事；任何失败一律 `_exit(127)`（父进程按"非 0 退出码"判红）。
+        // ★ stdout/stderr 是**普通文件**（⛔ 不是管道）⇒ 这条路径不产生 SIGPIPE；也⛔ 不在这里
+        //   `signal(SIGPIPE, SIG_IGN)`（exec 后仍被继承 ⇒ 会悄悄改掉产品自己的 SIGPIPE 处理）。
+        const int fd_out = openRetry(out_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC);
+        const int fd_err = openRetry(err_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC);
+        if (fd_out < 0 || fd_err < 0) ::_exit(127);
+        if (dup2Retry(fd_out, STDOUT_FILENO) < 0) ::_exit(127);
+        if (dup2Retry(fd_err, STDERR_FILENO) < 0) ::_exit(127);
+        if (chdirRetry(cwd.c_str()) != 0) ::_exit(127);
+        // 不把父进程的其它 fd 带进 exec：3 以上全关（含 fd_out/fd_err 的原始副本；它们已 dup2 到 1/2）。
+        // ★ 上界夹到 65536：Linux 的 `_SC_OPEN_MAX` 可能是 1M，而本测试进程不可能有那么高的 fd。
+        const long open_max = ::sysconf(_SC_OPEN_MAX);
+        const int close_upto = (open_max > 0 && open_max < 65536) ? static_cast<int>(open_max) : 65536;
+        for (int fd = 3; fd < close_upto; ++fd) ::close(fd);
+        for (;;) {  // execv 只在**失败**时返回；EINTR 也是失败的一种 ⇒ 重试
+            ::execv(exe.c_str(), argv.data());
+            if (errno != EINTR) break;
+        }
+        ::_exit(127);  // exec 失败（exe 不存在 / 不可执行 / ENOEXEC）
+    }
+    // ---- 父进程 ----
+    r.started = true;
+    int status = 0;
+    bool reaped = false;
+    bool timed_out = false;
+    // 60 s 上限，与 Windows 分支一致；`WNOHANG` 轮询 + `std::chrono` 计时。
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    for (;;) {
+        const pid_t w = ::waitpid(pid, &status, WNOHANG);
+        if (w == pid) {
+            reaped = true;
+            break;
+        }
+        if (w < 0) {
+            if (errno == EINTR) continue;  // 被信号打断 ⇒ 重试（⛔ 不许把 EINTR 当"子进程没了"）
+            break;                         // 其它错误：拿不到状态 ⇒ 下面记 -1（非 0）
+        }
+        // w == 0：还在跑。
+        if (std::chrono::steady_clock::now() >= deadline) {
+            timed_out = true;
+            break;
+        }
+        // 轮询间隔 10 ms（`nanosleep` 被信号打断也**不用补睡**：循环回头会重算 deadline）。
+        // ★ 不用 `std::this_thread::sleep_for`：POSIX 上它可能把 libstdc++ 的线程符号拖进链接行，
+        //   而这条测试只需要一个纯 POSIX 的睡眠原语。
+        const struct timespec poll = {0, 10 * 1000 * 1000};
+        ::nanosleep(&poll, nullptr);
+    }
+    if (timed_out) {
+        r.timed_out = true;
+        ::kill(pid, SIGKILL);
+        for (;;) {  // 收尸同样要过 EINTR
+            const pid_t w = ::waitpid(pid, &status, 0);
+            if (w == pid) break;
+            if (w < 0 && errno == EINTR) continue;
+            break;
+        }
+        r.exit_code = 991;  // 与 Windows 分支的 `TerminateProcess(…, 991)` 对齐
+    } else if (reaped) {
+        if (WIFEXITED(status)) {
+            r.exit_code = WEXITSTATUS(status);
+        } else if (WIFSIGNALED(status)) {
+            r.exit_code = 128 + WTERMSIG(status);  // 异常终止 ⇒ 非 0
+        } else {
+            r.exit_code = -1;
+        }
+    } else {
+        r.exit_code = -1;  // waitpid 非 EINTR 失败（如 ECHILD）⇒ 非 0（⛔ 不当成 0）
+    }
+    r.out = readAllBytes(out_path);
+    r.err = readAllBytes(err_path);
+    return r;
+}
+
+#endif  // _WIN32
+
+/**
+ * 从收口摘要 `present   : … lastHash=0x…` 里取 `lastHash=0x…` 这一段（没有 ⇒ 空串）。
+ * ★ 启动 readout 也打 `present   : driver=…`（**没有** `lastHash=`，`aot_main.cpp` 的 `describe()`）⇒
+ *   必须按 `lastHash=` 认那一条，⛔ 不能只按前缀取第一行（那会永远取到启动行 ⇒ 本判据假红）。
+ */
+std::string lastHashField(const std::string& out) {
+    const std::string prefix = "present   : ";
     std::size_t pos = 0;
-    while (pos <= text.size()) {
-        const std::size_t nl = text.find('\n', pos);
-        const std::string line = text.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
-        if (line.compare(0, prefix.size(), prefix) == 0) return line;
+    while (pos <= out.size()) {
+        const std::size_t nl = out.find('\n', pos);
+        const std::string line = out.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+        if (line.compare(0, prefix.size(), prefix) == 0) {
+            const std::size_t at = line.find("lastHash=");
+            if (at != std::string::npos) {
+                const std::size_t end = line.find(' ', at);
+                return line.substr(at, end == std::string::npos ? std::string::npos : end - at);
+            }
+        }
         if (nl == std::string::npos) break;
         pos = nl + 1;
     }
     return {};
-}
-
-/** 从 `present   : … lastHash=0x…` 里取 `lastHash=0x…` 这一段（没有 ⇒ 空串）。 */
-std::string lastHashField(const std::string& out) {
-    const std::string line = firstLineStartingWith(out, "present   : ");
-    const std::size_t at = line.find("lastHash=");
-    if (at == std::string::npos) return {};
-    const std::size_t end = line.find(' ', at);
-    return line.substr(at, end == std::string::npos ? std::string::npos : end - at);
 }
 
 std::size_t countOccurrences(const std::string& text, const std::string& needle) {
@@ -177,39 +326,41 @@ BmpPixel bmpPixel(const std::string& bytes, int x, int y) {
     return p;
 }
 
-#endif  // _WIN32
-
 }  // namespace
 
 int main(int argc, char** argv) {
     using namespace lift_test;
 
-#if !defined(_WIN32)
-    (void)argc;
-    (void)argv;
-    LIFT_SKIP("AOT 臂的端到端用 CreateProcessW 起子进程（Windows 专有）");
-#else
     if (argc < 4) {
-        LIFT_SKIP("需要 CTest 传 <emulator-lift-aot.exe> <AGE.EXE__dumped.sectfix.EXE> <安装树>（见 CMakeLists）");
+        LIFT_SKIP("需要 CTest 传 <emulator-lift-aot> <AGE.EXE__dumped.sectfix.EXE> <安装树>（见 CMakeLists）");
     }
     const fs::path exe = fs::path(argv[1]);
     const fs::path age_exe = fs::path(argv[2]);
     const fs::path game_dir = fs::path(argv[3]);
-    if (!fs::exists(exe)) LIFT_SKIP("emulator-lift-aot.exe 不在场");
+    if (!fs::exists(exe)) LIFT_SKIP("emulator-lift-aot 不在场");
     if (!fs::exists(age_exe)) LIFT_SKIP("执行源（corpus/assets/age/AGE.EXE__dumped.sectfix.EXE）不在场");
     if (!fs::exists(game_dir)) LIFT_SKIP("安装树（--game-dir）不在场：没有 AGERC.DLL 就跑不到 Present");
 
     std::error_code ec;
-    const fs::path root =
-        fs::temp_directory_path(ec) / ("lift-aot-overlay-" + std::to_string(::GetCurrentProcessId()));
+#if defined(_WIN32)
+    const unsigned long pid = ::GetCurrentProcessId();
+#else
+    const pid_t pid = ::getpid();
+#endif
+    const fs::path root = fs::temp_directory_path(ec) / ("lift-aot-overlay-" + std::to_string(pid));
     fs::remove_all(root, ec);
     fs::create_directories(root, ec);
     LIFT_CHECK(!ec);
 
-    const std::wstring exe_arg = L"--exe " + quoteArg(age_exe.wstring());
-    const std::wstring game_arg = L" --game-dir " + quoteArg(game_dir.wstring());
-    const wchar_t* const kCommon =
-        L" --skip-logo --present window --present-hidden --time-limit 60";
+    // 公共参数（两个平台共用一份构造；`Arg` 就是子进程真正收到的 argv token）。
+    std::vector<Arg> common;
+    common.push_back(argFromAscii("--exe"));
+    common.push_back(age_exe.native());
+    common.push_back(argFromAscii("--game-dir"));
+    common.push_back(game_dir.native());
+    for (const char* a : {"--skip-logo", "--present", "window", "--present-hidden", "--time-limit", "60"}) {
+        common.push_back(argFromAscii(a));
+    }
 
     // ★ 四次 run：① 判据 1（两帧，exit 0）；②/③ 用 **1 帧** 做开/关对照；④ 是 ③ 的**纯对照复制**
     //   （同一命令再跑一遍）：③ 与 ④ 若不相同 ⇒ 这个 run 本身非确定 ⇒ 跳过逐字节判据（⛔ 不假红）；
@@ -236,16 +387,21 @@ int main(int argc, char** argv) {
         g_current_case = k.name;
         const fs::path appdata = root / (std::string("appdata-") + k.name);
         fs::create_directories(appdata, ec);
-        std::wstring args = exe_arg + game_arg + kCommon + L" --max-frames " +
-                            std::to_wstring(k.frames) + L" --appdata " + quoteArg(appdata.wstring());
+        std::vector<Arg> args = common;
+        args.push_back(argFromAscii("--max-frames"));
+        args.push_back(argFromAscii(std::to_string(k.frames).c_str()));
+        args.push_back(argFromAscii("--appdata"));
+        args.push_back(appdata.native());
         Out o;
         o.shot = root / (std::string(k.name) + "-shot.bmp");
         o.dump = root / (std::string(k.name) + "-dump.bmp");
         if (k.artifacts) {
-            args += L" --present-screenshot " + quoteArg(o.shot.wstring());
-            args += L" --dump-frame " + quoteArg(o.dump.wstring());
+            args.push_back(argFromAscii("--present-screenshot"));
+            args.push_back(o.shot.native());
+            args.push_back(argFromAscii("--dump-frame"));
+            args.push_back(o.dump.native());
         }
-        if (k.overlay) args += L" --overlay";
+        if (k.overlay) args.push_back(argFromAscii("--overlay"));
         const std::string tag = std::string(k.name) + ".";
         o.run = runChild(exe, args, root, root / (tag + "out"), root / (tag + "err"));
         LIFT_CHECK(o.run.started);
@@ -259,12 +415,16 @@ int main(int argc, char** argv) {
         // ① 参数面 / 接线：每条命令都必须 exit 0（尤其 `--max-frames 2 --overlay`）。
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(o.run.exit_code), 0u);
         if (o.run.exit_code != 0) {
-            std::fprintf(stderr, "  [%s] exit=%lu\n  stderr:\n%s\n", k.name,
-                         static_cast<unsigned long>(o.run.exit_code), o.run.err.c_str());
+            std::fprintf(stderr, "  [%s] exit=%d\n  stderr:\n%s\n", k.name, o.run.exit_code, o.run.err.c_str());
         }
         // ⑤ 无周期行：`[overlay]` / `[ui]` 各至多一条（一次性 readout 允许）。
-        LIFT_CHECK(countOccurrences(o.run.err, "[overlay]") <= 1);
-        LIFT_CHECK(countOccurrences(o.run.err, "[ui]") <= 1);
+        // ★ 读数（不是额外断言）：让 `ctest -V` 直接看到 ① 的 exit 与 ⑤ 的计数。
+        const std::size_t overlay_lines = countOccurrences(o.run.err, "[overlay]");
+        const std::size_t ui_lines = countOccurrences(o.run.err, "[ui]");
+        std::printf("①/⑤ [%s]: exit=%d [overlay]=%zu [ui]=%zu\n", k.name, o.run.exit_code, overlay_lines,
+                    ui_lines);
+        LIFT_CHECK(overlay_lines <= 1);
+        LIFT_CHECK(ui_lines <= 1);
         outs.push_back(std::move(o));
     }
     if (outs.size() != 4) return finish("aot-overlay");
@@ -288,7 +448,7 @@ int main(int argc, char** argv) {
     const BmpPixel without_overlay = bmpPixel(shot_plain, 0, 0);
     LIFT_CHECK(with_overlay.ok);
     LIFT_CHECK(without_overlay.ok);
-    std::printf("shot(0,0): overlay=(%u,%u,%u) plain=(%u,%u,%u)\n", static_cast<unsigned>(with_overlay.r),
+    std::printf("② shot(0,0): overlay=(%u,%u,%u) plain=(%u,%u,%u)\n", static_cast<unsigned>(with_overlay.r),
                 static_cast<unsigned>(with_overlay.g), static_cast<unsigned>(with_overlay.b),
                 static_cast<unsigned>(without_overlay.r), static_cast<unsigned>(without_overlay.g),
                 static_cast<unsigned>(without_overlay.b));
@@ -302,16 +462,17 @@ int main(int argc, char** argv) {
     // ③ guest 帧逐字节相同（⛔ UI 不进 guest 后缓冲）。
     const std::string dump_overlay = readAllBytes(outs[1].dump);
     const std::string dump_plain = readAllBytes(outs[2].dump);
+    std::printf("③ dump: overlay=%zu bytes plain=%zu bytes equal=%d\n", dump_overlay.size(), dump_plain.size(),
+                dump_overlay == dump_plain ? 1 : 0);
     LIFT_CHECK(!dump_overlay.empty());
     LIFT_CHECK(dump_overlay == dump_plain);
 
     // ④ arena.hash（最后一次 Present 的后缓冲哈希）两次相同。
     const std::string hash_overlay = lastHashField(outs[1].run.out);
     const std::string hash_plain = lastHashField(outs[2].run.out);
-    std::printf("lastHash: overlay=%s plain=%s\n", hash_overlay.c_str(), hash_plain.c_str());
+    std::printf("④ lastHash: overlay=%s plain=%s\n", hash_overlay.c_str(), hash_plain.c_str());
     LIFT_CHECK(!hash_overlay.empty());
     LIFT_CHECK(hash_overlay == hash_plain);
-#endif
 
     return finish("aot-overlay");
 }

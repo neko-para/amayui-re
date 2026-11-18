@@ -187,8 +187,11 @@ M1 只加能力（layout / when / hit / clip），不改模型（N1）。
 ★ 旧的"真窗口 + 真落盘"覆盖已删 ⇒ M0 重新立了"带 `--overlay` 的 AOT 子进程跑两帧 + 窗口 BMP 在
 画布原点出现精确色块 + `--dump-frame` 两次逐字节相同"（`tests/aot_overlay.cpp`；缺资产 ⇒ SKIP 77），
 ⛔ 不靠 `tests/overlay.cpp` 的窗口用例冒充。
-★ **`aot-overlay` 在 mac / Linux 恒 SKIP 77**：它用 `CreateProcessW` 起子进程（Windows 专有）⇒ 非 win32
-永远是 SKIP，⛔ **不当绿**；判据 1 / 4 / 5 的端到端证据留给 **win32 验收**。
+★ **`aot-overlay` 的测试脚手架已跨平台**：Windows 用 `CreateProcessW`，mac / Linux 用 `fork` + 子进程
+`open`/`dup2`/`execv` + 父进程 `waitpid(WNOHANG)` 轮询 + 60 s `std::chrono` 超时（stdout/stderr 都重定向到
+文件，⛔ 不拼 shell 字符串 / ⛔ 不用 `system("timeout …")`）⇒ **mac / Linux 也真跑**。只有真正的环境缺口
+（GPU / 生成物 / 执行源 / 安装树 / 宿主字体）才 `LIFT_SKIP 77`；判据 1 / 4 / 5 的端到端证据不再只在
+win32 取。
 
 ### M1 — `ui_core` + display list + 布局 / 条件 / 命中（无语言运行时）
 
