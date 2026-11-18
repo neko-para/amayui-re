@@ -33,6 +33,15 @@
 //   · sampler = 缓存 (address U/V × MAG/MIN)；缺省 NEAREST+CLAMP（D3DXSprite 现状不变）。
 //   · 纹理上传按 (guest 指针/尺寸/alpha) 缓存，**像素内容未变就不重传**
 //     （TITLE 的 ID3DXSprite::End 曾因每次 draw 完整 upload 而 ~118–206 ms）。
+// ★ `NOMINMAX` 必须在**第一条 include 之前**：本文件经 `runtime/present_sdl.h` / `<SDL3/SDL.h>` /
+//   `<d3dcompiler.h>` 间接拉进 `<windows.h>`，而 `minwindef.h` 的 `min` / `max` 宏会把
+//   `std::min` / `std::max` 的函数名吃掉（clang-cl：`expected unqualified-id`）。
+//   本仓既有惯例同此（样例 `src/runtime/present_sdl.cpp:6`、`src/runtime/memory.cpp:19`）。
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#endif
 #include "runtime/present_sdl.h"
 
 #if defined(_WIN32)
@@ -2037,7 +2046,8 @@ private:
     void layoutLetterbox(int sw, int sh, SDL_GPUBlitRegion* out) const {
         const double sx = static_cast<double>(sw) / static_cast<double>(width_);
         const double sy = static_cast<double>(sh) / static_cast<double>(height_);
-        // ⛔ 不要写 `std::min`：<windows.h> 的 min 宏会把它撑坏（本文件经 SDL.h 间接包含）
+        // ★ 本文件顶部已定义 `NOMINMAX` ⇒ `std::min` / `std::max` 可用；
+        //   ⛔ 不要再退回 `min(...)` / `max(...)` 宏形式（那会被 `<windows.h>` 的宏吃掉）。
         const double scale = (sx < sy) ? sx : sy;
         int dw = static_cast<int>(std::lround(static_cast<double>(width_) * scale));
         int dh = static_cast<int>(std::lround(static_cast<double>(height_) * scale));
