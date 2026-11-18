@@ -4790,6 +4790,35 @@ const MUTATIONS = [
       'd3dx9-sprite-blend 的纯 ① `dst_blend == One` 与接线 ① `got.dst_blend == One` 当场红；' +
       '表达不了的因子也从 false+why 退化成静默成功（接线 ④ 的"不入队 + skipped 涨"红）',
   },
+
+  // ── D3DXSprite 的 `Begin(ALPHABLEND)` 必须像真 D3DX 那样设/恢复 27/19/20
+  //    （`REQ-01M7R3YPQPNPBZ327H89Q8RTEE`；守卫 = `tests/d3dx9_sprite_blend.cpp`）──
+  //   ★ 代表"普通 sprite 批次读到引擎残留的 ONE/ZERO ⇒ 透明黑 texel 写进后缓冲"这一类**静默**错误：
+  //     画面照出，只是走廊石地 / 对话框底板全黑（对话框黑度 1.23% → 33.70%），没有任何日志会喊。
+  //   ★ 为什么落在这一行：`Begin` 里那三句 `writeRenderState` 是"D3DX 自己先设好默认因子"的
+  //     唯一落点；禁掉它 ⇒ 合成路读到 Begin 之前的 2/1（引擎从没替 sprite 设过 5/6）。
+  //   ★ 判据不弱化：`begin-restores-blend-state` 的 `19==5` / `20==6` 与 `pixel-transparent-texel`
+  //     的"透明 texel 不改背景"直接红。
+  {
+    file: 'apps/emulator-lift/src/runtime/d3dx9_sprite.cpp',
+    from:
+      '                for (int i = 0; i < 3; ++i) {\n' +
+      '                    std::string write_why;\n' +
+      '                    if (!d3d9::writeRenderState(cpu, dev.state, ids[i], values[i], &write_why)) {',
+    to:
+      '                for (int i = 0; i < 3; ++i) {\n' +
+      '                    std::string write_why;\n' +
+      '                    if (false && !d3d9::writeRenderState(cpu, dev.state, ids[i], values[i], &write_why)) {' +
+      '  // 变异：Begin 不再设 SrcBlend/DestBlend',
+    guard: 'ctest:d3dx9-sprite-blend',
+    ctest: 'd3dx9-sprite-blend',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3dx9-sprite-blend',
+    what:
+      'sprite-begin-alphablend-state-writes：`Begin(ALPHABLEND)` 不再写 27/19/20（禁掉那三句 ' +
+      '`writeRenderState`）⇒ 普通批次读到引擎残留的 `ONE/ZERO` ⇒ d3dx9-sprite-blend 的' +
+      '"接管与恢复"（`19==5` / `20==6`）与"像素回归"（透明 texel 把背景写成黑）当场红',
+  },
 ];
 
 let mutationRunSeq = 0;

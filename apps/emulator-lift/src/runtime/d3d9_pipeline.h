@@ -618,6 +618,24 @@ struct BlendStateSnapshot {
 bool readBlendState(X86& cpu, std::uint32_t dev_state, BlendStateSnapshot* out, std::string* why);
 
 // =====================================================================================
+// 混合状态的**写**入口（D3DX 自己在 Begin/End 改状态时用；`REQ-01M7R3YPQPNPBZ327H89Q8RTEE`）
+//
+// ★ 为什么要它：真 D3DX9 的 `Begin(D3DXSPRITE_ALPHABLEND)` **自己**把
+//   `ALPHABLENDENABLE=1` / `SRCBLEND=SRCALPHA(5)` / `DESTBLEND=INVSRCALPHA(6)` 写进设备，
+//   并在 `End` 把**它改过的**三项恢复。⛔ 这不是"从 flags 推因子"（那会把
+//   `REQ-01M7R1ABAP86QVMNBZ5S4EDKD5` 修回去）：因子仍然只从设备状态**读**，本入口只补
+//   "D3DX 会先写哪几项"这一步。
+// ★ 与 `rsOf` / `setRs` 同源（`pipelineOf` + `setRs`），⛔ 不另写偏移、⛔ 不走 guest 的
+//   `SetRenderState` shim（那条路会做值校验 / unsupported 记账；D3DX 的内部写不该冒充 guest 写）。
+// ★ `dev_state` = 设备状态块（'D9D1'，与 `readBlendState` 同一口径）；`state` 的上界按
+//   `D3DRENDERSTATETYPE` 最后一员（209）判（越界 ⇒ false，⛔ 写穿状态块）。本入口**不做**
+//   `setRenderState` 的值校验 / unsupported 记账（那是 guest 写的路）；调用方只写本模块自己
+//   消费的 `kRsAlphaBlendEnable` / `kRsSrcBlend` / `kRsDestBlend` 这三项。
+// =====================================================================================
+bool writeRenderState(X86& cpu, std::uint32_t dev_state, std::uint32_t state, std::uint32_t value,
+                      std::string* why);
+
+// =====================================================================================
 // GPU 准入 / 状态映射（**纯函数**；夹具直接调，⛔ 不建机器）
 //
 // ★ 把 D3D9 的混合状态映射到 `GpuRasterState` 的 color/alpha 两段。

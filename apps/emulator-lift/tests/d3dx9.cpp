@@ -1867,10 +1867,10 @@ void caseTraps() {
 
 // ---------------------------------------------------------------------------------------
 // ⑦ 资源耗尽 ≠ unimplemented：把**夹具自己**那 1 MiB guest 堆占满到
-//    "状态块（128 B 载荷 → 136 B 块）能成、批次数组（1024 B → 1032 B 块）不够"的窗口。
+//    "状态块（140 B 载荷 → 148 B 块）能成、批次数组（1024 B → 1032 B 块）不够"的窗口。
 //    · ⛔ 不改 `kFixtureHeapBytes` / `heap().init(...)`：占满的对象就是 guest 侧用的**同一个**
 //      `GuestHeap` ⇒ `createSpriteState` 里的 `cpu.heap->alloc` 真的失败（不是伪造前提）。
-//    · 取窗口下沿 `L = need_state`（那 136 B 正好被状态块吃满 ⇒ 批次数组一个字节都不剩）：
+//    · 取窗口下沿 `L = need_state`（那 148 B 正好被状态块吃满 ⇒ 批次数组一个字节都不剩）：
 //      再宽一点会把"失败路径上多了一次小分配"静默吸收掉 ⇒ `allocCount()+1` 把"多一次就红"变成判据。
 // ---------------------------------------------------------------------------------------
 void caseCreateSpriteOom() {
@@ -1895,14 +1895,15 @@ void caseCreateSpriteOom() {
 
     const std::uint32_t baseline = h.bytesInUse();
     // 载荷 = `createSpriteState` 真会申请的两次：
-    //   状态块 `kSpBytes` = 128（`d3dx9_sprite.cpp` 的 `kSpBytes`）；
+    //   状态块 `kSpBytes` = 140（`d3dx9_sprite.cpp` 的 `kSpBytes`；本单把 Begin 的保存/恢复
+    //   三项追加在后面 ⇒ 128 → 140）；
     //   批次数组 `kInitialBatchCapacity`(16) × `kBatchEntryBytes`（`d3dx9_sprite.h`）。
     //   ★ 批次载荷写成**算式**（段 3 的 ⑥）：原先这里写死 `1152`，于是条目一变大（72 → 80 B）
     //     夹具仍在按 16×72 造窗口 —— 窗口的**上沿**与代码真实申请的字节数脱钩，载荷增长不会被发现。
     //     算式与 `kBatchEntryBytes` 同源：改常量 ⇒ 窗口跟着动 ⇒ 下面的范围断言 / 覆盖率警戒线红。
     //     ⛔ 常量 16 是 `d3dx9_sprite.cpp` 里 `kInitialBatchCapacity` 的值（内部量，不导出）；
     //     它若变大，`need_batch < 堆` 与失败位置会一起变，用例当场红而不是静默换窗口。
-    const std::uint32_t need_state = footprint(128u);
+    const std::uint32_t need_state = footprint(140u);
     const std::uint32_t need_batch = footprint(16u * lift::d3dx9::kBatchEntryBytes);
     const std::uint32_t header = footprint(0u);
     LIFT_CHECK_EQ_U32(h.bytesInUse(), baseline);  // 探针没留下块

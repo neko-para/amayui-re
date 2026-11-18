@@ -30,8 +30,11 @@
 //     注释与交付里都这么写。⛔ 不把推断说成实测。
 //
 // ★ 语义（为什么"不是占位"）：
-//   · `Begin(Flags)` 打开一个批次，只**记录** flags（ALPHABLEND 生效，其余"记录并明确忽略"，
-//     未定义位也记录并忽略 —— 见 begin() 的注释）。
+//   · `Begin(Flags)` 打开一个批次，记录 flags（ALPHABLEND 生效，其余"记录并明确忽略"，
+//     未定义位也记录并忽略 —— 见 begin() 的注释）。★ 带 `ALPHABLEND` 时还要做真 D3DX 自己做的
+//     那一步：保存设备里的 `ALPHABLENDENABLE` / `SRCBLEND` / `DESTBLEND` 并设成
+//     `1` / `SRCALPHA` / `INVSRCALPHA`（`End` 恢复，`Flush` 不恢复）
+//     —— `REQ-01M7R3YPQPNPBZ327H89Q8RTEE`。
 //   · `Draw(...)` 在**Draw 时**就把变换应用到四个角点（与 D3DX 的"顶点当场生成、Flush 才提交"一致），
 //     把一次绘制压进 guest 堆上的批次表；⛔ 不在 Draw 里写像素。
 //   · `End()` / `Flush()` 把批次交给**当前绑定的颜色目标**（与 `d3d9::Draw*` 同一个 GPU 后端）：
@@ -198,6 +201,8 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries, std::
 //   表达不了 ⇒ false + why（调用方必须记账 + 跳过，⛔ 不静默退回缺省因子）。
 // ★ `rs.blend`（设备 `D3DRS_ALPHABLENDENABLE`）**不参与**这个判定：`ALPHABLEND=0` 时 D3DX 的
 //   语义就是"这一批不混合"（真机由 D3DX 自己开关那一位），所以开不开只看 `alpha_blend_flag`。
+//   ★ 带 `ALPHABLEND` 的 `Begin` 已经把那一位置 1（见上），但这里仍然不看它 —— 开不开的口径
+//   只有 flags 一处（`REQ-01M7R3YPQPNPBZ327H89Q8RTEE` 只补了"D3DX 会先写哪几项"，没有改判定）。
 // =====================================================================================
 bool spriteBlendState(const d3d9::BlendStateSnapshot& rs, bool alpha_blend_flag, GpuRasterState* out,
                       std::string* why);
