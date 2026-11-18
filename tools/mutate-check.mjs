@@ -4665,6 +4665,89 @@ const MUTATIONS = [
       '它把 `GetCursorPos` 也算样本）⇒ 位置读点就能满足抬起 ⇒ input-inject-visible 的 ' +
       '`inject/click-two-phase`（位置读点再多也不许抬起）当场红',
   },
+
+  // ── UI 命中顺序（切片 2 后半；守卫 = `tests/ui_hit.cpp`）──
+  //   ★ 代表"点到被压住的那个按钮"这一类**静默**错误：画面照画、两个按钮都在、点击也不报错，
+  //     只是命中了**先画**的那一个（HUD 里后画的面板 / 按钮压在先画的上面，视觉与行为不一致）。
+  //   ★ 为什么落在这一行：`hitTest` 的**唯一**语义就是"从绘制序末尾往前找"（后画的先命中）；
+  //     改成正向遍历之后，`ui-hit/order-and-bounds` 的 `hitTest(7,7)` 会从 `b` 变成 `a`。
+  {
+    file: 'apps/emulator-lift/src/ui/hit.cpp',
+    from: '    for (auto it = regions.rbegin(); it != regions.rend(); ++it) {',
+    to: '    for (auto it = regions.begin(); it != regions.end(); ++it) {  // 变异：命中改正序（先画的先命中）',
+    guard: 'ctest:ui-hit',
+    ctest: 'ui-hit',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-ui-hit',
+    what:
+      'ui-hit-order-reversed：`hitTest` 从**逆序**（后画的先命中）改成**正序** ⇒ 重叠区里点到被压住的 ' +
+      '按钮 ⇒ ui-hit 的 order-and-bounds 在 `hitTest(7,7)` 上红（期望 `b`，得到 `a`）',
+  },
+
+  // ── UI 捕获路由：捕获中的 up 必须无条件吞掉（守卫 = `tests/ui_click_router.cpp`）──
+  //   ★ 代表"guest 收到一个没有 down 的 up"这一类**静默**错误：HUD 吞了 down、把 up 放了过去，
+  //     guest 的按钮电平 / 拖拽状态就卡在半截（而且没有任何报错）。
+  //   ★ 为什么落在这一行：`handlePointer` 的 Up 分支里 `swallow = true` 是唯一让"捕获中的 up
+  //     不进 guest"的地方；改成 false 之后，ui-click-router 的"捕获中的 up 必须吞掉"当场红。
+  {
+    file: 'apps/emulator-lift/src/ui/hit.cpp',
+    from:
+      '    if (!up_owed_) return decision;\n' +
+      '    decision.swallow = true;\n' +
+      '    up_owed_ = false;',
+    to:
+      '    if (!up_owed_) return decision;\n' +
+      '    decision.swallow = false;  // 变异：捕获中的 up 未吞（guest 收到没有 down 的 up）\n' +
+      '    up_owed_ = false;',
+    guard: 'ctest:ui-click-router',
+    ctest: 'ui-click-router',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-ui-click-router',
+    what:
+      'ui-click-up-not-swallowed：捕获中的左键 up 从"无条件吞掉"改成"放行给 guest" ⇒ ' +
+      'ui-click-router 的 `捕获中的 up 必须吞掉` 断言当场红（guest 的 down/up 不对称）',
+  },
+
+  // ── UI 一次性 click：消费之后必须清掉（守卫 = `tests/ui_click_router.cpp`）──
+  //   ★ 代表"同一次点击被重复消费"这一类**静默**错误：按钮的回调每帧都跑一次（PROFILE 会被
+  //     连续开 / 关好几轮），而屏幕上什么都不报。
+  //   ★ 为什么落在这一行：`takeClick` 是"一次性"的唯一落点（宿主每帧 render 前取走一次）；
+  //     不清 pending 之后，ui-click-router 的"click 只能被消费一次"立刻红。
+  {
+    file: 'apps/emulator-lift/src/ui/hit.cpp',
+    from: '    if (out != nullptr) *out = std::move(*pending_);\n    pending_.reset();',
+    to:
+      '    if (out != nullptr) *out = std::move(*pending_);\n' +
+      '    // 变异：消费后不清 ⇒ 下一次 render 还看得到同一个 click',
+    guard: 'ctest:ui-click-router',
+    ctest: 'ui-click-router',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-ui-click-router',
+    what:
+      'ui-click-not-cleared：`ClickRouter::takeClick` 消费后不清 pending ⇒ 同一次点击被每次 render 重复消费 ⇒ ' +
+      'ui-click-router 的 `click 只能被消费一次` 当场红',
+  },
+
+  // ── kit.js 的 hover 高亮分支（守卫 = `tests/ui_kit_script.cpp`）──
+  //   ★ 代表"悬停没有任何视觉反馈"这一类**静默**错误：按钮照画、点击照常，只是没有高亮 ——
+  //     用户以为鼠标没对上，而且没有任何日志 / 断言会喊。
+  //   ★ 为什么落在这一行：三态里只有 `hovered` 这一条分支决定 hover 配色（active / disabled 各有
+  //     自己的分支）；改成恒 idle 之后，ui-kit-script 的 `state=hover` 与"三态填充色互不相同"同时红。
+  //   ★ JS 是**运行时读**的发行件 ⇒ 变异不需要重编产品；`buildTarget` 仍会建该 CTest 的可执行 target。
+  {
+    file: 'apps/emulator-lift/scripts/ui/kit.js',
+    from: "  const state = disabled ? 'disabled' : (held ? 'active' : (hovered ? 'hover' : 'idle'));",
+    to:
+      "  const state = disabled ? 'disabled' : (held ? 'active' : (false ? 'hover' : 'idle'));" +
+      '  // 变异：hover 高亮分支失效',
+    guard: 'ctest:ui-kit-script',
+    ctest: 'ui-kit-script',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-ui-kit-script',
+    what:
+      'ui-kit-hover-branch：把 Button 的 hover 分支改成恒 idle ⇒ 悬停不再高亮 ⇒ ' +
+      'ui-kit-script 的 `state=hover` 断言与"三态填充色互不相同"当场红',
+  },
 ];
 
 let mutationRunSeq = 0;
