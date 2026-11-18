@@ -45,5 +45,5 @@ int main() {
         LIFT_CHECK(!presentIntervalSupported(v));
     }
 
-    return finish("lift-present-interval");
+    return finish("present-interval");
 }
