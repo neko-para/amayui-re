@@ -2,8 +2,9 @@
 
 - id: REQ-01M7PEG94GXE2V10DZYCZ0B5SR
 - type: req
-- status: doing
+- status: done
 - parent: REQ-01M7PE0D9MJA4REXQ1YJFVPHGF
+- verify: apps/emulator-lift/CMakeLists.txt#aot-overlay
 - tags: [emulator-lift, ui, overlay, m0]
 
 ## 一句话
@@ -53,3 +54,12 @@ C++ display list（无脚本、无输入）；两条路径都按窗口像素合�
 
 - M1 的布局 / when / 命中 / clip；M2 的 QuickJS 适配器与点击 router；M3 的 `script/pos` 数据面；M4 图片与热重载。
 - 复审列出的非阻塞项（N2–N11）按各自里程碑收，不塞进 M0。
+
+## 收口（2026-11-18）
+
+- mac 端到端：`ctest` 113/113；`aot-overlay` **33 checks / 0 failures**（AOT `--overlay` exit 0、
+  截图 (0,0)=`#101820`、`--dump-frame` 逐字节相同、`lastHash` 相同、无周期 `[overlay]`/`[ui]` 行）；
+  `ui-canvas` / `ui-text` / `present-window` / `present-window-gpu` 均绿。
+- 子进程脚手架已跨平台（Windows `CreateProcessW` / POSIX `fork+execv`）⇒ mac 不再 SKIP 77；
+  只有资产/GPU/字体缺口才 SKIP。
+- win32 分支未在本机跑；建议 win32 验收一次 `ctest -R aot-overlay -V`。
