@@ -30,7 +30,7 @@
 
 ## 范围
 
-- `third_party/quickjs-ng`（v0.10.1 / `3c9afc9…` / MIT / 原样 vendor + README + 本仓 CMake）。
+- `third_party/quickjs-ng`（**v0.18.0** / `d7215b0a…` / MIT / 原样 vendor + README + 本仓 CMake；0.10.1 的 win32 构建断与升级口径见 REQ-01M7QPHEF3WJ5W0RKAKFTKMFC1）。
 - `src/ui/script.h` / `script_quickjs.{h,cpp}` / `quickjs_value.h`（RAII 值包装；公开头零 qjs 类型）。
 - `src/ui/present_ui.{h,cpp}`；删 `hud.{h,cpp}` / `overlay.{h,cpp}`；`src/runtime/ui_readings.h`。
 - `scripts/ui/{hud.js,ui.d.ts,README.md}`：**外置**默认 HUD（⛔ 不编进 exe）；解析

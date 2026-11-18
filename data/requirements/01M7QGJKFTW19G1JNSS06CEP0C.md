@@ -2,10 +2,11 @@
 
 - id: REQ-01M7QGJKFTW19G1JNSS06CEP0C
 - type: bug
-- status: open
+- status: dropped
 - parent: REQ-01M7PE0D9MJA4REXQ1YJFVPHGF
 - repro: apps/emulator-lift/src/ui/script_quickjs.cpp#installSandbox
 - severity: S3
+- dropped_reason: 不是缺陷 / 不修：用户 2026-11-18 裁决「沙箱不重要、不用特地做，可以信任 JS —— 它本身没有宿主权限」。⇒ "沙箱是可绕过的安全边界"这个前提不成立：能力只来自宿主注入的 ui/game，脚本能做的事本来就在我们给的能力里。保留的删除（Function / eval / Math.random / .constructor）只有功能目的（禁动态编译、去随机源保复现），不再为"逃逸"追补；上游新增内建（如 0.18.0 的 BigInt）也不追删。重开条件：出现"脚本滥用宿主能力造成用户可见损害"的实测（那要另立单，按能力授权面处理）。
 - tags: [emulator-lift, quickjs, sandbox]
 
 ## 判据（存在性 + 观测）
