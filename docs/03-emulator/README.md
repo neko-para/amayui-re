@@ -20,7 +20,7 @@
 | **GPU 批的透视校正插值**（逐顶点 `1/w` · 顶点上的 `uv/w` / `color/w` 怎么在片元里除回来 · 202 的透视 `Proj` 为什么现在能画 · 双源改动 · 新像素 oracle 与仿射控制行 · 读数 · 残余风险） | `gpu-perspective.md` |
 | **"为什么这么实现"**（内部取舍 = L3，重写实现时可自由改，但要保住它列出的可观察现象） | `design-notes.md` |
 | **overlay / UI 宿主的设计裁决**（一个 host + 同一套 API、插件化、每帧 display list、1280×720 声明 + 窗口像素合成、单一输入 router、失败口径） | `overlay.md` |
-| **overlay 的 QuickJS 绑定**（Maa 封装可复用的形状 / QuickJS-ng v0.10.1 与预算 API / 沙箱 intrinsic 白名单 / 值转换 / TS 作者体验 / 静态链） | `overlay-quickjs.md` |
+| **overlay 的 QuickJS 绑定**（Maa 封装可复用的形状 / QuickJS-ng v0.18.0 与预算 API / 沙箱 intrinsic 白名单 / 值转换 / TS 作者体验 / 静态链） | `overlay-quickjs.md` |
 | **我们依赖哪些外部文档**，以及**我们偏离文档的地方**（偏在哪 / 为什么 / 谁受益） | `external-docs.md` |
 | **仓库自己的机械装置还成立吗**（素材清单 / 语料定位 / 台账 / shape / spec / 写路径 / 插件闭接口） | `repo-guards.md` |
 | **一条 opcode / 一个 EA 的取证** | 技能 `amayui-re-engine`（知识层，不在这里） |

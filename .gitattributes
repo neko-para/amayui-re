@@ -41,3 +41,9 @@ corpus/disasm/files/*.lst  text eol=lf
 #   `corpus/disasm/**` 是同一条理由（守卫 #6 会把纯文本侧车放行，但别自己制造混淆）。
 #   `.cur` / `.ico`（外部工具导出的光标与图标）已在上面的 LFS 组里。
 # ★ 字体只入库 7z 与派生 ttf；7z 的**解压产物**不入库（见 .gitignore）。
+
+# —— vendor 的逐字节上游副本：**字节保真优先于空白检查** ————————————————
+# `apps/emulator-lift/third_party/quickjs-ng/` 是 quickjs-ng 的"原样副本"（19 个文件逐个 sha256
+# 与上游 tag 比对；见该目录 README.md）。上游源码本身就带行尾空格，`git diff --check` 会报
+# whitespace error；⛔ 不许为了消警告去改上游字节 ⇒ 这个子树对空白检查豁免。
+apps/emulator-lift/third_party/quickjs-ng/** -whitespace

@@ -21,8 +21,8 @@
 //      `render` 仍成功**（异常已被取走）。红了 ⇒ 脏异常留在 ctx 上（下一次读到上一次的错）。
 //   ⑥ entry：没有 `globalThis.render`（或它不是函数）⇒ `load` 失败并点名 origin。红了 ⇒
 //      入口约定漂移（overlay 会静默不画）。★ 注意 `JS_EVAL_FLAG_STRICT` 的**全局代码**里
-//      `function render(){}` 会挂到 globalThis（实测 v0.10.1）；合同只要求"认 globalThis.render
-//      这个属性"，本文件不断言 function 声明挂不上（见 a-report.md 的差异记录）。
+//      `function render(){}` 会挂到 globalThis（实测 v0.18.0，与 v0.10.1 相同）；合同只要求"认
+//      globalThis.render 这个属性"，本文件不断言 function 声明挂不上（见 a-report.md 的差异记录）。
 // ★ 顶层无条件注册 = **pure** 档（AGENTS.md §12.4：判据 = 注册位置）。
 // ★ 只 include 接口头 + FontEngine；⛔ 不 include quickjs.h（那是 script_quickjs.cpp 的特权）。
 #include <chrono>
@@ -96,6 +96,16 @@ void expectChannels(const lift::ui::Color& color, int r, int g, int b, int a, co
     }
 }
 
+// ★ 只钉**形状**（"err 里有 `<origin>:<line>:`，且紧跟至少一个十进制数字"），⛔ 不钉上游的列定位精度：
+//   同一条语法错 0.10.1 报 `bad.js:2:1`，0.18.0 报 `bad.js:2:9`（上游改进了列定位，不是 API 变化）；
+//   `import x from 'y';` 同理 0.10.1 是 `import.js:1:1`，0.18.0 是 `import.js:1:8`。
+bool hasOriginLineCol(const std::string& err, const std::string& prefix) {
+    const std::size_t at = err.find(prefix);
+    if (at == std::string::npos) return false;
+    const std::size_t digit = at + prefix.size();
+    return digit < err.size() && err[digit] >= '0' && err[digit] <= '9';
+}
+
 // =======================================================================================
 // ① sandbox
 // =======================================================================================
@@ -132,9 +142,17 @@ void caseSandbox() {
     std::unique_ptr<UiScript> script = loadOk(*runtime, kSandboxScript, "sandbox.js");
     if (!script) return;
     const std::vector<std::string> texts = renderTexts(*script, UiFrameReadings{});
+    // ★ **沙箱不是安全边界**（用户裁决 2026-11-18：JS 没有宿主权限 —— 能力只来自我们注入的
+    //   `ui` / `game`，所以信任脚本）。下面这张表只记录**当前表面**，不是合同：
+    //   上游把新内建并进 `JS_AddIntrinsicBaseObjects` 时**不追着补删除**。
+    //   ★ 0.18.0 实测：BaseObjects 自带 `BigInt`（0.10.1 没有）⇒ 它的表面是 `function`，其余仍是 `undefined`。
     const char* undefineds[] = {"eval", "Function", "Date", "performance", "JSON", "Promise", "RegExp",
                                 "Proxy", "Map", "Uint8Array", "BigInt", "WeakRef"};
     for (std::size_t i = 0; i < sizeof(undefineds) / sizeof(undefineds[0]); ++i) {
+        if (std::string(undefineds[i]) == "BigInt") {
+            expectText(texts, i, "BigInt=function", "BigInt 的当前表面（0.18.0 BaseObjects 自带，不是合同）");
+            continue;
+        }
         expectText(texts, i, std::string(undefineds[i]) + "=undefined", "沙箱：不应存在的内建");
     }
     expectText(texts, 12, "Math.random=undefined", "沙箱：Math.random 必须删掉（种子是宿主时间）");
@@ -149,7 +167,7 @@ void caseSandbox() {
     ++lift_test::g_checks;
     if (imported) lift_test::failf(__FILE__, __LINE__, "import 语句不应能编译");
     ++lift_test::g_checks;
-    if (err.find("import.js:1:1") == std::string::npos) {
+    if (!hasOriginLineCol(err, "import.js:1:")) {
         lift_test::failf(__FILE__, __LINE__, "import 失败的 err 应含 origin:line:col，得到: %s", err.c_str());
     }
 }
@@ -490,8 +508,8 @@ void caseError() {
         ++lift_test::g_checks;
         if (script) lift_test::failf(__FILE__, __LINE__, "语法错的脚本不应 load 成功");
         ++lift_test::g_checks;
-        if (err.find("bad.js:2:1") == std::string::npos) {
-            lift_test::failf(__FILE__, __LINE__, "语法错的 err 应含 origin:line:col（bad.js:2:1），得到: %s",
+        if (!hasOriginLineCol(err, "bad.js:2:")) {
+            lift_test::failf(__FILE__, __LINE__, "语法错的 err 应含 origin:line:col（bad.js:2:…），得到: %s",
                              err.c_str());
         }
     }

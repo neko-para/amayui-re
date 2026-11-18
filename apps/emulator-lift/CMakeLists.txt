@@ -2368,12 +2368,13 @@ set_tests_properties(d3dx9-effect PROPERTIES
 endif() # LIFT_BUILD_TESTS
 
 # =====================================================================================
-# A · UI 脚本内核（QuickJS-ng v0.10.1 vendor + 语言无关适配器）
+# A · UI 脚本内核（QuickJS-ng v0.18.0 vendor + 语言无关适配器）
 # ★ 纯追加块：不改上面任何一行，也不改 runtime 的既有 source 列表（本单的边界）。
 # ★ 接口 = `src/ui/script.h`（⛔ 不 include quickjs.h）；唯一 include 它的 TU =
 #   `src/ui/script_quickjs.cpp`；PIMPL 边界见 `src/ui/script_quickjs.h`。
 # ★ vendor 的原样文件 / commit / 升级口径见 `third_party/quickjs-ng/README.md`；它的
-#   `CMakeLists.txt` 建 `lift-qjs`（5 个 C 源、C11、`_GNU_SOURCE`、非 MSVC `-funsigned-char`）。
+#   `CMakeLists.txt` 建 `lift-qjs`（4 个 C 源、C11、`_GNU_SOURCE` + `QUICKJS_NG_BUILD`、
+#   WIN32 的 `WIN32_LEAN_AND_MEAN` / `_WIN32_WINNT=0x0601`、非 MSVC 的 `-funsigned-char`）。
 # =====================================================================================
 add_subdirectory(third_party/quickjs-ng)
 

@@ -206,7 +206,7 @@ inline void takeException(JSContext* ctx, const std::string& origin, std::string
 }
 
 // 版本钉死：升级 quickjs-ng 时必须同时改这里与 `third_party/quickjs-ng/README.md`。
-static_assert(QJS_VERSION_MAJOR == 0 && QJS_VERSION_MINOR == 10 && QJS_VERSION_PATCH == 1,
-              "vendored quickjs-ng 必须是 v0.10.1（third_party/quickjs-ng/README.md）");
+static_assert(QJS_VERSION_MAJOR == 0 && QJS_VERSION_MINOR == 18 && QJS_VERSION_PATCH == 0,
+              "vendored quickjs-ng 必须是 v0.18.0（third_party/quickjs-ng/README.md）");
 
 }  // namespace lift::ui::qjs

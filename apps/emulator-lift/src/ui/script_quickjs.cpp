@@ -8,8 +8,9 @@
 // 一、沙箱形状（context §2.3 的**实测反转**，与 `overlay-quickjs.md` §2.1 相反，以 context 为准）
 //   1. `JS_NewContextRaw` + `JS_AddIntrinsicBaseObjects` 之后，**宿主**调 `JS_Eval` 会失败
 //      （`TypeError: eval is not supported`）：`JS_Eval` 走 `JS_EvalInternal`，它要求
-//      `ctx->eval_internal` 非空，而该字段**只由** `JS_AddIntrinsicEval` 设置（0.10.1
-//      `quickjs.c` 的 `JS_AddIntrinsicEval` 全部内容就是 `ctx->eval_internal = __JS_EvalInternal`）。
+//      `ctx->eval_internal` 非空，而该字段**只由** `JS_AddIntrinsicEval` 设置（0.18.0
+//      `quickjs.c` 的 `JS_AddIntrinsicEval` 在 `#ifndef QJS_DISABLE_PARSER` 里赋
+//      `ctx->eval_internal = __JS_EvalInternal`，然后 `return 0`）。
 //   2. ⇒ 必须 `JS_AddIntrinsicEval`（只为让**宿主**能编译脚本），随后把脚本可达的编译入口删掉：
 //      `globalThis.eval` / `globalThis.Function` / `Function.prototype.constructor`。
 //   3. ⛔ 只删 `globalThis.Function` **不够**：`(function(){}).constructor` 会从
@@ -18,12 +19,16 @@
 //      `Object.prototype.constructor` = `Object`，本文件不删它）；被钉住的是**行为**：
 //      拿到的任何 `.constructor` 都不能把字符串编译成函数（调用 ⇒ TypeError）。
 //   4. `Math.random` 也删（种子 = 宿主时间 ⇒ 不可复现）。`Date` / `RegExp` / `JSON` / `Proxy` /
-//      `Promise` / `BigInt` / `WeakRef` / TypedArrays / `performance` **没加**（`JS_NewContextRaw`
+//      `Promise` / `WeakRef` / TypedArrays / `performance` **没加**（`JS_NewContextRaw`
 //      不装它们，本文件只加 BaseObjects）。
+//      ★ 0.18.0 起 `BigInt` **不算"没加"**：`JS_AddIntrinsicBaseObjects` 自己会装它
+//      （`quickjs.c:59170`）⇒ `typeof BigInt === "function"`、`1n` 字面量可用。
+//      沙箱**不是安全边界**（用户裁决 2026-11-18：JS 没有宿主权限 —— 能力只来自注入的 `ui`/`game`，
+//      信任脚本）⇒ ⛔ 不为 `BigInt` 补删除；保留的删除只有功能目的（禁动态编译 / 去随机源）。
 //
 // 二、预算（context §5）
 //   · 内存 16 MiB / 栈 512 KiB / 中断回调每 ~10000 条字节码一次（`JS_INTERRUPT_COUNTER_INIT`）。
-//   · ★ 超预算的报错不是我们抛的：0.10.1 的 `JS_ThrowInterrupted` 是 `quickjs.c` 内的 **static**
+//   · ★ 超预算的报错不是我们抛的：0.18.0 的 `JS_ThrowInterrupted` 是 `quickjs.c` 内的 **static**
 //     （`quickjs.h` 未导出）；上游约定是**中断回调返非 0** 时由引擎自己
 //     `JS_ThrowInternalError("interrupted")` + `JS_SetUncatchableError`（`__js_poll_interrupts`）。
 //     ⇒ 本文件的回调只做"查 deadline / op_limit，超了返 1"，得到的就是合同要的不可 catch 错误。
@@ -64,7 +69,8 @@ using qjs::Value;
 // =======================================================================================
 constexpr std::size_t kMemoryLimitBytes = 16u << 20;  // 16 MiB
 constexpr std::size_t kStackLimitBytes = 512u << 10;  // 512 KiB
-// 引擎每 `JS_INTERRUPT_COUNTER_INIT` 条字节码调一次回调（0.10.1 `quickjs.c`）；op_limit 以它为步长。
+// 引擎每 `JS_INTERRUPT_COUNTER_INIT` 条字节码调一次回调（0.18.0 `quickjs.c:558`，值仍是 10000）；
+// op_limit 以它为步长。
 constexpr std::uint64_t kOpcodesPerInterrupt = 10000;
 
 std::uint64_t steadyNowNs() {
@@ -131,9 +137,13 @@ struct Impl {
 
 // ---------------------------------------------------------------------------------------
 // 中断回调：每 ~10000 条字节码一次。返非 0 ⇒ 引擎自己抛 "interrupted" 并置不可 catch
-// （见文件头第二节；`JS_ThrowInterrupted` 在 0.10.1 是 static，宿主无法直接调）。
+// （见文件头第二节；`JS_ThrowInterrupted` 在 0.18.0 仍是 static，宿主无法直接调）。
+// ★ 0.18.0 的签名变更（release notes PR #1802）：`JSInterruptHandler` 的**第一个参数从
+//   `JSRuntime*` 改成 `JSContext*`**（`quickjs.h:1192`，`JS_SetInterruptHandler` 在 `:1193`）。
+//   我们只需要那个不透明的 `Impl*`，它由 `JS_SetInterruptHandler` 原样传回（第三个参数），
+//   所以回调体一行不改 —— 语义（deadline / op_limit / overran）完全不变。
 // ---------------------------------------------------------------------------------------
-int interruptHandler(JSRuntime* /*rt*/, void* opaque) {
+int interruptHandler(JSContext* /*ctx*/, void* opaque) {
     Impl* impl = static_cast<Impl*>(opaque);
     if (impl == nullptr) return 0;
     impl->ops += kOpcodesPerInterrupt;

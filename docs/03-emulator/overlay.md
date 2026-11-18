@@ -57,7 +57,7 @@
 |---|---|---|
 | D1 | **一个 host + 同一套 API**：内置 HUD 与将来的"游戏内小窗口"是**同一类插件** —— 同一个 `UiHost`、同一份 display list、同一条输入路由 | 用户口径。⛔ 不为 HUD 单开一条渲染 / 输入路径 |
 | D2 | **插件化**：一个插件 = 一个脚本文件（`apps/emulator-lift/scripts/ui/<name>.js`）；`--ui <path>`（可重复）、`--ui-input=consume\|pass`、`--ui-watch`（默认关）、`--ui-strict` | 编译进 C++ 的固定 HUD 不能扩展；热重载默认不做任何 stat |
-| D3 | **语言 = JS/TS + QuickJS-ng v0.10.1**（以 git submodule pin，MIT） | 选型只看硬约束：可裁剪、可中断、迭代顺序按规范。Lua 只作对照（⛔ 不是方案）：longjmp 跨 C++ 帧、hash seed 每进程随机、x64-windows dynamic 要带 DLL |
+| D3 | **语言 = JS/TS + QuickJS-ng v0.18.0**（逐字节原样 vendor，见 `third_party/quickjs-ng/README.md`；MIT） | 选型只看硬约束：可裁剪、可中断、迭代顺序按规范。Lua 只作对照（⛔ 不是方案）：longjmp 跨 C++ 帧、hash seed 每进程随机、x64-windows dynamic 要带 DLL |
 | D4 | **每帧 display list**（立即模式）：脚本只产出元素描述，宿主独占校验 / 求值 / 布局 / 命中 / 光栅 / 合成；宿主只缓存**上一帧** resolved list 用于点击 | 没有跨帧控件树、脏矩形与 GPU 资源生命周期；resize / 缩放天然同步 |
 | D5 | **坐标**：声明用 **1280×720 参考系**，合成用**窗口像素**（letterbox 之后）；等比 `s = min(pic_w/1280, pic_h/720)`、画面内居中；文字按最终像素重绘（freetype），⛔ 不放大位图 | 两条路径统一到窗口像素；`--scale` 只要仍走 `cursor_map.h:letterboxFor`，UI 零改动 |
 | D6 | **输入单一 router**：OS 事件 / 注入 down / 注入 up 三个入口，都在调用 `input::*` **之前**问同一个 `UiClickRouter`；左键命中即吞 + 捕获；**down 吞 ⇒ up 吞**，**down 放 ⇒ up 放**；右键 / 中键 / 滚轮 / 键盘 M1 一律放行；motion 永远放行 | `input::*` 仍是唯一施加路径（`runtime/input.h` 口径不变）；吞掉 = **不调用** `input::*` |

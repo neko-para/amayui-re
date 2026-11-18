@@ -24,12 +24,16 @@ Maa 的 NodeJS binding 不是一份绑定，而是一层与语言无关的薄抽
 
 **一句话**：拿"值所有权 + 转换表 + 一个 C 函数注册口 + 错误分工"，其余（类体系 / 异步 / 多线程 / 业务）都不进。
 
-## 2. QuickJS-ng v0.10.1：来源、预算、沙箱
+## 2. QuickJS-ng v0.18.0：来源、预算、沙箱
 
-- 来源 = **quickjs-ng**（不是 bellard 仓），v0.10.1（Maa 仓里 pin 到该 tag；`git submodule status` 可复现），MIT。
-  CMake target `qjs` **缺省静态**（`BUILD_SHARED_LIBS` 缺省 OFF；Maa 没有显式 `STATIC` 字样），
-  5 个 C 源：`cutils.c libregexp.c libunicode.c quickjs.c xsum.c`。
-- 预算 API 三件（0.10.1 已核：`quickjs.h:440` / `:446` / `:1031`；0.16.2 本机没有 checkout ⇒ **未复核**）：
+- 来源 = **quickjs-ng**（不是 bellard 仓），**v0.18.0**（tag `v0.18.0` / commit
+  `d7215b0ad3fc2c562e8317fd9bca058fd4863804`；本仓是它的逐字节副本，来源 / 清单 / 怎么升级见
+  `third_party/quickjs-ng/README.md`），MIT。
+  CMake target `qjs` **缺省静态**（`BUILD_SHARED_LIBS` 缺省 OFF），
+  4 个 C 源：`dtoa.c libregexp.c libunicode.c quickjs.c`。★ 0.10.1 的 `cutils.c` 在 0.18.0 **没有了**
+  （实现以 `static inline` 落进 `cutils.h`）；`xsum.c` / `xsum.h` 上游在 0.18.0 **删掉了**
+  （tag 树里没有，raw 上 404）⇒ 我们也删；`dtoa.c` 是 0.18.0 新拆出的独立 TU。
+- 预算 API 三件（0.18.0 已核：`quickjs.h:515` / `:521` / `:1193`）：
   `JS_SetMemoryLimit` / `JS_SetMaxStackSize` / `JS_SetInterruptHandler`。
 - **Maa 没有沙箱也没有预算**：**预算 / 中断面**零使用 —— 用
   `rg 'JS_SetMemoryLimit|JS_SetMaxStackSize|JS_SetInterruptHandler'` 在 `source/binding/NodeJS/src` 与
@@ -38,18 +42,37 @@ Maa 的 NodeJS binding 不是一份绑定，而是一层与语言无关的薄抽
   且 `apis/loader.cpp:init_module_sys` 直接给脚本 `print/readFile/writeFile/exit`。
   ⇒ 这两面**没有先例可抄**，必须按下面自己立。
 
-### 2.1 沙箱：`JS_NewContextRaw` + 选择性 intrinsic
+### 2.1 沙箱：`JS_NewContextRaw` + 选择性 intrinsic（★ **不是安全边界**）
+
+★ **沙箱不是安全边界**（用户裁决 2026-11-18：JS 没有宿主权限 —— 它拿到的能力只来自我们注入的
+`ui` / `game`，所以**信任脚本**）。本节的口径因此是：
+
+1. **保留的删除只有功能目的**：删 `eval` / `Function` / `Function.prototype.constructor`
+   = 禁**动态编译**；删 `Math.random` = 去掉不可复现的随机源（种子是宿主时间）。
+   ⛔ 它们**不是**为了防逃逸。
+2. **不追着补删除**：上游把新内建并进 `JS_AddIntrinsicBaseObjects` 时（如 0.18.0 把 `BigInt`
+   并进来），**不**为它加新的删除 —— 只记录当前表面（`tests/ui_script_quickjs.cpp` 的 sandbox
+   用例同理：那张表记录**表面**，不是合同）。
+3. **宿主边界不在这里**：脚本能做什么只由注入的 `ui` / `game` 决定（无文件 / 网络 / 进程 / native 指针）；
+   用 `JS_NewContextRaw` 少装 intrinsic 另有功能价值（体积小、没有 `Date` / `Promise` 等不确定面），
+   但它**不是**权限边界。
 
 `JS_NewContext` 与 `JS_NewContextRaw` 的差集 = Date / eval / RegExp / JSON / Proxy / MapSet / TypedArrays /
-Promise / BigInt / WeakRef / `performance` 的来源（`quickjs.c:2318-2345` vs `2283-2315`）——其中 JSON / MapSet 按需单独加。我们的形状：
+Promise / WeakRef / `performance` 的来源（`quickjs.c:2894-2918` vs `2848-2892`）——其中 JSON / MapSet 按需单独加。
+★ 0.18.0 起 `BigInt` **不在**这个差集里：`JS_AddIntrinsicBaseObjects` 自己就会调
+`JS_AddIntrinsicBigInt`（`quickjs.c:59170`），所以"只加 BaseObjects"的形状**会带进 `BigInt`**：
+实测 `typeof BigInt === "function"`，且 `1n` 字面量照常可用（`typeof 1n === "bigint"`；
+全局构造器在 ⇒ `1n` 在；删了全局构造器 `<1n>` 也仍在，所以⛔ 不拿"删 BigInt"当收紧手段）。
+我们的形状：
 
 1. `JS_NewContextRaw`（只建原型与空全局对象，不装任何构造器）。
 2. 只加 `JS_AddIntrinsicBaseObjects`（Object / Function / Array / String / Number / Boolean / Error 族 /
-   Math / Reflect / Iterator / Symbol / `parseInt` / `isNaN`）——本切片**不**加 `MapSet` / `JSON`。
-3. ⛔ 不加 `Date`（墙钟）、`RegExp`、`Proxy`、`TypedArrays`、`Promise`、`BigInt`、`WeakRef`、
+   Math / Reflect / Iterator / Symbol / **BigInt** / `parseInt` / `isNaN`）——本切片**不**加 `MapSet` / `JSON`。
+3. ⛔ 不加 `Date`（墙钟）、`RegExp`、`Proxy`、`TypedArrays`、`Promise`、`WeakRef`、
    `JS_AddPerformance`（`Date.now` 派生）；本切片连 `JSON` / `MapSet` 也不加（HUD 用不到）。
+   （`BigInt` 是 `BaseObjects` 自带的，见上；⛔ 不为它补删除。）
 4. ★ **必须加 `JS_AddIntrinsicEval`**，但只为**宿主**能编译脚本：宿主 `JS_Eval` 走
-   `JS_EvalThis2` → `JS_EvalInternal`，而它在 `quickjs.c:35012` 先判 `ctx->eval_internal`
+   `JS_EvalThis2` → `JS_EvalInternal`，而它在 `quickjs.c:38338` 先判 `ctx->eval_internal`
    （只由 `JS_AddIntrinsicEval` 设置）⇒ 不加它宿主自己就 `TypeError: eval is not supported`
    （2026-11-18 实测）。**沙箱的门因此不是"不加 Eval"，而是加完之后删干净**：
    `globalThis.eval`、`globalThis.Function`、**`Function.prototype.constructor`**、
@@ -67,7 +90,7 @@ Promise / BigInt / WeakRef / `performance` 的来源（`quickjs.c:2318-2345` vs 
 |---|---|---|
 | 内存 | `JS_SetMemoryLimit(rt, N)`（0 = 关）；超限 ⇒ 分配返 NULL ⇒ 抛错 | **插件致命**（OOM 后 ctx 不可信）⇒ 卸载，旧实例继续 |
 | 栈 | `JS_SetMaxStackSize(rt, 512 KiB)`（默认 1 MiB；Windows exe 默认栈 reserve 也是 1 MiB ⇒ 不调小会先打穿宿主栈再报溢出；M2a 实值 512 KiB，见 `script_quickjs.cpp`） | 同上 |
-| CPU | `JS_SetInterruptHandler(rt, cb, opaque)`：回调返非 0 ⇒ 上游走 `JS_ThrowInternalError("interrupted")` + `JS_SetUncatchableError` ⇒ 脚本 `try/catch` 吞不掉（★ 0.10.1 的 `JS_ThrowInterrupted` 是 `quickjs.c` 的 static，头里没有，⛔ 不要直接调） | 本帧不上屏 + 一次响亮；连续 3 次 ⇒ 卸载 |
+| CPU | `JS_SetInterruptHandler(rt, cb, opaque)`：回调返非 0 ⇒ 上游走 `JS_ThrowInternalError("interrupted")` + `JS_SetUncatchableError` ⇒ 脚本 `try/catch` 吞不掉（★ 0.18.0 的 `JS_ThrowInterrupted` 是 `quickjs.c:8653` 的 static，头里没有，⛔ 不要直接调）。★ 0.18.0 起回调签名的**第一个参数是 `JSContext*`**（不再是 `JSRuntime*`；`quickjs.h:1192`，PR #1802） | 本帧不上屏 + 一次响亮；连续 3 次 ⇒ 卸载 |
 
 ★ 中断粒度 = 每 `JS_INTERRUPT_COUNTER_INIT`（10000）条字节码 ⇒ 回调里**只查 deadline**，
 ⛔ 不要在回调里数 op。
@@ -136,12 +159,12 @@ class UiScript {   // init / update(dt,frame) / render(UiBuilder&) / on_click / 
 
 ## 5. 静态链接与发行
 
-- QuickJS **vendor** 进 `apps/emulator-lift/third_party/quickjs-ng`（tag **v0.10.1** / commit
-  `3c9afc99…`；MIT；5 个 C 源 + 头 + `LICENSE` + 本仓 `README.md` + 本仓 `CMakeLists.txt` 建 `lift-qjs`）。
+- QuickJS **vendor** 进 `apps/emulator-lift/third_party/quickjs-ng`（tag **v0.18.0** / commit
+  `d7215b0a…`；MIT；**4 个 C 源** + 头 + `LICENSE` + 本仓 `README.md` + 本仓 `CMakeLists.txt` 建 `lift-qjs`）。
   ⛔ 不是 git submodule（本仓 `third_party/` 的惯例 = 原样副本 + README 记录来源 / 清单 / 怎么升级）。
 - `lift-qjs` **静态链进 exe**（`emulator-lift-runtime` PUBLIC 链接）⇒ 没开 `--ui` 也在 exe 里。
   ★ **默认 HUD 的 JS 是外置文件**（不编进 exe）：发行时 `scripts/ui/` 与 exe 一起放。
-- **版本 pin**：`script_quickjs.cpp` 对 `QJS_VERSION_MAJOR/MINOR/PATCH == 0/10/1` 做 `static_assert`；
+- **版本 pin**：`src/ui/quickjs_value.h` 对 `QJS_VERSION_MAJOR/MINOR/PATCH == 0/18/0` 做 `static_assert`；
   升级要同时改 `third_party/quickjs-ng/README.md`。
 - **LTO**：`lift-qjs` 是独立 target，未加 `-flto`（与 `LIFT_AOT_LTO` 的 runtime / AOT 目标分开；
   "vendored C 一起 LTO"是原始设想，本切片**未验证 / 未启用**）。
@@ -149,13 +172,16 @@ class UiScript {   // init / update(dt,frame) / render(UiBuilder&) / on_click / 
 
 ## 待核
 
-1. clang-cl 编译：上游只给 MSVC / ClangCL 的 `/wd…` 与 `/experimental:c11atomics`；`check_c_compiler_flag`
-   不认它时**静默不生效**（C11 atomics 走 `__STDC_NO_ATOMICS__` 分支）。首次构建要看实际生效了什么。
-2. mac：`quickjs/CMakeLists.txt` 对非 MSVC 非 IOS 开 `-Werror`（**目录级 `add_compile_options`**：
-   宏 `xcheck_add_c_compiler_flag` 在 `quickjs/CMakeLists.txt:32-38`，`-Werror` 在 `if(NOT MSVC AND NOT IOS)`
-   的 `:41-42`；⛔ 不是 target 级）⇒ 新 clang 一条新告警就整仓红；
-   放宽只能 `set_property(TARGET qjs APPEND PROPERTY COMPILE_OPTIONS -Wno-error)`（target 选项排在
-   目录选项**之后** ⇒ 会生效）。**未实测**。
+1. clang-cl 编译（**2026-11-18 已核**，clang 22.1.2 / RelWithDebInfo）：上游对 MSVC 加
+   `/experimental:c11atomics`（`CMakeLists.txt:129`）、对"认这个 flag 的编译器"加 `-funsigned-char`
+   （`:108-110`）。本仓用 `if(NOT MSVC)` ⇒ clang-cl 走 MSVC 分支、**不加**；这不叫"少加了"：
+   `-funsigned-char` 在 clang-cl 上是 **no-op**（`clang-cl: warning: unknown argument ignored ...
+   '-funsigned-char'`）⇒ 上游 win32（MSVC / clang-cl）最终也是 signed char，与本仓等价。
+   C11 atomics 不受影响：`quickjs-c-atomics.h` 对 clang 走 `#include <stdatomic.h>`（`GCC_BUILTIN_ATOMICS`
+   只给 GCC < 4.9），clang-cl 22.1.2 直接编过（`lift-qjs` 4 个 TU 全绿），**不需要** `/experimental:c11atomics`。
+2. 告警：0.18.0 的 `-Werror` 只在上游 `QJS_BUILD_WERROR=ON` 时加（`CMakeLists.txt:93-96`，`:95` 是
+   `-Werror`；缺省 OFF），
+   且本仓**不 vendor 上游 CMakeLists.txt** ⇒ 这条对 lift 不适用（`lift-qjs` 不加任何告警 flag）。
 3. `JSValue` 泄漏：唯一正确形状 = 每个 `JSValue` 有唯一所有者；开发构建开 `JS_DUMP_LEAKS`，产品构建关。
 4. GC 与宿主生命周期：宿主只在 runtime 内持句柄，跨调用 `JS_DupValue`；热重载换 runtime 后旧句柄必须失效。
 5. 体积 / 首帧开销：仍是估计；实测落 `observations.md`，阈值由读数定。
@@ -165,10 +191,14 @@ class UiScript {   // init / update(dt,frame) / render(UiBuilder&) / on_click / 
 ## 复现命令
 
 ```powershell
-$maa = 'E:\Projects\MAA\MaaFramework'   # 只读参考仓，不在本仓内
-git -C $maa submodule status 3rdparty/quickjs              # 3c9afc99… (v0.10.1)
-rg -n 'JS_SetMemoryLimit|JS_SetMaxStackSize|JS_SetInterruptHandler' $maa/3rdparty/quickjs/quickjs.h
+# 本仓 vendor 的那份（v0.18.0；文件清单 / 来源 / 怎么升级见 third_party/quickjs-ng/README.md）
+$qjs = 'E:\Projects\amayui-re\apps\emulator-lift\third_party\quickjs-ng'
+rg -n 'JS_SetMemoryLimit|JS_SetMaxStackSize|JS_SetInterruptHandler' $qjs/quickjs.h
+rg -n 'JS_AddIntrinsic' $qjs/quickjs.h
+rg -n 'JS_AddIntrinsicBigInt|JSContext \*JS_NewContextRaw|JS_INTERRUPT_COUNTER_INIT|js_random_init' $qjs/quickjs.c
+
+# MaaFramework 只是**只读参考**（本仓不依赖它的 pin；它的 quickjs submodule 可能仍是旧 tag）
+$maa = 'E:\Projects\MAA\MaaFramework'
+git -C $maa submodule status 3rdparty/quickjs
 rg -n 'JS_SetMemoryLimit|JS_SetMaxStackSize|JS_SetInterruptHandler' $maa/source/binding/NodeJS/src   # 零命中
-rg -n 'JS_AddIntrinsic' $maa/3rdparty/quickjs/quickjs.h
-rg -n 'js_random_init|void JS_AddPerformance|JSContext \*JS_NewContextRaw' $maa/3rdparty/quickjs/quickjs.c
 ```
