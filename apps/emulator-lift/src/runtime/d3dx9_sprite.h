@@ -35,7 +35,9 @@
 //   · `Draw(...)` 在**Draw 时**就把变换应用到四个角点（与 D3DX 的"顶点当场生成、Flush 才提交"一致），
 //     把一次绘制压进 guest 堆上的批次表；⛔ 不在 Draw 里写像素。
 //   · `End()` / `Flush()` 把批次交给**当前绑定的颜色目标**（与 `d3d9::Draw*` 同一个 GPU 后端）：
-//     源 × 调制色（Color 的 A/R/G/B）→ 目标；ALPHABLEND ⇒ SRCALPHA/INVSRCALPHA。
+//     源 × 调制色（Color 的 A/R/G/B）→ 目标。`Begin` 的 ALPHABLEND **只决定开不开**混合；
+//     因子 / op（含 separate-alpha）一律来自设备渲染状态，判据与 fixed-function 同源
+//     （`d3d9::readBlendState` + `gpuBlendStateFor`，见下面的 `spriteBlendState`）。
 //     ★ **光栅只有 GPU 一条实现**（`REQ-01M7AAXNJY2PACYJHYVRV620Q5` 删掉了 CPU 逐像素兜底）：
 //     GPU 不可用 / 表达不了这一条 ⇒ **记账（`skipped`）+ 跳过**，一像素都不写；⛔ 没有第二实现。
 //   · **反馈环**（`REQ-01M79ZRTHWWD296XRY5KYPR9J4`）：sprite 可以把像素写进绑定的纹理 RT（见上条），
@@ -69,6 +71,11 @@
 namespace lift {
 
 struct X86;
+struct GpuRasterState;  // runtime/gpu_raster.h（这里只要引用/指针，⛔ 不把那个头拖进来）
+
+namespace d3d9 {
+struct BlendStateSnapshot;  // runtime/d3d9_pipeline.h（同一个理由）
+}  // namespace d3d9
 
 namespace d3dx9 {
 
@@ -178,6 +185,22 @@ std::uint32_t onResetDevice(X86& cpu, std::uint32_t state, std::string* why);
 // ★ `pixels_written` 可以是 nullptr。
 bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries, std::uint64_t* pixels_written,
                     std::string* why);
+
+// =====================================================================================
+// `Begin` 的 flags → 这一批的混合：**纯判定**（导出给夹具，⛔ 不建机器）
+//
+// ★ D3DXSprite 的语义（`REQ-01M7R1ABAP86QVMNBZ5S4EDKD5`）：
+//   · `Begin` 的 `ALPHABLEND` 位只决定**开不开**混合；
+//   · 因子 / op 一律来自**设备渲染状态**（`D3DRS_SRCBLEND` / `D3DRS_DESTBLEND` / `D3DRS_BLENDOP`，
+//     以及 separate-alpha 的三项），⛔ 不是从 flags 推出来的、更不是写死的
+//     `SrcAlpha / InvSrcAlpha`。
+// ★ 映射只有一份：直接转发 `d3d9::gpuBlendStateFor`（与本模块之外的 fixed-function 同源）。
+//   表达不了 ⇒ false + why（调用方必须记账 + 跳过，⛔ 不静默退回缺省因子）。
+// ★ `rs.blend`（设备 `D3DRS_ALPHABLENDENABLE`）**不参与**这个判定：`ALPHABLEND=0` 时 D3DX 的
+//   语义就是"这一批不混合"（真机由 D3DX 自己开关那一位），所以开不开只看 `alpha_blend_flag`。
+// =====================================================================================
+bool spriteBlendState(const d3d9::BlendStateSnapshot& rs, bool alpha_blend_flag, GpuRasterState* out,
+                      std::string* why);
 
 }  // namespace d3dx9
 }  // namespace lift

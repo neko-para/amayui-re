@@ -58,6 +58,7 @@
 #include "check.h"
 #include "gpu_arm.h"
 #include "runtime/d3d9.h"
+#include "runtime/d3d9_pipeline.h"  // 混合状态常量（kRsSrcBlend / kBlendSrcAlpha …）
 #include "runtime/d3dx9_sprite.h"
 #include "runtime/machine.h"
 #include "runtime/png_decode.h"
@@ -463,6 +464,12 @@ struct Rig {
         return f.method(sprite, 0x24u, {tex, rect_ea, center_ea, pos_ea, color});
     }
     std::uint32_t end() { return f.method(sprite, 0x2Cu, {}); }
+    // `IDirect3DDevice9::SetRenderState` = +0xE4（与 tests/d3d9_pipeline.cpp 同一取证）。
+    // ★ `REQ-01M7R1ABAP86QVMNBZ5S4EDKD5`：sprite 的混合因子来自**设备状态**（不再写死
+    //   SrcAlpha/InvSrcAlpha）⇒ 想测"半透明叠加"的用例必须显式把状态设成那一组。
+    std::uint32_t setRenderState(std::uint32_t state, std::uint32_t value) {
+        return f.method(dev.object, 0xE4u, {state, value});
+    }
 };
 
 // ---------------------------------------------------------------------------------------
@@ -593,6 +600,12 @@ int caseDrawEndPixels(bool gpu) {
     // ★ `Clear` 直写 guest（不经过 GPU 队列）⇒ 这条在两条臂上都成立。
     LIFT_CHECK_EQ_U32(r.f.clearTo(r.dev, 0x004080C0u), 0u);
     LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 0, 0), 0x004080C0u);
+
+    // ★ 本用例判的是**经典半透明叠加** `src*a + dst*(1-a)` ⇒ 把设备混合状态显式设成
+    //   `SRCALPHA / INVSRCALPHA`。D3D9 的缺省是 `ONE / ZERO`（= 覆盖），而 sprite 的因子
+    //   从 `REQ-01M7R1ABAP86QVMNBZ5S4EDKD5` 起**取自设备状态**（⛔ 不再写死）。
+    LIFT_CHECK_EQ_U32(r.setRenderState(lift::d3d9::kRsSrcBlend, lift::d3d9::kBlendSrcAlpha), 0u);
+    LIFT_CHECK_EQ_U32(r.setRenderState(lift::d3d9::kRsDestBlend, lift::d3d9::kBlendInvSrcAlpha), 0u);
 
     const std::uint32_t src4 = r.f.placeRect(0, 0, 4, 4);
     const std::uint32_t zero3 = r.f.placeVec3(0.0f, 0.0f, 0.0f);
@@ -1109,6 +1122,11 @@ int caseTextureDraw(bool gpu) {
     std::string why;
     if (gpu && !r.pixelArm(&why)) LIFT_SKIP(why.c_str());
     LIFT_CHECK_EQ_U32(r.f.clearTo(r.dev, 0x004080C0u), 0u);
+
+    // ★ 同 `caseDrawEndPixels`：本用例要的是 `SRCALPHA / INVSRCALPHA` 叠加，而 sprite 的因子
+    //   自 `REQ-01M7R1ABAP86QVMNBZ5S4EDKD5` 起取自设备状态（D3D9 缺省 `ONE / ZERO` ⇒ 覆盖）。
+    LIFT_CHECK_EQ_U32(r.setRenderState(lift::d3d9::kRsSrcBlend, lift::d3d9::kBlendSrcAlpha), 0u);
+    LIFT_CHECK_EQ_U32(r.setRenderState(lift::d3d9::kRsDestBlend, lift::d3d9::kBlendInvSrcAlpha), 0u);
 
     const std::size_t surfaces_before = r.f.m.surfaces().surfaceCount();
     std::uint32_t tex = 0;

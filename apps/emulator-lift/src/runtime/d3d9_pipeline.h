@@ -592,6 +592,32 @@ struct DrawAlphaAgg {
 DrawAlphaAgg lastDrawAlphaAgg();
 
 // =====================================================================================
+// 混合状态的**读**入口（设备渲染状态 → 一份快照）
+//
+// ★ 为什么要它：D3D9 fixed-function 路与 D3DXSprite 的合成路必须对"引擎设了什么混合"
+//   有一致的读法。⛔ 两条路各读一遍 `kRsSrcBlend` / `kRsDestBlend` … 就是漂移的起点
+//   （`REQ-01M7R1ABAP86QVMNBZ5S4EDKD5`：sprite 路曾经连读都没读，落到了 `GpuRasterState`
+//   的缺省 `SrcAlpha / InvSrcAlpha`）。
+// ★ 只读 guest（`pipelineOf` + `rsOf`），不碰 SDL、不写任何状态。
+// ★ `blend` = `D3DRS_ALPHABLENDENABLE`。⚠ D3DXSprite 的 `Begin(ALPHABLEND)` **不用**这一位
+//   决定"开不开"（那是 D3DX 的 flags 语义，见 `d3dx9_sprite.h` 的 `spriteBlendState`）；
+//   这一位是设备状态的原样读数，留给 fixed-function / 诊断。
+// =====================================================================================
+struct BlendStateSnapshot {
+    bool blend = false;              // D3DRS_ALPHABLENDENABLE
+    std::uint32_t src_color = 0;     // D3DRS_SRCBLEND
+    std::uint32_t dst_color = 0;     // D3DRS_DESTBLEND
+    std::uint32_t color_op = 0;      // D3DRS_BLENDOP
+    bool separate_alpha = false;     // D3DRS_SEPARATEALPHABLENDENABLE
+    std::uint32_t src_alpha = 0;     // D3DRS_SRCBLENDALPHA
+    std::uint32_t dst_alpha = 0;     // D3DRS_DESTBLENDALPHA
+    std::uint32_t alpha_op = 0;      // D3DRS_BLENDOPALPHA
+};
+// `dev_state` = `IDirect3DDevice9` 状态块（'D9D1'，不是流水线块 'DL01'）；与 `pipelineOf` 同一口径。
+// 失败 ⇒ false + why（没有流水线状态块 / magic 不对 / out 为空），⛔ 不填缺省值冒充成功。
+bool readBlendState(X86& cpu, std::uint32_t dev_state, BlendStateSnapshot* out, std::string* why);
+
+// =====================================================================================
 // GPU 准入 / 状态映射（**纯函数**；夹具直接调，⛔ 不建机器）
 //
 // ★ 把 D3D9 的混合状态映射到 `GpuRasterState` 的 color/alpha 两段。

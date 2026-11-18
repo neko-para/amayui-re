@@ -4748,6 +4748,48 @@ const MUTATIONS = [
       'ui-kit-hover-branch：把 Button 的 hover 分支改成恒 idle ⇒ 悬停不再高亮 ⇒ ' +
       'ui-kit-script 的 `state=hover` 断言与"三态填充色互不相同"当场红',
   },
+
+  // ── D3DXSprite 的混合因子必须来自设备状态（`REQ-01M7R1ABAP86QVMNBZ5S4EDKD5`；
+  //    守卫 = `tests/d3dx9_sprite_blend.cpp`）──
+  //   ★ 代表"引擎的加性混合被静默当成别的混合"这一类**静默**错误：画面照出，只是那颗 sprite 的
+  //     （几乎全黑的）背景被不透明地盖成黑块（SAVE05 的 120×120 黑框），没有任何日志 / 断言会喊。
+  //   ★ 为什么落在这一行：`spriteBlendState` 是 sprite 路**唯一**把设备状态映射到
+  //     `GpuRasterState` 的地方；忽略 rs ⇒ 又回到写死的 `SrcAlpha / InvSrcAlpha`（本单的缺陷本体）。
+  //   ★ 措辞纪律：这件事**与影片没有关系**（同帧 dshow 影片只是相关读数，未直读）。
+  //   ★ 判据不弱化：纯 ① 的 `dst_blend == One` 与接线 ① 的 `got.dst_blend == One` 直接红；
+  //     附加红点 = 表达不了的因子从"false + why"退化成"静默成功"（wiring ④ 会看到它入队）。
+  {
+    file: 'apps/emulator-lift/src/runtime/d3dx9_sprite.cpp',
+    from:
+      'bool spriteBlendState(const d3d9::BlendStateSnapshot& rs, bool alpha_blend_flag, GpuRasterState* out,\n' +
+      '                      std::string* why) {\n' +
+      '    return d3d9::gpuBlendStateFor(rs.src_color, rs.dst_color, rs.color_op, rs.separate_alpha, rs.src_alpha,\n' +
+      '                                  rs.dst_alpha, rs.alpha_op, alpha_blend_flag, out, why);\n' +
+      '}',
+    to:
+      'bool spriteBlendState(const d3d9::BlendStateSnapshot&, bool alpha_blend_flag, GpuRasterState* out,\n' +
+      '                      std::string*) {\n' +
+      '    // 变异：忽略设备状态，退回写死的 SrcAlpha / InvSrcAlpha\n' +
+      '    if (out == nullptr) return false;\n' +
+      '    out->blend = alpha_blend_flag;\n' +
+      '    out->separate_alpha_blend = alpha_blend_flag;\n' +
+      '    out->src_blend = GpuBlendFactor::SrcAlpha;\n' +
+      '    out->dst_blend = GpuBlendFactor::InvSrcAlpha;\n' +
+      '    out->blend_op = GpuBlendOp::Add;\n' +
+      '    out->src_blend_alpha = GpuBlendFactor::SrcAlpha;\n' +
+      '    out->dst_blend_alpha = GpuBlendFactor::InvSrcAlpha;\n' +
+      '    out->blend_op_alpha = GpuBlendOp::Add;\n' +
+      '    return true;\n' +
+      '}',
+    guard: 'ctest:d3dx9-sprite-blend',
+    ctest: 'd3dx9-sprite-blend',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3dx9-sprite-blend',
+    what:
+      'sprite-blend-state-ignored：`spriteBlendState` 忽略设备状态、退回写死的 `SrcAlpha/InvSrcAlpha` ⇒ ' +
+      'd3dx9-sprite-blend 的纯 ① `dst_blend == One` 与接线 ① `got.dst_blend == One` 当场红；' +
+      '表达不了的因子也从 false+why 退化成静默成功（接线 ④ 的"不入队 + skipped 涨"红）',
+  },
 ];
 
 let mutationRunSeq = 0;

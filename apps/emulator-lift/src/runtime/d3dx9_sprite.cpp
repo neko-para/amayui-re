@@ -5,8 +5,9 @@
 // ★ 一切"真的做"的部分都在 compositeBatch：
 //     Draw 时把变换应用到四角（与 D3DX 的"顶点当场生成"一致），End/Flush 时把纹理四边形交给
 //     **GPU 光栅后端**：白色纹理源（pTexture=0 时的 D3D9 固定功能语义）× 调制色 → **当前绑定的
-//     颜色目标**（未绑 RT = 后缓冲；绑了纹理 RT = 那张纹理的像素块）；ALPHABLEND 走
-//     SRCALPHA/INVSRCALPHA。
+//     颜色目标**（未绑 RT = 后缓冲；绑了纹理 RT = 那张纹理的像素块）；`Begin` 的 ALPHABLEND
+//     只决定"开不开"混合，**因子 / op 一律来自设备渲染状态**（`D3DRS_SRCBLEND` / `DESTBLEND` /
+//     `BLENDOP` 与 separate-alpha 三项；与 fixed-function 同一份映射）。⛔ 不从 flags 推因子。
 // ★ **光栅只有 GPU 一条实现**（`REQ-01M7AAXNJY2PACYJHYVRV620Q5`）：原来那份"CPU 逐像素写后缓冲"
 //   的兜底已删 —— GPU 不可用 / 表达不了这一条 ⇒ **记账（`skipped`）+ 跳过**，⛔ 不静默画。
 //   本文件**没有**任何写 `dev.arena` / 目标像素的代码；"写了多少像素"这个数只为状态块的
@@ -641,6 +642,15 @@ std::uint32_t draw(X86& cpu, std::uint32_t state, std::uint32_t texture, std::ui
 // ---------------------------------------------------------------------------------------
 // 合成（End / Flush 共用）
 // ---------------------------------------------------------------------------------------
+
+// ★ 唯一的混合判定（`REQ-01M7R1ABAP86QVMNBZ5S4EDKD5`）：**只转发** fixed-function 那一份映射。
+//   ⛔ 不要在这里写第二套 switch、⛔ 不要"没状态就用缺省 SrcAlpha/InvSrcAlpha" —— 那正是本单的缺陷。
+bool spriteBlendState(const d3d9::BlendStateSnapshot& rs, bool alpha_blend_flag, GpuRasterState* out,
+                      std::string* why) {
+    return d3d9::gpuBlendStateFor(rs.src_color, rs.dst_color, rs.color_op, rs.separate_alpha, rs.src_alpha,
+                                  rs.dst_alpha, rs.alpha_op, alpha_blend_flag, out, why);
+}
+
 bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
                     std::uint64_t* pixels_written, std::string* why) {
     HostServices* m = nullptr;
@@ -690,7 +700,33 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
         return false;
     }
     const SurfaceFormat fmt = gs->format;
-    const bool blend = (s.flags & kSpriteAlphaBlend) != 0;
+    // ---- 混合：每**批**读一次设备渲染状态（⛔ 不是每条 draw 读一遍）----
+    // ★ `Begin` 的 flags 只决定"开不开"；因子 / op 一律来自设备状态，判据与 fixed-function
+    //   **同一份**读法（`d3d9::readBlendState`）与**同一份**映射（`gpuBlendStateFor`）。
+    //   `REQ-01M7R1ABAP86QVMNBZ5S4EDKD5` 之前这里只有一句 `gs_state.blend = blend;` ⇒ 落到
+    //   `gpu_raster.h` 的缺省 SrcAlpha/InvSrcAlpha，引擎的加性（SRCALPHA/ONE）被丢掉。
+    const bool alpha_blend_flag = (s.flags & kSpriteAlphaBlend) != 0;
+    GpuRasterState blend_state;  // 混合段（其余 viewport/scissor/depth 由每条覆盖）
+    std::string blend_error;
+    bool blend_ok = false;
+    if (dev.pipeline == 0) {
+        // 没有流水线状态块 = 一个 D3DRS 都读不到。⛔ 不许拿缺省因子冒充"读过了"。
+        blend_error = "设备没有流水线状态块（'DL01'）";
+    } else {
+        d3d9::BlendStateSnapshot rs;
+        if (!d3d9::readBlendState(cpu, dev.state, &rs, &blend_error)) {
+            // why 已由 readBlendState 填好
+        } else {
+            blend_ok = spriteBlendState(rs, alpha_blend_flag, &blend_state, &blend_error);
+        }
+    }
+    if (!blend_ok) {
+        // ★ **一条批次级**告警（⛔ 不每条 draw 刷屏；逐条只进覆盖账本）。
+        spriteWarn("End",
+                   "混合状态表达不了（%s）⇒ 本批 %u 条 Draw 全部跳过"
+                   "（sprite 路没有 CPU 兜底；⛔ 不退回写死的 SrcAlpha/InvSrcAlpha）",
+                   blend_error.empty() ? "原因未知" : blend_error.c_str(), s.count);
+    }
     // ★ 精灵合成与 D3D9 fixed-function 共用**同一个** GPU 光栅后端（那条 A/B 已删，
     //   见 `REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：没有"先关掉 GPU 再 CPU 合成"的开关。
     std::uint64_t written = 0;
@@ -876,6 +912,16 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
                 continue;
             }
         }
+        // ---- 混合状态表达不了 ⇒ 这一条**没画** ----
+        // ★ sprite 路没有 CPU 兜底（`REQ-01M7AAXNJY2PACYJHYVRV620Q5`）：读不到 / 映射不了混合状态时
+        //   ⛔ 不静默退回写死的缺省因子，而是记账 + 跳过这一条（批次级告警上面已经打过一条）。
+        if (!blend_ok) {
+            d3d9::gpuNoteSpriteNotDrawn("sprite: 混合状态表达不了（" +
+                                        (blend_error.empty() ? std::string("原因未知") : blend_error) + "）");
+            releaseEntry(ea, i);
+            ++entries_done;
+            continue;
+        }
         // ---- GPU 光栅化：D3DXSprite 纹理四边形（sampler 用 stage 默认 NEAREST+CLAMP，⛔ 不改）----
         // ★ **这条就是唯一实现**（`REQ-01M7AAXNJY2PACYJHYVRV620Q5` 删掉了 CPU 逐像素兜底）：
         //   GPU 不可用 / 表达不了这一条 ⇒ `skip_reason` 记账 + 跳过，⛔ 不写目标像素。
@@ -932,12 +978,12 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
                 set(3, q[2], q[3], u1f, v0f);
                 set(4, q[6], q[7], u1f, v1f);
                 set(5, q[4], q[5], u0f, v1f);
-                GpuRasterState gs_state;
+                // ★ 混合段直接来自**本批读一次**的设备状态（见函数头那段）；⛔ 不再从 flags 推一个 bool。
+                GpuRasterState gs_state = blend_state;
                 gs_state.viewport_w = gs->width;
                 gs_state.viewport_h = gs->height;
                 gs_state.scissor_x1 = gs->width;
                 gs_state.scissor_y1 = gs->height;
-                gs_state.blend = blend;
                 // CPU 的 sprite 合成不看深度 ⇒ GPU 这条也要关掉，否则两边语义不等价。
                 gs_state.depth_test = false;
                 gs_state.depth_write = false;

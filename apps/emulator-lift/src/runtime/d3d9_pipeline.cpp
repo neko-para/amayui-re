@@ -577,6 +577,19 @@ std::uint32_t rsOf(X86& cpu, std::uint32_t pe, std::uint32_t state) {
     return plGet(cpu, pe, kPlRenderStates + state * 4u);
 }
 
+// 混合状态的**唯一**读点（fixed-function 的 `prepareContext` 与 `readBlendState` 都走这里）：
+// 状态 id 只在这个函数里出现一次 ⇒ 两条路不会对"哪个 D3DRS 是哪一段"有分歧。
+void readBlendStateAt(X86& cpu, std::uint32_t pe, BlendStateSnapshot* out) {
+    out->blend = rsOf(cpu, pe, kRsAlphaBlendEnable) != 0u;
+    out->src_color = rsOf(cpu, pe, kRsSrcBlend);
+    out->dst_color = rsOf(cpu, pe, kRsDestBlend);
+    out->color_op = rsOf(cpu, pe, kRsBlendOp);
+    out->separate_alpha = rsOf(cpu, pe, kRsSeparateAlphaBlendEnable) != 0u;
+    out->src_alpha = rsOf(cpu, pe, kRsSrcBlendAlpha);
+    out->dst_alpha = rsOf(cpu, pe, kRsDestBlendAlpha);
+    out->alpha_op = rsOf(cpu, pe, kRsBlendOpAlpha);
+}
+
 void setRs(X86& cpu, std::uint32_t pe, std::uint32_t state, std::uint32_t value) {
     plSet(cpu, pe, kPlRenderStates + state * 4u, value);
 }
@@ -3760,14 +3773,18 @@ bool prepareContext(X86& cpu, const char* what, std::uint32_t dev, std::uint32_t
     ctx->alpha_test = rsOf(cpu, pe, kRsAlphaTestEnable) != 0u;
     ctx->alpha_func = rsOf(cpu, pe, kRsAlphaFunc);
     ctx->alpha_ref = rsOf(cpu, pe, kRsAlphaRef);
-    ctx->blend = rsOf(cpu, pe, kRsAlphaBlendEnable) != 0u;
-    ctx->src_blend = rsOf(cpu, pe, kRsSrcBlend);
-    ctx->dst_blend = rsOf(cpu, pe, kRsDestBlend);
-    ctx->blend_op = rsOf(cpu, pe, kRsBlendOp);
-    ctx->separate_alpha_blend = rsOf(cpu, pe, kRsSeparateAlphaBlendEnable) != 0u;
-    ctx->src_blend_a = rsOf(cpu, pe, kRsSrcBlendAlpha);
-    ctx->dst_blend_a = rsOf(cpu, pe, kRsDestBlendAlpha);
-    ctx->blend_op_a = rsOf(cpu, pe, kRsBlendOpAlpha);
+    // ★ 混合段走**唯一**读点（`readBlendStateAt`，与 `readBlendState` 同一份）：
+    //   读数逐字不变（同一批 `rsOf`），⛔ 不在这里再抄一遍状态 id。
+    BlendStateSnapshot bs;
+    readBlendStateAt(cpu, pe, &bs);
+    ctx->blend = bs.blend;
+    ctx->src_blend = bs.src_color;
+    ctx->dst_blend = bs.dst_color;
+    ctx->blend_op = bs.color_op;
+    ctx->separate_alpha_blend = bs.separate_alpha;
+    ctx->src_blend_a = bs.src_alpha;
+    ctx->dst_blend_a = bs.dst_alpha;
+    ctx->blend_op_a = bs.alpha_op;
     ctx->color_write = rsOf(cpu, pe, kRsColorWriteEnable);
     ctx->texture_factor = rsOf(cpu, pe, kRsTextureFactor);
     // ★ 派生 mip 的"轮"：本 Draw 里取到的链指针在本轮内不会被 LRU 回收（多 stage 同时持有）。
@@ -6083,6 +6100,19 @@ bool blendOpFor(std::uint32_t op, GpuBlendOp* out) {
 bool gpuUntexturedIsIdentity(std::uint32_t op, std::uint32_t arg1, std::uint32_t arg2) {
     // 无纹理时 CPU 采样是白色；只有结果恒等于顶点色的组合才能由无纹理 GPU 着色器表达。
     return untexturedResolvesToDiffuse(op, arg1, arg2);
+}
+
+// 设备渲染状态 → 混合快照。`dev_state` 是设备状态块（'D9D1'）⇒ 先解析流水线块（'DL01'），
+// 再用**同一个** `readBlendStateAt` 读那 7 个状态（fixed-function 的 `prepareContext` 也用它）。
+bool readBlendState(X86& cpu, std::uint32_t dev_state, BlendStateSnapshot* out, std::string* why) {
+    if (out == nullptr) {
+        if (why) *why = "readBlendState: out 为空";
+        return false;
+    }
+    std::uint32_t pe = 0;
+    if (!pipelineOf(cpu, dev_state, &pe, why)) return false;
+    readBlendStateAt(cpu, pe, out);
+    return true;
 }
 
 bool gpuBlendStateFor(std::uint32_t src_color, std::uint32_t dst_color, std::uint32_t color_op,

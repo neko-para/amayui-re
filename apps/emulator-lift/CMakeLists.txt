@@ -2590,3 +2590,26 @@ if(LIFT_BUILD_TESTS)
     target_link_libraries(lift-ui-kit-script PRIVATE emulator-lift-runtime)
     add_test(NAME ui-kit-script COMMAND lift-ui-kit-script)
 endif()
+
+# =====================================================================================
+# J · D3DXSprite 的混合因子必须来自**设备渲染状态**（`REQ-01M7R1ABAP86QVMNBZ5S4EDKD5`）
+#
+# ★ 不变量：`ID3DXSprite::Begin` 的 `ALPHABLEND` 位**只决定开不开**混合；因子 / op / separate-alpha
+#   一律来自 `D3DRS_SRCBLEND` / `DESTBLEND` / `BLENDOP`（与 fixed-function 同一份读法
+#   `d3d9::readBlendState` + 同一份映射 `gpuBlendStateFor`）。
+#   红了意味着：引擎的加性（`SRCALPHA / ONE`）又被当成别的混合 —— 缺省 `SrcAlpha / InvSrcAlpha`
+#   会把一颗 sprite 的（几乎全黑的）背景不透明地盖成黑块（SAVE05 的 120×120 黑框）。
+#   ★ 措辞纪律：这件事**与影片没有关系**；同帧的 dshow 影片只是相关读数（强相关、未直读）。
+# ★ 判据见 `tests/d3dx9_sprite_blend.cpp` 的 ①–⑤：纯映射（加性 / ALPHABLEND=0 / separate alpha
+#   三态 / 表达不了 ⇒ false+why）+ **接线**（真实 Begin/Draw/End 交进后端的 `GpuRasterState` 必须
+#   是 SrcAlpha/One，改设备状态要跟着变，表达不了时**不入队**且账本 skipped 涨）。
+# ★ 夹具只建裸 `Machine` + 假 `GpuRaster`（⛔ 不要 SDL / GPU 设备）⇒ 顶层 `if(LIFT_BUILD_TESTS)`
+#   注册 = pure 档（AGENTS.md §12.4：判据 = 注册位置）。
+# ★ 变异：`tools/mutate-check.mjs` 末尾 `sprite-blend-state-ignored` 把 `spriteBlendState` 改成
+#   忽略 rs、退回缺省 `SrcAlpha / InvSrcAlpha` ⇒ 本用例的纯 ① 与接线 ① 当场红。
+# =====================================================================================
+if(LIFT_BUILD_TESTS)
+    add_executable(lift-d3dx9-sprite-blend tests/d3dx9_sprite_blend.cpp)
+    target_link_libraries(lift-d3dx9-sprite-blend PRIVATE emulator-lift-runtime)
+    add_test(NAME d3dx9-sprite-blend COMMAND lift-d3dx9-sprite-blend)
+endif()
