@@ -1045,7 +1045,11 @@ bool SdlWindow::submitFrame(const SurfaceArena& arena, const GuestSurface& surfa
         impl_->tex_h = h;
         impl_->tex_fmt = fmt;
         if (!impl_->sized || size_changed) {
-            if (!SDL_SetWindowSize(impl_->window, w, h)) {
+            // ★ 窗口 = **帧尺寸 × scale**（`window_scale.h` 的 `windowSizeForFrame`：换算是唯一那份）。
+            //   `scale == 1.0` ⇒ 得到的就是 (w,h) ⇒ 与改动前逐字节相同；
+            //   `--scale` 是倍率、图像尺寸跟 guest ⇒ guest 改分辨率时窗口跟着帧走、倍率不变。
+            const WindowSize want = windowSizeForFrame(w, h, impl_->scale_report.scale);
+            if (!SDL_SetWindowSize(impl_->window, want.w, want.h)) {
                 if (err) *err = std::string("SDL_SetWindowSize 失败：") + SDL_GetError();
                 return false;
             }
@@ -1267,12 +1271,15 @@ bool SdlWindow::Impl::submitDirect(const SurfaceArena& arena, const GuestSurface
     if (!direct->directTargetCurrent()) {
         if (!direct->directUploadGuest(surface.format, arena.pixels(surface), surface.pitch, w, h, err)) return false;
     }
-    // 与 SDL_Renderer 路径一致：首帧 / 尺寸变化把窗口尺寸跟到后缓冲。
+    // 与 SDL_Renderer 路径一致：首帧 / 尺寸变化把窗口尺寸跟到后缓冲 —— **× scale**
+    // （同一份换算 `windowSizeForFrame`，⛔ 两处各写一套就是这次的 bug）。
     if (!sized || direct_w != w || direct_h != h) {
-        if (!SDL_SetWindowSize(window, w, h)) {
+        const WindowSize want = windowSizeForFrame(w, h, scale_report.scale);
+        if (!SDL_SetWindowSize(window, want.w, want.h)) {
             if (err) *err = std::string("SDL_SetWindowSize 失败：") + SDL_GetError();
             return false;
         }
+        // ★ 这两格仍是**帧**尺寸（判"要不要重设"用的是帧尺寸变化；窗口尺寸由 scale 唯一决定）。
         direct_w = w;
         direct_h = h;
         sized = true;

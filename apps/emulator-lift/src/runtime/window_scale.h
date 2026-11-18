@@ -73,7 +73,23 @@ struct WindowSize {
 int scaleWindowDimension(int base, double scale);
 
 // 窗口客户区尺寸 = `round(1280 × s) × round(720 × s)`。**画面仍是 1280×720**（本函数不改 image）。
+// ⚠ 只有"帧尺寸未知"的建窗那一刻用它（`SDL_CreateWindow`）；帧尺寸已知之后**一律**用
+//   `windowSizeForFrame`（⛔ 两处各写一套换算 = 这次的 bug 本身，见下）。
 WindowSize windowSizeForScale(double scale);
+
+// ★ `--scale` 的**唯一**换算口径（2026-11-19 裁决 c-i：**窗口 = 帧尺寸 × scale**）：
+//   一维 = `round(frame × s)`，四舍五入规则**只依赖** `scaleWindowDimension`（远离 0 取整、
+//   至少 1 px、`>= INT_MAX` 钳到 INT_MAX）—— ⛔ 这里不另写 `+0.5` / `lround` / 类型转换。
+//   边界：`scale` 非有限 / `<= 0` ⇒ **按 1.0 处理**（= 返回帧尺寸本身；调用方已校验，这里是兜底）；
+//   `frame_w/frame_h <= 0` ⇒ 该维 0（`scaleWindowDimension` 的原口径，调用方负责挡）。
+//   ⇒ `scale == 1.0` 时恒等于 `{frame_w, frame_h}` ⇒ 与"窗口跟随后缓冲尺寸"**逐字节相同**
+//     （既有 `present-window` 的"窗口跟随帧尺寸"判据在缺省档一字不改）。
+//   ⇒ `frame == 1280×720` 时恒等于 `windowSizeForScale(scale)`（= 文档里"窗口 = 1280·s"那条，
+//     在 guest 换分辨率之前字面成立）。
+// ★ 为什么要有它：`SDL_CreateWindow`（`present_sdl.cpp` 窗口档 init）之后，**每一次**"窗口该多大"
+//   都发生在 `SDL_SetWindowSize`（SDL_Renderer 路径 + GPU 直出路径）。那两处历史上直接用了 guest
+//   后缓冲尺寸 ⇒ 第一帧 Present 就把 `--scale` 静默抹掉（1280×720）。窗口尺寸的判据只能在这一份里。
+WindowSize windowSizeForFrame(int frame_w, int frame_h, double scale);
 
 // display content scale 是否可用（`auto` 的"取得到吗"判据）。⚠ 这是**唯一**一份判据。
 bool autoContentScaleUsable(double content_scale);

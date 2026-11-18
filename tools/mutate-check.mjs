@@ -4459,6 +4459,28 @@ const MUTATIONS = [
     buildTarget: 'lift-ui-text',
     what: '单边上限 8192 放宽到 1<<20 ⇒ 1e6×1（4 MB）的 rect 被接受并栅格化 ⇒ huge-rect-rejected 的 `!rasterized` 落空 ⇒ 红',
   },
+
+  // ── `--scale` 的**调用点**（守卫 = `tests/present_window.cpp` 的
+  //    `present-window/scale-window-follows-frame`）──
+  //   ★ 代表"有公式、但呈现汇点不乘 scale"这一类**静默**失效（2026-11-19 的现场）：
+  //     `--scale` 只在 `SDL_CreateWindow` 生效；第一帧 Present 时 `SDL_SetWindowSize` 把窗口
+  //     设回 guest 后缓冲尺寸（1280×720）⇒ 缩放被抹掉，无报错、无 readout 变化。
+  //   ★ 为什么变异落在**调用点**而不是 `windowSizeForFrame`：纯公式测试（`tests/window_scale.cpp`）
+  //     测得到公式、测不到"调用点不调用它"—— 而那正是这次的失效形态。
+  //   ★ 为什么只改 SDL_Renderer 那一路：`present-window`（dummy + software）走的就是它；
+  //     把乘子换成 1.0 ⇒ 期望 1920×1080 实得 1280×720（第二条 960×720 ⇒ 640×480 同时红）。
+  {
+    file: 'apps/emulator-lift/src/runtime/present_sdl.cpp',
+    from: '            const WindowSize want = windowSizeForFrame(w, h, impl_->scale_report.scale);',
+    to: '            const WindowSize want = windowSizeForFrame(w, h, kDefaultScale);  // 变异：丢掉 scale 乘子',
+    guard: 'ctest:present-window',
+    ctest: 'present-window',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-present-window',
+    what:
+      '呈现汇点把窗口尺寸设回**帧尺寸**（丢掉 `--scale` 乘子）⇒ 第一帧 Present 之后窗口 1280×720 ' +
+      '而不是 1920×1080（scale-window-follows-frame 的 ww/wh 与 960×720 四条断言红）',
+  },
 ];
 
 let mutationRunSeq = 0;

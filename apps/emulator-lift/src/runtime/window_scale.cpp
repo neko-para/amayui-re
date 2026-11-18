@@ -68,6 +68,16 @@ WindowSize windowSizeForScale(double scale) {
     return size;
 }
 
+WindowSize windowSizeForFrame(int frame_w, int frame_h, double scale) {
+    // ★ `scale` 非法 / 非正 ⇒ **按 1.0**（窗口 = 帧尺寸）：⛔ 不拿一个坏值去掉窗口尺寸。
+    //   `kDefaultScale == 1.0` ⇒ `scaleWindowDimension(frame, 1.0)` 恒等于 `frame`（逐字节不变）。
+    const double s = (std::isfinite(scale) && scale > 0.0) ? scale : kDefaultScale;
+    WindowSize size;
+    size.w = scaleWindowDimension(frame_w, s);
+    size.h = scaleWindowDimension(frame_h, s);
+    return size;
+}
+
 double quantizeScale(double scale) {
     if (!std::isfinite(scale) || scale <= 0.0) return kDefaultScale;
     const double q = roundHalfAway(scale * kScaleQuantum) / kScaleQuantum;

@@ -14,6 +14,12 @@
 | 任意 `--scale` + `--present headless` | 隐藏离屏窗口仍 `1280×720` | `1280×720` | **不生效**（接受 + readout 明说） |
 
 - **缺省 1.0 = 改动前的逐字节行为**：`SDL_CreateWindow(title, 1280, 720, …)` 的实参不变。
+- ★ **基准是"当前帧尺寸"（今天 = 1280×720）**：`--scale` 是倍率、图像尺寸跟 guest ⇒ 上表那两列在 guest
+  换分辨率之后要按**当帧尺寸**算（窗口跟着帧走、倍率不变）。**唯一换算** =
+  `windowSizeForFrame(frame_w, frame_h, scale)`；`scale == 1.0` ⇒ 恒等于帧尺寸（与"窗口跟随帧尺寸"
+  逐字节相同）。⚠ 2026-11-19 之前两处 `SDL_SetWindowSize` 直接用了帧尺寸 ⇒ **第一帧 Present 就把
+  `--scale` 静默抹掉**（`--scale auto` 建窗时变大、进界面又回 1×）；守卫 =
+  CTest `present-window/scale-window-follows-frame`（1.5× ⇒ 1920×1080；帧变 640×480 ⇒ 960×720）。
 - ★ **范围裁决（2026-11-18，用户口径）：`--scale` 只改窗口，不改帧。**
   guest 画面恒为 1280×720；窗口比画面大时画面是**放大**出来的，**模糊可接受**（真机也没做特殊处理，
   同样糊）。⇒ ⛔ 不做高分辨率重渲染 / ⛔ 不改帧尺寸 / ⛔ 不加额外 upscale pass。
@@ -21,7 +27,8 @@
 - 缩放只改**宿主窗口大小**，⛔ 不改 guest 可见的任何东西（后缓冲、D3D9 模式、`GetClientRect` 的
   虚拟屏仍是 1280×720）。
 - 公式 / 校验 / readout 文案的**唯一一份**在 `apps/emulator-lift/src/runtime/window_scale.h`
-  （`windowSizeForScale` / `parseScaleSpec` / `autoScaleFromContentScale` / `scaleReadoutLine`）。
+  （`windowSizeForScale`（建窗那一次）/ `windowSizeForFrame`（此后每一次）/ `parseScaleSpec` /
+  `autoScaleFromContentScale` / `scaleReadoutLine`）。
 - 窗口像素 → 画面像素**仍然只有一份公式**：`runtime/cursor_map.h` 的 `mapWindowPixelToImage`
   （`present_sdl.cpp` 的 `mapMouse` 只调它）。窗口变大后 letterbox 自然得到 `scale = 窗口/画面`，
   ⛔ 没有为 `--scale` 另写换算。

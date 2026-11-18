@@ -781,6 +781,70 @@ int main(int argc, char** argv) {
         win->shutdown();
     }
 
+    // ---- `--scale` 的**调用点**守卫：窗口 = **帧尺寸 × scale**（2026-11-19 裁决 c-i）----
+    //   ★ 为什么必须在**真窗口**上测：`tests/window_scale.cpp` 只测公式，抓不到"呈现汇点根本
+    //     没调用它" —— 而这次的失效正是两处 `SDL_SetWindowSize` 把窗口设回 guest 后缓冲尺寸
+    //     （1280×720），把 `--scale` 在**第一帧 Present 之后**静默丢掉；只加纯公式测试时
+    //     "把调用点改回帧尺寸"仍然全绿。
+    //   判据（c-i：窗口跟 guest 帧尺寸、保持倍率）：
+    //     ① Fixed 1.5 + submitFrame(1280×720) ⇒ 窗口 **1920×1080**（bug 态 = 1280×720）；
+    //     ② 再 submitFrame(640×480)（模拟 guest `SetDisplayMode` 改帧尺寸）⇒ 窗口 **960×720**
+    //        （⛔ 不是 1920×1080：那是 c-ii，且会让既有 `present-window` 的"窗口跟随帧尺寸"判据作废）。
+    //   ★ 本用例固定 software 渲染器（与 `--gpu` 变体无关）：判据是**窗口几何**，与呈现后端无关。
+    {
+        ::lift_test::g_current_case = "present-window/scale-window-follows-frame";
+        lift::GuestMemory mem;
+        lift::SurfaceArena arena;
+        LIFT_CHECK(mem.reserve());
+        // 8 MiB：1280×720×4 ≈ 3.5 MiB + 640×480×4 ≈ 1.2 MiB（`make()` 的 1 MiB 装不下）
+        LIFT_CHECK(arena.init(&mem, 0x10000000u, 0x00800000u));
+        const std::uint32_t ea_big = arena.create(1280, 720, format32(0u));
+        const std::uint32_t ea_small = arena.create(640, 480, format32(0u));
+        lift::GuestSurface* big = arena.find(ea_big);
+        lift::GuestSurface* small = arena.find(ea_small);
+        LIFT_CHECK_NE_U32(ea_big, 0u);
+        LIFT_CHECK_NE_U32(ea_small, 0u);
+        LIFT_CHECK(big != nullptr);
+        LIFT_CHECK(small != nullptr);
+
+        lift::SdlWindow win;
+        lift::SdlWindowOptions opt;
+        opt.title = "emulator-lift scale window test";
+        opt.driver_list = "software";
+        opt.hidden = true;
+        opt.scale.kind = lift::ScaleSpec::Kind::Fixed;
+        opt.scale.value = 1.5;
+        std::string err;
+        if (!win.init(opt, &err)) {
+            std::fprintf(stderr, "scale 窗口 init 失败（dummy+software 是机械守卫）：%s\n", err.c_str());
+            LIFT_CHECK(false);  // ★ 不许 SKIP 掉真实回归（与文件头的 requireWindow 同口径）
+            return lift_test::finish("present-window");
+        }
+        if (big != nullptr) {
+            int ww = -1;
+            int wh = -1;
+            LIFT_CHECK(win.submitFrame(arena, *big, &err));
+            SDL_Window* sw = SDL_GetWindowFromID(win.windowIdForTest());
+            LIFT_CHECK(sw != nullptr);
+            if (sw != nullptr) SDL_GetWindowSize(sw, &ww, &wh);
+            std::printf("[scale-window] 帧 1280x720 × 1.5 ⇒ 窗口 %dx%d（期望 1920x1080）\n", ww, wh);
+            LIFT_CHECK_EQ_I64(ww, 1920);  // ★ 调用点必须乘 scale（⛔ 帧尺寸本身）
+            LIFT_CHECK_EQ_I64(wh, 1080);
+        }
+        if (small != nullptr) {
+            int ww = -1;
+            int wh = -1;
+            LIFT_CHECK(win.submitFrame(arena, *small, &err));
+            SDL_Window* sw = SDL_GetWindowFromID(win.windowIdForTest());
+            LIFT_CHECK(sw != nullptr);
+            if (sw != nullptr) SDL_GetWindowSize(sw, &ww, &wh);
+            std::printf("[scale-window] 帧 640x480 × 1.5 ⇒ 窗口 %dx%d（期望 960x720）\n", ww, wh);
+            LIFT_CHECK_EQ_I64(ww, 960);  // c-i：窗口跟帧尺寸、保持倍率
+            LIFT_CHECK_EQ_I64(wh, 720);
+        }
+        win.shutdown();
+    }
+
     LIFT_CHECK_EQ_U32(SDL_WasInit(SDL_INIT_VIDEO), 0u);
     {
         // ★ 缺字体 / 无 GPU 直出 ⇒ **CTest SKIP 77**（用例无法判定），⛔ 不用"return 0"装 Passed。
