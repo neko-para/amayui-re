@@ -10,9 +10,10 @@
 //      `GetCommandLineW` 重建，主程序只看见 UTF-8。
 //   ② **控制台输出**：`printf` 写的是**字节**，控制台按自己的**输出代码页**解释它。
 //      源码按 UTF-8 编译（`/utf-8`）⇒ 吐出 UTF-8 字节，而中文 Windows 控制台默认 936
-//      ⇒ 用户看到乱码。⇒ `initConsoleUtf8()` 在进程**挂着控制台**时把码页切到 65001；
-//      重定向到文件 / 管道时**字节本身不转码**（仍是 UTF-8，供工具与测试消费），但码页是
-//      控制台级属性，只要挂着控制台就会切 —— 正常退出 / 已知 fatal 路径会恢复。
+//      ⇒ 用户看到乱码。⇒ `initConsoleUtf8()` 只在 **stdout 真的是 console** 时把码页切到
+//      65001（判据 = `GetConsoleMode(STD_OUTPUT_HANDLE)`）；正常退出 / 已知 fatal 路径会恢复。
+//      ★ 重定向到文件 / 管道时**不碰共享 console 的码页**（旧判据会碰：它只看"进程挂着
+//      控制台"，`GetConsoleOutputCP() != 0`）；那一路的字节始终是 UTF-8，由消费方自己解码。
 //
 // ★ 非 Windows 平台：argv 本来就是 UTF-8，控制台是字节流；两个函数都是 no-op / 直通。
 // ★ 这两件事是**进程入口**的事，⛔ 不要散到各 shim 里去做。
@@ -26,7 +27,8 @@ namespace lift {
 // 主程序的 UTF-8 argv（argv[0] = 可执行文件名；Windows 上按 GetCommandLineW 重建）。
 std::vector<std::string> argvUtf8(int argc, char** argv);
 
-// Windows：若进程挂着控制台，把控制台输出码页切到 UTF-8；正常退出时恢复。不是控制台 ⇒ no-op。
+// Windows：**stdout 是 console** 时把控制台输出码页切到 UTF-8；正常退出时恢复。
+// stdout 是文件 / 管道（或根本没有 console）⇒ no-op（⛔ 不改共享 console 的码页）。
 void initConsoleUtf8();
 
 // 立即恢复控制台码页（给 `_Exit` / `abort` 这些**不跑析构**的 fatal 路径用；可重复调用）。

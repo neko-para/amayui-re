@@ -258,47 +258,47 @@ struct Options {
 
 void usage() {
     std::printf(
-        "emulator-lift-gen —— Shape A / T1a：入口 EA 集合 + PE 字节 → LLVM IR（`.ll`）\n"
-        "  --exe <PE>            字节真源（映射进 guest 后交给解码器）\n"
-        "  --roots <file>        一行一个 hex EA（`#` 起注释）\n"
-        "  --out <file.ll>       产物（建议 out/aot/lift_aot.ll；⛔ 不入库）\n"
-        "  --check <file>        只校验 closure.txt（格式/升序/可解码/在 .text/entry 必在）⇒ 一行汇总；⛔ 不发射\n"
-        "  --closure-gate        生成这一趟**同时**做 --check 的五条硬闸（同一行汇总；CMake 的 AOT 生成命令带它）\n"
-        "  --split N             把输出分成 N 份 `.ll`（缺省 1 = 今天的单份路径；分桶 = 根 EA 升序贪心）\n"
-        "  --out-dir <dir>       --split N>1 时的落点目录（分片名 `lift_aot.partNN.ll` + 清单 `lift_aot.split.txt`）\n"
-        "  --split-prefix <s>    分片文件名前缀（缺省 lift_aot ⇒ `<dir>/lift_aot.partNN.ll`）\n"
-        "  --verify-split <dir>  独立模式：只读 <dir> 的产物验分片清单自洽（CTest\n"
-        "                        `lift-aot-split-manifest` 的被测入口；没有生成物 ⇒ skip、exit 0）\n"
-        "  --ir-target-cpu <s>   写进 `.ll` 的 `\"target-cpu\"` 函数属性（configure 期的 clang 探针取值；\n"
-        "                        缺省空 ⇒ 不发属性、产物与不带本参数时逐字节相同）\n"
-        "  --ir-target-features <s>  同上，`\"target-features\"`（原样字符串，不转义）\n"
-        "  --verify-ir-target <dir>  独立模式：验每个 `define i32 @lift_cc_*` 都挂着与运行库一致的\n"
-        "                        target 属性组（CTest `lift-aot-ir-target-attrs` 的被测入口；\n"
-        "                        需要同时给 --split N 与 --ir-target-cpu/--ir-target-features；\n"
-        "                        没有生成物 ⇒ skip、exit 0）\n"
-        "  --pin <file.h>        额外写 exe 的 sha256 + entry（AOT 启动核对，D1；⛔ 不入库）\n"
-        "  --table <file.inc>    额外写派发表 `EA → lift_cc_<根>`（AOT 的 EA→LiftFn 查找面；⛔ 不入库）\n"
-        "  --no-close-calls      关掉静态调用闭包（D14 默认开；对照档 = 只按 --roots 展开）\n"
-        "  --no-close-stores     关掉第二类软根（D15：写内存 mov 的 imm32 代码指针；默认开）\n"
-        "  --close-data          打开第三类软根（D17：非可执行节里静态初始化的代码指针 = `.data` 指针表）\n"
-        "  --no-close-data       关掉第三类软根（缺省 %s：见 kCloseDataByDefault 与 .tmp/aot/g3/readings.md）\n"
-        "  --close-jmptab        打开第五类软根（D26：可执行节跳表 dword → **尚未解码**的代码；会新增块）\n"
-        "  --no-close-jmptab     关掉第五类软根（缺省 %s：见 kCloseJmptabByDefault 与 .tmp/aot/c2/readings.md）\n"
-        "  --no-jmptab-exclude   关掉 P1（S2）：不把识别出的跳表区间从解码里排除（对照档；缺省开）\n"
-        "  --no-close-jmptab-items  关掉 P2（S3）：表项不在建块之前立成 leader（对照档；缺省开）\n"
-        "  --jmptab-audit        只读审计（P0）：只吃 --exe + --roots，跑到 dispatch 定型后提前返回；\n"
-        "                        ⛔ 不发射 IR / 不写 .ll / 派发表；退出码 = P-1..P-4 全过 0 / 任一不过 1\n"
-        "  --jmptab-max-passes N 两趟重启的轮数上限（缺省 4；不收敛 ⇒ exit 1，⛔ 不静默截断）\n"
-        "  --dump-blocks <file>  只读覆盖率读数：最终块的 `start EA / 字节长度 / 指令数`（升序文本；⛔ 不改 .ll / 派发表）\n"
-        "  --no-s7               关掉 S7 的一对一结构翻译（默认开）：回到 D55 之前的形状\n"
-        "                        （每个 call/ret 都回 trampoline；协议形状夹具用它）\n"
-        "  --max-components N    分量数上限（超过 ⇒ 退出码 2；缺省不限）\n"
-        "  --verbose             逐分量读数\n"
+        "emulator-lift-gen - Shape A / T1a: entry EA set + PE bytes -> LLVM IR (`.ll`)\n"
+        "  --exe <PE>            byte truth source (mapped into guest, then handed to the decoder)\n"
+        "  --roots <file>        one hex EA per line (`#` starts a comment)\n"
+        "  --out <file.ll>       output (recommended: out/aot/lift_aot.ll; NOT tracked in git)\n"
+        "  --check <file>        validate closure.txt only (format/ascending/decodable/in .text/entry present) => one summary line; does not emit\n"
+        "  --closure-gate        run the five --check hard gates on the generation pass (same summary line; the CMake AOT generation command passes it)\n"
+        "  --split N             split the output into N `.ll` files (default 1 = the single-file path; bucketing = greedy over ascending root EAs)\n"
+        "  --out-dir <dir>       output directory when --split N>1 (parts `lift_aot.partNN.ll` + manifest `lift_aot.split.txt`)\n"
+        "  --split-prefix <s>    part filename prefix (default lift_aot => `<dir>/lift_aot.partNN.ll`)\n"
+        "  --verify-split <dir>  standalone mode: read <dir> artifacts and verify the split manifest (CTest\n"
+        "                        `lift-aot-split-manifest` entry point; no artifacts => skip, exit 0)\n"
+        "  --ir-target-cpu <s>   write the `\"target-cpu\"` function attribute into `.ll` (configure-time clang probe value;\n"
+        "                        default empty => no attribute, byte-identical output to omitting this flag)\n"
+        "  --ir-target-features <s>  same, `\"target-features\"` (verbatim string, not escaped)\n"
+        "  --verify-ir-target <dir>  standalone mode: verify every `define i32 @lift_cc_*` carries the same\n"
+        "                        target attribute group as the runtime TU (CTest `lift-aot-ir-target-attrs` entry point;\n"
+        "                        requires --split N together with --ir-target-cpu/--ir-target-features;\n"
+        "                        no artifacts => skip, exit 0)\n"
+        "  --pin <file.h>        also write the exe sha256 + entry (AOT startup check, D1; NOT tracked in git)\n"
+        "  --table <file.inc>    also write the dispatch table `EA -> lift_cc_<root>` (the AOT EA->LiftFn lookup; NOT tracked in git)\n"
+        "  --no-close-calls      disable the static call closure (D14 defaults on; control mode = expand --roots only)\n"
+        "  --no-close-stores     disable soft roots of kind 2 (D15: imm32 code pointers stored into memory; defaults on)\n"
+        "  --close-data          enable soft roots of kind 3 (D17: statically initialised code pointers in non-executable sections = `.data` pointer tables)\n"
+        "  --no-close-data       disable soft roots of kind 3 (default %s: see kCloseDataByDefault and .tmp/aot/g3/readings.md)\n"
+        "  --close-jmptab        enable soft roots of kind 5 (D26: executable-section jump-table dword -> **not yet decoded** code; may add blocks)\n"
+        "  --no-close-jmptab     disable soft roots of kind 5 (default %s: see kCloseJmptabByDefault and .tmp/aot/c2/readings.md)\n"
+        "  --no-jmptab-exclude   disable P1 (S2): do not exclude recognised jump-table ranges from decoding (control mode; defaults on)\n"
+        "  --no-close-jmptab-items  disable P2 (S3): table items are not made leaders before block building (control mode; defaults on)\n"
+        "  --jmptab-audit        read-only audit (P0): takes only --exe + --roots, runs until dispatch is final and returns early;\n"
+        "                        does not emit IR / write .ll / dispatch table; exit code = 0 if P-1..P-4 all pass, else 1\n"
+        "  --jmptab-max-passes N max restarts of the two-pass loop (default 4; no convergence => exit 1, never silently truncate)\n"
+        "  --dump-blocks <file>  read-only coverage readout: `start EA / byte length / instruction count` per final block (ascending text; does not change .ll / dispatch table)\n"
+        "  --no-s7               disable S7 one-to-one structural translation (default on): back to the shape before D55\n"
+        "                        (every call/ret goes back through the trampoline; protocol-shape fixtures use it)\n"
+        "  --max-components N    component count limit (exceeding => exit code 2; default unlimited)\n"
+        "  --verbose             per-component readout\n"
         "  --help\n"
-        "退出码：0 成功 · 2 参数/输入错 · 3 仍有 llvm.trap（= 生成器内部不一致：控制转移掉进默认路径）\n"
-        "        · 4 根（--roots 里的 EA）解码失败 / 越界（派生 leader 解不出只丢弃 + 计数，不影响退出码）\n"
-        "        · 1 内部不一致\n",
-        kCloseDataByDefault ? "开" : "关", kCloseJmptabByDefault ? "开" : "关");
+        "exit codes: 0 success - 2 argument/input error - 3 llvm.trap remains (= generator internal inconsistency: control fell into the default path)\n"
+        "        - 4 root (EA from --roots) failed to decode / out of range (a derived leader that fails to decode is only dropped + counted, no exit-code effect)\n"
+        "        - 1 internal inconsistency\n",
+        kCloseDataByDefault ? "on" : "off", kCloseJmptabByDefault ? "on" : "off");
 }
 
 // =====================================================================================
@@ -768,7 +768,7 @@ StrategyA strategyA(const InsnCfg& cfg, const std::map<std::uint32_t, lift::Insn
     StrategyA out;
     const auto site_it = cfg.block_of.find(site);
     if (site_it == cfg.block_of.end()) {
-        out.why = "站点不在任何基本块里";
+        out.why = "site is not in any basic block";
         return out;
     }
     std::set<std::size_t> visited;
@@ -784,7 +784,7 @@ StrategyA strategyA(const InsnCfg& cfg, const std::map<std::uint32_t, lift::Insn
                 break;
             }
             if (writesGpr32(in, idx)) {
-                out.why = std::string("索引寄存器在 cmp 之前被重定义（") + lift::opName(in.op) + "）";
+                out.why = std::string("index register is redefined before the cmp (") + lift::opName(in.op) + ")";
                 out.hops = hop;
                 return out;
             }
@@ -805,16 +805,16 @@ StrategyA strategyA(const InsnCfg& cfg, const std::map<std::uint32_t, lift::Insn
             out.cmp_ea = cmp.ea;
             out.hops = hop;
             if (cf == nullptr) {
-                out.why = "cmp 之后同块内没有控制流";
+                out.why = "no control flow in the same block after the cmp";
                 return out;
             }
             out.ja_ea = cf->ea;
             if (cf->op != lift::Op::Jcc || cf->cc != lift::Cond::A) {
-                out.why = std::string("cmp 之后的第一条控制流不是 ja（是 ") + lift::opName(cf->op) + "）";
+                out.why = std::string("first control flow after the cmp is not ja (it is ") + lift::opName(cf->op) + ")";
                 return out;
             }
             if (imm >= 0x100000u) {
-                out.why = "cmp 的立即数大得不像项数";
+                out.why = "cmp immediate is too large to be an item count";
                 return out;
             }
             out.ja_target = lift::aot::genBranchTarget(*cf);
@@ -844,19 +844,19 @@ StrategyA strategyA(const InsnCfg& cfg, const std::map<std::uint32_t, lift::Insn
         }
         if (pick == pr.size() && !pr.empty()) pick = 0;
         if (pick == pr.size()) {
-            out.why = "回溯 " + std::to_string(hop) + " 个块仍没有定义索引寄存器的 cmp";
+            out.why = "went back " + std::to_string(hop) + " block(s) and still found no cmp defining the index register";
             out.hops = hop;
             return out;
         }
         const std::size_t next = pr[pick].first;
         if (!visited.insert(next).second) {
-            out.why = "前驱链成环";
+            out.why = "predecessor chain is cyclic";
             out.hops = hop;
             return out;
         }
         cur = next;
     }
-    out.why = "回溯 3 个块仍没有定义索引寄存器的 cmp";
+    out.why = "went back 3 blocks and still found no cmp defining the index register";
     out.hops = 3;
     return out;
 }
@@ -991,26 +991,26 @@ JmpTabRecognition recognizeJumpTables(const std::map<std::uint32_t, lift::Insn>&
             r.src_b = tab.src_b;
             if (tab.covers_protected) {
                 ++out.rejected_covers_protected;
-                r.why = "⑤ 区间覆盖了根 / D14 call 目标软根（";
+                r.why = "(5) range covers a root / a D14 call-target soft root (";
                 for (std::size_t i = 0; i < tab.protected_hits.size() && i < 3; ++i) {
                     if (i != 0) r.why += ",";
                     r.why += hexEa(tab.protected_hits[i]);
                 }
-                if (tab.protected_hits.size() > 3) r.why += ",…";
-                r.why += "）";
+                if (tab.protected_hits.size() > 3) r.why += ",...";
+                r.why += ")";
             } else if (tab.n == 0) {
-                r.why = "策略 A 失败且策略 B 读到 0 项（不是表）";
+                r.why = "strategy A failed and strategy B read 0 items (not a table)";
             } else if (!tab.v1) {
-                r.why = "判据 ①：区间越出可执行节";
+                r.why = "criterion (1): range extends outside the executable section";
             } else if (!tab.v2) {
-                r.why = "判据 ②：表项不在可执行节内 / 解不出（in_exec=" +
+                r.why = "criterion (2): table item is outside the executable section / does not decode (in_exec=" +
                         std::to_string(tab.items_in_exec) + " decode=" +
                         std::to_string(tab.items_decode) + " bad=" +
-                        std::to_string(tab.items_bad) + " n=" + std::to_string(tab.n) + "）";
+                        std::to_string(tab.items_bad) + " n=" + std::to_string(tab.n) + ")";
             } else if (!tab.v3) {
-                r.why = "判据 ③′：ja 目标不在可执行节 / 解不出 / 落在表自身区间内";
+                r.why = "criterion (3-prime): ja target is outside the executable section / does not decode / lies inside the table's own range";
             } else {
-                r.why = "判据 ④：表项自指";
+                r.why = "criterion (4): table item is self-referential";
             }
             out.rejects.push_back(std::move(r));
         }
@@ -1126,7 +1126,7 @@ public:
                     }
                     // 派生 leader 解不出 ⇒ 丢弃这一段（保留它已经解出来的部分：语义上无害）。
                     if (!drops->add_undecodable(leader)) {
-                        if (err != nullptr) *err = "派生 leader " + std::to_string(leader) + " 反复解码失败";
+                        if (err != nullptr) *err = "derived leader " + std::to_string(leader) + " repeatedly failed to decode";
                         if (err_ea != nullptr) *err_ea = bad_ea;
                         return false;
                     }
@@ -1203,7 +1203,7 @@ public:
                 }
             }
             if (!reached_end) {
-                if (err != nullptr) *err = "直线扫描超过 1e6 条上限（可能落在数据里）";
+                if (err != nullptr) *err = "linear scan exceeded the 1e6 instruction limit (probably fell into data)";
                 if (err_ea != nullptr) *err_ea = leader;
                 return false;
             }
@@ -1650,7 +1650,7 @@ bool buildBlocks(const std::map<std::uint32_t, lift::Insn>& insns,
             const auto it = insns.find(cur);
             if (it == insns.end()) {
                 if (err != nullptr)
-                    *err = "leader 的指令流里有一段没解出来（内部不一致）@ " + std::to_string(cur);
+                    *err = "a stretch of the leader instruction stream did not decode (internal inconsistency) @ " + std::to_string(cur);
                 if (err_leader != nullptr) *err_leader = leader;
                 return false;
             }
@@ -1668,7 +1668,7 @@ bool buildBlocks(const std::map<std::uint32_t, lift::Insn>& insns,
             cur = next;
         }
         if (!closed) {
-            if (err != nullptr) *err = "块扫描超过 1e6 条上限";
+            if (err != nullptr) *err = "block scan exceeded the 1e6 instruction limit";
             if (err_leader != nullptr) *err_leader = leader;
             return false;
         }
@@ -1704,7 +1704,7 @@ bool buildBlocksDropping(Explorer* explorer, std::set<std::uint32_t>* leaders,
             SoftStats* const st = accounts.of(kind);
             if (st != nullptr) st->undecodable.insert(bad);
         } else if (!drops->add_undecodable(bad)) {
-            if (err != nullptr) *err = why + "（同一个派生 leader 反复失败）";
+            if (err != nullptr) *err = why + " (the same derived leader failed repeatedly)";
             if (err_ea != nullptr) *err_ea = bad;
             return false;
         }
@@ -1817,7 +1817,7 @@ bool buildUnits(const std::set<std::uint32_t>& roots, Explorer* explorer, const 
             if (!rebuildFromExplorerLeaders(&leaders)) return false;
         }
         if (explorer->jumpTabRounds() >= kJumpTabMaxRounds) {
-            if (err != nullptr) *err = "第五类软根（D26）的不动点迭代超过轮数上限";
+            if (err != nullptr) *err = "fixed-point iteration of kind-5 soft roots (D26) exceeded the round limit";
             if (err_ea != nullptr) *err_ea = 0;
             return false;
         }
@@ -1839,7 +1839,7 @@ std::string trim(const std::string& s) {
 bool readRootsFile(const std::string& path, std::set<std::uint32_t>* roots, std::string* err) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
-        *err = "打不开 `" + path + "`";
+        *err = "cannot open `" + path + "`";
         return false;
     }
     std::string line;
@@ -1859,7 +1859,7 @@ bool readRootsFile(const std::string& path, std::set<std::uint32_t>* roots, std:
             if (std::isxdigit(static_cast<unsigned char>(ch)) == 0) ok = false;
         }
         if (!ok) {
-            *err = "第 " + std::to_string(lineno) + " 行不是 8 位以内的十六进制 EA：`" + line + "`";
+            *err = "line " + std::to_string(lineno) + " is not a hex EA of at most 8 digits: `" + line + "`";
             return false;
         }
         roots->insert(static_cast<std::uint32_t>(std::strtoul(token.c_str(), nullptr, 16)));
@@ -2186,14 +2186,14 @@ bool partitionComponents(const std::set<std::uint32_t>& roots, Explorer* explore
                     if (promoted.insert(ea).second) {
                         ++n_jump_promoted;
                         std::fprintf(stderr,
-                                     "lift-gen: 跳表目标 %08X 是块首但没有任何分量声明"
-                                     "⇒ 提升为新入口 EA 并重跑\n",
+                                     "lift-gen: jump-table target %08X is a block start but no component claims it"
+                                     " => promoting to a new entry EA and rerunning\n",
                                      ea);
                     }
                 }
                 if (n_jump_promoted == 0) {
                     // 已经在 promoted 里却仍没有分量 claim ⇒ 与"块冲突提升不收敛"同一类内部不一致。
-                    if (err != nullptr) *err = "跳表目标的孤儿提升不收敛";
+                    if (err != nullptr) *err = "orphan promotion of a jump-table target does not converge";
                     return false;
                 }
                 ++promo_events;
@@ -2212,15 +2212,15 @@ bool partitionComponents(const std::set<std::uint32_t>& roots, Explorer* explore
                 }
                 if (promoted.insert(ea).second) {
                     std::fprintf(stderr,
-                                 "lift-gen: 入口 %08X 没有任何分量声明（只在被拒绝的软根段之后可达）"
-                                 "⇒ 提升为新入口 EA 并重跑\n",
+                                 "lift-gen: entry %08X has no component claim (reachable only after a rejected soft-root segment)"
+                                 " => promoting to a new entry EA and rerunning\n",
                                  ea);
                 }
             }
             if (n_unbuildable != 0) {
                 std::fprintf(stderr,
-                             "lift-gen: 入口里有 %zu 个**没有块**（落在已发射块的字节区间内 / 解不出）"
-                             "⇒ 不提升、退出入口集（指向它们的边发 ret i32）\n",
+                             "lift-gen: %zu entries have **no block** (inside an already-emitted block's byte range / undecodable)"
+                             " => not promoting, dropping them from the entry set (edges to them emit ret i32)\n",
                              n_unbuildable);
             }
             ++promo_events;
@@ -2235,17 +2235,17 @@ bool partitionComponents(const std::set<std::uint32_t>& roots, Explorer* explore
             drops->dropped.insert(conflict);
             explorer->dropEntry(conflict);
             std::fprintf(stderr,
-                         "lift-gen: 块冲突 EA %08X 没有块（落在已发射块字节区间内 / 解不出）"
-                         "⇒ 退出入口集（指向它的边发 ret i32）\n",
+                         "lift-gen: conflicting block EA %08X has no block (inside an already-emitted block's byte range / undecodable)"
+                         " => dropping it from the entry set (edges to it emit ret i32)\n",
                          conflict);
             ++promo_events;
             components.clear();
             continue;
         }
-        std::fprintf(stderr, "lift-gen: 块 %08X 被两个入口函数同时声明 ⇒ 提升为新入口 EA 并重跑\n",
+        std::fprintf(stderr, "lift-gen: block %08X is claimed by two entry functions => promoting to a new entry EA and rerunning\n",
                      conflict);
         if (!promoted.insert(conflict).second) {
-            if (err != nullptr) *err = "分区提升不收敛（EA " + hexEa(conflict) + " 重复冲突）";
+            if (err != nullptr) *err = "partition promotion does not converge (EA " + hexEa(conflict) + " conflicts repeatedly)";
             return false;
         }
         ++promo_events;
@@ -2435,8 +2435,8 @@ bool buildAll(const std::set<std::uint32_t>& roots, const lift::PeImage& image,
                         }
                     }
                     if (err != nullptr)
-                        *err = "跳表识别面非单调（tables_pass ⊄ tables_{pass-1}）：新增/变长 " + bad +
-                               " ⇒ 识别器或表区间错了";
+                        *err = "jump-table recognition surface is not monotone (tables_pass is not a subset of tables_{pass-1}): new/lengthened " + bad +
+                               " => the recogniser or table ranges are wrong";
                     *err_code = 1;
                     if (err_ea != nullptr && !keys.empty()) *err_ea = keys.begin()->first;
                     return false;
@@ -2448,8 +2448,8 @@ bool buildAll(const std::set<std::uint32_t>& roots, const lift::PeImage& image,
             if (!converged) {
                 if (pass >= opt.jmptab_max_passes) {
                     if (err != nullptr)
-                        *err = "跳表识别的两趟重启在 " + std::to_string(opt.jmptab_max_passes) +
-                               " 趟内没有收敛 ⇒ 生成器内部不一致";
+                        *err = "the two-pass jump-table recognition did not converge within " + std::to_string(opt.jmptab_max_passes) +
+                               " passes => generator internal inconsistency";
                     *err_code = 1;
                     return false;
                 }
@@ -2582,7 +2582,7 @@ int auditJumpTables(const BuildRun& run, const lift::PeImage& image,
                     boundaryName(bit == run.boundaries.end() ? LeaderBoundary::None : bit->second));
         // ---- 不过的性质逐条打到 stderr（必须能只靠日志定位到 EA）----
         if (!p1) {
-            std::fprintf(stderr, "[jmptab/P-1] ea=0x%08X range=[0x%08X,0x%08X) 越出可执行节\n", t.ea,
+            std::fprintf(stderr, "[jmptab/P-1] ea=0x%08X range=[0x%08X,0x%08X) extends outside the executable section\n", t.ea,
                          t.ea, t.range_end());
         }
         if (!p2) {
@@ -2590,7 +2590,7 @@ int auditJumpTables(const BuildRun& run, const lift::PeImage& image,
                  it != block_starts.end() && *it < t.range_end(); ++it) {
                 const auto bnd = run.boundaries.find(*it);
                 std::fprintf(stderr,
-                             "[jmptab/P-2] ea=0x%08X 表区间 [0x%08X,0x%08X) 内有块首 0x%08X "
+                             "[jmptab/P-2] ea=0x%08X table range [0x%08X,0x%08X) contains block start 0x%08X "
                              "boundary=%s\n",
                              t.ea, t.ea, t.range_end(), *it,
                              boundaryName(bnd == run.boundaries.end() ? LeaderBoundary::None
@@ -2598,10 +2598,10 @@ int auditJumpTables(const BuildRun& run, const lift::PeImage& image,
             }
         }
         if (!p3) {
-            std::fprintf(stderr, "[jmptab/P-3] ea=0x%08X 有 %zu 个表项在可执行节内且能解码却不可派发：",
+            std::fprintf(stderr, "[jmptab/P-3] ea=0x%08X has %zu table items inside the executable section that decode but cannot be dispatched:",
                          t.ea, missing);
             for (const std::uint32_t v : missing_sample) std::fprintf(stderr, " 0x%08X", v);
-            std::fprintf(stderr, "%s\n", missing > missing_sample.size() ? " …" : "");
+            std::fprintf(stderr, "%s\n", missing > missing_sample.size() ? " ..." : "");
         }
         if (!p4) {
             std::fprintf(stderr, "[jmptab/P-4] ea=0x%08X items_selfref=%u in_section=%d\n", t.ea,
@@ -2633,13 +2633,13 @@ int auditJumpTables(const BuildRun& run, const lift::PeImage& image,
         run.jmptab_on ? 1 : 0, roots.size());
     // ---- P1 / P2 的读数（与"改前/改后"的对照直接相关）----
     std::printf(
-        "[jmptab/exclude] leaders_in_range=%llu（被区间挡下的 leader）· root_hits=%llu（应为 0）· "
-        "call_ret_in_range=%llu（noreturn call 紧邻表首的形状）\n",
+        "[jmptab/exclude] leaders_in_range=%llu (leaders blocked by a range) - root_hits=%llu (should be 0) - "
+        "call_ret_in_range=%llu (the shape where a noreturn call is adjacent to the table start)\n",
         static_cast<unsigned long long>(run.data_range_leaders),
         static_cast<unsigned long long>(run.data_range_root_hits),
         static_cast<unsigned long long>(run.call_ret_in_data_range));
     std::printf(
-        "[jmptab/items] seeds=%llu added=%zu already=%llu shim=%llu outside=%llu in_range=%llu · "
+        "[jmptab/items] seeds=%llu added=%zu already=%llu shim=%llu outside=%llu in_range=%llu - "
         "undecodable=%zu overlap=%zu\n",
         static_cast<unsigned long long>(run.item_seeds), run.soft_item.added.size(),
         static_cast<unsigned long long>(run.item_already),
@@ -2650,8 +2650,8 @@ int auditJumpTables(const BuildRun& run, const lift::PeImage& image,
     // ---- 守卫判据（P-1..P-4）----
     const bool ok = (p1_bad == 0 && p2_bad == 0 && p3_bad == 0 && p4_bad == 0);
     std::printf(
-        "[jmptab/guard] P-1 区间在可执行节内=%llu 红 · P-2 区间内无块首=%llu 红 · "
-        "P-3 表项可派发=%llu 红 · P-4 识别自洽=%llu 红 => %s\n",
+        "[jmptab/guard] P-1 range inside executable section=%llu bad - P-2 no block start inside range=%llu bad - "
+        "P-3 table items dispatchable=%llu bad - P-4 recognition self-consistent=%llu bad => %s\n",
         static_cast<unsigned long long>(p1_bad), static_cast<unsigned long long>(p2_bad),
         static_cast<unsigned long long>(p3_bad), static_cast<unsigned long long>(p4_bad),
         ok ? "PASS" : "FAIL");
@@ -2688,7 +2688,7 @@ struct ClosureGate {
 bool parseClosureFile(const std::string& path, ClosureGate* gate) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
-        std::fprintf(stderr, "emulator-lift-gen: --check 打不开 `%s`\n", path.c_str());
+        std::fprintf(stderr, "emulator-lift-gen: --check cannot open `%s`\n", path.c_str());
         return false;
     }
     std::string line;
@@ -2700,21 +2700,21 @@ bool parseClosureFile(const std::string& path, ClosureGate* gate) {
         std::uint32_t ea = 0;
         if (!lift::aot::strictParseEa(token, &ea)) {
             ++gate->format_bad;
-            gate->violations.push_back("第 " + std::to_string(lineno) + " 行不是 `0x` + 8 位十六进制：`" +
+            gate->violations.push_back("line " + std::to_string(lineno) + " is not `0x` + 8 hex digits: `" +
                                        token + "`");
             continue;
         }
         if (!gate->eas.empty() && ea <= gate->eas.back()) {
             ++gate->order_bad;
             char buf[128];
-            std::snprintf(buf, sizeof(buf), "第 %d 行不是严格升序（%08X 在 %08X 之后 / 重复）", lineno, ea,
+            std::snprintf(buf, sizeof(buf), "line %d is not strictly ascending (%08X comes after %08X / duplicate)", lineno, ea,
                           gate->eas.back());
             gate->violations.push_back(buf);
         }
         gate->eas.push_back(ea);
     }
     if (gate->eas.empty()) {
-        std::fprintf(stderr, "emulator-lift-gen: --check `%s` 里一个 EA 都没有\n", path.c_str());
+        std::fprintf(stderr, "emulator-lift-gen: --check `%s` contains no EA\n", path.c_str());
         return false;
     }
     return true;
@@ -2728,7 +2728,7 @@ void checkClosureRoots(const lift::PeImage& image, const std::vector<lift::aot::
         if (lift::aot::execRangeOf(ranges, ea) == nullptr) {
             ++gate->out_of_text;
             char buf[128];
-            std::snprintf(buf, sizeof(buf), "EA %08X 不在任何可执行节（越界根）", ea);
+            std::snprintf(buf, sizeof(buf), "EA %08X is not in any executable section (out-of-range root)", ea);
             gate->violations.push_back(buf);
             continue;
         }
@@ -2737,13 +2737,13 @@ void checkClosureRoots(const lift::PeImage& image, const std::vector<lift::aot::
         if (!decoder.decode(mem, ea, &in, &why)) {
             ++gate->undecodable;
             char buf[160];
-            std::snprintf(buf, sizeof(buf), "EA %08X 不可解码：%s", ea, why.c_str());
+            std::snprintf(buf, sizeof(buf), "EA %08X does not decode: %s", ea, why.c_str());
             gate->violations.push_back(buf);
         }
     }
     if (roots.count(image.entry_ea) == 0) {
         char buf[128];
-        std::snprintf(buf, sizeof(buf), "PE entry %08X 不在闭包里（起跑线口径）", image.entry_ea);
+        std::snprintf(buf, sizeof(buf), "PE entry %08X is not in the closure (starting-line invariant)", image.entry_ea);
         gate->violations.push_back(buf);
     }
 }
@@ -2774,24 +2774,24 @@ int checkClosure(const std::string& exe, const std::string& path, bool close_cal
     // ---- PE 字节（与主路径同一套：mem.reserve → loadPeFile → mapPeImage → Decoder）----
     lift::GuestMemory mem;
     if (!mem.reserve()) {
-        std::fprintf(stderr, "emulator-lift-gen: 预留 guest 地址空间失败：%s\n", mem.lastError());
+        std::fprintf(stderr, "emulator-lift-gen: failed to reserve guest address space: %s\n", mem.lastError());
         return 2;
     }
     lift::PeImage image;
     {
         std::string err;
         if (!lift::loadPeFile(exe, &image, &err)) {
-            std::fprintf(stderr, "emulator-lift-gen: 载入 PE 失败（%s）：%s\n", exe.c_str(), err.c_str());
+            std::fprintf(stderr, "emulator-lift-gen: failed to load PE (%s): %s\n", exe.c_str(), err.c_str());
             return 2;
         }
         if (!lift::mapPeImage(mem, image, &err)) {
-            std::fprintf(stderr, "emulator-lift-gen: 映射 PE 失败（%s）：%s\n", exe.c_str(), err.c_str());
+            std::fprintf(stderr, "emulator-lift-gen: failed to map PE (%s): %s\n", exe.c_str(), err.c_str());
             return 2;
         }
     }
     lift::Decoder decoder;
     if (!decoder.ok()) {
-        std::fprintf(stderr, "emulator-lift-gen: 解码器初始化失败：%s\n", decoder.lastError());
+        std::fprintf(stderr, "emulator-lift-gen: decoder initialisation failed: %s\n", decoder.lastError());
         return 4;
     }
     const std::vector<lift::aot::ExecRange> ranges = lift::aot::execRanges(image);
@@ -2838,8 +2838,8 @@ int checkClosure(const std::string& exe, const std::string& path, bool close_cal
             expand_ok = true;
         } else {
             char buf[192];
-            std::snprintf(buf, sizeof(buf), "静态展开%s @ %08X：%s",
-                          err_code == 4 ? "解码失败" : "收敛/分区失败", err_ea, err.c_str());
+            std::snprintf(buf, sizeof(buf), "static expansion %s @ %08X: %s",
+                          err_code == 4 ? "decoding failed" : "convergence/partition failed", err_ea, err.c_str());
             gate.violations.push_back(buf);
         }
     }
@@ -2882,15 +2882,15 @@ bool writeAotPin(const std::string& path, const lift::PeImage& image, std::size_
                  std::size_t entries, std::size_t functions, std::string* err) {
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file) {
-        if (err) *err = "写不了 `" + path + "`";
+        if (err) *err = "cannot write `" + path + "`";
         return false;
     }
-    file << "// 生成物（emulator-lift-gen --pin）—— ⛔ 不手改、⛔ 不入库。\n";
+    file << "// Generated by emulator-lift-gen --pin - do not edit by hand, not tracked in git.\n";
     file << "//\n";
-    file << "// ★ 这是 D1 的判据载体：lifted 代码在**构建期**把 EA / 块边界 / 操作数语义焊死在这一份 PE\n";
-    file << "//   上；换一份 exe 不会\"跑另一个游戏\"，只会静默跑错 ⇒ AOT 启动时先核对 sha256 + entry，\n";
-    file << "//   不一致就是 exit 2（⛔ 不降级、不警告后继续）。\n";
-    file << "// ★ 只写机械事实：没有时间戳、没有路径、没有主机名 ⇒ 同一份 PE 两次生成同字节。\n";
+    file << "// This header is the D1 pin: lifted code bakes EA / block boundaries / operand semantics to this PE at **build time**;\n";
+    file << "//   a different exe does not \"run another game\", it silently runs wrong => the AOT startup checks sha256 + entry,\n";
+    file << "//   and a mismatch is exit 2 (no downgrade, no warning-and-continue).\n";
+    file << "// Only mechanical facts: no timestamp, no path, no hostname => the same PE generates the same bytes twice.\n";
     file << "#pragma once\n\n";
     file << "#define LIFT_AOT_GENERATED 1\n";
     file << "#define LIFT_AOT_PIN_SHA256 \"" << image.sha256 << "\"\n";
@@ -2900,7 +2900,7 @@ bool writeAotPin(const std::string& path, const lift::PeImage& image, std::size_
     file << "#define LIFT_AOT_PIN_FUNCTIONS " << functions << "u\n";
     file.close();
     if (!file) {
-        if (err) *err = "写 `" + path + "` 失败";
+        if (err) *err = "write to `" + path + "` failed";
         return false;
     }
     return true;
@@ -2919,7 +2919,7 @@ bool writeAotTable(const std::string& path, const std::vector<GenComponent>& com
             if (!ins.second && ins.first->second != comp.root) {
                 if (err) {
                     char buf[160];
-                    std::snprintf(buf, sizeof(buf), "入口 EA %08X 同时属于两个分量（%08X / %08X）",
+                    std::snprintf(buf, sizeof(buf), "entry EA %08X belongs to two components at once (%08X / %08X)",
                                   ea, ins.first->second, comp.root);
                     *err = buf;
                 }
@@ -2929,13 +2929,13 @@ bool writeAotTable(const std::string& path, const std::vector<GenComponent>& com
     }
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file) {
-        if (err) *err = "写不了 `" + path + "`";
+        if (err) *err = "cannot write `" + path + "`";
         return false;
     }
-    file << "// 生成物（emulator-lift-gen --table）—— ⛔ 不手改、⛔ 不入库。\n";
-    file << "// 一行一个**入口 EA**：`LIFT_AOT_ENTRY(0x<EA>u, lift_cc_<该 EA 所在分量的根>)`。\n";
-    file << "// ★ 同一个函数会重复出现（一个分量有多个 resume EA）—— 那不是重复，是 switch 的多个 label。\n";
-    file << "// ★ 只许有真实存在的入口：每一行都在对应函数体的 `switch i32 %ea` 里有 label。\n";
+    file << "// Generated by emulator-lift-gen --table - do not edit by hand, not tracked in git.\n";
+    file << "// One line per **entry EA**: `LIFT_AOT_ENTRY(0x<EA>u, lift_cc_<root of the component containing that EA>)`.\n";
+    file << "// The same function appears more than once (a component has several resume EAs) - that is not duplication, it is several switch labels.\n";
+    file << "// Only real entries are allowed: every line has a label in the `switch i32 %ea` of the corresponding function body.\n";
     for (const auto& kv : ea_to_root) {
         // ★ 函数名走 `genFunctionName`（与 `.ll` 的 `define i32 @…` 是同一份拼法）。
         file << "LIFT_AOT_ENTRY(0x" << hexEa(kv.first) << "u, " << lift::aot::genFunctionName(kv.second)
@@ -2943,7 +2943,7 @@ bool writeAotTable(const std::string& path, const std::vector<GenComponent>& com
     }
     file.close();
     if (!file) {
-        if (err) *err = "写 `" + path + "` 失败";
+        if (err) *err = "write to `" + path + "` failed";
         return false;
     }
     return true;
@@ -2983,11 +2983,11 @@ bool writeBlockDump(const std::string& path, const std::vector<GenComponent>& co
     std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.ea < b.ea; });
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file) {
-        if (err != nullptr) *err = "写不了 `" + path + "`";
+        if (err != nullptr) *err = "cannot write `" + path + "`";
         return false;
     }
-    file << "# emulator-lift-gen --dump-blocks —— 只读覆盖率读数（⛔ 不参与 .ll / 派发表）\n";
-    file << "# 格式：`0x<8 位大写 start EA> <字节长度> <指令数>`，按 start EA 升序；每行 = 一个已发射块\n";
+    file << "# emulator-lift-gen --dump-blocks - read-only coverage readout (not part of .ll / dispatch table)\n";
+    file << "# Format: `0x<8 uppercase hex start EA> <byte length> <instruction count>`, ascending by start EA; one line per emitted block\n";
     file << "# blocks=" << rows.size() << "\n";
     std::uint64_t bytes = 0;
     std::uint64_t insns = 0;
@@ -2998,7 +2998,7 @@ bool writeBlockDump(const std::string& path, const std::vector<GenComponent>& co
     }
     file.close();
     if (!file) {
-        if (err != nullptr) *err = "写 `" + path + "` 失败";
+        if (err != nullptr) *err = "write to `" + path + "` failed";
         return false;
     }
     if (out_blocks != nullptr) *out_blocks = rows.size();
@@ -3095,7 +3095,7 @@ bool parseU64(const std::string& s, std::uint64_t* out) {
 bool readPinFunctions(const std::filesystem::path& pin, std::uint64_t* out, std::string* err) {
     std::string text;
     if (!readTextFile(pin, &text)) {
-        if (err != nullptr) *err = "读不了 `" + pin.string() + "`";
+        if (err != nullptr) *err = "cannot read `" + pin.string() + "`";
         return false;
     }
     const std::string key = "#define LIFT_AOT_PIN_FUNCTIONS ";
@@ -3104,12 +3104,12 @@ bool readPinFunctions(const std::filesystem::path& pin, std::uint64_t* out, std:
         std::string v = line.substr(key.size());
         while (!v.empty() && (v.back() == 'u' || v.back() == 'U')) v.pop_back();
         if (!parseU64(v, out)) {
-            if (err != nullptr) *err = "解析不了 LIFT_AOT_PIN_FUNCTIONS：`" + line + "`";
+            if (err != nullptr) *err = "cannot parse LIFT_AOT_PIN_FUNCTIONS: `" + line + "`";
             return false;
         }
         return true;
     }
-    if (err != nullptr) *err = "lift_pin.h 里没有 LIFT_AOT_PIN_FUNCTIONS";
+    if (err != nullptr) *err = "lift_pin.h has no LIFT_AOT_PIN_FUNCTIONS";
     return false;
 }
 
@@ -3117,7 +3117,7 @@ bool readTableFunctions(const std::filesystem::path& table, std::set<std::string
                         std::string* err) {
     std::string text;
     if (!readTextFile(table, &text)) {
-        if (err != nullptr) *err = "读不了 `" + table.string() + "`";
+        if (err != nullptr) *err = "cannot read `" + table.string() + "`";
         return false;
     }
     const std::string prefix = "LIFT_AOT_ENTRY(";
@@ -3134,7 +3134,7 @@ bool readTableFunctions(const std::filesystem::path& table, std::set<std::string
 
 int verifyAotSplit(const std::string& arg, std::size_t split) {
     if (split == 0) {
-        std::fprintf(stderr, "emulator-lift-gen: --verify-split 的 --split 必须 ≥ 1\n");
+        std::fprintf(stderr, "emulator-lift-gen: --verify-split requires --split >= 1\n");
         return 2;
     }
     std::error_code ec;
@@ -3145,7 +3145,7 @@ int verifyAotSplit(const std::string& arg, std::size_t split) {
     const std::filesystem::path table = dir / "lift_table.inc";
     if (!std::filesystem::exists(pin) || !std::filesystem::exists(table)) {
         std::printf(
-            "lift-gen --verify-split: skip（没有 lift_pin.h / lift_table.inc：本次构建没有 AOT 生成物）\n");
+            "lift-gen --verify-split: skip (no lift_pin.h / lift_table.inc: this build has no AOT artifacts)\n");
         return 0;
     }
     auto fail = [](const std::string& msg) {
@@ -3158,43 +3158,43 @@ int verifyAotSplit(const std::string& arg, std::size_t split) {
     if (!readPinFunctions(pin, &pin_functions, &err)) return fail(err);
     std::set<std::string> table_fns;
     if (!readTableFunctions(table, &table_fns, &err)) return fail(err);
-    if (table_fns.empty()) return fail("lift_table.inc 里一行 LIFT_AOT_ENTRY 都没有");
+    if (table_fns.empty()) return fail("lift_table.inc contains no LIFT_AOT_ENTRY line");
 
     if (split == 1) {
         // ---- 单份路径（缺省回退形状）：份数必然 1，清单不应存在 ----
         const std::filesystem::path ll = dir / "lift_aot.ll";
-        if (!std::filesystem::exists(ll)) return fail("split=1 但没有 `" + ll.string() + "`");
+        if (!std::filesystem::exists(ll)) return fail("split=1 but `" + ll.string() + "` is missing");
         if (std::filesystem::exists(dir / "lift_aot.split.txt")) {
-            return fail("split=1 却存在 `" + (dir / "lift_aot.split.txt").string() +
-                        "`（清单陈旧 / 两种形状混在一棵树里）");
+            return fail("split=1 but `" + (dir / "lift_aot.split.txt").string() +
+                        "` exists (stale manifest / two shapes mixed in one tree)");
         }
         std::string text;
-        if (!readTextFile(ll, &text)) return fail("读不了 `" + ll.string() + "`");
+        if (!readTextFile(ll, &text)) return fail("cannot read `" + ll.string() + "`");
         const std::vector<std::string> defs = liftDefineNames(text);
         if (defs.size() != pin_functions) {
-            return fail("split=1 的定义数=" + std::to_string(defs.size()) +
+            return fail("split=1 defines=" + std::to_string(defs.size()) +
                         " != PIN_FUNCTIONS=" + std::to_string(pin_functions));
         }
         const std::set<std::string> uniq(defs.begin(), defs.end());
-        if (uniq.size() != defs.size()) return fail("split=1 的 .ll 里有重复 `define`");
-        std::printf("lift-gen --verify-split: OK（single-O2；defines=%zu）\n", defs.size());
+        if (uniq.size() != defs.size()) return fail("duplicate `define` in the split=1 .ll");
+        std::printf("lift-gen --verify-split: OK (single-O2; defines=%zu)\n", defs.size());
         return 0;
     }
 
     // ---- 多份路径：清单 + 每份文件 ----
     const std::filesystem::path manifest = dir / "lift_aot.split.txt";
     if (!std::filesystem::exists(manifest)) {
-        return fail("LIFT_AOT_SPLIT=" + std::to_string(split) + " 但没有 `" + manifest.string() + "`");
+        return fail("LIFT_AOT_SPLIT=" + std::to_string(split) + " but `" + manifest.string() + "` is missing");
     }
     std::string manifest_text;
-    if (!readTextFile(manifest, &manifest_text)) return fail("读不了 `" + manifest.string() + "`");
+    if (!readTextFile(manifest, &manifest_text)) return fail("cannot read `" + manifest.string() + "`");
     std::vector<std::string> parts;
     for (const std::string& line : splitTextLines(manifest_text)) {
         if (line.compare(0, 5, "part ") == 0) parts.push_back(line);
     }
     if (parts.size() != split) {
-        return fail("清单份数=" + std::to_string(parts.size()) + " != LIFT_AOT_SPLIT=" +
-                    std::to_string(split) + "（典型原因：改了 LIFT_AOT_SPLIT 却没重新生成清单）");
+        return fail("manifest parts=" + std::to_string(parts.size()) + " != LIFT_AOT_SPLIT=" +
+                    std::to_string(split) + " (typical cause: LIFT_AOT_SPLIT changed without regenerating the manifest)");
     }
 
     constexpr std::uint64_t kMaxPartBytes = 20971520;  // 20 MB（design.md §3.1）
@@ -3204,7 +3204,7 @@ int verifyAotSplit(const std::string& arg, std::size_t split) {
     for (const std::string& line : parts) {
         const std::vector<std::string> f = splitWs(line);
         if (f.size() != 8) {
-            return fail("清单行字段数=" + std::to_string(f.size()) + "（应为 8）：`" + line + "`");
+            return fail("manifest line field count=" + std::to_string(f.size()) + " (expected 8): `" + line + "`");
         }
         const std::string& idx = f[1];
         const std::filesystem::path part_path = dir / f[2];
@@ -3212,59 +3212,59 @@ int verifyAotSplit(const std::string& arg, std::size_t split) {
         std::uint64_t want_bytes = 0;
         std::uint64_t want_fns = 0;
         if (!parseU64(f[4], &want_bytes) || !parseU64(f[5], &want_fns)) {
-            return fail("清单第 " + idx + " 份的 bytes/functions 不是十进制整数：`" + line + "`");
+            return fail("manifest part " + idx + ": bytes/functions are not decimal integers: `" + line + "`");
         }
         if (!std::filesystem::exists(part_path)) {
-            return fail("清单第 " + idx + " 份的文件不存在：`" + part_path.string() + "`");
+            return fail("manifest part " + idx + ": file does not exist: `" + part_path.string() + "`");
         }
         std::string content;
         if (!readTextFile(part_path, &content)) {
-            return fail("读不了清单第 " + idx + " 份：`" + part_path.string() + "`");
+            return fail("cannot read manifest part " + idx + ": `" + part_path.string() + "`");
         }
         const std::vector<std::uint8_t> raw(content.begin(), content.end());
         const std::string real_sha = lift::toLower(lift::toHex(lift::sha256(raw)));
         if (real_sha != lift::toLower(want_sha)) {
-            return fail("第 " + idx + " 份 sha256 不一致（清单=" + want_sha + " 实际=" + real_sha + "）");
+            return fail("part " + idx + " sha256 mismatch (manifest=" + want_sha + " actual=" + real_sha + ")");
         }
         if (content.size() != want_bytes) {
-            return fail("第 " + idx + " 份字节数不一致（清单=" + std::to_string(want_bytes) +
-                        " 实际=" + std::to_string(content.size()) + "）");
+            return fail("part " + idx + " byte count mismatch (manifest=" + std::to_string(want_bytes) +
+                        " actual=" + std::to_string(content.size()) + ")");
         }
         if (content.size() > kMaxPartBytes) {
-            return fail("第 " + idx + " 份 " + std::to_string(content.size()) + " B 超过 20 MB 上界");
+            return fail("part " + idx + " is " + std::to_string(content.size()) + " B, above the 20 MB bound");
         }
         if (content.size() > max_part_bytes) max_part_bytes = content.size();
 
         const std::vector<std::string> defs = liftDefineNames(content);
         if (defs.size() != want_fns) {
-            return fail("第 " + idx + " 份 define 数=" + std::to_string(defs.size()) +
-                        " != 清单 functions=" + std::to_string(want_fns));
+            return fail("part " + idx + " defines=" + std::to_string(defs.size()) +
+                        " != manifest functions=" + std::to_string(want_fns));
         }
         sum_functions += defs.size();
         for (const std::string& fn : defs) {
             if (!seen.insert(fn).second) {
-                return fail("符号 `" + fn + "` 出现在两份分片里（⛔ 两两不交破了）");
+                return fail("symbol `" + fn + "` appears in two parts (pairwise-disjoint invariant broken)");
             }
             if (table_fns.find(fn) == table_fns.end()) {
-                return fail("第 " + idx + " 份定义了 `" + fn + "`，但派发表里没有它");
+                return fail("part " + idx + " defines `" + fn + "`, but the dispatch table does not contain it");
             }
         }
     }
     if (sum_functions != pin_functions) {
-        return fail("Σ functions=" + std::to_string(sum_functions) +
+        return fail("sum functions=" + std::to_string(sum_functions) +
                     " != LIFT_AOT_PIN_FUNCTIONS=" + std::to_string(pin_functions));
     }
     if (seen.size() != table_fns.size()) {
-        return fail("分片并集=" + std::to_string(seen.size()) +
-                    " != 派发表函数集=" + std::to_string(table_fns.size()));
+        return fail("part union=" + std::to_string(seen.size()) +
+                    " != dispatch-table function set=" + std::to_string(table_fns.size()));
     }
     for (const std::string& fn : table_fns) {
         if (seen.find(fn) == seen.end()) {
-            return fail("派发表里的 `" + fn + "` 不在任何分片里");
+            return fail("dispatch table entry `" + fn + "` is not in any part");
         }
     }
     std::printf(
-        "lift-gen --verify-split: OK（LIFT_AOT_SPLIT=%zu；Σfunctions=%llu；最大份=%llu B）\n", split,
+        "lift-gen --verify-split: OK (LIFT_AOT_SPLIT=%zu; sum-functions=%llu; max-part=%llu B)\n", split,
         static_cast<unsigned long long>(sum_functions),
         static_cast<unsigned long long>(max_part_bytes));
     return 0;
@@ -3293,7 +3293,7 @@ int verifyAotSplit(const std::string& arg, std::size_t split) {
 // =====================================================================================
 int verifyAotIrTarget(const std::string& arg, std::size_t split, const GenIrTarget& want) {
     if (split == 0) {
-        std::fprintf(stderr, "emulator-lift-gen: --verify-ir-target 的 --split 必须 ≥ 1\n");
+        std::fprintf(stderr, "emulator-lift-gen: --verify-ir-target requires --split >= 1\n");
         return 2;
     }
     std::error_code ec;
@@ -3303,18 +3303,18 @@ int verifyAotIrTarget(const std::string& arg, std::size_t split, const GenIrTarg
     if (!std::filesystem::exists(dir / "lift_pin.h") ||
         !std::filesystem::exists(dir / "lift_table.inc")) {
         std::printf(
-            "lift-gen --verify-ir-target: skip（没有 lift_pin.h / lift_table.inc："
-            "本次构建没有 AOT 生成物）\n");
+            "lift-gen --verify-ir-target: skip (no lift_pin.h / lift_table.inc: "
+            "this build has no AOT artifacts)\n");
         return 0;
     }
     // ★ 有产物却没有期望值 = CMake 那侧的接线掉了（探针没跑 / 参数没传）。
     //   ⛔ 不许当 skip —— 那正是本用例要防的静默失效（属性整条消失而门禁照样绿）。
     if (want.empty()) {
         std::fprintf(stderr,
-                     "emulator-lift-gen --verify-ir-target: 期望值为空（cpu=`%s`；features=%zu 字符）"
-                     "⇒ CMake 没把 configure 期探针的 `--ir-target-cpu/--ir-target-features` 传进来；"
-                     "这会让 `attributes #0` 与 define 行的 ` #0 {` 一起消失 ⇒ LTO 的 "
-                     "areInlineCompatible 判不相容、lift_tick / lift_note_write 静默不内联\n",
+                     "emulator-lift-gen --verify-ir-target: expectation is empty (cpu=`%s`; features=%zu chars)"
+                     " => CMake did not pass the configure-time probe values `--ir-target-cpu/--ir-target-features`;"
+                     " that makes `attributes #0` and the ` #0 {` on define lines disappear together => LTO's "
+                     "areInlineCompatible judges incompatibility, so lift_tick / lift_note_write are silently not inlined\n",
                      want.cpu.c_str(), want.features.size());
         return 2;
     }
@@ -3339,13 +3339,13 @@ int verifyAotIrTarget(const std::string& arg, std::size_t split, const GenIrTarg
         }
         const std::filesystem::path p = dir / name;
         if (!std::filesystem::exists(p)) {
-            return fail("第 " + std::to_string(i) + " 份 `" + p.string() +
-                        "` 不存在（pin / 派发表在却没有这一份 ⇒ 产物形状陈旧："
-                        "改了 LIFT_AOT_SPLIT 却没重新生成 `.ll`）");
+            return fail("part " + std::to_string(i) + " `" + p.string() +
+                        "` does not exist (pin / dispatch table are present but this part is not => stale artifact shape: "
+                        "LIFT_AOT_SPLIT changed without regenerating the `.ll` files)");
         }
         std::string text;
         if (!readTextFile(p, &text)) {
-            return fail("读不了第 " + std::to_string(i) + " 份 `" + p.string() + "`");
+            return fail("cannot read part " + std::to_string(i) + " `" + p.string() + "`");
         }
         std::size_t attrs_lines = 0;
         std::string attrs_line;
@@ -3363,44 +3363,44 @@ int verifyAotIrTarget(const std::string& arg, std::size_t split, const GenIrTarg
                 const std::size_t lparen = line.find('(');
                 const std::string fn = line.substr(0, lparen);
                 const std::string tail =
-                    line.size() > 48 ? "…" + line.substr(line.size() - 48) : line;
-                return fail("第 " + std::to_string(i) + " 份 `" + name + "`：`" + fn +
-                            "` 的 define 行尾是 `" + tail + "`（应为 ` #0 {`）⇒ 这个函数**没有** "
-                            "target 属性 ⇒ LTO 里 callee 的 feature 不是 caller 的子集 ⇒ "
-                            "areInlineCompatible 判不相容 ⇒ lift_tick / lift_note_write "
-                            "静默不内联（构建成功、运行结果一样，只是没有收益）");
+                    line.size() > 48 ? "..." + line.substr(line.size() - 48) : line;
+                return fail("part " + std::to_string(i) + " `" + name + "`: define line of `" + fn +
+                            "` ends with `" + tail + "` (expected ` #0 {`) => this function has **no** "
+                            "target attribute => in LTO the callee features are not a subset of the caller's => "
+                            "areInlineCompatible judges incompatibility => lift_tick / lift_note_write are "
+                            "silently not inlined (build succeeds, results are the same, only the benefit is lost)");
             }
         }
         if (attrs_lines != 1) {
             return fail(
-                "第 " + std::to_string(i) + " 份 `" + name + "`：`attributes #0 = {` 出现 " +
-                std::to_string(attrs_lines) + " 行（应为恰好 1 行）" +
+                "part " + std::to_string(i) + " `" + name + "`: `attributes #0 = {` appears " +
+                std::to_string(attrs_lines) + " time(s) (expected exactly 1)" +
                 (attrs_lines == 0
-                     ? " ⇒ 属性组缺失：define 行挂着 #0 却没有可解析的属性（clang 直接报错），"
-                       "define 行不挂 #0 则函数属性与运行库对不上 ⇒ LTO 判不相容、tick/note 静默不内联"
-                     : " ⇒ 同一份里有两个 #0 组，哪一组生效说不清"));
+                     ? " => attribute group missing: define lines reference #0 but no attributes can be parsed (clang errors out),"
+                       " and without #0 the function attributes do not match the runtime TU => LTO judges incompatibility, tick/note silently not inlined"
+                     : " => two #0 groups in the same part, which one wins is undefined"));
         }
         if (attrs_line.find(cpu_pair) == std::string::npos) {
-            return fail("第 " + std::to_string(i) + " 份 `" + name + "`：属性组里没有逐字出现 `" +
-                        cpu_pair + "`（实际行=`" + attrs_line +
-                        "`）⇒ 与运行库 TU 的 target-cpu 对不上 ⇒ areInlineCompatible 判不相容");
+            return fail("part " + std::to_string(i) + " `" + name + "`: the attribute group does not contain `" +
+                        cpu_pair + "` verbatim (actual line=`" + attrs_line +
+                        "`) => target-cpu does not match the runtime TU => areInlineCompatible judges incompatibility");
         }
         if (attrs_line.find(feat_pair) == std::string::npos) {
-            return fail("第 " + std::to_string(i) + " 份 `" + name +
-                        "`：属性组里的 `\"target-features\"` 不是**逐字**等于参数串（实际行=`" +
+            return fail("part " + std::to_string(i) + " `" + name +
+                        "`: `\"target-features\"` in the attribute group is not **verbatim** equal to the argument string (actual line=`" +
                         attrs_line +
-                        "`）⇒ 与运行库 TU 的 feature 集对不上 ⇒ areInlineCompatible 判不相容 "
-                        "⇒ tick/note 静默不内联");
+                        "`) => the feature set does not match the runtime TU => areInlineCompatible judges incompatibility "
+                        "=> tick/note silently not inlined");
         }
         defines += part_defines;
     }
     if (defines == 0) {
         return fail(
-            "所有份里一条 `define i32 @lift_cc_` 都没有（pin / 派发表在场却零定义 ⇒ 产物是空壳，"
-            "上面两条断言会恒真 ⇒ 这条用例什么也没验到）");
+            "no part contains a `define i32 @lift_cc_` line (pin / dispatch table present but zero defines => the artifact is an empty shell, "
+            "the two assertions above are vacuously true => this test verified nothing)");
     }
     std::printf(
-        "lift-gen --verify-ir-target: OK（parts=%zu；defines=%llu；cpu=%s；features=%zu 字符）\n",
+        "lift-gen --verify-ir-target: OK (parts=%zu; defines=%llu; cpu=%s; features=%zu chars)\n",
         split, static_cast<unsigned long long>(defines), want.cpu.c_str(), want.features.size());
     return 0;
 }
@@ -3421,7 +3421,7 @@ int main(int argc, char** argv) {
         const std::string& a = args[i];
         auto needValue = [&](const char* flag, std::string* dst) -> bool {
             if (i + 1 >= args.size()) {
-                std::fprintf(stderr, "emulator-lift-gen: %s 需要一个值\n", flag);
+                std::fprintf(stderr, "emulator-lift-gen: %s requires a value\n", flag);
                 return false;
             }
             *dst = args[++i];
@@ -3443,7 +3443,7 @@ int main(int argc, char** argv) {
             char* endp = nullptr;
             const unsigned long n = std::strtoul(v.c_str(), &endp, 10);
             if (endp == v.c_str() || *endp != '\0' || n == 0) {
-                std::fprintf(stderr, "emulator-lift-gen: --split 需要正整数：`%s`\n", v.c_str());
+                std::fprintf(stderr, "emulator-lift-gen: --split requires a positive integer: `%s`\n", v.c_str());
                 return 2;
             }
             opt.split = static_cast<std::size_t>(n);
@@ -3475,7 +3475,7 @@ int main(int argc, char** argv) {
             char* endp = nullptr;
             const unsigned long n = std::strtoul(v.c_str(), &endp, 10);
             if (endp == v.c_str() || *endp != '\0' || n == 0) {
-                std::fprintf(stderr, "emulator-lift-gen: --max-components 需要正整数：`%s`\n", v.c_str());
+                std::fprintf(stderr, "emulator-lift-gen: --max-components requires a positive integer: `%s`\n", v.c_str());
                 return 2;
             }
             opt.max_components = n;
@@ -3499,7 +3499,7 @@ int main(int argc, char** argv) {
             char* endp = nullptr;
             const unsigned long n = std::strtoul(v.c_str(), &endp, 10);
             if (endp == v.c_str() || *endp != '\0' || n == 0) {
-                std::fprintf(stderr, "emulator-lift-gen: --jmptab-max-passes 需要正整数：`%s`\n",
+                std::fprintf(stderr, "emulator-lift-gen: --jmptab-max-passes requires a positive integer: `%s`\n",
                              v.c_str());
                 return 2;
             }
@@ -3512,7 +3512,7 @@ int main(int argc, char** argv) {
             usage();
             return 0;
         } else {
-            std::fprintf(stderr, "emulator-lift-gen: 未知参数：%s\n", a.c_str());
+            std::fprintf(stderr, "emulator-lift-gen: unknown argument: %s\n", a.c_str());
             usage();
             return 2;
         }
@@ -3528,7 +3528,7 @@ int main(int argc, char** argv) {
     // ★ `--check` 是**独立模式**：只吃 `--exe` + 一个 closure.txt，⛔ 不需要 `--roots/--out`。
     if (!opt.check.empty()) {
         if (opt.exe.empty()) {
-            std::fprintf(stderr, "emulator-lift-gen: --check 需要 --exe（字节真源）\n");
+            std::fprintf(stderr, "emulator-lift-gen: --check requires --exe (byte truth source)\n");
             return 2;
         }
         return checkClosure(opt.exe, opt.check, opt.close_calls, opt.close_stores, opt.close_data,
@@ -3539,20 +3539,20 @@ int main(int argc, char** argv) {
     //   `--out` / `--pin` / `--table`；跑 ①–③ + 分区 + D21 到 `dispatch_entries` 定型后提前返回）。
     if (opt.jmptab_audit) {
         if (opt.exe.empty() || opt.roots.empty()) {
-            std::fprintf(stderr, "emulator-lift-gen: --jmptab-audit 需要 --exe 与 --roots\n");
+            std::fprintf(stderr, "emulator-lift-gen: --jmptab-audit requires --exe and --roots\n");
             return 2;
         }
     } else if (opt.exe.empty() || opt.roots.empty() ||
                (opt.split <= 1 ? opt.out.empty() : opt.out_dir.empty())) {
         std::fprintf(stderr,
-                     "emulator-lift-gen: --exe / --roots 必需；--split 1 要 --out，--split N>1 要 "
+                     "emulator-lift-gen: --exe / --roots are required; --split 1 needs --out, --split N>1 needs "
                      "--out-dir\n");
         usage();
         return 2;
     }
     if (opt.split > 1 && !opt.out.empty()) {
         // ⛔ 两个落点同时给 = 谁生效说不清 ⇒ 直接拒绝（不猜）。
-        std::fprintf(stderr, "emulator-lift-gen: --split N>1 与 --out 互斥（多份用 --out-dir）\n");
+        std::fprintf(stderr, "emulator-lift-gen: --split N>1 is mutually exclusive with --out (use --out-dir for multiple parts)\n");
         return 2;
     }
 
@@ -3561,36 +3561,36 @@ int main(int argc, char** argv) {
     {
         std::string err;
         if (!readRootsFile(opt.roots, &roots, &err)) {
-            std::fprintf(stderr, "emulator-lift-gen: --roots 读不了：%s\n", err.c_str());
+            std::fprintf(stderr, "emulator-lift-gen: cannot read --roots: %s\n", err.c_str());
             return 2;
         }
     }
     if (roots.empty()) {
-        std::fprintf(stderr, "emulator-lift-gen: --roots 里一个 EA 都没有：%s\n", opt.roots.c_str());
+        std::fprintf(stderr, "emulator-lift-gen: --roots contains no EA: %s\n", opt.roots.c_str());
         return 2;
     }
 
     // ---- 输入 ②：PE 字节（映射进 guest 后交给唯一的解码器）----
     lift::GuestMemory mem;
     if (!mem.reserve()) {
-        std::fprintf(stderr, "emulator-lift-gen: 预留 guest 地址空间失败：%s\n", mem.lastError());
+        std::fprintf(stderr, "emulator-lift-gen: failed to reserve guest address space: %s\n", mem.lastError());
         return 2;
     }
     lift::PeImage image;
     {
         std::string err;
         if (!lift::loadPeFile(opt.exe, &image, &err)) {
-            std::fprintf(stderr, "emulator-lift-gen: 载入 PE 失败（%s）：%s\n", opt.exe.c_str(), err.c_str());
+            std::fprintf(stderr, "emulator-lift-gen: failed to load PE (%s): %s\n", opt.exe.c_str(), err.c_str());
             return 2;
         }
         if (!lift::mapPeImage(mem, image, &err)) {
-            std::fprintf(stderr, "emulator-lift-gen: 映射 PE 失败（%s）：%s\n", opt.exe.c_str(), err.c_str());
+            std::fprintf(stderr, "emulator-lift-gen: failed to map PE (%s): %s\n", opt.exe.c_str(), err.c_str());
             return 2;
         }
     }
     lift::Decoder decoder;
     if (!decoder.ok()) {
-        std::fprintf(stderr, "emulator-lift-gen: 解码器初始化失败：%s\n", decoder.lastError());
+        std::fprintf(stderr, "emulator-lift-gen: decoder initialisation failed: %s\n", decoder.lastError());
         return 4;
     }
 
@@ -3599,7 +3599,7 @@ int main(int argc, char** argv) {
     const std::vector<lift::aot::ExecRange> exec_ranges = lift::aot::execRanges(image);
     for (const std::uint32_t ea : roots) {
         if (lift::aot::execRangeOf(exec_ranges, ea) == nullptr) {
-            std::fprintf(stderr, "emulator-lift-gen: 根 %08X 不在任何可执行节（越界根）\n", ea);
+            std::fprintf(stderr, "emulator-lift-gen: root %08X is not in any executable section (out-of-range root)\n", ea);
             return 4;
         }
     }
@@ -3623,7 +3623,7 @@ int main(int argc, char** argv) {
             // ⛔ 不静默：**文法全绿**之后两条解析路径还读出不同集合 = 生成器内部不一致
             //   （文法红的情形已经在上面按"五条判据红"处理，⛔ 不在这里混成"内部错误"）。
             std::fprintf(stderr,
-                         "emulator-lift-gen: --closure-gate 的根集（%zu）与 --roots 的根集（%zu）不一致\n",
+                         "emulator-lift-gen: the --closure-gate root set (%zu) differs from the --roots root set (%zu)\n",
                          gate_roots.size(), roots.size());
             return 1;
         }
@@ -3635,8 +3635,8 @@ int main(int argc, char** argv) {
         std::uint32_t err_ea = 0;
         int err_code = 0;
         if (!buildAll(roots, image, exec_ranges, decoder, mem, opt, &run, &err, &err_ea, &err_code)) {
-            std::fprintf(stderr, "emulator-lift-gen: %s @ %08X：%s\n",
-                         err_code == 4 ? "建块/解码失败" : "跳表识别/分区失败", err_ea, err.c_str());
+            std::fprintf(stderr, "emulator-lift-gen: %s @ %08X: %s\n",
+                         err_code == 4 ? "block building/decoding failed" : "jump-table recognition/partition failed", err_ea, err.c_str());
             return err_code == 0 ? 1 : err_code;
         }
     }
@@ -3672,7 +3672,7 @@ int main(int argc, char** argv) {
         return auditJumpTables(run, image, exec_ranges, decoder, mem, roots);
     }
     if (opt.max_components != 0 && components.size() > opt.max_components) {
-        std::fprintf(stderr, "emulator-lift-gen: 分量数 %zu 超过 --max-components %lu\n",
+        std::fprintf(stderr, "emulator-lift-gen: component count %zu exceeds --max-components %lu\n",
                      components.size(), opt.max_components);
         return 2;
     }
@@ -3691,7 +3691,7 @@ int main(int argc, char** argv) {
     gen_structure.enabled = opt.s7;
     gen_structure.structured_roots = opt.s7 ? structure.structured : std::set<std::uint32_t>{};
     if (!opt.s7) {
-        std::fprintf(stderr, "lift-gen: [S7] --no-s7 ⇒ 结构翻译关闭（全部 call/ret 回 trampoline）\n");
+        std::fprintf(stderr, "lift-gen: [S7] --no-s7 => structural translation disabled (all call/ret go back through the trampoline)\n");
     }
     gen_structure.shim_begin = layout.shim_page;
     gen_structure.shim_end = layout.shim_page + layout.shim_slots * 4u;
@@ -3705,7 +3705,7 @@ int main(int argc, char** argv) {
             gen_structure.hook_eas.insert(hook);
         } else {
             std::fprintf(stderr,
-                         "lift-gen: [S7] 宿主钩子 EA %08X 不在本模块的入口集（小根集模块）⇒ 不列检查点\n",
+                         "lift-gen: [S7] host hook EA %08X is not in this module's entry set (small-root-set module) => not listing a checkpoint\n",
                          hook);
         }
     }
@@ -3775,7 +3775,7 @@ int main(int argc, char** argv) {
     closure.jump_table_unclaimed = jump_table.unclaimed.size();
     if (split_out) {
         if (opt.split > components.size()) {
-            std::fprintf(stderr, "emulator-lift-gen: --split %zu 超过分量数 %zu（⛔ 不静默截断）\n",
+            std::fprintf(stderr, "emulator-lift-gen: --split %zu exceeds the component count %zu (never silently truncate)\n",
                          opt.split, components.size());
             return 2;
         }
@@ -3784,21 +3784,21 @@ int main(int argc, char** argv) {
         if (!lift::aot::emitModuleSplit(components, all_entries, drops.dropped, closure, gen_structure,
                                         opt.split, &stats, &unsupported, &parts, &part_roots,
                                         opt.ir_target)) {
-            std::fprintf(stderr, "emulator-lift-gen: 发射器内部错误\n");
+            std::fprintf(stderr, "emulator-lift-gen: emitter internal error\n");
             return 1;
         }
     } else if (!lift::aot::emitModule(components, all_entries, drops.dropped, closure, gen_structure,
                                       &ir, &stats, &unsupported, opt.ir_target)) {
-        std::fprintf(stderr, "emulator-lift-gen: 发射器内部错误\n");
+        std::fprintf(stderr, "emulator-lift-gen: emitter internal error\n");
         return 1;
     }
     // ★ S7（D53）的覆盖率读数（stderr + `.ll` 头部都有；⛔ 只进读数、不进判据）。
     {
         const lift::aot::StructStats& s7 = structure.stats;
         std::fprintf(stderr,
-                     "lift-gen: [S7 判据] 单元根=%llu 自身通过=%llu 可结构化=%llu（自身降级=%llu · "
-                     "调用图传染=%llu）· 首因 可变长栈=%llu 写返回槽=%llu 间接call=%llu 动态返回=%llu "
-                     "表外callee=%llu\n",
+                     "lift-gen: [S7 criteria] unit roots=%llu self-pass=%llu structurable=%llu (self-downgrade=%llu - "
+                     "callgraph contagion=%llu) - primary causes variable-stack=%llu writes-return-slot=%llu indirect-call=%llu dynamic-return=%llu "
+                     "off-table-callee=%llu\n",
                      static_cast<unsigned long long>(s7.functions),
                      static_cast<unsigned long long>(s7.self_ok),
                      static_cast<unsigned long long>(s7.structured),
@@ -3810,9 +3810,9 @@ int main(int argc, char** argv) {
                      static_cast<unsigned long long>(s7.reason_dynamic_ret),
                      static_cast<unsigned long long>(s7.reason_unknown_callee));
         std::fprintf(stderr,
-                     "lift-gen: [S7 判据/站点账] ret=%llu（可结构化单元里=%llu）· call=%llu（静态=%llu "
-                     "间接=%llu）⇒ 宿主call=%llu lift_dyn=%llu shim派发=%llu 其余派发=%llu · jmp=%llu"
-                     "（静态=%llu 间接=%llu）\n",
+                     "lift-gen: [S7 criteria/site accounts] ret=%llu (in structured units=%llu) - call=%llu (static=%llu "
+                     "indirect=%llu) => host-call=%llu lift_dyn=%llu shim-dispatch=%llu other-dispatch=%llu - jmp=%llu"
+                     "(static=%llu indirect=%llu)\n",
                      static_cast<unsigned long long>(s7.ret_sites),
                      static_cast<unsigned long long>(s7.ret_sites_structured),
                      static_cast<unsigned long long>(s7.call_sites),
@@ -3830,14 +3830,14 @@ int main(int argc, char** argv) {
         for (const auto& kv : structure.reason) {
             const auto eit = structure.reason_ea.find(kv.first);
             const auto cit = structure.contagious_from.find(kv.first);
-            std::fprintf(stderr, "lift-gen: [S7 降级] %08X 原因=%s 站点=%08X%s%08X\n", kv.first,
+            std::fprintf(stderr, "lift-gen: [S7 downgrade] %08X reason=%s site=%08X%s%08X\n", kv.first,
                          lift::aot::structReasonName(kv.second),
                          eit != structure.reason_ea.end() ? eit->second : 0u,
-                         cit != structure.contagious_from.end() ? " 传染自=" : "",
+                         cit != structure.contagious_from.end() ? " contagious-from=" : "",
                          cit != structure.contagious_from.end() ? cit->second : 0u);
             ++printed;
         }
-        std::fprintf(stderr, "lift-gen: [S7 降级] 合计 %zu 个单元根不可结构化（逐条见上）\n", printed);
+        std::fprintf(stderr, "lift-gen: [S7 downgrade] total %zu unit roots are not structurable (one line each above)\n", printed);
     }
 
     // 计数（父级要求的读数）
@@ -3866,13 +3866,13 @@ int main(int argc, char** argv) {
             const std::filesystem::path p = parts_dir / name;
             std::ofstream file(p, std::ios::binary | std::ios::trunc);
             if (!file) {
-                std::fprintf(stderr, "emulator-lift-gen: 写不了 `%s`\n", p.string().c_str());
+                std::fprintf(stderr, "emulator-lift-gen: cannot write `%s`\n", p.string().c_str());
                 return 2;
             }
             file.write(parts[i].data(), static_cast<std::streamsize>(parts[i].size()));
             file.close();
             if (!file) {
-                std::fprintf(stderr, "emulator-lift-gen: 写 `%s` 失败\n", p.string().c_str());
+                std::fprintf(stderr, "emulator-lift-gen: write to `%s` failed\n", p.string().c_str());
                 return 2;
             }
             const std::vector<std::uint8_t> raw(parts[i].begin(), parts[i].end());
@@ -3882,14 +3882,14 @@ int main(int argc, char** argv) {
         const std::filesystem::path manifest = parts_dir / (opt.split_prefix + ".split.txt");
         std::ofstream file(manifest, std::ios::binary | std::ios::trunc);
         if (!file) {
-            std::fprintf(stderr, "emulator-lift-gen: 写不了 `%s`\n", manifest.string().c_str());
+            std::fprintf(stderr, "emulator-lift-gen: cannot write `%s`\n", manifest.string().c_str());
             return 2;
         }
-        file << "# 生成物（emulator-lift-gen --split " << parts.size()
-             << "）—— ⛔ 不手改、⛔ 不入库。\n";
-        file << "# 一行一份：`part <index> <file> <sha256> <bytes> <functions> <first-root> "
-                "<last-root>`；末行 `split=… functions=… bytes=… max-bytes=…`。\n";
-        file << "# 分桶规则（确定性纯函数）：分量根 EA 升序、贪心填到 Σbody/N。\n";
+        file << "# Generated by emulator-lift-gen --split " << parts.size()
+             << " - do not edit by hand, not tracked in git.\n";
+        file << "# One line per part: `part <index> <file> <sha256> <bytes> <functions> <first-root> "
+                "<last-root>`; last line `split=... functions=... bytes=... max-bytes=...`.\n";
+        file << "# Bucketing rule (deterministic pure function): component roots in ascending EA order, greedily filled to sum(body)/N.\n";
         std::uint64_t total_bytes = 0;
         std::uint64_t total_functions = 0;
         std::uint64_t max_bytes = 0;
@@ -3906,11 +3906,11 @@ int main(int argc, char** argv) {
              << " max-bytes=" << max_bytes << "\n";
         file.close();
         if (!file) {
-            std::fprintf(stderr, "emulator-lift-gen: 写 `%s` 失败\n", manifest.string().c_str());
+            std::fprintf(stderr, "emulator-lift-gen: write to `%s` failed\n", manifest.string().c_str());
             return 2;
         }
-        std::printf("lift-gen: 分片 %zu 份（%s/%s.part*.ll · 清单 %s · 函数合计 %llu · 字节合计 %llu · "
-                    "最大份 %llu）\n",
+        std::printf("lift-gen: %zu parts (%s/%s.part*.ll - manifest %s - total functions %llu - total bytes %llu - "
+                    "largest part %llu)\n",
                     parts.size(), opt.out_dir.c_str(), opt.split_prefix.c_str(), manifest.string().c_str(),
                     static_cast<unsigned long long>(total_functions),
                     static_cast<unsigned long long>(total_bytes),
@@ -3922,13 +3922,13 @@ int main(int argc, char** argv) {
         std::filesystem::create_directories(out_dir, ec);
         std::ofstream file(out_path, std::ios::binary | std::ios::trunc);
         if (!file) {
-            std::fprintf(stderr, "emulator-lift-gen: 写不了 `%s`\n", out_path.string().c_str());
+            std::fprintf(stderr, "emulator-lift-gen: cannot write `%s`\n", out_path.string().c_str());
             return 2;
         }
         file.write(ir.data(), static_cast<std::streamsize>(ir.size()));
         file.close();
         if (!file) {
-            std::fprintf(stderr, "emulator-lift-gen: 写 `%s` 失败\n", out_path.string().c_str());
+            std::fprintf(stderr, "emulator-lift-gen: write to `%s` failed\n", out_path.string().c_str());
             return 2;
         }
     }
@@ -3939,21 +3939,21 @@ int main(int argc, char** argv) {
     if (!opt.pin.empty()) {
         std::string err;
         if (!writeAotPin(opt.pin, image, roots.size(), dispatch_entries.size(), components.size(), &err)) {
-            std::fprintf(stderr, "emulator-lift-gen: --pin 失败：%s\n", err.c_str());
+            std::fprintf(stderr, "emulator-lift-gen: --pin failed: %s\n", err.c_str());
             return 2;
         }
-        std::printf("lift-gen: pin %s（sha256=%s entry=%08X）\n", opt.pin.c_str(), image.sha256.c_str(),
+        std::printf("lift-gen: pin %s (sha256=%s entry=%08X)\n", opt.pin.c_str(), image.sha256.c_str(),
                     image.entry_ea);
     }
     if (!opt.table.empty()) {
         std::string err;
         if (!writeAotTable(opt.table, components, &err)) {
-            std::fprintf(stderr, "emulator-lift-gen: --table 失败：%s\n", err.c_str());
+            std::fprintf(stderr, "emulator-lift-gen: --table failed: %s\n", err.c_str());
             return 1;
         }
         std::size_t rows = 0;
         for (const GenComponent& comp : components) rows += comp.entries.size();
-        std::printf("lift-gen: 派发表 %s（%zu 行 = 入口 EA → 分量根函数）\n", opt.table.c_str(), rows);
+        std::printf("lift-gen: dispatch table %s (%zu rows = entry EA -> component root function)\n", opt.table.c_str(), rows);
     }
     // ---- ⑤'' ★ D18：`--dump-blocks`（只读覆盖率读数；⛔ 不改 `.ll` / 派发表）----
     if (!opt.dump_blocks.empty()) {
@@ -3963,10 +3963,10 @@ int main(int argc, char** argv) {
         std::uint64_t dumped_insns = 0;
         if (!writeBlockDump(opt.dump_blocks, components, &dumped_blocks, &dumped_bytes, &dumped_insns,
                             &err)) {
-            std::fprintf(stderr, "emulator-lift-gen: --dump-blocks 失败：%s\n", err.c_str());
+            std::fprintf(stderr, "emulator-lift-gen: --dump-blocks failed: %s\n", err.c_str());
             return 2;
         }
-        std::printf("lift-gen: 块清单 %s（blocks=%zu bytes=%llu insns=%llu；⛔ 不进 .ll / 派发表）\n",
+        std::printf("lift-gen: block dump %s (blocks=%zu bytes=%llu insns=%llu; not part of .ll / dispatch table)\n",
                     opt.dump_blocks.c_str(), dumped_blocks,
                     static_cast<unsigned long long>(dumped_bytes),
                     static_cast<unsigned long long>(dumped_insns));
@@ -3996,13 +3996,13 @@ int main(int argc, char** argv) {
     {
         std::ofstream file(unsupported_path, std::ios::binary | std::ios::trunc);
         if (!file) {
-            std::fprintf(stderr, "emulator-lift-gen: 写不了 `%s`\n", unsupported_path.string().c_str());
+            std::fprintf(stderr, "emulator-lift-gen: cannot write `%s`\n", unsupported_path.string().c_str());
             return 2;
         }
-        file << "# emulator-lift-gen（Shape A / T1c）：**仍然 trap** 的 guest 指令\n";
-        file << "# 格式：0x<EA> <op> <原因>；这些位置在 .ll 里是 llvm.trap + unreachable\n";
-        file << "# ★ T1c 起「未实现的 op」不再落这里（走单指令宿主原语 @lift_one）；这里为空是正常态，\n";
-        file << "#   有内容 ⇒ 控制转移掉进了默认路径 = 生成器内部不一致（退出码 3）。\n";
+        file << "# emulator-lift-gen (Shape A / T1c): guest instructions that **still trap**\n";
+        file << "# Format: 0x<EA> <op> <reason>; these sites are llvm.trap + unreachable in .ll\n";
+        file << "# Since T1c 'unimplemented op' no longer lands here (it goes through the single-instruction host primitive @lift_one); empty is the normal state,\n";
+        file << "#   content => control fell into the default path = generator internal inconsistency (exit code 3).\n";
         for (const GenUnsupported& u : unsupported) {
             char ea[16];
             std::snprintf(ea, sizeof(ea), "0x%08X", u.ea);
@@ -4010,7 +4010,7 @@ int main(int argc, char** argv) {
         }
         file.close();
         if (!file) {
-            std::fprintf(stderr, "emulator-lift-gen: 写 `%s` 失败\n", unsupported_path.string().c_str());
+            std::fprintf(stderr, "emulator-lift-gen: write to `%s` failed\n", unsupported_path.string().c_str());
             return 2;
         }
     }
@@ -4024,10 +4024,10 @@ int main(int argc, char** argv) {
         promoted.size(), static_cast<unsigned long long>(stats.traps_unsupported + stats.traps_bad),
         static_cast<unsigned long long>(stats.traps_unsupported),
         static_cast<unsigned long long>(stats.traps_bad));
-    std::printf("lift-gen: lift_one 调用点 %llu 处（%zu 个 op；单指令宿主原语，⛔ 不是 trap）\n",
+    std::printf("lift-gen: lift_one call sites %llu (%zu ops; single-instruction host primitives, not traps)\n",
                 static_cast<unsigned long long>(stats.lift_one_sites), stats.lift_one_by_op.size());
     {
-        std::printf("lift-gen: lift_one 汇总：");
+        std::printf("lift-gen: lift_one totals:");
         bool first = true;
         for (const auto& kv : stats.lift_one_by_op) {
             std::printf("%s%s=%llu", first ? "" : " ", kv.first.c_str(),
@@ -4036,34 +4036,34 @@ int main(int argc, char** argv) {
         }
         std::printf("\n");
     }
-    std::printf("lift-gen: 派生 leader 丢弃 %zu 处（%zu 解不出 + %zu 落在已发射块字节内）\n",
+    std::printf("lift-gen: dropped derived leaders %zu (%zu undecodable + %zu inside already-emitted block bytes)\n",
                 drops.dropped.size(), drops.undecodable.size(), drops.inside_block.size());
     // ★ D14：静态调用闭包的账 —— 与上面"派生 leader"**分开报**（越界 / 解不出 / 重叠各一个数）。
     //   同一条也打到 stderr（要求：不静默），并把每个丢弃类别的 **3 个样例**打出来。
     std::printf(
-        "lift-gen: 静态调用闭包 %s soft-roots=%zu（新增 unit 根）· 丢弃：越界=%zu 解不出=%zu "
-        "重叠=%zu · shim 目标跳过=%zu\n",
+        "lift-gen: static call closure %s soft-roots=%zu (new unit roots) - dropped: outside=%zu undecodable=%zu "
+        "overlap=%zu - shim targets skipped=%zu\n",
         opt.close_calls ? "on" : "off", soft_call.added.size(), soft_call.outside.size(),
         soft_call.undecodable.size(), soft_call.overlap.size(), soft_call.shim_targets.size());
     std::fprintf(stderr,
-                 "lift-gen: [静态调用闭包 D14/%s] soft-roots=%zu 丢弃：越界=%zu 解不出=%zu 重叠=%zu "
-                 "· shim 目标跳过=%zu\n",
+                 "lift-gen: [static call closure D14/%s] soft-roots=%zu dropped: outside=%zu undecodable=%zu overlap=%zu "
+                 "- shim targets skipped=%zu\n",
                  opt.close_calls ? "on" : "off", soft_call.added.size(), soft_call.outside.size(),
                  soft_call.undecodable.size(), soft_call.overlap.size(), soft_call.shim_targets.size());
     // ★ D15：第二类软根（写内存 mov 的 imm32）—— **独立一行**，三档丢弃同样各一个数。
     //   `写内存 mov 的 imm32 站点` 是判据的**输入面**（读数，不是判据）：越界那一个数之所以大，
     //   就是因为绝大多数 `mov [x], <数据常量>` 的 imm 不是代码地址（站点 − 落在可执行节内 ≈ 它们）。
     std::printf(
-        "lift-gen: 代码指针立即数（D15）%s soft-roots=%zu（新增 unit 根）· 丢弃：越界=%zu 解不出=%zu "
-        "重叠=%zu · shim 目标跳过=%zu\n",
+        "lift-gen: code-pointer immediates (D15) %s soft-roots=%zu (new unit roots) - dropped: outside=%zu undecodable=%zu "
+        "overlap=%zu - shim targets skipped=%zu\n",
         opt.close_stores ? "on" : "off", soft_store.added.size(), soft_store.outside.size(),
         soft_store.undecodable.size(), soft_store.overlap.size(), soft_store.shim_targets.size());
-    std::printf("lift-gen: 写内存 mov 的 imm32：站点=%llu（其中 imm 落在可执行节内=%llu）\n",
+    std::printf("lift-gen: memory-writing mov imm32: sites=%llu (of which imm falls inside an executable section=%llu)\n",
                 static_cast<unsigned long long>(run.store_imm_sites),
                 static_cast<unsigned long long>(run.store_imm_in_exec));
     std::fprintf(stderr,
-                 "lift-gen: [代码指针立即数 D15/%s] soft-roots=%zu 丢弃：越界=%zu 解不出=%zu 重叠=%zu "
-                 "· shim 目标跳过=%zu · 站点=%llu（imm 落在可执行节内=%llu）\n",
+                 "lift-gen: [code-pointer immediates D15/%s] soft-roots=%zu dropped: outside=%zu undecodable=%zu overlap=%zu "
+                 "- shim targets skipped=%zu - sites=%llu (imm inside an executable section=%llu)\n",
                  opt.close_stores ? "on" : "off", soft_store.added.size(), soft_store.outside.size(),
                  soft_store.undecodable.size(), soft_store.overlap.size(),
                  soft_store.shim_targets.size(),
@@ -4075,13 +4075,13 @@ int main(int argc, char** argv) {
     //   ⇒ 恒等式（可手工核）：`distinct = added + overlap + skipped`（outside / shim 结构性为 0：
     //   候选的定义就是"值落在可执行节内"、而 shim 桩页不在可执行节里）。
     std::printf(
-        "lift-gen: 静态代码指针（D17）%s soft-roots=%zu（新增 unit 根）· 丢弃：越界=%zu 解不出=%zu "
-        "重叠=%zu · shim 目标跳过=%zu\n",
+        "lift-gen: static code pointers (D17) %s soft-roots=%zu (new unit roots) - dropped: outside=%zu undecodable=%zu "
+        "overlap=%zu - shim targets skipped=%zu\n",
         opt.close_data ? "on" : "off", soft_data.added.size(), soft_data.outside.size(),
         soft_data.undecodable.size(), soft_data.overlap.size(), soft_data.shim_targets.size());
     std::printf(
-        "lift-gen: 非可执行节的 4 字节对齐 dword：站点=%llu（值落在可执行节内=%llu）· 不同候选=%llu "
-        "· 已在入口集/已判过=%llu\n",
+        "lift-gen: 4-byte aligned dwords in non-executable sections: sites=%llu (value inside an executable section=%llu) - distinct candidates=%llu "
+        "- already in entry set/already judged=%llu\n",
         static_cast<unsigned long long>(run.data_ptr_sites),
         static_cast<unsigned long long>(run.data_ptr_in_exec),
         static_cast<unsigned long long>(run.data_ptr_distinct),
@@ -4090,11 +4090,11 @@ int main(int argc, char** argv) {
     //   其中"重叠"的**收之前挡下**那部分（`data_overlap_pre`）是判据前移挡的，其余是收进来之后
     //   由 `dropLeadersInsideBlocks` 事后判的（那一部分同时也在 `新增` 里 —— `added` 记的是
     //   "被接受为软根"，与 D14/D15 同一口径）。
-    std::printf("lift-gen: 其中收之前就挡下（落在已发射块字节区间内）= %llu\n",
+    std::printf("lift-gen: of which blocked before acceptance (inside already-emitted block byte range) = %llu\n",
                 static_cast<unsigned long long>(run.data_ptr_overlap_pre));
     std::fprintf(stderr,
-                 "lift-gen: [静态代码指针 D17/%s] soft-roots=%zu 丢弃：越界=%zu 解不出=%zu 重叠=%zu "
-                 "· shim 目标跳过=%zu · 站点=%llu（值落在可执行节内=%llu）· 不同候选=%llu · 已在入口集/已判过=%llu\n",
+                 "lift-gen: [static code pointers D17/%s] soft-roots=%zu dropped: outside=%zu undecodable=%zu overlap=%zu "
+                 "- shim targets skipped=%zu - sites=%llu (value inside an executable section=%llu) - distinct candidates=%llu - already in entry set/already judged=%llu\n",
                  opt.close_data ? "on" : "off", soft_data.added.size(), soft_data.outside.size(),
                  soft_data.undecodable.size(), soft_data.overlap.size(),
                  soft_data.shim_targets.size(),
@@ -4106,8 +4106,8 @@ int main(int argc, char** argv) {
     //   再一行是**候选面**（"先量后收"：每一档只归一类，五档相加 = `不同候选`）。
     //   ★ 与 D17 的本质区别：这里的 `added` 是**新增 unit 根 = 新增块 / 新增指令**（D17 那行不是）。
     std::printf(
-        "lift-gen: 可执行节跳表目标（D26）%s soft-roots=%zu（新增 unit 根 = **会新增块**）· 丢弃：越界=%zu "
-        "解不出=%zu 重叠=%zu · shim 目标跳过=%zu · 不动点轮数=%llu · 最终仍在入口集=%llu\n",
+        "lift-gen: executable-section jump-table targets (D26) %s soft-roots=%zu (new unit roots = **may add blocks**) - dropped: outside=%zu "
+        "undecodable=%zu overlap=%zu - shim targets skipped=%zu - fixed-point rounds=%llu - still in entry set=%llu\n",
         opt.close_jmptab ? "on" : "off", soft_jumptab.added.size(), soft_jumptab.outside.size(),
         soft_jumptab.undecodable.size(), soft_jumptab.overlap.size(),
         soft_jumptab.shim_targets.size(),
@@ -4119,8 +4119,8 @@ int main(int argc, char** argv) {
         //   候选已经并进下面那行的"不同候选（并集）"，收/丢的账仍然是 `soft_jumptab`
         //   （⛔ 不另立一类软根）。
         std::printf(
-            "lift-gen: 未对齐 imm32 候选面（D26 第二条扫描）：站点=%llu（push imm32=%llu · mov reg, "
-            "imm32=%llu）· 值在可执行节内=%llu · 不同候选=%llu（其中仅这条扫描发现的=%llu）\n",
+            "lift-gen: unaligned imm32 candidate surface (D26 second scan): sites=%llu (push imm32=%llu - mov reg, "
+            "imm32=%llu) - value inside an executable section=%llu - distinct candidates=%llu (of which found only by this scan=%llu)\n",
             static_cast<unsigned long long>(run.imm32_sites),
             static_cast<unsigned long long>(run.imm32_push_sites),
             static_cast<unsigned long long>(run.imm32_mov_sites),
@@ -4128,10 +4128,10 @@ int main(int argc, char** argv) {
             static_cast<unsigned long long>(run.imm32_distinct),
             static_cast<unsigned long long>(run.imm32_only));
         std::printf(
-            "lift-gen: 可执行节代码指针候选面（对齐 dword ∪ 未对齐 imm32）：对齐 dword 站点=%llu · "
-            "值在可执行节内=%llu · 不同候选（并集）=%llu "
-            "· 已在入口集/已判过=%llu · 已是块首（第四类 D21 处理）=%llu · 可解码=%llu · 解不出=%llu "
-            "· 被重叠挡下=%llu · shim 桩=%llu\n",
+            "lift-gen: executable code-pointer candidate surface (aligned dwords union unaligned imm32): aligned dword sites=%llu - "
+            "value inside an executable section=%llu - distinct candidates (union)=%llu "
+            "- already in entry set/already judged=%llu - already a block start (handled as kind 4, D21)=%llu - decodable=%llu - undecodable=%llu "
+            "- blocked by overlap=%llu - shim stubs=%llu\n",
             static_cast<unsigned long long>(s.sites), static_cast<unsigned long long>(s.in_exec),
             static_cast<unsigned long long>(s.distinct),
             static_cast<unsigned long long>(s.in_entries),
@@ -4141,11 +4141,11 @@ int main(int argc, char** argv) {
             static_cast<unsigned long long>(s.overlap_pre), static_cast<unsigned long long>(s.shim));
         // ★ 恒等式（可手工核）：`不同候选 = 已在入口集/已判过 + shim 桩 + 已是块首 + 被重叠挡下 + 可解码 + 解不出`。
         std::fprintf(stderr,
-                     "lift-gen: [可执行节跳表 D26/%s] soft-roots=%zu（最终仍在入口集=%llu）丢弃：越界=%zu "
-                     "解不出=%zu 重叠=%zu · shim 目标跳过=%zu · 轮数=%llu · 对齐 dword 站点=%llu（值在可执行节内=%llu）"
-                     " · 未对齐 imm32 站点=%llu（push=%llu · mov=%llu · 值在可执行节内=%llu，仅这条扫描发现=%llu）"
-                     " · 不同候选（并集）=%llu · 已在入口集/已判过=%llu · 已是块首=%llu · 可解码=%llu · 解不出=%llu"
-                     " · 被重叠挡下=%llu\n",
+                     "lift-gen: [executable jump table D26/%s] soft-roots=%zu (still in entry set at the end=%llu) dropped: outside=%zu "
+                     "undecodable=%zu overlap=%zu - shim targets skipped=%zu - rounds=%llu - aligned dword sites=%llu (value inside an executable section=%llu)"
+                     " - unaligned imm32 sites=%llu (push=%llu - mov=%llu - value inside an executable section=%llu, found only by this scan=%llu)"
+                     " - distinct candidates (union)=%llu - already in entry set/already judged=%llu - already a block start=%llu - decodable=%llu - undecodable=%llu"
+                     " - blocked by overlap=%llu\n",
                      opt.close_jmptab ? "on" : "off", soft_jumptab.added.size(),
                      static_cast<unsigned long long>(run.jumptab_live_roots),
                      soft_jumptab.outside.size(),
@@ -4169,49 +4169,49 @@ int main(int argc, char** argv) {
     // 样例（⛔ 不是"看看"：这三类的形状由 D14 的三条判据定义，样例是规则的实证）
     auto printSamples = [](const char* tag, const std::set<std::uint32_t>& eas) {
         if (eas.empty()) return;
-        std::fprintf(stderr, "lift-gen: [%s] %zu 处，样例：", tag, eas.size());
+        std::fprintf(stderr, "lift-gen: [%s] %zu site(s), samples:", tag, eas.size());
         std::size_t n = 0;
         for (const std::uint32_t ea : eas) {
             if (n++ == 8) {
-                std::fprintf(stderr, " …");
+                std::fprintf(stderr, " ...");
                 break;
             }
             std::fprintf(stderr, " %08X", ea);
         }
         std::fprintf(stderr, "\n");
     };
-    printSamples("丢弃/解不出", drops.undecodable);
-    printSamples("丢弃/落在已发射块字节内", drops.inside_block);
+    printSamples("dropped/undecodable", drops.undecodable);
+    printSamples("dropped/inside already-emitted block bytes", drops.inside_block);
     auto printSoftSamples = [](const char* tag, const std::set<std::uint32_t>& eas) {
         if (eas.empty()) return;
-        std::fprintf(stderr, "lift-gen: [%s] %zu 处，样例（3）：", tag, eas.size());
+        std::fprintf(stderr, "lift-gen: [%s] %zu site(s), samples (3):", tag, eas.size());
         std::size_t n = 0;
         for (const std::uint32_t ea : eas) {
             if (n++ == 3) {
-                std::fprintf(stderr, " …");
+                std::fprintf(stderr, " ...");
                 break;
             }
             std::fprintf(stderr, " %08X", ea);
         }
         std::fprintf(stderr, "\n");
     };
-    printSoftSamples("soft-root/越界（call）", soft_call.outside);
-    printSoftSamples("soft-root/解不出（call）", soft_call.undecodable);
-    printSoftSamples("soft-root/重叠（call）", soft_call.overlap);
-    printSoftSamples("soft-root/越界（store-imm）", soft_store.outside);
-    printSoftSamples("soft-root/解不出（store-imm）", soft_store.undecodable);
-    printSoftSamples("soft-root/重叠（store-imm）", soft_store.overlap);
-    printSoftSamples("soft-root/越界（data-ptr）", soft_data.outside);
-    printSoftSamples("soft-root/解不出（data-ptr）", soft_data.undecodable);
-    printSoftSamples("soft-root/重叠（data-ptr）", soft_data.overlap);
-    printSoftSamples("soft-root/越界（jmptab）", soft_jumptab.outside);
-    printSoftSamples("soft-root/解不出（jmptab）", soft_jumptab.undecodable);
-    printSoftSamples("soft-root/重叠（jmptab）", soft_jumptab.overlap);
-    printSoftSamples("soft-root/已收（jmptab）", soft_jumptab.added);
+    printSoftSamples("soft-root/outside (call)", soft_call.outside);
+    printSoftSamples("soft-root/undecodable (call)", soft_call.undecodable);
+    printSoftSamples("soft-root/overlap (call)", soft_call.overlap);
+    printSoftSamples("soft-root/outside (store-imm)", soft_store.outside);
+    printSoftSamples("soft-root/undecodable (store-imm)", soft_store.undecodable);
+    printSoftSamples("soft-root/overlap (store-imm)", soft_store.overlap);
+    printSoftSamples("soft-root/outside (data-ptr)", soft_data.outside);
+    printSoftSamples("soft-root/undecodable (data-ptr)", soft_data.undecodable);
+    printSoftSamples("soft-root/overlap (data-ptr)", soft_data.overlap);
+    printSoftSamples("soft-root/outside (jmptab)", soft_jumptab.outside);
+    printSoftSamples("soft-root/undecodable (jmptab)", soft_jumptab.undecodable);
+    printSoftSamples("soft-root/overlap (jmptab)", soft_jumptab.overlap);
+    printSoftSamples("soft-root/accepted (jmptab)", soft_jumptab.added);
     // ★ BUG-24 / P2（S3）：**表项**的账 —— 独立一行（⛔ 不与 D26 合并：两类来源不同）。
     std::printf(
-        "lift-gen: 跳表表项（S3/P2）%s 候选=%llu · 收成 leader（建块前）= %zu · 已是入口=%llu · "
-        "越界=%llu · shim=%llu · 落在表区间=%llu · 解不出=%zu · 与已发射块重叠=%zu\n",
+        "lift-gen: jump-table items (S3/P2) %s candidates=%llu - accepted as leaders (before block building)=%zu - already entries=%llu - "
+        "outside=%llu - shim=%llu - inside a table range=%llu - undecodable=%zu - overlaps an emitted block=%zu\n",
         opt.close_jmptab_items ? "on" : "off",
         static_cast<unsigned long long>(run.item_seeds), soft_item.added.size(),
         static_cast<unsigned long long>(run.item_already),
@@ -4219,12 +4219,12 @@ int main(int argc, char** argv) {
         static_cast<unsigned long long>(run.item_shim),
         static_cast<unsigned long long>(run.item_in_range), soft_item.undecodable.size(),
         soft_item.overlap.size());
-    printSoftSamples("soft-root/解不出（jmptab-item）", soft_item.undecodable);
-    printSoftSamples("soft-root/重叠（jmptab-item）", soft_item.overlap);
+    printSoftSamples("soft-root/undecodable (jmptab-item)", soft_item.undecodable);
+    printSoftSamples("soft-root/overlap (jmptab-item)", soft_item.overlap);
     // ★ BUG-24 / S1：**跳表识别**的账（逐表细节走 `--jmptab-audit`；这里只报能对账的汇总）。
     std::printf(
-        "lift-gen: 跳表识别（S1）%s · 站点=%llu · 候选表=%zu · 认出=%zu（srcA=%zu srcB=%zu）· "
-        "被拒=%zu（其中 ⑤ 区间覆盖根/call目标=%llu）· 表项=%zu · 趟数=%u · 开关 exclude=%d items=%d\n",
+        "lift-gen: jump-table recognition (S1) %s - sites=%llu - candidate tables=%zu - recognised=%zu (srcA=%zu srcB=%zu) - "
+        "rejected=%zu (of which (5) range covers a root/call target=%llu) - items=%zu - passes=%u - switches exclude=%d items=%d\n",
         run.jmptab_on ? "on" : "off", static_cast<unsigned long long>(run.jmptab.sites),
         run.jmptab.candidates.size(), run.jmptab.tables.size(),
         [&] {
@@ -4242,45 +4242,45 @@ int main(int argc, char** argv) {
         run.jmptab.items().size(), run.passes, opt.jmptab_exclude ? 1 : 0,
         opt.close_jmptab_items ? 1 : 0);
     // ★ BUG-24 / P1（S2）的读数：被表区间挡下的 leader / `call` 返回 EA。
-    std::printf("lift-gen: 跳表区间不参与解码（S2/P1）%s · 被区间挡下的 leader=%llu（根例外=%llu）· "
-                "call 返回 EA 落在区间=%llu\n",
+    std::printf("lift-gen: jump-table ranges excluded from decoding (S2/P1) %s - leaders blocked by a range=%llu (root exceptions=%llu) - "
+                "call return EAs inside a range=%llu\n",
                 opt.jmptab_exclude ? "on" : "off",
                 static_cast<unsigned long long>(run.data_range_leaders),
                 static_cast<unsigned long long>(run.data_range_root_hits),
                 static_cast<unsigned long long>(run.call_ret_in_data_range));
-    printSoftSamples("跳表区间/挡下的 leader", run.table_range_leaders);
+    printSoftSamples("jump-table range/blocked leaders", run.table_range_leaders);
     // 五类软根的"落在表区间"这一档（P1 新增；⛔ 不写 rejected_targets_）
-    printSoftSamples("soft-root/落在表区间（call）", soft_call.table_range);
-    printSoftSamples("soft-root/落在表区间（store-imm）", soft_store.table_range);
-    printSoftSamples("soft-root/落在表区间（data-ptr）", soft_data.table_range);
-    printSoftSamples("soft-root/落在表区间（jmptab）", soft_jumptab.table_range);
+    printSoftSamples("soft-root/inside table range (call)", soft_call.table_range);
+    printSoftSamples("soft-root/inside table range (store-imm)", soft_store.table_range);
+    printSoftSamples("soft-root/inside table range (data-ptr)", soft_data.table_range);
+    printSoftSamples("soft-root/inside table range (jmptab)", soft_jumptab.table_range);
     // ★ D21（第四类）：**跳表入口**的账 —— 独立一行，且必须能读出"只加 entry、0 新块"这一点。
     //   判据的输入面是"可执行节里 4 字节对齐的 dword"站点数；强过滤器是"值必须已经是块首"。
     std::printf(
-        "lift-gen: 跳表入口（D21）added=%zu（只加 entries；⛔ 0 新块 / 0 新指令）· 可执行节 4 字节对齐 "
-        "dword 站点=%llu（值=已建块首=%llu，不同目标=%llu）· 已在入口集=%zu · 孤儿提升=%zu\n",
+        "lift-gen: jump-table entries (D21) added=%zu (entries only; 0 new blocks / 0 new instructions) - executable-section 4-byte aligned "
+        "dword sites=%llu (value==an existing block start=%llu, distinct targets=%llu) - already in entry set=%zu - orphan promotions=%zu\n",
         jump_table.added.size(), static_cast<unsigned long long>(jump_table.sites),
         static_cast<unsigned long long>(jump_table.block_hits),
         static_cast<unsigned long long>(jump_table.distinct), jump_table.skipped.size(),
         jump_table.unclaimed.size());
     std::fprintf(stderr,
-                 "lift-gen: [跳表入口 D21] added=%zu（只加 entries、0 新块）· 可执行节 4 字节对齐 dword "
-                 "站点=%llu（值=已建块首=%llu，不同目标=%llu）· 已在入口集=%zu · 孤儿提升=%zu\n",
+                 "lift-gen: [jump-table entries D21] added=%zu (entries only, 0 new blocks) - executable-section 4-byte aligned dword "
+                 "sites=%llu (value==an existing block start=%llu, distinct targets=%llu) - already in entry set=%zu - orphan promotions=%zu\n",
                  jump_table.added.size(), static_cast<unsigned long long>(jump_table.sites),
                  static_cast<unsigned long long>(jump_table.block_hits),
                  static_cast<unsigned long long>(jump_table.distinct), jump_table.skipped.size(),
                  jump_table.unclaimed.size());
-    printSoftSamples("跳表入口/已加（D21）", jump_table.added);
-    printSoftSamples("跳表入口/孤儿提升（D21）", jump_table.unclaimed);
+    printSoftSamples("jump-table entry/added (D21)", jump_table.added);
+    printSoftSamples("jump-table entry/orphan-promoted (D21)", jump_table.unclaimed);
     // ★ G3：入口集收敛护栏 —— 没有块、退出入口集的入口 EA（⛔ 不静默）。
-    std::printf("lift-gen: 入口集收敛护栏：没有块的入口 EA=%zu（⇒ 退出入口集、指向它的边发 ret i32）\n",
+    std::printf("lift-gen: entry-set convergence guard: entry EAs without a block=%zu (=> dropped from the entry set, edges to them emit ret i32)\n",
                 unbuildable.size());
     if (!unbuildable.empty()) {
-        std::fprintf(stderr, "lift-gen: [入口集/没有块] %zu 处，样例（3）：", unbuildable.size());
+        std::fprintf(stderr, "lift-gen: [entry set/no block] %zu site(s), samples (3):", unbuildable.size());
         std::size_t n = 0;
         for (const std::uint32_t ea : unbuildable) {
             if (n++ == 3) {
-                std::fprintf(stderr, " …");
+                std::fprintf(stderr, " ...");
                 break;
             }
             std::fprintf(stderr, " %08X", ea);
@@ -4300,9 +4300,9 @@ int main(int argc, char** argv) {
     if (!unsupported.empty()) {
         std::map<std::string, std::size_t> by_op;
         for (const GenUnsupported& u : unsupported) ++by_op[u.op];
-        std::fprintf(stderr, "lift-gen: unsupported %zu 处（llvm.trap）→ %s\n", unsupported.size(),
+        std::fprintf(stderr, "lift-gen: %zu unsupported site(s) (llvm.trap) -> %s\n", unsupported.size(),
                      unsupported_path.string().c_str());
-        std::fprintf(stderr, "lift-gen: unsupported 汇总：");
+        std::fprintf(stderr, "lift-gen: unsupported totals:");
         bool first = true;
         for (const auto& kv : by_op) {
             std::fprintf(stderr, "%s%s=%zu", first ? "" : " ", kv.first.c_str(), kv.second);
