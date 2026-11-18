@@ -38,6 +38,11 @@ struct Element {
     int w = 0;               // Rect 的参考像素宽（Text 忽略：宽度由字体度量）
     int h = 0;               // Rect 的参考像素高（Text 忽略）
     std::string text;        // Text 的内容（UTF-8；宿主字体逐码位取字）
+    // ★ 命中键（`REQ-01M7QF01A00F9946DX0GPH23JQ` 切片 2 后半）：**非空** ⇒ 这条元素（只有 Rect）
+    //   是一个命中区，命中区 = 它的 **resolved rect**（缩放 / 居中 / DPR 之后的窗口像素）。
+    //   空 = 不可命中（`ui.rect` 不传 `key` 时的缺省）。⛔ 这不是 C++ 的按钮：外观 / 状态 / 主题
+    //   在 `scripts/ui/kit.js`（需求单「已裁决」第 2 条）。
+    std::string key;
     int font_size = 16;      // Text 的参考像素字号（D5：实际 = round(size*s)，按最终像素重绘）
     bool bold = false;       // Text 是否用粗体 face
     Color fill{0, 0, 0, 255};   // Rect 填充（Text 的底色由下层 Rect 提供）

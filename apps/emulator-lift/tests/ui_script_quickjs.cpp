@@ -25,6 +25,9 @@
 //      入口约定漂移（overlay 会静默不画）。★ 注意 `JS_EVAL_FLAG_STRICT` 的**全局代码**里
 //      `function render(){}` 会挂到 globalThis（实测 v0.18.0，与 v0.10.1 相同）；合同只要求"认
 //      globalThis.render 这个属性"，本文件不断言 function 声明挂不上（见 a-report.md 的差异记录）。
+//   ⑦ key-on-rect（切片 2 后半）：`ui.rect({key})` 的 key 进命中表；`game.click` 是**一次性**
+//      对象 `{key,x,y}`（下一帧就没有）；`game.hover` / `game.active` 是只读 key（没有 ⇒ undefined，
+//      strict 赋值抛 TypeError）。红了 ⇒ 命中原语没接到 JS 面 / click 会重复触发。
 // ★ 顶层无条件注册 = **pure** 档（AGENTS.md §12.4：判据 = 注册位置）。
 // ★ 只 include 接口头 + FontEngine；⛔ 不 include quickjs.h（那是 script_quickjs.cpp 的特权）。
 #include <chrono>
@@ -37,7 +40,9 @@
 
 #include "check.h"
 #include "runtime/font.h"
+#include "ui/canvas.h"
 #include "ui/element.h"
+#include "ui/hit.h"
 #include "ui/script.h"
 
 namespace {
@@ -663,6 +668,89 @@ void caseValueStress() {
     script->shutdown();
 }
 
+// =======================================================================================
+// ⑧ 命中 / 捕获的 JS 面（`REQ-01M7QF01A00F9946DX0GPH23JQ` 切片 2 后半）
+//   · `ui.rect({key})` ⇒ key 挂在 Element 上 ⇒ 命中表（`buildHitRegions`）里有它；
+//     没传 key / `key: ''` ⇒ **不可命中**（不进命中表）；
+//   · `game.click` = 一次性对象 `{key,x,y}`：宿主交来的那一帧看得到，下一帧就是 `undefined`；
+//   · `game.hover` / `game.active` = 只读 key（没有 ⇒ `undefined`），strict 赋值抛 TypeError。
+// ★ 红了 ⇒ 命中原语没接到 JS 面 / click 不是一次性（会重复触发）/ 新 getter 是可写数据属性。
+// =======================================================================================
+const char* kKeyOnRectScript = R"JS(
+globalThis.render = function render() {
+  ui.rect({ x: 10, y: 20, w: 30, h: 40, key: 'btn' });
+  ui.rect({ x: 0, y: 0, w: 5, h: 5 });            // 没 key ⇒ 不可命中
+  ui.rect({ x: 100, y: 0, w: 5, h: 5, key: '' }); // 空 key ⇒ 不可命中
+  var c = game.click;
+  ui.text({ x: 0, y: 0, text: c === undefined ? 'click=none' : ('click=' + c.key + '@' + c.x + ',' + c.y), size: 1 });
+  ui.text({ x: 0, y: 0, text: 'hover=' + (game.hover === undefined ? 'none' : game.hover), size: 1 });
+  ui.text({ x: 0, y: 0, text: 'active=' + (game.active === undefined ? 'none' : game.active), size: 1 });
+  var w1 = 'no'; try { game.hover = 'x'; } catch (e) { w1 = e.name; }
+  var w2 = 'no'; try { game.click = undefined; } catch (e) { w2 = e.name; }
+  var w3 = 'no'; try { game.active = 'x'; } catch (e) { w3 = e.name; }
+  ui.text({ x: 0, y: 0, text: 'write=' + w1 + ',' + w2 + ',' + w3, size: 1 });
+};
+)JS";
+
+void caseKeyOnRect() {
+    lift_test::g_current_case = "ui-script-quickjs/key-on-rect";
+    auto runtime = lift::ui::makeQuickJsRuntime();
+    std::unique_ptr<UiScript> script = loadOk(*runtime, kKeyOnRectScript, "key-on-rect.js");
+    if (!script) return;
+
+    // ① key 挂在 rect 上 ⇒ 命中表；没有 key / 空 key 的矩形不进表。
+    UiFrameReadings framed;
+    framed.frame = 1;
+    framed.hover_key = "btn";
+    framed.active_key = "btn";
+    framed.click_ok = true;
+    framed.click_key = "btn";
+    framed.click_x = 12;
+    framed.click_y = 34;
+    UiBuilder builder;
+    std::string err;
+    const bool ok = script->render(builder, framed, &err);
+    ++lift_test::g_checks;
+    if (!ok) {
+        lift_test::failf(__FILE__, __LINE__, "render 失败: %s", err.c_str());
+        return;
+    }
+    std::vector<std::string> texts;
+    for (const Element& e : builder.elements()) {
+        if (e.kind == ElementKind::Text) texts.push_back(e.text);
+    }
+    // 命中表：`key: 'btn'` 那一条（resolved = 参考像素，scale 1）；另两条不进表。
+    const std::vector<lift::ui::HitRegion> hits =
+        lift::ui::buildHitRegions(builder.elements(), lift::ui::CanvasOrigin{1.0, 0, 0}, 0, 0);
+    ++lift_test::g_checks;
+    if (hits.size() != 1) {
+        lift_test::failf(__FILE__, __LINE__, "命中表应恰好 1 条（没有 key / 空 key 的矩形不进表），实际 %zu",
+                         hits.size());
+    }
+    if (hits.size() == 1) {
+        ++lift_test::g_checks;
+        if (hits[0].key != "btn") lift_test::failf(__FILE__, __LINE__, "命中 key 应是 btn，实际 %s", hits[0].key.c_str());
+        ++lift_test::g_checks;
+        if (hits[0].x != 10 || hits[0].y != 20 || hits[0].w != 30 || hits[0].h != 40) {
+            lift_test::failf(__FILE__, __LINE__, "命中 rect 应是 (10,20,30,40)，实际 (%d,%d,%d,%d)", hits[0].x,
+                             hits[0].y, hits[0].w, hits[0].h);
+        }
+    }
+    // ② `game.click` 这一帧是一次性对象（key / x / y 原样）。
+    expectText(texts, 0, "click=btn@12,34", "game.click 的载荷");
+    // ③ hover / active 是只读 key。
+    expectText(texts, 1, "hover=btn", "game.hover");
+    expectText(texts, 2, "active=btn", "game.active");
+    expectText(texts, 3, "write=TypeError,TypeError,TypeError", "hover / click / active 只读（strict 赋值抛 TypeError）");
+
+    // ② 下一次 render 没有 click / hover / active ⇒ 全部 undefined（一次性 + 每帧快照）。
+    const std::vector<std::string> plain = renderTexts(*script, UiFrameReadings{});
+    expectText(plain, 0, "click=none", "下一次 render：click 已失效");
+    expectText(plain, 1, "hover=none", "没有鼠标位置时 hover 是 undefined");
+    expectText(plain, 2, "active=none", "没有捕获时 active 是 undefined");
+    expectText(plain, 3, "write=TypeError,TypeError,TypeError", "只读性不随帧变化");
+}
+
 }  // namespace
 
 int main() {
@@ -671,6 +759,7 @@ int main() {
     caseApi();
     caseReadings();
     caseError();
+    caseKeyOnRect();
     caseValueStress();
     return lift_test::finish("ui-script-quickjs");
 }
