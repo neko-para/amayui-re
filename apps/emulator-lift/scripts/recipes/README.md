@@ -51,6 +51,7 @@ click 1186 373                          # ⛔ 不带 timeout（点击没有可�
 | `sn0000-quit.plan` | TITLE → GAMESTART → ADV → 右键 → FELLOW → SAVE → 回 TITLE → Quit | **repro 锚** `01M78A0V0X1X1PCK7MP71Q1J81#click 1186 373` **与** `01M77MC1374HXC2JR7E0ZYSHQJ#click 1180 640` · `docs/03-emulator/defects.md`（quit 不是正常退出那张单的复现面）· `01M7A5VFKB7VYHEXVXB67QDNST` |
 | `title-loaddata.plan` | TITLE → 点 LoadData（1070,480）→ 留 20 s 看结局（进加载界面 / 干净退出） | **repro 锚** `01M75SDKZGY87B8SK7GBP92PXD#click 1070 480` · `docs/03-emulator/defects.md` · `01M7GA4B8T9JXFDAYK46YHNH7K`（AOT 侧手写 plan 的对照） |
 | `sc0000-wipe.plan` | 加载第 4 槽（`click 300 269` = SAVE03）+ **1 次**推进点击 → blind wipe；`profile_begin/end pre` 与 `wipe` 两窗（三档 headless / window vsync0 / vsync1） | `docs/03-emulator/wipe-profile.md`（逐帧 timed 读数与 H1–H6）· `docs/03-emulator/scripts/SC0000.md`（wipe 转场静态定位）· `docs/03-emulator/scripts/SAVE.md`（槽位行 y 实测） |
+| `save04-fault.plan` | 加载第 5 槽（`click 300 328` = SAVE04）→ 教程询问 `click 640 393`（不接受）→ 进地图 wipe ⇒ **exit 3 + guest mem fault**（判据是 `WRITE 0x1005BA8C` + fault 现场的 `eip=004A50C0` / 32 字栈 / `input-plan:` 摘要；`pending != 0` 是 `_Exit(3)` 的正常形状） | `docs/03-emulator/defects.md#BUG-32` · 缺陷单 `REQ-01M7PG01B79175MPR7XP0VP3DJ` · 工具单 `REQ-01M7PG086DG4BBPA40VCVZTP4X` |
 
 ★ 单号都是 `data/requirements/<ID>.md`。**改这里的路径 ⇒ 那 6 条 `repro:` 锚要一起改**（那是父级的活；
 本轮只搬家，没改需求树）。

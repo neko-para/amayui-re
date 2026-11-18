@@ -1,0 +1,53 @@
+# save04-fault.plan —— 加载 04 存档（第 5 槽）→ 教程询问选“否” → guest mem 越界（BUG-32）
+#
+# 判据：本次 run **exit 3** + `=== guest memory fault ===`（WRITE 0x1005BA8C，SC4000 wipe）。
+#   fault 文本含 eip / `lift_cc_<EA>` / 8 GPR+eflags / 32 字栈 / ebp 链 / `input-plan:` 摘要。
+#   崩溃发生在最后一个 `await position … 0x10D00` 之后的 wipe 里 ⇒ 末尾指令不再消费
+#   （`pending != 0` 是 `_Exit(3)` 的正常形状，⛔ 不是配方写错；`--time-limit` 只是看门狗）。
+#
+# 跑法（macOS / win32 同一份；每次全新 `--appdata`，存档从 `saves/` 复制）：
+#   cd apps/emulator-lift && ./out/emulator-lift-aot --present headless --skip-logo --audio off \
+#     --game-dir ../../links/install --appdata <私有副本> \
+#     --input-plan scripts/recipes/save04-fault.plan --max-frames 4000 --time-limit 300
+#
+# ★ 门都落在**停点**上：SC4000 的第一道门是 `[0x5800,0x5860)`（它停在这里等输入），
+#   ⛔ 不是 `[0x5900,0x5960)`（那个位置只有点了才会到；历史配方就卡在这）。
+# ★ 槽位：加载屏第 5 槽 SAVE04 = `click 300 328`；教程“不接受” = `click 640 393`。
+await position TITLE 0x0460 0x0520 timeout 30000
+click 1070 480
+await position SAVE 0x1104 0x11C4 timeout 30000
+click 300 328
+await position SBUNKI 0x09F8 0x0B18 timeout 30000
+click 640 323
+wait 300
+await position SBUNKI 0x0AF8 0x0B18 timeout 8000
+click 690 323
+await position SBUNKI 0x0F60 0x1040 timeout 8000
+await script SC0000 timeout 120000
+await position SC0000 0x194C0 0x19540 timeout 90000
+wait 8000
+click 500 500
+await script SC4000 timeout 120000
+await position SC4000 0x5800 0x5860 timeout 60000
+wait 3000
+click 500 500
+await position SC4000 0x5920 0x5960 timeout 60000
+wait 2000
+click 500 500
+await position BUNKI 0x0B00 0x0C00 timeout 120000
+wait 2000
+click 640 393
+await position SC4000 0x6B00 0x6B80 timeout 120000
+wait 3000
+click 500 500
+await position SC4000 0x6B80 0x6C00 timeout 60000
+wait 1500
+click 500 500
+await position SC4000 0x6C00 0x6D00 timeout 60000
+wait 1500
+click 500 500
+await position SC4000 0x10D00 0x10E00 timeout 60000
+wait 1000
+click 500 500
+wait 15000
+quit

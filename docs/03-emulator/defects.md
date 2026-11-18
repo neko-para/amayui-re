@@ -823,11 +823,25 @@
   崩溃帧 **1264**：同帧先建 `D3DXCreateEffectFromResourceA id=201`（Fade ps_2_0）与 `id=203`
   （SlideBlur/ZoomBlur ps_2_0），随后 fault。`0x1005BA8C = 0x1005BA80 + 0xC`；静态 203 调用有
   `lea eax,[ebx+0B59Ch]`（`loc_4B07D9`），但 **fault 时 `ebx` 没有读数** ⇒ 只作线索，⛔ 不作结论。
-- **配方状态**：`.tmp/save04-tutorial/save04-tutorial-no.plan` **未通过** —— 配方卡在 SC0000 首句
-  （同一坐标 `click 500 500` 用 emu-ctl 能推进，用 `--input-plan` 不推进）⇒ `pending=19/20`、exit 5。
-  ⛔ 不要把“配方没跑通”写成“不复现”：交互式已复现。
-- **未定**：根因（fault 时无 EIP / 寄存器 / 栈；AOT 臂没有 `Machine` ⇒ `liftFaultHook` 未装）；
-  没有跑“选是”的对照；win 侧未比对；`0x1005BA8C` 的写者未定位。
-- **工具缺口**（父级另派）：AOT guest fault 打 EIP/寄存器/栈 · `--input-plan-trace` · fault 路径打
-  `input-plan` 摘要 · `InputPlan` 的 click 在 SC0000 不被消费（与 emu-ctl 同坐标不同效）。
-- **代表守卫**：无（先要能定位；⛔ 在根因未明前写“到达某界面”的业务判据）。
+- **配方复现（2026-11-18 / 一次 run，已通过）**：
+  ```bash
+  cd apps/emulator-lift
+  ./out/emulator-lift-aot --present headless --skip-logo --audio off \
+    --game-dir ../../links/install --appdata <私有副本> \
+    --input-plan scripts/recipes/save04-fault.plan --max-frames 4000 --time-limit 300
+  ```
+  ⇒ **exit 3** + fault；父级复跑读数 `eip=004A50C0` / `lift_cc_004A50C0` /
+  `eax=10050004 ecx=10222920 edx=00000000 ebx=00000024` / `esp=6FFFD4A0 ebp=6FFFD4AC` /
+  `esi=100504F0 edi=100AE330` / 32 字栈 + ebp 链；fault 文本里同时有
+  `input-plan: steps=38 fired=10 pending=7 outcome=running`。`pending=7` 是 `_Exit(3)` 的正常形状。
+  ★ 旧 `.tmp` 版的 `await position SC4000 0x5900 0x5960` 是**错的**：SC4000 停在 `0x5828`
+  等输入，只有点了才会到 `0x5948` ⇒ 正确门是 `[0x5800,0x5860)`；配方已按此转正。
+- **`--input-plan` 点击前提（已推翻）**：trace 证明配方 click **被消费**（`await script SC4000` 在
+  f1259/f1398 成立；无 click 对照 60 s 不成立），emu-ctl 同屏 click 的施加形状逐项相同
+  （`at=PeekMessage` + `reason=forced`）⇒ `releaseDue` / `sampled` 不是根因，**未改 release 语义**。
+- **未定**：根因（fault 现场已有；`eip=004A50C0` 与 `0x1005BA8C` 的写者 / 对象尚未定位）；
+  没有跑“选是”的对照；win 侧未比对。
+- **工具缺口（已由 `REQ-01M7PG086DG4BBPA40VCVZTP4X` 落地）**：AOT fault 现场（EIP/寄存器/栈）·
+  `--input-plan-trace` · fault 路径 `input-plan` 摘要。真实 fault 的 eip/寄存器/栈即上面读数。
+- **代表守卫**：配方 `apps/emulator-lift/scripts/recipes/save04-fault.plan`（exit 3 是判据；⛔ 不写
+  “到达某界面”的业务判据）。
