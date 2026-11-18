@@ -2464,6 +2464,24 @@ if(LIFT_BUILD_TESTS)
 endif()
 
 # =====================================================================================
+# G · UI 脚本层的 ES module（`REQ-01M7QF01A00F9946DX0GPH23JQ` 切片 2 前半）
+# ★ 判据 = `tests/ui_script_modules.cpp`：相对 import / 嵌套 / 拒绝 bare + 绝对 + `data:` +
+#   `..` 逃逸 / module 顶层抛错不被吞 / classic 路径不变 / 缓存 / 混合 load（见该文件头的 ①–⑩）。
+# ★ 夹具 = `tests/ui_modules/`（跟着测试走；⛔ 不是发行的 `scripts/ui/`；切片 2 后半才放发行件）。
+#   绝对路径由 CMake 注入（`LIFT_UI_MODULES_DIR`），用例不依赖 ctest 的 cwd。
+# ★ **顶层** `if(LIFT_BUILD_TESTS)` ⇒ `cmakeTestTier()` 透明 ⇒ pure 档（AGENTS.md §12.4）。
+# ★ 变异：`tools/mutate-check.mjs` 末尾那条把 module 求值的 rejection 检查改成恒 false
+#   ⇒ module 顶层的异常被静默吞掉 ⇒ 本用例当场红。
+# =====================================================================================
+if(LIFT_BUILD_TESTS)
+    add_executable(lift-ui-script-modules tests/ui_script_modules.cpp)
+    target_link_libraries(lift-ui-script-modules PRIVATE emulator-lift-runtime)
+    target_compile_definitions(lift-ui-script-modules PRIVATE
+        LIFT_UI_MODULES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/ui_modules")
+    add_test(NAME ui-script-modules COMMAND lift-ui-script-modules)
+endif()
+
+# =====================================================================================
 # F · `emulator-lift-gen` 的输出字节恒为 ASCII（构建期工具 ⇒ 构建日志的编码不可知）
 # ★ 不变量：`lift-gen` 在**不依赖资产**的入口路径上（`--help` / 参数错误 / skip），stdout +
 #   stderr 的每个字节都 < 0x80。红了 ⇒ ninja 捕获回放 / 管道 / 重定向消费者按本地码页解码就是

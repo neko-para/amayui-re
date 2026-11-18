@@ -4519,6 +4519,26 @@ const MUTATIONS = [
       '把 usage 首行改回中文（原缺陷形态）⇒ `--help` 的 stdout 出现非 ASCII 字节 ⇒ ' +
       'gen-ascii-output 的"每个字节 < 0x80"断言当场红',
   },
+
+  // ── UI 脚本 ES module 的 rejection 面（切片 2 前半；守卫 = `tests/ui_script_modules.cpp`）──
+  //   ★ 代表"module 求值返回的 Promise 没人查 rejection"这一类**静默**失效：脚本明明在顶层抛了，
+  //     overlay 只是"不画"（load 走到入口检查才报一句没有 render），没有任何人看见真正的异常。
+  //   ★ 为什么落在这一行：drain / rejection 检查是本单**唯一**把 module 异常带回宿主 err 的地方；
+  //     `JS_Eval(MODULE)` 的失败在正常路径上是 rejected Promise 而不是 JS_EXCEPTION。
+  //   ★ 判据不变的红/绿：改成恒 false 后 `thrower.js` 的 `module-boom` 不会出现在 err 里
+  //     （改为入口缺失的错误）⇒ `module-throw-surfaced` 的 err 子串断言落空。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from: '            if (state == JS_PROMISE_REJECTED) {',
+    to: '            if (false && state == JS_PROMISE_REJECTED) {  // 变异：静默吞掉 module 的 rejection',
+    guard: 'ctest:ui-script-modules',
+    ctest: 'ui-script-modules',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-ui-script-modules',
+    what:
+      'module 求值返回的 Promise 的 rejection 检查改成恒 false ⇒ module 顶层的异常被静默吞掉 ⇒ ' +
+      'ui-script-modules 的 module-throw-surfaced 在 err 里看不到 `module-boom` ⇒ 红',
+  },
 ];
 
 let mutationRunSeq = 0;
