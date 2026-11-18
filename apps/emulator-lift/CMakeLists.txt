@@ -2554,3 +2554,39 @@ if(LIFT_BUILD_TESTS)
     target_link_libraries(lift-control-globals PRIVATE emulator-lift-runtime)
     add_test(NAME lift-control-globals COMMAND lift-control-globals)
 endif()
+
+# =====================================================================================
+# I · UI 的**命中原语 / 捕获路由**（`REQ-01M7QF01A00F9946DX0GPH23JQ` 切片 2 后半）
+#
+# ★ 裁决：C++ 只做原语 —— `key` 挂在 `ui.rect` 上（⛔ 没有 C++ `ui.button`，⛔ 没有 JS 的
+#   `ui.hit` 模块）；按钮外观 / 布局 / 状态 / 主题全在发行件 `scripts/ui/kit.js`。
+#   落点 = `src/ui/hit.{h,cpp}`（纯状态机）+ `src/ui/raster.cpp` 的 `resolveRectPixels` /
+#   `drawsBefore`（命中区与 `rasterize` **同一份**算术）+ `src/ui/script.h` 的三个只读读数
+#   （click 一次性 / hover / active）+ `src/ui/script_quickjs.cpp` 的 getter 与 `ui.rect` 的 key。
+# ★ 判据（顶层 `if(LIFT_BUILD_TESTS)` ⇒ `cmakeTestTier()` 透明 ⇒ pure 档，AGENTS.md §12.4）：
+#   · `ui-hit`          逆序命中 / resolved rect 边界（1 px 内/外）/ 无成功帧不命中 / key 为空不可命中；
+#   · `ui-click-router` down 吞+capture / up 无条件吞 / 同 rect 抬起才发 click / 拖出取消 /
+#                       motion·wheel·右键放行 / 新 down 清 capture / click 一次性；
+#   · `ui-kit-script`   经**现有 module loader** 加载发行件 `scripts/ui/kit.js`，断言 Button 的
+#                       idle / hover / active 三态（display list + hit list 的形状），⛔ 不靠截图。
+#   ★ `ui-script-quickjs` 增 `key-on-rect`：`ui.rect({key})` → 命中表；`game.click` 一次性；
+#     `game.hover` / `game.active` 只读。
+# ★ 变异（`tools/mutate-check.mjs` 末尾四条，都带 `buildTarget`）：
+#   ① 命中改正序 ⇒ `ui-hit` 红；② 捕获时 up 未吞 ⇒ `ui-click-router` 红；
+#   ③ click 消费后不清 ⇒ `ui-click-router` 红；④ kit 的 hover 高亮分支失效 ⇒ `ui-kit-script` 红。
+# =====================================================================================
+target_sources(emulator-lift-runtime PRIVATE src/ui/hit.cpp)
+
+if(LIFT_BUILD_TESTS)
+    add_executable(lift-ui-hit tests/ui_hit.cpp)
+    target_link_libraries(lift-ui-hit PRIVATE emulator-lift-runtime)
+    add_test(NAME ui-hit COMMAND lift-ui-hit)
+
+    add_executable(lift-ui-click-router tests/ui_click_router.cpp)
+    target_link_libraries(lift-ui-click-router PRIVATE emulator-lift-runtime)
+    add_test(NAME ui-click-router COMMAND lift-ui-click-router)
+
+    add_executable(lift-ui-kit-script tests/ui_kit_script.cpp)
+    target_link_libraries(lift-ui-kit-script PRIVATE emulator-lift-runtime)
+    add_test(NAME ui-kit-script COMMAND lift-ui-kit-script)
+endif()

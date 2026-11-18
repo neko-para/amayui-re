@@ -25,6 +25,26 @@ namespace lift::ui {
 bool measureText(const std::string& text, int pixel_size, bool bold, FontEngine& font, int* w, int* h,
                  std::string* err);
 
+// ---------------------------------------------------------------------------------------
+// 命中区与 `rasterize` **共用**的两份纯算术（`REQ-01M7QF01A00F9946DX0GPH23JQ` 切片 2 后半）
+// ★ 为什么放在 raster 这一层：命中区 = `ui.rect` 的 **resolved rect**（缩放 / 居中 / DPR 之后），
+//   必须与真正画到屏幕上的矩形**逐像素同源**；在别处再写一份 `* scale + origin` 就会静默漂移
+//   （高 DPI / 非 16:9 下点偏一格，而且没有任何症状）。
+// ---------------------------------------------------------------------------------------
+// 一条元素在**窗口像素**空间的 resolved rect（`kind == Rect` 时就是命中区）。
+// ★ 只对 Rect 有意义：Text 的尺寸由宿主字体度量（`rasterize` 内部再覆盖 w/h）。
+struct RectPixels {
+    int x = 0;
+    int y = 0;
+    int w = 0;
+    int h = 0;
+};
+RectPixels resolveRectPixels(const Element& e, const CanvasOrigin& canvas, int picture_x, int picture_y);
+
+// 绘制序：z 升序、同 z 按构造序（seq 升序）。
+// ★ `rasterize` 的 stable_sort 与命中表的顺序**共用这一份** —— 命中顺序 = 绘制序逆序。
+bool drawsBefore(const Element& a, const Element& b);
+
 // 栅格化结果：一块 RGBA8 图像 + 它在**窗口像素**空间的左上角。
 struct RasterImage {
     std::vector<std::uint8_t> rgba;

@@ -67,6 +67,17 @@ struct UiFrameReadings {
     double worst_guest_ms = 0.0;
     bool worst_guest_ok = false;
     double worst_shim_ms = 0.0;
+    // ---- 命中 / 捕获（切片 2 后半；`game.click|hover|active` 的**唯一**来源）----
+    // ★ 全部是**这一帧的只读快照**：宿主在 render 之前填好，render 结束即作废（下一次 render 重填）。
+    //   `hover_key` / `active_key` 空串 = 没有值（脚本侧 `undefined`，⛔ 不编空字符串）。
+    std::string hover_key;
+    std::string active_key;
+    // ★ `click` 是**一次性**的：宿主每帧 `takeClick` 取走一次 ⇒ 这一帧看得到，下一次就没有。
+    //   x/y = **抬起点**（窗口像素，与命中表同一空间）。
+    bool click_ok = false;
+    std::string click_key;
+    int click_x = 0;
+    int click_y = 0;
     // ★ 帧列表读数源（`game.local_frames()`；**非 owning**，只在 render 期间有效）。
     //   nullptr = 宿主没接（headless / 测试替身 / 叠层没开）⇒ 脚本侧 `undefined`。
     UiFrameSource* frames = nullptr;

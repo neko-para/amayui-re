@@ -94,13 +94,14 @@ struct Resolved {
 bool resolveOne(const Element& e, const CanvasOrigin& canvas, int picture_x, int picture_y, FontEngine& font,
                 Resolved* out, std::string* err) {
     out->element = &e;
-    out->x = picture_x + canvas.offset_x + scaleRef(e.x, canvas.scale, false);
-    out->y = picture_y + canvas.offset_y + scaleRef(e.y, canvas.scale, false);
-    if (e.kind == ElementKind::Rect) {
-        out->w = scaleRef(e.w, canvas.scale, true);
-        out->h = scaleRef(e.h, canvas.scale, true);
-        return true;
-    }
+    // ★ 左上角 / Rect 的 w/h 走 `resolveRectPixels`（与命中区**同一份**算术）；Text 的 w/h
+    //   随后由宿主字体度量覆盖（`RectPixels` 对 Text 只是无害的中间值）。
+    const RectPixels rect = resolveRectPixels(e, canvas, picture_x, picture_y);
+    out->x = rect.x;
+    out->y = rect.y;
+    out->w = rect.w;
+    out->h = rect.h;
+    if (e.kind == ElementKind::Rect) return true;
     out->font_px = scaleRef(e.font_size, canvas.scale, true);
     int w = 0;
     int h = 0;
@@ -155,6 +156,20 @@ bool drawText(std::vector<std::uint8_t>& rgba, int img_w, int img_h, int origin_
 }
 
 }  // namespace
+
+RectPixels resolveRectPixels(const Element& e, const CanvasOrigin& canvas, int picture_x, int picture_y) {
+    RectPixels out;
+    out.x = picture_x + canvas.offset_x + scaleRef(e.x, canvas.scale, false);
+    out.y = picture_y + canvas.offset_y + scaleRef(e.y, canvas.scale, false);
+    out.w = scaleRef(e.w, canvas.scale, true);
+    out.h = scaleRef(e.h, canvas.scale, true);
+    return out;
+}
+
+bool drawsBefore(const Element& a, const Element& b) {
+    if (a.z != b.z) return a.z < b.z;
+    return a.seq < b.seq;
+}
 
 bool measureText(const std::string& text, int pixel_size, bool bold, FontEngine& font, int* w, int* h,
                  std::string* err) {
@@ -248,9 +263,9 @@ bool rasterize(const std::vector<Element>& elements, const CanvasOrigin& canvas,
     out->rgba.assign(static_cast<std::size_t>(bytes), 0u);
 
     // ② 绘制序：z 升序、同 z 按 seq 升序（稳定排序；M0 的 z 全 0 ⇒ 纯构造序）。
+    //   ★ 比较只有一份（`drawsBefore`）：命中表的顺序 = 这一份的逆序。
     std::stable_sort(resolved.begin(), resolved.end(), [](const Resolved& a, const Resolved& b) {
-        if (a.element->z != b.element->z) return a.element->z < b.element->z;
-        return a.element->seq < b.element->seq;
+        return drawsBefore(*a.element, *b.element);
     });
 
     for (const Resolved& r : resolved) {
