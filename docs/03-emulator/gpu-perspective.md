@@ -245,5 +245,6 @@ node tools/mutate-check.mjs --list                                            # 
 - **运行**：两条链共 20,000 帧，挂 `--until 0x418340`（`lift_table.inc` 的合法派发块入口）⇒ **0 命中**、`[warn]` 0 条。
   ⚠ 位 21 / `skipped_draws` 在真 run 仍无机械读数（AOT 摘要不打印 d3d9 `unsupported`，见 §6.4）。
 - **下一步**：要一份**雪地图存档**（真机存一槽）或先解析 `SETL2DMOC` 的 238 条 `i341` 记录（天气列 = 2 的地图 id）；
+  ★ 用户口径（2026-11-18）：**暂时也不知道具体雪景存档** ⇒ N1 保持**待验证**记录，不阻塞其他工作。
   ⛔ 不要靠继续堆点击（80 击只推进 2 句对白）。存在性快判据：`LIFT_AOT_SHIM_TRACE=1` 里 `D3DXCreateEffectFromResourceA` 的资源号 `202`。
   有雪档后可直接用两个已查表停点：`0x004B56D0`（`Snow::Render` / `SetMatrix("Proj")`）、`0x00426E10`（`0x326` handler）。
