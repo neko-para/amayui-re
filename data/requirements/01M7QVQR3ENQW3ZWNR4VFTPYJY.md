@@ -2,10 +2,12 @@
 
 - id: REQ-01M7QVQR3ENQW3ZWNR4VFTPYJY
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M7JHSD5MWTB9N8WJC2Y2T69M
+- verify: apps/emulator-lift/tests/present_interval.cpp#present-interval
 - repro: apps/emulator-lift/src/runtime/d3d9.cpp#presentation_interval
 - severity: S3
+- done_reason: 白名单判定 + 唯一调用点 + 响亮停（退出码 2）落地：只接受 IMMEDIATE(0x80000000)，其余（含 DEFAULT=0）拒绝并点名 display:PresentInterval。守卫 present-interval 改前红 10 checks、改后 1/1；变异实测红。全量 ctest 120/120。
 - tags: [emulator-lift, dshow, d3d9, frame-pacing]
 
 ## 现象 / 提问（用户口径 2026-11-19）
