@@ -2484,3 +2484,20 @@ if(LIFT_BUILD_TESTS)
     add_dependencies(lift-gen-ascii-output emulator-lift-gen)
     add_test(NAME gen-ascii-output COMMAND lift-gen-ascii-output $<TARGET_FILE:emulator-lift-gen>)
 endif()
+
+# =====================================================================================
+# G · `D3DPRESENT_PARAMETERS.PresentationInterval` 的白名单（不变量：只接受 IMMEDIATE）
+#
+# ★ 不变量：`0x80000000 (D3DPRESENT_INTERVAL_IMMEDIATE)` 通过；`0 / 1 / 2 / 4 / 8 / 其余任意值`
+#   全拒（裁决 2026-11-19 · `REQ-01M7QVQR3ENQW3ZWNR4VFTPYJY`）。红了意味着：我们把 guest 的
+#   "等 vblank" 请求静默当成 IMMEDIATE 放行了（真机会被 vblank 挡住、我们会跑得更快），
+#   或者白名单本身被改成了别的值 —— 两种都是**静默的背离**，没有运行时症状。
+# ★ 判据是纯函数（`runtime/d3d9.h` 的 `presentIntervalSupported`）⇒ 不读 AGE.EXE / LFS /
+#   安装树 ⇒ 顶层 `if(LIFT_BUILD_TESTS)` 注册 = **pure** 档（AGENTS.md §12.4：判据 = 注册位置）。
+# ★ 变异：`tools/mutate-check.mjs` 末尾那条把判定改成恒真（`return true`）⇒ 本用例当场红。
+# =====================================================================================
+if(LIFT_BUILD_TESTS)
+    add_executable(lift-present-interval tests/present_interval.cpp)
+    target_link_libraries(lift-present-interval PRIVATE emulator-lift-runtime)
+    add_test(NAME present-interval COMMAND lift-present-interval)
+endif()

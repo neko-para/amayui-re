@@ -160,6 +160,26 @@ enum PresentParamsOff : std::uint32_t {
 };
 
 // =====================================================================================
+// PresentationInterval：**白名单 + 响亮停**（裁决 2026-11-19 · `REQ-01M7QVQR3ENQW3ZWNR4VFTPYJY`）
+//
+// ★ 引擎默认配置 `[display] PresentInterval=0` 写进 guest 的就是 **IMMEDIATE**：
+//   主渲染器 `sub_498CC0` 在 `0x498FBF` 查表 ⇒ `0x80000000`；影片渲染器 `0x47C7C3` 是纯立即数
+//   `80000000h`（无分支）。引擎自写的 `SYS4REG.INI` 72/72 份都是 `PresentInterval=0`。
+// ★ 本线**不实现"等 vblank"**：宿主没有 vsync 源，唯一能做到的是"按刷新率算 deadline 阻塞"=
+//   **语义近似**。⇒ 用户裁决：按"用户不会改配置"处理 —— **只有 IMMEDIATE 通过**，其余任何值
+//   （含 `D3DPRESENT_INTERVAL_DEFAULT (0)` / `ONE (1)` / `TWO (2)` / `FOUR (4)` / `EIGHT (8)`）
+//   ⇒ **立即停**，⛔ 不静默按 IMMEDIATE 继续（那等于假装尊重了 guest 的请求）。
+// ★ 判据是**纯函数**，调用点**只有一处**：`readPresentParams`（解析 D3DPRESENT_PARAMETERS 的那处）。
+//   ⛔ 不要在 `Present` 里再判一次 —— interval 是**建设备**时的合同，Present 每次重判只会在
+//   "设备已经建好"之后才发现矛盾（那时也没有第二条路了）。
+// =====================================================================================
+constexpr std::uint32_t kPresentIntervalImmediate = 0x80000000u;  // D3DPRESENT_INTERVAL_IMMEDIATE
+// 白名单判定（纯函数）：`interval == kPresentIntervalImmediate` ⇒ true，其余一律 false。
+// ★ **没有副作用**：打印 / 停机都在调用点（`readPresentParams` 的 `*why` + false）——
+//   这样它才能在纯夹具里被逐值断言（`tests/present_interval.cpp`）。
+bool presentIntervalSupported(std::uint32_t interval);
+
+// =====================================================================================
 // D3DCAPS9（**0xD4 B** = d3d9types.h 的字段数）
 //   实测的只有两个字段：`0x499126 call [ecx+1Ch]` 后 `0x499128` 读 `[ebp-0xE8]`、
 //   `0x49912E` 读 `[ebp-0xEC]`，其中 caps 基址 = `[ebp-0x144]` ⇒ **MaxTextureWidth +0x58 /

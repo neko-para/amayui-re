@@ -281,6 +281,14 @@ bool writeDisplayMode(X86& cpu, std::uint32_t ea, const AdapterMode& mode, std::
 // ---------------------------------------------------------------------------------------
 // D3DPRESENT_PARAMETERS
 // ---------------------------------------------------------------------------------------
+// ★ 白名单判定（裁决 / 反汇编锚见 `runtime/d3d9.h` 的 "PresentationInterval" 段）。
+//   **纯函数**：不读 guest 内存、不打日志、不停机器 —— 停机器的是**调用点**
+//   （`readPresentParams` 按本文件既有约定 `*why = …; return false`，再由 `shims/d3d9.cpp`
+//   的 `d3d9Trap` 打现场并 `stop_kind = Trap`）。⇒ 纯夹具能逐值断言它（`tests/present_interval.cpp`）。
+bool presentIntervalSupported(std::uint32_t interval) {
+    return interval == kPresentIntervalImmediate;
+}
+
 bool readPresentParams(X86& cpu, std::uint32_t ea, PresentParams* out, std::string* why) {
     if (!committedOut(cpu, ea, kPresentParamsBytes, "D3DPRESENT_PARAMETERS", why)) return false;
     PresentParams p;
@@ -298,6 +306,23 @@ bool readPresentParams(X86& cpu, std::uint32_t ea, PresentParams* out, std::stri
     p.flags = cpu.mem->rd32(ea + kPpFlags);
     p.refresh_hz = cpu.mem->rd32(ea + kPpFullScreenRefreshRateInHz);
     p.presentation_interval = cpu.mem->rd32(ea + kPpPresentationInterval);
+    // ★ 白名单外的 interval ⇒ **响亮停**（唯一调用点；裁决见 `runtime/d3d9.h`）。
+    //   为什么不能静默按 IMMEDIATE 继续：我们没有 vblank 源，"当成 IMMEDIATE"就是假装尊重了
+    //   guest 的请求 —— 真机在 `ONE/TWO/...` 下会被 vblank 挡住，我们会跑得更快。
+    //   消息必须带**实际值**（十六进制）并点名配置键 `display:PresentInterval`（用户唯一的改法）。
+    //   停法 = 本文件既有约定（`*why` + false）⇒ `shims/d3d9.cpp` 的 `d3d9Trap` 打现场、
+    //   `stop_kind = Trap` ⇒ AOT 臂 `!r.ok()` ⇒ 退出码 **2**（`aot_main.cpp`）。
+    if (!presentIntervalSupported(p.presentation_interval)) {
+        char buf[512];
+        std::snprintf(buf, sizeof(buf),
+                      "D3D9：D3DPRESENT_PARAMETERS.PresentationInterval=0x%08X 不在白名单（只有 "
+                      "D3DPRESENT_INTERVAL_IMMEDIATE=0x%08X）⇒ 本线不实现\"等 vblank\"，拒绝静默放行；"
+                      "配置键 display:PresentInterval 必须是 0（引擎默认值），改成其它值真机会被 vblank "
+                      "挡住、本线做不到",
+                      p.presentation_interval, kPresentIntervalImmediate);
+        if (why) *why = buf;
+        return false;
+    }
     *out = p;
     return true;
 }

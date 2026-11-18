@@ -4555,6 +4555,27 @@ const MUTATIONS = [
       '把 configure 期的 `input inventory: present` 那条 `message()` 改回中文（原缺陷形态）⇒ ' +
       'CMake 会打印的引号实参里又出现 UTF-8 ⇒ cmake-print-ascii 的"每字节 < 0x80"断言当场红',
   },
+
+  // ── `D3DPRESENT_PARAMETERS.PresentationInterval` 的白名单（G；守卫 = `tests/present_interval.cpp`）──
+  //   ★ 代表"读了不消费 ⇒ 静默按 IMMEDIATE 放行"这一类**静默**背离（2026-11-19 的现场）：
+  //     guest 把配置改成 `display:PresentInterval=1/2` 时真机会被 vblank 挡住，我们会跑得更快，
+  //     而**没有任何症状**（日志 / 像素 / 帧数都不会变）。裁决 = 白名单 + 响亮停，不做近似。
+  //   ★ 为什么变异落在**判定函数体**而不是调用点：调用点只有一处（`readPresentParams`），
+  //     判定一旦恒真，那个调用点就退化成"白读一个字段" —— 这正是修前的形态。
+  //   ★ `(void)interval` 不是摆设：本工程是 `/W4 /WX`，删掉形参引用会炸成"未使用形参"
+  //     ⇒ 变异变成**构建失败**，在自检里记"不可判定"而不是"守卫红了"。
+  {
+    file: 'apps/emulator-lift/src/runtime/d3d9.cpp',
+    from: '    return interval == kPresentIntervalImmediate;',
+    to: '    (void)interval;\n    return true;  // 变异：白名单恒接受（修前形态：读了不消费）',
+    guard: 'ctest:present-interval',
+    ctest: 'present-interval',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-present-interval',
+    what:
+      '把白名单判定改成恒 `true` ⇒ DEFAULT(0) / ONE(1) / TWO(2) / FOUR(4) / EIGHT(8) 全被接受 ⇒ ' +
+      'present-interval 的 10 条 `!presentIntervalSupported(v)` 断言当场红',
+  },
 ];
 
 let mutationRunSeq = 0;
