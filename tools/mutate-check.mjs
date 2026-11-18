@@ -4459,6 +4459,23 @@ const MUTATIONS = [
     buildTarget: 'lift-ui-text',
     what: '单边上限 8192 放宽到 1<<20 ⇒ 1e6×1（4 MB）的 rect 被接受并栅格化 ⇒ huge-rect-rejected 的 `!rasterized` 落空 ⇒ 红',
   },
+
+  // ── 窗口报告文本化（`REQ-01M7QF01A00F9946DX0GPH23JQ` 切片 1；守卫 = `tests/window_prof.cpp`）──
+  //   ★ 代表"抽函数时漏掉一段"这一类静默失效：`endWindow()` 的文本现在只有一份实现
+  //     （`formatWindowReportText`），少打一行 ⇒ 金样逐字节断言 + 段落闭合断言同时点名。
+  //   ★ 为什么落在 `window_prof.cpp`：文本的唯一实现在那里（头文件里改会重编整条 AOT 臂）。
+  {
+    file: 'apps/emulator-lift/src/aot/window_prof.cpp',
+    from: '    out += formatLine("instrument  : %10.3f ms  %5.1f%%  （%.1f ns/取时 × %llu 次）\\n",\n                      ms(t.instrument), pct(t.instrument), w.clock_read_ns,\n                      static_cast<unsigned long long>(w.sampled * 3 + w.shim_calls * 2));',
+    to: '    // 变异：删掉 instrument 行（报告少一段）',
+    guard: 'ctest:aot-window-report-text',
+    ctest: 'aot-window-report-text',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-aot-window-report',
+    what:
+      '删掉 `instrument` 行 ⇒ 报告文本少一段 ⇒ `aot-window-report-text` 的金样逐字节断言与' +
+      '段落闭合断言当场红（stdout 逐字不变的证据失效）',
+  },
 ];
 
 let mutationRunSeq = 0;

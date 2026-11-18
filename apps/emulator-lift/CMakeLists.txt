@@ -1779,6 +1779,19 @@ target_link_libraries(lift-aot-window-profile PRIVATE emulator-lift-runtime)
 add_test(NAME aot-window-profile COMMAND lift-aot-window-profile)
 
 # =====================================================================================
+# **AOT 窗口报告文本 + 状态位**（`formatWindowReportText` / `AotWindowProf::beginWindow` 的 pure 判据）
+# ★ 判据见 tests/window_prof.cpp 文件头：① 文本与**旧 `endWindow()` printf 块**的金样逐字节相同
+#   （= "抽函数不改 stdout"的机械证据）；② 段落闭合（wall/lift/.../verdict 每段都在）；
+#   ③ Top-8 + `(rest)`；④ `sampled==0` / `coverage` 越界 ⇒ 文本含 `INVALID`；⑤ 总行数 ≤ 20；
+#   ⑥ 重复 `beginWindow()` ⇒ false 且**不 reset**（⛔ 不静默重开）。
+# ★ 顶层无条件注册 ⇒ pure 档（判据 = 注册位置，AGENTS.md §12.4）；不碰 GPU / 资产 / 真进程。
+# =====================================================================================
+add_executable(lift-aot-window-report tests/window_prof.cpp)
+target_link_libraries(lift-aot-window-report PRIVATE emulator-lift-runtime)
+add_test(NAME aot-window-report-text COMMAND lift-aot-window-report)
+add_test(NAME aot-window-state COMMAND lift-aot-window-report state)
+
+# =====================================================================================
 # **AOT 按帧 shim 分桶**（`--profile-slow-frames <ms>`；pure：纯算术夹具 + 名字表，不取时）
 # ★ 判据见 tests/aot_frame_bucket.cpp 文件头：① 名字合并（同名 id 相加）+ 有界 top-N；
 #   ② 阈值门（**只**存 ≥ 阈值的帧，且每帧的账不跨帧漏）；

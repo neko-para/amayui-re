@@ -1233,9 +1233,9 @@ void AotHost::controlOnResume() { presenter_.noteControlResume(); }
 // 窗口 profile（`profile_begin/end` 驱动；桶与闭式在 `aot/window_prof.h`，这里只做
 // "开/关 + 快照 + 打表"。⛔ 零新 CLI：不开窗 ⇒ 一个取时都不做、一行都不打。
 // =====================================================================================
-void AotHost::beginWindow(const char* label) {
-    win_.reset();
-    win_.on = true;
+bool AotHost::beginWindow(const char* label) {
+    // ★ 状态位先判：已开 ⇒ false 且**不 reset**（`AotWindowProf::beginWindow()` 的唯一实现）。
+    if (!win_.beginWindow()) return false;
     win_.label = (label != nullptr && *label != '\0') ? label : "(unnamed)";
     win_.t_open_ns = windowNowNs();
     win_.insns_open = cpu_.insns;
@@ -1274,120 +1274,26 @@ void AotHost::beginWindow(const char* label) {
         win_.span_overhead_ns = static_cast<double>(acc) / static_cast<double>(kPairs);
     }
     ::liftDynCountOn = true;
+    return true;
 }
 
 void AotHost::endWindow() {
-    if (!win_.on) return;
+    // ★ 状态位是唯一判据（未开 ⇒ 没有表可打；幂等）。
+    if (!win_.closeWindow()) return;
     win_.closeEdges(windowNowNs());
     win_.insns_close = cpu_.insns;
     win_.frames_close = presenter_.frameCount();
     win_.liftdyn_close = ::liftDynCalls;
-    win_.on = false;
     ::liftDynCountOn = false;
 
-    const AotWindowProf::Totals t = win_.totals();
-    const auto ms = [](double ns) { return ns / 1.0e6; };
-    const auto pct = [&](double v) {
-        return t.wall > 0.0 ? (v / t.wall) * 100.0 : 0.0;
-    };
-    std::printf("=== profile window: %s ===\n", win_.label.c_str());
-    std::printf("wall        : %10.3f ms   iter=%llu sampled=%llu（stride %llu%s）insns=%llu frames=%llu\n",
-                ms(t.wall), static_cast<unsigned long long>(win_.iter),
-                static_cast<unsigned long long>(win_.sampled),
-                static_cast<unsigned long long>(AotWindowProf::kStride),
-                win_.iter < AotWindowProf::kLowSampleBelow ? "，⚠ 窗口短 ⇒ 样本少" : "",
-                static_cast<unsigned long long>(win_.insns_close - win_.insns_open),
-                static_cast<unsigned long long>(win_.frames_close - win_.frames_open));
-    std::printf("lift        : %10.3f ms  %5.1f%%  est\n", ms(t.lift), pct(t.lift));
-    std::printf("boundary    : %10.3f ms  %5.1f%%  est\n", ms(t.boundary), pct(t.boundary));
-    std::printf("shim        : %10.3f ms  %5.1f%%  exact(N=%llu)\n", ms(t.shim), pct(t.shim),
-                static_cast<unsigned long long>(win_.shim_calls));
-    // present 子桶（⊂ shim；⛔ 不加进闭式）
-    if (win_.present_calls != 0) {
-        const double psum = static_cast<double>(win_.present_readback_ns + win_.present_hash_ns +
-                                                win_.present_freeze_ns + win_.present_sink_ns +
-                                                win_.present_stats_ns);
-        std::printf("  present   : %10.3f ms  %5.1f%%  n=%llu（readback %.3f / hash %.3f / freeze %.3f / sink %.3f / stats %.3f ms）\n",
-                    ms(psum), pct(psum), static_cast<unsigned long long>(win_.present_calls),
-                    ms(static_cast<double>(win_.present_readback_ns)),
-                    ms(static_cast<double>(win_.present_hash_ns)),
-                    ms(static_cast<double>(win_.present_freeze_ns)),
-                    ms(static_cast<double>(win_.present_sink_ns)),
-                    ms(static_cast<double>(win_.present_stats_ns)));
-    }
-    // 每个 shim 的精确行（降序，只打 ≥0.5% 的；余下合并成一行，⛔ 不给"看不见的残差"）
-    {
-        struct Row {
-            double ns;
-            std::uint64_t calls;
-            std::string name;
-        };
-        std::vector<Row> rows;
-        rows.reserve(win_.per_shim_ns.size());
-        for (std::size_t id = 0; id < win_.per_shim_ns.size(); ++id) {
-            if (win_.per_shim_calls[id] == 0) continue;
-            const ShimDef* def = shims_.byId(static_cast<std::uint32_t>(id));
-            rows.push_back(Row{static_cast<double>(win_.per_shim_ns[id]), win_.per_shim_calls[id],
-                               def != nullptr ? (def->module + "!" + def->name) : std::string("(unknown)")});
-        }
-        std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.ns > b.ns; });
-        double rest_ns = 0.0;
-        std::uint64_t rest_calls = 0;
-        int printed = 0;
-        for (const Row& r : rows) {
-            const double share = t.wall > 0.0 ? r.ns / t.wall : 0.0;
-            if (share < 0.005 || printed >= 10) {
-                rest_ns += r.ns;
-                rest_calls += r.calls;
-                continue;
-            }
-            std::printf("  shim:%-34s %10.3f ms  %5.1f%%  N=%llu\n", r.name.c_str(), ms(r.ns), pct(r.ns),
-                        static_cast<unsigned long long>(r.calls));
-            ++printed;
-        }
-        if (rest_calls != 0) {
-            std::printf("  shim:(rest)                            %10.3f ms  %5.1f%%  N=%llu\n", ms(rest_ns),
-                        pct(rest_ns), static_cast<unsigned long long>(rest_calls));
-        }
-    }
-    std::printf("partial     : %10.3f ms  %5.1f%%  exact\n", ms(t.partial), pct(t.partial));
-    std::printf("instrument  : %10.3f ms  %5.1f%%  （%.1f ns/取时 × %llu 次）\n", ms(t.instrument),
-                pct(t.instrument), win_.clock_read_ns,
-                static_cast<unsigned long long>(win_.sampled * 3 + win_.shim_calls * 2));
-    std::printf("unaccounted : %10.3f ms  %5.1f%%  %s\n", ms(t.unaccounted),
-                t.wall > 0.0 ? (t.unaccounted / t.wall) * 100.0 : 0.0,
-                t.suspect ? "⚠ 五项之和偏离墙钟 >15% ⇒ 本次读数作废（见 coverage）"
-                          : (t.valid() ? "ok(≤3%)" : "INVALID: unaccounted 超 3% ⇒ 本次读数作废"));
-    std::printf("coverage    : %.2f×  （五项之和 / 墙钟；1.00 = 外推与墙钟吻合）\n", t.coverage);
-    // `lift_dyn`：只报次数（尾调用 ⇒ 区间含目标体，⛔ 不进闭式）
-    std::printf("lift_dyn    : %llu 次（计数精确；⛔ 不进闭式：尾调用 ⇒ 区间含目标体）\n",
-                static_cast<unsigned long long>(win_.liftdyn_close - win_.liftdyn_open));
-    // ★ 结论行（写死的单口径，§5）：最高**具名行** ≥10% 才是优化候选。
-    {
-        double top = 0.0;
-        std::string top_name = "(none)";
-        for (std::size_t id = 0; id < win_.per_shim_ns.size(); ++id) {
-            if (win_.per_shim_calls[id] == 0) continue;
-            const double v = static_cast<double>(win_.per_shim_ns[id]);
-            if (v > top) {
-                const ShimDef* def = shims_.byId(static_cast<std::uint32_t>(id));
-                top = v;
-                top_name = def != nullptr ? (def->module + "!" + def->name) : std::string("(unknown)");
-            }
-        }
-        // `boundary` 也是具名行；`lift` 聚合**不进候选**（M-12 §5.2）
-        const bool boundary_wins = t.boundary > top;
-        const double best = boundary_wins ? t.boundary : top;
-        const double share = t.wall > 0.0 ? best / t.wall : 0.0;
-        const AotWindowProf::Rank rank = AotWindowProf::rankOf(share);
-        const char* verdict = rank == AotWindowProf::Rank::Candidate
-                                  ? "候选（≥10%）"
-                                  : rank == AotWindowProf::Rank::Watch ? "观察名单（3–10%，需两次复现）"
-                                                                       : "噪声（<3%）";
-        std::printf("verdict     : 最高具名行 = %s %.1f%% ⇒ %s%s\n",
-                    boundary_wins ? "boundary" : top_name.c_str(), share * 100.0, verdict,
-                    rank == AotWindowProf::Rank::Candidate ? "" : "（无单点值得优化 ⇒ 记「均匀分布」）");
-    }
+    // ★ 文本由 `formatWindowReportText`（pure，`aot/window_prof.cpp`）**一份**实现产出 ⇒ `fputs` 写出的
+    //   字节与旧 `printf` 块逐字相同（守卫 `aot-window-report-text` 拿"旧 printf 产出的金样"对齐）。
+    //   ⛔ 不要在这里拼格式串：那会让文本重新长出第二份实现（切片 3 还要把同一份文本交给剪贴板）。
+    const std::string text = formatWindowReportText(win_, [this](std::uint32_t id) {
+        const ShimDef* def = shims_.byId(id);
+        return def != nullptr ? (def->module + "!" + def->name) : std::string("(unknown)");
+    });
+    std::fputs(text.c_str(), stdout);
     std::fflush(stdout);
 }
 
@@ -1395,7 +1301,12 @@ void AotHost::windowMarkThunk(void* ctx, const char* label, bool begin) {
     auto* host = static_cast<AotHost*>(ctx);
     if (host == nullptr) return;
     if (begin) {
-        host->beginWindow(label);
+        // ★ 已有一段开着 ⇒ `beginWindow` 返回 false（**不 reset**）。配方里重复 `profile_begin` 是
+        //   用户可见的错：留一行 stderr（⛔ stdout 一个字节不变），下一段 `profile_end` 收的是第一段。
+        if (!host->beginWindow(label)) {
+            std::fprintf(stderr, "[aot] profile_begin 时已有窗口打开（label=%s）⇒ 忽略（⛔ 不静默 reset）\n",
+                         (label != nullptr && *label != '\0') ? label : "(unnamed)");
+        }
     } else {
         host->endWindow();
     }
