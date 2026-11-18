@@ -867,8 +867,25 @@
   （⛔ 不退回写死因子）。`Begin` 的 `ALPHABLEND` 只决定开不开。
 - **守卫**：`apps/emulator-lift/tests/d3dx9_sprite_blend.cpp#d3dx9-sprite-blend`（66 checks：纯映射 ①–④ +
   真实 `Begin/Draw/End` 的**接线**守卫 ⑤）；改前红 **66/14 failures**、改后 66/0；全量 ctest **127/127**；
-  变异 `sprite-blend-state-ignored` ⇒ 当场红。⚠ e2e（SAVE05 黑块消失）**未做**。
+  变异 `sprite-blend-state-ignored` ⇒ 当场红。
+- **e2e（2026-11-19，`d9739f4` 的 exe）**：SAVE05 同一特效里 **120×120 黑块消失、白星可见**
+  （`.tmp/bug33-e2e/shots/cmp-b011-vs-fx1.png`；搜索区 v≥200 亮像素 447→679），日志里
+  `State=19⇒0x5`/`20⇒0x2` + `合成 1 条 Draw / 14400 个覆盖格` 仍在（状态没变、像素变了）。
+  ⚠ 同一次 e2e 暴露了**下一条回归**（普通 sprite 变 `ONE/ZERO` 不透明）⇒ BUG-35。
 - **需求单**：`REQ-01M7R1ABAP86QVMNBZ5S4EDKD5`（S2，done）。
+
+### BUG-35 · `Begin(ALPHABLEND)` 没像真 D3DX 那样先设 `SRCALPHA/INVSRCALPHA` ⇒ 普通 sprite 变 `ONE/ZERO` 不透明拷贝（**修 BUG-33 后暴露**）
+
+- **现象**：BUG-33 修好后，普通 sprite 批次按引擎留在设备里的 `SRCBLEND=ONE(2)` / `DESTBLEND=ZERO(1)` 合成 ⇒
+  源图 `alpha=0` 的黑色 texel 被写进后缓冲：走廊石地 / 教程暗化页 / 对话框底板**全黑**
+  （对话框黑度 1.23% → **33.70%**；同一 `MES` 帧 `lastHash` 两次 run 一致）。
+- **读数**：对话框帧 **383/383 批次 = 2/1**、特效帧 370/371 = 2/1（唯一 5/2 = 那条加性）；**修前**的
+  `.tmp/save05-black/slice_f48/f49` 普查**完全相同** ⇒ 修前是"sprite 路写死 5/6"碰巧对。
+- **口径**：真 D3DX9 的 `Begin(D3DXSPRITE_ALPHABLEND)` 自己设 `ALPHABLENDENABLE=1` / `SRCBLEND=SRCALPHA(5)` /
+  `DESTBLEND=INVSRCALPHA(6)`，`End` 恢复它改过的状态 ⇒ 我们漏了这一步。⛔ 不是"因子要从状态读"错了
+  （那是对的，BUG-33），⛔ 也不能退回写死 5/6。
+- **需求单**：`REQ-01M7R3YPQPNPBZ327H89Q8RTEE`（S2）。判据 = `Begin` 设 5/6/1、`End` 逐字恢复 +
+  "透明 texel 不许把目标写成黑"的像素用例；证据 `.tmp/bug33-e2e/report.md`。
 
 ### BUG-34 · 同一现场：影片 0.8 s × 30 fps 只送出 **1** 帧（**未修** · S3 · 影响未证）
 
