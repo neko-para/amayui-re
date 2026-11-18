@@ -52,15 +52,27 @@ function withScratch(fn) {
 const crCount = (p) => fs.readFileSync(p).filter((b) => b === 0x0d).length;
 const hasLf = (p) => fs.readFileSync(p).includes(0x0a);
 
+/**
+ * 合成一条文件记录（只为把数据形状凑齐，不读盘）。
+ * ★ 2026-11-18（用户裁决）真清单的载荷已全部删除 ⇒ `samples[]` / `containers[]` 是空数组，
+ *   所以凡是"需要有一个槽才能测到"的判据，都在 `.tmp/` 的**副本**里自造槽 —— ⛔ 不去碰真 JSON。
+ */
+const rec = (name) => ({ name, mtimeMs: 1, mtimeLocal: '2026-01-01T00:00:00', tzOffsetMinutes: 480 });
+
 test('fixtures --normalize --write：跑通、槽序规范、产出全 LF', () => {
   withScratch(({ samples }) => {
     const doc = loadSamples(samples);
-    doc.samples.reverse(); // 搅乱顺序，看 --normalize 是否拉回规范形态
+    // ★ 自造两个**倒序**的槽：原来这里是 `doc.samples.reverse()`，而真清单清空后它成了空操作 ⇒
+    //   "槽必须按号排序"会变成恒真断言（假绿）。
+    doc.samples = [
+      { slot: '77', where: '合成槽（本用例自建）', files: [rec('SAVE77.DAT'), rec('SAVE77.STH')] },
+      { slot: '76', where: '合成槽（本用例自建）', files: [rec('SAVE76.DAT'), rec('SAVE76.STH')] },
+    ];
     fs.writeFileSync(samples, `${JSON.stringify(doc, null, 2)}\n`, 'utf8');
 
     assert.equal(run(() => fixturesMain(['--normalize', '--write', '--samples', samples])), 0, 'fixtures --normalize --write 必须退出 0');
     const out = loadSamples(samples);
-    assert.deepEqual(out.samples.map((s) => s.slot), [...out.samples.map((s) => s.slot)].sort(), '槽必须按号排序');
+    assert.deepEqual(out.samples.map((s) => s.slot), ['76', '77'], '槽必须按号排序');
     assert.equal(crCount(samples), 0, 'samples.json 产出必须是 LF');
   });
 });
@@ -73,8 +85,12 @@ test('fixtures --list：只读路径不写、不改动 samples.json 的字节', 
   });
 });
 
-test('真 JSON 未被这些用例改动（真 samples.json 仍登记着样本、仍是 LF）', () => {
-  assert.ok(loadSamples(DEFAULT_SAMPLES).samples.length >= 4, '真 samples.json 仍登记着样本');
+test('真 JSON 未被这些用例改动（真 samples.json 仍可加载、仍是 LF）', () => {
+  // ★ 不再断言样本条数：2026-11-18 用户裁决删掉了全部载荷 ⇒ 真清单合法地是 0 个样本。
+  //   这条钉的是"上面那些写用例没写坏真 JSON"，与"有几个样本"无关。
+  const doc = loadSamples(DEFAULT_SAMPLES); // JSON 坏了会在这里抛
+  assert.ok(Array.isArray(doc.samples), '真 samples.json 的 samples 必须是数组');
+  assert.ok(Array.isArray(doc.containers), '真 samples.json 的 containers 必须是数组');
   assert.ok(hasLf(DEFAULT_SAMPLES), '真 samples.json 必须是 LF');
 });
 
@@ -82,7 +98,10 @@ test('★ containers 的写路径守卫：与槽载荷重名 / 自身重名 / �
   const base = { mtimeMs: 1, mtimeLocal: '2026-01-01T00:00:00', tzOffsetMinutes: 480 };
   withScratch(({ samples }) => {
     // ① 与槽载荷重名：同一份文件既是 SAVE76.DAT 又是"系统容器" ⇒ 两条不变量会互相打架
+    //   ★ 真清单现在是 0 个样本 ⇒ **自造一个槽**再撞它。⛔ 不要改成"清单里没有就算了"：
+    //     那样 mutate-check 的「去掉一个文件只能有一个身份」会假绿（没有可撞的对象）。
     const clash = loadSamples(samples);
+    clash.samples = [{ slot: '76', where: '合成槽（本用例自建）', files: [rec('SAVE76.DAT'), rec('SAVE76.STH')] }];
     clash.containers = [{ ...base, name: 'SAVE76.DAT', what: '伪装成容器' }];
     const before = fs.readFileSync(samples);
     const r1 = saveSamples(clash, samples);

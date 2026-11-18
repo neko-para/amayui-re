@@ -17,7 +17,7 @@ corpus/
   assets/          # UI 图片 / 字体（只读载荷，走 LFS）
     ui-images/     #   UI 块图（生效版 + 未汉化原图）+ E 系列渲染参考块 + versions.json
     fonts/         #   分发字体（派生 ttf）+ Sarasa 上游 7z（★ 解压产物 gitignore）
-  fixtures/        # 真存档样本（槽 76/77/78/79）+ samples.json（结构化描述）+ README
+  fixtures/        # 样本台账（当前为空；允许 0 个）+ README；载荷已按 2026-11-18 裁决删除
   game/            # 外部游戏目录 / 安装目录的**指针**（不搬数据）
 ```
 
@@ -26,7 +26,7 @@ corpus/
 | 条目 | 落点 | 存储 | 守卫 |
 |---|---|---|---|
 | `disasm/bundle` | `corpus/disasm/disasm-20260930.zip`（4 个 UTF-8 文件） | LFS（`*.zip`） | `recipe` 真跑 9 条保真断言（#7）；原件缺席时由 zip 反解 + 清单 sha256 自证 |
-| `fixtures/save-samples` | `corpus/fixtures/SAVE{76,77,78,79}.{DAT,STH}` | LFS（`*.DAT`/`*.STH`） | dest 下**每个已跟踪文件**的 `filter=lfs`（#6，不靠 origin 枚举）；文件级事实（槽定位 / mtime）另见 `corpus/fixtures/samples.json` |
+| `fixtures/save-samples` | `corpus/fixtures/`（只剩 README/samples.json/samples.md） | git（2026-11-18 由 lfs 翻为 git） | #3 目录型 dest 非空；#6 对非 lfs 条目不适用 |
 | `assets/ui-images` | `corpus/assets/ui-images/` | LFS（`*.png`） | #6 + `versions.json`（版本表；见该目录 `versions.md`） |
 | `assets/fonts-dist` | `corpus/assets/fonts/` | LFS（`*.ttf`/`*.7z`） | #6 + 「7z 的解压产物不入库」由 `tools/test/corpus-assets.test.mjs` 钉住 |
 | `translation/subs-cn-jp` | `data/translations/subs-cn-jp.json` | **git 文本** | #4（入库件不写 sha256）+ 同名说明书 |
@@ -42,8 +42,8 @@ corpus/
 
 ★ **只有"有加工链的入库件"才配来源记录**（`disasm/bundle` ↔ `disasm/raw-source-*`，`external-only` + 逐件 sha256）
 —— 那是"转码前的忠实参照"这个能力的来源：**来源 ≠ 入库件**时才谈得上复核。
-`fixtures/save-samples` **不配**：它是**自足条目**（固化资源，没有加工链、没有可再取的上游，入库的那一份就是原件），
-登记 origin 等于把 dest 抄第二遍。口径见 `pnpm tools corpus describe` 的「自足条目」。
+`fixtures/save-samples` **不配**：2026-11-18 后它是**目录登记**（只剩文字台账，没有加工链、没有可再取的上游），
+保留 `origin: []`，⛔ 不把 `saves/` 登记成它的 origin。口径见 `pnpm tools corpus describe` 的「自足条目」。
 `assets/ui-images` 与 `assets/fonts-dist` **配**：两者的入库副本就是旧仓 `res/` 下的原件（逐字节相同，由 #4 现算现比）。
 
 ## 2. `assets.json` 是什么、不是什么
@@ -62,7 +62,7 @@ corpus/
 
 * **大件一律不搬**：真游戏安装（7.7 GB）、外部素材（8.3 GB）、发行 zip（1.4 GB）留在仓库外，只用**路径登记**
   （必要时用符号链接引用，链接本身 gitignore）。
-* **需要入库的只读语料 / 二进制 / fixtures** 走 LFS：先 `git lfs track` 声明（`.gitattributes` 已有按扩展名的规则），
+* **需要入库的只读语料 / 二进制** 走 LFS：先 `git lfs track` 声明（`.gitattributes` 已有按扩展名的规则），
   再提交；**解压产物 / 中间视图永远 gitignore**。
 * **出仓带回来的东西先过 `.staging/`**（仓库内的中转区，gitignore）：它是**中转，不是"来源"**，
   所以 `roots` 里不写桌面路径，投递件的 sha256 仍记进清单以便复核。

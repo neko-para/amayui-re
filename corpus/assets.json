@@ -643,15 +643,15 @@
       "id": "fixtures/save-samples",
       "kind": "fixture",
       "role": "fixture",
-      "storage": "lfs",
+      "storage": "git",
       "origin": [],
       "dest": "corpus/fixtures/",
       "readOnly": true,
-      "consume": "真玩家存档样本（槽 76/77/78/79 的 .DAT + .STH，以及不属于任何槽的系统容器 SAVE.DAT / RT.DAT）+ README；落 corpus/fixtures/，走 LFS",
+      "consume": "`corpus/fixtures/` 目录只保留工具与说明书（`README.md` / `samples.json` / `samples.md`）；存档载荷已按用户 2026-11-18 裁决全部删除；存档规范样本在仓库根 `saves/`（用户自维护：只读，⛔ 不新建 / 不改 / 不删）",
       "blocks": [
         "M1"
       ],
-      "note": "槽样本 8 个 .DAT/.STH（槽 76/77/78/79）+ 系统容器 2 个（SAVE.DAT = 脚本键表、RT.DAT = 文本/消息库），全部走 LFS；文件级事实（各槽在游戏里的定位 where、每个文件的源 mtime、系统容器的 what）在 corpus/fixtures/samples.json。之所以要记 mtime：槽样本的槽头 +264 起七个 u16 就是存档时刻、而 git 不保存 mtime；系统容器没有这个字段，记 mtime 只为「这份样本是哪一次运行写出来的」可追溯。★ 固化资源：没有加工链、也没有可再取的上游 ⇒ 不登记 origin（见 pnpm tools corpus describe 的「自足条目」）。★ 系统容器只收**真实引擎**写出来的：本机 SYS4REG.INI 是模拟器自己写的（数值全 0），不当样本入库"
+      "note": "2026-11-18 用户裁决：删除全部存档载荷 —— 顶层槽 76/77/78/79 的 .DAT+.STH（8）、系统容器 SAVE.DAT / RT.DAT（2）、老汉化 936/GBK 的 `saves/` 子目录（8），共 18 个文件 / 9,832,566 B。条目保留为**目录登记**：dest 里只剩文字台账 ⇒ storage 由 lfs 翻为 git（#6 LFS 一致性对非 lfs 条目不适用）。★ 仍是**自足条目**：固化资源、没有加工链 ⇒ 不登记 origin。★ 规范样本在仓库根 `saves/`（用户自维护）。★ 老汉化那批复现不再可用：`corpus/fixtures/saves/SAVE00.DAT` = 1,218,515 B 与 `saves/SAVE00.DAT` = 1,494,060 B **不是同一份字节**，⛔ 不能改写为用 `saves/` 复现。"
     },
     {
       "id": "game/install-dir",

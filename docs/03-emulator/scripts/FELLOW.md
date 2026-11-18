@@ -38,11 +38,14 @@
 - 执行源：`apps/emulator-lift/out/emulator-lift-aot`，`sha256 = 27fca94a09422ece80d9db64b9962911bbb2d65cea7d1ae3f6dc8893e13f35c9`
   （2026-11-16；macos-arm64）。全部读数都是 `--present headless --skip-logo --game-dir links/install`、
   `--appdata` = 从 `corpus/fixtures/` 组装的那份（见 `docs/03-emulator/save-format.md` §外部组装）。
+  〔★ **2026-11-18 样本迁移**：那批存档载荷已按用户裁决删除 ⇒ **现在**照 §外部组装 要用仓库根 `saves/`
+  （槽 00–04）。上表读数仍出自**当时那份 fixtures appdata**，⛔ 不改写历史读数。〕
 - 原始日志（不入库）：`.tmp/p2/run-e1.log` · `run-e1-2/3/4.log` · `run-e2.log` · `run-e5.log` · `run-e0.log`。
 
 ```bash
 cd /Users/nekosu/Documents/Projects/amayui-re
 APP=.tmp/p2/appdata2     # 空 appdata 跑一次让引擎建目录，再按 save-format.md §外部组装 放 SAVE.DAT/RT.DAT + 槽
+                         # ★ 2026-11-18 起 §外部组装 的源是仓库根 saves/（槽 00–04）；corpus/fixtures/ 的载荷已删
 
 # ---- 共用前缀（= sn0000-save.plan L7–L18 的已取证前缀，逐字照抄；本轮没有改任何配方）----
 cat > /tmp/fellow-prefix.plan <<'PLAN'

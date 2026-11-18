@@ -22,6 +22,9 @@
 | `SAVE00=77`（SC0000 入口） | 99.491% 非黑 / 204,138 色 | 同上 |
 | `SAVE00=78`（SN0000 结尾→点击） | 100% 黑 **8 帧（≈0.3 s）** → 白 12 s → 淡入章节卡 | 正常过渡形态 |
 
+> ★ 2026-11-18：这三行的样本（`corpus/fixtures/SAVE7{6,7,8}.*`）已按用户裁决删除 ⇒ **读数不可逐字节复现**；
+>   重跑请用 `saves/` 里的槽（00–04），那是另一份数据，**只能重取“黑/不黑”这一类读数**，不能当成同一次观察。
+
 黑帧那一拍的 trace：`SetRenderTarget(后缓冲) → Clear → 3.94e9 条指令零 shim 调用` ⇒ **`Clear` 之后没有
 `Draw*`**，不是"画了但画成黑"；`D3DXLoadSurfaceFromSurface` 的未实现臂会 `d3dxTrap` **响亮停**、不会静默黑。
 
@@ -32,7 +35,9 @@ mac 走 `sdl-gpu/metal/MSL`，win32 走 D3D12/DXBC —— 两条光栅后端不�
 
 ## 要收的读数（在 win32 上）
 
-1. 同一入口（appdata 的 `SAVE00 = corpus/fixtures/SAVE76.DAT`，删 `SAVE.DAT/BAK/RT.DAT`）跑到 SC0000，
+1. 同一入口（appdata 的 `SAVE00 = saves/SAVE00.DAT` —— ★ 2026-11-18 起 `corpus/fixtures/` 的存档载荷已按
+   用户裁决删除，规范样本在仓库根 `saves/`（用户自维护：**只读复制**，⛔ 不就地改、不新建 / 不删）；
+   删 `SAVE.DAT/BAK/RT.DAT`）跑到 SC0000，
    `emu-ctl screenshot <bmp>`（⛔ 不要用 `paused_at=block` 的旧口径）⇒ 非黑比例/唯一色数；
 2. `--frame-log` 的逐帧 hash 是否恒定（恒定 = 没画）与 AOT 摘要的 `present :` 行
    （`sinkFailures` / `freezeFailures` / `readback_ns`）；

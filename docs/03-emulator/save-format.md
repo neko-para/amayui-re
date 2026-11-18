@@ -73,7 +73,7 @@ out += config("set:SavePath")
 * 两者与槽文件**共用同一套 292 字节头 + 20 字节参数块 + 变换/压缩负载**的外壳
   〔读侧 `sub_438940`（唯一调用方 `0x40AEE0`）内部调 `sub_438120` 做 292 字节头校验；外壳结构见下节〕。
 * 魔数不同：`SAVE.DAT` 起头是 `S4SD`，`RT.DAT` 起头是 `S3RT`
-  〔字节：`xxd -l 16 corpus/fixtures/SAVE.DAT corpus/fixtures/RT.DAT`；族标识逐容器，不是全引擎一个值 ——
+  〔字节：`xxd -l 16 saves/SAVE.DAT saves/RT.DAT`；族标识逐容器，不是全引擎一个值 ——
   读侧是 `strncmp("S4", <引擎自己的族标识>, 2)` 决定期望 `S4SD` 还是 `S3SD`，容器种类是常量〔EA 0x438120〕〕。
 * **角色（按"引擎的哪个功能用它"判，不按名字猜）**：
   * `SAVE.DAT` = **脚本键的持久化池**：`save-int`/`load-int`/`save-string`/`load-string` 四个 opcode
@@ -133,7 +133,7 @@ out += config("set:SavePath")
 
 * 槽路径上**文件名就是身份**：唯一的头校验是"魔数 + 标题"，两者都与槽号无关〔EA 0x438120〕。
 * 引擎**不扫描目录**、**不读任何索引**〔全语料仅一处 `FindFirstFileA`，通配 `*.AAI`，EA 0x455838〕。
-* ⇒ 把 `SAVE76.DAT/.STH` **逐字节复制**成 `SAVE00.DAT/.STH`，读取侧无法把它和"引擎自己往 0 号槽存过一次"区分开
+* ⇒ 把 `SAVE00.DAT/.STH`（`saves/` 里现成的一对）**逐字节复制**成 `SAVE05.DAT/.STH`，读取侧无法把它和"引擎自己往 5 号槽存过一次"区分开
   （能看出来的只有展示字段：头里的存档时刻、`+280` 游戏秒、缩略图内容）。
   ⛔ 反过来不成立的情形也没有：不存在"头里的号覆盖文件名"这条路径 —— 头里没有那个号。
 
@@ -229,7 +229,7 @@ opcode `0x1A0` = 416 → `sub_42DC70`〔EA 0x42DC70〕。它返回 **状态码**
   （配置 `this[166964]==1` 时走 `sub_4A5260` 另一支）；读侧 = 先把整份文件读进内存（`GetFileSize` + 读），
   再 `sub_40BF20(this+1978, 图像对象号, -1, buf, size)`〔EA 0x42E1F0 写 / 0x42E320 读；
   两个函数都用操作数 2 = 槽号拼 `.STH` 名，操作数 3 = 图像对象号〕。
-* 样本实测（`xxd -l 64 corpus/fixtures/SAVE76.STH`）：`BM`、声明文件长 `0x0002A328 = 172840`、
+* 样本实测（`xxd -l 64 saves/SAVE00.STH`）：`BM`、声明文件长 `0x0002A328 = 172840`、
   像素偏移 `0x36 = 54`、信息头 40、宽 `0x140 = 320`、高 `0xB4 = 180`、平面 1、位深 `0x18 = 24`、压缩 0、`biSizeImage` 0。
   实际文件长 **172854** ⇒ 声明值比实际**少 14**（写侧写的是 `40 + 像素字节数`）。
 * **能不能缺**：读侧打开失败就返回 `1`〔EA 0x42E320 的 `CreateFileA == -1` 支〕⇒ 不会阻止读档。
@@ -239,8 +239,12 @@ opcode `0x1A0` = 416 → `sub_42DC70`〔EA 0x42DC70〕。它返回 **状态码**
 
 ## 外部组装（逐条命令）
 
-**纪律**：只读 `corpus/fixtures/`（⛔ 不改名、不改 mtime、不就地改字节）；产物落 `.tmp/save/<变体>/`；
-⛔ 不碰 `links/install`。下面这套**没有在本轮执行**（本轮是只读取证），命令按可粘贴形式给出。
+**纪律**：只读**仓库根 `saves/`**（用户自维护的规范样本：⛔ 不新建 / 不改名 / 不改 mtime / 不就地改字节 / 不删除）；
+产物落 `.tmp/save/<变体>/`；⛔ 不碰 `links/install`。下面这套**没有在本轮执行**（本轮是只读取证），命令按可粘贴形式给出。
+
+★ **2026-11-18 样本迁移（用户裁决）**：本节原来以 `corpus/fixtures/`（槽 76–79）为源，那批载荷已**全部删除**
+⇒ 现时的源是 `saves/`（槽 **00–04**）。下面的命令已改指 `saves/`；旧样本的覆盖理由（"页基 0"与"页基 70"两种初值）
+**原样保留**，所以 76–79 仍然铺 —— 只是它们现在由 `saves/SAVE00` 的字节复制过去，不再来自原槽 76–79。
 
 ```bash
 cd /Users/nekosu/Documents/Projects/amayui-re
@@ -248,25 +252,25 @@ OUT=.tmp/save/page0
 mkdir -p "$OUT"
 
 # ① 两个系统容器（一起带；缺 SAVE.DAT 会退到 .BAK 再退到"跳过"，缺 RT.DAT 的后果未取证）
-cp -p corpus/fixtures/SAVE.DAT corpus/fixtures/RT.DAT "$OUT/"
+cp -p saves/SAVE.DAT saves/RT.DAT "$OUT/"
 
-# ② 第一页铺满：把 76..79 复制成 00..03（-p 保留 mtime，见下面的说明）
-i=0
-for src in 76 77 78 79; do
-  dst=$(printf '%02d' "$i")
-  cp -p "corpus/fixtures/SAVE${src}.DAT" "$OUT/SAVE${dst}.DAT"
-  cp -p "corpus/fixtures/SAVE${src}.STH" "$OUT/SAVE${dst}.STH"
-  i=$((i + 1))
+# ② 槽 00..04 原样带过去（saves/ 里现成的就是这五个槽；-p 保留 mtime，见下面的说明）
+for src in 00 01 02 03 04; do
+  cp -p "saves/SAVE${src}.DAT" "$OUT/SAVE${src}.DAT"
+  cp -p "saves/SAVE${src}.STH" "$OUT/SAVE${src}.STH"
 done
 
-# ③ 同一对文件再摊满 04..09（让第一页 10 行都有项；缩略图相同不影响"有项"）
-for dst in 04 05 06 07 08 09; do
-  cp -p corpus/fixtures/SAVE76.DAT "$OUT/SAVE${dst}.DAT"
-  cp -p corpus/fixtures/SAVE76.STH "$OUT/SAVE${dst}.STH"
+# ③ 同一对文件再摊满 05..09（让第一页 10 行都有项；缩略图相同不影响"有项"）
+for dst in 05 06 07 08 09; do
+  cp -p saves/SAVE00.DAT "$OUT/SAVE${dst}.DAT"
+  cp -p saves/SAVE00.STH "$OUT/SAVE${dst}.STH"
 done
 
-# ④ 原槽号也留着（样本清单声称的"上次槽号"若落在 7n，第一屏就停在 70..79，这一组直接有项）
-cp -p corpus/fixtures/SAVE7[6-9].DAT corpus/fixtures/SAVE7[6-9].STH "$OUT/"
+# ④ 76..79 也留着（`SAVE.DAT` 里持久化的"上次槽号"若落在 7n，第一屏就停在 70..79，这一组直接有项）
+for dst in 76 77 78 79; do
+  cp -p saves/SAVE00.DAT "$OUT/SAVE${dst}.DAT"
+  cp -p saves/SAVE00.STH "$OUT/SAVE${dst}.STH"
+done
 
 # 核对（只读）
 ls -l "$OUT"; echo "DAT=$(ls "$OUT"/SAVE[0-9][0-9].DAT | wc -l) STH=$(ls "$OUT"/SAVE[0-9][0-9].STH | wc -l)"
@@ -280,10 +284,11 @@ ls -l "$OUT"; echo "DAT=$(ls "$OUT"/SAVE[0-9][0-9].DAT | wc -l) STH=$(ls "$OUT"/
   〔复核：`rg -n 'GetFileTime|GetFileAttributesA' corpus/disasm/files/*.lst`〕。
   头里的存档时刻是 `GetLocalTime` 写进去的**独立副本**〔EA 0x437480〕。
 * **本仓的判据要**：`corpus/fixtures/samples.json` 记了源 instant，测试断言"至少一个真槽的头 == 文件 mtime"。
-  那只对 `corpus/fixtures/` 本体生效。复制到 `.tmp/` 的副本用 `cp -p` 继承即可；
+  那只对 `corpus/fixtures/` 本体生效。★ **2026-11-18 起该清单是空的（载荷已删）** ⇒ 这条断言只对**将来补回的样本**生效
+  （0 个样本时测试如实 `skip`，不空转 pass）。复制到 `.tmp/` 的副本用 `cp -p` 继承即可；
   若要显式拨回，**不要**用 `touch -t`（跨时区会错），用 instant：
   `touch -d @$(node -e "console.log(1790130898)") <file>` 这类写法，或直接依赖 `cp -p`。
-  ⛔ 不要对 `corpus/fixtures/` 里的文件跑。
+  ⛔ 不要对 `saves/` 里的文件跑（那是用户自维护的素材，mtime 也是它的一部分）。
 
 **这样组出来的目录，引擎会认为是几个槽？**
 
@@ -319,6 +324,11 @@ ls -l "$OUT"; echo "DAT=$(ls "$OUT"/SAVE[0-9][0-9].DAT | wc -l) STH=$(ls "$OUT"/
    〔`apps/emulator-lift/src/runtime/vfs.cpp:516-517,671`，`setAppDataDir` 在 `:590`〕。
    ⇒ 存档目录主机路径 = **`<--appdata>/Local/Eushully/天結いキャッスルマイスター/SAVE/`**（`<标题>` = 游戏标题目录名）。
    ⚠ **组装时只用 `corpus/fixtures/` 的原版样本**（用户口径 2026-11-16）——但理由**不是**"头校验会失败"：
+
+   ★ **2026-11-18 新裁决（取代上面那句里"从哪拿样本"这一半）**：`corpus/fixtures/` 的存档载荷已按用户裁决
+   **全部删除**（18 个文件）⇒ 组装一律改用**仓库根 `saves/`**（用户自维护；槽 00–04，见本节上面的命令）。
+   上面那句**保留为历史口径凭据**，它给出的**理由**（头校验不会因为汉化存档而失败，差异只在载荷里的文本编码）
+   不因这次迁移而改变。
 
    **实测（用户，2026-11-16）**：旧汉化版的存档**能看见、能加载**，只有存档里"标题 / 当前章节"这两个**字符串**
    按 SJIS 解码成**乱码**（旧汉化把脚本文本改成了 **GBK**；我们产出的存档是 **Shift-JIS**）。

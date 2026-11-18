@@ -289,12 +289,16 @@ test('#6 LFS 一致性：真仓的 .gitattributes 必须把 disasm zip 交给 LF
 });
 
 test('★ #6：目录型 dest 的载荷**不靠 origin 枚举**（自足条目 origin 为空也要看得见）', () => {
-  // 真仓、真 .gitattributes，两种"LFS 声明坏掉"的形态都必须红 —— 而 fixture 的 origin 已按自足条目清空，
+  // 真仓、真 .gitattributes，两种"LFS 声明坏掉"的形态都必须红 —— 而自足条目的 origin 是空的，
   // 靠"origin 里的来源文件"枚举的旧写法在这两种情形下都会**静默全绿**。
+  // ★ 2026-11-18（用户裁决）：`corpus/fixtures/` 的存档载荷已全部删除、该条目翻成 `storage=git`
+  //   ⇒ 它不再是"目录型 dest + lfs"的实例。这里换**另一个真实形态**当靶子：`corpus/disasm`
+  //   （`README.md` / `defs.h` 是纯文本侧车，`disasm-20260930.zip` 走 LFS）。
+  //   ⛔ 别转向仓库根 `saves/`：那是用户自维护的复现素材，测试不该拿它当靶子（也不该改写它）。
   const attrPath = path.join(REPO_ROOT, '.gitattributes');
   const original = fs.readFileSync(attrPath, 'utf8');
   const entry = () =>
-    validEntry({ id: 'fixtures/save-samples', kind: 'fixture', role: 'fixture', storage: 'lfs', dest: 'corpus/fixtures', origin: [] });
+    validEntry({ id: 'synthetic/dir-lfs-probe', kind: 'fixture', role: 'fixture', storage: 'lfs', dest: 'corpus/disasm', origin: [] });
   const c6 = () =>
     validateManifest(makeManifest(REPO_ROOT, [entry()]), { repoRoot: REPO_ROOT, runGit: true, checkHashes: false, runRecipe: false })
       .checks.find((c) => c.id === 6);
@@ -304,7 +308,7 @@ test('★ #6：目录型 dest 的载荷**不靠 origin 枚举**（自足条目 o
     // ① 规则还在、只是丢了 filter=lfs（保留 -text）⇒ 逐文件点名
     fs.writeFileSync(attrPath, original.replace(/ filter=lfs diff=lfs merge=lfs/g, ''), 'utf8');
     assert.equal(c6().status, 'fail', '① 载荷丢了 filter=lfs 必须红');
-    assert.ok(c6().details.some((d) => /SAVE79\.DAT/.test(d)), `① 必须点名盘上的载荷，实际：${JSON.stringify(c6().details)}`);
+    assert.ok(c6().details.some((d) => /disasm-20260930\.zip/.test(d)), `① 必须点名盘上的载荷，实际：${JSON.stringify(c6().details)}`);
 
     // ② LFS 规则整块被删（载荷会退化成 text: auto）⇒ 目录级兜底断言
     fs.writeFileSync(attrPath, `${original.split('\n')[0]}\n`, 'utf8');

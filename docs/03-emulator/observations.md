@@ -445,8 +445,16 @@
 
 ### OBS-20261113-01 · 读档标题乱码 = 老汉化 936/GBK 存档；新汉化 fixtures 正常
 
+> ⚠ **2026-11-18（用户裁决）：本条用到的两批样本已全部删除** —— `corpus/fixtures/` 的 18 个存档载荷
+> （顶层槽 76–79 的 `.DAT/.STH` + `SAVE.DAT`/`RT.DAT`，以及下面的 `corpus/fixtures/saves/` 子目录）已按裁决删除。
+> ⇒ **下面两条复现命令不再可用**，读数保留为历史记录。
+> ⛔ **不许改写成"用仓库根 `saves/` 复现"**：`saves/` 与这批**不是同一份字节**
+> （`corpus/fixtures/saves/SAVE00.DAT` = 1,218,515 B vs `saves/SAVE00.DAT` = 1,494,060 B），
+> 换了字节就不再是同一次观察。
+
 - **数据面**：`corpus/fixtures/` 顶层 = **新汉化**（槽 76–79，摘要 `1076–1079`/`2076–2079`）；
-  `corpus/fixtures/saves/` = **老汉化 936/GBK**（槽 00/01/03，摘要 `1000–1003`/`2000–2003`）。
+  `corpus/fixtures/saves/` = **老汉化 936/GBK**（槽 00/01/03，摘要 `1000–1003`/`2000–2003`）
+  〔★ 这两个位置**已于 2026-11-18 删除**，见本条顶部 ⚠〕。
   两份 `SAVE.DAT` 都是真机容器；老汉化的槽体只在 `saves/` 里，且与 `saves/SAVE.DAT` 的 0–3 摘要配套。
 - **读数（新汉化）**：`SAVE.DAT` 的 `1076–1079` = `8F 98 8F CD`（CP932 `序章`）；
   `2076–2079` = `91 68 90 C1 98 B0 FA 84 90 A2 93 49 8F 97 90 5F`（CP932 `蘇醒于刕世的女神`；
@@ -462,14 +470,14 @@
   `close_window`（`--close-confirm exit`）正常退出前 `SAVE.BAK` 的 `1110`/`2110` = `第六章` /
   `降臨的軍神使者`（旧摘要），退出后 `SAVE.DAT` 的同一对 = `8F 98 8F CD` / `91 68 … 90 5F`
   （`序章` / `蘇醒于刕世的女神`）；重进 LoadData 第 110 页显示正确。
-- **复现（新汉化）**：把顶层 `SAVE.DAT` / `RT.DAT` / `SAVE7{6,7,8,9}.{DAT,STH}` 拷进
+- **复现（新汉化）**〔2026-11-18：样本已删 ⇒ 本条**不再可执行**，只作历史记录〕：把顶层 `SAVE.DAT` / `RT.DAT` / `SAVE7{6,7,8,9}.{DAT,STH}` 拷进
   `<work>/appdata/Local/Eushully/天結いキャッスルマイスター/SAVE/`（无需 `SYS4REG.INI`）；
   `./out/emulator-lift --present window --present-hidden --raster gpu --native-overrides all
   --skip-logo --audio off --game-dir ../../links/install --appdata <work>/appdata
   --input-script <work>/load70.txt --max-frames 700 --time-limit 120`，其中 `load70.txt` =
   `at frame 130` / `click 1070 480` / `wait 60 frames` / `click 605 30` / `wait 20 frames` /
   `click 530 30` / `wait 40 frames` / `click 893 30` / `wait 80 frames` / `quit`。
-- **复现（老汉化）**：同上，但 SAVE 文件换成 `corpus/fixtures/saves/` 的 `SAVE.DAT` / `RT.DAT` /
+- **复现（老汉化）**〔2026-11-18：`corpus/fixtures/saves/` 已删 ⇒ 本条**不再可执行**；⛔ 别用根 `saves/` 顶替〕：同上，但 SAVE 文件换成 `corpus/fixtures/saves/` 的 `SAVE.DAT` / `RT.DAT` /
   `SAVE0{0,1,3}.{DAT,STH}`；`load0.txt` = `at frame 130` / `click 1070 480` / `wait 60 frames` /
   `click 605 30` / `wait 20 frames` / `click 530 30` / `wait 40 frames` / `click 612 30` /
   `wait 80 frames` / `quit`。

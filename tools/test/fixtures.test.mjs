@@ -6,15 +6,27 @@
  *   · `samples.json` —— 这一批 fixture 的**结构化描述**：`samples[]`（槽 → 游戏内定位 `where` → 各文件 mtime）
  *     与 `containers[]`（**不属任何槽**的系统容器 / 玩家配置，身份 = 文件名 + `what`）
  *   · `corpus/assets.json` —— 只管"入库 / 去向 / 走哪种存储"：fixture 是**自足条目**
- *     （固化资源，没有加工链）⇒ 它**不登记 origin**，"内容没变"由 git/LFS 与下面的 mtime 事实回答。
+ *     （固化资源，没有加工链）⇒ 它**不登记 origin**，"内容没变"由 git 的对象校验与下面的 mtime 事实回答
+ *     （2026-11-18 起该条目是 `storage: git`；此前载荷走 LFS）。
  *
- * 钉住：① 结构合法；② 槽 76–79 齐备且 .DAT/.STH 成对；③ 盘上文件与登记集合**两边相等**；
+ * 钉住：① 结构合法；② 登记了的槽 .DAT/.STH 成对（**0 个槽也合法**）；③ 盘上文件与登记集合**两边相等**；
  *       ④ mtime 与 samples.json 一致时，「槽头 +264 起七个 u16 == 文件 mtime」必须成立；
  *       ⑤ mtime 已漂移时**如实 skip**（fresh clone 的正常状态）并指向恢复命令 —— 不假装通过；
  *       ⑥ `containers` 的名字唯一、`what` 非空、与槽载荷不重名；
  *       ⑦ 目录里的条目只能是**登记的载荷 / 目录文档 / OS 元数据**（判据 = `classifyFixtureEntry`
  *          纯函数，见下；`REQ-01M7HAK2H6R8RWEG15RBDH5585`：Finder 的 `.DS_Store` 不再撞穿它，
  *          而塞一个真样本（`random.bin`）必须依旧红）。
+ *
+ * ★ **2026-11-18（用户裁决）：本目录的存档载荷已全部删除**（18 个文件：顶层槽 76–79 的 .DAT/.STH +
+ *   系统容器 SAVE.DAT / RT.DAT + 老汉化 936/GBK 的 `saves/` 子目录）⇒ `samples[]` / `containers[]`
+ *   现在是**空数组**，而**空清单合法**（`lib/samples.mjs` 的 `structuralProblems` 对空数组返回 []）。
+ *   于是判据按"当前登记了几个样本"取：
+ *   · **结构**（①⑥）与**目录白名单**（③⑦）照旧逐条成立 —— 它们不依赖盘上有载荷；
+ *     ★ ⑦ 的 `listed` 是**合成集合**，⛔ 不再由 `allFiles()` 推出来（空清单会让它变成空集 ⇒ 判据假松）；
+ *   · "文件都在盘上"（③）与"槽头 == mtime"（④）只在**登记了样本**时才走断言，0 个样本时如实 `skip`
+ *     （⛔ 不留"空转 pass"的假绿，也⛔ 不用 `t.diagnostic + return` —— `layering.test.mjs` 盯着这个形态）；
+ *   · 规范样本已移到仓库根 `saves/`（**用户自维护**，⛔ 不是这个工具的 dest）。
+ *   工具本身**不退役**：`samples.json` 仍只有一个写入口，将来补样本仍走 `pnpm tools fixtures add`。
  *
  * 运行：`pnpm test`
  */
@@ -29,7 +41,6 @@ import { wallClock } from '../lib/time.mjs';
 
 const FIXTURES = path.join(REPO_ROOT, 'corpus', 'fixtures');
 const SAMPLES = path.join(FIXTURES, 'samples.json');
-const SLOTS = ['76', '77', '78', '79'];
 
 const samples = () => JSON.parse(fs.readFileSync(SAMPLES, 'utf8'));
 
@@ -44,7 +55,8 @@ test('samples.json 存在，结构合法（每个样本都要有 where、files[]
   assert.ok(fs.existsSync(SAMPLES), 'corpus/fixtures/samples.json 必须存在');
   const doc = samples();
   assert.equal(doc.schemaVersion, 1);
-  assert.ok(Array.isArray(doc.samples) && doc.samples.length > 0);
+  // ★ 2026-11-18 起允许 0 个样本（载荷已按用户裁决删除）；"至少一个"不再是结构不变量。
+  assert.ok(Array.isArray(doc.samples), 'samples 必须是数组（可以为空，但字段要在）');
   for (const s of doc.samples) {
     assert.match(s.slot, /^\d{2,3}$/, `槽号形态异常：${JSON.stringify(s.slot)}`);
     assert.ok(typeof s.where === 'string' && s.where.trim() !== '', `槽 ${s.slot} 缺 where（游戏内定位）`);
@@ -74,21 +86,27 @@ test('★ 系统容器 / 玩家配置（`containers`）：不属任何槽，名�
   }
 });
 
-test('槽 76/77/78/79 齐备，且每个槽恰好 .DAT + .STH 成对', () => {
-  const bySlot = new Map(samples().samples.map((s) => [s.slot, s]));
-  for (const slot of SLOTS) {
-    const s = bySlot.get(slot);
-    assert.ok(s, `缺槽 ${slot}`);
+test('登记了的槽：每个槽恰好 .DAT + .STH 成对（0 个槽也合法）', () => {
+  const doc = samples();
+  const bySlot = new Map(doc.samples.map((s) => [s.slot, s]));
+  assert.equal(bySlot.size, doc.samples.length, '槽号不许重复');
+  // ★ 判据按"**登记了的**槽"取，不再要求 76–79 齐备：2026-11-18 载荷删除后不允许留一条恒红的
+  //   "缺槽"断言；反过来，将来补回任何一个槽，这条仍会当场检查它的 DAT/STH 是否成对。
+  for (const s of doc.samples) {
     assert.deepEqual(
       s.files.map((f) => f.name).sort(),
-      [`SAVE${slot}.DAT`, `SAVE${slot}.STH`].sort(),
-      `槽 ${slot} 的文件不成对`,
+      [`SAVE${s.slot}.DAT`, `SAVE${s.slot}.STH`].sort(),
+      `槽 ${s.slot} 的文件不成对`,
     );
   }
 });
 
-test('样本文件都在盘上且非空', () => {
-  for (const n of allFiles()) {
+test('样本文件都在盘上且非空', (t) => {
+  const files = allFiles();
+  // ★ 0 个样本时这条**没有可断言的对象** ⇒ 如实 skip（node:test 记 skip，不是 pass）。
+  //   ⛔ 不要让它空转 pass：那正是 AGENTS.md §5.2 要防的假绿。
+  if (files.length === 0) return t.skip('samples.json 里 0 个样本（2026-11-18 载荷已删除）⇒ 无盘上文件可断言');
+  for (const n of files) {
     const p = path.join(FIXTURES, n);
     assert.ok(fs.existsSync(p), `缺 ${n}`);
     assert.ok(fs.statSync(p).size > 0, `${n} 是空文件`);
@@ -103,7 +121,21 @@ test('目录里除了载荷、目录 README、samples.json 及其同名说明书
 });
 
 test('★ 目录白名单判据（纯函数）：OS 元数据放过；未登记的普通文件（真样本）必须红', () => {
-  const listed = new Set([...allFiles(), ...FIXTURE_DOC_FILES]);
+  // ★ `listed` 是**合成集合**（2026-11-18 起盘上已无真样本）：本条判的是**纯函数**，不是盘上现状。
+  //   ⛔ 不要换回 `allFiles()`：空清单会让它退化成空集，① 那组"已登记必须放过"就全靠 ② 的兜底通过 ⇒ 判据假松。
+  const listed = new Set([
+    'SAVE76.DAT',
+    'SAVE76.STH',
+    'SAVE77.DAT',
+    'SAVE77.STH',
+    'SAVE78.DAT',
+    'SAVE78.STH',
+    'SAVE79.DAT',
+    'SAVE79.STH',
+    'SAVE.DAT',
+    'RT.DAT',
+    ...FIXTURE_DOC_FILES,
+  ]);
 
   // ① 已登记：载荷 / 系统容器 / 目录文档 —— 一律放过
   for (const n of ['SAVE76.DAT', 'SAVE76.STH', 'RT.DAT', 'SAVE.DAT', 'README.md', 'samples.json', 'samples.md', '.gitkeep']) {
@@ -134,6 +166,8 @@ test('每个 .DAT 的槽头时刻 == wallClock(mtimeMs, tzOffsetMinutes)（mtime
   let checked = 0;
   let drifted = 0;
   const total = samples().samples.length;
+  // ★ 0 个样本 ⇒ 没有可核对的对象，如实 skip（否则 `checked > 0 || drifted === total` 会 0===0 空转 pass）。
+  if (total === 0) return t.skip('samples.json 里 0 个样本（2026-11-18 载荷已删除）⇒ 无槽头可核对');
   for (const s of samples().samples) {
     const rec = s.files.find((f) => f.name.endsWith('.DAT'));
     const p = path.join(FIXTURES, rec.name);

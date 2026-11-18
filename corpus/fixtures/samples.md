@@ -6,9 +6,15 @@
 > 本文件**不复述 schema**，只写"它是什么 + 非显然的口径 + 指向"。
 > ★ **不要手改 `samples.json`，也不要手工 `touch`**：唯一编辑入口是 `tools/fixtures.mjs`。
 
+> ★ **2026-11-18（用户裁决）：这份台账现在是空的** —— `corpus/fixtures/` 的存档载荷已**全部删除**
+> （18 个文件），`samples[]` / `containers[]` 都是 `[]`。**空清单合法**：模型层的 `structuralProblems`
+> 对空数组返回 `[]`，写入口照旧复验；schema、不变量、工具操作**都不因这次删除而改变** ——
+> 将来补样本仍走下面的 `add` / `add-container`。
+> **规范存档样本在仓库根 `saves/`**（用户自维护）——它是**另一批字节**，⛔ 不要登记成这里的样本。
+
 ## 它是什么
 
-`corpus/fixtures/` 这一批**真存档样本**的**结构化描述**，两段：
+`corpus/fixtures/` 这一批**真存档样本**的**结构化描述**（**允许为空**），两段：
 
 * `samples[]` —— 一个样本 = 一个槽 = 一对文件（`.DAT` + `.STH`）；
 * `containers[]` —— **不属任何槽**的文件（系统容器 / 玩家配置一类）：身份就是文件名，
@@ -26,7 +32,7 @@
 ## 非显然的口径（脚本里学不到、必须写下来的那种）
 
 * ★ **mtime 是判据的一部分**：槽头 `+264` 起七个 u16（年,月,星期,日,时,分,秒）记的就是**存档时刻**，
-  测试断言「至少一个真槽的头 == 文件 mtime」。而 **git 不保存 mtime** ⇒ 必须记下来。
+  测试断言「至少一个真槽的头 == 文件 mtime」（**0 个样本时如实 skip**，不空转 pass）。而 **git 不保存 mtime** ⇒ 必须记下来。
   记的是**源文件的 instant + 采集时区**（不是"本机墙上时间"），所以
   `pnpm tools fixtures restore-mtime --write` 在**任何机器 / 任何时区**上都能拨回正确值（手工 `touch -t` 不能）。
 * **`where` 由来源方给出**，机器推不出来 —— 所以加样本时 `--where` 是必填。
@@ -61,4 +67,5 @@ pnpm tools fixtures remove-container <文件名> --write
 pnpm tools fixtures normalize --write         # schema 变过之后拉回规范形态
 ```
 
-加 / 删之后跑一次 `pnpm tools corpus validate`（守卫 #3/#6 会核对目录非空与 LFS 属性）。
+加 / 删之后跑一次 `pnpm tools corpus validate`（#3 核对目录非空；#6 只对 `storage=lfs` 的条目适用 ——
+本目录那条 2026-11-18 起是 `storage: git`）。

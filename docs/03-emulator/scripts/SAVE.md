@@ -27,6 +27,8 @@
 读数口径：只有 `{script, pos}` 与配方的 `fired/pending/exit` 当判据。`pos` 与清单 `label_%08x` 同一坐标系。
 执行源 `apps/emulator-lift/out/emulator-lift-aot`，`sha256 = 27fca94a09422ece80d9db64b9962911bbb2d65cea7d1ae3f6dc8893e13f35c9`（2026-11-16，macos-arm64）；
 `--appdata` = 从 `corpus/fixtures/` 组装的那份（`docs/03-emulator/save-format.md` §外部组装）。
+〔★ **2026-11-18 样本迁移**：`corpus/fixtures/` 的存档载荷已按用户裁决删除 ⇒ **现在**照 §外部组装 要用仓库根
+`saves/`（槽 00–04）。上表读数仍出自**当时那份 fixtures appdata**，⛔ 不改写历史读数。〕
 原始日志：`.tmp/p2/run-s2.log` · `run-s3.log` · `run-l1.log` · `trace-s2.log` · `trace-s3.log` · `trace-l1.log`。
 
 | 区间 `[lo,hi)` | 是什么 | 复现命令 | 读数日期 |

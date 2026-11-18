@@ -28,10 +28,9 @@ export const SAMPLES_DOC =
 /** 工具层的自我声明：**我动哪片数据、有哪些操作**（`tools/cli.mjs` 的域地图从它派生） */
 export const DOMAIN = {
   id: 'fixtures',
-  title: '真存档样本（槽 76/77/78/79 + 系统容器 / 玩家配置；文件级事实 + mtime）',
+  title: '真存档样本台账（当前可为空；文件级事实 + mtime）',
   data: [
-    '`corpus/fixtures/samples.json`（本工具的唯一写入口）',
-    '`corpus/fixtures/SAVE*.DAT` / `.STH`（槽载荷，LFS）与系统容器 / 玩家配置（`containers`；本工具是它们唯一的增删入口）',
+    '`corpus/fixtures/samples.json`（唯一写入口是 `tools/fixtures.mjs`）；载荷已按 2026-11-18 用户裁决删除，规范样本在仓库根 `saves/`（用户自维护，⛔ 不是本工具的 dest）',
   ],
   access: 'rw（唯一编辑入口；缺省 dry-run，写后复验，不绿回滚）',
   tool: 'tools/fixtures.mjs',
@@ -78,7 +77,7 @@ const SAMPLE_INVARIANTS = [
   ['`containers` 的条目名不得与槽载荷重名（一个文件只能有一个身份）', '同上'],
   ['槽头 +264 起七个 u16 的年月日时分秒 == `wallClock(mtimeMs, tzOffsetMinutes)`；星期与日期自洽', '`tools/test/fixtures.test.mjs`'],
   ['目录里的文件集合 == 本文件登记的集合 + 目录文档；OS 元数据（点文件 / `Thumbs.db` / `desktop.ini`）不算（两边都不许多）', '`tools/test/fixtures.test.mjs`'],
-  ['载荷的 `filter=lfs`（**不靠 origin 枚举**）', '`pnpm tools corpus validate` 的守卫 #6'],
+  ['载荷文件（若有）的 `filter=lfs` 只在清单条目 `storage: lfs` 时才是判据；2026-11-18 起该条目是 `git` ⇒ #6 不适用', '`pnpm tools corpus validate` 的 #6（条件适用）'],
 ];
 
 const pad = (n) => String(n).padStart(2, '0');
@@ -245,11 +244,11 @@ export function describe() {
   return {
     file: 'corpus/fixtures/samples.json',
     purpose:
-      '这一批真存档样本的结构化描述，分两段：`samples`（每个样本 = 一个槽 = 一对 .DAT/.STH）与 ' +
+      '真存档样本台账（当前可为空；文件级事实 + mtime），分两段：`samples`（每个样本 = 一个槽 = 一对 .DAT/.STH）与 ' +
       '`containers`（不属任何槽的文件：系统容器 / 玩家配置）；只管**文件级事实**',
     notHere:
-      '存储去向（LFS）与"这批样本在清单里是哪一条"不在这里 —— 见 corpus/assets.json 的 `fixtures/save-samples`（说明书 corpus/assets.md）。' +
-      '★ 该条目是**自足条目**（固化资源，没有加工链）⇒ **不登记 origin**：样本的"来源"就是入库的那一份本身',
+      '存储去向（`lfs` / `git`）与"这批样本在清单里是哪一条"不在这里 —— 见 corpus/assets.json 的 `fixtures/save-samples`（说明书 corpus/assets.md）。' +
+      '★ 2026-11-18 后该条目是**目录登记**（只剩文字台账）⇒ **保留 `origin: []`**（⛔ 不把 `saves/` 登记成它的 origin）',
     topLevel: {
       schemaVersion: 1,
       _doc: '由本工具拥有（写盘时自动注入指向本自描述的指针）',
