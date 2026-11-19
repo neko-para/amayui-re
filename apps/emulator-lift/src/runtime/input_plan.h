@@ -361,8 +361,9 @@ private:
     void failTimeout(std::size_t index, std::uint64_t elapsed_ms, std::uint64_t guard_ms);
     void releaseDue(WindowManager& wm, InputPoint point);
     void emitRelease(WindowManager& wm, const PendingRelease& r);
-    // ★ **会话收口**：配方走完 / `quit` 且没有未收口的 click ⇒ `releaseScriptOwnership()`
-    //   （与解释器臂 `InputScript::tick` 的 `finished() || quit_requested_` **同一处**）。
+    // ★ **会话收口**：配方走完 / `quit` 且没有未收口的 click ⇒ `input::releaseProgram(wm, …)`
+    //   （清 Program 电平 + 逐条 post up；与解释器臂 `InputScript::tick` 的
+    //   `finished() || quit_requested_` **同一处**）。
     void closeSessionIfDone(WindowManager& wm);
     // `--input-plan-trace` 的两个出口（缺省 `trace_out_ == nullptr` ⇒ 各自只有一次判空）。
     //   ★ `kind_token` = nullptr ⇒ 用 `s.kind` 的词；控制层的 `move` 没有 StepKind（⛔ 不改配方语法）

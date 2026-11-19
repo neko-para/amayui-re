@@ -11,11 +11,15 @@
 //          wParam / lParam 与注入一致；`DispatchMessageA` 真的把这些消息送进 guest 的 WndProc。
 //   ② 帧触发真的按帧：`at frame 1` 在**没有 Present 过**时不触发；Present 一帧后触发。
 //   ③ `click` 的按下与抬起**跨帧**：guest 必须采到"按下"与"抬起后"两种电平（同帧 down+up 会漏）。
-//   ④ 优先级规则是显式的：脚本拥有某键时，OS 的抬起 / **焦点丢失清键**都不生效（注入不因失焦而丢）；
-//      反过来，脚本接管光标时**真人松开按钮必须被接受**（否则 VK 电平卡在按下）。
-//   ⑤ 脚本以"仍按着"的状态收口（动作跑完 / `quit`）⇒ 必须**补发** WM_KEYUP / WM_LBUTTONUP 并清电平。
+//   ④ 租约规则是显式的（S4 / §3.2）：Program 抬起的键 / 按钮不被 OS 的抬起或**焦点丢失**取消
+//      （注入不因失焦而丢）；反过来 OS 的抬起如果造成 `O==Os` 的 1→0 就**必须投影一条 up**
+//      （否则 VK 电平卡在按下）；孤儿 up（L==0）接受但**没有消息**。
+//   ⑤ 脚本以"仍按着"的状态收口（动作跑完 / `quit`）⇒ `input::releaseProgram` 清电平并**逐条**
+//      补发 WM_KEYUP / WM_LBUTTONUP（设备不 post，调用方投影）。
 //   ⑥ 同一帧里"上一 click 的抬起 + 本帧显式 mouse_down" 读作 down（延迟抬起先处理）。
 //   ⑦ 解析失败必须响亮（动作前没有时间、mouse_down 没有坐标、未知按钮 / 指令 / VK 0、空脚本）。
+//   ⑧ S4 的五条设备级子用例：`orphan-up` / `program-hold-os-release` / `release-program-posts-up` /
+//      `focus-loss-posts-up` / `wheel-while-program-drives`（§4.4 的断言形状）。
 //
 // ★ 这个进程**从不调用 SDL 初始化**（测试里显式断言 `SDL_WasInit(VIDEO)==0`）：它证明的是
 //   "注入只走 `runtime/input.h` + WindowManager 那一份状态"。
@@ -495,6 +499,29 @@ void drainMessages(lift::WindowManager& wm) {
     }
 }
 
+// 从队首 `from` 起数某类消息的条数（⛔ 不取走）—— S4 的「消息 = 电平转移的投影」用它判条数。
+std::size_t countMessages(lift::WindowManager& wm, std::size_t from, std::uint32_t message) {
+    std::size_t n = 0;
+    for (std::size_t i = from; i < wm.queueSize(); ++i) {
+        lift::WinMessage m;
+        if (!wm.peekAt(i, &m)) continue;
+        if (m.message == message) ++n;
+    }
+    return n;
+}
+
+// S4 的五条设备级子用例各用**自己的一台** `WindowManager`（隔离消息队列 / 租约 / 电平）：
+//   `WindowManager` 默认 owner = 构造线程；窗口原点非 0 ⇒ 客户区回读能证明坐标投影没被绕过。
+struct LeaseFixture {
+    lift::WindowManager wm;
+    std::uint32_t hwnd = 0;
+    bool ok = false;
+    LeaseFixture() {
+        hwnd = wm.createWindow("InjLease", 0u, 0u, kWinX, kWinY, 1280, 720, 0u);
+        ok = hwnd != 0;
+    }
+};
+
 bool runOneRound(lift::Machine& m) {
     lift::RunOptions opt;
     opt.until_ea = kSentinel;
@@ -700,10 +727,19 @@ int main() {
             if (!checked_priority && wm->keyDown(0x01u)) {
                 checked_priority = true;
                 g_current_case = "script-priority";
-                // ④ 脚本拥有 VK_LBUTTON：OS 的抬起 + 焦点丢失都不能把它清掉。
-                LIFT_CHECK(!wm->setKeyDown(lift::InputSource::Os, 0x01u, false));
+                // ④ 脚本（Program）抬起 VK_LBUTTON：OS 的抬起 + 焦点丢失都不能把它清掉。
+                //   ★ S4 / §3.2 #9：OS up **被接受**（accepted=true），但电平不变（Program 的 hold 不动）
+                //     且**不投影**任何消息（change==None）。
+                const std::size_t q_before = wm->queueSize();
+                const lift::WriteResult os_up =
+                    wm->setKeyDown(lift::InputSource::Os, 0x01u, false);
+                LIFT_CHECK(os_up.accepted);
+                LIFT_CHECK(os_up.change == lift::LevelChange::None);
                 LIFT_CHECK(wm->keyDown(0x01u));
-                wm->clearOsInput();
+                LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(wm->queueSize()),
+                                  static_cast<std::int64_t>(q_before));  // 没有 WM_KEYUP
+                // ★ S4 / §3.2 #20：焦点丢失只清 **Os** 电平；Program 的 0x01 保留，也不发消息。
+                LIFT_CHECK(lift::input::dropOsLevels(*wm, 0u).empty());
                 LIFT_CHECK(wm->keyDown(0x01u));
                 int cx = 0;
                 int cy = 0;
@@ -725,7 +761,7 @@ int main() {
         LIFT_CHECK(!wm->keyDown(0x01u));
         LIFT_CHECK(!wm->keyDown(0x0Du));
         LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);
-        LIFT_CHECK(!wm->cursorOwnedByScript());
+        LIFT_CHECK(!wm->programDriving());
 
         // guest 侧观测
         LIFT_CHECK_EQ_U32(m.mem().rd32(kLastX), static_cast<std::uint32_t>(kClickX + kWinX));
@@ -822,7 +858,7 @@ int main() {
         LIFT_CHECK_EQ_U32(m.mem().rd32(kLbUpMsg), 1u);
         LIFT_CHECK_EQ_U32(m.mem().rd32(kReleaseAfterDown), 1u);  // 跨帧：按下之后才看到抬起
         LIFT_CHECK_EQ_U32(m.mem().rd32(kDispatchLbDown), 1u);
-        LIFT_CHECK(!wm->cursorOwnedByScript());                  // 脚本结束后所有权已交还
+        LIFT_CHECK(!wm->programDriving());                       // 脚本结束后租约已交还 OS
         LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);
     }
 
@@ -853,6 +889,13 @@ int main() {
         }
         LIFT_CHECK_EQ_U32(m.mem().rd32(kLbUpMsg), 1u);
         LIFT_CHECK_EQ_U32(m.mem().rd32(kKeyUpMsg), 1u);
+        // ★ S4：收口的 up 由 `input::releaseProgram` **逐条**投影（`O==Program` 的鼠标键 + 键），
+        //   wParam / lParam 从设备**写后回读**：按钮位图已清、抬起坐标 = 设备当前位置（50,60），
+        //   最后一条 WM_KEYUP 是 0x0D（⛔ 没有把 VK_LBUTTON 也投影成 WM_KEYUP）。
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kLbUpWparam), 0u);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kLbUpLparam), (60u << 16) | 50u);
+        LIFT_CHECK_EQ_U32(m.mem().rd32(kKeyUpWparam), 0x0Du);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(wm->programHeldLevels().size()), 0);
     }
 
     // =================================================================================
@@ -873,15 +916,219 @@ int main() {
         LIFT_CHECK(m.inputScript().loadText(script, "inline:osup", &err));
         LIFT_CHECK(m.presenter().present(m.surfaces(), *gs, "", &err));
         LIFT_CHECK(runOneRound(m));
-        LIFT_CHECK(wm->cursorOwnedByScript());
-        // OS 的按下在光标被脚本拥有时被拒（消息与 GetCursorPos 不能两套话）……
+        LIFT_CHECK(wm->programDriving());
+        // OS 的按下在 Program 持租约时被拒（消息与 GetCursorPos 不能两套话；§3.2 #5）……
         LIFT_CHECK(!lift::input::mouseButton(*wm, 10, 10, lift::MouseButton::Left, true,
                                              lift::InputSource::Os, 0u));
-        // ……但 OS 的**抬起**必须接受。
+        // ……但 OS 的**抬起**必须接受，而且（★ S4 / §3.2 #10：1→0 且 O==Os）投影**一条**
+        // `WM_LBUTTONUP` —— lParam 用设备当前位置（OS 这次的位置写被租约拒了）。
+        const std::size_t q_up = wm->queueSize();
         LIFT_CHECK(lift::input::mouseButton(*wm, 10, 10, lift::MouseButton::Left, false,
                                             lift::InputSource::Os, 0u));
         LIFT_CHECK(!wm->keyDown(0x01u));
         LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessages(*wm, q_up, lift::input::kWmLButtonUp)), 1);
+        {
+            lift::WinMessage up;
+            bool found = false;
+            for (std::size_t i = q_up; i < wm->queueSize(); ++i) {
+                lift::WinMessage m;
+                if (!wm->peekAt(i, &m)) continue;
+                if (m.message == lift::input::kWmLButtonUp) {
+                    up = m;
+                    found = true;
+                }
+            }
+            LIFT_CHECK(found);
+            LIFT_CHECK_EQ_U32(up.lparam, (400u << 16) | 300u);  // 设备当前位置 = 脚本的 move(300,400)
+            LIFT_CHECK_EQ_U32(up.wparam & 0xFFFFu, 0u);        // 抬起后按钮位图已清
+        }
+        // 再收口一次 OS 电平：已经没有 OS-owned 电平 ⇒ 0 条投影；租约归 Program 的规则**不因**它改变
+        // （§3.2 #20 只清 `O==Os`）。
+        const std::size_t q_close = wm->queueSize();
+        LIFT_CHECK(lift::input::dropOsLevels(*wm, 0u).empty());
+        LIFT_CHECK(wm->programDriving());  // #20 不动租约
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(wm->queueSize()), static_cast<std::int64_t>(q_close));
+    }
+
+    // =================================================================================
+    // ④' S4 单一租约 + 电平转移投影（设计 §3.2 / §4.4 的五条子用例）
+    //   每条用例只需要一台设备 + 一个窗口（⛔ 不依赖 `Machine` / SDL / 帧）。
+    // =================================================================================
+
+    // ---- ④'-1 `orphan-up`：OS down → Program move（取得租约）→ OS up ⇒ 恰好一条 up（#10）；
+    //      再一条 OS up（L==0）⇒ 接受但**没有消息**（#8，孤儿 up 消失）。----
+    g_current_case = "input-injection/orphan-up";
+    {
+        LeaseFixture f;
+        LIFT_CHECK(f.ok);
+        if (!f.ok) return lift_test::finish("input-injection");
+        const std::size_t q0 = f.wm.queueSize();
+        LIFT_CHECK(lift::input::mouseButton(f.wm, 10, 20, lift::MouseButton::Left, true,
+                                            lift::InputSource::Os, 0u));
+        LIFT_CHECK(f.wm.keyDown(0x01u));
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessages(f.wm, q0, lift::input::kWmLButtonDown)), 1);
+        LIFT_CHECK(!f.wm.programDriving());  // OS 的 down 不取得租约
+        // Program 只做 move（= 配方 click 的阶段 ①）⇒ 取得租约，不按按钮。
+        LIFT_CHECK(lift::input::mouseMove(f.wm, 300, 400, lift::InputSource::Script, 0u));
+        LIFT_CHECK(f.wm.programDriving());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessages(f.wm, q0, lift::input::kWmLButtonDown)), 1);
+        // 真人松开：L==1 && O==Os ⇒ 1→0 并投影一条 up（#10）。
+        LIFT_CHECK(lift::input::mouseButton(f.wm, 10, 20, lift::MouseButton::Left, false,
+                                            lift::InputSource::Os, 0u));
+        LIFT_CHECK(!f.wm.keyDown(0x01u));
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessages(f.wm, q0, lift::input::kWmLButtonUp)), 1);
+        LIFT_CHECK(f.wm.programDriving());  // #10 不动租约（Program 仍然持着它）
+        // 第二条 OS up（L==0）：接受（true）但**不投影**（#8）—— 不会出现"只有 up 没有 down"的孤儿。
+        const std::size_t q_orphan = f.wm.queueSize();
+        LIFT_CHECK(lift::input::mouseButton(f.wm, 10, 20, lift::MouseButton::Left, false,
+                                            lift::InputSource::Os, 0u));
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.wm.queueSize()),
+                          static_cast<std::int64_t>(q_orphan));
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessages(f.wm, q0, lift::input::kWmLButtonUp)), 1);
+        // 收口 Program：没有 Program 电平 ⇒ 0 条投影，租约交还 Os（#19）。
+        LIFT_CHECK(lift::input::releaseProgram(f.wm, 0u).empty());
+        LIFT_CHECK(!f.wm.programDriving());
+    }
+
+    // ---- ④'-2 `program-hold-os-release`：Program 按下的按钮不被真人松开取消（#9）；
+    //      收口时投影**一条** up（#17/#19）。----
+    g_current_case = "input-injection/program-hold-os-release";
+    {
+        LeaseFixture f;
+        LIFT_CHECK(f.ok);
+        if (!f.ok) return lift_test::finish("input-injection");
+        const std::size_t q0 = f.wm.queueSize();
+        LIFT_CHECK(lift::input::mouseButton(f.wm, 100, 110, lift::MouseButton::Left, true,
+                                            lift::InputSource::Script, 0u));
+        LIFT_CHECK(f.wm.keyDown(0x01u));
+        LIFT_CHECK(f.wm.programDriving());
+        {
+            const std::vector<lift::LevelRef> held = f.wm.programHeldLevels();
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(held.size()), 1);
+            if (held.size() == 1) {
+                LIFT_CHECK_EQ_U32(held[0].vk, 0x01u);
+                LIFT_CHECK(held[0].owner == lift::LevelOwner::Program);
+                LIFT_CHECK(held[0].mouse);
+            }
+        }
+        // 真人 OS up：**接受**但 Program 的 hold 不动、也不投影（#9）。
+        const std::size_t q_os_up = f.wm.queueSize();
+        LIFT_CHECK(lift::input::mouseButton(f.wm, 100, 110, lift::MouseButton::Left, false,
+                                            lift::InputSource::Os, 0u));
+        LIFT_CHECK(f.wm.keyDown(0x01u));
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.wm.queueSize()), static_cast<std::int64_t>(q_os_up));
+        // 注入收口：投影一条 WM_LBUTTONUP、清电平、租约交还 Os。
+        const std::size_t q_release = f.wm.queueSize();
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(lift::input::releaseProgram(f.wm, 0u).size()), 1);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(
+                              countMessages(f.wm, q_release, lift::input::kWmLButtonUp)), 1);
+        LIFT_CHECK(!f.wm.keyDown(0x01u));
+        LIFT_CHECK(!f.wm.programDriving());
+        LIFT_CHECK(f.wm.programHeldLevels().empty());
+    }
+
+    // ---- ④'-3 `release-program-posts-up`：Program 同时按着鼠标键 + 普通键 ⇒ 收口**逐条**投影
+    //      `WM_LBUTTONUP` + `WM_KEYUP`（#19），电平全 0、租约 Os。----
+    g_current_case = "input-injection/release-program-posts-up";
+    {
+        LeaseFixture f;
+        LIFT_CHECK(f.ok);
+        if (!f.ok) return lift_test::finish("input-injection");
+        LIFT_CHECK(lift::input::mouseButton(f.wm, 50, 60, lift::MouseButton::Left, true,
+                                            lift::InputSource::Script, 0u));
+        LIFT_CHECK(lift::input::key(f.wm, 0x0D, true, 0u, lift::InputSource::Script, 0u));
+        {
+            const std::vector<lift::LevelRef> held = f.wm.programHeldLevels();
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(held.size()), 2);
+            if (held.size() == 2) {
+                LIFT_CHECK_EQ_U32(held[0].vk, 0x01u);
+                LIFT_CHECK(held[0].mouse);
+                LIFT_CHECK_EQ_U32(held[1].vk, 0x0Du);
+                LIFT_CHECK(!held[1].mouse);
+            }
+        }
+        const std::size_t q0 = f.wm.queueSize();
+        const std::vector<lift::LevelRef> released = lift::input::releaseProgram(f.wm, 0u);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(released.size()), 2);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(
+                              countMessages(f.wm, q0, lift::input::kWmLButtonUp)), 1);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(
+                              countMessages(f.wm, q0, lift::input::kWmKeyUp)), 1);
+        LIFT_CHECK(!f.wm.keyDown(0x01u));
+        LIFT_CHECK(!f.wm.keyDown(0x0Du));
+        LIFT_CHECK(f.wm.programHeldLevels().empty());
+        LIFT_CHECK(!f.wm.programDriving());
+    }
+
+    // ---- ④'-4 `focus-loss-posts-up`：失焦只清 **Os** 电平（#20）⇒ 一条 WM_LBUTTONUP；
+    //      Program 的 0x0D hold 保留、租约不动。----
+    g_current_case = "input-injection/focus-loss-posts-up";
+    {
+        LeaseFixture f;
+        LIFT_CHECK(f.ok);
+        if (!f.ok) return lift_test::finish("input-injection");
+        LIFT_CHECK(lift::input::mouseButton(f.wm, 20, 30, lift::MouseButton::Left, true,
+                                            lift::InputSource::Os, 0u));
+        LIFT_CHECK(f.wm.keyDown(0x01u));
+        LIFT_CHECK(lift::input::key(f.wm, 0x0D, true, 0u, lift::InputSource::Script, 0u));
+        LIFT_CHECK(f.wm.keyDown(0x0Du));
+        LIFT_CHECK(f.wm.programDriving());
+        const std::size_t q0 = f.wm.queueSize();
+        const std::vector<lift::LevelRef> dropped = lift::input::dropOsLevels(f.wm, 0u);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(dropped.size()), 1);
+        if (dropped.size() == 1) {
+            LIFT_CHECK_EQ_U32(dropped[0].vk, 0x01u);
+            LIFT_CHECK(dropped[0].owner == lift::LevelOwner::Os);
+            LIFT_CHECK(dropped[0].mouse);
+        }
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(
+                              countMessages(f.wm, q0, lift::input::kWmLButtonUp)), 1);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessages(f.wm, q0, lift::input::kWmKeyUp)), 0);
+        LIFT_CHECK(!f.wm.keyDown(0x01u));   // Os 电平已清
+        LIFT_CHECK(f.wm.keyDown(0x0Du));    // Program 的 hold 保留
+        LIFT_CHECK(f.wm.programDriving());  // #20 不动租约
+        (void)lift::input::releaseProgram(f.wm, 0u);
+    }
+
+    // ---- ④'-5 `wheel-while-program-drives`：Program 持租约时 OS 滚轮**仍然**投影一条
+    //      `WM_MOUSEWHEEL`（Q3b / #21），lParam = 设备当前位置；电平 / 租约都不变。----
+    g_current_case = "input-injection/wheel-while-program-drives";
+    {
+        LeaseFixture f;
+        LIFT_CHECK(f.ok);
+        if (!f.ok) return lift_test::finish("input-injection");
+        LIFT_CHECK(lift::input::mouseMove(f.wm, 300, 400, lift::InputSource::Script, 0u));
+        LIFT_CHECK(f.wm.programDriving());
+        const std::uint32_t buttons_before = f.wm.mouseButtons();
+        const std::size_t q0 = f.wm.queueSize();
+        // OS 的位置写会被租约拒（#3）⇒ 用设备当前位置（300,400），但滚轮照样投影。
+        LIFT_CHECK(lift::input::mouseWheel(f.wm, 999, 888, 120, lift::InputSource::Os, 0u));
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(
+                              countMessages(f.wm, q0, lift::input::kWmMouseWheel)), 1);
+        {
+            lift::WinMessage wheel;
+            bool found = false;
+            for (std::size_t i = q0; i < f.wm.queueSize(); ++i) {
+                lift::WinMessage m;
+                if (!f.wm.peekAt(i, &m)) continue;
+                if (m.message == lift::input::kWmMouseWheel) {
+                    wheel = m;
+                    found = true;
+                }
+            }
+            LIFT_CHECK(found);
+            LIFT_CHECK_EQ_U32(wheel.lparam, (400u << 16) | 300u);  // 设备当前位置，不是入参 (999,888)
+            LIFT_CHECK_EQ_U32(wheel.wparam >> 16, 120u);
+            LIFT_CHECK_EQ_U32(wheel.wparam & 0xFFFFu, 0u);
+        }
+        int cx = 0;
+        int cy = 0;
+        f.wm.cursorClientPos(f.hwnd, &cx, &cy);
+        LIFT_CHECK_EQ_I64(cx, 300);  // 位置没被这次滚轮改掉
+        LIFT_CHECK_EQ_I64(cy, 400);
+        LIFT_CHECK_EQ_U32(f.wm.mouseButtons(), buttons_before);  // 按钮电平不变
+        LIFT_CHECK(f.wm.programDriving());                      // 租约不变
     }
 
     // =================================================================================
@@ -935,7 +1182,7 @@ int main() {
         LIFT_CHECK(!wm->keyDown(0x01u));
         LIFT_CHECK(!wm->keyDown(0x0Du));
         LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);
-        LIFT_CHECK(!wm->cursorOwnedByScript());
+        LIFT_CHECK(!wm->programDriving());
         LIFT_CHECK(!m.inputScript().active());
     }
 

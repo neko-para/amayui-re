@@ -17,10 +17,10 @@
 //      `inputSampleCount()` 时它当场红）；必须跨过 `kKeyLevelReadsBeforeRelease` 个 **KeyLevel** 读点。
 //   ③ **兜底**：一次 KeyLevel 读点都不来的屏（纯消息型）⇒ 墙钟到期仍然抬起（⛔ 永久按住），
 //      而且到期之前**不许**提前抬起；整屏不读位置时 click 也**一定**能按下（`kPressFallbackMs`）。
-//   ④ **交还光标所有权**：注入会话结束（配方走完 / `releaseAll`）⇒ `releaseScriptOwnership()`，
-//      真实鼠标重新生效（`host_window.h` 的 InputSource 段就是它的合同）。
+//   ④ **交还租约**：注入会话结束（配方走完 / `releaseAll`）⇒ `input::releaseProgram()`，
+//      真实鼠标重新生效（`runtime/input_device.h` 的 `Driver` / §3.2 #19 就是它的合同）。
 //
-// ⚠ 诚实边界：本用例判的是**注入层的时序与所有权**，⛔ 不判"引擎会不会命中那个宝藏"。
+// ⚠ 诚实边界：本用例判的是**注入层的时序与租约**，⛔ 不判"引擎会不会命中那个宝藏"。
 //   "真的能被引擎看见"的最终判据只能人工跑一次 SAVE05 点宝藏（命令与期望见交付报告 §8）。
 #include <cstdint>
 #include <cstdio>
@@ -273,7 +273,7 @@ void caseWallclockFallbacks() {
 }
 
 // =====================================================================================
-// ④ · 交还光标所有权（解释器臂 `input_script` 的收口同口径）
+// ④ · 交还租约（解释器臂 `input_script` 的收口同口径：`input::releaseProgram`）
 // =====================================================================================
 void caseOwnershipHandback() {
     lift_test::g_current_case = "inject/handback";
@@ -288,21 +288,21 @@ void caseOwnershipHandback() {
     LIFT_CHECK(plan.loadText("click 10 20\n", "mem", &err));
 
     // 注入前：OS 能挪光标。
-    LIFT_CHECK(!f.wm.cursorOwnedByScript());
+    LIFT_CHECK(!f.wm.programDriving());
     LIFT_CHECK(lift::input::mouseMove(f.wm, 5, 5, lift::InputSource::Os, 0));
     int cx = 0;
     int cy = 0;
     f.wm.cursorClientPos(f.hwnd, &cx, &cy);
     LIFT_CHECK_EQ_I64(cx, 5);
 
-    // 注入臂上 = 光标归脚本（OS 的移动被拒）—— 这是既有的所有权合同，⛔ 本轮不改。
+    // 注入臂上 = Program 持租约（OS 的移动被拒，§3.2 #3）—— 这是 S4 的租约合同。
     readPoint(f.wm, plan, lift::InputPoint::PeekMsg, false);  // 阶段 ①：臂上
-    LIFT_CHECK(f.wm.cursorOwnedByScript());
+    LIFT_CHECK(f.wm.programDriving());
     LIFT_CHECK(!lift::input::mouseMove(f.wm, 6, 6, lift::InputSource::Os, 0));
     f.wm.cursorClientPos(f.hwnd, &cx, &cy);
     LIFT_CHECK_EQ_I64(cx, 10);  // 仍是注入的目标位置
 
-    // 走完一次 click（位置采样 → 按下 → N 个 KeyLevel 读点 → 抬起）；**这一刻**所有权还在脚本手里。
+    // 走完一次 click（位置采样 → 按下 → N 个 KeyLevel 读点 → 抬起）；**这一刻**租约还在 Program 手里。
     readPoint(f.wm, plan, lift::InputPoint::CursorPos, true);  // 位置采样（这一拍还没按）
     readPoint(f.wm, plan, lift::InputPoint::PeekMsg, false);   // 阶段 ②：按下
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 1);
@@ -313,10 +313,10 @@ void caseOwnershipHandback() {
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 0);
     LIFT_CHECK(plan.outcome() == lift::RecipeOutcome::Done);  // 配方走完 = 会话收口
 
-    // 收口：下一个读点把所有权交还 OS ⇒ 真鼠标重新生效（`GetCursorPos` 跟着变）。
+    // 收口：下一个读点把租约交还 OS ⇒ 真鼠标重新生效（`GetCursorPos` 跟着变）。
     g_now_ms += 1;
     readPoint(f.wm, plan, lift::InputPoint::CursorPos, true);
-    LIFT_CHECK(!f.wm.cursorOwnedByScript());
+    LIFT_CHECK(!f.wm.programDriving());
     LIFT_CHECK(lift::input::mouseMove(f.wm, 300, 400, lift::InputSource::Os, 0));
     f.wm.cursorClientPos(f.hwnd, &cx, &cy);
     LIFT_CHECK_EQ_I64(cx, 300);
@@ -325,9 +325,9 @@ void caseOwnershipHandback() {
     // `releaseAll`（AOT 收口 / CTest teardown）也必须交还：再注入一次再收口。
     LIFT_CHECK(plan.enqueueMove(50, 60));
     readPoint(f.wm, plan, lift::InputPoint::CursorPos, true);
-    LIFT_CHECK(f.wm.cursorOwnedByScript());
+    LIFT_CHECK(f.wm.programDriving());
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.releaseAll(f.wm)), 0);  // 没有按下的
-    LIFT_CHECK(!f.wm.cursorOwnedByScript());
+    LIFT_CHECK(!f.wm.programDriving());
     LIFT_CHECK(lift::input::mouseMove(f.wm, 7, 8, lift::InputSource::Os, 0));
 }
 

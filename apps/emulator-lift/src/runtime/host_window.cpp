@@ -222,13 +222,16 @@ std::uint32_t WindowManager::primaryWindow() const {
     return 0;
 }
 
-void WindowManager::setKeyDown(std::uint32_t vk, bool down) { setKeyDown(InputSource::Os, vk, down); }
+WriteResult WindowManager::setKeyDown(std::uint32_t vk, bool down) {
+    return setKeyDown(InputSource::Os, vk, down);
+}
 
-// ★ 输入状态（S1）：6 组字段与三套 owner 的规则已搬到 `runtime/input_device.cpp`；
+// ★ 输入状态（S4）：设备是唯一状态源；`InputSource` → `Driver` 的映射是**唯一**一份
+//   （`Script` = Program：配方 / 控制层 / `InputScript` / 交互图从不并发，§3.4）。
 //   这里只保留**同名转发** + 原来的 `checkMainThread` 站点名（⛔ 站点名一个都不许改）。
-bool WindowManager::setKeyDown(InputSource src, std::uint32_t vk, bool down) {
+WriteResult WindowManager::setKeyDown(InputSource src, std::uint32_t vk, bool down) {
     checkMainThread("window.key");
-    return device_.setKey(src, vk, down);
+    return device_.setKey(vk, down, src == InputSource::Script ? Driver::Program : Driver::Os);
 }
 
 bool WindowManager::keyDown(std::uint32_t vk) const {
@@ -236,37 +239,22 @@ bool WindowManager::keyDown(std::uint32_t vk) const {
     return device_.keyDown(vk);
 }
 
-bool WindowManager::keyOwnedByScript(std::uint32_t vk) const {
+std::vector<LevelRef> WindowManager::programHeldLevels() const {
     checkMainThread("window.key");
-    return device_.keyOwnedByScript(vk);
+    return device_.programHeldLevels();
 }
 
-bool WindowManager::mouseButtonOwnedByScript(MouseButton b) const {
+WriteResult WindowManager::setMouseButton(MouseButton b, bool down, InputSource src) {
     checkMainThread("window.mouse");
-    return device_.mouseButtonOwnedByScript(b);
-}
-
-bool WindowManager::setMouseButton(MouseButton b, bool down, InputSource src) {
-    checkMainThread("window.mouse");
-    if (static_cast<std::size_t>(b) >= kMouseButtonCount) return false;
+    if (static_cast<std::size_t>(b) >= kMouseButtonCount) return WriteResult{};
     // ★ 搬家前这里经 `setKeyDown` 再记一次 `window.key`（站点名与计数逐字保留；S1 纯搬家）。
     checkMainThread("window.key");
-    return device_.setMouseButton(b, down, src);
+    return device_.setButton(b, down, src == InputSource::Script ? Driver::Program : Driver::Os);
 }
 
 void WindowManager::clearKeys() {
     checkMainThread("window.key");
     device_.clearKeys();
-}
-
-void WindowManager::clearOsInput() {
-    checkMainThread("window.key");
-    device_.clearOsInput();
-}
-
-void WindowManager::releaseScriptOwnership() {
-    checkMainThread("window.key");
-    device_.releaseScriptOwnership();
 }
 
 void WindowManager::postQuit(std::uint32_t code) {
@@ -324,7 +312,7 @@ bool WindowManager::killTimer(std::uint32_t hwnd, std::uint32_t id) {
     return timers_.size() != before;
 }
 
-// ---- 光标 / 捕获（headless 虚拟状态；语义见 host_window.h 的注释）----
+// ---- 光标（headless 虚拟状态；设备侧语义见 `runtime/input_device.h` 的 `Driver` / §3.2）----
 
 std::uint32_t WindowManager::setCursor(std::uint32_t hcursor) {
     checkMainThread("window.cursor");
@@ -335,17 +323,18 @@ std::uint32_t WindowManager::setCursor(std::uint32_t hcursor) {
 
 void WindowManager::setCursorPos(int x, int y) {
     checkMainThread("window.cursor");
-    // guest 自己的 SetCursorPos：只写设备位置，不改所有权（S1 纯搬家）。
-    device_.setCursorScreen(x, y);
+    // guest 自己的 SetCursorPos：`Driver::Guest` **永远接受**，不改租约 / 电平，也不发消息（§3.2 #1）。
+    device_.moveToScreen(x, y, Driver::Guest);
 }
 
 bool WindowManager::setCursorClientPos(std::uint32_t hwnd, int x, int y, InputSource src) {
     checkMainThread("window.cursor");
-    // ★ 搬家前：先判所有权（被拒时**不查窗口表**），再查窗口原点、写位置 ⇒ 这里保持同样的顺序。
-    if (src == InputSource::Os && device_.cursorOwnedByScript()) return false;
+    // ★ 先判租约（被拒时**不查窗口表**；与搬家前的顺序一致）。
+    if (src == InputSource::Os && device_.programDriving()) return false;
     // ★ 窗口原点投影留在 `WindowManager`（窗口表在它这里；见设计 §3.6）。
     const HostWindow* w = find(hwnd);
-    return device_.moveToScreen(x + (w ? w->x : 0), y + (w ? w->y : 0), src);
+    return device_.moveToScreen(x + (w ? w->x : 0), y + (w ? w->y : 0),
+                                src == InputSource::Script ? Driver::Program : Driver::Os);
 }
 
 void WindowManager::cursorClientPos(std::uint32_t hwnd, int* x, int* y) const {

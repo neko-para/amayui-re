@@ -21,7 +21,8 @@
 //       入口按它吞掉那一条（`runtime/present_sdl.cpp` / `runtime/warp_echo.h`）—— `WindowManager`
 //       拿不到 clamp 之前的坐标。
 //
-// ★ 实现落点：光标 / 捕获状态在 `WindowManager`（host_window.h/.cpp 的"光标 / 捕获"段）。
+// ★ 实现落点：光标状态在 `WindowManager` 的转发（`runtime/host_window.{h,cpp}` 的光标段），
+//   唯一状态源 / 语义在 `runtime/input_device.{h,cpp}`（`InputDevice`；capture 已随 S1 删除）。
 // ★ 实测调用点（`.lst`，锚 EA）：
 //   · `0x004B8692 call SetCursor`（`sub_4B8680`：应用 `[esi+408h]` 的 HCURSOR，之后 `add [esi+42Ch],1`；
 //     **不读**返回值 —— 但真机语义仍是"返回旧光标"，照做）。
@@ -133,6 +134,8 @@ void shimSetCursorPos(X86& cpu, ShimCall& call) {
     const int y = call.i32(1);
     // ★ 投递层（S1）：**写点**（所有权：计划自己的位置不被这里顶掉；S2 才填）。
     input::deliverWrite(*wm, InputPoint::SetCursorPos);
+    // ★ S4 / Q7：guest 自己的 `SetCursorPos` 走 `Driver::Guest` ——**永远接受**、不改租约 / 电平、
+    //   不发消息（§3.2 #1）⇒ 它不会被「Program 持租约」误伤。
     wm->setCursorPos(x, y);  // ① guest 可见状态（屏幕坐标）—— 开关开不开都先落地
     // ② 宿主副作用。判据照 `user32_menu.cpp` 的 MessageBoxA：有宿主服务 + 有 sink + 不在音频 feeder 线程
     //    （WindowManager 是主线程独占宿主对象；feeder 上碰它本身就在既有违规账里）。

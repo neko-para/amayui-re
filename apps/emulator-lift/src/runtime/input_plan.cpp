@@ -518,13 +518,16 @@ void InputPlan::closeSessionIfDone(WindowManager& wm) {
     // ★ 与解释器臂 `InputScript::tick` 的收口**同一处**：`finished() || quit_requested_`。
     //   · 配方走完（`next_ >= size`）/ `quit` ⇒ 一次注入会话结束；
     //   · **纯控制层**的运行（没有配方）：一次 move / click 就是一次会话 ⇒ 落地并抬起之后也就结束。
-    //   ⇒ 交还光标所有权（`releaseScriptOwnership` 已存在；⛔ 不重构所有权机制）。
+    //   ⇒ 交还 Program 的 hold（§3.4 第 6 条）：`input::releaseProgram` 清 Program 抬起的电平并
+    //     **逐条 post up**；⛔ 不再有「只改状态、不投影」的 `releaseScriptOwnership`。
     //   ★ 必须等 `pending_` / `armed_` / `immediate_` 全空：按下还没抬起就把光标还给 OS，
     //     真实鼠标会在按下与抬起之间把它挪走（那就等于把本轮的修法又撤了）。
     if (session_closed_) return;
     if (!pending_.empty() || !armed_.empty() || !immediate_.empty()) return;
     if (!quit_requested_ && recipe_.active() && next_ < recipe_.size()) return;
-    wm.releaseScriptOwnership();
+    // ★ `atPoint` 的**开头**调用（早退之前）⇒ 收口的 up 在**本读点**入队，guest 本读点的
+    //   `PeekMessage` 就能取到，且电平已经是 0（§3.4 第 6 条）。
+    input::releaseProgram(wm, kPlanMessageTimeMs);
     session_closed_ = true;
 }
 
@@ -544,10 +547,12 @@ std::size_t InputPlan::releaseAll(WindowManager& wm) {
     releases_pending_ = 0;
     // ★ 还没按下的（`armed_`）直接丢掉：它们**没有按下过** ⇒ 没有要抬的，也不需要伪造一次点击。
     armed_.clear();
-    // ★ 收口（AOT 的 `aot_main` 跑完之后 / CTest 的收尾都走这里）：交还光标所有权。
-    //   与解释器臂 `InputScript::abandon()`（`releaseOwnedInputs` + `releaseScriptOwnership`）
+    // ★ 收口（AOT 的 `aot_main` 跑完之后 / CTest 的收尾都走这里）：先 `emitRelease` 处理
+    //   `pending_`（显式 click 的按下），再 `input::releaseProgram` 处理显式 `mouse_down` /
+    //   `key_down` 留下的 Program 电平（§4.4 的调用点表）。
+    //   与解释器臂 `InputScript::abandon()`（`releaseOwnedInputs` → `input::releaseProgram`）
     //   同一处、同一顺序 —— AOT 臂以前**没有**这个调用点（真鼠标在第一次注入之后永久失效）。
-    wm.releaseScriptOwnership();
+    input::releaseProgram(wm, kPlanMessageTimeMs);
     session_closed_ = true;
     return n;
 }

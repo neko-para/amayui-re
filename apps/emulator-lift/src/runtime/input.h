@@ -15,11 +15,13 @@
 //   SDL 的"窗口像素 → guest 客户区"映射仍留在 `present_sdl.cpp` 的 `mapMouse`（它需要窗口尺寸，
 //   是 SDL 平台的属性）；注入脚本的坐标本来就是 guest 空间，不需要再过一次。
 //
-// ★ 来源与优先级：见 `host_window.h` 的 `InputSource`。本层只负责"把一次输入交给状态源"，
-//   不决定谁赢——所有权的判定在 `WindowManager`。
+// ★ 来源与租约：见 `runtime/input_device.h` 的 `InputSource` / `Driver`（§3.2 / §3.4）。
+//   本层负责「把一次输入交给设备 + 按 **电平转移** 投影消息」，不决定谁赢 ——
+//   租约 / 来源的判定全在设备（`WindowManager` 只是同名转发）。
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 #include "runtime/host_window.h"
 #include "runtime/input_device.h"
@@ -51,15 +53,28 @@ std::uint32_t flagForMouseButton(MouseButton b);
 std::uint32_t messageForMouseButton(MouseButton b, bool down);
 
 // 应用一次输入。`client_x/client_y` 是 guest 客户区坐标；`time_ms` 进 `MSG.time`。
-// 返回 false = 这次输入被**所有者**拒绝（脚本拥有该键 / 光标而来源是 OS）——调用方据此决定
-// 要不要打日志；状态与队列都**没有**被改动（一致：不会出现"消息动了、电平没动"）。
+// 返回 false = 这次输入被**租约 / 来源规则拒绝**（§3.2 的 rejected 行）——调用方据此决定
+// 要不要打日志；状态与队列都**没有**被改动。
+// ★ S4：`accepted==true && change==None`（§3.2 #7/#8/#9/#13/#14/#16）⇒ 返回 true 但**不发消息**。
+// ★ `repeat` = Win32 键盘 auto-repeat（§3.11）：`down && repeat` 时即使电平不变也 post 一条
+//   `WM_KEYDOWN`（lParam bit30=1，§3.2 #23）。缺省 false（注入侧不建模 repeat）。
 bool mouseMove(WindowManager& wm, int client_x, int client_y, InputSource src, std::uint32_t time_ms);
 bool mouseButton(WindowManager& wm, int client_x, int client_y, MouseButton b, bool down, InputSource src,
                  std::uint32_t time_ms);
 bool mouseWheel(WindowManager& wm, int client_x, int client_y, int delta_120, InputSource src,
                 std::uint32_t time_ms);
 bool key(WindowManager& wm, std::uint32_t vk, bool down, std::uint32_t scancode, InputSource src,
-         std::uint32_t time_ms);
+         std::uint32_t time_ms, bool repeat = false);
+
+// =====================================================================================
+// 状态收口（S4 / §3.4 第 6–7 条）：设备只返回待投影的 `LevelRef`，这两个函数**逐条 post up**
+//   （`wParam` / `lParam` 从设备**写后回读**）。
+//   · `releaseProgram`：清 `O==Program` 的电平，lease 交还 Os（#19）；会话结束 / `releaseAll` 用。
+//   · `dropOsLevels`：清 `O==Os` 的电平，Program 的 hold 保留（#20）；失焦 / 暂停恢复用。
+//   ⛔ 设备不 post、不持队列 —— 所以投影只能在这里（调用方持有 `WindowManager&`）。
+// =====================================================================================
+std::vector<LevelRef> releaseProgram(WindowManager& wm, std::uint32_t time_ms);
+std::vector<LevelRef> dropOsLevels(WindowManager& wm, std::uint32_t time_ms);
 
 // =====================================================================================
 // 投递层入口（S1：**四个**，每个读点第一句调其中一个）

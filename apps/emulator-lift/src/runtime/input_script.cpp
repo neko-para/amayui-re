@@ -734,7 +734,7 @@ bool InputScript::releaseDue(Release& r, const WindowManager& wm, std::uint64_t 
 void InputScript::emitRelease(WindowManager& wm, const Release& r, std::uint64_t frame, std::uint64_t guest_ms,
                               std::uint32_t time_ms, bool bounded) {
     if (r.is_key) {
-        input::key(wm, r.vk, false, 0u, InputSource::Script, time_ms);
+        input::key(wm, r.vk, false, 0u, InputSource::Script, time_ms, /*repeat=*/false);
     } else {
         input::mouseButton(wm, r.x, r.y, r.button, false, InputSource::Script, time_ms);
     }
@@ -837,7 +837,7 @@ void InputScript::apply(WindowManager& wm, Action& a, std::uint64_t frame, std::
             break;
         }
         case Kind::KeyDown:
-            input::key(wm, a.vk, true, 0u, InputSource::Script, time_ms);
+            input::key(wm, a.vk, true, 0u, InputSource::Script, time_ms, /*repeat=*/false);
             notePress(a.vk, wm, guest_ms);
             break;
         case Kind::KeyUp: {
@@ -857,7 +857,7 @@ void InputScript::apply(WindowManager& wm, Action& a, std::uint64_t frame, std::
                             static_cast<unsigned long long>(p->samples));
                 break;
             }
-            input::key(wm, a.vk, false, 0u, InputSource::Script, time_ms);
+            input::key(wm, a.vk, false, 0u, InputSource::Script, time_ms, /*repeat=*/false);
             dropPress(a.vk);
             break;
         }
@@ -1288,7 +1288,8 @@ bool InputScript::tick(WindowManager& wm, std::uint64_t frame, std::uint64_t gue
         releases_.clear();
         presses_.clear();
         releaseOwnedInputs(wm, time_ms);
-        wm.releaseScriptOwnership();
+        // ★ S4：`releaseOwnedInputs` 内部已经调 `input::releaseProgram`（清 Program 电平 + 逐条
+        //   post up）⇒ ⛔ 不再有第二次 `releaseScriptOwnership()`（那会是一条不发消息的收口路径）。
         // ★ 收口行必须**与事实一致**（`REQ-01M72WHFMCWQ0KEJDQG0XH21AH`）：`quit` 提前结束时
         //   只剩 `quit` 之前到期的动作被应用，旧文案打的是**总**动作数、说的是"全部应用"
         //   ⇒ 与摘要里的 `input-script: unfinished pending=…` 正好相反。这里按 `applied_` / 总数分支。
@@ -1321,26 +1322,29 @@ bool InputScript::tick(WindowManager& wm, std::uint64_t frame, std::uint64_t gue
 void InputScript::abandon(WindowManager& wm, std::uint32_t time_ms) {
     if (!active() && !quit_requested_) return;
     releaseOwnedInputs(wm, time_ms);
-    wm.releaseScriptOwnership();
+    // ★ S4：收口（含 `input::releaseProgram`）全在 `releaseOwnedInputs` 里；⛔ 不再有第二次
+    //   `releaseScriptOwnership()`（只改状态、不投影）。
     clear();
 }
 
 void InputScript::releaseOwnedInputs(WindowManager& wm, std::uint32_t time_ms) {
-    int x = 0;
-    int y = 0;
-    wm.cursorClientPos(wm.primaryWindow(), &x, &y);
-    // 先按钮（它同时清 VK 电平），再剩下的键。
-    for (std::size_t i = 0; i < kMouseButtonCount; ++i) {
-        const MouseButton b = static_cast<MouseButton>(i);
-        if (!wm.mouseButtonOwnedByScript(b)) continue;
-        std::printf("[input-script]   release-at-finish: mouse %s\n", buttonName(b));
-        input::mouseButton(wm, x, y, b, false, InputSource::Script, time_ms);
+    // ★ S4（§4.4 的调用点表）：⛔ 不再用 `mouseButtonOwnedByScript` / `keyOwnedByScript` 决定发哪些 up
+    //   —— 设备给出「Program 抬起的电平」只读快照（只用于打印），实际收口交给
+    //   `input::releaseProgram`（它清电平并**逐条** post 对应的 `WM_*UP`）。
+    const std::vector<LevelRef> held = wm.programHeldLevels();
+    for (const LevelRef& level : held) {
+        if (level.mouse) {
+            MouseButton b = MouseButton::Left;
+            for (std::size_t i = 0; i < kMouseButtonCount; ++i) {
+                const MouseButton candidate = static_cast<MouseButton>(i);
+                if (vkForMouseButton(candidate) == level.vk) b = candidate;
+            }
+            std::printf("[input-script]   release-at-finish: mouse %s\n", buttonName(b));
+        } else {
+            std::printf("[input-script]   release-at-finish: key 0x%02X\n", level.vk);
+        }
     }
-    for (std::uint32_t vk = 1; vk < 256u; ++vk) {
-        if (!wm.keyOwnedByScript(vk)) continue;
-        std::printf("[input-script]   release-at-finish: key 0x%02X\n", vk);
-        input::key(wm, vk, false, 0u, InputSource::Script, time_ms);
-    }
+    input::releaseProgram(wm, time_ms);
 }
 
 }  // namespace lift

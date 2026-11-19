@@ -645,9 +645,11 @@ void SdlWindow::Impl::handleEvent(const SDL_Event& event) {
             }
             break;
         case SDL_EVENT_WINDOW_FOCUS_LOST:
-            // ★ 焦点丢失只清 **OS 拥有** 的键 / 按钮（见 host_window.h 的 InputSource）：
-            //   脚本注入的按下不因窗口失焦而丢 —— 那正是"注入不依赖焦点"的一半。
-            if (windows != nullptr) windows->clearOsInput();
+            // ★ 焦点丢失只清 **OS 拥有** 的电平（见 `runtime/input_device.h` 的 `LevelOwner`）：
+            //   Program（注入 / 配方 / 控制层）的按下不因窗口失焦而丢 —— 那正是"注入不依赖焦点"的一半。
+            //   ★ S4 / Q1b：`input::dropOsLevels` **逐条 post up**（§3.2 #20）⇒ guest 不会看到
+            //   「down 了却没有 up」的孤儿电平。
+            if (windows != nullptr) input::dropOsLevels(*windows, now_ms);
             // ★ 叠层的 capture 也清（失焦 ⇒ 这次按住不算数；抬起时放行给 guest，不发 click）。
             click_router.focusLost();
             break;
@@ -660,8 +662,12 @@ void SdlWindow::Impl::handleEvent(const SDL_Event& event) {
             const std::uint32_t vk = vkFromSdlKey(event.key.key);
             if (vk == 0) break;
             const std::uint32_t scan = event.key.scancode ? static_cast<std::uint32_t>(event.key.scancode) : 0u;
-            // ★ 注入路径与真人路径在**同一段代码**里：状态 + WM_* 一起落地（所有权判定在里面）。
-            if (windows != nullptr) input::key(*windows, vk, down, scan, InputSource::Os, now_ms);
+            // ★ 注入路径与真人路径在**同一段代码**里：状态 + WM_* 一起落地（租约判定在里面）。
+            //   ★ S4 / §3.11：`event.key.repeat` 是键盘 auto-repeat 的**唯一**来源
+            //   （`down && repeat` ⇒ 电平不变也 post `WM_KEYDOWN`，lParam bit30=1）。
+            if (windows != nullptr) {
+                input::key(*windows, vk, down, scan, InputSource::Os, now_ms, event.key.repeat);
+            }
             if (down && vk == 0x1B) requestClose();  // ESC = 用户要退出（与旧行为一致）
             break;
         }

@@ -39,6 +39,7 @@
 #include "runtime/decode_cache.h"  // `liftOneDecodeCache()`：只读命中率（`decode-cache:` 行）
 #include "runtime/fault_state.h"   // guest fault 现场（AOT 没有 Machine ⇒ 本臂自己登记；见该头注）
 #include "runtime/guest_token.h"   // Phase-0（`arm()` 在 `AotHost::run`；这里只读）
+#include "runtime/input.h"         // S4：`controlOnResume` 的 `input::dropOsLevels`（暂停恢复收口）
 #include "runtime/script_globals.h"  // `global-get/set` 的 AGE 引擎层实现（控制层只转发）
 #include "runtime/token_phase0_report.h"  // tokenhold/holdhist/waithist/shimmax 的唯一打印点
 #include "shims/register.h"
@@ -1246,7 +1247,14 @@ ControlShotStatus AotHost::controlScreenshot(const std::string& path, ControlScr
     return ControlShotStatus::Ok;
 }
 
-void AotHost::controlOnResume() { presenter_.noteControlResume(); }
+void AotHost::controlOnResume() {
+    // ★ S4 / Q1b（§3.10）：暂停期间没有读点，真人在暂停中松开的按钮**不会**被送给设备
+    //   （`pumpOneEvent` 的 stale 闸门会丢弃早于恢复时刻的 OS 事件）⇒ 电平会卡在按下。
+    //   这里在设置陈旧截点**之前**清 **OS-owned** 电平并逐条 post up（Program 的 hold 保留，
+    //   §3.2 #20）⇒ guest 看到的是「正常的 up」，而不是永久按下。
+    input::dropOsLevels(windows_, static_cast<std::uint32_t>(clock_.nowMs()));
+    presenter_.noteControlResume();
+}
 
 // =====================================================================================
 // `global-get` / `global-set`（控制层的主线程执行口）

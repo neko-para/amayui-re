@@ -1408,6 +1408,7 @@ void caseClickDelivery() {
 
         // 前 cap 条真的都在队列里：**下一个读点**（resume 之后）上全部生效（fired 1 → 1+cap），
         // 且配方仍然没动。
+        const std::size_t down_before_cap = reading.down_msgs;
         Res rr2;
         LIFT_CHECK(roundTrip("{\"id\":12,\"op\":\"resume\"}", &rr2));
         LIFT_CHECK(rr2.ok);
@@ -1418,7 +1419,12 @@ void caseClickDelivery() {
                     static_cast<unsigned long long>(reading.applied),
                     static_cast<unsigned long long>(reading.pending));
         LIFT_CHECK(reading.fired == 1 + cap);
-        LIFT_CHECK(reading.down_msgs == 1 + cap);
+        // ★ S4（§3.2 #14）：这 64 条 click 是**同一个按钮**、在同一个读点被一次性按下 ⇒ 电平只做
+        //   **一次** 0→1 转移，后续 63 次 `Program.down` 是「接受但不投影」（⛔ 旧实现的 64 条重复
+        //   `WM_LBUTTONDOWN` 是双表示的症状）。"一条都没丢"由 `fired == 1+cap` 证明；每条 click
+        //   各得一对 down/up 是 S7 的连点串行化（§4.7），不在本片。
+        LIFT_CHECK(reading.down_msgs <= down_before_cap + 1);
+        LIFT_CHECK(reading.left_down);  // 至少有一条 click 仍按着（pending==1 的同一条事实）
         LIFT_CHECK(reading.queued == 0);
         LIFT_CHECK(reading.applied == 0);
         LIFT_CHECK(reading.pending == 1);

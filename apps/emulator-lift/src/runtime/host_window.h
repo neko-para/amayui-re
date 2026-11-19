@@ -23,6 +23,14 @@ namespace lift {
 
 struct X86;
 class InputPlan;
+class WindowManager;
+
+// ★ S4：状态收口的**唯一**投影入口（§3.6）。设备只返回待投影的 `LevelRef`，这两个 free function
+//   逐条 post up；它们是 `WindowManager::releaseProgramLevels` / `dropOsLevelsState` 的 friend。
+namespace input {
+std::vector<LevelRef> releaseProgram(WindowManager& wm, std::uint32_t time_ms);
+std::vector<LevelRef> dropOsLevels(WindowManager& wm, std::uint32_t time_ms);
+}  // namespace input
 
 struct WinMessage {
     std::uint32_t hwnd = 0;
@@ -70,12 +78,12 @@ struct HostTimer {
 
 // =====================================================================================
 // 输入状态（★ **唯一输入状态源**：guest 侧所有输入 API 都读 `WindowManager` 的那一份）
-// ★ 2026-11-19（S1）：6 组输入状态与三套 owner 的规则**随状态一起搬到**
-//   `runtime/input_device.h` / `.cpp`（`InputDevice`，本类以私有成员 `device_` 持有）。
-//   `InputSource` / `MouseButton` / 按钮 ↔ VK 映射也在那里（本类 include 它）。
-//   ★ S1 是**过渡形态**（纯搬家）：三套 owner 都还在；S3 删掉了 `mouse_buttons_`
-//     （按钮位图改成 VK 电平的只读派生）；「单一租约」是 S4。
-// ★ 本类的公开 setter / getter 保留**同名**与同一个 `checkMainThread` 站点名，内部转 `device_`。
+// ★ 2026-11-19（S1 → S4）：输入状态在 `runtime/input_device.h` / `.cpp` 的 `InputDevice`
+//   （本类以私有成员 `device_` 持有）。S4 起设备是**最终形态**：单一租约（`lease_`）+
+//   逐电平来源（`level_owner_`）+ `WriteResult` 转移；⛔ 不再有 v1 的三套 owner。
+//   `InputSource` / `MouseButton` / 按钮 ↔ VK 映射也都在 `runtime/input_device.h`（本类 include 它）。
+// ★ 本类的公开 setter / getter 保留**同名**与同一个 `checkMainThread` 站点名，内部转 `device_`；
+//   `setKeyDown` / `setMouseButton` 返回 `WriteResult`（`input::*` 据此只在电平转移时 post）。
 // =====================================================================================
 const char* inputSourceName(InputSource src);
 
@@ -157,23 +165,23 @@ public:
     // 主窗口（第一个未销毁；本作单窗口；0 = 还没有窗口）。关窗消息的 hwnd 用它。
     std::uint32_t primaryWindow() const;
     // 影子键盘状态：WM_KEYDOWN/UP 与 GetAsyncKeyState 同源（⛔ 两套状态会打架）。
-    // ★ 来源规则见文件上方 `InputSource`；`setKeyDown(vk,down)` = OS（旧调用口径）。
-    void setKeyDown(std::uint32_t vk, bool down);
-    bool setKeyDown(InputSource src, std::uint32_t vk, bool down);  // false = 被所有者拒绝
+    // ★ 来源规则见 `runtime/input_device.h` 的 `InputSource` / `Driver`；`setKeyDown(vk,down)` = OS。
+    //   ★ S4：返回 `WriteResult{accepted, change}` —— `accepted==true && change==None` 是「接受但不投影」
+    //     （§3.2 #7/#8/#9/#13/#14/#16）。
+    WriteResult setKeyDown(std::uint32_t vk, bool down);
+    WriteResult setKeyDown(InputSource src, std::uint32_t vk, bool down);
     bool keyDown(std::uint32_t vk) const;
-    bool keyOwnedByScript(std::uint32_t vk) const;
-    void clearKeys();      // 全部清（旧口径 / 测试）
-    void clearOsInput();   // 焦点丢失：只清 **OS 拥有** 的键与按钮电平
-    // 脚本结束：释放脚本按下的键 / 按钮（置抬起）并把所有权交还 OS。
-    void releaseScriptOwnership();
+    void clearKeys();  // 全部清（旧口径 / 测试；整机复位：电平 / 来源标签 / 租约）
+    // 脚本（Program）抬起的电平只读快照（收口前打印 / 测试用；⛔ 不改状态）。
+    std::vector<LevelRef> programHeldLevels() const;
     // 鼠标按钮位图（WM_* 的 wParam）。★ S3：**只读派生**自设备的 VK 电平
-    //   （`key_down_[VK_LBUTTON/RBUTTON/MBUTTON]`），⛔ 没有第二份 `mouse_buttons_`。
+    //   （`key_level_[VK_LBUTTON/RBUTTON/MBUTTON]`），⛔ 没有第二份 `mouse_buttons_`。
     std::uint32_t mouseButtons() const {
         checkMainThread("window.mouse");
         return device_.buttons();
     }
-    bool setMouseButton(MouseButton b, bool down, InputSource src);  // S3：只写 VK 电平（位图是派生）
-    bool mouseButtonOwnedByScript(MouseButton b) const;
+    // S4：写按钮 = 写它的 VK 电平（位图是派生）。
+    WriteResult setMouseButton(MouseButton b, bool down, InputSource src);
     void postQuit(std::uint32_t code);
     bool quitPosted() const {
         checkMainThread("window.quit");
@@ -215,16 +223,19 @@ public:
         checkMainThread("window.cursor");
         return cursor_;
     }
-    // ★ 第 4 个参数是来源：`Script` 一旦写过位置就拥有光标，之后 `Os` 的移动被拒绝
-    //   （规则随状态在 `runtime/input_device.h` 的 `InputSource` 处，S1 纯搬家）。
-    void setCursorPos(int x, int y);  // guest 自己调 SetCursorPos（不改所有权）
+    // ★ guest 自己的 `SetCursorPos`：走 `Driver::Guest`（S4 / Q7）——**永远接受**、不改租约 / 电平、
+    //   不发消息（§3.2 #1）。
+    void setCursorPos(int x, int y);
+    // ★ 第 4 个参数是来源：`Script`（= `Driver::Program`）一旦写过位置就取得租约，之后 `Os` 的移动 /
+    //   上升被拒绝（规则在 `runtime/input_device.h` 的 `Driver` / §3.2）。
     bool setCursorClientPos(std::uint32_t hwnd, int x, int y, InputSource src);
     void setCursorClientPos(std::uint32_t hwnd, int x, int y) {
         setCursorClientPos(hwnd, x, y, InputSource::Os);
     }
-    bool cursorOwnedByScript() const {
+    // 当前租约是不是 Program（= 注入 / 配方 / 控制层在驱动）。S4 取代 `cursorOwnedByScript()`。
+    bool programDriving() const {
         checkMainThread("window.cursor");
-        return device_.cursorOwnedByScript();
+        return device_.programDriving();
     }
     // 屏幕坐标 → 客户区坐标（`SetCursorPos` / `GetCursorPos` 的反向；与 setCursorClientPos 同一份原点）。
     void cursorClientPos(std::uint32_t hwnd, int* x, int* y) const;
@@ -299,6 +310,20 @@ public:
     void validateAll(HostWindow& w);                          // 无效区清空
 
 private:
+    // ★ S4：状态收口只经这两个 private 方法（§3.6 / §3.7）——它们只返回待投影的 `LevelRef`，
+    //   消息由 `input::releaseProgram` / `input::dropOsLevels` 逐条 post。
+    //   ⛔ 不再保留 `clearOsInput` / `releaseScriptOwnership` 这两个「只改状态、不投影」的公开入口。
+    friend std::vector<LevelRef> input::releaseProgram(WindowManager& wm, std::uint32_t time_ms);
+    friend std::vector<LevelRef> input::dropOsLevels(WindowManager& wm, std::uint32_t time_ms);
+    std::vector<LevelRef> releaseProgramLevels() {
+        checkMainThread("window.key");
+        return device_.release(Driver::Program);
+    }
+    std::vector<LevelRef> dropOsLevelsState() {
+        checkMainThread("window.key");
+        return device_.dropOsLevels();
+    }
+
     std::vector<WindowClassInfo> classes_;
     std::map<std::uint32_t, HostWindow> windows_;
     std::deque<WinMessage> queue_;
@@ -309,7 +334,7 @@ private:
     bool quit_ = false;
     std::uint32_t quit_code_ = 0;
     HostEventPump host_event_pump_;
-    // ★ 输入状态（S1：6 组字段 + 三套 owner 的规则都在这里；写 API private + friend）。
+    // ★ 输入状态（S4：单一租约 + 逐电平来源都在设备里；写 API private + friend）。
     InputDevice device_;
     // 光标（见上面的方法注释）
     std::uint32_t cursor_ = 0;
