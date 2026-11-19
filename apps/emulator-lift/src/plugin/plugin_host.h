@@ -59,6 +59,7 @@
 namespace lift {
 
 class GuestMemory;
+class WindowManager;
 
 namespace ui {
 
@@ -180,6 +181,13 @@ private:
 
     // 一次回调的公共壳（start / onTrigger 共用）：预算 + 归因 + 返回值翻译。
     TriggerSet runCallback(Context& ctx, bool is_start, const TriggerEvent* ev, std::string* err);
+    // ★ F3（父级裁决）：`fail` / `quit` 是**终态异常** ⇒ 立刻清掉本 owner 的
+    //   staged input / 按住 / armed（在 `executor_.atPoint` 的第 ⑥ 步**之前**）。
+    //   `finish` / `return []` **不**释放（正常收口：本读点之后那次 click 仍要落地）。
+    void releaseRunInput();
+    // ★ F2：`TriggerRunner` 在 `onTrigger` 返回的集合上 `install` 失败（重复 name / Once 回放 /
+    //   非法 kind）时，`failed_` 只有 runner 知道 ⇒ 这里把它同步进本类（readout 才能说 `run=failed`）。
+    void syncRunnerFailure();
     // 四条 Input 的公共提交点（一读点一条 / owner / origin 只在这里定）。
     Receipt submitIntent(IntentKind kind, int x, int y, MouseButton button);
     // 失败收口：记错 + 一行 stderr（真源在本类；⛔ 不写 runner 的 `lastError`）。
@@ -203,6 +211,11 @@ private:
     Context* ctx_ = nullptr;
     bool in_callback_ = false;
     bool begun_ = false;
+
+    // ★ F3：本次读点的窗口管理器（`onReadPoint` 存；`onTrigger` 里 `releaseRunInput` 要用它）。
+    //   生命周期 = 宿主的 `AotHost::cpu().windows`（活到 run 之后）⇒ 非拥有指针足够；
+    //   ⛔ 回调里拿不到它（`Context` 里没有 `WindowManager`，合同 §4.5 711–713）。
+    lift::WindowManager* current_wm_ = nullptr;
 
     bool failed_ = false;
     std::string fail_name_;

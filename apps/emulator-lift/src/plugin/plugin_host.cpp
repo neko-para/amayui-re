@@ -107,8 +107,13 @@ void PluginHost::attachMemory(lift::GuestMemory& mem) {
 // =====================================================================================
 void PluginHost::onReadPoint(WindowManager& wm, InputPoint point) {
     if (script_ == nullptr) return;
+    // ★ F3：本读点的 wm 留给 `onTrigger`（终态异常要在这里释放本 owner 的输入状态）。
+    current_wm_ = &wm;
     // ① 七步（② `beginReadPoint` 已跑；没有 armed 时早退 —— 这是 C1 的既有语义，⛔ 不改）。
     executor_.atPoint(wm, point);
+    // ★ F2：`onTrigger` 返回的集合由 **runner** `install`；失败（重复 name / Once 回放 / 非法 kind）
+    //   只会写进 runner 的账 ⇒ 不同步出来的话 readout 会说 `run=waiting`（生产上只能等 --time-limit）。
+    syncRunnerFailure();
     if (begun_ || failed_ || quit_requested_) return;
 
     // ② 首点：只采样 + `begin`（D-C2-10）。`sampleNow` 让 `start` 里的 `ctx.now` 有值；
@@ -117,13 +122,17 @@ void PluginHost::onReadPoint(WindowManager& wm, InputPoint point) {
     executor_.sampleNow(point);
     std::string err;
     runner_.begin(*this, executor_.context(), &err);
-    if (!err.empty()) {
+    if (!err.empty() && !failed_) {
         // 两种来路：① 本类的 `start` 记了 JS 的错（`runner_.begin` 只清 err、不看清）；
         //           ② runner 自己判的（重复 name / 无 state / 预算）⇒ 由 `lastError()` 点名。
+        // ★ F7：`runCallback` 已经为 JS 失败打过一行（并置 `failed_`）⇒ 这里**只**补 runner 那一路，
+        //   否则同一条 "run failed" 会打两遍（收口时那是唯一消息面）。
         const std::string why = runner_.failed() && !runner_.lastError().empty() ? runner_.lastError() : err;
-        if (!failed_) markFailed(why);
+        markFailed(why);
         report("run failed", why);
     }
+    // ★ F3（start 侧）：`start` 里 `ctx.fail` / `ctx.quit` 也是终态异常 ⇒ 已 staged 的 input 不许落地。
+    if (failed_ || quit_requested_) releaseRunInput();
 }
 
 // =====================================================================================
@@ -143,7 +152,29 @@ PluginHost::TriggerSet PluginHost::onTrigger(Context& ctx, const TriggerEvent& e
     } else {
         ++timeouts_;
     }
-    return runCallback(ctx, false, &ev, err);
+    TriggerSet out = runCallback(ctx, false, &ev, err);
+    // ★ F3（父级裁决，写死）：`fail` / `quit` 是**终态异常** ⇒ 就在 JS 返回之后、`executor_.atPoint`
+    //   的第 ⑥ 步（`drainQueue`）**之前**清掉本 owner 的 staged input / 按住 / armed ——
+    //   本读点之后**不允许**再落地。`finish` / `return []` 不释放（正常收口：本读点提交的那次
+    //   `ctx.input.click` 仍要落地；见 `plugin/finish-lands-input`）。
+    if (failed_ || quit_requested_) releaseRunInput();
+    return out;
+}
+
+void PluginHost::releaseRunInput() {
+    if (current_wm_ == nullptr) return;
+    // `IntentExecutor::releaseOwner` 做三件事：真的抬起已按住的（post up）/ 丢掉队列里未落地的
+    // （staged + ready）/ 抹掉 runner 里该 owner 的 armed 槽。⇒ 一个入口，⛔ 不在这里手搓第二份。
+    executor_.releaseOwner(*current_wm_, kOwner);
+}
+
+void PluginHost::syncRunnerFailure() {
+    if (failed_ || !runner_.failed()) return;
+    // ★ F2：`lastError()` 是 runner 点名的（"duplicate trigger name: x" / "trigger exhausted: x" /
+    //   "unsupported trigger kind: x" / 预算）⇒ 原样进 readout 的 `reason=`，⛔ 不编第二套文案。
+    markFailed(runner_.lastError().empty() ? std::string("plugin: run failed（runner 未给原因）")
+                                           : runner_.lastError());
+    report("run failed", fail_reason_);
 }
 
 PluginHost::TriggerSet PluginHost::runCallback(Context& ctx, bool is_start, const TriggerEvent* ev,
@@ -387,8 +418,12 @@ std::string PluginHost::readout() const {
     out += std::string(" callbacks=") + (script_ != nullptr && script_->hasRun() ? "yes" : "no");
     out += " params=" + paramsText(params_);
     out += " calls=" + std::to_string(callbacks_);
+    // ★ F2 的 fallback：`failed_` 是本类记的（JS 失败 / `ctx.fail` / 同步过来的 runner 失败），
+    //   `runner_.failed()` 是 install 判的 ⇒ **两者任一**都必须让 readout 说 `run=failed`，
+    //   ⛔ 不许出现"runner 已经 failed、readout 还写 waiting"（那在生产上只能等 --time-limit）。
+    const bool run_failed = failed_ || runner_.failed();
     const char* state = "waiting";
-    if (failed_) {
+    if (run_failed) {
         state = "failed";
     } else if (quit_requested_) {
         state = "quit";
@@ -398,10 +433,14 @@ std::string PluginHost::readout() const {
         state = "done";
     }
     out += std::string(" run=") + state;
-    if (!fail_name_.empty()) out += " name=" + oneLine(fail_name_);
+    // 名字 / 原因也从 runner 兜底（`syncRunnerFailure` 通常已经把 `reason` 搬过来了）。
+    const std::string name_text = !fail_name_.empty() ? fail_name_ : (run_failed ? runner_.failName() : std::string());
+    if (!name_text.empty()) out += " name=" + oneLine(name_text);
     if (finished_) out += " exit=" + std::to_string(finish_code_);
-    if (failed_) {
-        if (!fail_reason_.empty()) out += " reason=" + oneLine(fail_reason_);
+    if (run_failed) {
+        const std::string reason =
+            !fail_reason_.empty() ? fail_reason_ : (runner_.failed() ? runner_.lastError() : std::string());
+        if (!reason.empty()) out += " reason=" + oneLine(reason);
     } else if (quit_requested_) {
         if (!quit_reason_.empty()) out += " reason=" + oneLine(quit_reason_);
     } else if (finished_ && !finish_reason_.empty()) {

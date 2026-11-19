@@ -423,8 +423,137 @@ void caseFinish() {
     LIFT_CHECK(!f.host->quitRequested());   // finish ≠ quit
     LIFT_CHECK(f.host->runner().done());    // Run 收口
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);
-    LIFT_CHECK(f.host->readout().find("run=finished") != std::string::npos);
-    LIFT_CHECK(f.host->readout().find("exit=5") != std::string::npos);
+    const std::string line = f.host->readout();
+    LIFT_CHECK(line.find("run=finished") != std::string::npos);
+    LIFT_CHECK(line.find("exit=5") != std::string::npos);
+    std::printf("  [%s] %s\n", lift_test::g_current_case, line.c_str());
+}
+
+// =====================================================================================
+// F2：`onTrigger` 返回的集合让 runner `install` 失败 ⇒ 必须在 readout 上可见（`run=failed`）
+// =====================================================================================
+void caseFailInstall() {
+    lift_test::g_current_case = "plugin/fail-install";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    const bool loaded = f.load("fail-install.js");
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    f.pump();  // 第 1 个读点：start arm `a`（Once）
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 0);
+    f.pump();  // 第 2 个读点：`a` fire ⇒ 回调把同一个 Once 对象放回 ⇒ install 判 exhausted
+    dumpFail(f);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 1);
+    // ★ 判据的两侧：runner 自己 failed **且** handler 侧同步到了（否则 readout 会说 waiting）。
+    LIFT_CHECK(f.host->runner().failed());
+    LIFT_CHECK(f.host->failed());
+    LIFT_CHECK(f.host->failReason().find("exhausted") != std::string::npos);
+    const std::string line = f.host->readout();
+    LIFT_CHECK(line.find("run=failed") != std::string::npos);
+    LIFT_CHECK(line.find("name=a") != std::string::npos);
+    LIFT_CHECK(line.find("exhausted") != std::string::npos);
+    // ★ 读数的**唯一消息面**：green 时也打一行（ctest 只在失败时回放，平时不吵）——
+    //   它是"Run 到底怎么收的口"的直接证据，比只看断言好读。
+    std::printf("  [%s] %s\n", lift_test::g_current_case, line.c_str());
+}
+
+// =====================================================================================
+// F3（父级裁决）：`fail` / `quit` ⇒ 立刻丢 staged input；`finish` ⇒ 不丢（下一个读点落地）
+// =====================================================================================
+void caseFailReleasesInput() {
+    lift_test::g_current_case = "plugin/fail-releases-input";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    const bool loaded = f.load("fail-release.js");
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    int cx = 0;
+    int cy = 0;
+    f.pump();  // 第 1 个读点：start arm `boom`
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    f.pump();  // 第 2 个读点：回调提交 click(200,100) **然后** fail ⇒ 必须被丢掉
+    dumpFail(f);
+    LIFT_CHECK(f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().depth()), 0);  // staged 被丢掉
+    f.cursor(&cx, &cy);
+    LIFT_CHECK(!(cx == 200 && cy == 100));
+    // 再泵一拍：失败之后**不允许**再落地（F3 的字面判据）。
+    f.pump();
+    f.cursor(&cx, &cy);
+    LIFT_CHECK(!(cx == 200 && cy == 100));
+}
+
+void caseQuitReleasesInput() {
+    lift_test::g_current_case = "plugin/quit-releases-input";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    const bool loaded = f.load("quit-release.js");
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    int cx = 0;
+    int cy = 0;
+    f.pump();  // start：arm `bye`
+    dumpFail(f);
+    LIFT_CHECK(!f.host->quitRequested());
+    f.pump();  // 回调：click(300,400) 然后 quit ⇒ staged 必须被丢掉
+    dumpFail(f);
+    LIFT_CHECK(f.host->quitRequested());  // 第二条停机源
+    LIFT_CHECK(!f.host->failed());         // quit ≠ fail
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().depth()), 0);
+    f.cursor(&cx, &cy);
+    LIFT_CHECK(!(cx == 300 && cy == 400));
+    f.pump();
+    f.cursor(&cx, &cy);
+    LIFT_CHECK(!(cx == 300 && cy == 400));
+    const std::string line = f.host->readout();
+    LIFT_CHECK(line.find("run=quit") != std::string::npos);
+    std::printf("  [%s] %s\n", lift_test::g_current_case, line.c_str());
+}
+
+void caseFinishLandsInput() {
+    lift_test::g_current_case = "plugin/finish-lands-input";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    const bool loaded = f.load("finish-click.js");
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    int cx = 0;
+    int cy = 0;
+    f.pump();  // start：arm `fin`
+    dumpFail(f);
+    f.pump();  // 回调：click(640,323) + finish(0) ⇒ **不**释放 ⇒ staged 留着（下一读点才落地）
+    dumpFail(f);
+    LIFT_CHECK(f.host->finished());
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().depth()), 1);
+    f.cursor(&cx, &cy);
+    LIFT_CHECK(!(cx == 640 && cy == 323));  // 本读点还没落地（callback 的 input 一律下一读点）
+    f.pump();                               // 下一读点：第 ② 步提升 ⇒ 第 ⑥ 步落地
+    f.cursor(&cx, &cy);
+    LIFT_CHECK_EQ_I64(cx, 640);
+    LIFT_CHECK_EQ_I64(cy, 323);
+    const std::string line = f.host->readout();
+    LIFT_CHECK(line.find("run=finished") != std::string::npos);
+    std::printf("  [%s] %s\n", lift_test::g_current_case, line.c_str());
 }
 
 // =====================================================================================
@@ -521,5 +650,9 @@ int main() {
     caseGlobalReadModifyWrite();
     caseFinish();
     caseStartNowAndStaged();
+    caseFailInstall();
+    caseFailReleasesInput();
+    caseQuitReleasesInput();
+    caseFinishLandsInput();
     return lift_test::finish("plugin-runtime");
 }
