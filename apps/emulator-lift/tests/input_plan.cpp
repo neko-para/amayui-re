@@ -51,6 +51,7 @@
 #include "runtime/host_window.h"
 #include "runtime/input.h"  // kMk* / WM_* 的闭集合
 #include "runtime/input_plan.h"
+#include "runtime/interaction_graph.h"  // S4/S6：`issueAction` 的 mouse 分支（动作文本可观察面）
 #include "runtime/memory.h"
 #include "shims/register.h"
 
@@ -1324,6 +1325,91 @@ void caseMousePrimitives() {
 }
 
 // =====================================================================================
+// S4/S6 · `InteractionGraph::issueAction` 的 **mouse 分支**（设计 §4.6）：`mouse_down` / `mouse_up`
+//   的临时解析器要求 `have_pos_` ⇒ 图必须为每条 down/up **在同一段追加文本里**补一条**同点**
+//   `mouse_move`（⛔ 不是第二套按下 / 抬起）。
+//
+// 判据（红了意味着什么）：图发出的动作**文本序列**必须是
+//   `mouse_move (x,y)` → [`mouse_move (x,y)` → `mouse_down`] → [`mouse_move (x,y)` → `mouse_up`]；
+//   少了那条 move ⇒ `appendText` 解析失败（动作永远不会被追加）；move 换了点 ⇒ down/up 落错位置。
+//   ★ 可观察面 = `InputScript::actions()[i]` 的 `kind` / `x` / `y` / `button` / `text` /
+//     `trigger.value` + `InteractionGraph::actionsIssued()`。`InteractionGraph` **没有 CLI**
+//     （见其文件头），`actuator()` 是它唯一的动作出口 ⇒ 这里断的就是它实际发出的东西。
+//   ⛔ 不要为此给 `InputScript` 加"跨 `appendText` 保留位置"的第二套解析状态。
+// =====================================================================================
+void caseGraphMouseActions() {
+    lift_test::g_current_case = "input-plan/graph-mouse-actions";
+    lift::WindowManager wm;
+    const std::uint32_t hwnd = wm.createWindow("PlanTest", 0u, 0u, 0u, 0u, 1280, 720, 0u);
+    LIFT_CHECK(hwnd != 0);
+    if (hwnd == 0) return;
+    lift::InteractionGraph graph;
+    std::string err;
+    const bool loaded = graph.loadText("mouse_move 300 400\nmouse_down\nmouse_up\n", "mem:graph-mouse", &err);
+    if (!loaded) std::fprintf(stderr, "图配方被拒：%s\n", err.c_str());
+    LIFT_CHECK(loaded);
+    if (!loaded) return;
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(graph.steps().size()), 3);
+
+    // 块边界推进（与 `Machine` 的块边界顺序相同）：actuator 先应用到期动作，图再追加下一步。
+    lift::InputScript& act = graph.actuator();
+    std::uint64_t frame = 0;
+    for (int i = 0; i < 200 && !graph.done() && !graph.failed(); ++i) {
+        ++frame;
+        const std::uint64_t guest_ms = frame * 100ull;
+        act.tick(wm, frame, guest_ms, guest_ms, guest_ms);
+        graph.tick(wm, frame, guest_ms, guest_ms, guest_ms, nullptr, nullptr);
+    }
+    LIFT_CHECK(!graph.failed());
+    LIFT_CHECK(graph.done());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(graph.actionsIssued()), 3);  // 三条步骤各发一次
+
+    const std::vector<lift::InputScript::Action>& acts = act.actions();
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(acts.size()), 5);
+    if (acts.size() != 5) return;
+    // ---- ① 形状：move → (move, down) → (move, up) ----
+    LIFT_CHECK(acts[0].kind == lift::InputScript::Kind::MouseMove);
+    LIFT_CHECK(acts[1].kind == lift::InputScript::Kind::MouseMove);
+    LIFT_CHECK(acts[2].kind == lift::InputScript::Kind::MouseDown);
+    LIFT_CHECK(acts[3].kind == lift::InputScript::Kind::MouseMove);
+    LIFT_CHECK(acts[4].kind == lift::InputScript::Kind::MouseUp);
+    // ---- ② 文本面：down/up 前**紧挨着**同点 `mouse_move`（§4.6 明写）----
+    LIFT_CHECK(acts[0].text == "mouse_move 300 400");
+    LIFT_CHECK(acts[1].text == "mouse_move 300 400");
+    LIFT_CHECK(acts[2].text == "mouse_down");
+    LIFT_CHECK(acts[3].text == "mouse_move 300 400");
+    LIFT_CHECK(acts[4].text == "mouse_up");
+    // ---- ③ 坐标面：三条 `mouse_move` 都是图自己的 last_move（300,400）；down/up 的坐标就是它 ----
+    const int move_idx[] = {0, 1, 3};
+    for (const int k : move_idx) {
+        LIFT_CHECK_EQ_I64(acts[k].x, 300);
+        LIFT_CHECK_EQ_I64(acts[k].y, 400);
+    }
+    LIFT_CHECK(acts[2].button == lift::MouseButton::Left);
+    LIFT_CHECK(acts[4].button == lift::MouseButton::Left);
+    // ---- ④ 触发面：每次追加 = `at frame <当时 frame + 1>`（动作只在**下一个 Present** 落地）----
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(acts[0].trigger.value), 2);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(acts[1].trigger.value), 3);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(acts[2].trigger.value), 3);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(acts[3].trigger.value), 4);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(acts[4].trigger.value), 4);
+    // ---- ⑤ 设备面：动作真的落地 —— 光标在 (300,400)，队列里有一条落在 (300,400) 的 DOWN ----
+    //   ⚠ 图臂是**测试夹具**（没有 CLI）：`InputScript` 的收口（追加批次 `finished()`）会在
+    //     down 应用完就补一条 UP ⇒ 这里不断言"最终仍按着"，只断言"DOWN 真的发过、位置正确"。
+    int cx = 0;
+    int cy = 0;
+    wm.cursorClientPos(hwnd, &cx, &cy);
+    LIFT_CHECK_EQ_I64(cx, 300);
+    LIFT_CHECK_EQ_I64(cy, 400);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessage(wm, 0, kWmLButtonDown)), 1);
+    lift::WinMessage down_msg;
+    LIFT_CHECK(findMessage(wm, 0, kWmLButtonDown, &down_msg));
+    LIFT_CHECK_EQ_U32(down_msg.lparam, mouseLParam(300, 400));
+    LIFT_CHECK_EQ_U32(down_msg.wparam, lift::input::kMkLButton);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessage(wm, 0, kWmMouseMove)), 3);  // 每条 down/up 各补一条
+}
+
+// =====================================================================================
 // S6 · 拖拽：down A → move B → up B（§4.6 判据 2）
 //
 // 判据（红了意味着什么）：
@@ -1622,6 +1708,7 @@ int main() {
     caseForcedRelease();
     caseTrace();
     caseMousePrimitives();
+    caseGraphMouseActions();
     caseDrag();
     caseDragRepeat();
     caseOneWritePerReadPoint();

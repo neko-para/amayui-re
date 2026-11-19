@@ -76,11 +76,32 @@ bool mouseMove(WindowManager& wm, int client_x, int client_y, InputSource src, s
 
 bool mouseButton(WindowManager& wm, int client_x, int client_y, MouseButton b, bool down, InputSource src,
                  std::uint32_t time_ms) {
+    // ★ S4-fix（§3.4 第 2 条）：`Script` 的 **up ⛔ 不先写光标**。
+    //   反例（曾经是缺陷）：up 也先 `setCursorClientPos(..., Script)` ⇒ 设备
+    //   `InputDevice::moveToScreen(Driver::Program)` **无条件取得租约**，于是
+    //   设备 §3.2 **#15**（没有租约的 Program up 应拒绝）对鼠标按钮**不可达**；
+    //   **#18**（Program 不取消真人按住的键）也会在拒绝之前把租约 / 光标改掉。
+    //   语义（§3.4 第 2 条）：Program 只在**第一次有效上升或移动**取得租约，⛔ **不是 Program.up**。
+    //   ⇒ up 先问设备（拒绝 ⇒ #15/#18 原样返回 false，⛔ 不动租约 / 光标 / 电平）；接受但电平
+    //   没有 1→0 转移（change==None）⇒ 不投影。⛔ 不要再把 move 加回 up 前面。
+    if (src == InputSource::Script && !down) {
+        const WriteResult wr = wm.setMouseButton(b, /*down=*/false, src);
+        if (!wr.accepted) return false;                    // #15 / #18：什么都不动
+        if (wr.change == LevelChange::None) return true;   // 接受但没转移（#14 / #16）
+        // change==Up：用**设备当前** client 位置 post（⛔ 不移动光标；设备不 post，调用方投影）。
+        int lx = 0;
+        int ly = 0;
+        wm.cursorClientPos(wm.primaryWindow(), &lx, &ly);
+        postToPrimary(wm, messageForMouseButton(b, /*down=*/false), wm.mouseButtons(), mouseLParam(lx, ly),
+                      time_ms);
+        return true;
+    }
     // ★ S4：⛔ 不再有「按钮 / 键 / 光标被脚本拥有」三条 OS 特例。规则只剩设备 §3.2 的转移表：
     //   · 光标：Win32 的按钮事件带位置。OS 的移动可能被租约拒绝（#3 / #5），但 OS 的**抬起**
     //     仍要落地（#9 / #10）⇒ 抬起被拒时用设备当前位置（与 `GetCursorPos` 一致），不丢抬起。
     //   · 电平：`setButton` 返回 `WriteResult`；**只在 change==Down/Up 时 post**
     //     （#7/#8/#9/#13/#14/#16 = accepted 但不投影）。
+    //   ★ Program 的 **down** 保持「先移动（取得租约）再按下」（#11/#12/#13）；只有 up 不走这里。
     if (!wm.setCursorClientPos(wm.primaryWindow(), client_x, client_y, src)) {
         if (down) return false;  // #5：Program 持租约期间 OS 的上升被拒 ⇒ 不写、不发
     }
