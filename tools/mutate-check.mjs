@@ -5096,6 +5096,29 @@ const MUTATIONS = [
       '第一个读点不再 `sampleNow` ⇒ `start` 里的 `ctx.now` 是空的（`plugin-runtime` 的 ' +
       '`plugin/start-now-and-staged-input` 红：JS 侧期望 `ctx.now.script/pos` 有值、拿到 undefined）',
   },
+
+  // ── C2b：`ctx.draw` 的不支持 style 字段（`c2-decisions.md` D-C2-3）─────────────────────────
+  //   ★ 代表"声明了却静默忽略"这一类错：`stroke`/`width`/`alpha`/`align` 在 `Element` 里没有
+  //     表示（`ui/element.h` 只有 fill/color/bold/z）⇒ 忽略掉的话插件**照样拿到 true**、
+  //     只是画出来的东西少一圈描边 / 少一层透明度，**没有任何症状**（除非有人逐字段比对）。
+  //   ★ 变异把拒绝分支变成永不进入（`blocked[i] == nullptr` 在循环里恒假）⇒ `render` 返回 true
+  //     ⇒ `plugin-runtime` 的 `plugin/ui-draw-bad-style` 的"必须抛"一侧红。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from:
+      '        if (!v.isUndefined()) {\n' +
+      '            JS_ThrowTypeError(ctx, "ctx.draw: style.%s is not supported", blocked[i]);\n',
+    to:
+      '        if (blocked[i] == nullptr && !v.isUndefined()) {  // 变异：不支持的 style 字段被静默忽略\n' +
+      '            JS_ThrowTypeError(ctx, "ctx.draw: style.%s is not supported", blocked[i]);\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`ctx.draw` 的不支持 style 字段不再抛 TypeError（静默忽略 `stroke`/`width`/`alpha`/`align`）⇒ ' +
+      '`plugin-runtime` 的 `plugin/ui-draw-bad-style` 红（`render` 返回 true，D-C2-3 的反面）',
+  },
 ];
 
 let mutationRunSeq = 0;
