@@ -5077,7 +5077,7 @@ const MUTATIONS = [
       '`const std::size_t next_ = 0; (void)next_;`）⇒ core-shape 的禁用词表当场点名 `next_` ⇒ 红',
   },
 
-  // ── C2a：首点的 `sampleNow`（`c2-decisions.md` D-C2-10）─────────────��──────────────────
+  // ── C2a：首点的 `sampleNow`（`c2-decisions.md` D-C2-10）───────────────────────────────────
   //   ★ 代表"第一个读点只 `begin` 不采样"这一类错：`IntentExecutor::atPoint` 的早退在 **② 之后**
   //     （没有 armed trigger 时**根本没采样**）⇒ 少了这一行，`start` 里的 `ctx.now` 是空对象，
   //     而 Input 的 staged 语义**完全不变** ⇒ 只有"start 读 now"的断言能看出来（静默）。
