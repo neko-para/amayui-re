@@ -37,13 +37,15 @@
 
 ## 切片（C0–C5）
 
-- **C0**：**已完成（dev，未合入 main）**：能力表/接口/9 项同源（`hello`/`caps=`/`--help`/`.d.ts` 一致；
+- **C0**：**已完成（main）**：能力表/接口/9 项同源（`hello`/`caps=`/`--help`/`.d.ts` 一致；
   `caps=` 6→9 readout 修正）；守卫 `tools/test/capability-matrix.test.mjs`。
-- **C1**：**已完成（dev，未合入 main；独立复审“C1 可收”）**：`TriggerRunner` + `IntentQueue` + executor +
+- **C1**：**已完成（main；独立复审“C1 可收”）**：`TriggerRunner` + `IntentQueue` + executor +
   `EngineRead` + C++ handler（`after position → global 读改写 → click`；不接 `input.h`、不迁 control click）；
-  用例 `tests/trigger_runner.cpp`（361 checks / 0 fail）。锚点待 dev→main 收口后补。
-- **C2**：单插件运行时（`render`/`onTrigger` + `edit/input/read`；QJS control，可 headless）。
-  C2a/C2b/C2c 分片与 5 条父级裁决见 dev `.tmp/plugin-runtime/c2-decisions.md`（C2a 进行中）。
+  用例 `tests/trigger_runner.cpp`（361 checks / 0 fail）。
+- **C2a**：**已完成（main；四轮独立复审收口）**：QJS loader/`start`/`onTrigger`/`ctx` 基础、
+  `--plugin`/`--plugin-param`、读点 observer、`plugin-runtime`（170 checks）与 `plugin-headless` e2e。
+- **C2**：单插件运行时剩余 C2b（`render`/`ctx.draw`/`ctx.ui` 渲染/adopt）与 C2c（`loadSave` + e2e）。
+  C2a/C2b/C2c 分片与父级裁决见 dev `.tmp/plugin-runtime/c2-decisions.md`。
 - **C3**：JS recipe driver + parity（`InputPlan` 保留）。
 - **C4**：ControlBus 收编 `emu-ctl`（`EditSink`/`EngineRead`/`HostAction`/控制点；WS 薄传输）。
 - **C5**：UI→Run（`read → edit → input → dispatch` 的 e2e）。
@@ -59,8 +61,7 @@ D6 ControlBus 5 + WS 控制点；D7 Run 只收 module+params、不 eval、busy �
 
 - 14 条 P2（`ctx.fail` 单参陷阱、initialState 的 ctx 引用只能 optional+guard、耗尽态不可类型化、stringly name、
   `UiApi.get` 无校验、`ProfileApi.end`、measure 估算等）——在 C0/C1 落类型/文档时处理。
-- C0/C1 已在 dev 落地并复审（**未合入 main**；锚点待 dev→main 收口后补）；C2–C5 未完成；
-  `emu-ctl` 尚未迁移；C3 parity 未跑；C5 e2e 未做。
+- C0/C1/C2a 已在 main；C2b–C5 未完成；`emu-ctl` 尚未迁移；C3 parity 未跑；C5 e2e 未做。
 - 蓝遮罩：`REQ-01M7SW90PC5GXBWZVJ2FJH7DY8`（独立；2026-11-19 真机确认为预期表现，已 dropped，不再是残留）。
 
 ## 怎么查
