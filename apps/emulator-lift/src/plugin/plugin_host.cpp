@@ -175,6 +175,13 @@ void PluginHost::syncRunnerFailure() {
     markFailed(runner_.lastError().empty() ? std::string("plugin: run failed（runner 未给原因）")
                                            : runner_.lastError());
     report("run failed", fail_reason_);
+    // ★ **F3-R1**（复审第二轮）：runner 侧的失败（`install` 拒了回调返回的集合）**也是终态** ⇒
+    //   与 `ctx.fail` / `ctx.quit` 同一条口径：同一个回调里已经 staged 的 input 必须丢掉。
+    //   为什么必须在这里（而不是 `onTrigger` 里）：`install` 的失败发生在 `onTrigger` **返回之后**
+    //   （`TriggerRunner::invokeOnTrigger` 里），那时 `onTrigger` 的归因位还看不到 ⇒ 只有这一处能兜。
+    //   时机仍安全：回调里的 `ctx.input.*` 一律进 `staged_`，而本读点的第 ⑥ 步只 drain `ready_`
+    //   ⇒ 这一拍它还没落地；下一次读点第 ② 步提升之前就会被 `dropOwner` 抹掉。
+    releaseRunInput();
 }
 
 PluginHost::TriggerSet PluginHost::runCallback(Context& ctx, bool is_start, const TriggerEvent* ev,

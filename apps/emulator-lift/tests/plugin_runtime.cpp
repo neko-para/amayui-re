@@ -464,6 +464,44 @@ void caseFailInstall() {
 }
 
 // =====================================================================================
+// F3-R1：**runner 侧**的失败（`install` 拒了回调返回的集合）也要丢掉同拍 staged input
+//   ★ 与 `plugin/fail-releases-input` 的区别：这条**不调** `ctx.fail` —— 失败在 JS 返回**之后**
+//     （`invokeOnTrigger` 的 `install`）⇒ 归因只能由 `syncRunnerFailure` 兜。
+// =====================================================================================
+void caseFailInstallReleasesInput() {
+    lift_test::g_current_case = "plugin/fail-install-releases-input";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    const bool loaded = f.load("fail-install-click.js");
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    int cx = 0;
+    int cy = 0;
+    f.pump();  // 第 1 个读点：start arm `a`（Once）
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    f.pump();  // 第 2 个读点：callback 先 click(700,500) 再返回已耗尽的 Once ⇒ install fail
+    dumpFail(f);
+    LIFT_CHECK(f.host->runner().failed());
+    LIFT_CHECK(f.host->failed());
+    // ★ 判据：同拍 staged 的 click 被丢掉（队列清零 + 光标没动）——失败之后也不许落地。
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().depth()), 0);
+    f.cursor(&cx, &cy);
+    LIFT_CHECK(!(cx == 700 && cy == 500));
+    f.pump();
+    f.cursor(&cx, &cy);
+    LIFT_CHECK(!(cx == 700 && cy == 500));
+    const std::string line = f.host->readout();
+    LIFT_CHECK(line.find("run=failed") != std::string::npos);
+    LIFT_CHECK(line.find("exhausted") != std::string::npos);
+    std::printf("  [%s] %s\n", lift_test::g_current_case, line.c_str());
+}
+
+// =====================================================================================
 // F3（父级裁决）：`fail` / `quit` ⇒ 立刻丢 staged input；`finish` ⇒ 不丢（下一个读点落地）
 // =====================================================================================
 void caseFailReleasesInput() {
@@ -651,6 +689,7 @@ int main() {
     caseFinish();
     caseStartNowAndStaged();
     caseFailInstall();
+    caseFailInstallReleasesInput();
     caseFailReleasesInput();
     caseQuitReleasesInput();
     caseFinishLandsInput();
