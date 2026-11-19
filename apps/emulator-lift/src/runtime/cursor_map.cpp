@@ -50,6 +50,25 @@ bool mapWindowPixelToImage(int window_w, int window_h, int image_w, int image_h,
                               image_y);
 }
 
+bool overlayPointerWindowPixels(int client_x, int client_y, int logical_w, int logical_h, int pixel_w,
+                                int pixel_h, int image_w, int image_h, int* window_px, int* window_py) {
+    if (window_px == nullptr || window_py == nullptr) return false;
+    // ① guest 客户区 → 宿主窗口**点**（letterbox 正算；几何非正 ⇒ `imageToWindowPixel` 已经 false）。
+    int wx = 0;
+    int wy = 0;
+    if (!imageToWindowPixel(letterboxFor(logical_w, logical_h, image_w, image_h), client_x, client_y, &wx, &wy)) {
+        return false;  // ⛔ 不猜一个几何
+    }
+    // ② 窗口点 → 窗口像素（`pixel/logical`，四舍五入）。与 `Impl::pointerWindowPixels` 同口径；
+    //    ⛔ 纯函数不依赖那个 SDL 方法（它要真窗口），这里只吃两个尺寸。
+    if (logical_w <= 0 || logical_h <= 0 || pixel_w <= 0 || pixel_h <= 0) return false;
+    const double sx = static_cast<double>(pixel_w) / static_cast<double>(logical_w);
+    const double sy = static_cast<double>(pixel_h) / static_cast<double>(logical_h);
+    *window_px = static_cast<int>(std::lround(static_cast<double>(wx) * sx));
+    *window_py = static_cast<int>(std::lround(static_cast<double>(wy) * sy));
+    return true;
+}
+
 bool referenceToClientPixel(int client_w, int client_h, int ref_x, int ref_y, int* x, int* y) {
     if (x == nullptr || y == nullptr) return false;
     // 0 / 非正 = 还没有窗口 ⇒ 目标就是参考系（恒等）；⛔ 不在这里猜 1280×720 之外的尺寸。

@@ -57,6 +57,20 @@ bool windowPixelToImage(const LetterboxMap& map, double window_x, double window_
 bool mapWindowPixelToImage(int window_w, int window_h, int image_w, int image_h, double window_x,
                            double window_y, int* image_x, int* image_y);
 
+// ★ S5：**overlay 的指针位置**（= HUD 命中 / hover 的唯一来源）整条映射。
+//   guest **客户区** → `letterboxFor` + `imageToWindowPixel` → 宿主**窗口点** → 按
+//   `pixel/logical` 换算到**窗口像素**（命中表 = resolved rect 的空间）→ `ClickRouter::hoverKey`。
+//   ⛔ 不读 SDL 的 `GetMouseState`：输入是**设备**里的 guest 客户区坐标（`WindowManager::cursorClientPos`
+//   同一个数），输出是窗口像素 —— 这样 `--present window --input-plan` 的 HUD hover 会跟随注入。
+//   ★ 纯函数、SDL-free：pure CTest（`tests/overlay.cpp` 的 `overlay/pointer-map-*`）直接喂数，
+//     **不依赖 `SDL_GetMouseFocus`**（宿主焦点判据留在调用方，是产品语义）。
+//   ★ `logical_w/h` = `SDL_GetWindowSize`（窗口点）· `pixel_w/h` = `SDL_GetWindowSizeInPixels`
+//     （窗口像素）· `image_w/h` = 最近一次呈现的**帧尺寸**（⛔ 不是常数 1280×720）。
+//   命中判据与 `Impl::pointerWindowPixels` **同一个** DPR 口径（四舍五入）。
+//   返回 false = 几何不可用（任一尺寸非正 / 输出指针为空），此时**不写**输出（⛔ 不猜）。
+bool overlayPointerWindowPixels(int client_x, int client_y, int logical_w, int logical_h, int pixel_w,
+                                int pixel_h, int image_w, int image_h, int* window_px, int* window_py);
+
 // 1280×720 **参考系** → 目标**客户区**像素（各轴独立均匀缩放 + 四舍五入；⛔ 不 clamp）。
 //   目标尺寸 = 主窗口的 `HostWindow::client_w/h`（headless 也有；guest 的 `CreateWindowExA` 填）。
 //   0 / 非正 ⇒ 退回 1280×720（恒等映射 = "还没有窗口"时的确定性缺省）。

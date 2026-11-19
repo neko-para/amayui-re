@@ -20,6 +20,14 @@
 //      连提 **200 帧**，每 10 帧回读**画布原点** = 期望 blend。红了 = 尺寸变化后叠层丢了 /
 //      错位了（叠层纹理按尺寸销毁重建 ⇒ 在飞的 draw 源被提前释放的回归）。
 //      ★ 这条**不**断言具体面板尺寸（`fps` 是本机读数）；只钉"原点必须还是那块混合底"。
+//   ⑥ **S5 指针映射链**（`overlay/pointer-map-*`，纯函数、SDL-free）：overlay 的 hover 位置
+//      = guest 客户区 → `letterboxFor` 窗口点 → `pixel/logical` 窗口像素。三条判据：
+//      · 1:1 DPR + letterbox（含非 16:9 的纵向偏移）必须按公式落数；
+//      · DPR=2 时像素翻倍（漏掉这一跳的实现在这里读出 (125,63) ⇒ 红）；
+//      · 同一像素喂 `ClickRouter::hoverKey` ⇒ rect 内给出该 key、rect 外为空；
+//      · 几何非正（窗口 / 帧 / 像素尺寸 0）⇒ false 且**不写**输出（⛔ 不猜）。
+//      红了 ⇒ hover 与命中表分处两个空间（HUD 高亮系统性偏移），或又回去读 OS 光标
+//      （SDL 的 `GetMouseState`）⇒ 注入 / 控制层移动带不动 hover。
 //
 // ★ B（2026-11-18）：HUD 的**内容**由外置脚本 `scripts/ui/hud.js` 产出（QuickJS 同步跑），
 //   C++ 侧只剩"读数 → 脚本 → 栅格化 → `presentOverlay`"。⇒ **期望面板**只能由**同一个脚本 +
@@ -40,6 +48,7 @@
 #include <vector>
 
 #include "check.h"
+#include "runtime/cursor_map.h"
 #include "runtime/font.h"
 #include "runtime/host_encoding.h"
 #include "runtime/memory.h"
@@ -49,6 +58,7 @@
 #include "runtime/vfs.h"  // openHostFileUtf8（Windows 的 UTF-8 脚本路径）
 #include "ui/canvas.h"
 #include "ui/element.h"
+#include "ui/hit.h"
 #include "ui/raster.h"
 #include "ui/script.h"
 
@@ -171,6 +181,92 @@ void caseScriptPayload() {
     // 降级时**不用**传进来的名字（⛔ 不猜）
     LIFT_CHECK(lift::uiScriptPayload("startup", true, 0x0000002Au) == "id:0x0000002A（降级）");
     LIFT_CHECK(lift::uiScriptPayload("startup", true, 0xDEADBEEFu) == "id:0xDEADBEEF（降级）");
+}
+
+// =======================================================================================
+// ⑥ S5：overlay 指针映射链（`runtime/cursor_map.h` 的纯函数，SDL-free）
+// =======================================================================================
+//   链：guest **客户区** → `letterboxFor` + `imageToWindowPixel`（窗口点）→ `pixel/logical`
+//   （窗口像素，命中表空间）。所有期望值**按生产公式手算**（⛔ 不抄实测），推导写在断言旁。
+void casePointerMapLetterbox() {
+    lift_test::g_current_case = "overlay/pointer-map-letterbox";
+    int px = -1;
+    int py = -1;
+    // ① 1:1 DPR + 恰好铺满的画面（无黑边）：
+    //    letterboxFor(1600,900,1280,720)：sx=1600/1280=1.25、sy=900/720=1.25 ⇒ scale=1.25、
+    //      off_x=(1600-1280*1.25)/2=0、off_y=(900-720*1.25)/2=0。
+    //    imageToWindowPixel(100,50)：x=lround(0+100*1.25)=125、
+    //      y=lround(0+50*1.25)=lround(62.5)=63（`lround` 半程远离 0）。
+    //    pixel==logical ⇒ 窗口点就是窗口像素 ⇒ (125,63)。
+    LIFT_CHECK(lift::overlayPointerWindowPixels(100, 50, 1600, 900, 1600, 900, 1280, 720, &px, &py));
+    LIFT_CHECK_EQ_I64(px, 125);
+    LIFT_CHECK_EQ_I64(py, 63);
+
+    // ② 非 16:9（上下有黑边）⇒ letterbox 的 off_y **必须**进结果：
+    //    letterboxFor(1600,1000,1280,720)：sx=1.25、sy=1000/720≈1.3889 ⇒ scale=1.25、
+    //      off_y=(1000-720*1.25)/2=(1000-900)/2=50。
+    //    (100,50) ⇒ (125, lround(50+50*1.25)=lround(112.5)=113)。
+    LIFT_CHECK(lift::overlayPointerWindowPixels(100, 50, 1600, 1000, 1600, 1000, 1280, 720, &px, &py));
+    LIFT_CHECK_EQ_I64(px, 125);
+    LIFT_CHECK_EQ_I64(py, 113);
+}
+
+void casePointerMapDpr() {
+    lift_test::g_current_case = "overlay/pointer-map-dpr";
+    int px = -1;
+    int py = -1;
+    // 同一几何，但窗口像素 3200×1800（logical 1600×900 ⇒ DPR=2）：
+    //    窗口点仍是 (125,63)（见上一条的推导）⇒ 像素 = lround(125*2), lround(63*2) = (250,126)。
+    //  ★ 分辨力：漏掉 DPR 那一跳（只做 letterbox）的实现在这里读出 (125,63) ⇒ 当场红。
+    LIFT_CHECK(lift::overlayPointerWindowPixels(100, 50, 1600, 900, 3200, 1800, 1280, 720, &px, &py));
+    LIFT_CHECK_EQ_I64(px, 250);
+    LIFT_CHECK_EQ_I64(py, 126);
+}
+
+void casePointerMapHover() {
+    lift_test::g_current_case = "overlay/pointer-map-hover";
+    // 命中表 = 上一帧成功 present 的 resolved rect（**窗口像素**，见 `ui/hit.h`）。
+    //   rect：x∈[110,210)、y∈[45,95) ⇒ 上一条算出的 (125,63) 落在里面。
+    //   ★ 左边界 110 是**故意的**：漏掉 letterbox 缩放（把 guest 客户区当窗口像素 ⇒ (100,50)）的
+    //     实现会让指针落在 rect 外 ⇒ 下面的 `hoverKey == "hud"` 当场红。
+    lift::ui::ClickRouter router;
+    std::vector<lift::ui::HitRegion> hits;
+    hits.push_back(lift::ui::HitRegion{"hud", 110, 45, 100, 50});
+    router.commitFrame(std::move(hits));
+    int px = -1;
+    int py = -1;
+    LIFT_CHECK(lift::overlayPointerWindowPixels(100, 50, 1600, 900, 1600, 900, 1280, 720, &px, &py));
+    LIFT_CHECK_EQ_I64(px, 125);
+    LIFT_CHECK_EQ_I64(py, 63);
+    LIFT_CHECK(router.hoverKey(px, py) == "hud");
+    // 指针移出 HUD：guest client (0,0) ⇒ 窗口像素 (0,0)（rect 外）⇒ hover 必须为空。
+    //   ★ 不是"没有命中表"：命中表仍在（`hasFrame()`）⇒ 这条区分的是**坐标**而不是空表。
+    LIFT_CHECK(router.hasFrame());
+    LIFT_CHECK(lift::overlayPointerWindowPixels(0, 0, 1600, 900, 1600, 900, 1280, 720, &px, &py));
+    LIFT_CHECK_EQ_I64(px, 0);
+    LIFT_CHECK_EQ_I64(py, 0);
+    LIFT_CHECK(router.hoverKey(px, py).empty());
+}
+
+void casePointerMapNoGeometry() {
+    lift_test::g_current_case = "overlay/pointer-map-invalid-geometry";
+    // 几何非正 ⇒ false 且输出**保持原值**（⛔ 不猜一个位置：0 / 上次的值都可能是错的）。
+    int px = -7;
+    int py = -9;
+    // 窗口逻辑尺寸 0（最小化 / 还没建）。
+    LIFT_CHECK(!lift::overlayPointerWindowPixels(100, 50, 0, 900, 1600, 900, 1280, 720, &px, &py));
+    LIFT_CHECK_EQ_I64(px, -7);
+    LIFT_CHECK_EQ_I64(py, -9);
+    // 帧尺寸 0（还没有呈现过）。
+    LIFT_CHECK(!lift::overlayPointerWindowPixels(100, 50, 1600, 900, 1600, 900, 0, 720, &px, &py));
+    LIFT_CHECK_EQ_I64(px, -7);
+    LIFT_CHECK_EQ_I64(py, -9);
+    // 窗口像素尺寸 0（DPR 那一跳没有比例）。
+    LIFT_CHECK(!lift::overlayPointerWindowPixels(100, 50, 1600, 900, 0, 0, 1280, 720, &px, &py));
+    LIFT_CHECK_EQ_I64(px, -7);
+    LIFT_CHECK_EQ_I64(py, -9);
+    // 输出指针为空 ⇒ false（不写任何东西）。
+    LIFT_CHECK(!lift::overlayPointerWindowPixels(100, 50, 1600, 900, 1600, 900, 1280, 720, nullptr, &py));
 }
 
 // =======================================================================================
@@ -682,6 +778,11 @@ int main(int argc, char** argv) {
 
     caseScriptPayload();
     caseWorstWindow();
+    // ★ S5 的纯映射先跑：它们**不依赖**窗口 / 字体 / GPU ⇒ 上面任何一条 SKIP 都不会把它们藏起来。
+    casePointerMapLetterbox();
+    casePointerMapDpr();
+    casePointerMapHover();
+    casePointerMapNoGeometry();
 
     std::string skip_why;
     if (gpu) {

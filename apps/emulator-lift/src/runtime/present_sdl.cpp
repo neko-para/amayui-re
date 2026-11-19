@@ -545,14 +545,30 @@ bool SdlWindow::drawOverlay(std::string* err) {
     {
         std::string hover;
         // 指针在**本窗口**上时才算 hover（没有鼠标焦点 ⇒ 空；⛔ 不拿别的窗口的坐标猜）。
-        if (impl_->window != nullptr && SDL_GetMouseFocus() == impl_->window) {
-            float mouse_x = 0.0f;
-            float mouse_y = 0.0f;
-            SDL_GetMouseState(&mouse_x, &mouse_y);
-            int hit_x = 0;
-            int hit_y = 0;
-            impl_->pointerWindowPixels(mouse_x, mouse_y, &hit_x, &hit_y);
-            hover = impl_->click_router.hoverKey(hit_x, hit_y);
+        // ★ S5：指针位置改读**设备** —— 与 `readings.mouse` **同一个来源**（`overlayMousePos` →
+        //   `WindowManager::cursorClientPos`，即设备里的 guest 客户区坐标）⇒ 同一帧只有一个鼠标
+        //   位置，且 `--input-plan` / 控制层注入的移动会带动 HUD hover。
+        //   ⛔ 不再调 SDL 的 `GetMouseState`（它报的是 OS 光标，注入路径根本不动它）。
+        //   焦点判据（`SDL_GetMouseFocus()==window`）保留：它是产品语义（指针不在本窗口 ⇒ 无 hover），
+        //   纯映射函数不需要它。
+        if (impl_->window != nullptr && SDL_GetMouseFocus() == impl_->window && readings.mouse_ok) {
+            int logical_w = 0;
+            int logical_h = 0;
+            int pixel_w = 0;
+            int pixel_h = 0;
+            // 取不到任一尺寸 ⇒ 无 hover（⛔ 不猜一个 DPR 比例）。
+            if (SDL_GetWindowSize(impl_->window, &logical_w, &logical_h) &&
+                SDL_GetWindowSizeInPixels(impl_->window, &pixel_w, &pixel_h)) {
+                int hit_x = 0;
+                int hit_y = 0;
+                // 映射链 = SDL-free 纯函数（`runtime/cursor_map.h`；判据在 tests/overlay.cpp）：
+                //   guest 客户区 → letterbox 窗口点 → 窗口像素（命中表 = resolved rect 的空间）。
+                if (overlayPointerWindowPixels(readings.mouse_x, readings.mouse_y, logical_w, logical_h, pixel_w,
+                                               pixel_h, impl_->frameImageW(), impl_->frameImageH(), &hit_x,
+                                               &hit_y)) {
+                    hover = impl_->click_router.hoverKey(hit_x, hit_y);
+                }
+            }
         }
         readings.hover_key = std::move(hover);
         readings.active_key = impl_->click_router.activeKey();
