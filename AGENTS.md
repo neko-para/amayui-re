@@ -514,8 +514,8 @@ git config --get core.hooksPath                     # 应打印 .githooks ——
 
 - ★ **LFS 的 4 个钩子不入库**（`post-checkout` / `post-commit` / `post-merge` / `pre-push`）：它们是 `git lfs install`
   的**生成物**，报错文案随 lfs 版本变（3.4 之前写 `.git/hooks/...`，3.8 改写为 `core.hooksPath`）⇒ 入库就会变成
-  "谁 install 谁改 4 个文件"的 diff；且 Windows 上生成的 `644` 在 mac / Linux 上会被 git **静默忽略**
-  （`hint: ... hook was ignored because it's not set as executable`）。⇒ `.gitignore` 已忽略这 4 个路径，
+  "谁 install 谁改 4 个文件"的 diff；且入库时留下的 `100644` 在 mac / Linux 上会被 git **忽略**
+  （只打一条 `hint: ... hook was ignored because it's not set as executable`，不报错）。⇒ `.gitignore` 已忽略这 4 个路径，
   换机 / 新 clone 各按上面的顺序装一次即可。
 - ⛔ 反向（main 上别长代码）**故意不做执行器**：14.2 留了"集成问题可在 main 直接修"的口子，硬拦会把它堵死。
 - ⛔ `git commit --no-verify` 是后门：绕过它就等于明知故犯让真相分两份；真绕了要在提交说明里写明原因。
