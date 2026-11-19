@@ -641,10 +641,19 @@ int main(int argc, char** argv) {
         } else if (a == "--plugin") {
             // ★ C2a：ES module 插件（`export default { render?, start?, onTrigger? }`）。
             //   · 与 `--ui` 同一字段：两份不同路径 ⇒ exit 2（同一路径 ⇒ 解析完之后按插件语义收敛）；
+            //   · **重复 `--plugin` 两份不同路径 ⇒ exit 2**（F6：与 `--ui` 的"不静默只取一个"对称；
+            //     同一路径重复给是幂等的，允许）；
             //   · ⛔ **不**设 `overlay`（D-C2-5：是否开窗由 `--present` 决定 ⇒ headless 也能跑）；
             //   · ⛔ **不**进 `present_window_flag`（见下面的注释）。
             std::string v;
             if (!needValue("--plugin", &v)) return 2;
+            if (!plugin_path.empty() && plugin_path != v) {
+                std::fprintf(stderr,
+                             "emulator-lift-aot: --plugin 给了两份不同的路径"
+                             "（%s / %s）⇒ exit 2（⛔ 不静默只取一个）\n",
+                             plugin_path.c_str(), v.c_str());
+                return 2;
+            }
             if (!ui_script.empty() && ui_script != v) {
                 std::fprintf(stderr,
                              "emulator-lift-aot: --plugin 与 --ui 是同一个字段，但给了两份不同的路径"
@@ -783,6 +792,14 @@ int main(int argc, char** argv) {
         // ★ 与 `--ui` **同一字段**（D-C2-2）：同一路径 ⇒ 只按**插件**语义（插件不隐含 overlay；
         //   `--ui` 的"隐含 --overlay"在这里必须让位，否则 `--present headless` 会被窗口参数拒绝）。
         if (ui_script == plugin_path) ui_script.clear();
+    } else if (!plugin_params.empty()) {
+        // ★ F6：`--plugin-param` 是给插件的 ⇒ 没有 `--plugin` 时它**没有消费者**。
+        //   ⛔ 不静默忽略（那会让"我明明传了参数、插件却没收到"变成无症状的错）。
+        std::fprintf(stderr,
+                     "emulator-lift-aot: --plugin-param 需要同时给 --plugin <path>"
+                     "（收到 %zu 个参数但没有插件）⇒ exit 2\n",
+                     plugin_params.size());
+        return 2;
     }
     // ★ `overlay` 的唯一合成点：显式 `--overlay` **或** 有 HUD 脚本。`--ui` 单给时与旧行为逐字相同
     //   （旧代码在 `--ui` 分支里写 `overlay = true`，等价于这里 `!ui_script.empty()`）。

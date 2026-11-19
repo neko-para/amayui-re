@@ -249,6 +249,11 @@ int main(int argc, char** argv) {
             {"plugin-param-duplicate", L"--plugin a.js --plugin-param k=1 --plugin-param k=2",
              "--plugin-param", "k"},
             {"plugin-param-shape", L"--plugin a.js --plugin-param novalue", "--plugin-param", "k=v"},
+            // ★ F6（C2a 复审）：重复 `--plugin` 给两份不同路径 — 与 `--plugin`/`--ui` 的
+            //   "不静默只取一个"对称（旧实现无条件覆盖 ⇒ 静默用后一个）。
+            {"plugin-duplicate", L"--plugin a.js --plugin b.js", "--plugin", "a.js"},
+            // ★ F6 的另一半：`--plugin-param` 没有 `--plugin` ⇒ 它**没有消费者**，⛔ 不许静默忽略。
+            {"plugin-param-without-plugin", L"--plugin-param k=v", "--plugin-param", "--plugin"},
         };
         for (const Case& c : cases) {
             const ChildRun bad = runChild(exe, c.args, root,
