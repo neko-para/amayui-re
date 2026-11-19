@@ -21,6 +21,7 @@
 
 #include "runtime/message_box.h"
 #include "runtime/present.h"
+#include "runtime/ui_input.h"
 #include "runtime/window_scale.h"
 
 namespace lift {
@@ -42,6 +43,11 @@ struct SdlWindowOptions {
     // ★ `--ui <path>`：叠层用**这份** JS 脚本代替默认的 `scripts/ui/hud.js`（空 = 默认）。
     //   ★ 它**不**是总开关 —— 总开关仍是 `overlay`（CLI 里 `--ui` 会一并把 overlay 打开）。
     std::string ui_script;
+    // ★ `--ui-input=consume|pass`（S9；D2 / D6 / R3）：**注入点击**（`--input-plan` / 控制层）
+    //   是否也过叠层的命中路由。缺省 `Consume` = 命中即吞（down 吞 ⇒ up 吞）；`Pass` = 注入点击
+    //   **完全不问** router ⇒ guest 逐位与没有 UI 相同。
+    //   ★ 只在 `overlay` 打开时才有意义（没有叠层 ⇒ 没有 router ⇒ 两种模式都是 no-op）。
+    UiInputMode ui_input = UiInputMode::Consume;
     std::string screenshot_path;  // 支持 {frame}
     // ★ 只回读**这一帧**（1 起；0 = 每帧都写）。配合 `--max-frames N` 就是"定帧截图"：
     //   `--present-screenshot out.bmp --present-screenshot-frame N --max-frames N` 只产出一张。

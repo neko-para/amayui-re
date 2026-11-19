@@ -30,6 +30,9 @@
 //      并点名两者**（含值 0 = 显式关那一档）；负数 / 小数 / 带单位 / 垃圾 / 缺值 ⇒ exit 2 且点名；
 //      `--profile --profile-slow-frames 50` **被接受**。
 //      红了 ⇒ 要么仪器"给了但跑不起来"，要么非法值被静默吞成 0（= 以为在量、其实没量）。
+//   ⑨ **S9** `--ui-input=consume|pass`：help 里两种写法都在；非法值 ⇒ exit 2 + 点名合法值；
+//      合法值被接受（走到 headless 的窗口参数拒绝，而不是「值非法」）；分离形式与 `=` 同结论。
+//      ★ pure 值域判据在 `overlay/ui-input-parse`（本用例 POSIX skip，⛔ 不靠它当唯一判据）。
 //
 // ★ 四条主断言**全部判在 GPU bring-up 之前**：AOT 臂的参数校验（`aot_main.cpp` 的
 //   `--audio` / `--cursor-warp` 平台闸门 / `present_window_flag` / `--sound` 说明）都在
@@ -208,6 +211,11 @@ int main(int argc, char** argv) {
         LIFT_CHECK(r.out.find("mouse_move") != std::string::npos);
         LIFT_CHECK(r.out.find("mouse_down") != std::string::npos);
         LIFT_CHECK(r.out.find("mouse_up") != std::string::npos);
+        // ★ S9：`--ui-input` 的**两个合法值**与"两种写法都收"必须写在 help 里（D2；否则用户
+        //   不知道"注入点击可以被叠层吞 / 怎么关掉"）。⚠ POSIX 上本用例 skip ⇒ 值域本身的
+        //   机械判据另在 `overlay/ui-input-parse`（pure），⛔ 不靠这一条当唯一判据。
+        LIFT_CHECK(r.out.find("--ui-input=consume|pass") != std::string::npos);
+        LIFT_CHECK(r.out.find("--ui-input consume|pass") != std::string::npos);
         // ★ `--profile-slow-frames` 必须在 help 里（否则"按帧的 shim 分桶"这条仪器等于不存在，
         //   而 wipe 剖面的最大缺口正是它 —— 见 `docs/03-emulator/wipe-profile.md`）。
         LIFT_CHECK(r.out.find("--profile-slow-frames") != std::string::npos);
@@ -215,6 +223,43 @@ int main(int argc, char** argv) {
         //   （否则用户不知道有这条入口，也不知道 headless 下它不生效）。
         LIFT_CHECK(r.out.find("--scale auto|数值") != std::string::npos);
         LIFT_CHECK(r.out.find("headless") != std::string::npos);
+    }
+
+    // ---- ①⁰ S9 `--ui-input=consume|pass`：值域 + **窗口参数**语义 ----
+    //   判据（红了意味着什么）：
+    //   ① 非法值（`pas`）⇒ exit 2 + 点名合法值，且**不是** `未知参数`（⛔ 不许"认不出就当 consume"）；
+    //   ② 合法值被**接受**（只有解析通过才会走到 headless 的窗口参数拒绝）⇒
+    //      `--present headless --ui-input=pass` = exit 2 + 「headless 不接受窗口参数」，
+    //      而**不是**「值非法」；
+    //   ③ 分离形式 `--ui-input consume` 与 `=` 形式同一结论（help 里两种写法都写了）；
+    //   ④ 拒绝文案里的窗口参数清单含 `--ui-input`（用户照着改）。
+    g_current_case = "ui-input-values";
+    {
+        const ChildRun bad = runChild(exe, L"--ui-input=pas", root, root / "uiinputbad.out",
+                                      root / "uiinputbad.err");
+        LIFT_CHECK(bad.started);
+        LIFT_CHECK(!bad.timed_out);
+        LIFT_CHECK_EQ_U32(bad.exit_code, 2u);
+        LIFT_CHECK(bad.err.find("未知参数") == std::string::npos);
+        LIFT_CHECK(bad.err.find("consume") != std::string::npos);
+        LIFT_CHECK(bad.err.find("pass") != std::string::npos);
+
+        const ChildRun eq = runChild(exe, L"--present headless --ui-input=pass", root, root / "uiinputeq.out",
+                                     root / "uiinputeq.err");
+        LIFT_CHECK(eq.started);
+        LIFT_CHECK(!eq.timed_out);
+        LIFT_CHECK_EQ_U32(eq.exit_code, 2u);
+        LIFT_CHECK(eq.err.find("headless 不接受窗口参数") != std::string::npos);
+        LIFT_CHECK(eq.err.find("值非法") == std::string::npos);
+        LIFT_CHECK(eq.err.find("--ui-input") != std::string::npos);
+
+        const ChildRun sep = runChild(exe, L"--present headless --ui-input consume", root, root / "uiinputsep.out",
+                                      root / "uiinputsep.err");
+        LIFT_CHECK(sep.started);
+        LIFT_CHECK(!sep.timed_out);
+        LIFT_CHECK_EQ_U32(sep.exit_code, 2u);
+        LIFT_CHECK(sep.err.find("headless 不接受窗口参数") != std::string::npos);
+        LIFT_CHECK(sep.err.find("值非法") == std::string::npos);
     }
 
     // ---- ①' `--input-plan <不存在的文件>` ⇒ exit 2 且 stderr **点名那个路径** ----

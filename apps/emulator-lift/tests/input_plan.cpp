@@ -30,6 +30,8 @@
 //      `recipeOutcomeExitCode()` = **5**（⛔ 不是 0）；全部走完 ⇒ `Done` + 退出码 0。
 //   ⑧ **跨行 `timeout` / `wait` 带 `timeout` / `click` 带 `timeout` ⇒ 解析期硬错**（文案点名修法）；
 //      **超长 `wait`（例 20000 ms）不再被判 timeout**（删掉 `ms + 缺省` 那条补丁的证明）。
+//   ⑨ **S9**：注入点击过叠层的**同一个** `UiClickRouter`（D6）—— 命中 ⇒ `fired` +1、`uiConsumed` +1、
+//      guest 消息为零 / 光标不动 / down 吞 ⇒ up 吞；未命中 ⇒ 与**没有 router**逐位相同。
 //
 // ⚠ 诚实边界：`ReadFile`（第 11 个投递点，只是**事件源**）**不在**本用例里 ——
 //   它要一个有效文件句柄（`CreateFileA` + `Vfs` 的 game_dir），那属于 `tests/file_io.cpp` 的夹具面；
@@ -53,6 +55,7 @@
 #include "runtime/input_plan.h"
 #include "runtime/interaction_graph.h"  // S4/S6：`issueAction` 的 mouse 分支（动作文本可观察面）
 #include "runtime/memory.h"
+#include "runtime/ui_input.h"  // S9：注入 click 的叠层路由（UiInputRouter）
 #include "shims/register.h"
 
 namespace {
@@ -1693,6 +1696,203 @@ void caseTwoClicksSerialized() {
     LIFT_CHECK_EQ_U32(wm.mouseButtons(), 0u);
 }
 
+// =====================================================================================
+// ⑨ S9 · 注入点击过叠层的**同一个** UiClickRouter（D6 的三个入口里的注入 down / up）
+//
+// 判据（红了意味着什么）：
+//   ① **命中 ⇒ 全吞**：`--ui-input=consume`（缺省）下，配方 / 控制层的 `click` 命中叠层 ⇒
+//      `fired` 照旧 +1、`uiConsumed()` +1，而 guest **一条 `WM_MOUSEMOVE/WM_*BUTTON*` 都没有**、
+//      按钮电平不动、**光标不动**（臂上不调 `input::mouseMove`）；
+//   ② **down 吞 ⇒ up 吞**：up 在 router 上的返回值**不**改变决定（这里模拟 ClickRouter 的 capture：
+//      Up 返回 true；但即使返回 false，`InputPlan` 也必须吞 —— 由 `swallowed` 决定）；
+//   ③ **时序不变**：吞掉的 click 仍然要跨过按下闸门③与抬起闸门①才收口 —— 与不吞时同一个形状；
+//   ④ **未命中 ⇒ 逐位相同**：装了 router 但点在 rect 外 ⇒ 消息序列与**完全没有 router**逐位相同，
+//      `uiConsumed()==0`（这是 `--ui-input=pass` 之外的第二条"guest 不变"证据）。
+// =====================================================================================
+struct RecordingRouter : lift::UiInputRouter {
+    // 命中区（**guest 客户区**坐标；本夹具自己的判定，⛔ 不是第二份 ClickRouter）。
+    int x = 0;
+    int y = 0;
+    int w = 0;
+    int h = 0;
+    bool capture = false;
+    int down_count = 0;
+    int up_count = 0;
+    std::vector<lift::UiPointerPhase> phases;
+    std::vector<int> px;
+    std::vector<int> py;
+
+    bool routeInjectedPointer(lift::UiPointerPhase phase, lift::MouseButton button, int cx, int cy) override {
+        if (button != lift::MouseButton::Left) return false;  // 右 / 中键一律放行（D6）
+        phases.push_back(phase);
+        px.push_back(cx);
+        py.push_back(cy);
+        if (phase == lift::UiPointerPhase::Down) {
+            ++down_count;
+            const bool hit = w > 0 && h > 0 && cx >= x && cy >= y && cx < x + w && cy < y + h;
+            capture = hit;
+            return hit;
+        }
+        ++up_count;
+        // 模拟 ClickRouter：down 接了的 up 才吞。⛔ 这个返回值**不是** InputPlan 的判据
+        // （down 吞 ⇒ up 吞），它只让本夹具与 `ui/hit.cpp` 的语义同形。
+        const bool swallow = capture;
+        capture = false;
+        return swallow;
+    }
+};
+
+void caseUiConsumedClick() {
+    lift_test::g_current_case = "input-plan/click-consumed-by-ui";
+    lift_fixture::Fixture f;
+    LIFT_CHECK(f.ok);
+    if (!f.ok) return;
+    lift::WindowManager* wm = f.m.cpu().windows;
+    LIFT_CHECK(wm != nullptr);
+    if (wm == nullptr) return;
+    const std::uint32_t hwnd = wm->createWindow("PlanTest", 0u, 0u, 0u, 0u, 1280, 720, 0u);
+    LIFT_CHECK(hwnd != 0);
+
+    RecordingRouter router;
+    router.w = 100;
+    router.h = 100;  // client (10,20) 落在里面
+    wm->setUiInputRouter(&router);
+
+    lift::InputPlan plan;
+    plan.setClockForTest(&testNowMs);
+    g_now_ms = 1000;
+    std::string err;
+    LIFT_CHECK(plan.loadText("click 10 20\n", "mem", &err));
+
+    const std::size_t q0 = wm->queueSize();
+    int cur0_x = -1;
+    int cur0_y = -1;
+    wm->cursorClientPos(hwnd, &cur0_x, &cur0_y);
+
+    // ---- 阶段①：臂上，但被叠层吞掉 ⇒ 不 move、不按下、光标不动 ----
+    plan.atPoint(*wm, lift::InputPoint::CursorPos);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.fired()), 1);         // 动作照旧算施加
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.uiConsumed()), 1);    // 叠层吞了它
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.armedPresses()), 1);  // 三段时序仍在
+    LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(wm->queueSize()), static_cast<std::int64_t>(q0));
+    int cur_x = 0;
+    int cur_y = 0;
+    wm->cursorClientPos(hwnd, &cur_x, &cur_y);
+    LIFT_CHECK_EQ_I64(cur_x, cur0_x);
+    LIFT_CHECK_EQ_I64(cur_y, cur0_y);
+
+    // ---- 阶段②：跨过一个已完成的位置读点 ⇒ 生成待抬起，但**没有** WM_LBUTTONDOWN ----
+    plan.atPoint(*wm, lift::InputPoint::CursorPos);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 1);
+    LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(wm->queueSize()), static_cast<std::int64_t>(q0));
+    wm->cursorClientPos(hwnd, &cur_x, &cur_y);
+    LIFT_CHECK_EQ_I64(cur_x, cur0_x);
+    LIFT_CHECK_EQ_I64(cur_y, cur0_y);
+
+    // ---- 闸门①：跨过 kKeyLevelReadsBeforeRelease 个 KeyLevel 读点才抬起；up 也**不进 guest** ----
+    for (std::uint64_t i = 0; i < lift::InputPlan::kKeyLevelReadsBeforeRelease; ++i) {
+        plan.atPoint(*wm, lift::InputPoint::KeyLevel);
+    }
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.releases()), 1);
+    LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(wm->queueSize()), static_cast<std::int64_t>(q0));
+    wm->cursorClientPos(hwnd, &cur_x, &cur_y);
+    LIFT_CHECK_EQ_I64(cur_x, cur0_x);
+    LIFT_CHECK_EQ_I64(cur_y, cur0_y);
+
+    // ---- router 收到 Down→Up，坐标一致（= guest 客户区，与 click 的映射同一个空间）----
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(router.phases.size()), 2);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(router.down_count), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(router.up_count), 1);
+    if (router.phases.size() == 2) {
+        LIFT_CHECK(router.phases[0] == lift::UiPointerPhase::Down);
+        LIFT_CHECK(router.phases[1] == lift::UiPointerPhase::Up);
+        LIFT_CHECK_EQ_I64(router.px[0], 10);
+        LIFT_CHECK_EQ_I64(router.py[0], 20);
+        LIFT_CHECK_EQ_I64(router.px[1], 10);
+        LIFT_CHECK_EQ_I64(router.py[1], 20);
+    }
+    // ---- 摘要：只在吞过时追加 `ui_consumed=N`（默认档逐字不变）----
+    LIFT_CHECK(plan.summary().find("ui_consumed=1") != std::string::npos);
+    LIFT_CHECK(plan.outcome() == lift::RecipeOutcome::Done);
+    // 读数（不是断言）：一行能直接对账"吞了几条 / guest 收到几条 / 光标在哪"。
+    std::printf("[click-consumed-by-ui] fired=%llu ui_consumed=%llu guest_queued=%zu buttons=0x%X "
+                "cursor=(%d,%d) router_phases=%zu at=(%d,%d)\n",
+                static_cast<unsigned long long>(plan.fired()),
+                static_cast<unsigned long long>(plan.uiConsumed()), wm->queueSize(),
+                static_cast<unsigned>(wm->mouseButtons()), cur_x, cur_y, router.phases.size(),
+                router.px.empty() ? -1 : router.px[0], router.py.empty() ? -1 : router.py[0]);
+}
+
+// 跑一遍"arm → press → release"的确定性场景，返回 guest 消息队列的逐条指纹。
+std::string runClickScenario(lift::UiInputRouter* router, std::uint64_t* fired, std::uint64_t* consumed,
+                             bool* ok) {
+    *ok = false;
+    *fired = 0;
+    *consumed = 0;
+    lift_fixture::Fixture f;
+    if (!f.ok) return std::string();
+    lift::WindowManager* wm = f.m.cpu().windows;
+    if (wm == nullptr) return std::string();
+    if (wm->createWindow("PlanTest", 0u, 0u, 0u, 0u, 1280, 720, 0u) == 0) return std::string();
+    if (router != nullptr) wm->setUiInputRouter(router);
+    lift::InputPlan plan;
+    plan.setClockForTest(&testNowMs);
+    g_now_ms = 2000;
+    std::string err;
+    if (!plan.loadText("click 10 20\n", "mem", &err)) return std::string();
+    plan.atPoint(*wm, lift::InputPoint::CursorPos);  // 臂上
+    plan.atPoint(*wm, lift::InputPoint::CursorPos);  // 按下（跨过一个完成的位置读点）
+    for (std::uint64_t i = 0; i < lift::InputPlan::kKeyLevelReadsBeforeRelease; ++i) {
+        plan.atPoint(*wm, lift::InputPoint::KeyLevel);  // 抬起
+    }
+    *fired = plan.fired();
+    *consumed = plan.uiConsumed();
+    *ok = true;
+    return dumpQueue(*wm);
+}
+
+void caseRouterMissIdentical() {
+    lift_test::g_current_case = "input-plan/click-router-miss-identical";
+    // ---- 对照组：**没有** router ----
+    std::uint64_t fired_a = 0;
+    std::uint64_t consumed_a = 0;
+    bool ok_a = false;
+    const std::string seq_a = runClickScenario(nullptr, &fired_a, &consumed_a, &ok_a);
+    LIFT_CHECK(ok_a);
+    // ---- 实验组：装了 router，但 click 落在命中区外（未命中 ⇒ 放行）----
+    RecordingRouter miss;
+    miss.x = 200;
+    miss.y = 200;
+    miss.w = 50;
+    miss.h = 50;
+    std::uint64_t fired_b = 0;
+    std::uint64_t consumed_b = 0;
+    bool ok_b = false;
+    const std::string seq_b = runClickScenario(&miss, &fired_b, &consumed_b, &ok_b);
+    LIFT_CHECK(ok_b);
+    // 两条序列必须**逐位相同**（同一条 click 的 move / down / up 三元组）。
+    LIFT_CHECK(seq_a == seq_b);
+    LIFT_CHECK(!seq_a.empty());  // 真的产生了消息（否则"相同"是空的）
+    LIFT_CHECK(seq_a.find("0201/") != std::string::npos);  // WM_LBUTTONDOWN
+    LIFT_CHECK(seq_a.find("0202/") != std::string::npos);  // WM_LBUTTONUP
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(fired_a), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(fired_b), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(consumed_a), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(consumed_b), 0);  // 未命中 ⇒ 没有吞
+    // 未命中的 click 仍要问 router（Down + Up 各一次）——证明"放行"不是"没接"。
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(miss.down_count), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(miss.up_count), 1);
+    std::printf("[click-router-miss-identical] seq_equal=%d fired(no_router/miss)=%llu/%llu "
+                "ui_consumed(no_router/miss)=%llu/%llu seq=%s\n",
+                seq_a == seq_b ? 1 : 0, static_cast<unsigned long long>(fired_a),
+                static_cast<unsigned long long>(fired_b), static_cast<unsigned long long>(consumed_a),
+                static_cast<unsigned long long>(consumed_b), seq_a.c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -1713,5 +1913,7 @@ int main() {
     caseDragRepeat();
     caseOneWritePerReadPoint();
     caseTwoClicksSerialized();
+    caseUiConsumedClick();
+    caseRouterMissIdentical();
     return lift_test::finish("input-plan-read-points");
 }

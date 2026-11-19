@@ -201,6 +201,11 @@ void usage() {
         "  --ui <path>               用这份 JS 脚本当 HUD（**隐含 --overlay**；与 --overlay 同给\n"
         "                            时以 --ui 为准）；脚本错误点名 `<path>:<行>:<列>`。\n"
         "                            字体缺失 / 脚本编译失败 ⇒ 拒绝启动（exit 2）\n"
+        "  --ui-input=consume|pass   注入点击（--input-plan / 控制层）是否也过叠层的命中路由：\n"
+        "                            consume（缺省）= 命中即吞（down 吞 ⇒ up 吞，guest 收不到该\n"
+        "                            点击的任何消息）；pass = 逐位与没有 UI 相同。也接受\n"
+        "                            `--ui-input consume|pass`。只在 --overlay / --ui 时生效；\n"
+        "                            窗口参数（--present headless 拒绝）；非法值 exit 2\n"
         "  --present-screenshot <path>      每次可见窗口 Present 后存一张窗口 BMP（{frame} 可用）\n"
         "  --present-screenshot-frame N     只回读第 N 帧（1 起；0 = 每帧都写）\n"
         "  --scale auto|数值  窗口客户区 = round(1280×s) × round(720×s)。★ **只改窗口、不改帧**：\n"
@@ -342,6 +347,11 @@ int main(int argc, char** argv) {
     // ★ `--ui <path>`（B；缺省空 = 默认外置 hud.js）：**隐含** `--overlay`（脚本是叠层的实现）。
     //   ★ 与 `--overlay` 同给时以 `--ui` 为准（就是这一个字段：非空 ⇒ 用这份脚本）。
     std::string ui_script;
+    // ★ S9 `--ui-input=consume|pass`（D2 / D6 / R3；缺省 Consume）：注入点击是否也过叠层的命中
+    //   路由。值域的唯一一份在 `runtime/ui_input.h` 的 `parseUiInputMode`（⛔ 不在这里另写比较）。
+    //   `ui_input_set` 只用于"它是窗口参数"这条判据（`--present headless` 与 `--overlay` 同一条拒绝）。
+    lift::UiInputMode ui_input_mode = lift::UiInputMode::Consume;
+    bool ui_input_set = false;
     // ★ 宿主真光标（`--cursor-warp`，缺省关；与已退役解释器臂同一个值）：只加宿主副作用，
     //   ⛔ 不改 guest 可见状态。只在 `--present window/auto` 且窗口可见时才真的挪（见
     //   `runtime/present_flags.h` 的 `cursorWarpState`）。
@@ -596,6 +606,24 @@ int main(int argc, char** argv) {
             // ★ B：`--ui <path>` 隐含 `--overlay`（总开关仍是 overlay）。也是窗口参数。
             if (!needValue("--ui", &ui_script)) return 2;
             overlay = true;
+        } else if (a == "--ui-input" || a.rfind("--ui-input=", 0) == 0) {
+            // ★ S9 / D2：注入点击的叠层路由模式。两种写法都收（help 里写明）：
+            //   `--ui-input=consume|pass` 与 `--ui-input consume|pass`。
+            //   值域的唯一一份在 `runtime/ui_input.h`（⛔ 这里不另写 consume/pass 比较）。
+            std::string v;
+            if (a == "--ui-input") {
+                if (!needValue("--ui-input", &v)) return 2;
+            } else {
+                v = a.substr(std::string("--ui-input=").size());
+            }
+            const lift::UiInputModeParse parsed = lift::parseUiInputMode(v.c_str());
+            if (!parsed.ok) {
+                std::fprintf(stderr, "emulator-lift-aot: --ui-input 的值非法：`%s`（%s）\n", v.c_str(),
+                             parsed.error != nullptr ? parsed.error : lift::kUiInputModeValues);
+                return 2;
+            }
+            ui_input_mode = parsed.mode;
+            ui_input_set = true;
         } else if (a == "--cursor-warp") {
             // ★ 与已退役解释器臂同一条：只置一个 bool。窗口参数（headless 下 exit 2
             //   —— 没有可见窗口可映射）。
@@ -723,7 +751,8 @@ int main(int argc, char** argv) {
         return 2;
     }
     const bool present_window_flag = present_driver_set || present_vsync_set || present_hidden ||
-                                     present_screenshot_set || cursor_warp || overlay || !ui_script.empty();
+                                     present_screenshot_set || cursor_warp || overlay || !ui_script.empty() ||
+                                     ui_input_set;
     if (present_screenshot_frame != 0 && present_screenshot.empty()) {
         std::fprintf(stderr, "--present-screenshot-frame 需要同时给 --present-screenshot <path>\n");
         return 2;
@@ -787,6 +816,9 @@ int main(int argc, char** argv) {
         //   `--present headless` 已在上面按 `present_window_flag` 拒绝。
         wopt.overlay = overlay;
         wopt.ui_script = ui_script;
+        // ★ S9：注入点击的叠层路由模式（`--ui-input=consume|pass`；缺省 Consume）。
+        //   没有 `--overlay` / `--ui` ⇒ sink 那边根本不装 router ⇒ 两种模式都是无害 no-op。
+        wopt.ui_input = ui_input_mode;
         // ★ `--scale` 只交给**窗口档**：`--present headless` 的隐藏离屏窗口保持 1280×720
         //   （= `--scale` 对 headless 无副作用；不设它 ⇒ 不查 DPI、不改窗口尺寸）。
         if (present_mode != "headless") wopt.scale = scale_spec;

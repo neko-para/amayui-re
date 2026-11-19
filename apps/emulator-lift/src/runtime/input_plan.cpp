@@ -21,6 +21,7 @@
 #include "runtime/cursor_map.h"  // referenceToClientPixel（1280×720 参考系 → 客户区，唯一公式）
 #include "runtime/input.h"       // input::mouseMove / mouseButton（唯一施加路径）
 #include "runtime/memory.h"      // GuestMemory（身份采样只经 MarkerSampler 读它）
+#include "runtime/ui_input.h"    // S9：注入指针的叠层路由（D6 三个入口里的 down / up）
 #include "runtime/vfs.h"         // openHostFileUtf8（Windows 的 UTF-8 路径）
 
 namespace lift {
@@ -426,9 +427,23 @@ void InputPlan::armClickAt(WindowManager& wm, int ref_x, int ref_y, MouseButton 
         target_h = w->client_h;
     }
     referenceToClientPixel(target_w, target_h, ref_x, ref_y, &client_x, &client_y);
+    // ★ S9 / D6：注入的 **down** 与 OS 事件问**同一个** `UiClickRouter`（`WindowManager` 装的那一个；
+    //   `nullptr` = 没有叠层 ⇒ 不问）。⚠ 这是**任何 `input::*` 之前**：吞掉 ⇒ 连 `mouseMove` 都不发
+    //   （光标不动、guest 一条 WM_MOUSEMOVE 都收不到）。
+    bool swallowed = false;
+    if (UiInputRouter* router = wm.uiInputRouter()) {
+        swallowed = router->routeInjectedPointer(UiPointerPhase::Down, button, client_x, client_y);
+    }
+    session_closed_ = false;  // 新的注入工作 ⇒ 所有权要重新握在脚本手里（见 closeSessionIfDone）
     // ★ S7 / Q8-A：**没有**"同按钮先抬起"的强制释放了。这个按钮还按着 ⇒ 调用方
     //   （`atPoint` / `drainImmediate`）**不消费**这条 click，等上一次的 up 落地（见两处调用的判据）。
-    armMoveAt(wm, ref_x, ref_y);  // 同一份映射 + 同一份 `input::mouseMove`（⛔ 不复制）
+    if (swallowed) {
+        // ★ S9：吞掉 ⇒ **不动设备**（不 move、不按下）。但仍然压进 `armed_` —— 三段时序不变，
+        //   `pressDue` 的闸门③ / `releaseDue` 的闸门①照旧决定 up 的时机（与不吞时同一个形状）。
+        ++ui_consumed_;
+    } else {
+        armMoveAt(wm, ref_x, ref_y);  // 同一份映射 + 同一份 `input::mouseMove`（⛔ 不复制）
+    }
     ArmedPress a;
     a.button = button;
     a.x = client_x;
@@ -436,6 +451,7 @@ void InputPlan::armClickAt(WindowManager& wm, int ref_x, int ref_y, MouseButton 
     a.arm_reads = read_points_;
     a.arm_cursor_done = cursor_reads_done_;  // 闸门 ③ 的起点（"已完成"的位置读点数）
     a.arm_ms = nowMs();                      // 兜底 ③ 的起点
+    a.swallowed = swallowed;
     armed_.push_back(a);
 }
 
@@ -464,11 +480,16 @@ void InputPlan::pressDue(WindowManager& wm) {
         r.x = a.x;
         r.y = a.y;
         r.line = a.line;
+        r.swallowed = a.swallowed;
         r.press_samples = wm.inputSampleCount();          // 读数（⛔ 不是闸门）
         r.press_key_reads = deliverCalls(InputPoint::KeyLevel);  // ★ 闸门 ① 的起点
         r.press_ms = now;                                 // ★ 兜底 ② 的起点
         r.press_reads = read_points_;
-        input::mouseButton(wm, r.x, r.y, r.button, /*down=*/true, InputSource::Script, kPlanMessageTimeMs);
+        // ★ S9：down 已被叠层吞掉 ⇒ **不调 `input::mouseButton(down)`**（guest 一条消息都没有），
+        //   但仍生成 `PendingRelease{swallowed=true}`：up 的时机走同一组闸门（三段时序不变）。
+        if (!r.swallowed) {
+            input::mouseButton(wm, r.x, r.y, r.button, /*down=*/true, InputSource::Script, kPlanMessageTimeMs);
+        }
         pending_.push_back(r);
         ++releases_pending_;
         armed_.erase(armed_.begin() + static_cast<std::ptrdiff_t>(i));
@@ -599,6 +620,17 @@ void InputPlan::closeSessionIfDone(WindowManager& wm) {
 
 void InputPlan::emitRelease(WindowManager& wm, const PendingRelease& r) {
     // 抬起复用**按下时存下的同一对**（已缩放的）客户区坐标。
+    // ★ S9 / D6：注入的 **up** 也是"三个入口"之一 ⇒ 不管 down 吞没吞，都把它交给 router。
+    //   · down 吞 ⇒ up **必须**吞（不看返回值）：`ClickRouter` 的 capture / pending click 靠这条收口，
+    //     而 guest ⛔ 不许收到没有 down 的 up；
+    //   · down 放 ⇒ up **必须**放（同样不看返回值）：overlay 中途出现 / 消失都不改变这次点击的归属
+    //     （"down 放 ⇒ up 放"是 D6 的明文；对 `ClickRouter` 来说这次 up 也是 no-op —— `up_owed_` 是假）。
+    UiInputRouter* router = wm.uiInputRouter();
+    if (router != nullptr) router->routeInjectedPointer(UiPointerPhase::Up, r.button, r.x, r.y);
+    if (r.swallowed) {
+        ++released_;
+        return;
+    }
     input::mouseButton(wm, r.x, r.y, r.button, /*down=*/false, InputSource::Script, kPlanMessageTimeMs);
     ++released_;
 }
@@ -734,7 +766,14 @@ std::string InputPlan::summary() const {
                   static_cast<unsigned long long>(pending()),
                   static_cast<unsigned long long>(presenting()),
                   static_cast<unsigned long long>(released_), pending_.size());
-    return std::string(buf);
+    std::string out(buf);
+    // ★ S9（D2 / R3）：只在**真的吞过**注入点击时追加 `ui_consumed=N`。默认档（没有叠层 / 没命中）
+    //   这一行**逐字不变** —— 那份文本是 `fault_report` / `input-plan` 摘要的既有判据面。
+    if (ui_consumed_ != 0) {
+        out += " ui_consumed=";
+        out += std::to_string(ui_consumed_);
+    }
+    return out;
 }
 
 RecipeOutcome InputPlan::outcome() const {

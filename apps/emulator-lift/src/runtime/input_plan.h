@@ -37,6 +37,11 @@
 //   那一行的末尾）。本臂只决定它们**落在哪个宿主对象**上：
 //   · `click` → **两段**：先 `input::mouseMove`（只有光标落地），**跨过一个已完成的位置读点**
 //     之后才 `input::mouseButton(down)`（唯一施加路径）+ 待抬起队列 —— 见下面的"注入形状"三条闸门；
+//     ★ **S9 / D6**：这两段与抬起都先在**同一个** `UiClickRouter` 上问一次（`WindowManager` 装的那
+//     个，缺省 = 没有叠层 ⇒ 不问）。`--ui-input=consume`（缺省）命中 ⇒ **不调任何 `input::*`**、
+//     down 吞 ⇒ up 吞、`fired` 照旧 +1、`uiConsumed` +1；`pass` ⇒ 逐位与没有 UI 相同。
+//     ⚠ **只接 `click`**（residual）：`mouse_move/mouse_down/mouse_up` 原语**不**问 router ——
+//     它们是"手"而不是"一次点击"，接上去会改变拖拽 / 显式 hold 的语义（见交付报告的 residual）；
 //   · `mouse_move` → `input::mouseMove`（与 click 的第一段**同一段**代码）；
 //   · `mouse_down` / `mouse_up` → `input::mouseButton`（坐标 = **设备当前位置**，⛔ 不回跳）。
 //     `mouse_down` 有**轻闸门**：上一条 `mouse_move` 之后必须**完成过**一次 CursorPos 读点，
@@ -302,6 +307,10 @@ public:
     //   （判据 1 的"两边 fired 相同"读的就是这一格）。
     std::uint64_t fired() const { return fired_; }
     std::uint64_t releases() const { return released_; }
+    // ★ S9：**被叠层吞掉**的注入 click 数（只有 `--ui-input=consume` + 叠层命中时才涨）。
+    //   摘要行只在它 ≠ 0 时追加 `ui_consumed=N` ⇒ 默认档（没有叠层 / 没命中）**逐字不变**。
+    //   口径 = 每次 click 的 **Down** 那一瞬 +1（一条 click 的 down/up 是同一个决定，⛔ 不数两次）。
+    std::uint64_t uiConsumed() const { return ui_consumed_; }
     // 位置门"这一刻读不到位置"的次数（base==0 / pc 越界 / 未提交）。⛔ 缺省不打印（诊断用）。
     std::uint64_t positionMisses() const { return position_misses_; }
     std::uint64_t presenting() const {
@@ -348,6 +357,9 @@ private:
         std::uint64_t press_ms = 0;           // 按下那一刻的宿主墙钟 ⇒ **兜底 ②**
         std::uint64_t press_reads = 0;        // 按下那一刻的读点序号（trace 读数）
         int line = 0;                     // 施加它的 step 行（trace 的 `plan:<文件>:<行>`）
+        // ★ S9：down 被叠层吞掉 ⇒ up 也**必须**吞（D6），且两者都**不**调 `input::*`。
+        //   这里记下 down 的决定；`emitRelease` 只看它，⛔ 不再问一次 router（"down 吞 ⇒ up 吞"）。
+        bool swallowed = false;
     };
 
     // **臂上**（光标已落地、还没按下）的一条 click：等"完成过一次 CursorPos 读点"后才按下。
@@ -359,6 +371,10 @@ private:
         std::uint64_t arm_cursor_done = 0;     // 臂上时**已完成**的 CursorPos 读点数 ⇒ 闸门 ③
         std::uint64_t arm_ms = 0;              // 臂上时的宿主墙钟 ⇒ 兜底 ③
         int line = 0;
+        // ★ S9：down 在**臂上那一刻**就被叠层吞掉了（`routeInjectedPointer(Down,…)` 返回 true）。
+        //   ⇒ 不调 `input::mouseMove`、`pressDue` 不调 `input::mouseButton(down)`；但**保留**这条
+        //   ArmedPress（三段时序 / 闸门 ①③ 照旧），这样 up 的时机与不吞时同一个形状。
+        bool swallowed = false;
     };
 
     // 立即队列的一条（click 或 move）：**1280×720 参考坐标**（⛔ 还没映射 —— 映射只发生在
@@ -425,6 +441,8 @@ private:
     std::uint64_t applied_ = 0;         // 已消费指令数
     std::uint64_t fired_ = 0;           // 已施加 click 数
     std::uint64_t released_ = 0;
+    // ★ S9：被叠层吞掉的注入 click 数（Down 那一瞬 +1；见 `uiConsumed()`）。
+    std::uint64_t ui_consumed_ = 0;
     std::uint64_t position_misses_ = 0;  // 位置门读不到位置的次数（诊断；缺省不打印）
     std::uint64_t read_points_ = 0;     // 读点序号（trace / profile 读数）
     // 本读点**之前**已经完成过的 CursorPos 读点数（"位置样本的年龄"刻度；见 `kPressFallbackMs`）。

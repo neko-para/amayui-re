@@ -51,6 +51,7 @@
 #include "runtime/cursor_map.h"
 #include "runtime/font.h"
 #include "runtime/host_encoding.h"
+#include "runtime/host_window.h"  // S9：router 的装/卸判据（WindowManager::uiInputRouter）
 #include "runtime/memory.h"
 #include "runtime/present_sdl.h"
 #include "runtime/surface.h"
@@ -270,6 +271,47 @@ void casePointerMapNoGeometry() {
 }
 
 // =======================================================================================
+// ⑦ S9：`--ui-input=consume|pass` 的**纯解析**与选项缺省
+// =======================================================================================
+//   判据（红了意味着什么）：
+//   · 合法值两个都认，且大小写 / 空白 / 空串 / nullptr **都不是**"认不出就当 consume"（那会让
+//     `--ui-input=pas` 静默变成 consume —— 用户以为点击穿过去了，实际被叠层吃掉）；
+//   · 缺省选项 = Consume（D2 / R3 的"默认档带 UI 时点 HUD 就是点 HUD"）。
+//   ★ 这是 pure 用例：不建窗口、不需要字体 / GPU（CLI 的整链判据在 `cli-aot-flags`，Windows 专有；
+//     POSIX 上那条 SKIP 时这一条仍然给出同一个值域的机械证据）。
+void caseUiInputParse() {
+    lift_test::g_current_case = "overlay/ui-input-parse";
+    using lift::UiInputMode;
+    lift::UiInputModeParse p = lift::parseUiInputMode("consume");
+    LIFT_CHECK(p.ok);
+    LIFT_CHECK(p.mode == UiInputMode::Consume);
+    p = lift::parseUiInputMode("pass");
+    LIFT_CHECK(p.ok);
+    LIFT_CHECK(p.mode == UiInputMode::Pass);
+
+    const char* const kBad[] = {"", "Consume", "PASS", "pas", "consume ", " consume", "consume=pass", nullptr};
+    for (const char* bad : kBad) {
+        const lift::UiInputModeParse r = lift::parseUiInputMode(bad);
+        LIFT_CHECK(!r.ok);
+        // 错误串必须**点名合法值**（人照着改），且不是一句空话。
+        LIFT_CHECK(r.error != nullptr);
+        if (r.error != nullptr) {
+            LIFT_CHECK(std::strstr(r.error, "consume") != nullptr);
+            LIFT_CHECK(std::strstr(r.error, "pass") != nullptr);
+        }
+    }
+    // `SdlWindowOptions` 的缺省 = Consume（`--ui-input` 不写时就是它）。
+    LIFT_CHECK(lift::SdlWindowOptions{}.ui_input == UiInputMode::Consume);
+    // `kUiInputModeValues` 是 help / 报错共用的同一份词表。
+    LIFT_CHECK(std::strcmp(lift::kUiInputModeValues, "consume|pass") == 0);
+    // 读数（不是断言）：合法值两个都认 / 非法值一个都不认 / 选项缺省。
+    std::printf("[ui-input-parse] consume=ok pass=ok invalid=%zu default=%s values=%s\n",
+                sizeof(kBad) / sizeof(kBad[0]),
+                lift::SdlWindowOptions{}.ui_input == UiInputMode::Consume ? "consume" : "pass",
+                lift::kUiInputModeValues);
+}
+
+// =======================================================================================
 // 窗口路径夹具（③ renderer / ④ 直出）
 // =======================================================================================
 struct Fx {
@@ -464,7 +506,11 @@ bool caseRendererWindow(std::string* skip_why) {
     }
     const std::vector<std::uint8_t> before = guestBytes(f);
 
+    // ★ S9：`WindowManager` 必须在 `win` **之前**声明（析构晚于 win）—— `SdlWindow::shutdown()` 会把
+    //   router 从它身上摘掉；反过来会让 shutdown 摸一个已销毁的 `WindowManager`。
+    lift::WindowManager wm;
     lift::SdlWindow win;
+
     lift::SdlWindowOptions opt;
     opt.title = "emulator-lift overlay test (renderer)";
     opt.driver_list = "software";
@@ -477,6 +523,21 @@ bool caseRendererWindow(std::string* skip_why) {
         return false;
     }
     LIFT_CHECK(win.overlayEnabled());
+    // ★ S9：注入 router 的**装/卸**（`WindowManager` 只存非拥有指针；装的条件 = `overlay && ui_script`）。
+    //   判据：init 已装好脚本 ⇒ attach 后**有** router；`setOverlay(false)` 卸脚本 ⇒ 必须**摘掉**；
+    //   再打开 ⇒ 重新装上；detach（nullptr）⇒ 摘掉。红了 = 注入点击会问一个不存在的叠层，
+    //   或者关闭叠层后仍继续吞 guest 的点击（静默丢输入）。
+    win.attachWindowManager(&wm);
+    LIFT_CHECK(wm.uiInputRouter() != nullptr);
+    win.setOverlay(false);
+    LIFT_CHECK(wm.uiInputRouter() == nullptr);
+    win.setOverlay(true);
+    LIFT_CHECK(win.overlayEnabled());
+    LIFT_CHECK(wm.uiInputRouter() != nullptr);
+    win.attachWindowManager(nullptr);
+    LIFT_CHECK(wm.uiInputRouter() == nullptr);
+    win.attachWindowManager(&wm);  // 供后面的 `setOverlay(false)` 段继续验证"关 ⇒ 卸"
+    LIFT_CHECK(wm.uiInputRouter() != nullptr);
     int ox = 0;
     int oy = 0;
     int rw = 0;
@@ -783,6 +844,8 @@ int main(int argc, char** argv) {
     casePointerMapDpr();
     casePointerMapHover();
     casePointerMapNoGeometry();
+    // ★ S9：`--ui-input` 的纯解析 + 选项缺省（同样不依赖窗口 / 字体 / GPU）。
+    caseUiInputParse();
 
     std::string skip_why;
     if (gpu) {

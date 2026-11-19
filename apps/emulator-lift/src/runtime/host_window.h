@@ -23,6 +23,7 @@ namespace lift {
 
 struct X86;
 class InputPlan;
+class UiInputRouter;
 class WindowManager;
 
 // ★ S4：状态收口的**唯一**投影入口（§3.6）。设备只返回待投影的 `LevelRef`，这两个 free function
@@ -298,6 +299,18 @@ public:
     InputPlan* inputPlan() const { return input_plan_; }
 
     // =====================================================================================
+    // ★ 叠层注入路由（S9；`docs/03-emulator/overlay.md` D6 / D2）
+    //   **非拥有指针**：生命周期 = 装配者（`SdlWindow::Impl`，由 `attachWindowManager` /
+    //   `setOverlay` 装/卸）。`nullptr` = 没有叠层 / `--ui-input=pass` 未装 / 叠层已关 ⇒
+    //   `InputPlan` 的 click 路径只多一次判空（⛔ 没有第二份命中 / 捕获状态）。
+    //   ★ 与 `setInputPlan` 不同：**读指针也算状态入口**（站点名 `window.ui-input`）——它只用
+    //     在 click 的臂上 / 抬起（不是每个读点），所以线程检查的代价不在热路径上。
+    //   ★ 谁装、装的条件（`overlay && ui_script`）不在这里判：`WindowManager` 只存指针。
+    // =====================================================================================
+    void setUiInputRouter(UiInputRouter* router);
+    UiInputRouter* uiInputRouter() const;
+
+    // =====================================================================================
     // 无效区（update region；M2 · P4 / B7）
     // ★ 语义（Win32 文档）：`InvalidateRect` 往无效区里**并**矩形、`ValidateRect` / `ValidateRgn`
     //   从中**减**矩形；`GetUpdateRgn` 只读（**不**改变无效区）；`UpdateWindow` 发完 WM_PAINT 后清空。
@@ -346,6 +359,8 @@ private:
     bool have_input_sample_ = false;
     // ★ 投递层（S1）：非拥有指针；nullptr = 没有计划（缺省档）。
     InputPlan* input_plan_ = nullptr;
+    // ★ 叠层注入路由（S9）：非拥有指针；nullptr = 没有叠层（缺省档）。见方法注释。
+    UiInputRouter* ui_input_router_ = nullptr;
     // 上一次采样间隔的小环（K = 8）：同一个"输入迭代"里往往有**多次**读点
     // （GetAsyncKeyState + GetCursorPos…），它们之间的间隔只有 0~1 ms；取**最大值**才代表
     // "迭代周期"，取最近一次会被这种同迭代内的小间隔污染成 1 ms（⇒ 安全下限失效）。

@@ -153,7 +153,9 @@ std::uint64_t steadyNowNs() {
 
 }  // namespace
 
-struct SdlWindow::Impl {
+// ★ S9：`Impl` 同时是实现注入路由的 `UiInputRouter`（`runtime/ui_input.h`）。注入的 down/up
+//   与 OS 事件问的是**同一个** `click_router` 实例（D6 的"三个入口"）；本类只做坐标那一跳。
+struct SdlWindow::Impl : public UiInputRouter {
     // ★ 指回拥有者：`Impl` 的路径（`submitDirect`）要调 `SdlWindow::drawOverlay`（M0 唯一 HUD 入口）。
     //   对象生命周期 = 拥有者（`impl_` 是 SdlWindow 的成员）⇒ 非拥有指针恒有效。
     SdlWindow* owner = nullptr;
@@ -264,6 +266,16 @@ struct SdlWindow::Impl {
     //   · 左键 down 命中 ⇒ 吞 + capture；捕获中的 up 无条件吞，抬在同一条 rect 内才产一次性 click；
     //   · ⛔ handleEvent 只调这里记 pending：不跑 JS、不开 profile、不写剪贴板。
     lift::ui::ClickRouter click_router;
+    // ★ S9：注入点击的模式（`--ui-input=consume|pass`；`SdlWindowOptions::ui_input`）。
+    //   `Consume`（缺省）⇒ 注入 down/up 也过 `click_router`；`Pass` ⇒ 直接 return false（不碰它）。
+    UiInputMode ui_input = UiInputMode::Consume;
+    // ★ S9：把本对象作为 router 装到/卸下 `WindowManager`（**唯一**同步点；条件 = `overlay &&
+    //   ui_script`）。调用点：`attachWindowManager` / `setOverlay` / `disableOverlay` / `shutdown`。
+    //   ⛔ 不要在别处直接 `windows->setUiInputRouter(...)`（会绕过"脚本还在不在"的判断）。
+    void syncUiInputRouter();
+    // ★ S9：`UiInputRouter` 的实现（注入 down/up）。**左键才问** `click_router`；右/中键与
+    //   `Pass` 模式一律 return false（后者连 router 都不碰 ⇒ guest 逐位不变）。
+    bool routeInjectedPointer(UiPointerPhase phase, MouseButton button, int client_x, int client_y) override;
     // ★ 宿主真光标（`--cursor-warp`，默认关）：只加宿主副作用，⛔ 不改 guest 可见状态。
     bool cursor_warp = false;
     // ★ `--cursor-warp` 的回灌抑制队列（**窗口客户区像素**的 FIFO；判据与为什么见
@@ -479,6 +491,9 @@ void SdlWindow::Impl::disableOverlay(const char* why) {
     // ★ 屏幕上已经没有这层叠层了 ⇒ 命中表 / capture 一起作废（⛔ 留着旧按钮继续吃点击）。
     click_router.clearFrame();
     ui_script.reset();
+    // ★ S9：叠层没了 ⇒ 注入点击也不再问 router（否则 `--input-plan` 会继续"点"一个不存在的
+    //   界面，而 guest 收不到点击 ⇒ 静默丢输入）。
+    syncUiInputRouter();
     // ★ 不立即销毁：上一帧的 draw 可能仍在 GPU 队列里（提前释放 ⇒ 部分/整块叠层丢失）。
     //   退役到 `retired_overlay_tex`，由 `shutdown()` 统一释放。
     if (overlay_tex != nullptr) {
@@ -611,6 +626,46 @@ void SdlWindow::Impl::pointerWindowPixels(float px, float py, int* x, int* y) co
     const double sy = static_cast<double>(pixel_h) / static_cast<double>(logical_h);
     *x = static_cast<int>(std::lround(static_cast<double>(px) * sx));
     *y = static_cast<int>(std::lround(static_cast<double>(py) * sy));
+}
+
+// ★ S9：注入指针（`--input-plan` / 控制层）与 OS 事件走**同一个** `click_router`（D6 三个入口）。
+//   · 坐标链与 S5 的 hover **同一份纯函数**：guest 客户区 → letterbox 窗口点 → DPR 窗口像素
+//     （命中表 = resolved rect 的空间）；⛔ 不另写一套 `* scale + origin`。
+//   · 左键才问；右 / 中键一律放行（D6）。`Pass` 模式**不碰** `click_router`，直接 return false
+//     （`--ui-input=pass` 的承诺是"逐位与没有 UI 相同"，不是"问了但不吞"）。
+//   · 几何不可用 / 没有窗口 / 叠层没开 ⇒ 放行（⛔ 不猜一个 DPR / 不吞一条点不中的点击）。
+//   · ⛔ 不看 `SDL_GetMouseFocus`：注入是"程序在点"，不需要宿主鼠标焦点（这正是 Q6-A 的产品面）。
+bool SdlWindow::Impl::routeInjectedPointer(UiPointerPhase phase, MouseButton button, int client_x,
+                                           int client_y) {
+    if (!overlay) return false;
+    if (ui_input != UiInputMode::Consume) return false;  // Pass：连 router 都不碰
+    if (button != MouseButton::Left) return false;
+    if (window == nullptr) return false;
+    int logical_w = 0;
+    int logical_h = 0;
+    int pixel_w = 0;
+    int pixel_h = 0;
+    if (!SDL_GetWindowSize(window, &logical_w, &logical_h)) return false;
+    if (!SDL_GetWindowSizeInPixels(window, &pixel_w, &pixel_h)) return false;
+    int hit_x = 0;
+    int hit_y = 0;
+    if (!overlayPointerWindowPixels(client_x, client_y, logical_w, logical_h, pixel_w, pixel_h, frameImageW(),
+                                    frameImageH(), &hit_x, &hit_y)) {
+        return false;
+    }
+    const lift::ui::UiPointerDecision decision = click_router.handlePointer(
+        phase == UiPointerPhase::Down ? lift::ui::UiPointerPhase::Down : lift::ui::UiPointerPhase::Up,
+        lift::ui::UiPointerButton::Left, hit_x, hit_y);
+    return decision.swallow;
+}
+
+// ★ S9：把本对象装/卸到 `WindowManager`（**唯一**同步点）。
+//   装的条件只有一条：`overlay && ui_script`（叠层真的画得出来、且有命中表可提交）。
+//   `Pass` 模式**也**装 —— 它的语义在 `routeInjectedPointer` 里（不碰 router），这样
+//   "装不装"与"吞不吞"是两件事，不会被两个地方各判一半。
+void SdlWindow::Impl::syncUiInputRouter() {
+    if (windows == nullptr) return;
+    windows->setUiInputRouter((overlay && ui_script != nullptr) ? this : nullptr);
 }
 
 void SdlWindow::Impl::mapMouse(float mx, float my, std::int32_t* gx, std::int32_t* gy) const {
@@ -835,6 +890,9 @@ bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
     impl_->raster_gpu = options.raster_gpu;
     impl_->overlay = options.overlay;
     impl_->ui_script_path = options.ui_script;
+    // ★ S9：注入点击的模式（`--ui-input`；缺省 Consume）。`attachWindowManager` 时按它 + 叠层状态
+    //   把 router 装到 `WindowManager`（见 `syncUiInputRouter`）。
+    impl_->ui_input = options.ui_input;
     // ★ B：`--overlay` / `--ui` 的叠层由**脚本**产出 display list（`scripts/ui/hud.js` 或 `--ui`）。
     //   装脚本 = ① 宿主字体（`ui.measure` 的来源，缺失 ⇒ 硬失败 R5）② 源码（默认 / `--ui` 文件）
     //   ③ QuickJS 编译 + 抓 `globalThis.render`。任何一步失败 ⇒ **启动硬错**（AOT 侧 exit 2；
@@ -1063,7 +1121,12 @@ void SdlWindow::shutdown() {
     impl_->stop = false;
     impl_->device_lost = false;
     impl_->capture = false;
-    impl_->windows = nullptr;
+    // ★ S9：先把这个 router 从 `WindowManager` 摘掉再断指针 —— 否则 `WindowManager` 会留着一个
+    //   指向已销毁 `Impl` 的非拥有指针（`--present auto` 的重试会再 init 一次）。
+    if (impl_->windows != nullptr) {
+        impl_->windows->setUiInputRouter(nullptr);
+        impl_->windows = nullptr;
+    }
     impl_->close_pending = false;
     impl_->close_frames_left = 0;
     impl_->close_deadline_ns = 0;
@@ -1505,7 +1568,13 @@ void SdlWindow::cancelCloseRequest() {
 // 宿主侧请求关窗（`InputScript::close_window` / 测试）：与 SDL 的 X 同一条路（含宽限/二次确认）。
 void SdlWindow::requestClose() { impl_->requestClose(); }
 
-void SdlWindow::attachWindowManager(WindowManager* windows) { impl_->windows = windows; }
+// ★ S9：换 `WindowManager` 时把注入 router 一起搬家（旧的那个先摘，避免它留着一个指向本对象的
+//   指针；新的按 `overlay && ui_script` 决定装不装 —— 判据只在 `syncUiInputRouter` 一处）。
+void SdlWindow::attachWindowManager(WindowManager* windows) {
+    if (impl_->windows != nullptr && impl_->windows != windows) impl_->windows->setUiInputRouter(nullptr);
+    impl_->windows = windows;
+    impl_->syncUiInputRouter();
+}
 
 std::uint32_t SdlWindow::windowIdForTest() const {
     return impl_->window != nullptr ? SDL_GetWindowID(impl_->window) : 0u;
@@ -1612,10 +1681,14 @@ void SdlWindow::setOverlay(bool on) {
             std::fprintf(stderr, "[overlay] 脚本 / 宿主字体不可用 ⇒ 拒绝启用（--overlay / --ui；R5）\n");
             impl_->overlay = false;
         }
+        // ★ S9：装/卸注入 router（条件 = `overlay && ui_script`；失败时 overlay 已回 false ⇒ 卸）。
+        impl_->syncUiInputRouter();
         return;
     }
     // ★ 关 ⇒ 丢掉这一份脚本（下次开会按 `ui_script_path` 重新装：`--ui` 可能换过内容）。
     impl_->ui_script.reset();
+    // ★ S9：脚本没了 ⇒ 注入点击不再问 router（见 `disableOverlay` 的同一条理由）。
+    impl_->syncUiInputRouter();
     // ★ 纹理只退役、不立即销毁（见字段注释）；保留到 `shutdown()` 的代价有界（关叠层次数很少）。
     if (impl_->overlay_tex != nullptr) {
         impl_->retired_overlay_tex.push_back(impl_->overlay_tex);
