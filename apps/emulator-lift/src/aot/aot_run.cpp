@@ -20,7 +20,6 @@
 //   · 边界→`cpu.eip` 的"块缓存"这一层不存在：EA 要么在派发表里、要么是 shim 桩，否则响亮停
 //     （D10 P4：⛔ 不设"返回哨兵 = 结束"的约定）。
 // ★ 本文件的诊断开关读 getenv（`LIFT_AOT_SHIM_TRACE`）；MSVC 口径里那是 deprecated 警告，不是问题。
-#define _CRT_SECURE_NO_WARNINGS
 #include "aot/aot_host.h"
 
 #include <algorithm>

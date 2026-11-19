@@ -11,7 +11,6 @@
 // ★ 为什么执行源要跟解释器臂同一套解析：读数（base / entry / 节表 / 导入数）必须与
 //   `emulator-lift` 报的是**同一份字节**，否则两边对不上时无法判断"是 lift 的问题还是喂了别的 exe"。
 // ★ `getenv` 在 MSVC 口径里是 deprecated 警告（不是问题）；与已退役解释器臂 `main.cpp` 同一条处置。
-#define _CRT_SECURE_NO_WARNINGS
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
