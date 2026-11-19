@@ -1,0 +1,19 @@
+{
+    "compilerOptions": {
+        "target": "ES2022",
+        "module": "ESNext",
+        "moduleResolution": "Bundler",
+        "baseUrl": ".",
+        "paths": {
+            "@amayui/lift-plugin": ["../plugin.d.ts"]
+        },
+        "strict": true,
+        "noEmit": true,
+        "noUncheckedIndexedAccess": true,
+        "exactOptionalPropertyTypes": true,
+        "forceConsistentCasingInFileNames": true,
+        "skipLibCheck": false,
+        "types": []
+    },
+    "include": ["./*.ts", "../plugin.d.ts"]
+}
