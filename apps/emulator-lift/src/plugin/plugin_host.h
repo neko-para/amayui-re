@@ -27,6 +27,12 @@
 //   executor 一行不改（测绘 §3.3 的第三行）。代价：第一个读点不 poll；从第二个读点起正常 poll。
 //   用例必须断言"`start` 之后同一 position 区间仍能命中"（⛔ 不靠"区间够长"）。
 //
+// ★ **`render`（C2b）不属于本类的循环**：`script()` 返回**同一个** `PluginScript`（它实现了
+//   `UiScript`），窗口叠层路径每帧调 `render(builder, readings)`（C2b-2 的 `adopt` 才接线）。
+//   本类只负责两件事：`init` 时把 `this` 设进 `PluginScript::setCallHost`（render 的
+//   `ctx.read` / `ctx.log` 的来路），以及让 `readWired()` 不绑 `in_callback_`（见下）。
+//   ⇒ ⛔ 本类不 include 任何 UI 实现头、不持有 `UiBuilder` / `FontEngine`。
+//
 // ★ **三个出口各有各的语义**（⛔ 不要合并）：
 //   · `ctx.fail(name, reason)` → 本次 Run 失败（清 armed + readout `run=failed`）；
 //   · `ctx.finish(code, reason)` → 结束本次 Run + 记录 exit（**不改进程 exit**；R3）；
@@ -109,11 +115,15 @@ public:
     void onReadPoint(WindowManager& wm, InputPoint point) override;
 
     // ---- `ui::PluginCallHost`（`ctx.*` 的宿主侧；形状见 `ui/plugin.h`）----
-    // ★ 四条装配线各判各的，且**必须正在回调里**（`in_callback_`）：回调外调用 `ctx.*` 是
-    //   实现错误 ⇒ JS 侧一律 TypeError（⛔ 不静默 no-op、⛔ 不编假回执）。
+    // ★ 三条**写类**装配线（Edit / Input / Trigger 工厂）各判各的，且**必须正在回调里**
+    //   （`in_callback_`）：回调外调用它们是实现错误 ⇒ JS 侧一律 TypeError（⛔ 不静默 no-op）。
+    // ★ **`read` 不绑 `in_callback_`**（C2b）：`ctx.read.global.get` 在 `RenderCtx` 里也要能用
+    //   （d.ts 的 `ReadApi` 同时出现在 RunCtx 与 RenderCtx）；EngineRead 本是**只读**、无暂停
+    //   （合同 §4.5），把它绑在"正在 Run 回调"上会让 render 的读数面静默缺失。
+    //   ⛔ 不要顺手把 `edit`/`input`/`trigger` 也放开 —— 那是"render 不做 guest 写"（§4.4c）的落点。
     bool editWired() const override { return in_callback_ && edit_ != nullptr; }
     bool inputWired() const override { return in_callback_ && ctx_input() != nullptr; }
-    bool readWired() const override { return in_callback_ && read_ != nullptr; }
+    bool readWired() const override { return read_ != nullptr; }
     bool triggerWired() const override { return in_callback_ && ctx_trigger() != nullptr; }
 
     bool editGlobalSet(lift::GlobalKind kind, std::uint32_t id, const lift::GlobalValue& value,
@@ -167,6 +177,9 @@ public:
     TriggerFactory& factory() { return factory_; }
     IntentQueue& queue() { return queue_; }
     IntentExecutor& executor() { return executor_; }
+    // ★ 非 const 那一份给 **render** 用（C2b）：`PluginScript` 也是 `UiScript`，
+    //   叠层路径要在**同一个实例**上调 `render(builder, readings)`（⛔ 不是第二个 QJS context）。
+    ui::PluginScript* script() { return script_.get(); }
     const ui::PluginScript* script() const { return script_.get(); }
 
     // 释放本 owner 的 armed + 未完成的输入状态（⛔ 不做 `releaseProgram`：那是"全抬"）。
