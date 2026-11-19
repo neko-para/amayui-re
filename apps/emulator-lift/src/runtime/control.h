@@ -10,11 +10,14 @@
 // ★ 热路径成本：`pending()` = **一次 atomic load**；调用方先判 `Control* == nullptr`
 //   ⇒ 不带 `--control-root` 的进程连这次原子读都不付（与 `presenter_` 的空指针判据同形）。
 //
-// ★ 能力面（S0+S1+S2+S3+S4 + M1 的 `click` + typed global）= `pause` / `resume`（含 `--for-ms` /
-//   `--for frames`）/ `sample` / `screenshot` / `click` / `global-get` / `global-set` / `quit`；
+// ★ 能力面（**真源** = `runtime/capability.h` 的 `kControlCapabilities`；⛔ 本注释不再维护清单）：
+//   `hello.capabilities`、`controlOpName` 与启动 readout 的 `caps=` 都从那张表生成（⛔ 不要在任何一处
+//   再抄一份 —— `tools/test/capability-matrix.test.mjs` 会红）。
 //   `capabilities` 只列**真的实现了**的（`hello` 如实报这一份）。
-//   ★ `click` = **暂停态入队**，由**下一个 guest 读点**（`InputPlan::atPoint`）施加 —— 控制线程与
-//     `serve()` 都**不碰** guest 状态；⛔ 也不推进配方（判据 2）。`key` 本轮**不做** ⇒ `unknown_op`。
+//   ★ `move` = **纯 move**（只把光标放到参考坐标，⛔ 不按键）；`click` = **暂停态入队**，由**下一个 guest
+//     读点**（`InputPlan::atPoint`）施加 —— 控制线程与 `serve()` 都**不碰** guest 状态；⛔ 也不推进配方（判据 2）。
+//   `key` 本轮**不做** ⇒ `unknown_op`；`wait` 是 `emu-ctl` 的**客户端糖**（= `resume --for-ms`），
+//   ⛔ 不是服务端 op、不进能力表。
 //   ★ `global-get` / `global-set` = **哑原语**：按 id + 显式 kind 读写一格 script global。
 //     寻址 / ENC-DEC / 类型编码在 `runtime/script_globals.h`（**AGE 引擎层**，可替换；QJS 侧将来共用）；
 //     本层只做「JSON → 参数校验（含 0x 十六进制口径）→ 调模块 → 组返回」。

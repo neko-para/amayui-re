@@ -51,6 +51,7 @@
 #include <boost/beast/websocket.hpp>
 #include <nlohmann/json.hpp>
 
+#include "runtime/capability.h"      // ★ 能力面的**唯一真源**（hello / caps= / controlOpName 同源）
 #include "runtime/clock.h"
 #include "runtime/control_global.h"  // global-get/set 的请求形状 + 十六进制口径（实现只在本 TU）
 #include "runtime/cursor_map.h"      // kReferenceFrameW/H（`click` 的参考系上界；⛔ 这里不做除法）
@@ -66,6 +67,13 @@
 #endif
 
 namespace lift {
+
+// ★ 值序绑定（C0）：`capability.h` 是 leaf 头（看不见 `ControlOp`）⇒ 这条断言是"两个枚举不许各自漂"
+//   的唯一机械判据（本 TU 同时看得见两个枚举）。加一个 op 要**同时**改 `runtime/capability.h` 与 `control.h`；
+//   只改一处 ⇒ 这里编译期红（⛔ 不是等运行期 `hello` 少一项才发现）。
+static_assert(static_cast<unsigned>(ControlOp::Quit) == static_cast<unsigned>(plugin::ControlCapability::Quit),
+              "ControlOp 与 ControlCapability 值序不一致：协议枚举与能力表必须逐项对齐");
+
 namespace {
 
 namespace asio = boost::asio;
@@ -485,10 +493,13 @@ std::string Control::Impl::helloJson() const {
     j["started_utc"] = started_utc;
     j["exe_sha256"] = opts.exe_sha256;
     j["shape"] = opts.shape;
-    // ★ 只列**真的实现了**的（S0+S1+S2+S3+S4 + M1 的 `click` + 2026-11-19 的 `move` + typed global；
-    //   `key` 本轮不做 ⇒ 不列）。
-    j["capabilities"] = json::array({"pause", "resume", "sample", "screenshot", "move", "click",
-                                     "global-get", "global-set", "quit"});
+    // ★ 能力面 = `runtime/capability.h` 的 `kControlCapabilities`（**唯一真源**；顺序 = 合同 =
+    //   `ControlOp` 值序）。⛔ 不要在这里再写字面量清单：`caps=` 曾经就是那样漏掉 move/global-* 的
+    //   （`tools/test/capability-matrix.test.mjs` 会红）。
+    j["capabilities"] = json::array();
+    for (const plugin::ControlCapabilityRow& row : plugin::kControlCapabilities) {
+        j["capabilities"].push_back(row.name);
+    }
     // ★ 判据 2 的裁决（父级 2026-11-16）：`present` 在**顶层**（⛔ 不塞进 `control`）：
     //   它是**连接时的事实**，值取 `windowHidden()` / `describe()` 那条既有判据（⛔ 不由 --present 推）。
     j["present"] = opts.present;
@@ -1618,19 +1629,9 @@ const char* controlErrorName(ControlError e) {
 }
 
 const char* controlOpName(ControlOp op) {
-    switch (op) {
-        case ControlOp::None: return "none";
-        case ControlOp::Pause: return "pause";
-        case ControlOp::Resume: return "resume";
-        case ControlOp::Sample: return "sample";
-        case ControlOp::Screenshot: return "screenshot";
-        case ControlOp::Move: return "move";
-        case ControlOp::Click: return "click";
-        case ControlOp::GlobalGet: return "global-get";
-        case ControlOp::GlobalSet: return "global-set";
-        case ControlOp::Quit: return "quit";
-    }
-    return "none";
+    // ★ 名字只有一份（`runtime/capability.h`）；枚举值序由本文件顶部那条 `static_assert` 绑住。
+    //   `None` 不在表里 ⇒ `controlCapabilityName` 落空到 `"none"`（与旧 switch 的缺省逐字相同）。
+    return plugin::controlCapabilityName(static_cast<plugin::ControlCapability>(static_cast<std::uint8_t>(op)));
 }
 
 // =====================================================================================

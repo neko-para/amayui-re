@@ -151,6 +151,12 @@ struct AotRunOptions {
     //   ⇒ `decode-error`，退出码 2）。
     //   读点在**主线程**里写这个 bool、主线程的块边界读它 ⇒ 不需要原子。
     const bool* stop_requested = nullptr;
+    // ★ **停因归因**（C2a；`c2-decisions.md` D-C2-9）：`stop_requested` 被触发时写进
+    //   `AotRunResult::detail` 的文本。`nullptr`（缺省）⇒ 保持旧文本 `"input-plan: quit"`。
+    //   为什么需要一格归因：`--plugin` 与 `--input-plan` 互斥（启动即 exit 2），但两者**写同一个**
+    //   `stop_requested` 槽 ⇒ 不归因就会把插件的 quit 说成配方的 quit（`bye.reason` 也跟着错）。
+    //   ⛔ 不要改成"按有没有装插件分支"：那是第二个判据，而这里只需要一个标签。
+    const char* stop_detail = nullptr;
 };
 
 struct AotRunResult {

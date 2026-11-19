@@ -3274,7 +3274,11 @@ int main() {
                 {"bitrev-unreadable", kN, kLog2N, kTrigEa, kInEa, kOutEa, kBadPartial, lift::MdctWhy::BitrevUnreadable},
             };
             for (const DeclineCase& c : cases) {
-                lift_test::g_current_case = (std::string("mdct/decline-") + c.name).c_str();
+                // ★ 必须让名字活过这一轮：`g_current_case` 是 `const char*`，指向临时
+                //   `std::string` 的 buffer 会在 full-expression 结束时悬垂（clang 的
+                //   -Wdangling-assignment-gsl 抓的就是这一行；它曾让全量构建 / 全量 ctest 红）。
+                const std::string case_name = std::string("mdct/decline-") + c.name;
+                lift_test::g_current_case = case_name.c_str();
                 lift::Machine m;
                 LIFT_CHECK(bootMdctVariant(m, c.n, c.log2n, c.trig_ea, c.in_ea, c.out_ea, c.bitrev_ea,
                                           c.why == lift::MdctWhy::InitUnreadable));

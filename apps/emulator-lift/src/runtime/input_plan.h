@@ -93,6 +93,8 @@
 #include <vector>
 
 #include "runtime/engine_marker.h"
+#include "runtime/input_point.h"   // 11 个投递点的闭集合（W1：`PointerCore` 也要用）
+#include "runtime/pointer_core.h"  // `PointerCore`（click 两段 / 三个闸门 / 写预算的唯一实现）
 #include "runtime/recipe.h"
 
 namespace lift {
@@ -101,28 +103,9 @@ class WindowManager;
 class GuestMemory;
 class VirtualClock;
 
-// 11 个投递点（**闭集合**；读路径已由复审穷举核过）：
-//   9 个读点 + 1 个写点（`SetCursorPos`）+ 1 个事件源（`ReadFile` —— ⛔ 它不是"输入族"，
-//   只是"文件读完"的事件源；守卫 ② 用 `std::fread(` 这个谓词把它与输入族分开判）。
-// ⛔ 排除：`timeGetTime` / `GetTickCount`（时钟不是输入）与 `WaitForSingleObject` 族
-//   （今天 `shimAbort`）。`SetCursor` / `ShowCursor` 只改 HCURSOR / 显示计数，不参与。
-enum class InputPoint : std::uint8_t {
-    KeyLevel = 0,    // user32!GetAsyncKeyState —— 电平
-    CursorPos,       // user32!GetCursorPos —— 电平
-    PeekMsg,         // user32!PeekMessageA —— 队列
-    GetMsg,          // user32!GetMessageA —— 队列（+ 阻塞点，S5）
-    MsgWait,         // user32!MsgWaitForMultipleObjects —— 队列（按 dwWakeMask 扫，不取走）
-    WaitMessage,     // user32!WaitMessage —— 队列
-    QueueStatus,     // user32!GetQueueStatus —— 队列状态位
-    Translate,       // user32!TranslateMessage —— 派生电平（shift/caps）
-    Dispatch,        // user32!DispatchMessageA —— 队列消费端（顺序要对）
-    SetCursorPos,    // user32!SetCursorPos —— **写点**（所有权：不被计划顶掉）
-    FileRead,        // kernel32!ReadFile —— **事件源**（⛔ 不算输入读点）
-    Count,
-};
-
-constexpr std::size_t kInputPointCount = static_cast<std::size_t>(InputPoint::Count);
-const char* inputPointName(InputPoint point);
+// ★ 11 个投递点的**闭集合**已搬到 `runtime/input_point.h`（W1：`PointerCore` 也要用它，
+//   而 `input_plan.h` 要 include `pointer_core.h` ⇒ 枚举住在这里会成环）。
+//   `inputPointName()` 的**定义**仍留在实现文件 `input_plan.cpp`（一个字节没动）。
 
 // 内部判定点 → 计划的事件词汇（闭集合；今天只消费 `Frame`）。
 // ★ 本枚举现在就存在，是为了让 `note()` 的形状**从第一天起**就是"只记账"：
@@ -141,8 +124,11 @@ constexpr std::size_t kPlanEventCount = static_cast<std::size_t>(PlanEventKind::
 
 // =====================================================================================
 // `InputPlan` —— 宿主对象（**不拥有任何 guest 可见状态**）
+//
+// ★ 继承 `PointerCore`（2026-11-19 · C1a）：click 的两段 / 三个闸门 / 写预算 / 待抬起队列
+//   是**共享实现**（C1b 的 executor 要同一段语义）。本类只留"配方 / 门 / 完成度 / 立即队列"。
 // =====================================================================================
-class InputPlan {
+class InputPlan : public PointerCore {
 public:
     // 有一个非空的指令表 ⇒ armed。⛔ 本函数不看墙钟、不看帧号。
     bool armed() const { return recipe_.active(); }
@@ -190,7 +176,16 @@ public:
     //   ★ `frame=` 的来源 = `presenting()`（`present.cpp` 在 `++frame_count_` 同一刻推的读数）
     //     ⇒ 与 `--frame-log` / 摘要里的帧号同一个数。
     //   ★ `state_seq=` 只有开了 `--control-root` 才有（`Control::stateSeq()`）；没开 ⇒ `-`（⛔ 不编造）。
-    void setTrace(std::FILE* out) { trace_out_ = out; }
+    void setTrace(std::FILE* out) {
+        trace_out_ = out;
+        // ★ 抬起那一行的钩子（`PointerCore::releaseDue` 只把读数交出去；`plan:<文件>:<行>` 的
+        //   文本属于配方口径 ⇒ 由本类装/摘；关档 ⇒ 摘掉 ⇒ core 每次抬起只判空一次）。
+        if (out != nullptr) {
+            setReleaseTrace(this, &InputPlan::releaseTraceHook);
+        } else {
+            setReleaseTrace(nullptr, nullptr);
+        }
+    }
     using StateSeqFn = std::uint64_t (*)(void* ctx);
     void setStateSeqSource(void* ctx, StateSeqFn fn) {
         state_seq_ctx_ = ctx;
@@ -253,34 +248,12 @@ public:
     //   同样会重置这个时钟：闸门判的是**设备位置**，不是"哪条 step 挪的"）。
 
     // =====================================================================================
-    // ★ **注入形状**（2026-11-19 裁决；锚 = `GetAsyncKeyState` 电平读点，⛔ 不是总采样数）
-    //
-    // 为什么闸门必须按 KeyLevel 读点：引擎的按键**只从电平读**（`GetAsyncKeyState`，
-    //   EA `0x477241 / 0x47725D`），而 `WM_LBUTTONDOWN/UP` 在 WndProc 里只写一个**全语料无读者**
-    //   的 dword（`+0x1620`，EA `0x4B8DE6`）+ 清去重锁存（`+0x1E70`）⇒ **消息路不能产生点击**。
-    //   而 `WindowManager::inputSampleCount()` 把 `GetCursorPos` 也算作样本 ⇒ 位置读点能满足
-    //   "等两拍"、按键却一次都没被读到 —— 那正是 2026-11-19 查出来的失效根因（现场读数
-    //   `reason=forced samples==press_samples`）⇒ ⛔ **不许**再拿总样本数当闸门。
-    // 唯一答案 = 本类的 `deliverCalls(InputPoint::KeyLevel)`：它就是"guest 真的读过按键电平"的计数
-    //   （唯一来源 = `atPoint` 的第一句 ⇒ 没有第二份账）。
-    // -------------------------------------------------------------------------------------
-    // ① 按下之后至少**跨过**这么多个 KeyLevel 读点才抬起。
-    //   ★ 为什么是 2 而不是 1：计数在 `atPoint` 的**第一句** +1，而抬起是**读之前** flush 的
-    //     （flush-before-read）⇒ N=1 时抬起落在那个读点自己的读**之前**，guest 一次也看不到按下；
-    //     N=2 才留下**至少一次** KeyLevel 读**真的读到**按下电平（读数 N=2 ⇒ 1 次观察；
-    //     若按下那次本身是 KeyLevel 读点则 2 次）。
-    static constexpr std::uint64_t kKeyLevelReadsBeforeRelease = 2;
-    // ② 抬起墙钟兜底：按下之后这么久（宿主单调毫秒，扣暂停）还没够 ①的读点 ⇒ **仍然抬起**。
-    //   ★ 为什么 500 ms：实测输入心跳 = `GetCursorPos` **20.02 Hz**（OBS-20261108-07，≈50 ms）
-    //     ⇒ 500 ms ≈ **10 个周期**，还在轮询按键的屏都会在兜底之前满足 ①；它只防"这个屏根本
-    //     不读按键"（那种屏上按键本来就不可能被看见）⇒ 行为与改动前相同，⛔ 不会永久按住。
-    static constexpr std::uint64_t kReleaseFallbackMs = 500;
-    // ③ 按下之前：光标必须先落地、且**至少跨过一个读点**（⛔ move 与 down 同读点）。
-    //   · 判据 = 臂上之后**完成过**至少一次 `InputPoint::CursorPos` 读点：引擎的位置样本被
-    //     `+0x74A4` 锁存，只有它**真的调了** `GetCursorPos` 才会把锁存刷新到新位置
-    //     （EA `0x404029 / 0x4040A9`；清零只在注册热点 `0x403BBE / 0x403C39`）；
-    //   · 有的屏整屏不读位置 ⇒ 墙钟兜底（250 ms ≈ 5 个周期）保证 click **一定会按下**。
-    static constexpr std::uint64_t kPressFallbackMs = 250;
+    // ★ 三个闸门常量（`kKeyLevelReadsBeforeRelease` / `kReleaseFallbackMs` / `kPressFallbackMs`）
+    //   与"注入形状"的完整口径已**逐字搬进 `runtime/pointer_core.h`**（C1a：click 施加核心的
+    //   唯一实现处）。本类经继承沿用同一份数 ⇒ `InputPlan::kReleaseFallbackMs` 这类写法照旧解析
+    //   得到；闸门 ① 的读数 = `PointerPoint::key_level_reads`（本类 `atPoint` 从自己的
+    //   `deliverCalls(InputPoint::KeyLevel)` 算好传进去 —— 仍只有那一个来源）。
+    // =====================================================================================
 
     // ★ 记账函数：**不接受 `WindowManager`**、不持有计划指针、只能累加计数。
     //   ⇒ 它**不可能**施加到期 step；到期 step 只能由**下一个读点**消费。
@@ -305,20 +278,20 @@ public:
     // **已施加的 `click`** 数（摘要 `fired=`；`await` / `wait` / `profile_*` / `quit` 不算"动作"）。
     // ★ **两种生产者同一口径**：配方 step 与控制层立即队列的 click 都记这里
     //   （判据 1 的"两边 fired 相同"读的就是这一格）。
-    std::uint64_t fired() const { return fired_; }
+    std::uint64_t fired() const { return PointerCore::fired(); }
     std::uint64_t releases() const { return released_; }
     // ★ S9：**被叠层吞掉**的注入 click 数（只有 `--ui-input=consume` + 叠层命中时才涨）。
     //   摘要行只在它 ≠ 0 时追加 `ui_consumed=N` ⇒ 默认档（没有叠层 / 没命中）**逐字不变**。
     //   口径 = 每次 click 的 **Down** 那一瞬 +1（一条 click 的 down/up 是同一个决定，⛔ 不数两次）。
-    std::uint64_t uiConsumed() const { return ui_consumed_; }
+    std::uint64_t uiConsumed() const { return PointerCore::uiConsumed(); }
     // 位置门"这一刻读不到位置"的次数（base==0 / pc 越界 / 未提交）。⛔ 缺省不打印（诊断用）。
     std::uint64_t positionMisses() const { return position_misses_; }
     std::uint64_t presenting() const {
         return event_calls_[static_cast<std::size_t>(PlanEventKind::Frame)];
     }
-    std::size_t pendingReleases() const { return releases_pending_; }
+    std::size_t pendingReleases() const { return PointerCore::pendingReleases(); }
     // 光标已落地、还没按下的 click 数（阶段 ① 与阶段 ② 之间；守卫 / 诊断读数）。
-    std::size_t armedPresses() const { return armed_.size(); }
+    std::size_t armedPresses() const { return PointerCore::armedPresses(); }
     // 已**正常收口**的区间数（`profile_begin` + `profile_end` 配对；读数，⛔ 不是性能判据）。
     std::uint64_t profileWindows() const { return profile_windows_; }
     bool profileOpen() const { return profile_open_; }
@@ -347,35 +320,9 @@ public:
     bool quitRequested() const { return quit_requested_; }
 
 private:
-    // **已按下**、等抬起的按钮（闸门 = `kKeyLevelReadsBeforeRelease` 个 KeyLevel 读点 / 墙钟兜底）。
-    struct PendingRelease {
-        MouseButton button = MouseButton::Left;
-        int x = 0;                       // **已缩放**的客户区坐标（move / down / up 共用）
-        int y = 0;
-        std::uint64_t press_samples = 0;      // 按下那一刻的 `inputSampleCount`（**只是读数**，⛔ 不是闸门）
-        std::uint64_t press_key_reads = 0;    // 按下那一刻的 KeyLevel 读点数 ⇒ **闸门 ①**
-        std::uint64_t press_ms = 0;           // 按下那一刻的宿主墙钟 ⇒ **兜底 ②**
-        std::uint64_t press_reads = 0;        // 按下那一刻的读点序号（trace 读数）
-        int line = 0;                     // 施加它的 step 行（trace 的 `plan:<文件>:<行>`）
-        // ★ S9：down 被叠层吞掉 ⇒ up 也**必须**吞（D6），且两者都**不**调 `input::*`。
-        //   这里记下 down 的决定；`emitRelease` 只看它，⛔ 不再问一次 router（"down 吞 ⇒ up 吞"）。
-        bool swallowed = false;
-    };
-
-    // **臂上**（光标已落地、还没按下）的一条 click：等"完成过一次 CursorPos 读点"后才按下。
-    struct ArmedPress {
-        MouseButton button = MouseButton::Left;
-        int x = 0;  // **已缩放**的客户区坐标（按下 / 抬起共用；⛔ 不重新映射）
-        int y = 0;
-        std::uint64_t arm_reads = 0;           // 臂上时的读点序号（trace 读数）
-        std::uint64_t arm_cursor_done = 0;     // 臂上时**已完成**的 CursorPos 读点数 ⇒ 闸门 ③
-        std::uint64_t arm_ms = 0;              // 臂上时的宿主墙钟 ⇒ 兜底 ③
-        int line = 0;
-        // ★ S9：down 在**臂上那一刻**就被叠层吞掉了（`routeInjectedPointer(Down,…)` 返回 true）。
-        //   ⇒ 不调 `input::mouseMove`、`pressDue` 不调 `input::mouseButton(down)`；但**保留**这条
-        //   ArmedPress（三段时序 / 闸门 ①③ 照旧），这样 up 的时机与不吞时同一个形状。
-        bool swallowed = false;
-    };
+    // ★ `PendingRelease` / `ArmedPress` 已搬进 `PointerCore`（`runtime/pointer_core.h`）：
+    //   click 的两段（arm → press → release）是共享实现。本类经继承引用同一份类型
+    //   （`traceRelease(const PendingRelease&, …)` 的写法照旧）。
 
     // 立即队列的一条（click 或 move）：**1280×720 参考坐标**（⛔ 还没映射 —— 映射只发生在
     // 落地那一刻的那一次）。
@@ -389,32 +336,23 @@ private:
     // 采一次身份（同 `(cur,id)` + 名字表签名不变 ⇒ 复用缓存的名字，不重解析）。
     void refreshIdentity();
     std::uint64_t nowMs() const;
-    // ★ **唯一**的 click 施加核心（阶段 ①）：映射坐标 + `input::mouseMove` + 进 `armed_`。
-    //   配方 step 与立即队列**都**走它（同一份 `referenceToClientPixel` + 同一份 `input::*`）。
-    void armClickAt(WindowManager& wm, int ref_x, int ref_y, MouseButton button);
-    // ★ 纯 move 的落地点（`move` 命令 / click 的第一段共用同一份映射与 `input::mouseMove`）。
-    void armMoveAt(WindowManager& wm, int ref_x, int ref_y);
-    // ★ 阶段 ②：把到期的 `armed_` 按下（`input::mouseButton(down)`）并转进 `pending_`。
-    //   ★ S7：一次读点**最多按一条**；已在 `pending_` 的按钮**跳过**（等它抬起，⛔ 不重复按下）。
-    void pressDue(WindowManager& wm);
-    // 这个按钮是否**已按下、还没抬起**（`pending_` 里有没有它）⇒ 连点串行化 / `mouse_down` 的判据。
-    bool buttonPending(MouseButton b) const;
-    // ★ 配方 step 的壳：只把 `Step` 的三个值交给上面那一段（⛔ 不复制映射 / 记账）。
-    void applyClick(WindowManager& wm, const Step& s);
+    // ★ `armClickAt` / `armMoveAt` / `pressDue` / `releaseDue` / `emitRelease` / `buttonPending` /
+    //   `releaseAll` 的实现已搬进 `PointerCore`（`runtime/pointer_core.h`；本类经继承调用）。
+    // ★ 配方 step 的壳：只把 `Step` 的三个值 + 本读点的读数交给基类那一段
+    //   （⛔ 不复制映射 / 记账）。
+    void applyClick(WindowManager& wm, const Step& s, const PointerPoint& at);
     // ★ S6：`mouse_move` / `mouse_down` / `mouse_up` 的落点（坐标一律走 `armMoveAt` /
     //   设备当前位置；⛔ 不在施加期重新映射一条 down/up 的坐标）。
-    void applyMouseMove(WindowManager& wm, const Step& s);
+    void applyMouseMove(WindowManager& wm, const Step& s, const PointerPoint& at);
     void applyMouseButton(WindowManager& wm, const Step& s, bool down);
     // 立即队列消费（同一次读点内、配方之前；⛔ 不碰 `next_` / `applied_`）。
-    void drainImmediate(WindowManager& wm, InputPoint point);
+    void drainImmediate(WindowManager& wm, const PointerPoint& at);
     // 区间边界的**本臂落点**（没有窗口 profiler ⇒ 一次性两行宿主墙钟读数）。
     void applyProfileMark(const Step& s, std::uint64_t now_ms);
     // `quit` 的**本臂落点**：与解释器臂同一个交付点 = `WindowManager::postQuit(0)`。
     void applyQuit(WindowManager& wm);
     // 某一步的守卫到期 ⇒ 记下是哪一条（下标）/ 等了多久（**唯一**失败面；⛔ 不 warning-only）。
     void failTimeout(std::size_t index, std::uint64_t elapsed_ms, std::uint64_t guard_ms);
-    void releaseDue(WindowManager& wm, InputPoint point);
-    void emitRelease(WindowManager& wm, const PendingRelease& r);
     // ★ **会话收口**：配方走完 / `quit` 且没有未收口的 click ⇒ `input::releaseProgram(wm, …)`
     //   （清 Program 电平 + 逐条 post up；与解释器臂 `InputScript::tick` 的
     //   `finished() || quit_requested_` **同一处**）。
@@ -426,10 +364,13 @@ private:
                            const char* kind_token, const char* extra_tag);
     void traceRelease(const PendingRelease& r, bool key_seen, bool wallclock, std::uint64_t samples_now,
                       InputPoint point);
+    // ★ `PointerCore::releaseDue` 的抬起钩子（`plan:<文件>:<行> reason=…` 的文本属于配方口径 ⇒
+    //   留在本类；`setTrace` 开/关时把钩子装上/摘掉，缺省 nullptr ⇒ core 每次抬起只判空一次）。
+    static void releaseTraceHook(void* ctx, const PendingRelease& r, bool key_seen, bool wallclock,
+                                 std::uint64_t samples_now, InputPoint point);
 
     Recipe recipe_;
-    std::vector<PendingRelease> pending_;  // 已按下、等抬起
-    std::vector<ArmedPress> armed_;        // 光标已落地、等"一次完成的位置采样"再按下
+    // ★ `pending_` / `armed_` 是 `PointerCore` 的成员（`runtime/pointer_core.h`；本类经继承读写）。
     // 控制层投进来的 click / move（**第二条生产者**；有界，见 `kImmediateClickCapacity`）。
     std::vector<ImmediateOp> immediate_;
     const GuestMemory* mem_ = nullptr;  // 装配点挂；nullptr ⇒ 门恒不成立
@@ -439,23 +380,11 @@ private:
     const VirtualClock* clock_ = nullptr;  // 暂停补偿（nullptr = 不减；见 attachClock）
     std::uint64_t next_ = 0;            // 下一个待判的指令（顺序推进，⛔ 不回跳）
     std::uint64_t applied_ = 0;         // 已消费指令数
-    std::uint64_t fired_ = 0;           // 已施加 click 数
-    std::uint64_t released_ = 0;
-    // ★ S9：被叠层吞掉的注入 click 数（Down 那一瞬 +1；见 `uiConsumed()`）。
-    std::uint64_t ui_consumed_ = 0;
+    // ★ `fired_` / `released_` / `ui_consumed_` / `cursor_reads_done_` / `writes_this_point_` /
+    //   `last_move_*` / `releases_pending_` / `session_closed_` 是 `PointerCore` 的成员
+    //   （`runtime/pointer_core.h`；本类经继承读写同一份）。
     std::uint64_t position_misses_ = 0;  // 位置门读不到位置的次数（诊断；缺省不打印）
     std::uint64_t read_points_ = 0;     // 读点序号（trace / profile 读数）
-    // 本读点**之前**已经完成过的 CursorPos 读点数（"位置样本的年龄"刻度；见 `kPressFallbackMs`）。
-    std::uint64_t cursor_reads_done_ = 0;
-    // ★ **写预算**（S7 / Q2）：本读点已经施加了几条写动作（0 / 1；见 `atPoint` 的四段）。
-    std::uint32_t writes_this_point_ = 0;
-    // ★ `mouse_down` 轻闸门（S6 / Q3）：上一次**设备移动**时的 `cursor_reads_done_` 与宿主墙钟
-    //   （`armMoveAt` 刷新；见类头的"轻闸门"段）。
-    std::uint64_t last_move_cursor_done_ = 0;
-    std::uint64_t last_move_ms_ = 0;
-    std::size_t releases_pending_ = 0;
-    // 本次注入会话是否已经把光标所有权交还过（`closeSessionIfDone` 只做一次；新的注入会清掉它）。
-    bool session_closed_ = true;
     // `wait` 的 deadline（宿主毫秒；起点 = 第一次到达这条指令的那个读点）
     bool wait_started_ = false;
     std::uint64_t wait_deadline_ms_ = 0;

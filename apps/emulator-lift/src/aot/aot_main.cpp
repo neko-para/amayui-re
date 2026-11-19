@@ -14,12 +14,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "aot/aot_dispatch.h"
 #include "aot/aot_host.h"
+#include "plugin/plugin_host.h"      // C2a：QJS 单插件（--plugin）的宿主适配器
+#include "plugin/readings.h"         // C2a：生产 ReadingsSource（marker + 鼠标）
+#include "runtime/capability.h"      // ★ 能力面（`caps=` 的**唯一真源**：与 hello 同一张表）
 #include "runtime/control.h"          // 控制层端点（`--control-root`；PIMPL，⛔ 不含 beast / nlohmann）
 #include "runtime/guest_exit.h"       // guest 退出码 → 宿主退出码（与解释器臂**同一份**映射；纯头）
 #include "runtime/font.h"             // `--baseline-lift` / `--baseline-lift-by-size`（任何 FontEngine 之前）
@@ -205,6 +210,14 @@ void usage() {
         "                            点击的任何消息）；pass = 逐位与没有 UI 相同。也接受\n"
         "                            `--ui-input consume|pass`。只在 --overlay / --ui 时生效；\n"
         "                            窗口参数（--present headless 拒绝）；非法值 exit 2\n"
+        "  --plugin <path>           用这份 **ES module** 当插件：`export default { render?, start?,\n"
+        "                            onTrigger?, initialState? }`（宿主只读 default 导出）。\n"
+        "                            `start/onTrigger` 是 Run 的回调链（写只经 ctx.edit / ctx.input）；\n"
+        "                            `render` 可选（本切片只认它存在，不调用）。与 `--ui` 是**同一\n"
+        "                            字段**（同一路径允许，不同路径 exit 2）；⛔ 不隐含 --overlay\n"
+        "                            ⇒ `--present headless` 也能跑（没有窗口就没有 render）。\n"
+        "                            与 --input-plan / --control-root 互斥（两套输入写预算）⇒ exit 2\n"
+        "  --plugin-param k=v        给插件的只读参数（`ctx.params`；可重复，**重复 key ⇒ exit 2**）\n"
         "  --present-screenshot <path>      每次可见窗口 Present 后存一张窗口 BMP（{frame} 可用）\n"
         "  --present-screenshot-frame N     只回读第 N 帧（1 起；0 = 每帧都写）\n"
         "  --scale auto|数值  窗口客户区 = round(1280×s) × round(720×s)。★ **只改窗口、不改帧**：\n"
@@ -343,9 +356,20 @@ int main(int argc, char** argv) {
     //   （默认**外置** `scripts/ui/hud.js`，或 `--ui <path>`）经 QuickJS 产出 display list；文本走宿主字体
     //   （`FontEngine`；支持中文）⇒ 字体缺失 / 脚本加载失败时 `SdlWindow::init` 硬失败（R5）。
     bool overlay = false;
+    // ★ `--overlay` 的**显式**位（C2a）：`--plugin` 与 `--ui` 是同一字段 ⇒ 同一路径时 `--ui` 那一半
+    //   要让位给插件语义（插件**不**隐含 overlay，D-C2-5）。⇒ overlay 在解析**之后**统一合成：
+    //   `overlay = overlay_flag || !ui_script.empty()`（`--ui` 单给时结果与旧行为逐字相同）。
+    bool overlay_flag = false;
     // ★ `--ui <path>`（B；缺省空 = 默认外置 hud.js）：**隐含** `--overlay`（脚本是叠层的实现）。
     //   ★ 与 `--overlay` 同给时以 `--ui` 为准（就是这一个字段：非空 ⇒ 用这份脚本）。
     std::string ui_script;
+    // ★ `--plugin <path>`（C2a；缺省空 = 不装载插件）：ES module 插件。
+    //   · 与 `--ui` **同一字段**（D-C2-2）：两份**不同**路径 ⇒ exit 2；同一路径 ⇒ 只按插件语义；
+    //   · ⛔ 不隐含 `overlay`（是否开窗由 `--present` 决定；`--present headless` 也能跑）；
+    //   · 与 `--input-plan` / `--control-root` 互斥 ⇒ 启动即 exit 2（两套输入写预算不能共存）。
+    std::string plugin_path;
+    // ★ `--plugin-param k=v`（可重复；`ctx.params` 只读；**重复 key ⇒ exit 2**，D-C2-9）。
+    std::map<std::string, std::string> plugin_params;
     // ★ S9 `--ui-input=consume|pass`（D2 / D6 / R3；缺省 Consume）：注入点击是否也过叠层的命中
     //   路由。值域的唯一一份在 `runtime/ui_input.h` 的 `parseUiInputMode`（⛔ 不在这里另写比较）。
     //   `ui_input_set` 只用于"它是窗口参数"这条判据（`--present headless` 与 `--overlay` 同一条拒绝）。
@@ -600,11 +624,53 @@ int main(int argc, char** argv) {
             present_hidden = true;
         } else if (a == "--overlay") {
             // ★ M0：窗口参数（`--present headless` 下由 `present_window_flag` 拒绝）。
-            overlay = true;
+            overlay_flag = true;
         } else if (a == "--ui") {
             // ★ B：`--ui <path>` 隐含 `--overlay`（总开关仍是 overlay）。也是窗口参数。
-            if (!needValue("--ui", &ui_script)) return 2;
-            overlay = true;
+            //   ★ C2a（D-C2-2）：`--plugin` 与它是**同一字段** ⇒ 两份**不同**路径当场 exit 2。
+            std::string v;
+            if (!needValue("--ui", &v)) return 2;
+            if (!plugin_path.empty() && plugin_path != v) {
+                std::fprintf(stderr,
+                             "emulator-lift-aot: --ui 与 --plugin 是同一个字段，但给了两份不同的路径"
+                             "（--ui %s / --plugin %s）⇒ exit 2\n",
+                             v.c_str(), plugin_path.c_str());
+                return 2;
+            }
+            ui_script = v;
+        } else if (a == "--plugin") {
+            // ★ C2a：ES module 插件（`export default { render?, start?, onTrigger? }`）。
+            //   · 与 `--ui` 同一字段：两份不同路径 ⇒ exit 2（同一路径 ⇒ 解析完之后按插件语义收敛）；
+            //   · ⛔ **不**设 `overlay`（D-C2-5：是否开窗由 `--present` 决定 ⇒ headless 也能跑）；
+            //   · ⛔ **不**进 `present_window_flag`（见下面的注释）。
+            std::string v;
+            if (!needValue("--plugin", &v)) return 2;
+            if (!ui_script.empty() && ui_script != v) {
+                std::fprintf(stderr,
+                             "emulator-lift-aot: --plugin 与 --ui 是同一个字段，但给了两份不同的路径"
+                             "（--plugin %s / --ui %s）⇒ exit 2\n",
+                             v.c_str(), ui_script.c_str());
+                return 2;
+            }
+            plugin_path = v;
+        } else if (a == "--plugin-param") {
+            // ★ `k=v`（可重复；`ctx.params` 只读）。**重复 key ⇒ exit 2**（D-C2-9）：
+            //   ⛔ 不静默"后一个赢"——那是"我明明传了，插件读到的却是别的"这种无症状的坑。
+            std::string v;
+            if (!needValue("--plugin-param", &v)) return 2;
+            const std::size_t eq = v.find('=');
+            if (eq == std::string::npos || eq == 0) {
+                std::fprintf(stderr, "emulator-lift-aot: --plugin-param 需要 k=v 形式（收到 `%s`）\n",
+                             v.c_str());
+                return 2;
+            }
+            const std::string key = v.substr(0, eq);
+            const std::string value = v.substr(eq + 1);
+            if (!plugin_params.emplace(key, value).second) {
+                std::fprintf(stderr, "emulator-lift-aot: --plugin-param 的 key 重复：`%s` ⇒ exit 2\n",
+                             key.c_str());
+                return 2;
+            }
         } else if (a == "--ui-input" || a.rfind("--ui-input=", 0) == 0) {
             // ★ S9 / D2：注入点击的叠层路由模式。两种写法都收（help 里写明）：
             //   `--ui-input=consume|pass` 与 `--ui-input consume|pass`。
@@ -694,6 +760,33 @@ int main(int argc, char** argv) {
                      "--control-predicate-timeout 需要同时给 --control-root <dir>\n");
         return 2;
     }
+
+    // =====================================================================================
+    // `--plugin`（C2a）：互斥 + 与 `--ui` 的同一字段收敛 + overlay 合成
+    //   ★ 三条都**启动即 exit 2**（不是运行期拒绝）：两条命令行的冲突必须在 GPU bring-up 之前判，
+    //     否则用户会先看到一整屏 readout 再看到拒绝（测绘 §3.1 第 4 条 / D-C2-2）。
+    // =====================================================================================
+    if (!plugin_path.empty()) {
+        if (!input_plan_path.empty()) {
+            std::fprintf(stderr,
+                         "emulator-lift-aot: --plugin 与 --input-plan 互斥（两套输入写预算不能共存；"
+                         "--plugin %s / --input-plan %s）⇒ exit 2\n",
+                         plugin_path.c_str(), input_plan_path.c_str());
+            return 2;
+        }
+        if (control_any) {
+            std::fprintf(stderr,
+                         "emulator-lift-aot: --plugin 与 --control-root 互斥（控制层的 click/move 也走"
+                         "输入写预算；C4 统一控制面之后再放开）⇒ exit 2\n");
+            return 2;
+        }
+        // ★ 与 `--ui` **同一字段**（D-C2-2）：同一路径 ⇒ 只按**插件**语义（插件不隐含 overlay；
+        //   `--ui` 的"隐含 --overlay"在这里必须让位，否则 `--present headless` 会被窗口参数拒绝）。
+        if (ui_script == plugin_path) ui_script.clear();
+    }
+    // ★ `overlay` 的唯一合成点：显式 `--overlay` **或** 有 HUD 脚本。`--ui` 单给时与旧行为逐字相同
+    //   （旧代码在 `--ui` 分支里写 `overlay = true`，等价于这里 `!ui_script.empty()`）。
+    overlay = overlay_flag || !ui_script.empty();
 
     // ---- `--sound`：**接受** + 一条一次性说明（⛔ 不 exit 2、⛔ 不静默）----
     //   ★ 文案与硬事实只在 `runtime/present_flags.h` 的 `kAotSoundNotice`：`--sound` 现在**真的**
@@ -977,6 +1070,39 @@ int main(int argc, char** argv) {
         run_opts.stop_requested = input_plan.quitFlag();
     }
 
+    // ---- ③''' `--plugin` 装配（C2a）：编译 + 沙箱 → guest 内存 → 读点观察者 → 停止请求 ----
+    //   ★ 位置与 `--input-plan` 的装配同一处（`init()` / `prepare()` 之后、`run()` 之前）：
+    //     两条命令面互斥（D-C2-2），所以这里只有一条会装配。
+    //   ★ 顺序照测绘 §3.3：`init`（= 编译 + 沙箱，⛔ 不调 start）→ `attachMemory`（Edit/Read）→
+    //     `setReadPointObserver`（装配点必须在**循环外**）→ `stop_requested`。
+    //   ★ ⛔ 不装在 `aot_run.cpp` / `machine.cpp`（守卫：执行循环里 0 命中 pump 词）。
+    std::unique_ptr<lift::plugin::PluginReadings> plugin_readings;
+    std::unique_ptr<lift::plugin::PluginHost> plugin_host;
+    if (!plugin_path.empty()) {
+        // 生产读数源：marker 身份 / 位置 + 鼠标（每读点一次；与 `InputPlan` 的采样互斥）。
+        plugin_readings = std::make_unique<lift::plugin::PluginReadings>(host.mem(), *host.cpu().windows);
+        plugin_host = std::make_unique<lift::plugin::PluginHost>(*plugin_readings);
+        std::string plugin_err;
+        if (!plugin_host->initFromFile(plugin_path, plugin_params, host.uiHostOps(), &plugin_err)) {
+            std::fprintf(stderr, "emulator-lift-aot: --plugin 装载失败（exit 2）：%s\n", plugin_err.c_str());
+            return 2;
+        }
+        // ★ Edit / EngineRead：`host.cpu().mem`（`init()` 之后才可读；`--input-plan` 的 attach 同处）。
+        plugin_host->attachMemory(*host.cpu().mem);
+        // ★ 读点观察者（C2a 的唯一泵；`input.h` 四个投递口 → `PluginHost::onReadPoint`）。
+        host.cpu().windows->setReadPointObserver(plugin_host.get());
+        // ★ `ctx.quit()` 的归因（D-C2-9）：run 循环在下一个块边界看到 `Stopped` + `plugin: quit`。
+        run_opts.stop_requested = plugin_host->quitFlag();
+        run_opts.stop_detail = "plugin: quit";
+        // ★ D-C2-5：有 `render` 但 headless ⇒ **允许**执行（`render` 永不调用），一次性 stderr 说明。
+        //   ⛔ 不 exit 2：CLI 阶段还不知道模块有没有 render；启动后知道了也只警告一次。
+        if (present_mode == "headless" && plugin_host->script() != nullptr &&
+            plugin_host->script()->hasRender()) {
+            std::fputs("[plugin] render is defined but no window; it will not be called\n", stderr);
+            std::fflush(stderr);
+        }
+    }
+
     // ---- ③' AGERC.DLL：真实 guest 模块（口径同已退役解释器臂 `main.cpp`：`--game-dir` 下那份，走 VFS 解析）----
     //   ★ 缺它不是"可选项"：guest 启动早期就 `LoadLibraryA("AGERC.DLL")`，没有镜像 ⇒ 返回 0 + 126
     //     ⇒ guest 走错误对话框路径（实测停在 `poly:005C3627 = j_MessageBoxA_15`）。
@@ -1138,11 +1264,14 @@ int main(int argc, char** argv) {
         //   回落隐藏窗）。`hello.present` 与 `sample.present` 都读它。
         host.setPresentState(copts.present);
         // 一次性 readout（§12.8 第 3 条：一次性输出可以；⛔ 不是周期性）。
+        // ★ `caps=` 从 `runtime/capability.h` 的**同一张表**生成（与 `hello.capabilities` 同源）：
+        //   它曾经是手写字面量 ⇒ 长期只有 6 项（漏 move/global-get/global-set），而没有任何守卫看得见。
+        //   （具名变量只是为了可读；临时 `std::string` 活到 full-expression 结束，直接传 `c_str()` 也安全。）
+        const std::string control_caps = lift::plugin::controlCapabilitiesCsv();
         std::printf(
-            "control   : ws://%s  file=%s  idle=%.1fs orphan=%.1fs predicate=%.1fs  "
-            "caps=pause,resume,sample,screenshot,click,quit\n",
+            "control   : ws://%s  file=%s  idle=%.1fs orphan=%.1fs predicate=%.1fs  caps=%s\n",
             control.localEndpoint().c_str(), control.controlFilePath().c_str(), control_idle_s,
-            control_orphan_s, control_predicate_s);
+            control_orphan_s, control_predicate_s, control_caps.c_str());
         std::fflush(stdout);
     }
 
@@ -1175,6 +1304,16 @@ int main(int argc, char** argv) {
     if (input_plan.armed()) {
         input_plan.releaseAll(*host.cpu().windows);
         printf("input-plan: %s\n", input_plan.summary().c_str());
+        std::fflush(stdout);
+    }
+    // ---- ⑥'` `--plugin` 收口：**一次性** readout（⛔ 不周期；§12.8 第 3 条）----
+    //   ★ 顺序：先摘读点观察者（run 之后⛔ 不再有读点回调），再释放本 owner 的武装 / 输入状态，
+    //     最后打一行。`releaseOwner` 只抬本 owner 的（⛔ 不 `releaseProgram` 全抬）。
+    //   ★ 这一行是 C2a 的**可判面**：`run=done|failed|finished|quit` 与 `render=` / `callbacks=`。
+    if (plugin_host != nullptr) {
+        host.cpu().windows->setReadPointObserver(nullptr);
+        plugin_host->releaseOwner(*host.cpu().windows);
+        std::printf("%s\n", plugin_host->readout().c_str());
         std::fflush(stdout);
     }
     host.printRunSummary(r, stdout);

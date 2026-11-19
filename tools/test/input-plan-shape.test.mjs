@@ -94,7 +94,17 @@ function braceBlockRange(lines, startIndex) {
 // =====================================================================================
 // ① 执行循环里 0 命中
 // =====================================================================================
-const LOOP_FORBIDDEN = ['InputPlan', 'input_plan', 'input::', 'deliver(', 'atPoint(', 'note('];
+// ★ 2026-11-20（C1b）追加后六个：插件运行时的 **唯一 pump** 是 `TriggerRunner::atPoint`（合同 §6 行 2），
+//   而它的驱动方只能是 executor 的读点（C4 才接线 ⇒ 今天生产路径零改动）。执行循环里出现
+//   `TriggerRunner` / `onTrigger(` = 第二 pump / 块边界触发；出现 `IntentExecutor` / `intent_executor`
+//   = 把 pump 塞回了 `aot_run.cpp`。实测加词前这两个文件 **0 命中**（`rg -n` 逐个核过）。
+//   ⛔ 不加 `fire(`：`hitLines` 用的是无词边界的 `includes`，而且本设计里 pump 的入口叫 `atPoint`、
+//   **没有** `fire(` 这个公开拼写（`fire` 是 `atPoint` 内的局部步骤）⇒ 加了只会制造假红。
+const LOOP_FORBIDDEN = [
+  'InputPlan', 'input_plan', 'input::', 'deliver(', 'atPoint(', 'note(',
+  'TriggerRunner', 'TriggerHandler', 'trigger_runner', 'onTrigger(',
+  'IntentExecutor', 'intent_executor',
+];
 
 test('① 执行循环里 0 命中投递层标识符（旧 harness 闸门按"位置"豁免，不是按词豁免）', () => {
   for (const [label, url] of [

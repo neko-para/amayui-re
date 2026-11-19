@@ -18,21 +18,17 @@
 #include <vector>
 
 #include "runtime/clock.h"       // VirtualClock（暂停补偿的唯一读数：pausedTotalMs）
-#include "runtime/cursor_map.h"  // referenceToClientPixel（1280×720 参考系 → 客户区，唯一公式）
-#include "runtime/input.h"       // input::mouseMove / mouseButton（唯一施加路径）
+#include "runtime/input.h"       // input::mouseButton / releaseProgram（唯一施加 / 收口路径）
 #include "runtime/memory.h"      // GuestMemory（身份采样只经 MarkerSampler 读它）
-#include "runtime/ui_input.h"    // S9：注入指针的叠层路由（D6 三个入口里的 down / up）
 #include "runtime/vfs.h"         // openHostFileUtf8（Windows 的 UTF-8 路径）
 
 namespace lift {
 namespace {
 
-// ★ 三条闸门的常量在 `input_plan.h` 的类里（`kKeyLevelReadsBeforeRelease` / `kReleaseFallbackMs` /
-//   `kPressFallbackMs`）—— 守卫要引用同一份数，⛔ 不在这里再写一遍。
-
-// 计划消息的 `MSG.time`：**没有** guest 时钟来源（plan 不在 tick 上下文里被调用）⇒ 恒 0。
-// 引擎不读它（`interaction-model.md` 的门不碰 MSG.time）。
-constexpr std::uint32_t kPlanMessageTimeMs = 0;
+// ★ 三条闸门的常量在 `PointerCore`（`runtime/pointer_core.h`）—— 守卫要引用同一份数，
+//   ⛔ 不在这里再写一遍。
+// ★ 计划消息的 `MSG.time`（恒 0）也在 `pointer_core.h`：`kPointerMessageTimeMs`（core 与
+//   `closeSessionIfDone` 用同一个数；⛔ 不各写一份 0）。
 
 // 与 `present.cpp` 的 `nowNs()` 同源：宿主单调时钟（⛔ 不是 `clock.h` 的 guest 虚拟时钟）。
 std::uint64_t hostNowMs() {
@@ -91,22 +87,15 @@ const char* inputPointName(InputPoint point) {
 
 void InputPlan::clear() {
     recipe_.clear();
-    pending_.clear();
-    armed_.clear();
+    // ★ 指针那一半（`pending_` / `armed_` / `fired_` / 闸门读数 / 写预算 / 会话旗标）搬到
+    //   `PointerCore` ⇒ 复位也搬过去（字段集合与旧 `clear()` 逐个对齐，见 `clearPointerState`）。
+    clearPointerState();
     immediate_.clear();
     identity_ = MarkerSample{};
     next_ = 0;
     applied_ = 0;
-    fired_ = 0;
-    released_ = 0;
     position_misses_ = 0;
     read_points_ = 0;
-    cursor_reads_done_ = 0;
-    writes_this_point_ = 0;
-    last_move_cursor_done_ = 0;
-    last_move_ms_ = 0;
-    releases_pending_ = 0;
-    session_closed_ = true;
     wait_started_ = false;
     wait_deadline_ms_ = 0;
     guard_armed_ = false;
@@ -199,18 +188,27 @@ void InputPlan::atPoint(WindowManager& wm, InputPoint point) {
     closeSessionIfDone(wm);
     // ★ 早退条件多了 **armed_ 非空** 这一项：光标已落地、还差一拍才按下的那些也是"有待办"。
     if (!recipe_.active() && pending_.empty() && armed_.empty() && immediate_.empty()) return;
+    // ★ **本读点的读数**（W2：core 不持有钟 / 读点计数 / 投递计数 ⇒ 值参数传进去）。
+    //   一次读点只取一次钟：旧实现 `releaseDue` 在每个待抬起项上各取一次（阈值是 250/500 ms 的
+    //   兜底 ⇒ 语义不变，见 `pointer_core.h` 头注的"唯一偏离"）。
+    const PointerPoint pt{point,
+                          nowMs(),
+                          deliverCalls(InputPoint::KeyLevel),
+                          cursor_reads_done_,
+                          read_points_,
+                          0};
     // ① 到期的**抬起**先落地（同一次读点内、读之前）。
-    releaseDue(wm, point);
+    releaseDue(wm, pt);
     // ② ★ 再把到期的 `armed_` **按下**（阶段 ②；闸门 ③ 见 `pressDue`）。
     //   ⛔ 顺序不许反：先按下再抬起会让"新的一次 click + 上一次的抬起"在同一个读点里发生
     //   ⇒ guest 只看到 up（第二次按下被吞掉）。
-    pressDue(wm);
+    pressDue(wm, pt);
     // ③ ★ **立即队列先于配方当步**（判据 2 的前半）：控制层的 click / move 在这里落地，
     //    走**同一段** `armClickAt` / `input::mouseMove`、计入 `fired_`，但**不动** `next_` /
     //    `applied_` / 守卫账。
     //    放在 `quit_requested_` / `failed_` 的早退**之前**：控制层已经对客户端答了 `ok:true`，
     //    不该因为**配方自己的**失败 / quit 把它静默丢掉（它只等下一个读点）。
-    drainImmediate(wm, point);
+    drainImmediate(wm, pt);
     // ④ `quit` 之后不再推进；守卫到期之后同样不再推进（⛔ 不许"失败后继续点"）。
     if (quit_requested_ || failed_) return;
     // ⑤ flush-before-read：按文件顺序把到期指令消费到 `WindowManager`（⛔ 不越过未到期的指令）。
@@ -276,14 +274,14 @@ void InputPlan::atPoint(WindowManager& wm, InputPoint point) {
             //   （留 `next_`，下一个读点再试）。⛔ 删掉了 `armClickAt` 的"同按钮先抬起" —— 那会让
             //   第一条 click 的 down 一次都不被 guest 读到。
             if (buttonPending(s.button)) return;
-            applyClick(wm, s);
+            applyClick(wm, s, pt);
             ++fired_;
             writes_this_point_ = 1;  // ★ 臂上的那一次 `input::mouseMove` 就是一条写动作
-            // trace 的 `plan:<文件>:<行>` 要指向**施加它的那条 step** ⇒ 记在臂上 / 待抬起的记录上
+            // trace 的 `plan:<文件>:<行>` 要指向**施加它的那条 step** ⇒ `applyClick` 把 `s.line`
+            // 放进 `PointerPoint::line`，由 `armClickAt` 记在臂上 / 待抬起的记录上
             // （抬起那一行因此也能点名同一个 `文件:行`；立即队列的 click 没有 step ⇒ 0）。
-            if (!armed_.empty()) armed_.back().line = s.line;
         } else if (s.kind == StepKind::MouseMove) {
-            applyMouseMove(wm, s);
+            applyMouseMove(wm, s, pt);
             writes_this_point_ = 1;
         } else if (s.kind == StepKind::MouseDown || s.kind == StepKind::MouseUp) {
             // ★ `mouse_down`：同一按钮还在 `pending_`（click 的 down 没抬）⇒ 不消费（否则那条 up
@@ -342,7 +340,7 @@ bool InputPlan::enqueueMove(int ref_x, int ref_y) {
     return true;
 }
 
-void InputPlan::drainImmediate(WindowManager& wm, InputPoint point) {
+void InputPlan::drainImmediate(WindowManager& wm, const PointerPoint& pt) {
     // ★ 只消费立即队列：**不碰** `next_` / `applied_` / `wait_started_` / 守卫账 ⇒ 配方里未到期的门
     //   照旧等（判据 2 的"步进指针不动"）。每条 click +1 `fired_`（与配方 click 同一读数口径）；
     //   move 不是"动作" ⇒ 不计 `fired_`（它没有按下 / 抬起，⛔ 不冒充一次点击）。
@@ -354,9 +352,9 @@ void InputPlan::drainImmediate(WindowManager& wm, InputPoint point) {
         if (!c.is_move && buttonPending(c.button)) return;  // 队首的 click 等这一次抬起
         immediate_.erase(immediate_.begin());
         if (c.is_move) {
-            armMoveAt(wm, c.x, c.y);
+            armMoveAt(wm, c.x, c.y, pt);
         } else {
-            armClickAt(wm, c.x, c.y, c.button);
+            armClickAt(wm, c.x, c.y, c.button, pt);
             ++fired_;
         }
         writes_this_point_ = 1;
@@ -368,20 +366,22 @@ void InputPlan::drainImmediate(WindowManager& wm, InputPoint point) {
             Step control_step;
             control_step.kind = StepKind::Click;
             control_step.line = 0;
-            traceStepConsumed(control_step, wm.inputSampleCount(), point,
+            traceStepConsumed(control_step, wm.inputSampleCount(), pt.point,
                               c.is_move ? "move" : nullptr, " origin=control");
         }
     }
 }
 
-void InputPlan::applyClick(WindowManager& wm, const Step& s) {
-    // 配方 step 的壳：只把 `Step` 里的三个值交给**同一段**核心（⛔ 不复制映射 / 记账）。
-    armClickAt(wm, s.x, s.y, s.button);
+void InputPlan::applyClick(WindowManager& wm, const Step& s, const PointerPoint& at) {
+    // 配方 step 的壳：只把 `Step` 里的三个值（+ 行号）交给**同一段**核心（⛔ 不复制映射 / 记账）。
+    PointerPoint pt = at;
+    pt.line = s.line;  // trace 的 `plan:<文件>:<行>`（臂上 / 待抬起的记录都点名它）
+    armClickAt(wm, s.x, s.y, s.button, pt);
 }
 
-void InputPlan::applyMouseMove(WindowManager& wm, const Step& s) {
+void InputPlan::applyMouseMove(WindowManager& wm, const Step& s, const PointerPoint& at) {
     // ★ 与 `click` 的**第一段**、控制层的 `move` 同一条落点（同一份坐标映射 + 同一份 `input::mouseMove`）。
-    armMoveAt(wm, s.x, s.y);
+    armMoveAt(wm, s.x, s.y, at);
 }
 
 void InputPlan::applyMouseButton(WindowManager& wm, const Step& s, bool down) {
@@ -390,112 +390,9 @@ void InputPlan::applyMouseButton(WindowManager& wm, const Step& s, bool down) {
     int client_x = 0;
     int client_y = 0;
     wm.cursorClientPos(wm.primaryWindow(), &client_x, &client_y);
-    input::mouseButton(wm, client_x, client_y, s.button, down, InputSource::Script, kPlanMessageTimeMs);
+    input::mouseButton(wm, client_x, client_y, s.button, down, InputSource::Script,
+                       kPointerMessageTimeMs);
     session_closed_ = false;  // 新的注入工作 ⇒ 所有权要重新握在脚本手里（见 closeSessionIfDone）
-}
-
-void InputPlan::armMoveAt(WindowManager& wm, int ref_x, int ref_y) {
-    // ★ 与 click 的**第一段**同一段代码（同一份坐标映射、同一份 `input::mouseMove`）。
-    int client_x = 0;
-    int client_y = 0;
-    int target_w = 0;
-    int target_h = 0;
-    if (const HostWindow* w = wm.find(wm.primaryWindow())) {
-        target_w = w->client_w;  // 0 / 没有窗口 ⇒ referenceToClientPixel 退回 1280×720
-        target_h = w->client_h;
-    }
-    referenceToClientPixel(target_w, target_h, ref_x, ref_y, &client_x, &client_y);
-    input::mouseMove(wm, client_x, client_y, InputSource::Script, kPlanMessageTimeMs);
-    // ★ S6 / Q3：`mouse_down` 的轻闸门从**设备最后一次移动**起算（控制层的纯 move 同样算：
-    //   闸门判的是"guest 有没有读过这个位置"，不是"哪条 step 挪的"）。
-    last_move_cursor_done_ = cursor_reads_done_;
-    last_move_ms_ = nowMs();
-    session_closed_ = false;  // 新的注入工作 ⇒ 所有权要重新握在脚本手里（见 closeSessionIfDone）
-}
-
-void InputPlan::armClickAt(WindowManager& wm, int ref_x, int ref_y, MouseButton button) {
-    // ★ 这是**唯一**的 click 施加核心的**第一段**（配方 step 与控制层立即队列都到这里；
-    //   判据 1 的"同一 apply 通道"）。★ 它**只**把光标放到目标上 —— 按下在 `pressDue`（下一段）。
-    // ★ 坐标**算一次**：move / 之后的 down / up 都读同一对值
-    //   （⛔ 两处各算一次 ⇒ move 到 A、消息 lParam 是 B 的静默漂移）。
-    int client_x = 0;
-    int client_y = 0;
-    int target_w = 0;
-    int target_h = 0;
-    if (const HostWindow* w = wm.find(wm.primaryWindow())) {
-        target_w = w->client_w;  // 0 / 没有窗口 ⇒ referenceToClientPixel 退回 1280×720
-        target_h = w->client_h;
-    }
-    referenceToClientPixel(target_w, target_h, ref_x, ref_y, &client_x, &client_y);
-    // ★ S9 / D6：注入的 **down** 与 OS 事件问**同一个** `UiClickRouter`（`WindowManager` 装的那一个；
-    //   `nullptr` = 没有叠层 ⇒ 不问）。⚠ 这是**任何 `input::*` 之前**：吞掉 ⇒ 连 `mouseMove` 都不发
-    //   （光标不动、guest 一条 WM_MOUSEMOVE 都收不到）。
-    bool swallowed = false;
-    if (UiInputRouter* router = wm.uiInputRouter()) {
-        swallowed = router->routeInjectedPointer(UiPointerPhase::Down, button, client_x, client_y);
-    }
-    session_closed_ = false;  // 新的注入工作 ⇒ 所有权要重新握在脚本手里（见 closeSessionIfDone）
-    // ★ S7 / Q8-A：**没有**"同按钮先抬起"的强制释放了。这个按钮还按着 ⇒ 调用方
-    //   （`atPoint` / `drainImmediate`）**不消费**这条 click，等上一次的 up 落地（见两处调用的判据）。
-    if (swallowed) {
-        // ★ S9：吞掉 ⇒ **不动设备**（不 move、不按下）。但仍然压进 `armed_` —— 三段时序不变，
-        //   `pressDue` 的闸门③ / `releaseDue` 的闸门①照旧决定 up 的时机（与不吞时同一个形状）。
-        ++ui_consumed_;
-    } else {
-        armMoveAt(wm, ref_x, ref_y);  // 同一份映射 + 同一份 `input::mouseMove`（⛔ 不复制）
-    }
-    ArmedPress a;
-    a.button = button;
-    a.x = client_x;
-    a.y = client_y;
-    a.arm_reads = read_points_;
-    a.arm_cursor_done = cursor_reads_done_;  // 闸门 ③ 的起点（"已完成"的位置读点数）
-    a.arm_ms = nowMs();                      // 兜底 ③ 的起点
-    a.swallowed = swallowed;
-    armed_.push_back(a);
-}
-
-void InputPlan::pressDue(WindowManager& wm) {
-    // ★ 阶段 ②：**唯一**的"按下"落地处。闸门 ③（`input_plan.h` 的 `kPressFallbackMs` 那一段）：
-    //   · 已**完成**过至少一次 CursorPos 读点（`cursor_reads_done_` 前进）⇒ 引擎的位置锁存
-    //     `+0x74A4` 已经被刷新到 move 之后的位置；
-    //   · 或者墙钟兜底到期（这个屏整屏不读位置）⇒ 仍然按下（⛔ 不让 click 永远挂着）。
-    //   ★ "至少跨过一个读点"是**结构性**保证：`armClickAt` 只在本读点的后半段被调用
-    //     （`drainImmediate` / flush 循环），而本函数在 `atPoint` 的**前半段** ⇒ 最早也是下一个读点。
-    if (armed_.empty()) return;
-    // ★ S7 / Q2：一次读点最多按**一条**（写预算）；已在 `pending_` 的按钮跳过（等它抬起，
-    //   ⛔ 不重复按下 —— 那会让两条 `armed_` 共用同一次 0→1 转移）。
-    if (writes_this_point_ != 0) return;
-    const std::uint64_t now = nowMs();
-    for (std::size_t i = 0; i < armed_.size();) {
-        const ArmedPress& a = armed_[i];
-        const bool cursor_fresh = cursor_reads_done_ > a.arm_cursor_done;
-        const bool wallclock = now >= a.arm_ms && now - a.arm_ms >= kPressFallbackMs;
-        if ((!cursor_fresh && !wallclock) || buttonPending(a.button)) {
-            ++i;
-            continue;
-        }
-        PendingRelease r;
-        r.button = a.button;
-        r.x = a.x;
-        r.y = a.y;
-        r.line = a.line;
-        r.swallowed = a.swallowed;
-        r.press_samples = wm.inputSampleCount();          // 读数（⛔ 不是闸门）
-        r.press_key_reads = deliverCalls(InputPoint::KeyLevel);  // ★ 闸门 ① 的起点
-        r.press_ms = now;                                 // ★ 兜底 ② 的起点
-        r.press_reads = read_points_;
-        // ★ S9：down 已被叠层吞掉 ⇒ **不调 `input::mouseButton(down)`**（guest 一条消息都没有），
-        //   但仍生成 `PendingRelease{swallowed=true}`：up 的时机走同一组闸门（三段时序不变）。
-        if (!r.swallowed) {
-            input::mouseButton(wm, r.x, r.y, r.button, /*down=*/true, InputSource::Script, kPlanMessageTimeMs);
-        }
-        pending_.push_back(r);
-        ++releases_pending_;
-        armed_.erase(armed_.begin() + static_cast<std::ptrdiff_t>(i));
-        writes_this_point_ = 1;  // 本读点的写动作已用完
-        break;                   // 一次最多按一条
-    }
 }
 
 void InputPlan::applyProfileMark(const Step& s, std::uint64_t now_ms) {
@@ -564,43 +461,6 @@ void InputPlan::failTimeout(std::size_t index, std::uint64_t elapsed_ms, std::ui
     failed_guard_ms_ = guard_ms;
 }
 
-void InputPlan::releaseDue(WindowManager& wm, InputPoint point) {
-    // ★ S7 / Q2：一次读点最多抬**一条**（写预算）。⚠ `releaseAll` / `closeSessionIfDone` 的
-    //   会话收口是**例外**（§3.8 #19）：它们一次可以投影多条 up。
-    for (std::size_t i = 0; i < pending_.size();) {
-        if (writes_this_point_ != 0) return;  // 本读点的写动作已用完 ⇒ 其余等下一个读点
-        const PendingRelease& r = pending_[i];
-        // ★ 闸门 ①（**唯一**判据）：按下之后至少跨过 `kKeyLevelReadsBeforeRelease` 个 **KeyLevel**
-        //   读点 —— 也就是 guest 的 `GetAsyncKeyState` **真的读到过**那个按下电平。
-        //   ⛔ 不用 `inputSampleCount()`（它把 `GetCursorPos` 也算样本 ⇒ 位置读点能满足它、
-        //   按键一次都没被读到 —— 2026-11-19 的失效根因）。
-        const bool key_seen = deliverCalls(InputPoint::KeyLevel) >=
-                              r.press_key_reads + kKeyLevelReadsBeforeRelease;
-        // ② 墙钟兜底：这个屏根本不读按键 ⇒ 按下之后 kReleaseFallbackMs 到期仍然抬起（⛔ 不永久按住）。
-        const std::uint64_t now = nowMs();
-        const bool wallclock = now >= r.press_ms && now - r.press_ms >= kReleaseFallbackMs;
-        if (!key_seen && !wallclock) {
-            ++i;
-            continue;
-        }
-        // ★ trace（opt-in）：抬起走的是哪条腿 = "guest 到底有没有机会看到按下"的唯一读数
-        //   （D 的判据面：`reason=wallclock` + `key_reads==press_key_reads` ⇒ 兜底先于任何一次电平读）。
-        traceRelease(r, key_seen, wallclock, wm.inputSampleCount(), point);
-        emitRelease(wm, r);
-        pending_.erase(pending_.begin() + static_cast<std::ptrdiff_t>(i));
-        --releases_pending_;
-        writes_this_point_ = 1;  // ★ S7：抬起也是写动作 ⇒ 本读点到此为止
-    }
-}
-
-bool InputPlan::buttonPending(MouseButton b) const {
-    // 一个按钮在 `pending_` 里 = 它**已按下、还没抬起** ⇒ 连点串行化（Q8-A）与 `mouse_down` 的判据。
-    for (const PendingRelease& r : pending_) {
-        if (r.button == b) return true;
-    }
-    return false;
-}
-
 void InputPlan::closeSessionIfDone(WindowManager& wm) {
     // ★ 与解释器臂 `InputScript::tick` 的收口**同一处**：`finished() || quit_requested_`。
     //   · 配方走完（`next_ >= size`）/ `quit` ⇒ 一次注入会话结束；
@@ -614,47 +474,15 @@ void InputPlan::closeSessionIfDone(WindowManager& wm) {
     if (!quit_requested_ && recipe_.active() && next_ < recipe_.size()) return;
     // ★ `atPoint` 的**开头**调用（早退之前）⇒ 收口的 up 在**本读点**入队，guest 本读点的
     //   `PeekMessage` 就能取到，且电平已经是 0（§3.4 第 6 条）。
-    input::releaseProgram(wm, kPlanMessageTimeMs);
+    input::releaseProgram(wm, kPointerMessageTimeMs);
     session_closed_ = true;
-}
-
-void InputPlan::emitRelease(WindowManager& wm, const PendingRelease& r) {
-    // ★ **Script up 用设备当前位置**（S4 follow-up）：`input::mouseButton(..., down=false, Script)`
-    //   不先移动光标，消息坐标由 `input::mouseButton` 从设备**写后回读**。`r.x/r.y` 只是按下时
-    //   存下的读数（测试 / trace 对账用），⛔ 不再是抬起消息的坐标来源。
-    // ★ S9 / D6：注入的 **up** 也是"三个入口"之一 ⇒ 不管 down 吞没吞，都把它交给 router。
-    //   · down 吞 ⇒ up **必须**吞（不看返回值）：`ClickRouter` 的 capture / pending click 靠这条收口，
-    //     而 guest ⛔ 不许收到没有 down 的 up；
-    //   · down 放 ⇒ up **必须**放（同样不看返回值）：overlay 中途出现 / 消失都不改变这次点击的归属
-    //     （"down 放 ⇒ up 放"是 D6 的明文；对 `ClickRouter` 来说这次 up 也是 no-op —— `up_owed_` 是假）。
-    UiInputRouter* router = wm.uiInputRouter();
-    if (router != nullptr) router->routeInjectedPointer(UiPointerPhase::Up, r.button, r.x, r.y);
-    if (r.swallowed) {
-        ++released_;
-        return;
-    }
-    input::mouseButton(wm, r.x, r.y, r.button, /*down=*/false, InputSource::Script, kPlanMessageTimeMs);
-    ++released_;
 }
 
 std::size_t InputPlan::releaseAll(WindowManager& wm) {
-    std::size_t n = 0;
-    for (const PendingRelease& r : pending_) {
-        emitRelease(wm, r);
-        ++n;
-    }
-    pending_.clear();
-    releases_pending_ = 0;
-    // ★ 还没按下的（`armed_`）直接丢掉：它们**没有按下过** ⇒ 没有要抬的，也不需要伪造一次点击。
-    armed_.clear();
-    // ★ 收口（AOT 的 `aot_main` 跑完之后 / CTest 的收尾都走这里）：先 `emitRelease` 处理
-    //   `pending_`（显式 click 的按下），再 `input::releaseProgram` 处理显式 `mouse_down` /
-    //   `key_down` 留下的 Program 电平（§4.4 的调用点表）。
-    //   与解释器臂 `InputScript::abandon()`（`releaseOwnedInputs` → `input::releaseProgram`）
-    //   同一处、同一顺序 —— AOT 臂以前**没有**这个调用点（真鼠标在第一次注入之后永久失效）。
-    input::releaseProgram(wm, kPlanMessageTimeMs);
-    session_closed_ = true;
-    return n;
+    // ★ 全抬 + 会话收口的**唯一**实现已搬进 `PointerCore::releaseAllPending`
+    //   （`pending_` → up、`armed_` 丢弃、`input::releaseProgram`、`session_closed_ = true`）。
+    //   本类只保留这个名字（`aot_main` / CTest 的调用点不动、行为逐位不变）。
+    return releaseAllPending(wm);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -715,6 +543,13 @@ void InputPlan::traceRelease(const PendingRelease& r, bool key_seen, bool wallcl
                  static_cast<unsigned long long>(read_points_),
                  static_cast<unsigned long long>(r.press_reads), inputPointName(point));
     std::fflush(trace_out_);
+}
+
+void InputPlan::releaseTraceHook(void* ctx, const PendingRelease& r, bool key_seen, bool wallclock,
+                                 std::uint64_t samples_now, InputPoint point) {
+    // `PointerCore::releaseDue` 的抬起钩子：`plan:<文件>:<行> reason=…` 的文本属于配方口径 ⇒
+    //   留在本类（core 只把读数交出来）。`ctx` 恒 = 本对象（见 `setTrace`）。
+    static_cast<InputPlan*>(ctx)->traceRelease(r, key_seen, wallclock, samples_now, point);
 }
 
 void InputPlan::printFaultSummary(std::FILE* out) const {

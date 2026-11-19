@@ -3,7 +3,7 @@
 // ★ 判据来源：`docs/03-emulator/overlay.md` 的 D6（输入单一 router）与 D2（`--ui-input`）；
 //   设计：`.tmp/input-s9/design.md`。D6 的三个入口 = OS 事件 / 注入 down / 注入 up，
 //   三者都在调用 `input::*` **之前**问**同一个** `UiClickRouter` 状态机（OS 入口见
-//   `present_sdl.cpp:Impl::handleEvent`；注入入口见 `input_plan.cpp:InputPlan::armClickAt` /
+//   `present_sdl.cpp:Impl::handleEvent`；注入入口见 `pointer_core.cpp:PointerCore::armClickAt` /
 //   `emitRelease`）。本头只描述"注入"那一半需要的最小接口 —— ⛔ 不是第二套命中 / 捕获实现：
 //   实现者（`SdlWindow::Impl`）内部仍然只调 `ui/hit.h` 的 `ClickRouter::handlePointer`。
 //

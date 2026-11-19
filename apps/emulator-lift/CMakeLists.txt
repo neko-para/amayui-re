@@ -75,6 +75,28 @@ add_library(emulator-lift-runtime STATIC
     #   ★ 输入**投递层**（S1：骨架 + 计数，没有配方）：`input_plan.h` 的三条铁律是形状真源。
     #     ⛔ 它不在执行循环里被调用（守卫 `tools/test/input-plan-shape.test.mjs` ①）。
     src/runtime/input_plan.cpp
+    #   ★ **指针施加核心**（C1a：click 两段 / 三个闸门 / 写预算的**唯一**实现）。`InputPlan`
+    #     与（C1b）executor 共用它 ⇒ 放进本 target（同 `input_plan.cpp` 的理由；纯 CTest 只链它）。
+    #     ⛔ 同样不在执行循环里被调用。
+    src/runtime/pointer_core.cpp
+    #   ★ **插件运行时 C1b 的核心**（`docs/03-emulator/plugin-runtime.md` §4.2 / §5 C1）：
+    #     `trigger_runner.cpp`（armed 集合 / 一读点最多一个事件 / timeout / owner / budget）、
+    #     `trigger_factory.cpp`（造 trigger 值 + **新**运行期状态）、`budget.cpp`（回调墙钟预算的
+    #     唯一读数来源）。归属本 target 的理由与 `input_plan.cpp` / `pointer_core.cpp` 相同：
+    #     纯 CTest `trigger-runner` **只链本 target**（⛔ 放进 AOT target 会让它链接失败）。
+    #     ⛔ 它们同样不在执行循环里被调用（守卫 `tools/test/input-plan-shape.test.mjs` ① 与
+    #     `tools/test/core-shape.test.mjs`）。
+    src/runtime/trigger_runner.cpp
+    src/runtime/trigger_factory.cpp
+    src/runtime/budget.cpp
+    #   ★ **插件运行时 C1c 的核心**（`docs/03-emulator/plugin-runtime.md` §4.3 / §4.4a / §5 C1）：
+    #     `intent_queue.cpp`（staged→ready 两级 / 回执 / owner）、`intent_executor.cpp`（七步 pump：
+    #     写预算 → beginReadPoint → poll → releaseDue → pressDue → drainQueue → 收口）、
+    #     `edit_sink.cpp`（Edit 的**立即**写；⛔ 不排进 Input）。归属本 target 的理由同上一段：
+    #     纯 CTest `trigger-runner` 只链本 target（⛔ 放进 AOT target 会让它链接失败）。
+    src/runtime/intent_queue.cpp
+    src/runtime/intent_executor.cpp
+    src/runtime/edit_sink.cpp
     #   `engine_marker.cpp` = 脚本身份（marker）采样器：`TriggerKind::Marker` 的**唯一**取数口
     #   （VM 循环头 `0x4123F0` / 消息泵回来的块入口 `0x4123E5`；常量与 EA 锚在头文件）。
     src/runtime/engine_marker.cpp
@@ -1311,6 +1333,22 @@ add_test(NAME input-anchor COMMAND lift-input-anchor)
 add_executable(lift-input-plan-read-points tests/input_plan.cpp)
 target_link_libraries(lift-input-plan-read-points PRIVATE emulator-lift-runtime)
 add_test(NAME input-plan-read-points COMMAND lift-input-plan-read-points)
+
+# ---- pure：插件运行时的 **TriggerRunner**（C1b；`docs/03-emulator/plugin-runtime.md` §4.2 / §5 C1）----
+# ★ 判据（红了意味着什么）：
+#   ① `after-position-once`：`[lo,hi)` 的**两端**（`pos==lo` 触发 / `pos==hi` 不）、Once 只一次、
+#      无效读数**不改变状态**、done 之后不再 poll；
+#   ② `after-script-once`：只比脚本名（**无区间**）、`script_ok=false` 不算匹配、Reenter 的 false→true、
+#      重新 arm **不清**边沿；
+#   ③ `named-set`：多具名 / 一读点**最多一个**事件（注册顺序、**不级联**）/ 返回集合 = **完整替换** /
+#      `[]` = done / 重复 name ⇒ fail 并点名 / `maxFires` **续计** + 耗尽再放回 ⇒ fail + 新对象新预算 /
+#      **fire 优先于 timeout**（同拍只一个事件、timeout 不计 fires、per-arm 重置 deadline）/ 超预算 ⇒ fail；
+#   ④ `rearm`：Once 放回 = fail / Reenter 需新的有效外→内（不会立刻再触发）/ `AfterDelay` 计时从头 /
+#      `AtReadPoint` 从**下一个**匹配读点重新计 / `releaseOwner` 只抹 armed（owner 由 runner 盖章）。
+# ★ 顶层无条件注册 ⇒ **pure** 档（夹具零 guest：`TriggerReadings` 是值输入，两把钟都注入）。
+add_executable(lift-trigger-runner tests/trigger_runner.cpp)
+target_link_libraries(lift-trigger-runner PRIVATE emulator-lift-runtime)
+add_test(NAME trigger-runner COMMAND lift-trigger-runner)
 
 # ---- pure：**注入真的能被引擎看见**（2026-11-19 裁决；`tests/input_inject_visible.cpp`）----
 # ★ 判据（红了意味着什么）：
@@ -2686,6 +2724,50 @@ endif()
 #   （做了也是假绿；理由写进 `.tmp/overlay-profile/slice3-report.md`）。
 # =====================================================================================
 target_sources(emulator-lift-runtime PRIVATE src/runtime/clipboard.cpp)
+
+# =====================================================================================
+# I · C2a：QJS 单插件运行时（`--plugin`）的适配器 + 两条判据
+#
+# 合同：`docs/03-emulator/plugin-runtime.md` §4.1（分层）/ §5 C2（判据）；裁决
+#       `.tmp/plugin-runtime/c2-decisions.md`（D-C2-1 / D-C2-2 / D-C2-5 / D-C2-9 / D-C2-10）。
+#
+# ★ 落点（全部**新增**文件；`src/plugin/**` 是适配层，⛔ 不 include `quickjs.h`、⛔ 不调
+#   `input::` / `writeGlobal`）：
+#   · `src/plugin/guest_read.{h,cpp}`   —— `EngineRead::globalGet` 的生产实现（`readGlobal`）
+#   · `src/plugin/readings.{h,cpp}`     —— 生产 `ReadingsSource`（marker 身份 + 位置 + 鼠标）
+#   · `src/plugin/plugin_host.{h,cpp}`  —— `TriggerHandler` + `ReadPointObserver` + `PluginCallHost`
+#   · `src/runtime/read_point.h`        —— 读点观察者（核心面；已进 `core-shape` 白名单）
+# ★ 为什么用 `target_sources` 追加：与上面 A / E / H 同一条并发编辑口径（顶部大列表是"别改"区，
+#   两条车道最容易撞的公共面；本单只在文件末尾追加自己的块）。
+# ★ `plugin-runtime`（**顶层** `if(LIFT_BUILD_TESTS)` ⇒ `cmakeTestTier()` 透明 ⇒ **pure** 档）：
+#   纯 QJS + 假 guest 内存 + 假读数源，⛔ 不需要游戏安装 / GPU / 真窗口。
+# ★ `plugin-headless`（顶层 + `SKIP_RETURN_CODE 77`）：真子进程跑 `--present headless --plugin …`。
+#   缺安装树 / GPU / 生成物 ⇒ 用例自己 `LIFT_SKIP(77)`（输入假定在场，缺了**不**改变档位）。
+#   子进程 spawn 产品 exe ⇒ 必须 `add_dependencies`（否则 `--target lift-plugin-headless` 只重建
+#   守卫 exe，产品 exe 停在变异前 ⇒ 变异自检假绿；同形坑见 `aot-overlay` / `aot-audio-wiring`）。
+# =====================================================================================
+target_sources(emulator-lift-runtime PRIVATE
+    src/plugin/guest_read.cpp
+    src/plugin/readings.cpp
+    src/plugin/plugin_host.cpp)
+
+if(LIFT_BUILD_TESTS)
+    add_executable(lift-plugin-runtime tests/plugin_runtime.cpp)
+    target_link_libraries(lift-plugin-runtime PRIVATE emulator-lift-runtime)
+    target_compile_definitions(lift-plugin-runtime PRIVATE
+        LIFT_PLUGIN_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/plugin_fixtures")
+    add_test(NAME plugin-runtime COMMAND lift-plugin-runtime)
+
+    add_executable(lift-plugin-headless tests/plugin_e2e.cpp)
+    target_link_libraries(lift-plugin-headless PRIVATE emulator-lift-runtime)
+    add_dependencies(lift-plugin-headless emulator-lift-aot)
+    target_compile_definitions(lift-plugin-headless PRIVATE
+        LIFT_PLUGIN_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/plugin_fixtures")
+    add_test(NAME plugin-headless
+        COMMAND lift-plugin-headless $<TARGET_FILE:emulator-lift-aot> "${AGE_SECTFIX_EXE}"
+                "${LIFT_STRESS_GAME_DIR}")
+    set_tests_properties(plugin-headless PROPERTIES SKIP_RETURN_CODE 77)
+endif()
 
 # =====================================================================================
 # 把 `lift_enable_warnings` 施加到本目录里**所有可执行文件**（产品 + 测试；唯一施加点）
