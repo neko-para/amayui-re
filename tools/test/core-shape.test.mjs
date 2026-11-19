@@ -372,3 +372,30 @@ test('⑤ `quickjs.h` 的 include 图只有一条：`ui/quickjs_value.h` → `ui
   assert.ok(files.length > 50, `walk 只读到 ${files.length} 个源文件（路径/扩展名写错了？）`);
   assert.ok(hit('#include "runtime/input.h"').length > 0, '反向自检：连 `runtime/input.h` 都读不到 ⇒ walk 坏了');
 });
+
+test('⑥ 覆盖检查：`src/plugin/` 下**每个** .cpp/.h 都在白名单里（新增文件不许悄悄漏掉）', () => {
+  // ★ 为什么需要它（C2a 复审第二轮 F4-R1）：② 的判据是"白名单里的文件 0 命中禁用词" ——
+  //   它**天然扫不到没被列进来的文件**。⇒ 新加一个 `src/plugin/xxx.cpp`（顺手 include 了
+  //   `quickjs.h` / 调了 `input::`）时，② 仍然全绿，而 §6 行 11/22 已经破了。
+  //   ⛔ 这条**不是**把判据改成"扫目录"：逐文件读 + 禁用词仍是 ②/④；这里只做**覆盖**。
+  const PLUGIN_DIR = new URL('apps/emulator-lift/src/plugin/', ROOT);
+  assert.ok(fs.existsSync(PLUGIN_DIR), '`src/plugin/` 不存在（路径被搬走了？本守卫会因此静默变瞎）');
+  const onDisk = fs
+    .readdirSync(PLUGIN_DIR, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && /\.(cpp|h)$/.test(entry.name))
+    .map((entry) => `apps/emulator-lift/src/plugin/${entry.name}`)
+    .sort();
+  // ★ 反"扫空集合"：目录里本来就有这几个 TU（C2a 落地）。为空 ⇒ 路径/扩展名写错，不是"没有漏"。
+  assert.ok(onDisk.length >= 3, `\`src/plugin/\` 只扫到 ${onDisk.length} 个源文件（扩展名/路径写错了？）`);
+  const listed = new Set(CORE_FILES);
+  const missing = onDisk.filter((rel) => !listed.has(rel));
+  assert.deepEqual(
+    missing,
+    [],
+    '`src/plugin/` 下有文件**没进** `CORE_FILES` ⇒ ②/④（禁用词）扫不到它，§6 行 11/22 静默失守：\n  ' +
+      missing.join('\n  '),
+  );
+  // ★ 反向自检：覆盖判据本身不是恒真 —— 往"磁盘清单"里塞一个没登记的路径必须被点名。
+  const probe = [...onDisk, 'apps/emulator-lift/src/plugin/not-listed.cpp'].filter((rel) => !listed.has(rel));
+  assert.deepEqual(probe, ['apps/emulator-lift/src/plugin/not-listed.cpp'], '覆盖判据恒真（注入的未登记文件没被点名）');
+});
