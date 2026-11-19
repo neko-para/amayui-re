@@ -56,11 +56,11 @@
 | # | 裁决 | 边界 / 理由 |
 |---|---|---|
 | D1 | **一个 host + 同一套 API**：内置 HUD 与将来的"游戏内小窗口"是**同一类插件** —— 同一个 `UiHost`、同一份 display list、同一条输入路由 | 用户口径。⛔ 不为 HUD 单开一条渲染 / 输入路径 |
-| D2 | **插件化**：一个插件 = 一个脚本文件（`apps/emulator-lift/scripts/ui/<name>.js`）；`--ui <path>`（可重复）、`--ui-input=consume\|pass`、`--ui-watch`（默认关）、`--ui-strict` | 编译进 C++ 的固定 HUD 不能扩展；热重载默认不做任何 stat |
+| D2 | **插件化**：一个插件 = 一个脚本文件（`apps/emulator-lift/scripts/ui/<name>.js`）；`--ui <path>`（可重复）、`--ui-input=consume\|pass`、`--ui-watch`（默认关）、`--ui-strict` | 编译进 C++ 的固定 HUD 不能扩展；热重载默认不做任何 stat。★ **`--ui-input=consume\|pass` 已实现（S9）**：缺省 **consume**；也收分离写法；它是**窗口参数**（`--present headless` 与 `--overlay` 走同一条 `present_window_flag` 拒绝）；非法值 `exit 2` 并点名合法值。★ `--ui-watch` / `--ui-strict` 仍未实现 |
 | D3 | **语言 = JS/TS + QuickJS-ng v0.18.0**（逐字节原样 vendor，见 `third_party/quickjs-ng/README.md`；MIT） | 选型只看硬约束：可裁剪、可中断、迭代顺序按规范。Lua 只作对照（⛔ 不是方案）：longjmp 跨 C++ 帧、hash seed 每进程随机、x64-windows dynamic 要带 DLL |
 | D4 | **每帧 display list**（立即模式）：脚本只产出元素描述，宿主独占校验 / 求值 / 布局 / 命中 / 光栅 / 合成；宿主只缓存**上一帧** resolved list 用于点击 | 没有跨帧控件树、脏矩形与 GPU 资源生命周期；resize / 缩放天然同步 |
 | D5 | **坐标**：声明用 **1280×720 参考系**，合成用**窗口像素**（letterbox 之后）；等比 `s = min(pic_w/1280, pic_h/720)`、画面内居中；文字按最终像素重绘（freetype），⛔ 不放大位图 | 两条路径统一到窗口像素；`--scale` 只要仍走 `cursor_map.h:letterboxFor`，UI 零改动 |
-| D6 | **输入单一 router**：OS 事件 / 注入 down / 注入 up 三个入口，都在调用 `input::*` **之前**问同一个 `UiClickRouter`；左键命中即吞 + 捕获；**down 吞 ⇒ up 吞**，**down 放 ⇒ up 放**；右键 / 中键 / 滚轮 / 键盘 M1 一律放行；motion 永远放行 | `input::*` 仍是唯一施加路径（`runtime/input.h` 口径不变）；吞掉 = **不调用** `input::*` |
+| D6 | **输入单一 router**：OS 事件 / 注入 down / 注入 up 三个入口，都在调用 `input::*` **之前**问同一个 `UiClickRouter`；左键命中即吞 + 捕获；**down 吞 ⇒ up 吞**，**down 放 ⇒ up 放**；右键 / 中键 / 滚轮 / 键盘 M1 一律放行；motion 永远放行 | `input::*` 仍是唯一施加路径（`runtime/input.h` 口径不变）；吞掉 = **不调用** `input::*`。★ **实现范围 = `click`**：三个入口已接同一个 router（OS 在 `present_sdl.cpp`、注入在 `input_plan.cpp` 的 `armClickAt` / `emitRelease`）；`mouse_move` / `mouse_down` / `mouse_up` 三条原语**不过 router**（S9 residual —— 接上去会改拖拽 / 显式 hold 的语义） |
 | D7 | **不写 guest**；`--present-screenshot` **含** UI；`--dump-frame` / `arena.hash` / 控制层 `screenshot`（guest 后缓冲冻结副本，`control_snapshot.h:ControlScreenshot.source`）**不含** | 与旧 overlay 同一条硬线；UI 只存在于宿主送显的窗口像素里 |
 | D8 | **失败响亮**：启动期（编译 / 校验 / 缺资源）`exit 2` + `origin:行:列`；运行期 = 卸载该插件 + **一次性** stderr；⛔ 不画空格 / 方块 | 静默降级等于"看起来正常但界面错了" |
 | D9 | **默认档零成本、零周期输出**：没有 `--ui` ⇒ 一次 bool 判空；有插件但本帧无可见元素 ⇒ 不布局 / 不栅格 / 不上传 / 不打印；`[ui]` 行按（插件, 错误种类）去重 | `AGENTS.md` §12.8；一次性收口行不收 |
@@ -243,15 +243,18 @@ M3 的数据面仍未做。
 （结束在宿主内部写系统剪贴板）+ `hud.js` 改 module 并用 `kit.Button` 画 PROFILE + 帧列表 `pos`
 （只有 top 帧；`0x3C + (pc − base)`）。
 
-落 `overlay-quickjs.md` 的适配器；HUD 变成 `scripts/ui/hud.js`；display list 成为脚本唯一出口；
-`UiClickRouter` 接进 `present_sdl.cpp:Impl::handleEvent` 与 `input_plan.cpp`；`--ui-input` / `--ui-strict`。
+落 `overlay-quickjs.md` 的适配器；HUD 变成 `scripts/ui/hud.js`；display list 成为脚本唯一出口。
+★ **S9 已落**：`UiClickRouter` 已接进 `present_sdl.cpp:Impl::handleEvent` 与 `input_plan.cpp` 的
+`click` 路径；`--ui-input=consume|pass` 已实现（缺省 consume；窗口参数）。`--ui-strict` 仍未做。
 
 1. HUD 脚本产出的像素与 M0 内置 HUD **结构等价**（行数 / 位置 / 颜色；允许字形不同）。
 2. OS 点击命中 ⇒ guest 的 `WM_LBUTTONDOWN` **为零**、`WindowManager` 按钮电平不变（`tests/input_injection.cpp` 夹具）。
 3. 未命中 ⇒ 与没有 UI 时逐位相同的消息序列。
 4. 捕获：down 命中、up 在面板外 ⇒ up 仍被吞（guest 没有孤儿 up）。
-5. 注入点击：`consume` ⇒ `consumed_by_ui=true`、配方 `fired` 照旧 +1、`ui_consumed` +1、guest 消息为零；
-   `pass` ⇒ 逐位与没有 UI 相同。
+5. 注入点击（**已实现，S9**）：`consume`（缺省）命中 ⇒ 配方 `fired` 照旧 +1、
+   `InputPlan::uiConsumed()` +1、guest 消息为零、按钮电平与光标都不动；`pass` ⇒ 逐位与没有 UI
+   相同。★ 摘要在**非 0** 时追加 `ui_consumed=N`（`InputPlan` 摘要字段）；控制层回执的
+   `consumed_by_ui` **未做**（M3）。
 6. 沙箱：访问文件 / 网络 / 墙钟 / 随机 ⇒ 运行时错误；`while(true){}` ⇒ 被中断 + 一次响亮；
    内存分配超限 ⇒ 被拒绝 + 卸载。
 7. 语法错 ⇒ `exit 2` 带 `file:line`；热重载失败 ⇒ 旧实例继续画 + 一行错误。
@@ -307,7 +310,7 @@ router 的"down 放 ⇒ up 放"改掉 ⇒ `ui_hit` 红 · 采样门少一个 EA 
 |---|---|---|
 | R1 | 运行时不能中断 ⇒ 脚本死循环卡住模拟器 | `JS_SetInterruptHandler` 返非 0 ⇒ 不可 catch 的中断（`overlay-quickjs.md` §2） |
 | R2 | 热重载失败策略与"错误必须停"的张力 | 启动期错误致命；运行期 / 热重载 = 卸载**新**实例、旧实例继续，并打 `FAIL`；`--ui-strict` 一刀切致命 |
-| R3 | 吞点击改变 guest 输入 ⇒ 配方可复现性 | 默认档不带 UI；`--ui-input=pass`；控制层回执 + 摘要计数；文档写死 |
+| R3 | 吞点击改变 guest 输入 ⇒ 配方可复现性 | 默认档不带 UI；**`--ui-input=pass` 已实现**（注入 click 逐位与没有 UI 相同）；摘要 `ui_consumed=N`（仅非 0 时出现）；控制层回执的 `consumed_by_ui` 仍待做；文档写死 |
 | R4 | AOT 每块新增 2 次比较 + 两个 EA 的采样 | 只在有插件时开；静态指令预算复核；读数进 `observations.md` |
 | R5 | 字体依赖（`LIFT_HOST_FONT_PATH` 不在 ⇒ 启动硬错） | `--ui-glyphs bitmap` 显式测试档；生产默认仍是字体，⛔ 不静默降级 |
 | R6 | "guest 客户区 == 帧尺寸"是既有假设；`--scale` 车道最终形状未知 | 先按相等验收；不等 / 变了记 observations，⛔ 不猜；`--scale` 只在 `letterboxFor` 之上接 |

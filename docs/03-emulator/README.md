@@ -25,6 +25,8 @@
 | **仓库自己的机械装置还成立吗**（素材清单 / 语料定位 / 台账 / shape / spec / 写路径 / 插件闭接口） | `repo-guards.md` |
 | **一条 opcode / 一个 EA 的取证** | 技能 `amayui-re-engine`（知识层，不在这里） |
 | **交互模型**（任务 = 一串**顺序**配方：门 → 动作 → 下一个门；失败全部响亮；两个门 = 脚本身份 / 脚本内位置；唯一入口 = AOT 臂 `--input-plan`，配方落点 `apps/emulator-lift/scripts/recipes/*.plan`） | `interaction-model.md` |
+| **输入设备**（shim 侧一台虚拟鼠标：唯一电平 + 单一租约；SDL / 配方 / 控制层 / 图只是驱动；转移表 · 坐标链 · `--ui-input` 注入路由 · 守卫） | `input-device.md` |
+| **配方 / 投递层**（11 个投递点 = 9 读点 + `SetCursorPos` 写点 + `ReadFile` 事件源；flush-before-read + 完成度 exit 5；写点账 = `input::*` 落点 + 会话写） | `input-plan.md` |
 | **某个脚本里哪段是哪个屏 / 哪段吃输入**（脚本级分析：身份 · 位置区间 · 输入点 · 待核；一条区间必须带复现命令与读数） | `scripts/<NAME>.md`（口径见 `scripts/README.md`） |
 | **怎么停下来看 AOT 跑到哪**（控制层：两个汇点 / WS 协议事实 / `sample` 快照 / 僵尸与 `gc` / window 档与陈旧事件 / 怎么跑 `emu-ctl`） | `control-plane.md` |
 | **窗口缩放 `--scale <auto/数值>`**（**只改窗口、不改帧**：窗口客户区 = round(1280×s)×round(720×s)、画面仍 1280×720（放大，接受模糊）；auto 取 display content scale；鼠标映射仍只有 `cursor_map.h` 一份；headless 不生效） | `window-scale.md` |

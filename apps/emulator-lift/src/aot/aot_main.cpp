@@ -140,7 +140,7 @@ void usage() {
         "                      解析失败 ⇒ exit 2 + 行号\n"
         "  --input-plan-trace  **opt-in**（缺省关）：每条 step **成立 / 施加**时打一行\n"
         "                      `plan:<文件>:<行> applied kind=… script=… pos=… frame=… state_seq=… reads=…`，\n"
-        "                      click 的抬起再打一行（`reason=sampled|forced` ⇒ guest 到底有没有机会\n"
+        "                      click 的抬起再打一行（`reason=keylevel|wallclock` ⇒ guest 到底有没有机会\n"
         "                      看到按下）；`frame` = 已 Present 帧数，`state_seq` 只有开 --control-root\n"
         "                      才有（否则 `-`）。⛔ 不每帧 / 不每块打；缺省档一条都不打\n"
         "                      （缺 --input-plan 时本参数无输出，⛔ 不报错）\n"

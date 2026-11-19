@@ -619,7 +619,9 @@ void InputPlan::closeSessionIfDone(WindowManager& wm) {
 }
 
 void InputPlan::emitRelease(WindowManager& wm, const PendingRelease& r) {
-    // 抬起复用**按下时存下的同一对**（已缩放的）客户区坐标。
+    // ★ **Script up 用设备当前位置**（S4 follow-up）：`input::mouseButton(..., down=false, Script)`
+    //   不先移动光标，消息坐标由 `input::mouseButton` 从设备**写后回读**。`r.x/r.y` 只是按下时
+    //   存下的读数（测试 / trace 对账用），⛔ 不再是抬起消息的坐标来源。
     // ★ S9 / D6：注入的 **up** 也是"三个入口"之一 ⇒ 不管 down 吞没吞，都把它交给 router。
     //   · down 吞 ⇒ up **必须**吞（不看返回值）：`ClickRouter` 的 capture / pending click 靠这条收口，
     //     而 guest ⛔ 不许收到没有 down 的 up；

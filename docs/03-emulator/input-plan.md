@@ -2,9 +2,11 @@
 
 > 状态口径：本文只写**不变量 / 落点 / 怎么查**。读数与历史进 `observations.md`；
 > 缺陷进 `defects.md`（`BUG-26`）；进度真源 `pnpm tools requirements plan`。
+> ★ **设备模型在 `input-device.md`**（`InputDevice` 的字段 / 转移表 / 租约 / 坐标链 / S9 注入路由）。
+> 本文仍是**配方 / 投递**的入口：只写「一条指令怎么到达 guest 读点、完成度怎么判」。
 > ★ **配方语法 / 闭集合 / 能力面的真源 = `apps/emulator-lift/src/runtime/recipe.h`**
 > （`--input-plan` 与机器内驱动器 `InteractionGraph` **共用同一个解析器与同一个 step 模型**；
-> ★ **能力面只有一份**：六条指令 + 行尾 `timeout` 每个驱动器都认，⛔ 没有 `kPlanFeatures` / `kGraphFeatures` 这种按入口
+> ★ **能力面只有一份**：九条指令 + 行尾 `timeout` 每个驱动器都认，⛔ 没有 `kPlanFeatures` / `kGraphFeatures` 这种按入口
 > 分叉的表，也没有"这个入口不认"的解析期硬错 —— 入口只决定**推进点**与**动作落在哪个宿主对象**上。
 > ★ **2026-11-16：`--interaction-graph` 用户入口退役**（配方只经本臂）⇒ 本文的 `--input-plan` 就是
 > 唯一入口；解释器臂只剩机器内驱动器（没有 CLI 参数能装载它）。
@@ -31,10 +33,17 @@
 
 ## 2. 设计（已裁决）
 
-### 2.1 状态源不变
+### 2.1 状态源 = `InputDevice`（`WindowManager` 成员）
 
-`WindowManager` 仍是唯一的状态源。`InputPlan` **只经 `src/runtime/input.h` 的四个入口**施加到它
-（电平读 / 队列 push / 写点 / 事件源），落点 `src/runtime/input_plan.{h,cpp}`。
+唯一输入状态在 **`InputDevice`**（`runtime/input_device.{h,cpp}`；`WindowManager` 的私有成员
+`device_`）。`InputPlan` **只经 `src/runtime/input.h` 的四个投递入口**到达 `WindowManager`，
+由它经 `input::*` 施加到设备（转移表 / 租约 / 写后回读见 `input-device.md`）。落点
+`src/runtime/input_plan.{h,cpp}`。
+
+★ 不再有 v1 的三套 owner（`key_owner_` / `button_owner_` / `cursor_script_owned_`）与
+`mouse_buttons_`：设备只有 `key_level_[256]` + `level_owner_[256]` + 单一 `lease_`
+（S4）。`WindowManager` 保留消息队列 / 窗口表 / 计时器 / 无效区 / 采样计数 / 计划与 router 的
+非拥有指针；⛔ 它不再持有第二份电平。
 
 ### 2.2 推进只发生在 guest 读点（⛔ 没有第二个时机）
 
@@ -57,6 +66,25 @@ WaitMessage · GetQueueStatus · TranslateMessage · DispatchMessageA · SetCurs
 - ⛔ 不要按**名单**写守卫：`SetCursor` / `ShowCursor` 已注册但按设计不参与 ⇒ 名单式断言从诞生起就红。
 - **已知残留**：`GetProcAddress` 动态解析是**静默旁路**（`kernel32_process.cpp` 给 `0 + 127`）⇒
   "未注册 ⇒ 响亮 trap"这条闭合论证**只在静态导入面上成立**。
+
+★ **写入点是另一张账**（别把「读点」与「写点」混成一个数）：当前是 **17 个 `input::*` 事件落点 +
+5 个会话写**。计数口径（排除注释与 `input.h/.cpp` 自身的转发 / 定义）：
+
+```bash
+rg -n -U 'input::(mouseMove|mouseButton|mouseWheel|key)\(' apps/emulator-lift/src
+```
+
+- **事件落点**：SDL `present_sdl.cpp` 的键 / move / 按钮 / 滚轮 4 处；配方 / 控制层的
+  `input_plan.cpp` 4 处（`armMoveAt` 的 move、`applyMouseButton` 的 down/up、`pressDue` 的 down、
+  `emitRelease` 的 up —— 同一段核心被 click 与三条鼠标原语共用）；`InputScript` 的
+  `apply` / `emitRelease` 9 处（`releaseOwnedInputs` 不直接调事件入口，它是会话写）。
+- **会话写**：失焦（`present_sdl.cpp` → `input::dropOsLevels`）· 控制层恢复
+  （`aot_host.cpp` 的 `controlOnResume` → `input::dropOsLevels`）· 配方收口
+  （`closeSessionIfDone` / `releaseAll` → `input::releaseProgram`）· `InputScript` 收口
+  （`releaseOwnedInputs` → `input::releaseProgram`，`tick` / `abandon` 共用这一处）。
+- ⚠ **历史口径**：设计稿 §1.2 记的「18 个 `input::*` 落点」是 S4 之前的读数；
+  `InputScript::releaseOwnedInputs` 里原有两个 `input::*` 已被 `input::releaseProgram` 取代 ⇒
+  按当前代码是 17。⛔ 不要把 18 当现状写进新文档。
 
 ### 2.4 两种投递语义按真机分开
 
@@ -81,6 +109,12 @@ WaitMessage · GetQueueStatus · TranslateMessage · DispatchMessageA · SetCurs
   ★ **区间不是随便挑的**：`[0x039C,0x0460)` 是"输入轮询体在跑"，但**在轮询体里投的点击不保证被回调
   看见**（实测见 §2.6 末段）；要让点击落在"回调正在读输入"那一刻，区间要取回调的输入读段
   （TITLE = `[0x0460,0x0520)`）。
+
+- ★ **一个读点最多一条写动作**（S7）：`releaseDue` → `pressDue` → 立即队列 → 配方当步四段
+  共用 `writes_this_point_`；本读点已经写过一条，后面的**写** step 留在 `next_` / 队首，但门 /
+  `wait` / `profile_*` / `quit` 仍可继续消费（它们不是写）。**同一按钮还按着**时后一条
+  `click` / `mouse_down` 不消费（连点串行化，⛔ 不再「同按钮先抬起」）。细节与代价见
+  `input-device.md` §5。
 
 ### 2.6 确定性：门只用 guest 可见状态；**`wait` 是唯一的墙钟面**
 
@@ -142,8 +176,9 @@ WaitMessage · GetQueueStatus · TranslateMessage · DispatchMessageA · SetCurs
 
 > 本节只列**落到哪**；⛔ 不要把 `recipe.h` 的词表抄成第二份真源。
 > 图那套词（`screen …` / `node` / `when` / `next` / `expect`）已退役 ⇒ 现在写进配方是未知指令。
-> ★ **六条指令 + 行尾 `timeout` 本臂都认、都有落点**（2026-11-16 能力面统一；`timeout` /
-> `profile_begin` / `profile_end` / `quit` 不再是"这个入口不认"）：落点表见下面那段，语义真源仍是 `recipe.h`。
+> ★ **九条指令 + 行尾 `timeout` 本臂都认、都有落点**（2026-11-16 能力面统一；S6 追加三条鼠标原语；
+> `timeout` / `profile_begin` / `profile_end` / `quit` 不再是"这个入口不认"）：落点表见下面那段，
+> 语义真源仍是 `recipe.h`。
 
 ```
 # 注释（整行 / 行尾都吃）；空行忽略
@@ -152,9 +187,18 @@ await position TITLE 0x039C 0x0460 timeout 5000
                         # 电平门：script == TITLE **且** FROM <= pos < TO（半开区间；FROM/TO 是带 0x 的 hex）
 wait 500                # 宿主单调时钟毫秒；正整数。★ 固定时长 ⇒ ⛔ 不带 timeout
 click 1070 480 right    # x/y = 1280×720 参考系；按钮词裸写（省略 = left；⛔ 不收 =left）
+mouse_move 1070 480     # 只写光标（与 click 的第一段同一段代码 / 同一参考系 / 同一缩放）
+mouse_down left         # 用**当前设备光标位置**按下；必须有一条更早的 mouse_move；
+                        # 轻闸门 = 那条 move 之后完成过一次 CursorPos 读点，或墙钟兜底
+mouse_up left           # 用**当前设备位置**抬起（可与 down 不同点 ⇒ 拖拽 up 不回跳）
 ```
 
-- **按文件顺序执行**；`click` 在同一个读点施加（flush-before-read 口径不变）。
+- **按文件顺序执行**；`click` 分三段（arm → press → release），**一个读点最多一条写动作**；
+  同一按钮还按着时后一条 `click` / `mouse_down` 不消费（连点串行化；见 §2.5 与
+  `input-device.md` §5）。
+- **`mouse_move` / `mouse_down` / `mouse_up` 是写动作**：一条一次、在读点消费时直写；`click`
+  仍是「写动作 + 三条闸门」的复合。拖拽 = `mouse_move` → `mouse_down` → `mouse_move` × N →
+  `mouse_up`，每条一个读点 ⇒ guest 每一拍看到新的 `WM_MOUSEMOVE`（MK 位 = 设备电平的投影）。
 - **`wait` 的起点** = 上一条指令生效的那个读点 ⇒ 有 0..一个迭代周期的偏差（**不可评估**）。
 - ★ **`timeout <ms>` 是行尾可选项，而且只允许出现在 `await script` / `await position` 上**：
   它守的是**同一行**那个门（这些门可能永远等不到）。本臂**只有一把尺 = 宿主墙钟**
@@ -189,9 +233,10 @@ click 1070 480 right    # x/y = 1280×720 参考系；按钮词裸写（省略 =
 - ⛔ **解析期硬错**（`exit 2` + `文件:行号: 原因`，**只剩两类**）：
   · **两臂都不认**：`await always` · `await presents <n>` · `key <VK>` · 旧节点模型的 `node / when /
     action / next / expect` · 画面源 `screen …` · 任何别的词（报"未知指令"并回显那行）；
-  · **`timeout` 写错位置**：单独成行（旧跨行写法）· 挂在 `wait` / `click` / `profile_*` / `quit` 上 ·
-    不在行尾 · 缺毫秒数 / 非数字 / 0（文案点名行号并给出修法）。
-  缺参数 / 负毫秒 / `=left` 同样硬错。
+  · **`timeout` 写错位置**：单独成行（旧跨行写法）· 挂在 `wait` / `click` / `mouse_move` /
+    `mouse_down` / `mouse_up` / `profile_*` / `quit` 上 · 不在行尾 · 缺毫秒数 / 非数字 / 0
+    （文案点名行号并给出修法）。
+  缺参数 / 负毫秒 / `=left` / `mouse_down`·`mouse_up` 前没有 `mouse_move`（或未知按钮）同样硬错。
 - ★ **只写门 / 只写 `wait` 是合法的**（线性指令流）⇒ 旧的"同一份计划去掉动作表达不了"
   这一限制**不再成立**：现在可以直接给一份"只等门"的配方当对照。
 - ⛔ 解释器臂**不接** `--input-plan`（给它 = `未知参数` + exit 2）。
@@ -233,6 +278,10 @@ click 1070 480 right    # x/y = 1280×720 参考系；按钮词裸写（省略 =
 - 跑完打一行**完成度**读数（一次性，位置在 `input-plan:` 前缀后）：
   `input-plan: steps=N fired=M pending=K presents=… released=… held=…`
   ⇒ 读这一行的最短形式就是 `steps= fired= pending=`（旧字段一个都没动）。
+- ★ **S9**：只有**真的吞过**注入 click 时才在这一行末尾追加 ` ui_consumed=N`
+  （= `InputPlan::uiConsumed()`；一条 click 的 Down 那一瞬 +1，up 不重复数）。没有叠层 /
+  没有命中 / `--ui-input=pass` ⇒ **这一行逐字不变**（默认档仍是既有判据面）。
+  ⛔ 控制层协议里的 `consumed_by_ui` 字段**未做**（见 §6）；这里只有 `InputPlan` 的摘要字段。
 - ★ **判据**（`recipe.h` 的 `RecipeOutcome` / `recipeOutcomeExitCode`，**唯一一份**：
   `--input-plan` 与机器内驱动器都对同一个 5 口径）：
   · `pending == 0` ⇒ `Done` ⇒ **不覆盖**运行结论（run 自己失败仍然 2）；
@@ -266,9 +315,11 @@ click 1070 480 right    # x/y = 1280×720 参考系；按钮词裸写（省略 =
 
 | 件 | 位置 |
 |---|---|
+| **设备实体**（唯一电平 / 单一租约 / 转移表 / 坐标链；`WindowManager` 私有成员） | `src/runtime/input_device.{h,cpp}`（`InputDevice`；合同见 **`input-device.md`**） |
 | **配方解析器 + step 模型 + 门判定**（唯一一份，两臂共用；语法真源） | `src/runtime/recipe.{h,cpp}`（`Recipe` / `Step` / `stepGateHolds` / `scriptNameMatches`） |
-| **AOT 臂的读点驱动**（顺序推进 + 施加 click + 待抬起 + 计数 + 摘要） | `src/runtime/input_plan.{h,cpp}`（`atPoint` 是唯一施加口） |
+| **AOT 臂的读点驱动**（顺序推进 + 施加 click / 鼠标原语 + 待抬起 + 计数 + 摘要） | `src/runtime/input_plan.{h,cpp}`（`atPoint` 是唯一施加口） |
 | **解释器臂的块边界驱动**（同一份 `Recipe`；动作经 `InputScript` 追加；**没有 CLI 入口**，只剩 pure 夹具） | `src/runtime/interaction_graph.{h,cpp}` |
+| **注入 click 的叠层路由**（S9；`UiInputRouter` / `--ui-input` 值域） | `src/runtime/ui_input.h`；实现 = `SdlWindow::Impl`（`present_sdl.cpp`） |
 | 参考系 → 客户区的**唯一**映射 | `src/runtime/cursor_map.{h,cpp}`（`referenceToClientPixel`） |
 | 名字口径（大小写 / 两侧 `.bin` / 退化名） | `src/runtime/recipe.{h,cpp}`（`scriptNameMatches`） |
 | 四个投递入口（inline，无计划时**一条 null 检查**） | `src/runtime/input.h` |
@@ -296,36 +347,52 @@ click 1070 480 right    # x/y = 1280×720 参考系；按钮词裸写（省略 =
 | ① | **源码形态**：执行循环文件里那 6 个词命中 0（`tools/test/input-plan-shape.test.mjs`） | 强：谁把推进塞回循环就红 |
 | ② | **读点闭环（按谓词）**：每个已注册 shim"是否读输入态"的判定 ⟺ "函数体里调了投递入口" | 强：两边都不许单边为真 |
 | ③ | **关系断言**：`plan.deliverCalls(…)` ⟺ `shims.callCount(…)`（两个**独立来源**，不是取值断言） | 中：无计划时两侧同为 0，需挂计划才有效 |
-| ④ | CLI 面：`--input-plan` 缺文件 / **旧指令硬错** / 缺参数 / 负毫秒 / `=left` / **`timeout` 写错位置**（跨行 · 挂在 `wait`/`click`/`quit` 上 · 不在行尾 · 缺毫秒数/非数字）⇒ `exit 2` + 点名行号 + 文案指向修法；缺省档不出现 `input-plan:` 行 | 强（⚠ `cli-aot-flags` 在非 Windows 是 SKIP） |
-| ⑤ | 语义面（CTest `input-plan-read-points`）：`await script` 电平门 + 身份读不到继续等 + `wait` 注入时钟（未到期不施加 / 到期施加，不需要真睡）+ click 的 sampled / forced 抬起 + 1280×720 → 客户区缩放且 move/down/up 同一结果 | 强：改语义就红 |
+| ④ | CLI 面：`--input-plan` 缺文件 / **旧指令硬错** / 缺参数 / 负毫秒 / `=left` / `mouse_down`·`mouse_up` 前没有 `mouse_move` / **`timeout` 写错位置**（跨行 · 挂在 `wait`/`click`/`mouse_*`/`quit` 上 · 不在行尾 · 缺毫秒数/非数字）⇒ `exit 2` + 点名行号 + 文案指向修法；缺省档不出现 `input-plan:` 行 | 强（⚠ `cli-aot-flags` 在非 Windows 是 SKIP） |
+| ⑤ | 语义面（CTest `input-plan-read-points`）：`await script` 电平门 + 身份读不到继续等 + `wait` 注入时钟（未到期不施加 / 到期施加，不需要真睡）+ click 抬起的**两条腿**（trace 的 `reason=keylevel` / `wallclock` / `keylevel+wallclock`）+ 1280×720 → 客户区缩放且 move/down/up 同一结果；S6 的子用例 `input-plan/mouse-primitives` · `input-plan/drag` · `input-plan/drag-repeat` | 强：改语义就红；`reason=` 口径与 `aot_main` 的 `--help` 必须一致 |
 | ⑥ | 位置门（同一 CTest 的 `input-plan/position-gate`）：`pos == FROM` 命中 / `pos == TO` 不命中 / 区间外继续等 / `base==0`·`pc<base`·`pc` 未提交·`pc−base` 越上界 ⇒ 不满足不崩 / `FROM>=TO`·缺参数·非 hex ⇒ 解析期硬错 / 未知脚本名不在解析期校验 | 强：改半开区间或哨兵就红（`tools/mutate-check.mjs` 有一条第 ⑥ 条的代表变异） |
 | ⑦ | **完成度判据**（同一 CTest 的 `input-plan/completion`）：门永不成立 ⇒ `outcome()==Running` + `pending==2` + `recipeOutcomeExitCode()==5`；全走完 ⇒ `Done` + 0 + 空报告；`Done` 时 `failureReport()` 为空串 | 强：**这就是"图 → 配方"改写会不会把 CTest 变成假绿的唯一闸门**（`tools/mutate-check.mjs` 有一条"完成度 ⇒ 恒 0"的代表变异） |
-| ⑧ | **能力面只有一份**（同一 CTest 的 `input-plan/step-timeout` + `input-plan/profile-and-quit`）：行尾 `timeout` 差 1 ms 不判 / 超 1 ms 判 + 报告点名 `mem:<行>` + 门；`wait` **没有守卫**（超长 `wait` 冲过 guest 时钟也不判 timeout）；`quit` ⇒ 队列尾 WM_QUIT + 不再推进；`profile_begin|end` ⇒ 收口一次、孤儿 `end` 不失败；六条指令 + 行尾 `timeout` 在**本臂**解析器上都被接受 | 强：谁把某条指令写成"这个入口不认"就红（含 `timeout` 的落点与 `wait` 无守卫两条代表变异） |
+| ⑧ | **能力面只有一份**（同一 CTest 的 `input-plan/step-timeout` + `input-plan/profile-and-quit`）：行尾 `timeout` 差 1 ms 不判 / 超 1 ms 判 + 报告点名 `mem:<行>` + 门；`wait` **没有守卫**（超长 `wait` 冲过 guest 时钟也不判 timeout）；`quit` ⇒ 队列尾 WM_QUIT + 不再推进；`profile_begin|end` ⇒ 收口一次、孤儿 `end` 不失败；**九条指令** + 行尾 `timeout` 在**本臂**解析器上都被接受 | 强：谁把某条指令写成"这个入口不认"就红（含 `timeout` 的落点与 `wait` 无守卫两条代表变异） |
+| ⑨ | **S7 写预算 + 连点串行化**（CTest `input-plan-read-points` 的 `input-plan/one-write-per-read-point` · `input-plan/control-queue-one-write` · `input-plan/two-clicks-serialized`；回归 `input-plan/gates-and-releases` / `input-plan/completion`；控制层 `lift-control-endpoint` 的 `click-enqueue-at-read-point`） | 强：同一读点出现两条写 / 两条 click 被合并成 `DOWN,DOWN,UP,UP` 就红 |
+| ⑩ | **S9 注入路由**（CTest `input-plan-read-points` 的 `input-plan/click-consumed-by-ui` / `input-plan/click-router-miss-identical`；解析面 `overlay` 的 `overlay/ui-input-parse`；CLI 面 `cli-aot-flags` 的 `ui-input-values`，⚠ 非 Windows SKIP 不作唯一判据） | 强：吞掉却仍调用 `input::*` / down 吞 up 不吞 / 未命中却改消息 / `pass` 不是逐位相同 / 非法值静默成 consume ⇒ 红 |
 
 ★ **一条要记住的分级**：如果一条守卫的"红"只是因为**编译不过**（断言用到新增 API），
 它并没有证明**运行期行为** ⇒ 必须在报告里标成"证明力弱"，⛔ 不许与运行时红并列。
 
 ## 6. 已做 / 未做
 
-- **已做（2026-11-16 第三轮）**：**`timeout` 改成行内**（用户裁决：不跨行贴附，跨行看起来不直观）：
-  只允许写在 `await script` / `await position` 那一行的末尾，守的就是同一行那个门；删掉"守上一条指令"
-  的旧路径（⛔ 不留两种写法）· 单独一行 / 挂在 `wait`/`click`/`profile_*`/`quit` 上 / 不在行尾 /
-  缺毫秒数 ⇒ 解析期硬错（文案给出修法）· 删掉 `wait` 的隐含缺省守卫 `ms + 5000`
-  （固定时长不需要守卫；`stepTimeoutMs` 对 `wait` 恒返回 0）· 6 份配方按新写法重写 ·
-  变异"行内 `timeout` 被忽略" / "`wait` 又拿到缺省守卫"都能红。
-- **已做（2026-11-16 第二轮）**：**能力面统一 + 完成度成判据**
-  （`REQ-01M7HP2Q1N0N004M8R4RPABWSV` 的前置）：删掉 `kPlanFeatures` / `kGraphFeatures`（能力面只有一份）·
-  `timeout` / `profile_begin|end` / `quit` 在本臂都有落点（§2.8）· `pending=` 读数 + `pending != 0`
-  或 `timeout` 到期 ⇒ **exit 5** + 点名（§2.9）· 变异"完成度 ⇒ 恒 0"能红。
-- **已做**：S1（投递层 + 11 读点，行为逐字节不变）· S4（AOT `--input-plan` + 一行摘要）·
-  S2′（flush-before-read + 待抬起 + `releaseAll`）· **三条指令**（`await script` 电平门 +
-  `wait` 宿主单调毫秒 + `click` 1280×720 参考系缩放；删 `key` / `presents` / 节点图模型）·
-  **第四条 `await position`**（脚本内位置电平门，`header_len + (pc−base)`，半开区间；见 §2.6/§2.8）·
-  **2026-11-16 两臂收敛**：解析器与 step 模型搬到 `runtime/recipe.{h,cpp}`，两臂共用；
-  画面三源 / `expect` / `key` 一并退役（`interaction-model.md` §5）。
-- **未做**：`GetMessageA` 空队列由计划供给 · 两臂共有的事件 emit 点（`ScreenSample` 等）· 旧路径删除 ·
-  `ScreenChanged` / `ScreenRect` / `click center` · 键盘（`key` 已删，需要时再加） · 解释器臂接 `--input-plan` ·
-  **`await position` 的区间选取**（哪些脚本的哪一段"点击会被消费"只解了 TITLE；其余脚本要按 §2 的方法逐支解）。
+- ★ **输入重设计的 S1–S9 都已落**（实现判据以代码 / CTest 为准，逐条见 `input-device.md`）：
+  - **S1 设备实体**：`runtime/input_device.{h,cpp}`；`InputDevice` 是 `WindowManager` 的私有成员，
+    `WindowManager` 保留同名 setter / getter 与 `checkMainThread` 站点名；死状态
+    `setCapture/capture` 删除。
+  - **S2 消息 = 设备的投影**：`input::*` 写后回读 `wParam/lParam`；`Script` 分支检查写返回值。
+  - **S3 按钮位图 = VK 电平的投影**：`mouse_buttons_` 已删，`mouseButtons()` / `buttonDown()`
+    从 `key_level_` 派生。
+  - **S4 单一租约 + `Driver::Guest` + 转移投影**：三套 owner 删除；`releaseScriptOwnership` /
+    `clearOsInput` 删除；收口改 `input::releaseProgram` / `input::dropOsLevels`，**逐条 post up**；
+    OS up 的 #8/#9/#10 与 Program up 的 #15/#18 按转移表；键盘 repeat 是显式例外。
+  - **S4 follow-up**：`Script` 的 **up 不再先移动光标**（否则 Program up 的 #15/#18 不可达）；
+    up 用**设备当前位置**，见 `input.cpp` 的 `mouseButton`。
+  - **S5 overlay 指针改读设备**：hover 走 `device client → imageToWindowPixel → window 点 →
+    pointerWindowPixels → window 像素` 的 SDL-free 纯函数；`SDL_GetMouseState` 不再参与。
+  - **S6 配方原语**：`mouse_move <x> <y>` / `mouse_down [left|right]` / `mouse_up [left|right]`
+    （能力面仍是 `recipe.h` 一份；`InteractionGraph` 同步执行）；`--help` 同一张表。
+  - **S7 一个读点最多一条写动作 + 连点串行化**：`writes_this_point_` 覆盖
+    `releaseDue` / `pressDue` / `drainImmediate` / flush；`armClickAt` 不再强制抬起；
+    同一按钮还在 `pending_` 时后一条不消费。
+  - **S8 文档切片**：`input-device.md`（设备合同）+ 本文 + `interaction-model.md` +
+    `overlay.md` + `contracts-win32.md` 的已实施口径。
+  - **S9 `--ui-input=consume|pass`**：注入 click 的 down/up 与 OS 入口问**同一个**
+    `UiClickRouter`（实现 = `SdlWindow::Impl`）；缺省 consume；摘要只在非 0 时追加
+    `ui_consumed=N`。
+- **S9 residual（明确未做，⛔ 不是"顺手会做"）**：
+  - `mouse_move` / `mouse_down` / `mouse_up` **原语不过 router**：它们是"手"而不是"一次点击"；
+    接上去会改拖拽 / 显式 hold 的语义（`input_plan.h` 头注也写了这条）。
+  - 控制层回执里的 `consumed_by_ui` **未做**：当前只有 `InputPlan::uiConsumed()` 与摘要行
+    `ui_consumed=N`（控制层协议 `consumed_by_ui` 仍在 `overlay.md` 的 M3 待办里）。
+- **未做**（其余）：`GetMessageA` 空队列由计划供给 · 两臂共有的事件 emit 点（`ScreenSample` 等）·
+  旧路径删除 · `ScreenChanged` / `ScreenRect` / `click center` · 键盘 `key`（已删，需要时再加）·
+  解释器臂接 `--input-plan` · **`await position` 的区间选取**（哪些脚本的哪一段"点击会被消费"
+  只解了 TITLE；其余脚本要按 §2 的方法逐支解）。
 - **两臂分歧**（打开中）：`defects.md#BUG-26` —— 同一点击在 AOT 生效、在解释器无反应。
   ★ 这条不查清，所有"解释器能跑通 / AOT 跑不通"的结论都要重打折扣。
 
@@ -334,11 +401,30 @@ click 1070 480 right    # x/y = 1280×720 参考系；按钮词裸写（省略 =
 ```bash
 node tools/requirements.mjs --plan                 # 进度真源（父单 REQ-01M7G7EJF062NKQ0D40RF3BZ4Z）
 cd apps/emulator-lift && ctest -R 'input-plan|cli-aot-flags' --output-on-failure
+cd apps/emulator-lift && ctest -R 'input-injection|input-inject-visible|overlay|ui-click-router|lift-control-endpoint|cursor-warp' --output-on-failure
 node tools/mutate-check.mjs --match 'input-plan-read-points'   # 变异自检（wait deadline 那两条）
 node tools/mutate-check.mjs --match '完成度'                    # 变异自检（pending != 0 ⇒ exit 5 那条）
 node tools/mutate-check.mjs --match '行尾 `timeout` 的落点'      # 变异自检（行内 timeout 被忽略）
 node tools/mutate-check.mjs --match 'wait` 恒 0'                # 变异自检（wait 又拿到缺省守卫）
 node --test --test-isolation=none tools/test/input-plan-shape.test.mjs
+```
+
+**机械复核（不靠肉眼）**：
+
+```bash
+# 设备状态只剩一份（S1/S3/S4）：实现文件里 0 命中（头注释提到旧名不算）
+rg -n 'cursor_x_|key_down_|mouse_buttons_|key_owner_|button_owner_|cursor_script_owned_' \
+  apps/emulator-lift/src/runtime/host_window.cpp
+
+# 旧收口入口已删（S4）：0 个**调用点**（注释里提到旧名不算）
+rg -n '\.releaseScriptOwnership\(|->releaseScriptOwnership\(|\.clearOsInput\(|->clearOsInput\(' \
+  apps/emulator-lift/src apps/emulator-lift/tests
+
+# 写入点两张账（口径见 §2.3）：看实际落点，不要手抄过期计数
+rg -n -U 'input::(mouseMove|mouseButton|mouseWheel|key)\(' apps/emulator-lift/src
+
+# S9：注入 click 的两端都在 `InputPlan` 里问 router；摘要只在非 0 时追加
+rg -n 'routeInjectedPointer|uiConsumed|ui_consumed' apps/emulator-lift/src/runtime/input_plan.cpp
 ```
 
 ★ **完成度判据的端到端读数**（下面三段命令的实测输出见 §2.9 的表；`--max-frames 400` 只是让 run

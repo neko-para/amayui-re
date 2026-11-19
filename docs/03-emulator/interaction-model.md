@@ -10,7 +10,7 @@
 ## 0. 一句话
 
 **任务 = 一串按文件顺序推进的指令**。两条指令是**门**（`await script` / `await position`），其余是动作
-（`click` / `wait` / `profile_*` / `quit`）；失败**响亮**。
+（`click` / `mouse_move` / `mouse_down` / `mouse_up` / `wait` / `profile_*` / `quit`）；失败**响亮**。
 
 ## 1. 模型（唯一一套）
 
@@ -28,7 +28,13 @@
   实测（`observations.md` 的 `OBS-20261116-05`）：TITLE 上"点得进去"的窗口落在回调体的输入端，
   而轮询体里同一个门也命中、点击却**不被消费** ⇒ "输入循环在跑" ≠ "点击会被消费"。
 - **动作**：`click <x> <y> [left|right]`（1280×720 参考系，投递前过 `cursor_map.h` 的唯一映射）·
+  `mouse_move <x> <y>`（同一参考系；只写光标，与 `click` 的第一段同一段代码）·
+  `mouse_down [left|right]` / `mouse_up [left|right]`（坐标 = **设备当前位置**，⛔ 不带 x/y；
+  拖拽 up 不回跳；`mouse_down` 有轻闸门：上一条 `mouse_move` 之后完成过一次位置读点，或墙钟兜底）·
   `wait <ms>`（**宿主墙钟**，非阻塞 deadline）· `profile_begin|end <label>` · `quit`（立即收口）。
+  ★ **配方能写拖拽，但 HUD 路由只接 `click`**：`mouse_move` / `mouse_down` / `mouse_up` 原语
+  **不过** `UiClickRouter`（S9 residual；接上去会改拖拽 / 显式 hold 的语义）。HUD 的命中与捕获
+  只对 `click` 和 OS 事件生效。
 - **`timeout <ms>`**：**行尾可选项**，只允许出现在 `await script` / `await position` 那一行的末尾
   （它守的就是**同一行**那个门；⛔ 旧的"守上一条指令"跨行写法已删除，单独一行写 `timeout` = 解析期硬错）。
   缺省由**入口**给（`recipe.h` 的 `stepTimeoutMs` 是唯一一份宽度公式）：解释器臂 **5000 ms**（它的
@@ -46,7 +52,7 @@
   ⇒ 差别只有**推进点**与**动作怎么落地**；顺序推进、两个门的判定、每步守卫的宽度 / 到期判据、
   完成度的结论与退出码**都是同一份实现**（`runtime/recipe.cpp` 的解析 + `stepGateHolds` +
   `stepTimeoutMs` / `stepWindowExpired` + `RecipeOutcome`）。
-  ★ **能力面只有一份**（2026-11-16 统一）：六条指令 + 行尾 `timeout` 每个驱动器都认，⛔ 没有 `kPlanFeatures` /
+  ★ **能力面只有一份**（2026-11-16 统一；S6 追加三条鼠标原语）：九条指令 + 行尾 `timeout` 每个驱动器都认，⛔ 没有 `kPlanFeatures` /
   `kGraphFeatures` 这种按入口分叉的表，也⛔ 没有"这个入口不认"的解析期硬错。
 
 ## 2. 失败（全部响亮）
@@ -118,7 +124,9 @@
 | 模板匹配 / 单点取色 / 区域均值作为**门** | **不做**（画面采样只服务 `--overlay` 与夹具的采样计数） |
 | 条件组合（AND/OR）、错误分支、回跳 | **不做**：顺序模型没有图 |
 | JSON 文件入口 / 生成器 | **没有**：行写法是唯一入口（第二份 schema 必漂） |
-| 鼠标拖拽 / 滚轮 / `hold` 时序 | **不做**：`click` = 按下 + 抬起，抬起由注入层的自动 hold 决定 |
+| 鼠标拖拽 | **配方有**（S6：`mouse_move` / `mouse_down` / `mouse_up`；坐标 = 设备当前位置，拖拽 up 不回跳）**但 HUD 路由不接**（只接 `click`，S9 residual） |
+| 滚轮 | **配方没有原语**：`SDL_EVENT_MOUSE_WHEEL` 经 `input::mouseWheel` 直接投给 guest；`InputScript` 也不建模滚轮。它不是电平（没有 `key_level_` 项） |
+| `hold` 时序 | **不是配方概念**：`click` 的抬起由注入层闸门（KeyLevel 读点 + 墙钟兜底）决定；`mouse_down/up` 的释放由配方自己控制。**`InputScript` 仍保留自己的 hold 策略**（`inputSampleCount` 闸门 + 上限；Q4 取消，不统一） |
 | `key <VK>` 动作 | **已退役**（没有生产者） |
 
 ## 7. 分期（历史与未做）
