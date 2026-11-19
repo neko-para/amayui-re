@@ -96,16 +96,34 @@ const CORE_FORBIDDEN = [
   'traceStepConsumed',
 ];
 
+/**
+ * ★ **插件适配层专属**禁用词（合同 `plugin-runtime.md` §6 行 11 / 22；C2a 复审 F4）。
+ *
+ * 判据（红了意味着什么）：`src/plugin/**` 是"guest 写 / 输入施加"的**第二入口**面 ——
+ *   · `quickjs.h` / `quickjs_value.h` ⇒ 第二个 QJS TU（§6 行 11 明的编译约束）；
+ *   · `input::` ⇒ 绕过 `IntentQueue` 直接施加输入（第二个施加点）；
+ *   · `writeGlobal` ⇒ 绕过 `EditSink` 直接写 guest。
+ *   这三条**现在都是零命中**（只出现在注释里），但它们正是"下一次改动不会有症状"的那一类。
+ *
+ * ★ 为什么**不能**并进 `CORE_FORBIDDEN`：`intent_executor.cpp` / `pointer_core.cpp` 合法调用
+ *   `input::releaseProgram` / `input::mouseMove`（它们是施加层的**实现**，不是插件）；
+ *   `edit_sink.cpp` 里 `writeGlobal` 是 Edit 的唯一实现。⇒ 只对 `src/plugin/**` 生效。
+ */
+const PLUGIN_FORBIDDEN = ['quickjs.h', 'quickjs_value.h', 'input::', 'writeGlobal'];
+
+/** 白名单里属于插件适配层的那些（按路径过滤，⛔ 不手写第二份清单）。 */
+const PLUGIN_FILES = CORE_FILES.filter((rel) => rel.includes('/src/plugin/'));
+
 function read(rel) {
   return fs.readFileSync(new URL(rel, ROOT), 'utf8');
 }
 
 /** 判据本体（纯函数；真实文件与注入的假文本**同一份**）。返回 `{line, token, text}` 列表。 */
-function forbiddenHits(text) {
+function forbiddenHits(text, tokens = CORE_FORBIDDEN) {
   const hits = [];
   const lines = stripComments(text).split('\n');
   for (let i = 0; i < lines.length; i += 1) {
-    for (const token of CORE_FORBIDDEN) {
+    for (const token of tokens) {
       if (lines[i].includes(token)) hits.push({ line: i + 1, token, text: lines[i].trim() });
     }
   }
@@ -280,4 +298,77 @@ test('③ `Context` 只认识工厂、不认识 runner（回调拿不到唯一 p
     'context.h 的**代码**里出现了 `TriggerRunner`：回调一旦拿到唯一 pump，就能递归 atPoint / 绕过"返回值替换集合"：\n  ' +
       runnerHits.map((h) => `context.h:${h.line}: ${h.text}`).join('\n  '),
   );
+});
+
+test('④ `src/plugin/**` 不 include quickjs、不调 `input::` / `writeGlobal`（§6 行 11 / 22）', () => {
+  // ★ 白名单必须**真的**覆盖到插件层：过滤后为空 ⇒ 本用例会"扫空集合"而恒绿。
+  assert.ok(PLUGIN_FILES.length > 0, 'PLUGIN_FILES 为空 ⇒ 本守卫会扫空集合而恒绿（白名单被改名/搬走了？）');
+  const reported = [];
+  for (const rel of PLUGIN_FILES) {
+    for (const hit of forbiddenHits(read(rel), PLUGIN_FORBIDDEN)) {
+      reported.push(`${rel}:${hit.line}: ${hit.token}  ← ${hit.text}`);
+    }
+  }
+  assert.deepEqual(
+    reported,
+    [],
+    '插件适配层里出现了第二 QJS TU / 第二施加点（合同 §6 行 11 / 22；C2a 复审 F4）：\n  ' +
+      reported.join('\n  '),
+  );
+
+  // ★ 反向自检（否则"0 命中"可能只是判据写错了）：注入三种词各一条必须被点名，且**只在那一行**；
+  //   而**注释**里的同名词不许命中（注释必须能解释"为什么这里不调 input::"）。
+  for (const token of PLUGIN_FORBIDDEN) {
+    const probe = forbiddenHits(`void f() {\n    ${token} x;\n}\n`, PLUGIN_FORBIDDEN);
+    assert.ok(probe.length >= 1, `注入 \`${token}\` 必须被报出来（否则本用例是恒真断言）`);
+    assert.equal(probe[0].line, 2, `注入 \`${token}\` 的报点行号必须是 2（剥注释不能漂行）`);
+  }
+  assert.equal(
+    forbiddenHits('// 这里不调 input:: / writeGlobal，也不 include "quickjs.h"\n', PLUGIN_FORBIDDEN).length,
+    0,
+    '注释里的 `input::` / `writeGlobal` / `quickjs.h` **不许**命中（否则解释判据本身就违规）',
+  );
+  assert.equal(
+    forbiddenHits('const char* s = "input::mouseMove";\n', PLUGIN_FORBIDDEN).length,
+    1,
+    '字符串字面量**不是**注释：`"input::"` 仍要命中（那代表代码里真有第二个施加点）',
+  );
+});
+
+test('⑤ `quickjs.h` 的 include 图只有一条：`ui/quickjs_value.h` → `ui/script_quickjs.cpp`（§6 行 11）', () => {
+  const SRC = new URL('apps/emulator-lift/src/', ROOT);
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const child = new URL(`${entry.name}${entry.isDirectory() ? '/' : ''}`, dir);
+      if (entry.isDirectory()) {
+        walk(child);
+      } else if (/\.(h|cpp)$/.test(entry.name)) {
+        files.push(child);
+      }
+    }
+  };
+  walk(SRC);
+  const hit = (needle) =>
+    files
+      // ★ 只看**代码**（`stripComments`）：`script_quickjs.cpp` 的头注里就**写着** `` `#include "quickjs.h"` ``
+      //   这句解释 —— 把注释算进来会把它判成"第二个 include 点"（假红）。
+      .filter((url) => stripComments(fs.readFileSync(url, 'utf8')).includes(needle))
+      .map((url) => url.pathname.replace(/^.*\/src\//, 'src/'))
+      .sort();
+  // ★ `quickjs.h` 只许被**一个**头 include（`ui/quickjs_value.h` 是唯一边界；⛔ 不许第二个 TU）。
+  assert.deepEqual(
+    hit('#include "quickjs.h"'),
+    ['src/ui/quickjs_value.h'],
+    '`quickjs.h` 的 include 点必须**恰好**是 `src/ui/quickjs_value.h`（第二个 include 点 = 第二个 QJS TU）',
+  );
+  // ★ 那个边界头只许被**一个** TU 消费（`script_quickjs.cpp`）⇒ 全仓只有一个 TU 认识 JS 类型。
+  assert.deepEqual(
+    hit('#include "ui/quickjs_value.h"'),
+    ['src/ui/script_quickjs.cpp'],
+    '`ui/quickjs_value.h` 的消费者必须**恰好**是 `src/ui/script_quickjs.cpp`（否则 JS 类型面扩散）',
+  );
+  // ★ 反向自检：判据不是"walk 没读到文件"—— 至少要有几十个源文件，且必须包含那两条边的两端。
+  assert.ok(files.length > 50, `walk 只读到 ${files.length} 个源文件（路径/扩展名写错了？）`);
+  assert.ok(hit('#include "runtime/input.h"').length > 0, '反向自检：连 `runtime/input.h` 都读不到 ⇒ walk 坏了');
 });
