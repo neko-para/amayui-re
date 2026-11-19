@@ -2,10 +2,11 @@
 
 - id: REQ-01M7MB6W1PF3KYCFFBN6JAVZ8A
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M7JHSD5MWTB9N8WJC2Y2T69M
 - repro: docs/03-emulator/scripts/SC0000.md#黑帧读数（2026-11-17 / macOS arm64 / HEAD 21c6bcd）
 - severity: S2
+- done_reason: 用户裁决（2026-11-19，本轮唯一裁决来源）：此单此前已修好、只是没关。证据：①P3 `c79da47` + P4 `f7f708d` 均已是 HEAD `d55b2c3` 的祖先；转场走 FX 路径（`apps/emulator-lift/src/runtime/d3d9.h:319-320` 报 PS 2.0 / VS 1.0；`apps/emulator-lift/src/shims/d3dx9_effect.cpp:836-837` 的 203 两条 technique 已进实现集；`apps/emulator-lift/src/runtime/d3d9_pipeline.cpp:4606` 未实现即 `pipelineTrap`），不再有「203 被拒 ⇒ 整段黑」这条路。②mac 三入口读数不复现持续黑：SAVE00=76/77 首帧 99.491% 非黑 / 204,220 与 204,138 色，黑只出现在 78 入口的 8 帧过渡；`--present window` 的窗口回读与 guest 后缓冲逐项相同（`docs/03-emulator/scripts/SC0000.md` 的「黑帧读数（2026-11-17 / macOS arm64 / HEAD 21c6bcd）」）。③`docs/03-emulator/d3dx-effect.md` §9/§10：FX 路径用户验收「与真机差不多了」，203 真画后转场由纯黑变为模糊的塔（`SN0000 pos=0xD190`：44 采样 1 个 hash ⇒ 25 采样 25 个 hash；nonblack 0% ⇒ uniq 3.2 万–28.9 万、亮度 244→102）。④`docs/03-emulator/audio.md` §5（win32）加载配方能到 SC0000、正常结局；文末「复测」（mac / HEAD `00af635`）缺省 caps 下黑区间 2.60 s（帧 1761–2671），不是持续黑。缺口：仍没有 win32 的「窗口回读 vs guest 后缓冲」像素读数（需 win32 装机，对应 `REQ-01M7JN5Z1GZ8BTB9FVY8AVY381`），故不挂 verify（游戏画面是产品观察，按 AGENTS §12.4 不进默认门禁）。保留 repro 作重开条件。
 - tags: [emulator-lift, render, sc0000]
 
 ## 现象（用户口径，2026-11-17）

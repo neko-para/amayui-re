@@ -2,8 +2,9 @@
 
 - id: REQ-01M7JN55VE9SA3KDHARYSSP6QW
 - type: spike
-- status: open
+- status: done
 - parent: REQ-01M7G7GPBG9BK2360WSG6DBFNP
+- done_reason: 设问是"AOT 臂能否在不引入第三份语义实现的前提下起 feeder"。答案：能，走 B —— feeder 经派发表取 LiftFn，在音频线程直接执行 IR；重入不是靠加重入守卫，而是给 feeder 一份私有 X86 副本（AudioEngine::audio_cpu_，audio.h:560 / audio.cpp:1790），AOT 的 feeder 执行器只碰这份副本（aot_feeder.h:22-28 / aot_feeder.cpp:19-105），并在注入 runner 时把 audio_cpu_.cache 置空（audio.cpp:1813-1815）⇒ 不需要 A 路的"只读解码 cache"，也不改 AGENTS.md §12.8。落地证据：732e503（新增 src/aot/aot_feeder.{h,cpp}、AOT 接 FeederGuestRunner、--audio sdl ⇒ feeder=host-thread、lead 19200 B）；装配见 aot_host.cpp:106-110（attach + setFeederGuestRunner）与 :144-153（thunk → runAotFeederGuest）；读数见 docs/03-emulator/audio.md §2.1/§3.1（pushed - played = 19200 B、calls=0、fills=3）。前提 1（续延机制是否活）对本选路不再是必要条件；前提 2 的答案 = AOT 不需要解码 cache。
 - tags: [emulator-lift, aot, audio, spike]
 
 ## 设问（限时，产出是结论不是实现）

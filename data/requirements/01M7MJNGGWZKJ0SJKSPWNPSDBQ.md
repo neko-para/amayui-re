@@ -2,10 +2,11 @@
 
 - id: REQ-01M7MJNGGWZKJ0SJKSPWNPSDBQ
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M7JHSD5MWTB9N8WJC2Y2T69M
 - repro: docs/03-emulator/scripts/SC0000.md#第 4 轮读数
 - severity: S2
+- done_reason: 用户裁决 2026-11-19（本单唯一裁决来源）：caps 之前已正确返回、相关能力已实现 ⇒ 可关闭；repro 保留为重开条件。【读数】① A/B 单变量（scripts/SC0000.md §第 5 轮「同一二进制 A/B」表）：同一二进制只改 caps，黑区间「≥1e8 条的帧」6→0、46.3e9→0.049e9 条；缺省 caps=0 才是 6 帧吃 99.5% 指令（17.8 s、单帧最大 20.46e9 / 4.0 s）。② 探针（本单正文「追加：caps 分路的验证」+ d3dx-effect.md §7）：PS=0x200 下 BlurTexture 0x004A62A0、其唯一动静调用点 0x004B3792、软件支入口 0x004B36EF 各 0 命中，effect draw 帮助函数 0x004A71B0 命中 ⇒ 软件模糊没进。③ P3 画面/像素（d3dx-effect.md §10.1「黑 → 有内容」）：203 真画后 SN0000 pos=0xD190 段 before 44 采样 = 1 个 hash（纯黑）、after 25 采样 = 25 个 hash，抽帧 uniq 8.2 万–28.9 万、亮度 244→102 斜坡 ⇒ 直接满足本单判据「多级灰阶帧，而不是一帧跳黑」。【源码 + 祖先】P4 f7f708d 与 P3 c79da47 均已在 HEAD 祖先里（git merge-base --is-ancestor 两查均过）：runtime/d3d9.h:319-320 固定 PS=0xFFFF0200 / VS=0xFFFE0100，runtime/d3d9.cpp:551 fillCaps 写入 +0xCC/+0xC4，shims/d3d9.cpp:415 effectCapsGuard 做 required==implemented 硬等式（缺一个启动 Trap），shims/d3dx9_effect.cpp:836-837 落 203 SlideBlur/ZoomBlur 两条 binding，runtime/d3d9_pipeline.cpp:463-470 未实现即 pipelineTrap ⇒ 等级 2 会建的 200/201/202/203 全在实现集内。【原假设处置】「caps 报 0 ⇒ 软件模糊 ⇒ 每帧 20e9」已被证实是缺省 caps=0 的成因，并由 P4 固定 caps=2.0 整条消除（psver opt-in 已删，⛔ 不走「报低一档」）⇒ 该「最强下一步假设」不再需要跟进。【裁决/推断，非读数】今天缺省档写进 +0xCC 的字节与上述 A/B、P3 两跑同值 ⇒ 引擎走同一条 FX 支、那段 39.5e9 窗口不再被选中；guest 代码原样在（caps=0 时仍会走），被消除的是「选中它」这件事。【读数缺口】P3/P4 之后没有再跑一次该转场的逐帧 hash 序列 ⇒ 缺「缺省档下端到端无 ≥1e8 单帧」的复测；本次按用户裁决 + 上述读数收口。【残余，非本单缺陷】配置键 display:PixelShader 可把效果等级压到 0/1（caps.md §7 第 3 条，缺省值未核）——配置值问题不是 caps 缺陷，且 required 已覆盖三档会建的程序。机制侧若 caps 退回 0：d3dx9-effect/caps-ps-version（其注释即「少报 ⇒ 引擎走软件模糊 / 转场 40+ s 黑屏」）、d3dx9-effect/effect-draw-blur-recorded、d3dx9-effect/blur-pixels 会红；仅作提示，不挂 verify（AGENTS §12.4：历史游戏画面回归不进默认门禁）。
 - tags: [emulator-lift, sc0000, script-wait]
 
 ## 一句话

@@ -2,9 +2,10 @@
 
 - id: REQ-01M7MHF67562WXHSRTEX3EQQG2
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M7JHSD5MWTB9N8WJC2Y2T69M
 - repro: docs/03-emulator/scripts/SC0000.md#第 2/3 步评估
+- done_reason: 用户裁决（2026-11-19，本轮唯一裁决来源）：此单此前已修好、只是没关。a 的判据（多级灰阶帧）已由 P3 `c79da47` 满足：203 的 SlideBlur(21-tap)/ZoomBlur(10-tap) 真画（MSL+DXBC 双源），`SN0000 pos=0xD190` 转场段 before 44 采样 = 1 个 hash（纯黑 `0xD11B…`）/ after 25 采样 = 25 个 hash，抽帧 nonblack 0% ⇒ uniq 32,079–289,101、亮度 244→102 的斜坡（`docs/03-emulator/d3dx-effect.md` §10.1）；P4 `f7f708d` 起 caps 缺省固定 2.0/1.0、`required == implemented` 启动硬等式（`docs/03-emulator/caps.md` §1/§3/§8），FX 路径不再是 opt-in。`docs/03-emulator/d3dx-effect.md` §9 用户验收：「FX 路径就是这条转场的答案」、与真机一致；203 真画后转场不再是黑的。c（黑白混合）本机不复现：章节卡淡入 62.89% 蓝向 / 1.36% 暗灰，完整卡 64.10% / 2.15%（`docs/03-emulator/scripts/SC0000.md` 第 4 轮），用户裁决视为已修。保留 repro 作重开条件；不挂 verify（最近守卫 `d3dx9-effect/blur-pixels` 只覆盖 203 像素且无 GPU 会 skip，不覆盖 a/c 整体；AGENTS §12.4 禁止把历史缺陷回归放进默认门禁）。
 - tags: [emulator-lift, d3d9, sc0000]
 
 ## 一句话
