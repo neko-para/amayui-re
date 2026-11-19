@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace lift {
@@ -40,8 +41,12 @@ struct HandleEntry {
 
 // 关闭一条句柄项时的**唯一**回收点（定义见 handles.cpp）。
 // ★ Win32 的合同："重复的句柄（`DuplicateHandle`）/ 同名对象（`Open*`）指向**同一个对象**，
-//   对象在**最后一个**句柄关闭时销毁"。⇒ 这里不数引用计数，而是问一句"还有别的活句柄
-//   指着同一个 payload 吗"：没有才调 `destroy`。⛔ 不许各处直接 delete payload（会 double-free）。
+//   对象在**最后一个**句柄关闭时销毁"。
+// ★ 实现：`add()` 每见到一个非空 payload 就把它在 `payload_refs_` 里的计数 +1；本函数据计数判
+//   "还有没有别的活句柄"（计数 1 = 最后一个 ⇒ `destroy`；>1 ⇒ 只减一、⛔ 不销毁）。
+//   ⛔ 不许各处直接 delete payload（会 double-free）；⛔ 减一**只能**发生在本函数里 ——
+//   `entry->payload` 在这里被置空，若放进 `close()` 就永远看到 nullptr ⇒ 计数只增不减（泄漏，
+//   而且下一个同地址的新对象会被误判成"共享"）。
 // 返回 true = 找到了这条句柄并断开（是否销毁见上面）。
 class HandleTable;
 bool releasePayload(HandleTable& table, std::uint32_t h);
@@ -60,7 +65,17 @@ public:
     // 返回句柄值；0 = 没找到（句柄值从 0x100 起 ⇒ 0 不可能是有效句柄）。
     std::uint32_t findNamed(HandleKind kind, const std::string& name) const;
     std::size_t size() const { return entries_.size(); }
-    void clear() { entries_.clear(); }
+    // ★ 清空表 + 两份派生索引（⛔ 不许分叉：索引里留着已关闭的值 = `DeleteObject` 白扫死槽）。
+    void clear();
+
+    // 活 DC 的句柄值（`kind == GdiDc` 且未关闭）。`DeleteObject` 问"这个对象还被某个 DC
+    // 选中吗"时**只**遍历这一份，⛔ 不再按句柄值扫全表（槽位只增不减 ⇒ 那是 O(累计槽数)）。
+    // ★ 维护点只有三处：`add`（DC ⇒ push）、`close`（DC ⇒ swap-pop）、`clear`。⛔ 别在别处改。
+    // ★ 索引只回答"**哪些 DC 还活着**"，**不**回答"它的 payload 有效"：DC 可以先 `releasePayload`
+    //   （payload 置空）再 `close` ⇒ 索引里会出现一条 `payload == nullptr` 的活 DC。
+    //   ⇒ `selectedAnywhere` 仍然要求 `kind == GdiDc && payload != nullptr`（它本来就要 `get()` 一层
+    //   防御）；⛔ 别把"索引里的每一条都必然有 payload"当成不变式。
+    const std::vector<std::uint32_t>& liveDcs() const { return live_dcs_; }
 
     // ---- 标准句柄三元组（`GetStdHandle` / `SetStdHandle` 的**进程级表**）----
     // ★ 文档：`SetStdHandle` 改的是进程级表，之后 `GetStdHandle` 要返回它；`GetFileType` /
@@ -96,11 +111,20 @@ public:
     [[noreturn]] void invalidHandle(std::uint32_t h, const char* api) const;
 
 private:
+    // ★ 引用计数的**唯一**读改写点就是 `releasePayload`（free function）⇒ 只给它开一个口子。
+    friend bool releasePayload(HandleTable& table, std::uint32_t h);
     struct Slot {
         std::uint32_t value = 0;
         HandleEntry entry;
     };
     std::vector<Slot> entries_;
+    // ★ B：活 DC 的句柄值（派生索引；与"`entries_` 里 kind==GdiDc 且 used"的集合恒等）。
+    std::vector<std::uint32_t> live_dcs_;
+    // ★ C：payload → 指向它的**活句柄数**（只在 `add` 里 +1、`releasePayload` 里 -1）。
+    //   ⛔ 这是实现细节：任何断言都不许读它 / 断言它的值。语义判据是"关一个不销毁、
+    //   最后一个才销毁"（`tests/sync_ext.cpp` 的 duplicate-handle + `tests/mechanism.cpp`
+    //   的 handle-table-payload-refcount）。
+    std::unordered_map<void*, std::uint32_t> payload_refs_;
     std::uint32_t std_handles_[kStdSlots] = {kStdDefault[0], kStdDefault[1], kStdDefault[2]};
 };
 

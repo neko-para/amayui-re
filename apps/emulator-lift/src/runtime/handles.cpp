@@ -44,7 +44,17 @@ std::uint32_t HandleTable::add(HandleKind kind, const char* name, void* payload,
     s.entry.aux = aux;
     s.entry.used = true;
     entries_.push_back(std::move(s));
-    return entries_.back().value;
+    const std::uint32_t value = entries_.back().value;
+    // ★ B：活 DC 索引（唯一 push 点）。★ C：payload 引用计数（唯一 +1 点）。
+    if (kind == HandleKind::GdiDc) live_dcs_.push_back(value);
+    if (payload != nullptr) ++payload_refs_[payload];
+    return value;
+}
+
+void HandleTable::clear() {
+    entries_.clear();
+    live_dcs_.clear();      // ★ 派生索引必须跟着表一起清（⛔ 不许分叉）
+    payload_refs_.clear();  // ★ 引用计数同理：表没了，就没有"活句柄"了
 }
 
 HandleEntry* HandleTable::get(std::uint32_t h) {
@@ -79,20 +89,19 @@ bool releasePayload(HandleTable& table, std::uint32_t h) {
     HandleEntry* entry = table.get(h);
     if (!entry) return false;
     if (!entry->payload) return true;
-    // ★ 判据是"还有没有**别的活句柄**指着同一个 payload"（不是引用计数：两个句柄各自不知道对方）。
-    bool shared = false;
-    const std::uint32_t end =
-        HandleTable::kFirst + HandleTable::kStep * static_cast<std::uint32_t>(table.size());
-    for (std::uint32_t other = HandleTable::kFirst; other < end; other += HandleTable::kStep) {
-        if (other == h) continue;
-        if (const HandleEntry* o = table.get(other)) {
-            if (o->payload == entry->payload) {
-                shared = true;
-                break;
-            }
-        }
+    // ★ C：判据仍是"还有没有**别的活句柄**指着同一个 payload"，只是从"再扫一遍全表"变成
+    //   `add()` 时记下的**引用计数**（计数 1 = 最后一个）。旧实现每次都要扫 `table.size()` 个槽，
+    //   而槽位只增不减 ⇒ 每次 `DeleteObject` / `CloseHandle` 都付一遍 O(累计槽数)。
+    //   ⛔ 减一只在这里：下面就把 `entry->payload` 置空了（放进 `close()` 会看到 nullptr ⇒
+    //   计数只增不减 ⇒ 永不销毁 + 下一个同地址对象被误判成"共享"）。
+    auto it = table.payload_refs_.find(entry->payload);
+    const std::uint32_t count = (it == table.payload_refs_.end()) ? 0u : it->second;
+    if (count <= 1u) {
+        if (it != table.payload_refs_.end()) table.payload_refs_.erase(it);
+        if (entry->destroy) entry->destroy(entry->payload);
+    } else {
+        it->second = count - 1u;
     }
-    if (!shared && entry->destroy) entry->destroy(entry->payload);
     entry->payload = nullptr;
     entry->destroy = nullptr;
     return true;
@@ -108,13 +117,23 @@ std::uint32_t HandleTable::findNamed(HandleKind kind, const std::string& name) c
 }
 
 bool HandleTable::close(std::uint32_t h) {
-    for (Slot& s : entries_) {
-        if (s.value == h && s.entry.used) {
-            s.entry.used = false;
-            return true;
+    // ★ A：下标反算（O(1)），**不是**线性扫描。判据与 `get()` 逐条相同（值唯一且下标=位置）
+    //   ⇒ 与旧实现"存在 value==h 且 used 的槽"等价：非法形状（<kFirst / 非 kStep 倍数 / 越界）
+    //   两条实现都返回 false。槽位仍然只增不减（槽位复用是另一张语义单）。
+    HandleEntry* entry = get(h);
+    if (entry == nullptr) return false;
+    entry->used = false;
+    // ★ B：DC 关闭 ⇒ 从活 DC 索引里 swap-pop 掉（O(#活 DC)，~10 以内）。
+    //   ⛔ 漏了这一步会让 `DeleteObject` 扫到已关的值（`get()` 兜得住，但那就退化成扫死槽）。
+    if (entry->kind == HandleKind::GdiDc) {
+        for (std::size_t i = 0; i < live_dcs_.size(); ++i) {
+            if (live_dcs_[i] != h) continue;
+            live_dcs_[i] = live_dcs_.back();
+            live_dcs_.pop_back();
+            break;
         }
     }
-    return false;
+    return true;
 }
 
 void HandleTable::invalidHandle(std::uint32_t h, const char* api) const {

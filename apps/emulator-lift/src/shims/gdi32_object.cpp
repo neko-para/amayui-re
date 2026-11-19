@@ -27,10 +27,12 @@ GdiDcObject* requireDc(X86& cpu, std::uint32_t hdc, const char* api) {
 }
 
 // 这个对象句柄是不是被**任何一个 DC** 选中（DeleteObject 的判据）
+// ★ B：只遍历**活 DC** 索引（`HandleTable::liveDcs()`），⛔ 不再按句柄值扫全表 ——
+//   槽位只增不减 ⇒ 旧实现每次 `DeleteObject` 都付一遍 O(累计槽数)（这台机器上实测 16–216 µs/次）。
+//   索引与"`entries_` 里 kind==GdiDc 且 used"恒等（维护点：add / close / clear），
+//   这里仍然用 `get()` 取 entry 并核对 kind / payload（索引坏掉时安全跳过）。
 bool selectedAnywhere(const HandleTable& table, std::uint32_t object) {
-    const std::uint32_t end =
-        HandleTable::kFirst + HandleTable::kStep * static_cast<std::uint32_t>(table.size());
-    for (std::uint32_t value = HandleTable::kFirst; value < end; value += HandleTable::kStep) {
+    for (const std::uint32_t value : table.liveDcs()) {
         const HandleEntry* entry = table.get(value);
         if (entry == nullptr || entry->kind != HandleKind::GdiDc || entry->payload == nullptr) continue;
         const auto* dc = static_cast<const GdiDcObject*>(entry->payload);

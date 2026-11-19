@@ -784,6 +784,20 @@ int main() {
         LIFT_CHECK(table.get(lift::HandleTable::kFirst + 1u) == nullptr);
         LIFT_CHECK(table.get(c + 4u) == nullptr);
         LIFT_CHECK(table.get(0xFFFFFFFCu) == nullptr);  // 不因为 (h - kFirst) 溢出而回绕进表
+        // ★ `close()` 的判据必须与 `get()` 逐条等价（旧实现是"存在 value==h 且 used 的槽"，
+        //   新实现是下标反算 + 值核对）⇒ 非法形状一律 false，且**不许误伤**别的活句柄。
+        //   ⛔ 这条不测快慢（同上面那条纪律）。
+        LIFT_CHECK(!table.close(0x102u));  // `kFirst + 2`：不是 kStep 的整数倍
+        LIFT_CHECK(!table.close(c + 4u));  // 越界（槽位只增不减 ⇒ 还没有这一条）
+        LIFT_CHECK(!table.close(0u));
+        LIFT_CHECK(!table.close(lift::HandleTable::kFirst - 4u));
+        LIFT_CHECK(!table.close(0xFFFFFFFCu));  // 不因为 (h - kFirst) 溢出而回绕进表
+        LIFT_CHECK(table.get(a) != nullptr);
+        LIFT_CHECK(table.get(c) != nullptr);
+        // 重复 close ⇒ false（已经不是活句柄），且仍然不误伤邻居
+        LIFT_CHECK(!table.close(b));
+        LIFT_CHECK(table.get(a) != nullptr);
+        LIFT_CHECK(table.get(c) != nullptr);
         // 新加的槽接在末尾，旧下标仍然命中自己那一条
         const std::uint32_t d = table.add(lift::HandleKind::Mutex, "d", nullptr);
         LIFT_CHECK_EQ_U32(d, 0x10Cu);
@@ -791,6 +805,114 @@ int main() {
         LIFT_CHECK(table.get(c)->kind == lift::HandleKind::Timer);
         LIFT_CHECK(table.get(d)->kind == lift::HandleKind::Mutex);
         LIFT_CHECK(table.get(b) == nullptr);
+        // 合法 close：只让目标消失（下标反算不许串号）
+        LIFT_CHECK(table.close(d));
+        LIFT_CHECK(table.get(d) == nullptr);
+        LIFT_CHECK(table.get(a) != nullptr);
+        LIFT_CHECK(table.get(c) != nullptr);
+    }
+
+    // ---- ④a 句柄表：**payload 的销毁时机**（C：用引用计数代替"再扫一遍全表"） ----
+    //   ★ 判据是**语义**：同一 payload 的多个句柄（`DuplicateHandle` 的形态）关一个**不销毁**、
+    //     **最后一个**才销毁一次。⛔ 不断言引用计数的内部数字（实现细节）。
+    //   ★ 为什么这条必须存在：引用计数写错的两个方向都会静默 —— 提前 destroy = 共享句柄留野指针；
+    //     漏减 = payload 永不销毁（泄漏）。而"无条件 destroy"那一个变异会让这条**当场红**。
+    {
+        g_current_case = "handle-table-payload-refcount";
+        lift::HandleTable table;
+        int destroyed = 0;
+        const auto count_destroy = [](void* p) { ++*static_cast<int*>(p); };
+        const std::uint32_t h1 = table.add(lift::HandleKind::Event, "p1", &destroyed);
+        const std::uint32_t h2 = table.add(lift::HandleKind::Event, "p2", &destroyed);
+        const std::uint32_t h3 = table.add(lift::HandleKind::Event, "p3", &destroyed);
+        for (const std::uint32_t h : {h1, h2, h3}) {
+            lift::HandleEntry* e = table.get(h);
+            LIFT_CHECK(e != nullptr);
+            LIFT_CHECK(e->payload == &destroyed);  // 三条指向**同一个**对象
+            if (e != nullptr) e->destroy = count_destroy;
+        }
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(destroyed), 0u);  // add 不销毁
+        LIFT_CHECK(lift::releasePayload(table, h1));
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(destroyed), 0u);  // 还有两条活句柄 ⇒ 不销毁
+        LIFT_CHECK(table.close(h1));
+        LIFT_CHECK(lift::releasePayload(table, h2));
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(destroyed), 0u);  // 还剩一条 ⇒ 不销毁
+        LIFT_CHECK(table.close(h2));
+        LIFT_CHECK(lift::releasePayload(table, h3));
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(destroyed), 1u);  // 最后一个 ⇒ 销毁**一次**
+        // 已释放的句柄再 release ⇒ true 且不再销毁（payload 已被置空）
+        LIFT_CHECK(lift::releasePayload(table, h3));
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(destroyed), 1u);
+        LIFT_CHECK(table.close(h3));
+        // `payload = nullptr`（`AddFontMemResourceEx` 的形态）**不进计数**：release 返回 true、不销毁
+        const std::uint32_t n1 = table.add(lift::HandleKind::GdiFontMem, "n1", nullptr);
+        const std::uint32_t n2 = table.add(lift::HandleKind::GdiFontMem, "n2", nullptr);
+        LIFT_CHECK(lift::releasePayload(table, n1));
+        LIFT_CHECK(lift::releasePayload(table, n2));
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(destroyed), 1u);
+        LIFT_CHECK(table.close(n1));
+        LIFT_CHECK(table.close(n2));
+    }
+
+    // ---- ④b 句柄表：**活 DC 索引**（B：`selectedAnywhere` 只扫活 DC，不再按句柄值扫全表） ----
+    //   ★ 判据：索引与"`kind == GdiDc` 且仍活着的槽"这个集合**恒等**。
+    //     `DeleteObject` 每次都要问"这个对象还被某个 DC 选中吗"；旧实现按句柄值扫全表，
+    //     而槽位只增不减 ⇒ 单次 O(槽数)。索引漏维护的两种失效（add 漏记 / close 漏删）
+    //     都在这条里：前者让 `DeleteObject` 看不见活 DC（错删被选中的对象），后者让索引留下
+    //     已关的值（白扫；`get()` 兜得住，但那就退化成"扫死槽"了）。⛔ 这条不测快慢。
+    {
+        g_current_case = "handle-table-live-dcs";
+        lift::HandleTable table;
+        // ★ `liveDcs()[0]` 一律经过这个口子：断言失败不中止（`LIFT_CHECK` 只记失败）⇒
+        //   size 断言失手时**不许**直接下标越界（那会把"红"变成"崩"）。
+        const auto first_live_dc = [&table]() -> std::uint32_t {
+            return table.liveDcs().empty() ? 0xFFFFFFFFu : table.liveDcs()[0];
+        };
+        LIFT_CHECK(table.liveDcs().empty());
+        const std::uint32_t dc1 = table.add(lift::HandleKind::GdiDc, "dc1", nullptr);
+        const std::uint32_t font = table.add(lift::HandleKind::GdiFont, "font", nullptr);
+        const std::uint32_t dc2 = table.add(lift::HandleKind::GdiDc, "dc2", nullptr);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(table.liveDcs().size()), 2u);
+        bool has_dc1 = false;
+        bool has_dc2 = false;
+        bool has_font = false;
+        for (const std::uint32_t value : table.liveDcs()) {
+            if (value == dc1) has_dc1 = true;
+            if (value == dc2) has_dc2 = true;
+            if (value == font) has_font = true;
+        }
+        LIFT_CHECK(has_dc1);
+        LIFT_CHECK(has_dc2);
+        LIFT_CHECK(!has_font);  // 只有 DC 进索引
+        // 关一个 DC ⇒ 索引里只剩另一个（已关的值不许留：那会让 `DeleteObject` 白扫死槽）
+        LIFT_CHECK(table.close(dc1));
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(table.liveDcs().size()), 1u);
+        LIFT_CHECK(!table.liveDcs().empty());
+        LIFT_CHECK(first_live_dc() != dc1);
+        LIFT_CHECK_EQ_U32(first_live_dc(), dc2);
+        // 非 DC 的 close 不动索引
+        LIFT_CHECK(table.close(font));
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(table.liveDcs().size()), 1u);
+        LIFT_CHECK_EQ_U32(first_live_dc(), dc2);
+        // clear() ⇒ 表与索引一起清（⛔ 不许分叉）
+        table.clear();
+        LIFT_CHECK(table.liveDcs().empty());
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(table.size()), 0u);
+        int dc3_payload = 0;
+        const std::uint32_t dc3 = table.add(lift::HandleKind::GdiDc, "dc3", &dc3_payload);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(table.liveDcs().size()), 1u);
+        LIFT_CHECK_EQ_U32(first_live_dc(), dc3);
+        // ★ 边界形态（复审建议①）：DC 先走 `releasePayload`（payload 被置空）**但不 close**
+        //   ⇒ 它仍是**活 DC**（索引里必须在），而 `selectedAnywhere` 会因为 `payload == nullptr` 跳过它。
+        //   ⇒ 之后 `close` 仍必须从 `live_dcs_` 里正确移除（索引删除只看 kind + 句柄值，不读 payload）。
+        LIFT_CHECK(lift::releasePayload(table, dc3));
+        LIFT_CHECK(table.get(dc3) != nullptr);                             // release 不 close ⇒ 仍活着
+        LIFT_CHECK(table.get(dc3)->payload == nullptr);                    // …但 payload 已断开
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(table.liveDcs().size()), 1u);
+        LIFT_CHECK_EQ_U32(first_live_dc(), dc3);
+        LIFT_CHECK(table.close(dc3));
+        LIFT_CHECK(table.liveDcs().empty());  // ⛔ 索引里不许留一条 payload 已空的死 DC
+        LIFT_CHECK(table.get(dc3) == nullptr);
     }
 
     // =====================================================================================

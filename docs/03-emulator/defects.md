@@ -902,3 +902,36 @@
   `0.8 s×30 fps` **不自洽**。**它对画面有没有可见影响未证**（⇒ S3）。
 - **未定论**：源本身是否只有 1 帧 / 泵的时钟取自哪里 / `completed` 判据 —— 三条候选都要先取读数（逐帧 pts、
   `Receive` 次数）。**需求单**：`REQ-01M7R1AR688T09G2T65GY8SZGG`（S3）。
+### BUG-36 · 句柄表全表扫描：OPTION 文本重绘时 `DeleteObject` 216 µs/次（随会话线性涨、占墙钟 32%）
+
+- **现象**：文本密集的 UI（TITLE → OPTION 后点击/拖动滚动条重绘列表）明显卡顿；overlay PROFILE 里
+  `shim:gdi32!DeleteObject` 单次成本随**会话时长**线性上涨：
+  - 用户长会话：`880.697 ms / N=4066`（**216 µs/次**，31.9% 墙钟）；
+  - 本机 60 s 预热：`99.229 ms / N=6142`（**16.2 µs/次**）；同一场景**不预热**（表更小）⇒ 不进 top-15。
+  ⇒ 同一份代码、同一条路径，成本只随"表有多长"变。
+- **根因**：`HandleTable` 槽位**只增不减**（`close()` 只置 `used=false`，`entries_` 从不回收；`clear()` 产品零调用者），
+  而一次成功的 `DeleteObject` 要跑三条 O(N) 扫描：① `selectedAnywhere()` 遍历全部句柄找"有没有 DC 选中它"
+  （每次迭代还付跨 TU 的 `get()`）；② `releasePayload()` 的"还有没有别的活句柄指同一 payload"；
+  ③ `close()` 的线性扫描。实测 OPTION 列表每次重绘约 **+43 槽/帧**、每次滚条点击批量 **~2047 次**
+  `DeleteObject`（TITLE→OPTION 那一帧 2766 次）⇒ 会话越长越慢（用户那台 ≈10 万槽对得上 216 µs/次）。
+  `CloseHandle` 完全同构，同一批修法一起受益。
+- **修法**：A `HandleTable::close()` 改下标反算（逐位等价）；B `selectedAnywhere()` 只遍历 `live_dcs_`
+  活 DC 索引（`add`/`close`/`clear` 三处维护）；C `releasePayload()` 用 `payload_refs_` 引用计数
+  （`add` +1 / `release` -1；`<=1` 才 destroy+erase；减一**只能**在 `releasePayload`）。
+  ⛔ 不做"GDI payload 独一无二"快路径（`DuplicateHandle` 不查种类 ⇒ 共享 font 会 use-after-free）；
+  ⛔ 不做槽位复用（会破 `mechanism#handle-table-index-lookup` 的"只增不减"断言；属另一张语义单）。
+- **读数（修前 → 修后，同配方 `scenario2.plan`，60 s 预热、`--present window --overlay`）**：
+  `DeleteObject` 99.229 ms / N=6142 → **0.931 ms / N=6142**（16.15 → 0.152 µs/次，**−99.06% / 106×**），
+  修后**掉出 top-15 具名行**；`--profile` 的 `waithist` 全 0 ⇒ 修前的 99 ms 不是等 guest 令牌。
+- **守卫**：`mechanism#handle-table-payload-refcount`（共享 payload 关一个不销毁、最后一个销毁一次）、
+  `mechanism#handle-table-live-dcs`（活 DC 索引与 `kind==GdiDc && used` 恒等）、
+  `mechanism#handle-table-index-lookup`（close 的非法形状 / 重复 close 等价）、
+  `sync-ext#duplicate-handle`（合同原件）。变异 `无条件 destroy`（`releasePayload`）⇒ `sync-ext` 当场红。
+  全量 ctest **127/127 passed**（4 skipped）、`pnpm test` 587/587、`pnpm verify` 500 pass/2 skip。
+- **复现**：`TITLE → OPTION（click 812 622）→ 等 CONFIG1 → 空转 60 s 让句柄表长到几千槽 →
+  OVERLAY 点 PROFILE → 点击/拖动滚动条重绘 → 再点 PROFILE`。配方 / 读数见
+  `.tmp/deleteobject-profile/report.md`（`scenario2.plan`；⚠ 性能读数 ⛔ 用 `--present-hidden`，
+  那档有一次 1.66 s/帧的观测，尚未做 visible/hidden 对照）。
+- **未做 / 同源**：槽位仍无界（长跑内存 + `findNamed` 的 O(used)+string 比较是下一处候选）；
+  Present 的整幅 GPU 回读（同一次 profile 821 ms/115 帧）是另一张单（`REQ-01M7S5KFRPAB6KSC033ECDHYMW`）。
+- **需求单**：`REQ-01M7S7F7NVHY0EVWWBQAQMKHWT`（S2，2026-11-19 修复）。

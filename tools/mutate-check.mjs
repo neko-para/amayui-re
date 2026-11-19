@@ -4869,6 +4869,40 @@ const MUTATIONS = [
       '`writeRenderState`）⇒ 普通批次读到引擎残留的 `ONE/ZERO` ⇒ d3dx9-sprite-blend 的' +
       '"接管与恢复"（`19==5` / `20==6`）与"像素回归"（透明 texel 把背景写成黑）当场红',
   },
+
+  // ── 句柄表的 payload 引用计数（`releasePayload` 不再扫全表；守卫 = CTest `sync-ext`）──
+  //   ★ 代表"**关闭时机**判据被去掉"这一类错：`DuplicateHandle` 让两条句柄指向**同一个** payload，
+  //     合同是"关一个**不销毁**、最后一个才销毁"。旧实现靠"再扫一遍全表找同 payload 的活句柄"，
+  //     新实现靠 `add()` 时 +1、`releasePayload()` 里 -1 的计数。
+  //     变异 = 计数分支退化成**无条件 destroy** ⇒ 关掉原件就把共享对象 delete 了，
+  //     副本句柄从此指着已释放的内存（`SetEvent` 读野对象 / 第二次 close 再 free 一次）。
+  //   ★ 为什么守卫是 `sync-ext` 的 `duplicate-handle`：它就是这条合同的原件（关 h1 后 h2 仍要能
+  //     `SetEvent` / `WaitForSingleObject`）⇒ 该用例的断言（`f.ok`）当场红。
+  //   ★ 同一语义面另由 `mechanism` 的 `handle-table-payload-refcount` 钉住（纯表、不启动 CPU）：
+  //     无条件 destroy 会让"前两次 release 的 destroy 计数必须 =0"当场红。
+  {
+    file: 'apps/emulator-lift/src/runtime/handles.cpp',
+    from:
+      '    if (count <= 1u) {\n' +
+      '        if (it != table.payload_refs_.end()) table.payload_refs_.erase(it);\n' +
+      '        if (entry->destroy) entry->destroy(entry->payload);\n' +
+      '    } else {\n' +
+      '        it->second = count - 1u;\n' +
+      '    }',
+    to:
+      '    // 变异：无条件 destroy（不看还有没有别的活句柄指着它）\n' +
+      '    (void)count;\n' +
+      '    if (it != table.payload_refs_.end()) table.payload_refs_.erase(it);\n' +
+      '    if (entry->destroy) entry->destroy(entry->payload);',
+    guard: 'ctest:sync-ext',
+    ctest: 'sync-ext',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-sync-ext',
+    what:
+      'releasePayload 的引用计数分支退化成**无条件 destroy** ⇒ 关掉 `DuplicateHandle` 的原件就把共享对象' +
+      '销毁了（副本句柄留野指针 / 再 close 一次 double free）⇒ sync-ext 的 duplicate-handle 当场红；' +
+      '同一变异也会让 mechanism 的 handle-table-payload-refcount（前两次 release 的 destroy 计数必须 0）红',
+  },
 ];
 
 let mutationRunSeq = 0;

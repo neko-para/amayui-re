@@ -1080,8 +1080,9 @@ void shimDuplicateHandle(X86& cpu, ShimCall& call) {
     std::uint32_t dup = 0;
     if (dst_proc != 0) {
         // 复制：与源句柄**共享** payload（文档："duplicate handle refers to the same object"）。
-        // ★ 生命周期由 `releasePayload()` 的"还有没有别的活句柄指着同一个 payload"判定，
-        //   ⛔ 这里不要写引用计数（两个句柄各自记数必然对不上）。
+        // ★ 生命周期由 `releasePayload()` 的"还有没有别的活句柄指着同一个 payload"判定：
+        //   计数在 `HandleTable::add`（+1）/ `HandleTable::releasePayload`（−1）里**统一**维护
+        //   ⇒ 本处只负责复制 payload / destroy 字段，⛔ 不要在这里另记一份（两个 shim 各自记数必然对不上）。
         dup = cpu.handles->add(src_kind, src_name.c_str(), src_payload, src_aux);
         if (HandleEntry* ne = cpu.handles->get(dup)) {
             ne->destroy = src_destroy;
