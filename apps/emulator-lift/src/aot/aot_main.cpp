@@ -1014,7 +1014,12 @@ int main(int argc, char** argv) {
         // ★ 帧列表读数源（`game.local_frames()`）：叠层打开时接一次（脚本按需查询，⛔ 不每帧推表）。
         //   `sink()` 可能为空（`setSink` 失败 / 被换掉）⇒ 判空。
         if (overlay) {
-            if (lift::PresentSink* sink = host.presenter().sink()) sink->setUiFrameSource(host.frameSource());
+            if (lift::PresentSink* sink = host.presenter().sink()) {
+                sink->setUiFrameSource(host.frameSource());
+                // ★ 宿主能力表（`host.profileBegin/End`；切片 3）：与 frame source 同一装配点。
+                //   生命周期 = `AotHost` 成员；sink 由 `presenter()` 拥有 ⇒ 先于 host 析构。
+                sink->setUiHostOps(host.uiHostOps());
+            }
         }
         // ★ AOT 没有输入脚本 / 交互图（那是解释器臂的宿主控制面）⇒ 泵里只有 SDL 事件。
         host.cpu().windows->setHostEventPump(

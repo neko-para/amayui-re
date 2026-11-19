@@ -66,6 +66,9 @@
 #include "runtime/surface.h"
 #include "runtime/vfs.h"
 #include "runtime/x86.h"
+// ★ 宿主能力表 `ui::UiHostOps`（切片 3）：`frame_source_` 那一路上已经经 `engine_frames.h` 拿到
+//   `ui/script.h`，这里**显式**写一行 —— 成员类型是它，别把依赖留给传递 include。
+#include "ui/script.h"
 
 namespace lift {
 // ★ 控制层端点（`runtime/control.h`）：这里只**前置声明** —— ⛔ 不 include control.h 的实现面，
@@ -359,8 +362,17 @@ public:
     // 收窗：算两个边沿 sliver、打表（含 `unaccounted` 与 `INVALID` 判定）、关闸门。
     // ★ 未闭合（配方只写 `profile_begin`）时由 `run()` 的收口路径调它 ⇒ ⛔ 不静默丢数据。
     void endWindow();
-    // 状态位（`REQ-01M7QF01A00F9946DX0GPH23JQ` 设计第 2 条的只读半边；`endWindowText` 是切片 3）。
+    // ★ 收窗的**取文本**版本（切片 3）：把 `endWindow()` 的函数体原样做完（关窗 + 快照 + 关闸门），
+    //   但**不打印** —— `*text` = `formatWindowReportText` 的全文（⛔ 不在这里拼格式串）。
+    //   true = 有一段开着的窗口、已被收口；false = 没有开着的窗口（幂等；一个字节都不动）。
+    //   `endWindow()` = 成功则 `fputs(text)` ⇒ stdout **逐字不变**（切片 1 的金样判据继续有效）。
+    bool endWindowText(std::string* text);
+    // 状态位（`REQ-01M7QF01A00F9946DX0GPH23JQ` 设计第 2 条的只读半边）。
     bool profileOpen() const { return win_.profileOpen(); }
+    // ★ 宿主能力表（`REQ-01M7QF01A00F9946DX0GPH23JQ` 切片 3）：`ctx = this`，两个 thunk 见下。
+    //   返回**成员**地址（生命周期 = 本宿主）；`aot_main` 在 `--overlay` 时交给 sink。
+    //   ⛔ 不要把 ops 建在 `aot_main` 的局部变量里（析构顺序反了：局部先于 host 亡）。
+    const ui::UiHostOps* uiHostOps();
     // 窗口标记的落点（`InputPlan::ProfileMarkHook` 的 thunk）：begin ⇒ 开窗，end ⇒ 打表 + 关窗。
     // ★ 静态 + `void*` 上下文 = 与 `InputPlan` 的 C 形状钩子对齐（⛔ 不用 std::function：
     //   那会在每个读点付一次间接跳转，而"缺省零成本"是硬口径）。`aot_main.cpp` 取它的地址。
@@ -426,6 +438,13 @@ private:
     // ★ 控制层 Present 闸门的 C 函数指针（`HeadlessPresenter::setPresentGate` 的形状；
     //   `user` = 本宿主）。只在主线程被调；`control_ == nullptr` 时已摘掉，不会进这里。
     static bool presentGateThunk(void* user);
+    // ★ 宿主能力表的两个 thunk（`UiHostOps::profile_begin/end` 的形状；`ctx` = 本宿主）。
+    //   只在 render（`drawOverlay`，Present 主线程）里被脚本间接调用。
+    //   `profile_begin`：已开 ⇒ false + 一行 stderr（与配方路径同样的可见性，⛔ stdout 不动）。
+    //   `profile_end`：收窗 → 取文本 → **写系统剪贴板** → 一行 stderr；剪贴板失败只写 `*err`，
+    //   `text` **不回滚**（需求单"INVALID 仍复制"）。默认档**不周期输出**（只在失败 / 拒绝时一行）。
+    static bool uiProfileBeginThunk(void* ctx, const char* label, std::string* err);
+    static bool uiProfileEndThunk(void* ctx, std::string* text, std::string* err);
     // 块边界的宿主泵（三个合成 EA：`0x7FFEF008` 续延 / `0x7FFEF004` 定时器返回 / SEH 派发）。
     // ★ 这三个 EA 都**落在 shim 桩页范围内**（0x7FFE0000 + 0x2000 槽）⇒ 必须在"桩 EA ⇒ lift_shim"
     //   之前认出来，否则会被当成普通桩 EA 而落到 `lift_shim` 的"桩 EA 不在注册表"响亮停上
@@ -483,6 +502,12 @@ private:
     //   `LIFT_AOT_AUDIO_TRACE`）。⚠ 它**不是**第二份音频语义：判据 / 记账只有这一份。
     AudioPumpGate audio_pump_;
     SurfaceArena surfaces_;
+    // ★ 宿主能力表（`host.profileBegin/End` 的唯一来源；切片 3）。`ctx = this`，两个 thunk 在 `.cpp`。
+    //   ★ **声明在 `presenter_` 之前** = 析构**晚于** `presenter_`：sink 由 `presenter_` 拥有，
+    //     而 sink 只存本表的**非 owning 指针** ⇒ "sink 先于 ops 析构"由成员次序保证（不是靠注释）。
+    //     ⛔ 不要把它挪到 `presenter_` 之后（那样 ops 的存储先于 sink 结束，未来有人在 sink
+    //     析构里读 ops 就是悬垂）。
+    ui::UiHostOps ui_host_ops_{};
     HeadlessPresenter presenter_;
     Seh seh_;
     X86 cpu_;

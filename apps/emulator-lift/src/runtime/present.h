@@ -24,6 +24,8 @@ namespace lift::ui {
 // ★ 帧列表读数源（`game.local_frames()`；`ui/script.h` 的 `UiFrameSource`）。
 //   ⛔ 本头不 include `ui/script.h` —— 只前向声明，保持 present.h 的轻量 / SDL-free。
 class UiFrameSource;
+// ★ 宿主能力表（`host.*`；`ui/script.h` 的 `UiHostOps`）。同样只前向声明（SDL-free）。
+struct UiHostOps;
 }  // namespace lift::ui
 
 namespace lift {
@@ -92,6 +94,11 @@ public:
     //   ⛔ 默认 no-op；只有窗口 sink 存指针，并在渲染那一帧塞进 `UiFrameReadings::frames`。
     //   调用点：`Machine::run()` / `aot_main` 在叠层打开时接一次（⛔ 不每帧推表）。
     virtual void setUiFrameSource(ui::UiFrameSource* /*src*/) {}
+    // ★ **宿主能力表**（`host.profileBegin/End` 的唯一来源；`REQ-01M7QF01A00F9946DX0GPH23JQ` 切片 3）。
+    //   非 owning；`nullptr` = 不接（headless / 测试替身 / 叠层没开）⇒ 脚本侧 `host.*` 抛 TypeError。
+    //   ⛔ 默认 no-op；只有窗口 sink 存指针，并在渲染那一帧塞进 `UiFrameReadings::host`。
+    //   调用点：`aot_main` 在叠层打开时接一次（生命周期与 `setUiFrameSource` 逐字相同）。
+    virtual void setUiHostOps(const ui::UiHostOps* /*ops*/) {}
     virtual bool overlayEnabled() const { return false; }
     // ★ **系统对话框**（`runtime/message_box.h` 的 `ModalSpec`）：唯一的宿主呈现缝。
     //   窗口 sink 用 `SDL_ShowMessageBox` 实现（会阻塞；实现方负责把阻塞放进 `GuestToken::YieldGuard`），

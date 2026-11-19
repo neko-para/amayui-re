@@ -127,6 +127,15 @@ std::vector<ui::UiFrameInfo> EngineFrameSource::localFrames(std::string* err) {
         info.script_id = id;
         info.parent = parent;
         info.top = (slot == cur);
+        // ★ 脚本内位置（切片 3）：**只有 top 帧是当前执行点**（判据 = `slot == cur`，与 `top`
+        //   同一个布尔）。公式 / 门 / 错误串的唯一实现在 `engine_marker.cpp:readScriptPositionAt`
+        //   （⛔ 不在这里写第二份）。非 top 帧的 `+0x04` 是挂起时保存的续延 PC ⇒ 不暴露。
+        //   ★ 单槽读不到 ⇒ 只让这一项 `pos_ok=false`（⛔ 不把整表升级成 err：那一帧仍在表里）。
+        if (info.top) {
+            const ScriptPositionSample p = readScriptPositionAt(mem, engine, slot);
+            info.pos_ok = p.valid;
+            info.pos = p.pos;
+        }
 
         // ⑥ 名字（复用 MarkerSampler；每槽缓存 `(id, sig)`）。
         NameCacheEntry& cached = cache_[slot];

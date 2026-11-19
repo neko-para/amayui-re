@@ -96,6 +96,13 @@ struct ScriptPositionSample {
 //   只读 guest 内存，不依赖 Machine / X86；`identity.valid == false` ⇒ 不成立（继续等，⛔ 不报错）。
 ScriptPositionSample readScriptPositionSample(const GuestMemory& mem, const MarkerSample& identity);
 
+// ★ **按槽号**读位置（切片 3：帧列表 / `game.local_frames()[i].pos` 用）。
+//   `engine` 由调用方给（帧列表已经读过单例；⚠ 调用方负责"读完再复查 engine 没变"）。
+//   门 / 错误串 / 公式与 `readScriptPositionSample` **逐条相同** —— 后者就是
+//   "identity 检查 + 取 engine + 调本函数"，⛔ 不许在调用方复制第二份判据。
+//   `slot` 越界不在这里判：帧列表只对已确认 `committed` 的记录调用。
+ScriptPositionSample readScriptPositionAt(const GuestMemory& mem, std::uint32_t engine, std::uint32_t slot);
+
 // marker 采样器（有状态：告警**每类只打一次**；计数供 run summary / CTest 读）。
 // ★ 纯档夹具直接 `MarkerSampler s; s.sample(machine.mem())` 即可驱动一次采样。
 class MarkerSampler {

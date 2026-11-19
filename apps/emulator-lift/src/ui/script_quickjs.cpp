@@ -646,8 +646,8 @@ Value makeWorstObject(JSContext* ctx, const UiFrameReadings& r) {
 //   （strict 下赋值 ⇒ TypeError）。
 // ★ 取不到的口径：`frames == nullptr` / 宿主 `err` 非空 / 空表 ⇒ **undefined**
 //   （⛔ 不编 0 / 空对象 / 空数组冒充读数）。字段 = 报告的最小版：slot / script_id / parent /
-//   script / name_degraded / top；`script_id` / `parent` 是 **uint32 原值**（`0xFFFFFFFF` 打印成
-//   `4294967295`，⛔ 不转成 -1）。
+//   script / name_degraded / top / **pos（切片 3：只有 top 帧有，其余没有这个键）**；
+//   `script_id` / `parent` 是 **uint32 原值**（`0xFFFFFFFF` 打印成 `4294967295`，⛔ 不转成 -1）。
 // =======================================================================================
 Value newArray(JSContext* ctx) { return Value(ctx, JS_NewArray(ctx)); }
 
@@ -675,6 +675,13 @@ Value makeFrameObject(JSContext* ctx, const UiFrameInfo& frame) {
         !setFrameProperty(ctx, obj.raw(), "script", qjs::newString(ctx, frame.script)) ||
         !setFrameProperty(ctx, obj.raw(), "name_degraded", qjs::newBool(ctx, frame.name_degraded)) ||
         !setFrameProperty(ctx, obj.raw(), "top", qjs::newBool(ctx, frame.top))) {
+        return Value::exception(ctx);
+    }
+    // ★ 位置读数（切片 3）：**只有宿主给了值**（top 帧且门都成立）才设 `pos` 键；否则**不设键**
+    //   ⇒ 脚本侧 `undefined`（⛔ 不编 0 / 不拿 frames[0] 冒充）。普通数据属性（与 slot / script_id
+    //   同形：可写、不是 getter —— 这一版不要求只读）。
+    if (frame.pos_ok &&
+        !setFrameProperty(ctx, obj.raw(), "pos", qjs::newInt64(ctx, static_cast<std::int64_t>(frame.pos)))) {
         return Value::exception(ctx);
     }
     return obj;
@@ -757,6 +764,98 @@ JSValue jsGameProperty(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/, 
         return JS_UNDEFINED;
     } catch (...) {
         return JS_ThrowTypeError(ctx, "game: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+// =======================================================================================
+// 宿主能力（切片 3）：`host.profileBegin(label)` / `host.profileEnd()`
+// ★ 两层错误口径（与 `ui.*` 完全同构）：
+//   - **用法错 ⇒ TypeError**（前缀 = 函数名 + 冒号）：不在 render 内 / label 不可转字符串 /
+//     宿主没接线 / 宿主 C++ 异常；
+//   - **领域失败 ⇒ 返回值**（不抛）：'已有一段开着' / '没有打开的窗口' / '剪贴板写失败' 都是
+//     **用户可见的正常状态**（HUD 要显示"失败"并继续画）。抛异常会让 render 返回 false ⇒
+//     叠层被**一枪**永久关掉（`present_sdl.cpp:disableOverlay`）。
+// ★ 返回对象所有键**恒存在**：`{ok, error}` / `{ok, text, error}`（⛔ 不造 undefined 键）。
+// ★ `host` 对象**恒存在**：缺接线是**调用时**的响亮错，而不是画 HUD 时的形状差异。
+// =======================================================================================
+Value makeProfileBeginResult(JSContext* ctx, bool ok, const std::string& error) {
+    Value out = qjs::newObject(ctx);
+    if (out.isException()) return out;
+    if (!qjs::setProperty(ctx, out.raw(), "ok", qjs::newBool(ctx, ok)) ||
+        !qjs::setProperty(ctx, out.raw(), "error", qjs::newString(ctx, error))) {
+        qjs::clearException(ctx);
+        return Value::exception(ctx);
+    }
+    return out;
+}
+
+Value makeProfileEndResult(JSContext* ctx, bool ok, const std::string& text, const std::string& error) {
+    Value out = qjs::newObject(ctx);
+    if (out.isException()) return out;
+    if (!qjs::setProperty(ctx, out.raw(), "ok", qjs::newBool(ctx, ok)) ||
+        !qjs::setProperty(ctx, out.raw(), "text", qjs::newString(ctx, text)) ||
+        !qjs::setProperty(ctx, out.raw(), "error", qjs::newString(ctx, error))) {
+        qjs::clearException(ctx);
+        return Value::exception(ctx);
+    }
+    return out;
+}
+
+JSValue jsHostProfileBegin(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        Impl* impl = implOf(ctx);
+        if (impl == nullptr || impl->current == nullptr) {
+            return JS_ThrowTypeError(ctx, "host.profileBegin: 只能在 render() 内调用");
+        }
+        const UiHostOps* ops = impl->current->host;
+        if (ops == nullptr || ops->profile_begin == nullptr) {
+            return JS_ThrowTypeError(ctx,
+                                     "host.profileBegin: 宿主没有接 profile 桥（--overlay 未接线 / 测试替身）");
+        }
+        if (argc < 1) {
+            return JS_ThrowTypeError(ctx, "host.profileBegin: label 必须是可转成 UTF-8 的字符串");
+        }
+        std::string label;
+        if (!qjs::toString(ctx, argv[0], &label)) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "host.profileBegin: label 必须是可转成 UTF-8 的字符串");
+        }
+        std::string error;
+        const bool ok = ops->profile_begin(ops->ctx, label.c_str(), &error);
+        Value out = makeProfileBeginResult(ctx, ok, error);
+        if (out.isException()) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "host.profileBegin: 结果对象写入失败");
+        }
+        return out.take();
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "host.profileBegin: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsHostProfileEnd(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/, JSValueConst* /*argv*/) {
+    try {
+        Impl* impl = implOf(ctx);
+        if (impl == nullptr || impl->current == nullptr) {
+            return JS_ThrowTypeError(ctx, "host.profileEnd: 只能在 render() 内调用");
+        }
+        const UiHostOps* ops = impl->current->host;
+        if (ops == nullptr || ops->profile_end == nullptr) {
+            return JS_ThrowTypeError(ctx, "host.profileEnd: 宿主没有接 profile 桥（--overlay 未接线 / 测试替身）");
+        }
+        std::string text;
+        std::string error;
+        // ★ ok=false ⇒ 没有开着的窗口（text 留空）；ok=true + error 非空 ⇒ 窗口关了、文本在，
+        //   但附带一步失败（剪贴板）—— 文本**不回滚**（需求单明文"INVALID 仍复制"）。
+        const bool ok = ops->profile_end(ops->ctx, &text, &error);
+        Value out = makeProfileEndResult(ctx, ok, ok ? text : std::string(), error);
+        if (out.isException()) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "host.profileEnd: 结果对象写入失败");
+        }
+        return out.take();
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "host.profileEnd: 宿主异常（C++ exception at script boundary）");
     }
 }
 
@@ -863,6 +962,20 @@ bool installHostApi(Impl& impl, std::string* err) {
                 ok = false;
             }
         }
+    }
+
+    // ★ `host`（切片 3）：**方法表**（像 `ui`），不是读数（像 `game`）⇒ 普通函数属性。
+    //   对象**恒存在**；ops 缺失是调用时的 TypeError（见 `jsHostProfileBegin`）。
+    if (ok) {
+        Value host = qjs::newObject(ctx);
+        if (host.isException()) {
+            qjs::clearException(ctx);
+            ok = false;
+            if (err != nullptr) *err = "quickjs: 分配 host 对象失败";
+        }
+        if (ok) ok = setFunction(ctx, host.raw(), "profileBegin", jsHostProfileBegin, 1, err);
+        if (ok) ok = setFunction(ctx, host.raw(), "profileEnd", jsHostProfileEnd, 0, err);
+        if (ok) ok = setProperty(ctx, global.raw(), "host", std::move(host), err);
     }
     return ok;
 }

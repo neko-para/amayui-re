@@ -984,7 +984,15 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     syncCpuFromRegs();
     // ★ 窗口 profile：配方只写了 `profile_begin` 而没写 `profile_end`（或 run 在窗口中途收口）
     //   ⇒ **照样打表 + 关闸门**（⛔ 不静默丢数据；与解释器"未闭合也打印"同口径）。
-    if (win_.on) endWindow();
+    //   ★ 收口时还开着 ⇒ 先打**一行** stderr（需求单「设计」第 2 条：未闭合在 run 收口打一行 warn；
+    //     与解释器 `machine.cpp` 的 `[profile-window] ⚠ … 未闭合 …` 同义）。⛔ stdout 不动；
+    //     只在真开着窗口时打一次（不是周期输出）。措辞点名 AOT 臂 + 自动收口，便于归因。
+    if (win_.on) {
+        std::fprintf(stderr,
+                     "[aot] ⚠ profile 窗口 \"%s\" 未闭合（运行收口）⇒ 自动收口并打印（差一段就是漏账）\n",
+                     win_.label.c_str());
+        endWindow();
+    }
     r.ea = cpu_.eip;
     r.insns = cpu_.insns;
     r.frames = presenter_.frameCount();

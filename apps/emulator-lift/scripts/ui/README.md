@@ -2,7 +2,9 @@
 
 `--overlay` 的左上角 HUD **不是 C++ 画出来的**：它由这份目录里的 JS 脚本经 QuickJS **同步**跑出
 一份 display list，宿主再交给宿主字体栅格化、合成进窗口像素。默认脚本就是 `hud.js`；
-按钮之类的外观 / 状态 / 主题在组件库 `kit.js`（module 脚本可以 `import` 它）。
+按钮之类的外观 / 状态 / 主题在组件库 `kit.js`。★ **`hud.js` 本身现在是 module**：
+它 `import { Button } from './kit.js'` ⇒ 发行时 `hud.js` 与 `kit.js` **必须同目录**
+（`import` 的相对解析以 `hud.js` 所在目录为根；缺 kit 与缺 hud 同属**加载期硬失败**）。
 
 ★ 脚本是**外置文件、运行时读**的：改完直接重跑，**不需要重编**（也⛔ 不要把 JS 抄进 C++）。
 
@@ -43,9 +45,11 @@ emulator-lift-aot --present window --ui E:\my-hud.js ...
   ```
 
   ★ module 里顶层的声明**不会**挂到 `globalThis` ⇒ 即便用 `import`，入口也**必须**显式写这一行。
-* `render()` 里只能用两个宿主全局：`ui`（画 list）与 `game`（读这一帧的读数）。
-  类型声明见同目录的 `ui.d.ts`（随发行分发，⛔ 不参与构建）。
-* 每次调用前宿主已经清空 display list ⇒ `render` 只**追加**，不要保存状态。
+* `render()` 里只能用三个宿主全局：`ui`（画 list）、`game`（读这一帧的读数）与 `host`（宿主能力，
+  例如 PROFILE 的开始 / 结束）。类型声明见同目录的 `ui.d.ts`（随发行分发，⛔ 不参与构建）。
+* 每次调用前宿主已经清空 display list ⇒ `render` 只**追加**：⛔ 不要缓存 display list 元素 /
+  不要建跨帧控件树（下一帧的 list 要从零再画）。★ **模块级 UI 状态是允许的**（例如 `hud.js` 的
+  `profile.status` / `profile.running`）：那是脚本自己的状态，不是跨帧复用 display list。
 
 ```js
 // 最小例子
@@ -101,6 +105,26 @@ globalThis.render = function render() {
 **不挂 key**（不可命中，宿主不会给它发 click）。★ 组件库只做**外观 / 状态 / 主题**：⛔ 不做通用
 布局系统、不做窗口管理；`rect` 的 x/y/w/h 由调用方给。
 
+### `host`（方法表；**只在 `render` 内可调用**）
+
+`host` 是**方法表**（像 `ui`），不是读数（像 `game`）：对象**恒存在**，缺接线是**调用时**的
+`TypeError`（⛔ 不是 `typeof host === 'undefined'` 那种形状差异）。
+
+| 成员 | 说明 |
+|---|---|
+| `host.profileBegin(label) -> { ok, error }` | 开始一段窗口 profile；`label` = UTF-8（缺省串由宿主决定）。`ok:false` ⇒ 已有一段开着（**不 reset** 上一段），`error` 是人可读的原因 |
+| `host.profileEnd() -> { ok, text, error }` | 结束这一段窗口 profile。**宿主内部**把 `text`（结论文本）写进系统剪贴板；`ok:false` ⇒ 没有开着的窗口（`text` 为空串） |
+
+* **返回对象所有键恒存在**；`error` 空串 = 没有错。
+* **结束 ≠ 复制成功**：`ok:true` + `error` 非空 = "窗口关了、`text` 在，但没进剪贴板"。
+  `text` **不回滚**（需求单明文"INVALID 仍复制"）。
+* `INVALID` 的判定：报告文本里含 `INVALID` 这个 token（`sampled==0` / `unaccounted` 超限时
+  C++ 侧写进去）。⛔ 脚本侧不要另立判据。
+* 默认 HUD 的四态状态行：`开始` / `已复制` / `失败：<error>` / `INVALID（已复制）`。
+* **用法错 ⇒ `TypeError`**（在 `render` 之外调用 / `label` 不可转成字符串 / 宿主没接线）；
+  **领域失败 ⇒ 返回值**（不抛：HUD 要显示"失败"并继续画，抛错会让叠层被永久关掉）。
+* ⛔ 副作用只发生在 `render` 里（`handleEvent` 不跑 JS / 不开 profile / 不写剪贴板）。
+
 ### `game`（只读 getter；这一帧没有值 ⇒ `undefined`，⛔ 不是 0）
 
 | 属性 | 类型 | 什么时候有 |
@@ -131,6 +155,7 @@ FrameInfo = {
   script: string;         // 名字；读不到时是 `id:0x%08X`
   name_degraded: boolean; // script 是降级形态（id / 这一项仍然有效）
   top: boolean;           // slot === cur（当前执行点）
+  pos?: number;           // 脚本内位置（label 坐标 = 0x3C + (pc − base)）；**只有 top 帧有**
 }
 ```
 
@@ -142,6 +167,10 @@ FrameInfo = {
   调用链由消费者自己走（这一版不做链排序）。
 * **读不到 ⇒ `undefined`**（⛔ 不编空数组）：宿主会一次性在 stderr 打一行 `[frames] why=<原因>`。
   单槽读不到 ⇒ 那一项不进表（保守跳过，不是猜）。
+* **`pos`（切片 3）**：只有 `top === true` 的那一项给 `pos`（= `0x3C + (pc − base)`，与
+  `await position` **同一坐标系、同一公式**）；非 top 帧的 `+0x04` 是"该脚本被挂起时保存的
+  续延 PC"，**不是**执行点 ⇒ 这一版直接不暴露（`undefined`）。采样时刻 = Present（不是块边界）：
+  对 `pos >= X` 这类单调条件没有区别；窄区间可能"两次 Present 之间整个穿过"而漏掉。
 * `script_id` / `parent` 是 **uint32 原值**：`0xFFFFFFFF` 在 JS 里是 `4294967295`，⛔ 不转成 `-1`。
 * 默认 HUD 的 `script` 行取 `top === true` 的那一项（`cur` 那一格不活动 ⇒ `top` 全 false ⇒ 回退 `game.script`）。
 
@@ -173,6 +202,8 @@ pnpm exec tsc -p apps/emulator-lift/scripts/ui   # exit 0、无输出 = 干净
 ## 现在**没有**的
 
 * **热重载**：脚本在装叠层时编译一次（`--ui` 换文件要重启；`--overlay` 每次启动重读）。
+  ⇒ `host.reload()` / `host.time_budget_ms()` **都还没实现**（`overlay.md` §3.5 的目标 API 里的
+  另外两项；调用时是 `TypeError`（没有这个成员），⛔ 不是静默 no-op）。
 * 通用布局 / 锚点 / 百分比 / 窗口管理：组件库只按调用方给的 `rect` 画，命中区是宿主从
   `ui.rect({key})` 的 resolved rect 算的（`ui` 目前只有 `rect` / `text` / `measure`）。
 * 校验表（未知键被忽略，不报错）。

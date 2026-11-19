@@ -34,6 +34,7 @@
 
 #include "aot/aot_dispatch.h"
 #include "aot/aot_feeder.h"       // feeder 的 IR 执行器（音频真线程用）
+#include "runtime/clipboard.h"     // 剪贴板（切片 3：overlay 的 PROFILE 桥在 profile_end 里写）
 #include "runtime/control.h"       // 控制层 Present 闸门 / Context（轻头：⛔ 无 beast / nlohmann）
 #include "runtime/decode_cache.h"  // `liftOneDecodeCache()`：只读命中率（`decode-cache:` 行）
 #include "runtime/fault_state.h"   // guest fault 现场（AOT 没有 Machine ⇒ 本臂自己登记；见该头注）
@@ -1296,9 +1297,9 @@ bool AotHost::beginWindow(const char* label) {
     return true;
 }
 
-void AotHost::endWindow() {
-    // ★ 状态位是唯一判据（未开 ⇒ 没有表可打；幂等）。
-    if (!win_.closeWindow()) return;
+bool AotHost::endWindowText(std::string* text) {
+    // ★ 状态位是唯一判据（未开 ⇒ 没有表可取；幂等）。
+    if (!win_.closeWindow()) return false;
     win_.closeEdges(windowNowNs());
     win_.insns_close = cpu_.insns;
     win_.frames_close = presenter_.frameCount();
@@ -1307,13 +1308,69 @@ void AotHost::endWindow() {
 
     // ★ 文本由 `formatWindowReportText`（pure，`aot/window_prof.cpp`）**一份**实现产出 ⇒ `fputs` 写出的
     //   字节与旧 `printf` 块逐字相同（守卫 `aot-window-report-text` 拿"旧 printf 产出的金样"对齐）。
-    //   ⛔ 不要在这里拼格式串：那会让文本重新长出第二份实现（切片 3 还要把同一份文本交给剪贴板）。
-    const std::string text = formatWindowReportText(win_, [this](std::uint32_t id) {
+    //   ⛔ 不要在这里拼格式串：那会让文本重新长出第二份实现（切片 3 把同一份文本交给剪贴板）。
+    const std::string report = formatWindowReportText(win_, [this](std::uint32_t id) {
         const ShimDef* def = shims_.byId(id);
         return def != nullptr ? (def->module + "!" + def->name) : std::string("(unknown)");
     });
+    if (text != nullptr) *text = report;
+    return true;
+}
+
+void AotHost::endWindow() {
+    // ★ stdout 逐字不变：取文本 + `fputs`（切片 1 的金样判据继续有效）。
+    std::string text;
+    if (!endWindowText(&text)) return;
     std::fputs(text.c_str(), stdout);
     std::fflush(stdout);
+}
+
+const ui::UiHostOps* AotHost::uiHostOps() {
+    ui_host_ops_.ctx = this;
+    ui_host_ops_.profile_begin = &AotHost::uiProfileBeginThunk;
+    ui_host_ops_.profile_end = &AotHost::uiProfileEndThunk;
+    return &ui_host_ops_;
+}
+
+bool AotHost::uiProfileBeginThunk(void* ctx, const char* label, std::string* err) {
+    auto* self = static_cast<AotHost*>(ctx);
+    if (self == nullptr) {
+        if (err != nullptr) *err = "profileBegin: 宿主上下文为空";
+        return false;
+    }
+    // ★ 复用既有 `beginWindow` 语义：已开 ⇒ false 且**不 reset**（⛔ 不新开状态机）。
+    if (!self->beginWindow(label)) {
+        if (err != nullptr) *err = "已经有一段 profile 窗口开着（begin 不会 reset 上一段）";
+        // 一行 stderr（一次性；与配方路径同样的可见性；⛔ stdout 不动）。
+        std::fprintf(stderr, "[profile] profileBegin 被拒：已有一段窗口开着（label=%s）\n",
+                     (label != nullptr && *label != '\0') ? label : "(unnamed)");
+        return false;
+    }
+    return true;  // 成功**不打** stderr（每次点击都打就成了噪音）
+}
+
+bool AotHost::uiProfileEndThunk(void* ctx, std::string* text, std::string* err) {
+    auto* self = static_cast<AotHost*>(ctx);
+    if (self == nullptr || text == nullptr) {
+        if (err != nullptr) *err = "profileEnd: 宿主上下文为空";
+        return false;
+    }
+    if (!self->endWindowText(text)) {
+        if (err != nullptr) *err = "没有打开的 profile 窗口";
+        std::fprintf(stderr, "[profile] profileEnd：没有打开的窗口（忽略）\n");
+        return false;
+    }
+    // ★ 裁决 3：剪贴板在 `profileEnd` **内部**完成 —— "INVALID 仍复制"由 C++ 保证（漏不掉）。
+    std::string copy_err;
+    if (lift::setSystemClipboard(*text, &copy_err)) {
+        // 一次性 stderr（需求单"一行 stderr"）：不读回系统剪贴板，只报我们写了多少。
+        std::fprintf(stderr, "[profile] 结论文本已写入剪贴板（%zu 字节）\n", text->size());
+    } else {
+        // ★ ok 仍为 true：窗口关了、文本已产出，HUD 仍要能显示它（并把失败如实说出来）。
+        if (err != nullptr) *err = copy_err;
+        std::fprintf(stderr, "[profile] 结论文本已生成，但写入剪贴板失败：%s\n", copy_err.c_str());
+    }
+    return true;
 }
 
 void AotHost::windowMarkThunk(void* ctx, const char* label, bool begin) {

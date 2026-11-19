@@ -14,6 +14,10 @@
 //   ⑥ **JS 面**：`game.local_frames()` 返回数组（top-first，字段齐全、`parent`/`script_id` 是
 //      uint32 原值）；`frames == nullptr` / 宿主 err / 空表 ⇒ `undefined`；属性不可写 / 不可枚举 /
 //      不可配置（strict 赋值 / delete ⇒ TypeError）。
+//   ⑦ **位置读数（切片 3）**：只有 `top` 帧给 `pos`（= `0x3C + (pc − base)`，与 `await position`
+//      同一套公式）；非 top 帧 `pos_ok=false`；单槽 `pc` 读不到（pc < base / 未提交 / 越出 region）
+//      ⇒ 那一帧的 `pos_ok=false`，但**仍进表**（⛔ 不把单槽读不到升级成整表 err）。
+//      ★ 红了 ⇒ HUD 会把"停在哪儿"读成"正在执行哪儿"，或一个坏槽让整张帧表消失。
 // ★ 夹具 = 裸 `GuestMemory` + `MarkerSampler` + `EngineFrameSource` 合成 Engine（形状照
 //   `tests/input_marker.cpp` 的 kBase/kFrameBase/put32/installRootTable/putName）。
 //   ⛔ 不依赖游戏安装 / LFS / 真实窗口。★ 所有 4 字节写前先 `committed`（safe 模式缺省关，
@@ -82,12 +86,13 @@ struct Fx {
         return engine + lift::kEngineFrameBase + lift::kFrameStride * slot;
     }
 
-    // 空槽的规范形状（C4）：body=0 / id=-1 / parent=-1。
+    // 空槽的规范形状（C4）：body=0 / pc=0 / id=-1 / parent=-1。
     void clearFrames() {
         for (std::uint32_t slot = 0; slot < lift::kFrameCount; ++slot) {
             const std::uint32_t rec = recOf(slot);
             if (!mem.committed(rec, lift::kFrameStride)) continue;
             put32(mem, rec, 0);
+            put32(mem, rec + lift::kFramePcOffset, 0);
             put32(mem, rec + lift::kFrameParentOffset, 0xFFFFFFFFu);
             put32(mem, rec + lift::kFrameIdentityOffset, 0xFFFFFFFFu);
         }
@@ -99,6 +104,11 @@ struct Fx {
         put32(mem, rec + lift::kFrameBodyBaseOffset, body);
         put32(mem, rec + lift::kFrameIdentityOffset, id);
         put32(mem, rec + lift::kFrameParentOffset, parent);
+    }
+
+    // 记录 +0x04 = PC（位置读数的另一半；`readScriptPositionAt` 的输入）。
+    void setPc(std::uint32_t slot, std::uint32_t pc) {
+        put32(mem, recOf(slot) + lift::kFramePcOffset, pc);
     }
 
     void installRootTable(std::uint32_t count) {
@@ -121,7 +131,7 @@ struct Fx {
     std::vector<lift::ui::UiFrameInfo> frames(std::string* err) { return source.localFrames(err); }
 };
 
-// 期望的槽序（top-first）/ top / id / parent / 名字 / 降级标志。
+// 期望的槽序（top-first）/ top / id / parent / 名字 / 降级标志 / 位置读数。
 struct Want {
     std::uint32_t slot;
     bool top;
@@ -129,6 +139,8 @@ struct Want {
     std::uint32_t parent;
     const char* name;
     bool degraded;
+    bool pos_ok = false;      // 缺省 = 这一项**没有**位置读数（非 top / 读不到）
+    std::uint32_t pos = 0;    // 只有 pos_ok=true 时才比较（pos_ok=false 时值无意义）
 };
 
 void expectList(const std::vector<lift::ui::UiFrameInfo>& got, const std::vector<Want>& want, const char* what) {
@@ -141,13 +153,16 @@ void expectList(const std::vector<lift::ui::UiFrameInfo>& got, const std::vector
         const lift::ui::UiFrameInfo& f = got[i];
         ++lift_test::g_checks;
         if (f.slot != want[i].slot || f.top != want[i].top || f.script_id != want[i].id ||
-            f.parent != want[i].parent || f.script != want[i].name || f.name_degraded != want[i].degraded) {
+            f.parent != want[i].parent || f.script != want[i].name || f.name_degraded != want[i].degraded ||
+            f.pos_ok != want[i].pos_ok || (want[i].pos_ok && f.pos != want[i].pos)) {
             lift_test::failf(__FILE__, __LINE__,
-                             "%s[%zu]：期望 slot=%u top=%d id=0x%08X parent=0x%08X script=`%s` degraded=%d，"
-                             "得到 slot=%u top=%d id=0x%08X parent=0x%08X script=`%s` degraded=%d",
+                             "%s[%zu]：期望 slot=%u top=%d id=0x%08X parent=0x%08X script=`%s` degraded=%d "
+                             "pos_ok=%d pos=0x%08X，得到 slot=%u top=%d id=0x%08X parent=0x%08X script=`%s` "
+                             "degraded=%d pos_ok=%d pos=0x%08X",
                              what, i, want[i].slot, static_cast<int>(want[i].top), want[i].id, want[i].parent,
-                             want[i].name, static_cast<int>(want[i].degraded), f.slot, static_cast<int>(f.top),
-                             f.script_id, f.parent, f.script.c_str(), static_cast<int>(f.name_degraded));
+                             want[i].name, static_cast<int>(want[i].degraded), static_cast<int>(want[i].pos_ok),
+                             want[i].pos, f.slot, static_cast<int>(f.top), f.script_id, f.parent, f.script.c_str(),
+                             static_cast<int>(f.name_degraded), static_cast<int>(f.pos_ok), f.pos);
         }
     }
 }
@@ -309,6 +324,7 @@ int main() {
     fx.installRootTable(8);
     fx.putName(0, "ROOT.BIN");
     fx.putName(3, "SC0003");
+    fx.putName(4, "SC0004");
     fx.putName(5, "SC0005");
     fx.setRecord(0, kCodeBase, 0, 0xFFFFFFFFu);
     fx.setRecord(1, kCodeBase, 3, 0);
@@ -375,6 +391,111 @@ int main() {
                        {0, false, 0, 0xFFFFFFFFu, "ROOT.BIN", false},
                    },
                    "cache-refresh");
+    }
+
+    // ---- ⑦ 位置读数：top 帧给 `pos = 0x3C + (pc − base)`（与 `await position` 同一公式） ----
+    g_current_case = "ui-frames/pos-formula";
+    fx.publish(kBase);
+    fx.clearFrames();
+    fx.installRootTable(8);
+    fx.setRecord(1, kCodeBase, 3, 0);
+    fx.setRecord(3, kCodeBase, 5, 1);
+    constexpr std::uint32_t kTopOff = 0x24;
+    fx.setPc(1, kCodeBase + kTopOff);
+    fx.setCur(1);
+    {
+        std::string err;
+        const std::vector<lift::ui::UiFrameInfo> list = fx.frames(&err);
+        LIFT_CHECK(err.empty());
+        expectList(list,
+                   {
+                       {1, true, 3, 0, "SC0003", false, true,
+                        static_cast<std::uint32_t>(lift::kScriptHeaderLen) + kTopOff},
+                       {3, false, 5, 1, "SC0005", false, false, 0},
+                   },
+                   "pos-formula");
+    }
+
+    // ---- ⑦ 位置读不到：pc < base / pc 未提交 / pc 越出 region ⇒ pos_ok=false，**但仍在表里** ----
+    //   ⛔ 不把单槽读不到升级成整表 err（那是"一个坏槽让整张帧表消失"）。
+    //   ★ 三档必须各自把 `cur` 指到那一格：`engine_frames` **只对 top 帧**调 `readScriptPositionAt`
+    //     ⇒ 非 top 槽的 pc 根本不会被读（把三档都放在非 top 上 = 这三条门一条也没被执行到）。
+    g_current_case = "ui-frames/pos-unavailable";
+    fx.publish(kBase);
+    fx.clearFrames();
+    fx.installRootTable(8);
+    fx.setRecord(1, kCodeBase, 3, 0);
+    fx.setRecord(2, kCodeBase, 4, 0);
+    fx.setRecord(3, kCodeBase, 5, 1);
+    fx.setPc(1, kCodeBase - 4);  // pc < base（这一段已提交 ⇒ 恰好落在 "pc-outside-body" 上）
+    fx.setPc(2, 0x00900000u);    // pc 未提交
+    // slot 3：pc 落在**另一个**已提交 region（>= base 所在 region 的 end ⇒ "pc-outside-region"）。
+    LIFT_CHECK(fx.mem.commitZeroed(0x00900000u, 0x1000u, lift::RegionKind::Heap, "far-code"));
+    fx.setPc(3, 0x00900000u);
+    // ① top = slot 1 ⇒ 走 `pc-outside-body`（pc < base）。
+    fx.setCur(1);
+    {
+        std::string err;
+        const std::vector<lift::ui::UiFrameInfo> list = fx.frames(&err);
+        LIFT_CHECK(err.empty());
+        expectList(list,
+                   {
+                       {1, true, 3, 0, "SC0003", false, false, 0},
+                       {3, false, 5, 1, "SC0005", false, false, 0},
+                       {2, false, 4, 0, "SC0004", false, false, 0},
+                   },
+                   "pos-unavailable/pc<base");
+    }
+    // ② top = slot 2 ⇒ 走 `pc-outside-body`（pc 未提交）。
+    fx.setCur(2);
+    {
+        std::string err;
+        const std::vector<lift::ui::UiFrameInfo> list = fx.frames(&err);
+        LIFT_CHECK(err.empty());
+        expectList(list,
+                   {
+                       {2, true, 4, 0, "SC0004", false, false, 0},
+                       {3, false, 5, 1, "SC0005", false, false, 0},
+                       {1, false, 3, 0, "SC0003", false, false, 0},
+                   },
+                   "pos-unavailable/uncommitted");
+    }
+    // ③ top = slot 3 ⇒ 走 `pc-outside-region`（pc 已提交、但在 base 所在 region 之外）。
+    fx.setCur(3);
+    {
+        std::string err;
+        const std::vector<lift::ui::UiFrameInfo> list = fx.frames(&err);
+        LIFT_CHECK(err.empty());
+        expectList(list,
+                   {
+                       {3, true, 5, 1, "SC0005", false, false, 0},
+                       {2, false, 4, 0, "SC0004", false, false, 0},
+                       {1, false, 3, 0, "SC0003", false, false, 0},
+                   },
+                   "pos-unavailable/outside-region");
+    }
+
+    // ---- ⑦ 只有 top 帧是当前执行点：两个活动槽都有可用 pc，只有 `cur` 那一格给 pos ----
+    g_current_case = "ui-frames/pos-only-top";
+    fx.publish(kBase);
+    fx.clearFrames();
+    fx.installRootTable(8);
+    fx.setRecord(1, kCodeBase, 3, 0);
+    fx.setRecord(3, kCodeBase, 5, 1);
+    fx.setPc(1, kCodeBase + 0x10);
+    fx.setPc(3, kCodeBase + 0x20);
+    fx.setCur(3);  // top = 后装载的那一格
+    {
+        std::string err;
+        const std::vector<lift::ui::UiFrameInfo> list = fx.frames(&err);
+        LIFT_CHECK(err.empty());
+        expectList(list,
+                   {
+                       {3, true, 5, 1, "SC0005", false, true,
+                        static_cast<std::uint32_t>(lift::kScriptHeaderLen) + 0x20},
+                       {1, false, 3, 0, "SC0003", false, false, 0},
+                   },
+                   "pos-only-top");
     }
 
     // ---- ③：整表不可用的每一条（err 是报告列的静态字面量，逐字断言） ----

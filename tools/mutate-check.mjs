@@ -4440,6 +4440,56 @@ const MUTATIONS = [
       '`top = (slot == cur)` 改成 `top = false` ⇒ 没有任何一项是栈顶（ui-frames 的 top 列断言落空）⇒ 红',
   },
 
+  // ── 宿主桥的结果对象（`REQ-01M7QF01A00F9946DX0GPH23JQ` 切片 3；守卫 = `tests/ui_script_quickjs.cpp`）──
+  //   ★ 代表"结束的结果没回到脚本"这一类**静默**错误：窗口关了、剪贴板也写了，但脚本拿到
+  //     `undefined` ⇒ HUD 的状态行整行不出现（或一按就把叠层打死）—— 屏幕照画，没有任何日志。
+  //   ★ 为什么落在这一行：`profileEnd` 的**唯一**返回值就是这里；`makeProfileEndResult` 仍被调用
+  //     （只是把结果丢掉）⇒ 没有额外的编译告警会"帮忙"让守卫红 —— 红点只能是 `host-bridge` 的
+  //     返回形状断言（`e.ok` on `undefined` ⇒ TypeError ⇒ render false）。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from:
+      '        Value out = makeProfileEndResult(ctx, ok, ok ? text : std::string(), error);\n' +
+      '        if (out.isException()) {\n' +
+      '            qjs::clearException(ctx);\n' +
+      '            return JS_ThrowTypeError(ctx, "host.profileEnd: 结果对象写入失败");\n' +
+      '        }\n' +
+      '        return out.take();',
+    to:
+      '        Value out = makeProfileEndResult(ctx, ok, ok ? text : std::string(), error);\n' +
+      '        if (out.isException()) {\n' +
+      '            qjs::clearException(ctx);\n' +
+      '            return JS_ThrowTypeError(ctx, "host.profileEnd: 结果对象写入失败");\n' +
+      '        }\n' +
+      '        (void)out;\n' +
+      '        return JS_UNDEFINED;  // 变异：profileEnd 不返回结果对象',
+    guard: 'ctest:ui-script-quickjs',
+    ctest: 'ui-script-quickjs',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-ui-script-quickjs',
+    what:
+      'ui-host-profile-end-result：`profileEnd` 不再把结果对象交回脚本（返回 undefined）⇒ ' +
+      'ui-script-quickjs 的 host-bridge 在返回形状 / `e.ok` 断言上当场红',
+  },
+
+  // ── 帧列表的 `pos_ok`（切片 3；守卫 = `tests/ui_frames.cpp`）──
+  //   ★ 代表"pos 读数没真的进表"这一类**静默**错误：帧列表照给、名字照解析、`top` 照对，
+  //     只是 top 项永远没有 `pos`（HUD / 未来 `game.when` 看不到执行点）—— 没有任何报错。
+  //   ★ 为什么落在这一行：`readScriptPositionAt` 的结果**只有这里**写进 `UiFrameInfo`；
+  //     改成恒 false 之后 `ui-frames` 的 `pos-formula` / `pos-only-top` 当场红。
+  {
+    file: 'apps/emulator-lift/src/runtime/engine_frames.cpp',
+    from: '            info.pos_ok = p.valid;',
+    to: '            info.pos_ok = false;  // 变异：帧列表不再暴露位置',
+    guard: 'ctest:ui-frames',
+    ctest: 'ui-frames',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-ui-frames',
+    what:
+      'ui-frames-pos-ok：`info.pos_ok` 恒 false（帧列表不再暴露位置）⇒ ' +
+      'ui-frames 的 pos-formula / pos-only-top 当场红（top 项应有 `0x3C + (pc − base)`）',
+  },
+
   // ── 栅格化的宿主级 OOM 上界（P1；守卫 = `tests/ui_text.cpp` 的 `ui-text/huge-rect-rejected`）──
   //   ★ 代表"--ui 脚本给一个超大 w/h 就能触发**宿主级**超大分配"这一类**用户可触发**的错误：
   //     没有上界时 `ui.rect({w:2e9,h:2e9})` 抛 std::length_error（异常穿到 presenter ⇒ latch、

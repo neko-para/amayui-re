@@ -2655,6 +2655,19 @@ if(LIFT_BUILD_TESTS)
 endif()
 
 # =====================================================================================
+# H · 系统剪贴板（`REQ-01M7QF01A00F9946DX0GPH23JQ` 切片 3）
+# ★ 落点：`src/runtime/clipboard.{h,cpp}`。头是 **SDL-free** 声明（`aot_host.cpp` include 它，
+#   而 AOT 臂从不直接碰 SDL 类型）；唯一 include `<SDL3/SDL_clipboard.h>` 的 TU 是 `.cpp`。
+# ★ 为什么不新增依赖：`emulator-lift-runtime` 已经 `PUBLIC SDL3::SDL3` ⇒ 所有 pure CTest
+#   本来就在链 SDL；本文件不改变任何 target 的链接面。
+# ★ 为什么用 `target_sources` 追加：与上面 A / E / 命中块同一条并发编辑口径（顶部大列表是
+#   "别改"区；本单只在文件末尾追加自己的块）。
+# ★ 没有默认档守卫能红（系统剪贴板不进 CTest）⇒ `tools/mutate-check.mjs` **不**为本文件加条目
+#   （做了也是假绿；理由写进 `.tmp/overlay-profile/slice3-report.md`）。
+# =====================================================================================
+target_sources(emulator-lift-runtime PRIVATE src/runtime/clipboard.cpp)
+
+# =====================================================================================
 # 把 `lift_enable_warnings` 施加到本目录里**所有可执行文件**（产品 + 测试；唯一施加点）
 # ★ 为什么在文件末尾统一扫一遍：target 分散在本文件多处（测试还有末尾多个独立
 #   `if(LIFT_BUILD_TESTS)` 块）⇒ 逐处手写调用一定会漏；`BUILDSYSTEM_TARGETS` 只列**本目录**

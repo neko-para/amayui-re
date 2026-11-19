@@ -242,10 +242,21 @@ bool scanRegion(lift::SdlWindow& win, int x0, int y0, int w, int h, std::uint32_
     return true;
 }
 
-// 矩形外必须**逐像素**还是 guest 色（叠层"只占画布原点那块"，⛔ 不遮别的区域）。
-// ★ `rect` = `expectedPanel()` 算出的**实际**叠层矩形（⛔ 不要拍脑袋给一个 120×60 —— 那可能比
-//   实际叠层更大，等于放过"叠层画到矩形外"的回归）。
-void expectGuestUntouched(lift::SdlWindow& win, const lift::GuestSurface& s, int ox, int oy, int rw, int rh) {
+// 脚本画出的一个矩形（窗口像素；画布原点 + `uiCanvasOrigin` 的 scale 之后）。
+struct PixelRect {
+    int x = 0;
+    int y = 0;
+    int w = 0;
+    int h = 0;
+};
+
+// 所有"叠层矩形"之外必须**逐像素**还是 guest 色（叠层"只占脚本画出的那几块"，⛔ 不遮别的区域）。
+// ★ 切片 3 起叠层不止一个矩形（面板 + 面板下方的 PROFILE 按钮）⇒ 覆盖集 = **每个 Rect 的并集**，
+//   ⛔ 不是它们的包围盒（面板与按钮之间那条 PAD 缝里仍是 guest 画面，包围盒会把它当成合法覆盖）。
+// ★ `covered` = `expectedPanel()` 用**生产脚本**跑出来的实际矩形（⛔ 不要拍脑袋给尺寸 ——
+//   那可能比实际叠层更大，等于放过"叠层画到矩形外"的回归）。
+void expectGuestUntouched(lift::SdlWindow& win, const lift::GuestSurface& s,
+                          const std::vector<PixelRect>& covered) {
     std::string err;
     for (int y = 0; y < s.height; y += 7) {
         for (int x = 0; x < s.width; x += 11) {
@@ -256,7 +267,14 @@ void expectGuestUntouched(lift::SdlWindow& win, const lift::GuestSurface& s, int
             }
             if ((argb & 0x00FFFFFFu) != kGuestRgb) {
                 // 叠层实际矩形内会被覆盖 ⇒ 那里不要求 guest 色
-                if (x >= ox && x < ox + rw && y >= oy && y < oy + rh) continue;
+                bool inside = false;
+                for (const PixelRect& r : covered) {
+                    if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) {
+                        inside = true;
+                        break;
+                    }
+                }
+                if (inside) continue;
                 lift_test::failf(__FILE__, __LINE__, "(%d,%d) 被遮住了：expected %06X, got %06X", x, y, kGuestRgb,
                                  argb & 0xFFFFFFu);
                 ++lift_test::g_checks;
@@ -286,7 +304,10 @@ bool readAll(const std::string& path, std::string* out) {
 //   fps = 1.0（最近 1 s 只有这一次 Present），没有 mouse（测试不挂 `WindowManager`）、
 //   没有 script / worst（`Machine` 没跑）。
 // ★ `frame_w/h` = 被呈现的帧尺寸（画布 `s` 从 `uiCanvasOrigin` 取）。
-bool expectedPanel(lift::FontEngine& font, int frame_w, int frame_h, int* ox, int* oy, int* w, int* h) {
+// ★ `covered` = 脚本画出的**每一个 Rect**（切片 3 起 = 面板 + PROFILE 按钮；`expectGuestUntouched`
+//   按它判"叠层只占画出的那几块"）。面板本身仍是 `elements[0]`（`w/h` 只回它）。
+bool expectedPanel(lift::FontEngine& font, int frame_w, int frame_h, int* ox, int* oy, int* w, int* h,
+                   std::vector<PixelRect>* covered) {
     std::string source;
     if (!readAll(hudScriptPath(), &source)) return false;
     auto runtime = lift::ui::makeQuickJsRuntime();
@@ -310,7 +331,19 @@ bool expectedPanel(lift::FontEngine& font, int frame_w, int frame_h, int* ox, in
     *h = static_cast<int>(static_cast<long long>(panel.h) * canvas.scale + 0.5);
     if (*w < 1) *w = 1;
     if (*h < 1) *h = 1;
-    return true;
+    covered->clear();
+    for (const lift::ui::Element& e : builder.elements()) {
+        if (e.kind != lift::ui::ElementKind::Rect) continue;
+        PixelRect r;
+        r.x = canvas.offset_x + static_cast<int>(static_cast<long long>(e.x) * canvas.scale + 0.5);
+        r.y = canvas.offset_y + static_cast<int>(static_cast<long long>(e.y) * canvas.scale + 0.5);
+        r.w = static_cast<int>(static_cast<long long>(e.w) * canvas.scale + 0.5);
+        r.h = static_cast<int>(static_cast<long long>(e.h) * canvas.scale + 0.5);
+        if (r.w < 1) r.w = 1;
+        if (r.h < 1) r.h = 1;
+        covered->push_back(r);
+    }
+    return !covered->empty();
 }
 
 std::vector<std::uint8_t> guestBytes(Fx& f) {
@@ -352,7 +385,8 @@ bool caseRendererWindow(std::string* skip_why) {
     int oy = 0;
     int rw = 0;
     int rh = 0;
-    if (!expectedPanel(font, 640, 360, &ox, &oy, &rw, &rh)) {
+    std::vector<PixelRect> covered;
+    if (!expectedPanel(font, 640, 360, &ox, &oy, &rw, &rh, &covered)) {
         LIFT_CHECK(false);
         win.shutdown();
         return true;
@@ -385,7 +419,7 @@ bool caseRendererWindow(std::string* skip_why) {
                 argb & 0x00FFFFFFu, want_bg);
     LIFT_CHECK(nearRgb(argb & 0x00FFFFFFu, want_bg, 1));
     LIFT_CHECK(!nearRgb(argb & 0x00FFFFFFu, kOverlayBgRgb, 1));
-    expectGuestUntouched(win, *f.s, ox, oy, rw, rh);
+    expectGuestUntouched(win, *f.s, covered);
     LIFT_CHECK(guestBytes(f) == before);  // ⛔ 叠层不写 guest 像素
 
     // 关掉开关 ⇒ 整窗**逐像素**恢复成纯画面（证明"默认关 / 可关"，不是一直在画）
@@ -446,7 +480,8 @@ bool caseDirectWindow(std::string* skip_why) {
     int oy = 0;
     int rw = 0;
     int rh = 0;
-    if (!expectedPanel(font, 320, 240, &ox, &oy, &rw, &rh)) {
+    std::vector<PixelRect> covered;
+    if (!expectedPanel(font, 320, 240, &ox, &oy, &rw, &rh, &covered)) {
         LIFT_CHECK(false);
         win.shutdown();
         return true;
@@ -482,7 +517,7 @@ bool caseDirectWindow(std::string* skip_why) {
     // 画布原点上方（画面原点那一块）仍是 guest 色 ⇒ 证明原点不是恒 0、也不是画面原点。
     LIFT_CHECK(win.readbackPixel(0, 0, &argb, &err));
     LIFT_CHECK_EQ_U32(argb & 0x00FFFFFFu, kGuestRgb);
-    expectGuestUntouched(win, *f.s, ox, oy, rw, rh);
+    expectGuestUntouched(win, *f.s, covered);
     LIFT_CHECK(guestBytes(f) == before);
 
     win.setOverlay(false);

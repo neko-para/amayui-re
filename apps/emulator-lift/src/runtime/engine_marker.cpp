@@ -118,20 +118,32 @@ ScriptPositionSample readScriptPositionSample(const GuestMemory& mem, const Mark
         out.why = "engine-unpublished";
         return out;
     }
+    // ★ 公式 / 门 / 错误串只有一份（下面那个函数）：这里只做"身份 + 取 engine"。
+    return readScriptPositionAt(mem, engine, identity.cur);
+}
+
+ScriptPositionSample readScriptPositionAt(const GuestMemory& mem, std::uint32_t engine, std::uint32_t slot) {
+    ScriptPositionSample out;
+    out.cur = slot;
+    // ① Engine 单例还没发布（`0x4BAA3A` 之前 / 退出后）⇒ 不成立。
+    if (engine == 0) {
+        out.why = "engine-unpublished";
+        return out;
+    }
     const std::uint64_t rec = static_cast<std::uint64_t>(engine) + kEngineFrameBase +
-                              static_cast<std::uint64_t>(kFrameStride) * identity.cur;
+                              static_cast<std::uint64_t>(kFrameStride) * slot;
     std::uint32_t base = 0;
     std::uint32_t pc = 0;
     if (!readU32(mem, rec + kFrameBodyBaseOffset, &base) || !readU32(mem, rec + kFramePcOffset, &pc)) {
         out.why = "frame-record-uncommitted";
         return out;
     }
-    // ① 引擎还没发布基址（`0x40EE44 GlobalAlloc` 之前 / 帧已清）⇒ 不成立。
+    // ② 引擎还没发布基址（`0x40EE44 GlobalAlloc` 之前 / 帧已清）⇒ 不成立。
     if (base == 0 || !mem.committed(base, 1u)) {
         out.why = "body-base-unpublished";
         return out;
     }
-    // ② PC 必须在**脚本体缓冲里**：`pc < base` ⇒ 不是"当前指令"。
+    // ③ PC 必须在**脚本体缓冲里**：`pc < base` ⇒ 不是"当前指令"。
     if (pc < base || !mem.committed(pc, 4u)) {
         out.why = "pc-outside-body";
         return out;

@@ -15,7 +15,11 @@
 //   `body != 0` + `committed(body,1)` + id 读 → 读完再看一眼 engine（变了 ⇒ 丢弃）。
 //   任何一步失败都**不猜**：整表不可用 ⇒ 空表 + 静态字面量 `err`（⛔ 不编 0 / 空对象）。
 // ★ 名字：复用 `MarkerSampler::resolveName` / `nameTableSignature`（C13：解析器不看 `cur`），
-//   ⛔ 不改 `engine_marker.*`。每槽缓存 `(id, sig)` ⇒ 名字表从"未装载"→"已装载"而 id 不变时会自动刷新。
+//   ⛔ **不**在本文件复制名字解析。每槽缓存 `(id, sig)` ⇒ 名字表从"未装载"→"已装载"而 id 不变时会自动刷新。
+// ★ 位置读数（切片 3）：**只有 top 帧**给 `pos`（判据 = `slot == cur`，与 `top` 同一个布尔）；
+//   公式 / 门 / 错误串的唯一实现在 `engine_marker.cpp:readScriptPositionAt`（本文件只调用它，
+//   ⛔ 不写第二份公式）。非 top 帧的 `+0x04` 是挂起时保存的续延 PC ⇒ 不暴露（`pos_ok=false`）。
+//   ★ 单槽读不到只让那一项 `pos_ok=false` ⇒ **仍进表**（⛔ 不把单槽读不到升级成整表 err）。
 // ★ ⛔ 不写 guest 内存；⛔ 不影响既有 `script` 行（`game.script` 仍是"当前帧"的既有语义）。
 #pragma once
 
@@ -32,8 +36,8 @@ namespace lift {
 class GuestMemory;
 
 // 帧记录的字段偏移（`packages/age-format/src/engine/layout.mts` 的 FRAME_LAYOUT + `engine_marker.h`）。
-// ★ `kFrameParentOffset` 只在这里定义：报告 C7 已证 `+0x38`，但 `engine_marker.h` 不暴露它
-//   （本单的边界是"⛔ 不改 engine_marker.*"）⇒ 由本头补齐，锚 EA 写在上面。
+// ★ `kFrameParentOffset` 只在这里定义：报告 C7 已证 `+0x38`，而 `engine_marker.h` 只暴露身份 /
+//   位置读数用到的字段（位置读数切片 3 抽到那里之后仍不需要 parent）⇒ 由本头补齐，锚 EA 写在上面。
 inline constexpr std::uint32_t kFrameParentOffset = 0x00000038u;  // 0x40EE05 写 / 0x41A834 读
 
 class EngineFrameSource final : public ui::UiFrameSource {

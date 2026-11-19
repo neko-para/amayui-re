@@ -28,6 +28,12 @@
 //   ⑦ key-on-rect（切片 2 后半）：`ui.rect({key})` 的 key 进命中表；`game.click` 是**一次性**
 //      对象 `{key,x,y}`（下一帧就没有）；`game.hover` / `game.active` 是只读 key（没有 ⇒ undefined，
 //      strict 赋值抛 TypeError）。红了 ⇒ 命中原语没接到 JS 面 / click 会重复触发。
+//   ⑧ frames-pos（切片 3）：`game.local_frames()[i].pos` 只在 top 帧是 number；非 top **没有这个键**
+//      （undefined）；它是普通数据属性（可写，不是 getter）。红了 ⇒ "只有 top 是当前执行点"没到 JS 面。
+//   ⑨ host-bridge（切片 3）：`host.profileBegin/End` 是 function；label 原样 / 恰好一次；返回对象键
+//      形状 `{ok,error}` / `{ok,text,error}` 且值逐字来自 C++；领域失败**不抛**；没接线 ⇒ TypeError
+//      点名函数；在 render 之外调用 ⇒ load 失败 + 消息含 `render()`。
+//      红了 ⇒ PROFILE 按钮拿不到结果，或一次失败把整层叠层打死。
 // ★ 顶层无条件注册 = **pure** 档（AGENTS.md §12.4：判据 = 注册位置）。
 // ★ 只 include 接口头 + FontEngine；⛔ 不 include quickjs.h（那是 script_quickjs.cpp 的特权）。
 #include <chrono>
@@ -669,7 +675,7 @@ void caseValueStress() {
 }
 
 // =======================================================================================
-// ⑧ 命中 / 捕获的 JS 面（`REQ-01M7QF01A00F9946DX0GPH23JQ` 切片 2 后半）
+// ⑦ 命中 / 捕获的 JS 面（`REQ-01M7QF01A00F9946DX0GPH23JQ` 切片 2 后半）
 //   · `ui.rect({key})` ⇒ key 挂在 Element 上 ⇒ 命中表（`buildHitRegions`）里有它；
 //     没传 key / `key: ''` ⇒ **不可命中**（不进命中表）；
 //   · `game.click` = 一次性对象 `{key,x,y}`：宿主交来的那一帧看得到，下一帧就是 `undefined`；
@@ -751,6 +757,232 @@ void caseKeyOnRect() {
     expectText(plain, 3, "write=TypeError,TypeError,TypeError", "只读性不随帧变化");
 }
 
+// =======================================================================================
+// ⑧ 帧列表的 `pos` 读数（`REQ-01M7QF01A00F9946DX0GPH23JQ` 切片 3）
+//   · 宿主给了 `pos_ok=true` 的项 ⇒ 脚本侧是 **number**、且键**存在**；
+//   · 非 top / 读不到 ⇒ **没有 `pos` 键**（`undefined`；⛔ 不编 0）；
+//   · 它是**普通数据属性**（与 slot / script_id 同形：可写、不是 getter）—— ⛔ 不要求只读。
+// ★ 红了 ⇒ "只有 top 帧是当前执行点"这条判据没到 JS 面（脚本会把续延 PC 读成执行点）。
+// =======================================================================================
+const char* kFramesPosScript = R"JS(
+globalThis.render = function render() {
+  const f = game.local_frames();
+  if (f === undefined) {
+    ui.text({ x: 0, y: 0, text: 'frames=undefined', size: 1 });
+    return;
+  }
+  const a = f[0];
+  const b = f[1];
+  ui.text({ x: 0, y: 0, text: 'top=' + typeof a.pos + ':' + a.pos + ':has=' + ('pos' in a), size: 1 });
+  ui.text({ x: 0, y: 0, text: 'below=' + typeof b.pos + ':has=' + ('pos' in b), size: 1 });
+  let w = 'no';
+  try { a.pos = 1; w = 'ok:' + a.pos; } catch (e) { w = e.name; }
+  ui.text({ x: 0, y: 0, text: 'write=' + w, size: 1 });
+};
+)JS";
+
+// ★ 帧源替身（`game.local_frames()` 的取数口）：只回给定条目 / err，不读 guest。
+struct FakeFrameSource final : lift::ui::UiFrameSource {
+    std::vector<lift::ui::UiFrameInfo> list;
+    std::string err;
+    std::vector<lift::ui::UiFrameInfo> localFrames(std::string* out_err) override {
+        if (out_err != nullptr) *out_err = err;
+        return list;
+    }
+};
+
+void caseFramesPos() {
+    lift_test::g_current_case = "ui-script-quickjs/frames-pos";
+    auto runtime = lift::ui::makeQuickJsRuntime();
+    std::unique_ptr<UiScript> script = loadOk(*runtime, kFramesPosScript, "frames-pos.js");
+    if (!script) return;
+
+    FakeFrameSource frames;
+    lift::ui::UiFrameInfo top;
+    top.slot = 3;
+    top.script = "SC0005";
+    top.top = true;
+    top.pos_ok = true;
+    top.pos = 0x3C + 0x24;  // = 0x60
+    lift::ui::UiFrameInfo below;
+    below.slot = 1;
+    below.script = "SC0003";
+    below.top = false;  // 非 top ⇒ 这一版**不给** pos
+    frames.list = {top, below};
+
+    UiFrameReadings r;
+    r.frames = &frames;
+    const std::vector<std::string> texts = renderTexts(*script, r);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(texts.size()), 3);
+    expectText(texts, 0, "top=number:96:has=true", "top 帧的 pos 是 number（0x3C + 0x24）");
+    expectText(texts, 1, "below=undefined:has=false", "非 top 帧没有 pos 键（⛔ 不编 0）");
+    expectText(texts, 2, "write=ok:1", "pos 是普通数据属性（可写，不是 getter）");
+}
+
+// =======================================================================================
+// ⑨ 宿主桥（切片 3）：`host.profileBegin(label)` / `host.profileEnd()`
+//   ① 两个成员都是 function；② label 原样到 C++、**恰好调用一次**；
+//   ③ 返回对象键形状 `{ok,error}` / `{ok,text,error}`，`text`/`error` 逐字来自 C++；
+//   ④ 领域失败（`ok:false`）**不抛**（render 继续画）；
+//   ⑤ `readings.host == nullptr` ⇒ TypeError 且消息点名函数；
+//   ⑥ 在 render 之外调用 ⇒ load 失败 + 消息含 `render()`。
+// ★ 红了 ⇒ HUD 的 PROFILE 按钮拿不到结果（或脚本一按就把整层叠层打死）。
+// =======================================================================================
+struct FakeHostOps {
+    int begin_calls = 0;
+    int end_calls = 0;
+    std::string last_label;
+    bool begin_ok = true;
+    std::string begin_error = "";
+    bool end_ok = true;
+    std::string end_text = "REPORT";
+    std::string end_error = "";
+};
+
+bool fakeProfileBegin(void* ctx, const char* label, std::string* err) {
+    auto* ops = static_cast<FakeHostOps*>(ctx);
+    ++ops->begin_calls;
+    ops->last_label = label != nullptr ? label : "";
+    if (err != nullptr) *err = ops->begin_error;
+    return ops->begin_ok;
+}
+
+bool fakeProfileEnd(void* ctx, std::string* text, std::string* err) {
+    auto* ops = static_cast<FakeHostOps*>(ctx);
+    ++ops->end_calls;
+    if (text != nullptr) *text = ops->end_ok ? ops->end_text : "";
+    if (err != nullptr) *err = ops->end_error;
+    return ops->end_ok;
+}
+
+lift::ui::UiHostOps opsFor(FakeHostOps* fake) {
+    lift::ui::UiHostOps ops{};
+    ops.ctx = fake;
+    ops.profile_begin = &fakeProfileBegin;
+    ops.profile_end = &fakeProfileEnd;
+    return ops;
+}
+
+const char* kHostBridgeScript = R"JS(
+globalThis.render = function render() {
+  const b = host.profileBegin('my-label');
+  ui.text({ x: 0, y: 0, text: 'begin=' + typeof b.ok + ':' + b.ok + ':' + b.error, size: 1 });
+  const e = host.profileEnd();
+  ui.text({ x: 0, y: 0, text: 'end=' + e.ok + ':' + e.text + ':' + e.error, size: 1 });
+  ui.text({ x: 0, y: 0, text: 'types=' + (typeof host.profileBegin) + ',' + (typeof host.profileEnd), size: 1 });
+};
+)JS";
+
+const char* kHostBeginFailScript = R"JS(
+globalThis.render = function render() {
+  const b = host.profileBegin('x');
+  ui.text({ x: 0, y: 0, text: 'begin-ok=' + b.ok + ' text=' + b.error, size: 1 });
+};
+)JS";
+
+const char* kHostEndScript = R"JS(
+globalThis.render = function render() {
+  const e = host.profileEnd();
+  ui.text({ x: 0, y: 0, text: 'end=' + e.ok + ':' + e.text + ':' + e.error, size: 1 });
+};
+)JS";
+
+const char* kHostOutsideRenderScript = R"JS(
+host.profileEnd();
+globalThis.render = function render() {};
+)JS";
+
+void caseHostBridge() {
+    auto runtime = lift::ui::makeQuickJsRuntime();
+
+    // ---- ①②③：成功路径（label 原样、恰好一次、键形状 / 值逐字来自 C++）----
+    lift_test::g_current_case = "ui-script-quickjs/host-bridge";
+    {
+        std::unique_ptr<UiScript> script = loadOk(*runtime, kHostBridgeScript, "host-bridge.js");
+        if (!script) return;
+        FakeHostOps fake;
+        const lift::ui::UiHostOps ops = opsFor(&fake);
+        UiFrameReadings r;
+        r.host = &ops;
+        const std::vector<std::string> texts = renderTexts(*script, r);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(texts.size()), 3);
+        expectText(texts, 0, "begin=boolean:true:", "profileBegin 返回 {ok,error}（成功 ⇒ error 空）");
+        expectText(texts, 1, "end=true:REPORT:", "profileEnd 返回 {ok,text,error}（text 逐字来自 C++）");
+        expectText(texts, 2, "types=function,function", "profileBegin / profileEnd 都是 function");
+        LIFT_CHECK_EQ_I64(fake.begin_calls, 1);
+        LIFT_CHECK_EQ_I64(fake.end_calls, 1);
+        ++lift_test::g_checks;
+        if (fake.last_label != "my-label") {
+            lift_test::failf(__FILE__, __LINE__, "label 应原样到达 C++（得到 `%s`）", fake.last_label.c_str());
+        }
+    }
+
+    // ---- ④ 领域失败（ok:false）**不抛**：render 继续，错误串逐字回给脚本 ----
+    lift_test::g_current_case = "ui-script-quickjs/host-bridge/domain-failure";
+    {
+        std::unique_ptr<UiScript> script = loadOk(*runtime, kHostBeginFailScript, "host-begin-fail.js");
+        if (!script) return;
+        FakeHostOps fake;
+        fake.begin_ok = false;
+        fake.begin_error = "已经有一段 profile 窗口开着（begin 不会 reset 上一段）";
+        const lift::ui::UiHostOps ops = opsFor(&fake);
+        UiFrameReadings r;
+        r.host = &ops;
+        const std::vector<std::string> texts = renderTexts(*script, r);
+        expectText(texts, 0, "begin-ok=false text=已经有一段 profile 窗口开着（begin 不会 reset 上一段）",
+                   "领域失败走返回值（不抛）且 error 逐字回给脚本");
+        LIFT_CHECK_EQ_I64(fake.begin_calls, 1);
+    }
+
+    // ---- ④ 剪贴板失败：ok 仍 true、text 保留、error 非空（"结束 ≠ 复制成功"）----
+    lift_test::g_current_case = "ui-script-quickjs/host-bridge/clipboard-failure";
+    {
+        std::unique_ptr<UiScript> script = loadOk(*runtime, kHostEndScript, "host-end.js");
+        if (!script) return;
+        FakeHostOps fake;
+        fake.end_ok = true;
+        fake.end_text = "WINDOW-TEXT";
+        fake.end_error = "SDL_SetClipboardText: boom";
+        const lift::ui::UiHostOps ops = opsFor(&fake);
+        UiFrameReadings r;
+        r.host = &ops;
+        const std::vector<std::string> texts = renderTexts(*script, r);
+        expectText(texts, 0, "end=true:WINDOW-TEXT:SDL_SetClipboardText: boom",
+                   "复制失败 ⇒ ok 仍 true、text 保留、error 非空");
+    }
+
+    // ---- ⑤ 没接线（readings.host == nullptr）⇒ TypeError 且消息点名函数 ----
+    lift_test::g_current_case = "ui-script-quickjs/host-bridge/no-ops";
+    {
+        std::unique_ptr<UiScript> script = loadOk(*runtime, kHostBeginFailScript, "host-no-ops.js");
+        if (!script) return;
+        UiBuilder builder;
+        std::string err;
+        const bool ok = script->render(builder, UiFrameReadings{}, &err);
+        ++lift_test::g_checks;
+        if (ok) lift_test::failf(__FILE__, __LINE__, "没有 ops 时 host.profileBegin 必须抛错（render 返回 false）");
+        ++lift_test::g_checks;
+        if (err.find("host.profileBegin") == std::string::npos || err.find("宿主没有接") == std::string::npos) {
+            lift_test::failf(__FILE__, __LINE__, "错误串应点名 `host.profileBegin` 与「没有接」（得到 `%s`）",
+                             err.c_str());
+        }
+    }
+
+    // ---- ⑥ 在 render 之外调用 ⇒ load 失败 + 消息含 `render()` ----
+    lift_test::g_current_case = "ui-script-quickjs/host-bridge/outside-render";
+    {
+        std::string err;
+        std::unique_ptr<UiScript> script = runtime->load(kHostOutsideRenderScript, "host-outside.js", nullptr, &err);
+        ++lift_test::g_checks;
+        if (script != nullptr) lift_test::failf(__FILE__, __LINE__, "在 render 之外调用 host 必须让 load 失败");
+        ++lift_test::g_checks;
+        if (err.find("host.profileEnd") == std::string::npos || err.find("render()") == std::string::npos) {
+            lift_test::failf(__FILE__, __LINE__, "错误串应点名 `host.profileEnd` 与 `render()`（得到 `%s`）",
+                             err.c_str());
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -760,6 +992,8 @@ int main() {
     caseReadings();
     caseError();
     caseKeyOnRect();
+    caseFramesPos();
+    caseHostBridge();
     caseValueStress();
     return lift_test::finish("ui-script-quickjs");
 }

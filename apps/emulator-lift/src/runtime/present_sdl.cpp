@@ -256,6 +256,9 @@ struct SdlWindow::Impl {
     // ★ 帧列表读数源（`game.local_frames()`；非 owning，生命周期 = 调用方 = Machine / AotHost）。
     //   `nullptr` = 没接 ⇒ 脚本侧 `undefined`。⛔ 不在这里推表：脚本**按需**查询。
     lift::ui::UiFrameSource* ui_frame_source = nullptr;
+    // ★ 宿主能力表（`host.profileBegin/End`；切片 3）。非 owning，生命周期 = 调用方 = `AotHost`。
+    //   `nullptr` = 没接 ⇒ 脚本侧调用抛 TypeError。⛔ 不在这里触发 profile / 剪贴板。
+    const lift::ui::UiHostOps* ui_host_ops = nullptr;
     // ★ 命中 / 捕获路由（`REQ-01M7QF01A00F9946DX0GPH23JQ` 切片 2 后半；`ui/hit.h` 的纯状态机）。
     //   · 命中表 = **上一帧成功 present** 的 display list 的 resolved rect（绘制序）；
     //   · 左键 down 命中 ⇒ 吞 + capture；捕获中的 up 无条件吞，抬在同一条 rect 内才产一次性 click；
@@ -535,6 +538,8 @@ bool SdlWindow::drawOverlay(std::string* err) {
     // ★ 帧列表读数源（`game.local_frames()`）：**按需查询** —— 这里只把指针交出去，
     //   本帧脚本不调用它就一次 guest 读都不发生（⛔ 宿主不每帧重建表）。
     readings.frames = impl_->ui_frame_source;
+    // ★ 宿主能力表（切片 3）：`host.profileBegin/End` 的唯一来源（与 frames 同一段，非 owning）。
+    readings.host = impl_->ui_host_ops;
     // ★ 命中 / 捕获（切片 2 后半）：全部读自**上一帧成功 present** 的命中表（= 屏幕上真正画着
     //   的东西）+ 本帧指针位置。⛔ 这里只读：不跑 JS、不改 capture。
     {
@@ -1613,6 +1618,8 @@ void SdlWindow::setUiReadings(const UiReadings& readings) { impl_->ui_readings =
 // ★ `Machine` / `AotHost` → 窗口 sink 的**帧列表读数源**（`game.local_frames()`）。
 //   只存指针（非 owning）：真正的读发生在脚本调用那一下；⛔ 宿主不推表、不缓存。
 void SdlWindow::setUiFrameSource(ui::UiFrameSource* src) { impl_->ui_frame_source = src; }
+
+void SdlWindow::setUiHostOps(const ui::UiHostOps* ops) { impl_->ui_host_ops = ops; }
 
 void SdlWindow::setCaptureForTest(bool on) { impl_->capture = on; }
 

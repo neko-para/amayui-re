@@ -19,6 +19,13 @@
 //   ⑥ **`cur` 不活动（`top` 全 false）⇒ 不许拿 `frames[0]` 冒充栈顶**：假帧源给两条 `top=false`
 //      （`frames[0].script` = SC0000）+ `readings.script` = "startup" ⇒ 行必须是 `script startup`
 //      （回退 `game.script`；与 ⑤ 的 top=true 用例互补）。红了 ⇒ `frames[0]` 又被当栈顶。
+//   ⑦ **PROFILE 按钮（切片 3）**：面板仍是 `elements[0]`；存在 `key == "profile"` 的 Rect（画在
+//      面板**之后**、面板下方）；按钮标签 `PROFILE` 是 14px / kit `idle.fg`。★ "HUD 行"的判据
+//      收窄成 `Text && font_size==16 && color==FG` —— ⛔ 不 blanket 跳过所有非 16px 文本：
+//      除按钮标签外，其余每个 Text 仍必须是 16px + FG。
+//   ⑧ **状态机（`game.click` 自驱）**：四态 `开始` / `已复制` / `失败：<error>` / `INVALID（已复制）`
+//      ／ 状态行是面板里的一行；两次击之间 `begin`/`end` 各**只**调一次；闲置帧不再调宿主、
+//      但状态行留着（不按帧清）。红了 ⇒ 按钮点了没反应 / 失败被画成"已复制" / 点击被重复消费。
 // ★ 脚本是**运行时读的外置文件**（`LIFT_UI_SCRIPT_DIR "/hud.js"`，与生产回退同一个路径）：
 //   改脚本 ⇒ 这条用例立刻看见。缺宿主字体（`ui.measure` 的来源）⇒ `LIFT_SKIP(77)`（⛔ 不假绿）。
 #include <cstdint>
@@ -49,11 +56,18 @@ bool readAll(const std::string& path, std::string* out) {
     return !bad;
 }
 
-// 把 display list 里的 Text 元素按构造序取出来（面板是第一条 Rect，⛔ 不参与）。
-std::vector<std::string> textsOf(const lift::ui::UiBuilder& builder) {
+// 把 display list 里的 **HUD 行**取出来：Text 且 `font_size == SIZE(16)` 且颜色 == FG。
+// ★ 为什么收窄判据（切片 3）：PROFILE 按钮由 `kit.js` 画（14px / 三态配色），它不是 HUD 行；
+//   ⛔ 不 blanket 跳过所有非 16px 文本 —— 除了按钮文本，其余 Text 仍必须是 16px + FG（见 ③）。
+bool isHudLine(const lift::ui::Element& e) {
+    return e.kind == lift::ui::ElementKind::Text && e.font_size == 16 && e.color.r == 235 &&
+           e.color.g == 255 && e.color.b == 235 && e.color.a == 255;
+}
+
+std::vector<std::string> hudLinesOf(const lift::ui::UiBuilder& builder) {
     std::vector<std::string> out;
     for (const lift::ui::Element& e : builder.elements()) {
-        if (e.kind == lift::ui::ElementKind::Text) out.push_back(e.text);
+        if (isHudLine(e)) out.push_back(e.text);
     }
     return out;
 }
@@ -68,6 +82,20 @@ void expectLine(const std::vector<std::string>& got, std::size_t i, const char* 
     if (got[i] != want) lift_test::failf(__FILE__, __LINE__, "第 %zu 条文本：期望 `%s`，得到 `%s`", i, want, got[i].c_str());
 }
 
+// `profile-status` 用例：状态行是面板里的一行（HUD 行），以 `profile: ` 开头。
+std::string statusLineOf(const lift::ui::UiBuilder& builder) {
+    for (const lift::ui::Element& e : builder.elements()) {
+        if (e.kind == lift::ui::ElementKind::Text && e.text.rfind("profile: ", 0) == 0) return e.text;
+    }
+    return {};
+}
+
+void expectStatus(const lift::ui::UiBuilder& builder, const char* want) {
+    ++lift_test::g_checks;
+    const std::string got = statusLineOf(builder);
+    if (got != want) lift_test::failf(__FILE__, __LINE__, "状态行：期望 `%s`，得到 `%s`", want, got.c_str());
+}
+
 // ★ 假帧源（`game.local_frames()` 的取数口）：只回给定条目 / err，不读 guest。
 struct FakeFrameSource final : lift::ui::UiFrameSource {
     std::vector<lift::ui::UiFrameInfo> list;
@@ -77,6 +105,181 @@ struct FakeFrameSource final : lift::ui::UiFrameSource {
         return list;
     }
 };
+
+// ★ 假宿主能力表（`host.profileBegin/End` 的取数口；切片 3）：记调用 + 可编排返回值。
+struct FakeHostOps {
+    int begin_calls = 0;
+    int end_calls = 0;
+    std::string last_label;
+    bool begin_ok = true;
+    std::string begin_error = "";
+    bool end_ok = true;
+    std::string end_text = "REPORT";
+    std::string end_error = "";
+};
+
+bool fakeProfileBegin(void* ctx, const char* label, std::string* err) {
+    auto* ops = static_cast<FakeHostOps*>(ctx);
+    ++ops->begin_calls;
+    ops->last_label = label != nullptr ? label : "";
+    if (err != nullptr) *err = ops->begin_error;
+    return ops->begin_ok;
+}
+
+bool fakeProfileEnd(void* ctx, std::string* text, std::string* err) {
+    auto* ops = static_cast<FakeHostOps*>(ctx);
+    ++ops->end_calls;
+    if (text != nullptr) *text = ops->end_ok ? ops->end_text : "";
+    if (err != nullptr) *err = ops->end_error;
+    return ops->end_ok;
+}
+
+lift::ui::UiHostOps opsFor(FakeHostOps* fake) {
+    lift::ui::UiHostOps ops{};
+    ops.ctx = fake;
+    ops.profile_begin = &fakeProfileBegin;
+    ops.profile_end = &fakeProfileEnd;
+    return ops;
+}
+
+// 一次带 click 的 render（`profile` 按钮）。
+lift::ui::UiFrameReadings clickReadings(const lift::ui::UiHostOps* ops, std::uint64_t frame) {
+    lift::ui::UiFrameReadings r;
+    r.frame = frame;
+    r.host = ops;
+    r.click_ok = true;
+    r.click_key = "profile";
+    r.click_x = 10;
+    r.click_y = 10;
+    return r;
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑦ PROFILE 按钮的状态机（`REQ-01M7QF01A00F9946DX0GPH23JQ` 切片 3）
+//   四态：`开始` / `已复制` / `失败：<error>` / `INVALID（已复制）`；状态行是面板里的一行。
+//   ★ 副作用在 render **开头**（`game.click` 自驱），`Button` 只画外观、不传 `on`。
+//   ★ 红了 ⇒ 按钮点了没反应 / 状态行不显示 / 同一次点击被重复消费 / 失败被画成"已复制"。
+// ---------------------------------------------------------------------------------------
+void caseProfileStatus(lift::ui::ScriptRuntime& runtime, const std::string& source, const std::string& path,
+                       lift::FontEngine* font) {
+    using namespace lift_test;
+    g_current_case = "ui-hud-script/profile-status";
+
+    // ---- ① 第一击 ⇒ 开始；第二击（text 含 INVALID）⇒ INVALID（已复制）；闲置帧不再调用 ----
+    {
+        std::string err;
+        std::unique_ptr<lift::ui::UiScript> script = runtime.load(source, path, font, &err);
+        LIFT_CHECK(script != nullptr);
+        if (!script) return;
+        FakeHostOps fake;
+        const lift::ui::UiHostOps ops = opsFor(&fake);
+
+        lift::ui::UiBuilder b1;
+        std::string rerr;
+        LIFT_CHECK(script->render(b1, clickReadings(&ops, 1), &rerr));
+        expectStatus(b1, "profile: 开始");
+        LIFT_CHECK_EQ_I64(fake.begin_calls, 1);
+        LIFT_CHECK_EQ_I64(fake.end_calls, 0);
+        ++g_checks;
+        if (fake.last_label != "overlay") {
+            failf(__FILE__, __LINE__, "profileBegin 的 label 应是 `overlay`，得到 `%s`", fake.last_label.c_str());
+        }
+
+        fake.end_text = "=== profile window: overlay ===\nunaccounted ... INVALID";
+        lift::ui::UiBuilder b2;
+        LIFT_CHECK(script->render(b2, clickReadings(&ops, 2), &rerr));
+        expectStatus(b2, "profile: INVALID（已复制）");
+        LIFT_CHECK_EQ_I64(fake.begin_calls, 1);  // 两次击之间：begin / end 各只一次
+        LIFT_CHECK_EQ_I64(fake.end_calls, 1);
+
+        // 没有点击的帧：状态行留着（不按帧清），且不再调用宿主。
+        lift::ui::UiFrameReadings idle;
+        idle.frame = 3;
+        idle.host = &ops;
+        lift::ui::UiBuilder b3;
+        LIFT_CHECK(script->render(b3, idle, &rerr));
+        expectStatus(b3, "profile: INVALID（已复制）");
+        LIFT_CHECK_EQ_I64(fake.begin_calls, 1);
+        LIFT_CHECK_EQ_I64(fake.end_calls, 1);
+        // 状态行参与面板尺寸：这一帧的 HUD 行 = frame + 状态行。
+        const std::vector<std::string> hud = hudLinesOf(b3);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hud.size()), 2);
+        expectLine(hud, 0, "frame 3");
+        expectLine(hud, 1, "profile: INVALID（已复制）");
+    }
+
+    // ---- ② 结束成功且文本不含 INVALID ⇒ 已复制 ----
+    {
+        std::string err;
+        std::unique_ptr<lift::ui::UiScript> script = runtime.load(source, path, font, &err);
+        LIFT_CHECK(script != nullptr);
+        if (!script) return;
+        FakeHostOps fake;
+        fake.end_text = "=== profile window: overlay ===\nverdict ...";
+        const lift::ui::UiHostOps ops = opsFor(&fake);
+        lift::ui::UiBuilder b1;
+        std::string rerr;
+        LIFT_CHECK(script->render(b1, clickReadings(&ops, 1), &rerr));
+        lift::ui::UiBuilder b2;
+        LIFT_CHECK(script->render(b2, clickReadings(&ops, 2), &rerr));
+        expectStatus(b2, "profile: 已复制");
+        LIFT_CHECK_EQ_I64(fake.begin_calls, 1);
+        LIFT_CHECK_EQ_I64(fake.end_calls, 1);
+    }
+
+    // ---- ③ 结束失败（ok:false）⇒ 失败：<error>（⛔ 不画成"已复制"）----
+    {
+        std::string err;
+        std::unique_ptr<lift::ui::UiScript> script = runtime.load(source, path, font, &err);
+        LIFT_CHECK(script != nullptr);
+        if (!script) return;
+        FakeHostOps fake;
+        fake.end_ok = false;
+        fake.end_error = "没有打开的 profile 窗口";
+        const lift::ui::UiHostOps ops = opsFor(&fake);
+        lift::ui::UiBuilder b1;
+        std::string rerr;
+        LIFT_CHECK(script->render(b1, clickReadings(&ops, 1), &rerr));
+        lift::ui::UiBuilder b2;
+        LIFT_CHECK(script->render(b2, clickReadings(&ops, 2), &rerr));
+        expectStatus(b2, "profile: 失败：没有打开的 profile 窗口");
+    }
+
+    // ---- ④ 复制失败（ok:true + error 非空）⇒ 失败：<error>（"结束 ≠ 复制成功"）----
+    {
+        std::string err;
+        std::unique_ptr<lift::ui::UiScript> script = runtime.load(source, path, font, &err);
+        LIFT_CHECK(script != nullptr);
+        if (!script) return;
+        FakeHostOps fake;
+        fake.end_error = "SDL_SetClipboardText: boom";
+        const lift::ui::UiHostOps ops = opsFor(&fake);
+        lift::ui::UiBuilder b1;
+        std::string rerr;
+        LIFT_CHECK(script->render(b1, clickReadings(&ops, 1), &rerr));
+        lift::ui::UiBuilder b2;
+        LIFT_CHECK(script->render(b2, clickReadings(&ops, 2), &rerr));
+        expectStatus(b2, "profile: 失败：SDL_SetClipboardText: boom");
+    }
+
+    // ---- ⑤ 开始被拒 ⇒ 失败：<error>（状态机不进入 running）----
+    {
+        std::string err;
+        std::unique_ptr<lift::ui::UiScript> script = runtime.load(source, path, font, &err);
+        LIFT_CHECK(script != nullptr);
+        if (!script) return;
+        FakeHostOps fake;
+        fake.begin_ok = false;
+        fake.begin_error = "已经有一段 profile 窗口开着（begin 不会 reset 上一段）";
+        const lift::ui::UiHostOps ops = opsFor(&fake);
+        lift::ui::UiBuilder b1;
+        std::string rerr;
+        LIFT_CHECK(script->render(b1, clickReadings(&ops, 1), &rerr));
+        expectStatus(b1, "profile: 失败：已经有一段 profile 窗口开着（begin 不会 reset 上一段）");
+        LIFT_CHECK_EQ_I64(fake.begin_calls, 1);
+        LIFT_CHECK_EQ_I64(fake.end_calls, 0);
+    }
+}
 
 }  // namespace
 
@@ -134,7 +337,7 @@ int main() {
         LIFT_CHECK(script->render(builder, r, &rerr));
         if (!rerr.empty()) std::fprintf(stderr, "render: %s\n", rerr.c_str());
 
-        const std::vector<std::string> texts = textsOf(builder);
+        const std::vector<std::string> texts = hudLinesOf(builder);
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(texts.size()), 5);
         expectLine(texts, 0, "mouse 812,622");
         expectLine(texts, 1, "script startup");
@@ -142,7 +345,7 @@ int main() {
         expectLine(texts, 3, "frame 1234");
         expectLine(texts, 4, "worst 3s  wall=33.3ms guest=21.5ms shim=4.2ms");
 
-        // ② 没有 raster / present（任何一条文本都不许含这两个词）。
+        // ② 没有 raster / present（任何一条 HUD 文本都不许含这两个词）。
         for (const std::string& t : texts) {
             ++g_checks;
             if (t.find("raster") != std::string::npos || t.find("present") != std::string::npos) {
@@ -150,8 +353,10 @@ int main() {
             }
         }
 
-        // ③ 颜色精确值：面板是第一条 Rect（fill = BG），所有 Text 都是 FG。
+        // ③ 颜色精确值：面板是第一条 Rect（fill = BG）；HUD 行全是 FG + 16px；
+        //    唯一的非 HUD Text 是按钮标签 PROFILE（kit 的 14px / idle fg）。
         LIFT_CHECK(!builder.elements().empty());
+        int panel_h = 0;
         if (!builder.elements().empty()) {
             const lift::ui::Element& panel = builder.elements().front();
             LIFT_CHECK(panel.kind == lift::ui::ElementKind::Rect);
@@ -160,14 +365,41 @@ int main() {
             LIFT_CHECK_EQ_U32(panel.fill.b, 32u);
             LIFT_CHECK_EQ_U32(panel.fill.a, 204u);  // CC = 80% 不透明（2026-11-18 用户裁决）
             LIFT_CHECK(panel.w > 0 && panel.h > 0);
+            panel_h = panel.h;
         }
-        for (const lift::ui::Element& e : builder.elements()) {
+        bool saw_profile_label = false;
+        std::size_t profile_rect = builder.elements().size();
+        for (std::size_t i = 0; i < builder.elements().size(); ++i) {
+            const lift::ui::Element& e = builder.elements()[i];
+            if (e.kind == lift::ui::ElementKind::Rect && e.key == "profile") profile_rect = i;
             if (e.kind != lift::ui::ElementKind::Text) continue;
+            if (e.text == "PROFILE") {
+                // ★ 按钮文本 = kit 的 `DEFAULT_THEME.font`(14) / `idle.fg`(#EBFFEB)；⛔ 不是 HUD 行。
+                saw_profile_label = true;
+                LIFT_CHECK_EQ_I64(e.font_size, 14);
+                LIFT_CHECK_EQ_U32(e.color.r, 235u);
+                LIFT_CHECK_EQ_U32(e.color.g, 255u);
+                LIFT_CHECK_EQ_U32(e.color.b, 235u);
+                LIFT_CHECK_EQ_U32(e.color.a, 255u);
+                continue;
+            }
+            // 其余每个 Text 都必须是 HUD 行（16px + FG）—— ⛔ 不是"非 16px 就跳过"。
             LIFT_CHECK_EQ_U32(e.color.r, 235u);  // #EBFFEB
             LIFT_CHECK_EQ_U32(e.color.g, 255u);
             LIFT_CHECK_EQ_U32(e.color.b, 235u);
             LIFT_CHECK_EQ_U32(e.color.a, 255u);
             LIFT_CHECK_EQ_I64(e.font_size, 16);  // 参考字号 = SIZE
+        }
+        LIFT_CHECK(saw_profile_label);
+        // 按钮结构：面板仍是 elements[0]，按钮 Rect 画在面板**之后**且 key = profile（可命中）。
+        ++g_checks;
+        if (profile_rect == builder.elements().size()) {
+            failf(__FILE__, __LINE__, "HUD 里没有 key == 'profile' 的按钮 Rect（PROFILE 按钮不可命中）");
+        } else {
+            LIFT_CHECK(profile_rect > 0);  // 面板仍是第一个元素
+            const lift::ui::Element& button = builder.elements()[profile_rect];
+            LIFT_CHECK(button.w > 0 && button.h > 0);
+            LIFT_CHECK(button.y >= panel_h);  // 面板下方
         }
     }
 
@@ -186,7 +418,7 @@ int main() {
         LIFT_CHECK(script->render(builder, r, &rerr));
         if (!rerr.empty()) std::fprintf(stderr, "render: %s\n", rerr.c_str());
 
-        const std::vector<std::string> texts = textsOf(builder);
+        const std::vector<std::string> texts = hudLinesOf(builder);
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(texts.size()), 2);
         expectLine(texts, 0, "frame 7");
         expectLine(texts, 1, "worst 3s  wall=1.2ms guest=-- shim=0.3ms");
@@ -222,7 +454,7 @@ int main() {
         LIFT_CHECK(script->render(builder, r, &rerr));
         if (!rerr.empty()) std::fprintf(stderr, "render: %s\n", rerr.c_str());
 
-        const std::vector<std::string> texts = textsOf(builder);
+        const std::vector<std::string> texts = hudLinesOf(builder);
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(texts.size()), 2);
         expectLine(texts, 0, "script SC0000");
         expectLine(texts, 1, "frame 9");
@@ -236,7 +468,7 @@ int main() {
         std::string rerr2;
         LIFT_CHECK(script->render(builder2, r, &rerr2));
         if (!rerr2.empty()) std::fprintf(stderr, "render: %s\n", rerr2.c_str());
-        const std::vector<std::string> texts2 = textsOf(builder2);
+        const std::vector<std::string> texts2 = hudLinesOf(builder2);
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(texts2.size()), 2);
         expectLine(texts2, 0, "script startup");
         expectLine(texts2, 1, "frame 9");
@@ -272,11 +504,14 @@ int main() {
         LIFT_CHECK(script->render(builder, r, &rerr));
         if (!rerr.empty()) std::fprintf(stderr, "render: %s\n", rerr.c_str());
 
-        const std::vector<std::string> texts = textsOf(builder);
+        const std::vector<std::string> texts = hudLinesOf(builder);
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(texts.size()), 2);
         expectLine(texts, 0, "script startup");  // ★ 不是 `script SC0000`（frames[0] 不是栈顶）
         expectLine(texts, 1, "frame 10");
     }
+
+    // ---- ⑦ / ⑧ PROFILE 按钮 + 状态机（切片 3；每次用一份**新的**脚本实例 = 干净的模块状态）----
+    caseProfileStatus(*runtime, source, path, &font);
 
     script->shutdown();
     return finish("ui-hud-script");

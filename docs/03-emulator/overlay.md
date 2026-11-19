@@ -125,19 +125,28 @@ when: { script: ["SC00*", "TITLE"] }                 // 多个候选 = 或
 
 | 命名空间 | 成员 | 来源 / 边界 |
 |---|---|---|
-| `game` | `frame` / `insns` / `guest_ms` / `script` / `script_id` / `script_ok` / `pos` / `pos_ok` / `metrics()` | 只读；`metrics()` 字段可缺，缺 ⇒ 脚本整行 / 整块省略 |
+| `game` | `frame` / `insns` / `guest_ms` / `script` / `script_id` / `script_ok` / `metrics()` | 只读；`metrics()` 字段可缺，缺 ⇒ 脚本整行 / 整块省略。★ 位置读数**不在** `game` 上，走 `game.local_frames()[i].pos`（见下） |
 | `game` | `local_int/float/string(i)`、`global_int/float/string(i)` | 帧记录 / 全局槽位只读；越界 ⇒ `undefined` + 计数（⛔ 读邻池） |
 | `ui` | `screen/panel/rect/text/image`、`measure(text,size)`、`show/hide/toggle`、`log(level,msg)` | 唯一绘制入口；`log` 有界去重 |
-| `host` | `reload()`、`time_budget_ms()` | 请求热重载 / 读本帧剩余预算 |
+| `host` | `profileBegin(label)`、`profileEnd()` | 宿主能力（方法表）。结束窗口 profile 并**在宿主内部**把结论文本写进系统剪贴板；返回 `{ok,error}` / `{ok,text,error}`（错误串口径见下） |
 | `probe` | `read_u32(ea)`、`read_bytes(ea,n)` | **只读**、有上界、越界即错；必须显式 `--ui-probe`，启动打一行警告 |
 
-★ **M2a 已落地的子集**（2026-11-18）：`game` = `frame` / `fps` / `mouse{x,y}` / `script` /
-`worst{wall_ms, guest_ms?, shim_ms}`（不可用 ⇒ `undefined`，⛔ 不编 0）；`ui` = `rect` / `text` / `measure`
-（绝对参考像素；未知键**暂时忽略**，M1 的校验表之后接）。`insns` / `guest_ms` / `pos` / `script_id` /
-`metrics()`、`host` / `probe`、`show/hide/toggle/log`、`local/global` 未接（M3）。
+★ **M2a 已落地的子集**（2026-11-18；**2026-11-19 切片 3** 追加 `host.profileBegin/End` 与帧列表
+`pos`）：`game` = `frame` / `fps` / `mouse{x,y}` / `script` / `worst{wall_ms, guest_ms?, shim_ms}`
+（不可用 ⇒ `undefined`，⛔ 不编 0）；`ui` = `rect` / `text` / `measure`（绝对参考像素；未知键
+**暂时忽略**，M1 的校验表之后接）；`host` = `profileBegin` / `profileEnd`（**只在 render 内可调用**；
+领域失败走返回值、⛔ 不抛 —— 抛错会让叠层被一枪永久关掉）。`insns` / `guest_ms` / `script_id` /
+`metrics()`、`probe`、`show/hide/toggle/log`、`local/global` 未接（M3）。
+★ **位置读数没有 `game.pos` / `game.pos_ok`**（目标 API 旧文里的那两个名字）：这一版只有
+`game.local_frames()[i].pos`，且**只有 top 帧**有（见下）。⛔ 不要据此以为 `game.pos` 可用。
+★ `host` 的目标 API 里 **`reload()` / `time_budget_ms()` 仍未实现**（切片 3 不做；没有这个成员，
+⛔ 不是静默 no-op）。
+★ `host.profileEnd()` 的 `ok:true` + `error` 非空 = "窗口关了、文本在，但没进剪贴板"；
+文本**不回滚**（需求单明文"INVALID 仍复制"；INVALID 的 token 只在 C++ 报告文本里，JS 侧不另立判据）。
 ★ `game.local_frames()` 是**方法**（不是 getter）：返回活动帧数组（top-first；字段
-`slot / script_id / parent / script / name_degraded / top`），不可用 ⇒ `undefined`；
-证据与安全读取见 `.tmp/ui-qjs/frames-research.md`。
+`slot / script_id / parent / script / name_degraded / top / pos`），不可用 ⇒ `undefined`；
+`pos`（= `0x3C + (pc − base)`，与 `await position` 同一公式）**只有 `top` 帧有**（非 top 是挂起时
+保存的续延 PC，⛔ 不是执行点 ⇒ `undefined`）；证据与安全读取见 `.tmp/ui-qjs/frames-research.md`。
 
 `global/local` 的实现边界（读之前先检查前置条件）：
 
@@ -226,8 +235,13 @@ win32 取。
 `local_frames()`（帧区 40 槽的只读视图，top-first，`top = slot == cur`；证据
 `.tmp/ui-qjs/frames-research.md`；HUD 的 `script` 行取 `top=true` 的项（没有 top 就回退 `game.script`））；`raster` / `present` 两行**已删**；底 `#101820CC`（80% 不透明，
 renderer 路径 `SDL_BLENDMODE_BLEND`，直出也混合（D 单，`SDL_DrawGPUPrimitives`；win32 未验证））；旧 `OverlayState` / `OverlayStatus` /
-`formatOverlayLines` / 5×7 点阵 / `buildHud` / `presentHud` 已删。M1 的布局 / when / 命中 / 校验表、
-M2 的点击路由、M3 的数据面仍未做。
+`formatOverlayLines` / 5×7 点阵 / `buildHud` / `presentHud` 已删。M1 的布局 / when / 校验表、
+M3 的数据面仍未做。
+
+★ **M2a 之后已落地的切片**（2026-11-19）：切片 2 = 命中 / 捕获 / `game.click|hover|active` +
+外置组件库 `kit.js`（`ui.rect({key})` 的 resolved rect 是命中区）；切片 3 = `host.profileBegin/End`
+（结束在宿主内部写系统剪贴板）+ `hud.js` 改 module 并用 `kit.Button` 画 PROFILE + 帧列表 `pos`
+（只有 top 帧；`0x3C + (pc − base)`）。
 
 落 `overlay-quickjs.md` 的适配器；HUD 变成 `scripts/ui/hud.js`；display list 成为脚本唯一出口；
 `UiClickRouter` 接进 `present_sdl.cpp:Impl::handleEvent` 与 `input_plan.cpp`；`--ui-input` / `--ui-strict`。
@@ -300,7 +314,7 @@ router 的"down 放 ⇒ up 放"改掉 ⇒ `ui_hit` 红 · 采样门少一个 EA 
 | R7 | 插件绕过 API 改 guest | API 无写入口 + 形态守卫（`src/ui/**` 不出现 guest 写 API）+ 逐位断言 |
 | R8 | QuickJS 内存 / 沙箱 / GC 与引用计数 / 静态链体积 / TS 产物（`.js` 与 `.d.ts` 漂移） | 见 `overlay-quickjs.md` §2、§5；体积是**估**，⛔ 不进判据；`.d.ts` 漂移守卫**未做**（M2a 只有声明文件） |
 | R9 | **80% 半透明在 GPU 直出上不生效**：`SDL_BlitGPUTexture` 是拷贝、不混合 | 已解决（D，2026-11-18）：直出改为专用混合绘制管线（`SDL_DrawGPUPrimitives` + `SRC_ALPHA/ONE_MINUS_SRC_ALPHA`），`directReadback` 同公式；win32 未验证 |
-| R10 | 外置 `scripts/ui/hud.js` 不在发行树 ⇒ `--overlay` 启动硬错 | 发行打包把 `scripts/ui/{hud.js,ui.d.ts,README.md}` 一起带上（`release/` 待补）；开发回退 `LIFT_UI_SCRIPT_DIR` |
+| R10 | 外置 `scripts/ui/hud.js`（及其 module 依赖 `kit.js`）不在发行树 ⇒ `--overlay` 启动硬错 | 发行打包把 `scripts/ui/{hud.js,kit.js,ui.d.ts,README.md}` 一起带上（`release/` 待补）；**`hud.js` 与 `kit.js` 必须同目录**（`import './kit.js'` 按 `hud.js` 所在目录解析；缺 kit 与缺 hud 同属 exit 2）；开发回退 `LIFT_UI_SCRIPT_DIR` |
 
 ## 待核
 

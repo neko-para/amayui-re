@@ -40,6 +40,12 @@ struct UiFrameInfo {
     std::string script;            // 名字；降级时 = "id:0x%08X"
     bool name_degraded = false;    // script 是降级形态（⛔ 不代表 id / 列表无效）
     bool top = false;              // slot == cur
+    // ★ 脚本内位置（`REQ-01M7QF01A00F9946DX0GPH23JQ` 切片 3）：label 坐标 = `0x3C + (pc − base)`，
+    //   与 `await position` 同一套公式（唯一实现在 `engine_marker.cpp:readScriptPositionAt`）。
+    //   **只有 top 帧**给（判据 = `slot == cur`，与 `top` 同一个布尔）：非 top 帧的 `+0x04` 是
+    //   "该脚本被挂起时保存的续延 PC"，**不是**执行点 ⇒ `pos_ok=false`（脚本侧 `undefined`）。
+    bool pos_ok = false;
+    std::uint32_t pos = 0;         // pos_ok=false 时值无意义（⛔ 不拿 0 冒充读数）
 };
 
 // 帧列表的**宿主取数口**（非 owning；只在 `render` 期间有效）。
@@ -49,6 +55,24 @@ class UiFrameSource {
 public:
     virtual ~UiFrameSource() = default;
     virtual std::vector<UiFrameInfo> localFrames(std::string* err) = 0;
+};
+
+// 宿主能力表（`host.*` 的**唯一**来源；`REQ-01M7QF01A00F9946DX0GPH23JQ` 切片 3）。
+// ★ **非 owning**：生命周期 = 填它的那一帧（生产 = `AotHost` 成员；测试 = 栈上替身；
+//   见 `UiFrameReadings::host`）。
+// ★ 为什么是"结构体 + 函数指针"而不是 `std::function`：本头是**语言无关的纯接口头**，
+//   `std::function` 会把 `<functional>` / 分配器 / "宿主可以塞任意可调用对象（含捕获悬垂引用的
+//   lambda）"带进来 —— 那正好是要防的生命周期模糊；而空槽在这里**编译期可判、运行期可测**
+//   （`ops->profile_begin == nullptr` ⇒ 一句 TypeError，测试能钉住"没接线是响亮失败"）。
+struct UiHostOps {
+    void* ctx = nullptr;  // 实现方自己的上下文（生产 = `AotHost*`；测试 = 任意 POD 指针）。
+    // label = UTF-8（空串也接受，实现方自己决定缺省 label）。
+    // true = 窗口已开；false = 没开（`*err` 填人可读的 UTF-8 原因）。
+    bool (*profile_begin)(void* ctx, const char* label, std::string* err) = nullptr;
+    // true = 窗口已关、`*text` = 报告全文；`*err` 只在"附带一步失败"时非空
+    //   （剪贴板写失败：`text` 仍然有效、仍要交给 HUD —— 需求单明文"INVALID 仍复制"）。
+    // false = 没有开着的窗口（`*err` 填原因）。
+    bool (*profile_end)(void* ctx, std::string* text, std::string* err) = nullptr;
 };
 
 // 宿主每帧给脚本的只读读数（⛔ 不含 raster / present —— 用户 2026-11-18 已裁决删除）。
@@ -81,6 +105,11 @@ struct UiFrameReadings {
     // ★ 帧列表读数源（`game.local_frames()`；**非 owning**，只在 render 期间有效）。
     //   nullptr = 宿主没接（headless / 测试替身 / 叠层没开）⇒ 脚本侧 `undefined`。
     UiFrameSource* frames = nullptr;
+    // ★ 本帧的宿主能力表（`host.*` 的**唯一**来源）。nullptr = 宿主没接（测试替身 / 非窗口臂）
+    //   ⇒ `host.profileBegin/End` 抛 TypeError（不是"`host` 是 undefined"：`host` 对象**恒存在**，
+    //   缺接线是**调用时**的响亮错，而不是画 HUD 时的形状差异）。
+    //   ★ 非 owning；宿主保证它在 render 期间存活（生产：`AotHost` 成员，sink 先于它析构）。
+    const UiHostOps* host = nullptr;
 };
 
 class UiScript {

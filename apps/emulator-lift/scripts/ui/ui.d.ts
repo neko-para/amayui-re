@@ -15,8 +15,8 @@
  *   bare specifier / 绝对路径 / `data:` / `..` 逃逸一律加载期拒绝。module 里**仍要显式**写
  *   `globalThis.render = …`。
  *
- * `scripts/ui/ui.d.ts` 声明宿主全局 `ui` 与 `game`，外加入口 `render` 的**类型**（供 `jsconfig.json`
- * 的 `checkJs` 用；运行时 `render` 由脚本自己赋值，不是宿主注入的值）。
+ * `scripts/ui/ui.d.ts` 声明宿主全局 `ui` / `game` / `host`，外加入口 `render` 的**类型**
+ * （供 `jsconfig.json` 的 `checkJs` 用；运行时 `render` 由脚本自己赋值，不是宿主注入的值）。
  */
 
 /** `ui.rect({ … })`：参考像素（1280×720 画布）的轴对齐矩形。 */
@@ -108,6 +108,16 @@ interface FrameInfo {
   name_degraded: boolean;
   /** 这一格就是当前执行点 `cur`；整表最多一项为真（`cur` 那一格不活动 ⇒ 全 false） */
   top: boolean;
+  /**
+   * 脚本内位置（label 坐标 = `0x3C + (pc − base)`；与 `await position` 同一坐标系、同一公式）。
+   *
+   * ★ **只有 `top === true` 的那一项有**（判据 = `slot === cur`，与 `top` 同一个布尔）；
+   *   非 top 帧的 `+0x04` 是"该脚本被挂起时保存的续延 PC"，**不是**执行点 ⇒ 这一版直接
+   *   不暴露（`undefined`，用 `'pos' in f` 判）。读不到时同样没有这个键（⛔ 不编 0）。
+   * ★ 采样时刻 = Present（不是块边界）：对 `pos >= X` 这类单调条件没有区别；窄区间
+   *   `[from,to)` 可能"两次 Present 之间整个穿过"而漏掉（本版不承诺边沿）。
+   */
+  pos?: number;
 }
 
 /** 每帧只读读数（宿主注入；没有值的项是 `undefined`，⛔ 不是 0）。 */
@@ -152,9 +162,49 @@ declare const ui: {
 /** 只读读数。属性是 getter（无 setter）⇒ strict 下赋值抛 TypeError。 */
 declare const game: UiFrameReadings;
 
+/** `host.profileBegin(label)` 的结果（所有键恒存在；`error` 空串 = 没有错）。 */
+interface UiProfileBeginResult {
+  /** true = 窗口已开；false = 没开（多半是"已有一段开着"，`error` 给原因） */
+  readonly ok: boolean;
+  /** 人可读的原因（UTF-8；没有错时是空串） */
+  readonly error: string;
+}
+
+/**
+ * `host.profileEnd()` 的结果（所有键恒存在）。
+ *
+ * ★ **结束 ≠ 复制成功**：`ok:true` + `error` 非空 = "窗口关了、`text` 在，但没进剪贴板"
+ *   （宿主内部写系统剪贴板；`text` **不回滚** —— 需求单明文"INVALID 仍复制"）。
+ *   `ok:false` ⇒ 没有开着的窗口（`text` 为空串）。
+ */
+interface UiProfileEndResult {
+  readonly ok: boolean;
+  /** 结论文本（`formatWindowReportText` 的全文）；`ok:false` 时是空串 */
+  readonly text: string;
+  readonly error: string;
+}
+
+/**
+ * 宿主能力（**方法表**，像 `ui`；⛔ 不是读数）。
+ *
+ * ★ 对象**恒存在**；缺接线（非窗口臂 / 测试替身）是**调用时**的 `TypeError`，不是 `undefined`。
+ * ★ **只在 `render` 内可调用**；副作用就发生在 render 里（⛔ 不在 `handleEvent`）。
+ * ★ 用法错 ⇒ `TypeError`；领域失败 ⇒ **返回值**（`ok:false`，不抛 —— HUD 要显示"失败"并继续画）。
+ * ★ 只在窗口档可达：`--present headless` 与 `--overlay` 同给是 `exit 2`。
+ * ★ 这一版只有这两项；`reload()` / `time_budget_ms()`（`docs/03-emulator/overlay.md` §3.5 的
+ *   目标 API）**尚未实现**。
+ */
+declare const host: {
+  /** 开始一段窗口 profile；`label` = UTF-8（默认 HUD 传 `"overlay"`）。 */
+  profileBegin(label: string): UiProfileBeginResult;
+  /** 结束这一段窗口 profile，并**由宿主**把结论文本写进系统剪贴板。 */
+  profileEnd(): UiProfileEndResult;
+};
+
 /**
  * 入口（脚本必须显式赋给 `globalThis.render`）。宿主**每帧**调一次；调用前 display list 已清空。
  *
+ * ★ `host.*` 的副作用发生在 **render 里**（⛔ 不在 `handleEvent`）；同一次点击只有这一帧看得到。
  * ★ 只是类型声明：`jsconfig.json` 的 `checkJs` 用它，让 `globalThis.render = function …` 类型通过。
  *   运行时这个全局**不存在**（脚本自己赋；宿主没赋 ⇒ 加载期硬失败）。
  */

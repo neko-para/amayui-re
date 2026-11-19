@@ -175,6 +175,9 @@ public:
     // ★ `PresentSink`：帧列表读数源（`game.local_frames()`；非 owning，生命周期 = 调用方）。
     //   ⛔ 只存指针：`drawOverlay` 每帧把它塞进 `UiFrameReadings::frames`，脚本**按需**查询。
     void setUiFrameSource(ui::UiFrameSource* src) override;
+    // ★ `PresentSink`：宿主能力表（`host.profileBegin/End`；非 owning，生命周期 = 调用方 = `AotHost`）。
+    //   ⛔ 只存指针：`drawOverlay` 每帧把它塞进 `UiFrameReadings::host`。
+    void setUiHostOps(const ui::UiHostOps* ops) override;
     bool overlayEnabled() const override;
     const char* rendererName() const;    // 直出时是 `gpu-direct`
     // GPU 直出是否成立（窗口已 claim 给光栅化的 device）。false ⇒ 呈现走 SDL_Renderer 上传。
