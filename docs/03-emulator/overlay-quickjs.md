@@ -17,12 +17,12 @@ Maa 的 NodeJS binding 不是一份绑定，而是一层与语言无关的薄抽
 | 参数解包 | `spec/wrapper.h:UnWrapArgs` / `OptionalCount`（错误里追加 `Sig:` / `Got:`）；`spec/traits.h:FuncTraits` | ⚠ 函数少，手写 `argc` 检查更短；只留 `Sig:` 诊断那一招 |
 | 函数注册 | `spec/utils.h:MAA_BIND_FUNC` → `WrapFunctionHelper` → `spec/quickjs/instric.impl.h:MakeFunction`（`JS_NewCFunctionData` 把 `std::function` 塞进 `func_data[0]`） | ✅ 机制可借；⚠ 别抄它硬编码 `55 /* JS_ATOM_name */`，我们 `JS_NewAtom("name")` |
 | 类注册 / GC | `spec/quickjs/class.h:NativeClass<T>::init`（`JS_NewClassID` / `JS_NewClass`、finalizer=delete、gc_mark、`JS_SetConstructor`…） | ❌ 整套不要（没有 host 句柄类）；✅ 只学原理：宿主把 JSValue 要么每次 `JS_DupValue` 临时保，要么挂在 runtime 内对象上被 mark |
-| 模块注册 | `apis/loader.cpp:init_module_maa` 把全局 `maa` 挂 `globalThis`，内部逐命名空间建对象 | ✅ 同样挂三个全局对象；❌ ESM |
+| 模块注册 | `apis/loader.cpp:init_module_maa` 把全局 `maa` 挂 `globalThis`，内部逐命名空间建对象 | ✅ 同样挂三个全局对象 `ui` / `game` / `host`；✅ ESM（module loader 按入口目录解析相对 specifier，见 §3） |
 | 错误 | `spec/tools.h:MaaError : std::exception`（只在本侧 throw/catch，不过 FFI）；跨到 JS = `JS_ThrowTypeError` + 返 `JS_EXCEPTION` | ✅ 同一分工 |
-| 生命周期 | `plugin/runtime.cpp`：`JS_NewRuntime` → `JS_NewContext` → `JS_SetDumpFlags(JS_DUMP_LEAKS)` → `JS_SetRuntimeOpaque`；析构 `JS_FreeContext` → `JS_FreeRuntime`；`JS_Eval(..., "index.js", JS_EVAL_FLAG_STRICT)`；`JS_ExecutePendingJob` | ✅ 骨架；❌ job 泵（无 Promise） |
+| 生命周期 | `plugin/runtime.cpp`：`JS_NewRuntime` → `JS_NewContext` → `JS_SetDumpFlags(JS_DUMP_LEAKS)` → `JS_SetRuntimeOpaque`；析构 `JS_FreeContext` → `JS_FreeRuntime`；`JS_Eval(..., "index.js", JS_EVAL_FLAG_STRICT)`；`JS_ExecutePendingJob` | ✅ 骨架；✅ job 泵（`JS_ExecutePendingJob` drain，只服务 module 求值 / 关闭；`Promise` 加而不删，见 §2.1） |
 | 多线程 / NAPI / 业务 | `plugin/entry.cpp` 的 detached `std::thread`、`plugin/runtime.cpp` 的 mutex/cv/`push_task`、`AsyncWork`（实在 `spec/quickjs/async.h:14` 与 `spec/nodejs/async.h:10`；`spec/async.h` 只是转发头）、`apis/` 40+ 文件 | ❌ 全丢 |
 
-**一句话**：拿"值所有权 + 转换表 + 一个 C 函数注册口 + 错误分工"，其余（类体系 / 异步 / 多线程 / 业务）都不进。
+**一句话**：拿"值所有权 + 转换表 + 一个 C 函数注册口 + 错误分工"，其余（类体系 / 多线程 / 业务）都不进；异步只留 module 求值的 job drain（⛔ 不做跨帧协程，见 §3）。
 
 ## 2. QuickJS-ng v0.18.0：来源、预算、沙箱
 
@@ -45,7 +45,7 @@ Maa 的 NodeJS binding 不是一份绑定，而是一层与语言无关的薄抽
 ### 2.1 沙箱：`JS_NewContextRaw` + 选择性 intrinsic（★ **不是安全边界**）
 
 ★ **沙箱不是安全边界**（用户裁决 2026-11-18：JS 没有宿主权限 —— 它拿到的能力只来自我们注入的
-`ui` / `game`，所以**信任脚本**）。本节的口径因此是：
+`ui` / `game` / `host`，所以**信任脚本**）。本节的口径因此是：
 
 1. **保留的删除只有功能目的**：删 `eval` / `Function` / `Function.prototype.constructor`
    = 禁**动态编译**；删 `Math.random` = 去掉不可复现的随机源（种子是宿主时间）。
@@ -53,12 +53,13 @@ Maa 的 NodeJS binding 不是一份绑定，而是一层与语言无关的薄抽
 2. **不追着补删除**：上游把新内建并进 `JS_AddIntrinsicBaseObjects` 时（如 0.18.0 把 `BigInt`
    并进来），**不**为它加新的删除 —— 只记录当前表面（`tests/ui_script_quickjs.cpp` 的 sandbox
    用例同理：那张表记录**表面**，不是合同）。
-3. **宿主边界不在这里**：脚本能做什么只由注入的 `ui` / `game` 决定（无文件 / 网络 / 进程 / native 指针）；
-   用 `JS_NewContextRaw` 少装 intrinsic 另有功能价值（体积小、没有 `Date` / `Promise` 等不确定面），
-   但它**不是**权限边界。
+3. **宿主边界不在这里**：脚本能做什么只由注入的 `ui` / `game` / `host` 决定（无文件 / 网络 / 进程 / native 指针）；
+   用 `JS_NewContextRaw` 少装 intrinsic 另有功能价值（体积小、没有 `Date` 等不确定面；`Promise` 是
+   显式例外，见下），但它**不是**权限边界。
 
 `JS_NewContext` 与 `JS_NewContextRaw` 的差集 = Date / eval / RegExp / JSON / Proxy / MapSet / TypedArrays /
-Promise / WeakRef / `performance` 的来源（`quickjs.c:2894-2918` vs `2848-2892`）——其中 JSON / MapSet 按需单独加。
+Promise / WeakRef / `performance` 的来源（`quickjs.c:2894-2918` vs `2848-2892`）——本仓从那组里只加了
+`Eval`（宿主编译）与 `Promise`（module 求值；裁决 2026-11-19），其余不加。
 ★ 0.18.0 起 `BigInt` **不在**这个差集里：`JS_AddIntrinsicBaseObjects` 自己就会调
 `JS_AddIntrinsicBigInt`（`quickjs.c:59170`），所以"只加 BaseObjects"的形状**会带进 `BigInt`**：
 实测 `typeof BigInt === "function"`，且 `1n` 字面量照常可用（`typeof 1n === "bigint"`；
@@ -66,10 +67,15 @@ Promise / WeakRef / `performance` 的来源（`quickjs.c:2894-2918` vs `2848-289
 我们的形状：
 
 1. `JS_NewContextRaw`（只建原型与空全局对象，不装任何构造器）。
-2. 只加 `JS_AddIntrinsicBaseObjects`（Object / Function / Array / String / Number / Boolean / Error 族 /
+2. 加 `JS_AddIntrinsicBaseObjects`（Object / Function / Array / String / Number / Boolean / Error 族 /
    Math / Reflect / Iterator / Symbol / **BigInt** / `parseInt` / `isNaN`）——本切片**不**加 `MapSet` / `JSON`。
-3. ⛔ 不加 `Date`（墙钟）、`RegExp`、`Proxy`、`TypedArrays`、`Promise`、`WeakRef`、
+   ★ 另外**必加** `JS_AddIntrinsicEval`（宿主编译，见 4）与 `JS_AddIntrinsicPromise`（module 求值返回
+   Promise，见 §3 / §5；用户裁决 2026-11-19：**加而不删** —— 沙箱不是安全边界，先加再删只是
+   以后要用还得改回来的额外特殊处理）。
+3. ⛔ 不加 `Date`（墙钟）、`RegExp`、`Proxy`、`TypedArrays`、`WeakRef`、
    `JS_AddPerformance`（`Date.now` 派生）；本切片连 `JSON` / `MapSet` 也不加（HUD 用不到）。
+   ★ `Promise` **不在**"不加"之列（见 2）；`typeof Promise === "function"` 是新的**表面事实**
+   （`tests/ui_script_quickjs.cpp` 记它，⛔ 不当合同），它**不是**给脚本的跨帧异步（`render` 仍同步，见 §3）。
    （`BigInt` 是 `BaseObjects` 自带的，见上；⛔ 不为它补删除。）
 4. ★ **必须加 `JS_AddIntrinsicEval`**，但只为**宿主**能编译脚本：宿主 `JS_Eval` 走
    `JS_EvalThis2` → `JS_EvalInternal`，而它在 `quickjs.c:38338` 先判 `ctx->eval_internal`
@@ -81,7 +87,9 @@ Promise / WeakRef / `performance` 的来源（`quickjs.c:2894-2918` vs `2848-289
    在只删全局 `Function` 后仍可用；删掉 `Function.prototype.constructor` 后才抛 `TypeError`。
    `eval` 全局删掉后是 `ReferenceError: eval is not defined`。
    ⇒ 这一段推翻本节早先的"不加 Eval"写法（同一条实测，2026-11-18）。
-5. 无 `std` / `os`：那是 `quickjs-libc.c` 的模块；不设 `JS_SetModuleLoaderFunc` ⇒ `import` 失败。
+5. 无 `std` / `os`：那是 `quickjs-libc.c` 的模块（本仓不 vendor 它）。module loader **已接**
+   （`script_quickjs.cpp:moduleLoad` / `moduleNormalize`），但它只读 **UI 根目录子树内的相对路径**；
+   bare specifier（含 `std` / `os`）/ 绝对路径 / `data:` 一律在 resolve 期拒绝 ⇒ 那些 `import` 仍失败。
 6. 无 host 反射：不学 `NativeObject<T>` / `NativePointerHolder`，⛔ 不给脚本任何 native 指针 / 句柄。
 
 ### 2.2 预算：三条线、三个失败面
@@ -121,7 +129,7 @@ class UiScript {   // init / update(dt,frame) / render(UiBuilder&) / on_click / 
 
 | 接口 | QuickJS 侧 |
 |---|---|
-| `load` | `JS_NewRuntime` → 三个预算设置 → `JS_NewContextRaw` → 白名单 intrinsic → 注入三表 → `JS_Eval(src,len,origin,JS_EVAL_FLAG_STRICT)` → 存 `render` 句柄（`JS_DupValue`） |
+| `load` | `JS_NewRuntime` → 三个预算设置 → `JS_NewContextRaw` → intrinsic（BaseObjects + Eval + Promise）→ 注入 `ui` / `game` / `host` → **classic 优先探针**（`COMPILE_ONLY`）：能编走 `JS_Eval(..., GLOBAL\|STRICT)`，否则 module 走 loader + `JS_Eval(MODULE)`（返 Promise ⇒ `drainPendingJobs` + 查 rejection）→ 存 `render` 句柄（`JS_DupValue`） |
 | `callUpdate/Render/Click/Pointer` | `JS_Call(ctx, fn, JS_UNDEFINED, argc, argv)`；`render` 期间 `Impl::builder` 指向本帧 `UiBuilder` |
 | `reload` | 先在**新** runtime 上 load 成功再换旧（失败**不动**旧的，`overlay.md` R2） |
 | `shutdown` | `JS_FreeContext` → `JS_FreeRuntime`（`JS_DUMP_LEAKS` 只在开发构建开） |
@@ -140,21 +148,29 @@ class UiScript {   // init / update(dt,frame) / render(UiBuilder&) / on_click / 
 
 - **宿主跨调用持有的 JSValue 只在 runtime 内活**：跨调用要 `JS_DupValue`；⛔ 绝不把 `JSValue` 存进 C++ 全局
   （热重载 = 换 runtime ⇒ UAF）。
-- ⛔ 无 Promise / async / job 泵：`render` 必须同步出 display list（`overlay.md` D10）。
+- `Promise` **存在**（`JS_AddIntrinsicPromise`、不删；用户裁决 2026-11-19），宿主的 job 泵**只**服务
+  module 求值 / 关闭的 microtask；⛔ `render` 仍必须**同步**出 display list —— 没有跨帧 async / 协程
+  （`overlay.md` D10）。
 - `game` 定死为 **getter 字段**：带下标的只能是函数（`local_int(3)` 等）；⛔ 字段与函数两种形态不并存。
 
 ## 4. JS 作者体验（M2a 实况）
 
-- 默认 HUD = **外置** `apps/emulator-lift/scripts/ui/hud.js`（UTF-8、单文件、无 `import`、strict；
-  入口必须**显式** `globalThis.render = function render() { … }`；`render` 每次只往 display list 追加）。
-- 随发行分发 `scripts/ui/{hud.js, ui.d.ts, README.md}`。`--overlay` 的解析顺序：
+- 默认 HUD = **外置** `apps/emulator-lift/scripts/ui/hud.js`（UTF-8、**module**、strict；它
+  `import { Button } from './kit.js'`。★ module 的顶层声明**不挂** `globalThis` ⇒ 入口**仍然**必须
+  **显式** `globalThis.render = function render() { … }`；`render` 每次只往 display list 追加。
+  classic 脚本仍支持（`--ui` 旧语义：能按 classic 编译就绝不走 module）。
+- 随发行分发 `scripts/ui/{hud.js, kit.js, ui.d.ts, README.md}`；**`hud.js` 与 `kit.js` 必须同目录**
+  （`import './kit.js'` 按 `hud.js` 所在目录解析）——缺 kit 与缺 hud 同属加载期硬失败
+  （`--overlay` exit 2，错误里点名路径）。`--overlay` 的解析顺序：
   ① `<exe 目录>/scripts/ui/hud.js`（发行布局）→ ② `LIFT_UI_SCRIPT_DIR/hud.js`（开发回退，
   CMake 把源码目录以 `target_compile_definitions(... PUBLIC ...)` 注入）→ ③ 硬错（err 点名两个路径）。
 - `--ui <path>` 只吃 `.js`；显式优先且隐含 `--overlay`。启动期校验"文件在 + 编译过 + `render` 是函数"，
   失败 = `exit 2` + `<path>:<行>:<列>`。
-- `scripts/ui/ui.d.ts` 是作者声明（`declare const ui` / `game`，含 `game.local_frames()`）；
-  **不参与构建、不进 `pnpm typecheck`**；本切片**没有** tsconfig / `tsc` 产物 / 漂移守卫
-  （`tools/test/ui-dts.test.mjs` 未做，见 `## 未做`）。
+- `scripts/ui/ui.d.ts` 是作者声明（`declare const ui` / `game` / `host`，含 `game.local_frames()` 与
+  module 的 `import` 说明）；
+  **不参与构建、不进 `pnpm typecheck`**。同目录的 `tsconfig.json` 是**编辑器 / 手动检查**用的
+  （`pnpm exec tsc -p apps/emulator-lift/scripts/ui`，见 `scripts/ui/README.md`），不是仓库门禁；
+  ⛔ 没有 `tsc` 产物 / 漂移守卫（`tools/test/ui-dts.test.mjs` 未做）。
 - 模板：`scripts/ui/hud.js` 本身就是模板（版式常量 PAD/SIZE/BG/FG 在文件头）。
 
 ## 5. 静态链接与发行
@@ -168,7 +184,7 @@ class UiScript {   // init / update(dt,frame) / render(UiBuilder&) / on_click / 
   升级要同时改 `third_party/quickjs-ng/README.md`。
 - **LTO**：`lift-qjs` 是独立 target，未加 `-flto`（与 `LIFT_AOT_LTO` 的 runtime / AOT 目标分开；
   "vendored C 一起 LTO"是原始设想，本切片**未验证 / 未启用**）。
-- **体积 / 首帧开销未实测**（`## 未做`）；⛔ 不把估计写进判据。
+- **体积 / 首帧开销未实测**；⛔ 不把估计写进判据。
 
 ## 待核
 

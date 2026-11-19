@@ -1,6 +1,6 @@
 # overlay UI：插件化宿主（一个 host · 同一套 API）
 
-> 本文是 overlay / UI 层的**设计裁决**：只写不变量、边界与可红判据。**本轮不实现**，实施从 **M0** 起（§4）；
+> 本文是 overlay / UI 层的**设计裁决**：只写不变量、边界与可红判据。实施从 **M0** 起（§4）；
 > 进度看 `pnpm tools requirements plan`，⛔ 本文不写状态与计数（`AGENTS.md` §10）。绑定 / 沙箱 / 值转换见
 > `overlay-quickjs.md`；坐标合同见 `interaction-model.md` §1；控制层见 `control-plane.md`。
 > 取证口径：C++ 事实给 `文件:符号`；引擎语义给 **EA**；盘点读数取证于 2026-11-18（main / win32）。
@@ -64,7 +64,7 @@
 | D7 | **不写 guest**；`--present-screenshot` **含** UI；`--dump-frame` / `arena.hash` / 控制层 `screenshot`（guest 后缓冲冻结副本，`control_snapshot.h:ControlScreenshot.source`）**不含** | 与旧 overlay 同一条硬线；UI 只存在于宿主送显的窗口像素里 |
 | D8 | **失败响亮**：启动期（编译 / 校验 / 缺资源）`exit 2` + `origin:行:列`；运行期 = 卸载该插件 + **一次性** stderr；⛔ 不画空格 / 方块 | 静默降级等于"看起来正常但界面错了" |
 | D9 | **默认档零成本、零周期输出**：没有 `--ui` ⇒ 一次 bool 判空；有插件但本帧无可见元素 ⇒ 不布局 / 不栅格 / 不上传 / 不打印；`[ui]` 行按（插件, 错误种类）去重 | `AGENTS.md` §12.8；一次性收口行不收 |
-| D10 | ⛔ **无 Promise / async**：`render` 必须**同步**产出 display list；宿主没有 job 队列 | 一帧的 UI 由这一帧的输入决定，异步会让帧序不可复现 |
+| D10 | ★ **2026-11-19 部分反转**（原文：「⛔ **无 Promise / async**：`render` 必须**同步**产出 display list；宿主没有 job 队列」）：`Promise` **存在** —— `JS_AddIntrinsicPromise` 且**不删**（module 求值返回 Promise，是硬前提；需求单 `REQ-01M7QF01A00F9946DX0GPH23JQ`「裁决（2026-11-19）」第 4 条）；宿主有 job 泵（`script_quickjs.cpp:drainPendingJobs` → `JS_ExecutePendingJob`），但**只**跑 module 求值 / 关闭时的 microtask。**没变的**：`render` 仍必须**同步**产出 display list（没有跨帧 async / 协程）；`handleEvent` 仍不跑 JS | 一帧的 UI 由这一帧的输入决定；D10 限的是"跨帧异步"，不是语言里有没有 Promise |
 | D11 | AOT 的 `script/pos` **块入口采样门是新增面**，不是"接上已有的" | 解释器有 `Machine::sampleMarker`；AOT 只有控制层 `sample` 时读一次（`aot_host.h:control_marker_`） |
 | D12 | **不保留第二套**：M0 把两条绘制路径合并成 `presentOverlay`；M2 删 `formatOverlayLines` / `OverlayState` / `OverlayStatus`；`--overlay` 从 M2 起只是**外置** `scripts/ui/hud.js` 的参数别名（`--ui <path>` 打开任意脚本） | 两套实现必然漂移；旧 5×7 点阵随 M2 一起删（`--ui-glyphs bitmap` 测试档本切片不开） |
 
@@ -229,7 +229,7 @@ win32 取。
 
 ### M2 — QuickJS 宿主 + HUD 迁脚本 + 点击路由
 
-★ **M2a 已落地（2026-11-18；本切片只做 QuickJS 宿主 + HUD 迁脚本，点击路由仍属 M2）**：
+★ **M2a 已落地（2026-11-18；M2a 本切片只做 QuickJS 宿主 + HUD 迁脚本；命中 / 捕获 / 点击路由在切片 2 落地，见下）**：
 `--overlay` 的 HUD 由**外置** `scripts/ui/hud.js` 经 QuickJS 同步产出；`--ui <path>` 打开任意脚本
 （显式优先、隐含 overlay）；`game` 注入 `frame / fps / mouse / script / worst` + 按需方法
 `local_frames()`（帧区 40 槽的只读视图，top-first，`top = slot == cur`；证据
