@@ -678,8 +678,17 @@ int main() {
             return true;
         };
 
-        Arm arms[4] = {{"A-off", false, false}, {"B-profile", true, false},
-                       {"C-window", false, true}, {"D-both", true, true}};
+        // ★ 逐字段赋值（⛔ 不用聚合初始化只填前 3 项：`-Wmissing-field-initializers` 会把
+        //   "只给了 name/use_profile/use_window" 当成漏初始化 —— 而那正是没人看的那类警告）。
+        Arm arms[4] = {};
+        arms[0].name = "A-off";
+        arms[1].name = "B-profile";
+        arms[1].use_profile = true;
+        arms[2].name = "C-window";
+        arms[2].use_window = true;
+        arms[3].name = "D-both";
+        arms[3].use_profile = true;
+        arms[3].use_window = true;
         for (Arm& a : arms) LIFT_CHECK(runArm(&a));
         for (const Arm& a : arms) {
             LIFT_CHECK(a.ran);

@@ -1104,16 +1104,18 @@ int caseMipLevels() {
         return hr;
     };
     lift::d3d9::GpuCoverage cov{};
+    // ★ 返回 bool 而不是在 lambda 里 `LIFT_SKIP`：那条宏展开成 `return 77;`，写在 lambda 里是
+    //   **return 给调用点丢掉**（进程照跑、skip 静默失效）。⇒ 跳过只能由调用点做。
     auto drawAndSync = [&](std::uint32_t data) {
         LIFT_CHECK_EQ_U32(drawQuad(data, &cov), lift::d3d9::kOk);  // 缩小采样不再整批拒绝
         LIFT_CHECK(cov.queued >= 1u);
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(cov.skipped_draws), 0);
-        if (!r.syncPixel(&why)) LIFT_SKIP(why.c_str());
+        return r.syncPixel(&why);
     };
 
     // ---- ① MIPFILTER=POINT：2:1 缩小 ⇒ level 1 的 box 值 [[3,16],[114,0]] ----
     LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMipFilter, lift::d3d9::kTexfPoint), 0u);
-    drawAndSync(data_2x);
+    if (!drawAndSync(data_2x)) LIFT_SKIP(why.c_str());
     // 手算值 = 3 / 16 / 114 / 0（写死，⛔ 不要用 `texels[]` 现算 —— 那会把"期望抄成实际"）：
     LIFT_CHECK_EQ_U32(r.f.pixelAt(0, 0), 0x00030000u);
     LIFT_CHECK_EQ_U32(r.f.pixelAt(1, 0), 0x00100000u);
@@ -1121,11 +1123,11 @@ int caseMipLevels() {
     LIFT_CHECK_EQ_U32(r.f.pixelAt(1, 1), 0x00000000u);
 
     // ---- ② MIPFILTER=POINT：4:1 缩小 ⇒ level 2 = 33 ----
-    drawAndSync(data_4x);
+    if (!drawAndSync(data_4x)) LIFT_SKIP(why.c_str());
     LIFT_CHECK_EQ_U32(r.f.pixelAt(0, 0), 0x00210000u);
 
     // ---- ③ MIPFILTER=POINT：1:1 ⇒ 逐 texel 等于 level 0（第 0 行与第 3 行）----
-    drawAndSync(data_1x);
+    if (!drawAndSync(data_1x)) LIFT_SKIP(why.c_str());
     for (int x = 0; x < 4; ++x) LIFT_CHECK_EQ_U32(r.f.pixelAt(x, 0), texels[x] << 16);
     LIFT_CHECK_EQ_U32(r.f.pixelAt(0, 3), texels[12] << 16);
     LIFT_CHECK_EQ_U32(r.f.pixelAt(1, 3), texels[13] << 16);
@@ -1133,12 +1135,12 @@ int caseMipLevels() {
     // ---- ④ MIPFILTER=NONE：4:1 仍**只采 level 0**（`D3DTEXF_NONE` = 关掉 mipmap）----
     //   采样点落在 level-0 texel(2,2) = 0；若后端错用 mip 链 ⇒ 会读到 level2 的 33。
     LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMipFilter, lift::d3d9::kTexfNone), 0u);
-    drawAndSync(data_4x);
+    if (!drawAndSync(data_4x)) LIFT_SKIP(why.c_str());
     LIFT_CHECK_EQ_U32(r.f.pixelAt(0, 0), 0x00000000u);
 
     // ---- ⑤ 反向条款：同一几何切回 MIPFILTER=POINT ⇒ level 2 = 33（两档必须不同）----
     LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMipFilter, lift::d3d9::kTexfPoint), 0u);
-    drawAndSync(data_4x);
+    if (!drawAndSync(data_4x)) LIFT_SKIP(why.c_str());
     LIFT_CHECK_EQ_U32(r.f.pixelAt(0, 0), 0x00210000u);
 
     LIFT_CHECK_EQ_U32(r.f.setTexture(0u, 0u), 0u);

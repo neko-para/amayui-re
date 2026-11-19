@@ -547,8 +547,8 @@ struct Fixture {
         lift::GuestSurface* gs = m.surfaces().find(ti.arena);
         if (gs == nullptr || gs->format.bytesPerPixel() != 4u) return false;
         std::uint8_t* px = m.surfaces().pixels(*gs);
-        for (std::uint32_t yy = 0; yy < gs->height; ++yy) {
-            for (std::uint32_t xx = 0; xx < gs->width; ++xx) {
+        for (std::int32_t yy = 0; yy < gs->height; ++yy) {
+            for (std::int32_t xx = 0; xx < gs->width; ++xx) {
                 std::uint8_t* p = px + static_cast<std::size_t>(yy) * gs->pitch +
                                   static_cast<std::size_t>(xx) * 4u;
                 p[0] = b;

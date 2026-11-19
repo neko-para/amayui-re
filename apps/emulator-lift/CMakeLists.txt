@@ -214,30 +214,57 @@ if(APPLE)
 endif()
 target_compile_features(emulator-lift-runtime PUBLIC cxx_std_20)
 
-# ---- 警告即错误：按**驱动**分档，⛔ 不能写一行 `-Wall -Wextra -Werror` 了事 ----
-# ★ 为什么（2026-11-04 实测 + 用户确认）：mac 侧那批**更强的警告**是靠 GNU 驱动的 `-Wall -Wextra` 表达的；
-#   而 **clang-cl 把 `-Wall` 当 MSVC 的 `/Wall`**，那等于 `-Weverything`（`-Wc++98-compat` /
-#   `-Wold-style-cast` / `-Wdeprecated-declarations` 全开）⇒ 同一行 flag 在 Windows 上把整棵树编挂。
+# =====================================================================================
+# 警告即错误（**唯一实现 + 唯一施加函数**：业务 target 与测试用同一份）
+# ★ 为什么按**驱动**分档，⛔ 不能写一行 `-Wall -Wextra -Werror` 了事（2026-11-04 实测 + 用户确认）：
+#   mac 侧那批**更强的警告**是靠 GNU 驱动的 `-Wall -Wextra` 表达的；而 **clang-cl 把 `-Wall`
+#   当 MSVC 的 `/Wall`**，那等于 `-Weverything`（`-Wc++98-compat` / `-Wold-style-cast` /
+#   `-Wdeprecated-declarations` 全开）⇒ 同一行 flag 在 Windows 上把整棵树编挂。
 # ★ 于是：MSVC 口径（`cl` 与 `clang-cl`）用 `/W4 /WX`（等价档，且 `/WX` 是真的"警告即错误"，
 #   不像 `-Werror` 会被 `cl` 当 D9002 静默忽略）；GNU 口径仍 `-Wall -Wextra -Werror`。
 #   ⛔ 不要为了"能编过"把 `-WX` / `-Werror` 删掉 —— 那会让 `chore: enable werror` 的意图归零。
-if(MSVC)
-    # `/utf-8`：源码里有中日文注释；MSVC 默认按本地码页读，会把它们读坏（clang-cl 同理）
-    # `_CRT_SECURE_NO_WARNINGS`：`getenv` / `fopen` 这类**可移植**用法在 MSVC 里被标成 deprecated；
-    #   这不是本仓要治的问题，显式关掉比逐个加 pragma 干净。
-    target_compile_options(emulator-lift-runtime PRIVATE /W4 /WX /permissive-)
-    target_compile_definitions(emulator-lift-runtime PRIVATE _CRT_SECURE_NO_WARNINGS)
-    # ★ `/utf-8` 已在 `project()` 之后用目录级 `add_compile_options` 覆盖所有 target
-    #   （见文件顶部）；这里不再重复，也不动 `/W4 /WX`（那是另一条口径）。
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-        # clang-cl 认 GNU 形态的 `-Wno-*`：把 GNU 那行**原本就关着**的两条照旧关掉（口径对齐，不是放宽）
-        target_compile_options(emulator-lift-runtime PRIVATE
-            -Wno-unused-variable -Wno-unused-const-variable)
+# ★ **unused 系列不作判据**（2026-11-19 用户裁决，业务 target 与测试**同一口径**）：
+#   "未使用的函数 / 形参 / 变量"不是缺陷（夹具常用同一个签名、留着手工调试的辅助函数；
+#   实例：`src/ui/script_quickjs.cpp` 的 `asciiFold`）⇒ 显式放行整个 unused 家族。
+#   ⛔ 不要为了消这类警告去删 / 改业务代码；⛔ 也不要顺手放宽别的警告。
+# ★ 施加点：`emulator-lift-runtime`（STATIC，定义处直接调）+
+#   文件末尾的循环（本目录所有 `lift-*` / `emulator-lift-*` 可执行文件 ⇒ 产品与测试一视同仁，
+#   新加 target / 新加用例不会漏）。
+# ★ ⛔ 不用目录级 `add_compile_options`：目录属性会继承进子目录，而
+#   `add_subdirectory(third_party/quickjs-ng)` 在本文件下半段 —— vendored C 不是我们的代码
+#   （实测：给它加这一档 = 78 个错误）。
+# ★ `_CRT_SECURE_NO_WARNINGS`：`getenv` / `fopen` 这类**可移植**用法在 MSVC 里被标成 deprecated；
+#   这不是本仓要治的问题，显式关掉比逐个加 pragma 干净。
+# =====================================================================================
+function(lift_enable_warnings target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /WX /permissive-)
+        # MSVC 的 unused 系列：C4100 未引用形参 / C4101 未引用局部变量 /
+        # C4189 局部变量已初始化但未使用 / C4505 未引用局部函数。
+        target_compile_options(${target} PRIVATE /wd4100 /wd4101 /wd4189 /wd4505)
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+            # clang-cl 认 GNU 形态的 `-Wno-*`；它另有两条 unused 告警是 `/wd` 关不掉的
+            # （lambda capture / private field）。
+            target_compile_options(${target} PRIVATE
+                -Wno-unused-variable -Wno-unused-const-variable -Wno-unused-function
+                -Wno-unused-parameter -Wno-unused-but-set-variable
+                -Wno-unused-lambda-capture -Wno-unused-private-field)
+        endif()
+        target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
+    else()
+        # GCC 认前五条；后两条是 clang 独有的（GCC 没有对应告警，也不认这些 flag ⇒ 不加）。
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Werror
+            -Wno-unused-variable -Wno-unused-const-variable -Wno-unused-function
+            -Wno-unused-parameter -Wno-unused-but-set-variable)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            target_compile_options(${target} PRIVATE -Wno-unused-lambda-capture
+                -Wno-unused-private-field)
+        endif()
     endif()
-else()
-    target_compile_options(emulator-lift-runtime PRIVATE -Wall -Wextra -Werror
-        -Wno-unused-variable -Wno-unused-const-variable)
-endif()
+endfunction()
+
+# ★ `/utf-8` 已在 `project()` 之后用目录级 `add_compile_options` 覆盖所有 target（见文件顶部）。
+lift_enable_warnings(emulator-lift-runtime)
 
 # =====================================================================================
 # Shape A · 构建期静态 lift 的 **T0** 落点：`emulator-lift-aot`（只做平台 bring-up）
@@ -890,6 +917,13 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/tests")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/tests")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/tests")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_BINARY_DIR}/tests")
+
+# ---- 测试也走"警告即错误"（与业务 target **同一份实现**，见文件上方的 `lift_enable_warnings`）----
+# ★ 为什么测试也要：测试里的隐式收窄（`std::uint8_t` 存 `0xFF204060u`）**不会**让用例红 ——
+#   它只是把"ARGB 填充"静默变成每字节 0x60，判据照旧全绿（`control-snapshot` 就是这么藏着的）。
+#   没人看的警告 = 静默的错误输入。
+# ★ 施加点在文件末尾（统一扫本目录的 `lift-*` 可执行文件）—— 测试 target 分散在多处，
+#   逐处手写调用一定会漏。
 
 # ---- pure：**GPU 是唯一光栅实现**（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）----
 # ① 无 GPU ⇒ **拒绝启动**（非 0 退出 + stderr 明确指路）。用 `SDL_VIDEODRIVER=dummy` 强制
@@ -2619,3 +2653,21 @@ if(LIFT_BUILD_TESTS)
     target_link_libraries(lift-d3dx9-sprite-blend PRIVATE emulator-lift-runtime)
     add_test(NAME d3dx9-sprite-blend COMMAND lift-d3dx9-sprite-blend)
 endif()
+
+# =====================================================================================
+# 把 `lift_enable_warnings` 施加到本目录里**所有可执行文件**（产品 + 测试；唯一施加点）
+# ★ 为什么在文件末尾统一扫一遍：target 分散在本文件多处（测试还有末尾多个独立
+#   `if(LIFT_BUILD_TESTS)` 块）⇒ 逐处手写调用一定会漏；`BUILDSYSTEM_TARGETS` 只列**本目录**
+#   创建的 target（⛔ 不含 `third_party/quickjs-ng` 子目录里的 `lift-qjs`）。
+# ★ 判据 = 类型 EXECUTABLE + 名字前缀 `lift-` 或 `emulator-lift-`：
+#   测试可执行文件一律叫 `lift-*`，产品 / 构建期工具叫 `emulator-lift-*`
+#   （`emulator-lift-runtime` 是 STATIC，在上面单独调用；`lift-pl-mpeg` 是 STATIC，被类型过滤）。
+# ★ 不放在 `if(LIFT_BUILD_TESTS)` 里：关掉测试时产品 target 照样要有这一档。
+# =====================================================================================
+get_property(_lift_dir_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(_lift_t IN LISTS _lift_dir_targets)
+    get_target_property(_lift_t_type ${_lift_t} TYPE)
+    if(_lift_t_type STREQUAL "EXECUTABLE" AND _lift_t MATCHES "^(lift|emulator-lift)-")
+        lift_enable_warnings(${_lift_t})
+    endif()
+endforeach()

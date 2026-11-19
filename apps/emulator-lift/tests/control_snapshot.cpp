@@ -55,6 +55,21 @@ bool putName(lift::GuestMemory& mem, std::uint32_t id, const char* name) {
     return true;
 }
 
+// 假后缓冲的像素写入：`SurfaceArena::pixels()` 返回的是**字节**指针 ⇒ ⛔ 不能 `px[i] = 0xAARRGGBBu`
+// （那只会写一个通道字节，编译器也会报 `-Wconstant-conversion`）。按 pitch 逐行、每像素 4 字节，
+// 把完整的 32bpp 字写回去（小端 = B,G,R,A）。
+void putArgb(std::uint8_t* px, const lift::GuestSurface& s, std::uint32_t x, std::uint32_t y,
+             std::uint32_t argb) {
+    const std::size_t off = static_cast<std::size_t>(y) * s.pitch + static_cast<std::size_t>(x) * 4u;
+    std::memcpy(px + off, &argb, sizeof argb);
+}
+
+void fillArgb(std::uint8_t* px, const lift::GuestSurface& s, std::uint32_t argb) {
+    for (std::uint32_t y = 0; y < static_cast<std::uint32_t>(s.height); ++y) {
+        for (std::uint32_t x = 0; x < static_cast<std::uint32_t>(s.width); ++x) putArgb(px, s, x, y, argb);
+    }
+}
+
 // 摆一份"已发布、已进入脚本"的假 Engine：`cur = 0`、记录 +0x00 = 代码区基址、+0x04 = pc、
 // +0x3C = id 0；名字表第 0 条 = `name`。
 bool makePublishedEngine(lift::GuestMemory& mem, const char* name, std::uint32_t pc_delta) {
@@ -282,7 +297,7 @@ void caseDumpLastFrame() {
     auto* px = arena.pixels(*surface);
     LIFT_CHECK(px != nullptr);
     if (px == nullptr) return;
-    for (int i = 0; i < 8 * 6; ++i) px[i] = 0xFF204060u;  // ARGB 小端 = B,G,R,A
+    fillArgb(px, *surface, 0xFF204060u);  // ARGB 小端 = B,G,R,A
 
     lift::HeadlessPresenter presenter;
     std::string err;
@@ -307,7 +322,7 @@ void caseDumpLastFrame() {
     LIFT_CHECK(hash_b);
 
     // ★ 语义对照：guest 在**同一块后缓冲**上画了下一帧 ⇒ 现场重算 != 记录的 hash ⇒ false。
-    px[0] = 0xFF00FF00u;
+    putArgb(px, *surface, 0u, 0u, 0xFF00FF00u);
     bool hash_c = true;
     LIFT_CHECK(presenter.dumpLastFrame((dir / "c.bmp").string(), &hash_c, &err));
     std::printf("[judge5] after guest drew next frame: hash_still_matches=%d\n", hash_c ? 1 : 0);
@@ -350,7 +365,7 @@ void caseScreenshotFreezesFrame() {
     auto* px = arena.pixels(*surface);
     LIFT_CHECK(px != nullptr);
     if (px == nullptr) return;
-    for (int i = 0; i < 8 * 6; ++i) px[i] = 0xFF204060u;  // ARGB 小端 = B,G,R,A
+    fillArgb(px, *surface, 0xFF204060u);  // ARGB 小端 = B,G,R,A
 
     lift::HeadlessPresenter presenter;
     // ★ 新开关（唯一产品调用点在 `aot_run.cpp`：与 `setPresentGate` 同处同条件 `control_ != nullptr`）。
