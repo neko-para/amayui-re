@@ -595,6 +595,38 @@ void caseFinishLandsInput() {
 }
 
 // =====================================================================================
+// F5-R2：`atReadPoint("fileRead", …)` 能解析 + 只在**下一个 `ReadFile` 投递点**上 fire
+// =====================================================================================
+void caseAtReadPointFileRead() {
+    lift_test::g_current_case = "plugin/at-read-point-file-read";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    const bool loaded = f.load("point-file-read.js");
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    f.pump(lift::InputPoint::PeekMsg);  // start：arm `atReadPoint("fileRead", 1)`
+    dumpFail(f);
+    // ★ 解析失败（旧实现：运行期词表没有 `fileRead` ⇒ TypeError）会走 `start` 抛错 ⇒ 这里先红。
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->runner().armedCount()), 1);
+    LIFT_CHECK(f.host->runner().armed()[0].point_filter == lift::InputPoint::FileRead);
+    // 别的读点不 fire（点过滤生效）。
+    f.pump(lift::InputPoint::PeekMsg);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 0);
+    // 下一个 `ReadFile` 投递点 ⇒ fire（回调里断言 `ev.point` / `ctx.now.point` == "fileRead"）。
+    f.pump(lift::InputPoint::FileRead);
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 1);
+    LIFT_CHECK(f.host->runner().done());
+    std::printf("  [%s] %s\n", lift_test::g_current_case, f.host->readout().c_str());
+}
+
+// =====================================================================================
 // D-C2-10：`start` 里 `ctx.now` 有值；`start` 里的 Input **下一读点**才落地
 // =====================================================================================
 void caseStartNowAndStaged() {
@@ -688,6 +720,7 @@ int main() {
     caseGlobalReadModifyWrite();
     caseFinish();
     caseStartNowAndStaged();
+    caseAtReadPointFileRead();
     caseFailInstall();
     caseFailInstallReleasesInput();
     caseFailReleasesInput();

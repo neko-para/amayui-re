@@ -1542,6 +1542,11 @@ constexpr PluginPointName kPluginPointNames[] = {
     {"msgWait", lift::InputPoint::MsgWait},         {"waitMessage", lift::InputPoint::WaitMessage},
     {"queueStatus", lift::InputPoint::QueueStatus}, {"translate", lift::InputPoint::Translate},
     {"dispatch", lift::InputPoint::Dispatch},       {"setCursorPos", lift::InputPoint::SetCursorPos},
+    // ★ F5-R2（父级裁决）：`fileRead` **也是**名字表的一员 —— `InputPoint::FileRead` 是 11 个投递点
+    //   之一（`kernel32!ReadFile` 的"文件读完"事件源），d.ts 的并集已经在 F5-R1 里补上它
+    //   ⇒ 运行期词表必须能**解析**它（否则 `atReadPoint("fileRead", …)` 与 `ctx.now.point` 的
+    //   同一个名字一边能给、一边抛 TypeError）。⛔ 不要只让 `pluginPointName()`（输出侧）认它。
+    {"fileRead", lift::InputPoint::FileRead},
 };
 
 const char* pluginPointName(lift::InputPoint point) {
@@ -1549,8 +1554,8 @@ const char* pluginPointName(lift::InputPoint point) {
     for (const PluginPointName& named : kPluginPointNames) {
         if (named.point == point) return named.js;
     }
-    // d.ts 的 `InputPoint` 并集没有 `ReadFile`（它是"文件读完"的事件源，不是输入族）——
-    // 如实给一个名字，⛔ 不冒充 `"any"`（那会让 trace 说谎）。
+    // 到不了（`kPluginPointNames` 现在覆盖了除 `Count` 以外的全部 11 个投递点）；兜底仍如实返回
+    // 一个名字而不是冒充 `"any"`（那会让 trace 说谎）。
     return "fileRead";
 }
 
@@ -1572,7 +1577,7 @@ bool parsePluginPoint(JSContext* ctx, JSValueConst value, lift::InputPoint* out,
         }
     }
     *why = "point 不认识：'" + text + "'（any | keyLevel | cursorPos | peekMsg | getMsg | msgWait | " +
-           "waitMessage | queueStatus | translate | dispatch | setCursorPos）";
+           "waitMessage | queueStatus | translate | dispatch | setCursorPos | fileRead）";
     return false;
 }
 
