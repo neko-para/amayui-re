@@ -23,6 +23,7 @@ namespace lift {
 
 struct X86;
 class InputPlan;
+class ReadPointObserver;
 class UiInputRouter;
 class WindowManager;
 
@@ -299,6 +300,19 @@ public:
     InputPlan* inputPlan() const { return input_plan_; }
 
     // =====================================================================================
+    // ★ **读点观察者**（C2a；父级裁决 `c2-decisions.md` D-C2-1）
+    //   **非拥有指针**（形状逐字照 `setInputPlan` / `inputPlan`）：生命周期 = 装配者
+    //   （`aot_main` 的 `PluginHost`），`WindowManager` 只借它。`nullptr` = 没有观察者 ⇒
+    //   `input.h` 的四个投递口每个读点只多**一次判空**（⛔ 不取时钟、不碰容器、不加第三个 `if`）。
+    //   ★ `setReadPointObserver` 是状态入口（算进主线程亲和性账，站点名 `window.readpoint`）；
+    //     **读指针不算**：它在每个读点的热路径上，读指针就是一次裸读。
+    //   ⚠ 必须在 `machine.cpp` / `aot_run.cpp` 的**循环外**装配（与 `setInputPlan` 同一条口径）。
+    //   ★ 为什么不去 `InputPlan` 上挂回调：那让核心认识配方（`core-shape` 的禁用词 + 合同 §6 行 1）。
+    // =====================================================================================
+    void setReadPointObserver(ReadPointObserver* observer);
+    ReadPointObserver* readPointObserver() const { return read_point_observer_; }
+
+    // =====================================================================================
     // ★ 叠层注入路由（S9；`docs/03-emulator/overlay.md` D6 / D2）
     //   **非拥有指针**：生命周期 = 装配者（`SdlWindow::Impl`，由 `attachWindowManager` /
     //   `setOverlay` 装/卸）。`nullptr` = 没有叠层 / `--ui-input=pass` 未装 / 叠层已关 ⇒
@@ -359,6 +373,8 @@ private:
     bool have_input_sample_ = false;
     // ★ 投递层（S1）：非拥有指针；nullptr = 没有计划（缺省档）。
     InputPlan* input_plan_ = nullptr;
+    // ★ 读点观察者（C2a）：非拥有指针；nullptr = 没有观察者（缺省档）。见方法注释。
+    ReadPointObserver* read_point_observer_ = nullptr;
     // ★ 叠层注入路由（S9）：非拥有指针；nullptr = 没有叠层（缺省档）。见方法注释。
     UiInputRouter* ui_input_router_ = nullptr;
     // 上一次采样间隔的小环（K = 8）：同一个"输入迭代"里往往有**多次**读点

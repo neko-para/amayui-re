@@ -624,7 +624,9 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         //   ★ 判据只读一个 bool（读点在主线程写、这里主线程读）⇒ 缺省 nullptr 时是一条判空。
         if (opts.stop_requested != nullptr && *opts.stop_requested) {
             r.reason = AotStop::Stopped;
-            r.detail = "input-plan: quit";
+            // ★ 归因（C2a）：唯一生产者 = `--input-plan` 的 `quit` 或 `--plugin` 的 `ctx.quit()`
+            //   （两者互斥）。缺省 `stop_detail == nullptr` ⇒ **逐字**保持旧文本。
+            r.detail = opts.stop_detail != nullptr ? opts.stop_detail : "input-plan: quit";
             cpu_.running = false;
             break;
         }

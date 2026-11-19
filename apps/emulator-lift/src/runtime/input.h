@@ -26,6 +26,7 @@
 #include "runtime/host_window.h"
 #include "runtime/input_device.h"
 #include "runtime/input_plan.h"
+#include "runtime/read_point.h"  // ReadPointObserver（四个投递口的第二个接收者；C2a）
 
 namespace lift {
 namespace input {
@@ -92,25 +93,33 @@ std::vector<LevelRef> dropOsLevels(WindowManager& wm, std::uint32_t time_ms);
 //
 // ★ 成本（S1 的硬要求）：**没有计划时 = 一条 null 检查**。这四个函数都是 `inline`：
 //   `wm.inputPlan()` 是 `host_window.h` 里的 inline 裸指针读，非空才 call `atPoint()`。
-//   ⛔ 不要在快路径上加 `armed()` / 取时钟 / 碰容器 / 加第二个 `if`。
+//   ⛔ 不要在快路径上取时钟 / 碰容器。
+//   ★ C2a（父级裁决 `c2-decisions.md` D-C2-1）：每个口在计划调用**之后**多一次
+//     **读点观察者**的判空（`wm.readPointObserver()` 同样是 inline 裸读）。⇒ 缺省档（没有观察者）
+//     的代价是**第二条 null 检查**，输出 / 行为逐字节不变。⛔ 不要把它做成回调容器 / 列表：
+//     那是"每个读点遍历一次"，也是第二份状态。
 //
 // ★ 唯一性能口径：判据是**调用点不在执行循环里**（不是"每次多少钱"）。
 // =====================================================================================
 inline void deliverLevel(WindowManager& wm, InputPoint point) {
     InputPlan* plan = wm.inputPlan();
     if (plan != nullptr) plan->atPoint(wm, point);
+    if (ReadPointObserver* observer = wm.readPointObserver()) observer->onReadPoint(wm, point);
 }
 inline void deliverQueue(WindowManager& wm, InputPoint point) {
     InputPlan* plan = wm.inputPlan();
     if (plan != nullptr) plan->atPoint(wm, point);
+    if (ReadPointObserver* observer = wm.readPointObserver()) observer->onReadPoint(wm, point);
 }
 inline void deliverWrite(WindowManager& wm, InputPoint point) {
     InputPlan* plan = wm.inputPlan();
     if (plan != nullptr) plan->atPoint(wm, point);
+    if (ReadPointObserver* observer = wm.readPointObserver()) observer->onReadPoint(wm, point);
 }
 inline void deliverFileRead(WindowManager& wm, InputPoint point) {
     InputPlan* plan = wm.inputPlan();
     if (plan != nullptr) plan->atPoint(wm, point);
+    if (ReadPointObserver* observer = wm.readPointObserver()) observer->onReadPoint(wm, point);
 }
 
 }  // namespace input

@@ -82,11 +82,15 @@
 #include <cstdint>
 #include <cstdio>
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "runtime/vfs.h"  // openHostFileUtf8（module 文件读取走 UTF-8 宿主路径）
+#include "runtime/budget.h"          // Budget（插件回调的预算形状；⛔ 不复述 2 ms / 100k）
+#include "runtime/trigger.h"         // Trigger / TriggerEvent / TriggerReadings（插件面）
+#include "runtime/vfs.h"             // openHostFileUtf8（module 文件读取走 UTF-8 宿主路径）
+#include "ui/plugin.h"               // PluginScript / PluginCallHost（语言无关接口）
 
 #include "runtime/font.h"
 #include "ui/element.h"
@@ -131,6 +135,24 @@ std::string toUtf8(JSContext* ctx, JSValueConst v) {
 // Impl：一个脚本实例的全部状态（JS 值 + 本帧注入的读数 + 预算）。
 // ★ 持有者 = `QuickJsScript`（`UiScript` 的实现），构造后不再移动 ⇒ 中断回调的 opaque 稳定。
 // =======================================================================================
+// ---- 插件（C2a）：JS 侧 trigger 对象 ↔ 宿主 `TriggerState` 的**对象表** ----
+// ★ 为什么需要它（合同 §4.2 417–419 / 测绘 §6-⑧）：`maxFires` 属于**对象**、跨 arm 累计 ⇒
+//   "同一个 JS 对象"必须映射到**同一个** `shared_ptr<TriggerState>`；"新对象"才是新预算。
+//   ⇒ JS 对象只带一个 id（`TriggerRef`，`JS_GetOpaque`），真值在表里。
+// ★ **有界**：`refs` 计的是"还有几个 JS 对象指向这个 id"；最后一个被 GC 时抹掉整条
+//   （`triggerFinalizer`）。⇒ "每次 fire 新建 trigger"的插件（`examples/rearm.ts` 那种）不会线性涨内存。
+//   ⛔ 不要改成"只追加不释放"（那正是测绘 §6-⑧ 点名的慢性泄漏）；也⛔ 不要改成"只留一个强引用"
+//   （那会让事件对象与插件手里那个 `===` 不等，rearm 语义随实现漂）。
+struct TriggerEntry {
+    lift::plugin::Trigger trigger;
+    int refs = 0;  // 指向同一 id 的活 JS 对象数
+};
+
+struct TriggerRef {
+    Impl* impl = nullptr;
+    std::uint32_t id = 0;
+};
+
 struct Impl {
     JSRuntime* rt = nullptr;
     JSContext* ctx = nullptr;
@@ -144,6 +166,24 @@ struct Impl {
     std::map<std::string, std::string> module_sources;    // 归一化 module 名 → 源码（只为错误定位）
     std::map<std::string, std::string> module_import_at;  // 归一化 module 名 → 首次导入点
     std::string module_error_at;                          // resolve 期拒绝的 `<file>:<line>:<col>`
+
+    // ---- 插件（C2a；只有 `--plugin` 路径填）----
+    Value plugin_default;    // `export default {…}`（持有；`initialState` 也从它读）
+    Value plugin_render;     // default.render（C2b 才调用；C2a 只回答 `hasRender()`）
+    Value plugin_start;      // default.start
+    Value plugin_on_trigger; // default.onTrigger
+    Value plugin_state;      // `ctx.state`（per-Run；第一次回调前建）
+    Value state_seed;        // `initialState` 的**原值**（拷贝在 `makeStateObject` 里做）
+    bool has_state_seed = false;
+    Value plugin_params;     // `ctx.params`（装载期建；属性只读）
+    Value ui_data;           // `ctx.ui.state` 的数据面（宿主本地 JS 状态；⛔ 不进 guest）
+    bool plugin_has_render = false;
+    bool plugin_has_run = false;
+    std::map<std::uint32_t, TriggerEntry> triggers;  // id → (trigger, refs)
+    std::uint32_t next_trigger_id = 1;               // 0 = "没分配"
+    JSClassID trigger_class = 0;                     // 本 runtime 的 JS class（finalizer 用）
+    std::set<std::string> ui_visible;                // `ctx.ui.visible(id)` 的宿主侧集合
+    lift::ui::PluginCallHost* call_host = nullptr;   // 只在回调期间非空（`ctx.*` 的来路）
 
     // 本帧注入（getter 读它们；render 结束一律复位）
     UiBuilder* builder = nullptr;
@@ -172,6 +212,15 @@ struct Impl {
             // ★ 先释放值、再忘掉 ctx：`Value` 析构时不能碰到已经被 Free 的 ctx。
             render.invalidate();
             game_obj.invalidate();
+            // 插件面（C2a）：与上面同一时刻、同一个理由（顺序无关，全部在 FreeContext 之前）。
+            plugin_default.invalidate();
+            plugin_render.invalidate();
+            plugin_start.invalidate();
+            plugin_on_trigger.invalidate();
+            plugin_state.invalidate();
+            state_seed.invalidate();
+            plugin_params.invalidate();
+            ui_data.invalidate();
             JS_FreeContext(ctx);
             ctx = nullptr;
         }
@@ -181,6 +230,10 @@ struct Impl {
         }
         builder = nullptr;
         current = nullptr;
+        call_host = nullptr;
+        triggers.clear();
+        ui_visible.clear();
+        trigger_class = 0;
     }
 };
 
@@ -1253,9 +1306,17 @@ void formatThrownValue(JSContext* ctx, const std::string& origin, JSValueConst v
     if (err != nullptr) *err = std::move(text);
 }
 
+// resolve 期拒绝（bare specifier / 绝对路径 / data: / `..` 逃逸 / 读不到被导入文件）**没有 JS 栈** ⇒
+// 用源码里 specifier 字面量的位置补 `<origin>:<line>:<col>` 形状（只补错文本，不参与解析）。
+// ★ 入口（`--ui` 的 module 脚本与 `--plugin`）共用这一份：两处各写一段会让形状慢慢分叉。
+void appendModuleErrorAt(Impl& impl, std::string* err) {
+    if (err == nullptr || impl.module_error_at.empty()) return;
+    if (err->find(impl.module_error_at) != std::string::npos) return;
+    *err += "\n    at " + impl.module_error_at;
+}
+
 // classic 能否**只编译**通过（不执行）：这是"旧语义优先"的探针 —— 能编就绝不走 module。
-bool classicParses(JSContext* ctx, const std::string& source, const std::string& origin) {
-    Value fn(ctx, JS_Eval(ctx, source.c_str(), source.size(), origin.c_str(),
+bool classicParses(JSContext* ctx, const std::string& source, const std::string& origin) {    Value fn(ctx, JS_Eval(ctx, source.c_str(), source.size(), origin.c_str(),
                           JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_STRICT | JS_EVAL_FLAG_COMPILE_ONLY));
     if (fn.isException()) {
         qjs::clearException(ctx);  // 探针失败不是错误（可能就是 module 语法），⛔ 不许把异常留到下一次
@@ -1312,55 +1373,68 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+// =======================================================================================
+// `createImpl`：一个实例的**全部语言无关装配**（runtime / context / 三个预算 / 沙箱 / 宿主 API）
+// ★ 两条入口都走这里：`--ui` 的 classic/module 脚本（`QuickJsRuntime::load`）与 `--plugin` 的
+//   ES module（`makeQuickJsPlugin`）。⛔ 不要各写一份 —— 那会让沙箱的删除项 / 内存上限 /
+//   interrupt 回调在两条路上**静默分叉**（一个入口删了 `Function.prototype.constructor`、
+//   另一个忘了，没有任何症状）。
+// =======================================================================================
+std::unique_ptr<Impl> createImpl(const std::string& origin, FontEngine* font, std::string* err) {
+    auto impl = std::make_unique<Impl>();
+    impl->origin = origin;
+    impl->font = font;
+
+    impl->rt = JS_NewRuntime();
+    if (impl->rt == nullptr) {
+        if (err != nullptr) *err = origin + ": quickjs: JS_NewRuntime 失败";
+        return nullptr;
+    }
+    // ★ 三个预算在**建 context 之前**设（context §5）。
+    JS_SetMemoryLimit(impl->rt, kMemoryLimitBytes);
+    JS_SetMaxStackSize(impl->rt, kStackLimitBytes);
+    JS_SetInterruptHandler(impl->rt, &interruptHandler, impl.get());
+#ifndef NDEBUG
+    // 开发构建：JS_FreeRuntime 时把泄漏的对象 / 字符串打出来；产品构建（NDEBUG）关。
+    JS_SetDumpFlags(impl->rt, JS_DUMP_LEAKS);
+#endif
+
+    impl->ctx = JS_NewContextRaw(impl->rt);
+    if (impl->ctx == nullptr) {
+        if (err != nullptr) *err = origin + ": quickjs: JS_NewContextRaw 失败";
+        return nullptr;
+    }
+    JS_SetContextOpaque(impl->ctx, impl.get());
+    JS_AddIntrinsicBaseObjects(impl->ctx);
+    // ★ 必须加：只为让**宿主**的 JS_Eval 能编译脚本（文件头 §1）；随后把脚本入口删掉。
+    JS_AddIntrinsicEval(impl->ctx);
+    // ★ module 求值返回 Promise（顶层 await 也是它）⇒ 必须加；**不删** globalThis.Promise
+    //   （用户裁决 2026-11-19：沙箱不是安全边界，保留的删除只有功能目的；文件头 §1.5）。
+    if (JS_AddIntrinsicPromise(impl->ctx) < 0) {
+        if (err != nullptr) *err = origin + ": quickjs: JS_AddIntrinsicPromise 失败";
+        return nullptr;
+    }
+
+    std::string setup_err;
+    if (!installSandbox(*impl, &setup_err) || !installHostApi(*impl, &setup_err)) {
+        // 沙箱 / 注入是**宿主**的失败：有引擎异常就经 takeException 取走（带 origin:line:col），
+        // 没有就用我们自己点名的文本。⛔ 两条路径都必须让 ctx 干净地走出 load。
+        if (JS_HasException(impl->ctx)) {
+            qjs::takeException(impl->ctx, origin, err);
+        } else if (err != nullptr) {
+            *err = origin + ": " + setup_err;
+        }
+        return nullptr;
+    }
+    return impl;
+}
+
 class QuickJsRuntime final : public ScriptRuntime {
 public:
     std::unique_ptr<UiScript> load(const std::string& source, const std::string& origin, FontEngine* font,
                                    std::string* err) override {
-        auto impl = std::make_unique<Impl>();
-        impl->origin = origin;
-        impl->font = font;
-
-        impl->rt = JS_NewRuntime();
-        if (impl->rt == nullptr) {
-            if (err != nullptr) *err = origin + ": quickjs: JS_NewRuntime 失败";
-            return nullptr;
-        }
-        // ★ 三个预算在**建 context 之前**设（context §5）。
-        JS_SetMemoryLimit(impl->rt, kMemoryLimitBytes);
-        JS_SetMaxStackSize(impl->rt, kStackLimitBytes);
-        JS_SetInterruptHandler(impl->rt, &interruptHandler, impl.get());
-#ifndef NDEBUG
-        // 开发构建：JS_FreeRuntime 时把泄漏的对象 / 字符串打出来；产品构建（NDEBUG）关。
-        JS_SetDumpFlags(impl->rt, JS_DUMP_LEAKS);
-#endif
-
-        impl->ctx = JS_NewContextRaw(impl->rt);
-        if (impl->ctx == nullptr) {
-            if (err != nullptr) *err = origin + ": quickjs: JS_NewContextRaw 失败";
-            return nullptr;
-        }
-        JS_SetContextOpaque(impl->ctx, impl.get());
-        JS_AddIntrinsicBaseObjects(impl->ctx);
-        // ★ 必须加：只为让**宿主**的 JS_Eval 能编译脚本（文件头 §1）；随后把脚本入口删掉。
-        JS_AddIntrinsicEval(impl->ctx);
-        // ★ module 求值返回 Promise（顶层 await 也是它）⇒ 必须加；**不删** globalThis.Promise
-        //   （用户裁决 2026-11-19：沙箱不是安全边界，保留的删除只有功能目的；文件头 §1.5）。
-        if (JS_AddIntrinsicPromise(impl->ctx) < 0) {
-            if (err != nullptr) *err = origin + ": quickjs: JS_AddIntrinsicPromise 失败";
-            return nullptr;
-        }
-
-        std::string setup_err;
-        if (!installSandbox(*impl, &setup_err) || !installHostApi(*impl, &setup_err)) {
-            // 沙箱 / 注入是**宿主**的失败：有引擎异常就经 takeException 取走（带 origin:line:col），
-            // 没有就用我们自己点名的文本。⛔ 两条路径都必须让 ctx 干净地走出 load。
-            if (JS_HasException(impl->ctx)) {
-                qjs::takeException(impl->ctx, origin, err);
-            } else if (err != nullptr) {
-                *err = origin + ": " + setup_err;
-            }
-            return nullptr;
-        }
+        std::unique_ptr<Impl> impl = createImpl(origin, font, err);
+        if (impl == nullptr) return nullptr;
 
         // ---- 检测（文件头 §5）：classic 能编就绝不走 module（旧 `--ui` 语义优先）；编不过才问
         //      `JS_DetectModule`（它把源码当 module 编一次）。★ 不能只看 DetectModule：0.18.0 对
@@ -1380,11 +1454,8 @@ public:
         if (eval_result.isException()) {
             qjs::takeException(impl->ctx, origin, err);
             // resolve 期拒绝（bare / 绝对 / data: / 逃逸 / 读不到文件）没有 JS 栈 ⇒ 用源码里
-            // specifier 字面量的位置补 `<origin>:<line>:<col>` 形状（只补错文本，不参与解析）。
-            if (is_module && err != nullptr && !impl->module_error_at.empty() &&
-                err->find(impl->module_error_at) == std::string::npos) {
-                *err += "\n    at " + impl->module_error_at;
-            }
+            // specifier 字面量的位置补形状（唯一实现在 `appendModuleErrorAt`）。
+            if (is_module) appendModuleErrorAt(*impl, err);
             return nullptr;
         }
         if (is_module) {
@@ -1431,8 +1502,1459 @@ public:
     }
 };
 
+// =======================================================================================
+// 插件（C2a）：`export default PluginModule` + `ctx`（RunCtx）的绑定
+//
+// 合同：`docs/03-emulator/plugin-runtime.md` §4.5 / §4.6 / §5 C2 / §6 行 9·11·12·26·30·34。
+// 父级裁决：`.tmp/plugin-runtime/c2-decisions.md` D-C2-5（headless + render 只警告一次）、
+//       D-C2-6（`ctx.read.frameHash` **不安装**）、D-C2-7（`ctx.now` 每回调新建值对象；
+//       `initialState` 浅拷贝；`ctx.run`/`ctx.dispatch` 不安装）、D-C2-9（`finish`/`quit` 的出口）。
+//
+// ★ **两条入口按 flag 选择**（⛔ 不按"有没有 default 猜"，测绘 §6-③）：
+//   `--ui` 仍走 `QuickJsRuntime::load`（classic 优先，读 `globalThis.render`）；
+//   `--plugin` 走 `makeQuickJsPlugin`（**强制 module**，只读 default 导出）。
+//   ⇒ 一个同时带 `export default` 与 `globalThis.render` 的文件，行为不随实现漂。
+//
+// ★ **`ctx` 是每次回调新建的值对象**（`ctx.now` 更是每回调一个新快照，D-C2-7）：
+//   RunCtx 的成员 = `edit/input/read/trigger/ui/profile/state/params/log/fail/finish/quit` + `now`；
+//   ⛔ **没有** `draw`（C2b；`onTrigger` 不画）、`run`/`dispatch`（C5）、`sample`/`screenshot`
+//   （永远不做）。`api-surface` 用例断言这些**缺席**（不是"有但抛"）。
+//
+// ★ **`ctx.ui` 是宿主本地的 JS 状态**（C2a 只建写入面）：数据面 = `Impl::ui_data`（一个 JS 对象），
+//   可见性 = `Impl::ui_visible`。⛔ 不进 guest / 不进 Edit / 不进存档。C2b 才让 `render` 读它。
+//
+// ★ **trigger 对象表**：JS 对象只带 id（`TriggerRef`），真值在 `Impl::triggers`；finalizer 扣引用。
+//   同一个 `TriggerState` 在不同 JS 对象之间共享 ⇒ "同一对象重新 arm 续计 maxFires" 照样成立。
+// =======================================================================================
+
+// ---- 插件侧的 InputPoint 名字 ----
+// ★ d.ts 是 **camelCase**（`keyLevel` / `peekMsg` / `msgWait` / `queueStatus`），而宿主侧的
+//   `inputPointName()` 是 PascalCase（`KeyLevel` / `PeekMessage` …）。⛔ 不要复用那个函数：
+//   它是 `--input-plan` trace 的读数面，两套名字各有消费者。
+struct PluginPointName {
+    const char* js;
+    lift::InputPoint point;
+};
+
+constexpr PluginPointName kPluginPointNames[] = {
+    {"keyLevel", lift::InputPoint::KeyLevel},       {"cursorPos", lift::InputPoint::CursorPos},
+    {"peekMsg", lift::InputPoint::PeekMsg},         {"getMsg", lift::InputPoint::GetMsg},
+    {"msgWait", lift::InputPoint::MsgWait},         {"waitMessage", lift::InputPoint::WaitMessage},
+    {"queueStatus", lift::InputPoint::QueueStatus}, {"translate", lift::InputPoint::Translate},
+    {"dispatch", lift::InputPoint::Dispatch},       {"setCursorPos", lift::InputPoint::SetCursorPos},
+    // ★ F5-R2（父级裁决）：`fileRead` **也是**名字表的一员 —— `InputPoint::FileRead` 是 11 个投递点
+    //   之一（`kernel32!ReadFile` 的"文件读完"事件源），d.ts 的并集已经在 F5-R1 里补上它
+    //   ⇒ 运行期词表必须能**解析**它（否则 `atReadPoint("fileRead", …)` 与 `ctx.now.point` 的
+    //   同一个名字一边能给、一边抛 TypeError）。⛔ 不要只让 `pluginPointName()`（输出侧）认它。
+    {"fileRead", lift::InputPoint::FileRead},
+};
+
+const char* pluginPointName(lift::InputPoint point) {
+    if (point == lift::InputPoint::Count) return "any";
+    for (const PluginPointName& named : kPluginPointNames) {
+        if (named.point == point) return named.js;
+    }
+    // 到不了（`kPluginPointNames` 现在覆盖了除 `Count` 以外的全部 11 个投递点）；兜底仍如实返回
+    // 一个名字而不是冒充 `"any"`（那会让 trace 说谎）。
+    return "fileRead";
+}
+
+bool parsePluginPoint(JSContext* ctx, JSValueConst value, lift::InputPoint* out, std::string* why) {
+    std::string text;
+    if (!JS_IsString(value) || !qjs::toString(ctx, value, &text)) {
+        qjs::clearException(ctx);
+        *why = "point 必须是字符串";
+        return false;
+    }
+    if (text == "any") {
+        *out = lift::InputPoint::Count;
+        return true;
+    }
+    for (const PluginPointName& named : kPluginPointNames) {
+        if (text == named.js) {
+            *out = named.point;
+            return true;
+        }
+    }
+    *why = "point 不认识：'" + text + "'（any | keyLevel | cursorPos | peekMsg | getMsg | msgWait | " +
+           "waitMessage | queueStatus | translate | dispatch | setCursorPos | fileRead）";
+    return false;
+}
+
+// `ctx.edit/input/read.…` 的 `kind` 参数（d.ts 的 `GlobalKind` = "int" | "uint" | "float" | "string"）。
+bool parseGlobalKindArg(JSContext* ctx, JSValueConst value, lift::GlobalKind* out, std::string* why) {
+    std::string text;
+    if (!JS_IsString(value) || !qjs::toString(ctx, value, &text)) {
+        qjs::clearException(ctx);
+        *why = "kind 必须是 'int' | 'uint' | 'float' | 'string'";
+        return false;
+    }
+    if (text == "int") {
+        *out = lift::GlobalKind::Int;
+        return true;
+    }
+    if (text == "uint") {
+        *out = lift::GlobalKind::Uint;
+        return true;
+    }
+    if (text == "float") {
+        *out = lift::GlobalKind::Float;
+        return true;
+    }
+    if (text == "string") {
+        *out = lift::GlobalKind::String;
+        return true;
+    }
+    *why = "kind 必须是 'int' | 'uint' | 'float' | 'string'（收到 '" + text + "'）";
+    return false;
+}
+
+// 宿主回调面（回调外恒 nullptr ⇒ 一律 TypeError，⛔ 不静默 no-op）。
+lift::ui::PluginCallHost* callHost(JSContext* ctx) {
+    Impl* impl = implOf(ctx);
+    return impl != nullptr ? impl->call_host : nullptr;
+}
+
+// ---- `ctx.*` 的 trampoline 前置声明 ----
+// ★ 为什么需要：`buildRunCtx` / `makeUiObject` 比它们的定义**先用**。这个匿名命名空间里没有
+//   "头文件里统一声明"这回事 ⇒ 显式列一次（⛔ 不要靠挪定义顺序凑）。
+//   函数体在下面（`ctx` 的成员构造之后），顺序与 d.ts 的成员顺序一致。
+JSValue jsCtxEditGlobalSet(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxInputClick(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxInputMove(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxInputDown(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxInputUp(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxInputStatus(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxReadGlobalGet(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxTriggerAfterScript(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxTriggerAfterPosition(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxTriggerAfterDelay(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxTriggerAtReadPoint(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxUiShow(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxUiHide(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxUiSet(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxUiVisible(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxUiGet(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxLog(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxProfileBegin(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxProfileEnd(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxFail(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxFinish(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxQuit(JSContext*, JSValueConst, int, JSValueConst*);
+
+// 小工具：读一个**必填**整数（`undefined` ⇒ 失败；非有限 ⇒ 失败，⛔ 不静默变 0）。
+bool readPluginInt(JSContext* ctx, JSValueConst obj, const char* name, bool required, std::int64_t dflt,
+                   std::int64_t* out, std::string* why) {
+    Value v = qjs::getProperty(ctx, obj, name);
+    if (v.isException()) {
+        qjs::clearException(ctx);
+        *why = std::string(name) + " 读取失败";
+        return false;
+    }
+    if (v.isUndefined()) {
+        if (required) {
+            *why = std::string(name) + " 缺失（必须是数字）";
+            return false;
+        }
+        *out = dflt;
+        return true;
+    }
+    if (!v.isNumber()) {
+        *why = std::string(name) + " 必须是数字";
+        return false;
+    }
+    double d = 0.0;
+    if (!qjs::toDouble(ctx, v.raw(), &d) || !std::isfinite(d)) {
+        qjs::clearException(ctx);
+        *why = std::string(name) + " 必须是有限数字";
+        return false;
+    }
+    *out = static_cast<std::int64_t>(d);
+    return true;
+}
+
+// 小工具：读一个可选字符串（缺省 ⇒ 空串；`null` 当缺省）。
+bool readPluginText(JSContext* ctx, JSValueConst obj, const char* name, std::string* out, std::string* why) {
+    Value v = qjs::getProperty(ctx, obj, name);
+    if (v.isException()) {
+        qjs::clearException(ctx);
+        *why = std::string(name) + " 读取失败";
+        return false;
+    }
+    if (v.isUndefined() || v.isNull()) {
+        out->clear();
+        return true;
+    }
+    if (!qjs::toString(ctx, v.raw(), out)) {
+        qjs::clearException(ctx);
+        *why = std::string(name) + " 无法转成 UTF-8 字符串";
+        return false;
+    }
+    return true;
+}
+
+// `opts.name`（必填、非空）+ `opts.mode`（"once" | "reenter"）+ `opts.timeoutMs` / `opts.maxFires`。
+bool readTriggerOptions(JSContext* ctx, JSValueConst opts, const char* fn, std::string* name,
+                        lift::plugin::TriggerMode* mode, std::uint32_t* max_fires, std::uint64_t* timeout_ms,
+                        std::string* why) {
+    if (!JS_IsObject(opts)) {
+        *why = std::string(fn) + ": 最后一个参数必须是 opts 对象 { name, mode?, timeoutMs?, maxFires? }";
+        return false;
+    }
+    if (!readPluginText(ctx, opts, "name", name, why)) return false;
+    if (name->empty()) {
+        *why = std::string(fn) + ": opts.name 必填（它是插件侧的具名状态）";
+        return false;
+    }
+    std::string mode_text = "once";
+    if (!readPluginText(ctx, opts, "mode", &mode_text, why)) return false;
+    if (mode_text.empty() || mode_text == "once") {
+        *mode = lift::plugin::TriggerMode::Once;
+    } else if (mode_text == "reenter") {
+        *mode = lift::plugin::TriggerMode::Reenter;
+    } else {
+        *why = std::string(fn) + ": opts.mode 只能是 'once' | 'reenter'（收到 '" + mode_text + "'）";
+        return false;
+    }
+    std::int64_t timeout = 0;
+    if (!readPluginInt(ctx, opts, "timeoutMs", false, 0, &timeout, why)) return false;
+    if (timeout < 0) {
+        *why = std::string(fn) + ": opts.timeoutMs 不许为负（0 = 不设超时）";
+        return false;
+    }
+    *timeout_ms = static_cast<std::uint64_t>(timeout);
+    std::int64_t max_fires_out = 0;
+    if (!readPluginInt(ctx, opts, "maxFires", false, 0, &max_fires_out, why)) return false;
+    if (max_fires_out < 0) {
+        *why = std::string(fn) + ": opts.maxFires 不许为负（0 = 不设硬上限）";
+        return false;
+    }
+    *max_fires = static_cast<std::uint32_t>(max_fires_out);
+    return true;
+}
+
+// =======================================================================================
+// trigger 对象表：JS 对象 ⇄ `Trigger`（state 共享）
+// =======================================================================================
+// ★ finalizer 的**唯一**纪律：先取需要的东西、再 `delete ref`（F1 / C2a 复审）。
+//   `delete ref` 之后读 `ref->id` 是 heap-use-after-free：正常构建无症状（`id` 在 offset 8，
+//   刚释放的块通常还读得到），换了 allocator / sanitizer 就是 UB；更糟的是它**以为**自己在
+//   "按 id 找条目"，实际可能减错对象的 `refs`（对象表丢条目）或永远找不到（条目永不释放）。
+void triggerFinalizer(JSRuntime* /*rt*/, JSValueConst value) {
+    auto* ref = static_cast<TriggerRef*>(JS_GetOpaque(value, JS_GetClassID(value)));
+    if (ref == nullptr) return;
+    Impl* impl = ref->impl;
+    const std::uint32_t id = ref->id;  // ★ 必须在 `delete ref` **之前**取出来（见头注）
+    delete ref;
+    if (impl == nullptr) return;
+    const auto it = impl->triggers.find(id);
+    if (it == impl->triggers.end()) return;
+    if (--it->second.refs <= 0) impl->triggers.erase(it);
+}
+
+// 把一个 `Trigger` 包成 JS 对象（同一个 state ⇒ 复用同一个 id；引用计数 +1）。
+Value wrapTrigger(Impl& impl, const lift::plugin::Trigger& trigger) {
+    JSContext* ctx = impl.ctx;
+    std::uint32_t id = 0;
+    for (const auto& kv : impl.triggers) {
+        if (kv.second.trigger.state == trigger.state) {
+            id = kv.first;
+            break;
+        }
+    }
+    if (id == 0) {
+        if (impl.next_trigger_id == 0) impl.next_trigger_id = 1;  // 回绕保护（实际上到不了）
+        id = impl.next_trigger_id++;
+        TriggerEntry entry;
+        entry.trigger = trigger;
+        entry.refs = 0;
+        impl.triggers[id] = std::move(entry);
+    }
+    Value obj(ctx, JS_NewObjectClass(ctx, impl.trigger_class));
+    if (obj.isException()) return obj;
+    auto* ref = new TriggerRef{&impl, id};
+    if (JS_SetOpaque(obj.raw(), ref) < 0) {
+        delete ref;
+        qjs::clearException(ctx);
+        return Value::exception(ctx);
+    }
+    ++impl.triggers[id].refs;
+    return obj;
+}
+
+// `start`/`onTrigger` 的一个元素 ⇒ `Trigger`。⛔ 只认**本 runtime 的** `ctx.trigger.*` 造出来的对象。
+bool appendTriggerFromValue(Impl& impl, JSValueConst value, std::vector<lift::plugin::Trigger>* out,
+                            std::string* err) {
+    if (JS_IsPromise(value)) {
+        *err = impl.origin + ": start/onTrigger 必须**同步**返回（拿到 Promise ⇒ async/await 不支持）";
+        return false;
+    }
+    if (!JS_IsObject(value)) {
+        *err = impl.origin + ": start/onTrigger 必须返回 Trigger | Trigger[] | null";
+        return false;
+    }
+    auto* ref = static_cast<TriggerRef*>(JS_GetOpaque(value, impl.trigger_class));
+    if (ref == nullptr || ref->impl != &impl) {
+        *err = impl.origin + ": 返回的对象不是 ctx.trigger.* 造出来的 Trigger（⛔ 不认任意对象）";
+        return false;
+    }
+    const auto it = impl.triggers.find(ref->id);
+    if (it == impl.triggers.end()) {
+        *err = impl.origin + ": 返回的 Trigger 已失效（对象表里没有这个 id）";
+        return false;
+    }
+    out->push_back(it->second.trigger);
+    return true;
+}
+
+// 返回值翻译：`null` / `undefined` / `[]` = done；单个对象 = 一个；数组 = 逐个。
+bool collectTriggers(Impl& impl, JSValueConst value, std::vector<lift::plugin::Trigger>* out,
+                     std::string* err) {
+    if (JS_IsUndefined(value) || JS_IsNull(value)) return true;  // done（⛔ 不逼插件写 return null）
+    if (JS_IsArray(value)) {
+        std::int64_t len = 0;
+        if (JS_GetLength(impl.ctx, value, &len) < 0) {
+            qjs::clearException(impl.ctx);
+            *err = impl.origin + ": 读取返回数组的长度失败";
+            return false;
+        }
+        for (std::int64_t i = 0; i < len; ++i) {
+            Value item(impl.ctx, JS_GetPropertyUint32(impl.ctx, value, static_cast<std::uint32_t>(i)));
+            if (item.isException()) {
+                qjs::takeException(impl.ctx, impl.origin, err);
+                return false;
+            }
+            if (!appendTriggerFromValue(impl, item.raw(), out, err)) return false;
+        }
+        return true;
+    }
+    return appendTriggerFromValue(impl, value, out, err);
+}
+
+// =======================================================================================
+// `ctx` 的成员构造
+// =======================================================================================
+Value makeReceiptObject(JSContext* ctx, bool accepted, bool queued, bool applied, const char* code,
+                        std::uint64_t seq, std::uint64_t id) {
+    Value obj = qjs::newObject(ctx);
+    if (obj.isException()) return obj;
+    bool ok = qjs::setProperty(ctx, obj.raw(), "accepted", qjs::newBool(ctx, accepted)) &&
+              qjs::setProperty(ctx, obj.raw(), "queued", qjs::newBool(ctx, queued)) &&
+              qjs::setProperty(ctx, obj.raw(), "applied", qjs::newBool(ctx, applied)) &&
+              qjs::setProperty(ctx, obj.raw(), "seq", qjs::newInt64(ctx, static_cast<std::int64_t>(seq))) &&
+              qjs::setProperty(ctx, obj.raw(), "id", qjs::newInt64(ctx, static_cast<std::int64_t>(id)));
+    if (ok && code != nullptr) ok = qjs::setProperty(ctx, obj.raw(), "code", qjs::newString(ctx, code));
+    if (!ok) {
+        qjs::clearException(ctx);
+        return Value::exception(ctx);
+    }
+    return obj;
+}
+
+Value makeNowObject(Impl& impl) {
+    JSContext* ctx = impl.ctx;
+    Value obj = qjs::newObject(ctx);
+    if (obj.isException()) return obj;
+    const lift::plugin::TriggerReadings* now = impl.call_host != nullptr ? impl.call_host->now() : nullptr;
+    bool ok = true;
+    if (now != nullptr) {
+        // ★ 有效才给值（⛔ 不编 0 / 空串）；`posValid` / `point` / `readIndex` 恒有。
+        if (now->script_ok && ok) ok = qjs::setProperty(ctx, obj.raw(), "script", qjs::newString(ctx, now->script));
+        if (now->pos_ok && ok) {
+            ok = qjs::setProperty(ctx, obj.raw(), "pos", qjs::newInt64(ctx, static_cast<std::int64_t>(now->pos)));
+        }
+        if (ok) ok = qjs::setProperty(ctx, obj.raw(), "posValid", qjs::newBool(ctx, now->pos_ok));
+        if (ok) {
+            ok = qjs::setProperty(ctx, obj.raw(), "readIndex",
+                                  qjs::newInt64(ctx, static_cast<std::int64_t>(now->read_index)));
+        }
+        if (ok) ok = qjs::setProperty(ctx, obj.raw(), "point", qjs::newString(ctx, pluginPointName(now->point)));
+        if (now->mouse_ok && ok) {
+            Value mouse = qjs::newObject(ctx);
+            if (!mouse.isException()) {
+                ok = qjs::setProperty(ctx, mouse.raw(), "x", qjs::newInt32(ctx, now->mouse_x)) &&
+                     qjs::setProperty(ctx, mouse.raw(), "y", qjs::newInt32(ctx, now->mouse_y)) &&
+                     qjs::setProperty(ctx, obj.raw(), "mouse", std::move(mouse));
+            }
+        }
+    }
+    if (!ok) {
+        qjs::clearException(ctx);
+        return Value::exception(ctx);
+    }
+    return obj;
+}
+
+Value makeEventObject(Impl& impl, const lift::plugin::TriggerEvent& ev) {
+    JSContext* ctx = impl.ctx;
+    Value obj = qjs::newObject(ctx);
+    if (obj.isException()) return obj;
+    bool ok = qjs::setProperty(ctx, obj.raw(), "kind", qjs::newString(ctx, ev.kind())) &&
+              qjs::setProperty(ctx, obj.raw(), "name", qjs::newString(ctx, ev.name));
+    if (ok) {
+        // ★ `ev.trigger` = 与 runner **同源**的 state（rearm 的判据就在它上面）。
+        Value trigger_obj = wrapTrigger(impl, ev.trigger);
+        if (trigger_obj.isException()) {
+            qjs::clearException(ctx);
+            ok = false;
+        } else {
+            ok = qjs::setProperty(ctx, obj.raw(), "trigger", std::move(trigger_obj));
+        }
+    }
+    if (ok && !ev.script.empty()) {
+        ok = qjs::setProperty(ctx, obj.raw(), "script", qjs::newString(ctx, ev.script));
+    }
+    if (ok && ev.pos_ok) {
+        ok = qjs::setProperty(ctx, obj.raw(), "pos", qjs::newInt64(ctx, static_cast<std::int64_t>(ev.pos)));
+    }
+    if (ok) ok = qjs::setProperty(ctx, obj.raw(), "posValid", qjs::newBool(ctx, ev.pos_ok));
+    if (ok) ok = qjs::setProperty(ctx, obj.raw(), "point", qjs::newString(ctx, pluginPointName(ev.point)));
+    if (ok) {
+        ok = qjs::setProperty(ctx, obj.raw(), "readIndex",
+                              qjs::newInt64(ctx, static_cast<std::int64_t>(ev.read_index)));
+    }
+    if (!ok) {
+        qjs::clearException(ctx);
+        return Value::exception(ctx);
+    }
+    return obj;
+}
+
+// `ctx.state`（per-Run；只有第一次回调前建一次）。`initialState` ⇒ `Object.assign({}, seed)`（浅拷贝）。
+// ★ D-C2-7：沙箱里**没有 `JSON`** ⇒ 用引擎自己的 `Object.assign`（与合同写法逐字一致）。
+bool ensureStateObject(Impl& impl) {
+    JSContext* ctx = impl.ctx;
+    if (impl.plugin_state.isObject()) return true;
+    Value state = qjs::newObject(ctx);
+    if (state.isException()) {
+        qjs::clearException(ctx);
+        return false;
+    }
+    if (impl.has_state_seed && impl.state_seed.isObject()) {
+        Value global = qjs::getGlobalObject(ctx);
+        Value object_ctor = global.isException() ? Value::exception(ctx) : qjs::getProperty(ctx, global.raw(), "Object");
+        Value assign = object_ctor.isObject() ? qjs::getProperty(ctx, object_ctor.raw(), "assign")
+                                              : Value::undefined(ctx);
+        if (!assign.isException() && assign.isFunction()) {
+            JSValueConst argv[2] = {state.raw(), impl.state_seed.raw()};
+            Value ret(ctx, JS_Call(ctx, assign.raw(), JS_UNDEFINED, 2, argv));
+            if (ret.isException()) {
+                qjs::clearException(ctx);  // ⛔ 不让"状态种子"把整个回调打挂；空对象仍然可用
+            }
+        } else {
+            qjs::clearException(ctx);
+        }
+    }
+    impl.plugin_state = std::move(state);
+    return true;
+}
+
+// 一个**只读**对象属性（`ctx.params` / `ctx.ui.state` 的口径；strict 下赋值 ⇒ TypeError）。
+bool defineReadOnly(JSContext* ctx, JSValueConst obj, const char* name, Value value) {
+    if (JS_DefinePropertyValueStr(ctx, obj, name, value.take(), JS_PROP_ENUMERABLE) < 0) {
+        qjs::clearException(ctx);
+        return false;
+    }
+    return true;
+}
+
+// `ctx.ui.state` 的数据对象（`ctx.ui` 的写入面都在它上面；C2b 才让 render 读）。
+Value makeUiObject(Impl& impl) {
+    JSContext* ctx = impl.ctx;
+    Value ui = qjs::newObject(ctx);
+    if (ui.isException()) return ui;
+    bool ok = setFunction(ctx, ui.raw(), "show", jsCtxUiShow, 2, nullptr) &&
+              setFunction(ctx, ui.raw(), "hide", jsCtxUiHide, 1, nullptr) &&
+              setFunction(ctx, ui.raw(), "set", jsCtxUiSet, 2, nullptr) &&
+              setFunction(ctx, ui.raw(), "visible", jsCtxUiVisible, 1, nullptr) &&
+              setFunction(ctx, ui.raw(), "get", jsCtxUiGet, 1, nullptr);
+    if (ok) {
+        // `ctx.ui.state` = 数据面本身（同一个对象 ⇒ 插件侧直接读写看到的是一份）。
+        ok = defineReadOnly(ctx, ui.raw(), "state", impl.ui_data.dup());
+    }
+    if (!ok) return Value::exception(ctx);
+    return ui;
+}
+
+// 组一个 `ctx`（RunCtx）。`is_start` 只影响是否带 `now`（两者都有 —— `start` 也有读数）。
+bool buildRunCtx(Impl& impl, Value* out) {
+    JSContext* ctx = impl.ctx;
+    if (!ensureStateObject(impl)) return false;
+    Value obj = qjs::newObject(ctx);
+    if (obj.isException()) {
+        qjs::clearException(ctx);
+        return false;
+    }
+    bool ok = true;
+
+    // ---- edit = { global: { set } } ----
+    if (ok) {
+        Value edit = qjs::newObject(ctx);
+        Value edit_global = qjs::newObject(ctx);
+        ok = !edit.isException() && !edit_global.isException();
+        if (ok) ok = setFunction(ctx, edit_global.raw(), "set", jsCtxEditGlobalSet, 3, nullptr);
+        if (ok) ok = qjs::setProperty(ctx, edit.raw(), "global", std::move(edit_global));
+        if (ok) ok = qjs::setProperty(ctx, obj.raw(), "edit", std::move(edit));
+        if (!ok) qjs::clearException(ctx);
+    }
+    // ---- input = { click, move, down, up, status } ----
+    if (ok) {
+        Value input = qjs::newObject(ctx);
+        ok = !input.isException();
+        if (ok) ok = setFunction(ctx, input.raw(), "click", jsCtxInputClick, 3, nullptr);
+        if (ok) ok = setFunction(ctx, input.raw(), "move", jsCtxInputMove, 2, nullptr);
+        if (ok) ok = setFunction(ctx, input.raw(), "down", jsCtxInputDown, 1, nullptr);
+        if (ok) ok = setFunction(ctx, input.raw(), "up", jsCtxInputUp, 1, nullptr);
+        if (ok) ok = setFunction(ctx, input.raw(), "status", jsCtxInputStatus, 1, nullptr);
+        if (ok) ok = qjs::setProperty(ctx, obj.raw(), "input", std::move(input));
+        if (!ok) qjs::clearException(ctx);
+    }
+    // ---- read = { global: { get } }（⛔ frameHash / frames / scriptPos 在 C2a 不存在）----
+    if (ok) {
+        Value read = qjs::newObject(ctx);
+        Value read_global = qjs::newObject(ctx);
+        ok = !read.isException() && !read_global.isException();
+        if (ok) ok = setFunction(ctx, read_global.raw(), "get", jsCtxReadGlobalGet, 2, nullptr);
+        if (ok) ok = qjs::setProperty(ctx, read.raw(), "global", std::move(read_global));
+        if (ok) ok = qjs::setProperty(ctx, obj.raw(), "read", std::move(read));
+        if (!ok) qjs::clearException(ctx);
+    }
+    // ---- trigger = { afterScript, afterPosition, afterDelay, atReadPoint } ----
+    if (ok) {
+        Value trigger = qjs::newObject(ctx);
+        ok = !trigger.isException();
+        if (ok) ok = setFunction(ctx, trigger.raw(), "afterScript", jsCtxTriggerAfterScript, 2, nullptr);
+        if (ok) ok = setFunction(ctx, trigger.raw(), "afterPosition", jsCtxTriggerAfterPosition, 4, nullptr);
+        if (ok) ok = setFunction(ctx, trigger.raw(), "afterDelay", jsCtxTriggerAfterDelay, 2, nullptr);
+        if (ok) ok = setFunction(ctx, trigger.raw(), "atReadPoint", jsCtxTriggerAtReadPoint, 3, nullptr);
+        if (ok) ok = qjs::setProperty(ctx, obj.raw(), "trigger", std::move(trigger));
+        if (!ok) qjs::clearException(ctx);
+    }
+    // ---- profile = { begin, end } ----
+    if (ok) {
+        Value profile = qjs::newObject(ctx);
+        ok = !profile.isException();
+        if (ok) ok = setFunction(ctx, profile.raw(), "begin", jsCtxProfileBegin, 1, nullptr);
+        if (ok) ok = setFunction(ctx, profile.raw(), "end", jsCtxProfileEnd, 0, nullptr);
+        if (ok) ok = qjs::setProperty(ctx, obj.raw(), "profile", std::move(profile));
+        if (!ok) qjs::clearException(ctx);
+    }
+    // ---- ui / state / params / log / fail / finish / quit ----
+    if (ok) {
+        Value ui = makeUiObject(impl);
+        if (ui.isException()) {
+            qjs::clearException(ctx);
+            ok = false;
+        } else {
+            ok = qjs::setProperty(ctx, obj.raw(), "ui", std::move(ui));
+        }
+    }
+    if (ok) ok = defineReadOnly(ctx, obj.raw(), "state", impl.plugin_state.dup());
+    if (ok) ok = defineReadOnly(ctx, obj.raw(), "params", impl.plugin_params.dup());
+    if (ok) ok = setFunction(ctx, obj.raw(), "log", jsCtxLog, 3, nullptr);
+    if (ok) ok = setFunction(ctx, obj.raw(), "fail", jsCtxFail, 2, nullptr);
+    if (ok) ok = setFunction(ctx, obj.raw(), "finish", jsCtxFinish, 2, nullptr);
+    if (ok) ok = setFunction(ctx, obj.raw(), "quit", jsCtxQuit, 1, nullptr);
+    // ---- now（**每次回调新建**的值快照；D-C2-7）----
+    if (ok) {
+        Value now = makeNowObject(impl);
+        if (now.isException()) {
+            qjs::clearException(ctx);
+            ok = false;
+        } else {
+            ok = defineReadOnly(ctx, obj.raw(), "now", std::move(now));
+        }
+    }
+    if (!ok) return false;
+    *out = std::move(obj);
+    return true;
+}
+
+// =======================================================================================
+// `ctx.*` 的 trampoline（每个都：取 impl → 判装配 → catch(...)）
+// =======================================================================================
+JSValue jsCtxEditGlobalSet(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr || !host->editWired()) {
+            return JS_ThrowTypeError(ctx, "ctx.edit.global.set: 宿主没有接 EditSink（⛔ 不静默 no-op）");
+        }
+        if (argc < 3) return JS_ThrowTypeError(ctx, "ctx.edit.global.set(kind, id, value)");
+        lift::GlobalKind kind = lift::GlobalKind::Int;
+        std::string why;
+        if (!parseGlobalKindArg(ctx, argv[0], &kind, &why)) return JS_ThrowTypeError(ctx, "ctx.edit.global.set: %s", why.c_str());
+        std::int64_t id = 0;
+        double d = 0.0;
+        if (!qjs::toDouble(ctx, argv[1], &d) || !std::isfinite(d)) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.edit.global.set: id 必须是数字");
+        }
+        id = static_cast<std::int64_t>(d);
+        if (id < 0 || id > 0xFFFFFFFFll) {
+            return JS_ThrowTypeError(ctx, "ctx.edit.global.set: id 越界（0..0xFFFFFFFF）");
+        }
+        lift::GlobalValue value;
+        value.kind = kind;
+        if (kind == lift::GlobalKind::Float) {
+            if (!qjs::toDouble(ctx, argv[2], &value.f64) || !std::isfinite(value.f64)) {
+                qjs::clearException(ctx);
+                return JS_ThrowTypeError(ctx, "ctx.edit.global.set: float 值必须是有限数字");
+            }
+        } else if (kind == lift::GlobalKind::String) {
+            return JS_ThrowTypeError(ctx, "ctx.edit.global.set: 'string' 型 global 本实现未实现");
+        } else {
+            std::uint32_t u = 0;
+            if (!qjs::toUint32(ctx, argv[2], &u)) {
+                qjs::clearException(ctx);
+                return JS_ThrowTypeError(ctx, "ctx.edit.global.set: int/uint 值必须是数字");
+            }
+            value.u32 = u;
+        }
+        const char* code = nullptr;
+        const bool accepted = host->editGlobalSet(kind, static_cast<std::uint32_t>(id), value, &code);
+        // Edit 是**立即**的：accepted = applied ⇒ receipt 里两者同值（⛔ 不是"排队成功"）。
+        Value out = makeReceiptObject(ctx, accepted, false, accepted, code, 0, 0);
+        if (out.isException()) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.edit.global.set: 回执对象写入失败");
+        }
+        return out.take();
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.edit.global.set: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+Value makeInputReceipt(JSContext* ctx, const lift::plugin::Receipt& receipt) {
+    return makeReceiptObject(ctx, receipt.accepted, receipt.accepted, false, receipt.code, receipt.seq,
+                             receipt.id);
+}
+
+JSValue jsCtxInputClick(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr || !host->inputWired()) {
+            return JS_ThrowTypeError(ctx, "ctx.input.click: 宿主没有接 IntentQueue（⛔ 不静默 no-op）");
+        }
+        if (argc < 2) return JS_ThrowTypeError(ctx, "ctx.input.click(x, y, button?)");
+        double x = 0.0;
+        double y = 0.0;
+        if (!qjs::toDouble(ctx, argv[0], &x) || !qjs::toDouble(ctx, argv[1], &y) || !std::isfinite(x) ||
+            !std::isfinite(y)) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.input.click: x / y 必须是有限数字");
+        }
+        lift::MouseButton button = lift::MouseButton::Left;
+        if (argc >= 3 && !JS_IsUndefined(argv[2])) {
+            std::string text;
+            if (!qjs::toString(ctx, argv[2], &text)) {
+                qjs::clearException(ctx);
+                return JS_ThrowTypeError(ctx, "ctx.input.click: button 必须是 'left' | 'right' | 'middle'");
+            }
+            if (text == "left") {
+                button = lift::MouseButton::Left;
+            } else if (text == "right") {
+                button = lift::MouseButton::Right;
+            } else if (text == "middle") {
+                button = lift::MouseButton::Middle;
+            } else {
+                return JS_ThrowTypeError(ctx, "ctx.input.click: button 只能是 'left' | 'right' | 'middle'");
+            }
+        }
+        Value out = makeInputReceipt(ctx, host->inputClick(static_cast<int>(x), static_cast<int>(y), button));
+        if (out.isException()) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.input.click: 回执对象写入失败");
+        }
+        return out.take();
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.input.click: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxInputMove(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr || !host->inputWired()) {
+            return JS_ThrowTypeError(ctx, "ctx.input.move: 宿主没有接 IntentQueue（⛔ 不静默 no-op）");
+        }
+        if (argc < 2) return JS_ThrowTypeError(ctx, "ctx.input.move(x, y)");
+        double x = 0.0;
+        double y = 0.0;
+        if (!qjs::toDouble(ctx, argv[0], &x) || !qjs::toDouble(ctx, argv[1], &y) || !std::isfinite(x) ||
+            !std::isfinite(y)) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.input.move: x / y 必须是有限数字");
+        }
+        Value out = makeInputReceipt(ctx, host->inputMove(static_cast<int>(x), static_cast<int>(y)));
+        if (out.isException()) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.input.move: 回执对象写入失败");
+        }
+        return out.take();
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.input.move: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+bool parseButtonArg(JSContext* ctx, JSValueConst value, lift::MouseButton* out) {
+    if (JS_IsUndefined(value)) return false;
+    std::string text;
+    if (!qjs::toString(ctx, value, &text)) {
+        qjs::clearException(ctx);
+        return false;
+    }
+    if (text == "left") {
+        *out = lift::MouseButton::Left;
+    } else if (text == "right") {
+        *out = lift::MouseButton::Right;
+    } else if (text == "middle") {
+        *out = lift::MouseButton::Middle;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+JSValue jsCtxInputDown(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr || !host->inputWired()) {
+            return JS_ThrowTypeError(ctx, "ctx.input.down: 宿主没有接 IntentQueue（⛔ 不静默 no-op）");
+        }
+        lift::MouseButton button = lift::MouseButton::Left;
+        if (argc < 1 || !parseButtonArg(ctx, argv[0], &button)) {
+            return JS_ThrowTypeError(ctx, "ctx.input.down(button)：button 只能是 'left' | 'right' | 'middle'");
+        }
+        Value out = makeInputReceipt(ctx, host->inputDown(button));
+        if (out.isException()) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.input.down: 回执对象写入失败");
+        }
+        return out.take();
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.input.down: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxInputUp(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr || !host->inputWired()) {
+            return JS_ThrowTypeError(ctx, "ctx.input.up: 宿主没有接 IntentQueue（⛔ 不静默 no-op）");
+        }
+        lift::MouseButton button = lift::MouseButton::Left;
+        if (argc < 1 || !parseButtonArg(ctx, argv[0], &button)) {
+            return JS_ThrowTypeError(ctx, "ctx.input.up(button)：button 只能是 'left' | 'right' | 'middle'");
+        }
+        Value out = makeInputReceipt(ctx, host->inputUp(button));
+        if (out.isException()) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.input.up: 回执对象写入失败");
+        }
+        return out.take();
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.input.up: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxInputStatus(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr || !host->inputWired()) {
+            return JS_ThrowTypeError(ctx, "ctx.input.status: 宿主没有接 IntentQueue（⛔ 不静默 no-op）");
+        }
+        if (argc < 1) return JS_ThrowTypeError(ctx, "ctx.input.status(id)");
+        double d = 0.0;
+        if (!qjs::toDouble(ctx, argv[0], &d) || !std::isfinite(d) || d < 0.0) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.input.status: id 必须是非负数字");
+        }
+        const auto state = host->inputStatus(static_cast<std::uint64_t>(d));
+        return qjs::newString(ctx, lift::ui::pluginInputStateName(state)).take();
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.input.status: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxReadGlobalGet(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr || !host->readWired()) {
+            return JS_ThrowTypeError(ctx, "ctx.read.global.get: 宿主没有接 EngineRead（⛔ 不静默 no-op）");
+        }
+        if (argc < 2) return JS_ThrowTypeError(ctx, "ctx.read.global.get(kind, id)");
+        lift::GlobalKind kind = lift::GlobalKind::Int;
+        std::string why;
+        if (!parseGlobalKindArg(ctx, argv[0], &kind, &why)) {
+            return JS_ThrowTypeError(ctx, "ctx.read.global.get: %s", why.c_str());
+        }
+        double d = 0.0;
+        if (!qjs::toDouble(ctx, argv[1], &d) || !std::isfinite(d) || d < 0.0 || d > 4294967295.0) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.read.global.get: id 必须是 0..0xFFFFFFFF 的数字");
+        }
+        lift::GlobalValue value;
+        const char* code = nullptr;
+        if (!host->readGlobal(kind, static_cast<std::uint32_t>(d), &value, &code)) {
+            // ★ 读失败**响亮**（d.ts 没有错误通道 ⇒ TypeError 是唯一诚实的出口；⛔ 不返回 0 冒充读数）。
+            return JS_ThrowTypeError(ctx, "ctx.read.global.get: 读失败（code=%s）",
+                                     code != nullptr ? code : "unknown");
+        }
+        if (kind == lift::GlobalKind::Float) return qjs::newDouble(ctx, value.f64).take();
+        return qjs::newInt64(ctx, static_cast<std::int64_t>(value.u32)).take();
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.read.global.get: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+// trigger 工厂：宿主返回 `Trigger`（新 state）⇒ 包成本 runtime 的 JS 对象。
+// ★ 返回**裸 JSValue**（不是 `qjs::Value`）：失败路径要直接 `JS_ThrowTypeError(...)`（它返回
+//   `JS_EXCEPTION`），而 `Value` 没有从 `JSValue` 的隐式构造 —— 那会让这两条路径各写一份包装。
+JSValue finishTrigger(Impl& impl, const lift::plugin::Trigger& trigger, const char* fn,
+                      const std::string& why) {
+    JSContext* ctx = impl.ctx;
+    if (!why.empty()) return JS_ThrowTypeError(ctx, "%s: %s", fn, why.c_str());
+    if (trigger.state == nullptr) {
+        return JS_ThrowTypeError(ctx, "%s: 宿主没有接 trigger 工厂（⛔ 不静默 no-op）", fn);
+    }
+    Value obj = wrapTrigger(impl, trigger);
+    if (obj.isException()) {
+        qjs::clearException(ctx);
+        return JS_ThrowTypeError(ctx, "%s: trigger 对象分配失败", fn);
+    }
+    return obj.take();
+}
+
+JSValue jsCtxTriggerAfterScript(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        Impl* impl = implOf(ctx);
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (impl == nullptr || host == nullptr || !host->triggerWired()) {
+            return JS_ThrowTypeError(ctx, "ctx.trigger.afterScript: 宿主没有接 TriggerFactory");
+        }
+        if (argc < 2) return JS_ThrowTypeError(ctx, "ctx.trigger.afterScript(script, opts)");
+        std::string script;
+        if (!qjs::toString(ctx, argv[0], &script)) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.trigger.afterScript: script 必须是字符串");
+        }
+        std::string name;
+        std::string why;
+        lift::plugin::TriggerMode mode = lift::plugin::TriggerMode::Once;
+        std::uint32_t max_fires = 0;
+        std::uint64_t timeout_ms = 0;
+        if (!readTriggerOptions(ctx, argv[1], "ctx.trigger.afterScript", &name, &mode, &max_fires, &timeout_ms,
+                                &why)) {
+            return JS_ThrowTypeError(ctx, "ctx.trigger.afterScript: %s", why.c_str());
+        }
+        const lift::plugin::Trigger trigger =
+            host->makeAfterScript(name, script, mode, max_fires, timeout_ms);
+        return finishTrigger(*impl, trigger, "ctx.trigger.afterScript", std::string());
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.trigger.afterScript: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxTriggerAfterPosition(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        Impl* impl = implOf(ctx);
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (impl == nullptr || host == nullptr || !host->triggerWired()) {
+            return JS_ThrowTypeError(ctx, "ctx.trigger.afterPosition: 宿主没有接 TriggerFactory");
+        }
+        if (argc < 4) return JS_ThrowTypeError(ctx, "ctx.trigger.afterPosition(script, lo, hi, opts)");
+        std::string script;
+        if (!qjs::toString(ctx, argv[0], &script)) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.trigger.afterPosition: script 必须是字符串");
+        }
+        double lo = 0.0;
+        double hi = 0.0;
+        if (!qjs::toDouble(ctx, argv[1], &lo) || !qjs::toDouble(ctx, argv[2], &hi) || !std::isfinite(lo) ||
+            !std::isfinite(hi) || lo < 0.0 || hi < 0.0 || lo > 4294967295.0 || hi > 4294967295.0) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.trigger.afterPosition: lo / hi 必须是 0..0xFFFFFFFF 的数字");
+        }
+        std::string name;
+        std::string why;
+        lift::plugin::TriggerMode mode = lift::plugin::TriggerMode::Once;
+        std::uint32_t max_fires = 0;
+        std::uint64_t timeout_ms = 0;
+        if (!readTriggerOptions(ctx, argv[3], "ctx.trigger.afterPosition", &name, &mode, &max_fires,
+                                &timeout_ms, &why)) {
+            return JS_ThrowTypeError(ctx, "ctx.trigger.afterPosition: %s", why.c_str());
+        }
+        const lift::plugin::Trigger trigger = host->makeAfterPosition(
+            name, script, static_cast<std::uint32_t>(lo), static_cast<std::uint32_t>(hi), mode, max_fires,
+            timeout_ms);
+        return finishTrigger(*impl, trigger, "ctx.trigger.afterPosition", std::string());
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.trigger.afterPosition: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxTriggerAfterDelay(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        Impl* impl = implOf(ctx);
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (impl == nullptr || host == nullptr || !host->triggerWired()) {
+            return JS_ThrowTypeError(ctx, "ctx.trigger.afterDelay: 宿主没有接 TriggerFactory");
+        }
+        if (argc < 2) return JS_ThrowTypeError(ctx, "ctx.trigger.afterDelay(ms, opts)");
+        double ms = 0.0;
+        if (!qjs::toDouble(ctx, argv[0], &ms) || !std::isfinite(ms) || ms < 0.0) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.trigger.afterDelay: ms 必须是非负有限数字");
+        }
+        std::string name;
+        std::string why;
+        lift::plugin::TriggerMode mode = lift::plugin::TriggerMode::Once;
+        std::uint32_t max_fires = 0;
+        std::uint64_t timeout_ms = 0;
+        if (!readTriggerOptions(ctx, argv[1], "ctx.trigger.afterDelay", &name, &mode, &max_fires, &timeout_ms,
+                                &why)) {
+            return JS_ThrowTypeError(ctx, "ctx.trigger.afterDelay: %s", why.c_str());
+        }
+        // ★ `afterDelay` **不接受** `timeoutMs`（合同 §4.2 441：延迟本身就是时间量）。
+        if (timeout_ms != 0) {
+            return JS_ThrowTypeError(
+                ctx, "ctx.trigger.afterDelay: 不接受 timeoutMs（延迟本身已是时间量；要超时就用别的 trigger）");
+        }
+        const lift::plugin::Trigger trigger =
+            host->makeAfterDelay(name, static_cast<std::uint64_t>(ms), mode);
+        return finishTrigger(*impl, trigger, "ctx.trigger.afterDelay", std::string());
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.trigger.afterDelay: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxTriggerAtReadPoint(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        Impl* impl = implOf(ctx);
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (impl == nullptr || host == nullptr || !host->triggerWired()) {
+            return JS_ThrowTypeError(ctx, "ctx.trigger.atReadPoint: 宿主没有接 TriggerFactory");
+        }
+        if (argc < 3) return JS_ThrowTypeError(ctx, "ctx.trigger.atReadPoint(point, maxFires, opts)");
+        lift::InputPoint point = lift::InputPoint::Count;
+        std::string why;
+        if (!parsePluginPoint(ctx, argv[0], &point, &why)) {
+            return JS_ThrowTypeError(ctx, "ctx.trigger.atReadPoint: %s", why.c_str());
+        }
+        double max_fires = 0.0;
+        if (!qjs::toDouble(ctx, argv[1], &max_fires) || !std::isfinite(max_fires) || max_fires < 1.0) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.trigger.atReadPoint: maxFires 必须是 >= 1 的数字");
+        }
+        std::string name;
+        lift::plugin::TriggerMode mode = lift::plugin::TriggerMode::Once;
+        std::uint32_t opts_max_fires = 0;
+        std::uint64_t timeout_ms = 0;
+        if (!readTriggerOptions(ctx, argv[2], "ctx.trigger.atReadPoint", &name, &mode, &opts_max_fires,
+                                &timeout_ms, &why)) {
+            return JS_ThrowTypeError(ctx, "ctx.trigger.atReadPoint: %s", why.c_str());
+        }
+        const lift::plugin::Trigger trigger =
+            host->makeAtReadPoint(name, point, static_cast<std::uint32_t>(max_fires), mode, timeout_ms);
+        return finishTrigger(*impl, trigger, "ctx.trigger.atReadPoint", std::string());
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.trigger.atReadPoint: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+// ---- ctx.ui（宿主本地 JS 状态；C2a 只建写入面）----
+bool uiIdArg(JSContext* ctx, JSValueConst value, std::string* out) {
+    if (!qjs::toString(ctx, value, out)) {
+        qjs::clearException(ctx);
+        return false;
+    }
+    return !out->empty();
+}
+
+JSValue jsCtxUiShow(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        Impl* impl = implOf(ctx);
+        if (impl == nullptr || argc < 1) return JS_ThrowTypeError(ctx, "ctx.ui.show(id, data?)");
+        std::string id;
+        if (!uiIdArg(ctx, argv[0], &id)) return JS_ThrowTypeError(ctx, "ctx.ui.show: id 必须是非空字符串");
+        impl->ui_visible.insert(id);
+        if (argc >= 2 && !JS_IsUndefined(argv[1])) {
+            if (JS_SetPropertyStr(ctx, impl->ui_data.raw(), id.c_str(), JS_DupValue(ctx, argv[1])) < 0) {
+                qjs::clearException(ctx);
+                return JS_ThrowTypeError(ctx, "ctx.ui.show: 写状态失败");
+            }
+        }
+        return JS_UNDEFINED;
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.ui.show: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxUiHide(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        Impl* impl = implOf(ctx);
+        if (impl == nullptr || argc < 1) return JS_ThrowTypeError(ctx, "ctx.ui.hide(id)");
+        std::string id;
+        if (!uiIdArg(ctx, argv[0], &id)) return JS_ThrowTypeError(ctx, "ctx.ui.hide: id 必须是非空字符串");
+        impl->ui_visible.erase(id);
+        const JSAtom atom = JS_NewAtom(ctx, id.c_str());
+        if (atom == JS_ATOM_NULL) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.ui.hide: 属性名创建失败");
+        }
+        const int rc = JS_DeleteProperty(ctx, impl->ui_data.raw(), atom, 0);
+        JS_FreeAtom(ctx, atom);
+        if (rc < 0) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.ui.hide: 删除状态失败");
+        }
+        return JS_UNDEFINED;
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.ui.hide: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxUiSet(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        Impl* impl = implOf(ctx);
+        if (impl == nullptr || argc < 2) return JS_ThrowTypeError(ctx, "ctx.ui.set(id, data)");
+        std::string id;
+        if (!uiIdArg(ctx, argv[0], &id)) return JS_ThrowTypeError(ctx, "ctx.ui.set: id 必须是非空字符串");
+        if (JS_SetPropertyStr(ctx, impl->ui_data.raw(), id.c_str(), JS_DupValue(ctx, argv[1])) < 0) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.ui.set: 写状态失败");
+        }
+        return JS_UNDEFINED;
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.ui.set: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxUiVisible(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        Impl* impl = implOf(ctx);
+        if (impl == nullptr || argc < 1) return JS_ThrowTypeError(ctx, "ctx.ui.visible(id)");
+        std::string id;
+        if (!uiIdArg(ctx, argv[0], &id)) return JS_ThrowTypeError(ctx, "ctx.ui.visible: id 必须是非空字符串");
+        return qjs::newBool(ctx, impl->ui_visible.count(id) != 0).take();
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.ui.visible: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxUiGet(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        Impl* impl = implOf(ctx);
+        if (impl == nullptr || argc < 1) return JS_ThrowTypeError(ctx, "ctx.ui.get(id)");
+        std::string id;
+        if (!uiIdArg(ctx, argv[0], &id)) return JS_ThrowTypeError(ctx, "ctx.ui.get: id 必须是非空字符串");
+        // ★ 不存在 ⇒ `undefined`（d.ts 的 `T | undefined`；⛔ 不编 `null`）。
+        return JS_GetPropertyStr(ctx, impl->ui_data.raw(), id.c_str());
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.ui.get: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+// ---- ctx.log / profile / fail / finish / quit ----
+JSValue jsCtxLog(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr) return JS_ThrowTypeError(ctx, "ctx.log: 不在插件回调里");
+        if (argc < 2) return JS_ThrowTypeError(ctx, "ctx.log(level, message, data?)");
+        std::string level;
+        std::string message;
+        if (!qjs::toString(ctx, argv[0], &level) || !qjs::toString(ctx, argv[1], &message)) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.log: level / message 必须能转成字符串");
+        }
+        // ★ `data`（第三个参数）**不进日志行**：一行一条是硬要求（合同 §4.10）；结构化数据由插件
+        //   自己决定要不要先 `String(...)`。⇒ 这里只记 message（有界 + 去重由宿主做）。
+        host->log(level.c_str(), message);
+        return JS_UNDEFINED;
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.log: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxProfileBegin(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr) return JS_ThrowTypeError(ctx, "ctx.profile.begin: 不在插件回调里");
+        std::string label;
+        if (argc >= 1 && !JS_IsUndefined(argv[0]) && !qjs::toString(ctx, argv[0], &label)) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.profile.begin: label 必须能转成字符串");
+        }
+        std::string why;
+        if (!host->profileBegin(label, &why)) {
+            return JS_ThrowTypeError(ctx, "ctx.profile.begin: %s", why.c_str());
+        }
+        return JS_UNDEFINED;
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.profile.begin: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxProfileEnd(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/, JSValueConst* /*argv*/) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr) return JS_ThrowTypeError(ctx, "ctx.profile.end: 不在插件回调里");
+        std::string why;
+        if (!host->profileEnd(&why)) {
+            return JS_ThrowTypeError(ctx, "ctx.profile.end: %s", why.c_str());
+        }
+        return JS_UNDEFINED;
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.profile.end: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxFail(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr) return JS_ThrowTypeError(ctx, "ctx.fail: 不在插件回调里");
+        std::string name;
+        std::string reason;
+        if (argc >= 1 && !JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0]) &&
+            !qjs::toString(ctx, argv[0], &name)) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.fail: name 必须能转成字符串");
+        }
+        if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]) &&
+            !qjs::toString(ctx, argv[1], &reason)) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.fail: reason 必须能转成字符串");
+        }
+        host->fail(name, reason);
+        return JS_UNDEFINED;
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.fail: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxFinish(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr) return JS_ThrowTypeError(ctx, "ctx.finish: 不在插件回调里");
+        if (argc < 1) return JS_ThrowTypeError(ctx, "ctx.finish(exitCode, reason?)");
+        double code = 0.0;
+        if (!qjs::toDouble(ctx, argv[0], &code) || !std::isfinite(code)) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.finish: exitCode 必须是有限数字");
+        }
+        std::string reason;
+        if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]) &&
+            !qjs::toString(ctx, argv[1], &reason)) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.finish: reason 必须能转成字符串");
+        }
+        host->finish(static_cast<int>(code), reason);
+        return JS_UNDEFINED;
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.finish: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxQuit(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr) return JS_ThrowTypeError(ctx, "ctx.quit: 不在插件回调里");
+        std::string reason;
+        if (argc >= 1 && !JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0]) &&
+            !qjs::toString(ctx, argv[0], &reason)) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.quit: reason 必须能转成字符串");
+        }
+        host->quit(reason);
+        return JS_UNDEFINED;
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.quit: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+// =======================================================================================
+// `PluginScript` 的实现
+// =======================================================================================
+class QuickJsPluginScript final : public PluginScript {
+public:
+    explicit QuickJsPluginScript(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+    ~QuickJsPluginScript() override {
+        if (impl_) impl_->shutdown();
+    }
+
+    bool hasRender() const override { return impl_->plugin_has_render; }
+    bool hasRun() const override { return impl_->plugin_has_run; }
+
+    bool start(PluginCallHost& host, const lift::plugin::Budget& budget, TriggerSet* out,
+               std::string* err) override {
+        return call(host, impl_->plugin_start, true, nullptr, budget, out, err);
+    }
+
+    bool onTrigger(PluginCallHost& host, const lift::plugin::TriggerEvent& ev,
+                   const lift::plugin::Budget& budget, TriggerSet* out, std::string* err) override {
+        return call(host, impl_->plugin_on_trigger, false, &ev, budget, out, err);
+    }
+
+    bool overran() const override { return impl_->overran; }
+
+    void shutdown() override { impl_->shutdown(); }
+
+private:
+    bool call(PluginCallHost& host, const Value& fn, bool is_start, const lift::plugin::TriggerEvent* ev,
+              const lift::plugin::Budget& budget, TriggerSet* out, std::string* err) {
+        Impl& impl = *impl_;
+        if (impl.ctx == nullptr) {
+            if (err != nullptr) *err = "quickjs: 插件已 shutdown";
+            return false;
+        }
+        if (!fn.isFunction()) {
+            if (err != nullptr) *err = impl.origin + ": 这个插件没有 " + (is_start ? "start" : "onTrigger");
+            return false;
+        }
+        // ★ 预算两件：deadline（宿主单调钟；0 = 不限）+ op_limit（中断步长）；**每次回调重置**。
+        //   ⛔ 不要沿用 render 的 20 ms / 1e6（那会让一次跑飞的回调卡住 guest 20 ms；合同 §4.5 D5）。
+        impl.deadline_ns =
+            budget.deadline_ns != 0 ? steadyNowNs() + budget.deadline_ns : 0;
+        impl.op_limit = budget.op_limit;
+        impl.ops = 0;
+        impl.overran = false;
+        impl.call_host = &host;
+
+        bool ok = true;
+        std::string local_err;
+        try {
+            Value ctx_obj = Value::undefined(impl.ctx);
+            Value ev_obj = Value::undefined(impl.ctx);
+            {
+                // `ctx` 是**每次回调新建**的值对象（D-C2-7）；`now` 里是这一拍的新鲜快照。
+                Value built;
+                if (!buildRunCtx(impl, &built)) {
+                    ok = false;
+                    local_err = impl.origin + ": 组 ctx 失败";
+                } else {
+                    ctx_obj = std::move(built);
+                }
+            }
+            if (ok && !is_start && ev != nullptr) {
+                ev_obj = makeEventObject(impl, *ev);
+                if (ev_obj.isException()) {
+                    qjs::clearException(impl.ctx);
+                    ok = false;
+                    local_err = impl.origin + ": 组事件对象失败";
+                }
+            }
+            if (ok) {
+                JSValueConst argv[2] = {ctx_obj.raw(), ev_obj.raw()};
+                const int argc = is_start ? 1 : 2;
+                Value ret(impl.ctx, JS_Call(impl.ctx, fn.raw(), JS_UNDEFINED, argc, argv));
+                if (ret.isException()) {
+                    qjs::takeException(impl.ctx, impl.origin, &local_err);
+                    ok = false;
+                } else {
+                    ok = collectTriggers(impl, ret.raw(), out, &local_err);
+                }
+            }
+        } catch (...) {
+            ok = false;
+            local_err = impl.origin + ": 宿主异常（C++ exception at script boundary）";
+        }
+        impl.call_host = nullptr;
+        if (!ok) {
+            if (impl.overran) {
+                local_err += "\n(plugin: 回调超出预算（deadline / op_limit）⇒ 已中断)";
+            }
+            if (err != nullptr) *err = local_err;
+            return false;
+        }
+        return true;
+    }
+
+    std::unique_ptr<Impl> impl_;
+};
+
 }  // namespace
 
 std::unique_ptr<ScriptRuntime> makeQuickJsRuntime() { return std::make_unique<QuickJsRuntime>(); }
+
+// =======================================================================================
+// 插件装载（`--plugin` 的唯一入口；实现见上面的匿名命名空间）
+//
+// ★ **强制 module**：插件必须是 ES module（`export default`）⇒ 不走 classic 探测
+//   （`--ui` 那条路才 classic 优先）。⇒ 一个 classic 文件用 `--plugin` 打开会得到
+//   "插件必须 export default"这条明确错误，而不是被当成 HUD 静默跑起来。
+// ★ 取 default 导出的路：`JS_Eval(MODULE|COMPILE_ONLY)` → `JS_ResolveModule` →
+//   `JS_EvalFunction`（求值 + 返回 promise）→ drain → `JS_GetModuleNamespace(ctx, m)` →
+//   `getProperty(ns, "default")`。
+//   ⚠ **不能**从求值返回的 promise 里取：`js_evaluate_module` 用 `JS_UNDEFINED` resolve
+//   （`quickjs.c` 的 `js_evaluate_module` 里 `resolving_funcs[0]` 的参数就是 `JS_UNDEFINED`）
+//   ⇒ namespace 只能从 module def 拿（`JS_GetModuleNamespace` 是公开 API）。
+// ⚠ **不能** `JS_FreeValue` 一个 module 值（`quickjs.c` 的 `case JS_TAG_MODULE` 是 `abort()`）：
+//   `module_value.take()` 把所有权交给 `JS_EvalFunction`。
+// =======================================================================================
+std::unique_ptr<PluginScript> makeQuickJsPlugin(const std::string& source, const PluginLoadOptions& opts,
+                                                std::string* err) {
+    const std::string origin = opts.origin;
+    std::unique_ptr<Impl> impl = createImpl(origin, opts.font, err);
+    if (impl == nullptr) return nullptr;
+    JSContext* ctx = impl->ctx;
+
+    // ---- module loader：入口 = origin（绝对路径）；相对 import 的根 = 它的目录 ----
+    impl->module_entry_is_path = isFilePathLike(origin);
+    impl->module_root = pathDirName(origin);
+    impl->module_sources[origin] = source;
+    JS_SetModuleLoaderFunc(impl->rt, moduleNormalize, moduleLoad, impl.get());
+
+    Value module_value(ctx, JS_Eval(ctx, source.c_str(), source.size(), origin.c_str(),
+                                    JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY));
+    if (module_value.isException()) {
+        qjs::takeException(ctx, origin, err);
+        appendModuleErrorAt(*impl, err);
+        return nullptr;
+    }
+    if (JS_ResolveModule(ctx, module_value.raw()) < 0) {
+        qjs::takeException(ctx, origin, err);
+        appendModuleErrorAt(*impl, err);
+        module_value.take();  // 见头注：module 值不能 FreeValue
+        return nullptr;
+    }
+    JSModuleDef* module = static_cast<JSModuleDef*>(JS_VALUE_GET_PTR(module_value.raw()));
+    Value eval_ret(ctx, JS_EvalFunction(ctx, module_value.take()));
+    if (eval_ret.isException()) {
+        qjs::takeException(ctx, origin, err);
+        appendModuleErrorAt(*impl, err);
+        return nullptr;
+    }
+    std::string drain_err;
+    if (!drainPendingJobs(*impl, &drain_err)) {
+        if (err != nullptr) *err = drain_err.empty() ? (origin + ": 插件求值失败") : drain_err;
+        return nullptr;
+    }
+    const JSPromiseStateEnum promise_state = JS_PromiseState(ctx, eval_ret.raw());
+    if (promise_state == JS_PROMISE_REJECTED) {
+        Value reason(ctx, JS_PromiseResult(ctx, eval_ret.raw()));
+        formatThrownValue(ctx, origin, reason.raw(), err);
+        return nullptr;
+    }
+    if (promise_state == JS_PROMISE_PENDING) {
+        if (err != nullptr) {
+            *err = origin + ": 插件顶层 await 没有可执行的异步来源（module 求值未完成；回调必须同步）";
+        }
+        return nullptr;
+    }
+
+    // ---- default 导出 ----
+    Value ns(ctx, JS_GetModuleNamespace(ctx, module));
+    if (ns.isException()) {
+        qjs::takeException(ctx, origin, err);
+        return nullptr;
+    }
+    Value def = qjs::getProperty(ctx, ns.raw(), "default");
+    if (def.isException()) {
+        qjs::takeException(ctx, origin, err);
+        return nullptr;
+    }
+    if (!def.isObject()) {
+        if (err != nullptr) {
+            *err = origin +
+                   ": 插件必须 `export default { render?, start?, onTrigger? }`（读到 "
+                   "default 不是对象；⛔ 不读 globalThis / 命名导出）";
+        }
+        return nullptr;
+    }
+
+    // ---- 三个可选成员 + 成对 / 至少一个（合同 §4.6 797–799）----
+    bool has_render = false;
+    bool has_start = false;
+    bool has_trigger = false;
+    const auto readMember = [&](const char* name, Value* out, bool* present) -> bool {
+        Value v = qjs::getProperty(ctx, def.raw(), name);
+        if (v.isException()) {
+            qjs::takeException(ctx, origin, err);
+            return false;
+        }
+        if (v.isUndefined() || v.isNull()) {
+            *present = false;
+            return true;
+        }
+        if (!v.isFunction()) {
+            if (err != nullptr) {
+                *err = origin + ": `export default` 的 `" + name + "` 必须是函数（`export default { " +
+                       name + "(ctx) { … } }`）";
+            }
+            return false;
+        }
+        *present = true;
+        *out = std::move(v);
+        return true;
+    };
+    if (!readMember("render", &impl->plugin_render, &has_render)) return nullptr;
+    if (!readMember("start", &impl->plugin_start, &has_start)) return nullptr;
+    if (!readMember("onTrigger", &impl->plugin_on_trigger, &has_trigger)) return nullptr;
+    if (has_start != has_trigger) {
+        if (err != nullptr) {
+            *err = origin +
+                   ": `start` 与 `onTrigger` 必须**成对**（有 start 就必须有 onTrigger，反之亦然）："
+                   "只有 render 的插件是合法的 UI-only 插件";
+        }
+        return nullptr;
+    }
+    if (!has_render && !has_start) {
+        if (err != nullptr) *err = origin + ": 插件至少要有 render 或 start+onTrigger 之一（三个都缺席）";
+        return nullptr;
+    }
+    impl->plugin_has_render = has_render;
+    impl->plugin_has_run = has_start && has_trigger;
+
+    // ---- initialState（可选；`ctx.state` 在第一次回调前由它浅拷贝）----
+    Value seed = qjs::getProperty(ctx, def.raw(), "initialState");
+    if (seed.isException()) {
+        qjs::takeException(ctx, origin, err);
+        return nullptr;
+    }
+    if (!seed.isUndefined() && !seed.isNull()) {
+        impl->has_state_seed = true;
+        impl->state_seed = std::move(seed);
+    }
+
+    // ---- `ctx.params`（只读：非 writable ⇒ strict 下赋值抛 TypeError）----
+    Value params = qjs::newObject(ctx);
+    if (params.isException()) {
+        qjs::clearException(ctx);
+        if (err != nullptr) *err = origin + ": 分配 ctx.params 失败";
+        return nullptr;
+    }
+    if (opts.params != nullptr) {
+        for (const auto& kv : *opts.params) {
+            if (!defineReadOnly(ctx, params.raw(), kv.first.c_str(), qjs::newString(ctx, kv.second))) {
+                if (err != nullptr) *err = origin + ": 写 ctx.params['" + kv.first + "'] 失败";
+                return nullptr;
+            }
+        }
+    }
+    impl->plugin_params = std::move(params);
+
+    // ---- `ctx.ui.state` 的数据面（宿主本地 JS 状态；C2a 只建写入面）----
+    impl->ui_data = qjs::newObject(ctx);
+    if (impl->ui_data.isException()) {
+        qjs::clearException(ctx);
+        if (err != nullptr) *err = origin + ": 分配 ctx.ui.state 失败";
+        return nullptr;
+    }
+
+    // ---- trigger 的 JS class（带 finalizer ⇒ 对象表有界）----
+    JSClassID class_id = 0;
+    class_id = JS_NewClassID(impl->rt, &class_id);
+    JSClassDef class_def{};
+    class_def.class_name = "LiftPluginTrigger";  // quickjs 要求纯 ASCII
+    class_def.finalizer = &triggerFinalizer;
+    if (class_id == 0 || JS_NewClass(impl->rt, class_id, &class_def) < 0) {
+        if (err != nullptr) *err = origin + ": 注册 trigger 对象类失败";
+        return nullptr;
+    }
+    impl->trigger_class = class_id;
+
+    impl->plugin_default = std::move(def);
+    return std::make_unique<QuickJsPluginScript>(std::move(impl));
+}
 
 }  // namespace lift::ui

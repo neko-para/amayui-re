@@ -388,6 +388,14 @@ void WindowManager::setInputPlan(InputPlan* plan) {
     input_plan_ = plan;
 }
 
+// ---- 读点观察者（C2a；`c2-decisions.md` D-C2-1）：非拥有指针。
+//   ★ 只有**装**算状态入口；读端（`readPointObserver()`）是 inline 裸读 —— 它落在每个读点的
+//     热路径上，那里的成本必须仍然只是"一条 null 检查"。
+void WindowManager::setReadPointObserver(ReadPointObserver* observer) {
+    checkMainThread("window.readpoint");
+    read_point_observer_ = observer;
+}
+
 // ---- 叠层注入路由（S9）：非拥有指针；两个方向都算状态入口（站点名 `window.ui-input`）。
 //   ★ 读也走 checkMainThread：调用点只在 click 的臂上 / 抬起（不是每个读点）⇒ 不在热路径上。
 //   ★ 装/卸的**条件**（`overlay && ui_script`）由装配者（`SdlWindow::Impl`）判，这里只存指针

@@ -65,7 +65,11 @@
 // ★ `std::getenv` 在 MSVC / clang-cl 里被标成 deprecated（本仓其它 TU 用 `_CRT_SECURE_NO_WARNINGS`
 //   关它）。这是**可移植**用法，只在**这个文件**里显式关掉，不去动 target 的编译口径。
 #ifdef _MSC_VER
+// 命令行（CMake 的 `_CRT_SECURE_NO_WARNINGS=1`）可能已经定义过；重复 `#define` 在
+// clang-cl 的 `/W4 /WX` 下是 `-Wmacro-redefined` ⇒ 让出一条路给"已经定义"的构建。
+#ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
+#endif
 #endif
 
 #include <algorithm>

@@ -742,7 +742,8 @@ void caseEnumDisplayModes() {
     cb.movMemEdxEbx();
     cb.movEbxMemEcxDisp8(lift::ddraw::kOffHeight);
     cb.movMemEdxDisp8Ebx(4);
-    cb.movEbxMemEcxDisp8(static_cast<std::uint8_t>(lift::ddraw::kOffPixelFormat + lift::ddraw::kPfBitCount));
+    cb.movEbxMemEcxDisp8(static_cast<std::uint8_t>(static_cast<std::uint32_t>(lift::ddraw::kOffPixelFormat) +
+                                                    static_cast<std::uint32_t>(lift::ddraw::kPfBitCount)));
     cb.movMemEdxDisp8Ebx(8);
     cb.incEax();
     cb.movMemEax(count_ea);

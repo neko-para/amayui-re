@@ -4731,8 +4731,11 @@ const MUTATIONS = [
   //     就会抬起 ⇒ `inject/click-two-phase` 的"位置读点再多也不许抬起"当场红
   //     （`input-plan-read-points` 的 `gates-and-releases` ⑤ 同步红）。
   {
-    file: 'apps/emulator-lift/src/runtime/input_plan.cpp',
-    from: '        const bool key_seen = deliverCalls(InputPoint::KeyLevel) >=\n' +
+    // ★ C1a（2026-11-19）：闸门①的实现从 `input_plan.cpp` 搬进了 `PointerCore::releaseDue`
+    //   （`runtime/pointer_core.cpp`），读数改走 `PointerPoint::key_level_reads` ⇒ 本条 `file`/`from`
+    //   跟着指到新落点（机制点名与 `what` 不变）。
+    file: 'apps/emulator-lift/src/runtime/pointer_core.cpp',
+    from: '        const bool key_seen = pt.key_level_reads >=\n' +
           '                              r.press_key_reads + kKeyLevelReadsBeforeRelease;',
     to: '        const bool key_seen = wm.inputSampleCount() > r.press_samples + 1;  // 变异：闸门退回"总样本数"',
     guard: 'ctest:input-inject-visible',
@@ -4931,6 +4934,167 @@ const MUTATIONS = [
       'releasePayload 的引用计数分支退化成**无条件 destroy** ⇒ 关掉 `DuplicateHandle` 的原件就把共享对象' +
       '销毁了（副本句柄留野指针 / 再 close 一次 double free）⇒ sync-ext 的 duplicate-handle 当场红；' +
       '同一变异也会让 mechanism 的 handle-table-payload-refcount（前两次 release 的 destroy 计数必须 0）红',
+  },
+
+  // ── C0 能力表：`hello` / `caps=` / `controlOpName` 三处同源（`plugin-runtime.md` §4.9 / §5 C0）──
+  //   ★ 为什么是这两条、且各代表一类：
+  //     ① **表少一项** ⇒ `hello` / `caps=` / `controlOpName` 同时少一项。`caps=` 是**唯一没有 CTest
+  //        覆盖**的面（`hello` 有 `tests/control_endpoint.cpp` 的逐字断言，`caps=` 连一条都没有 ——
+  //        这正是它从 9 项漂到 6 项还活了很久的原因）⇒ 只有静态守卫能证明"caps= 真的跟着表走"。
+  //     ② **hello 没枚举全表**（循环从第 1 项开始）⇒ 表 / caps= 都对，只有运行期 `hello` 少一项。
+  //        静态守卫**不会**红（它只断言"hello 从表生成"）⇒ 这条只能由 CTest 抓，正好点明
+  //        "hello 的内容有运行期那条腿兜着、caps= 没有"这个事实上的分工。
+  //   ⛔ 不给每个能力各配一条（`AGENTS.md` §5.3：每类挑一条代表）。
+  {
+    file: 'apps/emulator-lift/src/runtime/capability.h',
+    from: '    {ControlCapability::GlobalSet, "global-set"},\n',
+    to: '    // 变异：能力表少一项（hello / caps= / controlOpName 同时少 `global-set`）\n',
+    guard: 'tools/test/capability-matrix.test.mjs',
+    what:
+      '能力表删掉 `global-set` 一行（`hello` / `caps=` / `controlOpName` 三处同时少一项）⇒ ' +
+      'capability-matrix A 组的"表的名字序列 = 合同 9 项且精确有序"当场红（`caps=` 没有 CTest 覆盖，' +
+      '这是它唯一的守卫）。★ 同一条变异也会撞上 `capability.h` 里那条行数 `static_assert`（编译期）—— ' +
+      '所以这里的价值是**不构建也能点名**：静态守卫不需要一棵构建树就能说清"表不再覆盖合同"',
+  },
+
+  {
+    file: 'apps/emulator-lift/src/runtime/control_ws.cpp',
+    from:
+      '    j["capabilities"] = json::array();\n' +
+      '    for (const plugin::ControlCapabilityRow& row : plugin::kControlCapabilities) {\n' +
+      '        j["capabilities"].push_back(row.name);\n' +
+      '    }\n',
+    to:
+      '    j["capabilities"] = json::array();\n' +
+      '    // 变异：hello 少枚举第一项（表与 caps= 仍然对）\n' +
+      '    for (std::size_t i = 1; i < plugin::kControlCapabilityCount; ++i) {\n' +
+      '        j["capabilities"].push_back(plugin::kControlCapabilities[i].name);\n' +
+      '    }\n',
+    guard: 'ctest:lift-control-endpoint',
+    ctest: 'lift-control-endpoint',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-control-endpoint',
+    what:
+      '`hello.capabilities` 的循环从第 1 项开始（少 `pause`，`caps=` 不受影响）⇒ 运行期"9 项 + 顺序"的' +
+      '逐字断言（`tests/control_endpoint.cpp` 的 endpoint-surface）当场红；★ 静态守卫不会红 —— 那正是' +
+      '"hello 有运行期那条腿、caps= 没有"的分工',
+  },
+
+  // ── 插件运行时 C1b：`TriggerRunner`（`plugin-runtime.md` §4.2 / §6 行 31–33、36–37）──
+  //   ★ 为什么是这两条、且各代表一类（⛔ 不给每个常量配一条，`AGENTS.md` §5.3）：
+  //     ① **一读点处理多个事件**：`atPoint` 的火分支"命中即 return"是"一读点最多一个事件"的
+  //        **唯一**实现点。改成 `continue` ⇒ 同一读点会再扫下去、再调一次 `onTrigger` ——
+  //        而每次回调的返回值是"完整替换集合"，第二次替换会覆盖第一次（合同 §4.2 413–415 点名
+  //        不可定义）。红点 = `named-set` 的"读点 1 恰好一个事件（A 先于 B）"与"读点 3 没有事件"。
+  //        ★ 这条变异**必须**落在 C++ 里：它是语义级联，静态守卫看不见。
+  //     ② **Once 之后再返回同对象被接受**：`exhausted()` 里那条 Once 判据一消失，回调把刚触发的
+  //        Once 对象放回就被当成"重新 arm"（`fires` 仍是 1，但没人看）⇒ 合同 §4.2 417–419 点名
+  //        禁止的"计数被静默重置"。红点 = `rearm` 的第一段（期望 `Failed` + 点名 + "exhausted"）。
+  //        ★ 这也正是 `TriggerState` 必须共享（而不是值字段）的理由：值字段下这条判据**永远看不到**
+  //        回调递增过的计数 —— 那样这条变异与它的守卫会一起"静默变绿"。
+  {
+    file: 'apps/emulator-lift/src/runtime/trigger_runner.cpp',
+    from:
+      '        // ★ **一读点最多一个事件**：命中即 fire 并 return（⛔ 不许继续扫成同点级联）。\n' +
+      '        if (!invokeOnTrigger(ctx, event, now_ms, err)) return Result::Failed;\n' +
+      '        return Result::Fired;\n',
+    to:
+      '        // 变异：一读点处理多个事件（同点级联；第二次替换会覆盖第一次的返回集合）\n' +
+      '        if (!invokeOnTrigger(ctx, event, now_ms, err)) return Result::Failed;\n' +
+      '        continue;\n',
+    guard: 'ctest:trigger-runner',
+    ctest: 'trigger-runner',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-trigger-runner',
+    what:
+      '把 `atPoint` 火分支的"命中即 return"改成 `continue`（一读点处理多个事件）⇒ 同一读点会调两次 ' +
+      '`onTrigger`，而每次返回的是"完整替换集合"⇒ 第二次覆盖第一次 ⇒ trigger-runner 的 ' +
+      '`named-set` 红（"读点 1 恰好一个事件且是 A"、"读点 3 没有事件"当场对不上）',
+  },
+  {
+    file: 'apps/emulator-lift/src/runtime/trigger_runner.cpp',
+    from: '    if (trigger.mode == TriggerMode::Once && trigger.state->fires >= 1) return true;\n',
+    to: '    // 变异：Once 之后再返回同对象被接受（"已耗尽"判据消失 ⇒ 预算被静默重置）\n',
+    guard: 'ctest:trigger-runner',
+    ctest: 'trigger-runner',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-trigger-runner',
+    what:
+      'Once 之后再返回同对象被接受（删掉 `exhausted()` 里的 Once 判据 ⇒ 已 fire 过的对象再放回被当成' +
+      '"重新 arm"、预算被静默重置）⇒ trigger-runner 的 `rearm` 红（第一段期望 `Failed` + ' +
+      '`failName()=="O"` + lastError 含 "exhausted"，变异后返回 `Fired` 且 Run 仍然活着：' +
+      '合同 §4.2 417–419 点名禁止的"计数静默重置"）',
+  },
+
+  // ── 插件运行时 C1c：`EditSink` 的**立即**写（`plugin-runtime.md` §4.4a / §4.5）──
+  //   ★ 代表"Edit 被排在 Input 后面"这一类**静默**偏离：合同 §4.4 明文是 `read → edit → input`
+  //     且 `ctx.edit.global.set` **同步立即**（暂停 / 控制点也可）。改成"写进队列（延迟）"之后：
+  //     回执仍然 `accepted`、没有任何报错，只是**同一个回调里紧接着的读回**拿到旧值 ——
+  //     插件的 `global.get → |mask → global.set → 再看一眼` 会静默地读到过期数据。
+  //   ★ 红点 = `trigger-runner/global-read-modify-write-click` 的"同拍读回 0x1210 / 0x1310"与
+  //     "槽里是 ENC(新值)"。★ 这条**必须**落在 C++ 里：静态词表看不见"延迟一拍"。
+  {
+    file: 'apps/emulator-lift/src/runtime/edit_sink.cpp',
+    from: '    const bool ok = writeGlobal(mem_, id, kind, value, &err);\n',
+    to:
+      '    // 变异：Edit 改成"写进队列"（深度 1 且从不 drain ⇒ 本拍读不到新值；回执照旧 accepted）\n' +
+      '    (void)kind;\n' +
+      '    (void)id;\n' +
+      '    static lift::GlobalValue deferred;\n' +
+      '    deferred = value;\n' +
+      '    (void)deferred;\n' +
+      '    const bool ok = true;\n' +
+      '    err = GlobalError::None;\n',
+    guard: 'ctest:trigger-runner',
+    ctest: 'trigger-runner',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-trigger-runner',
+    what:
+      '`GuestEditSink::globalSet` 改成"写进队列"（延迟；回执仍然 `accepted`）⇒ trigger-runner 的 ' +
+      '`global-read-modify-write-click` 红（"同一个回调里 Edit 之后立刻 globalGet 得 0x1210 / ' +
+      '0x1310"与"槽里的原始 32 位 = ENC(新值)"当场对不上：拿到的是旧值 0x1200 / 0x1210）',
+  },
+
+  // ── 插件运行时 C1a/b/c 的**形状**守卫：`tools/test/core-shape.test.mjs`（`plugin-runtime.md` §6 行 1 / 5）──
+  //   ★ 为什么这条是**纯静态**（无 `buildDir` / `ctest` / `buildTarget`）：被判据本身就是"核心源码文本里
+  //     有没有长出配方 VM 的形状"——它读的是**源码文本**，不是任何 exe 的行为。⇒ 施加一处源码变异、
+  //     跑一次 `node --test`（~1 s）就够；⛔ 不要为了"跟别的条目一样"给它挂一个 CTest（那会白建两遍）。
+  //   ★ 为什么落在 `begin()` 的第一行：`core-shape` 扫的是白名单文件的**全部代码行**，加在哪个函数里都
+  //     一样会被扫到；选 `begin()` 开头是因为它后面那行 `handler_ = &handler;` 是当前源码里**唯一**的
+  //     子串（`from` 必须能唯一定位，否则变异会施加到别处 / 施加不上）。
+  //   ★ 为什么变异是一行**合法 C++**：这条自检证明的是"代码里多出一个 `next_` 就会被点名"，
+  //     ⛔ 不是"文件被写坏就会报错"（那不是守卫，是编译器）。
+  {
+    file: 'apps/emulator-lift/src/runtime/trigger_runner.cpp',
+    from: '    handler_ = &handler;\n',
+    to:
+      '    const std::size_t next_ = 0;  // 变异：核心文件里又长出 plan 的 `next_` 状态\n' +
+      '    (void)next_;\n' +
+      '    handler_ = &handler;\n',
+    guard: 'tools/test/core-shape.test.mjs',
+    what:
+      '核心文件里又长出 plan 的 `next_` 状态（往 `trigger_runner.cpp` 的 `begin()` 开头加一行合法的 ' +
+      '`const std::size_t next_ = 0; (void)next_;`）⇒ core-shape 的禁用词表当场点名 `next_` ⇒ 红',
+  },
+
+  // ── C2a：首点的 `sampleNow`（`c2-decisions.md` D-C2-10）───────────────────────────────────
+  //   ★ 代表"第一个读点只 `begin` 不采样"这一类错：`IntentExecutor::atPoint` 的早退在 **② 之后**
+  //     （没有 armed trigger 时**根本没采样**）⇒ 少了这一行，`start` 里的 `ctx.now` 是空对象，
+  //     而 Input 的 staged 语义**完全不变** ⇒ 只有"start 读 now"的断言能看出来（静默）。
+  //   ★ 反证过：把这一行删掉，`plugin-runtime` 的 `plugin/start-now-and-staged-input` 红
+  //     （JS 侧 `ctx.now.pos` 期望 4660，拿到 `undefined` ⇒ `ctx.fail`）；`plugin/start-now-requires-sample`
+  //     那条反向断言也会失去意义（它靠"期望值不对"来证明 now 真的被读到）。
+  {
+    file: 'apps/emulator-lift/src/plugin/plugin_host.cpp',
+    from: '    executor_.sampleNow(point);\n',
+    to: '    // 变异：首点不再补采样 ⇒ `start` 里 `ctx.now` 没有读数（Input 的 staged 语义不变）\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '第一个读点不再 `sampleNow` ⇒ `start` 里的 `ctx.now` 是空的（`plugin-runtime` 的 ' +
+      '`plugin/start-now-and-staged-input` 红：JS 侧期望 `ctx.now.script/pos` 有值、拿到 undefined）',
   },
 ];
 

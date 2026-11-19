@@ -1,0 +1,191 @@
+// emulator-lift · **插件面**（语言无关）：`PluginScript` = 插件回调的宿主侧形状，
+//                 `PluginCallHost` = 回调能调的宿主操作（`ctx.*` 的唯一来路）。
+//
+// 合同：`docs/03-emulator/plugin-runtime.md` §4.5（`Context` 的操作类）、§4.6（JS 单插件契约）、
+//       §5 C2（判据）。
+// 父级裁决：`.tmp/plugin-runtime/c2-decisions.md` D-C2-5（`render` 在 headless 下的形状）、
+//       D-C2-6（`ctx.read.frameHash` 不安装）、D-C2-7（`ctx.now` 每次回调新建值对象）、
+//       D-C2-9（`finish` 只结束 Run；`quit` 走第二条 stop 源）。
+//
+// ★ 本头是**语言无关**的：`quickjs.h` ⛔ **不许**出现在这里（唯一 TU 是 `ui/script_quickjs.cpp`，
+//   守卫 `tools/test/core-shape.test.mjs` 行 11）。⇒ 本头只认 `Trigger` / `Receipt` /
+//   `GlobalValue` / `InputPoint` 这些**核心值类型**，不认任何 JS 引擎类型。
+//
+// ★ 为什么 `PluginScript` **不继承** `UiScript`：`UiScript` 的 `render(UiBuilder&, UiFrameReadings&)`
+//   是**每帧**的只读读数面，而插件回调是**每读点**的操作类面；两者的失败口径（`err` 形状）一样，
+//   但参数/生命周期完全不同。把两个虚函数表塞进一个类会让 C2a（还没有 `render`）必须**立刻**
+//   实现一个它不认识的签名。⇒ 独立接口；C2b 让 `PluginScript` 再实现 `UiScript`（那时才有
+//   `adopt` 的入口）。
+//
+// ★ **`ctx` 不是全局**：每次回调由 `PluginScript` 新建一个值对象（`ctx.now` 更是每回调一个新值
+//   快照，D-C2-7）。⇒ 本头没有"当前 ctx"这种状态：`PluginCallHost` 的每个方法都**隐含**"现在正在
+//   那次回调里"（宿主在回调外调用它们是实现错误，由宿主自己守）。
+#pragma once
+
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "runtime/budget.h"          // Budget（每次回调的墙钟 + op 上限；只有一个真源）
+#include "runtime/input_device.h"    // MouseButton
+#include "runtime/input_point.h"     // InputPoint
+#include "runtime/script_globals.h"  // GlobalKind / GlobalValue（EngineRead / EditSink 的词汇）
+#include "runtime/trigger.h"         // Trigger / TriggerEvent（armed 集合与事件）
+#include "runtime/intent.h"          // Receipt（Input 的回执；与 Edit 共用同一份形状）
+
+namespace lift {
+class FontEngine;
+}  // namespace lift
+
+namespace lift::ui {
+
+using PluginParams = std::map<std::string, std::string>;
+
+// `ctx.input.status(id)` 的四态（d.ts 的 `"queued" | "applied" | "failed" | "unknown"`）。
+// ★ `IntentQueue::Status::Dropped` 映射成 `"failed"`（`c2-survey.md` §2 的逐项表）。
+enum class PluginInputState : std::uint8_t {
+    Queued = 0,
+    Applied = 1,
+    Failed = 2,
+    Unknown = 3,
+};
+
+inline const char* pluginInputStateName(PluginInputState state) {
+    switch (state) {
+        case PluginInputState::Queued:
+            return "queued";
+        case PluginInputState::Applied:
+            return "applied";
+        case PluginInputState::Failed:
+            return "failed";
+        case PluginInputState::Unknown:
+            return "unknown";
+    }
+    return "unknown";
+}
+
+// =====================================================================================
+// `ctx.*` 的宿主侧（唯一实现 = `src/plugin/plugin_host.cpp` 的 `PluginHost`）
+//
+// ★ 四条操作类语义（⛔ 不要在这里合并成一个"exec"）：
+//   · **Edit**（`editGlobalSet`）：**立即**同步写，不排队；失败走 receipt 的 `code`
+//     （`globalErrorName()` 的单一词表），⛔ 不 `exit 5`；
+//   · **Input**（`inputClick/Move/Down/Up`）：进 `IntentQueue`，**下一读点**才可能落地；
+//   · **EngineRead**（`readGlobal`）：同步只读、不暂停；失败走 `code`（同一份词表）；
+//   · **Trigger**（`makeAfter*`）：每次调用造**新对象**（= 新预算 / 新边沿；合同 §4.2 417–419）。
+//
+// ★ `now()` 是本读点的读数（`Context::now` 的同一个指针）；⛔ 回调外没有"当前读数"。
+// =====================================================================================
+class PluginCallHost {
+public:
+    virtual ~PluginCallHost() = default;
+
+    // ---- 装配检查（都是**实现错误**，不是用户输入）----
+    // false ⇒ 宿主没接这条操作类 ⇒ JS 侧一律 **TypeError**（⛔ 不静默 no-op、⛔ 不编一个假回执）。
+    // 为什么分成四个而不是一个 `wired()`：`ctx.edit/input/read/trigger` 是四条独立装配线
+    // （测试夹具只接其中两条是合法的；`C1` 的 trigger 用例就只接 `now` + `trigger`）。
+    virtual bool editWired() const = 0;
+    virtual bool inputWired() const = 0;
+    virtual bool readWired() const = 0;
+    virtual bool triggerWired() const = 0;
+
+    // ---- Edit（立即）----
+    // 返回 false ⇒ `*code` = `globalErrorName()` 认的那三个之一（⛔ 不是新词表）。
+    virtual bool editGlobalSet(lift::GlobalKind kind, std::uint32_t id, const lift::GlobalValue& value,
+                              const char** code) = 0;
+
+    // ---- Input（串行；下一读点 / 一读点一条）----
+    virtual lift::plugin::Receipt inputClick(int x, int y, lift::MouseButton button) = 0;
+    virtual lift::plugin::Receipt inputMove(int x, int y) = 0;
+    virtual lift::plugin::Receipt inputDown(lift::MouseButton button) = 0;
+    virtual lift::plugin::Receipt inputUp(lift::MouseButton button) = 0;
+    virtual PluginInputState inputStatus(std::uint64_t id) = 0;
+
+    // ---- EngineRead（同步只读 / 无暂停）----
+    virtual bool readGlobal(lift::GlobalKind kind, std::uint32_t id, lift::GlobalValue* out,
+                            const char** code) = 0;
+
+    // ---- Trigger 工厂（每次调用 = 新对象）----
+    virtual lift::plugin::Trigger makeAfterScript(const std::string& name, const std::string& script,
+                                                 lift::plugin::TriggerMode mode, std::uint32_t max_fires,
+                                                 std::uint64_t timeout_ms) = 0;
+    virtual lift::plugin::Trigger makeAfterPosition(const std::string& name, const std::string& script,
+                                                   std::uint32_t lo, std::uint32_t hi,
+                                                   lift::plugin::TriggerMode mode, std::uint32_t max_fires,
+                                                   std::uint64_t timeout_ms) = 0;
+    virtual lift::plugin::Trigger makeAfterDelay(const std::string& name, std::uint64_t delay_ms,
+                                                lift::plugin::TriggerMode mode) = 0;
+    virtual lift::plugin::Trigger makeAtReadPoint(const std::string& name, lift::InputPoint filter,
+                                                 std::uint32_t max_fires, lift::plugin::TriggerMode mode,
+                                                 std::uint64_t timeout_ms) = 0;
+
+    // 本读点的读数（`Context::now`；`nullptr` = 不在读点上 —— 那时 `ctx.now` 的每个字段都缺席）。
+    virtual const lift::plugin::TriggerReadings* now() const = 0;
+
+    // ---- 观测 / 副作用（HostAction 的既有桥）----
+    // 一行一条、有界、去重（`ctx.log`；合同 §4.10）。⛔ 不每读点刷屏（实现方自己限量）。
+    virtual void log(const char* level, const std::string& message) = 0;
+    // `ctx.profile.begin/end`：复用宿主既有的 `ui::UiHostOps`（D-C2-4）；false ⇒ `*err` 是原因。
+    virtual bool profileBegin(const std::string& label, std::string* err) = 0;
+    virtual bool profileEnd(std::string* err) = 0;
+
+    // ---- 归因（三个出口各有各的语义；⛔ 不要合并）----
+    // `fail` = 当前 Run 失败（点名 name / reason；清 armed）；
+    // `finish` = 结束 Run + 记录 exit code（**不改进程 exit**；R3）；
+    // `quit` = 请求宿主停机（`stop_requested` + detail 归因；D-C2-9）。
+    virtual void fail(const std::string& name, const std::string& reason) = 0;
+    virtual void finish(int exit_code, const std::string& reason) = 0;
+    virtual void quit(const std::string& reason) = 0;
+};
+
+// =====================================================================================
+// `PluginScript`：一个**已装载**的插件（ES module 的 default 导出）
+//
+// ★ 只有三个可选成员：`render` / `start` / `onTrigger`（`render` 属 C2b，本切片只回答
+//   `hasRender()` 让 aot_main 打那条一次性 stderr）。
+// ★ `start` / `onTrigger` 必须**同步**返回 `Trigger | Trigger[] | null`；返回 Promise / async
+//   ⇒ 明确错误（合同 §4.6 805）。返回值翻译成 `std::vector<Trigger>`：
+//   空 = done（`null` / `[]` / `undefined`）；重复 `name` 由 `TriggerRunner::install` 判 fail。
+// =====================================================================================
+class PluginScript {
+public:
+    using TriggerSet = std::vector<lift::plugin::Trigger>;
+
+    virtual ~PluginScript() = default;
+
+    virtual bool hasRender() const = 0;
+    // 有 `start` + `onTrigger`（两者必须成对；`render` 可单独存在）。
+    virtual bool hasRun() const = 0;
+
+    // 调 JS `start(ctx)`。false ⇒ `*err` 非空（Run fail，且 `*out` 无意义）。
+    virtual bool start(PluginCallHost& host, const lift::plugin::Budget& budget, TriggerSet* out,
+                       std::string* err) = 0;
+    // 调 JS `onTrigger(ctx, ev)`。`ev.kind()` 是 `"trigger"` / `"timeout"`。
+    virtual bool onTrigger(PluginCallHost& host, const lift::plugin::TriggerEvent& ev,
+                           const lift::plugin::Budget& budget, TriggerSet* out, std::string* err) = 0;
+
+    // 上一次回调是否被预算（deadline / op_limit）打断 —— 是 false 的 `start`/`onTrigger` 的**原因**之一。
+    virtual bool overran() const = 0;
+
+    virtual void shutdown() = 0;
+};
+
+// 装载参数（`origin` = `--plugin <path>` 原样：错误定位与 module 解析根都用它）。
+struct PluginLoadOptions {
+    std::string origin;
+    const PluginParams* params = nullptr;
+    // C2b 的 `ctx.draw.measure` 用；C2a 可以给 nullptr（那时 `draw` 根本不存在）。
+    FontEngine* font = nullptr;
+};
+
+// 装载一个插件（实现 = `ui/script_quickjs.cpp` 的唯一 QJS TU）。
+//   · 失败 ⇒ 返回 nullptr 且 `*err` 非空（形状 `<origin>: <message>\n<stack>`）；
+//   · **只读 ES module 的 default 导出**（⛔ 不读 `globalThis` / 命名导出）；
+//   · `render`/`start`/`onTrigger` 都可选，**至少一个**；有 `start` 就必须有 `onTrigger`（反之亦然）；
+//     类型不是函数 ⇒ 错误（带 `file:line`）。
+std::unique_ptr<PluginScript> makeQuickJsPlugin(const std::string& source, const PluginLoadOptions& opts,
+                                                std::string* err);
+
+}  // namespace lift::ui

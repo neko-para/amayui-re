@@ -223,6 +223,49 @@ int main(int argc, char** argv) {
         //   （否则用户不知道有这条入口，也不知道 headless 下它不生效）。
         LIFT_CHECK(r.out.find("--scale auto|数值") != std::string::npos);
         LIFT_CHECK(r.out.find("headless") != std::string::npos);
+        // ★ C2a：`--plugin` / `--plugin-param` 必须在 help 里（否则用户不知道 AOT 臂有插件面；
+        //   合同 `plugin-runtime.md` §4.6 / 裁决 D-C2-2。⚠ 本用例在 POSIX 上 skip ⇒ 装载面的判据
+        //   另在 `plugin-runtime`（pure），⛔ 不靠这一条当唯一判据）。
+        LIFT_CHECK(r.out.find("--plugin <path>") != std::string::npos);
+        LIFT_CHECK(r.out.find("--plugin-param k=v") != std::string::npos);
+        LIFT_CHECK(r.out.find("export default") != std::string::npos);
+    }
+
+    // ---- ①⁰⁰ C2a `--plugin` 的**启动即拒绝**（parse 期；⛔ 不需要 GPU / 资产）----
+    //   判据（红了意味着什么）：两套输入写预算被允许共存 / 同一字段给两份路径被静默取一个 ⇒
+    //   运行时会出现"一读点两条写"或"我传的插件没跑"这种**没有症状**的错。
+    g_current_case = "plugin-cli-mutex";
+    {
+        struct Case {
+            const char* name;
+            const wchar_t* args;  // ★ `runChild` 收的是"exe 之后那一整串参数"（⛔ 不是 argv 数组）
+            const char* must;
+            const char* also;
+        };
+        const Case cases[] = {
+            {"plugin+input-plan", L"--plugin a.js --input-plan b.plan", "--plugin", "--input-plan"},
+            {"plugin+control-root", L"--plugin a.js --control-root ctl", "--plugin", "--control-root"},
+            {"plugin+ui-different", L"--plugin a.js --ui b.js", "--plugin", "--ui"},
+            {"plugin-param-duplicate", L"--plugin a.js --plugin-param k=1 --plugin-param k=2",
+             "--plugin-param", "k"},
+            {"plugin-param-shape", L"--plugin a.js --plugin-param novalue", "--plugin-param", "k=v"},
+            // ★ F6（C2a 复审）：重复 `--plugin` 给两份不同路径 — 与 `--plugin`/`--ui` 的
+            //   "不静默只取一个"对称（旧实现无条件覆盖 ⇒ 静默用后一个）。
+            {"plugin-duplicate", L"--plugin a.js --plugin b.js", "--plugin", "a.js"},
+            // ★ F6 的另一半：`--plugin-param` 没有 `--plugin` ⇒ 它**没有消费者**，⛔ 不许静默忽略。
+            {"plugin-param-without-plugin", L"--plugin-param k=v", "--plugin-param", "--plugin"},
+        };
+        for (const Case& c : cases) {
+            const ChildRun bad = runChild(exe, c.args, root,
+                                          root / (std::string(c.name) + ".out"),
+                                          root / (std::string(c.name) + ".err"));
+            LIFT_CHECK(bad.started);
+            LIFT_CHECK(!bad.timed_out);
+            LIFT_CHECK_EQ_U32(bad.exit_code, 2u);
+            LIFT_CHECK(bad.err.find("未知参数") == std::string::npos);
+            LIFT_CHECK(bad.err.find(c.must) != std::string::npos);
+            LIFT_CHECK(bad.err.find(c.also) != std::string::npos);
+        }
     }
 
     // ---- ①⁰ S9 `--ui-input=consume|pass`：值域 + **窗口参数**语义 ----
