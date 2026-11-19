@@ -34,10 +34,18 @@ export interface InputReceipt extends Receipt {
 export type InputState = "queued" | "applied" | "failed" | "unknown";
 export type MouseButton = "left" | "right" | "middle";
 
-/** 坐标统一为 1280×720 参考系；宿主按窗口缩放。 */
+/**
+ * 坐标统一为 1280×720 参考系；宿主按窗口缩放。
+ *
+ * ★ `"fileRead"` 是 `kernel32!ReadFile` 的**事件源**（`InputPoint::FileRead`）：它不算"输入族"，
+ *   但它是宿主读点集合里的一个真实成员 ⇒ `ctx.now.point` / `ev.point` **会**出现这个值
+ *   （C2a 复审第二轮 F5-R1：并集缺它会让 `switch (ev.point)` 在 strict 下穷尽性检查误报）。
+ * ★ `"any"` = `InputPoint::Count`（只给 `atReadPoint` 用；`ctx.now.point` 不会是 "any"）。
+ */
 export type InputPoint =
     | "any" | "keyLevel" | "cursorPos" | "peekMsg" | "getMsg" | "msgWait"
-    | "waitMessage" | "queueStatus" | "translate" | "dispatch" | "setCursorPos";
+    | "waitMessage" | "queueStatus" | "translate" | "dispatch" | "setCursorPos"
+    | "fileRead";
 export interface ScriptPos {
     readonly script: string;
     readonly pos: number;
