@@ -1731,13 +1731,18 @@ bool readTriggerOptions(JSContext* ctx, JSValueConst opts, const char* fn, std::
 // =======================================================================================
 // trigger 对象表：JS 对象 ⇄ `Trigger`（state 共享）
 // =======================================================================================
+// ★ finalizer 的**唯一**纪律：先取需要的东西、再 `delete ref`（F1 / C2a 复审）。
+//   `delete ref` 之后读 `ref->id` 是 heap-use-after-free：正常构建无症状（`id` 在 offset 8，
+//   刚释放的块通常还读得到），换了 allocator / sanitizer 就是 UB；更糟的是它**以为**自己在
+//   "按 id 找条目"，实际可能减错对象的 `refs`（对象表丢条目）或永远找不到（条目永不释放）。
 void triggerFinalizer(JSRuntime* /*rt*/, JSValueConst value) {
     auto* ref = static_cast<TriggerRef*>(JS_GetOpaque(value, JS_GetClassID(value)));
     if (ref == nullptr) return;
     Impl* impl = ref->impl;
+    const std::uint32_t id = ref->id;  // ★ 必须在 `delete ref` **之前**取出来（见头注）
     delete ref;
     if (impl == nullptr) return;
-    const auto it = impl->triggers.find(ref->id);
+    const auto it = impl->triggers.find(id);
     if (it == impl->triggers.end()) return;
     if (--it->second.refs <= 0) impl->triggers.erase(it);
 }
