@@ -400,6 +400,21 @@ if(NOT APPLE AND NOT WIN32 AND NOT LIFT_AOT_LTO)
     message(STATUS
         "emulator-lift-aot: LTO defaults to OFF on Linux (unverified); enable it with -DLIFT_AOT_LTO=ON (unverified)")
 endif()
+# =====================================================================================
+# ★ `LIFT_AOT_NOTE_WRITE`（本单）：AOT 的 guest store 前是否发 `lift_note_write`（SMC 失效记账）。
+#
+#   为什么默认 **OFF**：AOT 臂的 `cpu.cache = nullptr`（`aot_host.cpp:88`）⇒ `lift_note_write →
+#   noteGuestWrite(nullptr, …)` 是 **no-op**；只有 `LIFT_WATCH`（opt-in 诊断）还会去读它。
+#   而它每个 guest store 之前**都要** `syncBeforeHostCall()`（= `flushTick() + flushRegs()`）——
+#   默认关时那是一笔**纯税**（实测读数见 `src/aot/lift_gen_emit.h` 的 `GenIrTarget::note_write` 头注）。
+#   ⇒ Release / RelWithDebInfo 默认**完全不发射**（call / `declare` / `used_note_write` 都不出现）；
+#     要在 debug / 诊断构建里观测 SMC（配合 `LIFT_WATCH`）才 `-DLIFT_AOT_NOTE_WRITE=ON`。
+#   ★ ON ⇒ 生成物与开这项之前**逐字节一致**（既有行为原样保留）。
+#   ⛔ 只 gate **发射**：运行时的 `lift_note_write` / `noteGuestWrite` 仍被 `X86::writeMem`、
+#     `exec_string` 与若干测试直接调用 ⇒ 一行都不删。
+# =====================================================================================
+option(LIFT_AOT_NOTE_WRITE
+       "Emit lift_note_write for AOT guest stores (debug/diagnostic only; OFF in release)" OFF)
 
 # ★ IR 的编译参数**唯一落点**（configure 期断言盯的就是这一行；OFF 档一字不动）。
 set(LIFT_AOT_CLANG_FLAGS -c -O2)
@@ -544,6 +559,9 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
             --ir-target-features "${LIFT_AOT_IR_TARGET_FEATURES}"
             --pin "${LIFT_AOT_DIR}/lift_pin.h"
             --table "${LIFT_AOT_DIR}/lift_table.inc")
+        if(LIFT_AOT_NOTE_WRITE)
+            list(APPEND LIFT_AOT_GEN_STEP2 --note-write)
+        endif()
     else()
         set(LIFT_AOT_GEN_OUTS "${LIFT_AOT_DIR}/lift_aot.ll")
         set(LIFT_AOT_OBJS "${LIFT_AOT_DIR}/lift_aot.obj")
@@ -556,6 +574,9 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
             --ir-target-features "${LIFT_AOT_IR_TARGET_FEATURES}"
             --pin "${LIFT_AOT_DIR}/lift_pin.h"
             --table "${LIFT_AOT_DIR}/lift_table.inc")
+        if(LIFT_AOT_NOTE_WRITE)
+            list(APPEND LIFT_AOT_GEN_STEP2 --note-write)
+        endif()
     endif()
     add_custom_command(
         OUTPUT ${LIFT_AOT_GEN_OUTS} "${LIFT_AOT_DIR}/lift_pin.h"

@@ -249,6 +249,11 @@ struct Options {
     //   `define i32 @lift_cc_*` 都挂着与运行库一致的 target 属性组"（CTest `lift-aot-ir-target-attrs`
     //   的被测入口）。⛔ 不需要 `--exe/--roots/--out`；没有生成物时 skip（exit 0），与 `--verify-split` 同口径。
     std::string verify_ir_target;
+    // ★ `--note-write`（CMake `LIFT_AOT_NOTE_WRITE`，**缺省 false**）：发射 `lift_note_write`（SMC 记账）。
+    //   AOT 臂的 `cpu.cache == nullptr` ⇒ 它是 no-op；缺省关 = Release / RelWithDebInfo 里完全不发
+    //   （call / `declare` / `used_note_write` 都不出现，也不为它做 `syncBeforeHostCall()`）。
+    //   只在 debug / 诊断（`LIFT_WATCH` 观测 SMC）构建里开。完整理由见 `GenIrTarget::note_write` 的头注。
+    bool note_write = false;
     // ★ 入库件硬闸（`--closure-gate`）：**生成这一趟同时**做 `--check` 的五条校验并打同一行汇总。
     //   CMake 的 AOT 生成命令带它 ⇒ 坏闭包在**构建期**硬红，且只分析一次（省 48.6 s）。
     //   ⛔ 缺省关：测试夹具的 roots 文件不是 `0x`+8 位严格文法（`tests/ir/*_roots.txt`），
@@ -278,6 +283,8 @@ void usage() {
         "                        no artifacts => skip, exit 0)\n"
         "  --pin <file.h>        also write the exe sha256 + entry (AOT startup check, D1; NOT tracked in git)\n"
         "  --table <file.inc>    also write the dispatch table `EA -> lift_cc_<root>` (the AOT EA->LiftFn lookup; NOT tracked in git)\n"
+        "  --note-write          emit `lift_note_write` (SMC accounting) before every guest store (CMake\n"
+        "                        LIFT_AOT_NOTE_WRITE; default OFF = nothing emitted in release builds; ON = debug/diagnostic)\n"
         "  --no-close-calls      disable the static call closure (D14 defaults on; control mode = expand --roots only)\n"
         "  --no-close-stores     disable soft roots of kind 2 (D15: imm32 code pointers stored into memory; defaults on)\n"
         "  --close-data          enable soft roots of kind 3 (D17: statically initialised code pointers in non-executable sections = `.data` pointer tables)\n"
@@ -3463,6 +3470,8 @@ int main(int argc, char** argv) {
             if (!needValue("--pin", &opt.pin)) return 2;
         } else if (a == "--table") {
             if (!needValue("--table", &opt.table)) return 2;
+        } else if (a == "--note-write") {
+            opt.note_write = true;
         } else if (a == "--no-close-calls") {
             opt.close_calls = false;
         } else if (a == "--no-s7") {
@@ -3517,6 +3526,9 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+    // ★ `--note-write` 直接落到发射器的 target 旋钮上（`GenIrTarget` 已经一路传到 `FnEmit` ——
+    //   ⛔ 不再加一条并行参数链，避免"解析了但没传到"这种静默失效）。
+    opt.ir_target.note_write = opt.note_write;
     // ★ `--verify-split` 是**独立模式**：只读 `out/aot/` 的产物，⛔ 不需要 `--exe/--roots/--out`。
     if (!opt.verify_split.empty()) {
         return verifyAotSplit(opt.verify_split, opt.split);

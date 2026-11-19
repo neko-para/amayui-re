@@ -6,7 +6,8 @@
 //   · flags 照 `exec.cpp` 的 `setLogicFlags` / `setAddFlags` / `setSubFlags` 与 `exec_integer.cpp`
 //     的逐条实现（CF/PF/AF/ZF/SF/OF 的公式**逐位**一致；其它位原样保留）；
 //   · `push/pop` 照 `X86::push32/pop32`（**不**走 `writeMem` ⇒ **不**调 `lift_note_write`）；
-//   · 唯一的数据写通道照 `X86::writeMem`：先 `lift_note_write(cpu, ea, n)` 再写。
+//   · 唯一的数据写通道照 `X86::writeMem`：`LIFT_AOT_NOTE_WRITE=ON` 时先 `lift_note_write(cpu, ea, n)`
+//     再写；**缺省（Release/RelWithDebInfo）不发** —— 见 `GenIrTarget::note_write` 的头注。
 //   ⛔ 一处都不"顺手优化"成另一套语义：与解释器逐位一致是 AOT 唯一的正确性判据。
 //
 // ★ 寄存器状态**留在 `%st`（LiftRegs）里**：`%st` 仍然是**唯一真源**，但**块内**用一份寄存器缓存
@@ -1343,15 +1344,20 @@ std::string FnEmit::loadMemAt(const std::string& ea, unsigned size) {
 std::string FnEmit::loadMemValue(const MemOperand& m) { return loadMemAt(eaOf(m), m.size); }
 
 // 照 `X86::writeMem`：先 `lift_note_write`（SMC 失效）再写。`push/pop` 不走这里。
+// ★ `ir_target_.note_write`（CMake `LIFT_AOT_NOTE_WRITE`，缺省 OFF）：
+//   OFF ⇒ 只发 store（纯 guest store **不是**宿主调用 ⇒ ⛔ 不发 `syncBeforeHostCall()`，也就
+//   不需要为它 `flushTick/flushRegs`）；ON ⇒ 与今天逐字节一致（SMC 记账 + 调用前的同步）。
 void FnEmit::storeMemAt(const std::string& ea, unsigned size, const std::string& v) {
-    // ★ 宿主调用之前先把挂账的条数发出去 + 把块内寄存器缓存写回 `%st`（E2 / S2）：
-    //   `lift_note_write` 也是宿主调用（口径：**任何**宿主调用之前 `%st` 都是同步的）。
-    //   本条自己**还没**执行完 ⇒ 不在这批 tick 里（pending 只含之前的指令）。
-    //   ★ 顺序：先 tick 再 flush —— 两者都在调用之前，互不依赖；`flushRegs()` **不**清缓存，
-    //     所以 `ea` 在调用方算得再早也不受影响（flush 只写回 `%st`，不改 SSA 值）。
-    syncBeforeHostCall();
-    add("call void @lift_note_write(ptr %cpu, i32 " + ea + ", i32 " + std::to_string(size) + ")");
-    stats_->used_note_write = true;
+    if (ir_target_.note_write) {
+        // ★ 宿主调用之前先把挂账的条数发出去 + 把块内寄存器缓存写回 `%st`（E2 / S2）：
+        //   `lift_note_write` 也是宿主调用（口径：**任何**宿主调用之前 `%st` 都是同步的）。
+        //   本条自己**还没**执行完 ⇒ 不在这批 tick 里（pending 只含之前的指令）。
+        //   ★ 顺序：先 tick 再 flush —— 两者都在调用之前，互不依赖；`flushRegs()` **不**清缓存，
+        //     所以 `ea` 在调用方算得再早也不受影响（flush 只写回 `%st`，不改 SSA 值）。
+        syncBeforeHostCall();
+        add("call void @lift_note_write(ptr %cpu, i32 " + ea + ", i32 " + std::to_string(size) + ")");
+        stats_->used_note_write = true;
+    }
     const std::string e64 = tmp();
     add(e64 + " = zext i32 " + ea + " to i64");
     const std::string p = tmp();
@@ -2910,6 +2916,7 @@ void FnEmit::emitDivIdiv(const Insn& in) {
 //   ★ SMC 记账：`movs`/`stos` 在**循环之前**发一次 `lift_note_write(lo, n)`（与解释器自己的
 //     `rep_bulk` 快路径同一口径 —— 它也是一次 `noteGuestWrite(lo, n)`，而
 //     `BlockCache::noteWrite` 内部按页循环 ⇒ 页集合与逐元素调用相同；`exec_string.cpp:81-138`）。
+//     ★ 这一处与 `storeMemAt` 走**同一道门**：`LIFT_AOT_NOTE_WRITE` 缺省 OFF ⇒ 一条都不发。
 //   ★ 非 rep 的单元素形态走 `writeElem` 的**逐元素**钩子（`exec_string.cpp:41-49`）。
 void FnEmit::emitString(const Insn& in) {
     ++stats_->string_sites;
@@ -2928,6 +2935,8 @@ void FnEmit::emitString(const Insn& in) {
         return v;
     };
     auto noteWriteAt = [&](const std::string& ea, const std::string& nbytes) {
+        // ★ 与 `storeMemAt` 同一道门（`LIFT_AOT_NOTE_WRITE`，缺省 OFF ⇒ 这里什么都不发）。
+        if (!ir_target_.note_write) return;
         syncBeforeHostCall();
         add("call void @lift_note_write(ptr %cpu, i32 " + ea + ", i32 " + nbytes + ")");
         stats_->used_note_write = true;

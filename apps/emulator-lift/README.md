@@ -258,6 +258,11 @@ apps/emulator-lift/
   默认档缺输入**不** FATAL：那条用例自己红，或返回 **77**（`SKIP_RETURN_CODE`）—— ⛔ 不是"什么都不做
   然后 return 0"，也 ⛔ 不是"这条用例不存在"。
 - ★ `LIFT_SAFE_MEMORY=1`：每次 guest 访存都查提交位图（慢）。判据 A1 要求**再跑一遍这一档**。
+- ★ `LIFT_AOT_NOTE_WRITE`（`-DLIFT_AOT_NOTE_WRITE=ON`，**默认 OFF**）：AOT 的 guest store 前是否发
+  `lift_note_write`（SMC 记账）。AOT 臂 `cpu.cache == nullptr` ⇒ 它是 no-op（只有 `LIFT_WATCH` 诊断会读），
+  而每个 store 前要付一次 `syncBeforeHostCall()` ⇒ **Release / RelWithDebInfo 默认完全不发射**；
+  要观测 SMC / 开 `LIFT_WATCH` 的 debug 诊断构建才 `ON`（ON 时生成物与关这项之前逐字节一致）。
+  运行时的 `lift_note_write` / `noteGuestWrite` **不受影响**（`X86::writeMem` / `exec_string` 仍在用）。
 - 生成物（`out/`、`vcpkg_installed/`）由本目录 `.gitignore` 排除。
 
 ## 4.0 压力/效率档（`LIFT_STRESS`）/ `LIFT_STOP_AFTER_MOVIE`

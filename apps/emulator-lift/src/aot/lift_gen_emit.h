@@ -257,6 +257,19 @@ struct GenEmitStats {
 struct GenIrTarget {
     std::string cpu;
     std::string features;
+    // =================================================================================
+    // ★ `--note-write`（CMake `LIFT_AOT_NOTE_WRITE`，**缺省 false**）：是否发射
+    //   `lift_note_write`（SMC 失效记账）。⛔ 缺省**不发** —— Release / RelWithDebInfo 里它是纯税：
+    //   AOT 臂的 `cpu.cache == nullptr`（`aot_host.cpp:88`）⇒ `lift_note_write` 是 no-op，
+    //   而每个 guest store 之前都要为它做一次 `syncBeforeHostCall()`（= `flushTick() + flushRegs()`），
+    //   默认关时那是一笔**纯税**。实测（2026-11-20 / win32 / shape=split8-O2-lto-abi，同一份闭包）：
+    //   note 站点 39,644；关掉后 `.ll` 里 `store i32 … align 4`（`%st` 回写）202,937 → 187,604（−7.6%）、
+    //   `call void @lift_tick` 107,827 → 74,375、AOT 可执行体 `__text` 15,126,710 → 12,760,422（−15.6%）。
+    //   只在 debug / 诊断（`LIFT_WATCH` 观测 SMC）构建里打开。
+    //   ★ false ⇒ **不发** `lift_note_write` call / `declare`、不置 `stats_->used_note_write`，
+    //     也**不发** `syncBeforeHostCall()`（纯 guest store 不是宿主调用）。
+    //   ★ true ⇒ 与今天逐字节一致（debug 诊断保留）。
+    bool note_write = false;
     // 两个都非空才发属性（见上：任一为空 ⇒ 今天的字节）。
     bool empty() const { return cpu.empty() || features.empty(); }
 };
