@@ -25,23 +25,11 @@ void postToPrimary(WindowManager& wm, std::uint32_t message, std::uint32_t wpara
 
 }  // namespace
 
-std::uint32_t vkForMouseButton(MouseButton b) {
-    switch (b) {
-        case MouseButton::Left: return 0x01u;    // VK_LBUTTON
-        case MouseButton::Right: return 0x02u;   // VK_RBUTTON
-        case MouseButton::Middle: return 0x04u;  // VK_MBUTTON
-    }
-    return 0;
-}
+// ★ S1：唯一定义已下沉到 `runtime/input_device.cpp`（状态层不再 include 施加层）；
+//   这里保留同名函数**转发**，所有调用点不变。
+std::uint32_t vkForMouseButton(MouseButton b) { return ::lift::vkForMouseButton(b); }
 
-std::uint32_t flagForMouseButton(MouseButton b) {
-    switch (b) {
-        case MouseButton::Left: return kMkLButton;
-        case MouseButton::Right: return kMkRButton;
-        case MouseButton::Middle: return kMkMButton;
-    }
-    return 0;
-}
+std::uint32_t flagForMouseButton(MouseButton b) { return ::lift::flagForMouseButton(b); }
 
 std::uint32_t messageForMouseButton(MouseButton b, bool down) {
     switch (b) {
@@ -55,7 +43,11 @@ std::uint32_t messageForMouseButton(MouseButton b, bool down) {
 bool mouseMove(WindowManager& wm, int client_x, int client_y, InputSource src, std::uint32_t time_ms) {
     // 先更新光标（含所有权判定）；被拒绝 ⇒ 连消息也不发（保持 GetCursorPos 与 lParam 一致）。
     if (!wm.setCursorClientPos(wm.primaryWindow(), client_x, client_y, src)) return false;
-    postToPrimary(wm, kWmMouseMove, wm.mouseButtons(), mouseLParam(client_x, client_y), time_ms);
+    // ★ S2：消息 = 设备的投影（**写后回读**）。今天写成功 ⇒ 回读值与入参逐位相同（加固片）。
+    int lx = client_x;
+    int ly = client_y;
+    wm.cursorClientPos(wm.primaryWindow(), &lx, &ly);
+    postToPrimary(wm, kWmMouseMove, wm.mouseButtons(), mouseLParam(lx, ly), time_ms);
     return true;
 }
 
@@ -69,7 +61,7 @@ bool mouseButton(WindowManager& wm, int client_x, int client_y, MouseButton b, b
     //   · 光标归脚本时 OS 不碰位置；否则 up 也要跟随事件坐标（与改动前 SDL 路径一致）。
     if (src == InputSource::Os) {
         if (wm.mouseButtonOwnedByScript(b)) return false;
-        if (wm.keyOwnedByScript(vkForMouseButton(b))) return false;
+        if (wm.keyOwnedByScript(::lift::input::vkForMouseButton(b))) return false;
         if (down && wm.cursorOwnedByScript()) return false;
         if (wm.cursorOwnedByScript()) {
             wm.cursorClientPos(wm.primaryWindow(), &client_x, &client_y);
@@ -77,15 +69,22 @@ bool mouseButton(WindowManager& wm, int client_x, int client_y, MouseButton b, b
             wm.setCursorClientPos(wm.primaryWindow(), client_x, client_y, InputSource::Os);
         }
         if (!wm.setMouseButton(b, down, InputSource::Os)) return false;
-        postToPrimary(wm, messageForMouseButton(b, down), wm.mouseButtons(), mouseLParam(client_x, client_y),
-                      time_ms);
+        // ★ S2：lParam 用**设备写入之后**的客户区坐标，不是调用方入参（今天两者逐位相同）。
+        int lx = client_x;
+        int ly = client_y;
+        wm.cursorClientPos(wm.primaryWindow(), &lx, &ly);
+        postToPrimary(wm, messageForMouseButton(b, down), wm.mouseButtons(), mouseLParam(lx, ly), time_ms);
         return true;
     }
     // 与真机同序：先把光标放到按键位置，再改按钮电平，最后发消息。
-    wm.setCursorClientPos(wm.primaryWindow(), client_x, client_y, InputSource::Script);
-    wm.setMouseButton(b, down, InputSource::Script);
-    postToPrimary(wm, messageForMouseButton(b, down), wm.mouseButtons(), mouseLParam(client_x, client_y),
-                  time_ms);
+    // ★ S2：Script 分支检查两个写的返回值 —— 只有 accepted 才 post（今天 Script 分支恒成功 ⇒
+    //   可达路径行为不变；这条修的是"光标动了、电平没动、消息照发"的结构缝）。
+    if (!wm.setCursorClientPos(wm.primaryWindow(), client_x, client_y, InputSource::Script)) return false;
+    if (!wm.setMouseButton(b, down, InputSource::Script)) return false;
+    int lx = client_x;
+    int ly = client_y;
+    wm.cursorClientPos(wm.primaryWindow(), &lx, &ly);
+    postToPrimary(wm, messageForMouseButton(b, down), wm.mouseButtons(), mouseLParam(lx, ly), time_ms);
     return true;
 }
 

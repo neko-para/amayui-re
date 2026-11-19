@@ -5,7 +5,6 @@
 
 #include "runtime/clock.h"
 #include "runtime/guest_token.h"
-#include "runtime/input.h"  // 按钮 ↔ VK / MK_* 位（**唯一一份**映射）
 #include "runtime/x86.h"
 
 namespace lift {
@@ -225,86 +224,49 @@ std::uint32_t WindowManager::primaryWindow() const {
 
 void WindowManager::setKeyDown(std::uint32_t vk, bool down) { setKeyDown(InputSource::Os, vk, down); }
 
+// ★ 输入状态（S1）：6 组字段与三套 owner 的规则已搬到 `runtime/input_device.cpp`；
+//   这里只保留**同名转发** + 原来的 `checkMainThread` 站点名（⛔ 站点名一个都不许改）。
 bool WindowManager::setKeyDown(InputSource src, std::uint32_t vk, bool down) {
     checkMainThread("window.key");
-    if (vk >= 256u) return false;
-    // ★ 所有权规则（文件上方 `InputSource`）：脚本拥有的键，OS 的按下 / 抬起都不生效。
-    if (src == InputSource::Os && key_owner_[vk] == static_cast<std::uint8_t>(InputSource::Script)) {
-        return false;
-    }
-    // 脚本抬起 ⇒ 该键交还 OS（`down == false` 时所有者清空）。
-    key_owner_[vk] = down ? static_cast<std::uint8_t>(src) : static_cast<std::uint8_t>(InputSource::Os);
-    key_down_[vk] = down ? 1u : 0u;
-    return true;
+    return device_.setKey(src, vk, down);
 }
 
 bool WindowManager::keyDown(std::uint32_t vk) const {
     checkMainThread("window.key");
-    return vk < 256u && key_down_[vk] != 0;
+    return device_.keyDown(vk);
 }
 
 bool WindowManager::keyOwnedByScript(std::uint32_t vk) const {
     checkMainThread("window.key");
-    return vk < 256u && key_owner_[vk] == static_cast<std::uint8_t>(InputSource::Script);
+    return device_.keyOwnedByScript(vk);
 }
 
 bool WindowManager::mouseButtonOwnedByScript(MouseButton b) const {
     checkMainThread("window.mouse");
-    const auto idx = static_cast<std::size_t>(b);
-    return idx < kMouseButtonCount && button_owner_[idx] == static_cast<std::uint8_t>(InputSource::Script);
+    return device_.mouseButtonOwnedByScript(b);
 }
 
 bool WindowManager::setMouseButton(MouseButton b, bool down, InputSource src) {
     checkMainThread("window.mouse");
-    const auto idx = static_cast<std::size_t>(b);
-    if (idx >= kMouseButtonCount) return false;
-    const std::uint32_t vk = input::vkForMouseButton(b);
-    if (!setKeyDown(src, vk, down)) return false;
-    button_owner_[idx] = down ? static_cast<std::uint8_t>(src) : static_cast<std::uint8_t>(InputSource::Os);
-    if (down) {
-        mouse_buttons_ |= input::flagForMouseButton(b);
-    } else {
-        mouse_buttons_ &= ~input::flagForMouseButton(b);
-    }
-    return true;
+    if (static_cast<std::size_t>(b) >= kMouseButtonCount) return false;
+    // ★ 搬家前这里经 `setKeyDown` 再记一次 `window.key`（站点名与计数逐字保留；S1 纯搬家）。
+    checkMainThread("window.key");
+    return device_.setMouseButton(b, down, src);
 }
 
 void WindowManager::clearKeys() {
     checkMainThread("window.key");
-    for (std::size_t i = 0; i < 256u; ++i) {
-        key_down_[i] = 0;
-        key_owner_[i] = 0;
-    }
-    for (std::uint8_t& o : button_owner_) o = 0;
-    mouse_buttons_ = 0;
+    device_.clearKeys();
 }
 
 void WindowManager::clearOsInput() {
     checkMainThread("window.key");
-    for (std::size_t i = 0; i < 256u; ++i) {
-        if (key_owner_[i] == static_cast<std::uint8_t>(InputSource::Script)) continue;
-        key_down_[i] = 0;
-    }
-    for (std::size_t i = 0; i < kMouseButtonCount; ++i) {
-        if (button_owner_[i] == static_cast<std::uint8_t>(InputSource::Script)) continue;
-        mouse_buttons_ &= ~input::flagForMouseButton(static_cast<MouseButton>(i));
-        button_owner_[i] = 0;
-    }
+    device_.clearOsInput();
 }
 
 void WindowManager::releaseScriptOwnership() {
     checkMainThread("window.key");
-    for (std::size_t i = 0; i < 256u; ++i) {
-        if (key_owner_[i] != static_cast<std::uint8_t>(InputSource::Script)) continue;
-        key_down_[i] = 0;
-        key_owner_[i] = 0;
-    }
-    for (std::size_t i = 0; i < kMouseButtonCount; ++i) {
-        if (button_owner_[i] != static_cast<std::uint8_t>(InputSource::Script)) continue;
-        mouse_buttons_ &= ~input::flagForMouseButton(static_cast<MouseButton>(i));
-        button_owner_[i] = 0;
-    }
-    cursor_script_owned_ = false;
+    device_.releaseScriptOwnership();
 }
 
 void WindowManager::postQuit(std::uint32_t code) {
@@ -373,27 +335,27 @@ std::uint32_t WindowManager::setCursor(std::uint32_t hcursor) {
 
 void WindowManager::setCursorPos(int x, int y) {
     checkMainThread("window.cursor");
-    cursor_x_ = x;
-    cursor_y_ = y;
+    // guest 自己的 SetCursorPos：只写设备位置，不改所有权（S1 纯搬家）。
+    device_.setCursorScreen(x, y);
 }
 
 bool WindowManager::setCursorClientPos(std::uint32_t hwnd, int x, int y, InputSource src) {
     checkMainThread("window.cursor");
-    // ★ 脚本拥有光标期间，OS 的鼠标移动不生效（见 InputSource）：这样 `GetCursorPos` 与
-    //   `WM_MOUSEMOVE` 的 lParam 永远说同一个位置。
-    if (src == InputSource::Os && cursor_script_owned_) return false;
-    if (src == InputSource::Script) cursor_script_owned_ = true;
+    // ★ 搬家前：先判所有权（被拒时**不查窗口表**），再查窗口原点、写位置 ⇒ 这里保持同样的顺序。
+    if (src == InputSource::Os && device_.cursorOwnedByScript()) return false;
+    // ★ 窗口原点投影留在 `WindowManager`（窗口表在它这里；见设计 §3.6）。
     const HostWindow* w = find(hwnd);
-    cursor_x_ = x + (w ? w->x : 0);
-    cursor_y_ = y + (w ? w->y : 0);
-    return true;
+    return device_.moveToScreen(x + (w ? w->x : 0), y + (w ? w->y : 0), src);
 }
 
 void WindowManager::cursorClientPos(std::uint32_t hwnd, int* x, int* y) const {
     checkMainThread("window.cursor");
     const HostWindow* w = find(hwnd);
-    if (x) *x = cursor_x_ - (w ? w->x : 0);
-    if (y) *y = cursor_y_ - (w ? w->y : 0);
+    int screen_x = 0;
+    int screen_y = 0;
+    device_.cursorScreen(&screen_x, &screen_y);
+    if (x) *x = screen_x - (w ? w->x : 0);
+    if (y) *y = screen_y - (w ? w->y : 0);
 }
 
 int WindowManager::showCursor(bool show) {
@@ -401,13 +363,6 @@ int WindowManager::showCursor(bool show) {
     // 真机实现：显示计数 +1 / -1；计数 < 0 ⇒ 光标不可见。返回值是**新计数**。
     cursor_show_count_ += show ? 1 : -1;
     return cursor_show_count_;
-}
-
-std::uint32_t WindowManager::setCapture(std::uint32_t hwnd) {
-    checkMainThread("window.capture");
-    const std::uint32_t old = capture_;
-    capture_ = hwnd;
-    return old;
 }
 
 // ---- 输入采样计数（guest 侧电平读点的单调计数；见 host_window.h 那一段的"为什么"）----

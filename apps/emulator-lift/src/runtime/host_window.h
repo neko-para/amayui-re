@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "runtime/input_device.h"
 #include "runtime/region.h"
 
 namespace lift {
@@ -68,25 +69,14 @@ struct HostTimer {
 };
 
 // =====================================================================================
-// 输入来源（★ **唯一输入状态源**：guest 侧所有输入 API 都读 `WindowManager` 的那一份）
-// ★ 2026-11-08：这里有两个来源 —— `Os`（SDL 真实事件）与 `Script`（机器内注入；原 `--input-script`
-//   的 CLI 入口 2026-11-16 已退役，注入侧只剩配方 actuator 与 pure CTest 夹具）。
-//   两者**走同一段应用代码**（`runtime/input.h`），所以不存在"注入只发消息、GetAsyncKeyState 仍读
-//   OS"的第二份状态。
-// ★ **优先级（显式规则，互相不污染）**：
-//   · 每个 VK 有一个所有者（`Os` 默认 / `Script`）。脚本按下某键 ⇒ 该键归脚本；期间 OS 的
-//     按下 / 抬起 / **焦点丢失清键** 一律**不生效**（注入不因窗口失焦而丢）。
-//   · 脚本 `key_up` / `mouse_up` 把该键**交还** OS（状态置抬起、所有者清空）。
-//   · 光标：脚本第一次 `mouse_move` 起归脚本；期间 OS 的鼠标移动**不生效**（不更新也不发消息，
-//     保持 `GetCursorPos` 与 `WM_MOUSEMOVE` 的 lParam 一致）；OS 的鼠标按键同样不生效
-//     （它们的坐标来自 OS 光标，而那份位置没有被采用 —— 半截输入比拒绝更糟）。
-//   · 脚本**结束**（动作跑完 / `quit`）⇒ `releaseScriptOwnership()`：释放脚本按下的键 / 按钮、
-//     交还光标所有权 —— 真人接着玩不会撞上"卡住的键"。
+// 输入状态（★ **唯一输入状态源**：guest 侧所有输入 API 都读 `WindowManager` 的那一份）
+// ★ 2026-11-19（S1）：6 组输入状态与三套 owner 的规则**随状态一起搬到**
+//   `runtime/input_device.h` / `.cpp`（`InputDevice`，本类以私有成员 `device_` 持有）。
+//   `InputSource` / `MouseButton` / 按钮 ↔ VK 映射也在那里（本类 include 它）。
+//   ★ S1 是**过渡形态**（纯搬家）：三套 owner 都还在；S3 删掉了 `mouse_buttons_`
+//     （按钮位图改成 VK 电平的只读派生）；「单一租约」是 S4。
+// ★ 本类的公开 setter / getter 保留**同名**与同一个 `checkMainThread` 站点名，内部转 `device_`。
 // =====================================================================================
-enum class InputSource : std::uint8_t { Os = 0, Script = 1 };
-enum class MouseButton : std::uint8_t { Left = 0, Right = 1, Middle = 2 };
-constexpr std::size_t kMouseButtonCount = 3;
-
 const char* inputSourceName(InputSource src);
 
 class WindowManager {
@@ -176,12 +166,13 @@ public:
     void clearOsInput();   // 焦点丢失：只清 **OS 拥有** 的键与按钮电平
     // 脚本结束：释放脚本按下的键 / 按钮（置抬起）并把所有权交还 OS。
     void releaseScriptOwnership();
-    // 鼠标按钮位图（WM_* 的 wParam / `mouse_buttons` 的**唯一**一份；SDL 与脚本共用）。
+    // 鼠标按钮位图（WM_* 的 wParam）。★ S3：**只读派生**自设备的 VK 电平
+    //   （`key_down_[VK_LBUTTON/RBUTTON/MBUTTON]`），⛔ 没有第二份 `mouse_buttons_`。
     std::uint32_t mouseButtons() const {
         checkMainThread("window.mouse");
-        return mouse_buttons_;
+        return device_.buttons();
     }
-    bool setMouseButton(MouseButton b, bool down, InputSource src);  // 同时写 VK 电平
+    bool setMouseButton(MouseButton b, bool down, InputSource src);  // S3：只写 VK 电平（位图是派生）
     bool mouseButtonOwnedByScript(MouseButton b) const;
     void postQuit(std::uint32_t code);
     bool quitPosted() const {
@@ -209,21 +200,23 @@ public:
     static void clientSizeFor(std::uint32_t style, int outer_w, int outer_h, int* client_w, int* client_h);
 
     // =====================================================================================
-    // 光标 / 捕获（M2 · 输入族；**headless 虚拟状态**）
-    // ★ 口径（2026-11-04）：不建 SDL 光标、不读 .cur；句柄 / 位置 / 显示计数 / 捕获都是
+    // 光标（M2 · 输入族；**headless 虚拟状态**）
+    // ★ 口径（2026-11-04）：不建 SDL 光标、不读 .cur；句柄 / 位置 / 显示计数都是
     //   **确定性宿主状态**，语义按 Win32 文档照做（返回旧句柄 / 新显示计数 / TRUE），
     //   ⛔ 不返回随机值、⛔ 不假装成功却什么都不记。
     // ★ 虚拟光标位置初值 = **(0,0)**：headless 没有鼠标输入，屏幕原点是"还没有输入"的
     //   中性状态（选它而不是客户区中心：后者会让 `ScreenToClient` 在上窗口之前给出负坐标）。
     // ★ `ShowCursor` 的语义是**显示计数**（真机初值 0，`>= 0` 才显示）：显示 +1 / 隐藏 -1，
     //   返回值 = **新计数**（不是布尔、不是旧值）。
+    // ★ `WindowManager::setCapture/capture`（Win32 capture 的死状态）已在 S1 删除：零调用者。
     // =====================================================================================
     std::uint32_t setCursor(std::uint32_t hcursor);  // 返回**旧** HCURSOR（Win32 语义）
     std::uint32_t cursor() const {
         checkMainThread("window.cursor");
         return cursor_;
     }
-    // ★ 第 4 个参数是来源：`Script` 一旦写过位置就拥有光标，之后 `Os` 的移动被拒绝（见 InputSource）。
+    // ★ 第 4 个参数是来源：`Script` 一旦写过位置就拥有光标，之后 `Os` 的移动被拒绝
+    //   （规则随状态在 `runtime/input_device.h` 的 `InputSource` 处，S1 纯搬家）。
     void setCursorPos(int x, int y);  // guest 自己调 SetCursorPos（不改所有权）
     bool setCursorClientPos(std::uint32_t hwnd, int x, int y, InputSource src);
     void setCursorClientPos(std::uint32_t hwnd, int x, int y) {
@@ -231,24 +224,18 @@ public:
     }
     bool cursorOwnedByScript() const {
         checkMainThread("window.cursor");
-        return cursor_script_owned_;
+        return device_.cursorOwnedByScript();
     }
     // 屏幕坐标 → 客户区坐标（`SetCursorPos` / `GetCursorPos` 的反向；与 setCursorClientPos 同一份原点）。
     void cursorClientPos(std::uint32_t hwnd, int* x, int* y) const;
     void getCursorPos(int* x, int* y) const {
         checkMainThread("window.cursor");
-        if (x) *x = cursor_x_;
-        if (y) *y = cursor_y_;
+        device_.cursorScreen(x, y);
     }
     // ★ `--cursor-warp` 的回灌抑制**不在这一层**：`WindowManager` 只保存 guest 虚拟状态；
     //   回灌抑制需要**窗口客户区像素**（warp 落点那一对，clamp 之前），那一层拿不到 ⇒ 它在
     //   `runtime/present_sdl.cpp` 的 SDL motion 入口（`runtime/warp_echo.h` 的 FIFO）。
-    int showCursor(bool show);                     // 显示 +1 / 隐藏 -1，返回**新**显示计数
-    std::uint32_t setCapture(std::uint32_t hwnd);  // 返回**旧**捕获窗口（0 = 没有）
-    std::uint32_t capture() const {
-        checkMainThread("window.capture");
-        return capture_;
-    }
+    int showCursor(bool show);  // 显示 +1 / 隐藏 -1，返回**新**显示计数
 
     // =====================================================================================
     // ★ 输入采样计数（2026-11-08；**注入层的判据**，不是 guest 语义）
@@ -322,17 +309,10 @@ private:
     bool quit_ = false;
     std::uint32_t quit_code_ = 0;
     HostEventPump host_event_pump_;
-    std::uint8_t key_down_[256] = {};
-    // 每个 VK / 按钮的所有者（InputSource 的整数值；0 = OS，1 = 脚本）
-    std::uint8_t key_owner_[256] = {};
-    std::uint8_t button_owner_[kMouseButtonCount] = {};
-    std::uint32_t mouse_buttons_ = 0;
-    bool cursor_script_owned_ = false;
-    // 光标 / 捕获（见上面的方法注释）
+    // ★ 输入状态（S1：6 组字段 + 三套 owner 的规则都在这里；写 API private + friend）。
+    InputDevice device_;
+    // 光标（见上面的方法注释）
     std::uint32_t cursor_ = 0;
-    std::uint32_t capture_ = 0;
-    std::int32_t cursor_x_ = 0;
-    std::int32_t cursor_y_ = 0;
     int cursor_show_count_ = 0;
     // ★ 输入采样计数（见 `inputSampleCount` 那一段）：单调计数 + 最近间隔
     std::uint64_t input_samples_ = 0;

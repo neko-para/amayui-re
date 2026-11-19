@@ -69,6 +69,8 @@ add_library(emulator-lift-runtime STATIC
     #   ⚠ 2026-11-16 起时间线的 **CLI 入口已退役**（`--input-script` 整族）；它只剩机器内 actuator
     #     与 pure CTest 夹具两个消费者（见 docs/03-emulator/input-plan.md §7）。
     src/runtime/input.cpp
+    # ★ 输入设备实体（S1：6 组输入状态 + 三套 owner 的规则；`WindowManager` 私有持有并同名转发）。
+    src/runtime/input_device.cpp
     src/runtime/input_script.cpp
     #   ★ 输入**投递层**（S1：骨架 + 计数，没有配方）：`input_plan.h` 的三条铁律是形状真源。
     #     ⛔ 它不在执行循环里被调用（守卫 `tools/test/input-plan-shape.test.mjs` ①）。

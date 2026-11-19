@@ -22,6 +22,7 @@
 #include <cstdint>
 
 #include "runtime/host_window.h"
+#include "runtime/input_device.h"
 #include "runtime/input_plan.h"
 
 namespace lift {
@@ -38,11 +39,13 @@ constexpr std::uint32_t kWmRButtonUp = 0x0205u;
 constexpr std::uint32_t kWmMButtonDown = 0x0207u;
 constexpr std::uint32_t kWmMButtonUp = 0x0208u;
 constexpr std::uint32_t kWmMouseWheel = 0x020Au;
-constexpr std::uint32_t kMkLButton = 0x0001u;
-constexpr std::uint32_t kMkRButton = 0x0002u;
-constexpr std::uint32_t kMkMButton = 0x0010u;
+// ★ MK_* 位随按钮映射下沉到 `runtime/input_device.h`（S1）；这里保留同名拼写，调用点不变。
+constexpr std::uint32_t kMkLButton = ::lift::kMkLButton;
+constexpr std::uint32_t kMkRButton = ::lift::kMkRButton;
+constexpr std::uint32_t kMkMButton = ::lift::kMkMButton;
 
-// 按钮 ↔ VK / MK_* 位 / WM_* 消息（**唯一一份**映射：`host_window.cpp` 的按钮状态也读它）。
+// 按钮 ↔ VK / MK_* 位 / WM_* 消息（**唯一一份**映射：唯一定义在 `runtime/input_device.{h,cpp}`）。
+// ★ S1：这两个同名函数只是**转发**（状态层不再反向依赖施加层；调用点不变）。
 std::uint32_t vkForMouseButton(MouseButton b);
 std::uint32_t flagForMouseButton(MouseButton b);
 std::uint32_t messageForMouseButton(MouseButton b, bool down);
