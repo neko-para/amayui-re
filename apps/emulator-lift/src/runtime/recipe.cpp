@@ -111,11 +111,12 @@ std::string hex8(std::uint32_t v) {
 std::string u64s(std::uint64_t v) { return std::to_string(static_cast<unsigned long long>(v)); }
 
 // 词表提示（报错用）。**唯一一份**：指令加了一条就只改这里。
-// ★ 没有"按入口裁剪"的参数：六条指令 + 行尾 `timeout` 两臂都认（能力面只有一份，见 `recipe.h`）。
+// ★ 没有"按入口裁剪"的参数：九条指令 + 行尾 `timeout` 两臂都认（能力面只有一份，见 `recipe.h`）。
 std::string instructionList() {
     return std::string(
         "`await script <名字> [timeout <ms>]` / `await position <名字> <FROM> <TO> [timeout <ms>]` / "
-        "`wait <ms>` / `click <x> <y> [left|right]` / `profile_begin <label>` / "
+        "`wait <ms>` / `click <x> <y> [left|right]` / `mouse_move <x> <y>` / "
+        "`mouse_down [left|right]` / `mouse_up [left|right]` / `profile_begin <label>` / "
         "`profile_end <label>` / `quit`");
 }
 
@@ -165,8 +166,21 @@ const char* stepKindName(StepKind k) {
         case StepKind::ProfileBegin: return "profile_begin";
         case StepKind::ProfileEnd: return "profile_end";
         case StepKind::Quit: return "quit";
+        case StepKind::MouseMove: return "mouse_move";
+        case StepKind::MouseDown: return "mouse_down";
+        case StepKind::MouseUp: return "mouse_up";
     }
     return "?";
+}
+
+// 按钮词（`click` / `mouse_down` / `mouse_up` 共用；⛔ 只在**非 left** 时出现 —— 缺省就是 left）。
+std::string buttonWord(MouseButton b) {
+    switch (b) {
+        case MouseButton::Left: return std::string();
+        case MouseButton::Right: return " right";
+        case MouseButton::Middle: return " middle";  // 配方解析期不收；保留完整映射（⛔ 不静默写成 left）
+    }
+    return std::string();
 }
 
 std::string stepText(const Step& s) {
@@ -182,6 +196,12 @@ std::string stepText(const Step& s) {
             if (s.button == MouseButton::Right) out += " right";
             return out;
         }
+        case StepKind::MouseMove:
+            return "mouse_move " + std::to_string(s.x) + " " + std::to_string(s.y);
+        case StepKind::MouseDown:
+            return "mouse_down" + buttonWord(s.button);
+        case StepKind::MouseUp:
+            return "mouse_up" + buttonWord(s.button);
         case StepKind::ProfileBegin:
             return "profile_begin " + s.label;
         case StepKind::ProfileEnd:
@@ -207,6 +227,9 @@ bool stepGateHolds(const Step& s, const MarkerSample* identity, const ScriptPosi
             return position.pos >= s.pos_from && position.pos < s.pos_to;
         case StepKind::Wait:
         case StepKind::Click:
+        case StepKind::MouseMove:
+        case StepKind::MouseDown:
+        case StepKind::MouseUp:
         case StepKind::ProfileBegin:
         case StepKind::ProfileEnd:
         case StepKind::Quit:
@@ -273,6 +296,10 @@ bool Recipe::loadText(const std::string& text, const std::string& origin, std::s
         return false;
     };
     const std::string list = instructionList();
+    // ★ `mouse_down` / `mouse_up` 的坐标 = **设备当前位置**（⛔ 不带 x/y）⇒ 解析期就要求前面有一条
+    //   `mouse_move`（与 `InputScript` 的临时解析器同一口径：它同样要求 `have_pos_` 才收 down/up）。
+    //   ⇒ 宁可在这里 `文件:行` 硬错，也不要在施加期"用 (0,0) 猜一个坐标"或静默不认。
+    bool have_move = false;
 
     // 一行 = 一条指令（`#` 到行尾是注释；空行忽略，但行号照数）。
     // ★ `tok` 按值收：行尾 `timeout <ms>` 会被剥掉，剩下的才是"指令 + 参数"。
@@ -311,7 +338,8 @@ bool Recipe::loadText(const std::string& text, const std::string& origin, std::s
                     return fail(line, "`wait` 是**固定时长**（到点就走），没有可等待的东西 ⇒ 去掉 `timeout`，"
                                       "把它写回 `" + fixed + "`");
                 }
-                if (head == "click" || head == "profile_begin" || head == "profile_end" || head == "quit" ||
+                if (head == "click" || head == "mouse_move" || head == "mouse_down" || head == "mouse_up" ||
+                    head == "profile_begin" || head == "profile_end" || head == "quit" ||
                     head == "exit") {
                     return fail(line, "`" + tok[0] +
                                           "` 没有可等待的东西 ⇒ `timeout <ms>` 只能挂在 `await script` / "
@@ -411,6 +439,52 @@ bool Recipe::loadText(const std::string& text, const std::string& origin, std::s
                 } else {
                     return fail(line, "`click` 的按钮词只认**裸写**的 `left` / `right`（收到 `" + tok[3] + "`）");
                 }
+            }
+            push(std::move(s));
+            return true;
+        }
+        if (head == "mouse_move") {
+            // ★ 语法钉死：`mouse_move <x> <y>`（⛔ 不带按钮词；只写光标、不按键）。
+            if (tok.size() != 3) {
+                return fail(line, "`mouse_move` 缺参数：要 `<x> <y>`（收到 " +
+                                      std::to_string(tok.size() - 1) + " 个词）");
+            }
+            int x = 0;
+            int y = 0;
+            if (!parseInt(tok[1], &x) || !parseInt(tok[2], &y)) {
+                return fail(line, "`mouse_move` 的坐标必须是整数（收到 `" + tok[1] + "` `" + tok[2] + "`）");
+            }
+            Step s;
+            s.kind = StepKind::MouseMove;
+            s.x = x;
+            s.y = y;
+            push(std::move(s));
+            have_move = true;  // down / up 的坐标来源（解析期检查）
+            return true;
+        }
+        if (head == "mouse_down" || head == "mouse_up") {
+            // ★ 不带 x/y：坐标 = **设备当前位置**（与 `InputScript` 同形）⇒ 必须有一条更早的
+            //   `mouse_move`（解析期硬错，⛔ 不在施加期猜坐标）。按钮词只认裸写 `left|right`。
+            if (tok.size() > 2) {
+                return fail(line, "`" + tok[0] + "` 最多带一个按钮词 `left|right`（收到 " +
+                                      std::to_string(tok.size() - 1) + " 个词；坐标来自前面的 `mouse_move`）");
+            }
+            Step s;
+            s.kind = head == "mouse_down" ? StepKind::MouseDown : StepKind::MouseUp;
+            if (tok.size() == 2) {
+                const std::string word = lowerAscii(tok[1]);
+                if (word == "left") {
+                    s.button = MouseButton::Left;
+                } else if (word == "right") {
+                    s.button = MouseButton::Right;
+                } else {
+                    return fail(line, "`" + tok[0] + "` 的按钮词只认**裸写**的 `left` / `right`（收到 `" +
+                                          tok[1] + "`）");
+                }
+            }
+            if (!have_move) {
+                return fail(line, "`" + tok[0] +
+                                      "` 需要先 mouse_move（它用**当前设备光标位置**，⛔ 不猜坐标）");
             }
             push(std::move(s));
             return true;

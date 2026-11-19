@@ -201,6 +201,13 @@ int main(int argc, char** argv) {
         //   见 `REQ-01M7PG086DG4BBPA40VCVZTP4X` B）。⚠ 本用例在 POSIX 上 skip（CreateProcessW
         //   是 Windows 专有）⇒ mac 侧的等价判据在 `docs` / 手工命令，⛔ 不要因此删掉这一条。
         LIFT_CHECK(r.out.find("--input-plan-trace") != std::string::npos);
+        // ★ S6：三条鼠标原语必须在 help 里（否则用户不知道"拖拽"能在配方里表达；
+        //   词表与 `runtime/recipe.cpp` 的 `instructionList` 是**同一组**指令）。
+        //   ⚠ 本用例在 POSIX 上 skip ⇒ 解析期判据另在 `input-plan-read-points` 的
+        //   `input-plan/parse-errors` / `input-plan/mouse-primitives`（⛔ 不靠这一条当唯一判据）。
+        LIFT_CHECK(r.out.find("mouse_move") != std::string::npos);
+        LIFT_CHECK(r.out.find("mouse_down") != std::string::npos);
+        LIFT_CHECK(r.out.find("mouse_up") != std::string::npos);
         // ★ `--profile-slow-frames` 必须在 help 里（否则"按帧的 shim 分桶"这条仪器等于不存在，
         //   而 wipe 剖面的最大缺口正是它 —— 见 `docs/03-emulator/wipe-profile.md`）。
         LIFT_CHECK(r.out.find("--profile-slow-frames") != std::string::npos);

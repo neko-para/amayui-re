@@ -31,11 +31,17 @@
 //
 // =====================================================================================
 // 能力面 = **共享的那一份**（`runtime/recipe.h`；⛔ 本臂没有自己的指令表）
-//   六条指令 + 行尾 `timeout` 全认：`await script` / `await position` / `wait <ms>` /
-//   `click x y [l|r]` / `profile_begin|end <label>` / `quit`（`timeout <ms>` 只能写在两个 `await`
+//   九条指令 + 行尾 `timeout` 全认：`await script` / `await position` / `wait <ms>` /
+//   `click x y [l|r]` / `mouse_move x y` / `mouse_down [l|r]` / `mouse_up [l|r]` /
+//   `profile_begin|end <label>` / `quit`（`timeout <ms>` 只能写在两个 `await`
 //   那一行的末尾）。本臂只决定它们**落在哪个宿主对象**上：
 //   · `click` → **两段**：先 `input::mouseMove`（只有光标落地），**跨过一个已完成的位置读点**
 //     之后才 `input::mouseButton(down)`（唯一施加路径）+ 待抬起队列 —— 见下面的"注入形状"三条闸门；
+//   · `mouse_move` → `input::mouseMove`（与 click 的第一段**同一段**代码）；
+//   · `mouse_down` / `mouse_up` → `input::mouseButton`（坐标 = **设备当前位置**，⛔ 不回跳）。
+//     `mouse_down` 有**轻闸门**：上一条 `mouse_move` 之后必须**完成过**一次 CursorPos 读点，
+//     或 `kPressFallbackMs` 墙钟兜底；不成立就**不消费**该 step（留 `next_`）。`mouse_up` 直写。
+//     ⛔ 二者都不进待抬起队列（释放由配方自己控制：⛔ 不套闸门①/②）。
 //   · `wait` → 非阻塞 deadline（宿主单调毫秒），到期由**下一个读点**消费（★ 固定时长、没有守卫）；
 //   · 门上的 `timeout` → 本臂**唯一**的尺 = 宿主墙钟（`stepTimeoutMs` 给宽度；本臂不给缺省值 ⇒
 //     没写 `timeout` 就没有守卫，卡住由 `--time-limit` / `--max-frames` 这层看门狗报）；
@@ -194,6 +200,8 @@ public:
     // ★ **唯一**能施加 step 的入口（也只经 `runtime/input.h` 的四个投递入口到达）。
     //   flush-before-read：先把到期 step 落地到 `WindowManager`，**再**让 shim 去读。
     //   ★ 同一个读点内的顺序：待抬起 → **立即队列（控制层 `click`）** → 配方当步。
+    //   ★ **一个读点最多一条写动作**（S7 / Q2；见下面的"写预算"段）：四段都尊重
+    //     `writes_this_point_`，⛔ 同一拍里不会出现两条 `mouse_move` / 一对 down+up。
     void atPoint(WindowManager& wm, InputPoint point);
 
     // =====================================================================================
@@ -215,6 +223,29 @@ public:
     bool enqueueMove(int ref_x, int ref_y);
     // 立即队列深度 = 还没在 guest 读点上落地的 click + move 条数（回执的 `queued`）。
     std::size_t queuedClicks() const { return immediate_.size(); }
+
+    // =====================================================================================
+    // ★ **写预算：一个读点最多施加一条写动作**（S7 / Q2；设计 §3.8 / §4.7）
+    //
+    //   · `writes_this_point_` 在**每个** `atPoint` 开头清零；`releaseDue` / `pressDue` /
+    //     `drainImmediate` / flush 循环四段都在写了一条之后停下。
+    //   · 判据 = `Step::isInputWrite()`（`click` / `mouse_move` / `mouse_down` / `mouse_up`）；
+    //     门 / `wait` / `profile_*` / `quit` **不是写** ⇒ 同一读点仍可继续消费。
+    //   · 为什么必须有它：否则 `mouse_move; mouse_move; mouse_move` 在一个读点里只剩最后一个位置
+    //     （拖拽根本表达不出来），连写 click 也会合并成一次长按。
+    //   · **连点串行化（Q8-A）**：`armClickAt` **不再**"同按钮先抬起"；`atPoint` 遇 `click` /
+    //     `mouse_down` 且该按钮**仍在 `pending_`**（已按下、未抬起）⇒ **不消费**该 step（留 `next_`），
+    //     `drainImmediate` 停在队首。⇒ 每条 click 的 down 都等得到闸门①的 2 个 KeyLevel 读点。
+    //     代价（显式）：连点总时长变长。
+    //   · **记账顺序**：`++applied_` / `++next_` / `guard_armed_=false` / `traceStepConsumed`
+    //     必须在停下**之前**完成（⛔ 在 `applyClick` 后直接 return）。
+    // =====================================================================================
+
+    // ★ `mouse_down` 的**轻闸门**（S6 / Q3）：上一条 `mouse_move` 之后必须**完成过**一次
+    //   CursorPos 读点（引擎的位置样本被 `+0x74A4` 锁存，只有它真调了 `GetCursorPos` 才会刷新），
+    //   或墙钟兜底 `kPressFallbackMs`；否则**不消费**该 step。⛔ 不套闸门①/②（释放由配方控制）。
+    //   状态 = `last_move_cursor_done_` / `last_move_ms_`（`armMoveAt` 里刷新 ⇒ 控制层的纯 move
+    //   同样会重置这个时钟：闸门判的是**设备位置**，不是"哪条 step 挪的"）。
 
     // =====================================================================================
     // ★ **注入形状**（2026-11-19 裁决；锚 = `GetAsyncKeyState` 电平读点，⛔ 不是总采样数）
@@ -348,9 +379,16 @@ private:
     // ★ 纯 move 的落地点（`move` 命令 / click 的第一段共用同一份映射与 `input::mouseMove`）。
     void armMoveAt(WindowManager& wm, int ref_x, int ref_y);
     // ★ 阶段 ②：把到期的 `armed_` 按下（`input::mouseButton(down)`）并转进 `pending_`。
+    //   ★ S7：一次读点**最多按一条**；已在 `pending_` 的按钮**跳过**（等它抬起，⛔ 不重复按下）。
     void pressDue(WindowManager& wm);
-    // 配方 step 的壳：只把 `Step` 的三个值交给上面那一段（⛔ 不复制映射 / 记账）。
+    // 这个按钮是否**已按下、还没抬起**（`pending_` 里有没有它）⇒ 连点串行化 / `mouse_down` 的判据。
+    bool buttonPending(MouseButton b) const;
+    // ★ 配方 step 的壳：只把 `Step` 的三个值交给上面那一段（⛔ 不复制映射 / 记账）。
     void applyClick(WindowManager& wm, const Step& s);
+    // ★ S6：`mouse_move` / `mouse_down` / `mouse_up` 的落点（坐标一律走 `armMoveAt` /
+    //   设备当前位置；⛔ 不在施加期重新映射一条 down/up 的坐标）。
+    void applyMouseMove(WindowManager& wm, const Step& s);
+    void applyMouseButton(WindowManager& wm, const Step& s, bool down);
     // 立即队列消费（同一次读点内、配方之前；⛔ 不碰 `next_` / `applied_`）。
     void drainImmediate(WindowManager& wm, InputPoint point);
     // 区间边界的**本臂落点**（没有窗口 profiler ⇒ 一次性两行宿主墙钟读数）。
@@ -391,6 +429,12 @@ private:
     std::uint64_t read_points_ = 0;     // 读点序号（trace / profile 读数）
     // 本读点**之前**已经完成过的 CursorPos 读点数（"位置样本的年龄"刻度；见 `kPressFallbackMs`）。
     std::uint64_t cursor_reads_done_ = 0;
+    // ★ **写预算**（S7 / Q2）：本读点已经施加了几条写动作（0 / 1；见 `atPoint` 的四段）。
+    std::uint32_t writes_this_point_ = 0;
+    // ★ `mouse_down` 轻闸门（S6 / Q3）：上一次**设备移动**时的 `cursor_reads_done_` 与宿主墙钟
+    //   （`armMoveAt` 刷新；见类头的"轻闸门"段）。
+    std::uint64_t last_move_cursor_done_ = 0;
+    std::uint64_t last_move_ms_ = 0;
     std::size_t releases_pending_ = 0;
     // 本次注入会话是否已经把光标所有权交还过（`closeSessionIfDone` 只做一次；新的注入会清掉它）。
     bool session_closed_ = true;

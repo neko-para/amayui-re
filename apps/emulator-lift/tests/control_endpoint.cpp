@@ -1125,6 +1125,7 @@ void caseClickDelivery() {
         std::uint64_t fired = 0;
         std::uint64_t applied = 0;
         std::uint64_t pending = 0;
+        std::uint64_t pending_releases = 0;
         std::uint64_t queued = 0;
         std::uint64_t released = 0;
         std::size_t move_msgs = 0;
@@ -1143,6 +1144,11 @@ void caseClickDelivery() {
     std::atomic<bool> gate_quit{false};
     std::atomic<bool> gate_done{false};
     std::atomic<unsigned long long> read_gen{0};  // 每次"guest 读点"完成 +1（测试等它推进）
+    // ★ S7：一次读点只落**一条**写动作 ⇒ 一批 click 必须跨**很多**读点才能逐条投完。
+    //   `burst_points` = 一次 `resume` 之后跑几个读点；`burst_mixed` = 交替 CursorPos / KeyLevel
+    //   （抬起闸门要 2 个 KeyLevel 读点 ⇒ 只有交替才驱动得出 down/up 对）。
+    std::atomic<unsigned long long> burst_points{3};
+    std::atomic<bool> burst_mixed{false};
     bool stop_flag = false;
 
     std::thread gate([&] {
@@ -1168,12 +1174,13 @@ void caseClickDelivery() {
         // ★ "guest 读点"（与 guest 侧**同一条**入口 `InputPlan::atPoint`）+ 一份读数。
         //   ★ 只在 `serve()` **放行**（resume 返回 false）之后才发生 —— 暂停态 guest 不跑，
         //     所以**暂停期间没有读点**（这正是"入队 → resume → 下一个读点才施加"的时态）。
-        auto doReadPoint = [&] {
-            plan.atPoint(wm, lift::InputPoint::CursorPos);
+        auto doReadPoint = [&](lift::InputPoint point) {
+            plan.atPoint(wm, point);
             Reading r;
             r.fired = plan.fired();
             r.applied = plan.stepsApplied();
             r.pending = plan.pending();
+            r.pending_releases = plan.pendingReleases();
             r.queued = plan.queuedClicks();
             r.released = plan.releases();
             r.failed = plan.failed();
@@ -1210,10 +1217,16 @@ void caseClickDelivery() {
                 if (c.watching()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
                 // ★ 2026-11-19：`resume` 之后不是"一个读点"，而是**一串**读点（真 guest 放行后
                 //   会连续跑）—— 而注入的 click 现在是**两段**：臂上（只 move）跨一个读点之后才按下。
-                //   ⇒ 这里连投 3 个读点，覆盖"臂上 + 按下 + 再一拍"。
+                //   ⇒ 缺省连投 3 个读点，覆盖"臂上 + 按下 + 再一拍"。
+                //   ★ S7：一次读点最多一条写动作 ⇒ 一批 N 条 click 要 N 个 down/up 周期；调用方
+                //     用 `burst_points` / `burst_mixed` 指定这一批的读点形状（见 cap 段）。
                 //   ★ 这一串**整体**算一次读数：`read_gen` 在整串跑完之后才 +1（否则客户端会读到
-                //     "臂上"那一拍就断言，把 64 条 click 全按下的结果看成 0 条）。
-                for (int k = 0; k < 3; ++k) doReadPoint();
+                //     "臂上"那一拍就断言，把多条 click 全投完的结果看成 0 条）。
+                const unsigned long long n = burst_points.load();
+                const bool mixed = burst_mixed.load();
+                for (unsigned long long k = 0; k < n; ++k) {
+                    doReadPoint(mixed && (k % 2 == 1) ? lift::InputPoint::KeyLevel : lift::InputPoint::CursorPos);
+                }
                 read_gen.fetch_add(1, std::memory_order_release);
                 continue;
             }
@@ -1406,26 +1419,41 @@ void caseClickDelivery() {
         LIFT_CHECK(over.code == "bad_request");
         LIFT_CHECK(jsonString(over.text, "message").find("已满") != std::string::npos);
 
-        // 前 cap 条真的都在队列里：**下一个读点**（resume 之后）上全部生效（fired 1 → 1+cap），
-        // 且配方仍然没动。
+        // ★ S7：前 cap 条**一条都不丢**，但也不再"同一个读点全生效"—— 一次读点最多一条写动作，
+        //   而且同一按钮还按着时下一条 click **不消费**（Q8-A 连点串行化）。⇒ 客户端必须驱动
+        //   **足够多的读点**，让 64 条各自走完 arm → press → up。
+        //   读点形状：CursorPos / KeyLevel 交替 —— arm（CursorPos）→ press（下一个读点，位置已读）
+        //   → 2 个 KeyLevel ⇒ up → 下一个 CursorPos 再 arm 下一条。
+        //   ⇒ 每条 click 用 6 个读点；第 1 条之前还要先把 judge2 那条（还按着）抬起来（4 个读点）。
+        //   预算：4 + 6 × cap = 388（这里给 400）。
         const std::size_t down_before_cap = reading.down_msgs;
+        const std::size_t up_before_cap = reading.up_msgs;
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(down_before_cap), 1);  // judge2 的那一条
+        burst_points.store(4 + 6 * static_cast<unsigned long long>(cap) + 12);
+        burst_mixed.store(true);
         Res rr2;
         LIFT_CHECK(roundTrip("{\"id\":12,\"op\":\"resume\"}", &rr2));
         LIFT_CHECK(rr2.ok);
         LIFT_CHECK(waitReadPoint());
-        std::printf("[judge5-click-drain] fired=%llu down=%zu queued=%llu applied=%llu pending=%llu\n",
-                    static_cast<unsigned long long>(reading.fired), reading.down_msgs,
-                    static_cast<unsigned long long>(reading.queued),
-                    static_cast<unsigned long long>(reading.applied),
-                    static_cast<unsigned long long>(reading.pending));
+        std::printf(
+            "[judge5-click-drain] fired=%llu down=%zu up=%zu queued=%llu applied=%llu pending=%llu "
+            "pending_releases=%llu left_down=%d\n",
+            static_cast<unsigned long long>(reading.fired), reading.down_msgs, reading.up_msgs,
+            static_cast<unsigned long long>(reading.queued),
+            static_cast<unsigned long long>(reading.applied), static_cast<unsigned long long>(reading.pending),
+            static_cast<unsigned long long>(reading.pending_releases), reading.left_down ? 1 : 0);
+        // ---- 一条都没丢：每条 click 各得一对 down/up（fired = 1（judge2）+ cap）----
         LIFT_CHECK(reading.fired == 1 + cap);
-        // ★ S4（§3.2 #14）：这 64 条 click 是**同一个按钮**、在同一个读点被一次性按下 ⇒ 电平只做
-        //   **一次** 0→1 转移，后续 63 次 `Program.down` 是「接受但不投影」（⛔ 旧实现的 64 条重复
-        //   `WM_LBUTTONDOWN` 是双表示的症状）。"一条都没丢"由 `fired == 1+cap` 证明；每条 click
-        //   各得一对 down/up 是 S7 的连点串行化（§4.7），不在本片。
-        LIFT_CHECK(reading.down_msgs <= down_before_cap + 1);
-        LIFT_CHECK(reading.left_down);  // 至少有一条 click 仍按着（pending==1 的同一条事实）
+        LIFT_CHECK(reading.down_msgs == reading.fired);  // down = 1 + cap（不再只是 ≤ +1）
+        LIFT_CHECK(reading.up_msgs == reading.fired);    // 每条都在这一批里被抬起（含 judge2 那条）
+        LIFT_CHECK(reading.down_msgs == down_before_cap + cap);
+        LIFT_CHECK(reading.up_msgs == up_before_cap + cap + 1);  // +1 = judge2 那条的 up 也落在这一批
         LIFT_CHECK(reading.queued == 0);
+        LIFT_CHECK(reading.pending_releases == 0);  // 没有留下"按着没抬"的按钮
+        LIFT_CHECK(!reading.left_down);
+        // ★ 配方**一位都没动**：门仍然在等（`pending` 是**配方**的待消费数 ⇒ 1；`applied` = 0）。
+        //   ⛔ 不要把它写成 0：`await script NOSUCHSCRIPT` 永远不成立，配方本来就走不完 ——
+        //   "立即队列不推进配方"正是本用例的判据 2。
         LIFT_CHECK(reading.applied == 0);
         LIFT_CHECK(reading.pending == 1);
     }

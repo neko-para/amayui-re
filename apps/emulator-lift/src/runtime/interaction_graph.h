@@ -130,6 +130,12 @@ private:
     // 动作步的账：`issued_` = 已追加进 actuator；`applied_before_` = 追加时的 applied 计数
     bool issued_ = false;
     std::uint64_t applied_before_ = 0;
+    // ★ S6：图自己的"最后一次 mouse_move 的坐标"（`mouse_down/up` 的临时解析器要求 `have_pos_`，
+    //   所以 `issueAction` 要在同一段文本里补一条同点 `mouse_move`）。解析期已保证 down/up 前面
+    //   一定有一条 `mouse_move` ⇒ 这里只防御性判空。
+    int last_move_x_ = 0;
+    int last_move_y_ = 0;
+    bool have_move_ = false;
     // Wait 動作的到期点（宿主墙钟）
     bool wait_pending_ = false;
     std::uint64_t wait_due_wall_ms_ = 0;

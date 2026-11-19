@@ -52,6 +52,9 @@ const char* traceKindToken(StepKind k) {
         case StepKind::ProfileBegin: return "profile-begin";
         case StepKind::ProfileEnd: return "profile-end";
         case StepKind::Quit: return "quit";
+        case StepKind::MouseMove: return "mouse-move";
+        case StepKind::MouseDown: return "mouse-down";
+        case StepKind::MouseUp: return "mouse-up";
     }
     return "?";
 }
@@ -98,6 +101,9 @@ void InputPlan::clear() {
     position_misses_ = 0;
     read_points_ = 0;
     cursor_reads_done_ = 0;
+    writes_this_point_ = 0;
+    last_move_cursor_done_ = 0;
+    last_move_ms_ = 0;
     releases_pending_ = 0;
     session_closed_ = true;
     wait_started_ = false;
@@ -180,6 +186,9 @@ void InputPlan::atPoint(WindowManager& wm, InputPoint point) {
     const std::size_t i = static_cast<std::size_t>(point);
     if (i < deliver_calls_.size()) ++deliver_calls_[i];
     ++read_points_;
+    // ★ S7 / Q2：**本读点的写预算**（门 / `wait` / `profile_*` / `quit` 不吃预算）。
+    //   下面的四段（releaseDue / pressDue / drainImmediate / flush）都在写过一条之后停。
+    writes_this_point_ = 0;
     // ★ 闸门 ③ 的刻度 = "**本读点之前**完成过几个 CursorPos 读点"：本读点自己的读还没发生，
     //   所以若是位置读点，得把刚 +1 的那个数扣掉（否则"move 与 down 同读点"又能满足它）。
     cursor_reads_done_ = deliverCalls(InputPoint::CursorPos);
@@ -224,6 +233,9 @@ void InputPlan::atPoint(WindowManager& wm, InputPoint point) {
                 return;
             }
         }
+        // ★ **写预算**（S7 / Q2）：本读点已经写过一条写动作 ⇒ 不再消费**写** step（留 `next_`），
+        //   但**门 / `wait` / `profile_*` / `quit` 照旧可以继续消费**（它们不是写动作）。
+        if (writes_this_point_ != 0 && s.isInputWrite()) return;
         if (s.isGate()) {
             // ★ **电平**门：身份当前就是它 ⇒ 通过；身份读不到（base==0 / valid=false）⇒ 不成立。
             if (mem_ == nullptr) {
@@ -259,11 +271,33 @@ void InputPlan::atPoint(WindowManager& wm, InputPoint point) {
             if (now < wait_deadline_ms_) return;
             wait_started_ = false;
         } else if (s.kind == StepKind::Click) {
+            // ★ **连点串行化（Q8-A）**：这个按钮还按着（第一条的 down 还没抬起）⇒ **不消费**该 step
+            //   （留 `next_`，下一个读点再试）。⛔ 删掉了 `armClickAt` 的"同按钮先抬起" —— 那会让
+            //   第一条 click 的 down 一次都不被 guest 读到。
+            if (buttonPending(s.button)) return;
             applyClick(wm, s);
             ++fired_;
+            writes_this_point_ = 1;  // ★ 臂上的那一次 `input::mouseMove` 就是一条写动作
             // trace 的 `plan:<文件>:<行>` 要指向**施加它的那条 step** ⇒ 记在臂上 / 待抬起的记录上
             // （抬起那一行因此也能点名同一个 `文件:行`；立即队列的 click 没有 step ⇒ 0）。
             if (!armed_.empty()) armed_.back().line = s.line;
+        } else if (s.kind == StepKind::MouseMove) {
+            applyMouseMove(wm, s);
+            writes_this_point_ = 1;
+        } else if (s.kind == StepKind::MouseDown || s.kind == StepKind::MouseUp) {
+            // ★ `mouse_down`：同一按钮还在 `pending_`（click 的 down 没抬）⇒ 不消费（否则那条 up
+            //   会把这次的 hold 一起清掉）。`mouse_up` 直写。
+            if (s.kind == StepKind::MouseDown && buttonPending(s.button)) return;
+            // ★ `mouse_down` 的**轻闸门**（Q3）：上一条 `mouse_move` 之后必须完成过一次 CursorPos
+            //   读点，或墙钟兜底到期；否则不消费（留 `next_`）。⛔ 不套闸门①/②。
+            if (s.kind == StepKind::MouseDown) {
+                const std::uint64_t now = nowMs();
+                const bool cursor_after_move = cursor_reads_done_ > last_move_cursor_done_;
+                const bool wallclock = now >= last_move_ms_ && now - last_move_ms_ >= kPressFallbackMs;
+                if (!cursor_after_move && !wallclock) return;
+            }
+            applyMouseButton(wm, s, /*down=*/s.kind == StepKind::MouseDown);
+            writes_this_point_ = 1;
         } else if (s.kind == StepKind::ProfileBegin || s.kind == StepKind::ProfileEnd) {
             applyProfileMark(s, nowMs());
         } else {  // Quit
@@ -311,8 +345,12 @@ void InputPlan::drainImmediate(WindowManager& wm, InputPoint point) {
     // ★ 只消费立即队列：**不碰** `next_` / `applied_` / `wait_started_` / 守卫账 ⇒ 配方里未到期的门
     //   照旧等（判据 2 的"步进指针不动"）。每条 click +1 `fired_`（与配方 click 同一读数口径）；
     //   move 不是"动作" ⇒ 不计 `fired_`（它没有按下 / 抬起，⛔ 不冒充一次点击）。
+    // ★ **S7 / Q2**：一次读点最多落**一条**写动作 ⇒ 剩下的**留在队首**（`queuedClicks()` 非 0）；
+    //   同一按钮还没抬起（`pending_`）⇒ 停在队首（连点串行化），⛔ 不在这里强制抬起。
     while (!immediate_.empty()) {
+        if (writes_this_point_ != 0) return;  // 本读点的写预算已经用完 ⇒ 其余留队
         const ImmediateOp c = immediate_.front();
+        if (!c.is_move && buttonPending(c.button)) return;  // 队首的 click 等这一次抬起
         immediate_.erase(immediate_.begin());
         if (c.is_move) {
             armMoveAt(wm, c.x, c.y);
@@ -320,6 +358,7 @@ void InputPlan::drainImmediate(WindowManager& wm, InputPoint point) {
             armClickAt(wm, c.x, c.y, c.button);
             ++fired_;
         }
+        writes_this_point_ = 1;
         // ★ trace（opt-in）：控制层的 click / move 与配方 click 走同一段施加核心 ⇒ 读数也要能
         //   直接对齐（D 的判据面：同一屏上"控制层 click 落在哪种读点"是唯一能解释两边差异的读数）。
         //   行里 `origin=control` + `plan:<文件>:0`（0 = 不是配方 step）点名它；move 显式写 `kind=move`
@@ -339,6 +378,21 @@ void InputPlan::applyClick(WindowManager& wm, const Step& s) {
     armClickAt(wm, s.x, s.y, s.button);
 }
 
+void InputPlan::applyMouseMove(WindowManager& wm, const Step& s) {
+    // ★ 与 `click` 的**第一段**、控制层的 `move` 同一条落点（同一份坐标映射 + 同一份 `input::mouseMove`）。
+    armMoveAt(wm, s.x, s.y);
+}
+
+void InputPlan::applyMouseButton(WindowManager& wm, const Step& s, bool down) {
+    // ★ 坐标 = **设备当前客户区位置**（⛔ 不带 x/y、⛔ 不用按下点回跳）：拖拽的 up 因此落在新点上。
+    //   写后回读由 `input::mouseButton` 自己做（消息的 lParam 与 `GetCursorPos` 说同一个位置）。
+    int client_x = 0;
+    int client_y = 0;
+    wm.cursorClientPos(wm.primaryWindow(), &client_x, &client_y);
+    input::mouseButton(wm, client_x, client_y, s.button, down, InputSource::Script, kPlanMessageTimeMs);
+    session_closed_ = false;  // 新的注入工作 ⇒ 所有权要重新握在脚本手里（见 closeSessionIfDone）
+}
+
 void InputPlan::armMoveAt(WindowManager& wm, int ref_x, int ref_y) {
     // ★ 与 click 的**第一段**同一段代码（同一份坐标映射、同一份 `input::mouseMove`）。
     int client_x = 0;
@@ -351,6 +405,11 @@ void InputPlan::armMoveAt(WindowManager& wm, int ref_x, int ref_y) {
     }
     referenceToClientPixel(target_w, target_h, ref_x, ref_y, &client_x, &client_y);
     input::mouseMove(wm, client_x, client_y, InputSource::Script, kPlanMessageTimeMs);
+    // ★ S6 / Q3：`mouse_down` 的轻闸门从**设备最后一次移动**起算（控制层的纯 move 同样算：
+    //   闸门判的是"guest 有没有读过这个位置"，不是"哪条 step 挪的"）。
+    last_move_cursor_done_ = cursor_reads_done_;
+    last_move_ms_ = nowMs();
+    session_closed_ = false;  // 新的注入工作 ⇒ 所有权要重新握在脚本手里（见 closeSessionIfDone）
 }
 
 void InputPlan::armClickAt(WindowManager& wm, int ref_x, int ref_y, MouseButton button) {
@@ -367,17 +426,8 @@ void InputPlan::armClickAt(WindowManager& wm, int ref_x, int ref_y, MouseButton 
         target_h = w->client_h;
     }
     referenceToClientPixel(target_w, target_h, ref_x, ref_y, &client_x, &client_y);
-    // ★ 一次注入必须是一对完整的 down→up：同一个按钮上一次按下**还没抬起**（墙钟兜底还没到）⇒
-    //   在这里先抬起它 —— 否则两次 click 在 guest 眼里合并成"一次长按"。
-    for (std::size_t i = 0; i < pending_.size();) {
-        if (pending_[i].button != button) {
-            ++i;
-            continue;
-        }
-        emitRelease(wm, pending_[i]);
-        pending_.erase(pending_.begin() + static_cast<std::ptrdiff_t>(i));
-        --releases_pending_;
-    }
+    // ★ S7 / Q8-A：**没有**"同按钮先抬起"的强制释放了。这个按钮还按着 ⇒ 调用方
+    //   （`atPoint` / `drainImmediate`）**不消费**这条 click，等上一次的 up 落地（见两处调用的判据）。
     armMoveAt(wm, ref_x, ref_y);  // 同一份映射 + 同一份 `input::mouseMove`（⛔ 不复制）
     ArmedPress a;
     a.button = button;
@@ -387,7 +437,6 @@ void InputPlan::armClickAt(WindowManager& wm, int ref_x, int ref_y, MouseButton 
     a.arm_cursor_done = cursor_reads_done_;  // 闸门 ③ 的起点（"已完成"的位置读点数）
     a.arm_ms = nowMs();                      // 兜底 ③ 的起点
     armed_.push_back(a);
-    session_closed_ = false;
 }
 
 void InputPlan::pressDue(WindowManager& wm) {
@@ -398,12 +447,15 @@ void InputPlan::pressDue(WindowManager& wm) {
     //   ★ "至少跨过一个读点"是**结构性**保证：`armClickAt` 只在本读点的后半段被调用
     //     （`drainImmediate` / flush 循环），而本函数在 `atPoint` 的**前半段** ⇒ 最早也是下一个读点。
     if (armed_.empty()) return;
+    // ★ S7 / Q2：一次读点最多按**一条**（写预算）；已在 `pending_` 的按钮跳过（等它抬起，
+    //   ⛔ 不重复按下 —— 那会让两条 `armed_` 共用同一次 0→1 转移）。
+    if (writes_this_point_ != 0) return;
     const std::uint64_t now = nowMs();
     for (std::size_t i = 0; i < armed_.size();) {
         const ArmedPress& a = armed_[i];
         const bool cursor_fresh = cursor_reads_done_ > a.arm_cursor_done;
         const bool wallclock = now >= a.arm_ms && now - a.arm_ms >= kPressFallbackMs;
-        if (!cursor_fresh && !wallclock) {
+        if ((!cursor_fresh && !wallclock) || buttonPending(a.button)) {
             ++i;
             continue;
         }
@@ -420,6 +472,8 @@ void InputPlan::pressDue(WindowManager& wm) {
         pending_.push_back(r);
         ++releases_pending_;
         armed_.erase(armed_.begin() + static_cast<std::ptrdiff_t>(i));
+        writes_this_point_ = 1;  // 本读点的写动作已用完
+        break;                   // 一次最多按一条
     }
 }
 
@@ -490,7 +544,10 @@ void InputPlan::failTimeout(std::size_t index, std::uint64_t elapsed_ms, std::ui
 }
 
 void InputPlan::releaseDue(WindowManager& wm, InputPoint point) {
+    // ★ S7 / Q2：一次读点最多抬**一条**（写预算）。⚠ `releaseAll` / `closeSessionIfDone` 的
+    //   会话收口是**例外**（§3.8 #19）：它们一次可以投影多条 up。
     for (std::size_t i = 0; i < pending_.size();) {
+        if (writes_this_point_ != 0) return;  // 本读点的写动作已用完 ⇒ 其余等下一个读点
         const PendingRelease& r = pending_[i];
         // ★ 闸门 ①（**唯一**判据）：按下之后至少跨过 `kKeyLevelReadsBeforeRelease` 个 **KeyLevel**
         //   读点 —— 也就是 guest 的 `GetAsyncKeyState` **真的读到过**那个按下电平。
@@ -511,7 +568,16 @@ void InputPlan::releaseDue(WindowManager& wm, InputPoint point) {
         emitRelease(wm, r);
         pending_.erase(pending_.begin() + static_cast<std::ptrdiff_t>(i));
         --releases_pending_;
+        writes_this_point_ = 1;  // ★ S7：抬起也是写动作 ⇒ 本读点到此为止
     }
+}
+
+bool InputPlan::buttonPending(MouseButton b) const {
+    // 一个按钮在 `pending_` 里 = 它**已按下、还没抬起** ⇒ 连点串行化（Q8-A）与 `mouse_down` 的判据。
+    for (const PendingRelease& r : pending_) {
+        if (r.button == b) return true;
+    }
+    return false;
 }
 
 void InputPlan::closeSessionIfDone(WindowManager& wm) {

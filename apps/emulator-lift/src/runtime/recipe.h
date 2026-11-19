@@ -18,6 +18,9 @@
 //     wait 5000                          ← 宿主单调毫秒（固定时长；⛔ 不带 timeout）
 //     click 1070 480 left                ← x/y = 1280×720 参考系；按钮词裸写 left|right（省略 = left）
 //                                          （⛔ 不带 timeout：点击没有可等待的东西）
+//     mouse_move 1070 480                ← 只写光标（同 click 的第一段）；同一参考系 / 同一缩放
+//     mouse_down left                    ← 用**当前设备光标位置**按下（⛔ 不带 x/y；必须有一条更早的
+//                                          `mouse_move`）；`mouse_up` 同理（拖拽 up 不回跳）
 //     profile_begin fellow-enter         ← 区间 profiler 的边界（label 只用于对齐 / 报错）
 //     profile_end fellow-enter
 //     quit                               ← 立刻结束这次运行
@@ -36,7 +39,7 @@
 //     不需要"等它成立"）：卡住由 `--time-limit` / `--max-frames` 这层看门狗报。
 //
 // ---- 能力面：**只有一份** ----
-// ★ 六条指令 + 行尾 `timeout` **每个驱动器都认**；⛔ 不存在"这个入口不认某条指令"的解析期硬错，也⛔ 不再有
+// ★ 九条指令 + 行尾 `timeout` **每个驱动器都认**；⛔ 不存在"这个入口不认某条指令"的解析期硬错，也⛔ 不再有
 //   `kPlanFeatures` / `kGraphFeatures` 这类**按入口分叉的能力面表**（2026-11-16 统一；用户口径：
 //   "不要没有新生产者的兼容层"）。`timeout` / `profile_begin` / `profile_end` / `quit` 的**语义**
 //   在各驱动器是同一份（本文件 + `recipe.cpp`）。
@@ -72,6 +75,9 @@ enum class StepKind : std::uint8_t {
     ProfileBegin = 4,   // `profile_begin <label>`（区间 profiler 的起点）
     ProfileEnd = 5,     // `profile_end <label>`（区间 profiler 的终点）
     Quit = 6,           // `quit`（立刻结束这次运行）
+    MouseMove = 7,      // `mouse_move <x> <y>`（只写光标；1280×720 参考系，缩放同 click）
+    MouseDown = 8,      // `mouse_down [left|right]`（用**当前设备光标位置**；必须有一条更早的 mouse_move）
+    MouseUp = 9,        // `mouse_up [left|right]`（用当前设备位置 ⇒ 拖拽 up 不回跳）
 };
 const char* stepKindName(StepKind k);
 
@@ -86,6 +92,8 @@ struct Step {
     // Wait（宿主毫秒）
     std::uint64_t wait_ms = 0;
     // Click（1280×720 参考系；缺省左键）
+    //   ★ MouseMove 复用 x/y（参考坐标）；MouseDown / MouseUp 复用 button（x/y **不用**：
+    //     它们的坐标 = 设备当前位置，⛔ 不在解析期烤进 step）
     int x = 0;
     int y = 0;
     MouseButton button = MouseButton::Left;
@@ -98,6 +106,14 @@ struct Step {
 
     // 门 = "要等它成立"的指令（其余指令一到就执行）。
     bool isGate() const { return kind == StepKind::AwaitScript || kind == StepKind::AwaitPosition; }
+
+    // **写动作** = 会改 guest 可见输入态 / 投影一条输入消息的指令（`click` / `mouse_move` /
+    //   `mouse_down` / `mouse_up`）。★ S7 的"一个读点最多一条写动作"按**这一个**判据，
+    //   ⛔ 不按"是不是门"（门 / `wait` / `profile_*` / `quit` 都不是写）。
+    bool isInputWrite() const {
+        return kind == StepKind::Click || kind == StepKind::MouseMove || kind == StepKind::MouseDown ||
+               kind == StepKind::MouseUp;
+    }
 };
 
 // ---------------------------------------------------------------------------------------

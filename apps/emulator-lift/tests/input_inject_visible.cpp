@@ -177,6 +177,100 @@ void caseTwoPhaseClick() {
 }
 
 // =====================================================================================
+// S6 · **拖拽**（`mouse_move` → `mouse_down` → `mouse_move` → `mouse_up`）
+//
+// 判据（红了意味着什么）：
+//   ① down 落在**第一个** `mouse_move` 之后（轻闸门：位置读点完成之后的下一个读点）；
+//   ② 拖拽中每个动作各占一个读点（S7 写预算）⇒ guest 每一拍都能看到新的 `WM_MOUSEMOVE`；
+//      第二拍 `WM_MOUSEMOVE` 的 wParam 带 `MK_LBUTTON`（设备电平的投影）；
+//   ③ up 的 lParam = **B**（不是按下点 A）⇒ 拖拽 up 不回跳；
+//   ④ 整个拖拽只有**一对** down/up，且 `mouse_down/up` 都**不进**待抬起队列
+//      （⛔ 不套闸门①/②：up 是在普通消息读点上直写的，没有任何 KeyLevel 读点）。
+// =====================================================================================
+void caseDrag() {
+    lift_test::g_current_case = "inject/drag";
+    Fixture f;
+    LIFT_CHECK(f.ok);
+    if (!f.ok) return;
+    lift::InputPlan plan;
+    plan.setClockForTest(&testNowMs);
+    f.wm.setInputPlan(&plan);
+    g_now_ms = 5000;
+    std::string err;
+    const bool loaded = plan.loadText("mouse_move 100 100\nmouse_down\nmouse_move 200 200\nmouse_up\n", "mem", &err);
+    if (!loaded) std::fprintf(stderr, "拖拽配方被拒：%s\n", err.c_str());
+    LIFT_CHECK(loaded);
+    if (!loaded) return;
+
+    const std::size_t q0 = f.wm.queueSize();
+    readPoint(f.wm, plan, lift::InputPoint::PeekMsg, false);       // move A（只写光标）
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 1);
+    LIFT_CHECK_EQ_U32(f.wm.mouseButtons(), 0u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessages(f.wm, q0, lift::input::kWmLButtonDown)), 0);
+
+    // 位置读点这一拍：move 之后**还没完成过** CursorPos 读点 ⇒ 不消费 `mouse_down`。
+    g_now_ms += 1;
+    readPoint(f.wm, plan, lift::InputPoint::CursorPos, true);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 1);
+    LIFT_CHECK_EQ_U32(f.wm.mouseButtons(), 0u);
+
+    // 这个位置读点完成之后的下一个读点：按下（在**设备当前位置** A 上）。
+    g_now_ms += 1;
+    readPoint(f.wm, plan, lift::InputPoint::PeekMsg, false);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 2);
+    LIFT_CHECK_EQ_U32(f.wm.mouseButtons(), lift::input::kMkLButton);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 0);  // ★ 不套闸门①
+
+    // move B：同一个读点里不能再冒出 up（写预算）⇒ 这里只有 WM_MOUSEMOVE。
+    g_now_ms += 1;
+    const std::size_t q_move_b = f.wm.queueSize();
+    readPoint(f.wm, plan, lift::InputPoint::PeekMsg, false);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 3);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessages(f.wm, q_move_b, lift::input::kWmMouseMove)), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessages(f.wm, q_move_b, lift::input::kWmLButtonUp)), 0);
+
+    // up B：普通消息读点直写（⛔ 不等 KeyLevel）。
+    g_now_ms += 1;
+    readPoint(f.wm, plan, lift::InputPoint::PeekMsg, false);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 4);
+    LIFT_CHECK_EQ_U32(f.wm.mouseButtons(), 0u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.releases()), 0);  // up 是配方直写，不是"自动抬起"
+    LIFT_CHECK(plan.outcome() == lift::RecipeOutcome::Done);
+
+    // ---- 只有一对 down/up；up 的 lParam 是 B（⛔ 不是按下点 A）----
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessages(f.wm, q0, lift::input::kWmLButtonDown)), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessages(f.wm, q0, lift::input::kWmLButtonUp)), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessages(f.wm, q0, lift::input::kWmMouseMove)), 2);
+    lift::WinMessage down_msg;
+    lift::WinMessage up_msg;
+    LIFT_CHECK(findMessage(f.wm, q0, lift::input::kWmLButtonDown, &down_msg));
+    LIFT_CHECK(findMessage(f.wm, q0, lift::input::kWmLButtonUp, &up_msg));
+    LIFT_CHECK_EQ_I64(decodeX(down_msg.lparam), 100);
+    LIFT_CHECK_EQ_I64(decodeY(down_msg.lparam), 100);  // 按下点 = 第一个 mouse_move 的位置
+    LIFT_CHECK_EQ_I64(decodeX(up_msg.lparam), 200);
+    LIFT_CHECK_EQ_I64(decodeY(up_msg.lparam), 200);
+    LIFT_CHECK(decodeX(up_msg.lparam) != decodeX(down_msg.lparam));  // ⛔ 不回跳
+    // 第二拍 move 的 wParam = 设备电平（按下之后带 MK_LBUTTON）。
+    lift::WinMessage m;
+    std::uint32_t second_move_wparam = 0;
+    std::size_t moves = 0;
+    for (std::size_t i = q0; i < f.wm.queueSize(); ++i) {
+        if (!f.wm.peekAt(i, &m)) continue;
+        if (m.message != lift::input::kWmMouseMove) continue;
+        ++moves;
+        if (moves == 2) second_move_wparam = m.wparam;
+    }
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(moves), 2);
+    LIFT_CHECK_EQ_U32(second_move_wparam, lift::input::kMkLButton);
+
+    // 配方走完之后的下一个读点：会话收口（交还租约 ⇒ 真鼠标重新生效）。
+    g_now_ms += 1;
+    readPoint(f.wm, plan, lift::InputPoint::CursorPos, true);
+    LIFT_CHECK(!f.wm.programDriving());
+}
+
+// =====================================================================================
 // ②' · 纯 move（`emu-ctl move` 的落地面）：只写光标，⛔ 不按键、⛔ 不冒充一次点击
 // =====================================================================================
 void caseMoveOnly() {
@@ -335,6 +429,7 @@ void caseOwnershipHandback() {
 
 int main() {
     caseTwoPhaseClick();
+    caseDrag();
     caseMoveOnly();
     caseWallclockFallbacks();
     caseOwnershipHandback();

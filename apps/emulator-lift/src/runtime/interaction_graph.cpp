@@ -102,6 +102,9 @@ void InteractionGraph::clear() {
     last_progress_insns_ = 0;
     issued_ = false;
     applied_before_ = 0;
+    last_move_x_ = 0;
+    last_move_y_ = 0;
+    have_move_ = false;
     wait_pending_ = false;
     wait_due_wall_ms_ = 0;
     identity_ = nullptr;
@@ -206,6 +209,33 @@ bool InteractionGraph::issueAction(const Step& s, std::uint64_t frame) {
         case StepKind::Quit:
             text = at + "quit\n";
             break;
+        // ★ S6：三条鼠标原语。`mouse_down/up` **不带坐标**（与配方语法一致），而
+        //   `InputScript::appendText` 每次把文本解析到一个**临时**实例（`have_pos_` 从 false 起）
+        //   ⇒ 必须在**同一段文本**里补一条同点 `mouse_move`（坐标 = 图自己的 `last_move_*`）。
+        //   代价（显式）：图臂因此为每条 down/up 多 post 一条 `WM_MOUSEMOVE` —— 只影响测试夹具
+        //   （`InteractionGraph` 没有 CLI、AOT 不 tick 它），⛔ 不要为此给 `InputScript` 加
+        //   "跨 appendText 保留位置"的第二套解析状态。
+        case StepKind::MouseMove:
+            text = at + "mouse_move " + std::to_string(s.x) + " " + std::to_string(s.y) + "\n";
+            last_move_x_ = s.x;
+            last_move_y_ = s.y;
+            have_move_ = true;
+            break;
+        case StepKind::MouseDown:
+        case StepKind::MouseUp: {
+            if (!have_move_) {
+                // 解析期已保证"down/up 前必有一条 mouse_move"（`recipe.cpp`）；走到这里说明
+                // 状态被绕过 ⇒ 响亮失败（⛔ 不猜 (0,0)、⛔ 不静默 return true）。
+                std::fprintf(stderr, "[interaction-graph] %s 之前没有生效过的 mouse_move（state=%s）\n",
+                             stepText(s).c_str(), stateName());
+                return false;
+            }
+            // 按钮词只在**非 left** 时发（与 click 同口径；trace 可 diff）。
+            const std::string button_word = s.button == MouseButton::Left ? std::string() : std::string(" right");
+            text = at + "mouse_move " + std::to_string(last_move_x_) + " " + std::to_string(last_move_y_) + "\n" +
+                   (s.kind == StepKind::MouseDown ? "mouse_down" : "mouse_up") + button_word + "\n";
+            break;
+        }
         // 门与 `wait` 不追加任何动作（`wait` 只记到期点；门在进入时已经成立）。
         case StepKind::AwaitScript:
         case StepKind::AwaitPosition:

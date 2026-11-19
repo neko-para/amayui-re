@@ -43,6 +43,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include "check.h"
 #include "fixture.h"
@@ -63,6 +64,7 @@ constexpr std::uint32_t kWmQuit = 0x0012u;  // WM_QUIT（`quit` 的交付物；�
 // 鼠标消息（只用于本文件的坐标 / 抬起断言；值来自 `runtime/input.h` 的闭集合）。
 constexpr std::uint32_t kWmMouseMove = 0x0200u;
 constexpr std::uint32_t kWmLButtonDown = 0x0201u;
+constexpr std::uint32_t kWmLButtonUp = 0x0202u;
 constexpr std::uint32_t kWmRButtonDown = 0x0204u;
 constexpr std::uint32_t kWmRButtonUp = 0x0205u;
 
@@ -233,6 +235,51 @@ bool findMessage(lift::WindowManager& wm, std::size_t from, std::uint32_t messag
         }
     }
     return false;
+}
+
+// 从 `from` 起数指定消息（⛔ 不取走）。
+std::size_t countMessage(lift::WindowManager& wm, std::size_t from, std::uint32_t message) {
+    std::size_t n = 0;
+    for (std::size_t i = from; i < wm.queueSize(); ++i) {
+        lift::WinMessage m;
+        if (wm.peekAt(i, &m) && m.message == message) ++n;
+    }
+    return n;
+}
+
+// 队列的逐条指纹（`message/wParam/lParam` 三元组）—— **重复跑**判据用它（⛔ 不比"画面动了"）。
+std::string dumpQueue(lift::WindowManager& wm) {
+    std::string out;
+    char buf[64];
+    for (std::size_t i = 0; i < wm.queueSize(); ++i) {
+        lift::WinMessage m;
+        if (!wm.peekAt(i, &m)) continue;
+        std::snprintf(buf, sizeof(buf), "%04X/%04X/%08X;", static_cast<unsigned>(m.message),
+                      static_cast<unsigned>(m.wparam), static_cast<unsigned>(m.lparam));
+        out += buf;
+    }
+    return out;
+}
+
+// 只取**按钮消息**的顺序（`D` = down / `U` = up）—— 连点串行化的判据是"DOWN,UP,DOWN,UP"。
+std::string downUpSequence(lift::WindowManager& wm) {
+    std::string out;
+    for (std::size_t i = 0; i < wm.queueSize(); ++i) {
+        lift::WinMessage m;
+        if (!wm.peekAt(i, &m)) continue;
+        if (m.message == kWmLButtonDown) {
+            out += 'D';
+        } else if (m.message == kWmLButtonUp) {
+            out += 'U';
+        }
+    }
+    return out;
+}
+
+// WM_* 的 lParam 编码（低 16 位 x、高 16 位 y；与 `runtime/input.cpp` 的 `mouseLParam` 同形）。
+std::uint32_t mouseLParam(int x, int y) {
+    return (static_cast<std::uint32_t>(static_cast<std::uint16_t>(y)) << 16) |
+           static_cast<std::uint32_t>(static_cast<std::uint16_t>(x));
 }
 
 // =====================================================================================
@@ -537,6 +584,21 @@ void caseParseErrors() {
         {"await position\n", "mem:1:", "await position"},
         {"click 1\n", "mem:1:", "缺参数"},
         {"click 1 2 =left\n", "mem:1:", "按钮词"},
+        // ★ S6：三条鼠标原语的负例（⛔ 不放松成"静默不认"、⛔ 不用 (0,0) 猜坐标）：
+        //   `mouse_move` 缺参 / 非整数 / 参数过多；`mouse_down|up` 之前在**文件里**没有 `mouse_move`
+        //   ⇒ 点名"需要先 mouse_move"；按钮词只认裸写 left|right；它们都没有可等待的东西。
+        {"mouse_move 1\n", "mem:1:", "缺参数"},
+        {"mouse_move\n", "mem:1:", "缺参数"},
+        {"mouse_move 1 2 3\n", "mem:1:", "缺参数"},
+        {"mouse_move a b\n", "mem:1:", "整数"},
+        {"mouse_down\n", "mem:1:", "mouse_move"},
+        {"mouse_up\n", "mem:1:", "mouse_move"},
+        {"mouse_down left\n", "mem:1:", "mouse_move"},
+        {"mouse_move 1 2\nmouse_down middle\n", "mem:2:", "按钮词"},
+        {"mouse_move 1 2\nmouse_up left extra\n", "mem:2:", "最多"},
+        {"mouse_move 1 2 timeout 5000\n", "mem:1:", "没有可等待的东西"},
+        {"mouse_move 1 2\nmouse_down timeout 5000\n", "mem:2:", "没有可等待的东西"},
+        {"await script TITLE\nmouse_up\n", "mem:2:", "mouse_move"},  // 门不算"更早的 mouse_move"
         // `timeout` / `profile_*` / `quit` 的**参数**仍然硬错（能力面统一了，⛔ 不是"什么都收"）：
         // ★ 行内 `timeout`：孤立成行 / 挂在 `wait` / `click` / `quit` / `profile_*` 上都是硬错，
         //   而且文案必须**指向修法**（不是只说"这里不对"）。
@@ -586,23 +648,37 @@ void caseParseErrors() {
         LIFT_CHECK(cross_err.find("末尾") != std::string::npos);
     }
 
-    // ---- 合法配方：**六条指令 + 行尾 `timeout`** 都吃（能力面只有一份），`#` / 空行 / 行尾注释 /
+    // ---- 合法配方：**九条指令 + 行尾 `timeout`** 都吃（能力面只有一份），`#` / 空行 / 行尾注释 /
     //      大小写指令名都忽略 ----
     lift::InputPlan plan;
     std::string err;
     const bool ok = plan.loadText(
         "\n# 注释\nAwait script TITLE timeout 2500  # 行尾注释\n\nWait 250\nclick 1 2 right\n"
         "profile_begin w\nprofile_end w\n"
-        "await POSITION some-name 0x0000039C 0x00000460 timeout 7000  # 未知脚本名不在解析期校验\nquit\n",
+        "await POSITION some-name 0x0000039C 0x00000460 timeout 7000  # 未知脚本名不在解析期校验\n"
+        "mouse_move 1070 480\nmouse_down right\nmouse_up\n"
+        "quit\n",
         "mem", &err);
     if (!ok) std::fprintf(stderr, "合法配方被拒：%s\n", err.c_str());
     LIFT_CHECK(ok);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.steps()), 7);  // `timeout` 不是一条指令
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.steps()), 10);  // `timeout` 不是一条指令
     // 行尾 `timeout` 挂在**同一行那个门**上（两种门都验；`wait` / `click` 等不能带）。
     LIFT_CHECK(plan.stepAt(0) != nullptr && plan.stepAt(0)->timeout_ms == 2500u);
     LIFT_CHECK(plan.stepAt(5) != nullptr && plan.stepAt(5)->timeout_ms == 7000u);
     LIFT_CHECK(plan.stepAt(1) != nullptr && plan.stepAt(1)->timeout_ms == 0u);  // `wait` 没有守卫
     LIFT_CHECK(plan.stepAt(2) != nullptr && plan.stepAt(2)->timeout_ms == 0u);  // `click` 也没有
+    // ★ S6：三条原语的 step 模型（`Step` 复用 x/y/button；down/up 的坐标**不**在解析期烤进来）。
+    LIFT_CHECK(plan.stepAt(6) != nullptr && plan.stepAt(6)->kind == lift::StepKind::MouseMove);
+    LIFT_CHECK(plan.stepAt(6) != nullptr && plan.stepAt(6)->x == 1070 && plan.stepAt(6)->y == 480);
+    LIFT_CHECK(plan.stepAt(7) != nullptr && plan.stepAt(7)->kind == lift::StepKind::MouseDown);
+    LIFT_CHECK(plan.stepAt(7) != nullptr && plan.stepAt(7)->button == lift::MouseButton::Right);
+    LIFT_CHECK(plan.stepAt(8) != nullptr && plan.stepAt(8)->kind == lift::StepKind::MouseUp);
+    LIFT_CHECK(plan.stepAt(8) != nullptr && plan.stepAt(8)->button == lift::MouseButton::Left);
+    // 规范化写法（trace / 失败报告用）：词表与解析器同一份。
+    LIFT_CHECK(lift::stepText(*plan.stepAt(6)) == "mouse_move 1070 480");
+    LIFT_CHECK(lift::stepText(*plan.stepAt(7)) == "mouse_down right");
+    LIFT_CHECK(lift::stepText(*plan.stepAt(8)) == "mouse_up");
+    LIFT_CHECK(std::string(lift::stepKindName(lift::StepKind::MouseMove)) == "mouse_move");
 }
 
 // =====================================================================================
@@ -1126,6 +1202,411 @@ void caseProfileAndQuit() {
     LIFT_CHECK_EQ_U32(wm->mouseButtons(), 0u);
 }
 
+// =====================================================================================
+// S6 · `mouse_move` / `mouse_down` / `mouse_up`：缩放 / 轻闸门 / 直写（§4.6 判据 1）
+//
+// 判据（红了意味着什么）：
+//   ① `mouse_move 1070 480` 在 1920×1080 客户区 ⇒ 设备 client = (1605,720)（与 `click` 同一公式）；
+//      `WM_MOUSEMOVE` 的 lParam 是同一个映射结果（⛔ 第二套缩放）。
+//   ② `mouse_down` **轻闸门**：上一条 `mouse_move` 之后**没完成过** CursorPos 读点 ⇒ **不消费**该 step
+//      （光标读点那一拍也还没按）；跨过它之后的下一个读点才按下。
+//   ③ `mouse_down` / `mouse_up` ⛔ **不进**待抬起队列（`pendingReleases` 恒 0、`armedPresses` 恒 0）：
+//      释放由配方自己控制（Q3：⛔ 不套闸门①/②）。
+//   ④ `mouse_down` 的墙钟兜底：整屏不读位置 ⇒ `kPressFallbackMs` 到期仍然按下（⛔ 永远挂着）。
+// =====================================================================================
+void caseMousePrimitives() {
+    lift_test::g_current_case = "input-plan/mouse-primitives";
+    g_now_ms = 5000;
+
+    // ---- ① 缩放：非 1:1 客户区，`mouse_move` 与 `click` 的映射同一份 ----
+    {
+        lift::WindowManager wm;
+        const std::uint32_t hwnd = wm.createWindow("PlanTest", 0u, 0u, 0u, 0u, 1920, 1080, 0u);
+        LIFT_CHECK(hwnd != 0);
+        lift::InputPlan plan;
+        std::string err;
+        LIFT_CHECK(plan.loadText("mouse_move 1070 480\n", "mem", &err));
+        const std::size_t q0 = wm.queueSize();
+        plan.atPoint(wm, lift::InputPoint::PeekMsg);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 1);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pending()), 0);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.fired()), 0);  // move 不是"动作"
+        int cx = 0;
+        int cy = 0;
+        wm.cursorClientPos(hwnd, &cx, &cy);
+        LIFT_CHECK_EQ_I64(cx, 1605);  // 1070 * 1920 / 1280
+        LIFT_CHECK_EQ_I64(cy, 720);   // 480 * 1080 / 720
+        lift::WinMessage move_msg;
+        LIFT_CHECK(findMessage(wm, q0, kWmMouseMove, &move_msg));
+        LIFT_CHECK_EQ_U32(move_msg.lparam, mouseLParam(1605, 720));
+        LIFT_CHECK_EQ_U32(move_msg.wparam, 0u);  // 没有按下的按钮
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessage(wm, q0, kWmLButtonDown)), 0);
+    }
+
+    // ---- ② + ③ 轻闸门 / 不进待抬起队列 ----
+    {
+        lift::WindowManager wm;
+        const std::uint32_t hwnd = wm.createWindow("PlanTest", 0u, 0u, 0u, 0u, 1280, 720, 0u);
+        LIFT_CHECK(hwnd != 0);
+        lift::InputPlan plan;
+        plan.setClockForTest(&testNowMs);
+        std::string err;
+        LIFT_CHECK(plan.loadText("mouse_move 100 100\nmouse_down\n", "mem", &err));
+        const std::size_t q0 = wm.queueSize();
+        g_now_ms = 6000;
+        plan.atPoint(wm, lift::InputPoint::PeekMsg);  // 只把光标放过去（写预算也用掉）
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 1);
+        LIFT_CHECK_EQ_U32(wm.mouseButtons(), 0u);
+        // 指针读点这一拍：move 之后**还没完成过** CursorPos 读点 ⇒ 不消费（⛔ 不猜"位置已经旧了"）。
+        g_now_ms += 1;
+        plan.atPoint(wm, lift::InputPoint::CursorPos);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 1);
+        LIFT_CHECK_EQ_U32(wm.mouseButtons(), 0u);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessage(wm, q0, kWmLButtonDown)), 0);
+        // 这个 CursorPos 读点完成之后 ⇒ 下一个读点按下（且只有 down，不进 pending_）。
+        g_now_ms += 1;
+        plan.atPoint(wm, lift::InputPoint::PeekMsg);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 2);
+        LIFT_CHECK_EQ_U32(wm.mouseButtons(), lift::input::kMkLButton);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 0);  // ★ 不套闸门①/②
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.armedPresses()), 0);
+        lift::WinMessage down_msg;
+        LIFT_CHECK(findMessage(wm, q0, kWmLButtonDown, &down_msg));
+        LIFT_CHECK_EQ_U32(down_msg.lparam, mouseLParam(100, 100));  // 设备当前位置
+        LIFT_CHECK_EQ_U32(down_msg.wparam, lift::input::kMkLButton);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessage(wm, q0, kWmLButtonDown)), 1);
+        (void)plan.releaseAll(wm);  // 这条 mouse_down 没有 up ⇒ 收尾（⛔ 不留给下一条配方）
+        LIFT_CHECK_EQ_U32(wm.mouseButtons(), 0u);
+        // `mouse_up` 直写：不排队、不进 armed_、不等任何闸门 ⇒ 下一个读点立刻发 WM_LBUTTONUP。
+        lift::InputPlan up_plan;
+        up_plan.setClockForTest(&testNowMs);
+        LIFT_CHECK(up_plan.loadText("mouse_move 100 100\nmouse_down\nmouse_up\n", "mem", &err));
+        const std::size_t q1 = wm.queueSize();
+        up_plan.atPoint(wm, lift::InputPoint::PeekMsg);   // move
+        up_plan.atPoint(wm, lift::InputPoint::CursorPos);  // 位置读点（down 的闸门还没满足）
+        up_plan.atPoint(wm, lift::InputPoint::KeyLevel);   // down（⛔ KeyLevel 不是 down 的闸门，这里只是下一个读点）
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(up_plan.stepsApplied()), 2);
+        // 预算：down 那条写动作已用完 ⇒ 同一读点里 `mouse_up` 留到下一点（S7）。
+        g_now_ms += 1;
+        up_plan.atPoint(wm, lift::InputPoint::KeyLevel);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(up_plan.stepsApplied()), 3);
+        LIFT_CHECK_EQ_U32(wm.mouseButtons(), 0u);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(up_plan.pendingReleases()), 0);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessage(wm, q1, kWmLButtonUp)), 1);
+        lift::WinMessage up_msg;
+        LIFT_CHECK(findMessage(wm, q1, kWmLButtonUp, &up_msg));
+        LIFT_CHECK_EQ_U32(up_msg.lparam, mouseLParam(100, 100));
+    }
+
+    // ---- ④ 墙钟兜底：整屏不读位置 ⇒ kPressFallbackMs 到期仍然按下（⛔ 提前按）----
+    {
+        lift::WindowManager wm;
+        LIFT_CHECK(wm.createWindow("PlanTest", 0u, 0u, 0u, 0u, 1280, 720, 0u) != 0);
+        lift::InputPlan plan;
+        plan.setClockForTest(&testNowMs);
+        std::string err;
+        LIFT_CHECK(plan.loadText("mouse_move 10 20\nmouse_down\n", "mem", &err));
+        g_now_ms = 7000;
+        plan.atPoint(wm, lift::InputPoint::PeekMsg);  // only move（纯消息型屏）
+        LIFT_CHECK_EQ_U32(wm.mouseButtons(), 0u);
+        g_now_ms += lift::InputPlan::kPressFallbackMs / 5;
+        plan.atPoint(wm, lift::InputPoint::PeekMsg);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 1);  // ⛔ 还没按
+        LIFT_CHECK_EQ_U32(wm.mouseButtons(), 0u);
+        g_now_ms += lift::InputPlan::kPressFallbackMs;
+        plan.atPoint(wm, lift::InputPoint::PeekMsg);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 2);
+        LIFT_CHECK_EQ_U32(wm.mouseButtons(), lift::input::kMkLButton);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 0);
+        (void)plan.releaseAll(wm);
+        LIFT_CHECK_EQ_U32(wm.mouseButtons(), 0u);
+    }
+}
+
+// =====================================================================================
+// S6 · 拖拽：down A → move B → up B（§4.6 判据 2）
+//
+// 判据（红了意味着什么）：
+//   ① 序列 = MOVE(A) → DOWN(A) → MOVE(B) → UP(B)：拖拽中每条鼠标动作各占**一个读点**（S7 的写预算），
+//      ⛔ 不是同一个读点里只剩最后一个位置；
+//   ② `WM_MOUSEMOVE` 的 wParam 在按下之后带 `MK_LBUTTON`（**设备电平的投影**）；
+//   ③ `UP` 的 lParam = **B**（不是按下点 A）⇒ 拖拽 up 不回跳（M4）。
+// =====================================================================================
+void caseDrag() {
+    lift_test::g_current_case = "input-plan/drag";
+    lift::WindowManager wm;
+    const std::uint32_t hwnd = wm.createWindow("PlanTest", 0u, 0u, 0u, 0u, 1280, 720, 0u);
+    LIFT_CHECK(hwnd != 0);
+    if (hwnd == 0) return;
+    lift::InputPlan plan;
+    plan.setClockForTest(&testNowMs);
+    std::string err;
+    const bool loaded = plan.loadText("mouse_move 100 100\nmouse_down\nmouse_move 200 200\nmouse_up\n", "mem",
+                                      &err);
+    if (!loaded) std::fprintf(stderr, "拖拽配方被拒：%s\n", err.c_str());
+    LIFT_CHECK(loaded);
+    if (!loaded) return;
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.steps()), 4);
+
+    const std::size_t q0 = wm.queueSize();
+    g_now_ms = 8000;
+    plan.atPoint(wm, lift::InputPoint::PeekMsg);  // ① MOVE(A)
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 1);
+    g_now_ms += 1;
+    plan.atPoint(wm, lift::InputPoint::CursorPos);  // ② 位置读点：down 的轻闸门还没满足
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 1);
+    g_now_ms += 1;
+    plan.atPoint(wm, lift::InputPoint::PeekMsg);  // ③ DOWN(A)；预算用完 ⇒ move B 留到下一点
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 2);
+    LIFT_CHECK_EQ_U32(wm.mouseButtons(), lift::input::kMkLButton);
+    g_now_ms += 1;
+    plan.atPoint(wm, lift::InputPoint::PeekMsg);  // ④ MOVE(B)（wParam 带 MK_LBUTTON）
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 3);
+    int cx = 0;
+    int cy = 0;
+    wm.cursorClientPos(hwnd, &cx, &cy);
+    LIFT_CHECK_EQ_I64(cx, 200);
+    LIFT_CHECK_EQ_I64(cy, 200);
+    g_now_ms += 1;
+    plan.atPoint(wm, lift::InputPoint::PeekMsg);  // ⑤ UP(B)（回读设备当前位置 ⇒ 不回跳）
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 4);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pending()), 0);
+    LIFT_CHECK(plan.outcome() == lift::RecipeOutcome::Done);
+    LIFT_CHECK(!plan.failed());
+    LIFT_CHECK_EQ_U32(wm.mouseButtons(), 0u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 0);  // ⛔ 没进待抬起队列
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.releases()), 0);         // up 是配方直写，不是"自动抬起"
+
+    // ---- 消息面：只有一对 down/up；up 的 lParam 是 B（⛔ 不是按下点 A）----
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessage(wm, q0, kWmLButtonDown)), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessage(wm, q0, kWmLButtonUp)), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessage(wm, q0, kWmMouseMove)), 2);
+    lift::WinMessage m;
+    std::vector<std::uint32_t> moves;
+    std::vector<std::uint32_t> move_wparams;
+    std::uint32_t down_lparam = 0;
+    std::uint32_t up_lparam = 0;
+    for (std::size_t i = q0; i < wm.queueSize(); ++i) {
+        if (!wm.peekAt(i, &m)) continue;
+        if (m.message == kWmMouseMove) {
+            moves.push_back(m.lparam);
+            move_wparams.push_back(m.wparam);
+        } else if (m.message == kWmLButtonDown) {
+            down_lparam = m.lparam;
+        } else if (m.message == kWmLButtonUp) {
+            up_lparam = m.lparam;
+        }
+    }
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(moves.size()), 2);
+    if (moves.size() == 2) {
+        LIFT_CHECK_EQ_U32(moves[0], mouseLParam(100, 100));
+        LIFT_CHECK_EQ_U32(moves[1], mouseLParam(200, 200));
+        LIFT_CHECK_EQ_U32(move_wparams[0], 0u);                    // 按下之前：没有 MK 位
+        LIFT_CHECK_EQ_U32(move_wparams[1], lift::input::kMkLButton);  // 按下之后：电平的投影
+    }
+    LIFT_CHECK_EQ_U32(down_lparam, mouseLParam(100, 100));
+    LIFT_CHECK_EQ_U32(up_lparam, mouseLParam(200, 200));
+    LIFT_CHECK(up_lparam != mouseLParam(100, 100));  // ⛔ 不回跳
+}
+
+// =====================================================================================
+// S6 · **重复跑**（REQ 判据 3）：同一份拖拽配方在两个**全新 fixture** 上各跑一遍
+//
+// 判据（红了意味着什么）：两遍的**消息序列**（message + wParam + lParam）逐条相同；
+//   两遍都 `pending == 0`；没有门 timeout 误报。⛔ 不以"画面动了"为判据。
+// =====================================================================================
+const char* const kDragRecipe =
+    "mouse_move 300 200\nmouse_down\nmouse_move 640 360\nmouse_up\n";
+
+std::string runDragOnce(bool* ok) {
+    *ok = false;
+    lift::WindowManager wm;
+    const std::uint32_t hwnd = wm.createWindow("PlanTest", 0u, 0u, 0u, 0u, 1280, 720, 0u);
+    if (hwnd == 0) return std::string();
+    lift::InputPlan plan;
+    plan.setClockForTest(&testNowMs);
+    std::string err;
+    if (!plan.loadText(kDragRecipe, "mem", &err)) return err;
+    g_now_ms = 9000;  // 两遍同一时钟起点（⛔ 不让墙钟兜底参与判据）
+    const lift::InputPoint points[] = {
+        lift::InputPoint::PeekMsg,   // move A
+        lift::InputPoint::CursorPos,  // 位置读点（down 的闸门：这一拍还不满足）
+        lift::InputPoint::PeekMsg,    // down
+        lift::InputPoint::PeekMsg,    // move B
+        lift::InputPoint::PeekMsg,    // up
+    };
+    for (const lift::InputPoint p : points) {
+        g_now_ms += 1;
+        plan.atPoint(wm, p);
+    }
+    *ok = plan.stepsApplied() == 4 && plan.pending() == 0 && !plan.failed() &&
+          plan.outcome() == lift::RecipeOutcome::Done && plan.pendingReleases() == 0 &&
+          wm.mouseButtons() == 0u;
+    return dumpQueue(wm);
+}
+
+void caseDragRepeat() {
+    lift_test::g_current_case = "input-plan/drag-repeat";
+    bool ok_a = false;
+    bool ok_b = false;
+    const std::string dump_a = runDragOnce(&ok_a);
+    const std::string dump_b = runDragOnce(&ok_b);
+    LIFT_CHECK(ok_a);
+    LIFT_CHECK(ok_b);
+    LIFT_CHECK(!dump_a.empty());
+    LIFT_CHECK(dump_a == dump_b);  // ★ 逐条相同（message/wParam/lParam）
+    std::printf("[drag-repeat] a=%s b=%s\n", dump_a.c_str(), dump_b.c_str());
+}
+
+// =====================================================================================
+// S7 · **一个读点最多一条写动作**（§4.7 判据 1/2）
+//
+// 判据（红了意味着什么）：
+//   ① 两条 `mouse_move` 分两个读点各发**一条** `WM_MOUSEMOVE`（同一个读点里不能只剩最后一个位置）；
+//   ② 控制层同一读点连投两条 move ⇒ 只落**第一条**，第二条留在队首（`queuedClicks() == 1`）。
+// =====================================================================================
+void caseOneWritePerReadPoint() {
+    lift_test::g_current_case = "input-plan/one-write-per-read-point";
+    g_now_ms = 10000;
+    {
+        lift::WindowManager wm;
+        const std::uint32_t hwnd = wm.createWindow("PlanTest", 0u, 0u, 0u, 0u, 1280, 720, 0u);
+        LIFT_CHECK(hwnd != 0);
+        lift::InputPlan plan;
+        std::string err;
+        LIFT_CHECK(plan.loadText("mouse_move 100 100\nmouse_move 200 200\n", "mem", &err));
+        const std::size_t q0 = wm.queueSize();
+        plan.atPoint(wm, lift::InputPoint::PeekMsg);
+        int cx = 0;
+        int cy = 0;
+        wm.cursorClientPos(hwnd, &cx, &cy);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 1);
+        LIFT_CHECK_EQ_I64(cx, 100);
+        LIFT_CHECK_EQ_I64(cy, 100);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessage(wm, q0, kWmMouseMove)), 1);
+        plan.atPoint(wm, lift::InputPoint::PeekMsg);
+        wm.cursorClientPos(hwnd, &cx, &cy);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 2);
+        LIFT_CHECK_EQ_I64(cx, 200);
+        LIFT_CHECK_EQ_I64(cy, 200);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessage(wm, q0, kWmMouseMove)), 2);
+    }
+    {
+        // ② 控制层立即队列：同一个读点连投两条 move ⇒ 第一条落地、第二条留队首。
+        lift_test::g_current_case = "input-plan/control-queue-one-write";
+        lift::WindowManager wm;
+        const std::uint32_t hwnd = wm.createWindow("PlanTest", 0u, 0u, 0u, 0u, 1280, 720, 0u);
+        LIFT_CHECK(hwnd != 0);
+        lift::InputPlan plan;
+        LIFT_CHECK(plan.enqueueMove(10, 10));
+        LIFT_CHECK(plan.enqueueMove(20, 20));
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.queuedClicks()), 2);
+        const std::size_t q0 = wm.queueSize();
+        plan.atPoint(wm, lift::InputPoint::PeekMsg);
+        int cx = 0;
+        int cy = 0;
+        wm.cursorClientPos(hwnd, &cx, &cy);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.queuedClicks()), 1);  // ★ 其余留队首
+        LIFT_CHECK_EQ_I64(cx, 10);
+        LIFT_CHECK_EQ_I64(cy, 10);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessage(wm, q0, kWmMouseMove)), 1);
+        plan.atPoint(wm, lift::InputPoint::PeekMsg);
+        wm.cursorClientPos(hwnd, &cx, &cy);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.queuedClicks()), 0);
+        LIFT_CHECK_EQ_I64(cx, 20);
+        LIFT_CHECK_EQ_I64(cy, 20);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessage(wm, q0, kWmMouseMove)), 2);
+    }
+}
+
+// =====================================================================================
+// S7 · **连点串行化**（§4.7 判据 3 / Q8-A）
+//
+// 判据（红了意味着什么）：
+//   ① 第一条 click 还按着（`pending_`）⇒ 第二条 **不消费**（`stepsApplied()` 停在 1），
+//      ⛔ 也不再"同按钮先抬起"（那样第一条的 down 一次都不会被 guest 读到）；
+//   ② 抬起第一条之后的下一个读点才 arm 第二条；
+//   ③ 消息序列必须是 **DOWN,UP,DOWN,UP** —— ⛔ 不是 DOWN,DOWN,UP,UP。
+// =====================================================================================
+void caseTwoClicksSerialized() {
+    lift_test::g_current_case = "input-plan/two-clicks-serialized";
+    lift::WindowManager wm;
+    const std::uint32_t hwnd = wm.createWindow("PlanTest", 0u, 0u, 0u, 0u, 1280, 720, 0u);
+    LIFT_CHECK(hwnd != 0);
+    if (hwnd == 0) return;
+    lift::InputPlan plan;
+    plan.setClockForTest(&testNowMs);
+    std::string err;
+    const bool loaded = plan.loadText("click 100 100\nclick 200 200\n", "mem", &err);
+    LIFT_CHECK(loaded);
+    if (!loaded) return;
+    g_now_ms = 11000;
+    const std::size_t q0 = wm.queueSize();
+    int cx = 0;
+    int cy = 0;
+
+    plan.atPoint(wm, lift::InputPoint::CursorPos);  // 第一条 arm（只 move）
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.armedPresses()), 1);
+    wm.cursorClientPos(hwnd, &cx, &cy);
+    LIFT_CHECK_EQ_I64(cx, 100);
+    LIFT_CHECK_EQ_I64(cy, 100);
+
+    plan.atPoint(wm, lift::InputPoint::CursorPos);  // 第一条 press（跨过一个完成的位置读点）
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 1);
+
+    // 第一条还按着 ⇒ 第二个 click 的两个读点都**不消费**（也不强制抬起）。
+    for (int i = 0; i + 1 < static_cast<int>(lift::InputPlan::kKeyLevelReadsBeforeRelease); ++i) {
+        plan.atPoint(wm, lift::InputPoint::KeyLevel);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 1);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 1);
+    }
+    // 第 N 个 KeyLevel 读点：第一条抬起（写动作）⇒ 同读点**不再** arm 第二条。
+    plan.atPoint(wm, lift::InputPoint::KeyLevel);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 1);  // ★ 写预算
+
+    plan.atPoint(wm, lift::InputPoint::CursorPos);  // 第二条 arm
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 2);
+    wm.cursorClientPos(hwnd, &cx, &cy);
+    LIFT_CHECK_EQ_I64(cx, 200);
+    LIFT_CHECK_EQ_I64(cy, 200);
+    plan.atPoint(wm, lift::InputPoint::CursorPos);  // 第二条 press
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 1);
+    for (std::uint64_t i = 0; i < lift::InputPlan::kKeyLevelReadsBeforeRelease; ++i) {
+        plan.atPoint(wm, lift::InputPoint::KeyLevel);
+    }
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.fired()), 2);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.releases()), 2);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.stepsApplied()), 2);
+    LIFT_CHECK(plan.outcome() == lift::RecipeOutcome::Done);
+
+    // ★ 消息序列：DOWN,UP,DOWN,UP（⛔ DOWN,DOWN,UP,UP = 两条按在同一拍里）
+    const std::string seq = downUpSequence(wm);
+    std::printf("[two-clicks-serialized] down/up seq=%s stepsApplied=%llu\n", seq.c_str(),
+                static_cast<unsigned long long>(plan.stepsApplied()));
+    LIFT_CHECK(seq == "DUDU");
+    lift::WinMessage m;
+    std::uint32_t down_lparams[2] = {0u, 0u};
+    std::uint32_t up_lparams[2] = {0u, 0u};
+    std::size_t nd = 0;
+    std::size_t nu = 0;
+    for (std::size_t i = q0; i < wm.queueSize(); ++i) {
+        if (!wm.peekAt(i, &m)) continue;
+        if (m.message == kWmLButtonDown && nd < 2) down_lparams[nd++] = m.lparam;
+        if (m.message == kWmLButtonUp && nu < 2) up_lparams[nu++] = m.lparam;
+    }
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(nd), 2);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(nu), 2);
+    LIFT_CHECK_EQ_U32(down_lparams[0], mouseLParam(100, 100));
+    LIFT_CHECK_EQ_U32(up_lparams[0], mouseLParam(100, 100));
+    LIFT_CHECK_EQ_U32(down_lparams[1], mouseLParam(200, 200));
+    LIFT_CHECK_EQ_U32(up_lparams[1], mouseLParam(200, 200));
+    LIFT_CHECK_EQ_U32(wm.mouseButtons(), 0u);
+}
+
 }  // namespace
 
 int main() {
@@ -1140,5 +1621,10 @@ int main() {
     caseCoordinateScale();
     caseForcedRelease();
     caseTrace();
+    caseMousePrimitives();
+    caseDrag();
+    caseDragRepeat();
+    caseOneWritePerReadPoint();
+    caseTwoClicksSerialized();
     return lift_test::finish("input-plan-read-points");
 }
