@@ -49,7 +49,7 @@
 | 2 | 生成物 | 生成视图与 DB 全部写进 `.gitignore`（两台机器各自重建时不许互相打架） |
 | 3 | 大小写 | 保持**零大小写冲突**（win/mac 不敏感、Linux CI 敏感）。加文件前顺带确认路径大小写唯一 |
 | 4 | 符号链接 | **可以用**：外部素材就用它引用（如旧仓 `raw/`）。只要**不 track** |
-| 5 | LFS | **直接用**：大二进制走 LFS；两台机器都 `git lfs install`。**不要**为"不支持 LFS"设计降级 |
+| 5 | LFS | **直接用**：大二进制走 LFS；两台机器都 `git lfs install`（**先** `git config core.hooksPath .githooks`，LFS 生成的钩子**不入库**，见 §14.7）。**不要**为"不支持 LFS"设计降级 |
 | 6 | 非 ASCII 路径 | **可以用**：中 / 日文件名照旧。**不要**为了"怕出问题"改名，也不要把符号链接改造成配置索引 |
 
 ★ **开发平台优先级**（用户口径）：**win32 优先**；macOS 侧只做**兼容性验证**、不阻塞任何一轮。
@@ -508,9 +508,15 @@ git -C E:\Projects\amayui-re-dev merge --ff-only main
 
 ```bash
 git config core.hooksPath .githooks                 # 每个 clone / 每台机器一次（worktree 共用同一份 config）
+git lfs install                                     # ★ 必须在上一条之后：lfs 钩子装进 core.hooksPath
 git config --get core.hooksPath                     # 应打印 .githooks ——打印不出来就是**没生效**
 ```
 
+- ★ **LFS 的 4 个钩子不入库**（`post-checkout` / `post-commit` / `post-merge` / `pre-push`）：它们是 `git lfs install`
+  的**生成物**，报错文案随 lfs 版本变（3.4 之前写 `.git/hooks/...`，3.8 改写为 `core.hooksPath`）⇒ 入库就会变成
+  "谁 install 谁改 4 个文件"的 diff；且 Windows 上生成的 `644` 在 mac / Linux 上会被 git **静默忽略**
+  （`hint: ... hook was ignored because it's not set as executable`）。⇒ `.gitignore` 已忽略这 4 个路径，
+  换机 / 新 clone 各按上面的顺序装一次即可。
 - ⛔ 反向（main 上别长代码）**故意不做执行器**：14.2 留了"集成问题可在 main 直接修"的口子，硬拦会把它堵死。
 - ⛔ `git commit --no-verify` 是后门：绕过它就等于明知故犯让真相分两份；真绕了要在提交说明里写明原因。
   `git merge --no-verify` 对 `pre-merge-commit` 同理（绕过 = 明知故犯违反 §14.2 的 ff-only 口径）。

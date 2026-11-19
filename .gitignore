@@ -35,3 +35,10 @@ tmp/
 /data/privileged-audit.log
 
 .DS_Store
+
+# —— git lfs install 的生成钩子：不入库（文案随 lfs 版本变，见 AGENTS §2 第 5 条）——
+# 生成顺序：先 `git config core.hooksPath .githooks`，再 `git lfs install`。
+/.githooks/post-checkout
+/.githooks/post-commit
+/.githooks/post-merge
+/.githooks/pre-push
