@@ -1,6 +1,7 @@
 // emulator-lift · Shape A / T2b：**AOT 执行循环**（`AotHost::run` + 块边界的宿主泵）
 //
-// ★ 复刻范围 = T2 §1.4 的**五件 guest 语义**（⛔ 不复刻 profiler / token / trace / watch / 块计时）：
+// ★ 复刻范围 = T2 §1.4 的**五件 guest 语义**（⛔ 不复刻 profiler / trace / watch / 块计时；
+//   `guestToken()` 只接了每轮 `arm`/`disarm` + Phase-0 读数，**没有**每块持令牌 —— 见下面"已知偏差"）：
 //   ① `eip → 派发表项`（lifted）、`eip → lift_shim`（shim 桩）、两者都不是 ⇒ **响亮停**；
 //   ② 三个合成 EA（`0x7FFEF008` 续延 / `0x7FFEF004` 定时器返回 / SEH 派发）+ 块边界定时器触发；
 //   ③ 按**与解释器同一张表**（T2 §2.2）归类停因；
@@ -11,8 +12,11 @@
 //
 // ★ 与解释器的**已知偏差**（都记在这里，⛔ 不装作没有）：
 //   · `--present` 只有 headless（presenter 没有 sink，`gpuRaster()` = nullptr）；
-//   · 没有 profiler / 影子栈 / guest token / 输入脚本 / 交互图 / 声音语义 —— 它们默认全关，
+//   · 没有 profiler / 影子栈 / 输入脚本 / 交互图 / 声音语义 —— 它们默认全关，
 //     本来就是宿主控制面（T2 §7.4）；
+//   · `guestToken()` 只有**每轮一次** `arm` / `disarm`（`AotHost::run`）与摘要读数；解释器那种
+//     "每块 `GuestToken::Guard`"**没有**复刻 ⇒ 块边界上的宿主续延（如 `EnumFontFamiliesExA` 的
+//     free）在令牌外碰 guest 堆，会记进 `violations`（`REQ-01M7SAHRTGZ760B35CQXASXT0R`，未修）；
 //   · 边界→`cpu.eip` 的"块缓存"这一层不存在：EA 要么在派发表里、要么是 shim 桩，否则响亮停
 //     （D10 P4：⛔ 不设"返回哨兵 = 结束"的约定）。
 // ★ 本文件的诊断开关读 getenv（`LIFT_AOT_SHIM_TRACE`）；MSVC 口径里那是 deprecated 警告，不是问题。
@@ -1017,6 +1021,12 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     //     `printRunSummary` 之后 —— 摘要里的 `audio     :` 一行读的是**同一份** stats，先 end 再打
     //     才能让 `device=` / `dump=` 反映"这一轮真的开了什么"（统计值不受 end 影响）。
     audio_.end();
+    // ★ run 结束：关掉违规计数。⚠ 计数本身**保留**（摘要还要读），只是之后的宿主侧析构 / 收尾
+    //   不再算进本轮账 —— 与解释器 `machine.cpp:1879` 同一个落点、同一条理由（`audio_.end()` 之后，
+    //   因为 `end()` 自己还会走 shim / 容器访问）。★ 与入口的 `arm()` 严格成对：本函数中
+    //   "生成物在场"之后的路径只有这一个出口（`audio_.end()` 也只有这一处）。
+    //   ⛔ 缺省档同样调用（`disarm()` 只关一个 bool，无输出、不改任何读数）。
+    guestToken().disarm();
     // ---- S3 泵的**收口读数**（opt-in 一行到 stderr；⛔ 缺省档**零输出**）----
     //   ★ 为什么必须留这个口：本单最硬的一条是"**off 档一次都不进 pump**"，而 off 档按定义
     //     **不许有 stdout 输出**（默认档逐字不变）⇒ 那条判据在正式摘要面上**没有**观察点。

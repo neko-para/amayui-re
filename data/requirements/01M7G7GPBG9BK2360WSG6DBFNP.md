@@ -2,21 +2,24 @@
 
 - id: REQ-01M7G7GPBG9BK2360WSG6DBFNP
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M7JHSDH16HCVEV4BA6NKSHN2
+- done_reason: 能力已交付（不是 flag 缺口）：2026-11-17 落地 732e503（feeder 经派发表取 LiftFn，音频线程直接执行 IR；私有 audio_cpu_ 副本避免重入；不改 §12.8）。证据：docs/03-emulator/audio.md §2.1（AOT --audio sdl = 真 feeder 线程，feeder=host-thread / lead 19200 B）、§3.1 的 mac run（--audio sdl --sound ⇒ audio-pump: calls=0 fills=3 pushed=428800 feeder=host-thread lead=19200，pushed-played=19200 B）、§5.2 的 win32 3 跑（device=ok / underruns=0 / pushed=46,097,280）。子单 41H0 已 done（2026-11-19）⇒ 按"父 done ⇒ 子树无活"收口。
 - tags: [emulator-lift, aot, audio]
 
-## 现象
+## 现象（历史；2026-11-17/18 已修）
 
-AOT 臂**恒无声**。用户实测："目前没有声音"。查清后确认这**不是 flag 缺口**，是整条链路不存在：
+AOT 臂**曾恒无声**（用户 2026-11-17 实测："目前没有声音"）。当时确认**不是 flag 缺口**，是整条链路不存在：
 
 - `repo:apps/emulator-lift/src/aot/aot_host.cpp` 硬写 `AudioMode::Off` + `sound=false`；
 - `aot_run.cpp` 只有 `audio_.afterGuestCall()`，**没有 begin / pump / end**（对照解释器 `machine.cpp` 的 begin/pump/end 三个函数）；
 - ⇒ 设备 / 混音 / 喂料 / guest DS 交付**全都不存在**。
 
-本轮已做（**只做可指定与说真话**，不是本单）：AOT 臂 `--sound` 现在**可指定**，并打一条**一次性**说明
-（"本臂不会有声音 + 理由 + 本单号"），⛔ 不 exit 2、⛔ 不静默。文案唯一落点
-`repo:apps/emulator-lift/src/runtime/present_flags.h` 的 `kAotSoundNotice`。
+★ 现状（2026-11-19 收口）：`--audio sdl --sound` 起真 feeder 线程（`feeder=host-thread`，lead 19200 B），feeder 的
+guest 执行器走 AOT IR 派发（`repo:apps/emulator-lift/src/aot/aot_feeder.cpp`）；读数见
+`docs/03-emulator/audio.md` §2.1 / §3.1 / §5.2（§3.1 的 mac run：`pushed=428800` / `played=409600` /
+`pushed-played=19200 B`；§5.2 的 win32 3 跑 `device=ok` / `underruns=0` / `pushed=46,097,280`）。
+子单 `REQ-01M7JFEA7J8AWQHPXTW6GB41H0` 已于 2026-11-19 `done` ⇒ 本节点按"父 done ⇒ 子树无活"收口。
 
 ## 能力面（本单的判据）
 
@@ -26,19 +29,13 @@ AOT 臂**恒无声**。用户实测："目前没有声音"。查清后确认这*
 - 守卫形状：一条 pure 断言（"`--sound` 的说明文案必须含本单号、且只在给了 `--sound` 时出现一次"）**已经存在**
   （`cli-aot-flags` 的 ④）⇒ 本单**不要**再重复它；要新增的是**能力**面那条。
 
-## 选路（未定；定案后本段降级成一行裁决）
+## 选路（已裁决：B + feeder 私有 X86 副本；2026-11-17 落地 `732e503`）
 
-真 feeder 线程**必须用解释器的 `BlockCache`**（`audio.cpp:1649` / `:1677` / `:2208`），而 AOT 的 `cpu.cache == nullptr`
-⇒ 与 §12.8 第 1 条（执行来源只有 IR 与 shim）正面冲突。三条互斥的路：
-
-| 路 | 做法 | 代价 / 风险 |
-|---|---|---|
-| **A** | 给 AOT 一个"只读解码 cache"（不是执行 cache）：feeder 只拿它**取指/解码**，不执行 | 要证明它不会变成执行来源；§12.8 的守卫要能区分 |
-| **B** | feeder 改经**派发表**取 `LiftFn`，在音频引擎线程里直接调 | 重入：`aot_run::run()` 没有重入守卫，`regs_` / `cpu_` 是单份状态 |
-| **C** | 明确 drop：长期无音频，只保证"可指定 + 说真话" | 最省，但用户要的是能听见 |
-
-★ **选路不由本单自裁**：A/B 能不能成立取决于 `REQ-01M7JN55VE9SA3KDHARYSSP6QW`（spike）的两条读数
-（续延机制是否真的被执行、只读解码 cache 能否与执行 cache 分开）⇒ **先做 spike，再由用户裁路**，本单才动手。
+原问题：feeder 一度**必须**用解释器的 `BlockCache`，而 AOT 的 `cpu.cache == nullptr` ⇒ 与 §12.8 第 1 条冲突。
+已裁决并落地的是 **B**：feeder 经**派发表**取 `LiftFn`，在音频线程直接执行 IR；重入不靠重入守卫，而靠
+`AudioEngine::audio_cpu_`（`cpu_` 的整份私有副本）—— `runAotFeederGuest` 只碰这份副本，主线程 `cpu_` / `regs_`
+只在 fill 边界同步；注入 runner 时 `audio_cpu_.cache` 被置空（`audio.cpp:1813-1815`）⇒ 不需要 A 路的"只读解码 cache"，
+也不改 §12.8。C 路（长期无音频）不再考虑。结论与读数见 spike 单 `REQ-01M7JN55VE9SA3KDHARYSSP6QW` 的 `done_reason`。
 
 ## 裁决（2026-11-17，用户口径）
 
@@ -48,13 +45,15 @@ AOT 臂**恒无声**。用户实测："目前没有声音"。查清后确认这*
 - ⇒ **"暂停必须 park feeder" 从"前置契约"降级为"可选加固"**：⛔ 不为它单独调研、⛔ 不设计音频↔输入通道。
 - ⇒ 本单只在"**真出声**"这条能力上收口；音频侧的时序 / 配合问题**发现即记，不阻塞任何一轮**。
 - ⇒ 2026-11-16 那份音频×暂停综合复审（`.tmp/audio-pause/`）里 §4/§5 的"配合契约"按本裁决**不再作为待办**；
-  其中仍有效的只有 §3 的三条选路判据（上表）与 §7 的最小 spike（已转成 spike 单）。
+  其中仍有效的只有 §3 的三条选路判据（已由 spike 收口）与 §7 的最小 spike（已转成 spike 单）。
 
 ## 复现 / 排障
 
-```powershell
-.\out\emulator-lift-aot.exe --skip-logo --present window --sound --game-dir ..\..\dist\install --appdata <空目录>
-# 期望：stderr 出现那条一次性说明（含本单号）；⛔ 不会有声音（本单未做前）
+```bash
+cd apps/emulator-lift
+LIFT_AOT_AUDIO_TRACE=1 ./out/emulator-lift-aot --skip-logo --max-frames 12 \
+  --audio sdl --sound --game-dir ../../links/install --appdata <空目录> --log-level info
+# 期望：audio     : mode=sdl … device=ok … muted=0；audio-pump: calls=0 fills>0 pushed>0 feeder=host-thread lead=19200
 ```
 
 ## 边界

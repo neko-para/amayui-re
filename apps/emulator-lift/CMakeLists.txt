@@ -2400,6 +2400,24 @@ add_test(NAME aot-overlay
     COMMAND lift-aot-overlay $<TARGET_FILE:emulator-lift-aot> "${AGE_SECTFIX_EXE}" "${LIFT_STRESS_GAME_DIR}")
 set_tests_properties(aot-overlay PROPERTIES SKIP_RETURN_CODE 77)
 
+# ---- AOT 令牌摘要（`REQ-01M7JFEA7J8AWQHPXTW6GB41H0` 的判据 3）：**真 run** 的接线守卫 ----------
+# ★ 判据：`--profile --max-frames 1` ⇒ stdout 恰好一行 `token     : violations=<n> max-concurrent=<m>`
+#   （`first=` 只在 n != 0 时出现）；缺省档（不给 `--profile`）⇒ 那一行与 Phase-0 四行**都不出现**，
+#   但 `frames    : 1` 在场。红了意味着：AOT 不再 `guestToken().arm(...)` / 摘要那条读数被删 /
+#   它越过了 `phase0Enabled()` 闸门（缺省档 stdout 逐字不变被破坏）。
+# ★ ⛔ 不断言 `violations==0`：2026-11-19 实测 AOT 真跑是 2（`first=GuestHeap::free`，另一个缺陷
+#   `REQ-01M7SAHRTGZ760B35CQXASXT0R`）。那条进需求单，⛔ 不在这里改弱或归零。
+# ★ 顶层无条件注册 ⇒ **pure** 档（§12.4 判据 = 注册位置；输入假定在场，缺了测试体 `LIFT_SKIP(77)`）。
+# ★ 子进程 spawn 产品 exe ⇒ 必须 `add_dependencies`（否则 `--target lift-aot-token-summary` 只重建
+#   守卫 exe，产品 exe 停在变异前 ⇒ 变异自检假绿；同形坑见 `aot-audio-wiring` / `aot-overlay`）。
+add_executable(lift-aot-token-summary tests/aot_token_summary.cpp)
+target_link_libraries(lift-aot-token-summary PRIVATE emulator-lift-runtime)
+add_dependencies(lift-aot-token-summary emulator-lift-aot)
+add_test(NAME aot-token-summary
+    COMMAND lift-aot-token-summary $<TARGET_FILE:emulator-lift-aot> "${LIFT_STRESS_GAME_DIR}"
+            "${AGE_SECTFIX_EXE}")
+set_tests_properties(aot-token-summary PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
 if(DEFINED ENV{LIFT_AUDIO_SDL_DEVICE})
     add_executable(lift-audio-sdl-device tests/audio_sdl_device.cpp)
     target_link_libraries(lift-audio-sdl-device PRIVATE emulator-lift-runtime)

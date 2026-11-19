@@ -634,7 +634,23 @@ void AotHost::printRunSummary(const AotRunResult& r, std::FILE* out) const {
     //   `Machine::dumpRunSummary` 调的是**同一个** `dumpTokenPhase0`（唯一实现 = 唯一格式）。
     //   开关由 `AotHost::run` 里的 `guestToken().arm(opts.profile)` 决定（`--profile` ∪ `LIFT_AUDIO_TRACE`）
     //   ⇒ 缺省档 `phase0Enabled()==false` ⇒ **一行不加**（默认档 stdout 逐字不变）。
-    if (guestToken().phase0Enabled()) dumpTokenPhase0(out, shims_.all());
+    //    ★ 行首那一条 `token     : violations=… max-concurrent=…` 与解释器 `Machine::dumpRunSummary`
+    //      （`machine.cpp:2732`）**同形**：同一个计数器、同一组字段、`first=` 只在非 0 时出现。
+    //      为什么放在 Phase-0 四行**前面**：`token` 是不变式的总账、四行是它的分解 ⇒ 先总账后分项；
+    //      位置本身不带语义（两处都在同一个 `if` 里）。
+    //    ⛔ 为什么必须受 `phase0Enabled()` 保护（而不是像解释器那样无条件打）：AOT 的**缺省档 stdout
+    //      必须逐字不变**（`AGENTS.md` §12.8 第 3 条；音频 S0–S4 那轮的最硬判据）。`--profile`（或
+    //      `LIFT_AUDIO_TRACE`）是这条读数唯一的开档口，与紧邻的 Phase-0 四行同一个闸门
+    //      ⇒ 缺省档一行不加、开档档一行不少。
+    if (guestToken().phase0Enabled()) {
+        const GuestToken& token = guestToken();
+        std::fprintf(out, "token     : violations=%llu max-concurrent=%u%s%s\n",
+                     static_cast<unsigned long long>(token.violations()), token.maxConcurrent(),
+                     token.violations() == 0 ? "" : " first=",
+                     token.violations() == 0 ? ""
+                                             : (token.firstViolationSite() ? token.firstViolationSite() : "?"));
+        dumpTokenPhase0(out, shims_.all());
+    }
     // ---- `--profile` 的整块读数（**关档时一行都不打** ⇒ 全文与基线逐字相同）----
     // ★ 落点为什么在这里：`aot_main.cpp` 在 `printRunSummary` 之后只有 stderr 回声 + `return`，
     //   所以这里就是"stdout 末尾（进程退出前）"。⛔ 不改 main 的打印顺序。

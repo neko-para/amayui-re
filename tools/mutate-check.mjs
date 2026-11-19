@@ -1605,6 +1605,33 @@ const MUTATIONS = [
       '`controlOnResume` 计数 3 → 0 断言红）',
   },
 
+  // ── AOT 臂的令牌 arm / disarm 与摘要读数（`REQ-01M7JFEA7J8AWQHPXTW6GB41H0`）──
+  //   ★ 两条各钉一类**静默**失效：
+  //     ① 删 `arm(...)` ⇒ `phase0Enabled()` 恒 false ⇒ 真跑用例的「恰好一行 `token     :`」落空；
+  //     ② 删 `disarm()` ⇒ 收口后仍记账（进程退出前的十几毫秒里**不可观测**）⇒ 只有**形态**能钉住；
+  //        ⛔ 别把这条说成运行期守卫（`tools/test/aot-token-shape.test.mjs` 的 @why 已标明）。
+  {
+    file: 'apps/emulator-lift/src/aot/aot_run.cpp',
+    from: '    guestToken().arm(opts.profile);',
+    to: '    // [变异] 删掉 AOT 的 arm 调用（phase0 关着）',
+    guard: 'ctest:aot-token-summary',
+    ctest: 'aot-token-summary',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-aot-token-summary',
+    what:
+      'AOT 不再 `guestToken().arm(...)` ⇒ 违规计数整轮关着、摘要的 `token     :` 行不再出现 ⇒ ' +
+      '`aot-token-summary` 的 profile 档（恰好一行 + 与解释器同形）当场红',
+  },
+  {
+    file: 'apps/emulator-lift/src/aot/aot_run.cpp',
+    from: '    guestToken().disarm();',
+    to: '    // [变异] 删掉 AOT 的 disarm 调用（收口后仍记账）',
+    guard: 'tools/test/aot-token-shape.test.mjs',
+    what:
+      'AOT 收口不再 `disarm()` ⇒ 之后的宿主析构 / 收尾仍记进本轮账（运行期不可观测）⇒ ' +
+      '`aot-token-shape` 的 arm/disarm 成对断言当场红（★ 形态守卫，证明力弱）',
+  },
+
   // ── 窗口 profile（`REQ-01M7JNX5MR7RWTBNBAE70PBCQP`；守卫 = `tests/aot_window_profile.cpp`）──
   //   ★ 代表"闭式里漏了一个桶"这一类静默失效：把 `shim` 从归一用的包络里去掉 ⇒
   //     归一后 `lift+boundary` 把 shim 那一份吞掉 ⇒ 表里各行百分比互相矛盾。
