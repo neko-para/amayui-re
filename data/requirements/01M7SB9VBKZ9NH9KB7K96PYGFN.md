@@ -2,10 +2,12 @@
 
 - id: REQ-01M7SB9VBKZ9NH9KB7K96PYGFN
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M7JHSFB2SSBBNSJ82YDED8M1
+- verify: apps/emulator-lift/tests/input_plan.cpp#input-plan/two-clicks-serialized
 - repro: apps/emulator-lift/src/runtime/input_plan.cpp#armClickAt
 - severity: S3
+- done_reason: S7（0a720cf）删掉 armClickAt 的强制抬起，改成“一个读点最多一条写动作 + 同按钮 pending_ 时 click/mouse_down 不消费”；两条连续 click 现在逐条串行、消息序列为 DOWN,UP,DOWN,UP（测试 input-plan/two-clicks-serialized 实测 seq=DUDU，⛔ 不是 DDUU）。repro 保留为重开条件。
 - tags: [emulator-lift, input-plan]
 
 ## 现象（2026-11-19 / macOS arm64 / 只读代码 + 纯夹具）

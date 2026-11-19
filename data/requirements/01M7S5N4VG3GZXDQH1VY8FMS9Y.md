@@ -2,8 +2,10 @@
 
 - id: REQ-01M7S5N4VG3GZXDQH1VY8FMS9Y
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M7JHSFB2SSBBNSJ82YDED8M1
+- verify: apps/emulator-lift/tests/input_inject_visible.cpp#inject/drag
+- done_reason: S6（0a720cf）给 --input-plan 加了鼠标原语：mouse_move <x> <y>（1280×720 缩放同 click）、mouse_down/up [left|right]（用设备当前位置、up 不回跳），--help 同表更新；拖拽由 inject/drag 覆盖（down A → move B → up B，up 的 lParam 是 B、只有一对 down/up），解析负例（缺参数 / 无前置 move / 未知按钮 / 挂 timeout）在 input-plan-read-points。判据 4（resume --for-ms 到点重停）已在 tools/emu-ctl.mjs:55/112 文档化。
 - tags: [emulator-lift, input-plan, control, tooling]
 
 ## 现象（2026-11-19 / macOS arm64）
