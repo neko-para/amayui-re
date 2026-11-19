@@ -2,7 +2,7 @@
 
 - id: REQ-01M7SB9R0BAYYY4H1VSHZA4GAJ
 - type: req
-- status: open
+- status: doing
 - parent: REQ-01M7JHSFB2SSBBNSJ82YDED8M1
 - tags: [emulator-lift, input]
 
@@ -12,7 +12,6 @@
 SDL / 配方 / 控制层 / 机器内驱动器都只是**驱动**它；shim 的读点只读设备，**不要求 SDL 窗口或事件泵存在**。
 用户口径（2026-11-19）：“shim 层需要一个‘虚拟鼠标’，而 input-plan 和 SDL 的输入都只是控制鼠标移动，
 而不是两遍分别组合。需要确保 shim 看到的状态是唯一的，不依赖 SDL。”
-
 ## 现状审计（2026-11-19 / macOS arm64 / 只读，无构建）
 
 - **已满足**：guest 可见输入的**事件写入路径只有一条** —— 18 个 `input::*` 落点 + 5 个会话写，
@@ -25,7 +24,6 @@ SDL / 配方 / 控制层 / 机器内驱动器都只是**驱动**它；shim 的�
 - **“两遍分别组合”的 5 个形状**：①同一个 `click` 由 plan 与 `InputScript` 两套 hold 策略组合；
   ②overlay 是 OS 路径上的第二道闸门；③`--cursor-warp` 要独立回灌抑制；④`SetCursorPos` 是隐藏推进点；
   ⑤`MSG.time` 有三个来源。
-
 ## 设计（v2，待裁决；稿在 `.tmp/input-virtual-mouse/`）
 
 - 新件 `runtime/input_device.{h,cpp}`（`InputDevice`），由 `WindowManager` **以成员持有**（同线程 / 同生命周期）；
@@ -35,7 +33,6 @@ SDL / 配方 / 控制层 / 机器内驱动器都只是**驱动**它；shim 的�
 - 四个驱动者（SDL / 配方 / 控制层 / `InteractionGraph`）都只调 `input::*`；SDL 适配器只做
   “窗口像素 → guest 屏幕坐标”的换算，不持有状态。
 - 设计稿 / 独立复审 / 修订记录：`.tmp/input-virtual-mouse/{design,review,changes-v2}.md`（未入库，裁决后落 docs）。
-
 ## 切片（行为标记）
 
 | 片 | 主题 | 行为 | 前置 |
@@ -48,23 +45,28 @@ SDL / 配方 / 控制层 / 机器内驱动器都只是**驱动**它；shim 的�
 | S6 | 配方 `mouse_move` / `mouse_down` / `mouse_up` | 增量（旧配方不变） | Q3 |
 | S7 | 一个读点最多一条写动作 + 连点串行化 | **变**（guest 时序） | Q2 / Q8 |
 | S8 | 文档切片（`MSG.time` 等） | 无代码 | Q5-B 已定 |
+## 裁决（2026-11-19，用户：“无问题，按这个策略处理即可”）
 
-## 待用户裁决（5 条，推荐见设计 §6）
+- **Q1** = 推荐：1→0 且来源是 OS 才 post；Program-owned 不动；失焦 / 暂停 post up。
+- **Q2** = 推荐：接受“一个读点最多施加一条写动作”（含 `drainImmediate`）。
+- **Q3** = 推荐：`mouse_move` + `mouse_down/up`；down 轻闸门、up 直写、滚轮不被光标写失败丢弃。
+- **Q6** = 推荐 A：overlay 注入点击过 router，并实现 `--ui-input`（新切片 S9）。
+- **Q8** = 推荐 A：删除连点强制抬起，连点串行化。
+- Q4 取消（解释器 target 已退役）；Q5 选 B（`MSG.time` 只写文档）；Q7 设计已定（`Driver::Guest`）。
+## 实施顺序（按依赖）
 
-- **Q1** OS 释放 / 失焦 / 暂停的电平收口（推荐：1→0 且来源是 OS 才 post；Program-owned 不动）。
-- **Q2** 一个读点最多施加一条写动作（推荐接受，含 `drainImmediate`）。
-- **Q3** 新原语与事件类保证（推荐：`mouse_move` + `mouse_down/up`；down 轻闸门、up 直写）。
-- **Q6** overlay 的注入点击是否过 router / 是否实现 `--ui-input`（推荐 A：过 router + 实现）。
-- **Q8** 连点强制抬起与闸门①（推荐 A：不再强制抬起，连点串行化）。
-
-已定/取消：Q4 取消（解释器 target 已退役，属内部清理）；Q5 选 B（只写文档）；Q7 设计已定（`Driver::Guest`）。
-
+1. **S1 → S2 → S3**：逐字节不变，一次批（设备实体 / 消息投影 / 位图派生）。
+2. **S4**：单一租约 + `Driver::Guest` + 转移投影（Q1 / Q7；改 guest 可见语义）。
+3. **S7**：一个读点一条写动作 + 连点串行化（Q2 / Q8）。
+4. **S6**：配方 `mouse_move` / `mouse_down` / `mouse_up`（Q3；S7 之后再落，拖拽自动串行）。
+5. **S5**：overlay 指针改读设备。
+6. **S9**：overlay 注入点击过 router + `--ui-input`（Q6）。
+7. **S8**：文档切片（`MSG.time` / 过期判据 / 文档债）。
 ## 判据（实施时）
 
 - 逐字节不变的片：`ctest` 与 `pnpm test`/`pnpm verify` 全绿，现有 `input-plan*` / `messagebox` / `cursor-warp` 用例逐项不变。
 - 语义片：新用例的断言形状见设计 §4（真实 CTest 名实施时定，⛔ 不挂假锚）。
 - 收口时把设计稿落 `docs/03-emulator/input-device.md`，并更新 `docs/03-emulator/input-plan.md` 的落点表。
-
 ## 边界
 
 - ⛔ 不恢复 `--input-script` / 图语法；⛔ 不引入第二份状态；⛔ 不把 SDL 事件直接当 guest 状态。
