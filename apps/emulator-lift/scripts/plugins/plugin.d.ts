@@ -51,13 +51,23 @@ export interface FrameInfo {
     readonly presented?: boolean;
 }
 
-/** EngineRead：同步、无暂停、便宜；global.get/frames/scriptPos/frameHash。 */
+/** EngineRead：同步、无暂停、便宜；global.get/frames/scriptPos/frameHash。
+ *
+ * ★ 切片状态（C2a 实现面，2026-11-20）：
+ *   - `global.get`：**已在 C2a 实现**（`ctx.read.global.get`）；
+ *   - `frames` / `scriptPos`：**C2b** 才接（`EngineRead` 接口在 C1 只声明了 `globalGet`）；
+ *   - `frameHash`：**留 C4**（runtime 里没有帧 hash 源；唯一实现在宿主的 `Presenter::lastHash`）。
+ *     ⚠ C2a 的实现**不安装**这个属性 ⇒ 调用是 `TypeError`（⛔ 不是"返回 0"；D-C2-6）。
+ */
 export interface ReadApi {
     readonly global: {
         get<K extends GlobalKind>(kind: K, id: number): GlobalValue<K>;
     };
+    /** C2b（未实现）。 */
     frames(): readonly FrameInfo[];
+    /** C2b（未实现）。 */
     scriptPos(): ScriptPos;
+    /** 留 C4（C2a **不安装**这个属性 ⇒ 调用 TypeError；⛔ 不返回 0）。 */
     frameHash(): number;
 }
 
@@ -269,27 +279,63 @@ export interface RenderCtx {
     readonly log: LogApi;
 }
 
-/** RunCtx：一次 Run 的 callback 上下文；Edit/Input/Read/Trigger/UI/Run。 */
+/** `ctx.now`：**本读点的读数快照**（C2a；与 `FiredEvent`/`TimeoutEvent` 的 `TriggerEventBase` 同源）。
+ *
+ * ★ **只在本回调内有效**（D-C2-7）：宿主**每次回调新建**这个值对象 ⇒ ⛔ 不要把它存进模块变量
+ *   （存了以后下一次回调读到的是"那次回调的值"，而不是当前读点）。
+ * ★ 有效才给值：`script` / `pos` / `mouse` 只在宿主那一边真的读到的时候出现（⛔ 不编 0 / 空串）；
+ *   `posValid` / `readIndex` / `point` 恒有（`posValid=false` 表示"位置暂时读不到"，不要当成 0）。
+ */
+export interface RunNow {
+    readonly script?: string;
+    readonly pos?: number;
+    readonly posValid: boolean;
+    readonly readIndex: number;
+    readonly point: InputPoint;
+    readonly mouse?: { readonly x: number; readonly y: number };
+}
+
+/**
+ * RunCtx：一次 Run 的 callback 上下文；Edit/Input/Read/Trigger/UI/Run。
+ *
+ * ★ 切片状态（C2a，2026-11-20）：
+ *   - 已实现：`edit` / `input` / `read.global.get` / `trigger` / `ui`（**只写**宿主本地状态）/
+ *     `profile` / `state` / `params` / `log` / `fail` / `finish` / `quit` / `now`；
+ *   - ⛔ **不安装**：`draw`（C2b；`onTrigger` 不画）、`run` / `dispatch`（C5）——`ctx.run` 在 C2a
+ *     是 `undefined`（⛔ 不是"有但抛"）；也不安装 `sample` / `screenshot`（永远不做）。
+ */
 export interface RunCtx<State = Record<string, unknown>> {
     readonly edit: EditApi;
     readonly input: InputApi;
     readonly read: ReadApi;
     readonly trigger: TriggerApi;
     readonly ui: UiApi;
+    /** ⚠ **C5**（C2a 里是 `undefined`）。Run 的 status/abort/events/dispatch。 */
     readonly run: RunApi;
     readonly profile: ProfileApi;
-    readonly state: State;                     // per-Run；只放数据；不跨 endpoint/Run 共享
+    /** per-Run；只放数据；不跨 endpoint/Run 共享。宿主建它时对 `initialState` 做**浅拷贝**（见下）。 */
+    readonly state: State;
     readonly params: Readonly<Record<string, string>>;
+    /** `ctx.log(level, message, data?)`：**一行一条、有界、去重**；`data` 当前**不进日志行**
+     *  （结构化数据请先 `String(...)` 再传 message）。 */
     readonly log: LogApi;
-    /** 失败当前 Run；name 是可选的具名状态，reason 是原因。 */
+    /** **本读点的读数快照**；每次回调新建、只在本回调内有效（⛔ 不要存进模块变量）。 */
+    readonly now: RunNow;
+    /** 失败当前 Run；name 是可选的具名状态，reason 是原因。
+     *  ★ 终态异常：本回调里**已经提交**的 `ctx.input.*` 会被立刻丢弃（⛔ 不再落地）。 */
     fail(name?: string, reason?: string): void;
-    /** 结束当前 Run；exitCode 可映射历史 exit 5。 */
+    /** 结束当前 Run；exitCode 可映射历史 exit 5。
+     *  ★ 正常收口：**不**丢弃本回调提交的 input（最后一个 `ctx.input.click` 仍会落地）。 */
     finish(exitCode: number, reason?: string): void;
-    /** 请求宿主停机（WM_QUIT + stop_requested）；Run 收口/releaseOwner。 */
+    /** 请求宿主停机（WM_QUIT + stop_requested）；Run 收口/releaseOwner。
+     *  ★ 终态异常（同 `fail`）：本回调已提交的 input 会被立刻丢弃。 */
     quit(reason?: string): void;
 }
 export interface PluginModule<State = Record<string, unknown>> {
-    /** 宿主在 start 之前初始化 ctx.state；省略 ⇒ {} as State。 */
+    /** 宿主在 start 之前初始化 ctx.state；省略 ⇒ {} as State。
+     *  ★ **浅拷贝**（`Object.assign({}, initialState)`，D-C2-7）：沙箱里没有 `JSON` / `structuredClone`
+     *    ⇒ 嵌套对象**不**深拷贝，也不承诺"同 runtime 两个 Run 共享/不共享"（C2 只有一个 Run）。
+     */
     initialState?: State;
     render?: (ctx: RenderCtx) => void;
     start?: (ctx: RunCtx<State>) => Trigger | Trigger[] | null;
