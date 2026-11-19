@@ -83,9 +83,12 @@ function drainEvents(ctx: RenderCtx): void {
 }
 
 function render(ctx: RenderCtx): void {
+    // ★ 两个"没有值"的口都要判（C2b）：`mouse()` 这一帧没有读数 ⇒ `undefined`；
+    //   而 `buttons`（三键电平）在 C2 没有读数源 ⇒ **缺键**（⛔ 不编 false）。
+    //   ⇒ 两者都按"全部抬起"处理，hover 也直接 false（⛔ 不拿 `{x:0,y:0}` 算命中）。
     const mouse = ctx.game.mouse();
-    const down = mouse.buttons.left;
-    const hover = hit(mouse.x, mouse.y);
+    const down = mouse !== undefined && mouse.buttons !== undefined && mouse.buttons.left;
+    const hover = mouse !== undefined && hit(mouse.x, mouse.y);
     // render 没有按下/抬起事件，只有 buttons 电平 ⇒ 自己做一个边沿。
     const pressed = down && !mouseWasDown && hover;
     mouseWasDown = down;

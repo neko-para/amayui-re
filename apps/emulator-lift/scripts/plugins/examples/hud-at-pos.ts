@@ -115,8 +115,11 @@ function render(ctx: RenderCtx): void {
     const width = Math.max(HUD_MIN_W, title.width + HUD_PAD * 2);
     const height = title.height + HUD_PAD * 2 + state.lines.length * HUD_LINE_H;
 
+    // ★ 这一帧没有鼠标读数 ⇒ `mouse` 是 `undefined`（C2b：host 没有值时**不编 0**）
+    //   ⇒ hover 直接 false，⛔ 不拿 `{x:0,y:0}` 去算命中（那会画出一个假的 hover）。
     const mouse = ctx.game.mouse();
     const hover =
+        mouse !== undefined &&
         mouse.x >= HUD_ANCHOR_X &&
         mouse.x < HUD_ANCHOR_X + width &&
         mouse.y >= HUD_ANCHOR_Y &&

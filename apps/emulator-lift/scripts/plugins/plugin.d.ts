@@ -48,13 +48,17 @@ export type InputPoint =
     | "fileRead";
 export interface ScriptPos {
     readonly script: string;
-    readonly pos: number;
+    /** ★ 只有宿主**真的读到**位置才有这个键（`valid:false` ⇒ 缺键；⛔ 不编 0）。
+     *  C2b 实现 = `RenderCtx.read.scriptPos()`（top 帧 + `pos_ok`）。 */
+    readonly pos?: number;
     readonly valid: boolean;   // false = marker 暂时不可读；不要当成 0
 }
 export interface FrameInfo {
     readonly index: number;
     readonly script: string;
-    readonly pos: number;
+    /** ★ 只有 **top 帧**（有执行点）才有这个键；非 top 帧缺键（⛔ 不拿 0 冒充）。
+     *  `hash` / `presented` 在 runtime 里没有源 ⇒ 实现**不安装**（C4 再接）。 */
+    readonly pos?: number;
     readonly hash?: number;
     readonly presented?: boolean;
 }
@@ -74,9 +78,9 @@ export interface ReadApi {
         get<K extends GlobalKind>(kind: K, id: number): GlobalValue<K>;
     };
     /** C2b（只在 `RenderCtx.read` 上；没有源 / 宿主报错 / 空表 ⇒ `undefined`，⛔ 不编空数组）。 */
-    frames(): readonly FrameInfo[];
-    /** C2b（只在 `RenderCtx.read` 上；没有 top 帧 ⇒ `undefined`）。 */
-    scriptPos(): ScriptPos;
+    frames(): readonly FrameInfo[] | undefined;
+    /** C2b（只在 `RenderCtx.read` 上；没有源 / 没有 top 帧 ⇒ `undefined`）。 */
+    scriptPos(): ScriptPos | undefined;
     /** 留 C4（**不安装**这个属性 ⇒ 调用 TypeError；⛔ 不返回 0）。 */
     frameHash(): number;
 }
@@ -271,17 +275,27 @@ export type LogApi = (level: LogLevel, message: string, data?: unknown) => void;
 
 /** render 只拿当帧 readings；不阻塞、不做 guest 写；按钮可 dispatch。
  *
- * ★ C2b 状态：`mouse()` / `localFrames()` 已实现（当帧 `UiFrameReadings`：读数没有值 ⇒ `undefined`）。
- *   ⚠ `mouse().buttons`（三键电平）在 C2 的读数里**没有源** ⇒ 实现**不安装**这个键
+ * ★ C2b 状态：`mouse()` / `localFrames()` 已实现（当帧 `UiFrameReadings`；**读数没有值 ⇒ `undefined`**，
+ *   ⛔ 不编 0 / 空数组）。类型上必须能表达这一点（`c2b1` 复审 F1）。
+ *   ⚠ `mouse().buttons`（三键电平）在 C2 的读数里**没有源** ⇒ 实现**不安装**这个键、类型是**可选**
  *   （⛔ 不编 `false`：那会让"鼠标按着"与"没有源"长得一样；C2b-2 的窗口装配 / C4 再接）。
  */
 export interface GameRead {
-    localFrames(): readonly FrameInfo[];
-    mouse(): {
-        readonly x: number;
-        readonly y: number;
-        readonly buttons: { readonly left: boolean; readonly right: boolean; readonly middle: boolean };
-    };
+    /** 没有源（`readings.frames == null`）/ 宿主报错 / 空表 ⇒ `undefined`（⛔ 不编空数组）。 */
+    localFrames(): readonly FrameInfo[] | undefined;
+    /** 这一帧没有鼠标读数 ⇒ `undefined`（⛔ 不编 `{x:0,y:0}`）。 */
+    mouse():
+        | {
+            readonly x: number;
+            readonly y: number;
+            /** C2 没有按键电平源 ⇒ 缺键（见上）。 */
+            readonly buttons?: {
+                readonly left: boolean;
+                readonly right: boolean;
+                readonly middle: boolean;
+            };
+        }
+        | undefined;
 }
 /** render 只拿当帧 readings；模块级变量是 per-plugin 状态（render/onTrigger 共享）。
  *
