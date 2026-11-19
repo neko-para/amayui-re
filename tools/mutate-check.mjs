@@ -3199,10 +3199,12 @@ const MUTATIONS = [
     file: 'apps/emulator-lift/src/aot/aot_main.cpp',
     from:
       '    const bool present_window_flag = present_driver_set || present_vsync_set || present_hidden ||\n' +
-      '                                     present_screenshot_set || cursor_warp || overlay || !ui_script.empty();',
+      '                                     present_screenshot_set || cursor_warp || overlay || !ui_script.empty() ||\n' +
+      '                                     ui_input_set;',
     to:
       '    const bool present_window_flag = present_driver_set || present_vsync_set || present_hidden ||\n' +
-      '                                     present_screenshot_set || overlay || !ui_script.empty();  // 变异：cursor_warp 不算窗口参数',
+      '                                     present_screenshot_set || overlay || !ui_script.empty() ||\n' +
+      '                                     ui_input_set;  // 变异：cursor_warp 不算窗口参数',
     guard: 'ctest:cli-aot-flags',
     ctest: 'cli-aot-flags',
     buildDir: 'apps/emulator-lift/out',
