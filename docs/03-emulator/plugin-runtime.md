@@ -766,10 +766,12 @@ export default plugin;   // 宿主 QJS 读 default 导出；⛔ 不读 globalThi
   `ctx.state` 只放数据（不是 step 计数器）：
 
 ```js
-// scripts/control/lib/save.js
+// scripts/plugins/lib/save.js
 export function loadSave(slot) {
-  const rowY = ({ 4: 328, 5: 388, 6: 450 })[slot];  // 实测表，⛔ 不用公式猜
-  if (rowY === undefined) throw new Error(`slot ${slot} 没有实测行中心`);
+  // 实测表（`docs/03-emulator/scripts/SAVE.md:112-124`；行距 ≈59.5，⛔ 不是 40）。
+  // 只收 0–6：7–9 未实测 ⇒ 抛错，⛔ 不用公式猜。
+  const rowY = ({ 0: 91, 1: 150, 2: 209, 3: 269, 4: 328, 5: 388, 6: 447 })[slot];
+  if (rowY === undefined) throw new Error(`slot ${slot} 没有实测行中心（只测了 0–6）`);
   return {
     start(ctx) {
       ctx.input.click(1070, 480);
@@ -785,7 +787,12 @@ export function loadSave(slot) {
           return ctx.trigger.afterPosition("SBUNKI", 0x09F8, 0x0B18, { name: "load:sbunki" });
         case "load:sbunki":
           ctx.input.click(640, 323);
-          return [];                             // done
+          return ctx.trigger.afterPosition("SBUNKI", 0x0AF8, 0x0B18, { name: "load:confirm2" });
+        case "load:confirm2":
+          ctx.input.click(690, 323);
+          return ctx.trigger.afterScript("SC0000", { name: "load:sc0000" });
+        case "load:sc0000":
+          return [];                             // done（加载完成）
         default:
           ctx.fail(ev.name, `unknown name: ${ev.name}`); return [];
       }
