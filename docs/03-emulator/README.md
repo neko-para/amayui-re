@@ -12,6 +12,7 @@
 | **"我们测到过 X"**（观察：命令 + 读数 + 日期 + 口径；过期不删，标 `stale`） | `observations.md` |
 | **"曾经有 bug Y"**（现象 / 根因 / 修法 / 代表守卫 / 复现命令） | `defects.md` |
 | **数字怎么比**（profiler 口径、墙钟在哪个 build 上可比、音频 underrun 判据） | `measurement.md` |
+| **SAVE05 移动卡顿基准怎么跑、怎么判**（配方 `scripts/recipes/save05-move.plan`；visible/hidden 两档命令 · N=3 · 仪器档 prof60 · 8 尖峰帧 + `boundary` ns/派发 + 语义指纹 · 本轮读数与待核） | `perf-bench-save05.md` |
 | **AOT lift 的静态指令预算**（host/guest、块边界税、循环/派发上界；一次性读数与复核命令） | `aot-instruction-budget.md` |
 | **AOT 该不该开 LTO / 改回 single LL**（A/B0/B1/B2/C 对照；一次性读数、LSP 污染标注与复核命令） | `aot-lto-evaluation.md` |
 | **blind wipe（场景命令族 kind 2）转场为什么卡**（身份 EA · 每帧工作量模型 · H1–H6 · `--until` 盲区 · 配方 `scripts/recipes/sc0000-wipe.plan` · timed 读数 · **按帧 shim 分桶**（`--profile-slow-frames`）的读数与未定项） | `wipe-profile.md` |

@@ -1,0 +1,88 @@
+# save05-move.plan —— SAVE05「移动」卡顿基准（纯 input-plan；⛔ 不用控制层 pause/move/resume）
+#
+# 目的：在 SAVE05（SC0000 第一个地图）里**真的移动镜头**，给窗口 `s05move` 一段可复现的
+#   卡顿基准。配方只负责把 guest 带到同一段事件顺序上；怎么读、判什么见
+#   docs/03-emulator/perf-bench-save05.md（8 尖峰帧 / boundary ns/派发 / 语义指纹）。
+#
+# ★ 为什么必须是**左键拖拽**（实测）：纯 `mouse_move` 不管有没有 wait，角色与镜头都不动 ——
+#   一串写动作会被同一个读点顺序读完（guest 只看到最后一个光标位置），A/B 截图里只有
+#   SO033A 覆盖图回来。只有 `mouse_down → mouse_move × N → mouse_up` 才让镜头平移。
+#   步间 `wait 120` 是必需的：没有它，整串写动作仍会在同一帧里被读完 ⇒ 看起来像"鼠标没动"。
+#   ⛔ 不要为了"跑得快"删这些 wait（删了就换了一个基准）。
+#
+# ★ 读档链：TITLE → SAVE（第 6 槽 = SAVE05）→ SBUNKI → FIELD；FIELD 稳定 20 s 后开窗口。
+#   `saves/` 只读：跑之前把 `saves/SAVE*.DAT` / `SAVE*.STH` / `SAVE.DAT` / `RT.DAT` **复制**到
+#   本次私有的 `--appdata`（布局 `Local/Eushully/天結いキャッスルマイスター/SAVE/`），⛔ 不就地写。
+#   每次跑都重建 appdata；本配方要 `SAVE05.DAT`。
+#
+# ★ 基准口径（详见 docs/03-emulator/perf-bench-save05.md，这里只列会改变读数的四项）：
+#   · N=3（同档 3 连跑，取中位；A/B 时 ≥3 对交错）；
+#   · 评测档 = `--present window --present-hidden`；⛔ visible 与 hidden 不混臂；
+#   · 仪器档 = `--profile --profile-slow-frames 60`（50 ms 稳态会吃满 32 条上限）；
+#   · 判据 = 窗口内**同一事件顺序**的 8 个尖峰帧（Σwall）+ `boundary` **ns/派发**
+#     （wait-closed ⇒ 绝对 ms 只报不判）+ 指纹（exit / stop @ / arena 三元组 / table misses）。
+#
+# ⚠ 帧号会随派发数平移（wait-closed；本轮观测 +2…+4），`frames` / `insns` 也不逐位稳定
+#   ⇒ 尖峰按窗口内**事件顺序**匹配，⛔ 不按字面帧号。
+# ★ `profile_begin` / `profile_end` 包住 click + 拖拽 + 收尾 3 s。要"不带窗口 profiler"的
+#   读数就删这两行（那是另一档，⛔ 不与本档混表）。
+await position TITLE 0x0460 0x0520 timeout 180000
+click 1070 480
+await position SAVE 0x1104 0x11C4 timeout 60000
+wait 2000
+click 300 388
+await position SBUNKI 0x09F8 0x0B18 timeout 60000
+wait 2000
+click 640 323
+await script FIELD timeout 240000
+wait 20000
+profile_begin s05move
+click 440 360
+wait 1500
+mouse_move 440 360
+mouse_down
+wait 300
+mouse_move 430 360
+wait 120
+mouse_move 420 360
+wait 120
+mouse_move 410 360
+wait 120
+mouse_move 400 360
+wait 120
+mouse_move 390 360
+wait 120
+mouse_move 380 360
+wait 120
+mouse_move 370 360
+wait 120
+mouse_move 360 360
+wait 120
+mouse_move 350 360
+wait 120
+mouse_move 340 360
+wait 120
+mouse_move 330 360
+wait 120
+mouse_move 320 360
+wait 120
+mouse_move 310 360
+wait 120
+mouse_move 300 360
+wait 120
+mouse_move 290 360
+wait 120
+mouse_move 280 360
+wait 120
+mouse_move 270 360
+wait 120
+mouse_move 260 360
+wait 120
+mouse_move 250 360
+wait 120
+mouse_move 240 360
+wait 300
+mouse_up
+wait 3000
+profile_end s05move
+quit
