@@ -34,11 +34,16 @@
 //                                            （`setCallHost` + `readWired` 不绑回调；⛔ 静默缺失）。
 //   · `plugin/render-readings`            ：`read.frames` / `read.scriptPos` / `game.localFrames` /
 //                                            `game.mouse` 的字段与"没有源 ⇒ undefined / 缺 pos 键"。
+//   · `plugin/render-stored-runctx-rejected`：把 **RunCtx 存下来**在 render 里用 `fail`/`finish`/
+//                                            `quit`/`profile.*` ⇒ TypeError（复审 F2：成员表不是门面）。
+//   · `plugin/render-budget-deadline`     ：`PluginScript::setBudget` 是**绝对** deadline
+//                                            （过去 1 ns ⇒ render false + `overran()`；复审 F3）。
 //
 // ★ 夹具口径：**零 `Machine`、零 GPU、零真窗口、零游戏安装**（与 `tests/trigger_runner.cpp` 同一条）：
 //   一块假 `GuestMemory`（假 Engine / 假池）+ 一个默认 `WindowManager` + 注入的 `ReadingsSource`。
 //   插件回调的全部效果都落在这两样上（Edit → guest 内存；Input → 队列 / 光标）。
 // ★ 读点 = `PluginHost::onReadPoint(wm, point)`（它内部就是 `executor_.atPoint` + 首点 `sampleNow`）。
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -58,6 +63,7 @@
 #include "runtime/script_globals.h"
 #include "runtime/value_codec.h"  // encodeInt（ENC 往返的断言；⛔ 不写死编码后的数）
 #include "ui/raster.h"            // measureText / UiBuilder / Element（C2b 的交叉读数）
+#include "ui/script.h"            // UiHostOps（C2b 复审 F2：判 profile 桥有没有被调到）
 
 namespace {
 
@@ -170,7 +176,8 @@ struct Fixture {
         win_ok = hwnd != 0;
     }
 
-    bool load(const std::string& file, const std::map<std::string, std::string>& params = {}) {
+    bool load(const std::string& file, const std::map<std::string, std::string>& params = {},
+              const lift::ui::UiHostOps* host_ops = nullptr) {
         std::string source;
         if (!readFixture(file, &source)) {
             load_error = "读不到夹具：" + fixturePath(file);
@@ -182,7 +189,8 @@ struct Fixture {
         //   用例变成随机红。⛔ 生产值仍只有一份（`runtime/budget.h`；`PluginHost` 读的就是它）。
         host->runner().setBudget(lift::plugin::Budget{500'000'000ull, 10'000'000u});
         // ★ 装配顺序与 `aot_main` **一致**：`init`（编译 + 沙箱）→ `attachMemory`（Edit/Read）。
-        if (!host->init(source, fixturePath(file), params, nullptr, &load_error)) return false;
+        //   `host_ops` 只在需要判"profile 桥有没有被调到"的用例里给（`plugin/render-stored-runctx-rejected`）。
+        if (!host->init(source, fixturePath(file), params, host_ops, &load_error)) return false;
         host->attachMemory(mem);
         return true;
     }
@@ -911,8 +919,10 @@ void caseUiDraw(lift::FontEngine* font) {
 
 // =====================================================================================
 // C2b · `plugin/ui-state`：onTrigger 只改 `ctx.ui`；**下一次 render** 才画；hide 后下一次为空
-//   ★ 回调里 `ctx.draw` 必须**不存在**（RunCtx 没有 draw）—— `hud-ui.js` 自己 fail。
-//   ★ "本帧 display list 为空"：回调之后宿主的 builder 仍是空的（UI 状态 ≠ display list）。
+//   ★ 回调里 `ctx.draw` 必须**不存在**（RunCtx 没有 draw）—— `hud-ui.js` 自己 fail；
+//     成员表那条在 `plugin/render-surface`。⛔ 本用例**不**拿"回调之后某个 builder 还是空的"
+//     当证据（回调根本拿不到 builder ⇒ 那是恒真断言，复审 F4）；这里只读**真的 render 过**的
+//     display list 形状：show 前 = 0、show 后 = 2（且顺序/字段固定）、hide 后 = 0。
 // =====================================================================================
 void caseUiState() {
     lift_test::g_current_case = "plugin/ui-state";
@@ -931,11 +941,13 @@ void caseUiState() {
     LIFT_CHECK(f.host->script()->hasRun());
 
     lift::ui::UiFrameReadings r;
-    lift::ui::UiBuilder before;
     std::string err;
-    // ① 回调之前：`ui` 没 show ⇒ render 合法且空（render 可以在 Run 之前跑）
-    LIFT_CHECK(f.host->script()->render(before, r, &err));
-    LIFT_CHECK(before.elements().empty());
+    // ① **render 之前**的形状：还没 `ui.show` ⇒ 本帧 list 为 0（render 自己不编元素）。
+    {
+        lift::ui::UiBuilder before_render;
+        LIFT_CHECK(f.host->script()->render(before_render, r, &err));
+        LIFT_CHECK(before_render.elements().empty());
+    }
     // ② 第 1 个读点：`start` arm 两道门（本拍只采样，不 fire）
     f.readings.script = "TITLE";
     f.readings.pos = 0;
@@ -943,41 +955,141 @@ void caseUiState() {
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 0);
-    // ③ 第 2 个读点：TITLE 命中 ⇒ onTrigger 只 `ctx.ui.show`
+    // ③ 第 2 个读点：TITLE 命中 ⇒ onTrigger 只 `ctx.ui.show`（回调里没有 draw —— JS 已断言）
     f.pump();
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 1);
-    // ④ 回调**之后**宿主手里的 list 仍是空的（UI 状态 ≠ display list；onTrigger 不画）
-    LIFT_CHECK(before.elements().empty());
-    // ⑤ 下一次 render 才画（按 `ctx.ui.visible` / `ctx.ui.get`）
-    lift::ui::UiBuilder shown;
-    const bool shown_ok = f.host->script()->render(shown, r, &err);
+    // ④ **下一次 render** 才画：本帧 list = 恰好 2 个元素（顺序 = 调用顺序），字段固定
+    lift::ui::UiBuilder after_show;
+    const bool shown_ok = f.host->script()->render(after_show, r, &err);
     if (!shown_ok) std::fprintf(stderr, "  render error: %s\n", err.c_str());
     LIFT_CHECK(shown_ok);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(shown.elements().size()), 2);
-    if (shown.elements().size() == 2) {
-        LIFT_CHECK(shown.elements()[0].kind == lift::ui::ElementKind::Rect);
-        LIFT_CHECK_EQ_I64(shown.elements()[0].w, 120);
-        LIFT_CHECK_EQ_I64(shown.elements()[0].h, 24);
-        LIFT_CHECK_EQ_U32(shown.elements()[0].fill.r, 16u);   // #101820CC
-        LIFT_CHECK_EQ_U32(shown.elements()[0].fill.g, 24u);
-        LIFT_CHECK_EQ_U32(shown.elements()[0].fill.b, 32u);
-        LIFT_CHECK_EQ_U32(shown.elements()[0].fill.a, 204u);
-        LIFT_CHECK(shown.elements()[1].kind == lift::ui::ElementKind::Text);
-        LIFT_CHECK(shown.elements()[1].text == "mode title");
-        LIFT_CHECK_EQ_I64(shown.elements()[1].font_size, 16);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(after_show.elements().size()), 2);
+    if (after_show.elements().size() == 2) {
+        LIFT_CHECK(after_show.elements()[0].kind == lift::ui::ElementKind::Rect);
+        LIFT_CHECK_EQ_I64(after_show.elements()[0].w, 120);
+        LIFT_CHECK_EQ_I64(after_show.elements()[0].h, 24);
+        LIFT_CHECK_EQ_U32(after_show.elements()[0].fill.r, 16u);   // #101820CC
+        LIFT_CHECK_EQ_U32(after_show.elements()[0].fill.g, 24u);
+        LIFT_CHECK_EQ_U32(after_show.elements()[0].fill.b, 32u);
+        LIFT_CHECK_EQ_U32(after_show.elements()[0].fill.a, 204u);
+        LIFT_CHECK(after_show.elements()[1].kind == lift::ui::ElementKind::Text);
+        LIFT_CHECK(after_show.elements()[1].text == "mode title");
+        LIFT_CHECK_EQ_I64(after_show.elements()[1].font_size, 16);
     }
-    // ⑥ FIELD 命中 ⇒ hide（返回 [] = done）⇒ 下一次 render 又为空
+    // ⑤ FIELD 命中 ⇒ hide（返回 [] = done）⇒ 下一次 render 又为 0
     f.readings.script = "FIELD";
     f.pump();
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 2);
     LIFT_CHECK(f.host->runner().done());
-    lift::ui::UiBuilder hidden;
-    LIFT_CHECK(f.host->script()->render(hidden, r, &err));
-    LIFT_CHECK(hidden.elements().empty());
+    lift::ui::UiBuilder after_hide;
+    LIFT_CHECK(f.host->script()->render(after_hide, r, &err));
+    LIFT_CHECK(after_hide.elements().empty());
+}
+
+// =====================================================================================
+// C2b · `plugin/render-stored-runctx-rejected`（复审 F2）：**存下来的 RunCtx** 不能在 render 里用
+//   `fail`/`finish`/`quit`/`profile.*`
+//
+//   ★ render 期 `call_host` 非空（`read`/`log` 要用）⇒ 那 5 个"run-context 出口"必须靠
+//     `PluginCallHost::inCallback()` 拒绝，⛔ 不能只判 `call_host != nullptr`。
+//   ★ 判据两侧：① render **返回 true**（5 个出口各抛 TypeError、夹具自己接住；有任何一个被接受
+//     ⇒ 夹具抛 `accepted:…` ⇒ render false）；② 宿主侧 `failed/finished/quit` 与 profile 桥的
+//     begin/end 计数**全未变**（⛔ "抛了但已经生效"）。
+//   ★ profile 桥必须**接上**：没接线时 `jsCtxProfileBegin` 本来就会抛 ⇒ 用例会假通过。
+// =====================================================================================
+struct ProfileProbe {
+    int begins = 0;
+    int ends = 0;
+};
+
+bool probeProfileBegin(void* ctx, const char* /*label*/, std::string* /*err*/) {
+    ++static_cast<ProfileProbe*>(ctx)->begins;
+    return true;
+}
+
+bool probeProfileEnd(void* ctx, std::string* text, std::string* /*err*/) {
+    ++static_cast<ProfileProbe*>(ctx)->ends;
+    if (text != nullptr) text->clear();
+    return true;
+}
+
+void caseRenderStoredRunCtx() {
+    lift_test::g_current_case = "plugin/render-stored-runctx-rejected";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    ProfileProbe probe;
+    lift::ui::UiHostOps ops{};
+    ops.ctx = &probe;
+    ops.profile_begin = &probeProfileBegin;
+    ops.profile_end = &probeProfileEnd;
+    const bool loaded = f.load("stored-ctx.js", {}, &ops);
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    LIFT_CHECK(f.host->script() != nullptr && f.host->script()->hasRender());
+    // ① 第 1 个读点：`start` 存下 RunCtx（并 arm `hold`，本拍不 fire）
+    f.readings.script = "TITLE";
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);
+    // ② render：5 个 run-context 出口全部 TypeError（夹具自吞）；读数面仍然可用
+    lift::ui::UiBuilder builder;
+    lift::ui::UiFrameReadings readings;
+    std::string err;
+    const bool ok = f.host->script() != nullptr && f.host->script()->render(builder, readings, &err);
+    if (!ok) std::fprintf(stderr, "  render error: %s\n", err.c_str());
+    LIFT_CHECK(ok);
+    LIFT_CHECK(builder.elements().empty());
+    // ③ 宿主侧的效果**一个都没发生**（拒绝在 trampoline，不是"生效之后才抛"）
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(!f.host->finished());
+    LIFT_CHECK(!f.host->quitRequested());
+    LIFT_CHECK_EQ_I64(probe.begins, 0);
+    LIFT_CHECK_EQ_I64(probe.ends, 0);
+}
+
+// =====================================================================================
+// C2b · `plugin/render-budget-deadline`（复审 F3）：`PluginScript::setBudget` 是**绝对** deadline
+//   ★ `UiScript` 的口径：deadline = steady_clock 的**绝对**纳秒（`present_sdl.cpp` 给
+//     `steadyNowNs() + 20ms`）⇒ 这里给一个"已经过去 1 ns"的 deadline，render 必须被打断。
+//     若实现误加成相对（`steadyNowNs() + deadline`），deadline 会落进未来 ⇒ render 跑到底 ⇒ 红。
+//   ★ 夹具 `for(;;)` 是承重的：中断回调每 ~10000 条字节码才跑一次，短脚本可能整段跑完都进不了中断。
+// =====================================================================================
+void caseRenderBudgetDeadline() {
+    lift_test::g_current_case = "plugin/render-budget-deadline";
+    std::string err;
+    std::unique_ptr<lift::ui::PluginScript> script = loadPlugin("budget.js", {}, nullptr, &err);
+    LIFT_CHECK(script != nullptr);
+    if (script == nullptr) {
+        std::fprintf(stderr, "  load error: %s\n", err.c_str());
+        return;
+    }
+    LIFT_CHECK(script->hasRender());
+    const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    const std::uint64_t deadline = static_cast<std::uint64_t>(now_ns);
+    LIFT_CHECK(deadline > 1);
+    // 绝对 deadline = 现在 - 1ns ⇒ 第一次中断检查就超时。
+    script->setBudget(deadline - 1u, 0);
+    lift::ui::UiBuilder builder;
+    lift::ui::UiFrameReadings readings;
+    std::string rerr;
+    const bool ok = script->render(builder, readings, &rerr);
+    if (ok) std::fprintf(stderr, "  render 没被预算打断（deadline 口径错了？）\n");
+    LIFT_CHECK(!ok);
+    LIFT_CHECK(script->overran());
+    LIFT_CHECK(builder.elements().empty());
+    // 唯一消息面：err 的尾巴点名 render 超预算（不是无名失败）。
+    LIFT_CHECK(rerr.find("render 超出预算") != std::string::npos);
 }
 
 // =====================================================================================
@@ -1173,6 +1285,8 @@ int main() {
     caseRenderSurface();
     caseUiDraw(&font);
     caseUiState();
+    caseRenderStoredRunCtx();
+    caseRenderBudgetDeadline();
     caseRenderRead();
     caseRenderReadings();
     return lift_test::finish("plugin-runtime");

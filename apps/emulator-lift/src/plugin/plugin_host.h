@@ -125,6 +125,10 @@ public:
     bool inputWired() const override { return in_callback_ && ctx_input() != nullptr; }
     bool readWired() const override { return read_ != nullptr; }
     bool triggerWired() const override { return in_callback_ && ctx_trigger() != nullptr; }
+    // ★ C2b 复审 F2：render 期 `call_host` **非空**（read/log 要用），但 `fail`/`finish`/`quit`/
+    //   `profile.*` 是 **Run 回调**的出口 ⇒ 那 5 个 trampoline 靠这一位拒绝"存下来的 RunCtx
+    //   在 render 里用"。⛔ 不要把它也放松成恒 true（那等于成员表只是画出来的门面）。
+    bool inCallback() const override { return in_callback_; }
 
     bool editGlobalSet(lift::GlobalKind kind, std::uint32_t id, const lift::GlobalValue& value,
                        const char** code) override;

@@ -3051,7 +3051,11 @@ JSValue jsCtxLog(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueCon
 JSValue jsCtxProfileBegin(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr) return JS_ThrowTypeError(ctx, "ctx.profile.begin: 不在插件回调里");
+        // ★ C2b 复审 F2：`profile` 是 **Run 回调**的出口（RenderCtx 没有它）⇒ 判"正在回调"，
+        //   ⛔ 只判 `host != nullptr`（render 期 host 也非空，那样"存下来的 RunCtx"就能用）。
+        if (host == nullptr || !host->inCallback()) {
+            return JS_ThrowTypeError(ctx, "ctx.profile.begin: 不在插件回调里");
+        }
         std::string label;
         if (argc >= 1 && !JS_IsUndefined(argv[0]) && !qjs::toString(ctx, argv[0], &label)) {
             qjs::clearException(ctx);
@@ -3070,7 +3074,9 @@ JSValue jsCtxProfileBegin(JSContext* ctx, JSValueConst /*this_val*/, int argc, J
 JSValue jsCtxProfileEnd(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/, JSValueConst* /*argv*/) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr) return JS_ThrowTypeError(ctx, "ctx.profile.end: 不在插件回调里");
+        if (host == nullptr || !host->inCallback()) {
+            return JS_ThrowTypeError(ctx, "ctx.profile.end: 不在插件回调里");
+        }
         std::string why;
         if (!host->profileEnd(&why)) {
             return JS_ThrowTypeError(ctx, "ctx.profile.end: %s", why.c_str());
@@ -3084,7 +3090,9 @@ JSValue jsCtxProfileEnd(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/,
 JSValue jsCtxFail(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr) return JS_ThrowTypeError(ctx, "ctx.fail: 不在插件回调里");
+        if (host == nullptr || !host->inCallback()) {
+            return JS_ThrowTypeError(ctx, "ctx.fail: 不在插件回调里");
+        }
         std::string name;
         std::string reason;
         if (argc >= 1 && !JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0]) &&
@@ -3107,7 +3115,9 @@ JSValue jsCtxFail(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueCo
 JSValue jsCtxFinish(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr) return JS_ThrowTypeError(ctx, "ctx.finish: 不在插件回调里");
+        if (host == nullptr || !host->inCallback()) {
+            return JS_ThrowTypeError(ctx, "ctx.finish: 不在插件回调里");
+        }
         if (argc < 1) return JS_ThrowTypeError(ctx, "ctx.finish(exitCode, reason?)");
         double code = 0.0;
         if (!qjs::toDouble(ctx, argv[0], &code) || !std::isfinite(code)) {
@@ -3130,7 +3140,9 @@ JSValue jsCtxFinish(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValue
 JSValue jsCtxQuit(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr) return JS_ThrowTypeError(ctx, "ctx.quit: 不在插件回调里");
+        if (host == nullptr || !host->inCallback()) {
+            return JS_ThrowTypeError(ctx, "ctx.quit: 不在插件回调里");
+        }
         std::string reason;
         if (argc >= 1 && !JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0]) &&
             !qjs::toString(ctx, argv[0], &reason)) {

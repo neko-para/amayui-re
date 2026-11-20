@@ -102,6 +102,14 @@ public:
     virtual bool readWired() const = 0;
     virtual bool triggerWired() const = 0;
 
+    // 现在是否在 **Run 回调**（`start` / `onTrigger`）里；`render` 期间恒 false（C2b 复审 F2）。
+    // ★ 为什么需要这一位：render 期间 `read` / `log` 也要能用 ⇒ 宿主（`call_host`）在 render 期
+    //   **非空**；于是"只判 `call_host != nullptr`"的出口（`fail` / `finish` / `quit` / `profile.*`）
+    //   会从 render 可达 —— 插件在 `onTrigger` 里把 `ctx` 存进模块变量，下一帧 `saved.fail(...)`
+    //   就绕过了 `RenderCtx` 的成员表。这 5 个 trampoline 必须判这一位。
+    //   ⛔ 这不是安全边界、guest 也不会坏（写面另有 `*Wired()` 把关），而是"成员表不是画出来的门面"。
+    virtual bool inCallback() const = 0;
+
     // ---- Edit（立即）----
     // 返回 false ⇒ `*code` = `globalErrorName()` 认的那三个之一（⛔ 不是新词表）。
     virtual bool editGlobalSet(lift::GlobalKind kind, std::uint32_t id, const lift::GlobalValue& value,
