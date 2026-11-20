@@ -73,12 +73,54 @@ scripts/clean-appdata.sh "$APP"
   ⚠ 与 visible 档不可互比（§4-4），只判比例与趋势。
 - 以上 P/C1/A′ 全是 visible 历史档；hidden 与 visible **不混臂**。
 
+### 3.1 win32 复核（2026-11-20 / win32 x64 / 机器独占 / hidden 档）
+
+这一轮回答的是"mac 上那几项在本机还剩多少"，**不是**单变量归因：before 臂是 **拉代码之前**的构建
+（`apps/emulator-lift/out`，`b14b897`，exe mtime 2026-11-20 03:50:44、sha256 前 8 `BFD94F47`），
+after 臂 = HEAD `911fe2b` 重建（22:02:29、`split8-O2-lto-abi`）。两臂之间**五个变量**：
+`793826b`(P) · `b48fdad`(C1) · `fbe4760`(A′) · `7f47235`(C6) · `ca0b877`(Phase A) ⇒ 只能判"合臂方向与量级"。
+
+命令（cwd `apps/emulator-lift`，每跑前 `scripts/clean-appdata.sh ../../.tmp/win32-perf/appdata-<臂><n>`）：
+
+```bash
+# before 臂：<repo>/.tmp/win32-perf/baseline/emulator-lift-aot.exe（exe + 8 个 DLL）
+# after  臂：out/emulator-lift-aot.exe
+<exe> --present window --present-hidden --game-dir ../../links/install \
+  --appdata ../../.tmp/win32-perf/appdata-<臂><n> --skip-logo --audio off \
+  --time-limit 400 --input-plan scripts/recipes/save05-move.plan --frame-log
+```
+
+- **主判据 `boundary` ns/派发**（= 该表 `boundary_ms×1e6 / iter=`；⛔ 没有现成字段）：3 对交错
+  `b1 a1 | a2 b2 | b3 a3` ⇒ 17.199→15.850（−7.84%）· 17.068→15.850（−7.13%）· 18.730→15.904（−15.09%）；
+  逐对中位 **−7.84%**，臂中位 17.200→15.850 = **−7.85%**，**3/3 同向**。
+- **窗口墙钟** 7538→7492 ms（−0.61%，逐对 −0.70…−0.01%）⇒ 低于本机 5% 分辨力，**只报不判**。
+- **绝对 `boundary` ms +0.78%、`iter` +9.1%**（64.0M→69.9M）：与 mac 同型（wait-closed，快了以后多转派发，
+  收益被自己吃回）⇒ 可比口径仍是 ns/派发。
+- **尖峰**：`save05-move.plan` 在 win32 上只有 **3 帧**过 `dInsns≥50M`（不是 mac 的 8）——
+  两对仪器档 Σwall 973.0→662.4 ms（−31.9%）· 866.6→649.4 ms（−25.1%）；三帧 `insns` 两臂逐位同
+  （174.0 / 67.3 / 66.7 M）⇒ 同一事件。top-8 慢帧 Σ 1293.5→1002.1、1189.5→973.1。
+  那 174M 事件里 `CreateFileA` 38.3→15.6 ms / 30.2→16.6 ms（−45…−59%）。
+- **Phase A 本档不可分离**：干净/仪器档都带 `--frame-log` ⇒ `needsGuestPixels()` 为真、逐帧强制回读，
+  门控不生效；`LIFT_PRESENT_EAGER=1` 与缺省两臂的 `readback` 6.64/6.79 vs 6.88–6.90 ms/帧（before 6.89–7.04）
+  ⇒ 三组重叠（≤6%）。要分离得换"无 `--frame-log`"的档。
+- **指纹**：`stop @ eip=00412383` · arena `89668632/119683880/182` · `table misses=0` · `exit 0` ·
+  `pending=0` 在 **14/14 跑逐位相同**；只有 `frames` 823→839（+1.9%，wait-closed 的必然，§4-2 已把它排除在指纹外）。
+- **与 mac 方向**：boundary 同向（mac P −8.9% / A′ −5.02%），尖峰 Σ 同向且量级更大（mac C1 −16.1%），
+  C6 的 `CreateFileA` 同向（mac −7.8%），Phase A 两边都测不出来（mac −1.7% <5%）。
+  ⚠ 档不同（mac = arm64/visible/点击版；本轮 = x64/hidden/拖拽版）⇒ **只比方向，不比绝对值**。
+- **与既有 win32 读数不可比**：`W1`（LTO `/Ob2` −9.25%，FELLOW init）与 `W4`（点击版 SAVE05、
+  pre-P、visible、28.6 ns/派发）都是**不同配方 / 不同 commit / 不同档** ⇒ 只当方向参照。
+- ⚠ 这是 `save05-move.plan`（拖拽版）在 **win32 上的第一次运行**：四个位置门全部成立，
+  14/14 `exit 0` + `pending=0`（无 exit 5）。
+
 ## 4. 判据
 
 1. **主判据 = `boundary` ns/派发**（同档、A/B 只差一个变量、≥3 对交错，比臂中位）。wait-closed ⇒ 绝对 ms **只报不判**；
    "同派发数折算"可作旁证，但⛔ 不换主判据。
 2. **8 尖峰帧**：窗口内**同一事件顺序**的 8 个尖峰（Σwall、最大位、拖拽起步位分别看）。帧号会平移（本轮 +2…+4），
    `frames` / `insns` 也不逐位稳定 ⇒ ⛔ 不按字面帧号匹配，⛔ 不把 `frames` / `insns` 列进指纹。
+   ⚠ 「8」是 mac visible 档的读数；**win32 hidden 档同一配方只有 3 帧过门**（§3.1）⇒ 尖峰个数**随平台/档变**，
+   判的是"同一事件顺序的那几帧"，不是"必须是 8 个"。
 3. **语义指纹**（逐位同）：`exit 0` · `stop @ eip=00412383`（`input-plan: quit`）· arena 三元组
    `89668632 / 119683880 / 182`（in_use / peak / surfaces）· `table misses=0`。
 4. **hidden 不混臂**：两臂必须同档（都 visible 或都 hidden）；visible 的旧数不能当 hidden 的 before；
@@ -87,8 +129,9 @@ scripts/clean-appdata.sh "$APP"
 
 ## 5. 不做 / 待核
 
-- **win32 无本轮读数**：`/Ob1` + LTO、`offsetof` 的条件支持合法性、`bl liftRegsToCpu` 这类反汇编计数都只在 macOS 验过，
-  win32 要各自重取（同一配方、同一档；⛔ 跨平台不混表）。
+- **win32 只复核了 hidden 档的合臂**（§3.1，2026-11-20）：visible 档、单变量归因（逐 commit 的 before/after）、
+  以及 `/Ob1`+LTO 的反汇编计数（`bl liftRegsToCpu` 那类）仍**只有 mac 读数** ⇒ 要单变量归因就在 win32 上
+  逐 commit 重建（每个 commit 一次构建 + ≥3 对），⛔ 不要拿合臂数字反推单项。
 - **hidden 档要重取就两臂都跑**（见 §4-4）；Present/GPU 的绝对数在 hidden 与 visible 之间**不可互比**
   （只判比例与趋势；`Present` 在尖峰里是常数项，不随尖峰增长）。
 - 装弹帧（窗口前）与 `click` 之前的转场不在基准目标内，⛔ 不列判据。
