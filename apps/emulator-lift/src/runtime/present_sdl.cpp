@@ -1889,6 +1889,12 @@ void SdlWindow::rasterRequestDepthClear(float z) {
     GpuRaster* r = impl_->raster();
     if (r != nullptr) r->rasterRequestDepthClear(z);
 }
+// ★ 颜色版的同一类转发（`REQ-01M7W2FR9EJEMG2QDMZNG6N7WV`）：少了这一行，`d3d9::clear` 以为清色已交给
+//   GPU，而后端什么都没收到 ⇒ 目标与 guest 一起丢掉这次清色（静默；所有既有测试照绿）。
+void SdlWindow::rasterRequestColorClear(std::uint32_t bgra8_pixel) {
+    GpuRaster* r = impl_->raster();
+    if (r != nullptr) r->rasterRequestColorClear(bgra8_pixel);
+}
 bool SdlWindow::rasterDirty() const {
     const GpuRaster* r = impl_->raster();
     return r != nullptr && r->rasterDirty();

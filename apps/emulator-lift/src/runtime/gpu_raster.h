@@ -468,6 +468,25 @@ public:
     //   · ⛔ **转发壳**（`present_sdl.cpp::SdlWindow`）必须显式转发 —— 这一条曾经整条漏掉，症状是
     //     "GPU 光栅化臂整层丢 Live2D 角色而账上一切正常"（静默、不改像素、所有既有测试全绿）。
     virtual void rasterRequestDepthClear(float z) { (void)z; }
+    // ★ 全幅 **color** clear 的请求（D3D9 `Clear(..., D3DCLEAR_TARGET)` 且 `Count==0` 那一路）：
+    //   下一次**真的录到** render pass 的 flush 的**第一个** render pass 用 `LOADOP_CLEAR`；清值 =
+    //   调用方给的 **BGRA8 4 字节**（⛔ 不是 `D3DCOLOR`；按 `ddraw::storePixel` 写进 guest 的字节序，
+    //   逐位、A 字节按目标格式掩码归一化）。默认 no-op。
+    //   ★ 与深度版（上面那条）的**三处不同** —— ⛔ 别照抄深度的三条契约：
+    //     (a) **绑 target 身份**：arm 记下当时的 `rasterTargetBase()`，换 target 一律丢弃
+    //         （颜色多清一次 = 把刚画好的 RT 清成纯色，而账上一切正常）；
+    //     (b) **后者覆盖前者**（颜色不幂等）：多次 arm 只有**最后一次**的清值生效
+    //         （深度可以合并成"清一次"，颜色不能）；
+    //     (c) **arm 即"镜像 != guest"**：后端必须在 arm 那一刻把"guest 镜像陈旧"标上（实现 = `dirty_`），
+    //         否则 clear-only 的 flush 之后 `rasterDirty()` 回 false，而 target 已经被写下清色、guest
+    //         还是旧的 ⇒ 三条 `!rasterDirty()` 的路径（`d3d9_pipeline.cpp` 的 sprite 上传 /
+    //         `d3dx9_sprite.cpp` 的同形判断 / `present_sdl.cpp` 的 `submitDirect`）会把**旧 guest
+    //         上传回去盖掉清色**（静默），所有诊断点也会读到旧帧。
+    //   ★ 队列空也必须真的提交一次（`rasterFlush` 的空队列早退要含这一项）—— "清-only"就是这一路。
+    //   ★ ⛔ **转发壳**（`present_sdl.cpp::SdlWindow`）必须显式转发：漏一条 = 基类空实现 = `Clear`
+    //     既不写 target 也不写 guest（静默；`rasterRequestDepthClear` 就这么漏过一次）。
+    //     守卫：`tests/gpu_batch.cpp::caseColorClearForwarded`（转发壳）+ `tests/gpu_raster.cpp`（真后端语义）。
+    virtual void rasterRequestColorClear(std::uint32_t /*bgra8_pixel*/) {}
     // 设备 / target 销毁前丢掉队列与镜像（⛔ 不要往即将释放的 guest 像素回读）。默认 no-op。
     virtual void rasterDiscardTarget() {}
 

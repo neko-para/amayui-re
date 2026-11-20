@@ -685,6 +685,17 @@ static std::uint32_t g_frame_seq = 0;
 
 std::uint32_t frameSeq() { return g_frame_seq; }
 
+// ---------------------------------------------------------------------------------------
+// 诊断：**整幅 GPU→guest 回读（`rasterSyncToGuest`）的调用点归因**（`[present-readback]` Phase B）
+// ---------------------------------------------------------------------------------------
+// ★ 为什么在这里而不是 `GpuRasterStats`：这里记的是"**谁**要了这次回读"（d3d9 层的账），
+//   不是后端的账。`submits_readback` 只给总数，看不出是 `Clear` / `Present` / 换 target 在打。
+// ★ 归因闭合（Step 0 的口径）：`readback = rb_clear + rb_present + 其余`，其余 = 换 target / 7 个读点。
+//   剩下的那部分必须与 `targets=`（本帧建了几个 color target = 换了几次 target）一起看 ——
+//   "其余 > 0 但一次 target 都没换"就是一条未归因的下载（B2 的判据）。
+static std::uint64_t g_rb_clear = 0;    // `clear()` 的屏障里那一次（`d3d9.cpp:clear` 的 sync 分支）
+static std::uint64_t g_rb_present = 0;  // `present()` 的屏障里那一次（`d3d9.cpp:present` 的 sync 分支）
+
 std::uint32_t clear(X86& cpu, const DeviceInfo& dev, std::uint32_t count, std::uint32_t rects_ea,
                     std::uint32_t flags, std::uint32_t color, float z, std::uint32_t stencil,
                     std::string* why) {
@@ -755,25 +766,52 @@ std::uint32_t clear(X86& cpu, const DeviceInfo& dev, std::uint32_t count, std::u
         cpu.mem->wr32(dev.state + kDvClears, dev.clears + 1u);
         return kOk;
     }
+    // ★ `pixel` / `base` **提前**算（`pixelFromColor` 是纯函数、无副作用）：下面的改道要用 `pixel`
+    //   当 GPU 清值，而 `base` 是"本次 Clear 的那个 surface 的 guest 像素"（= 判据的一半）。
+    const std::uint32_t pixel = pixelFromColor(gs->format, color);
+    std::uint8_t* base = m->surfaces().pixels(*gs);
     // GPU 光栅化：CPU 即将改写 guest 像素，先把 GPU 未读回的绘制落回 guest。
     // ★ 合批后 `rasterDirty()` 含"队列非空" ⇒ 这条屏障同时完成 flush + 读回。
     // ★ 但只有**这块 guest 像素就是当前镜像的目标**时才回读：同尺寸纹理当 RT 时，把后缓冲镜像
     //   写进纹理是错的（⛔ 静默写错 surface）。不是目标就只 flush，让队列落到它自己的 target。
-    if (GpuRaster* gpu = m->gpuRaster(); gpu != nullptr && gpu->rasterActive() && gpu->rasterDirty()) {
-        std::string gerr;
-        std::uint8_t* base = m->surfaces().pixels(*gs);
-        if (gpu->rasterTargetBase() != nullptr && gpu->rasterTargetBase() != base) {
-            if (!gpu->rasterFlush(&gerr)) d3d9Log("Clear", "GPU 队列 flush 失败：%s", gerr.c_str());
-        } else if (!gpu->rasterSyncToGuest(base, gs->pitch, gs->width, gs->height, &gerr)) {
-            d3d9Log("Clear", "GPU 光栅化读回失败：%s", gerr.c_str());
+    //
+    // ★★ **Phase B 的改道点**（`REQ-01M7W2FR9EJEMG2QDMZNG6N7WV`）：全幅 `Clear` 的目标**就是**当前
+    //   GPU 镜像时，不再"整幅下载 + 在 guest 里填色"，而是把清值交给 GPU 侧的 `LOADOP_CLEAR`。
+    //   · 判据 = **`rasterTargetBase() == base && Count == 0`**（`base` = 本次 Clear 的那个 surface）。
+    //     ⛔ 不是"== 后缓冲"：`Clear` 的目标可能是同尺寸的 RT，那时镜像仍是后缓冲 —— 走 arm 会
+    //     "用 RT 的清色去清后缓冲"，而 RT 的 guest 一位没写（清色静默丢失）。
+    //   · `mirror != base` 那一支**逐字保留**（只 flush），而且下面 `:808` 起的 CPU 填色照旧执行 ——
+    //     今天 `:762` 的 sync 是**条件性**的、CPU 填色是**无条件**的 ⇒ "Clear 一张镜像不是它的 surface"
+    //     时 guest 仍被填对。把整个全幅分支换成"只 arm"就会丢掉这一支的清色。
+    bool color_clear_armed = false;
+    if (GpuRaster* gpu = m->gpuRaster(); gpu != nullptr && gpu->rasterActive()) {
+        const bool mirror_is_target = gpu->rasterTargetBase() != nullptr && gpu->rasterTargetBase() == base;
+        const bool gpu_side_clear = mirror_is_target && count == 0 && base != nullptr;
+        if (gpu->rasterDirty()) {
+            std::string gerr;
+            if (!mirror_is_target) {
+                if (!gpu->rasterFlush(&gerr)) d3d9Log("Clear", "GPU 队列 flush 失败：%s", gerr.c_str());
+            } else if (gpu_side_clear) {
+                // 全幅 + 目标就是镜像 ⇒ **只 flush**（把更早的 draw 落成 pass），⛔ 不下载、⛔ 不清 guest。
+                // 清值由下面的 arm 做成 `LOADOP_CLEAR`（`rasterFlush` 的早退已含"待执行的 color clear"）。
+                if (!gpu->rasterFlush(&gerr)) d3d9Log("Clear", "GPU 队列 flush 失败：%s", gerr.c_str());
+            } else if (!gpu->rasterSyncToGuest(base, gs->pitch, gs->width, gs->height, &gerr)) {
+                d3d9Log("Clear", "GPU 光栅化读回失败：%s", gerr.c_str());
+            } else {
+                ++g_rb_clear;  // 诊断：这次整幅回读的调用点是 `Clear`（Phase B 之后它应该恒为 0）
+            }
+        }
+        // ★ 有序屏障（与深度**同一条**）：上面一定已经 flush 过（队列落成 pass）⇒ 现在 arm 才安全。
+        //   ⛔ 先 arm 后 flush 会让 CLEAR 落到"含更早 draw 的那个 pass 的开头"（`REQ-01M73XEB…`）。
+        if (gpu_side_clear) {
+            gpu->rasterRequestColorClear(pixel);
+            color_clear_armed = true;
         }
     }
     // ★ 有序屏障的第二半：上面的屏障已经把队列落成 pass（队列空 / 本就没有队列）⇒ 现在 arm 才安全。
     //   ⛔ 不要把它挪回函数开头：那正是 `REQ-01M73XEB594ZY8TA76S0EX4512` 的缺陷形态。
     armDepthClear();
-    const std::uint32_t pixel = pixelFromColor(gs->format, color);
     const std::uint32_t bytes_per_pixel = gs->format.bytesPerPixel();
-    std::uint8_t* base = m->surfaces().pixels(*gs);
     if (!base || bytes_per_pixel == 0) {
         if (why) *why = "D3D9：Clear 的后缓冲像素指针为空";
         return kFail;
@@ -805,7 +843,13 @@ std::uint32_t clear(X86& cpu, const DeviceInfo& dev, std::uint32_t count, std::u
         }
         cleared_pixels += static_cast<std::uint32_t>((x2 - x1) * (y2 - y1));
     };
-    if (count == 0) {
+    if (color_clear_armed) {
+        // ★ 全幅清色已经在 GPU 侧（`LOADOP_CLEAR`）⇒ ⛔ 不再往 guest 写字节，也 ⛔ 不再调 `clear_area`
+        //   （调了就等于还是 CPU 清 —— 搬运省了，但"用 CPU 在 guest 里填一遍"的活照付）。
+        //   `cleared_pixels` 仍然记账：它是 `[Clear]` 那行（"清 N 个像素"）与"本引擎用不用 rect Clear"
+        //   的**唯一**证据面 ⇒ 留 0 会让日志写"清 0 个像素"（复审 A4）。
+        cleared_pixels = static_cast<std::uint32_t>(gs->width) * static_cast<std::uint32_t>(gs->height);
+    } else if (count == 0) {
         clear_area(0, 0, gs->width, gs->height);
     } else {
         const std::size_t need = static_cast<std::size_t>(count) * 16u;
@@ -847,6 +891,10 @@ std::uint32_t clear(X86& cpu, const DeviceInfo& dev, std::uint32_t count, std::u
     }
     d3d9Log("Clear", "清 %u 个像素为 D3DCOLOR=0x%08X（像素值 0x%08X，%ubpp，%dx%d）", cleared_pixels, color, pixel,
             gs->format.bpp, gs->width, gs->height);
+    if (color_clear_armed) {
+        // 清色的**落点**也要出声（否则"清 N 个像素"看着像 CPU 填过，实际一位没写）。
+        d3d9Log("Clear", "颜色清交 GPU 侧（LOADOP_CLEAR，像素值 0x%08X 逐位；本次不写 guest 后缓冲）", pixel);
+    }
     return kOk;
 }
 
@@ -926,6 +974,8 @@ std::uint32_t present(X86& cpu, const DeviceInfo& dev, std::string* why) {
             // 读回失败 ⇒ guest 那块**不是**这一帧 ⇒ 同样不许 dump / freeze 拿它冒充。
             d3d9Log("Present", "GPU 光栅化读回失败：%s", gerr.c_str());
             materialized = false;
+        } else {
+            ++g_rb_present;  // 诊断：这次整幅回读的调用点是 `Present`（直出 + 无诊断档应恒为 0）
         }
     }
     pb.readback_ns = steadyNowNs() - readback_begin;
@@ -951,10 +1001,19 @@ std::uint32_t present(X86& cpu, const DeviceInfo& dev, std::string* why) {
         static std::uint64_t last_upload = 0;
         static std::uint64_t last_present = 0;
         static std::uint64_t last_cuts = 0;
+        static std::uint64_t last_readback_clear = 0;
+        static std::uint64_t last_readback_present = 0;
+        static std::uint64_t last_targets = 0;
         const GpuRasterStats now = gpuRasterStats();
+        // ★ `rb_clear` / `rb_present` / `targets`（`[present-readback]` Phase B）：把"整幅回读"按
+        //   **调用点**归因，并给出"这一帧换了几次 target"这个独立事件。
+        //   · `readback - rb_clear - rb_present` = 换 target / 7 个读点打的那份（"其余"）；
+        //   · 判据（⛔ 不是断言当前数字）：`rb_clear==0 && rb_present==0`，且凡"其余 > 0"的帧
+        //     `targets >= 1`（换过 target 才允许有那份额外的下载）。
         std::fprintf(stderr,
                      "[gpu-submits] frame=%llu submits=%llu (flush=%llu readback=%llu upload=%llu "
-                     "present=%llu) cuts=%llu uploads=%llu full=%llu\n",
+                     "present=%llu) cuts=%llu uploads=%llu full=%llu rb_clear=%llu rb_present=%llu "
+                     "targets=%llu\n",
                      static_cast<unsigned long long>(m->presenter().frameCount()),
                      static_cast<unsigned long long>(now.submits - last_submits),
                      static_cast<unsigned long long>(now.submits_flush - last_flush),
@@ -963,13 +1022,19 @@ std::uint32_t present(X86& cpu, const DeviceInfo& dev, std::string* why) {
                      static_cast<unsigned long long>(now.submits_present - last_present),
                      static_cast<unsigned long long>(now.cuts - last_cuts),
                      static_cast<unsigned long long>(now.uploads),
-                     static_cast<unsigned long long>(now.full_uploads));
+                     static_cast<unsigned long long>(now.full_uploads),
+                     static_cast<unsigned long long>(g_rb_clear - last_readback_clear),
+                     static_cast<unsigned long long>(g_rb_present - last_readback_present),
+                     static_cast<unsigned long long>(now.targets_created - last_targets));
         last_submits = now.submits;
         last_flush = now.submits_flush;
         last_readback = now.submits_readback;
         last_upload = now.submits_upload;
         last_present = now.submits_present;
         last_cuts = now.cuts;
+        last_readback_clear = g_rb_clear;
+        last_readback_present = g_rb_present;
+        last_targets = now.targets_created;
     }
     if (!dump_path.empty() && materialized) d3d9Log("Present", "帧 BMP 已写入 %s", dump_path.c_str());
     cpu.mem->wr32(dev.state + kDvPresents, dev.presents + 1u);

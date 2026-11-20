@@ -5274,6 +5274,34 @@ const MUTATIONS = [
       '`region-layout/shape` 与 `-pairwise-disjoint` 不受影响（arena 与其余区间仍不相交）',
   },
 
+  // ── `[present-readback]` Phase B：`SdlWindow` 漏了 color clear 的转发（`present_sdl.cpp`）──────
+  //   ★ 为什么这一条是**这一类错**的代表：`SdlWindow` 是 `GpuRaster` 的转发壳，每加一个虚函数它就要
+  //     再转发一次。漏了不会编译红、不会报错、不改像素、**所有既有测试全绿** —— `d3d9::clear` 以为
+  //     "清色已交给 GPU"，而后端基类实现是 no-op ⇒ 目标与 guest 一起丢掉这次清色
+  //     （`REQ-01M73P3GXW22Y467YGYPQSM571` 的 Live2D 整层丢失就是这个形状）。
+  //   ★ 守卫选 `gpu-batch/color-clear-forwarded`（pure / 顶层注册）：它经 `setGpuRasterForTest` 注入
+  //     替身，**必须**走壳才看得见"漏转发"。直连后端（`m.setGpuRaster(&mock)`）是抓不到的。
+  //   ★ 不选 `:1118` 提前返回那一条：那只证明真后端/`gpu-raster` 会红，而它需要 GPU 设备
+  //     （无 GPU 的机器上 SKIP 77 ⇒ 变异自检会变成"不可判定"）。
+  {
+    file: 'apps/emulator-lift/src/runtime/present_sdl.cpp',
+    from:
+      'void SdlWindow::rasterRequestColorClear(std::uint32_t bgra8_pixel) {\n' +
+      '    GpuRaster* r = impl_->raster();\n' +
+      '    if (r != nullptr) r->rasterRequestColorClear(bgra8_pixel);\n' +
+      '}',
+    to:
+      'void SdlWindow::rasterRequestColorClear(std::uint32_t bgra8_pixel) {\n' +
+      '    (void)bgra8_pixel;  // 变异：漏转发（后端收不到 arm ⇒ 清色静默丢失，账上一切正常）\n' +
+      '}',
+    guard: 'ctest:gpu-batch-order',
+    ctest: 'gpu-batch-order',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-gpu-batch',
+    what:
+      '删掉 `present_sdl.cpp` 里 `rasterRequestColorClear` 的转发 ⇒ 后端（替身）收不到 arm ⇒ ' +
+      '`gpu-batch/color-clear-forwarded` 红（`color_clear_count` 期望 1 实得 0）',
+  },
 ];
 
 let mutationRunSeq = 0;

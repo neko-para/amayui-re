@@ -750,7 +750,11 @@ int caseSolidTriangle() {
     if (!r.upGpu(&why)) LIFT_SKIP(why.c_str());
 
     LIFT_CHECK_EQ_U32(r.f.clearTo(kClearColor), 0u);
-    LIFT_CHECK_EQ_U32(r.f.pixelAt(0, 0), kClearPixel);  // ⑤ Clear 直写 guest（不经光栅）
+    // ★ `[present-readback]` Phase B（`REQ-01M7W2FR9EJEMG2QDMZNG6N7WV`）起：全幅 Clear 的目标就是
+    //   当前 GPU 镜像时，清色走 GPU 侧 `LOADOP_CLEAR` ⇒ **guest 后缓冲当场不再是这一帧**，只有
+    //   读点 / 诊断点才会就地材质化。⇒ 原来这里那条"Clear 直写 guest"（`pixelAt(0,0)==kClearPixel`）
+    //   不再成立（那是被本单**有意拿掉**的行为，不是判据放宽）：清色的像素判据搬到下面
+    //   `syncPixel()` 之后 —— `pixelAt(9,9) == kClearPixel` 仍是"清色真的落地"的像素断言。
     LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsZEnable, 0u), 0u);
     LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsCullMode, lift::d3d9::kCullNone), 0u);
     LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsAlphaBlendEnable, 0u), 0u);

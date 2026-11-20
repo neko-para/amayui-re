@@ -201,6 +201,46 @@ int main(int argc, char** argv) {
     }
     LIFT_CHECK_EQ_U32(ablend[0], 0u);
     LIFT_CHECK_EQ_U32(ablend[1], 0u);
+
+    // ---------------------------------------------------------------------------------
+    // `[present-readback]` Phase B（`REQ-01M7W2FR9EJEMG2QDMZNG6N7WV`）：全幅 color clear 的**真后端**语义
+    // ---------------------------------------------------------------------------------
+    // 红了意味着什么（三条各对一条机制，⛔ 都不可能在 Mock 上真守）：
+    //   ① **清值逐位**：`LOADOP_CLEAR` 的 `clear_color` 通道顺序错（R/B 对调）或清没执行 ⇒ 像素不是
+    //      `pixelFromColor` 给出的那 4 字节（X8 ⇒ A 字节归 0）。图形判据（"非背景像素数"）抓不到它。
+    //   ② **clear-only 的 flush 之后仍必须"脏"**：`rasterRequestColorClear` 没置 `dirty_` ⇒ 这里红；
+    //      它正是"清色被下一次 `rasterSyncFromGuest` 静默盖掉 + 所有诊断点读旧帧"的根因。
+    //   ③ **arm 绑 target 身份**：换 target 不丢 arm ⇒ 新 target 被清成纯色（这里红）；
+    //      丢得太早（不消费就丢）⇒ 旧 target 的 guest 拿不到清色（这里也红）。
+    std::vector<std::uint8_t> alt(static_cast<std::size_t>(w) * h * 4, 0);
+    lift_test::g_current_case = "gpu-raster/color-clear";
+    for (auto& v : pixels) v = 0x7F;  // 旧内容：清色必须整幅盖掉它
+    LIFT_CHECK(win.rasterPrepare(format32(), w, h, &err, pixels.data()));
+    LIFT_CHECK(win.rasterSyncFromGuest(pixels.data(), w * 4, w, h, &err));
+    win.rasterRequestColorClear(0x11223344u);
+    LIFT_CHECK(win.rasterDirty());      // arm ⇒ 「镜像 != guest」
+    LIFT_CHECK(win.rasterFlush(&err));  // 队列是空的，但"待执行的 color clear"必须真的提交一次
+    LIFT_CHECK(win.rasterDirty());      // ★ 消费掉 arm 之后仍脏（target 里是清色、guest 还是旧的）
+    LIFT_CHECK(win.rasterSyncToGuest(pixels.data(), w * 4, w, h, &err));
+    LIFT_CHECK(!win.rasterDirty());
+    LIFT_CHECK_EQ_U32(pixels[0], 0x44u);  // B
+    LIFT_CHECK_EQ_U32(pixels[1], 0x33u);  // G
+    LIFT_CHECK_EQ_U32(pixels[2], 0x22u);  // R
+    LIFT_CHECK_EQ_U32(pixels[3], 0x00u);  // X8 ⇒ A 字节归一化为 0
+
+    // ③ 换 target：arm(绿) 之后 prepare 到另一块 ⇒ 清色落到**旧** target 的 guest，⛔ 不清新 target。
+    win.rasterRequestColorClear(0xFF00FF00u);  // 绿
+    LIFT_CHECK(win.rasterPrepare(format32(), w, h, &err, alt.data()));
+    LIFT_CHECK(win.rasterSyncFromGuest(alt.data(), w * 4, w, h, &err));  // B 起点 = 全 0
+    LIFT_CHECK(win.rasterDraw(tri, 3, st, &err));                        // B 上画红三角
+    LIFT_CHECK(win.rasterSyncToGuest(alt.data(), w * 4, w, h, &err));
+    LIFT_CHECK_EQ_U32(alt[2], 255u);  // B(0,0) = 三角的红（若是清色 ⇒ 这里有 G=255 / R=0）
+    LIFT_CHECK_EQ_U32(alt[1], 0u);
+    LIFT_CHECK_EQ_U32(pixels[1], 0xFFu);  // A 的 guest 已拿到绿清色（arm 被**消费**而不是被丢）
+    LIFT_CHECK_EQ_U32(pixels[0], 0x00u);
+    LIFT_CHECK_EQ_U32(pixels[2], 0x00u);
+    LIFT_CHECK(!win.rasterDirty());
+
     std::printf("gpu-raster%s: driver=%s\n", gpu ? "-gpu" : "", win.rendererName());
     win.shutdown();
     LIFT_CHECK_EQ_U32(SDL_WasInit(SDL_INIT_VIDEO), 0u);

@@ -626,6 +626,17 @@ public:
                 dirty_ = false;
             }
         }
+        // ★ 颜色的 arm **绑 target 身份** ⇒ 换 target 一律丢弃（⛔ 别清到新 target 上：那会把刚画好的
+        //   RT 清成纯色，而账上一切正常）。
+        //   ★ 顺序 = **先消费再丢**：紧邻的上面那块（`dirty_ || !queue_.empty()`）已经 flush + 把旧
+        //     target 回读进旧目标的 guest ⇒ 清色已经落到 guest，这里丢的只是"还没被执行的那一份"。
+        //     ⛔ 别把这行挪到那块**之前**（"先丢后 flush"）⇒ 清色与 guest 一起静默丢。
+        //   ★ 这条依赖 `rasterRequestColorClear` 里的 `dirty_ = true`：否则上面那块会因 `dirty_ == false`
+        //     整块跳过，而 `destroyColorTarget()` 之后清色就永久没了（复审 (b)(d)）。
+        if (need_color_clear_) {
+            need_color_clear_ = false;
+            color_clear_target_ = nullptr;
+        }
         // ★ 只毁**颜色目标**：`REQ-01M79MSMWGFEKF8J7C7VYWS4YP` 起"换 target"从偶发变成每帧 ≥2 次
         //   （RT 与后缓冲常不同尺寸/格式）⇒ 顺手毁 depth + 全部 pipeline 会直接撞实时预算。
         //   · depth：D3D9 的深度缓冲属**设备**、不随 color target 变 ⇒ 尺寸相同就**复用**
@@ -708,6 +719,18 @@ public:
         if (target_base_ != nullptr && pixels != target_base_) {
             if (err) *err = "SDL_GPU：上传的像素基址不是当前镜像的目标（换 target 必须先准备）";
             return false;
+        }
+        // ★ 颜色 arm 与"guest 是权威"互斥：这次会**整块覆盖** target ⇒ 留着 arm 会让下一次 flush 把
+        //   刚上传的内容清成纯色（静默）。⇒ 丢弃 + **一次** warn（⛔ 不静默、⛔ 不每帧刷屏）。
+        if (need_color_clear_) {
+            need_color_clear_ = false;
+            color_clear_target_ = nullptr;
+            if (!color_clear_drop_warned_) {
+                color_clear_drop_warned_ = true;
+                std::fprintf(stderr,
+                             "[gpu-color] dropped arm at rasterSyncFromGuest（guest 覆盖 target ⇒ 待执行的"
+                             "清色作废）\n");
+            }
         }
         if (!uploadGuest(pixels, pitch, width, height, err)) return false;
         // ★ 这里**不**置 need_depth_clear_：只换颜色内容（guest 后缓冲是权威）不改深度。
@@ -1115,8 +1138,14 @@ public:
     bool rasterFlush(std::string* err) override {
         const bool has_uploads = hasPendingUploads();
         const bool had_draws = !queue_.empty();
-        if (!had_draws && !has_uploads) return true;
-        if (had_draws && (target_ == nullptr || depth_ == nullptr)) {
+        // ★ 早退必须含**待执行的 color clear**（`REQ-01M7W2FR9EJEMG2QDMZNG6N7WV`）：清-only 的 flush
+        //   队列是空的，而它必须**真的提交一次**（`LOADOP_CLEAR` 只能由 render pass 落地）。
+        //   漏了这一项 ⇒ arm 永远消费不掉 ⇒ 下一次 `rasterSyncToGuest` 先 flush（空转）再下载**旧内容**
+        //   （"清色丢了而判据照绿"）。守卫：真后端 `gpu-raster` 的 clear-only 断言。
+        if (!had_draws && !has_uploads && !need_color_clear_) return true;
+        // ★ target 检查也要覆盖 clear-only：`had_draws == false` 但 arm 在 ⇒ 下面一样会
+        //   `SDL_BeginGPURenderPass(cmd, &color, 1, &depth)` ⇒ 空 target 会当场炸（⛔ 不静默跳过）。
+        if ((had_draws || need_color_clear_) && (target_ == nullptr || depth_ == nullptr)) {
             if (err) *err = "SDL_GPU target 未准备";
             return false;
         }
@@ -1301,21 +1330,56 @@ public:
                 }
                 SDL_EndGPUCopyPass(copy);
             }
-            if (!seg_has_draws) continue;
+            // ★ 全幅 color clear（`REQ-01M7W2FR9EJEMG2QDMZNG6N7WV`）：**本 flush 的第一个 render pass**。
+            //   清-only（这一段没有 draw）也必须编一个 pass 出来 —— 否则 arm 永远消费不掉，下一次
+            //   `rasterSyncToGuest` 会先 flush（空转）再下载**旧内容**。⛔ 第二段起必须 LOAD
+            //   （否则把前面画进去的颜色/深度一起清掉）。
+            const bool color_clear_here = need_color_clear_ && first_render_pass;
+            if (!seg_has_draws && !color_clear_here) continue;
             if (gpuTraceEnabled()) {
                 std::fprintf(stderr,
-                             "[gpu-pass] seg=%zu/%zu draws=%zu..%zu first=%d need_clear=%d load=%d z=%g queue=%zu\n",
+                             "[gpu-pass] seg=%zu/%zu draws=%zu..%zu first=%d need_clear=%d load=%d z=%g "
+                             "color_clear=%d color_load=%d queue=%zu\n",
                              seg_index, segments_.size(), seg.first_draw, draw_end, first_render_pass ? 1 : 0,
                              need_depth_clear_ ? 1 : 0,
                              static_cast<int>((need_depth_clear_ && first_render_pass) ? SDL_GPU_LOADOP_CLEAR
                                                                                         : SDL_GPU_LOADOP_LOAD),
-                             static_cast<double>(need_depth_clear_ ? need_depth_clear_z_ : 1.0f), queue_.size());
+                             static_cast<double>(need_depth_clear_ ? need_depth_clear_z_ : 1.0f),
+                             color_clear_here ? 1 : 0,
+                             static_cast<int>(color_clear_here ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD),
+                             queue_.size());
             }
-            // render pass：color 始终 LOAD（第二段起必须保留前面画的内容）
+            // render pass：color 默认 LOAD（第二段起必须保留前面画的内容）
             SDL_GPUColorTargetInfo color{};
             color.texture = target_;
             color.load_op = SDL_GPU_LOADOP_LOAD;
             color.store_op = SDL_GPU_STOREOP_STORE;
+            if (color_clear_here) {
+                if (color_clear_target_ != nullptr && color_clear_target_ != target_base_) {
+                    // 防御：arm 绑的是另一块 target（三条丢弃路径本该挡住这种情形）⇒ ⛔ 不清，
+                    // 而且必须**丢掉**这个 arm（它的身份已经回不来）+ 出声（⛔ 不静默多清一份）。
+                    need_color_clear_ = false;
+                    color_clear_target_ = nullptr;
+                    if (!color_clear_drop_warned_) {
+                        color_clear_drop_warned_ = true;
+                        std::fprintf(stderr,
+                                     "[gpu-color] dropped arm at rasterFlush（arm 的 target 身份 != 当前"
+                                     "镜像 ⇒ 不清）\n");
+                    }
+                } else {
+                    color.load_op = SDL_GPU_LOADOP_CLEAR;
+                    // ★ 清值 = 调用方给的 BGRA8 4 字节，逐位（与 `ddraw::storePixel` 写进 guest 的
+                    //   字节序相同）：byte0=B / byte1=G / byte2=R / byte3=A。
+                    //   ⇒ `SDL_FColor` 是 **r,g,b,a**（`SDL_pixels.h`）⇒ 通道**反着**取。
+                    //   ⛔ 不要从 `D3DCOLOR` 直接猜通道顺序：这里 R/B 一换只差"清成另一个颜色"，
+                    //   图形判据（"非背景像素数"）照样绿 —— 只有真后端的清值逐位断言能抓。
+                    color.clear_color = SDL_FColor{
+                        static_cast<float>((color_clear_bgra_ >> 16) & 0xFFu) / 255.0f,
+                        static_cast<float>((color_clear_bgra_ >> 8) & 0xFFu) / 255.0f,
+                        static_cast<float>(color_clear_bgra_ & 0xFFu) / 255.0f,
+                        static_cast<float>((color_clear_bgra_ >> 24) & 0xFFu) / 255.0f};
+                }
+            }
             // ★ depth：**一帧只清一次**（本 flush 的第一个 render pass）。分段后第二段必须 LOAD，
             //   ⛔ 每段都 CLEAR 会把先画进去的深度清掉（后画的内容就会被错误接受）。
             SDL_GPUDepthStencilTargetInfo depth{};
@@ -1382,6 +1446,12 @@ public:
                 SDL_DrawGPUPrimitives(pass, static_cast<Uint32>(d.vertices.size()), 1, 0, 0);
             }
             SDL_EndGPURenderPass(pass);
+            if (color_clear_here) {
+                // ★ 一次 arm 只清一次：**在这里**消费（⛔ 别挪到 flush 末尾 —— 第二段起必须 LOAD，
+                //   留着 arm 到末尾没有语义上的第二个消费点）。
+                need_color_clear_ = false;
+                color_clear_target_ = nullptr;
+            }
             first_render_pass = false;
             encoded_render_pass = true;
         }
@@ -1472,6 +1542,8 @@ public:
 
     // ★ 语义 = 「镜像/纹理缓存 != guest」：队列非空 **或** 已提交但尚未读回 **或** 还有已入队
     //   但没提交的纹理上传。缺了最后一项，屏障会漏判（已录未提交的上传被当成已落地）。
+    //   ★ Phase B 起还有"**待执行的 color clear**"这一项 —— 它由 `rasterRequestColorClear` 里的
+    //   `dirty_ = true` 覆盖（arm 那一刻 target 就已经 != guest）⇒ 这里不用再加一项。
     bool rasterDirty() const override { return dirty_ || !queue_.empty() || hasPendingUploads(); }
     const void* rasterTargetBase() const override { return target_base_; }
     std::size_t rasterQueuedDraws() const override { return queue_.size(); }
@@ -1502,6 +1574,26 @@ public:
         need_depth_clear_z_ = z;
     }
 
+    // ★ 全幅 color clear（`REQ-01M7W2FR9EJEMG2QDMZNG6N7WV`）：交付契约见 `gpu_raster.h` 的同名注释。
+    //   与深度版的三个差别落在**这三行**上（⛔ 不要照抄深度版）：
+    //     · `color_clear_target_` = 绑身份（换 target 由 `rasterPrepare` 丢弃）；
+    //     · 清值每次覆盖（后者胜出）；
+    //     · **`dirty_ = true`** —— 本单最承重的一行。arm 之后 target 就"可能 != guest"，
+    //       clear-only 的 flush（`if (had_draws) dirty_ = true` 不执行）之后也必须继续脏，
+    //       否则 `!rasterDirty()` 的三条路径把**旧 guest** 上传回去盖掉清色（静默），
+    //       并且所有诊断点（dump / freeze / sampler / frameStats / lastHash）读到旧帧。
+    void rasterRequestColorClear(std::uint32_t bgra8_pixel) override {
+        if (gpuTraceEnabled()) {
+            std::fprintf(stderr, "[gpu-color] arm=clear seq=%llu queue=%zu pixel=0x%08X target=%p\n",
+                         static_cast<unsigned long long>(g_ff_tag_seq), queue_.size(), bgra8_pixel,
+                         static_cast<const void*>(target_base_));
+        }
+        need_color_clear_ = true;
+        color_clear_bgra_ = bgra8_pixel;
+        color_clear_target_ = target_base_;
+        dirty_ = true;
+    }
+
     void rasterDiscardTarget() override {
         // ★ 设备销毁前调用：队列与镜像都指向即将释放的 guest 像素 ⇒ 丢掉，⛔ 不回读。
         queue_.clear();
@@ -1526,6 +1618,9 @@ public:
         target_format_ = SurfaceFormat{};
         need_depth_clear_ = true;
         need_depth_clear_z_ = 1.0f;  // 重建的 depth 内容未定义 ⇒ 回到 D3D9 的初值 1.0
+        // ★ 待执行的 color clear 一起丢：设备/目标都要销毁，没人会再读它（⛔ 别留给下一个 target）。
+        need_color_clear_ = false;
+        color_clear_target_ = nullptr;
         dirty_ = false;
         target_current_ = false;
     }
@@ -3431,8 +3526,22 @@ private:
     //   flush 时**原样**进第一个 render pass 的 `clear_depth`。缺省 1.0 = D3D9 / 新建深度附件的初值
     //   （`rasterPrepare` 建/重建 depth 时回到 1.0，那条路不是 guest 的 Clear）。
     float need_depth_clear_z_ = 1.0f;
+    // ★ 全幅 **color** clear 的 arm（`REQ-01M7W2FR9EJEMG2QDMZNG6N7WV`）：`d3d9::clear` 在
+    //   "目标 == 当前镜像 + `Count==0`" 时调 `rasterRequestColorClear`，由本后端的**下一个 render pass**
+    //   用 `LOADOP_CLEAR` 落地。⛔ 与深度版的三点不同（见 `gpu_raster.h` 的同名注释）：
+    //   · `color_clear_target_` = arm 那一刻的镜像身份 ⇒ **换 target 必须丢弃**（颜色多清一次 = 把刚画好的
+    //     RT 清成纯色）；`rasterPrepare` / `rasterSyncFromGuest` / `rasterDiscardTarget` 三条路各丢一次；
+    //   · 每次 arm **覆盖**清值（颜色不幂等）。
+    bool need_color_clear_ = false;
+    std::uint32_t color_clear_bgra_ = 0;         // BGRA8，逐位（`ddraw::storePixel` 的字节序）
+    const void* color_clear_target_ = nullptr;   // arm 时的 `target_base_`（换 target 即作废）
+    bool color_clear_drop_warned_ = false;       // 丢弃/失配只出声一次（⛔ 不每帧刷屏）
     // ★ dirty_ = 「**已提交**但尚未读回 guest」；队列/未提交上传也算脏 —— 对外只暴露
     //   `rasterDirty() = dirty_ || !queue_.empty() || hasPendingUploads()`（见 gpu_raster.h 的语义）。
+    //   ★ **Phase B 起它同时覆盖"待执行的 color clear"**：`rasterRequestColorClear` 直接置真
+    //     （= "target 可能 != guest"）。所以 clear-only 的 flush 之后它仍为真 —— 那一帧 target 里是
+    //     清色、guest 还是旧的，任何 `!rasterDirty() ⇒ 拿 guest 覆盖 target` 的路径都必须被挡住。
+    //     ⛔ 不要把这两行拆开：arm 不置真 = 清色被下一次 `rasterSyncFromGuest` 静默盖掉。
     bool dirty_ = false;
     std::string name_;
     // ---- GPU 直出（窗口 swapchain）----

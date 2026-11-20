@@ -21,6 +21,12 @@
 //     `hash_still_matches==false`，`hashFailures()` 每次 +1，但 warn **只一次**。
 //   · `present-readback/gate-sink`：`PresentSink::needsGuestPixels()==false` ⇒ sync 0；`true` ⇒ sync 1
 //     （renderer 回退路径的接线）。
+//   · ★ Phase B（`REQ-01M7W2FR9EJEMG2QDMZNG6N7WV`，全幅 `Clear` 走 GPU 侧 color clear）：
+//     `clear-arms-not-downloads`（arm 1 / sync 0 / guest 一个字节没写 / arm 时队列 0 / 清值逐位）、
+//     `clear-materializes-on-read`（Clear 后仍脏，读点材质化**一次**）、
+//     `clear-mirror-mismatch-fills-guest`（镜像 != 目标 ⇒ 不 arm、不下载，guest 仍被填对）、
+//     `clear-rect-keeps-materializing`（`Count != 0` 保持材质化）。
+//     ★ 这四条只守**接线**；清值 / `dirty_` / 绑 target 的**机制**在真后端（`tests/gpu_raster.cpp`）。
 //
 // ★ 为什么在 d3d9 分派层守：`HeadlessPresenter` 自己只能守"拿到的是不是这一帧"；"要不要拿"是
 //   `d3d9.cpp` 的接线，漏了不会报错、只有旧帧（`[present-readback]` 的静默错面）。
@@ -96,16 +102,40 @@ public:
     }
     bool rasterFlush(std::string*) override {
         ++flush_count;
+        // ★ 与真后端同一条交付契约（`REQ-01M7W2FR9EJEGM2QDMZNG6N7WV`）：本 flush 消费待执行的 color
+        //   clear；清-only（队列空）也真的消费，且**消费之后 target != guest**（`dirty` 仍真）。
+        if (color_clear_pending) {
+            color_clear_pending = false;
+            ++color_clear_consumed;
+            dirty = true;
+        }
         return true;
     }
     bool rasterDirty() const override { return dirty; }
     const void* rasterTargetBase() const override { return target_base; }
+    // ★ 全幅 color clear 的 arm（Phase B）：只记"收到了什么"，语义在真后端 / d3d9 侧。
+    //   ★ 必须照抄真后端的两条契约，否则调用方的后续判断会被 Mock 自己的模型带偏：
+    //     ① arm ⇒ 「镜像 != guest」（`dirty = true`）；② 后者覆盖前者。
+    void rasterRequestColorClear(std::uint32_t bgra8_pixel) override {
+        ++color_clear_count;
+        color_clear_bgra = bgra8_pixel;
+        color_clear_arm_queue.push_back(queued_draws);
+        color_clear_pending = true;
+        dirty = true;
+    }
 
     int sync_count = 0;
     int flush_count = 0;
     bool dirty = false;
     bool fail_sync = false;
     const void* target_base = nullptr;
+    // 全幅 color clear（Phase B）的观测点
+    int color_clear_count = 0;
+    std::uint32_t color_clear_bgra = 0;
+    std::vector<std::size_t> color_clear_arm_queue;  // 每次 arm 时队列里还有几条 draw（契约要求 0）
+    int color_clear_consumed = 0;
+    std::size_t queued_draws = 0;
+    bool color_clear_pending = false;
 };
 
 // 测试替身 sink：`needsGuestPixels` 可配（守的是 `d3d9.cpp` 有没有问它）。
@@ -334,6 +364,11 @@ struct Fixture {
     lift::GuestSurface* backBuffer() { return f.m.surfaces().find(info.arena); }
 
     std::uint32_t present() { return callMethod(f, device, 0x44u, {0u, 0u, 0u, 0u}); }
+    // `IDirect3DDevice9::Clear(Count, pRects, Flags, Color, Z, Stencil)`（槽 0xAC）
+    std::uint32_t clear(std::uint32_t count, std::uint32_t rects_ea, std::uint32_t flags, std::uint32_t color) {
+        return callMethod(f, device, 0xACu, {count, rects_ea, flags, color, 0x3F800000u, 0u});
+    }
+    std::uint32_t clearTarget(std::uint32_t color) { return clear(0u, 0u, 1u, color); }
 };
 
 std::string readFile(const char* path) {
@@ -600,6 +635,145 @@ void caseDumpNoRecordedHash() {
                 countOccurrences(log, "最后帧 hash 不可用"));
 }
 
+// ---------------------------------------------------------------------------------------
+// ⑧ 全幅 `Clear(TARGET)` 走 GPU 侧（`REQ-01M7W2FR9EJEMG2QDMZNG6N7WV`）：**不下载、不写 guest**
+//
+// 红了意味着什么：`Clear` 又回到"整幅下载 + 在 guest 里填色"（Phase B 的收益全丢），或者反过来
+//   "arm 了但把 guest 也填了"（等于没省 CPU 填色，而且掩盖了"读点必须材质化"这条语义）。
+// ★ 本用例只守**接线**（`d3d9::clear` 有没有调 arm / 有没有下载 / guest 有没有被写）：
+//   清值的像素语义在真后端（`tests/gpu_raster.cpp` 的 `gpu-raster` 清值逐位断言）。
+// ---------------------------------------------------------------------------------------
+void caseClearArmsNotDownloads() {
+    lift_test::g_current_case = "present-readback/clear-arms-not-downloads";
+    Fixture x;
+    LIFT_CHECK(x.setup());
+    if (!x.f.ok) return;
+    lift::GuestSurface* gs = x.backBuffer();
+    LIFT_CHECK(gs != nullptr);
+    if (gs == nullptr) return;
+    std::uint8_t* base = x.f.m.surfaces().pixels(*gs);
+    LIFT_CHECK(base != nullptr);
+    if (base == nullptr) return;
+    // 后缓冲先写成"上一帧"的字节：清色**不该**覆盖它们（= 没有材质化）。
+    for (int y = 0; y < gs->height; ++y) {
+        std::memset(base + static_cast<std::size_t>(y) * gs->pitch, 0x5A,
+                    static_cast<std::size_t>(gs->width) * 4u);
+    }
+    const std::uint32_t before = x.f.m.mem().rd32(x.info.arena);
+    LIFT_CHECK_EQ_U32(before, 0x5A5A5A5Au);
+
+    LIFT_CHECK_EQ_U32(x.clearTarget(0xFF102030u), 0u);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(x.mock.color_clear_count), 1u);  // 修前 0（没这条虚函数）
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(x.mock.sync_count), 0u);         // 修前 1
+    LIFT_CHECK_EQ_U32(x.f.m.mem().rd32(x.info.arena), before);                    // guest 一个字节没被写
+    // 清值逐位 = `pixelFromColor(X8R8G8B8, 0xFF102030)`（A 字节归一化为 0）
+    LIFT_CHECK_EQ_U32(x.mock.color_clear_bgra, 0x00102030u);
+    // arm 时后端队列必须为空（= 调用方先 flush 再 arm；否则 CLEAR 会落到含更早 draw 的 pass 开头）
+    LIFT_CHECK(!x.mock.color_clear_arm_queue.empty());
+    if (!x.mock.color_clear_arm_queue.empty()) {
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(x.mock.color_clear_arm_queue.back()), 0u);
+    }
+    std::printf("[clear-arms-not-downloads] arm=%d sync=%d pixel=0x%08X guest-unwritten=1\n",
+                x.mock.color_clear_count, x.mock.sync_count, x.mock.color_clear_bgra);
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑨ 清色是"派生"的：**读点**才把它材质化（`--dump-frame` 是文档化的消费者）
+//
+// 红了意味着什么：① `Clear` 自己又下载了一次（收益丢）；② arm 之后 `rasterDirty()` 回 false
+//   （clear-only 的 flush 把"待执行"吃掉了）⇒ Present 以为"本帧没有 GPU 写"⇒ 不下载也不写盘
+//   （静默旧帧）；③ dump 的 needs 门漏了。
+// ★ 断的是**次数与顺序**（Clear 之后 0 次 → Present 之后 1 次）；⛔ 不断言 BMP 里的像素
+//   （Mock 写的是 sentinel，"guest == 清色"测的是 Mock 自洽 —— 那一半在真后端用例上）。
+// ---------------------------------------------------------------------------------------
+void caseClearMaterializesOnRead() {
+    lift_test::g_current_case = "present-readback/clear-materializes-on-read";
+    Fixture x;
+    LIFT_CHECK(x.setup());
+    if (!x.f.ok) return;
+    const char* path = "lift-present-readback-clear.bmp";
+    std::remove(path);
+    x.f.m.cpu().shim.frame_dump = path;
+    x.mock.dirty = false;  // 起点干净：这一帧的"脏"只由 Clear 的 arm 造成
+    LIFT_CHECK_EQ_U32(x.clearTarget(0xFF102030u), 0u);
+    LIFT_CHECK_EQ_U32(x.mock.color_clear_count == 1 ? 1u : 0u, 1u);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(x.mock.sync_count), 0u);
+    // ★ arm ⇒ 「镜像 != guest」：这一段没有 draw，脏必须仍为真（否则 Present 跳过下载）
+    LIFT_CHECK(x.mock.rasterDirty());
+    LIFT_CHECK_EQ_U32(x.present(), 0u);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(x.mock.sync_count), 1u);  // 读点材质化了一次
+    LIFT_CHECK(x.f.m.presenter().lastDump() == path);                     // 真的写出了这一帧
+    LIFT_CHECK(std::fopen(path, "rb") != nullptr);
+    std::remove(path);
+    std::printf("[clear-materializes-on-read] clear-sync=%d read-sync=%d dump=ok\n",
+                x.mock.color_clear_count, x.mock.sync_count);
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑩ 镜像**不是**本次 Clear 的目标 ⇒ 逐字保留现状：只 flush，guest 仍被 CPU 填成清色
+//
+// 红了意味着什么：把整个全幅分支换成"只 arm"（复审点名的那个错误切法）⇒ 这一支**既不清目标
+//   也不写 guest**，清色静默丢失，而所有"非背景像素"判据照样绿。
+// ---------------------------------------------------------------------------------------
+void caseClearMirrorMismatch() {
+    lift_test::g_current_case = "present-readback/clear-mirror-mismatch-fills-guest";
+    Fixture x;
+    LIFT_CHECK(x.setup());
+    if (!x.f.ok) return;
+    lift::GuestSurface* gs = x.backBuffer();
+    LIFT_CHECK(gs != nullptr);
+    if (gs == nullptr) return;
+    std::uint8_t* base = x.f.m.surfaces().pixels(*gs);
+    LIFT_CHECK(base != nullptr);
+    if (base == nullptr) return;
+    std::vector<std::uint8_t> other(gs->pitch * static_cast<std::size_t>(gs->height), 0);
+    x.mock.target_base = other.data();  // 镜像说的是另一块 surface（`Clear` 打的仍是后缓冲）
+    for (int y = 0; y < gs->height; ++y) {
+        std::memset(base + static_cast<std::size_t>(y) * gs->pitch, 0x5A,
+                    static_cast<std::size_t>(gs->width) * 4u);
+    }
+    LIFT_CHECK_EQ_U32(x.clearTarget(0xFF102030u), 0u);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(x.mock.color_clear_count), 0u);  // ⛔ 不 arm（清错目标）
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(x.mock.sync_count), 0u);         // ⛔ 不下载别的 target
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(x.mock.flush_count), 1u);        // 队列照样落成 pass
+    LIFT_CHECK_EQ_U32(x.f.m.mem().rd32(x.info.arena), 0x00102030u);               // ★ guest 仍被填对
+    std::printf("[clear-mirror-mismatch-fills-guest] arm=%d sync=%d guest=0x%08X\n", x.mock.color_clear_count,
+                x.mock.sync_count, x.f.m.mem().rd32(x.info.arena));
+}
+
+// ---------------------------------------------------------------------------------------
+// ⑪ 带 rect 的 Clear（`Count != 0`）⇒ **保持材质化**（形状不参与改道）
+//
+// 红了意味着什么：把"带 rect 的 Clear"也 route 到 GPU 全幅清 ⇒ 清掉整屏而不是那几条矩形，
+//   或者反过来"rect 分支不再写 guest" ⇒ 那几条矩形的清色没落地。
+// ---------------------------------------------------------------------------------------
+void caseClearRectStillMaterializes() {
+    lift_test::g_current_case = "present-readback/clear-rect-keeps-materializing";
+    Fixture x;
+    LIFT_CHECK(x.setup());
+    if (!x.f.ok) return;
+    lift::GuestSurface* gs = x.backBuffer();
+    LIFT_CHECK(gs != nullptr);
+    if (gs == nullptr) return;
+    // 一条覆盖整幅的 D3DRECT（**形状**仍是 Count != 0 那一支）
+    std::vector<std::uint8_t> rect(16, 0);
+    const std::uint32_t vals[4] = {0u, 0u, static_cast<std::uint32_t>(gs->width),
+                                   static_cast<std::uint32_t>(gs->height)};
+    for (int i = 0; i < 4; ++i) {
+        for (int b = 0; b < 4; ++b) {
+            rect[static_cast<std::size_t>(i) * 4u + static_cast<std::size_t>(b)] =
+                static_cast<std::uint8_t>((vals[i] >> (8 * b)) & 0xFFu);
+        }
+    }
+    const std::uint32_t rect_ea = x.f.data(rect.data(), rect.size());
+    LIFT_CHECK_EQ_U32(x.clear(1u, rect_ea, 1u, 0xFF102030u), 0u);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(x.mock.color_clear_count), 0u);  // ⛔ 不 arm
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(x.mock.sync_count), 1u);         // 仍整幅下载
+    LIFT_CHECK_EQ_U32(x.f.m.mem().rd32(x.info.arena), 0x00102030u);               // guest 被填对
+    std::printf("[clear-rect-keeps-materializing] arm=%d sync=%d guest=0x%08X\n", x.mock.color_clear_count,
+                x.mock.sync_count, x.f.m.mem().rd32(x.info.arena));
+}
+
 }  // namespace
 
 int main() {
@@ -619,6 +793,15 @@ int main() {
     caseDumpNoRecordedHash();
     g_current_case = "present-readback/gate-sink";
     caseGateSink();
+    // ★ `REQ-01M7W2FR9EJEMG2QDMZNG6N7WV`（Phase B）：全幅 `Clear` 走 GPU 侧 color clear
+    g_current_case = "present-readback/clear-arms-not-downloads";
+    caseClearArmsNotDownloads();
+    g_current_case = "present-readback/clear-materializes-on-read";
+    caseClearMaterializesOnRead();
+    g_current_case = "present-readback/clear-mirror-mismatch-fills-guest";
+    caseClearMirrorMismatch();
+    g_current_case = "present-readback/clear-rect-keeps-materializing";
+    caseClearRectStillMaterializes();
 
     return finish("present-readback");
 }

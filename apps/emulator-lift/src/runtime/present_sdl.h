@@ -161,6 +161,11 @@ public:
     //   Live2D 角色整层丢失就是这个）。★ 它属于"转发壳漏一个虚函数"这一类错 —— 不改像素、
     //   不报错、测试全绿 ⇒ 守卫必须是"逐条转发"的（`tests/gpu_batch.cpp::caseDepthClearForwarded`）。
     void rasterRequestDepthClear(float z) override;
+    // ★ 全幅 **color** clear（D3D9 `Clear(...,D3DCLEAR_TARGET)` + `Count==0`）的转发。
+    //   与上面那条**同一类**："转发壳漏一个虚函数 ⇒ 后端实现了但永远收不到"——不报错、不改像素、
+    //   既有测试全绿。漏了它 `d3d9::clear` 会以为"清色已交给 GPU"，而后端什么都没做 ⇒ 目标与 guest
+    //   一起丢掉这次清色（`REQ-01M7W2FR9EJEMG2QDMZNG6N7WV`）。守卫见 `tests/gpu_batch.cpp`。
+    void rasterRequestColorClear(std::uint32_t bgra8_pixel) override;
     // GPU 直出接口转发到真正的后端（后端在 d3d9_gpu.cpp）。
     GpuDirectPresenter* directPresenter() override;
 

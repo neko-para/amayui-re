@@ -604,6 +604,13 @@ public:
 
     bool rasterPrepare(const lift::SurfaceFormat&, int, int, std::string*, const std::uint8_t* color_base) override {
         ++prepare_count;
+        // ★ 与真后端同一条：color clear 的 arm **绑 target 身份** ⇒ 身份一变就丢（⛔ 别清到新 target 上）。
+        if (color_base != nullptr && base_ != nullptr && color_base != base_) {
+            if (pending_color_clear_) {
+                pending_color_clear_ = false;
+                ++color_clear_dropped;
+            }
+        }
         if (color_base != nullptr) base_ = color_base;
         return true;
     }
@@ -678,6 +685,14 @@ public:
     bool rasterFlush(std::string*) override {
         if (fail_flush) return false;
         ++flush_count;
+        // ★ 全幅 color clear 的交付契约（与真后端**同一条**，`REQ-01M7W2FR9EJEGM2QDMZNG6N7WV`）：
+        //   **本 flush 的第一个 render pass** 消费待执行的 arm；清-only（队列空）也必须真的消费
+        //   —— 否则调用方会先 flush（空转）再下载旧内容。消费之后 **target != guest**（`dirty_` 仍真）。
+        if (pending_color_clear_) {
+            pending_color_clear_ = false;
+            ++color_clear_consumed;
+            dirty_ = true;
+        }
         if (!queue_.empty()) {
             // ★ 只有 backend 真的"录进 render pass"才回报（`record_draws=false` 模拟
             //   "入队成功但没进 pass" ⇒ 账本的 `empty` 必须留着）。
@@ -700,7 +715,7 @@ public:
         segment_first_ = 0;
         return true;
     }
-    bool rasterDirty() const override { return dirty_ || !queue_.empty(); }
+    bool rasterDirty() const override { return dirty_ || !queue_.empty() || pending_color_clear_; }
     const void* rasterTargetBase() const override { return base_; }
     std::size_t rasterQueuedDraws() const override { return queue_.size(); }
     void rasterDiscardTarget() override {
@@ -708,6 +723,7 @@ public:
         queue_.clear();
         dirty_ = false;
         base_ = nullptr;
+        pending_color_clear_ = false;  // 设备/目标都要销毁 ⇒ 待执行的 color clear 一起丢
     }
     // ★ `REQ-01M73P3GXW22Y467YGYPQSM571`：这条就是 `Clear(...,D3DCLEAR_ZBUFFER)` 的落点。
     //   转发壳（`SdlWindow`）曾经**整条没转发**，于是本计数恒 0、D32 永不再清、GPU 臂整层丢角色。
@@ -723,6 +739,17 @@ public:
         pending_clear = true;
         pending_clear_z = z;
     }
+    // ★ `REQ-01M7W2FR9EJEGM2QDMZNG6N7WV`：全幅 color clear 的落点（`Clear(TARGET)` + `Count==0`）。
+    //   ★ 这是**转发壳**守卫的观测点：`SdlWindow` 漏一条转发 ⇒ 本计数恒 0（不报错、不改像素、测试全绿）。
+    //   ★ 与真后端同一条状态契约：① 绑 target 身份（`rasterPrepare` 换身份即丢）；② 后者覆盖前者；
+    //     ③ **arm ⇒ 「镜像 != guest」**（`dirty_ = true` —— clear-only 的 flush 之后也必须继续脏）。
+    void rasterRequestColorClear(std::uint32_t bgra8_pixel) override {
+        ++color_clear_count;
+        color_clear_bgra = bgra8_pixel;
+        color_clear_arm_queue.push_back(queue_.size());
+        pending_color_clear_ = true;
+        dirty_ = true;
+    }
     std::size_t flush_count = 0;
     std::size_t sync_to_count = 0;
     std::size_t sync_from_count = 0;
@@ -731,6 +758,12 @@ public:
     std::size_t depth_clear_count = 0;
     float depth_clear_z = 0.0f;      // 最近一次 arm 带下来的 z（逐位，不是"近似 1.0"）
     std::vector<std::size_t> arm_queue;  // 每次 arm 时队列里还有几条 draw（契约要求 0）
+    // 全幅 color clear（`REQ-01M7W2FR9EJEGM2QDMZNG6N7WV`）的观测点
+    std::size_t color_clear_count = 0;              // `rasterRequestColorClear` 收到几次（转发壳的判据）
+    std::uint32_t color_clear_bgra = 0;             // 最近一次 arm 的清值（BGRA8，逐位）
+    std::vector<std::size_t> color_clear_arm_queue; // 每次 arm 时队列里还有几条 draw（契约要求 0）
+    std::size_t color_clear_consumed = 0;           // 被 render pass 消费了几次（清-only 也算）
+    std::size_t color_clear_dropped = 0;            // 因换 target 身份丢弃了几次
     // 深度清除的**计划层**观测：本 flush 录出的那个 render pass 的深度 load_op / 清除值。
     struct PassRecord {
         std::size_t first_draw = 0;   // 这个 pass 里第一条 draw 的全局序号
@@ -760,6 +793,7 @@ private:
     };
     bool pending_clear = false;   // 已 arm、还没被 render pass 消费
     float pending_clear_z = 0.0f;
+    bool pending_color_clear_ = false;  // 全幅 color clear：已 arm、还没被 render pass 消费
     std::vector<std::uint64_t> queue_;  // 每个条目的批号（与真后端的 `QueuedDraw::batch_tag` 同义）
     std::vector<Queued> queued_;
     std::size_t segment_first_ = 0;
@@ -793,25 +827,47 @@ void caseOrder() {
     LIFT_CHECK_EQ_U32(f.setFvf(kFvfXyzRhwDiffuse), 0u);
     LIFT_CHECK_EQ_U32(f.setViewport(0, 0, 64, 64), 0u);
 
+    // ---- 屏障 0：先给后端绑上镜像身份（生产路径由 `rasterPrepare(..., color_base)` 给出）----
+    // ★ `[present-readback]` Phase B 的改道判据是「**镜像 == 本次 Clear 的目标**」（`d3d9.cpp` 的
+    //   `rasterTargetBase() == base`）。不先绑身份，下面的 `Clear` 走的是"只 flush"那一支
+    //   （那一支的守护在 `present-readback/clear-mirror-mismatch-fills-guest`）。
+    lift::GuestSurface* back = f.m.surfaces().find(dev.info.arena);
+    LIFT_CHECK(back != nullptr);
+    if (back == nullptr) return;
+    std::uint8_t* back_px = f.m.surfaces().pixels(*back);
+    std::string prep_err;
+    LIFT_CHECK(mock.rasterPrepare(back->format, back->width, back->height, &prep_err, back_px));
+
     // ---- ① N 次 Draw ⇒ 队列 N、flush 0（Draw 只入队）----
     for (int i = 0; i < 3; ++i) LIFT_CHECK_EQ_U32(f.drawTriangle(10.0f, 0xFFFF0000u), 0u);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.rasterQueuedDraws()), 3);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.flush_count), 0);
     LIFT_CHECK(mock.rasterDirty());  // 队列非空 ⇒ 脏
 
-    // ---- 屏障 1：Clear(TARGET) ⇒ flush 1 次 + syncToGuest 1 次（⛔ 不是每条 draw 一次）----
+    // ---- 屏障 1：Clear(TARGET) 全幅 ⇒ flush 1 次、**不再** syncToGuest；清值以 arm 交给后端 ----
+    // ★ Phase B（`REQ-01M7W2FR9EJEMG2QDMZNG6N7WV`）：全幅清色由 GPU 侧的 `LOADOP_CLEAR` 落地 ⇒
+    //   这一次不再有"整幅下载 + guest 填色"（修前：sync 1）。判据**没有变弱**：清色的像素判据在
+    //   真后端（`gpu-raster` 的清值逐位）与 `present-readback/clear-arms-not-downloads` 上。
     LIFT_CHECK_EQ_U32(f.clearTo(0xFF00FF00u), 0u);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.rasterQueuedDraws()), 0);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.flush_count), 1);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.sync_to_count), 1);
-    LIFT_CHECK(!mock.rasterDirty());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.sync_to_count), 0);  // ← 修前 1
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.color_clear_count), 1);
+    LIFT_CHECK(!mock.color_clear_arm_queue.empty());
+    if (!mock.color_clear_arm_queue.empty()) {
+        // arm 时后端队列必须**空**（= 调用方先 flush 了；否则 CLEAR 会落到含更早 draw 的 pass 开头）
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.color_clear_arm_queue.back()), 0);  // ← 修前无此项
+    }
+    // ★ arm ⇒ 「镜像 != guest」：清-only 的 flush 之后也必须继续脏（修前这里是"清完就干净"）。
+    //   真后端的那一半（`dirty_` 在 `rasterRequestColorClear` 里置真）由 `gpu-raster` 真后端断言守。
+    LIFT_CHECK(mock.rasterDirty());
 
     // ---- 屏障 2：Present ⇒ 再一次 flush + sync ----
     for (int i = 0; i < 2; ++i) LIFT_CHECK_EQ_U32(f.drawTriangle(10.0f, 0xFFFF0000u), 0u);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.flush_count), 1);
     LIFT_CHECK_EQ_U32(f.present(), 0u);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.flush_count), 2);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.sync_to_count), 2);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.sync_to_count), 1);
     LIFT_CHECK(!mock.rasterDirty());
 
     // ---- 屏障 3：换 target（同尺寸、不同 guest 像素基址）⇒ flush + 回读旧目标 ----
@@ -829,16 +885,20 @@ void caseOrder() {
     LIFT_CHECK(mock.rasterDirty());
     LIFT_CHECK(mock.rasterSyncToGuest(other.data(), 64u * 4u, 64, 64, &err));
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.flush_count), 3);  // 2 → 3
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.sync_to_count), 3);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.sync_to_count), 2);
     LIFT_CHECK(!mock.rasterDirty());
 
     // ---- 屏障 4：Draw → Clear → Draw → Clear ⇒ 两次 flush（"只在最后 flush 一次"会红）----
+    // ★ 每一次 draw 批都会 `rasterPrepare(后缓冲)`（生产路径同一份：`d3d9_pipeline.cpp` 的绘制入口）
+    //   ⇒ 屏障 3 里"身份换成 other"只是白盒夹缝，下一条 draw 就把身份换回后缓冲了。所以这两个
+    //   `Clear` 又走"镜像 == 目标"那一支（arm），仍然各触发一次 flush。
     LIFT_CHECK_EQ_U32(f.drawTriangle(10.0f, 0xFFFF0000u), 0u);
     LIFT_CHECK_EQ_U32(f.clearTo(0xFF0000FFu), 0u);
     LIFT_CHECK_EQ_U32(f.drawTriangle(10.0f, 0xFFFF0000u), 0u);
     LIFT_CHECK_EQ_U32(f.clearTo(0xFF00FF00u), 0u);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.flush_count), 5);  // 3 → 5
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.sync_to_count), 5);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.sync_to_count), 2);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.color_clear_count), 3);  // 1 + 屏障 4 的两次 arm
 
     // ---- syncFromGuest 在队列非空时必须拒绝（⛔ 静默覆盖）----
     LIFT_CHECK_EQ_U32(f.drawTriangle(10.0f, 0xFFFF0000u), 0u);
@@ -2663,6 +2723,77 @@ void caseDepthClearForwarded() {
 }
 
 // ---------------------------------------------------------------------------------------
+// pure：**全幅 color clear 的转发壳**（`REQ-01M7W2FR9EJEMG2QDMZNG6N7WV`）
+//   `gpu-batch/color-clear-forwarded`
+//
+// 红了意味着什么：`SdlWindow`（`GpuRaster` 的转发壳）**漏了** `rasterRequestColorClear` 那一条转发
+//   ⇒ `d3d9::clear` 以为"清色已交给 GPU"，而后端基类实现是 no-op ⇒ **目标与 guest 一起丢掉这次清色**
+//   （不报错、不改像素、既有测试全绿）。这是本类错**唯一**的默认档判据：
+//   ⛔ `f.m.setGpuRaster(&mock)` 直连后端是抓不到的（那条路本来就绕开壳）。
+// ★ 顺带断言 Phase B 的另一半：全幅 `Clear` **不再** `rasterSyncToGuest`（清色不再整幅下载）。
+// ★ 反向：`Clear(TARGET)` 不带 ZBUFFER ⇒ 颜色**照样** arm（D3D9 里颜色/深度是两个位），深度**不许**。
+// ---------------------------------------------------------------------------------------
+void caseColorClearForwarded() {
+    lift_test::g_current_case = "gpu-batch/color-clear-forwarded";
+    Fixture f;
+    LIFT_CHECK(f.boot(false));
+    const std::uint32_t d3d = f.createDirect3D();
+    LIFT_CHECK_NE_U32(d3d, 0u);
+    if (d3d == 0) return;
+    Fixture::Device dev;
+    LIFT_CHECK(f.createDevice(d3d, 64, 64, lift::d3d9::kFmtX8R8G8B8, &dev));
+    if (dev.object == 0) return;
+
+    MockRaster mock;
+    lift::SdlWindow window;  // ★ 不 init：本用例只测**转发壳**这一层，不建 device / 不 claim 窗口
+    lift::GuestSurface* back = f.m.surfaces().find(dev.info.arena);
+    LIFT_CHECK(back != nullptr);
+    if (back == nullptr) return;
+    std::uint8_t* back_px = f.m.surfaces().pixels(*back);
+    LIFT_CHECK(back_px != nullptr);
+    if (back_px == nullptr) return;
+    window.setGpuRasterForTest(&mock);
+    LIFT_CHECK(window.gpuRaster() == &window);  // 缝生效：机器看到的是壳
+    LIFT_CHECK(window.rasterActive());
+    f.m.setGpuRaster(&window);
+
+    std::string err;
+    // ---- ⓪ 先经壳绑镜像身份（生产路径同一条：`rasterPrepare(..., color_base)`）----
+    LIFT_CHECK(window.rasterPrepare(back->format, back->width, back->height, &err, back_px));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.prepare_count), 1);
+    LIFT_CHECK(window.rasterTargetBase() == static_cast<const void*>(back_px));
+
+    // ---- ① Clear(TARGET|ZBUFFER) 全幅 ⇒ 后端必须收到 **1 次**颜色 arm + 1 次深度 arm，
+    //         且**不再**有 `rasterSyncToGuest` ----
+    LIFT_CHECK_EQ_U32(f.clearTo(0xFF102030u), 0u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.color_clear_count), 1);  // ← 漏转发 ⇒ 0（静默）
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.depth_clear_count), 1);
+    LIFT_CHECK_EQ_U32(mock.color_clear_bgra, 0x00102030u);  // 逐位：`pixelFromColor` 的 BGRA8
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.sync_to_count), 0);  // ← 修前 1（整幅下载）
+    LIFT_CHECK(!mock.color_clear_arm_queue.empty());
+    if (!mock.color_clear_arm_queue.empty()) {
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.color_clear_arm_queue.back()), 0);  // 先 flush 再 arm
+    }
+
+    // ---- ② Clear(TARGET) 不带 ZBUFFER ⇒ 颜色照样 arm（D3D9 里颜色与深度是两个位），深度不许 ----
+    LIFT_CHECK_EQ_U32(f.clearTargetOnly(0xFF405060u), 0u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.color_clear_count), 2);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.depth_clear_count), 1);
+    LIFT_CHECK_EQ_U32(mock.color_clear_bgra, 0x00405060u);  // 后者覆盖前者
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.sync_to_count), 0);
+
+    // ---- ③ rect（Count != 0）⇒ 不走 arm、仍材质化（形状不参与改道）----
+    LIFT_CHECK_EQ_U32(f.clearRect(0, 0, 64, 64, 0xFF00FF00u), 0u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.color_clear_count), 2);  // ⛔ 不 arm
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(mock.sync_to_count), 1);      // 仍整幅下载
+
+    f.m.setGpuRaster(nullptr);
+    window.setGpuRasterForTest(nullptr);
+    std::printf("gpu-batch/color-clear-forwarded: 颜色 arm=%llu 次转发、Clear 不再 syncToGuest\n",
+                static_cast<unsigned long long>(mock.color_clear_count));
+}
+
+// ---------------------------------------------------------------------------------------
 // 夹具助手：深度清的两单（`REQ-01M6RMVJTTM8PDNXB39TVJ40WN` / `REQ-01M73XEB…`）共用
 // ---------------------------------------------------------------------------------------
 // float 的**位模式**：`Clear` 的 z 是逐位传的 ⇒ 断言也逐位做（⛔ 不写 `== 0.25f` 这种"看起来一样"）。
@@ -3443,6 +3574,8 @@ int main(int argc, char** argv) {
     caseSpriteFeedbackLoop();
     caseFfTexProbe();
     caseDepthClearForwarded();
+    // ★ `REQ-01M7W2FR9EJEMG2QDMZNG6N7WV`（Phase B）：全幅 color clear 的**转发壳**（漏一条转发 = 静默）。
+    caseColorClearForwarded();
     // ★ `REQ-01M6RMVJTTM8PDNXB39TVJ40WN`：Clear(ZBUFFER, z) 的 z 必须走到 pass 的清除值；
     //   `REQ-01M73XEB594ZY8TA76S0EX4512`：Clear(ZBUFFER) 必须**先 flush 再 arm**。
     //   ★ 两条都挂在既有注册 `gpu-batch-order` 下（`REQ-01M7ATAB5A18W7XBCKFBEQS7HB` 的口径：
