@@ -145,13 +145,22 @@ int runAsChild(const std::vector<std::string>& args) {
 // 自检
 // ---------------------------------------------------------------------------------------
 
+/** 剥掉行尾的 `\r`。
+ *  ★ win32 上子进程的 stdout / stderr 是**普通文件**（`subprocess.cpp` 传的是 `CreateFileW` 句柄），
+ *    CRT 的文本模式把 `\n` 翻成 `\r\n`（实测：`arg[1]=--child` 那一行的尾巴是 `0D 0A`）。
+ *    POSIX 上没有这层翻译 ⇒ 两种行尾都必须接受，否则 `\r` 会被当成 token 的一部分。 */
+void stripCr(std::string& line) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+}
+
 /** `arg[i]=<value>` 行 → 按 i 顺序还原（i 必须从 0 连续）。 */
 std::vector<std::string> parseArgLines(const std::string& out) {
     std::vector<std::string> got;
     std::size_t pos = 0;
     while (pos <= out.size()) {
         const std::size_t nl = out.find('\n', pos);
-        const std::string line = out.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+        std::string line = out.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+        stripCr(line);
         if (line.rfind("arg[", 0) == 0) {
             const std::size_t close = line.find("]=");
             if (close == std::string::npos) return {};
@@ -167,12 +176,13 @@ std::vector<std::string> parseArgLines(const std::string& out) {
     return got;
 }
 
-/** 第一行以 `prefix` 开头的行（没有 ⇒ 空串）。 */
+/** 第一行以 `prefix` 开头的行（没有 ⇒ 空串）。行尾 `\r` 同样剥掉（否则 `cwd=` 的值带行尾符）。 */
 std::string firstLineWithPrefix(const std::string& text, const std::string& prefix) {
     std::size_t pos = 0;
     while (pos <= text.size()) {
         const std::size_t nl = text.find('\n', pos);
-        const std::string line = text.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+        std::string line = text.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+        stripCr(line);
         if (line.compare(0, prefix.size(), prefix) == 0) return line;
         if (nl == std::string::npos) break;
         pos = nl + 1;

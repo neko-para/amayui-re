@@ -597,8 +597,13 @@ int caseDrawEndPixels(bool gpu) {
     // ★ `--gpu` 臂：把光栅接到本夹具的后缓冲（缺省臂 no-op）。没有 GPU 设备 ⇒ SKIP 77。
     if (gpu && !r.pixelArm(&why)) LIFT_SKIP(why.c_str());
     // 基准背景：0x004080C0（r=64 g=128 b=192；X 格式 ⇒ alpha 无意义）
-    // ★ `Clear` 直写 guest（不经过 GPU 队列）⇒ 这条在两条臂上都成立。
+    // ★ Present Phase B（`ec77a6d`）之后 **Clear 不再直写 guest**：全幅 `Clear` 只 arm GPU 侧
+    //   `LOADOP_CLEAR`，guest 字节**只在读点**才材质化 ⇒ 读像素前必须先 `syncPixels()`。
+    //   （缺省臂没有光栅 ⇒ `syncPixels` 是 no-op，这条断言在两条臂上都成立。）
     LIFT_CHECK_EQ_U32(r.f.clearTo(r.dev, 0x004080C0u), 0u);
+    if (gpu) {
+        if (!r.syncPixels(&why)) LIFT_SKIP(why.c_str());
+    }
     LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 0, 0), 0x004080C0u);
 
     // ★ 本用例判的是**经典半透明叠加** `src*a + dst*(1-a)` ⇒ 把设备混合状态显式设成
@@ -2296,7 +2301,12 @@ int caseDoNotAddRefStaleTexture(bool gpu) {
 
     // ② 合成：身份不符 ⇒ 跳过这个精灵（⛔ 不采 T2 的像素）
     LIFT_CHECK_EQ_U32(r.end(), 0u);
-    // ★ 这条在两条臂上都成立：缺省臂没有光栅（不写像素），`--gpu` 臂里这条精灵根本没入队。
+    // ★ Present Phase B（`ec77a6d`）之后 `Clear` 只 arm GPU 侧 `LOADOP_CLEAR`，guest 字节要到
+    //   读点才材质化 ⇒ 读像素前必须先 `syncPixels()`（缺省臂 no-op）。下面期望"清屏色原样"，
+    //   不 sync 拿到的是未材质化的 0 ⇒ 这条会**假红**（更糟的是可能假绿）。
+    if (gpu) {
+        if (!r.syncPixels(&why)) LIFT_SKIP(why.c_str());
+    }
     LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 10, 10), 0x004080C0u);  // 清屏色原样（修前 = 0x00FF0000）
     LIFT_CHECK_EQ_U32(r.f.pixelAt(d, 11, 11), 0x004080C0u);
     LIFT_CHECK_EQ_U32(com->refCount(t2), 1u);  // ⛔ 新占有者一个引用都不被减
