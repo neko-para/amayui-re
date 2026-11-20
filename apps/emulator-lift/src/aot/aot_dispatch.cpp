@@ -203,8 +203,11 @@ double tableLoadFactor() {
 
 unsigned tableBuildMaxProbes() { return g_buildMaxProbes; }
 
-LiftFn lookup(std::uint32_t ea, std::uint64_t* comparisons) {
-    ++g_stats.lookups;
+LiftFn lookup(std::uint32_t ea, DispatchStats& stats, std::uint64_t* comparisons) {
+    // ★ P2 §3.2：`stats` 是**调用方在循环外取好的**引用（`dispatchStatsRef()`）⇒ 每派发不再做一次
+    //   TLS 访问。`lookups/hits/misses` 永远记（语义指纹里有 `table misses`）；`comparisons/max_probes`
+    //   只在调用方要（= `--profile` 开档，`comparisons != nullptr`）时记 —— 它们是归因读数。
+    ++stats.lookups;
     std::uint64_t probes = 0;
     LiftFn found = nullptr;
     // ---- 首次使用 ⇒ 摊表（这一次分支在 6,200 万次查找里只有第一次为真，分支预测吃得下）----
@@ -223,13 +226,15 @@ LiftFn lookup(std::uint32_t ea, std::uint64_t* comparisons) {
         h = (h + 1) & kSlotMask;
         if (probes >= kSlotCount) break;  // 表满（装载因子 ≤ 0.5，不该发生）⇒ 防御性收口为 miss
     }
-    g_stats.comparisons += probes;
-    if (probes > g_stats.max_probes) g_stats.max_probes = probes;
-    if (comparisons != nullptr) *comparisons = probes;
+    if (comparisons != nullptr) {
+        stats.comparisons += probes;
+        if (probes > stats.max_probes) stats.max_probes = probes;
+        *comparisons = probes;
+    }
     if (found != nullptr) {
-        ++g_stats.hits;
+        ++stats.hits;
     } else {
-        ++g_stats.misses;
+        ++stats.misses;
     }
     return found;
 }
@@ -258,6 +263,8 @@ LiftFn lookupUncounted(std::uint32_t ea) {
 void resetDispatchStats() { g_stats = DispatchStats{}; }
 
 DispatchStats dispatchStats() { return g_stats; }
+
+DispatchStats& dispatchStatsRef() { return g_stats; }
 
 void printProbeLine(std::FILE* out) {
     if (out == nullptr) return;

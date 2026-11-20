@@ -59,12 +59,20 @@ std::size_t tableSize();
 //     `probe :` / `table :` 的读数）。
 void ensureDispatchTable();
 
+// ★ 前置声明：`lookup` 的形参是它的引用（定义在下面，调用方只需引用 ⇒ 不需要完整类型）。
+struct DispatchStats;
+
 // EA → LiftFn。返回 nullptr = **不在表里**（调用方必须响亮停机，⛔ 不返回哨兵函数）。
+// ★ **`stats` 是必填的引用**（P2 §3.2）：统计是**每线程一份**（`thread_local DispatchStats`：feeder
+//   的查找不写主线程的账，也不并发写同一份非原子计数）⇒ 那个 thread_local 的地址由**调用方每轮取一次**
+//   （`dispatchStatsRef()`），⛔ 不在每次查找里重取。热路径（`AotHost::run` 的 7e8 次）只付一次
+//   TLS 访问 / run；冷调用方用下面的便利重载（每次付一次，与改动前等价）。
 // `comparisons`（可空）= 这一次查找做了几次**关键字比较**（哈希表里 = 探测次数：每次探测比较一次
 //   槽里的 EA；⛔ 那是"查找成本"的读数，不是二分那种 log2 比较）。
-// ★ 统计是**每线程一份**（`thread_local DispatchStats`）：feeder 的查找不写主线程的账，
-//   也不并发写同一份非原子计数 ⇒ 摘要里的 `probe :` / `table :` 仍只反映主线程。
-LiftFn lookup(std::uint32_t ea, std::uint64_t* comparisons);
+//   ★ **nullptr = 本次不记账**（`stats.comparisons` / `stats.max_probes` 都不动）：这两个字段是
+//     profile 归因读数，只有 `--profile` 开档（`prof_.on`）才有人读 ⇒ 缺省档一次都不写。
+//     `lookups` / `hits` / `misses` **永远记**（语义指纹里有 `table misses`）。
+LiftFn lookup(std::uint32_t ea, DispatchStats& stats, std::uint64_t* comparisons);
 
 // ★ S7（D53）：**同一条查找路径、但不计 trampoline 的派发账**。给生成代码的 `lift_dyn` 用
 //   （间接 `jmp` / `call reg|mem` 的尾调用）：那一次查找**不是**一次派发（没有回主循环），
@@ -93,6 +101,17 @@ struct DispatchStats {
 };
 void resetDispatchStats();
 DispatchStats dispatchStats();
+
+// ★ 本线程那份 `DispatchStats` 的**引用**（P2 §3.2）：热路径在循环外取**一次**，再逐次传给 `lookup`。
+//   ⛔ 不要在每次查找里调它 —— 那正是要消掉的 `__tls_get_addr`（mac arm64 实测：`adrp/add/ldr/blr`）。
+//   取到的引用只对**取它的那个线程**有效（thread_local）；跨线程共享 = 数据竞争。
+DispatchStats& dispatchStatsRef();
+
+// 便利重载（冷调用方：测试 / `aot_host.cpp` 的一次性探针）：每次现取一次 TLS 引用。
+// ⛔ 热路径（`AotHost::run` 的派发循环）不要用它 —— 用上面那条，把引用提到循环外。
+inline LiftFn lookup(std::uint32_t ea, std::uint64_t* comparisons) {
+    return lookup(ea, dispatchStatsRef(), comparisons);
+}
 
 // 一行**新增读数**（D28）：`probes avg / max | table cap / load factor`。
 // ★ 为什么单独一行、而不是塞进既有那行 `table :`：既有统计行的落点是 `aot_host.cpp`（本轮不动它），

@@ -389,6 +389,10 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     cpu_.shim.max_frames = opts.max_frames;
     if (!clock_.realTime()) clock_.setRealTime(true);  // D2b：wall clock（⛔ 没有 --clock= 开关）
     resetDispatchStats();
+    // ★ P2 §3.2：本线程那份 `DispatchStats` 的引用**在循环外取一次**（TLS 访问 7.18e8 次 → 1 次/轮）。
+    //   `resetDispatchStats()` 刚把这个对象清过 ⇒ 取引用与清账的先后无关（同一个对象）。
+    //   ⛔ 不要在循环里传 `dispatchStatsRef()`（那等于没改）；它必须活过整个循环。
+    DispatchStats& dispatch_stats = dispatchStatsRef();
     timerFires_ = 0;
     callResumes_ = 0;
     timer_null_warned_ = false;  // 节流按轮重置（一次 run 最多一行）
@@ -679,7 +683,17 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         //   ⛔ 旧注释写的「它们都落在桩页范围内」是**假的**：`0x7FFEF004/008/010/014` 全在桩页
         //     上界 `0x7FFE8000` **之上**（桩页 = `[0x7FFE0000, 0x7FFE8000)`，`image.h:98-99`）；
         //     页内判定（`stub_off < stub_span`）对它们恒假 ⇒ 它们从来不是"桩 EA"。
-        const Pump pumped = pumpSyntheticEas(r);
+        //   ★ P（P2 §3.1）：泵的三条**首判**在循环里内联（≈13 条），只有命中才进 `pumpSyntheticEas`
+        //     （原函数一行不改）—— 旧形状每派发付一次 `bl` + 泵的 fast path ≈29 条。
+        //     ⛔ 不把 `seh_.busy()` 提到循环顶缓存：泵自己可能改 SEH 状态（`pumpSeh` 的
+        //     `setDispatchPending(false)`）⇒ ⑤ 的定时器闸门会读到旧值（用 8 条换一次语义偏差不值）。
+        //   ★ 判据与泵内首判逐字等价：cont / timer 两个 EA 命中 ⇒ 泵走那两条分支；`seh_.busy()` 命中
+        //     ⇒ 泵走 `pumpSeh`；都不命中 ⇒ 泵只会返回 `NotHandled`（= 这里的 else）。
+        const Pump pumped =
+            (cpu_.eip == GuestCallStack::kContinuationEa || cpu_.eip == kTimerCallbackReturnEa ||
+             seh_.busy())
+                ? pumpSyntheticEas(r)
+                : Pump::NotHandled;
         if (pumped == Pump::Stop) break;
         if (pumped == Pump::Handled) {
             // 泵可能改了 esp / eip / 寄存器（铺帧 / 恢复现场 / SEH 转移）⇒ 反向同步一次。
@@ -939,8 +953,12 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
             continue;
         }
 
+        // ★ P2 §3.2：`comparisons` 只在 `--profile` 开档时记（`stats.comparisons` / `max_probes` 同）；
+        //   缺省档传 nullptr ⇒ 查找里连那两个统计写都不做。⚠ 缺省档的 `probe :` / `table :` 两行
+        //   因此是 `probes=0 avg=0.00 max=0` / `comparisons=0 avg_cmp=0.00`（口径见设计 §3.2，
+        //   `lookups/hits/misses` 不受影响 —— 它们才是语义指纹里的 `table misses`）。
         std::uint64_t comparisons = 0;
-        const LiftFn fn = lookup(ea, &comparisons);
+        const LiftFn fn = lookup(ea, dispatch_stats, prof_.on ? &comparisons : nullptr);
         if (fn == nullptr) {
             // ★ **响亮停**并点名 EA（D10 P4）：⛔ 不设"返回哨兵 = 结束"的约定，也⛔ 不静默当普通 EA。
             r.reason = AotStop::DecodeError;
