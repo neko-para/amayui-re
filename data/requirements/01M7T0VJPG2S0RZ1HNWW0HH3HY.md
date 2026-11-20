@@ -44,8 +44,10 @@
   用例 `tests/trigger_runner.cpp`（361 checks / 0 fail）。
 - **C2a**：**已完成（main；四轮独立复审收口）**：QJS loader/`start`/`onTrigger`/`ctx` 基础、
   `--plugin`/`--plugin-param`、读点 observer、`plugin-runtime`（170 checks）与 `plugin-headless` e2e。
-- **C2**：单插件运行时剩余 C2b（`render`/`ctx.draw`/`ctx.ui` 渲染/adopt）与 C2c（`loadSave` + e2e）。
-  C2a/C2b/C2c 分片与父级裁决见 dev `.tmp/plugin-runtime/c2-decisions.md`。
+- **C2b**：**已完成（main `68ac4ae`；独立复审 PASS-with-fixes）**：C2b-1 `RenderCtx`/`ctx.draw`/`ctx.ui`；
+  C2b-2 `adoptOverlayScript` 窗口装配 / FontEngine 进 PluginHost / `game.mouse().buttons` 生产读数 /
+  `plugin-overlay`（pure，30 checks）+ `aot-overlay` 子用例（44 checks）。
+- **C2c**：**未做**：`scripts/plugins/lib/save.js` 的 `loadSave(slot)` + pure chain + load-save headless e2e。
 - **C3**：JS recipe driver + parity（`InputPlan` 保留）。
 - **C4**：ControlBus 收编 `emu-ctl`（`EditSink`/`EngineRead`/`HostAction`/控制点；WS 薄传输）。
 - **C5**：UI→Run（`read → edit → input → dispatch` 的 e2e）。
@@ -56,12 +58,16 @@
 D1 单插件入口/`--plugin-param`/headless；D2 具名集合/one-per-point/replace；D3 宿主墙钟 + `NON-DIFFABLE`；
 D4 recipe 冻结 + `InputPlan` 保留 + C3 parity；D5 错误/超时/owner/预算（2 ms / 100k ops）；
 D6 ControlBus 5 + WS 控制点；D7 Run 只收 module+params、不 eval、busy 不排队；D8 Run status/events/owner/一个 active。
+★ C2b-2 复审的裁决点：`--overlay` + 插件 render ⇒ 插件 render **取代** hud.js（一次性 stderr，⛔ 不静默）；
+adopt 失败（字体缺失 / 窗口没建）⇒ exit 2（与 `--overlay` R5 同口径）。
 
 ## 残留 / 未做
 
 - 14 条 P2（`ctx.fail` 单参陷阱、initialState 的 ctx 引用只能 optional+guard、耗尽态不可类型化、stringly name、
   `UiApi.get` 无校验、`ProfileApi.end`、measure 估算等）——在 C0/C1 落类型/文档时处理。
-- C0/C1/C2a 已在 main；C2b–C5 未完成；`emu-ctl` 尚未迁移；C3 parity 未跑；C5 e2e 未做。
+- C0/C1/C2a/C2b 已在 main；C2c–C5 未完成；`emu-ctl` 尚未迁移；C3 parity 未跑；C5 e2e 未做。
+- C2b-2 的 docs 同步未做：`plugin-runtime.md` §4.6/§8.1 与 `overlay.md` 的 `game.mouse` 形状（`buttons` 可选键）。
+- `plugin-overlay` 未覆盖“adopt 丢弃 owned `--ui`/hud.js 脚本”那条路径（用例 `opt.overlay=false`）⇒ 补 `--ui` 夹具。
 - 蓝遮罩：`REQ-01M7SW90PC5GXBWZVJ2FJH7DY8`（独立；2026-11-19 真机确认为预期表现，已 dropped，不再是残留）。
 
 ## 怎么查
