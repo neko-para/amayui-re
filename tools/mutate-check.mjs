@@ -2644,6 +2644,25 @@ const MUTATIONS = [
       'mechanism 的 com-generation-stale-holder 红（新对象的 refcount / 对象表项被减）',
   },
 
+  // ---- C1 性能修（2026-11-20）：每 (iface, methods) 一份 COM 槽计划缓存 ----
+  // ★ 为什么这条值得一条变异：命中路径是**新增的第二条建对象路径**。它写 vtable 的那一行如果把
+  //   每个槽都写成 slot 0 的 stub，对象仍"建得出来"、guest 也仍能调 —— 但调用会**串到别的方法**
+  //   上（静默行为错，不崩、不黑屏），与 `registerSlot` 的"同 stub 不同实现"校验要防的是同一类。
+  // ★ 守卫在 `mechanism` 的 `com-slot-plan-hit-and-conflict`：同一张表建两个对象 ⇒ 第二个走
+  //   命中路径、vtable 必须与第一个**逐槽相同**；变异后第二个 vtable 每槽都是 slot 0 的 stub ⇒ 红。
+  {
+    file: 'apps/emulator-lift/src/runtime/com.cpp',
+    from: '            cpu.mem->wr32(vtable + slot * 4u, plan_it->second.stubs[slot]);',
+    to: '            cpu.mem->wr32(vtable + slot * 4u, plan_it->second.stubs[0]);  // 变异：命中路径写错槽位',
+    guard: 'ctest:mechanism',
+    ctest: 'mechanism',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-mechanism',
+    what:
+      'COM 槽计划**命中路径**把每个槽都写成 slot 0 的 stub（对象仍建得出来、guest 仍能调，但调用串线）' +
+      '⇒ mechanism 的 `com-slot-plan-hit-and-conflict` 红（第二个对象的 vtable 与第一个逐槽不同）',
+  },
+
 
   // ── emulator-lift：时间线的**效果级判据**不许恒真 ─────────────────────────────────────
   //   ★ "先判满足"的短路：任何观测窗在第一个块边界就"看到变化"⇒ `not-changed` / `unclosed`

@@ -34,7 +34,9 @@
 // ★ 线程 / 重入：没有锁（本模拟器是单线程解释器，SCOPE §1）。
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -200,9 +202,45 @@ private:
         ShimFn fn = nullptr;       // nullptr ⇒ 未实现的槽（loud trap）
     };
 
+    // ★ C1（PERF）：每个 (方法表地址, 大小) 一份**槽计划**。createObject 的主成本是逐槽
+    //   `registerSlot`（每个槽一次 `addRuntime`：O(defs_) 的 `findMutable` + 每项 `normalizeModule`
+    //   建串 + `methods_` 冲突校验），而同一张表建 100 个对象时这些结果**逐字节相同**。
+    //   命中 ⇒ 直接 `alloc vtable` + 逐槽写缓存的 stub + `installShim` / `installFeederShim`
+    //   （⛔ C3 不做：逐槽仍装）；未命中 ⇒ 走原路（含 O(m²) 校验与冲突拒绝），成功后存 plan。
+    // ★ 键 = 表**地址 + size**（本仓所有方法表都是 `static const std::vector`），但 plan 里另存
+    //   **表内容**与 iface，命中时逐字段比对 ⇒ 栈上"同址不同表"只会 miss，⛔ 不会假命中、
+    //   更不会绕过"同 stub 不同实现"的响亮拒绝。表地址/大小变了 ⇒ miss ⇒ 原路。
+    struct SlotPlan {
+        std::string iface;                   // 建 plan 时的 iface（注册名 / 冲突判据的一部分）
+        std::vector<ComMethod> methods;      // 建 plan 时的表内容（name / fn 按**指针**比 ⇒ 保守 miss）
+        std::vector<std::uint32_t> stubs;    // 每个 slot 的 stub EA（由 addRuntime 发号）
+        std::vector<std::uint32_t> def_ids;  // 每个 slot 的 ShimDef::id（installShim 用）
+    };
+    struct SlotPlanKey {
+        const std::vector<ComMethod>* methods = nullptr;
+        std::size_t size = 0;
+        bool operator==(const SlotPlanKey& other) const {
+            return methods == other.methods && size == other.size;
+        }
+    };
+    struct SlotPlanKeyHash {
+        std::size_t operator()(const SlotPlanKey& key) const noexcept {
+            const std::size_t h1 = std::hash<const void*>{}(key.methods);
+            const std::size_t h2 = std::hash<std::size_t>{}(key.size);
+            return h1 ^ (h2 + static_cast<std::size_t>(0x9e3779b1u) + (h1 << 6) + (h1 >> 2));
+        }
+    };
+
     // 给一个槽登记 thunk（幂等：同一 (iface, 方法) 的第二、第三个对象复用同一个 stub）。
-    // 返回 stub EA；0 = 失败（已经打过日志）。
-    std::uint32_t registerSlot(X86& cpu, const std::string& iface, const MethodEntry& want, bool has_method);
+    // 返回 stub EA；0 = 失败（已经打过日志）。`out_def_id`（可空）回填 ShimDef::id（installShim 用）。
+    std::uint32_t registerSlot(X86& cpu, const std::string& iface, const MethodEntry& want, bool has_method,
+                               std::uint32_t* out_def_id);
+
+    // C1 命中路径的"装一条已发号的槽"：与 `registerSlot` 成功后的尾部**逐字节相同**
+    // （BlockCache::installShim / 无块缓存时 byStubEa 反查 / feeder 的私有块缓存）。
+    // 返回 false = 拒绝（已打日志）。
+    bool installPlannedSlot(X86& cpu, const std::string& iface, std::uint32_t stub,
+                            std::uint32_t def_id);
 
     // iface + 方法名 → 注册名（`<iface>::<name>`；已经带前缀就不重复加）
     static std::string qualifiedName(const std::string& iface, const char* name);
@@ -213,6 +251,8 @@ private:
 
     std::unordered_map<std::uint32_t, Object> objects_;        // key = obj guest EA
     std::unordered_map<std::uint32_t, MethodEntry> methods_;   // key = stub EA（桩页地址）
+    // C1：槽计划缓存（key = 方法表地址 + size）。见上面 `SlotPlan` 的说明。
+    std::unordered_map<SlotPlanKey, SlotPlan, SlotPlanKeyHash> plans_;
     // 下一个要发的代际（只增不复用；0 保留给"没有代际"）。
     std::uint32_t next_generation_ = 1;
     // ★ 方案 C：feeder 线程与主线程都会查/建 COM 对象（主线程建 SE、feeder 查 buffer 状态）。

@@ -64,6 +64,22 @@ void comWarn(const char* iface, const char* fmt, ...) {
     va_end(ap);
 }
 
+// C1：槽计划命中前的**表内容**比对。键只取表地址 + size ⇒ 必须确认这张表还是建 plan 时那张
+// （栈上局部 vector 可以复用同一地址）。`name` / `fn` 按**指针**比：不同字面量即使内容相同也判
+// 不同 ⇒ 保守 miss（⛔ 宁可走原路，也不许把一次真冲突吞成命中）。
+bool sameMethods(const std::vector<ComMethod>& a, const std::vector<ComMethod>& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        const ComMethod& x = a[i];
+        const ComMethod& y = b[i];
+        if (x.offset != y.offset || x.name != y.name || x.conv != y.conv || x.argc != y.argc ||
+            x.fn != y.fn) {
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 std::string ComRegistry::qualifiedName(const std::string& iface, const char* name) {
@@ -75,7 +91,7 @@ std::string ComRegistry::qualifiedName(const std::string& iface, const char* nam
 }
 
 std::uint32_t ComRegistry::registerSlot(X86& cpu, const std::string& iface, const MethodEntry& want,
-                                       bool has_method) {
+                                       bool has_method, std::uint32_t* out_def_id) {
     if (!cpu.shims) {
         comLog(iface.c_str(), "createObject 需要 cpu.shims（ShimRegistry）来发唯一 stub 地址");
         return 0;
@@ -111,26 +127,37 @@ std::uint32_t ComRegistry::registerSlot(X86& cpu, const std::string& iface, cons
         methods_.emplace(stub, std::move(e));
     }
 
+    if (!installPlannedSlot(cpu, iface, stub, def_id)) return 0;
+    if (out_def_id) *out_def_id = def_id;
+    return stub;
+}
+
+bool ComRegistry::installPlannedSlot(X86& cpu, const std::string& iface, std::uint32_t stub,
+                                    std::uint32_t def_id) {
     // ★ 必须有"桩 EA → 可调用"的机制。解释器用 BlockCache（`installShim`）；AOT 臂**没有块缓存**
     //   ⇒ 靠宿主的桩表承接（`lift_shim` 里就是靠 `idForStub` / `byStubEa` 反查的，
     //   见 `lift_abi.cpp:46-58`）。⛔ 这不是语义需要，是解释器时代的实现约束：不放开它，
     //   AOT 连一个 COM 对象都建不出来（D3D9 / DDraw / D3DX / DSound / DShow / AGERC 全走这里）。
+    if (!cpu.shims) {
+        comLog(iface.c_str(), "createObject 需要 cpu.shims（ShimRegistry）来发唯一 stub 地址");
+        return false;
+    }
     if (cpu.cache) {
         cpu.cache->installShim(stub, def_id);
     } else if (cpu.shims->byStubEa(stub) == nullptr) {
         // ⚠ **这个分支今天不可达**（复审 T2a P3-1）：`byStubEa` 就是扫 `defs_` 里
-        //   `stub_ea == ea`，而 `stub` 正是上面刚 `addRuntime` 出来的那个 `def->stub_ea`
-        //   （且 90 行已保证非 0）⇒ 反查必然命中。它**不是**一道有效的护栏，别指望它拦。
+        //   `stub_ea == ea`，而 `stub` 正是 `addRuntime` 发出来的那个 `def->stub_ea`
+        //   （且 registerSlot 入口已保证非 0）⇒ 反查必然命中。它**不是**一道有效的护栏，别指望它拦。
         //   ⛔ **也不要删**：它描述的是"既没有块缓存、桩表也接不住该 EA"这个**结构**上的拒绝
         //   条件 —— 将来任何"发得出桩 EA、注册表却接不住"的注册形态都会落到这里；删掉就等于
         //   悄悄退化成"返回一个调不动的桩 EA"，而那正是要防的静默错误。
         comLog(iface.c_str(),
                "没有 BlockCache 且宿主桩表里反查不到 stub 0x%08X ⇒ 拒绝（桩 EA 不可调用）", stub);
-        return 0;
+        return false;
     }
     // ★ 方案 C：feeder 的私有 BlockCache 也要有这条 vtable stub（它会在自己的线程里 call 它）。
     if (cpu.audio) cpu.audio->installFeederShim(stub, def_id);
-    return stub;
+    return true;
 }
 
 std::uint32_t ComRegistry::createObject(X86& cpu, const char* iface, const std::vector<ComMethod>& methods,
@@ -162,35 +189,51 @@ std::uint32_t ComRegistry::createObject(X86& cpu, const char* iface, const std::
         return 0;
     }
 
-    // ① 校验 offsets：对齐 / 重复 / 名字重复 / 上限
-    std::uint32_t max_offset = 0;
-    for (std::size_t i = 0; i < methods.size(); ++i) {
-        const ComMethod& m = methods[i];
-        if ((m.offset & 3u) != 0) {
-            comLog(face.c_str(), "方法 \"%s\" 的 offset 0x%X 不是 4 的倍数（vtable 槽按 DWORD 排）",
-                   m.name ? m.name : "?", m.offset);
+    // ① C1：先查槽计划（key = 方法表地址 + size）。命中 ⇒ 跳过 ①' 的 O(m²) 校验与逐槽
+    //   `registerSlot`（每次 `addRuntime` 都做 O(defs_) 的 `findMutable` + 每项 `normalizeModule`
+    //   建串 + `methods_` 冲突校验）；未命中 ⇒ 走原路，成功后存 plan。
+    //   ★ 语义：命中只省"重复计算"，**不省**任何 guest 可见动作 —— vtable 字节、对象头布局、
+    //   refcount、`installShim` / `installFeederShim`（C3 不做）与 guest 分配顺序全部与慢路径相同。
+    const SlotPlanKey plan_key{&methods, methods.size()};
+    const auto plan_it = plans_.find(plan_key);
+    const bool plan_hit = plan_it != plans_.end() && plan_it->second.iface == face &&
+                          sameMethods(plan_it->second.methods, methods);
+
+    std::uint32_t slots = 0;
+    if (plan_hit) {
+        slots = static_cast<std::uint32_t>(plan_it->second.stubs.size());
+    } else {
+        // ①' 校验 offsets：对齐 / 重复 / 名字重复 / 上限（原路）
+        std::uint32_t max_offset = 0;
+        for (std::size_t i = 0; i < methods.size(); ++i) {
+            const ComMethod& m = methods[i];
+            if ((m.offset & 3u) != 0) {
+                comLog(face.c_str(), "方法 \"%s\" 的 offset 0x%X 不是 4 的倍数（vtable 槽按 DWORD 排）",
+                       m.name ? m.name : "?", m.offset);
+                return 0;
+            }
+            if (m.offset > max_offset) max_offset = m.offset;
+            for (std::size_t j = 0; j < i; ++j) {
+                if (methods[j].offset == m.offset) {
+                    comLog(face.c_str(), "两个方法都写在 offset +0x%X（\"%s\" / \"%s\"）⇒ 拒绝",
+                           m.offset, methods[j].name ? methods[j].name : "?", m.name ? m.name : "?");
+                    return 0;
+                }
+                if (methods[j].name && m.name &&
+                    qualifiedName(face, methods[j].name) == qualifiedName(face, m.name)) {
+                    // 名字是 addRuntime 的键：同名不同 offset 会让两个槽指到同一条 stub（静默串线）
+                    comLog(face.c_str(), "两个方法同名 \"%s\"（offset +0x%X / +0x%X）⇒ 拒绝",
+                           m.name, methods[j].offset, m.offset);
+                    return 0;
+                }
+            }
+        }
+        slots = max_offset / 4u + 1u;
+        if (slots > kMaxVtableSlots) {
+            comLog(face.c_str(), "vtable 需要 %u 个槽（最大偏移 +0x%X）> 上限 %u ⇒ 拒绝（偏移写错？）",
+                   slots, max_offset, kMaxVtableSlots);
             return 0;
         }
-        if (m.offset > max_offset) max_offset = m.offset;
-        for (std::size_t j = 0; j < i; ++j) {
-            if (methods[j].offset == m.offset) {
-                comLog(face.c_str(), "两个方法都写在 offset +0x%X（\"%s\" / \"%s\"）⇒ 拒绝",
-                       m.offset, methods[j].name ? methods[j].name : "?", m.name ? m.name : "?");
-                return 0;
-            }
-            if (methods[j].name && m.name && qualifiedName(face, methods[j].name) == qualifiedName(face, m.name)) {
-                // 名字是 addRuntime 的键：同名不同 offset 会让两个槽指到同一条 stub（静默串线）
-                comLog(face.c_str(), "两个方法同名 \"%s\"（offset +0x%X / +0x%X）⇒ 拒绝",
-                       m.name, methods[j].offset, m.offset);
-                return 0;
-            }
-        }
-    }
-    const std::uint32_t slots = max_offset / 4u + 1u;
-    if (slots > kMaxVtableSlots) {
-        comLog(face.c_str(), "vtable 需要 %u 个槽（最大偏移 +0x%X）> 上限 %u ⇒ 拒绝（偏移写错？）",
-               slots, max_offset, kMaxVtableSlots);
-        return 0;
     }
 
     // ② 分配 vtable（guest 堆；先用临时数组算好每个槽的 stub，再一次性写进去）
@@ -200,45 +243,67 @@ std::uint32_t ComRegistry::createObject(X86& cpu, const char* iface, const std::
         comLog(face.c_str(), "guest 堆分配 vtable（%u 字节）失败：%s", vtable_bytes, cpu.heap->lastError());
         return 0;
     }
-    std::vector<std::uint32_t> slot_ea(slots, 0);
-    for (std::uint32_t slot = 0; slot < slots; ++slot) {
-        const std::uint32_t offset = slot * 4u;
-        const ComMethod* m = nullptr;
-        for (const ComMethod& cand : methods) {
-            if (cand.offset == offset) {
-                m = &cand;
-                break;
+    if (plan_hit) {
+        // 命中路径：stub 早已发号并通过过冲突校验 ⇒ 仍逐槽装 shim（C3 不做），再一次性写 vtable。
+        for (std::uint32_t slot = 0; slot < slots; ++slot) {
+            if (!installPlannedSlot(cpu, face, plan_it->second.stubs[slot],
+                                    plan_it->second.def_ids[slot])) {
+                cpu.heap->free(vtable);  // 半成品不留在 guest 堆里
+                return 0;
             }
         }
-        MethodEntry want;
-        want.iface = face;
-        want.offset = offset;
-        if (m) {
-            want.conv = m->conv;
-            want.argc = m->argc;
-            want.fn = m->fn;
+        for (std::uint32_t slot = 0; slot < slots; ++slot) {
+            cpu.mem->wr32(vtable + slot * 4u, plan_it->second.stubs[slot]);
         }
-        if (m && m->fn) {
-            want.name = qualifiedName(face, m->name);
-        } else {
-            // ★ 未实现的槽的注册名带上偏移：trap 只有这一处能可靠地打出 iface + 偏移
-            //   （`com!<iface>::<label>+0xNN`；没声明过的方法 label 就是 unsupported）
-            char buf[128];
-            std::snprintf(buf, sizeof(buf), "%s::%s+0x%X", face.c_str(),
-                          m ? (m->name ? m->name : "?") : "unsupported", offset);
-            want.name = buf;
-            want.fn = nullptr;
+    } else {
+        std::vector<std::uint32_t> slot_ea(slots, 0);
+        std::vector<std::uint32_t> def_id(slots, 0);
+        for (std::uint32_t slot = 0; slot < slots; ++slot) {
+            const std::uint32_t offset = slot * 4u;
+            const ComMethod* m = nullptr;
+            for (const ComMethod& cand : methods) {
+                if (cand.offset == offset) {
+                    m = &cand;
+                    break;
+                }
+            }
+            MethodEntry want;
+            want.iface = face;
+            want.offset = offset;
+            if (m) {
+                want.conv = m->conv;
+                want.argc = m->argc;
+                want.fn = m->fn;
+            }
+            if (m && m->fn) {
+                want.name = qualifiedName(face, m->name);
+            } else {
+                // ★ 未实现的槽的注册名带上偏移：trap 只有这一处能可靠地打出 iface + 偏移
+                //   （`com!<iface>::<label>+0xNN`；没声明过的方法 label 就是 unsupported）
+                char buf[128];
+                std::snprintf(buf, sizeof(buf), "%s::%s+0x%X", face.c_str(),
+                              m ? (m->name ? m->name : "?") : "unsupported", offset);
+                want.name = buf;
+                want.fn = nullptr;
+            }
+            const bool has_method = m != nullptr;
+            const std::uint32_t stub = registerSlot(cpu, face, want, has_method, &def_id[slot]);
+            if (stub == 0) {
+                cpu.heap->free(vtable);  // 半成品不留在 guest 堆里
+                return 0;
+            }
+            slot_ea[slot] = stub;
         }
-        const bool has_method = m != nullptr;
-        const std::uint32_t stub = registerSlot(cpu, face, want, has_method);
-        if (stub == 0) {
-            cpu.heap->free(vtable);  // 半成品不留在 guest 堆里
-            return 0;
+        for (std::uint32_t slot = 0; slot < slots; ++slot) {
+            cpu.mem->wr32(vtable + slot * 4u, slot_ea[slot]);
         }
-        slot_ea[slot] = stub;
-    }
-    for (std::uint32_t slot = 0; slot < slots; ++slot) {
-        cpu.mem->wr32(vtable + slot * 4u, slot_ea[slot]);
+        // 成功 ⇒ 存 plan（键是调用方的方法表地址 + size；plan 里另存表内容 ⇒ 栈上同址复用只会 miss）
+        SlotPlan plan;
+        plan.iface = face;
+        plan.methods = methods;
+        plan.stubs = std::move(slot_ea);
+        plan.def_ids = std::move(def_id);
+        plans_[plan_key] = std::move(plan);
     }
 
     // ③ 分配对象头（[0] = vtable，[4] = refcount = 1；挂了扩展块再加 [8] = user）

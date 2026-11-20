@@ -576,6 +576,57 @@ int main() {
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(com.objectCount()), 0u);
         LIFT_CHECK_EQ_U32(m.heap().bytesInUse(), heap_before);
 
+        // ---- C1：每 (iface, methods) 一份槽计划缓存（命中路径也是**逐槽同一个 stub**）----
+        //   ★ 为什么要有这一条：命中路径是**新增的第二条建对象路径**。"命中"只许省重复计算；
+        //     vtable 的每个槽必须仍与慢路径逐个相同 —— 写错槽 = guest 调用串到别的方法上
+        //     （静默行为错，不崩、不黑屏），与 `registerSlot` 的冲突校验要防的是同一类。
+        //   ★ 前序用例已经让这张表进过 plan ⇒ 这里两个对象都走命中路径。
+        g_current_case = "com-slot-plan-hit-and-conflict";
+        {
+            const std::uint32_t slots_before_plan = m.shims().nextStubSlot();
+            const std::uint32_t plan_obj_a = com.createObject(m.cpu(), "ITest", methods);
+            const std::uint32_t plan_obj_b = com.createObject(m.cpu(), "ITest", methods);
+            LIFT_CHECK_NE_U32(plan_obj_a, 0u);
+            LIFT_CHECK_NE_U32(plan_obj_b, 0u);
+            LIFT_CHECK_NE_U32(plan_obj_a, plan_obj_b);                      // 两个对象同时在表里
+            LIFT_CHECK_EQ_U32(m.shims().nextStubSlot(), slots_before_plan);  // 命中不新占桩号
+            const std::uint32_t plan_vt_a = m.mem().rd32(plan_obj_a);
+            const std::uint32_t plan_vt_b = m.mem().rd32(plan_obj_b);
+            LIFT_CHECK_NE_U32(plan_vt_a, 0u);
+            LIFT_CHECK_NE_U32(plan_vt_b, 0u);
+            LIFT_CHECK_NE_U32(plan_vt_a, plan_vt_b);  // 各自 vtable（C8 未做池化）
+            // `methods` 的最大 offset = 8 ⇒ 3 槽；逐槽比 EA，并确认桩仍可解析、仍装进块缓存。
+            bool plan_slots_same = true;
+            for (std::uint32_t slot = 0; slot < 3u; ++slot) {
+                const std::uint32_t ea_a = m.mem().rd32(plan_vt_a + slot * 4u);
+                const std::uint32_t ea_b = m.mem().rd32(plan_vt_b + slot * 4u);
+                if (ea_a == 0u || ea_a != ea_b) plan_slots_same = false;
+                if (m.shims().byStubEa(ea_b) == nullptr) plan_slots_same = false;
+                if (m.cache().peek(ea_b) == nullptr) plan_slots_same = false;  // 命中仍逐槽 installShim
+            }
+            LIFT_CHECK(plan_slots_same);
+
+            // 冲突表：同 iface / 同方法名 / **不同实现** ⇒ 仍必须响亮拒绝（plan 不许吞掉它）。
+            std::vector<lift::ComMethod> conflicting = methods;
+            conflicting[0].fn = &shimAdd;  // GetValue 的位置换成 Add 的实现
+            lift::logSetLevel("info");      // 冲突拒绝走 comLog（Info）；这里要看见那行
+            LIFT_CHECK(lift::logConfig().level == lift::LogLevel::Info);
+            StderrTee cap;
+            LIFT_CHECK(cap.begin());
+            const std::uint32_t conflict_obj = com.createObject(m.cpu(), "ITest", conflicting);
+            const std::string conflict_log = cap.finish();
+            LIFT_CHECK_EQ_U32(conflict_obj, 0u);
+            LIFT_CHECK(contains(conflict_log, "⇒ 拒绝（两个对象会串线）"));
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(com.objectCount()), 2u);  // 没有多建
+            LIFT_CHECK_EQ_U32(m.shims().nextStubSlot(), slots_before_plan);        // 也没有新占桩号
+            lift::logSetLevel("warn");  // 恢复默认（下面的 ④ 也显式设 warn）
+
+            LIFT_CHECK(com.release(m.cpu(), plan_obj_b));
+            LIFT_CHECK(com.release(m.cpu(), plan_obj_a));
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(com.objectCount()), 0u);
+            LIFT_CHECK_EQ_U32(m.heap().bytesInUse(), heap_before);
+        }
+
         // ---- ④ 响亮拒绝的**默认级别可见性**（`REQ-01M70FP71PWDFKGQ06QE37EQJY` #2）----
         // 缺陷形态：两处"响亮拒绝"走 `comLog`（`LogLevel::Info`），而默认 `--log-level` 是 `warn`
         //   ⇒ 默认跑法下这两行**根本看不见**（`ddrawWarn` / `d3dxWarn` / `pipeWarn` / `spriteWarn`
