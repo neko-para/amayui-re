@@ -24,6 +24,11 @@
 - 指纹 12 次 run 全同（exit 0 / `stop @ 00412383` / arena `89668632,119683880,182` / `table misses=0`）。
 - 守卫 `mechanism` 的 `com-slot-plan-hit-and-conflict`（顶层 pure）+ 变异 `--match '命中路径'` 1/1 红。
 
+★ **口径**：本节 A/B 是 **visible** 档（历史）。hidden 档（`--present window --present-hidden`）要重取时
+**两臂都重跑**（`.tmp/save05-bench/protocol.md`），⛔ 不混臂。
+★ 复审注：新 case 对"每槽写 slot 0"**不红**（两对象都变 slot0）——真正红的是前序
+`com-second-object-reuses-stubs`；待修"逐槽对已知 stub 比或改正变异归因"。
+
 ## 剩余候选（预期按 8 尖峰帧口径；C1 后基线已降到 ~805 ms）
 
 | # | 候选 | 预期 | 风险 |

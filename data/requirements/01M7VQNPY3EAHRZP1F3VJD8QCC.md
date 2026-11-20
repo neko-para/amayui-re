@@ -29,6 +29,9 @@
 - 变异：`--match 'lift-ir-shim'` 1/1 红（CTest 8），还原后绿。
 - 报告：`.tmp/perf-reassess/p2-design.md` / `p-implement-report.md` / `a-prime-report.md`（临时区，⛔ 不入库）。
 
+★ **A′ 的判据裁决**（2026-11-20，父级）：记为**方向确认**（6/6 + 2/2 同向；臂中位之比 −5.02%，
+逐对中位 −4.47% —— 落在本机 5% 分辨力的边缘）⇒ 不写成"稳健 ≥5%"；hidden 档复核留待后续。
+
 ## 未做 / 待核
 
 - **A′ 的 A/B 是 visible 档**（hidden 新口径 14:27 才到，按"不混臂"保留）；后续评测用
