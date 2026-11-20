@@ -429,6 +429,10 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     //   ★ 为什么缺省关：行数 = 帧数（300 帧 ⇒ 300 行，占默认 stdout 的 78%），而它只是**画面序列**读数；
     //     末帧 hash 另有出口（摘要 `present : … lastHash=0x…`）。
     const bool frame_log_on = opts.frame_log || prof_.on;  // ★ `|| prof_.on`：已有 profile 存档的可比面
+    // ★ 逐帧 hash 的**唯一**请求口（`[present-readback]` Phase A）：`--frame-log` 与 `--profile` 都走这一条
+    //   ⇒ 存档口径逐字不变（`[frame] … hash=` / profile 的 hash 仍是真的）；缺省关 ⇒ 默认档零逐帧 hash。
+    //   ★ 它同时让 `wantsGuestPixels()` 为真 ⇒ 这些档的 Present 仍每帧回读（仪器档不假装"优化后"）。
+    presenter_.setFrameHash(frame_log_on);
     // ★ shim 名字解析（`--profile-slow-frames` 的具名行用）：只在**慢帧保存时**被调（⛔ 不在热路径上）。
     //   与窗口 profile 的具名行同一份格式（`module!name`），唯一差别是这里按 id 查一次注册表。
     const ShimNameFn frame_shim_name = [this](std::uint32_t id) { return shimDisplayName(id); };
@@ -1064,6 +1068,15 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
                      static_cast<unsigned long long>(a.fills),
                      static_cast<unsigned long long>(a.fill_bytes),
                      static_cast<unsigned long long>(a.pushed_bytes));
+    }
+    // ★ **收口补算最后帧 hash**（`[present-readback]` Phase A；1 次/run，⛔ 不是周期性输出）：
+    //   惰性化之后 `lastHash` 可能还没算（上一帧按 needs 谓词跳过了回读）⇒ 在摘要打印前补一次，
+    //   让 `present : … lastHash=` 仍然是"这一帧"，⛔ 不是 0x0 的假读数。
+    //   失败（target-base 不匹配 / 回读失败）只在 presenter 里 warn 一次 ⇒ 摘要打 `lastHash=0x0`
+    //   表示**没算**（⛔ 不是旧值）。写回 guest 后缓冲这一副作用已被 R3 接受（`present.h` 的注释）。
+    if (presenter_.hasLastFrame() && !presenter_.hasFrameHash()) {
+        std::string hash_err;
+        (void)presenter_.captureLastFrameHash(gpuRaster(), &hash_err);
     }
     // ★ 摘掉 Present 闸门：下一轮 `run()` 可能不带控制层（⛔ 留一条指向旧 Control 的回调）。
     presenter_.setPresentGate(nullptr, nullptr);

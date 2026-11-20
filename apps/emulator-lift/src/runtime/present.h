@@ -1,12 +1,15 @@
 // emulator-lift · headless 记录 + 可选显示 sink（P3）
 //
 // ★ 唯一的呈现汇点：D3D9 Present 与 DDraw Flip 都走 `HeadlessPresenter::present()`。
-//   `present()` 永远先算 hash / 帧号，然后 **best-effort** 交给可选的 `PresentSink`（真实窗口 / GPU），
-//   最后再做可选 BMP dump；显示失败只记账，⛔ 不改变 guest 的 Present 结果。
+//   `present()` 永远记帧号 / 盖章，**按需**算 hash（`setFrameHash` / sampler / 调用方的 `want_hash`），
+//   然后 **best-effort** 交给可选的 `PresentSink`（真实窗口 / GPU），最后再做可选 BMP dump；
+//   显示失败只记账，⛔ 不改变 guest 的 Present 结果。
 //   ★ BMP dump 同理（`REQ-01M73YBCC3DZ05Y9NSDTRKTMMY`）：它是**宿主诊断**，写失败**不**让 guest 的
 //     Present 失败 —— 否则 `d3d9::present` 会在 `--max-frames` 停机检查之前返回，进程空转到别的
-//     停止条件（实测 546 s）。失败**第一次**打默认级别 warn，之后只计数，计数进 run summary
-//     （`dumpFailures=`，由 `main` 读 `dumpFailures()` 打印）。
+//     停止条件（实测 546 s）。失败**第一次**打默认级别 warn，之后只计数；计数由 **AOT 臂的 run
+//     summary**（`AotHost::printRunSummary`）在 `dumpFailures > 0` 时补打一行（健康路径逐字不变）。
+//   ★ 回退开关（Phase A 的逃生门，缺省不设）：`LIFT_PRESENT_EAGER=1` ⇒ `d3d9::present` 强制
+//     「每帧回读 + 每帧 hash」（等价本改动之前的行为）。⛔ 不进 `--help`、⛔ 不改变缺省行为。
 // ★ 本头文件保持 **SDL-free**：所有 pure CTest 都 include 它；SDL 类型只出现在 present_sdl.cpp。
 // ★ 单线程契约：sink 只在主线程（Machine::run / shim）被调用；sink 不允许抛异常。
 #pragma once
@@ -55,6 +58,12 @@ public:
     virtual ~PresentSink() = default;
     // 只读消费 guest 像素；false = 这一帧没送出去（err 必须填）。不得修改 guest 内存。
     virtual bool submitFrame(const SurfaceArena& arena, const GuestSurface& surface, std::string* err) = 0;
+    // ★ **本 sink 这一帧要不要 guest 后缓冲的 CPU 字节**（`[present-readback]` 的 needs 谓词）：
+    //   `d3d9::present` 只在它为真（或 dump / hash / freeze / frameStats 要）时才把 GPU 镜像读回 guest。
+    //   · 默认 **false** = headless / 测试替身 / GPU 直出（target 才是最新）；
+    //   · renderer 回退路径（`SdlWindow` 的 `SDL_UpdateTexture(arena.pixels)`）⇒ **true**；
+    //   ⛔ 叠层 / UI / `--present-screenshot` 不读 guest 像素 ⇒ 它们不许让这里变 true。
+    virtual bool needsGuestPixels() const { return false; }
     // ★ **本帧的呈现几何**（窗口像素；M0 新增）：窗口尺寸 + letterbox 之后**画面矩形**。
     //   UI 层用它算画布原点（`uiCanvasOrigin(picture_w,picture_h)`，`overlay.md` B2/D5）。
     //   false = 没有几何（headless / 测试替身 / 窗口最小化到 0）⇒ 这一帧不画 UI（⛔ 不猜）。
@@ -254,8 +263,14 @@ public:
     HeadlessPresenter(const HeadlessPresenter&) = delete;
     HeadlessPresenter& operator=(const HeadlessPresenter&) = delete;
 
+    // ★ `guest_pixels_materialized`（`d3d9::present` 传）：本帧的 guest 后缓冲是不是**刚刚被回读成
+    //   这一帧**。false = GPU 镜像里才有最新像素、guest 那块是旧的（或读回失败）⇒ **dump / freeze
+    //   必须拒写**（静默写旧帧比不写更贵），**hash 也记为「本帧没算」**（⛔ 不拿旧字节算一个值冒充
+    //   这一帧；`hasFrameHash()` 因此为假 ⇒ 收口会重试）。DDraw / 测试（没有 GPU 镜像）默认 true。
+    // ★ `want_hash`：调用方这一帧明确要读 `lastHash()`（`d3d9` 的 Info 日志）⇒ 当场算。
+    //   其余触发（`setFrameHash` / sampler）由 `wantsGuestPixels()` 保证同帧已回读。
     bool present(const SurfaceArena& arena, const GuestSurface& surface, const std::string& dump_path,
-                 std::string* err);
+                 std::string* err, bool guest_pixels_materialized = true, bool want_hash = false);
 
     // 转移 sink 所有权（Machine 是唯一装配点；不依赖 main 的声明顺序）。
     void setSink(std::unique_ptr<PresentSink> sink);
@@ -283,8 +298,35 @@ public:
     const char* controlStopReason() const;
 
     std::uint64_t frameCount() const { return frame_count_; }
-    std::uint64_t lastHash() const { return last_hash_; }
+    // ★ 最后一次 Present 的 guest 后缓冲 hash（`SurfaceArena::hash`）。
+    //   **0 = 本帧没算**（⛔ 惰性化之后不再假装有）；需要时用 `captureLastFrameHash` 显式补一次。
+    //   ★ 读时语义（`[present-readback]`）：能读到 guest 权威字节时（本帧回过读 / 无 GPU）返回**读这一刻**
+    //     的字节 hash；本帧跳过了回读 ⇒ 0，直到 `captureLastFrameHash` 补算。⇒ 停在 Present 的 run 与
+    //     改动前逐位相同；停在别处时它是**尾段内容**（⛔ 不要把它写进任何语义判据，`AGENTS.md §12.6`）。
+    std::uint64_t lastHash() const;
     std::string lastDump() const { return last_dump_; }
+
+    // ★ **逐帧 hash 请求**（`--frame-log` / `--profile` / 夹具）：缺省关 ⇒ 默认档零逐帧 hash。
+    //   开 ⇒ `wantsGuestPixels()` 为真（hash 必须有同帧的 guest 字节）⇒ 本帧回读。
+    void setFrameHash(bool on) { frame_hash_ = on; }
+    // ★ **本 presenter 这一帧要不要 guest 像素**（needs 谓词的 presenter 半边）：
+    //   freeze / sampler / frame-hash 任一为真 ⇒ 要。⛔ 不要派生自 `hasSink()`（sink 自己答）。
+    bool wantsGuestPixels() const { return freeze_ || sampler_ != nullptr || frame_hash_; }
+    // 本帧的 hash 读得到吗（已在 Present 时算过 / 可从冻结副本或 guest 权威字节读 / 本帧没跳过回读）。
+    bool hasFrameHash() const { return hash_valid_ || (freeze_ && frozen_valid_) || !gpu_pending_; }
+    // ★ **显式补算**（1 次/run 的收口 / 控制层 `sample`·`screenshot` 读之前）：
+    //   ① 冻结副本可用 ⇒ 在副本字节上算（精确，⛔ 不碰 guest）；
+    //   ② 本帧跳过回读（`gpu_pending_`）⇒ 只在 `gpu->rasterTargetBase() == last_arena_->pixels(...)`
+    //      时 `rasterSyncToGuest` 补一次（**会写 guest 后缓冲**，`[present-readback]` R3 已接受），
+    //      不匹配 / 失败 ⇒ `hashFailures_++` + 一次 warn + `lastHash()` 保持 0（⛔ 不写错 arena）；
+    //   ③ 否则（guest 权威）⇒ 直接算。⛔ 永不为了 hash 另写 guest。
+    //   ★ **已知边界（复审 W2；记录、不修）**：target-base 等式只证明"镜像对的是这块后缓冲"，**不证明**
+    //     guest 在最后一次 Present 之后没再用 `Clear` / `LockRect` 写过它 ⇒ ② 的下载会覆盖那些写入。
+    //     今天 `run()` 每进程只调一次（`aot_main.cpp`），且设备销毁经 `rasterDiscardTarget` 把
+    //     target_base 置空 ⇒ 失配即拒写；**多轮 `run()` 若启用，这一条要先重新裁决**。
+    bool captureLastFrameHash(GpuRaster* gpu, std::string* err);
+    // 诊断：hash 补算失败**次数**（0 = 一次都没失败）。形状同 `dumpFailures()`：计数 + 只第一次 warn。
+    std::uint64_t hashFailures() const { return hash_failures_; }
 
     // ★ 运行摘要 `present-tail` 的**盖章**（append-only，永不清）：`present()` 里与 `++frame_count_`
     //   **同一刻**记下 (insns / ns)，frame 就是 `frameCount()`。⛔ 不要在别的层另找一个"Present 那一刻"。
@@ -329,7 +371,8 @@ public:
 
     // ★ 诊断：`--dump-frame` 每帧写文件失败的**次数**（0 = 一次都没失败）。
     //   ⛔ 这不是"跳过导出"的开关：失败只记账 + 第一次 warn，guest 的 Present 照旧成功。
-    //   读点：`main` 在 `dumpRunSummary` 之后打 `dumpFailures=<它>`。
+    //   读点：AOT 臂的 `AotHost::printRunSummary` 在 `> 0` 时补打一行 `dumpFailures=`
+    //   （健康路径的缺省 stdout 逐字不变）。
     std::uint64_t dumpFailures() const { return dump_failures_; }
 
 private:
@@ -339,12 +382,23 @@ private:
     // 冻结失败：计数 + **只第一次** warn（形状照 `noteDumpFailure`）；⛔ 不把更旧的一帧冒充最后一帧，
     // 而是让 `frozen_valid_` 保持 false ⇒ 截图退回写现场。
     void noteFreezeFailure(const std::string& why);
+    // hash 补算失败 / dump 退回路径无 recorded hash：计数 + **只第一次** warn。const（`dumpLastFrame` 是
+    // const 诊断面）；计数 / warned 是 `mutable`。
+    void noteHashFailure(const std::string& why) const;
     // 把**这一帧**的像素拷进副本（描述符一起存）。只在 `freeze_` 为真时被 `present()` 调。
     void freezePresentedFrame(const SurfaceArena& arena, const GuestSurface& surface);
 
     std::unique_ptr<PresentSink> sink_;
     std::uint64_t frame_count_ = 0;
+    // ★ 惰性 hash（`[present-readback]` Phase A）：`last_hash_` 只在 `hash_valid_` 为真时算"这一帧"的。
+    //   `gpu_pending_` = 上一次 Present **跳过了回读**（GPU 镜像里才是这一帧）⇒ `lastHash()` 答 0，
+    //   直到 `captureLastFrameHash` 显式补一次。
     std::uint64_t last_hash_ = 0;
+    bool hash_valid_ = false;
+    bool gpu_pending_ = false;
+    bool frame_hash_ = false;
+    mutable std::uint64_t hash_failures_ = 0;
+    mutable bool hash_failure_warned_ = false;
     std::string last_dump_;
     std::uint64_t sink_failures_ = 0;
     std::string last_sink_error_;
@@ -352,7 +406,9 @@ private:
     // ★ 帧导出（BMP）失败账：`dump_failures_` 每帧累加；`dump_failure_warned_` 保证只喊一次。
     std::uint64_t dump_failures_ = 0;
     bool dump_failure_warned_ = false;
-    // 最后帧的描述符 + 当时的 hash（`dumpLastFrame` 的**退回路径**用）。
+    // 最后帧的描述符 + **Present 当时**算出的 hash（`dumpLastFrame` 的**退回路径**用）。
+    // `last_surface_hash_ == 0` = 那一帧在 Present 时**没算** hash（惰性化）⇒ 退回路径不得拿"现算值"
+    // 冒充同一帧（warn 一次 + `hash_still_matches=false`）。冻结副本路径不依赖它。
     FrameSampler* sampler_ = nullptr;
     // ★ `presents` 门的 emit 点（`--input-plan`；nullptr = 没有计划）。只记账，不施加 step。
     InputPlan* input_plan_ = nullptr;

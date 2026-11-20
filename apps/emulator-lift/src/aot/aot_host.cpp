@@ -542,8 +542,9 @@ void AotHost::printRunSummary(const AotRunResult& r, std::FILE* out) const {
                  surfaces_.bytesInUse(), surfaces_.peak(), surfaces_.surfaceCount(),
                  heap_.blockCount());
     // ---- 呈现读数（可测性口径；与解释器 `present-tail` / `d3d9.cpp:845-863` 同一组字段名）----
-    //   ★ `lastHash` 是**最后一次 Present 的 guest 后缓冲哈希**（`arena.hash(surface)`，`present.cpp:68`）；
-    //     逐帧读数由 `run()` 在每次 Present 之后打印（`[frame] n=… hash=…`）。
+    //   ★ `lastHash` 是**最后一次 Present 的 guest 后缓冲哈希**（`arena.hash(surface)`）；逐帧读数由
+    //     `run()` 在每次 Present 之后打印（`[frame] n=… hash=…`）。`[present-readback]` Phase A 起它
+    //     **惰性**：`run()` 收口在打印前补算一次（`captureLastFrameHash`）⇒ `0x0` = **没算**（⛔ 不是旧值）。
     //   ★ `sinkFailures` 与解释器同口径（提交失败**不改** guest 的 Present 结果）。
     //   ★ `freezeFailures` / `freezeNs`（`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ` 的 F1）：**一次性**读数，
     //     只在这一行出现（⛔ 不加周期性输出，`AGENTS.md` §12.8 第 3 条）。`freezeNs` = **最近一次**
@@ -559,6 +560,13 @@ void AotHost::printRunSummary(const AotRunResult& r, std::FILE* out) const {
                  static_cast<unsigned long long>(presenter_.freezeFailures()),
                  static_cast<unsigned long long>(presentBreakdown().freeze_ns),
                  presenter_.sinkFailures() == 0 ? "" : "（最后一次错误见 stderr）");
+    // ★ `--dump-frame` 写盘失败的**一次性停机读数**（`REQ-01M73YBCC3DZ05Y9NSDTRKTMMY`）：
+    //   **只在 > 0 时打** ⇒ 健康路径的缺省 stdout 逐字不变；第 1 次失败已由 `present.cpp` 打默认级别
+    //   warn（之后只计数）。惰性回读之后，"本帧没回读却要 dump"（needs 门漏了）也记进这个计数。
+    if (presenter_.dumpFailures() != 0) {
+        std::fprintf(out, "dump      : dumpFailures=%llu（--dump-frame 写盘失败次数；第一次已 warn，见 stderr）\n",
+                     static_cast<unsigned long long>(presenter_.dumpFailures()));
+    }
     // ★ 默认档就改写 guest 寄存器的那个钩子（T2 §1.2 #14 / `machine.cpp:1369`）的实际结局：
     //   "命中了并置 0" 与 "根本没走到" 是两件事，⛔ 不许只写一行模糊的 `bypassed`。
     if (recovery_bypass_applied_) {
@@ -1210,6 +1218,14 @@ void AotHost::fillControlSnapshot(ControlSnapshot& out) {
     out = ControlSnapshot{};
     out.insns = cpu_.insns;
     out.frame = presenter_.frameCount();
+    // ★ 惰性 hash（`[present-readback]` Phase A）：**读 `last_hash` 之前**补一次。
+    //   `--control-root` 已开 freeze ⇒ 命中冻结副本路径（零 GPU 等待、⛔ 不碰 guest 后缓冲）；
+    //   还没 Present 过 ⇒ `hasLastFrame()` 为假、保持 0、不 warn（不是错误）。
+    //   控制层每次 `sample` / `screenshot` 才走到这里，⛔ 不是每帧。
+    if (presenter_.hasLastFrame()) {
+        std::string hash_err;
+        (void)presenter_.captureLastFrameHash(gpuRaster(), &hash_err);
+    }
     out.last_hash = presenter_.lastHash();
     out.present = present_state_;
     out.guest_ms = clock_.nowMs();

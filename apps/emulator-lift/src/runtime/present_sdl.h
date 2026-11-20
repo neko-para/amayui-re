@@ -81,6 +81,10 @@ public:
     void shutdown();
 
     bool submitFrame(const SurfaceArena& arena, const GuestSurface& surface, std::string* err) override;
+    // ★ `PresentSink`（`[present-readback]`）：本 sink 这一帧要不要 guest 后缓冲的 CPU 字节。
+    //   GPU 直出（claim 成功）⇒ **不要**（target 里才是最新像素）；renderer 回退 ⇒ **要**
+    //   （`submitFrame` 走 `SDL_UpdateTexture(arena.pixels)`）。⛔ 叠层 / 截图不读 guest ⇒ 不进来。
+    bool needsGuestPixels() const override;
     // ★ `PresentSink`（M0）：本帧几何（窗口像素 + letterbox 之后画面矩形）→ UI 层算画布原点。
     bool presentGeometry(PresentGeometry* out) const override;
     // ★ `PresentSink`（M0）：**统一合成入口** —— 一块 RGBA8 叠层按窗口像素 1:1 画到 (x,y)。

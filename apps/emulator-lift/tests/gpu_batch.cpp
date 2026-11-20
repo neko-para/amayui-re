@@ -784,6 +784,10 @@ void caseOrder() {
 
     MockRaster mock;
     f.m.setGpuRaster(&mock);
+    // ★ `[present-readback]` Phase A：Present 只在**有 guest 像素消费者**时才回读（dump / hash /
+    //   sampler / freeze / renderer sink）。下面"屏障 2"要断言的是"Present ⇒ flush + 回读"这条旧屏障
+    //   序，所以显式请求一次逐帧 hash（= 让 `wantsGuestPixels()` 为真）。⛔ 断言阈值不动。
+    f.m.presenter().setFrameHash(true);
 
     LIFT_CHECK_EQ_U32(f.beginScene(), 0u);
     LIFT_CHECK_EQ_U32(f.setFvf(kFvfXyzRhwDiffuse), 0u);

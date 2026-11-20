@@ -819,10 +819,14 @@ std::uint32_t flip(X86& cpu, const SurfaceInfo& s, std::uint32_t back_surface, s
         return kGeneric;
     }
     if (d != 0) cpu.mem->wr32(d + kDevFlips, cpu.mem->rd32(d + kDevFlips) + 1u);
-    ddrawLog("Flip", "帧 #%llu hash=0x%016llX（%dx%d %dbpp）",
-             static_cast<unsigned long long>(m->presenter().frameCount()),
-             static_cast<unsigned long long>(m->presenter().lastHash()), s.width, s.height,
-             s.format.bpp);
+    // ★ 惰性 hash（`[present-readback]` Phase A）：`lastHash()` 的实参在这里求值，而 `ddrawLog` 直到
+    //   `logV` 里才查 `logVisible` ⇒ 不先门控的话，默认档每次 Flip 都白算一次全帧 hash。
+    if (logVisible(LogLevel::Info, LogGeneral)) {
+        ddrawLog("Flip", "帧 #%llu hash=0x%016llX（%dx%d %dbpp）",
+                 static_cast<unsigned long long>(m->presenter().frameCount()),
+                 static_cast<unsigned long long>(m->presenter().lastHash()), s.width, s.height,
+                 s.format.bpp);
+    }
     return kOk;
 }
 

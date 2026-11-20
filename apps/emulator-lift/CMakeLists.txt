@@ -2054,6 +2054,15 @@ target_link_libraries(lift-frame-dump-failure PRIVATE emulator-lift-runtime)
 add_test(NAME frame-dump-failure COMMAND lift-frame-dump-failure)
 set_tests_properties(frame-dump-failure PROPERTIES SKIP_RETURN_CODE 77)
 
+# ---- pure：Present 的**按需回读**（`[present-readback]` Phase A）----
+# 判据见 tests/present_readback.cpp 头注释：needs 谓词的**接线**（sink / dump / frameStats / presenter）、
+# dump 新鲜度（拒写旧帧 + `dumpFailures`）、惰性 `lastHash` 的补算与 target-base 等式。
+# ★ Mock GpuRaster + 真 D3D9 设备夹具（⛔ 不碰 SDL / GPU / 游戏）。
+# ★ 顶层无条件注册 ⇒ pure 档（`AGENTS.md §12.4`）。
+add_executable(lift-present-readback tests/present_readback.cpp)
+target_link_libraries(lift-present-readback PRIVATE emulator-lift-runtime)
+add_test(NAME present-readback COMMAND lift-present-readback)
+
 # =====================================================================================
 # 2026-11-14：`interaction-script-e2e`（`tests/interaction_script_e2e.cpp`）已按测试模型删除
 # （`REQ-01M7ATAB5A18W7XBCKFBEQS7HB`）—— 判据是"等一屏 → 点一下"这类**业务正确性**；

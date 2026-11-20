@@ -615,6 +615,9 @@ PresentResult runPresentFixture() {
     Fixture::Device dev;
     if (!f.createDevice(obj, 1u, 0x44u, 1280, 720, lift::d3d9::kFmtX8R8G8B8, &dev)) return out;
     if (dev.object == 0) return out;
+    // ★ `[present-readback]`：hash 惰性化之后 `lastHash()` 不再逐帧算 ⇒ 这条用例要的是"Present
+    //   当时那一帧"的 hash，用夹具开关显式请求一次（断言仍是 `lastHash == arena.hash`，阈值不动）。
+    f.m.presenter().setFrameHash(true);
     const std::uint32_t zero_z = 0x3F800000u;
     if (f.method(dev.object, 0xACu, {0u, 0u, 3u, 0x00112233u, zero_z, 0u}) != 0u) return out;
     if (f.method(dev.object, 0x44u, {0u, 0u, 0u, 0u}) != 0u) return out;  // Present(NULL,NULL,NULL,NULL)

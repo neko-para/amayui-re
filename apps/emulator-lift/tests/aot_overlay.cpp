@@ -544,6 +544,21 @@ int main(int argc, char** argv) {
                     ui_lines);
         LIFT_CHECK(overlay_lines <= 1);
         LIFT_CHECK(ui_lines <= 1);
+        // ⑥ `--dump-frame` 的**新鲜度加固**（`[present-readback]` Phase A）：只靠 ③ 的"两次 dump
+        //   逐字节相同"对"两次都写旧帧"失明。判据 = 每次真写盘（stderr 无 `present.cpp` 的一次性
+        //   warn "帧导出失败"）+ BMP 头是**本 fixture 的帧尺寸**（1280×720）：
+        //   惰性回读漏了 dump 消费者 ⇒ 这条 warn 或尺寸/非空断言先红。
+        if (k.artifacts) {
+            LIFT_CHECK(o.run.err.find("帧导出失败") == std::string::npos);
+            const std::string dump_bytes = readAllBytes(o.dump);
+            LIFT_CHECK(dump_bytes.size() > 54u);
+            const std::uint32_t dump_w = le32(dump_bytes, 18);
+            const std::uint32_t dump_h = le32(dump_bytes, 22);
+            std::printf("⑥ [%s]: dump=%u×%u bytes=%zu stderr-无帧导出失败=%d\n", k.name, dump_w, dump_h,
+                        dump_bytes.size(), o.run.err.find("帧导出失败") == std::string::npos ? 1 : 0);
+            LIFT_CHECK_EQ_U32(dump_w, 1280u);
+            LIFT_CHECK_EQ_U32(dump_h, 720u);
+        }
         outs.push_back(std::move(o));
     }
     if (outs.size() != 4) return finish("aot-overlay");

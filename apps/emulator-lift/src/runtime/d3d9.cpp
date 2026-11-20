@@ -874,8 +874,9 @@ std::uint32_t present(X86& cpu, const DeviceInfo& dev, std::string* why) {
     std::string err;
     // ★ GPU 光栅化 + 呈现。两种情形分清（决定窗口能不能直接用 GPU target 的像素）：
     //   ① `dirty` = target 里有尚未落回 guest 的绘制 ⇒ target 才是最新的。
-    //      先读回 guest（hash / frameStats / --dump-frame / 后缓冲语义都读 guest，⛔ 不砍），
-    //      读回后 target == guest，直出可以直接 blit。
+    //      若有消费者要 guest 像素（见下面的 needs 谓词）⇒ 先读回 guest；读回后 target == guest。
+    //      若没有消费者 ⇒ **只 flush，不下载**（`[present-readback]` Phase A）：target 仍是最新，
+    //      窗口直出照旧；guest 那块字节留在旧帧（语义边界见 present.h 的 needs 注释）。
     //   ② `!dirty` = 本帧没有 GPU 绘制（`Clear` / CPU 回退 / sprite 的 CPU 路径都先同步过）
     //      ⇒ **guest 才是最新的**，target 可能是上一帧 ⇒ 由呈现汇点在 blit 之前把 guest 上传
     //      （`directSetTargetCurrent(false)`；见 present_sdl.cpp 的 submitDirect）。
@@ -887,26 +888,56 @@ std::uint32_t present(X86& cpu, const DeviceInfo& dev, std::string* why) {
     const bool direct_active = direct != nullptr && direct->directActive();
     bool gpu_dirty = gpu_active && gpu->rasterDirty();
     pb.direct = direct_active;
+    // ★ **needs 谓词（内联；`[present-readback]` R5）**：这一帧有没有任何消费者要 guest 后缓冲的
+    //   CPU 字节。它是"每帧整幅回读"的**唯一**开关 —— 风险面是**接线**（漏一个消费者 = 静默旧帧），
+    //   所以判据在 `tests/present_readback.cpp` 的 mock 接线用例上，⛔ 不抽纯函数。
+    //   · sink：renderer 回退路径要（`SdlWindow::needsGuestPixels()`）；直出 / headless / 测试替身不要；
+    //   · `--dump-frame`：要（当场写的那张必须是这一帧）；
+    //   · presenter：freeze / sampler / `--frame-log` / `--profile`（`wantsGuestPixels()`）；
+    //   · `frameStats`：要（它数 guest 后缓冲像素，只在 Info 日志可见时才跑）；
+    //   · `LIFT_PRESENT_EAGER=1`：强制旧行为（Phase A 的回退开关，缺省不设）。
+    const char* eager_env = std::getenv("LIFT_PRESENT_EAGER");
+    const bool eager = eager_env != nullptr && std::strcmp(eager_env, "1") == 0;
+    const bool want_stats = logVisible(LogLevel::Info, LogD3d9);
+    const bool want_hash = want_stats || eager;
+    const PresentSink* sink = m->presenter().sink();
+    const bool want_guest = eager || want_hash || !dump_path.empty() ||
+                            (sink != nullptr && sink->needsGuestPixels()) ||
+                            m->presenter().wantsGuestPixels();
+    // ★ 本帧的 guest 后缓冲是不是**这一帧**（交给 presenter 守 dump / freeze / hash 的帧归属）。
+    //   镜像身份不符那一支（下面）flush 之后 guest 就是权威 ⇒ 仍是 true（= 今天写出的那块字节）。
+    bool materialized = true;
     const std::uint64_t readback_begin = steadyNowNs();
     if (gpu_dirty) {
         std::string gerr;
         std::uint8_t* back = m->surfaces().pixels(*gs);
         // ★ 镜像身份必须是后缓冲：同尺寸纹理当 RT 且没切回来时，把镜像读进后缓冲是错的。
         //   这种情况下先 flush（队列落到它自己的 target），并按"guest 才是后缓冲最新内容"处理。
+        //   ⛔ 这一支逐字不变（不归 needs 谓词管）。
         if (gpu->rasterTargetBase() != nullptr && gpu->rasterTargetBase() != back) {
             if (!gpu->rasterFlush(&gerr)) d3d9Log("Present", "GPU 队列 flush 失败：%s", gerr.c_str());
             gpu_dirty = false;
+        } else if (!want_guest) {
+            // ★ 本帧没有消费者要 guest 像素 ⇒ 只把队列落到 target（`rasterFlush` 空队列零成本），
+            //   ⛔ 不下载、不等 fence。`materialized=false` ⇒ dump/freeze 拒写、`lastHash()==0`。
+            if (!gpu->rasterFlush(&gerr)) d3d9Log("Present", "GPU 队列 flush 失败：%s", gerr.c_str());
+            materialized = false;
         } else if (!gpu->rasterSyncToGuest(back, gs->pitch, gs->width, gs->height, &gerr)) {
+            // 读回失败 ⇒ guest 那块**不是**这一帧 ⇒ 同样不许 dump / freeze 拿它冒充。
             d3d9Log("Present", "GPU 光栅化读回失败：%s", gerr.c_str());
+            materialized = false;
         }
     }
     pb.readback_ns = steadyNowNs() - readback_begin;
     // ★ 告诉呈现汇点"本帧的像素在哪儿"：
     //   · 刚读过回 ⇒ target == guest（target 就是最新内容）⇒ 直出可以直接 blit；
-    //   · 没读过回（本帧没有 GPU 绘制）⇒ target 可能是上一帧 ⇒ 由 sink 在呈现前把 guest 上传。
-    //   ⛔ 这是"直出"唯一可能静默出错的点，所以状态显式传给 sink，而不是让 sink 猜。
+    //   · 没读过回（本帧没有 GPU 绘制，或 Phase A 的 needs 门跳过了下载）⇒ guest 可能是旧的
+    //     ⇒ 由 sink 在呈现前把 guest 上传。
+    //   ★ 契约 = "**target 是本帧最新**"（⛔ 不是"target == guest"）：skip 路径 flush 之后 target
+    //     就是最新 ⇒ 传 `gpu_dirty`（仍为 true）正确；⛔ 不要为了让旧契约成立改传 false —— 那会把
+    //     guest 的旧字节上传，窗口停在上一帧（`present_sdl.cpp` 的 submitDirect）。
     if (direct_active) direct->directSetTargetCurrent(gpu_dirty);
-    if (!m->presenter().present(m->surfaces(), *gs, dump_path, &err)) {
+    if (!m->presenter().present(m->surfaces(), *gs, dump_path, &err, materialized, want_hash)) {
         if (why) *why = "D3D9：HeadlessPresenter.present 失败：" + err;
         return kFail;
     }
@@ -940,7 +971,7 @@ std::uint32_t present(X86& cpu, const DeviceInfo& dev, std::string* why) {
         last_present = now.submits_present;
         last_cuts = now.cuts;
     }
-    if (!dump_path.empty()) d3d9Log("Present", "帧 BMP 已写入 %s", dump_path.c_str());
+    if (!dump_path.empty() && materialized) d3d9Log("Present", "帧 BMP 已写入 %s", dump_path.c_str());
     cpu.mem->wr32(dev.state + kDvPresents, dev.presents + 1u);
     // ★ 第一帧的**像素判据**：后缓冲里"非背景像素数"（背景 = 出现次数最多的那个像素值）。
     //   ⛔ 不是猜，也不是"看截图"：直接数 guest 后缓冲的像素（确定性；同一份输入两次跑同值）。
@@ -948,8 +979,9 @@ std::uint32_t present(X86& cpu, const DeviceInfo& dev, std::string* why) {
     //   `std::map` ⇒ 1280×720 的 TITLE 帧实测 ~54 ms（比整条呈现路径还贵）。
     //   ⇒ 按**日志可见性**门控：`--log-level info` / `--verbose` 时算法与输出逐字不变，
     //   默认级别下不再为一个看不见的行付一次全帧直方图。⛔ 这不是"删功能"，也不是跳过 guest 语义
-    //   （hash / frameCount / dump 都在别处，照旧每帧算）。
-    if (logVisible(LogLevel::Info, LogD3d9)) {
+    //   （frameCount / dump 都在别处照旧；hash 按 needs 谓词算 —— 这里 `want_stats` 已进谓词）。
+    //   ★ 同一判据只取一次（`want_stats`）：`logVisible` 不会在这个函数里改变，取两次没有意义。
+    if (want_stats) {
         FrameStats st;
         const std::uint64_t stats_begin = steadyNowNs();
         const bool stats_ok =

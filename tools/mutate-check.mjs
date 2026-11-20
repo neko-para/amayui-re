@@ -5226,6 +5226,32 @@ const MUTATIONS = [
       '（`plugin-runtime` 的 `control-script/start-on-trigger-chain` 红；整条链仍能走完 ⇒ 只看' +
       '`run=done` 的断言抓不到）',
   },
+
+  // ── `[present-readback]` Phase A：needs 谓词漏 `--dump-frame`（`d3d9.cpp` 的 want_guest）─────
+  //   ★ 代表"回读的消费者少接一个"这一类错：`want_guest` 漏掉 `!dump_path.empty()` ⇒ `--dump-frame`
+  //     那一帧**不下载**（materialized=false）⇒ dump 写成旧帧 / 被现实现拒写。旧判据
+  //     （`tests/aot_overlay.cpp` 的两次 dump 对照）会**两边都旧、照绿**，所以承重守卫是新用例
+  //     `present-readback/gate-dump-fresh`（BMP 像素必须是本帧 sentinel）。
+  //   ★ 反证过（本机 / mac arm64）：`node tools/mutate-check.mjs --match present-readback` ⇒ 红。
+  {
+    file: 'apps/emulator-lift/src/runtime/d3d9.cpp',
+    from:
+      '    const bool want_guest = eager || want_hash || !dump_path.empty() ||\n' +
+      '                            (sink != nullptr && sink->needsGuestPixels()) ||\n' +
+      '                            m->presenter().wantsGuestPixels();',
+    to:
+      '    // 变异：needs 谓词漏掉 --dump-frame（那一帧不回读 ⇒ dump 写旧帧 / 被拒写）\n' +
+      '    const bool want_guest = eager || want_hash ||\n' +
+      '                            (sink != nullptr && sink->needsGuestPixels()) ||\n' +
+      '                            m->presenter().wantsGuestPixels();',
+    guard: 'ctest:present-readback',
+    ctest: 'present-readback',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-present-readback',
+    what:
+      'needs 谓词漏 `!dump_path.empty()` ⇒ `--dump-frame` 那一帧不下载（dump 写旧帧 / 被拒写）⇒ ' +
+      '`present-readback/gate-dump-fresh` 的 BMP sentinel 断言红',
+  },
 ];
 
 let mutationRunSeq = 0;

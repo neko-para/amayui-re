@@ -1663,6 +1663,10 @@ public:
         return true;
     }
 
+    // ★ 契约（`[present-readback]` Phase A 起**改口径**）：`current` = "**target 里有本帧最新像素**"，
+    //   ⛔ 不再是"target == guest"。`d3d9::present` 在两种路径上都传 true：真正读回过（target == guest），
+    //   或按 needs 谓词**只 flush 不下载**（guest 是旧的、target 才是最新）。false = 本帧没有 GPU 绘制
+    //   （guest 才是权威）⇒ `submitDirect` 呈现前必须 `directUploadGuest`。
     void directSetTargetCurrent(bool current) override { target_current_ = current; }
     bool directTargetCurrent() const override { return target_current_; }
 

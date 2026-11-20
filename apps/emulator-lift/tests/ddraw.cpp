@@ -672,6 +672,9 @@ FlipResult runFlipFixture() {
     if (!f.boot()) return r;
     if (!f.createDirectDraw()) return r;
     if (f.device == 0) return r;
+    // ★ `[present-readback]`：hash 惰性化之后 `lastHash()` 不再逐帧算 ⇒ 这条用例要"两次 Flip 同
+    //   一帧"的 hash，用夹具开关显式请求一次（断言仍是两次 Flip 同 hash，阈值不动）。
+    f.m.presenter().setFrameHash(true);
     std::uint32_t primary = 0;
     if (f.createSurface(4, 4, 0x00000200u /* PRIMARYSURFACE */, &primary) != 0) return r;
     if (primary == 0) return r;

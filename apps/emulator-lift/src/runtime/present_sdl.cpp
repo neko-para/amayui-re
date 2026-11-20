@@ -1256,6 +1256,13 @@ void SdlWindow::shutdown() {
     impl_->warp_echo.clear();
 }
 
+// ★ `PresentSink::needsGuestPixels`（`[present-readback]`）：**只有** renderer 回退路径要 guest 字节
+//   （`submitFrame` 的 `SDL_UpdateTexture(arena.pixels)`）。GPU 直出走 `submitDirect`：target 是本帧最新
+//   ⇒ 不读 guest（`d3d9::Present` 只在 target 不 current 时把 guest 上传）。叠层 / 截图都不读 guest。
+bool SdlWindow::needsGuestPixels() const {
+    return !(impl_ != nullptr && impl_->direct_present && impl_->direct != nullptr);
+}
+
 bool SdlWindow::submitFrame(const SurfaceArena& arena, const GuestSurface& surface, std::string* err) {
     // 关窗宽限按**呈现帧**计：WM_CLOSE 在上一帧末尾入队，本帧开始才消耗一格。
     impl_->advanceCloseFrame();
@@ -1535,7 +1542,8 @@ bool SdlWindow::Impl::submitDirect(const SurfaceArena& arena, const GuestSurface
         if (err) *err = "arena.pixels(surface) == nullptr";
         return false;
     }
-    // ★ 本帧的最新像素在哪儿：`directTargetCurrent()` 由 `d3d9::Present` 在读回之后声明。
+    // ★ 本帧的最新像素在哪儿：`directTargetCurrent()` 由 `d3d9::Present` 在**读回之后**或**只 flush
+    //   不下载**之后声明（`[present-readback]` Phase A：两种都证明 target 是本帧最新）。
     //   false ⇒ 本帧没有 GPU 绘制 / 不是 D3D9 Present（DDraw Flip、测试直接 submitFrame）⇒
     //   呈现前必须把 guest 后缓冲上传到 target，否则窗口会停在上一帧。
     if (!direct->directTargetCurrent()) {

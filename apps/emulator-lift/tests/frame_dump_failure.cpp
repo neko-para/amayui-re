@@ -5,7 +5,8 @@
 //      `HeadlessPresenter::present()` **仍然返回 true** —— 帧导出是宿主诊断，⛔ 不许让 guest 的
 //      Present 失败。旧实现返回 false ⇒ `d3d9::present` 在 `--max-frames` 停机检查之前退出 ⇒
 //      目录不存在时进程空转到别的停止条件（实测 546 s vs 目录建好后 7 s）。
-//   ② 失败**计数**每次 +1（`dumpFailures()`；`main` 在 run summary 后打 `dumpFailures=`）。
+//   ② 失败**计数**每次 +1（`dumpFailures()`；AOT 臂的 `AotHost::printRunSummary` 只在 >0 时补打一行
+//      `dumpFailures=`，所以健康路径的缺省 stdout 逐字不变）。
 //   ③ 默认级别 warn **只打一次**（第 2 次失败不再刷屏）：捕获 stderr，数"帧导出失败"出现次数 == 1。
 //   ④ 写成功时照旧：返回 true、`lastDump()` 更新、失败计数不变（⛔ 别为了"不失败"把导出关掉）。
 //

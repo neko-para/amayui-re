@@ -114,13 +114,44 @@ void HeadlessPresenter::freezePresentedFrame(const SurfaceArena& arena, const Gu
     frozen_valid_ = true;
 }
 
+void HeadlessPresenter::noteHashFailure(const std::string& why) const {
+    // ★ 与 `noteDumpFailure` / `noteFreezeFailure` 同一条口径：**计数** + **只第一次**喊。
+    //   const：`dumpLastFrame` 是 const 诊断面（计数 / warned 是 mutable）。
+    ++hash_failures_;
+    if (!hash_failure_warned_) {
+        hash_failure_warned_ = true;
+        logAt(LogLevel::Warn, LogD3d9, "[present] ",
+              "最后帧 hash 不可用（第 %llu 次 / 累计 %llu）：%s ⇒ `lastHash=0x0` 表示**本帧没算**"
+              "（⛔ 不是旧值、⛔ 不拿现算值冒充同一帧）；后续失败只计数",
+              static_cast<unsigned long long>(hash_failures_),
+              static_cast<unsigned long long>(hash_failures_), why.c_str());
+    }
+}
+
 bool HeadlessPresenter::present(const SurfaceArena& arena, const GuestSurface& surface,
-                                const std::string& dump_path, std::string* err) {
-    // ★ 先记录（与今天完全一致）：显示失败不能改变 frameCount / lastHash / dump。
+                                const std::string& dump_path, std::string* err,
+                                bool guest_pixels_materialized, bool want_hash) {
+    // ★ 先记录：显示失败不能改变 frameCount / hash / dump 的**帧归属**。
     PresentBreakdown& pb = presentBreakdown();
-    const std::uint64_t hash_begin = nowNs();
-    last_hash_ = arena.hash(surface);
-    pb.hash_ns = nowNs() - hash_begin;
+    // ★ **按需 hash**（`[present-readback]` Phase A）：缺省档一帧也不读 guest 像素。
+    //   三个触发点都保证这一帧已经回读过（`d3d9::present` 的 needs 谓词含 `wantsGuestPixels()` 与
+    //   `want_hash`）⇒ 拿到的就是这一帧的字节，⛔ 不是上一帧。
+    // ★ 但**读回失败 / 本帧没回读**（`materialized=false`）⇒ 一律记为"没算"：那块 guest 字节是旧的，
+    //   拿它算出的 hash 会被 `lastHash()` / `hasFrameHash()` 当成本帧（复审 W1）⇒ 收口也不再补算。
+    //   这一条同时管住"读回失败"与"needs 门漏了消费者"两种形态。
+    const bool compute_hash =
+        guest_pixels_materialized && (frame_hash_ || sampler_ != nullptr || want_hash);
+    if (compute_hash) {
+        const std::uint64_t hash_begin = nowNs();
+        last_hash_ = arena.hash(surface);
+        pb.hash_ns = nowNs() - hash_begin;
+        hash_valid_ = true;
+    } else {
+        last_hash_ = 0;
+        pb.hash_ns = 0;
+        hash_valid_ = false;
+    }
+    gpu_pending_ = !guest_pixels_materialized;
     ++frame_count_;
     // ★ `--input-plan` 的 `presents` 门 emit 点：与 `++frame_count_` **同一刻**（guest 可见、确定）。
     //   ⛔ 这里只记账（`note()` 不接受 `WindowManager`）⇒ 不可能在 Present 里施加 step。
@@ -138,7 +169,9 @@ bool HeadlessPresenter::present(const SurfaceArena& arena, const GuestSurface& s
     // 最后帧的**描述符**：永远记（退回路径要用）；像素**只在控制层启用时**拷成副本。
     last_arena_ = &arena;
     last_surface_ = surface;
-    last_surface_hash_ = last_hash_;
+    // ★ recorded hash 只在**本帧真算过**时有效（0 = 没算）⇒ `dumpLastFrame` 的退回路径据此拒绝
+    //   "现算值冒充同一帧"；⛔ 不要把没算的那一帧记成 0x0 的"合法 hash"（0 是哨兵）。
+    last_surface_hash_ = hash_valid_ ? last_hash_ : 0;
     have_last_surface_ = true;
 
     // ★ **冻结点**（`REQ-01M7JAGEKMYWWQPMWGV01Y1FNQ`；design-review §2 裁决的落点）：
@@ -152,7 +185,13 @@ bool HeadlessPresenter::present(const SurfaceArena& arena, const GuestSurface& s
     //   缺省（没有控制层）⇒ 一次 `freeze_` 判空，零拷贝。
     if (freeze_) {
         const std::uint64_t freeze_begin = nowNs();
-        freezePresentedFrame(arena, surface);
+        if (!guest_pixels_materialized) {
+            // ★ 正常走不到（`freeze_` ∈ `wantsGuestPixels()` ⇒ `d3d9::present` 必回读）⇒ 如果真走到，
+            //   说明 needs 门漏了；⛔ 不拿旧字节冒充这一帧，只记账（`frozen_valid_` 保持 false）。
+            noteFreezeFailure("本帧未回读 guest 像素（needs 门漏了 freeze）");
+        } else {
+            freezePresentedFrame(arena, surface);
+        }
         pb.freeze_ns = nowNs() - freeze_begin;
     } else {
         pb.freeze_ns = 0;
@@ -181,12 +220,20 @@ bool HeadlessPresenter::present(const SurfaceArena& arena, const GuestSurface& s
         //   在 `--max-frames` 的停机检查**之前**返回 ⇒ 目录不存在时永远到不了帧数上限，进程空转到
         //   别的停止条件（实测 546 s）。目录已由 `main` 在开跑前建好（那是第一道闸），这里只兜
         //   "跑到一半写不进去"（磁盘满 / 权限被撤 / 目标是目录）—— 同样不许把整轮拖住。
-        std::string dump_err;
-        if (arena.dumpBmp(surface, dump_path, &dump_err)) {
-            last_dump_ = dump_path;
+        // ★ 惰性回读之后新增的前置判据（`[present-readback]`）：本帧没回读 ⇒ 这块 guest 字节是**旧的**，
+        //   写出去就是一张旧帧、而且没有任何症状（`tests/aot_overlay.cpp` 的两次 dump 对照会两边都旧、
+        //   照绿）⇒ ⛔ 拒写 + 计数（把"静默写旧帧"变成 `dumpFailures=` / 一次 warn）。
+        if (!guest_pixels_materialized) {
+            noteDumpFailure(dump_path, "本帧没有回读 guest 像素（needs 门漏了 --dump-frame）");
+            if (err != nullptr) *err = "本帧没有回读 guest 像素";
         } else {
-            noteDumpFailure(dump_path, dump_err);
-            if (err != nullptr) *err = dump_err;  // 失败原因仍交给调用方（诊断用；不改变返回值）
+            std::string dump_err;
+            if (arena.dumpBmp(surface, dump_path, &dump_err)) {
+                last_dump_ = dump_path;
+            } else {
+                noteDumpFailure(dump_path, dump_err);
+                if (err != nullptr) *err = dump_err;  // 失败原因仍交给调用方（诊断用；不改变返回值）
+            }
         }
     }
     // ★ **控制层 Present 闸门**（S2）：位置 = sink（与 `--dump-frame`）**之后**、返回之前。
@@ -240,6 +287,65 @@ bool HeadlessPresenter::stopRequested() const {
 
 std::string HeadlessPresenter::sinkDescription() const { return sink_ ? sink_->describe() : std::string(); }
 
+std::uint64_t HeadlessPresenter::lastHash() const {
+    if (hash_valid_) return last_hash_;
+    // ★ 冻结副本 = Present 当场拷的那一帧 ⇒ 精确、且不碰正在被 guest 改写的后缓冲。
+    if (freeze_ && frozen_valid_) return hashPixels(frozen_desc_, frozen_pixels_.data());
+    // ★ 本帧跳过了回读（GPU 镜像里才是这一帧）⇒ **显式未算**（⛔ 不是旧字节的 hash）。
+    if (gpu_pending_) return 0;
+    if (!have_last_surface_ || last_arena_ == nullptr) return 0;
+    // ★ 其余情形（无 GPU / 本帧没画 / DDraw）：guest 后缓冲就是权威 ⇒ 算读这一刻的字节。
+    const std::uint8_t* p = last_arena_->pixels(last_surface_);
+    return p != nullptr ? hashPixels(last_surface_, p) : 0;
+}
+
+bool HeadlessPresenter::captureLastFrameHash(GpuRaster* gpu, std::string* err) {
+    if (!have_last_surface_ || last_arena_ == nullptr) {
+        if (err != nullptr) *err = "还没有 Present 过（没有最后帧可补算）";
+        return false;
+    }
+    if (hash_valid_) return true;
+    // ① 冻结副本优先（R3）：字节是 Present 当场拷的，精确且零 GPU 等待。
+    if (freeze_ && frozen_valid_) {
+        last_hash_ = hashPixels(frozen_desc_, frozen_pixels_.data());
+        hash_valid_ = true;
+        return true;
+    }
+    // ★ R3 的写回：`rasterSyncToGuest` 会把这一帧写进 guest 后缓冲（`run()` 可多轮，父级已接受）。
+    //   只写**确证是这块后缓冲**的那一次 —— ⛔ 不拿镜像去覆盖别人的 arena。
+    std::uint8_t* pixels = const_cast<std::uint8_t*>(last_arena_->pixels(last_surface_));
+    if (pixels == nullptr) {
+        noteHashFailure("最后帧的 guest 像素指针为空");
+        if (err != nullptr) *err = "最后帧的 guest 像素指针为空";
+        return false;
+    }
+    if (gpu_pending_) {
+        if (gpu == nullptr) {
+            noteHashFailure("本帧跳过了回读，但没有 GPU 后端可补");
+            if (err != nullptr) *err = "本帧跳过了回读，但没有 GPU 后端可补";
+            return false;
+        }
+        // ★ target-base 等式：镜像的身份必须**恰是**最后呈现的后缓冲（与 `d3d9::present` 的镜像身份
+        //   判据同一份）。不匹配 ⇒ 拒绝写（写错 arena 比 hash=0 贵得多）。
+        if (gpu->rasterTargetBase() != pixels) {
+            noteHashFailure("GPU 镜像的目标不是最后呈现的后缓冲（target-base 不匹配）");
+            if (err != nullptr) *err = "GPU 镜像的目标不是最后呈现的后缓冲（target-base 不匹配）";
+            return false;
+        }
+        std::string gerr;
+        if (!gpu->rasterSyncToGuest(pixels, last_surface_.pitch, last_surface_.width, last_surface_.height,
+                                   &gerr)) {
+            noteHashFailure(gerr.empty() ? "补回读失败（未给出原因）" : "补回读失败：" + gerr);
+            if (err != nullptr) *err = gerr;
+            return false;
+        }
+        gpu_pending_ = false;  // 已经落回 guest ⇒ 收口 / 采样再读时它是权威字节
+    }
+    last_hash_ = hashPixels(last_surface_, pixels);
+    hash_valid_ = true;
+    return true;
+}
+
 bool HeadlessPresenter::dumpLastFrame(const std::string& host_path, bool* hash_still_matches,
                                       std::string* err) const {
     if (!have_last_surface_ || last_arena_ == nullptr) {
@@ -253,15 +359,25 @@ bool HeadlessPresenter::dumpLastFrame(const std::string& host_path, bool* hash_s
     //   （同一帧冻的 ⇒ 恒 true：这张 BMP 就是 presenter 记录的那一帧）。
     if (freeze_ && frozen_valid_) {
         if (hash_still_matches != nullptr) {
-            *hash_still_matches = hashPixels(frozen_desc_, frozen_pixels_.data()) == last_surface_hash_;
+            // ★ 副本是 Present 当场冻的 ⇒ "这张 BMP 就是记录的那一帧"由构造保证；recorded 为 0
+            //   （那一帧在 Present 时没算 hash，惰性化之后是常态）时仍答 true —— ⛔ 不是"没比对"。
+            *hash_still_matches =
+                last_surface_hash_ == 0 ||
+                hashPixels(frozen_desc_, frozen_pixels_.data()) == last_surface_hash_;
         }
         return dumpBmpRaw(frozen_desc_, frozen_pixels_.data(), host_path, err);
     }
     // ★ **退回路径**（没开冻结 / 冻结失败）：写现场 = 今天的行为，⛔ 不新增错误码 / 不新增 why。
-    //   如实报告像素是否仍是被采样到的那一帧（guest 可能已经在对这块后缓冲画下一帧了）。
+    //   ★ 惰性化之后：Present 时没算 hash（recorded == 0）⇒ ⛔ **不许**拿"现在的字节"现算一个值假装
+    //     它是同一帧（guest 可能已经在这块后缓冲上画了下一帧）⇒ warn 一次 + false。
     if (hash_still_matches != nullptr) {
-        *hash_still_matches =
-            hashPixels(last_surface_, last_arena_->pixels(last_surface_)) == last_surface_hash_;
+        if (last_surface_hash_ == 0) {
+            noteHashFailure("退回路径没有 Present 时的 recorded hash（那一帧没算 hash）");
+            *hash_still_matches = false;
+        } else {
+            const std::uint8_t* p = last_arena_->pixels(last_surface_);
+            *hash_still_matches = p != nullptr && hashPixels(last_surface_, p) == last_surface_hash_;
+        }
     }
     return last_arena_->dumpBmp(last_surface_, host_path, err);
 }

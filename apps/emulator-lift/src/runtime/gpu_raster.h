@@ -333,7 +333,8 @@ public:
     // 内部按需 `rasterPrepare(format, w, h)`（首帧可能还没有 target）。
     virtual bool directUploadGuest(const SurfaceFormat& format, const std::uint8_t* pixels, std::uint32_t pitch,
                                    int width, int height, std::string* err) = 0;
-    // 「本帧的最新像素已经在 target 里」——由 `d3d9::Present` 在读回/同步之后置 true（它保证
+    // 「本帧的最新像素已经在 target 里」——由 `d3d9::Present` 在**读回之后**或**只 flush 不下载**
+    // 之后置 true（两种路径都证明 target 是本帧最新；`[present-readback]` Phase A 起**不再**要求
     // target == guest）。缺省 false ⇒ 呈现前 sink 必须把 guest 上传，⛔ 不会把上一帧当这一帧
     // （DDraw Flip / 测试里直接 submitFrame 都走这条）。
     virtual void directSetTargetCurrent(bool current) = 0;

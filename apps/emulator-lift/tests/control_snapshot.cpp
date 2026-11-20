@@ -300,6 +300,9 @@ void caseDumpLastFrame() {
     fillArgb(px, *surface, 0xFF204060u);  // ARGB 小端 = B,G,R,A
 
     lift::HeadlessPresenter presenter;
+    // ★ `[present-readback]`：`hash_still_matches` = "与 **Present 时** recorded 的 hash 比" ⇒ 必须显式
+    //   请求那一帧的 hash（惰性化之后缺省不逐帧算）。断言（改像素后 false）不变。
+    presenter.setFrameHash(true);
     std::string err;
     LIFT_CHECK(presenter.present(arena, *surface, std::string(), &err));
     LIFT_CHECK(presenter.frameCount() == 1);
