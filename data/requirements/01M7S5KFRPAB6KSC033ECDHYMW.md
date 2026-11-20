@@ -2,8 +2,10 @@
 
 - id: REQ-01M7S5KFRPAB6KSC033ECDHYMW
 - type: req
-- status: doing
+- status: done
 - parent: REQ-01M7JHSEZVMYB4XHEN32V7V6HJ
+- verify: apps/emulator-lift/tests/present_readback.cpp#present-readback/gate-no-consumer
+- done_reason: Phase A 已落地并复审（9/9 PASS + W1/W3/W4 修复，commit ca0b877）：needs 谓词门控 + dump 拒写旧帧 + 惰性 lastHash + LIFT_PRESENT_EAGER 回退。守卫 present-readback（7 case / 84 checks，变异实测红）。读数：无仪器 A/B 600 帧 3 对 19.15→18.82 s（−1.7%，低于本机 5% 分辨力，不宣称收益）；LIFT_GPU_SUBMITS 显示 readback 未归零（成本迁到 Clear）⇒ 总量收益归 Phase B（REQ-01M7W2FR9EJEMG2QDMZNG6N7WV）。文档 docs/03-emulator/present-readback.md。
 - tags: [emulator-lift, perf, gpu, present]
 
 ## 现象 / 读数
@@ -45,8 +47,15 @@ GPU 直出 + 窗口模式下，每个 Present 都做一次**整幅 GPU→guest �
 - `LIFT_GPU_SUBMITS=1` 的 `[gpu-submits] readback=…` 每帧计数；四臂对照：窗口无 overlay / 窗口 + overlay /
   headless / vsync=1 ⇒ 证明 overlay 无关、swapchain 无关。
 - 两个 draw 量不同的场景比 `readback ms/帧` ⇒ 分辨「等 fence」vs「拷贝」。
-- 目标：Phase A 后 Present ≈0.87 ms/帧 + 一次/run 的 hash；Phase B 后 ≈0.12（仅 sink）。
-  ⛔ 不先写一个数字进判据；主判据用**无仪器墙钟**（`--profile` 会强制逐帧 hash）。
+- 实测（Phase A 落地后）：无仪器 A/B 600 帧 3 对 = 19.15 → 18.82 s 中位（**−1.7%，低于本机 5% 分辨力**，
+  ⛔ 不宣称收益）；`[gpu-submits] readback` **未归零**（`Clear` 在下一帧重新材质化 ⇒ 成本从 Present 迁到 Clear）
+  ⇒ **总量收益要 Phase B**。⛔ 不把数字写进 CTest；主判据用无仪器墙钟（`--profile` 会强制逐帧 hash）。
+
+## 落地（2026-11-21）
+
+- Phase A（needs 谓词 + 诊断 opt-in + 惰性 `lastHash`）已落地：`ca0b877`；复审 9/9 PASS，W1/W3/W4 已修。
+- 守卫 `present-readback`（7 case / 84 checks，变异实测红）；文档 `docs/03-emulator/present-readback.md`。
+- Phase B 另单 `REQ-01M7W2FR9EJEMG2QDMZNG6N7WV`（已改挂 `lift 层 · 效率` 下，不再阻塞本单）。
 
 ## 边界
 

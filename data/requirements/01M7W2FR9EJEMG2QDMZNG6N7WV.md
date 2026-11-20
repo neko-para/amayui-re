@@ -3,7 +3,7 @@
 - id: REQ-01M7W2FR9EJEMG2QDMZNG6N7WV
 - type: req
 - status: open
-- parent: REQ-01M7S5KFRPAB6KSC033ECDHYMW
+- parent: REQ-01M7JHSEZVMYB4XHEN32V7V6HJ
 - tags: [emulator-lift, perf, gpu, present, semantics]
 
 ## 一句话

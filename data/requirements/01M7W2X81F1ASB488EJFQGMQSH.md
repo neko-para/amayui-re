@@ -50,3 +50,12 @@ cd apps/emulator-lift && ctest --test-dir out -R '^plugin-headless$' --output-on
 - ⛔ 不在本单改 C6 的负缓存语义（若归因成立，另开 / 改 C6 单）。
 - ⛔ 不动 P1 的 `runChild` 语义（除非证明超时 / 收尸有关）。
 - 与 `REQ-01M7VVDV69MJXRHNDGR50H7VHC`（首回调超 2 ms 预算）不是同一处：那条是 `start` 回调预算。
+
+## 2026-11-21 补充（归因排除）
+
+- Phase A 实现者用**改动前 exe 副本**（`.tmp/present-readback/aot-base`，`strings` 无 `LIFT_PRESENT_EAGER`）
+  手工跑同一子用例 ⇒ **红在同一签名**（`calls=7 … gate timeout (load:field-2)`）⇒ 与本轮 Phase A 改动无关。
+- 累计观测：P1 **3 红**（ctest 1 + 手工重放 2）· 父级 **1 绿**（151 s）· 实现者 **2 红 1 绿** ·
+  改动前 exe 手工 **1 红**. ⇒ 红/绿比 ≈ 6/2，支持"偶发 + 负载敏感"，不支持"确定性回归"。
+- 下一步（独立窗口，⛔ 不与构建抢 CPU）：按判据连跑 ≥10 次，记录机器负载；若仍偶发，再二分
+  "30 s gate" 与 "C6 负缓存"两个假设（后者需保留 base exe 对照，已在 `.tmp/present-readback/aot-base`）。
