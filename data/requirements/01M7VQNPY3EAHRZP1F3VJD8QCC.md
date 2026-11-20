@@ -45,3 +45,12 @@
 
 反汇编 `bl liftRegsToCpu` = 0；boundary **ns/派发** ≥5%（≥3 对交错）；指纹逐位同；ctest 全绿；
 变异一条能红（`--match 'lift-ir-shim'`）。
+
+## 2026-11-20 win32 复核（合臂，⛔ 不是单变量）
+
+win32 / hidden / 3 对交错（before = 拉代码前的构建 `b14b897`，after = HEAD，含 P/C1/A′/C6/Phase A 五个变量）：
+`boundary` **17.200 → 15.850 ns/派发**（逐对中位 −7.84%，3/3 同向）；窗口墙钟 −0.61%（低于 5% 分辨力，只报不判）；
+绝对 boundary ms +0.78%、iter +9.1%（wait-closed，与 mac 同型）。指纹 14/14 逐位同（`exit 0` / `stop@00412383` /
+arena `89668632,119683880,182` / `table misses=0` / `pending=0`；`frames` 823→839 按基准文档 §4-2 不计入指纹）。
+⇒ 当时"win32 的 `/Ob1`+LTO 与 `offsetof` 条件支持 `<待核>`"**已复核**：方向与 mac 一致。
+读数与命令见 `docs/03-emulator/perf-bench-save05.md` §3.1。

@@ -73,7 +73,8 @@
   “一处实现”指**能力逻辑**，不是适配器零逻辑。
 - **文本 recipe 冻结，`InputPlan` 保留为历史执行器**：⛔ 不再给 plan 加任何新能力；
   `StepKind`/parser 冻结；`InputPlan` 保留 summary/failureReport/fault/trace/exit5，**不退役**，
-  放在 `src/plan` 作**冻结兼容执行器**，不是核心。C3 只做 parity/验证，**不替换生产执行器**；
+  放在 `src/runtime/input_plan.*` + `src/runtime/recipe.*` 作**冻结兼容执行器**，不是核心；
+  C3 只做 parity/验证（**已落地 · main `eecbfac`**），**不替换生产执行器**；
   parity 是“语义等价 + 已知差异表”，不承诺逐位；旧执行器仍是历史行为真源。
 - **B2/B1 都不做核心**：B2 只在 C3 parity 中作为历史 `Step[]` 数据；B1 不是模型；
   QJS 是 callback，由 TriggerRunner 驱动。
@@ -300,15 +301,18 @@ recipe 是纯线性文本，没有函数/模块/参数/循环（`recipe.h:28-30`
 
 - 做法：
   - C++ parser 只产**数据**：`Recipe/Step`（含 `timeout`/`origin`）→ `Step[]`（JSON/ABI），**不执行**；
-  - **JS driver**（内置模块，跑在单插件运行时）：`runRecipe(steps)` 用
-    `ctx.afterPosition`/`ctx.input.*`/`ctx.read.*` 返回 callback 链；覆盖九条指令 + `timeout` + `quit`
-    + `profile` + 完成/`exit 5` 映射（尽力）；`wait` 宿主墙钟（driver `atReadPoint` 逐点检查）；
-  - **parity harness**：官方 `scripts/recipes/*.plan` + 所有 `repro:` 锚，旧 `--input-plan`（oracle）vs
-    新 JS driver，逐项比对消息/电平/`fired/applied/pending`/exit/`stepText`/trace；
+    这个**唯一** JSON 出口是独立 TU `src/runtime/recipe_json.{h,cpp}`（只读 `Step`）；
+  - **JS driver**（`scripts/plugins/lib/recipe.js`，跑在单插件运行时）：`runRecipe(steps)` 用
+    `ctx.trigger.*`/`ctx.input.*`/`ctx.read.*` 返回 callback 链；覆盖九条指令 + 行尾 `timeout` + `quit`
+    + `profile_*` + `finish(0)/finish(5)`（**只做翻译**，门/超时/完成度判据仍只有一份）；
+  - **parity harness**：官方 `scripts/recipes/*.plan` + `repro:` 锚的**指令行子串**（由
+    `tools/test/recipe-freeze.test.mjs` 逐字钉住，⛔ 不做配方 replay），旧 `--input-plan`（oracle =
+    `InputPlan::atPoint`）vs 新 JS driver，逐项比对消息/电平/`fired/applied/pending`/exit/trace；
     **语义等价 + 已知差异表**，不承诺逐位；含 `wait` 标 `NON-DIFFABLE`；
   - 任何一条旧 plan 表达不出来 = **callback API 缺口/已知差异**，列成覆盖/缺口表；
   - **`InputPlan` 保留**（不退役）：summary/failureReport/fault/trace/exit5 不动，仍是生产真源；
-    `src/plan` 保留 parser/执行器；C3 只加离线 JS driver/parity；官方 `.plan`/`repro:` 锚不动。
+    `src/runtime/recipe.*` / `src/runtime/input_plan.*` 保留 parser/执行器（一个字符没动）；
+    C3 只加离线 JS driver（`scripts/plugins/lib/recipe.js`）/parity；官方 `.plan`/`repro:` 锚不动。
   - **不新增 plan 能力**。
 - 优点：历史 plan 得到验证/支持；核心没有 plan VM；旧 plan 不再产出新能力。
 - 缺点：JS driver 要覆盖全部历史语义（包括 `exit 5`/trace 的 parity）；parity 需要专门的差分夹具。
@@ -353,8 +357,9 @@ guest 状态         InputDevice / WindowManager / GuestMemory / engine_marker /
 
 **硬规则**：
 
-1. 核心**没有** `Step`/`pending`/`next_`/`applied_`/`RecipeOutcome`；这些只属于 `src/plan` 的
-   **冻结历史执行器/parser**（`InputPlan`），不 include/引用到核心（`src/runtime/core/**` + `input.h` 投递口）。
+1. 核心**没有** `Step`/`pending`/`next_`/`applied_`/`RecipeOutcome`；这些只属于
+   `src/runtime/input_plan.*` / `recipe.*` 的**冻结历史执行器/parser**（`InputPlan`），
+   不 include/引用到核心（`src/runtime/core/**` + `input.h` 投递口）。
 2. **Input 唯一路径** = `IntentQueue` + executor；⛔ 没有第二个 Input 施加点。
    **Edit 是另一操作类**：`EditSink` 在安全点立即同步写（global.set 等），⛔ 不进 Input 队列；
    Edit 不是“第二个 Input 施加点”。
@@ -891,44 +896,61 @@ slot 5 "进门即点"落进 `0x0AF8` 的形态。⛔ 不把某个 `calls` 数当
 - **owner**：模块实例 = owner；`done/fail`/卸载 ⇒ `releaseOwner`；不残留按住。
 - **trace**：`ctx.log` + runner `trigger:`/`intent:`；不要求 plan DSL 图元。
 
-### 4.7 C3：JS recipe driver + parity harness（历史 plan 只验证/支持）
+### 4.7 C3：JS recipe driver + parity harness（历史 plan 只验证/支持；**已落地（main `eecbfac`）**）
 
-**定位**：文本 recipe **冻结**，⛔ 不再产出新能力；C3 只做“历史 plan 的 driver 与 parity”。
+**定位**：文本 recipe **冻结**，⛔ 不再产出新能力；C3 只做“历史 plan 的 driver 与 parity”——**已落地**
+（`eecbfac`），下面写的是**实际落点**，不再是拟名/拟路径。
 
-**C++ parser 只产数据**：
+**C++ parser 只产数据（唯一 JSON 出口 = 独立 TU）**：
 
-- `Recipe/Step` 保持现状（含 `timeout`/`origin`/line），但**不执行**；
-- 输出 `Step[]`（JSON/ABI）给单插件运行时：`kind/script/pos_from/pos_to/timeout_ms/x/y/button/label/line/origin`。
+- `Recipe/Step` 保持现状（`src/runtime/recipe.{h,cpp}`，含 `timeout`/`origin`/line），但**不执行**；
+  parser / 执行器**一个字符没动**（冻结面）。
+- `src/runtime/recipe_json.{h,cpp}` 是 `Step[]` 的**唯一** JSON 出口（独立 TU；只读 `Step`，不执行）：
+  `kind/script/posFrom/posTo/waitMs/x/y/button/label/timeoutMs`。
+- `Step[]` 的 `id`/`origin`/`line`/`label` **全量导出但不参与判定**（trace / 报错定位用；parity 只比语义面）。
 - `StepKind`/parser **冻结**：⛔ 不加 `global_set`/`global_get`/变量/表达式/新指令；⛔ 不做 JS→Step 生成。
   `global.set/get` 只存在于 callback API（§4.6）。
 
-**JS driver**（内置模块，跑在单插件运行时；`runRecipe(steps)`；每步用 `recipe:<index>` 作 name）：
+**JS driver**（`scripts/plugins/lib/recipe.js`；`runRecipe(steps)`；每步用 `recipe:<index>` 作 name）：
 
-- 覆盖九条指令 + 行尾 `timeout`：
+- **只做翻译**：九条指令 + 行尾 `timeout` + `quit` + `profile_*` + `finish(0)/finish(5)`；
+  门 / 超时 / 完成度判据仍只有**一份**（`src/runtime/recipe.*` + 宿主 `TriggerRunner`），driver 不另建状态机。
   - `await script` → `ctx.trigger.afterScript(...)`；`await position` → `ctx.trigger.afterPosition(...)`
     （Once；`timeout` 作为 trigger timeout）；
-  - `wait <ms>` → **宿主墙钟**（`afterDelay` 默认宿主墙钟，或 driver 用 `atReadPoint` 逐点检查）；
-    **NON-DIFFABLE**；
-  - `click/mouse_move/down/up` → `ctx.input`；
-  - `profile_begin/end` → HostEffect；
-  - `quit` → lifecycle；
+  - `wait <ms>` → **宿主墙钟**（`afterDelay`）；**NON-DIFFABLE**；
+  - `click/mouse_move/down/up` → `ctx.input`；`profile_begin/end` → HostEffect；
+  - `quit` → `ctx.finish(剩余 ? 5 : 0, …)` + `ctx.quit(…)`（旧执行器：`quit` 之后还有指令 ⇒ 非 0）。
 - 完成度/`exit 5` 映射：driver 用**具名 Trigger 集合**（`recipe:<index>`）推进，不维护 step 计数器；
-  全部走完 ⇒ `[]` + `ctx.done()`；
+  全部消费完 ⇒ **`ctx.finish(0)`**（正常收口，⛔ 不是 `quit`）；
   门超时/失败 ⇒ `ctx.fail(reason)` + **`ctx.finish(5, reason)`**（C3 driver-only grant）；旧 `stepText`/trace
   由 driver 用 `ctx.log` 复刻（或 parity harness 只比对事件序列）。
+  ⚠ 合同早先写的 **`ctx.done()` 是笔误** —— `plugin.d.ts` 里不存在这个成员；消费完就是 `finish(0)`。
 - **不新增 plan 能力**；如果某条旧 plan 表达不出来，那是 **callback API 缺口**，不是“给 plan 加指令”。
 
-**parity harness**：
+**parity harness**（CTest `recipe-driver-parity`，**pure 档**）：
 
-- 输入：`scripts/recipes/*.plan` 全部官方配方 + 所有 `repro:` 锚（`scripts/recipes/README.md:14-28`）。
+- 落点：`tests/recipe_driver_parity.cpp`（oracle = `InputPlan::atPoint`）+ `tests/plugin_fixtures/recipe-driver.js`
+  （插件入口）+ `scripts/plugins/lib/recipe.js`（driver）；**顶层无条件注册 ⇒ pure**
+  （零 `Machine` / 零 GPU / 零真窗口 / 零游戏安装 / 零 LFS 资产）。
+- 输入：`scripts/recipes/*.plan` 全部官方配方（逐条 replay）+ `repro:` 锚的**指令行子串**
+  （由 `tools/test/recipe-freeze.test.mjs` 逐字钉住，⛔ **不做配方 replay**）。
 - 两路：旧 `--input-plan`（oracle，仍用现有 `InputPlan`）vs 新 C3 JS driver（同一 `Step[]`）。
-- 逐项比对：消息序列（message/wParam/lParam/电平）、`fired/applied/pending`、exit、`stepText`/trace。
+- 逐项比对：消息序列（message/wParam/lParam/电平）、`fired/applied/pending`、exit、`stepText`（driver arm 的那一步
+  ↔ oracle 卡住的那一步）/trace。
 - **语义等价 + 已知差异表**，不承诺逐位；含 `wait` 的标 `NON-DIFFABLE`；旧执行器仍是历史真源。
-- **已知缺口**：`exit5` 状态机/`ctx.finish` 映射、timeout 新 API `>=` vs 旧执行器严格 `>` 的 1ms 差异、
-  `Step[]` 字段；
-  逐条标“旧执行器保留 / JS 部分覆盖 / 不覆盖”，⛔ 不声称全覆盖。
+- **已知差异 10 条**（`tests/recipe_driver_parity.cpp` 的 `kKnownDiffs[]`；⚠ 这里的 D 编号属于**这张差异表**，
+  与 §7 的 D1–D8 未决问题**不是**同一套编号；逐条标“旧执行器保留 / JS 部分覆盖 /
+  不覆盖”，⛔ 不声称全覆盖）。其中**两条必须点名**：
+  - **D5** 显式 `mouse_down`/`mouse_up` 在 C1 executor 里**不施加**（`intent_executor.cpp`）⇒ 带 `mouse_*`
+    的配方（含 `save05-move.plan`）是 **NON-DIFFABLE**（只承诺“到断点为止逐条相同”）；
+  - **D10** `click` 与 `quit` **同一回调** ⇒ 插件路径会丢掉刚 staged 的 input（旧执行器不丢）⇒
+    `click; quit` 这种形状 driver **少落一次写**（官方 `.plan` 里没有这种形状）。
+  - 其余 8 条：D1 `timeout` `>=` vs 旧执行器严格 `>` 的 1 ms、D2 script 名口径（旧执行器不敏感 + 剥 `.BIN`）、
+    D3 `wait` 墙钟、D4 `ctx.input.*` 下一读点落地、D6 `quit` 机制（不产生虚拟 `WM_QUIT`）、
+    D7 `profile_end` 无 label、D8 `exit 5` 只能映射 `finish(5)` 的 receipt、D9 `Step[]` 以生成的 ES module 进
+    driver（⛔ 不给 `ctx` 加成员）。
 - `InputPlan` **保留**（不退役）：summary/failureReport/fault/trace/exit5 不动；生产仍走 `--input-plan`；
-  `src/plan` 保留 parser/执行器，C3 只加离线 driver/parity。官方 `.plan`/`repro:` 锚**不迁移**。
+  `src/runtime/recipe.*` / `input_plan.*` 保留 parser/执行器，C3 只加离线 driver/parity。官方 `.plan`/`repro:` 锚**不迁移**。
 
 **为什么不是 C++ 兼容前端**：用户明确“旧 plan 用一个预编写的 js 就能直接驱动它”，正好验证 callback API
 的完整性；C++ 前端会留下第二个 step 状态机，和“核心没有 plan VM”冲突。⇒ C3 用 JS driver。
@@ -1159,46 +1181,59 @@ slot 5 "进门即点"落进 `0x0AF8` 的形态。⛔ 不把某个 `calls` 数当
 
 **行为**：新增 opt-in；不打开 flag 时逐字节不变；headless 可跑。
 
-### C3 — JS recipe driver + parity only（历史 plan 验证）
+### C3 — JS recipe driver + parity only（历史 plan 验证；**已落地（main `eecbfac`）**）
 
-**做什么**：
+**做什么**（以下为**实际落点**，`eecbfac` 已合入 main）：
 
 - **C++ parser 只产数据**：`Recipe/Step`（含 `timeout`/`origin`/line）→ `Step[]`（JSON/ABI），**不执行**；
-  `StepKind`/parser **冻结**（⛔ 不加 `global_set`/`global_get`/变量/新指令；⛔ 不做 JS→Step 生成）。
-- **JS driver**（内置模块，跑在单插件运行时；仅 parity）：`runRecipe(steps)` 用
-  `ctx.afterPosition`/`ctx.input.*`/`ctx.read.*`/`ctx.trigger.*` 返回 callback 链；
-  覆盖九条指令 + `timeout` + `quit` + `profile` + 完成/`exit 5` 映射（尽力）：
+  `StepKind`/parser **冻结**（⛔ 不加 `global_set`/`global_get`/变量/新指令；⛔ 不做 JS→Step 生成）；
+  唯一 JSON 出口 = 独立 TU `src/runtime/recipe_json.{h,cpp}`。
+- **JS driver**（`scripts/plugins/lib/recipe.js`，跑在单插件运行时；仅 parity）：`runRecipe(steps)` 用
+  `ctx.trigger.*`/`ctx.input.*`/`ctx.read.*` 返回 callback 链；
+  覆盖九条指令 + 行尾 `timeout` + `quit` + `profile_*` + `finish(0)/finish(5)`（**只做翻译**）：
   - `await script` → `afterScript`；`await position` → `afterPosition`（Once；`timeout` 作为 trigger timeout）；
-  - `wait` → **宿主墙钟**（`afterDelay` 默认宿主墙钟，或 driver 用 `atReadPoint` 逐点检查）；NON-DIFFABLE；
-  - `click/mouse_*` → `ctx.input`；`profile_*` → HostEffect；`quit` → lifecycle；
-  - driver 自己维护 `applied/pending`；完成/失败/门超时 ⇒ `ctx.done/fail` + `ctx.finish(5, …)`。
-- **parity harness**：官方 `scripts/recipes/*.plan` + 所有 `repro:` 锚；旧 `--input-plan`（**生产真源**）vs
+  - `wait` → **宿主墙钟**（`afterDelay`）；NON-DIFFABLE；
+  - `click/mouse_*` → `ctx.input`；`profile_*` → HostEffect；`quit` → `ctx.finish(剩余 ? 5 : 0, …)` + `ctx.quit(…)`；
+  - 门 / 超时 / 完成度的判据仍只有**一份**（`src/runtime/recipe.*`）；消费完 ⇒ `ctx.finish(0)`，
+    门超时/失败 ⇒ `ctx.fail` + `ctx.finish(5, …)`。
+    ⚠ 合同早先写的 `ctx.done()` 是**笔误**（`plugin.d.ts` 里不存在；消费完就是 `finish(0)`）。
+- **parity harness**：官方 `scripts/recipes/*.plan`（逐条 replay）+ `repro:` 锚的**指令行子串**
+  （由 `tools/test/recipe-freeze.test.mjs` 逐字钉住，⛔ 不做配方 replay）；旧 `--input-plan`（**生产真源**）vs
   新 JS driver（离线），逐项比对消息（message/wParam/lParam/电平）、`fired/applied/pending`、exit、
-  `stepText`/trace；**语义等价 + 已知差异表**，不承诺逐位；含 `wait` 的标 `NON-DIFFABLE`。
+  `stepText`（driver arm 的那一步）/trace；**语义等价 + 已知差异表**，不承诺逐位；含 `wait` 的标 `NON-DIFFABLE`。
 - **不替换生产执行器**：`InputPlan` 保留 summary/failureReport/fault/trace/exit5，仍是历史行为真源；
   C3 只验证 JS driver 能覆盖什么；不需要 C++ 只读镜、不需要 same-read-point 兼容模式。
-- **已知缺口（列出，不声称全覆盖）**：
-  - `exit 5`/失败报告是执行器状态机语义，JS driver 只能映射 `ctx.finish(5)` receipt；
+- **已知差异 10 条（列出，不声称全覆盖；表 = `tests/recipe_driver_parity.cpp` 的 `kKnownDiffs[]`；
+  D 编号属该表、与 §7 的 D1–D8 不是同一套）**：
+  - `exit 5`/失败报告是执行器状态机语义，JS driver 只能映射 `ctx.finish(5)` receipt（D8）；
   - `timeout` 边界：新 API 合同是 `elapsed >= timeout_ms`；旧执行器 `stepWindowExpired` 是**严格 `>`**
-    （`recipe.cpp:249`），C3 parity driver 为对齐旧行为按 `>`，与新 API 有 **1 ms 差异**；
-    在差距表标“已知差异/不逐位”；`Step[]` 字段（origin/line/label）同样标注旧执行器保留/JS 部分覆盖；
+    （`recipe.cpp:249`），C3 parity driver 为对齐旧行为按 `>`，与新 API 有 **1 ms 差异**（D1）；
+    `Step[]` 的 `id`/`origin`/`line`/`label` **全量导出但不参与判定**（D9：以生成的 ES module 进 driver）；
+  - **D5** 显式 `mouse_down`/`mouse_up` 在 C1 executor 里**不施加**（`intent_executor.cpp`）⇒ 带 `mouse_*`
+    的配方（含 `save05-move.plan`）是 **NON-DIFFABLE**；
+  - **D10** `click` 与 `quit` **同一回调** ⇒ 插件路径会丢掉刚 staged 的 input（旧执行器不丢）；
   - `global_set` 不存在于历史 plan（冻结），不补。
 - **入口不变**：`--input-plan <file>` 生产仍走旧 `InputPlan`；JS driver 只由 parity 夹具加载；
   parity 通过也不切换生产（用户裁决：`InputPlan` 保留）。
 - 官方 `.plan`/`repro:` 锚**不迁移**；旧 plan 不再产出新能力。
 
-**改哪些文件**：
+**改哪些文件**（已落地，`eecbfac`）：
 
-- `src/plan/input_plan.*` / `recipe.*`：**保留**（冻结兼容执行器；summary/failureReport/fault/trace/exit5 不动）。
-- `src/plan/recipe_driver.*`：parser → `Step[]`；JS driver 适配器（离线 parity）。
-- `scripts/control/recipe_driver.js`（拟）：`runRecipe(steps)`；九条指令 + timeout/quit/profile/exit5 映射。
-- `tests/recipe_driver_parity.cpp`〔拟名·新增〕（CTest `recipe-driver-parity`〔拟名·新增〕，**assets**）：
-  官方配方 + `repro:` 锚 old/new 差分；覆盖/缺口表输出。
+- `src/runtime/input_plan.*` / `src/runtime/recipe.*`：**一个字符没动**（冻结 parser/执行器；
+  summary/failureReport/fault/trace/exit5 不动）。
+- `src/runtime/recipe_json.{h,cpp}`（新增·独立 TU）：`Step[]` 的**唯一** JSON 出口（只读 `Step`，不执行）。
+- `scripts/plugins/lib/recipe.js`（新增）：`runRecipe(steps)`；九条指令 + 行尾 `timeout` + `quit` + `profile_*`
+  + `finish(0)/finish(5)`；**只做翻译**，⛔ 不接生产。
+- `tests/recipe_driver_parity.cpp` + `tests/plugin_fixtures/recipe-driver.js`（新增，CTest `recipe-driver-parity`，
+  **pure 档**：顶层无条件注册，零 `Machine`/GPU/窗口/安装/LFS）：oracle = `InputPlan::atPoint`；
+  官方配方逐条 replay + 已知差异 10 条输出。
+- `tools/test/recipe-freeze.test.mjs`（新增）：`StepKind` 闭集合 + 线上名字 = driver `KIND_*`
+  + 5 条 `repro:` 的**指令行子串**逐字钉住（⚠ **不是**“replay 配方”）。
 
 **判据**：
 
-- 官方配方 + `repro:` 锚：**语义等价 + 已知差异表**；确定性配方尽量逐项相同，含 `wait` 标 `NON-DIFFABLE`；
-  不要求“逐位全同”，旧执行器仍真源。
+- 官方配方 + `repro:` 锚的指令行子串：**语义等价 + 已知差异表**；确定性配方尽量逐项相同，含 `wait` 标
+  `NON-DIFFABLE`；不要求“逐位全同”，旧执行器仍真源。
 - 任何旧 plan 表达不出来 ⇒ 列入 **已知差异/API 缺口**（⛔ 不给 plan 加指令；⛔ 不宣称全覆盖）。
 - 旧 `--input-plan` 的 `exit 5`/`pending`/`trace` 语义**不变**；C3 不切换生产。
 - `input-plan-read-points` 的 control 队列子用例迁到 C4 core；C3 只保留 recipe/parity。
@@ -1286,22 +1321,22 @@ C5 是单插件 Run/dispatch 线；三者可与 C2 并行/后置。v3 的 S1/S2 
 
 | # | 不变量 | 红了意味着什么 | 落点 |
 |---|---|---|---|
-| 1 | **核心没有 plan 状态**：`src/runtime/core/**` + `input.h` 不出现 `Step`/`InputPlan`/`pending`/`RecipeOutcome`/`next_`（C3 在 `src/plan/**`） | 又长出一个 emulator 内 plan VM（用户点名的成本） | 源码形态守卫 `tools/test/core-shape.test.mjs`〔拟名·新增〕；C3 前端目录白名单 |
+| 1 | **核心没有 plan 状态**：`src/runtime/core/**` + `input.h` 不出现 `Step`/`InputPlan`/`pending`/`RecipeOutcome`/`next_`（C3 落点 = `src/runtime/recipe_json.*`） | 又长出一个 emulator 内 plan VM（用户点名的成本） | 源码形态守卫 `tools/test/core-shape.test.mjs`（**逐文件白名单**：⛔ 不是目录/glob 规则；C3 落点不在那份白名单里） |
 | 2 | **TriggerRunner 只在 `atPoint`**：`aot_run.cpp`/`machine.cpp` 不出现 `TriggerRunner`/`fire(`/`onTrigger` | 第二 pump / 块边界触发；时序静默漂 | 扩展 `input-plan-shape.test.mjs` 禁用词 |
 | 3 | **Edit 立即 / Input 下一读点**：Edit 在触发点同步写；Input 进 `staged_next_`，下一读点 drain；⛔ 不让 Edit 排队 | Edit 被延迟（违反“立即”）；Input 抢立即语义 | `control-bus/edit-immediate` + `trigger-runner/one-write` |
 | 4 | **Input 一读点一条**（move/click/down/up；staged 也受约束）；Edit 不在这个预算里 | 同拍两条 Input ⇒ 顺序合并；或 Edit 被塞进 Input 队列 | `control-bus/input-one-write` + `trigger-runner/one-write` |
-| 5 | **操作类唯一路径**：Input 只经 `IntentQueue`，Edit 只经 `EditSink`，EngineRead 只经 `EngineRead`；sample/screenshot 不进插件 Context；无 mutable `WindowManager`/`GuestMemory` | C++ handler 直接 `wm.mouseButton`/`writeGlobal`，第二 Input 施加点 | `trigger.h`/`context.h` 静态字段解析 + `src/plan/**` 禁用词 |
+| 5 | **操作类唯一路径**：Input 只经 `IntentQueue`，Edit 只经 `EditSink`，EngineRead 只经 `EngineRead`；sample/screenshot 不进插件 Context；无 mutable `WindowManager`/`GuestMemory` | C++ handler 直接 `wm.mouseButton`/`writeGlobal`，第二 Input 施加点 | `trigger.h`/`context.h` 静态字段解析 + `tools/test/core-shape.test.mjs`（`src/plugin/**` 不直调 `input::`/`writeGlobal`）+ `tools/test/input-plan-shape.test.mjs` 的 `LOOP_FORBIDDEN`（`machine.cpp`/`aot_run.cpp` 里 0 命中 `input_plan`/`input::`） |
 | 6 | **after position 语义**：`[lo,hi)`；Once 首次有效 inside；Reenter 有效外→内；无效不改变状态；跳过不触发 | 多/少触发，只有业务现象不对 | `trigger-runner/after-position-*` |
 | 7 | **ReadPoint/loop 有界**：`AtReadPoint.max_fires` 必填 >0；`staged_`/队列有界 | 无限灌输入、饿死 plan/测试 | C1/C2 用例 |
 | 8 | **owner 清理**：脚本错误/卸载/done/fail ⇒ `releaseOwner`；guest 不残留按住 | 永久按住；运行期无人发现 | `trigger-runner/owner-timeout` + C2 e2e |
 | 9 | **单插件运行时**：没有 `--ui-control`/第二个 QJS context；同一个插件可选 `render`/`start`/`onTrigger`；写只经 `ctx.input`/`ctx.edit` | 又拆回“功能/驱动两套上下文/权限”（用户明确否掉） | 静态 flag/上下文守卫 + 插件 API 单测 |
 | 10 | **control 9 项同源**：`hello`/`caps=`/`endpoint-surface` 精确 9；`Wait` client-sugar | 加 op 漏一处；C0 行为不一致 | `capability-matrix` + `endpoint-surface` |
-| 11 | **QJS 单 TU（编译约束，不是安全）**：`quickjs.h` 只在 `script_quickjs.cpp`；`src/plugin/**` / `src/plan/**` 不 include quickjs.h、不调 `input::`/`writeGlobal` | 第二 quickjs TU / 第二施加点 | 静态 include/禁用词守卫 |
+| 11 | **QJS 单 TU（编译约束，不是安全）**：`quickjs.h` 只在 `script_quickjs.cpp`；`src/plugin/**` / `src/runtime/input_plan.*`、`recipe.*`、`recipe_json.*` 不 include quickjs.h、不调 `input::`/`writeGlobal` | 第二 quickjs TU / 第二施加点 | `tools/test/core-shape.test.mjs` ④（`src/plugin/**` 的 `PLUGIN_FORBIDDEN`）+ ⑤（`quickjs.h` 的 include 点**恰好**一处、消费者**恰好** `script_quickjs.cpp`） |
 | 12 | **预算**：每次 `onTrigger`/`start` deadline+op_limit；超限 fail + 摘 trigger | 回调跑飞，guest 卡住 | C1/C2 用例 + `script_quickjs.cpp:195-208` |
-| 13 | **文本 recipe 冻结/parity**：`StepKind`/parser 不加能力；C3 JS driver 覆盖九条+timeout/quit/profile；旧 `--input-plan`（oracle）vs 新 driver 的 parity | 旧 plan 语义被静默破坏；或又给 plan 加能力 | `recipe-driver-parity`〔拟名·新增〕+ 冻结守卫 |
+| 13 | **文本 recipe 冻结/parity**：`StepKind`/parser 不加能力；C3 JS driver 覆盖九条+timeout/quit/profile；旧 `--input-plan`（oracle = `InputPlan::atPoint`）vs 新 driver 的 parity | 旧 plan 语义被静默破坏；或又给 plan 加能力 | `recipe-driver-parity`（已落地，pure）+ `tools/test/recipe-freeze.test.mjs` 冻结守卫 |
 | 14 | **能力表/映射**：`Move→mouse_move`、`Sample` overlay n/a、`Frames→game.local_frames`、`Wait` client-sugar | 名字漂/“只有某个入口有” | `capability-matrix` |
 | 15 | **plan 不再产出**：`StepKind`/parser/help 不新增 `global_*`/变量/指令；`Step[]` 只读数据 | 又给历史 plan 加能力（用户明确不加） | 静态 diff/白名单守卫 + `capability-matrix` |
-| 16 | **C3 parity 诚实**：官方配方 + `repro:` 锚 old/new 语义等价 + 已知差异表；缺口必须列出（不声称全覆盖） | 把“JS 没覆盖”藏成“等价”；或声称逐位全同 | `recipe-driver-parity`（assets）；覆盖/缺口表 |
+| 16 | **C3 parity 诚实**：官方配方（逐条 replay）+ `repro:` 锚的**指令行子串**（`recipe-freeze` 逐字钉住）old/new 语义等价 + 已知差异 10 条；缺口必须列出（不声称全覆盖） | 把“JS 没覆盖”藏成“等价”；或声称逐位全同 | `recipe-driver-parity`（**pure**）；覆盖/缺口表 = `kKnownDiffs[]` |
 | 17 | **ControlBus 单一能力逻辑**：WS `control_ws.cpp` 与 JS `ctx` 都只调 `EditSink`/`EngineRead`/`IntentQueue`/`RunnerControl`/`RunControl`；sample/screenshot 是组合；control-point 胶水可在 WS | 同一能力实现两次；修一处漏一处 | `control-bus/contract` + 形态守卫（`control_ws.cpp` 不出现 `input::`/`writeGlobal` 直写） |
 | 18 | **emu-ctl 9 op 组合/控制点**：pause/resume/quit→RunnerControl；move/click→Intent；sample→pause+EngineRead+元数据；screenshot→pause+HostAction；global-get→**EngineRead（不暂停）**；global-set→**EditSink（立即）**；hello/caps/timeouts/owner 是传输 | 把 global-set 做进 Input 队列；漏 op/控制点语义 | `lift-control-endpoint` + `capability-matrix` + `control-bus/edit-immediate` |
 | 19 | **Run 互斥**：一个 endpoint 一个 active Run（Input owner；只读/只 Edit 也唯一）；`dispatch`/`run` 已有 active ⇒ `busy`（不排队）；abort/releaseOwner | 两个 Run 同时写输入；owner 混乱；按键残留 | `plugin/dispatch-busy` / `plugin/abort-release` |
@@ -1309,7 +1344,7 @@ C5 是单插件 Run/dispatch 线；三者可与 C2 并行/后置。v3 的 S1/S2 
 
 | 21 | **Edit 立即（暂停/控制点）**：`global-set` 在暂停态/触发点同步生效；同拍 `readGlobal` 得新值 | 把 Edit 当 Input 延迟；暂停态不可 edit | `control-bus/edit-immediate` |
 | 22 | **无第二 Input 施加点**：Input 只经 `IntentQueue`；EditSink 不是 Input；⛔ 不用 `wm.mouseButton` 直写 | 两条 Input 路径；顺序静默漂 | 形态守卫 + C1/C4 用例 |
-| 23 | **`InputPlan` 保留**：`src/plan` 冻结兼容执行器；C3 只 parity；不退役、不接核心 | 误删历史执行器/exit5/summary；或把 plan VM 塞回核心 | `input-plan-read-points` + 代码形态守卫 |
+| 23 | **`InputPlan` 保留**：`src/runtime/input_plan.*` / `recipe.*` 冻结兼容执行器；C3 只 parity；不退役、不接核心 | 误删历史执行器/exit5/summary；或把 plan VM 塞回核心 | `input-plan-read-points` + 代码形态守卫 |
 
 | 24 | **`global-get` 不暂停**：EngineRead 读；`leave_paused=!paused`；不产生 `state_seq` | 把 global-get 做成 sample 组合，暂停/副作用静默变 | `lift-control-globals` + `control-bus/global-get-no-pause` |
 | 25 | **`sample`/`screenshot` 是组合**：pause+EngineRead/HostAction+元数据；paused/state_seq/产物；最后呈现帧 BMP | 把 sample 当普通读；或把 screenshot 暴露给插件 | `lift-control-snapshot` + `control-bus/sample-screenshot-composite` |
@@ -1375,10 +1410,15 @@ callback 链的可读性（进 `ctx.log`/设计文档）。
 - **推荐**：文本 recipe **冻结**（⛔ 不加 `global_set`/变量/新指令；`StepKind`/parser 只服务历史 plan）。
   **`InputPlan` 保留**（不退役）：summary/failureReport/fault/trace/exit5 不动；生产仍走 `--input-plan`。
   C3 = **JS driver + parity only**（离线）：
-  - C++ parser 只产 `Step[]`；JS `runRecipe(steps)` 返回 callback 链；
-  - parity 覆盖 `scripts/recipes/*.plan` + 所有 `repro:` 锚；old `--input-plan`（真源）vs 新 driver；
+  - C++ parser 只产 `Step[]`（唯一 JSON 出口 = `src/runtime/recipe_json.*`）；JS `runRecipe(steps)`
+    （`scripts/plugins/lib/recipe.js`）返回 callback 链；
+  - parity 覆盖 `scripts/recipes/*.plan`（逐条 replay）+ `repro:` 锚的**指令行子串**（由
+    `tools/test/recipe-freeze.test.mjs` 逐字钉住，⛔ 不做配方 replay）；old `--input-plan`（真源）vs 新 driver；
   - **语义等价 + 已知差异表**，不承诺逐位；含 `wait` 标 `NON-DIFFABLE`；
-  - 已知缺口：`exit5`/`ctx.finish` 映射、timeout 新 API `>=` vs 旧执行器严格 `>` 的 1ms 差异、`Step[]` 字段；
+  - 已知缺口：`exit5`/`ctx.finish` 映射、timeout 新 API `>=` vs 旧执行器严格 `>` 的 1ms 差异、`Step[]` 字段
+    （`id`/`origin`/`line`/`label` 全量导出但不参与判定）；**parity D5** 显式 `mouse_down`/`mouse_up` 在 C1 executor 里
+    不施加 ⇒ 带 `mouse_*` 的配方（含 `save05-move.plan`）是 **NON-DIFFABLE**；**parity D10** `click` 与 `quit`
+    同一回调 ⇒ 插件路径丢掉刚 staged 的 input（旧执行器不丢）；
     逐条标“旧执行器保留 / JS 部分覆盖 / 不覆盖”，⛔ 不声称全覆盖；
   - 任何旧 plan 表达不出来 = **API 缺口**（列覆盖/缺口表）；⛔ 不用给 plan 加指令绕过。
 - **影响面**：历史 plan 得到验证；核心无 plan VM；`InputPlan` 仍是历史真源；`repro:`/官方 `.plan` 不动。
@@ -1432,8 +1472,10 @@ callback 链的可读性（进 `ctx.log`/设计文档）。
   `emu-ctl`/RPC 回执是 JSON；插件失败默认不改进程 exit（除非 C3 parity/显式策略）。
 - **R4 `Step[]` 版本化**：`Step[]` 带 `version`（int）；parser 写入，JS driver 拒绝未知版本；
   字段增删走版本，不静默改历史字段。
-- **R5 parity 运行方式**：`recipe-driver-parity` 标 **assets**；fixture 覆盖纯解析/短链，必须真 guest 的
-  `repro:` 锚走 assets/手工 e2e；旧执行器是真源，JS driver 只对比。
+- **R5 parity 运行方式**：`recipe-driver-parity` 标 **pure**（顶层无条件注册；零 `Machine`/GPU/真窗口/
+  游戏安装/LFS 资产 ⇒ 与 `plugin-runtime`/`plugin-overlay` 同档）；官方 `.plan` 逐条 replay 用的是
+  **注入时钟 + 无 guest 的 parity 夹具**；`repro:` 锚只钉**指令行子串**（`recipe-freeze` 逐字），不做配方
+  replay；旧执行器是真源，JS driver 只对比。
 - **R6 `global.set` 时机**：**EditSink 立即**（安全点/暂停/控制点）同步生效；⛔ 不进 IntentQueue；
   `emu-ctl global-set` 与插件 `ctx.edit.global.set` 同一实现；Input 另走读点预算。
 
@@ -1448,6 +1490,8 @@ callback 链的可读性（进 `ctx.log`/设计文档）。
 | 启动 `caps=`（现状 6） | `apps/emulator-lift/src/aot/aot_main.cpp:1326-1331` |
 | 旧 plan VM（C3 前端） | `apps/emulator-lift/src/runtime/input_plan.cpp:186-217`、`781-810`；`input_plan.h:233-283`、`430-458` |
 | 旧 recipe | `apps/emulator-lift/src/runtime/recipe.h:41-55`、`70-81`；`recipe.cpp:318-503` |
+| C3 `Step[]` 唯一 JSON 出口 | `apps/emulator-lift/src/runtime/recipe_json.h:1-44`；`recipe_json.cpp:1-93`（独立 TU，只读 `Step`） |
+| C3 JS driver / parity / 冻结守卫 | `apps/emulator-lift/scripts/plugins/lib/recipe.js:126-293`（`runRecipe`）；`apps/emulator-lift/tests/recipe_driver_parity.cpp:606-635`（`kKnownDiffs[]`）；`apps/emulator-lift/tests/plugin_fixtures/recipe-driver.js`；`tools/test/recipe-freeze.test.mjs` |
 | click 两段/闸门 | `apps/emulator-lift/src/runtime/input_plan.h:249-283`、`392-417` |
 | 四个投递入口 | `apps/emulator-lift/src/runtime/input.h:80-114` |
 | 块边界 / Present 闸门 | `apps/emulator-lift/src/aot/aot_run.cpp:595-609`；`apps/emulator-lift/src/aot/aot_host.cpp:1184-1198` |
@@ -1468,6 +1512,9 @@ callback 链的可读性（进 `ctx.log`/设计文档）。
 `input-plan-read-points`、`input-injection`、`overlay`、`aot-overlay`、`ui-script-quickjs`、
 `ui-frames`、`ui-script-modules`、`ui-hud-script`、`ui-kit-script`、`plugin-runtime`、
 `plugin-headless`、`plugin-overlay`。
+
+`recipe-driver-parity`（C3，**pure**）由 `apps/emulator-lift/CMakeLists.txt` 顶层 `add_test` 注册
+（外层 `if(LIFT_BUILD_TESTS)` 被 `cmakeTestTier()` 当透明）。
 〔拟名·新增〕在 §5 标出，当前不存在。
 
 ### 8.2 文档

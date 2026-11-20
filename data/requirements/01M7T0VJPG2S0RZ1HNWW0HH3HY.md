@@ -48,7 +48,9 @@
   C2b-2 `adoptOverlayScript` 窗口装配 / FontEngine 进 PluginHost / `game.mouse().buttons` 生产读数 /
   `plugin-overlay`（pure，30 checks）+ `aot-overlay` 子用例（44 checks）。
 - **C2c**：**已完成（2026-11-20）**：`scripts/plugins/lib/save.js` 的 `loadSave(slot)` + pure chain + `plugin/load-save-e2e`（mac 真跑；偶发 gate timeout 已单独立 `REQ-01M7W2X81F1ASB488EJFQGMQSH`）。
-- **C3**：JS recipe driver + parity（`InputPlan` 保留）。
+- **C3**：**已完成（dev `02d3b73` → main `eecbfac`）**：`src/runtime/recipe_json.{h,cpp}`（`Step[]` 唯一 JSON 出口）·
+  `scripts/plugins/lib/recipe.js`（`runRecipe`，只翻译不判门）· `recipe-driver-parity`（pure；oracle=`InputPlan`）·
+  `tools/test/recipe-freeze.test.mjs`；已知差异 10 条（D5：显式 `mouse_down/up` 不施加 ⇒ save05-move NON-DIFFABLE）。
 - **C4**：ControlBus 收编 `emu-ctl`（`EditSink`/`EngineRead`/`HostAction`/控制点；WS 薄传输）。
 - **C5**：UI→Run（`read → edit → input → dispatch` 的 e2e）。
 - 最小闭环 **C0 → C1 → C2**；C3/C4/C5 可并行/后置。
@@ -65,7 +67,7 @@ adopt 失败（字体缺失 / 窗口没建）⇒ exit 2（与 `--overlay` R5 同
 
 - 14 条 P2（`ctx.fail` 单参陷阱、initialState 的 ctx 引用只能 optional+guard、耗尽态不可类型化、stringly name、
   `UiApi.get` 无校验、`ProfileApi.end`、measure 估算等）——在 C0/C1 落类型/文档时处理。
-- C0/C1/C2a/C2b/C2c 已在 main；C3–C5 未完成；`emu-ctl` 尚未迁移；C3 parity 未跑；C5 e2e 未做。
+- C0/C1/C2a/C2b/C2c/C3 已在 main；C4/C5 未完成；`emu-ctl` 尚未迁移；C5 e2e 未做。
 - C2b-2 的 docs 同步已完成（`da3d845`）：`plugin-runtime.md` §4.6/§8.1 与 `overlay.md` 的 `game.mouse` 形状（`buttons` 可选键）。
 - `plugin-overlay` 未覆盖“adopt 丢弃 owned `--ui`/hud.js 脚本”那条路径（用例 `opt.overlay=false`）⇒ 补 `--ui` 夹具。
 - 蓝遮罩：`REQ-01M7SW90PC5GXBWZVJ2FJH7DY8`（独立；2026-11-19 真机确认为预期表现，已 dropped，不再是残留）。
