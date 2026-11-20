@@ -1,4 +1,4 @@
-# 🐞S2 plugin/load-save-e2e 偶发 gate timeout（第二道确认后 30 s 未进 FIELD；1 红 1 绿）
+# 🐞S2 plugin/load-save-e2e 偶发 gate timeout（第二道确认后 30 s 未进 FIELD；累计 6 红 2 绿，改动前 exe 也红）
 
 - id: REQ-01M7W2X81F1ASB488EJFQGMQSH
 - type: bug
