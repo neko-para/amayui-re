@@ -5252,6 +5252,30 @@ const MUTATIONS = [
       'needs 谓词漏 `!dump_path.empty()` ⇒ `--dump-frame` 那一帧不下载（dump 写旧帧 / 被拒写）⇒ ' +
       '`present-readback/gate-dump-fresh` 的 BMP sentinel 断言红',
   },
+
+  // ── C3：`runRecipe` 把 `await position` 的左边界翻错（`scripts/plugins/lib/recipe.js`）──────
+  //   ★ 代表"配方 → trigger 的翻译漂了"这一类错：`posFrom → posFrom+1` 之后，driver arm 的那道门
+  //     与 `.plan` 的 `[FROM,TO)` **不再是同一个区间**（区间内部的读数照旧命中 ⇒ 光看"链走完了 /
+  //     `run=done`"抓不到）。红点 = `recipe-driver-parity` 的 `armed 与 oracle 那一步不符`
+  //     （`translation_mismatch`）：oracle 卡在 `await position …` 那一步，driver 却 arm 了不同的 lo。
+  //   ★ 落在 **JS 库**里（不是 C++）：`recipe-driver-parity` 在运行期按 `LIFT_PLUGIN_LIB_DIR` 直接读
+  //     该文件 ⇒ 不需要重编；`buildTarget` 只是让自检走同一条"重建守卫 exe + 跑 ctest"的路径
+  //     （重建是空操作），语义与 `save.js` 那条一致。
+  {
+    file: 'apps/emulator-lift/scripts/plugins/lib/recipe.js',
+    from: '            return ctx.trigger.afterPosition(step.script, step.posFrom, step.posTo,\n',
+    to:
+      '            // 变异：把 `await position` 的左边界挪 1（门的区间与 `.plan` 不再是同一个）\n' +
+      '            return ctx.trigger.afterPosition(step.script, step.posFrom + 1, step.posTo,\n',
+    guard: 'ctest:recipe-driver-parity',
+    ctest: 'recipe-driver-parity',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-recipe-driver-parity',
+    what:
+      '`runRecipe` 的 `await position` 左边界 `posFrom → posFrom+1` ⇒ driver arm 的门与 `.plan` 的 ' +
+      '`[FROM,TO)` 不一致（`recipe-driver-parity` 红在 `armed 与 oracle 那一步不符`；链仍能走完 ⇒ ' +
+      '只看 `run=done` 的断言抓不到）',
+  },
 ];
 
 let mutationRunSeq = 0;

@@ -2848,6 +2848,37 @@ if(LIFT_BUILD_TESTS)
 endif()
 
 # =====================================================================================
+# J · C3：JS recipe driver 的 parity（旧 `--input-plan` = oracle；`Step[]` 的唯一 JSON 出口）
+#
+# 合同：`docs/03-emulator/plugin-runtime.md` §5 C3（`:1162-1206`）；母单
+#       `data/requirements/01M7T0VJPG2S0RZ1HNWW0HH3HY.md:51`（"JS recipe driver + parity（`InputPlan` 保留）"）。
+#
+# ★ 落点（本切片**只新增**；⛔ `recipe.h/.cpp` 的 parser / `StepKind` / `stepWindowExpired`
+#   一个字符不动 —— 那是冻结面，`src/runtime/recipe_json.cpp` 是**独立 TU**）：
+#   · `src/runtime/recipe_json.{h,cpp}`         —— `Step[]` 的**唯一** JSON 出口（只读 `Step`，不执行）
+#   · `tests/recipe_driver_parity.cpp`          —— oracle（`InputPlan`）vs driver（`PluginHost` + lib）
+#   · `scripts/plugins/lib/recipe.js`           —— `runRecipe(steps)`（只由 parity 夹具加载，⛔ 不接生产）
+#   · `tests/plugin_fixtures/recipe-driver.js`  —— parity 的插件入口（相对 import 落在 run 私有临时目录）
+#
+# ★ **顶层无条件注册 ⇒ pure 档**（`AGENTS.md` §12.4 判据 = 注册位置；`cmakeTestTier()` 把外层
+#   `if(LIFT_BUILD_TESTS)` 当透明）：零 `Machine` / 零 GPU / 零真窗口 / 零游戏安装 / 零 LFS 资产
+#   ⇒ 与 `plugin-runtime` / `plugin-overlay` 同一档。
+# ★ `LIFT_RECIPES_DIR` = 官方配方目录：`scripts/recipes/*.plan` 逐条 replay（只读；⛔ 运行时复制 / 改写）。
+# ★ 不 spawn 产品 exe ⇒ **不需要** `add_dependencies`（与 `plugin-headless` 的差别）。
+# =====================================================================================
+target_sources(emulator-lift-runtime PRIVATE src/runtime/recipe_json.cpp)
+
+if(LIFT_BUILD_TESTS)
+    add_executable(lift-recipe-driver-parity tests/recipe_driver_parity.cpp)
+    target_link_libraries(lift-recipe-driver-parity PRIVATE emulator-lift-runtime)
+    target_compile_definitions(lift-recipe-driver-parity PRIVATE
+        LIFT_PLUGIN_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/plugin_fixtures"
+        LIFT_PLUGIN_LIB_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins/lib"
+        LIFT_RECIPES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scripts/recipes")
+    add_test(NAME recipe-driver-parity COMMAND lift-recipe-driver-parity)
+endif()
+
+# =====================================================================================
 # 把 `lift_enable_warnings` 施加到本目录里**所有可执行文件**（产品 + 测试；唯一施加点）
 # ★ 为什么在文件末尾统一扫一遍：target 分散在本文件多处（测试还有末尾多个独立
 #   `if(LIFT_BUILD_TESTS)` 块）⇒ 逐处手写调用一定会漏；`BUILDSYSTEM_TARGETS` 只列**本目录**
