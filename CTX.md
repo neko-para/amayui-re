@@ -8,7 +8,7 @@
 
 | 树 | HEAD | 状态 |
 |---|---|---|
-| main | `b14b897`（C2a 合并 + 需求状态） | `git status` 空 |
+| main | `b14b897` + 本 CTX 提交 | `git status` 空 |
 | dev | `b642a76`（C2b-1 F2/F3 修复） | `git status` 空 |
 
 - main 上有 merge commit `ee56984`（dev → main，C0/C1/C2a），之后 `b14b897` 只改需求单。
