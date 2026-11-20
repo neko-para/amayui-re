@@ -5182,6 +5182,28 @@ const MUTATIONS = [
       '删掉别名判据（无条件跳过两处搬运）⇒ 非别名调用方（夹具 / feeder 的真 `LiftRegs`）在过期' +
       '寄存器上执行（`lift-ir-shim` 的探针 EDX 回读断言红）',
   },
+
+  // ── C2c：`loadSave` 的槽位行坐标（`scripts/plugins/lib/save.js` 的 `click(300, rowY)`）────
+  //   ★ 代表"链的坐标写错 / 用了公式而不是实测表"这一类错：`rowY` 多 60 之后，**光标 y** 与
+  //     实测行表对不上，但整条链**照样走完**（终态仍是 FIELD、readout 仍 `run=done`）⇒ 纯文档 /
+  //     只看结局的断言抓不到。红点 = `plugin-runtime` 的 `control-script/start-on-trigger-chain`
+  //     第 ⑤ 拍（SBUNKI 命中后 `click(300,rowY)` 落地，光标 y 不是 `rowY`）。
+  //   ★ 这条变异落在 **JS 库**里（不是 C++）：`plugin-runtime` 在运行期按 `LIFT_PLUGIN_LIB_DIR`
+  //     直接读该文件 ⇒ 不需要重编；`buildTarget` 只是为了让自检走同一条"重建守卫 exe + 跑 ctest"
+  //     的路径（重建是空操作）。
+  {
+    file: 'apps/emulator-lift/scripts/plugins/lib/save.js',
+    from: '                    ctx.input.click(SLOT_X, rowY);\n',
+    to: '                    ctx.input.click(SLOT_X, rowY + 60);  // 变异：点错槽位行\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`loadSave` 的槽位点击从 `(300, rowY)` 变成 `(300, rowY+60)` ⇒ 光标 y 与实测行表不符' +
+      '（`plugin-runtime` 的 `control-script/start-on-trigger-chain` 红；整条链仍能走完 ⇒ 只看' +
+      '`run=done` 的断言抓不到）',
+  },
 ];
 
 let mutationRunSeq = 0;

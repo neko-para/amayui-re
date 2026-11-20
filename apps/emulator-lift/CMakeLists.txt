@@ -2777,17 +2777,26 @@ target_sources(emulator-lift-runtime PRIVATE
     src/plugin/plugin_host.cpp)
 
 if(LIFT_BUILD_TESTS)
+    # ★ C2c：`LIFT_PLUGIN_LIB_DIR` = **真库**目录（`scripts/plugins/lib`）。QJS 的 import 根是
+    #   **入口文件目录**（`script_quickjs.cpp` 的 `moduleNormalize`）⇒ `tests/plugin_fixtures/*`
+    #   **不能** import 它；两条用例都直接把 `lib/save.js` 当入口（它自带参考 default 导出，
+    #   见 D-C2C-1）。⛔ 不复制文件、不另开 lib 子目录。
+    # ★ `LIFT_SAVES_DIR`（只给 e2e）：`saves/` 是**只读**复现素材 ⇒ 测试把需要的存档**复制**进
+    #   `.tmp/` 下的私有 `--appdata`（照 `.tmp/save05-bench/clean-appdata.sh`），⛔ 不就地写。
     add_executable(lift-plugin-runtime tests/plugin_runtime.cpp)
     target_link_libraries(lift-plugin-runtime PRIVATE emulator-lift-runtime)
     target_compile_definitions(lift-plugin-runtime PRIVATE
-        LIFT_PLUGIN_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/plugin_fixtures")
+        LIFT_PLUGIN_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/plugin_fixtures"
+        LIFT_PLUGIN_LIB_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins/lib")
     add_test(NAME plugin-runtime COMMAND lift-plugin-runtime)
 
     add_executable(lift-plugin-headless tests/plugin_e2e.cpp)
     target_link_libraries(lift-plugin-headless PRIVATE emulator-lift-runtime)
     add_dependencies(lift-plugin-headless emulator-lift-aot)
     target_compile_definitions(lift-plugin-headless PRIVATE
-        LIFT_PLUGIN_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/plugin_fixtures")
+        LIFT_PLUGIN_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/plugin_fixtures"
+        LIFT_PLUGIN_LIB_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins/lib"
+        LIFT_SAVES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../saves")
     add_test(NAME plugin-headless
         COMMAND lift-plugin-headless $<TARGET_FILE:emulator-lift-aot> "${AGE_SECTFIX_EXE}"
                 "${LIFT_STRESS_GAME_DIR}")

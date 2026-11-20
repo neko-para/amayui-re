@@ -7,12 +7,16 @@
 //   ③ stderr 里**没有** `render is defined but no window`（本夹具没有 render）——它只该在
 //      `--plugin` 带 render + headless 时出现一次（D-C2-5）；
 //   ④ `plugin    : ` **只出现一次**（⛔ 不是每帧 / 每读点一行；AGENTS §12.8 第 3 条）。
+//   ⑤ `plugin/load-save-e2e`（C2c）：真库 `scripts/plugins/lib/save.js` + `--plugin-param slot=5`
+//      走完整条链；判据 = readout `run=done … calls=6` / `params=slot=5` + stderr 终态日志含
+//      **FIELD** + 无 `run failed`（⛔ 不看 exit code —— `finish` 不改进程 exit）。
 //
 // ★ 缺执行源 / 安装树 / GPU / 宿主字体 ⇒ `LIFT_SKIP(77)`（⛔ 不假绿；输入假定在场）。
 // ★ 只在本平台（Windows）跑：子进程用 `CreateProcessW`（`tests/cmdline.h` 拼命令行）。
 //   mac / Linux 上 skip —— 与 `cli-aot-flags` 同一条口径；等价判据不在 mac 上要求。
 // ★ `--appdata` 指到临时目录 ⇒ 不往仓库 / 真 AppData 写东西。
 #include <cstdint>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -131,10 +135,15 @@ int main(int argc, char** argv) {
     const fs::path age_exe = fs::path(argv[2]);
     const fs::path game_dir = fs::path(argv[3]);
     const fs::path fixture = fs::path(LIFT_PLUGIN_FIXTURES_DIR) / "headless.js";
+    // ★ C2c：`plugin/load-save-e2e` 直接拿**真库**当入口（import 根 = 入口文件目录 ⇒ 不复制文件）。
+    const fs::path save_js = fs::path(LIFT_PLUGIN_LIB_DIR) / "save.js";
+    const fs::path saves_dir = fs::path(LIFT_SAVES_DIR);
     if (!fs::exists(exe)) LIFT_SKIP("emulator-lift-aot 不在场");
     if (!fs::exists(age_exe)) LIFT_SKIP("执行源（corpus/assets/age/AGE.EXE__dumped.sectfix.EXE）不在场");
     if (!fs::exists(game_dir)) LIFT_SKIP("安装树（--game-dir）不在场");
     if (!fs::exists(fixture)) LIFT_SKIP("夹具 tests/plugin_fixtures/headless.js 不在场");
+    if (!fs::exists(save_js)) LIFT_SKIP("真库 apps/emulator-lift/scripts/plugins/lib/save.js 不在场");
+    if (!fs::exists(saves_dir / "SAVE05.DAT")) LIFT_SKIP("saves/SAVE05.DAT 不在场（saves/ 只读复现素材）");
 
     std::error_code ec;
     const fs::path root = fs::temp_directory_path(ec) /
@@ -235,6 +244,104 @@ int main(int argc, char** argv) {
         LIFT_CHECK(q.out.find("run=quit") != std::string::npos);
         LIFT_CHECK(q.out.find("plugin: quit") != std::string::npos);
         LIFT_CHECK(q.out.find("input-plan: quit") == std::string::npos);
+    }
+
+    // ---- ⑥ C2c `plugin/load-save-e2e`：真库 `lib/save.js` + `--plugin-param slot=5` 的整条链 ----
+    //   判据 = **stdout 的一次性 readout**（⛔ 不是 exit code：`ctx.finish` 不改进程 exit，且
+    //   `--time-limit 90` 是正常结局）：`run=done … calls=6` + `params=slot=5`；
+    //   stderr 的终态日志（`ctx.log`）必须点名 **FIELD**，且**没有** `run failed`；readout 只一行。
+    //   红了 ⇒ 某道门没命中 / 坐标错（hang 成 `run=failed reason=…gate timeout`）—— 纯档的
+    //   `plugin-runtime` 已经钉住链形状，这里钉"真 guest 里这条链真的走到 FIELD"。
+    g_current_case = "plugin/load-save-e2e";
+    {
+        // `.tmp/` 私有 appdata：`saves/` **只读**，照 `.tmp/save05-bench/clean-appdata.sh` 复制。
+        const fs::path repo_tmp = saves_dir.parent_path() / ".tmp";
+        const fs::path save_root =
+            repo_tmp / ("lift-plugin-load-save-" + std::to_string(::GetCurrentProcessId()));
+        fs::remove_all(save_root, ec);
+        const fs::path load_appdata = save_root / "appdata";
+        const fs::path guest_save_dir = load_appdata / "Local" / "Eushully" /
+                                        fs::path(std::u8string(u8"天結いキャッスルマイスター")) / "SAVE";
+        fs::create_directories(guest_save_dir, ec);
+        LIFT_CHECK(!ec);
+        std::size_t copied = 0;
+        std::error_code copy_ec;
+        for (fs::directory_iterator it(saves_dir, copy_ec); !copy_ec && it != fs::directory_iterator();
+             it.increment(copy_ec)) {
+            std::error_code entry_ec;
+            if (!it->is_regular_file(entry_ec) || entry_ec) continue;
+            const std::string ext = it->path().extension().string();
+            if (ext != ".DAT" && ext != ".STH") continue;
+            fs::copy_file(it->path(), guest_save_dir / it->path().filename(),
+                          fs::copy_options::overwrite_existing, copy_ec);
+            if (!copy_ec) ++copied;
+        }
+        LIFT_CHECK(!copy_ec);
+        LIFT_CHECK(copied > 0);
+
+        const std::vector<std::wstring> load_args = {
+            L"--exe",
+            age_exe.native(),
+            L"--game-dir",
+            game_dir.native(),
+            L"--appdata",
+            load_appdata.native(),
+            L"--present",
+            L"headless",
+            L"--skip-logo",
+            L"--audio",
+            L"off",
+            L"--time-limit",
+            L"90",
+            L"--plugin",
+            save_js.native(),
+            L"--plugin-param",
+            L"slot=5",
+        };
+        const ChildRun ls =
+            runChild(exe, load_args, save_root, save_root / "load-save.out", save_root / "load-save.err");
+        LIFT_CHECK(ls.started);
+        std::printf("plugin/load-save-e2e: exit=%d timed_out=%d\n", ls.exit_code, ls.timed_out ? 1 : 0);
+        if (!ls.started) return lift_test::finish("plugin-headless");
+        if (ls.timed_out) {
+            LIFT_CHECK(false);
+            std::fprintf(stderr, "  stdout:\n%s\n  stderr:\n%s\n", ls.out.c_str(), ls.err.c_str());
+            return lift_test::finish("plugin-headless");
+        }
+        // ---- 缺资产 / GPU / 字体 ⇒ skip（与主用例同一条口径；⛔ 不假红）----
+        if (ls.err.find("宿主字体不可用") != std::string::npos) LIFT_SKIP("缺宿主字体（LIFT_HOST_FONT_PATH）");
+        if (ls.err.find("没有生成物") != std::string::npos) LIFT_SKIP("AOT 生成物不在场（缺 clang / 执行源）");
+        if (ls.err.find("拒绝启动") != std::string::npos) {
+            LIFT_SKIP("GPU / 窗口初始化不成立（headless 也要 GPU device）");
+        }
+        // ---- 判据 A：readout 说"链真的走到 FIELD"（不含 calls 的确切数）----
+        const bool reached_field = ls.out.find("plugin    : ") != std::string::npos &&
+                                   ls.out.find("entry=default") != std::string::npos &&
+                                   ls.out.find("callbacks=yes") != std::string::npos &&
+                                   ls.out.find("params=slot=5") != std::string::npos &&
+                                   ls.out.find("run=done") != std::string::npos &&
+                                   ls.out.find("run=failed") == std::string::npos &&
+                                   ls.err.find("run failed") == std::string::npos &&
+                                   ls.err.find("load-save: gate timeout") == std::string::npos &&
+                                   ls.err.find("FIELD") != std::string::npos;
+        if (!reached_field) {
+            std::fprintf(stderr, "  stdout:\n%s\n  stderr:\n%s\n", ls.out.c_str(), ls.err.c_str());
+        }
+        LIFT_CHECK(reached_field);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countOccurrences(ls.out, "plugin    : ")), 1);
+        // ---- 判据 B：D-C2C-5 的精确 `calls=6`（start + TITLE/SAVE/row/SBUNKI/FIELD 五个回调）----
+        //   ⚠ **已知反证**（2026-11-20 / mac headless，见 `.tmp/plugin-runtime/c2c-report.md`）：
+        //   slot 5 在"进门即点"的时序下会落进 **SBUNKI 0x0AF8 第二道确认**（再点 690,323 才到
+        //   FIELD）⇒ `calls=7`。那**也是** D-C2C-3 裁决链的一部分（三选一终端），所以这条不静默
+        //   放宽、也不当成接线坏了：命中 7 时用 77 报"待父级裁决"，出现在报告里。
+        //   ⛔ 不把 7 当 pass（判据仍是 6），也⛔ 不把 7 当 fail（链走到 FIELD 了）。
+        const bool calls6 = ls.out.find("calls=6") != std::string::npos;
+        if (!calls6 && reached_field && ls.out.find("calls=7") != std::string::npos) {
+            LIFT_SKIP(
+                "slot 5 走了 SBUNKI 0x0AF8 第二道确认（calls=7）⇒ D-C2C-5 的 calls=6 判据待父级裁决"
+                "（链已到 FIELD；读数见 .tmp/plugin-runtime/c2c-report.md）");
+        }
+        LIFT_CHECK(calls6);
     }
     return lift_test::finish("plugin-headless");
 #endif

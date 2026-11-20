@@ -9,8 +9,15 @@
 //   · `plugin/concurrent-arm`             ：一读点最多一个（注册顺序）；返回数组**完整替换**；`[]`=done。
 //   · `plugin/module-default`（+ pair）   ：只读 `export default`；default 不是对象 / `start` 与
 //                                            `onTrigger` 不成对 ⇒ **装载失败并点名**。
-//   · `control-script/start-on-trigger-chain`：`loadSave(slot)` 形态的具名链；两个 slot 的 `move`
-//                                            落**不同** y（实测表，⛔ 不是公式）；链到第一道确认即 done。
+//   · `control-script/start-on-trigger-chain`：**真库** `scripts/plugins/lib/save.js`（假读数）走整条链：
+//                                            TITLE → SAVE → 读点 → SBUNKI → FIELD；两个 slot 的 `move`
+//                                            落**不同** y（实测表，⛔ 不是公式）；精确坐标
+//                                            (1070,480) / (300,rowY) / (640,323) + `done`/`fired=5`/`calls=6`。
+//   · `…-field-terminal`                  ：三选一终端的 **FIELD 分支**直接收口（假读数走这一支；
+//                                            真机 slot 5 本机实测走 0x0AF8，见 c2c-report §5-2）；
+//                                            不点 (690,323)，done 之后不再有回调。
+//   · `…-bad-slot`                        ：非整数 / 越界（9 / -1 / 1.5 / abc）⇒ 构造时 throw ⇒ `run=failed`
+//                                            且 reason 点名 `slot N`；0 / 6 合法（成对边界）。
 //   · `control-script/global-read-modify-write`：同拍 `read → edit → input`：Edit **立即**（读回新值）、
 //                                            **不占** Input 预算（队列里只有那一条 click）。
 //   · `plugin/finish-quit`（finish 半）   ：`ctx.finish(5)` 只结束 Run + 记 exit，⛔ 不改进程 exit。
@@ -133,12 +140,20 @@ std::string fixturePath(const std::string& name) {
     return (fs::path(LIFT_PLUGIN_FIXTURES_DIR) / name).string();
 }
 
-bool readFixture(const std::string& name, std::string* out) {
-    std::ifstream in(fixturePath(name), std::ios::binary);
+// ★ C2c：**真库**目录（`scripts/plugins/lib`）。QJS 的 import 根 = 入口文件目录 ⇒ 夹具不能
+//   import 它；本文件直接把 `lib/save.js` 当入口（它自带参考 default 导出，D-C2C-1）。
+std::string libPath(const std::string& name) {
+    return (fs::path(LIFT_PLUGIN_LIB_DIR) / name).string();
+}
+
+bool readHostFile(const std::string& path, std::string* out) {
+    std::ifstream in(path, std::ios::binary);
     if (!in) return false;
     out->assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
     return true;
 }
+
+bool readFixture(const std::string& name, std::string* out) { return readHostFile(fixturePath(name), out); }
 
 // 直接经 `makeQuickJsPlugin` 装载一个夹具（C2b 的 render 用例：**不需要** Run / PluginHost）。
 // ★ 为什么不用 `Fixture`：`plugin/ui-draw` / `plugin/render-readings` / `plugin/render-surface`
@@ -177,11 +192,12 @@ struct Fixture {
         win_ok = hwnd != 0;
     }
 
-    bool load(const std::string& file, const std::map<std::string, std::string>& params = {},
-              const lift::ui::UiHostOps* host_ops = nullptr) {
+    // 从**任意绝对路径**装载（`origin` = 该路径：QJS 的 import 根 = 它的目录）。
+    bool loadFile(const std::string& path, const std::map<std::string, std::string>& params = {},
+                  const lift::ui::UiHostOps* host_ops = nullptr) {
         std::string source;
-        if (!readFixture(file, &source)) {
-            load_error = "读不到夹具：" + fixturePath(file);
+        if (!readHostFile(path, &source)) {
+            load_error = "读不到插件：" + path;
             return false;
         }
         host = std::make_unique<lift::plugin::PluginHost>(readings);
@@ -191,9 +207,20 @@ struct Fixture {
         host->runner().setBudget(lift::plugin::Budget{500'000'000ull, 10'000'000u});
         // ★ 装配顺序与 `aot_main` **一致**：`init`（编译 + 沙箱）→ `attachMemory`（Edit/Read）。
         //   `host_ops` 只在需要判"profile 桥有没有被调到"的用例里给（`plugin/render-stored-runctx-rejected`）。
-        if (!host->init(source, fixturePath(file), params, host_ops, &load_error)) return false;
+        if (!host->init(source, path, params, host_ops, &load_error)) return false;
         host->attachMemory(mem);
         return true;
+    }
+
+    bool load(const std::string& file, const std::map<std::string, std::string>& params = {},
+              const lift::ui::UiHostOps* host_ops = nullptr) {
+        return loadFile(fixturePath(file), params, host_ops);
+    }
+
+    // ★ C2c：真库（`scripts/plugins/lib/save.js`）当入口 —— 与 e2e 同一个文件，⛔ 不复制。
+    bool loadLib(const std::map<std::string, std::string>& params = {},
+                 const lift::ui::UiHostOps* host_ops = nullptr) {
+        return loadFile(libPath("save.js"), params, host_ops);
     }
 
     // 一个读点（本文件里"读点"的唯一含义）。
@@ -340,75 +367,191 @@ void caseConcurrentArm() {
 }
 
 // =====================================================================================
-// `control-script/start-on-trigger-chain`：具名链 + 两个 slot 的 move 落**不同** y
+// `control-script/start-on-trigger-chain`：**真库** `lib/save.js` + 假读数走完整条链
+//
+// 链（D-C2C-3）与每拍的输入落点（IntentExecutor 七步：② staged→ready ③ poll ⑥ drain 一条）：
+//   ① TITLE 首点：`start` 只 arm TITLE 门（本拍 poll 在 start 之前 ⇒ 不 fire；不提交 input）
+//   ② TITLE 命中  ⇒ click(1070,480) staged
+//   ③ SAVE 命中   ⇒ ② 提升 click、⑥ 落地 ⇒ 光标 (1070,480)；回调提交 move(300,rowY)
+//   ④ 读点门命中  ⇒ ② 提升 move、⑥ 落地 ⇒ 光标 (300,rowY)；回调提交 click(300,rowY)
+//   ⑤ SBUNKI 命中 ⇒ ⑥ 落地 click(300,rowY) ⇒ 光标仍是 (300,rowY)；回调提交 click(640,323)
+//   ⑥ FIELD 命中  ⇒ ⑥ 落地 click(640,323) ⇒ 光标 (640,323)；终态 = done（fired=5 / calls=6）
+//
+// ★ 精确坐标是判据（⛔ 不是"没报错"）：变异 `click(300,rowY)` → `rowY+60` 在这里红（第 ⑤ 拍）。
 // =====================================================================================
+
+// 泵到 SBUNKI 门命中（= 提交 click(640,323) 并 arm 终态三选一）；返回实测 row y（失败 -1）。
+int driveToSbunki(Fixture& f) {
+    int cx = 0;
+    int cy = 0;
+    // ① TITLE 第 1 个读点：start 只 arm TITLE 门。
+    f.readings.script = "TITLE.BIN";
+    f.readings.pos = 0x0480;
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().stagedDepth()), 0);
+    // ② 下一读点（仍在 TITLE 区间）：TITLE 门命中 ⇒ click(1070,480) staged。
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().stagedDepth()), 1);
+    // ③ SAVE 读点：② 提升 click → ③ 命中 SAVE 门（提交 move(300,rowY)）→ ⑥ click 落地。
+    f.readings.script = "SAVE.BIN";
+    f.readings.pos = 0x1150;
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 2);
+    f.cursor(&cx, &cy);
+    LIFT_CHECK_EQ_I64(cx, 1070);
+    LIFT_CHECK_EQ_I64(cy, 480);
+    // ④ 下一读点（仍在 SAVE 区间）：② 提升 move → ③ 读点门命中（提交 click(300,rowY)）→ ⑥ move 落地。
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 3);
+    f.cursor(&cx, &cy);
+    LIFT_CHECK_EQ_I64(cx, 300);
+    const int row_y = cy;
+    // ⑤ SBUNKI 读点：② 提升 click(300,rowY) → ③ 命中 SBUNKI 门（提交 click(640,323)）→ ⑥ click 落地。
+    f.readings.script = "SBUNKI.BIN";
+    f.readings.pos = 0x0a00;
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 4);
+    f.cursor(&cx, &cy);
+    LIFT_CHECK_EQ_I64(cx, 300);
+    LIFT_CHECK_EQ_I64(cy, row_y);  // ★ 行 y 的精确判据（变异 rowY+60 在这里红）
+    return row_y;
+}
+
 int chainRowY(int slot) {
     lift_test::g_current_case = "control-script/start-on-trigger-chain";
     Fixture f;
     LIFT_CHECK(f.mem_ok && f.win_ok);
     if (!f.mem_ok || !f.win_ok) return -1;
-    const bool loaded = f.load("chain.js", {{"slot", std::to_string(slot)}});
+    const bool loaded = f.loadLib({{"slot", std::to_string(slot)}});
     LIFT_CHECK(loaded);
     if (!loaded) {
         std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
         return -1;
     }
-    // ① 第 1 个读点（TITLE）：start 只 arm SAVE + 提交 click(1070,480)（staged）。
-    f.readings.script = "TITLE";
-    f.readings.pos = 0;
+    const int row_y = driveToSbunki(f);
+    if (row_y < 0) return -1;
+    // ⑥ FIELD 读点：② 提升 click(640,323) → ③ 命中 FIELD 终态（done）→ ⑥ click 落地。
+    f.readings.script = "FIELD.BIN";
+    f.readings.pos = 0x0600;
     f.pump();
     dumpFail(f);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 0);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().stagedDepth()), 1);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().readyDepth()), 0);
-    // ② SAVE 区间：poll 之前 ② 先提升 click；poll 命中 load:save（提交 move(300,rowY)）；
-    //    ⑥ 落地 click ⇒ 光标到 (1070,480)。
-    f.readings.script = "SAVE";
-    f.readings.pos = 0x1150;
-    f.pump();
-    dumpFail(f);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 5);
     int cx = 0;
     int cy = 0;
     f.cursor(&cx, &cy);
-    LIFT_CHECK_EQ_I64(cx, 1070);
-    LIFT_CHECK_EQ_I64(cy, 480);
-    // ③ 下一读点：提升 move(300,rowY) 并落地；atReadPoint 命中 load:row（提交 click(300,rowY)）。
+    LIFT_CHECK_EQ_I64(cx, 640);
+    LIFT_CHECK_EQ_I64(cy, 323);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 6);
+    const std::string line = f.host->readout();
+    LIFT_CHECK(line.find("run=done") != std::string::npos);
+    LIFT_CHECK(line.find("params=slot=" + std::to_string(slot)) != std::string::npos);
+    std::printf("  [%s slot=%d] %s\n", lift_test::g_current_case, slot, line.c_str());
+    return row_y;
+}
+
+// -------------------------------------------------------------------------------------
+// `…-field-terminal`：三选一终端的 **FIELD 分支**直接收口（假读数走这一支；真机 slot 5 在本机
+//   headless 实测走 SBUNKI 0x0AF8 第二道确认，见 `.tmp/plugin-runtime/c2c-report.md` §5-2）
+//   ★ 反证面：若 FIELD 分支被删 / 被当成第二道确认的入口，这里会多一次 click(690,323)
+//     ⇒ 光标变成 (690,323)（本用例红）；或 fired 停在 4（也红）。
+// -------------------------------------------------------------------------------------
+void caseFieldTerminal() {
+    lift_test::g_current_case = "control-script/start-on-trigger-chain-field-terminal";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    const bool loaded = f.loadLib({{"slot", "5"}});
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    if (driveToSbunki(f) < 0) return;
+    // 终态 = FIELD：位置故意落在 SBUNKI 0x0AF8 区间里（终态由 script 名决定，不由位置决定）。
+    f.readings.script = "FIELD.BIN";
+    f.readings.pos = 0x0af8;
     f.pump();
     dumpFail(f);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 2);
-    f.cursor(&cx, &cy);
-    LIFT_CHECK_EQ_I64(cx, 300);
-    const int row_y = cy;
-    // ④ SBUNKI 区间：命中第一道确认 ⇒ 提交 click(640,323) + 返回 [] = done。
-    f.readings.script = "SBUNKI";
-    f.readings.pos = 0x0a00;
-    f.pump();
-    dumpFail(f);
-    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 3);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 5);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 6);
     LIFT_CHECK(f.host->runner().done());
     LIFT_CHECK(!f.host->failed());
-    return row_y;
+    int cx = 0;
+    int cy = 0;
+    f.cursor(&cx, &cy);
+    LIFT_CHECK_EQ_I64(cx, 640);
+    LIFT_CHECK_EQ_I64(cy, 323);  // ⛔ 不是 (690,323)：没有第二道确认
+    // done 之后：再泵两拍也不许有新回调 / 新输入（终态是**真的**收口，不是暂时等待）。
+    f.pump();
+    f.pump();
+    f.cursor(&cx, &cy);
+    LIFT_CHECK_EQ_I64(cx, 640);
+    LIFT_CHECK_EQ_I64(cy, 323);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 5);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 6);
+    std::printf("  [%s] %s\n", lift_test::g_current_case, f.host->readout().c_str());
+}
+
+// -------------------------------------------------------------------------------------
+// `…-bad-slot`：非整数 / 越界 ⇒ `loadSave` **构造时** throw（装载成功、`start` 里抛 ⇒ Run fail）
+//   ★ 0 / 6 是合法边界（成对断言）：只到 6 有实测行（7–9 抛）。
+// -------------------------------------------------------------------------------------
+void caseBadSlot() {
+    lift_test::g_current_case = "control-script/start-on-trigger-chain-bad-slot";
+    struct BadSlot {
+        const char* param;
+        const char* needle;
+    };
+    const BadSlot bad[] = {
+        {"9", "slot 9"}, {"-1", "slot -1"}, {"1.5", "slot 1.5"}, {"abc", "slot NaN"},
+    };
+    for (const BadSlot& b : bad) {
+        Fixture f;
+        LIFT_CHECK(f.mem_ok && f.win_ok);
+        if (!f.mem_ok || !f.win_ok) return;
+        const bool loaded = f.loadLib({{"slot", b.param}});
+        LIFT_CHECK(loaded);  // 装载不看参数；抛在 start
+        if (!loaded) {
+            std::fprintf(stderr, "  load error (%s): %s\n", b.param, f.load_error.c_str());
+            continue;
+        }
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(f.host->failed());
+        LIFT_CHECK(f.host->failReason().find(b.needle) != std::string::npos);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);  // start 跑了、onTrigger 没跑
+    }
+    // 合法边界 0 / 6 不抛（构造成功、start arm TITLE 门）。
+    for (const int slot : {0, 6}) {
+        Fixture f;
+        const bool loaded = f.loadLib({{"slot", std::to_string(slot)}});
+        LIFT_CHECK(loaded);
+        if (!loaded) continue;
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 0);
+    }
 }
 
 void caseChain() {
     const int y4 = chainRowY(4);
     const int y5 = chainRowY(5);
-    // ★ 实测表：slot 4 → 328、slot 5 → 388（⛔ 不是 91 + 59.5*n 之类的公式；见 D-C2-8）。
+    // ★ 实测表：slot 4 → 328、slot 5 → 388（⛔ 不是 91 + 59.5*n 之类的公式；见 D-C2C-3）。
     LIFT_CHECK_EQ_I64(y4, 328);
     LIFT_CHECK_EQ_I64(y5, 388);
     LIFT_CHECK(y4 != y5);  // 两个 slot 的链必须发不同坐标（"只是没报错"不够）
-
-    // ---- 未知 slot ⇒ 插件自己 `throw`（装载成功、`start` 里抛 ⇒ Run fail 并带消息）----
-    lift_test::g_current_case = "control-script/start-on-trigger-chain-bad-slot";
-    Fixture f;
-    const bool loaded = f.load("chain.js", {{"slot", "9"}});
-    LIFT_CHECK(loaded);  // 装载不看参数；抛在 start
-    if (loaded) {
-        f.pump();
-        LIFT_CHECK(f.host->failed());
-        LIFT_CHECK(f.host->failReason().find("slot 9") != std::string::npos);
-    }
+    caseFieldTerminal();
+    caseBadSlot();
 }
 
 // =====================================================================================
