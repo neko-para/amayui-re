@@ -641,11 +641,11 @@ public:
   一读点最多触发一个；其余不自动保留（要保留就放进返回数组）；不需要优先级/owner 复杂度。
 - **一个插件可以同时有 `render` + `onTrigger`**；没有双上下文/权限二分；`ctx.ui` 是两者共享的
   宿主本地状态。
-- **合同 API**：`apps/emulator-lift/scripts/plugins/plugin.d.ts`（368 行；`RenderCtx`/`RunCtx`，不含 sample/screenshot）；
+- **合同 API**：`apps/emulator-lift/scripts/plugins/plugin.d.ts`（`RenderCtx`/`RunCtx`，不含 sample/screenshot）；
   下一轮“只给 d.ts 让另一个 agent 翻译旧 plan/global/HUD 用例”的输入，会被测试修订。
-- **HUD 生命周期示例**：`afterPosition("TITLE", lo, hi, once)` → `ctx.ui.show("hud", {mode:"title"})`；
-  `afterPosition("FIELD", lo2, hi2, reenter)` → `ctx.ui.set("hud", {mode:"field"})`；
-  **另一个正向位置** `afterPosition("OTHER", lo3, hi3, once)` → `ctx.ui.hide("hud")`；
+- **HUD 生命周期示例**：`afterPosition("TITLE.BIN", lo, hi, once)` → `ctx.ui.show("hud", {mode:"title"})`；
+  `afterPosition("FIELD.BIN", lo2, hi2, reenter)` → `ctx.ui.set("hud", {mode:"field"})`；
+  **另一个正向位置** `afterPosition("OTHER.BIN", lo3, hi3, once)` → `ctx.ui.hide("hud")`；
   `render` 每帧 `if (ctx.ui.visible("hud")) ctx.draw.text(...)`。
   `onTrigger` 从不调用 draw；`render` 从不改 guest。
 
@@ -713,14 +713,43 @@ struct Context {
 - **没有第二个 Input 施加点**：Input 的唯一路径是 `IntentQueue`；EditSink 是 Edit 类，不是 Input。
 - `ctx.log`：一行一条、有界/去重；⛔ 不每读点刷屏。
 - `ctx.profile`：HostAction（`profileBegin/End`）；在下一个汇点执行；不直接改 guest。
-- `ctx.done/fail`：只影响 runner/owner，不直接 quit；`ctx.finish` 只给 C3 parity driver
-  （不用于生产执行器）。
+- `ctx.fail/finish/quit`：只影响 runner/owner，不直接改 guest；`ctx.finish(code, reason)` 结束本 Run
+  （映射历史 exit 5；C2c 的 `loadSave` 门超时用它），`ctx.quit()` 请求宿主停机。
 
 ### 4.6 JS 单插件契约（render / start / onTrigger 可选）
 
-**入口**：`--plugin <file>`〔拟名〕（D1；`--ui` 是 overlay 别名），**一个**运行时/context；
+**入口**：`--plugin <file>`（D1；`--ui` 是 overlay 别名），**一个**运行时/context；
 可选 `render`、`start`、`onTrigger`：只有 `render` = UI-only；有 `start`/`onTrigger` = Run（可同时 UI）；
 没有 `render` 时可 headless；有 `render` 时需窗口。
+
+**窗口档的 `render` = adopt 进已有叠层 host**（C2b-2）：`--present window/auto` + 有 `render`
+⇒ `aot_main.cpp:1201-1235` 的 ⑤' 调 `SdlWindow::adoptOverlayScript`（`present_sdl.cpp:543-568`），
+复用**同一个**叠层 host 的 `presentUi` / 宿主字体 / 画布 / 命中表 / `--ui-input` 注入 router；
+每帧仍走同一条 `drawOverlay`（`present_sdl.cpp:596-691`）管线。⛔ 不新开第二套 UI 运行时 / 第二个 QJS context。
+`--plugin`（有 `render`）**不隐含** `--overlay`：headless 照样能跑（D-C2-5）；窗口档由 adopt 打开叠层。
+
+- `--overlay` / `--ui` 与插件 `render` 同时给 ⇒ **插件 render 取代 hud.js**（一次 stderr 说清，⛔ 不静默）。
+  结构上是"**先装后弃**"：`--overlay` 仍先由 `SdlWindow::init` 装载 hud.js（`present_sdl.cpp:988-999`），
+  插件装载（③'''）晚于窗口 init（⑤）⇒ 装载时还不知道 `hasRender()`；adopt 成功后再
+  `ui_script.reset()` / `ui_runtime.reset()`。因此该组合仍要求 hud.js / kit.js 在场。
+- adopt 失败（宿主字体缺失 / 窗口没建）⇒ **`exit 2`**（与 `--overlay` 的 R5 同口径；除字体可能已建好外不改叠层状态）：
+  `ensureOverlayFont` 缺字体 ⇒ nullptr，`adoptOverlayScript` 窗口没建 / 拒收自己 ⇒ false。
+- `game.mouse()` 形状 = `{x, y, buttons?}`，`buttons = {left, right, middle}`：**有生产读数源**才装 ——
+  `WindowManager::mouseButtons()`（`host_window.h:181-184`）= `InputDevice` 的三键 VK 电平
+  （`input_device.h:84-90`，唯一电平表）。没有源（headless / 没有 `WindowManager` 的测试 sink）⇒
+  **缺键**（⛔ 不是 `false`：脚本写 `mouse.buttons?.left ?? false`）。旧 `--overlay` / `--ui` 也拿到该键
+  （`scripts/ui/ui.d.ts` 的 `UiMouse.buttons?`）。
+
+**读数**（2026-11-20 / macOS arm64 / 手工 run；`.tmp/plugin-runtime/c2b2-review.md` §1.4）：
+
+```bash
+# 同一构建：窗口档 + 有 render 的插件夹具（夹具见 `tests/plugin_overlay.cpp` 与 `.tmp/plugin-runtime/`）
+./out/emulator-lift-aot … --present window --present-hidden --max-frames 1 \
+  --overlay --plugin <有 render 的夹具> --present-screenshot <bmp>
+# (0,0)=#3366CC（插件 fill，不是 hud 的 #0D131A）+ 恰 1 条"HUD 已被插件的 render 取代"
+# 去掉 --plugin ⇒ (0,0)=#0D131A、无取代语
+# headless + render ⇒ exit 0 + 一次 "render is defined but no window"、无 [overlay]
+```
 
 **模块契约**（ES module；specifier `@amayui/lift-plugin`）：
 
@@ -734,7 +763,7 @@ const plugin = {
     initialState: { flags: {} } as MyState,   // 宿主在 start 之前初始化 ctx.state
     render(ctx) { /* 可选：每帧 UI/状态回显 */ },
     start(ctx: RunCtx<MyState>) {
-        return ctx.trigger.afterPosition("TITLE", 0x0460, 0x0520,
+        return ctx.trigger.afterPosition("TITLE.BIN", 0x0460, 0x0520,
                                          { name: "load:title", timeoutMs: 180000 });
     },
     onTrigger(ctx: RunCtx<MyState>, ev: FiredEvent | TimeoutEvent) {
@@ -762,44 +791,85 @@ export default plugin;   // 宿主 QJS 读 default 导出；⛔ 不读 globalThi
   } satisfies PluginModule;
   export default plugin;
   ```
-- `loadSave(slot)` 返回 `{ start, onTrigger }`：`start` 发初始具名 trigger；`onTrigger` 按 `ev.name` 分派；
-  `ctx.state` 只放数据（不是 step 计数器）：
+- `loadSave(slot, options = {})`（`options.timeoutMs` 可选）返回 `{ start, onTrigger }`：`start` 发初始具名 trigger；`onTrigger` 按
+  `ev.name` 分派。它是**纯 JS 的回调链构造器**（真源 `scripts/plugins/lib/save.js`），⛔ 不是 `ctx.run`
+  （Run/dispatch 属 C5）、⛔ 没有新宿主 API；宿主每次回调新建实例 ⇒ ⛔ 不把进度塞进闭包 / `ctx.state`。
+- **`.BIN` 身份**：`PluginReadings.script` 是 marker **文件名**（`TITLE.BIN` / `SAVE.BIN` / `SBUNKI.BIN` /
+  `FIELD.BIN`）；C1 的 `afterScript` / `afterPosition` 是精确 `==`（`trigger_runner.cpp:70,82`），
+  ⛔ 不做 recipe 那层的"剥 `.BIN` + ASCII 大小写不敏感"（`recipe.cpp:141-153`）⇒ 链里的名字**必须带后缀**。
+- **链（slot 5 实测）**：`TITLE [0x0460,0x0520)` → `click(1070,480)` → `SAVE [0x1104,0x11C4)` →
+  `move(300,rowY)` → 读点 → `click(300,rowY)` → `SBUNKI [0x09F8,0x0B18)` → `click(640,323)` →
+  三选一终端 `[FIELD | SC0000 | SBUNKI 0x0AF8]`；`0x0AF8` ⇒ `click(690,323)` → `[FIELD | SC0000]` ⇒ done。
+  `rowY = {0:91,1:150,2:209,3:269,4:328,5:388,6:447}`（实测表；⛔ 不用公式外推 7–9）。
+- **失败面**（全部响亮）：slot 非整数 / 越界 ⇒ **构造时 throw**；未知 `ev.name` ⇒ `ctx.fail` + `[]`；
+  门超 `timeoutMs`（缺省 30000）⇒ `ctx.finish(5, "load-save: gate timeout (…)")` + `[]`（⛔ 不用 `ctx.quit`）。
+- **参考入口**：`save.js` 另有一条 `export default`（`start`/`onTrigger` 从 `ctx.params.slot` 构造），
+  只为 `--plugin <save.js> --plugin-param slot=5` 直接当插件跑；库消费者用**具名** `loadSave(slot)`。
 
 ```js
-// scripts/plugins/lib/save.js
-export function loadSave(slot) {
-  // 实测表（`docs/03-emulator/scripts/SAVE.md:112-124`；行距 ≈59.5，⛔ 不是 40）。
-  // 只收 0–6：7–9 未实测 ⇒ 抛错，⛔ 不用公式猜。
-  const rowY = ({ 0: 91, 1: 150, 2: 209, 3: 269, 4: 328, 5: 388, 6: 447 })[slot];
-  if (rowY === undefined) throw new Error(`slot ${slot} 没有实测行中心（只测了 0–6）`);
-  return {
-    start(ctx) {
-      ctx.input.click(1070, 480);
-      return ctx.trigger.afterPosition("SAVE", 0x1104, 0x11C4, { name: "load:save" });
-    },
-    onTrigger(ctx, ev) {
-      switch (ev.name) {
-        case "load:save":
-          ctx.input.move(300, rowY);
-          return ctx.trigger.atReadPoint("any", 1, { name: "load:row" });
-        case "load:row":
-          ctx.input.click(300, rowY);
-          return ctx.trigger.afterPosition("SBUNKI", 0x09F8, 0x0B18, { name: "load:sbunki" });
-        case "load:sbunki":
-          ctx.input.click(640, 323);
-          return ctx.trigger.afterPosition("SBUNKI", 0x0AF8, 0x0B18, { name: "load:confirm2" });
-        case "load:confirm2":
-          ctx.input.click(690, 323);
-          return ctx.trigger.afterScript("SC0000", { name: "load:sc0000" });
-        case "load:sc0000":
-          return [];                             // done（加载完成）
-        default:
-          ctx.fail(ev.name, `unknown name: ${ev.name}`); return [];
-      }
-    },
-  };
+// scripts/plugins/lib/save.js（节选；行表与区间是实测值）
+const SCRIPT_TITLE = "TITLE.BIN", SCRIPT_SAVE = "SAVE.BIN", SCRIPT_SBUNKI = "SBUNKI.BIN";
+const SCRIPT_FIELD = "FIELD.BIN", SCRIPT_SC0000 = "SC0000.BIN";
+const ROW_Y = { 0: 91, 1: 150, 2: 209, 3: 269, 4: 328, 5: 388, 6: 447 };
+export function loadSave(slot, options = {}) {
+    const rowY = ROW_Y[slot];
+    if (!Number.isInteger(slot) || rowY === undefined) throw new Error(`slot ${slot} …`);
+    const timeoutMs = options !== null && options.timeoutMs !== undefined ? options.timeoutMs : 30000;
+    const terminal = (ctx) => [
+        ctx.trigger.afterScript(SCRIPT_FIELD, { name: "load:field", timeoutMs }),
+        ctx.trigger.afterScript(SCRIPT_SC0000, { name: "load:sc0000", timeoutMs }),
+        ctx.trigger.afterPosition(SCRIPT_SBUNKI, 0x0AF8, 0x0B18, { name: "load:confirm2", timeoutMs }),
+    ];
+    return {
+        start(ctx) {
+            return ctx.trigger.afterPosition(SCRIPT_TITLE, 0x0460, 0x0520, { name: "load:title", timeoutMs });
+        },
+        onTrigger(ctx, ev) {
+            if (ev.kind === "timeout") { ctx.finish(5, `load-save: gate timeout (${ev.name})`); return []; }
+            switch (ev.name) {
+                case "load:title":
+                    ctx.input.click(1070, 480);
+                    return ctx.trigger.afterPosition(SCRIPT_SAVE, 0x1104, 0x11C4, { name: "load:save", timeoutMs });
+                case "load:save":
+                    ctx.input.move(300, rowY);
+                    return ctx.trigger.atReadPoint("any", 1, { name: "load:row", timeoutMs });
+                case "load:row":
+                    ctx.input.click(300, rowY);
+                    return ctx.trigger.afterPosition(SCRIPT_SBUNKI, 0x09F8, 0x0B18, { name: "load:sbunki", timeoutMs });
+                case "load:sbunki":
+                    ctx.input.click(640, 323);
+                    return terminal(ctx);
+                case "load:field": case "load:sc0000":
+                    return [];                              // done
+                case "load:confirm2":
+                    ctx.input.click(690, 323);
+                    return [ctx.trigger.afterScript(SCRIPT_FIELD, { name: "load:field-2", timeoutMs }),
+                            ctx.trigger.afterScript(SCRIPT_SC0000, { name: "load:sc0000-2", timeoutMs })];
+                case "load:field-2": case "load:sc0000-2":
+                    return [];                              // done（第二道确认之后）
+                default:
+                    ctx.fail(ev.name, `unknown state: ${ev.name}`); return [];
+            }
+        },
+    };
 }
 ```
+
+**读数**（2026-11-20 / macOS arm64 / 手工 headless；`.tmp/plugin-runtime/c2c-headless3.{out,err}`）：
+
+```bash
+cd apps/emulator-lift && ./out/emulator-lift-aot --exe ../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE \
+  --game-dir ../../links/install --appdata ../../.tmp/plugin-runtime/appdata-c2c \
+  --present headless --skip-logo --audio off --time-limit 90 \
+  --plugin scripts/plugins/lib/save.js --plugin-param slot=5
+# plugin    : … params=slot=5 calls=7 run=done
+# [plugin] load-save: start (slot 5) → TITLE hit → SAVE hit → row hovered → SBUNKI hit
+#          → SBUNKI 0x0AF8 ⇒ second confirm → reached FIELD.BIN (slot 5)
+# stop      : time-limit（正常结局）
+```
+
+`calls=6` 是另一条合法终态（`FIELD` / `SC0000` 直接命中，不再走第二道确认）；`calls=7` 是
+slot 5 "进门即点"落进 `0x0AF8` 的形态。⛔ 不把某个 `calls` 数当唯一合法值。
 
 - **loader**：读 ES module 的 **default 导出**（`PluginModule` 对象）；`render`/`start`/`onTrigger` 都可选，
   至少一个；有 `start` 就必须有 `onTrigger`，反之亦然；类型不是函数 ⇒ `exit 2` + `file:line`。
@@ -813,7 +883,11 @@ export function loadSave(slot) {
 - **按操作类**：`ctx.input.click/move/down/up` → IntentQueue（串行）；`ctx.edit.global.set` → EditSink（立即）；
   `ctx.read.*` → EngineRead（只读/无暂停）；`sample/screenshot` 不暴露（emu-ctl 组合）；
   ⛔ 没有 `input::*`/`writeGlobal`/`wm.*` 宿主函数（不是“插件只读”，而是操作类/唯一路径）。
-- **预算**：每次 callback deadline（建议 2 ms）+ op limit（建议 100k；D5）；超限 ⇒ fail + 摘 trigger。
+- **预算**：每次 callback deadline **2 ms** + op limit **100k**（`runtime/budget.h:19-21`，D5）；超限 ⇒
+  fail + 摘 trigger。★ 读数（2026-11-20 / macOS arm64 / 手工 headless **5 跑 2 次**）：`start` 与
+  `onTrigger`（`load:sbunki`）都会偶发超 2 ms —— `calls=1 run=failed reason=start: callback budget exceeded`
+  与 `calls=5 run=failed name=load:sbunki reason=onTrigger: callback budget exceeded: load:sbunki`。⇒ 严格判据的 e2e
+  （`plugin/load-save-e2e`）可能因此偶发红；跟踪单 `REQ-01M7VVDV69MJXRHNDGR50H7VHC`。⛔ 不把预算放宽当修法。
 - **owner**：模块实例 = owner；`done/fail`/卸载 ⇒ `releaseOwner`；不残留按住。
 - **trace**：`ctx.log` + runner `trigger:`/`intent:`；不要求 plan DSL 图元。
 
@@ -866,6 +940,12 @@ export function loadSave(slot) {
   一个插件可以**既 UI 又 Run**，也可以只做一种；同时可 Edit/Input/EngineRead。⛔ 没有 `--ui-control` 第二上下文。
 - **overlay 不再是“另一种插件”**：`--overlay/--ui` 只是“启用 render + 显示”的插件用法；
   它和 Run 共用同一个运行时、同一套 `ctx.edit/input/read/trigger/run`。
+- **窗口档 = adopt 进已有叠层 host**（C2b-2）：`--present window/auto` 且插件有 `render` ⇒ 由
+  `aot_main.cpp:1201-1235` 的 ⑤' 调 `SdlWindow::adoptOverlayScript`；复用同一份 `presentUi` / 宿主字体 /
+  画布 / 命中表 / `--ui-input` 注入 router，每帧仍走同一条 `drawOverlay`。⛔ 不新开第二个 QJS context。
+  `--overlay` 同时给时，hud.js 由 `SdlWindow::init` **先装**、adopt 成功后再 `ui_script.reset()` /
+  `ui_runtime.reset()` **后弃**（结构上仍需 hud.js / kit.js 在场）；一次 stderr 说明取代（⛔ 不静默）。
+  adopt 失败（字体缺失 / 窗口没建）⇒ `exit 2`（与 `--overlay` 的 R5 同口径）。
 - **control（WS/emu-ctl）不是 QJS 上下文**：它是 `ControlBus`/`RunControl` 的传输适配器；
   `emu-ctl run` 在**同一个插件运行时**装载/执行一个 Run（一个 active slot）。
 - **失败隔离**：一个插件实例的异常/超预算 ⇒ 停该插件的 Run/render + 一行 stderr；run 继续；
@@ -1036,34 +1116,45 @@ export function loadSave(slot) {
 
 **做什么**：
 
-- `--plugin <file>`〔拟名〕：**一个** QJS 运行时；ES default `PluginModule`；
+- `--plugin <file>`：**一个** QJS 运行时；ES default `PluginModule`；
   同步、预算、写只经队列；可 headless；旧 `--ui/--overlay` 用法不变。
 - `ctx` API：`afterPosition/afterDelay/atReadPoint`、`ctx.input.*`、`ctx.edit.global.set`、
   `ctx.read.*`、`log`、`profile.*`、`done/fail`；底层是 `ControlBus`（Run/dispatch 留给 C5）。
-- `loadSave(slot)` 返回链；`start/onTrigger` 用闭包接链；同场景 e2e（headless）：加载存档 →
-  global 读改写 → click → 下一个具名集合 → done。
+- `loadSave(slot)`：真源 `scripts/plugins/lib/save.js`（**纯 JS** 回调链构造器；`.BIN` marker 身份；
+  `rowY` 实测表；三选一终端），`start/onTrigger` 用闭包接链（⛔ 不是 `ctx.run`，C5）；链形状 / 失败面
+  见 §4.6。另有用例加载存档 → global 读改写 → click → 下一个具名集合 → done。
 - QJS 适配器：`src/plugin/plugin_host.cpp` 实现 `TriggerHandler`/`ControlHostOps`，只调
   `IntentQueue`/`EngineRead`/`const GuestMemory`；JS trampoline 在 `script_quickjs.cpp`；不 include
   `quickjs.h` 的第二个 TU。
 
 **判据**：
 
-- 〔拟名·新增〕`control-script/start-on-trigger-chain`：`loadSave(slot)` 返回链；两个 slot 的链
-  发射不同坐标；`onTrigger` 返回具名集合（含 `name`）；done/fail；重复 name fail。
-- 〔拟名·新增〕`control-script/global-read-modify-write`：同 C1 场景，QJS 版本；`ctx.read.global.get` 读、
+- **C2c 用例**（`ctest --test-dir out -N`）：`plugin-runtime` 的
+  `control-script/start-on-trigger-chain{,-field-terminal,-second-confirm,-bad-slot}`（真库 `lib/save.js`；
+  slot 4/5 的链发射不同坐标；`calls=6` / `calls=7` 两条合法终态；`bad-slot` 构造 throw；重复 name
+  由 `plugin/concurrent-arm-duplicate-name` 钉住），以及 `plugin-headless` 二进制内的
+  `plugin/load-save-e2e`（真库 + `--plugin-param slot=5`；判据 = `run=done` + `params=slot=5` +
+  `calls ∈ {6,7}` + 终态日志含 `FIELD` + 无 `run failed`；⛔ 不看 exit code）。该 e2e 只在 Windows 跑
+  （子进程 `CreateProcessW`；mac/Linux skip）—— 本机等价证据是 §4.6 的手工 headless（`calls=7` / `FIELD`）。
+- **C2b-2 用例**：`plugin-overlay`（顶层 pure；adopt / 插件 display list 上屏 / 三键电平跟随
+  `WindowManager` / 叠层不写 guest / release 恢复 guest 画面）；`aot-overlay` 的子用例
+  `plugin-render-window`（`--plugin` 有 render + 窗口档 ⇒ 插件被 adopt，`(0,0)` = 插件填充色）。
+  读数（2026-11-20 / macOS arm64）：`ctest --test-dir out -R '^plugin-overlay$' -V` ⇒
+  `plugin-overlay: 30 checks, 0 failures`。
+- `control-script/global-read-modify-write`：同 C1 场景，QJS 版本；`ctx.read.global.get` 读、
   `ctx.edit.global.set` **立即**写；fire 读点写计数 = 1（Edit 不排队），Input 另计。
-- 〔拟名·新增〕`plugin/headless`：`--present headless` + `--plugin`（无 render）可跑；无窗口/Present。
-- 〔拟名·新增〕`plugin/api-surface`：同一个 `ctx` 有 `render`/`start`/`onTrigger`/`edit`/`input`/`read`/`ui`；
+- `plugin/headless`：`--present headless` + `--plugin`（无 render）可跑；无窗口/Present。
+- `plugin/api-surface`：同一个 `ctx` 有 `render`/`start`/`onTrigger`/`edit`/`input`/`read`/`ui`；
   ⛔ 没有第二套 `--ui-control` 上下文；Edit 立即、Input 队列。
-- 〔拟名·新增〕`plugin/initial-state`：`initialState` 在 `start` 前注入；无 initialState ⇒ `{}`；
+- `plugin/initial-state`：`initialState` 在 `start` 前注入；无 initialState ⇒ `{}`；
   `start` 首次读有值；两 Run 不共享。
-- 〔拟名·新增〕`plugin/ui-state`：`onTrigger` 只 `ctx.ui.show/hide`；**下一次 `render`** 才可见；
+- `plugin/ui-state`：`onTrigger` 只 `ctx.ui.show/hide`；**下一次 `render`** 才可见；
   `onTrigger` 不调用 draw；headless 下状态保留到下一次 render/卸载。
-- 〔拟名·新增〕`plugin/ui-draw`：`render` 用 `ctx.draw.rect/text/measure` 发 display list；
+- `plugin/ui-draw`：`render` 用 `ctx.draw.rect/text/measure` 发 display list；
   `RenderCtx.ui` 可写 hover 状态；`RunCtx` 没有 draw。
-- 〔拟名·新增〕`plugin/concurrent-arm`：一次 arm `hud:show`/`hud:hide`/`edit:flag`；
+- `plugin/concurrent-arm`：一次 arm `hud:show`/`hud:hide`/`edit:flag`；
   一读点最多触发一个（注册顺序），`ev.name` 分派；其余不自动保留（要保留放返回数组）。
-- 〔拟名·新增〕`plugin/finish-quit`：`ctx.finish(5, reason)` 结束 Run/记录 exit；`ctx.quit()` 请求宿主停机。
+- `plugin/finish-quit`：`ctx.finish(5, reason)` 结束 Run/记录 exit；`ctx.quit()` 请求宿主停机。
 - `lift-control-endpoint` / `input-plan-read-points` 不回归。
 
 **行为**：新增 opt-in；不打开 flag 时逐字节不变；headless 可跑。
@@ -1352,25 +1443,31 @@ callback 链的可读性（进 `ctx.log`/设计文档）。
 
 | 主题 | 文件:行 |
 |---|---|
-| `--input-plan` 帮助/载入 | `apps/emulator-lift/src/aot/aot_main.cpp:101-146`、`729-738` |
+| `--input-plan` 帮助/载入 | `apps/emulator-lift/src/aot/aot_main.cpp:105-146`、`420-421`、`843-848` |
 | 控制层 9 op / hello / serve | `apps/emulator-lift/src/runtime/control_ws.cpp:488-491`、`877-886`、`1192-1519` |
-| 启动 `caps=`（现状 6） | `apps/emulator-lift/src/aot/aot_main.cpp:1144` |
+| 启动 `caps=`（现状 6） | `apps/emulator-lift/src/aot/aot_main.cpp:1326-1331` |
 | 旧 plan VM（C3 前端） | `apps/emulator-lift/src/runtime/input_plan.cpp:186-217`、`781-810`；`input_plan.h:233-283`、`430-458` |
 | 旧 recipe | `apps/emulator-lift/src/runtime/recipe.h:41-55`、`70-81`；`recipe.cpp:318-503` |
 | click 两段/闸门 | `apps/emulator-lift/src/runtime/input_plan.h:249-283`、`392-417` |
 | 四个投递入口 | `apps/emulator-lift/src/runtime/input.h:80-114` |
 | 块边界 / Present 闸门 | `apps/emulator-lift/src/aot/aot_run.cpp:595-609`；`apps/emulator-lift/src/aot/aot_host.cpp:1184-1198` |
 | 快照 / global | `apps/emulator-lift/src/runtime/control_snapshot.h:39-66`；`script_globals.h:86-90` |
-| QJS 宿主 API / loader | `apps/emulator-lift/src/ui/script_quickjs.cpp:892-981`、`1141-1175`、`1416-1429` |
-| QJS overlay / Present | `apps/emulator-lift/src/runtime/present_sdl.cpp:521-609`、`1247-1255` |
-| QJS 预算/interrupt | `apps/emulator-lift/src/ui/script_quickjs.cpp:103-104`、`195-208`、`1323-1335` |
+| QJS 宿主 API / loader | `apps/emulator-lift/src/ui/script_quickjs.cpp:886-1063`、`1223-1287`、`1412-1459` |
+| QJS 叠层 / Present | `apps/emulator-lift/src/runtime/present_sdl.cpp:596-691`、`1240-1250` |
+| 插件 render adopt / release / 字体（C2b-2） | `apps/emulator-lift/src/runtime/present_sdl.h:208-221`；`present_sdl.cpp:528-582` |
+| 窗口档 ⑤' 装配（adopt / `exit 2` / 取代语） | `apps/emulator-lift/src/aot/aot_main.cpp:1201-1235` |
+| `game.mouse().buttons` 装配 / 三键唯一源 | `apps/emulator-lift/src/ui/script_quickjs.cpp:652-690`、`:3227`；`apps/emulator-lift/src/plugin/plugin_host.cpp:104-108`；`apps/emulator-lift/src/runtime/present_sdl.cpp:612-625`、`host_window.h:181-184`、`input_device.h:84-90` |
+| QJS 预算/interrupt | `apps/emulator-lift/src/ui/script_quickjs.cpp:107-113`、`197-201`、`253-265`、`1392-1395` |
+| C2c `loadSave` 真库 / 参考入口 | `apps/emulator-lift/scripts/plugins/lib/save.js:40-44`、`:80-164`、`:177-186` |
+| `.BIN` 精确相等（C1） vs recipe 剥后缀 | `apps/emulator-lift/src/runtime/trigger_runner.cpp:70,82`、`recipe.cpp:141-153` |
 | 帧列表 | `apps/emulator-lift/src/runtime/engine_frames.cpp:81` |
 | emu-ctl 命令表 | `tools/lib/emu-ctl.mjs:785-810`；`tools/emu-ctl.mjs:1-20` |
 
 **已核 CTest 名**（`ctest --test-dir out -N`）：
 `cli-aot-flags`、`lift-control-endpoint`、`lift-control-snapshot`、`lift-control-globals`、
 `input-plan-read-points`、`input-injection`、`overlay`、`aot-overlay`、`ui-script-quickjs`、
-`ui-frames`、`ui-script-modules`、`ui-hud-script`、`ui-kit-script`。
+`ui-frames`、`ui-script-modules`、`ui-hud-script`、`ui-kit-script`、`plugin-runtime`、
+`plugin-headless`、`plugin-overlay`。
 〔拟名·新增〕在 §5 标出，当前不存在。
 
 ### 8.2 文档
@@ -1379,7 +1476,7 @@ callback 链的可读性（进 `ctx.log`/设计文档）。
 - `docs/03-emulator/control-plane.md:60-136`（协议/边界/未做）、`:147-204`（global）
 - `docs/03-emulator/interaction-model.md:15-56`（顺序模型）、`:90-103`（确定性）、`:120-130`（缺什么）
 - `docs/03-emulator/input-device.md:219-239`（四驱动者）、`:265-291`（推进时机）
-- `docs/03-emulator/overlay.md:54-70`（D7/D10）、`:124-160`（API）、`:230-275`（M2a/M3）、`:284-318`（测试/风险）
+- `docs/03-emulator/overlay.md:54-70`（D7/D10）、`:124-162`（API）、`:233-279`（M2a/M3）、`:287-323`（测试/风险）
 - `docs/03-emulator/overlay-quickjs.md:45-112`（沙箱/预算/错误）、`:130-153`（load/Promise）
 - `docs/03-emulator/README.md:35-51`（什么进 test 的三问）
 - `apps/emulator-lift/scripts/recipes/README.md:14-28`（repro 锚/逐字不许改）

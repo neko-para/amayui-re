@@ -482,6 +482,9 @@
 - **现象**（2026-11-15 用户实测）：`emulator-lift-aot` 跑到 TITLE 后点 **OPTION** ⇒
   `stop : decode-error @ eip=0041B92D（非正常结局） — EA 0041B92D 既不在派发表里（closure 缺这一行？）也不是 shim 桩 EA ⇒ 响亮停（查找 1 次比较；表 33496 项）`。
   走同样路径到 TITLE 是正常的，**只有点到这一支才撞上**。
+  ★ **口径注**（`8b015f6`）：缺省档的 `decode-error` 现在打"比较数未记（缺省档；开 `--profile` 复现）"
+  （`apps/emulator-lift/src/aot/aot_run.cpp:963-975`）—— 只有开 `--profile` 才报 `查找 N 次比较`。
+  ⇒ 上面这行历史引用（含"查找 1 次比较"）在缺省档**不可复现**；缺陷史不改写。
 - **已证事实**（可复算）：
   1. `0x41B92D` 是菜单命令 switch 的 **case 14**：
      ```

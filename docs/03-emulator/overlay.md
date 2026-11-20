@@ -132,11 +132,14 @@ when: { script: ["SC00*", "TITLE"] }                 // 多个候选 = 或
 | `probe` | `read_u32(ea)`、`read_bytes(ea,n)` | **只读**、有上界、越界即错；必须显式 `--ui-probe`，启动打一行警告 |
 
 ★ **M2a 已落地的子集**（2026-11-18；**2026-11-19 切片 3** 追加 `host.profileBegin/End` 与帧列表
-`pos`）：`game` = `frame` / `fps` / `mouse{x,y}` / `script` / `worst{wall_ms, guest_ms?, shim_ms}`
-（不可用 ⇒ `undefined`，⛔ 不编 0）；`ui` = `rect` / `text` / `measure`（绝对参考像素；未知键
-**暂时忽略**，M1 的校验表之后接）；`host` = `profileBegin` / `profileEnd`（**只在 render 内可调用**；
-领域失败走返回值、⛔ 不抛 —— 抛错会让叠层被一枪永久关掉）。`insns` / `guest_ms` / `script_id` /
-`metrics()`、`probe`、`show/hide/toggle/log`、`local/global` 未接（M3）。
+`pos`；**C2b-2** 追加 `mouse.buttons?`）：`game` = `frame` / `fps` / `mouse{x,y,buttons?}` / `script` /
+`worst{wall_ms, guest_ms?, shim_ms}`（不可用 ⇒ `undefined`，⛔ 不编 0）；`ui` = `rect` / `text` /
+`measure`（绝对参考像素；未知键 **暂时忽略**，M1 的校验表之后接）；`host` = `profileBegin` /
+`profileEnd`（**只在 render 内可调用**；领域失败走返回值、⛔ 不抛 —— 抛错会让叠层被一枪永久关掉）。
+`insns` / `guest_ms` / `script_id` / `metrics()`、`probe`、`show/hide/toggle/log`、`local/global` 未接（M3）。
+★ `mouse.buttons = {left, right, middle}` 是**可选键**：窗口装配有 `WindowManager` 时来自
+`InputDevice` 的唯一三键电平（`WindowManager::mouseButtons()`）；没有源（headless / 测试 sink）⇒
+**缺键**（⛔ 不是 `false`）。`--overlay` / `--ui` 与 `--plugin` 的 `render` 拿到同一形状（`ui.d.ts`）。
 ★ **位置读数没有 `game.pos` / `game.pos_ok`**（目标 API 旧文里的那两个名字）：这一版只有
 `game.local_frames()[i].pos`，且**只有 top 帧**有（见下）。⛔ 不要据此以为 `game.pos` 可用。
 ★ `host` 的目标 API 里 **`reload()` / `time_budget_ms()` 仍未实现**（切片 3 不做；没有这个成员，
@@ -231,12 +234,12 @@ win32 取。
 
 ★ **M2a 已落地（2026-11-18；M2a 本切片只做 QuickJS 宿主 + HUD 迁脚本；命中 / 捕获 / 点击路由在切片 2 落地，见下）**：
 `--overlay` 的 HUD 由**外置** `scripts/ui/hud.js` 经 QuickJS 同步产出；`--ui <path>` 打开任意脚本
-（显式优先、隐含 overlay）；`game` 注入 `frame / fps / mouse / script / worst` + 按需方法
+（显式优先、隐含 overlay）；`game` 注入 `frame / fps / mouse{x,y,buttons?} / script / worst` + 按需方法
 `local_frames()`（帧区 40 槽的只读视图，top-first，`top = slot == cur`；证据
 `.tmp/ui-qjs/frames-research.md`；HUD 的 `script` 行取 `top=true` 的项（没有 top 就回退 `game.script`））；`raster` / `present` 两行**已删**；底 `#101820CC`（80% 不透明，
 renderer 路径 `SDL_BLENDMODE_BLEND`，直出也混合（D 单，`SDL_DrawGPUPrimitives`；win32 未验证））；旧 `OverlayState` / `OverlayStatus` /
 `formatOverlayLines` / 5×7 点阵 / `buildHud` / `presentHud` 已删。M1 的布局 / when / 校验表、
-M3 的数据面仍未做。
+M3 的数据面仍未做。`mouse.buttons` 的源与缺键口径见 §3.5（窗口装配有 `WindowManager` 才有）。
 
 ★ **M2a 之后已落地的切片**（2026-11-19）：切片 2 = 命中 / 捕获 / `game.click|hover|active` +
 外置组件库 `kit.js`（`ui.rect({key})` 的 resolved rect 是命中区）；切片 3 = `host.profileBegin/End`
@@ -312,7 +315,7 @@ router 的"down 放 ⇒ up 放"改掉 ⇒ `ui_hit` 红 · 采样门少一个 EA 
 | R2 | 热重载失败策略与"错误必须停"的张力 | 启动期错误致命；运行期 / 热重载 = 卸载**新**实例、旧实例继续，并打 `FAIL`；`--ui-strict` 一刀切致命 |
 | R3 | 吞点击改变 guest 输入 ⇒ 配方可复现性 | 默认档不带 UI；**`--ui-input=pass` 已实现**（注入 click 逐位与没有 UI 相同）；摘要 `ui_consumed=N`（仅非 0 时出现）；控制层回执的 `consumed_by_ui` 仍待做；文档写死 |
 | R4 | AOT 每块新增 2 次比较 + 两个 EA 的采样 | 只在有插件时开；静态指令预算复核；读数进 `observations.md` |
-| R5 | 字体依赖（`LIFT_HOST_FONT_PATH` 不在 ⇒ 启动硬错） | `--ui-glyphs bitmap` 显式测试档；生产默认仍是字体，⛔ 不静默降级 |
+| R5 | 字体依赖（`LIFT_HOST_FONT_PATH` 不在 ⇒ 启动硬错；C2b-2 起也覆盖插件 `render` 的 adopt） | `--ui-glyphs bitmap` 显式测试档；生产默认仍是字体，⛔ 不静默降级；adopt 失败（字体缺失 / 窗口没建）⇒ `exit 2` |
 | R6 | "guest 客户区 == 帧尺寸"是既有假设；`--scale` 车道最终形状未知 | 先按相等验收；不等 / 变了记 observations，⛔ 不猜；`--scale` 只在 `letterboxFor` 之上接 |
 | R7 | 插件绕过 API 改 guest | API 无写入口 + 形态守卫（`src/ui/**` 不出现 guest 写 API）+ 逐位断言 |
 | R8 | QuickJS 内存 / 沙箱 / GC 与引用计数 / 静态链体积 / TS 产物（`.js` 与 `.d.ts` 漂移） | 见 `overlay-quickjs.md` §2、§5；体积是**估**，⛔ 不进判据；`.d.ts` 漂移守卫**未做**（M2a 只有声明文件） |
