@@ -121,11 +121,13 @@ export interface TriggerOptions {
     maxFires?: number;       // 属于对象、跨 arm 累计；耗尽后再返回同一对象=fail；新对象才新预算
 }
 
-/** 只比当前脚本名（电平门；无区间）；等价旧 `await script NAME`。 */
+/** 只比当前脚本名（电平门；无区间）；等价旧 `await script NAME`。
+ *  ★ `script` 的值 = **marker 文件名**（例 `TITLE.BIN`，含后缀；⛔ 不是裸名 `TITLE`）。
+ *    C1 的匹配是**精确相等**（大小写/.BIN 都不归一化；`await script` 那层才剥 `.BIN`）。 */
 export interface AfterScriptTrigger {
     readonly name: string;   // 状态名
     readonly kind: "afterScript";
-    readonly script: string;
+    readonly script: string;  // marker 文件名（例 `TITLE.BIN`）
     readonly mode: TriggerMode;
     readonly timeoutMs?: number;
     readonly maxFires?: number;
@@ -133,7 +135,7 @@ export interface AfterScriptTrigger {
 export interface AfterPositionTrigger {
     readonly name: string;
     readonly kind: "afterPosition";
-    readonly script: string;
+    readonly script: string;  // marker 文件名（例 `SBUNKI.BIN`；精确相等）
     readonly lo: number;
     readonly hi: number;
     readonly mode: TriggerMode;
@@ -163,6 +165,7 @@ export interface DelayOptions {
     maxFires?: number;
 }
 export interface TriggerEventBase {
+    /** ★ **marker 文件名**（例 `TITLE.BIN`，含后缀；⛔ 不是裸名）。`loadSave` 的链用 `.BIN`。 */
     readonly script?: string;
     readonly pos?: number;
     readonly posValid?: boolean;
@@ -323,6 +326,7 @@ export interface RenderCtx {
  *   `posValid` / `readIndex` / `point` 恒有（`posValid=false` 表示"位置暂时读不到"，不要当成 0）。
  */
 export interface RunNow {
+    /** ★ **marker 文件名**（例 `TITLE.BIN`，含后缀；⛔ 不是裸名）。 */
     readonly script?: string;
     readonly pos?: number;
     readonly posValid: boolean;

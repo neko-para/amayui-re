@@ -8,8 +8,8 @@
 //      `--plugin` 带 render + headless 时出现一次（D-C2-5）；
 //   ④ `plugin    : ` **只出现一次**（⛔ 不是每帧 / 每读点一行；AGENTS §12.8 第 3 条）。
 //   ⑤ `plugin/load-save-e2e`（C2c）：真库 `scripts/plugins/lib/save.js` + `--plugin-param slot=5`
-//      走完整条链；判据 = readout `run=done … calls=6` / `params=slot=5` + stderr 终态日志含
-//      **FIELD** + 无 `run failed`（⛔ 不看 exit code —— `finish` 不改进程 exit）。
+//      走完整条链；判据 = readout `run=done` / `params=slot=5` / `calls ∈ {6,7}`（D2c-2：第二道
+//      确认也是合法终态）+ stderr 终态日志含 **FIELD** + 无 `run failed`（⛔ 不看 exit code）。
 //
 // ★ 缺执行源 / 安装树 / GPU / 宿主字体 ⇒ `LIFT_SKIP(77)`（⛔ 不假绿；输入假定在场）。
 // ★ 只在本平台（Windows）跑：子进程用 `CreateProcessW`（`tests/cmdline.h` 拼命令行）。
@@ -248,7 +248,7 @@ int main(int argc, char** argv) {
 
     // ---- ⑥ C2c `plugin/load-save-e2e`：真库 `lib/save.js` + `--plugin-param slot=5` 的整条链 ----
     //   判据 = **stdout 的一次性 readout**（⛔ 不是 exit code：`ctx.finish` 不改进程 exit，且
-    //   `--time-limit 90` 是正常结局）：`run=done … calls=6` + `params=slot=5`；
+    //   `--time-limit 90` 是正常结局）：`run=done` + `params=slot=5` + `calls ∈ {6,7}`；
     //   stderr 的终态日志（`ctx.log`）必须点名 **FIELD**，且**没有** `run failed`；readout 只一行。
     //   红了 ⇒ 某道门没命中 / 坐标错（hang 成 `run=failed reason=…gate timeout`）—— 纯档的
     //   `plugin-runtime` 已经钉住链形状，这里钉"真 guest 里这条链真的走到 FIELD"。
@@ -329,19 +329,17 @@ int main(int argc, char** argv) {
         }
         LIFT_CHECK(reached_field);
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countOccurrences(ls.out, "plugin    : ")), 1);
-        // ---- 判据 B：D-C2C-5 的精确 `calls=6`（start + TITLE/SAVE/row/SBUNKI/FIELD 五个回调）----
-        //   ⚠ **已知反证**（2026-11-20 / mac headless，见 `.tmp/plugin-runtime/c2c-report.md`）：
-        //   slot 5 在"进门即点"的时序下会落进 **SBUNKI 0x0AF8 第二道确认**（再点 690,323 才到
-        //   FIELD）⇒ `calls=7`。那**也是** D-C2C-3 裁决链的一部分（三选一终端），所以这条不静默
-        //   放宽、也不当成接线坏了：命中 7 时用 77 报"待父级裁决"，出现在报告里。
-        //   ⛔ 不把 7 当 pass（判据仍是 6），也⛔ 不把 7 当 fail（链走到 FIELD 了）。
+        // ---- 判据 B：`calls ∈ {6,7}`（D2c-2）----
+        //   6 = start + TITLE/SAVE/row/SBUNKI/FIELD（点完 640,323 直接 FIELD）；
+        //   7 = 上面那条 + **SBUNKI 0x0AF8 第二道确认**（再点 690,323 才到 FIELD；mac headless 实测）。
+        //   第二道确认**也是** D-C2C-3 三选一终端的一部分 ⇒ 两条都是合法终态。⛔ 不是"任意 calls"：
+        //   只接受这两个数；8+/更少 ⇒ 红。
         const bool calls6 = ls.out.find("calls=6") != std::string::npos;
-        if (!calls6 && reached_field && ls.out.find("calls=7") != std::string::npos) {
-            LIFT_SKIP(
-                "slot 5 走了 SBUNKI 0x0AF8 第二道确认（calls=7）⇒ D-C2C-5 的 calls=6 判据待父级裁决"
-                "（链已到 FIELD；读数见 .tmp/plugin-runtime/c2c-report.md）");
+        const bool calls7 = ls.out.find("calls=7") != std::string::npos;
+        if (!(calls6 || calls7)) {
+            std::fprintf(stderr, "  stdout:\n%s\n  stderr:\n%s\n", ls.out.c_str(), ls.err.c_str());
         }
-        LIFT_CHECK(calls6);
+        LIFT_CHECK(calls6 || calls7);
     }
     return lift_test::finish("plugin-headless");
 #endif

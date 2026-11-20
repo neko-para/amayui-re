@@ -16,6 +16,8 @@
 //   · `…-field-terminal`                  ：三选一终端的 **FIELD 分支**直接收口（假读数走这一支；
 //                                            真机 slot 5 本机实测走 0x0AF8，见 c2c-report §5-2）；
 //                                            不点 (690,323)，done 之后不再有回调。
+//   · `…-second-confirm`                  ：三选一终端的 **SBUNKI 0x0AF8 分支**：真的点落 (690,323)
+//                                            再 FIELD ⇒ done（`fired=6` / `calls=7`）；与 6 那条并存。
 //   · `…-bad-slot`                        ：非整数 / 越界（9 / -1 / 1.5 / abc）⇒ 构造时 throw ⇒ `run=failed`
 //                                            且 reason 点名 `slot N`；0 / 6 合法（成对边界）。
 //   · `control-script/global-read-modify-write`：同拍 `read → edit → input`：Edit **立即**（读回新值）、
@@ -502,6 +504,55 @@ void caseFieldTerminal() {
 }
 
 // -------------------------------------------------------------------------------------
+// `…-second-confirm`：三选一终端的 **SBUNKI 0x0AF8 分支**（2026-11-20 mac headless 实测 slot 5
+//   走的就是这条：进门即点 → guest 进 0x0AF8 → 再点 690,323 才到 FIELD）
+//   ★ 判据：0x0AF8 命中 ⇒ 真的**提交并落地** click(690,323)（光标变 (690,323)），再 FIELD ⇒ done；
+//     `fired=6` / `calls=7`。与 `…-field-terminal` 的 6 那条**并存**（两条都是 D-C2C-3 的合法终态）。
+// -------------------------------------------------------------------------------------
+void caseSecondConfirm() {
+    lift_test::g_current_case = "control-script/start-on-trigger-chain-second-confirm";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    const bool loaded = f.loadLib({{"slot", "5"}});
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    if (driveToSbunki(f) < 0) return;
+    int cx = 0;
+    int cy = 0;
+    // ⑤' SBUNKI 0x0AF8：② 提升并落地 click(640,323) → ③ 命中第二道确认（提交 click(690,323)）。
+    f.readings.script = "SBUNKI.BIN";
+    f.readings.pos = 0x0af8;
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 5);
+    f.cursor(&cx, &cy);
+    LIFT_CHECK_EQ_I64(cx, 640);
+    LIFT_CHECK_EQ_I64(cy, 323);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().stagedDepth()), 1);  // click(690,323) 已排队
+    // ⑥' FIELD：② 提升并落地 click(690,323) → ③ 命中 FIELD-2 ⇒ done。
+    f.readings.script = "FIELD.BIN";
+    f.readings.pos = 0x0600;
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 6);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 7);
+    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK(!f.host->failed());
+    f.cursor(&cx, &cy);
+    LIFT_CHECK_EQ_I64(cx, 690);  // ★ 690 那一步**真的发生了**（不是只 arm 不点）
+    LIFT_CHECK_EQ_I64(cy, 323);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().depth()), 0);
+    const std::string line = f.host->readout();
+    LIFT_CHECK(line.find("run=done") != std::string::npos);
+    LIFT_CHECK(line.find("calls=7") != std::string::npos);
+    std::printf("  [%s] %s\n", lift_test::g_current_case, line.c_str());
+}
+
+// -------------------------------------------------------------------------------------
 // `…-bad-slot`：非整数 / 越界 ⇒ `loadSave` **构造时** throw（装载成功、`start` 里抛 ⇒ Run fail）
 //   ★ 0 / 6 是合法边界（成对断言）：只到 6 有实测行（7–9 抛）。
 // -------------------------------------------------------------------------------------
@@ -551,6 +602,7 @@ void caseChain() {
     LIFT_CHECK_EQ_I64(y5, 388);
     LIFT_CHECK(y4 != y5);  // 两个 slot 的链必须发不同坐标（"只是没报错"不够）
     caseFieldTerminal();
+    caseSecondConfirm();
     caseBadSlot();
 }
 
