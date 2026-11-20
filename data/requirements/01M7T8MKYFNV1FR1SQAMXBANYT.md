@@ -2,10 +2,11 @@
 
 - id: REQ-01M7T8MKYFNV1FR1SQAMXBANYT
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M7JHSFB2SSBBNSJ82YDED8M1
 - repro: apps/emulator-lift/tests/native_override.cpp#g_current_case
 - severity: S2
+- done_reason: 三处根因在 HEAD 都已是修好的形态：tests/native_override.cpp:3280 用存活到循环末的 const std::string case_name；tests/ddraw.cpp:745 两枚举各自 static_cast 到 uint32_t；tests/insn_cost.cpp:70 加 #ifndef _CRT_SECURE_NO_WARNINGS（这三个文件最后一次改动都是 de1c23a，均在 main）。判据的 win32 全量 build/ctest 读数需在 win32 会话复核；若再红则重开。
 - tags: [emulator-lift, tests, build]
 
 ## 现象

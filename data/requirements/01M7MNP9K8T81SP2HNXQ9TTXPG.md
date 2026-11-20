@@ -2,7 +2,8 @@
 
 - id: REQ-01M7MNP9K8T81SP2HNXQ9TTXPG
 - type: decision
-- status: open
+- status: done
+- done_reason: ADR 本身即交付物：裁决（渲染目标 = 真 GPU 渲染，caps 报 0 只是当前能力）与依据（PS=0 时转场每帧 20.4e9 条 / caps=0xFFFF0300 后第一帧调 D3DXCreateEffectFromResourceA）已在正文定稿；其“实现后按真实能力报 caps”的后果已由 P4（REQ-01M7MXHYR1M72JW77J136GT3ZG，done）落地。
 - tags: [emulator-lift, d3d9, gpu, dx9]
 
 ## 裁决

@@ -2,8 +2,10 @@
 
 - id: REQ-01M7CZQZ5RR0WV8CQE2ZEKJHHQ
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M7JHSEKXW8KAKB6K2RS645M7
+- verify: apps/emulator-lift/tests/aot_quit_exit.cpp#aot-quit/exit-zero
+- done_reason: 12 个子单全部收口；判据“一次都不交回解释器”由发货档读数的 misses=0 兑现（tests/aot_quit_exit.cpp:213 断言），“与 Machine 夹具逐位一致”由 tests/lift_ir_proto.cpp 的两臂逐位差分（8 GPR + flags + 数据窗）覆盖。注：该 CTest 注册在 LIFT_STRESS 档（CMakeLists.txt:1249/1289）。
 - tags: [lift, aot]
 
 ## 范围

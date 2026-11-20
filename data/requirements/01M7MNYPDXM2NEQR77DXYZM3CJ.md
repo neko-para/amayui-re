@@ -2,7 +2,8 @@
 
 - id: REQ-01M7MNYPDXM2NEQR77DXYZM3CJ
 - type: decision
-- status: open
+- status: done
+- done_reason: ADR 已定稿：shader/FX 走构建期预转写（有限固定集合），不做运行时通用翻译器；未收录字节码必须响亮停（已由 d3dx9_effect 的 Unrecorded 路径兑现），caps 的 shader 版本号在该批 shader 真能跑之后按实测能力报（P4 已落地）。
 - tags: [emulator-lift, d3d9, shader, aot]
 
 ## 裁决

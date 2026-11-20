@@ -2,8 +2,9 @@
 
 - id: REQ-01M7MNPNW0F999WZYD6ZPBD7TE
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M7MNPGETP2CQJ3ACMCGEHKF5
+- done_reason: S0 四条判据的产出已落 docs/03-emulator/d3dx-effect.md（4 份 RT_RCDATA 的大小/sha256/内容/目标、d3dx9-effect/resources-pinned、ID3DXEffect 的 9 槽调用面、后端“整批拒绝”位清单）与制品契约 docs/03-emulator/caps.md；本单不含实现（实现归 P1/P2/P3/A/B，均已 done）。
 - tags: [emulator-lift, d3d9, spike]
 
 ## 一句话

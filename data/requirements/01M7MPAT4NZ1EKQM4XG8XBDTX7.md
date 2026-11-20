@@ -2,8 +2,10 @@
 
 - id: REQ-01M7MPAT4NZ1EKQM4XG8XBDTX7
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M7JHSD5MWTB9N8WJC2Y2T69M
+- verify: apps/emulator-lift/tests/d3dx9_effect.cpp#d3dx9-effect/caps-programs-guard
+- done_reason: 判据 2 由 P4（REQ-01M7MXHYR1M72JW77J136GT3ZG，done）以更强形态兑现：caps 固定按实现能力报，effectCapsGuard 在 GetDeviceCaps 路径上判 required==implemented，缺一个即启动 Trap（src/shims/d3d9.cpp:415 / d3dx9_effect.cpp:572）；判据 1 的 warn 行所要暴露的前提（caps 报 0 ⇒ 引擎静默改走软件路）已被 P4 结构性消除（src/runtime/d3d9.cpp:549-551）。
 - tags: [emulator-lift, d3d9, caps, guard]
 
 ## 一句话
