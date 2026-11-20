@@ -21,10 +21,12 @@
 //     由 `agercResolveExport` 交给**运行期 unimplemented thunk**：地址非 0（真机 loader 也这么说），
 //     真被调用时由 dispatcher **响亮失败**并打印是哪一条 —— ⛔ 不把未重定位的真实代码地址交给 guest。
 // ★ 为什么不能"给 RVA 就能跑"（本单的硬证据）：AGERC 的 ImageBase `0x10000000` 被 guest 的**堆**
-//   占着（`GuestLayout::heap_base`），所以它总被换基址到 `0x30000000`；而 `image.cpp` 明说
+//   占着（`GuestLayout::heap_base`），所以它总被换到 `GuestLayout::agerc_fallback_base` 上
+//   （唯一真源 = `src/runtime/image.h`；⛔ 这里不抄它的数值）；而 `image.cpp` 明说
 //   「固定 imageBase ⇒ 不做重定位」。`_SetNameLenMax@20` 的真实体里有一条**绝对**引用
 //   （`0x100367F9 mov dword ptr [0x100A9000], ecx`），它在 `.reloc` 里是 HIGHLOW（RVA `0x367FB`）
-//   ⇒ 直接在 `0x30000000` 跑它会把值写进**堆**（`0x100A9000` ∈ 堆区间）而不是 `0x300A9000`。
+//   ⇒ 直接在 fallback base 上跑它会把值写进**堆**（`0x100A9000` ∈ 堆区间）而不是换基址后的
+//   `fallback base + 0xA9000`。
 // ★ 它们分到唯一 guest 地址（shim 桩页；见 ShimRegistry::bind 的 extras 段 / addRuntime 的后续槽），
 //   所以 guest 的 `call eax`（GetProcAddress 的返回值）与 `call [IAT]` 走同一条 dispatcher 路径。
 // ★ ⛔ 不是"静默 no-op"：每个 thunk 都打一行 `[shim] agerc!...` 日志（SCOPE §3 第 3 条）。
@@ -215,8 +217,8 @@ bool exportsOrWarn(const PeImage& img, std::vector<ExportEntry>* out, std::strin
 // 运行期 unimplemented thunk 的理由串：真被调用时 dispatcher 会把它打出来。
 constexpr const char* kUnimplementedExportReason =
     "AGERC 的真实导出：有地址（真机 loader 也这么说），但本模拟器没有实现它 —— 镜像被换基址"
-    "（0x10000000→0x30000000，堆占了 ImageBase）而 `.reloc` 未应用，直接把真实代码地址交出去"
-    "会静默写坏堆（见 src/shims/kernel32_agerc.cpp 文件头）";
+    "（ImageBase 0x10000000 被堆占着 ⇒ 换到 GuestLayout::agerc_fallback_base），而 `.reloc` 未应用，"
+    "直接把真实代码地址交出去会静默写坏堆（见 src/shims/kernel32_agerc.cpp 文件头）";
 
 // ---- 本文件登记的 4 个实现 ----
 void shimAgercGetInstance(X86& cpu, ShimCall& call) {

@@ -92,6 +92,29 @@ struct GuestLayout {
     std::uint32_t stack_guard = 0x00001000u;  // 栈底再往下 1 页 guard（**不提交**）
     std::uint32_t heap_base = 0x10000000u;
     std::uint32_t heap_size = 0x08000000u;
+    // ---- surface arena（纹理像素 / 后缓冲 / 深度；**独立**的 `GuestHeap`，不并进主堆）----
+    // ★ 容量是**自定模型**，不是真机上限：真机 D3D9 能同时驻留多少像素由驱动 / 显存（以及
+    //   `D3DPOOL_MANAGED` 的换出策略）决定，**不可知**。书面依据 = `docs/03-emulator/external-docs.md`
+    //   的偏离 #10 与 `docs/03-emulator/design-notes.md` 的 L3-arena-01（"只够一份屏工作集"的
+    //   上限风险）。本值由 SAVE07 的战斗场景兑现：TITLE/FIELD 工作集已到 119,343,064 B，进战斗
+    //   还要一张 2048×2048 页（含块头 16,777,224 B）⇒ 下限 136,120,288 B（129.81 MiB），
+    //   128 MiB 差 1,902,560 B 装不下（`stop : resource-exhausted @ eip=0047839D`）。
+    // ★ **仍是上限、不是保证**：256 MiB 只保证"一份屏工作集 + 这场战斗的装载"放得下；更大的工作集
+    //   （更多常驻图集 / 更长的场景链）仍会耗尽。而且 128 MiB 时代它同时是"漏回收"的意外探测器
+    //   （BUG-01 就是这么抓到的）—— 抬容量把那个探测器变钝了 ⇒ 换屏 `in_use` 不增长的守卫不能省。
+    // ★ 基址**不动**（`0x28000000`）：`GuestHeap` 的 first-fit 从偏移 0 起扫 ⇒ 今天所有已存在的
+    //   arena 分配地址一位都不变，只有"原来装不下的"才落进新增的高段。
+    // ⛔ 不要把它与 AGERC 的 fallback base 搞成同一个数：两者必须**不相交**（见下一条）。
+    std::uint32_t arena_base = 0x28000000u;
+    std::uint32_t arena_size = 0x10000000u;  // 256 MiB ⇒ 上界 0x38000000
+    // ---- AGERC.DLL 的 fallback base（PE 头里的 ImageBase 冲突时用它）----
+    // ★ 必须在 arena **之外**：arena 现在到 `0x38000000`，所以选 `0x40000000`（留 128 MiB 余量，
+    //   也给 AGERC 的 `SizeOfImage`（实测 ≈0x1AC000）足够空间）。⛔ 不要挪回 `0x30000000`：那会落进
+    //   arena ⇒ `loadAgercModule` 的 `fits()` 会拒 ⇒ **启动即响亮报错**（不是静默降级）。
+    // ★ 这是**宿主常量**：真机 loader 尊重 PE 头里的 ImageBase，我们把冲突的那一份换掉了 ⇒
+    //   只有"ImageBase 冲突时"的这条备选地址是自定的。两份消费者（`Machine::loadAgercModule` /
+    //   `AotHost::loadAgercModule`）都引用本字段；关系不变量由 CTest `region-layout` 钉住。
+    std::uint32_t agerc_fallback_base = 0x40000000u;
     std::uint32_t teb_ea = 0x7FFD0000u;
     std::uint32_t peb_ea = 0x7FFD1000u;
     std::uint32_t tls_array_ea = 0x7FFD2000u;  // TEB+0x2C 指向它（64 个槽）

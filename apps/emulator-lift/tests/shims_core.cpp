@@ -77,7 +77,11 @@ constexpr std::uint32_t kMemRelease = 0x00008000u;
 constexpr std::uint32_t kPageReadWrite = 0x04u;
 
 // 纯档堆：1 MiB（⛔ 本夹具不测 > 1 MiB 的分配）
-constexpr std::uint32_t kHeapBegin = 0x30000000u;
+// ★ 落点必须落在 `GuestLayout` **没占**的空隙里：`Machine::initBare` 已按布局把 surface arena
+//   （`arena_base` 起 `arena_size`）整段提交，主堆区间也在布局里 ⇒ 取"主堆末尾"= 第一个空闲缺口的
+//   下界（`0x18000000` 起 128 MiB，直到 VirtualAlloc 窗口）。⛔ 不要写 `0x30000000`：
+//   那是 128 MiB 时代的 arena 上界，抬容量后它已被 arena 整段提交 ⇒ 夹具会与纹理像素**双重记账**。
+constexpr std::uint32_t kHeapBegin = lift::GuestLayout{}.heap_base + lift::GuestLayout{}.heap_size;
 constexpr std::uint32_t kHeapSize = 0x00100000u;
 
 // 纯档 Fixture 没有 PE ⇒ 自己铺 guest 堆（生产路径 `GuestHeap::init`，⛔ 不手搭块表）

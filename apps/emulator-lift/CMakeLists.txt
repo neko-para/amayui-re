@@ -1637,6 +1637,15 @@ target_link_libraries(lift-agerc-module PRIVATE emulator-lift-runtime)
 add_test(NAME agerc-module COMMAND lift-agerc-module)
 set_tests_properties(agerc-module PROPERTIES SKIP_RETURN_CODE 77)
 
+# ---- pure：guest 区域布局的**关系**不变量（`runtime/image.h` 的 `GuestLayout` 是唯一真源）----
+# 判据见 `tests/region_layout.cpp` 头注释：① 所有命名区间两两不相交；② AGERC 的 fallback base
+# 不在任何区间里（尤其不在 arena 内）且 ≥ arena 上界；③ 区间不倒扣 / 不越出 4 GiB。
+# ★ 只钉关系、⛔ 不钉"容量够用 / 地址等于多少"（那是读数）。★ 只算结构体里的数 ⇒ 资产 / GPU 都不需要
+# ⇒ 顶层无条件注册 = pure 档。★ 会红的那种改法：抬 arena 不搬 AGERC fallback base（或把它改回 arena 里）。
+add_executable(lift-region-layout tests/region_layout.cpp)
+target_link_libraries(lift-region-layout PRIVATE emulator-lift-runtime)
+add_test(NAME region-layout COMMAND lift-region-layout)
+
 add_executable(lift-mnemonics tests/mnemonics.cpp)
 target_link_libraries(lift-mnemonics PRIVATE emulator-lift-runtime)
 add_test(NAME mnemonics COMMAND lift-mnemonics)
@@ -2845,6 +2854,22 @@ if(LIFT_BUILD_TESTS)
     add_test(NAME plugin-overlay COMMAND lift-plugin-overlay)
     set_tests_properties(plugin-overlay PROPERTIES
         ENVIRONMENT "SDL_VIDEODRIVER=dummy" SKIP_RETURN_CODE 77)
+endif()
+
+# =====================================================================================
+# pure：SurfaceArena 的**回收 + 空闲块合并**（`runtime/image.h` 抬容量时点名的那条守卫）
+# 判据见 `tests/arena_recycle.cpp` 头注释：
+#   ① 一批不同尺寸 create → 逐张 release 之后 `bytesInUse()` 回到基线、`surfaceCount() == 0`；
+#   ② 全部释放之后再要**一张比任何单张都大**的 surface 必须成功（区域只留小余量 ⇒ 不合并必失败）；
+#   ③ 它的 `largestFreeBlock()` 回到"刚 init 时"的同一个读数（相对判据）。
+# ★ 只碰宿主 `GuestMemory` + arena 的簿记（不读资产 / 不起 Machine / 不建窗口）⇒ 纯档；
+#   ⛔ 不断言具体字节数 / 容量 / 地址。★ 会红的那种改法：`SurfaceArena::destroy` 漏 `heap_.free`
+#   （①红）或 `GuestHeap::free` 漏 `coalesce`（②③红 —— ① 抓不到它，`in_use` 照样回 0）。
+# ⛔ 这条不进 `tools/mutate-check.mjs`：清单条目由父级统一加。
+if(LIFT_BUILD_TESTS)
+add_executable(lift-arena-recycle tests/arena_recycle.cpp)
+target_link_libraries(lift-arena-recycle PRIVATE emulator-lift-runtime)
+add_test(NAME arena-recycle COMMAND lift-arena-recycle)
 endif()
 
 # =====================================================================================

@@ -36,7 +36,11 @@ constexpr std::uint32_t kCodeEa = 0x00401000u;  // 7 个 op 变体，每个占 0
 constexpr std::uint32_t kBufEa = 0x00480000u;   // 数据缓冲（64 KiB，全部已提交）
 constexpr std::uint32_t kBufSize = 0x10000u;
 constexpr std::uint32_t kSentinelEa = 0xFFFFFFFFu;
-constexpr std::uint32_t kUncommittedEa = 0x30000000u;  // 4 GiB 预留里**没提交**的一段
+// ★ "4 GiB 预留里**没提交**的一段"：取 arena 的**上界**（`GuestLayout` 是布局唯一真源）。
+//   ⛔ 不要写 `0x30000000` —— 那是 128 MiB 时代的 arena 上界；容量抬到 256 MiB 后它**已被 arena 整段提交**
+//   （`SurfaceArena::init` ⇒ `GuestHeap::init` 一次 commit），"未提交"这个前提当场失效（本用例因此红过）。
+//   取 arena 上界还保证 `kUncommittedEa - 0x1000` 仍落在已提交的 arena 里（"未提交页在跨度中间"那条用例）。
+constexpr std::uint32_t kUncommittedEa = lift::GuestLayout{}.arena_base + lift::GuestLayout{}.arena_size;
 
 // ---- op 变体（两臂放的是**同一份字节**）----
 struct OpVariant {

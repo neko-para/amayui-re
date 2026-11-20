@@ -430,7 +430,10 @@ void caseCreateSurface() {
     LIFT_CHECK_EQ_I64(w, 64);
     LIFT_CHECK_EQ_I64(h, 48);
     LIFT_CHECK_EQ_U32(bpp, 32u);
-    LIFT_CHECK(ptr >= 0x28000000u && ptr < 0x30000000u);  // SurfaceArena 区间
+    // ★ 判据跟着**模型常量**走（`GuestLayout::arena_base/arena_size`，唯一真源在 `runtime/image.h`）：
+    //   ⛔ 这里不抄字面量 —— 容量 / 基址是自定模型，会随工作集调整；要断言的是"像素在 arena 里"这条关系。
+    const lift::GuestLayout& layout = f.m.layout();
+    LIFT_CHECK(ptr >= layout.arena_base && ptr < layout.arena_base + layout.arena_size);  // SurfaceArena 区间
     LIFT_CHECK_EQ_U32(f.unlock(surf, ptr), 0u);
 }
 

@@ -21,11 +21,13 @@
 - **为什么必须保序**：有序索引命中的仍是"偏移最小的那一块"，与扫整张块表**结果相同**（`heap.cpp:90`）；`pending_merge_` 让块表"与旧实现**逐字相同**"（`heap.h:81`）。⇒ "优化前后 `in_use` 能一个个对上"是**设计要求**，不是巧合。
 - **重写必须保持不变**：① 一个 guest 堆（free 跨 API 不能炸）；② **分配地址逐位一致**；③ 非法/重复 free **响亮失败**（`heap.cpp:116-121` 打印 + `abort()`）；④ `largestFreeBlock()` 必须能把"总量满"与"碎片化"分开（BUG-01 的判别靠它）。
 
-### L3-arena-01 · surface arena 128 MiB 的来历与上限风险
-- **取舍**：D3D9 纹理 / 后缓冲 / 深度放**独立的** `GuestHeap` = `0x28000000..0x30000000`（`machine.cpp:107`；`:1418` 注明不与主堆共享）。起点同时是 `cpu_.shim.va_limit`（`machine.cpp:263`），终点是 guest 基址 fallback（`kFallbackBase`，`machine.cpp:165`）。
-- **备选**：① 与主堆共用；② 更大（如 256 MiB）；③ 动态扩。**没选** ①：**"纹理没回收"在主堆那行完全看不见**（`apps/emulator-lift/README.md` §4.5），分开才定得出 BUG-01。**没选** ②：会**改 AGERC 的 base**（实测启动行 `AGERC 的 ImageBase 0x10000000 冲突 ⇒ 改用 0x30000000`）⇒ **guest 可见 EA 一起变**，所有锚一起漂。**没选** ③：打破"区间固定 ⇒ 可复现"。
-- **上限风险（已知未解）**：128 MiB 只够"**一份**屏工作集 + 余量"（一份 TITLE 装载 = 26 张纹理 / 累计 125.3 MB / 峰值活跃 ≈56 MB，`.tmp/task2-report.md` §2-§4）⇒ 任何"新增一张常驻大纹理"都可能把 `largest-free` 压到请求量以下，而报错文本与"总量满"长得一样。
-- **重写必须保持不变**：① arena 独立、区间固定且**不越过 `0x30000000`**；② 摘要必须同时给 `in_use`/`peak`/`largest-free`；③ 失败要报 `w×h / D3DFORMAT / 请求字节 / 最大空闲块`。
+### L3-arena-01 · surface arena 的容量是**自定模型**（256 MiB）与剩余上限风险
+- **取舍**：D3D9 纹理 / 后缓冲 / 深度放**独立的** `GuestHeap` = `GuestLayout::arena_base` 起 `GuestLayout::arena_size`（唯一真源 `src/runtime/image.h`；两臂 `runtime/machine.cpp` 与 `aot/aot_host.cpp` 都引用它，⛔ 不再各写一个字面量）。起点同时是 `cpu_.shim.va_limit`（VirtualAlloc bump 区的上界贴着 arena 基址，两臂同一条口径）。
+- **容量为什么是 256 MiB（2026-11-20 改）**：真机的上限由驱动 / 显存决定（`external-docs.md` 偏离 #10 自己就这么写）⇒ 只能按"这个 EXE 用得到"给固定区。`saves/SAVE07.DAT`（第二个地图、即将战斗）→「结束回合」→「決定」把 128 MiB 顶穿了：进战斗前 `in_use=119,343,064 B / 340 surfaces`，还要一张 2048×2048 页（含块头 16,777,224 B）⇒ **下限 136,120,288 B（129.81 MiB）**，128 MiB 差 1,902,560 B ⇒ `stop : resource-exhausted @ eip=0047839D`（6/6 稳定）。抬到 256 MiB 后同一配方 4 跑（verify-01/03/04/05，含逐帧窗口截图与 guest 后缓冲 dump）：`region : arena in_use=92,662,952 peak=141,169,728 surfaces=110`（peak = **134.63 MiB**，余量 **121.37 MiB**），`stop` 变成 `stopped @ eip=00412383（正常结局）— input-plan: quit`，战斗界面出现在第 250 帧（`--present-screenshot` / `--dump-frame` 存图）。
+- **备选**：① 与主堆共用；② **不抬容量**（在 shim 里补释放 / 把请求改小 / 降精度）；③ 动态扩。**没选** ①：**"纹理没回收"在主堆那行完全看不见** ⇒ BUG-01 定不出来。**没选** ②：像素块的生命周期由 guest 的 `Release` 决定（`ComRegistry` 的 `on_zero` 是唯一收敛点），在 shim 里补释放 = 越界回收别人还在用的像素（真机不会发生）；把请求改小 / 降精度 = 改 guest 可见语义。**没选** ③：打破"区间固定 ⇒ 可复现"。
+- **代价（必须一起改的那一处）**：arena 新上界 `0x38000000` 吃掉了旧的 AGERC fallback base `0x30000000` ⇒ fallback 搬到 `GuestLayout::agerc_fallback_base = 0x40000000`（与上界留 128 MiB 余量）。⛔ 只抬容量不搬 base = `loadAgercModule` 的 `fits()` 拒 = **启动即响亮报错**（看起来像"扩容把启动搞坏了"）。守卫 = CTest `region-layout`（`tests/region_layout.cpp`，pure / 顶层无条件注册）：所有命名区间两两不相交 + fallback base 不在任何区间里且 ≥ arena 上界。
+- **剩余风险（仍是上限、不是保证）**：① 更大的工作集（更多常驻图集 / 更长的场景链）仍会耗尽 —— 256 MiB 只覆盖"一份屏工作集 + 这一场战斗的装载"，不是"以后都不会再耗尽"；② 128 MiB 时代 arena 同时是"漏回收"的**意外探测器**（BUG-01 就是这么抓到的：退回 TITLE 后 126.7 MB / 最大空闲 5.8 MB）—— 抬到 256 MiB 后一次 16 MB/屏的泄漏要更多屏才炸 ⇒ **今天能红的东西变静默**，对冲 = 换屏 `in_use` 不增长 / 回基线的守卫（`tests/option_roundtrip.cpp`、`tests/d3d9.cpp` 的 `texture-bound-then-guest-release`）不能省。
+- **重写必须保持不变**：① arena 独立、区间固定（基址 / 大小只从 `GuestLayout` 读，⛔ 不许在 cpp 里另写字面量）；② arena 与 AGERC 的 fallback base **不相交**；③ 摘要必须同时给 `in_use`/`peak`/`largest-free`；④ 失败要报 `w×h / D3DFORMAT / 请求字节 / 最大空闲块`。
 
 ### L3-token-01 · 单令牌 → **shim 边界令牌**：为什么"整次 fill 持令牌"不可接受
 - **取舍**：`GuestToken`（`src/runtime/guest_token.h`）= 任一时刻最多一个宿主线程持有；**互斥点在每次 shim 调用**（`ShimRegistry::invoke`），feeder 的**整次 fill 不持**令牌 —— guest 指令执行可并行，只有 guest 可见容器（`GuestHeap`/`HandleTable`/`Vfs`/`ComRegistry`/`SurfaceArena`/内存账本）必须在令牌里访问；阻塞前先 `Yield`（⛔ 持令牌等宿主锁）。

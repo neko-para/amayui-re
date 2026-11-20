@@ -374,7 +374,9 @@ bool Machine::init(std::string* err) {
         return false;
     }
     mem_.setSafeMode(GuestMemory::safeModeFromEnv());
-    if (!surfaces_.init(&mem_, 0x28000000u, 0x08000000u)) {
+    // ★ arena 的基址 / 大小只从 `GuestLayout` 读（`image.h` 是布局常量的唯一真源；⛔ 不要在这里
+    //   再写一份字面量 —— 否则 AOT 臂与解释器臂迟早分叉）。
+    if (!surfaces_.init(&mem_, layout_.arena_base, layout_.arena_size)) {
         if (err) *err = std::string("surface arena 初始化失败：") + surfaces_.lastError();
         return false;
     }
@@ -433,10 +435,12 @@ bool Machine::loadAgercModule(const std::string& path, std::string* err) {
     }
 
     // ---- 选一个不与现有 guest 布局冲突的 base ----
-    // ★ 优先用 PE 头里的 ImageBase（真机 loader 也尽量尊重它）；冲突 ⇒ 用 0x30000000。
+    // ★ 优先用 PE 头里的 ImageBase（真机 loader 也尽量尊重它）；冲突 ⇒ 用 `GuestLayout::agerc_fallback_base`。
     //   冲突表 = 主镜像 / 堆 / 栈（含 guard）/ TEB·PEB·TLS / 命令行块 / 桩页 / VirtualAlloc 区间
-    //   + **已经提交或登记过的所有区域**（bare 夹具的 placeCode、上一份 AGERC 等）。
-    constexpr std::uint32_t kFallbackBase = 0x30000000u;
+    //   / **surface arena** + **已经提交或登记过的所有区域**（bare 夹具的 placeCode、上一份 AGERC 等）。
+    //   ★ arena 必须显式在表里：它在 `init()` 里整段 commit ⇒ 通常也已出现在 `mem_.regions()`，
+    //     但"AGERC 的基址不许落进 arena"应是**结构**判断，⛔ 不依赖装配顺序。
+    const std::uint32_t kFallbackBase = layout_.agerc_fallback_base;
     struct Range {
         std::uint64_t begin = 0;
         std::uint64_t end = 0;
@@ -447,6 +451,7 @@ bool Machine::loadAgercModule(const std::string& path, std::string* err) {
     };
     if (image_loaded_) addRange(image_.image_base, static_cast<std::uint64_t>(image_.image_base) + image_.size_of_image);
     addRange(layout_.heap_base, static_cast<std::uint64_t>(layout_.heap_base) + layout_.heap_size);
+    addRange(layout_.arena_base, static_cast<std::uint64_t>(layout_.arena_base) + layout_.arena_size);
     addRange(static_cast<std::uint64_t>(layout_.stack_top) - layout_.stack_size - layout_.stack_guard,
              layout_.stack_top);
     addRange(layout_.teb_ea, static_cast<std::uint64_t>(layout_.teb_ea) + 0x1000u);
@@ -487,7 +492,12 @@ bool Machine::loadAgercModule(const std::string& path, std::string* err) {
               img.size_of_image, kFallbackBase);
         base = kFallbackBase;
         if (!fits(base)) {
-            setErr("选基址", "PE 的 ImageBase 0x... 冲突，备选 0x30000000 也冲突（没有可用的 guest 基址）");
+            // ★ 基址写进文本（不写死字面量：它来自 `GuestLayout`，搬一次不该再漏一条旧地址）。
+            char why[160];
+            std::snprintf(why, sizeof(why),
+                          "PE 的 ImageBase 冲突，备选 0x%08X 也冲突（没有可用的 guest 基址）",
+                          kFallbackBase);
+            setErr("选基址", why);
             return false;
         }
     }
@@ -543,7 +553,9 @@ bool Machine::prepare(std::uint32_t entry_override, std::string* err) {
     cpu_.shim.exe_path_ea = setup_.exe_path_ea;
     cpu_.shim.env_ea = setup_.env_ea;
     cpu_.shim.va_cursor = 0x20000000u;
-    cpu_.shim.va_limit = 0x28000000u;
+    // ★ bump 区的上界**贴着** arena 的基址：两者必须相邻而不相交（arena 自己整段 commit，
+    //   落进它 = 与纹理像素抢同一段地址）。⇒ 上界直接取 `layout_.arena_base`，⛔ 不写字面量。
+    cpu_.shim.va_limit = layout_.arena_base;
     return true;
 }
 
@@ -2804,7 +2816,8 @@ void Machine::dumpRunSummary(const RunResult& r, std::FILE* out, SummaryMode mod
         std::fprintf(out, "input-script: unfinished pending=%zu releases=%zu first=\"%s\"\n", pending, rel,
                      first.c_str());
     }
-    // ★ arena 是**独立**的 GuestHeap（`init` 的 0x28000000..0x30000000，128 MiB），不并进上面那行：
+    // ★ arena 是**独立**的 GuestHeap（区间 = `GuestLayout::arena_base` 起 `arena_size`，容量是自定
+    //   模型、见 `image.h` 该字段的注释），不并进上面那行：
     //   纹理像素 / 后缓冲 / 深度块只在这里，主堆的 in_use 对"纹理没回收"完全不可见。
     //   ★ 这一行的**逐字格式**被 `tests/option_roundtrip.cpp` 的 `parseArena` 消费 ⇒ 两档都打。
     std::fprintf(out, "arena     : surfaces %zu in_use %u peak %u largest-free %u\n", surfaces_.surfaceCount(),

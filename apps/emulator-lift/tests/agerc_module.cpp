@@ -5,7 +5,7 @@
 //      `agerc_base != 0`、`MZ` / 节字节逐字节对、`cpu.shim.agerc_image` 指向同一份镜像、
 //      `cpu.shim.agerc_base == agercBase()`，且 `cpu.shim.agerc_loaded == false`（还没 LoadLibrary）；
 //   ② base 选择：空闲时优先 PE 的 ImageBase；与已占区域（这里用 placeCode 占住 0x400000）冲突时
-//      改用 0x30000000；
+//      改用 `GuestLayout::agerc_fallback_base`（唯一真源 `runtime/image.h`）；
 //   ③ 句柄口径：`LoadLibraryA` / `GetModuleHandleA` 返回**同一个**真实 base；`GetProcAddress`
 //      返回 stub thunk，`call thunk` ⇒ `_GetInstance@0` 返回同一个 base；
 //      `LoadIconA(base, "IDI_ICON1")` 从**真实 AGERC 镜像**读 RT_GROUP_ICON / RT_ICON ⇒ 伪 HICON；
@@ -408,7 +408,7 @@ int main() {
     }
 
     // =====================================================================================
-    // ③ base 选择：与已占区域冲突 ⇒ 0x30000000
+    // ③ base 选择：与已占区域冲突 ⇒ `GuestLayout::agerc_fallback_base`
     // =====================================================================================
     {
         g_current_case = "base-conflict-falls-back";
@@ -419,9 +419,12 @@ int main() {
         LIFT_CHECK(fx2.m.placeCode(kImageBase, &nop, 1, &err));  // 占住 PE 的 ImageBase
         LIFT_CHECK(fx2.m.loadAgercModule(pe.path(), &err));
         if (!err.empty()) std::printf("loadAgercModule(conflict) err = %s\n", err.c_str());
-        LIFT_CHECK_EQ_U32(fx2.m.agercBase(), 0x30000000u);
-        LIFT_CHECK_EQ_U32(fx2.m.cpu().shim.agerc_base, 0x30000000u);
-        LIFT_CHECK_EQ_U32(fx2.m.mem().rd8(0x30000000u), 'M');
+        // ★ 判据跟着**模型常量**走（唯一真源 `runtime/image.h` 的 `GuestLayout`），⛔ 不抄字面量：
+        //   这条断言要守的是"冲突 ⇒ 用布局里那个 fallback base"，不是"它恰好等于某个数"。
+        const std::uint32_t fallback = fx2.m.layout().agerc_fallback_base;
+        LIFT_CHECK_EQ_U32(fx2.m.agercBase(), fallback);
+        LIFT_CHECK_EQ_U32(fx2.m.cpu().shim.agerc_base, fallback);
+        LIFT_CHECK_EQ_U32(fx2.m.mem().rd8(fallback), 'M');
     }
 
     // =====================================================================================

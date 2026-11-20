@@ -15,10 +15,13 @@
 //   2. **`GlobalAlloc(GMEM_MOVEABLE)` 不做可移动内存**：句柄就是**可直接用的指针**（等价于
 //      `GMEM_FIXED`）。⇒ `GlobalLock` 恒等、`GlobalUnlock` 返回 TRUE、`GlobalFlags` 返回 0。
 //      影响：guest 若先 `GlobalLock` 再解引用没问题；若依赖"地址会变"则看不到变化（这是好事）。
-//   3. **`VirtualAlloc` 是 bump 分配器**：`addr==0` 时从 `[0x20000000, 0x28000000)` 里 64 KiB
-//      对齐切（128 MiB 上限；这些常量是本文件的口径，`vcpkg`/layout 都拿不到 layout）。
-//      第一次调用时懒初始化（`va_cursor==0` ⇒ 置 0x20000000、`va_limit` 置 0x28000000）。
-//      影响：**不可能**预留 1 GiB 以上的单块；超过 128 MiB 直接 OOM（返回 0 + 错误 8）。
+//   3. **`VirtualAlloc` 是 bump 分配器**：`addr==0` 时从 `[kVaBase, GuestLayout::arena_base)` 里
+//      64 KiB 对齐切（今天 = 128 MiB）。★ 上界**不是**本文件的常量：它是"bump 窗口的上界"，
+//      但必须**贴着** arena 的基址（相邻而不相交 —— arena 自己整段 commit，落进去就是与纹理
+//      像素抢地址）⇒ 真源 = `GuestLayout::arena_base`（`runtime/image.h`；`Machine::init` /
+//      `AotHost` 的 `shim.va_limit` 也取同一个字段）。⛔ 不再抄一份字面量（同值第二来源 =
+//      将来只改一处就静默分叉）。第一次调用时懒初始化（`va_cursor==0` ⇒ 置 `kVaBase` / `kVaEnd`）。
+//      影响：**不可能**预留 1 GiB 以上的单块；超过这个窗口直接 OOM（返回 0 + 错误 8）。
 //      ★ 与文档的对齐（2026-11-04 收口 REQ-01M6JJ6ZYNT6FP5ESHRTFG9HA4）：`MEM_COMMIT` 必须落在
 //      **已预留**的区域里（显式地址不先 `MEM_RESERVE` ⇒ 0 + `ERROR_INVALID_ADDRESS(487)`，
 //      ⛔ 不再"顺手把任意地址清零"）；bump 出来的块自动进区域账本（`GuestMemory::vaRanges()`），
@@ -41,6 +44,7 @@
 #include <algorithm>
 #include <cstdint>
 
+#include "runtime/image.h"
 #include "runtime/x86.h"
 #include "shims/register.h"
 
@@ -62,8 +66,12 @@ constexpr std::uint32_t kMemRelease = 0x00008000u;
 constexpr std::uint32_t kPageReadWrite = 0x04u;
 
 // VirtualAlloc 的 bump 区（文件头偏差 3）
+// ★ `kVaEnd` 是**bump 窗口的上界**（不是 arena 基址本身），但两者的关系是**硬约束**：
+//   bump 区必须与 arena 相邻而不相交 ⇒ 上界 == `GuestLayout::arena_base`（唯一真源
+//   `runtime/image.h`；`Machine::init` / `AotHost` 装配 `shim.va_limit` 时取的也是它）。
+//   ⛔ 不要再写一份同值字面量：那会让"抬 arena"只改一处、bump 区静默伸进 arena。
 constexpr std::uint32_t kVaBase = 0x20000000u;
-constexpr std::uint32_t kVaEnd = 0x28000000u;
+constexpr std::uint32_t kVaEnd = GuestLayout{}.arena_base;
 constexpr std::uint32_t kAllocGranularity = 0x00010000u;
 
 std::uint32_t alignUp(std::uint32_t v, std::uint32_t a) {

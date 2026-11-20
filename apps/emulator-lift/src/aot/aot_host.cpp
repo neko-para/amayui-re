@@ -60,10 +60,11 @@ bool AotHost::init(std::string* err) {
     //   "再跑一遍 safe memory 全绿"对两臂都成立，两种内存护栏必须能互相核对。
     mem_.setSafeMode(GuestMemory::safeModeFromEnv());
 
-    // ---- ② surface arena（真源 `Machine::init`：`surfaces_.init(&mem_, 0x28000000, 0x08000000)`）----
+    // ---- ② surface arena（真源 = `GuestLayout::arena_base/arena_size`，与 `Machine::init` 同一份）----
     // ★ 图形 shim 的 `requireMachine`（`d3d9.cpp:115` / `ddraw_surface.cpp:107`）第一件事就是查
-    //   `surfaces().ready()`；不建它 ⇒ 图形路径**必停**。基址 / 大小与解释器臂逐字相同。
-    if (!surfaces_.init(&mem_, 0x28000000u, 0x08000000u)) {
+    //   `surfaces().ready()`；不建它 ⇒ 图形路径**必停**。基址 / 大小从布局常量读（⛔ 不另写字面量：
+    //   这份容量是自定模型，两臂必须逐位相同，见 `image.h` 该字段的注释）。
+    if (!surfaces_.init(&mem_, layout_.arena_base, layout_.arena_size)) {
         if (err) *err = std::string("surface arena 初始化失败：") + surfaces_.lastError();
         return false;
     }
@@ -275,7 +276,8 @@ bool AotHost::prepare(std::string* err) {
     cpu_.shim.exe_path_ea = setup_.exe_path_ea;
     cpu_.shim.env_ea = setup_.env_ea;
     cpu_.shim.va_cursor = 0x20000000u;
-    cpu_.shim.va_limit = 0x28000000u;
+    // ★ 上界**贴着** arena 的基址（与 `Machine::prepare` 同一条口径）：两者必须相邻而不相交。
+    cpu_.shim.va_limit = layout_.arena_base;
 
     prepared_ = true;
     return true;
@@ -285,7 +287,7 @@ bool AotHost::prepare(std::string* err) {
 // ★ 为什么 AOT 也必须做：guest 在启动早期就 `LoadLibraryA("AGERC.DLL")`（`ret=0048E751`），
 //   拿不到镜像 ⇒ 它返回 0 + 126 ⇒ guest 走**错误对话框**分支（`wsprintfA` → `MessageBoxA`）。
 //   实测读数：不装 AGERC 时 AOT 在 36,489 条指令处停在 `poly:005C3627`（= `j_MessageBoxA_15` thunk，
-//   它不在闭包里 ⇒ 响亮停），而解释器在同一个 `LoadLibraryA` 上拿到 `0x30000000` 并继续
+//   它不在闭包里 ⇒ 响亮停），而解释器在同一个 `LoadLibraryA` 上拿到换基址后的 fallback base 并继续
 //   `GetProcAddress`。⇒ 这是**宿主 bring-up 缺口**，不是 lift 语义问题。
 bool AotHost::loadAgercModule(const std::string& path, std::string* err) {
     auto setErr = [err](const char* step, const std::string& why) {
@@ -308,9 +310,10 @@ bool AotHost::loadAgercModule(const std::string& path, std::string* err) {
 
     // ---- 选一个不与现有 guest 布局冲突的 base ----
     // ★ 判据与 `Machine::loadAgercModule` **逐项相同**：优先用 PE 头里的 ImageBase（真机 loader 也尽量
-    //   尊重它）；冲突 ⇒ 用 0x30000000。冲突表 = 主镜像 / 堆 / 栈（含 guard）/ TEB·PEB·TLS / 命令行块 /
-    //   桩页 / VirtualAlloc 区间 + 假模块句柄空间 + 所有已登记区域。
-    constexpr std::uint32_t kFallbackBase = 0x30000000u;
+    //   尊重它）；冲突 ⇒ 用 `GuestLayout::agerc_fallback_base`。冲突表 = 主镜像 / 堆 / 栈（含 guard）/
+    //   TEB·PEB·TLS / 命令行块 / 桩页 / VirtualAlloc 区间 / **surface arena** + 假模块句柄空间
+    //   + 所有已登记区域。
+    const std::uint32_t kFallbackBase = layout_.agerc_fallback_base;
     struct Range {
         std::uint64_t begin = 0;
         std::uint64_t end = 0;
@@ -324,6 +327,9 @@ bool AotHost::loadAgercModule(const std::string& path, std::string* err) {
                  static_cast<std::uint64_t>(image_.image_base) + image_.size_of_image);
     }
     addRange(layout_.heap_base, static_cast<std::uint64_t>(layout_.heap_base) + layout_.heap_size);
+    // ★ arena 显式在表里（理由同 `Machine::loadAgercModule`）：它在 `init()` 里整段 commit，
+    //   "AGERC 的基址不许落进 arena"应是结构判断，⛔ 不依赖装配顺序。
+    addRange(layout_.arena_base, static_cast<std::uint64_t>(layout_.arena_base) + layout_.arena_size);
     addRange(static_cast<std::uint64_t>(layout_.stack_top) - layout_.stack_size - layout_.stack_guard,
              layout_.stack_top);
     addRange(layout_.teb_ea, static_cast<std::uint64_t>(layout_.teb_ea) + 0x1000u);
@@ -361,7 +367,11 @@ bool AotHost::loadAgercModule(const std::string& path, std::string* err) {
                      img.image_base, img.size_of_image, kFallbackBase);
         base = kFallbackBase;
         if (!fits(base)) {
-            setErr("选基址", "PE 的 ImageBase 冲突，备选 0x30000000 也冲突（没有可用的 guest 基址）");
+            char why[160];
+            std::snprintf(why, sizeof(why),
+                          "PE 的 ImageBase 冲突，备选 0x%08X 也冲突（没有可用的 guest 基址）",
+                          kFallbackBase);
+            setErr("选基址", why);
             return false;
         }
     }

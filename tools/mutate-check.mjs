@@ -5252,6 +5252,28 @@ const MUTATIONS = [
       'needs 谓词漏 `!dump_path.empty()` ⇒ `--dump-frame` 那一帧不下载（dump 写旧帧 / 被拒写）⇒ ' +
       '`present-readback/gate-dump-fresh` 的 BMP sentinel 断言红',
   },
+
+  // ── SurfaceArena 容量 / AGERC fallback base（2026-11-20 · SAVE07 战斗 `resource-exhausted`）───────
+  //   ★ 代表"抬 arena 容量却没搬 AGERC fallback base"这一类错：arena 的上界一抬就吃掉旧的
+  //     `0x30000000` ⇒ `loadAgercModule` 的 `fits()` 拒 ⇒ **启动即响亮报错**（看起来像"扩容把启动搞坏了"）。
+  //   ★ 守卫 `apps/emulator-lift/tests/region_layout.cpp`（CTest `region-layout`；pure / 顶层无条件注册）
+  //     只钉**关系**：所有命名区间两两不相交 + AGERC fallback base 不在任何区间里且 ≥ arena 上界。
+  //   ★ 变异形态选"把 fallback base 改回 0x30000000"，⛔ 不是"把 arena 缩回 128 MiB"：arena 缩小时
+  //     fallback base 仍在 arena 外 ⇒ 那不是布局错误、只是容量不够（容量是读数、不作断言，见 AGENTS.md §10）。
+  {
+    file: 'apps/emulator-lift/src/runtime/image.h',
+    from: '    std::uint32_t agerc_fallback_base = 0x40000000u;',
+    to: '    std::uint32_t agerc_fallback_base = 0x30000000u;  // 变异：落回 arena 里（[0x28000000,0x38000000)）',
+    guard: 'ctest:region-layout',
+    ctest: 'region-layout',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-region-layout',
+    what:
+      'AGERC 的 fallback base 改回 0x30000000 ⇒ 落进 arena [0x28000000,0x38000000) ⇒ ' +
+      '`region-layout/agerc-fallback-outside` 红（"落进了 arena" + "base < arena 上界"两条），' +
+      '`region-layout/shape` 与 `-pairwise-disjoint` 不受影响（arena 与其余区间仍不相交）',
+  },
+
 ];
 
 let mutationRunSeq = 0;
