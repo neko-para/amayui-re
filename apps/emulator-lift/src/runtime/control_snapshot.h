@@ -105,7 +105,7 @@ public:
     // `global-get` / `global-set` 的主线程执行口（`runtime/script_globals.h` 是唯一实现）。
     // ★ 默认 = 这个宿主没接（只会出现在测试假宿主上）⇒ 控制层按 `type_mismatch` 回；
     //   `AotHost` 覆写为直接调模块（`readGlobal` / `writeGlobal`）。
-    // ★ ⛔ 实现里不许碰 `cpu_` / `regs_`：写的是**一个 guest 数据槽**，不是执行流。
+    // ★ ⛔ 实现里不许碰 `cpu_`：写的是**一个 guest 数据槽**，不是执行流。
     virtual GlobalError controlGlobalGet(GlobalKind kind, std::uint32_t id, GlobalValue* out) {
         (void)kind;
         (void)id;

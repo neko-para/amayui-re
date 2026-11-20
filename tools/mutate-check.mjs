@@ -5159,6 +5159,29 @@ const MUTATIONS = [
       '`drawOverlay` 只认 owned `ui_script`（adopt 的插件脚本被丢掉）⇒ `plugin-overlay` 的 ' +
       '`render-up` / `render-down` 红（叠层不画、像素回到 guest 色；exit 仍 0）',
   },
+
+  // ── A′：`%st` 别名 `cpu_`（`p2-design.md` §1 / §5-4、6）──────────────────────────────────
+  //   ★ 代表"别名判据写反 / 被删掉"这一类错：`regsAliasCpu` 是 `liftShimCommon` 与 `lift_one`
+  //     共用的**唯一**判据。无条件 true ⇒ AOT 臂的跳过是正确的，但非别名调用方（生成物夹具 /
+  //     音频 feeder 用真 `LiftRegs`）也在**过期寄存器**上执行、结果丢掉 ⇒ 静默错值。
+  //   ★ 承重守卫 = `lift-ir-shim`：它用真 `LiftRegs`（`tests/lift_ir_shim.cpp`）并断言探针写的
+  //     EDX（`kProbeEdx`）被**整块回读**带回 —— 正是"整块回读必须真的发生"的判据。
+  //   ★ 反证过（2026-11-20 / mac arm64）：施加这一处 ⇒ `lift-ir-shim` 红（CTest 退出码非 0）。
+  //   （⛔ 不用"把 eip/eflags 换回去"当变异：那是编译错，证明力弱。）
+  {
+    file: 'apps/emulator-lift/src/runtime/lift_abi.cpp',
+    from: 'bool regsAliasCpu(const void* st, X86& cpu) { return st == liftRegsView(cpu); }\n',
+    to:
+      'bool regsAliasCpu(const void* /*st*/, X86& /*cpu*/) { return true; }  ' +
+      '// 变异：别名判据删除 ⇒ 无条件跳过两处搬运\n',
+    guard: 'ctest:lift-ir-shim',
+    ctest: 'lift-ir-shim',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-ir-shim',
+    what:
+      '删掉别名判据（无条件跳过两处搬运）⇒ 非别名调用方（夹具 / feeder 的真 `LiftRegs`）在过期' +
+      '寄存器上执行（`lift-ir-shim` 的探针 EDX 回读断言红）',
+  },
 ];
 
 let mutationRunSeq = 0;

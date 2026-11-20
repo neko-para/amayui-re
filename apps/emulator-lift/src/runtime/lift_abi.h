@@ -20,6 +20,8 @@
 #include <cstdint>
 #include <type_traits>
 
+#include "runtime/x86.h"  // X86 的完整类型（`liftRegsView` 的内联定义需要它）
+
 namespace lift {
 struct X86;
 }
@@ -33,6 +35,16 @@ static_assert(sizeof(LiftRegs) == 36, "LiftRegs 必须 36 B");
 static_assert(offsetof(LiftRegs, r) == 0, "LiftRegs.r 必须在 +0（.ll 的偏移假设）");
 static_assert(offsetof(LiftRegs, eflags) == 32, "LiftRegs.eflags 必须在 +32（.ll 的偏移假设）");
 static_assert(std::is_trivially_copyable_v<LiftRegs>, "LiftRegs 必须可平凡拷贝（跨 ABI）");
+
+// ★ A′（2026-11-20）：AOT 臂把 `%st` **直接指到** `cpu_.r[0]`（`X86` 的前 36 B 与 `LiftRegs`
+//   逐字节同布局：r@0 / eflags@32，eip 在 +36 之后）。⇒ 每派发那两次整块搬运（22 条）结构上消失。
+//   ★ 为什么返回 `void*` 而不是 `LiftRegs*`：`reinterpret_cast<LiftRegs*>(&cpu)` 之后由 C++ 解引用
+//     是**严格别名 UB**（`X86` 不是 standard-layout，没有 common initial sequence）。返回 `void*`
+//     ⇒ **不形成任何指向 `X86` 的 `LiftRegs*`**，别名判据退化成两个 `void*` 的比较（无对象访问）。
+//   ★ 非别名调用方（生成物夹具 / 音频 feeder）用的是自己的真 `LiftRegs` ⇒ 搬运路径逐字不变。
+namespace lift {
+inline void* liftRegsView(X86& c) { return static_cast<void*>(&c.r[0]); }
+}  // namespace lift
 
 // SMC 失效（转 x86.h 的 noteGuestWrite；`cpu == nullptr` ⇒ no-op，与 cache==nullptr 同口径）
 extern "C" void lift_note_write(void* cpu, std::uint32_t ea, std::uint32_t n);
@@ -60,10 +72,11 @@ extern "C" void lift_tick(void* cpu, std::uint32_t n);
 //   § 为什么要它（D10 P1/P2 / D11 / D12）：生成器只 inline 实现了 ~30 个 op；剩下的（x87 1022 /
 //     `fs:` 475 / 串操作 85 / Div 53 / 循环移位 58 / Imul 169 …）手写第二份语义是**静默偏差**的
 //     高发区（P1 的移位 PF 就是同类事故的现成例子）。⇒ 一条指令一次宿主调用，**语义只有一份**。
-//   § 为什么有 `st` 这个参数（与 `lift_shim` 的 `LiftRegs*` 同一条理由，**不能省**）：
-//     lifted 代码把 guest 状态放在 `LiftRegs`（`%st`）里，而 `execInsn` 吃的是 `X86`。
-//     只给 `cpu` 就会**在过期的寄存器上执行、再把结果丢掉**（静默错）⇒ 这里做与 `lift_shim`
-//     完全一样的三件事：① `liftRegsToCpu(*st, cpu)`；② 执行；③ `liftCpuToRegs(cpu, *st)`。
+//   § 为什么有 `st` 这个参数（与 `lift_shim` 的 `%st` 同一条理由，**不能省**）：
+//     lifted 代码把 guest 状态放在 `%st` 里（AOT 臂 = `cpu_.r[0]` 的别名；夹具 / feeder = 真
+//     `LiftRegs`），而 `execInsn` 吃的是 `X86`。只给 `cpu` 就会**在过期的寄存器上执行、再把结果
+//     丢掉**（静默错）⇒ 这里做与 `lift_shim` 完全一样的三件事：① `st → cpu`；② 执行；③ `cpu → st`。
+//     ★ A′ 之后 `st` 是 `void*`；别名时那两步是自拷贝 ⇒ 跳过（判据见 `liftRegsView`）。
 //   § 边界（本轮**必须**遵守）：
 //     · ⛔ 只用于**非控制转移**指令（`jmp/jcc/call/ret` 由生成器自己 inline / 回 trampoline）。
 //       生成器显式判定；控制转移掉进这里是生成器 bug（那边仍然是 `llvm.trap`）。
@@ -75,7 +88,7 @@ extern "C" void lift_tick(void* cpu, std::uint32_t n);
 //       false（生成器收到 false ⇒ `ret i32 kLiftHalt`，trampoline 报 stop_kind/stop_why）。
 //     · 宿主没装配（`hostOf(cpu) == nullptr` 或 `cpu.mem == nullptr`）⇒ **响亮停**并返回 false
 //       （⛔ 不许静默返回 true —— 那会把"没执行"变成"执行成功"）。
-extern "C" bool lift_one(void* cpu, LiftRegs* st, std::uint32_t ea);
+extern "C" bool lift_one(void* cpu, void* st, std::uint32_t ea);
 
 // ★ **采样式内部 profile 的唯一接缝**（AOT 的 `--profile`）：`lift_one` 是**生成物直接 call**
 //   的（`lift_gen_emit.cpp` 的 `call i1 @lift_one`），宿主一次都看不见 ⇒ 单次耗时的采样只能在这里。
@@ -166,7 +179,7 @@ inline constexpr std::uint32_t kLiftHalt = 0xFFFFFFFEu;
 //     内存（"参数里**存的**指针"那一层），与 `lift_one` 同一条理由。
 //   ★ 实现里最后一步必须是**尾调用**（`[[clang::musttail]]`，见 .cpp）：否则每个 `lift_dyn`
 //     站点都多一个宿主栈帧 ⇒ 深递归会爆栈，"tail call 站点"这个读数也会失真。
-extern "C" std::uint32_t lift_dyn(void* cpu, LiftRegs* st, std::uint32_t ea);
+extern "C" std::uint32_t lift_dyn(void* cpu, void* st, std::uint32_t ea);
 
 // ★ 窗口 profile 的 `lift_dyn` 计数（AGENTS §12.8 第 3 条：缺省零成本 ⇒ 闸门是一个 bool）。
 //   ★ 为什么只报**次数**、不报时间：`lift_dyn` 是**尾调用**（`return fn(...)`）⇒ 它的区间
@@ -183,14 +196,14 @@ extern std::atomic<std::uint64_t> liftDynCalls;
 // 走进一个 shim（阶段 B 的 ④）。语义**全部**在 `lift_abi.cpp`，这里只钉契约：
 //   ① `liftRegsToCpu(*st, cpu)`（8 GPR + eflags 物化；`cpu.eip = stub_ea`，与解释器 dispatcher
 //      命中 shim 块时同一口径）—— 因为 `invoke` 第一条就读 `[esp]` 取返回地址、`ShimCall::u32`
-//      全部基于 ESP；
+//      全部基于 ESP；★ A′ 之后 `st == liftRegsView(cpu)`（AOT 臂）时这一步**跳过**（自拷贝）；
 //   ② 用**桩 EA 反查 id**（块缓存里的 `installShim` 记录，与 dispatcher 同一个来源；缺块时回退
 //      `ShimRegistry::idForStub`），再 `ShimRegistry::invokeById(id, cpu)` —— ⛔ 不要自己新建
 //      `ShimCall`：invoke 自己读 `[esp]` 当返回地址、弹参、置 eip；
 //   ③ `liftCpuToRegs(cpu, *st)`（**整块回读** —— `QueryPerformanceCounter` 会自己写 EDX）；
 //   ④ 返回 `cpu.running ? cpu.eip : kLiftHalt`。
 // 失败面：桩 EA 不在注册表 / id 失效 ⇒ 走 `trapUnimplemented`（响亮停机）⇒ 返回 `kLiftHalt`。
-extern "C" std::uint32_t lift_shim(std::uint32_t stub_ea, LiftRegs* st, void* cpu);
+extern "C" std::uint32_t lift_shim(std::uint32_t stub_ea, void* st, void* cpu);
 
 // ★ **AOT 专用入口**（S3 性能修，2026-11-15）：调用方（AOT 的派发循环）**已经把桩 EA 解析成了
 //   `ShimRegistry::id`**（槽位索引表），⇒ 这里不再反查（不 `cache->peek`、不 `idForStub`、
@@ -202,18 +215,19 @@ extern "C" std::uint32_t lift_shim(std::uint32_t stub_ea, LiftRegs* st, void* cp
 //     发号序**（`shims.cpp` 的 bind/addRuntime），两者本来就不一定相等（夹具更明确不等）
 //     ⇒ `(stub_ea - 桩页) >> 2` 不是 id。判据：`lift-shim-stub-index`（`tests/shim_stub_index.cpp`）。
 //   ★ 解释器臂不调这个入口（它的 dispatcher 有块缓存，走 `peek` 那条），行为不变。
-extern "C" std::uint32_t lift_shim_id(std::uint32_t id_plus_one, std::uint32_t stub_ea, LiftRegs* st,
+extern "C" std::uint32_t lift_shim_id(std::uint32_t id_plus_one, std::uint32_t stub_ea, void* st,
                                       void* cpu);
 
 namespace lift {
 // 入口 = **resume EA**（复审裁决 1a）：`sub_436D00` 的两条 `call` 返回点 0x436D14 / 0x436D19
 // 都在函数中段 ⇒ 一个 `.ll` 导出**一个**函数，函数体开头按 `%ea` 分派到对应入口块。
-//   ^st     LiftRegs*（原地复用，无拷贝）
+//   ^st     void*（AOT 臂 = `liftRegsView(cpu_)`，即 `cpu_.r[0]` 的别名；夹具 / feeder = 真
+//           `LiftRegs`。**不产生指向 `X86` 的 `LiftRegs*`** ⇒ 无严格别名 UB）
 //   ^mem    guest EA 0 的宿主基址（`GuestMemory::host(0)`；4 GiB 预留后不搬迁）
 //   ^resume 下一个 guest EA（本函数 = 0x436D00 / 0x436D14 / 0x436D19）
 //   ^cpu    只给 lift_note_write 用
 //   返回    下一个 guest EA；0xFFFFFFFF = 回 trampoline 的哨兵
-using LiftFn = std::uint32_t (*)(LiftRegs*, std::uint8_t*, std::uint32_t, void*);
+using LiftFn = std::uint32_t (*)(void*, std::uint8_t*, std::uint32_t, void*);
 
 // ★ S7：`lift_dyn` 的派发表查找**唯一安装点**。运行期由执行臂 / 生成物夹具设成
 //   `lift::aot::lookup`（见 `aot_dispatch.h`）。

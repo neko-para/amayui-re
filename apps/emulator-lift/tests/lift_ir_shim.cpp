@@ -75,12 +75,12 @@
 #include "shims/register.h"
 
 // `.ll` 导出的两个入口（缺 clang 时由替身 TU / 本文件的替身定义提供 ⇒ 链接永不断）
-extern "C" std::uint32_t lift_cc_436D00(::LiftRegs*, std::uint8_t*, std::uint32_t, void*);
-extern "C" std::uint32_t lift_cc_4D4B40(::LiftRegs*, std::uint8_t*, std::uint32_t, void*);
+extern "C" std::uint32_t lift_cc_436D00(void*, std::uint8_t*, std::uint32_t, void*);
+extern "C" std::uint32_t lift_cc_4D4B40(void*, std::uint8_t*, std::uint32_t, void*);
 
 #ifndef LIFT_IR_CLANG
 // 替身（没有 clang 时 `.ll` 编不出来；测试体已 SKIP 77，⛔ 不会拿它当 lifted 代码跑）
-extern "C" std::uint32_t lift_cc_4D4B40(::LiftRegs*, std::uint8_t*, std::uint32_t, void*) {
+extern "C" std::uint32_t lift_cc_4D4B40(void*, std::uint8_t*, std::uint32_t, void*) {
     return 0xFFFFFFFFu;
 }
 #endif

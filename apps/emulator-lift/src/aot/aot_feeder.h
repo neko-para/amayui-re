@@ -8,7 +8,7 @@
 //   D 泵实测同一段 IR 执行只要 ~14 ms。
 //
 // ★ 与主循环（`aot_run.cpp` 的 `AotHost::run`）**有意不同**的三处（⛔ 不要"顺手对齐"）：
-//   ① 不 `syncCpuFromRegs/syncRegsFromCpu`：这里 `LiftRegs st` 就是唯一真源，`X86` 只是侧对象
+//   ① 不做块边界的寄存器搬运：这里 `LiftRegs st` 就是唯一真源，`X86` 只是侧对象
 //      （`lift_one` / `lift_shim_id` 自己会做三件套搬运）；
 //   ② **不过块边界泵**：定时器 / SEH 派发 / 控制层 / Present / 帧数闸门都是主线程的东西；
 //      feeder 只执行一段纯计算（引擎在 fill 前后自己管 CS / 在飞计数 / 上下文）；

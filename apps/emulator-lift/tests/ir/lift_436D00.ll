@@ -6,7 +6,7 @@
 ;   逐条对过 `.lst` 的指令窗口（0x436D00 push ebp … 0x436D4D retn 8）。
 ;
 ; 契约（`.tmp/irshape/runtime-contract.md` §7 + 复审裁决 1a/1b）：
-;   %st  = LiftRegs*：r[0..7] = EAX,ECX,EDX,EBX,ESP,EBP,ESI,EDI（+0..+28），eflags 在 +32
+;   %st  = void*（AOT 臂指向 cpu_.r[0]；夹具传真 LiftRegs）：r[0..7] = EAX,ECX,EDX,EBX,ESP,EBP,ESI,EDI（+0..+28），eflags 在 +32
 ;   %mem = guest EA 0 的宿主基址（i8*；EA 一律 zext 到 i64 再接 GEP —— i32 索引会被符号扩展）
 ;   %ea  = **resume EA**（本函数 3 个入口：0x436D00 / 0x436D14 / 0x436D19）
 ;   %cpu = X86*，只给 lift_note_write 用

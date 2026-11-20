@@ -64,27 +64,27 @@
 #endif
 
 // `.ll` 导出的唯一入口（缺 clang 时由 `tests/ir/lift_stub.cpp` 提供同名替身 ⇒ 链接永不断）
-extern "C" std::uint32_t lift_cc_436D00(::LiftRegs*, std::uint8_t*, std::uint32_t, void*);
+extern "C" std::uint32_t lift_cc_436D00(void*, std::uint8_t*, std::uint32_t, void*);
 // ★ 寄存器计数移位（CL）的两条定点差分 case 的入口：只有**链接生成器产物**的两条 target
 //   （`lift-ir-gen-*`，CMake 传 `LIFT_IR_CASE_GEN=1`）里才有这三个符号；手写 golden
 //   （`tests/ir/lift_*.ll`）没有 ⇒ 声明与调用点都挂在 `LIFT_IR_CASE_GEN` 下。
 //   缺 clang 时由 `tests/ir/lift_stub.cpp` 补替身（否则那两条 target 链接断）。
 #if defined(LIFT_IR_CASE_GEN)
-extern "C" std::uint32_t lift_cc_41880A(::LiftRegs*, std::uint8_t*, std::uint32_t, void*);
-extern "C" std::uint32_t lift_cc_4C6E64(::LiftRegs*, std::uint8_t*, std::uint32_t, void*);
-extern "C" std::uint32_t lift_cc_4E4B98(::LiftRegs*, std::uint8_t*, std::uint32_t, void*);
+extern "C" std::uint32_t lift_cc_41880A(void*, std::uint8_t*, std::uint32_t, void*);
+extern "C" std::uint32_t lift_cc_4C6E64(void*, std::uint8_t*, std::uint32_t, void*);
+extern "C" std::uint32_t lift_cc_4E4B98(void*, std::uint8_t*, std::uint32_t, void*);
 // ★ 2026-11-15 · S3-b：条件融合（`cmp`/`test` + `jcc`）的六条定点差分 case 的入口
 //   （见 §2c）。同样只有链接生成器产物的两条 target 才有这些符号。
-extern "C" std::uint32_t lift_cc_47A7F3(::LiftRegs*, std::uint8_t*, std::uint32_t, void*);
-extern "C" std::uint32_t lift_cc_49EE49(::LiftRegs*, std::uint8_t*, std::uint32_t, void*);
-extern "C" std::uint32_t lift_cc_404DEA(::LiftRegs*, std::uint8_t*, std::uint32_t, void*);
-extern "C" std::uint32_t lift_cc_4200F7(::LiftRegs*, std::uint8_t*, std::uint32_t, void*);
-extern "C" std::uint32_t lift_cc_4DD199(::LiftRegs*, std::uint8_t*, std::uint32_t, void*);
-extern "C" std::uint32_t lift_cc_4D19D3(::LiftRegs*, std::uint8_t*, std::uint32_t, void*);
+extern "C" std::uint32_t lift_cc_47A7F3(void*, std::uint8_t*, std::uint32_t, void*);
+extern "C" std::uint32_t lift_cc_49EE49(void*, std::uint8_t*, std::uint32_t, void*);
+extern "C" std::uint32_t lift_cc_404DEA(void*, std::uint8_t*, std::uint32_t, void*);
+extern "C" std::uint32_t lift_cc_4200F7(void*, std::uint8_t*, std::uint32_t, void*);
+extern "C" std::uint32_t lift_cc_4DD199(void*, std::uint8_t*, std::uint32_t, void*);
+extern "C" std::uint32_t lift_cc_4D19D3(void*, std::uint8_t*, std::uint32_t, void*);
 // ★ 2026-11-15 · S3-c：`div`/`idiv` 与 flags 的两条定点差分 case 的入口（见 §2d）。
 //   同样只有链接生成器产物的两条 target 才有这些符号。
-extern "C" std::uint32_t lift_cc_48D500(::LiftRegs*, std::uint8_t*, std::uint32_t, void*);
-extern "C" std::uint32_t lift_cc_419F0D(::LiftRegs*, std::uint8_t*, std::uint32_t, void*);
+extern "C" std::uint32_t lift_cc_48D500(void*, std::uint8_t*, std::uint32_t, void*);
+extern "C" std::uint32_t lift_cc_419F0D(void*, std::uint8_t*, std::uint32_t, void*);
 #endif
 
 namespace {

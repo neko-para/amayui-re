@@ -48,10 +48,11 @@ constexpr unsigned slotBitsFor(std::size_t n) {
 #include "lift_pin.h"
 
 // ---- 展开 ①：把表里出现的每个函数**声明**一遍（`extern "C"`：`.ll` 的符号不带 C++ 修饰名）----
-//   ★ 签名必须与 `LiftFn` 逐字相同（`LiftRegs* / uint8_t* / uint32_t / void*` → `uint32_t`）：
+//   ★ 签名必须与 `LiftFn` 逐字相同（`void* / uint8_t* / uint32_t / void*` → `uint32_t`）：
 //     类型不匹配在这里就是**编译错**，而不是运行期把栈/寄存器读歪。
+//   ★ A′：`%st` 是 `void*`（AOT 臂 = `liftRegsView(cpu_)` 的别名）⇒ 与生成物的 `ptr` 参数同形。
 #define LIFT_AOT_ENTRY(ea, name) \
-    extern "C" std::uint32_t name(::LiftRegs*, std::uint8_t*, std::uint32_t, void*);
+    extern "C" std::uint32_t name(void*, std::uint8_t*, std::uint32_t, void*);
 #include "lift_table.inc"
 #undef LIFT_AOT_ENTRY
 

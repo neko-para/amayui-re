@@ -322,7 +322,7 @@ public:
     std::uint64_t controlPresentFrame() const override { return presenter_.frameCount(); }
     // ★ `global-get` / `global-set`：直接转发到 `runtime/script_globals.h` 的 **AGE 引擎层实现**
     //   （控制层只搬 JSON / 值；寻址 + ENC/DEC 不在这里）。只在主线程被调；写的是一个 guest 数据槽，
-    //   ⛔ 不写 `cpu_` / `regs_`；下一块自然重新从内存加载 ⇒ 写完立刻对引擎可见。
+    //   ⛔ 不写 `cpu_`；下一块自然重新从内存加载 ⇒ 写完立刻对引擎可见。
     GlobalError controlGlobalGet(GlobalKind kind, std::uint32_t id, GlobalValue* out) override;
     GlobalError controlGlobalSet(GlobalKind kind, std::uint32_t id, const GlobalValue& value) override;
     // 宿主时钟（控制层的 freeze/unfreeze 与 `guest_ms` 读数都要它；解释器臂同形 `Machine::clock()`）。
@@ -470,9 +470,8 @@ private:
     void classifyShimStop(std::uint32_t def_id_plus_one, AotRunResult& r);
     // 宿主置停的三分类（真源 `machine.cpp:75-80` 的 `hostStopReason`；那份是内部链接，抄判据不抄代码）。
     static AotStop hostStopReason(const X86& cpu);
-    // `regs` ↔ `cpu` 的同步（lifted 侧的状态真源是 `regs`；宿主侧逻辑读 `cpu`）。
-    void syncCpuFromRegs();
-    void syncRegsFromCpu();
+    // ★ A′（2026-11-20）：`regs_` 与两个 `sync*` 已删 —— lifted 代码的 `%st` 直接指到 `cpu_.r[0]`
+    //   （`liftRegsView`），`cpu_` 就是唯一真源，块边界不需要任何寄存器搬运。
     // ★ 音频 feeder 的 guest 执行器 thunk（`AudioEngine::FeederGuestRunner` 的形状）：
     //   `ctx` = 本宿主；把 `entry/return` 转给 `aot::runAotFeederGuest`（**IR 派发**，⛔ 不走解释器）。
     //   契约与语义见 `src/aot/aot_feeder.h`；⛔ 不要在这里写 guest 语义。
@@ -517,8 +516,9 @@ private:
     HeadlessPresenter presenter_;
     Seh seh_;
     X86 cpu_;
-    // lifted 代码的寄存器现场（唯一真源；`lift_shim` / `lift_one` 与它双向同步）。
-    LiftRegs regs_{};
+    // ★ A′：lifted 代码的寄存器现场**就是** `cpu_.r[0..7] + eflags`（`liftRegsView(cpu_)`）——
+    //   没有第二份 `LiftRegs` 成员，也没有块边界同步。`x86.h` 的 `r/eflags/eip` 顺序是契约
+    //   （`lift_abi.cpp` 的 `offsetof` 断言）。
 
     std::string exe_path_;  // 宿主侧的 `--exe`（只进 trace 输入清单，⛔ 不进 guest 内存）
     std::string agerc_path_;

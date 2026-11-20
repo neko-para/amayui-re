@@ -64,7 +64,7 @@ enum class ControlOp : std::uint8_t {
     Move,
     Click,
     GlobalGet,  // 读一格 script global（id + 显式 kind；哑原语）
-    GlobalSet,  // 写一格 script global（只写一个数据槽；⛔ 不写 cpu_/regs_）
+    GlobalSet,  // 写一格 script global（只写一个数据槽；⛔ 不写 cpu_）
     Quit,
 };
 const char* controlOpName(ControlOp op);
@@ -99,7 +99,7 @@ public:
     //   · `paused_at` = 本汇点的名字（`"block"` / `"present"`）—— 由**调用点**填，⛔ Control 不猜；
     //   · `host`     = 快照 / 截图 / resume / **global 读写**的宿主取数口（S2/S3/S4；nullptr ⇒ 该能力 `unavailable`）。
     //     ★ `global-set` 是唯一会**写 guest 数据槽**的命令：`serve()` 在主线程块边界调
-    //       `ControlHostSide::controlGlobalSet`（→ `runtime/script_globals.h`）；⛔ 不写 cpu_/regs_、
+    //       `ControlHostSide::controlGlobalSet`（→ `runtime/script_globals.h`）；⛔ 不写 cpu_、
     //       ⛔ 不改执行流，下一块自然重新从内存加载 ⇒ 写完立刻对引擎可见。
     struct Context {
         VirtualClock* clock = nullptr;

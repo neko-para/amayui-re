@@ -202,9 +202,12 @@ enum class HostStopKind : std::uint8_t {
 
 struct X86 {
     // ---- 通用寄存器（下标见 GprIndex）----
+    // ★ 前 40 B 是**生成代码 / ABI 契约**：`r[8]@0..31 / eflags@32 / eip@36` ⇒ 与 `LiftRegs`
+    //   （r + eflags，sizeof 36）逐字节同布局、`eip` 紧跟在其后；`seg@40` 起才是另一组字段。
+    //   判据 = `lift_abi.cpp` / `tests/lift_abi_probe.cpp` 的 `offsetof` 断言（⛔ 不要换顺序）。
     std::uint32_t r[8] = {};   // EAX ECX EDX EBX ESP EBP ESI EDI
-    std::uint32_t eip = 0;
     std::uint32_t eflags = 0x202u;  // IF=1
+    std::uint32_t eip = 0;
     std::uint16_t seg[6] = {};      // ES CS SS DS FS GS（选择子）
     std::uint32_t fs_base = 0;      // guest TEB（⛔ 不是宿主 fs）
     std::uint32_t gs_base = 0;

@@ -107,10 +107,6 @@ AotStop AotHost::hostStopReason(const X86& cpu) {
     return AotStop::Stopped;
 }
 
-void AotHost::syncCpuFromRegs() { liftRegsToCpu(regs_, cpu_); }
-
-void AotHost::syncRegsFromCpu() { liftCpuToRegs(cpu_, regs_); }
-
 // =====================================================================================
 // 宿主置停的归类（shim 路径）
 // =====================================================================================
@@ -502,8 +498,8 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         //   ⛔ `--dump-frame` 不走副本（它是"当场写"的独立对照）。
         presenter_.setFreezeFrame(true);
     }
-    // ★ 起点：`cpu_.eip` 已经是 PE entry（`prepare` 设的）⇒ lifted 侧现场由它派生。
-    syncRegsFromCpu();
+    // ★ 起点：`cpu_.eip` 已经是 PE entry（`prepare` 设的）。★ A′ 之后 lifted 侧现场**就是** `cpu_`
+    //   （`%st == liftRegsView(cpu_)`）⇒ 不再需要把任何 `LiftRegs` 抄进 `cpu_`。
     const auto wall_start = std::chrono::steady_clock::now();
     std::uint64_t next_time_check = 0;
     // ★ 块边界事件泵的节流（与解释器 `machine.cpp:1097` / `:1298` 同粒度：每 4096 条一次）。
@@ -534,10 +530,12 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     std::uint32_t ea = cpu_.eip;
     // ★ guest fault 现场（`runtime/fault_state.h`）：**入口登记一次**（⛔ 不是每块 / 每帧）。
     //   `block_ea` 指向本函数的 `ea` ⇒ fault 时读到的就是当前派发块的 EA（lifted 代码不逐条更新
-    //   `cpu_.eip`）；寄存器真源在 `regs_`（块边界同步的那一份）。收口处清除。
+    //   `cpu_.eip`）。★ A′：`%st` 与 `cpu_` 是同一份内存 ⇒ `cpu_` 就是活现场，`regs = nullptr`
+    //   + `regs_aliased_cpu = true`（打印时不再尝试整块搬运）。收口处清除。
     GuestFaultSite fault_site;
     fault_site.cpu = &cpu_;
-    fault_site.regs = &regs_;
+    fault_site.regs = nullptr;
+    fault_site.regs_aliased_cpu = true;
     fault_site.block_ea = &ea;
     fault_site.stub_page = stub_page;
     fault_site.stub_span = stub_span;
@@ -582,9 +580,8 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
                 ++win_.sampled;
             }
         }
-        // ★ 块边界的第一件事：把 lifted 侧的寄存器现场同步进 `cpu_`（宿主侧逻辑读 cpu）。
-        //   ⛔ 反方向的同步只在宿主侧真的改过 cpu 之后做（下面 Pump::Handled 的三处）。
-        syncCpuFromRegs();
+        // ★ 块边界：lifted 代码已经把寄存器写进 `cpu_`（`%st` 别名）⇒ 这里只定 `cpu_.eip`。
+        //   ⛔ A′ 之前这里是一次 `liftRegsToCpu`（22 条/派发）；现在结构上不存在。
         cpu_.eip = ea;
 
         // ---- ⓪− 控制层闸门（`--control-root`；缺省 nullptr ⇒ 只有一次判空）----
@@ -592,7 +589,7 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         //     此刻 `cpu_` 已与 lifted 侧一致、`ea` = 本轮块入口、没有 in-flight shim。
         //   ★ **只写一个数据槽的语义**：`serve()` 动宿主对象（时钟冻结 / `postQuit` / 置停标志），
         //     唯一会改 guest 内存的是 `global-set`（主线程在这里写**一个** global 数据槽；⛔ 不写
-        //     `cpu_` / `regs_`）⇒ 返回后**不需要**反向同步；下一块从内存重新加载，写完立刻可见。
+        //     `cpu_`）⇒ 返回后**不需要**反向同步；下一块从内存重新加载，写完立刻可见。
         //     暂停对 guest 不可见（寄存器现场没被改）。
         //   ★ 返回 true = 已置停（客户端 `quit` / idle / orphan）⇒ 立即收口，⛔ 不再进下一块。
         if (control_ != nullptr &&
@@ -696,8 +693,8 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
                 : Pump::NotHandled;
         if (pumped == Pump::Stop) break;
         if (pumped == Pump::Handled) {
-            // 泵可能改了 esp / eip / 寄存器（铺帧 / 恢复现场 / SEH 转移）⇒ 反向同步一次。
-            syncRegsFromCpu();
+            // 泵可能改了 esp / eip / 寄存器（铺帧 / 恢复现场 / SEH 转移）—— 它改的就是 `cpu_`
+            // 本身（A′：`%st` 已是别名）⇒ 反向同步不需要了，只要把块 EA 接上。
             ea = cpu_.eip;
             continue;
         }
@@ -714,23 +711,22 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
 
         // ---- ④ `--accept-recovery-dialog` 的默认"绕过"（EAX := 0；machine.cpp:1369-1376）----
         //   ★ 这是默认档就改写 guest 寄存器的钩子（T2 §1.2 #14）：不实现它 boot 会弹系统框并挂住。
-        //   只应用一次；`regs_` 是寄存器真源 ⇒ 两个都写。
+        //   只应用一次；`cpu_` 就是寄存器真源（A′：`%st` 别名）⇒ 只写这一处。
         if (!recovery_bypass_checked_ && ea == kRecoveryCheckEa) {
             recovery_bypass_checked_ = true;
             recovery_bypass_prior_eax_ = cpu_.eax();
             cpu_.eax() = 0;
-            regs_.r[0] = 0;  // EAX 在 LiftRegs 的 +0（`lift_abi.h:28` 的 GprIndex 顺序）
             recovery_bypass_applied_ = true;
         }
 
         // ---- ④' `--skip-logo`：一次性 latch，与解释器**同一格内存**（真源 `machine.cpp:1377-1401`）----
         //   ★ 钩子点是 `0x004BAA33`，不是解释器的 `0x004BAA37`（理由见 `aot_host.h` 的常量注释：
         //     0x4BAA37 只是同函数内部块，派发表里没有它 ⇒ 挂那里**永不命中**）。
-        //   ★ 此刻 `syncCpuFromRegs()`（循环头）已把 lifted 侧寄存器同步进 `cpu_` ⇒ `cpu_.eax()` 就是
+        //   ★ 此刻 `cpu_` 已经是 lifted 侧的最新现场（A′：`%st` 别名）⇒ `cpu_.eax()` 就是
         //     `sub_415640`（`T_Command` 构造）的返回值；`0x4BAA33` → `0x4BAA37` 之间只有一条
         //     `jmp short`（无语义）⇒ 在这里写 `+0x5EB5C` 与解释器在 `0x4BAA37` 写**逐位等价**，
         //     而且同样发生在 `0x4BAA3A` 的 `mov ds:dword_55E1BC, eax`（指针发布）之前。
-        //   ★ 只写 **guest 内存**：不改 eip / 不改任何寄存器 ⇒ 不需要反向同步 `regs_`。
+        //   ★ 只写 **guest 内存**：不改 eip / 不改任何寄存器 ⇒ 不需要任何寄存器同步。
         //   ★ "初值不是 1" / "对象不可写"两条异常分支照解释器保留（⛔ 不静默）。
         if (skip_logo_ && !skip_logo_checked_ && ea == kSkipLogoHookEa) {
             skip_logo_checked_ = true;
@@ -774,7 +770,6 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
                     // 重算，⛔ 不拿旧 now 再判一次（否则周期定时器会按"旧时刻"空转重复触发）。
                     timer_now_hint = clock_.now100ns();
                     timer_due_hint = earliestTimerDue();
-                    syncRegsFromCpu();
                     ea = cpu_.eip;
                     continue;
                 }
@@ -788,7 +783,7 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         //   ★ 为什么是**块边界**、而且正好在**这一格**（`aot_run.cpp:AotHost::run` 的 for 循环，
         //     ⑤ 定时器之后、⑥ 分派之前）：
         //     ① `pump()` 会**铺一个 guest 帧**（`sub_4B6C30`）⇒ 它只能在"宿主与 guest 之间"的
-        //        边界上做。循环头刚 `syncCpuFromRegs()`（lifted 侧现场 → `cpu_`）⇒ 此刻
+        //        边界上做。`cpu_` 就是 lifted 侧现场（A′：`%st` 别名）⇒ 此刻
         //        `pump()` 里的 `capture()`（`audio.cpp`）拿到的是一份**自洽**的 guest 现场；
         //        若在派发中途做，`capture()` 会存下"半个块"的寄存器。
         //     ② 在 ⓪/①/②/⑤ 之后：那些步骤会 `continue`（续延点 / 定时器铺帧 / 控制层置停）⇒
@@ -830,12 +825,11 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
                 const AudioPump ap = audio_.pump();
                 audio_pump_.noteCalled(cpu_.insns);
                 if (ap == AudioPump::Suspended) {
-                    // ★ 与解释器**同一个形状**，但 AOT 多一步：`pump()` 只改 `cpu_`（`capture` /
-                    //   `restore` 都在 `cpu_` 上），而 lifted 代码的真源是 `regs_` ⇒ 必须
-                    //   `syncRegsFromCpu()` 把"新 eip / 借走的 esp / 新 fs 现场"回读进 `regs_`，
-                    //   再把 `ea` 指到 `sub_4B6C30`。解释器没有这一步是因为它直接跑 `cpu_`。
-                    //   ⛔ 少了这一步 = 生成代码从**旧现场**继续 ⇒ 借用的 `[esp]` / 续延点全丢。
-                    syncRegsFromCpu();
+                    // ★ 与解释器**同一个形状**：`pump()` 只改 `cpu_`（`capture` / `restore` 都在
+                    //   `cpu_` 上）。A′ 之后 lifted 代码的真源**就是** `cpu_`（`%st` 别名）⇒
+                    //   不需要任何回读，只要把 `ea` 指到 `sub_4B6C30`。
+                    //   （A′ 之前这里要 `syncRegsFromCpu()` 把新 eip / 借走的 esp / 新 fs 现场
+                    //    抄回 `regs_`，否则生成代码从旧现场继续、借用的 `[esp]` / 续延点全丢。）
                     ea = cpu_.eip;
                     continue;
                 }
@@ -908,7 +902,7 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
             const bool shim_timed = (win_.on || frame_prof_.on) && def != nullptr;
             std::uint64_t shim_wall_t0 = 0;
             if (shim_timed) shim_wall_t0 = windowNowNs();
-            const std::uint32_t next = ::lift_shim_id(shim_id1, ea, &regs_, &cpu_);
+            const std::uint32_t next = ::lift_shim_id(shim_id1, ea, liftRegsView(cpu_), &cpu_);
             if (shim_timed) {
                 const std::uint64_t shim_dt = windowNowNs() - shim_wall_t0;
                 if (win_.on) win_.noteShim(def_id, shim_dt);
@@ -979,7 +973,7 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         ++r.lifted_calls;
         profileDispatchSample(ea);
         if (win_sample) win_.noteBoundary(win_a, win_b);
-        const std::uint32_t next = fn(&regs_, mem_.host(0), ea, &cpu_);
+        const std::uint32_t next = fn(liftRegsView(cpu_), mem_.host(0), ea, &cpu_);
         if (win_sample) win_.noteLift(win_b, windowNowNs());
         if (next == ::kLiftHalt) {
             // 生成物里的停机出口：`lift_one` 的 false / `lift_stop`（T1c 的口径）。
@@ -1004,7 +998,7 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     // ★ fault 现场到这里失效（`ea` 是栈上局部变量）⇒ 先摘掉，⛔ 不让收口之后的宿主侧 fault
     //   读到一份悬垂的块 EA / 过期的寄存器。
     clearGuestFaultSite();
-    syncCpuFromRegs();
+    // ★ A′：收口时 `cpu_` 已经是 lifted 侧的最终现场（`%st` 别名）⇒ 不需要回搬。
     // ★ 窗口 profile：配方只写了 `profile_begin` 而没写 `profile_end`（或 run 在窗口中途收口）
     //   ⇒ **照样打表 + 关闸门**（⛔ 不静默丢数据；与解释器"未闭合也打印"同口径）。
     //   ★ 收口时还开着 ⇒ 先打**一行** stderr（需求单「设计」第 2 条：未闭合在 run 收口打一行 warn；

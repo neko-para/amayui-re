@@ -10,7 +10,7 @@
 ;   4D4B63 mov [esi+0FCh],eax · 4D4B69 pop esi · 4D4B6A retn 4
 ;
 ; 契约（与 `lift_436D00.ll` 同一份）：
-;   %st  = LiftRegs*：r[0..7] = EAX,ECX,EDX,EBX,ESP,EBP,ESI,EDI（+0..+28），eflags 在 +32
+;   %st  = void*（AOT 臂指向 cpu_.r[0]；夹具传真 LiftRegs）：r[0..7] = EAX,ECX,EDX,EBX,ESP,EBP,ESI,EDI（+0..+28），eflags 在 +32
 ;   %mem = guest EA 0 的宿主基址（EA 一律 zext 到 i64 再接 GEP）
 ;   %ea  = **resume EA**（本函数 3 个入口：0x4D4B40 / 0x4D4B5D / 0x4D4B63）
 ;   %cpu = X86*，只给 lift_note_write 用

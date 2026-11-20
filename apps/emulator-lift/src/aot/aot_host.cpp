@@ -1179,7 +1179,7 @@ void AotHost::printSlowFrames(std::FILE* out) const {
 // =====================================================================================
 // 控制层（S2/S3/S4 + typed global）的**主线程取数口**：全部在主线程被调（`Control::serve` 在汇点里跑）
 //   ★ 这里只**读**宿主 / guest；唯一的写 = `controlGlobalSet`（一个 global 数据槽，经
-//     `runtime/script_globals.h`）。⛔ 不改 `cpu_` / `regs_`、⛔ 不进执行循环。
+//     `runtime/script_globals.h`）。⛔ 不改 `cpu_`、⛔ 不进执行循环。
 // =====================================================================================
 bool AotHost::presentGateThunk(void* user) {
     auto* self = static_cast<AotHost*>(user);
@@ -1259,7 +1259,7 @@ void AotHost::controlOnResume() {
 // =====================================================================================
 // `global-get` / `global-set`（控制层的主线程执行口）
 //   ★ 唯一实现在 `runtime/script_globals.cpp`（寻址 / ENC-DEC / 类型编码）；这里只转发 `mem_`。
-//   ★ 写的是**一个 guest 数据槽**：⛔ 不碰 `cpu_` / `regs_`，下一块从内存重新加载。
+//   ★ 写的是**一个 guest 数据槽**：⛔ 不碰 `cpu_`，下一块从内存重新加载。
 // =====================================================================================
 GlobalError AotHost::controlGlobalGet(GlobalKind kind, std::uint32_t id, GlobalValue* out) {
     GlobalError err = GlobalError::None;

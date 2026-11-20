@@ -25,6 +25,12 @@ namespace {
 // ★ `lift_one` 的解码缓存：**每线程一份**（缓存不是线程安全的；`lift_one` 今天只在 AOT 主线程上
 //   被 lifted 代码调用 —— 音频 feeder 走的是解释器块缓存，不经过这里）。见 `decode_cache.h` 头注。
 thread_local DecodeCache g_liftOneDecodeCache;
+
+// ★ A′ 的**唯一**别名判据（`lift_shim*` 与 `lift_one` 共用）：`%st` 是不是就是 `cpu_.r[0]`。
+//   true ⇒ 两处整块搬运是自拷贝，**跳过**；false ⇒ 调用方是生成物夹具 / 音频 feeder（真
+//   `LiftRegs`）⇒ 搬运路径逐字不变。判据只是两个 `void*` 的比较（⛔ 不解引用、⛔ 不产生
+//   指向 `X86` 的 `LiftRegs*`）。
+bool regsAliasCpu(const void* st, X86& cpu) { return st == liftRegsView(cpu); }
 }  // namespace
 // 可写入口只给 `lift_one`（下面）；对外只有头文件里的只读 `liftOneDecodeCache()`（读数用）。
 DecodeCache& liftOneDecodeCacheMutable() { return g_liftOneDecodeCache; }
@@ -58,11 +64,20 @@ std::uint64_t liftOneProfileNowNs() {
 
 // `.ll` 里硬编码的偏移假设（`tests/ir/lift_436D00.ll` 只用 LiftRegs，不用 X86；
 // 下面这组是**搬运函数**的对照面 —— 它们一旦漂了，搬运函数的逐字段实现仍然对，
-// 但"LiftRegs 和 X86 头部不是同一布局"这条前提就变了，必须显式看见）。
+// 但"`LiftRegs` 和 `X86` 头部逐字节同布局"这条前提就变了，必须显式看见）。
+// ★ A′（2026-11-20）：`eip` 与 `eflags` 互换 ⇒ `r[8]@0..31 / eflags@32 / eip@36`；`seg@40` 不变。
 static_assert(offsetof(lift::X86, r) == 0, "X86.r 必须在 +0");
-static_assert(offsetof(lift::X86, eip) == 32, "X86.eip 必须在 +32（LiftRegs 没有这个字段）");
-static_assert(offsetof(lift::X86, eflags) == 36, "X86.eflags 必须在 +36（LiftRegs 在 +32）");
+static_assert(offsetof(lift::X86, eflags) == 32, "X86.eflags 必须在 +32（LiftRegs 的 eflags）");
+static_assert(offsetof(lift::X86, eip) == 36, "X86.eip 必须在 +36（紧跟在 LiftRegs 之后）");
 static_assert(sizeof(lift::X86::r) == 32, "X86.r 必须是 8 个 dword");
+// ★ 防重叠 / 别名契约：`LiftRegs`（r + eflags = 36 B）必须**恰好**覆盖到 `eip` 为止，`eip` 再占
+//   4 B 到 `seg`。设计单写的单条 `offsetof(r) + sizeof(LiftRegs) == offsetof(seg)` 少算了 `eip`
+//   的 4 B（0+36=36 != 40）⇒ 拆成两条等价判据（既钉"无重叠"，也钉"中间没有填充"）。
+static_assert(offsetof(lift::X86, r) + sizeof(LiftRegs) == offsetof(lift::X86, eip),
+              "LiftRegs 必须恰好覆盖到 eip（AOT 别名 `%st` 的前 36 B）");
+static_assert(offsetof(lift::X86, r) + sizeof(LiftRegs) + sizeof(lift::X86::eip) ==
+                  offsetof(lift::X86, seg),
+              "eip 之后必须紧跟 seg（无填充 ⇒ `%st` 别名 `cpu_` 的布局前提）");
 
 // ★ D49 / 检查点 2：**x87 状态偏移是生成代码契约**（唯一一份常量在 `runtime/x87_layout.h`）。
 //   发射器把 x87 状态读写发成 `getelementptr i8, ptr %cpu, i64 <kXxx>` ⇒ 这里的每个常量都必须
@@ -133,7 +148,7 @@ extern "C" void lift_tick(void* cpu_ptr, std::uint32_t n) {
 // ---------------------------------------------------------------------------------------
 // ② lift_one —— 单指令执行（语义全部在 Decoder + execInsn，这里只做搬运与 eip 保护）
 // ---------------------------------------------------------------------------------------
-extern "C" bool lift_one(void* cpu_ptr, LiftRegs* st, std::uint32_t ea) {
+extern "C" bool lift_one(void* cpu_ptr, void* st, std::uint32_t ea) {
     if (!cpu_ptr || !st) {
         std::fprintf(stderr, "[lift_one] 调用方传了空指针（cpu=%p st=%p ea=%08X）\n", cpu_ptr,
                      static_cast<void*>(st), ea);
@@ -178,7 +193,8 @@ extern "C" bool lift_one(void* cpu_ptr, LiftRegs* st, std::uint32_t ea) {
     };
 
     // ① 状态进 X86（与 `lift_shim` 的第 ① 步同口径；lifted 侧的状态在 `*st` 里）。
-    lift::liftRegsToCpu(*st, cpu);
+    //   ★ A′：AOT 臂 `st` 就是 `cpu.r[0]` 的别名 ⇒ 这步是自拷贝，**跳过**（非别名路径逐字不变）。
+    if (!lift::regsAliasCpu(st, cpu)) lift::liftRegsToCpu(*static_cast<const LiftRegs*>(st), cpu);
     // ② eip：**单条执行**不许打乱生成器的块内推进 ⇒ 执行前设成这一条的 EA、执行后复原。
     const std::uint32_t saved_eip = cpu.eip;
     cpu.eip = ea;
@@ -225,7 +241,8 @@ extern "C" bool lift_one(void* cpu_ptr, LiftRegs* st, std::uint32_t ea) {
     }
     cpu.eip = saved_eip;
     // ③ 整块回读（⛔ 不按"这条只写 eax"精简：execInsn 可能改任何 GPR / EFLAGS）。
-    lift::liftCpuToRegs(cpu, *st);
+    //   ★ A′：别名时是自拷贝 ⇒ 跳过（`execInsn` 可能改内存，块内的整份失效照旧在生成器里做）。
+    if (!lift::regsAliasCpu(st, cpu)) lift::liftCpuToRegs(cpu, *static_cast<LiftRegs*>(st));
     profMark(3);  // D 回读
     // ★ 采样式 profile 的**出口**：只把 (EA, 总 ns, op, 四段 ns) 交给宿主。
     //   ⛔ 不改返回值、不改任何状态；总 ns = 四段之和（同一次取时链）。
@@ -343,7 +360,7 @@ namespace {
 // ★ `lift_shim` / `lift_shim_id` 的**同一份**实现（见 lift_abi.h 的两个入口契约）。
 //   `id_plus_one == 0` ⇒ 不知道 id ⇒ 走"块缓存 peek → 注册表反查"的老路（解释器臂逐字不变）；
 //   `id_plus_one != 0` ⇒ AOT 的派发循环已经把 id 解析好了 ⇒ **零反查**（不拿 shims 锁、不扫 defs_）。
-std::uint32_t liftShimCommon(std::uint32_t id_plus_one, std::uint32_t stub_ea, LiftRegs* st, void* cpu_ptr) {
+std::uint32_t liftShimCommon(std::uint32_t id_plus_one, std::uint32_t stub_ea, void* st, void* cpu_ptr) {
     if (!cpu_ptr || !st) {
         // ⛔ 不静默：这是调用方的编程错误（trampoline 只该把 shim EA + 有效状态递进来）
         std::fprintf(stderr, "[lift_shim] 调用方传了空指针（cpu=%p st=%p）\n", cpu_ptr, static_cast<void*>(st));
@@ -353,7 +370,8 @@ std::uint32_t liftShimCommon(std::uint32_t id_plus_one, std::uint32_t stub_ea, L
     lift::X86& cpu = *static_cast<lift::X86*>(cpu_ptr);
     // ① 物化：8 GPR + eflags。`invoke` 第一条就 `mem->rd32(cpu.esp())` 取返回地址；
     //    eip 只是诊断面，但口径要与解释器一致 —— dispatcher 命中 shim 块时 cpu.eip 就是这个桩 EA。
-    lift::liftRegsToCpu(*st, cpu);
+    //    ★ A′：AOT 臂 `st == liftRegsView(cpu)` ⇒ 自拷贝，跳过（非别名路径逐字不变）。
+    if (!lift::regsAliasCpu(st, cpu)) lift::liftRegsToCpu(*static_cast<const LiftRegs*>(st), cpu);
     cpu.eip = stub_ea;
     // ② 桩 EA → id。★ 为什么**不**用 `(stub_ea - 桩页) >> 2`（任务书 §2.1 的字面公式）：
     //    id 是**注册序**（`shims.cpp:169/238`），stub 槽是**导入序 / 发号序**（`shims.cpp:319/340`），
@@ -389,18 +407,19 @@ std::uint32_t liftShimCommon(std::uint32_t id_plus_one, std::uint32_t stub_ea, L
         lift::trapUnimplemented(cpu, "(lift)", "lift_shim", "invokeById 找不到这个 id", ret_ea, stub_ea);
     }
     // ③ 整块回读（⛔ 不按"框架只写 eax/esp/eip"精简：QueryPerformanceCounter 自己写 EDX）
-    lift::liftCpuToRegs(cpu, *st);
+    //    ★ A′：别名时是自拷贝，跳过。
+    if (!lift::regsAliasCpu(st, cpu)) lift::liftCpuToRegs(cpu, *static_cast<LiftRegs*>(st));
     // ④ running == false ⇒ 停机哨兵（trampoline 负责报 stop_kind / stop_why）
     return cpu.running ? cpu.eip : ::kLiftHalt;
 }
 
 }  // namespace
 
-extern "C" std::uint32_t lift_shim(std::uint32_t stub_ea, LiftRegs* st, void* cpu_ptr) {
+extern "C" std::uint32_t lift_shim(std::uint32_t stub_ea, void* st, void* cpu_ptr) {
     return liftShimCommon(0u, stub_ea, st, cpu_ptr);
 }
 
-extern "C" std::uint32_t lift_shim_id(std::uint32_t id_plus_one, std::uint32_t stub_ea, LiftRegs* st,
+extern "C" std::uint32_t lift_shim_id(std::uint32_t id_plus_one, std::uint32_t stub_ea, void* st,
                                       void* cpu_ptr) {
     return liftShimCommon(id_plus_one, stub_ea, st, cpu_ptr);
 }
@@ -430,7 +449,7 @@ LiftDynLookup liftDynLookup = nullptr;
 std::atomic<bool> liftDynCountOn{false};
 std::atomic<std::uint64_t> liftDynCalls{0};
 
-extern "C" std::uint32_t lift_dyn(void* cpu_ptr, LiftRegs* st, std::uint32_t ea) {
+extern "C" std::uint32_t lift_dyn(void* cpu_ptr, void* st, std::uint32_t ea) {
     if (!cpu_ptr || !st) {
         std::fprintf(stderr, "[lift_dyn] 调用方传了空指针（cpu=%p st=%p ea=%08X）\n", cpu_ptr,
                      static_cast<void*>(st), ea);

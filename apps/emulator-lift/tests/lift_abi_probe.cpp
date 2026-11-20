@@ -2,8 +2,9 @@
 //
 // 判据（红了意味着什么）：
 //   ① **布局**：`LiftRegs` 是 `.ll` 硬编码的那一份（sizeof == 36、r 在 +0、eflags 在 +32）；
-//      `X86` 的 r/eip/eflags 在 +0/+32/+36、r 是 32 B。两者**不是**同一布局 ——
-//      这条差异是搬运函数必须逐字段写的理由，也是 `.ll` 只认 LiftRegs 的理由。
+//      `X86` 的 r/eflags/eip 在 +0/+32/+36、r 是 32 B。★ A′ 之后前 36 B **逐字节同布局**
+//      （`LiftRegs{r,eflags}` 恰好覆盖到 `eip`）—— 这是 AOT 把 `%st` 指到 `cpu_.r[0]` 的
+//      结构前提；搬运函数仍然逐字段写（正确性不押在布局上）。
 //   ② **搬运**：先把 X86 置 8 个互不相同的值 + eflags，`liftCpuToRegs`；
 //      再把 X86 清零、`liftRegsToCpu` —— 8 个寄存器与 eflags 全部按字段回得来。
 //      （⛔ 不用 memcpy/offsetof 当正确性依据：这条用例只认逐字段对应。）
@@ -40,9 +41,14 @@ int main() {
     LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(offsetof(::LiftRegs, r)), 0u);
     LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(offsetof(::LiftRegs, eflags)), 32u);
     LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(offsetof(lift::X86, r)), 0u);
-    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(offsetof(lift::X86, eip)), 32u);
-    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(offsetof(lift::X86, eflags)), 36u);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(offsetof(lift::X86, eflags)), 32u);
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(offsetof(lift::X86, eip)), 36u);
     LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(sizeof(lift::X86::r)), 32u);
+    // ★ A′ 防重叠：`LiftRegs`（r + eflags = 36 B）恰好覆盖到 `eip`，`eip` 再 4 B 到 `seg`。
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(offsetof(lift::X86, r) + sizeof(::LiftRegs)),
+                      static_cast<std::uint32_t>(offsetof(lift::X86, eip)));
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(offsetof(lift::X86, r) + sizeof(::LiftRegs) + 4u),
+                      static_cast<std::uint32_t>(offsetof(lift::X86, seg)));
 
     g_current_case = "regs-roundtrip";
     {

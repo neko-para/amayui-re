@@ -10,7 +10,7 @@
 
 #include "runtime/lift_abi.h"
 
-extern "C" std::uint32_t lift_cc_436D00(::LiftRegs*, std::uint8_t*, std::uint32_t, void*) {
+extern "C" std::uint32_t lift_cc_436D00(void*, std::uint8_t*, std::uint32_t, void*) {
     return 0xFFFFFFFFu;  // 哨兵：trampoline 立刻结束（缺 clang 时测试体已 SKIP）
 }
 
@@ -18,42 +18,42 @@ extern "C" std::uint32_t lift_cc_436D00(::LiftRegs*, std::uint8_t*, std::uint32_
 //   （`0x41880A` / `0x4C6E64`）也在 `LIFT_IR_CASE_GEN` 下引用同名入口 —— 而缺 clang 时
 //   `LIFT_IR_CASE_GEN` 仍是定义的（它由 CMake 无条件给 `lift-ir-gen-*`）⇒ 这里必须有同名符号，
 //   否则那两条 target 的**链接**会断（被测的 `.ll` 不在，跑不到这一段：测试体先 LIFT_SKIP(77)）。
-extern "C" std::uint32_t lift_cc_41880A(::LiftRegs*, std::uint8_t*, std::uint32_t, void*) {
+extern "C" std::uint32_t lift_cc_41880A(void*, std::uint8_t*, std::uint32_t, void*) {
     return 0xFFFFFFFFu;
 }
-extern "C" std::uint32_t lift_cc_4C6E64(::LiftRegs*, std::uint8_t*, std::uint32_t, void*) {
+extern "C" std::uint32_t lift_cc_4C6E64(void*, std::uint8_t*, std::uint32_t, void*) {
     return 0xFFFFFFFFu;
 }
-extern "C" std::uint32_t lift_cc_4E4B98(::LiftRegs*, std::uint8_t*, std::uint32_t, void*) {
+extern "C" std::uint32_t lift_cc_4E4B98(void*, std::uint8_t*, std::uint32_t, void*) {
     return 0xFFFFFFFFu;
 }
 
 // ★ 2026-11-15 · S3-b：条件融合（`cmp`/`test` + `jcc`）的六条差分 case 的入口。理由同上：
 //   缺 clang 时 `LIFT_IR_CASE_GEN` 仍然有定义（CMake 无条件给 `lift-ir-gen-*`）⇒ 必须有同名符号。
-extern "C" std::uint32_t lift_cc_47A7F3(::LiftRegs*, std::uint8_t*, std::uint32_t, void*) {
+extern "C" std::uint32_t lift_cc_47A7F3(void*, std::uint8_t*, std::uint32_t, void*) {
     return 0xFFFFFFFFu;
 }
-extern "C" std::uint32_t lift_cc_49EE49(::LiftRegs*, std::uint8_t*, std::uint32_t, void*) {
+extern "C" std::uint32_t lift_cc_49EE49(void*, std::uint8_t*, std::uint32_t, void*) {
     return 0xFFFFFFFFu;
 }
-extern "C" std::uint32_t lift_cc_404DEA(::LiftRegs*, std::uint8_t*, std::uint32_t, void*) {
+extern "C" std::uint32_t lift_cc_404DEA(void*, std::uint8_t*, std::uint32_t, void*) {
     return 0xFFFFFFFFu;
 }
-extern "C" std::uint32_t lift_cc_4200F7(::LiftRegs*, std::uint8_t*, std::uint32_t, void*) {
+extern "C" std::uint32_t lift_cc_4200F7(void*, std::uint8_t*, std::uint32_t, void*) {
     return 0xFFFFFFFFu;
 }
-extern "C" std::uint32_t lift_cc_4DD199(::LiftRegs*, std::uint8_t*, std::uint32_t, void*) {
+extern "C" std::uint32_t lift_cc_4DD199(void*, std::uint8_t*, std::uint32_t, void*) {
     return 0xFFFFFFFFu;
 }
-extern "C" std::uint32_t lift_cc_4D19D3(::LiftRegs*, std::uint8_t*, std::uint32_t, void*) {
+extern "C" std::uint32_t lift_cc_4D19D3(void*, std::uint8_t*, std::uint32_t, void*) {
     return 0xFFFFFFFFu;
 }
 
 // ★ 2026-11-15 · S3-c：`div`/`idiv` 与 flags 的两条 oracle（`0x48D500` / `0x419F0D`，见 §2d）。
 //   理由同上：缺 clang 时 `LIFT_IR_CASE_GEN` 仍然有定义 ⇒ 必须有同名符号，否则链接断。
-extern "C" std::uint32_t lift_cc_48D500(::LiftRegs*, std::uint8_t*, std::uint32_t, void*) {
+extern "C" std::uint32_t lift_cc_48D500(void*, std::uint8_t*, std::uint32_t, void*) {
     return 0xFFFFFFFFu;
 }
-extern "C" std::uint32_t lift_cc_419F0D(::LiftRegs*, std::uint8_t*, std::uint32_t, void*) {
+extern "C" std::uint32_t lift_cc_419F0D(void*, std::uint8_t*, std::uint32_t, void*) {
     return 0xFFFFFFFFu;
 }

@@ -38,14 +38,17 @@ void printGuestFaultSite(const GuestFaultSite& site, std::FILE* out) {
         return;
     }
     X86& cpu = *site.cpu;
-    // ★ 区分"活现场在哪一份状态里"（理由见头注）：
-    //   · eip 落在桩页 ⇒ fault 在 shim 调用里 ⇒ `cpu_` 是活的（lift_shim 入口已同步）；
-    //   · 否则 ⇒ lifted 代码 / lift_one 的现场 ⇒ `LiftRegs` 是块边界的真源。
+    // ★ 活现场在哪一份状态里（理由见头注）：
+    //   · `regs_aliased_cpu`（AOT 主循环）⇒ `%st` 就是 `cpu_.r[0]` ⇒ 块内 / shim / lift_one 都在
+    //     `cpu_` 里，**一次搬运都不做**；
+    //   · 非别名（音频 feeder）⇒ eip 落在桩页 = fault 在 shim 里（`cpu_` 已同步）；否则用它的
+    //     `LiftRegs` 块边界值物化（= 该指令执行前的寄存器，正是"哪条指令 / 哪个基址"要看的）。
     const bool in_shim = inStubPage(site, cpu.eip);
-    const bool use_lifted = !in_shim && site.regs != nullptr;
+    const bool use_lifted = !in_shim && site.regs != nullptr && !site.regs_aliased_cpu;
     if (use_lifted) liftRegsToCpu(*site.regs, cpu);  // 只搬 8 GPR + eflags（eip 原样）
+    const bool live_block = !in_shim && (site.regs_aliased_cpu || site.regs != nullptr);
     std::fprintf(out, "  eip        : %08X%s\n", cpu.eip,
-                 use_lifted ? "  (AOT: 当前块的 EA；lifted 代码不逐条更新 eip)" : "");
+                 live_block ? "  (AOT: 当前块的 EA；lifted 代码不逐条更新 eip)" : "");
     if (in_shim) {
         std::fprintf(out, "  block      : (eip 在 shim 桩页 ⇒ 当前在 shim 调用里，块 EA 未记录)\n");
     } else if (site.block_ea != nullptr) {
@@ -54,10 +57,13 @@ void printGuestFaultSite(const GuestFaultSite& site, std::FILE* out) {
         std::fprintf(out, "  block      : lift_cc_%08X\n", cpu.eip);
     }
     std::fprintf(out, "  regs       : %s\n",
-                 use_lifted ? "lifted (LiftRegs；块边界的 8 GPR + eflags —— 若 fault 在 lift_one 里，"
-                              "这是该指令执行前的值)"
-                            : (in_shim ? "cpu (fault 在 shim 调用里；lift_shim 入口已同步)"
-                                       : "cpu (没有 LiftRegs 可读)"));
+                 site.regs_aliased_cpu
+                     ? "cpu（AOT: %st 与 cpu_ 同一份内存 ⇒ 块内即活现场）"
+                     : (in_shim ? "cpu (fault 在 shim 调用里；lift_shim 入口已同步)"
+                                : (site.regs != nullptr
+                                       ? "lifted (LiftRegs；块边界的 8 GPR + eflags —— 若 fault 在 "
+                                         "lift_one 里，这是该指令执行前的值)"
+                                       : "cpu (没有 LiftRegs 可读)")));
     dumpRegisters(cpu, out);
     dumpGuestStack(cpu, out, 32);
 }

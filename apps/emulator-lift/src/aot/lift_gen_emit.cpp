@@ -5681,7 +5681,7 @@ std::string emitPrologue(const GenClosureStats& closure, const GenEmitStats* sta
                          const GenIrTarget& ir_target) {
     std::string text;
     text += "; emulator-lift · Shape A / T1c —— 由 `emulator-lift-gen` 生成，⛔ 不手改、不 commit。\n";
-    text += "; 契约：%st = LiftRegs*（r[0..7] + eflags@+32）；%mem = guest EA 0 的宿主基址；\n";
+    text += "; 契约：%st = void*（AOT 臂 = cpu_.r[0] 的别名；夹具 = 真 LiftRegs；r[0..7] + eflags@+32）；%mem = guest EA 0 的宿主基址；\n";
     text += ";       %ea = resume EA；%cpu = X86*；返回值 = 下一个 guest EA。\n";
     text += "; 不 inline 的指令 = 一次 @lift_one（语义在解释器里）；\n";
     text += "; 指令计数 = 块边界 / 宿主调用前的 @lift_tick（D2 / D2b：只记条数，不推进虚拟时间）。\n";

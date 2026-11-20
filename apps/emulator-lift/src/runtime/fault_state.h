@@ -15,13 +15,12 @@
 //   ③ **零分配**：fault 在平台异常 / 信号上下文里被调用（`memory.h` 的 `FaultHook` 注释）⇒
 //      只许 `fprintf` / 读已提交的 guest 页；⛔ 不构造 `std::string`、⛔ 不碰 `.lst`。
 //
-// ★ 寄存器真源怎么选（这是 AOT 唯一的坑）：
-//   lifted 代码把 guest 状态放在 `LiftRegs`（`%st`）里，`cpu_` 只在**块边界 / shim 调用**才同步。
-//   所以 fault 可能发生在这三种现场，判据**不需要热路径记账**（用 eip 落在哪个区区分）：
-//   · 块内的直接访存（SAVE04 的 WRITE 就是这一类）⇒ eip == 当前块 EA，`LiftRegs` 是活现场；
-//   · `lift_shim` 里（eip == shim 桩 EA）⇒ `cpu_` 是活现场（`lift_shim` 入口已经 `liftRegsToCpu`）；
-//   · `lift_one` 里（eip == 那一条指令的 EA）⇒ `cpu_` 是活现场；我们用 `LiftRegs` 的块边界值
-//     （= 该指令**执行前**的寄存器，正是"哪条指令 / 哪个基址"要看的），并在行里显式标注来源。
+// ★ 寄存器真源（A′ 之后，2026-11-20）：
+//   AOT 主循环的 `%st` **直接指向 `cpu_.r[0]`**（`lift_abi.h` 的 `liftRegsView`）⇒ `cpu_` 的内存
+//   **就是** lifted 寄存器现场：块内直接访存 / `lift_shim` / `lift_one` 三种现场都读 `cpu_`，
+//   打印时**零搬运**。登记时 `regs = nullptr` + `regs_aliased_cpu = true` 把这件事显式化。
+//   音频 feeder 跑在自己的线程 / 自己的 `X86` 副本上，`%st` 是它私有的真 `LiftRegs`
+//   ⇒ `regs != nullptr`、`regs_aliased_cpu = false`，块内 fault 仍用块边界物化（旧口径不变）。
 //   ⇒ 输出里有一行 `regs       :` 说明这次用的是哪一份，⛔ 不假装两者等价。
 #pragma once
 
@@ -35,13 +34,15 @@ namespace lift {
 struct X86;
 
 // 一次 guest fault 的现场（每线程一份；由 `AotHost::run` 在入口登记、收口清除）。
-//   · `cpu`      = `AotHost::cpu_`（mem / eip / 宿主侧寄存器）；
-//   · `regs`     = `AotHost::regs_`（lifted 侧真源；块边界同步）；
+//   · `cpu`      = `AotHost::cpu_`（mem / eip / **活的 8 GPR + eflags**）；
+//   · `regs`     = 非别名调用方（音频 feeder）的真 `LiftRegs`；AOT 主循环恒 `nullptr`；
+//   · `regs_aliased_cpu` = true ⇒ `%st` 与 `cpu_` 是同一份内存（AOT 主循环）⇒ ⛔ 不要搬 `regs`；
 //   · `block_ea` = `AotHost::run` 里的 `ea` 局部变量地址（= 当前派发块 EA，⛔ 不逐条更新）；
 //   · `stub_page` / `stub_span` = 桩页范围（判"此刻在 shim 里"只用一次无符号减法，⛔ 不查表、不拿锁）。
 struct GuestFaultSite {
     X86* cpu = nullptr;
     const LiftRegs* regs = nullptr;
+    bool regs_aliased_cpu = false;
     const std::uint32_t* block_ea = nullptr;
     std::uint32_t stub_page = 0;
     std::uint32_t stub_span = 0;
