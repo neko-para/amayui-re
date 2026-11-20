@@ -59,3 +59,10 @@ cd apps/emulator-lift && ctest --test-dir out -R '^plugin-headless$' --output-on
   改动前 exe 手工 **1 红**. ⇒ 红/绿比 ≈ 6/2，支持"偶发 + 负载敏感"，不支持"确定性回归"。
 - 下一步（独立窗口，⛔ 不与构建抢 CPU）：按判据连跑 ≥10 次，记录机器负载；若仍偶发，再二分
   "30 s gate" 与 "C6 负缓存"两个假设（后者需保留 base exe 对照，已在 `.tmp/present-readback/aot-base`）。
+
+## 2026-11-20 win32 补充（形态不同：不是超时，是"走完了但没到 FIELD"）
+
+- main `19a13f8` 全量 `ctest`（137 条）：本子用例红，但形态与 mac 记的不同 —— `plugin/load-save-e2e: exit=0 timed_out=0`，红在 `tests/plugin_e2e.cpp:255 CHECK failed: reached_field` ⇒ **不是**"30 s gate timeout"，而是"脚本跑完了、`FIELD` 没到"。
+- 同一二进制 20 分钟内重跑 1 次 ⇒ **Passed 152.4 s**（同 `out`、同资产）⇒ 仍是偶发。
+- 新线索（来自 `SAVE07` 取证，`REQ-01M7WTVBD26FT8G2B14BR19CQN`）：同一个确认框（SBUNKI「要读取吗？」）**在轮询体入口当场点会被吞**（按下只跨 2 个读点；等 1 s 再点就进 FIELD，实测 4/4）⇒ 二分时先量"红那次确认点击的落点与它跨了几个读点"，不要只看 gate 超时（两种形态可能同因）。
+- 统计更新：win32 **1 红 1 绿**；累计红/绿 ≈ 7/3。
