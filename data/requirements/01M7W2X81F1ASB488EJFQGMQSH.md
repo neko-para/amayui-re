@@ -66,3 +66,9 @@ cd apps/emulator-lift && ctest --test-dir out -R '^plugin-headless$' --output-on
 - 同一二进制 20 分钟内重跑 1 次 ⇒ **Passed 152.4 s**（同 `out`、同资产）⇒ 仍是偶发。
 - 新线索（来自 `SAVE07` 取证，`REQ-01M7WTVBD26FT8G2B14BR19CQN`）：同一个确认框（SBUNKI「要读取吗？」）**在轮询体入口当场点会被吞**（按下只跨 2 个读点；等 1 s 再点就进 FIELD，实测 4/4）⇒ 二分时先量"红那次确认点击的落点与它跨了几个读点"，不要只看 gate 超时（两种形态可能同因）。
 - 统计更新：win32 **1 红 1 绿**；累计红/绿 ≈ 7/3。
+
+## 2026-11-20 win32 · 负载相关性（同一小时内两种形态都出现）
+
+- **全量 `ctest` 下 2/2 红**（两次都是 137 条一起跑：一次 `reached_field=false`、一次 `reason=load-save: gate timeout (load:field-2)`）；
+- **单独跑 `ctest -R '^plugin-headless$'` 1/1 绿**（Passed 152.4 s）。
+⇒ 支持"负载 / 时序敏感"，两种形态很可能同因（第二道确认的点击落点 / 读点跨度）—— 见上一条线索。
