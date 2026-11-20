@@ -31,9 +31,13 @@
 | 1 | **boot → TITLE 稳定** | 旧 `stress-boot` / `stress-title-steady` 的对应物；启动链有已知的装载长活 |
 | 2 | **打开 FELLOW** | `graphs/sn0000-quit.graph` 的注释：穿过一次 **~7–17 s 的同步长活**（nested guest call：窗口里一次 Present 都没有、指令照涨） |
 | 3 | **加载存档** | `title-loaddata` 那条路径；存档写入侧同类（缩略图 STH + 1 MB DAT ≈ 7 s） |
+| 4 | **SAVE05 移动（拖拽）** | 用户口径可复现的卡顿点；配方 `apps/emulator-lift/scripts/recipes/save05-move.plan` + 读数/口径 `docs/03-emulator/perf-bench-save05.md`（2026-11-20 / mac arm64；visible 历史档，hidden 待两臂重取）。判据 = 8 尖峰帧 Σwall + boundary ns/派发，⛔ 不用窗口 wall |
 
 ★ 全部**依赖输入系统**才能确定性到达那个屏：`await position` 的确定性门（`OBS-20261116-05`）+ 配方完成度判据
 （`REQ-01M7HP2YZ4CRMQHYVSS8HH611Z`，未走完 ⇒ 非 0 退出）⇒ **输入那部分落地后**再逐条补。
+
+★ 路径 4 先以**人工基准**落地（配方 + 文档 + 读数），**尚未接 `LIFT_STRESS` 自动档**；
+接自动档时按判据 3/4（`LIFT_STRESS=1` 注册、缺资产 `FATAL_ERROR`、永不满足的门必须失败）。
 
 ★ 度量口径：这些场景的特征是"**单帧执行大量指令**" ⇒ 读数用**单帧指令数 + 帧时间**
 （⛔ 不拿 `.ll` 行数当效率指标，`AGENTS.md` §12.6）；动态读数仍要 ≥3 对交错 A/B 取中位。
@@ -47,4 +51,5 @@
 
 ## 未做
 
-不实现（本单先立判据与驱动方式）；不删旧的 6 条（退役由 `REQ-01M7HQ57XV66FZQA5ECEGHWD71N` 的第 4 步安排）。
+不实现（本单先立判据与驱动方式）；路径 4 的 `LIFT_STRESS` 自动档未接；不删旧的 6 条
+（退役由 `REQ-01M7HQ57XV66FZQA5ECEGHWD71N` 的第 4 步安排）。
