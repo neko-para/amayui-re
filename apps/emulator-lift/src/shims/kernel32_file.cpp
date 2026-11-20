@@ -761,6 +761,10 @@ void createFile(X86& cpu, ShimCall& call, bool wide) {
         call.result = kInvalidHandleValue;
         return;
     }
+    // ★ C6 失效点：这一打开**新建**了文件（`exists` 是解析后、打开前的宿主事实）⇒ 旧的
+    //   负解析结论（[notfound] / [notdir]）作废。截断已有文件不改存在性 ⇒ 不需要。
+    //   （父目录按需创建的那次失效在 `Vfs::shadowPathForSegments(create_dirs=true)` 里。）
+    if (write_intent && !exists) cpu.vfs->invalidatePathCache();
 
     auto* st = new FileState{};
     st->fp = fp;
@@ -1291,6 +1295,8 @@ void shimDeleteFileA(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
+    // ★ C6 失效点：这次删除**拿掉了一条存在的路径**（影子 / AppData）⇒ 旧的负解析结论作废。
+    cpu.vfs->invalidatePathCache();
     call.result = 1;
 }
 
@@ -1348,6 +1354,8 @@ void shimMoveFileA(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
+    // ★ C6 失效点：源路径消失、目标路径出现 ⇒ 两条路径的旧负结论都作废。
+    cpu.vfs->invalidatePathCache();
     call.result = 1;
 }
 
@@ -1403,6 +1411,8 @@ void shimCopyFileA(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
+    // ★ C6 失效点：目标路径出现（AppData 目标不经影子解析；影子目标上面的 copy-up 分支也会 +1 代）。
+    cpu.vfs->invalidatePathCache();
     call.result = 1;
 }
 
@@ -1456,6 +1466,8 @@ void shimCreateDirectoryA(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
+    // ★ C6 失效点：目录出现（影子 / AppData 都算）⇒ 旧负结论作废。
+    cpu.vfs->invalidatePathCache();
     call.result = 1;
 }
 
@@ -1501,6 +1513,8 @@ void shimRemoveDirectoryA(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
+    // ★ C6 失效点：目录消失 ⇒ 旧负结论作废。
+    cpu.vfs->invalidatePathCache();
     call.result = 1;
 }
 
@@ -1775,6 +1789,8 @@ void shimGetTempFileNameA(X86& cpu, ShimCall& call) {
             return;
         }
         std::fclose(fp);
+        // ★ C6 失效点：这个 API **真的创建**了那个 0 字节文件（AppData 的 Temp 不经影子解析）。
+        cpu.vfs->invalidatePathCache();
         if (!shadow_guest.empty()) {
             shimLogDebug("kernel32", api, "写 \"%s\" ⇒ 影子目录 \"%s\"（--game-dir 只读）",
                     shadow_guest.c_str(), shadow_host.c_str());

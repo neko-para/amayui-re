@@ -2666,6 +2666,25 @@ const MUTATIONS = [
       '前序 `com-second-object-reuses-stubs` 也红）',
   },
 
+  // ---- C6 性能修（2026-11-20）：`Vfs` 的读路径负缓存按影子代失效 ----
+  // ★ 为什么这条值得一条变异：缓存的是**失败结论**（`[notfound]` / `[notdir]`）。影子写了一刀之后
+  //   guest 再解析同一路径，旧条目若仍命中，引擎就会"自己刚写完的文件读不到"（静默行为错，
+  //   不崩、不黑屏）。代号检查反了 = 新鲜条目被丢、**过期条目照答** —— 正是这条守卫要钉的形态。
+  // ★ 守卫在 `file-path-ext` 的 `vfs-negative-cache-invalidated-by-create`：先解析不存在路径
+  //   （负结论入缓存），在影子里创建它，再解析**必须找到**。
+  {
+    file: 'apps/emulator-lift/src/runtime/vfs.cpp',
+    from: '    if (it->second.gen != path_cache_gen_) {',
+    to: '    if (it->second.gen == path_cache_gen_) {  // 变异：代号检查反了 ⇒ 过期条目照样命中',
+    guard: 'ctest:file-path-ext',
+    ctest: 'file-path-ext',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-file-path-ext',
+    what:
+      'Vfs 负缓存的**代号检查反了** ⇒ 影子写之后仍拿旧代条目回答（新建之后解析不到）' +
+      '⇒ file-path-ext 的 `vfs-negative-cache-invalidated-by-create` 红',
+  },
+
 
   // ── emulator-lift：时间线的**效果级判据**不许恒真 ─────────────────────────────────────
   //   ★ "先判满足"的短路：任何观测窗在第一个块边界就"看到变化"⇒ `not-changed` / `unclosed`

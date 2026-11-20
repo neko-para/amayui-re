@@ -1189,6 +1189,106 @@ int main() {
         LIFT_CHECK(f.ok);
     }
 
+    // ⑨ C6：`Vfs` 的**读路径负缓存**必须被影子写 / 删除**按代失效**
+    //    （`runtime/vfs.cpp` 的 `invalidatePathCache`；缓存只在写覆盖层启用时生效）。
+    //    判据：
+    //      ① 解析一条**不存在**的路径（连父目录都没有）⇒ FALSE + `[notdir]`（负结论进缓存）；
+    //      ② 用 `CreateFileA(CREATE_ALWAYS)` 在**影子**里创建它（父目录按需建）⇒ 宿主上真的
+    //         出现在 `<--appdata>/Game/…`，安装树里没有；
+    //      ③ **再解析必须找到**（旧负结论失效）—— 没失效就会拿到 ① 的缓存 ⇒ 本用例红；
+    //         ★ 这一条就是"缓存必须读得到影子写"的判据：变异成"旧代条目照样命中"⇒ 当场红。
+    //      ④ 删掉之后**再解析又失败**（存在性变化后结论跟着变；负缓存本身只会"有 → 无"，
+    //         这一步钉的是行为不漂，同时覆盖删除侧的失效钩子）；
+    //      ⑤ 大小写不敏感**唯一**匹配的判据不变：同一目录里两个只差 ASCII 大小写的候选
+    //         ⇒ 仍然 `[ambiguous]` 失败（⛔ 不按目录顺序猜）；影子再写一次（+1 代）之后仍失败。
+    //    ⚠ ⑤ 在**大小写不敏感的宿主**（macOS/APFS 默认）上造不出两个候选 ⇒ 那一小段如实跳过
+    //      （Linux / 大小写敏感卷上会真的跑）；①②③④ 与平台无关。
+    {
+        g_current_case = "vfs-negative-cache-invalidated-by-create";
+        Fixture f;
+        lift::registerFileShims(f.m.shims());
+        lift::registerSyncShims(f.m.shims());
+        f.m.vfs().setGameDir(pathToUtf8(dir));
+        f.m.vfs().setGuestRoot("D:\\GAME");
+        f.m.vfs().setAppDataDir(pathToUtf8(dir / "appdata"));
+        LIFT_CHECK(f.ok);
+
+        const fs::path shadow = dir / "appdata" / "Game";  // vfs.h 的唯一落点
+        const char* kProbe = "cache-probe\\NewFile.dat";  // 相对路径（cwd = guestRoot）；父目录不存在
+        std::string host;
+        std::string why;
+
+        // ① 负结论（父目录都不存在 ⇒ [notdir]）
+        LIFT_CHECK(!f.m.vfs().resolve(kProbe, &host, &why, /*must_exist=*/true, /*resolve_case=*/true));
+        LIFT_CHECK(why.rfind("[notdir]", 0) == 0);
+
+        // ② 在影子里创建（写 ⇒ 影子；父目录按需创建）
+        const std::uint32_t create = f.use("CreateFileA");
+        const std::uint32_t writef = f.use("WriteFile");
+        const std::uint32_t close = f.use("CloseHandle");
+        const std::uint32_t del = f.use("DeleteFileA");
+        const std::uint32_t h =
+            f.call(create, {f.cstr(kProbe), kGenericWrite, 0u, 0u, kCreateAlways, 0u, 0u});
+        LIFT_CHECK_NE_U32(h, kInvalidHandleValue);
+        const std::uint32_t data = f.data("CACHE", 5u);
+        const std::uint32_t written = f.u32data(0);
+        f.call(writef, {h, data, 5u, written, 0u});
+        LIFT_CHECK_EQ_U32(f.m.mem().rd32(written), 5u);
+        LIFT_CHECK_EQ_U32(f.call(close, {h}), 1u);
+        LIFT_CHECK(fs::exists(shadow / "cache-probe" / "NewFile.dat", ec));  // 影子里有
+        LIFT_CHECK(!fs::exists(dir / "cache-probe", ec));                     // 安装树里没有
+
+        // ③ 旧负结论必须失效：再解析找到影子里的那一份
+        host.clear();
+        why.clear();
+        LIFT_CHECK(f.m.vfs().resolve(kProbe, &host, &why, /*must_exist=*/true, /*resolve_case=*/true));
+        LIFT_CHECK(f.m.vfs().isWriteOverlayPath(host));
+        LIFT_CHECK(fs::exists(pathFromUtf8(host), ec));
+
+        // ④ 删除也是失效点：再解析又失败（影子里的文件没了，安装树里连父目录都没有 ⇒ [notdir]）
+        LIFT_CHECK_EQ_U32(f.call(del, {f.cstr(kProbe)}), 1u);
+        host.clear();
+        why.clear();
+        LIFT_CHECK(!f.m.vfs().resolve(kProbe, &host, &why, /*must_exist=*/true, /*resolve_case=*/true));
+        LIFT_CHECK(why.rfind("[notdir]", 0) == 0);
+
+        // ⑤ 歧义判据不变（只差 ASCII 大小写的两个候选 ⇒ [ambiguous] 失败）。
+        //    先探测宿主能不能真的放下两个候选：大小写不敏感卷上第二次创建会覆盖同一个文件。
+        const fs::path amb = dir / "amb";
+        fs::create_directories(amb, ec);
+        std::FILE* fa = lift::openHostFileUtf8(pathToUtf8(amb / "dup.TXT"), "wb");
+        if (fa) std::fclose(fa);
+        std::FILE* fb = lift::openHostFileUtf8(pathToUtf8(amb / "DUP.txt"), "wb");
+        if (fb) std::fclose(fb);
+        std::size_t amb_entries = 0;
+        for (fs::directory_iterator it(amb, ec), end; it != end; it.increment(ec)) ++amb_entries;
+        if (amb_entries < 2) {
+            std::printf("[case] vfs-negative-cache-invalidated-by-create: 宿主大小写不敏感 ⇒ "
+                        "两个只差大小写的候选造不出来，[ambiguous] 子判据在本平台跳过\n");
+        } else {
+            host.clear();
+            why.clear();
+            LIFT_CHECK(
+                !f.m.vfs().resolve("amb\\dup.txt", &host, &why, /*must_exist=*/true, /*resolve_case=*/true));
+            LIFT_CHECK(why.rfind("[ambiguous]", 0) == 0);
+            // 影子里再写一次（+1 代）⇒ 仍然 [ambiguous]（缓存既不改判据、也不替我们猜一个）
+            const std::uint32_t h2 =
+                f.call(create, {f.cstr("cache-probe\\Other.dat"), kGenericWrite, 0u, 0u, kCreateAlways, 0u, 0u});
+            LIFT_CHECK_NE_U32(h2, kInvalidHandleValue);
+            f.call(close, {h2});
+            host.clear();
+            why.clear();
+            LIFT_CHECK(
+                !f.m.vfs().resolve("amb\\dup.txt", &host, &why, /*must_exist=*/true, /*resolve_case=*/true));
+            LIFT_CHECK(why.rfind("[ambiguous]", 0) == 0);
+        }
+
+        // 收尾：清掉本用例写出来的影子目录 / 安装树里的 amb（`dir` 会被后面的运行复用）
+        fs::remove_all(shadow, ec);
+        fs::remove_all(amb, ec);
+        LIFT_CHECK(f.ok);
+    }
+
     fs::remove_all(dir, ec);
     return finish("file-path-ext");
 }

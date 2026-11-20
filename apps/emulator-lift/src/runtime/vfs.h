@@ -9,13 +9,18 @@
 //   · 通配符只实现游戏实际用到的形态：`*` / `?` / `*.*`（Windows 语义：`*.*` 匹配全部）。
 //     其它非法形态（`**`、`\` 后无名字等）⇒ 报错，⛔ 不静默忽略。
 //   · 宿主路径一律用 **UTF-8** 字符串（Windows 上经 `std::filesystem::u8path`）。
-// ★ 这是**叶子设施**：不做缓存、不碰 guest 内存；shim 负责读写与错误码。
+// ★ 这是**叶子设施**：不碰 guest 内存；shim 负责读写与错误码。唯一的一层缓存是 C6 的**读路径
+//   负缓存**（只存失败结论；按影子代失效，且以"写覆盖层启用时安装树只读"为前提 —— 见下面
+//   `invalidatePathCache` 与私有段 `NegativeKey` 上方）；⛔ 目录枚举（`find`）不缓存。
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace lift {
@@ -149,7 +154,10 @@ public:
     std::string guestEnvironmentText() const { return lift::guestEnvironmentText(!app_data_dir_.empty()); }
 
     // guest 根的文本形式（缺省 `E:\Games\Eushully\天結`；只用于把路径的公共前缀剥掉与日志）
-    void setGuestRoot(const std::string& guest_root) { guest_root_ = guest_root; }
+    void setGuestRoot(const std::string& guest_root) {
+        guest_root_ = guest_root;
+        invalidatePathCache();
+    }
     const std::string& guestRoot() const { return guest_root_; }
 
     // ★ guest 眼里的主模块路径 = **guest 根之下的 `AGE.EXE`**（用户 2026-11-05 口径：
@@ -215,6 +223,26 @@ public:
     // 句柄类写 API —— `SetFileTime` / `WriteFile` 的宿主侧 —— 靠它挡住"写回安装树"）。
     bool isInstallTreePath(const std::string& host_path) const;
 
+    // ===================================================================================
+    // ★ C6：**读**路径**负**缓存（只缓存失败结论）的失效点。
+    //
+    //   失效口径 = **按代（generation）**：每次调用 `++path_cache_gen_`，旧代的条目在下次查找时
+    //   就地淘汰。⛔ 不需要 O(n) 清表，也不需要知道"改的是哪条路径"。
+    //   调用点（**任何改变某条 guest 路径存在性的宿主写之后**）：
+    //     · 影子目录 / 文件的创建（`shadowPathForSegments(create_dirs=true)`、copy-up）；
+    //     · `makeSureDirectoryPathExists`（影子目录 + AppData 映射脚手架）；
+    //     · shim 侧的成功写：`CreateFileA` 新建、`DeleteFileA`、`MoveFileA`、`CopyFileA`、
+    //       `CreateDirectoryA`、`RemoveDirectoryA`、`GetTempFileNameA(uUnique=0)`；
+    //     · 配置变化（`setGameDir` / `setAppDataDir` / `setGuestRoot` / `setGuestCwd` / `setExeOverlay`）。
+    //   ⛔ **安装树**（`--game-dir`）本身不做失效：写覆盖层启用时它按合同是**只读来源**
+    //     （资源目录不变 —— 显式假设，见私有段的 `NegativeKey` 上方）；没有 `--appdata` 时
+    //     它是写目标 ⇒ 缓存整个停用（`resolve` 里的 `cacheable`）。
+    //   ⚠ 漏一个失效点 = 读到旧结论（最常见：**自己刚写的文件读不到**）。本轮只缓存失败 ⇒
+    //     删除 / 改名侧的 +1 代是保守项（把"存在性变化"这套钩子补齐，将来做正缓存也靠它）。
+    //     新增写路径时必须同时加到这里与 vfs.cpp 的对应位置。
+    // ===================================================================================
+    void invalidatePathCache() const;
+
     // 反解：宿主路径 → guest 路径（用于 GetCurrentDirectory / GetModuleFileName；
     // 不在根下 ⇒ false）。
     bool toGuest(const std::string& host_path, std::string* guest_path) const;
@@ -269,6 +297,51 @@ private:
                                    std::string* error) const;
     // 影子根 `<--appdata>/Game` 的宿主路径（未启用 / 未设置 ⇒ 空串）
     std::string shadowRoot() const;
+
+    // ---- C6：读路径负缓存（键 = 已折叠的段序列 + 两个影响结果的开关；**只缓存失败**）-----
+    //   ★ 为什么键是段而不是原始文本：`resolve` 走到段序列之后只看 `segs`（影子的逐段查找 +
+    //     安装树的逐段查找），而 `..` / `.` / 分隔符 / guest 根前缀 / cwd 都已折叠进 `segs`
+    //     ⇒ 同一个键必然走同一条解析路径、得到同一个结论（错误串里的宿主路径也由段决定）。
+    //   ★ 为什么把 `must_exist` / `resolve_case` 也放进键：它们改变"最后一段缺失"与
+    //     "最后一段大小写"的结果（`installPathForSegments` 的入参）。少一个都会串结论。
+    //   ★ 为什么不缓存**成功**（本轮裁决；读数见 `.tmp/perf-reassess/c6-vfs-cache.md`）：
+    //     实测 SAVE05 窗口里正结果的重复不少，但命中段只是**一次精确 stat**；把正结果也缓存后
+    //     `CreateFileA` 的 µs/次与尖峰 Σ 都落在噪声内。真正贵的是**失败**探测（安装树根目录
+    //     542 项整目录枚举）⇒ 本轮只做负缓存；正缓存带"安装树运行期不变"的假设与额外内存，
+    //     换不到可判收益 ⇒ 不做（留作下一步，若将来有 case 不一致的目录索引需求再论）。
+    //   ★ **显式假设**（负缓存也依赖它）：写覆盖层启用时（有 `--appdata`），`--game-dir` 安装树是
+    //     **只读**来源 —— 运行中不从外部改它（没有热更新的资源目录）。开发期"运行中换安装树里的
+    //     文件"不再被支持；不启用 `--appdata` 时缓存整个停用（那时安装树就是写目标）。
+    //   ⛔ 不缓存 `find()` / 目录枚举（排序 / 增删语义另说；C5 才做目录索引）。
+    struct NegativeKey {
+        std::vector<std::string> segs;
+        bool must_exist = true;
+        bool resolve_case = true;
+        bool operator==(const NegativeKey& other) const {
+            return must_exist == other.must_exist && resolve_case == other.resolve_case &&
+                   segs == other.segs;
+        }
+    };
+    struct NegativeKeyHash {
+        std::size_t operator()(const NegativeKey& key) const;
+    };
+    struct NegativeEntry {
+        std::uint64_t gen = 0;  // 写入时的影子代号；≠ 当前代 ⇒ 结论可能已过期（就地淘汰）
+        std::string error;      // **完整**错误串（tag + 说明）：shim 靠 tag 映射 Win32 错误码
+    };
+    // 命中 ⇒ true（`host_path` 清空、`error` = 缓存的失败原因）；未命中 / 已过期 ⇒ false。
+    bool lookupNegative(const std::vector<std::string>& segs, bool must_exist, bool resolve_case,
+                        std::string* host_path, std::string* error) const;
+    void rememberNegative(const std::vector<std::string>& segs, bool must_exist, bool resolve_case,
+                          const std::string& error) const;
+    // 缓存条目上限（防御性：引擎会探测大量"可能不存在"的名字；超限就整表丢掉重来）。
+    static constexpr std::size_t kMaxNegativeEntries = 8192;
+    // ★ `resolve` 是 const，而缓存是它的 memo ⇒ 成员必须 mutable。
+    // ★ 必须加锁：控制层（`control_snapshot.cpp` 的 `vfs.resolve`）跑在**另一条线程**上；
+    //   缓存是读解析时**写**的 ⇒ 无锁就是数据竞争（不是"本线单线程"能兜住的假设）。
+    mutable std::mutex neg_mu_;
+    mutable std::uint64_t path_cache_gen_ = 0;
+    mutable std::unordered_map<NegativeKey, NegativeEntry, NegativeKeyHash> negative_cache_;
 
     std::string game_dir_;
     std::string app_data_dir_;

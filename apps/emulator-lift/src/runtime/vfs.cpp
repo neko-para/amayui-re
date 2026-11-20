@@ -26,7 +26,10 @@
 //     `fileTime100ns` 的"此刻两钟差值"近似 ⇒ 三值相同、只在同一次运行内单调。
 //   · **宿主路径一律 UTF-8 字符串**。C++20 下用 `char8_t` 构造/取出 `fs::path`（与已弃用的
 //     `u8path` 语义相同，但不触发弃用警告）；Windows 上 `fs::path` 内部是 wchar_t。
-//   · 这是**叶子设施**：不缓存、不碰 guest 内存、不打日志（shim 负责这些）。
+//   · 这是**叶子设施**：不碰 guest 内存、不打日志（shim 负责这些）。唯一的缓存是 **C6 的读路径
+//     负缓存**（只存失败结论；按影子代失效，失效点见 vfs.h 的 `invalidatePathCache`；
+//     以"写覆盖层启用时安装树只读"为**显式假设** —— 见 vfs.h 私有段 `NegativeKey` 上方；
+//     ⛔ 目录枚举 `find()` 不缓存）。
 //
 // ⚠ 已知边界（M1 口径，按 plan §9 R2 "先只实现游戏实际用到的形态"）：
 //   1. **8.3 短名不模拟**：`FindFirstFileA` 的 `cAlternateFileName` 由 shim 填 0；拿短名当输入
@@ -570,6 +573,7 @@ std::string guestEnvironmentText(bool have_appdata) {
 // Vfs
 // =======================================================================================
 void Vfs::setGameDir(const std::string& host_dir) {
+    invalidatePathCache();  // C6：根变了 ⇒ 所有旧解析结论作废
     if (host_dir.empty()) {
         game_dir_.clear();
         guest_cwd_.clear();
@@ -588,6 +592,7 @@ void Vfs::setGameDir(const std::string& host_dir) {
 }
 
 void Vfs::setAppDataDir(const std::string& host_dir) {
+    invalidatePathCache();  // C6：影子根 / 特殊目录映射都变了；而且下面会清 Temp
     app_data_dir_ = host_dir;
     if (app_data_dir_.empty()) return;
     // ★ A4（逐字节可复现）：清掉上一轮的 Temp。`GetTempFileNameA(uUnique=0)` 从 0 起找空号 ⇒
@@ -632,6 +637,7 @@ std::string Vfs::guestExePath() const {
 
 void Vfs::setExeOverlay(const std::string& guest_path, const std::string& host_path,
                         const std::string& sha256) {
+    invalidatePathCache();  // C6：overlay 只影响"正结论"，但换 overlay 是配置变化 ⇒ 一起作废
     overlay_guest_.clear();
     overlay_host_.clear();
     overlay_sha256_.clear();
@@ -652,6 +658,7 @@ bool Vfs::matchesOverlay(const std::string& guest_path) const {
 
 
 void Vfs::setGuestCwd(const std::string& guest_path) {
+    invalidatePathCache();  // C6：相对路径的落点变了
     guest_cwd_ = absoluteGuest(guest_path);
     guest_cwd_set_ = true;
     // `guest_cwd_set_` 只表达"调用方显式设过"（缺省值口径见 cwdOf）；读一次免得它变成
@@ -763,6 +770,10 @@ bool Vfs::shadowPathForSegments(const std::vector<std::string>& segs, bool creat
                 }
                 return false;
             }
+            // ★ C6 失效点：影子根**真的**建出来了 ⇒ 存在性变了。
+            //   ⚠ 只在真的创建时 +1 代：`create_dirs=true` 但目录早已存在（写已有的存档 / 配置）
+            //   不构成变化 —— 无条件 +1 会让写密集的帧把负缓存整片冲掉（实测窗口内 143 代）。
+            invalidatePathCache();
         }
     }
     fs::path install_cur = pathFromUtf8(game_dir_).lexically_normal();
@@ -811,6 +822,8 @@ bool Vfs::shadowPathForSegments(const std::vector<std::string>& segs, bool creat
                         }
                         return false;
                     }
+                    // ★ C6 失效点：影子子目录**真的**建出来了（已存在不 +1 代）。
+                    invalidatePathCache();
                 }
             }
         }
@@ -846,6 +859,60 @@ bool Vfs::shadowExistingForSegments(const std::vector<std::string>& segs, std::s
     }
     if (host_path) *host_path = pathToUtf8(cur.lexically_normal());
     return true;
+}
+
+// =======================================================================================
+// C6：读路径负缓存（键 / 失效口径见 vfs.h 的 `invalidatePathCache`）
+//   ★ 只存**失败**结论：成功永远是现算的 ⇒ "影子文件创建后旧正结果仍活"这种问题不存在。
+//     （正结果在 SAVE05 里 756/1511 是重复的，但命中段只是一次精确 stat ⇒ 收益在噪声内，
+//      见 `.tmp/perf-reassess/c6-vfs-cache.md`；本轮不做。）
+//   ★ 失效靠代号：影子 / AppData / 配置一变就 +1 代，旧代条目在查找时就地淘汰。
+// =======================================================================================
+std::size_t Vfs::NegativeKeyHash::operator()(const NegativeKey& key) const {
+    // 段序列逐项混入（FNV-1a 变体）；两个开关最后折进去。⛔ 不依赖段数 / 指针，跨对象可复现。
+    std::size_t h = static_cast<std::size_t>(1469598103934665603ull);
+    const std::size_t prime = static_cast<std::size_t>(1099511628211ull);
+    for (const std::string& s : key.segs) {
+        for (const char c : s) {
+            h ^= static_cast<unsigned char>(c);
+            h *= prime;
+        }
+        h ^= 0x1Fu;  // 段分隔（只用于散列；相等性由 operator== 判，碰撞不会串结论）
+        h *= prime;
+    }
+    h ^= key.must_exist ? 0x2u : 0x3u;
+    h *= prime;
+    h ^= key.resolve_case ? 0x5u : 0x7u;
+    return h;
+}
+
+void Vfs::invalidatePathCache() const {
+    std::lock_guard<std::mutex> lock(neg_mu_);
+    ++path_cache_gen_;
+}
+
+bool Vfs::lookupNegative(const std::vector<std::string>& segs, bool must_exist, bool resolve_case,
+                         std::string* host_path, std::string* error) const {
+    const NegativeKey key{segs, must_exist, resolve_case};
+    std::lock_guard<std::mutex> lock(neg_mu_);
+    const auto it = negative_cache_.find(key);
+    if (it == negative_cache_.end()) return false;
+    if (it->second.gen != path_cache_gen_) {
+        // 影子 / AppData 被改过 ⇒ 这条结论可能已经过期（⛔ 不拿旧结论回答）。
+        negative_cache_.erase(it);
+        return false;
+    }
+    if (host_path) host_path->clear();
+    if (error) *error = it->second.error;
+    return true;
+}
+
+void Vfs::rememberNegative(const std::vector<std::string>& segs, bool must_exist,
+                           bool resolve_case, const std::string& error) const {
+    NegativeKey key{segs, must_exist, resolve_case};
+    std::lock_guard<std::mutex> lock(neg_mu_);
+    if (negative_cache_.size() >= kMaxNegativeEntries) negative_cache_.clear();  // 有界内存
+    negative_cache_[std::move(key)] = NegativeEntry{path_cache_gen_, error};
 }
 
 bool Vfs::resolve(const std::string& guest_path, std::string* host_path, std::string* error,
@@ -945,6 +1012,16 @@ bool Vfs::resolve(const std::string& guest_path, std::string* host_path, std::st
         return false;
     }
 
+    // ★ C6：**读**的负解析缓存（只在写覆盖层启用时；口径见 vfs.h 的 `invalidatePathCache`）。
+    //   ★ 位置刻意放在段序列之后：`segs` 已折叠 `.` / `..` / 分隔符 / guest 根前缀 / cwd
+    //     ⇒ 键相同 ⇒ 后面的解析路径完全相同 ⇒ 不存在"同一个键走出两个结论"。
+    //   ⛔ 没有 `--appdata` 时**不缓存**：那时安装树就是写目标（vfs.h 的旧行为），
+    //     "安装树只读"这个失效前提不成立 ⇒ 宁可慢，不拿可能过期的负结论回答。
+    const bool cacheable = writeOverlayEnabled() && !segs.empty() && access == VfsAccess::Read;
+    if (cacheable && lookupNegative(segs, must_exist, resolve_case, host_path, error)) {
+        return false;
+    }
+
     // ★ 写覆盖层（vfs.h 文件上方）：写 ⇒ 影子（父目录按需创建）；读 ⇒ **整条**影子路径存在才命中。
     //   ★ 空段（guest 根本身）不查影子：根目录是"影子 ∪ 安装树"的合并视图，不是一张宿主目录；
     //     它的合并由 `find()` 做，单个路径读（属性 / 是否是目录）用安装树根就够了。
@@ -959,12 +1036,19 @@ bool Vfs::resolve(const std::string& guest_path, std::string* host_path, std::st
             return true;
         }
         if (!shadow_err.empty()) {
+            if (cacheable) rememberNegative(segs, must_exist, resolve_case, shadow_err);
             if (error) *error = shadow_err;
             return false;
         }
     }
 
-    return installPathForSegments(segs, must_exist, resolve_case, host_path, error);
+    // 安装树这一支是**失败**的主来源（每段先精确 stat，未命中就整目录枚举）⇒ 负结论在这里存。
+    //   ★ 调用方可能没要 `error`，但缓存要错误串 ⇒ 用局部兜底。
+    std::string local_err;
+    std::string* errp = error != nullptr ? error : &local_err;
+    const bool ok = installPathForSegments(segs, must_exist, resolve_case, host_path, errp);
+    if (!ok && cacheable) rememberNegative(segs, must_exist, resolve_case, *errp);
+    return ok;
 }
 
 bool Vfs::resolveForWrite(const std::string& guest_path, std::string* host_path,
@@ -1055,6 +1139,9 @@ bool Vfs::resolveForWrite(const std::string& guest_path, std::string* host_path,
                     }
                     return false;
                 }
+                // ★ C6 失效点：copy-up 让"只在安装树里"的路径变成影子文件 ⇒ 旧的负结论作废。
+                //   （上面的 `shadowPathForSegments(create_dirs)` 可能已经 +1 代；多一次只是保守。）
+                invalidatePathCache();
             } else if (install_is_file) {
                 if (install_tree) *install_tree = true;
                 if (host_path) *host_path = install;
@@ -1507,6 +1594,8 @@ bool Vfs::makeSureDirectoryPathExists(const std::string& guest_path, std::string
                 }
                 return false;
             }
+            // ★ C6 失效点：AppData 映射脚手架**真的**建出来了（不经过影子解析）。
+            invalidatePathCache();
         }
         break;
     }
@@ -1565,6 +1654,8 @@ bool Vfs::makeSureDirectoryPathExists(const std::string& guest_path, std::string
             }
             return false;
         }
+        // ★ C6 失效点：目录**真的**建出来了（上一行只在"不存在"时才走到这里）。
+        invalidatePathCache();
     }
     return true;
 }
