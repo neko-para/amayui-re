@@ -66,3 +66,9 @@ D3DX 真机语义是返回 `E_OUTOFMEMORY`（guest 在 `0x48AD0C` `test eax,eax 
 
 - ⛔ 不靠"把 arena 调大"（128 MiB 正好顶到 AGERC 的 0x30000000 fallback base ⇒ 会改 guest 可见 EA）。
 - 容差来源：实测 1/2/3 轮三个数**完全相等**（in_use 109,895,008 / peak 126,672,232 / surfaces 23）；1 MiB 只防 `--present window` real-time 时钟让某一轮过渡帧多带一张临时纹理，比修前泄漏（18 MB/轮）小 17 倍。
+
+## 2026-11-20 订正（只加注，不改上面的历史记录）
+
+`## 边界` 那条“⛔ 不靠把 arena 调大”**已作废**：`SAVE07` 进战斗前的 D3DX 资源耗尽（`REQ-01M7WTVBD26FT8G2B14BR19CQN`）把 arena 抬到 **256 MiB**、AGERC fallback base 从 `0x30000000` 搬到 `0x40000000`（`GuestLayout` 单点真源）⇒ 当时“抬容量 ⇒ 改 guest 可见 EA”的代价**已经付过**。
+
+★ 代价照旧存在：本单当年能抓到漏回收，一部分靠 arena 只有 128 MiB（一屏量级泄漏跑两轮就炸）。抬到 256 MiB 后那个**意外探测器变钝**了 ⇒ 对冲 = 本单的 `d3d9/texture-bound-then-guest-release` 与新增 `arena-recycle`（批量 create→release 回基线 + 合并后仍能拿满一块），⛔ 不要因为“容量大了”就放宽这两条。

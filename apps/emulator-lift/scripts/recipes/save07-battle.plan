@@ -1,0 +1,56 @@
+# save07-battle.plan —— SAVE07 →「结束回合」→「決定」→ 进 live2d 战斗
+#
+# 用途：缺陷单 `REQ-01M7WTVBD26FT8G2B14BR19CQN` 的**复现 / 重开条件**。
+#   arena 抬到 256 MiB 之前，这条配方会停在
+#     `stop : resource-exhausted @ eip=0047839D（非正常结局） — D3DX 资源耗尽（shim d3dx9_43!D3DXCreateTextureFromFileInMemory）`
+#   现在应当走到 `stop : stopped @ eip=00412383（正常结局）— input-plan: quit`，且第 250 帧左右是战斗界面。
+#   ⚠ 判据是**日志里的 stop 行 / 战斗屏**，⛔ 不是 exit code：这条路正常也可能 exit 5（配方没走完）。
+#
+# 读档链（每条都有 trace 读数；区间含义见 `docs/03-emulator/scripts/<脚本名>.md`）：
+#   TITLE 回调体 [0x0460,0x0520) → LoadData(1070,480) → SAVE 回调体 [0x1104,0x11C4)
+#   → 槽 007 行中心 y≈507（行距 ≈59.5：000≈91 / 003≈269 / 005≈388 / 007≈507）
+#   → 确认框「要读取吗？」SBUNKI **主轮询体** [0x09A4,0x09F8) → 是(640,323)
+#   → FIELD **主轮询体** [0x579C,0x5860)（地图就绪、在等输入）
+#   → 结束回合「ターン終了」(1220,45) → SELACT **主轮询体** [0x0834,0x08C0)（「決定」那一屏）
+#   → 決定(640,517) ⇒ 进 live2d 战斗。
+#
+# ★ 槽位前提：私有 `--appdata` 的 `Local/Eushully/天結いキャッスルマイスター/SAVE/` 里**只有**
+#   `SAVE07.DAT` + `SAVE07.STH`，**没有** `SAVE.DAT` / `SAVE.BAK` / `RT.DAT` / `RT.BAK` ——
+#   有 `SAVE.DAT` 时页基初值来自它持久化的"上次槽号"（实测落在 110 页 ⇒ 第一屏 110..119，
+#   槽 007 不在屏上，点不中）。`saves/**` 只读：复制进去，⛔ 不就地写。
+#
+# ★ real-time 档（`--present window`）：`wait` 是宿主墙钟。**六道门全是 `await`**（TITLE / SAVE 回调体、
+#   SBUNKI / FIELD / SELACT 主轮询体），没有一处用 `wait` 顶替门。全篇只有两条 `wait`，各有实测理由：
+#   ③ 的 1000 ms = 对话框落位（入口当场点会被吞）；⑦ 的 25000 ms = 收尾窗，不是门。
+
+# ---- ① TITLE 回调体（吃 click 的窗口）→ 点 LoadData ----
+await position TITLE 0x0460 0x0520 timeout 60000
+click 1070 480
+
+# ---- ② 加载存档界面（SAVE 回调体，保存屏/加载屏共用这一条）→ 选第 007 行 ----
+await position SAVE 0x1104 0x11C4 timeout 120000
+click 300 507
+
+# ---- ③ 确认框「要读取吗？」：等它的**主轮询体**，不是在回调体里就点 ----
+await position SBUNKI 0x09A4 0x09F8 timeout 60000
+# ⚠ 这道 1000 ms 不是"硬怼"：实测在轮询体入口当场点会被吞（门在 0x09A4 成立、立刻点，
+#   按下只跨 2 个读点 ⇒ 对话框没看到"指针在按钮上且按下"）；同一屏等 1 s 再点就进 FIELD。
+wait 1000
+click 640 323
+
+# ---- ④ 读档完成：FIELD 主轮询体（地图就绪、在等输入）----
+await position FIELD 0x579C 0x5860 timeout 300000
+
+# ---- ⑤ 右上角「结束回合」（ターン終了）→ 脚本切到 SELACT ----
+click 1220 45
+await script SELACT timeout 120000
+
+# ---- ⑥ SELACT 主轮询体：等「決定」那一屏 ----
+#   0x0834 = `get-input-type` + `sleep 1` + `jmp 0x834`。实测：结束回合后 ~3 s 在 0x44EC
+#   （敌方回合处理）、~13 s 落到 0x0870（轮询体内）。
+await position SELACT 0x0834 0x08C0 timeout 180000
+
+# ---- ⑦ 中间「決定」⇒ 进 live2d 战斗 ----
+click 640 517
+wait 25000
+quit
