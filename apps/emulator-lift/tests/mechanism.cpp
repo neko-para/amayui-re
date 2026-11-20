@@ -595,16 +595,21 @@ int main() {
             LIFT_CHECK_NE_U32(plan_vt_a, 0u);
             LIFT_CHECK_NE_U32(plan_vt_b, 0u);
             LIFT_CHECK_NE_U32(plan_vt_a, plan_vt_b);  // 各自 vtable（C8 未做池化）
-            // `methods` 的最大 offset = 8 ⇒ 3 槽；逐槽比 EA，并确认桩仍可解析、仍装进块缓存。
-            bool plan_slots_same = true;
+            // `methods` 的最大 offset = 8 ⇒ 3 槽；逐槽与**已知 stub**（前序用例取到的
+            // `get_ea` / `hole_ea` / `add_ea`，按 offset 0/4/8）比 —— 两个对象都比。
+            // ★ 为什么不能只比"两个对象逐槽相等"：命中路径若把每个槽都写成 slot 0 的 stub，
+            //   两个对象会**同样错**，互等断言照样绿（真红就只剩前序 case）。对已知 stub 比
+            //   ⇒ 这个变异在本 case 里当场红。
+            const std::uint32_t plan_known[3] = {get_ea, hole_ea, add_ea};  // offset 0 / 4 / 8
+            bool plan_slots_known = true;
             for (std::uint32_t slot = 0; slot < 3u; ++slot) {
                 const std::uint32_t ea_a = m.mem().rd32(plan_vt_a + slot * 4u);
                 const std::uint32_t ea_b = m.mem().rd32(plan_vt_b + slot * 4u);
-                if (ea_a == 0u || ea_a != ea_b) plan_slots_same = false;
-                if (m.shims().byStubEa(ea_b) == nullptr) plan_slots_same = false;
-                if (m.cache().peek(ea_b) == nullptr) plan_slots_same = false;  // 命中仍逐槽 installShim
+                if (ea_a != plan_known[slot] || ea_b != plan_known[slot]) plan_slots_known = false;
+                if (m.shims().byStubEa(ea_b) == nullptr) plan_slots_known = false;
+                if (m.cache().peek(ea_b) == nullptr) plan_slots_known = false;  // 命中仍逐槽 installShim
             }
-            LIFT_CHECK(plan_slots_same);
+            LIFT_CHECK(plan_slots_known);
 
             // 冲突表：同 iface / 同方法名 / **不同实现** ⇒ 仍必须响亮拒绝（plan 不许吞掉它）。
             std::vector<lift::ComMethod> conflicting = methods;

@@ -949,8 +949,8 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
 
         // ★ P2 §3.2：`comparisons` 只在 `--profile` 开档时记（`stats.comparisons` / `max_probes` 同）；
         //   缺省档传 nullptr ⇒ 查找里连那两个统计写都不做。⚠ 缺省档的 `probe :` / `table :` 两行
-        //   因此是 `probes=0 avg=0.00 max=0` / `comparisons=0 avg_cmp=0.00`（口径见设计 §3.2，
-        //   `lookups/hits/misses` 不受影响 —— 它们才是语义指纹里的 `table misses`）。
+        //   因此打 `n/a`（`DispatchStats::comparisons_armed`），⛔ 不是 `0`；下面的 `decode-error`
+        //   同样只在开档时才报 N（`lookups/hits/misses` 不受影响 —— 它们才是语义指纹里的 `table misses`）。
         std::uint64_t comparisons = 0;
         const LiftFn fn = lookup(ea, dispatch_stats, prof_.on ? &comparisons : nullptr);
         if (fn == nullptr) {
@@ -960,11 +960,20 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
                 r.detail = "EA 0xFFFFFFFF = 栈底返回地址哨兵：guest 一路 `ret` 到了栈哨兵，派发表里没有它"
                            "（⛔ 不当成\"正常结束\"）";
             } else {
-                char buf[256];
-                std::snprintf(buf, sizeof(buf),
-                              "EA %08X 既不在派发表里（closure 缺这一行？）也不是 shim 桩 EA ⇒ 响亮停"
-                              "（查找 %llu 次比较；表 %zu 项）",
-                              ea, static_cast<unsigned long long>(comparisons), tableSize());
+                // ★ 缺省档**没有**记比较数 ⇒ ⛔ 不许打印"查找 0 次比较"（假诊断）。这条是冷错误路径，
+                //   开档时 N 照打；没开档就诚实说"未记"，并指出复现方式。
+                char buf[320];
+                if (prof_.on) {
+                    std::snprintf(buf, sizeof(buf),
+                                  "EA %08X 既不在派发表里（closure 缺这一行？）也不是 shim 桩 EA ⇒ 响亮停"
+                                  "（查找 %llu 次比较；表 %zu 项）",
+                                  ea, static_cast<unsigned long long>(comparisons), tableSize());
+                } else {
+                    std::snprintf(buf, sizeof(buf),
+                                  "EA %08X 既不在派发表里（closure 缺这一行？）也不是 shim 桩 EA ⇒ 响亮停"
+                                  "（比较数未记（缺省档；开 --profile 复现）；表 %zu 项）",
+                                  ea, tableSize());
+                }
                 r.detail = buf;
             }
             break;

@@ -521,14 +521,23 @@ void AotHost::printRunSummary(const AotRunResult& r, std::FILE* out) const {
                  static_cast<unsigned long long>(r.dispatches),
                  static_cast<unsigned long long>(r.lifted_calls),
                  static_cast<unsigned long long>(r.shim_calls));
-    std::fprintf(out,
-                 "table     : entries=%zu lookups=%llu hits=%llu misses=%llu comparisons=%llu "
-                 "avg_cmp=%.2f\n",
-                 tableSize(), static_cast<unsigned long long>(ds.lookups),
-                 static_cast<unsigned long long>(ds.hits), static_cast<unsigned long long>(ds.misses),
-                 static_cast<unsigned long long>(ds.comparisons),
-                 ds.lookups != 0 ? static_cast<double>(ds.comparisons) / static_cast<double>(ds.lookups)
-                                 : 0.0);
+    // ★ `comparisons` / `avg_cmp` 只在 `--profile` 开档时记账（`DispatchStats::comparisons_armed`）：
+    //   缺省档打 `n/a`，⛔ 不打 `0`（那是"查找 0 次比较"的假读数）。`lookups/hits/misses` 不变
+    //   （语义指纹里的 `table misses` 就取这几个数）。
+    char cmp_buf[96];
+    if (ds.comparisons_armed) {
+        const double avg_cmp =
+            ds.lookups != 0 ? static_cast<double>(ds.comparisons) / static_cast<double>(ds.lookups)
+                            : 0.0;
+        std::snprintf(cmp_buf, sizeof(cmp_buf), "comparisons=%llu avg_cmp=%.2f",
+                      static_cast<unsigned long long>(ds.comparisons), avg_cmp);
+    } else {
+        std::snprintf(cmp_buf, sizeof(cmp_buf), "comparisons=n/a avg_cmp=n/a（缺省档未记）");
+    }
+    std::fprintf(out, "table     : entries=%zu lookups=%llu hits=%llu misses=%llu %s\n", tableSize(),
+                 static_cast<unsigned long long>(ds.lookups),
+                 static_cast<unsigned long long>(ds.hits),
+                 static_cast<unsigned long long>(ds.misses), cmp_buf);
     std::fprintf(out, "region    : arena in_use=%u peak=%u surfaces=%zu heap_blocks=%zu\n",
                  surfaces_.bytesInUse(), surfaces_.peak(), surfaces_.surfaceCount(),
                  heap_.blockCount());

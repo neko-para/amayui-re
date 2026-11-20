@@ -94,6 +94,10 @@ struct DispatchStats {
     std::uint64_t misses = 0;       // 查不到（响亮停机的那一次也计入）
     std::uint64_t comparisons = 0;  // 关键字比较次数总和（哈希表：= 探测次数总和）
     std::uint64_t max_probes = 0;   // 单次查找的最坏探测次数（**运行期实测**，与建表那个分开）
+    // ★ 上面两个数只在 `lookup` 的 `comparisons != nullptr`（= `--profile` 开档）时才记。
+    //   这一位回答"本轮到底记没记"：缺省档是 **0 次记账，不是 0 次比较** ⇒ 消费方打 `n/a`，
+    //   ⛔ 不许把"没记"印成 "0"（假读数）。`lookups/hits/misses` 的语义不受影响。
+    bool comparisons_armed = false;
     // ★ S7：`lift_dyn`（间接 jmp / 间接 call 的尾调用）的查找次数 —— **单独一档**，不混进上面
     //   那四个数（理由见 `lookupUncounted` 的注释）。
     std::uint64_t lift_dyn_lookups = 0;

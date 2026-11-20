@@ -2648,8 +2648,10 @@ const MUTATIONS = [
   // ★ 为什么这条值得一条变异：命中路径是**新增的第二条建对象路径**。它写 vtable 的那一行如果把
   //   每个槽都写成 slot 0 的 stub，对象仍"建得出来"、guest 也仍能调 —— 但调用会**串到别的方法**
   //   上（静默行为错，不崩、不黑屏），与 `registerSlot` 的"同 stub 不同实现"校验要防的是同一类。
-  // ★ 守卫在 `mechanism` 的 `com-slot-plan-hit-and-conflict`：同一张表建两个对象 ⇒ 第二个走
-  //   命中路径、vtable 必须与第一个**逐槽相同**；变异后第二个 vtable 每槽都是 slot 0 的 stub ⇒ 红。
+  // ★ 守卫在 `mechanism` 的 `com-slot-plan-hit-and-conflict`：同一张表建两个对象（都走命中路径）
+  //   ⇒ vtable 的每个槽必须等于**已知 stub**（前序用例的 get/hole/add 桩）。
+  //   ★ 变异后**两个对象**的每个槽都会变成 slot 0 的 stub ⇒ 本 case 自己就红（不再只靠前序
+  //     `com-second-object-reuses-stubs`：那条比的是"两个对象互等"，同一个变异会让两者同样错）。
   {
     file: 'apps/emulator-lift/src/runtime/com.cpp',
     from: '            cpu.mem->wr32(vtable + slot * 4u, plan_it->second.stubs[slot]);',
@@ -2660,7 +2662,8 @@ const MUTATIONS = [
     buildTarget: 'lift-mechanism',
     what:
       'COM 槽计划**命中路径**把每个槽都写成 slot 0 的 stub（对象仍建得出来、guest 仍能调，但调用串线）' +
-      '⇒ mechanism 的 `com-slot-plan-hit-and-conflict` 红（第二个对象的 vtable 与第一个逐槽不同）',
+      '⇒ mechanism 的 `com-slot-plan-hit-and-conflict` 红（两个对象的 vtable 槽都与已知 stub 不符；' +
+      '前序 `com-second-object-reuses-stubs` 也红）',
   },
 
 

@@ -228,6 +228,7 @@ LiftFn lookup(std::uint32_t ea, DispatchStats& stats, std::uint64_t* comparisons
         if (probes >= kSlotCount) break;  // 表满（装载因子 ≤ 0.5，不该发生）⇒ 防御性收口为 miss
     }
     if (comparisons != nullptr) {
+        stats.comparisons_armed = true;
         stats.comparisons += probes;
         if (probes > stats.max_probes) stats.max_probes = probes;
         *comparisons = probes;
@@ -269,15 +270,24 @@ DispatchStats& dispatchStatsRef() { return g_stats; }
 
 void printProbeLine(std::FILE* out) {
     if (out == nullptr) return;
-    const double avg = g_stats.lookups != 0
-                           ? static_cast<double>(g_stats.comparisons) / static_cast<double>(g_stats.lookups)
-                           : 0.0;
+    // ★ 缺省档（`comparisons_armed == false`）**没记**比较数 ⇒ 打 `n/a`，⛔ 不打 `0`
+    //   （`0` 会被读成"查找 0 次比较"，那是假读数；`lookups/hits/misses` 照旧是真数）。
+    char probe_buf[128];
+    if (g_stats.comparisons_armed) {
+        const double avg = g_stats.lookups != 0
+                               ? static_cast<double>(g_stats.comparisons) /
+                                     static_cast<double>(g_stats.lookups)
+                               : 0.0;
+        std::snprintf(probe_buf, sizeof(probe_buf), "probes=%llu avg=%.2f max=%llu",
+                      static_cast<unsigned long long>(g_stats.comparisons), avg,
+                      static_cast<unsigned long long>(g_stats.max_probes));
+    } else {
+        std::snprintf(probe_buf, sizeof(probe_buf), "probes=n/a avg=n/a max=n/a（缺省档未记）");
+    }
     std::fprintf(out,
-                 "probe     : probes=%llu avg=%.2f max=%llu | table cap=%zu load=%.3f entries=%zu "
+                 "probe     : %s | table cap=%zu load=%.3f entries=%zu "
                  "build_max=%u | lift_dyn lookups=%llu misses=%llu\n",
-                 static_cast<unsigned long long>(g_stats.comparisons), avg,
-                 static_cast<unsigned long long>(g_stats.max_probes), tableCapacity(),
-                 tableLoadFactor(), kTableSize, g_buildMaxProbes,
+                 probe_buf, tableCapacity(), tableLoadFactor(), kTableSize, g_buildMaxProbes,
                  static_cast<unsigned long long>(g_stats.lift_dyn_lookups),
                  static_cast<unsigned long long>(g_stats.lift_dyn_misses));
 }
