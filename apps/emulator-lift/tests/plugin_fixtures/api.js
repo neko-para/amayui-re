@@ -6,6 +6,8 @@
 //
 // ★ 这些断言写在**插件自己**里：宿主侧读不到 JS 对象，而 `ctx.fail` 会把名字带进 readout。
 // ★ D-C2-6：`ctx.read.frameHash` **不安装**（⛔ 不返回 0）⇒ 这里断言它 `undefined`。
+// ★ C2b：`ctx.draw` 在 **RunCtx** 里仍然缺席（draw 只装在 RenderCtx 上 —— `plugin/render-surface`），
+//   而 `ctx.read.frames` / `ctx.read.scriptPos` 同样只装在 RenderCtx.read 上 ⇒ 这里也钉缺席。
 const REQUIRED = [
     "edit",
     "input",
@@ -34,6 +36,11 @@ const plugin = {
             if (typeof ctx[key] !== "undefined") bad.push(`present:${key}`);
         }
         if (typeof ctx.read.frameHash !== "undefined") bad.push("present:read.frameHash");
+        // ★ C2b：`frames` / `scriptPos` 只装在 **RenderCtx.read** 上（Run 语境的位置读数走
+        //   `ctx.now.pos` / `ev.pos`）；RunCtx 里安装它们等于在多一个"没有读数源"的口
+        //   ⇒ 这里钉住**缺席**（`plugin/render-surface` 钉住那边的**在场**）。
+        if (typeof ctx.read.frames !== "undefined") bad.push("present:read.frames");
+        if (typeof ctx.read.scriptPos !== "undefined") bad.push("present:read.scriptPos");
 
         // ---- EngineRead 的形状（C2a 只有 global.get）----
         if (typeof ctx.read.global.get !== "function") bad.push("missing:read.global.get");

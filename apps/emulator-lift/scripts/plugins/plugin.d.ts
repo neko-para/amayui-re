@@ -48,34 +48,40 @@ export type InputPoint =
     | "fileRead";
 export interface ScriptPos {
     readonly script: string;
-    readonly pos: number;
+    /** ★ 只有宿主**真的读到**位置才有这个键（`valid:false` ⇒ 缺键；⛔ 不编 0）。
+     *  C2b 实现 = `RenderCtx.read.scriptPos()`（top 帧 + `pos_ok`）。 */
+    readonly pos?: number;
     readonly valid: boolean;   // false = marker 暂时不可读；不要当成 0
 }
 export interface FrameInfo {
     readonly index: number;
     readonly script: string;
-    readonly pos: number;
+    /** ★ 只有 **top 帧**（有执行点）才有这个键；非 top 帧缺键（⛔ 不拿 0 冒充）。
+     *  `hash` / `presented` 在 runtime 里没有源 ⇒ 实现**不安装**（C4 再接）。 */
+    readonly pos?: number;
     readonly hash?: number;
     readonly presented?: boolean;
 }
 
 /** EngineRead：同步、无暂停、便宜；global.get/frames/scriptPos/frameHash。
  *
- * ★ 切片状态（C2a 实现面，2026-11-20）：
- *   - `global.get`：**已在 C2a 实现**（`ctx.read.global.get`）；
- *   - `frames` / `scriptPos`：**C2b** 才接（`EngineRead` 接口在 C1 只声明了 `globalGet`）；
+ * ★ 切片状态（C2a/C2b 实现面，2026-11-20）：
+ *   - `global.get`：**C2a 已实现**（`ctx.read.global.get`；RenderCtx.read 里同一份实现）；
+ *   - `frames` / `scriptPos`：**C2b 只装在 `RenderCtx.read` 上**（来路 = 当帧 `readings.frames`
+ *     的 top 帧）。⚠ `RunCtx.read` 里这两个属性**仍是 `undefined`**（位置读数在 Run 语境走
+ *     `ctx.now.pos` / `ev.pos`；⛔ 不是"有但抛"）。
  *   - `frameHash`：**留 C4**（runtime 里没有帧 hash 源；唯一实现在宿主的 `Presenter::lastHash`）。
- *     ⚠ C2a 的实现**不安装**这个属性 ⇒ 调用是 `TypeError`（⛔ 不是"返回 0"；D-C2-6）。
+ *     ⚠ 实现的 `read` 对象**不安装**这个属性 ⇒ 调用是 `TypeError`（⛔ 不是"返回 0"；D-C2-6）。
  */
 export interface ReadApi {
     readonly global: {
         get<K extends GlobalKind>(kind: K, id: number): GlobalValue<K>;
     };
-    /** C2b（未实现）。 */
-    frames(): readonly FrameInfo[];
-    /** C2b（未实现）。 */
-    scriptPos(): ScriptPos;
-    /** 留 C4（C2a **不安装**这个属性 ⇒ 调用 TypeError；⛔ 不返回 0）。 */
+    /** C2b（只在 `RenderCtx.read` 上；没有源 / 宿主报错 / 空表 ⇒ `undefined`，⛔ 不编空数组）。 */
+    frames(): readonly FrameInfo[] | undefined;
+    /** C2b（只在 `RenderCtx.read` 上；没有源 / 没有 top 帧 ⇒ `undefined`）。 */
+    scriptPos(): ScriptPos | undefined;
+    /** 留 C4（**不安装**这个属性 ⇒ 调用 TypeError；⛔ 不返回 0）。 */
     frameHash(): number;
 }
 
@@ -267,21 +273,42 @@ export interface ProfileApi {
 export type LogLevel = "debug" | "info" | "warn" | "error";
 export type LogApi = (level: LogLevel, message: string, data?: unknown) => void;
 
-/** render 只拿当帧 readings；不阻塞、不做 guest 写；按钮可 dispatch。 */
+/** render 只拿当帧 readings；不阻塞、不做 guest 写；按钮可 dispatch。
+ *
+ * ★ C2b 状态：`mouse()` / `localFrames()` 已实现（当帧 `UiFrameReadings`；**读数没有值 ⇒ `undefined`**，
+ *   ⛔ 不编 0 / 空数组）。类型上必须能表达这一点（`c2b1` 复审 F1）。
+ *   ⚠ `mouse().buttons`（三键电平）在 C2 的读数里**没有源** ⇒ 实现**不安装**这个键、类型是**可选**
+ *   （⛔ 不编 `false`：那会让"鼠标按着"与"没有源"长得一样；C2b-2 的窗口装配 / C4 再接）。
+ */
 export interface GameRead {
-    localFrames(): readonly FrameInfo[];
-    mouse(): {
-        readonly x: number;
-        readonly y: number;
-        readonly buttons: { readonly left: boolean; readonly right: boolean; readonly middle: boolean };
-    };
+    /** 没有源（`readings.frames == null`）/ 宿主报错 / 空表 ⇒ `undefined`（⛔ 不编空数组）。 */
+    localFrames(): readonly FrameInfo[] | undefined;
+    /** 这一帧没有鼠标读数 ⇒ `undefined`（⛔ 不编 `{x:0,y:0}`）。 */
+    mouse():
+        | {
+            readonly x: number;
+            readonly y: number;
+            /** C2 没有按键电平源 ⇒ 缺键（见上）。 */
+            readonly buttons?: {
+                readonly left: boolean;
+                readonly right: boolean;
+                readonly middle: boolean;
+            };
+        }
+        | undefined;
 }
-/** render 只拿当帧 readings；模块级变量是 per-plugin 状态（render/onTrigger 共享）。 */
+/** render 只拿当帧 readings；模块级变量是 per-plugin 状态（render/onTrigger 共享）。
+ *
+ * ★ C2b 实现面：`ui` / `draw` / `read` / `game` / `params` / `log`（`Object.keys(ctx)` **恰好**这六个）。
+ *   ⛔ 没有 `edit` / `input`（RunCtx 的写面；render 不做 guest 写）、`state` / `now` / `trigger` /
+ *   `profile` / `fail` / `finish` / `quit`（Run 语境），也⛔ 没有 `sample` / `screenshot`。
+ */
 export interface RenderCtx {
     readonly ui: UiApi;          // render 可写 hover/动画状态
     readonly draw: DrawApi;      // 本帧 display list
     readonly read: ReadApi;
     readonly game: GameRead;
+    /** ⚠ **C5**（C2b 里是 `undefined`；⛔ 不是"有但抛"）。 */
     readonly run: RunApi;
     readonly params: Readonly<Record<string, string>>;
     readonly log: LogApi;
@@ -306,11 +333,12 @@ export interface RunNow {
 /**
  * RunCtx：一次 Run 的 callback 上下文；Edit/Input/Read/Trigger/UI/Run。
  *
- * ★ 切片状态（C2a，2026-11-20）：
+ * ★ 切片状态（C2a，2026-11-20；C2b 追加注释）：
  *   - 已实现：`edit` / `input` / `read.global.get` / `trigger` / `ui`（**只写**宿主本地状态）/
  *     `profile` / `state` / `params` / `log` / `fail` / `finish` / `quit` / `now`；
- *   - ⛔ **不安装**：`draw`（C2b；`onTrigger` 不画）、`run` / `dispatch`（C5）——`ctx.run` 在 C2a
- *     是 `undefined`（⛔ 不是"有但抛"）；也不安装 `sample` / `screenshot`（永远不做）。
+ *   - ⛔ **`RunCtx` 永远没有** `draw`（C2b 只把它装在 `RenderCtx` 上；`onTrigger` 不画）/
+ *     `run` / `dispatch`（C5）——`ctx.run` 在 C2 是 `undefined`（⛔ 不是"有但抛"）；
+ *     也不安装 `sample` / `screenshot`（永远不做）。
  */
 export interface RunCtx<State = Record<string, unknown>> {
     readonly edit: EditApi;
@@ -345,6 +373,7 @@ export interface PluginModule<State = Record<string, unknown>> {
      *    ⇒ 嵌套对象**不**深拷贝，也不承诺"同 runtime 两个 Run 共享/不共享"（C2 只有一个 Run）。
      */
     initialState?: State;
+    /** 可选；有它就每帧跑（C2b：传 `RenderCtx`；没有窗口 ⇒ 永不调用 + 一次性 stderr，D-C2-5）。 */
     render?: (ctx: RenderCtx) => void;
     start?: (ctx: RunCtx<State>) => Trigger | Trigger[] | null;
     onTrigger?: (ctx: RunCtx<State>, ev: FiredEvent | TimeoutEvent) => Trigger | Trigger[] | null;

@@ -11,11 +11,16 @@
 //   守卫 `tools/test/core-shape.test.mjs` 行 11）。⇒ 本头只认 `Trigger` / `Receipt` /
 //   `GlobalValue` / `InputPoint` 这些**核心值类型**，不认任何 JS 引擎类型。
 //
-// ★ 为什么 `PluginScript` **不继承** `UiScript`：`UiScript` 的 `render(UiBuilder&, UiFrameReadings&)`
-//   是**每帧**的只读读数面，而插件回调是**每读点**的操作类面；两者的失败口径（`err` 形状）一样，
-//   但参数/生命周期完全不同。把两个虚函数表塞进一个类会让 C2a（还没有 `render`）必须**立刻**
-//   实现一个它不认识的签名。⇒ 独立接口；C2b 让 `PluginScript` 再实现 `UiScript`（那时才有
-//   `adopt` 的入口）。
+// ★ 为什么 `PluginScript` **继承** `UiScript`（C2b 定稿）：C2a 时它还不认识 `render`，所以保持独立；
+//   C2b 起 `render` 是插件的第三个可选成员（d.ts `PluginModule.render?`），而**唯一的**渲染出口是
+//   `UiScript::render(builder, readings)`（present_sdl 的叠层路径只认这个接口，`adoptOverlayScript`
+//   的形参就是它）。⇒ 多继承一个 `UiScript` 是形状最省的选择：**同一个实例**既跑回调链（每读点）
+//   又画本帧（每帧），⛔ 不需要第二个 QJS context / 第二个实例（合同 §6 行 9 / 11）。
+//   ★ 两条面的失败口径一致（`err` 形状 `<origin>: <message>\n<stack>`），但预算两档
+//   （回调 2 ms/100k vs render 20 ms/1e6）**不在这里合并**：`UiScript::setBudget` 是 render 的入口，
+//   回调预算由 `start/onTrigger` 的 `Budget` 形参给。
+//   ★ `render` 是**可选**的：没有 `render` 的插件（纯 Run / headless）实现 `UiScript::render` 时
+//   返回 true + 空 list（⛔ 不是失败 —— present_sdl 只在挂了 overlay 时调它）。
 //
 // ★ **`ctx` 不是全局**：每次回调由 `PluginScript` 新建一个值对象（`ctx.now` 更是每回调一个新值
 //   快照，D-C2-7）。⇒ 本头没有"当前 ctx"这种状态：`PluginCallHost` 的每个方法都**隐含**"现在正在
@@ -34,6 +39,7 @@
 #include "runtime/script_globals.h"  // GlobalKind / GlobalValue（EngineRead / EditSink 的词汇）
 #include "runtime/trigger.h"         // Trigger / TriggerEvent（armed 集合与事件）
 #include "runtime/intent.h"          // Receipt（Input 的回执；与 Edit 共用同一份形状）
+#include "ui/script.h"               // UiScript / UiFrameReadings（C2b：render 的**唯一**出口）
 
 namespace lift {
 class FontEngine;
@@ -77,6 +83,11 @@ inline const char* pluginInputStateName(PluginInputState state) {
 //   · **Trigger**（`makeAfter*`）：每次调用造**新对象**（= 新预算 / 新边沿；合同 §4.2 417–419）。
 //
 // ★ `now()` 是本读点的读数（`Context::now` 的同一个指针）；⛔ 回调外没有"当前读数"。
+//
+// ★ **`read` / `log` 在 `render` 里也会被调**（C2b 的 `RenderCtx.read.global.get` / `ctx.log`）：
+//   ⇒ 实现方**不许**把这两个口绑在"必须正在 Run 回调里"（`PluginHost` 的 `in_callback_`）上；
+//   而**写类**（Edit / Input / Trigger 工厂）仍必须只在回调里可用 —— 那是"render 不做 guest 写"
+//   （合同 §4.4c）的唯一落点。`profile` 只在 RunCtx 里装（`RenderCtx` 没有它）。
 // =====================================================================================
 class PluginCallHost {
 public:
@@ -90,6 +101,14 @@ public:
     virtual bool inputWired() const = 0;
     virtual bool readWired() const = 0;
     virtual bool triggerWired() const = 0;
+
+    // 现在是否在 **Run 回调**（`start` / `onTrigger`）里；`render` 期间恒 false（C2b 复审 F2）。
+    // ★ 为什么需要这一位：render 期间 `read` / `log` 也要能用 ⇒ 宿主（`call_host`）在 render 期
+    //   **非空**；于是"只判 `call_host != nullptr`"的出口（`fail` / `finish` / `quit` / `profile.*`）
+    //   会从 render 可达 —— 插件在 `onTrigger` 里把 `ctx` 存进模块变量，下一帧 `saved.fail(...)`
+    //   就绕过了 `RenderCtx` 的成员表。这 5 个 trampoline 必须判这一位。
+    //   ⛔ 这不是安全边界、guest 也不会坏（写面另有 `*Wired()` 把关），而是"成员表不是画出来的门面"。
+    virtual bool inCallback() const = 0;
 
     // ---- Edit（立即）----
     // 返回 false ⇒ `*code` = `globalErrorName()` 认的那三个之一（⛔ 不是新词表）。
@@ -143,17 +162,18 @@ public:
 // =====================================================================================
 // `PluginScript`：一个**已装载**的插件（ES module 的 default 导出）
 //
-// ★ 只有三个可选成员：`render` / `start` / `onTrigger`（`render` 属 C2b，本切片只回答
-//   `hasRender()` 让 aot_main 打那条一次性 stderr）。
+// ★ 三个可选成员：`render` / `start` / `onTrigger`（`start` 与 `onTrigger` 成对；`render` 可单独
+//   存在）。`render` 的面 = 基类 `UiScript`（C2b 起多继承）：`render(builder, readings, err)` 每次
+//   render 调 JS `render(RenderCtx)`；没有 `render` 的插件返回 true + 空 list。
 // ★ `start` / `onTrigger` 必须**同步**返回 `Trigger | Trigger[] | null`；返回 Promise / async
 //   ⇒ 明确错误（合同 §4.6 805）。返回值翻译成 `std::vector<Trigger>`：
 //   空 = done（`null` / `[]` / `undefined`）；重复 `name` 由 `TriggerRunner::install` 判 fail。
 // =====================================================================================
-class PluginScript {
+class PluginScript : public UiScript {
 public:
     using TriggerSet = std::vector<lift::plugin::Trigger>;
 
-    virtual ~PluginScript() = default;
+    ~PluginScript() override = default;
 
     virtual bool hasRender() const = 0;
     // 有 `start` + `onTrigger`（两者必须成对；`render` 可单独存在）。
@@ -166,17 +186,27 @@ public:
     virtual bool onTrigger(PluginCallHost& host, const lift::plugin::TriggerEvent& ev,
                            const lift::plugin::Budget& budget, TriggerSet* out, std::string* err) = 0;
 
-    // 上一次回调是否被预算（deadline / op_limit）打断 —— 是 false 的 `start`/`onTrigger` 的**原因**之一。
-    virtual bool overran() const = 0;
+    // 上一次**回调**是否被预算（deadline / op_limit）打断 —— 是 false 的 `start`/`onTrigger` 的原因之一。
+    // （render 的预算打断由基类的 `overran()` 报；同一个标志位。）
+    bool overran() const override = 0;
 
-    virtual void shutdown() = 0;
+    void shutdown() override = 0;
+
+    // `render` 期间 `RenderCtx.read` / `ctx.log` 的宿主来路（**非拥有**）。
+    // ★ 由 `PluginHost` 在 `init` 时设（生命周期 = host > script）；nullptr = 没接线 ⇒ 那两个口
+    //   在 render 里一律 TypeError（⛔ 不静默 no-op）。
+    // ★ 为什么是"装载时设一次"而不是每帧塞进 `UiFrameReadings`：渲染的 readings 是**只读读数**
+    //   （`ui/script.h` 头注），而 `read`/`log` 是**操作类**（回调与外设同一份宿主账）。放进 readings
+    //   会多一条"这一帧能不能写日志取决于谁填了 readings"的隐性口径。
+    virtual void setCallHost(PluginCallHost* host) = 0;
 };
 
 // 装载参数（`origin` = `--plugin <path>` 原样：错误定位与 module 解析根都用它）。
 struct PluginLoadOptions {
     std::string origin;
     const PluginParams* params = nullptr;
-    // C2b 的 `ctx.draw.measure` 用；C2a 可以给 nullptr（那时 `draw` 根本不存在）。
+    // C2b 的 `ctx.draw.measure` 用（度量走宿主字体，`ui/raster.h` 的 `measureText`）；
+    // noexcept：nullptr ⇒ `measure` 抛 TypeError（⛔ 不返回 0 尺寸冒充可用）。
     FontEngine* font = nullptr;
 };
 
@@ -185,6 +215,8 @@ struct PluginLoadOptions {
 //   · **只读 ES module 的 default 导出**（⛔ 不读 `globalThis` / 命名导出）；
 //   · `render`/`start`/`onTrigger` 都可选，**至少一个**；有 `start` 就必须有 `onTrigger`（反之亦然）；
 //     类型不是函数 ⇒ 错误（带 `file:line`）。
+//   · `render` 的 JS 契约 = `render(RenderCtx)`（C2b）；装载后由 `UiScript::render` 驱动。
+//   · `setCallHost` 不在装载参数里：宿主在 `init` 之后自己设（`PluginHost::init` 就会）。
 std::unique_ptr<PluginScript> makeQuickJsPlugin(const std::string& source, const PluginLoadOptions& opts,
                                                 std::string* err);
 

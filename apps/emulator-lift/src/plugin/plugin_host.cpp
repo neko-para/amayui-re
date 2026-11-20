@@ -66,7 +66,10 @@ PluginHost::PluginHost(ReadingsSource& source) : executor_(queue_, source) {
 }
 
 // `unique_ptr<GuestEngineRead>` 的析构要完整类型 ⇒ 定义放这里（见头注）。
-PluginHost::~PluginHost() = default;
+PluginHost::~PluginHost() {
+    // ★ C2b：`setCallHost` 是**非拥有**指针 ⇒ 析构时先撤掉（⛔ 不把悬垂的 `this` 留给脚本对象）。
+    if (script_ != nullptr) script_->setCallHost(nullptr);
+}
 
 bool PluginHost::init(const std::string& source, const std::string& origin, const Params& params,
                       const ui::UiHostOps* host_ops, std::string* err) {
@@ -82,6 +85,9 @@ bool PluginHost::init(const std::string& source, const std::string& origin, cons
         if (err != nullptr) *err = load_err.empty() ? (origin + ": 插件装载失败") : load_err;
         return false;
     }
+    // ★ C2b：`RenderCtx.read` / `ctx.log` 的宿主来路（非拥有；生命周期 = 本对象 > 脚本）。
+    //   ⛔ 不要改成"每帧从 readings 塞进去"（`UiFrameReadings` 是**只读读数**；读写两条面分开）。
+    script_->setCallHost(this);
     return true;
 }
 
