@@ -15,7 +15,8 @@
 2. 判据（与 mac 同一口径，⛔ 不接受"shape 串写着 -lto-abi 所以开了"）：
    - `lift-aot-ir-target-attrs` 绿（生成物属性与运行库对齐）；
    - `file out/aot/lift_aot.part00.obj` 是 LLVM bitcode；
-   - `node .tmp/lto/measure.mjs <binary>` 的 `_lift_tick` 站点相对 OFF 档显著下降（mac 是 −86.4%）；
+   - `llvm-objdump -d --no-show-raw-insn <binary> | grep -c 'bl.*_lift_tick'` 相对 OFF 档显著下降
+     （mac 实测 OFF 101,765；命令与其它站点口径见 `docs/03-emulator/aot-lto-evaluation.md` §4）；
      ⛔ 若站点不降 ⇒ 链接器静默没跑 LTO 后端 ⇒ 记失败，保持默认 OFF；
    - 60 帧语义指纹与 OFF 档逐位相同。
 3. 通过 ⇒ 把 Linux 的默认值改成 ON，并同步 `AGENTS.md` §12.8 与 `docs/03-emulator/aot-lto-evaluation.md`

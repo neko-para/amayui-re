@@ -100,7 +100,7 @@ interface UiWorst {
 /**
  * `game.local_frames()` 的一项：guest 帧区（40 槽）里**已装载**的一格。
  *
- * ★ 语义（取证锚见宿主仓库 `.tmp/ui-qjs/frames-research.md`，⛔ 不要在这里重新定义）：
+ * ★ 语义（取证锚见宿主仓库 `docs/03-emulator/ui-frames.md`，⛔ 不要在这里重新定义）：
  *   - **活动** = 记录 `+0x00`（脚本体基址）非 0 且已提交；⛔ 不是"id 非 0"、也⛔ 不是"0..cur 全算"。
  *   - **top** = `slot === cur`（引擎没有独立的栈顶变量；`cur` 是唯一执行点）。
  *   - **顺序** = top-first：`cur`（若活动）第一，其余活动槽按**槽号降序**（最小版不走 parent 链）。

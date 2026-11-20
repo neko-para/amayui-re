@@ -28,9 +28,7 @@
 cd apps/emulator-lift
 # 每次跑前重建**私有** appdata（saves/ 只读 ⇒ 只复制进去；⛔ 不就地写）
 APP=../../.tmp/save05-bench/appdata-n1
-GAME="$APP/Local/Eushully/天結いキャッスルマイスター"
-rm -rf "$APP" && mkdir -p "$GAME/SAVE"
-cp ../../saves/SAVE*.DAT ../../saves/SAVE*.STH ../../saves/SAVE.DAT ../../saves/RT.DAT "$GAME/SAVE/"
+scripts/clean-appdata.sh "$APP"
 ```
 
 ```bash
@@ -70,7 +68,10 @@ cp ../../saves/SAVE*.DAT ../../saves/SAVE*.STH ../../saves/SAVE.DAT ../../saves/
 
 - P 与 A′ 的 `boundary` **绝对 ms** 只 −2.9% / −0.03%：窗口是 20 Hz 忙等，快了以后同一段墙钟里多转派发（+4~6%）
   ⇒ 收益被自己吃回。**可比口径是 ns/派发**，⛔ 不是桶的绝对 ms。
-- hidden 档（`--present window --present-hidden`）**本轮没有读数**：以上全是 visible 历史档；hidden 要重取就两臂都跑。
+- hidden 档（`--present window --present-hidden`）：`hpa1`（2026-11-20，mac arm64，N=195，7591 ms）
+  `Present 1715.401 ms (22.6%)` = readback **7.93** / hash **0.748** / sink **0.117** ms/帧；
+  ⚠ 与 visible 档不可互比（§4-4），只判比例与趋势。
+- 以上 P/C1/A′ 全是 visible 历史档；hidden 与 visible **不混臂**。
 
 ## 4. 判据
 

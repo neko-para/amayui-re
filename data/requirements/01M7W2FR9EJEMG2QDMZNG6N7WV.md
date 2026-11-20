@@ -62,4 +62,4 @@
 
 - 与 `SetRenderTarget` 旧目标屏障的交互（`d3d9_pipeline.cpp:1985-2014`）：实现时复核。
 - `Clear` 的 rect 分支读数：待 `#2` 量完再定。
-- 评估全文：`.tmp/present-readback/evaluation.md`（临时区，结论已摘进本单）。
+- 消费者与 7 个读点的证据：`docs/03-emulator/present-readback.md`（Phase A 文档）；本单只留 Phase B 的边界与判据。

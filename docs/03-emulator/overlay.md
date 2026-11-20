@@ -149,7 +149,7 @@ when: { script: ["SC00*", "TITLE"] }                 // 多个候选 = 或
 ★ `game.local_frames()` 是**方法**（不是 getter）：返回活动帧数组（top-first；字段
 `slot / script_id / parent / script / name_degraded / top / pos`），不可用 ⇒ `undefined`；
 `pos`（= `0x3C + (pc − base)`，与 `await position` 同一公式）**只有 `top` 帧有**（非 top 是挂起时
-保存的续延 PC，⛔ 不是执行点 ⇒ `undefined`）；证据与安全读取见 `.tmp/ui-qjs/frames-research.md`。
+保存的续延 PC，⛔ 不是执行点 ⇒ `undefined`）；证据与安全读取见 `docs/03-emulator/ui-frames.md`。
 
 `global/local` 的实现边界（读之前先检查前置条件）：
 
@@ -236,7 +236,7 @@ win32 取。
 `--overlay` 的 HUD 由**外置** `scripts/ui/hud.js` 经 QuickJS 同步产出；`--ui <path>` 打开任意脚本
 （显式优先、隐含 overlay）；`game` 注入 `frame / fps / mouse{x,y,buttons?} / script / worst` + 按需方法
 `local_frames()`（帧区 40 槽的只读视图，top-first，`top = slot == cur`；证据
-`.tmp/ui-qjs/frames-research.md`；HUD 的 `script` 行取 `top=true` 的项（没有 top 就回退 `game.script`））；`raster` / `present` 两行**已删**；底 `#101820CC`（80% 不透明，
+`docs/03-emulator/ui-frames.md`；HUD 的 `script` 行取 `top=true` 的项（没有 top 就回退 `game.script`））；`raster` / `present` 两行**已删**；底 `#101820CC`（80% 不透明，
 renderer 路径 `SDL_BLENDMODE_BLEND`，直出也混合（D 单，`SDL_DrawGPUPrimitives`；win32 未验证））；旧 `OverlayState` / `OverlayStatus` /
 `formatOverlayLines` / 5×7 点阵 / `buildHud` / `presentHud` 已删。M1 的布局 / when / 校验表、
 M3 的数据面仍未做。`mouse.buttons` 的源与缺键口径见 §3.5（窗口装配有 `WindowManager` 才有）。

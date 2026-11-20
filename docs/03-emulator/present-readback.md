@@ -6,15 +6,20 @@
 `SetRenderTarget` 旧目标 / `Clear` 各有一道**显式**屏障。Present 里的整幅回读是"模型 + 诊断"顶出来的，
 不是 D3D9 要求。
 
-## 消费者（结论；逐条证据见 eval §1-2，⛔ 不在此复述）
+## 消费者（结论 + 符号锚；行号随改动漂移，按符号 `rg`）
 
-- **要 guest 像素**（Present 当场回读）：① renderer 回退路径的 `SDL_UpdateTexture(arena.pixels)`；
-  ② `--dump-frame`；③ `--frame-log` / `--profile` / `FrameSampler`（hash）；④ 控制层 freeze；
-  ⑤ `--log-level info` 的 `frameStats`。
-- **不要**：GPU 直出（target 才是最新）、overlay / UI / 插件 / `--present-screenshot`（读窗口 / target，
-  不读 guest）、`present-tail` / `lastHash` 的缺省摘要（收口补算一次）。
-- 7 个**显式**读点（`Clear` / LockRect / 纹理锁 / `SetRenderTarget` 旧目标 / `GetRenderTargetData` /
-  `UpdateSurface` / `LoadSurfaceFromSurface`）与 `Clear`→`rasterFlush` 的屏障**一字未改**（Phase B）。
+- **要 guest 像素**（Present 当场回读）：
+  - `SdlWindow::submitFrame` 的 renderer 回退路径（`SDL_UpdateTexture(arena.pixels)`，`present_sdl.cpp`）；
+  - `HeadlessPresenter::present` 的 `--dump-frame` 分支（`present.cpp`）；
+  - `--frame-log` / `--profile` / `FrameSampler`（`setFrameHash` / `sampler_`，`present.cpp` / `aot_run.cpp`）；
+  - 控制层 freeze（`--control-root`；`freezePresentedFrame`，`present.cpp`）；
+  - `--log-level info` 的 frameStats（`d3d9::present`，`d3d9.cpp`）。
+- **不要**：GPU 直出（target 才是最新；`SdlWindow::submitDirect`）、overlay / UI / 插件 /
+  `--present-screenshot`（读窗口 / target，不读 guest）、`present-tail` / `lastHash` 的缺省摘要（收口补算一次）。
+- 7 个**显式**读点（`GetRenderTargetData` / `LockRect` / `UpdateSurface` / `LoadSurfaceFromSurface` /
+  纹理 `LockRect` / `SetRenderTarget` 旧目标 / `Clear`）与 `Clear`→`rasterFlush` 的屏障**一字未改**（Phase B）。
+- 叠层 / UI / 插件 / 截图**不读** guest 的硬证据：`src/ui/**` 对 `arena` 零引用；直出叠层只画 swapchain
+  （`d3d9_gpu.cpp` 的 overlay pass）；开/关 `--overlay` 的 `--dump-frame` 逐字节相同（`tests/aot_overlay.cpp`）。
 
 ## Phase A 设计（零语义改动）
 
@@ -35,13 +40,13 @@
 ## A/B 读数（无仪器）
 
 平台：macOS arm64 · RelWithDebInfo · `apps/emulator-lift/out`（单树）；日期 2026-11-20。
-两臂 = 改动前 exe 副本（`.tmp/present-readback/aot-base`）/ 当前 `out/emulator-lift-aot`；交错 3 对，
-每跑先 `clean-appdata.sh` 重建私有 appdata：
+两臂 = 改动前构建（`git checkout 7f108ac` + 同一 preset 构建，复制成临时文件）/ 当前
+`out/emulator-lift-aot`；交错 3 对，每跑先 `apps/emulator-lift/scripts/clean-appdata.sh <私有 appdata>`：
 
 ```bash
 ./out/emulator-lift-aot --present window --present-hidden \
   --game-dir ../../links/install --appdata <私有> --skip-logo --audio off --max-frames 600 \
-  --input-plan ../../.tmp/save05-bench/save05-move.plan
+  --input-plan scripts/recipes/save05-move.plan
 ```
 
 | 臂 | wall（3 runs，s） | 中位 |
@@ -52,6 +57,9 @@
 差 −1.7%（逐对 −0.15 / −0.91 / +0.12）⇒ **低于本机 5% 分辨力，不宣称收益**。两臂 `frames=600`、
 `stop @ eip=00498AE4`、`region : arena in_use=… peak=… surfaces=…`、`table … misses=` 逐位相同
 （`lookups` 每轮抖动、`lastHash` 每轮不同 ⇒ 都不是指纹，`AGENTS.md §12.6`）。
+
+- base 臂按 `git checkout 7f108ac` + 同一 preset **重建**；⛔ 不必保留 19 MB 的 exe 副本（库外临时文件）。
+  Phase B 的 A/B 若还要 base，先核对新构建的 `stop @ eip` / `frames` 与本表两臂一致。
 
 ## Phase B
 

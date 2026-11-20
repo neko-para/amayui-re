@@ -2601,7 +2601,7 @@ endif()
 
 # =====================================================================================
 # E · `game.local_frames()`（帧列表 / 栈顶脚本名）
-# ★ 语义真源 = `.tmp/ui-qjs/frames-research.md`（C1–C14 已证 / U1–U8 未证）：
+# ★ 语义真源 = `docs/03-emulator/ui-frames.md`（C1–C14 已证 / U1–U8 未证）：
 #   活动 = `record+0x00 != 0` 且已提交；`top = (slot == cur)`；顺序 = top-first
 #   （`cur` 若活动第一，其余按槽号降序；最小版**不走 parent 链**）。
 # ★ 落点：`src/runtime/engine_frames.{h,cpp}`（`EngineFrameSource`，只读 guest）+
@@ -2811,7 +2811,7 @@ if(LIFT_BUILD_TESTS)
     #   **不能** import 它；两条用例都直接把 `lib/save.js` 当入口（它自带参考 default 导出，
     #   见 D-C2C-1）。⛔ 不复制文件、不另开 lib 子目录。
     # ★ `LIFT_SAVES_DIR`（只给 e2e）：`saves/` 是**只读**复现素材 ⇒ 测试把需要的存档**复制**进
-    #   `.tmp/` 下的私有 `--appdata`（照 `.tmp/save05-bench/clean-appdata.sh`），⛔ 不就地写。
+    #   `.tmp/` 下的私有 `--appdata`（照 `apps/emulator-lift/scripts/clean-appdata.sh`），⛔ 不就地写。
     add_executable(lift-plugin-runtime tests/plugin_runtime.cpp)
     target_link_libraries(lift-plugin-runtime PRIVATE emulator-lift-runtime)
     target_compile_definitions(lift-plugin-runtime PRIVATE

@@ -26,7 +26,7 @@
   砂箱的门是**加完再删** `eval` / `Function` / `Function.prototype.constructor`（只删全局不够）。
 - 语法错 / 运行期错的 `message` + `stack` 都带 `<origin>:<line>:<col>`。
 - 帧列表：40 槽 × `0x78`；活动 = `record+0x00 != 0` 且已提交；`parent=+0x38`；`top=slot==cur`；
-  名字复用 `MarkerSampler`（`.tmp/ui-qjs/frames-research.md`，14 证 / 8 未证）。
+  名字复用 `MarkerSampler`（`docs/03-emulator/ui-frames.md`，14 证 / 8 未证）。
 
 ## 范围
 

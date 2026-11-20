@@ -16,7 +16,7 @@ GPU 直出 + 窗口模式下，每个 Present 都做一次**整幅 GPU→guest �
   （readback 占墙钟 29.8%）；
 - 本机 OPTION 复现：`Present 2528.294 ms / N=369`，`readback 2077.967 / hash 274.225 / sink 175.022 ms`
   （≈5.6 ms/帧）；
-- hidden SAVE05（`.tmp/save05-bench/logs/hpa1.out:2084`，N=195）：`Present 1715.401 ms (22.6%)`
+- hidden SAVE05（`hpa1` 档，N=195；读数已进 `docs/03-emulator/perf-bench-save05.md` §3）：`Present 1715.401 ms (22.6%)`
   = readback **7.93** / hash **0.748** / sink **0.117** ms/帧。
 
 ⇒ 回读是**每帧固定成本**，与场景无关。
@@ -32,7 +32,7 @@ GPU 直出 + 窗口模式下，每个 Present 都做一次**整幅 GPU→guest �
   （`present.cpp:120-123`）——窗口档照付（0.748 ms/帧）。
 - `overlay` **不增加**回读（`d3d9_gpu.cpp` 显式禁止叠层碰 target；`drawOverlay` 只吃宿主读数）。
 
-## 裁决（2026-11-21 · 评估全文 `.tmp/present-readback/evaluation.md`）
+## 裁决（2026-11-21 · 消费者 / 7 个读点的证据见 `docs/03-emulator/present-readback.md`）
 
 - 候选 1（hash 并进下载）+ 2（复用 transfer buffer / 拆 fence）+ 诊断 opt-in ⇒ **Phase A**（零语义）。
   ⚠ **单独做 A 不会降 readback 总量**：`Clear` 屏障（`d3d9.cpp:762-770`）在下一帧开头重新材质化

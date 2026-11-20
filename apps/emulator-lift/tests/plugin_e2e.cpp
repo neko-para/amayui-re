@@ -177,7 +177,7 @@ int main(int argc, char** argv) {
     //   `plugin-runtime` 已经钉住链形状，这里钉"真 guest 里这条链真的走到 FIELD"。
     g_current_case = "plugin/load-save-e2e";
     {
-        // `.tmp/` 私有 appdata：`saves/` **只读**，照 `.tmp/save05-bench/clean-appdata.sh` 复制。
+        // `.tmp/` 私有 appdata：`saves/` **只读**，照 `apps/emulator-lift/scripts/clean-appdata.sh` 复制。
         const fs::path repo_tmp = saves_dir.parent_path() / ".tmp";
         const fs::path save_root =
             repo_tmp / ("lift-plugin-load-save-" + std::to_string(lift_test::processId()));

@@ -1,6 +1,6 @@
 // emulator-lift · guest 帧列表（`game.local_frames()` 的宿主取数口）—— **纯读 GuestMemory**
 //
-// ★ 语义真源 = `.tmp/ui-qjs/frames-research.md` 的 C1–C14（⛔ 本文件不重新取证、不新造判据）：
+// ★ 语义真源 = `docs/03-emulator/ui-frames.md` 的 C1–C14（⛔ 本文件不重新取证、不新造判据）：
 //   · 帧区 = `Engine+0x5D894` 起 **40 条记录**、步长 `0x78`（C1：`operator new(0xAABC8)` @0x4BAA11，
 //     发布 @0x4BAA3A；初始化循环 `0x415BFE` / `cmp eax,28h` @0x415C0A）；
 //   · **活动** = `record+0x00 != 0` 且该地址已提交（C3：`0x41A92E` / `0x41C946` / `0x40EA27` 三处一致）。
