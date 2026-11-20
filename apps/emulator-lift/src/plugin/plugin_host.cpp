@@ -101,6 +101,13 @@ bool PluginHost::initFromFile(const std::string& path, const Params& params, con
     return init(source, path, params, host_ops, err);
 }
 
+void PluginHost::setFont(lift::FontEngine* font) {
+    // ★ 只转发：字体是**渲染面**的依赖，不是 Run 的（`PluginScript` 同时是 `UiScript`）。
+    //   `script_ == nullptr`（init 之前 / 装载失败）⇒ 什么也不做（⛔ 不编一个"以后再用"的暂存变量：
+    //   那会让"接线顺序错了"变成静默可用）。
+    if (script_ != nullptr) script_->setFont(font);
+}
+
 void PluginHost::attachMemory(lift::GuestMemory& mem) {
     // ★ 两条都是**非拥有**引用：`mem` 归宿主（`AotHost::mem()`；这里只在 init/prepare 之后接）。
     edit_ = std::make_unique<GuestEditSink>(mem);        // Edit：立即写（⛔ 不排队）

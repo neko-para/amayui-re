@@ -107,6 +107,12 @@ public:
     // Read = `GuestEngineRead`（`src/plugin/guest_read.h`）。两者都不拥有 `mem`。
     void attachMemory(lift::GuestMemory& mem);
 
+    // ★ C2b-2：`ctx.draw.text` / `ctx.draw.measure` 的生产字体来源（**非拥有**；转发给
+    //   `PluginScript::setFont`）。调用时机 = 窗口装配**得知模块有 `render` 之后**（装载时还
+    //   不知道 ⇒ 不走 `PluginLoadOptions::font`）。`nullptr` = 没接（headless / 测试夹具）⇒
+    //   那两个口抛 TypeError（⛔ 不返回 0 尺寸冒充可用）。必须在 `init` **之后**调。
+    void setFont(lift::FontEngine* font);
+
     // ---- TriggerHandler（`TriggerRunner` 是唯一 pump；本类只被它调）----
     TriggerSet start(Context& ctx, std::string* err) override;
     TriggerSet onTrigger(Context& ctx, const TriggerEvent& ev, std::string* err) override;

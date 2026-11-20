@@ -33,7 +33,8 @@
 //   · `plugin/render-read`                ：render 里的 `ctx.read.global.get` / `ctx.log` 有宿主来路
 //                                            （`setCallHost` + `readWired` 不绑回调；⛔ 静默缺失）。
 //   · `plugin/render-readings`            ：`read.frames` / `read.scriptPos` / `game.localFrames` /
-//                                            `game.mouse` 的字段与"没有源 ⇒ undefined / 缺 pos 键"。
+//                                            `game.mouse` 的字段与"没有源 ⇒ undefined / 缺 pos 键"；
+//                                            C2b-2：**有**源时 `mouse().buttons` 三键 = 真实电平。
 //   · `plugin/render-stored-runctx-rejected`：把 **RunCtx 存下来**在 render 里用 `fail`/`finish`/
 //                                            `quit`/`profile.*` ⇒ TypeError（复审 F2：成员表不是门面）。
 //   · `plugin/render-budget-deadline`     ：`PluginScript::setBudget` 是**绝对** deadline
@@ -1194,6 +1195,20 @@ void caseRenderReadings() {
         std::string err;
         const bool ok = renderProbe("mouse", r, &err);
         if (!ok) std::fprintf(stderr, "  probe mouse: %s\n", err.c_str());
+        LIFT_CHECK(ok);
+    }
+    {
+        // ★ C2b-2：**有**读数源时安装 `buttons`，三位 = 真实电平（左按下 / 右中抬起）。
+        //   红了两件事之一：没有源的宿主被编了 false，或有源时不安装 / 装错位。
+        lift::ui::UiFrameReadings r;
+        r.mouse_ok = true;
+        r.mouse_x = 812;
+        r.mouse_y = 622;
+        r.mouse_buttons_ok = true;
+        r.mouse_left = true;
+        std::string err;
+        const bool ok = renderProbe("mouse-buttons", r, &err);
+        if (!ok) std::fprintf(stderr, "  probe mouse-buttons: %s\n", err.c_str());
         LIFT_CHECK(ok);
     }
     {

@@ -277,8 +277,9 @@ export type LogApi = (level: LogLevel, message: string, data?: unknown) => void;
  *
  * ★ C2b 状态：`mouse()` / `localFrames()` 已实现（当帧 `UiFrameReadings`；**读数没有值 ⇒ `undefined`**，
  *   ⛔ 不编 0 / 空数组）。类型上必须能表达这一点（`c2b1` 复审 F1）。
- *   ⚠ `mouse().buttons`（三键电平）在 C2 的读数里**没有源** ⇒ 实现**不安装**这个键、类型是**可选**
- *   （⛔ 不编 `false`：那会让"鼠标按着"与"没有源"长得一样；C2b-2 的窗口装配 / C4 再接）。
+ * ★ C2b-2：`mouse().buttons`（三键电平）**已有生产读数源**（窗口装配的 `WindowManager`；与 guest
+ *   输入同一张电平表）。类型仍是**可选**：宿主这一帧没有读数源时不安装这个键（⛔ 不编 `false`：
+ *   那会让"鼠标按着"与"没有源"长得一样）⇒ 插件必须写 `mouse.buttons?.left ?? false` 这种形态。
  */
 export interface GameRead {
     /** 没有源（`readings.frames == null`）/ 宿主报错 / 空表 ⇒ `undefined`（⛔ 不编空数组）。 */
@@ -288,7 +289,7 @@ export interface GameRead {
         | {
             readonly x: number;
             readonly y: number;
-            /** C2 没有按键电平源 ⇒ 缺键（见上）。 */
+            /** 有读数源才装（C2b-2 窗口装配 = 有）；没有源 ⇒ **缺键**（见上）。 */
             readonly buttons?: {
                 readonly left: boolean;
                 readonly right: boolean;

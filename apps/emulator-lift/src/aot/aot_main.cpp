@@ -213,7 +213,9 @@ void usage() {
         "  --plugin <path>           用这份 **ES module** 当插件：`export default { render?, start?,\n"
         "                            onTrigger?, initialState? }`（宿主只读 default 导出）。\n"
         "                            `start/onTrigger` 是 Run 的回调链（写只经 ctx.edit / ctx.input）；\n"
-        "                            `render` 可选（本切片只认它存在，不调用）。与 `--ui` 是**同一\n"
+        "                            `render` 可选：**窗口档**同一个插件实例被接进叠层 host\n"
+        "                            （ctx.draw 的 display list 每帧上屏；⛔ 不跑第二套 UI 运行时）\n"
+        "                            ⇒ 有 render 时装，不需要 --overlay；与 `--ui` 是**同一\n"
         "                            字段**（同一路径允许，不同路径 exit 2）；⛔ 不隐含 --overlay\n"
         "                            ⇒ `--present headless` 也能跑（没有窗口就没有 render）。\n"
         "                            与 --input-plan / --control-root 互斥（两套输入写预算）⇒ exit 2\n"
@@ -1113,6 +1115,8 @@ int main(int argc, char** argv) {
         run_opts.stop_detail = "plugin: quit";
         // ★ D-C2-5：有 `render` 但 headless ⇒ **允许**执行（`render` 永不调用），一次性 stderr 说明。
         //   ⛔ 不 exit 2：CLI 阶段还不知道模块有没有 render；启动后知道了也只警告一次。
+        // ★ C2b-2：窗口档的 adopt **不在这里** —— 它要等 ⑤ 的 `setSink` / `attachWindowManager`
+        //   之后（那时 sink 才真的能画、命中路由才有 `WindowManager`）。见 ⑤ 的本单块。
         if (present_mode == "headless" && plugin_host->script() != nullptr &&
             plugin_host->script()->hasRender()) {
             std::fputs("[plugin] render is defined but no window; it will not be called\n", stderr);
@@ -1194,9 +1198,47 @@ int main(int argc, char** argv) {
         }
         host.presenter().setSink(std::move(display));  // 所有权转给 presenter（与已退役解释器臂同）
         sdl_display->attachWindowManager(host.cpu().windows);
-        // ★ 帧列表读数源（`game.local_frames()`）：叠层打开时接一次（脚本按需查询，⛔ 不每帧推表）。
+        // ---- ⑤' C2b-2：把插件的 `render` 接进**已有**的叠层 host（⛔ 不新开第二套 UI 运行时）----
+        //   ★ 位置：必须在 `setSink` / `attachWindowManager` **之后**（sink 真能画、命中路由有 wm），
+        //     在读数接线之前（`if (sdl_display->overlayEnabled())` 才能看到 adopt 打开的那一档）。
+        //   ★ 同一个 `PluginScript` 实例既跑 Run 回调、又画本帧（它实现 `UiScript`）；`adopt` 会丢掉
+        //     `--overlay` 先装的 hud.js ⇒ 同一时刻只有一个 QJS context（合同 §6 行 9 / 11）。
+        //   ★ `--plugin`（有 render）**不隐含** `--overlay`（D-C2-5：headless 照样能跑）⇒ 窗口档由
+        //     这里打开叠层；headless 走上面的 D-C2-5 警告，不 adopt、不建字体。
+        if (plugin_host != nullptr && plugin_host->script() != nullptr &&
+            plugin_host->script()->hasRender()) {
+            std::string font_err;
+            lift::FontEngine* const font = sdl_display->ensureOverlayFont(&font_err);
+            if (font == nullptr) {
+                std::fprintf(stderr,
+                             "emulator-lift-aot: --plugin 的 render 需要宿主字体（exit 2）：%s\n",
+                             font_err.c_str());
+                return 2;
+            }
+            // ★ 字体**在装载之后**才接线（装载时还不知道模块有没有 render）⇒ late setter 写的是
+            //   与 `PluginLoadOptions::font` 同一个字段（`PluginScript::setFont`）。
+            plugin_host->setFont(font);
+            std::string adopt_err;
+            if (!sdl_display->adoptOverlayScript(*plugin_host->script(), &adopt_err)) {
+                std::fprintf(stderr, "emulator-lift-aot: --plugin 的 render 接不进叠层（exit 2）：%s\n",
+                             adopt_err.c_str());
+                return 2;
+            }
+            // ★ `--overlay` 同时给了 ⇒ 用户以为看的是 hud.js，实际被插件 render 取代（同一个叠层
+            //   host）。一次性说清，⛔ 不静默换内容。
+            if (overlay) {
+                std::fputs("[plugin] --overlay 的 HUD 已被插件的 render 取代（同一个叠层 host；"
+                           "⛔ 不跑第二套 UI 运行时）\n",
+                           stderr);
+                std::fflush(stderr);
+            }
+        }
+        // ★ 帧列表读数源（`game.local_frames()`）：叠层**真的开着**时接一次（脚本按需查询，⛔ 不每帧推表）。
+        //   ★ 判据用 sink 自己的状态（`overlayEnabled()`）而不是 CLI 的 `overlay`：C2b-2 的 adopt
+        //     会在窗口档打开叠层（`--plugin` 有 render、没给 `--overlay`）⇒ 那一刻它必须也接上
+        //     帧列表 / 宿主能力表，否则同一份 RenderCtx 的成员表按 CLI 旗标分叉。
         //   `sink()` 可能为空（`setSink` 失败 / 被换掉）⇒ 判空。
-        if (overlay) {
+        if (sdl_display->overlayEnabled()) {
             if (lift::PresentSink* sink = host.presenter().sink()) {
                 sink->setUiFrameSource(host.frameSource());
                 // ★ 宿主能力表（`host.profileBegin/End`；切片 3）：与 frame source 同一装配点。
@@ -1327,9 +1369,12 @@ int main(int argc, char** argv) {
     //   ★ 顺序：先摘读点观察者（run 之后⛔ 不再有读点回调），再释放本 owner 的武装 / 输入状态，
     //     最后打一行。`releaseOwner` 只抬本 owner 的（⛔ 不 `releaseProgram` 全抬）。
     //   ★ 这一行是 C2a 的**可判面**：`run=done|failed|finished|quit` 与 `render=` / `callbacks=`。
+    //   ★ C2b-2：adopt 是**非拥有**指针（插件 host 的析构早于窗口对象）⇒ run 收口后立刻从叠层
+    //     host 摘掉（⛔ 不让窗口留一个指向已销毁 `PluginScript` 的指针）。之后不再提交帧。
     if (plugin_host != nullptr) {
         host.cpu().windows->setReadPointObserver(nullptr);
         plugin_host->releaseOwner(*host.cpu().windows);
+        if (present_window_active) sdl_display->releaseOverlayScript();
         std::printf("%s\n", plugin_host->readout().c_str());
         std::fflush(stdout);
     }

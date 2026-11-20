@@ -243,11 +243,21 @@ struct SdlWindow::Impl : public UiInputRouter {
     //   仍在 GPU 队列里）。增长次数有界 ⇒ 只留到 `shutdown()`（renderer 销毁前）统一
     //   `SDL_DestroyTexture`。⛔ 不许在 `presentOverlay` / `setOverlay(false)` 里直接销毁。
     std::vector<SDL_Texture*> retired_overlay_tex;
-    // 宿主字体：**只在 `--overlay` 时构造**（默认档零成本）；字体不可用 ⇒ init 硬失败（R5）。
+    // 宿主字体：**只在真的要画时构造**（`--overlay` / `--ui`，或 adopt 插件 render ⇒
+    // `ensureOverlayFont`；默认档零成本）；字体不可用 ⇒ init 硬失败（R5）/ adopt 失败。
     std::unique_ptr<lift::FontEngine> ui_font;
     // 脚本内核 + 这一份脚本（`--ui <path>` 或随发行的 `scripts/ui/hud.js`）。空 = 没装 / 已关。
     std::unique_ptr<lift::ui::ScriptRuntime> ui_runtime;
     std::unique_ptr<lift::ui::UiScript> ui_script;
+    // ★ C2b-2：**外部拥有**的叠层脚本（生产 = `--plugin` 的 `PluginScript`，同一个实例也是
+    //   `UiScript`）。非拥有 ⇒ 本类不销毁它；`releaseOverlayScript()` / `shutdown()` 只摘指针。
+    //   adopted 优先于 owned：同一时刻只有一个叠层脚本（adopt 时 owned + 它的 QJS 内核一起释放）。
+    //   ⛔ 不要改成 `unique_ptr`：所有权在插件宿主（run 收口前它必须活着）。
+    lift::ui::UiScript* adopted_script = nullptr;
+    // 本帧要画的脚本（adopted 优先；都没有 ⇒ nullptr）。
+    lift::ui::UiScript* activeUiScript() const {
+        return adopted_script != nullptr ? adopted_script : ui_script.get();
+    }
     // `--ui <path>` 的原样路径；空 = 默认 HUD（走 `LIFT_UI_SCRIPT_DIR/hud.js` 开发回退，
     // 发行布局那一跳由 `aot_main` 先解析好塞进来）。origin = 这一个路径串。
     std::string ui_script_path;
@@ -295,9 +305,12 @@ struct SdlWindow::Impl : public UiInputRouter {
     void notePresentTime();
     bool overlayMousePos(int* x, int* y) const;
     // ★ 装脚本：`ui_script_path` 非空 = `--ui <path>`；空 = 默认 HUD 的开发回退
-    //   （`LIFT_UI_SCRIPT_DIR/hud.js`）。★ 幂等：已有 `ui_script` 时直接 true。
+    //   （`LIFT_UI_SCRIPT_DIR/hud.js`）。★ 幂等：已有 `ui_script`（或已 adopt）时直接 true。
     //   false ⇒ `err` 必须填（字体 / 读文件 / 脚本编译 / 入口缺失）。
     bool loadUiScript(std::string* err);
+    // ★ C2b-2：叠层纹理 / 直出叠层状态的**唯一** teardown（`setOverlay(false)` / `disableOverlay` /
+    //   `releaseOverlayScript` 三处共用；⛔ 三处各写一遍会漂）。只退役、不立即销毁（见字段注释）。
+    void teardownOverlayPixels();
     // 叠层画不出来 ⇒ 只告警 + 关掉叠层，呈现照旧（⛔ 不因为诊断层让整帧失败）。
     void disableOverlay(const char* why);
     // ★ 统一释放退役叠层纹理（**只在** `shutdown()`、`SDL_DestroyRenderer` 之前调用）：
@@ -422,20 +435,11 @@ bool SdlWindow::Impl::overlayMousePos(int* x, int* y) const {
 //   ★ 字体是**先决条件**（脚本的 `ui.measure` 走宿主字体）：没有字体 ⇒ 这里就失败（R5）。
 //   ★ 幂等：已经装好 ⇒ 直接 true（`setOverlay(true)` 重复调用不会重建 context）。
 bool SdlWindow::Impl::loadUiScript(std::string* err) {
-    if (ui_script != nullptr) return true;
+    // ★ C2b-2：已经 adopt 了外部脚本（插件 render）⇒ 叠层脚本已在场，⛔ 不再装 hud.js
+    //   （否则同一个窗口会跑两个 QJS context —— 合同 §6 行 9 / 11 的反面）。
+    if (ui_script != nullptr || adopted_script != nullptr) return true;
     // ① 宿主字体（`ui.measure` 的唯一来源）。缺失 ⇒ 硬失败（⛔ 不静默画空白）。
-    if (ui_font == nullptr) {
-        auto font = std::make_unique<lift::FontEngine>();
-        lift::HostTextMetrics metrics;
-        if (!font->metrics(lift::ui::kUiFontRefPx, false, &metrics)) {
-            if (err) {
-                *err = "宿主字体不可用（LIFT_HOST_FONT_PATH）⇒ --overlay / --ui 拒绝启动"
-                       "（R5：⛔ 不静默画空白）";
-            }
-            return false;
-        }
-        ui_font = std::move(font);
-    }
+    if (owner->ensureOverlayFont(err) == nullptr) return false;
     // ② 路径：显式 `--ui` 优先；否则开发回退（`LIFT_UI_SCRIPT_DIR`，编译期注入）。
     std::string path = ui_script_path;
     if (path.empty()) {
@@ -490,12 +494,20 @@ void SdlWindow::Impl::disableOverlay(const char* why) {
     overlay = false;
     // ★ 屏幕上已经没有这层叠层了 ⇒ 命中表 / capture 一起作废（⛔ 留着旧按钮继续吃点击）。
     click_router.clearFrame();
+    // ★ C2b-2：adopt 进来的脚本**也**要摘（对象仍归调用方，⛔ 不销毁）。否则 `setOverlay(true)`
+    //   会反复重试一个已经证明画不出来的脚本（症状 = 每帧一行 [overlay]，而人以为它只是"暂时关着"）。
+    adopted_script = nullptr;
     ui_script.reset();
     // ★ S9：叠层没了 ⇒ 注入点击也不再问 router（否则 `--input-plan` 会继续"点"一个不存在的
     //   界面，而 guest 收不到点击 ⇒ 静默丢输入）。
     syncUiInputRouter();
-    // ★ 不立即销毁：上一帧的 draw 可能仍在 GPU 队列里（提前释放 ⇒ 部分/整块叠层丢失）。
-    //   退役到 `retired_overlay_tex`，由 `shutdown()` 统一释放。
+    teardownOverlayPixels();
+}
+
+// ★ C2b-2：叠层像素面的**唯一** teardown（三处调用点：`setOverlay(false)` / `disableOverlay` /
+//   `releaseOverlayScript`）。只**退役**纹理、不立即销毁（上一帧的 draw 可能仍在 GPU 队列里，
+//   提前释放会让叠层撕裂 / 丢失）⇒ 统一由 `shutdown()` 的 `releaseRetiredOverlayTextures()` 释放。
+void SdlWindow::Impl::teardownOverlayPixels() {
     if (overlay_tex != nullptr) {
         retired_overlay_tex.push_back(overlay_tex);
         overlay_tex = nullptr;
@@ -508,6 +520,64 @@ void SdlWindow::Impl::disableOverlay(const char* why) {
         std::string ignored;
         direct->directOverlay(nullptr, 0, 0, 0, 0, &ignored);
     }
+}
+
+// =====================================================================================
+// C2b-2：插件脚本接进**已有**叠层 host（口径见头注）
+// =====================================================================================
+lift::FontEngine* SdlWindow::ensureOverlayFont(std::string* err) {
+    if (impl_->ui_font != nullptr) return impl_->ui_font.get();
+    auto font = std::make_unique<lift::FontEngine>();
+    lift::HostTextMetrics metrics;
+    if (!font->metrics(lift::ui::kUiFontRefPx, false, &metrics)) {
+        if (err != nullptr) {
+            *err = "宿主字体不可用（LIFT_HOST_FONT_PATH）⇒ 叠层 / 插件 render 拒绝启动"
+                   "（R5：⛔ 不静默画空白）";
+        }
+        return nullptr;
+    }
+    impl_->ui_font = std::move(font);
+    return impl_->ui_font.get();
+}
+
+bool SdlWindow::adoptOverlayScript(ui::UiScript& script, std::string* err) {
+    // ★ 失败必须**零副作用**（除了字体可能刚建好——那是 adopt 自己的先决条件，留着无害）：
+    //   ① 没有窗口 ⇒ 这个 sink 还不能画（`init` 失败 / 已 `shutdown`），⛔ 不静默接进空气；
+    if (impl_->window == nullptr) {
+        if (err != nullptr) *err = "adoptOverlayScript: 窗口还没建（init 失败 / 已 shutdown）";
+        return false;
+    }
+    //   ② 传进来的就是本窗口自己拥有的那份 ⇒ `ui_script.reset()` 会把参数变成悬垂引用（实现错误）。
+    if (&script == impl_->ui_script.get()) {
+        if (err != nullptr) *err = "adoptOverlayScript: 脚本已经是本窗口自己拥有的那一份（⛔ 不接管自己）";
+        return false;
+    }
+    //   ③ 字体是叠层 host 的先决条件（R5）。
+    if (ensureOverlayFont(err) == nullptr) return false;
+    // ---- 提交（从这里开始没有失败分支）----
+    // 丢掉本窗口拥有的脚本 + 它的 QJS 内核：同一时刻只有一个叠层脚本 / 一个 QJS context
+    // （合同 §6 行 9 / 11）。默认 `hud.js` 的 context 到这里就没有消费者了。
+    impl_->ui_script.reset();
+    impl_->ui_runtime.reset();
+    impl_->adopted_script = &script;
+    impl_->overlay = true;
+    // 新脚本 ⇒ 旧 key / resolved rect 一律不代表屏幕上的东西（⛔ 留着旧按钮吃点击）。
+    impl_->click_router.clearFrame();
+    impl_->syncUiInputRouter();
+    return true;
+}
+
+void SdlWindow::releaseOverlayScript() {
+    if (impl_->adopted_script == nullptr) return;
+    impl_->adopted_script = nullptr;
+    impl_->click_router.clearFrame();
+    // ★ 没有别的脚本可画 ⇒ 叠层跟着关（⛔ 留一个"开着但画不出"的状态：下一帧会走 `disableOverlay`，
+    //   那是一条误导人的 stderr）。纹理照 teardown 退役。
+    if (impl_->ui_script == nullptr) {
+        impl_->overlay = false;
+        impl_->teardownOverlayPixels();
+    }
+    impl_->syncUiInputRouter();
 }
 
 void SdlWindow::Impl::releaseRetiredOverlayTextures() {
@@ -525,8 +595,10 @@ void SdlWindow::Impl::releaseRetiredOverlayTextures() {
 //     一次并照旧呈现（⛔ 不让诊断层把整帧打死）。
 bool SdlWindow::drawOverlay(std::string* err) {
     if (!impl_->overlay) return true;
-    if (impl_->ui_script == nullptr || impl_->ui_font == nullptr) {
-        if (err) *err = "HUD 脚本未初始化（--overlay / --ui 需要 UiScript + FontEngine）";
+    // ★ C2b-2：本帧的脚本 = adopted（`--plugin` 的 render）优先，否则本窗口拥有的那一份。
+    lift::ui::UiScript* const script = impl_->activeUiScript();
+    if (script == nullptr || impl_->ui_font == nullptr) {
+        if (err) *err = "HUD 脚本未初始化（--overlay / --ui / --plugin render 需要 UiScript + FontEngine）";
         return false;
     }
     lift::ui::UiFrameReadings readings;
@@ -537,6 +609,17 @@ bool SdlWindow::drawOverlay(std::string* err) {
         readings.mouse_ok = true;
         readings.mouse_x = mx;
         readings.mouse_y = my;
+        // ★ C2b-2：三键电平 = **已有的输入设备**（`WindowManager::mouseButtons()` →
+        //   `InputDevice` 的 `key_level_` 里三个 VK 的只读派生）。⛔ 不新开输入状态源。
+        //   与鼠标位置同一格来源（同一次 drawOverlay、同一帧）⇒ `mouse_buttons_ok` 只在
+        //   "这一帧真的读得到输入设备"时为真；没有窗口管理器的测试 sink ⇒ 脚本侧缺 `buttons` 键。
+        if (impl_->windows != nullptr) {
+            const std::uint32_t bits = impl_->windows->mouseButtons();
+            readings.mouse_buttons_ok = true;
+            readings.mouse_left = (bits & kMkLButton) != 0;
+            readings.mouse_right = (bits & kMkRButton) != 0;
+            readings.mouse_middle = (bits & kMkMButton) != 0;
+        }
     }
     if (!impl_->present_times_ns.empty()) {
         readings.fps_ok = true;
@@ -598,10 +681,9 @@ bool SdlWindow::drawOverlay(std::string* err) {
         }
     }
     // ★ 预算 = 这一帧的墙钟上限 + 字节码条数上限（`UiScript::setBudget` 的绝对 ns 口径）。
-    impl_->ui_script->setBudget(steadyNowNs() + kUiScriptBudgetNs, kUiScriptOpLimit);
+    script->setBudget(steadyNowNs() + kUiScriptBudgetNs, kUiScriptOpLimit);
     lift::ui::UiPresentedFrame presented;
-    const bool ok =
-        lift::ui::presentUi(this, *impl_->ui_font, *impl_->ui_script, readings, &presented, err);
+    const bool ok = lift::ui::presentUi(this, *impl_->ui_font, *script, readings, &presented, err);
     // ★ 只有**成功 present** 的那一帧才更新命中表：没有几何 / 空 list / 合成失败 ⇒ 屏幕上仍是
     //   上一次的叠层，命中表必须跟着它（⛔ 不清空：那会让"画着按钮但点不中"）。
     if (ok && presented.presented) impl_->click_router.commitFrame(std::move(presented.hits));
@@ -660,12 +742,14 @@ bool SdlWindow::Impl::routeInjectedPointer(UiPointerPhase phase, MouseButton but
 }
 
 // ★ S9：把本对象装/卸到 `WindowManager`（**唯一**同步点）。
-//   装的条件只有一条：`overlay && ui_script`（叠层真的画得出来、且有命中表可提交）。
+//   装的条件只有一条：`overlay && activeUiScript()`（叠层真的画得出来、且有命中表可提交）。
+//   ★ C2b-2：`activeUiScript()` 把 adopt 进来的 `--plugin` render 也算进去 —— 否则"插件画了按钮"
+//     与"注入点击问不到命中表"会分叉（静默丢输入）。
 //   `Pass` 模式**也**装 —— 它的语义在 `routeInjectedPointer` 里（不碰 router），这样
 //   "装不装"与"吞不吞"是两件事，不会被两个地方各判一半。
 void SdlWindow::Impl::syncUiInputRouter() {
     if (windows == nullptr) return;
-    windows->setUiInputRouter((overlay && ui_script != nullptr) ? this : nullptr);
+    windows->setUiInputRouter((overlay && activeUiScript() != nullptr) ? this : nullptr);
 }
 
 void SdlWindow::Impl::mapMouse(float mx, float my, std::int32_t* gx, std::int32_t* gy) const {
@@ -885,6 +969,9 @@ SdlWindow::~SdlWindow() { shutdown(); }
 
 bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
     if (impl_->window != nullptr) return true;
+    // ★ C2b-2：新一次 `init` 不继承上一次 adopt 的脚本（`--present auto` 的重试 / 测试复用）；
+    //   adopted 是**非拥有**指针 ⇒ 只摘，不销毁。
+    impl_->adopted_script = nullptr;
     impl_->screenshot_path = options.screenshot_path;
     impl_->screenshot_frame = options.screenshot_frame;
     impl_->raster_gpu = options.raster_gpu;
@@ -902,6 +989,7 @@ bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
         std::string script_err;
         if (!impl_->loadUiScript(&script_err)) {
             if (err) *err = script_err;
+            impl_->adopted_script = nullptr;
             impl_->ui_script.reset();
             impl_->ui_runtime.reset();
             impl_->ui_font.reset();
@@ -1152,6 +1240,8 @@ void SdlWindow::shutdown() {
     impl_->retired_overlay_tex.clear();
     impl_->overlay = false;
     // ★ 脚本 / 内核 / 字体 / 读数一起放掉（下一轮 init 或 `setOverlay(true)` 会按新 options 重装）。
+    //   ★ C2b-2：adopted 只摘指针（**非拥有**；对象归插件宿主，销毁时机不在这里）。
+    impl_->adopted_script = nullptr;
     impl_->ui_script.reset();
     impl_->ui_runtime.reset();
     impl_->ui_font.reset();
@@ -1669,6 +1759,9 @@ const char* SdlWindow::rendererName() const { return impl_->renderer_name.c_str(
 // 由 `shutdown()` 统一销毁；直出那一份由后端 `directOverlay(nullptr,...)` 移交 retired ——
 // ⛔ 都不在关的这一下立即释放：上一帧的 draw 可能仍在 GPU 队列里，提前释放会让叠层撕裂/丢失）。
 // 下一帧起窗口像素恢复成"只有画面"。默认关（`--overlay` / `--ui` 才打开）。
+// ★ C2b-2 的 adopt 语义：关只表示"不画"，**不摘** adopted 指针；再打开时继续画**同一份**插件
+//   脚本（⛔ 不会退回 hud.js —— 那会在 `--plugin` 的窗口档静默换掉内容）。要摘 adopted 用
+//   `releaseOverlayScript()`（`aot_main` 在 run 收口处调）。
 void SdlWindow::setOverlay(bool on) {
     impl_->overlay = on;
     // ★ 命中表 / capture 不跨叠层会话：新的脚本 / 新的一次开着，旧的 key 与 rect 都不再有效。
@@ -1676,32 +1769,22 @@ void SdlWindow::setOverlay(bool on) {
     if (on) {
         // ★ 生产路径在 `init()` 就装好字体 + 脚本（失败 ⇒ 硬错）；这里只兜"运行时再开"这条
         //   （测试 / 未来开关）：装不上 ⇒ **一次性 stderr + 保持关**（⛔ 不静默画空白、
-        //   ⛔ 不让一个诊断层把 run 打死）。
+        //   ⛔ 不让一个诊断层把 run 打死）。★ adopted 在场时 `loadUiScript` 直接 true（不装 hud.js）。
         if (!impl_->loadUiScript(nullptr)) {
             std::fprintf(stderr, "[overlay] 脚本 / 宿主字体不可用 ⇒ 拒绝启用（--overlay / --ui；R5）\n");
             impl_->overlay = false;
         }
-        // ★ S9：装/卸注入 router（条件 = `overlay && ui_script`；失败时 overlay 已回 false ⇒ 卸）。
+        // ★ S9：装/卸注入 router（条件 = `overlay && activeUiScript()`；失败时 overlay 已回 false ⇒ 卸）。
         impl_->syncUiInputRouter();
         return;
     }
-    // ★ 关 ⇒ 丢掉这一份脚本（下次开会按 `ui_script_path` 重新装：`--ui` 可能换过内容）。
+    // ★ 关 ⇒ 丢掉**本窗口拥有**的这一份脚本（下次开会按 `ui_script_path` 重新装：`--ui` 可能换过
+    //   内容）。adopted 不在这里丢（见上）。
     impl_->ui_script.reset();
     // ★ S9：脚本没了 ⇒ 注入点击不再问 router（见 `disableOverlay` 的同一条理由）。
     impl_->syncUiInputRouter();
     // ★ 纹理只退役、不立即销毁（见字段注释）；保留到 `shutdown()` 的代价有界（关叠层次数很少）。
-    if (impl_->overlay_tex != nullptr) {
-        impl_->retired_overlay_tex.push_back(impl_->overlay_tex);
-        impl_->overlay_tex = nullptr;
-    }
-    impl_->overlay_tex_w = 0;
-    impl_->overlay_tex_h = 0;
-    impl_->overlay_tex_cap_w = 0;
-    impl_->overlay_tex_cap_h = 0;
-    if (impl_->direct != nullptr) {
-        std::string ignored;
-        impl_->direct->directOverlay(nullptr, 0, 0, 0, 0, &ignored);
-    }
+    impl_->teardownOverlayPixels();
 }
 
 bool SdlWindow::overlayEnabled() const { return impl_->overlay; }

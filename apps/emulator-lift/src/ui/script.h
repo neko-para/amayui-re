@@ -82,6 +82,17 @@ struct UiFrameReadings {
     bool mouse_ok = false;
     int mouse_x = 0;
     int mouse_y = 0;
+    // ---- 三键电平（`game.mouse().buttons`；C2b-2）----
+    // ★ `mouse_buttons_ok == false` ⇒ 宿主这一帧**没有读数源** ⇒ 脚本侧 `mouse()` 里**缺
+    //   `buttons` 键**（⛔ 不编 `false`：那会让"鼠标按着"与"没有源"长得一样；d.ts 的
+    //   `buttons?` 就是这条口径）。
+    // ★ 生产来源 = `WindowManager::mouseButtons()`（`InputDevice` 的 `key_level_` 里三个 VK 的
+    //   **只读派生**；`runtime/input_device.h` 的唯一电平表）⇒ ⛔ 不在这里新开输入状态源。
+    //   与 `mouse_ok` 同一格来源（同一次 `drawOverlay`、同一帧）。
+    bool mouse_buttons_ok = false;
+    bool mouse_left = false;
+    bool mouse_right = false;
+    bool mouse_middle = false;
     bool fps_ok = false;
     double fps = 0.0;
     bool script_ok = false;

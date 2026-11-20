@@ -292,6 +292,10 @@ struct BmpPixel {
     std::uint8_t r = 0;
 };
 
+// ★ C2b-2：`--plugin` 的 render 夹具（`tests/plugin_fixtures/overlay-render.js`）整屏 rect 的 fill。
+//   它是**不透明** `#3366CC`（alpha=FF）⇒ 两条呈现路径上都逐位等于该值（⛔ 不套混合公式）。
+constexpr std::uint32_t kPluginFillRgb = 0x3366CCu;
+
 // ★ HUD 的底是 `#101820CC`（alpha 204 ⇒ 80% 不透明）。**两条呈现路径都与底下的画面混合**
 //   （renderer = `SDL_BLENDMODE_BLEND`；直出 = D 单的 `SRC_ALPHA / ONE_MINUS_SRC_ALPHA` 混合管线）⇒
 //   首帧 guest 是黑 ⇒ 期望 = `(s*a + 127)/255`（整数、四舍五入）= `#0D131A` = (13,19,26)。
@@ -411,6 +415,69 @@ int main(int argc, char** argv) {
         LIFT_CHECK(r.err.find("bad.js:2:") != std::string::npos);
         if (r.err.find("bad.js:2:") == std::string::npos) {
             std::fprintf(stderr, "  stderr:\n%s\n", r.err.c_str());
+        }
+    }
+
+    // ---- C2b-2：`--plugin` 的 `render` 在**窗口档**真的上屏（⛔ 不需要 `--overlay`）---------
+    // ★ 判据：`--present window --present-hidden --plugin <render 夹具> --max-frames 1` ⇒
+    //   ① 子进程 exit 0、readout `plugin    : … render=yes … run=done`（插件真的装了、走了窗口档）；
+    //   ② `--present-screenshot` 在画布原点 (0,0) 是插件 `ctx.draw.rect` 的 fill（不透明 #3366CC）；
+    //   ③ 同一命令**没给** `--overlay` ⇒ adopt 自己打开叠层（hud.js 不参与），stderr 没有 `[overlay]`。
+    //   红了 ⇒ aot_main 的窗口装配没把插件接进叠层 host（或又退回"只认 render 存在、不调用"）。
+    //   ★ 像素期望是**不透明填充**（alpha=FF）⇒ 两条呈现路径上都逐位等于 fill，不需要混合容差。
+    {
+        g_current_case = "plugin-render-window";
+        const fs::path plugin_js = fs::path(LIFT_PLUGIN_FIXTURES_DIR) / "overlay-render.js";
+        if (!fs::exists(plugin_js)) LIFT_SKIP("夹具 tests/plugin_fixtures/overlay-render.js 不在场");
+        const fs::path appdata = root / "appdata-plugin-render";
+        fs::create_directories(appdata, ec);
+        const fs::path shot = root / "plugin-render-shot.bmp";
+        std::vector<Arg> args = common;
+        args.push_back(argFromAscii("--max-frames"));
+        args.push_back(argFromAscii("1"));
+        args.push_back(argFromAscii("--appdata"));
+        args.push_back(appdata.native());
+        // ★ **不给** `--overlay`：有 `render` 的插件在窗口档由 adopt 接进叠层 host。
+        args.push_back(argFromAscii("--plugin"));
+        args.push_back(plugin_js.native());
+        args.push_back(argFromAscii("--present-screenshot"));
+        args.push_back(shot.native());
+        const ChildRun r = runChild(exe, args, root, root / "plugin-render.out", root / "plugin-render.err");
+        LIFT_CHECK(r.started);
+        if (r.started) {
+            std::printf("plugin-render-window: exit=%d timed_out=%d\n", r.exit_code, r.timed_out ? 1 : 0);
+            if (r.timed_out) {
+                LIFT_CHECK(false);
+            } else {
+                // 输入不在场 ⇒ skip（与其余 run 同一条口径；⛔ 不假红）。
+                if (r.out.find("没有生成物") != std::string::npos) LIFT_SKIP("构建期没有生成物");
+                if (r.err.find("没有可用的 GPU 光栅化后端") != std::string::npos) {
+                    LIFT_SKIP("本机没有可用的 GPU 光栅化后端");
+                }
+                if (r.err.find("宿主字体不可用") != std::string::npos) LIFT_SKIP("缺宿主字体");
+                if (r.err.find("拒绝启动") != std::string::npos) LIFT_SKIP("窗口 / GPU 初始化不成立");
+                LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.exit_code), 0u);
+                // ① readout：插件真的装了 + 有 render（`render=yes` 是 `hasRender()` 的读数面）。
+                LIFT_CHECK(r.out.find("plugin    : ") != std::string::npos);
+                LIFT_CHECK(r.out.find("render=yes") != std::string::npos);
+                LIFT_CHECK(r.out.find("run=done") != std::string::npos);
+                // ③ 没给 --overlay ⇒ adopt 自己开；stderr 不该有叠层失败 / hud 相关的一次性行。
+                LIFT_CHECK(r.err.find("[overlay]") == std::string::npos);
+                if (r.exit_code != 0 || r.out.find("plugin    : ") == std::string::npos) {
+                    std::fprintf(stderr, "  stdout:\n%s\n  stderr:\n%s\n", r.out.c_str(), r.err.c_str());
+                }
+                // ② 窗口像素：画布原点 = 插件 fill（首帧 guest 是黑；fill 不透明 ⇒ 逐位相等）。
+                const std::string shot_bytes = readAllBytes(shot);
+                const BmpPixel origin = bmpPixel(shot_bytes, 0, 0);
+                LIFT_CHECK(origin.ok);
+                if (origin.ok) {
+                    const std::uint32_t got = (static_cast<std::uint32_t>(origin.r) << 16) |
+                                              (static_cast<std::uint32_t>(origin.g) << 8) |
+                                              static_cast<std::uint32_t>(origin.b);
+                    std::printf("plugin-render-window: shot(0,0)=#%06X want #%06X\n", got, kPluginFillRgb);
+                    LIFT_CHECK_EQ_U32(got, kPluginFillRgb);
+                }
+            }
         }
     }
 

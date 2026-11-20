@@ -5119,6 +5119,27 @@ const MUTATIONS = [
       '`ctx.draw` 的不支持 style 字段不再抛 TypeError（静默忽略 `stroke`/`width`/`alpha`/`align`）⇒ ' +
       '`plugin-runtime` 的 `plugin/ui-draw-bad-style` 红（`render` 返回 true，D-C2-3 的反面）',
   },
+
+  // ── C2b-2：插件脚本接进窗口叠层 host（`present_sdl::adoptOverlayScript`）─────────────────
+  //   ★ 代表"接进来了但每帧仍画旧脚本 / 什么都不画"这一类错：`drawOverlay` 的脚本选择一旦退回
+  //     "只认 owned `ui_script`"，`adoptOverlayScript` 已经把 owned 丢掉 ⇒ 本帧没有脚本 ⇒
+  //     `drawOverlay` 失败、叠层被 `disableOverlay` 关掉。症状**静默**：exit 仍 0、
+  //     readout 仍 `render=yes` / `run=done`，只有窗口像素能看出来（`present_sdl.cpp` 的
+  //     `activeUiScript()` 是 adopted 优先的**唯一**落点）。
+  //   ★ 反证过（2026-11-20 / mac arm64）：施加这一处 ⇒ `plugin-overlay` 的 `render-up` /
+  //     `render-down` 红（像素回到 guest 色、`overlayEnabled()` 仍是 true 之前就被关）。
+  {
+    file: 'apps/emulator-lift/src/runtime/present_sdl.cpp',
+    from: '        return adopted_script != nullptr ? adopted_script : ui_script.get();\n',
+    to: '        return ui_script.get();  // 变异：adopt 进来的插件脚本永远不被画\n',
+    guard: 'ctest:plugin-overlay',
+    ctest: 'plugin-overlay',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-overlay',
+    what:
+      '`drawOverlay` 只认 owned `ui_script`（adopt 的插件脚本被丢掉）⇒ `plugin-overlay` 的 ' +
+      '`render-up` / `render-down` 红（叠层不画、像素回到 guest 色；exit 仍 0）',
+  },
 ];
 
 let mutationRunSeq = 0;

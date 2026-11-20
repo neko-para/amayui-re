@@ -67,6 +67,16 @@ interface UiSize {
 interface UiMouse {
   x: number;
   y: number;
+  /**
+   * 三键电平。★ C2b-2：窗口装配现在有**生产读数源**（`WindowManager::mouseButtons()`，
+   * 与 guest 输入同一张 `InputDevice` 电平表）⇒ `--overlay` / `--ui` 脚本也会拿到这个键。
+   * 没有源（headless / 没有 WindowManager）⇒ **缺键**，⛔ 不是 `false`（`mouse.buttons?.left ?? false`）。
+   */
+  readonly buttons?: {
+    readonly left: boolean;
+    readonly right: boolean;
+    readonly middle: boolean;
+  };
 }
 
 /**

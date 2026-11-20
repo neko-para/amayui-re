@@ -2454,8 +2454,12 @@ set_tests_properties(aot-audio-wiring PROPERTIES SKIP_RETURN_CODE 77)
 #   ⇒ 档位 = pure（`AGENTS.md` §12.4：输入假定在场，缺了不改变档位）。
 # ★ 子进程 spawn 产品 exe ⇒ 必须带 `add_dependencies`（否则 `--target lift-aot-overlay` 只重建
 #   守卫 exe，产品 exe 停在变异前 ⇒ 变异自检假绿；同形坑见 `aot-audio-wiring`）。
+#   ★ C2b-2 追加一条 `plugin-render-window`：`--plugin`（有 render）+ 窗口档 ⇒ 插件被接进叠层
+#     host、display list 上屏。夹具路径由下面这行注入（与 `lift-plugin-runtime` 同一份目录）。
 add_executable(lift-aot-overlay tests/aot_overlay.cpp)
 target_link_libraries(lift-aot-overlay PRIVATE emulator-lift-runtime)
+target_compile_definitions(lift-aot-overlay PRIVATE
+    LIFT_PLUGIN_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/plugin_fixtures")
 add_dependencies(lift-aot-overlay emulator-lift-aot)
 add_test(NAME aot-overlay
     COMMAND lift-aot-overlay $<TARGET_FILE:emulator-lift-aot> "${AGE_SECTFIX_EXE}" "${LIFT_STRESS_GAME_DIR}")
@@ -2788,6 +2792,21 @@ if(LIFT_BUILD_TESTS)
         COMMAND lift-plugin-headless $<TARGET_FILE:emulator-lift-aot> "${AGE_SECTFIX_EXE}"
                 "${LIFT_STRESS_GAME_DIR}")
     set_tests_properties(plugin-headless PROPERTIES SKIP_RETURN_CODE 77)
+
+    # ---- C2b-2：`--plugin` 的 render 接进窗口叠层 host（`adoptOverlayScript`）---------------
+    # ★ 判据（详 `tests/plugin_overlay.cpp` 文件头）：同一个 `PluginScript` 实例被 adopt 进已有
+    #   叠层 ⇒ 插件 `ctx.draw` 的 display list 真的上屏；`ctx.draw.measure` 有宿主字体；三键电平
+    #   来自 `WindowManager`（唯一输入设备面）；叠层不写 guest；release 之后恢复 guest 画面。
+    # ★ **顶层无条件注册 ⇒ pure 档**（`AGENTS.md` §12.4 判据 = 注册位置；`cmakeTestTier()` 把
+    #   外层 `if(LIFT_BUILD_TESTS)` 当透明）。缺宿主字体 / 建不出窗口 ⇒ 用例自己 `LIFT_SKIP(77)`。
+    # ★ 不 spawn 产品 exe ⇒ **不需要** `add_dependencies`（与 `plugin-headless` 的差别）。
+    # ★ `SDL_VIDEODRIVER=dummy` 与 `overlay` 同一条：software 渲染器 + 窗口/纹理/上传/回读的
+    #   机械正确性，不需要真桌面。⛔ 不带 dummy 的 GPU 直出档不在本条（那条是 `overlay-gpu`）。
+    add_executable(lift-plugin-overlay tests/plugin_overlay.cpp)
+    target_link_libraries(lift-plugin-overlay PRIVATE emulator-lift-runtime)
+    add_test(NAME plugin-overlay COMMAND lift-plugin-overlay)
+    set_tests_properties(plugin-overlay PROPERTIES
+        ENVIRONMENT "SDL_VIDEODRIVER=dummy" SKIP_RETURN_CODE 77)
 endif()
 
 # =====================================================================================

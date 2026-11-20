@@ -651,6 +651,29 @@ JSValue jsUiMeasure(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValue
 // =======================================================================================
 enum class GameProp : int { Frame = 0, Fps = 1, Mouse = 2, Script = 3, Worst = 4, Click = 5, Hover = 6, Active = 7 };
 
+// ★ C2b-2：三键电平的 `{left,right,middle}` **唯一**装配点（经典 `game.mouse` 与 RenderCtx 的
+//   `game.mouse()` 共用）。`mouse_buttons_ok == false` ⇒ **不安装**这个键（⛔ 不编 false：
+//   "松开"与"没有源"必须是两件事；d.ts 的 `buttons?` 就是这条）。
+bool setMouseButtons(JSContext* ctx, JSValueConst obj, const UiFrameReadings& r) {
+    if (!r.mouse_buttons_ok) return true;
+    Value buttons = qjs::newObject(ctx);
+    if (buttons.isException()) {
+        qjs::clearException(ctx);
+        return false;
+    }
+    if (!qjs::setProperty(ctx, buttons.raw(), "left", qjs::newBool(ctx, r.mouse_left)) ||
+        !qjs::setProperty(ctx, buttons.raw(), "right", qjs::newBool(ctx, r.mouse_right)) ||
+        !qjs::setProperty(ctx, buttons.raw(), "middle", qjs::newBool(ctx, r.mouse_middle))) {
+        qjs::clearException(ctx);
+        return false;
+    }
+    if (!qjs::setProperty(ctx, obj, "buttons", std::move(buttons))) {
+        qjs::clearException(ctx);
+        return false;
+    }
+    return true;
+}
+
 Value makeMouseObject(JSContext* ctx, const UiFrameReadings& r) {
     Value obj = qjs::newObject(ctx);
     if (obj.isException()) return obj;
@@ -659,6 +682,7 @@ Value makeMouseObject(JSContext* ctx, const UiFrameReadings& r) {
         qjs::clearException(ctx);
         return Value::exception(ctx);
     }
+    if (!setMouseButtons(ctx, obj.raw(), r)) return Value::exception(ctx);
     return obj;
 }
 
@@ -2440,8 +2464,8 @@ JSValue jsCtxReadScriptPos(JSContext* ctx, JSValueConst /*this_val*/, int /*argc
 }
 
 // `game.mouse()`（d.ts `GameRead.mouse()`）：**方法**（⛔ 不是 overlay 的 getter）；没有读数 ⇒ `undefined`。
-// ★ `buttons`（三键电平）在 C2 的 `UiFrameReadings` 里**没有源** ⇒ **不安装**这个键
-//   （⛔ 不编 `{left:false,…}`：那会让"鼠标按着"与"没有源"长得一样；C2b-2 的窗口装配 / C4 再接）。
+// ★ C2b-2：三键电平**有读数源时**才安装 `buttons`（`setMouseButtons` 的唯一装配点）；没有源 ⇒
+//   **缺键**（⛔ 不编 `{left:false,…}`：那会让"鼠标按着"与"没有源"长得一样）。
 JSValue jsRenderGameMouse(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/, JSValueConst* /*argv*/) {
     try {
         const Impl* impl = implOf(ctx);
@@ -2457,6 +2481,9 @@ JSValue jsRenderGameMouse(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*
             !qjs::setProperty(ctx, obj.raw(), "y", qjs::newInt32(ctx, r.mouse_y))) {
             qjs::clearException(ctx);
             return JS_ThrowTypeError(ctx, "game.mouse: 结果对象写入失败");
+        }
+        if (!setMouseButtons(ctx, obj.raw(), r)) {
+            return JS_ThrowTypeError(ctx, "game.mouse: buttons 写入失败");
         }
         return obj.take();
     } catch (...) {
@@ -3194,6 +3221,10 @@ public:
         impl_->op_limit = op_limit;
     }
     void setCallHost(PluginCallHost* host) override { impl_->call_host_persistent = host; }
+    // ★ C2b-2：`ctx.draw.text` / `ctx.draw.measure` 的宿主字体（非拥有）。装载时还不知道模块
+    //   有没有 `render`（`PluginLoadOptions.font` 因此保留）；窗口装配在**得知有 render 之后**
+    //   才接线，所以这条 late setter 必须与装载期那条写**同一个**字段（`Impl::font`）。
+    void setFont(lift::FontEngine* font) override { impl_->font = font; }
 
 private:
     bool renderFrame(UiBuilder& builder, const UiFrameReadings& readings, std::string* err) {

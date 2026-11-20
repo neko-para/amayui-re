@@ -27,6 +27,13 @@
 namespace lift {
 
 class WindowManager;
+class FontEngine;
+
+namespace ui {
+// ★ C2b-2：叠层脚本的**语言无关**接口（`ui/script.h`）。本头只前向声明 ——
+//   `present.h` 不声明 `UiScript`，而 `present_sdl.cpp` 才 include `ui/script.h`。
+class UiScript;
+}  // namespace ui
 
 struct SdlWindowOptions {
     std::string title = "emulator-lift";
@@ -184,6 +191,34 @@ public:
     // ★ `PresentSink`：宿主能力表（`host.profileBegin/End`；非 owning，生命周期 = 调用方 = `AotHost`）。
     //   ⛔ 只存指针：`drawOverlay` 每帧把它塞进 `UiFrameReadings::host`。
     void setUiHostOps(const ui::UiHostOps* ops) override;
+
+    // =====================================================================================
+    // C2b-2：把**外部拥有**的叠层脚本接进本窗口**已有**的叠层 host
+    //
+    // ★ 用途（生产 = `aot_main`）：`--plugin` 的 `PluginScript` 同时是 `UiScript`（同一个实例既跑
+    //   Run 回调、又画本帧）⇒ 窗口装配把**它**接进来，⛔ **不新开第二套 UI 运行时**
+    //   （合同 §6 行 9 / 11；`plugin-runtime.md` §4.4c）。
+    // ★ 语义：
+    //   · 需要宿主字体（R5）：缺 ⇒ false + `*err`（⛔ 不静默画空白）；已有 ⇒ 复用同一个
+    //     `FontEngine`（插件装载期可能已经借走这个指针）；
+    //   · 会丢掉本窗口**自己拥有**的那份脚本（`--ui` / 默认 `hud.js`）与它的 QJS 内核 ⇒
+    //     同一时刻只有一个叠层脚本 / 一个 QJS context；
+    //   · **会打开 `overlay`**（有 `render` 的插件在窗口档就该画；`--present headless` 不 adopt）；
+    //   · 作废命中表（旧脚本的 key / resolved rect 不代表新脚本），并重装注入路由；
+    //   · `script` **非拥有**：调用方必须保证它活到 `releaseOverlayScript()`（生产 = `aot_main`
+    //     在 run 收口处调用；`plugin_host` 的析构早于本窗口对象）。
+    //   · `window == nullptr`（`init` 之前 / 已 shutdown）⇒ false + err（⛔ 不静默"接进空气"）。
+    // ★ `setOverlay(false)` **不**摘 adopted（只是不画）；`setOverlay(true)` 重新打开**同一份**
+    //   （⛔ 不会退回 hud.js）。真正"叠层不可用"（`disableOverlay`）/ `shutdown` 才摘。
+    bool adoptOverlayScript(ui::UiScript& script, std::string* err);
+    // 摘掉 `adoptOverlayScript` 接进来的那一份（**不**销毁对象）；没有别的脚本可画 ⇒ 关掉 `overlay`
+    // 并退役叠层纹理（与 `setOverlay(false)` 同一条 teardown）。幂等。
+    void releaseOverlayScript();
+    // ★ `ctx.draw.measure` / `draw.text` 的宿主字体来源（非拥有；C2b-2）。已存在 ⇒ 返回同一个；
+    //   缺 ⇒ 建 + 校验度量（`kUiFontRefPx`），失败 ⇒ nullptr + `*err`（R5）。
+    //   生产调用点 = `aot_main` 的窗口装配（**得知插件有 render 之后**），插件再经
+    //   `PluginHost::setFont` 借到同一个指针。
+    FontEngine* ensureOverlayFont(std::string* err);
     bool overlayEnabled() const override;
     const char* rendererName() const;    // 直出时是 `gpu-direct`
     // GPU 直出是否成立（窗口已 claim 给光栅化的 device）。false ⇒ 呈现走 SDL_Renderer 上传。

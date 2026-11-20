@@ -199,6 +199,14 @@ public:
     //   （`ui/script.h` 头注），而 `read`/`log` 是**操作类**（回调与外设同一份宿主账）。放进 readings
     //   会多一条"这一帧能不能写日志取决于谁填了 readings"的隐性口径。
     virtual void setCallHost(PluginCallHost* host) = 0;
+
+    // `ctx.draw.text` / `ctx.draw.measure` 的**宿主字体**（非拥有；C2b-2）。
+    // ★ 为什么是**装载之后**的 setter 而不是只有 `PluginLoadOptions::font`：装载时（`--plugin`
+    //   的 CLI 阶段）还不知道模块有没有 `render`，而字体闸门（R5）只对"真的要画"的路径有意义
+    //   ⇒ 窗口装配在 `hasRender()` 为真之后才建字体 / 接线。两条路写的是**同一个**字段，
+    //   ⛔ 不要各留一份（"装载期有字体、render 期没有"会静默变成 TypeError）。
+    // ★ `nullptr` = 没接（测试夹具 / headless）⇒ `measure` / `text` 抛 TypeError（⛔ 不返回 0 尺寸）。
+    virtual void setFont(lift::FontEngine* font) = 0;
 };
 
 // 装载参数（`origin` = `--plugin <path>` 原样：错误定位与 module 解析根都用它）。
@@ -207,6 +215,8 @@ struct PluginLoadOptions {
     const PluginParams* params = nullptr;
     // C2b 的 `ctx.draw.measure` 用（度量走宿主字体，`ui/raster.h` 的 `measureText`）；
     // noexcept：nullptr ⇒ `measure` 抛 TypeError（⛔ 不返回 0 尺寸冒充可用）。
+    // ★ 窗口装配走 **late setter**（`PluginScript::setFont`）：装载时还不知道模块有没有 `render`。
+    //   直接装载（测试夹具）仍可在这里给；两条写同一个字段。
     FontEngine* font = nullptr;
 };
 
