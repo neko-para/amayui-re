@@ -28,6 +28,7 @@
 // ★ 注册在**顶层无条件**（`SKIP_RETURN_CODE 77`）—— 缺 GPU / 缺生成物 / 缺执行源时 `LIFT_SKIP(77)`，
 //   ⛔ 不许"什么都不做然后 return 0"（那与跑绿了长得一样，`check.h`）。
 // ★ 子进程 cwd 指到临时目录、`--appdata` 也指到临时目录 ⇒ 不往仓库 / 真 AppData 写东西。
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -38,79 +39,16 @@
 #include <vector>
 
 #include "check.h"
-#include "cmdline.h"
-
-#if defined(_WIN32)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#endif
+#include "support/subprocess.h"
 
 namespace {
 
-#if defined(_WIN32)
-
 namespace fs = std::filesystem;
-
-struct ChildRun {
-    DWORD exit_code = 0xFFFFFFFFu;
-    bool started = false;
-    bool timed_out = false;
-    std::string out;
-    std::string err;
-};
 
 std::string readAllBytes(const fs::path& p) {
     std::ifstream in(p, std::ios::binary);
     if (!in) return {};
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-}
-
-ChildRun runChild(const fs::path& exe, const std::wstring& args, const fs::path& cwd, const fs::path& out_path,
-                  const fs::path& err_path) {
-    ChildRun r;
-    SECURITY_ATTRIBUTES sa{};
-    sa.nLength = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-    const HANDLE h_out = ::CreateFileW(out_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS,
-                                       FILE_ATTRIBUTE_NORMAL, nullptr);
-    const HANDLE h_err = ::CreateFileW(err_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS,
-                                       FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h_out == INVALID_HANDLE_VALUE || h_err == INVALID_HANDLE_VALUE) {
-        if (h_out != INVALID_HANDLE_VALUE) ::CloseHandle(h_out);
-        if (h_err != INVALID_HANDLE_VALUE) ::CloseHandle(h_err);
-        return r;
-    }
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdOutput = h_out;
-    si.hStdError = h_err;
-    PROCESS_INFORMATION pi{};
-    std::wstring cmd = lift_test::quoteArg(exe.wstring()) + L" " + args;
-    const BOOL ok = ::CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
-                                     cwd.c_str(), &si, &pi);
-    ::CloseHandle(h_out);
-    ::CloseHandle(h_err);
-    if (!ok) return r;
-    r.started = true;
-    // 60 s 上限：`--max-frames 5` 在本机 1–2 s（有安装树时含 skip-logo）；卡住必须**红**。
-    const DWORD waited = ::WaitForSingleObject(pi.hProcess, 60000u);
-    if (waited != WAIT_OBJECT_0) {
-        r.timed_out = true;
-        ::TerminateProcess(pi.hProcess, 991u);
-        ::WaitForSingleObject(pi.hProcess, 5000u);
-    }
-    ::GetExitCodeProcess(pi.hProcess, &r.exit_code);
-    ::CloseHandle(pi.hThread);
-    ::CloseHandle(pi.hProcess);
-    r.out = readAllBytes(out_path);
-    r.err = readAllBytes(err_path);
-    return r;
 }
 
 /** 第一行以 `prefix` 开头的行（没有 ⇒ 空串）。 */
@@ -149,20 +87,14 @@ std::uint32_t readLe32(const std::string& b, std::size_t off) {
 
 // 一次 run 的公共 argv（`--exe` 由调用方拼在前面；`--appdata` 每次一个全新空目录）。
 // ★ `--max-frames 5`：判据只要"跑到收口"，5 帧足够（本机 1–2 s）。
-const wchar_t* const kCommonArgs = L" --max-frames 5 --skip-logo --present headless --time-limit 60";
-
-#endif  // _WIN32
+const std::vector<std::string> kCommonArgs = {"--max-frames", "5",       "--skip-logo", "--present",
+                                              "headless",     "--time-limit", "60"};
 
 }  // namespace
 
 int main(int argc, char** argv) {
     using namespace lift_test;
 
-#if !defined(_WIN32)
-    (void)argc;
-    (void)argv;
-    LIFT_SKIP("AOT 臂的接线用 CreateProcessW 起子进程（Windows 专有）");
-#else
     if (argc < 3) {
         LIFT_SKIP("需要 CTest 传 <emulator-lift-aot.exe> <AGE.EXE__dumped.sectfix.EXE>（见 CMakeLists）");
     }
@@ -173,38 +105,43 @@ int main(int argc, char** argv) {
     if (!fs::exists(age_exe)) LIFT_SKIP("执行源（corpus/assets/age/AGE.EXE__dumped.sectfix.EXE）不在场");
 
     std::error_code ec;
-    const fs::path root = fs::temp_directory_path(ec) / ("lift-aot-audio-wiring-" + std::to_string(::GetCurrentProcessId()));
+    const fs::path root = fs::temp_directory_path(ec) / ("lift-aot-audio-wiring-" + std::to_string(lift_test::processId()));
     fs::remove_all(root, ec);
     fs::create_directories(root, ec);
     LIFT_CHECK(!ec);
 
-    const std::wstring exe_arg = L"--exe " + quoteArg(age_exe.wstring());
+    const std::vector<std::string> exe_arg = {"--exe", pathToUtf8(age_exe)};
 
     struct Run {
         const char* name;
-        std::wstring extra;  // 追加在公共 argv 之后
+        std::vector<std::string> extra;  // 追加在公共 argv 之后
         bool want_audio_line;
-        int want_muted;      // 只在 want_audio_line 时有意义（0 / 1）
+        int want_muted;  // 只在 want_audio_line 时有意义（0 / 1）
         bool want_dump;
     };
     // ★ 四条 = 3 个档位 + 1 个对照组。`--audio-dump` 会把档位提升成 virtual（唯一规则在
     //   `AudioEngine::configure`，`aot-audio-flags` 已钉），所以它不另给 `--audio`。
     const fs::path dump_path = root / "wiring-dump.wav";
     const Run kRuns[] = {
-        {"sound-only", L"--sound", /*want_audio_line=*/false, 0, false},
-        {"sound-virtual", L"--sound --audio virtual", true, 0, false},
-        {"virtual-no-sound", L"--audio virtual", true, 1, false},
-        {"sound-dump", L"--sound --audio-dump " + quoteArg(dump_path.wstring()), true, 0, true},
+        {"sound-only", {"--sound"}, /*want_audio_line=*/false, 0, false},
+        {"sound-virtual", {"--sound", "--audio", "virtual"}, true, 0, false},
+        {"virtual-no-sound", {"--audio", "virtual"}, true, 1, false},
+        {"sound-dump", {"--sound", "--audio-dump", pathToUtf8(dump_path)}, true, 0, true},
     };
 
     for (const Run& k : kRuns) {
         g_current_case = k.name;
         const fs::path appdata = root / (std::string("appdata-") + k.name);
         fs::create_directories(appdata, ec);
-        const std::wstring args = exe_arg + kCommonArgs + L" --appdata " +
-                                  quoteArg(appdata.wstring()) + L" " + k.extra;
-        const std::string tag = std::string(k.name) + ".";
-        const ChildRun r = runChild(exe, args, root, root / (tag + "out"), root / (tag + "err"));
+        std::vector<std::string> args = exe_arg;
+        args.insert(args.end(), kCommonArgs.begin(), kCommonArgs.end());
+        args.push_back("--appdata");
+        args.push_back(pathToUtf8(appdata));
+        args.insert(args.end(), k.extra.begin(), k.extra.end());
+        ChildOptions opts;
+        opts.cwd = root;
+        opts.timeout = std::chrono::milliseconds(60000);  // 原值：`--max-frames 5` 本机 1–2 s
+        const ChildResult r = runChild(exe, args, opts);
         LIFT_CHECK(r.started);
         if (!r.started) continue;
         LIFT_CHECK(!r.timed_out);
@@ -260,7 +197,6 @@ int main(int argc, char** argv) {
     }
 
     fs::remove_all(root, ec);
-#endif
 
     return lift_test::finish("aot-audio-wiring");
 }

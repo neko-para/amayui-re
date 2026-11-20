@@ -32,7 +32,7 @@
 //      红了 ⇒ 要么仪器"给了但跑不起来"，要么非法值被静默吞成 0（= 以为在量、其实没量）。
 //   ⑨ **S9** `--ui-input=consume|pass`：help 里两种写法都在；非法值 ⇒ exit 2 + 点名合法值；
 //      合法值被接受（走到 headless 的窗口参数拒绝，而不是「值非法」）；分离形式与 `=` 同结论。
-//      ★ pure 值域判据在 `overlay/ui-input-parse`（本用例 POSIX skip，⛔ 不靠它当唯一判据）。
+//      ★ pure 值域判据在 `overlay/ui-input-parse`（⛔ 不靠本用例当唯一判据）。
 //
 // ★ 四条主断言**全部判在 GPU bring-up 之前**：AOT 臂的参数校验（`aot_main.cpp` 的
 //   `--audio` / `--cursor-warp` 平台闸门 / `present_window_flag` / `--sound` 说明）都在
@@ -42,6 +42,7 @@
 // ★ 为什么是 CLI 级 + 真子进程：判据穿过"参数解析 → 早期拒绝 → 文案 → 退出码"整条链；
 //   单测某个解析函数抓不到"解析对了但闸门漏了 / 文案还写着未知参数"这种半修。
 // ★ 子进程 cwd 指到临时目录（照 `tests/cli_cursor_warp.cpp:17-18` 的理由）⇒ 结果不随宿主 cwd 漂。
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -52,82 +53,11 @@
 #include <vector>
 
 #include "check.h"
-#include "cmdline.h"
-
-#if defined(_WIN32)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#endif
+#include "support/subprocess.h"
 
 namespace {
 
-#if defined(_WIN32)
-
 namespace fs = std::filesystem;
-
-struct ChildRun {
-    DWORD exit_code = 0xFFFFFFFFu;
-    bool started = false;
-    bool timed_out = false;
-    std::string out;
-    std::string err;
-};
-
-std::string readAllBytes(const fs::path& p) {
-    std::ifstream in(p, std::ios::binary);
-    if (!in) return {};
-    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-}
-
-using lift_test::quoteArg;
-
-ChildRun runChild(const fs::path& exe, const std::wstring& args, const fs::path& cwd, const fs::path& out_path,
-                  const fs::path& err_path) {
-    ChildRun r;
-    SECURITY_ATTRIBUTES sa{};
-    sa.nLength = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-    const HANDLE h_out = ::CreateFileW(out_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS,
-                                       FILE_ATTRIBUTE_NORMAL, nullptr);
-    const HANDLE h_err = ::CreateFileW(err_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS,
-                                       FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h_out == INVALID_HANDLE_VALUE || h_err == INVALID_HANDLE_VALUE) {
-        if (h_out != INVALID_HANDLE_VALUE) ::CloseHandle(h_out);
-        if (h_err != INVALID_HANDLE_VALUE) ::CloseHandle(h_err);
-        return r;
-    }
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdOutput = h_out;
-    si.hStdError = h_err;
-    PROCESS_INFORMATION pi{};
-    std::wstring cmd = quoteArg(exe.wstring()) + L" " + args;
-    const BOOL ok = ::CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
-                                     cwd.c_str(), &si, &pi);
-    ::CloseHandle(h_out);
-    ::CloseHandle(h_err);
-    if (!ok) return r;
-    r.started = true;
-    // 30 s 上限：这几条都在建窗口之前就返回；卡住必须**红**，⛔ 不许挂死流水线。
-    const DWORD waited = ::WaitForSingleObject(pi.hProcess, 30000u);
-    if (waited != WAIT_OBJECT_0) {
-        r.timed_out = true;
-        ::TerminateProcess(pi.hProcess, 991u);
-        ::WaitForSingleObject(pi.hProcess, 5000u);
-    }
-    ::GetExitCodeProcess(pi.hProcess, &r.exit_code);
-    ::CloseHandle(pi.hThread);
-    ::CloseHandle(pi.hProcess);
-    r.out = readAllBytes(out_path);
-    r.err = readAllBytes(err_path);
-    return r;
-}
 
 bool hasLineStartingWith(const std::string& text, const std::string& prefix) {
     std::size_t pos = 0;
@@ -157,18 +87,19 @@ std::size_t countOccurrences(const std::string& hay, const std::string& needle) 
 //   其它文案）—— 标记必须只属于这句话，否则"恰好一次"这条断言会变成恒真。
 const char* const kSoundNoticeMarker = "--sound 已接受";
 
-#endif  // _WIN32
+/** 本文件的公共 spawn 选项：cwd 指到临时目录；超时沿用原值 30 s（这几条都在建窗口之前返回）。 */
+lift_test::ChildOptions childOptions(const fs::path& cwd) {
+    lift_test::ChildOptions opts;
+    opts.cwd = cwd;
+    opts.timeout = std::chrono::milliseconds(30000);
+    return opts;
+}
 
 }  // namespace
 
 int main(int argc, char** argv) {
     using namespace lift_test;
 
-#if !defined(_WIN32)
-    (void)argc;
-    (void)argv;
-    LIFT_SKIP("AOT 臂的参数面用 CreateProcessW 起子进程（Windows 专有）");
-#else
     if (argc < 2) {
         LIFT_SKIP("需要 CTest 传 <emulator-lift-aot.exe>（见 CMakeLists 的 cli-aot-flags）");
     }
@@ -176,7 +107,7 @@ int main(int argc, char** argv) {
     LIFT_CHECK(fs::exists(exe));
 
     std::error_code ec;
-    const fs::path root = fs::temp_directory_path(ec) / ("lift-cli-aot-" + std::to_string(::GetCurrentProcessId()));
+    const fs::path root = fs::temp_directory_path(ec) / ("lift-cli-aot-" + std::to_string(lift_test::processId()));
     fs::remove_all(root, ec);
     fs::create_directories(root, ec);
     LIFT_CHECK(!ec);
@@ -184,7 +115,7 @@ int main(int argc, char** argv) {
     // ---- ① `--help`：两个 flag 都在（缺一个都红）----
     g_current_case = "help-lists-both-flags";
     {
-        const ChildRun r = runChild(exe, L"--help", root, root / "help.out", root / "help.err");
+        const ChildResult r = runChild(exe, {"--help"}, childOptions(root));
         LIFT_CHECK(r.started);
         LIFT_CHECK(!r.timed_out);
         LIFT_CHECK_EQ_U32(r.exit_code, 0u);
@@ -201,19 +132,19 @@ int main(int argc, char** argv) {
         // ★ S4：`--input-plan` 必须在 help 里（否则用户不知道 AOT 臂有输入控制面）。
         LIFT_CHECK(r.out.find("--input-plan") != std::string::npos);
         // ★ 诊断档 `--input-plan-trace` 也必须在 help 里（否则"配方 click 不被消费"只能靠猜；
-        //   见 `REQ-01M7PG086DG4BBPA40VCVZTP4X` B）。⚠ 本用例在 POSIX 上 skip（CreateProcessW
-        //   是 Windows 专有）⇒ mac 侧的等价判据在 `docs` / 手工命令，⛔ 不要因此删掉这一条。
+        //   见 `REQ-01M7PG086DG4BBPA40VCVZTP4X` B）。解析期判据另在 `input-plan-read-points`
+        //   （⛔ 不靠这一条当唯一判据）。
         LIFT_CHECK(r.out.find("--input-plan-trace") != std::string::npos);
         // ★ S6：三条鼠标原语必须在 help 里（否则用户不知道"拖拽"能在配方里表达；
         //   词表与 `runtime/recipe.cpp` 的 `instructionList` 是**同一组**指令）。
-        //   ⚠ 本用例在 POSIX 上 skip ⇒ 解析期判据另在 `input-plan-read-points` 的
-        //   `input-plan/parse-errors` / `input-plan/mouse-primitives`（⛔ 不靠这一条当唯一判据）。
+        //   解析期判据另在 `input-plan-read-points` 的 `input-plan/parse-errors` /
+        //   `input-plan/mouse-primitives`（⛔ 不靠这一条当唯一判据）。
         LIFT_CHECK(r.out.find("mouse_move") != std::string::npos);
         LIFT_CHECK(r.out.find("mouse_down") != std::string::npos);
         LIFT_CHECK(r.out.find("mouse_up") != std::string::npos);
         // ★ S9：`--ui-input` 的**两个合法值**与"两种写法都收"必须写在 help 里（D2；否则用户
-        //   不知道"注入点击可以被叠层吞 / 怎么关掉"）。⚠ POSIX 上本用例 skip ⇒ 值域本身的
-        //   机械判据另在 `overlay/ui-input-parse`（pure），⛔ 不靠这一条当唯一判据。
+        //   不知道"注入点击可以被叠层吞 / 怎么关掉"）。值域本身的机械判据另在
+        //   `overlay/ui-input-parse`（pure），⛔ 不靠这一条当唯一判据。
         LIFT_CHECK(r.out.find("--ui-input=consume|pass") != std::string::npos);
         LIFT_CHECK(r.out.find("--ui-input consume|pass") != std::string::npos);
         // ★ `--profile-slow-frames` 必须在 help 里（否则"按帧的 shim 分桶"这条仪器等于不存在，
@@ -224,8 +155,8 @@ int main(int argc, char** argv) {
         LIFT_CHECK(r.out.find("--scale auto|数值") != std::string::npos);
         LIFT_CHECK(r.out.find("headless") != std::string::npos);
         // ★ C2a：`--plugin` / `--plugin-param` 必须在 help 里（否则用户不知道 AOT 臂有插件面；
-        //   合同 `plugin-runtime.md` §4.6 / 裁决 D-C2-2。⚠ 本用例在 POSIX 上 skip ⇒ 装载面的判据
-        //   另在 `plugin-runtime`（pure），⛔ 不靠这一条当唯一判据）。
+        //   合同 `plugin-runtime.md` §4.6 / 裁决 D-C2-2。装载面的判据另在 `plugin-runtime`
+        //   （pure），⛔ 不靠这一条当唯一判据）。
         LIFT_CHECK(r.out.find("--plugin <path>") != std::string::npos);
         LIFT_CHECK(r.out.find("--plugin-param k=v") != std::string::npos);
         LIFT_CHECK(r.out.find("export default") != std::string::npos);
@@ -238,27 +169,25 @@ int main(int argc, char** argv) {
     {
         struct Case {
             const char* name;
-            const wchar_t* args;  // ★ `runChild` 收的是"exe 之后那一整串参数"（⛔ 不是 argv 数组）
+            std::vector<std::string> args;
             const char* must;
             const char* also;
         };
         const Case cases[] = {
-            {"plugin+input-plan", L"--plugin a.js --input-plan b.plan", "--plugin", "--input-plan"},
-            {"plugin+control-root", L"--plugin a.js --control-root ctl", "--plugin", "--control-root"},
-            {"plugin+ui-different", L"--plugin a.js --ui b.js", "--plugin", "--ui"},
-            {"plugin-param-duplicate", L"--plugin a.js --plugin-param k=1 --plugin-param k=2",
+            {"plugin+input-plan", {"--plugin", "a.js", "--input-plan", "b.plan"}, "--plugin", "--input-plan"},
+            {"plugin+control-root", {"--plugin", "a.js", "--control-root", "ctl"}, "--plugin", "--control-root"},
+            {"plugin+ui-different", {"--plugin", "a.js", "--ui", "b.js"}, "--plugin", "--ui"},
+            {"plugin-param-duplicate", {"--plugin", "a.js", "--plugin-param", "k=1", "--plugin-param", "k=2"},
              "--plugin-param", "k"},
-            {"plugin-param-shape", L"--plugin a.js --plugin-param novalue", "--plugin-param", "k=v"},
+            {"plugin-param-shape", {"--plugin", "a.js", "--plugin-param", "novalue"}, "--plugin-param", "k=v"},
             // ★ F6（C2a 复审）：重复 `--plugin` 给两份不同路径 — 与 `--plugin`/`--ui` 的
             //   "不静默只取一个"对称（旧实现无条件覆盖 ⇒ 静默用后一个）。
-            {"plugin-duplicate", L"--plugin a.js --plugin b.js", "--plugin", "a.js"},
+            {"plugin-duplicate", {"--plugin", "a.js", "--plugin", "b.js"}, "--plugin", "a.js"},
             // ★ F6 的另一半：`--plugin-param` 没有 `--plugin` ⇒ 它**没有消费者**，⛔ 不许静默忽略。
-            {"plugin-param-without-plugin", L"--plugin-param k=v", "--plugin-param", "--plugin"},
+            {"plugin-param-without-plugin", {"--plugin-param", "k=v"}, "--plugin-param", "--plugin"},
         };
         for (const Case& c : cases) {
-            const ChildRun bad = runChild(exe, c.args, root,
-                                          root / (std::string(c.name) + ".out"),
-                                          root / (std::string(c.name) + ".err"));
+            const ChildResult bad = runChild(exe, c.args, childOptions(root));
             LIFT_CHECK(bad.started);
             LIFT_CHECK(!bad.timed_out);
             LIFT_CHECK_EQ_U32(bad.exit_code, 2u);
@@ -278,8 +207,7 @@ int main(int argc, char** argv) {
     //   ④ 拒绝文案里的窗口参数清单含 `--ui-input`（用户照着改）。
     g_current_case = "ui-input-values";
     {
-        const ChildRun bad = runChild(exe, L"--ui-input=pas", root, root / "uiinputbad.out",
-                                      root / "uiinputbad.err");
+        const ChildResult bad = runChild(exe, {"--ui-input=pas"}, childOptions(root));
         LIFT_CHECK(bad.started);
         LIFT_CHECK(!bad.timed_out);
         LIFT_CHECK_EQ_U32(bad.exit_code, 2u);
@@ -287,8 +215,8 @@ int main(int argc, char** argv) {
         LIFT_CHECK(bad.err.find("consume") != std::string::npos);
         LIFT_CHECK(bad.err.find("pass") != std::string::npos);
 
-        const ChildRun eq = runChild(exe, L"--present headless --ui-input=pass", root, root / "uiinputeq.out",
-                                     root / "uiinputeq.err");
+        const ChildResult eq =
+            runChild(exe, {"--present", "headless", "--ui-input=pass"}, childOptions(root));
         LIFT_CHECK(eq.started);
         LIFT_CHECK(!eq.timed_out);
         LIFT_CHECK_EQ_U32(eq.exit_code, 2u);
@@ -296,8 +224,8 @@ int main(int argc, char** argv) {
         LIFT_CHECK(eq.err.find("值非法") == std::string::npos);
         LIFT_CHECK(eq.err.find("--ui-input") != std::string::npos);
 
-        const ChildRun sep = runChild(exe, L"--present headless --ui-input consume", root, root / "uiinputsep.out",
-                                      root / "uiinputsep.err");
+        const ChildResult sep =
+            runChild(exe, {"--present", "headless", "--ui-input", "consume"}, childOptions(root));
         LIFT_CHECK(sep.started);
         LIFT_CHECK(!sep.timed_out);
         LIFT_CHECK_EQ_U32(sep.exit_code, 2u);
@@ -310,8 +238,7 @@ int main(int argc, char** argv) {
     g_current_case = "input-plan-missing-file";
     {
         const fs::path missing = root / "no-such-plan.plan";
-        const ChildRun r = runChild(exe, L"--input-plan " + quoteArg(missing.wstring()), root,
-                                    root / "planmiss.out", root / "planmiss.err");
+        const ChildResult r = runChild(exe, {"--input-plan", pathToUtf8(missing)}, childOptions(root));
         LIFT_CHECK(r.started);
         LIFT_CHECK(!r.timed_out);
         LIFT_CHECK_EQ_U32(r.exit_code, 2u);
@@ -332,8 +259,7 @@ int main(int argc, char** argv) {
             out << "click 1 2\n";
             out << "expect screen changed\n";
         }
-        const ChildRun r = runChild(exe, L"--input-plan " + quoteArg(bad.wstring()), root, root / "planbad.out",
-                                    root / "planbad.err");
+        const ChildResult r = runChild(exe, {"--input-plan", pathToUtf8(bad)}, childOptions(root));
         LIFT_CHECK(r.started);
         LIFT_CHECK(!r.timed_out);
         LIFT_CHECK_EQ_U32(r.exit_code, 2u);
@@ -363,9 +289,7 @@ int main(int argc, char** argv) {
                 std::ofstream out(p, std::ios::binary);
                 out << o.text;
             }
-            const std::string tag = std::string(o.name) + ".";
-            const ChildRun r = runChild(exe, L"--input-plan " + quoteArg(p.wstring()), root, root / (tag + "out"),
-                                        root / (tag + "err"));
+            const ChildResult r = runChild(exe, {"--input-plan", pathToUtf8(p)}, childOptions(root));
             LIFT_CHECK(r.started);
             LIFT_CHECK(!r.timed_out);
             LIFT_CHECK_EQ_U32(r.exit_code, 2u);
@@ -398,9 +322,7 @@ int main(int argc, char** argv) {
                 std::ofstream out(p, std::ios::binary);
                 out << b.text;
             }
-            const std::string tag = std::string(b.name) + ".";
-            const ChildRun r = runChild(exe, L"--input-plan " + quoteArg(p.wstring()), root, root / (tag + "out"),
-                                        root / (tag + "err"));
+            const ChildResult r = runChild(exe, {"--input-plan", pathToUtf8(p)}, childOptions(root));
             LIFT_CHECK(r.started);
             LIFT_CHECK(!r.timed_out);
             LIFT_CHECK_EQ_U32(r.exit_code, 2u);
@@ -434,9 +356,7 @@ int main(int argc, char** argv) {
                 std::ofstream out(p, std::ios::binary);
                 out << s.text;
             }
-            const std::string tag = std::string(s.name) + ".";
-            const ChildRun r = runChild(exe, L"--input-plan " + quoteArg(p.wstring()), root, root / (tag + "out"),
-                                        root / (tag + "err"));
+            const ChildResult r = runChild(exe, {"--input-plan", pathToUtf8(p)}, childOptions(root));
             LIFT_CHECK(r.started);
             LIFT_CHECK(!r.timed_out);
             LIFT_CHECK_EQ_U32(r.exit_code, 2u);
@@ -451,8 +371,8 @@ int main(int argc, char** argv) {
     //      ⛔ 不是 `未知参数`：那正是改动前的形状（用户"无法指定"的现场）。
     g_current_case = "headless-rejects-cursor-warp";
     {
-        const ChildRun r = runChild(exe, L"--cursor-warp --present headless", root, root / "cw.out",
-                                    root / "cw.err");
+        const ChildResult r =
+            runChild(exe, {"--cursor-warp", "--present", "headless"}, childOptions(root));
         LIFT_CHECK(r.started);
         LIFT_CHECK(!r.timed_out);
         LIFT_CHECK_EQ_U32(r.exit_code, 2u);
@@ -469,19 +389,16 @@ int main(int argc, char** argv) {
     g_current_case = "scale-bogus-values-rejected";
     {
         struct BadScale {
-            const wchar_t* arg;  // `--scale` 之后那个值（宽字符，直接拼进子进程命令行）
-            const char* word;    // stderr 里必须出现的词（值本身）
+            const char* arg;   // `--scale` 之后那个值（UTF-8 token，原样交给子进程）
+            const char* word;  // stderr 里必须出现的词（值本身）
         };
         const BadScale kBads[] = {
-            {L"0", "0"},     {L"-1", "-1"}, {L"nan", "nan"}, {L"inf", "inf"},
-            {L"abc", "abc"}, {L"1.5x", "1.5x"},
+            {"0", "0"},     {"-1", "-1"}, {"nan", "nan"}, {"inf", "inf"},
+            {"abc", "abc"}, {"1.5x", "1.5x"},
         };
         for (const BadScale& b : kBads) {
-            const std::wstring cmd = std::wstring(L"--scale ") + b.arg + L" --present headless";
-            std::string tag = "scale-";
-            for (const wchar_t* p = b.arg; *p != L'\0'; ++p) tag.push_back(static_cast<char>(*p));
-            tag += ".";
-            const ChildRun r = runChild(exe, cmd, root, root / (tag + "out"), root / (tag + "err"));
+            const ChildResult r =
+                runChild(exe, {"--scale", b.arg, "--present", "headless"}, childOptions(root));
             LIFT_CHECK(r.started);
             LIFT_CHECK(!r.timed_out);
             LIFT_CHECK_EQ_U32(r.exit_code, 2u);
@@ -492,8 +409,7 @@ int main(int argc, char** argv) {
             LIFT_CHECK(!hasLineStartingWith(r.out, "stop"));
         }
         // 缺值：`--scale` 后面没有东西 ⇒ exit 2 + `需要一个值` + 点名前缀（与其它 flag 同一句）。
-        const ChildRun missing =
-            runChild(exe, L"--scale", root, root / "scalemiss.out", root / "scalemiss.err");
+        const ChildResult missing = runChild(exe, {"--scale"}, childOptions(root));
         LIFT_CHECK(missing.started);
         LIFT_CHECK(!missing.timed_out);
         LIFT_CHECK_EQ_U32(missing.exit_code, 2u);
@@ -508,8 +424,8 @@ int main(int argc, char** argv) {
     //        `window-scale/headless-readout` 钉。
     g_current_case = "scale-headless-accepted";
     {
-        const ChildRun r = runChild(exe, L"--scale 1.5 --present headless", root, root / "scalehl.out",
-                                    root / "scalehl.err");
+        const ChildResult r =
+            runChild(exe, {"--scale", "1.5", "--present", "headless"}, childOptions(root));
         LIFT_CHECK(r.started);
         LIFT_CHECK(!r.timed_out);
         LIFT_CHECK_EQ_U32(r.exit_code, 2u);  // 仍会因别的原因退出；下面三条才是判据
@@ -519,8 +435,8 @@ int main(int argc, char** argv) {
         //    无 GPU 的机器上拒绝启动的文案里**也会**提到 `--present headless`）。
         LIFT_CHECK(r.err.find("不接受窗口参数") == std::string::npos);
         // 对照组：`auto` 同样被接受（数值与 auto 走同一个分支）。
-        const ChildRun ra = runChild(exe, L"--scale auto --present headless", root, root / "scaleauto.out",
-                                     root / "scaleauto.err");
+        const ChildResult ra =
+            runChild(exe, {"--scale", "auto", "--present", "headless"}, childOptions(root));
         LIFT_CHECK(ra.started);
         LIFT_CHECK(!ra.timed_out);
         LIFT_CHECK(ra.err.find("未知参数") == std::string::npos);
@@ -530,8 +446,8 @@ int main(int argc, char** argv) {
     // ---- ③ 错拼（wrap ≠ warp）**仍然**是未知参数：钉住"② 不是靠接受任何参数"----
     g_current_case = "typo-cursor-wrap-still-unknown";
     {
-        const ChildRun r = runChild(exe, L"--cursor-wrap --present headless", root, root / "typo.out",
-                                    root / "typo.err");
+        const ChildResult r =
+            runChild(exe, {"--cursor-wrap", "--present", "headless"}, childOptions(root));
         LIFT_CHECK(r.started);
         LIFT_CHECK(!r.timed_out);
         LIFT_CHECK_EQ_U32(r.exit_code, 2u);
@@ -547,7 +463,7 @@ int main(int argc, char** argv) {
     //        这里保留的文本判据只有一条**反向**的：⛔ 不许把接线前的谎话写回来。
     g_current_case = "sound-accepted-with-once-notice";
     {
-        const ChildRun r = runChild(exe, L"--sound", root, root / "sound.out", root / "sound.err");
+        const ChildResult r = runChild(exe, {"--sound"}, childOptions(root));
         LIFT_CHECK(r.started);
         LIFT_CHECK(!r.timed_out);
         LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
@@ -566,9 +482,9 @@ int main(int argc, char** argv) {
     //        过去了没有"，⛔ 不拿总退出码冒充。
     g_current_case = "audio-backends-accepted";
     {
-        for (const wchar_t* mode : {L"virtual", L"sdl"}) {
-            const ChildRun r = runChild(exe, std::wstring(L"--audio ") + mode + L" --present headless", root,
-                                        root / (std::wstring(mode) + L".out"), root / (std::wstring(mode) + L".err"));
+        for (const char* mode : {"virtual", "sdl"}) {
+            const ChildResult r =
+                runChild(exe, {"--audio", mode, "--present", "headless"}, childOptions(root));
             LIFT_CHECK(r.started);
             LIFT_CHECK(!r.timed_out);
             LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
@@ -581,8 +497,8 @@ int main(int argc, char** argv) {
     // ---- ⑥' 非法值**仍然** exit 2，且点名合法值域（⛔ 不许"认不出就当 off"）----
     g_current_case = "audio-bogus-value-rejected";
     {
-        const ChildRun r = runChild(exe, L"--audio bogus --present headless", root, root / "bogus.out",
-                                    root / "bogus.err");
+        const ChildResult r =
+            runChild(exe, {"--audio", "bogus", "--present", "headless"}, childOptions(root));
         LIFT_CHECK(r.started);
         LIFT_CHECK(!r.timed_out);
         LIFT_CHECK_EQ_U32(r.exit_code, 2u);
@@ -598,7 +514,7 @@ int main(int argc, char** argv) {
     // ---- ⑥'' `--audio-dump` 缺值 ⇒ exit 2 + 点名这个 flag（⛔ 不静默当成"没有 dump"）----
     g_current_case = "audio-dump-needs-value";
     {
-        const ChildRun r = runChild(exe, L"--audio-dump", root, root / "dumpmiss.out", root / "dumpmiss.err");
+        const ChildResult r = runChild(exe, {"--audio-dump"}, childOptions(root));
         LIFT_CHECK(r.started);
         LIFT_CHECK(!r.timed_out);
         LIFT_CHECK_EQ_U32(r.exit_code, 2u);
@@ -612,8 +528,8 @@ int main(int argc, char** argv) {
     //      而那正是"以为在量、其实没量"。★ 值 0（显式关）同样要带 `--profile`：判据只有一条。
     g_current_case = "profile-slow-frames-requires-profile";
     {
-        const ChildRun r = runChild(exe, L"--profile-slow-frames 50 --present headless", root, root / "psf.out",
-                                    root / "psf.err");
+        const ChildResult r =
+            runChild(exe, {"--profile-slow-frames", "50", "--present", "headless"}, childOptions(root));
         LIFT_CHECK(r.started);
         LIFT_CHECK(!r.timed_out);
         LIFT_CHECK_EQ_U32(r.exit_code, 2u);
@@ -622,8 +538,8 @@ int main(int argc, char** argv) {
         LIFT_CHECK(r.err.find("同时给 --profile") != std::string::npos);
         // 启动前拒绝 ⇒ 一行运行摘要都没有（不是"跑了一部分才停"）
         LIFT_CHECK(!hasLineStartingWith(r.out, "stop"));
-        const ChildRun r0 = runChild(exe, L"--profile-slow-frames 0 --present headless", root,
-                                     root / "psf0.out", root / "psf0.err");
+        const ChildResult r0 =
+            runChild(exe, {"--profile-slow-frames", "0", "--present", "headless"}, childOptions(root));
         LIFT_CHECK(r0.started);
         LIFT_CHECK(!r0.timed_out);
         LIFT_CHECK_EQ_U32(r0.exit_code, 2u);
@@ -637,17 +553,14 @@ int main(int argc, char** argv) {
     g_current_case = "profile-slow-frames-bad-values";
     {
         struct BadSlow {
-            const wchar_t* arg;
+            const char* arg;
             const char* word;  // stderr 里必须出现的那个值（人照它改）
         };
-        const BadSlow kBads[] = {{L"abc", "abc"}, {L"-1", "-1"}, {L"1.5", "1.5"}, {L"50ms", "50ms"}};
+        const BadSlow kBads[] = {{"abc", "abc"}, {"-1", "-1"}, {"1.5", "1.5"}, {"50ms", "50ms"}};
         for (const BadSlow& b : kBads) {
-            const std::wstring cmd =
-                std::wstring(L"--profile --profile-slow-frames ") + b.arg + L" --present headless";
-            std::string tag = "slow-";
-            for (const wchar_t* p = b.arg; *p != L'\0'; ++p) tag.push_back(static_cast<char>(*p));
-            tag += ".";
-            const ChildRun r = runChild(exe, cmd, root, root / (tag + "out"), root / (tag + "err"));
+            const ChildResult r = runChild(exe,
+                                           {"--profile", "--profile-slow-frames", b.arg, "--present", "headless"},
+                                           childOptions(root));
             LIFT_CHECK(r.started);
             LIFT_CHECK(!r.timed_out);
             LIFT_CHECK_EQ_U32(r.exit_code, 2u);
@@ -656,8 +569,8 @@ int main(int argc, char** argv) {
             LIFT_CHECK(r.err.find(b.word) != std::string::npos);
         }
         // 缺值：`--profile-slow-frames` 后面没有东西 ⇒ exit 2 + `需要一个值` + 点名（与其它 flag 同一句）。
-        const ChildRun missing = runChild(exe, L"--profile --profile-slow-frames", root, root / "slowmiss.out",
-                                          root / "slowmiss.err");
+        const ChildResult missing =
+            runChild(exe, {"--profile", "--profile-slow-frames"}, childOptions(root));
         LIFT_CHECK(missing.started);
         LIFT_CHECK(!missing.timed_out);
         LIFT_CHECK_EQ_U32(missing.exit_code, 2u);
@@ -670,8 +583,9 @@ int main(int argc, char** argv) {
     //        判据是"这一关过去了"，⛔ 不拿总退出码冒充（与 `scale-headless-accepted` 同一条处置）。
     g_current_case = "profile-slow-frames-accepted-with-profile";
     {
-        const ChildRun r = runChild(exe, L"--profile --profile-slow-frames 50 --present headless", root,
-                                    root / "slowok.out", root / "slowok.err");
+        const ChildResult r = runChild(exe,
+                                       {"--profile", "--profile-slow-frames", "50", "--present", "headless"},
+                                       childOptions(root));
         LIFT_CHECK(r.started);
         LIFT_CHECK(!r.timed_out);
         LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
@@ -681,8 +595,8 @@ int main(int argc, char** argv) {
     // ---- ⑤ 对照组：**不给** `--sound` ⇒ 那条说明不出现（同一份 stderr 面）----
     g_current_case = "default-no-sound-notice";
     {
-        const ChildRun r = runChild(exe, L"--present headless --present-hidden", root, root / "nosound.out",
-                                    root / "nosound.err");
+        const ChildResult r =
+            runChild(exe, {"--present", "headless", "--present-hidden"}, childOptions(root));
         LIFT_CHECK(r.started);
         LIFT_CHECK(!r.timed_out);
         LIFT_CHECK_EQ_U32(r.exit_code, 2u);
@@ -694,7 +608,6 @@ int main(int argc, char** argv) {
     }
 
     fs::remove_all(root, ec);
-#endif
 
     return lift_test::finish("cli-aot-flags");
 }

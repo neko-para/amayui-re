@@ -12,9 +12,9 @@
 //      确认也是合法终态）+ stderr 终态日志含 **FIELD** + 无 `run failed`（⛔ 不看 exit code）。
 //
 // ★ 缺执行源 / 安装树 / GPU / 宿主字体 ⇒ `LIFT_SKIP(77)`（⛔ 不假绿；输入假定在场）。
-// ★ 只在本平台（Windows）跑：子进程用 `CreateProcessW`（`tests/cmdline.h` 拼命令行）。
-//   mac / Linux 上 skip —— 与 `cli-aot-flags` 同一条口径；等价判据不在 mac 上要求。
+// ★ 子进程统一走 `tests/support/subprocess.h` 的 `runChild`（跨平台；capture = 两个临时文件）。
 // ★ `--appdata` 指到临时目录 ⇒ 不往仓库 / 真 AppData 写东西。
+#include <chrono>
 #include <cstdint>
 #include <cstddef>
 #include <cstdio>
@@ -26,87 +26,11 @@
 #include <vector>
 
 #include "check.h"
-
-#if defined(_WIN32)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-
-#include "cmdline.h"
-#endif
+#include "support/subprocess.h"
 
 namespace {
 
 namespace fs = std::filesystem;
-
-#if defined(_WIN32)
-
-struct ChildRun {
-    int exit_code = -1;
-    bool started = false;
-    bool timed_out = false;
-    std::string out;
-    std::string err;
-};
-
-std::string readAllBytes(const fs::path& p) {
-    std::ifstream in(p, std::ios::binary);
-    if (!in) return {};
-    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-}
-
-ChildRun runChild(const fs::path& exe, const std::vector<std::wstring>& args, const fs::path& cwd,
-                  const fs::path& out_path, const fs::path& err_path) {
-    ChildRun r;
-    SECURITY_ATTRIBUTES sa{};
-    sa.nLength = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-    const HANDLE h_out = ::CreateFileW(out_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS,
-                                       FILE_ATTRIBUTE_NORMAL, nullptr);
-    const HANDLE h_err = ::CreateFileW(err_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS,
-                                       FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h_out == INVALID_HANDLE_VALUE || h_err == INVALID_HANDLE_VALUE) {
-        if (h_out != INVALID_HANDLE_VALUE) ::CloseHandle(h_out);
-        if (h_err != INVALID_HANDLE_VALUE) ::CloseHandle(h_err);
-        return r;
-    }
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdOutput = h_out;
-    si.hStdError = h_err;
-    PROCESS_INFORMATION pi{};
-    std::vector<std::wstring> argv;
-    argv.reserve(args.size() + 1);
-    argv.push_back(exe.native());
-    argv.insert(argv.end(), args.begin(), args.end());
-    // ★ 命令行拼装只有一份实现（`tests/cmdline.h`）：结尾反斜杠 / 内嵌引号 / 空串按 MSVC 规则转义。
-    std::wstring cmd = lift_test::joinCommandLine(argv);
-    const BOOL ok = ::CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
-                                     cwd.c_str(), &si, &pi);
-    ::CloseHandle(h_out);
-    ::CloseHandle(h_err);
-    if (!ok) return r;
-    r.started = true;
-    const DWORD waited = ::WaitForSingleObject(pi.hProcess, 120000u);
-    if (waited != WAIT_OBJECT_0) {
-        r.timed_out = true;
-        ::TerminateProcess(pi.hProcess, 991u);
-        ::WaitForSingleObject(pi.hProcess, 5000u);
-    }
-    DWORD code = 0xFFFFFFFFu;
-    ::GetExitCodeProcess(pi.hProcess, &code);
-    r.exit_code = static_cast<int>(code);
-    ::CloseHandle(pi.hThread);
-    ::CloseHandle(pi.hProcess);
-    r.out = readAllBytes(out_path);
-    r.err = readAllBytes(err_path);
-    return r;
-}
 
 std::size_t countOccurrences(const std::string& text, const std::string& needle) {
     std::size_t n = 0;
@@ -116,18 +40,11 @@ std::size_t countOccurrences(const std::string& text, const std::string& needle)
     return n;
 }
 
-#endif  // _WIN32
-
 }  // namespace
 
 int main(int argc, char** argv) {
     using namespace lift_test;
 
-#if !defined(_WIN32)
-    (void)argc;
-    (void)argv;
-    LIFT_SKIP("plugin-headless 用 CreateProcessW 起子进程（Windows 专有）");
-#else
     if (argc < 4) {
         LIFT_SKIP("需要 CTest 传 <emulator-lift-aot> <AGE.EXE__dumped.sectfix.EXE> <安装树>（见 CMakeLists）");
     }
@@ -147,7 +64,7 @@ int main(int argc, char** argv) {
 
     std::error_code ec;
     const fs::path root = fs::temp_directory_path(ec) /
-                          ("lift-plugin-headless-" + std::to_string(::GetCurrentProcessId()));
+                          ("lift-plugin-headless-" + std::to_string(lift_test::processId()));
     fs::remove_all(root, ec);
     fs::create_directories(root, ec);
     LIFT_CHECK(!ec);
@@ -155,25 +72,28 @@ int main(int argc, char** argv) {
     fs::create_directories(appdata, ec);
 
     g_current_case = "plugin/headless";
-    std::vector<std::wstring> args = {
-        L"--exe",
-        age_exe.native(),
-        L"--game-dir",
-        game_dir.native(),
-        L"--appdata",
-        appdata.native(),
+    const std::vector<std::string> args = {
+        "--exe",
+        pathToUtf8(age_exe),
+        "--game-dir",
+        pathToUtf8(game_dir),
+        "--appdata",
+        pathToUtf8(appdata),
         // ★ 缺省档 = headless；这里显式给一遍（判据就是"没有窗口也能跑 Run"）。
-        L"--present",
-        L"headless",
-        L"--skip-logo",
-        L"--audio",
-        L"off",
-        L"--time-limit",
-        L"60",
-        L"--plugin",
-        fixture.native(),
+        "--present",
+        "headless",
+        "--skip-logo",
+        "--audio",
+        "off",
+        "--time-limit",
+        "60",
+        "--plugin",
+        pathToUtf8(fixture),
     };
-    const ChildRun r = runChild(exe, args, root, root / "plugin.out", root / "plugin.err");
+    ChildOptions opts;
+    opts.cwd = root;
+    opts.timeout = std::chrono::milliseconds(120000);
+    const ChildResult r = runChild(exe, args, opts);
     LIFT_CHECK(r.started);
     if (!r.started) return lift_test::finish("plugin-headless");
     std::printf("plugin-headless: exit=%d timed_out=%d\n", r.exit_code, r.timed_out ? 1 : 0);
@@ -216,24 +136,27 @@ int main(int argc, char** argv) {
     {
         const fs::path quit_appdata = root / "appdata-quit";
         fs::create_directories(quit_appdata, ec);
-        const std::vector<std::wstring> quit_args = {
-            L"--exe",
-            age_exe.native(),
-            L"--game-dir",
-            game_dir.native(),
-            L"--appdata",
-            quit_appdata.native(),
-            L"--present",
-            L"headless",
-            L"--skip-logo",
-            L"--audio",
-            L"off",
-            L"--time-limit",
-            L"60",
-            L"--plugin",
-            (fs::path(LIFT_PLUGIN_FIXTURES_DIR) / "quit.js").native(),
+        const std::vector<std::string> quit_args = {
+            "--exe",
+            pathToUtf8(age_exe),
+            "--game-dir",
+            pathToUtf8(game_dir),
+            "--appdata",
+            pathToUtf8(quit_appdata),
+            "--present",
+            "headless",
+            "--skip-logo",
+            "--audio",
+            "off",
+            "--time-limit",
+            "60",
+            "--plugin",
+            pathToUtf8(fs::path(LIFT_PLUGIN_FIXTURES_DIR) / "quit.js"),
         };
-        const ChildRun q = runChild(exe, quit_args, root, root / "quit.out", root / "quit.err");
+        ChildOptions quit_opts;
+        quit_opts.cwd = root;
+        quit_opts.timeout = std::chrono::milliseconds(120000);
+        const ChildResult q = runChild(exe, quit_args, quit_opts);
         LIFT_CHECK(q.started);
         LIFT_CHECK(!q.timed_out);
         if (q.exit_code != 0) {
@@ -257,7 +180,7 @@ int main(int argc, char** argv) {
         // `.tmp/` 私有 appdata：`saves/` **只读**，照 `.tmp/save05-bench/clean-appdata.sh` 复制。
         const fs::path repo_tmp = saves_dir.parent_path() / ".tmp";
         const fs::path save_root =
-            repo_tmp / ("lift-plugin-load-save-" + std::to_string(::GetCurrentProcessId()));
+            repo_tmp / ("lift-plugin-load-save-" + std::to_string(lift_test::processId()));
         fs::remove_all(save_root, ec);
         const fs::path load_appdata = save_root / "appdata";
         const fs::path guest_save_dir = load_appdata / "Local" / "Eushully" /
@@ -279,27 +202,29 @@ int main(int argc, char** argv) {
         LIFT_CHECK(!copy_ec);
         LIFT_CHECK(copied > 0);
 
-        const std::vector<std::wstring> load_args = {
-            L"--exe",
-            age_exe.native(),
-            L"--game-dir",
-            game_dir.native(),
-            L"--appdata",
-            load_appdata.native(),
-            L"--present",
-            L"headless",
-            L"--skip-logo",
-            L"--audio",
-            L"off",
-            L"--time-limit",
-            L"90",
-            L"--plugin",
-            save_js.native(),
-            L"--plugin-param",
-            L"slot=5",
+        const std::vector<std::string> load_args = {
+            "--exe",
+            pathToUtf8(age_exe),
+            "--game-dir",
+            pathToUtf8(game_dir),
+            "--appdata",
+            pathToUtf8(load_appdata),
+            "--present",
+            "headless",
+            "--skip-logo",
+            "--audio",
+            "off",
+            "--time-limit",
+            "90",
+            "--plugin",
+            pathToUtf8(save_js),
+            "--plugin-param",
+            "slot=5",
         };
-        const ChildRun ls =
-            runChild(exe, load_args, save_root, save_root / "load-save.out", save_root / "load-save.err");
+        ChildOptions ls_opts;
+        ls_opts.cwd = save_root;
+        ls_opts.timeout = std::chrono::milliseconds(120000);
+        const ChildResult ls = runChild(exe, load_args, ls_opts);
         LIFT_CHECK(ls.started);
         std::printf("plugin/load-save-e2e: exit=%d timed_out=%d\n", ls.exit_code, ls.timed_out ? 1 : 0);
         if (!ls.started) return lift_test::finish("plugin-headless");
@@ -342,5 +267,4 @@ int main(int argc, char** argv) {
         LIFT_CHECK(calls6 || calls7);
     }
     return lift_test::finish("plugin-headless");
-#endif
 }

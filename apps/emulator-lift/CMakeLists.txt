@@ -963,6 +963,14 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/tests")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/tests")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_BINARY_DIR}/tests")
 
+# ---- 测试侧公共支持库（P1）：跨平台子进程 helper 的**唯一**实现 -------------------------
+# ★ 为什么是 STATIC 库而不是头：POSIX 分支要 `<unistd.h>` / `<sys/wait.h>`，Windows 分支要
+#   `CreateProcessW` + `tests/cmdline.h`；放进头会让每个 include 它的测试各编一份平台代码。
+# ★ include 根 = `tests/`（调用方写 `#include "support/subprocess.h"`）。
+add_library(lift-test-support STATIC tests/support/subprocess.cpp)
+target_include_directories(lift-test-support PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+lift_enable_warnings(lift-test-support)
+
 # ---- 测试也走"警告即错误"（与业务 target **同一份实现**，见文件上方的 `lift_enable_warnings`）----
 # ★ 为什么测试也要：测试里的隐式收窄（`std::uint8_t` 存 `0xFF204060u`）**不会**让用例红 ——
 #   它只是把"ARGB 填充"静默变成每字节 0x60，判据照旧全绿（`control-snapshot` 就是这么藏着的）。
@@ -1015,7 +1023,7 @@ add_test(NAME window-scale COMMAND lift-window-scale)
 #   ⇒ 不需要 GPU、不需要 LFS / 游戏安装 ⇒ **没有** `LIFT_SKIP_IF_NO_GPU`。
 # ★ 顶层无条件注册 ⇒ pure 档（判据 = 注册位置，见 AGENTS.md §12.4）。
 add_executable(lift-cli-aot-flags tests/cli_aot_flags.cpp)
-target_link_libraries(lift-cli-aot-flags PRIVATE emulator-lift-runtime)
+target_link_libraries(lift-cli-aot-flags PRIVATE emulator-lift-runtime lift-test-support)
 # ★ **必须显式依赖产品 exe**（`REQ-01M7K04EY6D3GQNB5DRWP0DYJ8` 洞 7 的连带发现）：
 #   本用例**spawn** `emulator-lift-aot` 去读它的 `--help` / 退出码，而变异自检的
 #   `buildTarget: 'lift-cli-aot-flags'` 只重建守卫 exe ⇒ 产品 exe 会停在**变异前** ⇒ 那条变异**假绿**。
@@ -1025,6 +1033,18 @@ target_link_libraries(lift-cli-aot-flags PRIVATE emulator-lift-runtime)
 add_dependencies(lift-cli-aot-flags emulator-lift-aot)
 add_test(NAME cli-aot-flags COMMAND lift-cli-aot-flags $<TARGET_FILE:emulator-lift-aot>)
 set_tests_properties(cli-aot-flags PROPERTIES SKIP_RETURN_CODE 77)
+
+# ---- pure：跨平台子进程 helper 的自检（argv / 捕获 / 退出码 / 超时 / cwd）------------------
+# ★ 判据见 `tests/support/probe_child.cpp`；这个二进制**自己既是测试又是子进程**
+#   （`argv[1] == "--child"` 走子进程模式）⇒ 不需要资产 / GPU / 产品 exe。
+# ★ 顶层无条件注册 ⇒ **pure** 档（判据 = 注册位置，AGENTS.md §12.4）；纯逻辑，没有 `SKIP_RETURN_CODE`。
+# ★ Windows 上子进程 argv 用 `CommandLineToArgvW` 还原（与产品同一套规则）⇒ 链 shell32。
+add_executable(lift-support-child-proc tests/support/probe_child.cpp)
+target_link_libraries(lift-support-child-proc PRIVATE lift-test-support)
+if(WIN32)
+    target_link_libraries(lift-support-child-proc PRIVATE shell32)
+endif()
+add_test(NAME support-child-proc COMMAND lift-support-child-proc)
 
 # ---- pure：guest 退出码 → **宿主进程**退出码的纯映射（`REQ-01M7HP2YRZG222E0NE2H6MW6NK`）----
 # 判据见 tests/guest_exit.cpp 文件头：0 ⇒ 0；非 0（含 127/128/255/256/259/0xFFFFFFFF 边界）⇒ 2
@@ -2436,7 +2456,7 @@ add_test(NAME aot-audio-pump COMMAND lift-aot-audio-pump)
 # ★ 缺 GPU / 缺生成物 / 缺执行源 ⇒ `LIFT_SKIP(77)`（CMake 侧 `SKIP_RETURN_CODE 77`）；
 #   ⛔ 不挪到 `if()` 里当"只在有资产时才注册"——那会让"这台机器上它从不证明任何事"变成静默事实。
 add_executable(lift-aot-audio-wiring tests/aot_audio_wiring.cpp)
-target_link_libraries(lift-aot-audio-wiring PRIVATE emulator-lift-runtime)
+target_link_libraries(lift-aot-audio-wiring PRIVATE emulator-lift-runtime lift-test-support)
 # ★ 守卫**通过子进程**跑产品 exe ⇒ 必须声明这条依赖：否则 `cmake --build out --target
 #   lift-aot-audio-wiring`（变异自检 `buildTarget` 的用法）只重建守卫 exe、产品 exe 停在**变异前**
 #   ⇒ 变异施加了却读的是旧二进制 ⇒ 那条变异条目会**假绿**（本仓 `cli-aot-flags` 的同形坑）。
@@ -2791,7 +2811,7 @@ if(LIFT_BUILD_TESTS)
     add_test(NAME plugin-runtime COMMAND lift-plugin-runtime)
 
     add_executable(lift-plugin-headless tests/plugin_e2e.cpp)
-    target_link_libraries(lift-plugin-headless PRIVATE emulator-lift-runtime)
+    target_link_libraries(lift-plugin-headless PRIVATE emulator-lift-runtime lift-test-support)
     add_dependencies(lift-plugin-headless emulator-lift-aot)
     target_compile_definitions(lift-plugin-headless PRIVATE
         LIFT_PLUGIN_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/plugin_fixtures"
