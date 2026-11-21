@@ -72,3 +72,8 @@ cd apps/emulator-lift && ctest --test-dir out -R '^plugin-headless$' --output-on
 - **全量 `ctest` 下 2/2 红**（两次都是 137 条一起跑：一次 `reached_field=false`、一次 `reason=load-save: gate timeout (load:field-2)`）；
 - **单独跑 `ctest -R '^plugin-headless$'` 1/1 绿**（Passed 152.4 s）。
 ⇒ 支持"负载 / 时序敏感"，两种形态很可能同因（第二道确认的点击落点 / 读点跨度）—— 见上一条线索。
+
+## 2026-11-21 根因（已修，待 10 连跑确认）
+
+- 不是"30 s 门太紧"：SBUNKI 每趟回调只在 `read-mouse-button` 读一次电平，而 click 的抬起门槛是"跨 2 个 KeyLevel 读点"；门落在 `[0x09F8,0x0B18)` 时这 2 个读点被同一趟回调耗尽 ⇒ guest 只看到电平 0（无 down→up 边沿）⇒ 两种形态（`gate timeout` / `reached_field=false`）同因。
+- 修法（`c464651`，`save.js`）：确认门 `[0x09F8,0x0B18)` → `[0x0B18,0x0C58)` ⇒ 改前 `plugin-headless` 2/2 红、改后 2/2 绿 + 真跑 2/2 到 BTL；没加超时 / 没加 `wait` / 没 skip。还差：连续 ≥10 次 `ctest` 全绿（~25 min）⇒ 之前保持 open。
