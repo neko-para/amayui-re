@@ -461,8 +461,9 @@ public:
 - **owner**：每个 armed trigger 带 owner；Run 结束/卸载 ⇒ `releaseOwner` 清该 owner 的 armed + hold。
 - **回调内顺序**：JS 决定 Edit/EngineRead 调用顺序（宿主逐个同步执行）；Input 只入队；返回新集合。
 - **budget**：每次 start/onTrigger deadline + op limit；超限 ⇒ 清 armed + fail(owner)。
-  ★ 2 ms **只罩用户 JS 本体**（模块装载 / ctx 构造 / TriggerSet 收集 / 宿主调度不计）；宿主段另有
-  10×（20 ms）安全网，reason 带 `(host)`（见 §4.5 D5 与 4.x「预算」）。
+  ★ 2 ms **只罩用户 JS 本体**（模块装载 / ctx 构造 / TriggerSet 收集 / 宿主调度不计），且量的是
+  **本线程 CPU 时间**（`pluginThreadCpuNs()`；被 OS 抢占 / 等 I/O / 睡眠**不计**）；宿主段另有
+  10×（20 ms）**墙钟**安全网，reason 带 `(host)`（见 §4.5 D5 与 4.6「预算」）。
 - **可观测性**：`RunStatus.armedNames`/`armed`、`trigger:<name>` trace、`RunEvent.name`；
   name 是**插件侧状态名**，不是 guest 数据，不参与 Edit/EngineRead。
 
@@ -926,11 +927,18 @@ cd apps/emulator-lift && ./out/emulator-lift-aot --exe ../../corpus/assets/age/A
 - **按操作类**：`ctx.input.click/move/down/up` → IntentQueue（串行）；`ctx.edit.global.set` → EditSink（立即）；
   `ctx.read.*` → EngineRead（只读/无暂停）；`sample/screenshot` 不暴露（emu-ctl 组合）；
   ⛔ 没有 `input::*`/`writeGlobal`/`wm.*` 宿主函数（不是“插件只读”，而是操作类/唯一路径）。
-- **预算**：每次 callback deadline **2 ms** + op limit **100k**（`runtime/budget.h:27-32`，D5）；超限 ⇒
-  fail + 摘 trigger。★ **2 ms 只罩用户 JS 本体**（2026-11-21 口径收窄，用户裁决 D5 可改）：
-  deadline 起点 = 组完 ctx / 事件对象、**即将调用插件函数之前**（`script_quickjs.cpp` 的 `call()`）
-  ⇒ **模块装载 / ctx 与事件对象构造 / 返回值→TriggerSet 收集 / 宿主调度都不计**。
-  宿主段另有**安全网** = 10×（2 ms ⇒ **20 ms**）：防"宿主被卡死 ⇒ guest 被拖住"，超了照样 fail，
+- **预算**：每次 callback deadline **2 ms** + op limit **100k**（`runtime/budget.h` 的
+  `kCallbackDeadlineNs` / `kCallbackOpLimit`，D5）；超限 ⇒ fail + 摘 trigger。
+  ★ **2 ms = 用户 JS 本体的 CPU 时间**（2026-11-21 口径收窄 + CPU 钟裁决，用户裁决 D5 可改）：
+  deadline 起点 = 组完 ctx / 事件对象、**即将调用插件函数之前**
+  （`script_quickjs.cpp` 的 `call()`），中断回调拿**同一把 CPU 钟**（`pluginThreadCpuNs()`）比；
+  ⇒ **模块装载 / ctx 与事件对象构造 / 返回值→TriggerSet 收集 / 宿主调度都不计**，被 OS 抢占 / 等 I/O
+  也不计。★ **粒度**（2026-11-21 / win32 实测）：POSIX `CLOCK_THREAD_CPUTIME_ID` = ns 级；Windows
+  主源 `QueryThreadCycleTime` ≈ ns 级（首次用 4×200 µs 忙等标定，本机 ≈3.97 cycles/ns，`call()`
+  在计时窗前预热）；`GetThreadTimes` 是 **15.625 ms 整 tick 记账**（只作兜底 ——
+  0.5 ms 的忙等读到 0 或 156250，判不了 2 ms）。⚠ 按 MSDN，`QueryThreadCycleTime` **不保证精确**
+  （CPU 频率变化 / 跨核迁移都可能偏）⇒ 它只服务"2 ms 判据"，⛔ 不要当"精确 CPU 时间"用。
+  宿主段另有**安全网** = 10×（2 ms ⇒ **20 ms**），**仍是墙钟**：防"宿主被卡死 ⇒ guest 被拖住"，超了照样 fail，
   但 reason 必须可区分：
   - `onTrigger: callback budget exceeded: <name>`（用户 JS 本体超；`start: …` 同形无 name）
   - `onTrigger: callback budget exceeded (host): <name>`（宿主安全网；`start: … (host)` 同形）
@@ -1468,7 +1476,7 @@ C5 是单插件 Run/dispatch 线；三者可与 C2 并行/后置。v3 的 S1/S2 
 | 9 | **单插件运行时**：没有 `--ui-control`/第二个 QJS context；同一个插件可选 `render`/`start`/`onTrigger`；写只经 `ctx.input`/`ctx.edit` | 又拆回“功能/驱动两套上下文/权限”（用户明确否掉） | 静态 flag/上下文守卫 + 插件 API 单测 |
 | 10 | **control 9 项同源**：`hello`/`caps=`/`endpoint-surface` 精确 9；`Wait` client-sugar | 加 op 漏一处；C0 行为不一致 | `capability-matrix` + `endpoint-surface` |
 | 11 | **QJS 单 TU（编译约束，不是安全）**：`quickjs.h` 只在 `script_quickjs.cpp`；`src/plugin/**` / `src/runtime/input_plan.*`、`recipe.*`、`recipe_json.*` 不 include quickjs.h、不调 `input::`/`writeGlobal` | 第二 quickjs TU / 第二施加点 | `tools/test/core-shape.test.mjs` ④（`src/plugin/**` 的 `PLUGIN_FORBIDDEN`）+ ⑤（`quickjs.h` 的 include 点**恰好**一处、消费者**恰好** `script_quickjs.cpp`） |
-| 12 | **预算**：每次 `onTrigger`/`start` deadline+op_limit；超限 fail + 摘 trigger | 回调跑飞，guest 卡住 | C1/C2 用例 + `script_quickjs.cpp:195-208` |
+| 12 | **预算**：每次 `onTrigger`/`start` deadline（**CPU 钟**）+ op_limit；超限 fail + 摘 trigger | 回调跑飞、guest 卡住；或判据退回墙钟 ⇒ 被抢占的回调又被诬告 | `plugin/callback-cpu-budget`（`op_limit=0` ⇒ 打断只可能来自 CPU deadline，且 reason 点名 `interrupted` + 预算 hint）+ `plugin/callback-wall-only`（墙钟 6 ms、CPU 远 < 2 ms ⇒ **不**失败）+ `trigger-runner/named-set`（宿主安全网仍是墙钟） |
 | 13 | **文本 recipe 冻结/parity**：`StepKind`/parser 不加能力；C3 JS driver 覆盖九条+timeout/quit/profile；旧 `--input-plan`（oracle = `InputPlan::atPoint`）vs 新 driver 的 parity | 旧 plan 语义被静默破坏；或又给 plan 加能力 | `recipe-driver-parity`（已落地，pure）+ `tools/test/recipe-freeze.test.mjs` 冻结守卫 |
 | 14 | **能力表/映射**：`Move→mouse_move`、`Sample` overlay n/a、`Frames→game.local_frames`、`Wait` client-sugar | 名字漂/“只有某个入口有” | `capability-matrix` |
 | 15 | **plan 不再产出**：`StepKind`/parser/help 不新增 `global_*`/变量/指令；`Step[]` 只读数据 | 又给历史 plan 加能力（用户明确不加） | 静态 diff/白名单守卫 + `capability-matrix` |
@@ -1565,11 +1573,28 @@ callback 链的可读性（进 `ctx.log`/设计文档）。
 - **推荐**：callback 异常/超预算 ⇒ fail + 摘 trigger + `releaseOwner` + 一行 stderr，run 继续；
   trigger 超时 ⇒ timeout 事件（D2）；QJS 预算 2 ms / 100k ops（读数后再调）；
   C3 driver 把 fail 映射成 `exit 5`（历史兼容）；control 只报 receipt，不杀 run。
-- ★ **口径（2026-11-21 用户裁决：D5 可改）—— 2 ms 的窗口 = 用户 JS 本体**：
-  deadline 起点 = 组完 ctx / 事件对象、**即将调用插件函数之前**；**模块装载 / ctx 构造 / TriggerSet
-  收集 / 宿主调度不计**（`script_quickjs.cpp::call()` 的 `js_start_ns` 起算，中断回调靠它打断跑飞的 JS）。
-  **宿主段另有安全网** = `budget.deadline_ns × 10`（2 ms ⇒ 20 ms，`budget.h` 的 `kHostSafetyNetFactor`）：
-  超了照样 fail，但 reason 带 `(host)`；用户 JS 超限的 reason 不带。
+- ★ **口径（2026-11-21 用户裁决：D5 可改）—— 2 ms 的窗口 = 用户 JS 本体，钟 = 本线程 CPU 时间**：
+  deadline 起点 = 组完 ctx / 事件对象、**即将调用插件函数之前**（`script_quickjs.cpp::call()` 的
+  `js_start_cpu_ns` 起算），中断回调拿**同一把 CPU 钟**（`pluginThreadCpuNs()`）比 —— ⛔ 不能
+  "CPU 起点 + 墙钟比较"（CPU 读数比墙钟小几个数量级 ⇒ 第一次中断就误判）。**模块装载 / ctx 构造 /
+  TriggerSet 收集 / 宿主调度不计**；被 OS 抢占 / 等 I/O / 睡眠**也不计**（那是缺陷
+  `REQ-01M7VVDV69MJXRHNDGR50H7VHC` 的修法）。
+  ★ **粒度**（2026-11-21 / win32 实测）：POSIX ns 级；Windows 主源 `QueryThreadCycleTime` ≈ ns 级；
+  `GetThreadTimes` 是 **15.625 ms 整 tick 记账**（只作兜底：0.5 ms 忙等读到 0 或 156250，
+  **判不了 2 ms**）。⇒ 守卫只断言"单调不减"，⛔ 不断言具体数值。
+  ★ **钟的形状**：Windows 首次调用用 4 个 ~200 µs 的忙等窗口把 cycles 标定成 ns（取
+  max(cycles/wall)，本机 **≈3.97 cycles/ns**），只做一次；`call()` 在计时窗**之前**预热，
+  那 ~0.8 ms 不进判据窗。⚠ MSDN 明确 `QueryThreadCycleTime` **不保证精确**（CPU 频率变化 /
+  跨核迁移都可能偏）⇒ 它只服务"2 ms 判据"，⛔ 不要当"精确 CPU 时间"用。
+  ★ **读数**（2026-11-21 / win32 / `LIFT_PLUGIN_CALLBACK_ELAPSED=1` + `--plugin
+  scripts/plugins/lib/save.js --plugin-param slot=5 --plugin-param expect=FIELD,SC0000`）：7 个回调的
+  `js_cpu_us` = 137 / 70 / 82 / 16 / 137 / 159 / 47（另几轮 134 / 27）—— **全都不是 15625 的倍数**
+  （`GetThreadTimes` 的整 tick 记账必然是它的倍数）⇒ 亚 tick CPU 钟的独立佐证；同轮
+  `load:confirm2` = `elapsed_us=306`（墙钟）/ `js_cpu_us=159`。再压 6 个忙等进程重跑：
+  `load:confirm2 elapsed_us=641` vs `js_cpu_us=140`、`load:row elapsed_us=92` vs `js_cpu_us=27`
+  —— 墙钟涨、CPU 不涨 ⇒ **并发不再诬告回调**（缺陷 `REQ-01M7VVDV69MJXRHNDGR50H7VHC` 的修法）。
+  **宿主段另有安全网** = `budget.deadline_ns × 10`（2 ms ⇒ 20 ms，`budget.h` 的 `kHostSafetyNetFactor`），
+  **仍是墙钟**（`pluginNowNs()`）：超了照样 fail，但 reason 带 `(host)`；用户 JS 超限的 reason 不带。
   ⇒ 两种形态：`<start|onTrigger>: callback budget exceeded[: <name>]` vs
   `<start|onTrigger>: callback budget exceeded (host)[: <name>]`（拼法只有 `callbackBudgetReason()` 一处）。
   缺陷单 `REQ-01M7VVDV69MJXRHNDGR50H7VHC` 按此收口；⛔ 不要把两边的 reason 混成同一条（守卫与 e2e

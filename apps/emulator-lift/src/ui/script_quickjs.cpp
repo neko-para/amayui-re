@@ -32,6 +32,9 @@
 //
 // 二、预算（context §5）
 //   · 内存 16 MiB / 栈 512 KiB / 中断回调每 ~10000 条字节码一次（`JS_INTERRUPT_COUNTER_INIT`）。
+//   · ★ **插件回调的 2 ms 用本线程 CPU 钟**（`pluginThreadCpuNs()`，2026-11-21 用户裁决）：
+//     起点 = `call()` 里 `JS_Call` 之前，判据 = 中断回调拿**同一把 CPU 钟**比 —— 被 OS 抢占
+//     不计（缺陷 `REQ-01M7VVDV69MJXRHNDGR50H7VHC`）。render 的 20 ms 仍用 `steadyNowNs()` 墙钟。
 //   · ★ 超预算的报错不是我们抛的：0.18.0 的 `JS_ThrowInterrupted` 是 `quickjs.c` 内的 **static**
 //     （`quickjs.h` 未导出）；上游约定是**中断回调返非 0** 时由引擎自己
 //     `JS_ThrowInternalError("interrupted")` + `JS_SetUncatchableError`（`__js_poll_interrupts`）。
@@ -194,8 +197,12 @@ struct Impl {
     const UiFrameReadings* current = nullptr;
     FontEngine* font = nullptr;
 
-    // 预算（`setBudget` 写入；interrupt 回调读）
+    // 预算（`setBudget` 写入；interrupt 回调读）。★ 两把钟**分开存**（⛔ 混用会立刻误判）：
+    //   · `deadline_ns` = **墙钟**绝对 deadline —— `UiScript::setBudget`（render）的口径，`steadyNowNs()`；
+    //   · `cpu_deadline_ns` = **CPU** 绝对 deadline —— 插件回调的 2 ms（2026-11-21 用户裁决），
+    //     `pluginThreadCpuNs()`；只在 `call()` 的 JS 体窗口内非 0，回调结束即清 0。
     std::uint64_t deadline_ns = 0;
+    std::uint64_t cpu_deadline_ns = 0;
     std::uint32_t op_limit = 0;
     std::uint64_t ops = 0;  // 已执行的"中断步长"数（× 10000 = 近似字节码条数）
     bool overran = false;   // 本帧是否被预算打断（`render` false 的原因之一）
@@ -249,9 +256,10 @@ struct Impl {
 // 回调耗时诊断（`REQ-01M7VVDV69MJXRHNDGR50H7VHC` 待查 #3）
 //
 // ★ 本文件只**量**并填 `callbackDiag()`；**输出**在 `plugin_host.cpp` 的 `runCallback`
-//   —— 那里量的 `host_ns` 是宿主段窗口，判据用的 `js_ns` 是本文件切出来的**用户 JS 本体**。
-// ★ 预算起点在 `call()` 的 `js_start_ns`（JS_Call 之前）；`inner_ns` 仍从进入 `call()` 量
-//   （build + js + collect），它只是读数、⛔ 不是预算窗。
+//   —— 那里量的 `host_ns` 是宿主段窗口，判据用的 `js_cpu_ns`（**CPU 钟**）是本文件切出来的
+//   **用户 JS 本体**；`js_ns`（墙钟）只是对照读数（wall 大 / cpu 小 = 被 OS 抢占）。
+// ★ 预算起点在 `call()` 的 `js_start_cpu_ns`（JS_Call 之前，`pluginThreadCpuNs()`）；
+//   `inner_ns` 仍从进入 `call()` 量（build + js + collect），它只是读数、⛔ 不是预算窗。
 // ---------------------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------------------
@@ -266,7 +274,16 @@ int interruptHandler(JSContext* /*ctx*/, void* opaque) {
     Impl* impl = static_cast<Impl*>(opaque);
     if (impl == nullptr) return 0;
     impl->ops += kOpcodesPerInterrupt;
+    // ★ 两把钟各判各的（⛔ 不要用同一把 now 去比两个 deadline）：
+    //   · `deadline_ns` = render 的**墙钟** deadline（`UiScript::setBudget`，`present_sdl` 给）；
+    //   · `cpu_deadline_ns` = 插件回调的 **CPU** deadline（`call()` 里从 `pluginThreadCpuNs()` 起算）。
+    //   2026-11-21：2 ms 改用 CPU 钟（缺陷 `REQ-01M7VVDV69MJXRHNDGR50H7VHC`）⇒ 若这里仍拿
+    //   `steadyNowNs()` 去比 CPU 起点算出的 deadline，第一次中断就会误判（CPU 读数比墙钟小几个数量级）。
     if (impl->deadline_ns != 0 && steadyNowNs() >= impl->deadline_ns) {
+        impl->overran = true;
+        return 1;
+    }
+    if (impl->cpu_deadline_ns != 0 && lift::plugin::pluginThreadCpuNs() >= impl->cpu_deadline_ns) {
         impl->overran = true;
         return 1;
     }
@@ -3257,6 +3274,9 @@ private:
         impl.current = &readings;
         impl.ops = 0;
         impl.overran = false;
+        // ★ render 的预算是 `setBudget` 给的**墙钟** deadline（`deadline_ns`）⇒ 这里必须清掉
+        //   上一次回调留下的 CPU deadline（否则过期的 CPU deadline 会让 render 第一次中断就误判）。
+        impl.cpu_deadline_ns = 0;
         // ★ render 里 `ctx.read` / `ctx.log` 也要有来路：宿主在 init 时设的**非拥有**指针在这里
         //   临时成为 `call_host`（回调外没有别的 ctx；回调期间由 `call()` 的形参覆盖）。
         impl.call_host = impl.call_host_persistent;
@@ -3302,14 +3322,19 @@ private:
             if (err != nullptr) *err = impl.origin + ": 这个插件没有 " + (is_start ? "start" : "onTrigger");
             return false;
         }
-        // ★ 预算两件：deadline（宿主单调钟；0 = 不限）+ op_limit（中断步长）；**每次回调重置**。
+        // ★ 预算两件：deadline（**本线程 CPU 钟**；0 = 不限）+ op_limit（中断步长）；**每次回调重置**。
         //   ⛔ 不要沿用 render 的 20 ms / 1e6（那会让一次跑飞的回调卡住 guest 20 ms；合同 §4.5 D5）。
+        // ★ CPU 钟的**首发频率标定**（Windows 主源需要，~0.8 ms）放在计时窗**之外**：
+        //   它不属于任何回调。不预热的话，第一次回调的 `elapsed_us`（宿主安全网）会凭空多这一段，
+        //   而 `js_cpu_ns` 又因起点在标定之后而不含它 ⇒ 读数与判据都会歪。
+        (void)lift::plugin::pluginThreadCpuNs();
         // ★ 诊断起点 = 进入 `call()`（只给读数；⛔ 不是预算起点）。
         const std::uint64_t start_ns = steadyNowNs();
         // ★ **预算不在入口起算**（2026-11-21 收窄，用户裁决 D5 可改）：2 ms 只罩**用户 JS 本体**
-        //   ⇒ 起点挪到 `JS_Call` 之前（见下面的 `js_start_ns`）。组 ctx / 事件对象期间没有 JS 在跑
-        //   ⇒ 这里先把 deadline 清 0（⛔ 不要让上一次回调的 deadline 在这段里误触）。
+        //   ⇒ 起点挪到 `JS_Call` 之前（见下面的 `js_start_cpu_ns`）。组 ctx / 事件对象期间没有 JS 在跑
+        //   ⇒ 这里先把两个 deadline 都清 0（⛔ 不要让上一次回调的 deadline 在这段里误触）。
         impl.deadline_ns = 0;
+        impl.cpu_deadline_ns = 0;
         impl.op_limit = budget.op_limit;
         impl.ops = 0;
         impl.overran = false;
@@ -3317,12 +3342,13 @@ private:
 
         bool ok = true;
         std::string local_err;
-        // 诊断子阶段（与 `elapsed_us` 同一对钟切出来的三段；⛔ 不影响预算）：
+        // 诊断子阶段（与 `elapsed_us` 同一对墙钟切出来的三段；⛔ 不影响预算）：
         //   build = 组 ctx / 事件对象（每次回调新建 ~20 个 JS 对象 + C 函数）
-        //   js    = 用户 JS 本体（含 `ctx.log` 的 stderr 写）
+        //   js    = 用户 JS 本体（墙钟 `js_ns` + **CPU** `js_cpu_ns`；含 `ctx.log` 的 stderr 写）
         //   collect = 返回值 → TriggerSet（造 shared_ptr / 查对象表）
         std::uint64_t build_ns = 0;
-        std::uint64_t js_ns = 0;
+        std::uint64_t js_ns = 0;      // 墙钟（诊断对照；⛔ 不是 2 ms 判据）
+        std::uint64_t js_cpu_ns = 0;  // CPU（**2 ms 判据**用的就是这一段）
         std::uint64_t collect_ns = 0;
         try {
             Value ctx_obj = Value::undefined(impl.ctx);
@@ -3350,14 +3376,21 @@ private:
             if (ok) {
                 JSValueConst argv[2] = {ctx_obj.raw(), ev_obj.raw()};
                 const int argc = is_start ? 1 : 2;
-                const std::uint64_t js_start_ns = steadyNowNs();
-                // ★ **预算起点 = 用户 JS 本体起点**（组 ctx / 事件对象之后、`JS_Call` 之前）。
-                //   中断回调靠这个 deadline 打断跑飞的 JS；模块装载 / ctx 构造 / 收集 / 宿主调度
-                //   **都不在** 2 ms 里（2026-11-21 收窄）。`op_limit` 同理只数用户 JS 的步长。
-                impl.deadline_ns = budget.deadline_ns != 0 ? js_start_ns + budget.deadline_ns : 0;
+                const std::uint64_t js_start_ns = steadyNowNs();  // 墙钟读数（诊断用；⛔ 不是判据）
+                // ★ **预算起点 = 用户 JS 本体的 CPU 起点**（组 ctx / 事件对象之后、`JS_Call` 之前）。
+                //   中断回调用 `pluginThreadCpuNs()` 比这个 deadline（⛔ 不是 `steadyNowNs()`：
+                //   "CPU 起点 + 墙钟比较"会第一次中断就误判）。模块装载 / ctx 构造 / 收集 / 宿主调度
+                //   **都不在** 2 ms 里（2026-11-21 收窄；缺陷 REQ-01M7VVDV69MJXRHNDGR50H7VHC）。
+                const std::uint64_t js_start_cpu_ns = lift::plugin::pluginThreadCpuNs();
+                impl.cpu_deadline_ns =
+                    budget.deadline_ns != 0 ? js_start_cpu_ns + budget.deadline_ns : 0;
                 Value ret(impl.ctx, JS_Call(impl.ctx, fn.raw(), JS_UNDEFINED, argc, argv));
                 const std::uint64_t js_end_ns = steadyNowNs();
                 js_ns = js_end_ns >= js_start_ns ? js_end_ns - js_start_ns : 0;
+                // ★ 终点用**同一把 CPU 钟**；然后立刻撤掉 deadline（预算窗只到 JS 返回为止）。
+                const std::uint64_t js_end_cpu_ns = lift::plugin::pluginThreadCpuNs();
+                js_cpu_ns = js_end_cpu_ns >= js_start_cpu_ns ? js_end_cpu_ns - js_start_cpu_ns : 0;
+                impl.cpu_deadline_ns = 0;
                 if (ret.isException()) {
                     qjs::takeException(impl.ctx, impl.origin, &local_err);
                     ok = false;
@@ -3372,8 +3405,8 @@ private:
             ok = false;
             local_err = impl.origin + ": 宿主异常（C++ exception at script boundary）";
         }
-        // ★ 终点与起点同一对钟；范围 = 组 ctx / 事件对象 + JS_Call + collectTriggers。
-        //   ⚠ 这**不是**预算窗（预算窗只有 `js_ns` 那一段）—— 它只给 `gap_us` 与 `overran` 归因用。
+        // ★ 终点与起点同一对墙钟；范围 = 组 ctx / 事件对象 + JS_Call + collectTriggers。
+        //   ⚠ 这**不是**预算窗（预算窗只有 `js_cpu_ns` 那一段，CPU 钟）—— 它只给 `gap_us` 与 `overran` 归因用。
         const std::uint64_t end_ns = steadyNowNs();
         const std::uint64_t elapsed_ns = end_ns >= start_ns ? end_ns - start_ns : 0;
         // ⛔ 只填读数；输出（含"超预算无论开关都打"那条）在 `plugin_host.cpp` 的 `runCallback`。
@@ -3381,6 +3414,7 @@ private:
         diag.inner_ns = elapsed_ns;
         diag.build_ns = build_ns;
         diag.js_ns = js_ns;
+        diag.js_cpu_ns = js_cpu_ns;  // ★ 2 ms 判据读的是它（plugin_host.cpp 的 `js_late`）
         diag.collect_ns = collect_ns;
         diag.module_load_ns = impl.module_load_ns;
         diag.inner_overran = impl.overran;

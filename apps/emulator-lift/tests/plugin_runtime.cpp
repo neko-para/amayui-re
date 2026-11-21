@@ -70,10 +70,12 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "check.h"
 #include "plugin/plugin_host.h"
+#include "runtime/budget.h"         // callbackDiag / pluginThreadCpuNs（2 ms 判据的读数）
 #include "runtime/engine_marker.h"  // kEngineSingletonGlobal（假 Engine 的发布点）
 #include "runtime/font.h"           // FontEngine（C2b：`ctx.draw.measure` 的来路）
 #include "runtime/host_window.h"
@@ -97,6 +99,9 @@ constexpr std::uint32_t kFxKey = 0x1234ABCDu;  // 运行期 ENC/DEC key（⛔ �
 constexpr std::uint32_t kFxIntCount = 0xB1B6u;
 constexpr std::uint32_t kFxFloatCount = 0xB1B6u;
 constexpr std::uint32_t kFxGlobalId = 0xB1B6u;  // 合同点名的那个 id
+// `cpu-budget.js` 的握手槽（int 池里的两个**空**槽；`<= kFxIntCount` ⇒ 可寻址）。
+constexpr std::uint32_t kCpuBudgetSignalId = 0xB1B5u;  // JS 写 1：宿主线程据此挂起主线程
+constexpr std::uint32_t kCpuBudgetFlagId = 0xB1B4u;    // 宿主线程恢复后写 1：JS 据此退出
 
 bool put32(lift::GuestMemory& mem, std::uint32_t ea, std::uint32_t value) {
     if (!mem.committed(ea, 4u)) return false;
@@ -1869,6 +1874,119 @@ void caseRenderReadings() {
     }
 }
 
+// =====================================================================================
+// `plugin/callback-cpu-budget`：2 ms 判据**真的会触发**（CPU 钟）
+//   ★ 红了意味着什么：
+//     ① JS 体烧 >2 ms CPU 却被放过（预算形同虚设）；或
+//     ② 失败原因不是"用户 JS 体超预算"（`interrupted` + `回调超出预算（deadline / op_limit）`；
+//        ⛔ 带 `(host)` 就是宿主安全网，不是这条）。
+//   ★ **机制断言（不是"失败了"）**：`op_limit = 0`（不限）⇒ 这次打断**只可能**来自 CPU deadline；
+//     `overran()` 只由 QJS 中断回调置位 ⇒ 证明"CPU 钟 → 中断 → 回调失败"整条链真的走通。
+//     ⛔ 若 CPU 比较坏了：JS 会跑完 5e7 次循环、正常返回 [] ⇒ 本用例红（不是靠数字猜）。
+//   ★ `js_cpu_ns >= 2 ms` 是判据窗的读数（⛔ 不断言具体数值）。
+// =====================================================================================
+void caseCallbackCpuBudget() {
+    lift_test::g_current_case = "plugin/callback-cpu-budget";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    const bool loaded = f.load("cpu-budget.js", {{"mode", "busy"}});
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    // 2 ms（生产值）+ **op_limit 不限**：否则 100k 的 op_limit 会先于 CPU deadline 触发 ⇒
+    // 这条用例证明的就不是"CPU 钟会触发"，而是"op_limit 会触发"。
+    f.host->runner().setBudget(lift::plugin::Budget{2'000'000ull, 0u});
+    f.pump();
+    dumpFail(f);
+    const std::string reason = f.host->failReason();
+    LIFT_CHECK(f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);
+    // ★ 点名两段文本：QJS 的"被打断" + 回调预算的 hint（⛔ 只断言"失败了"）。
+    const bool named = reason.find("interrupted") != std::string::npos &&
+                       reason.find("回调超出预算") != std::string::npos;
+    if (!named) std::fprintf(stderr, "  reason=%s\n", reason.c_str());
+    LIFT_CHECK(named);
+    // ★ 不是宿主安全网：那条会带 `(host)`。
+    LIFT_CHECK(reason.find("(host)") == std::string::npos);
+    // ★ 机制：QJS 中断回调真的按 CPU deadline 打断过（op_limit=0、render deadline=0 ⇒ 唯一来源）。
+    LIFT_CHECK(f.host->script() != nullptr && f.host->script()->overran());
+    // ★ 判据窗读数：CPU 时间确实越过了 2 ms。
+    LIFT_CHECK(lift::plugin::callbackDiag().js_cpu_ns >= 2'000'000ull);
+}
+
+#ifdef _WIN32
+// =====================================================================================
+// `plugin/callback-wall-only`：**墙钟 > 2 ms、CPU 远 < 2 ms ⇒ 不许失败**
+//   ★ 红了意味着什么：判据退回了墙钟 ⇒ 被 OS 抢占 / 被挂起的回调又被诬告（缺陷
+//     REQ-01M7VVDV69MJXRHNDGR50H7VHC 原样复发）。⚠ busy 用例**发现不了**这个错（它墙钟也超）。
+//   ★ 构造（确定性，不靠"别的核抢 CPU"的概率）：JS 体写 guest 全局 `SIGNAL=1` 告诉本线程
+//     "已在跑"，再自旋等 `FLAG=1`；宿主线程看到 SIGNAL 就 `SuspendThread` **主线程** 6 ms、
+//     恢复后写 FLAG ⇒ 墙钟 6 ms（> 2 ms、**< 宿主安全网 20 ms**）、CPU 只有几十 µs。
+//   ★ 只在 win32 跑：POSIX 没有可移植的"挂起本线程"（SIGSTOP 是进程级）。
+// =====================================================================================
+void caseCallbackWallOnly() {
+    lift_test::g_current_case = "plugin/callback-wall-only";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    const bool loaded = f.load("cpu-budget.js", {{"mode", "stall"}});
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    // 两个握手槽的**宿主视图**（主线程建夹具时就已提交；`host()` 返回稳定基址）。
+    auto* signal_slot =
+        reinterpret_cast<volatile std::uint32_t*>(f.mem.host(intAddr(kCpuBudgetSignalId)));
+    auto* flag_slot =
+        reinterpret_cast<volatile std::uint32_t*>(f.mem.host(intAddr(kCpuBudgetFlagId)));
+    LIFT_CHECK(signal_slot != nullptr && flag_slot != nullptr);
+    if (signal_slot == nullptr || flag_slot == nullptr) return;
+    *flag_slot = 0;  // 池是零填充；显式置 0（防同一个池被别的用例写过）
+    const std::uint32_t want = lift::encodeInt(1u, kFxKey);
+    const DWORD main_tid = ::GetCurrentThreadId();
+    std::thread helper([&] {
+        ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_HIGHEST);  // 响应延迟要 µs 级
+        const auto t0 = std::chrono::steady_clock::now();
+        while (*signal_slot != want && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(5)) {
+            ::SwitchToThread();
+        }
+        HANDLE self = ::OpenThread(THREAD_SUSPEND_RESUME, FALSE, main_tid);
+        if (self != nullptr) {
+            // ★ 主线程此刻在 JS 体里：挂起 6 ms ⇒ 只走墙钟，CPU 不涨。
+            //   ⚠ 必须 **< 宿主安全网 20 ms**：这条判的是"2 ms 判据用哪把钟"，
+            //   超了 20 ms 就会先被安全网抓到（那是另一条腿，见 trigger_runner）。
+            //   ⚠ **不用 `Sleep`**：它的粒度是系统 tick（本机 15.625 ms、还可能成倍）⇒
+            //   想睡 6 ms 会真睡 15–31 ms、撞上 20 ms 安全网。用忙等把它钉准。
+            ::SuspendThread(self);
+            const auto hold = std::chrono::steady_clock::now();
+            while (std::chrono::steady_clock::now() - hold < std::chrono::milliseconds(6)) {
+                ::SwitchToThread();
+            }
+            ::ResumeThread(self);
+            ::CloseHandle(self);
+        }
+        *flag_slot = want;  // 放行 JS（无论挂起成功与否 —— 失败时用例会因为"墙钟没超"而红）
+    });
+    f.host->runner().setBudget(lift::plugin::Budget{2'000'000ull, 0u});
+    f.pump();
+    helper.join();
+    dumpFail(f);
+    const lift::plugin::CallbackDiag& d = lift::plugin::callbackDiag();
+    // ★ 墙钟确实超过 2 ms（挂起真的发生了）。
+    LIFT_CHECK(d.js_ns >= 2'000'000ull);
+    // ★ CPU **没有**超过 2 ms，而且远小于墙钟（判据读的是 CPU 钟）。
+    LIFT_CHECK(d.js_cpu_ns < 2'000'000ull);
+    LIFT_CHECK(d.js_cpu_ns * 4 < d.js_ns);
+    // ★ 结论：不许因为"墙钟超了"失败 / 被中断。
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->script() != nullptr && !f.host->script()->overran());
+}
+#endif  // _WIN32
+
 }  // namespace
 
 int main() {
@@ -1886,6 +2004,10 @@ int main() {
     caseLoadSaveOnLoaded();
     caseChainsRoute();
     caseGlobalReadModifyWrite();
+    caseCallbackCpuBudget();
+#ifdef _WIN32
+    caseCallbackWallOnly();
+#endif
     caseFinish();
     caseStartNowAndStaged();
     caseAtReadPointFileRead();

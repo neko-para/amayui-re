@@ -5227,6 +5227,28 @@ const MUTATIONS = [
       '`run=done` 的断言抓不到）',
   },
 
+  // ── D5：2 ms 判据读**CPU 钟**（`CallbackDiag::js_cpu_ns`），不是墙钟 ─────────────────────────
+  //   ★ 代表"钟换了、判据没换"这一类错：`js_cpu_us` 照旧打，但 `js_late` 仍拿 `js_ns` 比 ⇒
+  //     被 OS 抢占 / 被挂起的回调又被诬告（缺陷 REQ-01M7VVDV69MJXRHNDGR50H7VHC 原样复发），
+  //     而**普通回调**（CPU≈墙钟）全绿 ⇒ 只有"墙钟超 2 ms、CPU 远小于 2 ms"的对照用例能看出来。
+  //   ★ 承重守卫 = `plugin-runtime` 的 `plugin/callback-wall-only`：宿主线程把 JS 体挂起 6 ms
+  //     （`SuspendThread`）⇒ 墙钟 6 ms、CPU 只几十 µs；判据退回墙钟就**必须**红。
+  //   ★ 反证过（2026-11-21 / win32）：施加这一处 ⇒ `plugin-runtime` 红；还原后绿。
+  {
+    file: 'apps/emulator-lift/src/plugin/plugin_host.cpp',
+    from: 'const bool js_late = budget.deadline_ns != 0 && diag.js_cpu_ns >= budget.deadline_ns;',
+    to:
+      'const bool js_late = budget.deadline_ns != 0 && diag.js_ns >= budget.deadline_ns;  ' +
+      '// 变异：判据退回墙钟（被抢占 ⇒ 诬告）',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '2 ms 判据退回**墙钟**（`diag.js_ns`）⇒ 被 OS 抢占 / 被挂起的回调又被诬告（`plugin-runtime` 的 ' +
+      '`plugin/callback-wall-only` 红：墙钟 6 ms、CPU 远小于 2 ms 却被判超预算）',
+  },
+
   // ── `[present-readback]` Phase A：needs 谓词漏 `--dump-frame`（`d3d9.cpp` 的 want_guest）─────
   //   ★ 代表"回读的消费者少接一个"这一类错：`want_guest` 漏掉 `!dump_path.empty()` ⇒ `--dump-frame`
   //     那一帧**不下载**（materialized=false）⇒ dump 写成旧帧 / 被现实现拒写。旧判据

@@ -24,9 +24,11 @@
 //   ⛔ 不接 `VirtualClock` / `attachClock` / `pausedTotalMs()`（那是配方执行器的钟，**扣暂停**；
 //   这里的墙钟**不扣**，两者语义相反 —— 见合同 §4.2 440–441 与 D3）。
 //
-// ★ 预算：**2 ms 只罩用户 JS 本体**（判据在 `PluginHost::runCallback`，靠 `CallbackDiag::js_ns`）。
-//   本类量的 `start → end` 是整个宿主段 ⇒ 只留**宿主安全网** = 预算 × 10（2 ms ⇒ 20 ms）：
-//   超了清 armed + fail（`lastError()` 写清 `… (host)` + 哪个 trigger）。⛔ 不静默继续跑回调。
+// ★ 预算：**2 ms 只罩用户 JS 本体**（判据在 `PluginHost::runCallback`，靠 `CallbackDiag::js_cpu_ns`
+//   —— **CPU 钟**，见 `budget.h`）。
+//   本类量的 `start → end` 是整个宿主段 ⇒ 只留**宿主安全网** = 预算 × 10（2 ms ⇒ 20 ms），
+//   **仍是墙钟**（`pluginNowNs()`）：超了清 armed + fail（`lastError()` 写清 `… (host)` + 哪个 trigger）。
+//   ⛔ 不静默继续跑回调，⛔ 不把安全网换成 CPU 钟。
 #pragma once
 
 #include <cstddef>

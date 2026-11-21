@@ -1,4 +1,4 @@
-// emulator-lift · 插件回调的**预算**（墙钟 deadline + 操作数上限）—— C1b
+// emulator-lift · 插件回调的**预算**（用户 JS 的 **CPU** deadline + 操作数上限）—— C1b
 //
 // 合同：`docs/03-emulator/plugin-runtime.md` §4.2 第 458 行（"每次 start/onTrigger deadline + op limit；
 //       超限 ⇒ 清 armed + fail(owner)"）、§6 行 12（预算守卫）。
@@ -15,8 +15,29 @@
 //   （与用户 JS 超限的 reason 可区分；拼法只有 `callbackBudgetReason()` 一处）。
 // ★ `op_limit` 本切片**不消费**：C1 的 handler 是 C++（没有"步数"概念）；它的真消费者是 C2 的 QJS
 //   （QJS interrupt handler 数 op）。⇒ 这里只声明 + 保留形状，⛔ 不编一个假的 op 计数出来。
-// ★ 钟：`pluginNowNs()` = 宿主**单调**纳秒（`steady_clock`）。⛔ 不接 guest 虚拟时钟、⛔ 不扣暂停
-//   （预算判的是"宿主被回调占了多久"，与 guest 时间无关；与 `AfterDelay` / timeout 的墙钟同源）。
+// ★ **两把钟，别混**（2026-11-21 用户裁决：2 ms 预算改用 CPU 时钟）：
+//   · 用户 JS 的 **2 ms** 用 `pluginThreadCpuNs()`（**本线程 CPU 时间**，见下）。被 OS 抢占 /
+//     等 I/O / 睡 都**不算**进它 —— 这正是缺陷 `REQ-01M7VVDV69MJXRHNDGR50H7VHC` 的修法：
+//     一次只做 log+click+建 2 个 trigger 的回调不可能真花 9 ms（墙钟读数被抢占污染）。
+//   · 宿主安全网 **20 ms** 继续用 `pluginNowNs()`（**墙钟**）。⛔ 不要把它也换成 CPU 钟：
+//     它防的是"宿主段卡住 ⇒ guest 被拖住"，而"被抢占"恰好是它**应该**抓到的现象。
+//   ⛔ 两把钟都**不接** guest 虚拟时钟、⛔ 不扣暂停；与 `AfterDelay` / timeout 的墙钟各自独立。
+//
+// ★ **`pluginThreadCpuNs()` 的读数粒度（实测，⛔ 守卫不要按"2 ms 精确可测"写断言）**：
+//   · POSIX：`clock_gettime(CLOCK_THREAD_CPUTIME_ID)`，纳秒级。
+//   · Windows：**主源 = `QueryThreadCycleTime`**（线程周期计数，本机 ≈ ns 级）；首次使用时
+//     用 4 个 ~200 µs 的忙等窗口把 cycles 标定成 ns（取 max(cycles/wall) —— 抢占只会抬高 wall；
+//     本机实测 **≈3.97 cycles/ns**，只做一次）。这次标定烧 ~0.8 ms CPU ⇒ `call()` 在计时窗**之前**
+//     预热它（见 `script_quickjs.cpp`），⛔ 不进 2 ms 判据窗。
+//     ⚠ **MSDN 的已知限制**：`QueryThreadCycleTime` **不保证精确** —— CPU 频率变化（节能 / turbo）
+//     与跨核迁移都可能让计数与真实 CPU 时间有偏差 ⇒ 它只服务"2 ms 判据"，⛔ **不要**把它读成
+//     "精确 CPU 时间"、也⛔ 不要拿它做计费 / 性能读数。
+//     ⚠ **为什么不是 `GetThreadTimes`**：它是**按系统时钟 tick 记账**的（100 ns 单位只是字段宽度）。
+//     实测本机（win32 / 2026-11-21）：读数**只能**是 **15.625 ms** 的整数倍 —— 0.5 ms 的忙等读到
+//     0 或 156250；窗口里跨过一次 tick 边界就会**多记** 15.625 ms ⇒ 2 ms 判据的**假阳性**率约
+//     `cpu_ms / 15.6`（实测 40 个 0.5 ms 窗口里 1 次）。⇒ 它只作 `QueryThreadCycleTime` 失败时
+//     的**兜底**（那时粒度就是 15.625 ms；能判"跑飞"，判不了 2 ms）。
+//   · 读数**单调不减**（同一线程内可直接相减）；⛔ 不保证与墙钟同源、⛔ 不保证跨线程可比。
 #pragma once
 
 #include <cstdint>
@@ -24,7 +45,7 @@
 
 namespace lift::plugin {
 
-// 一次回调的墙钟上限（D5 裁决：2 ms）。★ 只罩**用户 JS 本体**（见头注）；超了 = 用户 JS 跑飞。
+// 一次回调的 **CPU 时间**上限（D5 裁决：2 ms）。★ 只罩**用户 JS 本体**（见头注）；超了 = 用户 JS 跑飞。
 inline constexpr std::uint64_t kCallbackDeadlineNs = 2'000'000ull;
 // 一次回调的操作数上限（D5 裁决：100k）。⚠ C1 不消费（见头注）；C2 的 QJS 才数。
 inline constexpr std::uint32_t kCallbackOpLimit = 100'000u;
@@ -32,16 +53,25 @@ inline constexpr std::uint32_t kCallbackOpLimit = 100'000u;
 inline constexpr std::uint64_t kHostSafetyNetFactor = 10;
 
 struct Budget {
-    // 0 = **不限墙钟**（只有 op_limit 那一半生效）—— 给"明确要放宽"的调用方一个干净的口子。
+    // 0 = **不限时间**（只有 op_limit 那一半生效）—— 给"明确要放宽"的调用方一个干净的口子。
+    // ★ 单位是**用户 JS 本体的 CPU 时间**（`pluginThreadCpuNs()`），⛔ 不是墙钟。
     std::uint64_t deadline_ns = kCallbackDeadlineNs;
     std::uint32_t op_limit = kCallbackOpLimit;
 };
 
-// 宿主单调纳秒（`std::chrono::steady_clock`；`budget.cpp` 是唯一定义）。
+// 宿主**墙钟**单调纳秒（`std::chrono::steady_clock`；`budget.cpp` 是唯一定义）。
+// ★ 只用于**宿主安全网**（`hostSafetyNetNs()`）与诊断；⛔ 不要拿它判用户 JS 的 2 ms。
 std::uint64_t pluginNowNs();
+
+// **本线程 CPU 时间**的纳秒读数（kernel + user；不含被抢占 / 睡眠 / 等 I/O）。
+// ★ 只用于**用户 JS 本体的 2 ms**（`script_quickjs.cpp` 的 deadline 起点与中断回调比较、
+//   `plugin_host.cpp` 的 `js_late` 判据）。⛔ 宿主安全网继续用 `pluginNowNs()`（见头注）。
+// ★ 粒度见文件头注（Windows 主源 ≈ ns 级；`GetThreadTimes` 兜底 = 15.625 ms 整 tick）。
+std::uint64_t pluginThreadCpuNs();
 
 // 是否超预算。判据 = `now_ns - start_ns >= deadline_ns`（**含等号**：正好到点即超）。
 // 钟回退（`now_ns < start_ns`）不算超：那是"读数坏了"，不是"回调跑飞"。
+// ★ 两把钟都适用：`pluginNowNs()`（墙钟）与 `pluginThreadCpuNs()`（CPU）；⛔ 不要交叉相减。
 bool budgetExceeded(const Budget& budget, std::uint64_t start_ns, std::uint64_t now_ns);
 
 // 宿主段安全网的纳秒上限（`deadline_ns × kHostSafetyNetFactor`；`deadline_ns == 0` = 不限 ⇒ 仍不限）。
@@ -57,17 +87,19 @@ std::string callbackBudgetReason(const char* call, const std::string& name, bool
 // 回调耗时诊断（REQ-01M7VVDV69MJXRHNDGR50H7VHC 待查 #3）
 //
 // ★ **不是预算的一部分**：⛔ 不进默认输出、不进 `--help`。进判据的只有两样（见 `PluginHost::runCallback`）：
-//   `js_ns` = 用户 JS 本体（2 ms 判据）；`host_ns` 只在 10× 宿主安全网上（reason 带 `(host)`）。
-//   `plugin_host.cpp` 量 `host_ns` 并逐回调打一行；`script_quickjs.cpp` 把
-//   `js_ns` / `build_ns` / `collect_ns` 与 `module_load_ns` 填进来（`inner_overran` 由中断回调置）。
+//   `js_cpu_ns` = 用户 JS 本体的 **CPU** 时间（2 ms 判据）；`host_ns` 只在 10× 宿主安全网上
+//   （墙钟，reason 带 `(host)`）。`plugin_host.cpp` 量 `host_ns` 并逐回调打一行；
+//   `script_quickjs.cpp` 把 `js_ns`（墙钟）/ `js_cpu_ns`（CPU）/ `build_ns` / `collect_ns` 与
+//   `module_load_ns` 填进来（`inner_overran` 由中断回调置）。
 // ★ 为什么用一个静态槽：两侧都要同一份读数，而 `PluginScript` 接口不该为诊断长一个方法。
 //   guest 循环是单线程 ⇒ 一个槽就够（⛔ 不要当线程安全的东西用）。
 // =========================================================================================
 struct CallbackDiag {
-    std::uint64_t host_ns = 0;         // `PluginHost::runCallback` 自己量的一段（≈ runner 的宿主段窗口）
+    std::uint64_t host_ns = 0;         // `PluginHost::runCallback` 自己量的一段（≈ runner 的宿主段窗口；墙钟）
     std::uint64_t inner_ns = 0;        // `call()` 从**进入**量到返回（build + js + collect；诊断用，⛔ 不是预算窗）
     std::uint64_t build_ns = 0;        // 组 ctx / 事件对象（每次回调新建；**不在** 2 ms 里）
-    std::uint64_t js_ns = 0;           // 用户 JS 本体（**预算窗**；含 `ctx.log` 的 stderr 写）
+    std::uint64_t js_ns = 0;           // 用户 JS 本体的**墙钟**（含 `ctx.log` 的 stderr 写；只作对照读数）
+    std::uint64_t js_cpu_ns = 0;       // 用户 JS 本体的**CPU 时间** = **预算窗**（2 ms 判据用这个）
     std::uint64_t collect_ns = 0;      // 返回值 → TriggerSet（**不在** 2 ms 里）
     std::uint64_t module_load_ns = 0;  // 模块装载（**在预算起点之前**）
     bool inner_overran = false;        // QJS 中断回调是否真的打断过（deadline / op_limit）

@@ -26,6 +26,9 @@
 //   ④ `trigger-runner/rearm`：Once 触发后再返回**同对象** ⇒ fail（⛔ 不是静默重置）；Reenter 需新的
 //      有效外→内（**不会立刻再触发**）；`AfterDelay` 计时从头；`AtReadPoint` 从**下一个**匹配读点重新计。
 //      ⇒ 去掉 Once 的"已耗尽"判据 ⇒ ① 那条红（"接受放回"= 静默重置预算）。
+//   ⑤ `trigger-runner/budget-cpu-clock`：**CPU 钟单调不减**（用户 JS 的 2 ms 判据用它）；
+//      ⛔ 不断言具体数值（Windows 的记账/标定粒度见 `budget.h` 头注）。
+#include <chrono>
 #include <cstdint>
 #include <initializer_list>
 #include <string>
@@ -1341,6 +1344,28 @@ void caseOwnerTimeout() {
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.runner.firesOf(v)), 0);
 }
 
+// =====================================================================================
+// ⑤ `trigger-runner/budget-cpu-clock`：**CPU 钟单调不减**（用户 JS 的 2 ms 判据用的就是它）
+//   ⛔ 不断言具体数值：Windows 的读数受记账 / 标定粒度影响（`budget.h` 头注写了实测粒度）。
+//   ⛔ 不拿"忙等 1 ms ⇒ cpu 前进 ≥ 1 ms"当判据（粒度 / 标定误差都可能让它不成立）。
+//   ★ 为什么在这里：`budget.cpp` 没有自己的 pure CTest，它由 `trigger-runner` 这条
+//     （只链 `emulator-lift-runtime`）覆盖（见 `CMakeLists.txt` 的 runtime 段注释）。
+// =====================================================================================
+void caseBudgetCpuClock() {
+    lift_test::g_current_case = "trigger-runner/budget-cpu-clock";
+    const std::uint64_t cpu_a = lift::plugin::pluginThreadCpuNs();
+    const std::uint64_t wall_a = lift::plugin::pluginNowNs();
+    // 忙等 ~1 ms。⛔ 不 sleep：睡眠消耗墙钟、**不**消耗 CPU 时间 —— 那正是本单要区分开的两件事。
+    const auto t0 = std::chrono::steady_clock::now();
+    while (std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0)
+               .count() < 1000) {
+    }
+    const std::uint64_t cpu_b = lift::plugin::pluginThreadCpuNs();
+    const std::uint64_t wall_b = lift::plugin::pluginNowNs();
+    LIFT_CHECK(cpu_b >= cpu_a);   // ★ 单调不减（⛔ 不要求严格增：读数粒度可以比这 1 ms 更粗）
+    LIFT_CHECK(wall_b > wall_a);  // 墙钟确实走过（否则上一条没有意义）
+}
+
 }  // namespace
 
 int main() {
@@ -1351,5 +1376,6 @@ int main() {
     caseGlobalReadModifyWriteClick();
     caseOneWritePerReadPoint();
     caseOwnerTimeout();
+    caseBudgetCpuClock();
     return lift_test::finish("trigger-runner");
 }

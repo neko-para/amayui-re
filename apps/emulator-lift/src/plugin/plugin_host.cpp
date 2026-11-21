@@ -56,8 +56,9 @@ std::string paramsText(const std::map<std::string, std::string>& params) {
 //
 // ★ 默认**零输出**、⛔ 不进 `--help`：只有 `LIFT_PLUGIN_CALLBACK_ELAPSED` 存在时才逐回调打一行。
 //   唯一例外 = **超预算那条无论开关都打**（失败本来就该有读数；否则只剩一句 reason）。
-// ★ 起点 = `runCallback` 入口 → `host_ns` = **宿主段窗口**（不是 2 ms 判据；判据见下面的 `js_ns`）。
-//   内层读数由 `script_quickjs.cpp` 填进同一个槽；`js_ns` 才是"2 ms 用在哪"。
+// ★ 起点 = `runCallback` 入口 → `host_ns` = **宿主段窗口**（墙钟；不是 2 ms 判据；判据见下面的
+//   `js_cpu_ns`）。内层读数由 `script_quickjs.cpp` 填进同一个槽；`js_cpu_ns`（**CPU 钟**）才是
+//   "2 ms 用在哪"。`js_ns`（墙钟）保留为对照：`elapsed_us` 远大于 `js_cpu_us` = 被 OS 抢占。
 // =====================================================================================
 bool callbackElapsedDiagOn() {
     static const bool on = std::getenv("LIFT_PLUGIN_CALLBACK_ELAPSED") != nullptr;
@@ -82,12 +83,12 @@ std::string diagName(const char* raw) {
 
 // `over` 的来路必须可分辨（三类）：
 //   `deadline` / `ops` = QJS 中断回调真的打断过（`inner_overran`）；
-//   `js`   = JS 本体跑完、但 `js_ns >= 2 ms`（没被打断的那种边界）；
-//   `host` = **宿主段**（ctx 构造 / 收集 / 调度）越过 10×（20 ms）安全网 —— 时间花在插件代码之外。
-// ★ 2026-11-21 收窄后 `over` **不再**等于"2 ms 判据失败"：2 ms 只看 `js_ns`（见 `runCallback`）。
+//   `js`   = JS 本体跑完、但 `js_cpu_ns >= 2 ms`（**CPU 钟**；没被打断的那种边界）；
+//   `host` = **宿主段**（ctx 构造 / 收集 / 调度）越过 10×（20 ms）安全网 —— 墙钟，时间花在插件代码之外。
+// ★ 2026-11-21 收窄后 `over` **不再**等于"2 ms 判据失败"：2 ms 只看 `js_cpu_ns`（见 `runCallback`）。
 void emitCallbackDiag(const lift::plugin::CallbackDiag& d, const char* raw_name, bool ok,
                       const lift::plugin::Budget& budget) {
-    const bool js_late = budget.deadline_ns != 0 && d.js_ns >= budget.deadline_ns;
+    const bool js_late = budget.deadline_ns != 0 && d.js_cpu_ns >= budget.deadline_ns;
     const bool host_late =
         budget.deadline_ns != 0 && d.host_ns >= lift::plugin::hostSafetyNetNs(budget);
     const bool over = d.inner_overran || js_late || host_late;
@@ -98,25 +99,27 @@ void emitCallbackDiag(const lift::plugin::CallbackDiag& d, const char* raw_name,
     const unsigned long long elapsed_us = static_cast<unsigned long long>(d.host_ns / 1000u);
     const unsigned long long build_us = static_cast<unsigned long long>(d.build_ns / 1000u);
     const unsigned long long js_us = static_cast<unsigned long long>(d.js_ns / 1000u);
+    const unsigned long long js_cpu_us = static_cast<unsigned long long>(d.js_cpu_ns / 1000u);
     const unsigned long long collect_us = static_cast<unsigned long long>(d.collect_ns / 1000u);
     const unsigned long long gap_us = static_cast<unsigned long long>(gap / 1000u);
     const unsigned long long load_us = static_cast<unsigned long long>(d.module_load_ns / 1000u);
     if (!over) {
         std::fprintf(stderr,
                      "callback name=%s elapsed_us=%llu ok=%d calls=%llu build_us=%llu js_us=%llu"
-                     " collect_us=%llu gap_us=%llu module_load_us=%llu\n",
+                     " js_cpu_us=%llu collect_us=%llu gap_us=%llu module_load_us=%llu\n",
                      name.c_str(), elapsed_us, ok ? 1 : 0, static_cast<unsigned long long>(calls),
-                     build_us, js_us, collect_us, gap_us, load_us);
+                     build_us, js_us, js_cpu_us, collect_us, gap_us, load_us);
     } else {
         const char* how = d.inner_overran
-                              ? (budget.deadline_ns != 0 && d.js_ns >= budget.deadline_ns ? "deadline"
-                                                                                           : "ops")
+                              ? (budget.deadline_ns != 0 && d.js_cpu_ns >= budget.deadline_ns ? "deadline"
+                                                                                               : "ops")
                               : (js_late ? "js" : "host");
         std::fprintf(stderr,
                      "callback name=%s elapsed_us=%llu ok=%d calls=%llu build_us=%llu js_us=%llu"
-                     " collect_us=%llu gap_us=%llu module_load_us=%llu budget_us=%llu over=%s\n",
+                     " js_cpu_us=%llu collect_us=%llu gap_us=%llu module_load_us=%llu budget_us=%llu"
+                     " over=%s\n",
                      name.c_str(), elapsed_us, ok ? 1 : 0, static_cast<unsigned long long>(calls),
-                     build_us, js_us, collect_us, gap_us, load_us,
+                     build_us, js_us, js_cpu_us, collect_us, gap_us, load_us,
                      static_cast<unsigned long long>(budget.deadline_ns / 1000u), how);
     }
     std::fflush(stderr);
@@ -293,15 +296,17 @@ PluginHost::TriggerSet PluginHost::runCallback(Context& ctx, bool is_start, cons
     const std::uint64_t host_end_ns = pluginNowNs();
     diag.host_ns = host_end_ns >= host_start_ns ? host_end_ns - host_start_ns : 0;
     // =================================================================================
-    // 判据（2026-11-21 收窄，用户裁决 D5 可改）：**2 ms 只罩用户 JS 本体**
-    //   · `js_ns` = 用户 JS 本体（QJS 侧从"即将调用插件函数"量到 JS 返回）；
+    // 判据（2026-11-21 收窄，用户裁决 D5 可改）：**2 ms 只罩用户 JS 本体，且用 CPU 钟**
+    //   · `js_cpu_ns` = 用户 JS 本体的**本线程 CPU 时间**（QJS 侧从"即将调用插件函数"量到 JS 返回）；
+    //     ⛔ 不要用 `js_ns`（墙钟）判 —— 被 OS 抢占 / 等 I/O 会让一次正常的回调偶发红
+    //     （缺陷单 REQ-01M7VVDV69MJXRHNDGR50H7VHC）；`js_ns` 只作 wall/cpu 对照读数。
     //   · 模块装载（`call()` 之前）、ctx / 事件对象构造、返回值→TriggerSet 收集、宿主调度
-    //     **都不计** —— 这些是宿主替用户代码付的成本（缺陷单 REQ-01M7VVDV69MJXRHNDGR50H7VHC）。
-    //   · **宿主段另有安全网** = 10×（20 ms）：防"宿主被卡死 ⇒ guest 被拖住"。超了照样响亮失败，
-    //     但 reason 带 `(host)`（⛔ 不与用户 JS 超限混成同一条）。
+    //     **都不计** —— 这些是宿主替用户代码付的成本。
+    //   · **宿主段另有安全网** = 10×（20 ms），**仍是墙钟**：防"宿主被卡死 ⇒ guest 被拖住"。超了照样
+    //     响亮失败，但 reason 带 `(host)`（⛔ 不与用户 JS 超限混成同一条）。
     //   · 用户 JS 真的跑飞时 QJS 中断回调会先打断（`inner_overran` ⇒ 脚本返回 false + 已中断文案）。
     // =================================================================================
-    const bool js_late = budget.deadline_ns != 0 && diag.js_ns >= budget.deadline_ns;
+    const bool js_late = budget.deadline_ns != 0 && diag.js_cpu_ns >= budget.deadline_ns;
     const bool host_late =
         budget.deadline_ns != 0 && diag.host_ns >= lift::plugin::hostSafetyNetNs(budget);
     if (ok && (js_late || host_late)) {
