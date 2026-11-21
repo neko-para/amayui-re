@@ -5326,6 +5326,22 @@ const MUTATIONS = [
       '`[FROM,TO)` 不一致（`recipe-driver-parity` 红在 `armed 与 oracle 那一步不符`；链仍能走完 ⇒ ' +
       '只看 `run=done` 的断言抓不到）',
   },
+
+  // ── 配方等待策略（★ 新 `wait` 静默混进 `.plan` ⇒ 又有场景在拿墙钟当门）──────────────
+  //   ★ 这一类错长什么样：某个场景"等 1 s 再点"能跑通，于是时间被当成门的替代品；
+  //     换机器 / 换负载就变成偶发（`plugin/load-save-e2e` 的两种形态就是这个形状）。
+  //   ★ 守卫 = `tools/test/recipe-wait-policy.test.mjs`（白名单集合相等；棘轮只降）。
+  //     ⛔ 不选"删一条 wait"当变异：删掉也照样能跑 —— 那是白名单 stale 的方向，已被用例 ③ 覆盖。
+  {
+    file: 'apps/emulator-lift/scripts/recipes/save07-battle.plan',
+    from: 'await position BTL 0x4A84 0x4AE4 timeout 180000\nquit',
+    to: 'await position BTL 0x4A84 0x4AE4 timeout 180000\nwait 777\nquit',
+    guard: 'tools/test/recipe-wait-policy.test.mjs',
+    what:
+      '往一份"已经没有 wait"的配方里加一条 `wait 777` ⇒ 白名单里没有它 ⇒ ' +
+      '`recipe-wait-policy/wait-set-equal` 红（"又有一个配方在拿时间当等待条件"；' +
+      '而这条配方照旧能跑完 ⇒ 只看 exit 0 / pending=0 的判据抓不到）',
+  },
 ];
 
 let mutationRunSeq = 0;

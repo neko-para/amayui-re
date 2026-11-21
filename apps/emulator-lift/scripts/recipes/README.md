@@ -41,6 +41,20 @@ click 1186 373                          # ⛔ 不带 timeout（点击没有可�
 （旧的"守上一条指令"写法）/ 挂在 `wait` · `click` · `profile_*` · `quit` 上 ⇒ **解析期硬错**
 （`exit 2` + 行号，文案会告诉你该写回哪一行）。`wait` **没有守卫**：它是固定时长、到点就走。
 
+## 等待策略（`wait` 只当最后手段）
+
+**除非有明确原因，否则不用 `wait` 当等待条件** —— 它是宿主墙钟、不推进 guest、也没有守卫，
+只是把「还没到」换成一个固定时长。能用门（`await script <名>` / `await position <名> <lo> <hi>`）表达的一律用门：
+门只在 guest 状态成立时才放行，所以可复跑、可跨臂比。只有**本质就是时间**的那几类等待才留在 `wait` 上
+（采样间隔 / 音频尾声 / 区间读数 / 收尾窗），而且每一条都必须在守卫的白名单里写清为什么 ——
+新加一条 `wait` 立刻红，换掉一条就删一条（棘轮只降）。
+
+怎么查：
+
+```bash
+node --test tools/test/recipe-wait-policy.test.mjs
+```
+
 ## 文件 → 干什么 → 谁在用
 
 | 文件 | 干什么 | 谁在用（`repro:` 锚 / docs / 需求单） |
@@ -54,7 +68,7 @@ click 1186 373                          # ⛔ 不带 timeout（点击没有可�
 | `sc0000-wipe.plan` | 加载第 4 槽（`click 300 269` = SAVE03）+ **1 次**推进点击 → blind wipe；`profile_begin/end pre` 与 `wipe` 两窗（三档 headless / window vsync0 / vsync1） | `docs/03-emulator/wipe-profile.md`（逐帧 timed 读数与 H1–H6）· `docs/03-emulator/scripts/SC0000.md`（wipe 转场静态定位）· `docs/03-emulator/scripts/SAVE.md`（槽位行 y 实测） |
 | `save04-fault.plan` | 加载第 5 槽（`click 300 328` = SAVE04）→ 教程询问 `click 640 393`（不接受）→ 进地图 wipe ⇒ **exit 3 + guest mem fault**（判据是 `WRITE 0x1005BA8C` + fault 现场的 `eip=004A50C0` / 32 字栈 / `input-plan:` 摘要；`pending != 0` 是 `_Exit(3)` 的正常形状） | `docs/03-emulator/defects.md#BUG-32` · 缺陷单 `REQ-01M7PG01B79175MPR7XP0VP3DJ` · 工具单 `REQ-01M7PG086DG4BBPA40VCVZTP4X` |
 | `save05-move.plan` | 加载第 6 槽（`click 300 388` = SAVE05）→ FIELD 稳定 20 s → `click 440 360` 打发覆盖图 → **左键拖拽**把镜头从 440 拖到 240（20 步、每步 `wait 120`）；窗口 `s05move` = 移动卡顿基准（纯 `mouse_move` 不动，必须拖拽） | `docs/03-emulator/perf-bench-save05.md`（怎么跑 / 判据 / 读数） |
-| `save07-battle.plan` | 加载第 8 槽（`click 300 507` = SAVE07）→ FIELD → 右上角「结束回合」`click 1220 45` → 等 SELACT 的「決定」屏 → `click 640 517` → 进 live2d 战斗；**arena 抬到 256 MiB 之前**这条路停在 `resource-exhausted @ eip=0047839D` | **repro 锚** `01M7WTVBD26FT8G2B14BR19CQN#click 640 517`（D3DX 资源耗尽那张单的重开条件）· `docs/03-emulator/present-readback.md`（Phase B 的冒烟跑） |
+| `save07-battle.plan` | 加载第 8 槽（`click 300 507` = SAVE07）→ FIELD → 右上角「结束回合」`click 1220 45` → 等 SELACT 的「決定」屏 → `click 640 517` → 进 live2d 战斗 → 等 BTL 主循环 `[0x4A84,0x4AE4)`（`poll-input`）再 `quit`；**全篇无 `wait`**（等待全是读点状态门）；**arena 抬到 256 MiB 之前**这条路停在 `resource-exhausted @ eip=0047839D` | **repro 锚** `01M7WTVBD26FT8G2B14BR19CQN#click 640 517`（D3DX 资源耗尽那张单的重开条件）· `docs/03-emulator/present-readback.md`（Phase B 的冒烟跑） |
 
 ★ 单号都是 `data/requirements/<ID>.md`。**改这里的路径 ⇒ 上面那几条 `repro:` 锚要一起改**（那是父级的活；
 本轮只搬家，没改需求树）。
