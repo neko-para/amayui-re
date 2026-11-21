@@ -1,0 +1,95 @@
+# fellow-switch.plan —— SAVE09 → REIGN → 右键进 FELLOW → 角色立绘来回切换 3 轮
+#
+# 用户给的操作序列（真源）：
+#   ① 加载 SAVE09（saves/SAVE09.DAT + .STH）② 进 REIGN ③ 在目录中心右键 ⇒ FELLOW
+#   ④ 点 (330,130) ⇒ 阿瓦罗（切过去明显卡顿）⑤ 点 (400,130) ⇒ 菲亚 ⑥ 来回切
+#
+# 每一道门都是**已取证**的位置门（读数与口径见 docs/03-emulator/perf-fellow-switch.md）：
+#   TITLE  回调体 [0x0460,0x0520)          → LoadData (1070,480)
+#   SAVE   回调体 [0x1104,0x11C4)          → 槽 009 行 y≈626（页基 0 已截图核对：行距 59.5）
+#   SBUNKI 读段之后 [0x0B18,0x0C58)        → 「是」(640,323)
+#   REIGN  回调体 [0x2048,0x2234) + 主轮询体 [0x1FF4,0x2048) → 右键 (640,360)
+#          ★ 单条 `click ... right` 实测**会随机被吞**：成功/失败两臂的 press→release 读点跨度
+#            是 1778 vs 6（同一道门同一坐标）⇒ 按下没被任何一次
+#            `read-mouse-button` 看见。⇒ 改成 `mouse_down` →（等它回到主轮询体、再等下一趟读段）
+#            → `mouse_up`：按下至少跨过一个完整回调 ⇒ 结构上不可能被吞（v4a/v4b 2/2）。
+#   FELLOW 回调体读段 [0x1684,0x16A4)      → 切人点 (330,130)/(400,130)
+#   FELLOW 主轮询体 [0x1570,0x15A8)        → 切换完成后的稳态（窗口收口用）
+# ★ 切换的转场链（两个方向都实测过）：click → SETTOOLLIST → FELLOW
+#   ⇒ 窗口 = click → 等 SETTOOLLIST → 等回 FELLOW → 等 FELLOW 主轮询体 → profile_end
+#   （⛔ 不用 wait 顶门；本文件一条 wait 都没有）
+
+# ---- ① TITLE 回调体 → LoadData ----
+await position TITLE 0x0460 0x0520 timeout 60000
+click 1070 480
+
+# ---- ② 加载屏（SAVE 回调体）→ 槽 009 ----
+await position SAVE 0x1104 0x11C4 timeout 120000
+click 300 626
+
+# ---- ③ 确认框「要读取吗？」：等读段之后那一档再点 ----
+await position SBUNKI 0x0B18 0x0C58 timeout 60000
+click 640 323
+
+# ---- ④ REIGN：回调体里按下 → 跨过一整帧 → 抬起（右键进 FELLOW）----
+await position REIGN 0x2048 0x2234 timeout 180000
+mouse_move 640 360
+mouse_down right
+await position REIGN 0x1FF4 0x2048 timeout 60000
+await position REIGN 0x2214 0x2234 timeout 60000
+mouse_up right
+
+# ---- ⑤ FELLOW 输入读段 ----
+await position FELLOW 0x1684 0x16A4 timeout 120000
+
+# =========================== 第 1 轮 ===========================
+profile_begin s1-to-avaro
+click 330 130
+await script SETTOOLLIST timeout 60000
+await script FELLOW timeout 60000
+await position FELLOW 0x1570 0x15A8 timeout 60000
+profile_end s1-to-avaro
+
+await position FELLOW 0x1684 0x16A4 timeout 60000
+profile_begin s1-to-fia
+click 400 130
+await script SETTOOLLIST timeout 60000
+await script FELLOW timeout 60000
+await position FELLOW 0x1570 0x15A8 timeout 60000
+profile_end s1-to-fia
+
+# =========================== 第 2 轮 ===========================
+await position FELLOW 0x1684 0x16A4 timeout 60000
+profile_begin s2-to-avaro
+click 330 130
+await script SETTOOLLIST timeout 60000
+await script FELLOW timeout 60000
+await position FELLOW 0x1570 0x15A8 timeout 60000
+profile_end s2-to-avaro
+
+await position FELLOW 0x1684 0x16A4 timeout 60000
+profile_begin s2-to-fia
+click 400 130
+await script SETTOOLLIST timeout 60000
+await script FELLOW timeout 60000
+await position FELLOW 0x1570 0x15A8 timeout 60000
+profile_end s2-to-fia
+
+# =========================== 第 3 轮 ===========================
+await position FELLOW 0x1684 0x16A4 timeout 60000
+profile_begin s3-to-avaro
+click 330 130
+await script SETTOOLLIST timeout 60000
+await script FELLOW timeout 60000
+await position FELLOW 0x1570 0x15A8 timeout 60000
+profile_end s3-to-avaro
+
+await position FELLOW 0x1684 0x16A4 timeout 60000
+profile_begin s3-to-fia
+click 400 130
+await script SETTOOLLIST timeout 60000
+await script FELLOW timeout 60000
+await position FELLOW 0x1570 0x15A8 timeout 60000
+profile_end s3-to-fia
+
+quit
