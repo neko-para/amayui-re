@@ -1,0 +1,31 @@
+{
+  // `scripts/` 层共享的类型检查口径（用户口径：一份配置给**所有 JS** 用）。
+  //   · 门禁：`pnpm typecheck` 的最后一次 tsc（仓根 package.json）。
+  //   · `ui/tsconfig.json` 与 `plugins/examples/tsconfig.json` 都 extends 它，只各自收窄 `include`。
+  //   · `@amayui/lift-plugin` = 宿主 API 的环境声明（`plugins/plugin.d.ts`）；`plugins/lib/*.js`
+  //     用它的 JSDoc 类型（`RunCtx` / `Trigger` / `FiredEvent` / `TimeoutEvent`）过 `checkJs`。
+  //   · 两条更严的 flag（`noUncheckedIndexedAccess` / `exactOptionalPropertyTypes`）**故意只在
+  //     examples**：那是"只看 d.ts 写插件"的 TS 样例档；提到 base 会红 `ui/hud.js`（既有 UI 脚本，
+  //     不在本轮改动面内）。⛔ 不要为了让门禁绿去掉 base 的 `strict` / `checkJs`。
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "checkJs": true,
+    "allowJs": true,
+    "noEmit": true,
+    "strict": true,
+    "types": [],
+    "baseUrl": ".",
+    "paths": {
+      "@amayui/lift-plugin": ["./plugins/plugin.d.ts"]
+    }
+  },
+  "include": [
+    "ui/*.js",
+    "ui/*.d.ts",
+    "plugins/lib/*.js",
+    "plugins/plugin.d.ts"
+  ]
+}

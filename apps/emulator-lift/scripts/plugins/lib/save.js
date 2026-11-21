@@ -68,6 +68,28 @@ import {
     SBUNKI_CONFIRM_READ_SEG_LO,
 } from "./script-positions.js";
 
+/** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
+/** @typedef {import("@amayui/lift-plugin").Trigger} Trigger */
+/** @typedef {import("@amayui/lift-plugin").FiredEvent} FiredEvent */
+/** @typedef {import("@amayui/lift-plugin").TimeoutEvent} TimeoutEvent */
+/** @typedef {FiredEvent | TimeoutEvent} PluginEvent */
+/**
+ * `loadSave` 的选项。`expect` 在**运行期**必填（缺 / 空 / 元素不是非空字符串 ⇒ 构造时 throw），
+ * 这里标 `?` 只是为了让"省略 options / 省略 expect"能通过类型检查后由那段运行期校验响亮拒绝。
+ *
+ * @typedef {object} LoadSaveOptions
+ * @property {string[]} [expect] 载入完成后**可以算落点**的脚本名表（必填，见上）。
+ * @property {number} [timeoutMs] 每道门的超时；缺省 30000 ms。
+ * @property {(ctx: RunCtx) => Trigger | Trigger[] | null} [onLoaded] 到终态之后要做的事。
+ */
+/**
+ * 一条链：形状 = `PluginModule` 的 `start` / `onTrigger`（与 `./chains.js` 的 `Chain` 同形）。
+ *
+ * @typedef {object} Chain
+ * @property {(ctx: RunCtx) => Trigger | Trigger[] | null} start
+ * @property {(ctx: RunCtx, ev: PluginEvent) => Trigger | Trigger[] | null} onTrigger
+ */
+
 // ★ 脚本身份 = **marker 读数**（`PluginReadings::sample` ⇒ `MarkerSampler::resolveName`），实际是
 //   文件名 `TITLE.BIN` / `SAVE.BIN` / …（实测：`--plugin` 探针在 headless boot 读到
 //   `SYSTEM4.BIN` / `LOADCONFIG.BIN` / `TITLE.BIN`）。C1 的 `afterScript` / `afterPosition` 是
@@ -102,6 +124,7 @@ const CONFIRM2_X = 690;
 const CONFIRM2_Y = 323;
 
 // 行 y 的**实测表**（⛔ 不用 91 + 59.5*n 之类的公式猜；0–6 与 7 都有读数）。
+/** @type {Readonly<Record<number, number | undefined>>} */
 const ROW_Y = { 0: 91, 1: 150, 2: 209, 3: 269, 4: 328, 5: 388, 6: 447, 7: 507 };
 
 const DEFAULT_GATE_TIMEOUT_MS = 30000;
@@ -114,20 +137,13 @@ const LOAD_EXPECT_PREFIX = "load:expect:";
  * 构造一条 `loadSave(slot, options)` 的 callback 链（纯函数：只读 slot / options，不读 ctx）。
  *
  * @param {number} slot 存档槽 0–7（实测行表）。
- * @param {{
- *   expect: string[],
- *   timeoutMs?: number,
- *   onLoaded?: (ctx: object) => object|object[]|null,
- * }} options
+ * @param {LoadSaveOptions | null} [options]
  *   · `expect`（**必填**）：载入完成后**可以算落点**的脚本名表（照宿主读数拼写、带 `.BIN`）——
  *     ADV = `SC*`/`SG*`/`SP*`、战斗 = `BTL.BIN`、地图 = `FIELD.BIN` …；由**调用方按预期给**。
  *   · `timeoutMs`：每道门的超时；缺省 30000 ms。
  *   · `onLoaded`：载入**到终态**之后要做的事（终态先 `ctx.log` 再回调）；它的返回值就是本次
  *     `onTrigger` 的返回值。⚠ 抛错**不**在这里捕获 —— 交给宿主按既有规则记 fail。
- * @returns {{
- *   start(ctx): object,
- *   onTrigger(ctx, ev): object|object[]|null,
- * }}
+ * @returns {Chain}
  */
 export function loadSave(slot, options = {}) {
     const rowY = ROW_Y[slot];
@@ -161,6 +177,7 @@ export function loadSave(slot, options = {}) {
     // 终态 = 调用方给的**期望落点表**（⛔ 本文件不内置场景清单）。
     // ★ 具名门：一个 armed 集合内 name 唯一；每个回调返回**完整的新集合**（⛔ 不是增量）。
     //   第二道确认之后也用它（那里同样只认调用方的 `expect`；点 690,323 那一步在 onTrigger 里）。
+    /** @type {(ctx: RunCtx) => Trigger[]} */
     const expectTerminals = (ctx) =>
         expect.map((script) =>
             ctx.trigger.afterScript(script, {
@@ -170,6 +187,7 @@ export function loadSave(slot, options = {}) {
         );
 
     // 点完 640,323 之后的终态集合：`expect` 里任一脚本 **或** 第二道确认（同一张对话框的回环）。
+    /** @type {(ctx: RunCtx) => Trigger[]} */
     const terminal = (ctx) => {
         const gates = expectTerminals(ctx);
         gates.push(
@@ -182,8 +200,10 @@ export function loadSave(slot, options = {}) {
     };
 
     // 第二道确认之后的终态：只剩 `expect` 里的脚本。
+    /** @type {(ctx: RunCtx) => Trigger[]} */
     const terminalAfterConfirm = (ctx) => expectTerminals(ctx);
 
+    /** @type {(ctx: RunCtx, script: string) => Trigger | Trigger[] | null} */
     const reached = (ctx, script) => {
         ctx.log("info", `load-save: reached ${script} (slot ${slot})`);
         // ★ 终态**先 log 再回调**：`onLoaded` 的返回值 = 本次 onTrigger 的返回值。
@@ -262,6 +282,10 @@ export function loadSave(slot, options = {}) {
 //   （`plugin/load-save-e2e` 就是这么用的），所以形状 = `boot:` 前缀归 boot、其余归 load。
 //   ⚠ 这与库接口不同：`loadSave(...)` 单独用时**调用方**保证已在 TITLE（文件头）。
 // ---------------------------------------------------------------------------
+/**
+ * @param {Readonly<Record<string, string | null | undefined>>} params
+ * @returns {number}
+ */
 function slotFromParams(params) {
     return Number(params["slot"]);
 }
@@ -269,6 +293,10 @@ function slotFromParams(params) {
 const DEFAULT_EXPECT = ["FIELD.BIN", "SC0000.BIN"];
 
 // null = 参数没给（由调用方决定用默认值 + 打一行说明）；数组 = 参数给了（可能为空 ⇒ 让 loadSave 响亮 throw）。
+/**
+ * @param {Readonly<Record<string, string | null | undefined>>} params
+ * @returns {string[] | null}
+ */
 function expectFromParams(params) {
     const raw = params["expect"];
     if (raw === undefined || raw === null || String(raw).trim() === "") return null;
@@ -282,6 +310,10 @@ function expectFromParams(params) {
     return out;
 }
 
+/**
+ * @param {Readonly<Record<string, string | null | undefined>>} params
+ * @returns {LoadSaveOptions}
+ */
 function loadOptionsFromParams(params) {
     const expect = expectFromParams(params);
     return { expect: expect === null ? DEFAULT_EXPECT : expect };
@@ -292,10 +324,17 @@ function loadOptionsFromParams(params) {
 //   在 `plugin/load-save-e2e` 上**同样**会撞 `onTrigger: callback budget exceeded: load:confirm2`
 //   （2 ms 那条线；跟踪单 `REQ-01M7VVDV69MJXRHNDGR50H7VHC`，⛔ 不靠放宽预算 / 删日志来"修"）。
 //   缓存的收益只是参考入口每拍少造 3 个对象。
+/** @type {string | null} */
 let entryKey = null;
+/** @type {Chain | null} */
 let entryChain = null;
 
-/** `boot:` 前缀归启动链（含它的 timeout），其余归载入链 —— 两段名字不相交（`./chains.js` 头）。 */
+/**
+ * `boot:` 前缀归启动链（含它的 timeout），其余归载入链 —— 两段名字不相交（`./chains.js` 头）。
+ *
+ * @param {Readonly<Record<string, string | null | undefined>>} params
+ * @returns {Chain}
+ */
 function chainForParams(params) {
     const key = `${String(params["slot"])}|${String(params["expect"])}`;
     if (entryChain !== null && entryKey === key) return entryChain;
@@ -306,6 +345,7 @@ function chainForParams(params) {
     return entryChain;
 }
 
+/** @type {Chain} */
 const plugin = {
     start(ctx) {
         if (expectFromParams(ctx.params) === null) {

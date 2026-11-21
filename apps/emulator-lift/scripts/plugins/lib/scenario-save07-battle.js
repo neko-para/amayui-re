@@ -42,6 +42,19 @@ import {
     SELACT_MAIN_LOOP_LO,
 } from "./script-positions.js";
 
+/** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
+/** @typedef {import("@amayui/lift-plugin").Trigger} Trigger */
+/** @typedef {import("@amayui/lift-plugin").FiredEvent} FiredEvent */
+/** @typedef {import("@amayui/lift-plugin").TimeoutEvent} TimeoutEvent */
+/** @typedef {FiredEvent | TimeoutEvent} PluginEvent */
+/**
+ * 场景这一段链：形状 = `PluginModule` 的 `start` / `onTrigger`（与 `./chains.js` 的 `Chain` 同形）。
+ *
+ * @typedef {object} Chain
+ * @property {(ctx: RunCtx) => Trigger | Trigger[] | null} start
+ * @property {(ctx: RunCtx, ev: PluginEvent) => Trigger | Trigger[] | null} onTrigger
+ */
+
 // ★ marker 身份 = **文件名**（含 `.BIN`；C1 的门是精确 `==`，⛔ 不剥后缀）。
 const SCRIPT_FIELD = "FIELD.BIN";
 const SCRIPT_SELACT = "SELACT.BIN";
@@ -58,6 +71,7 @@ const FIELD_TIMEOUT_MS = 300000;
 const SELACT_TIMEOUT_MS = 180000;
 const BTL_TIMEOUT_MS = 180000;
 
+/** @type {Chain} */
 const scenario = {
     // 载入链到终态 ⇒ 本函数被调起（`onLoaded`）；返回的 trigger 就是新的 armed 集合。
     start(ctx) {

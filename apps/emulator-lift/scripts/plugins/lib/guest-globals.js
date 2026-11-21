@@ -14,6 +14,9 @@
 // 怎么查（控制层，同一条读法）：
 //   `node tools/emu-ctl.mjs global-get --kind int --index 0xb1b6 --json`
 
+/** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
+/** @typedef {import("@amayui/lift-plugin").Receipt} Receipt */
+
 /**
  * 「战斗中的帮助界面」那一位（int global）。
  * 旁证两处：`docs/03-emulator/plugin-runtime.md` §C1（`global.get(0xb1b6)` → `set(0xb1b6, v|0x10)`）、
@@ -25,6 +28,10 @@ export const BATTLE_HELP_GLOBAL_ID = 0xb1b6;
 export const BATTLE_HELP_HIDE_BIT = 0x10;
 
 /** 十进制 → `0x…`（日志用；只在本文件里用，⛔ 不是位置常量）。 */
+/**
+ * @param {number} value
+ * @returns {string}
+ */
 function hex(value) {
     return "0x" + (value >>> 0).toString(16);
 }
@@ -35,12 +42,13 @@ function hex(value) {
  * ★ 调用时机由调用方决定：**载入完成之后、在 FIELD 上做**（载入会还原脚本 / global 状态，
  *   在 TITLE 上置位会被随后的载入覆盖）。
  *
- * @param {object} ctx RunCtx（需要 `ctx.read.global.get` / `ctx.edit.global.set` / `ctx.log`）。
+ * @param {RunCtx} ctx RunCtx（需要 `ctx.read.global.get` / `ctx.edit.global.set` / `ctx.log`）。
  * @returns {boolean} 写成功（`applied !== false`）⇒ true；否则 warn 后 false。
  */
 export function hideBattleHelp(ctx) {
     const before = ctx.read.global.get("int", BATTLE_HELP_GLOBAL_ID);
     const after = (before | BATTLE_HELP_HIDE_BIT) >>> 0;
+    /** @type {Receipt | null | undefined} */
     const receipt = ctx.edit.global.set("int", BATTLE_HELP_GLOBAL_ID, after);
     const applied = receipt !== null && typeof receipt === "object" ? receipt.applied !== false : false;
     if (!applied) {

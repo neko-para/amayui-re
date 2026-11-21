@@ -56,6 +56,45 @@
 //
 // ★ 失败面**全部响亮**（⛔ 不静默）：未知 kind / 回执 `accepted !== true` / 触发了不是当前步骤的
 //   trigger / 门超时 ⇒ `ctx.fail` 或 `ctx.finish(5)` 并点名 `recipe:<下标>` + 行号。
+
+/** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
+/** @typedef {import("@amayui/lift-plugin").Trigger} Trigger */
+/** @typedef {import("@amayui/lift-plugin").TriggerOptions} TriggerOptions */
+/** @typedef {import("@amayui/lift-plugin").InputReceipt} InputReceipt */
+/** @typedef {import("@amayui/lift-plugin").MouseButton} MouseButton */
+/**
+ * 本文件看到的 `onTrigger` 事件（宿主只会交 `trigger` / `timeout` 两种；`name` 在两种上都必填，
+ * 这里按 `?` 标，是因为本文件的失败面**防御性地**保留了一条 `name` 缺失时的 `recipe:?` 分支）。
+ *
+ * @typedef {import("@amayui/lift-plugin").TriggerEventBase
+ *   & { readonly kind: "trigger" | "timeout", readonly name?: string }} RecipeEvent
+ */
+/**
+ * 本文件产出的链：形状同 `PluginModule` 的 `start` / `onTrigger`（事件按上面的 `RecipeEvent`）。
+ *
+ * @typedef {object} RecipeChain
+ * @property {(ctx: RunCtx) => Trigger | Trigger[] | null} start
+ * @property {(ctx: RunCtx, ev: RecipeEvent) => Trigger | Trigger[] | null} onTrigger
+ */
+/**
+ * `stepsJson()` 的一步：形状 = `src/runtime/recipe_json.cpp` 的 `stepJson`
+ * （13 个键**总是全在**；`id` / `script` / `label` 是字符串，其余是数字，`button` 是词表）。
+ *
+ * @typedef {object} RecipeStep
+ * @property {string} id
+ * @property {string} kind
+ * @property {number} line
+ * @property {string} script
+ * @property {number} posFrom
+ * @property {number} posTo
+ * @property {number} waitMs
+ * @property {number} x
+ * @property {number} y
+ * @property {MouseButton} button
+ * @property {string} label
+ * @property {number} timeoutMs
+ */
+
 const KIND_AWAIT_SCRIPT = "await script";
 const KIND_AWAIT_POSITION = "await position";
 const KIND_WAIT = "wait";
@@ -70,6 +109,10 @@ const KIND_QUIT = "quit";
 // 旧执行器的"没走完"退出码（`recipe.h` 的 `kRecipeIncompleteExitCode`；⛔ 不在这里另定一个数）。
 const INCOMPLETE_EXIT_CODE = 5;
 
+/**
+ * @param {number} v
+ * @returns {string}
+ */
 function hex8(v) {
     let text = (v >>> 0).toString(16).toUpperCase();
     while (text.length < 8) text = "0" + text;
@@ -77,6 +120,10 @@ function hex8(v) {
 }
 
 // 人可读的一步（失败 / 超时原因里点名它；⛔ 不参与判定）。
+/**
+ * @param {RecipeStep} step
+ * @returns {string}
+ */
 function stepTextOf(step) {
     const line = "（行 " + step.line + "）";
     if (step.kind === KIND_AWAIT_SCRIPT) return "await script " + step.script + line;
@@ -94,21 +141,38 @@ function stepTextOf(step) {
     return "?" + line;
 }
 
+/**
+ * @param {string} kind
+ * @returns {boolean}
+ */
 function isGateKind(kind) {
     return kind === KIND_AWAIT_SCRIPT || kind === KIND_AWAIT_POSITION;
 }
 
+/**
+ * @param {string} kind
+ * @returns {boolean}
+ */
 function isWriteKind(kind) {
     return kind === KIND_CLICK || kind === KIND_MOUSE_MOVE || kind === KIND_MOUSE_DOWN || kind === KIND_MOUSE_UP;
 }
 
 // 行尾 `timeout <ms>`：0 = 这一行没写 ⇒ **不设**超时（⛔ 不下发 `timeoutMs: 0`：0 在宿主里也是
 // "不设"，但显式省略能让"没写"与"写了 0"在读数上分得开——配方解析期本来就不收 0）。
+/**
+ * @param {TriggerOptions} options
+ * @param {number | null | undefined} timeout_ms
+ * @returns {TriggerOptions}
+ */
 function withTimeout(options, timeout_ms) {
     if (timeout_ms !== undefined && timeout_ms !== null && timeout_ms > 0) options.timeoutMs = timeout_ms;
     return options;
 }
 
+/**
+ * @param {string | undefined} name
+ * @returns {number}
+ */
 function parseStepIndex(name) {
     if (typeof name !== "string" || name.indexOf("recipe:") !== 0) return -1;
     const rest = name.substring("recipe:".length);
@@ -120,8 +184,8 @@ function parseStepIndex(name) {
 /**
  * 把一份 `Step[]` 翻成 `PluginModule` 形状的 callback 链。
  *
- * @param {{origin?: string, steps: object[]}|object[]} plan `stepsJson()` 的结果（或裸的 steps 数组）。
- * @returns {{ start(ctx): object, onTrigger(ctx, ev): object }} 宿主只读 `start` / `onTrigger`。
+ * @param {{origin?: string, steps: RecipeStep[]} | RecipeStep[]} plan `stepsJson()` 的结果（或裸的 steps 数组）。
+ * @returns {RecipeChain} 宿主只读 `start` / `onTrigger`。
  */
 export function runRecipe(plan) {
     if (plan === null || plan === undefined) {
@@ -143,6 +207,11 @@ export function runRecipe(plan) {
     }
 
     // 一步的**翻译**（只对会"等"的指令：门 / wait）。
+    /**
+     * @param {RunCtx} ctx
+     * @param {number} index
+     * @returns {Trigger}
+     */
     function armStep(ctx, index) {
         const step = steps[index];
         const name = "recipe:" + index;
@@ -162,8 +231,15 @@ export function runRecipe(plan) {
     }
 
     // 一条写指令 → `ctx.input.*`。返回 false = 已 `ctx.fail`（调用方立刻停链）。
+    /**
+     * @param {RunCtx} ctx
+     * @param {RecipeStep} step
+     * @param {number} index
+     * @returns {boolean}
+     */
     function submitWrite(ctx, step, index) {
         const name = "recipe:" + index;
+        /** @type {InputReceipt | null} */
         let receipt = null;
         if (step.kind === KIND_CLICK) {
             receipt = ctx.input.click(step.x, step.y, step.button);
@@ -188,6 +264,10 @@ export function runRecipe(plan) {
     }
 
     // 从 `cursor` 起消费指令：非阻塞的一路走到底，遇到门 / wait 就 arm 并返回。
+    /**
+     * @param {RunCtx} ctx
+     * @returns {Trigger | Trigger[]}
+     */
     function advance(ctx) {
         for (;;) {
             if (cursor >= steps.length) {

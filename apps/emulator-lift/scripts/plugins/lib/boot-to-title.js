@@ -22,6 +22,19 @@
 
 import { TITLE_INPUT_CALLBACK_HI, TITLE_INPUT_CALLBACK_LO } from "./script-positions.js";
 
+/** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
+/** @typedef {import("@amayui/lift-plugin").Trigger} Trigger */
+/** @typedef {import("@amayui/lift-plugin").FiredEvent} FiredEvent */
+/** @typedef {import("@amayui/lift-plugin").TimeoutEvent} TimeoutEvent */
+/** @typedef {FiredEvent | TimeoutEvent} PluginEvent */
+/**
+ * 一条链：形状 = `PluginModule` 的 `start` / `onTrigger` 两个字段（与 `./chains.js` 的 `Chain` 同形）。
+ *
+ * @typedef {object} Chain
+ * @property {(ctx: RunCtx) => Trigger | Trigger[] | null} start
+ * @property {(ctx: RunCtx, ev: PluginEvent) => Trigger | Trigger[] | null} onTrigger
+ */
+
 // ★ 宿主 marker 的**精确拼写**（C1 的 `afterPosition` 是精确 `==`，⛔ 不剥 `.BIN`、不忽略大小写）。
 const SCRIPT_TITLE = "TITLE.BIN";
 
@@ -35,12 +48,12 @@ export const BOOT_TITLE_NAME = "boot:title";
  * 造一条"启动到 TITLE"的链。
  *
  * @param {{
- *   onDone?: (ctx: object) => object|object[]|null,
+ *   onDone?: (ctx: RunCtx) => Trigger | Trigger[] | null,
  *   timeoutMs?: number,
- * }} [options]
+ * } | null} [options]
  *   · `onDone`：门命中后要做的事（本案 = 拉起载入链的 `start`）；缺省 ⇒ `[]`（本链自己就是全部）。
  *   · `timeoutMs`：TITLE 门的超时；缺省 30000 ms。
- * @returns {{ start(ctx): object, onTrigger(ctx, ev): object|object[]|null }}
+ * @returns {Chain}
  */
 export function bootToTitle(options = {}) {
     const onDone = options !== null ? options.onDone : undefined;

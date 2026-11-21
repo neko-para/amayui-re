@@ -20,13 +20,26 @@
 //                        loadSave(7, { expect: ["FIELD.BIN"], onLoaded: (ctx) => scenario.start(ctx) }),
 //                        scenario);
 
+/** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
+/** @typedef {import("@amayui/lift-plugin").Trigger} Trigger */
+/** @typedef {import("@amayui/lift-plugin").FiredEvent} FiredEvent */
+/** @typedef {import("@amayui/lift-plugin").TimeoutEvent} TimeoutEvent */
+/** @typedef {FiredEvent | TimeoutEvent} PluginEvent */
+/**
+ * 一条链：形状 = `PluginModule` 的 `start` / `onTrigger` 两个字段。
+ *
+ * @typedef {object} Chain
+ * @property {(ctx: RunCtx) => Trigger | Trigger[] | null} start
+ * @property {(ctx: RunCtx, ev: PluginEvent) => Trigger | Trigger[] | null} onTrigger
+ */
+
 /**
  * 把两条 chain 按事件归属拼成一个插件对象。
  *
- * @param {(ev: object) => boolean} isFirst 这个事件属于 `first`（true）还是 `then`（false）；纯函数。
- * @param {{ start(ctx): object|object[]|null, onTrigger(ctx, ev): object|object[]|null }} first
- * @param {{ start(ctx): object|object[]|null, onTrigger(ctx, ev): object|object[]|null }} then
- * @returns {{ start(ctx): object|object[]|null, onTrigger(ctx, ev): object|object[]|null }}
+ * @param {(ev: PluginEvent) => boolean} isFirst 这个事件属于 `first`（true）还是 `then`（false）；纯函数。
+ * @param {Chain} first
+ * @param {Chain} then
+ * @returns {Chain}
  */
 export function route(isFirst, first, then) {
     if (typeof isFirst !== "function") {
