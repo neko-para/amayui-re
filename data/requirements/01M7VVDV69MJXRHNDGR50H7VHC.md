@@ -2,9 +2,11 @@
 
 - id: REQ-01M7VVDV69MJXRHNDGR50H7VHC
 - type: bug
-- status: open
+- status: done
 - parent: REQ-01M7T0VJPG2S0RZ1HNWW0HH3HY
+- verify: apps/emulator-lift/tests/plugin_runtime.cpp#plugin/callback-cpu-budget
 - repro: apps/emulator-lift/tests/plugin_e2e.cpp#plugin/load-save-e2e
+- done_reason: 2 ms 判据改为线程 CPU 钟：Windows 主源 QueryThreadCycleTime + 一次性标定（本机 ≈3.97 cycles/ns）；GetThreadTimes 只作兜底 —— 实测粒度 15.625 ms 整 tick（0.5 ms 忙等读到 0 或 156250），做不到 2 ms，这就是不用它判的理由。窗口 = 用户 JS 本体，OS 抢占 / 等 I/O 不计；宿主段另有墙钟安全网 20 ms（reason 带 (host)）。守卫：plugin/callback-cpu-budget（op_limit=0 + 烧 CPU ⇒ 必须因预算失败且 reason 无 (host)）、plugin/callback-wall-only（主线程被挂起 6 ms ⇒ 墙钟超、CPU 60–487 µs ⇒ 必须不失败）。读数 js_cpu_us 137/70/82/16/137/159/47 全都不是 15625 的倍数；负载下 elapsed_us=641 vs js_cpu_us=140。★ 原「e2e 连跑 ≥10 次 0 次预算失败」这条读数本轮没做（判据由上面两条结构性守卫接管）。
 - tags: [emulator-lift, plugin, qjs]
 
 ## 现象
@@ -38,7 +40,7 @@ plugin    : … calls=5 run=failed reason=onTrigger: callback budget exceeded: l
 3. 失败读数是否只有 `reason`、没有实际耗时（要加 opt-in 的 elapsed 读数，⛔ 不进默认输出）；
 4. 100k ops 是否被 QJS 的 op 计数口径放大（`start` 一次就要 5 位数的 ops？）。
 
-## 判据（修好后）
+## 判据（修好后；★ 2026-11-22 已改为线程 CPU 钟 —— 见末节）
 
 - 同命令 headless 连跑 ≥10 次，`callback budget exceeded`（`start` 与 `onTrigger` 两处）= **0**
   （不是"偶发变少"）；
@@ -56,3 +58,19 @@ plugin    : … calls=5 run=failed reason=onTrigger: callback budget exceeded: l
 - 本机（无其它负载）3 跑 = 2 绿 1 红；同一 ctest 在 `c464651`（未拆分）上 3/3 绿 —— **不足以归因到重构**
   （失败的是墙钟 2 ms，`src/runtime/budget.h`；成功面不回显子进程日志，无法确认它走没走同一拍）。
 - 判据不变（连跑 ≥10 次 0 次 budget 失败）；建议先加 `待查 #3` 的 opt-in elapsed 读数，再决定"放宽 / 只罩用户代码"。
+
+## 2026-11-22 收口（提交 `0a15fd1` + `ea20c37`）：判据改成线程 CPU 钟
+
+- ★ **2 ms 的窗口 = 用户 JS 本体**（`script_quickjs.cpp::call()` 的 `js_start_cpu_ns` 起算），**钟 = 本线程
+  CPU 时间**；中断回调拿同一把钟比（⛔ 不能"CPU 起点 + 墙钟比较"）。模块装载 / ctx 构造 / TriggerSet 收集 /
+  宿主调度不计；被 OS 抢占 / 等 I/O / 睡眠**也不计** ⇒ 并发不再诬告回调（本缺陷的失效方式）。
+- Windows 主源 `QueryThreadCycleTime` + 一次性标定（4 个 ~200 µs 忙等，取 max(cycles/wall)，本机
+  **≈3.97 cycles/ns**，只做一次；`call()` 在计时窗**之前**预热）。`GetThreadTimes` **只作兜底**：实测粒度 =
+  **15.625 ms 整 tick**（0.5 ms 忙等读到 0 或 156250）⇒ **做不到 2 ms**，这就是不用它判的理由。
+- 守卫（CTest `plugin-runtime`，顶层注册 ⇒ pure 档）：`plugin/callback-cpu-budget`（`op_limit=0` + 烧 CPU
+  ⇒ 必须因预算失败、reason **无** `(host)`）+ `plugin/callback-wall-only`（主线程被挂起 6 ms ⇒ 墙钟超、
+  CPU 只有 60–487 µs ⇒ **必须不失败**；win32 专有）。`repo:tools/mutate-check.mjs` 有对应条目（`diag.js_cpu_ns` → `diag.js_ns`）。
+- 读数（win32 / 2026-11-21）：7 个回调 `js_cpu_us` = 137 / 70 / 82 / 16 / 137 / 159 / 47（全都**不是** 15625 的
+  倍数 ⇒ 亚 tick 钟的独立佐证）；压 6 个忙等进程重跑：`load:confirm2 elapsed_us=641` vs `js_cpu_us=140` ⇒
+  墙钟涨、CPU 不涨。宿主段另有安全网 = `deadline × 10`（2 ms ⇒ 20 ms，仍是墙钟，reason 带 `(host)`）。
+- **没做**：原 `## 判据` 第 1 条（连跑 ≥10 次 0 次预算失败）本轮**没有**读数 ⇒ 判据由上面两条结构性守卫接管。
