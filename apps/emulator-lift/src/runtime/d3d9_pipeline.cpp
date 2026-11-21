@@ -6136,6 +6136,89 @@ bool writeRenderState(X86& cpu, std::uint32_t dev_state, std::uint32_t state, st
     return true;
 }
 
+// 设备采样器状态 → 一份快照（8 项；`stage` 上界 = `kMaxSamplers`）。
+// ★ 读入口只读 guest（`pipelineOf` + `samplerOf`），不碰 SDL、不写任何状态。
+bool readSamplerState(X86& cpu, std::uint32_t dev_state, std::uint32_t stage,
+                      SamplerStateSnapshot* out, std::string* why) {
+    if (out == nullptr) {
+        if (why) *why = "readSamplerState: out 为空";
+        return false;
+    }
+    std::uint32_t pe = 0;
+    if (!pipelineOf(cpu, dev_state, &pe, why)) return false;
+    if (stage >= kMaxSamplers) {
+        if (why) {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf), "readSamplerState: Stage=%u 越界（上限 %u）", stage, kMaxSamplers);
+            *why = buf;
+        }
+        return false;
+    }
+    out->address_u = samplerOf(cpu, pe, stage, kSampAddressU);
+    out->address_v = samplerOf(cpu, pe, stage, kSampAddressV);
+    out->mag_filter = samplerOf(cpu, pe, stage, kSampMagFilter);
+    out->min_filter = samplerOf(cpu, pe, stage, kSampMinFilter);
+    out->mip_filter = samplerOf(cpu, pe, stage, kSampMipFilter);
+    out->max_mip_level = samplerOf(cpu, pe, stage, kSampMaxMipLevel);
+    out->mip_lod_bias = samplerOf(cpu, pe, stage, kSampMipLodBias);
+    out->max_anisotropy = samplerOf(cpu, pe, stage, kSampMaxAnisotropy);
+    return true;
+}
+
+// 设备采样器状态 → 写回（D3DX 自己的 Begin/End 用；见头文件的同名段）。
+// ★ 与 `setSamplerState` 同一条理由：**不做** guest 写的值校验 / unsupported 记账 ——
+//   D3DX 的内部写不该冒充 guest 写。但类型上界仍要判（`kPlSamplers + type*4` 会写穿状态块）。
+bool writeSamplerState(X86& cpu, std::uint32_t dev_state, std::uint32_t stage, std::uint32_t type,
+                       std::uint32_t value, std::string* why) {
+    std::uint32_t pe = 0;
+    if (!pipelineOf(cpu, dev_state, &pe, why)) return false;
+    if (stage >= kMaxSamplers || type == 0u || type > 13u) {
+        if (why) {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf),
+                          "writeSamplerState: Stage=%u / Type=%u 非法（Stage 上限 %u，Type 1..13）⇒ ⛔ 不写",
+                          stage, type, kMaxSamplers);
+            *why = buf;
+        }
+        return false;
+    }
+    plSet(cpu, pe, kPlSamplers + (stage * 16u + type) * 4u, value);
+    return true;
+}
+
+// 采样器状态 → `GpuSampler`：**复用** fixed-function 的同一份映射（`gpuAddressFor` / `gpuFilterFor`）
+// 与同一条 mip 判据（`MIPFILTER=NONE` ⇔ 只采 level 0）。⛔ 不在这里另写一张常量表 ——
+// 两条路（pipeline / D3DXSprite）对"D3D9 的值 → GpuSampler"只有这一处结论。
+bool gpuSamplerFor(const SamplerStateSnapshot& ss, GpuSampler* out, std::string* why) {
+    if (out == nullptr) {
+        if (why) *why = "gpuSamplerFor: out 为空";
+        return false;
+    }
+    GpuSampler s;
+    if (!gpuAddressFor(ss.address_u, &s.address_u) || !gpuAddressFor(ss.address_v, &s.address_v)) {
+        if (why) {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf), "GPU 不支持该采样器寻址模式（U=%u V=%u）", ss.address_u,
+                          ss.address_v);
+            *why = buf;
+        }
+        return false;
+    }
+    if (!gpuFilterFor(ss.mag_filter, &s.mag_filter) || !gpuFilterFor(ss.min_filter, &s.min_filter)) {
+        if (why) {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf), "GPU 不支持该采样过滤（MAG=%u MIN=%u）", ss.mag_filter,
+                          ss.min_filter);
+            *why = buf;
+        }
+        return false;
+    }
+    // `MIPFILTER=NONE`（`D3DTEXF_NONE` = "disables mipmapping"）⇔ 只采 level 0（`max_lod` 收紧）。
+    s.mipmap = ss.mip_filter != kTexfNone;
+    *out = s;
+    return true;
+}
+
 bool gpuBlendStateFor(std::uint32_t src_color, std::uint32_t dst_color, std::uint32_t color_op,
                       bool separate_alpha, std::uint32_t src_alpha, std::uint32_t dst_alpha,
                       std::uint32_t alpha_op, bool blend_enabled, GpuRasterState* out, std::string* why) {

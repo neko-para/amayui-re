@@ -51,6 +51,12 @@ SurfaceFormat formatWhite() {
 }
 
 // 状态块布局（**我们自己的**；⛔ 不是 Win32 结构体）
+//
+// ★ `Begin` 写的 stage 采样器（MSDN `ID3DXSprite::Begin` 的 Sampler States 表）：
+//   MSDN 那张表**只有 stage 0 的行**（D3DXSprite 只把纹理绑在 stage 0）⇒ `kSpTexStages = 1`；
+//   常量留着是为了让"保存块 / 循环"的尺寸只有一处来源（⛔ 不要在别处再写 8 项 / 32 B）。
+constexpr std::uint32_t kSpTexStages = 1u;
+constexpr std::uint32_t kSpSamplerStageBytes = 32u;  // 每 stage 8 项 × 4 B
 enum SpriteOff : std::uint32_t {
     kSpMagic = 0,         // 'SPR1'
     kSpDevice = 4,        // 建它时的 IDirect3DDevice9 对象 EA（⛔ 不 AddRef，见 createSpriteState）
@@ -77,8 +83,58 @@ enum SpriteOff : std::uint32_t {
     kSpSavedAlphaBlendEnable = 128,  // Begin 之前的 D3DRS_ALPHABLENDENABLE（0/1）
     kSpSavedSrcBlend = 132,          // Begin 之前的 D3DRS_SRCBLEND
     kSpSavedDstBlend = 136,          // Begin 之前的 D3DRS_DESTBLEND
-    kSpBytes = 140,
+    // ---- MSDN `ID3DXSprite::Begin` 的 **Sampler States** 表（stage 0）----
+    //      `Begin` 自己写、`End` 恢复（`D3DXSPRITE_DONOTSAVESTATE` 时不保存 / 不恢复）。
+    //      ★ 这组状态落在**设备的采样器表**里（`GetSamplerState` 读得到），本块只是"pre-Begin 的值"；
+    //      ⛔ 不是 sprite 的影子采样状态 —— `Draw` 用的始终是 device 当前 stage 0。
+    kSpSavedSamplerValid = 140,  // 1 = End 要把 kSpSavedSampler 整块写回设备
+    kSpSavedSampler = 144,       // kSpTexStages × kSpSamplerStageBytes（每 stage 8 项 × 4 B）
+    kSpBytes = kSpSavedSampler + kSpTexStages * kSpSamplerStageBytes,
 };
+
+// =====================================================================================
+// `Begin` 写的 stage 采样器（MSDN `ID3DXSprite::Begin` 的 Sampler States 表）
+//
+// ★ 尺寸常量（`kSpTexStages` / `kSpSamplerStageBytes`）在 `SpriteOff` 之前 —— 状态块要用它们算大小。
+// ★ caps ⇒ MSDN 的分支：本线声明的 `TextureFilterCaps` 是 0x03030303（`d3d9.cpp` 的 GetDeviceCaps）
+//   ⇒ 有 MAGFLINEAR / MINFLINEAR / **MIPFLINEAR**，没有 MAGFANISOTROPIC / MINFANISOTROPIC；
+//   `MaxAnisotropy = kCapsMaxAnisotropyClaim = 1` ⇒ 按 MSDN：
+//     MAG/MIN = ANISOTROPIC（不支持）⇒ **LINEAR**；MIPFILTER = LINEAR（支持）⇒ **LINEAR**；
+//     MAXANISOTROPY = `MaxAnisotropy` = 1。
+//   ★ 下面的 `static_assert` 钉住"本线没有各向异性"这个前提：caps 若哪天真的支持了各向异性，
+//     这里编译期就红，而不是静默继续写 LINEAR（`MaxAnisotropy == 1` 时 ANISOTROPIC 无意义）。
+// =====================================================================================
+// 每个 stage 保存 / 恢复的 8 项在块内的偏移（顺序与 `kSpriteBeginSamplerTypes` **逐项对应**）。
+enum SpriteSamplerSaveOff : std::uint32_t {
+    kSsAddressU = 0,
+    kSsAddressV = 4,
+    kSsMagFilter = 8,
+    kSsMinFilter = 12,
+    kSsMipFilter = 16,
+    kSsMaxMipLevel = 20,
+    kSsMipLodBias = 24,
+    kSsMaxAnisotropy = 28,
+};
+static_assert(d3d9::kCapsMaxAnisotropyClaim == 1u,
+              "MSDN ID3DXSprite::Begin 的 MAG/MIN=ANISOTROPIC 分支以 MaxAnisotropy>1 为前提；"
+              "本线声明 MaxAnisotropy=1 ⇒ 必须走 LINEAR 分支（caps 变了就重新裁这一处）");
+constexpr std::uint32_t kSpriteBeginMagMin = d3d9::kTexfLinear;
+constexpr std::uint32_t kSpriteBeginMip = d3d9::kTexfLinear;
+constexpr std::uint32_t kSpriteBeginMaxAnisotropy = d3d9::kCapsMaxAnisotropyClaim;
+// MSDN 的 8 项（type）与它们要写成的值；顺序 = `SpriteSamplerSaveOff` 的顺序。
+constexpr std::uint32_t kSpriteBeginSamplerTypes[8] = {
+    d3d9::kSampAddressU,     d3d9::kSampAddressV,       d3d9::kSampMagFilter,    d3d9::kSampMinFilter,
+    d3d9::kSampMipFilter,    d3d9::kSampMaxMipLevel,   d3d9::kSampMipLodBias,   d3d9::kSampMaxAnisotropy};
+constexpr std::uint32_t kSpriteBeginSamplerValues[8] = {
+    d3d9::kAddressClamp,     d3d9::kAddressClamp,       kSpriteBeginMagMin,      kSpriteBeginMagMin,
+    kSpriteBeginMip,         0u /* MAXMIPLEVEL */,     0u /* MIPMAPLODBIAS = 0.0f 的位模式 */,
+    kSpriteBeginMaxAnisotropy};
+constexpr std::uint32_t kSpriteSamplerSaveOffsets[8] = {
+    kSsAddressU,  kSsAddressV,  kSsMagFilter, kSsMinFilter,
+    kSsMipFilter, kSsMaxMipLevel, kSsMipLodBias, kSsMaxAnisotropy};
+static_assert(sizeof(kSpriteBeginSamplerTypes) / sizeof(kSpriteBeginSamplerTypes[0]) ==
+                  sizeof(kSpriteSamplerSaveOffsets) / sizeof(kSpriteSamplerSaveOffsets[0]),
+              "采样器 type 表与保存偏移表必须逐项对应");
 constexpr std::uint32_t kSpMagicValue = 0x31525053u;  // 'SPR1'
 
 constexpr std::uint32_t kInitialBatchCapacity = 16u;
@@ -193,6 +249,10 @@ struct State {
     std::uint32_t saved_alpha_blend_enable = 0;
     std::uint32_t saved_src_blend = 0;
     std::uint32_t saved_dst_blend = 0;
+    // 1 = 本批 Begin 接管了stage 采样器（End 要把 `saved_sampler` 整块写回设备）。
+    std::uint32_t saved_sampler_valid = 0;
+    // [stage][8 项]，项序 = `kSpriteSamplerSaveOffsets`。
+    std::uint32_t saved_sampler[kSpTexStages][8] = {};
     float matrix[16] = {0};
 };
 
@@ -233,6 +293,13 @@ bool readState(X86& cpu, std::uint32_t state, State* out, std::string* why) {
     s.saved_alpha_blend_enable = cpu.mem->rd32(state + kSpSavedAlphaBlendEnable);
     s.saved_src_blend = cpu.mem->rd32(state + kSpSavedSrcBlend);
     s.saved_dst_blend = cpu.mem->rd32(state + kSpSavedDstBlend);
+    s.saved_sampler_valid = cpu.mem->rd32(state + kSpSavedSamplerValid);
+    for (std::uint32_t st = 0; st < kSpTexStages; ++st) {
+        for (std::uint32_t i = 0; i < 8u; ++i) {
+            s.saved_sampler[st][i] =
+                cpu.mem->rd32(state + kSpSavedSampler + st * kSpSamplerStageBytes + kSpriteSamplerSaveOffsets[i]);
+        }
+    }
     *out = s;
     return true;
 }
@@ -390,6 +457,112 @@ bool restoreBeginSavedState(X86& cpu, std::uint32_t state, const State& s) {
     return ok;
 }
 
+// ---------------------------------------------------------------------------------------
+// `Begin` 的 stage-0 采样器（MSDN `ID3DXSprite::Begin` 的 Sampler States 表）
+// ---------------------------------------------------------------------------------------
+// ★ MSDN 原文："This method will set the following states on the device." 的 **Sampler States**
+//   表（只有 stage 0 的行）：ADDRESSU / ADDRESSV = CLAMP；MAG / MIN = ANISOTROPIC（caps 不支持则
+//   LINEAR）；MIPFILTER = LINEAR（不支持则 POINT）；MAXMIPLEVEL = 0；MAXANISOTROPY = MaxAnisotropy；
+//   MIPMAPLODBIAS = 0。`End` 恢复 pre-Begin（MSDN `ID3DXSprite::End`："restores the device state to
+//   how it was before ID3DXSprite::Begin was called"），`Flush` 不恢复（"Device states remain as they
+//   were after the last call to Begin"）；`D3DXSPRITE_DONOTSAVESTATE` = "not to be saved or restored"
+//   ⇒ 写仍然发生，但 End 不恢复。
+// ★ 写进**设备的采样器表**（`d3d9::writeSamplerState`），⛔ 不建 sprite 自己的影子采样状态：
+//   `Draw` 用的始终是 device 当前 stage 0（`compositeBatch` 每批读一次），所以这些写必须让
+//   guest 的 `GetSamplerState` 读得到、guest 在 Begin 之后的覆盖也必须被 `Draw` 看到。
+// ★ 失败语义沿用 Begin(ALPHABLEND) 那一段：取不到设备 / 没有流水线状态块 ⇒ **不改 Begin 的返回码**，
+//   只记默认级别可见的告警 + `saved_sampler_valid=0`（End 一项都不恢复，⛔ 不假装接管了）。
+bool applyBeginSamplerState(X86& cpu, const State& s, bool save_before_end) {
+    d3d9::DeviceInfo dev;
+    std::string why_dev;
+    if (!d3d9::deviceInfo(cpu, s.device, &dev, &why_dev)) {
+        spriteWarn("Begin", "采样器：取不到设备状态（%s）⇒ ⛔ 不写 D3DX 文档状态", why_dev.c_str());
+        return false;
+    }
+    if (dev.pipeline == 0) {
+        spriteWarn("Begin", "采样器：设备没有流水线状态块（'DL01'）⇒ ⛔ 不写 D3DX 文档状态");
+        return false;
+    }
+    // ① 先读出 pre-Begin 的整块（只有 save 时才落盘）。
+    d3d9::SamplerStateSnapshot before[kSpTexStages];
+    bool before_ok = true;
+    for (std::uint32_t st = 0; st < kSpTexStages; ++st) {
+        std::string read_why;
+        if (!d3d9::readSamplerState(cpu, dev.state, st, &before[st], &read_why)) {
+            spriteWarn("Begin", "采样器：读不到 stage %u 的原值（%s）⇒ ⛔ End 不恢复这一块", st,
+                       read_why.c_str());
+            before_ok = false;
+        }
+    }
+    // ② 保存（除非 DONOTSAVESTATE）。★ 读失败不落盘：写一个猜的值回去比"不恢复"更糟。
+    if (save_before_end && before_ok) {
+        for (std::uint32_t st = 0; st < kSpTexStages; ++st) {
+            const std::uint32_t vals[8] = {before[st].address_u,
+                                           before[st].address_v,
+                                           before[st].mag_filter,
+                                           before[st].min_filter,
+                                           before[st].mip_filter,
+                                           before[st].max_mip_level,
+                                           before[st].mip_lod_bias,
+                                           before[st].max_anisotropy};
+            for (std::uint32_t i = 0; i < 8u; ++i) {
+                cpu.mem->wr32(s.state + kSpSavedSampler + st * kSpSamplerStageBytes +
+                                  kSpriteSamplerSaveOffsets[i],
+                              vals[i]);
+            }
+        }
+    }
+    cpu.mem->wr32(s.state + kSpSavedSamplerValid, (save_before_end && before_ok) ? 1u : 0u);
+    // ③ 写 MSDN 的文档值（caps 分支已在文件头的常量段钉死，见 `kSpriteBeginSamplerValues`）。
+    bool ok = true;
+    for (std::uint32_t st = 0; st < kSpTexStages; ++st) {
+        for (std::uint32_t i = 0; i < 8u; ++i) {
+            std::string write_why;
+            if (!d3d9::writeSamplerState(cpu, dev.state, st, kSpriteBeginSamplerTypes[i],
+                                         kSpriteBeginSamplerValues[i], &write_why)) {
+                spriteWarn("Begin", "采样器：写 stage %u type %u 失败（%s）", st,
+                           kSpriteBeginSamplerTypes[i], write_why.c_str());
+                ok = false;
+            }
+        }
+    }
+    if (ok) {
+        spriteLog("Begin",
+                  "stage 0 采样器按 D3DX 文档写：ADDRESSU/V=CLAMP · MAG/MIN=%u · MIP=%u · MAXMIPLEVEL=0 ·"
+                  " LODBIAS=0 · MAXANISO=%u（End 恢复=%d；Draw 读 device 当前值）",
+                  kSpriteBeginMagMin, kSpriteBeginMip, kSpriteBeginMaxAnisotropy,
+                  (save_before_end && before_ok) ? 1 : 0);
+    }
+    return ok;
+}
+
+// `End` 把 Begin 保存的 stage 采样器整块写回设备（`Flush` 不调用它）。
+bool restoreBeginSamplerState(X86& cpu, std::uint32_t state, const State& s) {
+    if (s.saved_sampler_valid == 0) return true;
+    // 先清标记：恢复失败也**不**重试（同一台设备上重试不会有不同结果；⛔ 不每次 End 重复告警）。
+    cpu.mem->wr32(state + kSpSavedSamplerValid, 0u);
+    std::string why;
+    d3d9::DeviceInfo dev;
+    if (!d3d9::deviceInfo(cpu, s.device, &dev, &why)) {
+        spriteWarn("End", "采样器收尾：取不到设备（%s）⇒ ⛔ 恢复不了 stage 采样器", why.c_str());
+        return false;
+    }
+    bool ok = true;
+    for (std::uint32_t st = 0; st < kSpTexStages; ++st) {
+        for (std::uint32_t i = 0; i < 8u; ++i) {
+            std::string write_why;
+            if (!d3d9::writeSamplerState(cpu, dev.state, st, kSpriteBeginSamplerTypes[i],
+                                         s.saved_sampler[st][i], &write_why)) {
+                spriteWarn("End", "采样器收尾：恢复 stage %u type %u 失败（%s）", st,
+                           kSpriteBeginSamplerTypes[i], write_why.c_str());
+                ok = false;
+            }
+        }
+    }
+    if (ok) spriteLog("End", "stage 0 采样器恢复成 Begin 之前的值");
+    return ok;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------------------
@@ -512,7 +685,7 @@ std::uint32_t begin(X86& cpu, std::uint32_t state, std::uint32_t flags, std::str
     //   不认识的位（含未定义位）不当作失败：D3DX 的 flag 是"提示"，真机对未知位也不返回错误；
     //   但⛔ 不静默 —— 记进 state 的 kSpIgnoredFlags + 一行日志。
     const std::uint32_t ignored =
-        flags & ~(kSpriteAlphaBlend);  // 除 ALPHABLEND 外本线**不建模**（没有渲染状态 / 排序 / 3D）
+        flags & ~(kSpriteAlphaBlend | kSpriteDoNotSaveState);  // 除这两位外本线**不建模**
     cpu.mem->wr32(state + kSpFlags, flags);
     cpu.mem->wr32(state + kSpIgnoredFlags, ignored);
     cpu.mem->wr32(state + kSpDrawing, 1u);
@@ -524,9 +697,12 @@ std::uint32_t begin(X86& cpu, std::uint32_t state, std::uint32_t flags, std::str
     //   `1` / `SRCALPHA(5)` / `INVSRCALPHA(6)`；`End` 恢复（`Flush` 不恢复）。
     //   ⛔ 因子仍然只从设备状态**读**（`compositeBatch` 的快照）—— 本步只决定"读到什么"，
     //   不是"跳过读取、从 flags 推因子"（那会把 BUG-33 修回去）。
-    // ★ 边界（本轮**不动**）：`kSpriteDoNotSaveState` / `kSpriteDoNotModifyRenderState` 仍按既有
-    //   口径"记录并忽略"；它们只影响真 D3DX 的保存/改动范围，而本线本轮只补 ALPHABLEND 的
-    //   默认因子这一步。⛔ 不顺手扩到 `ALPHATESTENABLE` / `ZENABLE` / `LIGHTING` 等其它状态。
+    // ★ 边界（本轮**不动**）：`kSpriteDoNotModifyRenderState` 仍按既有口径"记录并忽略"
+    //   （MSDN 只写"device **render state** is not to be changed"；sampler state 在 D3D9 里
+    //   与 render state 是两个枚举族，表格也是分开的 ⇒ 不据此跳过采样器写入）。
+    //   `kSpriteDoNotSaveState` **现在建模**：只影响"保存/恢复采样器"，不影响"写文档值"
+    //   （MSDN："The device state is not to be saved or restored"）。⛔ 不顺手扩到
+    //   `ALPHATESTENABLE` / `ZENABLE` / `LIGHTING` 等其它状态。
     // ★ 失败语义沿用既有边界：取不到设备 / 没有流水线状态块 ⇒ **不改 Begin 的返回码**，只记一条
     //   默认级别可见的告警，并让 `saved_valid=0`（End 一项都不恢复，⛔ 不假装接管了）。
     {
@@ -570,17 +746,24 @@ std::uint32_t begin(X86& cpu, std::uint32_t state, std::uint32_t flags, std::str
         }
         if (!took) cpu.mem->wr32(state + kSpSavedValid, 0u);
     }
+    // ---- 真 D3DX 的 Begin 副作用之②：stage 0 采样器（MSDN 的 Sampler States 表）----
+    // ★ `D3DXSPRITE_DONOTSAVESTATE` ⇒ 不保存（End 也就不恢复），但**写仍然发生** ——
+    //   MSDN 的 flag 原文是"not to be saved or restored"，不是"not to be set"。
+    (void)applyBeginSamplerState(cpu, s, (flags & kSpriteDoNotSaveState) == 0);
     if (flags & ~kSpriteKnownFlags) {
         spriteLog("Begin", "Flags=0x%08X 含**未定义**位 0x%08X ⇒ 记录并忽略（不失败）", flags,
                   flags & ~kSpriteKnownFlags);
     }
     if (ignored != 0) {
         spriteLog("Begin",
-                  "Flags=0x%08X：ALPHABLEND=%d；其余位 0x%08X **记录并忽略**"
-                  "（本线没有渲染状态保存/排序/3D 空间：OBJECTSPACE/BILLBOARD/SORT_*/DONOT* 都不建模）",
-                  flags, (flags & kSpriteAlphaBlend) ? 1 : 0, ignored);
+                  "Flags=0x%08X：ALPHABLEND=%d / DONOTSAVESTATE=%d；其余位 0x%08X **记录并忽略**"
+                  "（本线没有渲染状态保存/排序/3D 空间：OBJECTSPACE/BILLBOARD/SORT_*/"
+                  "DONOTMODIFY_RENDERSTATE 都不建模）",
+                  flags, (flags & kSpriteAlphaBlend) ? 1 : 0,
+                  (flags & kSpriteDoNotSaveState) ? 1 : 0, ignored);
     } else {
-        spriteLog("Begin", "Flags=0x%08X（ALPHABLEND=1，其余 0）⇒ 批次打开", flags);
+        spriteLog("Begin", "Flags=0x%08X（ALPHABLEND=%d / DONOTSAVESTATE=%d）⇒ 批次打开", flags,
+                  (flags & kSpriteAlphaBlend) ? 1 : 0, (flags & kSpriteDoNotSaveState) ? 1 : 0);
     }
     return kOk;
 }
@@ -842,6 +1025,35 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
                    "（sprite 路没有 CPU 兜底；⛔ 不退回写死的 SrcAlpha/InvSrcAlpha）",
                    blend_error.empty() ? "原因未知" : blend_error.c_str(), s.count);
     }
+    // ---- 采样器：每**批**读一次设备的 stage-0（`Draw` 用的就是 device 当前值）----
+    // ★ MSDN `ID3DXSprite::Draw` 只把精灵排进批次、**不设任何 state**；`Flush` 提交时的采样器
+    //   就是 device 当前的 stage 0 —— `Begin` 刚按文档写过（`applyBeginSamplerState`），guest
+    //   可以在 Begin 之后用 `SetSamplerState` 覆盖（引擎每个 `DrawTexture` 正是这么做的：
+    //   `0x4A30FB/0x4A310C/0x4A311D` 设 MIN/MAG=LINEAR、MIP=NONE）。
+    // ⇒ 本线在这里**读 device**（`d3d9::readSamplerState` + `gpuSamplerFor`，与固定功能
+    //   `gpuEligible` 同一份映射），⛔ 不再硬编码 Clamp/Point/Point/mip-on（那正是修前的缺陷：
+    //   Point + texel 角 UV ⇒ 半 texel 吸附；mip-on ⇒ 缩小绘制采更粗一级）。
+    GpuSampler sprite_sampler;
+    std::string sampler_error;
+    bool sampler_ok = false;
+    if (dev.pipeline == 0) {
+        // 没有流水线状态块 = 一个 D3DSAMP 都读不到。⛔ 不许拿缺省值冒充"读过了"。
+        sampler_error = "设备没有流水线状态块（'DL01'）";
+    } else {
+        d3d9::SamplerStateSnapshot ss;
+        if (!d3d9::readSamplerState(cpu, dev.state, 0u, &ss, &sampler_error)) {
+            // why 已由 readSamplerState 填好
+        } else {
+            sampler_ok = d3d9::gpuSamplerFor(ss, &sprite_sampler, &sampler_error);
+        }
+    }
+    if (!sampler_ok) {
+        // ★ **一条批次级**告警（⛔ 不每条 draw 刷屏；逐条只进覆盖账本）。
+        spriteWarn("End",
+                   "stage-0 采样器表达不了（%s）⇒ 带纹理的 %u 条 Draw 会跳过"
+                   "（无纹理条目只用 1×1 白纹理，不受采样器影响；sprite 路没有 CPU 兜底）",
+                   sampler_error.empty() ? "原因未知" : sampler_error.c_str(), s.count);
+    }
     // ★ 精灵合成与 D3D9 fixed-function 共用**同一个** GPU 光栅后端（那条 A/B 已删，
     //   见 `REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：没有"先关掉 GPU 再 CPU 合成"的开关。
     std::uint64_t written = 0;
@@ -1037,7 +1249,7 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
             ++entries_done;
             continue;
         }
-        // ---- GPU 光栅化：D3DXSprite 纹理四边形（sampler 用 stage 默认 NEAREST+CLAMP，⛔ 不改）----
+        // ---- GPU 光栅化：D3DXSprite 纹理四边形（采样器 = device 当前 stage 0）----
         // ★ **这条就是唯一实现**（`REQ-01M7AAXNJY2PACYJHYVRV620Q5` 删掉了 CPU 逐像素兜底）：
         //   GPU 不可用 / 表达不了这一条 ⇒ `skip_reason` 记账 + 跳过，⛔ 不写目标像素。
         bool gpu_done = false;
@@ -1051,6 +1263,11 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
             gpu = nullptr;
         } else if (has_texture && tbpp != 4) {
             skip_reason = "sprite: 纹理不是 32bpp";
+            gpu = nullptr;
+        } else if (has_texture && !sampler_ok) {
+            // ★ 无纹理条目只用 1×1 白纹理 ⇒ 采样器表达不了也不影响像素（不跳过）。
+            skip_reason = "sprite: stage-0 采样器表达不了（" +
+                          (sampler_error.empty() ? std::string("原因未知") : sampler_error) + "）";
             gpu = nullptr;
         } else if (has_texture && (left < 0 || top < 0 || right > static_cast<std::int32_t>(tw) ||
                                    bottom > static_cast<std::int32_t>(th))) {
@@ -1120,6 +1337,9 @@ bool compositeBatch(X86& cpu, std::uint32_t state, std::uint32_t* entries_out,
                                                           twrite_rect[3] - twrite_rect[1]};
                     gt.content_change_version = twrite_version;
                     gt.content_change_prev_version = tprev_write_version;
+                    // ★ 采样器 = 本批读一次的 device stage 0（不是常量、也不是 sprite 影子表）：
+                    //   `Begin` 写过 → guest 可覆盖 → 这里读到的就是 `Draw` 真正该用的那一组。
+                    gt.sampler = sprite_sampler;
                 } else {
                     // pTexture=0 的 D3DX 语义 = 白色源；GPU 用 1×1 白纹理 + 顶点色。
                     gt.pixels = nullptr;
@@ -1200,6 +1420,9 @@ std::uint32_t end(X86& cpu, std::uint32_t state, std::string* why) {
     //   `saved_valid=0`（Begin 没接管）⇒ 这里一项都不碰。恢复失败只告警，**不改** End 的返回码：
     //   批次已经合成完，把一次状态恢复失败升级成"整批失败"会丢掉已经画出来的像素。
     if (s.saved_valid != 0) (void)restoreBeginSavedState(cpu, state, s);
+    // ★ 同一条语义的另一半（MSDN `ID3DXSprite::End`）：stage 0 采样器恢复到 pre-Begin。
+    //   `DONOTSAVESTATE` 时 `saved_sampler_valid=0` ⇒ 一项都不碰（也不告警）。
+    if (s.saved_sampler_valid != 0) (void)restoreBeginSamplerState(cpu, state, s);
     cpu.mem->wr32(state + kSpDrawing, 0u);
     cpu.mem->wr32(state + kSpEnds, s.ends + 1u);
     spriteLog("End", "合成 %u 条 Draw / %llu 个覆盖格（四边形包围盒）⇒ 批次关闭", entries,

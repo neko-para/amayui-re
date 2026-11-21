@@ -35,6 +35,15 @@
 //     那一步：保存设备里的 `ALPHABLENDENABLE` / `SRCBLEND` / `DESTBLEND` 并设成
 //     `1` / `SRCALPHA` / `INVSRCALPHA`（`End` 恢复，`Flush` 不恢复）
 //     —— `REQ-01M7R3YPQPNPBZ327H89Q8RTEE`。
+//   · ★ `Begin` 还会按 MSDN `ID3DXSprite::Begin` 的 **Sampler States** 表**自己写 stage-0 采样器**
+//     （ADDRESSU/V=CLAMP、MAG/MIN=ANISOTROPIC 不支持则 LINEAR、MIPFILTER=LINEAR 不支持则 POINT、
+//     MAXMIPLEVEL=0、MIPMAPLODBIAS=0、MAXANISOTROPY=MaxAnisotropy），`End` 恢复 pre-Begin
+//     （`D3DXSPRITE_DONOTSAVESTATE` 时不保存/不恢复），`Flush` 不恢复。这些值落在**设备的采样器表**
+//     （`GetSamplerState` 读得到），⛔ 不是 sprite 的影子状态：`Draw` 用的始终是 device 当前 stage 0
+//     （`compositeBatch` 每批读一次，guest 在 Begin 之后的覆盖会被看到）。
+//     ⇒ 修前 sprite 路一个 sampler 都不写、硬编码 `Clamp/Point/Point/mip-on`：同一 guest 采样状态下
+//     与真机差 **MAG / MIN / MIPFILTER** 三项 —— `Point` + texel 角 UV 把内容吸到 texel 网格
+//     （<=0.5 texel/轴，视觉上像 (+1,+1)），`mip-on` 让缩小绘制采更粗一级（更糊）。
 //   · `Draw(...)` 在**Draw 时**就把变换应用到四个角点（与 D3DX 的"顶点当场生成、Flush 才提交"一致），
 //     把一次绘制压进 guest 堆上的批次表；⛔ 不在 Draw 里写像素。
 //   · `End()` / `Flush()` 把批次交给**当前绑定的颜色目标**（与 `d3d9::Draw*` 同一个 GPU 后端）：

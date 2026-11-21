@@ -202,6 +202,7 @@ constexpr std::uint32_t kSampBorderColor = 4;
 constexpr std::uint32_t kSampMagFilter = 5;
 constexpr std::uint32_t kSampMinFilter = 6;
 constexpr std::uint32_t kSampMipFilter = 7;
+constexpr std::uint32_t kSampMipLodBias = 8;
 constexpr std::uint32_t kSampMaxMipLevel = 9;
 constexpr std::uint32_t kSampMaxAnisotropy = 10;
 
@@ -634,6 +635,38 @@ bool readBlendState(X86& cpu, std::uint32_t dev_state, BlendStateSnapshot* out, 
 // =====================================================================================
 bool writeRenderState(X86& cpu, std::uint32_t dev_state, std::uint32_t state, std::uint32_t value,
                       std::string* why);
+
+// =====================================================================================
+// 采样器状态的**读 / 写**入口（D3DXSprite `Begin`/`End` 用；`REQ-01M7R3YPQPNPBZ327H89Q8RTEE` 的姊妹条）
+//
+// ★ 为什么要它：MSDN `ID3DXSprite::Begin` 会**自己写** stage-0 采样器，`End` 恢复 pre-Begin
+//   （`D3DXSPRITE_DONOTSAVESTATE` 时不保存 / 不恢复）。那些写必须真的落进**设备的采样器表**
+//   （`IDirect3DDevice9::GetSamplerState` 读得到）—— ⛔ 不是 sprite 自己的一份影子表：否则
+//   "Draw 用 device 当前 stage-0" 就是假的（`Draw` 本身不设 sampler，见 MSDN）。
+// ★ 与 `setSamplerState` 的区别（与 `writeRenderState` 同一条理由）：那条是 **guest 写**的路，
+//   会做值校验 + `recordUnsupported` 记账；D3DX 的内部写不该冒充 guest 写（否则账上会多出
+//   一条"MIPFILTER=LINEAR 按最近级近似"的 guest 行为）。
+// ★ `dev_state` = 设备状态块（'D9D1'，与 `readBlendState` 同一口径）；stage 上界 = `kMaxSamplers`。
+// =====================================================================================
+struct SamplerStateSnapshot {
+    std::uint32_t address_u = 0;       // D3DSAMP_ADDRESSU
+    std::uint32_t address_v = 0;       // D3DSAMP_ADDRESSV
+    std::uint32_t mag_filter = 0;      // D3DSAMP_MAGFILTER
+    std::uint32_t min_filter = 0;      // D3DSAMP_MINFILTER
+    std::uint32_t mip_filter = 0;      // D3DSAMP_MIPFILTER
+    std::uint32_t max_mip_level = 0;   // D3DSAMP_MAXMIPLEVEL
+    std::uint32_t mip_lod_bias = 0;    // D3DSAMP_MIPMAPLODBIAS 的**位模式**（float 原样保存 / 恢复）
+    std::uint32_t max_anisotropy = 0;  // D3DSAMP_MAXANISOTROPY
+};
+bool readSamplerState(X86& cpu, std::uint32_t dev_state, std::uint32_t stage,
+                      SamplerStateSnapshot* out, std::string* why);
+bool writeSamplerState(X86& cpu, std::uint32_t dev_state, std::uint32_t stage, std::uint32_t type,
+                       std::uint32_t value, std::string* why);
+
+// 采样器状态 → `GpuSampler`：与 fixed-function 的 `gpuEligible` **同一份映射**
+// （`gpuAddressFor` / `gpuFilterFor` + `mipmap = MIPFILTER != NONE`；⛔ 不复制第二张常量表）。
+// `false` = 这个组合 SDL_GPU 表达不了（BORDER / MIRROR_ONCE / 过滤值 0）⇒ 调用方记账 + 跳过。
+bool gpuSamplerFor(const SamplerStateSnapshot& ss, GpuSampler* out, std::string* why);
 
 // =====================================================================================
 // GPU 准入 / 状态映射（**纯函数**；夹具直接调，⛔ 不建机器）

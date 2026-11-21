@@ -364,6 +364,47 @@
 - **备选**：① 放过去（继续画）；② 整批跳过；③ 整帧丢弃；④ 复用 draw 路的 bit28。**没选** ①：静默旧像素正是本单要消除的那类错。**没选** ②③：一批里各条目采各自的纹理，`tbase == base` 是**逐条目**属性 ⇒ 丢掉正确条目（②）或把"一条坏 sprite"放大成"整帧空/黑"（③），与 `REQ-01M7A74YG08R65NJBFXF7DEJDK` 的"跳过而不是回退/整帧重来"口径冲突。**没选** ④：复用会让"draw 路命中"与"sprite 路命中"在位图 / 摘要里分不开，两条守卫互成恒真。
 - **重写必须保持不变**：① 判据只有一份（`compositeBatch` 的 `tbase == base`），⛔ 不在 `gpuEligible` 里再判一遍 sprite；② 触发时**像素零写入** + 账上一定看得见（具名位 + `sprite_skipped` + 原因），⛔ 不许静默；③ 采**别的**纹理必须照常入队（反向条款，防过度收紧）；④ 位号 43 不与 28 合并（合并 = 两条守卫互成恒真）；⑤ 守卫 = `gpu_batch.cpp` 的 `d3d9p/sprite-feedback-loop`（CTest `gpu-batch-order`），变异 = 判据换成永不成立（`tools/mutate-check.mjs`）。
 
+### L3-sprite-02 · `ID3DXSprite` 的 stage-0 采样器：**Begin 写文档值 / End 恢复 / Draw 用 device 当前值**
+- **口径（MSDN 原文，不是推断）**：`ID3DXSprite::Begin` 的 "Sampler States" 表（只有 **stage 0** 的行）会
+  自己写 `ADDRESSU/V=CLAMP`、`MAG/MIN=ANISOTROPIC`（`TextureFilterCaps` 无 `MAG/MIN` `FANISOTROPIC` ⇒ `LINEAR`）、
+  `MIPFILTER=LINEAR`（无 `MIPFLINEAR` ⇒ `POINT`）、`MAXMIPLEVEL=0`、`MIPMAPLODBIAS=0`、`MAXANISOTROPY=MaxAnisotropy`；
+  `ID3DXSprite::End` "restores the device state to how it was before Begin was called"；`Flush` 不恢复
+  （"Device states remain as they were after the last call to Begin"）；`D3DXSPRITE_DONOTSAVESTATE` =
+  "not to be saved or restored"（**写仍然发生**，只是 End 不恢复）。
+  `ID3DXSprite::Draw` 本身**不设任何 state** ⇒ 实际采样器 = **device 当前的 stage 0**：Begin 刚写过，
+  guest 可以在 Begin 之后用 `SetSamplerState` 覆盖（引擎每个 `DrawTexture` 正是这样：EA
+  `0x4A30FB/0x4A310C/0x4A311D` 设 `MIN/MAG=LINEAR`、`MIP=NONE`）。
+- **取舍**：采样器状态**落在设备的采样器表**（`d3d9::writeSamplerState`，`GetSamplerState` 读得到），
+  sprite 只把 "pre-Begin 的 8 项" 存进自己的状态块（`kSpTexStages=1` × 32 B）供 `End` 恢复；
+  `compositeBatch` **每批读一次** device 的 stage-0（`d3d9::readSamplerState` + `gpuSamplerFor`，
+  与固定功能 `gpuEligible` **同一份** `gpuAddressFor`/`gpuFilterFor` 映射）。⛔ 不建 sprite 的影子采样表，
+  ⛔ 不在 sprite 里写第二张 "D3D9 值 → GpuSampler" 常量表。
+- **为什么（这条修了什么"偏"）**：修前 sprite 路**一个 sampler 都不写**、硬编码 `Clamp/Point/Point/mip-on`
+  （`GpuSampler{}` 的缺省）⇒ 与真机的有效采样差 **MAG / MIN / MIPFILTER** 三项：
+  ① `Point` + texel 角 UV（`u=left/tw`）在非 1:1 或小数位移时把内容吸到 texel 网格（≤0.5 texel/轴，
+  两轴同时），`Linear` 保持连续；② `mipmap=true`（`max_lod=1000`）在缩小绘制时
+  会采更粗的派生级 ⇒ **更糊**；真机（guest `MIP=NONE`）只采 level 0。
+- **⚠ 实测边界（2026-11-21，SAVE08→SC0010 配方，两档 scale）**：这条修的是**保真偏差**（sprite 路
+  现在真的按 guest 的 `MIN/MAG=LINEAR`、`MIP=NONE` 采样：平稳帧锐度 `17.05 → 15.94`），
+  **但它不是**用户报的"切立绘偏 (1,1) + 变糊"的来源 —— 那 2 帧修前/修后仍是
+  `(−0.48,−0.44)` → `(−0.48,−0.46)` px、锐度双峰（`15.94` vs `9.99`，进入/离开 chg_px 仍 ~49k）；
+  那 2 帧是 `ID3DXEffect` 的 `Fade` + RTT 路（`submits=15 / targets=4`，其余帧 `submits=3`）。
+  ⇒ 残余另立 **BUG-38**；⛔ 不要为了消它在本路加半像素补偿。
+- **备选**：① 只把 sprite 缺省改成 `Linear/Linear/no-mip`（1–2 行）；② 只读 device 但不让 Begin 写/End 恢复
+  （sprite 拉向 pipeline，不是拉向真机，且 guest 不设 address 时会漂成 WRAP）；③ 让 pipeline 也改成
+  sprite 的硬编码值（把忠实的那条弄偏）。**没选** ①：仍"不问 guest"，guest 的 `POINT` / `WRAP` 一律被忽略；
+  **没选** ②：address 会变成 pipeline 的 WRAP，而真机 sprite 是 CLAMP（Begin 写的）；**没选** ③：反向扩大偏差。
+- **重写必须保持不变**：① 文档值写进**设备**（读回守卫走 `GetSamplerState`），⛔ 影子表；
+  ② `End` 恢复 pre-Begin 的**整块 8 项**（含 guest 在 Begin 内改过的那一项），`Flush` 不恢复；
+  ③ `DONOTSAVESTATE` ⇒ 写仍发生、End 不恢复；④ `compositeBatch` 读 device 当前 stage 0、失败
+  （BORDER / MIRROR_ONCE / `MAG|MIN=NONE`）⇒ **记账 + 跳过这一条**（无 CPU 兜底），⛔ 不猜缺省值；
+  ⑤ 无纹理条目（1×1 白纹理）不受采样器表达不了的影响（⛔ 不要因为采样器把白块也跳过）。
+  守卫 = `d3dx9/begin-sampler-state`（文档值 / 恢复 / Flush 不恢复 / DONOTSAVESTATE）+
+  `d3dx9/sprite-sampler-pixels`（2× 放大：LINEAR 混合值 ≠ POINT 纯色，且 guest 改成 POINT 时像素跟着变）；
+  变异 = `kSpriteBeginMagMin` 由 `kTexfLinear` 改回 `kTexfPoint` ⇒ 前两者当场红。
+- **caps 前提**：`static_assert(d3d9::kCapsMaxAnisotropyClaim == 1u)` 钉住"本线无各向异性" ⇒ 走 MSDN 的
+  LINEAR 分支；caps 若将来真的支持各向异性，编译期就红（⛔ 不静默继续写 LINEAR）。
+
 ### L3-tl-01 · 顶点处理（T&L / 裁剪 / 状态机）留在 CPU、GPU 只吃**屏幕空间**三角形 —— 是 2026-11 的**分期**取舍，不是"两套实现"
 
 - **为什么**：GPU 光栅化后端是**分期**接的。phase 1 的边界写死在 `REQ-01M6PAXW7EFCERJR6G2EEDN2A0`：

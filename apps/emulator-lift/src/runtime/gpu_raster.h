@@ -241,7 +241,7 @@ struct GpuRasterTexture {
     // guest 纹理身份（进程级单调 serial）。★ 缓存键用它：guest 指针 / 尺寸 / alpha / generation
     // 都可能撞车（arena 复用 + 新对象 generation 也从 0/1 起）。0 = 夹具/白纹理 ⇒ 退回指针键。
     std::uint32_t serial = 0;
-    GpuSampler sampler;         // 缺省 NEAREST + CLAMP（D3DXSprite 的现状，⛔ 不变）
+    GpuSampler sampler;         // 缺省 Point/Clamp/无 mip；D3DXSprite 从 device stage-0 填（不靠缺省）
     // ---- 方案 C 的"内容变更边界"数据（由 guest 侧的 LockRect/UnlockRect 记录，生产者填）----
     // ★ 语义：guest 只在 `LockRect` 允许的矩形内写像素（D3D9 API 契约；矩形外的直写是未定义行为）。
     //   `content_change_version` = 最近一次 UnlockRect 发的内容版本；`content_change_prev_version`

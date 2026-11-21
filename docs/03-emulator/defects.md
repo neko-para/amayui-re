@@ -938,3 +938,91 @@
 - **未做 / 同源**：槽位仍无界（长跑内存 + `findNamed` 的 O(used)+string 比较是下一处候选）；
   Present 的整幅 GPU 回读（同一次 profile 821 ms/115 帧）是另一张单（`REQ-01M7S5KFRPAB6KSC033ECDHYMW`）。
 - **需求单**：`REQ-01M7S7F7NVHY0EVWWBQAQMKHWT`（S2，2026-11-19 修复）。
+
+### BUG-37 · `ID3DXSprite` 路不按 D3DX 语义设采样器 ⇒ 与真机差 MAG/MIN/MIPFILTER（半 texel 吸附 + 缩小更糊）
+
+- **现象（用户报告）**：ADV 切立绘的那一下，立绘**纹理偏 (1,1) + 变糊**。
+  ⚠ **归因边界（已实测，2026-11-21）**：本缺陷（sprite 路采样口径偏离 MSDN）**真实存在**，但它
+  **不是**用户看到的"切立绘那 2 帧跳变"的来源 —— 修掉它之后，SAVE08→SC0010 的那 2 帧仍偏
+  (−0.48,−0.46) px、锐度仍双峰（见下面"场景对照（2026-11-21 实测）"与 BUG-38）。
+  ⛔ 不把"同一条纹理在两条路上采样口径不同"写成"用户那个症状的根因"。
+- **根因（代码事实）**：sprite 路**一个 sampler 都不写**，合成时落到 `GpuSampler{}` 的缺省
+  `Clamp/Clamp/Point/Point/mip-on`（`gpu_raster.h`）⇒ 与真机的有效采样差三项：
+  ① `MAG/MIN=Point` —— 我们 texel 角 UV（`u=left/tw`）在非 1:1 / 小数位移时把内容吸到 texel 网格
+  （≤0.5 texel/轴，两轴同时 ⇒ 看起来像 (+1,+1)），`Linear` 保持连续；
+  ② `MIPFILTER` 开（`mipmap=true` ⇒ `max_lod=1000`）⇒ 缩小绘制采更粗一级（**更糊**）；
+  ③ `ADDRESSU/V` 恰好（Clamp）与真机一致（D3DXSprite 的 Begin 就是 CLAMP），所以这一项**不是**偏差来源。
+  MSDN 判据：`ID3DXSprite::Begin` 自己写 stage-0 采样器、`End` 恢复、`Flush` 不恢复、
+  `Draw` 本身不设 state（用 device 当前 stage 0）；引擎在每个 `DrawTexture` 的 Begin 之后又显式设
+  `MIN/MAG=LINEAR`、`MIP=NONE`（EA `0x4A30FB/0x4A310C/0x4A311D`）⇒ 真机有效采样 = CLAMP + LINEAR/LINEAR + NONE。
+- **修法**：`src/runtime/d3dx9_sprite.cpp:475`（`applyBeginSamplerState`：按 MSDN 写 8 项进**设备**采样器表；
+  caps 无各向异性 ⇒ LINEAR 分支，`static_assert(kCapsMaxAnisotropyClaim==1)` 钉前提）、`:540`
+  （`End` 恢复整块，`:1425`）、`:752`（`DONOTSAVESTATE` ⇒ 不保存/不恢复但写仍发生）、
+  `:1028` + `:1342`（`compositeBatch` 每批读一次 device stage-0，填 `GpuRasterTexture::sampler`）；
+  设备侧读/写/映射 = `src/runtime/d3d9_pipeline.cpp:6141`（`readSamplerState`）·`:6171`
+  （`writeSamplerState`，与 guest 写路径分开：⛔ 不做值校验 / unsupported 记账）·`:6192`
+  （`gpuSamplerFor`，复用 `gpuAddressFor`/`gpuFilterFor`，`mipmap = MIPFILTER != NONE`）；
+  状态块 `kSpBytes` 140 → 176（`d3dx9_sprite.cpp:91-92`），OOM 用例同步（`tests/d3dx9.cpp`）。
+- **守卫**：`d3dx9/begin-sampler-state`（Begin 后 `GetSamplerState` = 文档 8 项；`End` 恢复 pre-Begin
+  含 guest 在 Begin 内改过的项；`Flush` 不恢复；`DONOTSAVESTATE` 不恢复）+
+  `d3dx9/sprite-sampler-pixels`（GPU 臂：2×2 四色纹理 2× 放大 ⇒ LINEAR 混合值 ≈`0x009F4040`、
+  guest 改成 POINT ⇒ 纯红 `0x00FF0000`，两者必须不同；显式设回 LINEAR ⇒ 回到同一值）。
+  变异实测：`kSpriteBeginMagMin` 由 `kTexfLinear` 改回 `kTexfPoint` ⇒ 两条守卫当场红。
+- **场景对照（2026-11-21 实测 · win32 · main 工作树 `E:\Projects\amayui-re`）**：
+  - 配方 `apps/emulator-lift/.tmp/jitter/save08-sc0010.plan`（SAVE08 → SC0010 → ADV 停等点
+    `SC0010 0xC330 0xC3FC` → `click 640 360` → `wait 2000`），命令（cwd = `apps/emulator-lift`）：
+    `--game-dir ../../links/install --appdata <私有> --skip-logo --audio off --present window
+    --present-hidden --input-plan <配方> --dump-frame "<dir>/f{frame}.bmp" --frame-log
+    --input-plan-trace --log-level info --max-frames 300 --time-limit 200`（env `LIFT_GPU_SUBMITS=1`）。
+  - 修前 = 冻结的 Point 版二进 `sha256 DF4925DE…F35E2B`（22:30:36）；修后 = `sha256 3FECD040…24B7`
+    （23:13:49，含本缺陷 + 同树另一车道的未提交改动）。判据 = 立绘窗 `x[300,1100) y[80,500)` 内
+    **相邻帧** `chg_px`（|ΔRGB|max>8）+ `mean|Laplacian|`；亚像素 = 双线性配准（ref=f120）。
+  - **结论：本修复不改变那 2 帧**。修前异常帧 f78/f79、修后 f77/f78（帧号随墙钟漂 1 帧），
+    形状完全相同：进入/离开各 ~49k（f76→f77 49145、f78→f79 49045），异常帧之间只有 401（口/眼动画）；
+    亚像素位移修前 (−0.48,−0.44) → 修后 (−0.48,−0.46) px（**未变**）。锐度仍是双峰：
+    平稳帧 **17.05 → 15.94**（sprite 路现在真的用 LINEAR，按 MSDN 的预期变化）、异常帧 **11.08 → 9.99**。
+  - ⇒ 残余在 **`ID3DXEffect` 的 `Fade` / RTT 合成路**（那 2 帧 `submits=15 / targets=4 / flush=5`，
+    日志有 `SetTechnique "Fade"` + `SetFloat "Alpha"=0` + `Tex0/Tex1` + 1 次 `DrawPrimitive`
+    FVF=0x244 TEX2 stride=36；其余帧 `submits=3 / targets=0`）⇒ 另立 **BUG-38**。
+    ⛔ **不要**为了消这段残余在 sprite 路里加半像素补偿（那是 guest 可见语义，要单独裁决）。
+  - 两档 `--scale 1.0 / 1.5` 的对应内容帧**逐字节相同**（f76..f79 maxdiff=0；同样本修复前后都是）⇒
+    与缩放 / letterbox 无关。
+- **需求单**：待父级登记（本车道按纪律 ⛔ 不改 `data/**`）。
+
+### BUG-38 · ADV 切立绘的 2 帧：整层偏约 (−0.48,−0.46) px + 锐度双峰（`ID3DXEffect` 的 `Fade` / RTT 路，**未修**）
+
+- **现象**：SAVE08 → SC0010 → `click 640 360` 之后恰好 **2 帧**，立绘/前景层相对稳定帧
+  **偏 (−0.48,−0.46) px**（左上）且**变糊**（立绘窗内 `mean|Laplacian|` 15.94 → 9.99）；
+  随后帧**逐字节回到**稳定帧。用户看到的"偏 (1,1) + 变糊"就是这 2 帧（半像素被点采样量化成
+  逐块 0/1 px，肉眼看成 (1,1)）。
+- **与 BUG-37 无关（已实测）**：BUG-37（sprite 采样器按 MSDN）修前/修后，这 2 帧的
+  亚像素位移 `(−0.48,−0.44)` → `(−0.48,−0.46)`、进入/离开的 chg_px `49414/49055` → `49404/49045`
+  **都没变**（异常帧只是整体从 f78/f79 挪到 f77/f78，帧号随墙钟漂 1 帧）。锐度两档都随 sprite 路
+  换成 LINEAR 下降 ~1.1（17.05→15.94、11.08→9.99），**双峰仍在**。
+- **证据（哪条路）**：那 2 帧是整跑唯一使用 **`ID3DXEffect`** 的帧：
+  `[gpu-submits] frame=77 submits=15 (flush=5 readback=5 upload=4) targets=4`（其余帧 `submits=3`,
+  `targets=0`）；同一段日志有 `ID3DXEffect::SetTechnique: "Fade"` / `SetFloat: "Alpha" = 0` /
+  `SetTexture: "Tex0"` / `SetTexture: "Tex1"` / `Begin: passes=1`，随后
+  `SetStreamSource Stride=36` + `SetFVF FVF=0x244`（XYZRHW|DIFFUSE|TEX2）+ 1 次 `DrawPrimitive`
+  （1 quad / 2 三角形），并把 Tex0/Tex1 先渲染进 render target（每帧 4 个 target、5 次 flush）。
+  ⇒ 这 2 帧的像素经过 **RTT → Fade 全屏 quad** 两跳，与 steady 帧的 sprite 直画不是同一条几何/采样路。
+- **读数（修后二进制 `sha256 3FECD040…24B7` · 2026-11-21 · 判据窗口 `x[300,1100) y[80,500)`）**：
+
+  | 帧 | `--scale 1.0` adj_chg / vs_ref / sharp | `--scale 1.5` adj_chg / vs_ref / sharp |
+  |---|---|---|
+  | f75 | 0 / 368 / 15.9691 | 0 / 368 / 15.9691 |
+  | f76 | 0 / 368 / 15.9691 | **49145 / 49404 / 9.9911** |
+  | f77 | **49145 / 49404 / 9.9911** | 401 / 49045 / 9.9733 |
+  | f78 | 401 / 49045 / 9.9733 | **49045 / 0 / 15.9362** |
+  | f79 | **49045 / 0 / 15.9362** | 0 / 0 / 15.9362 |
+  | f80 | 0 / 0 / 15.9362 | 0 / 0 / 15.9362 |
+  | f81 | 0 / 0 / 15.9362 | 0 / 0 / 15.9362 |
+
+  （adj_chg = 与上一帧在窗内 |ΔRGB|max>8 的像素数；vs_ref = 与 f120；sharp = `mean|Laplacian|`。
+  ref 帧号在两档里只是墙钟对齐用，判据不依赖它。）
+- **候选（待取证，⛔ 未定论）**：① Fade 全屏 quad 的顶点/UV 半像素（FVF 0x244 的 XYZRHW 预变换
+  约定）；② RTT 的采样口径（RT 纹理的 sampler / 是否多一次重采样）；③ Tex0/Tex1 两张 RT 的内容
+  在写入时是否已偏半像素。判据入口 = 上面那条日志 + `--dump-frame` 的 f77/f78 与稳定帧配准。
+- **守卫**：**无**（这是业务可见的场景级缺陷；配方留在 `.tmp/jitter/save08-sc0010.plan`，
+  ⛔ 不把"再回归一遍"做成默认门禁）。修它之前 ⛔ 不要在 sprite 路加半像素补偿（guest 可见语义）。
+- **需求单**：待父级登记（本车道 ⛔ 不改 `data/**`）。

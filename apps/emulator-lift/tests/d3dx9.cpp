@@ -470,6 +470,16 @@ struct Rig {
     std::uint32_t setRenderState(std::uint32_t state, std::uint32_t value) {
         return f.method(dev.object, 0xE4u, {state, value});
     }
+    // `IDirect3DDevice9::SetSamplerState` = +0x114 / `GetSamplerState` = +0x118
+    // （`tests/d3d9.cpp` 的 state block 用例同一取证；读回的 pValue 走夹具的 guest 数据区）。
+    std::uint32_t setSampler(std::uint32_t type, std::uint32_t value) {
+        return f.method(dev.object, 0x114u, {0u, type, value});
+    }
+    std::uint32_t getSampler(std::uint32_t type) {
+        const std::uint32_t out = f.placeU32(0xDEADBEEFu);
+        LIFT_CHECK_EQ_U32(f.method(dev.object, 0x118u, {0u, type, out}), 0u);
+        return f.m.mem().rd32(out);
+    }
 };
 
 // ---------------------------------------------------------------------------------------
@@ -745,6 +755,211 @@ int caseDrawEndPixels(bool gpu) {
             LIFT_CHECK_EQ_U32(px, 0x0000u);  // 清屏值原样（⛔ 不再是 0xF81F）
         }
     }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------------------
+// ②a0 `ID3DXSprite::Begin` 的 **stage-0 采样器**（MSDN `ID3DXSprite::Begin` 的 Sampler States 表）
+//
+// 判据（红了意味着什么）：
+//   ① Begin 之后 `GetSamplerState(stage 0, …)` 读到**文档值**：ADDRESSU/V=CLAMP、MAG/MIN=LINEAR
+//      （本线 caps `TextureFilterCaps=0x03030303` 没有 MAG/MINFANISOTROPIC、`MaxAnisotropy=1`
+//      ⇒ MSDN 的 fallback 分支）、MIPFILTER=LINEAR（caps 有 MIPFLINEAR）、MAXMIPLEVEL=0、
+//      MIPMAPLODBIAS=0、MAXANISOTROPY=1；
+//   ② `End` **恢复** pre-Begin 的 8 项（含 guest 在 Begin 之内改过的那一项）；
+//   ③ `Flush` **不**恢复（MSDN："Device states remain as they were after the last call to Begin"）；
+//   ④ `D3DXSPRITE_DONOTSAVESTATE` ⇒ 文档值仍然写、`End` **不**恢复（MSDN："not to be saved or
+//      restored"）。
+// ★ 修前 Begin 一个 sampler 都不写 ⇒ ① 当场红（读到的是 guest 之前设的 WRAP/POINT/NONE/…）。
+// ★ 这些值必须落在**设备的采样器表**里（读回走 `GetSamplerState`），⛔ 不是 sprite 的影子表：
+//   ② 的"恢复"与 `compositeBatch` 的"读 device 当前 stage 0"用的是同一份状态。
+// ---------------------------------------------------------------------------------------
+void caseBeginSamplerState() {
+    lift_test::g_current_case = "d3dx9/begin-sampler-state";
+    Rig r;
+    LIFT_CHECK(r.withSprite());
+    if (r.sprite == 0) return;
+    using namespace lift;
+    // 前提：设备上先放一组**非 D3D9 缺省**的 stage-0 采样器（缺省 = WRAP/WRAP/POINT/POINT/NONE、
+    // MAXMIPLEVEL=0、LODBIAS=0、MAXANISO=1）⇒ 这样才能区分"Begin 改了"与"根本没变"。
+    std::uint32_t lod_bias_bits = 0;
+    const float lod_bias = 0.75f;
+    std::memcpy(&lod_bias_bits, &lod_bias, sizeof(lod_bias_bits));
+    LIFT_CHECK_EQ_U32(r.setSampler(d3d9::kSampAddressU, d3d9::kAddressWrap), 0u);
+    LIFT_CHECK_EQ_U32(r.setSampler(d3d9::kSampAddressV, d3d9::kAddressWrap), 0u);
+    LIFT_CHECK_EQ_U32(r.setSampler(d3d9::kSampMagFilter, d3d9::kTexfPoint), 0u);
+    LIFT_CHECK_EQ_U32(r.setSampler(d3d9::kSampMinFilter, d3d9::kTexfPoint), 0u);
+    LIFT_CHECK_EQ_U32(r.setSampler(d3d9::kSampMipFilter, d3d9::kTexfNone), 0u);
+    LIFT_CHECK_EQ_U32(r.setSampler(d3d9::kSampMaxMipLevel, 2u), 0u);
+    LIFT_CHECK_EQ_U32(r.setSampler(d3d9::kSampMipLodBias, lod_bias_bits), 0u);
+    LIFT_CHECK_EQ_U32(r.setSampler(d3d9::kSampMaxAnisotropy, 4u), 0u);
+    const std::uint32_t types[8] = {d3d9::kSampAddressU,    d3d9::kSampAddressV,
+                                    d3d9::kSampMagFilter,   d3d9::kSampMinFilter,
+                                    d3d9::kSampMipFilter,   d3d9::kSampMaxMipLevel,
+                                    d3d9::kSampMipLodBias,  d3d9::kSampMaxAnisotropy};
+    std::uint32_t before[8];
+    for (int i = 0; i < 8; ++i) before[i] = r.getSampler(types[i]);
+    LIFT_CHECK_EQ_U32(before[0], d3d9::kAddressWrap);
+    LIFT_CHECK_EQ_U32(before[2], d3d9::kTexfPoint);
+    LIFT_CHECK_EQ_U32(before[4], d3d9::kTexfNone);
+    LIFT_CHECK_EQ_U32(before[5], 2u);
+    LIFT_CHECK_EQ_U32(before[6], lod_bias_bits);
+    LIFT_CHECK_EQ_U32(before[7], 4u);
+
+    // ---- ① Begin 写文档值（ALPHABLEND 与采样器无关：不带它也一样写）----
+    LIFT_CHECK_EQ_U32(r.begin(0u), 0u);
+    LIFT_CHECK_EQ_U32(r.getSampler(d3d9::kSampAddressU), d3d9::kAddressClamp);
+    LIFT_CHECK_EQ_U32(r.getSampler(d3d9::kSampAddressV), d3d9::kAddressClamp);
+    LIFT_CHECK_EQ_U32(r.getSampler(d3d9::kSampMagFilter), d3d9::kTexfLinear);
+    LIFT_CHECK_EQ_U32(r.getSampler(d3d9::kSampMinFilter), d3d9::kTexfLinear);
+    LIFT_CHECK_EQ_U32(r.getSampler(d3d9::kSampMipFilter), d3d9::kTexfLinear);
+    LIFT_CHECK_EQ_U32(r.getSampler(d3d9::kSampMaxMipLevel), 0u);
+    LIFT_CHECK_EQ_U32(r.getSampler(d3d9::kSampMipLodBias), 0u);
+    LIFT_CHECK_EQ_U32(r.getSampler(d3d9::kSampMaxAnisotropy), 1u);  // = caps MaxAnisotropy
+    // guest 在 Begin 之后覆盖 ⇒ 设备上是 guest 的值（真机也是：Draw 用 device 当前 stage 0）
+    LIFT_CHECK_EQ_U32(r.setSampler(d3d9::kSampMagFilter, d3d9::kTexfPoint), 0u);
+    LIFT_CHECK_EQ_U32(r.getSampler(d3d9::kSampMagFilter), d3d9::kTexfPoint);
+    // ---- Flush 不恢复（批次还开着）----
+    LIFT_CHECK_EQ_U32(r.f.method(r.sprite, 0x28u, {}), 0u);
+    LIFT_CHECK_EQ_U32(r.getSampler(d3d9::kSampMagFilter), d3d9::kTexfPoint);
+    LIFT_CHECK_EQ_U32(r.getSampler(d3d9::kSampAddressU), d3d9::kAddressClamp);
+    // ---- ② End 恢复 pre-Begin 的整块（含 Begin 内被 guest 改过的 MAG）----
+    LIFT_CHECK_EQ_U32(r.end(), 0u);
+    for (int i = 0; i < 8; ++i) LIFT_CHECK_EQ_U32(r.getSampler(types[i]), before[i]);
+
+    // ---- ④ DONOTSAVESTATE：写发生、End 不恢复 ----
+    LIFT_CHECK_EQ_U32(r.setSampler(d3d9::kSampMagFilter, d3d9::kTexfPoint), 0u);
+    LIFT_CHECK_EQ_U32(r.begin(d3dx9::kSpriteDoNotSaveState), 0u);
+    LIFT_CHECK_EQ_U32(r.getSampler(d3d9::kSampMagFilter), d3d9::kTexfLinear);  // 文档值仍然写
+    LIFT_CHECK_EQ_U32(r.getSampler(d3d9::kSampMinFilter), d3d9::kTexfLinear);
+    LIFT_CHECK_EQ_U32(r.end(), 0u);
+    LIFT_CHECK_EQ_U32(r.getSampler(d3d9::kSampMagFilter), d3d9::kTexfLinear);  // ⛔ 没恢复
+    LIFT_CHECK_EQ_U32(r.getSampler(d3d9::kSampMinFilter), d3d9::kTexfLinear);
+
+    // 收尾：把采样器放回 D3D9 缺省（不影响本夹具后续用例；本用例自己的断言已经做完）
+    for (std::uint32_t t : {d3d9::kSampAddressU, d3d9::kSampAddressV})
+        LIFT_CHECK_EQ_U32(r.setSampler(t, d3d9::kAddressWrap), 0u);
+    for (std::uint32_t t : {d3d9::kSampMagFilter, d3d9::kSampMinFilter})
+        LIFT_CHECK_EQ_U32(r.setSampler(t, d3d9::kTexfPoint), 0u);
+    LIFT_CHECK_EQ_U32(r.setSampler(d3d9::kSampMipFilter, d3d9::kTexfNone), 0u);
+}
+
+// ---------------------------------------------------------------------------------------
+// ②a1 **像素**：sprite 的 GPU 绘制用 **device 当前 stage-0**（不是常量、也不是影子表）
+//
+// 场景：2×2 四色纹理按 2× 放大（4×4）。D3D9 的采样位置 = `u·size − 0.5` ⇒ 像素 (21,21)
+//   的中心落在 texel 位置 (0.25,0.25)：
+//   · LINEAR ⇒ 0.5625·红 + 0.1875·绿 + 0.1875·蓝 + 0.0625·白 ≈ (159,64,64)
+//   · POINT  ⇒ 最近 texel (0,0) 的纯红 (255,0,0)（同一位置取整）
+// 判据（红了意味着什么）：
+//   ① `Begin(0)` 之后（文档 MAG/MIN=LINEAR）画出来的像素 = **LINEAR 混合值**；
+//   ② guest 在 Begin 之后把 stage-0 改成 POINT ⇒ 同一位置 = **纯红**，
+//      且与 ① 的像素**不同**（这条钉住"不再忽略 guest 的采样器"）；另一点取到纯绿（texel (1,0)）。
+//   ③ guest 显式设回 LINEAR ⇒ 像素回到 ① 的值（同一份映射，不是两条路各算一套）。
+// ★ 修前 sprite 恒 `Clamp/Point/Point/mip-on` ⇒ ① 读到纯红（≈255,0,0）⇒ 红；② 与 ① 相同 ⇒ 也红。
+// ★ 期望值**按公式算**（不是把解码输出抄成 expected）；每通道容差 ≤1 LSB（GPU unorm 舍入）。
+// ---------------------------------------------------------------------------------------
+int caseSpriteSamplerPixels(bool gpu) {
+    lift_test::g_current_case = gpu ? "d3dx9/sprite-sampler-pixels" : "d3dx9/sprite-sampler-protocol";
+    Rig r;
+    LIFT_CHECK(r.withSprite());
+    if (r.sprite == 0) return 0;
+    const lift::d3d9::DeviceInfo& d = r.dev.info;
+    std::string why;
+    if (gpu && !r.pixelArm(&why)) LIFT_SKIP(why.c_str());
+    using namespace lift;
+    LIFT_CHECK_EQ_U32(r.f.clearTo(r.dev, 0x004080C0u), 0u);
+
+    // 2×2 纹理：左上红 / 右上绿 / 左下蓝 / 右下白（全部不透明）
+    std::uint32_t tex = 0;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.dev.object, 2u, 2u, 1u, 0u, d3d9::kFmtA8R8G8B8, 1u, &tex), 0u);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return 0;
+    const std::uint32_t lr = r.f.placeBytes(std::vector<std::uint8_t>(8u, 0xEEu));
+    LIFT_CHECK_EQ_U32(r.f.method(tex, 0x4Cu, {0u, lr, 0u, 0u}), 0u);
+    const std::uint32_t tpitch = r.f.m.mem().rd32(lr + 0u);
+    const std::uint32_t tbits = r.f.m.mem().rd32(lr + 4u);
+    LIFT_CHECK_EQ_U32(tpitch, 8u);
+    const std::uint32_t texels[4] = {0xFFFF0000u, 0xFF00FF00u, 0xFF0000FFu, 0xFFFFFFFFu};
+    for (int y = 0; y < 2; ++y)
+        for (int x = 0; x < 2; ++x)
+            r.f.m.mem().wr32(tbits + static_cast<std::uint32_t>(y) * tpitch +
+                                 static_cast<std::uint32_t>(x) * 4u,
+                             texels[y * 2 + x]);
+    LIFT_CHECK_EQ_U32(r.f.method(tex, 0x50u, {0u}), 0u);
+
+    const std::uint32_t src = r.f.placeRect(0, 0, 2, 2);  // 整张 2×2
+    const std::uint32_t zero3 = r.f.placeVec3(0.0f, 0.0f, 0.0f);
+    // 2× 放大 + 平移：quad = 4×4 屏幕像素。三笔画在不同位置（同一矩阵形状，只换平移）。
+    auto setScale2x = [&](float tx, float ty) {
+        float m[16] = {0};
+        m[0] = 2.0f;
+        m[5] = 2.0f;
+        m[10] = 1.0f;
+        m[15] = 1.0f;
+        m[12] = tx;
+        m[13] = ty;
+        const std::uint32_t ea = r.f.placeMatrix(m);
+        LIFT_CHECK_EQ_U32(r.f.method(r.sprite, 0x14u, {ea}), 0u);
+    };
+
+    // ---- ① Begin(0)：文档 MAG/MIN=LINEAR ⇒ 像素 = LINEAR 混合值 ----
+    setScale2x(20.0f, 20.0f);
+    LIFT_CHECK_EQ_U32(r.begin(0u), 0u);
+    // 前提（设备可见）：Begin 之后 stage-0 真的是 LINEAR —— 否则下面的像素断言测的是别的东西。
+    LIFT_CHECK_EQ_U32(r.getSampler(d3d9::kSampMagFilter), d3d9::kTexfLinear);
+    LIFT_CHECK_EQ_U32(r.getSampler(d3d9::kSampMinFilter), d3d9::kTexfLinear);
+    LIFT_CHECK_EQ_U32(r.drawTex(tex, src, zero3, zero3, 0xFFFFFFFFu), 0u);
+    LIFT_CHECK_EQ_U32(r.end(), 0u);
+
+    // ---- ② guest 在 Begin 之后把 stage-0 改成 POINT ⇒ 像素 = 纯红（左上 texel）----
+    setScale2x(40.0f, 20.0f);
+    LIFT_CHECK_EQ_U32(r.begin(0u), 0u);
+    LIFT_CHECK_EQ_U32(r.setSampler(d3d9::kSampMagFilter, d3d9::kTexfPoint), 0u);
+    LIFT_CHECK_EQ_U32(r.setSampler(d3d9::kSampMinFilter, d3d9::kTexfPoint), 0u);
+    LIFT_CHECK_EQ_U32(r.drawTex(tex, src, zero3, zero3, 0xFFFFFFFFu), 0u);
+    LIFT_CHECK_EQ_U32(r.end(), 0u);
+
+    // ---- ③ guest 显式设回 LINEAR ⇒ 像素回到 ① ----
+    setScale2x(60.0f, 20.0f);
+    LIFT_CHECK_EQ_U32(r.begin(0u), 0u);
+    LIFT_CHECK_EQ_U32(r.setSampler(d3d9::kSampMagFilter, d3d9::kTexfLinear), 0u);
+    LIFT_CHECK_EQ_U32(r.setSampler(d3d9::kSampMinFilter, d3d9::kTexfLinear), 0u);
+    LIFT_CHECK_EQ_U32(r.drawTex(tex, src, zero3, zero3, 0xFFFFFFFFu), 0u);
+    LIFT_CHECK_EQ_U32(r.end(), 0u);
+
+    if (gpu) {
+        if (!r.syncPixels(&why)) LIFT_SKIP(why.c_str());
+        // ★ 像素坐标 → texel 位置：D3D9 的采样器约定是 `pos = u·size − 0.5`（texel 中心在
+        //   `u=(i+0.5)/size`），我们的 sprite UV 是 **texel 角**（`u=left/tw`）⇒ 两者配合正好
+        //   对齐第 0 个 texel 的**外角**。对这张 2×2 纹理、4×4 的 quad（x/y ∈ [20,24)）：
+        //     · 像素 (21,21) 的中心 → u=(1.5)/4=0.375 → pos=0.75−0.5=**0.25** ⇒ 线性混合 0.25/0.25；
+        //     · 像素 (21,20) → v=0.125 → pos=−0.25 ⇒ clamp 到 0；u 仍是 0.25 ⇒ 红/绿 0.75/0.25。
+        //   ⛔ 期望值不是"uv 直接乘宽度"：漏掉 −0.5 会把 (20,20)（pos=−0.25，clamp 后 = 0）
+        //      当成 0.25（这正是本用例第一版算错的那一格）。
+        // 期望（按上面的公式）：(21,21) R=(0.5625+0.0625)·255=159.375→159；G=B=0.25·255=63.75→64
+        const std::uint32_t linear_expected = 0x009F4040u;
+        checkPixel(r.f.m, d, 21, 21, linear_expected, "Begin 的文档 LINEAR 生效（texel 0.25/0.25）");
+        checkPixel(r.f.m, d, 21, 20, 0x00BF4000u, "LINEAR：u=0.25 / v clamp 到 0");
+        checkPixel(r.f.m, d, 61, 21, linear_expected, "guest 显式设回 LINEAR ⇒ 与 ① 一致");
+        // POINT（guest 在 Begin 之后覆盖）：同一 texel 位置 0.25/0.25 会**最近级取整到 (0,0)**
+        // ⇒ 纯红；而 (42,20) 的 pos 是 0.75 ⇒ 取整到 (1,0) ⇒ 纯绿。两条一起证明"读的是 device 值"。
+        checkPixel(r.f.m, d, 41, 21, 0x00FF0000u, "guest 改成 POINT ⇒ 最近 texel (0,0) 纯红");
+        checkPixel(r.f.m, d, 42, 20, 0x0000FF00u, "guest 改成 POINT ⇒ 最近 texel (1,0) 纯绿");
+        // ① 与 ② 必须**不同**（修前两处都是 Point ⇒ 相同）
+        const std::uint32_t lin = r.f.pixelAt(d, 21, 21);
+        const std::uint32_t pt = r.f.pixelAt(d, 41, 21);
+        ++lift_test::g_checks;
+        if (lift_test::pxNear(lin, pt, 1))
+            lift_test::failf(__FILE__, __LINE__,
+                             "LINEAR 与 POINT 的同一像素相同（0x%08X vs 0x%08X）⇒ sprite 没在跟随 device "
+                             "stage-0",
+                             lin, pt);
+        // 收尾：把 guest 采样器放回 D3D9 缺省（本夹具后续用例从干净状态开始）
+        LIFT_CHECK_EQ_U32(r.setSampler(d3d9::kSampMagFilter, d3d9::kTexfPoint), 0u);
+        LIFT_CHECK_EQ_U32(r.setSampler(d3d9::kSampMinFilter, d3d9::kTexfPoint), 0u);
+    }
+    LIFT_CHECK_EQ_U32(r.f.method(tex, 0x08u, {}), 0u);  // Release 回收
     return 0;
 }
 
@@ -1872,10 +2087,10 @@ void caseTraps() {
 
 // ---------------------------------------------------------------------------------------
 // ⑦ 资源耗尽 ≠ unimplemented：把**夹具自己**那 1 MiB guest 堆占满到
-//    "状态块（140 B 载荷 → 148 B 块）能成、批次数组（1024 B → 1032 B 块）不够"的窗口。
+//    "状态块（176 B 载荷 → 184 B 块）能成、批次数组（1024 B → 1032 B 块）不够"的窗口。
 //    · ⛔ 不改 `kFixtureHeapBytes` / `heap().init(...)`：占满的对象就是 guest 侧用的**同一个**
 //      `GuestHeap` ⇒ `createSpriteState` 里的 `cpu.heap->alloc` 真的失败（不是伪造前提）。
-//    · 取窗口下沿 `L = need_state`（那 148 B 正好被状态块吃满 ⇒ 批次数组一个字节都不剩）：
+//    · 取窗口下沿 `L = need_state`（那 184 B 正好被状态块吃满 ⇒ 批次数组一个字节都不剩）：
 //      再宽一点会把"失败路径上多了一次小分配"静默吸收掉 ⇒ `allocCount()+1` 把"多一次就红"变成判据。
 // ---------------------------------------------------------------------------------------
 void caseCreateSpriteOom() {
@@ -1900,15 +2115,15 @@ void caseCreateSpriteOom() {
 
     const std::uint32_t baseline = h.bytesInUse();
     // 载荷 = `createSpriteState` 真会申请的两次：
-    //   状态块 `kSpBytes` = 140（`d3dx9_sprite.cpp` 的 `kSpBytes`；本单把 Begin 的保存/恢复
-    //   三项追加在后面 ⇒ 128 → 140）；
+    //   状态块 `kSpBytes` = 176（`d3dx9_sprite.cpp` 的 `kSpBytes`；MSDN Begin 的 stage-0 采样器
+    //   保存块（8 项 × 4 B）追加在后面 ⇒ 140 → 176）；
     //   批次数组 `kInitialBatchCapacity`(16) × `kBatchEntryBytes`（`d3dx9_sprite.h`）。
     //   ★ 批次载荷写成**算式**（段 3 的 ⑥）：原先这里写死 `1152`，于是条目一变大（72 → 80 B）
     //     夹具仍在按 16×72 造窗口 —— 窗口的**上沿**与代码真实申请的字节数脱钩，载荷增长不会被发现。
     //     算式与 `kBatchEntryBytes` 同源：改常量 ⇒ 窗口跟着动 ⇒ 下面的范围断言 / 覆盖率警戒线红。
     //     ⛔ 常量 16 是 `d3dx9_sprite.cpp` 里 `kInitialBatchCapacity` 的值（内部量，不导出）；
     //     它若变大，`need_batch < 堆` 与失败位置会一起变，用例当场红而不是静默换窗口。
-    const std::uint32_t need_state = footprint(140u);
+    const std::uint32_t need_state = footprint(176u);
     const std::uint32_t need_batch = footprint(16u * lift::d3dx9::kBatchEntryBytes);
     const std::uint32_t header = footprint(0u);
     LIFT_CHECK_EQ_U32(h.bytesInUse(), baseline);  // 探针没留下块
@@ -2446,6 +2661,8 @@ int main(int argc, char** argv) {
 #endif
             int rc = caseDrawEndPixels(true);
             if (rc != 0) return rc;  // 77 = 没有 GPU 设备（SKIP），⛔ 不假绿
+            rc = caseSpriteSamplerPixels(true);
+            if (rc != 0) return rc;
             rc = caseTextureDraw(true);
             if (rc != 0) return rc;
             rc = caseDoNotAddRefStaleTexture(true);
@@ -2455,6 +2672,8 @@ int main(int argc, char** argv) {
         // ---- 缺省臂（pure）：对象 / 状态 / 协议 / 生命周期 / trap；**不判像素** ----
         caseCreateQueryRelease();
         if (caseDrawEndPixels(false) != 0) return 1;
+        caseBeginSamplerState();
+        if (caseSpriteSamplerPixels(false) != 0) return 1;
         caseTextureFromMemory();
         caseTextureFromMemoryPng();
         casePngDecode();
