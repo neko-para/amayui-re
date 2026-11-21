@@ -61,6 +61,7 @@
 //   一块假 `GuestMemory`（假 Engine / 假池）+ 一个默认 `WindowManager` + 注入的 `ReadingsSource`。
 //   插件回调的全部效果都落在这两样上（Edit → guest 内存；Input → 队列 / 光标）。
 // ★ 读点 = `PluginHost::onReadPoint(wm, point)`（它内部就是 `executor_.atPoint` + 首点 `sampleNow`）。
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -1948,9 +1949,11 @@ void caseCallbackWallOnly() {
     *flag_slot = 0;  // 池是零填充；显式置 0（防同一个池被别的用例写过）
     const std::uint32_t want = lift::encodeInt(1u, kFxKey);
     const DWORD main_tid = ::GetCurrentThreadId();
+    std::atomic<bool> helper_ready{false};
     std::thread helper([&] {
         ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_HIGHEST);  // 响应延迟要 µs 级
         const auto t0 = std::chrono::steady_clock::now();
+        helper_ready.store(true);  // ★ 主线程等这一位：见下面的握手
         while (*signal_slot != want && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(5)) {
             ::SwitchToThread();
         }
@@ -1971,6 +1974,12 @@ void caseCallbackWallOnly() {
         }
         *flag_slot = want;  // 放行 JS（无论挂起成功与否 —— 失败时用例会因为"墙钟没超"而红）
     });
+    // ★ **握手**：等 helper 真的在自旋之后才进回调。否则 `std::thread` 的启动延迟会被算成
+    //   JS 体的 CPU 忙等（实测负载下 helper 晚起 1.3–3.5 ms ⇒ `js_cpu_ns` 假超 2 ms）。
+    for (int i = 0; i < 100000 && !helper_ready.load(); ++i) {
+        ::SwitchToThread();
+    }
+    LIFT_CHECK(helper_ready.load());
     f.host->runner().setBudget(lift::plugin::Budget{2'000'000ull, 0u});
     f.pump();
     helper.join();
