@@ -1101,6 +1101,10 @@ int main(int argc, char** argv) {
         host.cpu().windows->setInputPlan(&input_plan);
         // `present.cpp` 的 `note(Frame)` 保留：它只是摘要 `presents=` 的读数，⛔ 不再是门。
         host.presenter().setInputPlan(&input_plan);
+        // ★ **回调边界**（2026-11-21）：`note(Frame)` 这条线在本臂是**活的** ⇒ 抬起还必须在按下之后
+        //   跨过一个完整的 guest 回调（`PointerCore::kCallbackFramesBeforeRelease`；证据见
+        //   `pointer_core.h` 的闸门 ②'）。⛔ 纯夹具 / 插件 executor 没有这条线 ⇒ 不置位 = 旧行为。
+        input_plan.requireCallbackBoundary();
         // ★ 窗口 profile 的标记钩子（`profile_begin/end` ⇒ 开/收窗 + 打桶表）。
         //   装配位置与其余 `attach*` 同处：`AotHost` 已在作用域里，钩子只在**有配方**时才有意义。
         //   ⛔ 不改配方语法：钩子只消费既有的 `profile_begin` / `profile_end` 两步。

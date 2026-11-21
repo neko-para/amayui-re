@@ -19,6 +19,10 @@
 //      而且到期之前**不许**提前抬起；整屏不读位置时 click 也**一定**能按下（`kPressFallbackMs`）。
 //   ④ **交还租约**：注入会话结束（配方走完 / `releaseAll`）⇒ `input::releaseProgram()`，
 //      真实鼠标重新生效（`runtime/input_device.h` 的 `Driver` / §3.2 #19 就是它的合同）。
+//   ⑤ **回调边界**（2026-11-21 追加）：供给帧线的驱动（`InputPlan::requireCallbackBoundary`）⇒
+//      按下与抬起必须落在**不同的 guest 回调**；否则闸门① 的 2 个 KeyLevel 读点可以全在同一个回调里
+//      （现场失败臂 press→release 只跨 6 个读点），回调体的状态机一次也看不到按下电平。
+//      判据见 `inject/click-crosses-callback`（⛔ 不是"某函数被调用了"）。
 //
 // ⚠ 诚实边界：本用例判的是**注入层的时序与租约**，⛔ 不判"引擎会不会命中那个宝藏"。
 //   "真的能被引擎看见"的最终判据只能人工跑一次 SAVE05 点宝藏（命令与期望见交付报告 §8）。
@@ -174,6 +178,79 @@ void caseTwoPhaseClick() {
     LIFT_CHECK(!f.wm.keyDown(kVkLButton));
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countMessages(f.wm, q0, lift::input::kWmLButtonUp)), 1);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.releases()), 1);
+}
+
+// =====================================================================================
+// ⑤ · **合成 click 必须跨过一个完整的 guest 回调**（2026-11-21 现场：单发 click 4/5 成）
+//
+// 判据（红了意味着什么）：
+//   ① 假 guest = **每个回调只读一次按键电平**（真实引擎的形状：回调体每帧读一次
+//      `GetAsyncKeyState` 比对 `3f1`/`3f2`）；一条合成 click 的按下与抬起**必须落在不同的回调**；
+//   ② 同一个回调里把宿主墙钟推过 `kReleaseFallbackMs`（旧判据的兜底腿）也**不许**抬起 ——
+//      否则那个回调的状态机还没读到按下，抬起就已经发生（旧行为：`reason=keylevel`、press→release
+//      只跨 6 个读点，全在同一回调）；
+//   ③ 按下电平必须**活到下一个回调的按键读点**（不只是"某函数被调用了"）：假 guest 在下一个
+//      回调读 `GetAsyncKeyState` 时按钮仍必须是按下的；
+//   ④ 两个完整回调走完之后的下一个读点才抬起，且只抬一次。
+// =====================================================================================
+void caseClickCrossesCallback() {
+    lift_test::g_current_case = "inject/click-crosses-callback";
+    Fixture f;
+    LIFT_CHECK(f.ok);
+    if (!f.ok) return;
+    lift::InputPlan plan;
+    plan.setClockForTest(&testNowMs);
+    plan.requireCallbackBoundary();  // 与 `aot_main` 的装配**同一句**（这个驱动供给帧线）
+    f.wm.setInputPlan(&plan);
+    g_now_ms = 6000;
+    std::string err;
+    const bool loaded = plan.loadText("click 640 360 right\n", "mem", &err);
+    LIFT_CHECK(loaded);
+    if (!loaded) return;
+
+    // ---- 回调 A：臂上 → 按下（此后的按键读点 = 这个回调的状态机读）----
+    readPoint(f.wm, plan, lift::InputPoint::PeekMsg, false);   // 阶段 ①：臂上（只 move）
+    readPoint(f.wm, plan, lift::InputPoint::CursorPos, true);  // 完成一个位置读点
+    readPoint(f.wm, plan, lift::InputPoint::PeekMsg, false);   // 阶段 ②：按下
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.presenting()), 0);
+    LIFT_CHECK(f.wm.keyDown(kVkRButton));
+
+    // ---- 同一个回调的按键电平读点：读到按下（flush-before-read），但仍**不许**抬起 ----
+    readPoint(f.wm, plan, lift::InputPoint::KeyLevel, true);
+    LIFT_CHECK(f.wm.keyDown(kVkRButton));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 1);
+
+    // ---- 旧判据的兜底腿：墙钟越过 `kReleaseFallbackMs` + 一串位置读点，仍然**不许**抬起 ----
+    //   ★ 这 12 个位置读点就是现场失败臂那"6 个读点"的形状（同一个回调里的轮询体）。
+    g_now_ms += lift::InputPlan::kReleaseFallbackMs + 100;
+    for (int i = 0; i < 12; ++i) {
+        readPoint(f.wm, plan, lift::InputPoint::CursorPos, true);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 1);  // ★ 旧判据在此红
+        LIFT_CHECK(f.wm.keyDown(kVkRButton));
+    }
+
+    // ---- 回调 A 走完（Present #1）⇒ 还差一个**完整**回调 ----
+    plan.note(lift::PlanEventKind::Frame);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.presenting()), 1);
+    readPoint(f.wm, plan, lift::InputPoint::CursorPos, true);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 1);
+
+    // ---- 回调 B：这个回调的按键读点必须**仍读到按下**（按下跨过了一个完整回调）----
+    readPoint(f.wm, plan, lift::InputPoint::KeyLevel, true);
+    LIFT_CHECK(f.wm.keyDown(kVkRButton));  // ★ 这是"按下被下一个回调看见"的判据
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 1);
+    // 回调 B 走完（Present #2）⇒ 下一个读点才抬起
+    plan.note(lift::PlanEventKind::Frame);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.presenting()), 2);
+    readPoint(f.wm, plan, lift::InputPoint::PeekMsg, false);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.pendingReleases()), 0);
+    LIFT_CHECK(!f.wm.keyDown(kVkRButton));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(plan.releases()), 1);
+    // 读数（不是断言）：press/release 的回调号与保持时长，能直接对账"跨没跨回调"。
+    std::printf("[click-crosses-callback] press_frames=0 release_frames=%llu hold_ms=%llu pending=%zu\n",
+                static_cast<unsigned long long>(plan.presenting()),
+                static_cast<unsigned long long>(g_now_ms - 6000), plan.pendingReleases());
 }
 
 // =====================================================================================
@@ -429,6 +506,7 @@ void caseOwnershipHandback() {
 
 int main() {
     caseTwoPhaseClick();
+    caseClickCrossesCallback();
     caseDrag();
     caseMoveOnly();
     caseWallclockFallbacks();

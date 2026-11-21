@@ -167,6 +167,14 @@ public:
         mark_fn_ = fn;
     }
 
+    // ★ **回调边界**（装配点：与 `host.presenter().setInputPlan(&input_plan)` 同一处）：
+    //   本驱动会收到 `note(Frame)`（`present.cpp` 在 `++frame_count_` 同一刻推）⇒ 抬起还必须在
+    //   **按下之后的下一个完整 guest 回调**之后才允许（`PointerCore::kCallbackFramesBeforeRelease`）。
+    //   证据：单发 `click … right` 曾在 REIGN 上 4/5 成；失败臂 press→release 只跨 6 个读点（含 2 个
+    //   KeyLevel 读点）⇒ 闸门① 满足了，但那 6 个读点全在**同一个回调**里，回调体的状态机看不到按下。
+    //   ⛔ 缺省 false = 本驱动没有帧线（插件 `IntentExecutor` / 纯夹具）⇒ 保持旧行为（只有 ①/②）。
+    void requireCallbackBoundary(bool required = true) { callback_boundary_ = required; }
+
     // =====================================================================================
     // ★ `--input-plan-trace`（opt-in；`REQ-01M7PG086DG4BBPA40VCVZTP4X` B）
     //   · 缺省 `nullptr` ⇒ **一条都不打**（默认档输出逐字节不变）；
@@ -363,11 +371,11 @@ private:
     void traceStepConsumed(const Step& s, std::uint64_t samples_now, InputPoint point,
                            const char* kind_token, const char* extra_tag);
     void traceRelease(const PendingRelease& r, bool key_seen, bool wallclock, std::uint64_t samples_now,
-                      InputPoint point);
+                      std::uint64_t frames_now, InputPoint point);
     // ★ `PointerCore::releaseDue` 的抬起钩子（`plan:<文件>:<行> reason=…` 的文本属于配方口径 ⇒
     //   留在本类；`setTrace` 开/关时把钩子装上/摘掉，缺省 nullptr ⇒ core 每次抬起只判空一次）。
     static void releaseTraceHook(void* ctx, const PendingRelease& r, bool key_seen, bool wallclock,
-                                 std::uint64_t samples_now, InputPoint point);
+                                 std::uint64_t samples_now, std::uint64_t frames_now, InputPoint point);
 
     Recipe recipe_;
     // ★ `pending_` / `armed_` 是 `PointerCore` 的成员（`runtime/pointer_core.h`；本类经继承读写）。
@@ -412,6 +420,9 @@ private:
     ProfileMarkHook mark_fn_ = nullptr;
     // ★ `--input-plan-trace`（缺省 nullptr ⇒ 不打；见 `setTrace`）
     std::FILE* trace_out_ = nullptr;
+    // ★ **回调边界**（见 `requireCallbackBoundary`）：装配点置位后，抬起必须跨过
+    //   `kCallbackFramesBeforeRelease` 个完成的 guest 回调。⛔ 缺省 false ⇒ 旧行为（无帧线）。
+    bool callback_boundary_ = false;
     void* state_seq_ctx_ = nullptr;
     StateSeqFn state_seq_fn_ = nullptr;
     std::array<std::uint64_t, kInputPointCount> deliver_calls_{};

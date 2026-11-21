@@ -52,6 +52,13 @@ struct PointerPoint {
     std::uint64_t read_index = 0;
     // 施加它的 step 行（`InputPlan` 用；executor 恒 0）。
     int line = 0;
+    // ★ 本读点之前**已完成**的 guest 回调数（帧计数；唯一来源 = 派生类自己的帧钩子：
+    //   `InputPlan` = `presenting()`（`present.cpp` 在 `++frame_count_` 同一刻推的 `note(Frame)`），
+    //   `IntentExecutor` 没有这根线 ⇒ 恒 0）。
+    std::uint64_t frames = 0;
+    // ★ 这个驱动**供给了**回调边界（`frames` 是活的）⇒ 抬起还必须在**按下之后的下一个完整回调**之后
+    //   （见 `kCallbackFramesBeforeRelease`）。没有这根线的驱动（插件 executor / 纯夹具）保持旧行为。
+    bool callback_boundary = false;
 };
 
 // =====================================================================================
@@ -59,7 +66,8 @@ struct PointerPoint {
 // =====================================================================================
 class PointerCore {
 public:
-    // **已按下**、等抬起的按钮（闸门 = `kKeyLevelReadsBeforeRelease` 个 KeyLevel 读点 / 墙钟兜底）。
+    // **已按下**、等抬起的按钮（闸门 = `kKeyLevelReadsBeforeRelease` 个 KeyLevel 读点 / 墙钟兜底 /
+    // 供给回调边界时的 `kCallbackFramesBeforeRelease` 个 guest 回调）。
     struct PendingRelease {
         MouseButton button = MouseButton::Left;
         int x = 0;                       // **已缩放**的客户区坐标（move / down / up 共用）
@@ -67,6 +75,7 @@ public:
         std::uint64_t press_samples = 0;      // 按下那一刻的 `inputSampleCount`（**只是读数**，⛔ 不是闸门）
         std::uint64_t press_key_reads = 0;    // 按下那一刻的 KeyLevel 读点数 ⇒ **闸门 ①**
         std::uint64_t press_ms = 0;           // 按下那一刻的宿主墙钟 ⇒ **兜底 ②**
+        std::uint64_t press_frames = 0;       // 按下那一刻已完成的 guest 回调数 ⇒ **闸门 ②'**
         std::uint64_t press_reads = 0;        // 按下那一刻的读点序号（trace 读数）
         int line = 0;                     // 施加它的 step 行（trace 的 `plan:<文件>:<行>`）
         // ★ C1c：提交者的 owner（`Intent::owner`；配方 / 控制层恒 0）。`releaseOwner` 只认它。
@@ -122,13 +131,23 @@ public:
     //     （EA `0x404029 / 0x4040A9`；清零只在注册热点 `0x403BBE / 0x403C39`）；
     //   · 有的屏整屏不读位置 ⇒ 墙钟兜底（250 ms ≈ 5 个周期）保证 click **一定会按下**。
     static constexpr std::uint64_t kPressFallbackMs = 250;
+    // ②' ★ **回调边界**：供给帧计数的驱动（`PointerPoint::callback_boundary`）⇒ 抬起还必须在
+    //   **按下之后的下一个完整 guest 回调走完之后**：`frames >= press_frames + 2`。
+    //   · 为什么是 **2** 而不是 1：帧计数在回调**末尾**（Present）才 +1 ⇒ `+1` 只证明"按下那一帧
+    //     走完了"，证明不了"**下一个**回调的按键电平读发生在抬起之前"（按下可能落在那一帧的最后
+    //     几个读点里，它的状态机读已经过去了）。`+2` = 按下那一帧 + 它之后的**一整帧**都走完。
+    //   · ★ 为什么这一条**不能只挂在兜底 ② 上**：2026-11-21 实测失败臂 `reason=keylevel`、
+    //     press→release 只跨 **6 个读点**（含 2 个 KeyLevel 读点）—— 闸门 ① 满足了，但那 6 个读点
+    //     全在**同一个回调**里 ⇒ 回调体的状态机（`3f1`/`3f2` 比对）一次也没看到按下电平。
+    //     ⇒ ①/② 任一成立也**不够**，必须再过这一条（只有"没供给回调边界"的驱动才跳过它）。
+    static constexpr std::uint64_t kCallbackFramesBeforeRelease = 2;
 
     // ★ 抬起那一行的**唯一外部消费者**（`--input-plan-trace` 的 `plan:<文件>:<行> reason=…`）。
     //   为什么是裸函数指针 + `void*`（同 `InputPlan::setProfileMarkHook` 的既有风格）：
     //   缺省 nullptr ⇒ 每次抬起只多一次判空；⛔ 不用 `std::function`（间接跳转 + 可能的分配）。
     //   文本格式属于**派生类**（`plan:文件:行` 是配方口径）⇒ core 只把读数交出去。
     using ReleaseTraceFn = void (*)(void* ctx, const PendingRelease& r, bool key_seen, bool wallclock,
-                                    std::uint64_t samples, InputPoint point);
+                                    std::uint64_t samples, std::uint64_t frames, InputPoint point);
     void setReleaseTrace(void* ctx, ReleaseTraceFn fn) {
         trace_ctx_ = ctx;
         trace_ = fn;
