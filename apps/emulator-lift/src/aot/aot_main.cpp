@@ -223,15 +223,23 @@ void usage() {
         "  --present-screenshot <path>      每次可见窗口 Present 后存一张窗口 BMP（{frame} 可用）\n"
         "  --present-screenshot-frame N     只回读第 N 帧（1 起；0 = 每帧都写）\n"
         "  --scale auto|数值  窗口客户区 = round(1280×s) × round(720×s)。★ **只改窗口、不改帧**：\n"
-        "                      guest 画面恒为 1280×720，放大后的模糊**可接受**（真机也糊）⇒\n"
-        "                      ⛔ 不做高分辨率重渲染 / 不改帧尺寸 / 不加 upscale pass。缺省 1.0\n"
+        "                      guest 画面恒为 1280×720 ⇒ 放大由宿主完成（选哪个滤波器见\n"
+        "                      `--scale-filter`，缺省 linear = 与真机 150%% DPI 同档的平滑放大）\n"
+        "                      ⇒ ⛔ 不做高分辨率重渲染 / 不改帧尺寸 / 不加 upscale pass。缺省 1.0\n"
         "                      = 1280×720，逐字节不变。auto = 按显示 DPI（SDL 的 display content\n"
         "                      scale）取，取不到 ⇒ 回 1.0 并打一行 readout；启动固定打一行\n"
-        "                      `scale: …（window WxH，image 1280x720；放大，接受模糊）`\n"
+        "                      `scale: …（window WxH，image 1280x720；filter=…；…）`\n"
         "                      （缺省 1.0 也打，一次性；s<1 说\"缩小\"）。★ `--present headless`\n"
         "                      对 `--scale` **无副作用**：接受但不生效（隐藏离屏窗口仍是\n"
         "                      1280×720，也不查 DPI）。非 auto 且非正数 / NaN / 垃圾 ⇒ exit 2\n"
         "                      并点名本参数\n"
+        "  --scale-filter nearest|linear\n"
+        "                      放大时的采样滤波器（缺省 **linear**）：linear = 与真机 150%% DPI\n"
+        "                      同档的平滑放大 / nearest = 硬边（1.5× 这类非整数倍率会有锯齿；\n"
+        "                      像素党 / A/B 对照用，与换滤波器之前逐字节相同）。★ 只影响宿主\n"
+        "                      呈现的那次放大：⛔ 不改帧尺寸、⛔ 不改 guest 像素、⛔ 不改游戏内容\n"
+        "                      的纹理采样；清晰度仍由源分辨率（image 1280×720）决定。\n"
+        "                      未知值（含大小写不符）⇒ exit 2 并点名本参数\n"
         "  --baseline-lift <N> 宿主基线补偿**默认字号的值**像素（0..64；0 = 关；缺省 = 编译期\n"
         "                      `kBaselineLift`）。★ 宿主视觉策略（⛔ 不是引擎语义）：≤16px 按表给 1，\n"
         "                      同一字号下所有字形位移完全一致（⛔ 不做逐字型夹取）。\n"
@@ -384,8 +392,9 @@ int main(int argc, char** argv) {
     std::string present_screenshot;
     bool present_screenshot_set = false;
     std::uint64_t present_screenshot_frame = 0;
-    // ★ `--scale <auto|数值>`（缺省 Fixed 1.0 = 1280×720，逐字节不变）。取值 / 拒绝 / readout
-    //   文案的唯一一份在 `runtime/window_scale.h`；本文件只做"解析 + 交给 sink + 打印"。
+    // ★ `--scale <auto|数值>`（缺省 Fixed 1.0 = 1280×720，逐字节不变）+ `--scale-filter nearest|linear`
+    //   （缺省 linear）：取值 / 拒绝 / readout 文案的唯一一份在 `runtime/window_scale.h`；
+    //   本文件只做"解析 + 交给 sink + 打印"。两个 flag 落进**同一个** `ScaleSpec`（滤波器不是第二份真源）。
     lift::ScaleSpec scale_spec;
     std::string frame_dump;  // --dump-frame（guest 后缓冲 BMP；`cpu.shim.frame_dump`）
     // ★ 控制层（`--control-*`；缺省全不给 ⇒ 控制层**完全不启动**，默认档逐字节不变）。
@@ -730,6 +739,19 @@ int main(int argc, char** argv) {
                 return 2;
             }
             scale_spec = parsed.spec;
+        } else if (a == "--scale-filter") {
+            // ★ 取值 / 拒绝口径的唯一一份在 `runtime/window_scale.h`（`parseScaleFilterSpec`）：
+            //   `linear` / `nearest`、大小写敏感、整串精确匹配；其余 ⇒ exit 2 + 点名本参数。
+            //   ⛔ 不放宽成"认不出就 linear"：那会让"以为在用 nearest 对照"变成静默的 linear。
+            std::string v;
+            if (!needValue("--scale-filter", &v)) return 2;
+            const lift::ScaleFilterParse parsed = lift::parseScaleFilterSpec(v.c_str());
+            if (!parsed.ok) {
+                std::fprintf(stderr, "emulator-lift-aot: --scale-filter 的值非法：`%s`（%s）\n", v.c_str(),
+                             parsed.error != nullptr ? parsed.error : "只能是 nearest 或 linear");
+                return 2;
+            }
+            scale_spec.filter = parsed.filter;
         } else if (a == "--help" || a == "-h") {
             usage();
             return 0;
@@ -1282,6 +1304,7 @@ int main(int argc, char** argv) {
             scale_report.applied = false;
             scale_report.auto_requested = scale_spec.kind == lift::ScaleSpec::Kind::Auto;
             scale_report.scale = scale_spec.value;
+            scale_report.filter = scale_spec.filter;  // 不生效但仍如实填（⚠ readout 不印这一格）
             scale_report.window_w = lift::kBaseWindowW;
             scale_report.window_h = lift::kBaseWindowH;
         }

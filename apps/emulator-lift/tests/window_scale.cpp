@@ -2,7 +2,7 @@
 //
 // 判据（红了意味着什么）：
 //   ① **缺省 1.0 = 现状**：`ScaleSpec{}` 是 Fixed 1.0，窗口 = 1280×720，readout 逐字是
-//      `scale: 1.0（window 1280x720，image 1280x720）`。红了 ⇒ `--scale` 的缺省不再与
+//      `scale: 1.0（window 1280x720，image 1280x720；filter=linear）`。红了 ⇒ `--scale` 的缺省不再与
 //      `SDL_CreateWindow(…,1280,720,…)` 等价（"缺省行为不变"是承诺，不是巧合）。
 //   ② **数值倍率**：窗口客户区 = `round(1280×s) × round(720×s)`，**画面仍是 1280×720**。
 //      1.5 ⇒ 1920×1080；1.25 ⇒ 1600×900（非整数倍率，取整点在这里）；0.5 ⇒ 640×360。
@@ -23,6 +23,10 @@
 //      红了 ⇒ 用户给了垃圾倍率却跑成了一个静默的缺省窗口。
 //   ⑥ **headless 无副作用**：`applied=false` 时 readout 明说"不生效"，且不印 window（没有窗口），
 //      仍带 `image 1280x720`。红了 ⇒ `--present headless` 下 `--scale` 被静默接受/静默忽略。
+//   ⑦ **`--scale-filter` 只有两个值、缺省 linear**（2026-11-21）：`linear` / `nearest` 接受，
+//      大小写不符 / 尾随空格 / 前缀 / 数值 / 空串一律拒（CLI 侧 exit 2 + 点名该参数），且拒绝原因
+//      点名值域；readout 印出**当前**滤波器（1.5 + nearest 换一句"硬边"）。
+//      红了 ⇒ 用户要的 nearest 对照静默变成 linear（或反之），A/B 与像素断言一起失效。
 //
 // ★ 本用例**只** include 纯头（`window_scale.h` / `cursor_map.h`）：不建窗口、不碰 GPU、不读资产
 //   ⇒ 顶层无条件注册 = pure 档（`AGENTS.md` §12.4 的判据 = 注册位置）。
@@ -63,9 +67,14 @@ void caseDefaultUnchanged() {
     const std::string line = lift::scaleReadoutLine(report);
     std::printf("[readout-default] %s\n", line.c_str());
     ++lift_test::g_checks;
-    if (line != "scale: 1.0（window 1280x720，image 1280x720）") {
+    if (line != "scale: 1.0（window 1280x720，image 1280x720；filter=linear）") {
         lift_test::failf(__FILE__, __LINE__, "缺省 readout 不是期望的那一行：`%s`", line.c_str());
     }
+    // ★ 缺省滤波器 = **linear**（2026-11-21）：红了两件事之一 —— 有人把缺省退回 NEAREST
+    //   （放大后比真机糙），或 `ScaleSpec{}` 的滤波器字段没被 readout 读到。
+    LIFT_CHECK(spec.filter == lift::ScaleFilter::Linear);
+    LIFT_CHECK(report.filter == lift::ScaleFilter::Linear);
+    LIFT_CHECK(std::string(lift::scaleFilterName(lift::kDefaultScaleFilter)) == "linear");
 }
 
 // ---- ② 数值倍率：round(1280×s) × round(720×s)，画面仍 1280×720 ----
@@ -95,7 +104,8 @@ void caseFixedScales() {
                          map.scale, map.off_x, map.off_y);
     }
     // ★ 范围裁决（2026-11-18）：`--scale` **只改窗口，不改帧** ⇒ readout 必须自己说清
-    //   "image 仍是 1280×720（放大，接受模糊）"，⛔ 不许让人读成"帧被重渲染成 1920×1080"。
+    //   "image 仍是 1280×720"，⛔ 不许让人读成"帧被重渲染成 1920×1080"。
+    //   ★ 滤波器（2026-11-21）：同一行印 `filter=linear`（缺省）+ 一句放大口径（⛔ 不承诺"变清晰"）。
     {
         lift::ScaleReport scaled;
         scaled.scale = 1.5;
@@ -104,11 +114,27 @@ void caseFixedScales() {
         const std::string line = lift::scaleReadoutLine(scaled);
         std::printf("[readout-1.5] %s\n", line.c_str());
         ++lift_test::g_checks;
-        if (line != "scale: 1.5（window 1920x1080，image 1280x720；放大，接受模糊）") {
+        if (line !=
+            "scale: 1.5（window 1920x1080，image 1280x720；filter=linear；"
+            "放大：与真机 150% DPI 同档的平滑放大）") {
             lift_test::failf(__FILE__, __LINE__, "1.5 readout 不是期望的那一行：`%s`", line.c_str());
         }
     }
-    // 缩小档（s < 1）说"缩小"，⛔ 不冒充"放大，接受模糊"；恰好 1.0 不加这一句（缺省那一行已钉）。
+    // `--scale-filter nearest` 档：同一行换口径（硬边 / 锯齿），且⛔ 不冒充 linear 那句。
+    {
+        lift::ScaleReport scaled;
+        scaled.scale = 1.5;
+        scaled.window_w = 1920;
+        scaled.window_h = 1080;
+        scaled.filter = lift::ScaleFilter::Nearest;
+        const std::string line = lift::scaleReadoutLine(scaled);
+        std::printf("[readout-1.5-nearest] %s\n", line.c_str());
+        ++lift_test::g_checks;
+        if (line != "scale: 1.5（window 1920x1080，image 1280x720；filter=nearest；放大：硬边，非整数倍率有锯齿）") {
+            lift_test::failf(__FILE__, __LINE__, "1.5/nearest readout 不是期望的那一行：`%s`", line.c_str());
+        }
+    }
+    // 缩小档（s < 1）说"缩小"，⛔ 不冒充"放大"；恰好 1.0 不加这一句（缺省那一行已钉）。
     {
         lift::ScaleReport half;
         half.scale = 0.5;
@@ -117,7 +143,7 @@ void caseFixedScales() {
         const std::string line = lift::scaleReadoutLine(half);
         std::printf("[readout-0.5] %s\n", line.c_str());
         ++lift_test::g_checks;
-        if (line != "scale: 0.5（window 640x360，image 1280x720；缩小）") {
+        if (line != "scale: 0.5（window 640x360，image 1280x720；filter=linear；缩小）") {
             lift_test::failf(__FILE__, __LINE__, "0.5 readout 不是期望的那一行：`%s`", line.c_str());
         }
     }
@@ -243,7 +269,8 @@ void caseAutoDpi() {
     const std::string ok_line = lift::scaleReadoutLine(ok_report);
     std::printf("[readout-auto-ok] %s\n", ok_line.c_str());
     LIFT_CHECK(ok_line ==
-               "scale: 1.25（window 1600x900，image 1280x720；放大，接受模糊；"
+               "scale: 1.25（window 1600x900，image 1280x720；filter=linear；"
+               "放大：与真机 150% DPI 同档的平滑放大；"
                "auto ← display content scale 1.25）");
 
     lift::ScaleReport fb_report;
@@ -257,7 +284,8 @@ void caseAutoDpi() {
     const std::string fb_line = lift::scaleReadoutLine(fb_report);
     std::printf("[readout-auto-fallback] %s\n", fb_line.c_str());
     LIFT_CHECK(fb_line ==
-               "scale: 1.0（window 1280x720，image 1280x720；auto 取不到 display content scale（SDL 返回 0.0）"
+               "scale: 1.0（window 1280x720，image 1280x720；filter=linear；"
+               "auto 取不到 display content scale（SDL 返回 0.0）"
                "⇒ 回 1.0）");
 }
 
@@ -317,6 +345,46 @@ void caseHeadlessReadout() {
     LIFT_CHECK(auto_line == "scale: auto（--present headless ⇒ 无窗口可施，不生效；image 1280x720）");
 }
 
+// ---- ⑤' `--scale-filter` 的解析：linear / nearest 接受，其余拒绝（口径照 `--scale`）----
+void caseParseFilter() {
+    lift_test::g_current_case = "window-scale/parse-filter";
+    // 接受：两个值，大小写敏感、整串精确匹配。
+    {
+        const lift::ScaleFilterParse p = lift::parseScaleFilterSpec("linear");
+        LIFT_CHECK(p.ok);
+        LIFT_CHECK(p.filter == lift::ScaleFilter::Linear);
+        LIFT_CHECK(std::string(lift::scaleFilterName(p.filter)) == "linear");
+    }
+    {
+        const lift::ScaleFilterParse p = lift::parseScaleFilterSpec("nearest");
+        LIFT_CHECK(p.ok);
+        LIFT_CHECK(p.filter == lift::ScaleFilter::Nearest);
+        LIFT_CHECK(std::string(lift::scaleFilterName(p.filter)) == "nearest");
+    }
+    // 拒绝：大小写不符 / 尾随空格 / 前缀 / 数值 / 空串 / 空指针（CLI 侧 ⇒ exit 2 + 点名
+    // `--scale-filter`）。★ 不做"认不出就当 linear"的放宽：那会让 nearest 对照静默变成 linear。
+    const char* const kBads[] = {"LINEAR", "Linear", "NEAREST", "Nearest", "linear ", " nearest",
+                                 "lin",    "near",    "0",       "1",      "auto",     "1.5", ""};
+    for (const char* bad : kBads) {
+        const lift::ScaleFilterParse p = lift::parseScaleFilterSpec(bad);
+        ++lift_test::g_checks;
+        if (p.ok) {
+            lift_test::failf(__FILE__, __LINE__, "`%s` 应被拒绝（parseScaleFilterSpec 却 ok=true, filter=%s）", bad,
+                             lift::scaleFilterName(p.filter));
+        }
+    }
+    LIFT_CHECK(!lift::parseScaleFilterSpec(nullptr).ok);
+    // 拒绝原因必须**点名合法值域**（CLI 原样拼进报错 ⇒ 人照它改）。
+    {
+        const lift::ScaleFilterParse p = lift::parseScaleFilterSpec("blur");
+        ++lift_test::g_checks;
+        const std::string why = p.error != nullptr ? p.error : "";
+        if (why.find("nearest") == std::string::npos || why.find("linear") == std::string::npos) {
+            lift_test::failf(__FILE__, __LINE__, "拒绝原因没点名值域（nearest / linear）：`%s`", why.c_str());
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -325,6 +393,7 @@ int main() {
     caseMouseMapping();
     caseAutoDpi();
     caseParse();
+    caseParseFilter();
     caseHeadlessReadout();
     return lift_test::finish("window-scale");
 }

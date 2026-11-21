@@ -592,6 +592,12 @@ public:
     bool rasterActive() const override { return device_ != nullptr && vertex_shader_ != nullptr; }
     const char* rasterName() const override { return name_.c_str(); }
 
+    // ★ 呈现放大的采样滤波器（`--scale-filter`；缺省 linear）。**唯一**设置点 =
+    //   `createSdlGpuRaster` 的第二个实参（=`SdlWindowOptions::scale.filter`）。
+    //   ⛔ 只用于 `directPresent` 那次 letterbox 放大 + `directReadback` 的同口径重建；
+    //   ⛔ 不碰游戏内容 / D3DXSprite 的纹理 sampler（那是 `samplerFor` / `gpu_raster.h` 的 GpuSampler）。
+    void setScaleFilter(ScaleFilter filter) { scale_filter_ = filter; }
+
     bool rasterPrepare(const SurfaceFormat& format, int width, int height, std::string* err,
                        const std::uint8_t* color_base = nullptr) override {
         if (format.bpp != 32) {
@@ -1847,12 +1853,17 @@ public:
         info.destination.x = 0;
         info.destination.y = 0;
         // ★ letterbox：窗口不一定与 target 同尺寸。整张 swapchain 先清成黑（= SDL 逻辑呈现的
-        //   LETTERBOX 行为），再把目标矩形按整数像素缩放置中。过滤用 NEAREST —— 与 CPU 路径
-        //   `SDL_SetTextureScaleMode(NEAREST)` 一致，⛔ 不在这里引入第二条缩放口径。
+        //   LETTERBOX 行为），再把目标矩形按整数像素缩放置中。
+        //   ★ 放大的采样滤波器 = `--scale-filter`（缺省 **linear**）—— 与 CPU 路径
+        //   `SDL_SetTextureScaleMode(...)` **同一个字段**（`ScaleSpec::filter`），⛔ 不在这里引入
+        //   第二条缩放口径。真机 `AGE.EXE` 无 DPI 声明 ⇒ Windows 按 150% **平滑**放大，所以
+        //   linear 才是同档；`--scale-filter nearest` 是像素党 / A/B 的**回退**档（1.5× 有锯齿）。
+        //   ⛔ 这里只改"放大怎么采"，⛔ 不动 `layoutLetterbox` 的矩形算术、⛔ 不动游戏内容采样。
+        //   ★ `--scale 1.0` 时源与目的同尺寸 ⇒ 两个滤波器的采样点都落在 texel 中心、逐字节同值。
         info.load_op = SDL_GPU_LOADOP_CLEAR;
         info.clear_color = SDL_FColor{0.0f, 0.0f, 0.0f, 1.0f};
         info.flip_mode = SDL_FLIP_NONE;
-        info.filter = SDL_GPU_FILTER_NEAREST;
+        info.filter = scale_filter_ == ScaleFilter::Nearest ? SDL_GPU_FILTER_NEAREST : SDL_GPU_FILTER_LINEAR;
         info.cycle = false;
         layoutLetterbox(static_cast<int>(sw), static_cast<int>(sh), &info.destination);
         SDL_BlitGPUTexture(cmd, &info);
@@ -1955,13 +1966,55 @@ public:
                     d[3] = 0;  // letterbox 黑边（与 present 的 clear_color 同值）
                     continue;
                 }
-                // NEAREST：整像素映射回 target（1:1 时就是 x,y 本身）
-                int sx = static_cast<int>((static_cast<long long>(x) - rect.x) * width_ / static_cast<int>(rect.w));
-                int sy = static_cast<int>((static_cast<long long>(y) - rect.y) * height_ / static_cast<int>(rect.h));
-                sx = std::clamp(sx, 0, width_ - 1);
-                sy = std::clamp(sy, 0, height_ - 1);
-                std::memcpy(d, src.data() + (static_cast<std::size_t>(sy) * width_ + sx) * 4u, 4u);
-                d[3] = 0;  // XRGB 的 X 字节没有语义（guest X8 的归一化口径见 rasterSyncToGuest）
+                // ★ 采样口径 = **与呈现同档**（`scale_filter_` / `--scale-filter`）：窗口像素是从
+                //   target 重建的，所以这里必须用同一个滤波器 —— 否则"linear 上屏、nearest 贴图"
+                //   ⇒ 截图 / 回读不再是"窗口像素"（`--present-screenshot` 与屏幕对不上）。
+                //   · nearest：整像素映射回 target（1:1 时就是 x,y 本身）—— 与换滤波器之前**逐字节相同**；
+                //   · linear：目的像素中心按 bilinear 采 4 个 texel（`fx = (x+0.5)·W/Dw − 0.5`，与
+                //     GPU 的 LINEAR blit 同一定义；越界按 CLAMP_TO_EDGE）。1:1 时采样点正落 texel 中心
+                //     ⇒ 与 nearest 逐字节同值（缺省档的既有像素断言因此不变）。
+                //   ⚠ linear 档是 CPU 近似：GPU 若在 sRGB 空间混合，可能差几个单位（不是逐位等价）。
+                if (scale_filter_ == ScaleFilter::Nearest) {
+                    int sx =
+                        static_cast<int>((static_cast<long long>(x) - rect.x) * width_ / static_cast<int>(rect.w));
+                    int sy =
+                        static_cast<int>((static_cast<long long>(y) - rect.y) * height_ / static_cast<int>(rect.h));
+                    sx = std::clamp(sx, 0, width_ - 1);
+                    sy = std::clamp(sy, 0, height_ - 1);
+                    std::memcpy(d, src.data() + (static_cast<std::size_t>(sy) * width_ + sx) * 4u, 4u);
+                    d[3] = 0;  // XRGB 的 X 字节没有语义（guest X8 的归一化口径见 rasterSyncToGuest）
+                } else {
+                    const double fx = (static_cast<double>(x) - static_cast<double>(rect.x) + 0.5) *
+                                          static_cast<double>(width_) / static_cast<double>(rect.w) -
+                                      0.5;
+                    const double fy = (static_cast<double>(y) - static_cast<double>(rect.y) + 0.5) *
+                                          static_cast<double>(height_) / static_cast<double>(rect.h) -
+                                      0.5;
+                    const double f0 = std::floor(fx);
+                    const double f1 = std::floor(fy);
+                    const int x0 = static_cast<int>(f0);
+                    const int y0 = static_cast<int>(f1);
+                    const double tx = fx - f0;
+                    const double ty = fy - f1;
+                    auto clampX = [this](int v) { return std::clamp(v, 0, width_ - 1); };
+                    auto clampY = [this](int v) { return std::clamp(v, 0, height_ - 1); };
+                    const std::uint8_t* p00 = src.data() + (static_cast<std::size_t>(clampY(y0)) * width_ +
+                                                            clampX(x0)) * 4u;
+                    const std::uint8_t* p10 = src.data() + (static_cast<std::size_t>(clampY(y0)) * width_ +
+                                                            clampX(x0 + 1)) * 4u;
+                    const std::uint8_t* p01 = src.data() + (static_cast<std::size_t>(clampY(y0 + 1)) * width_ +
+                                                            clampX(x0)) * 4u;
+                    const std::uint8_t* p11 = src.data() + (static_cast<std::size_t>(clampY(y0 + 1)) * width_ +
+                                                            clampX(x0 + 1)) * 4u;
+                    // 通道 0..2 = B,G,R（XRGB8888 字节序）；X 字节不参与（最后统一写 0）。
+                    for (int c = 0; c < 3; ++c) {
+                        const double top = static_cast<double>(p00[c]) * (1.0 - tx) + static_cast<double>(p10[c]) * tx;
+                        const double bot = static_cast<double>(p01[c]) * (1.0 - tx) + static_cast<double>(p11[c]) * tx;
+                        const double v = top * (1.0 - ty) + bot * ty;
+                        d[c] = static_cast<std::uint8_t>(std::lround(std::clamp(v, 0.0, 255.0)));
+                    }
+                    d[3] = 0;
+                }
             }
         }
         // ★ 统一合成入口（M0）：与 `directPresent` **同一个 origin / 同一块矩形**合成进回读像素
@@ -3554,6 +3607,9 @@ private:
     const char* present_mode_name_ = "vsync";
     std::uint64_t presented_ = 0;
     std::uint64_t present_skipped_ = 0;
+    // ★ 呈现放大的滤波器（`--scale-filter`；缺省 linear = 与真机 Windows 150% DPI 位图放大同档）。
+    //   只作用于 letterbox 那一次放大 blit（`SDL_GPUBlitInfo::filter`）与回读的同口径重建。
+    ScaleFilter scale_filter_ = kDefaultScaleFilter;
     // ---- 调试叠层（`--overlay`；只存在于宿主送显的那一份像素里）----
     // ★ 纹理建在**同一 device**、格式 = 实际 swapchain 格式（blit 源/目的兼容的唯一保证）。
     SDL_GPUTexture* overlay_tex_ = nullptr;
@@ -3598,8 +3654,9 @@ void gpuRasterSetBatchTag(std::uint64_t tag) { g_batch_tag = tag; }
 
 std::uint64_t gpuRasterBatchTag() { return g_batch_tag; }
 
-std::unique_ptr<GpuRaster> createSdlGpuRaster(std::string* err) {
+std::unique_ptr<GpuRaster> createSdlGpuRaster(std::string* err, ScaleFilter filter) {
     auto r = std::make_unique<SdlGpuRaster>();
+    r->setScaleFilter(filter);
     if (!r->init(err)) return nullptr;
     return r;
 }

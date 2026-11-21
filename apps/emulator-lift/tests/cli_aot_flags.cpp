@@ -154,6 +154,10 @@ int main(int argc, char** argv) {
         //   （否则用户不知道有这条入口，也不知道 headless 下它不生效）。
         LIFT_CHECK(r.out.find("--scale auto|数值") != std::string::npos);
         LIFT_CHECK(r.out.find("headless") != std::string::npos);
+        // ★ `--scale-filter nearest|linear` 必须在 help 里（否则"放大用哪个滤波器"这条入口等于
+        //   不存在，用户既找不到 nearest 回退档、也读不到缺省是 linear）。值域 / 拒绝口径的机械
+        //   判据另在 pure 用例 `window-scale/parse-filter`，⛔ 不靠这一条当唯一判据。
+        LIFT_CHECK(r.out.find("--scale-filter nearest|linear") != std::string::npos);
         // ★ C2a：`--plugin` / `--plugin-param` 必须在 help 里（否则用户不知道 AOT 臂有插件面；
         //   合同 `plugin-runtime.md` §4.6 / 裁决 D-C2-2。装载面的判据另在 `plugin-runtime`
         //   （pure），⛔ 不靠这一条当唯一判据）。
@@ -441,6 +445,50 @@ int main(int argc, char** argv) {
         LIFT_CHECK(!ra.timed_out);
         LIFT_CHECK(ra.err.find("未知参数") == std::string::npos);
         LIFT_CHECK(ra.err.find("--scale") == std::string::npos);
+    }
+
+    // ---- ②''' `--scale-filter`：未知值 / 缺值 ⇒ exit 2 且**点名参数**（⛔ 不是"未知参数"，
+    //      ⛔ 不静默当缺省）----
+    //   判据（红了意味着什么）：用户要 nearest 做 A/B / 回归对照却得到 linear（或反过来）——
+    //   "以为在对照、其实两跑同一档"，而且截图与像素断言会一起变成不可信的对照。
+    g_current_case = "scale-filter-bogus-values-rejected";
+    {
+        // 值域只有两个、大小写敏感、整串精确匹配（`--scale auto` 同一口径）。
+        const char* const kBads[] = {"LINEAR", "Linear", "NEAREST", "Nearest", "nearestx", "lin", "blur", "0", ""};
+        for (const char* bad : kBads) {
+            const ChildResult r =
+                runChild(exe, {"--scale-filter", bad, "--present", "headless"}, childOptions(root));
+            LIFT_CHECK(r.started);
+            LIFT_CHECK(!r.timed_out);
+            LIFT_CHECK_EQ_U32(r.exit_code, 2u);
+            LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
+            LIFT_CHECK(r.err.find("--scale-filter") != std::string::npos);
+            // 拒绝原因点名值域（人照它改）——非空值要求原样出现在 stderr 里。
+            if (bad[0] != '\0') LIFT_CHECK(r.err.find(bad) != std::string::npos);
+            LIFT_CHECK(!hasLineStartingWith(r.out, "stop"));  // 启动前拒绝 ⇒ 没有运行摘要
+        }
+        // 缺值：`--scale-filter` 后面没有东西 ⇒ exit 2 + `需要一个值` + 点名前缀。
+        const ChildResult missing = runChild(exe, {"--scale-filter"}, childOptions(root));
+        LIFT_CHECK(missing.started);
+        LIFT_CHECK(!missing.timed_out);
+        LIFT_CHECK_EQ_U32(missing.exit_code, 2u);
+        LIFT_CHECK(missing.err.find("--scale-filter") != std::string::npos);
+        LIFT_CHECK(missing.err.find("需要一个值") != std::string::npos);
+    }
+
+    // ---- ②''' `--scale-filter` 在 headless 下**接受**（与 `--scale` 同一口径：无窗口可施但
+    //      不拒绝、⛔ 不进"headless 不接受窗口参数"那一类）----
+    //      ★ 不判总退出码（原因同 ②''：这一跑还会因缺执行源 / 缺 GPU 退出）。
+    g_current_case = "scale-filter-headless-accepted";
+    {
+        const ChildResult r =
+            runChild(exe, {"--scale", "1.5", "--scale-filter", "nearest", "--present", "headless"},
+                     childOptions(root));
+        LIFT_CHECK(r.started);
+        LIFT_CHECK(!r.timed_out);
+        LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
+        LIFT_CHECK(r.err.find("--scale-filter") == std::string::npos);  // 没有对它报错
+        LIFT_CHECK(r.err.find("不接受窗口参数") == std::string::npos);
     }
 
     // ---- ③ 错拼（wrap ≠ warp）**仍然**是未知参数：钉住"② 不是靠接受任何参数"----

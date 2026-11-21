@@ -33,7 +33,7 @@
 | **业务外策略入口整合（插件运行时 v1 合同）**（plan-as-callbacks / 具名 Trigger / Edit-Input-EngineRead-Trigger / ControlBus / 历史 plan 兼容；窗口档 `render` adopt 进已有叠层 host（单 QJS context）· `game.mouse().buttons` 读数 · `loadSave(slot)` 参考链（`scripts/plugins/lib/save.js`）；API 声明与示例在 `apps/emulator-lift/scripts/plugins/`） | `plugin-runtime.md` |
 | **某个脚本里哪段是哪个屏 / 哪段吃输入**（脚本级分析：身份 · 位置区间 · 输入点 · 待核；一条区间必须带复现命令与读数） | `scripts/<NAME>.md`（口径见 `scripts/README.md`） |
 | **怎么停下来看 AOT 跑到哪**（控制层：两个汇点 / WS 协议事实 / `sample` 快照 / 僵尸与 `gc` / window 档与陈旧事件 / 怎么跑 `emu-ctl`） | `control-plane.md` |
-| **窗口缩放 `--scale <auto/数值>`**（**只改窗口、不改帧**：窗口客户区 = round(1280×s)×round(720×s)、画面仍 1280×720（放大，接受模糊）；auto 取 display content scale；鼠标映射仍只有 `cursor_map.h` 一份；headless 不生效） | `window-scale.md` |
+| **窗口缩放 `--scale <auto/数值>` + `--scale-filter nearest|linear`**（**只改窗口、不改帧**：窗口客户区 = round(1280×s)×round(720×s)、画面仍 1280×720；放大滤波器缺省 `linear`（与真机 150% DPI 位图放大同档的平滑放大）、`nearest` 是显式回退档（硬边，非整数倍率有锯齿；与换滤波器之前逐字节相同）；auto 取 display content scale；鼠标映射仍只有 `cursor_map.h` 一份；headless 不生效） | `window-scale.md` |
 | **CP932 编码后端能不能换成系统接口**（评估：解码等价 9790/9795、编码 373 个重复映射的字节选择分歧；结论与待补的 Windows 实测） | `encoding-backend.md` |
 
 ### 0.1 判据：什么进 test，什么进文档

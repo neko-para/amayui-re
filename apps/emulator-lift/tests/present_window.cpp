@@ -347,6 +347,179 @@ bool caseOverlayCanvasComposition(bool gpu, std::string* skip_why) {
     return true;
 }
 
+// =====================================================================================
+// `--scale-filter`（2026-11-21）：放大滤波器**真的**接到呈现上（1.5× 的确定性对照）
+//
+// 判据（红了意味着什么）：
+//   ① `nearest` 档在 1.5× 上逐像素 == **旧 NEAREST 映射**（公式显式写在这里：
+//      `sx = (wx-rect.x) * 1280 / 1920`，整数截断）。红 ⇒ 回退口径失效 ——
+//      像素党 / A/B / 既有截图守卫的基准不再"逐字节相同"。
+//   ② `linear` 档在**同一个位置**给出两相邻源像素之间的值（不是纯色）；红 ⇒ 缺省档静默退回
+//      硬边（放大后比真机 150% DPI 的平滑放大糙）。
+//   ③ `--scale 1.0`（1:1）两档逐字节同值：红 ⇒ 缺省窗口的画面被滤波器动过（"缺省行为不变"崩）。
+// ★ 为什么这段能当判据：guest 内容由本文件造（竖条纹），没有动画 / 没有墙钟 ⇒ 像素是确定的
+//   （游戏截图做不到这一点：LOAD / TITLE 屏的背景都按墙钟动，同配置两跑已有 44~59% 像素不同）。
+// ★ 覆盖哪条路径：`gpu=false` = SDL_Renderer（software）⇒ 回读是**真实窗口像素**
+//   （`SDL_RenderReadPixels`，滤镜由渲染器施加）；`gpu=true` = 真 GPU renderer（同一句
+//   `SDL_SetTextureScaleMode`，只是施加在 GPU 上）。
+// =====================================================================================
+// 竖条纹：偶数列红、奇数列蓝（1.5× 时每 3 个窗口像素对 2 个源像素 ⇒ 边界落在 x%3==2）。
+void fillStripes(Fx& f) {
+    auto* p = f.arena.pixels(*f.s);
+    for (int y = 0; y < f.s->height; ++y) {
+        for (int x = 0; x < f.s->width; ++x) {
+            const std::uint32_t rgb = (x % 2 == 0) ? 0x00FF0000u : 0x000000FFu;  // 0x00RRGGBB
+            // guest 后缓冲的内存序 = B,G,R,X（X8R8G8B8）⇒ 按字写 0x00RRGGBB 正好是 B,G,R,0
+            std::memcpy(p + static_cast<std::size_t>(y) * f.s->pitch + static_cast<std::size_t>(x) * 4, &rgb, 4);
+        }
+    }
+}
+
+// 旧 NEAREST 映射（`d3d9_gpu.cpp::directReadback` 的整数公式；1.5× 时 3:2）：
+//   sx = (wx - 0) * 1280 / 1920（**整数截断**）
+int oldNearestSrcX(int wx) { return (wx * 1280) / 1920; }
+
+// 1280×720 的 fixture：`make()` 的 arena 只有 1 MiB（够小图，不够 1280×720×4 ≈ 3.5 MiB）。
+bool makeBig(Fx& f) {
+    if (!f.mem.reserve() || !f.arena.init(&f.mem, 0x10000000u, 0x00800000u)) return false;
+    f.ea = f.arena.create(1280, 720, format32(0));
+    f.s = f.arena.find(f.ea);
+    return f.ea != 0 && f.s != nullptr;
+}
+
+bool caseScaleFilter(bool gpu, std::string* skip_why) {
+    ::lift_test::g_current_case = "present-window/scale-filter-1.5";
+    // (a) 1.5× + nearest：窗口像素 == 旧整数映射取到的源像素（逐点精确）
+    {
+        Fx f;
+        LIFT_CHECK(makeBig(f));
+        fillStripes(f);
+        lift::SdlWindow win;
+        lift::SdlWindowOptions opt;
+        opt.title = "emulator-lift scale-filter nearest";
+        opt.driver_list = gpu ? "gpu" : "software";
+        opt.raster_gpu = gpu;
+        opt.hidden = true;
+        opt.scale.kind = lift::ScaleSpec::Kind::Fixed;
+        opt.scale.value = 1.5;
+        opt.scale.filter = lift::ScaleFilter::Nearest;
+        win.setCaptureForTest(true);
+        std::string err;
+        if (!win.init(opt, &err)) {
+            if (gpu) {
+                *skip_why = "gpu 窗口 / GPU device 不可用：" + err;
+                return false;
+            }
+            LIFT_CHECK(false);
+            return true;
+        }
+        if (gpu && !win.directPresentActive()) {
+            *skip_why = std::string("gpu 直出未成立：") + win.describe();
+            win.shutdown();
+            return false;
+        }
+        LIFT_CHECK(win.submitFrame(f.arena, *f.s, &err));
+        LIFT_CHECK_EQ_I64(win.scaleReport().window_w, 1920);
+        LIFT_CHECK_EQ_I64(win.scaleReport().window_h, 1080);
+        // 采样点：wx = 0/1/2/3/4/5 覆盖"3 窗口像素对 2 源像素"的相位；wy 取 1:1 的行（sy = wy*2/3）。
+        for (int wx = 0; wx < 12; ++wx) {
+            const int sx = oldNearestSrcX(wx);
+            const std::uint32_t want = (sx % 2 == 0) ? 0x00FF0000u : 0x000000FFu;
+            std::uint32_t got = 0;
+            LIFT_CHECK(win.readbackPixel(wx, 3, &got, &err));
+            ++lift_test::g_checks;
+            if ((got & 0x00FFFFFFu) != want) {
+                lift_test::failf(__FILE__, __LINE__,
+                                 "nearest 1.5x：窗口 (%d,3) 期望旧映射 sx=%d 的颜色 #%06X，实得 #%06X",
+                                 wx, sx, want, got & 0x00FFFFFFu);
+            }
+        }
+        if (gpu) std::printf("[scale-filter] nearest 1.5x（%s）：逐点命中旧整数映射\n", win.describe().c_str());
+        win.shutdown();
+    }
+    // (b) 1.5× + linear：同一位置必须是**混合值**（两相邻源像素之间），且不等于 nearest 的那一个。
+    {
+        Fx f;
+        LIFT_CHECK(makeBig(f));
+        fillStripes(f);
+        lift::SdlWindow win;
+        lift::SdlWindowOptions opt;
+        opt.title = "emulator-lift scale-filter linear";
+        opt.driver_list = gpu ? "gpu" : "software";
+        opt.raster_gpu = gpu;
+        opt.hidden = true;
+        opt.scale.kind = lift::ScaleSpec::Kind::Fixed;
+        opt.scale.value = 1.5;
+        opt.scale.filter = lift::ScaleFilter::Linear;
+        win.setCaptureForTest(true);
+        std::string err;
+        if (!win.init(opt, &err)) {
+            if (gpu) {
+                *skip_why = "gpu 窗口 / GPU device 不可用：" + err;
+                return false;
+            }
+            LIFT_CHECK(false);
+            return true;
+        }
+        LIFT_CHECK(win.submitFrame(f.arena, *f.s, &err));
+        // wx=3 ⇒ 源坐标 fx = (3+0.5)*1280/1920 - 0.5 = 1.8333 ⇒ 采源像素 1(蓝)/2(红) 之间
+        //   ⇒ R 与 B **同时**非零（nearest 在这里是纯色）。容差放宽到"严格在 8..247 之间"，
+        //   只钉"确实是双线性"，不钉具体舍入（软件 / GPU 后端的舍入可能不同）。
+        std::uint32_t got = 0;
+        LIFT_CHECK(win.readbackPixel(3, 3, &got, &err));
+        const std::uint32_t r = (got >> 16) & 0xFFu;
+        const std::uint32_t b = got & 0xFFu;
+        std::printf("[scale-filter] linear 1.5x：窗口 (3,3)=#%06X（nearest 同点是纯色 #%06X）\n", got & 0x00FFFFFFu,
+                    ((oldNearestSrcX(3) % 2 == 0) ? 0x00FF0000u : 0x000000FFu));
+        ++lift_test::g_checks;
+        if (!(r > 8u && r < 247u && b > 8u && b < 247u)) {
+            lift_test::failf(__FILE__, __LINE__,
+                             "linear 1.5x：窗口 (3,3) 应为两相邻源像素的混合（R/B 都非纯），实得 R=%u B=%u（#%06X）",
+                             r, b, got & 0x00FFFFFFu);
+        }
+        win.shutdown();
+    }
+    // (c) 1:1（缺省 scale 1.0）两档逐字节同值：滤波器在 1:1 上没有可见差别。
+    {
+        const std::uint32_t kWant[2] = {0x00FF0000u, 0x000000FFu};
+        for (int pass = 0; pass < 2; ++pass) {
+            Fx f;
+            LIFT_CHECK(make(f, 64, 48, format32(0)));
+            fillStripes(f);
+            lift::SdlWindow win;
+            lift::SdlWindowOptions opt;
+            opt.title = "emulator-lift scale-filter 1to1";
+            opt.driver_list = gpu ? "gpu" : "software";
+            opt.raster_gpu = gpu;
+            opt.hidden = true;
+            opt.scale.filter = pass == 0 ? lift::ScaleFilter::Linear : lift::ScaleFilter::Nearest;
+            win.setCaptureForTest(true);
+            std::string err;
+            if (!win.init(opt, &err)) {
+                if (gpu) {
+                    *skip_why = "gpu 窗口 / GPU device 不可用：" + err;
+                    return false;
+                }
+                LIFT_CHECK(false);
+                return true;
+            }
+            LIFT_CHECK(win.submitFrame(f.arena, *f.s, &err));
+            for (int x = 0; x < 8; ++x) {
+                std::uint32_t got = 0;
+                LIFT_CHECK(win.readbackPixel(x, 2, &got, &err));
+                ++lift_test::g_checks;
+                if ((got & 0x00FFFFFFu) != kWant[x % 2]) {
+                    lift_test::failf(__FILE__, __LINE__, "1:1（filter=%s）：窗口 (%d,2) 期望 #%06X，实得 #%06X",
+                                     lift::scaleFilterName(opt.scale.filter), x, kWant[x % 2], got & 0x00FFFFFFu);
+                }
+            }
+            win.shutdown();
+        }
+    }
+    return true;
+}
+
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -845,6 +1018,13 @@ int main(int argc, char** argv) {
         win.shutdown();
     }
 
+    // ---- `--scale-filter`：放大滤波器真的接到呈现上（1.5× / 1:1 的确定性对照）----
+    //   判据与"为什么游戏截图不行"见 `caseScaleFilter` 上方的注释块。
+    {
+        std::string skip_why;
+        if (!caseScaleFilter(gpu, &skip_why)) LIFT_SKIP(skip_why.c_str());
+    }
+
     LIFT_CHECK_EQ_U32(SDL_WasInit(SDL_INIT_VIDEO), 0u);
     {
         // ★ 缺字体 / 无 GPU 直出 ⇒ **CTest SKIP 77**（用例无法判定），⛔ 不用"return 0"装 Passed。
@@ -854,3 +1034,4 @@ int main(int argc, char** argv) {
     caseControlResumeStaleEvents();
     return lift_test::finish("present-window");
 }
+

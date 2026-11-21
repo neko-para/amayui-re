@@ -1025,7 +1025,7 @@ bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
     // ★ GPU device 先建（不需要窗口）：后端失败必须在开窗之前就是硬失败。
     if (options.raster_gpu) {
         std::string gerr;
-        impl_->gpu_raster = createSdlGpuRaster(&gerr);
+        impl_->gpu_raster = createSdlGpuRaster(&gerr, options.scale.filter);
         if (impl_->gpu_raster == nullptr) {
             if (err) *err = "GPU 光栅化后端创建失败：" + gerr;
             shutdown();
@@ -1047,6 +1047,10 @@ bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
         ScaleReport report;
         report.image_w = kBaseWindowW;  // 被呈现的画面尺寸（guest 后缓冲）；窗口尺寸不改变它
         report.image_h = kBaseWindowH;
+        // ★ `--scale-filter`（缺省 linear）：**生效**的放大滤波器，readout 由它印出来。
+        //   两条放大路径都按它取值（本文件的 SDL 纹理 / `d3d9_gpu.cpp` 的 letterbox blit）——
+        //   字段只有一份（`ScaleSpec::filter`），⛔ 不在这里另立开关。
+        report.filter = options.scale.filter;
         if (options.scale.kind == ScaleSpec::Kind::Auto) {
             report.auto_requested = true;
             const SDL_DisplayID primary = SDL_GetPrimaryDisplay();
@@ -1310,8 +1314,17 @@ bool SdlWindow::submitFrame(const SurfaceArena& arena, const GuestSurface& surfa
             if (err) *err = std::string("SDL_SetTextureBlendMode(NONE) 失败：") + SDL_GetError();
             return false;
         }
-        if (!SDL_SetTextureScaleMode(impl_->texture, SDL_SCALEMODE_NEAREST)) {
-            if (err) *err = std::string("SDL_SetTextureScaleMode(NEAREST) 失败：") + SDL_GetError();
+        // ★ 放大滤波器（`--scale-filter`，缺省 linear）：**这一处**是 SDL 路径唯一的放大采样口径。
+        //   缺省档（`--scale 1.0`）纹理与窗口 1:1 ⇒ 两个滤波器逐字节同值；`--scale 1.5` 才分叉 ——
+        //   linear 与真机（Windows 按 150% 位图放大）同档，nearest 是像素党 / A/B 的回退档。
+        const SDL_ScaleMode scale_mode = impl_->scale_report.filter == ScaleFilter::Nearest
+                                             ? SDL_SCALEMODE_NEAREST
+                                             : SDL_SCALEMODE_LINEAR;
+        if (!SDL_SetTextureScaleMode(impl_->texture, scale_mode)) {
+            if (err) {
+                *err = std::string("SDL_SetTextureScaleMode(") + scaleFilterName(impl_->scale_report.filter) +
+                       ") 失败：" + SDL_GetError();
+            }
             return false;
         }
         if (!SDL_SetRenderLogicalPresentation(impl_->renderer, w, h, SDL_LOGICAL_PRESENTATION_LETTERBOX)) {

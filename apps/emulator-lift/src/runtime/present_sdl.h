@@ -64,7 +64,9 @@ struct SdlWindowOptions {
     //   实际生效还要求窗口可见（运行时 `windowHidden()` 判据）——见 `hostCursorWarpEnabled`。
     bool cursor_warp = false;
     // ★ `--scale <auto|数值>`（缺省 `Fixed 1.0` = 窗口客户区 1280×720，逐字节不变）。
-    //   口径**唯一一份**在 `runtime/window_scale.h`（窗口尺寸 / auto 的 DPI / readout 文案）。
+    //   口径**唯一一份**在 `runtime/window_scale.h`（窗口尺寸 / auto 的 DPI / 滤波器 / readout 文案）。
+    //   ★ `scale.filter` = `--scale-filter nearest|linear`（缺省 **linear**）：放大采样只在这里一处
+    //     定值，两条路径（SDL 纹理 / GPU 直出的 letterbox blit）都从它取值。
     //   ⛔ 只由**窗口档**设置：`--present headless` 的调用方不要设它（`--scale` 对 headless
     //   无副作用：隐藏离屏窗口仍是 1280×720，也不去查 DPI —— 那会让"只是拿 GPU device"多一次平台依赖）。
     ScaleSpec scale;
@@ -246,6 +248,9 @@ private:
 
 // 用 SDL_GPU 设备创建真正的 GPU 光栅化后端（需要 SDL_Init(VIDEO)；
 // Windows = DXBC，macOS = MSL/Metal，其它平台明确失败）。
-std::unique_ptr<GpuRaster> createSdlGpuRaster(std::string* err);
+// ★ `filter` = 直出（`GpuDirectPresenter`）在 letterbox blit 里用的**放大**采样滤波器
+//   （`--scale-filter`；缺省 linear）。它只影响呈现放大，⛔ 不影响游戏内容 / D3DXSprite 的纹理采样。
+//   默认实参 = 缺省档 ⇒ 既有调用方（测试 / 夹具）逐字不变。
+std::unique_ptr<GpuRaster> createSdlGpuRaster(std::string* err, ScaleFilter filter = kDefaultScaleFilter);
 
 }  // namespace lift

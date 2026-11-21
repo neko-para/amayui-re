@@ -51,6 +51,33 @@ ScaleParse parseScaleSpec(const char* text) {
     return r;
 }
 
+const char* scaleFilterName(ScaleFilter filter) {
+    return filter == ScaleFilter::Nearest ? "nearest" : "linear";
+}
+
+ScaleFilterParse parseScaleFilterSpec(const char* text) {
+    ScaleFilterParse r;
+    // ★ 空 / 空指针 ⇒ 与 `--scale` 同一句"需要一个值"（CLI 的 needValue 已经挡了缺值，这里是防御面）。
+    if (text == nullptr || text[0] == '\0') {
+        r.error = "需要一个值（只能是 nearest 或 linear，例：--scale-filter nearest）";
+        return r;
+    }
+    // ★ 大小写敏感、整串精确匹配（与 `--scale auto` / `--audio` 同一口径）：
+    //   不做前缀匹配、不做 trim ⇒ `LINEAR` / `linear ` / `lin` 都拒（CLI 原样把原因打出来）。
+    if (std::strcmp(text, "linear") == 0) {
+        r.ok = true;
+        r.filter = ScaleFilter::Linear;
+        return r;
+    }
+    if (std::strcmp(text, "nearest") == 0) {
+        r.ok = true;
+        r.filter = ScaleFilter::Nearest;
+        return r;
+    }
+    r.error = "只能是 nearest 或 linear（例：--scale-filter nearest）";
+    return r;
+}
+
 int scaleWindowDimension(int base, double scale) {
     if (base <= 0) return 0;
     if (!std::isfinite(scale) || scale <= 0.0) return base;  // 防御：调用方已校验
@@ -106,12 +133,20 @@ std::string scaleReadoutLine(const ScaleReport& report) {
     out += formatScale(report.scale);
     out += "（window " + std::to_string(report.window_w) + "x" + std::to_string(report.window_h) + "，image " +
            std::to_string(report.image_w) + "x" + std::to_string(report.image_h);
+    // ★ 滤波器（`--scale-filter`）：**总是**印出来 —— 这是"现在放大用的是哪一个"的唯一读数。
+    //   scale == 1.0 时 1:1、两个滤波器无可见差别，但⛔ 不因此隐去这一格（缺省档也照印）。
+    out += "；filter=";
+    out += scaleFilterName(report.filter);
     // ★ 范围裁决（2026-11-18）：`--scale` **只改窗口，不改帧**。窗口比画面大时，画面是**放大**出来的
-    //   （模糊可接受：真机也没做特殊处理；⛔ 不做高分辨率重渲染 / 不改帧尺寸 / 不加 upscale pass）。
-    //   这一句让 readout 自己说清"image 仍是 1280×720"，而不是让人以为帧被重渲染成 1920×1080。
+    //   （⛔ 不做高分辨率重渲染 / 不改帧尺寸 / 不加 upscale pass）。这一句让 readout 自己说清
+    //   "image 仍是 1280×720"，而不是让人以为帧被重渲染成 1920×1080。
+    //   ★ 滤波器口径（2026-11-21）：linear = 与真机（无 DPI 声明 ⇒ Windows 按 150% 位图放大）同档的
+    //     平滑放大；nearest = 硬边、非整数倍率有锯齿（像素党 / A/B 回退档）。
+    //   ⛔ 不承诺"变清晰"：清晰度由源分辨率（image 1280×720）决定，换滤波器只改放大时的采样。
     //   scale < 1 时说"缩小"（⛔ 不冒充"放大"）；恰好 1.0 不加这一句（1:1）。
     if (report.scale > 1.0 + 1e-9) {
-        out += "；放大，接受模糊";
+        out += report.filter == ScaleFilter::Nearest ? "；放大：硬边，非整数倍率有锯齿"
+                                                     : "；放大：与真机 150% DPI 同档的平滑放大";
     } else if (report.scale < 1.0 - 1e-9) {
         out += "；缩小";
     }

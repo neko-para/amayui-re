@@ -14,9 +14,17 @@
 //   `present_sdl.cpp` 的 `mapMouse` 一行都不用改 —— ⛔ 不许为 `--scale` 另写一套换算。
 //
 // ★ 范围裁决（2026-11-18，用户口径）：`--scale` **只改窗口，不改帧**。
-//   guest 画面恒为 1280×720；窗口变大 ⇒ 画面被**放大**，模糊是**可接受**的（真机也没做特殊处理，
-//   同样糊）。⇒ ⛔ 不为此做高分辨率重渲染 / 不改帧尺寸 / 不加额外的 upscale pass；本头里的
-//   `image_w/image_h` 永远是被呈现的那一帧的尺寸（生产上 = 1280×720），不随 scale 变。
+//   guest 画面恒为 1280×720；窗口变大 ⇒ 画面由宿主**放大**。⇒ ⛔ 不为此做高分辨率重渲染 /
+//   不改帧尺寸 / 不加额外的 upscale pass；本头里的 `image_w/image_h` 永远是被呈现的那一帧的
+//   尺寸（生产上 = 1280×720），不随 scale 变。
+//
+// ★ 滤波器裁决（2026-11-21）：放大用 **LINEAR**（缺省），`--scale-filter nearest` 保留为显式档。
+//   取证：真机 `AGE.EXE` 的 manifest 无 DPI 声明、也没有 `SetProcessDPIAware` ⇒ 窗口一打开就是
+//   **DPI 放大后**的尺寸（用户实测 `1923×1151 = 1.5 × (1282×767.33)`）⇒ 真机 = "渲染 1280×720 →
+//   Windows 按 150% **平滑**放大"（不是重渲染）。NEAREST 在 1.5× 上每 2 源像素对 3 目标像素 ⇒
+//   锯齿（用户实测"明显比真机糙"）⇒ 缺省改成 linear 与真机同档。
+//   ★ `nearest` 是**回退口径**：`--scale-filter nearest` 必须与换滤波器之前**逐字节相同**
+//     （像素党 / A/B 对照 / 既有像素与截图断言都用它当基准）。
 //
 // ★ 缺省 = 1.0 ⇒ 窗口客户区 1280×720（与改动前的 `SDL_CreateWindow(…, 1280, 720, …)`
 //   逐字节相同 ⇒ 缺省档行为不变）。
@@ -45,11 +53,36 @@ inline constexpr double kMaxAutoScale = 8.0;
 // `auto` 取到的值先四舍五入到 1/10000 ⇒ "readout 上印的数"与"真的拿去算窗口尺寸的数"是同一个。
 inline constexpr double kScaleQuantum = 10000.0;
 
+// `--scale-filter` 的取值（★ 唯一一份：`aot_main.cpp` 解析、`present_sdl.cpp` / `d3d9_gpu.cpp` 消费）。
+//   · `Linear`（缺省）= 平滑放大，与真机 Windows 按 DPI 位图放大同档；
+//   · `Nearest` = 硬边（1.5× 这类非整数倍率有锯齿）；与换滤波器之前的行为**逐字节相同**。
+// ⛔ 这两个值只影响**宿主呈现的那一次放大**：不碰 guest 像素、不碰游戏内容的纹理采样、
+//   不碰 letterbox 的矩形计算（那三样与滤波器无关）。
+enum class ScaleFilter { Linear, Nearest };
+inline constexpr ScaleFilter kDefaultScaleFilter = ScaleFilter::Linear;
+
+// 取值 → 名字（readout 用；`"linear"` / `"nearest"`）。
+const char* scaleFilterName(ScaleFilter filter);
+
+// `--scale-filter` 的解析结果。`ok == false` 时 `error` 是给人看的原因（CLI 原样拼进报错）。
+// 拒绝口径照 `--scale`：大小写敏感、整串精确匹配；其余一律拒 ⇒ exit 2 + 点名 `--scale-filter`。
+struct ScaleFilterParse {
+    bool ok = false;
+    ScaleFilter filter = kDefaultScaleFilter;
+    const char* error = "只能是 nearest 或 linear（例：--scale-filter nearest）";
+};
+
+// 解析 `--scale-filter` 的**唯一**入口（`linear` / `nearest`，大小写敏感）。
+ScaleFilterParse parseScaleFilterSpec(const char* text);
+
 // `--scale` 的取值：缺省 `Fixed 1.0`（= 现状 1280×720）；`auto` = 按显示 DPI 取。
+// ★ `filter` 是**独立的** CLI 参数（`--scale-filter`）的落点，`parseScaleSpec` 不碰它：
+//   两个参数各自有唯一的解析入口，但"生效的滤波器"只有这一个字段（⛔ 不另立第二个真源）。
 struct ScaleSpec {
     enum class Kind { Fixed, Auto };
     Kind kind = Kind::Fixed;
     double value = kDefaultScale;
+    ScaleFilter filter = kDefaultScaleFilter;
 };
 
 // `--scale` 的解析结果。`ok == false` 时 `error` 是给人看的原因（CLI 原样拼进报错）。
@@ -108,6 +141,9 @@ struct ScaleReport {
     int window_h = kBaseWindowH;
     int image_w = kBaseWindowW;    // 被呈现的画面像素（guest 后缓冲；缺省 1280×720）
     int image_h = kBaseWindowH;
+    // **生效**的放大滤波器（`--scale-filter`；缺省 linear）。scale == 1.0 时 1:1、滤波器无可见差别，
+    // 但这一行照印（人读的那一行要说清"现在用的是哪一个"，⛔ 不留给猜）。
+    ScaleFilter filter = kDefaultScaleFilter;
     bool applied = true;           // false = `--present headless`（无可见窗口 ⇒ --scale 不生效）
     bool auto_requested = false;   // 命令行给的是 `auto`
     bool auto_fallback = false;    // auto 取不到 display content scale ⇒ 回 1.0（必须打出来）
@@ -115,9 +151,10 @@ struct ScaleReport {
 };
 
 // 启动 readout **一行**（含换行？不含）。格式（缺省档）：
-//   `scale: 1.0（window 1280x720，image 1280x720）`
-// 数值 1.5（**只改窗口、不改帧**；窗口比画面大 ⇒ 画面放大，模糊可接受）：
-//   `scale: 1.5（window 1920x1080，image 1280x720；放大，接受模糊）`
+//   `scale: 1.0（window 1280x720，image 1280x720；filter=linear）`
+// 数值 1.5（**只改窗口、不改帧**；窗口比画面大 ⇒ 画面放大，滤波器见 `filter=`）：
+//   `scale: 1.5（window 1920x1080，image 1280x720；filter=linear；放大：与真机 150% DPI 同档的平滑放大）`
+//   `scale: 1.5（window 1920x1080，image 1280x720；filter=nearest；放大：硬边，非整数倍率有锯齿）`
 // 缩小档（s < 1）说"缩小"；恰好 1.0 不加这一句。
 // `auto` 成功 / 取不到 / headless 各一种后缀（见实现）。★ 格式只在这里一份。
 std::string scaleReadoutLine(const ScaleReport& report);
