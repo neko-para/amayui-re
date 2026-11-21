@@ -48,3 +48,11 @@ plugin    : … calls=5 run=failed reason=onTrigger: callback budget exceeded: l
 ## 不做
 
 不改 C2c 的链 / 坐标；不把预算放宽成"永远够"（那会让跑飞的插件拖死 guest）；不把失败转 77 掩盖。
+
+## 2026-11-21 补充（同一个执行器的第三处落点）
+
+- 把 `save.js` 的确认门挪到读段之后（`c464651`）之后，链在 headless e2e 里**更常**走到 `load:confirm2`，于是失败面变成
+  `onTrigger: callback budget exceeded: load:confirm2`（同一族：2 个 expect 终态 trigger + click + log）。
+- 本机（无其它负载）3 跑 = 2 绿 1 红；同一 ctest 在 `c464651`（未拆分）上 3/3 绿 —— **不足以归因到重构**
+  （失败的是墙钟 2 ms，`src/runtime/budget.h`；成功面不回显子进程日志，无法确认它走没走同一拍）。
+- 判据不变（连跑 ≥10 次 0 次 budget 失败）；建议先加 `待查 #3` 的 opt-in elapsed 读数，再决定"放宽 / 只罩用户代码"。
