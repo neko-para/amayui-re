@@ -105,13 +105,17 @@ apps/emulator-lift/out/emulator-lift-aot --present headless --skip-logo --game-d
 
 ## 待核
 
-1. **为什么轮询体上的 click 不生效**（机制未取证）。假设（**只是假设**）：`InputPlan::releaseDue`
-   （`apps/emulator-lift/src/runtime/input_plan.cpp`）要 `inputSampleCount > press_samples + 1` 才抬起，而输入采样来自
-   `GetCursorPos` / `GetAsyncKeyState`（`shims/user32_input.cpp` · `shims/user32_window.cpp` 的 `noteInputSample`）；
-   轮询体的采样密度高 ⇒ 按下在下一次回调读 `read-mouse-button` 之前就被抬起了，脚本只看到"电平=0"。
-   要钉死需要 shim 级 trace（`fired` 之外的按下/抬起时刻），本轮没做。
-2. **`[0x15A8,0x1600)` 为什么也能吃 click**：按上一条假设，落在 `call-frame 1c` / `i20c` 上的按下应当能在**下一帧**
-   的回调读按钮时被看到（它前面没有别的采样点把两次采样耗光）——**没有逐点取证**（E5 只证"门命中且点击生效"）。
+1. **为什么轮询体上的 click 不生效** —— ★ **宿主侧机制已取证（2026-11-22）；这不是 guest 语义结论**：
+   配方层的抬起判据原先只看 **KeyLevel 读点个数**，而**同一个 guest 回调**里会连读多次
+   （`GetCursorPos` + `GetAsyncKeyState`）⇒ 按下与抬起可以落在**同一个回调**里（实测 trace 行
+   `frames == press_frames`），回调体那一趟比 `3f1`/`3f2` 就只看到"电平 0"。
+   修掉之后（提交 `4f8aa5c`：抬起还必须 `frames >= press_frames + 2`，见 `input-device.md` §5 的闸门②'），
+   同为单条 `click … right` 的复现从 **4/5 变成 14/14**。
+   ⚠ **仍未取证的是"逐点"**：`[0x15A8,0x1600)` / `[0x1FF4,0x2048)` 这些区间**各自**吃不吃 click，
+   仍要按本目录的规矩一跑一读；⛔ 不要拿上面这条机制替代区间取证。
+2. **`[0x15A8,0x1600)` 为什么也能吃 click**：按上一条机制（宿主侧抬起判据现在要求跨一个回调），落在
+   `call-frame 1c` / `i20c` 上的按下应当能在**下一帧**的回调读按钮时被看到 —— **没有逐点取证**
+   （E5 只证"门命中且点击生效"）。
 3. **init 段**：装载早期采到 `pos = 0xA4F4`，≈0.7 s 后 `0x1590`、≈1.4 s 后 `0x15F8`（`trace1.log` 单次 run；
    采样间隔 300 guest-ms）⇒ "进屏后多久才稳"只有 1 次读数，没做 3×。
 4. **`100 270` 是哪一项 / 是否也进 SAVE**：未取证（见 `## 输入点`）。

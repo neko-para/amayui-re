@@ -212,10 +212,11 @@ rg -n 'scripts/recipes/<名>\.plan' data/ docs/ apps/ --glob '!apps/emulator-lif
    ⇒ 判一条区间能不能当门，**只能**跑 `--input-plan`（要耗时就用 `profile_begin/end`）。
 8. **SN0000 第 4 页及以后没有稳定停点**（`0x6228` → 1 s 内自己走到 `0x62C0`），
    且粗区间 A 的上界只到第 12 个 wfi（`0xB26C`），脚本继续到 `0xEC0C` ⇒ 页 4+ 要另做一轮。
-9. **★ 为什么"轮询体上的 click 不生效"没有机制取证**（只有读数）：假设是"按下在轮询体的高频输入采样里
-   两次就被抬起（`InputPlan::releaseDue` 的 `inputSampleCount > press_samples+1`），下一次回调读
-   `read-mouse-button` 只看到电平 0"。要钉死需要 shim 级的按下/抬起时刻 trace，本轮没做
-   （见 `FELLOW.md` 待核 1）。
+9. **★ "轮询体上的 click 不生效" 的宿主侧机制已取证（2026-11-22）**：抬起判据原先只看 **KeyLevel 读点
+   个数**，而同一个 guest 回调里会连读多次 ⇒ 按下与抬起可以落在**同一个回调**里（trace 行
+   `frames == press_frames`），回调体那一趟只看到"电平 0"。修掉之后（提交 `4f8aa5c`，闸门②' =
+   抬起还必须 `frames >= press_frames + 2`，见 `input-device.md` §5）单条 `click … right` 从 4/5 变 14/14。
+   ⚠ 各区间**逐点**吃不吃 click 仍未取证 ⇒ 仍要一跑一读（见 `FELLOW.md` 待核 1）。
 10. **FELLOW 的 `click 100 140` 只证到"进 SAVE"**；`sn0000-quit` 那条 `100 270` 的转移**没有读数**
     （`FELLOW.md` 待核 4）。
 11. **③-7 的 `click 650 320`（确认保存）没有读数**：选槽会换脚本（`SBUNKI.BIN`），但"确认之后确实写盘"

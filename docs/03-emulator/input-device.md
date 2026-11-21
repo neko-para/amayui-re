@@ -279,6 +279,16 @@ rg -n -U 'input::(mouseMove|mouseButton|mouseWheel|key)\(' apps/emulator-lift/sr
   - `drainImmediate` 遇同样的 click 停在队首；
   - `pressDue` 一次最多按一条；`buttonPending` 跳过已按下未抬起的按钮。
   - 代价（显式）：连点总时长变长；每条 click 的 down 都能等到闸门①的 2 个 KeyLevel 读点。
+  - ★ **闸门②'（回调边界，2026-11-22 加）**：`releaseDue` 原先只看**读点个数** —— 2 个 KeyLevel
+    读点可以在**同一个 guest 回调**里凑满，抬起就落在施加按下的那个回调**内部**；而引擎是**按回调**
+    比电平（`3f1`/`3f2` 这种"这一趟读到的电平"），那一趟根本没看到按下 ⇒ 边沿被丢（实测单条
+    `click … right` 4/5；失败臂 `reason=keylevel`、press→release 只跨 6 个读点）。现在：**驱动供给
+    帧线时**（`PointerPoint::callback_boundary`，唯一来源 = `InputPlan` 的 `presenting()`）还要求
+    `frames >= press_frames + 2`，它与 ①/② **并联**（任一成立之后仍要过这一条）。为什么是 **2**：
+    帧计数在回调**末尾**（Present）才 +1 ⇒ `+1` 只证明"按下那一帧走完了"，证明不了"**下一个**回调的
+    按键读发生在抬起之前"。★ 没有帧线的驱动（插件 `IntentExecutor`）缺省不置位 ⇒ 行为不变（那里的
+    注入 click **仍是旧行为**，见 §6.3 residual）。守卫：`inject/click-crosses-callback`
+    （CTest `input-inject-visible`），`tools/mutate-check.mjs` 有对应条目。
 - **`mouse_move` / `mouse_down` / `mouse_up`**：写动作，一条一次直写。
   - `mouse_move` → `armMoveAt`（与 click 第一段同一段代码）；
   - `mouse_down` → 轻闸门：上一条 `mouse_move` 之后**完成过**一次 CursorPos 读点，或
@@ -340,7 +350,7 @@ move / down / up 与没有 UI 时**逐位相同**；右 / 中键同样 `return f
 |---|---|
 | `input-injection`：`orphan-up` · `program-hold-os-release` · `release-program-posts-up` · `focus-loss-posts-up` · `wheel-while-program-drives` · `program-down-takeover` · `program-up-without-lease` · `program-up-human-hold` · `key-repeat-bit30` · `guest-setcursorpos-while-program` | 转移表 / 租约 / 收口投影被改坏：孤儿 up 回来了、OS up 取消了 Program 的 hold、收口不发 up、失焦不清 OS 电平、滚轮被整条丢、接管重复 down、Program up 无租约也生效、repeat 不投影、guest 的 `SetCursorPos` 被租约误伤 |
 | `input-plan-read-points`：`input-plan/mouse-primitives` · `drag` · `drag-repeat` · `one-write-per-read-point` · `control-queue-one-write` · `two-clicks-serialized` · `click-consumed-by-ui` · `click-router-miss-identical` · `gates-and-releases` · `completion` · `trace` · `wallclock-release` | 配方解析 / 施加 / 写预算 / 连点串行化 / S9 路由被改坏。例如 `two-clicks-serialized` 红 = 两条 click 又合并成 `DOWN,DOWN,UP,UP`；`click-router-miss-identical` 红 = 未命中却改了 guest 消息序列；`trace` 红 = 抬起那一行的 `reason=keylevel` / `reason=wallclock` / `reason=keylevel+wallclock` 不再如实区分两条腿 |
-| `input-inject-visible`：`inject/click-two-phase` · `inject/drag` · `inject/move-only` · `inject/handback` · `inject/wallclock` | 端到端消息序列 / lParam / MK 位被改坏：down 与 up 落在不同坐标、拖拽 up 回跳、move 变成点击、收口不交还、墙钟兜底不抬起 |
+| `input-inject-visible`：`inject/click-two-phase` · `inject/drag` · `inject/move-only` · `inject/handback` · `inject/wallclock` · `inject/click-crosses-callback` | 端到端消息序列 / lParam / MK 位被改坏：down 与 up 落在不同坐标、拖拽 up 回跳、move 变成点击、收口不交还、墙钟兜底不抬起；`click-crosses-callback` 红 = 抬起又退回"只按读点个数判"（2 个 KeyLevel 读点可以在同一个回调里凑满 ⇒ 边沿在慢屏/20 Hz 屏上被丢） |
 | `overlay`：`overlay/pointer-map-letterbox` · `overlay/pointer-map-dpr` · `overlay/pointer-map-hover` · `overlay/pointer-map-invalid-geometry` · `overlay/ui-input-parse` | overlay 指针映射链（客户区 → 窗口点 → 窗口像素）或 `--ui-input` 值域被改坏；`ui-input-parse` 红 = 非法值静默成 consume / 缺省不是 consume |
 | `lift-control-endpoint`：`click-enqueue-at-read-point` · `click-coordinate-map` · `clock-freeze+plan-guard` · `control-resume-arms-host-hook` | 控制层立即队列的落点 / 坐标映射 / 暂停补偿被改坏（控制层 click 绕过 guest 读点、映射分叉、暂停期间墙钟走掉、恢复不清 OS 电平） |
 | `ui-click-router`：`ui-click-router/capture` | 纯 `ClickRouter` 状态机（down 吞 ⇒ up 吞 / down 放 ⇒ up 放）被改坏；它证明的是叠层状态机，不是注入路径 |

@@ -197,7 +197,8 @@ mouse_up left           # 用**当前设备位置**抬起（可与 down 不同�
   同一按钮还按着时后一条 `click` / `mouse_down` 不消费（连点串行化；见 §2.5 与
   `input-device.md` §5）。
 - **`mouse_move` / `mouse_down` / `mouse_up` 是写动作**：一条一次、在读点消费时直写；`click`
-  仍是「写动作 + 三条闸门」的复合。拖拽 = `mouse_move` → `mouse_down` → `mouse_move` × N →
+  仍是「写动作 + 四条闸门」的复合（① KeyLevel 读点 · ② 墙钟兜底 · ③ 按下侧 CursorPos 读点 ·
+  ②' **回调边界** `frames >= press_frames + 2`，见 `input-device.md` §5）。拖拽 = `mouse_move` → `mouse_down` → `mouse_move` × N →
   `mouse_up`，每条一个读点 ⇒ guest 每一拍看到新的 `WM_MOUSEMOVE`（MK 位 = 设备电平的投影）。
 - **`wait` 的起点** = 上一条指令生效的那个读点 ⇒ 有 0..一个迭代周期的偏差（**不可评估**）。
 - ★ **`timeout <ms>` 是行尾可选项，而且只允许出现在 `await script` / `await position` 上**：
