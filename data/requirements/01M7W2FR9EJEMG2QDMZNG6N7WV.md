@@ -34,7 +34,15 @@
 ## 判据（⛔ 原「首帧必须含非背景像素」作废：首帧实测是黑，会打在正确实现上）
 
 - **B1（dump 档）**：`--dump-frame` 时**每帧**都有 BMP，且该帧 `readback>=1`（dump 是消费者；触发漏了当场红）。
-- **B2（无 dump 档）**：逐帧 `rb_clear==0 && rb_present==0`；凡 `readback - rb_clear - rb_present > 0` 的帧必须
+- **B2（无 dump 档）**：逐帧 `rb_clear==0 && rb_present==0`；凡 `readback - rb_clear - rb_present > 0` 的帧必须能**归因**（见下一条）。
+- **下载归因（⛔ 不以 `readback=0` 为目标）**：每一次下载都要能归因到一条**显式读点**的 guest 调用。
+  · **DX 语义本身要求的 CPU 读回**（真机也走这条）⇒ 保留、⛔ 不优化掉：`GetRenderTargetData` /
+    可锁后缓冲 `LockRect` / `UpdateSurface` / `LoadSurfaceFromSurface` / 纹理 `LockRect`。
+  · **不是 DX 语义的两处**：`Clear` 的整幅下载（`Clear` 只写 VRAM；Phase B 已消掉）与
+    `SetRenderTarget` 旧目标那一项（真机像素留在 VRAM 纹理里，我们为了"guest 字节是权威副本"才下载）。
+    后者单独记 `rb_target`；实测 SAVE05 窗口 600 帧只有 **4 次**换 target（2 帧）⇒ 本基准里不是热点，
+    **不做** per-target 镜像；等某个场景真把它变热再开单（按需、不预先做）。
+  · 判据的形状因此是"**非读点下载 = 0**"，而不是"总下载 = 0"。
   `targets>=1`（RT 帧的那 1–2 次下载被**点名**，不是被忽略）。
 - **B3（像素）**：同一命令 `--max-frames 1 --dump-frame`，缺省臂 vs `LIFT_PRESENT_EAGER=1` 参照臂 ⇒ 首帧**逐字节相同**
   （跨 run 的帧 ≥2 不稳定，`tests/aot_overlay.cpp` 已证否 ⇒ ⛔ 不拿跨 run 的帧 ≥2 比）。
@@ -47,9 +55,10 @@
 ## 边界 / 未做
 
 - ⛔ 不改 DX 语义：7 个显式读点的行为逐位不变。
-- **RT 帧仍会下载 1–2 次**（`SetRenderTarget` 旧目标的保全屏障）：本单**接受**的边界，不是缺陷 ——
-  归零要 per-target 镜像 + 让"RT 当纹理采样"直接绑 GPU target（另一张单）。
-- rect `Clear`（`Count != 0`）保持材质化；本引擎是否真用 rect `Clear` 仍是 `<待核>`（`clear-shape` 统计属 Phase C）。
+- **RT 帧仍会下载 1–2 次**（`SetRenderTarget` 旧目标的保全屏障）：这是**我们的模型**的代价，不是 DX 语义；
+  实测 600 帧只有 4 次换 target ⇒ 不在本单优化（per-target 镜像 = 让"RT 当纹理采样"直接绑 GPU target，另开单）。
+- rect `Clear`（`Count != 0`）保持材质化；本引擎是否真用 rect `Clear` 仍是 `<待核>`（`clear-shape` 统计**没做**，要开单才做）。
 - 诊断点未改：根因是 `dirty_`，已由"arm ⇒ dirty"修掉；新增不看 `materialized` 的消费者要重审。
 - ⛔ 脏矩形回读：已裁不立项（本场景全屏重绘，近零收益）。
-- 墙钟收益要记就必须换**定帧数**窗口（当前窗口 wait-closed，差额被帧数吸收）。
+- 墙钟收益要精确记，就让 **JS 侧在载入完成后用 `ctx.profile.begin/end` 夹住那段操作**（窗口由状态门定界、不是墙钟，
+  `PluginHost::profileEnd` 复用 `AotHost::endWindowText()`，报告走 stdout，与配方窗同一份文本）—— 本单没做。

@@ -96,8 +96,13 @@
 - **B1（dump 档）**：`--max-frames 3 --dump-frame <dir>/f{frame}.bmp` + `LIFT_GPU_SUBMITS=1`
   ⇒ 每帧都有 BMP，且该帧 `readback>=1`（dump 是消费者；触发漏了当场红）。
 - **B2（无 dump 档）**：逐帧 `rb_clear==0 && rb_present==0`，且凡
-  `readback - rb_clear - rb_present > 0` 的帧必须 `targets>=1`（RT 帧的那 1–2 次下载被**点名**，
-  而不是被忽略）。
+  `readback - rb_clear - rb_present > 0` 的帧必须能**归因**（见下一条）。
+- **下载归因（⛔ 不以 `readback=0` 为目标）**：判据是"**非读点下载 = 0**"，不是"总下载 = 0"。按 DX 预期分两类：
+  - **DX 语义本身就要求 CPU 读回**（真机也走这条 ⇒ 保留、⛔ 不优化掉）：`GetRenderTargetData` /
+    可锁后缓冲 `LockRect` / `UpdateSurface` / `LoadSurfaceFromSurface` / 纹理 `LockRect`。
+  - **不是 DX 语义的**：`Clear` 的整幅下载（`Clear` 只写 VRAM）——Phase B 已消掉；
+    `SetRenderTarget` 旧目标那一项（真机像素留在 VRAM 纹理里，我们为了"guest 字节是权威副本"才下载）——
+    单独记账，实测 600 帧只有 **4 次**换 target ⇒ 本基准里不是热点，**不做** per-target 镜像。
 - **B3（像素）**：同一条命令 `--max-frames 1 --dump-frame` 跑两臂（缺省 / `LIFT_PRESENT_EAGER=1`
   = 已知新鲜的参照臂）⇒ 首帧**逐字节相同**。**只对帧 1**：同一二进制连跑两遍，帧 2/3 的 dump
   就不同（真实时间依赖）⇒ ⛔ 不拿跨 run 的帧 ≥2 比。
@@ -151,10 +156,11 @@ $env:LIFT_GPU_SUBMITS="1"
 
 ### 剩余边界
 
-- **RT 帧仍会下载 1–2 次**（`SetRenderTarget` 旧目标的保全屏障，以及换 target 时旧目标的回读）。
-  这是本单**接受**的边界，不是缺陷：把它归零要 per-target 镜像 + 让"RT 当纹理采样"直接绑 GPU target。
+- **RT 帧仍会下载 1–2 次**（`SetRenderTarget` 旧目标的保全屏障）：这是**我们的模型**的代价，不是 DX 语义
+  （真机像素留在 VRAM 纹理里）。本单**不**优化它：实测 SAVE05 窗口 600 帧只有 4 次换 target ⇒ 不是热点；
+  真要做就 per-target 镜像 + 让"RT 当纹理采样"直接绑 GPU target（另开单，按需）。
 - **rect `Clear`（`Count != 0`）保持材质化**：仍整幅下载 + CPU 填色。本引擎在 SAVE05 窗口里是否真用
-  rect `Clear` 仍是 `<待核>`（`clear-shape` 统计属 Phase C）。
+  rect `Clear` 仍是 `<待核>`（`clear-shape` 统计**没做**，要开单才做；本单只把它列进需求单的 `## 未做`）。
 - **诊断点**：`--dump-frame` / `freeze` / `frameStats` / `lastHash` 都经 `materialized` 闸门；
   `FrameSampler`（`present.cpp`）是唯一不看 `materialized` 的点，但它在 `wantsGuestPixels()` 里
   （`present.h`）⇒ needs 谓词必先回读，Phase B 之后仍拿到本帧字节。⇒ 本阶段**未改**诊断点：
