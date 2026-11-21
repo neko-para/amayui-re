@@ -10,16 +10,21 @@
 //   · `plugin/module-default`（+ pair）   ：只读 `export default`；default 不是对象 / `start` 与
 //                                            `onTrigger` 不成对 ⇒ **装载失败并点名**。
 //   · `control-script/start-on-trigger-chain`：**真库** `scripts/plugins/lib/save.js`（假读数）走整条链：
-//                                            TITLE → SAVE → 读点 → SBUNKI → FIELD；两个 slot 的 `move`
+//                                            TITLE → SAVE → 读点 → SBUNKI → `expect` 命中（用例显式给
+//                                            `--plugin-param expect=FIELD,SC0000`）；两个 slot 的 `move`
 //                                            落**不同** y（实测表，⛔ 不是公式）；精确坐标
 //                                            (1070,480) / (300,rowY) / (640,323) + `done`/`fired=5`/`calls=6`。
-//   · `…-field-terminal`                  ：三选一终端的 **FIELD 分支**直接收口（假读数走这一支；
-//                                            真机 slot 5 本机实测走 0x0AF8，见 c2c-report §5-2）；
+//   · `…-field-terminal`                  ：终态 = `expect` 里的脚本命中（FIELD 分支）直接收口；
 //                                            不点 (690,323)，done 之后不再有回调。
-//   · `…-second-confirm`                  ：三选一终端的 **SBUNKI 0x0AF8 分支**：真的点落 (690,323)
-//                                            再 FIELD ⇒ done（`fired=6` / `calls=7`）；与 6 那条并存。
+//   · `…-second-confirm`                  ：终态的 **SBUNKI 0x0AF8 第二道确认**分支：真的点落 (690,323)
+//                                            再 FIELD ⇒ done（`fired=6` / `calls=7`）；与上面那条并存。
 //   · `…-bad-slot`                        ：非整数 / 越界（9 / -1 / 1.5 / abc）⇒ 构造时 throw ⇒ `run=failed`
-//                                            且 reason 点名 `slot N`；0 / 6 合法（成对边界）。
+//                                            且 reason 点名 `slot N`；0 / 7 合法（成对边界）。
+//   · `control-script/load-save-onloaded` ：`loadSave` 的 **expect（落点由调用方给）+ onLoaded**：
+//                                            `SC0000` 不在 expect 里 ⇒ 不是终态；`FIELD` 命中 ⇒ `onLoaded`
+//                                            起场景（armed 换成场景的门）；`expect` 缺 / 元素非法 ⇒ 构造时 throw。
+//   · `control-script/chains-route`        ：`chains.js` 的 `route`（**通用**，与 save 无关）：`load:*` ⇒ first、
+//                                            其余 ⇒ then；**timeout 也按名字路由**；`route.start` 只启 first。
 //   · `control-script/global-read-modify-write`：同拍 `read → edit → input`：Edit **立即**（读回新值）、
 //                                            **不占** Input 预算（队列里只有那一条 click）。
 //   · `plugin/finish-quit`（finish 半）   ：`ctx.finish(5)` 只结束 Run + 记 exit，⛔ 不改进程 exit。
@@ -382,7 +387,7 @@ void caseConcurrentArm() {
 // ★ 精确坐标是判据（⛔ 不是"没报错"）：变异 `click(300,rowY)` → `rowY+60` 在这里红（第 ⑤ 拍）。
 // =====================================================================================
 
-// 泵到 SBUNKI 门命中（= 提交 click(640,323) 并 arm 终态三选一）；返回实测 row y（失败 -1）。
+// 泵到 SBUNKI 门命中（= 提交 click(640,323) 并 arm 终态集合）；返回实测 row y（失败 -1）。
 int driveToSbunki(Fixture& f) {
     int cx = 0;
     int cy = 0;
@@ -414,9 +419,10 @@ int driveToSbunki(Fixture& f) {
     f.cursor(&cx, &cy);
     LIFT_CHECK_EQ_I64(cx, 300);
     const int row_y = cy;
-    // ⑤ SBUNKI 读点：② 提升 click(300,rowY) → ③ 命中 SBUNKI 门（提交 click(640,323)）→ ⑥ click 落地。
+    // ⑤ SBUNKI 读点（★ 必须在 **读段之后**的 [0x0B18,0x0C58)：在这之前的点会被吞 —— 见 save.js 头）：
+    //    ② 提升 click(300,rowY) → ③ 命中 SBUNKI 门（提交 click(640,323)）→ ⑥ click 落地。
     f.readings.script = "SBUNKI.BIN";
-    f.readings.pos = 0x0a00;
+    f.readings.pos = 0x0b20;
     f.pump();
     dumpFail(f);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 4);
@@ -431,7 +437,7 @@ int chainRowY(int slot) {
     Fixture f;
     LIFT_CHECK(f.mem_ok && f.win_ok);
     if (!f.mem_ok || !f.win_ok) return -1;
-    const bool loaded = f.loadLib({{"slot", std::to_string(slot)}});
+    const bool loaded = f.loadLib({{"slot", std::to_string(slot)}, {"expect", "FIELD,SC0000"}});
     LIFT_CHECK(loaded);
     if (!loaded) {
         std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
@@ -455,7 +461,9 @@ int chainRowY(int slot) {
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 6);
     const std::string line = f.host->readout();
     LIFT_CHECK(line.find("run=done") != std::string::npos);
-    LIFT_CHECK(line.find("params=slot=" + std::to_string(slot)) != std::string::npos);
+    // readout 的 params 是**按名字排序逗号拼接** ⇒ `expect=FIELD,SC0000,slot=N`。
+    LIFT_CHECK(line.find("slot=" + std::to_string(slot)) != std::string::npos);
+    LIFT_CHECK(line.find("expect=FIELD,SC0000") != std::string::npos);
     std::printf("  [%s slot=%d] %s\n", lift_test::g_current_case, slot, line.c_str());
     return row_y;
 }
@@ -471,7 +479,7 @@ void caseFieldTerminal() {
     Fixture f;
     LIFT_CHECK(f.mem_ok && f.win_ok);
     if (!f.mem_ok || !f.win_ok) return;
-    const bool loaded = f.loadLib({{"slot", "5"}});
+    const bool loaded = f.loadLib({{"slot", "5"}, {"expect", "FIELD,SC0000"}});
     LIFT_CHECK(loaded);
     if (!loaded) {
         std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
@@ -514,7 +522,7 @@ void caseSecondConfirm() {
     Fixture f;
     LIFT_CHECK(f.mem_ok && f.win_ok);
     if (!f.mem_ok || !f.win_ok) return;
-    const bool loaded = f.loadLib({{"slot", "5"}});
+    const bool loaded = f.loadLib({{"slot", "5"}, {"expect", "FIELD,SC0000"}});
     LIFT_CHECK(loaded);
     if (!loaded) {
         std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
@@ -554,7 +562,7 @@ void caseSecondConfirm() {
 
 // -------------------------------------------------------------------------------------
 // `…-bad-slot`：非整数 / 越界 ⇒ `loadSave` **构造时** throw（装载成功、`start` 里抛 ⇒ Run fail）
-//   ★ 0 / 6 是合法边界（成对断言）：只到 6 有实测行（7–9 抛）。
+//   ★ 0 / 7 是合法边界（成对断言）：实测行表到 7（8–9 抛）。
 // -------------------------------------------------------------------------------------
 void caseBadSlot() {
     lift_test::g_current_case = "control-script/start-on-trigger-chain-bad-slot";
@@ -569,7 +577,7 @@ void caseBadSlot() {
         Fixture f;
         LIFT_CHECK(f.mem_ok && f.win_ok);
         if (!f.mem_ok || !f.win_ok) return;
-        const bool loaded = f.loadLib({{"slot", b.param}});
+        const bool loaded = f.loadLib({{"slot", b.param}, {"expect", "FIELD,SC0000"}});
         LIFT_CHECK(loaded);  // 装载不看参数；抛在 start
         if (!loaded) {
             std::fprintf(stderr, "  load error (%s): %s\n", b.param, f.load_error.c_str());
@@ -581,10 +589,10 @@ void caseBadSlot() {
         LIFT_CHECK(f.host->failReason().find(b.needle) != std::string::npos);
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);  // start 跑了、onTrigger 没跑
     }
-    // 合法边界 0 / 6 不抛（构造成功、start arm TITLE 门）。
-    for (const int slot : {0, 6}) {
+    // 合法边界 0 / 7 不抛（构造成功、start arm TITLE 门）。
+    for (const int slot : {0, 7}) {
         Fixture f;
-        const bool loaded = f.loadLib({{"slot", std::to_string(slot)}});
+        const bool loaded = f.loadLib({{"slot", std::to_string(slot)}, {"expect", "FIELD,SC0000"}});
         LIFT_CHECK(loaded);
         if (!loaded) continue;
         f.pump();
@@ -597,13 +605,373 @@ void caseBadSlot() {
 void caseChain() {
     const int y4 = chainRowY(4);
     const int y5 = chainRowY(5);
-    // ★ 实测表：slot 4 → 328、slot 5 → 388（⛔ 不是 91 + 59.5*n 之类的公式；见 D-C2C-3）。
+    const int y7 = chainRowY(7);  // 表里第 7 行（save07-battle.plan 的槽 007 读数）
+    // ★ 实测表：slot 4 → 328、slot 5 → 388、slot 7 → 507（⛔ 不是公式；见 D-C2C-3 / save07-battle.plan）。
     LIFT_CHECK_EQ_I64(y4, 328);
     LIFT_CHECK_EQ_I64(y5, 388);
+    LIFT_CHECK_EQ_I64(y7, 507);
     LIFT_CHECK(y4 != y5);  // 两个 slot 的链必须发不同坐标（"只是没报错"不够）
+    LIFT_CHECK(y5 != y7);  // ★ 7 是新补进表的那一行：退回 0–6 的表会让它（= undefined ⇒ 构造 throw）红
     caseFieldTerminal();
     caseSecondConfirm();
     caseBadSlot();
+}
+
+
+// =====================================================================================
+// `control-script/load-save-onloaded`：`loadSave` 的 **expect（落点由调用方给）+ onLoaded**
+//
+// 判据（三条；⛔ 不判游戏业务）：
+//   ① **期望值/名字表**：`expect` 只给 `FIELD.BIN` 时 `SC0000.BIN` **不是**终态（旧实现硬编码 FIELD/SC0000）；
+//   ② `expect` 命中 ⇒ 先 log、再 `onLoaded`：armed 集合**换成**场景的门（`battle:field`）；
+//   ③ `expect` 缺 / 元素不是非空字符串 ⇒ **构造时 throw** ⇒ `run=failed`（⛔ 不猜默认值）。
+//
+// ★ ①② 用**交付样例** `scripts/plugins/lib/scenario-save07-battle.js`（真 `save.js` + 真 `chains.js`）；
+//   ③ 需要一份"故意漏参数"的入口 ⇒ run 私有临时目录放 `save.js` 的**逐字节副本** + 小入口
+//   （import 根 = 入口目录 ⇒ 只有这样它才 import 得到真库；⛔ 不往 `scripts/plugins/lib/` 塞测试夹具）。
+// =====================================================================================
+
+// run 私有目录（`fs::temp_directory_path()` 之下；析构时删掉 ⇒ ⛔ 不污染工作树）。
+struct ScopedTempDir {
+    fs::path path;
+    ~ScopedTempDir() {
+        if (path.empty()) return;
+        std::error_code ec;
+        fs::remove_all(path, ec);
+    }
+    bool make(const std::string& tag) {
+        static int seq = 0;
+        ++seq;
+        std::error_code ec;
+        path = fs::temp_directory_path(ec) / (tag + "-" + std::to_string(seq));
+        if (ec || path.empty()) return false;
+        fs::remove_all(path, ec);
+        ec.clear();
+        fs::create_directories(path, ec);
+        return !ec;
+    }
+};
+
+bool writeHostFile(const fs::path& path, const std::string& text) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    out.write(text.data(), static_cast<std::streamsize>(text.size()));
+    out.flush();
+    return static_cast<bool>(out);
+}
+
+// ③ 的两份探针：`loadSave` 的 `expect` 校验只能拿**裸 loadSave** 测（参考入口有默认值 + 一行 info）。
+const char* kNoExpectProbe = R"JS(
+import { loadSave } from "./save.js";
+
+const plugin = {
+    start(ctx) {
+        return loadSave(7, {}).start(ctx);
+    },
+    onTrigger(ctx, ev) {
+        return loadSave(7, {}).onTrigger(ctx, ev);
+    },
+};
+
+export default plugin;
+)JS";
+
+const char* kBadExpectProbe = R"JS(
+import { loadSave } from "./save.js";
+
+const plugin = {
+    start(ctx) {
+        return loadSave(7, { expect: ["FIELD.BIN", ""] }).start(ctx);
+    },
+    onTrigger(ctx, ev) {
+        return loadSave(7, { expect: ["FIELD.BIN", ""] }).onTrigger(ctx, ev);
+    },
+};
+
+export default plugin;
+)JS";
+
+void caseLoadSaveOnLoaded() {
+    lift_test::g_current_case = "control-script/load-save-onloaded";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    const bool loaded = f.loadFile(libPath("scenario-save07-battle.js"));
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    // 载入链（TITLE → SAVE → row → SBUNKI）由库自己走；这里只喂假读数。
+    const int row_y = driveToSbunki(f);
+    if (row_y < 0) return;
+    LIFT_CHECK_EQ_I64(row_y, 507);  // 槽 7（样例就是 `loadSave(7, { expect: ["FIELD.BIN"] })`）
+    // ---- ① 期望值/名字表：SC0000 不在 expect 里 ⇒ **不是**终态 ----
+    {
+        const std::vector<std::string> armed = f.host->runner().armedNames();
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(armed.size()), 2);  // expect 1 条 + 第二道确认
+        bool has_field_expect = false;
+        bool has_confirm = false;
+        for (const std::string& name : armed) {
+            if (name == "load:expect:FIELD.BIN") has_field_expect = true;
+            if (name == "load:confirm2") has_confirm = true;
+        }
+        LIFT_CHECK(has_field_expect);
+        LIFT_CHECK(has_confirm);
+    }
+    f.readings.script = "SC0000.BIN";
+    f.readings.pos = 0x0600;
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 4);      // 没有终态门命中
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 5);  // 也没有新回调
+    // ---- ② expect 命中 ⇒ 先 log、再 onLoaded；armed 换成场景的门 ----
+    f.readings.script = "FIELD.BIN";
+    f.readings.pos = 0x0600;  // ⛔ 不在 [0x579C,0x5860)：这是"刚进 FIELD"，场景的门还没到
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 5);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 6);  // start + 载入链 5
+    LIFT_CHECK(!f.host->runner().done());
+    const std::vector<std::string> armed = f.host->runner().armedNames();
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(armed.size()), 1);
+    if (armed.size() == 1) LIFT_CHECK(armed[0] == "battle:field");  // ★ onLoaded 起了场景、场景的门被 arm
+    // 场景的第一跳（走 `chains.js` 的 route）：FIELD 主轮询体命中 ⇒ scenario.onTrigger 提交 click(1220,45)。
+    f.readings.pos = 0x5800;  // [0x579C,0x5860) 内部
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 6);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().stagedDepth()), 1);
+    {
+        const std::vector<std::string> next = f.host->runner().armedNames();
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(next.size()), 1);
+        if (next.size() == 1) LIFT_CHECK(next[0] == "battle:selact");
+    }
+    {
+        const std::string line = f.host->readout();
+        LIFT_CHECK(line.find("run=waiting") != std::string::npos);
+        std::printf("  [%s] %s\n", lift_test::g_current_case, line.c_str());
+    }
+
+    // ---- ③ expect 缺失 / 元素非法 ⇒ 构造时 throw（Run fail 并点名，⛔ 不静默）----
+    ScopedTempDir tmp;
+    LIFT_CHECK(tmp.make("lift-plugin-onloaded"));
+    if (tmp.path.empty()) return;
+    std::error_code ec;
+    fs::copy_file(fs::path(libPath("save.js")), tmp.path / "save.js",
+                  fs::copy_options::overwrite_existing, ec);
+    LIFT_CHECK(!ec);
+    LIFT_CHECK(writeHostFile(tmp.path / "no-expect.js", kNoExpectProbe));
+    LIFT_CHECK(writeHostFile(tmp.path / "bad-expect.js", kBadExpectProbe));
+    struct ExpectProbe {
+        const char* file;
+        const char* needle;
+    };
+    const ExpectProbe probes[] = {
+        {"no-expect.js", "options.expect"},  // 缺 ⇒ 消息里点名 expect
+        {"bad-expect.js", "expect[1]"},      // 元素不是非空字符串 ⇒ 点名下标
+    };
+    for (const ExpectProbe& probe : probes) {
+        Fixture p;
+        LIFT_CHECK(p.mem_ok && p.win_ok);
+        if (!p.mem_ok || !p.win_ok) return;
+        const bool ok = p.loadFile((tmp.path / probe.file).string());
+        LIFT_CHECK(ok);
+        if (!ok) {
+            std::fprintf(stderr, "  load error (%s): %s\n", probe.file, p.load_error.c_str());
+            continue;
+        }
+        p.pump();
+        dumpFail(p);
+        LIFT_CHECK(p.host->failed());
+        LIFT_CHECK(p.host->failReason().find(probe.needle) != std::string::npos);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(p.host->callbacks()), 1);  // start 抛了、onTrigger 没跑
+        const std::string line = p.host->readout();
+        LIFT_CHECK(line.find("run=failed") != std::string::npos);
+    }
+    // 缺失 expect 的消息里要给出**三类别名**（ADV / 战斗 / 地图）—— ⛔ 不许只说"必填"。
+    {
+        Fixture p;
+        LIFT_CHECK(p.mem_ok && p.win_ok);
+        if (!p.mem_ok || !p.win_ok) return;
+        const bool ok = p.loadFile((tmp.path / "no-expect.js").string());
+        LIFT_CHECK(ok);
+        if (ok) {
+            p.pump();
+            const std::string reason = p.host->failReason();
+            LIFT_CHECK(reason.find("ADV") != std::string::npos);
+            LIFT_CHECK(reason.find("BTL.BIN") != std::string::npos);
+            LIFT_CHECK(reason.find("FIELD.BIN") != std::string::npos);
+        }
+    }
+}
+
+// =====================================================================================
+// `control-script/chains-route`：`chains.js` 的 `route` —— **通用**（与 save 无关）
+//
+// 判据：
+//   ① `load:*` 事件走 `first`（它的 click 提交/落地）；其余走 `then`（click 来源可区分）；
+//   ② **timeout 也按名字路由**（`load:*` 的 timeout ⇒ first；`then:*` 的 ⇒ then）—— ⛔ 不看 kind；
+//   ③ `route.start` **只启 first**（`then` 由调用方在自己的 onLoaded 里拉起 —— 探针里就是 first.onTrigger
+//      调 `then.start`）。
+// ★ 时钟注入（`setClockForTest`；与 `tests/recipe_driver_parity.cpp` 同一条）：超时判据**不真睡**。
+// =====================================================================================
+std::uint64_t g_routeNowMs = 1000;
+std::uint64_t routeNowMs() { return g_routeNowMs; }
+
+const char* kRouteProbe = R"JS(
+import { route } from "./chains.js";
+
+const first = {
+    start(ctx) {
+        return ctx.trigger.afterScript("FIRST.BIN", { name: "load:armed", timeoutMs: 3 });
+    },
+    onTrigger(ctx, ev) {
+        if (ev.kind === "timeout") {
+            ctx.finish(5, `first: timeout (${ev.name})`);
+            return [];
+        }
+        ctx.input.click(11, 11);
+        return then.start(ctx);   // ★ 调用方在 onLoaded 里拉起 then（route.start 只启 first）
+    },
+};
+
+const then = {
+    start(ctx) {
+        return ctx.trigger.afterScript("THEN.BIN", { name: "then:armed", timeoutMs: 3 });
+    },
+    onTrigger(ctx, ev) {
+        if (ev.kind === "timeout") {
+            ctx.finish(7, `then: timeout (${ev.name})`);
+            return [];
+        }
+        ctx.input.click(22, 22);
+        return [];
+    },
+};
+
+export default route((ev) => String(ev.name).startsWith("load:"), first, then);
+)JS";
+
+void caseChainsRoute() {
+    lift_test::g_current_case = "control-script/chains-route";
+    ScopedTempDir tmp;
+    LIFT_CHECK(tmp.make("lift-plugin-chains"));
+    if (tmp.path.empty()) return;
+    std::error_code ec;
+    fs::copy_file(fs::path(libPath("chains.js")), tmp.path / "chains.js",
+                  fs::copy_options::overwrite_existing, ec);
+    LIFT_CHECK(!ec);
+    LIFT_CHECK(writeHostFile(tmp.path / "route-probe.js", kRouteProbe));
+
+    // ---- ① 名字路由：`load:*` ⇒ first；其余 ⇒ then（click 坐标可区分来源）----
+    {
+        Fixture f;
+        LIFT_CHECK(f.mem_ok && f.win_ok);
+        if (!f.mem_ok || !f.win_ok) return;
+        const bool loaded = f.loadFile((tmp.path / "route-probe.js").string());
+        LIFT_CHECK(loaded);
+        if (!loaded) {
+            std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+            return;
+        }
+        g_routeNowMs = 1000;
+        f.host->runner().setClockForTest(&routeNowMs);
+        f.host->executor().setClockForTest(&routeNowMs);
+        f.readings.script = "FIRST.BIN";
+        f.readings.pos = 0x10;
+        f.pump();  // start：只启 first ⇒ armed = { load:armed }
+        dumpFail(f);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 0);
+        {
+            const std::vector<std::string> armed = f.host->runner().armedNames();
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(armed.size()), 1);
+            if (armed.size() == 1) LIFT_CHECK(armed[0] == "load:armed");
+        }
+        f.pump();  // load:armed 命中 ⇒ first.onTrigger ⇒ click(11,11) + then.start
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 1);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().stagedDepth()), 1);
+        {
+            const std::vector<std::string> armed = f.host->runner().armedNames();
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(armed.size()), 1);
+            if (armed.size() == 1) LIFT_CHECK(armed[0] == "then:armed");  // ★ then 由调用方拉起
+        }
+        f.readings.script = "THEN.BIN";  // then:armed 命中 ⇒ then.onTrigger ⇒ click(22,22)；click(11,11) 落地
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 2);
+        int cx = 0;
+        int cy = 0;
+        f.cursor(&cx, &cy);
+        LIFT_CHECK_EQ_I64(cx, 11);  // first 的 click 真的落地了
+        LIFT_CHECK_EQ_I64(cy, 11);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().stagedDepth()), 1);  // click(22,22) 来自 then
+        LIFT_CHECK(f.host->runner().done());
+        std::printf("  [%s] %s\n", lift_test::g_current_case, f.host->readout().c_str());
+    }
+
+    // ---- ② `load:*` 的 **timeout** 也走 first（按名字，⛔ 不按 kind）----
+    {
+        Fixture f;
+        LIFT_CHECK(f.mem_ok && f.win_ok);
+        if (!f.mem_ok || !f.win_ok) return;
+        const bool loaded = f.loadFile((tmp.path / "route-probe.js").string());
+        LIFT_CHECK(loaded);
+        if (!loaded) return;
+        g_routeNowMs = 1000;
+        f.host->runner().setClockForTest(&routeNowMs);
+        f.host->executor().setClockForTest(&routeNowMs);
+        f.readings.script = "FIRST.BIN";
+        f.readings.pos = 0x10;
+        f.pump();  // start：arm load:armed（deadline = 1003）
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->timeouts()), 0);
+        g_routeNowMs = 1010;  // 越过 deadline（⛔ 不真睡）
+        // ★ 这一拍**不许**命中 fire（fire 优先于 timeout）⇒ 喂一个不匹配的读数点。
+        f.readings.script = "OTHER.BIN";
+        f.readings.pos = 0x00;
+        f.pump();  // timeout 事件 name=load:armed ⇒ first.onTrigger
+        dumpFail(f);
+        LIFT_CHECK(f.host->finished());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->finishCode()), 5);
+        LIFT_CHECK(f.host->finishReason().find("first: timeout") != std::string::npos);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->timeouts()), 1);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 0);
+    }
+
+    // ---- ③ `then:*` 的 timeout 走 then ----
+    {
+        Fixture f;
+        LIFT_CHECK(f.mem_ok && f.win_ok);
+        if (!f.mem_ok || !f.win_ok) return;
+        const bool loaded = f.loadFile((tmp.path / "route-probe.js").string());
+        LIFT_CHECK(loaded);
+        if (!loaded) return;
+        g_routeNowMs = 1000;
+        f.host->runner().setClockForTest(&routeNowMs);
+        f.host->executor().setClockForTest(&routeNowMs);
+        f.readings.script = "FIRST.BIN";
+        f.readings.pos = 0x10;
+        f.pump();  // start
+        f.pump();  // load:armed 命中（now 仍是 1000 ⇒ 不超时）⇒ then.start 拉起 then:armed（deadline 1003）
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK(!f.host->finished());
+        g_routeNowMs = 1010;
+        // ★ 同样：喂不匹配的读数点，让 timeout（而不是 fire）成为本拍事件。
+        f.readings.script = "OTHER.BIN";
+        f.readings.pos = 0x00;
+        f.pump();  // then:armed 超时 ⇒ then.onTrigger ⇒ finish(7, …)
+        dumpFail(f);
+        LIFT_CHECK(f.host->finished());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->finishCode()), 7);
+        LIFT_CHECK(f.host->finishReason().find("then: timeout") != std::string::npos);
+    }
 }
 
 // =====================================================================================
@@ -1482,6 +1850,8 @@ int main() {
     caseInitialState();
     caseConcurrentArm();
     caseChain();
+    caseLoadSaveOnLoaded();
+    caseChainsRoute();
     caseGlobalReadModifyWrite();
     caseFinish();
     caseStartNowAndStaged();

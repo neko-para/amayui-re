@@ -791,40 +791,64 @@ export default plugin;   // 宿主 QJS 读 default 导出；⛔ 不读 globalThi
 - **chain 接线（用 name，不用 step 计数器 / ctx.state）**：
   ```js
   const plugin = {
-    start: (ctx) => loadSave(Number(ctx.params.slot)).start(ctx),
-    onTrigger: (ctx, ev) => loadSave(Number(ctx.params.slot)).onTrigger(ctx, ev),
+    start: (ctx) => loadSave(Number(ctx.params.slot), { expect: ["FIELD.BIN"] }).start(ctx),
+    onTrigger: (ctx, ev) => loadSave(Number(ctx.params.slot), { expect: ["FIELD.BIN"] }).onTrigger(ctx, ev),
   } satisfies PluginModule;
   export default plugin;
   ```
-- `loadSave(slot, options = {})`（`options.timeoutMs` 可选）返回 `{ start, onTrigger }`：`start` 发初始具名 trigger；`onTrigger` 按
-  `ev.name` 分派。它是**纯 JS 的回调链构造器**（真源 `scripts/plugins/lib/save.js`），⛔ 不是 `ctx.run`
-  （Run/dispatch 属 C5）、⛔ 没有新宿主 API；宿主每次回调新建实例 ⇒ ⛔ 不把进度塞进闭包 / `ctx.state`。
+- `loadSave(slot, { expect, timeoutMs, onLoaded })`：**`expect` 必填**（`string[]`，非空、元素非空字符串）
+  —— 载入完成后**可以算落点**的脚本名由**调用方按预期给**（照宿主读数拼写、带 `.BIN`）：
+  **ADV = `SC*` / `SG*` / `SP*`**（如 `SC0000.BIN`）、**战斗 = `BTL.BIN`**、**地图 = `FIELD.BIN`**（可能还有别的名字）。
+  ⛔ 本库**不内置场景清单**（旧版把 `FIELD` / `SC0000` 写死成"三选一终端"就是错的来源）。
+  返回 `{ start, onTrigger }`；它是**纯 JS 的回调链构造器**（真源 `scripts/plugins/lib/save.js`），
+  ⛔ 不是 `ctx.run`（Run/dispatch 属 C5）、⛔ 没有新宿主 API；宿主每次回调新建实例 ⇒
+  ⛔ 不把进度塞进闭包 / `ctx.state`。
+  `onLoaded(ctx)` 是"载入**到终态之后**"的接续点（终态先 log 再回调，返回值 = 本次 `onTrigger` 的返回值；
+  ⛔ 不给它时行为不变）。**本库不认识场景**：把载入链和场景拼起来是使用方用 `chains.js` 的 `route` 做的
+  （§4.6a）。
 - **`.BIN` 身份**：`PluginReadings.script` 是 marker **文件名**（`TITLE.BIN` / `SAVE.BIN` / `SBUNKI.BIN` /
   `FIELD.BIN`）；C1 的 `afterScript` / `afterPosition` 是精确 `==`（`trigger_runner.cpp:70,82`），
   ⛔ 不做 recipe 那层的"剥 `.BIN` + ASCII 大小写不敏感"（`recipe.cpp:141-153`）⇒ 链里的名字**必须带后缀**。
 - **链（slot 5 实测）**：`TITLE [0x0460,0x0520)` → `click(1070,480)` → `SAVE [0x1104,0x11C4)` →
-  `move(300,rowY)` → 读点 → `click(300,rowY)` → `SBUNKI [0x09F8,0x0B18)` → `click(640,323)` →
-  三选一终端 `[FIELD | SC0000 | SBUNKI 0x0AF8]`；`0x0AF8` ⇒ `click(690,323)` → `[FIELD | SC0000]` ⇒ done。
-  `rowY = {0:91,1:150,2:209,3:269,4:328,5:388,6:447}`（实测表；⛔ 不用公式外推 7–9）。
-- **失败面**（全部响亮）：slot 非整数 / 越界 ⇒ **构造时 throw**；未知 `ev.name` ⇒ `ctx.fail` + `[]`；
+  `move(300,rowY)` → 读点 → `click(300,rowY)` → `SBUNKI [0x0B18,0x0C58)` → `click(640,323)` →
+  终态 `[expect… | SBUNKI 0x0AF8]`；`0x0AF8` ⇒ `click(690,323)` → `[expect…]` ⇒ done。
+  ★ 确认点击为什么等 `[0x0B18,0x0C58)`：`save07-battle.plan` 头的 trace 读数 —— 同一张「要读取吗？」对话框，
+  轮询体 `[0x09A4,0x09F8)` 与读段 `[0x0AF8,0x0B18)` 里 click 会被吞（press 只跨 2 个读点），
+  **读段之后** `[0x0B18,0x0C58)` 里 3/3 被消费。旧窗口 `[0x09F8,0x0B18)` 的落点多数在 `0x0AF8` ⇒ 点击被吞
+  ⇒ 链停在那里（`REQ-01M7W2X81F1ASB488EJFQGMQSH` 的签名：`gate timeout (load:field-2)`）。
+  `rowY = {0:91,1:150,2:209,3:269,4:328,5:388,6:447,7:507}`（实测表；`7` = `save07-battle.plan` 的槽 007 读数；⛔ 不用公式外推 8–9）。
+- **失败面**（全部响亮）：slot 非整数 / 越界 ⇒ **构造时 throw**；`expect` 缺 / 空 / 元素非法 ⇒ **构造时 throw**
+  （消息给出 ADV / 战斗 / 地图三类别名）；未知 `ev.name` ⇒ `ctx.fail` + `[]`；
   门超 `timeoutMs`（缺省 30000）⇒ `ctx.finish(5, "load-save: gate timeout (…)")` + `[]`（⛔ 不用 `ctx.quit`）。
-- **参考入口**：`save.js` 另有一条 `export default`（`start`/`onTrigger` 从 `ctx.params.slot` 构造），
-  只为 `--plugin <save.js> --plugin-param slot=5` 直接当插件跑；库消费者用**具名** `loadSave(slot)`。
+- **参考入口**：`save.js` 另有一条 `export default`（`start`/`onTrigger` 从 `ctx.params` 构造），
+  只为 `--plugin <save.js> --plugin-param slot=5 --plugin-param expect=FIELD,SC0000` 直接当插件跑
+  （`expect` 逗号分隔、裸名自动补 `.BIN`；**不给 ⇒ 默认 `FIELD,SC0000` 并打一行 info** 说明可覆盖）；
+  库消费者用**具名** `loadSave(slot, { expect })`。
 
 ```js
-// scripts/plugins/lib/save.js（节选；行表与区间是实测值）
+// scripts/plugins/lib/save.js（节选；行表与区间是实测值；⛔ 终态不内置场景清单）
 const SCRIPT_TITLE = "TITLE.BIN", SCRIPT_SAVE = "SAVE.BIN", SCRIPT_SBUNKI = "SBUNKI.BIN";
-const SCRIPT_FIELD = "FIELD.BIN", SCRIPT_SC0000 = "SC0000.BIN";
-const ROW_Y = { 0: 91, 1: 150, 2: 209, 3: 269, 4: 328, 5: 388, 6: 447 };
+const ROW_Y = { 0: 91, 1: 150, 2: 209, 3: 269, 4: 328, 5: 388, 6: 447, 7: 507 };
+const LOAD_EXPECT_PREFIX = "load:expect:";
 export function loadSave(slot, options = {}) {
     const rowY = ROW_Y[slot];
     if (!Number.isInteger(slot) || rowY === undefined) throw new Error(`slot ${slot} …`);
+    const expect = options !== null ? options.expect : undefined;
+    if (!Array.isArray(expect) || expect.length === 0) throw new Error("loadSave: options.expect 必填…");
+    const onLoaded = options !== null ? options.onLoaded : undefined;
     const timeoutMs = options !== null && options.timeoutMs !== undefined ? options.timeoutMs : 30000;
-    const terminal = (ctx) => [
-        ctx.trigger.afterScript(SCRIPT_FIELD, { name: "load:field", timeoutMs }),
-        ctx.trigger.afterScript(SCRIPT_SC0000, { name: "load:sc0000", timeoutMs }),
-        ctx.trigger.afterPosition(SCRIPT_SBUNKI, 0x0AF8, 0x0B18, { name: "load:confirm2", timeoutMs }),
-    ];
+    const expectTerminals = (ctx) =>
+        expect.map((s) => ctx.trigger.afterScript(s, { name: LOAD_EXPECT_PREFIX + s, timeoutMs }));
+    const terminalAfterConfirm = (ctx) => expectTerminals(ctx);
+    const terminal = (ctx) => {
+        const gates = expectTerminals(ctx);
+        gates.push(ctx.trigger.afterPosition(SCRIPT_SBUNKI, 0x0AF8, 0x0B18, { name: "load:confirm2", timeoutMs }));
+        return gates;
+    };
+    const reached = (ctx, script) => {
+        ctx.log("info", `load-save: reached ${script} (slot ${slot})`);
+        return onLoaded === undefined ? [] : onLoaded(ctx);   // ⛔ 不 try/catch：抛错交给宿主记 fail
+    };
     return {
         start(ctx) {
             return ctx.trigger.afterPosition(SCRIPT_TITLE, 0x0460, 0x0520, { name: "load:title", timeoutMs });
@@ -840,19 +864,18 @@ export function loadSave(slot, options = {}) {
                     return ctx.trigger.atReadPoint("any", 1, { name: "load:row", timeoutMs });
                 case "load:row":
                     ctx.input.click(300, rowY);
-                    return ctx.trigger.afterPosition(SCRIPT_SBUNKI, 0x09F8, 0x0B18, { name: "load:sbunki", timeoutMs });
+                    // ★ 确认点击等**读段之后**的 [0x0B18,0x0C58)：在它之前点会被吞（见上）。
+                    return ctx.trigger.afterPosition(SCRIPT_SBUNKI, 0x0B18, 0x0C58, { name: "load:sbunki", timeoutMs });
                 case "load:sbunki":
                     ctx.input.click(640, 323);
                     return terminal(ctx);
-                case "load:field": case "load:sc0000":
-                    return [];                              // done
                 case "load:confirm2":
                     ctx.input.click(690, 323);
-                    return [ctx.trigger.afterScript(SCRIPT_FIELD, { name: "load:field-2", timeoutMs }),
-                            ctx.trigger.afterScript(SCRIPT_SC0000, { name: "load:sc0000-2", timeoutMs })];
-                case "load:field-2": case "load:sc0000-2":
-                    return [];                              // done（第二道确认之后）
+                    return expectTerminals(ctx);   // 第二道确认之后：只剩 expect 里的脚本
                 default:
+                    if (ev.name.startsWith(LOAD_EXPECT_PREFIX)) {
+                        return reached(ctx, ev.name.slice(LOAD_EXPECT_PREFIX.length));   // 终态
+                    }
                     ctx.fail(ev.name, `unknown state: ${ev.name}`); return [];
             }
         },
@@ -866,15 +889,15 @@ export function loadSave(slot, options = {}) {
 cd apps/emulator-lift && ./out/emulator-lift-aot --exe ../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE \
   --game-dir ../../links/install --appdata ../../.tmp/plugin-runtime/appdata-c2c \
   --present headless --skip-logo --audio off --time-limit 90 \
-  --plugin scripts/plugins/lib/save.js --plugin-param slot=5
-# plugin    : … params=slot=5 calls=7 run=done
+  --plugin scripts/plugins/lib/save.js --plugin-param slot=5 --plugin-param expect=FIELD,SC0000
+# plugin    : … params=expect=FIELD,SC0000,slot=5 calls=7 run=done
 # [plugin] load-save: start (slot 5) → TITLE hit → SAVE hit → row hovered → SBUNKI hit
 #          → SBUNKI 0x0AF8 ⇒ second confirm → reached FIELD.BIN (slot 5)
 # stop      : time-limit（正常结局）
 ```
 
-`calls=6` 是另一条合法终态（`FIELD` / `SC0000` 直接命中，不再走第二道确认）；`calls=7` 是
-slot 5 "进门即点"落进 `0x0AF8` 的形态。⛔ 不把某个 `calls` 数当唯一合法值。
+`calls=6` 是另一条合法终态（`expect` 里的脚本直接命中，不再走第二道确认）；`calls=7` 是落进
+`0x0AF8` 的形态。⛔ 不把某个 `calls` 数当唯一合法值。
 
 - **loader**：读 ES module 的 **default 导出**（`PluginModule` 对象）；`render`/`start`/`onTrigger` 都可选，
   至少一个；有 `start` 就必须有 `onTrigger`，反之亦然；类型不是函数 ⇒ `exit 2` + `file:line`。
@@ -895,6 +918,62 @@ slot 5 "进门即点"落进 `0x0AF8` 的形态。⛔ 不把某个 `calls` 数当
   （`plugin/load-save-e2e`）可能因此偶发红；跟踪单 `REQ-01M7VVDV69MJXRHNDGR50H7VHC`。⛔ 不把预算放宽当修法。
 - **owner**：模块实例 = owner；`done/fail`/卸载 ⇒ `releaseOwner`；不残留按住。
 - **trace**：`ctx.log` + runner `trigger:`/`intent:`；不要求 plan DSL 图元。
+
+### 4.6a 新场景怎么写（不要重写载入存档）
+
+**是两件东西，不是一个成品**：`save.js` 只提供**载入链**（落点 `expect` 由调用方给）；
+`chains.js` 只提供**通用的链路由** `route(isFirst, first, then)`；把两者拼起来是**使用方**的事
+（`save.js` 不认识场景，也不替谁拼）。
+
+**规则（终态由调用方给）**：`loadSave(slot, { expect })` 的 `expect` 是"这些落点算载入完成"的**脚本名表**
+（照宿主读数拼写、带 `.BIN`），按**这次载入的预期**给：**ADV = `SC*` / `SG*` / `SP*`**（如 `SC0000.BIN`）、
+**战斗 = `BTL.BIN`**、**地图 = `FIELD.BIN`**（地图可能还有别的名字）。⛔ 工具**不再内置场景清单**；
+`expect` 缺 / 空 / 元素非法 ⇒ 构造时 throw。
+
+**组合写法**（`scenario` 只是 `{ start, onTrigger }`，且**无状态**：进度只在 `ev.name`，
+⛔ 别用 `ctx.state` 记步）：
+
+```js
+// scripts/plugins/lib/my-scenario.js（★ 必须在本目录，见下面第一条约束）
+import { route } from "./chains.js";
+import { loadSave } from "./save.js";
+
+const myScenario = {
+    start(ctx) { return ctx.trigger.afterPosition("FIELD.BIN", LO, HI, { name: "mine:field" }); },
+    onTrigger(ctx, ev) {
+        switch (ev.name) {
+            case "mine:field":
+                ctx.input.click(X, Y);
+                return ctx.trigger.afterPosition("SELACT.BIN", A, B, { name: "mine:next" });
+            case "mine:next":
+                ctx.finish(0, "scenario: done");
+                return [];
+            default:
+                ctx.fail(ev.name, `unknown state: ${ev.name}`);
+                return [];
+        }
+    },
+};
+
+// 路由：`load:` 前缀（含 timeout）归载入链，其余归场景。
+export default route(
+    (ev) => String(ev.name).startsWith("load:"),
+    loadSave(5, { expect: ["FIELD.BIN"], onLoaded: (ctx) => myScenario.start(ctx) }),
+    myScenario,
+);
+```
+
+两条硬约束：
+
+- **两个文件都必须能被入口 import**：宿主 QJS 的 import 根 = **入口文件所在目录**
+  （`script_quickjs.cpp` 的 `moduleNormalize`），`../` 会被"越出 UI 根目录"拒掉、子目录也解析不到
+  ⇒ 场景文件必须和 `save.js` / `chains.js` 同目录（`scripts/plugins/lib/`）。
+- **两条链的 trigger 名字必须不相交**（`save.js` 用 `load:` 前缀）：`route` 只看 `isFirst(ev)`，
+  名字串了会被另一条链抢走、**静默不触发** —— 所以场景一律用自己的前缀（本案 `battle:`）。
+
+样板：`scripts/plugins/lib/scenario-save07-battle.js`（载入 007 → 结束回合 → 決定 → BTL，全篇零 `wait`；
+门 / 坐标与 `scripts/recipes/save07-battle.plan` 同源；**`expect: ['FIELD.BIN']`** —— SAVE07 落在图上，
+战斗是之后由用户动作进的）。纯档用例：`control-script/load-save-onloaded` + `control-script/chains-route`。
 
 ### 4.7 C3：JS recipe driver + parity harness（历史 plan 只验证/支持；**已落地（main `eecbfac`）**）
 
@@ -1142,9 +1221,10 @@ slot 5 "进门即点"落进 `0x0AF8` 的形态。⛔ 不把某个 `calls` 数当
   同步、预算、写只经队列；可 headless；旧 `--ui/--overlay` 用法不变。
 - `ctx` API：`afterPosition/afterDelay/atReadPoint`、`ctx.input.*`、`ctx.edit.global.set`、
   `ctx.read.*`、`log`、`profile.*`、`done/fail`；底层是 `ControlBus`（Run/dispatch 留给 C5）。
-- `loadSave(slot)`：真源 `scripts/plugins/lib/save.js`（**纯 JS** 回调链构造器；`.BIN` marker 身份；
-  `rowY` 实测表；三选一终端），`start/onTrigger` 用闭包接链（⛔ 不是 `ctx.run`，C5）；链形状 / 失败面
-  见 §4.6。另有用例加载存档 → global 读改写 → click → 下一个具名集合 → done。
+- `loadSave(slot, { expect, timeoutMs, onLoaded })`：真源 `scripts/plugins/lib/save.js`（**纯 JS** 回调链构造器；
+  `.BIN` marker 身份；`rowY` 实测表；**终态 = 调用方的 `expect`**），`start/onTrigger` 用闭包接链
+  （⛔ 不是 `ctx.run`，C5）；链形状 / 失败面见 §4.6。场景的组合是**另一件工具**
+  （`scripts/plugins/lib/chains.js` 的 `route`，见 §4.6a）。
 - QJS 适配器：`src/plugin/plugin_host.cpp` 实现 `TriggerHandler`/`ControlHostOps`，只调
   `IntentQueue`/`EngineRead`/`const GuestMemory`；JS trampoline 在 `script_quickjs.cpp`；不 include
   `quickjs.h` 的第二个 TU。
@@ -1153,10 +1233,14 @@ slot 5 "进门即点"落进 `0x0AF8` 的形态。⛔ 不把某个 `calls` 数当
 
 - **C2c 用例**（`ctest --test-dir out -N`）：`plugin-runtime` 的
   `control-script/start-on-trigger-chain{,-field-terminal,-second-confirm,-bad-slot}`（真库 `lib/save.js`；
-  slot 4/5 的链发射不同坐标；`calls=6` / `calls=7` 两条合法终态；`bad-slot` 构造 throw；重复 name
-  由 `plugin/concurrent-arm-duplicate-name` 钉住），以及 `plugin-headless` 二进制内的
-  `plugin/load-save-e2e`（真库 + `--plugin-param slot=5`；判据 = `run=done` + `params=slot=5` +
-  `calls ∈ {6,7}` + 终态日志含 `FIELD` + 无 `run failed`；⛔ 不看 exit code）。该 e2e 只在 Windows 跑
+  用例**显式**给 `expect=FIELD,SC0000`；slot 4/5/7 的链发射不同坐标；`calls=6` / `calls=7` 两条合法终态；
+  `bad-slot` 构造 throw；重复 name 由 `plugin/concurrent-arm-duplicate-name` 钉住），
+  `control-script/load-save-onloaded`（`expect` 决定终态 / `SC0000` 不在表里就不收 / `onLoaded` 起场景 /
+  `expect` 缺或非法 ⇒ 构造 throw）与 `control-script/chains-route`（`route`：`load:*` ⇒ first、其余 ⇒ then、
+  **timeout 也按名字**、`start` 只启 first），以及 `plugin-headless` 二进制内的
+  `plugin/load-save-e2e`（真库 + `--plugin-param slot=5 --plugin-param expect=FIELD,SC0000`；
+  判据 = `run=done` + `params=…slot=5` + `expect` 生效 + `calls ∈ {6,7}` + 终态日志含 `FIELD` +
+  无 `run failed`；⛔ 不看 exit code）。该 e2e 只在 Windows 跑
   （子进程 `CreateProcessW`；mac/Linux skip）—— 本机等价证据是 §4.6 的手工 headless（`calls=7` / `FIELD`）。
 - **C2b-2 用例**：`plugin-overlay`（顶层 pure；adopt / 插件 display list 上屏 / 三键电平跟随
   `WindowManager` / 叠层不写 guest / release 恢复 guest 画面）；`aot-overlay` 的子用例
@@ -1502,7 +1586,8 @@ callback 链的可读性（进 `ctx.log`/设计文档）。
 | 窗口档 ⑤' 装配（adopt / `exit 2` / 取代语） | `apps/emulator-lift/src/aot/aot_main.cpp:1201-1235` |
 | `game.mouse().buttons` 装配 / 三键唯一源 | `apps/emulator-lift/src/ui/script_quickjs.cpp:652-690`、`:3227`；`apps/emulator-lift/src/plugin/plugin_host.cpp:104-108`；`apps/emulator-lift/src/runtime/present_sdl.cpp:612-625`、`host_window.h:181-184`、`input_device.h:84-90` |
 | QJS 预算/interrupt | `apps/emulator-lift/src/ui/script_quickjs.cpp:107-113`、`197-201`、`253-265`、`1392-1395` |
-| C2c `loadSave` 真库 / 参考入口 | `apps/emulator-lift/scripts/plugins/lib/save.js:40-44`、`:80-164`、`:177-186` |
+| C2c `loadSave` 真库 / 参考入口 | `apps/emulator-lift/scripts/plugins/lib/save.js`（`loadSave` / 参考入口 / `expect`） |
+| A 阶段 `chains.js`（通用路由） / 可跑样例 | `apps/emulator-lift/scripts/plugins/lib/chains.js`（`route`）；`apps/emulator-lift/scripts/plugins/lib/scenario-save07-battle.js` |
 | `.BIN` 精确相等（C1） vs recipe 剥后缀 | `apps/emulator-lift/src/runtime/trigger_runner.cpp:70,82`、`recipe.cpp:141-153` |
 | 帧列表 | `apps/emulator-lift/src/runtime/engine_frames.cpp:81` |
 | emu-ctl 命令表 | `tools/lib/emu-ctl.mjs:785-810`；`tools/emu-ctl.mjs:1-20` |

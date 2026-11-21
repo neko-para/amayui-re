@@ -8,7 +8,7 @@
 //      `--plugin` 带 render + headless 时出现一次（D-C2-5）；
 //   ④ `plugin    : ` **只出现一次**（⛔ 不是每帧 / 每读点一行；AGENTS §12.8 第 3 条）。
 //   ⑤ `plugin/load-save-e2e`（C2c）：真库 `scripts/plugins/lib/save.js` + `--plugin-param slot=5`
-//      走完整条链；判据 = readout `run=done` / `params=slot=5` / `calls ∈ {6,7}`（D2c-2：第二道
+//      走完整条链；判据 = readout `run=done` / `params=…slot=5` / `expect` 生效 / `calls ∈ {6,7}`（D2c-2：第二道
 //      确认也是合法终态）+ stderr 终态日志含 **FIELD** + 无 `run failed`（⛔ 不看 exit code）。
 //
 // ★ 缺执行源 / 安装树 / GPU / 宿主字体 ⇒ `LIFT_SKIP(77)`（⛔ 不假绿；输入假定在场）。
@@ -169,9 +169,9 @@ int main(int argc, char** argv) {
         LIFT_CHECK(q.out.find("input-plan: quit") == std::string::npos);
     }
 
-    // ---- ⑥ C2c `plugin/load-save-e2e`：真库 `lib/save.js` + `--plugin-param slot=5` 的整条链 ----
+    // ---- ⑥ C2c `plugin/load-save-e2e`：真库 `lib/save.js` + `--plugin-param slot=5 expect=FIELD,SC0000` ----
     //   判据 = **stdout 的一次性 readout**（⛔ 不是 exit code：`ctx.finish` 不改进程 exit，且
-    //   `--time-limit 90` 是正常结局）：`run=done` + `params=slot=5` + `calls ∈ {6,7}`；
+    //   `--time-limit 90` 是正常结局）：`run=done` + `params=expect=FIELD,SC0000,slot=5` + `calls ∈ {6,7}`；
     //   stderr 的终态日志（`ctx.log`）必须点名 **FIELD**，且**没有** `run failed`；readout 只一行。
     //   红了 ⇒ 某道门没命中 / 坐标错（hang 成 `run=failed reason=…gate timeout`）—— 纯档的
     //   `plugin-runtime` 已经钉住链形状，这里钉"真 guest 里这条链真的走到 FIELD"。
@@ -220,6 +220,10 @@ int main(int argc, char** argv) {
             pathToUtf8(save_js),
             "--plugin-param",
             "slot=5",
+            // ★ A 阶段裁决：终态由**调用方**给（`save.js` 不再内置 FIELD/SC0000）⇒ 这里显式给。
+            //   slot 5 的存档落在 FIELD；SC0000 是另一类 ADV 落点（保留在期望表里不影响本用例）。
+            "--plugin-param",
+            "expect=FIELD,SC0000",
         };
         ChildOptions ls_opts;
         ls_opts.cwd = save_root;
@@ -243,7 +247,8 @@ int main(int argc, char** argv) {
         const bool reached_field = ls.out.find("plugin    : ") != std::string::npos &&
                                    ls.out.find("entry=default") != std::string::npos &&
                                    ls.out.find("callbacks=yes") != std::string::npos &&
-                                   ls.out.find("params=slot=5") != std::string::npos &&
+                                   ls.out.find("slot=5") != std::string::npos &&
+                                   ls.out.find("expect=FIELD,SC0000") != std::string::npos &&
                                    ls.out.find("run=done") != std::string::npos &&
                                    ls.out.find("run=failed") == std::string::npos &&
                                    ls.err.find("run failed") == std::string::npos &&
