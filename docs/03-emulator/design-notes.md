@@ -423,3 +423,27 @@
   ① `vs_1_0` 这类**有限固定**的顶点程序 → 构建期转成 C++，仍在 CPU 顶点阶段跑（保持一份实现，推荐先走这条）；
   ② 一般的 `vs_3_0`（战斗/3D 场景）→ 才考虑 GPU 顶点着色 + shader 落后端，那是独立的大单。
   ⛔ 不要为了"看起来更像 GPU 渲染"而在没有顶点着色需求时把 T&L 搬上 GPU —— 那会立刻产生第二份语义实现。
+### L3-tl-02 · 屏幕空间的**像素中心**口径：D3D9 在整数格点、光栅器在 (i+0.5, j+0.5) —— 两者差半像素，只在「屏幕→NDC」这一处换算
+- **口径（MSDN 原文，不是推断）**：`Coordinate Systems (Direct3D 10)` 顶端的差异段 ——
+  「Direct3D 9 defines the center of the upper-left pixel as the origin of a render target. …
+  **In Direct3D 9, pixel centers are at integer locations.**」；
+  而 SDL_GPU 的三个后端（D3D12 / Metal / Vulkan）都是 D3D10 口径：原点是左上**角**、像素 (i,j)
+  的中心在 (i+0.5, j+0.5)（视口把 NDC [-1,1] 映到视口的**边界**坐标）。
+  ⇒ 同一个点：D3D9 屏幕坐标 x 落在像素中心，光栅器要把它写成 x+0.5。
+- **落点（唯一）**：`d3d9_gpu.cpp` 的 `kD3d9PixelCenterBias` + `d3d9ScreenToNdcX/Y`；**所有**顶点
+  （固定功能 / XYZRHW / sprite / effect / 点线展开）在 `flush` 里走这两行。⛔ 不许在单条几何里再各加一次。
+- **与 D3DX 的 −0.5 是两件事、必须成对**：`ID3DXSprite::Draw` 的 `pPosition` 是**像素位置**、四角是
+  **像素边界** ⇒ D3DX 自己把四角减 0.5（`d3dx9_sprite.cpp` 的 `kD3dxSpriteVertexBias`）。
+  两段相加在光栅器侧**正好相消** ⇒ sprite 路的像素与加之前**逐字节相同**（实测，见 BUG-38 的场景 A/B）；
+  ⛔ 只改一边 ⇒ 整层 sprite 偏半像素（BUG-38 正是"Fade 全屏 quad 用了 D3D9 的 −0.5、而屏幕→NDC 没有
+  +0.5"这一种不对称的形态）。
+- **判据（两条，都是数学必然，不是"看着对"）**：
+  ① **1:1 的 render-target 往返必须恒等** —— 同一份内容直接画到后缓冲 vs 画进同尺寸 RT 再用覆盖全屏的
+  quad（LINEAR+CLAMP、像素中心对齐）合成回去，必须逐像素相同（1:1 且采样落在 texel 中心时双线性 = 恒等）；
+  ② **同一个逻辑 quad：sprite 路与固定功能 XYZRHW 路必须同像素**。
+  守卫 = `d3d9p/rt-roundtrip-identity`（CTest `d3d9-pipeline-gpu`）+ `d3dx9/sprite-vs-rhw-quad`
+  （CTest `d3dx9-gpu`）；变异 = `kD3d9PixelCenterBias` 0.5→0 / `kD3dxSpriteVertexBias` 0.5→0（各自当场红）。
+- **为什么容易漏**：少这半像素**看不出偏移**——所有 draw 都同样偏，稳定帧的相邻差仍是 0；只有"画面过一遍
+  RT"的帧多一跳才会暴露。实测进入/离开那 2 帧 `adj_chg 49145/49045`、锐度 `15.77 → 9.94` 双峰。
+- **重写必须保持不变**：① 屏幕→NDC 只有一处 +0.5；② sprite 的 −0.5 仍在变换**之后**（缩放不缩放它）；
+  ③ 深度/裁剪/`toScreen` 的屏幕坐标仍是 **D3D9 口径**（`toScreen` 对 XYZRHW 直通、NDC −1 → 视口边界）。

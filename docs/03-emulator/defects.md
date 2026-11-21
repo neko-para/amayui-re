@@ -983,46 +983,107 @@
     平稳帧 **17.05 → 15.94**（sprite 路现在真的用 LINEAR，按 MSDN 的预期变化）、异常帧 **11.08 → 9.99**。
   - ⇒ 残余在 **`ID3DXEffect` 的 `Fade` / RTT 合成路**（那 2 帧 `submits=15 / targets=4 / flush=5`，
     日志有 `SetTechnique "Fade"` + `SetFloat "Alpha"=0` + `Tex0/Tex1` + 1 次 `DrawPrimitive`
-    FVF=0x244 TEX2 stride=36；其余帧 `submits=3 / targets=0`）⇒ 另立 **BUG-38**。
+    FVF=0x244 TEX2 stride=36；其余帧 `submits=3 / targets=0`）⇒ 另立 **BUG-38**
+    （**已修**：根因不在 sprite 路，是屏幕→光栅器少了 D3D9 的半像素，见下条）。
     ⛔ **不要**为了消这段残余在 sprite 路里加半像素补偿（那是 guest 可见语义，要单独裁决）。
   - 两档 `--scale 1.0 / 1.5` 的对应内容帧**逐字节相同**（f76..f79 maxdiff=0；同样本修复前后都是）⇒
     与缩放 / letterbox 无关。
 - **需求单**：待父级登记（本车道按纪律 ⛔ 不改 `data/**`）。
 
-### BUG-38 · ADV 切立绘的 2 帧：整层偏约 (−0.48,−0.46) px + 锐度双峰（`ID3DXEffect` 的 `Fade` / RTT 路，**未修**）
+### BUG-38 · ADV 切立绘的 2 帧：整层偏约 (−0.48,−0.46) px + 锐度双峰（`ID3DXEffect` 的 `Fade` / RTT 路，**已修 2026-11-21**）
 
 - **现象**：SAVE08 → SC0010 → `click 640 360` 之后恰好 **2 帧**，立绘/前景层相对稳定帧
-  **偏 (−0.48,−0.46) px**（左上）且**变糊**（立绘窗内 `mean|Laplacian|` 15.94 → 9.99）；
+  **偏 (−0.48,−0.46) px**（左上）且**变糊**（立绘窗内 `mean|Laplacian|` 15.77 → 9.94）；
   随后帧**逐字节回到**稳定帧。用户看到的"偏 (1,1) + 变糊"就是这 2 帧（半像素被点采样量化成
   逐块 0/1 px，肉眼看成 (1,1)）。
 - **与 BUG-37 无关（已实测）**：BUG-37（sprite 采样器按 MSDN）修前/修后，这 2 帧的
   亚像素位移 `(−0.48,−0.44)` → `(−0.48,−0.46)`、进入/离开的 chg_px `49414/49055` → `49404/49045`
-  **都没变**（异常帧只是整体从 f78/f79 挪到 f77/f78，帧号随墙钟漂 1 帧）。锐度两档都随 sprite 路
-  换成 LINEAR 下降 ~1.1（17.05→15.94、11.08→9.99），**双峰仍在**。
+  **都没变**（异常帧只是整体挪了 1 帧，帧号随墙钟漂）。锐度两档都随 sprite 路换成 LINEAR 下降
+  ~1.1，**双峰仍在**。
 - **证据（哪条路）**：那 2 帧是整跑唯一使用 **`ID3DXEffect`** 的帧：
-  `[gpu-submits] frame=77 submits=15 (flush=5 readback=5 upload=4) targets=4`（其余帧 `submits=3`,
-  `targets=0`）；同一段日志有 `ID3DXEffect::SetTechnique: "Fade"` / `SetFloat: "Alpha" = 0` /
-  `SetTexture: "Tex0"` / `SetTexture: "Tex1"` / `Begin: passes=1`，随后
-  `SetStreamSource Stride=36` + `SetFVF FVF=0x244`（XYZRHW|DIFFUSE|TEX2）+ 1 次 `DrawPrimitive`
-  （1 quad / 2 三角形），并把 Tex0/Tex1 先渲染进 render target（每帧 4 个 target、5 次 flush）。
-  ⇒ 这 2 帧的像素经过 **RTT → Fade 全屏 quad** 两跳，与 steady 帧的 sprite 直画不是同一条几何/采样路。
-- **读数（修后二进制 `sha256 3FECD040…24B7` · 2026-11-21 · 判据窗口 `x[300,1100) y[80,500)`）**：
+  `[gpu-submits] submits=15 (flush=5 readback=5 upload=4) targets=4`（其余帧 `submits=3`, `targets=0`）；
+  同一段日志有 `ID3DXEffect::SetTechnique: "Fade"` / `SetFloat: "Alpha" = 0` / `SetTexture: "Tex0"` /
+  `SetTexture: "Tex1"` / `Begin: passes=1`，随后 `SetStreamSource Stride=36` + `SetFVF FVF=0x244`
+  （XYZRHW|DIFFUSE|TEX2）+ 1 次 `DrawPrimitive`（1 quad / 2 三角形），并把 Tex0/Tex1 先渲染进
+  render target。⇒ 这 2 帧的像素经过 **RTT → Fade 全屏 quad** 两跳，稳定帧是 sprite 直画。
+- **根因（定论 · 定点读数）**：**屏幕空间 → 光栅器视口的换算少了 D3D9 的半像素**。
+  - 判据（MSDN `Coordinate Systems (Direct3D 10)` 的差异段，原文）：「Direct3D 9 defines the center of
+    the upper-left pixel as the origin of a render target. … **In Direct3D 9, pixel centers are at integer
+    locations.**」；而 SDL_GPU 的光栅器（D3D12 / Metal / Vulkan）像素中心在 (i+0.5, j+0.5)。
+  - **探针读数 ①（guest 的 Fade quad，`LIFT_BUG38_RAW=1` 打在 `submitPrimitives` 入口）**：
+    `prim=5 prim_count=2 verts=4 pre=1 viewport=0,0,1280,720 target=1280x720`；
+    四角 `(-0.5000,-0.5000) (1279.5000,-0.5000) (-0.5000,719.5000) (1279.5000,719.5000)`，
+    `u0/v0 = 0.000000/0.000000 .. 1.000000/1.000000`，`w=1`（RHW=1）。⇒ 这是 D3D9 的**全屏 quad idiom**
+    （像素边界 −0.5 .. size−0.5、UV 0..1）。
+  - **探针读数 ②（合成那一跳，`LIFT_BUG38_PROBE=1` 打在 `rasterQueueEffect`）**：
+    `tgt=1280x720 vp=0,0,1280,720 texs=2 | tex0=1280x720 pitch=5120 samp=1/1/0 uvset=0 |
+    tex1=1280x720 samp=1/1/0 uvset=1`（samp = LINEAR/LINEAR/CLAMP）。
+    ⇒ RT 与后缓冲**同尺寸**、quad 覆盖**全屏**、UV **0..1** ⇒ 这是 1:1 的往返，**必须恒等**。
+  - **算术**：按 D3D9 的像素中心（整数）算，像素 i 的 u=(i+0.5)/1280 ⇒ 硬件采样坐标
+    `u·1280 − 0.5 = i` = texel i 中心 ⇒ **恒等**；按修前的口径（像素中心 i+0.5）算 u=(i+1)/1280 ⇒
+    采样坐标 `i+1−0.5 = i+0.5` = texel **边界** ⇒ LINEAR 50/50（糊）+ 半 texel 偏移。
+    ⇒ 定点在 **①屏幕坐标的点代表像素中心还是像素边界**（不是 RT 尺寸、不是 UV、不是 FVF/stride）。
+  - **为什么稳定帧看不出来**：sprite 直画只有一跳，而 `ID3DXSprite` 自己会把四角减 0.5（D3DX 的
+    "position 是像素、四角是边界"）⇒ 与缺失的 +0.5 **正好相消**。多一跳的 Fade 路把误差加倍到 1 px
+    采样偏移 ⇒ 才暴露。
+- **修法（约定收在一处）**：
+  - `src/runtime/d3d9_gpu.cpp`：新增 `kD3d9PixelCenterBias = 0.5f` + `d3d9ScreenToNdcX/Y()`；
+    flush 的**两处**顶点换算（effect 批、固定功能/sprite 批）与那条诊断打印都改走它。
+  - `src/runtime/d3dx9_sprite.cpp`：`kD3dxSpriteVertexBias = 0.5` —— D3DX 自己的 −0.5 顶点偏置，
+    加在**变换之后**（`Draw` 的四角 `p0.x/p0.y − 0.5`）。
+  - 两者成对：sprite 路的像素与修前**逐字节相同**（实测 maxdiff=0），RT/Fade 路变成恒等。
+  - 连带把两条**编码了旧相位**的像素期望改成 D3D9 口径（不是"为了变绿改弱判据"）：
+    `d3d9p/min-filter`（放大臂判据点 (2,2)→(3,3)、缩小臂 UV 跨度 0.9→0.7 以避开 clamp 区与 0.5 平局）、
+    `d3d9p/perspective-interpolation`（参考的像素中心 `x+0.5` → `x`；改后最大误差 **207 → 0/1 LSB**）。
+- **守卫（两条都是数学必然）**：
+  ① `d3d9p/rt-roundtrip-identity`（CTest `d3d9-pipeline-gpu`）：同一份内容 (a) 直画后缓冲 vs
+  (b) 画进同尺寸 RT 再用 (−0.5..size−0.5) 的全屏 quad（LINEAR+CLAMP）合成回去 ⇒ 逐像素相同，且两者
+  都等于源 texel（容差 1 吸收 unorm 舍入）；
+  ② `d3dx9/sprite-vs-rhw-quad`（CTest `d3dx9-gpu`）：同一张纹理、同一位置、1:1 的 sprite 路 vs
+  XYZRHW 路 ⇒ 同像素（sprite 的 position 语义 = 四角边界 −0.5）。
+  **改坏就红（实测）**：`kD3d9PixelCenterBias` 0.5→0 ⇒ ① 红（(a)/(b) 与源 texel 4096/4096 不等、
+  (b) vs (a) 3968/4096）；`kD3dxSpriteVertexBias` 0.5→0 ⇒ ② 红（63/64 不等）。前者已进
+  `tools/mutate-check.mjs`（`--match kD3d9PixelCenterBias` 实测通过：变异红、还原绿）。
+- **场景 A/B（2026-11-21/22 · main 工作树 `E:\Projects\amayui-re` · HEAD `ea20c37`）**
+  - 配方 `E:\Projects\amayui-re\.tmp\jitter\save08-sc0010.plan`；命令（cwd = `apps/emulator-lift`，
+    env `LIFT_GPU_SUBMITS=1`）：`--game-dir ../../links/install --appdata <私有> --skip-logo --audio off
+    --present window --present-hidden --scale <1.0|1.5> --input-plan <配方> --dump-frame "<dir>/f{frame}.bmp"
+    --frame-log --log-level warn --max-frames 300 --time-limit 200`。
+  - 判据窗口 `x[300,1100) y[80,500)`；`adj_chg` = 与**上一帧**在窗内 `|ΔRGB|max>8` 的像素数；
+    `sharp` = 窗内 `mean|Laplacian|`；`subpix` = 双线性配准（ref = f250，符号 = "内容位移"）。
+  - 帧号随墙钟漂：同一配方两次跑，effect 帧（`targets=4`）可差 **40 帧**（实测 76/77 与 142..148）
+    ⇒ 判据锚"`targets=4` 的那几帧"，`f74..f81` 只是历史表的口径。
+  - **修前** = 快照 `sha256 51273C18…D540AF8C`（2026-11-21 23:47:26；HEAD `ea20c37`；另一车道的
+    插件提交已在内）。effect 帧 = **144/145/146**：
 
-  | 帧 | `--scale 1.0` adj_chg / vs_ref / sharp | `--scale 1.5` adj_chg / vs_ref / sharp |
-  |---|---|---|
-  | f75 | 0 / 368 / 15.9691 | 0 / 368 / 15.9691 |
-  | f76 | 0 / 368 / 15.9691 | **49145 / 49404 / 9.9911** |
-  | f77 | **49145 / 49404 / 9.9911** | 401 / 49045 / 9.9733 |
-  | f78 | 401 / 49045 / 9.9733 | **49045 / 0 / 15.9362** |
-  | f79 | **49045 / 0 / 15.9362** | 0 / 0 / 15.9362 |
-  | f80 | 0 / 0 / 15.9362 | 0 / 0 / 15.9362 |
-  | f81 | 0 / 0 / 15.9362 | 0 / 0 / 15.9362 |
+    | 帧 | scale 1.0 adj_chg / subpix / sharp | scale 1.5 adj_chg / subpix / sharp |
+    |---|---|---|
+    | 142 | 0 / (+0.000,+0.000) / 15.7726 | 0 / (+0.000,+0.000) / 15.7726 |
+    | 143 | 0 / (+0.000,+0.000) / 15.7726 | **49145 / (−0.480,−0.460) / 9.9404** |
+    | 144 | **49145 / (−0.480,−0.460) / 9.9404** | 393 / (−0.480,−0.460) / 9.9267 |
+    | 145 | 389 / (−0.480,−0.460) / 9.9274 | 357 / (−0.480,−0.460) / 9.9218 |
+    | 146 | 362 / (−0.480,−0.460) / 9.9218 | **49045 / (+0.000,+0.000) / 15.7390** |
+    | 147 | **49045 / (+0.000,+0.000) / 15.7390** | 0 / (+0.000,+0.000) / 15.7390 |
 
-  （adj_chg = 与上一帧在窗内 |ΔRGB|max>8 的像素数；vs_ref = 与 f120；sharp = `mean|Laplacian|`。
-  ref 帧号在两档里只是墙钟对齐用，判据不依赖它。）
-- **候选（待取证，⛔ 未定论）**：① Fade 全屏 quad 的顶点/UV 半像素（FVF 0x244 的 XYZRHW 预变换
-  约定）；② RTT 的采样口径（RT 纹理的 sampler / 是否多一次重采样）；③ Tex0/Tex1 两张 RT 的内容
-  在写入时是否已偏半像素。判据入口 = 上面那条日志 + `--dump-frame` 的 f77/f78 与稳定帧配准。
-- **守卫**：**无**（这是业务可见的场景级缺陷；配方留在 `.tmp/jitter/save08-sc0010.plan`，
-  ⛔ 不把"再回归一遍"做成默认门禁）。修它之前 ⛔ 不要在 sprite 路加半像素补偿（guest 可见语义）。
+  - **修后** = `sha256 2B26147D…29C098BF`（2026-11-21 23:51:30；同树）。effect 帧 = **142/143/144**
+    （scale 1.0）/ **146/147/148**（scale 1.5）：
+
+    | 帧 | scale 1.0 adj_chg / subpix / sharp | scale 1.5 adj_chg / subpix / sharp |
+    |---|---|---|
+    | 140/144 | 0 / (+0.000,+0.000) / 15.7726 | 0 / (+0.000,+0.000) / 15.7726 |
+    | 141/145 | 0 / (+0.000,+0.000) / 15.7726 | 0 / (+0.000,+0.000) / 15.7726 |
+    | 142/146 | **0** / (+0.000,+0.000) / 15.7724 | **0** / (+0.000,+0.000) / 15.7724 |
+    | 143/147 | 360 / (+0.000,+0.000) / 15.7504 | 365 / (+0.000,+0.000) / 15.7469 |
+    | 144/148 | 343 / (+0.000,+0.000) / 15.7389 | 336 / (+0.000,+0.000) / 15.7389 |
+    | 145/149 | 0 / (+0.000,+0.000) / 15.7390 | 0 / (+0.000,+0.000) / 15.7390 |
+
+  - **结论**：进入/离开的 `adj_chg` 从 **49145 / 49045** 塌到 **0**；异常帧内只剩**口/眼动画**那 343..365
+    个像素（与稳定段的 360..401 同量级）；锐度**不再双峰**（15.77 → 15.75 → 15.739，差 ≤0.03）；
+    亚像素位移从 `(−0.480,−0.460)` 变成 **(0,0)**。
+  - **回归面**：修前/修后的**稳定帧逐字节相同**（3 对 maxdiff=0）——与"两段半像素相消"的推导一致；
+    修后相邻帧的字节差只剩 `maxdiff=3 / 17 px`（背景动画），修前是 `maxdiff=182 / 187844 px`。
+  - **两档 scale**：对应内容帧**逐字节相同**（`maxdiff=0`），只有过渡中的**那一帧**不同
+    （before 411 px / maxdiff=5；after 378 px / maxdiff=16）——那是 Fade 的 alpha 在两次跑的采样
+    时刻不同，与缩放无关。
+- **守卫的边界**：配方的场景读数**不进 test**（只在本文）；⛔ 不要把"再回归一遍场景"做成默认门禁。
 - **需求单**：待父级登记（本车道 ⛔ 不改 `data/**`）。

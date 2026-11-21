@@ -372,15 +372,17 @@ struct Fixture {
         return true;
     }
 
-    // D3DXCreateTexture(device, w, h, 1, 0, format, POOL_DEFAULT=0, &out)
+    // D3DXCreateTexture(device, w, h, 1, usage, format, POOL_DEFAULT=0, &out)
+    //   `usage` 缺省 0；RT 用例传 `D3DUSAGE_RENDERTARGET`(1)（否则流水线会打一条
+    //   "Usage 没 RENDERTARGET ⇒ 仍放行" 的 warn —— 那是**真实**的引擎侧偏差，不该由夹具制造）。
     std::uint32_t createTexture(std::uint32_t device, std::uint32_t w, std::uint32_t h, std::uint32_t format,
-                                std::uint32_t* out_obj) {
+                                std::uint32_t* out_obj, std::uint32_t usage = 0u) {
         const std::uint32_t out_ea = placeU32(0xDEADBEEFu);
         Asm a;
         a.pushImm(out_ea);
         a.pushImm(0u);          // Pool
         a.pushImm(format);      // Format
-        a.pushImm(0u);          // Usage
+        a.pushImm(usage);       // Usage
         a.pushImm(1u);          // MipLevels
         a.pushImm(h);
         a.pushImm(w);
@@ -866,6 +868,162 @@ int caseTexturedQuad() {
 }
 
 // ---------------------------------------------------------------------------------------
+// ④a 1:1 的 render-target 往返必须**恒等**（BUG-38 的判据）
+// ---------------------------------------------------------------------------------------
+// 判据（数学必然，不是"看着对"）：同一份内容
+//   (a) 直接画到后缓冲；vs
+//   (b) 先画进一张与后缓冲**同尺寸**的 RT，再用一个覆盖全屏的 quad（LINEAR + CLAMP、顶点按
+//       D3D9 的像素中心约定 = 像素边界 −0.5）合成回后缓冲
+// 必须逐像素相同 —— 1:1 且采样点落在 texel 中心时双线性**就是**恒等变换。任何"把画面过一遍 RT
+// 做淡入淡出"的效果都不能改变画面；真机怎么实现不影响这条。
+// 同时断言 (a)/(b) 与**源 texel** 逐像素相同：1:1 不过滤的直画也不该改画面。
+//
+// 根因（BUG-38）：屏幕→NDC 少了 D3D9 的半像素。D3D9 的像素中心在**整数**格点上（MSDN
+// 「Coordinate Systems (Direct3D 10)」的差异段：「In Direct3D 9, pixel centers are at integer
+// locations.」），而光栅器（D3D12 / Metal / Vulkan）的像素中心在 (i+0.5, j+0.5) ⇒ 少了这半像素，
+// (b) 的合成 quad 每个像素都采在 texel **边界**上（LINEAR 50/50）⇒ 糊 + 偏 0.5 px。
+// (a) 只有一跳、且同样偏半个 texel —— 所以"稳定帧看着对"完全掩盖了这条缺陷。
+// ★ 改坏哪一行会红：`d3d9_gpu.cpp` 的 `kD3d9PixelCenterBias` 改回 0 ⇒ 本用例的 (b) 臂当场红
+//   （`tools/mutate-check.mjs` 的 `d3d9p/rt-roundtrip-identity` 那一条施加这一处）。
+int caseRtRoundTripIdentity() {
+    lift_test::g_current_case = "d3d9p/rt-roundtrip-identity";
+    Rig r;
+    std::string why;
+    if (!r.upGpu(&why)) LIFT_SKIP(why.c_str());
+    auto& mem = r.f.m.mem();
+
+    constexpr int kSize = 64;  // = 设备/后缓冲尺寸 ⇒ 1:1
+    // ---- 源纹理：64×64 确定性伪随机（高频；半像素 / 多一次重采样一定看得见）----
+    std::vector<std::uint32_t> source(static_cast<std::size_t>(kSize) * kSize, 0u);
+    std::uint32_t tex = 0;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, kSize, kSize, lift::d3d9::kFmtA8R8G8B8, &tex), 0u);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return 0;
+    {
+        const std::uint32_t locked = r.f.placeBytes(std::vector<std::uint8_t>(8u, 0u));
+        LIFT_CHECK_EQ_U32(r.f.method(tex, kOffTextureLockRect, {0u, locked, 0u, 0u}), 0u);
+        const std::uint32_t pitch = mem.rd32(locked + 0u);
+        const std::uint32_t bits = mem.rd32(locked + 4u);
+        LIFT_CHECK_NE_U32(bits, 0u);
+        if (bits == 0u) return 0;
+        std::uint32_t s = 0x12345678u;
+        for (int y = 0; y < kSize; ++y) {
+            for (int x = 0; x < kSize; ++x) {
+                s = s * 1664525u + 1013904223u;
+                const std::uint32_t c = 0xFF000000u | (s & 0x00FFFFFFu);
+                source[static_cast<std::size_t>(y) * kSize + x] = c;
+                mem.wr32(bits + static_cast<std::uint32_t>(y) * pitch + static_cast<std::uint32_t>(x) * 4u, c);
+            }
+        }
+        LIFT_CHECK_EQ_U32(r.f.method(tex, kOffTextureUnlockRect, {0u}), 0u);
+    }
+
+    // ---- 同尺寸 RT 纹理（Usage = D3DUSAGE_RENDERTARGET）----
+    std::uint32_t rt_tex = 0;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, kSize, kSize, lift::d3d9::kFmtA8R8G8B8, &rt_tex, 1u),
+                      0u);
+    LIFT_CHECK_NE_U32(rt_tex, 0u);
+    if (rt_tex == 0) return 0;
+    lift::d3d9::TextureInfo rti;
+    LIFT_CHECK(lift::d3d9::textureInfo(r.f.m.cpu(), rt_tex, &rti, nullptr));
+    const std::uint32_t surface_out = r.f.placeU32(0u);
+    LIFT_CHECK_EQ_U32(r.f.method(rt_tex, kOffTextureGetSurfaceLevel, {0u, surface_out}), 0u);
+    const std::uint32_t rt_surface = mem.rd32(surface_out);
+    LIFT_CHECK_NE_U32(rt_surface, 0u);
+    if (rt_surface == 0) return 0;
+
+    // ---- 共用状态：LINEAR + CLAMP + 无混合 / 无深度（与 Fade 的 sampler_state 同档）----
+    auto setCommon = [&](std::uint32_t t) {
+        LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsZEnable, 0u), 0u);
+        LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsCullMode, lift::d3d9::kCullNone), 0u);
+        LIFT_CHECK_EQ_U32(r.f.setRs(lift::d3d9::kRsAlphaBlendEnable, 0u), 0u);
+        LIFT_CHECK_EQ_U32(r.f.setTexture(0u, t), 0u);
+        LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMagFilter, lift::d3d9::kTexfLinear), 0u);
+        LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMinFilter, lift::d3d9::kTexfLinear), 0u);
+        LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampAddressU, lift::d3d9::kAddressClamp), 0u);
+        LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampAddressV, lift::d3d9::kAddressClamp), 0u);
+        LIFT_CHECK_EQ_U32(r.f.setFvf(kFvfXyzRhwDiffuseTex1), 0u);
+    };
+    // ★ D3D9 的全屏 quad = 像素**边界** (−0.5 .. size−0.5)：像素中心在整数格点上。
+    const std::uint32_t white = 0xFFFFFFFFu;
+    const float hi = static_cast<float>(kSize) - 0.5f;
+    const std::vector<Fixture::TexVertex> full = {
+        {-0.5f, -0.5f, 0.0f, 1.0f, white, 0.0f, 0.0f},
+        {hi, -0.5f, 0.0f, 1.0f, white, 1.0f, 0.0f},
+        {-0.5f, hi, 0.0f, 1.0f, white, 0.0f, 1.0f},
+        {hi, -0.5f, 0.0f, 1.0f, white, 1.0f, 0.0f},
+        {hi, hi, 0.0f, 1.0f, white, 1.0f, 1.0f},
+        {-0.5f, hi, 0.0f, 1.0f, white, 0.0f, 1.0f},
+    };
+    const std::uint32_t quad_ea = r.f.placeTexVertices(full);
+    auto drawFull = [&]() {
+        LIFT_CHECK_EQ_U32(r.f.clearTo(kClearColor), 0u);
+        LIFT_CHECK_EQ_U32(r.f.beginScene(), 0u);
+        LIFT_CHECK_EQ_U32(r.f.drawUp(lift::d3d9::kPtTriangleList, 2u, quad_ea, 28u), 0u);
+        LIFT_CHECK_EQ_U32(r.f.endScene(), 0u);
+    };
+    auto readBackbuffer = [&]() {
+        std::vector<std::uint32_t> out(static_cast<std::size_t>(kSize) * kSize, 0u);
+        for (int y = 0; y < kSize; ++y)
+            for (int x = 0; x < kSize; ++x)
+                out[static_cast<std::size_t>(y) * kSize + x] = r.f.pixelAt(x, y);
+        return out;
+    };
+    auto compare = [&](const std::vector<std::uint32_t>& got, const std::vector<std::uint32_t>& want,
+                       const char* what) {
+        std::size_t diff = 0;
+        for (std::size_t i = 0; i < got.size(); ++i)
+            if (!lift_test::pxNear(got[i], want[i], 1)) ++diff;
+        ++lift_test::g_checks;
+        if (diff != 0u)
+            lift_test::failf(__FILE__, __LINE__, "%s：%zu/%zu 个像素不等（容差 1）", what, diff, got.size());
+    };
+
+    // ---- (a) 直画到后缓冲 ----
+    setCommon(tex);
+    drawFull();
+    if (!r.syncPixel(&why)) LIFT_SKIP(why.c_str());
+    const std::vector<std::uint32_t> ref_direct = readBackbuffer();
+    compare(ref_direct, source, "(a) 直画后缓冲 vs 源 texel");
+
+    // ---- (b-1) 画进同尺寸 RT ----
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, rt_surface}), 0u);
+    setCommon(tex);
+    drawFull();
+    // 换回后缓冲：这一步会把 RT 的像素**读回 guest**（屏障），随后 rt_tex 才能当采样源。
+    // ★ ⛔ 不在这里 `syncPixel()`：读回的是**后缓冲**，而此时的镜像还是 RT（下一批 draw 才
+    //   `rasterPrepare` 回后缓冲）⇒ 后端会以"读回的基址不是镜像目标"拒绝。
+    LIFT_CHECK_EQ_U32(r.f.method(r.f.device.object, kOffSetRenderTarget, {0u, 0u}), 0u);
+
+    // ---- (b-2) 用全屏 quad 把 RT 合成回后缓冲 ----
+    setCommon(rt_tex);
+    drawFull();
+    if (!r.syncPixel(&why)) LIFT_SKIP(why.c_str());
+    const std::vector<std::uint32_t> ref_rt = readBackbuffer();
+    compare(ref_rt, source, "(b) RT 往返 vs 源 texel");
+    compare(ref_rt, ref_direct, "(b) RT 往返 vs (a) 直画");
+    // ---- RT 自身的内容（换 target 的屏障已经把它读回 guest）也必须 = 源 texel ----
+    {
+        const lift::GuestSurface* gs = r.f.m.surfaces().find(rti.arena);
+        LIFT_CHECK(gs != nullptr);
+        if (gs != nullptr) {
+            std::vector<std::uint32_t> got(static_cast<std::size_t>(kSize) * kSize, 0u);
+            for (int y = 0; y < kSize; ++y)
+                for (int x = 0; x < kSize; ++x)
+                    got[static_cast<std::size_t>(y) * kSize + x] =
+                        mem.rd32(gs->ea + static_cast<std::uint32_t>(y) * gs->pitch +
+                                 static_cast<std::uint32_t>(x) * 4u);
+            compare(got, source, "(b-1) RT 内容 vs 源 texel");
+        }
+    }
+
+    LIFT_CHECK_EQ_U32(r.f.setTexture(0u, 0u), 0u);
+    r.f.method(rt_tex, kOffRelease, {});
+    r.f.method(tex, kOffRelease, {});
+    return 0;
+}
+
+// ---------------------------------------------------------------------------------------
 // ④b MAG / MIN 两档过滤**各自参与**、且 `MAG != MIN` 的批**必须照画**
 //   （`REQ-01M7AZ68J05PMVWVY7A589TQ6Y`：以前这条批被 `kUnGpuFilterSplit` 整批拒绝）
 //   · (a) 放大臂（2×2 纹理 → 8×8 像素）：放大用 `MAGFILTER` ⇒ MAG=POINT 纯 texel、
@@ -930,13 +1088,14 @@ int caseMinFilterSampling() {
     };
 
     // ===== (a) 放大臂（2×2 纹理铺 8×8 像素 = 4:1 **放大**）=====
-    // D3D9 放大采样用 `MAGFILTER`（MINFILTER 不参与）：
-    //   (a1) MAG=POINT + MIN=LINEAR ⇒ (2,2) = texel(0,0) 纯红 `0x00FF0000`；
-    //   (a2) MAG=LINEAR + MIN=POINT ⇒ (2,2) = 双线性 `0x00C72020`。
-    // ⛔ 旧期望 `0x00C72020` 属于 (a2)，不属于 MAG=POINT 那一臂 —— 旧用例把它写在 MAG=POINT 上，
-    //    断的其实是"CPU 把 MIN 用在放大上"这条**不合规范**的行为
-    //    （`REQ-01M7AZ68J05PMVWVY7A589TQ6Y`，⛔ 不要恢复那条）。
-    //   两臂都带 MAG!=MIN ⇒ 同时证明"准入不再整批拒绝"。
+    // D3D9 放大采样用 `MAGFILTER`（MINFILTER 不参与）。★ 采样坐标按 **D3D9 的像素中心
+    //   （整数格点，见 `d3d9_gpu.cpp` 的 `kD3d9PixelCenterBias`）**算：像素 (3,3) 的中心 = (3,3)
+    //   ⇒ u=v=3/8=0.375 ⇒ texel 坐标 = u·2−0.5 = **0.25**（双线性权重 0.75/0.25）：
+    //   (a1) MAG=POINT  ⇒ 最近 texel (0,0) = 纯红 `0x00FF0000`；
+    //   (a2) MAG=LINEAR ⇒ 双线性 `0x009F4040`（R=0.625·255=159，G=B=0.25·255=64）。
+    // ⛔ 旧期望 `0x00C72020` 是**半像素偏了**的采样相位（像素中心当 3.5 算）算出来的 —— 它断的是
+    //    BUG-38 的旧约定，⛔ 不要恢复。像素 (2,2) 在新约定下正好落在 texel (0,0) 中心 ⇒ 两档同值，
+    //    没有判别力 ⇒ 判据点挪到 (3,3)。
     LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMinFilter, lift::d3d9::kTexfLinear), 0u);
     LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMagFilter, lift::d3d9::kTexfPoint), 0u);
     lift::d3d9::GpuCoverage cov{};
@@ -944,7 +1103,7 @@ int caseMinFilterSampling() {
     LIFT_CHECK(cov.queued >= 1u);                        // 真的进了 GPU 队列
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(cov.skipped_draws), 0);
     if (!r.syncPixel(&why)) LIFT_SKIP(why.c_str());
-    const std::uint32_t mag_point_px = r.f.pixelAt(2, 2);
+    const std::uint32_t mag_point_px = r.f.pixelAt(3, 3);
     LIFT_CHECK_EQ_U32(mag_point_px, 0x00FF0000u);
 
     LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMagFilter, lift::d3d9::kTexfLinear), 0u);
@@ -953,16 +1112,19 @@ int caseMinFilterSampling() {
     LIFT_CHECK(cov.queued >= 1u);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(cov.skipped_draws), 0);
     if (!r.syncPixel(&why)) LIFT_SKIP(why.c_str());
-    const std::uint32_t mag_linear_px = r.f.pixelAt(2, 2);
-    LIFT_CHECK(lift_test::pxNear(mag_linear_px, 0x00C72020u, 1));  // 双线性（unorm 舍入 ±1）
+    const std::uint32_t mag_linear_px = r.f.pixelAt(3, 3);
+    LIFT_CHECK(lift_test::pxNear(mag_linear_px, 0x009F4040u, 1));  // 双线性（unorm 舍入 ±1）
     LIFT_CHECK(mag_point_px != mag_linear_px);  // 反向条款：MAG 两档必须产生不同像素
 
     // ===== (b) 缩小臂（8×8 纹理铺 2×2 像素 = 4:1 **缩小**；MIPFILTER=NONE ⇒ 只采 level 0）=====
-    // 纹理：R = 10*x（每行相同）、A=255 ⇒ 只有 x 方向有梯度，手算简单：
-    //   (0,0) 像素中心 ⇒ u = 0.05 + 0.25*0.9 = 0.275 ⇒ level-0 texel 坐标 2.2：
-    //     MIN=POINT  ⇒ texel(2,·)：R = 20 ⇒ `0x00140000`
-    //     MIN=LINEAR ⇒ taps x=1/2（权重 0.3/0.7）：R = 0.3*10 + 0.7*20 = 17 ⇒ `0x00110000`
+    // 纹理：R = 10*x（每行相同）、A=255 ⇒ 只有 x 方向有梯度，手算简单。
+    // ★ UV 跨度取 0.7（0.05..0.75）：像素 (1,·) 的中心 = x=1 ⇒ s=0.5 ⇒ u = 0.05+0.5·0.7 = 0.4
+    //   ⇒ level-0 texel 坐标 = 0.4·8−0.5 = **2.7**（⛔ 不是 0.5 的平局、也不在 clamp 区）：
+    //     MIN=POINT  ⇒ 最近 texel 3：R = 30 ⇒ `0x001E0000`
+    //     MIN=LINEAR ⇒ taps x=2/3（权重 0.3/0.7）：R = 0.3·20 + 0.7·30 = 27 ⇒ `0x001B0000`
     //   ★ 两个值**必须不同**：这才是"MINFILTER 真的参与缩小采样"的判据（旧用例缺的就是这一臂）。
+    //   ⛔ 旧几何（UV 0.05..0.95）在 D3D9 的整数像素中心下，像素 (0,0) 落在 clamp 区（texel 坐标
+    //     −0.1）⇒ 两档同值；那是半像素偏了才"有梯度"的假象。
     std::uint32_t shrink_tex = 0;
     LIFT_CHECK_EQ_U32(r.f.createTexture(r.f.device.object, 8u, 8u, lift::d3d9::kFmtA8R8G8B8, &shrink_tex), 0u);
     LIFT_CHECK_NE_U32(shrink_tex, 0u);
@@ -984,11 +1146,11 @@ int caseMinFilterSampling() {
     }
     const std::vector<Fixture::TexVertex> shrink_quad = {
         {0.0f, 0.0f, 0.0f, 1.0f, white, 0.05f, 0.05f},
-        {2.0f, 0.0f, 0.0f, 1.0f, white, 0.95f, 0.05f},
-        {0.0f, 2.0f, 0.0f, 1.0f, white, 0.05f, 0.95f},
-        {2.0f, 0.0f, 0.0f, 1.0f, white, 0.95f, 0.05f},
-        {2.0f, 2.0f, 0.0f, 1.0f, white, 0.95f, 0.95f},
-        {0.0f, 2.0f, 0.0f, 1.0f, white, 0.05f, 0.95f},
+        {2.0f, 0.0f, 0.0f, 1.0f, white, 0.75f, 0.05f},
+        {0.0f, 2.0f, 0.0f, 1.0f, white, 0.05f, 0.75f},
+        {2.0f, 0.0f, 0.0f, 1.0f, white, 0.75f, 0.05f},
+        {2.0f, 2.0f, 0.0f, 1.0f, white, 0.75f, 0.75f},
+        {0.0f, 2.0f, 0.0f, 1.0f, white, 0.05f, 0.75f},
     };
     const std::uint32_t shrink_data = r.f.placeTexVertices(shrink_quad);
     auto drawShrink = [&](lift::d3d9::GpuCoverage* cov) {
@@ -1007,16 +1169,16 @@ int caseMinFilterSampling() {
     LIFT_CHECK(cov.queued >= 1u);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(cov.skipped_draws), 0);
     if (!r.syncPixel(&why)) LIFT_SKIP(why.c_str());
-    const std::uint32_t shrink_point = r.f.pixelAt(0, 0);
-    LIFT_CHECK_EQ_U32(shrink_point, 0x00140000u);
+    const std::uint32_t shrink_point = r.f.pixelAt(1, 1);
+    LIFT_CHECK_EQ_U32(shrink_point, 0x001E0000u);
 
     LIFT_CHECK_EQ_U32(r.f.setSampler(0u, lift::d3d9::kSampMinFilter, lift::d3d9::kTexfLinear), 0u);
     LIFT_CHECK_EQ_U32(drawShrink(&cov), lift::d3d9::kOk);
     LIFT_CHECK(cov.queued >= 1u);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(cov.skipped_draws), 0);
     if (!r.syncPixel(&why)) LIFT_SKIP(why.c_str());
-    const std::uint32_t shrink_linear = r.f.pixelAt(0, 0);
-    LIFT_CHECK(lift_test::pxNear(shrink_linear, 0x00110000u, 1));
+    const std::uint32_t shrink_linear = r.f.pixelAt(1, 1);
+    LIFT_CHECK(lift_test::pxNear(shrink_linear, 0x001B0000u, 1));
     LIFT_CHECK(shrink_point != shrink_linear);  // 反向条款：MIN 两档必须产生不同像素
 
     LIFT_CHECK_EQ_U32(r.f.setTexture(0u, 0u), 0u);
@@ -3679,10 +3841,13 @@ int casePerspectiveInterpolation() {
     LIFT_CHECK(tri[0].invw[0] == 1.0 && std::fabs(tri[0].invw[2] - 0.25) < 1e-9);
 
     // 像素中心处的参考（透视 / 仿射共用一份算式，只有 `invw` 不同）。
+    // ★ 像素中心 = **(x, y)**：D3D9 的像素中心在整数格点上（MSDN「Coordinate Systems (Direct3D 10)」
+    //   的差异段；`d3d9_gpu.cpp` 的 `kD3d9PixelCenterBias` 就是这半像素）。⛔ 不要写回 `x+0.5`
+    //   —— 那是 D3D10 之后的口径，会让参考整体偏半像素（BUG-38 之前的读数就是这么来的）。
     const auto sampleRef = [&](bool perspective, int x, int y, double* u, double* v, double* cr,
                                double* cg, double* cb) -> bool {
-        const double px = static_cast<double>(x) + 0.5;
-        const double py = static_cast<double>(y) + 0.5;
+        const double px = static_cast<double>(x);
+        const double py = static_cast<double>(y);
         for (int ti = 0; ti < 2; ++ti) {
             double l[3] = {0.0, 0.0, 0.0};
             if (!refBary(tri[ti], px, py, l, 0.03)) continue;
@@ -4015,6 +4180,9 @@ int main(int argc, char** argv) {
             rc = caseTexturedQuad();
             if (rc != 0) return rc;
             rc = caseMinFilterSampling();
+            if (rc != 0) return rc;
+            // ★ BUG-38 的判据：1:1 的 RT 往返必须恒等（屏幕→NDC 的 D3D9 半像素）
+            rc = caseRtRoundTripIdentity();
             if (rc != 0) return rc;
             rc = caseMipLevels();
             if (rc != 0) return rc;

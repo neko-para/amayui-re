@@ -493,6 +493,35 @@ constexpr std::size_t kFxEntryCount = sizeof(kFxEntries) / sizeof(kFxEntries[0])
 static_assert(kFxEntryCount == static_cast<std::size_t>(GpuEffectProgram::SnowPs10) + 1u,
               "kFxEntries 必须与 GpuEffectProgram 的整数值一一对应（下标 = 程序号）");
 
+// =====================================================================================
+// ★★ D3D9 屏幕空间 → 光栅器视口坐标的**唯一**换算（像素中心约定）
+//
+// 判据（MSDN「Coordinate Systems (Direct3D 10)」顶端的差异段，原文）：
+//   「Direct3D 9 defines the center of the upper-left pixel as the origin of a render target.
+//     ... In Direct3D 9, pixel centers are at integer locations.」
+//   ⇒ D3D9 的屏幕坐标里，像素 (i,j) 的**中心**就是 (i,j)（渲染目标原点是左上像素的中心）。
+//   而 SDL_GPU 的三个后端（D3D12 / Metal / Vulkan）都是 D3D10 口径：原点是左上**角**、
+//   像素 (i,j) 的中心在 (i+0.5, j+0.5)。视口把 NDC [-1,1] 映到 [vp, vp+size] 的**边界**坐标上。
+//   ⇒ 同一个点：D3D9 屏幕坐标 x 落在像素中心，光栅器要把它写成 x+0.5。
+//
+// ⛔ 这不是"补偿用魔数"：它是两个坐标系原点的差（MSDN 同一段写的就是 0.5 / 整数两种中心）。
+// ⛔ 约定**只在这里**：⛔ 不要在 sprite / Fade quad / 线 / 投影路里再各加一次。
+//   · XYZRHW（预变换）顶点与 XYZ 投影路（`toScreen` 已给出 D3D9 屏幕坐标）⇒ 直通本函数；
+//   · `ID3DXSprite` 的 Draw 另有 **D3DX 自己的** −0.5 顶点偏置（sprite 的 position 是像素位置、
+//     四角是像素边界）—— 见 `d3dx9_sprite.cpp` 的 `kD3dxSpriteVertexBias`。两段各管一段、
+//     **必须同时在场**：只改一边 ⇒ 整层 sprite 偏半像素。
+// ★ 判据（守卫）：1:1 的 RT 往返必须恒等（`d3d9p/rt-roundtrip-identity`）、同一 quad 的
+//   sprite 路与 XYZRHW 路必须同像素（`d3dx9/sprite-vs-rhw-quad`）。
+// =====================================================================================
+constexpr float kD3d9PixelCenterBias = 0.5f;
+
+inline float d3d9ScreenToNdcX(float x, float vp_x, float vp_w) {
+    return ((x + kD3d9PixelCenterBias) - vp_x) / vp_w * 2.0f - 1.0f;
+}
+inline float d3d9ScreenToNdcY(float y, float vp_y, float vp_h) {
+    return 1.0f - ((y + kD3d9PixelCenterBias) - vp_y) / vp_h * 2.0f;
+}
+
 // ★ 诊断用：到目前为止入队的**带批号** draw 数（`LIFT_GPU_FF_TEX` 的 `[gpu-depth]` 用它定位
 //   `Clear(ZBUFFER)` 落在哪两批之间）。只在探针开启时被读，⛔ 不参与任何判据。
 std::uint64_t g_ff_tag_seq = 0;
@@ -1050,8 +1079,8 @@ public:
                 const float diag_vp_h = draw.state.viewport_h > 0
                                             ? static_cast<float>(draw.state.viewport_h)
                                             : static_cast<float>(height_);
-                const float nx = (v0.x - diag_vp_x) / diag_vp_w * 2.0f - 1.0f;
-                const float ny = 1.0f - (v0.y - diag_vp_y) / diag_vp_h * 2.0f;
+                const float nx = d3d9ScreenToNdcX(v0.x, diag_vp_x, diag_vp_w);
+                const float ny = d3d9ScreenToNdcY(v0.y, diag_vp_y, diag_vp_h);
                 // 整批 z 的范围：只打 `v0.z` 会把"深度被谁判掉"这条线索藏起来
                 //   （`a12` §5 的 `<待核>` #1：`[draw]` 的 `z=` 是状态位，不是顶点 z 范围）。
                 float zmin = v0.z;
@@ -1240,8 +1269,9 @@ public:
                     const bool have_uv1 = d.fx_uv1.size() == d.vertices.size() * 2u;
                     for (std::size_t vi = 0; vi < d.vertices.size(); ++vi) {
                         const GpuRasterVertex& v = d.vertices[vi];
-                        dst->x = (v.x - vp_x) / vp_w * 2.0f - 1.0f;
-                        dst->y = 1.0f - (v.y - vp_y) / vp_h * 2.0f;
+                        // ★ D3D9 像素中心约定：**只经这一个换算**（见文件上方的 `kD3d9PixelCenterBias`）。
+                        dst->x = d3d9ScreenToNdcX(v.x, vp_x, vp_w);
+                        dst->y = d3d9ScreenToNdcY(v.y, vp_y, vp_h);
                         dst->z = v.z;
                         dst->r = v.r;
                         dst->g = v.g;
@@ -1261,8 +1291,9 @@ public:
                 }
                 auto* dst = reinterpret_cast<Vertex*>(mapped + d.vertex_byte_offset);
                 for (const GpuRasterVertex& v : d.vertices) {
-                    dst->x = (v.x - vp_x) / vp_w * 2.0f - 1.0f;
-                    dst->y = 1.0f - (v.y - vp_y) / vp_h * 2.0f;
+                    // ★ 同上：D3D9 像素中心约定只经 `d3d9ScreenToNdcX/Y` 这一处换算。
+                    dst->x = d3d9ScreenToNdcX(v.x, vp_x, vp_w);
+                    dst->y = d3d9ScreenToNdcY(v.y, vp_y, vp_h);
                     dst->z = v.z;
                     dst->r = v.r;
                     dst->g = v.g;

@@ -930,13 +930,17 @@ int caseSpriteSamplerPixels(bool gpu) {
 
     if (gpu) {
         if (!r.syncPixels(&why)) LIFT_SKIP(why.c_str());
-        // ★ 像素坐标 → texel 位置：D3D9 的采样器约定是 `pos = u·size − 0.5`（texel 中心在
-        //   `u=(i+0.5)/size`），我们的 sprite UV 是 **texel 角**（`u=left/tw`）⇒ 两者配合正好
-        //   对齐第 0 个 texel 的**外角**。对这张 2×2 纹理、4×4 的 quad（x/y ∈ [20,24)）：
-        //     · 像素 (21,21) 的中心 → u=(1.5)/4=0.375 → pos=0.75−0.5=**0.25** ⇒ 线性混合 0.25/0.25；
-        //     · 像素 (21,20) → v=0.125 → pos=−0.25 ⇒ clamp 到 0；u 仍是 0.25 ⇒ 红/绿 0.75/0.25。
-        //   ⛔ 期望值不是"uv 直接乘宽度"：漏掉 −0.5 会把 (20,20)（pos=−0.25，clamp 后 = 0）
-        //      当成 0.25（这正是本用例第一版算错的那一格）。
+        // ★ 像素坐标 → texel 位置（两个半像素都要算对）：
+        //   ① D3D9 的**像素中心在整数格点**（MSDN「Coordinate Systems (Direct3D 10)」的差异段；
+        //      `d3d9_gpu.cpp` 的 `kD3d9PixelCenterBias`）⇒ 像素 (21,21) 的中心是 **x=21**；
+        //   ② `ID3DXSprite` 的四角是像素**边界**（`kD3dxSpriteVertexBias` 的 −0.5）⇒ 这张 4×4 的
+        //      quad 在 x/y 上覆盖 **[19.5, 23.5)**（⛔ 不是 [20,24)）；
+        //   ③ 硬件采样坐标 = `u·size − 0.5`（texel 中心在 `u=(i+0.5)/size`），UV 是 **texel 角**
+        //      （`u=left/tw`）。
+        //   合起来：像素 (21,21) → s=(21−19.5)/4=0.375 → u=0.375 → pos=0.75−0.5=**0.25** ⇒ 0.25/0.25；
+        //          像素 (21,20) → s=(20−19.5)/4=0.125 → v=0.125 → pos=−0.25 ⇒ clamp 到 0（u 仍 0.25）。
+        //   ⛔ 三种"少算一项"的写法都会算出**别的**格子（把像素中心当 21.5 / 把 quad 当 [20,24) /
+        //      漏掉 −0.5）；数值恰好与旧推导相同，但旧推导的两项各自都是错的（BUG-38）。
         // 期望（按上面的公式）：(21,21) R=(0.5625+0.0625)·255=159.375→159；G=B=0.25·255=63.75→64
         const std::uint32_t linear_expected = 0x009F4040u;
         checkPixel(r.f.m, d, 21, 21, linear_expected, "Begin 的文档 LINEAR 生效（texel 0.25/0.25）");
@@ -964,7 +968,155 @@ int caseSpriteSamplerPixels(bool gpu) {
 }
 
 // ---------------------------------------------------------------------------------------
-// ②a D3DXCreateTextureFromFileInMemory（TITLE Live2D 纹理的真实入口；`.lst` 0x478398）
+// ①z 同一个逻辑 quad：**sprite 路** vs **固定功能 XYZRHW 路** ⇒ 必须同像素（BUG-38 的第二条判据）
+// ---------------------------------------------------------------------------------------
+// 判据：同一张纹理、同一尺寸、画在**同一屏幕位置**（像素对齐、1:1）：
+//   · sprite 路 = `ID3DXSprite::Draw(tex, 全矩形, center=0, position=(P,P))`
+//     —— D3DX 把四角写成像素**边界**（P−0.5 .. P+w−0.5；`kD3dxSpriteVertexBias`）；
+//   · 固定功能路 = FVF XYZRHW 的 quad，顶点**直接写** D3D9 屏幕坐标的像素边界
+//     （P−0.5 .. P+w−0.5）—— 这正是引擎在 Fade 全屏 quad 上用的写法（−0.5 .. size−0.5，
+//     见 `defects.md#BUG-38` 的 `[bug38-raw]` 读数）。
+// 两条路在 D3D9 里描述的是**同一个 quad** ⇒ 像素必须逐字节相同（容差 1 只吸收 unorm 舍入）。
+// 同时断言 sprite 路 = **源 texel**（1:1 的 sprite 不该改变画面内容）。
+//
+// ★ 改坏哪一行会红：把 `d3dx9_sprite.cpp` 的 `kD3dxSpriteVertexBias` 改回 0（sprite 偏半像素、
+//   XYZRHW 路不动）⇒ 本用例红。这条与 `d3d9p/rt-roundtrip-identity` 互补：
+//   那条钉"屏幕→NDC 的 +0.5"（像素中心约定），这条钉"两条几何路从同一约定派生"。
+int caseSpriteVsRhwQuad() {
+    using namespace lift;
+    lift_test::g_current_case = "d3dx9/sprite-vs-rhw-quad";
+    Rig r;
+    LIFT_CHECK(r.withSprite());
+    if (r.sprite == 0) return 0;
+    std::string why;
+    if (!r.pixelArm(&why)) LIFT_SKIP(why.c_str());
+
+    constexpr int kP = 100;  // 屏幕位置（像素）
+    constexpr int kN = 8;    // 纹理边长 = 绘制边长（1:1）
+    // 确定性伪随机：半像素错位一定改像素（纯色/渐变可能"看起来一样"）
+    std::uint32_t texels[kN * kN];
+    {
+        std::uint32_t s = 0x9E3779B9u;
+        for (int i = 0; i < kN * kN; ++i) {
+            s = s * 1664525u + 1013904223u;
+            texels[i] = 0xFF000000u | (s & 0x00FFFFFFu);
+        }
+    }
+    std::uint32_t tex = 0;
+    LIFT_CHECK_EQ_U32(r.f.createTexture(r.dev.object, kN, kN, 1u, 0u, d3d9::kFmtA8R8G8B8, 1u, &tex), 0u);
+    LIFT_CHECK_NE_U32(tex, 0u);
+    if (tex == 0) return 0;
+    {
+        const std::uint32_t locked = r.f.placeBytes(std::vector<std::uint8_t>(8u, 0u));
+        LIFT_CHECK_EQ_U32(r.f.method(tex, 0x4Cu, {0u, locked, 0u, 0u}), 0u);  // IDirect3DTexture9::LockRect
+        const std::uint32_t pitch = r.f.m.mem().rd32(locked + 0u);
+        const std::uint32_t bits = r.f.m.mem().rd32(locked + 4u);
+        LIFT_CHECK_NE_U32(bits, 0u);
+        if (bits == 0u) return 0;
+        for (int y = 0; y < kN; ++y)
+            for (int x = 0; x < kN; ++x)
+                r.f.m.mem().wr32(bits + static_cast<std::uint32_t>(y) * pitch + static_cast<std::uint32_t>(x) * 4u,
+                                 texels[y * kN + x]);
+        LIFT_CHECK_EQ_U32(r.f.method(tex, 0x50u, {0u}), 0u);  // UnlockRect
+    }
+
+    // 无混合 / 无深度：两条路只用几何与采样口径作判据。
+    LIFT_CHECK_EQ_U32(r.setRenderState(d3d9::kRsAlphaBlendEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.setRenderState(d3d9::kRsZEnable, 0u), 0u);
+    LIFT_CHECK_EQ_U32(r.setRenderState(d3d9::kRsCullMode, d3d9::kCullNone), 0u);
+
+    auto readRegion = [&](std::vector<std::uint32_t>* out) {
+        out->assign(kN * kN, 0u);
+        for (int y = 0; y < kN; ++y)
+            for (int x = 0; x < kN; ++x)
+                (*out)[static_cast<std::size_t>(y) * kN + x] = r.f.pixelAt(r.dev.info, kP + x, kP + y);
+    };
+    auto compare = [&](const std::vector<std::uint32_t>& got, const std::uint32_t* want, const char* what) {
+        std::size_t diff = 0;
+        for (std::size_t i = 0; i < got.size(); ++i)
+            if (!lift_test::pxNear(got[i], want[i], 1)) ++diff;
+        ++lift_test::g_checks;
+        if (diff != 0u)
+            lift_test::failf(__FILE__, __LINE__, "%s：%zu/%d 个像素不等（容差 1）", what, diff, kN * kN);
+    };
+
+    // ---- sprite 路：position=(P,P)，center=0，整张纹理 ----
+    LIFT_CHECK_EQ_U32(r.f.clearTo(r.dev, 0xFF000000u), 0u);
+    LIFT_CHECK_EQ_U32(r.begin(0u), 0u);
+    LIFT_CHECK_EQ_U32(r.drawTex(tex, 0u, 0u, r.f.placeVec3(static_cast<float>(kP), static_cast<float>(kP), 0.0f),
+                                0xFFFFFFFFu),
+                      0u);
+    LIFT_CHECK_EQ_U32(r.end(), 0u);
+    if (!r.syncPixels(&why)) LIFT_SKIP(why.c_str());
+    std::vector<std::uint32_t> sprite_px;
+    readRegion(&sprite_px);
+    compare(sprite_px, texels, "sprite 路 vs 源 texel");
+
+    // ---- 固定功能路：同一个 quad，顶点写成 D3D9 的像素**边界**（P−0.5 .. P+w−0.5）----
+    LIFT_CHECK_EQ_U32(r.f.clearTo(r.dev, 0xFF000000u), 0u);
+    const float lo = static_cast<float>(kP) - 0.5f;
+    const float hi = static_cast<float>(kP + kN) - 0.5f;
+    struct RhwVertex {
+        float x, y, z, rhw;
+        std::uint32_t color;
+        float u, v;
+    };
+    const RhwVertex quad[6] = {
+        {lo, lo, 0.0f, 1.0f, 0xFFFFFFFFu, 0.0f, 0.0f},
+        {hi, lo, 0.0f, 1.0f, 0xFFFFFFFFu, 1.0f, 0.0f},
+        {lo, hi, 0.0f, 1.0f, 0xFFFFFFFFu, 0.0f, 1.0f},
+        {hi, lo, 0.0f, 1.0f, 0xFFFFFFFFu, 1.0f, 0.0f},
+        {hi, hi, 0.0f, 1.0f, 0xFFFFFFFFu, 1.0f, 1.0f},
+        {lo, hi, 0.0f, 1.0f, 0xFFFFFFFFu, 0.0f, 1.0f},
+    };
+    std::vector<std::uint8_t> bytes;
+    bytes.reserve(sizeof(quad));
+    for (const RhwVertex& v : quad)
+        bytes.insert(bytes.end(), reinterpret_cast<const std::uint8_t*>(&v),
+                     reinterpret_cast<const std::uint8_t*>(&v) + sizeof(v));
+    const std::uint32_t vdata = r.f.placeBytes(bytes);
+    // 与 `ID3DXSprite::Begin` 写的 stage-0 同档（MSDN：CLAMP + MAG/MIN/MIP = LINEAR）
+    LIFT_CHECK_EQ_U32(r.setSampler(d3d9::kSampAddressU, d3d9::kAddressClamp), 0u);
+    LIFT_CHECK_EQ_U32(r.setSampler(d3d9::kSampAddressV, d3d9::kAddressClamp), 0u);
+    LIFT_CHECK_EQ_U32(r.setSampler(d3d9::kSampMagFilter, d3d9::kTexfLinear), 0u);
+    LIFT_CHECK_EQ_U32(r.setSampler(d3d9::kSampMinFilter, d3d9::kTexfLinear), 0u);
+    LIFT_CHECK_EQ_U32(r.setSampler(d3d9::kSampMipFilter, d3d9::kTexfLinear), 0u);
+    LIFT_CHECK_EQ_U32(r.f.method(r.dev.object, 0x104u, {0u, tex}), 0u);  // SetTexture(0, tex)
+    LIFT_CHECK_EQ_U32(r.f.method(r.dev.object, 0x164u, {0x0144u}), 0u);  // SetFVF(XYZRHW|DIFFUSE|TEX1)
+    // ★ fixed-function Draw 必须在 `BeginScene/EndScene` 之间（D3D9 语义；`drawPrecheck` 拒否则
+    //   `D3DERR_INVALIDCALL`）。sprite 路没有这条要求 —— 两条路的**入口**不同，判据在像素上。
+    LIFT_CHECK_EQ_U32(r.f.method(r.dev.object, 0xA4u, {}), 0u);  // BeginScene
+    {
+        // ★ 失败时把"为什么没画"（GPU 准入的跳过原因）打出来：`gpuCoverage()` 每次 `Machine::run`
+        //   都会清零 ⇒ 这次调用之后读到的是**这次 Draw** 的账。
+        const std::uint32_t hr = r.f.method(r.dev.object, 0x14Cu, {4u /*TRIANGLELIST*/, 2u, vdata, 28u});
+        const lift::d3d9::GpuCoverage cov = lift::d3d9::gpuCoverage();
+        ++lift_test::g_checks;
+        if (hr != 0u) {
+            std::string reasons;
+            for (const auto& kv : cov.skipped_reasons)
+                reasons += kv.first + " ×" + std::to_string(kv.second) + "；";
+            lift_test::failf(__FILE__, __LINE__,
+                             "XYZRHW 路的 DrawPrimitiveUP 失败 hr=0x%08X（queued=%llu skipped=%llu）；"
+                             "GPU 跳过原因：%s",
+                             hr, static_cast<unsigned long long>(cov.queued),
+                             static_cast<unsigned long long>(cov.skipped_draws),
+                             reasons.empty() ? "(无记录)" : reasons.c_str());
+        }
+    }
+    LIFT_CHECK_EQ_U32(r.f.method(r.dev.object, 0xA8u, {}), 0u);  // EndScene
+    if (!r.syncPixels(&why)) LIFT_SKIP(why.c_str());
+    std::vector<std::uint32_t> rhw_px;
+    readRegion(&rhw_px);
+    compare(rhw_px, texels, "XYZRHW 路 vs 源 texel");
+    compare(rhw_px, sprite_px.data(), "XYZRHW 路 vs sprite 路");
+
+    LIFT_CHECK_EQ_U32(r.f.method(r.dev.object, 0x104u, {0u, 0u}), 0u);
+    LIFT_CHECK_EQ_U32(r.f.method(tex, 0x08u, {}), 0u);
+    return 0;
+}
+
+
 //   本层断言"**头**决定的属性"：宽高来自 PNG 的 IHDR（**非方、非 2 的幂**的 7×5 ⇒ 不可能是常量）、
 //   格式恒 A8R8G8B8、MipLevels=1、Release 之后 arena / 对象全部回收；未知容器 ⇒ E_FAIL。
 //   ★ 像素级判据在 ②c（8×8 的 α 梯度图，逐像素对源公式）。
@@ -2662,6 +2814,9 @@ int main(int argc, char** argv) {
             int rc = caseDrawEndPixels(true);
             if (rc != 0) return rc;  // 77 = 没有 GPU 设备（SKIP），⛔ 不假绿
             rc = caseSpriteSamplerPixels(true);
+            if (rc != 0) return rc;
+            // ★ BUG-38 的第二条判据：同一 quad 的 sprite 路与 XYZRHW 路必须同像素
+            rc = caseSpriteVsRhwQuad();
             if (rc != 0) return rc;
             rc = caseTextureDraw(true);
             if (rc != 0) return rc;

@@ -615,13 +615,16 @@ void casePixelTransparentTexel() {
     LIFT_CHECK(gt.pixels != nullptr);
     if (gt.pixels == nullptr) return;
 
-    // 四边形正好覆盖 (0,0)–(16,16)、uv 0..1 ⇒ 每个 texel 落到同坐标的目标像素（1:1）。
+    // 四边形的**像素边界**是 (−0.5,−0.5)–(15.5,15.5)：sprite 的 position (0,0) 是像素位置、
+    // 四角是像素边界（D3DX 的 −0.5；`d3dx9_sprite.cpp` 的 `kD3dxSpriteVertexBias`）。它正好覆盖
+    // 像素 0..15 ⇒ 每个 texel 落到同坐标的目标像素（1:1）。⛔ 不要把四角写回 (0,0)–(16,16)
+    // —— 那是"像素中心当边界"的旧口径（BUG-38）。
     {
         const std::vector<lift::GpuRasterVertex>& v = mock.vertices[0];
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(v.size()), 6u);
-        LIFT_CHECK(nearlyEqual(v[0].x, 0.0) && nearlyEqual(v[0].y, 0.0));
-        LIFT_CHECK(nearlyEqual(v[1].x, 16.0) && nearlyEqual(v[1].y, 0.0));
-        LIFT_CHECK(nearlyEqual(v[2].x, 0.0) && nearlyEqual(v[2].y, 16.0));
+        LIFT_CHECK(nearlyEqual(v[0].x, -0.5) && nearlyEqual(v[0].y, -0.5));
+        LIFT_CHECK(nearlyEqual(v[1].x, 15.5) && nearlyEqual(v[1].y, -0.5));
+        LIFT_CHECK(nearlyEqual(v[2].x, -0.5) && nearlyEqual(v[2].y, 15.5));
         LIFT_CHECK(nearlyEqual(v[0].u, 0.0f) && nearlyEqual(v[0].v, 0.0f));
         LIFT_CHECK(nearlyEqual(v[4].u, 1.0f) && nearlyEqual(v[4].v, 1.0f));
     }

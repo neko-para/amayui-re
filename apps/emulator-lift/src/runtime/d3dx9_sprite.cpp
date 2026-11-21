@@ -121,6 +121,16 @@ static_assert(d3d9::kCapsMaxAnisotropyClaim == 1u,
 constexpr std::uint32_t kSpriteBeginMagMin = d3d9::kTexfLinear;
 constexpr std::uint32_t kSpriteBeginMip = d3d9::kTexfLinear;
 constexpr std::uint32_t kSpriteBeginMaxAnisotropy = d3d9::kCapsMaxAnisotropyClaim;
+// ★★ D3DX 的**顶点偏置**：`ID3DXSprite::Draw` 的 pPosition 是**像素位置**（"the sprite 的左上角
+//   画在这个像素上"），而它生成的四角是**像素边界**坐标 ⇒ 四角再减 0.5。
+//   依据（MSDN「Coordinate Systems (Direct3D 10)」的差异段）：D3D9 的像素中心在**整数**格点上
+//   （渲染目标原点是左上像素的中心），像素 i 的边界因此是 [i-0.5, i+0.5)。
+//   ⇒ 1:1 的 sprite 恰好覆盖像素 P..P+w-1，且 texel 角 UV（`u=left/tw`）在像素中心处正好落在
+//     texel 中心（`pos = u·tw − 0.5 = left + i − P`，硬件双线性的通用公式）。
+//   ⚠ 与 `d3d9_gpu.cpp` 的 `kD3d9PixelCenterBias`（屏幕→NDC 的 +0.5）**成对**：
+//     两者相加在光栅器侧正好相消 ⇒ sprite 路的像素与修复前**逐字节相同**；
+//     ⛔ 只改一边 ⇒ 整层 sprite 偏半像素（这正是 BUG-38 在 Fade 路上的形态）。
+constexpr double kD3dxSpriteVertexBias = 0.5;
 // MSDN 的 8 项（type）与它们要写成的值；顺序 = `SpriteSamplerSaveOff` 的顺序。
 constexpr std::uint32_t kSpriteBeginSamplerTypes[8] = {
     d3d9::kSampAddressU,     d3d9::kSampAddressV,       d3d9::kSampMagFilter,    d3d9::kSampMinFilter,
@@ -882,8 +892,11 @@ std::uint32_t draw(X86& cpu, std::uint32_t state, std::uint32_t texture, std::ui
     const math::Vec4d p0 = math::transformVec4D3D(M, math::Vec4d(ax, ay, az, 1.0));
     const math::Vec4d uaxis = math::transformVec4D3D(M, math::Vec4d(w, 0.0, 0.0, 0.0));
     const math::Vec4d vaxis = math::transformVec4D3D(M, math::Vec4d(0.0, h, 0.0, 0.0));
-    const double x0 = p0.x;
-    const double y0 = p0.y;
+    // ★ D3DX 的 −0.5 顶点偏置：pPosition 是**像素位置**、四角是**像素边界**（见
+    //   `kD3dxSpriteVertexBias` 的注释）。偏置在**变换之后**加（屏幕空间），⛔ 不是把 position 减 0.5：
+    //   缩放/旋转只作用于宽高两轴，不作用于这个半像素边界量。
+    const double x0 = p0.x - kD3dxSpriteVertexBias;
+    const double y0 = p0.y - kD3dxSpriteVertexBias;
     const double x1 = x0 + uaxis.x;
     const double y1 = y0 + uaxis.y;
     const double x2 = x0 + vaxis.x;

@@ -5383,6 +5383,29 @@ const MUTATIONS = [
       '往 `save.js` 里塞一个裸 `0x9F8` 常量 ⇒ `script-map/no-bare-hex` 红' +
       '（"位置只有一个数字真源"被绕过；而这条链照旧能跑完 ⇒ 只看 run=done 的断言抓不到）',
   },
+
+  // ── BUG-38：屏幕→NDC 的 **D3D9 半像素**（`kD3d9PixelCenterBias`）──────────────────────
+  //   ★ 这一类错长什么样：D3D9 的像素中心在**整数**格点上（MSDN「Coordinate Systems
+  //     (Direct3D 10)」的差异段：「In Direct3D 9, pixel centers are at integer locations.」），
+  //     而 SDL_GPU 的光栅器（D3D12 / Metal / Vulkan）的像素中心在 (i+0.5, j+0.5)。
+  //     少了这半像素 ⇒ **1:1 的 RT 往返不再恒等**（合成那一跳多采半个 texel：糊 + 偏 0.5 px）。
+  //     ⚠ 稳定帧**看不出来**（只有一跳、误差恒定）⇒ 只看场景截图的判据抓不到；缺陷史见
+  //     `docs/03-emulator/defects.md#BUG-38`。
+  //   ★ 守卫 = `ctest:d3d9-pipeline-gpu` 的 `d3d9p/rt-roundtrip-identity`（顶层无条件注册 ⇒ pure
+  //     档；真 GPU 臂，无设备 ⇒ SKIP 77 = 本机"不可判定"，⛔ 不是假绿）。
+  {
+    file: 'apps/emulator-lift/src/runtime/d3d9_gpu.cpp',
+    from: 'constexpr float kD3d9PixelCenterBias = 0.5f;',
+    to: 'constexpr float kD3d9PixelCenterBias = 0.0f;',
+    guard: 'ctest:d3d9-pipeline-gpu',
+    ctest: 'd3d9-pipeline-gpu',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3d9-pipeline',
+    what:
+      '`kD3d9PixelCenterBias` 0.5 → 0（屏幕→NDC 丢掉 D3D9 的半像素）⇒ ' +
+      '`d3d9p/rt-roundtrip-identity` 红：(a) 直画与 (b) RT 往返都与源 texel 4096/4096 不等、' +
+      '(b) vs (a) 3968/4096 不等（多糊一次）；而稳定帧 / 场景截图**看不出来**',
+  },
 ];
 
 let mutationRunSeq = 0;
