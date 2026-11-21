@@ -5427,6 +5427,48 @@ const MUTATIONS = [
       '`d3d9p/rt-roundtrip-identity` 红：(a) 直画与 (b) RT 往返都与源 texel 4096/4096 不等、' +
       '(b) vs (a) 3968/4096 不等（多糊一次）；而稳定帧 / 场景截图**看不出来**',
   },
+
+  // ── 同一批：`ID3DXSprite::Begin` 的采样器常量（`kSpriteBeginMagMin`）────────────────────
+  //   ★ 这一类错长什么样：`Begin` 按 MSDN 把 8 个 stage 的采样器写成 MAG/MIN =
+  //     `kSpriteBeginMagMin`。本线声明 `MaxAnisotropy = 1` ⇒ 走 LINEAR 分支（`static_assert`
+  //     就在常量上方钉住这个前提）。写成 POINT ⇒ 采样变成最近邻 ⇒ **pure 臂的采样器合同**
+  //     当场红 8 条（Begin 后读回的 MAG/MIN 不是 LINEAR / 各 stage 一致 / Save-Restore 往返…）。
+  //   ★ 守卫 = `ctest:d3dx9`（顶层无条件注册 ⇒ pure 档；不碰 GPU / 资产，比同一处的 GPU 臂
+  //     `d3dx9-gpu` 便宜且可靠 —— 后者没设备时 SKIP 77，只能记「不可判定」）。
+  {
+    file: 'apps/emulator-lift/src/runtime/d3dx9_sprite.cpp',
+    from: 'constexpr std::uint32_t kSpriteBeginMagMin = d3d9::kTexfLinear;',
+    to: 'constexpr std::uint32_t kSpriteBeginMagMin = d3d9::kTexfPoint;',
+    guard: 'ctest:d3dx9',
+    ctest: 'd3dx9',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3dx9',
+    what:
+      '`kSpriteBeginMagMin` LINEAR → POINT（`ID3DXSprite::Begin` 写下的 MAG/MIN 采样器）⇒ ' +
+      '`ctest:d3dx9` 的采样器合同红 8 条（Begin 后读回的值不再是 LINEAR / 恢复不回去等）；' +
+      '这一臂不判像素（CPU 逐像素合成已删）⇒ 抓它的是"读回的值"系列，不是截图',
+  },
+
+  // ── 同一批：`ID3DXSprite::Draw` 的**顶点偏置**（`kD3dxSpriteVertexBias`）────────────────
+  //   ★ 这一类错长什么样：D3DX 的 `pPosition` 是**像素位置**，而 `Draw` 生成的四角是像素**边界**
+  //     坐标 ⇒ 四角再减 0.5（与 `d3d9_gpu.cpp` 的 `kD3d9PixelCenterBias` 成对：两者相加在光栅器
+  //     侧正好相消）。偏置置 0 ⇒ 整层 sprite 偏半像素（与 BUG-38 在 Fade 路上的形态同形）。
+  //   ★ 判据**只能**落在真 GPU 臂：默认臂的 sprite 是"记账 + 跳过"，一个像素都不写 ⇒ 那里的
+  //     断言对这条变异天然看不见。守卫 = `ctest:d3dx9-gpu`（顶层无条件注册 ⇒ pure 档；
+  //     无设备 ⇒ SKIP 77 = 本机「不可判定」，⛔ 不是假绿）。
+  {
+    file: 'apps/emulator-lift/src/runtime/d3dx9_sprite.cpp',
+    from: 'constexpr double kD3dxSpriteVertexBias = 0.5;',
+    to: 'constexpr double kD3dxSpriteVertexBias = 0.0;',
+    guard: 'ctest:d3dx9-gpu',
+    ctest: 'd3dx9-gpu',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-d3dx9',
+    what:
+      '`kD3dxSpriteVertexBias` 0.5 → 0（`ID3DXSprite::Draw` 的四角不再减半像素）⇒ ' +
+      'GPU 臂 `d3dx9/sprite-vs-rhw-quad` 红（64 个 texel 里 63 个不等：整层 sprite 偏半像素）；' +
+      '默认臂的 sprite 不写像素 ⇒ 只有真 GPU 臂看得见',
+  },
 ];
 
 let mutationRunSeq = 0;
