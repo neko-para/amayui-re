@@ -5342,6 +5342,25 @@ const MUTATIONS = [
       '`recipe-wait-policy/wait-set-equal` 红（"又有一个配方在拿时间当等待条件"；' +
       '而这条配方照旧能跑完 ⇒ 只看 exit 0 / pending=0 的判据抓不到）',
   },
+
+  // ── 脚本位置集中化：lib 里又出现裸 `0x…` 位置字面量（`scripts/plugins/lib/script-positions.js`）──
+  //   ★ 这一类错长什么样：某次调试把"从 trace 抄来的区间"直接写进消费方（`save.js` / 场景文件），
+  //     于是同一段读数有两份真源；改一处、另一处静默过期 ⇒ 门不命中 / 点击被吞，表现成偶发
+  //     `gate timeout`，而**链照样能跑**（只看 `run=done` 抓不到）。
+  //   ★ 守卫 = `tools/test/script-map.test.mjs`（`node --test`，pure；剥注释后扫 `0x…`）。
+  //     ⛔ 不选"改某个坐标 / 改某个门的值"当变异：那会被 CTest 的坐标断言先抓住，
+  //       证明不了"裸写字面量"这条规则本身会红。
+  {
+    file: 'apps/emulator-lift/scripts/plugins/lib/save.js',
+    from: 'const DEFAULT_GATE_TIMEOUT_MS = 30000;',
+    to:
+      'const BARE_0X9F8 = 0x9F8;  // 变异：裸写位置字面量（绕过 script-positions.js）\n' +
+      'const DEFAULT_GATE_TIMEOUT_MS = 30000;',
+    guard: 'tools/test/script-map.test.mjs',
+    what:
+      '往 `save.js` 里塞一个裸 `0x9F8` 常量 ⇒ `script-map/no-bare-hex` 红' +
+      '（"位置只有一个数字真源"被绕过；而这条链照旧能跑完 ⇒ 只看 run=done 的断言抓不到）',
+  },
 ];
 
 let mutationRunSeq = 0;

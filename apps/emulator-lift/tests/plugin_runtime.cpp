@@ -10,7 +10,10 @@
 //   · `plugin/module-default`（+ pair）   ：只读 `export default`；default 不是对象 / `start` 与
 //                                            `onTrigger` 不成对 ⇒ **装载失败并点名**。
 //   · `control-script/start-on-trigger-chain`：**真库** `scripts/plugins/lib/save.js`（假读数）走整条链：
-//                                            TITLE → SAVE → 读点 → SBUNKI → `expect` 命中（用例显式给
+//                                            参考入口 = `bootToTitle` + 载入链（2026-11-21 起 `loadSave`
+//                                            自己**不等 TITLE**；TITLE 门在 `lib/boot-to-title.js`）：
+//                                            `boot:title` 命中 → `start` 点 LoadData → SAVE → 读点 →
+//                                            SBUNKI → `expect` 命中（用例显式给
 //                                            `--plugin-param expect=FIELD,SC0000`）；两个 slot 的 `move`
 //                                            落**不同** y（实测表，⛔ 不是公式）；精确坐标
 //                                            (1070,480) / (300,rowY) / (640,323) + `done`/`fired=5`/`calls=6`。
@@ -376,8 +379,13 @@ void caseConcurrentArm() {
 // =====================================================================================
 // `control-script/start-on-trigger-chain`：**真库** `lib/save.js` + 假读数走完整条链
 //
-// 链（D-C2C-3）与每拍的输入落点（IntentExecutor 七步：② staged→ready ③ poll ⑥ drain 一条）：
-//   ① TITLE 首点：`start` 只 arm TITLE 门（本拍 poll 在 start 之前 ⇒ 不 fire；不提交 input）
+// ★ 2026-11-21 起 `loadSave.start` **不等 TITLE**（前提 = 调用方保证已在 TITLE；TITLE 门搬到了
+//   `lib/boot-to-title.js`）⇒ 以 `lib/save.js` 当入口时走的是它的**参考入口**（`bootToTitle` + 载入链）：
+//   `start` arm `boot:title`，命中后才 `click(1070,480)` 并 arm `load:save`。
+//   ⇒ 下面两道 armed-name 断言就是"拆分"的地面真相：TITLE 门属于 boot 链，载入链的第一道门是 SAVE。
+//
+// 链与每拍的输入落点（IntentExecutor 七步：② staged→ready ③ poll ⑥ drain 一条）：
+//   ① TITLE 首点：`start` 只 arm `boot:title` 门（本拍 poll 在 start 之前 ⇒ 不 fire；不提交 input）
 //   ② TITLE 命中  ⇒ click(1070,480) staged
 //   ③ SAVE 命中   ⇒ ② 提升 click、⑥ 落地 ⇒ 光标 (1070,480)；回调提交 move(300,rowY)
 //   ④ 读点门命中  ⇒ ② 提升 move、⑥ 落地 ⇒ 光标 (300,rowY)；回调提交 click(300,rowY)
@@ -387,22 +395,32 @@ void caseConcurrentArm() {
 // ★ 精确坐标是判据（⛔ 不是"没报错"）：变异 `click(300,rowY)` → `rowY+60` 在这里红（第 ⑤ 拍）。
 // =====================================================================================
 
+/** armed 集合必须恰好是那一个名字（`⛔` 不是"至少有一个"）。 */
+void checkSingleArmed(Fixture& f, const char* expected) {
+    const std::vector<std::string> armed = f.host->runner().armedNames();
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(armed.size()), 1);
+    if (armed.size() == 1) LIFT_CHECK(armed[0] == expected);
+}
+
 // 泵到 SBUNKI 门命中（= 提交 click(640,323) 并 arm 终态集合）；返回实测 row y（失败 -1）。
 int driveToSbunki(Fixture& f) {
     int cx = 0;
     int cy = 0;
-    // ① TITLE 第 1 个读点：start 只 arm TITLE 门。
+    // ① TITLE 第 1 个读点：start 只 arm `boot:title` 门（TITLE 门在 bootToTitle，⛔ 不在 loadSave 里）。
     f.readings.script = "TITLE.BIN";
     f.readings.pos = 0x0480;
     f.pump();
     dumpFail(f);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 0);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().stagedDepth()), 0);
-    // ② 下一读点（仍在 TITLE 区间）：TITLE 门命中 ⇒ click(1070,480) staged。
+    checkSingleArmed(f, "boot:title");
+    // ② 下一读点（仍在 TITLE 区间）：`boot:title` 命中 ⇒ click(1070,480) staged；armed 换成载入链 ⇒
+    //    `load:save`（★ 拆分后的第一道门就是 SAVE，⛔ 不再是 load:title）。
     f.pump();
     dumpFail(f);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->fired()), 1);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().stagedDepth()), 1);
+    checkSingleArmed(f, "load:save");
     // ③ SAVE 读点：② 提升 click → ③ 命中 SAVE 门（提交 move(300,rowY)）→ ⑥ click 落地。
     f.readings.script = "SAVE.BIN";
     f.readings.pos = 0x1150;
@@ -531,7 +549,7 @@ void caseSecondConfirm() {
     if (driveToSbunki(f) < 0) return;
     int cx = 0;
     int cy = 0;
-    // ⑤' SBUNKI 0x0AF8：② 提升并落地 click(640,323) → ③ 命中第二道确认（提交 click(690,323)）。
+    // ④' SBUNKI 0x0AF8：② 提升并落地 click(640,323) → ③ 命中第二道确认（提交 click(690,323)）。
     f.readings.script = "SBUNKI.BIN";
     f.readings.pos = 0x0af8;
     f.pump();
@@ -541,7 +559,7 @@ void caseSecondConfirm() {
     LIFT_CHECK_EQ_I64(cx, 640);
     LIFT_CHECK_EQ_I64(cy, 323);
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().stagedDepth()), 1);  // click(690,323) 已排队
-    // ⑥' FIELD：② 提升并落地 click(690,323) → ③ 命中 FIELD-2 ⇒ done。
+    // ⑤' FIELD：② 提升并落地 click(690,323) → ③ 命中 FIELD-2 ⇒ done。
     f.readings.script = "FIELD.BIN";
     f.readings.pos = 0x0600;
     f.pump();
@@ -589,7 +607,7 @@ void caseBadSlot() {
         LIFT_CHECK(f.host->failReason().find(b.needle) != std::string::npos);
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);  // start 跑了、onTrigger 没跑
     }
-    // 合法边界 0 / 7 不抛（构造成功、start arm TITLE 门）。
+    // 合法边界 0 / 7 不抛（构造成功、`start` 发 click(1070,480) 并 arm SAVE 门 —— 当拍不 fire）。
     for (const int slot : {0, 7}) {
         Fixture f;
         const bool loaded = f.loadLib({{"slot", std::to_string(slot)}, {"expect", "FIELD,SC0000"}});
@@ -703,6 +721,7 @@ void caseLoadSaveOnLoaded() {
         return;
     }
     // 载入链（TITLE → SAVE → row → SBUNKI）由库自己走；这里只喂假读数。
+    // ★ 样例入口自带 `bootToTitle`（TITLE 门）⇒ 驱动方式与 `start-on-trigger-chain` 相同。
     const int row_y = driveToSbunki(f);
     if (row_y < 0) return;
     LIFT_CHECK_EQ_I64(row_y, 507);  // 槽 7（样例就是 `loadSave(7, { expect: ["FIELD.BIN"] })`）
@@ -761,9 +780,23 @@ void caseLoadSaveOnLoaded() {
     LIFT_CHECK(tmp.make("lift-plugin-onloaded"));
     if (tmp.path.empty()) return;
     std::error_code ec;
-    fs::copy_file(fs::path(libPath("save.js")), tmp.path / "save.js",
-                  fs::copy_options::overwrite_existing, ec);
+    // ★ 2026-11-21：`save.js` 现在 import 同目录的兄弟模块（`script-positions.js` / `boot-to-title.js` /
+    //   `chains.js`）⇒ 只复制 save.js 会让探针在 module 解析期就失败。复制**整份 lib**（只复制 .js），
+    //   仍然是"run 私有临时目录"，⛔ 不往真库里塞夹具。
+    const fs::path lib_dir = fs::path(LIFT_PLUGIN_LIB_DIR);
+    std::size_t copied_lib = 0;
+    for (fs::directory_iterator it(lib_dir, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        std::error_code one;
+        if (!it->is_regular_file(one) || one) continue;
+        if (it->path().extension() != ".js") continue;
+        std::error_code copy_ec_one;
+        fs::copy_file(it->path(), tmp.path / it->path().filename(),
+                      fs::copy_options::overwrite_existing, copy_ec_one);
+        if (!copy_ec_one) ++copied_lib;
+        else ec = copy_ec_one;
+    }
     LIFT_CHECK(!ec);
+    LIFT_CHECK(copied_lib > 0);
     LIFT_CHECK(writeHostFile(tmp.path / "no-expect.js", kNoExpectProbe));
     LIFT_CHECK(writeHostFile(tmp.path / "bad-expect.js", kBadExpectProbe));
     struct ExpectProbe {
