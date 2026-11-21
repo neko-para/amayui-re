@@ -110,6 +110,7 @@ void PointerCore::pressDue(WindowManager& wm, const PointerPoint& pt) {
         r.press_samples = wm.inputSampleCount();              // 读数（⛔ 不是闸门）
         r.press_key_reads = pt.key_level_reads;               // ★ 闸门 ① 的起点
         r.press_ms = now;                                     // ★ 兜底 ② 的起点
+        r.press_frames = pt.frames;                           // ★ 闸门 ②' 的起点
         r.press_reads = pt.read_index;
         r.owner = a.owner;  // ★ C1c：owner 从"臂上"原样带到"已按下"（releaseOwner 两侧都要认）
         // ★ S9：down 已被叠层吞掉 ⇒ **不调 `input::mouseButton(down)`**（guest 一条消息都没有），
@@ -132,7 +133,7 @@ void PointerCore::releaseDue(WindowManager& wm, const PointerPoint& pt) {
     for (std::size_t i = 0; i < pending_.size();) {
         if (writes_this_point_ != 0) return;  // 本读点的写动作已用完 ⇒ 其余等下一个读点
         const PendingRelease& r = pending_[i];
-        // ★ 闸门 ①（**唯一**判据）：按下之后至少跨过 `kKeyLevelReadsBeforeRelease` 个 **KeyLevel**
+        // ★ 闸门 ①（**电平腿**）：按下之后至少跨过 `kKeyLevelReadsBeforeRelease` 个 **KeyLevel**
         //   读点 —— 也就是 guest 的 `GetAsyncKeyState` **真的读到过**那个按下电平。
         //   ⛔ 不用 `inputSampleCount()`（它把 `GetCursorPos` 也算样本 ⇒ 位置读点能满足它、
         //   按键一次都没被读到 —— 2026-11-19 的失效根因）。
@@ -141,13 +142,22 @@ void PointerCore::releaseDue(WindowManager& wm, const PointerPoint& pt) {
         // ② 墙钟兜底：这个屏根本不读按键 ⇒ 按下之后 kReleaseFallbackMs 到期仍然抬起（⛔ 不永久按住）。
         const std::uint64_t now = pt.now_ms;
         const bool wallclock = now >= r.press_ms && now - r.press_ms >= kReleaseFallbackMs;
-        if (!key_seen && !wallclock) {
+        // ②' ★ **回调边界**（只有供给帧计数的驱动才判；见 `kCallbackFramesBeforeRelease`）：
+        //   按下之后必须**跨过下一个完整 guest 回调**。★ 它与 ①/② **并联**而不是二选一：
+        //   2026-11-21 实测失败臂 `reason=keylevel`、press→release 只跨 6 个读点（含 2 个 KeyLevel 读点）
+        //   —— 那 6 个读点全在**同一个回调**里 ⇒ 闸门 ① 满足了，回调体的状态机却一次也没看到按下电平。
+        //   ⇒ ①/② 任一成立之后仍要过这一条；只有没供给帧线的驱动（插件 executor / 纯夹具）才跳过。
+        const bool callback_ok = !pt.callback_boundary ||
+                                 (pt.frames >= r.press_frames + kCallbackFramesBeforeRelease);
+        if (!callback_ok || (!key_seen && !wallclock)) {
             ++i;
             continue;
         }
         // ★ trace（opt-in）：抬起走的是哪条腿 = "guest 到底有没有机会看到按下"的唯一读数
         //   （D 的判据面：`reason=wallclock` + `key_reads==press_key_reads` ⇒ 兜底先于任何一次电平读）。
-        if (trace_ != nullptr) trace_(trace_ctx_, r, key_seen, wallclock, wm.inputSampleCount(), pt.point);
+        if (trace_ != nullptr) {
+            trace_(trace_ctx_, r, key_seen, wallclock, wm.inputSampleCount(), pt.frames, pt.point);
+        }
         emitRelease(wm, r);
         pending_.erase(pending_.begin() + static_cast<std::ptrdiff_t>(i));
         --releases_pending_;
@@ -217,9 +227,10 @@ std::size_t PointerCore::releaseOwner(WindowManager& wm, std::uint32_t owner) {
         const PendingRelease& r = pending_[i];
         // trace：owner 级释放**没有**闸门（两条腿都不成立，是"被强制抬起"）。
         // `point` 给 `Count`：调用点不在读点上下文里（`releaseOwner` 是 Run 的生命周期事件）。
+        // `frames` 给 0：这里没有本读点的帧读数（不是闸门，只是 trace 读数）。
         if (trace_ != nullptr) {
             trace_(trace_ctx_, r, /*key_seen=*/false, /*wallclock=*/false, wm.inputSampleCount(),
-                   InputPoint::Count);
+                   /*frames=*/0, InputPoint::Count);
         }
         emitRelease(wm, r);
         pending_.erase(pending_.begin() + static_cast<std::ptrdiff_t>(i));

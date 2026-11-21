@@ -67,7 +67,8 @@ void IntentExecutor::atPoint(WindowManager& wm, InputPoint point) {
     if (!polling && queue_.depth() == 0 && pending_.empty() && armed_.empty()) return;
 
     const std::uint64_t now = nowMs();
-    const PointerPoint pt{point, now, deliverCalls(InputPoint::KeyLevel), cursor_done, read_points_, 0};
+    const PointerPoint pt{point, now, deliverCalls(InputPoint::KeyLevel), cursor_done, read_points_, 0,
+                          /*frames=*/0, /*callback_boundary=*/false};
 
     // ---- ③ 采样 → poll（合同 §4.2 445：采样后、releaseDue 前；0 或 1 个事件）----
     if (polling) {

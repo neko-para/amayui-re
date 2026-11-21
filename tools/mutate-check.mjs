@@ -4789,6 +4789,27 @@ const MUTATIONS = [
       '`inject/click-two-phase`（位置读点再多也不许抬起）当场红',
   },
 
+  // ── 注入闸门 ②'：抬起必须**跨过一个完整 guest 回调**（2026-11-21；守卫 = `tests/input_inject_visible.cpp`）──
+  //   ★ 代表"按下与抬起落在同一个 guest 回调里"这一类**静默**失效：闸门① 的 2 个 KeyLevel 读点
+  //     可以全在同一个回调里满足（实测失败臂 press→release 只跨 6 个读点、frames 244→244），
+  //     回调体的状态机一次也没看到按下电平 ⇒ 单发 `click … right` 4/5 成。
+  //   ★ 判据不变的红/绿：把 `callback_ok` 改成恒 true ⇒ `inject/click-crosses-callback` 在
+  //     "同一个回调里把墙钟推过 kReleaseFallbackMs 仍不许抬起"那一拍当场红（实测 12 failures）。
+  {
+    file: 'apps/emulator-lift/src/runtime/pointer_core.cpp',
+    from: '        const bool callback_ok = !pt.callback_boundary ||\n' +
+          '                                 (pt.frames >= r.press_frames + kCallbackFramesBeforeRelease);',
+    to: '        const bool callback_ok = true;  // 变异：抬起不再要求跨过 guest 回调',
+    guard: 'ctest:input-inject-visible',
+    ctest: 'input-inject-visible',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-input-inject-visible',
+    what:
+      'click-crosses-callback：抬起不再要求跨过 guest 回调（`callback_ok` 恒 true）⇒ ' +
+      'input-inject-visible 的 `inject/click-crosses-callback`（同一回调里墙钟过 500 ms 仍不许抬起 / ' +
+      '下一个回调的按键读点必须仍读到按下）当场红',
+  },
+
   // ── UI 命中顺序（切片 2 后半；守卫 = `tests/ui_hit.cpp`）──
   //   ★ 代表"点到被压住的那个按钮"这一类**静默**错误：画面照画、两个按钮都在、点击也不报错，
   //     只是命中了**先画**的那一个（HUD 里后画的面板 / 按钮压在先画的上面，视觉与行为不一致）。

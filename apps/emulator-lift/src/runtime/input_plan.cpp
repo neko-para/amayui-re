@@ -196,7 +196,9 @@ void InputPlan::atPoint(WindowManager& wm, InputPoint point) {
                           deliverCalls(InputPoint::KeyLevel),
                           cursor_reads_done_,
                           read_points_,
-                          0};
+                          0,
+                          presenting(),
+                          callback_boundary_};
     // ① 到期的**抬起**先落地（同一次读点内、读之前）。
     releaseDue(wm, pt);
     // ② ★ 再把到期的 `armed_` **按下**（阶段 ②；闸门 ③ 见 `pressDue`）。
@@ -523,17 +525,19 @@ void InputPlan::traceStepConsumed(const Step& s, std::uint64_t samples_now, Inpu
 }
 
 void InputPlan::traceRelease(const PendingRelease& r, bool key_seen, bool wallclock, std::uint64_t samples_now,
-                             InputPoint point) {
+                             std::uint64_t frames_now, InputPoint point) {
     if (trace_out_ == nullptr) return;
     // 两条腿都成立时 `reason` 写 `keylevel+wallclock`（读数要能看出"是电平读点先到还是兜底先到"）。
     const char* reason =
         key_seen && wallclock ? "keylevel+wallclock" : (key_seen ? "keylevel" : "wallclock");
     // ★ `samples=` / `press_samples=` 是 `WindowManager::inputSampleCount()` 的读数（**不是闸门**）：
     //   `samples == press_samples` ⇒ 按下之后连**位置**读点都没有；真正回答"按键被看见没有"的是
-    //   `key_reads=` / `press_key_reads=`（唯一来源 = `InputPlan::deliverCalls(KeyLevel)`）。
+    //   `key_reads=` / `press_key_reads=`（唯一来源 = `InputPlan::deliverCalls(KeyLevel)`）与
+    //   `frames=` / `press_frames=`（唯一来源 = `presenting()`；供给回调边界时这条也是闸门）。
     std::fprintf(trace_out_,
                  "plan:%s:%d release kind=click button=%s reason=%s samples=%llu press_samples=%llu "
-                 "key_reads=%llu press_key_reads=%llu reads=%llu press_reads=%llu at=%s\n",
+                 "key_reads=%llu press_key_reads=%llu reads=%llu press_reads=%llu frames=%llu "
+                 "press_frames=%llu at=%s\n",
                  recipe_.origin().empty() ? "(control)" : recipe_.origin().c_str(), r.line,
                  mouseButtonToken(r.button), reason,
                  static_cast<unsigned long long>(samples_now),
@@ -541,15 +545,17 @@ void InputPlan::traceRelease(const PendingRelease& r, bool key_seen, bool wallcl
                  static_cast<unsigned long long>(deliverCalls(InputPoint::KeyLevel)),
                  static_cast<unsigned long long>(r.press_key_reads),
                  static_cast<unsigned long long>(read_points_),
-                 static_cast<unsigned long long>(r.press_reads), inputPointName(point));
+                 static_cast<unsigned long long>(r.press_reads),
+                 static_cast<unsigned long long>(frames_now),
+                 static_cast<unsigned long long>(r.press_frames), inputPointName(point));
     std::fflush(trace_out_);
 }
 
 void InputPlan::releaseTraceHook(void* ctx, const PendingRelease& r, bool key_seen, bool wallclock,
-                                 std::uint64_t samples_now, InputPoint point) {
+                                 std::uint64_t samples_now, std::uint64_t frames_now, InputPoint point) {
     // `PointerCore::releaseDue` 的抬起钩子：`plan:<文件>:<行> reason=…` 的文本属于配方口径 ⇒
     //   留在本类（core 只把读数交出来）。`ctx` 恒 = 本对象（见 `setTrace`）。
-    static_cast<InputPlan*>(ctx)->traceRelease(r, key_seen, wallclock, samples_now, point);
+    static_cast<InputPlan*>(ctx)->traceRelease(r, key_seen, wallclock, samples_now, frames_now, point);
 }
 
 void InputPlan::printFaultSummary(std::FILE* out) const {
