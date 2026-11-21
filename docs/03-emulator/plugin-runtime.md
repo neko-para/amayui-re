@@ -461,6 +461,8 @@ public:
 - **owner**：每个 armed trigger 带 owner；Run 结束/卸载 ⇒ `releaseOwner` 清该 owner 的 armed + hold。
 - **回调内顺序**：JS 决定 Edit/EngineRead 调用顺序（宿主逐个同步执行）；Input 只入队；返回新集合。
 - **budget**：每次 start/onTrigger deadline + op limit；超限 ⇒ 清 armed + fail(owner)。
+  ★ 2 ms **只罩用户 JS 本体**（模块装载 / ctx 构造 / TriggerSet 收集 / 宿主调度不计）；宿主段另有
+  10×（20 ms）安全网，reason 带 `(host)`（见 §4.5 D5 与 4.x「预算」）。
 - **可观测性**：`RunStatus.armedNames`/`armed`、`trigger:<name>` trace、`RunEvent.name`；
   name 是**插件侧状态名**，不是 guest 数据，不参与 Edit/EngineRead。
 
@@ -924,18 +926,24 @@ cd apps/emulator-lift && ./out/emulator-lift-aot --exe ../../corpus/assets/age/A
 - **按操作类**：`ctx.input.click/move/down/up` → IntentQueue（串行）；`ctx.edit.global.set` → EditSink（立即）；
   `ctx.read.*` → EngineRead（只读/无暂停）；`sample/screenshot` 不暴露（emu-ctl 组合）；
   ⛔ 没有 `input::*`/`writeGlobal`/`wm.*` 宿主函数（不是“插件只读”，而是操作类/唯一路径）。
-- **预算**：每次 callback deadline **2 ms** + op limit **100k**（`runtime/budget.h:19-21`，D5）；超限 ⇒
-  fail + 摘 trigger。★ 读数（2026-11-20 / macOS arm64 / 手工 headless **5 跑 2 次**）：`start` 与
-  `onTrigger`（`load:sbunki`）都会偶发超 2 ms —— `calls=1 run=failed reason=start: callback budget exceeded`
-  与 `calls=5 run=failed name=load:sbunki reason=onTrigger: callback budget exceeded: load:sbunki`。⇒ 严格判据的 e2e
-  （`plugin/load-save-e2e`）可能因此偶发红；跟踪单 `REQ-01M7VVDV69MJXRHNDGR50H7VHC`。⛔ 不把预算放宽当修法。
-  ★ 读数（2026-11-21 / win32 / `ctest -R plugin-headless`）：拆分"启动到 TITLE"之后，e2e 红点变成
+- **预算**：每次 callback deadline **2 ms** + op limit **100k**（`runtime/budget.h:27-32`，D5）；超限 ⇒
+  fail + 摘 trigger。★ **2 ms 只罩用户 JS 本体**（2026-11-21 口径收窄，用户裁决 D5 可改）：
+  deadline 起点 = 组完 ctx / 事件对象、**即将调用插件函数之前**（`script_quickjs.cpp` 的 `call()`）
+  ⇒ **模块装载 / ctx 与事件对象构造 / 返回值→TriggerSet 收集 / 宿主调度都不计**。
+  宿主段另有**安全网** = 10×（2 ms ⇒ **20 ms**）：防"宿主被卡死 ⇒ guest 被拖住"，超了照样 fail，
+  但 reason 必须可区分：
+  - `onTrigger: callback budget exceeded: <name>`（用户 JS 本体超；`start: …` 同形无 name）
+  - `onTrigger: callback budget exceeded (host): <name>`（宿主安全网；`start: … (host)` 同形）
+  ★ 读数（2026-11-20 / macOS arm64 / 手工 headless 5 跑 2 次；**旧口径** —— 那时 2 ms 罩整个宿主段）：
+  `start` 与 `onTrigger`（`load:sbunki`）都会偶发超 2 ms —— `calls=1 run=failed reason=start: callback budget exceeded`
+  与 `calls=5 run=failed name=load:sbunki reason=onTrigger: callback budget exceeded: load:sbunki`。
+  ★ 读数（2026-11-21 / win32 / `ctest -R plugin-headless`；**旧口径**）：拆分"启动到 TITLE"之后，红点变成
   `onTrigger: callback budget exceeded: load:confirm2`（**10 跑 1 绿**）；同一台机器上 HEAD 的 `save.js`
   走同一 ctest **3/3 绿**、且手工 headless 新旧两版都绿（`calls=7 run=done`）。⚠ 未定论的是**为什么**：
   e2e 成功时不回显子进程日志 ⇒ 无法确认 HEAD 那 3 次是否也走了第二道确认分支。两种可能都成立：
   ① 新链让 e2e 每次都走第二道确认（分支选择变了）；② 那条回调在旧链上本来也在 2 ms 边缘。
-  ⇒ 判据不变：**这条 e2e 受 2 ms 预算支配**，⛔ 不据此删日志 / 放宽预算；要收口就另开一单
-  （让 e2e 显式打印分支 `calls`，或把"到达 FIELD"的判据拆成两段）。
+  ⇒ **2026-11-21 起按新口径收口**：2 ms 不再罩 ctx 构造 / 收集 / 装载（缺陷单
+  `REQ-01M7VVDV69MJXRHNDGR50H7VHC`）；⛔ 不据此删日志，也⛔ 不把 deadline 放宽当修法。
 - **owner**：模块实例 = owner；`done/fail`/卸载 ⇒ `releaseOwner`；不残留按住。
 - **trace**：`ctx.log` + runner `trigger:`/`intent:`；不要求 plan DSL 图元。
 
@@ -1557,6 +1565,15 @@ callback 链的可读性（进 `ctx.log`/设计文档）。
 - **推荐**：callback 异常/超预算 ⇒ fail + 摘 trigger + `releaseOwner` + 一行 stderr，run 继续；
   trigger 超时 ⇒ timeout 事件（D2）；QJS 预算 2 ms / 100k ops（读数后再调）；
   C3 driver 把 fail 映射成 `exit 5`（历史兼容）；control 只报 receipt，不杀 run。
+- ★ **口径（2026-11-21 用户裁决：D5 可改）—— 2 ms 的窗口 = 用户 JS 本体**：
+  deadline 起点 = 组完 ctx / 事件对象、**即将调用插件函数之前**；**模块装载 / ctx 构造 / TriggerSet
+  收集 / 宿主调度不计**（`script_quickjs.cpp::call()` 的 `js_start_ns` 起算，中断回调靠它打断跑飞的 JS）。
+  **宿主段另有安全网** = `budget.deadline_ns × 10`（2 ms ⇒ 20 ms，`budget.h` 的 `kHostSafetyNetFactor`）：
+  超了照样 fail，但 reason 带 `(host)`；用户 JS 超限的 reason 不带。
+  ⇒ 两种形态：`<start|onTrigger>: callback budget exceeded[: <name>]` vs
+  `<start|onTrigger>: callback budget exceeded (host)[: <name>]`（拼法只有 `callbackBudgetReason()` 一处）。
+  缺陷单 `REQ-01M7VVDV69MJXRHNDGR50H7VHC` 按此收口；⛔ 不要把两边的 reason 混成同一条（守卫与 e2e
+  靠它判"哪一侧超的"）。
 - **影响面**：错误可恢复 vs 终止；owner 释放必须可靠；预算过小会误杀合法回调。
 - **若答“fail 即停”**：control 会话会被脚本错误杀掉；不建议（overlay 的 `disableOverlay` 是另一档）。
 

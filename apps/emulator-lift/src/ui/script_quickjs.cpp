@@ -200,6 +200,9 @@ struct Impl {
     std::uint64_t ops = 0;  // 已执行的"中断步长"数（× 10000 = 近似字节码条数）
     bool overran = false;   // 本帧是否被预算打断（`render` false 的原因之一）
 
+    // ---- 回调耗时诊断（REQ-01M7VVDV69MJXRHNDGR50H7VHC 待查 #3；⛔ 默认不读、不进 --help）----
+    std::uint64_t module_load_ns = 0;  // 模块装载（编译 + resolve + 求值 + drain）；**在预算起点之前**
+
     ~Impl() { shutdown(); }
 
     // 幂等：释放持有的 JS 值 → 释放 context → 释放 runtime。
@@ -241,6 +244,15 @@ struct Impl {
         trigger_class = 0;
     }
 };
+
+// ---------------------------------------------------------------------------------------
+// 回调耗时诊断（`REQ-01M7VVDV69MJXRHNDGR50H7VHC` 待查 #3）
+//
+// ★ 本文件只**量**并填 `callbackDiag()`；**输出**在 `plugin_host.cpp` 的 `runCallback`
+//   —— 那里量的 `host_ns` 是宿主段窗口，判据用的 `js_ns` 是本文件切出来的**用户 JS 本体**。
+// ★ 预算起点在 `call()` 的 `js_start_ns`（JS_Call 之前）；`inner_ns` 仍从进入 `call()` 量
+//   （build + js + collect），它只是读数、⛔ 不是预算窗。
+// ---------------------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------------------
 // 中断回调：每 ~10000 条字节码一次。返非 0 ⇒ 引擎自己抛 "interrupted" 并置不可 catch
@@ -3292,8 +3304,12 @@ private:
         }
         // ★ 预算两件：deadline（宿主单调钟；0 = 不限）+ op_limit（中断步长）；**每次回调重置**。
         //   ⛔ 不要沿用 render 的 20 ms / 1e6（那会让一次跑飞的回调卡住 guest 20 ms；合同 §4.5 D5）。
-        impl.deadline_ns =
-            budget.deadline_ns != 0 ? steadyNowNs() + budget.deadline_ns : 0;
+        // ★ 诊断起点 = 进入 `call()`（只给读数；⛔ 不是预算起点）。
+        const std::uint64_t start_ns = steadyNowNs();
+        // ★ **预算不在入口起算**（2026-11-21 收窄，用户裁决 D5 可改）：2 ms 只罩**用户 JS 本体**
+        //   ⇒ 起点挪到 `JS_Call` 之前（见下面的 `js_start_ns`）。组 ctx / 事件对象期间没有 JS 在跑
+        //   ⇒ 这里先把 deadline 清 0（⛔ 不要让上一次回调的 deadline 在这段里误触）。
+        impl.deadline_ns = 0;
         impl.op_limit = budget.op_limit;
         impl.ops = 0;
         impl.overran = false;
@@ -3301,6 +3317,13 @@ private:
 
         bool ok = true;
         std::string local_err;
+        // 诊断子阶段（与 `elapsed_us` 同一对钟切出来的三段；⛔ 不影响预算）：
+        //   build = 组 ctx / 事件对象（每次回调新建 ~20 个 JS 对象 + C 函数）
+        //   js    = 用户 JS 本体（含 `ctx.log` 的 stderr 写）
+        //   collect = 返回值 → TriggerSet（造 shared_ptr / 查对象表）
+        std::uint64_t build_ns = 0;
+        std::uint64_t js_ns = 0;
+        std::uint64_t collect_ns = 0;
         try {
             Value ctx_obj = Value::undefined(impl.ctx);
             Value ev_obj = Value::undefined(impl.ctx);
@@ -3322,21 +3345,45 @@ private:
                     local_err = impl.origin + ": 组事件对象失败";
                 }
             }
+            const std::uint64_t built_ns = steadyNowNs();
+            build_ns = built_ns >= start_ns ? built_ns - start_ns : 0;
             if (ok) {
                 JSValueConst argv[2] = {ctx_obj.raw(), ev_obj.raw()};
                 const int argc = is_start ? 1 : 2;
+                const std::uint64_t js_start_ns = steadyNowNs();
+                // ★ **预算起点 = 用户 JS 本体起点**（组 ctx / 事件对象之后、`JS_Call` 之前）。
+                //   中断回调靠这个 deadline 打断跑飞的 JS；模块装载 / ctx 构造 / 收集 / 宿主调度
+                //   **都不在** 2 ms 里（2026-11-21 收窄）。`op_limit` 同理只数用户 JS 的步长。
+                impl.deadline_ns = budget.deadline_ns != 0 ? js_start_ns + budget.deadline_ns : 0;
                 Value ret(impl.ctx, JS_Call(impl.ctx, fn.raw(), JS_UNDEFINED, argc, argv));
+                const std::uint64_t js_end_ns = steadyNowNs();
+                js_ns = js_end_ns >= js_start_ns ? js_end_ns - js_start_ns : 0;
                 if (ret.isException()) {
                     qjs::takeException(impl.ctx, impl.origin, &local_err);
                     ok = false;
                 } else {
+                    const std::uint64_t collect_start_ns = steadyNowNs();
                     ok = collectTriggers(impl, ret.raw(), out, &local_err);
+                    const std::uint64_t collect_end_ns = steadyNowNs();
+                    collect_ns = collect_end_ns >= collect_start_ns ? collect_end_ns - collect_start_ns : 0;
                 }
             }
         } catch (...) {
             ok = false;
             local_err = impl.origin + ": 宿主异常（C++ exception at script boundary）";
         }
+        // ★ 终点与起点同一对钟；范围 = 组 ctx / 事件对象 + JS_Call + collectTriggers。
+        //   ⚠ 这**不是**预算窗（预算窗只有 `js_ns` 那一段）—— 它只给 `gap_us` 与 `overran` 归因用。
+        const std::uint64_t end_ns = steadyNowNs();
+        const std::uint64_t elapsed_ns = end_ns >= start_ns ? end_ns - start_ns : 0;
+        // ⛔ 只填读数；输出（含"超预算无论开关都打"那条）在 `plugin_host.cpp` 的 `runCallback`。
+        lift::plugin::CallbackDiag& diag = lift::plugin::callbackDiag();
+        diag.inner_ns = elapsed_ns;
+        diag.build_ns = build_ns;
+        diag.js_ns = js_ns;
+        diag.collect_ns = collect_ns;
+        diag.module_load_ns = impl.module_load_ns;
+        diag.inner_overran = impl.overran;
         impl.call_host = nullptr;
         if (!ok) {
             if (impl.overran) {
@@ -3383,6 +3430,9 @@ std::unique_ptr<PluginScript> makeQuickJsPlugin(const std::string& source, const
     impl->module_sources[origin] = source;
     JS_SetModuleLoaderFunc(impl->rt, moduleNormalize, moduleLoad, impl.get());
 
+    // ★ 诊断（`module_load_us`）：装载 = 编译 + resolve + 求值 + drain。它**在** `call()` 的预算起点
+    //   **之前**完成 ⇒ 2 ms 不含装载；这个读数用来证明（而不是声称）这一点。
+    const std::uint64_t module_load_start_ns = steadyNowNs();
     Value module_value(ctx, JS_Eval(ctx, source.c_str(), source.size(), origin.c_str(),
                                     JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY));
     if (module_value.isException()) {
@@ -3420,6 +3470,7 @@ std::unique_ptr<PluginScript> makeQuickJsPlugin(const std::string& source, const
         }
         return nullptr;
     }
+    impl->module_load_ns = steadyNowNs() - module_load_start_ns;  // 诊断：见上面的起点注
 
     // ---- default 导出 ----
     Value ns(ctx, JS_GetModuleNamespace(ctx, module));

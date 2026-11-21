@@ -198,8 +198,13 @@ bool TriggerRunner::begin(TriggerHandler& handler, Context& ctx, std::string* er
     const std::uint64_t start_ns = nowNs();
     TriggerHandler::TriggerSet next = handler.start(ctx, err);
     const std::uint64_t end_ns = nowNs();
-    if (budgetExceeded(budget_, start_ns, end_ns)) {
-        return failRun("start: callback budget exceeded", std::string(), err);
+    // ★ 2026-11-21 收窄（用户裁决 D5 可改）：**2 ms 只罩用户 JS 本体**，判据在 handler 侧
+    //   （`PluginHost` 用 `CallbackDiag::js_ns`）。本函数量的 `start → end` 是**整个宿主段**
+    //   （组 ctx / 收 TriggerSet / 调度都在内）⇒ 这里只留**宿主安全网** = 预算 × 10（2 ms ⇒ 20 ms）：
+    //   宿主段被卡死时照样响亮失败，但 reason 带 `(host)`（⛔ 不与用户 JS 超限混淆）。
+    const Budget host_net{hostSafetyNetNs(budget_), budget_.op_limit};
+    if (budgetExceeded(host_net, start_ns, end_ns)) {
+        return failRun(callbackBudgetReason("start", std::string(), /*host=*/true), std::string(), err);
     }
     return install(std::move(next), nowMs(), err);
 }
@@ -212,8 +217,10 @@ bool TriggerRunner::invokeOnTrigger(Context& ctx, const TriggerEvent& ev, std::u
     const std::uint64_t start_ns = nowNs();
     TriggerHandler::TriggerSet next = handler_->onTrigger(ctx, ev, err);
     const std::uint64_t end_ns = nowNs();
-    if (budgetExceeded(budget_, start_ns, end_ns)) {
-        return failRun("onTrigger: callback budget exceeded: " + ev.name, ev.name, err);
+    // ★ 同 `begin`：2 ms 判据在 handler 侧（用户 JS 本体）；这里只留 10× 的宿主安全网。
+    const Budget host_net{hostSafetyNetNs(budget_), budget_.op_limit};
+    if (budgetExceeded(host_net, start_ns, end_ns)) {
+        return failRun(callbackBudgetReason("onTrigger", ev.name, /*host=*/true), ev.name, err);
     }
     return install(std::move(next), now_ms, err);
 }

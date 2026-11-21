@@ -513,22 +513,26 @@ void caseNamedSet() {
         LIFT_CHECK(f.runner.done());
     }
 
-    // (e) budget：紧预算 ⇒ fail 且 lastError 写清；放宽（缺省 2 ms）⇒ 同一条回调能跑。
+    // (e) budget：**2 ms 只罩用户 JS 本体**（判据在 handler 侧）⇒ runner 只留**宿主安全网**
+    //     （预算 × 10）。紧预算 + 烧过 10× ⇒ fail 且 lastError 写清 `(host)`；放宽（缺省 2 ms）⇒ 能跑。
     {
         Fixture f;
         const Trigger s = f.factory.afterScript("S", "SCENE1", TriggerMode::Once);
-        f.handler.replies = {replyBurning({s}, 10)};  // start 里烧 10 ns
+        // ★ 烧 60 ns vs 紧预算 5 ns：安全网 = 5 × 10 = 50 ns ⇒ 60 越过（10 ns 就**不该**再红了）。
+        f.handler.replies = {replyBurning({s}, 60)};
         Budget tight;
         tight.deadline_ns = 5;
         f.runner.setBudget(tight);
         LIFT_CHECK(!f.begin());
         LIFT_CHECK(f.runner.failed());
         LIFT_CHECK(contains(f.runner.lastError(), "budget"));
+        // ★ 宿主段越线 ⇒ reason 必须带 `(host)`（与用户 JS 超限可区分）。
+        LIFT_CHECK(contains(f.runner.lastError(), "(host)"));
         LIFT_CHECK(contains(f.err, "budget"));
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.runner.armedCount()), 0);
     }
     {
-        Fixture f;  // 缺省预算（2 ms）⇒ 同样的 10 ns 不算超 ⇒ 能跑
+        Fixture f;  // 缺省预算（2 ms）⇒ 安全网 20 ms；10 ns 当然不算超 ⇒ 能跑
         const Trigger s = f.factory.afterScript("S", "SCENE1", TriggerMode::Once);
         f.handler.replies = {replyBurning({s}, 10), replyDone()};
         LIFT_CHECK(f.begin());
@@ -537,10 +541,10 @@ void caseNamedSet() {
         LIFT_CHECK(f.pump(Rd().script("SCENE1")) == Result::Fired);
     }
     {
-        // onTrigger 超预算同样 ⇒ fail（点名那个 trigger）
+        // onTrigger 越过宿主安全网同样 ⇒ fail（点名那个 trigger、reason 带 `(host)`）
         Fixture f;
         const Trigger s = f.factory.afterScript("S", "SCENE1", TriggerMode::Once);
-        f.handler.replies = {replyWith({s}), replyBurning(TriggerSet{}, 10)};
+        f.handler.replies = {replyWith({s}), replyBurning(TriggerSet{}, 60)};
         Budget tight;
         tight.deadline_ns = 5;
         f.runner.setBudget(tight);
@@ -549,6 +553,7 @@ void caseNamedSet() {
         LIFT_CHECK(f.runner.failed());
         LIFT_CHECK(f.runner.failName() == "S");
         LIFT_CHECK(contains(f.runner.lastError(), "budget"));
+        LIFT_CHECK(contains(f.runner.lastError(), "(host)"));
     }
 }
 

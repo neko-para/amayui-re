@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>  // std::getenv（诊断开关；⛔ 不是 CLI 旋钮、不进 --help）
 #include <string>
 #include <utility>
 
@@ -48,6 +49,77 @@ std::string paramsText(const std::map<std::string, std::string>& params) {
         out += kv.second;
     }
     return out;
+}
+
+// =====================================================================================
+// 回调耗时诊断（REQ-01M7VVDV69MJXRHNDGR50H7VHC 待查 #3）
+//
+// ★ 默认**零输出**、⛔ 不进 `--help`：只有 `LIFT_PLUGIN_CALLBACK_ELAPSED` 存在时才逐回调打一行。
+//   唯一例外 = **超预算那条无论开关都打**（失败本来就该有读数；否则只剩一句 reason）。
+// ★ 起点 = `runCallback` 入口 → `host_ns` = **宿主段窗口**（不是 2 ms 判据；判据见下面的 `js_ns`）。
+//   内层读数由 `script_quickjs.cpp` 填进同一个槽；`js_ns` 才是"2 ms 用在哪"。
+// =====================================================================================
+bool callbackElapsedDiagOn() {
+    static const bool on = std::getenv("LIFT_PLUGIN_CALLBACK_ELAPSED") != nullptr;
+    return on;
+}
+
+// 回调名 → 调用序号（诊断行的 `calls=`；单线程 guest 循环 ⇒ 一个文件级表就够）。
+std::map<std::string, std::uint64_t>& callbackCalls() {
+    static std::map<std::string, std::uint64_t> calls;
+    return calls;
+}
+
+// 名字进 stderr 前把控制字符 / 空格换成 `_`：一行一条是读数的**形状**（否则无法配对）。
+std::string diagName(const char* raw) {
+    std::string out = raw != nullptr ? raw : "";
+    if (out.empty()) out = "?";
+    for (char& c : out) {
+        if (static_cast<unsigned char>(c) < 0x20 || c == ' ') c = '_';
+    }
+    return out;
+}
+
+// `over` 的来路必须可分辨（三类）：
+//   `deadline` / `ops` = QJS 中断回调真的打断过（`inner_overran`）；
+//   `js`   = JS 本体跑完、但 `js_ns >= 2 ms`（没被打断的那种边界）；
+//   `host` = **宿主段**（ctx 构造 / 收集 / 调度）越过 10×（20 ms）安全网 —— 时间花在插件代码之外。
+// ★ 2026-11-21 收窄后 `over` **不再**等于"2 ms 判据失败"：2 ms 只看 `js_ns`（见 `runCallback`）。
+void emitCallbackDiag(const lift::plugin::CallbackDiag& d, const char* raw_name, bool ok,
+                      const lift::plugin::Budget& budget) {
+    const bool js_late = budget.deadline_ns != 0 && d.js_ns >= budget.deadline_ns;
+    const bool host_late =
+        budget.deadline_ns != 0 && d.host_ns >= lift::plugin::hostSafetyNetNs(budget);
+    const bool over = d.inner_overran || js_late || host_late;
+    if (!over && !callbackElapsedDiagOn()) return;
+    const std::string name = diagName(raw_name);
+    const std::uint64_t calls = ++callbackCalls()[name];
+    const std::uint64_t gap = d.host_ns > d.inner_ns ? d.host_ns - d.inner_ns : 0;
+    const unsigned long long elapsed_us = static_cast<unsigned long long>(d.host_ns / 1000u);
+    const unsigned long long build_us = static_cast<unsigned long long>(d.build_ns / 1000u);
+    const unsigned long long js_us = static_cast<unsigned long long>(d.js_ns / 1000u);
+    const unsigned long long collect_us = static_cast<unsigned long long>(d.collect_ns / 1000u);
+    const unsigned long long gap_us = static_cast<unsigned long long>(gap / 1000u);
+    const unsigned long long load_us = static_cast<unsigned long long>(d.module_load_ns / 1000u);
+    if (!over) {
+        std::fprintf(stderr,
+                     "callback name=%s elapsed_us=%llu ok=%d calls=%llu build_us=%llu js_us=%llu"
+                     " collect_us=%llu gap_us=%llu module_load_us=%llu\n",
+                     name.c_str(), elapsed_us, ok ? 1 : 0, static_cast<unsigned long long>(calls),
+                     build_us, js_us, collect_us, gap_us, load_us);
+    } else {
+        const char* how = d.inner_overran
+                              ? (budget.deadline_ns != 0 && d.js_ns >= budget.deadline_ns ? "deadline"
+                                                                                           : "ops")
+                              : (js_late ? "js" : "host");
+        std::fprintf(stderr,
+                     "callback name=%s elapsed_us=%llu ok=%d calls=%llu build_us=%llu js_us=%llu"
+                     " collect_us=%llu gap_us=%llu module_load_us=%llu budget_us=%llu over=%s\n",
+                     name.c_str(), elapsed_us, ok ? 1 : 0, static_cast<unsigned long long>(calls),
+                     build_us, js_us, collect_us, gap_us, load_us,
+                     static_cast<unsigned long long>(budget.deadline_ns / 1000u), how);
+    }
+    std::fflush(stderr);
 }
 
 }  // namespace
@@ -206,14 +278,42 @@ PluginHost::TriggerSet PluginHost::runCallback(Context& ctx, bool is_start, cons
         return {};
     }
     ++callbacks_;
+    // ★ 诊断：起点 = 本函数入口（`host_ns` = 宿主段窗口；⛔ 不是 2 ms 判据）。
+    const std::uint64_t host_start_ns = pluginNowNs();
+    lift::plugin::CallbackDiag& diag = lift::plugin::callbackDiag();
+    diag = lift::plugin::CallbackDiag{};  // 复位：内层读数由 `script_quickjs.cpp` 的 `call()` 填
     ctx_ = &ctx;
     in_callback_ = true;
     TriggerSet out;
     std::string call_err;
     // ★ 预算 = **runner 的那一份**（`Budget{}` 缺省 2 ms / 100k；⛔ 不在这里再写一次数字）。
     const Budget budget = runner_.budget();
-    const bool ok = is_start ? script_->start(*this, budget, &out, &call_err)
-                             : script_->onTrigger(*this, *ev, budget, &out, &call_err);
+    bool ok = is_start ? script_->start(*this, budget, &out, &call_err)
+                       : script_->onTrigger(*this, *ev, budget, &out, &call_err);
+    const std::uint64_t host_end_ns = pluginNowNs();
+    diag.host_ns = host_end_ns >= host_start_ns ? host_end_ns - host_start_ns : 0;
+    // =================================================================================
+    // 判据（2026-11-21 收窄，用户裁决 D5 可改）：**2 ms 只罩用户 JS 本体**
+    //   · `js_ns` = 用户 JS 本体（QJS 侧从"即将调用插件函数"量到 JS 返回）；
+    //   · 模块装载（`call()` 之前）、ctx / 事件对象构造、返回值→TriggerSet 收集、宿主调度
+    //     **都不计** —— 这些是宿主替用户代码付的成本（缺陷单 REQ-01M7VVDV69MJXRHNDGR50H7VHC）。
+    //   · **宿主段另有安全网** = 10×（20 ms）：防"宿主被卡死 ⇒ guest 被拖住"。超了照样响亮失败，
+    //     但 reason 带 `(host)`（⛔ 不与用户 JS 超限混成同一条）。
+    //   · 用户 JS 真的跑飞时 QJS 中断回调会先打断（`inner_overran` ⇒ 脚本返回 false + 已中断文案）。
+    // =================================================================================
+    const bool js_late = budget.deadline_ns != 0 && diag.js_ns >= budget.deadline_ns;
+    const bool host_late =
+        budget.deadline_ns != 0 && diag.host_ns >= lift::plugin::hostSafetyNetNs(budget);
+    if (ok && (js_late || host_late)) {
+        ok = false;
+        // 两侧都可分辨：JS 本体越线 ⇒ 无后缀；只有宿主段越线 ⇒ `(host)`。
+        call_err = callbackBudgetReason(
+            is_start ? "start" : "onTrigger",
+            is_start ? std::string() : (ev != nullptr ? ev->name : std::string()),
+            /*host=*/host_late && !js_late);
+    }
+    emitCallbackDiag(diag, is_start ? "start" : (ev != nullptr ? ev->name.c_str() : "onTrigger"), ok,
+                     budget);
     in_callback_ = false;
     ctx_ = nullptr;
 

@@ -24,8 +24,9 @@
 //   ⛔ 不接 `VirtualClock` / `attachClock` / `pausedTotalMs()`（那是配方执行器的钟，**扣暂停**；
 //   这里的墙钟**不扣**，两者语义相反 —— 见合同 §4.2 440–441 与 D3）。
 //
-// ★ 预算：`start` / `onTrigger` 各包一次 `pluginNowNs()` 读数（`budget.h`）。超限 ⇒ 清 armed +
-//   fail（`lastError()` 写清是哪一次调用 + 哪个 trigger）。⛔ 不静默继续跑回调。
+// ★ 预算：**2 ms 只罩用户 JS 本体**（判据在 `PluginHost::runCallback`，靠 `CallbackDiag::js_ns`）。
+//   本类量的 `start → end` 是整个宿主段 ⇒ 只留**宿主安全网** = 预算 × 10（2 ms ⇒ 20 ms）：
+//   超了清 armed + fail（`lastError()` 写清 `… (host)` + 哪个 trigger）。⛔ 不静默继续跑回调。
 #pragma once
 
 #include <cstddef>
@@ -104,7 +105,7 @@ private:
     bool install(TriggerHandler::TriggerSet next, std::uint64_t now_ms, std::string* err);
     // 统一 fail 收尾：清 armed（⛔ 不保留旧集合 —— 保留会让"同一拍继续触发"）+ 写 lastError。
     bool failRun(const std::string& message, const std::string& name, std::string* err);
-    // 调一次 `handler.onTrigger` 并按预算判超限。
+    // 调一次 `handler.onTrigger` 并按**宿主安全网**（预算 × 10）判超限。
     bool invokeOnTrigger(Context& ctx, const TriggerEvent& ev, std::uint64_t now_ms, std::string* err);
 
     // ★ `armed_` 与 `armed_meta_` **同序同长**（唯一不变量；只在 install / releaseOwner 里一起改）。

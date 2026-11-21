@@ -7,6 +7,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <string>
 
 namespace lift::plugin {
 
@@ -20,6 +21,30 @@ bool budgetExceeded(const Budget& budget, std::uint64_t start_ns, std::uint64_t 
     if (budget.deadline_ns == 0) return false;  // 0 = 不限墙钟
     if (now_ns < start_ns) return false;        // 钟回退 ⇒ 不是"跑飞"
     return now_ns - start_ns >= budget.deadline_ns;
+}
+
+std::uint64_t hostSafetyNetNs(const Budget& budget) {
+    if (budget.deadline_ns == 0) return 0;  // 不限 ⇒ 安全网也不限（⛔ 不凭空造一个上限）
+    constexpr std::uint64_t kMax = ~std::uint64_t{0};
+    if (budget.deadline_ns > kMax / kHostSafetyNetFactor) return kMax;  // 饱和：不溢出成一个更小的数
+    return budget.deadline_ns * kHostSafetyNetFactor;
+}
+
+std::string callbackBudgetReason(const char* call, const std::string& name, bool host) {
+    std::string out = call != nullptr && call[0] != '\0' ? call : "callback";
+    out += ": callback budget exceeded";
+    if (host) out += " (host)";
+    if (!name.empty()) {
+        out += ": ";
+        out += name;
+    }
+    return out;
+}
+
+CallbackDiag& callbackDiag() {
+    // ★ 进程级单槽（单线程 guest 循环）；⛔ 不参与判据，见头注。
+    static CallbackDiag diag;
+    return diag;
 }
 
 }  // namespace lift::plugin
