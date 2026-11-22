@@ -16,6 +16,7 @@
 #include "runtime/decode_cache.h"
 #include "runtime/exec.h"
 #include "runtime/host_services.h"
+#include "runtime/rep_bulk.h"
 #include "runtime/shims.h"
 #include "runtime/x86.h"
 #include "runtime/x87_layout.h"
@@ -125,6 +126,32 @@ extern "C" void lift_note_write(void* cpu, std::uint32_t ea, std::uint32_t n) {
     //   `cpu->eip` = 当前块 EA（lifted 代码不逐条更新 eip）⇒ 打出来就是 `lift_cc_<块EA>`。
     if (lift::watchOn()) lift::watchGuestWrite(static_cast<lift::X86*>(cpu)->eip, ea, n);
     lift::noteGuestWrite(static_cast<lift::X86*>(cpu)->cache, ea, n);
+}
+
+// ★ `rep movs*` / `rep stos*` 的整段快路径（AOT 臂）：判 + 执行 + 计数 = `lift::repBulkTry`。
+//   ⛔ 这里**不许**出现第二套闸门（`CrossBoundary` / `Uncommitted` / 方向×重叠 全在 `repBulkPlan`）；
+//   本函数只做三件搬运之外的事：拼一个 `Insn`（闸门要读 `rep` / `op`）、别名判据、回读。
+//   ★ `Insn` 只填闸门真读的四个字段（`ea` / `rep` / `op` / `opsz`）—— 其余字段是解码产物，
+//     快路径一个都不读（`repBulkPlan` 只读 `in.rep` / `in.op`）。填 `rep = 0xF3` 与 `0xF2` 等价，见闸门 ⓪。
+extern "C" bool lift_rep_bulk(void* cpu_ptr, void* st, std::uint32_t ea, std::uint32_t kind,
+                              std::uint32_t size) {
+    if (cpu_ptr == nullptr || st == nullptr) {
+        // 与 `lift_one` 同口径：唯一调用方是生成物，空指针 = 生成器 / 夹具的编程错误 ⇒ 响亮退出。
+        std::fprintf(stderr, "[lift_rep_bulk] 调用方传了空指针（cpu=%p st=%p ea=%08X）\n", cpu_ptr, st, ea);
+        std::fflush(stderr);
+        std::_Exit(4);
+    }
+    lift::X86& cpu = *static_cast<lift::X86*>(cpu_ptr);
+    const bool alias = lift::regsAliasCpu(st, cpu);
+    if (!alias) lift::liftRegsToCpu(*static_cast<const LiftRegs*>(st), cpu);
+    lift::Insn in;
+    in.ea = ea;
+    in.opsz = static_cast<std::uint8_t>(size);
+    in.rep = 0xF3;  // `F3` / `F2` 对 movs/stos 是同一条循环（`exec_string.cpp` 的闸门 ⓪）
+    in.op = (kind == kLiftRepStos) ? lift::Op::Stos : lift::Op::Movs;
+    const bool done = lift::repBulkTry(cpu, in, static_cast<std::uint8_t>(size));
+    if (!alias) lift::liftCpuToRegs(cpu, *static_cast<LiftRegs*>(st));
+    return done;
 }
 
 // ---------------------------------------------------------------------------------------

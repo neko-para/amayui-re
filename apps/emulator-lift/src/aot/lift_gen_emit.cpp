@@ -2909,14 +2909,22 @@ void FnEmit::emitDivIdiv(const Insn& in) {
 }
 
 // 串操作：逐行照 `exec_string.cpp:219-304`（`execString`）。
-//   · `movs`/`stos`：**真实 IR 循环**（DF 正向 / 反向各一份 ⇒ 正向那份能被
-//     LLVM 的 `LoopIdiomRecognize` 认成 memcpy / memset）；
+//   · `movs`/`stos`（**带 `rep`**）：先在**解码那一层**认出"这是 `rep movs*` / `rep stos*`"
+//     （`in.rep != 0 && (in.op == Movs || in.op == Stos)`；`F3 A4/A5/AA/AB` 解码后就是这两个 op）
+//     ⇒ 发**一次** `@lift_rep_bulk(ptr %cpu, ptr %st, i32 <EA>, i32 <kind>, i32 <size>)`：
+//     `true` = 闸门放行、整段已搬完（跳过逐元素 IR）；`false` = 闸门拒绝 ⇒ 落回下面那对
+//     **真实 IR 循环**（DF 正向 / 反向各一份 ⇒ 正向那份本来指望 `LoopIdiomRecognize` 认成 memcpy）。
+//     ★ 判据不在发射器里：闸门**唯一真源** = `runtime/rep_bulk.h` 的 `repBulkPlan`，执行 = 同一个
+//       `repBulkExecute`（`exec_string.cpp`）⇒ 解释器臂与 AOT 臂共用一条判定 + 一份实现 + 一份计数。
+//       ⛔ 这里不许出现第二条"跨 4 GiB / committed / 方向×重叠"的判断（那是第二套闸门）。
 //   · `scas`/`cmps`：单循环 + 运行期步长（每元素写 EFLAGS，且 `repe/repne` 会提前结束）。
 //   ★ DF 的**唯一来源**是 `%st` 的 eflags 基字（`exec_string.cpp` 的 `advance` 读 `cpu.df()`）。
-//   ★ SMC 记账：`movs`/`stos` 在**循环之前**发一次 `lift_note_write(lo, n)`（与解释器自己的
+//   ★ SMC 记账：`movs`/`stos` 的**逐元素臂**在循环之前发一次 `lift_note_write(lo, n)`（与解释器自己的
 //     `rep_bulk` 快路径同一口径 —— 它也是一次 `noteGuestWrite(lo, n)`，而
 //     `BlockCache::noteWrite` 内部按页循环 ⇒ 页集合与逐元素调用相同；`exec_string.cpp:81-138`）。
 //     ★ 这一处与 `storeMemAt` 走**同一道门**：`LIFT_AOT_NOTE_WRITE` 缺省 OFF ⇒ 一条都不发。
+//     ★ 快路径那支不发 `lift_note_write`：`repBulkExecute` 自己在**写之前**做一次
+//       `noteGuestWrite(lo, n)`（同一段、同一页集合）。AOT 臂 `cpu.cache == nullptr` ⇒ 两条都是 no-op。
 //   ★ 非 rep 的单元素形态走 `writeElem` 的**逐元素**钩子（`exec_string.cpp:41-49`）。
 void FnEmit::emitString(const Insn& in) {
     ++stats_->string_sites;
@@ -2996,6 +3004,23 @@ void FnEmit::emitString(const Insn& in) {
     const std::string dfb = bin("icmp ne", "i32", andv(loadEflags(), kDf), "0");
 
     if (in.op == Op::Movs || in.op == Op::Stos) {
+        // ===================== ① 闸门快路径探针 =====================
+        // 判据全在 runtime：`@lift_rep_bulk` → `lift::repBulkTry` → `repBulkPlan` + `repBulkExecute`。
+        // 发射器只发**一次**调用，并把"放行了吗"当分支条件；拒绝 ⇒ 走下面那段逐元素 IR。
+        const std::string handled = tmp();
+        const std::string slow = "st_slow_" + id, done = "st_done_" + id;
+        syncBeforeHostCall();  // ★ 宿主调用前：挂账 tick 结算 + 脏寄存器物化（`%st` 才是最新）
+        add(handled + " = call i1 @lift_rep_bulk(ptr %cpu, ptr %st, i32 " + i32c(in.ea) + ", i32 " +
+            (in.op == Op::Stos ? "1" : "0") + ", i32 " + std::to_string(size) + ")");
+        stats_->used_rep_bulk = true;
+        ++stats_->rep_bulk_sites;
+        add("br i1 " + handled + ", label %" + done + ", label %" + slow);
+        put(slow + ":\n");
+        // ★ 拒绝路径**重新读**寄存器：宿主调用可能改了 8 GPR（放行时 ECX/ESI/EDI 都变了）⇒ 缓存作废。
+        //   ⚠ `esi0`/`edi0`/`ecx0`/`n`/`dfb` 是**调用之前**算出来的 SSA 值 —— 它们在 `slow` 与 `done`
+        //     两个块里都支配（`done` 的写回要用），而拒绝路径不写 guest 状态（`rep_bulk.h` 的契约）。
+        invalidateRegs();
+        // ---- ② 逐元素臂（闸门拒绝时唯一的路；与改动前逐字节相同）----
         // SMC：整段一次（解释器 `rep_bulk` 快路径同一口径；见函数头注）
         const std::string dn = bin("sub", "i32", edi0, n);
         const std::string lo = select1(dfb, "i32", bin("add", "i32", dn, i32c(size)), edi0);
@@ -3063,6 +3088,12 @@ void FnEmit::emitString(const Insn& in) {
         if (in.op == Op::Movs)
             storeReg(6, select1(dfb, "i32", bin("sub", "i32", esi0, n), bin("add", "i32", esi0, n)));
         storeReg(7, select1(dfb, "i32", bin("sub", "i32", edi0, n), bin("add", "i32", edi0, n)));
+        // ★ 慢路径在**自己的块里**把写回落盘：`done` 是合并点，那里必须让缓存为空（快路径没有这些值）。
+        flushRegs();
+        add("br label %" + done);
+        // ===================== ③ 合并点（两条路都到这里；寄存器已在 `%st` 里）=====================
+        put(done + ":\n");
+        invalidateRegs();
         return;
     }
 
@@ -5884,6 +5915,12 @@ std::string emitPrologue(const GenClosureStats& closure, const GenEmitStats* sta
     //   `willreturn` 对 `lift_one` 也不成立（`execInsn` 会 `_Exit` / 报停机）。
     if (stats->used_note_write)
         text += "declare void @lift_note_write(ptr, i32, i32) argmemonly nounwind willreturn\n";
+    // ★ 2026-11-22：`rep movs*` / `rep stos*` 的整段快路径（闸门 = `runtime/rep_bulk.h`）。
+    //   返回 `i1`：`true` = 闸门放行、整段已搬完（生成代码跳过逐元素 IR）；`false` = 拒绝 ⇒ 落回循环。
+    //   ⚠ 声明**无属性**（⛔ `argmemonly` / `readnone` / `nounwind`）：它经由 `cpu->mem` 读写 guest 内存
+    //   （"参数里**存的**指针"那一层），与 `lift_one` / `lift_x87_sem` 同一条理由；它还会推进
+    //   ECX/ESI/EDI 并把 `rep_bulk_hits/declines` 记进 `cpu`。给属性 = 允许 LLVM 重排/删掉访存。
+    if (stats->used_rep_bulk) text += "declare i1 @lift_rep_bulk(ptr, ptr, i32, i32, i32)\n";
     if (stats->used_tick) text += "declare void @lift_tick(ptr, i32) argmemonly nounwind willreturn\n";
     if (stats->used_lift_one) text += "declare i1 @lift_one(ptr, ptr, i32)\n";
     // ★ 2026-11-15（本轮：`lift_one` 调用点 → 0）：停机原语。**不加属性**（它写 `%cpu` 的

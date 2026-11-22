@@ -21,6 +21,15 @@
 //   而块尾的 `jae` 会把它**融合**进分支（S3-c 活性分析 ⇒ CF 不进 `%st`）⇒ 可观测的语义差是
 //   **下一条 EA**（`OpsCase::compare_next_ea`），⛔ 不是 flags 字。
 //   停机面：`int`（`Int`）· `xlat`（`Op::Other`）
+// ★ 2026-11-22 追加：`rep movs*` / `rep stos*` 的**闸门快路径**（AOT 发 `@lift_rep_bulk`）。
+//   这五个用例的对照臂是**逐元素解释器臂**（`OpsCase::rep_slow_arm ⇒ X86::rep_bulk = false`），
+//   并且在 **lifted 臂**上断言 `rep_bulk_hits` / `rep_bulk_declines` 的增量：
+//     · 放行的类（前向 / 反向 / `stosd`）必须 `hits == 1` 且内存 + 寄存器逐位相同；
+//     · `ReverseOverlap`（DF=0 且 dst_lo > src_lo）必须 `declines == 1` 且结果仍与逐元素臂相同；
+//     · `ECX == 0` 必须 `hits == declines == 0`（`NotApplicable`）且一个字节都不动。
+//   ⛔ 只比"结果一样"不够：快路径从没被走到也能让结果一样（那是本单最想防的假绿）。
+//   闸门本身的四类（跨 4 GiB / safe-mode committed / 方向×重叠 / `F2`）由 `tests/rep_bulk.cpp`
+//   在解释器臂上逐条钉住 —— 两臂共用 `repBulkTry` ⇒ 那些判据对 AOT 也成立。
 //   ⚠ 未覆盖（如实登记）：
 //     · `imul` 的 **1 操作数**与 **3 操作数**形态：本根集里挑不到已知形态的站点
 //       （`.ll` 的注释只给助记符，不给操作数形态）；两者的语义差异在 `emitImul` 里按
@@ -79,6 +88,15 @@ struct OpsCase {
     // 那是另一层契约）。`bt` 这类"只写一位标志、而这位又被块尾分支融合"的站点靠它才可观测：
     // 位取值错 ⇒ 走另一条边 ⇒ 两臂返回的 EA 不同。
     bool compare_next_ea = false;
+    // ★ 2026-11-22（`rep movs*` / `rep stos*` 的 AOT 快路径）：
+    //   `df` = 起始 DF（`eflags |= 0x400`）；`rep_slow_arm` = **把解释器臂的快路径关掉**
+    //   （`X86::rep_bulk = false`）⇒ 解释器臂退化成 **逐元素臂**，也就是 AOT 快路径的对照物。
+    //   `hits` / `declines` = **lifted 臂**上 `rep_bulk_hits` / `rep_bulk_declines` 的预期增量
+    //   —— ⛔ 少了这两条，"快路径从没被走到"也会让逐位差分全绿（那是本单最想防的假绿）。
+    bool df = false;
+    bool rep_slow_arm = false;
+    int hits = 0;
+    int declines = 0;
 };
 
 // ★ 与 `tests/ir/ops_roots.txt` 的行序**一一对应**（数量不等 ⇒ 硬错）。
@@ -109,8 +127,9 @@ constexpr OpsCase kCases[] = {
     {.ea = 0x004122FD, .op = "idiv", .eax = 0, .ecx = 0xFFFFFFFFu, .edx = 0x80000000u,
      .ptr_fill = false, .fill = 0xFF, .stops = true},
     // ---- 串操作 ----
-    {.ea = 0x0040B227, .op = "rep movsd", .ecx = 4},
-    {.ea = 0x0040C8E7, .op = "rep stosd", .ecx = 4},
+    // ★ 2026-11-22：原来这里的 `rep movsd@0040B227` / `rep stosd@0040C8E7` 两条**被下面的
+    //   "闸门快路径"用例吸收**（同一对站点；新的用例把源/目标挪进被比较的窗口，并断言
+    //   `rep_bulk_hits` / `rep_bulk_declines`）⇒ 不再单列，否则"同一站点两条用例"会重复付夹具成本。
     // [夹具跑不动 ⇒ 跳过] {.ea = 0x0042A96D, .op = "movsb", .ecx = 4},
     // [夹具跑不动 ⇒ 跳过] {.ea = 0x0042A985, .op = "cmpsb", .ecx = 4},
     {.ea = 0x0043AC37, .op = "cpuid"},
@@ -162,6 +181,27 @@ constexpr OpsCase kCases[] = {
      .esp = kProbeAt + 0x100u, .compare_next_ea = true},
     {.ea = 0x004F7CA8, .op = "bt", .eax = 0x6Eu, .ptr_fill = false, .fill = 0x3E,
      .esp = kProbeAt + 0x100u, .compare_next_ea = true},
+    // ---- ★ 2026-11-22：`rep movs*` / `rep stos*` 的**闸门快路径**（AOT 臂发 `@lift_rep_bulk`）----
+    //   判据（缺一条就不算证明）：
+    //     ① lifted 臂（快路径）+ **逐元素**解释器臂（`rep_slow_arm ⇒ rep_bulk = false`）逐位相同；
+    //     ② lifted 臂上真的记到了 `rep_bulk_hits`（否则"快路径从没被走到"也能让 ① 全绿）；
+    //     ③ 闸门拦下的类必须记到 `rep_bulk_declines`，且结果仍与逐元素臂相同（= 退回那条路真的在走）。
+    //   ★ 源 / 目标都挪进被比较的 4 KiB 窗口（`kProbeAt..+0x1000`）⇒ 搬出来的字节**真的被比**
+    //     （`snap()` 只比窗口；缺省 `.esi/.edi = kBase / kBase+0x1000` 正好在窗口外）。
+    {.ea = 0x0040B227, .op = "rep movsd", .ecx = 4, .esi = kProbeAt + 0x800u, .edi = kProbeAt + 0x100u,
+     .rep_slow_arm = true, .hits = 1},
+    // DF=1（反向）：写落后于读 ⇒ 允许整段搬；方向只影响寄存器收尾（`repBulkExecute` 的 ③）
+    {.ea = 0x0040B227, .op = "rep movsd", .ecx = 8, .esi = kProbeAt + 0x100u,
+     .edi = kProbeAt + 0x800u, .df = true, .rep_slow_arm = true, .hits = 1},
+    // 重叠且"写跑在读前面"（DF=0 且 `dst_lo > src_lo`）⇒ `ReverseOverlap` ⇒ **必须**退回逐元素臂
+    {.ea = 0x0040B227, .op = "rep movsd", .ecx = 16, .esi = kProbeAt + 0x100u, .edi = kProbeAt + 0x102u,
+     .rep_slow_arm = true, .declines = 1},
+    // `ECX == 0` 的零次：一个字节都不许碰，且**不许**记 hits/declines（闸门 ① 的 `NotApplicable`）
+    {.ea = 0x0040B227, .op = "rep movsd", .ecx = 0, .esi = kProbeAt + 0x800u, .edi = kProbeAt + 0x100u,
+     .rep_slow_arm = true},
+    // `rep stosd`：写入的字节在图样 / 计数两边都要对上（`fillPatternBytes` 的 2/4 字节倍增路径）
+    {.ea = 0x0040C8E7, .op = "rep stosd", .ecx = 4, .edi = kProbeAt + 0x100u, .rep_slow_arm = true,
+     .hits = 1},
 };
 constexpr std::size_t kCaseCount = sizeof(kCases) / sizeof(kCases[0]);
 
@@ -212,6 +252,7 @@ void setState(Arm& a, const OpsCase& c) {
     cpu.fs_base = kBase + 0x2000u;
     cpu.gs_base = kBase + 0x2000u;
     cpu.eflags = 0x202u;
+    if (c.df) cpu.eflags |= 0x400u;  // EFLAGS.DF（`exec_string.cpp` 的 `advance` 读它）
     cpu.running = true;
     // ---- 受控数据区 ----
     std::vector<std::uint8_t> buf(kScratchBytes, c.fill);
@@ -347,8 +388,15 @@ int main(int argc, char** argv) {
             g_current_case = "(none)";
             continue;
         }
+        // ★ rep 快路径的用例：解释器臂**关掉**快路径 ⇒ 它是逐元素臂（AOT 快路径的对照物）。
+        ia.m.cpu().rep_bulk = !c.rep_slow_arm;
         setState(li, c);
         setState(ia, c);
+        // ★ 计数器复位（`setState` 不碰它们）：两条臂各自的增量都要单独看清楚。
+        li.m.cpu().rep_bulk_hits = 0;
+        li.m.cpu().rep_bulk_declines = 0;
+        ia.m.cpu().rep_bulk_hits = 0;
+        ia.m.cpu().rep_bulk_declines = 0;
 
         // ---- ① lifted 臂 ----
         LiftRegs regs{};
@@ -368,6 +416,11 @@ int main(int argc, char** argv) {
         // ★ 生成代码把"下一条 guest EA"**当返回值**给出来（`%st` 里没有 eip）⇒ 出口 EA 取 `ea`。
         const std::uint32_t lifted_next_ea = ea;
         const std::uint64_t lifted_insns = li.m.cpu().insns - insns0;
+        // ★ ①②：AOT 臂上**必须能观测到**闸门真的做了决定（"结果一样但快路径从没被走到"也是假绿）。
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(li.m.cpu().rep_bulk_hits),
+                          static_cast<std::uint32_t>(c.hits));
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(li.m.cpu().rep_bulk_declines),
+                          static_cast<std::uint32_t>(c.declines));
 
         // ---- ② 解释器臂：同一份状态，跑**同样条数**（停机类跑 1 条）----
         const std::uint64_t interp0 = ia.m.cpu().insns;

@@ -216,6 +216,21 @@ RepBulkPlan repBulkPlan(const X86& cpu, const Insn& in, std::uint8_t size) {
     return plan;
 }
 
+// ---- 判 + 执行 + 计数（唯一入口；两臂共用，见 `runtime/rep_bulk.h`）----
+// ★ 这里的四行就是**全部**计数口径：放行 ⇒ `rep_bulk_hits`；本来够格被闸门拦下 ⇒ `rep_bulk_declines`
+//   （`NotApplicable` 的形态差异不算退回 —— 那是"不需要快路径"，不是"被拦住"）。
+//   ⛔ 两臂不要各写一份：解释器（`execString`）与 AOT（`lift_rep_bulk`）都调这一个。
+bool repBulkTry(X86& cpu, const Insn& in, std::uint8_t size) {
+    const RepBulkPlan bulk = repBulkPlan(cpu, in, size);
+    if (bulk.why == RepBulkWhy::Ok) {
+        ++cpu.rep_bulk_hits;
+        repBulkExecute(cpu, in, size, bulk);
+        return true;
+    }
+    if (bulk.why != RepBulkWhy::NotApplicable) ++cpu.rep_bulk_declines;
+    return false;
+}
+
 bool execString(X86& cpu, const Insn& in) {
     const std::uint8_t size = in.opsz ? in.opsz : 4;
     const std::uint32_t step = size;
@@ -281,14 +296,8 @@ bool execString(X86& cpu, const Insn& in) {
     // ★ REP 快路径（见文件头）：闸门全在 `repBulkPlan` 里；`Ok` 才一次搬完，否则照旧走逐元素臂。
     //   ⛔ 这里的顺序不许动：本分支在 `execInsn` 之后（override 已在块入口吃过流量），
     //   而快路径**失败就退回**下面的 `while`（不许有第三条路）。
-    const RepBulkPlan bulk = repBulkPlan(cpu, in, size);
-    if (bulk.why == RepBulkWhy::Ok) {
-        ++cpu.rep_bulk_hits;
-        repBulkExecute(cpu, in, size, bulk);
-        return true;
-    }
-    // 诊断计数：只有"本来够格、被某条闸门拦下"才算退回（`NotApplicable` 的形态差异不计）。
-    if (bulk.why != RepBulkWhy::NotApplicable) ++cpu.rep_bulk_declines;
+    //   ★ AOT 臂（`lift_rep_bulk`）调的是**同一个** `repBulkTry` ⇒ 计数与闸门口径只有一份。
+    if (repBulkTry(cpu, in, size)) return true;
 
     while (cpu.ecx() != 0) {
         once();

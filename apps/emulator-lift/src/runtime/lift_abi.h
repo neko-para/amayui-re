@@ -49,6 +49,24 @@ inline void* liftRegsView(X86& c) { return static_cast<void*>(&c.r[0]); }
 // SMC 失效（转 x86.h 的 noteGuestWrite；`cpu == nullptr` ⇒ no-op，与 cache==nullptr 同口径）
 extern "C" void lift_note_write(void* cpu, std::uint32_t ea, std::uint32_t n);
 
+// ★ `rep movs*` / `rep stos*` 的**整段快路径**（AOT 臂的入口；闸门 = `runtime/rep_bulk.h` 的
+//   `repBulkPlan`，**唯一真源**，这里一个字都不重写）。
+//   ① 生成代码在 `rep` 站点发**一次**调用，`kind ∈ {movs, stos}`、`size` = 元素宽度（1/2/4）；
+//   ② `true`  = 闸门放行 ⇒ ECX / ESI / EDI / guest 内存都已写好（EFLAGS 未动）⇒ **跳过逐元素 IR**；
+//      `false` = 闸门拒绝 ⇒ 生成代码照旧跑逐元素 IR（那条路与改动前逐字节相同）。
+//   ③ `st` 与 `lift_one` 同口径：AOT 臂 = `liftRegsView(cpu)`（别名 ⇒ 搬运跳过）；夹具 / feeder 是
+//      真 `LiftRegs` ⇒ 调用前后整块物化 / 回读（否则会在过期寄存器上判、再把结果丢掉）。
+//   ④ **不**改 `insns`（计数只由 `lift_tick` 负责；`rep` 在两条臂上都算**一条**，见 `lift_tick` 注）。
+//   ⑤ 声明**无属性**（⛔ `argmemonly` / `readnone`）：它经由 `cpu->mem` 读写 guest 内存（两层指针），
+//      与 `lift_one` / `lift_x87_sem` 同一条理由。
+//   ⚠ 拒绝路径不写 guest 状态（`rep_bulk.h` 的 `repBulkTry` 契约）⇒ 生成代码在合并点之后读到的是
+//      调用前的寄存器。但发射器仍选择"慢路径重新 `loadReg`"（见 `lift_gen_emit.cpp` 的 `emitString`）。
+extern "C" bool lift_rep_bulk(void* cpu, void* st, std::uint32_t ea, std::uint32_t kind,
+                              std::uint32_t size);
+// `kind` 的闭集合（⛔ 不要用 `Op` 的枚举值：那是 runtime 内部编号，改了就会静默对不上）。
+inline constexpr std::uint32_t kLiftRepMovs = 0;
+inline constexpr std::uint32_t kLiftRepStos = 1;
+
 // =====================================================================================
 // T1c 的三个宿主原语（父级裁决 D2 / D2b / D10-P2 / D11）
 // ★ 共同口径：`.ll` 里**没有任何解释器类型**，只有一次 C 调用；语义一行不写、只转发。

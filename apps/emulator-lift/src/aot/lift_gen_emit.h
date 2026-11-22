@@ -212,6 +212,11 @@ struct GenEmitStats {
     std::uint64_t packed_sites = 0;
     std::uint64_t sse_sites = 0;
     std::uint64_t string_sites = 0;
+    // ★ `rep movs*` / `rep stos*` 发**闸门快路径探针**（`@lift_rep_bulk`）的站点数。
+    //   `used_rep_bulk` 决定发不发 `declare`；逐元素 IR 仍在（闸门拒绝时唯一的那条路）。
+    //   ⚠ 这是"发过探针的站点数"，⛔ 不是"命中快路径的条数"（后者只有运行期 `rep_bulk_hits` 能说）。
+    std::uint64_t rep_bulk_sites = 0;
+    bool used_rep_bulk = false;
     std::uint64_t imul_sites = 0;
     std::uint64_t div_sites = 0;
     std::uint64_t rotate_sites = 0;

@@ -45,4 +45,13 @@ struct RepBulkPlan {
 // ★ 传进来的 `size` 必须是解码器归一化后的元素宽度（1 / 2 / 4，见 `decode.cpp`）。
 RepBulkPlan repBulkPlan(const X86& cpu, const Insn& in, std::uint8_t size);
 
+// ★ **判 + 执行 + 计数**的唯一入口（解释器的 `execString` 与 AOT 臂的 `lift_rep_bulk` 都走这里）。
+//   返回 `true`  = 闸门放行 ⇒ 整段已搬完：guest 内存、ECX / ESI / EDI 都写好，**EFLAGS 一位未动**；
+//   返回 `false` = 闸门拒绝（或形态不适用）⇒ 调用方**必须**退回逐元素臂。
+//   ★ 拒绝路径**不写任何 guest 状态**：`repBulkPlan` 是 const，唯一的副作用是 `rep_bulk_declines`。
+//     这一条是 AOT 发射器的形状前提之一（它在合并点之后才读到寄存器），所以写在这里而不是靠调用方自觉。
+//   ★ 为什么把"判 + 执行"合成一个函数而不是分别导出：两臂各调一次 `repBulkPlan` 再各判一次
+//     `why == Ok` ⇒ 计数口径迟早分叉（`rep_bulk_declines` 的"只算本来够格的"那条判据就散了）。
+bool repBulkTry(X86& cpu, const Insn& in, std::uint8_t size);
+
 }  // namespace lift
