@@ -163,35 +163,48 @@ arena `in_use=108595152 peak=108595152 surfaces=21 heap_blocks=6691` · `table m
 要求与解释器（`Machine`，即 `tests/*` 用的语义 oracle）臂**逐位相同**。
 有了这条再评估 —— 在那之前，patch 只留在 `.tmp/lift-opt/s7-relax.patch`，主树保持未放宽形态。
 
-## 6 待核：`leave` 的 esp 模型
+## 6. `leave` 的 esp 模型：查清了 —— 是三条偏差，且**没有**错编译
 
-现状：`Leave` 分支只做 `s->esp = s->ebp`（`lift_struct.cpp:208-217`），**少了 `pop ebp` 的 +4**。
-按 Intel 语义（`leave` ≡ `mov esp,ebp; pop ebp`）修正它是**收紧**，实测：
+读数日期 2026-11-22 / 主树 `E:\Projects\amayui-re`（HEAD `a6674dc`）/ 生成期口径同 §4；完整取证在
+`.tmp/leave-model/report.md`（gitignored：三趟 stderr、`structured` 清单、11 个风险单元的反汇编窗口）。
+**§4 里"这 63 个靠偏差才通过、真 esp 是入口+4"的推断被证伪**。
 
-| 读数 | 现状 | 按 Intel 修正 | Δ |
-|---|---:|---:|---:|
-| 自身通过 | 8,600 | 8,393 | **−207** |
-| 可结构化 | 5,343 | 5,280 | **−63** |
+1. **那 63 个单元在 `ret` 处的真 esp 是入口 +0**：把模型按 Intel 改对（三处一起补）重跑，它们
+   **63/63 仍然自证通过**（可结构化 5,343 → 5,335，掉的 8 个与这 63 不相交）。
+2. **偏差是三条，不是一条**：`transferEsp` 里 `push ebp` / `pop ebp` 也被"目的操作数是 EBP"分支
+   （`lift_struct.cpp:163-191` 的 `if (isEbp32)`）截走 —— 只把 `ebp` 置 `kUnknown`、**不动 esp**。
+   于是标准帧上 `push ebp` 漏的 −4 与 `leave` 漏的 +4 **成对抵消**（`mov esp,ebp; pop ebp` 尾声同理）。
+   机械核对：234/234 个含 `leave` 的单元，`leave` 命中的 `ebp` 都是"`push ebp` 紧接 `mov ebp,esp`"。
+3. **真正"靠偏差"的集合 = 11 个（8 个进 `structured`）**，形态全是 `… pop ebp; ret [imm16]` 的
+   **共享尾声块**（单元根在函数中间）。它们的 `ret` 处真 esp 确实是**入口+4**，但那 4 字节正是返回槽
+   （入口 esp 指"保存的 ebp"那一格）⇒ **弹对了**。4 个在 `closure.txt` 里是 `why: indirect-entry`、
+   2 个有跳表证据 ⇒ 不是死代码；但即使执行也对。
+4. **对当前 HEAD 没有潜伏错编译**，三重证据：
+   - **集合**：base 与 full 的可结构化差集只有 8 个，且它们**不是任何宿主 `call` 的靶子**
+     （宿主 `call` 站点 1,572 → 1,572，一个没变）；
+   - **产物**：full 模型生成的 8 份 `.ll` 与 base **逐字节只差 header 的两处计数器**（每份 4 字节；
+     总字节 132,744,647 相同）⇒ 发射物等价；
+   - **设计**：`emitRet` 在 structured / 非 structured 里发**同一条 IR**（`lift_gen_emit.cpp:1952-1967`），
+     弹出的永远是**真 guest 栈那一格**；`structured` 只影响**调用点**，而宿主 `call` 后**必带**
+     `emitCallReturnCheck`（`:1857-1879`）：`%r != resume` ⇒ `ret i32 %r` 上抛 ⇒ trampoline 按 `%r` 派发。
+     ⇒ 判据错了最多**多一次派发**，不会把错值当返回地址。
 
-⇒ 那 **~207** 个单元是靠这个偏差通过**自身判据**的；其中 **63** 个的可结构化身份直接来自它
-（另 144 个本来就被调用图传染挡着，最终判定不变；63 由 5,343−5,280 得出，报告只给 −63）。
-报告据此推断：这些单元在 `ret` 处的**真 esp 是入口 +4**。
+### 6.1 修法：三条一起补，⛔ 不要只补 +4
 
-**风险（尚未验证）**：若推断成立，那 63 个单元的结构化 `ret` 就是**错的**（不是慢，是错）：
-`ret` 弹的不是调用者压的那一格。⛔ 这**不是**已确认的缺陷 —— 偏差到底命中了谁、命中者的真 esp
-是多少，一条都还没核对过。
+| 模型 | 自身通过 | 可结构化 | 宿主 `call` 站点 | 8 份 `.ll` 总字节 |
+|---|---:|---:|---:|---:|
+| 现状（三条都漏） | 8,600 | 5,343 | 1,572 | 132,744,647 |
+| **只补 `leave` 的 +4** | 8,393 | **5,280（−63）** | **1,498（−74）** | 132,729,477 |
+| **三条一起补（Intel 正确）** | 8,589（−11） | 5,335（−8） | **1,572（0）** | **132,744,647（相同）** |
 
-**验证方向**（不必实现，两条都可行）：
+⇒ 只补 +4 是**坏改动**（63 个正确单元失格、少 74 个宿主 `call`、IR 少 15,170 B）；三条一起补是
+**中性改动**（−8 个单元、零发射差异），价值在**把证明做对**，不在提速。
 
-1. **差分**：为这批单元构造"结构化 vs 解释器（`Machine`）"的逐位对照。现有 `lift-s7-structured`
-   的夹具形态可以扩 —— 它已经是"`tests/ir/s7_roots.txt` 的固定根 → 生成 → 与 oracle 逐位比"，
-   把固定的一对（F, G）换成"按清单多对"即可覆盖这批根。
-2. **具名清单**：在 `lift-gen` 里对这批单元打一条具名清单（现状与修正两次生成的 `structured` 差集，
-   或 `[S7 downgrade]` 行里 `reason=动态返回` 新增的那批），再逐个核对 `ret` 前的 esp（静态读 + 与
-   解释器在 `ret` 处的 esp 比对）。
+### 6.2 不随本单收的两件事
 
-两条都先回答一个问题：**那 63 个单元的 `ret` 在 guest 上到底弹哪一格**。答"入口+4" ⇒ 结构化出口错；
-答"入口+0" ⇒ 偏差只是让判据绕了一圈、结论没错。
+1. **"单元根必须是函数入口"**：会把上面 11 个合法共享尾声判死，还牵动一大批 soft root
+   ⇒ 要**单独立项、单独读数**，⛔ 不要和 6.1 一起收。
+2. 其余四类降级（动态返回 / 可变长栈 / 写返回槽 / 表外 callee）的进一步放宽。
 
 ## 7 复现
 
@@ -217,9 +230,17 @@ out/emulator-lift-aot.exe --present window --present-hidden --skip-logo --audio 
 
 # ④ boundary ns/派发（窗口档，5 趟）
 pwsh -File ../../.tmp/lift-opt/measure.ps1 -Tag s7-1
+
+# ⑤ §6 的 esp 模型三趟（base / 只补 leave+4 / 三条一起补）—— 探针是**临时的**，收工要还原
+#    改动点：lift_struct.cpp 的 Leave 分支（esp = ebp → ebp+4）与 `if (isEbp32)` 两个分支
+#    （push ebp 要 esp −4、pop ebp 要 esp +4；现状两处都只把 ebp 置未知）。
+#    每趟只改 `[S7 criteria]` 与生成物，跑完 diff 两趟的 out/aot/lift_aot.part*.ll：
+cmake --build out --target emulator-lift-gen 2>&1 | Tee-Object ..\..\.tmp\leave-model\full.log
+#    判据：三处一起补 ⇒ 8 份 .ll 与 base **逐字节只差 header 两处计数器**（总字节相同）；
+#    只补 +4 ⇒ host-call 1,572→1,498、IR 少 15,170 B（⇒ 坏改动）。
 ```
 
 > ③ 的 flag 按本轮同一套口径写（日志自证 `frames : 30 … 本臂 --max-frames=30` 与 `present … window=hidden`）；
 > 二进制不回显 argv。④ 的 `measure.ps1` 采集的是 **boot→TITLE** 窗口，不是 FELLOW 切换帧
 > （`saves/` 多了 SAVE10 之后旧配方点空，报告 §0）。
-> `.tmp/lift-opt/**` 是本地实验记录（gitignored）：patch 与日志都**不是入库件**。
+> `.tmp/lift-opt/**` 与 `.tmp/leave-model/**` 是本地实验记录（gitignored）：patch、清单与日志都**不是入库件**。
