@@ -5,21 +5,26 @@
 //      也没有 `audio-pump:` 一行（档位 = off ⇒ `AudioEngine::enabled()` 为假 ⇒ 那两行不打）。
 //      红了 ⇒ `present_flags.h` 的 `kAotSoundNotice` 又会指着一行**不存在**的东西
 //      （洞 4：它曾写"读数：收口时 stdout 的 audio 一行"，而只给 `--sound` 时那一行不存在）。
-//   ② `--sound --audio virtual` ⇒ 有那一行，且 `muted=0`。★ `muted=` 是 `AudioEngine::dumpSummary`
-//      从 `mute_` 打出来的**引擎状态**，不是通知文本里的字面量。
-//   ③ 对照组 `--audio virtual`（**不给** `--sound`）⇒ 同一行 `muted=1`。
+//   ② `--sound --audio-dump <path>` ⇒ 有那一行，且 `muted=0`。★ `muted=` 是
+//      `AudioEngine::dumpSummary` 从**引擎状态**打出来的，不是通知文本里的字面量。
+//   ③ 对照组 `--audio-dump <path>`（**不给** `--sound`）⇒ 同一行 `muted=1`。
 //      ★ ②③ 合起来才是"`--sound` 真的接进静音门"的机械判据：删掉 `aot_main` 里
 //      `configureAudio(…, sound, …)` 的 `sound`（或 `AotHost::configureAudio` 里把它写死）
 //      ⇒ ② 变成 `muted=1` ⇒ **这条用例红**。
 //      洞 6：旧的 `cli-aot-flags`/`sound-accepted-with-once-notice` 只断言**自己打的那句文案**
 //      里含 `muted=0`（自证式断言）⇒ 接线坏了它照绿。本文件取代那条作为证据。
-//   ④ `--sound --audio-dump <path>` ⇒ 同一行 `muted=0` + **WAV 文件真的存在**：
+//   ④ `--sound --audio-dump <path>` ⇒ **WAV 文件真的存在**：
 //      `size >= 44`、头部两个长度字段与文件大小自洽（`RIFF size == size-8`、`data size == size-44`）。
 //      ★ 洞 5：说明文本说 dump 是"44 字节头（data=0）"——S3 之后它取决于这一跑**有没有真交付**，
 //        所以这里只断言**结构**（头自洽 + 至少 44 B）+ 把实测字节数打出来（读数，不作断言）。
 //      ★ 洞 7：`std::abort()` 路径跳过 `AudioEngine::end()` ⇒ 两个长度字段**不回填** ⇒
 //        那种 run 的 dump 不可信。本用例的前提是"正常收口"（见下面的 `stop      :` 断言）：
 //        abort 的 run 连摘要都没有，会先在①那条前提上红。
+//   ⑤ **`--audio sdl` 打不开设备 ⇒ 没有音频输出**（CLI 级）：用父进程注入
+//      `SDL_AUDIODRIVER=<不存在的驱动>` 让子进程的 `openSdl()` 必败 ⇒ 摘要仍是
+//      `mode=off device=none muted=1`（⛔ 不是 `fallback`、⛔ 不是一行都没有），且 `audio-pump:`
+//      的 `calls=0 fills=0`。
+//      ★ 判据只读引擎自己打的那一行；⛔ 不读说明文本。
 //
 // ★ 为什么必须**真 run**（而不是纯 `AudioEngine` 夹具）：`--sound` → `AotHost::configureAudio()`
 //   → `AudioEngine::configure(…, sound, …)` 这三段是**接线**，纯夹具只能钉住最后一段
@@ -31,6 +36,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -49,6 +55,15 @@ std::string readAllBytes(const fs::path& p) {
     std::ifstream in(p, std::ios::binary);
     if (!in) return {};
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+/** ★ 本进程的 `SDL_AUDIODRIVER` = <不存在的驱动> ⇒ 子进程的 `openSdl()` 必败（判"没有输出"）。 */
+void setSdlAudioDriver(const char* value) {
+#if defined(_WIN32)
+    _putenv_s("SDL_AUDIODRIVER", value);
+#else
+    ::setenv("SDL_AUDIODRIVER", value, 1);
+#endif
 }
 
 /** 第一行以 `prefix` 开头的行（没有 ⇒ 空串）。 */
@@ -77,8 +92,7 @@ std::string audioSummaryLine(const std::string& out) {
     return {};
 }
 
-std::uint32_t readLe32(const std::string& b, std::size_t off) {
-    if (b.size() < off + 4) return 0xFFFFFFFFu;
+std::uint32_t readLe32(const std::string& b, std::size_t off) {    if (b.size() < off + 4) return 0xFFFFFFFFu;
     return static_cast<std::uint32_t>(static_cast<unsigned char>(b[off])) |
            (static_cast<std::uint32_t>(static_cast<unsigned char>(b[off + 1])) << 8) |
            (static_cast<std::uint32_t>(static_cast<unsigned char>(b[off + 2])) << 16) |
@@ -117,16 +131,19 @@ int main(int argc, char** argv) {
         std::vector<std::string> extra;  // 追加在公共 argv 之后
         bool want_audio_line;
         int want_muted;  // 只在 want_audio_line 时有意义（0 / 1）
-        bool want_dump;
+        fs::path dump_path;      // 非空 ⇒ 这一跑应写出 WAV
+        bool force_no_device;    // 注入 SDL_AUDIODRIVER=<不存在> ⇒ openSdl 必败
     };
-    // ★ 四条 = 3 个档位 + 1 个对照组。`--audio-dump` 会把档位提升成 virtual（唯一规则在
-    //   `AudioEngine::configure`，`aot-audio-flags` 已钉），所以它不另给 `--audio`。
-    const fs::path dump_path = root / "wiring-dump.wav";
+    // ★ 四条 = 2 个 dump 臂（`--sound` / 不给 `--sound`）+ 1 个 sdl 无设备臂 + 1 个 off 对照。
+    //   `--audio-dump` **不是档位**（`--audio` 只有 off / sdl）：它只是加一条设备无关的交付路径，
+    //   摘要里档位仍写 `off`、`device=none`。`virtual` 档已于 2026-11-22 移除。
+    const fs::path dump_sound = root / "wiring-dump-sound.wav";
+    const fs::path dump_muted = root / "wiring-dump-muted.wav";
     const Run kRuns[] = {
-        {"sound-only", {"--sound"}, /*want_audio_line=*/false, 0, false},
-        {"sound-virtual", {"--sound", "--audio", "virtual"}, true, 0, false},
-        {"virtual-no-sound", {"--audio", "virtual"}, true, 1, false},
-        {"sound-dump", {"--sound", "--audio-dump", pathToUtf8(dump_path)}, true, 0, true},
+        {"sound-only", {"--sound"}, /*want_audio_line=*/false, 0, {}, false},
+        {"sound-dump", {"--sound", "--audio-dump", pathToUtf8(dump_sound)}, true, 0, dump_sound, false},
+        {"dump-no-sound", {"--audio-dump", pathToUtf8(dump_muted)}, true, 1, dump_muted, false},
+        {"sdl-no-device", {"--sound", "--audio", "sdl"}, true, 1, {}, true},
     };
 
     for (const Run& k : kRuns) {
@@ -141,7 +158,10 @@ int main(int argc, char** argv) {
         ChildOptions opts;
         opts.cwd = root;
         opts.timeout = std::chrono::milliseconds(60000);  // 原值：`--max-frames 5` 本机 1–2 s
+        // ★ 子进程继承父进程环境 ⇒ 在**这一次** runChild 前后改/复原（SDLaudio 的驱动选择）。
+        if (k.force_no_device) setSdlAudioDriver("lift-no-such-audio-driver");
         const ChildResult r = runChild(exe, args, opts);
+        if (k.force_no_device) setSdlAudioDriver("");
         LIFT_CHECK(r.started);
         if (!r.started) continue;
         LIFT_CHECK(!r.timed_out);
@@ -169,15 +189,30 @@ int main(int argc, char** argv) {
         }
         LIFT_CHECK(!audio.empty());
         if (audio.empty()) continue;
-        // ②③（洞 6）：`muted=` 是引擎状态（`AudioEngine::dumpSummary` 读 `mute_`）。
+        // ②③⑤（洞 6）：`muted=` 是引擎状态（`AudioEngine::dumpSummary`）。
         char want[32];
         std::snprintf(want, sizeof(want), "muted=%d ", k.want_muted);
         if (audio.find(want) == std::string::npos)
             lift_test::failf(__FILE__, __LINE__, "`%s` 里没有 `%s` ⇒ --sound 没有真的进静音门（全文：%s）",
                              k.name, want, audio.c_str());
-        if (k.want_dump) {
+        if (k.force_no_device) {
+            // ⑤：设备打不开 ⇒ **没有音频输出**，摘要如实写 mode=off / device=none（⛔ 不是 fallback）。
+            if (audio.find("mode=off") == std::string::npos)
+                lift_test::failf(__FILE__, __LINE__, "`%s` 该是 mode=off（设备打不开）⇒ 拿到的：%s", k.name,
+                                 audio.c_str());
+            if (audio.find("device=none") == std::string::npos)
+                lift_test::failf(__FILE__, __LINE__, "`%s` 该写 device=none（⛔ 不是 fallback）⇒ 拿到的：%s",
+                                 k.name, audio.c_str());
+            if (audio.find("fallback") != std::string::npos)
+                lift_test::failf(__FILE__, __LINE__,
+                                 "`%s` 不该再出现 `fallback`（那是「还有 D 泵在跑」的旧含义）", k.name);
+            if (pump.find("fills=0") == std::string::npos)
+                lift_test::failf(__FILE__, __LINE__, "`%s` 没有输出时 fills 必须是 0 ⇒ 拿到的：%s", k.name,
+                                 pump.c_str());
+        }
+        if (!k.dump_path.empty()) {
             // ④（洞 5/7）：WAV 在场 + 头自洽（正常收口由上面的 `stop      :` 保证）。
-            const std::string bytes = readAllBytes(dump_path);
+            const std::string bytes = readAllBytes(k.dump_path);
             const std::uint64_t size = bytes.size();
             // ★ 读数（不是断言）：实测字节数打在 ctest 日志里。
             std::printf("aot-audio-wiring: dump=%s bytes=%llu\n", k.name,

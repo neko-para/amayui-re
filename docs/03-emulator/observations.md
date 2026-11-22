@@ -340,6 +340,8 @@
   随共享负载漂"，**不是**"某一次数字更对"。⛔ 本条不是断言，也不据此判定本单效果（`waithist`/`token` 两栏三次都稳定）。
 
 ### OBS-20261112-03 · 第 3 层等待的时长读数：`fill_wait_ms` / `fill_wait_max_ms`（本机 sdl + virtual 两臂）
+> ⚠ 下面 ② 的 **`--audio virtual` 臂已于 2026-11-22 整档移除**（它没有 feeder 线程、走主线程 D 泵，
+> 会被误读成产品态音频）。**读数保留**（它们仍是当时的实测值）；复现命令已不可用，替代读法见 ②。
 - **口径**：**不是口径A** —— **macOS arm64 / Metal（MSL）/ RelWithDebInfo**（`cmake --preset macos-arm64`）·
   2026-11-12 · **工作树 = `9378da7` + 本单改动（未提交）**，两条臂都在该工作树上跑（构建于收口前；
   其后的收口只删了 `pump()` 里**不可达**的门与注释，音频路径未变）·
@@ -357,13 +359,17 @@
   fill_overlapped=5 fill_max_ms=125.09 fill_wait_ms=78.87 fill_wait_max_ms=78.87`（exit 0，`task done`）。
   ⇒ 两次**形状一致**（`fill_waits` / `fill_overlapped` / `fill_wait_timeouts` 相同），绝对值
   **28.49 vs 78.87 ms** 随**共享负载**漂（本机 12 核，两跑负载不同）—— ⛔ 不可横比，也不取平均。
-- **命令 ②（D 臂阴性对照：`--audio virtual` + 窗口 40 帧）**：
+- **命令 ②（D 臂阴性对照：`--audio virtual` + 窗口 40 帧）** —— ⚠ **原命令已不可用**（`virtual` 档
+  2026-11-22 移除；现在给 `--audio virtual` 会 exit 2）。等价的 D 臂读法 = 同一条命令加
+  `--audio-dump <tmp>.wav`（设备无关的 dump 路径；摘要写 `mode=off device=none`）：
   `./out/emulator-lift --appdata /tmp/req-audio/virt3 --game-dir ../../links/install --present window
   --present-hidden --raster gpu --native-overrides all --skip-logo --audio virtual --max-frames 40`
-  ⇒ exit 0、`detail: max-frames`。
-- **读数 ②**：`mode=virtual device=none fills=4 fill_waits=0 fill_wait_timeouts=0 fill_overlapped=0
+  ⇒ 原读数：exit 0、`detail: max-frames`。
+- **读数 ②（旧档读数，保留；口径 = `--audio virtual`）**：`mode=virtual device=none fills=4 fill_waits=0 fill_wait_timeouts=0 fill_overlapped=0
   fill_max_ms=113.80 fill_wait_ms=0.00 fill_wait_max_ms=0.00`。
   ⇒ 与"D 模式（`thread_mode_ == false`）没有 feeder 线程、`filling_obj_` 恒 0"一致。
+  ★ 该档移除后，等价的读法是 `--audio off --audio-dump <tmp>.wav`（`mode=off device=none`，
+  机制同一份 D 泵）；⛔ 不要把旧 `mode=virtual` 那行当"现在还能跑"的证据。
 - **边界读数（不当作阴性对照）**：同形状的 `--audio sdl` 40 帧臂（`--max-frames 40`）只跑了 boot
   的 3 刀、没有 Stop 落进 fill ⇒ `fill_waits=0`、两栏 `0.00`、`fill_max_ms=145.59`。⇒ 短跑读不到
   第 3 层的代价，读数要看跑到交互结束的那一臂。

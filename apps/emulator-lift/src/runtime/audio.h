@@ -193,16 +193,28 @@ public:
     // ★ `sound=false`（缺省）= 静音：设备 / 混音 / 喂料 / guest 的 DS 调用全部照跑，
     //   只在**最终交付点**（`generateTo` 里 `out` 生成之后、`pushMixed` 之前）把缓冲置 0。
     //   ⛔ 不是"不建设备 / 不起 feeder / 提前退出 / 改 guest SetVolume"。
+    // ★ `dump_path` 非空 = `--audio-dump`：它**不是档位**，只在 `mode==Off` 时把这一跑标记成
+    //   "设备无关的 dump 路径"（虚拟时钟 + 交付点写 WAV）。`--audio` 的值域只有 off / sdl。
     bool configure(AudioMode mode, const std::string& dump_path, bool sound, std::string* err);
 
     bool begin(std::string* err);  // 打开 SDL 设备 / dump 文件；幂等
     void end();                    // 关闭设备、回填 WAV 大小；幂等
-    bool enabled() const { return mode_ != AudioMode::Off; }
+    // ★ 这一跑要不要跑混音 / 泵（`mode_ != Off` 或 dump / 夹具的设备无关路径）。
+    //   ⚠ `--audio sdl` 打不开设备 ⇒ 这里是 **false**（没有输出 ⇒ 不跑混音），但
+    //   `audioRequested()` 仍是 true（摘要要如实写 `device=none`）。
+    bool enabled() const { return mode_ != AudioMode::Off || device_free_; }
+    // ★ 这一跑**要过**音频吗（摘要 / readout 的门）：`--audio off` 且没有 `--audio-dump` ⇒ false。
+    //   与 `enabled()` 分开的理由：设备打不开时"没有输出"不等于"没要音频" —— ⛔ 不许把失败
+    //   静默成"缺省档"（那样收口摘要里连 `device=none` 都看不到）。
+    bool audioRequested() const {
+        return configured_mode_ != AudioMode::Off || dump_requested_ || device_free_;
+    }
+    // ★ dump 路径 / 夹具钩子要求"没有设备也跑混音"（虚拟时钟）。⛔ 这不是档位、不进 `--audio`。
+    bool deviceFreeMix() const { return device_free_; }
     AudioMode mode() const { return mode_; }
     // ★ 只读：`configure()` 之后 / `begin()` 之前的**配置事实**（`mode()` 要等 begin 才是真值）。
-    //   存在理由：`configure(Off, <非空 dump 路径>, …)` 会把档位**提升**成 Virtual
-    //   （规则在 audio.cpp 的 configure 里，唯一一份）—— S1 的守卫要能机械判这条提升，
-    //   ⛔ 不去猜 / ⛔ 不在测试里重抄那条规则。
+    //   存在理由：readout 打在 `begin()` 之前，而 `--audio sdl` 失败后 `mode()` 变 Off ⇒
+    //   读数要用"配置时请求的档"。⛔ 不在测试里重抄配置规则。
     AudioMode configuredMode() const { return configured_mode_; }
     // 缺省 true = 静音；`--sound` 时 false。与后端（`--audio`）正交。
     bool muted() const { return mute_; }
@@ -301,6 +313,13 @@ public:
     void installFeederShim(std::uint32_t stub_ea, std::uint32_t shim_id);
 
     // ---- 仅供夹具（不参与运行）----
+    // ★ 仅夹具（⛔ **不是** CLI 档位、⛔ 不进 `--help`）：没有设备时也让混音 / 泵跑起来
+    //   （虚拟时钟 + 交付点）。存在理由：`audio-device` 那批 pure 用例判的是设备模型 / 通知次序 /
+    //   混音字节，它们必须能在**没有声卡**的机器上跑；而 `virtual` 档已于 2026-11-22 移除
+    //   （`--audio` 只剩 off / sdl）⇒ 夹具需要一条不进参数面的路。`--audio-dump` 是产品面的
+    //   等价路径（它自己会置位 `device_free_`），不需要这个钩子。
+    //   ⛔ 生产路径不要调它（`aot_main` / `Machine::configureAudio` 都不碰）。
+    void enableDeviceFreeMixForTest() { device_free_for_test_ = true; }
     std::uint64_t playedBytes() const { return stats_.played_bytes; }
     std::uint64_t mixedBytes() const { return stats_.mixed_bytes; }
     // ⚠ 只给夹具 / 单线程：不取 `pending_mutex_`。
@@ -478,8 +497,13 @@ private:
     bool sdl_ok_ = false;
     // `begin()` 时 SDL 设备**曾经**打开成功（summary 在 `end()` 之后打印，那时 `sdl_ok_` 已清）。
     bool sdl_device_opened_ = false;
-    // `--audio sdl` 打不开设备、`begin()` 退回 virtual 时置位（summary 的 device=fallback）。
-    bool sdl_fallback_ = false;
+    // `--audio sdl` 打不开设备 ⇒ `begin()` 落回 `Off`（见 `begin`）。summary 的 `device=` 只写
+    // `ok` / `none`：⛔ 不再有 `fallback` 这个"其实还有 D 泵在跑"的档位含义。
+    // ★ `--audio-dump` 给了（`end()` 之后 summary 仍要知道"有没有 dump 这个 sink"）。
+    bool dump_requested_ = false;
+    // ★ dump / 夹具要求"没有设备也跑混音"（虚拟时钟）。⛔ 不是档位（`--audio` 只有 off / sdl）。
+    bool device_free_ = false;
+    bool device_free_for_test_ = false;
     // 缺省静音：见 `configure` / `generateTo` 的交付点门。与 `--audio` 后端正交。
     bool mute_ = true;
     bool dump_ok_ = false;
@@ -497,10 +521,11 @@ private:
     std::deque<AudioNotifyEvent> pending_;
     Feeder feeder_;
 
-    // 全局时间线（单位都是"混音输出字节"；44.1k/16/2 ⇒ 4 B/frame）
+    // ★ 全局时间线（单位都是"混音输出字节"；44.1k/16/2 ⇒ 4 B/frame）
     std::uint64_t played_ = 0;     // 设备已经消费的字节
-    // ★ 游标原点（S2）：`begin()` 那一刻的 `clock_->now100ns()`。虚拟档 `advanceDevice()` 用
-    //   `now - origin_100ns_` 算 `played_` —— ⛔ 不是 `now` 的绝对值（AOT 是墙钟 ⇒ 那等于"自开机"）。
+    // ★ 游标原点（S2）：`begin()` 那一刻的 `clock_->now100ns()`。没有真设备时（dump / 夹具的
+    //   设备无关路径）`advanceDevice()` 用 `now - origin_100ns_` 算 `played_` —— ⛔ 不是 `now`
+    //   的绝对值（AOT 是墙钟 ⇒ 那等于"自开机"）。
     std::uint64_t origin_100ns_ = 0;
     // 影片音频：宿主 PCM（48k/S16/2ch）+ 它在输出帧轴上的起点。
     std::vector<std::int16_t> host_pcm_;

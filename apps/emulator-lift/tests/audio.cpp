@@ -54,7 +54,7 @@ void testDeviceModel() {
     }
     const std::string dump = "lift-audio-dump-test.wav";
     std::remove(dump.c_str());
-    if (!m.configureAudio(lift::AudioMode::Virtual, dump, /*sound=*/true, &err)) {
+    if (!m.configureAudio(lift::AudioMode::Off, dump, /*sound=*/true, &err)) {
         LIFT_CHECK(false);
         return;
     }
@@ -63,7 +63,7 @@ void testDeviceModel() {
         LIFT_CHECK(false);
         return;
     }
-    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(a.mode()), static_cast<std::uint32_t>(lift::AudioMode::Virtual));
+    LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(a.mode()), static_cast<std::uint32_t>(lift::AudioMode::Off));
 
     const std::uint32_t data_ea = 0x00440000u;
     const std::uint32_t state_ea = 0x00430000u;
@@ -168,7 +168,7 @@ void testMonoResample() {
     }
     const std::string dump = "lift-audio-mono-test.wav";
     std::remove(dump.c_str());
-    if (!m.configureAudio(lift::AudioMode::Virtual, dump, /*sound=*/true, &err) || !m.audio().begin(&err)) {
+    if (!m.configureAudio(lift::AudioMode::Off, dump, /*sound=*/true, &err) || !m.audio().begin(&err)) {
         LIFT_CHECK(false);
         return;
     }
@@ -237,7 +237,8 @@ void testFeederLifecycle() {
         LIFT_CHECK(false);
         return;
     }
-    if (!m.configureAudio(lift::AudioMode::Virtual, "", /*sound=*/true, &err) || !m.audio().begin(&err)) {
+    m.audio().enableDeviceFreeMixForTest();  // ★ 仅夹具：没有设备也跑混音（⛔ 不是 CLI 档位）
+    if (!m.configureAudio(lift::AudioMode::Off, "", /*sound=*/true, &err) || !m.audio().begin(&err)) {
         LIFT_CHECK(false);
         return;
     }
@@ -277,7 +278,8 @@ void testFeederContext() {
         LIFT_CHECK(false);
         return;
     }
-    if (!m.configureAudio(lift::AudioMode::Virtual, "", /*sound=*/true, &err) || !m.audio().begin(&err)) {
+    m.audio().enableDeviceFreeMixForTest();  // ★ 仅夹具：没有设备也跑混音（⛔ 不是 CLI 档位）
+    if (!m.configureAudio(lift::AudioMode::Off, "", /*sound=*/true, &err) || !m.audio().begin(&err)) {
         LIFT_CHECK(false);
         return;
     }
@@ -398,7 +400,8 @@ void testCrossingSort() {
         LIFT_CHECK(false);
         return;
     }
-    if (!m.configureAudio(lift::AudioMode::Virtual, "", /*sound=*/true, &err) || !m.audio().begin(&err)) {
+    m.audio().enableDeviceFreeMixForTest();  // ★ 仅夹具：没有设备也跑混音（⛔ 不是 CLI 档位）
+    if (!m.configureAudio(lift::AudioMode::Off, "", /*sound=*/true, &err) || !m.audio().begin(&err)) {
         LIFT_CHECK(false);
         return;
     }
@@ -470,7 +473,8 @@ void testRepositionAndReplay() {
             LIFT_CHECK(false);
             return;
         }
-        if (!m.configureAudio(lift::AudioMode::Virtual, "", /*sound=*/true, &err) || !m.audio().begin(&err)) {
+        m.audio().enableDeviceFreeMixForTest();  // ★ 仅夹具：没有设备也跑混音（⛔ 不是 CLI 档位）
+        if (!m.configureAudio(lift::AudioMode::Off, "", /*sound=*/true, &err) || !m.audio().begin(&err)) {
             LIFT_CHECK(false);
             return;
         }
@@ -521,7 +525,8 @@ void testRepositionAndReplay() {
             LIFT_CHECK(false);
             return;
         }
-        if (!m.configureAudio(lift::AudioMode::Virtual, "", /*sound=*/true, &err) || !m.audio().begin(&err)) {
+        m.audio().enableDeviceFreeMixForTest();  // ★ 仅夹具：没有设备也跑混音（⛔ 不是 CLI 档位）
+        if (!m.configureAudio(lift::AudioMode::Off, "", /*sound=*/true, &err) || !m.audio().begin(&err)) {
             LIFT_CHECK(false);
             return;
         }
@@ -591,7 +596,8 @@ void testStopThenPlayWithoutSeek() {
         LIFT_CHECK(false);
         return;
     }
-    if (!m.configureAudio(lift::AudioMode::Virtual, "", /*sound=*/true, &err) || !m.audio().begin(&err)) {
+    m.audio().enableDeviceFreeMixForTest();  // ★ 仅夹具：没有设备也跑混音（⛔ 不是 CLI 档位）
+    if (!m.configureAudio(lift::AudioMode::Off, "", /*sound=*/true, &err) || !m.audio().begin(&err)) {
         LIFT_CHECK(false);
         return;
     }
@@ -639,7 +645,8 @@ void testStopThenPlayWithoutSeek() {
 //   **G5**：同一 `state_ea` 换成另一条 obj 时，旧 obj 的在飞那一刀也要等（`addBuffer`）；
 //   等完新 obj 必须在模型里生效（Play 入队的是新 obj，不是旧 obj）。
 //
-// ★ 怎么造"在飞 fill"：本测试是 `AudioMode::Virtual` ⇒ `thread_mode_ == false`、
+// ★ 怎么造"在飞 fill"：本测试是**设备无关档**（off + `enableDeviceFreeMixForTest()`）⇒
+//   `thread_mode_ == false`、
 //   `filling_obj_` 恒 0（它只在 `feederEvent` 里置位，而 feeder 只在 `Sdl && realTime` 起）。
 //   ⇒ 用夹具 seam `setFillInFlightForTest(obj)` 伪造，**另一条线程** 20 ms 后清 0。
 //   ⛔ 它测的是"等待的接线"（真的进了 `waitFill` + 记账），**不**覆盖：
@@ -669,7 +676,9 @@ lift::AudioFormat stereo48k() {
 
 bool beginVirtualAudio(lift::Machine& m, std::string* err) {
     if (!initMachine(m, err)) return false;
-    if (!m.configureAudio(lift::AudioMode::Virtual, "", /*sound=*/true, err)) return false;
+    // ★ 名字保留为"设备无关的音频夹具"：`virtual` 档已于 2026-11-22 移除，`--audio` 只剩 off / sdl。
+    m.audio().enableDeviceFreeMixForTest();  // ★ 仅夹具：没有设备也跑混音（⛔ 不是 CLI 档位）
+    if (!m.configureAudio(lift::AudioMode::Off, "", /*sound=*/true, err)) return false;
     return m.audio().begin(err);
 }
 
@@ -795,7 +804,7 @@ void testAddBufferSwapWaitsForInFlight() {
 // ★ 场景复用 `testFeederContext` 的假 `sub_4B6C30`（11 条指令、`ret 4`）+ 真 feeder 身份，
 //   以及 `testDeviceModel` 的 384000 B 斜坡环；0.25 s 虚拟时钟正好混出 48000 B，且不跨任何
 //   新通知点（所以 fill 恰好一次）。
-// ★ 这条守卫只用 `AudioMode::Virtual` ⇒ 不需要声卡（pure 档）。
+// ★ 这条守卫只用**设备无关档**（off + `enableDeviceFreeMixForTest()`）⇒ 不需要声卡（pure 档）。
 struct DeliveryRun {
     bool begun = false;
     bool filled = false;
@@ -825,7 +834,7 @@ DeliveryRun runDelivery(bool sound, const char* tag) {
     if (!initMachine(m, &err)) return r;
     const std::string dump = std::string("lift-audio-mute-") + tag + ".wav";
     std::remove(dump.c_str());
-    if (!m.configureAudio(lift::AudioMode::Virtual, dump, sound, &err)) return r;
+    if (!m.configureAudio(lift::AudioMode::Off, dump, sound, &err)) return r;
     lift::AudioEngine& a = m.audio();
     if (!a.begin(&err)) return r;
     r.begun = true;
@@ -980,7 +989,7 @@ void testMutedDeliveryParity() {
 //   `[stream+0x444] / 4`）。红了 ⇒ "喂了多少字节"在**唯一可达档**（AOT 恒 D 泵，
 //   `runtime/audio_policy.h` 的 S0 谓词）恒 0 ⇒ 摘要里的 `fill_bytes=` 永远读不出东西，
 //   而 `fills>0` 会让人以为喂料账是完整的。
-// ★ 复用 `runDelivery` 的同一条夹具（`Virtual` 档 ⇒ 无 feeder 线程 ⇒ 走 D 泵，pure 档），
+// ★ 复用 `runDelivery` 的同一条夹具（设备无关档 ⇒ 无 feeder 线程 ⇒ 走 D 泵，pure 档），
 //   只多断言这一个量；`fills == 1` 与 `r.fill_bytes != 0` 两个方向都钉（防"换成常量"）。
 void testDPumpFillBytes() {
     lift_test::g_current_case = "audio-device/d-pump-fill-bytes";
@@ -1027,7 +1036,7 @@ RingRun runRing(const std::vector<std::int16_t>& pcm, std::uint32_t laps, bool s
     if (!initMachine(m, &err)) return r;
     const std::string dump = std::string("lift-audio-underrun-") + tag + ".wav";
     std::remove(dump.c_str());
-    if (!m.configureAudio(lift::AudioMode::Virtual, dump, /*sound=*/true, &err)) return r;
+    if (!m.configureAudio(lift::AudioMode::Off, dump, /*sound=*/true, &err)) return r;
     lift::AudioEngine& a = m.audio();
     if (!a.begin(&err)) return r;
     r.begun = true;
@@ -1056,7 +1065,7 @@ RingRun runRing(const std::vector<std::int16_t>& pcm, std::uint32_t laps, bool s
         }
         for (std::uint32_t s = 0; s < kLapSteps; ++s) {
             m.clock().advance100ns(500'000);  // 0.05 s
-            a.pump();                          // Virtual 档：mixStep 只 generateTo(played_)
+            a.pump();                          // 设备无关档：mixStep 只 generateTo(played_)
         }
     }
     a.end();  // 回填 WAV 头
@@ -1095,7 +1104,7 @@ void testUnderrunSilenceStale() {
     LIFT_CHECK_EQ_U32(r.stats.fill_witnessed, 0u);
     LIFT_CHECK_EQ_U32(r.stats.underrun_silence_events, 4u);
     LIFT_CHECK_EQ_U32(r.stats.underrun_silence_bytes, kRingLapBytes);
-    // design §1.5：`underruns` 语义扩档 = 设备队列空 ∪ 环陈旧（Virtual 档没有队列，所以相等）。
+    // design §1.5：`underruns` 语义扩档 = 设备队列空 ∪ 环陈旧（设备无关档没有队列，所以相等）。
     LIFT_CHECK_EQ_U32(r.stats.underruns, r.stats.underrun_silence_events);
     LIFT_CHECK(r.stats.underrun_silence_bytes <= r.stats.mixed_bytes);
 }
@@ -1171,7 +1180,7 @@ EpochRun runEpochDelivery(std::uint64_t raw_base_100ns, const char* tag) {
     g_fake_raw_now_100ns = raw_base_100ns;
     m.clock().setRealTime(true);
     m.clock().setRawNowForTest(&fakeRawNow100ns);
-    if (!m.configureAudio(lift::AudioMode::Virtual, dump, /*sound=*/true, &err)) return r;
+    if (!m.configureAudio(lift::AudioMode::Off, dump, /*sound=*/true, &err)) return r;
     lift::AudioEngine& a = m.audio();
     if (!a.begin(&err)) return r;  // ★ 游标原点 = raw_base_100ns（begin 那一刻）
     r.begun = true;
@@ -1198,7 +1207,7 @@ EpochRun runEpochDelivery(std::uint64_t raw_base_100ns, const char* tag) {
 
     // 相对引擎起点推进 0.25 s ⇒ 48000 输出字节（⛔ 不真睡）。
     g_fake_raw_now_100ns += kQuarterSecond100ns;
-    if (a.pump() != lift::AudioPump::Idle) return r;  // Virtual 档不会铺 guest 帧
+    if (a.pump() != lift::AudioPump::Idle) return r;  // 设备无关档不会铺 guest 帧
     r.played = a.playedBytes();
     r.mixed = a.mixedBytes();
     r.gen_overflow = a.stats().gen_overflow;
@@ -1260,7 +1269,7 @@ void testGenerateToOverflowCounted() {
     LIFT_CHECK(initMachine(m, &err));
     const std::string dump = "lift-audio-overflow.wav";
     std::remove(dump.c_str());
-    LIFT_CHECK(m.configureAudio(lift::AudioMode::Virtual, dump, /*sound=*/true, &err));
+    LIFT_CHECK(m.configureAudio(lift::AudioMode::Off, dump, /*sound=*/true, &err));
     lift::AudioEngine& a = m.audio();
     LIFT_CHECK(a.begin(&err));
     // 2 天虚拟时间 ⇒ played ≈ 33.2e9 B ≈ 8.3e9 帧 > 0xFFFFFFFF。

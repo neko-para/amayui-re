@@ -15,14 +15,17 @@
 //      ★ **洞 6**：这里⛔ **不**再断言"说明文本里含 `muted=0`"——那是**自证式断言**（只断言自己
 //        打的那句话，`--sound` 的接线丢了它照绿）。真正的判据落在**引擎状态**上：
 //        `aot-audio-wiring`（真 run，读收口摘要的 `audio     : … muted=0|1`，含 `muted=1` 的对照组）。
-//      ★ **洞 4**：这段说明里"读数"那句必须限定"**仅** `--audio virtual|sdl` 或 `--audio-dump` 时
+//      ★ **洞 4**：这段说明里"读数"那句必须限定"**仅** `--audio sdl` 或 `--audio-dump` 时
 //        才有 `audio     :` 一行"（只给 `--sound` 时档位是 off ⇒ 没有那一行）。行为判据同样在
 //        `aot-audio-wiring` 的①（那条 run 里那一行**不存在**）。
 //   ⑤ 缺省档（**不给** `--sound`）这条说明**不出现**（同一份 stderr 面的对照组）。
-//   ⑥ **S1 参数面**：`--audio virtual` / `--audio sdl` **不再**被拒（旧文案"本臂只有 off"必须消失）；
-//      非法值 `--audio bogus` 仍 **exit 2** 并点名合法值域（⛔ 不放宽成"认不出就当 off"）；
+//   ⑥ **S1 参数面**：`--audio sdl` **被接受**（旧文案"本臂只有 off"必须消失）；
+//      **`--audio virtual` 必须被拒**：exit 2、stderr 是 `--audio` 的非法值文案、**点名
+//      `off / sdl`**（⛔ 不许再把这个档位收回来）。该档已于 2026-11-22 整档移除：它看起来像
+//      产品态、其实**没有 feeder 线程**（走主线程 D 泵），留着会让人把它当"产品态音频"读数。
+//      非法值 `--audio bogus` 同样 exit 2 并点名合法值域（⛔ 不放宽成"认不出就当 off"）；
 //      `--audio-dump` 缺值 ⇒ exit 2 并点名这个 flag（⛔ 不静默当成"没有 dump"）。
-//      红了 ⇒ 用户要么无法指定后端 / dump，要么非法值被静默吞掉。
+//      红了 ⇒ 用户要么无法指定后端 / dump，要么非法值（含已移除的 `virtual`）被静默吞掉。
 //   ⑦ `--help` 里有 `--audio-dump`（否则用户不知道这条入口存在）；且它的说明**声明**了
 //      「abort 之后 dump 不可信」（洞 7：`std::abort()` 路径跳过 `AudioEngine::end()` ⇒ WAV 两个
 //      长度字段不回填。⛔ 不改 abort 语义，只声明）。
@@ -121,8 +124,10 @@ int main(int argc, char** argv) {
         LIFT_CHECK_EQ_U32(r.exit_code, 0u);
         LIFT_CHECK(r.out.find("--cursor-warp") != std::string::npos);
         LIFT_CHECK(r.out.find("--sound") != std::string::npos);
-        // ★ S1：`--audio` 的三个档位与 `--audio-dump` 必须在 help 里（否则用户不知道它们存在）。
-        LIFT_CHECK(r.out.find("--audio off|virtual|sdl") != std::string::npos);
+        // ★ S1：`--audio` 的两个档位与 `--audio-dump` 必须在 help 里（否则用户不知道它们存在）。
+        //   ★ 2026-11-22：`virtual` 档整档移除 ⇒ help 里**不许**再列它（值域 = off / sdl）。
+        LIFT_CHECK(r.out.find("--audio off|sdl") != std::string::npos);
+        LIFT_CHECK(r.out.find("--audio off|virtual|sdl") == std::string::npos);
         LIFT_CHECK(r.out.find("--audio-dump") != std::string::npos);
         // ★ 洞 7：`--audio-dump` 的说明必须**声明**「abort 之后 dump 不可信」（不改 abort 语义，只声明）。
         //   红了 ⇒ 那条已知的失效方式（`std::abort()` 跳过 `end()` ⇒ WAV 长度字段不回填）又变成
@@ -525,24 +530,41 @@ int main(int argc, char** argv) {
         LIFT_CHECK(r.err.find("TODO(") == std::string::npos);
     }
 
-    // ---- ⑥ S1：`--audio virtual` / `--audio sdl` **不再**被拒（旧文案"本臂只有 off"必须消失）----
+    // ---- ⑥ S1：`--audio sdl` **被接受**（旧文案"本臂只有 off"必须消失）----
     //      ★ 仍然 exit 2 是**别的**原因（临时 cwd 里没有执行源 / 没有 GPU）—— 判据只判"音频这一关
     //        过去了没有"，⛔ 不拿总退出码冒充。
-    g_current_case = "audio-backends-accepted";
+    g_current_case = "audio-sdl-accepted";
     {
-        for (const char* mode : {"virtual", "sdl"}) {
-            const ChildResult r =
-                runChild(exe, {"--audio", mode, "--present", "headless"}, childOptions(root));
-            LIFT_CHECK(r.started);
-            LIFT_CHECK(!r.timed_out);
-            LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
-            // 旧形状：`--audio %s 未实现（本臂只有 off：没有音频设备 / 喂料线程）`。
-            LIFT_CHECK(r.err.find("未实现（本臂只有 off") == std::string::npos);
-            LIFT_CHECK(r.err.find("值非法") == std::string::npos);
-        }
+        const ChildResult r = runChild(exe, {"--audio", "sdl", "--present", "headless"}, childOptions(root));
+        LIFT_CHECK(r.started);
+        LIFT_CHECK(!r.timed_out);
+        LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
+        // 旧形状：`--audio %s 未实现（本臂只有 off：没有音频设备 / 喂料线程）`。
+        LIFT_CHECK(r.err.find("未实现（本臂只有 off") == std::string::npos);
+        LIFT_CHECK(r.err.find("值非法") == std::string::npos);
     }
 
-    // ---- ⑥' 非法值**仍然** exit 2，且点名合法值域（⛔ 不许"认不出就当 off"）----
+    // ---- ⑥' `--audio virtual` **必须被拒**（该档已于 2026-11-22 移除）----
+    //      ★ 判据（三条都要）：
+    //        ① exit 2（⛔ 不是"接受后什么都不做"）；
+    //        ② stderr 认得出是这个参数错了：含 `--audio`，且**不是** `未知参数`；
+    //        ③ stderr **点名合法值** `off / sdl`（人照它改），而且**不再提 virtual**。
+    //      红了 ⇒ 已移除的档位又被收回来（它没有 feeder 线程，会被当成"产品态音频"读数）。
+    g_current_case = "audio-virtual-rejected";
+    {
+        const ChildResult r =
+            runChild(exe, {"--audio", "virtual", "--present", "headless"}, childOptions(root));
+        LIFT_CHECK(r.started);
+        LIFT_CHECK(!r.timed_out);
+        LIFT_CHECK_EQ_U32(r.exit_code, 2u);
+        LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
+        LIFT_CHECK(r.err.find("--audio") != std::string::npos);
+        LIFT_CHECK(r.err.find("virtual") != std::string::npos);  // 回显用户给的值
+        LIFT_CHECK(r.err.find("off / sdl") != std::string::npos);  // ★ 点名合法值（逐字同 --help）
+        LIFT_CHECK(r.err.find("virtual / sdl") == std::string::npos);  // ⛔ 旧值域不许回来
+    }
+
+    // ---- ⑥'' 非法值**仍然** exit 2，且点名合法值域（⛔ 不许"认不出就当 off"）----
     g_current_case = "audio-bogus-value-rejected";
     {
         const ChildResult r =
@@ -555,11 +577,12 @@ int main(int argc, char** argv) {
         LIFT_CHECK(r.err.find("bogus") != std::string::npos);
         // 合法值域必须**写在报错里**（人照它改），不是只说"非法"。
         LIFT_CHECK(r.err.find("off") != std::string::npos);
-        LIFT_CHECK(r.err.find("virtual") != std::string::npos);
         LIFT_CHECK(r.err.find("sdl") != std::string::npos);
+        LIFT_CHECK(r.err.find("off / sdl") != std::string::npos);
+        LIFT_CHECK(r.err.find("virtual") == std::string::npos);  // 已移除的档位不许再出现在值域里
     }
 
-    // ---- ⑥'' `--audio-dump` 缺值 ⇒ exit 2 + 点名这个 flag（⛔ 不静默当成"没有 dump"）----
+    // ---- ⑥''' `--audio-dump` 缺值 ⇒ exit 2 + 点名这个 flag（⛔ 不静默当成"没有 dump"）----
     g_current_case = "audio-dump-needs-value";
     {
         const ChildResult r = runChild(exe, {"--audio-dump"}, childOptions(root));

@@ -4,11 +4,15 @@
   - `--audio=sdl` + 宿主时钟（窗口 / `--real-time`）⇒ **方案 C**：真宿主 feeder 线程
     （自己的 `X86` / 专用 guest 栈 / 私有 `BlockCache`/`Decoder`，直接执行 `sub_4B6C30`）
     + 独立 mixer 线程；引擎每槽 `CRITICAL_SECTION` 映射到宿主递归锁。
-  - `--audio=virtual` 或无 `--real-time` ⇒ **方案 D 回退**：主线程块边界的泵（确定性；CTest 用）。
-    ★ D **只**服务这几种情形：virtual（确定性设备时钟）/ 无 mixer 线程 / 确定性 dump / C 起不来
-    时的降级；判据只有 `thread_mode_ = Sdl && clock.realTime()`（见 `audio.cpp` 的 `begin()`）⇒
-    **窗口 + `--audio sdl`（自动 real-time）永远是 C**，而**窗口 + `--audio virtual` 仍是 D**
-    （那一档没有 SDL 设备，只产设备模型 / dump；`--audio sdl` 无 `--real-time` 也仍是 D）。
+  - `--audio off` / 无 `--real-time` 的 `sdl` / `--audio-dump` 的**设备无关路径** ⇒ **方案 D 回退**：
+    主线程块边界的泵（确定性；CTest 用）。
+    ★ D **只**服务这几种情形：无 mixer 线程 / 确定性 dump / C 起不来时的降级；判据只有
+    `thread_mode_ = Sdl && clock.realTime()`（见 `audio.cpp` 的 `begin()`）⇒
+    **窗口 + `--audio sdl`（自动 real-time）永远是 C**，而**headless 的 `--audio sdl` 仍是 D**。
+    ★ **`--audio virtual` 这一档已于 2026-11-22 整档移除**（它没有 feeder 线程、走主线程 D 泵，
+    看起来像产品态音频 ⇒ 用户口径"保留还会影响判断"）。原用途的现在写法：确定性 dump =
+    `--audio off --audio-dump <path>`；设备模型 / 通知次序用例 = 夹具钩子
+    `AudioEngine::enableDeviceFreeMixForTest()`（⛔ 不是 CLI 值）。
     ⛔ `GetMessageA` 事件泵里从来**没有**第三条喂料路径
     （审计见 `.tmp/audio-token/feed-paths-audit.md` §2）。
 - 代码落点：`src/runtime/audio.{h,cpp}` · `src/runtime/critical_sections.h` ·
@@ -123,7 +127,7 @@ SDL 设备已消费字节 ────────────────► ad
   feeder fill 381–462 ms；30 s：fills=52 / notify=52 / underruns=0
   dump 4–29 s 连续，RMS 4.5k–6.4k，lag2 ≈ 0
   ```
-- ⚠ **`--audio=virtual` 不能当实时吞吐判据**：虚拟时钟是"每条指令 100 ns"，一次 fill 的虚拟时间
+- ⚠ **设备无关路径（原 `--audio=virtual`，该档已于 2026-11-22 移除）不能当实时吞吐判据**：虚拟时钟是"每条指令 100 ns"，一次 fill 的虚拟时间
   远大于它产出的 0.5 s 音频 ⇒ 虚拟档下泵会落后、dump 出现 2 s 环。这是**时钟档**的性质；
   实时验收必须用 `--real-time`/窗口 + `sdl`。
 
@@ -223,18 +227,21 @@ feeder fill 墙钟：381–462 ms（与主线程/mixer 并发）
 dump：4–29 s 连续；RMS 4.5k–6.4k；lag2 相关 ≈ 0（不是 2 s 环）
 ```
 
-**D 回退（`--audio=virtual` / 无 `--real-time`）**：
+**D 回退（`--audio off --audio-dump` 的设备无关路径 / 无 `--real-time` 的 `sdl`）**：
 
 ```text
 fills=30  notify=30  underruns=0；fill 344–425 ms；lead 600 ms；SE 延迟 ≈ 600 ms
 ```
 
-### 4.2 虚拟（确定性 / dump）
+### 4.2 虚拟（确定性 / dump）—— ⚠ 原命令已不可用
 
 ```text
 --audio virtual --audio-dump ... --max-insns 400000000
 filled=21–23（虚拟时钟下泵会落后；dump 出现 2 s 环）
 ```
+
+★ `virtual` 档 **2026-11-22 移除** ⇒ 上面那条命令现在会 exit 2；等价读法 = `--audio off
+--audio-dump ...`（摘要 `mode=off device=none`）。**读数保留**（它们是当时的实测值）。
 
 ⇒ 这是虚拟时钟的性质（见 §1.4），**不是**实时输出的结论。CTest 用虚拟档只验证设备模型 /
 通知次序 / 逐字节混音，不验证"实时吞吐"。
@@ -445,8 +452,9 @@ LIFT_AUDIO_TRACE=1 ./out/emulator-lift --verbose --appdata <fresh> --game-dir ..
 总和 +18.6%）。⇒ "CPU raster 的 `guest=` 不可作吞吐判据"。
 ⛔ 这些是读数（会随工况变、进文档不进 test）；test 只断言关系（见 `tests/feeder_seg_e2e.cpp` 文件头）。
 
-**pump 臂（阴性对照）**：`--audio virtual/off` 走主线程 dispatcher ⇒ 段级在**改动前就能生效**，
-所以它只能证明"输出没变"：`--audio virtual --sound --audio-dump` 的 WAV 在 `all` 与 `all,-sub_48D610`
+**pump 臂（阴性对照）**：`--audio off` / `--audio-dump` 走主线程 dispatcher ⇒ 段级在**改动前就能生效**，
+所以它只能证明"输出没变"：原 `--audio virtual --sound --audio-dump`（virtual 档 2026-11-22 移除；
+等价 = `--audio off --sound --audio-dump`）的 WAV 在 `all` 与 `all,-sub_48D610`
 两臂**逐字节相同**（同 sha256、同 5,717,772 B）。★ 这一臂**没有** `bov` 读数通道 —— 泵打的是另一行
 `[audio] fill slot=… ret=… state=… wrote=…`（不含 `ov`/`bov`）；`audio_block_overrides_` 只在
 `setupFeederContext()` 里填，泵路径根本不走那段 ⇒ `bov` 由构造恒 0。要证明段在这一臂**真的被用**，
@@ -456,7 +464,8 @@ LIFT_AUDIO_TRACE=1 ./out/emulator-lift --verbose --appdata <fresh> --game-dir ..
 
 ## 6. 怎么查 / 怎么改
 
-- **听不到**：先看 `[audio] mode=...` 与 `SDL 音频设备：...`；没有设备会退回 `virtual`（有日志）。
+- **听不到**：先看 `[audio] mode=...` 与 `SDL 音频设备：...`；设备打不开 ⇒ **没有音频输出**
+  （不跑混音，摘要 `mode=off device=none muted=1`；原"退回 virtual"的行为已于 2026-11-22 删除）。
   再看 `fills` / `underruns`：`fills=0` ⇒ 没进喂料（`CreateThread` 没命中 0x4B5AA0 或音频 Off）。
 - **有爆音/断续**：先看 `[audio] feeder=...`。
   - `host-thread`：mixer 独立；`underruns` 来自 mixer 线程本身（SDL 设备/主线程不再直接相关）。
@@ -464,8 +473,8 @@ LIFT_AUDIO_TRACE=1 ./out/emulator-lift --verbose --appdata <fresh> --game-dir ..
     检查是否有新的长 shim 持锁（`ComRegistry`/`ShimRegistry` 已改成 fn 锁外执行）。
   - `主线程泵`：fill > lead ⇒ 增大 `kLeadBytes` 或优化解码。
   ⛔ 不要先怀疑混音；先用 `underruns` / fill 墙钟定位。
-- **线程**：C 模式三条线程 = 主线程 / feeder / mixer；`--audio=virtual` 或没有 `--real-time` 会
-  自动回退成单线程泵（日志 `feeder=主线程泵`）。
+- **线程**：C 模式三条线程 = 主线程 / feeder / mixer；没有 `--real-time` 的 `sdl` 或
+  `--audio-dump` 的设备无关路径会走单线程泵（日志 `feeder=主线程泵`）。
 - **音调不对**：检查该缓冲的 `WAVEFORMATEX` 是否被 `audioFormatOf` 正确带进 `AudioFormat`；
   特别是 48k stereo 与 44.1k mono。
 - **通知错序**：`fireCrossings` 必须先收集 `(pos,quarter)` 再排序；⛔ 不要按 quarter 循环直接入队。

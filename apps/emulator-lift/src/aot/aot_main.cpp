@@ -93,11 +93,12 @@ void usage() {
         "  --time-limit SEC    墙钟上限（每 4096 条查一次；0 = 不限）\n"
         "  --skip-logo         一次性 latch：T_Command + 0x5EB5C 写 0（口径同 emulator-lift；\n"
         "                      钩子点 AOT 用 0x004BAA33；⛔ 不跳过 boot、不改 eip/寄存器）\n"
-        "  --audio off|virtual|sdl  音频后端（缺省 off：不开设备 / 不跑混音；判据只有一份 =\n"
-        "                      runtime/audio_policy.h）。virtual = 虚拟设备时钟（确定性、可 dump）；\n"
-        "                      sdl = 真设备（打不开 ⇒ 退回 virtual，摘要里 device=fallback）\n"
-        "  --audio-dump <path> 把 48k/16/2ch 交付缓冲写成 WAV（缺省不给 = 不写）；给了它而 --audio off\n"
-        "                      ⇒ 档位自动提升为 virtual（与 AudioEngine::configure 同一条规则）\n"
+        "  --audio off|sdl     音频后端（缺省 off：不开设备 / 不跑混音；判据只有一份 =\n"
+        "                      runtime/audio_policy.h）。sdl = 真设备（打不开 ⇒ **没有音频输出**：\n"
+        "                      不跑混音、摘要 device=none；⛔ 没有第二个档位可退）\n"
+        "  --audio-dump <path> 把 48k/16/2ch 交付缓冲写成 WAV（缺省不给 = 不写）；它**不是档位**：\n"
+        "                      给了它而 --audio off ⇒ 走设备无关的 dump 路径（档位仍写 off、\n"
+        "                      device=none，虚拟时钟）\n"
         "                      文件 = 44 字节头 + 这一跑**真交付**的字节（没有真交付 ⇒ 只有 44 字节头，\n"
         "                      data=0；有没有 PCM 看摘要的 fills / fill_bytes / pushed）\n"
         "                      ★ **abort() 之后 dump 不可信**：heap / handles / shims 的 std::abort()\n"
@@ -334,8 +335,9 @@ int main(int argc, char** argv) {
     //   `InputPlan` 的 step 事件输出（`plan:<文件>:<行> …`），⛔ 不改任何 guest 可见状态。
     bool input_plan_trace = false;
     std::string audio_mode = "off";  // ★ 本臂缺省 off（不开设备 / 不跑混音：与改动前逐位相同）
-    // ★ S1：`--audio-dump <path>`（缺省空 = 不写 WAV）。给了它而档位是 off ⇒ 引擎把档位提升成
-    //   virtual（`AudioEngine::configure` 的唯一规则；⛔ 不在这里另写一份）。
+    // ★ S1：`--audio-dump <path>`（缺省空 = 不写 WAV）。它**不是档位**：给了它而档位是 off ⇒
+    //   引擎走"设备无关的 dump 路径"（虚拟时钟；档位仍写 off、摘要 device=none）。
+    //   ⛔ `--audio` 的值域只有 off / sdl（`virtual` 档已于 2026-11-22 移除）。
     std::string audio_dump;
     // ★ `--sound`（缺省关）：**真的**进 `AudioEngine` 的静音门（`mute_ = !sound`）—— 不再是
     //   `aot_host.cpp` 里的硬写 false（b-3）。文案与口径见 `runtime/present_flags.h`。
@@ -766,7 +768,7 @@ int main(int argc, char** argv) {
     const lift::AudioModeParse audio_parse = lift::parseAudioMode(audio_mode.c_str());
     if (!audio_parse.ok) {
         std::fprintf(stderr, "emulator-lift-aot: --audio 的值非法：`%s`（%s）\n", audio_mode.c_str(),
-                     audio_parse.error != nullptr ? audio_parse.error : "值域 = off / virtual / sdl");
+                     audio_parse.error != nullptr ? audio_parse.error : "值域 = off / sdl");
         return 2;
     }
 

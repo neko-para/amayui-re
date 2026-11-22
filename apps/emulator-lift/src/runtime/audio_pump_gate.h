@@ -22,9 +22,10 @@
 //
 // ★ 与 S0 的关系：`thread_mode` 这一格就是 `audioThreadMode(mode, realTime)` 的输出
 //   （`runtime/audio_policy.h`，两个事实；"宿主给没给 GuestLayout"由 `attach` 的引用在装配期钉死）。
-//   AOT 在 `--audio sdl` + 墙钟 + 设备真的打开时**会**是真 feeder 线程（这是用户裁决的形状），
-//   `--audio virtual` / 设备回退仍是主线程 D 泵。thread 档下喂料由 feeder 线程自己做，
-//   主线程**不该**再泵（解释器里那也是 `pump()` 一进来就 `return Idle` 的无用功）。
+//   AOT 在 `--audio sdl` + 墙钟 + 设备真的打开时**会**是真 feeder 线程（这是用户裁决的形状）；
+//   `--audio sdl` 打不开设备 ⇒ 落回 `Off`（没有输出、不跑混音）⇒ 本闸门一次都不 due。
+//   thread 档下喂料由 feeder 线程自己做，主线程**不该**再泵（解释器里那也是 `pump()` 一进来就
+//   `return Idle` 的无用功）。
 //   ★ 本闸门**不表达** feeder 的失败面：thread 档 `due()` 恒假 ⇒ `pump()` 里的 `feeder_error_`
 //     早退不可达 ⇒ AOT 的块边界必须直接看 `AudioEngine::feederFailed()`。
 #pragma once
@@ -35,7 +36,8 @@ namespace lift {
 
 // ★ S3：块边界"要不要泵"的全部输入 —— 每一项都是**事实**，没有一项是选项。
 struct AudioPumpFacts {
-    // `AudioEngine::enabled()`（档位 != Off）。★ **这一格为假 ⇒ 一次都不许调 pump()**。
+    // `AudioEngine::enabled()`（有混音 / 泵在跑：`mode_ != Off` 或 dump 的设备无关路径）。
+    // ★ **这一格为假 ⇒ 一次都不许调 pump()**（`--audio off`，以及 `--audio sdl` 打不开设备）。
     bool enabled = false;
     // `AudioEngine::threadMode()`（= S0 谓词 `audioThreadMode(mode, realTime)` 的输出）。
     bool thread_mode = false;

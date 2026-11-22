@@ -20,7 +20,8 @@
 //      S0 谓词 `audioThreadMode(mode, realTime)` 的输出）。★ 注意：新谓词下 AOT 的
 //      `--audio sdl` + 墙钟**会**是真 feeder 线程 ⇒ 这一格在 AOT 上不再恒 false；
 //      闸门行为本身（thread 档不 due）不变，变的是"谁会进 thread 档"。
-//      ⛔ 不要把"thread 档不 due"读成"AOT 永远不 due"：`--audio virtual` / 设备回退仍走 D 泵。
+//      ⛔ 不要把"thread 档不 due"读成"AOT 永远不 due"：没开 `--audio sdl` / 设备打不开时，
+//      `enabled()` 为假 ⇒ 本闸门一次都不 due（"没有输出"就不跑混音）。
 //
 // ★ 为什么是 pure 档：`add_test` 在 CMakeLists 最外层（`AGENTS.md` §12.4 判据 = 注册位置）
 //   ⇒ 默认 `ctest` 就跑；本文件只 include 一个**纯头**（`<cstdint>`），不碰 SDL / 设备 / guest 内存 /

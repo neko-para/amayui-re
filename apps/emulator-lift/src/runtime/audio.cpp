@@ -108,7 +108,6 @@ void traceDword(const GuestMemory* mem, std::uint32_t ea, char* out, std::size_t
 const char* audioModeName(AudioMode m) {
     switch (m) {
         case AudioMode::Off: return "off";
-        case AudioMode::Virtual: return "virtual";
         case AudioMode::Sdl: return "sdl";
     }
     return "?";
@@ -176,17 +175,22 @@ bool AudioEngine::configure(AudioMode mode, const std::string& dump_path, bool s
     // ★ 缺省静音：`--sound` 才出声。它与 `--audio`（后端选择）正交：设备 / 混音 / 喂料 /
     //   guest 的 DS 调用全都照跑，只在交付点覆盖缓冲（见 `generateTo`）。
     mute_ = !sound;
-    // `--audio-dump` 是机械判据入口：即使没给 `--audio`，也要有虚拟设备时钟才能产出 PCM。
-    if (configured_mode_ == AudioMode::Off && !dump_path_.empty()) configured_mode_ = AudioMode::Virtual;
+    // ★ `--audio-dump` **不是档位**（值域只有 off / sdl）：它要一条**设备无关**的混音路径
+    //   （虚拟时钟 + 交付点写 WAV）。这里只记两个 sink 事实，⛔ 不改 `configured_mode_`
+    //   （`--audio off --audio-dump` 的档位仍是 off、摘要仍写 `device=none`）。
+    //   ★ 夹具另有 `enableDeviceFreeMixForTest()`（不进 CLI）：它和 dump 走同一条路径。
+    dump_requested_ = !dump_path_.empty();
+    device_free_ = device_free_for_test_ || (configured_mode_ == AudioMode::Off && dump_requested_);
     return true;
 }
 
 bool AudioEngine::begin(std::string* err) {
     if (begun_) return true;
     mode_ = configured_mode_;
-    sdl_fallback_ = false;
     sdl_device_opened_ = false;
-    if (mode_ == AudioMode::Off) {
+    // ★ 设备无关的混音路径（dump / 夹具）也要在 `mode_ == Off` 下跑起来；否则 off 档是纯 no-op。
+    device_free_ = device_free_for_test_ || (mode_ == AudioMode::Off && dump_requested_);
+    if (mode_ == AudioMode::Off && !device_free_) {
         begun_ = true;
         return true;
     }
@@ -215,8 +219,8 @@ bool AudioEngine::begin(std::string* err) {
         if (err) *err = "AudioEngine 没有 attach（cpu/mem/clock）";
         return false;
     }
-    // ★ 游标原点（S2，`REQ-01M7K2J7FP60YHNGTEFR5EGGA7`）：虚拟档的 `played_` 必须相对**这一轮
-    //   引擎的起点**算。AOT 的时钟是墙钟（`AotHost::init` 里 `setRealTime(true)`）⇒ `now100ns()`
+    // ★ 游标原点（S2，`REQ-01M7K2J7FP60YHNGTEFR5EGGA7`）：**没有真设备**的档（dump / 夹具 /
+    //   无墙钟的 sdl）的 `played_` 必须相对**这一轮引擎的起点**算。AOT 的时钟是墙钟（`AotHost::init` 里 `setRealTime(true)`）⇒ `now100ns()`
     //   是 steady_clock 的**绝对值**（自开机）；直接拿它当游标 ⇒ `played_` 落在 1e10 量级 ⇒
     //   `generateTo` 的越界门恒命中、`mixed/pushed` 恒 0、dump 只有 44 B 头（本单的 S2）。
     //   ⛔ 不许改成"把 `setRealTime(false)` 关掉"绕过（那会改 AOT 时钟档 / guest 可见时间语义）；
@@ -237,10 +241,18 @@ bool AudioEngine::begin(std::string* err) {
     }
     if (mode_ == AudioMode::Sdl) {
         if (!openSdl()) {
-            logAt(LogLevel::Warn, "SDL3 音频设备打不开（%s）⇒ 退回 virtual（不出声，仍可 dump）",
-                  SDL_GetError());
-            mode_ = AudioMode::Virtual;
-            sdl_fallback_ = true;
+            // ★ 设备打不开 = **没有音频输出**：落回 `Off`（`enabled()==false` ⇒ 不跑混音、
+            //   不注册 buffer），摘要如实写 `device=none`。⛔ 没有第二个档位可以退（`virtual`
+            //   已于 2026-11-22 移除），也⛔ 不保留"其实还有 D 泵在跑"的 `fallback` 含义。
+            //   ★ 例外只有 `--audio-dump`：那是**显式要了**离线 PCM 的 sink；此时 dump 继续
+            //     （仍报 `mode=off device=none`），warn 里点名。
+            mode_ = AudioMode::Off;
+            if (dump_requested_) device_free_ = true;
+            logAt(LogLevel::Warn,
+                  "SDL3 音频设备打不开（%s）⇒ 没有音频输出（不跑混音；档位按 off 记，摘要 "
+                  "device=none）%s",
+                  SDL_GetError(),
+                  dump_requested_ ? "；--audio-dump 仍会写文件（设备无关路径）" : "");
         } else {
             sdl_device_opened_ = true;
         }
@@ -249,7 +261,7 @@ bool AudioEngine::begin(std::string* err) {
     //   生效档位 / 宿主时钟）。⛔ 不要在这里写内联判据，也⛔ 不要把 `has_machine` /
     //   `feederLayoutAvailable()` 这类运行时布尔加进谓词：真 feeder 线程要的 TEB/栈由
     //   `attach(...)` 的 `const GuestLayout&` 在装配期**结构上**保证（见 audio.h 的 attach 注释）。
-    //   ★ `mode_` 在上一块里可能已被 `Sdl ⇒ Virtual` 的回退改过 ⇒ 这里读到的是**真档位**。
+    //   ★ `mode_` 在上一块里可能已被"打不开设备 ⇒ Off"改过 ⇒ 这里读到的是**真档位**。
     const bool want_thread = audioThreadMode(mode_, clock_ != nullptr && clock_->realTime());
     thread_mode_ = want_thread && feeder_layout_given_;
     if (want_thread && !feeder_layout_given_) {
@@ -261,13 +273,13 @@ bool AudioEngine::begin(std::string* err) {
     }
     begun_ = true;
     if (thread_mode_) startMixThread();
-    if (mode_ != AudioMode::Off) {
+    if (enabled()) {
         logAt(LogLevel::Info,
               "mode=%s %u Hz / 16 bit / 2 ch（lead=%llu B）；游标=%s；feeder=%s；"
               "muted=%d%s；PCM 由 guest 解码器产生，宿主只做混音与输出",
               audioModeName(mode_), kSampleRate,
               static_cast<unsigned long long>(leadBytesFor(thread_mode_)),
-              mode_ == AudioMode::Sdl ? "SDL 设备已消费字节" : "VirtualClock",
+              sdl_device_opened_ ? "SDL 设备已消费字节" : "VirtualClock",
               thread_mode_ ? "host-thread（方案 C）" : "主线程泵（方案 D）", mute_ ? 1 : 0,
               mute_ ? "（缺省；--sound 可听）" : "（--sound）");
     }
@@ -434,7 +446,7 @@ void AudioEngine::end() {
     }
     closeSdl();
     closeDump();
-    if (mode_ != AudioMode::Off) {
+    if (enabled()) {
         logAt(LogLevel::Info,
               "统计：played=%llu mixed=%llu pushed=%llu notify=%llu fills=%llu deferred=%llu "
               "dropped=%llu underruns=%llu",
@@ -714,9 +726,9 @@ void AudioEngine::removeBuffer(std::uint32_t state_ea) {
         buffers_.erase(it);
         // ★ D2：`pending_` 归 `pending_mutex_` 管；这里以前是唯一一处**在 `mutex_` 下裸动 deque**
         //   的地方（宿主 UB：feeder / `enqueue` 都在 `pending_mutex_` 下动它）。
-        //   ⚠ **例外**：D 模式（`--audio virtual` / 无 real-time）没有 feeder 线程、也没有 mixer
-        //   线程 ⇒ `pump()` 是单执行流，**有意**不持 `pending_mutex_` 直接操作 `pending_`
-        //   （不能跨 fill 持锁：混音器每次 `enqueue` 都会被 fill 的 380–460 ms 堵住）。
+        //   ⚠ **例外**：D 模式（没有 real-time 的 sdl 档 / 设备无关的 dump 路径）没有 feeder
+        //   线程、也没有 mixer 线程 ⇒ `pump()` 是单执行流，**有意**不持 `pending_mutex_` 直接
+        //   操作 `pending_`（不能跨 fill 持锁：混音器每次 `enqueue` 都会被 fill 的 380–460 ms 堵住）。
         //   ⛔ 不要在 thread 模式里加任何无锁 `pending_` 路径。
         dropPending(obj);
         // ★ 自等判据（与 `stop()` 的 :598 同文）：feeder **自己**调进来（fill 内的 DS `Release` /
@@ -2389,11 +2401,14 @@ bool AudioEngine::runFeederGuest(std::string* err) {
 AudioEngine::Snapshot AudioEngine::snapshot() const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     Snapshot s;
-    // `device` 口径与 `dumpSummary` 逐字同源：ok = SDL 真设备；fallback = sdl 打不开退回 virtual；
-    // none = virtual / off（本来就没有宿主设备）。
+    // `device` 口径与 `dumpSummary` 逐字同源：ok = SDL 真设备真的打开了；none = 没有宿主设备
+    // （`--audio off` / dump 的设备无关路径 / **`--audio sdl` 打不开设备**）。
+    // ★ ⛔ 不再有 `fallback`：设备打不开 ⇒ 没有输出（不跑混音），那不是"还有第二条喂料路线"。
     s.mode = audioModeName(mode_);
-    s.device = sdl_device_opened_ ? "ok" : (sdl_fallback_ ? "fallback" : "none");
-    s.muted = mute_;
+    s.device = sdl_device_opened_ ? "ok" : "none";
+    // `muted` 的语义按**新事实**写：这一跑有没有可听 / 可写出的 sink（真设备或 dump）？
+    // 都没有 ⇒ 什么都交付不出去 ⇒ 报 `muted=1`（⛔ 不许让 `--sound` 看起来"开着"）。
+    s.muted = mute_ || !(sdl_device_opened_ || dump_requested_);
     s.fill_max_ms = static_cast<double>(stats_.fill_max_us) / 1000.0;
     s.fills = stats_.fills;
     s.fill_bytes = stats_.fill_bytes;
@@ -2419,9 +2434,11 @@ AudioEngine::Snapshot AudioEngine::snapshot() const {
 void AudioEngine::dumpSummary(std::FILE* out) const {
     if (!out) return;
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    // `device` 把"没有设备"与"静音"分开：ok = SDL 真设备；fallback = sdl 打不开退回 virtual；
-    // none = virtual / off（本来就没有宿主设备）。
-    const char* device = sdl_device_opened_ ? "ok" : (sdl_fallback_ ? "fallback" : "none");
+    // `device` 把"没有设备"与"静音"分开：ok = SDL 真设备真的打开了；none = 没有宿主设备
+    // （`--audio off` / dump 的设备无关路径 / **`--audio sdl` 打不开设备**）。
+    // ★ ⛔ 不再有 `fallback`：设备打不开 ⇒ 没有输出（不跑混音），那不是"还有第二条喂料路线"。
+    const char* device = sdl_device_opened_ ? "ok" : "none";
+    const bool muted = mute_ || !(sdl_device_opened_ || dump_requested_);
     std::fprintf(out,
                  "audio     : mode=%s device=%s muted=%d muted_bytes=%llu fills=%llu fill_bytes=%llu "
                  "mixed=%llu played=%llu notify=%llu deferred=%llu dropped=%llu underruns=%llu "
@@ -2440,7 +2457,7 @@ void AudioEngine::dumpSummary(std::FILE* out) const {
                  // ★ S2：`gen_overflow` = `generateTo()` 越界门命中次数（正常档恒 0；非 0 =
                  //   设备游标 / 原点跑飞）。放在末尾 ⇒ 原有字段顺序没动。
                  " guest_silence_fills=%llu gen_overflow=%llu%s\n",
-                 audioModeName(mode_), device, mute_ ? 1 : 0,
+                 audioModeName(mode_), device, muted ? 1 : 0,
                  static_cast<unsigned long long>(stats_.muted_bytes),
                  static_cast<unsigned long long>(stats_.fills),
                  static_cast<unsigned long long>(stats_.fill_bytes),

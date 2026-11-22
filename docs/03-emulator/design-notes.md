@@ -201,7 +201,7 @@
   另有 `0x4BC539` / `0x4BC680` 直连 `__ftol2`（真消费 `EDX:EAX`，不经 `0x4E82C0`）。
   ⇒ "hits 与 385 个 call 站点吻合"只是**下界**（`0x4E82C0` 实际有 386 个入口）。
 - **收口读数（按 audio mode 分开读，⛔ 别混）**：两种模式下 hit 记在**两张不同的表**上 ——
-  ① `--audio off` / virtual（pump 模式：`sub_4B6C30` 从**主线程**被嵌套调用）⇒ 命中的是主表，
+  ① `--audio off` / `--audio-dump`（pump 模式：`sub_4B6C30` 从**主线程**被嵌套调用）⇒ 命中的是主表，
      读启动摘要里的 `native-ovr:` 那一行（`__ftol2_sse` 的 hits / fallbacks）；
   ② 真 SDL 设备（thread 模式）⇒ feeder 用的是 `audio_overrides_ = *cpu_->native_overrides` 的**表拷贝**
      （`audio.cpp` 的 `runFeederGuest`）⇒ `native-ovr:` 里这一项**恒 0**，要看 feeder 自己的计数：

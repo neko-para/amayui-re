@@ -9,19 +9,23 @@
 //      ⇒ 判据提成纯函数 `audioThreadMode()`：**只由两个事实决定** —— 生效档位与宿主时钟。
 //      "能不能起 feeder"由宿主装配期**必须**给 `AudioEngine::attach()` 一份 `GuestLayout`
 //      （引用入参，不可为空）表达；⛔ 不再是一个可以"声明 true 而实际没有"的运行时布尔。
-//   ② **参数面**：`--audio` 的值域是闭集（off / virtual / sdl），非法值必须 **exit 2 并点名合法值**
+//   ② **参数面**：`--audio` 的值域是闭集（off / sdl），非法值必须 **exit 2 并点名合法值**
 //      （⛔ 不放宽成"认不出就当 off" —— 那会让"以为有声"变成静默失效）。
 //      ⇒ 判据提成纯函数 `parseAudioMode()`（`aot_main` 的唯一调用点）。
+//      ★ `virtual` 这一档**已于 2026-11-22 整档移除**（用户口径："从来就没法有效使用过，保留还
+//        会影响判断"）：它看起来像产品态、其实**没有 feeder 线程**（走主线程 D 泵），留着会让
+//        人（和 agent）把它当"产品态音频"来读读数。⇒ 值域只剩两个真档位；需要离线 PCM 的
+//        诊断路径用 `--audio-dump`（**不是**档位，见 `audio.cpp` 的 `configure`）。
 //
 // ★ 本头**纯**：只 `<cstdint>` + 编译期字符串比较，不 include SDL / x86 / guest 头
 //   ⇒ 可被 pure CTest 直接驱动（`tests/aot_audio_flags.cpp`），也**没有**第二份实现。
 //   `audioModeName` 的**定义**仍在 `runtime/audio.cpp`（唯一一份），这里只声明。
 //
 // ★ S0 谓词判什么（两个输入都是事实，不是选项）：
-//   · `mode`         = `AudioEngine::begin()` 那一刻**生效**的档（`--audio sdl` 打开设备失败会
-//                      先退回 `Virtual` —— 回退发生在**算定档之前**，所以谓词看到的是真档位）；
-//                      ★ 保留 `mode == Sdl` 这一项：`Virtual` 一律 D 泵 ⇒ dump 的确定性不被
-//                      第二条线程破坏（设备打不开回退 virtual 时也就自然回 D 泵）。
+//   · `mode`         = `AudioEngine::begin()` 那一刻**生效**的档（`--audio sdl` 打不开设备 ⇒
+//                      落回 `Off` —— "没有音频输出"**不是**第二个档位，只是一个失败事实；
+//                      回退发生在**算定档之前**，所以谓词看到的是真档位）；
+//                      ★ 保留 `mode == Sdl` 这一项：只有真设备档才可能进 thread 档。
 //   · `real_time`    = 宿主时钟是不是墙钟（虚拟时钟的 tick 是主线程的确定性账本，不能由第二条
 //                      guest 执行流并发推进：`audio.h` 文件头的时钟档口径）。
 //   ⇒ 只有两者全真才进 thread 档。
@@ -32,9 +36,8 @@
 namespace lift {
 
 enum class AudioMode : std::uint8_t {
-    Off = 0,      // 不出声、不跑泵（缺省；`--audio off`）
-    Virtual = 1,  // 虚拟设备时钟（确定性；可 dump）
-    Sdl = 2,      // SDL3 真设备（能听到）
+    Off = 0,  // 不出声、不跑混音（缺省；`--audio off`；`--audio sdl` 打不开设备时也落回这里）
+    Sdl = 1,  // SDL3 真设备（能听到；+ 墙钟 ⇒ 真 feeder 线程）
 };
 
 const char* audioModeName(AudioMode m);
@@ -93,9 +96,8 @@ constexpr bool audioTextEquals(const char* a, const char* b) {
 //   ⛔ 不要放宽成"认不出就当 Off"：那会让"以为有声"变成一条**静默**失效（本仓最贵的一类 bug）。
 constexpr AudioModeParse parseAudioMode(const char* value) {
     if (audioTextEquals(value, "off")) return {true, AudioMode::Off, nullptr};
-    if (audioTextEquals(value, "virtual")) return {true, AudioMode::Virtual, nullptr};
     if (audioTextEquals(value, "sdl")) return {true, AudioMode::Sdl, nullptr};
-    return {false, AudioMode::Off, "只能是 off / virtual / sdl"};
+    return {false, AudioMode::Off, "只能是 off / sdl"};
 }
 
 }  // namespace lift

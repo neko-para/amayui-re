@@ -178,8 +178,10 @@
 - **怎么核（做过一次，误差 ≤1 ms）**：把 profile 窗口的 `wall=` 与同一对锚点的 `guest_ms` 差逐字对照 ——
   `enter-prof2` 的 `8085.1 ms` 对 `guest_ms` 差 `8085`；`exit-prof2b` 的 `9180.4 ms` 对 `9181`
   （`.tmp/roomopt/run.ps1` 文件头记着这次核对）。
-- **代价**：这条只在 real-time 档成立；`--present headless` / `--audio virtual` **不成立**（虚拟时钟）。
+- **代价**：这条只在 real-time 档成立；`--present headless` / `--audio off` **不成立**（虚拟时钟）。
   ⇒ 用 `guest_ms` 当墙钟前，先确认启动行有 `⚠ 窗口模式（自动 real-time）`。
+  （原句写的是 `--audio virtual` —— 该档已于 2026-11-22 移除；"虚拟时钟"这个事实不变，只是现在
+  由 `--audio off` / headless 表达。）
 - **怎么量**：`pwsh .tmp/roomopt/run.ps1 -Mode enter -Label <名字> -Runs 3`（脚本里没有任何 `profile_*`，
   从 `[input-script]` 行取 `guest_ms` 采样）；两次动作之间取差，就是那段的宿主墙钟。
 

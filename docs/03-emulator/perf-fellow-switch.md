@@ -14,6 +14,11 @@
 | 档位 | `--present window --present-hidden`（= hidden）· `--skip-logo --audio off --time-limit 240` · `--scale` 缺省 1.0 · guest 1280×720 |
 | 原始件 | 日志 `log-a1n` / `log-a2n` / `log-b3w` / `log-ctl` / `log-c2`、配方 `save09-fellow-switch.plan` / `-nowin.plan` / `control-steady.plan` —— 都在 `.tmp/fellow-profile/`（**gitignored，不入库**；仓内 `scripts/recipes/` 没有它 ⇒ 文件不在原地读数就不可复跑） |
 
+★ **复跑的两个前提（2026-11-22 实测，缺一个就跑不出来）**：
+
+- **存档集要用 2026-11-21 那份**：`saves/SAVE.DAT` + `RT.DAT` 在 2026-11-22 09:33 被重写过、并新增了 `SAVE10` ⇒ 读档界面的**持久化页号变成 1**（每页 10 行 ⇒ 第一屏是 `LOAD 010..019`），于是"点 `y=626` 选槽 009"**必然落空**（`await position SBUNKI` 超时、exit 5）。复原办法：`git archive 04a6e24 saves/ | tar -x -C <私有 appdata 的 SAVE 目录>`（实测 4/4 通过，含 `--audio sdl/off`）。
+- **`--audio` 只认 `off` / `sdl`**（`parseAudioMode`）；⛔ 没有 `on`（会 exit 2）。"产品态" = **`--audio sdl`**（`audioThreadMode()` = Sdl && realTime ⇒ 真 feeder 线程）；`--audio off` 不开设备、不跑混音。本文 §3 那批读数是 **`--audio off`** ⇒ 是**下界**，不是产品态。★ 原第三值 `virtual` 档已于 2026-11-22 **整档移除**（它没有 feeder 线程、走主线程 D 泵，会被误读成产品态音频）。
+
 ## 1. 现象（形状）
 
 - **单帧 ~1.0 s、每次切换一帧**：6 次切换 = 6 个 0.95–1.18 s 的单帧（帧内 `insns` 433–437 M）；该帧之前还有一帧 ~17–24 ms 的「轻帧」（0.26 M）⇒ 不是"每帧都慢"。**30/30 复现**（5 跑 × 6 切换，逐次差 ≤~20%，两方向同量级）；同跑内切换之间稳态 8.0–9.0 ms/帧（≈28.6 K insns），⛔ 不是常说的 ~50 ms（FIELD 20 Hz 旧口径）。

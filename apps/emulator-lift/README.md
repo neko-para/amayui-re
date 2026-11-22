@@ -130,8 +130,9 @@
     映射到宿主 per-EA 递归锁（`CriticalSectionTable`）。feeder 到点会等这个槽：实现是
     `tryEnter` + **放开令牌** 1 ms 重试（⛔ 不是持令牌阻塞）；主线程的 `Enter` 若撞上 feeder
     持有的槽，也先 `Yield` 令牌再等宿主锁。
-  - `--audio=sdl` 且宿主时钟（窗口模式/`--real-time`）⇒ 方案 C；否则（`--audio=virtual`、
-    纯 CTest）自动回退到方案 D 的主线程泵，保持确定性。
+  - `--audio=sdl` 且宿主时钟（窗口模式/`--real-time`）⇒ 方案 C；否则（没有 `--real-time` 的 sdl、
+    `--audio-dump` 的设备无关路径、纯 CTest）自动回退到方案 D 的主线程泵，保持确定性。
+    ★ 原第三档 `--audio=virtual` 已于 2026-11-22 **整档移除**（它没有 feeder 线程，会被误读成产品态）。
 - 其余服务线程（DirectShow 读文件 / MF 回调）仍是**伪线程**：`CreateThread` 只发线程句柄，
   **不执行 start routine**；`ResumeThread` / `SetThreadPriority` / 亲和性只返回形态值。
   ★ 例外：**纹理影片**（DirectShow 模式）的渲染器服务线程等待由**宿主合成**——它等的是
@@ -1008,11 +1009,11 @@ node --test --test-isolation=none tools/test/input-plan-shape.test.mjs   # 形�
 
 ```bash
 # 默认 = SDL3 真设备但**静音**（--sound 才出声）；--audio=off 回到旧 silent；
-# --audio=virtual 用虚拟设备时钟（确定性；dump 与 --sound 正交）
+# 离线 PCM（确定性）用 --audio off --audio-dump <path>（原 --audio=virtual 档已于 2026-11-22 移除）
 emulator-lift --game-dir <install> --skip-logo --native-overrides all --present window
 emulator-lift --game-dir <install> --skip-logo --native-overrides all --present window --sound
 emulator-lift --game-dir <install> --skip-logo --native-overrides all --present headless \
-              --audio virtual --sound --audio-dump .tmp/title.wav --max-insns 400000000
+              --audio off --sound --audio-dump .tmp/title.wav --max-insns 400000000
 ```
 
 口径（`docs/audio-implementation.md` 是唯一真源）：
@@ -1032,16 +1033,17 @@ emulator-lift --game-dir <install> --skip-logo --native-overrides all --present 
   `HandleTable` / `ComRegistry` / `Vfs`。可观测检查点覆盖 `GuestHeap::alloc/free/realloc`、
   `HandleTable::add`、`machine.block`、`shim.invoke`（未持令牌 ⇒ 违规计数，`--assert-guest-token`
   判红）；`Vfs` / `ComRegistry` 没有单独计数点，靠"访问都在 shim 里"这条结构约束。
-- **时钟档**：`sdl` + 宿主时钟（窗口模式/`--real-time`）= **方案 C 真线程**；`virtual` 或没有
-  `--real-time` 的 sdl = **方案 D 主线程泵**（确定性回退，CTest 用）。窗口模式会强制 `--real-time`。
+- **时钟档**：`sdl` + 宿主时钟（窗口模式/`--real-time`）= **方案 C 真线程**；没有 `--real-time` 的
+  sdl / `--audio-dump` 的设备无关路径 = **方案 D 主线程泵**（确定性回退，CTest 用）。窗口模式会强制 `--real-time`。
 - **输出格式固定 48k / 16 bit / 2 ch**；每条缓冲按自己的 `WAVEFORMATEX` 做采样率/声道转换
   （实测引擎会建 44.1k mono SE、48k stereo BGM、44.1k stereo 静音垫）。
 - **静音开关**：缺省 `muted=1`（`--sound` 才出声）。它与 `--audio`（后端选择）**正交**：
   设备创建 / 混音器 / feeder 线程 / 格式协商 / guest 的 DirectSound 调用 / underrun·dropped
   统计**全部照跑**，只在最终交付点（`out` 生成之后、`pushMixed` 之前）把缓冲覆盖为 0。
-  怎么查：运行摘要的 `audio     :` 行有 `device=ok|fallback|none muted=1|0 muted_bytes=
+  怎么查：运行摘要的 `audio     :` 行有 `device=ok|none muted=1|0 muted_bytes=
   fills= fill_bytes=`；`muted_bytes == mixed > 0` = "确实有内容被静音"，
-  `muted_bytes=0` 且 `device=none` = "没有交付 / 没有设备"。`begin()` 的 Info 行也会写
+  `muted_bytes=0` 且 `device=none` = "没有交付 / 没有设备"（`--audio sdl` 打不开设备也是这一格，
+  ⛔ 不再有 `device=fallback`）。`begin()` 的 Info 行也会写
   `muted=1（缺省；--sound 可听）`。⛔ 要看 dump 里的 PCM 必须带 `--sound`（缺省时 dump 也全 0，
   因为门在 `pushMixed` 之前的唯一交付点）。
 - **通知/游标**：每条缓冲的 `played` 以它自己的 `nAvgBytesPerSec` 折算；通知按位置排序后入队

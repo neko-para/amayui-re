@@ -491,7 +491,7 @@ void AotHost::printReadout(std::FILE* out, bool region_log) const {
                  cpu_.fonts != nullptr ? "yes" : "no",
                  // ★ 读**配置**事实（`configuredMode()`），不是 `mode()`：readout 打在 `run()` 的
                  //   `begin()` **之前**，那时 `mode_` 还是 Off ⇒ 用 `mode()` 会让 `--audio sdl`
-                 //   的 bring-up 读数写一句假的 `audio=off`（真实的档位 / `device=ok|fallback`
+                 //   的 bring-up 读数写一句假的 `audio=off`（真实的档位 / `device=ok|none`
                  //   在收口的 `audio     :` 一行）。缺省档两者同为 `off` ⇒ 默认档读数逐字不变。
                  cpu_.audio != nullptr ? audioModeName(audio_.configuredMode()) : "no");
     std::fprintf(out, "owner     : cpu.machine=nullptr（AOT 有意没有 Machine）+ cpu.host=this\n");
@@ -628,14 +628,17 @@ void AotHost::printRunSummary(const AotRunResult& r, std::FILE* out) const {
                  static_cast<unsigned long long>(seh_.raiseCount()),
                  static_cast<unsigned long long>(seh_.handlerCalls()),
                  static_cast<unsigned long long>(seh_.unhandledCount()));
-    // ---- S2 的**机械判据**：音频**启用**时打一行与解释器 `machine.cpp:2955` 同形的 `audio     :`
-    //   （`mode` / `device=ok|fallback|none` / `muted` / fills / pushed / underruns / …）。
-    //   ★ **只有在 `enabled()` 时**才打：缺省档（`--audio off`，包括不给任何音频 flag）**一行都不打**
+    // ---- S2 的**机械判据**：音频**被请求**时打一行与解释器 `machine.cpp:2955` 同形的 `audio     :`
+    //   （`mode` / `device=ok|none` / `muted` / fills / pushed / underruns / …）。
+    //   ★ 门是 `audioRequested()`（不是 `enabled()`）：`--audio sdl` 打不开设备时 `enabled()` 为假、
+    //     但这一跑**要过**音频 ⇒ 摘要仍要如实写 `mode=off device=none muted=1`（⛔ 不许把
+    //     "没有输出"静默成"没要音频"）。缺省档（不给任何音频 flag）两门同为假 ⇒ **一行都不打**
     //     ⇒ 默认档 stdout 与改动前逐字相同（`AGENTS.md` §12.8 第 3 条 / 本单最硬的一条）。
     //   ★ 一次性输出（不是周期性）：落点与 `--profile` 块同处"stdout 末尾"的前一刻。
-    if (audio_.enabled()) {
+    if (audio_.audioRequested()) {
         audio_.dumpSummary(out);
-        // ---- S3 泵的读数（**只在音频开启时打**；off 档这一行不存在 ⇒ 默认档 stdout 逐字不变）----
+        // ---- S3 泵的读数（同样受 `audioRequested()` 门；`--audio sdl` 打不开设备时它照打，
+        //   `calls=0 fills=0` = 没有输出、泵没跑 —— 与"跑过但没喂到"是两回事）----
         //   为什么要另起一行而不塞进上面那行：`dumpSummary` 是**解释器与 AOT 共用**的一份口径
         //   （`machine.cpp:2955` 也在用），改它的字段顺序会让两条臂的 `audio     :` 行不可比；
         //   而 `calls=`（真调 pump 的次数）是 AOT 臂独有的量。⇒ 追加一行，⛔ 不动那一行。

@@ -10,7 +10,7 @@
 | 谁填 guest 环 | feeder 线程（guest 的 `0x004B5AA0` 线程体） | 主线程在块边界调 `AudioEngine::pump()` |
 | 预读 lead | `kThreadLeadBytes` = **100 ms**（19200 B） | `kLeadBytes` = **600 ms**（115200 B） |
 | 延迟量级 | ~100 ms | **~600 ms**（D 在一次 fill 期间暂停混音 ⇒ lead 必须撑过整刀 fill；`audio.cpp:42-47` 注释自述） |
-| AOT 现状（2026-11-17 起） | **可达**（`--audio sdl`；`feeder=host-thread`） | 仅 `--audio virtual` / 设备回退 |
+| AOT 现状（2026-11-17 起） | **可达**（`--audio sdl`；`feeder=host-thread`） | 仅 `--audio sdl` 无墙钟（headless）；设备打不开 ⇒ **没有输出、不跑混音** |
 | AOT 现状（2026-11-17 之前） | 不可达（`has_machine` 门；BUG-29） | 恒 |
 
 ★ `lead` 是**预读字节数**，不是设备缓冲：它决定"这一刀 fill 之前先垫多少声音"，也就直接决定音效从 `Play` 到听见的间隔。
@@ -23,9 +23,12 @@
 
 ## 2.1 现状（2026-11-17 起）
 
-AOT 臂 `--audio sdl` = **真 feeder 线程**（`feeder=host-thread`，lead 19200 B）；`--audio virtual` 仍 D 泵（lead 115200 B）。
-判据的唯一一份在 `runtime/audio_policy.h`（`audioThreadMode()` 两个事实 + `leadBytesFor()`），
-"能起 feeder"由 `attach(..., const GuestLayout&)` 的引用入参在编译期钉死（⛔ 不是运行时能力位）。
+AOT 臂 `--audio sdl` = **真 feeder 线程**（`feeder=host-thread`，lead 19200 B）；没有墙钟的 sdl
+（headless）仍 D 泵（lead 115200 B）。★ `virtual` 档**已于 2026-11-22 整档移除**（用户口径：
+"从来就没法有效使用过，保留还会影响判断" —— 它没有 feeder 线程，走主线程 D 泵，看起来像产品态
+音频，会让人按它读读数）。判据的唯一一份在 `runtime/audio_policy.h`（`audioThreadMode()` 两个事实 +
+`leadBytesFor()`），"能起 feeder"由 `attach(..., const GuestLayout&)` 的引用入参在编译期钉死
+（⛔ 不是运行时能力位）。
 
 | 量 | 改前（AOT 恒 D 泵） | 改后（feeder 线程） |
 |---|---|---|
@@ -62,7 +65,9 @@ audio-pump: calls=0 fills=3 fill_bytes=288000 pushed=428800 feeder=host-thread l
 ★ 判据 = `pushed - played`（稳态等于预读 lead）⇒ 上例 `428800 - 409600 = 19200 B = 100.0 ms`。
 ★ `calls=0` 是 **thread 档的正常读数**（主线程一次都不泵），⛔ 不要拿它当"没跑音频"。
 ★ `dev_frames` 是 SDL 设备缓冲，与 lead **两笔账**（提前垫多少 / 设备一次取走多少），⛔ 不要相加成"总延迟"。
-◆ 设备打不开 ⇒ 回退 `virtual` ⇒ 自然是 D 泵（`lead=115200 B`）：那时只记"真设备档未测"，⛔ 不要放宽谓词。
+◆ 设备打不开 ⇒ **没有音频输出**：不跑混音，摘要写 `mode=off device=none muted=1`（`--audio-dump`
+另给时 dump 这一路继续，仍报 `device=none`）。那时只记"真设备档未测"，⛔ 不要放宽谓词，
+⛔ 也不要再找一个"设备无关的档位"来顶替（原 `virtual` 档已于 2026-11-22 移除）。
 
 ## 4. 吞吐读数（2026-11-17 / mac arm64 M3 / 转场 90 s / `--audio sdl --sound`）
 

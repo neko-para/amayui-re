@@ -3,7 +3,7 @@
 // 判据（红了意味着什么）：
 //   ① `--audio sdl` 的生命周期在**真设备**上成立：`configure(Sdl, <dump>, /*sound=*/true)` + `begin()`
 //      之后 `mode() == Sdl` **且** `snapshot().device == "ok"`（= SDL 设备真的打开了）。
-//      红了 ⇒ "sdl 档能跑"只剩"进程没崩"这一句：设备其实没开（退回 virtual / 或根本没打开）。
+//      红了 ⇒ "sdl 档能跑"只剩"进程没崩"这一句：设备其实没开（落回 off / 或根本没打开）。
 //      ⛔ 判据**不是**退出码 0，也⛔ 不是 "output 非空"。
 //   ② `--sound` 的静音门在真设备档下是开的（`muted() == false`）；同一台引擎改成 `sound=false`
 //      再配置一次 ⇒ `muted() == true`（反相，钉住"开关真的进 mute_"）。
@@ -37,7 +37,7 @@ namespace fs = std::filesystem;
 
 // ★ **先自己探一次设备**，把"本机没有设备"与"引擎打不开设备"分成两件事：
 //   探针打不开 ⇒ SKIP 77（真的没设备）；探针打得开而引擎没开 ⇒ **红**（引擎路径坏了）。
-//   ⛔ 直接靠"引擎退回 virtual 就 skip"会把一个坏掉的 `openSdl()` 伪装成"本机没声卡"。
+//   ⛔ 直接靠"引擎退回 off 就 skip"会把一个坏掉的 `openSdl()` 伪装成"本机没声卡"。
 bool probeSdlAudioDevice() {
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) return false;
     SDL_AudioSpec spec{};
@@ -107,7 +107,7 @@ int main() {
         return lift_test::finish("audio-sdl-device");
     }
     // ★ 探针已经证明这台机器有设备 ⇒ **这里不再有 skip 分支**：引擎必须报 `mode=sdl device=ok`。
-    //   引擎退回 `Virtual`（`sdl_fallback_`）⇒ 直接红（那是实现坏了，不是机器没声卡）。
+    //   引擎打不开设备（落回 `Off`，`sdl_open_failed_`）⇒ 直接红（那是实现坏了，不是机器没声卡）。
     LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(a.mode()), static_cast<std::uint32_t>(lift::AudioMode::Sdl));
     // ★ 机械判据 = `device=ok`（"有输出"的那一面），⛔ 不是"进程没崩"。
     LIFT_CHECK(std::strcmp(a.snapshot().device, "ok") == 0);

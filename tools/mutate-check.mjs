@@ -2286,6 +2286,28 @@ const MUTATIONS = [
   },
 
   {
+    // ★ 代表 "AOT 臂的 `rep movs*` / `rep stos*` 快路径**判定被用反**" 这一类错。
+    //   判据：`apps/emulator-lift/tests/ops_diff.cpp` 的 5 条 `rep` 用例 —— `lift-gen` 生成的代码
+    //   vs **逐元素**解释器臂（`rep_bulk = false`）逐位差分（8 GPR / EFLAGS / 自动目标区所在的内存
+    //   窗口），**外加** lifted 臂上 `rep_bulk_hits` / `rep_bulk_declines` 的增量断言。
+    //   判定用反 ⇒ 放行的类先被快路径整段搬完、**又**走一遍逐元素循环（寄存器被推进两次）⇒
+    //   寄存器与目标区当场不同；被拦的类反过来"跳过"⇒ declines 断言也红。
+    //   ★ 为什么挑这一条（而不是 `lift_rep_bulk` 里的 `kind` 映射）：判定是发射器唯一自己写的东西 ——
+    //     闸门本身在 `rep_bulk.h`（已由上面那条 rep-bulk 条目钉住）。这条钉的是"AOT 居然**用了**
+    //     那条闸门"，也就是本单的机制本身。
+    file: 'apps/emulator-lift/src/aot/lift_gen_emit.cpp',
+    from: '        add("br i1 " + handled + ", label %" + done + ", label %" + slow);',
+    to: '        add("br i1 " + handled + ", label %" + slow + ", label %" + done);',
+    guard: 'ctest:lift-ops-diff',
+    ctest: 'lift-ops-diff',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-ops-diff',
+    what:
+      'AOT 的 `rep movs*`/`rep stos*` 快路径判定写反（放行 ⇒ 逐元素臂、拒绝 ⇒ 跳过）⇒ 放行的类' +
+      '被搬两遍：lift-ops-diff 的 5 条 rep 用例与 hits/declines 断言当场红',
+  },
+
+  {
     // ★ 代表 "x87 override 的运算顺序 / `fchs` 被弄丢" 这一类错（REQ-01M6NZSAAD0WCNBE3RKMFF84R5）。
     //   判据：`apps/emulator-lift/tests/native_override_assets.cpp` 的 ④ = `sub_4CCC60` 的**函数级真字节
     //   两臂**（同一份 guest 机器码跑解释器当 oracle，再跑 native 实现；比 dst / 寄存器 / x87 状态字）。
@@ -3733,6 +3755,22 @@ const MUTATIONS = [
       '`--audio sdl` 被解析成 `Off`（"认不出就当 off"）⇒ 用户以为开了真设备、其实整条音频是关的，' +
       '而**没有任何症状** ⇒ `aot-audio-flags` 的解析断言红',
   },
+  {
+    // S1（2026-11-22）：已移除的 `--audio virtual` 被**收回来** ⇒ 一个没有 feeder 线程的
+    //   假产品态回来了，而且退出码是 0（用户/agent 会把它当"产品态音频"读读数）。
+    file: 'apps/emulator-lift/src/runtime/audio_policy.h',
+    from: '    if (audioTextEquals(value, "sdl")) return {true, AudioMode::Sdl, nullptr};',
+    to:
+      '    if (audioTextEquals(value, "virtual")) return {true, AudioMode::Off, nullptr};  // 变异：收回已移除的档位\n' +
+      '    if (audioTextEquals(value, "sdl")) return {true, AudioMode::Sdl, nullptr};',
+    guard: 'ctest:cli-aot-flags',
+    ctest: 'cli-aot-flags',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-cli-aot-flags',
+    what:
+      '`--audio virtual` 又被 `parseAudioMode` 接受（档位当 off）⇒ 那个**没有 feeder 线程**的假产品态' +
+      '回来了（exit 0）⇒ `cli-aot-flags` 的 `audio-virtual-rejected` 红（要 exit 2 + 点名 off / sdl）',
+  },
   // ── D3DX surface 拷贝（SC0000 第 1 步；守卫 = `tests/d3dx9_load_surface.cpp`，CTest `d3dx9-load-surface`）──
   //   ★ 这三条代表同一类错：**"看起来拷了、其实错了"** —— 半开当闭区间（多拷一圈）、尺寸不等硬拷（内容错）、
   //     跨序不换 R/B（红蓝互换）。三者都不崩、不改指纹，只有逐像素断言能抓。
@@ -3907,8 +3945,8 @@ const MUTATIONS = [
     buildTarget: 'lift-aot-audio-wiring',
     what:
       'AOT 臂 `--sound` 不进 `AudioEngine::configure`（传死 false）⇒ 摘要里 `audio : … muted=1`，' +
-      '而 `kAotSoundNotice` 照旧声明 `muted=0` ⇒ `aot-audio-wiring` 的 `sound-virtual` / `sound-dump` 红' +
-      '（实测 2 failures；`virtual-no-sound` 对照组仍绿 ⇒ 红的方向唯一）',
+      '而 `kAotSoundNotice` 照旧声明 `muted=0` ⇒ `aot-audio-wiring` 的 `sound-dump` 红' +
+      '（`dump-no-sound` 对照组仍绿 ⇒ 红的方向唯一）',
   },
   // ── S2 虚拟音频档的交付游标（`REQ-01M7K2J7FP60YHNGTEFR5EGGA7`）──
   //   ★ 判据：虚拟档的 `played_` 必须相对**这一轮引擎的起点**（`begin()` 记的 `origin_100ns_`），
