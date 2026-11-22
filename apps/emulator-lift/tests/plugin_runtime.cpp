@@ -252,6 +252,21 @@ void dumpFail(const Fixture& f) {
                  f.host->failReason().c_str());
 }
 
+// ★ 脚本化的夹具**没有"进屏"这一步** ⇒ 必须把读档界面的**页号**（guest int global `0x138e`）种成
+//   **目标页**，否则 `save.js` 的 `readSavePage` 读到的不是 0：槽里存的是 `ENC(value, key)`，
+//   而零内存 ≠ 明文 0（`ENC(0) = key`）⇒ 它会去点左右箭头翻页 ⇒ 整条脚本链的坐标/拍数全部错位。
+//   真机那条路上这个 global 由 `SAVE.BIN` 第 11 行 `load-int` 写（见 `save-format.md` §加载界面的列表与翻页）。
+constexpr std::uint32_t kSavePageGlobalId = 0x138eu;
+
+void seedSavePage(Fixture& f, std::uint32_t page) {
+    lift::GlobalValue v;
+    v.kind = lift::GlobalKind::Int;
+    v.u32 = page;
+    lift::GlobalError err = lift::GlobalError::None;
+    LIFT_CHECK(lift::writeGlobal(f.mem, kSavePageGlobalId, lift::GlobalKind::Int, v, &err));
+    LIFT_CHECK(err == lift::GlobalError::None);
+}
+
 // =====================================================================================
 // `plugin/api-surface`
 // =====================================================================================
@@ -467,6 +482,7 @@ int chainRowY(int slot) {
         std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
         return -1;
     }
+    seedSavePage(f, static_cast<std::uint32_t>(slot / 10));  // 已停在目标页 ⇒ 不翻页（链形状见文件头）
     const int row_y = driveToSbunki(f);
     if (row_y < 0) return -1;
     // ⑥ FIELD 读点：② 提升 click(640,323) → ③ 命中 FIELD 终态（done）→ ⑥ click 落地。
@@ -509,6 +525,7 @@ void caseFieldTerminal() {
         std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
         return;
     }
+    seedSavePage(f, 0);  // 槽 5 在页 0；夹具直接停在目标页（不翻页）
     if (driveToSbunki(f) < 0) return;
     // 终态 = FIELD：位置故意落在 SBUNKI 0x0AF8 区间里（终态由 script 名决定，不由位置决定）。
     f.readings.script = "FIELD.BIN";
@@ -552,6 +569,7 @@ void caseSecondConfirm() {
         std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
         return;
     }
+    seedSavePage(f, 0);  // 槽 5 在页 0；夹具直接停在目标页（不翻页）
     if (driveToSbunki(f) < 0) return;
     int cx = 0;
     int cy = 0;
@@ -595,7 +613,9 @@ void caseBadSlot() {
         const char* needle;
     };
     const BadSlot bad[] = {
-        {"9", "slot 9"}, {"-1", "slot -1"}, {"1.5", "slot 1.5"}, {"abc", "slot NaN"},
+        // ★ `9` 在 2026-11-22 之后**是合法槽**（读档界面 90 页 × 10 行 ⇒ 0..899；见 `save.js` 的 `MAX_SLOT`）
+        //   ⇒ 越界边界挪到 900。
+        {"900", "slot 900"}, {"-1", "slot -1"}, {"1.5", "slot 1.5"}, {"abc", "slot NaN"},
     };
     for (const BadSlot& b : bad) {
         Fixture f;
@@ -728,6 +748,7 @@ void caseLoadSaveOnLoaded() {
     }
     // 载入链（TITLE → SAVE → row → SBUNKI）由库自己走；这里只喂假读数。
     // ★ 样例入口自带 `bootToTitle`（TITLE 门）⇒ 驱动方式与 `start-on-trigger-chain` 相同。
+    seedSavePage(f, 0);  // 槽 7 在页 0；夹具直接停在目标页（不翻页）
     const int row_y = driveToSbunki(f);
     if (row_y < 0) return;
     LIFT_CHECK_EQ_I64(row_y, 507);  // 槽 7（样例就是 `loadSave(7, { expect: ["FIELD.BIN"] })`）

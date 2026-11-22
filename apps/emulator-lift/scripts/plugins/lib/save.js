@@ -22,8 +22,27 @@
 //     （press 只跨 2 个读点），**读段之后** [0x0B18,0x0C58) 点 3/3 被消费。
 //     ⇒ 旧窗口 [0x09F8,0x0B18) 的落点多数落在 0x0AF8（读段首）⇒ 点击被吞、链停在那里
 //     （正是 `REQ-01M7W2X81F1ASB488EJFQGMQSH` 的签名：`gate timeout (load:field-2)`）。
-//   rowY = 实测表 {0:91,1:150,2:209,3:269,4:328,5:388,6:447,7:507}
-//          （⛔ 不是公式：7 的读数来自 `scripts/recipes/save07-battle.plan` 的槽 007；8–9 无读数 ⇒ 掷错）。
+//   rowY = 行**在页内**的 y（实测表 {0:91,1:150,2:209,3:269,4:328,5:388,6:447,7:507,8:567,9:626}；
+//          0–7 的读数来自既有配方（槽 007 = `save07-battle.plan`），9 的读数 = 截图核对
+//          `.tmp/fellow-profile/report.md`（槽 009 行中心 ≈ 626），8 = 91+59.5*8=567 与同两张截图逐行吻合）。
+//
+// ★ 2026-11-22（B 阶段）—— **`loadSave` 自己判断页**（读档界面每页 10 行；槽 010 在**第 2 页**）：
+//   页号是**可读的** guest int global `0x138e`（`./guest-globals.js` 的 `readSavePage`；0 基、0..89）。
+//   ⇒ `slot` → 目标页 `t = slot / 10`（向下取整）、页内行 `slot % 10`；进屏时先读当前页，再**翻过去**：
+//     · 翻页**只用左右大箭头**（左 `(45,357)` = −1 页、右 `(1235,357)` = +1 页，环形 0..89），
+//       方向按"更短的那一边"选（`pageStep`）。
+//     · 每点一次都**用门等页号真的变**：arm `atReadPoint`，回调里 `readSavePage`；位置动了 ⇒ 按新位置再走一步；
+//       没动满 `PAGE_STALL_LIMIT` 个读点 ⇒ 重试**一次**；再等满一次还没动 ⇒ `ctx.finish(5, …)` 响亮失败
+//       （⛔ 不假设"点一下就到下一页"、⛔ 不用 `wait`、⛔ 不无限重试）。
+//     · 页内行行为**一字不变**（0..7 既有读数照旧；8–9 是新补的行）。
+//   ★ 页的读数与取证（2026-11-22 / win32）：
+//     进屏 `global-get 0x138e` = 1 且画面 = `LOAD 010..019`；点右箭头 (1235,357) ⇒ 2 且 `020..029`；
+//     左箭头 (45,357) 2→1→0→89（`890..899`）⇒ 页是**环形** 0..89（⛔ 不是"到 0 就停"）。
+//     ⛔ **顶部页签不是页号的真源**：从页 1 点页签 0（x = 606 + 42k, y = 32），`0x138e` 连 60 个读点都还是 1
+//     （读数见 `docs/03-emulator/save-format.md` §翻页，2026-11-22；此前按"页签直接改页号"实现过一版，把 CTest
+//     `plugin-runtime` / `plugin-headless` 的 `load-save-e2e` 钉在 `page not reached (target 0, still 1)`）。
+//     ⇒ 顶部那排只影响"显示哪十年组"，⛔ 不要拿它翻页。详见 `docs/03-emulator/save-format.md`
+//     §加载界面的列表与翻页。
 //
 // ★ 2026-11-21（A 阶段）—— **两个接口，各管一件事**：
 //   · `options.expect: string[]`（**必填**）：载入完成后落在哪个脚本，由**调用方按预期给** ——
@@ -59,6 +78,7 @@
 //   本文件从"已经在 TITLE"开始 ⇒ TITLE 门在 `./boot-to-title.js` 里，不在本文件。
 import { bootToTitle } from "./boot-to-title.js";
 import { route } from "./chains.js";
+import { readSavePage } from "./guest-globals.js";
 import {
     SAVE_INPUT_CALLBACK_HI,
     SAVE_INPUT_CALLBACK_LO,
@@ -123,9 +143,28 @@ const CONFIRM_Y = 323;
 const CONFIRM2_X = 690;
 const CONFIRM2_Y = 323;
 
-// 行 y 的**实测表**（⛔ 不用 91 + 59.5*n 之类的公式猜；0–6 与 7 都有读数）。
+// 页机制（2026-11-22 实测；读数与命令见文件头）。
+const SAVE_PAGE_ROWS = 10; // 每页 10 行 ⇒ 槽 = 页 * 10 + 行
+const SAVE_PAGES = 90; // 页号 0..89（环形：0 的上一页 = 89）
+// 翻页只用**左右大箭头**（±1 页）。★ 顶部页签（x = 606 + 42k, y = 32）实测**改不动**页号：
+//   从页 1 点页签 0，`global-get 0x138e` 连 60 个读点都还是 1（读数见 `save-format.md` §翻页；
+//   同一读数让 CTest `plugin-*` 之前在 `load-save: page not reached` 上红过）⇒ 页签不是页号的真源，⛔ 不用它。
+const PAGE_PREV_X = 45; // 左侧大箭头 = 上一页（页号 −1，环形）
+const PAGE_NEXT_X = 1235; // 右侧大箭头 = 下一页（页号 +1，环形）
+const PAGE_ARROW_Y = 357;
+// 点一次箭头后等"页号真的变了"的读点上限（一个读点 ≈ 一拍输入轮询 ⇒ 60 拍 ≈ 1 s）。
+const PAGE_STALL_LIMIT = 60;
+// 点击被吞时的第二次机会（同样是 PAGE_STALL_LIMIT 个读点）。
+const PAGE_RETRY_PHASE = "turnr";
+
+// 行 y 的**实测表**（⛔ 不用 91 + 59.5*n 之类的公式猜；0–7 与 9 都有读数，8 与截图逐行吻合）。
 /** @type {Readonly<Record<number, number | undefined>>} */
-const ROW_Y = { 0: 91, 1: 150, 2: 209, 3: 269, 4: 328, 5: 388, 6: 447, 7: 507 };
+const ROW_Y = { 0: 91, 1: 150, 2: 209, 3: 269, 4: 328, 5: 388, 6: 447, 7: 507, 8: 567, 9: 626 };
+
+// 槽号上限：读档界面 = 90 页 × 10 行（页签条实测到"890"，页号 0..89 环形）⇒ 手选槽 0..899。
+// ⚠ 槽 ≥ 100 的**文件名字形**未取证（`saves/` 只到 `SAVE99`；`%2.2d` 遇 3 位数会照写）⇒ 本库只按
+//   "界面能选到的槽"放行，⛔ 不声称 SAVE100.DAT 一定能打开。
+const MAX_SLOT = 90 * SAVE_PAGE_ROWS - 1;
 
 const DEFAULT_GATE_TIMEOUT_MS = 30000;
 
@@ -136,7 +175,7 @@ const LOAD_EXPECT_PREFIX = "load:expect:";
 /**
  * 构造一条 `loadSave(slot, options)` 的 callback 链（纯函数：只读 slot / options，不读 ctx）。
  *
- * @param {number} slot 存档槽 0–7（实测行表）。
+ * @param {number} slot 存档槽（读档界面能选到的 0–899；页 = slot/10，页内行 = slot%10）。
  * @param {LoadSaveOptions | null} [options]
  *   · `expect`（**必填**）：载入完成后**可以算落点**的脚本名表（照宿主读数拼写、带 `.BIN`）——
  *     ADV = `SC*`/`SG*`/`SP*`、战斗 = `BTL.BIN`、地图 = `FIELD.BIN` …；由**调用方按预期给**。
@@ -146,10 +185,14 @@ const LOAD_EXPECT_PREFIX = "load:expect:";
  * @returns {Chain}
  */
 export function loadSave(slot, options = {}) {
-    const rowY = ROW_Y[slot];
-    if (!Number.isInteger(slot) || rowY === undefined) {
-        throw new Error(`slot ${slot} has no measured row (only integers 0-7; see SAVE.md)`);
+    if (!Number.isInteger(slot) || slot < 0 || slot > MAX_SLOT) {
+        throw new Error(`loadSave: slot ${slot} 越界（0–${MAX_SLOT}；读档界面 = 90 页 × 10 行）`);
     }
+    const rowY = ROW_Y[slot % SAVE_PAGE_ROWS];
+    if (rowY === undefined) {
+        throw new Error(`loadSave: slot ${slot} 的页内行 ${slot % SAVE_PAGE_ROWS} 没有实测 y（0–9；见 SAVE.md）`);
+    }
+    const targetPage = Math.floor(slot / SAVE_PAGE_ROWS);
     const gateTimeoutMs =
         options !== null && options.timeoutMs !== undefined ? options.timeoutMs : DEFAULT_GATE_TIMEOUT_MS;
     const onLoaded = options !== null ? options.onLoaded : undefined;
@@ -213,6 +256,75 @@ export function loadSave(slot, options = {}) {
         return onLoaded(ctx);
     };
 
+    // ---- 页：读档界面每页 10 行；槽 010 在**第 2 页**（页号 = 可读的 guest int global）------------
+    //
+    // ★ 进度**只在 `ev.name`**（宿主每回调新建实例）：页链的名字 =
+    //   `load:pg:<目标页>:<阶段>:<计数>:<上次看到的位置>` —— 全部从名字解析 ⇒ 不需要闭包 / `ctx.state`。
+    const PAGE_PREFIX = "load:pg:";
+
+    /** @type {(ctx: RunCtx, page: number, phase: string, i: number, last: number) => Trigger} */
+    const armPage = (ctx, page, phase, i, last) =>
+        ctx.trigger.atReadPoint("any", 1, {
+            name: `${PAGE_PREFIX}${page}:${phase}:${i}:${last}`,
+            timeoutMs: gateTimeoutMs,
+        });
+
+    // 页内行：move → 一个读点 → click（与 C2c 一字不变的两段形状）。
+    /** @type {(ctx: RunCtx) => Trigger} */
+    const rowMove = (ctx) => {
+        ctx.input.move(SLOT_X, rowY);
+        return ctx.trigger.atReadPoint("any", 1, { name: "load:row", timeoutMs: gateTimeoutMs });
+    };
+
+    // 往目标页**走一步**：比当前页大 ⇒ 右箭头（下一页），小 ⇒ 左箭头（上一页）；两端环形
+    //   （0 的上一页 = 89）。方向按"更短的那一边"选，⛔ 不假设"只能一步一步往前"。
+    /** @type {(ctx: RunCtx, ctxPage: number, seen: number, phase: string) => Trigger} */
+    const pageStep = (ctx, ctxPage, seen, phase) => {
+        const forward = (ctxPage - seen + 2 * SAVE_PAGES) % SAVE_PAGES;
+        const backward = (seen - ctxPage + 2 * SAVE_PAGES) % SAVE_PAGES;
+        ctx.input.click(forward <= backward ? PAGE_NEXT_X : PAGE_PREV_X, PAGE_ARROW_Y);
+        return armPage(ctx, ctxPage, phase, 0, seen);
+    };
+
+    // 页链的两个阶段（见文件头）：
+    //   turn<i>  点过箭头之后**等页号真的动**：动了 ⇒ 按新位置再走一步；没动 ⇒ 等；
+    //            等满 PAGE_STALL_LIMIT 个读点 ⇒ 再点一次（`turnr`，点击被吞的第二次机会）
+    //   turnr<i> 同上，但再等满一次就 `finish(5)` 响亮失败（⛔ 不无限重试、⛔ 不假设"点一下就到"）
+    /** @type {(ctx: RunCtx, name: string) => Trigger | Trigger[] | null} */
+    const onPageState = (ctx, name) => {
+        const parts = name.split(":"); // ["load","pg",<目标页>,<阶段>,<计数>,<上次位置>]
+        const page = Number(parts[2]);
+        const phase = parts[3];
+        const i = Number(parts[4]);
+        const last = Number(parts[5]);
+        if (!Number.isInteger(page) || !Number.isInteger(i) || !Number.isInteger(last)) {
+            ctx.fail(name, `load-save: 页状态名不合法 (${name})`);
+            return [];
+        }
+        if (phase !== "turn" && phase !== PAGE_RETRY_PHASE) {
+            ctx.fail(name, `load-save: 未知页阶段 (${name})`);
+            return [];
+        }
+        const seen = readSavePage(ctx);
+        if (seen === page) {
+            ctx.log("info", `load-save: page ${page} reached (slot ${slot} ⇒ row ${slot % SAVE_PAGE_ROWS})`);
+            // ★ 翻完页**不能马上点行**：页号在点箭头那一刻就变了，而列表要**重读这一页的 10 份存档头**
+            //   —— 刷新期间点下去会被吞（实测：page 0 到了、`click` 之后 `load:sbunki` 30 s 超时）。
+            //   所以再等一道"SAVE 的回调体又活了"的位置门（列表刷完、在等输入），然后才 move/click。
+            return ctx.trigger.afterPosition(SCRIPT_SAVE, SAVE_INPUT_CALLBACK_LO, SAVE_INPUT_CALLBACK_HI, {
+                name: "load:page-ready",
+                timeoutMs: gateTimeoutMs,
+            });
+        }
+        // 位置**动了**（或第一次进这个阶段：last = -1）⇒ 立刻按新位置再走一步。
+        if (seen !== last) return pageStep(ctx, page, seen, phase);
+        if (i < PAGE_STALL_LIMIT) return armPage(ctx, page, phase, i + 1, last);
+        // 等满了还没动：第一次 ⇒ 重试一次（点击可能被吞）；第二次 ⇒ 响亮失败。
+        if (phase === "turn") return pageStep(ctx, page, seen, PAGE_RETRY_PHASE);
+        ctx.finish(5, `load-save: page not reached (target ${page}, still ${seen})`);
+        return [];
+    };
+
     return {
         start(ctx) {
             // ★ **前提：已经在 TITLE**（文件头）。这里不再等 TITLE —— 直接点 LoadData 入口，
@@ -232,10 +344,18 @@ export function loadSave(slot, options = {}) {
                 return [];
             }
             switch (ev.name) {
-                case "load:save":
+                case "load:save": {
                     ctx.log("info", "load-save: SAVE hit");
-                    ctx.input.move(SLOT_X, rowY);
-                    return ctx.trigger.atReadPoint("any", 1, { name: "load:row", timeoutMs: gateTimeoutMs });
+                    // ★ 页号**可读**（`readSavePage`）：先读当前页，再决定要不要翻。
+                    const seen = readSavePage(ctx);
+                    ctx.log("info", `load-save: page ${seen} (target ${targetPage}, slot ${slot})`);
+                    if (seen === targetPage) return rowMove(ctx);
+                    // 不在目标页 ⇒ 走箭头（±1 页、环形）；`last = -1` ⇒ 第一拍就点（见 `onPageState`）。
+                    return armPage(ctx, targetPage, "turn", 0, -1);
+                }
+                case "load:page-ready":
+                    // 列表刷完了（SAVE 的回调体又活了）⇒ 现在才 move/click 那一行。
+                    return rowMove(ctx);
                 case "load:row":
                     ctx.log("info", "load-save: row hovered");
                     ctx.input.click(SLOT_X, rowY);
@@ -257,6 +377,10 @@ export function loadSave(slot, options = {}) {
                     ctx.input.click(CONFIRM2_X, CONFIRM2_Y);
                     return terminalAfterConfirm(ctx);
                 default:
+                    // ★ 页链（`load:pg:<目标页>:<阶段>:<计数>`）——进度全在名字里。
+                    if (ev.name.startsWith(PAGE_PREFIX)) {
+                        return onPageState(ctx, ev.name);
+                    }
                     // ★ 终态：`load:expect:<脚本名>`（脚本名 = 调用方给的 `expect` 元素）。
                     if (ev.name.startsWith(LOAD_EXPECT_PREFIX)) {
                         return reached(ctx, ev.name.slice(LOAD_EXPECT_PREFIX.length));

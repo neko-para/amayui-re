@@ -7,8 +7,8 @@
 //   ③ stderr 里**没有** `render is defined but no window`（本夹具没有 render）——它只该在
 //      `--plugin` 带 render + headless 时出现一次（D-C2-5）；
 //   ④ `plugin    : ` **只出现一次**（⛔ 不是每帧 / 每读点一行；AGENTS §12.8 第 3 条）。
-//   ⑤ `plugin/load-save-e2e`（C2c）：真库 `scripts/plugins/lib/save.js` + `--plugin-param slot=5`
-//      走完整条链；判据 = readout `run=done` / `params=…slot=5` / `expect` 生效 / `calls ∈ {6,7}`（D2c-2：第二道
+//   ⑤ `plugin/load-save-e2e`（C2c）：真库 `scripts/plugins/lib/save.js` + `--plugin-param slot=15`
+//      走完整条链；判据 = readout `run=done` / `params=…slot=15` / `expect` 生效 / `calls ∈ {6,7}`（D2c-2：第二道
 //      确认也是合法终态）+ stderr 终态日志含 **FIELD** + 无 `run failed`（⛔ 不看 exit code）。
 //
 // ★ 缺执行源 / 安装树 / GPU / 宿主字体 ⇒ `LIFT_SKIP(77)`（⛔ 不假绿；输入假定在场）。
@@ -169,12 +169,18 @@ int main(int argc, char** argv) {
         LIFT_CHECK(q.out.find("input-plan: quit") == std::string::npos);
     }
 
-    // ---- ⑥ C2c `plugin/load-save-e2e`：真库 `lib/save.js` + `--plugin-param slot=5 expect=FIELD,SC0000` ----
+    // ---- ⑥ C2c `plugin/load-save-e2e`：真库 `lib/save.js` + `--plugin-param slot=15 expect=FIELD,SC0000` ----
     //   判据 = **stdout 的一次性 readout**（⛔ 不是 exit code：`ctx.finish` 不改进程 exit，且
-    //   `--time-limit 90` 是正常结局）：`run=done` + `params=expect=FIELD,SC0000,slot=5` + `calls ∈ {6,7}`；
+    //   `--time-limit 90` 是正常结局）：`run=done` + `params=expect=FIELD,SC0000,slot=15` + `calls ∈ {6,7}`；
     //   stderr 的终态日志（`ctx.log`）必须点名 **FIELD**，且**没有** `run failed`；readout 只一行。
     //   红了 ⇒ 某道门没命中 / 坐标错（hang 成 `run=failed reason=…gate timeout`）—— 纯档的
     //   `plugin-runtime` 已经钉住链形状，这里钉"真 guest 里这条链真的走到 FIELD"。
+    //   ★ 为什么是 **15**（不是 5）：`saves/SAVE.DAT` 现在持久化**页 1**（2026-11-22 入库）⇒ 槽 5 在
+    //     页 0，要先翻页；而 `calls ∈ {6,7}` 钉的是**不翻页**那条链的形状（6 = 点完 640,323 直接 FIELD、
+    //     7 = 多一道 SBUNKI 第二确认），翻页会把 calls 抬到 100+（每个读点一次回调）⇒ 判据失去意义。
+    //     所以夹具把**同一份存档**（SAVE05）再放到 `SAVE15`（页 1 第 5 行 = 进屏那一页）⇒ 链形状不变、
+    //     载入内容也不变。翻页路径的端到端读数见 `defects.md#BUG-39`，
+    //     ⛔ 不把"再回归一遍翻页"做进默认门禁（业务正确性不作判据）。
     g_current_case = "plugin/load-save-e2e";
     {
         // `.tmp/` 私有 appdata：`saves/` **只读**，照 `apps/emulator-lift/scripts/clean-appdata.sh` 复制。
@@ -202,6 +208,17 @@ int main(int argc, char** argv) {
         LIFT_CHECK(!copy_ec);
         LIFT_CHECK(copied > 0);
 
+        // ★ 同一份存档放进 `SAVE15`（页 1 第 5 行 = 进屏那一页）⇒ 载入同内容，但**不用翻页**
+        //   （理由见上面 ⑥ 的注释：`calls ∈ {6,7}` 只描述不翻页那条链）。
+        for (const char* suffix : {".DAT", ".STH"}) {
+            const fs::path src = saves_dir / (std::string("SAVE05") + suffix);
+            if (!fs::exists(src)) continue;
+            std::error_code cp_ec;
+            fs::copy_file(src, guest_save_dir / (std::string("SAVE15") + suffix),
+                          fs::copy_options::overwrite_existing, cp_ec);
+            LIFT_CHECK(!cp_ec);
+        }
+
         const std::vector<std::string> load_args = {
             "--exe",
             pathToUtf8(age_exe),
@@ -219,9 +236,9 @@ int main(int argc, char** argv) {
             "--plugin",
             pathToUtf8(save_js),
             "--plugin-param",
-            "slot=5",
+            "slot=15",
             // ★ A 阶段裁决：终态由**调用方**给（`save.js` 不再内置 FIELD/SC0000）⇒ 这里显式给。
-            //   slot 5 的存档落在 FIELD；SC0000 是另一类 ADV 落点（保留在期望表里不影响本用例）。
+            //   slot 15 的存档（= SAVE05 的副本）落在 FIELD；SC0000 是另一类 ADV 落点（保留不影响本用例）。
             "--plugin-param",
             "expect=FIELD,SC0000",
         };
@@ -247,7 +264,7 @@ int main(int argc, char** argv) {
         const bool reached_field = ls.out.find("plugin    : ") != std::string::npos &&
                                    ls.out.find("entry=default") != std::string::npos &&
                                    ls.out.find("callbacks=yes") != std::string::npos &&
-                                   ls.out.find("slot=5") != std::string::npos &&
+                                   ls.out.find("slot=15") != std::string::npos &&
                                    ls.out.find("expect=FIELD,SC0000") != std::string::npos &&
                                    ls.out.find("run=done") != std::string::npos &&
                                    ls.out.find("run=failed") == std::string::npos &&
