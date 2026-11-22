@@ -152,7 +152,28 @@ public:
     //   · 队列空且 `postQuitMessage` 过 ⇒ `WM_QUIT` 是**队尾**的一条虚拟消息（与 `peekAt` 同形），
     //     它也参与 `pred` 匹配；`remove == true` 时消费掉它。
     //   ⛔ 不实现成"逐条取走不匹配的"：那条路会静默丢消息（本单修的正是它）。
-    bool peekMatching(const std::function<bool(const WinMessage&)>& pred, WinMessage* out, bool remove);
+    // ★ lift-opt #8（2026-11-22）：过滤条件收进一个 **POD**（三个 `uint32`）⇒ 热路径
+    //   （`PeekMessageA`，FELLOW 切换帧里 162,450 次）不再每次构造/析构一个 `std::function`。
+    //   ★ 为什么是"具体类型"而不是模板：**循环体只有一份、留在 `.cpp` 里**（`peekMatching`）——
+    //     模板化会把那 12 行搬到头文件（于是 `tools/mutate-check.mjs` 里"过滤不匹配也 pop"那条
+    //     变异锚就失配了，而那条锚必须钉在**活代码**上）。谓词语义与 `PeekMessageA` 的文档一一对应：
+    //     `hwnd != 0` ⇒ 只匹配该窗口；`min != 0` ⇒ `message >= min`；`max != 0` ⇒ `message <= max`。
+    struct MessageFilter {
+        std::uint32_t hwnd = 0;
+        std::uint32_t min = 0;
+        std::uint32_t max = 0;
+        // 旧接口 `peekMatching(const std::function<…>&)` 的 `if (pred && …)` 形状保留：这个对象
+        // **永远**是一个有效谓词（"空 `std::function` = 匹配一切"的那条路不再需要 —— 调用方只有
+        // `PeekMessageA`，它总是给三个真过滤值）。
+        explicit operator bool() const { return true; }
+        bool operator()(const WinMessage& m) const {
+            if (hwnd != 0 && m.hwnd != hwnd) return false;
+            if (min != 0 && m.message < min) return false;
+            if (max != 0 && m.message > max) return false;
+            return true;
+        }
+    };
+    bool peekMatching(const MessageFilter& pred, WinMessage* out, bool remove);
     // 只看第 index 条（0 = 队首），**不取走**。`MsgWaitForMultipleObjects` 要"扫描整个队列找匹配
     // 唤醒掩码的消息"，只看队首会让"不匹配的消息挡在前面"时误报 WAIT_TIMEOUT。
     bool peekAt(std::size_t index, WinMessage* out) const;

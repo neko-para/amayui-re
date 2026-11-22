@@ -569,6 +569,24 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         slot.second += delta;
     };
 
+    // ★ lift-opt #5（2026-11-22）：派发序言的**循环不变量外提** + 门重排。
+    //   · `opts` 是 `const AotRunOptions&`（`run()` 的签名）⇒ 循环体**不可能**改它；
+    //     `time_limit_sec / until_ea / max_insns / stop_requested` 对整轮 run 是常量
+    //     ⇒ 每派发省 4-6 次 load（旧形状每次都读）。
+    //   · `audio_.enabled()` == `mode_ != AudioMode::Off`，而 `mode_` **只**在 `begin()`（在循环之前）
+    //     与 `end()`（在循环之后）里被写（`audio.cpp:186` 的 Sdl⇒Virtual 回退也在 `begin()` 内）
+    //     ⇒ 对整轮 run 是常量。⛔ 注意：外提的只是这一个 bool；`facts` 的计算仍在 if **里面**
+    //     （off 档的罚金必须仍是"零"级，见下面的长注释）。
+    //   · 两个**一次性 latch**（④ recovery / ④' skip-logo）合成一个 bool：两者都是"命中一次就
+    //     再也不看"的判据，中间没有能改它们的语句 ⇒ 一次 load 代替三次。
+    const bool has_time_limit = opts.time_limit_sec > 0.0;
+    const bool has_until = opts.until_ea != 0;
+    const std::uint32_t until_ea = opts.until_ea;
+    const std::uint64_t max_insns = opts.max_insns;
+    const bool* const stop_requested = opts.stop_requested;
+    const bool audio_enabled = audio_.enabled();
+    bool one_shot_pending = !recovery_bypass_checked_ || (skip_logo_ && !skip_logo_checked_);
+
     for (;;) {
         // ★ 窗口 profile 的**第一个**取时点（`win_.on` 为假时这一步只付一次 bool 读）：
         //   `t_a` = 块顶（= boundary 桶的起点），`t_b` 在分派前取（见 ⑥ 之前）。
@@ -596,29 +614,33 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         //     `cpu_`）⇒ 返回后**不需要**反向同步；下一块从内存重新加载，写完立刻可见。
         //     暂停对 guest 不可见（寄存器现场没被改）。
         //   ★ 返回 true = 已置停（客户端 `quit` / idle / orphan）⇒ 立即收口，⛔ 不再进下一块。
-        if (control_ != nullptr &&
-            (control_->pending() || (control_->watching() && cpu_.insns >= next_control_check))) {
-            Control::Context gate_ctx;
-            gate_ctx.clock = &clock_;
-            gate_ctx.windows = &windows_;
-            gate_ctx.stop_requested = &control_stop_;
-            gate_ctx.paused_at = "block";
-            gate_ctx.host = this;
-            if (control_->serve(gate_ctx)) {
+        //   ★ lift-opt #5：两次 `control_ != nullptr` 判空合并成一层（两次判空之间没有任何
+        //     能改 `control_` 的语句）⇒ 每派发省一次 load + 一次分支。判据与顺序逐字不变：
+        //     先「重停谓词」，再「置停标志」。
+        if (control_ != nullptr) {
+            if (control_->pending() || (control_->watching() && cpu_.insns >= next_control_check)) {
+                Control::Context gate_ctx;
+                gate_ctx.clock = &clock_;
+                gate_ctx.windows = &windows_;
+                gate_ctx.stop_requested = &control_stop_;
+                gate_ctx.paused_at = "block";
+                gate_ctx.host = this;
+                if (control_->serve(gate_ctx)) {
+                    r.reason = AotStop::Stopped;
+                    r.detail = "control: quit";
+                    cpu_.running = false;
+                    break;
+                }
+                next_control_check = cpu_.insns + kCheckStride;
+            }
+            // ★ 置停可能发生在**上一个块边界之后**（Present 闸门里的 `quit` / idle / orphan）：
+            //   块边界读一次 bool（`control_ == nullptr` 时连这一读都不付）⇒ 立即收口，⛔ 不再进下一块。
+            if (control_stop_) {
                 r.reason = AotStop::Stopped;
                 r.detail = "control: quit";
                 cpu_.running = false;
                 break;
             }
-            next_control_check = cpu_.insns + kCheckStride;
-        }
-        // ★ 置停可能发生在**上一个块边界之后**（Present 闸门里的 `quit` / idle / orphan）：块边界
-        //   读一次 bool（`control_ == nullptr` 时连这一读都不付）⇒ 立即收口，⛔ 不再进下一块。
-        if (control_ != nullptr && control_stop_) {
-            r.reason = AotStop::Stopped;
-            r.detail = "control: quit";
-            cpu_.running = false;
-            break;
         }
 
         // ---- ⓪ 外部停止请求（`--input-plan` 的 `quit`；`AotRunOptions::stop_requested`）----
@@ -627,7 +649,7 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         //     不等它的理由：guest 的停机路径可能不在闭包里（实测 WM_QUIT 之后停在 `00513B90`
         //     ⇒ `decode-error`，退出码 2），那与"quit 是正常结局"这条语义冲突。
         //   ★ 判据只读一个 bool（读点在主线程写、这里主线程读）⇒ 缺省 nullptr 时是一条判空。
-        if (opts.stop_requested != nullptr && *opts.stop_requested) {
+        if (stop_requested != nullptr && *stop_requested) {
             r.reason = AotStop::Stopped;
             // ★ 归因（C2a）：唯一生产者 = `--input-plan` 的 `quit` 或 `--plugin` 的 `ctx.quit()`
             //   （两者互斥）。缺省 `stop_detail == nullptr` ⇒ **逐字**保持旧文本。
@@ -637,7 +659,8 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         }
 
         // ---- ① `--time-limit`（每 4096 条查一次墙钟；machine.cpp:1148-1157）----
-        if (opts.time_limit_sec > 0.0 && cpu_.insns >= next_time_check) {
+        //   ★ lift-opt #5：`time_limit_sec > 0.0` 外提到循环外 ⇒ 每派发只剩一次整数比较。
+        if (has_time_limit && cpu_.insns >= next_time_check) {
             const auto now = std::chrono::steady_clock::now();
             // ★ 暂停不是运行时间（父级 2026-11-16 裁决 / 判据 6）：`--time-limit` 与 guest 时钟同口径
             //   扣掉累计暂停。没有暂停过 ⇒ `pausedTotalMs() == 0` ⇒ 与改动前逐位等价。
@@ -657,8 +680,12 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         //   ⛔ 嵌套 guest 调用（或 SEH 派发）进行中不泵：那一刻正在跑另一段 guest 代码，插一个
         //   WndProc 帧会改坏它仍活着的上下文（真机上它们是两个线程）。
         {
-            const bool nested_guest_active = calls_.active() || seh_.busy();
-            if (!nested_guest_active && presenter_.hasSink() && cpu_.insns >= next_present_check) {
+            // ★ lift-opt #5：门重排 —— 先比 `insns`（每 kCheckStride 条才成立一次）⇒ 绝大多数
+            //   迭代从"3 次成员读 + 1 次比较"降到"1 次比较 + 1 次分支"。
+            //   三项都是**纯读、无副作用**（`calls_.active()` / `seh_.busy()` / `hasSink()`），
+            //   短路顺序的交换不改变任何结果；`seh_.busy()` ⛔ 仍然每轮**现读**（不缓存）。
+            if (cpu_.insns >= next_present_check && !(calls_.active() || seh_.busy()) &&
+                presenter_.hasSink()) {
                 presenter_.pumpHostEvents();
                 if (presenter_.stopRequested()) {
                     r.reason = AotStop::Stopped;
@@ -704,15 +731,22 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         }
 
         // ---- ③ `--until` / `--max-insns`（块边界；machine.cpp:1356-1363）----
-        if (opts.until_ea != 0 && ea == opts.until_ea) {
+        //   ★ lift-opt #5：`until_ea` / `max_insns` 外提到循环外（`opts` 是 const 引用）。
+        if (has_until && ea == until_ea) {
             r.reason = AotStop::UntilEa;
             break;
         }
-        if (opts.max_insns != 0 && cpu_.insns >= opts.max_insns) {
+        if (max_insns != 0 && cpu_.insns >= max_insns) {
             r.reason = AotStop::MaxInsns;
             break;
         }
 
+        // ★ lift-opt #5：两个**一次性 latch** 合成一个 bool 门（`one_shot_pending`）。
+        //   为什么等价：两者都是"命中一次就再也不看"的判据，二者之间**没有**任何能改
+        //   `recovery_bypass_checked_` / `skip_logo_checked_` 的语句，也不存在"先读完 ④ 才能
+        //   判 ④'"的依赖（④ 写的是 `cpu_.eax()`，④' 读的正是它 —— 顺序**原样保留**）。
+        //   门关掉之后（两个 latch 都不再可能命中）每派发只剩一次 load + 一次分支。
+        if (one_shot_pending) {
         // ---- ④ `--accept-recovery-dialog` 的默认"绕过"（EAX := 0；machine.cpp:1369-1376）----
         //   ★ 这是默认档就改写 guest 寄存器的钩子（T2 §1.2 #14）：不实现它 boot 会弹系统框并挂住。
         //   只应用一次；`cpu_` 就是寄存器真源（A′：`%st` 别名）⇒ 只写这一处。
@@ -754,6 +788,9 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
                              kSkipLogoHookEa, object, kSkipLogoFieldOffset);
             }
         }
+        // 门刷新：两个 latch 都"再也不可能命中" ⇒ 关掉（严格按上面两个判据重算，不是猜的）。
+        one_shot_pending = !recovery_bypass_checked_ || (skip_logo_ && !skip_logo_checked_);
+        }
 
         // ---- ⑤ 到期的 winmm 定时器在**块边界**触发（machine.cpp:1402-1418）----
         //   ⛔ 不嵌套：一个回调没跑完就不再触发下一个；嵌套 guest 调用 / SEH 期间也不触发。
@@ -761,7 +798,10 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         //     guest 指令时取一次 `clock_.now100ns()`（⛔ 不每轮派发取时；旧实现每轮一次 ≈ 21 ns）。
         //     `timer_due_hint <= timer_now_hint` ⇔ "上次采样时刻已经有定时器到期"
         //     ⇔ `fireDueTimer` 会选中一个（它的选择逻辑与判据**一个字都没改**）。
-        if (!calls_.active() && !cpu_.shim.timer_firing && !cpu_.shim.timers.empty() &&
+        //   ★ lift-opt #5：`timers.empty()` 提到最前 —— 它是唯一能区分"这一跑根本不用管定时器"
+        //     的条件（FELLOW 切换帧里它恒空）⇒ 空表时每派发从 5 次成员读降到 1 次。
+        //     其余四项都是**纯读**；`seh_.busy()` 仍然每轮现读（⛔ 不缓存，理由见 ②）。
+        if (!cpu_.shim.timers.empty() && !calls_.active() && !cpu_.shim.timer_firing &&
             !cpu_.shim.callback.active && !seh_.busy()) {
             if (cpu_.insns >= next_timer_check) {
                 next_timer_check = cpu_.insns + kCheckStride;
@@ -806,7 +846,10 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         //   ★ **off 档的代价** = 最外层那一次 `enabled()` 读 + 一次分支（下面这行 ↓）。⛔ 不要把
         //     `facts` 的计算提到这层 if **外面**：那是每块边界都要付的（300 帧 ≈ 5.4e7 次），
         //     而 `--audio off` 是**缺省档** ⇒ 它的 penalty 必须是"零"级，不是"几纳秒"。
-        if (audio_.enabled()) {
+        //   ★ **off 档的代价** = 循环外读到的那一个 bool + 一次分支（下面这行 ↓，lift-opt #5 外提）。
+        //     ⛔ 不要把 `facts` 的计算提到这层 if **外面**：那是每块边界都要付的（300 帧 ≈ 5.4e7 次），
+        //     而 `--audio off` 是**缺省档** ⇒ 它的 penalty 必须是"零"级，不是"几纳秒"。
+        if (audio_enabled) {
             // ★ thread 档的**失败面**：`AudioPumpGate::due()` 在 thread 档恒假 ⇒ 下面那条
             //   `audio_.pump()` 永远不会被调 ⇒ `pump()` 里的 `feeder_error_` 早退在 AOT **不可达**。
             //   ⇒ 这里补一条只读判据（原子读，只在音频开启时付）：feeder 挂了必须**停**并点名，

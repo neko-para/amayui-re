@@ -573,12 +573,10 @@ void shimPeekMessageA(X86& cpu, ShimCall& call) {
     cpu.windows->pumpTimers(cpu);
     // 过滤条件（与文档一致）：hWnd != 0 ⇒ 只匹配该窗口（0 = 调用线程任意窗口）；
     // wMsgFilterMin / wMsgFilterMax != 0 ⇒ 只匹配 [min, max] 里的 message（0 = 该侧不限）。
-    const auto pred = [hwnd_filter, min_filter, max_filter](const WinMessage& m) {
-        if (hwnd_filter != 0 && m.hwnd != hwnd_filter) return false;
-        if (min_filter != 0 && m.message < min_filter) return false;
-        if (max_filter != 0 && m.message > max_filter) return false;
-        return true;
-    };
+    // ★ lift-opt #8（2026-11-22）：装进 `WindowManager::MessageFilter`（三个 `uint32` 的 POD）而不是
+    //   每次构造一个 `std::function`。谓词语义**逐字搬过去**（见 `host_window.h` 的 `operator()`），
+    //   `PM_REMOVE` 只摘命中那一条 / 不匹配的原地保留 / `WM_QUIT` 虚拟项 —— 全在 `peekMatching` 里，未动。
+    const WindowManager::MessageFilter pred{hwnd_filter, min_filter, max_filter};
     WinMessage m;
     if (!cpu.windows->peekMatching(pred, &m, do_remove)) {
         // ★ 没有匹配的消息 ⇒ 返回 0，**队列原样保留**（不匹配的消息仍然在那里，下次还能看到）。

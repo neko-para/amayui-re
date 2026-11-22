@@ -144,12 +144,14 @@ bool WindowManager::peek(WinMessage* out, bool remove) {
     return true;
 }
 
-bool WindowManager::peekMatching(const std::function<bool(const WinMessage&)>& pred, WinMessage* out,
-                                 bool remove) {
+bool WindowManager::peekMatching(const MessageFilter& pred, WinMessage* out, bool remove) {
     checkMainThread("window.peekMatching");
     // ★ FIFO 语义：从**队首**起线性找第一条匹配的。匹配只决定"看哪一条" ——
     //   不匹配的消息**原地保留**（⛔ 不许学旧实现那样 `peek(true)` 逐条取走：那是静默丢消息）。
     //   `queue_.erase(it)` 只摘掉命中的那一条，其余消息（含它前面的）相对顺序不变。
+    //   ★ lift-opt #8：`pred` 现在是一个 POD（三个 `uint32`，见 `host_window.h` 的 `MessageFilter`）
+    //     ⇒ 这里不再每次构造 / 析构 `std::function`。**循环体与改动前逐字相同**
+    //     （`tools/mutate-check.mjs` 那条"过滤不匹配也 pop"的变异锚就钉在这几行上 ⇒ 改动它才会红）。
     for (auto it = queue_.begin(); it != queue_.end(); ++it) {
         if (pred && !pred(*it)) continue;
         if (out) *out = *it;
@@ -266,6 +268,12 @@ void WindowManager::postQuit(std::uint32_t code) {
 void WindowManager::pumpTimers(X86& cpu) {
     checkMainThread("window.timer");
     if (!cpu.clock) return;
+    // ★ lift-opt #7（2026-11-22）：空定时器表 ⇒ **一次取时都不做**。
+    //   为什么语义不变：`timers_` 为空时下面那个循环第一次 `find_if` 就返回 `end()` ⇒
+    //   `now` 在旧形状里是**取了一次、一次都没用**（一次 QPC ≈ 27-29 ns，
+    //   `PeekMessageA` 每次调用都会进来 ⇒ 162K 次/切换帧）。`timers_` 只在本函数 / `setTimer` /
+    //   `killTimer` 里改，三者都在主线程 ⇒ 这条提前返回不可能与同一线程的插入竞争。
+    if (timers_.empty()) return;
     const std::uint64_t now = cpu.clock->now100ns();
     for (;;) {
         auto it = std::find_if(timers_.begin(), timers_.end(), [now](const HostTimer& t) { return t.due_100ns <= now; });
