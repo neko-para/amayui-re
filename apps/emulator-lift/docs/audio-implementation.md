@@ -420,8 +420,9 @@ feeder 的 dispatch 只查这一份。`feeder_ok` 是**编译期 opt-in**（`kKn
 
 **两个假绿陷阱（报数前必须排除）**：
 
-1. **量错臂**：`openSdl()` 失败会把 `mode_` 降成 `Virtual`（`audio.cpp`），`thread_mode_ = (Sdl &&
-   realTime)` ⇒ 于是跑的是**主线程泵**，而泵走**主线程 dispatcher** ⇒ 段级**本来**就生效。
+1. **量错臂**：`openSdl()` 失败 ⇒ `mode_` 落回 `Off`（`audio.cpp`；`virtual` 档 2026-11-22 移除）
+   ⇒ `enabled()` 为假、**根本不跑混音**（不是"退回主线程泵"）；而 `--audio off --audio-dump` 那条
+   设备无关路径走的是**主线程泵**，泵走**主线程 dispatcher** ⇒ 段级在那一臂**本来**就生效。
    ⇒ 报数前必须贴启动行的 `feeder=host-thread` 与摘要行的 `device=ok`（`--verbose` 才有启动行；
    缺省 `warn` 会把它滤掉）。`tests/feeder_seg_e2e.cpp` 把这条做成了机械判据：缺任一条 ⇒ **SKIP 77**。
 2. **`ov=` 会下降**：PCM 段把每样本一次的 `__ftol2_sse` **函数级**命中吃掉了 ⇒ `ov=` 从 7 位数掉到
