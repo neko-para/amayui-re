@@ -38,6 +38,10 @@
 //
 // ★ **两条 `PointerCore` 语义照抄、不重写**：click 的两段 + 三个闸门（`armClickAt` / `pressDue` /
 //   `releaseDue`）、"同按钮未抬起 ⇒ 停队首"（连点串行化）。⇒ 本文件**没有**第二套坐标映射 / 闸门。
+//   ★ **闸门 ②′（回调边界）也走同一份**：装配点用 `setFrameSource` 把 `presenter.frameCount()`
+//   （= `InputPlan::presenting()` 的同一个计数）接进来 ⇒ `PointerPoint::frames` 是活的、
+//   `callback_boundary=true` ⇒ 插件 `ctx.input.click` 的抬起同样要跨过一个完整 guest 回调。
+//   ⛔ 阈值只有 `PointerCore::kCallbackFramesBeforeRelease` 一份（不在本类复制）。
 //
 // ★ **队首头阻是形状，不是 bug**（施工图 §4.2）：`drainQueue` 遇到队首是"该按钮仍在 `pending_`"的
 //   click 就**停住整条队列**（不同按钮也会被挡住）。`one-write-per-read-point` 断言它。
@@ -93,6 +97,21 @@ public:
     //   `now_ms` 参数用 —— 驱动方负责让两者一致（`tests/trigger_runner.cpp` 的 `pump()` 就是这么做的）。
     void setClockForTest(NowFn now_ms) { now_fn_ = now_ms; }
 
+    // ★ **帧线**（2026-11-22）：与 `InputPlan::presenting()` 是**同一个计数源** —— 宿主**已完成**的
+    //   guest 回调数（`present.cpp` 在 `++frame_count_` 同一刻推 `PlanEventKind::Frame`；装配点给的是
+    //   `presenter.frameCount()`）。供给之后 `PointerPoint::callback_boundary=true` ⇒ 抬起还必须在
+    //   **按下之后的下一个完整 guest 回调**之后（`PointerCore::kCallbackFramesBeforeRelease`；
+    //   闸门 ②′ 在 `PointerCore::releaseDue`，⛔ 本类不复制阈值、不另造一套）。
+    //   · 缺省 `fn == nullptr` ⇒ `frames=0` / `callback_boundary=false` = **旧行为**（纯夹具 /
+    //     没有 presenter 的驱动）。⛔ 不是"恒 false ⇒ 插件永远不受闸门②′"—— 生产装配点会接上。
+    //   · 形状与 `InputPlan::setProfileMarkHook` / `setStateSeqSource` 同一条（裸函数指针 + `void*`；
+    //     缺省 nullptr ⇒ 每个读点多一次判空，⛔ 不用 `std::function`）。
+    using FrameCountFn = std::uint64_t (*)(void* ctx);
+    void setFrameSource(void* ctx, FrameCountFn fn) {
+        frame_ctx_ = ctx;
+        frame_fn_ = fn;
+    }
+
     // ★ **唯一 pump**（每读点一次；七步顺序见头注）。
     void atPoint(WindowManager& wm, InputPoint point);
 
@@ -136,6 +155,10 @@ private:
     std::array<std::uint64_t, kInputPointCount> deliver_calls_{};
     std::uint64_t read_points_ = 0;
     NowFn now_fn_ = nullptr;  // 测试缝（nullptr = `pluginNowNs()/1e6`）
+    // ★ **帧线**（缺省 nullptr ⇒ `frames=0` / `callback_boundary=false` = 旧行为；见 `setFrameSource`）。
+    //   `ctx` 是**非拥有**的（生产 = `AotHost*`）；本类只调它取"已完成 guest 回调数"。
+    void* frame_ctx_ = nullptr;
+    FrameCountFn frame_fn_ = nullptr;
     TriggerReadings readings_;  // 本读点的读数（`ctx_.now` 恒指它）
     // ★ `Context` 在 `trigger.h` 里只有前向声明（两个头不能互相 include）⇒ 持有它的**只有本头**
     //   （`intent_executor.h` include `context.h`，反向不成环）。回调面 = `context()`。
