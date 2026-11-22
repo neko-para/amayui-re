@@ -57,10 +57,11 @@ dsh plugin --profile web uninstall "<包名>"            # 撤回（例：@amayu
    ⇒ **`uninstall` 再 `install` 一次**（登记只在真的 add 时发生）。
 3. 宿主插件**代码不热重载**：改完 `.mjs` 要重启 DSH（配置层的变化才走 HMR）。
 
-★ 写 `$DSH_HOME` 是工作区之外的动作 ⇒ 受限沙箱里这一步**必然**要提权（与本仓"提权只发生在少数几步"同一口径）。
-★ **插件的依赖**（`@deepseek-ai/dsh-tools` 等）由根 `pnpm install` 装进工作区 —— 但**这一步也要提权**：
-Windows 上 pnpm 的目录符号链接要 `SeCreateSymbolicLinkPrivilege`，沙箱里被拒后会**静默降级成 junction**，
-而 Node 解析不了 junction（传递依赖报 `ERR_MODULE_NOT_FOUND`）⇒ 判据与修法见 `AGENTS.md` §3 的 `storeDir` 那条。
+★ 写 `$DSH_HOME` 是工作区之外的动作 —— 会话是 `danger-full-access`（`AGENTS.md` §5.1）时按用户权限直接写，
+**不需要**为它设计提权步骤。
+★ **插件的依赖**（`@deepseek-ai/dsh-tools` 等）由根 `pnpm install` 装进工作区。Windows 上 pnpm 建目录符号链接仍要
+`SeCreateSymbolicLinkPrivilege`（**OS 权限**，不是 DSH 沙箱）：被拒时它会**静默降级成 junction**，而 Node 解析不了
+junction（传递依赖报 `ERR_MODULE_NOT_FOUND`）⇒ 判据与修法见 `AGENTS.md` §5.1 与 archive §3。**不要**为此写插件。
 
 
 ## 4. 与技能的区别

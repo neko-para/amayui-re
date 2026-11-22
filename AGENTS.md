@@ -88,22 +88,24 @@ pnpm typecheck                  # tsc --noEmit，六份工程
 **lift 线的构建 / 测试 / 验收命令见 §12；翻译线的工具见 §13；CTest 的档位判据（注册位置）见 §12.4。**
 ★ 每个工具也都能**独立跑**（脱离 DSH / 脱离 pnpm）：`node tools/requirements.mjs --validate`。
 
-### 5.1 三个环境口径（沙箱 / 管道 / 提权）
+### 5.1 环境口径：**win32 不用 `workspace-write`**（会话总是 `danger-full-access`）
 
-① **不要捕获子进程输出**（`stdio: 'pipe'`）：受限沙箱里捕获输出要开命名管道 ⇒ `spawn EPERM`。
-`tools/corpus.mjs` 的 `runCapture()` 用**文件描述符重定向**替代管道，拿到同一份 git/recipe 答案。
-② **`pnpm test` 用 `--test-isolation=none`**：默认隔离模式由 runner 起子进程走管道，同样会 EPERM。
-③ **headless Chrome 在受限沙箱下跑不了**（`tools/ui-bake` 的渲染步骤）：要提权。判据与处置见 `tools/ui-bake.md` §5.1。
-★ 装依赖往工作区外写（store）也属这一类；**Windows 上更要提权**（pnpm 的目录符号链接要 `SeCreateSymbolicLinkPrivilege`，
-沙箱里被拒后它会**静默降级成 junction**）⇒ **提权只发生在"装依赖"与"headless 渲染"两步**；
-`pnpm test` / `pnpm tools` / vite 构建都只读 `node_modules`，不提权照跑。
+★ **用户口径（2026-11-23）**：`workspace-write` 在 Windows 上引入的问题（受限令牌 / Low 完整性标签 /
+junction 解析不到 / 命名管道 `spawn`·`pipe` EPERM）比它挡住的更多 ⇒ **不再为它设计、实现任何兼容工具**
+（不提权插件、不做 ACL 沙箱 provider、不为"沙箱拒绝的那几步"开特权 op）。DSH 会话**总是用
+`danger-full-access`**，文件与子进程按用户权限直接做。
 
-★ **第四条（Windows + DSH ≥ 0.2 才有）：工作区里的文件带 Low 完整性标签**
-⇒ **从带 Low 标签的 exe 起的进程本身就是 Low 完整性**，于是"产物要被别的进程执行"的那类会在 DSH 之外也受影响：
-实测症状 = 测试安装树用 Locale Emulator **进程起来、窗口没建出来**（直接双击却正常）、游戏写存档目录被拒。
-**处置**：产物建到工作区**之外**（同卷），或落盘后 `icacls <目标> /setintegritylevel Medium /T /C`
-（代价：该子树随即落在沙箱可写范围之外）。成因 / 实测 / 命令见 `tools/release.md` §3.1。
-★ 只影响"要被执行"的产物；纯文本产物与入库件不受影响。
+⇒ 下面三条**退役**（保留只为解释老代码里的写法，⛔ 不要再据此加兼容层）：
+① 捕获子进程输出改走文件描述符重定向（`tools/corpus.mjs` 的 `runCapture()` 仍是这个写法，但**不再必需**）；
+② `--test-isolation=none`（仍可留，理由是更快；**不再是** EPERM 的处置）；
+③ headless Chrome "要提权"（`tools/ui-bake.md` §5.1 的判据只对受限沙箱成立）。
+★ 装依赖时 pnpm 建目录符号链接被拒、**静默降级成 junction** 是 **OS 权限**问题
+（`SeCreateSymbolicLinkPrivilege` / 开发者模式），不是 DSH 沙箱问题 ⇒ 同样**不做插件去修**。
+
+★ **历史遗留**：2026-11 之前被 DSH（≤ 0.2 的 ACL 沙箱）打过 **Low 完整性标签**的树仍在
+（症状：从带标签的 exe 起的进程是 Low 完整性 ⇒ Locale Emulator 进程起来但窗口不建、游戏写存档被拒）。
+一次性改回即可：`icacls <目标> /setintegritylevel Medium /T /C`；**不要**为它维护工具。
+成因与实测见 `tools/release.md` §3.1。新产物不再打标签。
 
 ### 5.2 测试分级（判据写在文件首行的 pragma 里，**不建清单文件**）
 
@@ -167,7 +169,7 @@ CTest 条目每条要 **2 次增量构建**（变异前 + 还原后各一次）+
 | | 落点 | 注册方式 |
 |---|---|---|
 | **技能** | **`.agents/skills/<名字>/SKILL.md`** —— 路径**固定、不可改名/移位** | DSH 按该固定路径发现，**无需注册**（落盘即进技能目录）。内容从零重写；**有哪些技能看目录本身** —— 不在这里列清单 |
-| **DSH 插件** | `plugins/` 只是**源码落点**，位置自由 | **`dsh plugin --profile web install "<插件绝对路径>"`**（环境级、要提权：写 `$DSH_HOME`）。包必须声明 `dsh.bundle.patch`（否则只当普通依赖装进来、**不会**被组合）；宿主插件代码**不热重载** ⇒ 改完要重启。**有哪些插件看 `plugins/` 目录本身**（`plugins/README.md` 写各自解决什么、怎么装/撤） |
+| **DSH 插件** | `plugins/` 只是**源码落点**，位置自由 | **`dsh plugin --profile web install "<插件绝对路径>"`**（环境级：写 `$DSH_HOME`）。包必须声明 `dsh.bundle.patch`（否则只当普通依赖装进来、**不会**被组合）；宿主插件代码**不热重载** ⇒ 改完要重启。**有哪些插件看 `plugins/` 目录本身**（`plugins/README.md` 写各自解决什么、怎么装/撤） |
 
 ★ **不要为了迎合注册方式去扭曲仓库结构**：技能必须遵守固定路径，而插件位置自由。
 
@@ -190,6 +192,8 @@ CTest 条目每条要 **2 次增量构建**（变异前 + 还原后各一次）+
 * ❌ 把旧仓的**知识文档**"顺手"复制进 `docs/`；❌ 在 `data/ledger/` 里塞旧条目。
 * ❌ 手工编辑 `corpus/assets.json` 的 `sha256` / 大小（唯一写入口是 `pnpm tools corpus scan --write`）。
   ⇒ 其余与 DB / 台账 / 语料清单相关的反模式 → `docs/00-origin/agents-archive.md` §9。
+* ❌ **不要为 Windows 的 `workspace-write` 写兼容工具**（提权插件 / ACL 沙箱 provider / "沙箱拒绝的那几步"的特权 op）：
+  会话一律 `danger-full-access`，见 §5.1。觉得"这一步沙箱不让做"时，先确认是不是还在 `workspace-write` 下。
 
 ## 10. 文档纪律：README **不写状态**
 
