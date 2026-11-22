@@ -33,6 +33,19 @@ namespace lift {
 thread_local std::uint64_t t_shim_token_wait_ns = 0;
 thread_local std::uint64_t t_shim_token_wait_count = 0;
 
+// ★ lift-opt #4（2026-11-22）：`byStubEa` 的 **1-entry memo**（"上一次的桩 EA → 同一条登记"）。
+//   为什么可以记忆化（结构上的理由，不是"观察到表不变"）：
+//     · 桩 EA 只由 `bind()` / `addRuntime()` 发号，且**发号后不再改**（`stub_ea` 是登记期写死的）；
+//     · 命中后仍要 `d->stub_ea == ea` **二次校验** ⇒ 表过期（夹具直写 `stub_ea`）时不会给出错答案，
+//       只会落回与改动前逐字相同的慢路径（并照常 `++stub_index_slow_`）。
+//   ⚠ 存 **id（下标）**而不是 `ShimDef*`：`defs_` 是 vector，`addRuntime` 会 push_back 扩容 ⇒
+//     缓存的指针会悬垂（`shims.h` 的既有警告）。取回一律走 `defByIdUnlocked`（与 `byStubEa`
+//     内部**同一条**解析路径）。
+//   ⚠ `thread_local`：feeder 线程也可能走这条（`lift_shim` → `idForStub`）⇒ 一条线程一份，
+//     没有数据竞争；`0` 作空哨兵（桩 EA 恒非 0，见 `checkStubEaShape`）。
+thread_local std::uint32_t t_stub_memo_ea = 0;
+thread_local std::uint32_t t_stub_memo_id = 0;
+
 namespace {
 // `LIFT_AUDIO_TRACE` 只读一次（默认关 ⇒ 默认行为与读数都不变）。
 bool audioTraceEnabled() {
@@ -301,12 +314,22 @@ const ShimDef* ShimRegistry::byStubEa(std::uint32_t ea) const {
     const std::uint32_t slots = shim_slots_;
     const std::uint32_t off = ea - shim_page_;  // 无符号：ea < page ⇒ 巨大值 ⇒ 一定落在页外
     if (slots != 0u && off < slots * 4u) {
+        // ★ lift-opt #4：1-entry memo（见文件上方 `t_stub_memo_*` 的长注释）。
+        //   只在**页内**试命中；命中后走与下面**逐字相同**的二次校验。
+        if (ea == t_stub_memo_ea) {
+            const ShimDef* d = defByIdUnlocked(t_stub_memo_id);
+            if (d != nullptr && d->stub_ea == ea) return d;
+        }
         const std::uint32_t slot = off >> 2;
         if (slot < slot_index_.size()) {
             const std::uint32_t id1 = slot_index_[slot];
             if (id1 != 0u) {
                 const ShimDef* d = defByIdUnlocked(id1 - 1u);
-                if (d != nullptr && d->stub_ea == ea) return d;
+                if (d != nullptr && d->stub_ea == ea) {
+                    t_stub_memo_ea = ea;
+                    t_stub_memo_id = id1 - 1u;
+                    return d;
+                }
             }
         }
     }
@@ -492,33 +515,54 @@ std::size_t ShimRegistry::importedCount() const {
     return n;
 }
 
+void ShimRegistry::prepareLocked(const ShimDef& src, ShimDef* out, bool* trace_on, bool* timing_on) {
+    // ★ 临界区内容与改动前**逐字相同**（`invoke` 里那一段）：
+    //   拷一份 def + 快照两个开关 + 记 `called` / `call_count`。唯一差别 = 由调用方在**同一次**
+    //   加锁里也完成"取 def"（`invokeById`）⇒ 整条路径只付一次 uncontended 递归锁。
+    *out = src;
+    *trace_on = trace_;
+    *timing_on = timing_;
+    if (out->id < defs_.size()) {
+        defs_[out->id].called = true;
+        ++defs_[out->id].call_count;
+    }
+}
+
 bool ShimRegistry::invokeById(X86& cpu, std::uint32_t id) {
-    ShimDef copy;
+    // ★ 方案 C：**不要**在 fn 执行期间持有 shims 锁（主线程的 Present/D3D shim 可能很长，
+    //   feeder 的 Lock/Unlock 会被它卡住）。只锁住"拷贝 def + 计数"，fn 在锁外跑。
+    //   ★ lift-opt #2/#3（2026-11-22）：旧形状是"这里取一份 → 调 `invoke` 再取一份"，
+    //     中间还多一次加锁（同一个 `recursive_mutex` 的两对 lock/unlock）。现在所有权直接传下去：
+    //     **一次锁 + 一次拷贝**。为什么语义不变：两次拷贝的源都是 `defs_[id]`（表在 fn 之前不会变，
+    //     `fn` 里即使 `addRuntime` 也只 push_back），`called/call_count` 仍在锁内自增，
+    //     `fn` 仍在锁外跑。
+    ShimDef local;
+    bool trace_on = false;
+    bool timing_on = false;
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (id >= defs_.size()) return false;
-        copy = defs_[id];
+        prepareLocked(defs_[id], &local, &trace_on, &timing_on);
     }
-    invoke(cpu, copy);
+    invokePrepared(cpu, local, trace_on, timing_on);
     return true;
 }
 
 void ShimRegistry::invoke(X86& cpu, ShimDef& def) {
     // ★ 方案 C：**不要**在 fn 执行期间持有 shims 锁（主线程的 Present/D3D shim 可能很长，
     //   feeder 的 Lock/Unlock 会被它卡住）。只锁住"拷贝 def + 计数"，fn 在锁外跑。
+    //   ⚠ `def` 可能**就是** `defs_[i]`（解释器臂的 `byStubEa` 返回指针）⇒ 必须先拷出来再记账。
     ShimDef local;
     bool trace_on = false;
     bool timing_on = false;
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        local = def;
-        trace_on = trace_;
-        timing_on = timing_;
-        if (local.id < defs_.size()) {
-            defs_[local.id].called = true;
-            ++defs_[local.id].call_count;
-        }
+        prepareLocked(def, &local, &trace_on, &timing_on);
     }
+    invokePrepared(cpu, local, trace_on, timing_on);
+}
+
+void ShimRegistry::invokePrepared(X86& cpu, ShimDef& local, bool trace_on, bool timing_on) {
     const std::uint32_t ret_ea = cpu.mem->rd32(cpu.esp());
     ShimCall call;
     call.cpu = &cpu;
@@ -530,10 +574,13 @@ void ShimRegistry::invoke(X86& cpu, ShimDef& def) {
     call.def = &local;
     call.stdcall_bytes = (local.conv == Conv::Stdcall) ? static_cast<std::uint32_t>(local.argc) * 4u : 0u;
 
+    // ★ lift-opt #1（2026-11-22）：这里**不再**无条件拷 `trace_module` / `trace_name` 两份
+    //   `std::string`（SSO ⇒ 每次 2 段 memcpy）。它们只在下面的 `if (trace_on)` 分支里被读，
+    //   而 `local` 活到函数尾（`fn` 在 `local` 的地址上跑，`call.def = &local`）⇒ 直接用
+    //   `local.module.c_str()` / `local.name.c_str()` 与 `local.argc` 与改动前**逐字等价**。
+    //   `trace_id` 仍单独取：它是"**调用前**的 id"的具名别名（`local` 是栈上的拷贝 ⇒ 即使 `fn`
+    //   里 `addRuntime` 让 `defs_` 扩容也不受影响；两者本来就相同）。
     const std::uint32_t trace_id = local.id;
-    const std::string trace_module = local.module;
-    const std::string trace_name = local.name;
-    const int trace_argc = local.argc;
 
     if (!local.fn) {
         // **响亮失败**：未实现的导入。这里是 A5 缺口的执行期落点（与条件 trap 共用停机点，
@@ -600,8 +647,10 @@ void ShimRegistry::invoke(X86& cpu, ShimDef& def) {
 
     if (trace_on) {
         // ★ 确定性：只打参数原始字 + 返回值，不打时间、不打宿主地址
-        std::fprintf(trace_out_, "[shim] %3u %s!%s(", trace_id, trace_module.c_str(), trace_name.c_str());
-        for (int i = 0; i < trace_argc; ++i) {
+        //   ⚠ lift-opt #1：这里读的是 `local`（栈上的拷贝，此刻仍活）⇒ 与改动前逐字等价。
+        std::fprintf(trace_out_, "[shim] %3u %s!%s(", trace_id, local.module.c_str(),
+                     local.name.c_str());
+        for (int i = 0; i < local.argc; ++i) {
             std::fprintf(trace_out_, "%s%08X", i ? "," : "", call.u32(i));
         }
         std::fprintf(trace_out_, ") -> %08X  ret=%08X\n", call.result, ret_ea);
