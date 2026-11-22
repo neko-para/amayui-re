@@ -179,3 +179,50 @@ shim 调用的宿主成本 + 派发边界），而**逐像素转换对每次切�
    不在 top-8 / top-15"，**不是**计数 0 ⇒ 要一条窗口级具名行才能回答"48 张是新建还是复用"。
 4. **caps 查询的运行时计数**："`GetDeviceCaps` / `CheckDeviceFormat` 只在启动期"目前只有"唯一调用点"这条静态依据。另：两套稳态基线的 `insns`/帧 差 7.5×（28.6 K vs 216 K）没有归因；mip / Live2D 重算
    这两个假设，本文读数既不排除也不证实，⛔ 不要当结论引用。
+
+## 9. 2026-11-22 微优化批（另一批二进制；单价来自 boot 窗口，不是切换帧）
+
+> ★ **本节与 §3 不可直接比**：§3 的绝对值是 FELLOW 切换帧（10.2 M 派发 / 685 K shim 调用/帧、19.95 ns/派发）；
+> 本节的单价来自 **boot→TITLE 窗口**（≈2.4 s / 41.3 M 派发 / ≈43 K shim 调用/趟、11.8 ns/派发）。
+> 二进制 = dev 车道 `66a8ee7` + 两个 perf 提交（`f70fa96` shim chrome · `722784b` 派发序言 + 消息泵）；
+> 读数日期 2026-11-22 / win32 / RelWithDebInfo / `--audio off` / 每配置 5 趟取中位。
+
+### 9.1 改了什么（对应 §7 里"能省"的那几项）
+
+| # | 落点 | 改了什么 |
+|---|---|---|
+| 1–4 | `runtime/shims.cpp` | 每次 shim 调用：两把递归锁 → 一把；两份 `ShimDef` 拷贝（每个两个 `std::string`）→ 一份；两份无条件 trace string 拷贝 → 只在 `trace_on` 分支；`byStubEa` 加 1-entry 桩 memo（存 id、命中后仍做 `stub_ea` 二次校验） |
+| 7 | `runtime/host_window.cpp` | `pumpTimers` 空定时器表直接返回（旧形状取一次 QPC 后一次都没用） |
+| 8 | `host_window.h` + `shims/user32_window.cpp` | `PeekMessageA` 的过滤条件从 `std::function` 换成 `MessageFilter`（三个 `uint32` 的 POD）；匹配循环体仍在 `.cpp` |
+| 5 | `aot/aot_run.cpp` | 派发序言：循环不变量外提（`time_limit` / `until` / `max_insns` / `stop_requested` / `audio_enabled`）、Present 闸门先比 `insns`、`control_` 两次判空并一层、两个一次性 latch 并一个 bool |
+| 6 | `aot/aot_dispatch.cpp` | `lookup` / `lookupUncounted` 各加 1-entry `ea→fn` memo；`lookups / hits / misses / probes` 原样补记（`table misses` 是语义指纹） |
+
+### 9.2 读数（同负载、同一轮内的前后对照）
+
+| 读数 | 基线 | 本批 | Δ |
+|---|---:|---:|---:|
+| `timeGetTime` ns/次 | 175.2 | **152.4** | −22.8（−13.0%） |
+| `PeekMessageA` ns/次 | 596.6 | **533.4** | −63.2（−10.6%） |
+| `boundary` ns/派发 | 11.827 | **11.320** | 配对差中位 −0.278（−2.4%） |
+
+拆开：#1–#4 = −22.8 ns/`timeGetTime` 次（它是最纯的样本：shim 体本身只占 ≈35 ns）；
+#7+#8 = −31.4 ns/`PeekMessageA` 次（空表不取 QPC ≈28 ns + 不建 `std::function`）；
+#5+#6 = −0.28 ns/派发（3 对交错 A/B 的配对差 −0.509 / +0.071 / −0.278）。
+
+⇒ **调研估计偏乐观**：每条 shim 的固定 chrome 实测 ≈ **23 ns**（估 45–95）；派发序言只有估计的 **1/10**
+（LTO + `-O2` 已经把 `const` 引用上的循环不变量提前取了；memo 多一次比较 + TLS 读，与"哈希 + 1 次探测"打平）。
+
+### 9.3 折算到切换帧（估算，不是实测）
+
+685 K shim/帧 × 23 ns ≈ **15.6 ms**；162 K `PeekMessageA` × 31.4 ns ≈ **5.1 ms**；10.26 M 派发 ×
+0.28 ns ≈ **2.9 ms** ⇒ ≈ **−24 ms/帧（≈2.2%）**。
+⚠ 单价来自 boot 负载（混合比例与切换帧不同）⇒ 只当量级；与 §7 的"10–20 点"上界相比，这一批只吃到 2 点量级。
+
+### 9.4 口径警告（这一批踩到的）
+
+- **并行车道会污染墙钟**：2026-11-22 21:00 之后的一轮 5 趟**作废** —— 另一条车道同时跑 exe + ninja，
+  同一份二进制全线慢 15–25%，**连本批改动碰不到的 `timeGetTime` 一起慢**。⇒ 本机只有
+  **交错 A/B 的配对差**与同一轮内部的相对关系可信；跨轮绝对值只当方向，Δ 只当**下界**。
+- 语义判据不变：`exit` / `frames` / `stop @ EA` / arena / `table misses` 逐位相同；`insns` 不作判据。
+- 门禁：`ctest --test-dir out` **137/137**（360 s，`MessageFilter` POD 形态 + 收紧后的
+  `input-plan-shape` 守卫）· `pnpm test` 614/614 · `pnpm verify` 500 pass + 2 skip。
