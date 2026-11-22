@@ -286,9 +286,12 @@ rg -n -U 'input::(mouseMove|mouseButton|mouseWheel|key)\(' apps/emulator-lift/sr
     帧线时**（`PointerPoint::callback_boundary`，唯一来源 = `InputPlan` 的 `presenting()`）还要求
     `frames >= press_frames + 2`，它与 ①/② **并联**（任一成立之后仍要过这一条）。为什么是 **2**：
     帧计数在回调**末尾**（Present）才 +1 ⇒ `+1` 只证明"按下那一帧走完了"，证明不了"**下一个**回调的
-    按键读发生在抬起之前"。★ 没有帧线的驱动（插件 `IntentExecutor`）缺省不置位 ⇒ 行为不变（那里的
-    注入 click **仍是旧行为**，见 §6.3 residual）。守卫：`inject/click-crosses-callback`
-    （CTest `input-inject-visible`），`tools/mutate-check.mjs` 有对应条目。
+    按键读发生在抬起之前"。★ **两条驱动都供给帧线了**（唯一来源都是同一个 Present 帧计数）：
+    `InputPlan` 用 `presenting()`，插件 `IntentExecutor` 用 `setFrameSource(presenter.frameCount())`
+    （`aot_main` 装配；缺省 nullptr ⇒ 纯夹具行为不变）。守卫：`inject/click-crosses-callback`
+    （plan 路径）· `inject/executor-click-crosses-callback`（插件路径）+ 负对照
+    `inject/executor-click-without-frame-line`（不注帧线 ⇒ 抬起不跨边界，正判据必然红）；
+    `tools/mutate-check.mjs` 有对应条目。
 - **`mouse_move` / `mouse_down` / `mouse_up`**：写动作，一条一次直写。
   - `mouse_move` → `armMoveAt`（与 click 第一段同一段代码）；
   - `mouse_down` → 轻闸门：上一条 `mouse_move` 之后**完成过**一次 CursorPos 读点，或
