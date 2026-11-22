@@ -80,8 +80,23 @@ public:
         plm_set_loop(plm_, 0);  // 循环由调用方决定（本模块不接管）
 
         if (!plm_has_headers(plm_)) {
-            setError(err, "不是 MPEG-1 program stream（找不到 pack/system header）");
-            return false;
+            // ★ 有界退路（2026-11-22，缺陷现场见 `docs/03-emulator/defects.md#BUG-39`）：
+            //   `plm_has_headers` 要求**视频头与音频头都成立**，而 `plm_init_decoders` 在
+            //   `num_audio_streams > 0` 时**无条件**建音频解码器（`third_party/pl_mpeg/pl_mpeg.h`
+            //   的 `plm_init_decoders`：`audio_enabled` 只决定 packet type，不阻止建对象）⇒
+            //   **音频流不是 MPEG-1 Layer II 的整部片会被判死**，哪怕视频是标准 MPEG-1 PS。
+            //   游戏的 `MVS*.MPG`（120×120 / 30 fps 的特效小片，ALF 里 65540 字节）正是这种：
+            //   视频能完整解出（实测 26 / 29 帧），音频不是 MP2（`0xC0` 包里没有 MPEG audio 帧头）。
+            //   ⇒ 只认视频：关音频包，用 sequence header 的宽/高/帧率当判据（⛔ 不看音频头）。
+            //   ⛔ 不改 vendored pl_mpeg（三处逐字节守卫）；⛔ 不静默：warn 一行说清"音频不播"。
+            plm_set_audio_enabled(plm_, 0);
+            video_only_ = true;
+            if (plm_get_width(plm_) <= 0 || plm_get_height(plm_) <= 0 || !(plm_get_framerate(plm_) > 0.0)) {
+                setError(err, "不是 MPEG-1 program stream（找不到 pack/system header，或视频头不可用）");
+                return false;
+            }
+            vlog(LogLevel::Warn,
+                 "音频头不是 MPEG-1 Layer II ⇒ 只播视频（pl_mpeg 的 plm_has_headers 会把整部片判死）");
         }
         const int width = plm_get_width(plm_);
         const int height = plm_get_height(plm_);
@@ -137,6 +152,10 @@ public:
     }
 
     bool nextAudio(AudioFrame* out, bool* ended, std::string* err) override {
+        if (ended != nullptr) *ended = false;
+        // 视频-only 模式（音频头不是 MP2，见 init()）：⛔ 不去 pl_mpeg 里扫一个解不了的音频流
+        // （`audio_packet_type = 0` 时它会一路读到流尾才返回 null）；就是"没有音频样本"。
+        if (video_only_) return false;
         if (plm_ == nullptr) {
             setError(err, "未打开");
             return false;
@@ -197,7 +216,8 @@ private:
             audio_logged_ = true;
             const int n = plm_get_num_audio_streams(plm_);
             const int rate = plm_get_samplerate(plm_);
-            vlog(LogLevel::Info, "音频流：%d 个，samplerate=%d（宿主侧播放，同步见 audio_render.h）", n, rate);
+            vlog(LogLevel::Info, "音频流：%d 个，samplerate=%d（宿主侧播放，同步见 audio_render.h）%s", n,
+                 rate, video_only_ ? "；本片只播视频（音频头不是 MP2）" : "");
         }
         const std::uint32_t width = decoded->width;
         const std::uint32_t height = decoded->height;
@@ -225,6 +245,8 @@ private:
     Frame pending_{};
     bool has_pending_ = false;
     bool audio_logged_ = false;
+    // 音频头不是 MP2 ⇒ 只播视频（`init()` 的退路；`nextAudio()` 直接报"没有音频样本"）。
+    bool video_only_ = false;
     std::vector<std::int16_t> audio_i16_;
 };
 

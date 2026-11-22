@@ -77,6 +77,10 @@ public:
 
 // MPEG-1 program stream 解码器。
 //
+// ★ 判据分层（2026-11-22）：**视频头**是硬判据；**音频头不是 MPEG-1 Layer II 时只播视频**
+//   （pl_mpeg 的 `plm_has_headers` 会把这种整部片判死 —— 游戏里 `MVS*.MPG` 特效小片就是这种，
+//   视频完全可解。退路在 `movie_decoder.cpp` 的 `PlMpegFrameSource::init()`，⛔ 不改 vendored pl_mpeg）。
+//
 // ★ 缓冲所有权（**零拷贝**，调用方保证字节寿命）：
 //   `open(bytes, size, …)` 走 `plm_create_with_memory(bytes, size, /*free_when_done=*/0)`，
 //   pl_mpeg 在整个生命周期里**只持有裸指针**、不复制、不释放。所以：

@@ -7,12 +7,15 @@
 //      单调、不重复返回同一帧、`ended` 只在「刚解到流尾」那一次置 true；
 //   ④ 返回的 `Frame::pixels` 在**下一次 decode 之前**稳定（同一 now 再调一次不会改内容）；
 //   ⑤ `seek` / `rewind` 之后能重新从目标位置起解。
+//   ⑤' **视频头 OK 但音频不是 MP2** ⇒ 只播视频、必须打开（负对照：没有 sequence header 仍拒绝）。
+//      现场 = 存档 010 的 FIELD 点 (540,450) 放的 `MVS*.MPG`（`docs/03-emulator/defects.md#BUG-39`）。
 //
 // ★ 为什么用 fake 帧源：仓库里没有影片资产（`.MPG` 不进 LFS），而时间语义与 pl_mpeg 无关，
 //   是 MovieDecoder 自己的逻辑 —— 所以把它抽成 seam 单独测（真解像素的正确性靠 pl_mpeg 自身
 //   与 `tools/test/emulator-cxx-pl-mpeg-sync.test.mjs` 的逐字节守卫）。
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
@@ -270,11 +273,82 @@ void testSeekAndRewind() {
     LIFT_CHECK(!err.empty());
 }
 
+// ⑤' 只播视频的退路：**音频头不是 MPEG-1 Layer II 时，视频头仍然说了算**。
+//
+// 现场（2026-11-22，`docs/03-emulator/defects.md#BUG-39`）：载入存档 010 → FIELD 点 (540,450) ⇒ 引擎建
+// DirectShow 图放 `MVS*.MPG`（ALF 里恰 65540 字节、120×120/30fps 的特效小片）。视频是标准
+// MPEG-1 PS（pl_mpeg 能完整解出 26/29 帧），但 `0xC0` 音频包里没有 MPEG audio 帧头（不是 MP2）。
+// pl_mpeg 的 `plm_has_headers` 要求**视频头与音频头都成立**（`plm_init_decoders` 无条件建音频
+// 解码器）⇒ 整部片被判死 ⇒ dshow 渲染器没有输入 pin ⇒ `IMediaControl::Run` 之前就结束运行。
+//
+// 这条用例 = **纯字节**复现"视频头 OK + 音频不是 MP2"：pl_mpeg 先判死（老行为），退路必须接受
+// 视频（120×120 / 30fps）。负对照：把 sequence header 抹掉 ⇒ 必须仍然拒绝（退路不放宽视频判据）。
+std::vector<std::uint8_t> makeVideoOnlyPs(bool withSequenceHeader) {
+    // pack header（与游戏影片同形：MPEG-1 pack，SCR/mux_rate 任意可解析值）。
+    std::vector<std::uint8_t> b = {0x00, 0x00, 0x01, 0xBA, 0x21, 0x00, 0x01,
+                                   0x00, 0x03, 0x80, 0x0A, 0xBF};
+    // system header：audio_bound=1 / video_bound=1（与现场同形；正是"声明有音频"让 pl_mpeg 建音频解码器）。
+    const std::uint8_t sys[] = {0x00, 0x00, 0x01, 0xBB, 0x00, 0x0C, 0x80, 0x0A, 0xBF,
+                                0x04, 0xE1, 0xFF, 0xE0, 0xE0, 0xDD, 0xC0, 0xC0, 0x20};
+    b.insert(b.end(), std::begin(sys), std::end(sys));
+    // 视频 packet：PES 头（P-STD + PTS + DTS = 12 字节，pl_mpeg 会跳掉）+ sequence header。
+    // sequence header：w=120 h=120 aspect=1 fpsCode=5(30fps)，两套量化矩阵都用默认值。
+    const std::uint8_t seq[] = {0x00, 0x00, 0x01, 0xB3, 0x07, 0x80, 0x78, 0x15,
+                                0x00, 0x00, 0x20, 0x00};
+    const std::uint8_t pes[] = {0x60, 0xDD, 0x31, 0x00, 0x03, 0x12, 0xE9, 0x11, 0x00, 0x01, 0xFB, 0x79};
+    std::vector<std::uint8_t> payload;
+    payload.insert(payload.end(), std::begin(pes), std::end(pes));
+    if (withSequenceHeader) {
+        payload.insert(payload.end(), std::begin(seq), std::end(seq));
+    } else {
+        // 负对照：同样的长度、但没有 sequence header（全 0 ⇒ 找不到 00 00 01 B3）。
+        payload.insert(payload.end(), sizeof(seq), 0);
+    }
+    payload.resize(payload.size() + 4096, 0);  // > pl_mpeg 的 sequence header 探测窗口（1088 字节）
+    const auto len = static_cast<std::uint32_t>(payload.size());
+    const std::uint8_t vh[] = {0x00, 0x00, 0x01, 0xE0, static_cast<std::uint8_t>(len >> 8),
+                               static_cast<std::uint8_t>(len & 0xFF)};
+    b.insert(b.end(), std::begin(vh), std::end(vh));
+    b.insert(b.end(), payload.begin(), payload.end());
+    // 音频 packet：**不是 MPEG audio**（没有 0xFF 0xE0… 帧头）⇒ pl_mpeg 的音频头判定必然失败。
+    const std::uint8_t aud[] = {0x00, 0x00, 0x01, 0xC0, 0x00, 0x08,
+                                0xFF, 0xFF, 0x60, 0x00, 0x44, 0x44, 0x22, 0x22};
+    b.insert(b.end(), std::begin(aud), std::end(aud));
+    const std::uint8_t end[] = {0x00, 0x00, 0x01, 0xB9};
+    b.insert(b.end(), std::begin(end), std::end(end));
+    return b;
+}
+
+void testVideoHeaderAcceptedWhenAudioIsNotMp2() {
+    lift_test::g_current_case = "video-only-audio-not-mp2";
+    MovieDecoder decoder;
+    Info info;
+    std::string err = "stale";
+
+    // ① 视频头 OK + 音频不是 MP2 ⇒ **必须打开**（老行为：整部片判死）。
+    const std::vector<std::uint8_t> ps = makeVideoOnlyPs(true);
+    LIFT_CHECK(decoder.open(ps.data(), ps.size(), &err));
+    LIFT_CHECK(err.empty());
+    LIFT_CHECK(decoder.info(&info));
+    LIFT_CHECK_EQ_U32(info.width, 120u);
+    LIFT_CHECK_EQ_U32(info.height, 120u);
+    LIFT_CHECK(info.fps > 29.0 && info.fps < 31.0);
+    decoder.close();
+
+    // ② 负对照：同长度但没有 sequence header ⇒ **必须仍然拒绝**（退路不放宽视频判据）。
+    const std::vector<std::uint8_t> noSeq = makeVideoOnlyPs(false);
+    err = "stale";
+    LIFT_CHECK(!decoder.open(noSeq.data(), noSeq.size(), &err));
+    LIFT_CHECK(!err.empty());
+    LIFT_CHECK(!decoder.info(&info));
+}
+
 }  // namespace
 
 int main() {
     testBadInputAndUnopenedState();
     testTimeAdvanceSemantics();
     testSeekAndRewind();
+    testVideoHeaderAcceptedWhenAudioIsNotMp2();
     return lift_test::finish("movie-decoder");
 }

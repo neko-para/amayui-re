@@ -1514,6 +1514,21 @@ const MUTATIONS = [
     what: 'stdcall 不再弹参 ⇒ 栈每次调用涨 argc*4 ⇒ shim-abi 的 esp 平衡断言红',
   },
 
+  {
+    // ★ 代表"影片解码只认视频头、不被非 MP2 音频头否决"这一类错（缺陷现场 = 存档 010 → FIELD 点
+    //   (540,450) 放 `MVS*.MPG`：视频是标准 MPEG-1 PS，音频不是 MP2 ⇒ pl_mpeg 的
+    //   `plm_has_headers` 会把整部片判死 ⇒ dshow 渲染器没有输入 pin ⇒ 运行被结束）。
+    //   把退路拆掉（恢复"整部片判死"）⇒ `movie-decoder` 的 video-only-audio-not-mp2 断言红。
+    file: 'apps/emulator-lift/src/runtime/video/movie_decoder.cpp',
+    from: '            plm_set_audio_enabled(plm_, 0);\n            video_only_ = true;',
+    to: '            setError(err, "变异：音频头不是 MP2 时仍然整部片判死");\n            return false;',
+    guard: 'ctest:movie-decoder',
+    ctest: 'movie-decoder',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-movie-decoder',
+    what: '影片解码拆掉"音频头不是 MP2 ⇒ 只播视频"的退路 ⇒ 整部片被判死 ⇒ movie-decoder 的 video-only 断言红',
+  },
+
 
   {
     // ★ 代表"把续延桩 EA 写成字面量"这一类错（AOT 臂 `EnumSystemLocalesA` 的"续延桩不可调用"）：

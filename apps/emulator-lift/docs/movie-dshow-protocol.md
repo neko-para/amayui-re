@@ -382,3 +382,21 @@
      `tests/movie_logo.cpp` 断言 `音频渲染器：Stop` 的 `fed > 200000`（至少 4.5 s 真的解出来并推出去）。
    - **未定 / 已知限制**：无逐帧漂移校正（只靠 200 ms 前导 + 迟到丢弃）；循环/seek 会清队列重排；
      pl_mpeg 只解 MPEG-1 Layer II；`SetVolume` 的 −100 dB 是静音门限。
+
+19. **视频-only 退路：音频头不是 MPEG-1 Layer II 时，视频头说了算（2026-11-22）**
+   - **为什么必须有**：`plm_has_headers` 是**组合判据** —— `pl_mpeg.h:979-984` 要求
+     `(video_decoder && !plm_video_has_header) || (audio_decoder && !plm_audio_has_header)` 为假；
+     而 `plm_init_decoders`（同文件 `:939-948`）在 `num_audio_streams > 0` 时**无条件**建音频解码器
+     （`audio_enabled` 只决定 `audio_packet_type`，**不阻止建对象**）⇒ **音频不是 MP2 的整部片会被判死**，
+     哪怕视频是标准 MPEG-1 PS。游戏的 `MVS*.MPG`（120×120 / 30 fps、65540 字节的特效小片）正是这种：
+     `probe2` 读 `MVS006.MPG` ⇒ `demux_has_headers=1` / `audio=1 video=1` / `video_has_header=1`
+     但 **`has_headers=0`**；`probe3` 显示视频能完整解（26 / 29 帧）。现场与读数见
+     `docs/03-emulator/defects.md#BUG-39`。
+   - **口径**：`MovieDecoder::open` 里 **视频头是硬判据**；`plm_has_headers` 为假时改成
+     `plm_set_audio_enabled(plm_, 0)` + `video_only_ = true`，再用 sequence header 的宽/高/帧率当判据
+     （宽高 ≤0 / fps ≤0 ⇒ 仍然拒绝，**不放宽视频判据**）；`nextAudio()` 在 `video_only_` 下直接返回
+     false（⛔ 不去 pl_mpeg 里扫一个解不了的音频流：`audio_packet_type = 0` 时它会一路读到流尾才返回）；
+     并 warn 一行说清"只播视频"。
+   - **边界**：⛔ **不改 vendored `third_party/pl_mpeg`**（三份副本逐字节相同，`tools/test/emulator-cxx-pl-mpeg-sync.test.mjs`
+     守着）；这类片**没有声音**，且 `MVS*.MPG` 是"刻意无音轨"还是"有非 MP2 音轨"**未取证**；
+     正常 MP2 片（如 LOGO 1280×720）走的仍是 §18 那条路，一字不变。

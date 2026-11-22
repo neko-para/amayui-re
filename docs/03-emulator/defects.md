@@ -1087,3 +1087,63 @@
     时刻不同，与缩放无关。
 - **守卫的边界**：配方的场景读数**不进 test**（只在本文）；⛔ 不要把"再回归一遍场景"做成默认门禁。
 - **需求单**：待父级登记（本车道 ⛔ 不改 `data/**`）。
+
+### BUG-39 · 存档 010 → FIELD 点 (540,450)：`MVS*.MPG` 的音频头不是 MP2 ⇒ `plm_has_headers` 把**整部片**判死（**已修** 2026-11-22）
+- **现象**（用户 2026-11-22）：加载**存档 10**（`saves/SAVE10.DAT`）进 FIELD，点 **(540,450)**，因为**播不了一个特效**而退出。
+- **"特效"是什么**：`MVS*.MPG` —— ALF 里恰 **65540 字节**（日志：`[dshow] IAsyncReader::Length ⇒ total=65540 available=65540`）、
+  **120×120 / 30 fps** 的短小片。实测 `MVS006` / `MVS058` = 0.833 s（**26** 帧）、`MVS023` = 0.933 s（**29** 帧）；
+  三者的 pack / system header 与 sequence header 都齐（标准 MPEG-1 program stream）。
+- **根因（pl_mpeg 的**组合**判据，不是解码失败）**：
+  - `plm_init_decoders`（`apps/emulator-lift/third_party/pl_mpeg/pl_mpeg.h:939-948`）在 `num_audio_streams > 0` 时
+    **无条件**建音频解码器 —— `audio_enabled` 只决定 `audio_packet_type`，**不阻止建对象**；
+  - `plm_has_headers`（同文件 `:979-984`）要求**视频头与音频头都成立**
+    （`(video_decoder && !video_has_header) || (audio_decoder && !audio_has_header)` ⇒ false）；
+  - 这些片的 `0xC0` 包里**没有 MPEG audio 帧头**（不是 MPEG-1 Layer II）⇒ 音频头永不成立 ⇒
+    **整部片被判死**，尽管视频能完整解。
+  - 读数（**逐字**，2026-11-22 / win32 / 一次性探针 `.tmp/save10-crash/probe2.exe` + `probe3.exe`）：
+    - `probe2.exe MVS006.MPG` ⇒ `size=65540` · `demux_has_headers = 1` · `has_pack_header=1 has_system_header=1 audio=1 video=1` ·
+      `init_decoders = 1` · `video_has_header = 1 (has_sequence_header=1) start_code=0xb3 tell=76` · **`has_headers = 0`**；
+      **对照** `MVB001.MPG`（同形状，音频是 MP2）⇒ **`has_headers = 1`**。
+    - `probe3.exe`（视频-only 口径，同一份 vendored pl_mpeg）⇒ `MVS006`/`MVS058` `frames decoded=26 ended=1`、
+      `MVS023` `frames decoded=29 ended=1`，三者的 `w=120 h=120 fps=30.000`。
+  - 后果链：`MovieDecoder::open` 返回 false ⇒ dshow 的 `Render` 没有可接的输入 pin ⇒ 引擎拿不到帧 ⇒ 那次交互以退出收场。
+- **修法**（`src/runtime/video/movie_decoder.cpp`）：**视频头 = 硬判据**，音频头只作降级条件 ——
+  `plm_has_headers` 为假时先 `plm_set_audio_enabled(plm_, 0)`（`:92`）+ `video_only_ = true`（`:93`），
+  再用 sequence header 的宽/高/帧率当判据（宽高 ≤0 或 fps ≤0 ⇒ **仍然拒绝**，`:94-97`）；
+  `nextAudio()` 在 `video_only_` 下直接返回 false（`:154-158` —— ⛔ 不去 pl_mpeg 里扫一个解不了的音频流：
+  `audio_packet_type = 0` 时它会一路读到流尾才返回 null）；warn 一行说清"只播视频"（`:98-99`）；
+  判据分层写在头注释（`movie_decoder.h:80-82`）。
+  - **边界**：⛔ **不改 vendored `third_party/pl_mpeg`**（三份副本逐字节相同，`tools/test/emulator-cxx-pl-mpeg-sync.test.mjs` 守着）；
+    ⛔ 不放宽视频判据（负对照见守卫）；正常 MP2 片（LOGO 1280×720）走的仍是原路，一字不变。
+- **守卫**：CTest `movie-decoder`（`apps/emulator-lift/CMakeLists.txt:1950`；用例 `video-only-audio-not-mp2`，
+  `tests/movie_decoder.cpp:322`）—— 纯字节构造"视频头 OK + `0xC0` 包不是 MP2"的 PS：
+  ① 必须 `open` 成功且 `120×120` / `fps ∈ (29,31)`；② 负对照（同长度但抹掉 sequence header）必须**仍然拒绝**。
+  **红了意味着什么**：退了"只播视频"的退路 ⇒ 游戏里 `MVS*.MPG` 这类片会重新整部判死（用户症状复现）；
+  或退路放宽到"没有视频头也接受" ⇒ 坏片会被当成 0×0 影片送进渲染器。
+  变异条目 = `tools/mutate-check.mjs` 里 `guard: 'ctest:movie-decoder'` 那条（拆掉退路 ⇒ 当场红）。
+- **读数（修后，端到端；3 次同一条链）**（2026-11-22 / win32 / RelWithDebInfo / `--present headless`）：
+  ```
+  ./out/emulator-lift-aot.exe --game-dir ../../links/install --appdata ../../.tmp/save10-crash/appdata-e2e-<n> \
+    --present headless --skip-logo --audio off --time-limit 180 --log-level info \
+    --plugin scripts/plugins/lib/scenario-save10-field.js --plugin-param slot=10 --plugin-param expect=FIELD
+  ```
+  （跑前 `scripts/clean-appdata.sh <appdata>`）⇒ **3/3 都走到 `finish(0)`**（r6/r7 的进程退出码直接读到 **0**；
+  r5 的退出码被 pwsh 的重定向句柄挡住没读到，但日志有同一行 survive、进程已退）；每次都有：
+  `[dshow] IAsyncReader::Length ⇒ total=65540` ·
+  `[warn] [video] movie: 音频头不是 MPEG-1 Layer II ⇒ 只播视频…` ·
+  `[video] movie: opened: 120x120 @ 30.000 fps, duration 0.933 s` ·
+  `[dshow] MovieDecoder open：120x120 fps=30.000 时长=0.933s` ·
+  `[dshow] tex movie #1 w=120 h=120 nonzero=17 sampled=225 hash=456bf87b156e6fb7`（**像素真的被写进纹理**）·
+  `[dshow] 音频渲染器：Stop（fed=0 frames …）`（视频-only ⇒ 没有音频样本）·
+  `scenario-save10: 点击之后 8000 ms 仍在跑`。
+  ⚠ 同一份代码换一种**启动方式**（`Start-Process -RedirectStandardOutput/-Error` 两个文件）连跑 3 次都在
+  `load:expect:FIELD.BIN` 门超时（第二道确认的点击没被消费，`frames≈35/180 s`）——那不是本单的缺陷，
+  读数与差异见 `.tmp/save10-crash/report.md` §3（**未归因**）。
+  ⛔ **没有 `startPage` 旋钮**（2026-11-22 删）：进屏时 `SAVE.BIN` 第 11 行 `load-int (global-int 138e)` 会把页号**从 `SAVE.DAT` 重新读回** ⇒ 进屏前写它会被覆盖（实测 `applied=true`、进屏仍读回 1；读数见 `save-format.md` §翻页）⇒ 这条链走的是「页 1 已在目标页」分支；翻页链的端到端读数见下面的 `slot=5` 那条。
+- **未做 / 边界**：
+  - 只播视频 ⇒ 这些片**没有声音**，且**未取证** `MVS*.MPG` 是"刻意无音轨"还是"有非 MP2 音轨（MPEG-2 audio / AC-3 …）"——
+    两种都落进同一条退路（"没有音频样本"，不是"静音补偿"）。
+  - `plm_audio_has_header` 只认 MPEG-1 Layer II ⇒ 其它编码的音频仍然不会播。
+  - 退路只在 `plm_has_headers` 为假时启用；**没有**区分"音频坏了"与"根本没有音频流"（后者本来就走正常路）。
+- **复现**：上面那条命令（`<n>` = 1/2/3；每次先 `scripts/clean-appdata.sh <appdata>`）；页机制见
+  `save-format.md` §加载界面的列表与翻页。
