@@ -67,8 +67,13 @@ void IntentExecutor::atPoint(WindowManager& wm, InputPoint point) {
     if (!polling && queue_.depth() == 0 && pending_.empty() && armed_.empty()) return;
 
     const std::uint64_t now = nowMs();
+    // ★ **帧线**（2026-11-22）：与 `InputPlan::presenting()` 同一条计数（宿主**已完成**的 guest 回调数）。
+    //   装配点注入 `presenter.frameCount()` 的读数函数 ⇒ `frames` 是活的、`callback_boundary=true`；
+    //   ⛔ 阈值不在这里 —— 闸门 ②′ 在 `PointerCore::releaseDue`（`kCallbackFramesBeforeRelease` 只有
+    //   一份），本类只把读数传进去。没有注入 ⇒ `frames=0` / `callback_boundary=false` = 旧行为。
+    const std::uint64_t frames = frame_fn_ != nullptr ? frame_fn_(frame_ctx_) : 0;
     const PointerPoint pt{point, now, deliverCalls(InputPoint::KeyLevel), cursor_done, read_points_, 0,
-                          /*frames=*/0, /*callback_boundary=*/false};
+                          frames, frame_fn_ != nullptr};
 
     // ---- ③ 采样 → poll（合同 §4.2 445：采样后、releaseDue 前；0 或 1 个事件）----
     if (polling) {

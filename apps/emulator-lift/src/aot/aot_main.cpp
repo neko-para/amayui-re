@@ -78,6 +78,14 @@ std::uint64_t controlStateSeq(void* ctx) {
     return control != nullptr ? control->stateSeq() : 0;
 }
 
+// 插件 `IntentExecutor` 的**帧线**（与 `--input-plan` 同一条）：`presenter.frameCount()` = 已完成
+// guest 回调数（`present.cpp` 在 `++frame_count_` 同一刻推 `PlanEventKind::Frame`）。
+// ★ 它与 `InputPlan::presenting()` 是**同一个计数源** —— ⛔ 不另建第二份帧账、⛔ 不按插件/场景特判。
+std::uint64_t presentFrameCount(void* ctx) {
+    auto* host = static_cast<lift::aot::AotHost*>(ctx);
+    return host != nullptr ? host->presenter().frameCount() : 0;
+}
+
 void usage() {
     std::printf(
         "emulator-lift-aot —— Shape A：**执行**构建期 lift 出来的代码（⛔ 不构造 Machine）\n"
@@ -1138,6 +1146,11 @@ int main(int argc, char** argv) {
         plugin_host->attachMemory(*host.cpu().mem);
         // ★ 读点观察者（C2a 的唯一泵；`input.h` 四个投递口 → `PluginHost::onReadPoint`）。
         host.cpu().windows->setReadPointObserver(plugin_host.get());
+        // ★ **回调边界**（2026-11-22）：插件 executor 与 `--input-plan` 走**同一条**帧线 ——
+        //   `presenter.frameCount()`（`present.cpp` 在 `++frame_count_` 同一刻推 `Frame`）。
+        //   ⇒ `ctx.input.click` 的抬起同样要跨过一个完整 guest 回调（闸门 ②′；阈值只有
+        //   `PointerCore::kCallbackFramesBeforeRelease` 一份）。⛔ 不按插件 / 场景开特判。
+        plugin_host->executor().setFrameSource(&host, &presentFrameCount);
         // ★ `ctx.quit()` 的归因（D-C2-9）：run 循环在下一个块边界看到 `Stopped` + `plugin: quit`。
         run_opts.stop_requested = plugin_host->quitFlag();
         run_opts.stop_detail = "plugin: quit";
