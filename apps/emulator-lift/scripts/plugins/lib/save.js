@@ -66,7 +66,7 @@
 //   （pure CTest 与 e2e 直接拿本文件当入口，不复制文件）。
 //
 // ★ 失败面（全部响亮，⛔ 不静默）：
-//   ① slot 非整数 / 不在 0–7 ⇒ **构造时** throw（参考入口在 `start` 里构造 ⇒ Run fail + 点名）；
+//   ① slot 非整数 / 不在 0–`MAX_SLOT`（899 = 90 页 × 10 行，界面能选到的范围）⇒ **构造时** throw（参考入口在 `start` 里构造 ⇒ Run fail + 点名）；⚠ 槽 ≥100 的文件名字形**未取证**；
 //   ①' `expect` 缺 / 空 / 元素不是非空字符串 ⇒ **构造时** throw（消息给出 ADV / 战斗 / 地图三类别名）；
 //   ② 未知 `ev.name` ⇒ `ctx.fail(ev.name, …)` + `[]`；
 //   ③ 门超时（`timeoutMs`）⇒ `ctx.finish(5, "load-save: gate timeout …")` + `[]`。
