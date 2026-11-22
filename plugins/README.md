@@ -10,24 +10,17 @@ DSH 插件的源码放这里。**位置是自由的** —— 与技能不同，�
 
 **本仓现有的插件**（都属于**反面情形**那一类，判据见 §2："**需要的是文件，还是需要 DSH 的运行时？**"）：
 
-* **`deploy`**（`plugins/deploy/`）—— 沙箱拒绝的那几步：游戏目录硬链接 / headless Chrome / 完整性标签。
-* **`pnpm-priv`**（`plugins/pnpm-priv/`）—— **提权安装依赖**：让 `pnpm` 建**真符号链接**而不是 junction。
-  ★ 它存在的唯一理由：Node **拒绝为 `node_modules` 下的文件剥类型**
-  （`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`），而"跨包用包名导入 `.mts`"必然解析到
-  `node_modules/@amayui/<包>` ⇒ 那条路**只在真符号链接下走得通**（实测：symbolic link 成功 / junction 报错）；
-  Windows 上建真符号链接要 `SeCreateSymbolicLinkPrivilege`，沙箱里拿不到 ⇒ pnpm **静默降级成 junction**。
-  判据不是"pnpm 退出 0"，而是 `pnpm_priv op=check-links` 里**"不是真符号链接"为 0**。
-  ★ 它还有一个 `run` op：**只认固定任务名**（`build-renderer` / `smoke` / `electron`），把"沙箱里
-  `spawn EPERM`"的那几步（`vite build` / Electron GUI）搬回宿主。**不是**通用 exec ——
-  任务名 → argv / cwd 全部写死在插件里，见它自己的 README §3.1。
 * **`wait-subagent`**（`plugins/wait-subagent/`）—— **会话内**的 `wait_subagent` 工具：订阅运行中的
   subagent 生命周期与 agent inbox 事件，等到子代理结束、用户插话 / turn 取消就立刻返回。
   可一次等一组 child：缺省 `mode: any_of`（**谁先结束就返回**，其余留在 `pending`），要等全部才 `all_of`。
   ★ 它不要宿主特权，但**仍然必须是插件**：要拿 `exec.agent` 的 scope context 与正在运行的事件流，
   网页视图拿不到这些。它替代的是"用 `bash sleep` 猜时长"。
-* **`sandbox-nomic`**（`plugins/sandbox-nomic/`）—— **PoC**：替换 `ctx.sandbox`，把 Windows 的
-  `workspace-write` 从「受限令牌 + 全树 Low 标签」换成「受限令牌 + 能力 SID 的 DACL」，**不打完整性标签**。
-  只在 win32 有意义；缺口（Everyone 可写 / FAT / 网络共享 / UI 隔离）在它自己的 README 里逐条写清。
+* **`wait-job`**（`plugins/wait-job/`）—— **会话内**的 `wait_job` 工具：等一个后台任务结算
+  （`wake_on: settle | output`），用户插话 / turn 取消时立刻返回；结算时把正文带回，不依赖完成通知。
+
+★ 2026-11-23 按用户裁决移除了三个插件：`deploy`（宿主侧特权 op：硬链接 / headless Chrome / 完整性标签）·
+`pnpm-priv`（提权装依赖，让 pnpm 建真符号链接）· `sandbox-nomic`（no-MIC 的 `ctx.sandbox`）。
+它们原来的职责**没有替代品**；要取回看 `git log -- plugins/deploy`（其余同理）。
 
 上面这些插件的设计 / 安全口径 / 装法见各自的 `README.md`。
 
@@ -51,8 +44,8 @@ DSH 插件的源码放这里。**位置是自由的** —— 与技能不同，�
 
 ```bash
 pnpm install                                          # 插件的依赖是**普通 dependencies**（plugins/* 是 workspace 成员）
-dsh plugin --profile web install "<插件的绝对路径>"     # 例：E:\Projects\amayui-re\plugins\deploy
-dsh plugin --profile web uninstall "<包名>"            # 撤回（例：@amayui/dsh-plugin-deploy）
+dsh plugin --profile web install "<插件的绝对路径>"     # 例：E:\Projects\amayui-re\plugins\wait-subagent
+dsh plugin --profile web uninstall "<包名>"            # 撤回（例：@amayui/dsh-plugin-wait-subagent）
 ```
 
 三个**实测踩过**的坑（别当成"命令打错了"）：

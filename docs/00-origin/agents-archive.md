@@ -55,7 +55,7 @@
   ★ 各包 `package.json` 的 `exports` 用 `"./*": "./*"`：**无构建 ⇒ 不做打包边界**，只是让"包内路径"有个显式入口集合。
   ★ Windows 上那个链接**必须是真符号链接**（`lstat.isSymbolicLink === true`）：Node **拒绝为 `node_modules`
   下的文件剥类型**（`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`）⇒ 跨包 `.mts` 只在真符号链接下走得通。
-  无提权时 pnpm 会**静默降级成 junction**（装完不报错、链接形态却是错的）⇒ 提权安装见 `plugins/pnpm-priv`。
+  无提权时 pnpm 会**静默降级成 junction**（装完不报错、链接形态却是错的）⇒ 提权安装（`AGENTS.md` §5.1）。
 * ★ **类型检查用 `noEmit`，覆盖六个工程**：`pnpm typecheck`
   （= `tsc -p packages/age-format/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.frontends.json --noEmit && tsc -p apps/emulator-new/tsconfig.core.json --noEmit && tsc -p apps/emulator-new/tsconfig.renderer.json --noEmit && tsc -p apps/emulator-new/tsconfig.json --noEmit`）。
   ★ **后三个是 `apps/emulator-new`**：核心 / 渲染进程 / 整个 app 分成三份 tsconfig ——
@@ -98,7 +98,7 @@
   ★ **但 Windows 上"装依赖"这一步仍要提权**：pnpm 建的是**目录符号链接**
   （要 `SeCreateSymbolicLinkPrivilege`），受限沙箱里会被拒，而 pnpm 会**静默降级成 junction** ——
   Node **不能 realpath junction**（`lstatSync().isSymbolicLink === false`，实测）⇒ **传递依赖解析不到**
-  （实测：`plugins/deploy` 里 `schemastery` 的 `cosmokit` 报 `ERR_MODULE_NOT_FOUND`）。
+  （实测 2026-10：当时某个插件的 `node_modules` 里 `schemastery` 的 `cosmokit` 报 `ERR_MODULE_NOT_FOUND`）。
   判据：`lstatSync('<包>').isSymbolicLink === true`；修法：**提权重跑 `pnpm install`**（删掉那层 `node_modules` 更稳）。
   ★ **判据**：① `pnpm store path` 落在工作区内；② `node_modules/.modules.yaml` 的 `nodeLinker`
   是你期望的布局 —— 实物形状由**上一次安装时的配置**决定，pnpm 不会替你清理遗留的树。

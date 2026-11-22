@@ -92,15 +92,15 @@
   `age-format-types.test.mjs` · `emulator-cxx-pl-mpeg-sync.test.mjs`
 - **失效后果**：技能与文档指向不存在的动作；同一部影片在三条实现线上解出不同像素而三边测试都绿。
 
-## T-8 插件（agent 基建）：**op 是闭集合，写类默认 dry-run**
+## T-8 插件（agent 基建）：**等待语义不被抢跑**
 
-- **合同**：`plugins/` 的每个 op 是闭集合、argv 数组不经 shell、参数受校验、写类 op 缺 `write:true` 只出计划；
-  提权插件不许变成"能跑任意命令"；`wait_subagent` 的等待 / 插话 / 竞态语义稳定。
-- **兜它的用例**：`plugins/pnpm-priv/test/ops.test.mjs` · `plugins/pnpm-priv/test/plugin.test.mjs` ·
-  `plugins/deploy/test/ops.test.mjs` · `plugins/deploy/test/plugin.test.mjs` ·
-  `plugins/sandbox-nomic/test/confine.test.mjs` · `plugins/sandbox-nomic/test/provider.test.mjs` ·
-  `plugins/wait-subagent/test/wait.test.mjs` · `plugins/wait-subagent/test/plugin.test.mjs`
-- **失效后果**：宿主替调用方真的跑构建 / 起窗口 / 越界写仓库外的路径，而调用方以为只是"出了个计划"。
+- **合同**：`wait_subagent` / `wait_job` 的等待 / 插话 / 取消 / 竞态语义稳定（`any_of` 如实交回"谁还在跑"、
+  队列插话收束 turn、`wake_on: output` 不消费输出）；插件只注册一个工具名、参数 / 输出 schema 能被 `defineTool` 吃下。
+- **兜它的用例**：`plugins/wait-subagent/test/wait.test.mjs` · `plugins/wait-subagent/test/plugin.test.mjs` ·
+  `plugins/wait-job/test/wait-job.test.mjs`
+- **失效后果**：模型被挂住或提前返回、用户插话被丢掉、`wake_on: output` 把输出吃掉（后续 `job_output` 读不到）。
+- ★ 原 T-8 还覆盖 `deploy` / `pnpm-priv` / `sandbox-nomic` 的"op 是闭集合、写类默认 dry-run、提权不许变成任意 exec"；
+  这三个插件 2026-11-23 移除（用户裁决），那条合同随它们退场。
 
 ## T-9 附：**spec 的证据锚**（`apps/emulator-cxx` 的 CTest）
 

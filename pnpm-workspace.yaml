@@ -14,8 +14,8 @@ packages:
   # ★ `plugins/*` 入列表的判据与 `apps/workbench` 相同：**它有自己的依赖**
   #   （`@deepseek-ai/dsh-tools` / `schemastery` 是普通 dependencies ⇒ 由本仓 `pnpm install` 装，
   #   落在工作区内的 `.pnpm-store` ⇒ 装依赖这一步**不需要提权**）。
-  #   ★ 版本要与**正在运行的 DSH** 同步（当前 `0.2.0-rc.2`）：升 DSH 时同步升插件里那两行 ——
-  #   否则插件会解析到另一份 `defineTool`（见 `plugins/deploy/README.md` §5）。
+  #   ★ 版本要与**正在运行的 DSH** 同步（以 `plugins/*/package.json` 为准）：升 DSH 时同步升插件里那几行 ——
+  #   否则插件会解析到另一份 `defineTool`（见 `plugins/README.md` §3）。
   - plugins/*
 
 # ★ 项目级设置写在**这里**，不写 `.npmrc`：

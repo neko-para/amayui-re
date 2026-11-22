@@ -4,8 +4,8 @@
 - type: bug
 - status: done
 - parent: REQ-01M3TCXAQ0BZEJ1MMM0N9ZMB8Y
-- verify: plugins/deploy/test/ops.test.mjs#★ 路径校验
-- repro: plugins/deploy/test/ops.test.mjs#★ 路径校验
+- verify: tools/test/release.test.mjs#install：落盘途中出错也**不留半棵树**（外层薄壳兜住意外抛出）
+- repro: tools/test/release.test.mjs#install：落盘途中出错也**不留半棵树**（外层薄壳兜住意外抛出）
 - severity: S3
 - tags: [macos compat plugins]
 
@@ -34,3 +34,9 @@
 ## 非目标
 
 不改变插件的闭接口 / 安全口径；不为了绿而放宽路径校验。
+
+## 后续
+
+2026-11-23：`plugins/deploy` 与 `plugins/pnpm-priv` 已按用户裁决**移除**（连同 `sandbox-nomic`）⇒
+本单原覆盖的 10 条插件测试随插件消失，仍可跑的凭据只剩 `tools/test/release.test.mjs` 的 1 条
+（上面的 `verify`/`repro` 已改指它）。本单结论（当时的 11 条在 macOS 上转绿）不因此失效，但已**无法再自动复核**。

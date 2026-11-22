@@ -99,10 +99,10 @@ wait_job(job_id: "bash-xxxx", wake_on: "output")   # 有新的输出字节就回
 ## 5. 依赖与版本
 
 - 运行时依赖：`@deepseek-ai/dsh-tools`（`defineTool`）与宿主服务 `ctx.jobs`（`inject: ['tools', 'jobs']`）。
-- **`@deepseek-ai/dsh-tools` 的版本要与正在运行的 DSH 同步**（理由同 `plugins/deploy/README.md` §5：
-  否则插件会解析到另一份 `defineTool`）。
+- **`@deepseek-ai/dsh-tools` 的版本要与正在运行的 DSH 同步**（否则插件会解析到另一份 `defineTool`：
+  与宿主那份不是同一个模块实例）。
 - `plugins/*` 在 `pnpm-workspace.yaml` 的 workspace 列表里 ⇒ 新增/升依赖后跑一次 `pnpm install`
-  （装依赖这一步在 Windows 上要提权，见 `plugins/pnpm-priv`）。
+  （装依赖这一步在 Windows 上要提权：pnpm 建真符号链接要 `SeCreateSymbolicLinkPrivilege`，见 `AGENTS.md` §5.1）。
 
 ## 6. 安装 / 卸载（环境级动作）
 
