@@ -175,6 +175,13 @@ public:
     bool invokeById(X86& cpu, std::uint32_t id);
 
 private:
+    // ★ lift-opt #2/#3（2026-11-22）：`invokeById` / `invoke` 的公共下半段。
+    //   为什么拆出来：旧形状里 `invokeById` 取一份 def 交给 `invoke`，`invoke` 再取一份
+    //   ⇒ 每次 shim 调用付 **两把 `recursive_mutex` + 两次 `ShimDef` 拷贝**（每个 def 两个
+    //   `std::string`）。现在"取 def + 记账"在**一次**加锁里完成（`prepareLocked`），
+    //   然后把所有权交给这里 ⇒ **一次锁 + 一次拷贝**。临界区内容一个字都没改。
+    void prepareLocked(const ShimDef& src, ShimDef* out, bool* trace_on, bool* timing_on);
+    void invokePrepared(X86& cpu, ShimDef& local, bool trace_on, bool timing_on);
     std::vector<ShimDef> defs_;
     bool trace_ = false;
     bool timing_ = false;

@@ -262,8 +262,21 @@ test('③ 关系断言的两个来源互相独立（不许退化成恒真）+ CT
   const incDeliver = (planSrc.match(/\+\+deliver_calls_\[/g) ?? []).length;
   assert.equal(incDeliver, 1, `input_plan.cpp：\`++deliver_calls_[\` 有 ${incDeliver} 处（应恰好 1 处 = atPoint）`);
   const shimsSrc = read(SHIMS_CPP);
-  const incShim = (shimsSrc.match(/\+\+defs_\[local\.id\]\.call_count/g) ?? []).length;
-  assert.equal(incShim, 1, `shims.cpp：\`++defs_[local.id].call_count\` 有 ${incShim} 处（应恰好 1 处 = invoke）`);
+  // ★ lift-opt（2026-11-22）：`invokeById` / `invoke` 现在共用 `prepareLocked()`（一次锁 + 一次
+  //   `ShimDef` 拷贝）⇒ 自增点的形参名从 `local` 变成 `out`。**判据不许放宽成"有就行"**：
+  //   ① 全文**恰好一处** `++defs_[<任意下标>].call_count`（= 计数只有一个来源）；
+  //   ② 那一处必须落在 `prepareLocked()` 的**函数体**里（两条 invoke 路径共用它）——
+  //      只断言"函数存在"是不够的（别处再记一次它照样绿）。
+  const incRe = /\+\+defs_\[[^\]\n]+\]\.call_count/g;
+  const incShim = (shimsSrc.match(incRe) ?? []).length;
+  assert.equal(incShim, 1, `shims.cpp：\`++defs_[<下标>].call_count\` 有 ${incShim} 处（应恰好 1 处）`);
+  const prep = /void ShimRegistry::prepareLocked\([^)]*\) \{([\s\S]*?)\n\}\n/.exec(shimsSrc);
+  assert.ok(prep, 'shims.cpp：找不到 `ShimRegistry::prepareLocked` 的函数体（判据要靠它定位唯一自增点）');
+  assert.equal(
+    (prep[1].match(incRe) ?? []).length,
+    1,
+    'shims.cpp：唯一那处 `call_count` 自增必须在 `prepareLocked()` 里（两条 invoke 路径共用它）',
+  );
 
   assert.ok(
     /^add_test\(NAME input-plan-read-points /m.test(read(CMAKE)),

@@ -141,6 +141,29 @@ void buildSlotsOnce() {
 //   `resetDispatchStats()` / `printProbeLine()` 只作用于调用线程 = 主线程 ⇒ 摘要口径不变。
 thread_local DispatchStats g_stats;
 
+// =====================================================================================
+// ★ lift-opt #6（2026-11-22）：**1-entry `ea → fn` memo**（纯函数缓存）
+//
+// 为什么可以记忆化（不是"观察到表不变"，是**结构上**不变）：
+//   · `g_slots` 只由 `buildSlotsOnce()` 的 `call_once` 写一次，之后**没有任何代码写它**
+//     （`buildSlotsOnce` 是唯一的写者；`g_buildMaxProbes` 同）；
+//   · 于是 `ea → (fn, probes)` 是 `(ea, 表的初始内容)` 的**纯函数**。
+// ⇒ 命中时返回的 fn 与"再查一遍"逐位相同；`probes` 也相同（同一条探测链）。
+//
+// ⚠ **计数器必须逐位不变**（`table misses` 是语义指纹的一项，`lookups/hits/misses` 与
+//   `probes/max_probes` 都会被打进运行摘要）：
+//   · 命中 ⇒ 仍然 `++lookups` / `++hits`，且把记忆的 `probes` 原样补进 `comparisons/max_probes`；
+//   · 只缓存 `fn != nullptr` 的**命中**（`ea == 0` / 未命中 / 空表一律走原路径 ⇒ `misses` 不受影响）。
+// ⚠ 线程口径：memo 是 `thread_local`（与 `g_stats` 同口径）⇒ 主线程与音频 feeder 各一份，
+//   没有数据竞争。表本身只读 ⇒ 两份 memo 的内容也必然一致。
+struct LookupMemo {
+    std::uint32_t ea = 0;
+    std::uint32_t probes = 0;
+    LiftFn fn = nullptr;
+};
+thread_local LookupMemo t_lookup_memo;      // `lookup()`（带 probes 补计）
+thread_local LookupMemo t_lift_dyn_memo;    // `lookupUncounted()`（不记 probes ⇒ 各用一份，互不污染读数）
+
 }  // namespace
 
 bool generatedPresent() {
@@ -209,6 +232,17 @@ LiftFn lookup(std::uint32_t ea, DispatchStats& stats, std::uint64_t* comparisons
     //   TLS 访问。`lookups/hits/misses` 永远记（语义指纹里有 `table misses`）；`comparisons/max_probes`
     //   只在调用方要（= `--profile` 开档，`comparisons != nullptr`）时记 —— 它们是归因读数。
     ++stats.lookups;
+    // ★ lift-opt #6：1-entry memo（命中 ⇒ 计数与探测数**原样补计**，见 `t_lookup_memo` 的长注释）。
+    if (ea == t_lookup_memo.ea && t_lookup_memo.fn != nullptr) {
+        if (comparisons != nullptr) {
+            stats.comparisons_armed = true;
+            stats.comparisons += t_lookup_memo.probes;
+            if (t_lookup_memo.probes > stats.max_probes) stats.max_probes = t_lookup_memo.probes;
+            *comparisons = t_lookup_memo.probes;
+        }
+        ++stats.hits;
+        return t_lookup_memo.fn;
+    }
     std::uint64_t probes = 0;
     LiftFn found = nullptr;
     // ---- 首次使用 ⇒ 摊表（这一次分支在 6,200 万次查找里只有第一次为真，分支预测吃得下）----
@@ -235,6 +269,10 @@ LiftFn lookup(std::uint32_t ea, DispatchStats& stats, std::uint64_t* comparisons
     }
     if (found != nullptr) {
         ++stats.hits;
+        // ★ lift-opt #6：只缓存命中（`probes` 是这条 EA 的固定探测长度）。
+        t_lookup_memo.ea = ea;
+        t_lookup_memo.probes = static_cast<std::uint32_t>(probes);
+        t_lookup_memo.fn = found;
     } else {
         ++stats.misses;
     }
@@ -244,6 +282,12 @@ LiftFn lookup(std::uint32_t ea, DispatchStats& stats, std::uint64_t* comparisons
 // ★ S7：与 `lookup` **逐字相同**的查找，只是不记 trampoline 的派发账（改记 `lift_dyn_*`）。
 //   ⛔ 不要把它实现成"调 lookup 再减计数"：那会同时弄脏 max_probes / comparisons。
 LiftFn lookupUncounted(std::uint32_t ea) {
+    // ★ lift-opt #6：**自己那份** memo（与 `lookup` 的分开 ⇒ 不会把 `probes=0` 写进带补计的那份）。
+    //   命中时只补 `lift_dyn_lookups`；未命中仍按原路径记 `lift_dyn_misses`。
+    if (ea == t_lift_dyn_memo.ea && t_lift_dyn_memo.fn != nullptr) {
+        ++g_stats.lift_dyn_lookups;
+        return t_lift_dyn_memo.fn;
+    }
     buildSlotsOnce();
     ++g_stats.lift_dyn_lookups;
     std::size_t h = slotOf(ea);
@@ -258,7 +302,13 @@ LiftFn lookupUncounted(std::uint32_t ea) {
         h = (h + 1) & kSlotMask;
         if (probes >= kSlotCount) break;
     }
-    if (found == nullptr) ++g_stats.lift_dyn_misses;
+    if (found == nullptr) {
+        ++g_stats.lift_dyn_misses;
+    } else {
+        t_lift_dyn_memo.ea = ea;
+        t_lift_dyn_memo.probes = 0;
+        t_lift_dyn_memo.fn = found;
+    }
     return found;
 }
 
