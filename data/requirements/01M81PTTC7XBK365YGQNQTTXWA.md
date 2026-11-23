@@ -32,8 +32,9 @@ S7 判据 4（"有间接 `call` ⇒ 整单元不可结构化"）的一条**可�
    （现在只跑 `repo:apps/emulator-lift/tests/ir/s7_roots.txt` 的固定一对 F/G）。
 2. 有了 1 之后再评估放宽本身（实现在 dev 车道的 `.tmp/lift-opt/s7-relax.patch`，gitignored、未入库；
    主树是**未放宽**形态）。
-3. `leave` / `push ebp` / `pop ebp` 的 esp 模型**已查清**（2026-11-22）：**没有**错编译；修法是
-   "三条一起补"（IR 等价），已另立 `REQ-01M81W63PV0JRRX8QZY7ZGEGTF`，⛔ 不随本单收。
+3. `leave` / `push ebp` / `pop ebp` 的 esp 模型**已查清**（2026-11-22 / 2026-11-23 复核）：
+   **不是缺陷**、对当前 HEAD **没有**错编译（见 `repo:docs/03-emulator/aot-s7-evaluation.md` §6）；
+   "三条一起补"只是把证明做对（IR 逐字节等价）⇒ **不排期**。
 
 ## 为什么这一批不并（裁决，2026-11-22）
 
@@ -52,7 +53,7 @@ S7 判据 4（"有间接 `call` ⇒ 整单元不可结构化"）的一条**可�
 ## 未做 / 待核
 
 - **未做**：判据 1 的那条形状级差分用例（本节点的交付）。
-- **另立**：`REQ-01M81W63PV0JRRX8QZY7ZGEGTF` —— esp 模型三条一起补（IR 等价）。
+- **不排期**：esp 模型"三条一起补"（IR 等价、收益 0）—— 单 `REQ-01M81W63PV0JRRX8QZY7ZGEGTF` 已 dropped，理由见它的 `dropped_reason`。
 - **已核（2026-11-22）**：`leave` 那件事**不是缺陷**。63 个"靠偏差才通过"的单元在 Intel 正确模型下
   63/63 仍通过；真正靠偏差的是 8 个 `… pop ebp; ret [imm16]` 共享尾声块，`ret` 处 +4 就是返回槽。
   取证见 `repo:docs/03-emulator/aot-s7-evaluation.md` §6。
@@ -63,3 +64,4 @@ S7 判据 4（"有间接 `call` ⇒ 整单元不可结构化"）的一条**可�
 
 全部读数、命令与口径（生成期 `lift-gen: [S7 criteria]` / `[S7 downgrade]`、30 帧指纹、`boundary` ns/派发）
 见 `repo:docs/03-emulator/aot-s7-evaluation.md` §0 / §4 / §7。本节点不复述数字。
+

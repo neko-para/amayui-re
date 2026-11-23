@@ -2,8 +2,9 @@
 
 - id: REQ-01M81W63PV0JRRX8QZY7ZGEGTF
 - type: req
-- status: open
+- status: dropped
 - parent: REQ-01M7JHSEZVMYB4XHEN32V7V6HJ
+- dropped_reason: 不是缺陷：那 63 个单元在 Intel 正确模型下 63/63 仍通过，11 个'靠偏差'的单元是共享尾声块（ret 处 +4 就是返回槽）；对当前 HEAD 没有潜伏错编译（宿主 call 站点 1,572 不变、8 份 .ll 与 base 逐字节只差 header 计数器）。三条一起补是纯整洁性改动（IR 等价、-8 个单元），收益 0 ⇒ 不排期。⛔ 只补 leave +4 是坏改动（-63 单元、-74 宿主 call），已写进 docs/03-emulator/aot-s7-evaluation.md §6.1；将来动 S7 判据（间接 call 放宽 / 单元根入口）时一并做。
 - tags: [emulator-lift, aot, s7]
 
 # AOT · S7 的 esp 模型按 Intel 三条一起补（push ebp / pop ebp / leave）
