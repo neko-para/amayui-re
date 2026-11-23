@@ -1,0 +1,3 @@
+# `lift-intrinsics` 夹具的根集：只有静态 CRT 的 `_memcpy`。
+# 让单元根 = 0x4E74B0（闸门块的唯一落点）；所有 `--no-close-*` / `--no-s7` 由 CMake 传。
+0x004E74B0  # _memcpy (cdecl; fast path gate: n<=16 + committed; fallback = original body)

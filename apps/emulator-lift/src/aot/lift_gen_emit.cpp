@@ -969,6 +969,11 @@ private:
 
     // ---- 控制流 ----
     std::string labelFor(std::uint32_t ea);
+    // ★ 构建期库内建（v1：`_memcpy`）：`switch` 里**单元根 EA** 的 case 走这里（不是 `bb_<root>`）：
+    //   只给"从派发边界 fresh entry 进根"的那一次发闸门；单元内部的 `br` 仍去 `bb_<root>`，
+    //   所以 resume EA / 内部回边**永远看不到闸门**（它们不是一次 `_memcpy` 调用）。
+    std::string switchLabelFor(std::uint32_t ea) const;
+    void emitIntrinsicMemcpyEntry(std::uint32_t root);
     void emitEdge(std::uint32_t ea);
     // ---- S7（D53）：一对一结构翻译 ----
     // ★ 判据（能否结构化 / 传递闭包）在 `aot/lift_struct.*`，这里**只消费结论**：
@@ -1833,6 +1838,55 @@ std::string FnEmit::labelFor(std::uint32_t ea) {
         return "%bb_exit_" + hexEa(ea);
     }
     return "%bb_" + hexEa(ea);
+}
+
+std::string FnEmit::switchLabelFor(std::uint32_t ea) const {
+    if (ea == comp_.root && structure_.intrinsic_roots.count(ea) != 0) {
+        return "%lintr_entry_" + hexEa(ea);
+    }
+    return "%bb_" + hexEa(ea);
+}
+
+// ★ 构建期库内建（v1：`_memcpy`）的入口块。**只从 `switch` 的根 case 进**（见 `switchLabelFor`）：
+//   一次 fresh `_memcpy` 调用在 guest 栈上一定是 `[esp]=返回地址 / [esp+4]=dst / [esp+8]=src /
+//   [esp+12]=n`（cdecl；反汇编已核）。闸门拒绝就 `br` 到原入口块 `bb_<root>` —— 那条路逐字节不变。
+//
+// ★ 为什么快路径自己写 `%st` 的 EAX / ESP 而不是调 `storeReg`：这是单元根入口，寄存器缓存是空的；
+//   直接 store 与 `flushRegs()` 的产物同形，而且 `ret` 之前不需要再 flush 别的槽。
+//
+// ★ `resume` 必须在 `do` **之后**才读 `mem32[esp]`：`_memcpy` 允许 `dst` 指向返回地址所在槽
+//   （原函数体也会先写再 `ret`）⇒ 先读会静默改变"返回到被写坏的地址"这个 guest 可见结果。
+void FnEmit::emitIntrinsicMemcpyEntry(std::uint32_t root) {
+    const auto it = structure_.intrinsic_roots.find(root);
+    if (it == structure_.intrinsic_roots.end()) return;
+    if (it->second != "memcpy") {
+        // 表解析已经拒绝未知内建名 ⇒ 这里只防"解析通过了、发射器不认识"的静默失效。
+        fail("intrinsic `" + it->second + "` @ " + hexEa(root) + " is not implemented by this emitter");
+        return;
+    }
+    put("lintr_entry_" + hexEa(root) + ":\n");
+    const std::string esp = loadReg(4);  // `%st + 16`（E2 的寄存器缓存：块内一次 GEP + 一次 load）
+    const std::string dst_ea = bin("add", "i32", esp, "4");
+    const std::string src_ea = bin("add", "i32", esp, "8");
+    const std::string n_ea = bin("add", "i32", esp, "12");
+    const std::string dst = loadAt(dst_ea);
+    const std::string src = loadAt(src_ea);
+    const std::string n = loadAt(n_ea);
+    const std::string ok = tmp();
+    add(ok + " = call i1 @lift_intrinsic_memcpy_gate(ptr %cpu, ptr %st, i32 " + dst + ", i32 " +
+        src + ", i32 " + n + ")");
+    add("br i1 " + ok + ", label %lintr_fast_" + hexEa(root) + ", label %bb_" + hexEa(root));
+    put("lintr_fast_" + hexEa(root) + ":\n");
+    add("call void @lift_intrinsic_memcpy_do(ptr %cpu, i32 " + dst + ", i32 " + src + ", i32 " + n +
+        ")");
+    // EAX = dst（cdecl 返回值）；ESP += 4（只弹返回地址）；EBX/ESI/EDI/EBP 未动（没执行 prologue）。
+    add("store i32 " + dst + ", ptr " + stGep(0) + ", align 4");
+    const std::string resume = loadAt(esp);
+    const std::string esp2 = bin("add", "i32", esp, "4");
+    add("store i32 " + esp2 + ", ptr " + stGep(4) + ", align 4");
+    add("ret i32 " + resume);
+    stats_->used_intrinsic_memcpy = true;
+    ++stats_->intrinsic_memcpy_sites;
 }
 
 void FnEmit::emitEdge(std::uint32_t ea) {
@@ -5575,7 +5629,8 @@ std::string FnEmit::run() {
     //   每函数 9 行纯死语句。现在 GEP 由 `stGep(i)` 在**首次使用处**按需发射、块内复用。
     put("  switch i32 %ea, label %bad [\n");
     for (std::uint32_t ea : entries) {
-        put("    i32 " + i32c(ea) + ", label %bb_" + hexEa(ea) + "\n");
+        // ★ 内建表里的**单元根**：case 走闸门块；其他 entry（含 resume EA）仍是 `bb_<EA>`。
+        put("    i32 " + i32c(ea) + ", label " + switchLabelFor(ea) + "\n");
     }
     put("  ]\n\n");
 
@@ -5583,6 +5638,14 @@ std::string FnEmit::run() {
     add("call void @llvm.trap()");
     add("unreachable");
     ++stats_->traps_bad;
+
+    // ★ 内建入口块（v1：`_memcpy`）必须在 block 之前发：它 `br` 到 `bb_<root>`（原函数体）。
+    for (const auto& kv : structure_.intrinsic_roots) {
+        if (kv.first != comp_.root) continue;
+        put("\n");
+        emitIntrinsicMemcpyEntry(kv.first);
+    }
+    if (failed_) return body_;
 
     for (const auto& kv : comp_.blocks) {
         put("\n");
@@ -5716,6 +5779,13 @@ std::string emitPrologue(const GenClosureStats& closure, const GenEmitStats* sta
     text += ";       %ea = resume EA；%cpu = X86*；返回值 = 下一个 guest EA。\n";
     text += "; 不 inline 的指令 = 一次 @lift_one（语义在解释器里）；\n";
     text += "; 指令计数 = 块边界 / 宿主调用前的 @lift_tick（D2 / D2b：只记条数，不推进虚拟时间）。\n";
+    // ★ 构建期库内建（`aot/intrinsics.txt`）：只写站点数，不写 EA 清单（清单是入库件的真源）。
+    //   ⛔ 站点为 0 时**一行都不加**：不带内建表的生成路径（golden / x87 / ops / s7）与今天逐字节相同。
+    if (stats->intrinsic_memcpy_sites != 0) {
+        text += "; 构建期库内建：单元根带闸门快路径 = " +
+                std::to_string(stats->intrinsic_memcpy_sites) +
+                "（闸门拒绝 ⇒ 回退原 lifted 函数体）\n";
+    }
     // ★ S7（D53）：**覆盖率读数**（按 `.ll` 里实际发射的站点数；⛔ 不是估值）。
     //   判据 = 单元根"可一对一结构翻译"（`aot/lift_struct.*` 的 fixpoint），
     //   没转换的站点**保持今天的语义**（`ret i32` 回 trampoline）⇒ 部分完成是安全的。
@@ -5921,6 +5991,14 @@ std::string emitPrologue(const GenClosureStats& closure, const GenEmitStats* sta
     //   （"参数里**存的**指针"那一层），与 `lift_one` / `lift_x87_sem` 同一条理由；它还会推进
     //   ECX/ESI/EDI 并把 `rep_bulk_hits/declines` 记进 `cpu`。给属性 = 允许 LLVM 重排/删掉访存。
     if (stats->used_rep_bulk) text += "declare i1 @lift_rep_bulk(ptr, ptr, i32, i32, i32)\n";
+    // ★ 构建期库内建（v1：`_memcpy`）：闸门 + 执行两个宿主入口。
+    //   ⚠ 声明**无属性**：`do` 经由 `cpu->mem` 读写 guest 内存（"参数里**存的**指针"那层，与
+    //   `lift_one` / `lift_rep_bulk` 同一条理由）；`gate` 虽然只读，但给它 `readonly`/`argmemonly`
+    //   会让 LLVM 有许可把它跨 `do` 重排 —— 收益为零、风险是真的（⛔ 不要加）。
+    if (stats->used_intrinsic_memcpy) {
+        text += "declare i1 @lift_intrinsic_memcpy_gate(ptr, ptr, i32, i32, i32)\n";
+        text += "declare void @lift_intrinsic_memcpy_do(ptr, i32, i32, i32)\n";
+    }
     if (stats->used_tick) text += "declare void @lift_tick(ptr, i32) argmemonly nounwind willreturn\n";
     if (stats->used_lift_one) text += "declare i1 @lift_one(ptr, ptr, i32)\n";
     // ★ 2026-11-15（本轮：`lift_one` 调用点 → 0）：停机原语。**不加属性**（它写 `%cpu` 的

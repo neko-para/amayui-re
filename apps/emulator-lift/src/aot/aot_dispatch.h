@@ -49,6 +49,15 @@ std::uint64_t pinnedRoots();
 std::uint64_t pinnedEntries();
 std::uint64_t pinnedFunctions();
 
+// ★ 构建期库内建表（`aot/intrinsics.txt` 的已校验内容；`lift_pin.h` 的 X-macro 列表）。
+//   只给**一次性启动 readout** 用：这一趟 AOT 带了哪几个内建 EA。⛔ 运行期不读表文件。
+struct AotIntrinsic {
+    std::uint32_t ea = 0;
+    const char* name = "";
+};
+std::size_t pinnedIntrinsicCount();
+AotIntrinsic pinnedIntrinsic(std::size_t index);
+
 // 表长（= 入口 EA 数）。
 std::size_t tableSize();
 

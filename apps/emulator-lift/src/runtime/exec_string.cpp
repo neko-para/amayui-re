@@ -19,6 +19,7 @@
 //   ★ 换臂开关：`X86::rep_bulk`（宿主字段，默认 true）⇒ 同一进程里两臂可切（差分夹具要这个）。
 //   ★ 优先级不变：override（`machine.cpp:1320`，块入口）> 本快路径 > 逐元素臂。
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "runtime/exec.h"
@@ -29,6 +30,29 @@
 
 namespace lift {
 namespace {
+
+RepBulkDiag makeRepBulkDiag() {
+    RepBulkDiag d;
+    const char* v = std::getenv("LIFT_MEMCPY_DIAG");
+    d.on = v != nullptr && v[0] != '\0';
+    return d;
+}
+
+// `_memcpy` 函数体内的 8 个 `rep movsd` 站点（`llvm-objdump` / 语料字节解码）；
+// 返回下标 = 报告里那一列的顺序，-1 = 不在这 8 条里。
+int mcSiteIndex(std::uint32_t ea) {
+    switch (ea) {
+        case 0x004E7507u: return 0;  // 前向、dst 4 对齐（入口块）
+        case 0x004E7564u: return 1;  // 前向、非对齐 +3
+        case 0x004E758Au: return 2;  // 前向、非对齐 +2
+        case 0x004E75A8u: return 3;  // 前向、非对齐 +1
+        case 0x004E768Cu: return 4;  // 后向（重叠，`std;` 之后）
+        case 0x004E76E7u: return 5;  // 后向、非对齐 +3
+        case 0x004E7711u: return 6;  // 后向、非对齐 +2
+        case 0x004E7743u: return 7;  // 后向、非对齐 +1
+        default: return -1;
+    }
+}
 
 std::uint32_t readElem(X86& cpu, std::uint32_t ea, std::uint8_t size) {
     switch (size) {
@@ -139,6 +163,9 @@ void repBulkExecute(X86& cpu, const Insn& in, std::uint8_t size, const RepBulkPl
 
 }  // namespace
 
+// ★ 临时诊断（`LIFT_MEMCPY_DIAG=1`）：缺省档 `on=false` ⇒ 下面每个 rep 只多一次 bool 判定。
+RepBulkDiag g_rep_bulk_diag = makeRepBulkDiag();
+
 // ---- 快路径的闸门（判据的唯一真源；`runtime/rep_bulk.h` 声明，测试也直接调它）----
 RepBulkPlan repBulkPlan(const X86& cpu, const Insn& in, std::uint8_t size) {
     RepBulkPlan plan;
@@ -222,6 +249,38 @@ RepBulkPlan repBulkPlan(const X86& cpu, const Insn& in, std::uint8_t size) {
 //   ⛔ 两臂不要各写一份：解释器（`execString`）与 AOT（`lift_rep_bulk`）都调这一个。
 bool repBulkTry(X86& cpu, const Insn& in, std::uint8_t size) {
     const RepBulkPlan bulk = repBulkPlan(cpu, in, size);
+    // ★ 临时诊断（`LIFT_MEMCPY_DIAG=1`）：**只增计数**，不改任何 guest 状态 / 不回写寄存器。
+    //   缺省档 `on=false` ⇒ 每个 rep 多一次 bool 判定（下面整块不执行）。
+    if (g_rep_bulk_diag.on) {
+        RepBulkDiag& d = g_rep_bulk_diag;
+        const int wi = static_cast<int>(bulk.why);
+        ++d.why[wi];
+        if (bulk.why == RepBulkWhy::Ok) {
+            ++d.hits;
+            d.bytes_ok += bulk.bytes;
+        } else if (bulk.why == RepBulkWhy::NotApplicable) {
+            ++d.not_applicable;
+        } else {
+            ++d.declines;
+            d.bytes_declined += bulk.bytes;
+        }
+        // `_memcpy` 函数体 [0x4E74B0, 0x4E7811)：按**指令 EA** 归属（rep 站点分布在入口/三个 tail 块里）。
+        if (in.ea >= 0x004E74B0u && in.ea < 0x004E7811u) {
+            ++d.mc_sites;
+            ++d.mc_why[wi];
+            if (bulk.why == RepBulkWhy::Ok) {
+                ++d.mc_hits;
+                d.mc_bytes_ok += bulk.bytes;
+            } else if (bulk.why == RepBulkWhy::NotApplicable) {
+                ++d.mc_not_applicable;
+            } else {
+                ++d.mc_declines;
+                d.mc_bytes_declined += bulk.bytes;
+            }
+            const int si = mcSiteIndex(in.ea);
+            if (si >= 0) ++d.mc_site[si];
+        }
+    }
     if (bulk.why == RepBulkWhy::Ok) {
         ++cpu.rep_bulk_hits;
         repBulkExecute(cpu, in, size, bulk);

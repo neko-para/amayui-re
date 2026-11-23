@@ -1,0 +1,36 @@
+# emulator-lift · AOT 构建期**库内建表**（入库件；不是生成物）
+#
+# ## 这是什么
+# 一行一个内建：`lift-gen --intrinsics` 读它，把对应 EA 的**单元根入口**发射成
+#   「带闸门快路径 + 回退到原 lifted 函数体」（与 `rep_bulk` 同一类，⛔ 不是运行期 override）。
+# 闸门 Ok ⇒ 宿主 `memmove` 干完；拒绝 ⇒ `br` 到原入口块（那条路逐字节不变）。
+# ⛔ 不是"按 EA 开特判"：判据是这张表 + 下面的 FLIRT/反汇编契约，不是"这块慢"。
+#
+# ## 格式（`#` 起注释；字段以空白分隔）
+#   pe-sha256 <16..64 hex>                       本表只对这份 PE 有效（= 所读 PE 的 sha256 **前缀**）
+#   ea 0x<8 hex> <builtin> <cc> <args> <ret>      一个内建单元根
+#     <builtin>  v1 只认 `memcpy`（发射器不认识的必须构建期红，⛔ 不许静默跳过）
+#     <cc>       `cdecl`
+#     <args>     `dst=esp+4,src=esp+8,n=esp+12`（顺序 = 参数位置）
+#     <ret>      `eax`
+#
+# ## 判据（三条，缺一条都不该收）
+# 1. `.lst` 的 FLIRT 名：`corpus/disasm/files/AGE.EXE__dumped.sectfix.EXE.lst` 里
+#    0x004E74B0 的名字是 `_memcpy`（静态 CRT 的库函数，不是引擎自己的 handler）。
+# 2. 反汇编（`llvm-objdump -d` / 语料字节）：入口 `push ebp; mov ebp,esp; push edi; push esi;`，
+#    尾声 `0x4E77F0: mov 0x8(%ebp),%eax; pop esi; pop edi; leave; ret`
+#    ⇒ cdecl；`dst=[esp+4] / src=[esp+8] / n=[esp+12]`；返回 EAX=dst；callee-saved 全恢复；
+#    重叠走 `std; rep movsl; cld`（⇒ 等价 memmove，DF 返回时为 0）。
+# 3. 契约测试：CTest `lift-intrinsics`（闸门逐条 / 哨兵 / 寄存器 / helper vs `memmove` /
+#    开↔关差分）。改这张表或改闸门都会让它红（变异条目见 `tools/mutate-check.mjs`）。
+#
+# ## 为什么 v1 只收 `_memcpy`（不按调用点特判）
+# SAVE11 点击后 2.5 s：2,293,913 次、avg 4.39 B、p50=p90=4（99.993% 在 4–7 B 桶；最大 400 KB），
+# 自身 76.6 M insns = 15.0%（33.4 条/次）。快路径的判据**只有形状**（n<=16 + 4 GiB 边界 +
+# committed），不看"这次调用看起来像 4 字节"。
+#
+# ## 换 PE 时
+# `pe-sha256` 与 EA 必须一起更新；`lift-gen` 会硬校验 ① sha 前缀、② 该 EA 仍是**已发射单元的根**
+# （否则 FATAL —— 防止 PE 变了以后闸门静默失效）。
+pe-sha256 1937f08628efcebbf4cdcf8fbb0c066a83b4c579cd9925ca7b441de343d3b134
+ea 0x004E74B0 memcpy cdecl dst=esp+4,src=esp+8,n=esp+12 eax

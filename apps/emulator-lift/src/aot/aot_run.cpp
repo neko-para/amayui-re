@@ -29,6 +29,8 @@
 #include <string>
 
 #include "aot/aot_dispatch.h"
+#include "aot/memcpy_diag.h"  // 临时诊断：`LIFT_MEMCPY_DIAG=1`（缺省零输出 / 每派发一次 bool）
+#include "runtime/lift_intrinsics.h"  // `--no-intrinsics`（只关闸门；A/B 与诊断）
 #include "runtime/control.h"  // Control（PIMPL 门面：⛔ 不含 beast / nlohmann / guest 头）
 #include "runtime/fault_state.h"  // guest fault 现场（AOT 没有 Machine；只登记 / 清除，零周期输出）
 #include "runtime/guest_token.h"  // Phase-0 的 `arm()`（与解释器 `Machine::run` 同一个单例）
@@ -386,6 +388,16 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     cpu_.shim.max_frames = opts.max_frames;
     if (!clock_.realTime()) clock_.setRealTime(true);  // D2b：wall clock（⛔ 没有 --clock= 开关）
     resetDispatchStats();
+    // ★ 构建期库内建（v1：`_memcpy`）的运行期闸门开关：**只改闸门的答案**（缺省开）。
+    //   IR 形状是构建期决定的；`--no-intrinsics` 让闸门返回 false ⇒ 回退原 lifted 函数体。
+    lift::setIntrinsicsEnabled(!opts.no_intrinsics);
+    lift::resetIntrinsicCounters();
+    // ★ 临时诊断（`LIFT_MEMCPY_DIAG=1`）：`_memcpy` 里 `0x55F2E8` 是 SSE 分支的全局开关，
+    //   只读一次（缺省档 `on()==false` ⇒ 连这次读都不做）。
+    const bool memcpy_diag_on = memcpy_diag::on();
+    if (memcpy_diag_on && mem_.committed(0x0055F2E8u, 4u)) {
+        memcpy_diag::setSseSwitch(mem_.rd32(0x0055F2E8u));
+    }
     // ★ P2 §3.2：本线程那份 `DispatchStats` 的引用**在循环外取一次**（TLS 访问 7.18e8 次 → 1 次/轮）。
     //   `resetDispatchStats()` 刚把这个对象清过 ⇒ 取引用与清账的先后无关（同一个对象）。
     //   ⛔ 不要在循环里传 `dispatchStatsRef()`（那等于没改）；它必须活过整个循环。
@@ -976,6 +988,9 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
             //   帧数闸门**之前**打 —— `--max-frames` 恰好是 D3D9 自己在 Present 里置停的那条路，
             //   晚一步就会丢掉最后一帧的读数。
             logPresentedFrames();
+            // ★ 临时诊断（`LIFT_MEMCPY_DIAG=1`）：按 Present 做帧边界，记这一帧的 `_memcpy` 量。
+            //   只增计数；缺省档 `on()==false` ⇒ 这一行不执行（不取帧号、不输出）。
+            if (memcpy_diag_on) memcpy_diag::notePresent(presenter_.frameCount());
             // `lift_shim` 自己把整块状态回读进了 `*st`；`cpu_` 与它一致（同一次调用里同步过）。
             if (!cpu_.running) {
                 classifyShimStop(shim_id1, r);
@@ -1035,7 +1050,33 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         ++r.lifted_calls;
         profileDispatchSample(ea);
         if (win_sample) win_.noteBoundary(win_a, win_b);
+        // ★ 临时诊断（`LIFT_MEMCPY_DIAG=1`；缺省 `memcpy_diag_on == false` ⇒ 这整块不执行）。
+        //   `_memcpy` 的 cdecl 参数在 guest 栈上：`[esp+4]=dst [esp+8]=src [esp+12]=n`；
+        //   `_memset` 的 n 也在 `[esp+12]`。只读，⛔ 不写 guest 状态。
+        const bool diag_active = memcpy_diag_on && memcpy_diag::active();
+        const bool ea_in_memcpy =
+            diag_active && ea >= memcpy_diag::kMemcpyBegin && ea < memcpy_diag::kMemcpyEnd;
+        if (diag_active && (ea == memcpy_diag::kMemcpyBegin || ea == memcpy_diag::kMemsetBegin)) {
+            const std::uint32_t sp = cpu_.esp();
+            const std::uint64_t base = static_cast<std::uint64_t>(sp) + 4u;
+            const bool args_ok =
+                base + 12u <= 0x100000000ull && mem_.committed(static_cast<std::uint32_t>(base), 12u);
+            if (ea == memcpy_diag::kMemcpyBegin) {
+                const std::uint32_t dst =
+                    args_ok ? mem_.rd32(static_cast<std::uint32_t>(base)) : 0u;
+                const std::uint32_t src =
+                    args_ok ? mem_.rd32(static_cast<std::uint32_t>(base) + 4u) : 0u;
+                const std::uint32_t n =
+                    args_ok ? mem_.rd32(static_cast<std::uint32_t>(base) + 8u) : 0u;
+                memcpy_diag::noteMemcpyEntry(args_ok, sp, dst, src, n);
+            } else if (args_ok) {
+                memcpy_diag::noteMemsetCall(mem_.rd32(static_cast<std::uint32_t>(base) + 8u));
+            }
+        }
+        // ★ 区间内派发的 `cpu_.insns` 前后差 = 该派发执行的 guest 条数（`_memcpy` 的 rep/循环都算）。
+        const std::uint64_t insns_before = ea_in_memcpy ? cpu_.insns : 0;
         const std::uint32_t next = fn(liftRegsView(cpu_), mem_.host(0), ea, &cpu_);
+        if (ea_in_memcpy) memcpy_diag::noteDispatch(ea, cpu_.insns - insns_before);
         if (win_sample) win_.noteLift(win_b, windowNowNs());
         if (next == ::kLiftHalt) {
             // 生成物里的停机出口：`lift_one` 的 false / `lift_stop`（T1c 的口径）。

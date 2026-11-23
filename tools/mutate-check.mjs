@@ -5555,6 +5555,28 @@ const MUTATIONS = [
       '只读安装树内容缓存的命中路径**少搬 1 字节**（`ReadFile` 的 `got` 减 1）⇒ `file-io` 的 ' +
       '`vfs-read-cache-parity` 红（命中那趟 nread=255 / 字节不等；关档的同一段断言仍绿）',
   },
+  // ── 构建期库内建（2026-11-24）：`_memcpy` 闸门的 committed 检查 ──────────────────────
+  //   ★ 代表"闸门少一条形状判据"这一类**静默**失效：未提交页在 guest 可见状态上观察不到
+  //     （放过去就会替 guest 搬一段未提交内存 ⇒ 把 fault 掩盖成"部分拷贝"）。
+  //     守卫 = `ctest:lift-intrinsics`：夹具直接断言 `memcpyGatePlan(...).why == Uncommitted`，
+  //     去掉 committed 检查后它当场红，并点名"未提交页（dst/src）没被 decline"。
+  {
+    file: 'apps/emulator-lift/src/runtime/lift_intrinsics.cpp',
+    from:
+      '    if (!cpu.mem->committed(dst, static_cast<std::size_t>(n)) ||\n' +
+      '        !cpu.mem->committed(src, static_cast<std::size_t>(n))) {\n' +
+      '        plan.why = IntrinsicWhy::Uncommitted;\n' +
+      '        return plan;\n' +
+      '    }',
+    to: '    // 变异：去掉 committed 检查（未提交页会被当成 Ok）',
+    guard: 'ctest:lift-intrinsics',
+    ctest: 'lift-intrinsics',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-intrinsics',
+    what:
+      '把 `_memcpy` 闸门的 committed 检查去掉 ⇒ 未提交页没被 decline（`lift-intrinsics` 的 ' +
+      '"未提交页（dst/src）没被 decline" 断言当场红）',
+  },
 ];
 
 let mutationRunSeq = 0;

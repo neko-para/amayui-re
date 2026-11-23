@@ -68,6 +68,25 @@ inline constexpr std::uint32_t kLiftRepMovs = 0;
 inline constexpr std::uint32_t kLiftRepStos = 1;
 
 // =====================================================================================
+// ★ 构建期**库内建函数**（v1：静态 CRT 的 `_memcpy` @ 0x004E74B0；`aot/intrinsics.txt`）
+//
+// 形状 = 单元入口的**带闸门快路径 + 回退到原 lifted 函数体**（与 `lift_rep_bulk` 同一类，
+// ⛔ 不是运行期 override）：
+//   ① 生成代码在 `_memcpy` 的单元根入口把 `dst/[esp+4]`、`src/[esp+8]`、`n/[esp+12]` 读出来，
+//      发**一次** `@lift_intrinsic_memcpy_gate(cpu, st, dst, src, n)`；
+//   ② `true`  ⇒ 发 `@lift_intrinsic_memcpy_do(cpu, dst, src, n)`（宿主 `memmove`），
+//      然后由 **IR** 写 `EAX = dst`、`resume = mem32[esp]`、`esp += 4`，`ret i32 %resume`；
+//      `false` ⇒ `br` 到原函数的入口块（逐字节不变的原 lifted 函数体）。
+//   ③ 闸门**只读**（不写任何 guest 状态）；`--no-intrinsics` 只让它返回 false（A/B 与诊断）。
+//   ④ ⛔ ECX / EDX 的残留值**不拟合**：cdecl 调用者不依赖被调方留下的它们（显式裁决，见
+//      `runtime/lift_intrinsics.h` 的头注）。`EBX/ESI/EDI/EBP` 不动；`ESP` 只 `+4`；`EFLAGS` 不碰。
+// =====================================================================================
+extern "C" bool lift_intrinsic_memcpy_gate(void* cpu, void* st, std::uint32_t dst,
+                                           std::uint32_t src, std::uint32_t n);
+extern "C" void lift_intrinsic_memcpy_do(void* cpu, std::uint32_t dst, std::uint32_t src,
+                                         std::uint32_t n);
+
+// =====================================================================================
 // T1c 的三个宿主原语（父级裁决 D2 / D2b / D10-P2 / D11）
 // ★ 共同口径：`.ll` 里**没有任何解释器类型**，只有一次 C 调用；语义一行不写、只转发。
 // =====================================================================================

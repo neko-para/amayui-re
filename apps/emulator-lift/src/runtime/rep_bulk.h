@@ -30,6 +30,33 @@ enum class RepBulkWhy : std::uint8_t {
     ReverseOverlap,  // DF 与 dst/src 的相对位置给出"逆向涂抹"（4 B 分块会与逐字节不同）
 };
 
+// ★ 临时诊断（2026-11-24，`LIFT_MEMCPY_DIAG=1`）：`rep_bulk` 的**原因分布 / 字节数**。
+//   目的只有一个：回答 `_memcpy` 里那几条 `rep movsl` 到底有没有走快路径、没走的话首因是哪个闸门。
+//   ⛔ 缺省档零输出、零累加：`repBulkTry` 里只多一次 `g_rep_bulk_diag.on` 的 bool 判定。
+//   ★ `mc_*` 只算 `_memcpy` 函数体 `[0x4E74B0, 0x4E7811)` 里的 rep 站点（按指令 EA 归属，
+//     不按"当前在哪个派发块"归属 —— `_memcpy` 的 rep 站点分在入口块与三个 tail 块里）。
+struct RepBulkDiag {
+    bool on = false;
+    // 全进程口径（只用于交叉核对；报告主口径是下面的 mc_*）
+    std::uint64_t hits = 0;
+    std::uint64_t declines = 0;
+    std::uint64_t not_applicable = 0;
+    std::uint64_t bytes_ok = 0;
+    std::uint64_t bytes_declined = 0;
+    std::uint64_t why[5] = {};  // 下标 = `RepBulkWhy`
+    // `_memcpy` 函数体内（EA 区间）的 rep 站点
+    std::uint64_t mc_sites = 0;
+    std::uint64_t mc_hits = 0;
+    std::uint64_t mc_declines = 0;
+    std::uint64_t mc_not_applicable = 0;
+    std::uint64_t mc_bytes_ok = 0;
+    std::uint64_t mc_bytes_declined = 0;
+    std::uint64_t mc_why[5] = {};
+    // 8 个 rep 站点的命中数（0x4E7507 / 4E7564 / 4E758A / 4E75A8 / 4E768C / 4E76E7 / 4E7711 / 4E7743）
+    std::uint64_t mc_site[8] = {};
+};
+extern RepBulkDiag g_rep_bulk_diag;
+
 struct RepBulkPlan {
     RepBulkWhy why = RepBulkWhy::NotApplicable;
     std::uint64_t bytes = 0;   // `ECX × 元素宽度`（★ 64 位算出来的那个值，已过 4 GiB 闸门）

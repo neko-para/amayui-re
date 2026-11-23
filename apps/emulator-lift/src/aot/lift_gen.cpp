@@ -179,6 +179,10 @@ struct Options {
     //   ★ 为什么是 `.inc` 片段而不是 `.cpp`：见写盘那一段的注释（宏展开两次 = 声明 + 表）。
     std::string pin;
     std::string table;
+    // ★ 构建期库内建表（入库件 `aot/intrinsics.txt`）：EA → 内建名。**缺省不给**（golden / x87 /
+    //   ops / s7 这些小根集模块不需要它；给了就会要求表里的 EA 必须是**已发射单元的根**）。
+    //   CMake 的 AOT 生成命令显式传 `--intrinsics`；另有 `--no-intrinsics` 只关运行期闸门（A/B）。
+    std::string intrinsics;
     // ★ D14：静态调用闭包（`call rel32` 目标 ⇒ 新的 unit 根）。默认开；`--no-close-calls` 关。
     bool close_calls = true;
     // ★ D15：第二类软根 —— 写内存的 `mov` 的 imm32（代码指针立即数）。默认开；`--no-close-stores` 关。
@@ -283,6 +287,9 @@ void usage() {
         "                        no artifacts => skip, exit 0)\n"
         "  --pin <file.h>        also write the exe sha256 + entry (AOT startup check, D1; NOT tracked in git)\n"
         "  --table <file.inc>    also write the dispatch table `EA -> lift_cc_<root>` (the AOT EA->LiftFn lookup; NOT tracked in git)\n"
+        "  --intrinsics <file>   build-time library-intrinsic table (checked-in `aot/intrinsics.txt`):\n"
+        "                        each EA must be an emitted unit root; the entry gets a gated host fast path\n"
+        "                        (gate declines => the original lifted body, byte-for-byte)\n"
         "  --note-write          emit `lift_note_write` (SMC accounting) before every guest store (CMake\n"
         "                        LIFT_AOT_NOTE_WRITE; default OFF = nothing emitted in release builds; ON = debug/diagnostic)\n"
         "  --no-close-calls      disable the static call closure (D14 defaults on; control mode = expand --roots only)\n"
@@ -1875,6 +1882,145 @@ bool readRootsFile(const std::string& path, std::set<std::uint32_t>* roots, std:
 }
 
 // =====================================================================================
+// ★ 构建期**库内建表**（入库件 `aot/intrinsics.txt`）的解析 + 硬校验
+//
+// 形式（一行一条；`#` 起注释）：
+//   pe-sha256 <16..64 hex>                         本表只对这份 PE 有效（= 所读 PE 的 sha256 **前缀**）
+//   ea 0x<8 hex> <builtin> <cc> <args> <ret>       一个内建单元根
+//     <builtin> ∈ {memcpy}（v1 只有一个；⛔ 发射器不认识的必须**构建期红**，不能静默跳过）
+//     <cc>      = cdecl
+//     <args>    = dst=esp+4,src=esp+8,n=esp+12
+//     <ret>     = eax
+//   ★ 为什么把调用约定 / 参数 / 返回值也写进表：发射器里的"读 `[esp+4..12]`、写 EAX、`esp += 4`"
+//     是**形态假设**；表里声明过、这里再逐字校验 ⇒ 任何一边漂了都是构建期红（⛔ 不是运行期静默错位）。
+//   ★ 判据链：`.lst` 的 FLIRT 名（`_memcpy`）+ 反汇编（cdecl / epilogue / `std;rep movsl;cld`）
+//     + 契约测试 `lift-intrinsics`。表只是**落点**，不是判据本身。
+// =====================================================================================
+struct IntrinsicEntry {
+    std::uint32_t ea = 0;
+    std::string builtin;
+    std::string convention;
+    std::string args;
+    std::string ret;
+};
+
+struct IntrinsicTable {
+    std::string path;
+    std::string pe_sha256_prefix;  // 小写
+    std::vector<IntrinsicEntry> entries;
+};
+
+bool parseIntrinsicsFile(const std::string& path, IntrinsicTable* table, std::string* err) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        *err = "cannot open `" + path + "`";
+        return false;
+    }
+    table->path = path;
+    bool have_sha = false;
+    std::set<std::uint32_t> seen;
+    std::string line;
+    int lineno = 0;
+    while (std::getline(in, line)) {
+        ++lineno;
+        const std::size_t hash = line.find('#');
+        if (hash != std::string::npos) line.resize(hash);
+        line = trim(line);
+        if (line.empty()) continue;
+        std::vector<std::string> tok;
+        {
+            std::size_t b = 0;
+            while (b < line.size()) {
+                while (b < line.size() && std::isspace(static_cast<unsigned char>(line[b])) != 0) ++b;
+                std::size_t e0 = b;
+                while (e0 < line.size() && std::isspace(static_cast<unsigned char>(line[e0])) == 0) ++e0;
+                if (e0 > b) tok.push_back(line.substr(b, e0 - b));
+                b = e0;
+            }
+        }
+        if (tok.empty()) continue;
+        const std::string at = path + ":" + std::to_string(lineno);
+        if (tok[0] == "pe-sha256") {
+            if (have_sha) {
+                *err = at + ": duplicate `pe-sha256` (exactly one, before any `ea` line)";
+                return false;
+            }
+            if (tok.size() != 2) {
+                *err = at + ": `pe-sha256` needs exactly one hex value";
+                return false;
+            }
+            if (tok[1].size() < 16 || tok[1].size() > 64 || (tok[1].size() & 1u) != 0) {
+                *err = at + ": sha256 prefix must be 16..64 hex chars (even length), got `" + tok[1] + "`";
+                return false;
+            }
+            std::string low;
+            low.reserve(tok[1].size());
+            for (const char ch : tok[1]) {
+                if (std::isxdigit(static_cast<unsigned char>(ch)) == 0) {
+                    *err = at + ": sha256 prefix is not hex: `" + tok[1] + "`";
+                    return false;
+                }
+                low.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+            }
+            table->pe_sha256_prefix = low;
+            have_sha = true;
+            continue;
+        }
+        if (tok[0] != "ea") {
+            *err = at + ": unknown directive `" + tok[0] + "` (expected `pe-sha256` or `ea`)";
+            return false;
+        }
+        if (!have_sha) {
+            *err = at + ": `ea` before `pe-sha256` (the PE pin must come first)";
+            return false;
+        }
+        if (tok.size() != 6) {
+            *err = at + ": `ea <EA> <builtin> <cc> <args> <ret>` needs 6 fields, got " +
+                   std::to_string(tok.size());
+            return false;
+        }
+        std::string ea_tok = tok[1];
+        if (ea_tok.size() != 10 || ea_tok[0] != '0' || (ea_tok[1] != 'x' && ea_tok[1] != 'X')) {
+            *err = at + ": EA must be `0x` + exactly 8 hex digits: `" + ea_tok + "`";
+            return false;
+        }
+        std::uint32_t ea = 0;
+        for (std::size_t i = 2; i < 10; ++i) {
+            const char ch = ea_tok[i];
+            if (std::isxdigit(static_cast<unsigned char>(ch)) == 0) {
+                *err = at + ": EA is not hex: `" + ea_tok + "`";
+                return false;
+            }
+            ea = (ea << 4) | static_cast<std::uint32_t>(
+                                  std::isdigit(static_cast<unsigned char>(ch))
+                                      ? (ch - '0')
+                                      : (std::tolower(static_cast<unsigned char>(ch)) - 'a' + 10));
+        }
+        if (!seen.insert(ea).second) {
+            *err = at + ": duplicate EA " + hexEa(ea);
+            return false;
+        }
+        // ★ v1 发射器**只认这一种形态**。表里写别的 ⇒ 构建期红（⛔ 不许"解析通过、发射时静默跳过"）。
+        if (tok[2] != "memcpy") {
+            *err = at + ": unsupported builtin `" + tok[2] +
+                   "` (v1 emitter knows only `memcpy`)";
+            return false;
+        }
+        if (tok[3] != "cdecl" || tok[4] != "dst=esp+4,src=esp+8,n=esp+12" || tok[5] != "eax") {
+            *err = at + ": unsupported signature `" + tok[3] + " " + tok[4] + " " + tok[5] +
+                   "` (v1 emitter knows only `cdecl dst=esp+4,src=esp+8,n=esp+12 eax`)";
+            return false;
+        }
+        table->entries.push_back(IntrinsicEntry{ea, tok[2], tok[3], tok[4], tok[5]});
+    }
+    if (!have_sha) {
+        *err = path + ": missing `pe-sha256` line";
+        return false;
+    }
+    return true;
+}
+
+// =====================================================================================
 // ③' ★ D17：第三类软根的**候选集** = 非可执行节里静态初始化的代码指针
 //
 // 判据（父级给定；**只有这一处**）：**非可执行节**里 **4 字节对齐**的 dword，其值落在
@@ -2886,7 +3032,8 @@ std::string hexEa(std::uint32_t ea) {
 }
 
 bool writeAotPin(const std::string& path, const lift::PeImage& image, std::size_t roots,
-                 std::size_t entries, std::size_t functions, std::string* err) {
+                 std::size_t entries, std::size_t functions,
+                 const std::vector<IntrinsicEntry>& intrinsics, std::string* err) {
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file) {
         if (err) *err = "cannot write `" + path + "`";
@@ -2905,6 +3052,17 @@ bool writeAotPin(const std::string& path, const lift::PeImage& image, std::size_
     file << "#define LIFT_AOT_PIN_ROOTS " << roots << "u\n";
     file << "#define LIFT_AOT_PIN_ENTRIES " << entries << "u\n";
     file << "#define LIFT_AOT_PIN_FUNCTIONS " << functions << "u\n";
+    // ★ 构建期库内建表（`aot/intrinsics.txt` 的**已校验**内容）：AOT 启动 readout 要知道
+    //   "这一趟到底带了哪几个内建 EA"，而不必在运行期再读一遍入库件（那是第二条解析路径）。
+    //   形态 = X-macro 列表：`aot_dispatch.cpp` 用它展开成 `{EA, 名字}` 常量数组。
+    file << "#define LIFT_AOT_PIN_INTRINSICS " << intrinsics.size() << "u\n";
+    if (!intrinsics.empty()) {
+        file << "#define LIFT_AOT_PIN_INTRINSIC_LIST(X) \\\n";
+        for (std::size_t i = 0; i < intrinsics.size(); ++i) {
+            file << "    X(0x" << hexEa(intrinsics[i].ea) << "u, \"" << intrinsics[i].builtin << "\")";
+            file << (i + 1 == intrinsics.size() ? "\n" : " \\\n");
+        }
+    }
     file.close();
     if (!file) {
         if (err) *err = "write to `" + path + "` failed";
@@ -3470,6 +3628,8 @@ int main(int argc, char** argv) {
             if (!needValue("--pin", &opt.pin)) return 2;
         } else if (a == "--table") {
             if (!needValue("--table", &opt.table)) return 2;
+        } else if (a == "--intrinsics") {
+            if (!needValue("--intrinsics", &opt.intrinsics)) return 2;
         } else if (a == "--note-write") {
             opt.note_write = true;
         } else if (a == "--no-close-calls") {
@@ -3606,6 +3766,29 @@ int main(int argc, char** argv) {
         return 4;
     }
 
+    // ---- 输入 ③：构建期库内建表（可选；⛔ 缺省不给 ⇒ 产物与今天逐字节相同）----
+    IntrinsicTable intrinsics;
+    if (!opt.intrinsics.empty()) {
+        std::string err;
+        if (!parseIntrinsicsFile(opt.intrinsics, &intrinsics, &err)) {
+            std::fprintf(stderr, "emulator-lift-gen: intrinsics table rejected: %s\n", err.c_str());
+            return 2;
+        }
+        // ★ 硬校验 ①：PE 的 sha256 必须与表里 pin 的前缀一致。PE 一换，表里的 EA / 形态假设
+        //   就可能不再成立；⛔ 不许"生成成功了，但内建表静默失效"。
+        std::string actual = image.sha256;
+        for (char& ch : actual) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        if (actual.rfind(intrinsics.pe_sha256_prefix, 0) != 0) {
+            std::fprintf(stderr,
+                         "emulator-lift-gen: intrinsics table PE pin mismatch (%s):\n"
+                         "  table pe-sha256 prefix = %s\n"
+                         "  actual PE sha256        = %s\n"
+                         "  => the table describes a different PE; refusing to emit (exit 2)\n",
+                         opt.intrinsics.c_str(), intrinsics.pe_sha256_prefix.c_str(), actual.c_str());
+            return 2;
+        }
+    }
+
     // ---- ① leader / 入口 EA ----
     // ★ 根必须落在**可执行节**里（越界根 = 闭包本身错 ⇒ 硬红 exit 4；⛔ 不许与派生噪声混在一起丢）。
     const std::vector<lift::aot::ExecRange> exec_ranges = lift::aot::execRanges(image);
@@ -3688,6 +3871,23 @@ int main(int argc, char** argv) {
                      components.size(), opt.max_components);
         return 2;
     }
+    // ★ 硬校验 ②：内建表里的每个 EA 必须是**已发射单元的根**。PE / 闭包一变，某个 EA 可能
+    //   不再是根（甚至不再被发射）—— 那时闸门永远不会执行，而构建仍然全绿 ⇒ 这是**静默失效**。
+    //   判据 = `components` 的根集合（= `emitModule` 真正定义的那批函数），⛔ 不是 `--roots` 文本。
+    if (!intrinsics.entries.empty()) {
+        std::set<std::uint32_t> component_roots;
+        for (const GenComponent& comp : components) component_roots.insert(comp.root);
+        for (const IntrinsicEntry& e : intrinsics.entries) {
+            if (component_roots.count(e.ea) == 0) {
+                std::fprintf(stderr,
+                             "emulator-lift-gen: intrinsics table EA %08X (%s) is NOT an emitted unit root\n"
+                             "  => the gated fast path would never run (silent no-op); refusing to emit (exit 1)\n"
+                             "  (a PE/closure change moved or removed that root; update `%s`)\n",
+                             e.ea, e.builtin.c_str(), opt.intrinsics.c_str());
+                return 1;
+            }
+        }
+    }
     // ---- ④ 发射 ----
     // ★ S7（D53）：先按函数判"能不能一对一结构翻译"（判据在 `aot/lift_struct.*`，跑在本进程
     //   **自己的 Zydis 解码结果**上；⛔ 不搬 `.lst` 的那套普查）。
@@ -3707,6 +3907,10 @@ int main(int argc, char** argv) {
     }
     gen_structure.shim_begin = layout.shim_page;
     gen_structure.shim_end = layout.shim_page + layout.shim_slots * 4u;
+    // ★ 构建期库内建表 → 发射器的唯一输入（EA → 内建名）。表已经过 PE pin + 单元根两条硬校验。
+    for (const IntrinsicEntry& e : intrinsics.entries) {
+        gen_structure.intrinsic_roots.emplace(e.ea, e.builtin);
+    }
     // ★ 宿主钩子 EA 只在这一份模块**真的能到达它**时才有意义（小根集模块，如 x87 差分 /
     //   golden，根本不含 WinMain ⇒ 那里没有钩子点）。判据 = "它在入口集里"（能在派发表里查到）：
     //   · 在入口集 ⇒ 指向它的边发 `ret i32 <EA>`（trampoline 跑钩子后再派发回来）；
@@ -3950,7 +4154,8 @@ int main(int argc, char** argv) {
     //   ⛔ 缺省不写：测试夹具的 golden 生成（`lift-ir-gen-*`）与 `--check` 都不需要它们。
     if (!opt.pin.empty()) {
         std::string err;
-        if (!writeAotPin(opt.pin, image, roots.size(), dispatch_entries.size(), components.size(), &err)) {
+        if (!writeAotPin(opt.pin, image, roots.size(), dispatch_entries.size(), components.size(),
+                         intrinsics.entries, &err)) {
             std::fprintf(stderr, "emulator-lift-gen: --pin failed: %s\n", err.c_str());
             return 2;
         }
@@ -3966,6 +4171,11 @@ int main(int argc, char** argv) {
         std::size_t rows = 0;
         for (const GenComponent& comp : components) rows += comp.entries.size();
         std::printf("lift-gen: dispatch table %s (%zu rows = entry EA -> component root function)\n", opt.table.c_str(), rows);
+    }
+    if (!intrinsics.entries.empty()) {
+        std::printf("lift-gen: intrinsics %s (%zu unit root%s; PE sha prefix %s)\n",
+                    opt.intrinsics.c_str(), intrinsics.entries.size(),
+                    intrinsics.entries.size() == 1 ? "" : "s", intrinsics.pe_sha256_prefix.c_str());
     }
     // ---- ⑤'' ★ D18：`--dump-blocks`（只读覆盖率读数；⛔ 不改 `.ll` / 派发表）----
     if (!opt.dump_blocks.empty()) {

@@ -154,6 +154,10 @@ struct GenStructure {
     std::set<std::uint32_t> hook_eas;
     std::uint32_t shim_begin = 0;  // shim 桩页（`GuestLayout::shim_page`）
     std::uint32_t shim_end = 0;    // `shim_page + shim_slots*4`
+    // ★ 构建期库内建表（`aot/intrinsics.txt` 的实际内容；EA → 内建名）：这些 EA 的**单元根入口**
+    //   会先过闸门，闸门 Ok 走宿主快路径，拒绝回退原 lifted 函数体（见 `runtime/lift_intrinsics.h`）。
+    //   ⚠ 只允许**单元根**（`lift-gen` 已硬校验）；resume EA 不进这张表。
+    std::map<std::uint32_t, std::string> intrinsic_roots;
 };
 
 struct GenEmitStats {
@@ -217,6 +221,10 @@ struct GenEmitStats {
     //   ⚠ 这是"发过探针的站点数"，⛔ 不是"命中快路径的条数"（后者只有运行期 `rep_bulk_hits` 能说）。
     std::uint64_t rep_bulk_sites = 0;
     bool used_rep_bulk = false;
+    // ★ 构建期库内建（v1：`_memcpy`）的站点数。`used_intrinsic_memcpy` 决定发不发两条 `declare`；
+    //   每个带内建表的单元根入口 = 1 个站点（闸门一次 + 快路径一次）。
+    std::uint64_t intrinsic_memcpy_sites = 0;
+    bool used_intrinsic_memcpy = false;
     std::uint64_t imul_sites = 0;
     std::uint64_t div_sites = 0;
     std::uint64_t rotate_sites = 0;

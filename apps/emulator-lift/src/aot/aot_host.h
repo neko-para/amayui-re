@@ -143,6 +143,10 @@ struct AotRunOptions {
     //   `heap` / `stack` / `va` 那几行 + 复跑一次 `--region-log` 就能回答 ⇒ 属噪音。
     //   ★ 形态与 `--frame-log` **同族**：一类读数的 opt-in、⛔ 不是"总开关"（别的 readout 一行不动）。
     bool region_log = false;
+    // ★ `--no-intrinsics`（**缺省 false = 内建开**）：只关**运行期闸门**（A/B 与诊断）。
+    //   IR 里的闸门块 / 快路径**仍然在**（构建期决定）；闸门返回 false ⇒ 回退原 lifted 函数体。
+    //   ⛔ 不是运行期 override：本开关只让一个只读判定改答案，不替换任何执行来源。
+    bool no_intrinsics = false;
     // ★ **外部请求停止**（缺省 nullptr = 从不请求）。唯一的生产者 = `--input-plan` 的 `quit`
     //   （`InputPlan::quitFlag()`）⇒ 与解释器臂**同一条口径**（`machine.cpp` 的
     //   `interaction_.actuator().quitRequested()` ⇒ `Stopped` + detail `… quit`）：

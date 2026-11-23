@@ -358,6 +358,9 @@ target_link_libraries(emulator-lift-gen PRIVATE emulator-lift-runtime)
 # =====================================================================================
 set(LIFT_AOT_DIR "${CMAKE_CURRENT_BINARY_DIR}/aot")
 set(LIFT_AOT_CLOSURE "${CMAKE_CURRENT_SOURCE_DIR}/aot/closure.txt")
+# ★ 构建期库内建表（入库件）：`lift-gen --intrinsics` 会校验 ① PE sha256 前缀、② 每个 EA 是已发射
+#   单元的根。缺文件 / 校验失败 ⇒ 构建期红（⛔ 不许"生成成功但闸门静默失效"）。
+set(LIFT_AOT_INTRINSICS "${CMAKE_CURRENT_SOURCE_DIR}/aot/intrinsics.txt")
 set(LIFT_AOT_AGE_EXE "${CMAKE_CURRENT_SOURCE_DIR}/../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE")
 find_program(LIFT_AOT_IR_CLANG NAMES clang clang.exe)
 # =====================================================================================
@@ -579,6 +582,7 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
             --out-dir "${LIFT_AOT_DIR}"
             --ir-target-cpu "${LIFT_AOT_IR_TARGET_CPU}"
             --ir-target-features "${LIFT_AOT_IR_TARGET_FEATURES}"
+            --intrinsics "${LIFT_AOT_INTRINSICS}"
             --pin "${LIFT_AOT_DIR}/lift_pin.h"
             --table "${LIFT_AOT_DIR}/lift_table.inc")
         if(LIFT_AOT_NOTE_WRITE)
@@ -594,6 +598,7 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
             --out "${LIFT_AOT_DIR}/lift_aot.ll"
             --ir-target-cpu "${LIFT_AOT_IR_TARGET_CPU}"
             --ir-target-features "${LIFT_AOT_IR_TARGET_FEATURES}"
+            --intrinsics "${LIFT_AOT_INTRINSICS}"
             --pin "${LIFT_AOT_DIR}/lift_pin.h"
             --table "${LIFT_AOT_DIR}/lift_table.inc")
         if(LIFT_AOT_NOTE_WRITE)
@@ -606,7 +611,7 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
         COMMAND ${CMAKE_COMMAND} -E make_directory "${LIFT_AOT_DIR}"
         # ★ 一条命令做完"硬闸 + 生成"：`--closure-gate` 与 `--check` 共用同一份五条校验实现。
         COMMAND $<TARGET_FILE:emulator-lift-gen> ${LIFT_AOT_GEN_STEP2}
-        DEPENDS emulator-lift-gen "${LIFT_AOT_CLOSURE}" "${LIFT_AOT_AGE_EXE}"
+        DEPENDS emulator-lift-gen "${LIFT_AOT_CLOSURE}" "${LIFT_AOT_AGE_EXE}" "${LIFT_AOT_INTRINSICS}"
         COMMENT "lift-aot: closure-gate + roots/PE -> out/aot/lift_aot*.ll (split=${LIFT_AOT_SPLIT}) + lift_pin.h + lift_table.inc"
         VERBATIM)
     # ② `clang -c -O2` 每份一条（无 llc；`-Wno-override-module` = 这份 IR 是目标无关的，triple 交给驱动）
@@ -631,11 +636,12 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
         src/aot/aot_dispatch.cpp
         src/aot/aot_feeder.cpp
         src/aot/aot_run.cpp
+        src/aot/memcpy_diag.cpp
         ${LIFT_AOT_OBJS})
     # ★ `aot_dispatch.cpp` `#include "lift_table.inc"`（生成物）⇒ 必须显式声明文件级依赖，
     #   否则并行构建可能在生成之前就编译它（clean build 才显形的那种红）。
     set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/aot/aot_dispatch.cpp"
-        PROPERTIES OBJECT_DEPENDS "${LIFT_AOT_DIR}/lift_table.inc")
+        PROPERTIES OBJECT_DEPENDS "${LIFT_AOT_DIR}/lift_table.inc;${LIFT_AOT_DIR}/lift_pin.h")
     target_include_directories(emulator-lift-aot PRIVATE "${LIFT_AOT_DIR}")
     # ★ 这个宏是"生成物在场"的唯一判据（`aot_dispatch.cpp` 用它决定表有没有内容；
     #   `aot_main.cpp` 用它决定"没有生成物"的响亮报告）。
@@ -667,7 +673,8 @@ else()
     message(STATUS
         "emulator-lift-aot: missing clang / execution source (${LIFT_AOT_AGE_EXE}) / closure.txt => stub TU:"
         "the build continues, but the AOT exe will loudly report 'no generated artifacts' at startup and exit 1")
-    target_sources(emulator-lift-aot PRIVATE src/aot/aot_dispatch.cpp src/aot/aot_feeder.cpp src/aot/aot_run.cpp)
+    target_sources(emulator-lift-aot PRIVATE src/aot/aot_dispatch.cpp src/aot/aot_feeder.cpp src/aot/aot_run.cpp
+        src/aot/memcpy_diag.cpp)
 endif()
 
 # =====================================================================================
@@ -951,6 +958,10 @@ add_test(NAME lift-aot-ir-target-attrs
 # ★ 它**不属于**任何测试：产品二进制也要链它（将来 lifted 代码是产品的一部分）。
 # =====================================================================================
 target_sources(emulator-lift-runtime PRIVATE src/runtime/lift_abi.cpp)
+# ★ 构建期**库内建函数**（v1：静态 CRT 的 `_memcpy` @ 0x004E74B0；入库表 `aot/intrinsics.txt`）：
+#   闸门（只读判定）+ 执行（宿主 `memmove`）的**唯一实现**；生成物只 `call` 这两个 C 入口。
+#   ⛔ 它不是运行期 override：执行来源仍然只有 IR 与 shim（闸门拒绝 ⇒ 原 lifted 函数体）。
+target_sources(emulator-lift-runtime PRIVATE src/runtime/lift_intrinsics.cpp)
 # ★ EA → Insn 解码缓存（`lift_one` 的唯一加速层；契约见 `src/runtime/decode_cache.h`）：
 #   四桶归因实测解码占 `lift_one` 的 79%（见该文件头注）⇒ 缓存 + **逐字节**校验。
 target_sources(emulator-lift-runtime PRIVATE src/runtime/decode_cache.cpp)
@@ -2273,6 +2284,52 @@ endif()
 target_link_libraries(lift-x87-diff PRIVATE emulator-lift-runtime)
 add_test(NAME lift-x87-diff COMMAND lift-x87-diff)
 set_tests_properties(lift-x87-diff PROPERTIES SKIP_RETURN_CODE 77)
+
+# =====================================================================================
+# ★ 构建期库内建（v1：静态 CRT 的 `_memcpy` @ 0x004E74B0）的契约测试
+#   判据（`tests/lift_intrinsics.cpp` 头注）：
+#     ① 闸门逐条（n==0 / n<=16 + 4 GiB + committed / `--no-intrinsics` / cpu.mem==nullptr）；
+#     ② helper 与参考 `std::memmove` 逐字节同（size × 对齐 × 重叠）+ 哨兵 + 8 GPR/EFLAGS；
+#     ③ 生成物端到端：闸门 Ok ⇒ EAX=dst / ESP+=4 / callee-saved 不变 / DF=0 / ret 回 [esp]；
+#        闸门拒绝（n=17）⇒ 原函数体，与 `--no-intrinsics` 逐位相同（8 GPR+EFLAGS+insns+内存）。
+#   ★ 缺 clang / 缺执行源 ⇒ 只跑 ①/②（它们不需要生成物），③ 打一行 SKIP。
+#   ★ `add_test` 在最外层（不嵌进任何 if）⇒ 档位 = pure（§12.4）。
+# =====================================================================================
+set(LIFT_INTRINSICS_DIR "${CMAKE_CURRENT_BINARY_DIR}/intrinsics")
+set(LIFT_INTRINSICS_ROOTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/ir/intrinsics_roots.txt")
+if(LIFT_IR_CLANG AND EXISTS "${LIFT_GEN_AGE_EXE}")
+    add_custom_command(
+        OUTPUT "${LIFT_INTRINSICS_DIR}/lift_aot.ll" "${LIFT_INTRINSICS_DIR}/lift_aot.obj"
+               "${LIFT_INTRINSICS_DIR}/lift_table.inc"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${LIFT_INTRINSICS_DIR}"
+        COMMAND $<TARGET_FILE:emulator-lift-gen>
+                --exe "${LIFT_GEN_AGE_EXE}" --roots "${LIFT_INTRINSICS_ROOTS}"
+                --out "${LIFT_INTRINSICS_DIR}/lift_aot.ll"
+                --intrinsics "${LIFT_AOT_INTRINSICS}"
+                --table "${LIFT_INTRINSICS_DIR}/lift_table.inc"
+                --no-close-calls --no-close-stores --no-close-data --no-close-jmptab --no-s7
+        COMMAND ${LIFT_IR_CLANG} -c -O2 ${LIFT_IR_TARGET_FLAGS} -Wno-override-module
+                -o "${LIFT_INTRINSICS_DIR}/lift_aot.obj" "${LIFT_INTRINSICS_DIR}/lift_aot.ll"
+        DEPENDS emulator-lift-gen "${LIFT_INTRINSICS_ROOTS}" "${LIFT_GEN_AGE_EXE}"
+                "${LIFT_AOT_INTRINSICS}"
+        COMMENT "lift-intrinsics: roots + PE -> intrinsics/lift_aot.ll + .obj + table (gate + fallback fixture)"
+        VERBATIM)
+    set_source_files_properties("${LIFT_INTRINSICS_DIR}/lift_aot.obj"
+        PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+    add_executable(lift-intrinsics tests/lift_intrinsics.cpp "${LIFT_INTRINSICS_DIR}/lift_aot.obj")
+    target_compile_definitions(lift-intrinsics PRIVATE LIFT_INTRINSICS_GEN=1
+        LIFT_INTRINSICS_PE_PATH="${LIFT_GEN_AGE_EXE}" _CRT_SECURE_NO_WARNINGS)
+    target_include_directories(lift-intrinsics PRIVATE "${LIFT_INTRINSICS_DIR}")
+    # ★ 测试源 `#include "lift_table.inc"`（生成物）⇒ 显式文件级依赖（clean build 的并行坑）。
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/tests/lift_intrinsics.cpp"
+        PROPERTIES OBJECT_DEPENDS "${LIFT_INTRINSICS_DIR}/lift_table.inc")
+else()
+    message(STATUS
+        "lift-intrinsics: missing clang or execution source (${LIFT_GEN_AGE_EXE}) => pure gate/helper checks only (generated end-to-end prints SKIP)")
+    add_executable(lift-intrinsics tests/lift_intrinsics.cpp)
+endif()
+target_link_libraries(lift-intrinsics PRIVATE emulator-lift-runtime)
+add_test(NAME lift-intrinsics COMMAND lift-intrinsics)
 
 # =====================================================================================
 # 2026-11-15 · **把 `lift_one` 调用点降到 0** 时新增的 inline 族：两臂差分（`lift-ops-diff`）

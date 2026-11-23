@@ -34,6 +34,8 @@
 
 #include "aot/aot_dispatch.h"
 #include "aot/aot_feeder.h"       // feeder 的 IR 执行器（音频真线程用）
+#include "aot/memcpy_diag.h"      // 临时诊断：`LIFT_MEMCPY_DIAG=1`（缺省零输出）
+#include "runtime/lift_intrinsics.h"  // 构建期库内建的收口计数（一次性输出）
 #include "runtime/clipboard.h"     // 剪贴板（切片 3：overlay 的 PROFILE 桥在 profile_end 里写）
 #include "runtime/control.h"       // 控制层 Present 闸门 / Context（轻头：⛔ 无 beast / nlohmann）
 #include "runtime/decode_cache.h"  // `liftOneDecodeCache()`：只读命中率（`decode-cache:` 行）
@@ -689,6 +691,18 @@ void AotHost::printRunSummary(const AotRunResult& r, std::FILE* out) const {
     // ★ `--profile-slow-frames`：**一次性**慢帧表（run 结束时打一次；⛔ 不每帧打）。
     //   关档时 `printSlowFrames` 第一行就返回 ⇒ 默认档 / 只给 `--profile` 的档逐字不变。
     printSlowFrames(out);
+    // ★ 临时诊断（`LIFT_MEMCPY_DIAG=1`）：`_memcpy` 画像 + `rep_bulk` 命中/decline。
+    //   一次性输出；缺省档 `on()==false` ⇒ 一行都不打（stdout 逐字不变）。
+    memcpy_diag::print(out);
+    // ★ 构建期库内建（v1：`_memcpy`）的**一次性**计数（⛔ 不周期打）。表为空 ⇒ 一行都不打；
+    //   表非空但一条都没走（例如这轮没进到那个 EA）⇒ 三个 0 也打（否则"没生效"与"没调用"分不清）。
+    if (pinnedIntrinsicCount() != 0) {
+        const lift::IntrinsicCounters c = lift::intrinsicCounters();
+        std::fprintf(out, "intrinsics: fast=%llu decline=%llu disabled=%llu\n",
+                     static_cast<unsigned long long>(c.fast),
+                     static_cast<unsigned long long>(c.decline),
+                     static_cast<unsigned long long>(c.disabled));
+    }
 }
 
 // =====================================================================================
@@ -1319,6 +1333,8 @@ bool AotHost::beginWindow(const char* label) {
     // ★ 状态位先判：已开 ⇒ false 且**不 reset**（`AotWindowProf::beginWindow()` 的唯一实现）。
     if (!win_.beginWindow()) return false;
     win_.label = (label != nullptr && *label != '\0') ? label : "(unnamed)";
+    // ★ 临时诊断（`LIFT_MEMCPY_DIAG=1`）：只对目标窗口（缺省 `move11`）开始收集；缺省档 no-op。
+    memcpy_diag::beginWindow(win_.label.c_str());
     win_.t_open_ns = windowNowNs();
     win_.insns_open = cpu_.insns;
     win_.frames_open = presenter_.frameCount();
@@ -1373,6 +1389,8 @@ bool AotHost::beginWindow(const char* label) {
 bool AotHost::endWindowText(std::string* text) {
     // ★ 状态位是唯一判据（未开 ⇒ 没有表可取；幂等）。
     if (!win_.closeWindow()) return false;
+    // ★ 临时诊断（`LIFT_MEMCPY_DIAG=1`）：收窗时结算 `rep_bulk` 的窗口增量；缺省档 no-op。
+    memcpy_diag::endWindow();
     win_.closeEdges(windowNowNs());
     win_.insns_close = cpu_.insns;
     win_.frames_close = presenter_.frameCount();

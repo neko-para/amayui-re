@@ -32,6 +32,7 @@
 #include "runtime/host_encoding.h"
 #include "runtime/input_plan.h"       // `--input-plan`（S4：AOT 臂唯一的输入控制面）
 #include "runtime/log.h"              // `--log-level`（缺省 warn；AOT 臂过去没有这个开关）
+#include "runtime/lift_intrinsics.h"  // `--no-intrinsics` + `kMemcpyFastMaxBytes`（启动 readout）
 #include "runtime/memory.h"           // setGuestFaultTextHook（fault 路径的 `input-plan` 摘要；C）
 #include "runtime/present_flags.h"    // `--cursor-warp` / `--sound` 的**唯一**一份判据 + 文案
 #include "runtime/present_sdl.h"
@@ -187,6 +188,9 @@ void usage() {
         "                      **缺省关**）：那是**静态布局快照**（谁占了哪一段），一次 run 里不变，\n"
         "                      属噪音 ⇒ 缺省档不打。⛔ 只影响这一块，别的 readout（exe / PE / 导入 /\n"
         "                      地址与服务面 / pin / 缺口 / 停机原因）一格都不收\n"
+        "  --no-intrinsics      **只给 A/B 与诊断**：关掉构建期库内建闸门（缺省 = 开）。IR 里的闸门块 /\n"
+        "                      快路径仍在（构建期决定），闸门返回 false ⇒ 回退原 lifted 函数体；\n"
+        "                      ⛔ 不是运行期 override（不替换任何执行来源）\n"
         "\n"
         "★ 控制层（停住 / 继续 / 采样 / 截图 / 移光标 / 投递一条 click / typed global 读写 / 收口；\n"
         "  **缺省完全不启动** ⇒ 不给 --control-root 时行为与逐字节输出都不变）：\n"
@@ -604,6 +608,9 @@ int main(int argc, char** argv) {
         } else if (a == "--region-log") {
             // ★ 启动 readout 末尾的 guest 区域表 28 行（**缺省关**；理由见 `AotRunOptions::region_log`）。
             run_opts.region_log = true;
+        } else if (a == "--no-intrinsics") {
+            // ★ 构建期库内建（v1：`_memcpy`）只关运行期闸门（A/B 与诊断）。缺省 = 开。
+            run_opts.no_intrinsics = true;
         } else if (a == "--present") {
             if (!needValue("--present", &present_mode)) return 2;
         } else if (a == "--control-root") {
@@ -1361,6 +1368,31 @@ int main(int argc, char** argv) {
         std::printf("%s\n", lift::scaleReadoutLine(scale_report).c_str());
     }
     host.printReadout(stdout, run_opts.region_log);
+    // ★ 构建期库内建的**一次性**启动 readout（§12.8 第 3 条：一次性输出 ⛔ 不许收）：
+    //   这一趟的二进制到底带了哪几个内建 EA（来自 `lift_pin.h` 的已校验列表，⛔ 不在运行期读表文件）。
+    //   `--no-intrinsics` 只关闸门；IR 里的闸门块 / 快路径是构建期决定的 ⇒ 这里如实说 "off"。
+    {
+        const std::size_t ni = lift::aot::pinnedIntrinsicCount();
+        std::string line = "intrinsics: ";
+        if (ni == 0) {
+            line += "none（本二进制没有构建期内建表）";
+        } else {
+            line += run_opts.no_intrinsics ? "off(--no-intrinsics)" : "on";
+            line += "  table=";
+            for (std::size_t i = 0; i < ni; ++i) {
+                const lift::aot::AotIntrinsic it = lift::aot::pinnedIntrinsic(i);
+                char b[96];
+                std::snprintf(b, sizeof(b), "%s0x%08X/%s", i == 0 ? "" : ",",
+                              static_cast<unsigned>(it.ea), it.name);
+                line += b;
+            }
+            char b[64];
+            std::snprintf(b, sizeof(b), "  fast-max=%u B  [A/B: --no-intrinsics]",
+                          static_cast<unsigned>(lift::kMemcpyFastMaxBytes));
+            line += b;
+        }
+        std::printf("%s\n", line.c_str());
+    }
     std::fflush(stdout);
 
     // =====================================================================================

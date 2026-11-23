@@ -66,6 +66,16 @@ constexpr AotEntry kTable[] = {
 
 constexpr std::size_t kTableSize = sizeof(kTable) / sizeof(kTable[0]);
 
+// ★ 构建期库内建表（`lift_pin.h` 的 X-macro 列表；数量为 0 时没有 list 宏）。
+#if LIFT_AOT_PIN_INTRINSICS > 0
+#define LIFT_AOT_INTRINSIC_ROW(ea_, name_) AotIntrinsic{ea_, name_},
+constexpr AotIntrinsic kIntrinsics[] = {
+    LIFT_AOT_PIN_INTRINSIC_LIST(LIFT_AOT_INTRINSIC_ROW)};
+#undef LIFT_AOT_INTRINSIC_ROW
+#else
+constexpr AotIntrinsic kIntrinsics[] = {{0u, ""}};  // 只为让 `sizeof` 合法；count 由 PIN 宏给出
+#endif
+
 // ★ 升序是"同输入同字节"的一部分（生成器已保证）⇒ 编译期钉住（不是运行期抽查）。
 constexpr bool tableIsSorted() {
     for (std::size_t i = 1; i < kTableSize; ++i) {
@@ -212,6 +222,23 @@ std::uint64_t pinnedFunctions() {
 #else
     return 0u;
 #endif
+}
+
+std::size_t pinnedIntrinsicCount() {
+#ifdef LIFT_AOT_HAS_GENERATED
+    return static_cast<std::size_t>(LIFT_AOT_PIN_INTRINSICS);
+#else
+    return 0;
+#endif
+}
+
+AotIntrinsic pinnedIntrinsic(std::size_t index) {
+#ifdef LIFT_AOT_HAS_GENERATED
+    if (index < pinnedIntrinsicCount()) return kIntrinsics[index];
+#else
+    (void)index;
+#endif
+    return AotIntrinsic{};
 }
 
 std::size_t tableSize() { return kTableSize; }
