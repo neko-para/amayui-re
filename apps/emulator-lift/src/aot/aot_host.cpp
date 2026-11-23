@@ -1323,6 +1323,17 @@ bool AotHost::beginWindow(const char* label) {
     win_.insns_open = cpu_.insns;
     win_.frames_open = presenter_.frameCount();
     win_.liftdyn_open = ::liftDynCalls;
+    // ★ 窗口级 EA 派发归因（`--profile` 开档才做）：快照既有采样表，收窗时做差。
+    //   ⛔ 热路径零改动：`prof_.dispatch_by_ea` 的写点仍然只有 `profileDispatchSample`（每 stride 一次）。
+    //   关档时连这份拷贝都不做（`win_` 的这块保持空 ⇒ `endWindowText` 不追加任何行）。
+    if (prof_.on) {
+        win_.dispatch_open_calls = prof_.dispatch_calls;
+        win_.dispatch_open.clear();
+        win_.dispatch_open.reserve(prof_.dispatch_by_ea.size());
+        for (const auto& kv : prof_.dispatch_by_ea) {
+            win_.dispatch_open.emplace_back(kv.first, kv.second.first);
+        }
+    }
     // 每个 shim 的精确账：按 registry id 索引（`byId` 是 O(1)；⛔ 不用 map，热路径里每次调用
     // 一次 map 查找在 init 那种 40 万次 shim 的窗口里是几 ms 级噪声）。
     const std::size_t nshim = shims_.size();
@@ -1368,13 +1379,41 @@ bool AotHost::endWindowText(std::string* text) {
     win_.liftdyn_close = ::liftDynCalls;
     ::liftDynCountOn = false;
 
+    // ★ 窗口级 EA 派发归因的**差分**（`--profile` 开档才做）：快照（按 EA 升序）与当前表
+    //   （`std::map` 迭代序也是 EA 升序）归并，`本次 − 开窗时` = 本窗口的采样命中分布。
+    //   ⛔ 这里只读 `prof_.dispatch_by_ea`，不写它；也不碰任何热路径计数器。
+    if (prof_.on) {
+        win_.dispatch_window_calls = prof_.dispatch_calls - win_.dispatch_open_calls;
+        win_.dispatch_rows.clear();
+        win_.dispatch_window_samples = 0;
+        auto open_it = win_.dispatch_open.begin();
+        for (const auto& kv : prof_.dispatch_by_ea) {
+            while (open_it != win_.dispatch_open.end() && open_it->first < kv.first) ++open_it;
+            const std::uint64_t before =
+                (open_it != win_.dispatch_open.end() && open_it->first == kv.first) ? open_it->second : 0;
+            const std::uint64_t now = kv.second.first;
+            if (now > before) {
+                win_.dispatch_rows.push_back({kv.first, now - before});
+                win_.dispatch_window_samples += now - before;
+            }
+        }
+        // 降序（同数按 EA 升序）⇒ 输出确定；格式层只按这个序打。
+        std::sort(win_.dispatch_rows.begin(), win_.dispatch_rows.end(),
+                  [](const AotWindowProf::DispatchEaRow& a, const AotWindowProf::DispatchEaRow& b) {
+                      if (a.samples != b.samples) return a.samples > b.samples;
+                      return a.ea < b.ea;
+                  });
+    }
+
     // ★ 文本由 `formatWindowReportText`（pure，`aot/window_prof.cpp`）**一份**实现产出 ⇒ `fputs` 写出的
     //   字节与旧 `printf` 块逐字相同（守卫 `aot-window-report-text` 拿"旧 printf 产出的金样"对齐）。
     //   ⛔ 不要在这里拼格式串：那会让文本重新长出第二份实现（切片 3 把同一份文本交给剪贴板）。
-    const std::string report = formatWindowReportText(win_, [this](std::uint32_t id) {
+    std::string report = formatWindowReportText(win_, [this](std::uint32_t id) {
         const ShimDef* def = shims_.byId(id);
         return def != nullptr ? (def->module + "!" + def->name) : std::string("(unknown)");
     });
+    // ★ `--profile` 开档才追加窗口级 EA 分布（关档 ⇒ 一个字节都不多；与旧窗口表逐字相同）。
+    if (prof_.on) report += formatWindowDispatchText(win_);
     if (text != nullptr) *text = report;
     return true;
 }

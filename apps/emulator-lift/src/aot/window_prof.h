@@ -36,6 +36,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "runtime/present.h"  // `PresentBreakdown`（present 子桶的唯一来源）
@@ -73,6 +74,20 @@ struct AotWindowProf {
     std::uint64_t frames_close = 0;
     std::uint64_t liftdyn_open = 0;
     std::uint64_t liftdyn_close = 0;
+
+    // ---- 窗口级 EA 派发归因（`--profile` 开档时由宿主填；关档 ⇒ 全空 / 全 0）----
+    // ★ 数据面与热路径**无交**：热路径仍只写 `AotProfile::dispatch_by_ea`（既有那一个表），
+    //   这里只在**开窗 / 收窗各走一次**（快照 / 差分）。窗口不多、单窗口至多 3.5 万项 ⇒ 拷贝无所谓。
+    // ★ 快照按 EA 升序（`std::map` 的迭代序）；收窗时与当前表按 EA 归并做差 ⇒ 本窗口的分布。
+    std::vector<std::pair<std::uint32_t, std::uint64_t>> dispatch_open;
+    std::uint64_t dispatch_open_calls = 0;
+    struct DispatchEaRow {
+        std::uint32_t ea = 0;
+        std::uint64_t samples = 0;  // 本窗口该 EA 的**采样命中次数**（派发采样 stride 1/4096）
+    };
+    std::vector<DispatchEaRow> dispatch_rows;   // 收窗时的差，按 samples 降序 → ea 升序
+    std::uint64_t dispatch_window_calls = 0;    // 本窗口**精确**派发数（`dispatch_calls` 差分）
+    std::uint64_t dispatch_window_samples = 0;  // 本窗口采样命中总数（= dispatch_rows 的 samples 和）
 
     // ---- 迭代 / 采样 ----
     std::uint64_t iter = 0;      // 窗口内经过的派发迭代数（lift + shim）
@@ -241,6 +256,18 @@ using ShimNameFn = std::function<std::string(std::uint32_t id)>;
 //   `INVALID`（需求单已裁决"仍复制"；本函数只保证文本里有它，剪贴板是切片 3 的事）。
 // =====================================================================================
 std::string formatWindowReportText(const AotWindowProf& w, const ShimNameFn& shimName, int top = 8);
+
+// =====================================================================================
+// **窗口级 EA 派发分布**（`window-dispatch-top:` 那一块；`--profile` 开档时才由宿主追加）
+//
+// ★ 为什么要它：`dispatch-top:` 只有**整轮**口径，而点击只占整轮 ~10% ⇒ 被装载帧淹没。
+//   窗口 = 同一份采样表在开窗/收窗各快照一次、做差 ⇒ 回答"这 8 秒的派发集中在哪些 EA"。
+// ★ 分母是**窗口内派发数**（精确，`dispatch_calls` 差分）；每行的 `派发=` 是**按样本比例还原**
+//   的估计（采样 stride 1/4096，`样本=` 列给原始命中数）⇒ `top1 占窗口指令=` 是"派发份额 ×
+//   窗口 insns"的量级估计（块有长有短，⛔ 不当精确 insns 归因）。
+// ★ 纯函数：只读 `w`，同输入 ⇒ 同字节。`--profile` 关档时宿主不填 ⇒ **不调用**（零输出）。
+// =====================================================================================
+std::string formatWindowDispatchText(const AotWindowProf& w, int top = 20);
 
 }  // namespace lift::aot
 

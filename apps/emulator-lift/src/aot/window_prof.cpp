@@ -25,6 +25,10 @@
 #include <utility>
 #include <vector>
 
+// ★ 只为 `AotProfile::kDispatchStride`（派发采样的真源）—— 输出里那一行 `stride 1/N` 不许手抄数字。
+//   本 TU 是 `.cpp`（不是纯头）⇒ 引它不会把 AOT 头传播给别的 TU。
+#include "aot/aot_host.h"
+
 namespace lift::aot {
 
 namespace {
@@ -236,6 +240,43 @@ std::string formatWindowReportText(const AotWindowProf& w, const ShimNameFn& shi
                           boundary_wins ? "boundary" : best_name.c_str(), share * 100.0, verdict,
                           rank == AotWindowProf::Rank::Candidate ? "" : "（无单点值得优化 ⇒ 记「均匀分布」）");
     }
+    return out;
+}
+
+std::string formatWindowDispatchText(const AotWindowProf& w, int top) {
+    std::string out;
+    const std::uint64_t calls = w.dispatch_window_calls;
+    const std::uint64_t samples = w.dispatch_window_samples;
+    const std::uint64_t insns = w.insns_close > w.insns_open ? w.insns_close - w.insns_open : 0;
+    out += formatLine(
+        "window-dispatch-top: %s：%zu 个 EA / %llu 次派发"
+        "（窗口内采样 %llu 个，stride 1/%llu；`派发=` 按样本比例还原）\n",
+        w.label.c_str(), w.dispatch_rows.size(), static_cast<unsigned long long>(calls),
+        static_cast<unsigned long long>(samples),
+        static_cast<unsigned long long>(AotProfile::kDispatchStride));
+    if (samples == 0 || w.dispatch_rows.empty()) {
+        out += formatLine("window-dispatch-top: distinct=0  top1 占窗口指令=0.0%%（窗口内没有派发采样）\n");
+        return out;
+    }
+    const std::size_t shown = top < 0 ? 0 : std::min(static_cast<std::size_t>(top), w.dispatch_rows.size());
+    for (std::size_t i = 0; i < shown; ++i) {
+        const AotWindowProf::DispatchEaRow& r = w.dispatch_rows[i];
+        // 按样本比例还原到"窗口派发数"（所有窗口共用同一个 stride ⇒ 份额是样本份额）。
+        const std::uint64_t est = static_cast<std::uint64_t>(
+            (static_cast<unsigned long long>(r.samples) * calls + samples / 2) / samples);
+        const double share = 100.0 * static_cast<double>(r.samples) / static_cast<double>(samples);
+        out += formatLine("window-dispatch-top: %2zu. ea=%08X 派发=%llu 占窗口派发=%5.1f%% 样本=%llu\n",
+                          i + 1, r.ea, static_cast<unsigned long long>(est), share,
+                          static_cast<unsigned long long>(r.samples));
+    }
+    // ★ 一行收口：`distinct` = 窗口内有样本的不同 EA 数；`top1 占窗口指令` = top1 的派发份额 ×
+    //   窗口 insns（块长度不均 ⇒ 只给量级，⛔ 不当精确 insns 归因）。
+    const AotWindowProf::DispatchEaRow& top1 = w.dispatch_rows.front();
+    const double top1_share = static_cast<double>(top1.samples) / static_cast<double>(samples);
+    out += formatLine(
+        "window-dispatch-top: distinct=%zu  top1 占窗口指令=%5.1f%%（窗口 insns=%llu；按 top1 派发份额 × "
+        "insns 估）\n",
+        w.dispatch_rows.size(), top1_share * 100.0, static_cast<unsigned long long>(insns));
     return out;
 }
 
