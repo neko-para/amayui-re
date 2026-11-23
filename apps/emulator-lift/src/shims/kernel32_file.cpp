@@ -79,6 +79,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -344,6 +345,374 @@ std::uint32_t errnoToWin32(int e) {
     }
 }
 
+// =======================================================================================
+// ★ 诊断：`CreateFileA` 热路径的**分段计时**（`LIFT_VFS_TIMING=1`；缺省档零开销）
+//
+//   为什么要这一段：`CreateFileA` 在 SAVE11 里是 184 µs/次（点击帧 20.4 ms / 111 次），
+//   而"贵在哪"只能从**段**上看：resolve（逐段 stat + 可能的整目录枚举）、exists/is_directory、
+//   shareViolation、句柄表插入、**真正的 CreateFileW**（AV/文件系统固定成本）、首次 ReadFile。
+//
+//   口径：
+//   · **默认档零开销**：`on()` 是一次静态 bool 判定（与 `saveTraceEnabled()` 同一形态）；
+//     关档时不取时、不记账、不打任何字节。
+//   · 只累计（ns + 次数 + 分布），**在运行收尾打一次块**（⛔ 不周期性输出 —— AGENTS §12.8）。
+//   · **burst 分组**：相邻两次 `CreateFileA` 的间隔 > 100 ms 就切一组 ⇒ 一次装载 / 一次点击
+//     各自成组，这样"装载帧 vs 点击窗口"的对比不必依赖帧号（AOT 臂没有帧号可读）。
+//     ⚠ 分组阈值是人挑的（100 ms）：它把"同一个装载 / 点击动作"的连续打开归到一组，不参与判据。
+//   · ⛔ 不改任何返回值 / 错误码 / 游标；`readFile` 的两段计时只包住宿主读写。
+// =======================================================================================
+namespace vfstime {
+
+using Clock = std::chrono::steady_clock;
+
+bool on() {
+    static const bool v = std::getenv("LIFT_VFS_TIMING") != nullptr;
+    return v;
+}
+
+std::uint64_t nowNs() {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count());
+}
+
+// 一次打开的段（ns）；`total` = 整次 shim 的墙钟（含没单独列出的部分）。
+struct Span {
+    std::uint64_t resolve = 0;
+    std::uint64_t exists = 0;   // fs::exists + fs::is_directory
+    std::uint64_t share = 0;    // shareViolation
+    std::uint64_t cache = 0;    // 内容缓存：查找（含校验 stat）/ 未命中后的存入
+    std::uint64_t open = 0;     // openHostFile（真正的 CreateFileW）
+    std::uint64_t insert = 0;   // new FileState + 句柄表 add
+    std::uint64_t total = 0;
+};
+
+// 一次打开里**要计数**的事实（与时间分开：时间进 Span，次数进 Facts）。
+struct Facts {
+    std::uint64_t resolve_ok = 0;    // 解析成功（含负缓存未命中的真解析 / 影子命中）
+    std::uint64_t resolve_fail = 0;
+    std::uint64_t isdir = 0;
+    std::uint64_t share = 0;         // 共享冲突（错误 32）
+    std::uint64_t open_ok = 0;       // 真的打开了宿主文件（或走了缓存句柄）
+    std::uint64_t open_fail = 0;
+    std::uint64_t cache_hit = 0;     // 只读内容缓存命中（跳过 exists/isdir/真 open）
+    std::uint64_t cache_miss = 0;    // 够格进缓存但没命中
+    std::uint64_t write_intent = 0;  // 写意图（一律不走内容缓存）
+    std::uint64_t resolve_ok_ns = 0; // 解析成功那一段的 ns（失败探测的枚举不算进来）
+};
+
+struct Totals {
+    std::uint64_t calls = 0;
+    Span span;
+    Facts f;
+    std::uint64_t resolve_ok_ns = 0;  // 其中"解析成功"那部分（失败探测的枚举不算进来）
+    std::uint64_t read_calls = 0;
+    std::uint64_t read_ns = 0;           // 整次 ReadFile
+    std::uint64_t read_host_ns = 0;      // 其中宿主 read（fread / memcpy）
+    std::uint64_t first_read_calls = 0;  // offset == 0 的读（= 首次触碰内容）
+    std::uint64_t first_read_ns = 0;
+    std::uint64_t first_read_host_ns = 0;
+};
+
+constexpr std::uint64_t kGapNs = 100ull * 1000ull * 1000ull;  // burst 分组阈值（100 ms）
+constexpr std::size_t kMaxGroups = 96;
+
+struct Group {
+    std::uint64_t frame = 0;  // Present 帧号（与 `--profile-slow-frames` 的 n= 同一个计数）
+    std::uint64_t start_ns = 0;
+    std::uint64_t end_ns = 0;
+    Totals t;
+};
+
+struct State {
+    Totals all;
+    Totals hit;   // 只统计**内容缓存命中**的那些调用（"命中 ns/次"的分子）
+    Totals miss;  // 只统计**够格但未命中**的那些调用（真打开 + 存入）
+    Group cur;
+    bool cur_open = false;
+    std::uint64_t frame = 0;  // 已过的帧边界数（= 已 Present 的帧数）
+    std::vector<Group> groups;
+    Group overflow {};
+    std::uint64_t handles_max = 0;
+    const Vfs* vfs = nullptr;  // 第一次 `CreateFileA` 记下（只用于收尾打缓存读数）
+};
+
+// 收尾打印（`atexit` 一次；⛔ 不是周期性输出）。前置声明：`state()` 在首次调用时注册它。
+void printSummary();
+
+State& state() {
+    static State s;
+    // ★ 打印挂在 `atexit` 上（**不是**静态对象的析构）：`std::exit` 先跑 atexit 处理器、
+    //   再销毁静态对象 ⇒ 这样 `s` 在打印时一定还活着（否则 `s.groups` 的 vector 已经被销毁，
+    //   读数会只剩最后一组 —— 实测踩过：整跑 1535 次调用，表里只出现 12 次）。
+    static const bool registered = [] {
+        std::atexit(&printSummary);
+        return true;
+    }();
+    (void)registered;
+    return s;
+}
+
+void addSpan(Span* dst, const Span& s) {
+    dst->resolve += s.resolve;
+    dst->exists += s.exists;
+    dst->share += s.share;
+    dst->cache += s.cache;
+    dst->open += s.open;
+    dst->insert += s.insert;
+    dst->total += s.total;
+}
+
+void addFacts(Facts* dst, const Facts& f) {
+    dst->resolve_ok += f.resolve_ok;
+    dst->resolve_fail += f.resolve_fail;
+    dst->isdir += f.isdir;
+    dst->share += f.share;
+    dst->open_ok += f.open_ok;
+    dst->open_fail += f.open_fail;
+    dst->cache_hit += f.cache_hit;
+    dst->cache_miss += f.cache_miss;
+    dst->write_intent += f.write_intent;
+    dst->resolve_ok_ns += f.resolve_ok_ns;
+}
+
+// 收尾打印（`atexit` 一次；⛔ 不是周期性输出）。
+void closeGroup() {
+    State& s = state();
+    if (!s.cur_open) return;
+    s.cur_open = false;
+    if (s.cur.t.calls == 0) return;
+    if (s.groups.size() < kMaxGroups) {
+        s.groups.push_back(s.cur);
+    } else {
+        s.overflow.end_ns = s.cur.end_ns;
+        s.overflow.t.calls += s.cur.t.calls;
+        addSpan(&s.overflow.t.span, s.cur.t.span);
+        addFacts(&s.overflow.t.f, s.cur.t.f);
+        s.overflow.t.read_calls += s.cur.t.read_calls;
+        s.overflow.t.read_ns += s.cur.t.read_ns;
+        s.overflow.t.read_host_ns += s.cur.t.read_host_ns;
+    }
+    s.cur = Group{};
+}
+
+// 一次 `CreateFileA` 收口。
+void commit(std::uint64_t start_ns, const Span& sp, const Facts& f) {
+    State& s = state();
+    const std::uint64_t end_ns = start_ns + sp.total;
+    if (!s.cur_open || start_ns > s.cur.end_ns + kGapNs) {
+        closeGroup();
+        s.cur = Group{};
+        s.cur.start_ns = start_ns;
+        s.cur.frame = s.frame + 1;  // 这一帧（帧边界还没到）
+        s.cur_open = true;
+    }
+    s.cur.end_ns = end_ns;
+    s.cur.t.calls++;
+    addSpan(&s.cur.t.span, sp);
+    addFacts(&s.cur.t.f, f);
+    s.all.calls++;
+    addSpan(&s.all.span, sp);
+    addFacts(&s.all.f, f);
+    // 命中 / 够格未命中分开记（"命中 ns/次、未命中 ns/次"的唯一来源）
+    Totals* which = nullptr;
+    if (f.cache_hit != 0) {
+        which = &s.hit;
+    } else if (f.cache_miss != 0) {
+        which = &s.miss;
+    }
+    if (which != nullptr) {
+        which->calls++;
+        addSpan(&which->span, sp);
+        addFacts(&which->f, f);
+    }
+}
+
+// 一次打开的分段计时器：构造取时、析构收口（**早退分支也自动收口**）。
+struct Probe {
+    bool on = false;
+    std::uint64_t t0 = 0;
+    std::uint64_t t = 0;
+    Span sp;
+    Facts f;
+    const HandleTable* handles = nullptr;
+
+    explicit Probe(const HandleTable* h) : on(vfstime::on()), handles(h) {
+        if (on) t0 = t = vfstime::nowNs();
+    }
+    void mark(std::uint64_t Span::*field) {
+        if (!on) return;
+        const std::uint64_t now = vfstime::nowNs();
+        sp.*field += now - t;
+        t = now;
+    }
+    ~Probe() {
+        if (!on) return;
+        sp.total = vfstime::nowNs() - t0;
+        if (f.resolve_ok != 0) f.resolve_ok_ns = sp.resolve;
+        State& s = vfstime::state();
+        if (handles != nullptr && handles->size() > s.handles_max) s.handles_max = handles->size();
+        vfstime::commit(t0, sp, f);
+    }
+};
+
+double ms(std::uint64_t ns) { return static_cast<double>(ns) / 1.0e6; }
+double us(std::uint64_t ns) { return static_cast<double>(ns) / 1.0e3; }
+
+double pct(std::uint64_t part, std::uint64_t whole) {
+    return whole != 0 ? 100.0 * static_cast<double>(part) / static_cast<double>(whole) : 0.0;
+}
+
+void printRow(const char* tag, const Totals& t) {
+    std::printf(
+        "vfs-timing: %-10s calls=%-6llu resolve=%8.3fms exists=%8.3fms share=%8.3fms cache=%8.3fms "
+        "insert=%8.3fms openW=%9.3fms total=%9.3fms\n",
+        tag, static_cast<unsigned long long>(t.calls), ms(t.span.resolve), ms(t.span.exists),
+        ms(t.span.share), ms(t.span.cache), ms(t.span.insert), ms(t.span.open), ms(t.span.total));
+}
+
+void printSummary() {
+    State& s = state();
+    closeGroup();
+    if (s.all.calls == 0) return;
+    const Totals& t = s.all;
+    const VfsDiagCounters dc = vfsDiagCounters();
+    std::printf("\n=== vfs-timing（LIFT_VFS_TIMING=1；一次性读数，缺省档不打）===\n");
+    std::printf(
+        "vfs-timing: CreateFileA/创建调用=%llu 解析成功=%llu 解析失败=%llu（其中负缓存命中=%llu）"
+        " 目录=%llu 共享冲突=%llu 真打开成功=%llu 打开失败=%llu 缓存命中=%llu 缓存未命中=%llu "
+        "写意图=%llu\n",
+        static_cast<unsigned long long>(t.calls), static_cast<unsigned long long>(t.f.resolve_ok),
+        static_cast<unsigned long long>(t.f.resolve_fail), static_cast<unsigned long long>(dc.negative_hits),
+        static_cast<unsigned long long>(t.f.isdir), static_cast<unsigned long long>(t.f.share),
+        static_cast<unsigned long long>(t.f.open_ok), static_cast<unsigned long long>(t.f.open_fail),
+        static_cast<unsigned long long>(t.f.cache_hit), static_cast<unsigned long long>(t.f.cache_miss),
+        static_cast<unsigned long long>(t.f.write_intent));
+    printRow("TOTAL", t);
+    if (s.hit.calls != 0) printRow("缓存命中", s.hit);
+    if (s.miss.calls != 0) printRow("未命中(够格)", s.miss);
+    std::printf(
+        "vfs-timing: 占比: resolve=%.1f%% exists+isdir=%.1f%% shareViolation=%.1f%% 内容缓存=%.1f%% "
+        "句柄表插入=%.1f%% CreateFileW=%.1f%%（合计 %.3f ms）\n",
+        pct(t.span.resolve, t.span.total), pct(t.span.exists, t.span.total),
+        pct(t.span.share, t.span.total), pct(t.span.cache, t.span.total), pct(t.span.insert, t.span.total),
+        pct(t.span.open, t.span.total), ms(t.span.total));
+    const std::uint64_t ok = t.f.open_ok != 0 ? t.f.open_ok : 1;
+    std::printf(
+        "vfs-timing: 单次均值（按成功打开 %llu 次折算）: resolve=%.2fµs exists+isdir=%.2fµs "
+        "share=%.2fµs cache=%.2fµs insert=%.2fµs openW=%.2fµs 合计=%.2fµs/次\n",
+        static_cast<unsigned long long>(t.f.open_ok), us(t.span.resolve / ok), us(t.span.exists / ok),
+        us(t.span.share / ok), us(t.span.cache / ok), us(t.span.insert / ok), us(t.span.open / ok),
+        us(t.span.total / ok));
+    // ★ 命中 / 未命中的**单次**成本（判据要的就是这两个数；分母是各自的调用数）
+    if (s.hit.calls != 0) {
+        std::printf(
+            "vfs-timing: 缓存命中 ns/次: 合计=%.2fµs/次（resolve=%.2f exists+isdir=%.2f share=%.2f "
+            "cache=%.2f insert=%.2f openW=%.2f；%llu 次）\n",
+            us(s.hit.span.total / s.hit.calls), us(s.hit.span.resolve / s.hit.calls),
+            us(s.hit.span.exists / s.hit.calls), us(s.hit.span.share / s.hit.calls),
+            us(s.hit.span.cache / s.hit.calls), us(s.hit.span.insert / s.hit.calls),
+            us(s.hit.span.open / s.hit.calls), static_cast<unsigned long long>(s.hit.calls));
+    }
+    if (s.miss.calls != 0) {
+        std::printf(
+            "vfs-timing: 未命中 ns/次: 合计=%.2fµs/次（resolve=%.2f exists+isdir=%.2f share=%.2f "
+            "cache=%.2f insert=%.2f openW=%.2f；%llu 次）\n",
+            us(s.miss.span.total / s.miss.calls), us(s.miss.span.resolve / s.miss.calls),
+            us(s.miss.span.exists / s.miss.calls), us(s.miss.span.share / s.miss.calls),
+            us(s.miss.span.cache / s.miss.calls), us(s.miss.span.insert / s.miss.calls),
+            us(s.miss.span.open / s.miss.calls), static_cast<unsigned long long>(s.miss.calls));
+    }
+    // 缓存自身的读数（条目 / 字节 / 校验失效次数；由第一次 `CreateFileA` 记下的 Vfs 指针取）
+    if (s.vfs != nullptr) {
+        const Vfs::ReadCacheStats cs = s.vfs->readCacheStats();
+        std::printf(
+            "vfs-cache: 条目=%llu 堆字节=%.2f MiB 映射字节=%.2f MiB 命中=%llu 未命中=%llu "
+            "校验失效=%llu 存入=%llu 逐出=%llu 预算=%llu MiB\n",
+            static_cast<unsigned long long>(cs.entries),
+            static_cast<double>(cs.bytes) / (1024.0 * 1024.0),
+            static_cast<double>(cs.mapped_bytes) / (1024.0 * 1024.0),
+            static_cast<unsigned long long>(cs.hits), static_cast<unsigned long long>(cs.misses),
+            static_cast<unsigned long long>(cs.stale), static_cast<unsigned long long>(cs.stores),
+            static_cast<unsigned long long>(cs.evictions),
+            static_cast<unsigned long long>(s.vfs->readCacheBudgetMb()));
+    }
+    std::printf(
+        "vfs-timing: resolve 内部: lookupSegment=%llu 次 目录枚举=%llu 次（全进程，含 find；"
+        "负缓存命中=%llu）；resolve 分摊: 成功的 %llu 次共 %.3f ms（%.2fµs/次）· 失败的 %llu 次共 "
+        "%.3f ms（%.2fµs/次）\n",
+        static_cast<unsigned long long>(dc.segment_lookups),
+        static_cast<unsigned long long>(dc.dir_enumerations),
+        static_cast<unsigned long long>(dc.negative_hits),
+        static_cast<unsigned long long>(t.f.resolve_ok), ms(t.f.resolve_ok_ns),
+        us(t.f.resolve_ok != 0 ? t.f.resolve_ok_ns / t.f.resolve_ok : 0),
+        static_cast<unsigned long long>(t.f.resolve_fail),
+        ms(t.span.resolve > t.f.resolve_ok_ns ? t.span.resolve - t.f.resolve_ok_ns : 0),
+        us(t.f.resolve_fail != 0
+               ? (t.span.resolve > t.f.resolve_ok_ns ? t.span.resolve - t.f.resolve_ok_ns : 0) /
+                     t.f.resolve_fail
+               : 0));
+    std::printf(
+        "vfs-timing: ReadFile: 调用=%llu 整调用=%.2fµs/次 宿主读=%.2fµs/次；offset==0 的读=%llu 次 "
+        "整调用=%.2fµs/次 宿主读=%.2fµs/次\n",
+        static_cast<unsigned long long>(t.read_calls),
+        us(t.read_calls != 0 ? t.read_ns / t.read_calls : 0),
+        us(t.read_calls != 0 ? t.read_host_ns / t.read_calls : 0),
+        static_cast<unsigned long long>(t.first_read_calls),
+        us(t.first_read_calls != 0 ? t.first_read_ns / t.first_read_calls : 0),
+        us(t.first_read_calls != 0 ? t.first_read_host_ns / t.first_read_calls : 0));
+    std::printf("vfs-timing: 句柄表累计槽数=%llu（槽位从不复用；`shareViolation` 已改成只扫活文件句柄 ⇒ "
+                "不再随这个数增长）\n",
+                static_cast<unsigned long long>(s.handles_max));
+    // ---- 按**帧**分组：同一帧里"间隔 >100 ms"会切成多组 ⇒ 打印前按帧号合并 ----
+    //   ★ 为什么合并：与 `--profile-slow-frames` 的 `n=` 对得上，装载帧 / 点击帧才能一眼认出。
+    std::vector<Group> by_frame;
+    for (const Group& g : s.groups) {
+        bool merged = false;
+        for (Group& m : by_frame) {
+            if (m.frame != g.frame) continue;
+            m.start_ns = std::min(m.start_ns, g.start_ns);
+            m.end_ns = std::max(m.end_ns, g.end_ns);
+            m.t.calls += g.t.calls;
+            addSpan(&m.t.span, g.t.span);
+            addFacts(&m.t.f, g.t.f);
+            m.t.read_calls += g.t.read_calls;
+            m.t.read_ns += g.t.read_ns;
+            m.t.read_host_ns += g.t.read_host_ns;
+            merged = true;
+            break;
+        }
+        if (!merged) by_frame.push_back(g);
+    }
+    std::sort(by_frame.begin(), by_frame.end(), [](const Group& a, const Group& b) {
+        return a.t.span.total > b.t.span.total;
+    });
+    std::printf("vfs-timing: 帧分组（按合计降序 top-10；共 %zu 帧有 CreateFileA，%zu 个原始组）:\n",
+                by_frame.size(), s.groups.size());
+    const std::size_t n = by_frame.size() < 10 ? by_frame.size() : 10;
+    for (std::size_t i = 0; i < n; ++i) {
+        const Group& g = by_frame[i];
+        std::printf(
+            "vfs-timing:   #%zu frame=%-4llu calls=%-5llu span=%7.1fms resolve=%8.3f exists=%8.3f "
+            "share=%7.3f cache=%7.3f openW=%9.3f total=%9.3f 真打开=%llu 缓存命中=%llu\n",
+            i + 1, static_cast<unsigned long long>(g.frame), static_cast<unsigned long long>(g.t.calls),
+            ms(g.end_ns - g.start_ns), ms(g.t.span.resolve), ms(g.t.span.exists), ms(g.t.span.share),
+            ms(g.t.span.cache), ms(g.t.span.open), ms(g.t.span.total),
+            static_cast<unsigned long long>(g.t.f.open_ok),
+            static_cast<unsigned long long>(g.t.f.cache_hit));
+    }
+    std::fflush(stdout);
+}
+
+// 帧边界（宿主帧循环每帧一次）：把当前帧的打开收成一组。关档 ⇒ 一次静态 bool 判定就返回。
+void frameBoundary(std::uint64_t frame) {
+    if (!on()) return;
+    closeGroup();
+    state().frame = frame;  // 下一组（帧 frame+1）的编号从它起算
+}
+
+}  // namespace vfstime
+
+
 // ---------------------------------------------------------------------------------------
 // 现场检查 / 诊断
 // ---------------------------------------------------------------------------------------
@@ -446,6 +815,14 @@ std::uint32_t writeAnsiBuffer(X86& cpu, std::uint32_t ea, std::uint32_t cap,
 // ---------------------------------------------------------------------------------------
 struct FileState {
     std::FILE* fp = nullptr;
+    // ★ C7：**只读内容缓存命中的句柄**（`fp == nullptr` 而 `cached` 非空）：
+    //   内容在 `cached_data`（MMF / 堆，归 `cached` 的引用计数所有），游标是 `cached_pos`。
+    //   ⚠ 一旦 `liftFileStream` 为 mmio 升级出真实 `FILE*`（`fp != nullptr`），这个句柄就
+    //   **回到 `FILE*` 语义**（ReadFile / 定位都走 `fp`），`cached_pos` 不再被读。
+    std::shared_ptr<const void> cached;
+    const std::uint8_t* cached_data = nullptr;
+    std::uint64_t cached_size = 0;
+    std::uint64_t cached_pos = 0;
     std::string host_path;
     std::string guest_path;
     std::uint32_t share_mode = 0;
@@ -456,6 +833,24 @@ struct FileState {
     bool readable = false;
     bool writable = false;
 };
+
+// 这个句柄是不是"从缓存内容读"（`fp` 为空 + 有条目）。一旦 mmio 升级出 `FILE*` ⇒ false。
+bool cachedHandle(const FileState& st) { return st.fp == nullptr && st.cached != nullptr; }
+
+// 当前读位置（缓存句柄 / `FILE*` 句柄各一条路径；语义与 `_ftelli64` 一致）
+std::int64_t filePosition(const FileState& st) {
+    if (cachedHandle(st)) return static_cast<std::int64_t>(st.cached_pos);
+    return tellFile64(st.fp);
+}
+
+// 落位（缓存句柄只动游标；`FILE*` 句柄走宿主 seek）。失败 ⇒ false。
+bool setFilePosition(FileState& st, std::int64_t pos) {
+    if (cachedHandle(st)) {
+        st.cached_pos = static_cast<std::uint64_t>(pos);
+        return true;
+    }
+    return seekFile64(st.fp, pos, SEEK_SET) == 0;
+}
 
 struct FindState {
     std::vector<HostDirEntry> entries;
@@ -500,6 +895,12 @@ FindState* findOf(X86& cpu, std::uint32_t h, const char* api) {
 
 // 当前大小（不改文件指针）
 bool sizeOfFile(const FileState& st, std::uint64_t* size) {
+    if (cachedHandle(st)) {
+        // 缓存句柄：大小 = 条目的大小（内容是从安装树那份字节来的；安装树只读 ⇒ 不会变）。
+        // ★ 语义与 `fseek(END)+tell` 等价（原实现也是"当下"的大小）：同一份只读字节。
+        *size = st.cached_size;
+        return true;
+    }
     if (!st.fp) return false;
     const std::int64_t cur = tellFile64(st.fp);
     if (cur < 0) return false;
@@ -551,11 +952,11 @@ bool resolveWriteTarget(X86& cpu, const std::string& guest_path, std::string* ho
 // ⚠ 只比**本族句柄表**里同宿主路径的活句柄：没有别的进程、也没有真文件锁；DELETE 位不建模。
 bool shareViolation(X86& cpu, const std::string& host, std::uint32_t new_access,
                     std::uint32_t new_share, std::uint32_t skip_handle) {
-    // 句柄值 = kFirst + kStep*下标 ⇒ 上界由 entries 数量给出（**已关闭**的槽也会被 get 成 nullptr，
-    // 所以不能"碰到 nullptr 就 break"）。
-    const std::uint32_t end =
-        HandleTable::kFirst + HandleTable::kStep * static_cast<std::uint32_t>(cpu.handles->size());
-    for (std::uint32_t h = HandleTable::kFirst; h < end; h += HandleTable::kStep) {
+    // ★ 只遍历**活文件句柄**（`HandleTable::liveFiles()`）：判据与"扫全表"逐条相同
+    //   （旧实现跳过非 File / 已关闭的槽，正是这一份索引的补集），但代价从 O(累计槽数)
+    //   降到 O(活文件句柄)。实测 SAVE11 一趟累计 5334 槽 / 活文件句柄 ~10 ⇒ 每次省 ~10 µs。
+    //   ⛔ 别改回"按句柄值扫全表"：那会在长跑里越扫越慢（槽位从不复用）。
+    for (const std::uint32_t h : cpu.handles->liveFiles()) {
         if (h == skip_handle) continue;
         const HandleEntry* e = cpu.handles->get(h);
         if (!e || !e->used) continue;
@@ -583,6 +984,10 @@ void createFile(X86& cpu, ShimCall& call, bool wide) {
     const char* api = wide ? "CreateFileW" : "CreateFileA";
     requireHandles(cpu, api);
     requireVfs(cpu, api);
+    // ★ 诊断：本次调用的分段计时（缺省档 `on == false` ⇒ 下面所有 `if (vt)` 都不进；见 vfstime 段）。
+    vfstime::Probe vprobe(cpu.handles);
+    const bool vt = vprobe.on;
+    if (vt && vfstime::state().vfs == nullptr) vfstime::state().vfs = cpu.vfs;
     const std::string guest = wide ? pathFromWide(call.wstr(0)) : pathFromCp932(call.str(0), api);
     const std::uint32_t access = call.u32(1);
     const std::uint32_t share = call.u32(2);
@@ -628,6 +1033,7 @@ void createFile(X86& cpu, ShimCall& call, bool wide) {
     //   影子目录（已有文件先 copy-up），没有时保持旧行为（安装树，下面 `logWriteTarget` 打警告）。
     //   写意图 = 要写位，或 disposition 会创建 / 截断文件；`OPEN_EXISTING` + 只读 = 纯读。
     const bool write_intent = want_write || disposition != kOpenExisting;
+    if (vt) vprobe.f.write_intent = write_intent ? 1u : 0u;
     std::string host;
     std::string why;
     bool install_tree = false;
@@ -642,6 +1048,10 @@ void createFile(X86& cpu, ShimCall& call, bool wide) {
         resolved = resolveGuest(cpu, guest, &host, &why, must_exist, /*resolve_case=*/true);
     }
     if (!resolved) {
+        if (vt) {
+            vprobe.f.resolve_fail = 1;
+            vprobe.mark(&vfstime::Span::resolve);
+        }
         if (saveTraceEnabled() && isSaveTracePath(guest)) {
             saveTrace("CreateFileA \"%s\" FAILED disp=%u why=%s", guest.c_str(), disposition,
                       why.c_str());
@@ -655,12 +1065,78 @@ void createFile(X86& cpu, ShimCall& call, bool wide) {
         call.result = kInvalidHandleValue;
         return;
     }
+    if (vt) {
+        vprobe.f.resolve_ok = 1;
+        vprobe.mark(&vfstime::Span::resolve);
+    }
+
+    // ★ C7：只读安装树**内容缓存**的判定 —— **按性质**，⛔ 不看文件名 / 扩展名 / 目录名：
+    //   ① 纯读（`dwDesiredAccess` 没有写位，含 APPEND）；② `OPEN_EXISTING`（不会创建 / 截断）；
+    //   ③ 写覆盖层启用（= 安装树只读这条既有前提成立）；④ 解析结果在安装树之下（影子命中 / 特殊
+    //   目录 / `--exe` overlay 都不缓存 —— 它们不是"运行期不变的安装树"）。
+    const bool cache_eligible = want_read && !want_write && !want_append &&
+                                disposition == kOpenExisting && cpu.vfs->writeOverlayEnabled() &&
+                                cpu.vfs->readCacheEnabled() && cpu.vfs->isInstallTreePath(host);
+    if (cache_eligible) {
+        // 命中 ⇒ **跳过** `fs::exists` / `fs::is_directory` / 宿主 open；共享冲突判据仍按原样跑
+        // （语义红线：错误码 32 不能变 —— 缓存只省"代价"，⛔ 不改"判据"）。
+        std::shared_ptr<const void> cookie;
+        Vfs::ReadCacheEntryView view;
+        if (cpu.vfs->readCacheLookup(host, &cookie, &view)) {
+            if (vt) {
+                vprobe.f.cache_hit = 1;
+                vprobe.mark(&vfstime::Span::cache);  // 查找代价（含那次校验 stat）
+            }
+            if (shareViolation(cpu, host, access_mask, share, 0)) {
+                if (vt) {
+                    vprobe.f.share = 1;
+                    vprobe.mark(&vfstime::Span::share);
+                }
+                pathFailure(cpu, api, kErrSharingViolation, guest,
+                            "新请求的访问位/共享位与同一路径上已打开句柄的共享模式冲突（双向判定）");
+                call.result = kInvalidHandleValue;
+                return;
+            }
+            if (vt) vprobe.mark(&vfstime::Span::share);
+            auto* st = new FileState{};
+            st->cached = std::move(cookie);
+            st->cached_data = view.data;
+            st->cached_size = view.size;
+            st->cached_pos = 0;  // 与 `_wfopen_s(rb)` 一样：新打开的位置在 0
+            st->host_path = host;
+            st->guest_path = guestFormOf(cpu, host, guest);
+            st->share_mode = share;
+            st->access_mask = access_mask;
+            st->readable = true;
+            st->writable = false;
+            const std::uint32_t h = cpu.handles->add(HandleKind::File, st->guest_path.c_str(), st);
+            HandleEntry* entry = cpu.handles->get(h);
+            if (!entry) {
+                delete st;
+                shimAbort("kernel32", api, "句柄表拒绝分配文件句柄（add 后立刻取不到 0x%08X）", h);
+            }
+            entry->destroy = &destroyFile;
+            if (vt) vprobe.mark(&vfstime::Span::insert);
+            call.result = h;
+            if (cpu.shims && cpu.shims->trace()) {
+                shimLog("kernel32", api, "0x%08X ⇒ \"%s\"（内容缓存命中，%llu 字节）", h, host.c_str(),
+                        static_cast<unsigned long long>(st->cached_size));
+            }
+            return;
+        }
+        if (vt) vprobe.f.cache_miss = 1;
+        if (vt) vprobe.mark(&vfstime::Span::cache);  // 未命中的查找代价（含那次校验 stat）
+    }
 
     std::error_code ec;
     const fs::path hp = pathFromUtf8(host);
     const bool exists = fs::exists(hp, ec) && !ec;
     ec.clear();
     const bool is_dir = fs::is_directory(hp, ec) && !ec;
+    if (vt) {
+        vprobe.mark(&vfstime::Span::exists);
+        vprobe.f.isdir = is_dir ? 1u : 0u;
+    }
     if (is_dir) {
         // 真机：不带 FILE_FLAG_BACKUP_SEMANTICS 打开目录 ⇒ ERROR_ACCESS_DENIED（偏差 3）
         pathFailure(cpu, api, kErrAccessDenied, guest, "目标是目录，CreateFile 打不开目录");
@@ -735,11 +1211,16 @@ void createFile(X86& cpu, ShimCall& call, bool wide) {
 
     // 共享冲突：**双向**判定，且 `access = 0` 不参与（见 shareViolation 的说明与偏差 2）
     if (shareViolation(cpu, host, access_mask, share, 0)) {
+        if (vt) {
+            vprobe.f.share = 1;
+            vprobe.mark(&vfstime::Span::share);
+        }
         pathFailure(cpu, api, kErrSharingViolation, guest,
                     "新请求的访问位/共享位与同一路径上已打开句柄的共享模式冲突（双向判定）");
         call.result = kInvalidHandleValue;
         return;
     }
+    if (vt) vprobe.mark(&vfstime::Span::share);
 
     // ★ 宿主 `FILE*` **一律用可读模式**打开：`GetFileSize` / `GetFileTime` / `SetFilePointer(Ex)`
     //   都要靠它 seek/tell；guest 可见的读/写权限由 `access_mask` 卡（见 readFile / writeFile）。
@@ -755,11 +1236,28 @@ void createFile(X86& cpu, ShimCall& call, bool wide) {
     }
     std::FILE* fp = openHostFile(host, mode);
     if (!fp) {
+        if (vt) {
+            vprobe.f.open_fail = 1;
+            vprobe.mark(&vfstime::Span::open);
+        }
         const int e = errno;
         pathFailure(cpu, api, errnoToWin32(e), guest,
                     std::string("宿主打开失败（") + mode + "，errno=" + std::to_string(e) + "）");
         call.result = kInvalidHandleValue;
         return;
+    }
+    if (vt) {
+        vprobe.f.open_ok = 1;
+        vprobe.mark(&vfstime::Span::open);
+    }
+    // ★ C7：这次是**未命中** ⇒ 顺手把内容放进缓存（下一次同路径的只读 OPEN_EXISTING 直接命中）。
+    //   ⚠ 只对够格的调用做（`cache_eligible`）；写 / 探测 / 影子一律不碰。小文件整块进堆
+    //   （≤ 1 MiB），大文件只读 mmap（不读内容）。`fp` 的位置由 store 自己恢复。
+    if (cache_eligible) {
+        std::shared_ptr<const void> cookie;
+        Vfs::ReadCacheEntryView view;
+        (void)cpu.vfs->readCacheStore(host, fp, &cookie, &view);
+        if (vt) vprobe.mark(&vfstime::Span::cache);
     }
     // ★ C6 失效点：这一打开**新建**了文件（`exists` 是解析后、打开前的宿主事实）⇒ 旧的
     //   负解析结论（[notfound] / [notdir]）作废。截断已有文件不改存在性 ⇒ 不需要。
@@ -783,6 +1281,7 @@ void createFile(X86& cpu, ShimCall& call, bool wide) {
         shimAbort("kernel32", api, "句柄表拒绝分配文件句柄（add 后立刻取不到 0x%08X）", h);
     }
     entry->destroy = &destroyFile;
+    if (vt) vprobe.mark(&vfstime::Span::insert);
     call.result = h;
     if (saveTraceEnabled() && isSaveTracePath(st->guest_path)) {
         saveTrace("CreateFileA \"%s\" access=0x%08X share=0x%08X disp=%u want(read=%d,write=%d) "
@@ -808,6 +1307,36 @@ void shimCreateFileW(X86& cpu, ShimCall& call) { createFile(cpu, call, true); }
 void readFile(X86& cpu, ShimCall& call) {
     const char* api = "ReadFile";
     requireHandles(cpu, api);
+    // ★ 诊断：整次 ReadFile 的墙钟 + 其中宿主读的墙钟（缺省档零开销；见 vfstime 段）。
+    struct ReadProbe {
+        bool on = vfstime::on();
+        std::uint64_t t0 = 0;
+        std::uint64_t t = 0;
+        std::uint64_t host = 0;
+        std::int64_t off = -1;
+        ReadProbe() {
+            if (on) t0 = t = vfstime::nowNs();
+        }
+        void markHost() {
+            if (!on) return;
+            const std::uint64_t now = vfstime::nowNs();
+            host += now - t;
+            t = now;
+        }
+        ~ReadProbe() {
+            if (!on) return;
+            const std::uint64_t total = vfstime::nowNs() - t0;
+            vfstime::Totals& a = vfstime::state().all;
+            ++a.read_calls;
+            a.read_ns += total;
+            a.read_host_ns += host;
+            if (off == 0) {
+                ++a.first_read_calls;
+                a.first_read_ns += total;
+                a.first_read_host_ns += host;
+            }
+        }
+    } rprobe;
     FileState* st = fileOf(cpu, call.u32(0), api);
     if (!st) {
         call.result = 0;
@@ -841,6 +1370,34 @@ void readFile(X86& cpu, ShimCall& call) {
     requireCommitted(cpu, buf, n, api, "lpBuffer");
     if (out_ea != 0) requireCommitted(cpu, out_ea, 4, api, "lpNumberOfBytesRead");
 
+    // ★ C7：内容缓存的句柄 ⇒ 直接从条目 `memcpy`（零系统调用）。
+    //   语义与 `fread` 逐位一致：位置在 0 / 中途都只搬 `min(n, size - pos)` 字节；越过 EOF ⇒ 0；
+    //   游标按实际搬走的字节推进；`got == 0` 不是错误（EOF 也是 TRUE + 0 字节）。
+    if (cachedHandle(*st)) {
+        const std::uint64_t pos = st->cached_pos;
+        const std::uint64_t left = pos < st->cached_size ? st->cached_size - pos : 0;
+        const std::size_t got = static_cast<std::size_t>(left < n ? left : n);
+        if (rprobe.on) rprobe.off = static_cast<std::int64_t>(pos);
+        if (got > 0) {
+            // ⚠ 必须走 `writeBytes`（它带 guest 写的记账），⛔ 不要自己 memcpy 到 `host(ea)`
+            //   —— 那会绕过 `lift_note_write`（与原来 `fread`→`writeBytes` 的路径不再等价）。
+            cpu.mem->writeBytes(buf, st->cached_data + pos, got);
+            st->cached_pos = pos + got;
+        }
+        rprobe.markHost();
+        if (saveTraceEnabled() && isSaveTracePath(st->guest_path)) {
+            saveTrace("ReadFile \"%s\" off=%lld len=%zu got=%zu cur=%lld（内容缓存）",
+                      st->guest_path.c_str(), static_cast<long long>(pos), n, got,
+                      static_cast<long long>(st->cached_pos));
+        }
+        if (out_ea != 0) cpu.mem->wr32(out_ea, static_cast<std::uint32_t>(got));
+        if (cpu.windows != nullptr) {
+            input::deliverFileRead(*cpu.windows, InputPoint::FileRead);
+        }
+        call.result = 1;
+        return;
+    }
+
     // C 标准：输出 → 输入之间必须有一个定位函数（否则是未定义行为）
     if (seekFile64(st->fp, 0, SEEK_CUR) != 0) {
         cpu.shim.last_error = kErrReadFault;
@@ -850,8 +1407,10 @@ void readFile(X86& cpu, ShimCall& call) {
     }
     std::vector<std::uint8_t> tmp(n, 0);
     const std::int64_t off_before = tellFile64(st->fp);
+    if (rprobe.on) rprobe.off = off_before;
     const std::size_t got = std::fread(tmp.data(), 1, n, st->fp);
     const std::int64_t off_after = tellFile64(st->fp);
+    rprobe.markHost();
     if (saveTraceEnabled() && isSaveTracePath(st->guest_path)) {
         saveTrace("ReadFile \"%s\" off=%lld len=%zu got=%zu cur=%lld hex=%s",
                   st->guest_path.c_str(), static_cast<long long>(off_before), n, got,
@@ -950,6 +1509,11 @@ void shimFlushFileBuffers(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
+    // 缓存句柄：没有宿主缓冲要刷（旧路径对只读 `FILE*` 也是 `fflush` 成功）⇒ 按成功返回。
+    if (st->fp == nullptr) {
+        call.result = 1;
+        return;
+    }
     if (std::fflush(st->fp) != 0) {
         cpu.shim.last_error = kErrWriteFault;
         shimLog("kernel32", api, "宿主 flush 失败（%s）⇒ 失败", errnoText(errno).c_str());
@@ -972,7 +1536,7 @@ bool seekTarget(const FileState& st, std::int64_t distance, std::uint32_t method
     if (method == kFileBegin) {
         base = 0;  // 文档把 liDistanceToMove 当 unsigned；本实现按二补码还原（与真机实现一致）
     } else if (method == kFileCurrent) {
-        base = tellFile64(st.fp);
+        base = filePosition(st);
         if (base < 0) {
             *error = kErrInvalidParameter;
             *why = "宿主 tell 失败";
@@ -1066,7 +1630,7 @@ void shimSetFilePointer(X86& cpu, ShimCall& call) {
     }
     // 目标位置已由自己算好且非负：宿主 seek 只负责落位（失败仍按 errno 兜底，见下）
     errno = 0;
-    if (seekFile64(st->fp, pos, SEEK_SET) != 0) {
+    if (!setFilePosition(*st, pos)) {
         const int e = errno;
         cpu.shim.last_error = (e == EINVAL) ? kErrNegativeSeek : kErrInvalidParameter;
         shimLog("kernel32", api,
@@ -1126,7 +1690,7 @@ void shimSetFilePointerEx(X86& cpu, ShimCall& call) {
         return;
     }
     errno = 0;
-    if (seekFile64(st->fp, pos, SEEK_SET) != 0) {
+    if (!setFilePosition(*st, pos)) {
         const int e = errno;
         cpu.shim.last_error = (e == EINVAL) ? kErrNegativeSeek : kErrInvalidParameter;
         shimLog("kernel32", api,
@@ -2279,11 +2843,29 @@ void shimFindClose(X86& cpu, ShimCall& call) {
 
 }  // namespace
 
+// ★ 诊断（`LIFT_VFS_TIMING=1`）：帧边界（`kernel32_file.h` 的声明；宿主帧循环每帧调一次）。
+//   必须在匿名命名空间**外面**定义 —— 否则是内部链接，AOT 臂（另一个 TU）链接不到。
+void vfsTimingFrameBoundary(std::uint64_t frame) { vfstime::frameBoundary(frame); }
+
 std::FILE* liftFileStream(X86& cpu, std::uint32_t handle) {
     if (!cpu.handles) return nullptr;
     HandleEntry* e = cpu.handles->get(handle);
     if (!e || !e->used || e->kind != HandleKind::File || !e->payload) return nullptr;
-    return static_cast<FileState*>(e->payload)->fp;
+    FileState* st = static_cast<FileState*>(e->payload);
+    if (st->fp == nullptr && st->cached != nullptr) {
+        // ★ C7：内容缓存的句柄 + mmio（`mmioOpenA` 沿同一个 `FILE*` 读 RIFF）⇒ **按需**开一份
+        //   只读宿主流，并把游标对齐到缓存游标；此后这个句柄**回到 `FILE*` 语义**
+        //   （ReadFile / 定位都走 `fp`，与改动前逐位相同）。
+        //   为什么不是"让 mmio 读缓存"：mmio 的合同就是"沿 guest 文件句柄的同一个 `FILE*`"，
+        //   换一套接口等于给 mmio 加第二个实现 —— 而这条路径只发生在"句柄被 mmio 拿去"时
+        //   （音频 wav 头解析），一次 open 的代价可以接受。
+        st->fp = openHostFile(st->host_path, "rb");
+        if (st->fp != nullptr && st->cached_pos != 0) {
+            (void)seekFile64(st->fp, static_cast<std::int64_t>(st->cached_pos), SEEK_SET);
+        }
+        if (st->fp == nullptr) return nullptr;
+    }
+    return st->fp;
 }
 
 // =======================================================================================

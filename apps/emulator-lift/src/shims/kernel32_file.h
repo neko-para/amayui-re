@@ -19,4 +19,11 @@ struct X86;
 // 因为 mmio 自己会返回真实失败码）。
 std::FILE* liftFileStream(X86& cpu, std::uint32_t handle);
 
+// ★ 诊断（`LIFT_VFS_TIMING=1`）：按**帧**给 `CreateFileA` 的分段计时切组（见 kernel32_file.cpp
+//   的 `vfstime` 段）。`frame` = 宿主 Present 的帧号（与 `--profile-slow-frames` 的 `n=` 同一个计数）。
+//   关档时是一次静态 bool 判定 ⇒ 默认档零开销。
+//   为什么由宿主帧循环调用：shim 里读不到帧号，而"装载帧 vs 点击帧"的对比必须有帧边界；
+//   AOT 臂的帧边界唯一落在 `aot_run.cpp` 的 Present 收口处。
+void vfsTimingFrameBoundary(std::uint64_t frame);
+
 }  // namespace lift

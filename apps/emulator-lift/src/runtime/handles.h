@@ -77,6 +77,14 @@ public:
     //   防御）；⛔ 别把"索引里的每一条都必然有 payload"当成不变式。
     const std::vector<std::uint32_t>& liveDcs() const { return live_dcs_; }
 
+    // 活**文件**句柄的值（`kind == File` 且未关闭）。共享冲突判定（`kernel32_file.cpp` 的
+    // `shareViolation`）**只**遍历这一份，⛔ 不再按句柄值扫全表（槽位只增不减 ⇒ 那是 O(累计槽数)；
+    // 实测 SAVE11 一趟累计 5334 槽，每次 `CreateFileA` 白扫 ~10 µs）。
+    // ★ 维护点与 `live_dcs_` 同一套：`add`（File ⇒ push）、`close`（File ⇒ swap-pop）、`clear`。
+    // ★ 判据不变：索引只回答"**哪些文件句柄还活着**"，`shareViolation` 仍旧自己 `get()` +
+    //   校验 `kind == File && payload != nullptr`（索引里可能出现"先 releasePayload 再 close"的条目）。
+    const std::vector<std::uint32_t>& liveFiles() const { return live_files_; }
+
     // ---- 标准句柄三元组（`GetStdHandle` / `SetStdHandle` 的**进程级表**）----
     // ★ 文档：`SetStdHandle` 改的是进程级表，之后 `GetStdHandle` 要返回它；`GetFileType` /
     //   `GetConsoleMode` 要按句柄的真实种类回答（REQ-01M6K69K9HM3ETCDNMJWPHGXJC）。
@@ -120,6 +128,7 @@ private:
     std::vector<Slot> entries_;
     // ★ B：活 DC 的句柄值（派生索引；与"`entries_` 里 kind==GdiDc 且 used"的集合恒等）。
     std::vector<std::uint32_t> live_dcs_;
+    std::vector<std::uint32_t> live_files_;  // 活文件句柄（口径见上面的 `liveFiles()`）
     // ★ C：payload → 指向它的**活句柄数**（只在 `add` 里 +1、`releasePayload` 里 -1）。
     //   ⛔ 这是实现细节：任何断言都不许读它 / 断言它的值。语义判据是"关一个不销毁、
     //   最后一个才销毁"（`tests/sync_ext.cpp` 的 duplicate-handle + `tests/mechanism.cpp`

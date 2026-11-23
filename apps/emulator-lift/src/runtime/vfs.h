@@ -17,6 +17,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <list>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -50,10 +52,31 @@ struct HostFileTimes {
 // 失败（路径不存在 / SDL 不可用）⇒ false，调用方回退到 `std::filesystem::last_write_time`。
 bool hostFileTimes(const std::string& host_path, HostFileTimes* out);
 
+// =======================================================================================
+// ★ 诊断：**解析内部**的段查询 / 目录枚举 / 负缓存命中计数（`LIFT_VFS_TIMING=1` 门控）
+//
+//   为什么要有：`CreateFileA` 的 184 µs/次 里有多少是"路径解析"、其中又有多少是**整目录枚举**，
+//   只能从解析内部读数 —— 外面只能看到总时间。⛔ 只读计量：不改任何解析结论、不参与判据；
+//   关档时每次 `lookupSegment` 只多一次静态 bool 判定（不取时、不记账）。
+//   ⚠ 计数是**全进程**的（`find()` 也走 `lookupSegment`）⇒ 读数里包含目录枚举的份额，不是只有 `resolve`。
+// =======================================================================================
+struct VfsDiagCounters {
+    std::uint64_t segment_lookups = 0;   // 段查询次数（每次都先做一次精确 stat）
+    std::uint64_t dir_enumerations = 0;  // 整目录枚举次数（精确 stat 未命中后的回退）
+    std::uint64_t negative_hits = 0;     // 负解析缓存命中次数
+};
+bool vfsDiagOn();
+VfsDiagCounters vfsDiagCounters();
+
 // 按 **UTF-8 宿主路径**打开文件（Windows 上走 `_wfopen_s`）。
 // ★ 为什么不能直接用 `std::fopen`：MSVC 的窄 `fopen` 按 **ANSI 代码页**解释路径，而本仓路径一律
 //   UTF-8（游戏目录本身是日文名）⇒ Windows 上非 ASCII 的 `--exe` / `--lst` / `--game-dir` 会打不开。
 std::FILE* openHostFileUtf8(const std::string& host_path, const char* mode);
+
+// 一次宿主 stat：**同时**给出 size 与 write time（100 ns 自 1601），且只在"它是普通文件"时成功。
+// ★ 为什么不是两次 `std::filesystem` 调用：内容缓存的**每次命中**都要付这一笔（目标 2–5 µs），
+//   两次 stat 就翻倍；`SDL_GetPathInfo` 一次拿全（与 `hostFileTimes` 同一个来源 ⇒ 存与查的口径一致）。
+bool hostFileInfo(const std::string& host_path, std::uint64_t* size, std::uint64_t* write_100ns);
 
 // =======================================================================================
 // ★ guest 路径文本的编码 —— **唯一规则**（2026-11-05 缺陷单 `🐞S2 VFS 不认 guest 根前缀`）
@@ -224,6 +247,57 @@ public:
     bool isInstallTreePath(const std::string& host_path) const;
 
     // ===================================================================================
+    // ★ C7：**只读安装树内容缓存**（2026-11-23；口径见 vfs.cpp 的"内容缓存"段）
+    //
+    //   为什么：SAVE11 的读数把 `CreateFileA` 的 184 µs/次 拆开之后，**真正的 CreateFileW
+    //   （宿主 open）单独就是 ~200 µs/次**（AV / 文件系统固定成本），`resolve` 再占 ~110 µs/次
+    //   ⇒ 同一份只读内容被反复打开是纯浪费。写覆盖层启用时（有 `--appdata`）安装树按合同**只读**
+    //   （见 `invalidatePathCache` 上方的显式假设）⇒ 内容可以缓存，校验只要一次 stat。
+    //
+    //   语义边界（**这些是判据，不许"看起来还能跑"就放宽**）：
+    //   · 只对**读**生效，且调用方必须已经判定"纯读 + OPEN_EXISTING + 安装树之下"（判定在 shim，
+    //     因为它才看得到 `dwDesiredAccess` / `dwCreationDisposition`）；
+    //   · 每次命中都做**一次 stat**（size + write time）校验 —— 不一致就丢弃条目（安装树运行期
+    //     不变是既有假设，但"变了就重读"这条兜底不要省：省了就变成静默旧数据）；
+    //   · 条目内容**只读**：小文件整块进堆（计入字节预算），大文件 `mmap` 只读（不计入预算，
+    //     由 OS 页缓存管）；两者都**不复制**进 guest 内存 —— 复制由 shim 做（那是它的职责）。
+    //   · ⛔ 缓存键是**解析后的宿主路径**，⛔ 不是 guest 路径、⛔ 不按扩展名 / 目录名特判。
+    // ===================================================================================
+    struct ReadCacheEntryView {
+        std::uint64_t size = 0;
+        const std::uint8_t* data = nullptr;
+    };
+    // 预算（MiB；0 = **整个缓存关掉**，一次查找都不做）。缺省 256 MiB。
+    void setReadCacheBudgetMb(std::uint64_t mb) { read_cache_budget_mb_ = mb; }
+    std::uint64_t readCacheBudgetMb() const { return read_cache_budget_mb_; }
+    // 缓存是否可能生效（= 预算非 0）。⛔ 这**不是**"这条路径该不该缓存"的判据（那在 shim）。
+    bool readCacheEnabled() const { return read_cache_budget_mb_ != 0; }
+    // 命中判定：返回 true ⇒ `out` 是条目视图（只读，有效期 = 本次句柄持有期间）。
+    //   `cookie` 是条目所有权（引用 +1）—— 由调用方交给句柄，句柄销毁时自动释放。
+    //   校验失败（stat 不一致 / 文件不再是普通文件）⇒ 丢弃条目并返回 false。
+    bool readCacheLookup(const std::string& host_path, std::shared_ptr<const void>* cookie,
+                         ReadCacheEntryView* out) const;    // 把一条内容存进缓存（`fp` 是调用方刚打开的那个只读 `std::FILE*`；位置会被恢复）。
+    // 预算为 0 / 读失败 / 超预算 ⇒ 不存（`cookie` 空）。返回时 `out` 有效 ⇔ 返回 true。
+    bool readCacheStore(const std::string& host_path, std::FILE* fp,
+                        std::shared_ptr<const void>* cookie, ReadCacheEntryView* out) const;
+    // 在读视图里定位（`data` 为空的条目 = 不该走到这里）。
+    static void readCacheRelease(std::shared_ptr<const void>* cookie) { cookie->reset(); }
+    // 缓存计数器（诊断 / 守卫用）：命中 / 未命中（含校验失败）/ 存入 / 逐出 / 当前字节。
+    struct ReadCacheStats {
+        std::uint64_t hits = 0;
+        std::uint64_t misses = 0;
+        std::uint64_t stale = 0;
+        std::uint64_t stores = 0;
+        std::uint64_t evictions = 0;
+        std::uint64_t bytes = 0;       // 堆里的字节（计入预算的那部分）
+        std::uint64_t entries = 0;
+        std::uint64_t mapped_bytes = 0;  // mmap 条目的地址空间（**不计入**预算，只报出来）
+    };
+    ReadCacheStats readCacheStats() const;
+    // 清空（配置变化 / 守卫用）。
+    void clearReadCache();
+
+    // ===================================================================================
     // ★ C6：**读**路径**负**缓存（只缓存失败结论）的失效点。
     //
     //   失效口径 = **按代（generation）**：每次调用 `++path_cache_gen_`，旧代的条目在下次查找时
@@ -342,6 +416,33 @@ private:
     mutable std::mutex neg_mu_;
     mutable std::uint64_t path_cache_gen_ = 0;
     mutable std::unordered_map<NegativeKey, NegativeEntry, NegativeKeyHash> negative_cache_;
+
+    // ---- C7：只读内容缓存（实现在 vfs.cpp 的"内容缓存"段）----
+    //   ★ 条目 = {size, mtime, 内容}，键 = 解析后的宿主路径。LRU 顺序存在 `read_cache_lru_` 里
+    //     （**表头 = 最久未用**）；字节预算只算**堆**条目（mmap 条目单列，只报地址空间）。
+    //   ★ 内容所有权用 `shared_ptr<const void>`（cookie）：句柄在、内容就在 ⇒ 逐出只是从表里
+    //     摘掉，不会把别人正在读的映射 `unmap` 掉（那是 use-after-free）。
+    struct ReadCacheEntry {
+        std::shared_ptr<const void> cookie;
+        const std::uint8_t* data = nullptr;
+        std::uint64_t size = 0;
+        std::uint64_t mtime = 0;     // 存的时候的宿主 write time（100 ns 自 1601）
+        std::uint64_t heap_bytes = 0;  // 计入预算的字节（mmap 条目 = 0）
+        std::uint64_t map_bytes = 0;   // mmap 的地址空间（不计入预算，只报出来）
+        std::list<std::string>::iterator lru_pos;  // 在 `read_cache_lru_` 里的位置（O(1) 搬移）
+    };
+    using ReadCacheMap = std::unordered_map<std::string, ReadCacheEntry>;
+    // 从表里摘掉一个条目（调用方持锁）。`ReadCacheMap::iterator` 有效。
+    void dropReadCacheEntry(ReadCacheMap::iterator it) const;
+    mutable std::mutex cache_mu_;
+    mutable ReadCacheMap read_cache_;
+    mutable std::list<std::string> read_cache_lru_;  // 表头 = 最久未用，表尾 = 最近使用
+    mutable ReadCacheStats read_cache_stats_;
+    std::uint64_t read_cache_budget_mb_ = 256;       // 0 = 关
+    // 条目数上限（防御性：mmap 条目不占字节预算，但每个都占地址空间）。
+    static constexpr std::size_t kMaxReadCacheEntries = 512;
+    // 小文件阈值：≤ 它整块进堆，> 它走只读 mmap（"别让默认档吃光内存"）。
+    static constexpr std::uint64_t kReadCacheSmallMax = 1ull << 20;
 
     std::string game_dir_;
     std::string app_data_dir_;
