@@ -491,6 +491,11 @@ struct DeviceInfo {
     std::uint32_t clears = 0;
 };
 bool deviceInfo(X86& cpu, std::uint32_t object, DeviceInfo* out, std::string* why);
+// ★ 热路径专用（`SetRenderState` / `SetSamplerState`）：只解析**设备状态块 EA**，不填整份
+//   `DeviceInfo`（省掉 15 次 guest 读 + 72 B 拷贝 + 失败串构造）。判据与 `deviceInfo` **同一条链**：
+//   `cpu.com` 存在 → `userOf(object)` → `committed(state, 64)` → 状态块 magic == 'D9D1'。
+//   返回 false 时调用方应走慢路径 `deviceInfo` 取诊断串（它必然也失败 ⇒ 诊断逐字不变）。
+bool deviceStateOf(X86& cpu, std::uint32_t object, std::uint32_t* out);
 // ★ 诊断用（只读）：到目前为止**清过后缓冲**的次数。`Clear(TARGET)` 是"新的一帧开始"的机械判据，
 //   逐帧诊断拿它给 Draw 编号（`[draw] frame=`），比时间戳可靠。⛔ 不参与任何语义、不进基线。
 std::uint32_t frameSeq();

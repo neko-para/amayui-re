@@ -155,7 +155,7 @@ void shimReleaseImpl(X86 &cpu, ShimCall &call, const char *what) {
 // 宿主对象，槽位齐全本来就是为了不让引擎撞上 `comUnsupported` 停机器）。
 void shimNotImpl(X86 &cpu, ShimCall &call) {
     (void)cpu;
-    dshowLog(LogLevel::Debug, "%s 未实现 ⇒ E_NOTIMPL（this=0x%08X）", call.def ? call.def->name.c_str() : "?",
+    dshowLog(LogLevel::Debug, "%s 未实现 ⇒ E_NOTIMPL（this=0x%08X）", call.def ? call.def->name : "?",
              call.u32(0));
     call.result = kENotImpl;
 }

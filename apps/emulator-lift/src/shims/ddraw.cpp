@@ -87,6 +87,7 @@ constexpr std::uint32_t kDdedmRefreshRates = 0x00000001u;
 constexpr std::uint32_t kDescBytes2 = 124;
 
 void ddrawLog(const char* method, const char* fmt, ...) {
+    if (!logVisible(LogLevel::Info, LogGeneral)) return;  // 先判可见性再拼前缀（口径同 shims/d3d9.cpp）
     char prefix[256];
     std::snprintf(prefix, sizeof(prefix), "[ddraw] %s: ", method ? method : "?");
     va_list ap;

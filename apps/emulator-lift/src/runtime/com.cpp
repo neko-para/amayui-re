@@ -536,7 +536,7 @@ void ComRegistry::dispatch(X86& cpu, ShimCall& call) {
                      "  stub 0x%08X（%s!%s）\n"
                      "  this=0x%08X\n"
                      "  原因：这条 stub 不是本 ComRegistry 发的（或 registry 与 ShimRegistry 不是一对）\n",
-                     stub, call.def ? call.def->module.c_str() : "?", call.def ? call.def->name.c_str() : "?",
+                     stub, call.def ? call.def->module : "?", call.def ? call.def->name : "?",
                      call.u32(0));
         dumpRegisters(cpu, stderr);
         dumpGuestStack(cpu, stderr, 24);
@@ -571,8 +571,8 @@ void comTrampoline(X86& cpu, ShimCall& call) {
                      "\n=== COM thunk 被调到，但 cpu.com 为空 ===\n"
                      "  stub 0x%08X（%s!%s）\n"
                      "  原因：装配方没把 ComRegistry 接到 X86::com 上（见 com.h）\n",
-                     call.def ? call.def->stub_ea : 0, call.def ? call.def->module.c_str() : "?",
-                     call.def ? call.def->name.c_str() : "?");
+                     call.def ? call.def->stub_ea : 0, call.def ? call.def->module : "?",
+                     call.def ? call.def->name : "?");
         call.result = 0;
         cpu.running = false;
         cpu.stop_why = "cpu.com 为空";

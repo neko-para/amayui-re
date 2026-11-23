@@ -473,6 +473,18 @@ bool deviceInfo(X86& cpu, std::uint32_t object, DeviceInfo* out, std::string* wh
     return deviceInfoOfState(cpu, state, out, why);
 }
 
+// ★ 热路径：只回答"这个对象对应的设备状态块 EA 是多少、它是否仍然有效"。
+//   **判据链与 `deviceInfo` 逐条相同**（下面四条），只是不把 15 个字段读出来、也不构造 why。
+bool deviceStateOf(X86& cpu, std::uint32_t object, std::uint32_t* out) {
+    if (!cpu.com) return false;
+    const std::uint32_t state = cpu.com->userOf(object);
+    if (state == 0) return false;
+    if (!cpu.mem->committed(state, kDvBytes)) return false;
+    if (cpu.mem->rd32(state + kDvMagic) != kDvMagicValue) return false;
+    *out = state;
+    return true;
+}
+
 void destroyDeviceState(X86& cpu, std::uint32_t state) {
     if (state == 0 || !cpu.mem || !cpu.mem->committed(state, kDvBytes)) return;
     if (cpu.mem->rd32(state + kDvMagic) != kDvMagicValue) return;

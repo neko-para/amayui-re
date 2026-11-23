@@ -38,9 +38,9 @@ thread_local std::uint64_t t_shim_token_wait_count = 0;
 //     · 桩 EA 只由 `bind()` / `addRuntime()` 发号，且**发号后不再改**（`stub_ea` 是登记期写死的）；
 //     · 命中后仍要 `d->stub_ea == ea` **二次校验** ⇒ 表过期（夹具直写 `stub_ea`）时不会给出错答案，
 //       只会落回与改动前逐字相同的慢路径（并照常 `++stub_index_slow_`）。
-//   ⚠ 存 **id（下标）**而不是 `ShimDef*`：`defs_` 是 vector，`addRuntime` 会 push_back 扩容 ⇒
-//     缓存的指针会悬垂（`shims.h` 的既有警告）。取回一律走 `defByIdUnlocked`（与 `byStubEa`
-//     内部**同一条**解析路径）。
+//   ⚠ 存 **id（下标）**而不是 `ShimDef*`：`defs_` 现在是 `std::deque`（引用稳定），但仍按既有契约
+//     存 id —— 取回一律走 `defByIdUnlocked`（与 `byStubEa` 内部**同一条**解析路径），夹具直写
+//     `stub_ea` 时的二次校验也照旧。
 //   ⚠ `thread_local`：feeder 线程也可能走这条（`lift_shim` → `idForStub`）⇒ 一条线程一份，
 //     没有数据竞争；`0` 作空哨兵（桩 EA 恒非 0，见 `checkStubEaShape`）。
 thread_local std::uint32_t t_stub_memo_ea = 0;
@@ -221,10 +221,10 @@ void ShimRegistry::configureStubPage(std::uint32_t page, std::uint32_t slots) {
     }
     shim_page_ = page;
     shim_slots_ = slots;
-    // ★ 索引表按新桩页重建（此刻 `next_slot_ == 0` ⇒ 还没有任何 stub EA，表必然是空的）+ 预留容量：
-    //   bind 之后 `addRuntime` 还会追加 def；预留到"现有登记 + 槽位上限"⇒ 运行期**不再重分配**
-    //   （并发读 `defs_` 的读者 —— 例如 feeder 的 `idForStub` —— 不会看到被释放的旧缓冲）。
-    defs_.reserve(defs_.size() + shim_slots_);
+    // ★ 索引表按新桩页重建（此刻 `next_slot_ == 0` ⇒ 还没有任何 stub EA，表必然是空的）。
+    // ★ `defs_` 是 `std::deque`：运行期 `push_back` **不失效**已有元素的引用（也不需要 reserve，
+    //   deque 没有 reserve）⇒ 并发读 `defs_` 的读者（例如 feeder 的 `idForStub`）看不到被释放的
+    //   旧缓冲。⛔ 不要为了"预留容量"把它换回 `std::vector`（那会让 `ShimCallDef` 的字符串指针悬垂）。
     rebuildSlotIndexLocked();
 }
 
@@ -413,7 +413,7 @@ void ShimRegistry::checkStubEaShape(std::uint32_t stub_ea, std::uint32_t page, s
 
 std::vector<ShimDef> ShimRegistry::snapshot() const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    return defs_;
+    return std::vector<ShimDef>(defs_.begin(), defs_.end());
 }
 
 std::size_t ShimRegistry::size() const {
@@ -481,8 +481,7 @@ bool ShimRegistry::bind(GuestMemory& mem, const PeImage& img, std::uint32_t shim
     shim_slots_ = shim_slots;
     next_slot_ = slot;
     // ★ 槽位索引表（见 shims.h 的注释）：bind 是**唯一**批量发号的地方 ⇒ 在这里重建一次。
-    //   预留容量 = 现有登记 + 剩余槽位（之后 addRuntime 只会消耗这些槽位、不会再扩容）。
-    defs_.reserve(defs_.size() + (shim_slots_ - next_slot_));
+    //   `defs_` 是 `std::deque` ⇒ 之后的 `addRuntime` 追加不会让已有元素引用失效（无需 reserve）。
     rebuildSlotIndexLocked();
     return true;
 }
@@ -515,11 +514,21 @@ std::size_t ShimRegistry::importedCount() const {
     return n;
 }
 
-void ShimRegistry::prepareLocked(const ShimDef& src, ShimDef* out, bool* trace_on, bool* timing_on) {
+void ShimRegistry::prepareLocked(const ShimDef& src, ShimCallDef* out, bool* trace_on, bool* timing_on) {
     // ★ 临界区内容与改动前**逐字相同**（`invoke` 里那一段）：
-    //   拷一份 def + 快照两个开关 + 记 `called` / `call_count`。唯一差别 = 由调用方在**同一次**
+    //   取 def + 快照两个开关 + 记 `called` / `call_count`。唯一差别 = 由调用方在**同一次**
     //   加锁里也完成"取 def"（`invokeById`）⇒ 整条路径只付一次 uncontended 递归锁。
-    *out = src;
+    // ★ shim-fast #2：这里**只拷 POD 字段**（48 B），不再 `*out = src` 拷两个 `std::string`。
+    //   `module` / `name` 是 `defs_[id]` 里那两个字符串的**稳定指针**（`defs_` 是 deque，
+    //   且这两个字段登记后不再改写）⇒ 与拷贝字符串逐字等价（读的都是同一份不变字节）。
+    out->module = src.module.c_str();
+    out->name = src.name.c_str();
+    out->reason = src.reason;
+    out->fn = src.fn;
+    out->stub_ea = src.stub_ea;
+    out->id = src.id;
+    out->conv = src.conv;
+    out->argc = src.argc;
     *trace_on = trace_;
     *timing_on = timing_;
     if (out->id < defs_.size()) {
@@ -533,10 +542,11 @@ bool ShimRegistry::invokeById(X86& cpu, std::uint32_t id) {
     //   feeder 的 Lock/Unlock 会被它卡住）。只锁住"拷贝 def + 计数"，fn 在锁外跑。
     //   ★ lift-opt #2/#3（2026-11-22）：旧形状是"这里取一份 → 调 `invoke` 再取一份"，
     //     中间还多一次加锁（同一个 `recursive_mutex` 的两对 lock/unlock）。现在所有权直接传下去：
-    //     **一次锁 + 一次拷贝**。为什么语义不变：两次拷贝的源都是 `defs_[id]`（表在 fn 之前不会变，
+    //     **一次锁**。为什么语义不变：两次拷贝的源都是 `defs_[id]`（表在 fn 之前不会变，
     //     `fn` 里即使 `addRuntime` 也只 push_back），`called/call_count` 仍在锁内自增，
     //     `fn` 仍在锁外跑。
-    ShimDef local;
+    //   ★ shim-fast #2：`local` 是 `ShimCallDef`（POD）⇒ 只拷 48 B，不碰字符串。
+    ShimCallDef local;
     bool trace_on = false;
     bool timing_on = false;
     {
@@ -550,9 +560,9 @@ bool ShimRegistry::invokeById(X86& cpu, std::uint32_t id) {
 
 void ShimRegistry::invoke(X86& cpu, ShimDef& def) {
     // ★ 方案 C：**不要**在 fn 执行期间持有 shims 锁（主线程的 Present/D3D shim 可能很长，
-    //   feeder 的 Lock/Unlock 会被它卡住）。只锁住"拷贝 def + 计数"，fn 在锁外跑。
-    //   ⚠ `def` 可能**就是** `defs_[i]`（解释器臂的 `byStubEa` 返回指针）⇒ 必须先拷出来再记账。
-    ShimDef local;
+    //   feeder 的 Lock/Unlock 会被它卡住）。只锁住"取 def + 计数"，fn 在锁外跑。
+    //   ⚠ `def` 可能**就是** `defs_[i]`（解释器臂的 `byStubEa` 返回指针）⇒ 先在锁内取 POD 视图。
+    ShimCallDef local;
     bool trace_on = false;
     bool timing_on = false;
     {
@@ -562,31 +572,27 @@ void ShimRegistry::invoke(X86& cpu, ShimDef& def) {
     invokePrepared(cpu, local, trace_on, timing_on);
 }
 
-void ShimRegistry::invokePrepared(X86& cpu, ShimDef& local, bool trace_on, bool timing_on) {
+void ShimRegistry::invokePrepared(X86& cpu, const ShimCallDef& def, bool trace_on, bool timing_on) {
     const std::uint32_t ret_ea = cpu.mem->rd32(cpu.esp());
     ShimCall call;
     call.cpu = &cpu;
-    call.conv = local.conv;
-    call.argc = local.argc;
+    call.conv = def.conv;
+    call.argc = def.argc;
     call.ret_ea = ret_ea;
     // ★ 运行期注册的 thunk（COM vtable 槽）靠它认出"我是哪个槽"（见 shims.h 的 ShimCall::def）。
-    //   指向**栈上的拷贝**：fn 执行期间不会因为 addRuntime 扩容而悬垂。
-    call.def = &local;
-    call.stdcall_bytes = (local.conv == Conv::Stdcall) ? static_cast<std::uint32_t>(local.argc) * 4u : 0u;
+    //   指向**本函数栈上的 POD 视图**：fn 执行期间有效，与改动前指向栈上拷贝的寿命相同。
+    call.def = &def;
+    call.stdcall_bytes = (def.conv == Conv::Stdcall) ? static_cast<std::uint32_t>(def.argc) * 4u : 0u;
 
-    // ★ lift-opt #1（2026-11-22）：这里**不再**无条件拷 `trace_module` / `trace_name` 两份
-    //   `std::string`（SSO ⇒ 每次 2 段 memcpy）。它们只在下面的 `if (trace_on)` 分支里被读，
-    //   而 `local` 活到函数尾（`fn` 在 `local` 的地址上跑，`call.def = &local`）⇒ 直接用
-    //   `local.module.c_str()` / `local.name.c_str()` 与 `local.argc` 与改动前**逐字等价**。
-    //   `trace_id` 仍单独取：它是"**调用前**的 id"的具名别名（`local` 是栈上的拷贝 ⇒ 即使 `fn`
-    //   里 `addRuntime` 让 `defs_` 扩容也不受影响；两者本来就相同）。
-    const std::uint32_t trace_id = local.id;
+    // ★ lift-opt #1（2026-11-22）+ shim-fast #2（2026-11-23）：这里**不再**拷
+    //   `trace_module` / `trace_name` 两份 `std::string`：它们只在下面的 `if (trace_on)` 里被读，
+    //   而 `def` 活到函数尾 ⇒ 直接用 `def.module` / `def.name` / `def.argc`，与改动前逐字等价。
+    const std::uint32_t trace_id = def.id;
 
-    if (!local.fn) {
+    if (!def.fn) {
         // **响亮失败**：未实现的导入。这里是 A5 缺口的执行期落点（与条件 trap 共用停机点，
         // 见上面的 `trapUnimplemented`）。
-        trapUnimplemented(cpu, local.module.c_str(), local.name.c_str(), local.reason, ret_ea, local.stub_ea,
-                          local.conv, local.argc);
+        trapUnimplemented(cpu, def.module, def.name, def.reason, ret_ea, def.stub_ea, def.conv, def.argc);
         return;
     }
 
@@ -628,8 +634,8 @@ void ShimRegistry::invokePrepared(X86& cpu, ShimDef& local, bool trace_on, bool 
         // ★ M1：计时起点在**取到令牌之后**（等令牌的时间⛔ 不进 ns，见上方注释）。
         if (shim_max_wanted) time_begin = std::chrono::steady_clock::now();
         // ★ 给 `LIFT_WATCH` 的命中行带上"哪个 shim"（只在开档时生效；见上面的 WatchShimNameScope）。
-        const WatchShimNameScope watch_shim_name(watchOn(), local.name.c_str());
-        local.fn(cpu, call);
+        const WatchShimNameScope watch_shim_name(watchOn(), def.name);
+        def.fn(cpu, call);
     }
     if (shim_max_wanted) {
         const std::uint64_t ns = static_cast<std::uint64_t>(
@@ -647,10 +653,9 @@ void ShimRegistry::invokePrepared(X86& cpu, ShimDef& local, bool trace_on, bool 
 
     if (trace_on) {
         // ★ 确定性：只打参数原始字 + 返回值，不打时间、不打宿主地址
-        //   ⚠ lift-opt #1：这里读的是 `local`（栈上的拷贝，此刻仍活）⇒ 与改动前逐字等价。
-        std::fprintf(trace_out_, "[shim] %3u %s!%s(", trace_id, local.module.c_str(),
-                     local.name.c_str());
-        for (int i = 0; i < local.argc; ++i) {
+        //   ⚠ shim-fast #2：这里读的是 `def`（栈上的 POD 视图，此刻仍活）⇒ 与改动前逐字等价。
+        std::fprintf(trace_out_, "[shim] %3u %s!%s(", trace_id, def.module, def.name);
+        for (int i = 0; i < def.argc; ++i) {
             std::fprintf(trace_out_, "%s%08X", i ? "," : "", call.u32(i));
         }
         std::fprintf(trace_out_, ") -> %08X  ret=%08X\n", call.result, ret_ea);

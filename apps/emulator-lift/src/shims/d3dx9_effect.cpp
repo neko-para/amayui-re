@@ -108,6 +108,7 @@ float rdGuestF32(X86& cpu, std::uint32_t ea) {
 
 // 日志前缀与 d3dx9.cpp 同形（`[d3dx9] <what>: `）
 void fxLog(const char* what, const char* fmt, ...) {
+    if (!logVisible(LogLevel::Info, LogD3dx9)) return;  // 先判可见性再拼前缀（口径同 shims/d3dx9.cpp）
     char prefix[256];
     std::snprintf(prefix, sizeof(prefix), "[d3dx9] %s: ", what ? what : "?");
     va_list ap;
@@ -117,6 +118,7 @@ void fxLog(const char* what, const char* fmt, ...) {
 }
 
 void fxWarn(const char* what, const char* fmt, ...) {
+    if (!logVisible(LogLevel::Warn, LogD3dx9)) return;  // 同上
     char prefix[256];
     std::snprintf(prefix, sizeof(prefix), "[d3dx9] %s: ", what ? what : "?");
     va_list ap;

@@ -115,7 +115,7 @@ void WindowProfiler::finishBlocks(const BlockCache& cache) {
 }
 
 void WindowProfiler::finishShims(const ShimRegistry& shims) {
-    const std::vector<ShimDef>& defs = shims.all();
+    const auto& defs = shims.all();
     for (std::size_t i = 0; i < defs.size(); ++i) {
         const std::uint64_t before_ns = i < shim_ns_at_begin_.size() ? shim_ns_at_begin_[i] : 0;
         const std::uint64_t before_calls = i < shim_calls_at_begin_.size() ? shim_calls_at_begin_[i] : 0;

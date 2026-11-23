@@ -154,6 +154,10 @@ constexpr std::uint32_t kVec3Bytes = 12u;              // D3DXVECTOR3 = 3 个 fl
 constexpr std::uint32_t kMatrixBytes = 64u;            // D3DXMATRIX = 16 个 float
 
 void spriteLog(const char* what, const char* fmt, ...) {
+    // ★ 先判可见性、再拼前缀（口径同 `shims/d3d9.cpp`）：`spriteLog` 在 Begin/End/Draw 的
+    //   热路径上每次调用都走，默认 `warn` 下不可见 ⇒ 旧形状每次白做一次 `snprintf`。
+    //   ⚠ `spriteWarn` **不**在这里加门：它先做限流计数（副作用），必须先跑完。
+    if (!logVisible(LogLevel::Info, LogD3dx9)) return;
     char prefix[256];
     std::snprintf(prefix, sizeof(prefix), "[d3dx9] %s: ", what ? what : "?");
     va_list ap;

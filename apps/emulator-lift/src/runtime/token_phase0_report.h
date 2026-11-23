@@ -12,6 +12,7 @@
 #pragma once
 
 #include <cstdio>
+#include <deque>
 #include <vector>
 
 namespace lift {
@@ -24,6 +25,6 @@ struct ShimDef;
 //   · `waithist`  = 主 + 其它角色的**等令牌**直方图（同五桶）；
 //   · `shimmax`   = 每个 shim 的**最长一次**宿主墙钟，top 8。
 // `shims` = `ShimRegistry::all()`（名字与 id 的唯一来源；⛔ 不在这里另建一张表）。
-void dumpTokenPhase0(std::FILE* out, const std::vector<ShimDef>& shims);
+void dumpTokenPhase0(std::FILE* out, const std::deque<ShimDef>& shims);
 
 }  // namespace lift

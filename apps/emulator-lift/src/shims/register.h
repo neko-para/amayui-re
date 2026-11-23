@@ -100,6 +100,11 @@ const char* dynamicExportAbsentReason(const char* module, const char* name);
 //   `shimAbort` 永远显示（Error 不受闸门影响），因为它是"该实现却做不到"的硬失败。
 inline void shimVPrintAt(LogLevel level, std::uint32_t category, const char* module, const char* name,
                          const char* fmt, va_list ap) {
+    // ★ 先判可见性，再拼前缀（与 `runtime/d3d9.cpp` / `d3d9_pipeline.cpp` 同一条口径）：
+    //   默认级别下 `shimLog`（Info）不可见，而它会被若干热 shim 每次调用都走到 ⇒
+    //   旧形状每次都白做一次 `snprintf`。`logV` 内部除了同一条 `logVisible` 没有别的副作用
+    //   （见 runtime/log.h）⇒ 这里提前返回与它自己过滤**逐字等价**。
+    if (!logVisible(level, category)) return;
     char prefix[320];
     std::snprintf(prefix, sizeof(prefix), "[shim] %s!%s: ", module ? module : "?",
                   name ? name : "?");

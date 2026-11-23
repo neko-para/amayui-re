@@ -70,6 +70,9 @@ constexpr std::uint8_t kIidIndexBuffer9[16] = {0x5E, 0xD6, 0x9D, 0x7C, 0xF7, 0xD
 constexpr std::uint32_t kLastDeviceSlotOffset = 0x1D8u;
 
 void d3d9Log(const char* method, const char* fmt, ...) {
+    // ★ 先判可见性、再拼前缀（口径同 `runtime/d3d9.cpp`）：`SetRenderState` 这类热路径每次成功
+    //   都调这里，默认 `warn` 下 Info 不可见 ⇒ 旧形状每次都白做一次 `snprintf`。
+    if (!logVisible(LogLevel::Info, LogD3d9)) return;
     char prefix[256];
     std::snprintf(prefix, sizeof(prefix), "[d3d9] %s: ", method ? method : "?");
     va_list ap;
@@ -81,6 +84,8 @@ void d3d9Log(const char* method, const char* fmt, ...) {
 // ★ **默认级别可见**的告警（`warn` 是默认日志级别；`d3d9Log` 是 Info，默认看不见）。
 //   用于"资源耗尽 / 状态块没能恢复"这类**本会静默**的事件（与流水线的 `pipeWarn` 同口径）。
 void d3d9Warn(const char* method, const char* fmt, ...) {
+    // 同上：`logVisible` 是唯一判据（Warn 默认可见 ⇒ 行为不变；分类过滤时省掉前缀拼接）。
+    if (!logVisible(LogLevel::Warn, LogD3d9)) return;
     char prefix[256];
     std::snprintf(prefix, sizeof(prefix), "[d3d9] %s: ", method ? method : "?");
     va_list ap;
@@ -397,6 +402,24 @@ bool requireDevice(X86& cpu, ShimCall& call, const char* method, d3d9::DeviceInf
     return true;
 }
 
+// ★ shim-fast #3（2026-11-23）：热路径（SetRenderState / SetSamplerState）只要 `state` EA。
+//   旧形状每次调用都填一份 `DeviceInfo`（15 次 guest 读 + 72 B 拷贝）并构造 `why`；
+//   现在只走 `d3d9::deviceStateOf`（与 `deviceInfo` 同一条判据链，见 runtime/d3d9.cpp）。
+//   **失败路径**再走一次 `deviceInfo` 拼诊断串 —— 它必然也失败 ⇒ 停机文本与改动前逐字相同。
+bool requireDeviceState(X86& cpu, ShimCall& call, const char* method, std::uint32_t* out) {
+    const std::uint32_t self = call.u32(0);
+    if (d3d9::deviceStateOf(cpu, self, out)) return true;
+    d3d9::DeviceInfo dev;
+    std::string why;
+    if (!d3d9::deviceInfo(cpu, self, &dev, &why)) {
+        d3d9Trap(cpu, method, "%s", why.c_str());
+    } else {
+        // 理论上到不了（两条判定链逐条相同）；真到了也⛔不静默返回成功。
+        d3d9Trap(cpu, method, "D3D9：设备对象 0x%08X 的状态块不可用", self);
+    }
+    return false;
+}
+
 void shimGetDeviceCaps(X86& cpu, ShimCall& call) {
     const std::uint32_t self = call.u32(0);
     const std::uint32_t caps_ea = call.u32(1);
@@ -695,15 +718,15 @@ void shimMultiplyTransform(X86& cpu, ShimCall& call) {
 }
 
 void shimSetRenderState(X86& cpu, ShimCall& call) {
-    d3d9::DeviceInfo dev;
-    if (!requireDevice(cpu, call, "IDirect3DDevice9::SetRenderState(+0xE4)", &dev)) {
+    std::uint32_t state_ea = 0;
+    if (!requireDeviceState(cpu, call, "IDirect3DDevice9::SetRenderState(+0xE4)", &state_ea)) {
         call.result = d3d9::kInvalidCall;
         return;
     }
     const std::uint32_t state = call.u32(1);
     const std::uint32_t value = call.u32(2);
     std::string why;
-    const std::uint32_t hr = d3d9::setRenderState(cpu, dev.state, state, value, &why);
+    const std::uint32_t hr = d3d9::setRenderState(cpu, state_ea, state, value, &why);
     if (hr != d3d9::kOk) {
         d3d9Log("SetRenderState", "State=%u Value=0x%X 失败：%s", state, value, why.c_str());
     } else {
@@ -723,8 +746,8 @@ void shimGetRenderState(X86& cpu, ShimCall& call) {
 }
 
 void shimSetSamplerState(X86& cpu, ShimCall& call) {
-    d3d9::DeviceInfo dev;
-    if (!requireDevice(cpu, call, "IDirect3DDevice9::SetSamplerState(+0x114)", &dev)) {
+    std::uint32_t state_ea = 0;
+    if (!requireDeviceState(cpu, call, "IDirect3DDevice9::SetSamplerState(+0x114)", &state_ea)) {
         call.result = d3d9::kInvalidCall;
         return;
     }
@@ -732,7 +755,7 @@ void shimSetSamplerState(X86& cpu, ShimCall& call) {
     const std::uint32_t type = call.u32(2);
     const std::uint32_t value = call.u32(3);
     std::string why;
-    const std::uint32_t hr = d3d9::setSamplerState(cpu, dev.state, stage, type, value, &why);
+    const std::uint32_t hr = d3d9::setSamplerState(cpu, state_ea, stage, type, value, &why);
     if (hr != d3d9::kOk) d3d9Log("SetSamplerState", "Stage=%u Type=%u 失败：%s", stage, type, why.c_str());
     else d3d9Log("SetSamplerState", "Stage=%u Type=%u ⇒ 0x%X", stage, type, value);
     call.result = hr;
@@ -1136,6 +1159,7 @@ void shimDrawIndexedPrimitiveUP(X86& cpu, ShimCall& call) {
 //   ⛔ 不按记忆编 GUID（真要 QI 时先取证）。
 // ---------------------------------------------------------------------------------------
 void d3d9LogDebug(const char* method, const char* fmt, ...) {
+    if (!logVisible(LogLevel::Debug, LogD3d9)) return;  // 先判可见性再拼前缀（同上）
     char prefix[256];
     std::snprintf(prefix, sizeof(prefix), "[d3d9] %s: ", method ? method : "?");
     va_list ap;

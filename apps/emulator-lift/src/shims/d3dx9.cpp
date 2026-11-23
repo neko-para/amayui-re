@@ -53,6 +53,7 @@ constexpr std::uint8_t kIidUnknown[16] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x
                                           0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46};
 
 void d3dxWarn(const char* method, const char* fmt, ...) {
+    if (!logVisible(LogLevel::Warn, LogD3dx9)) return;  // 先判可见性再拼前缀（口径同 shims/d3d9.cpp）
     char prefix[256];
     std::snprintf(prefix, sizeof(prefix), "[d3dx9] %s: ", method ? method : "?");
     va_list ap;
@@ -62,6 +63,8 @@ void d3dxWarn(const char* method, const char* fmt, ...) {
 }
 
 void d3dxLog(const char* method, const char* fmt, ...) {
+    // ★ 先判可见性、再拼前缀：`d3dxLog` 在若干 hot 路径上每次调用都走（默认 warn 下不可见）。
+    if (!logVisible(LogLevel::Info, LogD3dx9)) return;
     char prefix[256];
     std::snprintf(prefix, sizeof(prefix), "[d3dx9] %s: ", method ? method : "?");
     va_list ap;
@@ -1305,22 +1308,24 @@ void shimD3DXCreateTexture(X86& cpu, ShimCall& call) {
 // D3DX math（本线只实现**确定能写对**的那几条；其余仍是 gap 里的 loud trap）
 // ★ D3DXMATRIX = 16 个 float，行主序；D3DX 用**行向量**约定（v' = v * M）。
 // ---------------------------------------------------------------------------------------
-float rdF(X86& cpu, std::uint32_t ea) {
-    const std::uint32_t bits = cpu.mem->rd32(ea);
-    float f = 0.0f;
-    std::memcpy(&f, &bits, sizeof(f));
-    return f;
+// ★ shim-fast #4（2026-11-23）：这些 math shim 的 guest 访问全部**先一次 `committed(n)`、再整块搬**。
+//   旧形状是逐 float 的 `rd32`/`wr32`（`D3DXMatrixMultiply` = 32 次读 + 16 次写），每次都要
+//   设 `g_access` + 走一遍写观察门；现在一次 `readBytes`/`writeBytes`（与 guest 同布局的小端 float）。
+//   ⚠ 调用方**必须**已经对整段做过 `committed(ea, bytes)`（下面每个函数都是这样）。
+void readMat(X86& cpu, std::uint32_t ea, float out[16]) {
+    cpu.mem->readBytes(ea, out, 64);
 }
-void wrF(X86& cpu, std::uint32_t ea, float v) {
-    std::uint32_t bits = 0;
-    std::memcpy(&bits, &v, sizeof(bits));
-    cpu.mem->wr32(ea, bits);
+void readVec3(X86& cpu, std::uint32_t ea, float out[3]) {
+    cpu.mem->readBytes(ea, out, 12);
 }
-// 把 GLM 矩阵按 D3DX 的 16-float 布局写回 guest（⛔ guest ABI 不变）
+void wrVec3(X86& cpu, std::uint32_t ea, const float v[3]) {
+    cpu.mem->writeBytes(ea, v, 12);
+}
+// 把 GLM 矩阵按 D3DX 的 16-float 布局写回 guest（⛔ guest ABI 不变）。
 void wrMat(X86& cpu, std::uint32_t ea, const math::Mat4& m) {
     float d3d[16];
     math::toD3DLayout(m, d3d);
-    for (int i = 0; i < 16; ++i) wrF(cpu, ea + static_cast<std::uint32_t>(i) * 4u, d3d[i]);
+    cpu.mem->writeBytes(ea, d3d, sizeof(d3d));
 }
 float u32ToFloat(std::uint32_t bits) {
     float f = 0.0f;
@@ -1340,10 +1345,8 @@ void shimD3DXMatrixMultiply(X86& cpu, ShimCall& call) {
     }
     float a_in[16];
     float b_in[16];
-    for (int i = 0; i < 16; ++i) {
-        a_in[i] = rdF(cpu, a_ea + static_cast<std::uint32_t>(i) * 4u);
-        b_in[i] = rdF(cpu, b_ea + static_cast<std::uint32_t>(i) * 4u);
-    }
+    readMat(cpu, a_ea, a_in);
+    readMat(cpu, b_ea, b_in);
     // ★ 唯一的适配点：D3DX 的 A*B（行向量）在 GLM 里是 B^T*A^T ⇒ multiplyD3D 内部反转顺序。
     const math::Mat4 product = math::multiplyD3D(math::fromD3DLayout(a_in), math::fromD3DLayout(b_in));
     wrMat(cpu, out_ea, product);
@@ -1390,12 +1393,13 @@ void shimD3DXVec4Transform(X86& cpu, ShimCall& call) {
         return;
     }
     float v[4];
-    for (int i = 0; i < 4; ++i) v[i] = rdF(cpu, v_ea + static_cast<std::uint32_t>(i) * 4u);
     float m_in[16];
-    for (int i = 0; i < 16; ++i) m_in[i] = rdF(cpu, m_ea + static_cast<std::uint32_t>(i) * 4u);
+    cpu.mem->readBytes(v_ea, v, sizeof(v));
+    readMat(cpu, m_ea, m_in);
     // v' = v*M（行向量）⇒ GLM 的 M^T * v；同一个适配点也供内部 T&L / Sprite 用。
     const math::Vec4 out = math::transformVec4D3D(math::fromD3DLayout(m_in), math::Vec4(v[0], v[1], v[2], v[3]));
-    for (int i = 0; i < 4; ++i) wrF(cpu, out_ea + static_cast<std::uint32_t>(i) * 4u, out[i]);
+    const float out4[4] = {out[0], out[1], out[2], out[3]};
+    cpu.mem->writeBytes(out_ea, out4, sizeof(out4));
     call.result = out_ea;
 }
 
@@ -1432,11 +1436,9 @@ void shimD3DXMatrixLookAtLH(X86& cpu, ShimCall& call) {
         return;
     }
     float eye[3], at[3], up[3];
-    for (int i = 0; i < 3; ++i) {
-        eye[i] = rdF(cpu, eye_ea + static_cast<std::uint32_t>(i) * 4u);
-        at[i] = rdF(cpu, at_ea + static_cast<std::uint32_t>(i) * 4u);
-        up[i] = rdF(cpu, up_ea + static_cast<std::uint32_t>(i) * 4u);
-    }
+    readVec3(cpu, eye_ea, eye);
+    readVec3(cpu, at_ea, at);
+    readVec3(cpu, up_ea, up);
     wrMat(cpu, out_ea, math::lookAtLH(eye, at, up));
     call.result = out_ea;
 }
@@ -1465,10 +1467,9 @@ void shimD3DXMatrixRotationAxis(X86& cpu, ShimCall& call) {
         return;
     }
     const float angle = u32ToFloat(call.u32(2));
-    const float x = rdF(cpu, axis_ea + 0);
-    const float y = rdF(cpu, axis_ea + 4);
-    const float z = rdF(cpu, axis_ea + 8);
-    wrMat(cpu, out_ea, math::rotationAxis(x, y, z, angle));
+    float axis[3];
+    readVec3(cpu, axis_ea, axis);
+    wrMat(cpu, out_ea, math::rotationAxis(axis[0], axis[1], axis[2], angle));
     call.result = out_ea;
 }
 
@@ -1494,12 +1495,11 @@ void shimD3DXVec3Normalize(X86& cpu, ShimCall& call) {
         call.result = 0;
         return;
     }
-    const float in[3] = {rdF(cpu, v_ea + 0u), rdF(cpu, v_ea + 4u), rdF(cpu, v_ea + 8u)};
+    float in[3];
+    readVec3(cpu, v_ea, in);
     float out[3];
     const float len = math::normalize3(in, out);  // 零向量 ⇒ (0,0,0)、长度 0（政策在 math 里唯一）
-    wrF(cpu, out_ea + 0u, out[0]);
-    wrF(cpu, out_ea + 4u, out[1]);
-    wrF(cpu, out_ea + 8u, out[2]);
+    wrVec3(cpu, out_ea, out);
     std::uint32_t bits = 0;
     std::memcpy(&bits, &len, 4);
     call.result = bits;
@@ -1535,24 +1535,20 @@ void shimD3DXMatrixDecompose(X86& cpu, ShimCall& call) {
         return;
     }
     float m_in[16];
-    for (int i = 0; i < 16; ++i) m_in[i] = rdF(cpu, m_ea + static_cast<std::uint32_t>(i) * 4u);
+    readMat(cpu, m_ea, m_in);
     math::Vec3 scale;
     math::Vec3 translation;
     math::Quat rot(1.0f, 0.0f, 0.0f, 0.0f);
     const bool ok = math::decomposeD3D(m_in, &scale, &rot, &translation);
     // scale + translation：两条路径都写（见上面 ②）
-    wrF(cpu, scale_ea + 0u, scale.x);
-    wrF(cpu, scale_ea + 4u, scale.y);
-    wrF(cpu, scale_ea + 8u, scale.z);
-    wrF(cpu, trans_ea + 0u, translation.x);
-    wrF(cpu, trans_ea + 4u, translation.y);
-    wrF(cpu, trans_ea + 8u, translation.z);
+    const float scale_out[3] = {scale.x, scale.y, scale.z};
+    const float trans_out[3] = {translation.x, translation.y, translation.z};
+    wrVec3(cpu, scale_ea, scale_out);
+    wrVec3(cpu, trans_ea, trans_out);
     if (ok) {
         // glm::quat 的 x/y/z/w 成员与 D3DXQUATERNION 的字段一一对应（见 math::decomposeD3D）
-        wrF(cpu, rot_ea + 0u, rot.x);
-        wrF(cpu, rot_ea + 4u, rot.y);
-        wrF(cpu, rot_ea + 8u, rot.z);
-        wrF(cpu, rot_ea + 12u, rot.w);
+        const float rot_out[4] = {rot.x, rot.y, rot.z, rot.w};
+        cpu.mem->writeBytes(rot_ea, rot_out, sizeof(rot_out));
         call.result = d3d9::kOk;
         return;
     }

@@ -170,6 +170,7 @@ enum : std::uint32_t {
 constexpr std::uint32_t kMaxDetailedBuffers = 32u;  // 超过这个数只记账、不再逐条打格式
 
 void dsLog(const char* method, const char* fmt, ...) {
+    if (!logVisible(LogLevel::Info, LogDsound)) return;  // 先判可见性再拼前缀（口径同 shims/d3d9.cpp）
     char prefix[256];
     std::snprintf(prefix, sizeof(prefix), "[dsound] %s: ", method ? method : "?");
     va_list ap;

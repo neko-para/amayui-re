@@ -1504,9 +1504,10 @@ const MUTATIONS = [
     file: 'apps/emulator-lift/src/runtime/shims.cpp',
     // ★ 2026-11-10 重定向（REQ-01M70KGDXSKDVK7MCJYFABXERH）：`shims.cpp` 割出去之后局部变量
     //   从 `def` 改成了 `local`（`const ShimDef local = …` 的栈上拷贝）⇒ 原 `from` 在现源码里 0 次。
-    //   施加点仍是**同一处**（弹参字节数的唯一算法），守卫仍是 `shim-abi` 的 esp 平衡断言。
-    from: '    call.stdcall_bytes = (local.conv == Conv::Stdcall) ? static_cast<std::uint32_t>(local.argc) * 4u : 0u;',
-    to: '    call.stdcall_bytes = (local.conv == Conv::Stdcall) ? 0u : 0u;',
+    //   ★ 2026-11-23（shim-fast #2）：栈上拷贝改成 `ShimCallDef` POD 视图、变量名回到 `def` ⇒
+    //   再次重定向。施加点仍是**同一处**（弹参字节数的唯一算法），守卫仍是 `shim-abi` 的 esp 平衡断言。
+    from: '    call.stdcall_bytes = (def.conv == Conv::Stdcall) ? static_cast<std::uint32_t>(def.argc) * 4u : 0u;',
+    to: '    call.stdcall_bytes = (def.conv == Conv::Stdcall) ? 0u : 0u;',
     guard: 'ctest:shim-abi',
     ctest: 'shim-abi',
     buildDir: 'apps/emulator-lift/out',
@@ -4386,8 +4387,8 @@ const MUTATIONS = [
   //     判据抓住的；这条只动一个符号，红点唯一。
   {
     file: 'apps/emulator-lift/src/shims/d3dx9.cpp',
-    from: '        wrF(cpu, rot_ea + 8u, rot.z);',
-    to: '        wrF(cpu, rot_ea + 8u, -rot.z);  // 变异：四元数写共轭（z 取反）\n',
+    from: '        const float rot_out[4] = {rot.x, rot.y, rot.z, rot.w};',
+    to: '        const float rot_out[4] = {rot.x, rot.y, -rot.z, rot.w};  // 变异：四元数写共轭（z 取反）',
     guard: 'ctest:d3dx9',
     ctest: 'd3dx9',
     buildDir: 'apps/emulator-lift/out',
@@ -5521,6 +5522,19 @@ const MUTATIONS = [
       '`kD3dxSpriteVertexBias` 0.5 → 0（`ID3DXSprite::Draw` 的四角不再减半像素）⇒ ' +
       'GPU 臂 `d3dx9/sprite-vs-rhw-quad` 红（64 个 texel 里 63 个不等：整层 sprite 偏半像素）；' +
       '默认臂的 sprite 不写像素 ⇒ 只有真 GPU 臂看得见',
+  },
+  // shim-fast（2026-11-23）：删掉 `d3d9Log` 的可见性门（最容易发生的一次"优化回退"）。
+  //   守卫 = `tools/test/shim-fast-shape.test.mjs`（源码形态，`node --test`，不编 C++ ⇒ 便宜）。
+  //   红的是"函数体里 logVisible 必须在 snprintf 之前"那一条：默认 warn 下 Info 不可见，
+  //   没有门 ⇒ 每次 `SetRenderState` 又白做一次前缀 snprintf（读数见 `.tmp/shim-fast/report.md`）。
+  {
+    file: 'apps/emulator-lift/src/shims/d3d9.cpp',
+    from: '    if (!logVisible(LogLevel::Info, LogD3d9)) return;\n',
+    to: '',
+    guard: 'tools/test/shim-fast-shape.test.mjs',
+    what:
+      '删掉 `shims/d3d9.cpp` 的 `d3d9Log` 可见性门（默认档每次 SetRenderState 又白拼一次日志前缀）⇒ ' +
+      '`shim-fast-shape` 的"logVisible 在 snprintf 之前"断言红',
   },
 ];
 

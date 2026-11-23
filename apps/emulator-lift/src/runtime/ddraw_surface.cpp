@@ -85,6 +85,7 @@ constexpr std::uint32_t kSfMagicValue = 0x31534444u;  // 'DDS1'
 // P1→P2 的字体 DC 接缝：GetDC 直接用 P2 的 `gdiCreateDc` 建 DC、`fontAttachDcSurface` 绑像素
 // （runtime/font.h 的合同：hdc 必须是 GDI DC 句柄，否则 attach 会明确失败并打日志）。
 void ddrawLog(const char* what, const char* fmt, ...) {
+    if (!logVisible(LogLevel::Info, LogGeneral)) return;  // 先判可见性再拼前缀（口径同 shims/d3d9.cpp）
     char prefix[256];
     std::snprintf(prefix, sizeof(prefix), "[ddraw] %s: ", what ? what : "?");
     va_list ap;
@@ -95,6 +96,7 @@ void ddrawLog(const char* what, const char* fmt, ...) {
 
 // 契约级失败 / "资源没回收"这类**必须在默认级别看得见**的用它（Info 要 --verbose；同形：d3d9Warn）。
 void ddrawWarn(const char* what, const char* fmt, ...) {
+    if (!logVisible(LogLevel::Warn, LogGeneral)) return;  // 同上
     char prefix[256];
     std::snprintf(prefix, sizeof(prefix), "[ddraw] %s: ", what ? what : "?");
     va_list ap;

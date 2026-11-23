@@ -617,7 +617,7 @@ void Machine::flushFrameTrace() {
     frame_trace_last_insns_ = cpu_.insns;
 
     // ---- 宿主 shim（含 Present / Sprite 的像素循环 / GPU submit）----
-    const std::vector<ShimDef>& defs = shims_.all();
+    const auto& defs = shims_.all();
     if (frame_trace_prev_shim_ns_.size() < defs.size()) frame_trace_prev_shim_ns_.resize(defs.size(), 0);
     if (frame_trace_prev_shim_calls_.size() < defs.size()) frame_trace_prev_shim_calls_.resize(defs.size(), 0);
     struct ShimRow {

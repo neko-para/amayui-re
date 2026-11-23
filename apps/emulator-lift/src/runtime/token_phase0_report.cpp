@@ -21,7 +21,7 @@
 
 namespace lift {
 
-void dumpTokenPhase0(std::FILE* out, const std::vector<ShimDef>& shims) {
+void dumpTokenPhase0(std::FILE* out, const std::deque<ShimDef>& shims) {
     if (out == nullptr) return;
     const GuestToken::Phase0Readings mainr = guestToken().phase0Readings(GuestToken::kPhase0RoleMain);
     const GuestToken::Phase0Readings other = guestToken().phase0Readings(GuestToken::kPhase0RoleOther);

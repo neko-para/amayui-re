@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -21,7 +22,8 @@ namespace lift {
 
 struct X86;
 struct PeImage;
-struct ShimDef;  // ShimCall::def（定义在下面；这里只要指针）
+struct ShimDef;      // 注册项（含 std::string；只在注册 / 查询路径按值出现）
+struct ShimCallDef;  // 热路径的 POD 视图（定义在 ShimFn 之后）
 class GuestMemory;
 
 enum class Conv : std::uint8_t { Stdcall = 0, Cdecl, Varargs };
@@ -53,11 +55,12 @@ struct ShimCall {
     //   （见 kernel32_string.cpp）。⛔ 普通实现不要设它 —— 设了就绕过了调用约定。
     bool take_control = false;
 
-    // ★ 正在执行的**这一条登记**（module / name / stub_ea / id / reason）。
+    // ★ 正在执行的**这一条登记**（热路径 POD 视图：module / name / stub_ea / id / reason）。
     //   为什么要给 shim 看它：运行期注册的 thunk（`addRuntime` / COM vtable 槽）**共用同一个
     //   ShimFn**，函数指针本身分不出"我是哪个槽"；靠 `def->stub_ea` 回查注册表才能路由。
-    //   ⛔ 不要在 shim 里长期保存这个指针（`defs_` 是 vector，之后的 add/addRuntime 会让它失效）。
-    const ShimDef* def = nullptr;
+    //   ⛔ 不要在 shim 里长期保存这个指针：它指向 `invokePrepared` **栈上的 POD 视图**，
+    //      fn 返回即失效（与改动前指向栈上 `ShimDef` 拷贝的寿命逐字相同）。
+    const ShimCallDef* def = nullptr;
 
     // 读参数（i 从 0 起）
     std::uint32_t u32(int i) const;
@@ -73,6 +76,25 @@ struct ShimCall {
 };
 
 using ShimFn = void (*)(X86& cpu, ShimCall& call);
+
+// ★ 热路径的 **POD 视图**：`prepareLocked` 每次调用只拷下面这些字段（x64 上 48 B），
+//   ⛔ 不再按值拷 `ShimDef` 里的两个 `std::string`（旧形状里 `D3DXMatrixMultiply` 的 17 字符名
+//   > SSO ⇒ 每调用一次就 malloc / free 一次；其余名字也至少两段 memcpy）。
+//   `module` / `name` 指向登记项里的 `std::string::c_str()`：`defs_` 是 `std::deque`
+//   （`push_back` 不让已有元素的引用失效）且这两个字段登记后**不再改写** ⇒ 指针稳定。
+//   ⛔ 不要把 `defs_` 换回 `std::vector`：`push_back` 扩容会让这里缓存的字符串指针悬垂。
+//   ★ 为什么还留 `id` / `stub_ea`：它们与 `ShimDef` 同名同义，读者（trace / trap / COM 路由）
+//     一个字都不用改；`reason` 是失败路径才读的静态串。
+struct ShimCallDef {
+    const char* module = "";       // 稳定（见上）
+    const char* name = "";         // 稳定（见上）
+    const char* reason = nullptr;  // 未实现 / stub 的理由（只在失败路径读）
+    ShimFn fn = nullptr;
+    std::uint32_t stub_ea = 0;
+    std::uint32_t id = 0;
+    Conv conv = Conv::Stdcall;
+    int argc = 0;
+};
 
 struct ShimDef {
     std::string module;
@@ -120,8 +142,9 @@ public:
     // ★ **幂等**：同 (module, name) 已登记且**已有** stub_ea ⇒ 直接返回那一条（⛔ 绝不覆盖已有 stub EA）。
     //   这条对 COM 是必需的：同一种 iface 建第二个对象时方法名会重复，必须复用同一个 thunk。
     // ★ 槽位耗尽 / 没有桩页（bind 没跑过、也没 configureStubPage）⇒ 打一行到 stderr + 返回 nullptr。
-    // ⚠ 返回的 `ShimDef*` 在**下一次 add/addRuntime** 之后可能失效（`defs_` 是 std::vector）；
-    //   跨多次注册持有请存 `id`，再用 `byId()` / `byStubEa()` 取。
+    // ⚠ 返回的 `ShimDef*` 在**下一次 add/addRuntime** 之后仍然有效（`defs_` 现在是 `std::deque`，
+    //   `push_back` 不让已有元素引用失效）；但**已有条目会被原地改写**（`conv/argc/fn/stub_ea`），
+    //   ⇒ 跨多次注册仍请存 `id`，再用 `byId()` / `byStubEa()` 取（与改动前同一条建议）。
     // ⚠ 拿到 `stub_ea` 之后要 **`cpu.cache->installShim(def->stub_ea, def->id)`**，否则 guest 的
     //   `call [IAT]` / `call eax` 落到这个 EA 时会去**解码桩页字节**而不是走 shim。
     //   （`ComRegistry::createObject` 会自己装；裸 addRuntime 的调用方负责。）
@@ -158,7 +181,7 @@ public:
         return stub_index_slow_.load(std::memory_order_relaxed);
     }
     void resetStubIndexStats() const { stub_index_slow_.store(0, std::memory_order_relaxed); }
-    const std::vector<ShimDef>& all() const { return defs_; }
+    const std::deque<ShimDef>& all() const { return defs_; }
     // ★ 方案 C：给 feeder 的私有 BlockCache 预装 shim 块时用（拷贝，避免 defs_ 并发扩容）。
     std::vector<ShimDef> snapshot() const;
     std::size_t size() const;
@@ -179,10 +202,13 @@ private:
     //   为什么拆出来：旧形状里 `invokeById` 取一份 def 交给 `invoke`，`invoke` 再取一份
     //   ⇒ 每次 shim 调用付 **两把 `recursive_mutex` + 两次 `ShimDef` 拷贝**（每个 def 两个
     //   `std::string`）。现在"取 def + 记账"在**一次**加锁里完成（`prepareLocked`），
-    //   然后把所有权交给这里 ⇒ **一次锁 + 一次拷贝**。临界区内容一个字都没改。
-    void prepareLocked(const ShimDef& src, ShimDef* out, bool* trace_on, bool* timing_on);
-    void invokePrepared(X86& cpu, ShimDef& local, bool trace_on, bool timing_on);
-    std::vector<ShimDef> defs_;
+    //   然后把所有权交给这里 ⇒ **一次锁**。
+    // ★ 2026-11-23（shim-fast #2）：`prepareLocked` **只拷 POD 字段**（`ShimCallDef`，48 B），
+    //   两个 `std::string` 不再按值拷 —— `module` / `name` 改成指向 `defs_`（deque，引用稳定）
+    //   里那两个字符串的 `const char*`。记账（`called` / `call_count`）仍在锁内、逐字未改。
+    void prepareLocked(const ShimDef& src, ShimCallDef* out, bool* trace_on, bool* timing_on);
+    void invokePrepared(X86& cpu, const ShimCallDef& def, bool trace_on, bool timing_on);
+    std::deque<ShimDef> defs_;
     bool trace_ = false;
     bool timing_ = false;
     std::FILE* trace_out_ = stdout;
@@ -198,9 +224,9 @@ private:
     //   · `stub_ea` **只**由 bind() / addRuntime() 发号，形状恒为 `shim_page_ + slot*4`
     //     （登记期断言 `checkStubEaInPage` 把它从"观察"变成"前提"，违反即响亮停）；
     //   · 于是 `ea → slot` 是一次无符号减 + 一次移位，`slot → 登记项` 是**一次数组取**；
-    //   · ⛔ 表里存 **id / 下标，不存 `ShimDef*`**：`defs_` 是 std::vector，`addRuntime` 会追加
-    //     ⇒ 任何缓存的指针都会悬空。返回指针一律走 `defByIdUnlocked()`（与 `byId()` **同一条**
-    //     解析路径：一次边界检查 + `&defs_[id]`）。
+    //   · ⛔ 表里存 **id / 下标，不存 `ShimDef*`**：`defs_` 现在是 `std::deque`（引用稳定），
+    //     但"表里不存指针"是既有契约：返回指针一律走 `defByIdUnlocked()`（与 `byId()` **同一条**
+    //     解析路径：一次边界检查 + `&defs_[id]`），夹具直写 `stub_ea` 时也靠它重取。
     //   · 表长 = `shim_slots_`，在 configureStubPage / bind 时**定死**，运行期不再扩容 ⇒ 热路径
     //     读它不需要锁（读到旧值也不会错：命中后还要 `d->stub_ea == ea` 二次校验，不成立就走
     //     与旧实现逐字相同的线性扫描）。
