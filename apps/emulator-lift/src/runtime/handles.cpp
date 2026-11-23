@@ -47,6 +47,8 @@ std::uint32_t HandleTable::add(HandleKind kind, const char* name, void* payload,
     const std::uint32_t value = entries_.back().value;
     // ★ B：活 DC 索引（唯一 push 点）。★ C：payload 引用计数（唯一 +1 点）。
     if (kind == HandleKind::GdiDc) live_dcs_.push_back(value);
+    // ★ 活**文件**句柄索引（唯一 push 点；维护口径与 `live_dcs_` 逐字相同）。
+    if (kind == HandleKind::File) live_files_.push_back(value);
     if (payload != nullptr) ++payload_refs_[payload];
     return value;
 }
@@ -54,6 +56,7 @@ std::uint32_t HandleTable::add(HandleKind kind, const char* name, void* payload,
 void HandleTable::clear() {
     entries_.clear();
     live_dcs_.clear();      // ★ 派生索引必须跟着表一起清（⛔ 不许分叉）
+    live_files_.clear();    //   同上：留着已关闭的值 = `shareViolation` 白扫死槽
     payload_refs_.clear();  // ★ 引用计数同理：表没了，就没有"活句柄"了
 }
 
@@ -130,6 +133,16 @@ bool HandleTable::close(std::uint32_t h) {
             if (live_dcs_[i] != h) continue;
             live_dcs_[i] = live_dcs_.back();
             live_dcs_.pop_back();
+            break;
+        }
+    }
+    // ★ 活文件句柄索引的同一套 swap-pop（漏了 ⇒ `shareViolation` 会看到已关闭的值；
+    //   `get()` 兜得住，但那就退化成扫死槽 ⇒ 白付 O(累计槽数)）。
+    if (entry->kind == HandleKind::File) {
+        for (std::size_t i = 0; i < live_files_.size(); ++i) {
+            if (live_files_[i] != h) continue;
+            live_files_[i] = live_files_.back();
+            live_files_.pop_back();
             break;
         }
     }

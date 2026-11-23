@@ -5536,6 +5536,25 @@ const MUTATIONS = [
       '删掉 `shims/d3d9.cpp` 的 `d3d9Log` 可见性门（默认档每次 SetRenderState 又白拼一次日志前缀）⇒ ' +
       '`shim-fast-shape` 的"logVisible 在 snprintf 之前"断言红',
   },
+  // vfs-cache（2026-11-23）：只读安装树**内容缓存**的命中路径少搬 1 字节
+  //   （`.tmp/vfs-cache/report.md`；守卫 = `file-io` 的新用例 `vfs-read-cache-parity`）。
+  //   ★ 代表"命中返回的字节 / 长度与不缓存不一致"这一类错：**只有缓存命中那一趟**会红
+  //     （关档的同一段断言照旧绿）⇒ 红得很干净，不会把"缓存被关掉"误判成"守卫在测缓存"。
+  //   ★ 为什么是合法 C++：这条自检证明的是"命中少搬一字节会被点名"，⛔ 不是"文件被写坏就报错"。
+  {
+    file: 'apps/emulator-lift/src/shims/kernel32_file.cpp',
+    from: '        const std::size_t got = static_cast<std::size_t>(left < n ? left : n);\n',
+    to:
+      '        std::size_t got = static_cast<std::size_t>(left < n ? left : n);\n' +
+      '        if (got > 0) --got;  // 变异：内容缓存命中少返回 1 字节\n',
+    guard: 'ctest:file-io',
+    ctest: 'file-io',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-file-io',
+    what:
+      '只读安装树内容缓存的命中路径**少搬 1 字节**（`ReadFile` 的 `got` 减 1）⇒ `file-io` 的 ' +
+      '`vfs-read-cache-parity` 红（命中那趟 nread=255 / 字节不等；关档的同一段断言仍绿）',
+  },
 ];
 
 let mutationRunSeq = 0;

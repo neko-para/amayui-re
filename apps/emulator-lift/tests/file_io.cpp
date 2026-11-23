@@ -126,6 +126,12 @@ std::string readHostFile(const fs::path& p) {
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }
 
+// 直接写宿主文件（**守卫自造安装树**用：模拟"安装树里那份只读字节"；⛔ 不是产品路径）
+void writeHostFile(const fs::path& p, const std::string& bytes) {
+    std::ofstream out(p, std::ios::binary | std::ios::trunc);
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+}
+
 // 读 guest 里的 FILETIME（lo, hi 两个 DWORD）
 std::uint64_t readFileTime(lift::Machine& m, std::uint32_t ea) {
     return static_cast<std::uint64_t>(m.mem().rd32(ea)) |
@@ -937,6 +943,129 @@ int main() {
                     "⇒ GetFileType=2 且 GetConsoleMode=TRUE；SetStdHandle(STD_OUTPUT, h) 后 "
                     "GetStdHandle 返回 h，恢复后回到 0x%08X\n",
                     h, kErrInvalidHandle, in, out, err, out);
+    }
+
+    // ---------------- ⑭ 只读安装树内容缓存：命中的字节 / 大小 / 错误码与不缓存**逐位一致** ----------------
+    // 判据（C7，`runtime/vfs.h` 的 C7 段）：
+    //   ① **缓存命中**（第二次打开）与**不缓存**（`--vfs-cache-mb 0` ⇒ 预算 0）在
+    //      `GetFileSize` / `ReadFile` 的字节与长度 / `SetFilePointer` / EOF 语义上完全一致，
+    //      且两边都等于宿主上那份字节（256 字节**全值域**，含 0x00 / 0xFF ⇒ 不是"文本碰巧相等"）；
+    //   ② 错误码不变：目录 ⇒ 5、不存在 ⇒ 2（缓存命中路径不许把这两条变成成功）；
+    //   ③ **失效**：安装树那份在运行期被改写（size 也变）⇒ 下一次打开必须读到**新**内容
+    //      （条目被 `size+mtime` 校验丢弃，`stale` 计数 +1），⛔ 不是静默旧字节；
+    //   ④ 预算 = 0 时**同一段断言照样过**，且 `hits` 恒 0（证明"关档也通过"）。
+    // ★ 为什么这一段便宜：只在 `$env:TEMP` 下造一个 256 字节文件 + 一个 appdata 目录，不碰游戏 / LFS。
+    {
+        g_current_case = "vfs-read-cache-parity";
+        // 造"安装树"（宿主侧直接写 = 只读来源；写覆盖层只读的是**产品路径**，不是这个夹具）
+        std::string payload;
+        for (int i = 0; i < 256; ++i) payload.push_back(static_cast<char>(i));
+        const fs::path inst_dir = tmp / "inst";
+        const fs::path inst_file = inst_dir / "sub" / "blob.bin";
+        std::error_code mk_ec;
+        fs::create_directories(inst_file.parent_path(), mk_ec);
+        writeHostFile(inst_file, payload);
+        // 写覆盖层启用（= "安装树只读"这条前提成立）⇒ 内容缓存对"纯读 + OPEN_EXISTING + 安装树下"生效
+        f.m.vfs().setAppDataDir(pathToUtf8(tmp / "appdata"));
+
+        const std::uint32_t p_file = f.cstr("C:\\lift-game\\inst\\sub\\blob.bin");
+        const std::uint32_t buf = f.zeroBuf(512);
+        const std::uint32_t nread = f.zeroBuf(4);
+        const std::uint32_t hi = f.zeroBuf(4);
+
+        // 同一段断言跑两档：预算 256 MiB（开档；第 2 趟必命中）与 0（关档；两趟都不命中）
+        auto readCase = [&](const std::string& want, std::uint32_t want_size) {
+            const std::uint32_t h =
+                f.call("CreateFileA", {p_file, kGenericRead, kShareRead, 0u, kOpenExisting, 0u, 0u});
+            LIFT_CHECK_NE_U32(h, kInvalidHandleValue);
+            LIFT_CHECK_EQ_U32(f.call("GetFileSize", {h, hi}), want_size);
+            LIFT_CHECK_EQ_U32(f.m.mem().rd32(hi), 0u);
+            f.m.mem().fillBytes(buf, 0xCC, 512);
+            LIFT_CHECK_EQ_U32(f.call("ReadFile", {h, buf, 512u, nread, 0u}), 1u);
+            LIFT_CHECK_EQ_U32(f.m.mem().rd32(nread), want_size);
+            std::vector<std::uint8_t> got(want_size, 0);
+            if (want_size != 0) f.m.mem().readBytes(buf, got.data(), got.size());
+            LIFT_CHECK(std::memcmp(got.data(), want.data(), want.size()) == 0);  // 逐字节
+            // EOF：真机 TRUE + 0 字节（缓存句柄必须同一条）
+            LIFT_CHECK_EQ_U32(f.call("ReadFile", {h, buf, 8u, nread, 0u}), 1u);
+            LIFT_CHECK_EQ_U32(f.m.mem().rd32(nread), 0u);
+            // 定位 + 局部读：从文件中间（`want_size/2`）读 4 字节（偏移按内容长度算，⛔ 不写死 0x81）
+            LIFT_CHECK(want_size >= 8u);
+            const std::uint32_t off = want_size / 2u;
+            LIFT_CHECK_EQ_U32(f.call("SetFilePointer", {h, off, 0u, 0u}), off);
+            f.m.mem().fillBytes(buf, 0, 512);
+            LIFT_CHECK_EQ_U32(f.call("ReadFile", {h, buf, 4u, nread, 0u}), 1u);
+            LIFT_CHECK_EQ_U32(f.m.mem().rd32(nread), 4u);
+            std::uint32_t want4 = 0;
+            for (int i = 0; i < 4; ++i) {
+                want4 |= static_cast<std::uint32_t>(static_cast<std::uint8_t>(want[off + i])) << (8 * i);
+            }
+            LIFT_CHECK_EQ_U32(f.m.mem().rd32(buf), want4);
+            // 定位**越过 EOF**：允许（真机 SetFilePointer 不查边界）⇒ 读回来 TRUE + 0（不是失败）
+            LIFT_CHECK_EQ_U32(f.call("SetFilePointer", {h, want_size + 100u, 0u, 0u}), want_size + 100u);
+            LIFT_CHECK_EQ_U32(f.call("ReadFile", {h, buf, 8u, nread, 0u}), 1u);
+            LIFT_CHECK_EQ_U32(f.m.mem().rd32(nread), 0u);
+            // 负位置：FALSE + ERROR_NEGATIVE_SEEK(131)，且**指针不动**（文档："not moved"）
+            f.m.cpu().shim.last_error = 0;
+            LIFT_CHECK_EQ_U32(f.call("SetFilePointer", {h, 0xFFFFFFFFu, 0u, 0u}), 0xFFFFFFFFu);
+            LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, 131u);
+            LIFT_CHECK_EQ_U32(f.call("SetFilePointer", {h, 0u, 0u, 1u}), want_size + 100u);
+            LIFT_CHECK_EQ_U32(f.call("CloseHandle", {h}), 1u);
+        };
+
+        // ---- ① 预算 256 MiB：第 1 次未命中（存入）、第 2 次命中 ⇒ 两趟都必须与宿主字节一致 ----
+        f.m.vfs().setReadCacheBudgetMb(256);
+        f.m.vfs().clearReadCache();
+        readCase(payload, 256u);  // 未命中（真打开 + 存入）
+        readCase(payload, 256u);  // 命中
+        {
+            const lift::Vfs::ReadCacheStats st = f.m.vfs().readCacheStats();
+            LIFT_CHECK(st.stores >= 1);      // 第 1 趟存进去了
+            LIFT_CHECK(st.hits >= 1);        // 第 2 趟真的命中了（否则这段断言没测到缓存）
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(st.entries), 1);
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(st.bytes), 256);
+        }
+
+        // ---- ② 错误码不变：目录 ⇒ 5、不存在 ⇒ 2（缓存开着的档）----
+        {
+            const std::uint32_t p_dir = f.cstr("C:\\lift-game\\inst\\sub");
+            f.m.cpu().shim.last_error = 0;
+            LIFT_CHECK_EQ_U32(
+                f.call("CreateFileA", {p_dir, kGenericRead, 0u, 0u, kOpenExisting, 0u, 0u}),
+                kInvalidHandleValue);
+            LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, kErrAccessDenied);
+            const std::uint32_t p_missing = f.cstr("C:\\lift-game\\inst\\sub\\nope.bin");
+            f.m.cpu().shim.last_error = 0;
+            LIFT_CHECK_EQ_U32(
+                f.call("CreateFileA", {p_missing, kGenericRead, 0u, 0u, kOpenExisting, 0u, 0u}),
+                kInvalidHandleValue);
+            LIFT_CHECK_EQ_U32(f.m.cpu().shim.last_error, 2u);  // ERROR_FILE_NOT_FOUND
+        }
+
+        // ---- ③ 失效：宿主侧改写（size 变）⇒ 必须读到新内容（条目被校验 stat 丢弃）----
+        std::string second = payload.substr(0, 100);
+        second[0] = static_cast<char>(0x7F);
+        writeHostFile(inst_file, second);
+        readCase(second, 100u);
+        readCase(second, 100u);
+        LIFT_CHECK(f.m.vfs().readCacheStats().stale >= 1);  // 旧条目是被**校验**丢掉的
+
+        // ---- ④ 预算 = 0（关档）：同一段断言再跑一遍，且命中恒 0 ----
+        f.m.vfs().setReadCacheBudgetMb(0);
+        f.m.vfs().clearReadCache();
+        readCase(second, 100u);
+        readCase(second, 100u);
+        {
+            const lift::Vfs::ReadCacheStats st = f.m.vfs().readCacheStats();
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(st.hits), 0);
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(st.stores), 0);
+        }
+        // 还原预算（这条夹具之后的用例若也要读安装树，行为仍然确定）
+        f.m.vfs().setReadCacheBudgetMb(256);
+        std::printf("[case] vfs-read-cache-parity: 256 字节全值域文件；预算 256 MiB 下第 2 次打开命中"
+                    "（stores>=1 / hits>=1），命中与关档（预算 0）的 GetFileSize / ReadFile / "
+                    "SetFilePointer / EOF 逐位一致；目录=5、不存在=2 不变；宿主改写后 stale>=1 且读到"
+                    "新内容（100 字节）\n");
     }
 
     std::printf("[case] tmp = %s\n", game.c_str());

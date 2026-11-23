@@ -46,6 +46,7 @@
 #include <SDL3/SDL_time.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -63,12 +64,39 @@
 #include <sys/stat.h>  // st_birthtimespec（SDL_GetPathInfo 在 POSIX 给的是 ctime）
 #endif
 
+#if !defined(_WIN32)
+#include <sys/mman.h>  // mmap / munmap（大文件只读映射）
+#include <sys/types.h>
+#include <unistd.h>    // fseeko / ftello / off_t / fileno
+#else
+// ★ 只为 C7 的"大文件只读 mmap"（CreateFileMapping / MapViewOfFile）：与 kernel32_file.cpp 同一套
+//   WIN32_LEAN_AND_MEAN + NOMINMAX 口径（不拉 GDI/COM 头，也不让 `min`/`max` 宏污染本文件）。
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <io.h>  // _get_osfhandle / _fileno
+#include <windows.h>
+#endif
+
 namespace lift {
 namespace {
 namespace fs = std::filesystem;
 
 // 1601-01-01 → 1970-01-01 的 100 ns 数（与 kernel32_time.cpp 的 kFiletimeEpochDelta 同一个常数）
 constexpr std::int64_t kFileTimeEpochDelta = 116444736000000000ll;
+
+// ---------------------------------------------------------------------------------------
+// ★ 诊断计数（`LIFT_VFS_TIMING=1`；口径见 vfs.h 的 `VfsDiagCounters`）
+//   ⛔ 只读计量：三个原子只在关档判定为真时 +1；关档时 `lookupSegment` 只多一次静态 bool 判定。
+//   ★ 用 relaxed 原子：控制层（另一条线程）也会走 `resolve`，这些计数只用于人读的读数，
+//     不与任何判定绑定（丢了也只是读数偏小）。
+// ---------------------------------------------------------------------------------------
+std::atomic<std::uint64_t> g_diag_seg_lookups{0};
+std::atomic<std::uint64_t> g_diag_dir_enums{0};
+std::atomic<std::uint64_t> g_diag_neg_hits{0};
 
 // ★ 写覆盖层的影子目录：`<--appdata>/Game`（口径见 vfs.h 文件上方）。
 //   ⛔ 不要把它挪到 `Roaming` / `Local` / `Documents` 里：那三个是 guest 特殊目录的映射脚手架，
@@ -311,6 +339,8 @@ SegLookup lookupSegment(const fs::path& dir, const std::string& seg, bool exact_
         *error = "[invalid] 空路径段";
         return SegLookup::Error;
     }
+    // ★ 诊断：段查询次数（每次首选一次精确 stat；未命中后的回退是整目录枚举，另计）。
+    if (vfsDiagOn()) g_diag_seg_lookups.fetch_add(1, std::memory_order_relaxed);
 
     std::error_code ec;
     const fs::path exact = dir / pathFromUtf8(seg);
@@ -328,6 +358,7 @@ SegLookup lookupSegment(const fs::path& dir, const std::string& seg, bool exact_
         return SegLookup::Error;
     }
     std::vector<std::string> hits;
+    if (vfsDiagOn()) g_diag_dir_enums.fetch_add(1, std::memory_order_relaxed);
     fs::directory_iterator it(dir, ec);
     if (ec) {
         *error = "[io] 枚举 \"" + pathToUtf8(dir) + "\" 失败：" + ec.message();
@@ -449,6 +480,20 @@ bool wildcardMatch(const std::string& pat, const std::string& name) {
 
 }  // namespace
 
+// ★ 诊断（`LIFT_VFS_TIMING=1`）：口径见 vfs.h 的 `VfsDiagCounters`。
+bool vfsDiagOn() {
+    static const bool on = std::getenv("LIFT_VFS_TIMING") != nullptr;
+    return on;
+}
+
+VfsDiagCounters vfsDiagCounters() {
+    VfsDiagCounters c;
+    c.segment_lookups = g_diag_seg_lookups.load(std::memory_order_relaxed);
+    c.dir_enumerations = g_diag_dir_enums.load(std::memory_order_relaxed);
+    c.negative_hits = g_diag_neg_hits.load(std::memory_order_relaxed);
+    return c;
+}
+
 // =======================================================================================
 // guest 路径文本的编码归一（规则见 vfs.h；**解析入口与日志共用这一条规则**）
 // =======================================================================================
@@ -462,23 +507,26 @@ std::string guestPathForLog(std::string_view guest_path) {
 }
 
 // =======================================================================================
-// 宿主文件时间
+// 宿主文件时间 / stat
 //   · Windows：SDL_GetPathInfo 的 create_time 就是 ftCreationTime；
 //   · macOS：SDL 的 POSIX 实现把 **ctime** 当 create_time（实测 3.4.18：create == ctime == mtime），
 //     所以这里用 `stat` 的 `st_birthtimespec`（用户 2026-11-04 口径：有 birthtime 就用，否则回退 ctime）；
 //   · 其它 POSIX：没有可移植的 birthtime ⇒ 接受 SDL 的 ctime 回退。
 // =======================================================================================
+// SDL_Time（自 1970 起的纳秒）→ FILETIME（100 ns 自 1601）。
+// ★ 0 表示"这个文件系统不提供该时间" ⇒ 按 Windows 文档留 FILETIME 0，⛔ 不编一个 1970。
+// ★ 两个消费者共用这一份：`hostFileTimes`（GetFileTime）与 `hostFileInfo`（内容缓存的校验 stat）。
+static std::uint64_t sdlTimeToWindows100ns(SDL_Time t) {
+    if (t <= 0) return 0;
+    Uint32 lo = 0;
+    Uint32 hi = 0;
+    SDL_TimeToWindows(t, &lo, &hi);
+    return (static_cast<std::uint64_t>(hi) << 32) | lo;
+}
+
 bool hostFileTimes(const std::string& host_path, HostFileTimes* out) {
     if (!out) return false;
-    // SDL_Time = 自 1970 起的**纳秒**；`SDL_TimeToWindows` 转成 FILETIME（100ns 自 1601）。
-    // ★ 0 表示"这个文件系统不提供该时间" ⇒ 按 Windows 文档留 FILETIME 0，⛔ 不编一个 1970。
-    auto toWindows100ns = [](SDL_Time t) -> std::uint64_t {
-        if (t <= 0) return 0;
-        Uint32 lo = 0;
-        Uint32 hi = 0;
-        SDL_TimeToWindows(t, &lo, &hi);
-        return (static_cast<std::uint64_t>(hi) << 32) | lo;
-    };
+    const auto toWindows100ns = &sdlTimeToWindows100ns;
 #if defined(__APPLE__)
     struct stat st{};
     if (::stat(host_path.c_str(), &st) != 0) return false;
@@ -495,6 +543,29 @@ bool hostFileTimes(const std::string& host_path, HostFileTimes* out) {
     out->create_100ns = toWindows100ns(info.create_time);
     out->access_100ns = toWindows100ns(info.access_time);
     out->write_100ns = toWindows100ns(info.modify_time);
+    return true;
+#endif
+}
+
+// 一次宿主 stat：size + write time（100 ns），且只在"它是普通文件"时成功。
+bool hostFileInfo(const std::string& host_path, std::uint64_t* size, std::uint64_t* write_100ns) {
+    if (host_path.empty()) return false;
+#if defined(__APPLE__)
+    // ★ macOS 的时间口径与 `hostFileTimes` 保持一致（`st_mtimespec`，不是 SDL 的 ctime）。
+    struct stat st{};
+    if (::stat(host_path.c_str(), &st) != 0) return false;
+    if (!S_ISREG(st.st_mode)) return false;
+    const SDL_Time ns = static_cast<SDL_Time>(st.st_mtimespec.tv_sec) * 1000000000ll +
+                        static_cast<SDL_Time>(st.st_mtimespec.tv_nsec);
+    if (size) *size = static_cast<std::uint64_t>(st.st_size);
+    if (write_100ns) *write_100ns = sdlTimeToWindows100ns(ns);
+    return true;
+#else
+    SDL_PathInfo info{};
+    if (!SDL_GetPathInfo(host_path.c_str(), &info)) return false;
+    if (info.type != SDL_PATHTYPE_FILE) return false;
+    if (size) *size = static_cast<std::uint64_t>(info.size);
+    if (write_100ns) *write_100ns = sdlTimeToWindows100ns(info.modify_time);
     return true;
 #endif
 }
@@ -904,6 +975,8 @@ bool Vfs::lookupNegative(const std::vector<std::string>& segs, bool must_exist, 
     }
     if (host_path) host_path->clear();
     if (error) *error = it->second.error;
+    // ★ 诊断：负缓存命中（"贵的是失败探测"那条结论的读数面）。
+    if (vfsDiagOn()) g_diag_neg_hits.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 
@@ -1659,4 +1732,240 @@ bool Vfs::makeSureDirectoryPathExists(const std::string& guest_path, std::string
     }
     return true;
 }
+
+// =======================================================================================
+// ★ C7：只读安装树**内容缓存**（口径见 vfs.h 的 C7 段；这里是唯一实现）
+//
+//   ★ 为什么这一层值得存在（读数见 `.tmp/vfs-cache/report.md`）：
+//     SAVE11 的 `CreateFileA` 在 LIFT_VFS_TIMING 下是 **~440 µs/次成功打开**，其中
+//     **宿主 open（`_wfopen_s` → CreateFileW）单独 ~200 µs**、`resolve` 再 ~110 µs/次 ——
+//     同一份只读内容被反复打开，付的是 AV / 文件系统的固定成本。缓存命中把这两段一起省掉。
+//
+//   ★ 失效口径：**每次命中用一次 `hostFileInfo`（size + write time）校验**，不一致就丢弃条目。
+//     安装树运行期不变是既有显式假设（vfs.h 的 `invalidatePathCache` 上方），但这条校验是
+//     "假设破了也不会静默返回旧字节"的唯一兜底 —— ⛔ 不要为了省 2–5 µs 把它删掉。
+//
+//   ★ 内容所有权：条目里存 `shared_ptr<const void>`（cookie）。句柄拿到的是它的一个引用 ⇒
+//     **逐出只从表里摘掉，不会把别人正在读的内存 `unmap`/`free` 掉**（那是 use-after-free）。
+//     cookie 的实际类型只有两种：`vector<uint8_t>`（小文件）与 `MappedFile`（大文件，析构即解除映射）。
+// =======================================================================================
+namespace {
+
+// 大文件：只读映射（小文件不走这里）。
+struct MappedFile {
+    void* view = nullptr;
+    std::uint64_t size = 0;
+#if defined(_WIN32)
+    void* mapping = nullptr;  // HANDLE（映射对象本身）
+#else
+#endif
+    MappedFile() = default;
+    MappedFile(const MappedFile&) = delete;
+    MappedFile& operator=(const MappedFile&) = delete;
+    ~MappedFile() {
+#if defined(_WIN32)
+        if (view != nullptr) ::UnmapViewOfFile(view);
+        if (mapping != nullptr) ::CloseHandle(static_cast<HANDLE>(mapping));
+#else
+        if (view != nullptr && view != MAP_FAILED) ::munmap(view, static_cast<std::size_t>(size));
+#endif
+    }
+};
+
+// 从**已经打开的**只读 `FILE*` 建只读映射（不复制内容 ⇒ 不占常驻内存）。
+// ⛔ 不重新 `open`：那正是缓存要省掉的那笔系统调用。
+std::shared_ptr<MappedFile> mapReadOnly(std::FILE* fp, std::uint64_t size) {
+    if (fp == nullptr || size == 0) return nullptr;
+    auto m = std::make_shared<MappedFile>();
+    m->size = size;
+#if defined(_WIN32)
+    const intptr_t os = ::_get_osfhandle(::_fileno(fp));
+    if (os == -1) return nullptr;
+    const HANDLE file = reinterpret_cast<HANDLE>(os);
+    const HANDLE map = ::CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    if (map == nullptr) return nullptr;
+    void* view = ::MapViewOfFile(map, FILE_MAP_READ, 0, 0, 0);
+    if (view == nullptr) {
+        ::CloseHandle(map);
+        return nullptr;
+    }
+    m->mapping = map;
+    m->view = view;
+#else
+    const int fd = ::fileno(fp);
+    if (fd < 0) return nullptr;
+    void* view = ::mmap(nullptr, static_cast<std::size_t>(size), PROT_READ, MAP_PRIVATE, fd, 0);
+    if (view == MAP_FAILED) return nullptr;
+    m->view = view;
+#endif
+    return m;
+}
+
+// 64 位 tell / seek（`std::ftell` 的 long 在 Windows 上是 32 位）。
+std::int64_t cacheTell(std::FILE* fp) {
+#if defined(_WIN32)
+    return ::_ftelli64(fp);
+#else
+    return static_cast<std::int64_t>(::ftello(fp));
+#endif
+}
+
+bool cacheSeek(std::FILE* fp, std::int64_t off) {
+#if defined(_WIN32)
+    return ::_fseeki64(fp, off, SEEK_SET) == 0;
+#else
+    return ::fseeko(fp, static_cast<off_t>(off), SEEK_SET) == 0;
+#endif
+}
+
+}  // namespace
+
+void Vfs::dropReadCacheEntry(ReadCacheMap::iterator it) const {
+    // 调用方持 `cache_mu_`。
+    read_cache_stats_.bytes -= it->second.heap_bytes;
+    read_cache_stats_.mapped_bytes -= it->second.map_bytes;
+    read_cache_lru_.erase(it->second.lru_pos);
+    read_cache_.erase(it);
+    ++read_cache_stats_.evictions;
+    read_cache_stats_.entries = read_cache_.size();
+}
+
+bool Vfs::readCacheLookup(const std::string& host_path, std::shared_ptr<const void>* cookie,
+                          ReadCacheEntryView* out) const {
+    if (cookie) cookie->reset();
+    if (out) *out = ReadCacheEntryView{};
+    if (!readCacheEnabled() || host_path.empty()) return false;
+
+    // ★ 校验 stat 在**锁外**做（一次 syscall，别让别的线程等锁）。
+    std::uint64_t size = 0;
+    std::uint64_t mtime = 0;
+    const bool stat_ok = hostFileInfo(host_path, &size, &mtime);
+
+    std::lock_guard<std::mutex> lock(cache_mu_);
+    auto it = read_cache_.find(host_path);
+    if (it == read_cache_.end()) {
+        ++read_cache_stats_.misses;
+        return false;
+    }
+    if (!stat_ok || it->second.size != size || it->second.mtime != mtime) {
+        // 内容可能变了（安装树"运行期不变"的假设破了 / 条目已被替换）⇒ 丢弃，按未命中处理。
+        ++read_cache_stats_.stale;
+        ++read_cache_stats_.misses;
+        dropReadCacheEntry(it);
+        return false;
+    }
+    // 命中：搬到 LRU 表尾（最近使用）。
+    read_cache_lru_.splice(read_cache_lru_.end(), read_cache_lru_, it->second.lru_pos);
+    ++read_cache_stats_.hits;
+    if (cookie) *cookie = it->second.cookie;
+    if (out) *out = ReadCacheEntryView{it->second.size, it->second.data};
+    return true;
+}
+
+bool Vfs::readCacheStore(const std::string& host_path, std::FILE* fp,
+                         std::shared_ptr<const void>* cookie, ReadCacheEntryView* out) const {
+    if (cookie) cookie->reset();
+    if (out) *out = ReadCacheEntryView{};
+    if (!readCacheEnabled() || fp == nullptr || host_path.empty()) return false;
+
+    std::uint64_t size = 0;
+    std::uint64_t mtime = 0;
+    if (!hostFileInfo(host_path, &size, &mtime)) return false;
+
+    std::shared_ptr<const void> blob;
+    const std::uint8_t* data = nullptr;
+    std::uint64_t heap_bytes = 0;
+    std::uint64_t map_bytes = 0;
+    if (size <= kReadCacheSmallMax) {
+        // 小文件：整块进堆（≤ 1 MiB ⇒ 复制一次的代价远小于一次 open）。位置要恢复。
+        const std::int64_t pos = cacheTell(fp);
+        std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
+        std::size_t got = 0;
+        if (size != 0) {
+            if (!cacheSeek(fp, 0)) return false;
+            got = std::fread(bytes.data(), 1, bytes.size(), fp);
+        }
+        if (pos >= 0) (void)cacheSeek(fp, pos);
+        if (got != bytes.size()) return false;
+        auto owned = std::make_shared<std::vector<std::uint8_t>>(std::move(bytes));
+        data = owned->data();
+        heap_bytes = size;
+        blob = std::move(owned);
+    } else {
+        // 大文件：只读 mmap（不读内容、不占堆；页由 OS 页缓存管）。
+        auto mapped = mapReadOnly(fp, size);
+        if (!mapped) return false;
+        data = static_cast<const std::uint8_t*>(mapped->view);
+        map_bytes = size;
+        blob = std::move(mapped);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(cache_mu_);
+        // 同路径已存在 ⇒ 先摘掉（旧 cookie 若还被句柄持有，内容仍然有效）。
+        auto it = read_cache_.find(host_path);
+        if (it != read_cache_.end()) dropReadCacheEntry(it);
+        // 条目数上限（mmap 条目不吃字节预算，但每个都吃地址空间）。
+        while (read_cache_.size() >= kMaxReadCacheEntries && !read_cache_lru_.empty()) {
+            auto victim = read_cache_.find(read_cache_lru_.front());
+            if (victim != read_cache_.end()) {
+                dropReadCacheEntry(victim);
+            } else {
+                read_cache_lru_.pop_front();  // 表与 LRU 不一致时自愈（不该发生）
+            }
+        }
+        ReadCacheEntry e;
+        e.cookie = blob;
+        e.data = data;
+        e.size = size;
+        e.mtime = mtime;
+        e.heap_bytes = heap_bytes;
+        e.map_bytes = map_bytes;
+        read_cache_lru_.push_back(host_path);
+        e.lru_pos = std::prev(read_cache_lru_.end());
+        read_cache_.emplace(host_path, std::move(e));
+        read_cache_stats_.bytes += heap_bytes;
+        read_cache_stats_.mapped_bytes += map_bytes;
+        ++read_cache_stats_.stores;
+        read_cache_stats_.entries = read_cache_.size();
+        // 字节预算：从 LRU 表头（最久未用）逐出堆条目。⚠ 只逐出**堆**条目：
+        //   mmap 条目不占预算（任务口径），但也不许把"唯一能逐出的东西"饿死 ——
+        //   如果表头全是 mmap，就继续往后找第一个堆条目。
+        const std::uint64_t budget = read_cache_budget_mb_ << 20;
+        while (read_cache_stats_.bytes > budget) {
+            bool dropped = false;
+            for (auto lit = read_cache_lru_.begin(); lit != read_cache_lru_.end(); ++lit) {
+                auto victim = read_cache_.find(*lit);
+                if (victim == read_cache_.end()) {
+                    read_cache_lru_.erase(lit);
+                    dropped = true;
+                    break;
+                }
+                if (victim->second.heap_bytes == 0) continue;  // mmap：不吃预算，跳过
+                dropReadCacheEntry(victim);
+                dropped = true;
+                break;
+            }
+            if (!dropped) break;  // 表里已经没有堆条目了（只剩 mmap）⇒ 预算无法再降
+        }
+    }
+    if (cookie) *cookie = blob;
+    if (out) *out = ReadCacheEntryView{size, data};
+    return true;
+}
+
+Vfs::ReadCacheStats Vfs::readCacheStats() const {
+    std::lock_guard<std::mutex> lock(cache_mu_);
+    ReadCacheStats s = read_cache_stats_;
+    s.entries = read_cache_.size();
+    return s;
+}
+
+void Vfs::clearReadCache() {
+    std::lock_guard<std::mutex> lock(cache_mu_);
+    read_cache_.clear();
+    read_cache_lru_.clear();
+    read_cache_stats_ = ReadCacheStats{};
+}
+
 }  // namespace lift

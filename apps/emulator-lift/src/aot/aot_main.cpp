@@ -95,6 +95,10 @@ void usage() {
         "  --game-dir <path>   guest 文件系统的唯一根（缺省 env AMAYUI_GAME_DIR / AMAYUI_INSTALL）\n"
         "  --guest-root <path> guest 眼里的安装根文本（缺省同 emulator-lift：E:\\Games\\Eushully\\天結）\n"
         "  --appdata <path>    伪造 AppData 的宿主目录（特殊目录映射；缺省 = 不用 AppData）\n"
+        "  --vfs-cache-mb N    ★ 只读安装树**内容缓存**的字节预算（MiB；缺省 256，0 = 关）。\n"
+        "                      只在有 `--appdata` 时生效（那时安装树按合同只读）；只对\n"
+        "                      \"纯读 + OPEN_EXISTING + 解析结果在安装树之下\"的打开生效。\n"
+        "                      小文件整块进堆、大文件只读 mmap；每次命中用一次 stat 校验 size+mtime。\n"
         "  --max-frames N      Present 到第 N 帧后停（0 = 不限；缺省 0）\n"
         "  --max-insns N       guest 指令数绝对上限（0 = 不限）\n"
         "  --until EA          跑到该 EA（块边界）后停（hex，缺省关）\n"
@@ -335,6 +339,9 @@ int main(int argc, char** argv) {
     std::string exe_path;
     std::string game_dir;
     std::string appdata_dir;
+    // ★ C7：`--vfs-cache-mb`（缺省 256 MiB；0 = 关）。`_set` 单独记：值 0 也是"给了这个 flag"。
+    std::uint64_t vfs_cache_mb = 256;
+    bool vfs_cache_mb_set = false;
     std::string guest_root;
     // ★ `--input-plan <file>`（S4）：AOT 臂的**唯一**输入控制面（`runtime/input_plan.h`）。
     //   缺省空 = 不给 ⇒ 输出与行为逐字节不变（含那 57 行 stdout）。
@@ -434,6 +441,26 @@ int main(int argc, char** argv) {
             if (!needValue("--game-dir", &game_dir)) return 2;
         } else if (a == "--appdata") {
             if (!needValue("--appdata", &appdata_dir)) return 2;
+        } else if (a == "--vfs-cache-mb") {
+            // ★ C7：只读安装树内容缓存的字节预算（MiB；0 = 关；缺省 256）。
+            //   **只收十进制非负整数**：`strtoull("-1")` 会静默回绕成巨大值 ⇒ 负号 / 小数 / 垃圾一律 exit 2。
+            std::string v;
+            if (!needValue("--vfs-cache-mb", &v)) return 2;
+            bool digits_only = !v.empty();
+            for (const char c : v) {
+                if (c < '0' || c > '9') {
+                    digits_only = false;
+                    break;
+                }
+            }
+            if (!digits_only) {
+                std::fprintf(stderr,
+                             "emulator-lift-aot: --vfs-cache-mb 需要非负整数（MiB，0 = 关）：`%s`\n",
+                             v.c_str());
+                return 2;
+            }
+            vfs_cache_mb = std::strtoull(v.c_str(), nullptr, 10);
+            vfs_cache_mb_set = true;
         } else if (a == "--guest-root") {
             if (!needValue("--guest-root", &guest_root)) return 2;
         } else if (a == "--input-plan") {
@@ -1069,6 +1096,10 @@ int main(int argc, char** argv) {
     if (!game_dir.empty()) host.vfs().setGameDir(game_dir);
     if (!appdata_dir.empty()) host.vfs().setAppDataDir(appdata_dir);
     if (!guest_root.empty()) host.vfs().setGuestRoot(guest_root);
+    // ★ C7：只读安装树内容缓存（口径见 `runtime/vfs.h` 的 C7 段）。`--vfs-cache-mb` 只改预算；
+    //   "这条路径该不该缓存"的判据在 shim（纯读 + OPEN_EXISTING + 写覆盖层 + 安装树之下）。
+    //   ⚠ 没有 `--appdata` 时缓存**天然不生效**（安装树那时是可写目标，只读前提不成立）。
+    if (vfs_cache_mb_set) host.vfs().setReadCacheBudgetMb(vfs_cache_mb);  // 缺省已在 Vfs 里 = 256 MiB
 
     // ---- ② 载入 PE（**先核对 D1 的 pin**，再映射进 guest）----
     if (!host.loadImage(exe_path, &err)) {

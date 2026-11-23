@@ -32,6 +32,7 @@
 #include "runtime/control.h"  // Control（PIMPL 门面：⛔ 不含 beast / nlohmann / guest 头）
 #include "runtime/fault_state.h"  // guest fault 现场（AOT 没有 Machine；只登记 / 清除，零周期输出）
 #include "runtime/guest_token.h"  // Phase-0 的 `arm()`（与解释器 `Machine::run` 同一个单例）
+#include "shims/kernel32_file.h"  // `vfsTimingFrameBoundary`（`LIFT_VFS_TIMING=1` 的帧边界；缺省 no-op）
 
 namespace lift {
 namespace aot {
@@ -440,6 +441,11 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     auto logPresentedFrames = [&]() {
         const std::uint64_t n = presenter_.frameCount();
         if (n == logged_frames) return;
+        // ★ 诊断（`LIFT_VFS_TIMING=1`）：**帧边界** —— 把这一帧里 `CreateFileA` 的分段计时收成一组。
+        //   为什么在这里：shim 里读不到帧号，而"装载帧 vs 点击帧"的对比必须有帧边界；
+        //   关档时它是一次静态 bool 判定（不取时、不记账）。
+        lift::vfsTimingFrameBoundary(n);
+
         // ★ 窗口 profile 的 `present` 子桶（⊂ shim；**零额外成本** —— `presentBreakdown()` 本来
         //   就一直在计时）。⚠ 一次 shim 里多次 Present 时只有最后一帧的拆分（只增计数）。
         if (win_.on) win_.notePresent(presentBreakdown(), n - logged_frames);
