@@ -209,8 +209,11 @@ inline constexpr std::uint32_t kLiftHalt = 0xFFFFFFFEu;
 //   ⛔ 不回宿主主循环。
 //   生成代码只在"目标运行期才知道"的站点发它（间接 `jmp` / 间接 `call reg|mem`）：
 //     · 间接 `jmp`：`%r = tail call i32 @lift_dyn(...)` + `ret i32 %r` ⇒ 真尾调用（LLVM 落成 jmp）；
-//     · 间接 `call`：同上，但 `%r == resume EA` 才在本宿主帧里继续（见 `lift_gen_emit.cpp` 的
-//       `emitCallReturnCheck`：guest `ret` 弹的就是我们压的那一格 ⇒ 判据就是"返回 EA == resume"）。
+//     · 间接 `call`：`%r = call i32 @lift_dyn(...)`（★ **普通 call**，⛔ 不是 `tail`：`%r` 要被
+//       `emitCallReturnCheck` 的 `icmp` 使用 ⇒ 该点不在尾位置），`%r == resume EA` 才在本宿主帧里
+//       继续（见 `lift_gen_emit.cpp` 的 `emitCallReturnCheck`：guest `ret` 弹的就是我们压的那一格
+//       ⇒ 判据就是"返回 EA == resume"）。**进入目标**的那一跳仍由本函数内部的 `return fn(...)` 完成，
+//       那一处才是真尾调用（见 .cpp 的 musttail 注记）。
 //   ★ 返回 = 目标的返回值（= 下一个 guest EA）；目标不在派发表 ⇒ 响亮停并返回 `kLiftHalt`。
 //   ★ 声明**无属性**（⛔ `argmemonly` / `noalias` / `readnone`）：它经由 `cpu->mem` 读写 guest
 //     内存（"参数里**存的**指针"那一层），与 `lift_one` 同一条理由。

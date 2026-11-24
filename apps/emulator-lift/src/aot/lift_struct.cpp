@@ -16,6 +16,26 @@ namespace {
 // esp / ebp 相对**入口**的偏移（字节）。`UNKNOWN` = 证明不了（保守）。
 constexpr std::int32_t kUnknown = 0x7FFFFFFF;
 
+// ★ D4（2026-11-24）：`LIFT_S7_RELAX_INDIRECT` —— 判据 4（"无间接 `call`"）的放宽开关。
+//   缺省 **ON**；`-DLIFT_S7_RELAX_INDIRECT=OFF` 回退到"有间接 `call` ⇒ 整单元判死"的旧判据
+//   （风格对齐 AGENTS §12.8 的"回退 = 一行 flag"）。语义与理由见 `analyzeStructure` 的 ②-a / ②-b。
+#ifndef LIFT_S7_RELAX_INDIRECT
+#define LIFT_S7_RELAX_INDIRECT 1
+#endif
+
+// ★ D4 的前提（**不是装饰**）：`kUnknown` 参与算术**必须仍是"未知"**。
+//   两条理由：① `kUnknown + 4` 会变成一个**看着已知**的偏移（把判据变成假绿）；
+//   ② `0x7FFFFFFF + d` 是有符号溢出（UB）。间接 `call` 会把 esp 标成未知（见 ②-b），
+//   之后紧跟 `push` / `add esp,imm` 是常见形态 ⇒ 这条守卫必须先有。
+//   ★ 它是**无条件**的：与开关无关 —— 合并（join）产生 `kUnknown` 的旧路径同样会撞上它。
+inline std::int32_t espAdd(std::int32_t esp, std::int32_t d) {
+    if (esp == kUnknown) return kUnknown;
+    const std::int64_t sum = static_cast<std::int64_t>(esp) + static_cast<std::int64_t>(d);
+    // 偏移是"相对入口的字节数"，真实函数不可能接近 int32 边界；越界 ⇒ 证明不了，保守取未知。
+    if (sum < -0x40000000ll || sum > 0x40000000ll) return kUnknown;
+    return static_cast<std::int32_t>(sum);
+}
+
 struct EspState {
     std::int32_t esp = 0;
     std::int32_t ebp = kUnknown;
@@ -128,7 +148,7 @@ bool transferEsp(const Insn& in, EspState* s, StructReason* why) {
                 }
                 const std::int32_t d = static_cast<std::int32_t>(m.disp);
                 if (m.base == Reg::ESP) {
-                    s->esp = static_cast<std::int32_t>(s->esp + d);
+                    s->esp = espAdd(s->esp, d);
                     return true;
                 }
                 if (m.base == Reg::EBP) {
@@ -147,8 +167,7 @@ bool transferEsp(const Insn& in, EspState* s, StructReason* why) {
                 if (in.op1().kind == OpKind::Imm) {
                     const std::int32_t d = static_cast<std::int32_t>(
                         static_cast<std::uint32_t>(in.op1().imm));
-                    s->esp = static_cast<std::int32_t>(
-                        s->esp + (in.op == Op::Add ? d : -d));
+                    s->esp = espAdd(s->esp, in.op == Op::Add ? d : -d);
                     return true;
                 }
                 *why = StructReason::VarStack;  // add/sub esp,reg / [mem]
@@ -174,7 +193,7 @@ bool transferEsp(const Insn& in, EspState* s, StructReason* why) {
                 if (!m.absolute && !m.seg_fs && !m.seg_gs && m.index == Reg::None) {
                     const std::int32_t d = static_cast<std::int32_t>(m.disp);
                     if (m.base == Reg::ESP) {
-                        s->ebp = static_cast<std::int32_t>(s->esp + d);
+                        s->ebp = espAdd(s->esp, d);
                         return true;
                     }
                     if (m.base == Reg::EBP && s->ebp != kUnknown) {
@@ -191,20 +210,20 @@ bool transferEsp(const Insn& in, EspState* s, StructReason* why) {
     }
     // ---- 隐式改 esp 的形态 ----
     switch (in.op) {
-        case Op::Push: s->esp = static_cast<std::int32_t>(s->esp - 4); return true;
-        case Op::Pushfd: s->esp = static_cast<std::int32_t>(s->esp - 4); return true;
-        case Op::Pushad: s->esp = static_cast<std::int32_t>(s->esp - 32); return true;
+        case Op::Push: s->esp = espAdd(s->esp, -4); return true;
+        case Op::Pushfd: s->esp = espAdd(s->esp, -4); return true;
+        case Op::Pushad: s->esp = espAdd(s->esp, -32); return true;
         case Op::Pop: {
             if (isEsp32(in.op0())) {  // pop esp：值来自栈 ⇒ 不可跟踪
                 *why = StructReason::VarStack;
                 return false;
             }
-            s->esp = static_cast<std::int32_t>(s->esp + 4);
+            s->esp = espAdd(s->esp, 4);
             if (isEbp32(in.op0())) s->ebp = kUnknown;
             return true;
         }
-        case Op::Popfd: s->esp = static_cast<std::int32_t>(s->esp + 4); return true;
-        case Op::Popad: s->esp = static_cast<std::int32_t>(s->esp + 32); return true;
+        case Op::Popfd: s->esp = espAdd(s->esp, 4); return true;
+        case Op::Popad: s->esp = espAdd(s->esp, 32); return true;
         case Op::Leave: {
             // leave = mov esp,ebp; pop ebp（D53 明确：帧恢复不算失效）
             if (s->ebp == kUnknown) {
@@ -282,18 +301,36 @@ StructResult analyzeStructure(const std::vector<GenComponent>& comps,
 
         // ---- ②-a 语法判据（返回槽写 / 间接 call / 识别不了的 esp 形态）----
         //   注意：`ret` 的 esp 偏移由 ②-b 的数据流判，不在这里。
+        //   ★ D4：间接 `call` 不再**直接判死**（见下面的 `LIFT_S7_RELAX_INDIRECT`）。
+#if LIFT_S7_RELAX_INDIRECT
+        //   旧判据（D53 第 4 条）的理由是"caller 的宿主帧在那次尾调用里就没了"。但发射器的
+        //   **事实**是：间接 `call` 发 `%r = call i32 @lift_dyn(...)`（**普通 call**，D3 已把误标的
+        //   `tail` 撤回；`%r` 被 `emitCallReturnCheck` 的 `icmp` 使用 ⇒ 该点不在尾位置），
+        //   `lift_dyn` 内部的 `return fn(...)` 才是真尾调用 ⇒ 目标的 `ret` 直接回到**本调用点**，
+        //   `%r` 就是它 `ret` 弹出的 guest EA；一旦 `%r != resume`，兜底 `ret i32 %r` 原样上抛给
+        //   调用链 / trampoline，语义与今天的 `ret i32` 出口逐位相同。
+        //   真正拦着的是**静态证明**：间接 callee 的 `ret imm16` 清理字节数运行期才知道 ⇒ 之后
+        //   esp 不可静态跟踪（②-b 把 esp 标成未知）。⇒ 只放宽到"函数必须自己把 esp **可证明地**
+        //   重建回入口值"（帧恢复 `mov esp,ebp` / `leave`，且 ebp 自入口起可跟踪）。
+        //   ⛔ 这里**不假设**任何 callee 的清理字节数（那才是不能证的东西）。
+        bool has_indirect_call = false;
+        std::uint32_t first_indirect_ea = 0;
+#endif
         for (const auto& kv : c.blocks) {
             for (const Insn& in : kv.second.insns) {
                 if (!self_ok) break;
-                switch (in.op) {
-                    case Op::Call:
-                        if (in.op0().kind != OpKind::Imm) {
-                            self_ok = false;
-                            why = StructReason::IndirectCall;
-                            why_ea = in.ea;
-                        }
-                        break;
-                    default: break;
+                if (in.op == Op::Call && in.op0().kind != OpKind::Imm) {
+#if LIFT_S7_RELAX_INDIRECT
+                    if (!has_indirect_call) {
+                        has_indirect_call = true;
+                        first_indirect_ea = in.ea;
+                    }
+#else
+                    self_ok = false;
+                    why = StructReason::IndirectCall;
+                    why_ea = in.ea;
+                    break;
+#endif
                 }
                 if (!self_ok) break;
                 // 写返回地址那一格（op0 是内存目的操作数；`xchg` 的 op1 也算）
@@ -353,16 +390,35 @@ StructResult analyzeStructure(const std::vector<GenComponent>& comps,
                                 }
                                 cs.insert(oi->second);
                                 const auto cl = ret_cleanup.find(oi->second);
-                                s.esp = static_cast<std::int32_t>(
-                                    s.esp + (cl != ret_cleanup.end() ? cl->second : 0));
+                                s.esp = espAdd(s.esp, cl != ret_cleanup.end() ? cl->second : 0);
                             }
+#if LIFT_S7_RELAX_INDIRECT
+                        } else {
+                            // ★ D4：间接 `call` 的**栈清理**（callee 的 `ret imm16`）运行期才知道
+                            //   ⇒ 静态上**不假设任何字节数**，把 esp 标成未知；之后必须由函数自己
+                            //   用**可跟踪的帧基准**重建 esp（`mov esp,ebp` / `leave`；ebp 从入口起
+                            //   可跟踪）⇒ 只有那时 `ret` 的 "esp == 0" 判据才成立。
+                            //   ⛔ 不许写 `s.esp += 0`：那等于假设 cdecl，是**不能证**的东西。
+                            //   ⛔ 也不许"按 callee 的 ret_cleanup 建模"：间接 callee 是谁运行期才知道。
+                            (void)first_indirect_ea;
+                            s.esp = kUnknown;
                         }
+#else
+                        }
+#endif
                         continue;
                     }
                     if (in.op == Op::Ret) {
                         if (s.esp == kUnknown || s.esp != 0) {
                             self_ok = false;
+#if LIFT_S7_RELAX_INDIRECT
+                            // ★ 归因（只影响报告）：带间接 `call` 的单元里 esp 未知 ⇒ 首因就是那条
+                            //   间接 `call`（它与"动态返回"在读数上分开，才能看出放宽命中了多少）。
+                            why = (has_indirect_call && s.esp == kUnknown) ? StructReason::IndirectCall
+                                                                          : StructReason::DynamicReturn;
+#else
                             why = StructReason::DynamicReturn;
+#endif
                             why_ea = in.ea;
                             block_ok = false;
                             break;

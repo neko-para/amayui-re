@@ -340,6 +340,14 @@ endif()
 add_executable(emulator-lift-gen src/aot/lift_gen.cpp src/aot/lift_gen_emit.cpp
                                 src/aot/lift_struct.cpp)
 target_link_libraries(emulator-lift-gen PRIVATE emulator-lift-runtime)
+# ★ D4（2026-11-24）：S7 判据 4（"无间接 `call`"）的放宽开关，**缺省 ON**。
+#   理由 / 语义 / 接受条件见 `src/aot/lift_struct.cpp` 的 `LIFT_S7_RELAX_INDIRECT` 注释与
+#   `docs/03-emulator/aot-s7-evaluation.md` §3。回退 = **一行**：`-DLIFT_S7_RELAX_INDIRECT=OFF`
+#   （OFF ⇒ 回到"有间接 call ⇒ 整单元判死"的判据，⛔ 不改其它任何一行）。
+option(LIFT_S7_RELAX_INDIRECT "S7/D4: allow units with indirect call when their frame is provably restored" ON)
+target_compile_definitions(emulator-lift-gen PRIVATE
+    LIFT_S7_RELAX_INDIRECT=$<BOOL:${LIFT_S7_RELAX_INDIRECT}>)
+message(STATUS "LIFT_S7_RELAX_INDIRECT: ${LIFT_S7_RELAX_INDIRECT} (S7 criterion 4: indirect call relaxed; OFF = old criterion)")
 
 # =====================================================================================
 # Shape A · T2b：`emulator-lift-aot` 的**执行源**（生成物 + 派发表）
@@ -2435,6 +2443,73 @@ endif()
 target_link_libraries(lift-s7-structured PRIVATE emulator-lift-runtime)
 add_test(NAME lift-s7-structured COMMAND lift-s7-structured)
 set_tests_properties(lift-s7-structured PROPERTIES SKIP_RETURN_CODE 77)
+
+# =====================================================================================
+# S7 / D53：**间接 `call` 放宽（D4）的形状级差分**（`lift-s7-indirect`）
+# ★ 判据（红了意味着什么）：`tests/ir/s7_indirect_roots.txt` 的 F（有间接 `call` + `mov esp,ebp`
+#   帧恢复）必须在**生成期**被判为 structured（读生成那一趟的 `[S7 criteria]` / `[S7 downgrade]`，
+#   由 `tests/cmake/lift_gen_capture.cmake` 落到 `s7indirect/criteria.txt`）；并且运行期
+#   「F → 间接 call G（G 用 `retn 8` 多清 4 字节）→ F `mov esp,ebp` 恢复 → `retn 4`」与解释器臂逐位相同。
+#   判据收紧 / 回退到"有间接 call 就判死" ⇒ ① 红。详见 `tests/s7_indirect.cpp` 头注。
+# ★ 缺 clang / 缺执行源 ⇒ 不链生成物、不定义 `LIFT_S7_INDIRECT` ⇒ 测试体返回 77（SKIP）；
+#   ⛔ `add_test` 仍在**最外层**（档位 = pure，判据 = 注册位置 §12.4）。
+# =====================================================================================
+set(LIFT_S7_INDIRECT_DIR "${CMAKE_CURRENT_BINARY_DIR}/s7indirect")
+set(LIFT_S7_INDIRECT_ROOTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/ir/s7_indirect_roots.txt")
+# ★ 与 `tests/ir/s7_indirect_roots.txt` **一一对应**。
+set(LIFT_S7_INDIRECT_CALLER_EA 0x00452FA0)
+set(LIFT_S7_INDIRECT_CALLEE_EA 0x0047CC80)
+if(LIFT_IR_CLANG AND EXISTS "${LIFT_GEN_AGE_EXE}")
+    # 生成 + **把 stderr 落成文件**（判据①的唯一可复核面）：由 cmake -P 脚本捕获，
+    # 这样测试读到的判据与链进 exe 的 `.ll` 是**同一次**生成。
+    add_custom_command(
+        OUTPUT "${LIFT_S7_INDIRECT_DIR}/lift_aot.ll" "${LIFT_S7_INDIRECT_DIR}/lift_pin.h"
+               "${LIFT_S7_INDIRECT_DIR}/lift_table.inc" "${LIFT_S7_INDIRECT_DIR}/criteria.txt"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${LIFT_S7_INDIRECT_DIR}"
+        COMMAND ${CMAKE_COMMAND}
+                -DGEN=$<TARGET_FILE:emulator-lift-gen>
+                -DEXE=${LIFT_GEN_AGE_EXE}
+                -DROOTS=${LIFT_S7_INDIRECT_ROOTS}
+                -DOUT=${LIFT_S7_INDIRECT_DIR}/lift_aot.ll
+                -DPIN=${LIFT_S7_INDIRECT_DIR}/lift_pin.h
+                -DTABLE=${LIFT_S7_INDIRECT_DIR}/lift_table.inc
+                -DLOG=${LIFT_S7_INDIRECT_DIR}/criteria.txt
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/lift_gen_capture.cmake"
+        DEPENDS emulator-lift-gen "${LIFT_S7_INDIRECT_ROOTS}" "${LIFT_GEN_AGE_EXE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/lift_gen_capture.cmake"
+        COMMENT "lift-s7-indirect: roots + PE -> s7indirect/{ll,pin,table,criteria.log}"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${LIFT_S7_INDIRECT_DIR}/lift_aot.obj"
+        COMMAND ${LIFT_IR_CLANG} -c -O2 ${LIFT_IR_TARGET_FLAGS} -Wno-override-module
+                -o "${LIFT_S7_INDIRECT_DIR}/lift_aot.obj" "${LIFT_S7_INDIRECT_DIR}/lift_aot.ll"
+        DEPENDS "${LIFT_S7_INDIRECT_DIR}/lift_aot.ll"
+        COMMENT "lift-s7-indirect: lift_aot.ll -> .obj (clang -c -O2)")
+    set_source_files_properties("${LIFT_S7_INDIRECT_DIR}/lift_aot.obj"
+        PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+    add_executable(lift-s7-indirect tests/s7_indirect.cpp src/aot/aot_dispatch.cpp
+                   "${LIFT_S7_INDIRECT_DIR}/lift_aot.obj")
+    target_compile_definitions(lift-s7-indirect PRIVATE LIFT_AOT_HAS_GENERATED=1
+        LIFT_S7_INDIRECT=1 LIFT_S7_INDIRECT_PE_PATH="${LIFT_GEN_AGE_EXE}"
+        LIFT_S7_INDIRECT_CRITERIA="${LIFT_S7_INDIRECT_DIR}/criteria.txt"
+        LIFT_S7_INDIRECT_CALLER_EA=${LIFT_S7_INDIRECT_CALLER_EA}
+        LIFT_S7_INDIRECT_CALLEE_EA=${LIFT_S7_INDIRECT_CALLEE_EA}
+        _CRT_SECURE_NO_WARNINGS)
+    target_include_directories(lift-s7-indirect PRIVATE "${LIFT_S7_INDIRECT_DIR}")
+    # ★ 用 **APPEND**（⛔ 不用 set_source_files_properties）：同一个 `aot_dispatch.cpp` 也被
+    #   `lift-s7-structured` 编译，而 `OBJECT_DEPENDS` 是**按源文件**的属性 ⇒ 覆盖式写法会把
+    #   上面那份 `s7diff/lift_table.inc` 依赖顶掉（增量构建时可能留下**陈旧的派发表**）。
+    set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/aot/aot_dispatch.cpp"
+        APPEND PROPERTY OBJECT_DEPENDS "${LIFT_S7_INDIRECT_DIR}/lift_table.inc")
+else()
+    message(STATUS "lift-s7-indirect: missing clang or execution source (${LIFT_GEN_AGE_EXE}) => generated output is not linked (test SKIPs 77)")
+    add_executable(lift-s7-indirect tests/s7_indirect.cpp)
+    target_compile_definitions(lift-s7-indirect PRIVATE LIFT_S7_INDIRECT_CALLER_EA=0
+        LIFT_S7_INDIRECT_CALLEE_EA=0)
+endif()
+target_link_libraries(lift-s7-indirect PRIVATE emulator-lift-runtime)
+add_test(NAME lift-s7-indirect COMMAND lift-s7-indirect)
+set_tests_properties(lift-s7-indirect PROPERTIES SKIP_RETURN_CODE 77)
 
 # =====================================================================================
 # ★ 发射形状守卫 D1 / D2（2026-11-24，`.tmp/emit-edges/report.md`）：**同分量的块直连

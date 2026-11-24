@@ -2013,7 +2013,9 @@ void FnEmit::emitCall(const Insn& in) {
     if (op.kind != OpKind::Imm) dyn = readValue(op);
     pushValue(i32c(ret));
     flushRegs();  // 块出口（E2/S2）：`pushValue` 刚改过 ESP ⇒ 必须在宿主调用 / `ret` 之前写回 `%st`
-    // ---- 间接 `call reg/mem`：查派发表 + 尾调用进目标（⛔ 不回宿主主循环）----
+    // ---- 间接 `call reg/mem`：查派发表 + 进目标（⛔ 不回宿主主循环）----
+    //   ★ 进入目标是**真尾调用**（在 `lift_dyn` 内部 `return fn(...)`）；但本调用点本身是
+    //     **普通 `call`**（返回值 `%r` 要用来做 resume 判据）—— 见下面 D3 的注释。
     if (op.kind != OpKind::Imm) {
         if (!structure_.enabled) {
             // `--no-s7`：回到 D55 之前的形状（目标 EA 交回 trampoline）
@@ -2021,13 +2023,18 @@ void FnEmit::emitCall(const Insn& in) {
             ++stats_->s7_call_dispatch;
             return;
         }
+        // ★ D3（2026-11-24）：这里是**普通 `call`**，⛔ 不是 `tail call`。
+        //   理由（判据，不是风格）：`%r` 紧接着被 `emitCallReturnCheck` 的 `icmp` 使用 ⇒ 该点
+        //   **不在尾位置**；`tail` 标记会让 IR 的"这个调用点没有 caller 帧"读法的前提不成立
+        //   （D53 判据 4 与 D4 放宽的论证都建立在这件事上）。旧标记是错的，已撤回。
+        //   ⛔ 不要动 `lift_dyn` **内部**的 `return fn(...)`（那才是真尾调用，见 lift_abi.cpp）。
         const std::string r = tmp();
-        add(r + " = tail call i32 @lift_dyn(ptr %cpu, ptr %st, i32 " + dyn + ")");
+        add(r + " = call i32 @lift_dyn(ptr %cpu, ptr %st, i32 " + dyn + ")");
         stats_->used_lift_dyn = true;
         ++stats_->s7_call_lift_dyn;
-        ++stats_->s7_tail_calls;
-        // `lift_dyn` 的 `return fn(st, mem, ea, cpu)` 是尾调用 ⇒ 目标的宿主返回地址**就是我们**
-        // ⇒ 目标正常 `ret` 时 `%r` 就是 resume EA（判据与宿主 call 完全相同）。
+        // `lift_dyn` 内部的 `return fn(st, mem, ea, cpu)` 是真尾调用 ⇒ 目标正常 `ret` 时
+        // `%r` 就是 resume EA（判据与宿主 `call` 完全相同）；而**本调用点**有 caller 帧，
+        // 所以 `%r != resume` 的兜底 `ret i32 %r` 仍然是"原样上抛"。
         emitCallReturnCheck(r, ret);
         return;
     }

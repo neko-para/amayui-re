@@ -5599,6 +5599,30 @@ const MUTATIONS = [
       '`lift-emit-edges` 的 "`jcc` 目标 = 本分量入口 ⇒ 两个臂都直连" 断言红并点名 `bb_exit_401010`。' +
       '这条错**只影响速度**（每走一次多一圈 trampoline），guest 可见语义等价 ⇒ 只有形状断言抓得住它',
   },
+  // ── s7-indirect（2026-11-24 / D4）：间接 `call` 又直接判死（判据 4 收回）──────────────────
+  //   ★ 这一类错长什么样：`analyzeStructure` 的 ②-a 不再"记录间接 call"，而是恢复成
+  //     "有间接 call ⇒ 整单元 self_ok=false"（= D4 之前的判据）。**运行期语义不变**
+  //     （F 只是从宿主 call/ret 退回派发），所以差分 / 五项指纹 / 端到端全绿；
+  //     会红的只有"F 在生成期还算不算 structured"。
+  //     守卫 = `ctest:lift-s7-indirect` 的判据①（读生成那一趟的 `[S7 criteria]` / `[S7 downgrade]`），
+  //     它同时打断 host-call 读数的 +1,395（读数见 `.tmp/s7-indirect/report.md`）。
+  {
+    file: 'apps/emulator-lift/src/aot/lift_struct.cpp',
+    from:
+      '                if (in.op == Op::Call && in.op0().kind != OpKind::Imm) {\n' +
+      '#if LIFT_S7_RELAX_INDIRECT\n',
+    to:
+      '                if (in.op == Op::Call && in.op0().kind != OpKind::Imm) {\n' +
+      '#if 0  // 变异：间接 call 又直接判死（D4 之前的判据）\n',
+    guard: 'ctest:lift-s7-indirect',
+    ctest: 'lift-s7-indirect',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-s7-indirect',
+    what:
+      '把 D4 的放宽关掉（②-a 里间接 call 又直接判死）⇒ F=00452FA0 回到 `[S7 downgrade]`、' +
+      '`structurable` 2→1 ⇒ `lift-s7-indirect` 的判据①（生成期 structured）当场红；' +
+      '这条错**只影响派发密度**（运行期语义等价，差分 / 五项指纹全绿）',
+  },
 ];
 
 let mutationRunSeq = 0;

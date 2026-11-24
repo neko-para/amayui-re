@@ -237,7 +237,7 @@ struct GenEmitStats {
     std::uint64_t s7_ret_host = 0;
     std::uint64_t s7_ret_dispatch = 0;
     std::uint64_t s7_call_host = 0;       // 静态目标 + 可结构化 caller/callee ⇒ 宿主 `call`
-    std::uint64_t s7_call_lift_dyn = 0;   // 间接 `call reg/mem` ⇒ `lift_dyn` 尾调用
+    std::uint64_t s7_call_lift_dyn = 0;   // 间接 `call reg/mem` ⇒ `lift_dyn`（**普通 call**：返回值被 resume 判据使用）
     std::uint64_t s7_call_shim = 0;       // 目标 = shim 桩 ⇒ 保持今天的 `ret i32`（派发）
     std::uint64_t s7_call_dispatch = 0;   // 其余 ⇒ 保持今天的 `ret i32`（派发）
     std::uint64_t s7_jmp_tail = 0;        // 跨单元 `jmp` + 目标可结构化 ⇒ 尾调用
@@ -246,7 +246,7 @@ struct GenEmitStats {
     // ★ D2（2026-11-24）：跨单元 `jcc` 的**臂** ⇒ 尾巴调用（与静态 `jmp` 同一形态 / 同一判据）。
     //   一个 `jcc` 可能给两个臂各发一个尾巴块 ⇒ 这个数按**臂**计，⛔ 不是按 jcc 计。
     std::uint64_t s7_jcc_tail = 0;
-    std::uint64_t s7_tail_calls = 0;      // 所有 `tail call` 站点（jmp 尾调用 + lift_dyn）
+    std::uint64_t s7_tail_calls = 0;      // 所有**真** `tail call` 站点（jmp 尾调用 + 间接 jmp 的 lift_dyn）
     bool used_lift_dyn = false;
 };
 

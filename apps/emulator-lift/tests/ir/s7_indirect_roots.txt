@@ -1,0 +1,17 @@
+# S7（D53）**间接 call 放宽**（D4）的形状级差分根集 —— `lift-s7-indirect`（一行一个 hex EA）
+#
+# 只放两个：
+#   0x452FA0   F：`push ebp / mov ebp,esp` 标准帧；**两条间接 call**（`call ecx` / `call edx`）；
+#              两条出口都以 `mov esp,ebp` 恢复帧，最后 `retn 4`；没有静态 callee。
+#   0x47CC80   G：`xor eax,eax / retn 8`（2 条指令，无内存访问）—— 间接 call 的运行期目标，
+#              **`ret imm16` 清 8 字节**；F 在调用点只压了 1 个实参 ⇒ 比 cdecl 口径多清 4 字节。
+# ★ 选择判据（可复核）：F 的 esp 数据流在间接 call 之后不可知（callee 的 `ret imm16` 字节数运行期
+#   才知道），只有"自己用可跟踪的 `mov esp,ebp` 重建 esp 到入口值"时才允许放行 —— 这正是 D4。
+#   ⇒ 旧判据（"有间接 call ⇒ 整单元判死"）下 F 会出现在 `[S7 downgrade]` 里；放宽后消失。
+# ★ ⛔ 不要往这里加"随便挑的 EA"：测试体会①读生成期的 `[S7 criteria]`（unit roots=2 /
+#   structurable=2 / ret=3 in structured units）②按 `this` 夹具驱动 F 并断言间接 call 走了
+#   `lift_dyn`、与解释器逐位相同。加错了就是红。
+# ★ 这一对**只**证明"带间接 call + 帧恢复的单元可结构化，且运行期与解释器逐位相同"；
+#   覆盖率读数仍在生成期（`[S7 criteria]`），⛔ 不拿这条用例冒充覆盖率。
+0x452FA0
+0x47CC80
