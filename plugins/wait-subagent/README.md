@@ -6,7 +6,8 @@
 
 ## 1. 它解决什么
 
-`subagent` / `subagent_fork` 工具只返回 `started subagent <id>`，子代理的结果通过
+`subagent` / `subagent_fork` 工具只返回 `started subagent <name>` —— 这是**名字**（由调用方给，
+`list_agents` 也按名字显示），不是 Session id。子代理的结果通过
 **settlement notice** 异步投递。但模型有时必须在本 turn 内等到它结束才能继续
 （例如要根据子代理的结论决定下一步）。现在只能：
 
@@ -44,21 +45,23 @@ sleep 30   # 短了再睡，长了白等；用户插话也打断不了
 
 ```jsonc
 {
-  "agent_ids": ["<child-1>", "<child-2>"],  // 也可以只给一个 agent_id（单 child 的简写）
+  "agent_ids": ["<child-name-1>", "<child-name-2>"],  // 名字或 Session id；也可只给一个 agent_id
   "mode": "any_of",                          // 缺省 any_of；要等全部才 all_of
   "timeout_seconds": 120                      // 可选
 }
 ```
 
-* `agent_id`（单个）与 `agent_ids`（数组）可以混用；重复的 id 会去重，一次最多 **32** 个。
-* 每个 id 都必须是**直接子代理**（用 parent-owned `subagent/catalog` 校验；不是就报错，不猜）。
+* `agent_id`（单个）与 `agent_ids`（数组）可以混用；重复的引用会去重，一次最多 **32** 个。
+* 每个引用可以是**名字**（`started subagent <name>` / `list_agents` 看到的那个）或 **Session id**；
+  名字先用 `subagents.resolveName` 解析成 Session id，再查 tracker / `agents.get`。
+* 每个引用都必须是**直接子代理**（用 parent-owned `subagent/catalog` 校验；不是就报错，不猜）。
 
 返回一个固定对象（模型看到的是 `note` 的一段可执行文字）：
 
 | 字段 | 说明 |
 |---|---|
 | `status` | 见下表 |
-| `mode` / `agent_ids` | 回显本次调用的口径与去重后的 id |
+| `mode` / `agent_ids` | 回显本次调用的口径与去重后的引用（名字或 Session id，按调用方给的写） |
 | `settled` | 已经结束的 child：`[{ agent_id, stop_reason? }]`（按确认顺序） |
 | `pending` | 返回时**仍在跑**的 child |
 | `absent` | 调用时**没有 live activation**（既没有结束记录、也没有本地 Agent）的 child |
@@ -112,7 +115,8 @@ loop 在本 tool group 提交后关闭 turn，不需要模型“记得”结束�
 
 边界：
 
-* **只等直接子代理**：用 parent-owned `subagent/catalog` 一次性校验全部 id；混进陌生 id 就报错
+* **只等直接子代理**：用 parent-owned `subagent/catalog` 一次性校验全部引用（名字先解析成 Session id）；
+  混进陌生引用就报错
   并**点名**是哪一个，不去等一个陌生 session。
 * **已结束不挂等待**：tracker 保留 `settled` 状态，正是为了回答“调用时它是不是早就结束了”
   —— `any_of` 因此能在第一个 child 早已结束时立刻返回 `already_finished`。

@@ -64,17 +64,38 @@ async function flush() {
 }
 
 /**
- * 造一个插件上下文。
- * @param {object} options - catalog / live agent behavior.
+ * 造一个插件上下文（**rc.5 形状的 double**，不是真宿主）。
+ *
+ * 形状对齐宿主 0.2.2-rc.5：`subagents` 只有 `resolveName` / `listDescendants`
+ * （旧协议的 `subagents.listChildren` 已经不存在），`agents` 也没有 `isOwnedBy`。
+ * `children` 的每一项是一条 catalog 行 `{ id: <Session id>, name?: <名字>, mode? }`；
+ * `listDescendants` 与宿主一致地带 `parentId`（直系子代 = `parentId === caller.id`）。
+ * @param {object} options - catalog / live agent / name-resolution behavior.
  * @returns {{ctx: object, bus: object, tools: object[]}} fake host.
  */
-function fakeHost({ children = [{ id: 'child', mode: 'continuable' }], live } = {}) {
+function fakeHost({ children = [{ id: 'child', mode: 'continuable' }], live, resolveName } = {}) {
   const bus = eventBus();
   const tools = [];
-  const subagents = { listChildren: async () => children };
+  const rows = children.map((entry) => ({
+    kind: 'child',
+    parentId: 'parent',
+    depth: 1,
+    mode: 'continuable',
+    ...entry,
+  }));
+  const subagents = {
+    // 名字 → Session id；不是名字就原样返回（宿主 resolveName 的口径，单 token 可当 id）。
+    async resolveName(_caller, reference) {
+      if (resolveName !== undefined) return resolveName(reference);
+      const match = rows.find((entry) => entry.name === reference);
+      return match === undefined ? reference : match.id;
+    },
+    async listDescendants() {
+      return rows;
+    },
+  };
   const agents = {
-    get: (id) => (live?.(id) ? { id } : undefined),
-    isOwnedBy: () => true,
+    get: (id) => (live?.(id) ? { id, status: 'running' } : undefined),
   };
   const ctx = {
     on: bus.on,
@@ -320,9 +341,9 @@ test('★ catalog 读取期间用户插话：不进入等待，立即 user_inter
 
   let release;
   const gate = new Promise((resolve) => { release = resolve; });
-  ctx.get('subagents').listChildren = async () => {
+  ctx.get('subagents').listDescendants = async () => {
     await gate;
-    return [{ id: 'child', mode: 'continuable' }];
+    return [{ kind: 'child', id: 'child', parentId: 'parent', depth: 1, mode: 'continuable' }];
   };
 
   const pending = tool.execute({ agent_id: 'child' }, { agent, signal: new AbortController().signal });
@@ -416,4 +437,125 @@ test('★ timeout_seconds 越界：errored result（不让模型用 0 / 负数 /
     () => tool.execute({ agent_id: 'child', timeout_seconds: 3601 }, { agent, signal: new AbortController().signal }),
     /1 through 3600/,
   );
+});
+
+// ── rc.5 协议：agent 引用 = 名字 or Session id ────────────────────────────────
+// 宿主 0.2.2-rc.5 的 `subagent` 回执是 `started subagent <name>`（名字由调用方给，
+// `list_agents` 也按名字显示）；Session id 仍可作输入。这一组钉住"引用先解析再查"。
+
+test('★ rc.5 名字寻址：用 `started subagent <name>` 的名字等待 ⇒ 真挂等待，end 后 finished', async () => {
+  const { tool, bus } = loadTool({ children: [{ id: 'uuid-a', name: 'recon-lift2-4' }] });
+  const agent = fakeAgent({ bus });
+  bus.emit('subagent/start', { id: 'uuid-a', runId: 'r1' });
+
+  const pending = tool.execute({ agent_ids: ['recon-lift2-4'] }, { agent, signal: new AbortController().signal });
+  // 关键：不是立即返回，而是真的挂上了等待监听（旧代码在这里就 not_running 了）。
+  await until(() => bus.count('agent/inbox/inserted') === 1, 'wait listeners');
+  bus.emit('subagent/end', { id: 'uuid-a', runId: 'r1', stopReason: 'completed' });
+
+  const value = await pending;
+  assert.equal(value.status, 'finished');
+  assert.deepEqual(value.settled, [{ agent_id: 'recon-lift2-4', stop_reason: 'completed' }]);
+  assert.deepEqual(value.pending, []);
+  assert.deepEqual(value.absent, []);
+});
+
+test('★ rc.5 名字 + Session id 混用：两者都进等待，结果回显各自的引用', async () => {
+  const { tool, bus } = loadTool({ children: [{ id: 'uuid-a', name: 'alpha' }, { id: 'uuid-b', name: 'beta' }] });
+  const agent = fakeAgent({ bus });
+  bus.emit('subagent/start', { id: 'uuid-a', runId: 'r1' });
+  bus.emit('subagent/start', { id: 'uuid-b', runId: 'r2' });
+
+  let resolved = false;
+  const pending = tool
+    .execute({ agent_ids: ['alpha', 'uuid-b'], mode: 'all_of' }, { agent, signal: new AbortController().signal })
+    .then((value) => {
+      resolved = true;
+      return value;
+    });
+  await until(() => bus.count('agent/inbox/inserted') === 1, 'wait listeners');
+
+  bus.emit('subagent/end', { id: 'uuid-a', runId: 'r1', stopReason: 'completed' });
+  await flush();
+  assert.equal(resolved, false, 'all_of 要等两个：名字与 id 都必须被解析到 Session id');
+
+  bus.emit('subagent/end', { id: 'uuid-b', runId: 'r2', stopReason: 'refusal' });
+  const value = await pending;
+  assert.equal(value.status, 'finished');
+  assert.deepEqual(value.settled, [
+    { agent_id: 'alpha', stop_reason: 'completed' },
+    { agent_id: 'uuid-b', stop_reason: 'refusal' },
+  ]);
+});
+
+test('★ rc.5 未知名字：errored 且点名、列出已知名字；不挂等待监听', async () => {
+  const { tool, bus } = loadTool({ children: [{ id: 'uuid-a', name: 'alpha' }] });
+  const agent = fakeAgent({ bus });
+
+  await assert.rejects(
+    () => tool.execute({ agent_ids: ['shadow'] }, { agent, signal: new AbortController().signal }),
+    (error) => {
+      assert.match(error.message, /"shadow" is not a direct child/);
+      assert.match(error.message, /alpha/, '错误要告诉模型当前树里有哪些名字');
+      return true;
+    },
+  );
+  assert.equal(bus.count('agent/inbox/inserted'), 0, 'errored 之前不许挂等待监听');
+});
+
+test('★ rc.5 tracker 空但 agents.get(Session id)=running：名字也能走兜底进等待', async () => {
+  const { tool, bus } = loadTool({
+    children: [{ id: 'uuid-a', name: 'alpha' }],
+    live: (id) => id === 'uuid-a',
+  });
+  const agent = fakeAgent({ bus });
+  // 故意不发 subagent/start：模拟插件重载后没见过这次 activation（tracker 空）。
+
+  const pending = tool.execute({ agent_ids: ['alpha'] }, { agent, signal: new AbortController().signal });
+  await until(() => bus.count('agent/inbox/inserted') === 1, 'wait listeners');
+  bus.emit('subagent/end', { id: 'uuid-a', runId: 'r1', stopReason: 'completed' });
+
+  const value = await pending;
+  assert.equal(value.status, 'finished');
+  assert.deepEqual(value.settled, [{ agent_id: 'alpha', stop_reason: 'completed' }]);
+});
+
+test('★ rc.5 名字指向已 settle 的 child：already_finished，且不挂等待监听', async () => {
+  const { tool, bus } = loadTool({ children: [{ id: 'uuid-a', name: 'alpha' }] });
+  const agent = fakeAgent({ bus });
+  bus.emit('subagent/start', { id: 'uuid-a', runId: 'r1' });
+  bus.emit('subagent/end', { id: 'uuid-a', runId: 'r1', stopReason: 'completed' });
+
+  const value = await tool.execute({ agent_ids: ['alpha'] }, { agent, signal: new AbortController().signal });
+  assert.equal(value.status, 'already_finished');
+  assert.deepEqual(value.settled, [{ agent_id: 'alpha', stop_reason: 'completed' }]);
+  assert.deepEqual(value.pending, []);
+  assert.equal(bus.count('agent/inbox/inserted'), 0);
+});
+
+test('★ rc.5 resolveName 抛 AGENT_NAME_NOT_FOUND：errored 且提示 list_agents', async () => {
+  const { tool, bus } = loadTool({
+    children: [{ id: 'uuid-a', name: 'alpha' }],
+    resolveName: (reference) => {
+      if (reference.includes('/')) {
+        const error = new Error(
+          'agent name "ghost/child" was not found in this subagent tree; use list_agents to see the names',
+        );
+        error.code = 'AGENT_NAME_NOT_FOUND';
+        throw error;
+      }
+      return reference;
+    },
+  });
+  const agent = fakeAgent({ bus });
+
+  await assert.rejects(
+    () => tool.execute({ agent_ids: ['ghost/child'] }, { agent, signal: new AbortController().signal }),
+    (error) => {
+      assert.match(error.message, /could not resolve "ghost\/child"/);
+      assert.match(error.message, /list_agents/);
+      return true;
+    },
+  );
+  assert.equal(bus.count('agent/inbox/inserted'), 0);
 });

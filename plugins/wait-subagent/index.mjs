@@ -58,6 +58,7 @@ const DESCRIPTION = [
   'Wait for direct subagents to settle instead of sleeping or polling.',
   'List the children in `agent_ids` (a single `agent_id` also works). `mode` decides when the call returns: `any_of` (default) returns as soon as the FIRST of them settles; `all_of` waits until every requested child has settled.',
   'Returns immediately when a human user interjects (queue or steer), when the wait times out, or when the turn is cancelled; the result then carries the settled/pending snapshot.',
+  'Each entry in `agent_ids` is an agent reference: the name `subagent` / `subagent_fork` returned (`started subagent <name>`, also what `list_agents` shows), or a Session id; names are resolved to Session ids before the wait.',
   'A child that had already settled is reported as already_finished; a child with no live activation is reported as absent and is never waited for.',
   'Each child’s final output still arrives separately as its completion notice; this tool only confirms settlement.',
   'A queued user interjection automatically concludes the turn so the message can run; a steered message is visible at your next step. Do not call wait_subagent again for a child you were told settled.',
@@ -166,26 +167,40 @@ function serviceOf(ctx, serviceName) {
  */
 async function catalogOf(ctx, agent, signal) {
   const subagents = serviceOf(ctx, 'subagents');
-  if (subagents === undefined || typeof subagents.listChildren !== 'function') return { supported: false };
+  if (subagents === undefined) return { supported: false };
   try {
-    return { supported: true, children: (await subagents.listChildren(agent.id, signal)) ?? [] };
+    // Current DSH: one recursive listing that names each row's catalog parent.
+    // Only rows the caller created directly are its children.
+    if (typeof subagents.listDescendants === 'function') {
+      const entries = (await subagents.listDescendants(agent.id, signal)) ?? [];
+      return { supported: true, children: entries.filter((entry) => entry?.parentId === agent.id) };
+    }
+    // Older DSH kept the direct-children read on the service.
+    if (typeof subagents.listChildren === 'function') {
+      return { supported: true, children: (await subagents.listChildren(agent.id, signal)) ?? [] };
+    }
+    return { supported: false };
   } catch {
     return { supported: false };
   }
 }
 
 /**
- * Whether the child is a direct runtime child of the caller. Only available for
- * local children (external runs have no Agent).
+ * Resolve one model-supplied child reference to a Session id.
+ * `subagent` / `subagent_fork` report `started subagent <name>`, and `list_agents`
+ * reports names, so a bare token is normally a name — not a Session id. The
+ * subagent service owns the name → id mapping (`resolveName`); a token that is
+ * not a name in this tree is returned unchanged so it can still be a Session id.
  * @param {object} ctx - plugin context.
  * @param {object} agent - calling agent.
- * @param {string} childId - child session id.
- * @returns {boolean|undefined} true/false when the registry can answer; undefined when it cannot.
+ * @param {string} reference - name or Session id as supplied by the model.
+ * @param {AbortSignal} [signal] - cancellation forwarded to the catalog reads.
+ * @returns {Promise<string>} the child's Session id.
  */
-function ownedByCaller(ctx, agent, childId) {
-  const agents = serviceOf(ctx, 'agents');
-  if (agents === undefined || typeof agents.isOwnedBy !== 'function') return undefined;
-  return agents.isOwnedBy(childId, agent);
+async function resolveChildId(ctx, agent, reference, signal) {
+  const subagents = serviceOf(ctx, 'subagents');
+  if (subagents === undefined || typeof subagents.resolveName !== 'function') return reference;
+  return await subagents.resolveName(agent, reference, signal);
 }
 
 /**
@@ -231,12 +246,12 @@ function settledOfTracker(entries) {
   }));
 }
 
-/** 合并“调用前已经结束”的 child 与“等到了”的 child。 */
-function mergeSettled(settledNow, outcomeSettled) {
+/** 合并“调用前已经结束”的 child 与“等到了”的 child（`tokenOf` 把 Session id 换回调用方给的引用）。 */
+function mergeSettled(settledNow, outcomeSettled, tokenOf = (id) => id) {
   const merged = [...settledNow];
   for (const entry of outcomeSettled ?? []) {
     const stop = entry.info?.stopReason;
-    merged.push({ agent_id: entry.childId, ...(stop === undefined ? {} : { stop_reason: String(stop) }) });
+    merged.push({ agent_id: tokenOf(entry.childId), ...(stop === undefined ? {} : { stop_reason: String(stop) }) });
   }
   return merged;
 }
@@ -287,9 +302,9 @@ function valueOfPendingUser({ agent, mode, agentIds }) {
  * @param {object} options - aggregation inputs.
  * @returns {object} canonical value.
  */
-function valueOfWaitOutcome({ mode, agentIds, settledNow, absent, outcome, timeoutSeconds }) {
-  const settled = mergeSettled(settledNow, outcome.settled);
-  const pending = outcome.pending ?? [];
+function valueOfWaitOutcome({ mode, agentIds, settledNow, absent, outcome, timeoutSeconds, tokenOf = (id) => id }) {
+  const settled = mergeSettled(settledNow, outcome.settled, tokenOf);
+  const pending = (outcome.pending ?? []).map(tokenOf);
 
   switch (outcome.kind) {
     case WAIT_KINDS.FINISHED: {
@@ -372,12 +387,12 @@ export function apply(ctx) {
         agent_id: {
           type: 'string',
           description:
-            'One child session id returned by subagent/subagent_fork as `started subagent <id>`. Shorthand for a single-element `agent_ids`; provide at least one of the two.',
+            'One agent reference returned by subagent/subagent_fork as `started subagent <name>`, or a Session id. Shorthand for a single-element `agent_ids`; provide at least one of the two.',
         },
         agent_ids: {
           type: 'array',
           items: { type: 'string' },
-          description: `Child session ids to wait for (1-${MAX_TARGETS}). With mode=any_of the call returns as soon as the first of them settles.`,
+          description: `Agent references to wait for (1-${MAX_TARGETS}): names as shown by list_agents, or Session ids. With mode=any_of the call returns as soon as the first of them settles.`,
         },
         mode: {
           type: 'string',
@@ -453,16 +468,53 @@ export function apply(ctx) {
           return concludeIfQueued(exec, valueOfPendingUser({ agent, mode, agentIds: ids }));
         }
 
+        // Every reference is resolved through the subagent service: `subagent` /
+        // `subagent_fork` hand the model a NAME (`started subagent <name>`), not a
+        // Session id, so a bare token must not be looked up as an id.
+        const resolved = new Map();
+        for (const reference of ids) {
+          let childId;
+          try {
+            childId = await resolveChildId(ctx, agent, reference, exec.signal);
+          } catch (error) {
+            throw new Error(
+              `wait_subagent could not resolve "${reference}": ${
+                error instanceof Error ? error.message : String(error)
+              }. Use list_agents to see the agent names in your subagent tree.`,
+            );
+          }
+          if (childId === agent.id) throw new Error('wait_subagent cannot wait for the calling agent itself.');
+          resolved.set(reference, String(childId));
+        }
+        // Resolution reads catalogs and can yield: re-check cancellation and a human interjection.
+        if (exec.signal?.aborted) return valueOfCancelled({ mode, agentIds: ids });
+        if (pendingHumanMessages(agent).length > 0) {
+          return concludeIfQueued(exec, valueOfPendingUser({ agent, mode, agentIds: ids }));
+        }
+        /** Session id → the reference the caller used, so results echo the caller's input. */
+        const tokenOf = (childId) => ids.find((reference) => resolved.get(reference) === childId) ?? childId;
+
         // The parent-owned catalog is the authority on "is this one of my direct children?".
         // A missing read (projection unavailable) is a soft failure: keep the tracker/registry checks.
         if (catalog.supported) {
           const known = new Set(catalog.children.map((entry) => entry.id));
-          const strangers = ids.filter((id) => !known.has(id));
+          const strangers = ids.filter((reference) => !known.has(resolved.get(reference)));
           if (strangers.length > 0) {
+            const detail = strangers
+              .map((reference) => {
+                const childId = resolved.get(reference);
+                return childId === reference ? `"${reference}"` : `"${reference}" (session ${childId})`;
+              })
+              .join(', ');
+            const names = catalog.children
+              .map((entry) => (typeof entry.name === 'string' ? entry.name : undefined))
+              .filter((name) => name !== undefined);
             throw new Error(
-              `${strangers.map((id) => `"${id}"`).join(', ')} ${
+              `${detail} ${
                 strangers.length === 1 ? 'is not a direct child' : 'are not direct children'
-              } of agent "${agent.id}". Use list_agents to find a child id from \`started subagent <id>\`.`,
+              } of agent "${agent.id}". Use list_agents to see the agent names${
+                names.length === 0 ? '' : ` (${names.join(', ')})`
+              }.`,
             );
           }
         }
@@ -472,27 +524,25 @@ export function apply(ctx) {
         const settledNow = [];
         const targets = [];
         const absent = [];
-        for (const id of ids) {
-          const tracked = tracker.get(id);
+        for (const reference of ids) {
+          const childId = resolved.get(reference);
+          const tracked = tracker.get(childId);
           if (tracked?.state === 'settled') {
-            settledNow.push({ agent_id: id, ...(tracked.info?.stopReason === undefined ? {} : { stop_reason: String(tracked.info.stopReason) }) });
+            settledNow.push({ agent_id: reference, ...(tracked.info?.stopReason === undefined ? {} : { stop_reason: String(tracked.info.stopReason) }) });
             continue;
           }
           if (tracked?.state === 'running') {
-            targets.push({ childId: id, runId: tracked.runId });
+            targets.push({ childId, runId: tracked.runId });
             continue;
           }
           // Tracker missed the start (plugin reload / child started before this plugin).
           // A live local Agent is still an authoritative "running" answer.
-          const live = agents !== undefined && typeof agents.get === 'function' ? agents.get(id) : undefined;
+          const live = agents !== undefined && typeof agents.get === 'function' ? agents.get(childId) : undefined;
           if (live !== undefined) {
-            if (ownedByCaller(ctx, agent, id) === false) {
-              throw new Error(`"${id}" is a live agent but is not a direct child of agent "${agent.id}".`);
-            }
-            targets.push({ childId: id });
+            targets.push({ childId });
             continue;
           }
-          absent.push(id);
+          absent.push(reference);
         }
 
         // any_of 的“第一个”在调用前就已经结束 ⇒ 根本不用等。
@@ -501,7 +551,7 @@ export function apply(ctx) {
             mode,
             agentIds: ids,
             settled: settledNow,
-            pending: targets.map((target) => target.childId),
+            pending: targets.map((target) => tokenOf(target.childId)),
             absent,
           });
         }
@@ -520,7 +570,10 @@ export function apply(ctx) {
           signal: exec.signal,
           tracker,
         });
-        return concludeIfQueued(exec, valueOfWaitOutcome({ mode, agentIds: ids, settledNow, absent, outcome, timeoutSeconds }));
+        return concludeIfQueued(
+          exec,
+          valueOfWaitOutcome({ mode, agentIds: ids, settledNow, absent, outcome, timeoutSeconds, tokenOf }),
+        );
       },
     }),
   );
