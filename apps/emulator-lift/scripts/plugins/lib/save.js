@@ -44,6 +44,26 @@
 //     ⇒ 顶部那排只影响"显示哪十年组"，⛔ 不要拿它翻页。详见 `docs/03-emulator/save-format.md`
 //     §加载界面的列表与翻页。
 //
+// ★ 2026-11-25 —— **翻页等待的读点预算 60 太小**（11-24 的「3 次 2 次 `page not reached`」根因）：
+//   实测（win32 / dev / `out/emulator-lift-aot.exe`（2026-11-24 23:28）/ `--present headless`，
+//   私有 appdata 从 `saves/` 复制；5/5 run）：点左箭头 `(45,357)` 之后，页号 `0x138e` 在
+//   **76–77 个读点 / ≈210 ms** 才变（变的那一拍 `pos=0x6EF4` / `0x6F44` = `SAVE.BIN` 的翻页处理段；
+//   读点密度 ≈ **366 个/s**）。
+//   ⇒ 旧 `PAGE_STALL_LIMIT = 60`（≈164 ms ≈ 1.5 帧）**比点击自身还短**：插件点击的抬起要跨过
+//   按下之后的**两个完整 guest 回调**（闸门②′，`PointerCore::kCallbackFramesBeforeRelease`；
+//   2026-11-22 `f7ec239` 接进插件路）。
+//   · 正常时：`turn` 先撞满 60 ⇒ 发一次"重试点击"；第一下在 76 落地 ⇒ `turnr` 接住（"看起来能用"）；
+//   · 第一下被吞时：重试点击**自己**又要 76 个读点才落地，而 `turnr` 预算只有 60 ⇒ 重试**结构上
+//     救不回来** ⇒ `finish(5, "page not reached (target 0, still 1)")`
+//     （= `REQ-01M86VRRTPY8W9RP1SFDT0N200` 的签名）。此外那记多余的重试点击会在页号已变之后落地，
+//     把页**又**翻一格（0 → 89）⇒ 之后按页内行 y 点下去落到空槽（= `load:sbunki` 超时的另一条路）。
+//   ⇒ 修法（本文件）：预算改 **1200**（≈2.6× 实测上界 461 读点）⇒ 正常时 `turn` 自己就看到页号变、
+//   **不产生**重试点击；只有点击真丢了才重试。另在点行**之前**再核一次页号（不符就回页链、⛔ 不点行）。
+//   ★ **真游戏 A/B（同一份 `saves/`、同一个 exe）**：把第一下箭头点击**故意点空**（= 模拟"第一下被吞"）⇒
+//     旧 60：`run=finished exit=5 reason=load-save: page not reached (target 0, still 1)`（calls=126）；
+//     新 1200：`page 0 reached` → `reached REIGN.BIN`（calls=723）⇒ 重试窗口是这条链唯一的救命面。
+//   ⛔ 没有放宽任何门（判据仍是"页号真的等于目标页"）；⛔ 没改 `saves/`；⛔ 没有用 `--input-plan`。
+//
 // ★ 2026-11-21（A 阶段）—— **两个接口，各管一件事**：
 //   · `options.expect: string[]`（**必填**）：载入完成后落在哪个脚本，由**调用方按预期给** ——
 //     ADV = `SC*` / `SG*` / `SP*`（如 `SC0000.BIN`）、战斗 = `BTL.BIN`、地图 = `FIELD.BIN`（可能还有别的名字）。
@@ -152,8 +172,23 @@ const SAVE_PAGES = 90; // 页号 0..89（环形：0 的上一页 = 89）
 const PAGE_PREV_X = 45; // 左侧大箭头 = 上一页（页号 −1，环形）
 const PAGE_NEXT_X = 1235; // 右侧大箭头 = 下一页（页号 +1，环形）
 const PAGE_ARROW_Y = 357;
-// 点一次箭头后等"页号真的变了"的读点上限（一个读点 ≈ 一拍输入轮询 ⇒ 60 拍 ≈ 1 s）。
-const PAGE_STALL_LIMIT = 60;
+// 点一次箭头后等"页号真的变了"的读点上限。
+//
+// ★ 2026-11-25 改 60 → 1200（**回归修复**；读数见文件头 §2026-11-25）：
+//   实测一次箭头点击从"提交"到"页号变"= **76–77 个读点 / ≈210 ms**（5/5 次无干扰的探针 run：
+//   76,77,76,76,77；页号变的那一拍落在 `SAVE.BIN` 的翻页处理段 `pos=0x6EF4` / `0x6F44`），
+//   读点密度 ≈ **366 个/s** ⇒ **60 个读点 ≈ 164 ms ≈ 1.5 帧**，而点击的抬起要等按下之后的
+//   **两个完整 guest 回调**（`PointerCore::kCallbackFramesBeforeRelease`，闸门②′）⇒ 旧值**比点击自身还短**。
+//   真 run 里的落地延迟还**在抖**：12 次 `save.js` run 的页链回调数 = 85…461（≈0.2–1.3 s，
+//   抖动来自"2 个回调"的帧长本身）⇒ 上界按 **461 读点**取。
+//   ⛔ 旧注释写的"一个读点 ≈ 一拍输入轮询 ⇒ 60 拍 ≈ 1 s"是错的（实测 60 拍 ≈ 0.16 s）——
+//   这条错误假设就是 60 的来路，也是 11-24「3 次 2 次 `page not reached`」的来路：
+//   · 每一次**正常**点击都会先撞满 60、再靠 `turnr` 那一拍才接住（所以"有时能过"）；
+//   · 第一下真被吞时，`turnr` 的重试点击自己又要 76 个读点才落地，而重试预算只有 60
+//     ⇒ 重试**结构上救不回来**，必红（真游戏里复现过：见文件头）。
+//   新值 = **1200**（≈2.6× 实测上界）：正常时 `turn` 阶段自己就看到页号变（**不产生**重试点击，
+//   也就不会有多余的第 2 次翻页）；只有点击真丢了才走重试（最坏等 2×1200 读点后响亮失败）。
+const PAGE_STALL_LIMIT = 1200;
 // 点击被吞时的第二次机会（同样是 PAGE_STALL_LIMIT 个读点）。
 const PAGE_RETRY_PHASE = "turnr";
 
@@ -356,7 +391,20 @@ export function loadSave(slot, options = {}) {
                 case "load:page-ready":
                     // 列表刷完了（SAVE 的回调体又活了）⇒ 现在才 move/click 那一行。
                     return rowMove(ctx);
-                case "load:row":
+                case "load:row": {
+                    // ★ 点行**之前**再核一次页号（2026-11-25）：箭头点击的落地要比 2 个 guest 回调，
+                    //   旧预算（60 读点）会让页链提前发一次"重试点击"；那一下在页号已经变了之后
+                    //   才落地 ⇒ 把页**又**翻一格（0 → 89），随后按页内行 y 点下去就落到别的槽上
+                    //   （空槽 ⇒ 没有确认框 ⇒ `load:sbunki` 30 s 超时）。⇒ 这里发现页不对就回页链，
+                    //   ⛔ 不点行、⛔ 不猜"差一格"。
+                    const nowPage = readSavePage(ctx);
+                    if (nowPage !== targetPage) {
+                        ctx.log(
+                            "warn",
+                            `load-save: page moved to ${nowPage} before the row click (target ${targetPage}) ⇒ 回页链`,
+                        );
+                        return armPage(ctx, targetPage, "turn", 0, nowPage);
+                    }
                     ctx.log("info", "load-save: row hovered");
                     ctx.input.click(SLOT_X, rowY);
                     return ctx.trigger.afterPosition(
@@ -368,6 +416,7 @@ export function loadSave(slot, options = {}) {
                             timeoutMs: gateTimeoutMs,
                         },
                     );
+                }
                 case "load:sbunki":
                     ctx.log("info", "load-save: SBUNKI hit (read-segment passed)");
                     ctx.input.click(CONFIRM_X, CONFIRM_Y);

@@ -16,19 +16,26 @@
 //   `DRAWOBJ.BIN` instr#44 `add (local-int 11) fa (local-int 1)` ⇒ 纹理槽 = `0xFA + 类型`；
 //   `SETMAPTEX.BIN` instr#78/#80 把 ALF 20797 / 20798 绑到 `0x119` / `0x11A`。
 //
-// ★ **为什么本文件自己走载入链、而不用 `./save.js` 的 `loadSave`**（2026-11-24 / win32 实测）：
-//   本安装树上 `loadSave` 两次都停在 `load:sbunki` 门超时（`calls=5`、`reason=load-save: gate timeout
-//   (load:sbunki)`；槽 5 与槽 10 各一次）。同一组窗口在 `.plan` 前端是 4/4（`save07-battle.plan` 的
-//   ①–④：SAVE 回调体 → `click 300 507` → SBUNKI 轮询体 → 读段之后 `[0x0B18,0x0C58)` → `click 640 323`）。
-//   这里照抄那四步（窗口常量全部 import 自 `./script-positions.js`），⛔ 没有新窗口、没有新坐标。
+// ★ **载入段 = `./save.js` 的 `loadSave`（2026-11-25 改回；此前是本文件自建的四步链）**：
+//   自建链的那一版**没有判页**（照抄 `save07-battle.plan` 的 4 步，行 y 直接按槽号取），而
+//   `saves/SAVE.DAT` 持久化的进屏页是 **1**（`LOAD 010..019`）⇒ 槽 7 的 y=507 落在**页 1 的第 7 行
+//   = 槽 17**（空槽：`saves/` 只有 SAVE10 / SAVE11）⇒ 点下去没有确认框 ⇒ `fp:sbunki-poll` 超时、
+//   连采 8 次仍 `SAVE.BIN pos=0x11B8`。**那不是输入被吞，是页基算错**。
+//   ⇒ 现在载入段交给 `loadSave(slot)`（它自己读页号 `0x138e`、翻页、翻完等列表刷新、再点行）；
+//   本文件只剩"载入之后"这一段（`fp:` 前缀），⛔ 不再重算行 y / 不重抄确认框窗口。
+//   ⚠ 2026-11-24 那一版还写过"只 click 不动光标 ⇒ 行不亮"：`ctx.input.click` 自己会先 `mouseMove`
+//   （`PointerCore::armClickAt` → `armMoveAt`），所以那条归因**不成立**；真正的原因是上面这条空槽。
 //
 // 用法（cwd = apps/emulator-lift；`on` 缺省 0 = 不动）：
-//   ./out/emulator-lift-aot.exe --exe ../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE \
-//     --game-dir ../../links/install --appdata ../../.tmp/field-model/appdata \
+//   ./out/emulator-lift-aot.exe --game-dir ../../links/install --appdata ../../.tmp/field-model/appdata \
 //     --present headless --skip-logo --audio off --time-limit 180 \
 //     --plugin scripts/plugins/lib/scenario-field-point-visible.js \
 //     --plugin-param slot=7 --plugin-param on=1
+//   ★ 从冷启动跑 ⇒ 本文件自己盖 `./boot-to-title.js`（与 `scenario-fellow-switch.js` 同一个三层 route）。
 
+import { bootToTitle } from "./boot-to-title.js";
+import { route } from "./chains.js";
+import { loadSave } from "./save.js";
 import {
     FIELD_CURRENT_MAP_GLOBAL_ID,
     FIELD_MAP_INSTANCE_GLOBAL_ID,
@@ -39,18 +46,7 @@ import {
     readFieldObjectSlots,
     readIntGlobal,
 } from "./guest-globals.js";
-import {
-    FIELD_MAIN_LOOP_HI,
-    FIELD_MAIN_LOOP_LO,
-    SAVE_INPUT_CALLBACK_HI,
-    SAVE_INPUT_CALLBACK_LO,
-    SBUNKI_CONFIRM_CLICK_HI,
-    SBUNKI_CONFIRM_CLICK_LO,
-    SBUNKI_POLL_HI,
-    SBUNKI_POLL_LO,
-    TITLE_INPUT_CALLBACK_HI,
-    TITLE_INPUT_CALLBACK_LO,
-} from "./script-positions.js";
+import { FIELD_MAIN_LOOP_HI, FIELD_MAIN_LOOP_LO } from "./script-positions.js";
 
 /** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
 /** @typedef {import("@amayui/lift-plugin").Trigger} Trigger */
@@ -58,23 +54,20 @@ import {
 /** @typedef {import("@amayui/lift-plugin").TimeoutEvent} TimeoutEvent */
 /** @typedef {FiredEvent | TimeoutEvent} PluginEvent */
 
-/** 载入槽（缺省 7：`save07-battle.plan` 用的那一槽，行 y = 507）。 */
+/** 载入槽（缺省 7：`save07-battle.plan` 用的那一槽 ⇒ 页 0 第 7 行）。 */
 const DEFAULT_SLOT = 7;
-/** 加载屏行中心 y（实测表；只有 0..7 有读数）。坐标不是 `pos`，⛔ 不进 `script-positions.js`。 */
-const ROW_Y = { 0: 91, 1: 150, 2: 209, 3: 269, 4: 328, 5: 388, 6: 447, 7: 507 };
-/** 各道门的上限（宿主墙钟）。 */
-const TITLE_TIMEOUT_MS = 60000;
-const SAVE_TIMEOUT_MS = 120000;
-const SBUNKI_TIMEOUT_MS = 60000;
+/** 载入的终态脚本：这份存档落在 `FIELD`（页号/行由 `loadSave` 自己判）。 */
+const LOAD_EXPECT = ["FIELD.BIN"];
+/** 载入段各道门的超时（翻页 + 列表刷新 + 确认框）。 */
+const LOAD_TIMEOUT_MS = 120000;
+/** FIELD 就绪 + 之后各道门的上限。 */
 const FIELD_TIMEOUT_MS = 300000;
 /** 改完之后再活多久（给 DRAWOBJ 若干帧去画）。 */
 const DEFAULT_HOLD_MS = 3000;
 /** 日志里最多逐槽打几行（⛔ 不刷屏）。 */
 const MAX_LOGGED_SLOTS = 12;
-/** 点 LoadData 入口 / 确认框「是」的坐标（1280×720；照抄 `save07-battle.plan`）。 */
-const LOAD_DATA_XY = [1070, 480];
-const CONFIRM_XY = [640, 323];
-const ROW_X = 300;
+/** `diag` 连采的读点个数（诊断档：看 FIELD 之后脚本停在哪）。 */
+const DIAG_SAMPLES = 8;
 
 /**
  * `1f,20`（反汇编口径：**十六进制不带 0x**）→ 数字数组。
@@ -141,19 +134,18 @@ function logSnapshot(ctx, tag) {
 }
 
 /**
- * 载入链 + 场景。`slot` 只决定行 y（页基由读档界面自己从 `SAVE.DAT` 读回）。
+ * **载入之后**的那一段（`fp:` 前缀）：`FIELD` 就绪 → 改派生渲染位 → 保持若干帧。
  *
- * @param {number} slot 0..7（只支持有行 y 读数的那 8 行）。
+ * @param {{ on: boolean, types: number[], hold: number, diag: boolean }} opts
  * @returns {{ start: (ctx: RunCtx) => Trigger | Trigger[], onTrigger: (ctx: RunCtx, ev: PluginEvent) => Trigger | Trigger[] }}
  */
-function makeChain(slot) {
-    const rowY = ROW_Y[slot];
-    if (rowY === undefined) throw new Error(`slot ${slot} 没有行 y 读数（只支持 0..7）`);
+function makeFieldStage(opts) {
     return {
         start(ctx) {
-            return ctx.trigger.afterPosition("TITLE.BIN", TITLE_INPUT_CALLBACK_LO, TITLE_INPUT_CALLBACK_HI, {
-                name: "fp:title",
-                timeoutMs: TITLE_TIMEOUT_MS,
+            ctx.log("info", "field-points: 载入到 FIELD ⇒ 等地图主循环");
+            return ctx.trigger.afterPosition("FIELD.BIN", FIELD_MAIN_LOOP_LO, FIELD_MAIN_LOOP_HI, {
+                name: "fp:field",
+                timeoutMs: FIELD_TIMEOUT_MS,
             });
         },
         onTrigger(ctx, ev) {
@@ -161,119 +153,83 @@ function makeChain(slot) {
                 ctx.finish(5, `field-points: timeout (${ev.name})`);
                 return [];
             }
-            switch (ev.name) {
-                case "fp:title":
-                    if (intParam(ctx.params, "selftest", 0) !== 0) {
-                        // 能力自检（⛔ 不是场景）：证明 `ctx.read.global.get` / `ctx.edit.global.set` 在这台
-                        // 构建上真的通 —— 读一格 → 写回**同一个值**（无副作用）→ 再读回比对。
-                        const id = FIELD_OBJECT_FLAGS_GLOBAL_ID;
-                        const before = readIntGlobal(ctx, id) >>> 0;
-                        const receipt = ctx.edit.global.set("int", id, before);
-                        const each = readIntGlobal(ctx, id) >>> 0;
-                        const applied = receipt !== null && typeof receipt === "object" ? receipt.applied !== false : false;
-                        ctx.log("info", `field-points: selftest global=${hex(id)} before=${hex(before)} ` +
-                            `readback=${hex(each)} applied=${String(applied)} ` +
-                            `accepted=${String(receipt !== null && typeof receipt === "object" ? receipt.accepted : "?")}`);
-                        ctx.finish(applied && each === before ? 0 : 6, "field-points: selftest");
-                        return [];
+            const name = String(ev.name);
+            if (name === "fp:field") {
+                ctx.log("info", `field-points: FIELD 就绪 ⇒ switch on=${opts.on ? 1 : 0} ` +
+                    `types=${opts.types.map(hex).join(",")}`);
+                logSnapshot(ctx, "before");
+                if (opts.on) {
+                    const changed = forceFieldPointsVisible(ctx, { types: opts.types });
+                    const did = changed.filter((c) => c.applied);
+                    ctx.log("info", `field-points: forced=${did.length}/${changed.length} 个槽（清 HIDE|ALPHA0；派生位）`);
+                    for (const c of did.slice(0, MAX_LOGGED_SLOTS)) {
+                        ctx.log("info", `field-points: forced slot=${c.slot} type=${hex(c.type)} ` +
+                            `${hex(c.before)} → ${hex(c.after)}`);
                     }
-                    ctx.input.click(LOAD_DATA_XY[0], LOAD_DATA_XY[1]);
-                    return ctx.trigger.afterPosition("SAVE.BIN", SAVE_INPUT_CALLBACK_LO, SAVE_INPUT_CALLBACK_HI, {
-                        name: "fp:save",
-                        timeoutMs: SAVE_TIMEOUT_MS,
-                    });
-                case "fp:save":
-                    // ★ **先 move 再 click**：guest 的命中判定读的是**光标位置**（`ctx.input.move`），
-                    //   只 click 不动光标 ⇒ 行不亮、确认框不弹（2026-11-24 实测：本链第一版没有 move，
-                    //   `fp:sbunki-poll` 60 s 超时）。
-                    ctx.log("info", `field-points: SAVE 回调体 ⇒ 悬停第 ${slot} 行 (${ROW_X},${rowY})`);
-                    ctx.input.move(ROW_X, rowY);
-                    return ctx.trigger.atReadPoint("any", 1, { name: "fp:row-hover", timeoutMs: SBUNKI_TIMEOUT_MS });
-                case "fp:row-hover":
-                    ctx.input.click(ROW_X, rowY);
-                    if (intParam(ctx.params, "diag", 0) !== 0) {
-                        // 诊断档：点完之后连采 scriptPos，看有没有确认框脚本起来（⛔ 不进正常链）。
-                        return ctx.trigger.atReadPoint("any", 1, { name: "fp:diag:0", timeoutMs: 15000 });
-                    }
-                    return ctx.trigger.afterPosition("SBUNKI.BIN", SBUNKI_POLL_LO, SBUNKI_POLL_HI, {
-                        name: "fp:sbunki-poll",
-                        timeoutMs: SBUNKI_TIMEOUT_MS,
-                    });
-                case "fp:sbunki-poll":
-                    // ★ 读段**之后**才点（在轮询体/读段里点会被吞；`save07-battle.plan` 的 ③/③' 读数）。
-                    return ctx.trigger.afterPosition("SBUNKI.BIN", SBUNKI_CONFIRM_CLICK_LO, SBUNKI_CONFIRM_CLICK_HI, {
-                        name: "fp:sbunki-click",
-                        timeoutMs: SBUNKI_TIMEOUT_MS,
-                    });
-                case "fp:sbunki-click":
-                    ctx.input.move(CONFIRM_XY[0], CONFIRM_XY[1]);
-                    return ctx.trigger.atReadPoint("any", 1, { name: "fp:confirm-hover", timeoutMs: SBUNKI_TIMEOUT_MS });
-                case "fp:confirm-hover":
-                    ctx.input.click(CONFIRM_XY[0], CONFIRM_XY[1]);
-                    return ctx.trigger.afterPosition("FIELD.BIN", FIELD_MAIN_LOOP_LO, FIELD_MAIN_LOOP_HI, {
-                        name: "fp:field",
-                        timeoutMs: FIELD_TIMEOUT_MS,
-                    });
-                case "fp:field": {
-                    const on = intParam(ctx.params, "on", 0) !== 0;
-                    const types = parseTypes(ctx.params["types"]);
-                    const hold = intParam(ctx.params, "hold", DEFAULT_HOLD_MS);
-                    ctx.log("info", `field-points: FIELD 就绪 ⇒ switch on=${on ? 1 : 0} types=${types.map(hex).join(",")}`);
-                    logSnapshot(ctx, "before");
-                    if (on) {
-                        const changed = forceFieldPointsVisible(ctx, { types });
-                        const did = changed.filter((c) => c.applied);
-                        ctx.log("info", `field-points: forced=${did.length}/${changed.length} 个槽（清 HIDE|ALPHA0；派生位）`);
-                        for (const c of did.slice(0, MAX_LOGGED_SLOTS)) {
-                            ctx.log("info", `field-points: forced slot=${c.slot} type=${hex(c.type)} ` +
-                                `${hex(c.before)} → ${hex(c.after)}`);
-                        }
-                        logSnapshot(ctx, "after");
-                        ctx.log("info", `field-points: 只写过 ${hex(FIELD_OBJECT_FLAGS_GLOBAL_ID)}+slot` +
-                            "（派生渲染位）；类型表与持久输入未写");
-                    }
-                    return ctx.trigger.afterDelay(hold, { name: "fp:hold" });
+                    logSnapshot(ctx, "after");
+                    ctx.log("info", `field-points: 只写过 ${hex(FIELD_OBJECT_FLAGS_GLOBAL_ID)}+slot` +
+                        "（派生渲染位）；类型表与持久输入未写");
                 }
-                case "fp:hold":
-                    logSnapshot(ctx, "after-hold");
-                    ctx.log("info", `field-points: done (on=${intParam(ctx.params, "on", 0) !== 0 ? 1 : 0})`);
-                    ctx.finish(0, "field-points: survived");
-                    return [];
-                default:
-                    if (ev.name.startsWith("fp:diag:")) {
-                        const n = Number(ev.name.slice("fp:diag:".length));
-                        // ★ `RunCtx.read.scriptPos` 在 Run 语境是 `undefined`（`plugin.d.ts` 的 C2b 切片）
-                        //   ⇒ 位置读数走 `ctx.now`（`TriggerReadings{script,pos}`）。
-                        const now = ctx.now;
-                        ctx.log("info", `field-points: diag[${n}] script=${String(now.script)} ` +
-                            `pos=0x${Number((now.pos ?? 0) >>> 0).toString(16)}`);
-                        if (n + 1 >= 8) {
-                            ctx.finish(7, "field-points: diag done");
-                            return [];
-                        }
-                        return ctx.trigger.atReadPoint("any", 1, { name: `fp:diag:${n + 1}`, timeoutMs: 15000 });
-                    }
-                    ctx.fail(ev.name, `unknown state: ${ev.name}`);
-                    return [];
+                if (opts.diag) {
+                    // 诊断档（⛔ 不进正常链）：连采 8 个读点的 script / pos。
+                    return ctx.trigger.atReadPoint("any", 1, { name: "fp:diag:0", timeoutMs: 15000 });
+                }
+                return ctx.trigger.afterDelay(opts.hold, { name: "fp:hold" });
             }
+            if (name === "fp:hold") {
+                logSnapshot(ctx, "after-hold");
+                ctx.log("info", `field-points: done (on=${opts.on ? 1 : 0})`);
+                ctx.finish(0, "field-points: survived");
+                return [];
+            }
+            if (name.startsWith("fp:diag:")) {
+                const n = Number(name.slice("fp:diag:".length));
+                // ★ `RunCtx.read.scriptPos` 在 Run 语境是 `undefined`（`plugin.d.ts` 的 C2b 切片）
+                //   ⇒ 位置读数走 `ctx.now`（`TriggerReadings{script,pos}`）。
+                const now = ctx.now;
+                ctx.log("info", `field-points: diag[${n}] script=${String(now.script)} ` +
+                    `pos=0x${Number((now.pos ?? 0) >>> 0).toString(16)}`);
+                if (n + 1 >= DIAG_SAMPLES) {
+                    ctx.finish(7, "field-points: diag done");
+                    return [];
+                }
+                return ctx.trigger.atReadPoint("any", 1, { name: `fp:diag:${n + 1}`, timeoutMs: 15000 });
+            }
+            ctx.fail(name, `unknown state: ${name}`);
+            return [];
         },
     };
 }
 
-/** @type {{ start: (ctx: RunCtx) => Trigger | Trigger[], onTrigger: (ctx: RunCtx, ev: PluginEvent) => Trigger | Trigger[] } | null} */
+/** @type {object | null} */
 let chain = null;
 /** @type {string | null} */
 let chainKey = null;
 
 /**
+ * 三层 `route`（前缀两两不相交）：`boot:` 启动 / `load:` 载入 / 其余（`fp:`）本场景。
+ *
  * @param {Readonly<Record<string, string | null | undefined>>} params
  * @returns {{ start: (ctx: RunCtx) => Trigger | Trigger[], onTrigger: (ctx: RunCtx, ev: PluginEvent) => Trigger | Trigger[] }}
  */
 function chainFor(params) {
-    // `ctx.params` 在一个 Run 内不变 ⇒ 链只构造一次，不把进度塞进闭包。
-    const key = `${String(params["slot"])}|${String(params["on"])}`;
+    // `ctx.params` 在一个 Run 内不变 ⇒ 链只构造一次（链本身无状态：进度只在 ev.name）。
+    const slot = intParam(params, "slot", DEFAULT_SLOT);
+    const on = intParam(params, "on", 0) !== 0;
+    const typesRaw = String(params["types"] ?? "");
+    const hold = intParam(params, "hold", DEFAULT_HOLD_MS);
+    const diag = intParam(params, "diag", 0) !== 0;
+    const key = `${slot}|${on}|${typesRaw}|${hold}|${diag}`;
     if (chain !== null && chainKey === key) return chain;
-    chain = makeChain(intParam(params, "slot", DEFAULT_SLOT));
+    const stage = makeFieldStage({ on, types: parseTypes(params["types"]), hold, diag });
+    const load = loadSave(slot, {
+        expect: LOAD_EXPECT,
+        timeoutMs: LOAD_TIMEOUT_MS,
+        onLoaded: (ctx) => stage.start(ctx),
+    });
+    const boot = bootToTitle({ onDone: (ctx) => load.start(ctx) });
+    const afterBoot = route((ev) => String(ev.name).startsWith("load:"), load, stage);
+    chain = route((ev) => String(ev.name).startsWith("boot:"), boot, afterBoot);
     chainKey = key;
     return chain;
 }
