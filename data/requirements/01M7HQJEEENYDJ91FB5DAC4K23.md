@@ -2,8 +2,9 @@
 
 - id: REQ-01M7HQJEEENYDJ91FB5DAC4K23
 - type: req
-- status: doing
+- status: blocked
 - parent: REQ-01M7JHSEZVMYB4XHEN32V7V6HJ
+- blocked_by: [01M86VRT1YP53CJS0M885FCCJM]
 - tags: [emulator-lift, aot, stress, perf]
 
 ## 一句话
