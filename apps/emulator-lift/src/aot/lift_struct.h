@@ -43,6 +43,7 @@
 #include <vector>
 
 #include "aot/lift_gen_emit.h"
+#include "aot/lift_iat.h"
 
 namespace lift {
 namespace aot {
@@ -101,10 +102,16 @@ struct StructResult {
 
 // `entry_owner`：入口 EA → 该单元的根（调用目标归属）。`dropped` = 没有块的派生 leader。
 // `shim_begin/end` = shim 桩页（桩 EA 不是 guest 单元 ⇒ 不参与调用图，也不算"不可结构化"）。
+//
+// `iat`（★ S7-IAT，REQ-01M86NMT0YJ9V78XS2DZZV364Q）：`call *<IAT 槽>` 的**清理字节**模型
+// （`aot/lift_iat.h`）。**缺省 `nullptr` = 今天的行为逐位不变**；只有
+// `LIFT_S7_IAT=ON` 编译时才会被查询（OFF 时参数被忽略 ⇒ 8 份 `.ll` 逐字节相同）。
+// ⚠ 编译期开关与**调用方**（`lift_gen.cpp` / Step 3-4 的夹具）必须带上同一个 `LIFT_S7_IAT`
+//   定义：OFF 那一侧连"查表"都不存在，传进来的模型不会被看。
 StructResult analyzeStructure(const std::vector<GenComponent>& comps,
                               const std::map<std::uint32_t, std::uint32_t>& entry_owner,
                               const std::set<std::uint32_t>& dropped, std::uint32_t shim_begin,
-                              std::uint32_t shim_end);
+                              std::uint32_t shim_end, const IatModel* iat = nullptr);
 
 }  // namespace aot
 }  // namespace lift

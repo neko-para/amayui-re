@@ -101,4 +101,13 @@ void registerKernel32Shims(ShimRegistry& shims) {
     registerImportGaps(shims);
 }
 
+// ★ AOT 臂 / 生成期的**唯一**装配序列（顺序 = `ShimDef::id` = trace 顺序 ⇒ 判据的一部分）。
+//   ⛔ 不要把它内联到调用点：`AotHost::prepare`（运行期）与 `lift-gen`（生成期，算 IAT 清理字节）
+//   必须是**同一份**注册集 —— 两份装配序列会让"生成期看到的 conv/argc"与"运行期执行的那个 shim"漂。
+//   ★ 它只做 `add` / `addStub`：不 bind、不发 stub EA、不碰 guest 内存（`lift_iat` 需要的就是这个性质）。
+void registerAotShims(ShimRegistry& shims) {
+    registerKernel32Shims(shims);
+    registerBootstrapShims(shims);
+}
+
 }  // namespace lift

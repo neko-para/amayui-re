@@ -338,16 +338,28 @@ endif()
 # ★ 告警口径与上面两个 target 一致：本块**不加**任何 `-W` / `/W` 覆盖。
 # =====================================================================================
 add_executable(emulator-lift-gen src/aot/lift_gen.cpp src/aot/lift_gen_emit.cpp
-                                src/aot/lift_struct.cpp)
+                                src/aot/lift_struct.cpp src/aot/lift_iat.cpp)
 target_link_libraries(emulator-lift-gen PRIVATE emulator-lift-runtime)
 # ★ D4（2026-11-24）：S7 判据 4（"无间接 `call`"）的放宽开关，**缺省 ON**。
 #   理由 / 语义 / 接受条件见 `src/aot/lift_struct.cpp` 的 `LIFT_S7_RELAX_INDIRECT` 注释与
 #   `docs/03-emulator/aot-s7-evaluation.md` §3。回退 = **一行**：`-DLIFT_S7_RELAX_INDIRECT=OFF`
 #   （OFF ⇒ 回到"有间接 call ⇒ 整单元判死"的判据，⛔ 不改其它任何一行）。
 option(LIFT_S7_RELAX_INDIRECT "S7/D4: allow units with indirect call when their frame is provably restored" ON)
+
+# ★ S7-IAT（REQ-01M86NMT0YJ9V78XS2DZZV364Q）：`call *<IAT 槽>` 的**栈清理字节**按**生成期**的表
+#   记账（`src/aot/lift_iat.{h,cpp}`：PE 导入表 × `ShimRegistry`，与运行期 `ShimCall::stdcall_bytes`
+#   同一条式子 `(conv == Stdcall) ? argc*4 : 0`）⇒ `analyzeStructure` 的间接 `call` 分支不再一律
+#   `kUnknown`。判据 / 停下来的门槛见 `.tmp/reveq/REQ-01M86NMT0YJ9V78XS2DZZV364Q/design.md` §8.3。
+#   ★ **缺省 OFF**（回退 = 一行 flag）：OFF ⇒ 8 份 `.ll` 与不带本机制时**逐字节相同**
+#   （模型建出来但不被查询；连 stderr 的 `[shim-meta]` 读数都不打）。
+#   ⛔ 发射器一行不改：机制改的是"谁进 `structured`"（判据的结论），IR 的发射规则不变。
+option(LIFT_S7_IAT "S7: resolve `call *[IAT slot]` cleanup bytes from the shim registry (build-time table)" OFF)
+
 target_compile_definitions(emulator-lift-gen PRIVATE
-    LIFT_S7_RELAX_INDIRECT=$<BOOL:${LIFT_S7_RELAX_INDIRECT}>)
+    LIFT_S7_RELAX_INDIRECT=$<BOOL:${LIFT_S7_RELAX_INDIRECT}>
+    LIFT_S7_IAT=$<BOOL:${LIFT_S7_IAT}>)
 message(STATUS "LIFT_S7_RELAX_INDIRECT: ${LIFT_S7_RELAX_INDIRECT} (S7 criterion 4: indirect call relaxed; OFF = old criterion)")
+message(STATUS "LIFT_S7_IAT: ${LIFT_S7_IAT} (S7 indirect-call cleanup bytes from the IAT slot; OFF = today's kUnknown)")
 
 # =====================================================================================
 # Shape A · T2b：`emulator-lift-aot` 的**执行源**（生成物 + 派发表）
@@ -1310,6 +1322,74 @@ if(DEFINED ENV{LIFT_STRESS})
                 "$<TARGET_FILE:emulator-lift-aot>" "${_LIFT_STRESS_RAW_GAME_DIR}"
                 "${_LIFT_STRESS_RAW_GAME_DIR}/AGE.EXE" "${AGE_SECTFIX_EXE}")
     set_tests_properties(aot-quit-exit PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 420)
+
+    # ---- LIFT_STRESS：**判据 4 的自检**（`REQ-01M7HQJEEENYDJ91FB5DAC4K23` · S1）----
+    # ★ 判据（详见 `tests/aot_stress_plan_exit5.cpp` 文件头）：一份**永不满足**的门
+    #   （`tests/fixtures/boot-title-exit-never.plan`）交给 `--input-plan` ⇒ **exit 5** +
+    #   stderr 点名 `<夹具文件名>:<门那一行>` + `pending != 0`。
+    #   规则级的 `recipeOutcomeExitCode` 已由 `input-plan-read-points` 钉住；本条钉的是
+    #   **`aot_main` 那个调用点**（端到端接线），只有它能抓"没走完却 exit 0"。
+    # ★ 夹具放 `tests/fixtures/`，⛔ **不放** `scripts/recipes/`：那个目录会被
+    #   `recipe-driver-parity` 的用例 5 逐条 replay 并要求 `Done`（永不满足的门会让它红）。
+    # ★ 本用例 spawn 产品 exe ⇒ `add_dependencies`（否则变异自检里 `--target` 只重建守卫 exe，
+    #   产品 exe 停在变异前 ⇒ 假绿；同 `aot-quit-exit` / `CMakeLists.txt:1046-1052` 的教训）。
+    add_executable(lift-aot-stress-plan-exit5 tests/aot_stress_plan_exit5.cpp)
+    target_link_libraries(lift-aot-stress-plan-exit5 PRIVATE emulator-lift-runtime lift-test-support)
+    add_dependencies(lift-aot-stress-plan-exit5 emulator-lift-aot)
+    add_test(NAME aot-stress-plan-exit5
+        COMMAND lift-aot-stress-plan-exit5
+                "$<TARGET_FILE:emulator-lift-aot>" "${AGE_SECTFIX_EXE}"
+                "${_LIFT_STRESS_RAW_GAME_DIR}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/boot-title-exit-never.plan")
+    set_tests_properties(aot-stress-plan-exit5 PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    # ---- LIFT_STRESS：**路径 1（boot → TITLE）**的读数面 ----
+    # ★ 判据（详见 `tests/aot_stress_boot_title.cpp` 文件头）：`scripts/recipes/boot-title.plan`
+    #   ⇒ exit 0 · `pending=0` · 停机原因 = `input-plan: quit`（⛔ 不是 `--time-limit` 的圆场）·
+    #   `[profile-window] begin/end label=boot-title` 存在（**不判 ms**：读数进文档，AGENTS §12.6）。
+    # ★ 这条给路径 1 一个**自动读数面**（窗口墙钟 / dispatch 表随 `--profile` 打在 stdout 上），
+    #   同时把"门 + quit 的配方在 AOT 臂上真的能走完"变成判据。
+    add_executable(lift-aot-stress-boot-title tests/aot_stress_boot_title.cpp)
+    target_link_libraries(lift-aot-stress-boot-title PRIVATE emulator-lift-runtime lift-test-support)
+    add_dependencies(lift-aot-stress-boot-title emulator-lift-aot)
+    add_test(NAME aot-stress-boot-title
+        COMMAND lift-aot-stress-boot-title
+                "$<TARGET_FILE:emulator-lift-aot>" "${AGE_SECTFIX_EXE}"
+                "${_LIFT_STRESS_RAW_GAME_DIR}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/scripts/recipes/boot-title.plan")
+    set_tests_properties(aot-stress-boot-title PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    # ---- LIFT_STRESS：**路径 2（打开 FELLOW，6 次立绘切换）**的读数面 ----
+    # ★ 判据（详见 `tests/aot_stress_fellow_switch.cpp` 文件头）：真库驱动
+    #   `scripts/plugins/lib/scenario-fellow-switch.js` ⇒ **exit 0** +
+    #   readout `run=finished exit=0` + stdout 里 `=== profile window:` **恰好 6 条**（6 个切换
+    #   窗口标签逐字齐全）。⛔ 不断言 ms（读数进文档）。
+    # ★ 为什么判 readout 而不只判退出码：`--plugin` 路的失败**不**改宿主退出码
+    #   （`plugin_host.cpp` 的合同：receipt + 一行，⛔ 不让核心 exit 5）⇒ 只看退出码会把失败读成绿。
+    # ★ `--time-limit 240` 兜底（单跑 60–120 s）；CTest 上限 420 s。
+    # ★ `saves/` 是**只读**复现素材 ⇒ 用例自己复制进 `.tmp/` 私有 `--appdata`（⛔ 不就地写）。
+    # =====================================================================================
+    # ★★ **本用例当前 `DISABLED`（2026-11-24 父级裁决）**：它的断言是活的，但"6 次切换全走完"
+    #    今天做不到，挡住它的是两张**已开单、不在本批修**的既有缺口：
+    #      · `REQ-01M86VRRTPY8W9RP1SFDT0N200`（S2 · `loadSave` 翻页点击在插件路上会丢 ⇒
+    #        `load-save: page not reached (target 0, still 1)`；3 次 run 里 2 次停在这里）；
+    #      · `REQ-01M86VRT1YP53CJS0M885FCCJM`（S3 · `settle` 回调的 2 ms CPU 预算被冷启动顶穿 ⇒
+    #        `run=failed: callback budget exceeded: scenario:settle:0`，`js_cpu_us=2217 > 2000`）。
+    #    ⛔ 不要把它改成 SKIP 77（"没修好"不是"输入不在场"）、⛔ 不要放宽 6 个窗口 / 标签 / readout 的断言。
+    #    **解除条件**：上面两张单任一修完后，把 `DISABLED TRUE` 删掉、复跑；绿了才算收口。
+    # =====================================================================================
+    add_executable(lift-aot-stress-fellow-switch tests/aot_stress_fellow_switch.cpp)
+    target_link_libraries(lift-aot-stress-fellow-switch PRIVATE emulator-lift-runtime lift-test-support)
+    add_dependencies(lift-aot-stress-fellow-switch emulator-lift-aot)
+    add_test(NAME aot-stress-fellow-switch
+        COMMAND lift-aot-stress-fellow-switch
+                "$<TARGET_FILE:emulator-lift-aot>" "${AGE_SECTFIX_EXE}"
+                "${LIFT_STRESS_GAME_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../../saves"
+                "${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins/lib/scenario-fellow-switch.js")
+    # ★ `DISABLED TRUE`（而不是不注册）：注册表里**看得见**它（`ctest -N` 显示 Disabled），
+    #   存量与"为什么没跑"都不丢；`ctest` 也不把它算成失败（⛔ 不是 skip、⛔ 不是删掉）。
+    set_tests_properties(aot-stress-fellow-switch PROPERTIES
+        SKIP_RETURN_CODE 77 DISABLED TRUE TIMEOUT 420)
 endif()
 
 # =====================================================================================
@@ -2530,6 +2610,52 @@ set_tests_properties(lift-s7-indirect PROPERTIES SKIP_RETURN_CODE 77)
 add_executable(lift-emit-edges tests/emit_edges.cpp src/aot/lift_gen_emit.cpp)
 target_link_libraries(lift-emit-edges PRIVATE emulator-lift-runtime)
 add_test(NAME lift-emit-edges COMMAND lift-emit-edges)
+
+# =====================================================================================
+# S7-IAT（REQ-01M86NMT0YJ9V78XS2DZZV364Q）：`call *<IAT 槽>` 的清理字节 + 尾跳壳的 ret_cleanup
+# ★ 判据（红了意味着什么）：`tests/s7_iat.cpp` 的 **9 个合成 case**（公式 / `modelled=false` /
+#   尾跳传递 / 发射形状）+ **生成期** 4 根集的 `[S7 criteria]` / `[S7 criteria/site accounts]` 逐字
+#   与两根根的 `[S7 downgrade]`。详见该文件头注与 `.tmp/reveq/<id>/design.md` §5.2 / §5.4。
+# ★ 档位 = **pure**（`add_test` 在**最外层**、只在透明的 `if(LIFT_BUILD_TESTS)` 里；AGENTS §12.4）：
+#   · 9 个 case 不读 PE / 不用 clang ⇒ 永远跑（这是"机制可证"的那一半）；
+#   · 生成期那一半只在"有 clang + 有 AGE.EXE"时链接进来（缺资产 ⇒ 那一半打一行、不判）。
+# ★ 本 exe **强制** `LIFT_S7_IAT=1`（夹具钉的是"机制打开时"的语义，⛔ 不随缺省档变）；
+#   生成期那一半的期望值由 `LIFT_S7_IAT_GEN` 选（= 生成 `s7iat/criteria.txt` 的那个 `lift-gen`
+#   用过的开关值）—— 这样**两档都有判据**：ON 档钉"机制生效"，OFF 档钉"回退面"。
+# =====================================================================================
+set(LIFT_S7_IAT_DIR "${CMAKE_CURRENT_BINARY_DIR}/s7iat")
+set(LIFT_S7_IAT_ROOTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/ir/s7_iat_roots.txt")
+add_executable(lift-s7-iat tests/s7_iat.cpp src/aot/lift_struct.cpp src/aot/lift_gen_emit.cpp)
+target_link_libraries(lift-s7-iat PRIVATE emulator-lift-runtime)
+target_compile_definitions(lift-s7-iat PRIVATE LIFT_S7_IAT=1
+    LIFT_S7_IAT_GEN=$<BOOL:${LIFT_S7_IAT}> _CRT_SECURE_NO_WARNINGS)
+if(LIFT_IR_CLANG AND EXISTS "${LIFT_GEN_AGE_EXE}")
+    # 生成期读数：由 `cmake -P` 捕获（与 `lift-s7-indirect` 同一套脚本 ⇒ 判据与 `.ll` 同源）。
+    add_custom_command(
+        OUTPUT "${LIFT_S7_IAT_DIR}/criteria.txt"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${LIFT_S7_IAT_DIR}"
+        COMMAND ${CMAKE_COMMAND}
+                -DGEN=$<TARGET_FILE:emulator-lift-gen>
+                -DEXE=${LIFT_GEN_AGE_EXE}
+                -DROOTS=${LIFT_S7_IAT_ROOTS}
+                -DOUT=${LIFT_S7_IAT_DIR}/lift_aot.ll
+                -DPIN=${LIFT_S7_IAT_DIR}/lift_pin.h
+                -DTABLE=${LIFT_S7_IAT_DIR}/lift_table.inc
+                -DLOG=${LIFT_S7_IAT_DIR}/criteria.txt
+                -DEXTRA=--no-close-calls
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/lift_gen_capture.cmake"
+        DEPENDS emulator-lift-gen "${LIFT_S7_IAT_ROOTS}" "${LIFT_GEN_AGE_EXE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/lift_gen_capture.cmake"
+        COMMENT "lift-s7-iat: roots + PE -> s7iat/criteria.txt (generation-time criteria)"
+        VERBATIM)
+    add_custom_target(lift-s7-iat-capture DEPENDS "${LIFT_S7_IAT_DIR}/criteria.txt")
+    add_dependencies(lift-s7-iat lift-s7-iat-capture)
+    target_compile_definitions(lift-s7-iat PRIVATE
+        LIFT_S7_IAT_CRITERIA="${LIFT_S7_IAT_DIR}/criteria.txt")
+else()
+    message(STATUS "lift-s7-iat: missing clang or execution source (${LIFT_GEN_AGE_EXE}) => generation-time half is not linked (only the 9 synthetic cases run)")
+endif()
+add_test(NAME lift-s7-iat COMMAND lift-s7-iat)
 
 # =====================================================================================
 # BUG-24 / `REQ-01M7FS59VTS7X4TGVK6Z7MTKJG`：**跳表项必须可派发 + 表区间内不许有块首**

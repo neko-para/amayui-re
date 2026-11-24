@@ -254,8 +254,9 @@ bool AotHost::prepare(std::string* err) {
         return false;
     }
     // ★ 注册顺序 = `ShimDef::id` = trace 顺序 ⇒ 与 `Machine::prepare` 逐字相同（改顺序 = 改 trace）。
-    registerKernel32Shims(shims_);
-    registerBootstrapShims(shims_);
+    //   ★ 这两步已经抽成 `registerAotShims`（`shims/register.h`）：生成期（`lift-gen`）算
+    //     "`call *<IAT 槽>` 的清理字节"时用的是**同一份**序列（REQ-01M86NMT0YJ9V78XS2DZZV364Q）。
+    registerAotShims(shims_);
     // ★ bind：给每个导入分配唯一 guest 地址并把地址写回 IAT 槽（未实现的导入**也**分到地址，
     //   执行到就响亮停机 —— 那是解释器臂的语义，AOT 只把地址铺好）。
     if (!shims_.bind(mem_, image_, layout_.shim_page, layout_.shim_slots, err)) return false;

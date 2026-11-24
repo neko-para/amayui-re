@@ -1401,7 +1401,7 @@ const MUTATIONS = [
   //   ★ 把 `pending` 抹成 `[]` ⇒ 模型以为“都结束了”，于是不再等剩下的 completion notice。
   {
     file: 'plugins/wait-subagent/index.mjs',
-    from: 'pending: targets.map((target) => target.childId),',
+    from: 'pending: targets.map((target) => tokenOf(target.childId)),',
     to: 'pending: [],',
     guard: 'plugins/wait-subagent/test/plugin.test.mjs',
     what: 'any_of 的 already_finished 不再列出仍在跑的 child ⇒ “还有人没结束”被当成“都结束了”',
@@ -3626,6 +3626,32 @@ const MUTATIONS = [
       '`recipeOutcomeExitCode(TimedOut)` 应为 5）',
   },
   {
+    // ★ **端到端接线**（`REQ-01M7HQJEEENYDJ91FB5DAC4K23` · 判据 4 的自检 · stress 档）：
+    //   上面那条只证明 `recipeOutcomeExitCode` 这个**函数**返回 5；它证明不了 `aot_main` 的
+    //   **收口点**用了它。把调用点改成 `return 0;` ⇒ 配方没走完也只打一行 stderr、exit 0
+    //   （= 完成度判据在 AOT 臂上重新变成假绿面）。
+    //   ★ 只有 `ctest:aot-stress-plan-exit5` 能抓：规则级两条用例（`input-plan-read-points`、
+    //     `recipe-driver-parity` 用例 3）读的是函数本身，**不经过** `aot_main`；
+    //     `aot-quit-exit` 的配方 pending=0（不受影响）。
+    //   ★ 条目带 `optInEnv`：该 CTest 注册在 `if(DEFINED ENV{LIFT_STRESS})` 里 ⇒ 没设 `LIFT_STRESS`
+    //     时本工具记「不可判定（本机未启用）」，⛔ 不混进「守卫不存在」（见 §配置期 opt-in）。
+    //     要跑它：`$env:LIFT_STRESS=1` + 重新 configure + 构建，再
+    //     `node tools/mutate-check.mjs --match 'aot-stress-plan-exit5'`。
+    file: 'apps/emulator-lift/src/aot/aot_main.cpp',
+    from:
+      '        return lift::recipeOutcomeExitCode(plan_outcome);  // = 5（recipe.h 的 kRecipeIncompleteExitCode）\n',
+    to: '        return 0;  // 变异：配方没走完也 exit 0（完成度判据在 AOT 收口点断线）\n',
+    guard: 'ctest:aot-stress-plan-exit5',
+    ctest: 'aot-stress-plan-exit5',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-aot-stress-plan-exit5',
+    optInEnv: 'LIFT_STRESS',
+    what:
+      '把 `aot_main` 对"配方没走完"的收口点从 `recipeOutcomeExitCode(plan_outcome)`（= 5）改成恒 0 ⇒ ' +
+      '`aot-stress-plan-exit5` 红（它 spawn 真 AOT + 永不满足门的夹具，断言 exit 5 + stderr 点名 ' +
+      '`<夹具>:<门行>` + `pending != 0`）',
+  },
+  {
     // ★ **行内 `timeout` 真的被记下来**（2026-11-16 起 `timeout` 只能写在 `await …` 那一行的末尾；
     //   旧的跨行写法已删）。把"挂到 step 上"改成丢弃 ⇒ 门永远没有守卫 ⇒
     //   ① `input-plan/parse-errors` 的 `stepAt(0)->timeout_ms == 2500` 红；
@@ -5622,6 +5648,43 @@ const MUTATIONS = [
       '把 D4 的放宽关掉（②-a 里间接 call 又直接判死）⇒ F=00452FA0 回到 `[S7 downgrade]`、' +
       '`structurable` 2→1 ⇒ `lift-s7-indirect` 的判据①（生成期 structured）当场红；' +
       '这条错**只影响派发密度**（运行期语义等价，差分 / 五项指纹全绿）',
+  },
+  // ── s7-iat（2026-11-24 / Step 4）：IAT 清理字节一律当 0（= "无条件放宽"）───────────────────
+  //   ★ 这一类错长什么样：`lift_struct.cpp` 的间接 `call` 分支**不查表**，直接把 callee 当成
+  //     cdecl（清 0）。对 `USER32!SetCursor`（stdcall 1 ⇒ 清 4）这类槽，esp 会少记 4 ⇒
+  //     该单元从"可结构化"变成"动态返回"。**运行期语义不变**（`emitRet` 弹的是 guest 真正的
+  //     那一格 + 每个宿主 call 后都有 `%r == resume` 兜底）⇒ 差分会全绿，红只能来自判据。
+  //     守卫 = `lift-s7-iat` 的 case 1（stdcall-1 记账）与 case 3（表写 Cdecl/0 ⇒ 期望 dynamic-return）。
+  {
+    file: 'apps/emulator-lift/src/aot/lift_struct.cpp',
+    from: 's.esp = espAdd(s.esp, static_cast<std::int32_t>(row->cleanup));',
+    to: 's.esp = espAdd(s.esp, 0);  // 变异：不查表，一律当 cdecl',
+    guard: 'ctest:lift-s7-iat',
+    ctest: 'lift-s7-iat',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-s7-iat',
+    what:
+      '把 IAT 的清理字节一律当 0（不查表）⇒ `lift-s7-iat` 的 case 1（stdcall-1 记账 ⇒ 该单元' +
+      '可结构化）与 case 3（表写 Cdecl/0 ⇒ 期望 dynamic-return）当场红；这条错**只影响记账**' +
+      '（运行期语义等价 ⇒ 差分 / 五项指纹全绿）',
+  },
+  // ── s7-iat（2026-11-24 / Step 4）：`ret_cleanup` 不沿尾跳壳传递（design §2.3 收回）──────────
+  //   ★ 这一类错长什么样：`004B60C0` / `004B6130` 这类"静态 call 一个 jmp 壳"的单元，
+  //     壳（`004034C0`：`push ebp / mov ecx,[ecx+4] / pop ebp / jmp 0x497620`）自己没有 `ret`
+  //     ⇒ 旧口径给它记 0 ⇒ 调用者的 `retn 4` 处 esp 停在 −4 ⇒ 永远"动态返回"。
+  //     跑得通，只是派发更密 ⇒ 差分 / 五项指纹全绿；红只能来自 case 8（合成 T/X/F 三单元）。
+  {
+    file: 'apps/emulator-lift/src/aot/lift_struct.cpp',
+    from: 'ret_cleanup[root] = ci->second;  // ← 沿 jmp 壳传递（design §2.3）',
+    to: 'ret_cleanup[root] = 0;  // 变异：不沿 jmp 壳传递 ret_cleanup',
+    guard: 'ctest:lift-s7-iat',
+    ctest: 'lift-s7-iat',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-s7-iat',
+    what:
+      '不沿 jmp 壳传递 `ret_cleanup` ⇒ `lift-s7-iat` 的 case 8（T 只有一条跨分量 jmp、X 是 ' +
+      '`retn 4` ⇒ F 该可结构化）当场红（F 停在 −4 ⇒ dynamic-return）；全量上表现为 ' +
+      '`004B60C0` / `004B6130` 回到 `动态返回` / `间接 call`、`structurable` 少 19 —— 只影响派发密度',
   },
 ];
 

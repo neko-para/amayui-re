@@ -23,6 +23,14 @@ constexpr std::int32_t kUnknown = 0x7FFFFFFF;
 #define LIFT_S7_RELAX_INDIRECT 1
 #endif
 
+// ★ S7-IAT（REQ-01M86NMT0YJ9V78XS2DZZV364Q）：`call *<IAT 槽>` 的清理字节按**生成期**的表
+//   （`aot/lift_iat.h`：PE 导入表 × `ShimRegistry`，与运行期 `stdcall_bytes` 同一条式子）记账。
+//   **缺省 OFF**（宏没定义也当 OFF —— 单独编译本文件的夹具不会意外打开它）。
+//   OFF ⇒ 间接 `call` 仍然把 esp 标成未知（D4 的今天行为，逐字节不变）。
+#ifndef LIFT_S7_IAT
+#define LIFT_S7_IAT 0
+#endif
+
 // ★ D4 的前提（**不是装饰**）：`kUnknown` 参与算术**必须仍是"未知"**。
 //   两条理由：① `kUnknown + 4` 会变成一个**看着已知**的偏移（把判据变成假绿）；
 //   ② `0x7FFFFFFF + d` 是有符号溢出（UB）。间接 `call` 会把 esp 标成未知（见 ②-b），
@@ -262,31 +270,139 @@ const char* structReasonName(StructReason r) { return structReasonNameImpl(r); }
 StructResult analyzeStructure(const std::vector<GenComponent>& comps,
                               const std::map<std::uint32_t, std::uint32_t>& entry_owner,
                               const std::set<std::uint32_t>& dropped, std::uint32_t shim_begin,
-                              std::uint32_t shim_end) {
+                              std::uint32_t shim_end, const IatModel* iat) {
     StructResult out;
     StructStats& st = out.stats;
+#if !LIFT_S7_IAT
+    // OFF 档：模型**不被查询**（连代码都不在）⇒ 传进来的指针无关，显式吃掉避免"未使用参数"。
+    // （`LIFT_S7_RELAX_INDIRECT=OFF` 的档同理；那一档不在本单的门禁里。）
+    (void)iat;
+#endif
     // `dropped` 目前只用于"跨单元边"的语义（`c.blocks.count(t) == 0` 已覆盖）；
     // 显式留参是为了让调用方**必须**把"哪些 EA 没有块"这份事实递进来（将来收严判据时用）。
     (void)dropped;
 
     // ---- ① 每个单元的 `retn imm16`（call 清理建模的输入）----
+    //   口径（与 `lift_struct.h` 的 ① 一致）：该单元里所有 `ret` 的立即数**唯一** ⇒ 用它；
+    //   不唯一（共享 epilogue / 多个退出点）⇒ 0（cdecl 口径）—— 函数序言/尾声的 `mov esp,ebp`
+    //   会把偏移**重新对齐**，所以 0 是安全的兜底（错了只会让"证明不了"落在 ret 处 ⇒ 降级，
+    //   ⛔ 不会把它判成可结构化）。
+    //
+    // ★ ①-b（design §2.3）：**`ret_cleanup` 沿"尾跳壳"传递**。为什么需要：
+    //   `004B60C0` 在 `004B60F7` 有一条静态 `call 0x4034C0`，而 `004034C0` 自己**没有 `ret`**
+    //   （`push ebp / mov ebp,esp / mov ecx,[ecx+4] / pop ebp / jmp 0x497620`）—— 真正的返回在
+    //   `0x497620` 那一侧（`497655` / `497665` 两条 `retl $0x4`）。旧口径给 `004034C0` 记 0，
+    //   于是模型算到调用者的 `retn 4` 时 esp = −4 ⇒ 永远"动态返回"。
+    //   判据（单调、可回退，错了只会降级，⛔ 不会假绿）：
+    //     cleanup(C) = 唯一 `ret imm`(C)                      若 C 有 `ret`
+    //                = cleanup(owner(T))                      若 C **没有 `ret`** 且**全部**静态出口
+    //                                                         是同一条跨分量 `jmp → T`（T 在入口集里）
+    //                = 0                                      其余（多出口 / 间接出口 / 环 / 表外）
+    //   ⛔ 不改判据的其余部分：这里只补"这个单元的**返回清理字节**是多少"，esp 数据流一字未动。
+    struct UnitRet {
+        bool has_ret = false;
+        bool multi = false;
+        std::int32_t imm = 0;
+        bool thunk = false;          // true ⇒ 无 `ret` 且全部静态出口是同一条跨分量 jmp
+        std::uint32_t thunk_target = 0;
+    };
+    std::map<std::uint32_t, UnitRet> unit_ret;
     std::map<std::uint32_t, std::int32_t> ret_cleanup;
     for (const GenComponent& c : comps) {
+        UnitRet u;
         std::optional<std::uint16_t> uniq;
-        bool multi = false;
         for (const auto& kv : c.blocks) {
             for (const Insn& in : kv.second.insns) {
                 if (in.op != Op::Ret) continue;
+                u.has_ret = true;
                 const std::uint16_t imm =
                     in.op0().kind == OpKind::Imm
                         ? static_cast<std::uint16_t>(static_cast<std::uint32_t>(in.op0().imm) & 0xFFFFu)
                         : 0u;
                 if (!uniq.has_value()) uniq = imm;
-                else if (*uniq != imm) multi = true;
+                else if (*uniq != imm) u.multi = true;
             }
         }
-        ret_cleanup[c.root] = (uniq.has_value() && !multi) ? *uniq : 0;
+        u.imm = uniq.has_value() ? static_cast<std::int32_t>(*uniq) : 0;
+#if LIFT_S7_IAT
+        if (!u.has_ret) {
+            // "尾跳壳"判据：分量内**所有**块的所有静态出口，要么落在本分量里，要么是同一条
+            // 跨分量 `jmp`。任何一条 `dynamic` 边（`jmp reg/mem`）或"离开分量的 `call` resume"
+            // ⇒ 不可建模（保守 0）。⛔ 不按助记符判：判据只有 `genBlockEdges` 的边形态。
+            bool ok = true;
+            std::optional<std::uint32_t> target;
+            for (const auto& kv : c.blocks) {
+                for (const GenEdge& e : genBlockEdges(kv.second)) {
+                    if (e.dynamic) {
+                        ok = false;
+                        break;
+                    }
+                    if (c.blocks.count(e.ea) != 0) continue;  // 分量内边：不是出口
+                    if (e.call_ret) {  // 离开分量的 `call` 续延 ⇒ 不是"唯一 jmp 出口"
+                        ok = false;
+                        break;
+                    }
+                    if (!target.has_value()) target = e.ea;
+                    else if (*target != e.ea) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (!ok) break;
+            }
+            if (ok && target.has_value()) {
+                u.thunk = true;
+                u.thunk_target = *target;
+            }
+        }
+#endif
+        unit_ret[c.root] = u;
     }
+#if LIFT_S7_IAT
+    // ①-b 的不动点：先给"有 `ret`"与"连出口都没有"的单元定值，`thunk` 候选留给传递。
+    //   收敛性：每一轮至少解决一个候选，否则退出（环 / 全部未解 ⇒ 剩下的记 0）。
+    std::set<std::uint32_t> unresolved;
+    for (const auto& kv : unit_ret) {
+        const UnitRet& u = kv.second;
+        if (u.has_ret) {
+            ret_cleanup[kv.first] = u.multi ? 0 : u.imm;
+        } else if (u.thunk) {
+            unresolved.insert(kv.first);
+        } else {
+            ret_cleanup[kv.first] = 0;
+        }
+    }
+    for (;;) {
+        bool changed = false;
+        for (auto it = unresolved.begin(); it != unresolved.end();) {
+            const std::uint32_t root = *it;
+            const auto oi = entry_owner.find(unit_ret[root].thunk_target);
+            if (oi == entry_owner.end()) {  // 目标不在入口集（表外 / 被丢弃 / 桩页）
+                ret_cleanup[root] = 0;
+                it = unresolved.erase(it);
+                changed = true;
+                continue;
+            }
+            const auto ci = ret_cleanup.find(oi->second);
+            if (ci == ret_cleanup.end()) {  // 目标自己还没解 ⇒ 下一轮
+                ++it;
+                continue;
+            }
+            ret_cleanup[root] = ci->second;  // ← 沿 jmp 壳传递（design §2.3）
+            it = unresolved.erase(it);
+            changed = true;
+        }
+        if (!changed) break;
+    }
+    for (const std::uint32_t root : unresolved) ret_cleanup[root] = 0;  // 环 / 未解 ⇒ 保守 0
+#else
+    // 缺省档（`LIFT_S7_IAT=OFF`）：**与改动前逐字等价**的式子（⛔ 不许在这里偷加传递：
+    // 那会让默认构建的 8 份 `.ll` 变掉 —— "回退 = 一行 flag" 的前提）。
+    for (const auto& kv : unit_ret) {
+        const UnitRet& u = kv.second;
+        ret_cleanup[kv.first] = (u.has_ret && !u.multi) ? u.imm : 0;
+    }
+#endif
 
     // ---- ② 自身分析：esp 数据流 + 返回槽写 + 间接 call + 调用图边 ----
     std::map<std::uint32_t, std::set<std::uint32_t>> callees;  // root → 静态 callee roots
@@ -400,8 +516,28 @@ StructResult analyzeStructure(const std::vector<GenComponent>& comps,
                             //   可跟踪）⇒ 只有那时 `ret` 的 "esp == 0" 判据才成立。
                             //   ⛔ 不许写 `s.esp += 0`：那等于假设 cdecl，是**不能证**的东西。
                             //   ⛔ 也不许"按 callee 的 ret_cleanup 建模"：间接 callee 是谁运行期才知道。
+                            //
+                            // ★ S7-IAT（REQ-01M86NMT0YJ9V78XS2DZZV364Q）：上面两条说的都是"运行期
+                            //   才知道"。`call *<IAT 槽>` 是一个**例外**：槽里是宿主 shim，它的清理
+                            //   字节由 `ShimDef::conv/argc` 决定 —— 生成期就能从同一份注册表得到
+                            //   （`iatOf()` 只认纯绝对地址；⛔ 不看助记符 / 不看 `.lst`）。
+                            //   仍然未知的：寄存器 / 基址 / 段前缀目标、表里没有的绝对地址、
+                            //   `modelled == false`（未实现导入 ⇒ 执行即 trap；会 take_control 的
+                            //   shim ⇒ 自己安排 esp/eip）。⇒ 那条路保持 kUnknown，⛔ 不许兜底成 0。
+#if LIFT_S7_IAT
+                            const IatRow* row = (iat != nullptr) ? iatOf(in.op0(), *iat) : nullptr;
+                            if (row != nullptr && row->modelled) {
+                                // 与静态 `call` 同一条记账（见上面的 `ret_cleanup`）：模型记的是
+                                // "callee 在返回地址之外多弹了多少字节"（= `ShimCall::stdcall_bytes`）。
+                                s.esp = espAdd(s.esp, static_cast<std::int32_t>(row->cleanup));
+                            } else {
+                                (void)first_indirect_ea;
+                                s.esp = kUnknown;
+                            }
+#else
                             (void)first_indirect_ea;
                             s.esp = kUnknown;
+#endif
                         }
 #else
                         }

@@ -64,6 +64,11 @@ bool contains(const std::string& hay, const std::string& needle) {
     return hay.find(needle) != std::string::npos;
 }
 
+// ★ **产品响亮错的规范前缀**（`src/aot/aot_main.cpp:1489`：`emulator-lift-aot: ⛔ 停在一个派发表里
+//   没有的 EA：…`）。本用例判"有没有响亮错"一律用这个前缀，⛔ 不用裸 `⛔`（见 ①+② 那段的注释）：
+//   `⛔` 在正常读数的解释性文案里也有（`lift_dyn` 行 / `[warn] [present]` 行），裸判 = 假红。
+constexpr const char* kLoudErrorPrefix = "emulator-lift-aot: ⛔";
+
 #if !defined(_WIN32)
 std::string shq(const std::string& s) {
     std::string out = "'";
@@ -202,8 +207,15 @@ int main(int argc, char** argv) {
         } else {
             ++g_checks;
         }
-        LIFT_CHECK(!contains(stdout_text, "⛔"));
-        LIFT_CHECK(!contains(stderr_text, "⛔"));
+        // ★ 判据是**产品响亮错的规范前缀** `emulator-lift-aot: ⛔`（`src/aot/aot_main.cpp:1489` 是
+        //   本臂唯一一处响亮错：`emulator-lift-aot: ⛔ 停在一个派发表里没有的 EA：…`），⛔ 不是裸 `⛔`。
+        //   为什么收窄（2026-11-24 父级裁决）：`⛔` 在**解释性文案**里也出现 —— 正常读数
+        //   `lift_dyn : … （⛔ 不进闭式…）` 与 `[warn] [present] 最后帧 hash 不可用 … （⛔ 不是旧值…）`
+        //   ⇒ 裸判会把"跑绿了"判成红（本用例在 `f58c2b7` 上就是这么红的：exit 0 / 173 帧 / 正常结局）。
+        //   ⛔ 这不是放宽：真响亮错一定会带那个前缀，而它下面三条（`派发表里没有的 EA` / `decode-error`）
+        //   仍然按**原文**判，两条口径互不替代。
+        LIFT_CHECK(!contains(stdout_text, kLoudErrorPrefix));
+        LIFT_CHECK(!contains(stderr_text, kLoudErrorPrefix));
         LIFT_CHECK(!contains(stdout_text, "派发表里没有的 EA"));
         LIFT_CHECK(!contains(stderr_text, "派发表里没有的 EA"));
         LIFT_CHECK(!contains(stdout_text, "decode-error"));

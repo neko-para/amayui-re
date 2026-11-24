@@ -1,0 +1,26 @@
+# S7-IAT 的**生成期**根集（`lift-s7-iat`）—— 一行一个 hex EA
+#
+# 四个根（design §5.2；与 `tests/s7_iat.cpp` 的常量一一对应）：
+#   0x418F80   A：`push esi / mov esi,ecx / … / call 0x4B8660 / cmp [esi+0x48dc],0 / je …` +
+#              另一臂 `pop esi / jmp 0x4B7D20`（静态 `call` 只有 1 条、**没有**间接 `call`
+#              ⇒ 自身分析今天已通过；它过去被降级的唯一原因是 `contagious-from=0x4B8660`）
+#   0x4B8660   F：`push esi / mov esi,ecx / mov eax,[esi+0x408] / push eax /
+#              call *0x51D3C4（= USER32!SetCursor，stdcall 1 ⇒ 清 4）/ … / pop esi / ret`
+#              ⇒ **没有帧恢复**：IAT 表不打开时它的 esp 在间接 call 之后是"未知" ⇒ `间接 call`
+#   0x485F90   G：`xor eax,eax / retn 4`（形态 A 的运行期槽目标；清 4 = 模型值）
+#   0x47CC80   G'：`xor eax,eax / retn 8`（形态 B 的运行期槽目标；比模型多清 4）
+#
+# ★ 选择判据（可复核）：F 的阻塞点是**一条绝对 IAT 槽**的间接 `call`（生成期可解析），
+#   而不是寄存器间接 ⇒ 这正是本单机制要覆盖的形态；A 是"只被 F 传染"的现成见证
+#   （F 变 structured ⇒ A 跟着变 structured）。
+# ★ ⛔ 不要往这里加"随便挑的 EA"：测试体读生成期的 `[S7 criteria]`（`unit roots=4` / `structurable`
+#   按档）/ site accounts，并断言 **F 的** `[S7 downgrade]` 行在 ON 档**不在**、OFF 档**在**。
+#   ⚠ A 在**两档里都**降级（`静态 call 目标不是已发射单元`）：它的另一臂 `jmp 004B7D20` 落进的
+#   那个函数里有 `004B7D2D call 004B7B70`，闭包关着时 `004B7B70` 不在入口集 ⇒ 与本单机制无关。
+#   （实测与两条出路的取舍见 `tests/s7_iat.cpp` 顶部那段"与 design §5.2 的偏差"。）
+# ★ 这一组**只**证明"绝对 IAT 槽的清理字节在生成期被记账、且它决定 F/A 能不能结构化"；
+#   覆盖率读数（703 → 501 那类）仍在全量生成期 stderr，⛔ 不拿这条用例冒充覆盖率。
+0x418F80
+0x4B8660
+0x485F90
+0x47CC80

@@ -43,6 +43,15 @@ void registerImportGaps(ShimRegistry& shims);
 // 七族的唯一入口（Machine 装配时调一次）。定义在 register.cpp。
 void registerKernel32Shims(ShimRegistry& shims);
 
+// ★ AOT 臂 / **生成期**（`emulator-lift-gen`）共用的**唯一**装配序列
+//   = `registerKernel32Shims` + `registerBootstrapShims`。
+//   为什么要有这个函数（REQ-01M86NMT0YJ9V78XS2DZZV364Q · design §1.3）：
+//   生成期要按 `ShimDef::conv/argc` 推"`call *<IAT 槽>` 的清理字节"（`aot/lift_iat.h`），
+//   它必须与**运行期**注册的是**同一批**条目 —— 两处各写一遍装配序列 ⇒ 注册集 / 顺序 / trace
+//   都会漂。⇒ `AotHost::prepare` 与 `lift-gen` 都只调本函数（⛔ 不要再在别处写这两行）。
+//   ⚠ 它只做 `add` / `addStub`（无宿主副作用、不 bind、不发 stub EA）。
+void registerAotShims(ShimRegistry& shims);
+
 // 族文件各自导出的注册函数（调用顺序见 register.cpp）。
 void registerErrorTlsShims(ShimRegistry& shims);  // kernel32_error_tls.cpp
 void registerMemShims(ShimRegistry& shims);       // kernel32_mem.cpp

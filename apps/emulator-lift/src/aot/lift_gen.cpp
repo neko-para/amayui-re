@@ -127,6 +127,7 @@
 #include "aot/closure_scan.h"
 #include "aot/lift_aot_text.h"
 #include "aot/lift_gen_emit.h"
+#include "aot/lift_iat.h"
 #include "aot/lift_struct.h"
 #include "runtime/decode.h"
 #include "runtime/exec.h"
@@ -134,6 +135,14 @@
 #include "runtime/image.h"
 #include "runtime/memory.h"
 #include "runtime/sha256.h"  // `--split` 清单里每份的 sha256（与 PE pin 同一份实现）
+#include "shims/register.h"
+
+// ★ S7-IAT（REQ-01M86NMT0YJ9V78XS2DZZV364Q）：`call *<IAT 槽>` 的清理字节建模开关，
+//   与 `aot/lift_struct.cpp` 的**同一个**宏（`CMakeLists.txt` 的缺省 OFF；OFF ⇒ 8 份 `.ll`
+//   与不带本机制时逐字节相同）。宏没定义也当 OFF。
+#ifndef LIFT_S7_IAT
+#define LIFT_S7_IAT 0
+#endif
 
 namespace {
 
@@ -3896,8 +3905,33 @@ int main(int argc, char** argv) {
     for (const GenComponent& comp : components) {
         for (const std::uint32_t ea : comp.entries) entry_owner.emplace(ea, comp.root);
     }
-    const lift::aot::StructResult structure = lift::aot::analyzeStructure(
-        components, entry_owner, drops.dropped, layout.shim_page, layout.shim_page + layout.shim_slots * 4u);
+    // ★ S7-IAT（REQ-01M86NMT0YJ9V78XS2DZZV364Q · design §1.3）：生成期把**运行期同一份**
+    //   shim 注册表实例化出来（`registerAotShims` = 唯一装配序列），与 PE 导入表交叉成
+    //   `槽 EA → 清理字节`（`aot/lift_iat.h`）。槽 EA = `image_base + PeImportInfo::iat_rva`。
+    //   ⛔ 这里**不** `bind()`：本机制不需要 stub EA（关键 —— 避开了"stub EA 由注册顺序决定"
+    //   这个耦合）；`registerAotShims` 只做 `add` / `addStub`（无宿主副作用、不碰 guest 内存）。
+    //   ⛔ 不按微软文档手写 conv/argc 表：清理字节的真源就是 `ShimDef::conv/argc`（= 运行期
+    //   `invokePrepared` 用的那两个字段）。
+    lift::ShimRegistry shim_meta;
+    lift::registerAotShims(shim_meta);
+    const lift::aot::IatModel iat_model = lift::aot::buildIatModel(shim_meta, image);
+#if LIFT_S7_IAT
+    {
+        // 读数（⛔ 不进判据）：`modelled` = 会按 shim 的约定弹参的槽数；其余是未实现导入 /
+        // take_control 的 shim（见 `aot/lift_iat.cpp` 的 `kTakeControlImports`）。
+        // 两平台比对它就能发现"注册集随宿主平台变"（design §1.4-1）。
+        const lift::aot::IatModelStats ms = lift::aot::iatModelStats(iat_model);
+        std::fprintf(stderr,
+                     "lift-gen: [shim-meta] imports=%llu modelled=%llu unmodelled=%llu"
+                     " (registered=%zu; modelled = fn != nullptr && !take_control)\n",
+                     static_cast<unsigned long long>(ms.imports),
+                     static_cast<unsigned long long>(ms.modelled),
+                     static_cast<unsigned long long>(ms.unmodelled), shim_meta.size());
+    }
+#endif
+    const lift::aot::StructResult structure =
+        lift::aot::analyzeStructure(components, entry_owner, drops.dropped, layout.shim_page,
+                                    layout.shim_page + layout.shim_slots * 4u, &iat_model);
     // ★ S7：交给发射器的**结论**（判据在上面；发射器只消费）。
     lift::aot::GenStructure gen_structure;
     gen_structure.enabled = opt.s7;

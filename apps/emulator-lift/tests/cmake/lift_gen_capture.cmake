@@ -14,10 +14,19 @@ if(NOT DEFINED GEN OR NOT DEFINED EXE OR NOT DEFINED ROOTS OR NOT DEFINED OUT OR
   message(FATAL_ERROR "lift_gen_capture.cmake: GEN / EXE / ROOTS / OUT / PIN / TABLE / LOG are required")
 endif()
 
+# ★ 可选 `EXTRA`：追加给 `lift-gen` 的额外开关（`;` 分隔）。缺省**空** ⇒ 与改动前逐字相同
+#   （`lift-s7-indirect` 就是这个路径）。
+#   为什么需要它：`lift-s7-iat` 的根集要的是**受控的 4 个单元**，而静态 call 闭包（D14）默认开
+#   ⇒ 它会把 132 个软根拉进来（179 个单元），判据读数就不再是"这四个根"的性质。
+#   ⇒ 那一条传 `--no-close-calls`（**只**影响那一条，⛔ 不动 `lift-s7-indirect` 的输入）。
+set(_args "${GEN}" --exe "${EXE}" --roots "${ROOTS}" --out "${OUT}" --pin "${PIN}" --table "${TABLE}"
+          --no-close-stores --no-close-data --no-close-jmptab)
+if(DEFINED EXTRA AND NOT "${EXTRA}" STREQUAL "")
+  list(APPEND _args ${EXTRA})
+endif()
+
 execute_process(
-  COMMAND "${GEN}" --exe "${EXE}" --roots "${ROOTS}"
-          --out "${OUT}" --pin "${PIN}" --table "${TABLE}"
-          --no-close-stores --no-close-data --no-close-jmptab
+  COMMAND ${_args}
   RESULT_VARIABLE rc
   OUTPUT_VARIABLE out
   ERROR_VARIABLE err)

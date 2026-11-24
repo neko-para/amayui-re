@@ -1,0 +1,17 @@
+# 夹具（**负对照**）：一道**永远不会成立**的位置门 —— 判据 4 的自检用。
+#
+# `TITLE` 的 `[0x388C,0x38A4)` 是 TITLE 退出路径上的段（`scripts/plugins/lib/script-positions.js`
+# 记的负对照区间：3/3 `fired=0` + `pending=5` + exit 5）。本配方**不点 Quit**，所以这一道门
+# 在这次 run 里结构上不可能成立 ⇒ 配方必然 `pending != 0` ⇒ AOT 必须 **exit 5** 并点名本文件
+# 的这一行。
+#
+# ★ 消费方 = CTest `aot-stress-plan-exit5`（`LIFT_STRESS` 档；`tests/aot_stress_plan_exit5.cpp`）：
+#   它断言"exit 5 + stderr 点名 **本文件 + 门那一行** + pending != 0"。
+#   ⇒ 红了意味着 `--input-plan` 的完成度判据在 CLI 层断线（配方没走完却 exit 0 / 不点名）。
+#
+# ⛔ **不要把这个文件搬进 `scripts/recipes/`**：那个目录会被 `recipe-driver-parity` 的用例 5
+#   逐条 replay 并要求 `Done` —— 一道永不满足的门会让那条 pure 用例红。
+# ⛔ 也不要在这里加 `wait`：`wait` 没有门语义，会把"永不成立"变成一个固定时长的等待。
+await position TITLE 0x388C 0x38A4 timeout 30000
+click 1070 480
+quit

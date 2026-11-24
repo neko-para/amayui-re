@@ -1,0 +1,23 @@
+# boot → TITLE（路径 1）的**读数面**配方：门 + `quit`，中间夹一个区间 profiler 窗。
+#
+# 门的判据（这条**唯一**的确定性门）：
+#   `TITLE` 的**回调体** `[0x0460,0x0520)` = `input-plan.md` §2.6 / `OBS-20261116-05` 那条
+#   3–4 次 run 逐位相同的读点区间（同一个数在 `scripts/recipes/title-loaddata.plan` /
+#   `sn0000*.plan` 里已经是"TITLE 就绪"的判据）。`timeout 180000` 只兜"根本到不了"。
+#   ⛔ 负对照是 `[0x388C,0x38A4)`（TITLE 退出路径段；换成它 ⇒ 永不成立 ⇒ exit 5）。
+#
+# 窗口 `boot-title` = 从这条配方被开始消费（第一个读点）到 TITLE 门成立。
+#   ★ `--profile` 会打 `[profile-window] begin/end label=boot-title …` 与窗口表；**读数进文档**
+#     （`docs/03-emulator/perf-*.md`），⛔ 不进任何断言（AGENTS.md §12.6 / 测试模型单）。
+#   ★ 窗口里的 `wall_ms` 是**宿主墙钟**（受机器 / 构建类型 / 并发影响）；它只用来"量"，不用来"判"。
+#
+# 消费方 = CTest `aot-stress-boot-title`（`LIFT_STRESS` 档；`tests/aot_stress_boot_title.cpp`）：
+#   断言 exit 0 · `pending=0` · 停机原因 = `input-plan: quit`（⛔ 不是 `--time-limit` 打的圆场）·
+#   `[profile-window] begin/end label=boot-title` 存在。红了意味着"启动到 TITLE 这条端到端路径
+#   在 AOT 臂上断了"（或完成度判据 / profiler 窗的接线断了）。
+#
+# ⛔ 本文件**不加 `wait`**：等待全部由门表达（`tools/test/recipe-wait-policy.test.mjs` 的白名单只降不升）。
+profile_begin boot-title
+await position TITLE 0x0460 0x0520 timeout 180000
+profile_end boot-title
+quit
