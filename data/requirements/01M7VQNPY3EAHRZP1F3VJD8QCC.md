@@ -2,8 +2,9 @@
 
 - id: REQ-01M7VQNPY3EAHRZP1F3VJD8QCC
 - type: req
-- status: doing
+- status: done
 - parent: REQ-01M7JHSEZVMYB4XHEN32V7V6HJ
+- done_reason: P（793826b）与 A′（fbe4760）已落地：boundary 11.075→10.091（−8.9%，3/3）与 10.780→10.239（−5.02%，6/6 同向，判为方向确认）；反汇编 bl liftRegsToCpu 2→0、bl liftCpuToRegs 4→0；17 次 run 指纹逐位同。剩余两条（hidden 档复测、lookupUncounted 的 armed 位）属读数面，不构成'能力未交付'；入口包装/派发密度的后续动作按 REQ-01M86NNG4YMF68NCAX0NT45Y22 跟踪。
 - tags: [emulator-lift, aot, perf]
 
 ## 一句话

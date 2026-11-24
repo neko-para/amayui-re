@@ -2,8 +2,9 @@
 
 - id: REQ-01M7JV8S4MGY87K76YDQ9WRKA8
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M7JHSEZVMYB4XHEN32V7V6HJ
+- done_reason: 归因已完成：派发密度那一轮把 boundary 的构成拆到具名段（每次派发 ≈18 条 host 指令 = prologue 5–11 + 块内 switch 2–29 + epilogue 6–9），并证明 FIELD 的 lift 差 85% 来自派发密度（19.95 vs 42.6–46.9 条 guest/派发）；boundary 现在是 0.75–0.93 ns/guest 指令，'再切六刀'已没有可判收益（子桶就是那三段）。后续动作按 REQ-01M86NNG4YMF68NCAX0NT45Y22 跟踪；依据见 repo:docs/03-emulator/aot-dispatch-density.md。
 - tags: [emulator-lift, efficiency, profile]
 
 ## 一句话

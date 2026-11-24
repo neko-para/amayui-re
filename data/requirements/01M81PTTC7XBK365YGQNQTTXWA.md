@@ -1,4 +1,4 @@
-# AOT · S7 放宽（间接 call 后 esp 未知）未合入：补形状级差分用例再评估 · leave 的 esp 模型待核
+# AOT · S7 判据 4（间接 call）的可证放宽：已合并（形状级差分先红后绿）
 
 - id: REQ-01M81PTTC7XBK365YGQNQTTXWA
 - type: req

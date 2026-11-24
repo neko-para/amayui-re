@@ -6,6 +6,14 @@
 - parent: REQ-01M7JHSEZVMYB4XHEN32V7V6HJ
 - tags: [emulator-lift, lift, efficiency]
 
+# M-lift-2 · 真翻译：解释回退归零 + 去掉逐指令宿主调用 + 寄存器跨块 SSA + call/ret 真调用（release 端到端为唯一速度判据）
+
+- id: REQ-01M7FC3W0ZMA35PK3WV73YXB1Q
+- type: req
+- status: doing
+- parent: REQ-01M7JHSEZVMYB4XHEN32V7V6HJ
+- tags: [emulator-lift, lift, efficiency]
+
 ## 为什么单独立这一节点
 
 `M-lift-1`（`REQ-01M7CZH25AVZWVZH4JH408CJPB`）已 done，它证的是**能力**：`entry → TITLE`、
@@ -61,3 +69,10 @@
 - ⛔ 不把 `insns` / 时钟 / 定时器语义改掉（它们参与 `--max-insns` / `--time-limit` / 停机诊断）。
 - ⛔ 不为达标去装 override、不为达标删既有 CTest 证据。
 - x87 的精度裁决见 `docs/00-origin/decisions.md` §8.1（**统一用 `double`，不追 80 位；PE 恒 0**）。
+
+## 进展（2026-11-24）
+
+- **判据 2（`call`/`ret` 真调用）在兑现**：判据 4 的可证放宽已收（`REQ-01M81PTTC7XBK365YGQNQTTXWA`：可结构化 5,343→6,411、宿主 `call` 站点 1,572→2,967）；同分量边直连 + 跨分量 `jcc` tail call 已收（`REQ-01M85TQW3Z2QR2KWGCQB34KWAP`：静态同分量 `ret i32` 1,897→0）。
+- **运行期**：`iter` 64.07→51.07 M、`insns/iter` 16.50→23.64、点击大帧 409→210 ms（`repo:docs/03-emulator/aot-dispatch-density.md`）。
+- **下一层已拆单**：派发密度/块合并 `REQ-01M86NNG4YMF68NCAX0NT45Y22`；不可跟踪帧恢复的间接 `call`（热泵 `004BBAB0` / 主循环 `00412290`）`REQ-01M86NMT0YJ9V78XS2DZZV364Q`。
+- **判据 5 的绝对值口径**：8.14 s / 15 s 是 2026-11-15 的读数，⛔ 不要拿它当今天的判据（本机分辨力见 `AGENTS.md` §12.6）。

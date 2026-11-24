@@ -6,6 +6,14 @@
 - parent: REQ-01M7JHSEZVMYB4XHEN32V7V6HJ
 - tags: [emulator-lift, aot, stress, perf]
 
+# AOT 侧压力/性能档重建：判据 = AOT 的 IR 执行速度（替代随解释器退役的 6 条 LIFT_STRESS）
+
+- id: REQ-01M7HQJEEENYDJ91FB5DAC4K23
+- type: req
+- status: open
+- parent: REQ-01M7JHSEZVMYB4XHEN32V7V6HJ
+- tags: [emulator-lift, aot, stress, perf]
+
 ## 一句话
 
 `LIFT_STRESS` 这个档（唯一允许跑真游戏的档）今天**全部由解释器驱动**，而那 6 条要随解释器退役
@@ -53,3 +61,9 @@
 
 不实现（本单先立判据与驱动方式）；路径 4 的 `LIFT_STRESS` 自动档未接；不删旧的 6 条
 （退役由 `REQ-01M7HQ57XV66FZQA5ECEGHWD71N` 的第 4 步安排）。
+
+## 进展（2026-11-24）
+
+- 路径 2/3 已有**入库的插件链**可当驱动：`repo:apps/emulator-lift/scripts/plugins/lib/scenario-fellow-switch.js`（boot→TITLE→`loadSave(9)`→6 次切人）与 `repo:apps/emulator-lift/scripts/plugins/lib/scenario-save10-field.js`（`loadSave(10)`→FIELD 主轮询体→点击→存活 8 s）。
+- 口径：一律 `--log-level warn`（`info` 会打开 Present 的逐帧像素直方图，+50 ms/帧）；读数用 `frame-ms` + `[profile-window]` + 窗口级 `window-dispatch-top`（`--profile` 收尾按窗口打 top-20）。
+- 剩余：把这些路径接进 `LIFT_STRESS` 自动档 + 本机阈值重定（判据 3/4 不变）。
