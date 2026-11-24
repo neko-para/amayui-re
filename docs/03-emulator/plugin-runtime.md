@@ -464,6 +464,11 @@ public:
   ★ 2 ms **只罩用户 JS 本体**（模块装载 / ctx 构造 / TriggerSet 收集 / 宿主调度不计），且量的是
   **本线程 CPU 时间**（`pluginThreadCpuNs()`；被 OS 抢占 / 等 I/O / 睡眠**不计**）；宿主段另有
   10×（20 ms）**墙钟**安全网，reason 带 `(host)`（见 §4.5 D5 与 4.6「预算」）。
+  ★ **宿主能力调用暂停**（2026-11-25）：`ctx.profile.end` 是宿主能力（生成报告 + 写系统剪贴板），
+  它的 CPU 成本**不计入** 2 ms —— `HostPause` 把宿主调用段的 CPU 累加进 `paused_ns`，`js_cpu_ns`
+  与中断判据都饱和扣除；诊断行 `paused_us` 给出扣除量。⛔ 本轮**只接 `profile.end`**（`log` /
+  `profile.begin` / `edit` 未接；真出现超预算再按同一原则逐个接），2 ms 数值与 `kCallbackOpLimit`
+  不变（真跑飞的 JS 忙循环仍 `over=js`，`plugin/callback-js-band`）。
 - **可观测性**：`RunStatus.armedNames`/`armed`、`trigger:<name>` trace、`RunEvent.name`；
   name 是**插件侧状态名**，不是 guest 数据，不参与 Edit/EngineRead。
 
@@ -933,7 +938,11 @@ cd apps/emulator-lift && ./out/emulator-lift-aot --exe ../../corpus/assets/age/A
   deadline 起点 = 组完 ctx / 事件对象、**即将调用插件函数之前**
   （`script_quickjs.cpp` 的 `call()`），中断回调拿**同一把 CPU 钟**（`pluginThreadCpuNs()`）比；
   ⇒ **模块装载 / ctx 与事件对象构造 / 返回值→TriggerSet 收集 / 宿主调度都不计**，被 OS 抢占 / 等 I/O
-  也不计。★ **粒度**（2026-11-21 / win32 实测）：POSIX `CLOCK_THREAD_CPUTIME_ID` = ns 级；Windows
+  也不计。
+  ★ **宿主能力调用（本轮只接 `ctx.profile.end`）也不计**（2026-11-25，缺陷单
+  `REQ-01M86VRT1YP53CJS0M885FCCJM`）：`HostPause` 在宿主调用前后取 CPU 差，累加进 `paused_ns`，
+  `js_cpu_ns` 与中断判据都扣掉它；诊断行 `paused_us` 是扣除量。⛔ 不是放宽 2 ms（见
+  `plugin/callback-js-band` 与 `plugin/callback-host-pause`）。★ **粒度**（2026-11-21 / win32 实测）：POSIX `CLOCK_THREAD_CPUTIME_ID` = ns 级；Windows
   主源 `QueryThreadCycleTime` ≈ ns 级（首次用 4×200 µs 忙等标定，本机 ≈3.97 cycles/ns，`call()`
   在计时窗前预热）；`GetThreadTimes` 是 **15.625 ms 整 tick 记账**（只作兜底 ——
   0.5 ms 的忙等读到 0 或 156250，判不了 2 ms）。⚠ 按 MSDN，`QueryThreadCycleTime` **不保证精确**
@@ -1476,7 +1485,7 @@ C5 是单插件 Run/dispatch 线；三者可与 C2 并行/后置。v3 的 S1/S2 
 | 9 | **单插件运行时**：没有 `--ui-control`/第二个 QJS context；同一个插件可选 `render`/`start`/`onTrigger`；写只经 `ctx.input`/`ctx.edit` | 又拆回“功能/驱动两套上下文/权限”（用户明确否掉） | 静态 flag/上下文守卫 + 插件 API 单测 |
 | 10 | **control 9 项同源**：`hello`/`caps=`/`endpoint-surface` 精确 9；`Wait` client-sugar | 加 op 漏一处；C0 行为不一致 | `capability-matrix` + `endpoint-surface` |
 | 11 | **QJS 单 TU（编译约束，不是安全）**：`quickjs.h` 只在 `script_quickjs.cpp`；`src/plugin/**` / `src/runtime/input_plan.*`、`recipe.*`、`recipe_json.*` 不 include quickjs.h、不调 `input::`/`writeGlobal` | 第二 quickjs TU / 第二施加点 | `tools/test/core-shape.test.mjs` ④（`src/plugin/**` 的 `PLUGIN_FORBIDDEN`）+ ⑤（`quickjs.h` 的 include 点**恰好**一处、消费者**恰好** `script_quickjs.cpp`） |
-| 12 | **预算**：每次 `onTrigger`/`start` deadline（**CPU 钟**）+ op_limit；超限 fail + 摘 trigger | 回调跑飞、guest 卡住；或判据退回墙钟 ⇒ 被抢占的回调又被诬告 | `plugin/callback-cpu-budget`（`op_limit=0` ⇒ 打断只可能来自 CPU deadline，且 reason 点名 `interrupted` + 预算 hint）+ `plugin/callback-wall-only`（墙钟 6 ms、CPU 远 < 2 ms ⇒ **不**失败）+ `trigger-runner/named-set`（宿主安全网仍是墙钟） |
+| 12 | **预算**：每次 `onTrigger`/`start` deadline（**CPU 钟**）+ op_limit；超限 fail + 摘 trigger | 回调跑飞、guest 卡住；或判据退回墙钟 ⇒ 被抢占的回调又被诬告 | `plugin/callback-cpu-budget`（`op_limit=0` ⇒ 打断只可能来自 CPU deadline，且 reason 点名 `interrupted` + 预算 hint）+ `plugin/callback-wall-only`（墙钟 6 ms、CPU 远 < 2 ms ⇒ **不**失败）+ `plugin/callback-host-pause`（假宿主 5 ms 忙等 ⇒ 扣除后 `js_cpu` ≪ 2 ms）+ `plugin/callback-js-band`（原生大循环仍 `over=js`）+ `trigger-runner/named-set`（宿主安全网仍是墙钟） |
 | 13 | **文本 recipe 冻结/parity**：`StepKind`/parser 不加能力；C3 JS driver 覆盖九条+timeout/quit/profile；旧 `--input-plan`（oracle = `InputPlan::atPoint`）vs 新 driver 的 parity | 旧 plan 语义被静默破坏；或又给 plan 加能力 | `recipe-driver-parity`（已落地，pure）+ `tools/test/recipe-freeze.test.mjs` 冻结守卫 |
 | 14 | **能力表/映射**：`Move→mouse_move`、`Sample` overlay n/a、`Frames→game.local_frames`、`Wait` client-sugar | 名字漂/“只有某个入口有” | `capability-matrix` |
 | 15 | **plan 不再产出**：`StepKind`/parser/help 不新增 `global_*`/变量/指令；`Step[]` 只读数据 | 又给历史 plan 加能力（用户明确不加） | 静态 diff/白名单守卫 + `capability-matrix` |
@@ -1579,6 +1588,9 @@ callback 链的可读性（进 `ctx.log`/设计文档）。
   "CPU 起点 + 墙钟比较"（CPU 读数比墙钟小几个数量级 ⇒ 第一次中断就误判）。**模块装载 / ctx 构造 /
   TriggerSet 收集 / 宿主调度不计**；被 OS 抢占 / 等 I/O / 睡眠**也不计**（那是缺陷
   `REQ-01M7VVDV69MJXRHNDGR50H7VHC` 的修法）。
+  ★ 用户在 JS 里调**宿主能力**的那段 CPU 同样不计，**本轮只接 `ctx.profile.end`**（2026-11-25，
+  缺陷单 `REQ-01M86VRT1YP53CJS0M885FCCJM`）：`HostPause` 累加进 `paused_ns`，`js_cpu_ns` 与中断判据
+  饱和扣除；诊断行 `paused_us` 可见。⛔ 不是放宽 2 ms；`log`/`profile.begin`/`edit` 未接。
   ★ **粒度**（2026-11-21 / win32 实测）：POSIX ns 级；Windows 主源 `QueryThreadCycleTime` ≈ ns 级；
   `GetThreadTimes` 是 **15.625 ms 整 tick 记账**（只作兜底：0.5 ms 忙等读到 0 或 156250，
   **判不了 2 ms**）。⇒ 守卫只断言"单调不减"，⛔ 不断言具体数值。
@@ -1671,7 +1683,7 @@ callback 链的可读性（进 `ctx.log`/设计文档）。
 | 插件 render adopt / release / 字体（C2b-2） | `apps/emulator-lift/src/runtime/present_sdl.h:208-221`；`present_sdl.cpp:528-582` |
 | 窗口档 ⑤' 装配（adopt / `exit 2` / 取代语） | `apps/emulator-lift/src/aot/aot_main.cpp:1201-1235` |
 | `game.mouse().buttons` 装配 / 三键唯一源 | `apps/emulator-lift/src/ui/script_quickjs.cpp:652-690`、`:3227`；`apps/emulator-lift/src/plugin/plugin_host.cpp:104-108`；`apps/emulator-lift/src/runtime/present_sdl.cpp:612-625`、`host_window.h:181-184`、`input_device.h:84-90` |
-| QJS 预算/interrupt | `apps/emulator-lift/src/ui/script_quickjs.cpp:107-113`、`197-201`、`253-265`、`1392-1395` |
+| QJS 预算/interrupt（含宿主暂停） | `apps/emulator-lift/src/ui/script_quickjs.cpp:107-113`、`197-212`、`253-285`、`317-329`、`1392-1395`、`3387-3390`、`3438-3447` |
 | C2c `loadSave` 真库 / 参考入口 | `apps/emulator-lift/scripts/plugins/lib/save.js`（`loadSave` / 参考入口 / `expect`） |
 | A 阶段 `chains.js`（通用路由） / 可跑样例 | `apps/emulator-lift/scripts/plugins/lib/chains.js`（`route`）；`apps/emulator-lift/scripts/plugins/lib/scenario-save07-battle.js` |
 | `.BIN` 精确相等（C1） vs recipe 剥后缀 | `apps/emulator-lift/src/runtime/trigger_runner.cpp:70,82`、`recipe.cpp:141-153` |
