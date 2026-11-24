@@ -5744,6 +5744,29 @@ const MUTATIONS = [
       '翻页等待窗缩回 60 个读点（≈164 ms）⇒ 正常点击也要先撞满窗、再发一次多余的重试点击（把页多翻一格），' +
       '而第一下真被吞时重试自己又要 76 个读点才落地、`turnr` 的 60 拍等不到 ⇒ `page not reached (target 0, still 1)`',
   },
+
+  // ── COM trampoline 去税（2026-11-25 / REQ-01M86NP8R79FE25CSMMV86JE31）────────────────────
+  //   ★ 这一类错长什么样：`dispatch` 在**热路径**上把 `MethodEntry` 的两个 `std::string` 拷进
+  //     局部（`iface` 16 字符 / `name` 33 字符都超过 MSVC 的 SSO 15 ⇒ 每次 COM 方法调用两次
+  //     堆分配 + 两次 free，而且都在锁内）。它**不改 guest 语义**、不崩、不黑屏 —— "跑得慢"
+  //     不会有任何行为用例红（耗时不是语义），读数又只进 `.tmp/`（不进门禁）⇒ 判据只能是源码形态。
+  //   ★ 守卫 = `tools/test/com-dispatch-shape.test.mjs`（pure、`node --test`、不编 C++ ⇒ 便宜）；
+  //     红的是"dispatch 热路径不拷贝两个 std::string"那一条（`std::string` 与
+  //     `iface/name = e->…` 两条断言同时命中）。行为侧的另一半（那条 Info 诊断仍要打得出）
+  //     由 `mechanism` 的 `com-dispatch-unknown-this` 守，⛔ 不在这里重复。
+  {
+    file: 'apps/emulator-lift/src/runtime/com.cpp',
+    from: '    const MethodEntry* e = methodByStubLocked(stub);\n',
+    to:
+      '    const MethodEntry* e = methodByStubLocked(stub);\n' +
+      '    const std::string iface = e->iface;\n' +
+      '    const std::string name = e->name;\n',
+    guard: 'tools/test/com-dispatch-shape.test.mjs',
+    what:
+      '把 `iface = e.iface; name = e.name;` 加回 `ComRegistry::dispatch` 热路径（每次 COM 方法调用' +
+      '两次堆分配 + 两次 free，且都在锁内）⇒ `com-dispatch-shape` 红（dispatch 体里又出现 ' +
+      '`std::string` / 又从 `e` 拷 `iface`·`name`）',
+  },
 ];
 
 let mutationRunSeq = 0;

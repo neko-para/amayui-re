@@ -31,7 +31,10 @@
 //   纯档夹具手动设 `m.cpu().com = &com`。⚠ 一台 Machine 配一个 ComRegistry ——
 //   方法 thunk 的 stub EA 是 `ShimRegistry` 全局的，两台 ComRegistry 共享同一批 stub 会找不到路由。
 //
-// ★ 线程 / 重入：没有锁（本模拟器是单线程解释器，SCOPE §1）。
+// ★ 线程 / 重入：**不是**单线程（见 `mutex_` 的注记 —— feeder 是真宿主线程）。宿主表由 `mutex_` 互斥，
+//   而且必须**可重入**（`createObject → generationOf`、`releaseImpl → releaseImpl`）。
+//   `dispatch` 对**方法表**的读不取这把锁：走按槽平坦数组（见 `method_by_slot_` 的注记）。
+//   ⛔ 注册（`createObject → registerSlot`）只在主线程 —— 这是数组可以裸指针发布的前提。
 #pragma once
 
 #include <cstddef>
@@ -236,6 +239,16 @@ private:
     std::uint32_t registerSlot(X86& cpu, const std::string& iface, const MethodEntry& want, bool has_method,
                                std::uint32_t* out_def_id);
 
+    // 桩 EA → 方法登记项（`dispatch` 的唯一查表口）。**与 `ShimRegistry::byStubEa` 同构**：
+    //   页内（`[stub_page_, stub_page_ + stub_slots_*4)` 且 4 字节对齐）⇒ 一次减法 + 一次边界比较 +
+    //   一次数组取 + **`stub_ea` 二次校验**（`e->stub == stub`）；页外 / 未对齐 / 未登记 / 表过期
+    //   ⇒ 回落 `methods_.find`（⛔ **不能**返回"缺失" —— 夹具会直写 `ShimDef::stub_ea`，那是页外形态）。
+    // ★ 为什么返回指针而不是副本：`methods_` 是 `unordered_map` 且**从不 erase** ⇒ 节点稳定；
+    //   ⛔ 拷贝 `MethodEntry` 等于把两个 `std::string` 的税搬回来（本类要去的正是这笔）。
+    // ⚠ 名字里的 `Locked` 沿用设计单（C1）：**快路径不取锁**（数组在第一次注册时发布，之后只读），
+    //   慢路径自己取 `mutex_`。`mutex_` 是 recursive ⇒ 调用方已经持锁时再取也安全（不会死锁）。
+    const MethodEntry* methodByStubLocked(std::uint32_t stub) const;
+
     // C1 命中路径的"装一条已发号的槽"：与 `registerSlot` 成功后的尾部**逐字节相同**
     // （BlockCache::installShim / 无块缓存时 byStubEa 反查 / feeder 的私有块缓存）。
     // 返回 false = 拒绝（已打日志）。
@@ -251,6 +264,29 @@ private:
 
     std::unordered_map<std::uint32_t, Object> objects_;        // key = obj guest EA
     std::unordered_map<std::uint32_t, MethodEntry> methods_;   // key = stub EA（桩页地址）
+    // ★ C1（REQ-01M86NP8R79FE25CSMMV86JE31）：按**槽**的平坦数组（`slot = (stub - stub_page_) >> 2`）。
+    //   存的是 `const MethodEntry*`（`methods_` 的节点；⛔ **不存 `MethodEntry` 副本** —— 它含两个
+    //   `std::string`，拷一次就把税搬回来了）。形状抄 `ShimRegistry::byStubEa` 的"快路径 + 慢路径"：
+    //   页外 / 未对齐 / 未登记 ⇒ 回 `methods_.find`（夹具会直写 `stub_ea`，那是页外 EA）。
+    //   槽数 = `ShimRegistry::stubSlots()`（8192 ⇒ 64 KB / registry；一台 Machine 一个，可接受）。
+    //   ⚠ 数组会有空洞（COM 的 stub 与 dshow / quartz / 其它运行期登记共用同一个桩页池）。
+    // ★ **发布时序**：只在 `registerSlot` 的 `methods_.emplace` **成功**时写一次，之后**从不清 / 从不改**
+    //   （`methods_` 从不 erase ⇒ 指针寿命与 registry 相同）。页参数 / 数组在**第一次注册**时一次性
+    //   从 `cpu.shims` 取，之后不变（`configureStubPage` 在已有 stub 发出去之后会被拒绝）。
+    // ★ **线程假设（复审订正，2026-11-25）**：数组读（`dispatch`）**不持** `mutex_`，数组写
+    //   （`registerSlot`）在 `createObject` 的锁内 —— 只看这两处是"锁外读 + 锁内写"。**真正让它们
+    //   串行的是 guest 令牌**：`dispatch` 的生产入口只有 `comTrampoline`（`com.cpp`），它由 shim
+    //   分发器调用；`ShimRegistry::invokePrepared`（`shims.cpp:622/638`）在调 `def.fn` 前取
+    //   `GuestToken::Guard`（`guest_token.h` 的 `std::mutex`）；`createObject` 的真调用点（23 处）
+    //   全在 shim 实现里，同样持令牌；feeder 的 fill 走 `invokeById`（`audio.cpp:2378` /
+    //   `lift_abi.cpp:432`）也持令牌。⇒ "注册（主线程）/ dispatch（主线程或 feeder）"**不会并发**。
+    //   首次 `methods_.emplace` 的 `method_by_slot_.assign()`（一次 resize 到 `stub_slots_`）也不会与
+    //   feeder 重叠：feeder 起线程前必须先有 DS buffer 对象，且 `configureStubPage` 在已有 stub 后拒绝重置。
+    //   ⇒ 数组单元格用裸指针发布，⛔ 不需要 `atomic`。**若将来出现不持令牌的 dispatch/注册路径**，
+    //   才必须换成 `std::atomic<const MethodEntry*>`（release / acquire）。
+    std::vector<const MethodEntry*> method_by_slot_;
+    std::uint32_t stub_page_ = 0;   // 桩页起点（首次注册时从 cpu.shims->stubPage() 取；之后不变）
+    std::uint32_t stub_slots_ = 0;  // 桩槽数（同上；0 = 还没取到 ⇒ 全部走慢路径）
     // C1：槽计划缓存（key = 方法表地址 + size）。见上面 `SlotPlan` 的说明。
     std::unordered_map<SlotPlanKey, SlotPlan, SlotPlanKeyHash> plans_;
     // 下一个要发的代际（只增不复用；0 保留给"没有代际"）。

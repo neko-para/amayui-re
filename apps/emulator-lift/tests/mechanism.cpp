@@ -39,6 +39,9 @@ constexpr std::uint32_t kDataEa = 0x00410000u;   // guest 里的字符串（plac
 constexpr std::uint32_t kStubPage = 0x7FF80000u; // bare 夹具的桩页（⛔ 与 GuestLayout::shim_page 分开）
 constexpr std::uint32_t kStubSlots = 0x1000u;
 constexpr std::uint32_t kProcStubEa = 0x7FF81000u;  // LoadLibraryA / GetProcAddress 在本夹具里的地址
+// 页外桩 EA（**夹具直写 `ShimDef::stub_ea` 的形态**；地址取自 `tests/fixture.h` 的 `kStubBase`，
+// 与上面 `kStubPage = 0x7FF80000` 不是同一页）⇒ COM 的按槽数组必然取不到，必须回落 `methods_.find`。
+constexpr std::uint32_t kOutOfPageStub = 0x7FFE2000u;
 constexpr std::uint32_t kFixtureHeap = 0x00100000u; // 1 MiB 足够，别为夹具 commit 128 MiB
 
 // ---- stderr **tee**（"默认日志级别看得见"的判据用；形态照 `tests/dsound.cpp`）----
@@ -652,6 +655,135 @@ int main() {
             LIFT_CHECK(contains(log, "owns_owner=true 但 owner=0"));
             LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(com.objectCount()), 0u);
             LIFT_CHECK_EQ_U32(m.heap().bytesInUse(), heap_before);  // 拒绝路径不分配
+        }
+
+        // ---- ⑤ dispatch 的诊断：`this` 不是**本 registry** 建出来的对象 ⇒ 仍转发 + 那行 Info ----
+        //   ★ 为什么需要这条（`REQ-01M86NP8R79FE25CSMMV86JE31` C4）：本单把 `known_this` 的查表
+        //     按 `logVisible(Info, LogCom)` 门控了。门控只许省掉"看不见时的锁 + 哈希"，
+        //     **不许**把这条诊断变成"永远打不出来"——而它默认就看不见（`warn`），删掉它没有任何
+        //     行为用例会红。所以判据必须是"**那行日志真的出现在 stderr 里**"。
+        //   ★ ⛔ 不只断言计数器：`known_this` 对 `fn` 的转发 / 返回值**一无所知**，计数器删掉整条
+        //     诊断照样是 1 ⇒ 恒真的"守卫"。
+        //   ★ 形态：registry A 建对象（`this` 的来源），registry B 用**同一批方法表**建自己的对象
+        //     （`addRuntime` 幂等 ⇒ 同一个 stub），然后对 **B** 调 dispatch 而 `this` 传 **A** 的对象
+        //     ⇒ B 的对象表里没有它（"非本 registry 的 this"，比"编一个野 EA"更贴近真机形态：
+        //     两个 registry 共用同一个 ShimRegistry 的桩页，正是"registry 与 ShimRegistry 不是一对"
+        //     那条 missing 分支的反面）。
+        //   ★ 捕获方式 = 本文件的 `StderrTee`（`tmpfile` + `_dup2(2)`，读回后 tee 到真 stderr）：
+        //     与 `tests/dispatch_tax.cpp` 的 `StderrMute` 同一套系统调用，但多了"读回"。
+        g_current_case = "com-dispatch-unknown-this";
+        {
+            lift::ComRegistry com_b;
+            const std::uint32_t obj_b = com_b.createObject(m.cpu(), "ITest", methods);
+            LIFT_CHECK_NE_U32(obj_b, 0u);
+            const std::uint32_t obj_a = com.createObject(m.cpu(), "ITest", methods);
+            LIFT_CHECK_NE_U32(obj_a, 0u);
+            LIFT_CHECK(com_b.find(obj_b));
+            // ★ 前提必须硬断言：`obj_a` 是**另一个** registry 建出来的（否则下面的诊断根本不该出现，
+            //   用例会假绿）。`methods` 相同 ⇒ 两边拿到同一批 stub（`addRuntime` 幂等）。
+            LIFT_CHECK(!com_b.find(obj_a));
+
+            // 手工构造一次 dispatch 的现场：`def` 是热路径 POD 视图，guest 栈上 [esp+4] = this。
+            lift::ShimCallDef def;
+            def.module = "com";
+            def.name = "ITest::GetValue";
+            def.stub_ea = get_ea;  // 与 `com_b` 的 methods_ 里那条同键（同一个 ShimRegistry 桩页）
+            lift::ShimCall call;
+            call.cpu = &m.cpu();
+            call.conv = lift::Conv::Stdcall;
+            call.argc = 1;  // this + 0 个声明参数
+            call.def = &def;
+            const std::uint32_t saved_esp = m.cpu().esp();
+            m.cpu().esp() = m.layout().stack_top - 8u;  // [esp] 返回地址，[esp+4] this
+            m.mem().wr32(m.cpu().esp(), 0xFFFFFFFFu);
+            m.mem().wr32(m.cpu().esp() + 4u, obj_a);
+            m.cpu().running = true;
+            const int calls_before = g_get_value_calls;
+
+            // ① 显式 `info`（诊断走 `comLog` = `LogLevel::Info`；默认 `warn` 下它与改动前一样看不见）
+            LIFT_CHECK(lift::logSetLevel("info"));
+            LIFT_CHECK(lift::logConfig().level == lift::LogLevel::Info);
+            StderrTee cap;
+            LIFT_CHECK(cap.begin());
+            com_b.dispatch(m.cpu(), call);
+            const std::string log = cap.finish();
+            // ② 默认级别下**不能**出现那行（诊断是 Info；⛔ 不许被顺手升成 Warn 混过 ①）
+            lift::logSetLevel("warn");  // 恢复默认
+            LIFT_CHECK(lift::logConfig().level == lift::LogLevel::Warn);
+            StderrTee quiet;
+            LIFT_CHECK(quiet.begin());
+            com_b.dispatch(m.cpu(), call);
+            const std::string quiet_log = quiet.finish();
+            m.cpu().esp() = saved_esp;
+
+            // ★ 转发没变：两次都真的调到了方法体（返回值 / 计数 / 不停机）
+            LIFT_CHECK_EQ_U32(call.result, 0x1111u);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(g_get_value_calls - calls_before), 2u);
+            LIFT_CHECK(m.cpu().running);
+            // ★ 判据：`info` 档下那行**逐字**在（名字 + 偏移 + "不是 ComRegistry 建出来的对象"+转发）
+            LIFT_CHECK(contains(log, "[shim] com!ITest: "));
+            LIFT_CHECK(contains(log, "ITest::GetValue(+0x0)"));
+            LIFT_CHECK(contains(log, "不是 ComRegistry 建出来的对象"));
+            LIFT_CHECK(contains(log, "仍转发"));
+            // 反过来：`warn` 档下同一调用**没有**这行（证明 ① 的可见性来自级别门，不是常开输出）
+            LIFT_CHECK(!contains(quiet_log, "不是 ComRegistry 建出来的对象"));
+
+            // 收尾：两个对象都还回去（不影响后面的用例 / 堆记账）
+            LIFT_CHECK(com_b.release(m.cpu(), obj_b));
+            LIFT_CHECK(com.release(m.cpu(), obj_a));
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(com.objectCount()), 0u);
+            LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(com_b.objectCount()), 0u);
+            LIFT_CHECK_EQ_U32(m.heap().bytesInUse(), heap_before);
+        }
+
+        // ---- ⑥ 页外 stub ⇒ dispatch 必须**回落 `methods_.find`**（⛔ 不是"路由表里没有"）----
+        //   ★ 为什么需要这条：C1 的快路径按 `slot = (stub - stub_page_) >> 2` 取数组 ⇒ 页外 / 未对齐
+        //     的 stub 一定取不到。那条路**必须**落回哈希表；⛔ **不能**返回 missing —— 后者会把
+        //     "夹具直写 `stub_ea`"的形态打成 loud trap（`stop_kind = Trap` + `unimplemented_calls++`
+        //     + 停机器），而 `ShimRegistry::byStubEa` 的注记明说夹具会直写 `stub_ea`
+        //     （`tests/fixture.h` 的 `kStubBase` 与 `configureStubPage` 就是两个不同的页）。
+        //   ★ 变异（把 `methodByStubLocked` 的慢路径删掉 / 改成恒 `nullptr`）⇒ 这里当场红：
+        //     返回值不会被写、`running` 变 false、`unimplemented_calls` +1。
+        g_current_case = "com-dispatch-out-of-page-stub";
+        {
+            // 先登记一条实现过的方法（拿到桩页内的 EA），再把它的 `stub_ea` **直写成页外地址**。
+            // `addRuntime` 的幂等分支（已有 stub_ea ⇒ 原样返回）不会重跑"形状断言" ⇒ 这正是夹具形态。
+            lift::ShimDef* raw = m.shims().addRuntime("com", "IBad::Foo", lift::Conv::Stdcall, 1, &shimGetValue);
+            LIFT_CHECK(raw != nullptr);
+            if (raw != nullptr) {
+                raw->stub_ea = kOutOfPageStub;
+                const std::vector<lift::ComMethod> bad = {
+                    {0u, "Foo", lift::Conv::Stdcall, 0, &shimGetValue},
+                };
+                const std::uint32_t obj = com.createObject(m.cpu(), "IBad", bad);
+                LIFT_CHECK_NE_U32(obj, 0u);
+
+                lift::ShimCallDef def;
+                def.module = "com";
+                def.name = "IBad::Foo";
+                def.stub_ea = kOutOfPageStub;  // ★ 页外（数组必然 miss）
+                lift::ShimCall call;
+                call.cpu = &m.cpu();
+                call.conv = lift::Conv::Stdcall;
+                call.argc = 1;
+                call.def = &def;
+                const std::uint32_t saved_esp = m.cpu().esp();
+                m.cpu().esp() = m.layout().stack_top - 8u;
+                m.mem().wr32(m.cpu().esp(), 0xFFFFFFFFu);
+                m.mem().wr32(m.cpu().esp() + 4u, obj);  // 真对象 ⇒ 不会走那条 Info 诊断
+                m.cpu().running = true;
+                const std::uint32_t traps_before = m.cpu().shim.unimplemented_calls;
+                const int calls_before = g_get_value_calls;
+                com.dispatch(m.cpu(), call);
+                m.cpu().esp() = saved_esp;
+
+                LIFT_CHECK_EQ_U32(call.result, 0x1111u);  // fn 真的跑到了（不是 missing 的 0）
+                LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(g_get_value_calls - calls_before), 1u);
+                LIFT_CHECK(m.cpu().running);  // ⛔ 不是 loud trap
+                LIFT_CHECK_EQ_U32(m.cpu().shim.unimplemented_calls, traps_before);  // missing 分支没被走到
+                LIFT_CHECK(com.release(m.cpu(), obj));
+                LIFT_CHECK_EQ_U32(m.heap().bytesInUse(), heap_before);
+            }
         }
     }
 

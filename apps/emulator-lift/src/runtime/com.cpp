@@ -124,7 +124,26 @@ std::uint32_t ComRegistry::registerSlot(X86& cpu, const std::string& iface, cons
     } else {
         MethodEntry e = want;
         e.stub = stub;
-        methods_.emplace(stub, std::move(e));
+        const auto ins = methods_.emplace(stub, std::move(e));
+        // ★ C2：把**这次新插的节点**发布到按槽平坦数组（页内 + 4 字节对齐才写）。
+        //   · 页参数在**首次注册**时从 ShimRegistry 取一次（`bind()` 之后不变；`configureStubPage`
+        //     在已有 stub 发出去之后会被拒绝 ⇒ 这里不会拿到过期值）。
+        //   · `ins.second == false`（已存在同 stub 的登记项）⇒ 早就发布过，⛔ 不重复写。
+        //   · 页外 / 未对齐（夹具直写 `stub_ea` 的形态）⇒ **不写** ⇒ `dispatch` 回落 `methods_.find`。
+        //   ⛔ 不拷 `MethodEntry`（两个 `std::string`）；存的是 `&ins.first->second`（unordered_map
+        //     节点稳定 + `methods_` 从不 erase ⇒ 与本 registry 同寿）。
+        if (ins.second) {
+            if (stub_slots_ == 0u) {
+                stub_page_ = cpu.shims->stubPage();
+                stub_slots_ = cpu.shims->stubSlots();
+                method_by_slot_.assign(stub_slots_, nullptr);
+            }
+            const std::uint32_t off = stub - stub_page_;  // 无符号：stub < page ⇒ 巨大值 ⇒ 页外
+            if (stub_slots_ != 0u && off < stub_slots_ * 4u && (stub & 3u) == 0u) {
+                const std::uint32_t slot = off >> 2u;
+                if (slot < method_by_slot_.size()) method_by_slot_[slot] = &ins.first->second;
+            }
+        }
     }
 
     if (!installPlannedSlot(cpu, iface, stub, def_id)) return 0;
@@ -507,29 +526,34 @@ const char* ComRegistry::ifaceOf(std::uint32_t obj) const {
     return it == objects_.end() ? nullptr : it->second.iface.c_str();
 }
 
-void ComRegistry::dispatch(X86& cpu, ShimCall& call) {
-    const std::uint32_t stub = call.def ? call.def->stub_ea : 0;
-    ShimFn fn = nullptr;
-    std::string iface;
-    std::string name;
-    std::uint32_t offset = 0;
-    bool known_this = false;
-    bool missing = false;
-    {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
-        const auto it = methods_.find(stub);
-        if (it == methods_.end()) {
-            missing = true;
-        } else {
-            const MethodEntry& e = it->second;
-            fn = e.fn;
-            iface = e.iface;
-            name = e.name;
-            offset = e.offset;
-            known_this = objects_.find(call.u32(0)) != objects_.end();
+const ComRegistry::MethodEntry* ComRegistry::methodByStubLocked(std::uint32_t stub) const {
+    // ---- 快路径：按槽平坦数组（**无锁**；数组在第一次注册时发布，之后只读，见 com.h 的注记）----
+    const std::uint32_t slots = stub_slots_;
+    const std::uint32_t off = stub - stub_page_;  // 无符号：stub < page ⇒ 巨大值 ⇒ 落在页外
+    if (slots != 0u && off < slots * 4u) {
+        const std::uint32_t slot = off >> 2u;
+        if (slot < method_by_slot_.size()) {
+            const MethodEntry* e = method_by_slot_[slot];
+            // ★ `stub_ea` 二次校验（与 `ShimRegistry::byStubEa` 同一条判据）：表过期 / 有人直写
+            //   `ShimDef::stub_ea` 时**不会**给出错答案，只会落慢路径。⛔ 不要在这里加 size 之类的
+            //   "顺手一致性检查" —— 那就把锁 / 扫描又请回来了。
+            if (e != nullptr && e->stub == stub) return e;
         }
     }
-    if (missing) {
+    // ---- 慢路径：页外 / 未对齐 / 未登记 / 表过期 ⇒ 与改动前逐字相同的哈希查找（在锁内）----
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    const auto it = methods_.find(stub);
+    return it == methods_.end() ? nullptr : &it->second;
+}
+
+void ComRegistry::dispatch(X86& cpu, ShimCall& call) {
+    const std::uint32_t stub = call.def ? call.def->stub_ea : 0;
+    // ★ C1/C3：这里只取**指针** —— `fn` / `offset` / `iface` / `name` 全在 `e` 上直接读，
+    //   ⛔ 不往局部 `std::string` 里拷（`iface` 16 字符、`name` 33 字符都超过 MSVC 的 SSO 15
+    //   ⇒ 旧形状每次调用**两次堆分配 + 两次 free**，而且都是在锁内）。`methods_` 从不 erase
+    //   ⇒ 指针稳定（页外形态由 `methodByStubLocked` 的慢路径回哈希表取，同样是稳定节点）。
+    const MethodEntry* e = methodByStubLocked(stub);
+    if (e == nullptr) {
         // ⛔ 不静默：能走到这里说明 vtable 里有一条我们不认识的地址（或 registry 不是同一个实例）
         std::fprintf(stderr,
                      "\n=== COM thunk 不在路由表里 ===\n"
@@ -548,16 +572,29 @@ void ComRegistry::dispatch(X86& cpu, ShimCall& call) {
         ++cpu.shim.unimplemented_calls;
         return;
     }
+    const ShimFn fn = e->fn;
     if (!fn) {
         // 未实现的槽：走到这里就是 loud trap（见下面的 comUnsupported）
         comUnsupported(cpu, call);
         return;
     }
     // 诊断（不改变行为）：`this` 应该是我们建出来的对象 —— vtable 只可能从 createObject 流出去。
-    if (!known_this) {
-        comLog(iface.c_str(),
-               "%s(+0x%X) 的 this=0x%08X 不是 ComRegistry 建出来的对象 —— 仍转发（可能是 guest 自己造的 vtable）",
-               name.c_str(), offset, call.u32(0));
+    // ★ C4：`known_this` **只喂下面这一条 Info 日志**（不改变返回值 / 不改变转发）⇒ 按可见性门控：
+    //   默认 `warn` 下**不查 `objects_`、也不拼日志**（省掉一把锁 + 一次哈希 + 一次 snprintf 前缀）。
+    //   可见时与改动前**逐字相同**（同一条 `logVisible(Info, LogCom)` 判据、同一段文本、同一个前缀）。
+    if (logVisible(LogLevel::Info, LogCom)) {
+        bool known_this = false;
+        {
+            // `objects_` 仍走 `mutex_`（只在真正要打诊断时）；⛔ 不要把它挪到快路径上。
+            std::lock_guard<std::recursive_mutex> lock(mutex_);
+            known_this = objects_.find(call.u32(0)) != objects_.end();
+        }
+        if (!known_this) {
+            comLog(e->iface.c_str(),
+                   "%s(+0x%X) 的 this=0x%08X 不是 ComRegistry 建出来的对象 —— 仍转发"
+                   "（可能是 guest 自己造的 vtable）",
+                   e->name.c_str(), e->offset, call.u32(0));
+        }
     }
     // ★ fn 在锁外执行：主线程的 D3D/DDraw 方法可能很长，feeder 的 DS Lock/Unlock 不能排在它后面。
     fn(cpu, call);
