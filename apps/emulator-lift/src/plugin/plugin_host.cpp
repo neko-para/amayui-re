@@ -86,6 +86,9 @@ std::string diagName(const char* raw) {
 //   `js`   = JS 本体跑完、但 `js_cpu_ns >= 2 ms`（**CPU 钟**；没被打断的那种边界）；
 //   `host` = **宿主段**（ctx 构造 / 收集 / 调度）越过 10×（20 ms）安全网 —— 墙钟，时间花在插件代码之外。
 // ★ 2026-11-21 收窄后 `over` **不再**等于"2 ms 判据失败"：2 ms 只看 `js_cpu_ns`（见 `runCallback`）。
+// ★ `paused_us` = **宿主调用暂停**的读数（`ctx.profile.end` 一类宿主能力的 CPU；`script_quickjs.cpp`
+//   的 `HostPause` 量、已从 `js_cpu_us` 里扣掉）。`js_cpu_us` 小、`paused_us` 大 ⇒ 这段时间是宿主
+//   替用户 JS 付的，不是用户 JS 跑飞（口径见 `runtime/budget.h` 头注）。
 void emitCallbackDiag(const lift::plugin::CallbackDiag& d, const char* raw_name, bool ok,
                       const lift::plugin::Budget& budget) {
     const bool js_late = budget.deadline_ns != 0 && d.js_cpu_ns >= budget.deadline_ns;
@@ -100,15 +103,18 @@ void emitCallbackDiag(const lift::plugin::CallbackDiag& d, const char* raw_name,
     const unsigned long long build_us = static_cast<unsigned long long>(d.build_ns / 1000u);
     const unsigned long long js_us = static_cast<unsigned long long>(d.js_ns / 1000u);
     const unsigned long long js_cpu_us = static_cast<unsigned long long>(d.js_cpu_ns / 1000u);
+    // 宿主调用暂停（`ctx.profile.end` 一类宿主能力的 CPU；**已从** `js_cpu_us` 里扣掉）。
+    // ★ 与 `js_cpu_us` 同一把 CPU 钟 ⇒ 两者可以直接对照（⛔ `host_ns` 是墙钟，别混）。
+    const unsigned long long paused_us = static_cast<unsigned long long>(d.host_pause_ns / 1000u);
     const unsigned long long collect_us = static_cast<unsigned long long>(d.collect_ns / 1000u);
     const unsigned long long gap_us = static_cast<unsigned long long>(gap / 1000u);
     const unsigned long long load_us = static_cast<unsigned long long>(d.module_load_ns / 1000u);
     if (!over) {
         std::fprintf(stderr,
                      "callback name=%s elapsed_us=%llu ok=%d calls=%llu build_us=%llu js_us=%llu"
-                     " js_cpu_us=%llu collect_us=%llu gap_us=%llu module_load_us=%llu\n",
+                     " js_cpu_us=%llu paused_us=%llu collect_us=%llu gap_us=%llu module_load_us=%llu\n",
                      name.c_str(), elapsed_us, ok ? 1 : 0, static_cast<unsigned long long>(calls),
-                     build_us, js_us, js_cpu_us, collect_us, gap_us, load_us);
+                     build_us, js_us, js_cpu_us, paused_us, collect_us, gap_us, load_us);
     } else {
         const char* how = d.inner_overran
                               ? (budget.deadline_ns != 0 && d.js_cpu_ns >= budget.deadline_ns ? "deadline"
@@ -116,10 +122,10 @@ void emitCallbackDiag(const lift::plugin::CallbackDiag& d, const char* raw_name,
                               : (js_late ? "js" : "host");
         std::fprintf(stderr,
                      "callback name=%s elapsed_us=%llu ok=%d calls=%llu build_us=%llu js_us=%llu"
-                     " js_cpu_us=%llu collect_us=%llu gap_us=%llu module_load_us=%llu budget_us=%llu"
-                     " over=%s\n",
+                     " js_cpu_us=%llu paused_us=%llu collect_us=%llu gap_us=%llu module_load_us=%llu"
+                     " budget_us=%llu over=%s\n",
                      name.c_str(), elapsed_us, ok ? 1 : 0, static_cast<unsigned long long>(calls),
-                     build_us, js_us, js_cpu_us, collect_us, gap_us, load_us,
+                     build_us, js_us, js_cpu_us, paused_us, collect_us, gap_us, load_us,
                      static_cast<unsigned long long>(budget.deadline_ns / 1000u), how);
     }
     std::fflush(stderr);
@@ -302,6 +308,9 @@ PluginHost::TriggerSet PluginHost::runCallback(Context& ctx, bool is_start, cons
     //     （缺陷单 REQ-01M7VVDV69MJXRHNDGR50H7VHC）；`js_ns` 只作 wall/cpu 对照读数。
     //   · 模块装载（`call()` 之前）、ctx / 事件对象构造、返回值→TriggerSet 收集、宿主调度
     //     **都不计** —— 这些是宿主替用户代码付的成本。
+    //   · **宿主调用暂停**（2026-11-25）：用户 JS 里调宿主能力（`ctx.profile.end` 生成报告 + 写剪贴板）
+    //     的那段 CPU 也**不计** —— `diag.js_cpu_ns` 已经是**扣除后**的值（`paused_us` 是扣掉的那段）。
+    //     ⛔ 这不是放宽：用户 JS 自己的 CPU 一分不减（`plugin/callback-js-band` / `callback-cpu-budget`）。
     //   · **宿主段另有安全网** = 10×（20 ms），**仍是墙钟**：防"宿主被卡死 ⇒ guest 被拖住"。超了照样
     //     响亮失败，但 reason 带 `(host)`（⛔ 不与用户 JS 超限混成同一条）。
     //   · 用户 JS 真的跑飞时 QJS 中断回调会先打断（`inner_overran` ⇒ 脚本返回 false + 已中断文案）。

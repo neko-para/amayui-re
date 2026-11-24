@@ -1370,14 +1370,11 @@ if(DEFINED ENV{LIFT_STRESS})
     # ★ `--time-limit 240` 兜底（单跑 60–120 s）；CTest 上限 420 s。
     # ★ `saves/` 是**只读**复现素材 ⇒ 用例自己复制进 `.tmp/` 私有 `--appdata`（⛔ 不就地写）。
     # =====================================================================================
-    # ★★ **本用例当前 `DISABLED`（2026-11-24 父级裁决）**：它的断言是活的，但"6 次切换全走完"
-    #    今天做不到，挡住它的是两张**已开单、不在本批修**的既有缺口：
-    #      · `REQ-01M86VRRTPY8W9RP1SFDT0N200`（S2 · `loadSave` 翻页点击在插件路上会丢 ⇒
-    #        `load-save: page not reached (target 0, still 1)`；3 次 run 里 2 次停在这里）；
-    #      · `REQ-01M86VRT1YP53CJS0M885FCCJM`（S3 · `settle` 回调的 2 ms CPU 预算被冷启动顶穿 ⇒
-    #        `run=failed: callback budget exceeded: scenario:settle:0`，`js_cpu_us=2217 > 2000`）。
+    # ★★ 2026-11-25：**`DISABLED TRUE` 已删**（两张挡路单都收口）：
+    #      · `REQ-01M86VRRTPY8W9RP1SFDT0N200`（S2 · `loadSave` 翻页窗 60→1200 读点 + 点行前核页）；
+    #      · `REQ-01M86VRT1YP53CJS0M885FCCJM`（S3 · 2 ms 预算改为"宿主调用暂停"：`ctx.profile.end`
+    #        的宿主成本不进用户 JS 的 2 ms；守卫 `plugin/callback-host-pause`）。
     #    ⛔ 不要把它改成 SKIP 77（"没修好"不是"输入不在场"）、⛔ 不要放宽 6 个窗口 / 标签 / readout 的断言。
-    #    **解除条件**：上面两张单任一修完后，把 `DISABLED TRUE` 删掉、复跑；绿了才算收口。
     # =====================================================================================
     add_executable(lift-aot-stress-fellow-switch tests/aot_stress_fellow_switch.cpp)
     target_link_libraries(lift-aot-stress-fellow-switch PRIVATE emulator-lift-runtime lift-test-support)
@@ -1387,10 +1384,11 @@ if(DEFINED ENV{LIFT_STRESS})
                 "$<TARGET_FILE:emulator-lift-aot>" "${AGE_SECTFIX_EXE}"
                 "${LIFT_STRESS_GAME_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../../saves"
                 "${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins/lib/scenario-fellow-switch.js")
-    # ★ `DISABLED TRUE`（而不是不注册）：注册表里**看得见**它（`ctest -N` 显示 Disabled），
-    #   存量与"为什么没跑"都不丢；`ctest` 也不把它算成失败（⛔ 不是 skip、⛔ 不是删掉）。
+    # ★ 2026-11-24 曾登记 `DISABLED TRUE`（两张既有缺口挡路）；2026-11-25 两张单都收口 ⇒ **已删除**。
+    #   ⛔ 今后再红就当一个真回归修，⛔ 不要用 `DISABLED` 藏起来（`ctest -N` 里 Disabled 看得见，
+    #   但"没跑"与"跑绿了"在输出里长得一样 —— 那正是 AGENTS §12.4 反对的形状）。
     set_tests_properties(aot-stress-fellow-switch PROPERTIES
-        SKIP_RETURN_CODE 77 DISABLED TRUE TIMEOUT 420)
+        SKIP_RETURN_CODE 77 TIMEOUT 420)
 endif()
 
 # =====================================================================================

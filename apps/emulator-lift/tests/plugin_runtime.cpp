@@ -33,6 +33,10 @@
 //   · `plugin/finish-quit`（finish 半）   ：`ctx.finish(5)` 只结束 Run + 记 exit，⛔ 不改进程 exit。
 //   · `start 的 ctx.now`（D-C2-10）       ：`start` 里 `ctx.now` 有值（script/pos/readIndex）；
 //                                            `start` 里的 click **下一读点**才落地。
+//   · `plugin/callback-js-band`           ：2 ms+ 的 JS 本体**跑完**（没被中断）⇒ 仍落 `js` 档
+//                                            （`callbackBudgetReason(…, host=false)` 逐字；⛔ 不是 `(host)`）。
+//   · `plugin/callback-host-pause`        ：**宿主调用暂停** —— `ctx.profile.end` 的宿主成本（假宿主
+//                                            烧 5 ms CPU）**不进**用户 JS 的 2 ms（去掉暂停 ⇒ 本用例红）。
 //
 // C2b（render / ui / draw；`plugin-runtime` 的 pure 半 —— 窗口 `adopt` 是 C2b-2）：
 //   · `plugin/render-surface`             ：`RenderCtx` 的成员表 = d.ts 的 RenderCtx **减 `run`**
@@ -1641,6 +1645,21 @@ bool probeProfileEnd(void* ctx, std::string* text, std::string* /*err*/) {
     return true;
 }
 
+// ★ 宿主调用暂停的**假宿主**（`plugin/callback-host-pause`）：`ctx.profile.end` 在这里**故意**
+//   烧 5 ms 本线程 CPU（照生产 `AotHost::endWindowText` 的实测 2.5–2.9 ms 再留余量）。
+//   为什么烧 CPU 而不是 sleep：2 ms 判据用 CPU 钟 ⇒ sleep 根本不会进预算，"暂停生效"就变成
+//   恒真断言。忙等用的是 `pluginThreadCpuNs()`（与预算同一把钟）⇒ 这段**必然**落在预算读数里，
+//   只有暂停能把它扣掉。
+bool probeProfileEndBurn(void* ctx, std::string* text, std::string* /*err*/) {
+    ++static_cast<ProfileProbe*>(ctx)->ends;
+    if (text != nullptr) text->clear();
+    const std::uint64_t t0 = lift::plugin::pluginThreadCpuNs();
+    while (lift::plugin::pluginThreadCpuNs() - t0 < 5'000'000ull) {
+        // 忙等：故意烧 5 ms CPU（不 sleep —— 见上）。
+    }
+    return true;
+}
+
 void caseRenderStoredRunCtx() {
     lift_test::g_current_case = "plugin/render-stored-runctx-rejected";
     Fixture f;
@@ -1939,6 +1958,88 @@ void caseCallbackCpuBudget() {
     LIFT_CHECK(lift::plugin::callbackDiag().js_cpu_ns >= 2'000'000ull);
 }
 
+// =====================================================================================
+// `plugin/callback-js-band`：**2 ms+ 的 JS 本体跑完 ⇒ 仍落在 `js` 档**（暂停不许把用户 JS 也扣掉）
+//   ★ 红了意味着什么：
+//     ① 一个真烧 >2 ms CPU、**完全没调宿主**的回调被放过（预算形同虚设）；或
+//     ② 失败原因不是 `js` 档（`callbackBudgetReason("start", "", false)`）—— 例如带 `(host)`。
+//   ★ 为什么这条与 `plugin/callback-cpu-budget` 不是同一条：那条烧 CPU 的**字节码**很多 ⇒ 被
+//     QJS 中断回调当场打断（`overran()` 真、reason 带 `interrupted`）⇒ `over=deadline`。这条的
+//     负载是**原生内建的大循环**（`Array.join`；字节码只有几十条 ≪ 每 10000 条一次的中断步长）
+//     ⇒ 不被打断、正常跑完，判据落在"跑完了但 CPU 超了"的 `js` 档 —— 这正是生产上
+//     `scenario:settle:0` 的形状（缺陷 `REQ-01M86VRT1YP53CJS0M885FCCJM` 的现场）。
+//   ★ 机制断言：`overran() == false` 证明这次**不是**中断回调判的 ⇒ 走的是 `js_late`。
+// =====================================================================================
+void caseCallbackJsBand() {
+    lift_test::g_current_case = "plugin/callback-js-band";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    const bool loaded = f.load("cpu-budget.js", {{"mode", "js-band"}});
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    f.host->runner().setBudget(lift::plugin::Budget{2'000'000ull, 0u});
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(f.host->failed());
+    // ★ 没有被打断（否则走的是 `deadline` 档，本用例就没钉住 `js` 档）。
+    LIFT_CHECK(f.host->script() != nullptr && !f.host->script()->overran());
+    // ★ 判据窗读数：用户 JS 本体的 CPU 确实越过了 2 ms（夹具的负载**没有**任何宿主调用 ⇒
+    //   `paused_ns == 0` ⇒ 这个数就是用户 JS 自己的时间）。
+    LIFT_CHECK(lift::plugin::callbackDiag().js_cpu_ns >= 2'000'000ull);
+    LIFT_CHECK(lift::plugin::callbackDiag().host_pause_ns == 0ull);
+    // ★ `js` 档**逐字**：`callbackBudgetReason(call, name, host=false)`（⛔ 不是 `(host)`）。
+    const std::string want = lift::plugin::callbackBudgetReason("start", std::string(), /*host=*/false);
+    const std::string got = f.host->failReason();
+    if (got != want) std::fprintf(stderr, "  reason=%s（期望 %s）\n", got.c_str(), want.c_str());
+    LIFT_CHECK(got == want);
+}
+
+// =====================================================================================
+// `plugin/callback-host-pause`：**宿主调用暂停** —— `ctx.profile.end` 的 CPU 不计入 2 ms
+//   ★ 红了意味着什么：宿主能力的成本又算回用户 JS 头上（缺陷 `REQ-01M86VRT1YP53CJS0M885FCCJM`
+//     原样复发：每个 `settle` 回调 `js_cpu_us` 2.5–2.9 ms > 2000 ⇒ `run=failed`）。
+//   ★ 构造（确定性）：假宿主的 `profile_end` 忙等 **5 ms 本线程 CPU**（> 2 ms 判据、< 20 ms 宿主
+//     安全网）⇒ 去掉 `HostPause` 就**必然** `over=js`（⛔ 不是靠"这台机器碰巧慢"）。
+//   ★ 三条一起判：
+//     ① 回调**不失败**、没被中断；
+//     ② 假宿主**真被调到了**（`probe.ends == 1`）且真的烧了 ≥4 ms（`paused_us` 读数）；
+//     ③ 判据读的 `js_cpu_ns` 是**扣除后**的（< 2 ms）—— 这才是诊断行 `js_cpu_us` 的真值。
+// =====================================================================================
+void caseCallbackHostPause() {
+    lift_test::g_current_case = "plugin/callback-host-pause";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    ProfileProbe probe;
+    lift::ui::UiHostOps ops{};
+    ops.ctx = &probe;
+    ops.profile_begin = &probeProfileBegin;
+    ops.profile_end = &probeProfileEndBurn;
+    const bool loaded = f.load("budget-pause.js", {}, &ops);
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    // 生产值 2 ms + op_limit 不限：这条判的**只**是 CPU deadline（⛔ 不让 op_limit 掺一脚）。
+    f.host->runner().setBudget(lift::plugin::Budget{2'000'000ull, 0u});
+    f.pump();
+    dumpFail(f);
+    // ① 不失败、没被打断
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->script() != nullptr && !f.host->script()->overran());
+    // ② 宿主真被调到、真烧了（⛔ 否则"没超"可能只是夹具没调宿主）
+    LIFT_CHECK_EQ_I64(probe.ends, 1);
+    const lift::plugin::CallbackDiag& d = lift::plugin::callbackDiag();
+    LIFT_CHECK(d.host_pause_ns >= 4'000'000ull);
+    // ③ 预算窗 = 扣除后的用户 JS 本体
+    LIFT_CHECK(d.js_cpu_ns < 2'000'000ull);
+}
+
 #ifdef _WIN32
 // =====================================================================================
 // `plugin/callback-wall-only`：**墙钟 > 2 ms、CPU 远 < 2 ms ⇒ 不许失败**
@@ -2035,6 +2136,8 @@ int main() {
     caseChainsRoute();
     caseGlobalReadModifyWrite();
     caseCallbackCpuBudget();
+    caseCallbackJsBand();
+    caseCallbackHostPause();
 #ifdef _WIN32
     caseCallbackWallOnly();
 #endif

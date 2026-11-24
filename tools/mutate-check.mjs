@@ -5356,6 +5356,27 @@ const MUTATIONS = [
       '`plugin/callback-wall-only` 红：墙钟 6 ms、CPU 远小于 2 ms 却被判超预算）',
   },
 
+  // ── 2 ms 的**宿主调用暂停**（`REQ-01M86VRT1YP53CJS0M885FCCJM`）─────────────────────────────
+  //   ★ 代表"宿主能力的成本又算回用户 JS 头上"这一类错：`ctx.profile.end` 是宿主能力（生成窗口报告 +
+  //     写系统剪贴板，实测 2.5–2.9 ms CPU）。删掉 `jsCtxProfileEnd` 的 `HostPause` ⇒ 那段 CPU 落进
+  //     `js_cpu_ns` ⇒ 生产上每个 `settle` 回调 `over=js`（缺陷原样复发）。
+  //   ★ 能抓到它的**只有** `plugin/callback-host-pause`（假宿主故意烧 5 ms 本线程 CPU）；
+  //     `plugin/callback-cpu-budget` 发现不了（那条根本不调宿主）。
+  //   ★ 反证过（2026-11-25 / win32 / dev `3409aad` + 本轮改动）：施加这一处 ⇒ `plugin-runtime` 的
+  //     `plugin/callback-host-pause` 红（`js_cpu_us ≈ 5xxx > 2000` ⇒ `over=js`）；还原后绿。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from: '            HostPause pause(implOf(ctx));\n            ok = host->profileEnd(&why);\n',
+    to: '            ok = host->profileEnd(&why);  // 变异：去掉宿主调用暂停（宿主成本算回用户 JS）\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`ctx.profile.end` 的宿主成本不再暂停 ⇒ 落进用户 JS 的 2 ms（`plugin-runtime` 的 ' +
+      '`plugin/callback-host-pause` 红：假宿主烧 5 ms CPU ⇒ `over=js`）',
+  },
+
   // ── `[present-readback]` Phase A：needs 谓词漏 `--dump-frame`（`d3d9.cpp` 的 want_guest）─────
   //   ★ 代表"回读的消费者少接一个"这一类错：`want_guest` 漏掉 `!dump_path.empty()` ⇒ `--dump-frame`
   //     那一帧**不下载**（materialized=false）⇒ dump 写成旧帧 / 被现实现拒写。旧判据

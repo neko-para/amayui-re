@@ -10,6 +10,14 @@
 //   ⇒ **模块装载**（`call()` 之前）、**ctx / 事件对象构造**、**返回值 → TriggerSet 收集**、宿主段调度
 //   **都不计**。理由：这些是宿主替用户代码付的成本；把它们算进预算会让"一次正常的回调"偶发红
 //   （缺陷单 `REQ-01M7VVDV69MJXRHNDGR50H7VHC`）。
+// ★ **宿主调用暂停**（2026-11-25，缺陷单 `REQ-01M86VRT1YP53CJS0M885FCCJM`）：同一条原则也罩
+//   **用户在 JS 里调用宿主能力**的那一段 —— **本轮只接 `ctx.profile.end`**（生成窗口报告 + 写系统
+//   剪贴板，缺陷现场 `js_cpu_us=2217`、后续窗口 2.56–2.90 ms CPU）。`script_quickjs.cpp` 的
+//   `HostPause` 在调用宿主前后各取 `pluginThreadCpuNs()`，差值累加进 `Impl::paused_ns`（**每次回调
+//   归零**）；`js_cpu_ns` 与中断回调的 deadline 比较都扣掉它。⛔ 其余宿主能力（`ctx.log` /
+//   `profile.begin` / `edit`）**未接**；真出现超预算再按同一原则逐个接，⛔ 不要把它写成"整类宿主能力
+//   都已暂停"。⛔ 这不是放宽 2 ms：用户 JS 自己的 CPU 一分不减，真跑飞的忙循环照样响亮失败
+//   （`plugin/callback-js-band`）。
 // ★ **宿主侧另有安全网** = `deadline_ns × kHostSafetyNetFactor`（2 ms ⇒ **20 ms**）：它防的是
 //   "宿主段被卡死 ⇒ guest 被拖住"，不是"用户 JS 跑飞" ⇒ 超了照样响亮失败，但 reason 带 `(host)`
 //   （与用户 JS 超限的 reason 可区分；拼法只有 `callbackBudgetReason()` 一处）。
@@ -100,6 +108,9 @@ struct CallbackDiag {
     std::uint64_t build_ns = 0;        // 组 ctx / 事件对象（每次回调新建；**不在** 2 ms 里）
     std::uint64_t js_ns = 0;           // 用户 JS 本体的**墙钟**（含 `ctx.log` 的 stderr 写；只作对照读数）
     std::uint64_t js_cpu_ns = 0;       // 用户 JS 本体的**CPU 时间** = **预算窗**（2 ms 判据用这个）
+    // 宿主调用暂停的**读数**（`ctx.profile.end` 一类宿主能力的 CPU；已从 `js_cpu_ns` 里扣掉）。
+    // ⛔ 不是判据：它只回答"这段时间是谁的"（`js_cpu_us` 小、`paused_us` 大 = 宿主替用户付的）。
+    std::uint64_t host_pause_ns = 0;
     std::uint64_t collect_ns = 0;      // 返回值 → TriggerSet（**不在** 2 ms 里）
     std::uint64_t module_load_ns = 0;  // 模块装载（**在预算起点之前**）
     bool inner_overran = false;        // QJS 中断回调是否真的打断过（deadline / op_limit）

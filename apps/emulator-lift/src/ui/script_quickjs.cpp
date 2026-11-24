@@ -203,6 +203,12 @@ struct Impl {
     //     `pluginThreadCpuNs()`；只在 `call()` 的 JS 体窗口内非 0，回调结束即清 0。
     std::uint64_t deadline_ns = 0;
     std::uint64_t cpu_deadline_ns = 0;
+    // ★ **宿主调用暂停**（2026-11-25，`REQ-01M86VRT1YP53CJS0M885FCCJM`）：`ctx.profile.end` 这类
+    //   **宿主能力**在用户 JS 本体里被调用，它们自己的 CPU（生成报告 + 写剪贴板）**不计入** 2 ms ——
+    //   与"模块装载 / ctx 构造不计"同一原则（`runtime/budget.h` 头注）。每次 `call()` 归零；
+    //   宿主调用前后各取 `pluginThreadCpuNs()`，差值累加到这里（`HostPause`）。
+    //   ⛔ 只减**宿主段**：用户 JS 自己的时间一分不减（中断回调也要减同一个数，见 `interruptHandler`）。
+    std::uint64_t paused_ns = 0;
     std::uint32_t op_limit = 0;
     std::uint64_t ops = 0;  // 已执行的"中断步长"数（× 10000 = 近似字节码条数）
     bool overran = false;   // 本帧是否被预算打断（`render` false 的原因之一）
@@ -253,6 +259,31 @@ struct Impl {
 };
 
 // ---------------------------------------------------------------------------------------
+// **宿主调用暂停**（RAII）：一个宿主能力的调用把本线程 CPU 时间加进 `Impl::paused_ns`。
+//
+// ★ 口径（`runtime/budget.h` 头注 / 用户裁决 2026-11-25）：2 ms 只罩**用户 JS 本体** ⇒ 用户 JS
+//   **调用宿主**，宿主替它干活的那段 CPU（`ctx.profile.end` 生成报告 + 写剪贴板；以后同形的
+//   宿主能力按同一原则接进来）不算用户 JS 的时间。⛔ 这不是"放宽 2 ms"：真正的 JS 忙循环
+//   （不调宿主）一分不少地记在预算里（`plugin/callback-js-band` / `plugin/callback-cpu-budget`）。
+// ★ 为什么必须在**中断回调里也减同一个数**：宿主调用期间没有字节码在跑 ⇒ 中断回调不会被调；
+//   但宿主返回之后 `pluginThreadCpuNs()` 已经涨了 2.5 ms ⇒ 不减就会在下一次中断**误判**超时。
+//   两处用的是同一个 `paused_ns`，所以"宿主段不计"是**一个**口径，不是两处各算一次。
+// ★ 用 RAII 而不是手工成对：`ctx.*` 的宿主调用会 `throw`（`catch (...)` 在 trampoline 上），
+//   手工写法在异常路径上会漏减 ⇒ 那次回调的宿主成本又算回用户 JS 头上。
+// ---------------------------------------------------------------------------------------
+struct HostPause {
+    Impl* impl = nullptr;
+    std::uint64_t start_ns = 0;
+    explicit HostPause(Impl* i) : impl(i), start_ns(lift::plugin::pluginThreadCpuNs()) {}
+    ~HostPause() {
+        const std::uint64_t end_ns = lift::plugin::pluginThreadCpuNs();
+        if (impl != nullptr && end_ns >= start_ns) impl->paused_ns += end_ns - start_ns;
+    }
+    HostPause(const HostPause&) = delete;
+    HostPause& operator=(const HostPause&) = delete;
+};
+
+// ---------------------------------------------------------------------------------------
 // 回调耗时诊断（`REQ-01M7VVDV69MJXRHNDGR50H7VHC` 待查 #3）
 //
 // ★ 本文件只**量**并填 `callbackDiag()`；**输出**在 `plugin_host.cpp` 的 `runCallback`
@@ -283,9 +314,18 @@ int interruptHandler(JSContext* /*ctx*/, void* opaque) {
         impl->overran = true;
         return 1;
     }
-    if (impl->cpu_deadline_ns != 0 && lift::plugin::pluginThreadCpuNs() >= impl->cpu_deadline_ns) {
-        impl->overran = true;
-        return 1;
+    if (impl->cpu_deadline_ns != 0) {
+        // ★ 扣除**宿主调用暂停**（`Impl::paused_ns`；`ctx.profile.end` 一类宿主能力）：
+        //   deadline = `js_start_cpu_ns + budget`，而 `paused_ns` 是从同一把 CPU 钟量出来的
+        //   ⇒ 比较 `(now - paused) >= deadline` 等价于"把 deadline 按暂停顺延"。
+        //   ⛔ 不减用户 JS 自己的时间：`paused_ns` 只在 `HostPause` 的构造→析构之间增长。
+        const std::uint64_t cpu_now_ns = lift::plugin::pluginThreadCpuNs();
+        const std::uint64_t js_cpu_now_ns =
+            cpu_now_ns >= impl->paused_ns ? cpu_now_ns - impl->paused_ns : 0;
+        if (js_cpu_now_ns >= impl->cpu_deadline_ns) {
+            impl->overran = true;
+            return 1;
+        }
     }
     if (impl->op_limit != 0 && impl->ops >= impl->op_limit) {
         impl->overran = true;
@@ -3134,9 +3174,15 @@ JSValue jsCtxProfileEnd(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/,
             return JS_ThrowTypeError(ctx, "ctx.profile.end: 不在插件回调里");
         }
         std::string why;
-        if (!host->profileEnd(&why)) {
-            return JS_ThrowTypeError(ctx, "ctx.profile.end: %s", why.c_str());
+        // ★ **宿主调用暂停**（`REQ-01M86VRT1YP53CJS0M885FCCJM`）：`profile.end` 是**宿主能力** ——
+        //   它在这里生成窗口报告文本并写系统剪贴板（`AotHost::endWindowText`），实测 2.5–2.9 ms CPU
+        //   ⇒ 不算用户 JS 的 2 ms（`runtime/budget.h` 头注的同一原则）。RAII：异常路径也减。
+        bool ok = false;
+        {
+            HostPause pause(implOf(ctx));
+            ok = host->profileEnd(&why);
         }
+        if (!ok) return JS_ThrowTypeError(ctx, "ctx.profile.end: %s", why.c_str());
         return JS_UNDEFINED;
     } catch (...) {
         return JS_ThrowTypeError(ctx, "ctx.profile.end: 宿主异常（C++ exception at script boundary）");
@@ -3338,6 +3384,9 @@ private:
         impl.op_limit = budget.op_limit;
         impl.ops = 0;
         impl.overran = false;
+        // ★ **宿主调用暂停的累计值每次回调归零**（`Impl::paused_ns`）：它只描述"本次回调里
+        //   宿主替用户 JS 花了多少 CPU"，跨回调累计会让下一次的预算凭空变宽。
+        impl.paused_ns = 0;
         impl.call_host = &host;
 
         bool ok = true;
@@ -3389,7 +3438,12 @@ private:
                 js_ns = js_end_ns >= js_start_ns ? js_end_ns - js_start_ns : 0;
                 // ★ 终点用**同一把 CPU 钟**；然后立刻撤掉 deadline（预算窗只到 JS 返回为止）。
                 const std::uint64_t js_end_cpu_ns = lift::plugin::pluginThreadCpuNs();
-                js_cpu_ns = js_end_cpu_ns >= js_start_cpu_ns ? js_end_cpu_ns - js_start_cpu_ns : 0;
+                const std::uint64_t js_raw_cpu_ns =
+                    js_end_cpu_ns >= js_start_cpu_ns ? js_end_cpu_ns - js_start_cpu_ns : 0;
+                // ★ 扣掉**宿主调用暂停**（`ctx.profile.end` 一类宿主能力；见 `HostPause`）⇒ `js_cpu_ns`
+                //   是"用户 JS 本体自己的 CPU"。诊断行的 `js_cpu_us` 是**扣除后**的值（真跑飞时
+                //   它仍是真值：`paused_ns` 只含宿主段）。⛔ 不减用户 JS 的时间。
+                js_cpu_ns = js_raw_cpu_ns >= impl.paused_ns ? js_raw_cpu_ns - impl.paused_ns : 0;
                 impl.cpu_deadline_ns = 0;
                 if (ret.isException()) {
                     qjs::takeException(impl.ctx, impl.origin, &local_err);
@@ -3415,6 +3469,9 @@ private:
         diag.build_ns = build_ns;
         diag.js_ns = js_ns;
         diag.js_cpu_ns = js_cpu_ns;  // ★ 2 ms 判据读的是它（plugin_host.cpp 的 `js_late`）
+        // 宿主调用暂停的**读数**（已从 `js_cpu_ns` 里扣掉的那一段；⛔ 不是判据，只给诊断行看
+        // "这 2.5 ms 是谁的"）。`host_ns`（墙钟）与它不同源，⛔ 不要交叉相减。
+        diag.host_pause_ns = impl.paused_ns;
         diag.collect_ns = collect_ns;
         diag.module_load_ns = impl.module_load_ns;
         diag.inner_overran = impl.overran;

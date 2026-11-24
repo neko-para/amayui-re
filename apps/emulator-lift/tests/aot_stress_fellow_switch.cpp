@@ -22,10 +22,11 @@
 //   实测记录：本用例第一次跑（2026-11-24）在**载入前缀**就红了 —— `loadSave(9)` 的翻页门
 //   `load-save: page not reached (target 0, still 1)`（见报告 `## 未做`：路径 3 的翻页是既有缺口）。
 //
-// ★ **当前登记为 `DISABLED TRUE`**（`CMakeLists.txt` 的 stress 块）：本批（2026-11-24）三次独立 run
-//   都红在两个**既有**输入缺口上 —— ① `REQ-01M86VRRTPY8W9RP1SFDT0N200`（`loadSave(9)` 翻页点击会丢，
-//   2/3 run 停在 `page not reached`）；② `REQ-01M86VRT1YP53CJS0M885FCCJM`（第一个 `settle` 回调
-//   `js_cpu_us=2217 > 2000`）。两张单修完后删掉 `DISABLED` 即恢复本用例，⛔ 不要改成 skip/放宽断言。
+// ★ **2026-11-24 曾登记 `DISABLED TRUE`**（`CMakeLists.txt` 的 stress 块）：当时三次独立 run 都红在
+//   两个**既有**输入缺口上 —— ① `REQ-01M86VRRTPY8W9RP1SFDT0N200`（`loadSave(9)` 翻页点击会丢）；
+//   ② `REQ-01M86VRT1YP53CJS0M885FCCJM`（第一个 `settle` 回调 `js_cpu_us=2217 > 2000`）。
+//   2026-11-25 两张单都收口（翻页窗 60→1200 读点；`ctx.profile.end` 的宿主成本走"宿主调用暂停"）
+//   ⇒ **`DISABLED` 已删**。⛔ 再红就当一个真回归修，不要再把它藏起来、⛔ 也不要改成 skip/放宽断言。
 //
 // ★ 为什么在 `LIFT_STRESS` 档：真跑（`saves/` + 真安装树 + 240 s 上限）⇒ 只能进"唯一允许跑真游戏"
 //   的那档（`AGENTS.md` §12.4）。
