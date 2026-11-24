@@ -2,9 +2,9 @@
 
 - id: REQ-01M86NP9S7BEGSP1QR4VX51G9N
 - type: req
-- status: blocked
+- status: done
 - parent: REQ-01M7JHSEZVMYB4XHEN32V7V6HJ
-- blocked_by: [01M86VSP8CXH998HTJTD50MEGC]
+- done_reason: 普查完成（真 calls 由 --no-s7 诊断构建 + fast/decline 对账 0.00056%）：_memcpy_0 点击 63/装载 13,244 次，估价 3.0µs/0.68ms，远低于 5/20ms 线；其它候选更小；_memcpy 已内建过线。⇒ 不落第二个，表保持 1 行；将来 _memcpy_0 ≥147K（装载）/≥37K（点击）再落。
 - tags: [emulator-lift, aot, intrinsics]
 
 ## 结论（2026-11-24 普查）
@@ -53,3 +53,17 @@
 
 ⛔ 只收**静态 CRT / 平台库函数**（FLIRT 名 + 反汇编契约双证）；⛔ 不收引擎自己的 handler（§12.8）；
 ⛔ 不按调用点 / EA 开特判；每个内建都要一份契约差分（`docs/03-emulator/aot-intrinsics.md` §5 六步）。
+
+## 结果（2026-11-25：不落第二个内建）
+
+真 calls（`--no-s7` 诊断构建，与 `fast+decline` 对账 **0.00056%**）：
+
+- 点击 seg2：`_memcpy` 2,559,744 · `_memcpy_0` **63** · `_memset` 1,222 · `__ftol2_sse` 393 · `_strcpy_s` 858
+- 装载 load9：`_memcpy` 9,117,397 · `_memcpy_0` **13,244** · `_memset` 3,573 · `__ftol2_sse` **154,805** ·
+  `_strcpy_s` 7,571
+- FELLOW s1：`_memcpy` 66,274 · `_memcpy_0` 0 · `_memset` 526 · `__ftol2_sse` 1,428 · `_strcpy_s` 2,842
+
+`_memcpy_0` 估价：点击 **3.0 µs** / 装载 **0.68 ms**（136 ns 上界 1.8 ms）⇒ 差 5/20 ms 线 **≥11× / ≥500×**。
+其它最大 `__ftol2_sse` 装载 ≈2.99 ms、`_strcpy_s` ≈1.69 ms；只有 `_memcpy`（已内建）过线。
+⇒ `aot/intrinsics.txt` 保持 1 行。将来 `_memcpy_0` 的 calls 涨到 **≥147 K（装载）/ ≥37 K（点击）** 再落；
+它两件硬前提仍成立（逐字节同体 + 是 unit root），只是量不够。

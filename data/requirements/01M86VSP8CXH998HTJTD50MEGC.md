@@ -2,8 +2,9 @@
 
 - id: REQ-01M86VSP8CXH998HTJTD50MEGC
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M86NP9S7BEGSP1QR4VX51G9N
+- done_reason: 诊断 + 三窗口真 calls 落地；_memcpy 对账 0.00056%；_memcpy_0 点击 3.0µs/装载 0.68ms（差 ≥11×/≥500×）⇒ 不落第二个内建；默认档不变（call-diag 0 行、profile 块同）。FELLOW 只测到 s1/6、ns/次是估价。
 - tags: [emulator-lift, aot, diagnostics, intrinsics]
 
 ## 为什么需要
@@ -33,3 +34,24 @@ FELLOW 只有旧二进制的**整跑**表 ⇒ 无法按 `calls × ns/次` 排序
 
 ⛔ 不改 `aot/intrinsics.txt`（第 2 个内建由普查单在测量后决定）；⛔ 不按 EA 特判产品路径
 （诊断只在 opt-in 时计数）；⛔ 不把"派发份额"换算成调用次数。
+
+## 结果（2026-11-25 / win32 / dev）
+
+- **诊断**：`src/aot/call_diag.{h,cpp}`（9 个候选 EA 表；`LIFT_CALL_DIAG=1` opt-in，缺省零输出；
+  `calls = 派发 + lift_dyn`）；默认档 `call-diag` 行 0、profile 块逐字同、`stop`/arena/table 同。
+- **盲区修正**：S7 直呼（`tail call @lift_cc_*`）不进派发 / `lift_dyn` ⇒ 派发口径只看到 **0.1875%**。
+  用 **`lift-gen --no-s7` 诊断构建**（同一源码、只改发射形状；`.tmp/.../nos7/`）取真 calls：
+  `_memcpy` **26,721,353** vs `fast+decline` **26,721,503**（差 150 / **0.00056%**，`lift_dyn=0`）。
+- **真 calls（三窗口）**：
+
+  | 窗口 | `_memcpy` | `_memcpy_0` | `_memset` | `__ftol2_sse` | `_strcpy_s` |
+  |---|---:|---:|---:|---:|---:|
+  | 点击 seg2（3 趟） | 2,559,744 | **63** | 1,222 | 393 | 858 |
+  | 装载 load9 | 9,117,397 | **13,244** | 3,573 | **154,805** | 7,571 |
+  | FELLOW s1 | 66,274 | 0 | 526 | 1,428 | 2,842 |
+
+- **判定**：`_memcpy_0` 点击 3.0 µs / 装载 0.68 ms（136 ns 上界 1.8 ms）⇒ 差 5/20 ms 线 **≥11× / ≥500×**；
+  其余最大 `__ftol2_sse` 装载 ≈2.99 ms、`_strcpy_s` ≈1.69 ms；只有已内建的 `_memcpy` 过线。
+  ⇒ **不落第二个内建**（铁律：不拿派发份额当成本）。
+- **未做**：FELLOW 只测到 `s1-to-avaro`/6（其余 5 个被插件 2 ms 预算挡）；`ns/次` 是估价不是逐次实测。
+- 门禁：`ctest` 141/141、`pnpm test` 627、`verify` 472 pass、`validate` 6/6。
