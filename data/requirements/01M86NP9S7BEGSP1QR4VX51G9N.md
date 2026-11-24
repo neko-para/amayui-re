@@ -9,8 +9,9 @@
 
 ## 结论（2026-11-24 普查）
 
-按现有三份数据求交，**能双证为静态 CRT 且还在窗口里出现的只有 `_memcpy` 自己**（三个块）；`_memcmp` /
-`_strlen` / `_strcmp` / `_memmove_s` 等 **0 个 `call` 站点**（或不发射），`_memset` 已排除。
+按现有三份数据求交，**能双证为静态 CRT 且还在窗口里出现的只有 `_memcpy` 自己**（三个块）；
+`_strlen` / `_strcmp` / `_memmove_s` 等 **0 个 `call` 站点**；`_memcmp` 有 **1 次真调用**（装载窗口，
+见文末），`_memset` 已排除。
 ⇒ 本阶段**不落第二个内建**（`aot/intrinsics.txt` 保持 1 行）。但「第 2 个收谁」还不能最终判定 ——
 数据缺口见下，测量前置已拆到 `REQ-01M86VSP8CXH998HTJTD50MEGC`（M1–M4）。
 
@@ -22,7 +23,7 @@
 | `0x4E78E0` | `_memcpy_0` | 43 | 不在 top-20 | 未测 | 同族；待逐字节比体 |
 | `0x4E7400` | `_memset` | 185 | 不在 top-20 | **1,074** | 已排除（<0.1 ms） |
 | `0x4E82C0` | `__ftol2_sse` | 385 | 不在 top-20 | 未测 | x87/EDX:EAX/20 B scratch ⇒ 不是 v1 形态 |
-| `0x4F8434` | `_memcmp` | **0** | 不在 | 0（不发射） | 不在 closure |
+| `0x4F8434` | `_memcmp` | 静态 0 | 不在 | **1（装载）** | 表里有 entry（lift_table.inc）；原「不发射」撤回 |
 | `0x4F4620` | `_strlen` | **0** | 不在 | 0（死代码） | — |
 | `0x4E8A19` | `_sprintf_s` | 365 | 不在 top-20 | 未测 | varargs ⇒ 不可精确表达 |
 | `0x4ED5C0` | `_qsort` | 5 | 不在 top-20 | 未测 | guest 回调（§12.8 红线） |
@@ -39,7 +40,7 @@
 
 `_memset`（1,074 次 / 2.5 s ⇒ <0.1 ms）· `__ftol2_sse`（契约不是 v1 发射器能表达的形态）·
 `_sprintf_s`（varargs）· `_qsort`（guest 回调）· `_malloc` / `_free`（堆契约）·
-`_memcmp` / `_strlen` / `_strcmp` / `_memmove`（0 站点或不发射）。`_memset` 的 FLIRT 在
+`_strlen` / `_strcmp` / `_memmove`（0 站点）；`_memcmp` 有 1 次（远低于阈值）。`_memset` 的 FLIRT 在
 `.lst:381846`，是活的，只是不热。
 
 ## 若测量后必须落一个
