@@ -106,3 +106,146 @@ export function hideBattleHelp(ctx) {
     );
     return true;
 }
+
+// ===========================================================================
+// FIELD 地图点位精灵的**派生渲染位**（VM 自己在每次进图时重建；⛔ 不是持久值）
+// ===========================================================================
+//
+// 取证（2026-11-24 / win32 / 只读脚本清单 `dist/views/data/*.BIN.txt`；逐条指令见
+// `docs/03-emulator/scripts/FIELD.md` §地块特效渲染模型）：
+//   · `FIELD.BIN`  instr#187 `0x000FA0` `fill-zero (global-int 50ff9f) 32`      —— 进图先清这 32 个 dword
+//   · `SETOBJ.BIN` instr#2   `0x00005C` `fill-zero (global-int 50ff9f) 32`      —— 再清一次，然后逐槽 bit-set
+//                  instr#34  `0x00037C` `bit-set …  0`（= 不画）· instr#78/#84 `bit-set … 2`（= alpha 0）
+//                  instr#86  `0x0008C4` `bit-set …  1`
+//   · `DRAWOBJ.BIN` instr#7  `0x0000E0` `and (…) (50ff9f[slot]) 1` → `jcc` 跳过该槽（**不画**）
+//                  instr#26 `0x0002C4` `and (…) (50ff9f[slot]) 4` → instr#29 `set-draw-color-alpha(item,0,0,ffffff)`
+//                  instr#44 `0x0004E4` `add (local-int 11) fa (local-int 1)`  ⇒ **纹理槽 = 0xFA + 类型**
+//                  instr#58 `0x00066C` `draw-texture (item) (0xFA+类型) 0 0 w h dstx dsty`
+//   ⇒ 採集点(0x1F) 的槽 = 0x119 = `MO031B.AGF`（ALF 20797，绿草）·
+//      発掘点(0x20) 的槽 = 0x11A = `MO032B.AGF`（ALF 20798，岩石）
+//   ⇒ **画不画/透不透明** 只由这两位的组合决定；它们由 VM 在进图时按持久输入重算 ⇒ 改它 = 改**路由**，
+//      不是改"这点位发现过没有"那个真值（真值在 `13d7` / `3e2a0` / `14d8cc` 那几个输入里，本文件不碰）。
+
+/** 地图点位**逐槽渲染标志**（int global，32 槽 × 1 dword；VM 每次进图重建）。 */
+export const FIELD_OBJECT_FLAGS_GLOBAL_ID = 0x50ff9f;
+
+/** 地图点位**逐槽类型**（int global，32 槽；`SETOBJ` #3 把它拷进 `14d7a0`，`DRAWOBJ` #9 用它选图）。 */
+export const FIELD_OBJECT_TYPE_GLOBAL_ID = 0x50ffd1;
+
+/** `50ff9f[slot]` 位：**置位 ⇒ 该点不画**（`DRAWOBJ.BIN` instr#7 `and … 1` → `jcc` 跳过）。 */
+export const FIELD_OBJECT_HIDE_BIT = 0x1;
+
+/** `50ff9f[slot]` 位：**置位 ⇒ 照画但 alpha=0**（`DRAWOBJ.BIN` instr#26 `and … 4` → instr#29 alpha 0）。 */
+export const FIELD_OBJECT_ALPHA0_BIT = 0x4;
+
+/** 点位类型：**採集点**（`DRAWOBJ` 槽 = 0xFA+type ⇒ `0x119` = `MO031B.AGF`）。 */
+export const FIELD_POINT_TYPE_GATHER = 0x1f;
+
+/** 点位类型：**発掘点**（`DRAWOBJ` 槽 = 0xFA+type ⇒ `0x11A` = `MO032B.AGF`）。 */
+export const FIELD_POINT_TYPE_DIG = 0x20;
+
+/** 点位槽号范围（`DRAWOBJ.BIN` instr#1/#4：`local 2 = 1 … < 32`）⇒ 1..31（0 号不用）。 */
+export const FIELD_OBJECT_SLOT_FIRST = 1;
+export const FIELD_OBJECT_SLOT_LAST = 31;
+
+/**
+ * 当前**地图号**（int global）：`STINIT` / `FIELD` / `SETOBJ` 的门都是 `eq … (global-int b222) <mapNo>`，
+ * 逐地图的表一律 `lookup-array-2d (base) (global-int b222) …`（例 `SETOBJ.BIN` instr#16/#68 的 `3e2a0`、
+ * `DRAWOBJ.BIN` instr#18 的 `4a5f0`）。只用于读数/日志，⛔ 不写。
+ */
+export const FIELD_CURRENT_MAP_GLOBAL_ID = 0xb222;
+
+/**
+ * 运行期**地图实例下标**（int global）：逐地图表运行时按它索引（`62d72[61c72][…]` / `71cb4[61c72]` /
+ * `62ab6[61c72]`）。只用于读数/日志，⛔ 不写。
+ */
+export const FIELD_MAP_INSTANCE_GLOBAL_ID = 0x61c72;
+
+/**
+ * 读一格 int global。读失败在 API 里没有错误通道 ⇒ 宿主抛 TypeError（⛔ 本文件不吞）。
+ *
+ * @param {RunCtx} ctx RunCtx（需要 `ctx.read.global.get`）。
+ * @param {number} id raw 池下标。
+ * @returns {number}
+ */
+export function readIntGlobal(ctx, id) {
+    const value = ctx.read.global.get("int", id);
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+        throw new TypeError(`readIntGlobal: global ${hex(id)} 不是数字（${typeof value}）`);
+    }
+    return value | 0;
+}
+
+/**
+ * 读一格 int global，并**响亮失败**（`null` 之外的形状一律 throw）—— 给"读数即证据"的调用方用。
+ *
+ * @param {RunCtx} ctx RunCtx。
+ * @param {number} id raw 池下标。
+ * @returns {number}
+ */
+export function readIntGlobalStrict(ctx, id) {
+    return readIntGlobal(ctx, id) >>> 0;
+}
+
+/**
+ * 一次性读 `FIELD_OBJECT_TYPE_GLOBAL_ID` / `FIELD_OBJECT_FLAGS_GLOBAL_ID` 的 32 槽快照。
+ *
+ * @param {RunCtx} ctx RunCtx。
+ * @returns {{ slot: number, type: number, flags: number }[]} 下标 0..31（`[0]` 恒不用）。
+ */
+export function readFieldObjectSlots(ctx) {
+    /** @type {{ slot: number, type: number, flags: number }[]} */
+    const out = [];
+    for (let slot = 0; slot <= FIELD_OBJECT_SLOT_LAST; slot += 1) {
+        out.push({
+            slot,
+            type: readIntGlobal(ctx, FIELD_OBJECT_TYPE_GLOBAL_ID + slot),
+            flags: readIntGlobal(ctx, FIELD_OBJECT_FLAGS_GLOBAL_ID + slot),
+        });
+    }
+    return out;
+}
+
+/**
+ * 把"有点位且类型命中"的槽的**派生渲染位**改成"可见"：清 `HIDE` 与 `ALPHA0`。
+ *
+ * ★ 为什么这不算改真实值（三条，都可复核）：
+ *   ① 作用面是 `50ff9f`，而 `50ff9f` 是 VM **每次进图重建**的派生表（`FIELD.BIN` #187 + `SETOBJ.BIN` #2 两处
+ *      `fill-zero`，随后逐槽 `bit-set`）⇒ 它不是"这一点位发现过没有"的存储；
+ *   ② 持久输入（`50ffd1` 类型表、`14d8cc`、`3e2a0`…）**一个都不写** —— 本函数只写 `50ff9f+slot`；
+ *   ③ 只在 `on == 1` 时执行；`on == 0` 走完全相同的链但不写（A/B 只差这一处）。
+ *
+ * @param {RunCtx} ctx RunCtx。
+ * @param {{ types?: number[] | null }} [options] 参与强制的类型（缺省 = 採集 + 発掘）。
+ * @returns {{ slot: number, type: number, before: number, after: number, applied: boolean }[]} 实际改过的槽。
+ */
+export function forceFieldPointsVisible(ctx, options) {
+    const types = options !== null && options !== undefined && Array.isArray(options.types)
+        ? options.types
+        : [FIELD_POINT_TYPE_GATHER, FIELD_POINT_TYPE_DIG];
+    /** @type {{ slot: number, type: number, before: number, after: number, applied: boolean }[]} */
+    const changed = [];
+    for (let slot = FIELD_OBJECT_SLOT_FIRST; slot <= FIELD_OBJECT_SLOT_LAST; slot += 1) {
+        const type = readIntGlobal(ctx, FIELD_OBJECT_TYPE_GLOBAL_ID + slot);
+        if (type === 0 || !types.includes(type)) continue;
+        const id = FIELD_OBJECT_FLAGS_GLOBAL_ID + slot;
+        const before = readIntGlobal(ctx, id) >>> 0;
+        const after = (before & ~(FIELD_OBJECT_HIDE_BIT | FIELD_OBJECT_ALPHA0_BIT)) >>> 0;
+        if (after === before) {
+            changed.push({ slot, type, before, after, applied: false });
+            continue;
+        }
+        /** @type {Receipt | null | undefined} */
+        const receipt = ctx.edit.global.set("int", id, after);
+        const applied = receipt !== null && typeof receipt === "object" ? receipt.applied !== false : false;
+        if (!applied) {
+            const code = receipt !== null && typeof receipt === "object" && receipt.code !== undefined
+                ? String(receipt.code)
+                : "unknown";
+            ctx.log("warn", `guest-globals: forceFieldPointsVisible 未生效 — slot=${slot} global=${hex(id)} ` +
+                `before=${hex(before)} after=${hex(after)} code=${code}`);
+        }
+        changed.push({ slot, type, before, after, applied });
+    }
+    return changed;
+}
