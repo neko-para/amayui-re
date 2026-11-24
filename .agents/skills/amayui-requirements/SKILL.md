@@ -10,7 +10,9 @@ description: 在本仓（《天結いキャッスルマイスター》汉化工�
 1. **不许手改 `data/requirements/*.md`**（改参数区、重命名、新建文件都算）：写路径**只有一条** ——
    领域模型里的 `planAdd` / `saveNode`，两个调用方（CLI `--add/--set`、工作台 `POST /api/nodes`）共用它。
    手改会被 `validate` 判红，且失去"写后回读复验、不绿回滚"的保护。
-2. **不许 `git add` / `git commit`** —— 提交时机由用户决定（沿用旧仓长期要求）。
+2. **提交按 `AGENTS.md` §14.1**（本技能不额外禁提交）：`git add` / `git commit` 可以做，但
+   **已提交的历史不许改写**（`reset --hard` / `amend` / `rebase` / `push --force`），
+   **推送默认不做**（要用户点头）；`data/requirements/**` 只在 `main` 改（§14.3）。
 3. **进度只写在树里**：`release/CHANGELOG.md` 是**玩家**的更新记录、README **不许**写状态 / 进度 / 计数
    （`AGENTS.md` §10）。发现"该做的事没人 track"时的正确动作是**开单**，不是写进散文。
 
