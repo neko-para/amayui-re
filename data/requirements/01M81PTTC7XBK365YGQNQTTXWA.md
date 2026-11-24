@@ -2,66 +2,50 @@
 
 - id: REQ-01M81PTTC7XBK365YGQNQTTXWA
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M7JHSEZVMYB4XHEN32V7V6HJ
+- verify: apps/emulator-lift/tests/s7_indirect.cpp#s7-indirect
 - tags: [emulator-lift, aot, s7]
 
-# AOT · S7 放宽（间接 call 后 esp 未知）未合入：补形状级差分用例再评估
-
-- id: REQ-01M81PTTC7XBK365YGQNQTTXWA
-- type: req
-- status: open
-- parent: REQ-01M7JHSEZVMYB4XHEN32V7V6HJ
-- tags: [emulator-lift, aot, s7]
+# AOT · S7 判据 4（间接 call）的放宽：已收（形状级差分先红后绿）
 
 ## 一句话
 
-S7 判据 4（"有间接 `call` ⇒ 整单元不可结构化"）的一条**可证放宽**已在 dev 车道实现并实测
-（间接 `call` 之后把 `esp` 标未知，不假设 callee 的 `ret imm16` 清字节数；只有函数自己能可证地
-把 `esp` 重建回入口值才放行）。读数站得住，**但本批不收**：收益 ≈ 0.03 ms/切换帧，而它改的是
-**发射形状**的判据面。本节点 = 补一条**形状级差分用例**（接受条件）。
+判据 4「有间接 `call` ⇒ 整单元判死」曾占降级根 **76%**（首因 1,682）。放宽 = 间接 `call` 之后把 `esp`
+标成**未知**（⛔ 不假设 callee 的 `ret imm16` 清字节数），只有函数自己能用**可跟踪的** `mov esp,ebp` /
+`leave` 把 `esp` 重建回入口值时才放行；配套 `espAdd()`（`kUnknown + d` 仍是未知，避免假绿与有符号溢出）。
+构建期开关 `LIFT_S7_RELAX_INDIRECT`（缺省 **ON**；`-D…=OFF` ⇒ 8 份 `.ll` 与放宽前**逐字节相同**）。
 
-★ 这是 `REQ-01M7FC3W0ZMA35PK3WV73YXB1Q`（M-lift-2）的**兄弟**节点，不是子节点：那单的判据 2 已裁
-"剩余覆盖率不再投入"，本节点收的是"放宽 + 它缺的那条判据"。
+## 判据（接受条件，已满足）
 
-## 判据（接受条件，不是愿望）
+1. **形状级差分 CTest `lift-s7-indirect`**（默认档）：夹具 = 单元内有间接 `call` + callee 用 `ret imm16`
+   清字节 + 函数自己用 `mov esp,ebp` / `leave` 恢复帧；断言 ① 该单元被判 **structured**、
+   ② 与解释器（`Machine`）**逐位相同**（`lift_dyn` 查找=1）。
+   **先红后绿**：放宽前 ① 红 3 条（`structurable=1` / `ret in structured=1` / 有 `downgrade 00452FA0`），
+   放宽后 **22/0 全绿**；`-DLIFT_S7_RELAX_INDIRECT=OFF` 时用例复红。
+2. **D3（前置修正）**：间接 `call` 原来的 `%r = tail call i32 @lift_dyn(…)` 是**假尾调用**（`%r` 紧接着被
+   `icmp` 用）⇒ 改回普通 `call`；`tail call @lift_dyn` 5,804→492，三份 exe `.text` sha256 全同（性能持平）。
+3. 五项指纹（`exit` / `stop @` / arena / `table misses`）逐位同；`ctest` 140/140 · `pnpm test` 618 ·
+   `pnpm verify` 466；变异 `--match s7-indirect` 实测红。
 
-1. 新增一条 CTest / 差分用例，形状至少覆盖「单元内有间接 `call` **+** callee 用 `ret imm16` 清字节
-   **+** 函数自己用 `mov esp,ebp` / `leave` 恢复帧」，要求与解释器（`Machine`，即 `tests/*` 用的语义
-   oracle）臂**逐位相同**。夹具形态可在 `repo:apps/emulator-lift/tests/s7_structured.cpp` 上扩
-   （现在只跑 `repo:apps/emulator-lift/tests/ir/s7_roots.txt` 的固定一对 F/G）。
-2. 有了 1 之后再评估放宽本身（实现在 dev 车道的 `.tmp/lift-opt/s7-relax.patch`，gitignored、未入库；
-   主树是**未放宽**形态）。
-3. `leave` / `push ebp` / `pop ebp` 的 esp 模型**已查清**（2026-11-22 / 2026-11-23 复核）：
-   **不是缺陷**、对当前 HEAD **没有**错编译（见 `repo:docs/03-emulator/aot-s7-evaluation.md` §6）；
-   "三条一起补"只是把证明做对（IR 逐字节等价）⇒ **不排期**。
+## 读数（2026-11-24 / win32 / dev `53d438c`；SAVE11，4 对交错 A/B）
 
-## 为什么这一批不并（裁决，2026-11-22）
-
-- 收益 ≈ **0.03 ms/切换帧**（本负载 −0.31% 派发）对上"改**发射形状**判据"的审查成本，不成比例。
-- **论证有一处对不上**：判据 4 的理由是"caller 的宿主帧在那次尾调用里就没了"
-  （`repo:apps/emulator-lift/src/aot/lift_struct.h` 里第 4 条判据与传递闭包那两段都写这个理由）。
-  但当前发射器发的是
-  `%r = tail call i32 @lift_dyn(...)` 紧跟 `emitCallReturnCheck(%r, resume)` —— **`%r` 在被用**
-  ⇒ 该点**不是**真尾调用 ⇒ **D53 的前提在现状下需要重新证明**。实测指纹相同 ≠ 理由成立。
-- **缺形状级差分**：`lift-s7-structured` 只跑 `s7_roots.txt` 的固定根
-  （`repo:apps/emulator-lift/CMakeLists.txt` 里 `LIFT_S7_CALLER_EA` / `LIFT_S7_CALLEE_EA` 是硬编码的一对），
-  覆盖不到新解锁的 **1,395** 个宿主 `call` 站点。
-- 实测**没有**解锁 FELLOW 主循环 `00412290`：它仍因 `004E8C21` 传染降级，而后者自身仍是间接 `call`
-  （站 `004E8C57`）、之后没有可跟踪的帧恢复 ⇒ 估的 85–105 ms 没拿到；`004BBAB0` 同理（卡 `004B60C0`）。
+| 读数 | 放宽前 | 放宽后 | Δ |
+|---|---:|---:|---:|
+| 可结构化单元（生成期） | 5,343 | **6,411** | +20.0% |
+| 宿主 `call` 站点 | 1,572 | **2,967** | +88.7% |
+| 间接 call 首因 | 1,682 | **703** | — |
+| `iter`（8 s 窗口派发） | 56.35 M | **51.07 M** | −9.4% |
+| `insns/iter` | 21.18 | **23.64** | +11.6% |
+| 点击大帧 | 267.3 ms | **210.2 ms** | **−21.4%（4/4 同向）** |
 
 ## 未做 / 待核
 
-- **未做**：判据 1 的那条形状级差分用例（本节点的交付）。
-- **不排期**：esp 模型"三条一起补"（IR 等价、收益 0）—— 单 `REQ-01M81W63PV0JRRX8QZY7ZGEGTF` 已 dropped，理由见它的 `dropped_reason`。
-- **已核（2026-11-22）**：`leave` 那件事**不是缺陷**。63 个"靠偏差才通过"的单元在 Intel 正确模型下
-  63/63 仍通过；真正靠偏差的是 8 个 `… pop ebp; ret [imm16]` 共享尾声块，`ret` 处 +4 就是返回槽。
-  取证见 `repo:docs/03-emulator/aot-s7-evaluation.md` §6。
-- 不进本节点：其余四类降级（动态返回 / 可变长栈 / 写返回槽 / 表外 callee）的进一步放宽；
-  "单元根必须是函数入口"（另立、单独读数）。
+- **没有解锁主循环/热泵**：`00412290`（主循环）与 `004BBAB0`（定时器泵）仍卡在 `004E8C21` / `004B60C0`
+  —— 那两条间接 `call` 之后**没有可跟踪的帧恢复**，本次"可证"放宽结构上管不到。`004B5230` 在放宽前
+  就已结构化（不是本单的功劳）。本单新解锁的是 `004E73EB`（614 个直接传染源）与 `004E8A6E`（180）。
+- 其余四类降级（动态返回 / 可变长栈 / 写返回槽 / 表外 callee）的进一步放宽不随本单。
+- "单元根必须是函数入口"另立（见 `REQ-01M81W63PV0JRRX8QZY7ZGEGTF` 的 dropped 理由）。
 
-## 读数与复现
-
-全部读数、命令与口径（生成期 `lift-gen: [S7 criteria]` / `[S7 downgrade]`、30 帧指纹、`boundary` ns/派发）
-见 `repo:docs/03-emulator/aot-s7-evaluation.md` §0 / §4 / §7。本节点不复述数字。
-
+详见 `repo:docs/03-emulator/aot-s7-evaluation.md` §4.4–§5；派发密度那一层的三条修正见
+`repo:docs/03-emulator/aot-dispatch-density.md`。
