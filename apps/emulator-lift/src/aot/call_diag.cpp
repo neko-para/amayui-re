@@ -31,8 +31,18 @@
 namespace lift {
 namespace call_diag {
 
-// ★ 定义在匿名 namespace 之外：头文件用 inline `active()` 读它（派发热路径）。
-bool g_active_state = false;
+// ★ 开关：定义在匿名 namespace 之外（头文件用 inline `on()` 读它）。
+//   `LIFT_CALL_DIAG` 只在这里读一次；之后所有判定都是普通全局 bool。
+bool g_on_state = [] {
+    const char* v = std::getenv("LIFT_CALL_DIAG");
+    return v != nullptr && v[0] != '\0';
+}();
+
+// ★ 窗口状态：**只属于开窗的线程**（宿主主线程）。`lookupUncounted` 也会被音频 feeder 线程调用
+//   （`aot_feeder.cpp`）⇒ 共享无锁结构是数据竞争；`thread_local` 让 feeder 线程看到自己那份
+//   （恒 false / 空窗口）⇒ 不写、不竞争。⚠ 代价 = feeder 线程里的调用不计入 ⇒ 只保证
+//   `--audio off`（`aot_run.cpp` 在 audio 非 off + opt-in 时打一行 stderr）。
+thread_local bool g_active_state = false;
 
 namespace {
 
@@ -51,11 +61,6 @@ const Candidate kCandidates[] = {
     {0x004F8434u, 0x004F9906u, "_memcmp", false},     // 0x14D2 B
 };
 constexpr int kN = static_cast<int>(sizeof(kCandidates) / sizeof(kCandidates[0]));
-
-const bool kOn = [] {
-    const char* v = std::getenv("LIFT_CALL_DIAG");
-    return v != nullptr && v[0] != '\0';
-}();
 
 // `LIFT_CALL_DIAG_WINDOW`：只收集这个 `profile.begin` 窗口；缺省 `*` = 所有窗口。
 const char* targetWindow() {
@@ -80,12 +85,12 @@ struct Window {
     CandStat cand[kN];
 };
 
-Window g_cur;
-std::vector<Window> g_done;
+thread_local Window g_cur;
+thread_local std::vector<Window> g_done;
 
 }  // namespace
 
-bool on() { return kOn; }
+// `on()` 是头文件里的 inline（读 `g_on_state`）⇒ 这里不再给出跨 TU 定义。
 
 std::size_t candidateCount() { return static_cast<std::size_t>(kN); }
 
@@ -124,7 +129,7 @@ void noteHostCall(std::uint32_t ea) {
 }
 
 void beginWindow(const char* label) {
-    if (!kOn) return;
+    if (!g_on_state) return;
     const std::string name = (label != nullptr && *label != '\0') ? label : "(unnamed)";
     const char* want = targetWindow();
     if (std::strcmp(want, "*") != 0 && name != want) return;
@@ -141,7 +146,7 @@ void endWindow() {
 }
 
 void print(std::FILE* out) {
-    if (!kOn || out == nullptr) return;
+    if (!g_on_state || out == nullptr) return;
     if (g_active_state) endWindow();
     if (g_done.empty()) {
         std::fprintf(out, "call-diag: on（LIFT_CALL_DIAG=1）但目标窗口 \"%s\" 没有出现\n", targetWindow());

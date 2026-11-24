@@ -607,6 +607,14 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     const std::uint64_t max_insns = opts.max_insns;
     const bool* const stop_requested = opts.stop_requested;
     const bool audio_enabled = audio_.enabled();
+    // ★ 临时诊断（`LIFT_CALL_DIAG=1`）的**口径前提**：窗口状态是 thread_local ⇒ 音频 feeder 线程
+    //   （它自己的 IR 执行器也会调 `lookupUncounted`）里的调用**不计入**。audio off 时没有 feeder
+    //   ⇒ 全部计数都在主线程。audio 非 off + opt-in ⇒ **一行** stderr，⛔ 不让读数静默失真。
+    if (call_diag_on && audio_enabled) {
+        std::fprintf(stderr,
+                     "[aot] ⚠ LIFT_CALL_DIAG=1 且音频未关（--audio off 才是计数口径）："
+                     "音频 feeder 线程的 guest 调用不计入 ⇒ 本 run 的 call-diag 读数不可信\n");
+    }
     bool one_shot_pending = !recovery_bypass_checked_ || (skip_logo_ && !skip_logo_checked_);
 
     for (;;) {

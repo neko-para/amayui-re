@@ -312,8 +312,12 @@ LiftFn lookup(std::uint32_t ea, DispatchStats& stats, std::uint64_t* comparisons
 //   ⛔ 不要把它实现成"调 lookup 再减计数"：那会同时弄脏 max_probes / comparisons。
 LiftFn lookupUncounted(std::uint32_t ea) {
     // ★ 临时诊断（`LIFT_CALL_DIAG=1`）：S7 之后 `call` 站点走 `lift_dyn` **不回派发循环**
-    //   ⇒ 派发计数看不到它们。这里补记"到该 EA 的一次调用"（缺省档 = 一次 bool 读）。
-    if (call_diag::active()) call_diag::noteHostCall(ea);
+    //   ⇒ 派发计数看不到它们。这里补记"到该 EA 的一次调用"。
+    //   ★ 两级判定：`on()`（普通全局 bool，缺省档一次 load）在前；`active()`（thread_local）
+    //     只在 opt-in 时才读 —— 缺省档不碰 TLS。`active()` 是 thread_local ⇒ 音频 feeder 线程
+    //     （`aot_feeder.cpp` 也调本函数）永远看到自己的 false ⇒ 不写共享状态、无数据竞争；
+    //     代价 = feeder 线程的调用不计入（本诊断只保证 `--audio off`）。
+    if (call_diag::on() && call_diag::active()) call_diag::noteHostCall(ea);
     // ★ lift-opt #6：**自己那份** memo（与 `lookup` 的分开 ⇒ 不会把 `probes=0` 写进带补计的那份）。
     //   命中时只补 `lift_dyn_lookups`；未命中仍按原路径记 `lift_dyn_misses`。
     if (ea == t_lift_dyn_memo.ea && t_lift_dyn_memo.fn != nullptr) {

@@ -37,11 +37,19 @@ struct Candidate {
     bool has_n;  // true = 入口处 `[esp+12]` 是长度 n（memcpy / memset 家族）
 };
 
-bool on();
+// ★ 开关（进程级、只读）：`LIFT_CALL_DIAG` 的静态判定结果，只由 `call_diag.cpp` 的初始化写一次。
+//   读它是**普通全局 bool**（不碰 TLS）⇒ 缺省档的每一处判定只多一次 load + 分支。
+extern bool g_on_state;
+inline bool on() { return g_on_state; }
 
-// ★ 热路径（`aot_run.cpp` 的派发循环）按引用读这个 bool：开档时每派发只多一次 load，
-//   ⛔ 不是一次跨 TU 调用。
-extern bool g_active_state;
+// ★ 窗口状态**只属于开窗的那个线程**（= 宿主主线程）：`thread_local`。
+//   为什么必须：`aot_dispatch.cpp` 的 `lookupUncounted` 也会被**音频 feeder 线程**调用
+//   （`aot_feeder.cpp` 的 IR 执行器）⇒ 共享一份无锁 `g_cur` 是数据竞争（主线程同时在
+//   `noteDispatch` 里写它）。`thread_local` 之后 feeder 线程看到的是它自己那份（恒 false /
+//   空窗口）⇒ 一个字节都不写、不竞争。
+//   ⚠ 代价：feeder 线程里的调用**不计入** ⇒ **本诊断只保证 `--audio off` 下的计数**；
+//   `--audio` 非 off 且 opt-in 时 `aot_run.cpp` 会打**一行** stderr 说明"本 run 计数不可信"。
+extern thread_local bool g_active_state;
 inline bool active() { return g_active_state; }
 
 // 候选表（只读；`print` 与 `rangeIndex` 共用这一份）。

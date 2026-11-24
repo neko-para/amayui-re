@@ -91,11 +91,17 @@ ctest --test-dir out -R '^lift-intrinsics$' --output-on-failure
 ## 7. 候选测量（2026-11-25）：per-function 计数，以及"派发口径"的盲区
 
 > 需求单 `REQ-01M86VSP8CXH998HTJTD50MEGC`（内建普查的测量前置 M1–M4）·
-> 读数：win32 / `dc65c8f` / RelWithDebInfo / shape `split8-O2-lto-abi` / 2026-11-25 03:30–05:00 ·
-> 原始日志与复现命令：`.tmp/reveq/REQ-01M86VSP8CXH998HTJTD50MEGC/`（report.md / run.ps1 / logs/）
+> 读数：win32 / `dc65c8f` / RelWithDebInfo / shape `split8-O2-lto-abi` / 2026-11-25 03:30–05:10
+> （§7.1–7.2 派发口径 03:30–05:00；§7.4 的 `--no-s7` 诊断构建 04:40–05:10）·
+> 原始日志与复现命令：`.tmp/reveq/REQ-01M86VSP8CXH998HTJTD50MEGC/`（report.md / report-nos7.md / run.ps1 / logs/）
 
-诊断：`src/aot/call_diag.*`（`LIFT_CALL_DIAG=1`，缺省零输出 / 每派发一次 bool）。候选表用
-`.lst` 的 `COLLAPSED FUNCTION` 的 `{EA, 名字, 字节数}`：
+诊断：`src/aot/call_diag.*`（`LIFT_CALL_DIAG=1`）。缺省档的精确代价：**零输出、零表查找**，每派发一次
+`call_diag_on && active()`、每次 `lookupUncounted` 一次 `on() && active()`；两级都短路在**普通全局 bool**
+（`g_on_state`）上 ⇒ 缺省不碰 TLS、不碰 `g_cur`。候选表 = 评测单点名的 8 个
+（`_memcpy_0` / `_memset` / `__ftol2_sse` / `_sprintf_s` / `_strncpy_s` / `_strcpy_s` / `_rand` / `_memcmp`）
+**+ 已内建的 `_memcpy` 作同口径对照** = 9 行；名字 / 字节数取 `.lst` 的 `COLLAPSED FUNCTION`。
+CSV 里其余 23 行（`_strncmp` 16 站点 / `_memchr` 4 站点 / `_atoi` / `_floor` / `_qsort` / `_malloc` …）**不在本表**：
+不是本单点名的判据面，或契约上已排除（guest 回调 / 堆）。
 
 | EA | 名字 | 大小 | 点击 `seg2-click2p5` | 装载 `load9` | FELLOW `s1-to-avaro` |
 |---|---|---:|---:|---:|---:|
@@ -134,18 +140,77 @@ calls = **50,099**，而同一次 run 的 `intrinsics: fast+decline` = **26,721,
 2. ⇒ 判据只能在 §7.4 的真 calls 上取；本表的派发可见值只保留"顺带能看见的那部分"这一层意思。
 3. `_memcpy_0` 的两件前提本轮**已核**（只读）：① 与 `0x4E74B0` 逐字节同体——
    PE 偏移 `0xe68b0` vs `0xe6ce0` 各 865 B，94 个 diff 字节全在 47 个 2 字节段里，
-   每段是同一地址字段的低 16 位（46 段 +0x430、1 段 rel32 −0x430，目标同为 `0x4F1121`）；
+   每段是同一地址字段的低 16 位（46 段 +0x430、1 段 rel32 −0x430；该 rel32 的**操作数起点实测 `0x4E74F0`**，
+   两体**目标同为 `0x4F111F`** —— `_memcpy` 侧 `E9 2B 9C 00 00`、`_memcpy_0` 侧 `E9 FB 97 00 00`，
+   各自下一条指令 + 位移即可复算）；
    ② `lift-gen` 硬闸：临时表含 `0x4E74B0` + `0x4E78E0` 跑 `--closure-gate --intrinsics` ⇒ **exit 0**、
    `intrinsics … (2 unit roots)`、`.ll` 里有 `lintr_entry_4E78E0`。
    ⇒ 它**过得了**"逐字节同体 + 单元根"两道闸；量够不够见 §7.4。
 4. `_memcmp` 在 `out/aot/lift_table.inc` 里有 `LIFT_AOT_ENTRY(0x004F8434u, lift_cc_4F8434)`（可发射），
-   本轮装载窗口也真调到 1 次 ⇒ 普查里"0 个 call 站点 ⇒ 不发射"这句要按**发射形状**重写。
+   本轮装载窗口也真调到 1 次 ⇒ 普查里"0 个 call 站点 ⇒ 不发射"这句要按**发射形状**重写（需求单侧修复另走）。
+
+### 7.3 怎么造这份 `--no-s7` 诊断二进制（可复制粘贴）
+
+`.tmp` 是 gitignored ⇒ 下面这份命令就是"诊断二进制从哪来"的**唯一可复跑入口**（占位：`$ROOT` = 仓库根，
+`$D` = 任意工作目录，产物全在 `$D`）。它**只改 `lift-gen` 的发射形状**（所有 `call`/`ret` 回 trampoline），
+⛔ 不改源码 / 闭包 / 内建表。
+
+```powershell
+$ROOT = "E:\Projects\amayui-re-dev"          # 仓库根
+$APP  = "$ROOT\apps\emulator-lift"
+$D    = "$ROOT\.tmp\reveq\REQ-01M86VSP8CXH998HTJTD50MEGC\nos7"
+New-Item -ItemType Directory -Force -Path "$D\aot" | Out-Null
+
+# ① 生成（同 PE pin、同 intrinsics.txt；--no-s7 是关键）
+& "$APP\out\emulator-lift-gen.exe" --exe "$ROOT\corpus\assets\age\AGE.EXE__dumped.sectfix.EXE" `
+  --roots "$APP\aot\closure.txt" --closure-gate --no-s7 --split 8 --split-prefix lift_aot `
+  --out-dir "$D\aot" --ir-target-cpu x86-64 `
+  --ir-target-features '+cmov,+cx8,+fxsr,+mmx,+sse,+sse2,+x87' `
+  --intrinsics "$APP\aot\intrinsics.txt" --pin "$D\aot\lift_pin.h" --table "$D\aot\lift_table.inc"
+# ⇒ exit 0；断言（诊断表必须与产物逐字节相同，才能复用产物的 obj）：
+if (((Get-FileHash "$D\aot\lift_table.inc").Hash) -ne ((Get-FileHash "$APP\out\aot\lift_table.inc").Hash)) { throw "table 不同" }
+if (((Get-FileHash "$D\aot\lift_pin.h").Hash)     -ne ((Get-FileHash "$APP\out\aot\lift_pin.h").Hash))     { throw "pin 不同" }
+
+# ② 8 份 .ll → obj（与 CMake 同一条 clang 形状）
+cd "$APP\out"
+for ($i = 0; $i -lt 8; $i++) { $p = '{0:D2}' -f $i
+  & 'C:\Program Files\LLVM\bin\clang.exe' -c -O2 -flto --target=x86_64-pc-windows-msvc `
+    -Wno-override-module -o "$D\aot\lift_aot.part$p.obj" "$D\aot\lift_aot.part$p.ll" }
+
+# ③ 链接：产物那 7 个 obj（out 里已编译）+ 诊断的 8 个 obj + 与 CMake 同一条 LINK_LIBRARIES
+$objs = 1..8 | ForEach-Object { "$D\aot\lift_aot.part$('{0:D2}' -f ($_ - 1)).obj" }
+$objs += 'CMakeFiles\emulator-lift-aot.dir\src\aot\aot_main.cpp.obj',
+         'CMakeFiles\emulator-lift-aot.dir\src\aot\aot_host.cpp.obj',
+         'CMakeFiles\emulator-lift-aot.dir\src\aot\aot_dispatch.cpp.obj',
+         'CMakeFiles\emulator-lift-aot.dir\src\aot\aot_feeder.cpp.obj',
+         'CMakeFiles\emulator-lift-aot.dir\src\aot\aot_run.cpp.obj',
+         'CMakeFiles\emulator-lift-aot.dir\src\aot\call_diag.cpp.obj',
+         'CMakeFiles\emulator-lift-aot.dir\src\aot\memcpy_diag.cpp.obj'
+$libs = 'emulator-lift-runtime.lib', 'vcpkg_installed\x64-windows\lib\SDL3.lib',
+        'vcpkg_installed\x64-windows\lib\Zydis.lib', 'vcpkg_installed\x64-windows\lib\Zycore.lib',
+        'third_party\berkeley-softfloat\berkeley-softfloat.lib', 'shell32.lib', 'd3dcompiler.lib',
+        'vcpkg_installed\x64-windows\lib\freetype.lib', 'vcpkg_installed\x64-windows\lib\glm.lib',
+        'lift-pl-mpeg.lib', 'vcpkg_installed\x64-windows\lib\libpng16.lib',
+        'vcpkg_installed\x64-windows\lib\z.lib',
+        'vcpkg_installed\x64-windows\lib\boost_date_time-vc145-mt-x64-1_92.lib',
+        'vcpkg_installed\x64-windows\lib\boost_context-vc145-mt-x64-1_92.lib',
+        'vcpkg_installed\x64-windows\lib\boost_container-vc145-mt-x64-1_92.lib',
+        'third_party\quickjs-ng\lift-qjs.lib',
+        'kernel32.lib','user32.lib','gdi32.lib','winspool.lib','shell32.lib','ole32.lib',
+        'oleaut32.lib','uuid.lib','comdlg32.lib','advapi32.lib'
+& 'C:\PROGRA~1\LLVM\bin\lld-link.exe' /nologo @objs `
+  /out:"$D\emulator-lift-aot-nos7.exe" /implib:"$D\emulator-lift-aot-nos7.lib" `
+  /pdb:"$D\emulator-lift-aot-nos7.pdb" /version:0.0 /machine:x64 /debug /INCREMENTAL `
+  /subsystem:console /STACK:33554432 -flto @libs
+Copy-Item "$APP\out\*.dll" $D -Force      # 8 个宿主 DLL（诊断 exe 不在 out/ 里 ⇒ 自带）
+```
+
+**开关生效的判据**：该 run 的 `[profile-window]` 里 `lift_dyn = 0`（产物档同一场景 38,551,874）
+且 `call_diag` 的 `host=` 全 0（这条腿没有读数支持，见 §7.4 的 nit）。
 
 ### 7.4 `--no-s7` 诊断构建：真 calls（2026-11-25）
 
-`lift-gen --no-s7`（所有 `call` 回 trampoline，**不改源码**）生成 8 份 `.ll`，用产物同一套 obj/lib 链一份
-诊断 exe（`.tmp/reveq/REQ-01M86VSP8CXH998HTJTD50MEGC/nos7/`；`lift_table.inc` / `lift_pin.h` 与产物逐字节相同）。
-**开关生效的判据**：该 run 的 `lift_dyn = 0`（产物档同一场景 38,551,874）。
+生成/链接命令见 §7.3；本节只放读数。`lift_table.inc` / `lift_pin.h` 与产物逐字节相同（复用产物 obj）。
 
 | 窗口 | `_memcpy` | `_memcpy_0` | `_memset` | `__ftol2_sse` | `_strcpy_s` |
 |---|---:|---:|---:|---:|---:|
@@ -154,18 +219,25 @@ calls = **50,099**，而同一次 run 的 `intrinsics: fast+decline` = **26,721,
 | FELLOW `s1-to-avaro` | **66,274** | **0** | 526 | 1,428 | 2,842 |
 
 **对账**（整跑窗口）：`_memcpy` 派发计数 **26,721,353** vs 同一 run 的 `fast+decline` **26,721,503**
-⇒ 差 **150（0.00056%）** ⇒ 诊断构建上"派发到该 EA" ≡ 真调用数。`_memcpy` 点击窗 `avg_n=4.36`
+⇒ 差 **150（0.00056%；在窗口边界外，未单独归因）**。两个来源在 2,672 万次上对齐到 6 位有效数字，
+足以支撑"诊断构建上派发计数 ≡ 真调用数"这一判断（`lift_dyn=0`）。`_memcpy` 点击窗 `avg_n=4.36`
 （11-24 seg2 是 4.39）⇒ 同一类窗口被复现。
 
-**判定**（`ns/次` 是估价 = `insn/次 × 窗口 lift_ns/insn` + 该窗口 `boundary_ns/dispatch`；`_memcpy_0` 另给评测单的
-33.39 insn / ≈136 ns 上界）：点击线上除已内建的 `_memcpy`（≈119 ms）外最大是 `_strcpy_s` ≈145 µs；
-装载线上最大是 `__ftol2_sse` ≈3.0 ms、`_strcpy_s` ≈1.7 ms、`_memcpy_0` ≈0.68 ms（136 ns 上界 ⇒ 1.80 ms）、
-`_memset` ≈0.21 ms ⇒ **没有第二个候选过线**（`_memcpy_0` 差 ≥11×）。⇒ **本阶段不落第二个内建**
-（`aot/intrinsics.txt` 保持 1 行）。若将来某窗口 `_memcpy_0` 的 calls 涨到 ≥147 K（装载）/ ≥37 K（点击），
-最小落表 = 表加一行 + `tests/ir/intrinsics_roots.txt` 加 `0x004E78E0` + 复用现有契约矩阵。
+**判定**（`ns/次` 是估价 = `insn/次 × 窗口 lift_ns/insn` **+ 该窗口 `boundary_ns/dispatch`**；`_memcpy_0` 另给
+评测单的 33.39 insn / ≈136 ns 上界）：点击线上除已内建的 `_memcpy`（≈119 ms）外最大是 `_strcpy_s` ≈145 µs；
+装载线上最大是 `__ftol2_sse` ≈3.0 ms、`_strcpy_s` ≈1.7 ms、`_memcpy_0` ≈0.68 ms（补它的派发项 9,148 × 15.6 ns
+⇒ **≈0.82 ms**；136 ns 上界 ⇒ 1.80 ms）、`_memset` ≈0.21 ms（补派发项 3,224 × 15.6 ns ⇒ **≈0.28 ms**）
+⇒ **没有第二个候选过线**（`_memcpy_0` 差 ≥11×）。⇒ **本阶段不落第二个内建**（`aot/intrinsics.txt` 保持 1 行）。
+若将来某窗口 `_memcpy_0` 的 calls 涨到 ≥147 K（装载）/ ≥37 K（点击），最小落表 = 表加一行 +
+`tests/ir/intrinsics_roots.txt` 加 `0x004E78E0` + 复用现有契约矩阵。
+
+**口径 nit（读 §7 时一起看）**：① `frames` **不作可比项 / 不当指纹**（墙钟驱动，实测 603/613/617/619）；
+② `call_diag` 的 `host=` 腿在全部 11 份日志里 **0 次**（`_memcpy` 的 2.67 M 全是直呼、不经过 `lift_dyn`）
+⇒ `calls = 派发 + host` 的第二项没有读数支撑，保留它只是为了"万一某候选的调用方走间接 call"时不静默漏计；
+③ 本诊断的窗口计数是 `thread_local`（只属于开窗的主线程）⇒ 只保证 `--audio off`；audio 非 off + opt-in 时
+`aot_run.cpp` 打**一行** stderr 说明读数不可信。
 
 ### 7.5 怎么复跑
-
 
 ```powershell
 cd apps/emulator-lift
@@ -173,9 +245,12 @@ $env:LIFT_CALL_DIAG='1'; $env:LIFT_CALL_DIAG_WINDOW='*'
 # 点击 / 装载 / FELLOW / 整跑对账 四个插件在 .tmp/reveq/REQ-01M86VSP8CXH998HTJTD50MEGC/
 out\emulator-lift-aot.exe --game-dir ..\..\links\install --appdata <私有> --present headless `
   --skip-logo --audio off --time-limit 60 --log-level warn --profile --plugin <插件>
+# 真 calls：把上面的 exe 换成 §7.3 造出来的 emulator-lift-aot-nos7.exe（同一条命令）
 ```
 
-⚠ 已知跑不到：FELLOW 的 6 个窗口只拿到 1 个 —— 每收一个窗口的 `ctx.profile.end()` 要写系统剪贴板，
-该回调的用户 JS CPU 2.56–2.90 ms > 2 ms 预算 ⇒ `run failed`（4/4 趟都停在 `scenario:settle:0`）。
+⚠ **`--audio off` 是计数口径的一部分**（窗口状态 thread_local ⇒ feeder 线程的调用不计入；
+audio 非 off + opt-in 时宿主会打一行"本 run 读数不可信"）。FELLOW 的 6 个窗口本轮只拿到 1 个：
+收窗的 `ctx.profile.end()` 让该回调的用户 JS CPU 2.56–2.90 ms > 2 ms 预算 ⇒ `run failed`（4/4 趟停在
+`scenario:settle:0`；该预算路径此后由 `b18fc9a` 的 HostPause 改过，本读数未在改后重测）。
 其余 5 个窗口是**没测到**，不是 0 次；原因与读数见 `.tmp/reveq/REQ-01M86VSP8CXH998HTJTD50MEGC/report.md` §未做。
 
