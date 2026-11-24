@@ -30,7 +30,14 @@
 //   `define i32 @lift_cc_<EA>(ptr %st, ptr %mem, i32 %ea, ptr %cpu)`；
 //   `switch i32 %ea` 表外 ⇒ `bad:` = `llvm.trap` + `unreachable`（⛔ 不返回哨兵）。
 //   · 目标**不是**入口 EA 的 fallthrough / jcc rel32 / jmp rel32 ⇒ 宿主 `br`；
-//   · 目标**是**入口 EA ⇒ `ret i32 <目标 EA>`（交回 trampoline）；
+//   · 目标是**入口 EA**：
+//       · 目标块在**本分量**里（`comp_.blocks`）且不是钩子 / intrinsic 根 / dropped
+//         ⇒ 仍然 `br label %bb_<目标 EA>`（**D1**，2026-11-24：派发回来只会 `switch` 到同一个块）；
+//       · 跨分量 + 可结构化（`structuredRoot`）的静态 `jmp` / **`jcc` 臂** ⇒ 尾巴调用
+//         `%r = tail call i32 @lift_cc_<owner>(...); ret i32 %r`（`jmp` 早就有；**D2** 把
+//         `jcc` 的两个臂并进来 —— 两者在 guest 语义上都是 `eip := 目标`，不压返回地址）；
+//       · 其余 ⇒ `ret i32 <目标 EA>`（交回 trampoline；钩子 EA / intrinsic 根 / dropped /
+//         不可结构化目标 / shim 桩都留在这条路上，⛔ 不许改成直连）；
 //   · `call` ⇒ 压返回 EA 到 guest 栈，然后 `ret i32 <被调方 EA>`（rel32 是常量；
 //     reg/mem 从操作数**先读**再压栈 —— 与 `exec_control.cpp` 的顺序一致）；
 //   · `ret`/`retn imm16` ⇒ 弹 EA、`esp += 4 [+ imm]`、`ret i32 <弹出的 EA>`；
@@ -968,6 +975,19 @@ private:
     void fail(const std::string& why);
 
     // ---- 控制流 ----
+    // ★ D1：目标 EA 是**本分量**里有块的 EA ⇒ 这条边可以**直连**（`br label %bb_<EA>`），
+    //   不必回 trampoline 再派发回来（那会多付一次 prologue + switch 树 + epilogue）。
+    //   三类**必须**继续派发（⛔ 一处都不许改成直连）：
+    //     ① 宿主语义钩子 EA（`mustDispatchAt`，`aot/aot_hook_ea.h`）—— 钩子跑在派发边界上，
+    //        直连等于让它静默失效；
+    //     ② intrinsic 根（`aot/intrinsics.txt`，今天只有 `_memcpy` @ 0x4E74B0）—— 闸门块
+    //        `lintr_entry_<root>` **只从 `switch` 的根 case 进**（`switchLabelFor`）；直连
+    //        `bb_<root>` 会跳过闸门、静默退化成"没有内建快路径"；
+    //     ③ `dropped_`（被丢弃的派生 leader）—— 它们**没有块**，直连会指向不存在的标签。
+    bool localBlockEdge(std::uint32_t ea) const;
+    // ★ D2：跨分量 `jcc` 的臂能否走**尾巴调用**——判据与静态 `jmp`（`emitTerminator`）**同一份**，
+    //   参数 / 返回值约定也同一份（`emitTailCallTo`）。`false` ⇒ 保持今天的 `ret i32 <EA>`（派发）。
+    bool tailCallEdge(std::uint32_t ea) const;
     std::string labelFor(std::uint32_t ea);
     // ★ 构建期库内建（v1：`_memcpy`）：`switch` 里**单元根 EA** 的 case 走这里（不是 `bb_<root>`）：
     //   只给"从派发边界 fresh entry 进根"的那一次发闸门；单元内部的 `br` 仍去 `bb_<root>`，
@@ -1829,7 +1849,48 @@ void FnEmit::recordFlagsWrites(const Insn& in, int index, std::uint8_t write_mas
 // ---------------------------------------------------------------------------------------
 // 控制流
 // ---------------------------------------------------------------------------------------
+// ★ D1（2026-11-24）：**同分量的块**也是一条可以直连的边。
+//   为什么这不是"另一个语义"：目标块就在**同一个 `define` 里**（同一个 `switch` 的 case），
+//   `ret i32 <EA>` 之后 trampoline 做的全部事情就是"查表 → 用同一个 `%st`/`%mem`/`%cpu` 和
+//   同一个 `ea` 调回**这个函数** → `switch` 到 `%bb_<EA>`"⇒ 直连与派发回来的 guest 可见状态
+//   逐位相同（寄存器 / flags / 内存都在 `%st`/`%mem` 里，块首由 `invalidateRegs()` 重新装载）。
+//   ⛔ 三类必须继续派发：见类内声明的注释（钩子 / intrinsic 根 / dropped）。
+//   ★ `--no-s7`（`structure_.enabled == false`）⇒ **整条 D1 关掉**：那个开关的语义是
+//     "回到 D55 之前的形状（每个块边界都回 trampoline）"，而 D1 恰好改的是"哪些边回 trampoline"。
+//     用法见 `lift_gen.cpp` 的 `Options::s7`：ops / x87 / intrinsics 那几条**逐块**差分夹具
+//     （`ops_diff.cpp` 的 `if (++dispatches > 1) break;`）就是按"一次宿主调用 = 一个块"写的
+//     ⇒ 不关掉 D1 它们会把一个 guest 循环整段跑在一次调用里（夹具的预算失效，不是语义差）。
+bool FnEmit::localBlockEdge(std::uint32_t ea) const {
+    if (!structure_.enabled) return false;
+    if (comp_.blocks.count(ea) == 0) return false;
+    if (mustDispatchAt(ea)) return false;
+    if (dropped_.count(ea) != 0) return false;
+    if (structure_.intrinsic_roots.count(ea) != 0) return false;
+    return true;
+}
+
+// ★ D2（2026-11-24）：跨分量 `jcc` 的臂 ⇒ 与静态 `jmp` **同一个**尾巴调用形态。
+//   判据逐条对应 `emitTerminator` 的 `Op::Jmp` 分支（那里是唯一一份既有约定）：
+//     单元内 ⇒ 不在这里（走 `br`）；钩子 ⇒ 派发；单元根不是入口 ⇒ 派发；
+//     跨函数 + 目标可结构化 ⇒ 尾巴调用；其余 ⇒ `ret i32`。
+//   ⇒ 参数顺序 / 返回值语义**一个字都不新发明**：`emitTailCallTo(owner, target)`。
+//   ★ 与 D1 同一个开关：`--no-s7` ⇒ 关（理由同上：那条开关 = 旧派发形状）。
+bool FnEmit::tailCallEdge(std::uint32_t ea) const {
+    if (!structure_.enabled) return false;
+    if (comp_.blocks.count(ea) != 0) return false;               // 单元内 ⇒ `br`（D1）
+    if (mustDispatchAt(ea)) return false;                        // 钩子 ⇒ 必须过一次派发
+    if (dropped_.count(ea) != 0) return false;                   // 没有块 ⇒ 只能派发
+    if (structure_.intrinsic_roots.count(ea) != 0) return false;  // intrinsic 根 ⇒ 必须派发
+    if (entries_.count(ea) == 0) return false;                   // 不是入口 EA ⇒ 表里没有它
+    if (inShimPage(ea)) return false;                            // shim 桩 ⇒ 不是 guest 单元
+    if (!selfStructured()) return false;                         // 与静态 `jmp` 同一判据
+    const std::uint32_t owner = ownerOf(ea);
+    return owner != 0 && structuredRoot(owner);
+}
+
 std::string FnEmit::labelFor(std::uint32_t ea) {
+    // ★ D1：同分量的块 ⇒ `%bb_<EA>` 直连（钩子 / intrinsic 根 / dropped 除外，理由见上）。
+    if (localBlockEdge(ea)) return "%bb_" + hexEa(ea);
     // 入口 EA / 被丢弃的派生 leader（没有块）/ **宿主语义钩子 EA** ⇒ 统一的 `bb_exit_<EA>` 出口块
     //   （`ret i32 <EA>`）。最后那一类见 `aot/aot_hook_ea.h`：S7 之后控制流不再逐函数回派发器，
     //   钩子 EA 若不强制过一次派发就再也见不到 trampoline ⇒ 钩子静默失效。
@@ -1892,7 +1953,9 @@ void FnEmit::emitIntrinsicMemcpyEntry(std::uint32_t root) {
 void FnEmit::emitEdge(std::uint32_t ea) {
     // ★ 块出口（E2 / S2）：`ret`/`br` 之后 `%st` 就是下一个执行者的输入 ⇒ 先写回缓存。
     flushRegs();
-    if (entries_.count(ea) != 0 || dropped_.count(ea) != 0 || mustDispatchAt(ea)) {
+    // ★ D1：同分量的块 ⇒ 直连（派发回来只会 `switch` 到**同一个** `%bb_<EA>`）。
+    if (!localBlockEdge(ea) &&
+        (entries_.count(ea) != 0 || dropped_.count(ea) != 0 || mustDispatchAt(ea))) {
         // 目标是入口 EA ⇒ 交回 trampoline（状态已经在 %st 里）。
         // 目标是被丢弃的派生 leader ⇒ 同样交回 trampoline（它没有块；解释器会自己解那段字节）。
         // 目标是宿主钩子 EA ⇒ 必须经过一次派发（trampoline 在那里跑钩子）。
@@ -2000,7 +2063,34 @@ void FnEmit::emitJcc(const Insn& in) {
     // ★ S3-b：能融合 ⇒ 一条 icmp（不产生任何 flag 位）；否则逐位惰性读。
     const std::string cond = condForReader(in.cc, /*kind=*/0);
     flushRegs();  // 块出口（E2/S2）：两个后继块都以 `%st` 为输入
-    add("br i1 " + cond + ", label " + labelFor(target) + ", label " + labelFor(fall));
+    // ★ D2（2026-11-24）：两个臂**各自**判"要不要走尾巴调用"——形态 / 参数 / 返回值与静态 `jmp`
+    //   完全相同（`emitTailCallTo`：`%r = tail call i32 @lift_cc_<owner>(%st, %mem, <目标 EA>, %cpu)`
+    //   + `ret i32 %r`），判据见 `tailCallEdge`。为什么可以：guest `jcc` 的"跳成功"与 `jmp` 是同
+    //   一件事（`eip := 目标`，不压返回地址）⇒ 尾巴调用后目标最终 `ret i32` 回到我们的 caller，
+    //   就是 trampoline 下一步要做的那件事；跳失败那一支（`fall`）同理。
+    //   ⚠ 每个走尾巴调用的臂要**自己一个块**（`br` 只能带 label）⇒ IR 体积 +1 块 / 臂。
+    const bool tail_hi = tailCallEdge(target);
+    const bool tail_lo = tailCallEdge(fall);
+    if (!tail_hi && !tail_lo) {
+        add("br i1 " + cond + ", label " + labelFor(target) + ", label " + labelFor(fall));
+        return;
+    }
+    const std::string id = std::to_string(label_id_++);
+    const std::string l_hi = tail_hi ? "%s7_jc_" + id + "_hi" : labelFor(target);
+    const std::string l_lo = tail_lo ? "%s7_jc_" + id + "_lo" : labelFor(fall);
+    add("br i1 " + cond + ", label " + l_hi + ", label " + l_lo);
+    // ⚠ 两个尾巴块都发在 `br` **之后**：`emitJcc` 是块的最后一条（`emitBlock` 调完就 `return`）
+    //   ⇒ 不会把后续指令发进这两个块（与 `emitCallReturnCheck` 的 `s7_ok_/s7_esc_` 同一手法）。
+    if (tail_hi) {
+        put("s7_jc_" + id + "_hi:\n");
+        emitTailCallTo(ownerOf(target), target);
+        ++stats_->s7_jcc_tail;
+    }
+    if (tail_lo) {
+        put("s7_jc_" + id + "_lo:\n");
+        emitTailCallTo(ownerOf(fall), fall);
+        ++stats_->s7_jcc_tail;
+    }
 }
 
 void FnEmit::emitRet(const Insn& in) {
@@ -5798,11 +5888,13 @@ std::string emitPrologue(const GenClosureStats& closure, const GenEmitStats* sta
     text += "；跨函数 jmp 尾巴调用=" + std::to_string(stats->s7_jmp_tail);
     text += " lift_dyn=" + std::to_string(stats->s7_jmp_lift_dyn);
     text += " 派发=" + std::to_string(stats->s7_jmp_dispatch);
+    text += "；跨函数 jcc 尾巴调用=" + std::to_string(stats->s7_jcc_tail);
+    text += "（D2：按**臂**计）";
     text += "；tail call 站点合计=" + std::to_string(stats->s7_tail_calls) + "\n";
     std::fprintf(stderr,
                  "lift-gen: [S7 结构翻译] ret 站点 宿主ret=%llu 回派发器=%llu · call 站点 宿主call=%llu "
                  "lift_dyn=%llu shim派发=%llu 其余派发=%llu · 跨函数 jmp 尾巴调用=%llu lift_dyn=%llu "
-                 "派发=%llu · tail call 合计=%llu\n",
+                 "派发=%llu · 跨函数 jcc 尾巴调用（臂）=%llu · tail call 合计=%llu\n",
                  static_cast<unsigned long long>(stats->s7_ret_host),
                  static_cast<unsigned long long>(stats->s7_ret_dispatch),
                  static_cast<unsigned long long>(stats->s7_call_host),
@@ -5812,6 +5904,7 @@ std::string emitPrologue(const GenClosureStats& closure, const GenEmitStats* sta
                  static_cast<unsigned long long>(stats->s7_jmp_tail),
                  static_cast<unsigned long long>(stats->s7_jmp_lift_dyn),
                  static_cast<unsigned long long>(stats->s7_jmp_dispatch),
+                 static_cast<unsigned long long>(stats->s7_jcc_tail),
                  static_cast<unsigned long long>(stats->s7_tail_calls));
     // ★ D14：静态调用闭包的读数写进产物头部 —— 拿到一份 `.ll` 就能看出它收了多少软根、
     //   丢了多少（⛔ 不让"生成了什么"只存在于 stderr 里）。数字全部由输入确定 ⇒ 同输入同字节。

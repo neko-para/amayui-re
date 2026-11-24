@@ -243,6 +243,9 @@ struct GenEmitStats {
     std::uint64_t s7_jmp_tail = 0;        // 跨单元 `jmp` + 目标可结构化 ⇒ 尾调用
     std::uint64_t s7_jmp_lift_dyn = 0;    // 间接 `jmp` ⇒ `lift_dyn` 尾调用
     std::uint64_t s7_jmp_dispatch = 0;    // 跨单元 `jmp` + 目标不可结构化 ⇒ `ret i32`
+    // ★ D2（2026-11-24）：跨单元 `jcc` 的**臂** ⇒ 尾巴调用（与静态 `jmp` 同一形态 / 同一判据）。
+    //   一个 `jcc` 可能给两个臂各发一个尾巴块 ⇒ 这个数按**臂**计，⛔ 不是按 jcc 计。
+    std::uint64_t s7_jcc_tail = 0;
     std::uint64_t s7_tail_calls = 0;      // 所有 `tail call` 站点（jmp 尾调用 + lift_dyn）
     bool used_lift_dyn = false;
 };

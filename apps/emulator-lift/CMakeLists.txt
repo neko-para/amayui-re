@@ -2437,6 +2437,26 @@ add_test(NAME lift-s7-structured COMMAND lift-s7-structured)
 set_tests_properties(lift-s7-structured PROPERTIES SKIP_RETURN_CODE 77)
 
 # =====================================================================================
+# ★ 发射形状守卫 D1 / D2（2026-11-24，`.tmp/emit-edges/report.md`）：**同分量的块直连
+#   `br`** + **跨分量 `jcc` 的臂与静态 `jmp` 同形态（尾巴调用）**
+# 判据（红了意味着什么）：`emitModule` 吐出的 IR 文本里
+#   ① 目标 EA 是**本分量里有块的 EA** ⇒ 必须是 `br label %bb_<EA>`（⛔ 不是 `ret i32 <EA>`）；
+#   ② **三类必须继续派发**：钩子 EA / intrinsic 根 / `dropped`（⛔ 一处都不许改成直连）；
+#   ③ 跨分量 `jcc` 的臂：目标可结构化 ⇒ 尾巴调用；不可结构化 ⇒ 仍 `ret i32`。
+# ★ 为什么必须有这条（⛔ 不是风格检查）：把 ① 改回 `ret i32` 之后 **guest 可见语义一个字都不变**
+#   （只是每步多跑一圈 trampoline）⇒ 五项指纹 / 差分 / 端到端 ctest **全绿**，唯一会变的是
+#   "这条边发成了什么"。⇒ 判据只能落在 IR 文本上（变异实测见 `tools/mutate-check.mjs` 的
+#   `emit-edges` 条目：把 `labelFor` 的直连分支删掉 ⇒ 本用例当场红并点名 `bb_exit_401010`）。
+# ★ 为什么这条用例**不读任何资产**：夹具是合成的 `GenComponent`（5 分量 / 11 块 / 0 条数据指令），
+#   `emitModule` 是公开 API、只消费分区结果 ⇒ 毫秒级、不需要 PE / `.lst` / clang。
+#   ⇒ 谁改了发射器，`--target lift-emit-edges` 一次增量重建就能自检（`buildTarget` 就是它）。
+# ★ 档位 = **pure**（`add_test` 在最外层，AGENTS.md §12.4）。
+# =====================================================================================
+add_executable(lift-emit-edges tests/emit_edges.cpp src/aot/lift_gen_emit.cpp)
+target_link_libraries(lift-emit-edges PRIVATE emulator-lift-runtime)
+add_test(NAME lift-emit-edges COMMAND lift-emit-edges)
+
+# =====================================================================================
 # BUG-24 / `REQ-01M7FS59VTS7X4TGVK6Z7MTKJG`：**跳表项必须可派发 + 表区间内不许有块首**
 # （`lift-jmptab-dispatch`）
 # ★ 判据（红了意味着什么）：`emulator-lift-gen --jmptab-audit` 的**退出码非 0** —— 审计模式把

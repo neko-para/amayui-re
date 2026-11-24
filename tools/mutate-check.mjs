@@ -5577,6 +5577,28 @@ const MUTATIONS = [
       '把 `_memcpy` 闸门的 committed 检查去掉 ⇒ 未提交页没被 decline（`lift-intrinsics` 的 ' +
       '"未提交页（dst/src）没被 decline" 断言当场红）',
   },
+  // ── emit-edges（2026-11-24）：D1 把"同分量的块"改回派发出口 ─────────────────────────────
+  //   ★ 这一类错长什么样：`FnEmit::labelFor` 里少一条"同分量块 ⇒ `%bb_<EA>`"的分支 ⇒ 本可以
+  //     `br` 到**同一个 `define` 里的块**的边又变回 `ret i32 <EA>`（回 trampoline 再派发回来）。
+  //   ★ 为什么它必须有一个**形状**守卫：改回派发之后 **guest 可见语义一个字都不变**
+  //     （`exit` / `stop @ EA` / arena 三元组 / `table misses` 逐位相同，只是每走一次多付一整圈
+  //     prologue + switch 树 + epilogue ⇒ 慢），所以五项指纹 / 差分 / 端到端 ctest 全绿；
+  //     会红的只有"这条边发成了什么"。守卫 = `ctest:lift-emit-edges`（合成分量图 + IR 文本断言，
+  //     顶层无条件注册 ⇒ pure 档；不读 PE / `.lst` / clang ⇒ 毫秒级）。
+  //   ★ 读数侧：`.tmp/emit-edges/report.md`（1,897 处同分量出口 ⇒ 0；`iter` 与 `lift` 的 A/B）。
+  {
+    file: 'apps/emulator-lift/src/aot/lift_gen_emit.cpp',
+    from: '    if (localBlockEdge(ea)) return "%bb_" + hexEa(ea);\n',
+    to: '',
+    guard: 'ctest:lift-emit-edges',
+    ctest: 'lift-emit-edges',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-emit-edges',
+    what:
+      '删掉 `FnEmit::labelFor` 的"同分量块 ⇒ 直连 `%bb_<EA>`"分支（D1 改回 `ret i32` 派发出口）⇒ ' +
+      '`lift-emit-edges` 的 "`jcc` 目标 = 本分量入口 ⇒ 两个臂都直连" 断言红并点名 `bb_exit_401010`。' +
+      '这条错**只影响速度**（每走一次多一圈 trampoline），guest 可见语义等价 ⇒ 只有形状断言抓得住它',
+  },
 ];
 
 let mutationRunSeq = 0;
