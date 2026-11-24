@@ -2,15 +2,7 @@
 
 - id: REQ-01M7HQJEEENYDJ91FB5DAC4K23
 - type: req
-- status: open
-- parent: REQ-01M7JHSEZVMYB4XHEN32V7V6HJ
-- tags: [emulator-lift, aot, stress, perf]
-
-# AOT 侧压力/性能档重建：判据 = AOT 的 IR 执行速度（替代随解释器退役的 6 条 LIFT_STRESS）
-
-- id: REQ-01M7HQJEEENYDJ91FB5DAC4K23
-- type: req
-- status: open
+- status: doing
 - parent: REQ-01M7JHSEZVMYB4XHEN32V7V6HJ
 - tags: [emulator-lift, aot, stress, perf]
 
@@ -20,50 +12,50 @@
 （用户 2026-11-16 裁决：AOT 速度已远超解释器，测试目标已不存在）⇒ **AOT 侧的压力/性能档要重建**，
 否则端到端速度**没有任何自动化读数**。
 
-## 为什么必须有（不是"锦上添花"）
-
-- M-lift-2（`REQ-01M7FC3W0ZMA35PK3WV73YXB1Q`）明写"**release 端到端为唯一速度判据**"。
-- 退役后 `LIFT_STRESS` 归零 ⇒ 这条判据将只剩人手跑，无法回归。
-
 ## 与旧档的关系（⛔ 不要照抄）
 
 - 旧 6 条：**带 `--native-overrides all` 的解释器读数**，判据是"跟历史基线比"。
-- 新档：判据是 **AOT 的 IR 执行速度**（无 override，`-O2` 的 lifted IR），⛔ **不是**"跟解释器比"。
-- 阈值**在本机 win32 / RelWithDebInfo 上重定**（`AGENTS.md` §12.6：同机、release、交错 A/B ≥3 对、取中位；本机分辨不了 <5%）。
-- 驱动：用能**确定性到达某个屏**的配方（今天 `await position` 已能给确定性门；见 `OBS-20261116-05`）⇒ ⛔ 不要再用 `wait` 计时器当门。
+- 新档：判据是 **AOT 的 IR 执行速度**（无 override，`-O2` 的 lifted IR），⛔ **不是**"跟解释器比"；
+  驱动用能**确定性到达某个屏**的配方（`await position`），⛔ 不用 `wait` 计时器当门。
+
+## 判据
+
+1. 同一份配方 AOT 连跑 3 次，语义指纹逐位相同（`exit` / `frames` / `stop @` / arena 三元组 /
+   `table misses`）。⚠ 本批只做了单跑，3 连跑归 `## 未做`。
+2. 速度读数有抖动界线（≥3 对交错 A/B 中位 + 极差，写明本机 <5% 不可分辨）。⚠ 人工 / 文档项，未做。
+3. 该档只在 `LIFT_STRESS=1` 下注册（`assets` 档，⛔ 不进默认门禁）；缺资产 ⇒ `FATAL_ERROR`。
+   ✅ 已核：stress 档 `ctest -N` = 146；默认档 = 140 且 `aot-stress` 命中 0。
+4. 一条"能红"的自检：配方改永不满足的门 ⇒ 必须失败。✅ 已落成 `aot-stress-plan-exit5` + 变异 1/1 红。
+
+## 本批（2026-11-24 / win32 / dev）
+
+- **S0**：dev 建 `links/raw` junction（gitignored；不带它 `LIFT_STRESS=1` configure 会 `FATAL_ERROR`）。
+- **S1 `aot-stress-plan-exit5`**：夹具 `tests/fixtures/boot-title-exit-never.plan`（门 `0x388C..0x38A4`
+  永不成立）⇒ **exit 5** + stderr 点名 `<夹具>:<行>` + `pending != 0`；变异（把 `aot_main` 的
+  `recipeOutcomeExitCode(...)` 改 `return 0`，`optInEnv=LIFT_STRESS`）⇒ **1/1 红**（CTest 退出码 8）。
+- **S2 `aot-stress-boot-title`**：`scripts/recipes/boot-title.plan`（门 `0x0460..0x0520` + `profile` 窗 +
+  `quit`，0 条 `wait`）⇒ `exit 0` / `pending=0` / `— input-plan: quit` / `[profile-window] end
+  label=boot-title`；窗读数 **1995 ms / 46,815 读点 / 27 presents**（整进程 ≈3.0 s）。
+- **S3 `aot-stress-fellow-switch`**：已落（6 个窗口标签 + `run=finished exit=0` + 19–20 条断言），但
+  **今天红**：2/3 run 停在 `load-save: page not reached (target 0, still 1)`、1/3 停在
+  `settle` 回调 `js_cpu_us=2217 > budget 2000` ⇒ 登记为 **`DISABLED TRUE`**，等
+  `REQ-01M86VRRTPY8W9RP1SFDT0N200` / `REQ-01M86VRT1YP53CJS0M885FCCJM` 修完再开。
+- **`aot-quit-exit` 的既存假红已修**：裸 `⛔` 断言被正常 warn 文案触发 ⇒ 收窄成产品响亮错的规范前缀
+  `emulator-lift-aot: ⛔`（同处的 `派发表里没有的 EA` / `decode-error` 不动）。
+- **门禁**：stress 档 3 pass + 1 Disabled；默认档 **140/140**；`pnpm test` **618/618**；
+  `pnpm verify` **474 / 472 pass / 0 fail / 2 skip**；`requirements validate` 6/6。
 
 ## 待测路径（用户 2026-11-16 指定；逐步补充，不一次做完）
 
-| # | 路径 | 为什么值得测（已有读数/取证） |
+| # | 路径 | 状态 |
 |---|---|---|
-| 1 | **boot → TITLE 稳定** | 旧 `stress-boot` / `stress-title-steady` 的对应物；启动链有已知的装载长活 |
-| 2 | **打开 FELLOW** | `graphs/sn0000-quit.graph` 的注释：穿过一次 **~7–17 s 的同步长活**（nested guest call：窗口里一次 Present 都没有、指令照涨） |
-| 3 | **加载存档** | `title-loaddata` 那条路径；存档写入侧同类（缩略图 STH + 1 MB DAT ≈ 7 s） |
-| 4 | **SAVE05 移动（拖拽）** | 用户口径可复现的卡顿点；配方 `apps/emulator-lift/scripts/recipes/save05-move.plan` + 读数/口径 `docs/03-emulator/perf-bench-save05.md`（2026-11-20 / mac arm64；visible 历史档，hidden 待两臂重取）。判据 = 8 尖峰帧 Σwall + boundary ns/派发，⛔ 不用窗口 wall |
-
-★ 全部**依赖输入系统**才能确定性到达那个屏：`await position` 的确定性门（`OBS-20261116-05`）+ 配方完成度判据
-（`REQ-01M7HP2YZ4CRMQHYVSS8HH611Z`，未走完 ⇒ 非 0 退出）⇒ **输入那部分落地后**再逐条补。
-
-★ 路径 4 先以**人工基准**落地（配方 + 文档 + 读数），**尚未接 `LIFT_STRESS` 自动档**；
-接自动档时按判据 3/4（`LIFT_STRESS=1` 注册、缺资产 `FATAL_ERROR`、永不满足的门必须失败）。
-
-★ 度量口径：这些场景的特征是"**单帧执行大量指令**" ⇒ 读数用**单帧指令数 + 帧时间**
-（⛔ 不拿 `.ll` 行数当效率指标，`AGENTS.md` §12.6）；动态读数仍要 ≥3 对交错 A/B 取中位。
-
-## 判据（能红）
-
-1. 同一份配方在 AOT 臂连跑 3 次，语义指纹逐位相同（`exit` / `frames` / `stop @` / arena 三元组 / `table misses`）。
-2. 速度读数有**抖动界线**（≥3 对交错 A/B 的中位 + 极差），并写明"本机分辨不了 <5%"。
-3. 该档只在 `LIFT_STRESS=1` 下注册（`assets` 档，⛔ 不进默认门禁）；缺资产 ⇒ `FATAL_ERROR`（不静默 skip）。
-4. 一条"能红"的自检：把配方改成永不满足的门 ⇒ 必须失败（依赖 `REQ-01M7HP2YZ4CRMQHYVSS8HH611Z` 的配方完成度判据）。
+| 1 | **boot → TITLE 稳定** | ✅ 自动档（`aot-stress-boot-title`） |
+| 2 | **打开 FELLOW** | ⛔ 用例已落但 Disabled（两个输入 bug） |
+| 3 | **加载存档** | ⚠ 只作为 S3 的 `loadSave(9)` 前缀；无独立窗口读数 |
+| 4 | **SAVE05 移动（拖拽）** | ⚠ 人工基准；今天 `saves/SAVE.DAT` 持久化页 1 ⇒ `save05-move.plan` 的 `click 300 388` 必点空 |
 
 ## 未做
 
-不实现（本单先立判据与驱动方式）；路径 4 的 `LIFT_STRESS` 自动档未接；不删旧的 6 条
-（退役由 `REQ-01M7HQ57XV66FZQA5ECEGHWD71N` 的第 4 步安排）。
-
-## 进展（2026-11-24）
-
-- 路径 2/3 已有**入库的插件链**可当驱动：`repo:apps/emulator-lift/scripts/plugins/lib/scenario-fellow-switch.js`（boot→TITLE→`loadSave(9)`→6 次切人）与 `repo:apps/emulator-lift/scripts/plugins/lib/scenario-save10-field.js`（`loadSave(10)`→FIELD 主轮询体→点击→存活 8 s）。
-- 口径：一律 `--log-level warn`（`info` 会打开 Present 的逐帧像素直方图，+50 ms/帧）；读数用 `frame-ms` + `[profile-window]` + 窗口级 `window-dispatch-top`（`--profile` 收尾按窗口打 top-20）。
-- 剩余：把这些路径接进 `LIFT_STRESS` 自动档 + 本机阈值重定（判据 3/4 不变）。
+- 路径 2 转绿（等两张输入 bug）；路径 3 的独立窗口读数；路径 4 的自动档（先换 `loadSave(5)` 驱动）。
+- 判据 1 的 3 连跑、判据 2 的阈值重定、`tools/` 的 A/B runner（⛔ 不做成 test）。
+- `FATAL_ERROR` 的资产盘点扩到 `saves/` + 插件 JS + 安装树脚本（`CMakeLists.txt` 公共面，另单）。

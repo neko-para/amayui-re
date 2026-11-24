@@ -2,31 +2,39 @@
 
 - id: REQ-01M7M1C59PJ2M4MMF69J4T1YPS
 - type: spike
-- status: open
+- status: dropped
 - parent: REQ-01M7JHSEZVMYB4XHEN32V7V6HJ
+- dropped_reason: Linux 不在本仓平台范围：无 Linux CI；本机仅 WSL2，缺无后缀 clang/clang++/ld.lld 与 vcpkg x64-linux 依赖（9 port 现编），/mnt/e 余 23 GB；且 linux-x64 预设用 gcc，与 clang 产出的 LLVM bitcode + -flto 结构性混链。按 AGENTS.md §2（win32 优先、mac 只做兼容性验证）保持默认 OFF（显式 ON 仍可用、configure 有 WARNING）。重开条件：出现 Linux 设备/CI。
 - tags: [emulator-lift, lto, linux]
 
-## 要做什么
+## 结论（2026-11-24 裁决：dropped）
 
-在 **Linux** 上验一次 `-DLIFT_AOT_LTO=ON` 能不能真跑起来、真内联（mac / win32 已实测，见兄弟单与下节）：
+Linux 的 `LIFT_AOT_LTO=ON` **不在本仓的平台上验证**：仓库没有任何 Linux CI；本机（win32）只有 WSL2
+Ubuntu 22.04，而 WSL 侧没有这条构建链（无无后缀 `clang` / `clang++` / `ld.lld`；`vcpkg_installed/x64-linux`
+不存在，9 个 port 要现场编；`/mnt/e` 只剩 23 GB）。按 `AGENTS.md` §2（win32 优先、mac 只做兼容性验证），
+Linux 保持**默认 OFF**；显式 `-DLIFT_AOT_LTO=ON` 仍是"未验证"路径（configure 有 WARNING，不拦）。
 
-1. 构建：`cmake --preset linux-x64 -DLIFT_AOT_LTO=ON`（GNU ld / ld.lld，必要时 `-fuse-ld=lld`）；
-   记墙钟、链接峰值内存、shape 串。
-2. 判据（与 mac 同一口径，⛔ 不接受"shape 串写着 -lto-abi 所以开了"）：
-   - `lift-aot-ir-target-attrs` 绿（生成物属性与运行库对齐）；
-   - `file out/aot/lift_aot.part00.obj` 是 LLVM bitcode；
-   - `llvm-objdump -d --no-show-raw-insn <binary> | grep -c 'bl.*_lift_tick'` 相对 OFF 档显著下降
-     （mac 实测 OFF 101,765；命令与其它站点口径见 `docs/03-emulator/aot-lto-evaluation.md` §4）；
-     ⛔ 若站点不降 ⇒ 链接器静默没跑 LTO 后端 ⇒ 记失败，保持默认 OFF；
-   - 60 帧语义指纹与 OFF 档逐位相同。
-3. 通过 ⇒ 把 Linux 的默认值改成 ON，并同步 `AGENTS.md` §12.8 与 `docs/03-emulator/aot-lto-evaluation.md`
-   的平台范围；不通过 ⇒ 在本单写清失败命令 / 报错 / 结论。
+## 为什么不是"没做"（2026-11-24 只读盘点）
 
-## 现状（2026-11-21）
+- `linux-x64` 预设用系统 **gcc**（`CMakePresets.json` 不钉编译器），而 AOT `.obj` 是 clang 产的
+  LLVM bitcode、`lift_abi.cpp` 用项目 CXX 带 `-flto` ⇒ gcc 下是 GIMPLE 字节码，**结构性混链**；
+  要 ON 必须同时换 clang/lld —— 那是一次从未构建过的新平台 bring-up，不是"跑一遍预设"。
+- 判据 2 第 3 条的命令 `bl.*_lift_tick` 是 **mac arm64 专用**；x86-64 上应写 `call.*_lift_tick`
+  （照抄会恒得 0，与"真内联"长得一样）。
+- 判据 2 第 4 条（60 帧指纹）要 GPU；`--present headless` 无 GPU 也拒绝启动。
+- 构建树口径：`linux-x64` 的 `binaryDir` 也是 `out/`，直接按预设 configure 会把 Windows 树改成
+  Linux 配置 ⇒ Linux 实验必须另给 `-B`，与 `AGENTS.md` §12.3「构建树只有一个」的字面冲突。
 
-- **win32 已验（2026-11-18）**：默认 ON（`CMakeLists.txt:413`）；`/Ob2` 只对 `lift_abi.cpp` 后
-  `lift_tick` 调用 **104,750 → 0**、`lift_note_write` **39,075 → 0**、`__text` **−3.70%**、
-  窗口墙钟 **−9.25%**（5/5 同向）、ctest 107/107 —— 读数在 `docs/03-emulator/aot-lto-evaluation.md` §12。
-- **Linux 未验**：本机是 mac（一仓一树），Linux 构建与运行都不在场；`AGENTS.md` §2 只承诺
-  win32 优先 / mac 兼容 ⇒ Linux 是"要不要做"的问题，不是"做没做"。
-- 本单剩余 = 要么在 Linux 上跑一次 ON 档（判据同上），要么由父级裁决「不做 Linux」后 dropped。
+## 重开条件（若将来有 Linux 设备 / CI）
+
+按原来的 1–3 条判据做；判据 2c 改成 `call.*_lift_tick`；判据 2d 若在无 GPU 环境不可执行，就把
+"Linux 默认改 ON"的证据限定为 1–3 并写明。重开前先重跑本节的工具链盘点（`wsl -l -v` + `which`）。
+
+## 现状（2026-11-24 / win32）
+
+- `wsl -l -v`：`ubuntu2204` / `v2` / `Stopped`；内核 6.18.58.1；`cmake 3.31.8` / `ninja 1.13.0` /
+  `g++ 13.1.0`；`clang` / `clang++` / `ld.lld` / `llvm-objdump` 只有带版本号（`-17` / `-22`）的副本。
+- 仓库无 Linux CI：`.github/`、`ci/`、azure/gitlab/circle/jenkins/appveyor/buildkite/drone 全无。
+- `/mnt/e` 954 G / 已用 932 G / 可用 **23 G**；`apps/emulator-lift/out` 2.9 GB（Windows 树）。
+- win32 已于 2026-11-18 验：默认 ON，`lift_tick` 104,750 → 0、`__text` −3.70%、
+  窗口墙钟 −9.25%（5/5）、ctest 107/107（`docs/03-emulator/aot-lto-evaluation.md` §12）。
