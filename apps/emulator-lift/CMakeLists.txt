@@ -656,6 +656,7 @@ if(LIFT_AOT_IR_CLANG AND EXISTS "${LIFT_AOT_AGE_EXE}" AND EXISTS "${LIFT_AOT_CLO
         src/aot/aot_dispatch.cpp
         src/aot/aot_feeder.cpp
         src/aot/aot_run.cpp
+        src/aot/call_diag.cpp
         src/aot/memcpy_diag.cpp
         ${LIFT_AOT_OBJS})
     # ★ `aot_dispatch.cpp` `#include "lift_table.inc"`（生成物）⇒ 必须显式声明文件级依赖，
@@ -694,7 +695,7 @@ else()
         "emulator-lift-aot: missing clang / execution source (${LIFT_AOT_AGE_EXE}) / closure.txt => stub TU:"
         "the build continues, but the AOT exe will loudly report 'no generated artifacts' at startup and exit 1")
     target_sources(emulator-lift-aot PRIVATE src/aot/aot_dispatch.cpp src/aot/aot_feeder.cpp src/aot/aot_run.cpp
-        src/aot/memcpy_diag.cpp)
+        src/aot/call_diag.cpp src/aot/memcpy_diag.cpp)
 endif()
 
 # =====================================================================================
@@ -2356,7 +2357,7 @@ if(LIFT_IR_CLANG AND EXISTS "${LIFT_GEN_AGE_EXE}")
         COMMENT "lift-x87-diff: lift_aot.ll -> .obj (clang -c -O2)")
     set_source_files_properties("${LIFT_X87_DIR}/lift_aot.obj"
         PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
-    add_executable(lift-x87-diff tests/x87_diff.cpp src/aot/aot_dispatch.cpp
+    add_executable(lift-x87-diff tests/x87_diff.cpp src/aot/aot_dispatch.cpp src/aot/call_diag.cpp
                    "${LIFT_X87_DIR}/lift_aot.obj")
     # ★ `aot_dispatch.cpp` 靠这个宏决定"表里有没有内容"（与 `emulator-lift-aot` 同一判据）
     target_compile_definitions(lift-x87-diff PRIVATE LIFT_AOT_HAS_GENERATED=1 LIFT_X87_DIFF=1
@@ -2454,7 +2455,7 @@ if(LIFT_IR_CLANG AND EXISTS "${LIFT_GEN_AGE_EXE}")
         COMMENT "lift-ops-diff: lift_aot.ll -> .obj (clang -c -O2)")
     set_source_files_properties("${LIFT_OPS_DIR}/lift_aot.obj"
         PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
-    add_executable(lift-ops-diff tests/ops_diff.cpp src/aot/aot_dispatch.cpp
+    add_executable(lift-ops-diff tests/ops_diff.cpp src/aot/aot_dispatch.cpp src/aot/call_diag.cpp
                    "${LIFT_OPS_DIR}/lift_aot.obj")
     target_compile_definitions(lift-ops-diff PRIVATE LIFT_AOT_HAS_GENERATED=1 LIFT_OPS_DIFF=1
         LIFT_OPS_PE_PATH="${LIFT_GEN_AGE_EXE}" _CRT_SECURE_NO_WARNINGS)
@@ -2506,7 +2507,7 @@ if(LIFT_IR_CLANG AND EXISTS "${LIFT_GEN_AGE_EXE}")
         COMMENT "lift-s7-structured: lift_aot.ll -> .obj (clang -c -O2)")
     set_source_files_properties("${LIFT_S7_DIR}/lift_aot.obj"
         PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
-    add_executable(lift-s7-structured tests/s7_structured.cpp src/aot/aot_dispatch.cpp
+    add_executable(lift-s7-structured tests/s7_structured.cpp src/aot/aot_dispatch.cpp src/aot/call_diag.cpp
                    "${LIFT_S7_DIR}/lift_aot.obj")
     target_compile_definitions(lift-s7-structured PRIVATE LIFT_AOT_HAS_GENERATED=1
         LIFT_S7_STRUCTURED=1 LIFT_S7_PE_PATH="${LIFT_GEN_AGE_EXE}"
@@ -2567,7 +2568,7 @@ if(LIFT_IR_CLANG AND EXISTS "${LIFT_GEN_AGE_EXE}")
         COMMENT "lift-s7-indirect: lift_aot.ll -> .obj (clang -c -O2)")
     set_source_files_properties("${LIFT_S7_INDIRECT_DIR}/lift_aot.obj"
         PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
-    add_executable(lift-s7-indirect tests/s7_indirect.cpp src/aot/aot_dispatch.cpp
+    add_executable(lift-s7-indirect tests/s7_indirect.cpp src/aot/aot_dispatch.cpp src/aot/call_diag.cpp
                    "${LIFT_S7_INDIRECT_DIR}/lift_aot.obj")
     target_compile_definitions(lift-s7-indirect PRIVATE LIFT_AOT_HAS_GENERATED=1
         LIFT_S7_INDIRECT=1 LIFT_S7_INDIRECT_PE_PATH="${LIFT_GEN_AGE_EXE}"

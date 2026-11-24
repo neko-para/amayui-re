@@ -29,6 +29,7 @@
 #include <string>
 
 #include "aot/aot_dispatch.h"
+#include "aot/call_diag.h"    // 临时诊断：`LIFT_CALL_DIAG=1`（缺省零输出 / 每派发一次表查找判定）
 #include "aot/memcpy_diag.h"  // 临时诊断：`LIFT_MEMCPY_DIAG=1`（缺省零输出 / 每派发一次 bool）
 #include "runtime/lift_intrinsics.h"  // `--no-intrinsics`（只关闸门；A/B 与诊断）
 #include "runtime/control.h"  // Control（PIMPL 门面：⛔ 不含 beast / nlohmann / guest 头）
@@ -398,6 +399,9 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     if (memcpy_diag_on && mem_.committed(0x0055F2E8u, 4u)) {
         memcpy_diag::setSseSwitch(mem_.rd32(0x0055F2E8u));
     }
+    // ★ 临时诊断（`LIFT_CALL_DIAG=1`）：库函数候选的 per-function 计数。缺省档 `on()==false`
+    //   ⇒ 循环里那两处 `call_diag_on && ...` 各只付一次 bool 判定，一次表查找都不做。
+    const bool call_diag_on = call_diag::on();
     // ★ P2 §3.2：本线程那份 `DispatchStats` 的引用**在循环外取一次**（TLS 访问 7.18e8 次 → 1 次/轮）。
     //   `resetDispatchStats()` 刚把这个对象清过 ⇒ 取引用与清账的先后无关（同一个对象）。
     //   ⛔ 不要在循环里传 `dispatchStatsRef()`（那等于没改）；它必须活过整个循环。
@@ -1075,8 +1079,25 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
         }
         // ★ 区间内派发的 `cpu_.insns` 前后差 = 该派发执行的 guest 条数（`_memcpy` 的 rep/循环都算）。
         const std::uint64_t insns_before = ea_in_memcpy ? cpu_.insns : 0;
+        // ★ 临时诊断（`LIFT_CALL_DIAG=1`；缺省 `call_diag_on == false` ⇒ 下面三行全不执行）：
+        //   按"派发到该 EA"计数（与 memcpy_diag **同一处判定**，⛔ 不把派发份额换算成调用次数）。
+        //   `calls` = 派发到入口 EA 的次数；`dispatches/insns` = 落在候选 `[ea,end)` 的派发量。
+        const int cd_idx = (call_diag_on && call_diag::active()) ? call_diag::rangeIndex(ea) : -1;
+        std::uint32_t cd_n = 0;
+        bool cd_n_ok = false;
+        if (cd_idx >= 0 && ea == call_diag::candidate(static_cast<std::size_t>(cd_idx)).ea &&
+            call_diag::candidate(static_cast<std::size_t>(cd_idx)).has_n) {
+            // cdecl 实参在 guest 栈上：`[esp+12]` 是 n（`_memcpy` / `_memcpy_0` / `_memset` 同一个槽）。
+            // 只读；读不出来（未提交 / 越界）就记 n_ok=0，⛔ 不猜。
+            const std::uint64_t base = static_cast<std::uint64_t>(cpu_.esp()) + 4u;
+            cd_n_ok = base + 12u <= 0x100000000ull &&
+                      mem_.committed(static_cast<std::uint32_t>(base), 12u);
+            if (cd_n_ok) cd_n = mem_.rd32(static_cast<std::uint32_t>(base) + 8u);
+        }
+        const std::uint64_t cd_insns_before = cd_idx >= 0 ? cpu_.insns : 0;
         const std::uint32_t next = fn(liftRegsView(cpu_), mem_.host(0), ea, &cpu_);
         if (ea_in_memcpy) memcpy_diag::noteDispatch(ea, cpu_.insns - insns_before);
+        if (cd_idx >= 0) call_diag::noteDispatch(cd_idx, ea, cpu_.insns - cd_insns_before, cd_n_ok, cd_n);
         if (win_sample) win_.noteLift(win_b, windowNowNs());
         if (next == ::kLiftHalt) {
             // 生成物里的停机出口：`lift_one` 的 false / `lift_stop`（T1c 的口径）。

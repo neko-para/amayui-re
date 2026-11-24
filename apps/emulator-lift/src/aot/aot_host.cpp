@@ -34,6 +34,7 @@
 
 #include "aot/aot_dispatch.h"
 #include "aot/aot_feeder.h"       // feeder 的 IR 执行器（音频真线程用）
+#include "aot/call_diag.h"        // 临时诊断：`LIFT_CALL_DIAG=1`（缺省零输出）
 #include "aot/memcpy_diag.h"      // 临时诊断：`LIFT_MEMCPY_DIAG=1`（缺省零输出）
 #include "runtime/lift_intrinsics.h"  // 构建期库内建的收口计数（一次性输出）
 #include "runtime/clipboard.h"     // 剪贴板（切片 3：overlay 的 PROFILE 桥在 profile_end 里写）
@@ -695,6 +696,9 @@ void AotHost::printRunSummary(const AotRunResult& r, std::FILE* out) const {
     // ★ 临时诊断（`LIFT_MEMCPY_DIAG=1`）：`_memcpy` 画像 + `rep_bulk` 命中/decline。
     //   一次性输出；缺省档 `on()==false` ⇒ 一行都不打（stdout 逐字不变）。
     memcpy_diag::print(out);
+    // ★ 临时诊断（`LIFT_CALL_DIAG=1`）：库函数候选的 per-function 计数（每窗口一块）。
+    //   一次性输出；缺省档 `on()==false` ⇒ 一行都不打（stdout 逐字不变）。
+    call_diag::print(out);
     // ★ 构建期库内建（v1：`_memcpy`）的**一次性**计数（⛔ 不周期打）。表为空 ⇒ 一行都不打；
     //   表非空但一条都没走（例如这轮没进到那个 EA）⇒ 三个 0 也打（否则"没生效"与"没调用"分不清）。
     if (pinnedIntrinsicCount() != 0) {
@@ -1336,6 +1340,8 @@ bool AotHost::beginWindow(const char* label) {
     win_.label = (label != nullptr && *label != '\0') ? label : "(unnamed)";
     // ★ 临时诊断（`LIFT_MEMCPY_DIAG=1`）：只对目标窗口（缺省 `move11`）开始收集；缺省档 no-op。
     memcpy_diag::beginWindow(win_.label.c_str());
+    // ★ 临时诊断（`LIFT_CALL_DIAG=1`）：每个窗口都开一段计数（缺省档 / env 未设 ⇒ no-op）。
+    call_diag::beginWindow(win_.label.c_str());
     win_.t_open_ns = windowNowNs();
     win_.insns_open = cpu_.insns;
     win_.frames_open = presenter_.frameCount();
@@ -1392,6 +1398,8 @@ bool AotHost::endWindowText(std::string* text) {
     if (!win_.closeWindow()) return false;
     // ★ 临时诊断（`LIFT_MEMCPY_DIAG=1`）：收窗时结算 `rep_bulk` 的窗口增量；缺省档 no-op。
     memcpy_diag::endWindow();
+    // ★ 临时诊断（`LIFT_CALL_DIAG=1`）：收窗时落一段计数；缺省档 no-op。
+    call_diag::endWindow();
     win_.closeEdges(windowNowNs());
     win_.insns_close = cpu_.insns;
     win_.frames_close = presenter_.frameCount();

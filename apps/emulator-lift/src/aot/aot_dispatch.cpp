@@ -19,6 +19,8 @@
 //     ⛔ 没有 fallback、⛔ 没有"哈希没中就去线性扫一遍"。
 #include "aot/aot_dispatch.h"
 
+#include "aot/call_diag.h"  // 临时诊断（`LIFT_CALL_DIAG=1`）：S7 宿主调用路径的 per-function 计数
+
 #include <mutex>
 
 namespace lift {
@@ -309,6 +311,9 @@ LiftFn lookup(std::uint32_t ea, DispatchStats& stats, std::uint64_t* comparisons
 // ★ S7：与 `lookup` **逐字相同**的查找，只是不记 trampoline 的派发账（改记 `lift_dyn_*`）。
 //   ⛔ 不要把它实现成"调 lookup 再减计数"：那会同时弄脏 max_probes / comparisons。
 LiftFn lookupUncounted(std::uint32_t ea) {
+    // ★ 临时诊断（`LIFT_CALL_DIAG=1`）：S7 之后 `call` 站点走 `lift_dyn` **不回派发循环**
+    //   ⇒ 派发计数看不到它们。这里补记"到该 EA 的一次调用"（缺省档 = 一次 bool 读）。
+    if (call_diag::active()) call_diag::noteHostCall(ea);
     // ★ lift-opt #6：**自己那份** memo（与 `lookup` 的分开 ⇒ 不会把 `probes=0` 写进带补计的那份）。
     //   命中时只补 `lift_dyn_lookups`；未命中仍按原路径记 `lift_dyn_misses`。
     if (ea == t_lift_dyn_memo.ea && t_lift_dyn_memo.fn != nullptr) {

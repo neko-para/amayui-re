@@ -87,3 +87,95 @@ out\emulator-lift-aot.exe --present window --present-hidden --game-dir ..\..\lin
 # 关的那臂加 --no-intrinsics
 ctest --test-dir out -R '^lift-intrinsics$' --output-on-failure
 ```
+
+## 7. 候选测量（2026-11-25）：per-function 计数，以及"派发口径"的盲区
+
+> 需求单 `REQ-01M86VSP8CXH998HTJTD50MEGC`（内建普查的测量前置 M1–M4）·
+> 读数：win32 / `dc65c8f` / RelWithDebInfo / shape `split8-O2-lto-abi` / 2026-11-25 03:30–05:00 ·
+> 原始日志与复现命令：`.tmp/reveq/REQ-01M86VSP8CXH998HTJTD50MEGC/`（report.md / run.ps1 / logs/）
+
+诊断：`src/aot/call_diag.*`（`LIFT_CALL_DIAG=1`，缺省零输出 / 每派发一次 bool）。候选表用
+`.lst` 的 `COLLAPSED FUNCTION` 的 `{EA, 名字, 字节数}`：
+
+| EA | 名字 | 大小 | 点击 `seg2-click2p5` | 装载 `load9` | FELLOW `s1-to-avaro` |
+|---|---|---:|---:|---:|---:|
+| `0x004E74B0` | `_memcpy`（已内建） | 0x361 | 157 | 22,504 | 226 |
+| `0x004E78E0` | `_memcpy_0` | 0x361 | **0** | **9,148** | **0** |
+| `0x004E7400` | `_memset` | 0x7A | 1,146 | 3,224 | 511 |
+| `0x004E82C0` | `__ftol2_sse` | 0x1C | 393 | **155,122** | 1,428 |
+| `0x004E8A19` | `_sprintf_s` | 0x1E | 0 | 0 | 0 |
+| `0x004EA11D` | `_strncpy_s` | 0xB5 | 0 | 59 | 0 |
+| `0x004E7C41` | `_strcpy_s` | 0x5F | 858 | 7,571 | 2,842 |
+| `0x004E8BF1` | `_rand` | 0x21 | 0 | 0 | 0 |
+| `0x004F8434` | `_memcmp` | 0x14D2 | 0 | **1** | 0 |
+
+窗口（同一份日志里的 `=== profile window ===`）：点击 `wall 2,511.9 ms / iter 8,628,631 / insns 458,166,480`；
+装载 `3,194.0 ms / 19,622,936 / 977,993,613`；FELLOW `s1-to-avaro` `801.1 ms / 7,348,211 / 436,065,186`。
+按同窗口的 `lift` / `boundary` 折算（`insns×lift_ns/insn + dispatches×boundary_ns/dispatch`，**不是**逐次实测）：
+装载窗口最大的是 `__ftol2_sse` ≈ 3.04 ms，`_memcpy` ≈ 1.44 ms、`_memcpy_0` ≈ 0.38 ms；
+点击窗口最大 `_strcpy_s` ≈ 0.118 ms；FELLOW-s1 最大 `_strcpy_s` ≈ 0.274 ms。
+
+### 7.1 这个口径只看到 0.19% 的 `_memcpy` 调用
+
+整跑窗口（`whole-run`，`wall 28,429.7 ms / insns 3,823,688,139`）对账：`_memcpy` 的**派发可见**
+calls = **50,099**，而同一次 run 的 `intrinsics: fast+decline` = **26,721,505**（闸门被求值次数 = 真调用数）
+⇒ 派发可见占 **0.1875%**。同一窗口 `lift_dyn` = 38,551,874 次（间接 call/jmp 路径），
+但它对本表 9 个候选的入口 **0 次**。
+
+原因（发射形状，2026-11-24 的 D2/D3 注记）：立即数 `call` 被发成
+`tail call i32 @lift_cc_<owner>(%st, %mem, <目标 EA>, %cpu)`（`emitTailCallTo`）⇒ 目标函数的
+`switch`（内建闸门就在那里）照常执行，但**既不回派发循环、也不进 `lift_dyn`**。
+⇒ 对**没有闸门**的候选，任何派发侧诊断（本表 + 既有 `memcpy_diag` + `window-dispatch-top`）
+都只能给**下界**，且各候选的倍数不同；⛔ 不能把它当调用数，⛔ 不能换算成时间。
+
+### 7.2 对"第 2 个内建收谁"意味着什么
+
+1. 本表（派发口径）**不是**调用数；真调用数由 §7.4 的 `--no-s7` 诊断构建给出（两者差 533× 的那一项就是 `_memcpy`）。
+2. ⇒ 判据只能在 §7.4 的真 calls 上取；本表的派发可见值只保留"顺带能看见的那部分"这一层意思。
+3. `_memcpy_0` 的两件前提本轮**已核**（只读）：① 与 `0x4E74B0` 逐字节同体——
+   PE 偏移 `0xe68b0` vs `0xe6ce0` 各 865 B，94 个 diff 字节全在 47 个 2 字节段里，
+   每段是同一地址字段的低 16 位（46 段 +0x430、1 段 rel32 −0x430，目标同为 `0x4F1121`）；
+   ② `lift-gen` 硬闸：临时表含 `0x4E74B0` + `0x4E78E0` 跑 `--closure-gate --intrinsics` ⇒ **exit 0**、
+   `intrinsics … (2 unit roots)`、`.ll` 里有 `lintr_entry_4E78E0`。
+   ⇒ 它**过得了**"逐字节同体 + 单元根"两道闸；量够不够见 §7.4。
+4. `_memcmp` 在 `out/aot/lift_table.inc` 里有 `LIFT_AOT_ENTRY(0x004F8434u, lift_cc_4F8434)`（可发射），
+   本轮装载窗口也真调到 1 次 ⇒ 普查里"0 个 call 站点 ⇒ 不发射"这句要按**发射形状**重写。
+
+### 7.4 `--no-s7` 诊断构建：真 calls（2026-11-25）
+
+`lift-gen --no-s7`（所有 `call` 回 trampoline，**不改源码**）生成 8 份 `.ll`，用产物同一套 obj/lib 链一份
+诊断 exe（`.tmp/reveq/REQ-01M86VSP8CXH998HTJTD50MEGC/nos7/`；`lift_table.inc` / `lift_pin.h` 与产物逐字节相同）。
+**开关生效的判据**：该 run 的 `lift_dyn = 0`（产物档同一场景 38,551,874）。
+
+| 窗口 | `_memcpy` | `_memcpy_0` | `_memset` | `__ftol2_sse` | `_strcpy_s` |
+|---|---:|---:|---:|---:|---:|
+| 点击 `seg2-click2p5`（3 趟） | **2,559,742 / 2,559,744 / 2,559,744** | **63** | 1,218 / 1,222 / 1,222 | 393 | 858 |
+| 装载 `load9` | **9,117,397** | **13,244** | 3,573 | 154,805 | 7,571 |
+| FELLOW `s1-to-avaro` | **66,274** | **0** | 526 | 1,428 | 2,842 |
+
+**对账**（整跑窗口）：`_memcpy` 派发计数 **26,721,353** vs 同一 run 的 `fast+decline` **26,721,503**
+⇒ 差 **150（0.00056%）** ⇒ 诊断构建上"派发到该 EA" ≡ 真调用数。`_memcpy` 点击窗 `avg_n=4.36`
+（11-24 seg2 是 4.39）⇒ 同一类窗口被复现。
+
+**判定**（`ns/次` 是估价 = `insn/次 × 窗口 lift_ns/insn` + 该窗口 `boundary_ns/dispatch`；`_memcpy_0` 另给评测单的
+33.39 insn / ≈136 ns 上界）：点击线上除已内建的 `_memcpy`（≈119 ms）外最大是 `_strcpy_s` ≈145 µs；
+装载线上最大是 `__ftol2_sse` ≈3.0 ms、`_strcpy_s` ≈1.7 ms、`_memcpy_0` ≈0.68 ms（136 ns 上界 ⇒ 1.80 ms）、
+`_memset` ≈0.21 ms ⇒ **没有第二个候选过线**（`_memcpy_0` 差 ≥11×）。⇒ **本阶段不落第二个内建**
+（`aot/intrinsics.txt` 保持 1 行）。若将来某窗口 `_memcpy_0` 的 calls 涨到 ≥147 K（装载）/ ≥37 K（点击），
+最小落表 = 表加一行 + `tests/ir/intrinsics_roots.txt` 加 `0x004E78E0` + 复用现有契约矩阵。
+
+### 7.5 怎么复跑
+
+
+```powershell
+cd apps/emulator-lift
+$env:LIFT_CALL_DIAG='1'; $env:LIFT_CALL_DIAG_WINDOW='*'
+# 点击 / 装载 / FELLOW / 整跑对账 四个插件在 .tmp/reveq/REQ-01M86VSP8CXH998HTJTD50MEGC/
+out\emulator-lift-aot.exe --game-dir ..\..\links\install --appdata <私有> --present headless `
+  --skip-logo --audio off --time-limit 60 --log-level warn --profile --plugin <插件>
+```
+
+⚠ 已知跑不到：FELLOW 的 6 个窗口只拿到 1 个 —— 每收一个窗口的 `ctx.profile.end()` 要写系统剪贴板，
+该回调的用户 JS CPU 2.56–2.90 ms > 2 ms 预算 ⇒ `run failed`（4/4 趟都停在 `scenario:settle:0`）。
+其余 5 个窗口是**没测到**，不是 0 次；原因与读数见 `.tmp/reveq/REQ-01M86VSP8CXH998HTJTD50MEGC/report.md` §未做。
+
