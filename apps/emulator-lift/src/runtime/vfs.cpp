@@ -136,6 +136,16 @@ bool isAscii(std::string_view s) {
     return true;
 }
 
+// 目录索引的**折叠键**：`asciiLowerChar` 逐字节，非 ASCII 原样。
+// ★ 与 `asciiEqualNoCase` 是**同一条**规则（那边是逐字节比、这边是把结果做成键 —— 两者必须一致，
+//   否则"索引说没有、线性扫描说有"）。⛔ 不用 `std::tolower`（locale 相关）/ ⛔ 不依赖宿主 FS
+//   的大小写行为（Windows 与 Linux 必须给出同一个结论）。
+std::string foldAsciiKey(std::string_view s) {
+    std::string out(s);
+    for (char& c : out) c = asciiLowerChar(c);
+    return out;
+}
+
 // UTF-8 合法性（整串；strict：过短编码 / 代理项 / > U+10FFFF 都不算）。
 // ★ 只用来**选解码器**（见 guestPathForLog）——它不是安全校验，也不改变任何解析语义。
 bool isValidUtf8(std::string_view s) {
@@ -329,9 +339,8 @@ bool splitGuest(const Vfs& v, const std::string& guest_path, std::vector<std::st
 
 // ---------------------------------------------------------------------------------------
 // 目录项查询（大小写不敏感的唯一匹配）
+//   ★ 结果类型 `SegLookup` 在 vfs.h（`lookupSegmentIndexed` 也用它）。
 // ---------------------------------------------------------------------------------------
-enum class SegLookup { Found, Missing, Error };
-
 SegLookup lookupSegment(const fs::path& dir, const std::string& seg, bool exact_only,
                         std::string* real_name, std::string* error) {
     real_name->clear();
@@ -393,6 +402,206 @@ SegLookup lookupSegment(const fs::path& dir, const std::string& seg, bool exact_
     }
     return SegLookup::Missing;
 }
+
+}  // namespace
+
+// =======================================================================================
+// ★ C5：安装树目录索引（口径见 vfs.h 的 public 段与私有段 `DirEntry`）
+//
+//   为什么有这一层（读数见 `.tmp/reveq/REQ-01M86NP7RNP65YCC4709HZ7AN7/analysis.md`）：
+//   `lookupSegment` 每次先做一次精确 stat，**未命中就整目录枚举**（安装树根目录实测 542 项）。
+//   引擎的失败探测（633 次 resolve 里 385 次没被负缓存接住）每次都在付那笔枚举（合计 113–122 ms）
+//   ⇒ 把"某个目录里有哪些名字"记住**一次**，之后每条段只查表。
+//
+//   ★ **语义必须逐字等价**（判据 = `tests/file_io.cpp` 的 `vfs-dir-index-parity`：开 / 关两档的
+//     `ok / host / error` 三元组逐字节相同）。所以查表的次序与 `lookupSegment` 一模一样：
+//       ① 目录项里有**逐字节相同**的名字 ⇒ Found（现有实现的第一条精确 stat 会成功）——
+//          零次 stat（这正是索引要省的那一笔）；`real_name` 保留**调用方拼写**（与现有实现一致）。
+//       ② 表答不了"这个拼写此刻在不在"（表里没有逐字节相同的名字：可能是刚建出来的名字、
+//          或是大小写变体）⇒ 做**现有实现的第一个动作**：一次精确 stat（`fs::status` 一次给出
+//          "存在 + 是不是目录"）。★ 这一条让"宿主侧新加 / 只有大小写不同"的路径仍然正确 ——
+//          索引只替"枚举"，不替"宿主事实"。
+//       ③ 仍未命中 ⇒ 与现有次序完全一致：`exact_only` ⇒ Missing；**非 ASCII** 段 ⇒ Missing
+//          （日文名没有大小写 ⇒ 现有实现不枚举）。⚠ 这一步的次序不能动：提前报 `[notdir]` 会把
+//          `[notfound]`（码 2）变成 `[notdir]`（码 3）。
+//       ④ 目录本身不是可枚举目录 ⇒ `[notdir] "<dir>" 不是可枚举的宿主目录`（原文逐字相同）。
+//       ⑤ 折叠桶：多个候选 ⇒ `[ambiguous]`（名字**排序后**列出来，文本逐字相同）；一个候选 ⇒
+//          Found + **磁盘拼写**；没有候选 ⇒ Missing（**不枚举** = 那 388 次枚举被消掉的地方）。
+//
+//   ★ 已知边界（都是"安装树运行期不变"这条既有假设的推论，⛔ 不是新假设）：
+//     · 索引建好之后**宿主侧删掉**的文件仍会被 ① 判成存在（表里还有那个名字）；
+//     · 宿主侧新加的名字若拼写与调用方**大小写不同**，② 的精确 stat 在大小写敏感的宿主上会失败，
+//       于是按旧表回答 ⇒ 少数情况下会漏掉它；
+//     · "目录可遍历但不可枚举"（ACL：能按名字 stat、不能列举）时，现有实现能靠精确 stat 命中，
+//       而索引在**建表**处就报 `[io]` —— 安装树不需要这种权限形态（本机 542 项全部可读），
+//       ⛔ 不为此加分支（AGENTS.md §5.1：不为权限形态写兼容层）。
+//     前两条都只在"运行中从外部改安装树"时出现；`--appdata` 缺席时索引整个停用（`dirIndexUsable`）。
+// =======================================================================================
+const Vfs::DirIndex* Vfs::dirIndexFor(const std::string& dir_host, DirIndexStatus* status,
+                                      std::string* error) const {
+    *status = DirIndexStatus::Ready;
+    const auto cached = install_dir_index_.find(dir_host);
+    if (cached != install_dir_index_.end()) return &cached->second;
+    const fs::path dir = pathFromUtf8(dir_host);
+    // ★ 与 `lookupSegment` 的次序一致：**先**判"能不能枚举"，不能 ⇒ `NotDir`（不是 `[io]`）。
+    //   原文是 `if (!fs::is_directory(dir, ec) || ec)` ⇒ 任何 is_directory 失败都按"不是目录"处理。
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec) || ec) {
+        *status = DirIndexStatus::NotDir;
+        return nullptr;
+    }
+    DirIndex table;
+    if (vfsDiagOn()) g_diag_dir_enums.fetch_add(1, std::memory_order_relaxed);
+    fs::directory_iterator iter(dir, ec);
+    if (ec) {
+        *status = DirIndexStatus::Error;
+        *error = "[io] 枚举 \"" + dir_host + "\" 失败：" + ec.message();
+        return nullptr;
+    }
+    const fs::directory_iterator end;
+    while (iter != end) {
+        const std::string name = pathToUtf8(iter->path().filename());
+        // `is_dir`：Windows 上 `directory_iterator` 的条目自带 `WIN32_FIND_DATA`（不额外 stat）；
+        //   POSIX 上 readdir 的 `d_type` 直接给（个别 FS 回 DT_UNKNOWN 时才退化成一次 stat）。
+        std::error_code type_ec;
+        const bool is_dir = iter->is_directory(type_ec) && !type_ec;
+        table[foldAsciiKey(name)].push_back(DirEntry{name, is_dir});
+        iter.increment(ec);
+        if (ec) {
+            *status = DirIndexStatus::Error;
+            *error = "[io] 枚举 \"" + dir_host + "\" 中断：" + ec.message();
+            return nullptr;
+        }
+    }
+    // ★ 计数记的是**表里真的有多少项**（⛔ 不是"扫过多少项"）：这条读数是"索引有没有把目录整个
+    //   记下来"的唯一观察面（`vfs-dir-index-parity` 拿它钉"漏建一项"那类变异 —— 那种错在
+    //   大小写不敏感的宿主上不会改变任何 resolve 结论）。
+    std::uint64_t entries = 0;
+    for (const auto& bucket : table) entries += bucket.second.size();
+    dir_index_builds_ += 1;
+    dir_index_entries_ += entries;
+    return &install_dir_index_.emplace(dir_host, std::move(table)).first->second;
+}
+
+SegLookup Vfs::lookupSegmentIndexed(const std::string& dir_host, const std::string& seg,
+                                   bool exact_only, bool dir_is_known_dir, std::string* real_name,
+                                   bool* real_is_dir, std::string* error) const {
+    real_name->clear();
+    if (real_is_dir) *real_is_dir = false;
+    if (seg.empty()) {
+        *error = "[invalid] 空路径段";
+        return SegLookup::Error;
+    }
+    // ★ 诊断：段查询次数（与 `lookupSegment` 同一个计数器；读数里"走索引"看 `pathResolveStats`）。
+    if (vfsDiagOn()) g_diag_seg_lookups.fetch_add(1, std::memory_order_relaxed);
+
+    std::lock_guard<std::mutex> lock(dir_index_mu_);
+    dir_index_lookups_ += 1;
+
+    // 取表（懒建）。`dir_is_known_dir == false` ⇒ 调用方已经知道这条路径是**文件**（上一段
+    // 的 `is_dir`）⇒ `dir/seg` 不可能存在，既不建表也不 stat（与现有实现的两次失败完全等价）。
+    const DirIndex* table = nullptr;
+    if (dir_is_known_dir) {
+        DirIndexStatus status = DirIndexStatus::Ready;
+        std::string build_err;
+        table = dirIndexFor(dir_host, &status, &build_err);  // 持锁调用（见声明处注释）
+        if (status == DirIndexStatus::Error) {
+            *error = build_err;
+            return SegLookup::Error;
+        }
+        // NotDir ⇒ table 留空：落到下面"不是可枚举目录"那一支（⛔ 不在这里报，次序见 ③）
+    }
+
+    const std::vector<DirEntry>* bucket = nullptr;
+    if (table != nullptr) {
+        const auto it = table->find(foldAsciiKey(seg));
+        if (it != table->end()) bucket = &it->second;
+        // ① 逐字节相同的名字 ⇒ Found（零次 stat；`real_name` = 调用方拼写）。
+        if (bucket != nullptr) {
+            for (const DirEntry& e : *bucket) {
+                if (e.real == seg) {
+                    *real_name = seg;
+                    if (real_is_dir) *real_is_dir = e.is_dir;
+                    return SegLookup::Found;
+                }
+            }
+        }
+        // ② 表里没有这个拼写 ⇒ 一次精确 stat（现有实现的第一个动作；`status` 一次拿"存在 + 类型"）。
+        //    ⚠ 这一笔只落在"大小写变体 / 刚建出来的名字 / 真的不存在"上，正常路径（拼写与磁盘一致）
+        //      走的是 ①，一次 stat 都不做。
+        std::error_code ec;
+        const fs::file_status st = fs::status(pathFromUtf8(dir_host) / pathFromUtf8(seg), ec);
+        if (!ec && fs::exists(st)) {
+            *real_name = seg;  // ★ 与现有实现一致：精确 stat 成功时 real = **调用方拼写**
+            if (real_is_dir) *real_is_dir = fs::is_directory(st);
+            return SegLookup::Found;
+        }
+    }
+
+    // ③ 与现有次序一致：`exact_only` / 非 ASCII 段都**不枚举**，直接 Missing（不写 `error`）。
+    if (exact_only) return SegLookup::Missing;
+    if (!isAscii(seg)) return SegLookup::Missing;
+
+    // ④ 目录本身不是可枚举目录 ⇒ `[notdir]`（现有实现的 `is_directory` 那一支；⛔ 不是 `[io]`）。
+    if (table == nullptr) {
+        *error = "[notdir] \"" + dir_host + "\" 不是可枚举的宿主目录";
+        return SegLookup::Error;
+    }
+    // ⑤ 折叠桶（一个都不剩 ⇒ 这条目录里没有任何只差 ASCII 大小写的候选 ⇒ 不枚举直接 Missing）。
+    if (bucket == nullptr) return SegLookup::Missing;
+    if (bucket->size() > 1) {
+        std::vector<std::string> hits;
+        hits.reserve(bucket->size());
+        for (const DirEntry& e : *bucket) hits.push_back(e.real);
+        std::sort(hits.begin(), hits.end());
+        std::string list;
+        for (const std::string& h : hits) {
+            if (!list.empty()) list += ", ";
+            list += h;
+        }
+        *error = "[ambiguous] 段 \"" + seg + "\" 在 \"" + dir_host +
+                 "\" 里有多个大小写不敏感候选：[" + list + "] —— 不按目录顺序猜";
+        return SegLookup::Error;
+    }
+    *real_name = (*bucket)[0].real;  // 磁盘拼写（与 `lookupSegment` 的 `hits[0]` 同）
+    if (real_is_dir) *real_is_dir = (*bucket)[0].is_dir;
+    return SegLookup::Found;
+}
+
+void Vfs::setDirIndexEnabled(bool on) {
+    if (dir_index_enabled_ == on) return;
+    dir_index_enabled_ = on;
+    clearDirIndex();  // A/B 两档各自从空表开始（读数不串；也避免"关档期间安装树变了"的旧表）
+}
+
+void Vfs::clearDirIndex() {
+    std::lock_guard<std::mutex> lock(dir_index_mu_);
+    install_dir_index_.clear();
+    // ★ 计数一起归零（口径见 vfs.h 的声明处）：A/B 两档的"表里条目数"必须各算各的。
+    dir_index_builds_ = 0;
+    dir_index_lookups_ = 0;
+    dir_index_entries_ = 0;
+}
+
+Vfs::PathResolveStats Vfs::pathResolveStats() const {
+    PathResolveStats out;
+    {
+        std::lock_guard<std::mutex> lock(dir_index_mu_);
+        out.dir_index_builds = dir_index_builds_;
+        out.dir_index_lookups = dir_index_lookups_;
+        out.dir_index_entries = dir_index_entries_;
+    }
+    {
+        std::lock_guard<std::mutex> lock(path_cache_mu_);
+        out.positive_hits = positive_hits_;
+        out.positive_stores = positive_stores_;
+    }
+    return out;
+}
+
+// ★ 成员函数的定义必须落在 `namespace lift` 作用域（⛔ 不能写在匿名 namespace 里）⇒ 上面把匿名
+//   namespace 收口了一次，这里重新打开：下面的自由函数继续用。
+namespace {
 
 // 结果必须落在根下：逐段比较（路径是我们自己从 game_dir 拼的 ⇒ 精确比较足够）
 bool isUnderRoot(const fs::path& root, const fs::path& p) {
@@ -645,6 +854,7 @@ std::string guestEnvironmentText(bool have_appdata) {
 // =======================================================================================
 void Vfs::setGameDir(const std::string& host_dir) {
     invalidatePathCache();  // C6：根变了 ⇒ 所有旧解析结论作废
+    clearDirIndex();        // C5：索引的键是宿主目录文本 ⇒ 换了根，旧表一条都不能留
     if (host_dir.empty()) {
         game_dir_.clear();
         guest_cwd_.clear();
@@ -780,12 +990,28 @@ bool Vfs::installPathForSegments(const std::vector<std::string>& segs, bool must
     const fs::path root = pathFromUtf8(game_dir_);
     fs::path cur = root;
     std::string err;
+    // ★ C5：目录索引（`--vfs-dir-index 0` 关掉，供 A/B 与守卫）。两档的结果必须**逐字节**相同 ——
+    //   关档时走的就是原来的逐段 `lookupSegment`（= 参照实现）。
+    //   ⚠ 索引只在"安装树只读"这条前提成立时可用（没有 `--appdata` 时安装树就是写目标，
+    //     建出来的表会被引擎自己的写弄脏 ⇒ `dirIndexUsable()`）。
+    const bool use_index = dirIndexUsable();
+    // `cur` 是不是目录：根按定义是（若它其实不是，第一次建表就报 `[notdir]`，与现有实现同）；
+    //   之后每一段用索引给出的 `is_dir`（**文件** ⇒ 下一段不可能存在 ⇒ 省掉建表与 stat）。
+    bool cur_is_dir = true;
     for (std::size_t i = 0; i < segs.size(); ++i) {
         const bool last = (i + 1 == segs.size());
         // `resolve_case == false` 只影响**最后一段**（父目录仍要做大小写匹配）
         const bool exact_only = last && !resolve_case;
         std::string real;
-        const SegLookup r = lookupSegment(cur, segs[i], exact_only, &real, &err);
+        SegLookup r = SegLookup::Missing;
+        if (use_index) {
+            bool real_is_dir = false;
+            r = lookupSegmentIndexed(pathToUtf8(cur), segs[i], exact_only, cur_is_dir, &real,
+                                     &real_is_dir, &err);
+            if (r == SegLookup::Found) cur_is_dir = real_is_dir;
+        } else {
+            r = lookupSegment(cur, segs[i], exact_only, &real, &err);
+        }
         if (r == SegLookup::Error) {
             if (error) *error = err;
             return false;
@@ -933,11 +1159,20 @@ bool Vfs::shadowExistingForSegments(const std::vector<std::string>& segs, std::s
 }
 
 // =======================================================================================
-// C6：读路径负缓存（键 / 失效口径见 vfs.h 的 `invalidatePathCache`）
-//   ★ 只存**失败**结论：成功永远是现算的 ⇒ "影子文件创建后旧正结果仍活"这种问题不存在。
-//     （正结果在 SAVE05 里 756/1511 是重复的，但命中段只是一次精确 stat ⇒ 收益在噪声内，
-//      见 `.tmp/perf-reassess/c6-vfs-cache.md`；本轮不做。）
-//   ★ 失效靠代号：影子 / AppData / 配置一变就 +1 代，旧代条目在查找时就地淘汰。
+// C6 / C8：路径解析缓存（键 / 失效口径见 vfs.h 的 `invalidatePathCache` 与私有段的
+//          `NegativeEntry` / `PositiveEntry`）
+//   ★ **两张表、同一把键、同一代**：
+//     · 负表（C6）只存**失败**结论（完整错误串：shim 靠 tag 映射 Win32 错误码）；
+//     · 正表（C8）只存**成功**时解析出来的宿主路径（⛔ 不是内容 —— 内容是 C7 的另一件事；
+//       ⛔ 也不是"存在性"：路径只由段序列决定）。
+//     · 失效只有一条路：`invalidatePathCache()` 的 `++path_cache_gen_`。两张表各自在**查找时**
+//       用代做比较，旧代条目就地 erase（⛔ 不 O(n) 清表、⛔ 不需要知道"改的是哪条路径"）。
+//   ★ 为什么正表现在值得做：C5 的目录索引把命中路径的"2–3 次精确 stat"也拿掉了 ⇒ 正结论的
+//     重复探测剩下的成本就是两次哈希（读数与顺序裁决见
+//     `.tmp/reveq/REQ-01M86NP7RNP65YCC4709HZ7AN7/analysis.md`）。
+//   ★ **写后读**是这条路径唯一的正确性风险面：影子新建 / copy-up / 删除 / 改名 / 配置变化之后
+//     必须换代（失效点清单见 vfs.h 的 `invalidatePathCache`）；漏一个 ⇒ 正表会把旧路径 /
+//     旧结论继续答出去（`vfs-resolve-cache-parity` 的写后读那一段就是钉这个）。
 // =======================================================================================
 std::size_t Vfs::NegativeKeyHash::operator()(const NegativeKey& key) const {
     // 段序列逐项混入（FNV-1a 变体）；两个开关最后折进去。⛔ 不依赖段数 / 指针，跨对象可复现。
@@ -958,14 +1193,17 @@ std::size_t Vfs::NegativeKeyHash::operator()(const NegativeKey& key) const {
 }
 
 void Vfs::invalidatePathCache() const {
-    std::lock_guard<std::mutex> lock(neg_mu_);
+    // ★ 这里**只**换代：正 / 负两张表都在查找时按代淘汰（⛔ 别在这里顺手清表 —— 那会变成
+    //   O(条目数) 的代价，而换代点在一个窗口里能到上百次）。⚠ 目录索引**不**跟代走：
+    //   它的失效条件是"安装树被改"，而写覆盖层启用时安装树按合同只读（见 `dirIndexUsable`）。
+    std::lock_guard<std::mutex> lock(path_cache_mu_);
     ++path_cache_gen_;
 }
 
 bool Vfs::lookupNegative(const std::vector<std::string>& segs, bool must_exist, bool resolve_case,
                          std::string* host_path, std::string* error) const {
-    const NegativeKey key{segs, must_exist, resolve_case};
-    std::lock_guard<std::mutex> lock(neg_mu_);
+    const PathKey key{segs, must_exist, resolve_case};
+    std::lock_guard<std::mutex> lock(path_cache_mu_);
     const auto it = negative_cache_.find(key);
     if (it == negative_cache_.end()) return false;
     if (it->second.gen != path_cache_gen_) {
@@ -982,10 +1220,38 @@ bool Vfs::lookupNegative(const std::vector<std::string>& segs, bool must_exist, 
 
 void Vfs::rememberNegative(const std::vector<std::string>& segs, bool must_exist,
                            bool resolve_case, const std::string& error) const {
-    NegativeKey key{segs, must_exist, resolve_case};
-    std::lock_guard<std::mutex> lock(neg_mu_);
+    PathKey key{segs, must_exist, resolve_case};
+    std::lock_guard<std::mutex> lock(path_cache_mu_);
     if (negative_cache_.size() >= kMaxNegativeEntries) negative_cache_.clear();  // 有界内存
     negative_cache_[std::move(key)] = NegativeEntry{path_cache_gen_, error};
+}
+
+bool Vfs::lookupPositive(const std::vector<std::string>& segs, bool must_exist, bool resolve_case,
+                         std::string* host_path) const {
+    if (!positive_cache_enabled_) return false;  // 关档（守卫的 A/B）：⛔ 不查也不写
+    const PathKey key{segs, must_exist, resolve_case};
+    std::lock_guard<std::mutex> lock(path_cache_mu_);
+    const auto it = positive_cache_.find(key);
+    if (it == positive_cache_.end()) return false;
+    if (it->second.gen != path_cache_gen_) {
+        // ★ 写后读的红线：影子 / AppData 被改过 ⇒ 这条宿主路径可能已经不是"先影子再安装树"
+        //   该走的那一条了（⛔ 不拿旧结论回答）。
+        positive_cache_.erase(it);
+        return false;
+    }
+    positive_hits_ += 1;
+    if (host_path) *host_path = it->second.host;
+    return true;
+}
+
+void Vfs::rememberPositive(const std::vector<std::string>& segs, bool must_exist,
+                           bool resolve_case, const std::string& host_path) const {
+    if (!positive_cache_enabled_) return;
+    PathKey key{segs, must_exist, resolve_case};
+    std::lock_guard<std::mutex> lock(path_cache_mu_);
+    if (positive_cache_.size() >= kMaxPositiveEntries) positive_cache_.clear();  // 有界内存
+    positive_cache_[std::move(key)] = PositiveEntry{path_cache_gen_, host_path};
+    positive_stores_ += 1;
 }
 
 bool Vfs::resolve(const std::string& guest_path, std::string* host_path, std::string* error,
@@ -1091,8 +1357,11 @@ bool Vfs::resolve(const std::string& guest_path, std::string* host_path, std::st
     //   ⛔ 没有 `--appdata` 时**不缓存**：那时安装树就是写目标（vfs.h 的旧行为），
     //     "安装树只读"这个失效前提不成立 ⇒ 宁可慢，不拿可能过期的负结论回答。
     const bool cacheable = writeOverlayEnabled() && !segs.empty() && access == VfsAccess::Read;
-    if (cacheable && lookupNegative(segs, must_exist, resolve_case, host_path, error)) {
-        return false;
+    if (cacheable) {
+        // ★ C8：**正表先查**。命中的是"这条段序列上次解析出来的宿主路径" —— 它只由段序列决定
+        //   （影子 / 安装树的先后已经在**上一轮**算过；写覆盖层的任何变化都会换代 ⇒ 不会拿旧序）。
+        if (lookupPositive(segs, must_exist, resolve_case, host_path)) return true;
+        if (lookupNegative(segs, must_exist, resolve_case, host_path, error)) return false;
     }
 
     // ★ 写覆盖层（vfs.h 文件上方）：写 ⇒ 影子（父目录按需创建）；读 ⇒ **整条**影子路径存在才命中。
@@ -1105,6 +1374,8 @@ bool Vfs::resolve(const std::string& guest_path, std::string* host_path, std::st
         std::string shadow_host;
         std::string shadow_err;
         if (shadowExistingForSegments(segs, &shadow_host, &shadow_err)) {
+            // ★ C8 存正结论：影子命中也要存 —— 否则"影子里的存档被反复打开"永远走不到缓存。
+            if (cacheable) rememberPositive(segs, must_exist, resolve_case, shadow_host);
             if (host_path) *host_path = shadow_host;
             return true;
         }
@@ -1115,12 +1386,22 @@ bool Vfs::resolve(const std::string& guest_path, std::string* host_path, std::st
         }
     }
 
-    // 安装树这一支是**失败**的主来源（每段先精确 stat，未命中就整目录枚举）⇒ 负结论在这里存。
+    // 安装树这一支是**失败**的主来源；成功也要存（C8）。
     //   ★ 调用方可能没要 `error`，但缓存要错误串 ⇒ 用局部兜底。
     std::string local_err;
     std::string* errp = error != nullptr ? error : &local_err;
-    const bool ok = installPathForSegments(segs, must_exist, resolve_case, host_path, errp);
-    if (!ok && cacheable) rememberNegative(segs, must_exist, resolve_case, *errp);
+    //   ★ `must_exist=false` 的成功同样要存：那是"拼出来的宿主路径"（末段可能还不存在），
+    //     它只由段序列决定 ⇒ 存它是安全的（`PositiveEntry` 的注释）。
+    std::string local_host;
+    std::string* hostp = host_path != nullptr ? host_path : &local_host;
+    const bool ok = installPathForSegments(segs, must_exist, resolve_case, hostp, errp);
+    if (cacheable) {
+        if (ok) {
+            rememberPositive(segs, must_exist, resolve_case, *hostp);
+        } else {
+            rememberNegative(segs, must_exist, resolve_case, *errp);
+        }
+    }
     return ok;
 }
 

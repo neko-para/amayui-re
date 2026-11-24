@@ -9,9 +9,14 @@
 //   · 通配符只实现游戏实际用到的形态：`*` / `?` / `*.*`（Windows 语义：`*.*` 匹配全部）。
 //     其它非法形态（`**`、`\` 后无名字等）⇒ 报错，⛔ 不静默忽略。
 //   · 宿主路径一律用 **UTF-8** 字符串（Windows 上经 `std::filesystem::u8path`）。
-// ★ 这是**叶子设施**：不碰 guest 内存；shim 负责读写与错误码。唯一的一层缓存是 C6 的**读路径
-//   负缓存**（只存失败结论；按影子代失效，且以"写覆盖层启用时安装树只读"为前提 —— 见下面
-//   `invalidatePathCache` 与私有段 `NegativeKey` 上方）；⛔ 目录枚举（`find`）不缓存。
+// ★ 这是**叶子设施**：不碰 guest 内存；shim 负责读写与错误码。解析侧有**三层**记忆（都建立在
+//   同一条显式假设上："写覆盖层启用时安装树只读" —— 见 `invalidatePathCache` 与私有段
+//   `PositiveEntry` 上方）：
+//     ① **安装树目录索引**（每个目录**一次** `directory_iterator` ⇒ 折叠名 → 候选；没有失效语义，
+//        `setGameDir` 清空）—— 消掉"失败探测每次都整目录枚举"与"逐段精确 stat"；
+//     ② **负**解析缓存（只存失败结论；按影子代失效）；
+//     ③ **正**解析缓存（只存宿主路径；与负表**同一把键、同一代**）。
+//   ⛔ 目录枚举本身（`find()`）不缓存（`FindFirstFile` 的排序 / 增删语义另说）。
 #pragma once
 
 #include <cstddef>
@@ -157,6 +162,14 @@ struct VfsWriteOptions {
     // 影子的父目录按需创建（只有"会新建文件 / 目录"的调用方才开；删 / 改名 / 改属性不开）。
     bool create_parents = false;
 };
+
+// =======================================================================================
+// 段查询的结果（`lookupSegment` 与 `Vfs::lookupSegmentIndexed` **共用**这一个定义）
+//   ★ `Error` ⇒ `error` 里是**完整**的 tag 串（`[notdir]` / `[io]` / `[ambiguous]` / `[invalid]`）；
+//     `Missing` ⇒ **不写** `error`（调用方按"最后一段 / 中间段"自己决定 tag，见 `installPathForSegments`）。
+//   ★ 放头文件只是因为 `Vfs` 的私有成员函数签名要用它 —— 实现仍在 vfs.cpp 的匿名 namespace 里。
+// =======================================================================================
+enum class SegLookup { Found, Missing, Error };
 
 class Vfs {
 public:
@@ -317,6 +330,54 @@ public:
     // ===================================================================================
     void invalidatePathCache() const;
 
+    // ===================================================================================
+    // ★ C5：**安装树目录索引** + C8：**正解析缓存**（2026-11-25；实现在 vfs.cpp 的同名段）
+    //
+    //   为什么（读数见 `.tmp/reveq/REQ-01M86NP7RNP65YCC4709HZ7AN7/analysis.md`）：C7 把
+    //   `CreateFileA` 压到命中 88–114 µs 之后，剩下的钱仍花在解析上 —— 命中路径要 2–3 次精确
+    //   stat（53–62 µs），而失败探测每次都把安装树根目录**整目录枚举**一遍（542 项；388 次枚举
+    //   = 121.5 ms）。两笔各有一层记忆：
+    //
+    //   · **目录索引**（`install_dir_index_`）：每个目录**一次** `directory_iterator` 建
+    //     "折叠名 → 候选"表。折叠规则与 `lookupSegment` **同一条**（`asciiLowerChar` 逐字节，
+    //     非 ASCII 原样）；同一个折叠键的**多个候选全部保留** ⇒ `[ambiguous]` 照样会报，
+    //     ⛔ 不用单值表静默挑一个。它替的是"逐段精确 stat → 未命中再整目录枚举"这条老路。
+    //   · **正解析缓存**（`positive_cache_`）：与负缓存**同一把键、同一代**（`cacheable` 的判据
+    //     一行不动；`invalidatePathCache` 只换代，两张表按代一起淘汰）。缓存的是**宿主路径**
+    //     （内容缓存是另一件事，见上面的 C7 段）。
+    //
+    //   ★ 两层共同的**显式假设**（与负缓存同一条，原文见私有段 `PositiveEntry` 上方）：
+    //     写覆盖层启用时（有 `--appdata`）`--game-dir` 是**只读**来源，运行中不从外部改它。
+    //   ⇒ 没有 `--appdata` 时三层记忆**全部停用**（那时安装树就是写目标）：
+    //     负 / 正表看 `resolve` 的 `cacheable`，目录索引看 `dirIndexUsable()`。
+    //   ⛔ `find()` / 目录枚举不在本层（`FindFirstFile` 的排序 / 增删语义另说）。
+    // ===================================================================================
+    // `--vfs-dir-index 0`（A/B 与守卫）：关掉目录索引 ⇒ `installPathForSegments` 回到逐段
+    //   `lookupSegment`。缺省开。⛔ 它不是语义开关 —— 两档的 `ok / host / error` 必须逐字节相同。
+    //   ⚠ 只在**启动 / 夹具**里设置（不是并发开关：它没有自己的锁，见私有段）。
+    void setDirIndexEnabled(bool on);
+    bool dirIndexEnabled() const { return dir_index_enabled_; }
+    // 安装树目录索引的**显式**失效点：只在"宿主侧改动了安装树"（测试夹具 / 诊断）时调用。
+    //   产品路径不需要它（安装树只读）；`setGameDir` 自己会清（根变了）；
+    //   `setDirIndexEnabled` 在值**变化**时也清（A/B 两档各自从空表开始，读数才不串）。
+    //   ★ 清表**同时把计数归零**（表与计数一起回到"从没建过"；否则"表里条目数"这类读数会被
+    //     上一次建表带偏 —— `vfs-dir-index-parity` 就是靠它把两档切开）。
+    void clearDirIndex();
+    // 正解析缓存的关档（守卫的 A/B 用；缺省开）。⛔ 同一条边界：两档 `ok / host / error` 逐字节同。
+    //   ⚠ 同在启动 / 夹具里设置（不是并发开关）。
+    void setPositiveCacheEnabled(bool on) { positive_cache_enabled_ = on; }
+    bool positiveCacheEnabled() const { return positive_cache_enabled_; }
+    // 两层的计数（**不受 `LIFT_VFS_TIMING` 门控**：守卫拿它证明"真的被用到了"，否则
+    //   "开↔关逐位相同"可能只是两层都没生效）。⛔ 只读计量，不参与任何判定。
+    struct PathResolveStats {
+        std::uint64_t dir_index_builds = 0;   // 目录索引建表次数（每个目录一次）
+        std::uint64_t dir_index_lookups = 0;  // 走索引的段查询次数
+        std::uint64_t dir_index_entries = 0;  // 表里累计记下的目录项数（= 各被建过表的目录的条目数之和）
+        std::uint64_t positive_hits = 0;
+        std::uint64_t positive_stores = 0;
+    };
+    PathResolveStats pathResolveStats() const;
+
     // 反解：宿主路径 → guest 路径（用于 GetCurrentDirectory / GetModuleFileName；
     // 不在根下 ⇒ false）。
     bool toGuest(const std::string& host_path, std::string* guest_path) const;
@@ -372,21 +433,55 @@ private:
     // 影子根 `<--appdata>/Game` 的宿主路径（未启用 / 未设置 ⇒ 空串）
     std::string shadowRoot() const;
 
+    // ---- C5：安装树目录索引（每个目录一张"折叠名 → 候选"表；懒建；口径见 public 段的 C5/C8）----
+    //   ★ 键 = `asciiLowerChar` 逐字节折叠（**非 ASCII 原样** = `lookupSegment` 的同一条规则）；
+    //     值里**保留全部候选** —— 大小写敏感的宿主上"只差 ASCII 大小写的两个真名"必须照样报
+    //     `[ambiguous]`，⛔ 不能用单值 map 静默挑一个（Linux/macOS 上会真的发生）。
+    //   ★ `is_dir` 如实记录：`lookupSegmentIndexed` 把它交给 `installPathForSegments`，后者用它
+    //     在"中间段其实是文件"时省掉下一次索引建表的尝试（**不提前改判据** —— 那种情况现有实现
+    //     会在下一条段上按 `[notdir]` / `[notfound]` 分岔，见 `installPathForSegments` 的 tag 注释）。
+    struct DirEntry {
+        std::string real;       // 宿主目录里的真实文件名（UTF-8）
+        bool is_dir = false;    // 是否目录（符号链接按"跟随之后"算，与 `fs::is_directory` 同）
+    };
+    using DirIndex = std::unordered_map<std::string, std::vector<DirEntry>>;
+    enum class DirIndexStatus { Ready, NotDir, Error };
+    // 取（或懒建）`dir_host` 的表。**调用方必须持 `dir_index_mu_`**。返回 nullptr 时看 `*status`：
+    //   `NotDir` = 不是可枚举目录（`[notdir]` 的文本由 `lookupSegmentIndexed` 按现有**次序**补 ——
+    //   那里才知道该不该报）；`Error` = 枚举失败（`*error` 是 `[io] …`，与现有文本逐字相同）。
+    const DirIndex* dirIndexFor(const std::string& dir_host, DirIndexStatus* status,
+                                std::string* error) const;
+    // 与 `lookupSegment` **逐字等价**的段查询（走索引）：规则见 vfs.cpp 的"目录索引"段。
+    //   `dir_is_known_dir=false` ⇒ 调用方已知道这条路径不是可枚举目录（上一段是文件）⇒ 省一次 stat。
+    SegLookup lookupSegmentIndexed(const std::string& dir_host, const std::string& seg, bool exact_only,
+                                   bool dir_is_known_dir, std::string* real_name, bool* real_is_dir,
+                                   std::string* error) const;
+    // 索引能不能用 = 开关 + "安装树只读"这条前提（与 `resolve` 的 `cacheable` 同一条判据：
+    // 没有 `--appdata` 时安装树就是写目标 ⇒ 建出来的表随时会过期）。
+    bool dirIndexUsable() const { return dir_index_enabled_ && writeOverlayEnabled(); }
+    mutable std::mutex dir_index_mu_;      // 控制层另一条线程也会 `resolve` ⇒ 懒建必须加锁
+    mutable std::unordered_map<std::string, DirIndex> install_dir_index_;  // 键 = 宿主目录 UTF-8
+    mutable std::uint64_t dir_index_builds_ = 0;
+    mutable std::uint64_t dir_index_lookups_ = 0;
+    mutable std::uint64_t dir_index_entries_ = 0;
+    bool dir_index_enabled_ = true;
+
     // ---- C6：读路径负缓存（键 = 已折叠的段序列 + 两个影响结果的开关；**只缓存失败**）-----
     //   ★ 为什么键是段而不是原始文本：`resolve` 走到段序列之后只看 `segs`（影子的逐段查找 +
     //     安装树的逐段查找），而 `..` / `.` / 分隔符 / guest 根前缀 / cwd 都已折叠进 `segs`
     //     ⇒ 同一个键必然走同一条解析路径、得到同一个结论（错误串里的宿主路径也由段决定）。
     //   ★ 为什么把 `must_exist` / `resolve_case` 也放进键：它们改变"最后一段缺失"与
     //     "最后一段大小写"的结果（`installPathForSegments` 的入参）。少一个都会串结论。
-    //   ★ 为什么不缓存**成功**（本轮裁决；读数见 `.tmp/perf-reassess/c6-vfs-cache.md`）：
-    //     实测 SAVE05 窗口里正结果的重复不少，但命中段只是**一次精确 stat**；把正结果也缓存后
-    //     `CreateFileA` 的 µs/次与尖峰 Σ 都落在噪声内。真正贵的是**失败**探测（安装树根目录
-    //     542 项整目录枚举）⇒ 本轮只做负缓存；正缓存带"安装树运行期不变"的假设与额外内存，
-    //     换不到可判收益 ⇒ 不做（留作下一步，若将来有 case 不一致的目录索引需求再论）。
-    //   ★ **显式假设**（负缓存也依赖它）：写覆盖层启用时（有 `--appdata`），`--game-dir` 安装树是
-    //     **只读**来源 —— 运行中不从外部改它（没有热更新的资源目录）。开发期"运行中换安装树里的
-    //     文件"不再被支持；不启用 `--appdata` 时缓存整个停用（那时安装树就是写目标）。
-    //   ⛔ 不缓存 `find()` / 目录枚举（排序 / 增删语义另说；C5 才做目录索引）。
+    //   ★ 正结论本来**不**缓存（C6 的裁决，读数见 `.tmp/perf-reassess/c6-vfs-cache.md`：那时
+    //     命中段只是**一次精确 stat**，收益在噪声内）。C5 的目录索引把这"一次精确 stat"也拿掉
+    //     之后，正结论的重复探测就只剩"两次哈希"这一档成本 ⇒ C8 把正表加回来，与负表**同一把键、
+    //     同一代**（见下面的 `PositiveEntry`）。⛔ 两张表不许各用一套代号：`invalidatePathCache`
+    //     只 `++path_cache_gen_`，任何一边漏查代就会静默返回旧结论。
+    //   ★ **显式假设**（正 / 负 / 目录索引三层都依赖它）：写覆盖层启用时（有 `--appdata`），
+    //     `--game-dir` 安装树是**只读**来源 —— 运行中不从外部改它（没有热更新的资源目录）。
+    //     开发期"运行中换安装树里的文件"不再被支持；不启用 `--appdata` 时三层记忆整个停用
+    //     （那时安装树就是写目标）。
+    //   ⛔ 不缓存 `find()` / 目录枚举（排序 / 增删语义另说）。
     struct NegativeKey {
         std::vector<std::string> segs;
         bool must_exist = true;
@@ -399,6 +494,9 @@ private:
     struct NegativeKeyHash {
         std::size_t operator()(const NegativeKey& key) const;
     };
+    // ★ 正 / 负两张表**共用同一把键**（段序列 + 两个改变结果的开关）⇒ 用一个别名，⛔ 不复制一份
+    //   同名结构体（复制出来迟早漂一个字段，那时同一个 `segs` 会在两张表里算出不同结论）。
+    using PathKey = NegativeKey;
     struct NegativeEntry {
         std::uint64_t gen = 0;  // 写入时的影子代号；≠ 当前代 ⇒ 结论可能已过期（就地淘汰）
         std::string error;      // **完整**错误串（tag + 说明）：shim 靠 tag 映射 Win32 错误码
@@ -410,12 +508,36 @@ private:
                           const std::string& error) const;
     // 缓存条目上限（防御性：引擎会探测大量"可能不存在"的名字；超限就整表丢掉重来）。
     static constexpr std::size_t kMaxNegativeEntries = 8192;
+    // ---- C8：正解析缓存（只存**宿主路径**；与负表同一把键 / 同一代 / 同一把锁）----
+    //   ★ 存的是"这条段序列解析出来的宿主路径"，⛔ 不是内容（内容在 C7）、⛔ 不是"存在性"。
+    //     `must_exist=false` 的成功结果也安全：路径只由段序列决定。
+    //   ★ 不存的两类（它们都在段序列之前就返回，天然进不来）：`--exe` overlay 与 `--appdata`
+    //     特殊目录（AppData 映射走另一支逐段查找）。
+    //   ★ 失效只有一条：`invalidatePathCache()` 的**换代**（影子新建 / copy-up / 删除 / 改名 /
+    //     配置变化都会调）—— 写作"删掉换代"的变异必须让 `vfs-resolve-cache-parity` 的写后读红。
+    struct PositiveEntry {
+        std::uint64_t gen = 0;  // 写入时的影子代号；≠ 当前代 ⇒ 就地淘汰（与 `NegativeEntry` 同一条）
+        std::string host;       // 当时解析出来的宿主绝对路径（UTF-8）
+    };
+    // 命中 ⇒ true（`host_path` = 缓存的宿主路径）；未命中 / 已过期 / 关档 ⇒ false。
+    bool lookupPositive(const std::vector<std::string>& segs, bool must_exist, bool resolve_case,
+                        std::string* host_path) const;
+    void rememberPositive(const std::vector<std::string>& segs, bool must_exist, bool resolve_case,
+                          const std::string& host_path) const;
+    // 条目上限（与负表同一条防御性口径：超限就整表丢掉重来）。
+    static constexpr std::size_t kMaxPositiveEntries = 8192;
     // ★ `resolve` 是 const，而缓存是它的 memo ⇒ 成员必须 mutable。
     // ★ 必须加锁：控制层（`control_snapshot.cpp` 的 `vfs.resolve`）跑在**另一条线程**上；
     //   缓存是读解析时**写**的 ⇒ 无锁就是数据竞争（不是"本线单线程"能兜住的假设）。
-    mutable std::mutex neg_mu_;
+    //   ★ 负表 / 正表 / 代**共用这一把锁**：换代与两张表的写入必须是同一个临界区，否则
+    //     "刚换完代、旧代的正条目又写进来"会让旧结论活下来。
+    mutable std::mutex path_cache_mu_;
     mutable std::uint64_t path_cache_gen_ = 0;
-    mutable std::unordered_map<NegativeKey, NegativeEntry, NegativeKeyHash> negative_cache_;
+    mutable std::unordered_map<PathKey, NegativeEntry, NegativeKeyHash> negative_cache_;
+    mutable std::unordered_map<PathKey, PositiveEntry, NegativeKeyHash> positive_cache_;
+    mutable std::uint64_t positive_hits_ = 0;
+    mutable std::uint64_t positive_stores_ = 0;
+    bool positive_cache_enabled_ = true;
 
     // ---- C7：只读内容缓存（实现在 vfs.cpp 的"内容缓存"段）----
     //   ★ 条目 = {size, mtime, 内容}，键 = 解析后的宿主路径。LRU 顺序存在 `read_cache_lru_` 里

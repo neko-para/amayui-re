@@ -636,6 +636,22 @@ void printSummary() {
             static_cast<unsigned long long>(cs.evictions),
             static_cast<unsigned long long>(s.vfs->readCacheBudgetMb()));
     }
+    // 路径解析两层的读数（C5 目录索引 / C8 正解析缓存；**不计入 `vfs-timing` 的耗时列**）：
+    //   · `建表` = 整目录枚举次数 —— 本轮的目标就是把它从 388 压到 ≤5（见单里的判据）；
+    //   · `走索引的段查询` 与 `目录枚举` 一起看才能判"索引真的在替 stat + 枚举"；
+    //   · `正缓存命中` 与 `存入` 判"正表真的在用"（⛔ 只读读数，不参与任何判定）。
+    if (s.vfs != nullptr) {
+        const Vfs::PathResolveStats ps = s.vfs->pathResolveStats();
+        std::printf(
+            "vfs-paths: 目录索引 建表=%llu 次 走索引的段查询=%llu 次（dir-index=%s）；"
+            "正解析缓存 命中=%llu 存入=%llu（resolve-cache=%s）\n",
+            static_cast<unsigned long long>(ps.dir_index_builds),
+            static_cast<unsigned long long>(ps.dir_index_lookups),
+            s.vfs->dirIndexEnabled() ? "on" : "off",
+            static_cast<unsigned long long>(ps.positive_hits),
+            static_cast<unsigned long long>(ps.positive_stores),
+            s.vfs->positiveCacheEnabled() ? "on" : "off");
+    }
     std::printf(
         "vfs-timing: resolve 内部: lookupSegment=%llu 次 目录枚举=%llu 次（全进程，含 find；"
         "负缓存命中=%llu）；resolve 分摊: 成功的 %llu 次共 %.3f ms（%.2fµs/次）· 失败的 %llu 次共 "

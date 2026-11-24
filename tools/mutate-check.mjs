@@ -2712,8 +2712,14 @@ const MUTATIONS = [
   //   （负结论入缓存），在影子里创建它，再解析**必须找到**。
   {
     file: 'apps/emulator-lift/src/runtime/vfs.cpp',
-    from: '    if (it->second.gen != path_cache_gen_) {',
-    to: '    if (it->second.gen == path_cache_gen_) {  // 变异：代号检查反了 ⇒ 过期条目照样命中',
+    // ★ 2026-11-25（C8 正解析缓存）：正表的代号检查与负表**逐字相同**（`it->second.gen != path_cache_gen_`）
+    //   ⇒ 只拿那一行当锚会出现两次（replace 只改第一处，对错取决于行序）⇒ 锚里带上它下面那句注释。
+    from:
+      '    if (it->second.gen != path_cache_gen_) {\n' +
+      '        // 影子 / AppData 被改过 ⇒ 这条结论可能已经过期（⛔ 不拿旧结论回答）。\n',
+    to:
+      '    if (it->second.gen == path_cache_gen_) {  // 变异：代号检查反了 ⇒ 过期条目照样命中\n' +
+      '        // 影子 / AppData 被改过 ⇒ 这条结论可能已经过期（⛔ 不拿旧结论回答）。\n',
     guard: 'ctest:file-path-ext',
     ctest: 'file-path-ext',
     buildDir: 'apps/emulator-lift/out',
@@ -5685,6 +5691,58 @@ const MUTATIONS = [
       '不沿 jmp 壳传递 `ret_cleanup` ⇒ `lift-s7-iat` 的 case 8（T 只有一条跨分量 jmp、X 是 ' +
       '`retn 4` ⇒ F 该可结构化）当场红（F 停在 −4 ⇒ dynamic-return）；全量上表现为 ' +
       '`004B60C0` / `004B6130` 回到 `动态返回` / `间接 call`、`structurable` 少 19 —— 只影响派发密度',
+  },
+  // ── C5 / C8（2026-11-25）：VFS 解析的两层记忆（安装树目录索引 / 正解析缓存）────────────────
+  //   ★ 为什么这两条都要**专门的**变异：两层都是"只替代价"的记忆 ⇒ 破坏它们的典型形态（漏建一项 /
+  //     不查代）在**语义**上可能一句话都不改（安装树只读时，索引漏掉的名字会被
+  //     `lookupSegmentIndexed` 的精确 stat 兜住）⇒ 只有 `file-io` 新加的两条 case 抓得住：
+  //     `vfs-dir-index-parity` 里有一条"**表里记下的条目数 == 目录里的条目数**"（那正是"隔一项
+  //     建表"唯一可观察的形态），`vfs-resolve-cache-parity` 的写后读钉的是"删掉之后正表不许再答一次"。
+  {
+    file: 'apps/emulator-lift/src/runtime/vfs.cpp',
+    from: '        table[foldAsciiKey(name)].push_back(DirEntry{name, is_dir});',
+    to:
+      '        if (((static_cast<unsigned char>(name.empty() ? 0 : name[0])) & 1u) != 0)  // 变异：约一半目录项不建表\n' +
+      '            table[foldAsciiKey(name)].push_back(DirEntry{name, is_dir});',
+    guard: 'ctest:file-io',
+    ctest: 'file-io',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-file-io',
+    what:
+      '安装树目录索引**隔一项建表**（按名字首字节的奇偶丢掉一半）⇒ `file-io` 的 ' +
+      '`vfs-dir-index-parity` 红（"目录索引没有把被探到的目录整个记下来"：表里条目数 < 目录条目数）。' +
+      '⚠ 这条错**不改** resolve 结论（精确 stat 会兜住漏掉的名字）⇒ 只有"表的规模"那条断言抓得住',
+  },
+  {
+    file: 'apps/emulator-lift/src/runtime/vfs.cpp',
+    from:
+      '    if (it->second.gen != path_cache_gen_) {\n' +
+      '        // ★ 写后读的红线：影子 / AppData 被改过 ⇒ 这条宿主路径可能已经不是"先影子再安装树"\n' +
+      '        //   该走的那一条了（⛔ 不拿旧结论回答）。\n' +
+      '        positive_cache_.erase(it);\n' +
+      '        return false;\n' +
+      '    }',
+    to: '    // 变异：正解析缓存**不查代**（旧代条目的宿主路径照样命中）',
+    guard: 'ctest:file-io',
+    ctest: 'file-io',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-file-io',
+    what:
+      '正解析缓存**不查代**（`lookupPositive` 删掉 `gen` 比较）⇒ `file-io` 的 ' +
+      '`vfs-resolve-cache-parity` 的**写后读**红：`DeleteFileA` 之后那条正条目还活着 ⇒ ' +
+      '再解析仍然成功（本该失败）',
+  },
+  {
+    // ── 插件 `loadSave` 的翻页等待窗（★ 只判"链的判定"，不判游戏读数）──
+    //   把 1200 改回 60 ⇒ 正常点击也会被判成"丢了"（60 读点 ≈ 1.5 帧 < 一次点击要跨的 2 个回调）。
+    //   守卫 = `tools/test/plugin-loadsave-page.test.mjs`（pure；不需要构建）。
+    file: 'apps/emulator-lift/scripts/plugins/lib/save.js',
+    from: 'const PAGE_STALL_LIMIT = 1200;',
+    to: 'const PAGE_STALL_LIMIT = 60;',
+    guard: 'tools/test/plugin-loadsave-page.test.mjs',
+    what:
+      '翻页等待窗缩回 60 个读点（≈164 ms）⇒ 正常点击也要先撞满窗、再发一次多余的重试点击（把页多翻一格），' +
+      '而第一下真被吞时重试自己又要 76 个读点才落地、`turnr` 的 60 拍等不到 ⇒ `page not reached (target 0, still 1)`',
   },
 ];
 

@@ -100,6 +100,9 @@ void usage() {
         "                      只在有 `--appdata` 时生效（那时安装树按合同只读）；只对\n"
         "                      \"纯读 + OPEN_EXISTING + 解析结果在安装树之下\"的打开生效。\n"
         "                      小文件整块进堆、大文件只读 mmap；每次命中用一次 stat 校验 size+mtime。\n"
+        "  --vfs-dir-index 0|1 ★ 安装树**目录索引**（缺省 1；0 = 关，供 A/B 与守卫）。\n"
+        "                      只在有 `--appdata` 时生效（那时安装树按合同只读）；⛔ 不是语义开关 ——\n"
+        "                      开 / 关两档的解析结论（ok / host / error）必须逐字节相同。\n"
         "  --max-frames N      Present 到第 N 帧后停（0 = 不限；缺省 0）\n"
         "  --max-insns N       guest 指令数绝对上限（0 = 不限）\n"
         "  --until EA          跑到该 EA（块边界）后停（hex，缺省关）\n"
@@ -346,6 +349,8 @@ int main(int argc, char** argv) {
     // ★ C7：`--vfs-cache-mb`（缺省 256 MiB；0 = 关）。`_set` 单独记：值 0 也是"给了这个 flag"。
     std::uint64_t vfs_cache_mb = 256;
     bool vfs_cache_mb_set = false;
+    // ★ C5：`--vfs-dir-index 0|1`（缺省 1 = 开；0 只供 A/B 与守卫，⛔ 不是语义开关）。
+    bool vfs_dir_index = true;
     std::string guest_root;
     // ★ `--input-plan <file>`（S4）：AOT 臂的**唯一**输入控制面（`runtime/input_plan.h`）。
     //   缺省空 = 不给 ⇒ 输出与行为逐字节不变（含那 57 行 stdout）。
@@ -465,6 +470,15 @@ int main(int argc, char** argv) {
             }
             vfs_cache_mb = std::strtoull(v.c_str(), nullptr, 10);
             vfs_cache_mb_set = true;
+        } else if (a == "--vfs-dir-index") {
+            // ★ C5：安装树目录索引的开 / 关（只认 0 / 1；⛔ 缺省 1）。
+            std::string v;
+            if (!needValue("--vfs-dir-index", &v)) return 2;
+            if (v != "0" && v != "1") {
+                std::fprintf(stderr, "emulator-lift-aot: --vfs-dir-index 需要 0 或 1：`%s`\n", v.c_str());
+                return 2;
+            }
+            vfs_dir_index = (v == "1");
         } else if (a == "--guest-root") {
             if (!needValue("--guest-root", &guest_root)) return 2;
         } else if (a == "--input-plan") {
@@ -1107,6 +1121,9 @@ int main(int argc, char** argv) {
     //   "这条路径该不该缓存"的判据在 shim（纯读 + OPEN_EXISTING + 写覆盖层 + 安装树之下）。
     //   ⚠ 没有 `--appdata` 时缓存**天然不生效**（安装树那时是可写目标，只读前提不成立）。
     if (vfs_cache_mb_set) host.vfs().setReadCacheBudgetMb(vfs_cache_mb);  // 缺省已在 Vfs 里 = 256 MiB
+    // ★ C5：安装树目录索引（口径见 `runtime/vfs.h` 的 C5 段）。`--vfs-dir-index 0` 只供 A/B 与守卫；
+    //   "能不能用"还要看 `--appdata`（安装树只读那条前提在 `Vfs::dirIndexUsable()` 里）。
+    host.vfs().setDirIndexEnabled(vfs_dir_index);
 
     // ---- ② 载入 PE（**先核对 D1 的 pin**，再映射进 guest）----
     if (!host.loadImage(exe_path, &err)) {
@@ -1340,6 +1357,15 @@ int main(int argc, char** argv) {
     std::printf("raster    : %s%s\n", host.gpuRaster() != nullptr ? host.gpuRaster()->rasterName() : "(nullptr)",
                 present_mode == "headless" ? "（headless 离屏；**隐藏**窗口，不出现可见窗口）" : "");
     std::printf("present   : %s\n", sdl_display->describe().c_str());
+    // ★ C5/C8 的**一次性**启动 readout（§12.8 第 3 条：一次性输出 ⛔ 不许收；缺省档也打）：
+    //   "这一趟路径解析的两层记忆是开还是关"（读数**从 Vfs 自己的状态取**，⛔ 不抄 CLI 变量）。
+    //   `dir-index` 的 on/off 是**开关**；它是否真的生效还要看写覆盖层（`--appdata`）。
+    {
+        const lift::Vfs& vfs = host.vfs();
+        std::printf("vfs-paths : dir-index=%s resolve-cache=%s（安装树目录索引 / 正解析缓存；"
+                    "A/B: --vfs-dir-index 0）\n",
+                    vfs.dirIndexEnabled() ? "on" : "off", vfs.positiveCacheEnabled() ? "on" : "off");
+    }
     // ★ `--cursor-warp` 的**有效状态**一行（缺省关）：`on` / `off` / `on-but-hidden` / `unsupported`。
     //   与 `describe()` 里的 `cursor-warp=on|off`（sink 自己的开关）分工不同 —— 这一行回答
     //   "这轮真的会不会挪宿主光标"（含"开关开着但窗口是隐藏的"这种静默失效）。

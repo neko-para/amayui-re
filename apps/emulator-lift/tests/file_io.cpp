@@ -119,6 +119,13 @@ std::string pathToUtf8(const fs::path& p) {
     return std::string(reinterpret_cast<const char*>(u.data()), u.size());
 }
 
+// 反向：UTF-8 文本 → fs path（宿主路径一律 UTF-8 ⇒ ⛔ 不走 `fs::path(const std::string&)`
+// 那条按 ANSI 代码页解释的窄构造）
+fs::path pathFromUtf8(const std::string& s) {
+    const std::u8string u(reinterpret_cast<const char8_t*>(s.data()), s.size());
+    return fs::path(u);
+}
+
 // 直接读宿主文件（判据要求"逐字节相等"，⛔ 不读 guest 里的副本自证）
 std::string readHostFile(const fs::path& p) {
     std::ifstream in(p, std::ios::binary);
@@ -130,6 +137,54 @@ std::string readHostFile(const fs::path& p) {
 void writeHostFile(const fs::path& p, const std::string& bytes) {
     std::ofstream out(p, std::ios::binary | std::ios::trunc);
     out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+}
+
+// 宿主目录的条目数（⑮ 的"索引真的把整个目录记下来了吗"用它，⛔ 不写死数字）。
+std::size_t countHostEntries(const fs::path& dir) {
+    std::error_code e;
+    std::size_t n = 0;
+    for (fs::directory_iterator it(dir, e), end; it != end; it.increment(e)) ++n;
+    return n;
+}
+
+// ★ ⑮ / ⑯ 共用的探针表：解析语义的边角一次列全 —— 精确 / ASCII 大小写变体 / 非 ASCII（精确与
+//   变体）/ **中间段是文件** / 最后一段缺失 / 中间目录缺失 / 最后一段是目录 / `..` 越界。
+//   路径都相对 guest 根 `C:\lift-game`（夹具的 guestRoot），宿主落点 = `<tmp>/pidx`。
+struct PathProbe {
+    const char* guest;
+    const char* label;
+};
+const PathProbe kPathProbes[] = {
+    {"C:\\lift-game\\pidx\\sub\\blob.bin", "精确（嵌套存在）"},
+    {"C:\\lift-game\\pidx\\SUB\\BLOB.BIN", "ASCII 大小写变体"},
+    {"C:\\lift-game\\pidx\\MixedCase.TXT", "混合大小写精确"},
+    {"C:\\lift-game\\pidx\\mixedcase.txt", "混合大小写变体"},
+    {"C:\\lift-game\\pidx\\日本語.dat", "非 ASCII 精确"},
+    {"C:\\lift-game\\pidx\\日本語.DAT", "非 ASCII 大小写变体（按宿主语义，两档必须一致）"},
+    {"C:\\lift-game\\pidx\\file_as_dir\\x.txt", "中间段是文件（下一段 ASCII）"},
+    {"C:\\lift-game\\pidx\\file_as_dir\\日本語", "中间段是文件（下一段非 ASCII ⇒ 分支不同）"},
+    {"C:\\lift-game\\pidx\\sub\\nope.bin", "最后一段缺失"},
+    {"C:\\lift-game\\pidx\\nope\\deep.txt", "中间目录缺失"},
+    {"C:\\lift-game\\pidx\\sub", "最后一段是目录"},
+    {"C:\\lift-game\\..\\..\\escape.txt", "`..` 越界"},
+};
+
+// 造 ⑮ / ⑯ 的安装树（宿主侧直接写 = "只读来源"；⛔ 不经过产品写路径）。
+void makePathProbeTree(const fs::path& tmp) {
+    std::error_code e;
+    const fs::path pidx = tmp / "pidx";
+    fs::create_directories(pidx / "sub", e);
+    std::string payload;
+    payload.reserve(256);
+    for (int i = 0; i < 256; ++i) payload.push_back(static_cast<char>(i));
+    writeHostFile(pidx / "sub" / "blob.bin", payload);
+    writeHostFile(pidx / "MixedCase.TXT", "MIXED");
+    // ★ 非 ASCII 名字必须自己从 **UTF-8 文本**转 `fs::path`（`path("日本語.dat")` 那条窄构造按
+    //   ANSI 代码页解释，CP932 下会抛 / 变成乱码 —— 本仓的宿主路径一律 UTF-8）。
+    writeHostFile(pidx / pathFromUtf8("日本語.dat"), "JP");
+    // ★ "中间段是文件"的探针（⛔ 不是目录）：现有实现在**下一段**上按 `[notdir]` / `[notfound]`
+    //   分岔，索引必须复现**同一支**（这一条是最容易写错的地方）。
+    writeHostFile(pidx / "file_as_dir", "I-AM-A-FILE");
 }
 
 // 读 guest 里的 FILETIME（lo, hi 两个 DWORD）
@@ -1066,6 +1121,234 @@ int main() {
                     "（stores>=1 / hits>=1），命中与关档（预算 0）的 GetFileSize / ReadFile / "
                     "SetFilePointer / EOF 逐位一致；目录=5、不存在=2 不变；宿主改写后 stale>=1 且读到"
                     "新内容（100 字节）\n");
+    }
+
+    // ---------------- ⑮ 安装树目录索引：开 / 关两档的解析结论**逐字节相同** ----------------
+    // 判据（C5；口径见 `runtime/vfs.h` 的 C5 段与 `lookupSegmentIndexed` 的注释）：
+    //   ① 探针覆盖：精确 / ASCII 大小写变体 / 非 ASCII（精确 + 变体）/ **中间段是文件** /
+    //      最后一段缺失 / 中间目录缺失 / 最后一段是目录 / `..` 越界，且每条 × `must_exist∈{t,f}`
+    //      × `resolve_case∈{t,f}`；
+    //   ② `setDirIndexEnabled(true)` 与 `false` 两档的 `ok / host / error` **逐字节相同**
+    //      （"索引只替代价、不替语义"的判据；`[notdir]` / `[notfound]` / `[ambiguous]` 的 tag 分岔
+    //      最容易在这里露出来）；
+    //   ③ 索引真的被用了：建表次数 ≥ 1、走索引的段查询 ≥ 探针数、**表里记下的条目数 == 那三个
+    //      宿主目录的条目数**（根 / pidx / pidx/sub）。★ 最后这一条是"隔一项建表"那类变异的判据：
+    //      在**大小写不敏感**的宿主（Windows）上"少建一项"不会改变 resolve 的结论（精确 stat 会
+    //      兜住）⇒ 只能从表的**规模**看出来。关档那一档再断言建表 / 段查询都归 0。
+    // ★ 正解析缓存必须关掉：两层一起开时，第二档可能直接从正表拿答案 ⇒ 索引根本不被查，
+    //   "开↔关逐位相同"就变成"两层都没测到"。负表在每条探针之前换代（同理）。
+    {
+        g_current_case = "vfs-dir-index-parity";
+        makePathProbeTree(tmp);
+        // 写覆盖层启用 = "安装树只读"这条前提成立 ⇒ 目录索引才可用（`Vfs::dirIndexUsable()`）
+        f.m.vfs().setAppDataDir(pathToUtf8(tmp / "appdata"));
+        // ★ 从空索引 / 空计数开始：⑭ 也开着索引、在同一个 `tmp` 上建过表。
+        f.m.vfs().clearDirIndex();
+        f.m.vfs().setPositiveCacheEnabled(false);
+
+        struct ArmResult {
+            bool ok = false;
+            std::string host;
+            std::string error;
+            std::string label;
+            bool must_exist = true;
+            bool resolve_case = true;
+        };
+        // 一档 = 固定 `index_on` 跑完**全部**探针 × 组合（顺序固定 ⇒ 失败时能点名是哪一条）
+        auto runAll = [&](bool index_on) {
+            f.m.vfs().setDirIndexEnabled(index_on);  // 值变化时自己清表（A/B 两档各自从空表起来）
+            std::vector<ArmResult> out;
+            for (const PathProbe& p : kPathProbes) {
+                for (int mi = 0; mi < 2; ++mi) {
+                    for (int rc = 0; rc < 2; ++rc) {
+                        ArmResult r;
+                        r.must_exist = mi == 1;
+                        r.resolve_case = rc == 1;
+                        r.label = std::string(p.label) + "（must_exist=" +
+                                  (r.must_exist ? "true" : "false") + " resolve_case=" +
+                                  (r.resolve_case ? "true" : "false") + "）";
+                        f.m.vfs().invalidatePathCache();  // 负表换代：别的组合 / 上一档不许替这一条回答
+                        r.ok = f.m.vfs().resolve(p.guest, &r.host, &r.error, r.must_exist,
+                                                 r.resolve_case);
+                        out.push_back(std::move(r));
+                    }
+                }
+            }
+            return out;
+        };
+
+        const std::vector<ArmResult> on = runAll(true);
+        const lift::Vfs::PathResolveStats st_on = f.m.vfs().pathResolveStats();
+        LIFT_CHECK(st_on.dir_index_builds >= 1);
+        LIFT_CHECK(st_on.dir_index_lookups >= on.size());
+        {
+            // ★ 期望值**按宿主事实算**（⛔ 不写死数字）：本用例的探针会让 3 个宿主目录进表 ——
+            //   根 / pidx / pidx/sub；另外 `pidx\SUB\BLOB.BIN` 那条探针在**大小写不敏感**的宿主上
+            //   会让同一个物理目录以 `…\SUB` 这个文本键**再建一张表**（精确 stat 命中时
+            //   `real_name` 保留**调用方拼写** —— 与 `lookupSegment` 逐字一致；⛔ 不是 bug，只是内存）。
+            std::error_code wec;
+            std::size_t want = countHostEntries(tmp) + countHostEntries(tmp / "pidx") +
+                               countHostEntries(tmp / "pidx" / "sub");
+            if (fs::is_directory(tmp / "pidx" / "SUB", wec) && !wec) {
+                want += countHostEntries(tmp / "pidx" / "SUB");
+            }
+            if (st_on.dir_index_entries != want) {
+                lift_test::failf(__FILE__, __LINE__,
+                                 "目录索引没有把被探到的目录整个记下来：表里 %llu 项，目录里 %zu 项"
+                                 "（根 / pidx / pidx/sub 的条目数之和）；建表 %llu 次",
+                                 static_cast<unsigned long long>(st_on.dir_index_entries), want,
+                                 static_cast<unsigned long long>(st_on.dir_index_builds));
+            }
+        }
+        const std::vector<ArmResult> off = runAll(false);
+        LIFT_CHECK(on.size() == off.size());
+        std::size_t compared = 0;
+        for (std::size_t i = 0; i < on.size() && i < off.size(); ++i) {
+            compared += 1;
+            if (on[i].ok != off[i].ok || on[i].host != off[i].host || on[i].error != off[i].error) {
+                lift_test::failf(__FILE__, __LINE__,
+                                 "目录索引开 / 关两档的结论不同：%s\n"
+                                 "  index=on : ok=%d host=\"%s\" error=\"%s\"\n"
+                                 "  index=off: ok=%d host=\"%s\" error=\"%s\"",
+                                 off[i].label.c_str(), on[i].ok ? 1 : 0, on[i].host.c_str(),
+                                 on[i].error.c_str(), off[i].ok ? 1 : 0, off[i].host.c_str(),
+                                 off[i].error.c_str());
+            }
+        }
+        LIFT_CHECK(compared == on.size());
+        // 关档真的关掉了（⛔ 不是两档都开 / 都关）：关档那一档一次表都不建、一次索引都不查
+        const lift::Vfs::PathResolveStats st_off = f.m.vfs().pathResolveStats();
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(st_off.dir_index_builds), 0);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(st_off.dir_index_lookups), 0);
+        // 还原默认档（后面的用例 / 收尾要的是默认档）
+        f.m.vfs().setDirIndexEnabled(true);
+        f.m.vfs().setPositiveCacheEnabled(true);
+        f.m.vfs().clearDirIndex();
+        std::printf("[case] vfs-dir-index-parity: %zu 条探针 × must_exist{true,false} × "
+                    "resolve_case{true,false} = %zu 次解析；索引开 / 关两档 ok / host / error 逐字节相同；"
+                    "索引档 建表=%llu 次 走索引的段查询=%llu 次 表里=%llu 项（= 根/pidx/pidx/sub 的条目数）；"
+                    "关档 建表=0 段查询=0\n",
+                    sizeof(kPathProbes) / sizeof(kPathProbes[0]), on.size(),
+                    static_cast<unsigned long long>(st_on.dir_index_builds),
+                    static_cast<unsigned long long>(st_on.dir_index_lookups),
+                    static_cast<unsigned long long>(st_on.dir_index_entries));
+    }
+
+    // ---------------- ⑯ 正解析缓存：开 / 关两档同 + **写后读**（影子新建 / 删除必须换代）----------------
+    // 判据（C8；口径见 `runtime/vfs.h` 的 C8 段与 `PositiveEntry` 的注释）：
+    //   ① 与 ⑮ 同一张探针表：`setPositiveCacheEnabled(true)` 与 `false` 两档的 `ok / host / error`
+    //      **逐字节相同**（每条探针解析**两次**：第二次必须命中正表 —— 否则这段断言没测到正表）；
+    //      索引两档都开着 ⇒ 这一档只比"正表"这一个变量。
+    //   ② **写后读**：影子不存在 ⇒ 解析失败（负结论进表）→ `CreateFileA(CREATE_ALWAYS)` 在影子里
+    //      建出来 → 再解析**必须成功**（换代）→ 再解析一次（这一次走**正表**）→ `DeleteFileA` →
+    //      再解析**必须失败**（正表里那条宿主路径不许再答一次）。
+    //      ★ 这两步就是变异的判据：删 `invalidatePathCache` 的换代 ⇒ ②的第二段红；删正表的代比较
+    //        ⇒ ②的最后一段红。
+    {
+        g_current_case = "vfs-resolve-cache-parity";
+        makePathProbeTree(tmp);
+        f.m.vfs().setAppDataDir(pathToUtf8(tmp / "appdata"));
+        f.m.vfs().clearDirIndex();
+        f.m.vfs().setDirIndexEnabled(true);  // 两档都开（本用例只比正表）
+
+        struct ArmResult {
+            bool ok = false;
+            std::string host;
+            std::string error;
+            std::string label;
+        };
+        auto runAll = [&](bool positive_on) {
+            f.m.vfs().setPositiveCacheEnabled(positive_on);
+            std::vector<ArmResult> out;
+            for (const PathProbe& p : kPathProbes) {
+                for (int mi = 0; mi < 2; ++mi) {
+                    for (int rc = 0; rc < 2; ++rc) {
+                        const bool must_exist = mi == 1;
+                        const bool resolve_case = rc == 1;
+                        ArmResult r;
+                        r.label = std::string(p.label) + "（must_exist=" +
+                                  (must_exist ? "true" : "false") + " resolve_case=" +
+                                  (resolve_case ? "true" : "false") + "）";
+                        f.m.vfs().invalidatePathCache();  // 从"没有缓存结论"起步 ⇒ 第一次算、第二次命中
+                        std::string host1;
+                        std::string err1;
+                        (void)f.m.vfs().resolve(p.guest, &host1, &err1, must_exist, resolve_case);
+                        r.ok = f.m.vfs().resolve(p.guest, &r.host, &r.error, must_exist, resolve_case);
+                        out.push_back(std::move(r));
+                    }
+                }
+            }
+            return out;
+        };
+
+        const std::vector<ArmResult> on = runAll(true);
+        const lift::Vfs::PathResolveStats st_on = f.m.vfs().pathResolveStats();
+        LIFT_CHECK(st_on.positive_hits >= 1);    // 第二次解析真的命中了正表（否则这段没测到缓存）
+        LIFT_CHECK(st_on.positive_stores >= 1);
+        const std::vector<ArmResult> off = runAll(false);
+        LIFT_CHECK(on.size() == off.size());
+        std::size_t compared = 0;
+        for (std::size_t i = 0; i < on.size() && i < off.size(); ++i) {
+            compared += 1;
+            if (on[i].ok != off[i].ok || on[i].host != off[i].host || on[i].error != off[i].error) {
+                lift_test::failf(__FILE__, __LINE__,
+                                 "正解析缓存开 / 关两档的结论不同：%s\n"
+                                 "  cache=on : ok=%d host=\"%s\" error=\"%s\"\n"
+                                 "  cache=off: ok=%d host=\"%s\" error=\"%s\"",
+                                 off[i].label.c_str(), on[i].ok ? 1 : 0, on[i].host.c_str(),
+                                 on[i].error.c_str(), off[i].ok ? 1 : 0, off[i].host.c_str(),
+                                 off[i].error.c_str());
+            }
+        }
+        LIFT_CHECK(compared == on.size());
+        // 关档恒不查正表（⛔ 不是两档都开）：关档那一档的命中增量必须是 0
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.m.vfs().pathResolveStats().positive_hits -
+                                                    st_on.positive_hits),
+                          0);
+
+        // ---- ② 写后读（这条用例的变异判据）----
+        f.m.vfs().setPositiveCacheEnabled(true);
+        const char* kRt = "C:\\lift-game\\pidx\\rt\\new.dat";  // 父目录安装树里没有（相对 guest 根）
+        std::error_code wec;
+        std::string host;
+        std::string why;
+        f.m.vfs().invalidatePathCache();
+        LIFT_CHECK(!f.m.vfs().resolve(kRt, &host, &why, /*must_exist=*/true, /*resolve_case=*/true));
+        LIFT_CHECK(why.rfind("[notdir]", 0) == 0);  // 父目录都没有 ⇒ 中间段缺失
+        // 在**影子**里创建（父目录按需创建）：这就是写覆盖层的失效点（`shadowPathForSegments`
+        // 建出目录时 + `createFile` 新建文件时各一次）
+        const std::uint32_t hfile =
+            f.call("CreateFileA", {f.cstr(kRt), kGenericWrite, 0u, 0u, kCreateAlways, 0x80u, 0u});
+        LIFT_CHECK_NE_U32(hfile, kInvalidHandleValue);
+        LIFT_CHECK_EQ_U32(f.call("CloseHandle", {hfile}), 1u);
+        host.clear();
+        why.clear();
+        LIFT_CHECK(f.m.vfs().resolve(kRt, &host, &why, /*must_exist=*/true, /*resolve_case=*/true));
+        LIFT_CHECK(f.m.vfs().isWriteOverlayPath(host));            // 落在影子里（⛔ 不是安装树）
+        LIFT_CHECK(fs::exists(pathFromUtf8(host), wec));           // 宿主上真的有
+        // 再解析一次 ⇒ 这一次走**正表**（这条正条目是"删掉之后必须作废"的那一条）
+        std::string host2;
+        std::string why2;
+        LIFT_CHECK(f.m.vfs().resolve(kRt, &host2, &why2, /*must_exist=*/true, /*resolve_case=*/true));
+        LIFT_CHECK(host2 == host);
+        const std::uint64_t hits_before = f.m.vfs().pathResolveStats().positive_hits;
+        LIFT_CHECK(f.m.vfs().resolve(kRt, &host2, &why2, /*must_exist=*/true, /*resolve_case=*/true));
+        LIFT_CHECK(f.m.vfs().pathResolveStats().positive_hits > hits_before);  // 真的从正表拿的
+        // 删除 ⇒ 必须换代 ⇒ 再解析失败（正表里那条宿主路径不许再答一次）
+        LIFT_CHECK_EQ_U32(f.call("DeleteFileA", {f.cstr(kRt)}), 1u);
+        host.clear();
+        why.clear();
+        LIFT_CHECK(!f.m.vfs().resolve(kRt, &host, &why, /*must_exist=*/true, /*resolve_case=*/true));
+        LIFT_CHECK(why.rfind("[notdir]", 0) == 0);
+        // 还原默认档
+        f.m.vfs().setPositiveCacheEnabled(true);
+        f.m.vfs().setDirIndexEnabled(true);
+        f.m.vfs().clearDirIndex();
+        std::printf("[case] vfs-resolve-cache-parity: 同一张 %zu 条探针表 × 4 组合，每条解析两次"
+                    "（第二次命中正表，hits=%llu）；正表开 / 关两档 ok / host / error 逐字节相同；"
+                    "写后读：影子新建 ⇒ 再解析成功、删除 ⇒ 再解析失败\n",
+                    sizeof(kPathProbes) / sizeof(kPathProbes[0]),
+                    static_cast<unsigned long long>(st_on.positive_hits));
     }
 
     std::printf("[case] tmp = %s\n", game.c_str());
