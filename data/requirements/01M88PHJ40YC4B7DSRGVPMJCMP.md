@@ -23,8 +23,8 @@
 
 ## 迁移（已交付）
 
-- 域：`save`（`slot` / `expect` / 可选 `saveDir` / `timeoutMs` / `precheck`）、`scenario.save10-field`（`slot` / `expect`）、`scenario.field-point-visible`（`slot` / `on` / `types` / `hold` / `diag`）。
-- FIELD 验收：`plugin-config.json`（`scenario.field-point-visible`：`slot 10` / `on 1`）+ 嵌套 appdata，**不带** `--plugin-param` ⇒ `forced=3/3`、`run=finished exit=0`。
+- 域：`save`（`slot` / `expect` / 可选 `saveDir` / `timeoutMs` / `precheck`）、`scenario.save10-field`（`slot` / `expect`）、`field.point-visible`（`slot` / `on` / `types` / `hold` / `diag`）。
+- FIELD 验收：`plugin-config.json`（`field.point-visible`：`slot 10` / `on 1`）+ 嵌套 appdata，**不带** `--plugin-param` ⇒ `forced=3/3`、`run=finished exit=0`。
 - `clean-appdata.sh` 会 `rm -rf` 整个 appdata ⇒ 配置一起删；⛔ 不放 `SAVE/`。
 
 ## 落点（已交付）

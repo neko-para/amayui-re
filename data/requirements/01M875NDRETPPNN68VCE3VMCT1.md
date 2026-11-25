@@ -18,7 +18,7 @@
 - 两套驱动 = 两套门 / 两套失败面 / 两套维护成本；`plan` 的完成度判据（exit 5）与 JS 的
   `ctx.finish(5)` 重复，且 `plan` 不能表达"当前选中角色 / 技能 / 取消路由"这类 VM 逻辑。
 - 已有 JS 场景覆盖了 plan 的主用途：`scenario-fellow-switch.js`、`scenario-save10-field.js`、
-  `scenario-save07-battle.js`、`scenario-field-point-visible.js`（本轮新增）。
+  `scenario-save07-battle.js`、`field-point-visible.js`（本轮新增）。
 
 ## 要做什么（分批，不要一轮删光）
 

@@ -27,5 +27,5 @@
 ## 读数（2026-11-25 / win32 / RelWithDebInfo）
 
 - `ctest` 全量 **144/144**；`pnpm test` **633/633**；`plugin/load-save-e2e` exit 0。
-- FIELD：`--plugin scenario-field-point-visible`（id 形式、配置文件、无 `--plugin-param`）⇒ `field-points: forced=3/3`、`exit=0`。
+- FIELD：`--plugin field-point-visible`（id 形式、配置文件、无 `--plugin-param`）⇒ `field-points: forced=3/3`、`exit=0`。
 - main 侧锚点已跟随（`repo:` / `repro:` / 正文命令），`requirements validate` 6/6。
