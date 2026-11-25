@@ -3280,16 +3280,16 @@ const MUTATIONS = [
   //   判据：`tests/cli_aot_flags.cpp` 的 `headless-rejects-cursor-warp`（stderr 必须是
   //   "`--present headless` 不接受窗口参数（… --cursor-warp）"，⛔ 不含 `未知参数`）。
   //   ★ `from` 是**落地后实际的代码字节**（4 / 37 空格缩进，换行照源文件）。
+  //   ★ S3：`--ui` 删除后 `present_window_flag` 只剩这一份（`!ui_script.empty()` 已随 CLI 入口删除）；
+  //     变异仍只删 `|| cursor_warp` 一项（⛔ 不动 `overlay` / `ui_input` 等其它项）。
   {
     file: 'apps/emulator-lift/src/aot/aot_main.cpp',
     from:
       '    const bool present_window_flag = present_driver_set || present_vsync_set || present_hidden ||\n' +
-      '                                     present_screenshot_set || cursor_warp || overlay || !ui_script.empty() ||\n' +
-      '                                     ui_input_set;',
+      '                                     present_screenshot_set || cursor_warp || overlay || ui_input_set;',
     to:
       '    const bool present_window_flag = present_driver_set || present_vsync_set || present_hidden ||\n' +
-      '                                     present_screenshot_set || overlay || !ui_script.empty() ||\n' +
-      '                                     ui_input_set;  // 变异：cursor_warp 不算窗口参数',
+      '                                     present_screenshot_set || overlay || ui_input_set;  // 变异：cursor_warp 不算窗口参数',
     guard: 'ctest:cli-aot-flags',
     ctest: 'cli-aot-flags',
     buildDir: 'apps/emulator-lift/out',
