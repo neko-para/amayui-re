@@ -1192,6 +1192,16 @@ int main(int argc, char** argv) {
         // 生产读数源：marker 身份 / 位置 + 鼠标（每读点一次；与 `InputPlan` 的采样互斥）。
         plugin_readings = std::make_unique<lift::plugin::PluginReadings>(host.mem(), *host.cpu().windows);
         plugin_host = std::make_unique<lift::plugin::PluginHost>(*plugin_readings);
+        // ★ `ctx.appdata`（2026-11-25）：根由宿主绝对化（`Vfs::setAppDataDir` 存的是 CLI 原串）。
+        //   没有 `--appdata` ⇒ `available=false`（正常）；根不可用 / 落在安装树 ⇒ 一行 warn + 继续
+        //   —— 插件能力缺失不是启动失败（⛔ 不 exit 2）。
+        {
+            std::string appdata_err;
+            if (!plugin_host->attachAppData(appdata_dir, game_dir, &appdata_err)) {
+                std::fprintf(stderr, "emulator-lift-aot: [plugin] ctx.appdata 不可用：%s\n",
+                             appdata_err.c_str());
+            }
+        }
         std::string plugin_err;
         if (!plugin_host->initFromFile(plugin_path, plugin_params, host.uiHostOps(), &plugin_err)) {
             std::fprintf(stderr, "emulator-lift-aot: --plugin 装载失败（exit 2）：%s\n", plugin_err.c_str());

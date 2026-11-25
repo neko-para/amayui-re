@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "runtime/budget.h"          // Budget（每次回调的墙钟 + op 上限；只有一个真源）
+#include "runtime/appdata.h"         // AppDataStat（ctx.appdata.stat 的结果对象；语言无关）
 #include "runtime/input_device.h"    // MouseButton
 #include "runtime/input_point.h"     // InputPoint
 #include "runtime/script_globals.h"  // GlobalKind / GlobalValue（EngineRead / EditSink 的词汇）
@@ -81,6 +82,8 @@ inline const char* pluginInputStateName(PluginInputState state) {
 //   · **Input**（`inputClick/Move/Down/Up`）：进 `IntentQueue`，**下一读点**才可能落地；
 //   · **EngineRead**（`readGlobal`）：同步只读、不暂停；失败走 `code`（同一份词表）；
 //   · **Trigger**（`makeAfter*`）：每次调用造**新对象**（= 新预算 / 新边沿；合同 §4.2 417–419）。
+//   ★ 另有 **AppData**（`appDataStat` / `appDataAvailable` / `appDataPath`）：同步只读宿主 I/O，
+//     **只 appdata 子树**、只装 RunCtx；它的宿主段必须包 `HostPause`（不计进用户 2 ms）。
 //
 // ★ `now()` 是本读点的读数（`Context::now` 的同一个指针）；⛔ 回调外没有"当前读数"。
 //
@@ -125,6 +128,15 @@ public:
     // ---- EngineRead（同步只读 / 无暂停）----
     virtual bool readGlobal(lift::GlobalKind kind, std::uint32_t id, lift::GlobalValue* out,
                             const char** code) = 0;
+
+    // ---- AppData（同步只读宿主 I/O；**只 RunCtx**）----
+    // ★ 没有 `appDataWired()`：`ctx.appdata` 在 RunCtx 里**恒在**（普通对象），没接根时
+    //   `available=false` + `path=null` + `stat` 一律 `no_appdata`（⛔ 不"有但抛"，也⛔ 不静默 no-op）。
+    // ★ `stat` 的宿主段要包 `HostPause`（宿主 I/O 不计进用户 2 ms；见 `script_quickjs.cpp`）。
+    // ★ ⛔ 不进 `RenderCtx`（精确成员表；render 不做 I/O）。
+    virtual bool appDataAvailable() const = 0;
+    virtual std::string appDataPath() const = 0;  // 空串 = null（不可用）
+    virtual lift::plugin::AppDataStat appDataStat(const std::string& rel) = 0;
 
     // ---- Trigger 工厂（每次调用 = 新对象）----
     virtual lift::plugin::Trigger makeAfterScript(const std::string& name, const std::string& script,

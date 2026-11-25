@@ -196,6 +196,13 @@ void PluginHost::attachMemory(lift::GuestMemory& mem) {
     executor_.setBus(edit_.get(), read_.get());
 }
 
+bool PluginHost::attachAppData(const std::string& appdata_dir, const std::string& install_dir,
+                               std::string* err) {
+    // ★ 只转发给 `PluginAppData`：绝对化 / appdata-only / escape 判据都在那里
+    //   （`src/plugin/plugin_appdata.cpp`；本类不碰 `std::filesystem`）。
+    return appdata_.attach(appdata_dir, install_dir, err);
+}
+
 // =====================================================================================
 // ReadPointObserver（C2a 的唯一入口）
 // =====================================================================================

@@ -76,6 +76,10 @@ const CORE_FILES = [
   'apps/emulator-lift/src/runtime/read_point.h',
   'apps/emulator-lift/src/plugin/plugin_host.h',
   'apps/emulator-lift/src/plugin/plugin_host.cpp',
+  // ★ 2026-11-25：`ctx.appdata` 的宿主实现（只读 stat；appdata-only）。它是**第二入口**面的近邻
+  //   （宿主 I/O），同样逐文件登记 ⇒ 新增 `src/plugin/**` 文件漏登记时 ⑥ 会红。
+  'apps/emulator-lift/src/plugin/plugin_appdata.h',
+  'apps/emulator-lift/src/plugin/plugin_appdata.cpp',
   'apps/emulator-lift/src/plugin/guest_read.h',
   'apps/emulator-lift/src/plugin/guest_read.cpp',
   'apps/emulator-lift/src/plugin/readings.h',

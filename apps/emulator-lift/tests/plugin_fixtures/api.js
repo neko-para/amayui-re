@@ -17,6 +17,7 @@ const REQUIRED = [
     "profile",
     "state",
     "params",
+    "appdata",
     "log",
     "fail",
     "finish",
@@ -70,6 +71,30 @@ const plugin = {
 
         // ---- ctx.params（只读；宿主给了什么就有什么）----
         if (ctx.params.probe !== "api-surface") bad.push(`params.probe:${String(ctx.params.probe)}`);
+
+        // ---- ctx.appdata（只读 stat；RunCtx 恒在；本夹具**没有** attachAppData ⇒ available=false）----
+        if (typeof ctx.appdata !== "object" || ctx.appdata === null) {
+            bad.push("appdata:not-object");
+        } else {
+            if (typeof ctx.appdata.available !== "boolean") bad.push("appdata.available");
+            if (ctx.appdata.available === false && ctx.appdata.path !== null) {
+                bad.push(`appdata.path:${String(ctx.appdata.path)}`);
+            }
+            if (typeof ctx.appdata.stat !== "function") {
+                bad.push("missing:appdata.stat");
+            } else {
+                const st = ctx.appdata.stat("probe-file.txt");
+                if (typeof st !== "object" || st === null) {
+                    bad.push("appdata.stat:not-object");
+                } else if (ctx.appdata.available === false) {
+                    // 没有 --appdata ⇒ 稳定错误码（⛔ 不是异常、也⛔ 不是 exists=true）。
+                    if (st.exists !== false) bad.push(`appdata.stat.exists:${String(st.exists)}`);
+                    if (st.error !== "no_appdata") bad.push(`appdata.stat.error:${String(st.error)}`);
+                } else if (typeof st.exists !== "boolean") {
+                    bad.push("appdata.stat.exists");
+                }
+            }
+        }
 
         if (bad.length !== 0) {
             ctx.fail("api-surface", bad.join(","));

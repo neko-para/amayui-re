@@ -1616,7 +1616,7 @@ public:
 //   ⇒ 一个同时带 `export default` 与 `globalThis.render` 的文件，行为不随实现漂。
 //
 // ★ **`ctx` 是每次回调新建的值对象**（`ctx.now` 更是每回调一个新快照，D-C2-7）：
-//   RunCtx 的成员 = `edit/input/read/trigger/ui/profile/state/params/log/fail/finish/quit` + `now`；
+//   RunCtx 的成员 = `edit/input/read/trigger/ui/profile/state/params/appdata/log/fail/finish/quit` + `now`；
 //   ⛔ **没有** `draw`（C2b 只装在 RenderCtx 上；`onTrigger` 不画）、`run`/`dispatch`（C5）、
 //   `sample`/`screenshot`（永远不做）。`api-surface` 用例断言这些**缺席**（不是"有但抛"）。
 //   RenderCtx（C2b，**每帧新建**）= `ui/draw/read/game/params/log`（见下面的 `buildRenderCtx`）。
@@ -1743,6 +1743,8 @@ JSValue jsCtxProfileEnd(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxFail(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxFinish(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxQuit(JSContext*, JSValueConst, int, JSValueConst*);
+// ---- AppData（同步只读宿主 I/O；只 RunCtx；宿主段包 `HostPause`）----
+JSValue jsCtxAppDataStat(JSContext*, JSValueConst, int, JSValueConst*);
 // ---- C2b：`RenderCtx` 的 trampoline（`draw` / `read` / `game`；`ui` / `params` / `log` 复用 RunCtx 那几个）
 JSValue jsCtxDrawRect(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxDrawText(JSContext*, JSValueConst, int, JSValueConst*);
@@ -2127,6 +2129,24 @@ bool buildRunCtx(Impl& impl, Value* out) {
         if (ok) ok = setFunction(ctx, read_global.raw(), "get", jsCtxReadGlobalGet, 2, nullptr);
         if (ok) ok = qjs::setProperty(ctx, read.raw(), "global", std::move(read_global));
         if (ok) ok = qjs::setProperty(ctx, obj.raw(), "read", std::move(read));
+        if (!ok) qjs::clearException(ctx);
+    }
+    // ---- appdata = { available, path, stat }（同步只读宿主 I/O；**只 RunCtx**）----
+    //   ★ `available=false` 时 `path=null`、`stat` 一律 `{exists:false, error:"no_appdata"}`
+    //     （⛔ 不"有但抛"：前置检查要能无 try/catch 地读结果对象）。
+    if (ok) {
+        Value appdata = qjs::newObject(ctx);
+        ok = !appdata.isException();
+        lift::ui::PluginCallHost* host = impl.call_host;
+        const bool available = host != nullptr && host->appDataAvailable();
+        if (ok) ok = defineReadOnly(ctx, appdata.raw(), "available", qjs::newBool(ctx, available));
+        if (ok) {
+            const std::string path = available ? host->appDataPath() : std::string();
+            ok = defineReadOnly(ctx, appdata.raw(), "path",
+                                path.empty() ? Value::null(ctx) : qjs::newString(ctx, path));
+        }
+        if (ok) ok = setFunction(ctx, appdata.raw(), "stat", jsCtxAppDataStat, 1, nullptr);
+        if (ok) ok = defineReadOnly(ctx, obj.raw(), "appdata", std::move(appdata));
         if (!ok) qjs::clearException(ctx);
     }
     // ---- trigger = { afterScript, afterPosition, afterDelay, atReadPoint } ----
@@ -3255,6 +3275,54 @@ JSValue jsCtxQuit(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueCo
         return JS_UNDEFINED;
     } catch (...) {
         return JS_ThrowTypeError(ctx, "ctx.quit: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+// ★ `ctx.appdata.stat(rel)`：同步返回结果对象（`AppDataStat`）；`rel` 不是字符串 ⇒ TypeError。
+//   ★ **宿主段包 `HostPause`**：stat 是宿主 I/O（网络盘 / 杀软可能 ms 级），⛔ 不算用户 JS 的 2 ms
+//     （与 `ctx.profile.end` 同一原则）。RAII ⇒ trampoline 的异常路径也减。
+//   ★ `exists / isFile / isDir / size` 是**可选字段**：只有 `exists=true` 才给 isFile/isDir；
+//     `size` 只在 isFile 且 file_size 成功时给；`error` 只在非 None 时给（⛔ 不把 errno 漏出去）。
+JSValue jsCtxAppDataStat(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr || !host->inCallback()) {
+            return JS_ThrowTypeError(ctx, "ctx.appdata.stat: 不在插件回调里");
+        }
+        if (argc < 1 || !JS_IsString(argv[0])) {
+            return JS_ThrowTypeError(ctx, "ctx.appdata.stat(rel): rel 必须是字符串（相对 appdata 根）");
+        }
+        std::string rel;
+        if (!qjs::toString(ctx, argv[0], &rel)) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.appdata.stat: rel 读取失败");
+        }
+        lift::plugin::AppDataStat st;
+        {
+            HostPause pause(implOf(ctx));
+            st = host->appDataStat(rel);
+        }
+        Value out = qjs::newObject(ctx);
+        if (out.isException()) return out.take();
+        bool ok = defineReadOnly(ctx, out.raw(), "exists", qjs::newBool(ctx, st.exists));
+        if (ok && st.exists) {
+            ok = defineReadOnly(ctx, out.raw(), "isFile", qjs::newBool(ctx, st.is_file));
+            if (ok) ok = defineReadOnly(ctx, out.raw(), "isDir", qjs::newBool(ctx, st.is_dir));
+            if (ok && st.is_file && st.has_size) {
+                ok = defineReadOnly(ctx, out.raw(), "size", qjs::newDouble(ctx, static_cast<double>(st.size)));
+            }
+        }
+        if (ok && st.error != lift::plugin::AppDataStatError::None) {
+            ok = defineReadOnly(ctx, out.raw(), "error",
+                                qjs::newString(ctx, lift::plugin::appDataStatErrorName(st.error)));
+        }
+        if (!ok) {
+            qjs::clearException(ctx);
+            return JS_EXCEPTION;
+        }
+        return out.take();
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.appdata.stat: 宿主异常（C++ exception at script boundary）");
     }
 }
 

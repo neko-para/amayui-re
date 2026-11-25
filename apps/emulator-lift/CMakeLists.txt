@@ -3089,7 +3089,8 @@ target_sources(emulator-lift-runtime PRIVATE src/runtime/clipboard.cpp)
 target_sources(emulator-lift-runtime PRIVATE
     src/plugin/guest_read.cpp
     src/plugin/readings.cpp
-    src/plugin/plugin_host.cpp)
+    src/plugin/plugin_host.cpp
+    src/plugin/plugin_appdata.cpp)
 
 if(LIFT_BUILD_TESTS)
     # ★ C2c：`LIFT_PLUGIN_LIB_DIR` = **真库**目录（`scripts/plugins/lib`）。QJS 的 import 根是
@@ -3104,6 +3105,14 @@ if(LIFT_BUILD_TESTS)
         LIFT_PLUGIN_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/plugin_fixtures"
         LIFT_PLUGIN_LIB_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins/lib")
     add_test(NAME plugin-runtime COMMAND lift-plugin-runtime)
+
+    # ---- `plugin-appdata`：`ctx.appdata.stat` 的**只读 / appdata-only** 判据（pure）----------
+    # ★ 判据（详 `tests/plugin_appdata.cpp` 文件头）：文件 / 目录 / 缺失 / `..` / 绝对路径 / NUL /
+    #   空串 / 无 appdata 七条 + 符号链接逃逸（能建就测，建不了在输出里说明并跳过那一条）。
+    # ★ 只碰宿主临时目录（零游戏安装 / 零 GPU / 零真窗口）⇒ 顶层无条件注册 = pure 档。
+    add_executable(lift-plugin-appdata tests/plugin_appdata.cpp)
+    target_link_libraries(lift-plugin-appdata PRIVATE emulator-lift-runtime)
+    add_test(NAME plugin-appdata COMMAND lift-plugin-appdata)
 
     add_executable(lift-plugin-headless tests/plugin_e2e.cpp)
     target_link_libraries(lift-plugin-headless PRIVATE emulator-lift-runtime lift-test-support)

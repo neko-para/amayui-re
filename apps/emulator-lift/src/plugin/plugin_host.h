@@ -55,6 +55,7 @@
 
 #include "runtime/context.h"
 #include "runtime/edit_sink.h"
+#include "plugin/plugin_appdata.h"
 #include "runtime/intent_executor.h"
 #include "runtime/intent_queue.h"
 #include "runtime/read_point.h"
@@ -107,6 +108,15 @@ public:
     // Read = `GuestEngineRead`（`src/plugin/guest_read.h`）。两者都不拥有 `mem`。
     void attachMemory(lift::GuestMemory& mem);
 
+    // ★ `ctx.appdata` 的根（**在 `init` / `initFromFile` 之前**由 `aot_main` 调；测试夹具可以不调
+    //   ⇒ `available=false`，与生产路径的差别是显式的）。
+    //   `appdata_dir` = `--appdata` 的**原字符串**（绝对化在这里做；`Vfs::setAppDataDir` 不做）；
+    //   `install_dir` = `--game-dir`（只用来自检"appdata 落在只读安装树里"）。
+    //   返回 false ⇒ `*err` 非空、`ctx.appdata.available=false`（调用方 **warn + 继续**：插件能力
+    //   缺失不是启动失败；⛔ 不要把它变成 exit 2）。
+    bool attachAppData(const std::string& appdata_dir, const std::string& install_dir,
+                       std::string* err);
+
     // ★ C2b-2：`ctx.draw.text` / `ctx.draw.measure` 的生产字体来源（**非拥有**；转发给
     //   `PluginScript::setFont`）。调用时机 = 窗口装配**得知模块有 `render` 之后**（装载时还
     //   不知道 ⇒ 不走 `PluginLoadOptions::font`）。`nullptr` = 没接（headless / 测试夹具）⇒
@@ -145,6 +155,12 @@ public:
     ui::PluginInputState inputStatus(std::uint64_t id) override;
     bool readGlobal(lift::GlobalKind kind, std::uint32_t id, lift::GlobalValue* out,
                     const char** code) override;
+    // ---- AppData（同步只读宿主 I/O；只 RunCtx）----
+    bool appDataAvailable() const override { return appdata_.available(); }
+    std::string appDataPath() const override { return appdata_.path(); }
+    lift::plugin::AppDataStat appDataStat(const std::string& rel) override {
+        return appdata_.stat(rel);
+    }
     lift::plugin::Trigger makeAfterScript(const std::string& name, const std::string& script,
                                          lift::plugin::TriggerMode mode, std::uint32_t max_fires,
                                          std::uint64_t timeout_ms) override;
@@ -225,6 +241,7 @@ private:
     std::unique_ptr<GuestEditSink> edit_;
     std::unique_ptr<GuestEngineRead> read_;
     std::unique_ptr<ui::PluginScript> script_;
+    PluginAppData appdata_;
 
     const ui::UiHostOps* host_ops_ = nullptr;
     Params params_;

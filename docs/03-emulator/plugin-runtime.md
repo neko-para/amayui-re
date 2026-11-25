@@ -682,6 +682,7 @@ struct Context {
     // ⛔ 没有 sample/screenshot：它们是 emu-ctl 组合命令
     Log& log;                      // ctx.log（有界）
     const Params& params;          // `--plugin-param k=v`（只读）
+    AppDataApi& appdata;           // `ctx.appdata`：同步只读 stat（只 appdata 子树；宿主 I/O）
     // Trigger helper
     Trigger afterScript(std::string name, std::string script, TriggerMode, uint32_t max_fires=0,
                         uint64_t timeout_ms=0);
@@ -717,6 +718,15 @@ struct Context {
 - **`ctx.read.*`**：同步只读（global.get/frames/scriptPos/纯 frame/hash）；**无暂停**；
   与 Edit 同点组合 `read → edit → input`。
 - **`ctx.state`**：per-Run 状态容器；同一模块两个 endpoint/Run 不共享；`render` 可读。
+- **`ctx.appdata`**（2026-11-25；**只 `RunCtx`**，⛔ `RenderCtx` 没有 —— render 不做文件 I/O）：
+  `{ available, path, stat(rel) }`，`stat` **同步**返回结果对象（⛔ 不返回 Promise：`start`/`onTrigger`
+  必须同步返回）。只读、**只 appdata 子树**：`rel` 相对 `--appdata` 根，绝对路径 / `..` 段 / NUL /
+  空串 ⇒ `error:"invalid_path"`；canonical 后跑出根外（符号链接 / junction）⇒ `error:"escape"`；
+  不存在 ⇒ `exists:false, error:"not_found"`；权限 / I/O 分别是 `denied` / `io`（⛔ 不把 errno
+  漏给 JS）。`available=false` ⇒ `path=null`、`stat` 一律 `{exists:false, error:"no_appdata"}`。
+  ★ **宿主段不计入 2 ms**：`stat` 的 C++ 实现包 `HostPause`（与 `ctx.profile.end` 同一原则）。
+  ★ 宿主**不知道** title / `set:SavePath`（`set:UseAppDataFolder != 1` 时存档根本不在 appdata）⇒
+  存档目录由插件常量拼；`ctx.appdata` 不提供 read / write / 列目录。
 - **`ctx.input.status(id)`**：`queued/applied/failed/unknown`；click 只保证入队，完成要查询。
 - **`ctx.finish(code, reason)`**：结束当前 Run（可映射历史 exit 5）；**`ctx.quit()`** 请求宿主停机。
 - **`sample`/`screenshot` 不在 Context**：它们是 `emu-ctl` 的组合命令（pause + EngineRead/HostAction + 元数据）；
@@ -1153,6 +1163,7 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
 | AtReadPoint | n/a | n/a | n/a | `ctx.atReadPoint` |
 | Profile | `profile_*` | n/a | `host.profileBegin/End` | `ctx.profile.*` |
 | Quit | `quit` | `quit` | n/a | `ctx.quit()`（请求宿主停机）/`ctx.finish(code)` |
+| AppData | n/a | n/a | n/a | `ctx.appdata.stat`（宿主 I/O；只 appdata 子树、只 RunCtx，⛔ 不是 guest 能力） |
 | RunDispatch | n/a | `run/status/abort` | n/a | `ctx.dispatch` / `ctx.run.*` |
 
 - **`RunStatus.armedNames` / `RunEvent.name`**：当前具名 armed 集合/事件名；只用于可观测性，
@@ -1518,6 +1529,9 @@ C5 是单插件 Run/dispatch 线；三者可与 C2 并行/后置。v3 的 S1/S2 
 | 36 | **rearm 语义**：Once 再返回=fail；Reenter 需新外→内；AfterDelay 计时从头；AtReadPoint 下一读点；maxFires 续计 | 立刻重复触发/计时不重置/预算静默重置 | `trigger-runner/rearm` + C3 parity |
 
 | 37 | **Timeout 只读点 poll**：arm 记 deadline；atPoint 采样后/releaseDue 前 poll；暂停/headless 不 poll；不自动 finish | 独立 timer 超时；暂停仍触发；自动 exit | `trigger-runner/owner-timeout` + C3 parity |
+
+| 38 | **`ctx.appdata` 只 appdata 子树 / 只 RunCtx**：绝对路径 / `..` / NUL / 空串 ⇒ `invalid_path`；canonical 出根 ⇒ `escape`；`available=false` ⇒ `path=null` + `no_appdata`；`RenderCtx` 没有它 | 路径穿越静默成功（能读安装树 / 用户目录），或 render 里做文件 I/O | `plugin-appdata`（`appdata/stat-escape` / `stat-absolute` / `stat-nul` / `stat-symlink-escape`）+ `plugin/api-surface`（RunCtx 有 `appdata`）+ `plugin/render-surface`（精确六成员） |
+| 40 | **`ctx.appdata.stat` 的宿主段不计入 2 ms**（`HostPause`；与 `ctx.profile.end` 同一原则） | 网络盘 / 杀软 stat 被记成用户 JS 超预算 ⇒ 误报 `callback budget exceeded` | 实现落点 `script_quickjs.cpp` 的 `jsCtxAppDataStat`；现有预算守卫（`plugin/callback-*`）覆盖同一机制，stat 自身暂无专门用例 |
 
 **不进 test（文档/读数）**：JS 回调性能、QJS 内存、`afterDelay` 的墙钟读数、文本 plan 的复用行数、
 callback 链的可读性（进 `ctx.log`/设计文档）。

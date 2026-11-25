@@ -335,12 +335,54 @@ export interface RunNow {
     readonly mouse?: { readonly x: number; readonly y: number };
 }
 
+/** `ctx.appdata.stat(rel)` 的结果对象（**同步**；不存在 / 非法路径都是正常结果，⛔ 不抛）。
+ *
+ * ★ 只读；宿主**只 appdata 子树**：`rel` 是相对 appdata 根的路径（`/` 或 `\` 都收），
+ *   绝对路径 / `..` 段 / NUL ⇒ `invalid_path`；canonical 之后跑出根外（符号链接 / junction）⇒ `escape`。
+ * ★ 错误码是稳定词表：`no_appdata` / `invalid_path` / `escape` / `not_found` / `not_dir` /
+ *   `denied` / `io`（⛔ 不把 errno / 平台文案漏给 JS）。
+ */
+export interface AppDataStat {
+    readonly exists: boolean;
+    /** 只在 `exists` 时安装。 */
+    readonly isFile?: boolean;
+    /** 只在 `exists` 时安装。 */
+    readonly isDir?: boolean;
+    /** bytes；只在 `isFile` 且宿主 `file_size` 成功时安装。 */
+    readonly size?: number;
+    /** `exists=false` 时的原因（缺省 `not_found`）。 */
+    readonly error?:
+        | "no_appdata"
+        | "invalid_path"
+        | "escape"
+        | "not_found"
+        | "not_dir"
+        | "denied"
+        | "io";
+}
+
+/** `ctx.appdata`：宿主的 **`--appdata` 根**（只读 stat；只装在 `RunCtx`，⛔ `RenderCtx` 没有）。
+ *
+ * ★ 宿主**不知道** title / `set:SavePath`：存档目录由插件用常量拼（`save.js` 的 `SAVE_DIR_REL`）；
+ *   `set:UseAppDataFolder != 1`（存档在安装树）时 appdata 下没有存档 ⇒ `loadSave` 的前置检查按
+ *   "存档目录不在 appdata 下"跳过（⛔ 不误杀）。
+ * ★ `stat` 的宿主段**不计入** 2 ms 预算（与 `ctx.profile.end` 同一原则）。
+ */
+export interface AppDataApi {
+    /** `--appdata` 非空且根可绝对化（且不落在只读安装树里）。false ⇒ `path=null`、`stat` 一律 `no_appdata`。 */
+    readonly available: boolean;
+    /** 绝对宿主路径（UTF-8；宿主分隔符口径）；不可用 ⇒ `null`。 */
+    readonly path: string | null;
+    /** 同步只读 stat；`rel` 相对 appdata 根。参数不是字符串 ⇒ **TypeError**（⛔ 不是结果对象）。 */
+    stat(rel: string): AppDataStat;
+}
+
 /**
  * RunCtx：一次 Run 的 callback 上下文；Edit/Input/Read/Trigger/UI/Run。
  *
- * ★ 切片状态（C2a，2026-11-20；C2b 追加注释）：
+ * ★ 切片状态（C2a，2026-11-20；C2b 追加注释；2026-11-25 追加 `appdata`）：
  *   - 已实现：`edit` / `input` / `read.global.get` / `trigger` / `ui`（**只写**宿主本地状态）/
- *     `profile` / `state` / `params` / `log` / `fail` / `finish` / `quit` / `now`；
+ *     `profile` / `state` / `params` / `appdata` / `log` / `fail` / `finish` / `quit` / `now`；
  *   - ⛔ **`RunCtx` 永远没有** `draw`（C2b 只把它装在 `RenderCtx` 上；`onTrigger` 不画）/
  *     `run` / `dispatch`（C5）——`ctx.run` 在 C2 是 `undefined`（⛔ 不是"有但抛"）；
  *     也不安装 `sample` / `screenshot`（永远不做）。
@@ -357,6 +399,8 @@ export interface RunCtx<State = Record<string, unknown>> {
     /** per-Run；只放数据；不跨 endpoint/Run 共享。宿主建它时对 `initialState` 做**浅拷贝**（见下）。 */
     readonly state: State;
     readonly params: Readonly<Record<string, string>>;
+    /** 宿主的 `--appdata` 根（只读 stat；只有 RunCtx 有 —— render 不做文件 I/O）。 */
+    readonly appdata: AppDataApi;
     /** `ctx.log(level, message, data?)`：**一行一条、有界、去重**；`data` 当前**不进日志行**
      *  （结构化数据请先 `String(...)` 再传 message）。 */
     readonly log: LogApi;
