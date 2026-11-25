@@ -5,7 +5,7 @@
 - status: done
 - parent: REQ-01M7G7EJF062NKQ0D40RF3BZ4Z
 - verify: tools/test/plugin-loadsave-page.test.mjs#loadsave-page/first-click-swallowed
-- repro: apps/emulator-lift/scripts/plugins/lib/scenario-fellow-switch.js#loadSave(9
+- repro: apps/emulator-lift/scripts/plugins/scenario-fellow-switch.js#loadSave(9
 - severity: S2
 - tags: [emulator-lift, input, plugin, defect]
 
@@ -25,7 +25,7 @@
 
 ## 现象
 
-`scenario-fellow-switch.js`（`scripts/plugins/lib/`）的 `loadSave(9)` 在插件路上**翻页点击会丢**：
+`scenario-fellow-switch.js`（`scripts/plugins/`）的 `loadSave(9)` 在插件路上**翻页点击会丢**：
 
 - 2026-11-24 / win32 / dev `f58c2b7`，`aot-stress-fellow-switch` 三次独立 run：
   **2 次**停在 `load-save: page not reached (target 0, still 1)`（翻页门两轮各 60 读点都没等到页号变 ⇒

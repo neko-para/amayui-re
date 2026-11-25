@@ -5,7 +5,7 @@
 - status: done
 - parent: REQ-01M7G7EJF062NKQ0D40RF3BZ4Z
 - verify: apps/emulator-lift/tests/plugin_runtime.cpp#plugin/callback-host-pause
-- repro: apps/emulator-lift/scripts/plugins/lib/scenario-fellow-switch.js#settle:
+- repro: apps/emulator-lift/scripts/plugins/scenario-fellow-switch.js#settle:
 - severity: S3
 - tags: [emulator-lift, input, plugin, budget]
 

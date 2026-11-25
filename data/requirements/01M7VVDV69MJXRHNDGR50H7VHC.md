@@ -11,7 +11,7 @@
 
 ## 现象
 
-C2c 手工 headless（`--present headless --skip-logo --audio off --time-limit 90 --plugin …/lib/save.js --plugin-param slot=5`）
+C2c 手工 headless（`--present headless --skip-logo --audio off --time-limit 90 --plugin load-save --plugin-param slot=5`）
 **5 次同命令、机器无其它负载，其中 2 次**：
 
 ```

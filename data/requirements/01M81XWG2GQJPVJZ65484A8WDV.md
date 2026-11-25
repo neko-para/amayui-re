@@ -40,6 +40,6 @@
 cd apps/emulator-lift
 .\out\emulator-lift-aot.exe --game-dir ../../links/install --appdata ../../.tmp/plug-click/appdata-1 `
   --present headless --skip-logo --audio off --time-limit 300 --log-level info `
-  --profile --plugin scripts/plugins/lib/scenario-fellow-switch.js
+  --profile --plugin scripts/plugins/scenario-fellow-switch.js
 # 观察 settle 阶段的 js_us / js_cpu_us / budget_us / over
 ```
