@@ -60,8 +60,10 @@
 **两条线的落地只有两种语言**：`apps/emulator-lift` 是 **C++/CMake（CTest）**；仓库工具与守卫是 **`.mjs`**（Node 直接跑，**无构建步骤**）。
 ★ 跨包引用走包名 `@amayui/x`（前提：消费者 `dependencies` 里写了它 + `pnpm install`）；⛔ 不用 `../../packages/...`。
 ★ 包管理**只用 pnpm**（`pnpm-workspace.yaml` 是真源）；⛔ 不混用 `npm install`（会生成 `package-lock.json`）。
-★ `pnpm typecheck` 是 `tsc --noEmit`（**六份 tsconfig**，覆盖 `packages/age-format` 与两个已废弃 app —— 它们留在门禁里只为
-**发现"冻结件被无意改动"**，不是为了继续演进）。
+★ `pnpm typecheck` 是 `tsc --noEmit`（**五条链 / 五份 tsconfig**：`packages/age-format` · `apps/emulator` 两份 ·
+`apps/emulator-lift/scripts` 两份）。`apps/emulator` 留在门禁里只为发现"冻结件被无意改动"；
+`apps/emulator-new` 已于 2026-11-25 移出 pnpm workspace（F2：pixi / electron 只服务它）⇒ 它的三份 tsconfig
+不再进 typecheck，冻结告警只剩 `pnpm test` 的冻结清单（`tools/test-frozen.json`）与 `data/spec` 的 evidence 锚。
 ★ 为什么 TS 只在 `apps/emulator` / `apps/emulator-new` / `apps/workbench` / `packages/age-format`、
 为什么 `age-format` 的源码是 `.mts` 一份真源、为什么 `core` 是 `"types": []`、
 为什么 store 落在仓库内、junction 与提权的关系 —— 全文 → `docs/00-origin/agents-archive.md` §3。
@@ -82,7 +84,7 @@ pnpm test                       # 合同档（默认只跑 @env pure）
 pnpm verify                     # 工具链档（台账 / 写路径 / 知识层）；也必须绿
 pnpm test:list                  # 看分级集合与每个文件的声明（先看这个）
 pnpm test:mutation              # ★ 守卫自检：改坏一处关键常量 ⇒ 确认对应守卫当场红
-pnpm typecheck                  # tsc --noEmit，六份工程
+pnpm typecheck                  # tsc --noEmit，五条链
 ```
 
 **lift 线的构建 / 测试 / 验收命令见 §12；翻译线的工具见 §13；CTest 的档位判据（注册位置）见 §12.4。**
@@ -221,8 +223,8 @@ CTest 条目每条要 **2 次增量构建**（变异前 + 还原后各一次）+
 由 spec 派生的待办一律 **drop**，重启时**整体重审**并从 git 恢复被 drop 的单。
 ★ **当前唯一在维护的实现是 `apps/emulator-lift`**（见 §12）。`apps/emulator-cxx` 是按 spec 重写的**对照实现**：
 仍可执行、可作语义对照，但**新功能不落那里**。`apps/emulator` 与 `apps/emulator-new` **已废弃**（只读遗产）：
-⛔ 不新增功能、不补守卫、不为它们改 spec。冻结件仍留在 `pnpm typecheck` / `pnpm test` 里，只为
-**发现"冻结件被无意改动"**，不是为了让它继续演进。
+⛔ 不新增功能、不补守卫、不为它们改 spec。`apps/emulator` 仍留在 `pnpm typecheck` 里（只为发现"冻结件被无意改动"）；
+`apps/emulator-new` 已移出 workspace ⇒ 靠 `tools/test-frozen.json` 的冻结清单与 spec evidence 锚兜底。
 ★ **措辞纪律**：说"与所有可获得的独立证据不矛盾、且能被独立实现"，⛔ **不说"与真机等价"**；
 且 **投影一致 ≠ 与引擎一致**（多路推导只发现内部矛盾与遗漏，发现不了共同误解）。
 ★ 全文（两层本体 / 平台 API 是 spec 的边界 / `evidence` 挂哪个 CTest）→ `docs/00-origin/agents-archive.md` §11。
