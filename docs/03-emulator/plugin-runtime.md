@@ -722,7 +722,8 @@ struct Context {
 - **`ctx.read.*`**：同步只读（global.get/frames/scriptPos/纯 frame/hash）；**无暂停**；
   与 Edit 同点组合 `read → edit → input`。
 - **`ctx.state`**：per-Run 状态容器；同一模块两个 endpoint/Run 不共享；`render` 可读。
-- **`ctx.appdata`**（2026-11-25；**只 `RunCtx`**，⛔ `RenderCtx` 没有 —— render 不做文件 I/O）：
+- **`ctx.appdata`**（2026-11-25；**只 `RunCtx`**，⛔ `RenderCtx` 没有 —— render **直接碰不到**
+  appdata 子树；它只经宿主 config 桥写 `plugin-config.json`，不做任意路径 I/O）：
   `{ available, path, stat(rel) }`，`stat` **同步**返回结果对象（⛔ 不返回 Promise：`start`/`onTrigger`
   必须同步返回）。只读、**只 appdata 子树**：`rel` 相对 `--appdata` 根，绝对路径 / `..` 段 / NUL /
   空串 ⇒ `error:"invalid_path"`；canonical 后跑出根外（符号链接 / junction）⇒ `error:"escape"`；
@@ -735,7 +736,8 @@ struct Context {
   ★ **宿主段不计入 2 ms**：`stat` 的 C++ 实现包 `HostPause`（与 `ctx.profile.end` 同一原则）。
   ★ 宿主**不知道** title / `set:SavePath`（`set:UseAppDataFolder != 1` 时存档根本不在 appdata）⇒
   存档目录由插件常量拼；`ctx.appdata` 不提供 read / write / 列目录。
-- **`ctx.config`**（2026-11-25；**只 `RunCtx`**，⛔ `RenderCtx` 没有 —— render 不做文件 I/O）：
+- **`ctx.config`**（2026-11-25 `RunCtx`；**2026-11-26 加回 `RenderCtx`**（7→8 成员，父级裁决）——
+  render 可经宿主桥**写** `plugin-config.json`，仍⛔ 不做 guest 写 / 任意路径 I/O）：
   配置文件 = **`<--appdata>/plugin-config.json`**（appdata 根；⛔ 不放 `SAVE/`；`clean-appdata.sh`
   的 `rm -rf` 会删它）。信封 `{"version":1,"domains":{"<id>":{...}}}`；值 = **原生 JS 值**
   （对象 / 数组 / 字符串 / 有限数字 / 布尔 / null；⛔ 不是 JSON 字符串 ⇒ 沙箱里不需要 `JSON`）。
@@ -782,13 +784,15 @@ struct Context {
   · ⚠ **已知限制（不是沙箱边界）**：`__render` 是 config / domain 对象上的**不可枚举 / 不可写 /
     不可配置**属性（`markConfigObject`），但**脚本可以 `Object.defineProperty` 在自己的 config
     对象上伪造它**：普通对象可扩展，而门只看"这个对象上有没有标记"（`configCall`）。伪造之后，
-    存下来的 **RunCtx** `config` 在 render 里也能调 —— 同一个 `ConfigBridge` / 同一套校验
-    ⇒ **无权限提升**，只是绕开了"RenderCtx 没有 `config`"的收窄。⇒ 它挡的是"顺手把 RunCtx
-    带进 render"，⛔ 不是安全边界；要真收紧得换帧令牌 / 弱引用表。
+    存下来的 **RunCtx** `config` 在 render 里也能调（两个面现在都能合法拿到 config，所以这里
+    不再有"哪种 config 不该存在"的收窄）—— 同一个 `ConfigBridge` / 同一套校验 ⇒ **无权限提升**，
+    只是选错了门。⇒ 它挡的仍是"把对象存下来、离开 render / 回调再调"，⛔ 不是安全边界；
+    要真收紧得换帧令牌 / 弱引用表。
   · ⚠ **`--overlay` 预设模式（= `--plugin hud`）没有注册设置**：预设的 hud 不调
-    `registerSettings` ⇒ `settings.schema` 是**空表** ⇒ 设置页只显示一行
-    `settings: 没有注册设置`（⛔ 不打开一张只有 `SETTINGS` + live + `BACK` 的空白页）。要有设置面
-    就显式 `--plugin field-point-visible --appdata <根>`（它自己 `registerSettings`）。
+    `registerSettings` ⇒ `settings.schema` 是**空表** ⇒ 即使 `--appdata` 可用，点 `settings…`
+    也只留一行 `settings: 没有注册设置`（⛔ 不打开一张只有 `SETTINGS` + live + `BACK` 的空白页）；
+    没有 `--appdata` 时更早一步停在 `settings: 没有 appdata`。要有设置面就显式
+    `--plugin field-point-visible --appdata <根>`（它自己 `registerSettings`）。
 - **`ctx.input.status(id)`**：`queued/applied/failed/unknown`；click 只保证入队，完成要查询。
 - **`ctx.finish(code, reason)`**：结束当前 Run（可映射历史 exit 5）；**`ctx.quit()`** 请求宿主停机。
 - **`sample`/`screenshot` 不在 Context**：它们是 `emu-ctl` 的组合命令（pause + EngineRead/HostAction + 元数据）；
@@ -802,8 +806,13 @@ struct Context {
   **`end()` 返回 `{ok, text, error}`**（与旧 UiScript 的 `host.profileEnd()` 同形；S2 复审 I3 的
   HUD 回传路，报告文本**不再**额外写 stdout）；`end` 走 `HostPause`。RunCtx 的 `end()` 仍是 `void`
   （报告走 stdout，D-C2-4 不变）。
-- **`RenderCtx` 的成员**（S2）：`ui` / `draw` / `read` / `game` / `params` / `log` / `profile`
-  （`Object.keys(ctx)` **恰好**七个；`run` 仍属 C5 ⇒ `undefined`）。
+- **`RenderCtx` 的成员**（S2；**2026-11-26 起八成员**）：`ui` / `draw` / `read` / `game` / `params` /
+  `log` / `profile` / `config`（`Object.keys(ctx)` **恰好**八个；`run` 仍属 C5 ⇒ `undefined`）。
+  · `config` = `{ available, domain(id) }`，与经典 `host.config` **同一份**
+    `makeConfigObject(impl, /*render=*/true)`（同一套校验 / 转换 / 回执）；**没有桥 /
+    没有 `--appdata` ⇒ `available=false`**（⛔ 不是缺成员：HUD 靠"成员在不在"区分
+    `设置不可用` 与 `没有 appdata` 两种状态行）。写盘 = 每帧 render 之后由 `present_sdl`
+    调一次 `UiScript::flushConfig`（与 `RunCtx` 的回调末 flush 同一口径）。
   · `game` = `localFrames()` / `mouse()` **方法** + 经典 `game` 的**只读 getter**
     （`frame` / `fps?` / `script?` / `worst?` / `click?` / `hover?` / `active?` / `overlayKeySeq?`）
     —— 同一个
@@ -933,7 +942,7 @@ export default plugin;   // 宿主 QJS 读 default 导出；⛔ 不读 globalThi
   单个 `Trigger`，或 `null`/`[]` = done；`ev.name` 是触发的具名状态。
 - `ctx.edit.*`（立即）、`ctx.input.*`（串行，`ctx.input.status(id)` 查完成）、`ctx.read.*`（无暂停）、
   `ctx.trigger.*`、`ctx.ui.show/hide/set/visible`、`ctx.state`（per-Run）、`ctx.profile`、`ctx.dispatch`；
-  **`ctx.appdata` / `ctx.config`**（宿主 I/O，只 RunCtx；§4.5）、`ctx.log`；
+  **`ctx.appdata`（只 RunCtx）/ `ctx.config`（RunCtx 与 RenderCtx）**（宿主 I/O；§4.5）、`ctx.log`；
   `ctx.finish(code, reason)`（结束本 Run，映射历史 exit 5）/ `ctx.quit()`（请求宿主停机）。
   一个 endpoint 一个 active，已有 ⇒ `busy`（不排队）；`render` 里也可 dispatch。
 - **chain 接线（用 name，不用 step 计数器 / ctx.state）**：
@@ -1337,7 +1346,7 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
 | Profile | `profile_*` | n/a | `host.profileBegin/End` | `ctx.profile.*`（**RunCtx 与 RenderCtx 同形**；S2） |
 | Quit | `quit` | `quit` | n/a | `ctx.quit()`（请求宿主停机）/`ctx.finish(code)` |
 | AppData | n/a | n/a | n/a | `ctx.appdata.stat`（宿主 I/O；只 appdata 子树、只 RunCtx，⛔ 不是 guest 能力） |
-| Config | n/a | n/a | `host.config`（经典回退 HUD；与 `ctx.config` **同一形状**；无桥 ⇒ `undefined`） | `ctx.config.domain(id).get/has/set/delete/all`（域式 JSON 配置，文件 = `<--appdata>/plugin-config.json`；只 RunCtx） |
+| Config | n/a | n/a | `host.config`（经典回退 HUD；与 `ctx.config` **同一形状**；无桥 ⇒ `undefined`） | `ctx.config.domain(id).get/has/set/delete/all`（域式 JSON 配置，文件 = `<--appdata>/plugin-config.json`；**RunCtx 与 RenderCtx**） |
 | RunDispatch | n/a | `run/status/abort` | n/a | `ctx.dispatch` / `ctx.run.*` |
 
 - **`RunStatus.armedNames` / `RunEvent.name`**：当前具名 armed 集合/事件名；只用于可观测性，
@@ -1708,12 +1717,12 @@ C5 是单插件 Run/dispatch 线；三者可与 C2 并行/后置。v3 的 S1/S2 
 
 | 37 | **Timeout 只读点 poll**：arm 记 deadline；atPoint 采样后/releaseDue 前 poll；暂停/headless 不 poll；不自动 finish | 独立 timer 超时；暂停仍触发；自动 exit | `trigger-runner/owner-timeout` + C3 parity |
 
-| 38 | **`ctx.appdata` 只 appdata 子树 / 只 RunCtx**：绝对路径 / `..` / NUL / 空串 / **非法 UTF-8** ⇒ `invalid_path`；canonical 出根 ⇒ `escape`；`available=false` ⇒ `path=null` + `no_appdata`；`--appdata` 是普通文件 / 落在安装树 ⇒ `available=false`（warn + 继续）；`RenderCtx` 没有它 | 路径穿越静默成功（能读安装树 / 用户目录），或非法 UTF-8 退化成"根目录存在"，或 render 里做文件 I/O | `plugin-appdata`（`stat-escape` / `stat-absolute` / `stat-nul` / `stat-invalid-utf8` / `stat-symlink-escape` / `attach-not-a-directory`）+ `plugin/api-surface`（RunCtx 有 `appdata`）+ `plugin/render-surface`（精确六成员） |
+| 38 | **`ctx.appdata` 只 appdata 子树 / 只 RunCtx**：绝对路径 / `..` / NUL / 空串 / **非法 UTF-8** ⇒ `invalid_path`；canonical 出根 ⇒ `escape`；`available=false` ⇒ `path=null` + `no_appdata`；`--appdata` 是普通文件 / 落在安装树 ⇒ `available=false`（warn + 继续）；`RenderCtx` 没有它 | 路径穿越静默成功（能读安装树 / 用户目录），或非法 UTF-8 退化成"根目录存在"，或 render 里做任意路径 I/O / guest 写 | `plugin-appdata`（`stat-escape` / `stat-absolute` / `stat-nul` / `stat-invalid-utf8` / `stat-symlink-escape` / `attach-not-a-directory`）+ `plugin/api-surface`（RunCtx 有 `appdata`）+ `plugin/render-surface`（精确八成员） |
 | 39 | **`loadSave` 缺 `.DAT` 在第一个 click 之前收口**：缺文件 **或存档目录不存在** ⇒ `finish(5)` + **0 click**；只查 `.DAT`、只 0..99；无 appdata / `escape` / `invalid_path` / `denied` / `io` / slot≥100 ⇒ 跳过 + 一行 warn | 缺文件退回 30 s 门超时（与"点击被吞"混在一起）；或合法读档被误杀 | `control-script/save-missing-precheck`（临时 appdata，`stagedDepth/depth=0`）+ `loadsave-page/save-missing` / `save-dir-missing` / `save-dir-escape` / `save-present` / `no-appdata` + 变异 `if (!st.exists)` |
 | 40 | **`ctx.appdata.stat` 的宿主段不计入 2 ms**（`HostPause`；与 `ctx.profile.end` 同一原则） | 网络盘 / 杀软 stat 被记成用户 JS 超预算 ⇒ 误报 `callback budget exceeded` | 实现落点 `script_quickjs.cpp` 的 `jsCtxAppDataStat`；现有预算守卫（`plugin/callback-*`）覆盖同一机制，stat 自身暂无专门用例 |
 | 41 | **`ctx.config` 的文件形状 / 值 / 持久化 / 装载期上限**：信封 `version=1` + `domains` 对象 + 域值对象；未知顶层键 / 域内键保留；域自动创建；值只收原生六种（深度 8 / 节点 1024 / 串 8192 / key 128 / 域 256 / 每域 key 1024 / 文件 1 MiB；**set 与 attach 同一套**）；非法 UTF-8 在 set 期 TypeError、装载期 exit 2；`__proto__` / `prototype` / `constructor` 在域 id 与 key 都拒；没有 appdata ⇒ `domain()` 抛 `Error("no_appdata")`；`applied` = 内存已改（只有 `read_only` / `no_appdata` 两个 code）；`set` 只改内存 + **回调末**原子 flush（I/O 失败 warn 一次、后续不重试；序列化/超限失败不熔断）；`HostPause` 含值转换 | 配置文件被静默重写（丢前向兼容键）/ 深层文件在 `get` 递归爆栈而不是 exit 2 / 坏配置被当成"没有配置"继续跑 / `__proto__` 污染原型 / 写盘每 set 一次 / 宿主转换被记进用户 2 ms | `plugin-config` 的 `roundtrip` / `unknown-preserved` / `domain-autocreate` / `bad-json-exit2`（attach 判据）/ `bad-top-level` / `bad-domain-value` / `proto-key` / `limits` / `limits-on-load` / `invalid-utf8` / `no-appdata` / `missing-root` / `document-size` / `read-only-receipt` / `flush-on-callback` / `cross-instance-read` + `plugin/bad-config-exit2`（**进程 exit 2**）+ `control-script/config-roundtrip`（真宿主 + 回调末 flush）+ `plugin/config-host-pause` |
 | 42 | **内建插件参数来源 = config > params > 默认**（`has()` 判"给了"，falsy 也算）；没有 config 时**完全回退**到旧 params 行为 | 内建插件仍只认 `--plugin-param`（用户口径的迁移没发生）；或 `on:0` 被当成"没给" | `plugin/load-save-e2e`（⑥ 用 `plugin-config.json`、**不带** `--plugin-param`）+ `control-script/config-roundtrip` + 三个库文件的域表（`scripts/plugins/README.md`） |
-| 43 | **S2 `--overlay` = `--plugin hud` 预设**：`hud` 保留 id 先于普通根（exe → `LIFT_UI_SCRIPT_DIR`，exe 赢；ASCII 大小写不敏感）；用户插件根里的 `hud.js` ⇒ exit 2；`--overlay` 仍是窗口参数（headless exit 2）；`--plugin hud` 不隐含开窗；**`--overlay` + 显式 `--plugin` 保持旧形状**（有 render ⇒ adopt 取代；无 render ⇒ hud 照画，⛔ 静默无 HUD）；预设不改互斥（`--overlay --input-plan` 仍 exit 5 / `--plugin hud --input-plan` 仍 exit 2）；`--overlay` 不吃 `--plugin-param`；**`--overlay` / `--plugin hud` / 内部 hud 回退（`--overlay` + 无 render 的插件）三方窗口 BMP + guest dump 逐字节相同**；`RenderCtx` = 七成员（含 `profile.end()` 回 `{ok,text,error}` ⇒ PROFILE 四态）；`measure` 的 `bold` 真参与度量；`game` getter 与经典同口径 | `--overlay` 静默换 HUD（装了另一份 hud.js / 被用户文件遮住 / 入口像素不同 / 无 render 插件让 HUD 消失）；或预设把"要窗口"/互斥语义吃掉；或 PROFILE 少一态 / `measure.bold` 被静默忽略 | `plugin-resolve`（`resolve/hud-*` 含大小写）+ `cli-aot-flags`（`overlay-headless-rejected` / `overlay-plugin-param-rejected`，help 面）+ `aot-overlay`（`overlay-headless-rejected` / `plugin-hud-headless` / `plugin-hud-window` / `plugin-hud-equivalence` / `overlay-plus-plugin-wins` / `overlay-with-run-only-plugin` / `overlay-input-plan-exit5` / `overlay-plugin-hud-input-plan-mutex`）+ `plugin/hud-equivalence`（旧/新 loader display list 逐字段，含 INVALID）+ `plugin/render-surface`（七成员）+ `plugin/render-profile` + `plugin/ui-draw-measure-bold` |
+| 43 | **S2 `--overlay` = `--plugin hud` 预设**：`hud` 保留 id 先于普通根（exe → `LIFT_UI_SCRIPT_DIR`，exe 赢；ASCII 大小写不敏感）；用户插件根里的 `hud.js` ⇒ exit 2；`--overlay` 仍是窗口参数（headless exit 2）；`--plugin hud` 不隐含开窗；**`--overlay` + 显式 `--plugin` 保持旧形状**（有 render ⇒ adopt 取代；无 render ⇒ hud 照画，⛔ 静默无 HUD）；预设不改互斥（`--overlay --input-plan` 仍 exit 5 / `--plugin hud --input-plan` 仍 exit 2）；`--overlay` 不吃 `--plugin-param`；**`--overlay` / `--plugin hud` / 内部 hud 回退（`--overlay` + 无 render 的插件）三方窗口 BMP + guest dump 逐字节相同**；`RenderCtx` = 八成员（含 `config` 与 `profile.end()` 回 `{ok,text,error}` ⇒ PROFILE 四态）；`measure` 的 `bold` 真参与度量；`game` getter 与经典同口径 | `--overlay` 静默换 HUD（装了另一份 hud.js / 被用户文件遮住 / 入口像素不同 / 无 render 插件让 HUD 消失）；或预设把"要窗口"/互斥语义吃掉；或 PROFILE 少一态 / `measure.bold` 被静默忽略 | `plugin-resolve`（`resolve/hud-*` 含大小写）+ `cli-aot-flags`（`overlay-headless-rejected` / `overlay-plugin-param-rejected`，help 面）+ `aot-overlay`（`overlay-headless-rejected` / `plugin-hud-headless` / `plugin-hud-window` / `plugin-hud-equivalence` / `overlay-plus-plugin-wins` / `overlay-with-run-only-plugin` / `overlay-input-plan-exit5` / `overlay-plugin-hud-input-plan-mutex`）+ `plugin/hud-equivalence`（旧/新 loader display list 逐字段，含 INVALID）+ `plugin/render-surface`（八成员）+ `plugin/render-profile` + `plugin/ui-draw-measure-bold` |
 
 **不进 test（文档/读数）**：JS 回调性能、QJS 内存、`afterDelay` 的墙钟读数、文本 plan 的复用行数、
 callback 链的可读性（进 `ctx.log`/设计文档）。

@@ -66,8 +66,9 @@ emulator-lift-aot --present window --overlay --plugin E:\my-run-only.js ...
   `settings…` 恒在**最后一行**。`frame <n>` 行已删（总帧数无诊断价值）。
 - **设置入口**：最后一行 `settings…` 上叠一条 `fill:"#00000000"`、`key:"settings"` 的**透明命中
   Rect**（刚好盖住那一行）。点击 ⇒ 打开 `settings-page.js` 的二级页（页面开着时**不画 HUD 面板**，
-  `settings…` 行与 PROFILE 都不画；`BACK` 关闭）。`h.config` 不可用（`undefined` / `available !== true`）⇒
-  不打开，状态行 `settings: 没有 appdata`（同一个脚本实例内改回来才清）。★ **空注册表**（桥可用但
+  `settings…` 行与 PROFILE 都不画；`BACK` 关闭）。`h.config` **缺失**（`undefined`）⇒ 不打开，状态行
+  `settings: 设置不可用`；桥在但 `available !== true` ⇒ `settings: 没有 appdata`（两种原因分开写；
+  同一个脚本实例内改回来才清）。★ **空注册表**（桥可用但
   `settings.schema` 一个可画项都没有，`hasSettings(h) === false`）⇒ 也不打开，状态行
   `settings: 没有注册设置`（⛔ 不打开空白页、不造死控件），注册表回来才清。
 - **设置状态行是模块级**（`hud.js` 的 `settingsPage.status`，由 `drawPage` 每帧写回；⛔ 不每帧新建）：
@@ -194,9 +195,11 @@ if (canOpen(h) && hasSettings(h)) {
 ```
 
 - **`h.config`**：与插件 `ctx.config` **同一份 JS 形状**（`{ available, domain(id) }`），来路 =
-  经典回退 HUD 的 `UiHostOps::config`（`docs/03-emulator/plugin-runtime.md`）。`undefined` ⇒
-  `canOpen(h) === false`、`drawPage` 返回 `{ closed: true, status: "没有插件在跑" }` 且**不画控件**
-  （⛔ 不造假开关 —— `--plugin hud` 预设模式就没有 config）。
+  经典回退 HUD 的 `UiHostOps::config` / 插件档的 `ctx.config`（后者 **2026-11-26 加回 `RenderCtx`**；
+  `docs/03-emulator/plugin-runtime.md`）。`undefined` ⇒ `canOpen(h) === false`、`drawPage` 返回
+  `{ closed: true, status: "没有插件在跑" }` 且**不画控件**（⛔ 不造假开关）；生产上只有
+  **测试替身**会造 `undefined`（`--plugin hud` / `--overlay` 都有 `ctx.config`，只是没有 `--appdata`
+  时 `available:false`）。
 - **`hasSettings(h)`**（`hud.js` 的入口用它）：`canOpen` 只回答"桥在不在"，本函数回答"打开之后有没有
   东西可画"（`settings.schema` 至少一项；坏形状照 `drawPage` 的规则跳过）。桥可用但空表 ⇒ **不打开**，
   状态行 `settings: 没有注册设置` —— ⛔ 打开一张只有 `SETTINGS` + live + `BACK` 的空白页。
@@ -229,7 +232,7 @@ if (canOpen(h) && hasSettings(h)) {
 | `game.mouse`（getter） | `ctx.game.mouse()`（**方法**） |
 | `game.local_frames()` | `ctx.game.localFrames()` |
 | `host.profileBegin/End()`（结果对象） | `ctx.profile.begin()`（`void`）/ `ctx.profile.end()`（`{ok,text,error}`） |
-| `host.config`（D2；属性；无桥 ⇒ `undefined`） | **没有**（`RenderCtx` 恰好 7 成员，父级收窄）⇒ 插件档设置页不可用（诚实的"没有 appdata"） |
+| `host.config`（D2；属性；无桥 ⇒ `undefined`） | `ctx.config`（**2026-11-26 加回** `RenderCtx`，7→8 成员；同一形状 / 同一份实现） |
 
 ### `host`（方法表；**只在 `render` 内可调用**）
 

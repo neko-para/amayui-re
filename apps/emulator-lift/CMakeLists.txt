@@ -2879,7 +2879,7 @@ target_compile_definitions(emulator-lift-runtime PUBLIC
 # ★ `ui-hud-script`：默认 HUD 脚本（`scripts/ui/hud.js`）的**内容 / 版式判据** —— 行序（mouse / script /
 #   fps / worst / 状态行 / settings…，D4 删掉 `frame`）、⛔ 没有 raster / present 两行、颜色精确值、
 #   缺省项整行省略、面板贴左 + 垂直居中、`settings…` 的透明命中区、PROFILE 默认隐藏 + F9 切换、
-#   设置页打开/关闭与 `settings: 没有 appdata`。
+#   设置页打开/关闭与两种"打不开"文案（`设置不可用` / `没有 appdata`）。
 #   直接读 `LIFT_UI_SCRIPT_DIR "/hud.js"` ⇒ 改脚本就会让这条用例看见（改错 ⇒ 红）。
 #   **顶层** `if(LIFT_BUILD_TESTS)` ⇒ `cmakeTestTier()` 透明 ⇒ pure 档（AGENTS.md §12.4）。
 #   缺宿主字体 ⇒ 用例自己 `LIFT_SKIP(77)`（`SKIP_RETURN_CODE 77`）。

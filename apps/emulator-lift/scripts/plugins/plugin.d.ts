@@ -365,9 +365,9 @@ export interface GameRead {
 }
 /** render 只拿当帧 readings；模块级变量是 per-plugin 状态（render/onTrigger 共享）。
  *
- * ★ C2b 实现面：`ui` / `draw` / `read` / `game` / `params` / `log`；**S2 起加 `profile`**
- *   （运行期 `Object.keys(ctx)` **恰好**这七个；`run` 在 interface 里**声明保留**、运行期
- *   **不安装**（C5）⇒ `typeof ctx.run === "undefined"`）。
+ * ★ C2b 实现面：`ui` / `draw` / `read` / `game` / `params` / `log`；**S2 加 `profile`**；
+ *   **2026-11-26 加回 `config`**（运行期 `Object.keys(ctx)` **恰好**这八个；`run` 在 interface 里
+ *   **声明保留**、运行期**不安装**（C5）⇒ `typeof ctx.run === "undefined"`）。
  *   ⛔ 没有 `edit` / `input`（RunCtx 的写面；render 不做 guest 写）、`state` / `now` / `trigger` /
  *   `fail` / `finish` / `quit`（Run 语境），也⛔ 没有 `sample` / `screenshot`。
  * ★ **S2**：`ctx.profile.begin(label)` 是 `void`（失败 = TypeError）；`ctx.profile.end()` 返回
@@ -384,6 +384,11 @@ export interface RenderCtx {
     readonly log: LogApi;
     /** S2：宿主的 profile 窗口（`end()` 回传报告文本；结束走 HostPause）。 */
     readonly profile: RenderProfileApi;
+    /** 域式 JSON 配置（`<--appdata>/plugin-config.json`；**与经典 `host.config` 同一份实现**）。
+     *  ★ render 可经宿主桥**写**这个文件（宿主在每帧 render 之后 flush 一次），但仍⛔ 不做
+     *    guest 写 / 任意路径 I/O。没有 `--appdata` ⇒ `available:false`、`domain()` 抛
+     *    `Error("no_appdata")`（⛔ 不做内存态）。 */
+    readonly config: ConfigApi;
 }
 
 /** `ctx.now`：**本读点的读数快照**（C2a；与 `FiredEvent`/`TimeoutEvent` 的 `TriggerEventBase` 同源）。
@@ -473,7 +478,9 @@ export interface ConfigDomain {
 }
 
 /**
- * `ctx.config`：**域式 JSON 配置**（`<--appdata>/plugin-config.json`；只装在 `RunCtx`，⛔ `RenderCtx` 没有）。
+ * `ctx.config`：**域式 JSON 配置**（`<--appdata>/plugin-config.json`；**`RunCtx` 与 `RenderCtx`
+ * 都有** —— 2026-11-26 加回 `RenderCtx`（7→8 成员）；render 可经宿主桥**写**这个文件，
+ * 仍⛔ 不做 guest 写 / 任意路径 I/O）。
  *
  * 文件信封：`{"version":1,"domains":{"<id>":{...}}}`。未知顶层键与未知域内键**保留**（前向兼容）；
  * 域自动创建、不注册、可共享。域 id = `^[A-Za-z0-9._-]{1,64}$`；域 id 与 key 都拒
@@ -497,7 +504,8 @@ export interface ConfigApi {
 /**
  * RunCtx：一次 Run 的 callback 上下文；Edit/Input/Read/Trigger/UI/Run。
  *
- * ★ 切片状态（C2a，2026-11-20；C2b 追加注释；2026-11-25 追加 `appdata` / `config`）：
+ * ★ 切片状态（C2a，2026-11-20；C2b 追加注释；2026-11-25 追加 `appdata` / `config`；
+ *   2026-11-26 `config` 加回 `RenderCtx`）：
  *   - 已实现：`edit` / `input` / `read.global.get` / `trigger` / `ui`（**只写**宿主本地状态）/
  *     `profile` / `state` / `params` / `appdata` / `config` / `log` / `fail` / `finish` / `quit` / `now`；
  *   - ⛔ **`RunCtx` 永远没有** `draw`（C2b 只把它装在 `RenderCtx` 上；`onTrigger` 不画）/
@@ -516,9 +524,10 @@ export interface RunCtx<State = Record<string, unknown>> {
     /** per-Run；只放数据；不跨 endpoint/Run 共享。宿主建它时对 `initialState` 做**浅拷贝**（见下）。 */
     readonly state: State;
     readonly params: Readonly<Record<string, string>>;
-    /** 宿主的 `--appdata` 根（只读 stat；只有 RunCtx 有 —— render 不做文件 I/O）。 */
+    /** 宿主的 `--appdata` 根（只读 stat；只有 RunCtx 有 —— render 直接碰不到 appdata 子树）。 */
     readonly appdata: AppDataApi;
-    /** 域式 JSON 配置（`<--appdata>/plugin-config.json`；只有 RunCtx 有 —— render 不做文件 I/O）。 */
+    /** 域式 JSON 配置（`<--appdata>/plugin-config.json`；`RunCtx` 与 `RenderCtx` 同形 ——
+     *  ★ 2026-11-26 起 render 也可经宿主桥写这个文件，仍⛔ 不做任意路径 I/O）。 */
     readonly config: ConfigApi;
     /** `ctx.log(level, message, data?)`：**一行一条、有界、去重**；`data` 当前**不进日志行**
      *  （结构化数据请先 `String(...)` 再传 message）。 */

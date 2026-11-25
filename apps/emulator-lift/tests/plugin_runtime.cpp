@@ -49,9 +49,12 @@
 // C2b（render / ui / draw；`plugin-runtime` 的 pure 半 —— 窗口 `adopt` 是 C2b-2）：
 //   · `plugin/render-surface`             ：`RenderCtx` 的成员表 = d.ts 的 RenderCtx **减 `run`**
 //                                            （S2 起 `ui/draw/read/game/params/log/profile`；
-//                                            `Object.keys` 精确比对）；⛔ `edit`/`input`/`state`/`now`/…；
-//                                            `read.frameHash` 缺席；S2 的 `game` getter 无源 ⇒ undefined；
-//                                            没有 `render` 的插件调 render ⇒ true + 空 list。
+//                                            **2026-11-26 加回 `config`** ⇒ 八成员；`Object.keys`
+//                                            精确比对）；⛔ `edit`/`input`/`state`/`now`/…；
+//                                            `config` 形状 + 临时 appdata 的真桥可读可写（回执
+//                                            `{applied}`）；`read.frameHash` 缺席；S2 的 `game`
+//                                            getter 无源 ⇒ undefined；没有 `render` 的插件调
+//                                            render ⇒ true + 空 list。
 //   · `plugin/ui-draw`                    ：`ctx.draw.rect/text/measure` 的元素字段（x/y/w/h/fill/
 //                                            字号/颜色；S2 加 `style.key` / `style.bold`）、z 序 = 调用顺序、
 //                                            measure `{width,height}`（与宿主 `measureText` 交叉核对）；
@@ -1819,6 +1822,9 @@ void caseModuleContract() {
 // =====================================================================================
 // C2b · `plugin/render-surface`：`RenderCtx` 的成员表（= d.ts 的 RenderCtx 减 `run`）
 //   ★ 形状断言全在 `render-surface.js` 里（宿主读不到 JS 对象）⇒ 判据 = render 返回 true。
+//   ★ 2026-11-26：`config` 加回 RenderCtx（7→8）。夹具要判"可读可写、回执 {applied}" ⇒
+//     给真 `PluginHost` 桥 + 临时 appdata（与 `control-script/config-roundtrip` 同一个来路），
+//     并把 `readings.host` 设成 `UiHostOps`（生产 = `AotHost::uiHostOps()` + `setConfigBridge`）。
 //   ★ 附带钉住"没有 render 的插件调 render ⇒ true + 空 list"（present_sdl 只在挂 overlay 时调它）。
 // =====================================================================================
 void caseRenderSurface() {
@@ -1826,18 +1832,28 @@ void caseRenderSurface() {
     Fixture f;
     LIFT_CHECK(f.mem_ok && f.win_ok);
     if (!f.mem_ok || !f.win_ok) return;
+    ScopedTempDir appdata;
+    LIFT_CHECK(appdata.make("lift-plugin-render-surface"));
+    if (appdata.path.empty()) return;
     const bool loaded = f.load("render-surface.js", {{"probe", "render-surface"}});
     LIFT_CHECK(loaded);
     if (!loaded) {
         std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
         return;
     }
+    // 桥的来路 = 真 `PluginHost`（`config()` 返回 `this`）；没有 appdata ⇒ available=false ⇒
+    // 夹具的"可写"那半会红（⛔ 不静默跳过，那会让这条判据永远不执行）。
+    LIFT_CHECK(f.attachAppData(hostPathText(appdata.path)));
+    LIFT_CHECK(f.attachConfig());
     LIFT_CHECK(f.host->script() != nullptr);
     if (f.host->script() == nullptr) return;
     LIFT_CHECK(f.host->script()->hasRender());
     LIFT_CHECK(!f.host->script()->hasRun());
+    lift::ui::UiHostOps ops{};
+    ops.config = f.host->config();
     lift::ui::UiBuilder builder;
     lift::ui::UiFrameReadings readings;
+    readings.host = &ops;
     std::string err;
     const bool ok = f.host->script()->render(builder, readings, &err);
     if (!ok) std::fprintf(stderr, "  render error: %s\n", err.c_str());

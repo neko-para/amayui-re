@@ -11,8 +11,9 @@
 //   ★ 本文件是 **module**（`import`）：module 的顶层声明**不会**挂到 `globalThis` ⇒ 旧入口**仍然**必须
 //     显式写 `globalThis.render = …`（下面）。
 // ★ 两个入口的能力面（同一份读数，逐条同口径）：
-//     · 插件：`ctx.draw.*` / `ctx.game.*` / `ctx.profile.*`（**没有** `config`：`RenderCtx` 是 7 成员）；
+//     · 插件：`ctx.draw.*` / `ctx.game.*` / `ctx.profile.*` / `ctx.config`（`RenderCtx` 是 8 成员）；
 //     · 内部 hud 回退（classic）：全局 `ui.*` / `game.*` / `host.profileBegin|End` / `host.config`。
+//   ★ 两条入口的 config 都经各自的适配器变成 `h.config`（同一个 `{ available, domain(id) }` 形状）。
 //   ⛔ 没有 Date / Math.random（沙箱里也不存在）⇒ 同一份读数必然产出同一份 list（可测）。
 // ★ 发行件：同目录必须有 `kit.js` 与 `settings-page.js`（`import` 的相对解析以本文件所在目录为根）；
 //   缺任一与缺 hud 同属**加载期硬失败**（`--overlay` / `--plugin hud` exit 2，错误里点名路径）。
@@ -35,8 +36,9 @@
 // ★ 设置入口：最后一行 `settings…`（16px / FG）+ 一条**透明命中 Rect**（`fill:"#00000000"`、
 //   `key:"settings"`）刚好盖住那一行。点击 ⇒ 打开二级页（`settings-page.js` 的 `drawPage`）；
 //   打开期间**不画 HUD 面板**，只画页面（`settings…` 行与 PROFILE 都不画；页面自己的 BACK 关闭）。
-//   ★ `h.config` 不可用（`undefined` / `available !== true`）⇒ **不打开**，状态行
-//     `settings: 没有 appdata`。
+//   ★ `h.config` **缺失**（`undefined`）⇒ **不打开**，状态行 `settings: 设置不可用`（宿主没接桥 /
+//     测试替身）；`h.config.available !== true` ⇒ **不打开**，状态行 `settings: 没有 appdata`
+//     （桥在，但没有可用的 `--appdata` 根）。两种原因分开写，⛔ 不把"没有成员"误报成"没有 appdata"。
 //   ★ 桥可用但 `settings.schema` 里**一个可画项都没有**（空表 / 全是坏形状）⇒ **也不打开**，
 //     状态行 `settings: 没有注册设置`（⛔ 不打开一个空白页、⛔ 不造死控件）。
 //     两条都是"同一个脚本实例内改回来才清"。
@@ -71,7 +73,9 @@ const PROFILE_LABEL = "overlay";  // `profile.begin(label)` 的 label
 const SETTINGS_LINE = "settings…";
 /** 设置入口的命中键（`ui.rect({key})`；透明 Rect 刚好盖住那一行）。 */
 const SETTINGS_KEY = "settings";
-/** `h.config` 不可用时留在状态行上的那句话（D4；同一个 session 内改回来才清）。 */
+/** `h.config` **缺失**（宿主没接桥）时留在状态行上的那句话（同一个 session 内改回来才清）。 */
+const NO_CONFIG = "settings: 设置不可用";
+/** 桥在但 `available !== true`（没有 `--appdata`）时留在状态行上的那句话。 */
 const NO_APPDATA = "settings: 没有 appdata";
 /** 桥可用但 `settings.schema` 空表时留在状态行上的那句话（⛔ 不打开空白页；改回来才清）。 */
 const NO_SETTINGS = "settings: 没有注册设置";
@@ -115,7 +119,7 @@ let lastKeySeq;
  * ★ ⛔ 不每帧新建（`const page = { status: "" }`）：那样 `applied:false` / `set` 抛错的回执
  *   只在自己那一帧可见（≈16ms，人看不见）—— 只读 appdata 下点开关就是"零反馈"。
  * 规则：成功点（`applied:true`）清空；失败保留到下一次操作或下一次成功；关闭页面**不清**
- *   （状态行留在 HUD 上）。两条"打不开"的原因（`NO_APPDATA` / `NO_SETTINGS`）也放这里。
+ *   （状态行留在 HUD 上）。三条"打不开"的原因（`NO_CONFIG` / `NO_APPDATA` / `NO_SETTINGS`）也放这里。
  */
 const settingsPage = { status: "" };
 /** PROFILE 按钮是否可见（默认隐藏；F9 的读数**变了**才切换）。 */
@@ -154,8 +158,9 @@ function classicHost() {
 //   ★ 形状差异全部**只在**这里：measure 的 `{width,height}` ↔ `{w,h}`；`mouse()` 方法；
 //     profile 的 `void` + TypeError ↔ `{ok,error}` 结果对象。
 //   ★ 失败文本剥掉 `ctx.profile.*: ` 前缀 ⇒ 与旧 `host.profile*` 的 `error` 字段同形（HUD 文案不变）。
-//   ★ D2 收窄：`RenderCtx` **没有** `config`（7 成员）⇒ 插件档 `h.config` 恒 `undefined`
-//     （预设模式 `--plugin hud` 没有插件注册 schema ⇒ 设置页不可用是诚实的）。
+//   ★ `config` 是 **getter**（与 classicHost 的 `host.config` 同法）：每帧现读 `ctx.config`。
+//     `RenderCtx.config` 是第 8 个成员（2026-11-26 加回）；测试替身没给 ⇒ `undefined`
+//     （`canOpen` 仍为假，⛔ 不编一个假桥）。
 // ---------------------------------------------------------------------------------------
 /**
  * @param {any} ctx
@@ -199,7 +204,7 @@ function pluginHost(ctx) {
     get hover() { return ctx.game.hover; },
     get active() { return ctx.game.active; },
     get overlayKeySeq() { return ctx.game.overlayKeySeq; },
-    config: undefined,
+    get config() { return ctx.config; },
     profileBegin: (label) => {
       try {
         ctx.profile.begin(label);
@@ -252,6 +257,22 @@ function drawSettingsPage(h) {
 }
 
 /**
+ * 设置页**为什么**打不开（`""` = 可打开）；两种原因分开写，⛔ 不合并成一句。
+ *
+ * ★ `h.config` 缺失（`undefined`/`null`）= 宿主没接桥（经典回退的测试替身 / 插件侧 `ctx.config`
+ *   缺失的替身）⇒ `设置不可用`；桥在但 `available !== true` ⇒ `没有 appdata`。
+ * ★ 与 `canOpen(h)` 同一判据（本函数只在 `canOpen` 为假时被调用）—— 不另立一套"能不能开"。
+ *
+ * @param {HudHost} h 宿主适配器。
+ * @returns {string}
+ */
+function settingsBlockedReason(h) {
+  const config = h.config;
+  if (config === undefined || config === null) return NO_CONFIG;
+  return NO_APPDATA;
+}
+
+/**
  * 绘制体（两个入口共用）：`h` 是上面两种适配器之一。
  * @param {HudHost} h
  */
@@ -261,10 +282,14 @@ function drawHud(h) {
 
   const click = h.click;
   // `h.config` 每帧现读：`available` 可能从 false 变 true（同一个 session 内）⇒ 才清那句状态。
-  const configReady = canOpen(h);
+  const blocked = canOpen(h) ? "" : settingsBlockedReason(h);
+  const configReady = blocked === "";
   // ★ 桥可用 ≠ 有东西可画：`settings.schema` 空表 ⇒ 打开就是**空白页**（⛔ 不造死控件）。
   const settingsReady = configReady && hasSettings(h);
-  if (configReady && settingsPage.status === NO_APPDATA) settingsPage.status = "";
+  if (configReady &&
+      (settingsPage.status === NO_CONFIG || settingsPage.status === NO_APPDATA)) {
+    settingsPage.status = "";
+  }
   if (settingsReady && settingsPage.status === NO_SETTINGS) settingsPage.status = "";
 
   // 页开着 ⇒ 只画页面（HUD 面板 / `settings…` / PROFILE 都不画）。
@@ -272,7 +297,7 @@ function drawHud(h) {
     if (!settingsReady) {
       // 桥在这一帧断了 / 注册表空了（例如 appdata 被撤 / 插件全退）：回到 HUD + 一行原因。
       settingsOpen = false;
-      settingsPage.status = configReady ? NO_SETTINGS : NO_APPDATA;
+      settingsPage.status = configReady ? NO_SETTINGS : blocked;
     } else if (drawSettingsPage(h)) {
       return;
     }
@@ -282,7 +307,7 @@ function drawHud(h) {
   // ★ 打开**不**清状态：失败回执要留到下一次操作（页面里那一行也会显示它）。
   if (click !== undefined && click.key === SETTINGS_KEY) {
     if (!configReady) {
-      settingsPage.status = NO_APPDATA;
+      settingsPage.status = blocked;
     } else if (!settingsReady) {
       settingsPage.status = NO_SETTINGS;
     } else {

@@ -272,8 +272,9 @@ M3 的数据面仍未做。`mouse.buttons` 的源与缺键口径见 §3.5（窗�
   **透明命中 Rect**（刚好盖住那一行）。★ 栅格里 `alpha == 0` 的 Rect 是**不画**（只作命中区），
   ⛔ 不许把它写成 `(0,0,0,0)` —— 那会擦掉底下的面板 / 文本像素。点击 ⇒ 打开二级页
   （`scripts/ui/settings-page.js` 的 `drawPage`）：页面开着时**不画 HUD 面板**（`settings…` 行与
-  PROFILE 都不画），`BACK` 关闭并回到 HUD。`h.config` 不可用（`undefined` / `available !== true`）⇒
-  **不打开**，状态行 `settings: 没有 appdata`（同一个脚本实例内改回来才清）。★ **空注册表**（桥可用但
+  PROFILE 都不画），`BACK` 关闭并回到 HUD。`h.config` **缺失**（`undefined`）⇒ **不打开**，状态行
+  `settings: 设置不可用`；桥在但 `available !== true` ⇒ `settings: 没有 appdata`（两种原因分开写；
+  同一个脚本实例内改回来才清）。★ **空注册表**（桥可用但
   `settings.schema` 一个可画项都没有）⇒ 同样**不打开**（⛔ 不造空白页 / 死控件），状态行
   `settings: 没有注册设置`，注册表回来才清。
 - **设置状态行是模块级状态**（`hud.js` 的 `settingsPage.status`，`drawPage` 每帧写回；⛔ 不每帧新建）：

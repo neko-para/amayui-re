@@ -196,9 +196,9 @@ struct Impl {
     //   `UiScript::flushConfig` 在 present_sdl 的"render 之后"调，那时 `current` / `call_host`
     //   都已经复位 ⇒ 桥必须在这里缓存（⛔ 不靠 `current` 再解析一次）。
     //   nullptr = 这一帧没有桥 ⇒ flush 是 no-op。
-    // ★ 经典回退 HUD 的 `host.config` 是**唯一**消费者：`RenderCtx` **没有** `config`
-    //   （父级 2026-11-25 收窄：`--overlay` 预设的 hud 没有 `start`，加它只买到"下一轮的值"，
-    //   却要废掉"恰好 7 成员"的既有合同）。
+    // ★ 消费者 = **两条渲染面**：经典回退 HUD 的 `host.config` 与 `RenderCtx.config`（2026-11-26
+    //   加回；父级裁决：它挡住 `--overlay` 下最基本的设置页 / 预配置）。两者**同一份**
+    //   `makeConfigObject(impl, /*render=*/true)` ⇒ 同一套校验 / 转换 / 回执。
     lift::plugin::ConfigBridge* render_bridge = nullptr;
 
     // 本帧注入（getter 读它们；render 结束一律复位）
@@ -1681,7 +1681,8 @@ public:
 //   RunCtx 的成员 = `edit/input/read/trigger/ui/profile/state/params/appdata/log/fail/finish/quit` + `now`；
 //   ⛔ **没有** `draw`（C2b 只装在 RenderCtx 上；`onTrigger` 不画）、`run`/`dispatch`（C5）、
 //   `sample`/`screenshot`（永远不做）。`api-surface` 用例断言这些**缺席**（不是"有但抛"）。
-//   RenderCtx（C2b，**每帧新建**）= `ui/draw/read/game/params/log`（见下面的 `buildRenderCtx`）。
+//   RenderCtx（C2b，**每帧新建**）= `ui/draw/read/game/params/log/profile/config`
+//   （见下面的 `buildRenderCtx`；`config` = 2026-11-26 加回的第 8 个成员）。
 //
 // ★ **`ctx.ui` 是宿主本地的 JS 状态**：数据面 = `Impl::ui_data`（一个 JS 对象），可见性 =
 //   `Impl::ui_visible`。⛔ 不进 guest / 不进 Edit / 不进存档。RunCtx 与 RenderCtx **共用**
@@ -2226,9 +2227,10 @@ bool buildRunCtx(Impl& impl, Value* out) {
         if (ok) ok = defineReadOnly(ctx, obj.raw(), "appdata", std::move(appdata));
         if (!ok) qjs::clearException(ctx);
     }
-    // ---- config = { available, domain(id) }（域式 JSON 配置；**只 RunCtx**）----
-    //   ★ `--overlay` 的经典回退 HUD 用同一个桥、同一份 JS 形状（`host.config`，D2），但它**不是**
-    //     `RenderCtx` 的成员（父级 2026-11-25 收窄：RenderCtx 仍恰好 7 成员）。
+    // ---- config = { available, domain(id) }（域式 JSON 配置；**RunCtx**）----
+    //   ★ `--overlay` 的经典回退 HUD 用同一个桥、同一份 JS 形状（`host.config`，D2）；
+    //     ★ 2026-11-26 起 **`RenderCtx` 也有 `config`**（父级裁决：7→8 成员）——
+    //     它与 `host.config` 复用**同一份** `makeConfigObject(impl, /*render=*/true)`。
     //   ★ 没有 `--appdata` ⇒ `available=false` 且 `domain()` 抛 `Error("no_appdata")`
     //     （⛔ 不做内存态：内建插件必须先看 `available` 再回退 params / 默认值）。
     //   ★ 域对象没有缓存：`domain(id)` 每次新建一个绑定同一 store 的对象（同一个 appdata 共享）。
@@ -2294,20 +2296,20 @@ bool buildRunCtx(Impl& impl, Value* out) {
 
 // =======================================================================================
 // `RenderCtx`（C2b）：**每帧新建**的值对象；成员 = `ui` / `draw` / `read` / `game` / `params` /
-// `log` / `profile`
+// `log` / `profile` / `config`
 //
 // 合同：`docs/03-emulator/plugin-runtime.md` §4.4c（`render` 只画 / `onTrigger` 只改 UI 状态）/
 //       §4.6（`render(ctx: RenderCtx)`）/ §5 C2（`plugin/ui-state` / `plugin/ui-draw`）。
 // 裁决：`.tmp/plugin-runtime/c2-decisions.md` D-C2-3（不支持的 style 字段 ⇒ **TypeError**，
 //       ⛔ 不静默忽略）、D-C2-6（`read.frameHash` 不安装）、D-C2-7（`run`/`dispatch` 留 C5）。
-//       ★ 2026-11-25 父级收窄：`config` **不进** `RenderCtx`（仍恰好 7 成员）；要 config 的是
-//       **经典回退 HUD 的 `host.config`**（D2 的另一半，见下面的 `jsHostConfig`）。
+//       ★ 2026-11-26 父级裁决：`config` **加回** `RenderCtx`（7→8）—— 当初撤它的理由是
+//       "预设模式没有插件注册 schema"，但它挡住了 `--overlay` 下最基本的设置页 / 预配置；
+//       与经典回退 HUD 的 `host.config` **同一份**实现（见 `makeConfigObject`）。
 //
 // ★ **成员表写死 = d.ts 的 `RenderCtx` 减 `run`**（`run`/`dispatch` 属 C5）：
 //   ⛔ 没有 `edit`/`input`（RunCtx 的写面；render 不做 guest 写）、`state`/`now`/`trigger`/
 //   `fail`/`finish`/`quit`（Run 语境），也⛔ 没有 `sample`/`screenshot`。
-//   `plugin/render-surface` 用 `Object.keys(ctx)` 钉住**恰好**这七个成员（多一个也红；
-//   `config` 在它的 FORBIDDEN 表里 —— 想加回 RenderCtx 必须先改父级裁决）。
+//   `plugin/render-surface` 用 `Object.keys(ctx)` 钉住**恰好**这八个成员（多一个也红）。
 // ★ S2：`profile` 是**render 专用**的一份（`begin/end` 都是 `void`；trampoline 判 `impl.current`），
 //   与 RunCtx 的 `ctx.profile` 同形但**不复用**它的门（存下来的 RunCtx 仍被拒）。
 // ★ S2：`game` 除 `localFrames()/mouse()` 两个方法外，还装经典 `game` 的只读 getter
@@ -2822,6 +2824,22 @@ bool buildRenderCtx(Impl& impl, Value* out) {
     // ---- params（只读；与 RunCtx 同一个对象）/ log ----
     if (ok) ok = defineReadOnly(ctx, obj.raw(), "params", impl.plugin_params.dup());
     if (ok) ok = setFunction(ctx, obj.raw(), "log", jsCtxLog, 3, nullptr);
+    // ---- config = { available, domain(id) }（★ 2026-11-26 加回：RenderCtx 第 8 个成员）----
+    //   ★ **复用**经典 `host.config` 那一份 `makeConfigObject(impl, /*render=*/true)`：同一份
+    //     校验 / 转换 / 回执（⛔ 不复制第二套）。门也同 `host.config`：config / domain 对象带
+    //     `__render`，`configCall` 要求 `impl.current` + `builder` 非空 ⇒ 出 render 再调
+    //     `domain()/get()/…` 一律 TypeError（存下 ctx 跨帧用也不行）。
+    //   ★ 没有桥 / 没有 `--appdata` ⇒ `available=false`（⛔ 不是缺成员）：HUD 要靠
+    //     "成员在不在"区分"宿主没接桥"与"接桥但没 appdata"（两种状态行文案）。
+    if (ok) {
+        Value config = makeConfigObject(impl, /*render=*/true);
+        if (config.isException()) {
+            qjs::clearException(ctx);
+            ok = false;
+        } else {
+            ok = defineReadOnly(ctx, obj.raw(), "config", std::move(config));
+        }
+    }
     if (!ok) return false;
     *out = std::move(obj);
     return true;
@@ -3336,7 +3354,8 @@ JSValue jsCtxLog(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueCon
 JSValue jsCtxProfileBegin(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        // ★ C2b 复审 F2：`profile` 是 **Run 回调**的出口（RenderCtx 没有它）⇒ 判"正在回调"，
+        // ★ C2b 复审 F2：`profile` 是 **Run 回调**的出口（RenderCtx 有自己的一份
+        //   `jsRenderProfileBegin`）⇒ 判"正在回调"，
         //   ⛔ 只判 `host != nullptr`（render 期 host 也非空，那样"存下来的 RunCtx"就能用）。
         if (host == nullptr || !host->inCallback()) {
             return JS_ThrowTypeError(ctx, "ctx.profile.begin: 不在插件回调里");
@@ -3566,7 +3585,10 @@ JSValue jsCtxAppDataStat(JSContext* ctx, JSValueConst /*this_val*/, int argc, JS
 // 合同：`docs/03-emulator/plugin-runtime.md` §4.5 / §4.6 / §6 行 41–42；值类型与上限在
 //       `runtime/config.h`（语言无关），宿主实现 = `src/plugin/plugin_config.cpp`（PIMPL）。
 //
-// ★ 为什么 `ctx.config` 只装在 RunCtx：render 不做文件 I/O（与 `ctx.appdata` 同一条）。
+// ★ `ctx.config` 的宿主实现只有一份：RunCtx（`inCallback()`）与两条渲染面（`host.config` /
+//   `RenderCtx.config`，`__render` + current/builder）的门都在 `configCall`。
+//   render 可经宿主桥写 `plugin-config.json`，仍⛔ 不做 guest 写 / 任意路径 I/O
+//   （`ctx.appdata` 仍只 RunCtx）。
 // ★ 为什么值走**中立树**而不是 JSON 字符串：沙箱里没有 `JSON`（`JS_NewContextRaw` + BaseObjects），
 //   而且"原生 JS 值"是 d.ts 的合同；转换只在这里（nlohmann 在 plugin_config.cpp 的 PIMPL 里）。
 // ★ 每个宿主调用都包 `HostPause`（同 `ctx.appdata.stat`）：宿主段不计用户 2 ms。
@@ -3784,9 +3806,10 @@ JSValue throwPlainError(JSContext* ctx, const std::string& message) {
 // `domain` 对象把域 id 藏在**不可枚举**的 `__domain` 属性里（每次 `domain(id)` 新建一个对象；
 // 同一个 store 共享）。⛔ 不用 `JS_NewCFunctionData`：它没有公开的 data 读口。
 constexpr const char* kConfigDomainProp = "__domain";
-// ★ D2：渲染面的不可枚举标记（RunCtx 的对象**没有**它）。经典 `host.config` 的 config / domain
-//   对象带 `__render` ⇒ trampoline 走"正在 render"那条门；RunCtx 的走 `inCallback()`。
-//   ⛔ 不做帧令牌：经典 `host` 是**全局对象**（跨帧合法），而 `RenderCtx` 已收窄为没有 `config`。
+// ★ D2：渲染面的不可枚举标记（RunCtx 的对象**没有**它）。经典 `host.config` 与
+//   `RenderCtx.config` 的 config / domain 对象都带 `__render` ⇒ trampoline 走"正在 render"那条门；
+//   RunCtx 的走 `inCallback()`。⛔ 不做帧令牌：经典 `host` 是**全局对象**（跨帧合法），
+//   而 `__render` 挡的是"把对象存下来、离开 render 再调"（两条渲染面同一口径）。
 constexpr const char* kConfigRenderProp = "__render";
 
 // 在 config / domain 对象上装渲染标记（不可枚举、不可写、不可配置）。
@@ -3878,7 +3901,8 @@ JSValue makeConfigDomain(JSContext* ctx, const std::string& domain, bool render)
     return obj.take();
 }
 
-// `render=false` ⇒ RunCtx 的 `ctx.config`；`render=true` ⇒ 经典回退 HUD 的 `host.config`。
+// `render=false` ⇒ RunCtx 的 `ctx.config`；`render=true` ⇒ 经典回退 HUD 的 `host.config`
+// **与** `RenderCtx.config`（★ 2026-11-26：两条渲染面共用这一份，⛔ 不复制第二套）。
 Value makeConfigObject(Impl& impl, bool render) {
     JSContext* ctx = impl.ctx;
     Value obj = qjs::newObject(ctx);
@@ -3894,6 +3918,8 @@ Value makeConfigObject(Impl& impl, bool render) {
 
 // 经典回退 HUD 的 `host.config`（D2）：**getter**，每次访问按"这一帧有没有桥"现算。
 // ★ 没有桥 / 不在 render ⇒ `undefined`（⛔ 不抛：HUD 每帧都要读，optional 能力不能把叠层打黑）。
+// ★ 与 `RenderCtx.config` 的区别只在**缺桥时**：`RenderCtx.config` 恒是一个对象
+//   （`available=false`），因为它是 d.ts 的成员、HUD 要能区分"成员缺失"与"接桥但没 appdata"。
 JSValue jsHostConfig(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/, JSValueConst* /*argv*/) {
     try {
         Impl* impl = implOf(ctx);
@@ -4231,7 +4257,8 @@ private:
         impl.ops = 0;
         impl.overran = false;
         // ★ D2：把本帧的 config 桥缓存到 `render_bridge`（flushConfig 在 render 返回之后还要用它
-        //   —— 那时 current / call_host 已经复位）。经典回退 HUD 的 `host.config` 是唯一消费者。
+        //   —— 那时 current / call_host 已经复位）。消费者 = 经典 `host.config` **与**
+        //   `RenderCtx.config`（两条渲染面同一份）。
         impl.render_bridge = configBridgeFor(impl, /*render=*/true);
         // ★ render 的预算是 `setBudget` 给的**墙钟** deadline（`deadline_ns`）⇒ 这里必须清掉
         //   上一次回调留下的 CPU deadline（否则过期的 CPU deadline 会让 render 第一次中断就误判）。

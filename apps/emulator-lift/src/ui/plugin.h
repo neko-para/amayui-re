@@ -135,12 +135,13 @@ public:
     // ★ 没有 `appDataWired()`：`ctx.appdata` 在 RunCtx 里**恒在**（普通对象），没接根时
     //   `available=false` + `path=null` + `stat` 一律 `no_appdata`（⛔ 不"有但抛"，也⛔ 不静默 no-op）。
     // ★ `stat` 的宿主段要包 `HostPause`（宿主 I/O 不计进用户 2 ms；见 `script_quickjs.cpp`）。
-    // ★ ⛔ 不进 `RenderCtx`（精确成员表；render 不做 I/O）。
+    // ★ ⛔ 不进 `RenderCtx`（没有这个成员；render 只经 config 桥写 `plugin-config.json`，
+    //   不碰 appdata 子树 / 任意路径 I/O）。
     virtual bool appDataAvailable() const = 0;
     virtual std::string appDataPath() const = 0;  // 空串 = null（不可用）
     virtual lift::plugin::AppDataStat appDataStat(const std::string& rel) = 0;
 
-    // ---- Config（同步宿主 I/O；**只 RunCtx** 的 `ctx.config`）----
+    // ---- Config（同步宿主 I/O；**`RunCtx` 与 `RenderCtx` 都有** `ctx.config`）----
     // ★ `ctx.config` 的形状 = `{ available, domain(id) }`；域对象 =
     //   `{ get(key, fallback?), has(key), set(key, value), delete(key), all() }`（d.ts 的
     //   `ConfigApi` / `ConfigDomain` / `ConfigReceipt`）。
@@ -150,9 +151,11 @@ public:
     //   各 flush 一次（原子替换）；校验错误（域 id / key / 值类型 / 超限 / 非法 UTF-8）由宿主返回
     //   false + `why` ⇒ JS 侧 TypeError；`ConfigReceipt.applied` = **内存已改**（⛔ 不是"已落盘"）。
     // ★ 值的实现面只有一份 = `lift::plugin::ConfigBridge`（`runtime/config.h`）：
-    //   RunCtx 的 `ctx.config` 走**这里**，经典回退 HUD 的 `host.config` 走 `UiHostOps::config`
-    //   （同一个桥、同一份 JS trampoline；D2，2026-11-25）。★ **`RenderCtx` 没有 `config`**
-    //   （父级同日收窄：`--overlay` 预设的 hud 没有 `start`，加它只买到"下一轮的值"）。
+    //   RunCtx 的 `ctx.config` 走**这里**；两条渲染面（经典 `host.config` 与 **`RenderCtx.config`**）
+    //   走 `UiHostOps::config`（同一个桥、同一份 `makeConfigObject(impl, /*render=*/true)`）。
+    //   ★ 2026-11-26 父级裁决：`config` **加回 `RenderCtx`**（7→8 成员）—— 它挡住 `--overlay`
+    //   下最基本的设置页 / 预配置；render 可经宿主桥写 `plugin-config.json`，仍⛔ 不做 guest 写 /
+    //   任意路径 I/O（`ctx.appdata` 仍只 RunCtx）。
     //   nullptr = 没接桥 ⇒ RunCtx 里调 `domain()` 是 TypeError（⛔ 不是静默 no-op）。
     virtual lift::plugin::ConfigBridge* config() { return nullptr; }
 

@@ -201,7 +201,7 @@ public:
     lift::plugin::ConfigValue all(const std::string& domain) override { return config_.all(domain); }
     void flushIfDirty(std::string* warn) override { config_.flushIfDirty(warn); }
     // `PluginCallHost::config()`：RunCtx 的 `ctx.config` 来路（与 `UiHostOps::config` 指向**同一个**
-    //   桥，只是两个面各有一条取用路径；`RenderCtx` 没有 `config`）。
+    //   桥，只是两个面各有一条取用路径；两条渲染面 = 经典 `host.config` + `RenderCtx.config`）。
     lift::plugin::ConfigBridge* config() override { return this; }
     lift::plugin::Trigger makeAfterScript(const std::string& name, const std::string& script,
                                          lift::plugin::TriggerMode mode, std::uint32_t max_fires,

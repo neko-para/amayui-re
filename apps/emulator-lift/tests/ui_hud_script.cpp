@@ -25,7 +25,8 @@
 //      红了 ⇒ PROFILE 要么切不过来，要么每帧都切（当电平用）。
 //   ⑥ **设置入口（D4）**：点 `settings` 且 `h.config` 可用 ⇒ **该帧只有页面元素**（背板 `settings.bg`
 //      是 elements[0]、面板/`settings…` 行都不画），`BACK`（`settings.back`）后回到 HUD；
-//      `h.config` 不可用（`undefined`）⇒ **仍画 HUD** + 状态行 `settings: 没有 appdata`；
+//      `h.config` **缺失**（`undefined`）⇒ **仍画 HUD** + 状态行 `settings: 设置不可用`；
+//      桥在但 `available !== true` ⇒ `settings: 没有 appdata`（两种原因分开写）；
 //      config 在同一脚本实例里改回可用 ⇒ 那句状态**清掉**（不点也对）。
 //   ⑦ **PROFILE 按钮（切片 3）**：可见时标签 `PROFILE` 是 14px / kit `idle.fg`；★ "HUD 行"的判据
 //      收窄成 `Text && font_size==16 && color==FG` —— ⛔ 不 blanket 跳过所有非 16px 文本：
@@ -520,7 +521,8 @@ void caseProfileToggle(lift::ui::ScriptRuntime& runtime, const std::string& sour
 
 // ---------------------------------------------------------------------------------------
 // ⑥ 设置入口（D4）：最后一行 `settings…` + 透明命中 Rect；点击开二级页；BACK 回 HUD；
-//   `h.config` 不可用 ⇒ 不打开 + `settings: 没有 appdata`（同一个脚本实例改回来才清）。
+//   `h.config` 缺失 ⇒ 不打开 + `settings: 设置不可用`；可用但 `available=false` ⇒ `settings: 没有 appdata`
+//   （同一个脚本实例改回来才清）。
 // ---------------------------------------------------------------------------------------
 void caseSettingsEntry(lift::ui::ScriptRuntime& runtime, const std::string& source, const std::string& path,
                        lift::FontEngine* font) {
@@ -554,7 +556,7 @@ void caseSettingsEntry(lift::ui::ScriptRuntime& runtime, const std::string& sour
         expectNoKey(b, "settings.bg", "没有 config 时不画设置页");
         const std::vector<std::string> hud = hudLinesOf(b);
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hud.size()), 2);
-        expectLine(hud, 0, "settings: 没有 appdata");
+        expectLine(hud, 0, "settings: 设置不可用");
         expectLine(hud, 1, "settings…");
         // 设置入口仍是最后一行、仍可命中。
         expectRect(b, "settings", "设置入口的透明命中 Rect");
@@ -574,7 +576,7 @@ void caseSettingsEntry(lift::ui::ScriptRuntime& runtime, const std::string& sour
         const std::vector<std::string> hud = hudLinesOf(b);
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hud.size()), 1);
         expectLine(hud, 0, "settings…");
-        expectNoText(b, "settings: 没有 appdata", "config 改回可用 ⇒ 状态清掉");
+        expectNoText(b, "settings: 设置不可用", "config 改回可用 ⇒ 状态清掉");
     }
 
     // ③ 点 settings 且 config 可用 ⇒ **该帧只有页面元素**（背板 = elements[0]），HUD 行不画。

@@ -1,13 +1,15 @@
 // C2b/S2 夹具 · `plugin/render-surface`：`RenderCtx` 的成员表 = d.ts 的 `RenderCtx` **减 `run`**（C5）。
 //
 // 判据（红了意味着什么）：形状与 d.ts 漂了 ——
-//   · **多**一个成员（把 RunCtx 的写面带进 render：edit/input/config，或 Run 语境的 state/now/…）；
-//   · **少**一个成员（插件写不出来：ui/draw/read/game/params/log，或 S2 的 profile）；
+//   · **多**一个成员（把 RunCtx 的写面带进 render：edit/input，或 Run 语境的 state/now/…）；
+//   · **少**一个成员（插件写不出来：ui/draw/read/game/params/log/profile/config）；
 //   · `read.frameHash` 又"有值"了（D-C2-6：C2 **不安装** ⇒ 必须是 undefined）；
 //   · S2 的 `game` 读数 getter（frame 恒有；fps/script/worst/click/hover/active/overlayKeySeq
-//     无源 ⇒ undefined）与 `profile.begin/end` 缺失。
-// ★ 2026-11-25 父级收窄：`config` **不在** `RenderCtx`（仍恰好 7 成员）⇒ 它在 FORBIDDEN 里；
-//   要 config 的是经典回退 HUD 的 `host.config`（`ui-script-quickjs/host-config` 判）。
+//     无源 ⇒ undefined）与 `profile.begin/end` 缺失；
+//   · `config` 的形状 / 读写面漂了（2026-11-26 加回：第 8 个成员）。
+// ★ 2026-11-26 父级裁决：`config` **加回** `RenderCtx`（7→8）；它与经典 `host.config` 同一份
+//   实现（`makeConfigObject(impl, /*render=*/true)`）。本用例由 C++ 侧给一个**临时 appdata**
+//   + 真 `PluginHost` 的 config 桥 ⇒ 这里能断言"可读可写、回执 `{applied}`"，而不只是形状。
 // ★ `do-nothing` 地成功也算过 —— 但这个夹具**只在形状对时**不抛；宿主侧判据是 render 返回 true。
 const FORBIDDEN = [
     "edit",
@@ -15,7 +17,6 @@ const FORBIDDEN = [
     "trigger",
     "state",
     "now",
-    "config",
     "fail",
     "finish",
     "quit",
@@ -30,7 +31,7 @@ const plugin = {
         const bad = [];
         // ★ 精确成员表：多一个 / 少一个都红（`Object.keys` 是这个判据的唯一来路）。
         const keys = Object.keys(ctx).sort().join(",");
-        if (keys !== "draw,game,log,params,profile,read,ui") bad.push("keys:" + keys);
+        if (keys !== "config,draw,game,log,params,profile,read,ui") bad.push("keys:" + keys);
         for (const key of FORBIDDEN) {
             if (typeof ctx[key] !== "undefined") bad.push("present:" + key);
         }
@@ -52,6 +53,33 @@ const plugin = {
         if (ctx.game.frame !== 0) bad.push("game.frame:" + String(ctx.game.frame));
         for (const key of ["fps", "script", "worst", "click", "hover", "active", "overlayKeySeq"]) {
             if (typeof ctx.game[key] !== "undefined") bad.push("game." + key + ":" + String(ctx.game[key]));
+        }
+        // ---- config（★ 2026-11-26 加回：`{available, domain(id)}`）----
+        if (typeof ctx.config.available !== "boolean") {
+            bad.push("config.available:" + typeof ctx.config.available);
+        }
+        if (typeof ctx.config.domain !== "function") {
+            bad.push("missing:config.domain");
+        } else if (ctx.config.available !== true) {
+            // 本用例的 C++ 侧给了临时 appdata + 真桥 ⇒ 这里必须是 true（否则"可写"那半永远不跑）。
+            bad.push("config.available:" + String(ctx.config.available));
+        } else {
+            // 宿主给的是真桥（临时 appdata）⇒ 逐个方法 + 一次写-读-删往返。
+            const dom = ctx.config.domain("render.surface");
+            for (const key of ["get", "has", "set", "delete", "all"]) {
+                if (typeof dom[key] !== "function") bad.push("missing:config.domain()." + key);
+            }
+            const receipt = dom.set("probe", 7);
+            if (receipt === null || typeof receipt !== "object" || receipt.applied !== true) {
+                bad.push("config.set.applied:" + String(receipt === null ? receipt : receipt.applied));
+            }
+            if (dom.get("probe") !== 7) bad.push("config.get:" + String(dom.get("probe")));
+            if (dom.has("probe") !== true) bad.push("config.has");
+            const all = dom.all();
+            if (all === null || typeof all !== "object" || all.probe !== 7) {
+                bad.push("config.all:" + String(all === null ? all : all.probe));
+            }
+            if (dom.delete("probe") !== true) bad.push("config.delete");
         }
         // ---- ui / params / log ----
         for (const key of ["show", "hide", "set", "visible", "get"]) {
