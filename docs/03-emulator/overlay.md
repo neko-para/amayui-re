@@ -56,7 +56,7 @@
 | # | 裁决 | 边界 / 理由 |
 |---|---|---|
 | D1 | **一个 host + 同一套 API**：内置 HUD 与将来的"游戏内小窗口"是**同一类插件** —— 同一个 `UiHost`、同一份 display list、同一条输入路由 | 用户口径。⛔ 不为 HUD 单开一条渲染 / 输入路径 |
-| D2 | **插件化**：一个插件 = 一个脚本文件（`apps/emulator-lift/scripts/ui/<name>.js`）；`--ui <path>`（可重复）、`--ui-input=consume\|pass`、`--ui-watch`（默认关）、`--ui-strict` | 编译进 C++ 的固定 HUD 不能扩展；热重载默认不做任何 stat。★ **`--ui-input=consume\|pass` 已实现（S9）**：缺省 **consume**；也收分离写法；它是**窗口参数**（`--present headless` 与 `--overlay` 走同一条 `present_window_flag` 拒绝）；非法值 `exit 2` 并点名合法值。★ `--ui-watch` / `--ui-strict` 仍未实现 |
+| D2 | **插件化**：一个插件 = 一个脚本文件（`apps/emulator-lift/scripts/ui/<name>.js`）；`--ui <path>`（可重复；★ S1 起**已弃用** ⇒ `--plugin <id|path>`）、`--ui-input=consume\|pass`、`--ui-watch`（默认关）、`--ui-strict` | 编译进 C++ 的固定 HUD 不能扩展；热重载默认不做任何 stat。★ **`--ui-input=consume\|pass` 已实现（S9）**：缺省 **consume**；也收分离写法；它是**窗口参数**（`--present headless` 与 `--overlay` 走同一条 `present_window_flag` 拒绝）；非法值 `exit 2` 并点名合法值。★ `--ui-watch` / `--ui-strict` 仍未实现 |
 | D3 | **语言 = JS/TS + QuickJS-ng v0.18.0**（逐字节原样 vendor，见 `third_party/quickjs-ng/README.md`；MIT） | 选型只看硬约束：可裁剪、可中断、迭代顺序按规范。Lua 只作对照（⛔ 不是方案）：longjmp 跨 C++ 帧、hash seed 每进程随机、x64-windows dynamic 要带 DLL |
 | D4 | **每帧 display list**（立即模式）：脚本只产出元素描述，宿主独占校验 / 求值 / 布局 / 命中 / 光栅 / 合成；宿主只缓存**上一帧** resolved list 用于点击 | 没有跨帧控件树、脏矩形与 GPU 资源生命周期；resize / 缩放天然同步 |
 | D5 | **坐标**：声明用 **1280×720 参考系**，合成用**窗口像素**（letterbox 之后）；等比 `s = min(pic_w/1280, pic_h/720)`、画面内居中；文字按最终像素重绘（freetype），⛔ 不放大位图 | 两条路径统一到窗口像素；`--scale` 只要仍走 `cursor_map.h:letterboxFor`，UI 零改动 |
@@ -234,7 +234,9 @@ win32 取。
 
 ★ **M2a 已落地（2026-11-18；M2a 本切片只做 QuickJS 宿主 + HUD 迁脚本；命中 / 捕获 / 点击路由在切片 2 落地，见下）**：
 `--overlay` 的 HUD 由**外置** `scripts/ui/hud.js` 经 QuickJS 同步产出；`--ui <path>` 打开任意脚本
-（显式优先、隐含 overlay）；`game` 注入 `frame / fps / mouse{x,y,buttons?} / script / worst` + 按需方法
+（显式优先、隐含 overlay）；★ **S1（2026-11-25）起 `--ui` 已弃用**：仍可用、仍只吃路径、仍隐含
+`--overlay`，但每次给都会打一行 `emulator-lift-aot: --ui 已弃用，请改用 --plugin <path>`；
+新写法是 `--plugin <id|path>`（`--plugin <path>` 装载同一份脚本，⛔ 不隐含 overlay）。`game` 注入 `frame / fps / mouse{x,y,buttons?} / script / worst` + 按需方法
 `local_frames()`（帧区 40 槽的只读视图，top-first，`top = slot == cur`；证据
 `docs/03-emulator/ui-frames.md`；HUD 的 `script` 行取 `top=true` 的项（没有 top 就回退 `game.script`））；`raster` / `present` 两行**已删**；底 `#101820CC`（80% 不透明，
 renderer 路径 `SDL_BLENDMODE_BLEND`，直出也混合（D 单，`SDL_DrawGPUPrimitives`；win32 未验证））；旧 `OverlayState` / `OverlayStatus` /

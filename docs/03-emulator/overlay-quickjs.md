@@ -165,7 +165,8 @@ class UiScript {   // init / update(dt,frame) / render(UiBuilder&) / on_click / 
   ① `<exe 目录>/scripts/ui/hud.js`（发行布局）→ ② `LIFT_UI_SCRIPT_DIR/hud.js`（开发回退，
   CMake 把源码目录以 `target_compile_definitions(... PUBLIC ...)` 注入）→ ③ 硬错（err 点名两个路径）。
 - `--ui <path>` 只吃 `.js`；显式优先且隐含 `--overlay`。启动期校验"文件在 + 编译过 + `render` 是函数"，
-  失败 = `exit 2` + `<path>:<行>:<列>`。
+  失败 = `exit 2` + `<path>:<行>:<列>`。★ **S1 起 `--ui` 已弃用**（一行 deprecation，行为不变；
+  新入口 `--plugin <id|path>`）。
 - `scripts/ui/ui.d.ts` 是作者声明（`declare const ui` / `game` / `host`，含 `game.local_frames()` 与
   module 的 `import` 说明）；
   **不参与构建、不进 `pnpm typecheck`**。同目录的 `tsconfig.json` 是**编辑器 / 手动检查**用的

@@ -5592,7 +5592,8 @@ const MUTATIONS = [
     buildTarget: 'lift-plugin-resolve',
     what:
       '`resolvePluginSpec` 的命中判据 `size() == 1` → `!empty()`（两根都命中时静默取第一个）⇒ ' +
-      '`resolve/id-both-roots-ambiguous` 红（`status` 不再是 `Ambiguous`、`hits` 只剩 1 条）',
+      '`resolve/id-both-roots-ambiguous` 红：`status` 不再是 `Ambiguous`（变成 `Ok` 且 `path` = 第一个命中；' +
+      '`hits` 仍有 2 条 —— 红在**分类**，不在命中计数）',
   },
 
   // ── BUG-38：屏幕→NDC 的 **D3D9 半像素**（`kD3d9PixelCenterBias`）──────────────────────

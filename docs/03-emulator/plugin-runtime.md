@@ -120,7 +120,7 @@ callback 模型把这两件事都移到 JS：
 ### 1.1 三个入口的真实代码面
 
 - **`--input-plan`（当前 = 一个 plan 状态机）**：
-  - 入口/帮助 `aot_main.cpp:90-306`；载入 `728-751`。
+  - 入口/帮助 `aot_main.cpp:91-309`；载入 `730-762`。
   - 语法/门/完成度：`recipe.h:41-55`（注释写“九条”，实际 `StepKind` 10 项，见 §1.4）、
     `70-81`；解析器 `recipe.cpp:318-503`。
   - 推进/写预算/闸门：`input_plan.cpp:186-217`（`atPoint` 是唯一施加口）、
@@ -135,7 +135,7 @@ callback 模型把这两件事都移到 JS：
   - `global-get/set` 在块边界执行（`control_ws.cpp:1470-1507`），不要求暂停（`1475`）。
   - `wait` 是 **`emu-ctl` 客户端糖**（= `resume --for-ms`，`tools/lib/emu-ctl.mjs:799`），
     **不是 `ControlOp`**；`hello`/`caps=` 只有 9 项。
-  - `caps=` 启动 readout 现状只有 6 项（`aot_main.cpp:1545`，漏 `move/global-get/global-set`）。
+  - `caps=` 启动 readout 现状只有 6 项（`aot_main.cpp:1560`，漏 `move/global-get/global-set`）。
 - **QJS binding（overlay）**：
   - `--overlay`/`--ui`（`aot_main.cpp:221-233`）；`drawOverlay` 在 Present 跑
     （`present_sdl.cpp:521-609`）；只读 `ui/game/host`（`script_quickjs.cpp:892-981`）。
@@ -177,7 +177,7 @@ callback 模型把这两件事都移到 JS：
 | **G4** | plan 需要 emulator 内的状态机 + 调试图元 | `input_plan.cpp:186-217`、`781-810`；`recipe.h:169-180` | 每个 plan 入口都要复刻 step/gate/pending/exit5；用户点名的成本 |
 | **G5** | recipe 无状态载体（读改写） | `recipe.h:28-30`；`Step` 无变量 | `global-get` trace-only 不解决问题；`global-set-bitor` 是怪原语 |
 | **G6** | 无 owner/回执/预算的统一模型 | `input_plan.h:430-458`；`control_ws.cpp:548-559` | 脚本/控制层/plan 的 hold 释放、失败、入队回执各自为政 |
-| **G7** | 三处能力清单会漂 | `hello` 9（`control_ws.cpp:490`）；`caps=` 6（`aot_main.cpp:1545`）；`control.h:13-21` 注释漏 `move`；`ui.d.ts` 无守卫 | “只有某一个入口有”再次发生 |
+| **G7** | 三处能力清单会漂 | `hello` 9（`control_ws.cpp:490`）；`caps=` 6（`aot_main.cpp:1560`）；`control.h:13-21` 注释漏 `move`；`ui.d.ts` 无守卫 | “只有某一个入口有”再次发生 |
 | **G8** | 复用/参数化只在 recipe 外 | 官方 `.plan` 重复加载前缀（`save04-fault.plan:17-26`、`sc0000-wipe.plan:19-28`）；文档教 `cat 前缀 + tail`（`SAVE.md:52`） | 复制/行号引用；无法 `loadSave(slot)` |
 
 ### 1.4 注释声称 vs 代码实际
@@ -784,9 +784,10 @@ struct Context {
 `emulator-lift-aot: --plugin id=<id> ⇒ <绝对路径>`，再用绝对路径交给 `initFromFile`（一次性，⛔ 不周期）。
 ★ `--ui` 本轮只加一行 deprecation（`emulator-lift-aot: --ui 已弃用，请改用 --plugin <path>`），
 行为**逐字不变**（仍只吃路径、仍隐含 `--overlay`、仍是窗口参数）；下一轮 S2/S3 再删。
+★ 显式空串 `--plugin ""` ⇒ **exit 2**（空串不是 id，也不是可装载路径；⛔ 不静默当成"没有插件"）。
 
 **窗口档的 `render` = adopt 进已有叠层 host**（C2b-2）：`--present window/auto` + 有 `render`
-⇒ `aot_main.cpp:1385-1420` 的 ⑤' 调 `SdlWindow::adoptOverlayScript`（`present_sdl.cpp:543-568`），
+⇒ `aot_main.cpp:1395-1429` 的 ⑤' 调 `SdlWindow::adoptOverlayScript`（`present_sdl.cpp:543-568`），
 复用**同一个**叠层 host 的 `presentUi` / 宿主字体 / 画布 / 命中表 / `--ui-input` 注入 router；
 每帧仍走同一条 `drawOverlay`（`present_sdl.cpp:596-691`）管线。⛔ 不新开第二套 UI 运行时 / 第二个 QJS context。
 `--plugin`（有 `render`）**不隐含** `--overlay`：headless 照样能跑（D-C2-5）；窗口档由 adopt 打开叠层。
@@ -1195,7 +1196,7 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
 - **overlay 不再是“另一种插件”**：`--overlay/--ui` 只是“启用 render + 显示”的插件用法；
   它和 Run 共用同一个运行时、同一套 `ctx.edit/input/read/trigger/run`。
 - **窗口档 = adopt 进已有叠层 host**（C2b-2）：`--present window/auto` 且插件有 `render` ⇒ 由
-  `aot_main.cpp:1385-1420` 的 ⑤' 调 `SdlWindow::adoptOverlayScript`；复用同一份 `presentUi` / 宿主字体 /
+  `aot_main.cpp:1395-1429` 的 ⑤' 调 `SdlWindow::adoptOverlayScript`；复用同一份 `presentUi` / 宿主字体 /
   画布 / 命中表 / `--ui-input` 注入 router，每帧仍走同一条 `drawOverlay`。⛔ 不新开第二个 QJS context。
   `--overlay` 同时给时，hud.js 由 `SdlWindow::init` **先装**、adopt 成功后再 `ui_script.reset()` /
   `ui_runtime.reset()` **后弃**（结构上仍需 hud.js / kit.js 在场）；一次 stderr 说明取代（⛔ 不静默）。
@@ -1220,7 +1221,7 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
 - **control 的 9 项不变**：`pause/resume/sample/screenshot/move/click/global-get/global-set/quit`
   （`control_ws.cpp:488-491`）。`Wait` 是 `emu-ctl` 客户端糖（= `resume --for-ms`，`tools/lib/emu-ctl.mjs:799`），
   **不是 `ControlOp`**；`hello`/`caps=`/`endpoint-surface` 精确 9 项。`caps=` 现状 6 项
-  （`aot_main.cpp:1545`）是已知漂移，C0 修成 9（readout 修正，guest 行为不变）。
+  （`aot_main.cpp:1560`）是已知漂移，C0 修成 9（readout 修正，guest 行为不变）。
 - **mapping 表**（名字不 1:1）：
 
 | 能力 | 文本 recipe 前端 | control op | overlay `.d.ts` | 插件（单运行时） |
@@ -1309,7 +1310,7 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
   `runtime/engine_read.h`（`EngineRead`）、`runtime/host_action.h`（`HostAction`）、
   `runtime/control_bus.h`（`ControlBus` + `RunnerControl`）、
   `runtime/context.h`（只读 Context）、`runtime/budget.h`、`runtime/capability.h`（能力表）。
-- `control_ws.cpp`：`hello.capabilities` 从表生成（9 项，`488-491`）；`aot_main.cpp:1545` 的 `caps=`
+- `control_ws.cpp`：`hello.capabilities` 从表生成（9 项，`488-491`）；`aot_main.cpp:1560` 的 `caps=`
   同表生成（6→9，readout 修正）；`control.h:13-21` 注释标“非真源”或一起生成。
 - 新增 `tools/test/capability-matrix.test.mjs`〔拟名·新增〕：四上下文/`no:<token>`/`planned:<Qn>`；
   `hello`/`caps=`/`endpoint-surface` 精确 9；`Wait` 是 client-sugar；mapping 表。
@@ -1782,7 +1783,7 @@ callback 链的可读性（进 `ctx.log`/设计文档）。
 | QJS 宿主 API / loader | `apps/emulator-lift/src/ui/script_quickjs.cpp:886-1063`、`1223-1287`、`1412-1459` |
 | QJS 叠层 / Present | `apps/emulator-lift/src/runtime/present_sdl.cpp:596-691`、`1240-1250` |
 | 插件 render adopt / release / 字体（C2b-2） | `apps/emulator-lift/src/runtime/present_sdl.h:208-221`；`present_sdl.cpp:528-582` |
-| 窗口档 ⑤' 装配（adopt / `exit 2` / 取代语） | `apps/emulator-lift/src/aot/aot_main.cpp:1385-1420` |
+| 窗口档 ⑤' 装配（adopt / `exit 2` / 取代语） | `apps/emulator-lift/src/aot/aot_main.cpp:1395-1429` |
 | `game.mouse().buttons` 装配 / 三键唯一源 | `apps/emulator-lift/src/ui/script_quickjs.cpp:652-690`、`:3227`；`apps/emulator-lift/src/plugin/plugin_host.cpp:104-108`；`apps/emulator-lift/src/runtime/present_sdl.cpp:612-625`、`host_window.h:181-184`、`input_device.h:84-90` |
 | QJS 预算/interrupt（含宿主暂停） | `apps/emulator-lift/src/ui/script_quickjs.cpp:107-113`、`197-212`、`253-285`、`317-329`、`1392-1395`、`3387-3390`、`3438-3447` |
 | C2c `loadSave` 库 / 参考入口 | `apps/emulator-lift/scripts/plugins/lib/save.js`（`loadSave` / `SAVE_DIR_REL` / 前置检查 / `expect`）；参考入口在**根** `apps/emulator-lift/scripts/plugins/load-save.js`（id = `load-save`） |

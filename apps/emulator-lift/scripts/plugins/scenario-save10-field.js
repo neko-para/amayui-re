@@ -40,7 +40,7 @@ const READY_TIMEOUT_MS = 60000;
 // 点完之后还要活多久才算"没崩"（宿主墙钟；这一条是**诊断判据**，不是 wait 出来的业务门）。
 const SURVIVE_MS = 8000;
 
-/** @type {import("./chains.js").Chain} */
+/** @type {import("./lib/chains.js").Chain} */
 const scenario = {
     start(ctx) {
         ctx.log("info", "scenario-save10: FIELD.BIN reached ⇒ 等主轮询体（地图就绪）");
@@ -172,7 +172,7 @@ function expectSetting(ctx, domain) {
     return out.length === 0 ? DEFAULT_EXPECT : out;
 }
 
-/** @type {import("./chains.js").Chain | null} */
+/** @type {import("./lib/chains.js").Chain | null} */
 let chain = null;
 
 /**
@@ -180,7 +180,7 @@ let chain = null;
  * ★ 2026-11-25：`ctx.config` 的读取也**只在第一次**做（每拍重读会在 2 ms 窗口里占可观测的份额）。
  *
  * @param {RunCtx} ctx
- * @returns {import("./chains.js").Chain}
+ * @returns {import("./lib/chains.js").Chain}
  */
 function chainFor(ctx) {
     if (chain !== null) return chain;

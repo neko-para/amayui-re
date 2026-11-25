@@ -91,14 +91,38 @@ PluginResolveResult resolvePluginSpec(const std::string& spec, const PluginResol
     result.id = spec;
     const std::string file_name = spec + ".js";
     // ★ 顺序 = 发行优先、开发回退（与 `--overlay` 的 hud 解析同一条口径）；⛔ 不查 `lib/`、⛔ 不递归。
+    // ★ 两个根**可能指向同一路径**（同一目录 / junction / 把 exe 放进源码 plugins 目录）⇒ 候选去重：
+    //   同一份文件不许被报成歧义（用户口径的"两根同名 ⇒ exit 2"指的是**两份不同文件**）。
+    const auto push_candidate = [&result](const std::string& candidate) {
+        for (const std::string& seen : result.searched) {
+            if (seen == candidate) return;
+        }
+        result.searched.push_back(candidate);
+    };
     if (!roots.exe_dir.empty()) {
-        result.searched.push_back(absoluteOf(candidatePath(roots.exe_dir, file_name, true)));
+        push_candidate(absoluteOf(candidatePath(roots.exe_dir, file_name, true)));
     }
     if (!roots.dev_dir.empty()) {
-        result.searched.push_back(absoluteOf(candidatePath(roots.dev_dir, file_name, false)));
+        push_candidate(absoluteOf(candidatePath(roots.dev_dir, file_name, false)));
     }
+    // ★ 命中再按**文件身份**去重（canonical 相同 = 同一份文件：符号链接 / junction / 大小写别名）：
+    //   报错文案里的"N 处"必须是 N 份**不同**文件。canonical 取不到（权限 / 不存在）⇒ 退回候选原串。
+    std::vector<fs::path> identities;
     for (const std::string& candidate : result.searched) {
-        if (isRegularFile(candidate)) result.hits.push_back(candidate);
+        if (!isRegularFile(candidate)) continue;
+        std::error_code ec;
+        fs::path identity = fs::weakly_canonical(pathFromUtf8(candidate), ec);
+        if (ec) identity = pathFromUtf8(candidate);
+        bool duplicate = false;
+        for (const fs::path& seen : identities) {
+            if (seen == identity) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) continue;
+        identities.push_back(identity);
+        result.hits.push_back(candidate);
     }
     if (result.hits.size() == 1) {
         result.path = result.hits.front();

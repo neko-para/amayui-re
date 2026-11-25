@@ -245,6 +245,8 @@ void usage() {
         "                            ★ **id 语法**：`^[A-Za-z0-9_-]{1,64}$`（文件名 stem）。\n"
         "                              含 `.` / `/` / `\\` 的写法一律当**路径**（所以 `x.js` 天然是路径，\n"
         "                              行为与旧版逐字相同：cwd 相对 / 绝对 / 装载失败 exit 2）。\n"
+        "                              ★ 显式空串（`--plugin \"\"`）⇒ exit 2：空串不是 id、也不是可装载\n"
+        "                              路径；⛔ 不静默当成\"没有插件\"。\n"
         "                            ★ **id 只查两处非递归根**（⛔ 不查 `lib/`、⛔ 不递归子目录）：\n"
         "                              ① `<exe 目录>/scripts/plugins/<id>.js`（发行）\n"
         "                              ② 编译期 `LIFT_PLUGIN_DIR/<id>.js`（开发；= 源码 scripts/plugins）\n"
@@ -734,16 +736,25 @@ int main(int argc, char** argv) {
             //   · ⛔ **不**进 `present_window_flag`（见下面的注释）。
             std::string v;
             if (!needValue("--plugin", &v)) return 2;
+            // ★ S1 复审：显式空串 ⇒ **exit 2**（⛔ 不静默当成"没有插件"）。
+            //   空串既不是 id（`^[A-Za-z0-9_-]{1,64}$` 要求至少 1 个字符）也不是可装载的路径；
+            //   旧实现会因 `plugin_path.empty()` 整块跳过 ⇒ "我明明给了 --plugin 却没生效"。
+            if (v.empty()) {
+                std::fprintf(stderr,
+                             "emulator-lift-aot: --plugin 需要 id 或路径（收到空串）⇒ exit 2"
+                             "（空串不是 id：id 只匹配 ^[A-Za-z0-9_-]{1,64}$；路径见 --help）\n");
+                return 2;
+            }
             if (!plugin_path.empty() && plugin_path != v) {
                 std::fprintf(stderr,
-                             "emulator-lift-aot: --plugin 给了两份不同的路径"
+                             "emulator-lift-aot: --plugin 给了两份不同的 spec"
                              "（%s / %s）⇒ exit 2（⛔ 不静默只取一个）\n",
                              plugin_path.c_str(), v.c_str());
                 return 2;
             }
             if (!ui_script.empty() && ui_script != v) {
                 std::fprintf(stderr,
-                             "emulator-lift-aot: --plugin 与 --ui 是同一个字段，但给了两份不同的路径"
+                             "emulator-lift-aot: --plugin 与 --ui 是同一个字段，但给了两份不同的 spec"
                              "（--plugin %s / --ui %s）⇒ exit 2\n",
                              v.c_str(), ui_script.c_str());
                 return 2;
@@ -896,7 +907,7 @@ int main(int argc, char** argv) {
         // ★ F6：`--plugin-param` 是给插件的 ⇒ 没有 `--plugin` 时它**没有消费者**。
         //   ⛔ 不静默忽略（那会让"我明明传了参数、插件却没收到"变成无症状的错）。
         std::fprintf(stderr,
-                     "emulator-lift-aot: --plugin-param 需要同时给 --plugin <path>"
+                     "emulator-lift-aot: --plugin-param 需要同时给 --plugin <id|path>"
                      "（收到 %zu 个参数但没有插件）⇒ exit 2\n",
                      plugin_params.size());
         return 2;
@@ -911,6 +922,10 @@ int main(int argc, char** argv) {
     // =====================================================================================
     if (!plugin_path.empty()) {
         lift::plugin::PluginResolveRoots roots;
+        // ★ argv[0] 不含分隔符（PATH 搜索 / 裸命令名）⇒ `exeDirOf` 返回空 ⇒ **发行根整根跳过**，
+        //   只查 `LIFT_PLUGIN_DIR`（开发回退；它由 CMake 注入、与 cwd 无关）。
+        //   ⛔ 不回退到 cwd（那会让"从哪跑就装哪个脚本"变成隐变量）；纯解析器的
+        //   `resolve/id-empty-exe-root` 用例钉住"空 exe 根 = 只剩 dev 根"。
         roots.exe_dir = exeDirOf(args.empty() ? std::string() : args[0]);
         roots.dev_dir = LIFT_PLUGIN_DIR;
         const lift::plugin::PluginResolveResult resolved =

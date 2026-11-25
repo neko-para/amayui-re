@@ -309,7 +309,8 @@ rg -n -U 'input::(mouseMove|mouseButton|mouseWheel|key)\(' apps/emulator-lift/sr
 - `--ui-input=consume|pass`（也收分离形式 `--ui-input consume|pass`）；缺省 **consume**；
   非法值 `exit 2` 并点名合法值。值域唯一一份在 `runtime/ui_input.h` 的 `parseUiInputMode`。
 - 它是**窗口参数**：`--present headless` 与 `--overlay` 走同一条 `present_window_flag` 拒绝。
-  没有 `--overlay` / `--ui` 时它是无害 no-op（没有 router，两种模式都不产生行为）。
+  没有 `--overlay` / `--ui` 时它是无害 no-op（没有 router，两种模式都不产生行为）。★ S1 起 `--ui`
+  已弃用（一行 deprecation，行为不变）；叠层 / 插件的入口见 `--plugin <id|path>`。
 - `UiInputRouter`（`runtime/ui_input.h`，SDL-free）只有一条：
   `virtual bool routeInjectedPointer(UiPointerPhase, MouseButton, int client_x, int client_y)`。
   返回 true = 叠层吞掉（调用方**不得**调用 `input::*`）；`client_x/y` = **guest 客户区**。

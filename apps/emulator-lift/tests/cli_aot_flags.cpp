@@ -86,6 +86,15 @@ std::size_t countOccurrences(const std::string& hay, const std::string& needle) 
     return n;
 }
 
+/** `/` 与 `\` 统一成 `/`（**只用于断言路径子串**；⛔ 不参与任何真实路径计算）。 */
+std::string normalizedSeparators(const std::string& text) {
+    std::string out = text;
+    for (char& c : out) {
+        if (c == '\\') c = '/';
+    }
+    return out;
+}
+
 // ★ ④ 用来认"那条一次性说明"的**唯一**标记：说明的开头。⛔ 不用泛词（`--sound` 会命中 help /
 //   其它文案）—— 标记必须只属于这句话，否则"恰好一次"这条断言会变成恒真。
 const char* const kSoundNoticeMarker = "--sound 已接受";
@@ -231,11 +240,31 @@ int main(int argc, char** argv) {
         LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
         LIFT_CHECK(r.err.find("找不到 id") != std::string::npos);
         LIFT_CHECK(r.err.find("does-not-exist") != std::string::npos);
-        // 每个候选都要点名（`<id>.js` + 两处根）⇒ 证明 `exeDir` / `LIFT_PLUGIN_DIR` 真的传进去了。
-        LIFT_CHECK(r.err.find("does-not-exist.js") != std::string::npos);
-        LIFT_CHECK(r.err.find("scripts/plugins") != std::string::npos ||
-                   r.err.find("scripts\\plugins") != std::string::npos);
+        // ★ S1 复审：两个根都要**逐字**点名（只断言"含 scripts/plugins"两条候选都满足 ⇒ 删掉
+        //   任一根仍绿）。候选行 = `<id>.js` 恰 2 次 + 发行根 / 开发根各一条绝对路径。
+        const std::string exe_candidate =
+            pathToUtf8(exe.parent_path() / "scripts" / "plugins" / "does-not-exist.js");
+        const std::string dev_candidate = pathToUtf8(fs::path(LIFT_PLUGIN_DIR) / "does-not-exist.js");
+        const std::string err_norm = normalizedSeparators(r.err);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countOccurrences(r.err, "does-not-exist.js")), 2);
+        LIFT_CHECK(err_norm.find(normalizedSeparators(exe_candidate)) != std::string::npos);
+        LIFT_CHECK(err_norm.find(normalizedSeparators(dev_candidate)) != std::string::npos);
         // 启动前拒绝 ⇒ 一行运行摘要都没有。
+        LIFT_CHECK(!hasLineStartingWith(r.out, "stop"));
+    }
+
+    // ---- ①⁰²' S1 复审：显式空串 `--plugin ""` ⇒ exit 2（⛔ 不静默当成"没有插件"）----
+    //   红线：旧实现让空 spec 整块跳过 ⇒ "我明明给了 --plugin 却没生效"；空串既不是 id 也不是
+    //   可装载路径 ⇒ 启动即拒绝并点名"空串不是 id"（合法写法 = id 或路径）。
+    g_current_case = "plugin-empty-spec";
+    {
+        const ChildResult r = runChild(exe, {"--plugin", ""}, childOptions(root));
+        LIFT_CHECK(r.started);
+        LIFT_CHECK(!r.timed_out);
+        LIFT_CHECK_EQ_U32(r.exit_code, 2u);
+        LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
+        LIFT_CHECK(r.err.find("收到空串") != std::string::npos);
+        LIFT_CHECK(r.err.find("空串不是 id") != std::string::npos);
         LIFT_CHECK(!hasLineStartingWith(r.out, "stop"));
     }
 
