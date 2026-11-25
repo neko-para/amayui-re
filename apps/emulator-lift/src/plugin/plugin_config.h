@@ -29,13 +29,14 @@ public:
 
     // `appdata_root` = **绝对宿主路径**（UTF-8；空 = 没有 `--appdata` ⇒ available=false）。
     // 读 `plugin-config.json`：不存在 ⇒ 空文档；坏 JSON / 顶层不是对象 / version != 1 /
-    // `domains` 不是对象 / 域值不是对象 / 超过字节上限 ⇒ false，`*err` 带**文件路径**（坏 JSON
-    // 还带 byte 位置）。返回 false 是**装载失败**（调用方 exit 2），与"没有 appdata"不同。
+    // `domains` 不是对象 / 域值不是对象 / **值超过深度/节点/串长上限** / 非法 UTF-8 /
+    // 超过字节上限 ⇒ false，`*err` 带**文件路径**（坏 JSON 还带 byte 位置）。返回 false 是
+    // **装载失败**（调用方 exit 2），与"没有 appdata"不同。
     bool attach(const std::string& appdata_root, std::string* err);
 
     bool available() const;
-    // 文件存在但不可写（或 appdata 根建不出文件）⇒ true：`set` / `delete` 返回
-    // `{applied:false, code:"read_only"}` / false，**不改内存**。
+    // 只读：**配置文件存在但打不开写**（attach 期试开一次）。根目录还不存在 / 文件还不存在 ⇒
+    // false（flush 会 `create_directories`；⛔ 不因为"根还没建出来"就永久只读）。
     bool readOnly() const;
     // 绝对文件路径（UTF-8；不可用 ⇒ 空串）。只用于错误消息 / 测试读数。
     const std::string& path() const;
@@ -48,8 +49,9 @@ public:
     bool get(const std::string& domain, const std::string& key, ConfigValue* out, bool* found,
              std::string* why) const;
     bool has(const std::string& domain, const std::string& key, bool* found, std::string* why) const;
-    // 写：false ⇒ 校验错误（`*why`：域 id / key / 值类型 / 深度 / 节点数 / 字符串长度）；true 时
-    // `*receipt` 是 I/O 语义（正常 `{applied:true}`；只读 / 无 appdata 走 code）。
+    // 写：false ⇒ 校验错误（`*why`：域 id / key / 值类型 / 深度 / 节点数 / 字符串长度 / UTF-8 /
+    // 域数 / 每域 key 数）；true 时 `*receipt` 是**内存态**结果 —— `applied` = 内存已改
+    // （⛔ 不代表已落盘）；只读 / 无 appdata 走 `code`。持久化失败只 `flushIfDirty` 的 warn，不回填。
     bool set(const std::string& domain, const std::string& key, const ConfigValue& value,
              ConfigReceipt* receipt, std::string* why);
     // 删：true = 真的删掉了（不存在 ⇒ false）；只读 / 无 appdata ⇒ false。

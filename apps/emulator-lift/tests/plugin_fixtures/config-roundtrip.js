@@ -87,6 +87,17 @@ const plugin = {
         expectTypeError("nan", () => d.set("nan", NaN));
         expectTypeError("undefined", () => d.set("undef", undefined));
         expectTypeError("function", () => d.set("fn", () => 1));
+        // I2：QJS 把孤立代理项编成非法 UTF-8 ⇒ 宿主 set 必须当场 TypeError（⛔ 不能放进 store 再让
+        // 写盘 dump 抛、把本进程的配置持久化永久熔断）。
+        expectTypeError("bad-utf8-value", () => d.set("bad-utf8", String.fromCharCode(0xd800)));
+        expectTypeError("bad-utf8-key", () => d.set(String.fromCharCode(0xd800), 1));
+        // 深度边界（与宿主同一句话：**节点**深度 ≤ 8）：7 层容器 + 叶子 = 8 ⇒ 收；8 层容器 + 叶子 = 9 ⇒ 拒。
+        let depthOk = 1;
+        for (let i = 0; i < 7; i += 1) depthOk = [depthOk];
+        if (d.set("deep-ok", depthOk).applied !== true) bad.push("deep-ok:rejected");
+        let depthBad = 1;
+        for (let i = 0; i < 8; i += 1) depthBad = [depthBad];
+        expectTypeError("deep", () => d.set("deep-bad", depthBad));
 
         if (bad.length !== 0) ctx.fail("config-roundtrip", bad.join(","));
         return [];

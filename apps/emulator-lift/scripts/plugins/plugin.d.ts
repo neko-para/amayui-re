@@ -377,12 +377,15 @@ export interface AppDataApi {
     stat(rel: string): AppDataStat;
 }
 
-/** `set` / `delete` 的回执（I/O / 只读走这里；⛔ 校验错误走 TypeError）。 */
+/** `set` / `delete` 的回执（校验错误走 TypeError，不走这里）。 */
 export interface ConfigReceipt {
-    /** false = 没写进去（`code` 说明为什么）。 */
+    /**
+     * `true` = **内存已改**（⛔ 不代表已落盘）。持久化在宿主每个回调末 flush；失败只有一次
+     * `ctx.log("warn")` —— 回执里看不到那次失败（v1 口径，见 `plugin-runtime.md` §4.5）。
+     */
     readonly applied: boolean;
-    /** `read_only` = 配置文件 / appdata 根不可写；`io` = 宿主 I/O 失败；`no_appdata` = 没有 `--appdata`。 */
-    readonly code?: "read_only" | "io" | "no_appdata";
+    /** `read_only` = 配置文件本身不可写（或 appdata 根不可写）；`no_appdata` = 没有 `--appdata`。 */
+    readonly code?: "read_only" | "no_appdata";
 }
 
 /** 一个配置域（`ctx.config.domain(id)`）。同一进程内所有域共享同一份 store。 */
@@ -407,6 +410,9 @@ export interface ConfigDomain {
  * null；⛔ 不是 JSON 字符串 ⇒ 沙箱里不需要 `JSON`）。
  *
  * ★ 没有 `--appdata` ⇒ `available=false`，`domain()` 抛 `Error("no_appdata")`（⛔ 不做内存态）。
+ * ★ 上限（`set` 与**装载期**同一套）：值嵌套 ≤ **8 层**（根值 = 1）、值树 ≤ **1024 节点**、
+ *   单个字符串 / 对象 key ≤ **8192 字节**、key 长 ≤ **128**、域数 ≤ **256**、每域 key ≤ **1024**、
+ *   整份文件 ≤ **1 MiB**；超限 ⇒ TypeError（装载期 ⇒ exit 2）。字符串 / key 必须是合法 UTF-8。
  * ★ 改配置的产物 = 该 appdata 根的 `plugin-config.json`（⛔ 不在 `SAVE/`；`clean-appdata.sh` 会删它）。
  * ★ 一个 appdata 只跑一个实例（v1；⛔ 不做文件锁）。
  */

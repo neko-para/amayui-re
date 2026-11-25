@@ -900,8 +900,9 @@ target_link_libraries(emulator-lift-runtime PRIVATE PNG::PNG)
 #   ⚠ 实测：`boost-beast` 依赖 `boost-asio` 时**没有**写 default-features ⇒ vcpkg 的"特性可加"模型
 #     会把 asio 的默认特性重新打开 ⇒ 仍然装了 `boost-context` / `boost-date-time`（各一个静态库）。
 #     这是**依赖账的事实**，记在报告里（design-ws §1.2 的"35 个 header-only 端口"因此不成立）。
-# ★ `control_ws.cpp` 是**唯一** include beast / nlohmann 的 TU（`runtime/control.h` 用 PIMPL 挡住）；
-#   别的 TU 只 include `runtime/control.h`（零第三方头 ⇒ 编译时间不受影响）。
+# ★ `control_ws.cpp` 是**唯一** include beast 的 TU；nlohmann 另有一个消费者
+#   `src/plugin/plugin_config.cpp`（2026-11-25，`ctx.config` 的 JSON 文本层；头是 PIMPL）。
+#   别的 TU 只 include `runtime/control.h` / `plugin/plugin_config.h`（零第三方头 ⇒ 编译时间不受影响）。
 # =====================================================================================
 find_package(Boost CONFIG REQUIRED COMPONENTS asio beast)
 find_package(nlohmann_json CONFIG REQUIRED)
@@ -3116,6 +3117,8 @@ if(LIFT_BUILD_TESTS)
     add_executable(lift-plugin-appdata tests/plugin_appdata.cpp)
     target_link_libraries(lift-plugin-appdata PRIVATE emulator-lift-runtime)
     add_test(NAME plugin-appdata COMMAND lift-plugin-appdata)
+    # 符号链接建不出来（无开发者模式 / 权限）⇒ 用例 `LIFT_SKIP`（77）⇒ CTest 记 skipped，⛔ 不静默绿。
+    set_tests_properties(plugin-appdata PROPERTIES SKIP_RETURN_CODE 77)
 
     # ---- `plugin-config`：`ctx.config` 的**文件形状 / 值 / 持久化**判据（pure）------------------
     # ★ 判据（详 `tests/plugin_config.cpp` 文件头）：往返 / 未知键保留 / 域自动创建 / 坏 JSON ⇒
@@ -3124,6 +3127,8 @@ if(LIFT_BUILD_TESTS)
     add_executable(lift-plugin-config tests/plugin_config.cpp)
     target_link_libraries(lift-plugin-config PRIVATE emulator-lift-runtime)
     add_test(NAME plugin-config COMMAND lift-plugin-config)
+    # 只读文件探针在"文件系统不把只读位当不可写"的环境（如 root）不可判定 ⇒ LIFT_SKIP（77）。
+    set_tests_properties(plugin-config PROPERTIES SKIP_RETURN_CODE 77)
 
     add_executable(lift-plugin-headless tests/plugin_e2e.cpp)
     target_link_libraries(lift-plugin-headless PRIVATE emulator-lift-runtime lift-test-support)

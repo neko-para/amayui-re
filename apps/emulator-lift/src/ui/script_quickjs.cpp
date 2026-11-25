@@ -274,10 +274,20 @@ struct Impl {
 struct HostPause {
     Impl* impl = nullptr;
     std::uint64_t start_ns = 0;
+    bool active = true;
     explicit HostPause(Impl* i) : impl(i), start_ns(lift::plugin::pluginThreadCpuNs()) {}
-    ~HostPause() {
+    ~HostPause() { stop(); }
+    // 中途让出（"这段其实会跑用户 JS"）：累计已 pause 的部分，之后 resume 重新起算。
+    void stop() {
+        if (!active) return;
+        active = false;
         const std::uint64_t end_ns = lift::plugin::pluginThreadCpuNs();
         if (impl != nullptr && end_ns >= start_ns) impl->paused_ns += end_ns - start_ns;
+    }
+    void resume() {
+        if (active) return;
+        active = true;
+        start_ns = lift::plugin::pluginThreadCpuNs();
     }
     HostPause(const HostPause&) = delete;
     HostPause& operator=(const HostPause&) = delete;
@@ -3360,9 +3370,15 @@ JSValue jsCtxAppDataStat(JSContext* ctx, JSValueConst /*this_val*/, int argc, JS
 // =======================================================================================
 
 // `ConfigValue` → JS 原生值（对象成员用 **DefineProperty** 装：`__proto__` 只当普通数据键，
-// ⛔ 不走 `[[Set]]` 的原型 setter）。
-Value configValueToJs(JSContext* ctx, const lift::plugin::ConfigValue& value) {
+// ⛔ 不走 `[[Set]]` 的原型 setter）。★ `depth` 是**防御性护栏**：`attach` 已按同一上限拒绝深层
+// 文件；这里再挡一次，⛔ 不让宿主递归爆栈（B1）。
+Value configValueToJs(JSContext* ctx, const lift::plugin::ConfigValue& value, std::size_t depth = 1) {
     using lift::plugin::ConfigValueKind;
+    if (depth > lift::plugin::kConfigMaxDepth) {
+        JS_ThrowInternalError(ctx, "ctx.config: 值嵌套超过上限（%zu 层）",
+                              lift::plugin::kConfigMaxDepth);
+        return Value::exception(ctx);
+    }
     switch (value.kind) {
         case ConfigValueKind::Null:
             return Value::null(ctx);
@@ -3376,7 +3392,7 @@ Value configValueToJs(JSContext* ctx, const lift::plugin::ConfigValue& value) {
             Value out(ctx, JS_NewArray(ctx));
             if (out.isException()) return out;
             for (std::size_t i = 0; i < value.items.size(); ++i) {
-                Value item = configValueToJs(ctx, value.items[i]);
+                Value item = configValueToJs(ctx, value.items[i], depth + 1);
                 if (item.isException()) return item;
                 // ★ 快照 = **普通可写对象**（`all()` 的深拷贝；改它不影响 store，但也不是冻结值）。
                 if (JS_DefinePropertyValueUint32(
@@ -3392,7 +3408,7 @@ Value configValueToJs(JSContext* ctx, const lift::plugin::ConfigValue& value) {
             Value out = qjs::newObject(ctx);
             if (out.isException()) return out;
             for (const auto& member : value.members) {
-                Value item = configValueToJs(ctx, member.second);
+                Value item = configValueToJs(ctx, member.second, depth + 1);
                 if (item.isException()) return item;
                 if (JS_DefinePropertyValueStr(
                         ctx, out.raw(), member.first.c_str(), item.take(),
@@ -3409,8 +3425,16 @@ Value configValueToJs(JSContext* ctx, const lift::plugin::ConfigValue& value) {
 
 // JS 原生值 → `ConfigValue`。false ⇒ `*why` 是原因（调用方转 TypeError）。
 // ★ 只收 d.ts 的六种；`undefined` / 函数 / symbol / bigint 一律**响亮拒绝**（⛔ 不静默丢）。
+// ★ `pause`（可空）：枚举 / 建树是**宿主 CPU** ⇒ pause；`JS_GetProperty*` 可能执行用户 getter
+//   ⇒ 那几处 `stop()`，让 getter 的 CPU 仍算用户时间（I3）。
+// ★ `depth` 从 1（根值）起，节点深度 > `kConfigMaxDepth` ⇒ 拒绝（与 `PluginConfig::set` 的
+//   `validateValue` 同一句话；⛔ 不要一边 `>` 一边 `>=`）。
 bool jsToConfigValue(JSContext* ctx, JSValueConst value, std::size_t depth, std::size_t* nodes,
-                     lift::plugin::ConfigValue* out, std::string* why) {
+                     HostPause* pause, lift::plugin::ConfigValue* out, std::string* why) {
+    if (depth > lift::plugin::kConfigMaxDepth) {
+        *why = "值嵌套太深（上限 " + std::to_string(lift::plugin::kConfigMaxDepth) + " 层）";
+        return false;
+    }
     if (++(*nodes) > lift::plugin::kConfigMaxNodes) {
         *why = "值太大（节点上限 " + std::to_string(lift::plugin::kConfigMaxNodes) + "）";
         return false;
@@ -3458,10 +3482,6 @@ bool jsToConfigValue(JSContext* ctx, JSValueConst value, std::size_t depth, std:
         return false;
     }
     if (JS_IsArray(value)) {
-        if (depth >= lift::plugin::kConfigMaxDepth) {
-            *why = "值嵌套太深（上限 " + std::to_string(lift::plugin::kConfigMaxDepth) + " 层）";
-            return false;
-        }
         Value length = qjs::getProperty(ctx, value, "length");
         std::uint32_t count = 0;
         if (length.isException() || !length.isNumber() ||
@@ -3472,24 +3492,23 @@ bool jsToConfigValue(JSContext* ctx, JSValueConst value, std::size_t depth, std:
         }
         lift::plugin::ConfigValue arr = lift::plugin::ConfigValue::array();
         for (std::uint32_t i = 0; i < count; ++i) {
+            // ★ 元素读可能触发 getter / 访问器 ⇒ 这段算**用户 JS**。
+            if (pause != nullptr) pause->stop();
             Value item(ctx, JS_GetPropertyUint32(ctx, value, i));
+            if (pause != nullptr) pause->resume();
             if (item.isException()) {
                 qjs::clearException(ctx);
                 *why = "数组元素读取失败";
                 return false;
             }
             lift::plugin::ConfigValue child;
-            if (!jsToConfigValue(ctx, item.raw(), depth + 1, nodes, &child, why)) return false;
+            if (!jsToConfigValue(ctx, item.raw(), depth + 1, nodes, pause, &child, why)) return false;
             arr.items.push_back(std::move(child));
         }
         *out = std::move(arr);
         return true;
     }
     if (JS_IsObject(value)) {
-        if (depth >= lift::plugin::kConfigMaxDepth) {
-            *why = "值嵌套太深（上限 " + std::to_string(lift::plugin::kConfigMaxDepth) + " 层）";
-            return false;
-        }
         JSPropertyEnum* table = nullptr;
         std::uint32_t count = 0;
         if (JS_GetOwnPropertyNames(ctx, &table, &count, value,
@@ -3510,7 +3529,10 @@ bool jsToConfigValue(JSContext* ctx, JSValueConst value, std::size_t depth, std:
             }
             std::string key(raw_key);
             JS_FreeCString(ctx, raw_key);
+            // ★ 同数组：属性值读可能跑用户 getter。
+            if (pause != nullptr) pause->stop();
             Value item(ctx, JS_GetPropertyStr(ctx, value, key.c_str()));
+            if (pause != nullptr) pause->resume();
             if (item.isException()) {
                 qjs::clearException(ctx);
                 *why = "对象属性读取失败";
@@ -3518,7 +3540,7 @@ bool jsToConfigValue(JSContext* ctx, JSValueConst value, std::size_t depth, std:
                 break;
             }
             lift::plugin::ConfigValue child;
-            if (!jsToConfigValue(ctx, item.raw(), depth + 1, nodes, &child, why)) {
+            if (!jsToConfigValue(ctx, item.raw(), depth + 1, nodes, pause, &child, why)) {
                 ok = false;
                 break;
             }
@@ -3660,16 +3682,18 @@ JSValue jsCtxConfigGet(JSContext* ctx, JSValueConst this_val, int argc, JSValueC
         lift::plugin::ConfigValue value;
         bool found = false;
         bool ok = true;
+        // ★ HostPause 罩住**整段**：store 调用 + `ConfigValue → JS` 的建树（纯宿主 CPU）。
+        Value out = Value::undefined(ctx);
         {
             HostPause pause(implOf(ctx));
             ok = host->configGet(domain, key, &value, &found, &why);
+            if (ok && found) out = configValueToJs(ctx, value);
         }
         if (!ok) {
             return JS_ThrowTypeError(ctx, "ctx.config.domain('%s').get('%s'): %s", domain.c_str(),
                                      key.c_str(), why.c_str());
         }
         if (!found) return argc >= 2 ? JS_DupValue(ctx, argv[1]) : JS_UNDEFINED;
-        Value out = configValueToJs(ctx, value);
         return out.take();
     } catch (...) {
         return JS_ThrowTypeError(ctx, "ctx.config.domain(...).get: 宿主异常（C++ exception at script boundary）");
@@ -3739,16 +3763,15 @@ JSValue jsCtxConfigSet(JSContext* ctx, JSValueConst this_val, int argc, JSValueC
         }
         lift::plugin::ConfigValue value;
         std::size_t nodes = 0;
-        if (!jsToConfigValue(ctx, argv[1], 1, &nodes, &value, &why)) {
+        // ★ 从**这里**到 `configSet` 返回都在同一个 HostPause 里：枚举/建树是宿主 CPU；
+        //   `jsToConfigValue` 会在 `JS_GetProperty*` 前后 stop/resume（getter 仍算用户时间）。
+        HostPause pause(implOf(ctx));
+        if (!jsToConfigValue(ctx, argv[1], 1, &nodes, &pause, &value, &why)) {
             return JS_ThrowTypeError(ctx, "ctx.config.domain('%s').set('%s'): %s", domain.c_str(),
                                      key.c_str(), why.c_str());
         }
         lift::plugin::ConfigReceipt receipt;
-        bool ok = true;
-        {
-            HostPause pause(implOf(ctx));
-            ok = host->configSet(domain, key, value, &receipt, &why);
-        }
+        const bool ok = host->configSet(domain, key, value, &receipt, &why);
         if (!ok) {
             return JS_ThrowTypeError(ctx, "ctx.config.domain('%s').set('%s'): %s", domain.c_str(),
                                      key.c_str(), why.c_str());
@@ -3818,11 +3841,13 @@ JSValue jsCtxConfigAll(JSContext* ctx, JSValueConst this_val, int /*argc*/, JSVa
             return JS_ThrowTypeError(ctx, "ctx.config.domain(...).all: %s", why.c_str());
         }
         lift::plugin::ConfigValue value;
+        Value out = Value::undefined(ctx);
         {
+            // ★ 整段（store + 建树）都在 HostPause 里；大域的 `all()` 不许被记成用户 2 ms。
             HostPause pause(implOf(ctx));
             value = host->configAll(domain);
+            out = configValueToJs(ctx, value);
         }
-        Value out = configValueToJs(ctx, value);
         return out.take();
     } catch (...) {
         return JS_ThrowTypeError(ctx, "ctx.config.domain(...).all: 宿主异常（C++ exception at script boundary）");

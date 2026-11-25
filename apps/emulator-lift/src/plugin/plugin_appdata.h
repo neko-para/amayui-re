@@ -5,10 +5,11 @@
 //
 // ★ 只做**一件事**：把 `<appdata 根>/<rel>` 的 `stat` 结果翻成稳定错误码。⛔ 不做 read / write /
 //   列目录 —— 插件里的任意文件读会绕开 guest 语义（合同 §4.5 的"操作类唯一路径"）。
-// ★ **只 appdata 子树**：绝对路径 / `..` / NUL 一律拒绝；canonical（`weakly_canonical`，目录可以
-//   还不存在）之后必须仍在根下 ⇒ 符号链接 / junction 指向外面是 `escape`。
+// ★ **只 appdata 子树**：绝对路径 / `..` / NUL / **非法 UTF-8** 一律拒绝；canonical（`weakly_canonical`，
+//   目录可以还不存在）之后必须仍在根下 ⇒ 符号链接 / junction 指向外面是 `escape`。
 // ★ 根由 `attach()` 绝对化（`Vfs::setAppDataDir` 存的是 CLI 原串，不做绝对化）；没有 `--appdata`
-//   ⇒ `available()=false`，`stat` 一律 `no_appdata`（⛔ 不编一个假根）。
+//   ⇒ `available()=false`，`stat` 一律 `no_appdata`（⛔ 不编一个假根）。`--appdata` 是**普通文件**
+//   或落在只读安装树里 ⇒ `attach` 返回 false（调用方 warn + 继续：不是启动失败）。
 // ★ 本类**不** include `quickjs.h`、不调 `input::` / `writeGlobal`（core-shape ④）。
 #pragma once
 

@@ -337,16 +337,18 @@ PluginHost::TriggerSet PluginHost::runCallback(Context& ctx, bool is_start, cons
     const Budget budget = runner_.budget();
     bool ok = is_start ? script_->start(*this, budget, &out, &call_err)
                        : script_->onTrigger(*this, *ev, budget, &out, &call_err);
-    const std::uint64_t host_end_ns = pluginNowNs();
-    diag.host_ns = host_end_ns >= host_start_ns ? host_end_ns - host_start_ns : 0;
     // ★ `ctx.config` 的持久化（2026-11-25）：**每个回调末** flush 一次（只写脏数据；原子替换）。
     //   ⛔ 不放进 `js_cpu_ns` 的窗口（它在 JS 返回之后）；⛔ 不每个 set 都写盘。
     //   第一次写盘失败 ⇒ 经 `ctx.log("warn")` 说一次，之后不再重试（`PluginConfig` 的 gave_up）。
+    //   ★ 2026-11-25 复审 I12：flush 在 `host_end_ns` **之前**，所以它落进宿主安全网（20 ms 墙钟）
+    //     与诊断行的 `elapsed` —— 慢盘卡 5 s 时不再"只表现为 guest 停住"。
     {
         std::string flush_warn;
         config_.flushIfDirty(&flush_warn);
         if (!flush_warn.empty()) log("warn", flush_warn);
     }
+    const std::uint64_t host_end_ns = pluginNowNs();
+    diag.host_ns = host_end_ns >= host_start_ns ? host_end_ns - host_start_ns : 0;
     // =================================================================================
     // 判据（2026-11-21 收窄，用户裁决 D5 可改）：**2 ms 只罩用户 JS 本体，且用 CPU 钟**
     //   · `js_cpu_ns` = 用户 JS 本体的**本线程 CPU 时间**（QJS 侧从"即将调用插件函数"量到 JS 返回）；

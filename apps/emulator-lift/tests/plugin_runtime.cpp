@@ -913,6 +913,58 @@ void caseConfigRoundtrip() {
     LIFT_CHECK(after.find("temp") == std::string::npos);  // delete 过的 key 不落盘
 }
 
+// =====================================================================================
+// `plugin/config-host-pause`：大域 `all()` 的值转换是**宿主 CPU**（不计用户 2 ms）
+//
+// 判据（红了意味着什么）：`configValueToJs`（1024 个 key 的建树 / 定义属性）被算进
+// `js_cpu_ns` ⇒ 一个只读配置、什么都没做的回调会误报 `callback budget exceeded`。
+// ★ 数据 = 临时 appdata 的 `plugin-config.json`（域 `big`，1024 个 key × 800 B；
+//   文件 < 1 MiB、每值 1 节点 ⇒ 合法）；夹具只 `all()` + 核对 key 数。
+// =====================================================================================
+void caseConfigHostPause() {
+    lift_test::g_current_case = "plugin/config-host-pause";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    ScopedTempDir appdata;
+    LIFT_CHECK(appdata.make("lift-plugin-config-host-pause"));
+    if (appdata.path.empty()) return;
+    std::string doc = R"({"version":1,"domains":{"big":{)";
+    const std::string value(800, 'x');
+    for (int i = 0; i < 1024; ++i) {
+        if (i != 0) doc += ",";
+        char key[32];
+        std::snprintf(key, sizeof(key), "\"k%04d\":\"", i);
+        doc += key;
+        doc += value;
+        doc += "\"";
+    }
+    doc += "}}}";
+    const fs::path file = appdata.path / "plugin-config.json";
+    LIFT_CHECK(writeHostFile(file, doc));
+    const bool loaded = f.load("config-all.js");
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    LIFT_CHECK(f.attachAppData(hostPathText(appdata.path)));
+    LIFT_CHECK(f.attachConfig());
+    // 生产值 2 ms / op_limit 不限：这条判的**只**是 CPU deadline。
+    f.host->runner().setBudget(lift::plugin::Budget{2'000'000ull, 0u});
+    f.pump();
+    dumpFail(f);
+    const lift::plugin::CallbackDiag& d = lift::plugin::callbackDiag();
+    std::printf("  [%s] js_cpu_us=%llu paused_us=%llu\n", lift_test::g_current_case,
+                static_cast<unsigned long long>(d.js_cpu_ns / 1000),
+                static_cast<unsigned long long>(d.host_pause_ns / 1000));
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);
+    LIFT_CHECK(d.host_pause_ns > 0);
+    LIFT_CHECK(d.js_cpu_ns < 2'000'000ull);
+}
+
 void caseLoadSaveOnLoaded() {
     lift_test::g_current_case = "control-script/load-save-onloaded";
     Fixture f;
@@ -2308,6 +2360,7 @@ int main() {
     caseChain();
     caseSaveMissingPrecheck();
     caseConfigRoundtrip();
+    caseConfigHostPause();
     caseLoadSaveOnLoaded();
     caseChainsRoute();
     caseGlobalReadModifyWrite();

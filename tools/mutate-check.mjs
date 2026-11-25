@@ -5356,10 +5356,10 @@ const MUTATIONS = [
   //     `unknown-preserved` 是唯一点它的用例（预置 `unknown` 键 + flush 后二次装载读）。
   {
     file: 'apps/emulator-lift/src/plugin/plugin_config.cpp',
-    from: '    domains[domain][key] = toJson(value);',
+    from: '    dom[key] = toJson(value);',
     to:
-      '    domains[domain] = json::object();  // 变异：域对象重建（未知域内键被丢掉）\n' +
-      '    domains[domain][key] = toJson(value);',
+      '    dom = json::object();  // 变异：域对象重建（未知域内键被丢掉）\n' +
+      '    dom[key] = toJson(value);',
     guard: 'ctest:plugin-config',
     ctest: 'plugin-config',
     buildDir: 'apps/emulator-lift/out',

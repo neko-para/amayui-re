@@ -146,9 +146,11 @@ public:
     // ★ 配置文件 = `<--appdata>/plugin-config.json`（appdata 根；⛔ 不在 `SAVE/`）。**没有**
     //   `available` ⇒ `domain()` 抛 `Error("no_appdata")`（⛔ 不做内存态）。
     // ★ 语义：`set` / `delete` 只改内存 + 标脏，宿主在**每个回调末** flush 一次（原子替换）；
-    //   校验错误（域 id / key / 值类型 / 超限）由宿主返回 false + `why` ⇒ JS 侧 TypeError；
-    //   I/O / 只读走 `ConfigReceipt{applied:false, code:"read_only"|"io"}`。
-    // ★ 宿主段要包 `HostPause`（同 `appDataStat`；⛔ 不算用户 2 ms）。
+    //   校验错误（域 id / key / 值类型 / 超限 / 非法 UTF-8）由宿主返回 false + `why` ⇒ JS 侧 TypeError；
+    //   `ConfigReceipt.applied` = **内存已改**（⛔ 不是"已落盘"）：只读 / 无 appdata 走 code，
+    //   写盘失败只有一次 `ctx.log("warn")`。
+    // ★ 宿主段要包 `HostPause`（**含值树 ↔ JS 值的转换**；⛔ 不算用户 2 ms）。用户 getter
+    //   （`set` 读对象属性时）例外：那段仍是用户时间。
     virtual bool configAvailable() const = 0;
     virtual bool configCheckDomain(const std::string& id, std::string* why) const = 0;
     virtual bool configGet(const std::string& domain, const std::string& key,

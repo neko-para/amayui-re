@@ -222,6 +222,18 @@ int main() {
         expectError("control", appdata.stat(std::string("a\nb", 3)), AppDataStatError::InvalidPath);
     }
 
+    // ---- appdata/stat-invalid-utf8：非法 UTF-8 不许退化成"根目录" ----
+    lift_test::g_current_case = "appdata/stat-invalid-utf8";
+    {
+        // U+D800 的 WTF-8（QJS 对孤立代理项的编码）；utf8ToWide 会返回空串 ⇒ 不拒绝就会 stat 根。
+        expectError("utf8-surrogate", appdata.stat(std::string("\xED\xA0\x80", 3)),
+                    AppDataStatError::InvalidPath);
+        expectError("utf8-truncated", appdata.stat(std::string("\xC3", 1)),
+                    AppDataStatError::InvalidPath);
+        expectError("utf8-in-segment", appdata.stat(std::string("sub/\xED\xA0\x80", 7)),
+                    AppDataStatError::InvalidPath);
+    }
+
     // ---- appdata/attach-rejects-install-tree：appdata 落在只读安装树里 ⇒ 不接 ----
     lift_test::g_current_case = "appdata/attach-rejects-install-tree";
     {
@@ -233,6 +245,16 @@ int main() {
         expectError("install-tree", nested.stat("dir"), AppDataStatError::NoAppData);
     }
 
+    // ---- appdata/attach-not-a-directory：--appdata 指向普通文件 ⇒ 不接（warn + 继续，⛔ 不是 exit 2）----
+    lift_test::g_current_case = "appdata/attach-not-a-directory";
+    {
+        PluginAppData file_root;
+        std::string err;
+        LIFT_CHECK(!file_root.attach(toUtf8(root / "file.txt"), "", &err));
+        LIFT_CHECK(!err.empty());
+        LIFT_CHECK(!file_root.available());
+    }
+
     // ---- appdata/stat-symlink-escape：符号链接 / junction 指向根外 ----
     lift_test::g_current_case = "appdata/stat-symlink-escape";
     {
@@ -241,8 +263,8 @@ int main() {
         std::error_code link_ec;
         fs::create_directory_symlink(outside, root / "escape-link", link_ec);
         if (link_ec) {
-            std::printf("SKIP appdata/stat-symlink-escape: 建不了符号链接（%s）——需开发者模式 / 权限\n",
-                        link_ec.message().c_str());
+            // ⛔ 不 printf 后继续（那会被记成绿）：环境不成立 ⇒ skip（CMake SKIP_RETURN_CODE 77）。
+            LIFT_SKIP("建不了符号链接（需开发者模式 / 权限）⇒ escape 判据不可判定");
         } else {
             expectError("symlink-dir", appdata.stat("escape-link"), AppDataStatError::Escape);
             expectError("symlink-child", appdata.stat("escape-link/evil.txt"), AppDataStatError::Escape);

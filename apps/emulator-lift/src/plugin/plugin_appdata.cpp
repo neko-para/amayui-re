@@ -78,9 +78,12 @@ AppDataStatError mapError(const std::error_code& ec) {
     return AppDataStatError::Io;
 }
 
-// 把插件给的相对路径拆成段；拒绝空串 / 控制字符 / 绝对路径 / `..`。
+// 把插件给的相对路径拆成段；拒绝空串 / 控制字符 / 非法 UTF-8 / 绝对路径 / `..`。
 bool splitRelative(const std::string& rel, std::vector<std::string>* segs) {
     if (rel.empty()) return false;
+    // ★ 非法 UTF-8（QJS 会把孤立代理项编成 WTF-8）必须先拒绝：`utf8ToWide` 对非法串返回空串
+    //   ⇒ `pathFromUtf8` 得到空路径 ⇒ 目标退化成 **appdata 根**（`exists:true,isDir:true`）。
+    if (!lift::isValidUtf8(rel)) return false;
     for (const unsigned char c : rel) {
         if (c == 0 || c < 0x20 || c == 0x7f) return false;  // NUL / 控制字符（std::filesystem 会截断）
     }
@@ -109,6 +112,10 @@ bool PluginAppData::attach(const std::string& appdata_dir, const std::string& in
     path_.clear();
     canon_.clear();
     if (appdata_dir.empty()) return true;  // 没有 --appdata：正常的"不可用"，不是错误
+    if (!lift::isValidUtf8(appdata_dir)) {
+        if (err != nullptr) *err = "--appdata 不是合法 UTF-8";
+        return false;
+    }
     std::error_code ec;
     fs::path root = fs::absolute(pathFromUtf8(appdata_dir), ec);
     if (ec || root.empty()) {
@@ -117,6 +124,16 @@ bool PluginAppData::attach(const std::string& appdata_dir, const std::string& in
     }
     root = root.lexically_normal();
     if (root != root.root_path() && !root.has_filename()) root = root.parent_path();
+    // ★ 存在但不是目录（普通文件）⇒ 明确报"不可用"（调用方 warn + 继续）；⛔ 不要让它一路掉到
+    //   `PluginConfig::attach` 的 not_a_directory 里变成 exit 2（那是配置文件坏，不是 appdata 坏）。
+    {
+        std::error_code sec;
+        const fs::file_status st = fs::status(root, sec);
+        if (!sec && fs::exists(st) && !fs::is_directory(st)) {
+            if (err != nullptr) *err = "--appdata 指向的不是目录（" + pathToUtf8(root) + "）";
+            return false;
+        }
+    }
     if (!install_dir.empty()) {
         std::error_code iec;
         fs::path install = fs::absolute(pathFromUtf8(install_dir), iec);

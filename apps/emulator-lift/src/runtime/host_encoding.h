@@ -39,5 +39,10 @@ void restoreConsoleUtf8();
 std::string wideToUtf8(const wchar_t* w);
 // UTF-8 → 宿主 `wchar_t`；非法序列返回空串（不抛）。
 std::wstring utf8ToWide(const std::string& s);
+// ★ 严格 UTF-8 合法性（过短编码 / 代理项 / >U+10FFFF / 截断都算非法）。
+//   用途：**插件面**的字符串（`ctx.appdata.stat` 的 rel / `ctx.config` 的 key 与值）不是宿主的
+//   `argvUtf8` 也不是 guest 文本（QJS 会把孤立代理项按 WTF-8 编成非法 UTF-8）⇒ 必须在入口拒绝，
+//   ⛔ 不能让它经 `utf8ToWide`（返回空串）退化成"根目录 / 空路径"。
+bool isValidUtf8(const std::string& s);
 
 }  // namespace lift

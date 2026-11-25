@@ -2,8 +2,11 @@
 //
 // ★ 本文件是**唯一** include `<nlohmann/json.hpp>` 的插件侧 TU（`plugin_config.h` 用 PIMPL）。
 // ★ 失败面分两类，⛔ 不要合并：
-//   · **装载失败**（attach 返回 false）= 文件的形状坏 / 读不到 / 太大 ⇒ 调用方 exit 2；
-//   · **写盘失败**（flush 返回一行 warn）= 运行期 I/O ⇒ 插件继续跑，只警告一次。
+//   · **装载失败**（attach 返回 false）= 文件的形状坏 / 读不到 / 太大 / 值超限 / 非法 UTF-8 ⇒ exit 2；
+//     值上限（深度 / 节点 / 串长）在 attach 与 set **两侧都执行**（attach 用显式栈，⛔ 不在 get 爆栈）。
+//   · **写盘失败**（flush 返回一行 warn）= 运行期 I/O；第一次失败后不再重试（⛔ 不重试风暴）。
+//     序列化 / 写出超限不是 I/O ⇒ 只 warn、**不**永久熔断后续合法写入。
+// ★ `ConfigReceipt` 只表达**内存态**（`applied` / `read_only` / `no_appdata`）；⛔ 没有不可达的 `io`。
 #include "plugin/plugin_config.h"
 
 #include <cmath>
@@ -63,25 +66,49 @@ bool isDomainIdChar(unsigned char c) {
            c == '_' || c == '-';
 }
 
-ConfigValue fromJson(const json& j) {
-    if (j.is_null()) return ConfigValue::null();
-    if (j.is_boolean()) return ConfigValue::fromBool(j.get<bool>());
-    if (j.is_number()) return ConfigValue::fromNumber(j.get<double>());
-    if (j.is_string()) return ConfigValue::fromString(j.get<std::string>());
-    if (j.is_array()) {
-        ConfigValue out = ConfigValue::array();
-        out.items.reserve(j.size());
-        for (const json& item : j) out.items.push_back(fromJson(item));
-        return out;
+// JSON → 中立值树。★ **带深度/节点护栏**：`attach` 已经校验过（见 `validateJsonValue`），这里是
+//   第二条保险 —— 即使将来有人绕过 attach，也只会返回 false，⛔ 不会在 `get` 里把栈递归爆。
+bool fromJson(const json& j, std::size_t depth, std::size_t* nodes, ConfigValue* out) {
+    if (depth > kConfigMaxDepth) return false;
+    if (++(*nodes) > kConfigMaxNodes) return false;
+    if (j.is_null()) {
+        *out = ConfigValue::null();
+        return true;
     }
-    ConfigValue out = ConfigValue::object();
+    if (j.is_boolean()) {
+        *out = ConfigValue::fromBool(j.get<bool>());
+        return true;
+    }
+    if (j.is_number()) {
+        *out = ConfigValue::fromNumber(j.get<double>());
+        return true;
+    }
+    if (j.is_string()) {
+        *out = ConfigValue::fromString(j.get<std::string>());
+        return true;
+    }
+    if (j.is_array()) {
+        ConfigValue arr = ConfigValue::array();
+        arr.items.reserve(j.size());
+        for (const json& item : j) {
+            ConfigValue child;
+            if (!fromJson(item, depth + 1, nodes, &child)) return false;
+            arr.items.push_back(std::move(child));
+        }
+        *out = std::move(arr);
+        return true;
+    }
+    ConfigValue object = ConfigValue::object();
     if (j.is_object()) {
-        out.members.reserve(j.size());
+        object.members.reserve(j.size());
         for (auto it = j.begin(); it != j.end(); ++it) {
-            out.members.emplace_back(it.key(), fromJson(it.value()));
+            ConfigValue child;
+            if (!fromJson(it.value(), depth + 1, nodes, &child)) return false;
+            object.members.emplace_back(it.key(), std::move(child));
         }
     }
-    return out;
+    *out = std::move(object);
+    return true;
 }
 
 json toJson(const ConfigValue& v) {
@@ -140,6 +167,10 @@ bool validateValue(const ConfigValue& v, std::size_t depth, std::size_t* nodes, 
                 *why = "字符串太长（上限 " + std::to_string(kConfigMaxStringBytes) + " 字节）";
                 return false;
             }
+            if (!lift::isValidUtf8(v.text)) {
+                *why = "字符串必须是合法 UTF-8（孤立代理项 / 截断序列不支持）";
+                return false;
+            }
             return true;
         case ConfigValueKind::Array:
             for (const ConfigValue& item : v.items) {
@@ -148,12 +179,83 @@ bool validateValue(const ConfigValue& v, std::size_t depth, std::size_t* nodes, 
             return true;
         case ConfigValueKind::Object:
             for (const auto& member : v.members) {
+                // ★ 对象 key 也写进 JSON：非法 UTF-8 会让 `dump` 抛 ⇒ 在 **set 期** 就拒绝。
+                if (member.first.size() > kConfigMaxStringBytes) {
+                    *why = "对象 key 太长（上限 " + std::to_string(kConfigMaxStringBytes) + " 字节）";
+                    return false;
+                }
+                if (!lift::isValidUtf8(member.first)) {
+                    *why = "对象 key 必须是合法 UTF-8（孤立代理项 / 截断序列不支持）";
+                    return false;
+                }
                 if (!validateValue(member.second, depth + 1, nodes, why)) return false;
             }
             return true;
     }
     *why = "不认识的值类型";
     return false;
+}
+
+// `attach` 期对**文件里的每个域值**做与 `set` 同一套上限校验（深度 / 节点 / 串长 / UTF-8）。
+// ★ 必须**非递归**（显式栈）：校验对象正是"可能有一万层嵌套"的文件 —— 递归校验自己就会爆栈
+//   （B1 的原始症状在 `get` 的 `fromJson`，这里再用递归就是换个地方爆）。
+bool validateJsonValue(const json& root, std::string* why) {
+    struct Frame {
+        const json* value;
+        std::size_t depth;
+    };
+    std::vector<Frame> stack;
+    stack.push_back(Frame{&root, 1});
+    std::size_t nodes = 0;
+    while (!stack.empty()) {
+        const Frame frame = stack.back();
+        stack.pop_back();
+        const json& value = *frame.value;
+        if (frame.depth > kConfigMaxDepth) {
+            *why = "值嵌套太深（上限 " + std::to_string(kConfigMaxDepth) + " 层）";
+            return false;
+        }
+        if (++nodes > kConfigMaxNodes) {
+            *why = "值太大（节点上限 " + std::to_string(kConfigMaxNodes) + "）";
+            return false;
+        }
+        if (value.is_number()) {
+            if (!std::isfinite(value.get<double>())) {
+                *why = "数字必须是有限的（NaN / Infinity 不支持）";
+                return false;
+            }
+        } else if (value.is_string()) {
+            const std::string& text = value.get_ref<const std::string&>();
+            if (text.size() > kConfigMaxStringBytes) {
+                *why = "字符串太长（上限 " + std::to_string(kConfigMaxStringBytes) + " 字节）";
+                return false;
+            }
+            if (!lift::isValidUtf8(text)) {
+                *why = "字符串必须是合法 UTF-8（孤立代理项 / 截断序列不支持）";
+                return false;
+            }
+        } else if (value.is_array()) {
+            for (auto it = value.rbegin(); it != value.rend(); ++it) {
+                stack.push_back(Frame{&*it, frame.depth + 1});
+            }
+        } else if (value.is_object()) {
+            for (auto it = value.begin(); it != value.end(); ++it) {
+                if (it.key().size() > kConfigMaxStringBytes) {
+                    *why = "对象 key 太长（上限 " + std::to_string(kConfigMaxStringBytes) + " 字节）";
+                    return false;
+                }
+                if (!lift::isValidUtf8(it.key())) {
+                    *why = "对象 key 必须是合法 UTF-8（孤立代理项 / 截断序列不支持）";
+                    return false;
+                }
+                stack.push_back(Frame{&it.value(), frame.depth + 1});
+            }
+        } else if (!value.is_null() && !value.is_boolean()) {
+            *why = "不认识的值类型（只有 null / bool / 数字 / 字符串 / 数组 / 对象）";
+            return false;
+        }
+    }
+    return true;
 }
 
 }  // namespace
@@ -248,6 +350,10 @@ bool PluginConfig::attach(const std::string& appdata_root, std::string* err) {
             return false;
         }
         for (auto it = domains.begin(); it != domains.end(); ++it) {
+            if (!lift::isValidUtf8(it.key())) {
+                if (err != nullptr) *err = s.path_utf8 + ": 域 id 不是合法 UTF-8";
+                return false;
+            }
             if (!it.value().is_object()) {
                 if (err != nullptr) *err = s.path_utf8 + ": 域 '" + it.key() + "' 的值必须是对象";
                 return false;
@@ -259,21 +365,24 @@ bool PluginConfig::attach(const std::string& appdata_root, std::string* err) {
                 }
                 return false;
             }
+            for (auto key_it = it.value().begin(); key_it != it.value().end(); ++key_it) {
+                std::string why;
+                if (!validateJsonValue(key_it.value(), &why)) {
+                    if (err != nullptr) {
+                        *err = s.path_utf8 + ": 域 '" + it.key() + "' 的 key '" + key_it.key() +
+                               "' 超限（" + why + "）";
+                    }
+                    return false;
+                }
+            }
         }
-        // 只读探针：能在文件尾打开（不写）⇒ 可写；否则 `set` 走 read_only 回执。
+        // 只读探针：文件存在时试开一次写（不写内容）⇒ 明确"文件只读"。⛔ 文件不存在时**不探**
+        //   （根目录可能还没被 guest 建出来；flush 会 `create_directories`；探针会把全新 appdata
+        //   永久标成 read_only —— I6）。
         std::ofstream probe(s.file, std::ios::binary | std::ios::app);
         if (!probe) s.read_only = true;
-    } else {
-        // 文件不存在（正常）：探一次"能不能在 appdata 根建文件"，把只读提前暴露给 `set` 的回执。
-        std::ofstream probe(s.temp, std::ios::binary | std::ios::trunc);
-        if (!probe) {
-            s.read_only = true;
-        } else {
-            probe.close();
-            std::error_code rec;
-            fs::remove(s.temp, rec);
-        }
     }
+    // 文件不存在 ⇒ 空文档；`read_only` 保持 false（真正写失败在 flush 里有 warn，⛔ 不在这里猜）。
     s.available = true;
     return true;
 }
@@ -315,6 +424,10 @@ bool PluginConfig::checkKey(const std::string& key, std::string* why) {
         if (why != nullptr) *why = "key 不许含 NUL / 控制字符";
         return false;
     }
+    if (!lift::isValidUtf8(key)) {
+        if (why != nullptr) *why = "key 必须是合法 UTF-8（孤立代理项 / 截断序列不支持）";
+        return false;
+    }
     if (isReservedName(key)) {
         if (why != nullptr) *why = "key 不许是保留名（__proto__ / prototype / constructor）";
         return false;
@@ -334,7 +447,13 @@ bool PluginConfig::get(const std::string& domain, const std::string& key, Config
     if (dom == domains->end() || !dom->is_object()) return true;
     const auto value = dom->find(key);
     if (value == dom->end()) return true;
-    if (out != nullptr) *out = fromJson(*value);
+    if (out != nullptr) {
+        std::size_t nodes = 0;
+        if (!fromJson(*value, 1, &nodes, out)) {
+            if (why != nullptr) *why = "值超过上限 / 非法（正常应在装载期被拒绝）";
+            return false;
+        }
+    }
     if (found != nullptr) *found = true;
     return true;
 }
@@ -361,8 +480,22 @@ bool PluginConfig::set(const std::string& domain, const std::string& key, const 
     }
     // ★ 未知顶层键 / 未知域内键都**保留**：只在既有对象上写这一项（⛔ 不重建 `domains` / 域对象）。
     json& domains = s.doc["domains"];
-    if (!domains.contains(domain) || !domains[domain].is_object()) domains[domain] = json::object();
-    domains[domain][key] = toJson(value);
+    if (!domains.contains(domain) || !domains[domain].is_object()) {
+        if (domains.size() >= kConfigMaxDomains) {
+            if (why != nullptr) *why = "域太多（上限 " + std::to_string(kConfigMaxDomains) + "）";
+            return false;
+        }
+        domains[domain] = json::object();
+    }
+    json& dom = domains[domain];
+    if (!dom.contains(key) && dom.size() >= kConfigMaxKeysPerDomain) {
+        if (why != nullptr) {
+            *why = "域 '" + domain + "' 的 key 太多（上限 " +
+                   std::to_string(kConfigMaxKeysPerDomain) + "）";
+        }
+        return false;
+    }
+    dom[key] = toJson(value);
     s.dirty = true;
     if (receipt != nullptr) *receipt = ConfigReceipt{true, nullptr};
     return true;
@@ -394,7 +527,11 @@ ConfigValue PluginConfig::all(const std::string& domain) const {
     ConfigValue out = ConfigValue::object();
     out.members.reserve(dom->size());
     for (auto it = dom->begin(); it != dom->end(); ++it) {
-        out.members.emplace_back(it.key(), fromJson(it.value()));
+        ConfigValue child;
+        std::size_t nodes = 0;
+        // 装载期已校验；这里失败只可能是内部不一致 ⇒ 返回空域（⛔ 不递归爆栈、不抛）。
+        if (!fromJson(it.value(), 1, &nodes, &child)) return ConfigValue::object();
+        out.members.emplace_back(it.key(), std::move(child));
     }
     return out;
 }
@@ -417,12 +554,27 @@ void PluginConfig::flushIfDirty(std::string* warn) {
     try {
         text = s.doc.dump(2);
     } catch (const std::exception& e) {
-        fail(std::string("序列化失败：") + e.what());
+        // ★ **序列化失败是编程错误，不是 I/O 失败**：`set` 已经校验过 UTF-8 / 上限，正常到不了这里。
+        //   ⛔ 不置 `gave_up`（那会让后续合法 set 也永久停写；I2）；只警告一次并把本次脏标记清掉。
+        if (!s.warned) {
+            s.warned = true;
+            if (warn != nullptr) {
+                *warn = "plugin-config: 内部序列化失败（" + s.path_utf8 + "）：" + e.what() +
+                        "；本次不写盘，后续合法写入仍会重试";
+            }
+        }
         return;
     }
     text += "\n";
     if (text.size() > kConfigMaxDocumentBytes) {
-        fail("写出的文件太大（上限 " + std::to_string(kConfigMaxDocumentBytes) + " 字节）");
+        // ★ 同"序列化失败"：这是**上限/编程错误**，不是 I/O；⛔ 不把进程的配置写盘永久熔断。
+        if (!s.warned) {
+            s.warned = true;
+            if (warn != nullptr) {
+                *warn = "plugin-config: 写出的文件太大（上限 " +
+                        std::to_string(kConfigMaxDocumentBytes) + " 字节）；本次不写盘";
+            }
+        }
         return;
     }
     std::error_code ec;

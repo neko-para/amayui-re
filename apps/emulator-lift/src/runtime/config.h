@@ -82,10 +82,13 @@ struct ConfigValue {
 };
 
 // `set` / `delete` 的回执（与 d.ts 的 `ConfigReceipt` 逐字一致）。
-// ★ 校验错误（key 非法 / 值类型非法 / 超限）**不走回执**：它们抛 `TypeError`（宿主侧返回 false + why）。
+// ★ `applied` = **内存已改**（不是"已落盘"）：写盘在宿主每个回调末 flush，失败只 `ctx.log("warn")`
+//   一次（⛔ 不回填到本回执 —— 那会让"set 的返回值"依赖未来的 I/O）。
+// ★ 校验错误（key 非法 / 值类型非法 / 超限 / 非法 UTF-8）**不走回执**：它们抛 `TypeError`
+//   （宿主侧返回 false + why）。
 struct ConfigReceipt {
     bool applied = false;
-    const char* code = nullptr;  // "read_only" | "io" | "no_appdata"；空 = 无错误码
+    const char* code = nullptr;  // "read_only" | "no_appdata"；空 = 无错误码
 };
 
 inline const char* configReceiptCodeName(const ConfigReceipt& receipt) {

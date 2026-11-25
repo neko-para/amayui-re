@@ -160,6 +160,11 @@ std::wstring utf8ToWide(const std::string& s) {
     return out;
 }
 
+bool isValidUtf8(const std::string& s) {
+    std::vector<std::uint32_t> cps;
+    return decodeUtf8(s, &cps);
+}
+
 std::vector<std::string> argvUtf8(int argc, char** argv) {
     std::vector<std::string> out;
 #if defined(_WIN32)
