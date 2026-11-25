@@ -5,16 +5,13 @@
 //
 //     import { Button } from './kit.js';
 //
+//     // S2：写 HUD 的脚本（`export default { render(ctx) }`）传自己的适配器
+//     //     （`hud.js` 的 `pluginHost(ctx)`；只需要 { rect, text, hover, active, click }）。
+//     Button({ key: 'profile', rect: {...}, label: 'PROFILE' }, host);
+//
+//     // 旧 `--ui` loader（deprecated）：第二个参数省略 ⇒ 走全局 `ui` / `game`
 //     globalThis.render = function render() {
-//       Button({
-//         key: 'profile',
-//         rect: { x: 8, y: 8, w: 96, h: 28 },   // 参考像素（1280×720 画布）
-//         label: 'PROFILE',
-//         on: {
-//           click: function (ev) { /* ev.key / ev.x / ev.y（一次性；同一帧只有一次） */ },
-//           hover: function (on) { /* on: 指针是否在这个 key 上 */ },
-//         },
-//       });
+//       Button({ key: 'profile', rect: {...}, label: 'PROFILE' });
 //     };
 //
 // ★ 分工（需求单「已裁决」第 2 条）：**C++ 只做原语** —— `ui.rect({key})` 的 resolved rect 是
@@ -23,7 +20,7 @@
 // ★ 状态：`idle` / `hover` / `active`（active 优先于 hover，与按下时"指针一定也在上面"一致）
 //   + 可选的 `disabled`。★ disabled 的按钮**不挂 key** ⇒ 宿主不给它发 click（不可命中）。
 // ★ 几何：`rect` 的 x/y/w/h 由调用方给（参考像素）。文本只做**左对齐 + 垂直居中**这一条算术
-//   （⛔ 不调 `ui.measure`：那要求宿主字体；组件库的几何不能被字体可用性绑架）。
+//   （⛔ 不调 `measure`：那要求宿主字体；组件库的几何不能被字体可用性绑架）。
 // ★ 颜色 / 字号都在 `DEFAULT_THEME`；`theme` 覆盖是**整表替换**（不做逐键合并 —— 合并会让
 //   "漏了一个状态"变成静默继承，而不是加载期/渲染期的显式错）。
 
@@ -63,11 +60,28 @@ export const DEFAULT_THEME = {
 };
 
 /**
+ * 旧 `--ui` loader 的默认适配器（只有它知道全局 `ui` / `game`）。
+ * @returns {{ rect: (o: UiRectOptions) => void, text: (o: UiTextOptions) => void,
+ *             hover?: string, active?: string, click?: UiClick }}
+ */
+function classicHost() {
+  return {
+    rect: (o) => ui.rect(o),
+    text: (o) => ui.text(o),
+    get hover() { return game.hover; },
+    get active() { return game.active; },
+    get click() { return game.click; },
+  };
+}
+
+/**
  * 画一个按钮（每帧调一次；display list 每次 render 前由宿主清空 ⇒ 这里只追加）。
  * @param {ButtonSpec} spec
+ * @param {{ rect: (o: any) => void, text: (o: any) => void, hover?: string, active?: string, click?: UiClick }} [host]
+ *   S2：像素原语的来路。省略 = 旧 `--ui` 的全局 `ui` / `game`（deprecated 路径）。
  * @returns {'idle' | 'hover' | 'active' | 'disabled'}
  */
-export function Button(spec) {
+export function Button(spec, host) {
   if (spec === undefined || spec === null || typeof spec !== 'object') {
     throw new TypeError('Button: 需要一个 { key, rect, label } 对象');
   }
@@ -75,12 +89,13 @@ export function Button(spec) {
   if (rect === undefined || rect === null || typeof rect !== 'object') {
     throw new TypeError('Button: rect 必须是 { x, y, w, h }（参考像素）');
   }
+  const h = host === undefined || host === null ? classicHost() : host;
   const theme = spec.theme === undefined ? DEFAULT_THEME : spec.theme;
   const key = spec.key;
   const disabled = spec.disabled === true;
   // ★ 只读 key：没有 hover / active（宿主每帧交来的快照）⇒ idle。disabled 不看它们。
-  const hovered = !disabled && key !== undefined && key !== '' && game.hover === key;
-  const held = !disabled && key !== undefined && key !== '' && game.active === key;
+  const hovered = !disabled && key !== undefined && key !== '' && h.hover === key;
+  const held = !disabled && key !== undefined && key !== '' && h.active === key;
   const state = disabled ? 'disabled' : (held ? 'active' : (hovered ? 'hover' : 'idle'));
   const colors = theme[state];
 
@@ -88,12 +103,12 @@ export function Button(spec) {
   /** @type {UiRectOptions} */
   const plate = { x: rect.x, y: rect.y, w: rect.w, h: rect.h, fill: colors.bg };
   if (!disabled && key !== undefined && key !== '') plate.key = key;
-  ui.rect(plate);
+  h.rect(plate);
 
   // ② 文本：左对齐 + 垂直居中（⛔ 不量字，所以没有宿主字体也能画）。
   const label = spec.label === undefined ? '' : String(spec.label);
   if (label !== '') {
-    ui.text({
+    h.text({
       x: rect.x + theme.text_pad_x,
       y: rect.y + Math.max(0, Math.round((rect.h - theme.font) / 2)),
       text: label,
@@ -103,11 +118,11 @@ export function Button(spec) {
     });
   }
 
-  // ③ 事件钩子：在 **render** 里跑（⛔ 不在 handleEvent 里）。`game.click` 是宿主交来的
+  // ③ 事件钩子：在 **render** 里跑（⛔ 不在 handleEvent 里）。`host.click` 是宿主交来的
   //    一次性对象（这一帧看得到，下一次就没有）；只有 key 相同才触发。
   const handlers = spec.on === undefined ? {} : spec.on;
   if (typeof handlers.hover === 'function') handlers.hover(hovered);
-  const click = game.click;
+  const click = h.click;
   if (!disabled && click !== undefined && click.key === key && typeof handlers.click === 'function') {
     handlers.click(click);
   }

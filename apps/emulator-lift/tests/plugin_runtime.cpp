@@ -48,14 +48,16 @@
 //
 // C2b（render / ui / draw；`plugin-runtime` 的 pure 半 —— 窗口 `adopt` 是 C2b-2）：
 //   · `plugin/render-surface`             ：`RenderCtx` 的成员表 = d.ts 的 RenderCtx **减 `run`**
-//                                            （`ui/draw/read/game/params/log`；`Object.keys` 精确比对）；
-//                                            ⛔ `edit`/`input`/`state`/`now`/…；`read.frameHash` 缺席；
+//                                            （S2 起 `ui/draw/read/game/params/log/profile`；
+//                                            `Object.keys` 精确比对）；⛔ `edit`/`input`/`state`/`now`/…；
+//                                            `read.frameHash` 缺席；S2 的 `game` getter 无源 ⇒ undefined；
 //                                            没有 `render` 的插件调 render ⇒ true + 空 list。
 //   · `plugin/ui-draw`                    ：`ctx.draw.rect/text/measure` 的元素字段（x/y/w/h/fill/
-//                                            字号/颜色）、z 序 = 调用顺序、measure `{width,height}`
-//                                            （与宿主 `measureText` 交叉核对）；`RenderCtx.ui` 可写。
-//   · `plugin/ui-draw-bad-style`          ：`stroke`/`width`/`alpha`/`align` ⇒ **TypeError**（D-C2-3），
-//                                            ⛔ 不静默忽略。
+//                                            字号/颜色；S2 加 `style.key` / `style.bold`）、z 序 = 调用顺序、
+//                                            measure `{width,height}`（与宿主 `measureText` 交叉核对）；
+//                                            `RenderCtx.ui` 可写。
+//   · `plugin/ui-draw-bad-style`          ：`stroke`/`width`/`alpha`/`align`/`text.key` ⇒ **TypeError**
+//                                            （D-C2-3），⛔ 不静默忽略。
 //   · `plugin/ui-draw-measure-no-font`    ：没有 `FontEngine` ⇒ measure 抛 TypeError（⛔ 不返回 0 尺寸）。
 //   · `plugin/ui-state`                   ：`onTrigger` 只 `ctx.ui.show/hide`（⛔ 回调里没有 draw）；
 //                                            本帧 display list 为空；**下一次 render** 才可见；hide 后为空。
@@ -64,8 +66,14 @@
 //   · `plugin/render-readings`            ：`read.frames` / `read.scriptPos` / `game.localFrames` /
 //                                            `game.mouse` 的字段与"没有源 ⇒ undefined / 缺 pos 键"；
 //                                            C2b-2：**有**源时 `mouse().buttons` 三键 = 真实电平。
+//   · `plugin/render-profile`（S2）        ：`ctx.profile.begin/end` 在 **render** 里调到宿主、返回
+//                                            `undefined`；宿主失败 ⇒ TypeError（与 RunCtx 同形）。
+//   · `plugin/hud-equivalence`（S2）       ：`scripts/ui/hud.js` 的**旧 loader** 与**插件 loader**
+//                                            在同一份 readings 下 display list **逐字段相同**
+//                                            （含 PROFILE 点击两拍）—— `--overlay` 像素/行序不变的判据。
 //   · `plugin/render-stored-runctx-rejected`：把 **RunCtx 存下来**在 render 里用 `fail`/`finish`/
-//                                            `quit`/`profile.*` ⇒ TypeError（复审 F2：成员表不是门面）。
+//                                            `quit`/`profile.*` ⇒ TypeError（复审 F2：成员表不是门面；
+//                                            S2 起 `RenderCtx` **自己**有 profile，但存下来的 RunCtx 仍被拒）。
 //   · `plugin/render-budget-deadline`     ：`PluginScript::setBudget` 是**绝对** deadline
 //                                            （过去 1 ns ⇒ render false + `overran()`；复审 F3）。
 //
@@ -1706,10 +1714,13 @@ void caseUiDraw(lift::FontEngine* font) {
         LIFT_CHECK_EQ_U32(elements[0].fill.g, 32u);
         LIFT_CHECK_EQ_U32(elements[0].fill.b, 48u);
         LIFT_CHECK_EQ_U32(elements[0].fill.a, 204u);
-        // ② 第二条 Text：文案 / 字号 / 颜色（`#EBFFEB`）
+        // ★ S2：`style.key` → `Element.key`（命中区；与经典 `ui.rect({key})` 同一个字段）。
+        LIFT_CHECK(elements[0].key == "hit10");
+        // ② 第二条 Text：文案 / 字号 / 颜色（`#EBFFEB`）；★ S2：`style.bold` → `Element.bold`。
         LIFT_CHECK(elements[1].kind == lift::ui::ElementKind::Text);
         LIFT_CHECK(elements[1].text == "hello");
         LIFT_CHECK_EQ_I64(elements[1].font_size, 20);
+        LIFT_CHECK(elements[1].bold);
         LIFT_CHECK_EQ_I64(elements[1].x, 12);
         LIFT_CHECK_EQ_I64(elements[1].y, 24);
         LIFT_CHECK_EQ_U32(elements[1].color.r, 235u);
@@ -1741,7 +1752,7 @@ void caseUiDraw(lift::FontEngine* font) {
     const BadStyle bad_cases[] = {
         {"rect.stroke", "stroke"},   {"rect.width", "width"},   {"rect.alpha", "alpha"},
         {"text.align", "align"},     {"text.stroke", "stroke"}, {"text.width", "width"},
-        {"text.alpha", "alpha"},     {"measure.align", "align"},
+        {"text.alpha", "alpha"},     {"text.key", "key"},       {"measure.align", "align"},
     };
     for (const BadStyle& bc : bad_cases) {
         std::string load_err;
@@ -2157,6 +2168,229 @@ void caseRenderReadings() {
 }
 
 // =====================================================================================
+// S2 · `plugin/render-profile`：`ctx.profile.begin/end` 在 **render** 里可用
+//   ★ 判据：① 能调到宿主（计数）；② 返回 `undefined`（与 RunCtx 的 `ctx.profile` 同形）；
+//     ③ 宿主失败 ⇒ TypeError（文案点名 `ctx.profile.begin: <why>`，⛔ 静默 no-op）。
+//   ★ 反证（存下来的 RunCtx 的 `profile.*` 在 render 里仍被拒）在
+//     `plugin/render-stored-runctx-rejected` —— 两份 trampoline 的边界。
+// =====================================================================================
+struct ProfileResultFake {
+    int begins = 0;
+    int ends = 0;
+    bool begin_ok = true;
+    std::string begin_err;
+    bool end_ok = true;
+    std::string end_err;
+};
+
+bool resultProfileBegin(void* ctx, const char* /*label*/, std::string* err) {
+    auto* fake = static_cast<ProfileResultFake*>(ctx);
+    ++fake->begins;
+    if (err != nullptr) *err = fake->begin_err;
+    return fake->begin_ok;
+}
+
+bool resultProfileEnd(void* ctx, std::string* text, std::string* err) {
+    auto* fake = static_cast<ProfileResultFake*>(ctx);
+    ++fake->ends;
+    if (text != nullptr) text->clear();
+    if (err != nullptr) *err = fake->end_err;
+    return fake->end_ok;
+}
+
+std::string soleText(const lift::ui::UiBuilder& builder) {
+    for (const lift::ui::Element& e : builder.elements()) {
+        if (e.kind == lift::ui::ElementKind::Text) return e.text;
+    }
+    return {};
+}
+
+void caseRenderProfile() {
+    lift_test::g_current_case = "plugin/render-profile";
+    struct Run {
+        const char* mode;
+        bool begin_ok;
+        bool end_ok;
+        std::int64_t want_begins;
+        std::int64_t want_ends;
+        const char* want_prefix;
+    };
+    const Run runs[] = {
+        {"ok", true, true, 1, 1, "ok"},
+        // begin 抛 ⇒ 夹具提前返回，`end` 一次都不调。
+        {"fail-begin", false, true, 1, 0, "begin-threw: ctx.profile.begin: already-open"},
+        // 只有 end（没有 begin）：end 抛一次。
+        {"fail-end", true, false, 0, 1, "end-threw: ctx.profile.end: not-open"},
+    };
+    for (const Run& run : runs) {
+        Fixture f;
+        LIFT_CHECK(f.mem_ok && f.win_ok);
+        if (!f.mem_ok || !f.win_ok) return;
+        ProfileResultFake fake;
+        fake.begin_ok = run.begin_ok;
+        fake.begin_err = "already-open";
+        fake.end_ok = run.end_ok;
+        fake.end_err = "not-open";
+        lift::ui::UiHostOps ops{};
+        ops.ctx = &fake;
+        ops.profile_begin = &resultProfileBegin;
+        ops.profile_end = &resultProfileEnd;
+        const bool loaded = f.load("render-profile.js", {{"mode", run.mode}}, &ops);
+        LIFT_CHECK(loaded);
+        if (!loaded) {
+            std::fprintf(stderr, "  load error (%s): %s\n", run.mode, f.load_error.c_str());
+            continue;
+        }
+        LIFT_CHECK(f.host->script() != nullptr && f.host->script()->hasRender());
+        lift::ui::UiBuilder builder;
+        lift::ui::UiFrameReadings readings;
+        std::string err;
+        const bool ok = f.host->script() != nullptr && f.host->script()->render(builder, readings, &err);
+        if (!ok) std::fprintf(stderr, "  render error (%s): %s\n", run.mode, err.c_str());
+        LIFT_CHECK(ok);
+        const std::string text = soleText(builder);
+        ++lift_test::g_checks;
+        if (text.rfind(run.want_prefix, 0) != 0) {
+            lift_test::failf(__FILE__, __LINE__, "render-profile(%s)：文本应是 `%s…`，得到 `%s`", run.mode,
+                             run.want_prefix, text.c_str());
+        }
+        // 宿主侧计数：按 mode 精确判（fail-begin 不 end；fail-end 只 end 一次）。
+        LIFT_CHECK_EQ_I64(fake.begins, run.want_begins);
+        LIFT_CHECK_EQ_I64(fake.ends, run.want_ends);
+    }
+}
+
+// =====================================================================================
+// S2 · `plugin/hud-equivalence`：`scripts/ui/hud.js` 的**旧 loader** 与**插件 loader**
+//   在同一份 readings 下产出**逐字段相同**的 display list（含行序 / 颜色 / key / bold）。
+//   ★ 这是"--overlay 的像素/行序不变"的**确定性**判据（不需要 GPU / 窗口 / 墙钟）。
+//   ★ 两份实例都从**同一份源码文件**装载（`LIFT_UI_SCRIPT_DIR/hud.js`）⇒ 改 hud.js 两边一起变，
+//     ⛔ 不可能"旧版一套、新版一套"。
+//   ★ PROFILE 的点击帧也对比（begin / end 成功两拍）。⚠ 已知差：插件侧 `ctx.profile.end()` 是
+//     `void` ⇒ 看不到报告文本里的 `INVALID`（`--ui` 旧 loader 仍有四态）—— 那条**不在这里比**
+//     （按 D-C2-4 收口，见 `plugin-runtime.md` §4.6）。
+// =====================================================================================
+bool sameHudList(const std::vector<lift::ui::Element>& a, const std::vector<lift::ui::Element>& b,
+                 std::string* why) {
+    if (a.size() != b.size()) {
+        *why = "元素数不同：" + std::to_string(a.size()) + " vs " + std::to_string(b.size());
+        return false;
+    }
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        const lift::ui::Element& x = a[i];
+        const lift::ui::Element& y = b[i];
+        const bool same = x.kind == y.kind && x.x == y.x && x.y == y.y && x.w == y.w && x.h == y.h &&
+                          x.text == y.text && x.key == y.key && x.font_size == y.font_size &&
+                          x.bold == y.bold && x.fill.r == y.fill.r && x.fill.g == y.fill.g &&
+                          x.fill.b == y.fill.b && x.fill.a == y.fill.a && x.color.r == y.color.r &&
+                          x.color.g == y.color.g && x.color.b == y.color.b && x.color.a == y.color.a &&
+                          x.z == y.z && x.seq == y.seq;
+        if (!same) {
+            *why = "第 " + std::to_string(i) + " 个元素不同（kind/text/几何/颜色/key/bold 之一）";
+            return false;
+        }
+    }
+    return true;
+}
+
+void caseHudEquivalence(lift::FontEngine* font) {
+    lift_test::g_current_case = "plugin/hud-equivalence";
+    LIFT_CHECK(font != nullptr);
+    if (font == nullptr) return;
+    const std::string path = std::string(LIFT_UI_SCRIPT_DIR) + "/hud.js";
+    std::string source;
+    if (!readHostFile(path, &source)) {
+        LIFT_CHECK(false);
+        return;
+    }
+    // ---- ① 同一份 readings 的**普通帧**（frame/mouse/fps/script/worst/frames）----
+    auto runtime = lift::ui::makeQuickJsRuntime();
+    std::string err;
+    std::unique_ptr<lift::ui::UiScript> classic = runtime->load(source, path, font, &err);
+    if (classic == nullptr) {
+        std::fprintf(stderr, "  classic load error: %s\n", err.c_str());
+        LIFT_CHECK(false);
+        return;
+    }
+    ProfileProbe probe;
+    lift::ui::UiHostOps ops{};
+    ops.ctx = &probe;
+    ops.profile_begin = &probeProfileBegin;
+    ops.profile_end = &probeProfileEnd;
+    Fixture plugin;
+    const bool loaded = plugin.loadFile(path, {}, &ops);
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  plugin load error: %s\n", plugin.load_error.c_str());
+        return;
+    }
+    plugin.host->setFont(font);
+    LIFT_CHECK(plugin.host->script() != nullptr);
+
+    RenderFrameSource frames = renderFrames();
+    lift::ui::UiFrameReadings r;
+    r.frame = 1234;
+    r.mouse_ok = true;
+    r.mouse_x = 812;
+    r.mouse_y = 622;
+    r.mouse_buttons_ok = true;
+    r.mouse_left = true;
+    r.fps_ok = true;
+    r.fps = 59.9;
+    r.script_ok = true;
+    r.script = "startup";
+    r.worst_ok = true;
+    r.worst_wall_ms = 33.3;
+    r.worst_guest_ok = true;
+    r.worst_guest_ms = 21.5;
+    r.worst_shim_ms = 4.2;
+    r.frames = &frames;
+    r.host = &ops;
+
+    lift::ui::UiBuilder a;
+    lift::ui::UiBuilder b;
+    std::string cerr;
+    std::string perr;
+    LIFT_CHECK(classic->render(a, r, &cerr));
+    LIFT_CHECK(plugin.host->script()->render(b, r, &perr));
+    LIFT_CHECK(a.elements().size() >= 7);  // 面板 + 5 行 + 按钮底板 + 标签（不许"两边都空"地等价）
+    ++lift_test::g_checks;
+    {
+        std::string why;
+        if (!sameHudList(a.elements(), b.elements(), &why)) {
+            lift_test::failf(__FILE__, __LINE__, "hud 普通帧不等价：%s", why.c_str());
+        }
+    }
+
+    // ---- ② PROFILE 点击帧（begin → end，成功两拍）----
+    lift::ui::UiFrameReadings click = r;
+    click.frame = 1235;
+    click.click_ok = true;
+    click.click_key = "profile";
+    click.click_x = 10;
+    click.click_y = 10;
+    bool status_seen = false;
+    for (int hit = 1; hit <= 2; ++hit) {
+        click.frame = 1234 + static_cast<std::uint64_t>(hit);
+        lift::ui::UiBuilder ca;
+        lift::ui::UiBuilder pb;
+        LIFT_CHECK(classic->render(ca, click, &cerr));
+        LIFT_CHECK(plugin.host->script()->render(pb, click, &perr));
+        ++lift_test::g_checks;
+        std::string why;
+        if (!sameHudList(ca.elements(), pb.elements(), &why)) {
+            lift_test::failf(__FILE__, __LINE__, "hud PROFILE 第 %d 拍不等价：%s", hit, why.c_str());
+        }
+        for (const lift::ui::Element& e : pb.elements()) {
+            if (e.kind == lift::ui::ElementKind::Text && e.text.rfind("profile: ", 0) == 0) status_seen = true;
+        }
+    }
+    // 状态行确实进了 list（⛔ 不是"两边都没画"地等价）
+    LIFT_CHECK(status_seen);
+}
+
+
+// =====================================================================================
 // `plugin/callback-cpu-budget`：2 ms 判据**真的会触发**（CPU 钟）
 //   ★ 红了意味着什么：
 //     ① JS 体烧 >2 ms CPU 却被放过（预算形同虚设）；或
@@ -2401,5 +2635,8 @@ int main() {
     caseRenderBudgetDeadline();
     caseRenderRead();
     caseRenderReadings();
+    // ---- S2（`hud` 变插件的前置：RenderCtx.profile + 双 loader 等价）----
+    caseRenderProfile();
+    caseHudEquivalence(&font);
     return lift_test::finish("plugin-runtime");
 }

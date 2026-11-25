@@ -56,6 +56,9 @@ export interface ScriptPos {
 export interface FrameInfo {
     readonly index: number;
     readonly script: string;
+    /** `slot == cur`（当前执行点）—— 与经典 `game.local_frames()[].top` **同一个布尔**。
+     *  ⛔ 不是"列表第一个"：`cur` 那一格不活动时整表 `top` 全 false（`pos` 也因此全缺）。 */
+    readonly top: boolean;
     /** ★ 只有 **top 帧**（有执行点）才有这个键；非 top 帧缺键（⛔ 不拿 0 冒充）。
      *  `hash` / `presented` 在 runtime 里没有源 ⇒ 实现**不安装**（C4 再接）。 */
     readonly pos?: number;
@@ -218,10 +221,17 @@ export interface DrawStyle {
     readonly stroke?: string;
     readonly width?: number;
     readonly alpha?: number;
+    /**
+     * ★ S2：命中键（**只对 `draw.rect` 有意义**）。非空 ⇒ 这条 Rect 是命中区（resolved rect）；
+     *   `text` / `measure` 上传它 ⇒ TypeError。缺省 = 不可命中。
+     */
+    readonly key?: string;
 }
 export interface TextStyle extends DrawStyle {
     readonly size?: number;
     readonly align?: "left" | "center" | "right";
+    /** ★ S2：粗体（缺省 false；与经典 `ui.text({bold})` 同一条渲染路径）。 */
+    readonly bold?: boolean;
 }
 
 /**
@@ -269,6 +279,14 @@ export interface RunApi {
     events(since?: number): readonly RunEvent[];
     current(): RunStatus | null;               // 本插件当前 active Run
 }
+/** 宿主的 profile 窗口（开始 / 结束）。
+ *
+ * ★ S2：**`RunCtx` 与 `RenderCtx` 都有**（同形：`begin(label)` / `end()`，都是 `void`）。
+ *   失败（已有一段开着 / 没有打开的窗口 / 剪贴板写失败）⇒ **TypeError**（与 `ctx.*` 其它宿主能力同口径）；
+ *   想要"结果对象"的旧契约只有 `--ui` 的全局 `host.profileBegin/End()`（`ui.d.ts`）。
+ * ★ `end()` 的宿主成本（生成报告 + 写剪贴板）走 `HostPause`，**不计入** 2 ms 回调预算；
+ *   报告文本由宿主写 **stdout**（D-C2-4：`ctx.profile` 是 void，没有 HUD 回传路）。
+ */
 export interface ProfileApi {
     begin(label: string): void;
     end(): void;
@@ -283,6 +301,12 @@ export type LogApi = (level: LogLevel, message: string, data?: unknown) => void;
  * ★ C2b-2：`mouse().buttons`（三键电平）**已有生产读数源**（窗口装配的 `WindowManager`；与 guest
  *   输入同一张电平表）。类型仍是**可选**：宿主这一帧没有读数源时不安装这个键（⛔ 不编 `false`：
  *   那会让"鼠标按着"与"没有源"长得一样）⇒ 插件必须写 `mouse.buttons?.left ?? false` 这种形态。
+ * ★ **S2**：为了让内置 `hud` 从经典 `game.*` 迁到 `ctx.game.*` 后**逐字节等价**，这里补上经典的
+ *   **只读 getter**：`frame`（恒有）/ `fps?` / `script?` / `worst?` / `click?` / `hover?` / `active?`。
+ *   语义与 `--overlay` / `--ui` 的全局 `game.*` **逐条相同**（`script_quickjs.cpp` 同一个
+ *   `jsGameProperty` 实现、同一份当帧 readings）：没有值 ⇒ `undefined`，`click` 是**一次性**对象
+ *   （只在该帧有值），`hover` / `active` 是**只读 key**（不在命中区上 ⇒ `undefined`）。
+ *   ⚠ `mouse` 仍是**方法**（⛔ 不是 getter）：必须写 `ctx.game.mouse()`。
  */
 export interface GameRead {
     /** 没有源（`readings.frames == null`）/ 宿主报错 / 空表 ⇒ `undefined`（⛔ 不编空数组）。 */
@@ -300,12 +324,34 @@ export interface GameRead {
             };
         }
         | undefined;
+    /** 当前帧号（宿主每帧都给 ⇒ **总是**数字）。 */
+    readonly frame: number;
+    /** 最近 1 s 的 Present 次数；没有读数 ⇒ `undefined`（⛔ 不编 0）。 */
+    readonly fps?: number;
+    /** 当前帧的 marker 文件名（例 `TITLE.BIN`）；没有 / 空 ⇒ `undefined`。 */
+    readonly script?: string;
+    /** 最近 3 s 最坏一帧；`guest_ms` 在块计时没开时**缺键**。 */
+    readonly worst?: {
+        readonly wall_ms: number;
+        readonly guest_ms?: number;
+        readonly shim_ms: number;
+    };
+    /** **一次性**点击载荷（抬起点窗口像素）；只在该帧有值。 */
+    readonly click?: { readonly key: string; readonly x: number; readonly y: number };
+    /** 指针当前所在命中区的 key；不在任何命中区上 ⇒ `undefined`。 */
+    readonly hover?: string;
+    /** 当前被按下捕获的 key；没有 ⇒ `undefined`。 */
+    readonly active?: string;
 }
 /** render 只拿当帧 readings；模块级变量是 per-plugin 状态（render/onTrigger 共享）。
  *
- * ★ C2b 实现面：`ui` / `draw` / `read` / `game` / `params` / `log`（`Object.keys(ctx)` **恰好**这六个）。
+ * ★ C2b 实现面：`ui` / `draw` / `read` / `game` / `params` / `log`；**S2 起加 `profile`**
+ *   （`Object.keys(ctx)` **恰好**这七个）。
  *   ⛔ 没有 `edit` / `input`（RunCtx 的写面；render 不做 guest 写）、`state` / `now` / `trigger` /
- *   `profile` / `fail` / `finish` / `quit`（Run 语境），也⛔ 没有 `sample` / `screenshot`。
+ *   `fail` / `finish` / `quit`（Run 语境），也⛔ 没有 `sample` / `screenshot`。
+ * ★ **S2**：成员表**加 `profile`**（`Object.keys(ctx)` **恰好**七个）：`ctx.profile.begin(label)` /
+ *   `ctx.profile.end()`，与 RunCtx 的 `ctx.profile` 同形（`void`；失败 = TypeError；`end` 走 HostPause）。
+ *   `.tmp` 的 D-C2-4 仍成立：`end()` 不返回报告文本 ⇒ 报告走 **stdout**（`ctx.profile` 是 void）。
  */
 export interface RenderCtx {
     readonly ui: UiApi;          // render 可写 hover/动画状态
@@ -316,6 +362,8 @@ export interface RenderCtx {
     readonly run: RunApi;
     readonly params: Readonly<Record<string, string>>;
     readonly log: LogApi;
+    /** S2：宿主的 profile 窗口（开始 / 结束；结束走 HostPause，报告文本在 stdout）。 */
+    readonly profile: ProfileApi;
 }
 
 /** `ctx.now`：**本读点的读数快照**（C2a；与 `FiredEvent`/`TimeoutEvent` 的 `TriggerEventBase` 同源）。

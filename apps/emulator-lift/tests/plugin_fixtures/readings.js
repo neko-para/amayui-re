@@ -43,6 +43,8 @@ const plugin = {
             if (top.index !== 2 || top.script !== "SC0000") {
                 throw new Error("frames[0]:" + top.index + "," + top.script);
             }
+            // ★ S2：`top` 与经典 `game.local_frames()[].top` 同一个布尔。
+            if (top.top !== true) throw new Error("frames[0].top:" + String(top.top));
             if (top.pos !== 0x1104) throw new Error("frames[0].pos:" + top.pos);
             // `hash` / `presented` 在 runtime 里没有源 ⇒ 不安装（⛔ 不编 0 / false）。
             if ("hash" in top || "presented" in top) throw new Error("frames[0]:extra-keys");

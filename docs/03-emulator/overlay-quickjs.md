@@ -153,20 +153,23 @@ class UiScript {   // init / update(dt,frame) / render(UiBuilder&) / on_click / 
   （`overlay.md` D10）。
 - `game` 定死为 **getter 字段**：带下标的只能是函数（`local_int(3)` 等）；⛔ 字段与函数两种形态不并存。
 
-## 4. JS 作者体验（M2a 实况）
+## 4. JS 作者体验（M2a 实况；S2 起 hud 是插件）
 
 - 默认 HUD = **外置** `apps/emulator-lift/scripts/ui/hud.js`（UTF-8、**module**、strict；它
-  `import { Button } from './kit.js'`。★ module 的顶层声明**不挂** `globalThis` ⇒ 入口**仍然**必须
-  **显式** `globalThis.render = function render() { … }`；`render` 每次只往 display list 追加。
+  `import { Button } from './kit.js'`。★ **S2 起入口是插件契约** `export default { render(ctx) }`
+  （`ctx.draw.*` / `ctx.game.*` / `ctx.profile.*`）；**同一份文件还保留** `globalThis.render` ——
+  旧 `--ui` loader（deprecated）仍要它，两个入口共用同一份绘制体、只换薄适配器。
   classic 脚本仍支持（`--ui` 旧语义：能按 classic 编译就绝不走 module）。
 - 随发行分发 `scripts/ui/{hud.js, kit.js, ui.d.ts, README.md}`；**`hud.js` 与 `kit.js` 必须同目录**
   （`import './kit.js'` 按 `hud.js` 所在目录解析）——缺 kit 与缺 hud 同属加载期硬失败
-  （`--overlay` exit 2，错误里点名路径）。`--overlay` 的解析顺序：
+  （`--overlay` / `--plugin hud` exit 2，错误里点名路径）。`hud` 是**保留 id**（S2），解析顺序：
   ① `<exe 目录>/scripts/ui/hud.js`（发行布局）→ ② `LIFT_UI_SCRIPT_DIR/hud.js`（开发回退，
-  CMake 把源码目录以 `target_compile_definitions(... PUBLIC ...)` 注入）→ ③ 硬错（err 点名两个路径）。
+  CMake 把源码目录以 `target_compile_definitions(... PUBLIC ...)` 注入）→ ③ 硬错（err 点名两个路径）；
+  两份都在场 ⇒ **exe 赢**；用户插件根里的 `hud.js` ⇒ exit 2（⛔ 不静默被内置件遮住）。
 - `--ui <path>` 只吃 `.js`；显式优先且隐含 `--overlay`。启动期校验"文件在 + 编译过 + `render` 是函数"，
   失败 = `exit 2` + `<path>:<行>:<列>`。★ **S1 起 `--ui` 已弃用**（一行 deprecation，行为不变；
-  新入口 `--plugin <id|path>`）。
+  新入口 `--plugin <id|path>`）；★ **S2 起 `--overlay` = `--plugin hud` 预设**（窗口档走 adopt，
+  `SdlWindow::init` 不再为 `--overlay` 装载 hud.js）。
 - `scripts/ui/ui.d.ts` 是作者声明（`declare const ui` / `game` / `host`，含 `game.local_frames()` 与
   module 的 `import` 说明）；
   **不参与构建、不进 `pnpm typecheck`**。同目录的 `tsconfig.json` 是**编辑器 / 手动检查**用的

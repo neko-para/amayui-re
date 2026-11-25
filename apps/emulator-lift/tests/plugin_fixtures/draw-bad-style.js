@@ -30,6 +30,10 @@ const plugin = {
             case "text.alpha":
                 ctx.draw.text(0, 0, "x", { alpha: 0.5 });
                 break;
+            case "text.key":
+                // ★ S2：`key` 只对 rect 有意义（命中区）；text 上 ⇒ TypeError。
+                ctx.draw.text(0, 0, "x", { key: "k" });
+                break;
             case "measure.align":
                 ctx.draw.measure("x", { align: "left" });
                 break;

@@ -1771,6 +1771,11 @@ JSValue jsCtxReadFrames(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxReadScriptPos(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsRenderGameMouse(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsRenderGameLocalFrames(JSContext*, JSValueConst, int, JSValueConst*);
+// ★ S2：`RenderCtx.profile` 的 trampoline 与 RunCtx 的**分开两份**（`jsCtxProfile*` 仍只认
+//   `inCallback()` ⇒ render 里拿一个存下来的 RunCtx 调 profile 仍 TypeError；见
+//   `plugin/render-stored-runctx-rejected`）。render 的两个判 `impl.current != nullptr`。
+JSValue jsRenderProfileBegin(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsRenderProfileEnd(JSContext*, JSValueConst, int, JSValueConst*);
 
 // 小工具：读一个**必填**整数（`undefined` ⇒ 失败；非有限 ⇒ 失败，⛔ 不静默变 0）。
 bool readPluginInt(JSContext* ctx, JSValueConst obj, const char* name, bool required, std::int64_t dflt,
@@ -2232,7 +2237,7 @@ bool buildRunCtx(Impl& impl, Value* out) {
 }
 
 // =======================================================================================
-// `RenderCtx`（C2b）：**每帧新建**的值对象；成员 = `ui` / `draw` / `read` / `game` / `params` / `log`
+// `RenderCtx`（C2b）：**每帧新建**的值对象；成员 = `ui` / `draw` / `read` / `game` / `params` / `log` / `profile`
 //
 // 合同：`docs/03-emulator/plugin-runtime.md` §4.4c（`render` 只画 / `onTrigger` 只改 UI 状态）/
 //       §4.6（`render(ctx: RenderCtx)`）/ §5 C2（`plugin/ui-state` / `plugin/ui-draw`）。
@@ -2241,8 +2246,12 @@ bool buildRunCtx(Impl& impl, Value* out) {
 //
 // ★ **成员表写死 = d.ts 的 `RenderCtx` 减 `run`**（`run`/`dispatch` 属 C5）：
 //   ⛔ 没有 `edit`/`input`（RunCtx 的写面；render 不做 guest 写）、`state`/`now`/`trigger`/
-//   `profile`/`fail`/`finish`/`quit`（Run 语境），也⛔ 没有 `sample`/`screenshot`。
-//   `plugin/render-surface` 用 `Object.keys(ctx)` 钉住**恰好**这六个成员（多一个也红）。
+//   `fail`/`finish`/`quit`（Run 语境），也⛔ 没有 `sample`/`screenshot`。
+//   `plugin/render-surface` 用 `Object.keys(ctx)` 钉住**恰好**这七个成员（多一个也红）。
+// ★ S2：`profile` 是**render 专用**的一份（`begin/end` 都是 `void`；trampoline 判 `impl.current`），
+//   与 RunCtx 的 `ctx.profile` 同形但**不复用**它的门（存下来的 RunCtx 仍被拒）。
+// ★ S2：`game` 除 `localFrames()/mouse()` 两个方法外，还装经典 `game` 的只读 getter
+//   （frame/fps/script/worst/click/hover/active）—— `hud.js` 迁到插件后读数必须逐字等价。
 // ★ 数据面：`ui` 与 RunCtx **共用** `Impl::ui_data` / `ui_visible`（同一个 JS 对象 / 同一个集合）
 //   ⇒ "onTrigger 写入、下一次 render 可见"与"render 内写入本帧后续可见"是同一条事实。
 // ★ `draw` 只碰 `UiBuilder`（1280×720 参考系；z 序 = 调用顺序 —— `z` 恒 0、绘制序按 `seq`）。
@@ -2291,9 +2300,10 @@ bool rejectUnsupportedStyle(JSContext* ctx, JSValueConst style, const char* cons
 }
 
 // `stroke` / `width` / `alpha` 在**两种** style 上都没有表示；`align` 只在 text/measure 的
-// `TextStyle` 里出现（d.ts 的 `DrawStyle` 没有它）。
+// `TextStyle` 里出现（d.ts 的 `DrawStyle` 没有它）。★ S2：`key` 只对 rect 有意义（命中区），
+// 在 text/measure 上传它 ⇒ 同样响亮 TypeError。
 const char* const kRectBlockedStyle[] = {"stroke", "width", "alpha", nullptr};
-const char* const kTextBlockedStyle[] = {"stroke", "width", "alpha", "align", nullptr};
+const char* const kTextBlockedStyle[] = {"stroke", "width", "alpha", "align", "key", nullptr};
 
 // `style.fill`（可选；缺省 = `dflt`）。★ 复用 `parseColor`（唯一色解析；⛔ 不写第二份）。
 bool readStyleFill(JSContext* ctx, JSValueConst style, const Color& dflt, Color* out, std::string* why) {
@@ -2359,16 +2369,23 @@ JSValue jsCtxDrawRect(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSVal
             }
         }
         Color fill{0, 0, 0, 255};
+        std::string key;
         if (argc >= 5 && !JS_IsUndefined(argv[4]) && !JS_IsNull(argv[4])) {
             if (!JS_IsObject(argv[4])) return JS_ThrowTypeError(ctx, "ctx.draw.rect: style 必须是对象");
             if (!rejectUnsupportedStyle(ctx, argv[4], kRectBlockedStyle)) return JS_EXCEPTION;
             if (!readStyleFill(ctx, argv[4], Color{0, 0, 0, 255}, &fill, &why)) {
                 return JS_ThrowTypeError(ctx, "ctx.draw.rect: %s", why.c_str());
             }
+            // ★ S2：命中键（与 `ui.rect({key})` 同一个 `Element.key`）。非空 ⇒ 这条 Rect 是命中区
+            //   （resolved rect = 命中区）；⛔ 不在宿主侧做按钮（外观 / 状态在 kit.js）。
+            if (!readOptionalText(ctx, argv[4], "key", &key, &why)) {
+                return JS_ThrowTypeError(ctx, "ctx.draw.rect: %s", why.c_str());
+            }
         }
         // z 恒 0 ⇒ 绘制序 = 调用顺序（`drawsBefore`：z 升序、同 z 按 seq）。⛔ 不读 `style.z`
         // （d.ts 的 `DrawStyle` 没有它；声明之外的东西不接受、也不假装接受）。
-        impl->builder->rect(args[0], args[1], args[2], args[3], fill, 0);
+        Element& element = impl->builder->rect(args[0], args[1], args[2], args[3], fill, 0);
+        element.key = std::move(key);
         return JS_UNDEFINED;
     } catch (...) {
         return JS_ThrowTypeError(ctx, "ctx.draw.rect: 宿主异常（C++ exception at script boundary）");
@@ -2401,6 +2418,7 @@ JSValue jsCtxDrawText(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSVal
         }
         std::int32_t size = 16;
         Color color{255, 255, 255, 255};
+        bool bold = false;
         if (argc >= 4 && !JS_IsUndefined(argv[3]) && !JS_IsNull(argv[3])) {
             if (!JS_IsObject(argv[3])) return JS_ThrowTypeError(ctx, "ctx.draw.text: style 必须是对象");
             if (!rejectUnsupportedStyle(ctx, argv[3], kTextBlockedStyle)) return JS_EXCEPTION;
@@ -2410,9 +2428,13 @@ JSValue jsCtxDrawText(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSVal
             if (!readStyleFill(ctx, argv[3], Color{255, 255, 255, 255}, &color, &why)) {
                 return JS_ThrowTypeError(ctx, "ctx.draw.text: %s", why.c_str());
             }
+            // ★ S2：`bold`（`TextStyle.bold`；缺省 false）。`kit.js` 的按钮标签是 14px bold ⇒
+            //   与 `ui.text({bold})` 同一条渲染路径（否则 HUD 迁到插件后像素会变）。
+            if (!readBool(ctx, argv[3], "bold", false, &bold, &why)) {
+                return JS_ThrowTypeError(ctx, "ctx.draw.text: %s", why.c_str());
+            }
         }
-        // `bold` 恒 false：d.ts 的 `TextStyle` 没有 bold（声明之外的不接受）。
-        impl->builder->text(x, y, std::move(text), size, color, false, 0);
+        impl->builder->text(x, y, std::move(text), size, color, bold, 0);
         return JS_UNDEFINED;
     } catch (...) {
         return JS_ThrowTypeError(ctx, "ctx.draw.text: 宿主异常（C++ exception at script boundary）");
@@ -2500,7 +2522,11 @@ Value makeRenderFrameObject(JSContext* ctx, const UiFrameInfo& frame) {
     if (obj.isException()) return obj;
     if (!setFrameProperty(ctx, obj.raw(), "index",
                           qjs::newInt64(ctx, static_cast<std::int64_t>(frame.slot))) ||
-        !setFrameProperty(ctx, obj.raw(), "script", qjs::newString(ctx, frame.script))) {
+        !setFrameProperty(ctx, obj.raw(), "script", qjs::newString(ctx, frame.script)) ||
+        // ★ S2：`top` = 当前执行点（`slot == cur`）—— 与经典 `game.local_frames()` 的 `top` **同一个
+        //   布尔**。HUD 的 `script` 行只认 top 项（⛔ 不拿 frames[0] 冒充栈顶）；没有它，插件侧
+        //   只能靠 `pos` 猜，而 top 帧在位置读不到时也没有 `pos`。
+        !setFrameProperty(ctx, obj.raw(), "top", qjs::newBool(ctx, frame.top))) {
         return Value::exception(ctx);
     }
     if (frame.pos_ok &&
@@ -2672,13 +2698,54 @@ bool buildRenderCtx(Impl& impl, Value* out) {
         if (ok) ok = qjs::setProperty(ctx, obj.raw(), "read", std::move(read));
         if (!ok) qjs::clearException(ctx);
     }
-    // ---- game = { localFrames(), mouse() }（**方法**；⛔ 不是 overlay 的 getter）----
+    // ---- game = { localFrames(), mouse(), frame/fps/script/worst/click/hover/active } ----
+    //   ★ S2：`hud.js` 迁到插件后要**同一份读数**（行序 / 文案 / 交互不能变）⇒ 把经典 `game` 的
+    //     只读 getter 也装到 `ctx.game` 上（**同一个** `jsGameProperty` 实现、同一份 `impl.current`）。
+    //     `mouse` 仍是**方法**（插件契约；经典的是 getter），`localFrames` 沿用方法名。
+    //   ★ 读数没有值 ⇒ `undefined`（⛔ 不编 0 / 空对象），与经典 `game.*` 逐条同口径。
     if (ok) {
         Value game = qjs::newObject(ctx);
         ok = !game.isException();
         if (ok) ok = setFunction(ctx, game.raw(), "localFrames", jsRenderGameLocalFrames, 0, nullptr);
         if (ok) ok = setFunction(ctx, game.raw(), "mouse", jsRenderGameMouse, 0, nullptr);
+        if (ok) {
+            ok = defineGetterOnly(ctx, game.raw(), "frame", nullptr, jsGameProperty,
+                                  static_cast<int>(GameProp::Frame), nullptr);
+        }
+        if (ok) {
+            ok = defineGetterOnly(ctx, game.raw(), "fps", nullptr, jsGameProperty,
+                                  static_cast<int>(GameProp::Fps), nullptr);
+        }
+        if (ok) {
+            ok = defineGetterOnly(ctx, game.raw(), "script", nullptr, jsGameProperty,
+                                  static_cast<int>(GameProp::Script), nullptr);
+        }
+        if (ok) {
+            ok = defineGetterOnly(ctx, game.raw(), "worst", nullptr, jsGameProperty,
+                                  static_cast<int>(GameProp::Worst), nullptr);
+        }
+        if (ok) {
+            ok = defineGetterOnly(ctx, game.raw(), "click", nullptr, jsGameProperty,
+                                  static_cast<int>(GameProp::Click), nullptr);
+        }
+        if (ok) {
+            ok = defineGetterOnly(ctx, game.raw(), "hover", nullptr, jsGameProperty,
+                                  static_cast<int>(GameProp::Hover), nullptr);
+        }
+        if (ok) {
+            ok = defineGetterOnly(ctx, game.raw(), "active", nullptr, jsGameProperty,
+                                  static_cast<int>(GameProp::Active), nullptr);
+        }
         if (ok) ok = qjs::setProperty(ctx, obj.raw(), "game", std::move(game));
+        if (!ok) qjs::clearException(ctx);
+    }
+    // ---- profile = { begin, end }（S2；render 专用的 trampoline，见 jsRenderProfile*）----
+    if (ok) {
+        Value profile = qjs::newObject(ctx);
+        ok = !profile.isException();
+        if (ok) ok = setFunction(ctx, profile.raw(), "begin", jsRenderProfileBegin, 1, nullptr);
+        if (ok) ok = setFunction(ctx, profile.raw(), "end", jsRenderProfileEnd, 0, nullptr);
+        if (ok) ok = qjs::setProperty(ctx, obj.raw(), "profile", std::move(profile));
         if (!ok) qjs::clearException(ctx);
     }
     // ---- params（只读；与 RunCtx 同一个对象）/ log ----
@@ -3231,6 +3298,63 @@ JSValue jsCtxProfileEnd(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/,
         bool ok = false;
         {
             HostPause pause(implOf(ctx));
+            ok = host->profileEnd(&why);
+        }
+        if (!ok) return JS_ThrowTypeError(ctx, "ctx.profile.end: %s", why.c_str());
+        return JS_UNDEFINED;
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.profile.end: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+// =======================================================================================
+// S2 · `RenderCtx.profile`（`ctx.profile.begin/end` 在 **render** 里）
+// ★ 与 RunCtx 的 `ctx.profile` **同形**（`begin(label?)` / `end()`，都是 `void`；失败 = TypeError）。
+//   ⛔ 不复用 `jsCtxProfile*`：那两个靠 `inCallback()` 区分"存下来的 RunCtx"，放宽会破
+//   `plugin/render-stored-runctx-rejected`。这里判 `impl.current != nullptr`（render 的判据）。
+// ★ `end` 同样走 `HostPause`（宿主的报告 / 剪贴板成本不算用户 JS；同一口径）。
+// ★ 语义差（已知且按 D-C2-4 收口）：`end()` 是 `void`，报告文本走 **stdout**（`PluginHost::profileEnd`），
+//   HUD 拿不到 `INVALID` 那个 token —— `--ui` 旧 loader 的 `host.profileEnd()` 仍返回 `{ok,text,error}`。
+// =======================================================================================
+JSValue jsRenderProfileBegin(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        Impl* impl = implOf(ctx);
+        if (impl == nullptr || impl->current == nullptr) {
+            return JS_ThrowTypeError(ctx, "ctx.profile.begin: 只能在 render() 内调用");
+        }
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr) {
+            return JS_ThrowTypeError(ctx, "ctx.profile.begin: 宿主没有接插件回调桥（⛔ 不静默 no-op）");
+        }
+        std::string label;
+        if (argc >= 1 && !JS_IsUndefined(argv[0]) && !qjs::toString(ctx, argv[0], &label)) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.profile.begin: label 必须能转成字符串");
+        }
+        std::string why;
+        if (!host->profileBegin(label, &why)) {
+            return JS_ThrowTypeError(ctx, "ctx.profile.begin: %s", why.c_str());
+        }
+        return JS_UNDEFINED;
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.profile.begin: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsRenderProfileEnd(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/, JSValueConst* /*argv*/) {
+    try {
+        Impl* impl = implOf(ctx);
+        if (impl == nullptr || impl->current == nullptr) {
+            return JS_ThrowTypeError(ctx, "ctx.profile.end: 只能在 render() 内调用");
+        }
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr) {
+            return JS_ThrowTypeError(ctx, "ctx.profile.end: 宿主没有接插件回调桥（⛔ 不静默 no-op）");
+        }
+        std::string why;
+        bool ok = false;
+        {
+            HostPause pause(impl);
             ok = host->profileEnd(&why);
         }
         if (!ok) return JS_ThrowTypeError(ctx, "ctx.profile.end: %s", why.c_str());
