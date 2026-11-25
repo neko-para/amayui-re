@@ -7,9 +7,13 @@
 //   ③ stderr 里**没有** `render is defined but no window`（本夹具没有 render）——它只该在
 //      `--plugin` 带 render + headless 时出现一次（D-C2-5）；
 //   ④ `plugin    : ` **只出现一次**（⛔ 不是每帧 / 每读点一行；AGENTS §12.8 第 3 条）。
-//   ⑤ `plugin/load-save-e2e`（C2c）：真库 `scripts/plugins/lib/save.js` + `--plugin-param slot=15`
-//      走完整条链；判据 = readout `run=done` / `params=…slot=15` / `expect` 生效 / `calls ∈ {6,7}`（D2c-2：第二道
-//      确认也是合法终态）+ stderr 终态日志含 **FIELD** + 无 `run failed`（⛔ 不看 exit code）。
+//   ⑤ `plugin/quit-attribution`：`ctx.quit()` ⇒ readout `run=quit` + 停机摘要点名 `plugin: quit`。
+//   ⑥ `plugin/load-save-e2e`（C2c）：真库 `scripts/plugins/lib/save.js`，参数来自
+//      `<--appdata>/plugin-config.json` 的域 `save`（`slot` / `expect`）——**不给** `--plugin-param`；
+//      判据 = readout `run=done` / stderr 终态日志含 **FIELD** / 无 `run failed`（⛔ 不看 exit code，
+//      `params=` 也不再是判据）。
+//   ⑦ `plugin/bad-config-exit2`：坏 `plugin-config.json` ⇒ 产品 exe **exit 2** + stderr 点名
+//      `plugin-config.json`（配置装载失败是**启动失败**，不是 warn + 继续）。
 //
 // ★ 缺执行源 / 安装树 / GPU / 宿主字体 ⇒ `LIFT_SKIP(77)`（⛔ 不假绿；输入假定在场）。
 // ★ 子进程统一走 `tests/support/subprocess.h` 的 `runChild`（跨平台；capture = 两个临时文件）。
@@ -298,6 +302,49 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "  stdout:\n%s\n  stderr:\n%s\n", ls.out.c_str(), ls.err.c_str());
         }
         LIFT_CHECK(calls6 || calls7);
+    }
+
+    // ---- ⑦ `plugin/bad-config-exit2`：坏 plugin-config.json ⇒ **进程 exit 2** ----
+    //   判据（红了意味着什么）：配置装载失败被降级成 warn + 继续（D1 41 的"exit 2"没落地）——
+    //   插件会带着"看起来没有配置"的状态继续跑，坏文件永远不会被人发现。
+    //   ★ 直接写坏 JSON（不是形状错），文件路径 = 本用例的私有 appdata 根。
+    g_current_case = "plugin/bad-config-exit2";
+    {
+        const fs::path bad_appdata = root / "appdata-bad-config";
+        fs::create_directories(bad_appdata, ec);
+        LIFT_CHECK(writeTextFile(bad_appdata / "plugin-config.json", R"({"version":1,"domains":{)"));
+        const std::vector<std::string> bad_args = {
+            "--exe",
+            pathToUtf8(age_exe),
+            "--game-dir",
+            pathToUtf8(game_dir),
+            "--appdata",
+            pathToUtf8(bad_appdata),
+            "--present",
+            "headless",
+            "--skip-logo",
+            "--audio",
+            "off",
+            "--time-limit",
+            "30",
+            "--plugin",
+            pathToUtf8(fixture),
+        };
+        ChildOptions bad_opts;
+        bad_opts.cwd = root;
+        bad_opts.timeout = std::chrono::milliseconds(60000);
+        const ChildResult bad = runChild(exe, bad_args, bad_opts);
+        LIFT_CHECK(bad.started);
+        LIFT_CHECK(!bad.timed_out);
+        if (bad.exit_code != 2 || bad.err.find("配置装载失败（exit 2）") == std::string::npos ||
+            bad.err.find("plugin-config.json") == std::string::npos) {
+            std::fprintf(stderr, "  stdout:\n%s\n  stderr:\n%s\n", bad.out.c_str(), bad.err.c_str());
+        }
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(bad.exit_code), 2);
+        LIFT_CHECK(bad.err.find("配置装载失败（exit 2）") != std::string::npos);
+        LIFT_CHECK(bad.err.find("plugin-config.json") != std::string::npos);
+        // ⛔ 坏配置不许被当成"没有配置"继续跑（没有 readout = 没进 Run）。
+        LIFT_CHECK(bad.out.find("plugin    : ") == std::string::npos);
     }
     return lift_test::finish("plugin-headless");
 }

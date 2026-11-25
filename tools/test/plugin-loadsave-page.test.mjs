@@ -358,12 +358,34 @@ test('loadsave-page/no-appdata：没有 ctx.appdata（或无 --appdata）⇒ 跳
     );
 });
 
-test('loadsave-page/save-dir-not-under-appdata：存档目录不在 appdata 下 ⇒ 跳过 + warn（存档在安装树）', () => {
+test('loadsave-page/save-dir-missing：存档目录不存在（全新 / 空 appdata）⇒ 按缺文件 finish(5)，0 click', () => {
     const r = drivePageChain({ startPage: TARGET_PAGE, appdata: { dirs: [] } });
-    assert.equal(r.finished, null, `不该收口（存档可能在安装树）：${JSON.stringify(r.finished)}`);
+    assert.equal(r.failed, null, `不应该 ctx.fail：${JSON.stringify(r.failed)}`);
+    assert.deepEqual(r.clicks, [], `目录不存在时一个 click 都不许发（实际 ${JSON.stringify(r.clicks)}）`);
+    assert.notEqual(r.finished, null, '目录不存在必须自己收口（finish），⛔ 不许继续等 SAVE 门');
+    assert.equal(r.finished.code, 5, `finish code 必须是 5（实际 ${r.finished.code}）`);
+    assert.match(r.finished.reason, /load-save: save file missing:/, `reason 没点名缺文件：${r.finished.reason}`);
+    assert.match(r.finished.reason, /SAVE09\.DAT/, 'reason 必须点名缺的是哪个文件');
+    assert.match(r.finished.reason, /slot 9/, 'reason 必须点名槽号');
+    assert.match(r.finished.reason, /不存在/, 'reason 必须点名存档目录不存在（⛔ 不能只报缺文件）');
+    assert.ok(
+        r.logs.some((line) => line.startsWith('error:') && line.includes('save file missing')),
+        `error 日志缺失：${JSON.stringify(r.logs)}`,
+    );
+    assert.deepEqual(
+        r.statCalls,
+        [`${SAVE_DIR}/SAVE09.DAT`, SAVE_DIR],
+        '前置检查只许 stat 这两个路径（文件 → 目录）',
+    );
+});
+
+test('loadsave-page/save-dir-escape：存档目录 stat 报 escape ⇒ 跳过 + warn（无法证明缺文件）', () => {
+    const r = drivePageChain({ startPage: TARGET_PAGE, appdata: { dirs: [], statError: 'escape' } });
+    assert.equal(r.finished, null, `escape 不该收口：${JSON.stringify(r.finished)}`);
+    assert.equal(r.failed, null, `escape 不该 ctx.fail：${JSON.stringify(r.failed)}`);
     assert.equal(r.rowClicked, true, '跳过之后链必须照常走');
     assert.ok(
-        r.logs.some((line) => line.startsWith('warn:') && line.includes('不在 appdata 下')),
+        r.logs.some((line) => line.startsWith('warn:') && line.includes('escape')),
         `必须 warn 说明跳过原因：${JSON.stringify(r.logs)}`,
     );
 });

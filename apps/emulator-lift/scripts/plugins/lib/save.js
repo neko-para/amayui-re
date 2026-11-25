@@ -69,8 +69,10 @@
 //   症状和"点击被吞"混在一起。现在 `start(ctx)` 先 `ctx.appdata.stat(<saveDir>/SAVE<NN>.DAT)`：
 //   缺 ⇒ `ctx.finish(5, "load-save: save file missing: <绝对路径> (slot N)")` + 返回 `[]`，
 //   **一个 click 都不发**。只查 `.DAT`（`.STH` 缺失不阻止读档；`SAVE.DAT` 不是槽索引）；
-//   槽 0..99（≥100 的字形未取证 ⇒ 跳过 + warn）；没有 `--appdata` / 存档目录不在 appdata 下
-//   （`set:UseAppDataFolder != 1` 的代理）⇒ 跳过 + warn（⛔ 不误杀）。
+//   槽 0..99（≥100 的字形未取证 ⇒ 跳过 + warn）；没有 `--appdata` / stat 报 denied/io ⇒ 跳过 + warn
+//   （⛔ 不误杀）。★ 2026-11-25 订正：`saveDir` **目录不存在**（全新 / 空 appdata）也算缺文件 ⇒
+//   finish(5)（旧版把它当"存档在安装树"静默跳过 ⇒ 本轮要消除的 30 s 超时又回来了）；
+//   只有 `escape` / `invalid_path` / `denied` / `io` 才跳过。
 //   有文件 ⇒ 下面整条链**逐行不变**。
 //
 // ★ 2026-11-21（A 阶段）—— **两个接口，各管一件事**：
@@ -297,11 +299,12 @@ function displayPath(appdata, rel) {
 
 /**
  * 前置检查：缺 `SAVE<NN>.DAT` ⇒ `finish(5)` 并返回 false（调用方 **一个 click 都不发**）。
- * 跳过（返回 true，照常读档）的三种情况都必须**打一行 warn**（⛔ 不静默）：
+ * 跳过（返回 true，照常读档）的情况都必须**打一行 warn**（⛔ 不静默）：
  *   ① `ctx.appdata` 不存在 / `available=false`（没有 `--appdata`）；
  *   ② `slot > 99`（文件名字形未取证）；
- *   ③ 存档目录本身不在 appdata 下（= 存档在安装树 / `set:UseAppDataFolder != 1` 的宿主侧代理），
- *      或 stat 报 denied/io（无法证明"缺文件"）。
+ *   ③ stat 报 `denied` / `io`（无法证明"缺文件"），或存档目录 stat 报 `escape` / `invalid_path`
+ *      （路径非法 / 符号链接逃逸）；
+ *      ★ **目录不存在不跳过**（2026-11-25 订正）：那是"全新 / 空 appdata"，按缺文件 finish(5)。
  *
  * @param {RunCtx} ctx
  * @param {number} slot
@@ -331,14 +334,17 @@ function precheckSaveFile(ctx, slot, saveDir) {
     if (!st.exists) {
         // ★ 无法证明"缺文件"的读法一律跳过：denied / io 可能是环境问题，no_appdata 是配置晚了。
         const error = typeof st.error === "string" ? st.error : "not_found";
-        if (error === "denied" || error === "io" || error === "not_dir" || error === "no_appdata") {
+        if (error === "denied" || error === "io" || error === "no_appdata") {
             ctx.log("warn", `load-save: stat ${rel} 失败（${error}）⇒ 跳过存档文件前置检查`);
             return true;
         }
-        // ★ "存档在安装树"的宿主侧代理：存档目录不在 appdata 下 ⇒ 这个前置检查没有意义，
-        //   ⛔ 不误杀合法读档（宿主 / 插件都拿不到 `set:UseAppDataFolder` / `set:SavePath` 的值）。
+        // ★ 再查一次**存档目录**：只有"目录存在但这一槽没有文件"才是缺文件；
         //   `saveDir === "."` = appdata 根本身（`available=true` 已证明根可用）⇒ 不用 stat 它。
+        //   ★ 2026-11-25 订正（复审 I5）：`stat(saveDir)` 的 `not_found` = **目录真的不存在**
+        //     （全新 / 空 appdata）⇒ 也是缺文件、按设计 finish(5)。只有 `escape` / `invalid_path`
+        //     （路径非法 / 符号链接逃逸）与 `denied` / `io`（无法证明）才跳过 + warn。
         let dirOk = false;
+        let dirError = "";
         if (saveDir === ".") {
             dirOk = true;
         } else {
@@ -348,13 +354,31 @@ function precheckSaveFile(ctx, slot, saveDir) {
                 dirStat !== undefined &&
                 dirStat.exists === true &&
                 dirStat.isDir === true;
+            if (!dirOk && dirStat !== null && dirStat !== undefined && typeof dirStat.error === "string") {
+                dirError = dirStat.error;
+            }
         }
         if (!dirOk) {
-            ctx.log(
-                "warn",
-                `load-save: ${saveDir} 不在 appdata 下 ⇒ 跳过存档文件前置检查（存档可能在安装树）`,
-            );
-            return true;
+            if (
+                dirError === "escape" ||
+                dirError === "invalid_path" ||
+                dirError === "denied" ||
+                dirError === "io"
+            ) {
+                ctx.log(
+                    "warn",
+                    `load-save: stat ${saveDir} 失败（${dirError}）⇒ 跳过存档文件前置检查`,
+                );
+                return true;
+            }
+            // 目录不存在（not_found / not_dir）⇒ 这个路径下不可能有 `SAVE<NN>.DAT` ⇒ 响亮收口。
+            const file = displayPath(appdata, rel);
+            const reason =
+                `load-save: save file missing: ${file} (slot ${slot};` +
+                ` 存档目录 ${saveDir} 不存在)`;
+            ctx.log("error", reason);
+            ctx.finish(5, reason);
+            return false;
         }
         const file = displayPath(appdata, rel);
         const reason = `load-save: save file missing: ${file} (slot ${slot})`;
@@ -617,7 +641,8 @@ export function loadSave(slot, options = {}) {
 //   · config = `<--appdata>/plugin-config.json` 的域 **`save`**（ctx.config；没 appdata ⇒ 完全回退）；
 //     key：`slot`（number）、`expect`（string[] 或逗号串）、可选 `saveDir`（string，相对 appdata 根）、
 //     `timeoutMs`（number）。
-//   · params = `--plugin-param k=v`（夹具 / 诊断口；只有 `slot` / `expect` 被这里消费）。
+//   · params = `--plugin-param k=v`（夹具 / 诊断口）；四个 key（`slot` / `expect` / `saveDir` /
+//     `timeoutMs`）都支持 params 回退（旧行为只有前两个；后两个是 2026-11-25 加的，值 = 字符串）。
 //   · 默认：`expect` 缺 ⇒ `FIELD,SC0000` 并打一行 info；`slot` 没有默认值（缺 ⇒ `loadSave` 响亮 throw）。
 // ★ "给了"的判据是 `has()`（⛔ 不是真值）：`slot: 0` 这种 falsy 值也算给了。
 //

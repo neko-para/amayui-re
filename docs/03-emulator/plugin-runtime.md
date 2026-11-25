@@ -725,6 +725,10 @@ struct Context {
   空串 ⇒ `error:"invalid_path"`；canonical 后跑出根外（符号链接 / junction）⇒ `error:"escape"`；
   不存在 ⇒ `exists:false, error:"not_found"`；权限 / I/O 分别是 `denied` / `io`（⛔ 不把 errno
   漏给 JS）。`available=false` ⇒ `path=null`、`stat` 一律 `{exists:false, error:"no_appdata"}`。
+  `available=false` 的第二种来路：`--appdata` 落在 `--game-dir`（只读安装树）里，或被指向一个
+  **普通文件**（`attach` 拒绝，`aot_main` 一行 warn + 继续 ⇒ 插件能力缺失不是启动失败）。
+  ★ **非法 UTF-8 的 `rel` ⇒ `invalid_path`**（QJS 把孤立代理项编成 WTF-8；`utf8ToWide` 返回空串
+  ⇒ 不拒绝就会退化成"appdata 根存在且是目录"）。
   ★ **宿主段不计入 2 ms**：`stat` 的 C++ 实现包 `HostPause`（与 `ctx.profile.end` 同一原则）。
   ★ 宿主**不知道** title / `set:SavePath`（`set:UseAppDataFolder != 1` 时存档根本不在 appdata）⇒
   存档目录由插件常量拼；`ctx.appdata` 不提供 read / write / 列目录。
@@ -733,19 +737,26 @@ struct Context {
   的 `rm -rf` 会删它）。信封 `{"version":1,"domains":{"<id>":{...}}}`；值 = **原生 JS 值**
   （对象 / 数组 / 字符串 / 有限数字 / 布尔 / null；⛔ 不是 JSON 字符串 ⇒ 沙箱里不需要 `JSON`）。
   API = `{ available, domain(id) }`；域对象 = `{ get(key, fallback?), has(key), set(key, value),
-  delete(key), all() }`（`ConfigReceipt = {applied, code?: "read_only"|"io"|"no_appdata"}`）。
+  delete(key), all() }`。
+  · **`ConfigReceipt = {applied, code?}`**：`applied` = **内存已改**（⛔ 不代表已落盘）；
+    `code` 只有 `read_only`（配置文件不可写）/ `no_appdata`（没有 appdata）。写盘失败**不回填**
+    receipt —— 回调末 flush 失败只有一次 `ctx.log("warn")`（v1 的诚实口径；⛔ 没有不可达的 `io`）。
   · 域**自动创建**、不注册、可共享；域 id = `^[A-Za-z0-9._-]{1,64}$`；域 id 与 key 都拒
     `__proto__` / `prototype` / `constructor`。未知顶层键 / 未知域内键**保留**（前向兼容）。
   · `set` / `delete` 只改内存 + 标脏；宿主在**每个插件回调末**原子 flush 一次（临时文件 +
-    `MoveFileEx(MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)`）。第一次写盘失败 ⇒
+    `MoveFileEx(MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)`）。**I/O** 失败 ⇒
     `ctx.log("warn", …)` **一次**、之后不再重试（⛔ 不重试风暴）。
-  · 校验错误（域 id / key / 值类型 / 深度 / 大小）⇒ **TypeError**；I/O / 只读 ⇒
-    receipt `applied:false` + `code`。上限：嵌套 **8 层** / 值树 **1024 节点** / 单个字符串
-    **8192 字节** / 文件 **1 MiB**（`runtime/config.h` 是唯一真源）。
+  · 校验错误（域 id / key / 值类型 / 深度 / 节点 / 串长 / 非法 UTF-8 / 域数 / 每域 key 数）⇒
+    **TypeError**。上限（`set` 与**装载期**同一套，`runtime/config.h` 是唯一真源）：值嵌套
+    **8 层**（根值 = 1）/ 值树 **1024 节点** / 单个字符串与对象 key **8192 字节** / key 长 **128** /
+    域数 **256** / 每域 key **1024** / 文件 **1 MiB**。超限的文件 ⇒ **装载失败 + exit 2**
+    （`attach` 用显式栈校验，⛔ 不在 `get`/`all` 递归爆栈）。
   · **没有 `--appdata`** ⇒ `available=false`、`domain()` 抛 `Error("no_appdata")`（⛔ 不做内存态）；
-    坏 JSON / 顶层不是对象 / `version != 1` / `domains` 不是对象 / 域值不是对象 ⇒ **装载失败 +
-    进程 exit 2**（错误消息带文件路径，坏 JSON 还带 byte 位置）。一个 appdata 只跑一个实例（v1；
-    ⛔ 不做文件锁）。宿主段（每次 get/set/…）都包 `HostPause`（不计用户 2 ms）。
+    坏 JSON / 顶层不是对象 / `version != 1` / `domains` 不是对象 / 域值不是对象 / 值超限 /
+    非法 UTF-8 ⇒ **装载失败 + 进程 exit 2**（错误消息带文件路径，坏 JSON 还带 byte 位置）。
+    一个 appdata 只跑一个实例（v1；⛔ 不做文件锁）。
+  · **宿主段不计入 2 ms**：每次 get/set/delete/all 的 store 调用**与**值树 ↔ JS 值的转换都包
+    `HostPause`；`set` 里用户对象 getter 执行的那几段例外（仍是用户时间）。
 - **`ctx.input.status(id)`**：`queued/applied/failed/unknown`；click 只保证入队，完成要查询。
 - **`ctx.finish(code, reason)`**：结束当前 Run（可映射历史 exit 5）；**`ctx.quit()`** 请求宿主停机。
 - **`sample`/`screenshot` 不在 Context**：它们是 `emu-ctl` 的组合命令（pause + EngineRead/HostAction + 元数据）；
@@ -823,6 +834,7 @@ export default plugin;   // 宿主 QJS 读 default 导出；⛔ 不读 globalThi
   单个 `Trigger`，或 `null`/`[]` = done；`ev.name` 是触发的具名状态。
 - `ctx.edit.*`（立即）、`ctx.input.*`（串行，`ctx.input.status(id)` 查完成）、`ctx.read.*`（无暂停）、
   `ctx.trigger.*`、`ctx.ui.show/hide/set/visible`、`ctx.state`（per-Run）、`ctx.profile`、`ctx.dispatch`；
+  **`ctx.appdata` / `ctx.config`**（宿主 I/O，只 RunCtx；§4.5）、`ctx.log`；
   `ctx.finish(code, reason)`（结束本 Run，映射历史 exit 5）/ `ctx.quit()`（请求宿主停机）。
   一个 endpoint 一个 active，已有 ⇒ `busy`（不排队）；`render` 里也可 dispatch。
 - **chain 接线（用 name，不用 step 计数器 / ctx.state）**：
@@ -853,8 +865,11 @@ export default plugin;   // 宿主 QJS 读 default 导出；⛔ 不读 globalThi
     （缺它最多让页号回 0）⇒ 都不查。
   · **只查 0..99**：`slot >= 100` 的 `%2.2d` 三位字形未取证 ⇒ 跳过 + 一行 warn。
   · **跳过 + 一行 warn**（⛔ 不 fail，否则误杀合法读档）：没有 `ctx.appdata` / `available=false`；
-    或存档目录本身不在 appdata 下（宿主拿不到 `set:UseAppDataFolder`，这是"存档在安装树"
-    的宿主侧代理）；或 stat 报 `denied` / `io`（无法证明"缺文件"）。
+    或 stat 报 `denied` / `io`（无法证明"缺文件"）；或存档目录 stat 报 `escape` / `invalid_path`
+    （路径非法 / 符号链接逃逸）。
+  · ★ **存档目录不存在不跳过**（2026-11-25 复审 I5 订正）：全新 / 空 appdata 里 `SAVE/` 还没被
+    引擎建出来时，`SAVE<NN>.DAT` **确实缺** ⇒ 仍按缺文件 `finish(5)`（reason 额外点名
+    "存档目录 … 不存在"）。旧版把 `not_found` 当"存档在安装树"静默跳过 ⇒ 又要等 30 s 门超时。
   · 有文件 ⇒ 这条链的形状 / 坐标 / 门 / 超时**逐行不变**。
 - **`.BIN` 身份**：`PluginReadings.script` 是 marker **文件名**（`TITLE.BIN` / `SAVE.BIN` / `SBUNKI.BIN` /
   `FIELD.BIN`）；C1 的 `afterScript` / `afterPosition` 是精确 `==`（`trigger_runner.cpp:70,82`），
@@ -880,7 +895,8 @@ export default plugin;   // 宿主 QJS 读 default 导出；⛔ 不读 globalThi
 - **参考入口**：`save.js` 另有一条 `export default`，只为 `--plugin <save.js>` 直接当插件跑。
   ★ 2026-11-25 起参数来源 = **config > `--plugin-param` > 默认**：config = `<--appdata>/plugin-config.json`
   的域 **`save`**（`slot` number / `expect` string[] 或逗号串 / 可选 `saveDir` / `timeoutMs`）；
-  没有 appdata ⇒ **完全回退**到 params（旧行为）；`expect` 两处都没给 ⇒ 默认 `FIELD,SC0000` + 一行 info。
+  没有 appdata ⇒ **完全回退**到 params（四个 key 都支持 params 回退；后两个是本轮新加）；
+  `expect` 两处都没给 ⇒ 默认 `FIELD,SC0000` + 一行 info。
   `--plugin-param` 保留为**夹具 / 诊断口**（形状错误仍 exit 2），⛔ 不再是内建插件的正常用法。
   库消费者用**具名** `loadSave(slot, { expect })`（签名与链形状**不变**）。
 - **三个内建插件的域**（配置的 owner 表见 `apps/emulator-lift/scripts/plugins/README.md`）：
@@ -1230,6 +1246,9 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
 - `AfterDelay` 用**宿主墙钟**（AOT 强制 `setRealTime(true)`）：**NON-DIFFABLE**，不作为判据；
   ⛔ 不声称 guest 虚拟时钟可复现。
 - JS 回调本身若无 `Date`/`Math.random`/外部 IO，则确定；QJS 沙箱已无这些（`overlay-quickjs.md:45-93`）。
+- ★ **`ctx.appdata.stat` 是外部 IO**（文件系统状态）；**`ctx.config` 会跨 Run 持久化**
+  （`plugin-config.json`，且以后可能被别的进程改）⇒ 带它们的 Run 是 **NON-DIFFABLE**：
+  ⛔ 不把配置 / stat 的读数当确定性判据（⛔ 不给它们做"逐位相同"的断言）。
 - 文本 recipe 的 `wait` 仍是**宿主墙钟**（C3 兼容），带 `wait` 的 trace 仍 `NON-DIFFABLE`
   （`interaction-model.md:90-103`）。
 - control/trigger 的运行期 `global.get/set` 是 `NON-DIFFABLE`；要可复现就写常量/静态断言。
@@ -1570,11 +1589,10 @@ C5 是单插件 Run/dispatch 线；三者可与 C2 并行/后置。v3 的 S1/S2 
 
 | 37 | **Timeout 只读点 poll**：arm 记 deadline；atPoint 采样后/releaseDue 前 poll；暂停/headless 不 poll；不自动 finish | 独立 timer 超时；暂停仍触发；自动 exit | `trigger-runner/owner-timeout` + C3 parity |
 
-| 38 | **`ctx.appdata` 只 appdata 子树 / 只 RunCtx**：绝对路径 / `..` / NUL / 空串 ⇒ `invalid_path`；canonical 出根 ⇒ `escape`；`available=false` ⇒ `path=null` + `no_appdata`；`RenderCtx` 没有它 | 路径穿越静默成功（能读安装树 / 用户目录），或 render 里做文件 I/O | `plugin-appdata`（`appdata/stat-escape` / `stat-absolute` / `stat-nul` / `stat-symlink-escape`）+ `plugin/api-surface`（RunCtx 有 `appdata`）+ `plugin/render-surface`（精确六成员） |
-| 39 | **`loadSave` 缺 `.DAT` 在第一个 click 之前收口**：缺文件 ⇒ `finish(5)` + **0 click**；只查 `.DAT`、只 0..99；无 appdata / 存档目录不在 appdata / slot≥100 ⇒ 跳过 + 一行 warn | 缺文件退回 30 s 门超时（与"点击被吞"混在一起）；或合法读档被误杀 | `control-script/save-missing-precheck`（临时 appdata，`stagedDepth/depth=0`）+ `loadsave-page/save-missing` / `save-present` / `no-appdata` / `save-dir-not-under-appdata` + 变异 `if (!st.exists)` |
+| 38 | **`ctx.appdata` 只 appdata 子树 / 只 RunCtx**：绝对路径 / `..` / NUL / 空串 / **非法 UTF-8** ⇒ `invalid_path`；canonical 出根 ⇒ `escape`；`available=false` ⇒ `path=null` + `no_appdata`；`--appdata` 是普通文件 / 落在安装树 ⇒ `available=false`（warn + 继续）；`RenderCtx` 没有它 | 路径穿越静默成功（能读安装树 / 用户目录），或非法 UTF-8 退化成"根目录存在"，或 render 里做文件 I/O | `plugin-appdata`（`stat-escape` / `stat-absolute` / `stat-nul` / `stat-invalid-utf8` / `stat-symlink-escape` / `attach-not-a-directory`）+ `plugin/api-surface`（RunCtx 有 `appdata`）+ `plugin/render-surface`（精确六成员） |
+| 39 | **`loadSave` 缺 `.DAT` 在第一个 click 之前收口**：缺文件 **或存档目录不存在** ⇒ `finish(5)` + **0 click**；只查 `.DAT`、只 0..99；无 appdata / `escape` / `invalid_path` / `denied` / `io` / slot≥100 ⇒ 跳过 + 一行 warn | 缺文件退回 30 s 门超时（与"点击被吞"混在一起）；或合法读档被误杀 | `control-script/save-missing-precheck`（临时 appdata，`stagedDepth/depth=0`）+ `loadsave-page/save-missing` / `save-dir-missing` / `save-dir-escape` / `save-present` / `no-appdata` + 变异 `if (!st.exists)` |
 | 40 | **`ctx.appdata.stat` 的宿主段不计入 2 ms**（`HostPause`；与 `ctx.profile.end` 同一原则） | 网络盘 / 杀软 stat 被记成用户 JS 超预算 ⇒ 误报 `callback budget exceeded` | 实现落点 `script_quickjs.cpp` 的 `jsCtxAppDataStat`；现有预算守卫（`plugin/callback-*`）覆盖同一机制，stat 自身暂无专门用例 |
-
-| 41 | **`ctx.config` 的文件形状 / 值 / 持久化**：信封 `version=1` + `domains` 对象 + 域值对象；未知顶层键 / 域内键保留；域自动创建；值只收原生六种（深度 8 / 节点 1024 / 字符串 8192 / 文件 1 MiB）；`__proto__` / `prototype` / `constructor` 在域 id 与 key 都拒；没有 appdata ⇒ `domain()` 抛 `Error("no_appdata")`；`set` 只改内存 + **回调末**原子 flush；只读 ⇒ receipt `read_only` | 配置文件被静默重写（丢前向兼容键）/ 坏配置被当成"没有配置"继续跑 / `__proto__` 污染原型 / 写盘每 set 一次 | `plugin-config` 的 `config/roundtrip` / `unknown-preserved` / `domain-autocreate` / `bad-json-exit2` / `bad-top-level` / `bad-domain-value` / `proto-key` / `limits` / `no-appdata` / `read-only-receipt` / `flush-on-callback` / `cross-instance-read` + `plugin/api-surface`（RunCtx 有 `config`）+ `control-script/config-roundtrip`（真宿主 + 回调末 flush） |
+| 41 | **`ctx.config` 的文件形状 / 值 / 持久化 / 装载期上限**：信封 `version=1` + `domains` 对象 + 域值对象；未知顶层键 / 域内键保留；域自动创建；值只收原生六种（深度 8 / 节点 1024 / 串 8192 / key 128 / 域 256 / 每域 key 1024 / 文件 1 MiB；**set 与 attach 同一套**）；非法 UTF-8 在 set 期 TypeError、装载期 exit 2；`__proto__` / `prototype` / `constructor` 在域 id 与 key 都拒；没有 appdata ⇒ `domain()` 抛 `Error("no_appdata")`；`applied` = 内存已改（只有 `read_only` / `no_appdata` 两个 code）；`set` 只改内存 + **回调末**原子 flush（I/O 失败 warn 一次、后续不重试；序列化/超限失败不熔断）；`HostPause` 含值转换 | 配置文件被静默重写（丢前向兼容键）/ 深层文件在 `get` 递归爆栈而不是 exit 2 / 坏配置被当成"没有配置"继续跑 / `__proto__` 污染原型 / 写盘每 set 一次 / 宿主转换被记进用户 2 ms | `plugin-config` 的 `roundtrip` / `unknown-preserved` / `domain-autocreate` / `bad-json-exit2`（attach 判据）/ `bad-top-level` / `bad-domain-value` / `proto-key` / `limits` / `limits-on-load` / `invalid-utf8` / `no-appdata` / `missing-root` / `document-size` / `read-only-receipt` / `flush-on-callback` / `cross-instance-read` + `plugin/bad-config-exit2`（**进程 exit 2**）+ `control-script/config-roundtrip`（真宿主 + 回调末 flush）+ `plugin/config-host-pause` |
 | 42 | **内建插件参数来源 = config > params > 默认**（`has()` 判"给了"，falsy 也算）；没有 config 时**完全回退**到旧 params 行为 | 内建插件仍只认 `--plugin-param`（用户口径的迁移没发生）；或 `on:0` 被当成"没给" | `plugin/load-save-e2e`（⑥ 用 `plugin-config.json`、**不带** `--plugin-param`）+ `control-script/config-roundtrip` + 三个库文件的域表（`scripts/plugins/README.md`） |
 
 **不进 test（文档/读数）**：JS 回调性能、QJS 内存、`afterDelay` 的墙钟读数、文本 plan 的复用行数、

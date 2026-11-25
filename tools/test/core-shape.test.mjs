@@ -71,9 +71,13 @@ const CORE_FILES = [
   //   ★ `src/plugin/**` 为什么在这个白名单里：它是 **guest 写 / 输入施加**的**第二入口**面 ——
   //     一旦它自己直接 `input::*` 或 `writeGlobal`（而不是只经 `IntentQueue` / `EditSink`），
   //     就又多了一条施加路径，而且**没有运行期症状**（合同 §6 行 11 / 22）。
-  //   ★ 这 7 个文件逐文件列出（⛔ 不扫目录）：`src/plugin/` 将来会长出 C2b/C2c 的东西，
+  //   ★ 这些文件逐文件列出（⛔ 不扫目录）：`src/plugin/` 将来会长出 C2b/C2c 的东西，
   //     扫目录会把它们一并算成"核心"。
   'apps/emulator-lift/src/runtime/read_point.h',
+  // ★ 2026-11-25：`ctx.appdata` / `ctx.config` 的**值类型头**（语言无关；插件宿主 I/O 的词汇）。
+  //   它们不是 `src/plugin/**`，但同属"插件能碰到的第二入口面" ⇒ 显式登记（⑥ 的覆盖检查也点名）。
+  'apps/emulator-lift/src/runtime/appdata.h',
+  'apps/emulator-lift/src/runtime/config.h',
   'apps/emulator-lift/src/plugin/plugin_host.h',
   'apps/emulator-lift/src/plugin/plugin_host.cpp',
   // ★ 2026-11-25：`ctx.appdata` 的宿主实现（只读 stat；appdata-only）。它是**第二入口**面的近邻
@@ -406,4 +410,17 @@ test('⑥ 覆盖检查：`src/plugin/` 下**每个** .cpp/.h 都在白名单里�
   // ★ 反向自检：覆盖判据本身不是恒真 —— 往"磁盘清单"里塞一个没登记的路径必须被点名。
   const probe = [...onDisk, 'apps/emulator-lift/src/plugin/not-listed.cpp'].filter((rel) => !listed.has(rel));
   assert.deepEqual(probe, ['apps/emulator-lift/src/plugin/not-listed.cpp'], '覆盖判据恒真（注入的未登记文件没被点名）');
+  // ★ 2026-11-25（复审 minor 10）：`src/plugin/` 之外的**插件值类型头**也逐文件点名
+  //   （⛔ 不扫整个 `src/runtime/`：那里有 shim / 解码等本单之外的邻居）。
+  const EXTRA_CORE_FILES = [
+    'apps/emulator-lift/src/runtime/appdata.h',
+    'apps/emulator-lift/src/runtime/config.h',
+  ];
+  const missingExtra = EXTRA_CORE_FILES.filter((rel) => !listed.has(rel));
+  assert.deepEqual(
+    missingExtra,
+    [],
+    '`src/runtime/{appdata,config}.h` 没进 `CORE_FILES` ⇒ ②/④ 的禁用词扫不到它们：\n  ' +
+      missingExtra.join('\n  '),
+  );
 });
