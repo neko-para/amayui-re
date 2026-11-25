@@ -115,20 +115,23 @@ export function hideBattleHelp(ctx) {
 // FIELD 地图点位精灵的**派生渲染位**（VM 自己在每次进图时重建；⛔ 不是持久值）
 // ===========================================================================
 //
-// 取证（2026-11-24 / win32 / 只读脚本清单 `dist/views/data/*.BIN.txt`；逐条指令见
+// 取证（2026-11-25 订正 / win32 / `DRAWOBJ.BIN` 逐条指令 + `jcc` 极性；逐条指令见
 // `docs/03-emulator/scripts/FIELD.md` §地块特效渲染模型）：
 //   · `FIELD.BIN`  instr#187 `0x000FA0` `fill-zero (global-int 50ff9f) 32`      —— 进图先清这 32 个 dword
 //   · `SETOBJ.BIN` instr#2   `0x00005C` `fill-zero (global-int 50ff9f) 32`      —— 再清一次，然后逐槽 bit-set
-//                  instr#34  `0x00037C` `bit-set …  0`（= 不画）· instr#78/#84 `bit-set … 2`（= alpha 0）
-//                  instr#86  `0x0008C4` `bit-set …  1`
-//   · `DRAWOBJ.BIN` instr#7  `0x0000E0` `and (…) (50ff9f[slot]) 1` → `jcc` 跳过该槽（**不画**）
-//                  instr#26 `0x0002C4` `and (…) (50ff9f[slot]) 4` → instr#29 `set-draw-color-alpha(item,0,0,ffffff)`
+//                  instr#34  `0x00037C` `bit-set …  0`（= **画**）· instr#78/#84 `bit-set … 2`（= **alpha 正常**）
+//                  instr#86  `0x0008C4` `bit-set …  1`（= 格标记 / 战利品抽取那一位；本文件**不动**）
+//   · `DRAWOBJ.BIN` instr#7  `0x0000E0` `and (…) (50ff9f[slot]) 1` → `jcc`（**cond==0 才跳**）⇒ **bit0=0 才跳过**
+//                  instr#26 `0x0002C4` `and (…) (50ff9f[slot]) 4` 为 0 → instr#29 `set-draw-color-alpha(item,0,0,ffffff)`
 //                  instr#44 `0x0004E4` `add (local-int 11) fa (local-int 1)`  ⇒ **纹理槽 = 0xFA + 类型**
 //                  instr#58 `0x00066C` `draw-texture (item) (0xFA+类型) 0 0 w h dstx dsty`
 //   ⇒ 採集点(0x1F) 的槽 = 0x119 = `MO031B.AGF`（ALF 20797，绿草）·
 //      発掘点(0x20) 的槽 = 0x11A = `MO032B.AGF`（ALF 20798，岩石）
-//   ⇒ **画不画/透不透明** 只由这两位的组合决定；它们由 VM 在进图时按持久输入重算 ⇒ 改它 = 改**路由**，
+//   ⇒ **画不画/透不透明** 只由这两位的组合决定（bit0=1 画、bit2=1 正常 alpha；⚠ 2026-11-24 的
+//      "置位=不画/HIDE" 读反了 `jcc` 极性）；它们由 VM 在进图时按持久输入重算 ⇒ 改它 = 改**路由**，
 //      不是改"这点位发现过没有"那个真值（真值在 `13d7` / `3e2a0` / `14d8cc` 那几个输入里，本文件不碰）。
+//   · ⛔ **bit1（0x2）不要清**：A 链格表（`FIELD.BIN` 的 `0x100000` 位）与 `FIELD` `label_00030E54`
+//      的按 `flags & 2` 抽取战利品都消费它。
 
 /** 地图点位**逐槽渲染标志**（int global，32 槽 × 1 dword；VM 每次进图重建）。 */
 export const FIELD_OBJECT_FLAGS_GLOBAL_ID = 0x50ff9f;
@@ -136,11 +139,11 @@ export const FIELD_OBJECT_FLAGS_GLOBAL_ID = 0x50ff9f;
 /** 地图点位**逐槽类型**（int global，32 槽；`SETOBJ` #3 把它拷进 `14d7a0`，`DRAWOBJ` #9 用它选图）。 */
 export const FIELD_OBJECT_TYPE_GLOBAL_ID = 0x50ffd1;
 
-/** `50ff9f[slot]` 位：**置位 ⇒ 该点不画**（`DRAWOBJ.BIN` instr#7 `and … 1` → `jcc` 跳过）。 */
-export const FIELD_OBJECT_HIDE_BIT = 0x1;
+/** `50ff9f[slot]` 位：**置位 ⇒ 该槽参与绘制**（`DRAWOBJ.BIN` #7 `and … 1` → `jcc` 的 cond 为 0 才跳 ⇒ bit0=0 才跳过）。 */
+export const FIELD_OBJECT_DRAW_BIT = 0x1;
 
-/** `50ff9f[slot]` 位：**置位 ⇒ 照画但 alpha=0**（`DRAWOBJ.BIN` instr#26 `and … 4` → instr#29 alpha 0）。 */
-export const FIELD_OBJECT_ALPHA0_BIT = 0x4;
+/** `50ff9f[slot]` 位：**置位 ⇒ 正常 alpha**（`DRAWOBJ.BIN` #26 `and … 4` 为 0 ⇒ #29 把 alpha 置 0）。 */
+export const FIELD_OBJECT_ALPHA_BIT = 0x4;
 
 /** 点位类型：**採集点**（`DRAWOBJ` 槽 = 0xFA+type ⇒ `0x119` = `MO031B.AGF`）。 */
 export const FIELD_POINT_TYPE_GATHER = 0x1f;
@@ -211,22 +214,25 @@ export function readFieldObjectSlots(ctx) {
 }
 
 /**
- * 把"有点位且类型命中"的槽的**派生渲染位**改成"可见"：清 `HIDE` 与 `ALPHA0`。
+ * 把"有点位且类型命中"的槽的**派生渲染位**改成"要画 + 正常 alpha"：置 `DRAW` 与 `ALPHA`（`|= 0x5`）。
  *
  * ★ 为什么这不算改真实值（三条，都可复核）：
  *   ① 作用面是 `50ff9f`，而 `50ff9f` 是 VM **每次进图重建**的派生表（`FIELD.BIN` #187 + `SETOBJ.BIN` #2 两处
  *      `fill-zero`，随后逐槽 `bit-set`）⇒ 它不是"这一点位发现过没有"的存储；
  *   ② 持久输入（`50ffd1` 类型表、`14d8cc`、`3e2a0`…）**一个都不写** —— 本函数只写 `50ff9f+slot`；
+ *      并且**只置位、不清位**（bit1 = 格标记 / 战利品抽取要消费它，见上）；
  *   ③ 只在 `on == 1` 时执行；`on == 0` 走完全相同的链但不写（A/B 只差这一处）。
  *
  * @param {RunCtx} ctx RunCtx。
  * @param {{ types?: number[] | null }} [options] 参与强制的类型（缺省 = 採集 + 発掘）。
- * @returns {{ slot: number, type: number, before: number, after: number, applied: boolean }[]} 实际改过的槽。
+ * @returns {{ slot: number, type: number, before: number, after: number, applied: boolean }[]}
+ *   类型命中的槽的逐槽读数（`applied=false` = 这两位本来就有 / 写回执失败）。
  */
 export function forceFieldPointsVisible(ctx, options) {
     const types = options !== null && options !== undefined && Array.isArray(options.types)
         ? options.types
         : [FIELD_POINT_TYPE_GATHER, FIELD_POINT_TYPE_DIG];
+    const visibleBits = FIELD_OBJECT_DRAW_BIT | FIELD_OBJECT_ALPHA_BIT;
     /** @type {{ slot: number, type: number, before: number, after: number, applied: boolean }[]} */
     const changed = [];
     for (let slot = FIELD_OBJECT_SLOT_FIRST; slot <= FIELD_OBJECT_SLOT_LAST; slot += 1) {
@@ -234,7 +240,8 @@ export function forceFieldPointsVisible(ctx, options) {
         if (type === 0 || !types.includes(type)) continue;
         const id = FIELD_OBJECT_FLAGS_GLOBAL_ID + slot;
         const before = readIntGlobal(ctx, id) >>> 0;
-        const after = (before & ~(FIELD_OBJECT_HIDE_BIT | FIELD_OBJECT_ALPHA0_BIT)) >>> 0;
+        // ★ 只 `|=`，⛔ 不清任何位（尤其 bit1）：清了它会改动 A 链格表与战利品抽取。
+        const after = (before | visibleBits) >>> 0;
         if (after === before) {
             changed.push({ slot, type, before, after, applied: false });
             continue;

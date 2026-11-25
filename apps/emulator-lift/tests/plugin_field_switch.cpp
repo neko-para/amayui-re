@@ -5,17 +5,18 @@
 //      · 没有输入写面（`ctx.input`）⇒ 不会点鼠标；
 //      · 没有读档链（`loadSave` / `bootToTitle` / `save.js` / `boot-to-title.js` / `chains.js`）⇒ 不会自己读档；
 //      · 不结束 Run（`ctx.finish` / `ctx.quit`）⇒ 常驻（正常路径永不收口，进程按 `--time-limit` / 关窗结束）；
-//      · 还在用**位置触发**那条链（`afterPosition` + `reenter` + `FIELD_MAIN_LOOP` + `forceFieldPointsVisible`；
-//        ⛔ 没有 `afterDelay` / `poll` —— 判据是已知脚本位置，不是轮询）。
+//      · 还在用**位置触发**那条链（`afterPosition` + `reenter` + 两个 setmap 区间
+//        `FIELD_SETMAP_A_LO` / `FIELD_SETMAP_B_LO` + `forceFieldPointsVisible`；
+//        ⛔ 没有 `afterDelay` / `poll` / `FIELD_MAIN_LOOP` —— 判据是 setmap 的已知脚本位置，不是轮询）。
 //      红了 ⇒ 这个"开关"又开始驱动输入 / 读档 / 自己收口了。
 //   ② **端到端常驻**（真子进程 `--present headless --plugin field-point-visible`，**无** `--input-plan` /
 //      `--control-root` —— 它们与 `--plugin` 互斥）：
 //      · 进程按 `--time-limit` 收口：readout `run=waiting`（≠ done / finished / failed）+ 摘要
 //        `stop      : time-limit` + exit 0；`calls>=1`（start）⇒ 插件**常驻**（位置触发只在玩家进
-//        FIELD 时 fire；headless 停在标题 ⇒ 没有第二次回调）；
+//        FIELD 的 setmap 时 fire；headless 停在标题 ⇒ 没有第二次回调）；
 //      · stdout+stderr **没有** `boot:` / `load:` / `load-save:` / `[input-script]` / `input-plan:` 行
 //        ⇒ 没有自驱到 TITLE、没有读档、没有输入计划；
-//      · 首行 `field-points:` 日志带 `on=0`（缺省关），且**没有** `forced=` / `FIELD 就绪`
+//      · 首行 `field-points:` 日志带 `on=0`（缺省关），且**没有** `forced=` / `setmap`
 //        ⇒ "关着的时候什么也不做"是**可读的**（不是靠"没看见"猜）。
 //   ★ 缺执行源 / 安装树 / GPU / 宿主字体 ⇒ `LIFT_SKIP(77)`（与 `plugin-headless` 同一条口径：输入假定在场）。
 //     ★ 静态那一段在 skip **之前**跑完 ⇒ 缺资产不会把"契约"整段跳掉（失败仍会 exit 1，不会被 77 盖住）。
@@ -162,13 +163,17 @@ int main(int argc, char** argv) {
     LIFT_CHECK(code.find("ctx.quit") == std::string::npos);
     // 正向：该写的那条链还在（否则"禁令全过"可以靠一个空文件达成）。
     LIFT_CHECK(code.find("forceFieldPointsVisible") != std::string::npos);
-    // ★ 判据是**已知脚本位置** ⇒ 位置触发（reenter），⛔ 不是轮询（`afterDelay` / `poll`）。
+    // ★ 判据是 setmap 的**已知脚本位置** ⇒ 两条位置触发（reenter），⛔ 不是轮询。
     LIFT_CHECK(code.find("afterPosition") != std::string::npos);
     LIFT_CHECK(code.find("reenter") != std::string::npos);
-    LIFT_CHECK(code.find("FIELD_MAIN_LOOP") != std::string::npos);
+    LIFT_CHECK(code.find("FIELD_SETMAP_A_LO") != std::string::npos);
+    LIFT_CHECK(code.find("FIELD_SETMAP_B_LO") != std::string::npos);
     LIFT_CHECK(code.find("FIELD_MAP_INSTANCE_GLOBAL_ID") != std::string::npos);
+    LIFT_CHECK(code.find("FIELD_MAIN_LOOP") == std::string::npos);
     LIFT_CHECK(code.find("afterDelay") == std::string::npos);
     LIFT_CHECK(code.find("DEFAULT_POLL_MS") == std::string::npos);
+    // ★ `poll` 这个子串在代码里出现 ⇒ 有人把"每拍重读"的轮询又接回来了（注释已剥 ⇒ 不会误伤）。
+    LIFT_CHECK(code.find("poll") == std::string::npos);
     // 日志前缀是外部可判面（下面 ② 与文档都按它抓）。
     LIFT_CHECK(source.find("field-points:") != std::string::npos);
     const std::size_t forbidden_tokens = sizeof(kForbiddenOutput) / sizeof(kForbiddenOutput[0]) + 8;
@@ -277,7 +282,7 @@ int main(int argc, char** argv) {
     LIFT_CHECK(!first_line.empty());
     LIFT_CHECK(first_line.find("on=0") != std::string::npos);
     LIFT_CHECK(r.err.find("forced=") == std::string::npos);          // 关着 ⇒ 一个槽都没写
-    LIFT_CHECK(r.err.find("FIELD 就绪") == std::string::npos);        // 没人读档 ⇒ 从没进过 FIELD
+    LIFT_CHECK(r.err.find("field-points: setmap") == std::string::npos);  // 没人读档 ⇒ 从没到过 setmap
     LIFT_CHECK(r.err.find("re-applied") == std::string::npos);
 
     return lift_test::finish("plugin-field-switch");

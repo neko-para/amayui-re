@@ -1,22 +1,27 @@
-// scripts/plugins/field-point-visible.js —— `FIELD` 上的**开关**：把「点位精灵」的派生渲染位强制成可见
+// scripts/plugins/field-point-visible.js —— `FIELD` 上的**开关**：setmap 时无条件显示所有采集 / 挖掘点
 //
-// 是什么（★ 父级裁决 2026-11-25：开关 = 开关，⛔ 不是自驱复现脚本）：
-//   · 玩家**自己**进 `FIELD` 时（**脚本内位置** = `[FIELD_MAIN_LOOP_LO, FIELD_MAIN_LOOP_HI)`，
-//     见 `./lib/script-positions.js`），把 32 槽派生渲染标志（`FIELD_OBJECT_FLAGS_GLOBAL_ID` = `0x50ff9f`）
-//     里、类型命中（缺省 採集 `0x1F` / 発掘 `0x20`）的槽的 `HIDE|ALPHA0` 两位**清掉**
-//     ⇒ `DRAWOBJ.BIN` instr#7 不再跳过、instr#26 不再把 alpha 置 0
-//     ⇒ 那张 `0xFA+类型` 的纹理（`0x119` = `MO031B.AGF` 绿草 / `0x11A` = `MO032B.AGF` 岩石）就画出来。
+// 是什么（★ 用户裁决 2026-11-25：目标不是"在 FIELD 里无条件显示 `?`/`!` 图标"）：
+//   · 采集 / 挖掘点的本体 = **B 链点位精灵**（`DRAWOBJ.BIN` 每槽 `draw-texture`，纹理槽 = `0xFA + 类型`：
+//     `0x119` = `MO031B.AGF` 绿草 / `0x11A` = `MO032B.AGF` 岩石）。`?` / `!` 是 **A 链格标记**
+//     （`SO030.AGF` 槽 `0x49`），**不是**点位，本插件不改它们。
+//   · 精灵画不画 = 派生渲染位 `FIELD_OBJECT_FLAGS_GLOBAL_ID`（`50ff9f[slot]`）的两位：
+//     **bit0=1 ⇒ 画**（`DRAWOBJ` #7 `and … 1` → `jcc`：cond==0 才跳 ⇒ bit0=0 才跳过）·
+//     **bit2=1 ⇒ 正常 alpha**（#26 `and … 4` 为 0 ⇒ #29 把 alpha 置 0）。
+//   · 所以本插件对**类型命中**（缺省 採集 `0x1F` / 発掘 `0x20`）的槽写 `flags |= 0x5`（只置位、⛔ 不清位）。
+//     ★ bit1 **不要清**：A 链格表与 `FIELD` `label_00030E54` 的战利品抽取都消费 `flags & 2`。
 //   · `50ff9f` 是 VM **每次进图重算**的派生表（`FIELD.BIN` #187 / `SETOBJ.BIN` #2 的 `fill-zero`，
-//     之后逐槽 `bit-set`）⇒ **每次进图都要重新施加**。
-//   · ★ **判据是"已知的脚本位置"，所以用位置触发，⛔ 不用轮询**（父级裁决 2026-11-25）：
-//     `start` 只 arm **一个** `ctx.trigger.afterPosition(FIELD.BIN, LO, HI, { mode: "reenter" })`；
-//     Reenter 的边沿是**有效读数的 外→内**（`src/runtime/trigger_runner.cpp:76-87`），
-//     `last_inside` 挂在**同一个 trigger 对象**上、跨 arm 保留 ⇒ 每次重新进入主轮询体 fire 一次，
-//     **不需要 re-arm**（`exhausted()` 只耗尽 Once / `maxFires>0`：`trigger_runner.cpp:100-106`）。
-//     回调返回**同一个** trigger 对象即可（不新建 ⇒ 边沿状态不丢；`install()` 只查 state / name /
-//     kind / maxFires / exhausted：`trigger_runner.cpp:140-178`）。
+//     之后逐槽 `bit-set`）⇒ **每次 setmap 都要重新施加**。
+//   · ★ **钩子 = setmap 完成、SETOBJ 已算完、FIELD 还没建表 / 画**（父级/用户裁决 2026-11-25）：
+//     两个常驻 `afterPosition(FIELD.BIN, …, { mode: "reenter" })` ——
+//       ① `[FIELD_SETMAP_A_LO, FIELD_SETMAP_A_HI)` = `label_00018274` 内 `call-script 511a`(SETOBJ) 的
+//          **返回点**（进图主路径）；
+//       ② `[FIELD_SETMAP_B_LO, FIELD_SETMAP_B_HI)` = `0x035130` 块里同一条 `call-script 511a` 的返回点。
+//     两个 trigger 都 arm 着；任一处 fire 都把**同一份 32 槽表**重算一遍（换图 / 重进 FIELD 会重新 SETOBJ）。
+//     Reenter 的边沿是**有效读数的 外→内**（`src/runtime/trigger_runner.cpp`），`last_inside` 挂在**同一个
+//     trigger 对象**上、跨 arm 保留 ⇒ 不需要 re-arm（`exhausted()` 只耗尽 Once / `maxFires>0`）。
+//   · ★ **判据是"已知的脚本位置"，所以用位置触发，⛔ 不用轮询**（父级裁决 2026-11-25）。
 //
-// ⛔ 三件事本插件**永远不做**（父级裁决：开关不许驱动任何输入）：
+// ⛔ 三件事本插件**永远不做**（用户裁决：开关不许驱动任何输入）：
 //   ① ⛔ **不读档**：不 import `lib/save.js`（`loadSave`）、不 import `lib/boot-to-title.js`、不 import
 //      `lib/chains.js`。验收时**玩家自己读档**：`--overlay --plugin field-point-visible` 是目标用法
 //      （`--plugin` 与 `--input-plan` / `--control-root` 互斥 ⇒ "输入计划驱动"这条路不存在）。
@@ -26,7 +31,7 @@
 //      这个**机器写的保留域**，由 `registerSettings` 在 `start` 里做，见下）。
 //   ⇒ 守卫 `apps/emulator-lift/tests/plugin_field_switch.cpp` 两段判据：
 //      **静态**（剥注释后）"代码里没有 input / loadSave / bootToTitle / chains / finish / quit"，
-//      且仍在用 `afterPosition` + `reenter` + `FIELD_MAIN_LOOP` + `forceFieldPointsVisible`；
+//      且仍在用 `afterPosition` + `reenter` + 两个 setmap 区间 + `forceFieldPointsVisible`；
 //      **端到端**（`emulator-lift-aot --plugin` headless，无 `--input-plan`）"没有任何 `boot:` / `load:`
 //      行、Run 保持常驻（readout `run=waiting`、`stop: time-limit`）、首行日志 `field-points: on=0`"。
 //
@@ -44,9 +49,9 @@
 //        {"version":1,"domains":{"field.point-visible":{"on":1}}}
 //      域 key（全部可选；缺省 = `on false` / `types ["1f","20"]` / `diag 0`）：
 //        `on` bool|0/1|"true"/"false" · `types` hex 串 `"1f,20"` 或数组 · `diag` bool|0/1
-//      ★ 旧配置里残留的 `slot` / `hold` / **`poll`** = **无害忽略**（本文件既不读、也不报错：
+//      ★ 旧配置里残留的 `slot` / `hold` / `poll` = **无害忽略**（本文件既不读、也不报错：
 //        不再读档、不再轮询）。
-//   2) 玩家自己读档进 FIELD；在此之前插件只是 arm 了位置触发（一个读点都没碰 guest）：
+//   2) 玩家自己读档进 FIELD；在此之前插件只是 arm 了两条位置触发（一个读点都没碰 guest）：
 //      ./out/emulator-lift-aot.exe --game-dir ../../links/install --appdata <本树 .tmp 下的私有 appdata> \
 //        --present headless --skip-logo --audio off --time-limit 180 --log-level warn \
 //        --plugin field-point-visible
@@ -77,8 +82,10 @@ import {
     registerSettings,
 } from "./lib/settings.js";
 import {
-    FIELD_MAIN_LOOP_HI,
-    FIELD_MAIN_LOOP_LO,
+    FIELD_SETMAP_A_HI,
+    FIELD_SETMAP_A_LO,
+    FIELD_SETMAP_B_HI,
+    FIELD_SETMAP_B_LO,
 } from "./lib/script-positions.js";
 
 /** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
@@ -95,12 +102,13 @@ const CONFIG_DOMAIN = "field.point-visible";
 
 /**
  * `FIELD` 的宿主 marker 拼写（trigger / `ctx.now.script` 侧是**精确 `==`**：带 `.BIN`、不折叠大小写）。
- * 位置表在 `./lib/script-positions.js`（`FIELD_MAIN_LOOP_LO/HI`）。
+ * 位置表在 `./lib/script-positions.js`（`FIELD_SETMAP_A_LO/HI` / `FIELD_SETMAP_B_LO/HI`）。
  */
 const FIELD_SCRIPT = "FIELD.BIN";
 
-/** 具名状态（trigger 名；每次 fire 原样放回同一个对象）。 */
-const TRIGGER_NAME = "fp:field";
+/** 两条 setmap 钩子的具名状态（每次 fire 原样放回**同一个**集合）。 */
+const TRIGGER_NAME_A = "fp:setmap-a";
+const TRIGGER_NAME_B = "fp:setmap-b";
 
 /** 日志里最多逐槽打几行（⛔ 不刷屏；宿主另有 100 行上限）。 */
 const MAX_LOGGED_SLOTS = 12;
@@ -200,19 +208,22 @@ function settingsFor(ctx) {
 
 // ---- 常驻状态（模块级 = per-plugin；一个进程只有一个 Run）------------------------------
 
+/** 两条 trigger 的**同一个集合**（每次 fire 原样放回；⛔ 不新建 ⇒ Reenter 的边沿不丢）。 */
+/** @type {Trigger[] | null} */
+let triggers = null;
 /** 上一次施加时的地图实例（`FIELD_MAP_INSTANCE_GLOBAL_ID`）；null = 还没施加过。 */
 /** @type {number | null} */
 let lastInstance = null;
-/** "FIELD 就绪"那行只打一次。 */
-let greeted = false;
+/** "首次施加"那一段日志只打一次。 */
+let announced = false;
 /** `diag` 还剩几次（打够就安静常驻；⛔ 不结束 Run）。 */
 let diagLeft = 0;
 
 /**
- * 在 `FIELD` 上施加一次（⛔ 不在 FIELD 就一个 guest global 都不读）。
+ * 在 setmap 完成点施加一次（⛔ `on == 0` 时调用方根本不会进来 ⇒ 一个 guest global 都不读）。
  *
- * ★ 只由**位置触发的 fire** 调（`on` 为真时）；Reenter 每次重新进入主轮询体都会 fire 一次
- *   ⇒ "VM 每次进图重建 `50ff9f`" 由**重新进图/重新回到主轮询体**那一次 fire 覆盖，⛔ 不靠轮询兜底。
+ * ★ 只由**位置触发的 fire** 调（`on` 为真时）；Reenter 每次重新进入区间都会 fire 一次
+ *   ⇒ "VM 每次进图重建 `50ff9f`" 由**重新 setmap** 那一次 fire 覆盖，⛔ 不靠轮询兜底。
  *   "只在真的需要时写"由 `forceFieldPointsVisible` 逐槽 `before/after` 保证
  *   （`after === before` ⇒ 不发写回执）。进度只在 `lastInstance`（地图实例号）与 `diagLeft`。
  *
@@ -220,39 +231,34 @@ let diagLeft = 0;
  * @param {Settings} settings 本次 fire 的设置。
  * @returns {void}
  */
-function applyInField(ctx, settings) {
-    const now = ctx.now;
-    if (now.script !== FIELD_SCRIPT) return;   // 不在 FIELD：不读 guest、不写 guest
-    const first = !greeted;
-    greeted = true;
+function applyAtSetmap(ctx, settings) {
+    const first = !announced;
     const map = readIntGlobal(ctx, FIELD_CURRENT_MAP_GLOBAL_ID);
     const instance = readIntGlobal(ctx, FIELD_MAP_INSTANCE_GLOBAL_ID);
     const instanceChanged = instance !== lastInstance;
     lastInstance = instance;
     const changed = forceFieldPointsVisible(ctx, { types: settings.types });
+    const did = changed.filter((c) => c.applied);
+    if (did.length === 0) return;   // 本来就已经要画 ⇒ 不写、不刷屏
+    announced = true;
     if (first) {
         ctx.log(
             "info",
-            `field-points: FIELD 就绪 ⇒ switch on=${settings.on ? 1 : 0} ` +
-                `types=${settings.types.map(hex).join(",")} map=${hex(map)} instance=${hex(instance)}`,
-        );
-    } else if (instanceChanged) {
-        ctx.log("info", `field-points: re-applied after map change instance=${hex(instance)}`);
-    }
-    const did = changed.filter((c) => c.applied);
-    if (did.length > 0) {
-        ctx.log(
-            "info",
-            `field-points: forced=${did.length}/${changed.length} 个槽（清 HIDE|ALPHA0；派生位 ` +
-                `${hex(FIELD_OBJECT_FLAGS_GLOBAL_ID)}）`,
+            `field-points: setmap forced=${did.length}/${changed.length} 个槽（置 DRAW|ALPHA；派生位 ` +
+                `${hex(FIELD_OBJECT_FLAGS_GLOBAL_ID)}）map=${hex(map)} instance=${hex(instance)}`,
         );
         for (const c of did.slice(0, MAX_LOGGED_SLOTS)) {
             ctx.log(
                 "info",
-                `field-points: forced slot=${c.slot} type=${hex(c.type)} ${hex(c.before)} → ${hex(c.after)}`,
+                `field-points: setmap slot=${c.slot} type=${hex(c.type)} ${hex(c.before)} → ${hex(c.after)}`,
             );
         }
         ctx.log("info", `field-points: 只写过 ${hex(FIELD_OBJECT_FLAGS_GLOBAL_ID)}+slot（派生渲染位）；类型表与持久输入未写`);
+    } else if (instanceChanged) {
+        ctx.log(
+            "info",
+            `field-points: setmap re-applied instance=${hex(instance)} forced=${did.length}/${changed.length}`,
+        );
     }
 }
 
@@ -290,33 +296,40 @@ const plugin = {
                 diag: { type: "bool", label: "diag", default: false },
             },
         });
-        greeted = false;
+        announced = false;
         lastInstance = null;
         diagOn = settings.diag;
         diagLeft = settings.diag ? DIAG_SAMPLES : 0;
         // ★ 首行日志：明写开关状态（守卫按 `on=0` 判"关着的时候什么也不做"）。
         ctx.log(
             "info",
-            `field-points: on=${settings.on ? 1 : 0} types=${settings.types.map(hex).join(",")} ` +
-                `（常驻开关：位置触发 ${FIELD_SCRIPT} ` +
-                `[${hex(FIELD_MAIN_LOOP_LO)},${hex(FIELD_MAIN_LOOP_HI)})；不读档、不点鼠标、不写盘）`,
+            `field-points: on=${settings.on ? 1 : 0} types=${settings.types.map(hex).join(",")}` +
+                `（setmap 时显示所有采集/挖掘点）`,
         );
-        // ★ **唯一**的 trigger：常驻 reenter。外→内每次 fire 一次（进图 / 换图 / 重新进主轮询体）；
-        //   ⛔ **不要**在这里再 arm 一个 poll（那会把"已知位置"退化成轮询）。
-        return ctx.trigger.afterPosition(FIELD_SCRIPT, FIELD_MAIN_LOOP_LO, FIELD_MAIN_LOOP_HI, {
-            name: TRIGGER_NAME,
-            mode: "reenter",
-        });
+        // ★ **两个**常驻 trigger：setmap 的两条返回点（进图主路径 / `0x035130` 块）。
+        //   ⛔ **不要**在这里再 arm 一个轮询（那会把"已知位置"退化成轮询）。
+        triggers = [
+            ctx.trigger.afterPosition(FIELD_SCRIPT, FIELD_SETMAP_A_LO, FIELD_SETMAP_A_HI, {
+                name: TRIGGER_NAME_A,
+                mode: "reenter",
+            }),
+            ctx.trigger.afterPosition(FIELD_SCRIPT, FIELD_SETMAP_B_LO, FIELD_SETMAP_B_HI, {
+                name: TRIGGER_NAME_B,
+                mode: "reenter",
+            }),
+        ];
+        return triggers;
     },
     onTrigger(ctx, ev) {
         if (ev.kind === "timeout") {
-            // 正常路径不会有 timeout（只 arm 了 afterPosition，它没配 timeoutMs）⇒ 真出现就是接线坏了。
+            // 正常路径不会有 timeout（两个 afterPosition 都没配 timeoutMs）⇒ 真出现就是接线坏了。
             // ⛔ 这里**不用** `gates.js` 的 `failOnTimeout`：那条是 `finish(5)`（收口），而本开关
             //    正常路径永不收口（`plugin_field_switch.cpp` 的静态契约也钉着"代码里没有 finish"）。
             ctx.fail(String(ev.name), "field-points: unexpected timeout");
             return [];
         }
-        if (String(ev.name) !== TRIGGER_NAME) {
+        const name = String(ev.name);
+        if (name !== TRIGGER_NAME_A && name !== TRIGGER_NAME_B) {
             failOnUnknown(ctx, ev, "field-points");
             return [];
         }
@@ -330,13 +343,13 @@ const plugin = {
             diagOn = false;
             diagLeft = 0;
         }
-        // `on=0` ⇒ 连 `ctx.now.script` 都不判：一个 guest global 都不读（只有 start 那一行日志）。
-        if (settings.on) applyInField(ctx, settings);
+        // `on=0` ⇒ 一个 guest global 都不读（只有 start 那一行日志）。
+        if (settings.on) applyAtSetmap(ctx, settings);
         if (settings.diag) logDiag(ctx);
-        // ★ 放回**同一个** trigger 对象（不是新造的）：Reenter 的 `last_inside` 挂在它的 state 上，
+        // ★ 放回**同一个**集合（不是新造的 trigger）：Reenter 的 `last_inside` 挂在它的 state 上，
         //   跨 arm 保留 ⇒ 不会在同一个读点反复触发；`exhausted()` 也不耗尽它（mode != Once、
-        //   maxFires = 0）⇒ `install()` 收得下（`trigger_runner.cpp:100-106 / 140-178`）。
-        return ev.trigger;
+        //   maxFires = 0）⇒ `install()` 收得下（`trigger_runner.cpp`）。
+        return triggers !== null ? triggers : [ev.trigger];
     },
 };
 

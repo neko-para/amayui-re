@@ -141,12 +141,28 @@ export const SBUNKI_CONFIRM_ACTION_LO = 0x30ac;
 export const SBUNKI_CONFIRM_ACTION_HI = 0x32e8;
 
 // ===========================================================================
-// FIELD.BIN（无 doc；读数 = `save07-battle.plan` 头的 `--input-plan-trace`，每 100 ms 采样）
+// FIELD.BIN（doc: `docs/03-emulator/scripts/FIELD.md`；主轮询体的读数 = `save07-battle.plan` 头的 `--input-plan-trace`，每 100 ms 采样）
+//
+// ★ `FIELD_MAIN_LOOP` = 进图完成、开始等输入（`field-point-visible` **已不再用它**；仍归
+//   `scenario-save07-battle.js` / `scenario-save10-field.js` 那两个复现入口）。
+// ★ `FIELD_SETMAP_A/B` = setmap 完成、SETOBJ 已算完、FIELD 还没建表 / 画的两个返回点
+//   （`call-script 511a` 的返回点；`field-point-visible` 在这里无条件显示采掘点）。
+//   ⚠ 这两个区间目前只有**静态取证**、没有 run 读数（见 FIELD.md 的 `## 待核` 9）。
 // ===========================================================================
 
 // 主轮询体（地图就绪、在等输入）。门 = 读档完成后"地图在跑"（无 3× 独立读数）。
 export const FIELD_MAIN_LOOP_LO = 0x579c;
 export const FIELD_MAIN_LOOP_HI = 0x5860;
+
+// setmap 完成（`label_00018274` 里 `call-script 511a` = SETOBJ 的**返回点** `0x018280`）：进图主路径 ——
+// 此时 SETOBJ 已算完 `50ff9f`、FIELD 还没建 `65f2` / 画。`mode:"reenter"` ⇒ 每次外→内 fire 一次。
+export const FIELD_SETMAP_A_LO = 0x18280;
+export const FIELD_SETMAP_A_HI = 0x18284;
+
+// 同形第二条：`0x035130` 块（`SETROOM` → `SETHALLTEX` → `SETOBJ`）里 `call-script 511a` 之后的
+// `mov (global-int b22a) 1` @`0x035168` = 该块恢复 `b22a` 的那一拍（SETOBJ 已完成、还没开始画）。
+export const FIELD_SETMAP_B_LO = 0x35168;
+export const FIELD_SETMAP_B_HI = 0x3517c;
 
 // ===========================================================================
 // REIGN.BIN（无 doc；读数 = `scripts/recipes/fellow-switch.plan` 的 ④ + 该文件头的取证口径）

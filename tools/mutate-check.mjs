@@ -4610,10 +4610,10 @@ const MUTATIONS = [
   //     静态抓"静默的输入提交"（e2e 对后者是瞎的）。
   {
     file: 'apps/emulator-lift/scripts/plugins/field-point-visible.js',
-    from: '        return ctx.trigger.afterPosition(FIELD_SCRIPT, FIELD_MAIN_LOOP_LO, FIELD_MAIN_LOOP_HI, {\n',
+    from: '            ctx.trigger.afterPosition(FIELD_SCRIPT, FIELD_SETMAP_A_LO, FIELD_SETMAP_A_HI, {\n',
     to:
-      '        ctx.input.click(0, 0);  // 变异：开关又开始点鼠标\n' +
-      '        return ctx.trigger.afterPosition(FIELD_SCRIPT, FIELD_MAIN_LOOP_LO, FIELD_MAIN_LOOP_HI, {\n',
+      '            ctx.input.click(0, 0);  // 变异：开关又开始点鼠标\n' +
+      '            ctx.trigger.afterPosition(FIELD_SCRIPT, FIELD_SETMAP_A_LO, FIELD_SETMAP_A_HI, {\n',
     guard: 'ctest:plugin-field-switch',
     ctest: 'plugin-field-switch',
     buildDir: 'apps/emulator-lift/out',

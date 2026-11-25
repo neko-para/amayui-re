@@ -69,16 +69,21 @@ scripts/plugins/
 | `field.point-visible` | `on` (bool / `0|1` / `"true"|"false"`，缺省 false)、`types` (hex 串 `"1f,20"` 或数组)、`diag` (bool，缺省 false)；旧配置里的 `poll` **无害忽略** | `field-point-visible.js`（根） |
 | `settings.schema` | **保留域（机器写，⛔ 人不用手改）**：key = 插件域 id；值 = `{title, live, entries}` | 写 = `lib/settings.js` 的 `registerSettings`；读 = `scripts/ui/settings-page.js` |
 
-- ★ `field-point-visible.js` 是**常驻开关**（父级裁决 2026-11-25）：它只 arm **一个**
-  `afterPosition("FIELD.BIN", 0x579C, 0x5860, { mode: "reenter" })`（判据 = **已知脚本位置**，
-  `FIELD_MAIN_LOOP_LO/HI`），在玩家**自己**进 `FIELD` 主轮询体（每次外→内 fire 一次）时把 32 槽派生渲染位里
-  类型命中的槽清 `HIDE|ALPHA0`（`50ff9f` 是 VM 每次进图重算的派生表 ⇒ 每次进图重新施加）。⛔ 不轮询
-  （没有 `afterDelay` / `poll`）、⛔ 不读档（不 import `lib/save.js` / `lib/boot-to-title.js` /
-  `lib/chains.js`）、⛔ 不点鼠标、⛔ 不写盘、⛔ 不 `finish`（正常路径常驻；进程按 `--time-limit` / 关窗结束）。
+- ★ `field-point-visible.js` 是**常驻开关**（用户裁决 2026-11-25：目标 = **在 setmap 时无条件显示所有
+  采集 / 挖掘点**，不是"在 FIELD 里无条件显示 `?`/`!`"）：它常驻 arm **两个**
+  `afterPosition("FIELD.BIN", …, { mode: "reenter" })`（判据 = **setmap 完成的已知脚本位置**：
+  `FIELD_SETMAP_A_LO/HI` = `call-script 511a`(SETOBJ) 在进图主路径的返回点 ·
+  `FIELD_SETMAP_B_LO/HI` = `0x035130` 块的返回点），任一处**外→内** fire 时把 32 槽派生渲染位里
+  类型命中的槽 **置 `DRAW|ALPHA`（`|= 0x5`）** —— `DRAWOBJ` 的 bit0=1 才画、bit2=1 才不是 alpha 0；
+  **⛔ 不清任何位**（尤其 bit1：A 链格表与 FIELD 的战利品抽取都消费它）。`50ff9f` 是 VM 每次进图
+  重算的派生表 ⇒ 每次 setmap 重新施加。⛔ 不轮询（没有 `afterDelay` / `poll` / `FIELD_MAIN_LOOP`）、
+  ⛔ 不读档（不 import `lib/save.js` / `lib/boot-to-title.js` / `lib/chains.js`）、⛔ 不点鼠标、
+  ⛔ 不写盘、⛔ 不 `finish`（正常路径常驻；进程按 `--time-limit` / 关窗结束）。
   ⇒ 验收用法 = **玩家自己读档**：`--overlay --plugin field-point-visible`（`--plugin` 与
   `--input-plan` / `--control-root` 互斥 ⇒ 没有"输入计划驱动"这条验收）；FIELD 的**自动化复现**仍归
   `scenario-save10-field.js`。守卫：CTest `plugin-field-switch`（静态契约 + headless 常驻）与
-  `plugin-runtime` 的 `plugin/field-switch-apply`（施加 / 不重复写 / 换图重施加 / `on=0` 不写）。
+  `plugin-runtime` 的 `plugin/field-switch-apply`（`0x3→0x7` / `0x5→0x5` / 不重复写 / 换图重施加 /
+  `on=0` 不写）。★ `?` / `!` 是 **A 链格标记**（`SO030` 槽 `0x49`），不是点位；`on=1` 之后它们照旧出现。
   ★ 设置面（D1/D3）：`start` 里 `registerSettings` 登记 `on`/`diag`（页面据此画），这两项
   **每次位置触发（fire）重读**；`types` 不在 schema 里 ⇒ 只在 `start` 读一次。
 - ★ 旧配置里残留的 `slot` / `hold` / `poll` 对本插件**无害忽略**（不读、不报错；它不再读档、

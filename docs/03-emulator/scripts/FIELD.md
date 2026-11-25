@@ -42,21 +42,31 @@
 | `[0x579C,0x5860)` | **主轮询体**：进图完成、开始等输入。★ 目前唯一被用过的门（`await position FIELD 0x579C 0x5860`） | 见下 ①（开关的常驻读数）/ ②（读档链到 FIELD）/ ③（配方里的同一区间） | **2026-11-25 门 2/2**（headless 与 window 各一次，都命中本区间；★ 当时用的是 `--plugin field-point-visible` 的**自驱读档版本** —— 那条自驱链已删，同一区间现在用 ② 复现）；历史：2026-11-22 配方侧 4/4（出处 `apps/emulator-lift/scripts/recipes/save07-battle.plan` 的 ①–④ 头注释） |
 
 - **`[0x579C,0x5860)` 只证明"到地图就绪"，不证明"点击被消费"**：FIELD 上没做过点击负对照 ⇒ `## 待核` 3。
-- 常量位置：`apps/emulator-lift/scripts/plugins/lib/script-positions.js` 的 `FIELD_MAIN_LOOP_LO/HI`（数值只写这一处）。
+- ★ **`field-point-visible` 的触发区间不是本表这一条**：它改成 **setmap 的两个返回点** ——
+  `[0x18280,0x18284)`（`FIELD_SETMAP_A_*`，`label_00018274` 里 `call-script 511a`=SETOBJ 的返回点）与
+  `[0x35168,0x3517C)`（`FIELD_SETMAP_B_*`，`0x035130` 块里同一条 `call-script 511a` 之后）。这两个区间
+  目前**只有静态取证、没有 run 读数** ⇒ 按上一段的收录口径进 `## 待核` 9（⛔ 不写进本表）。
+- 常量位置：`apps/emulator-lift/scripts/plugins/lib/script-positions.js` 的 `FIELD_MAIN_LOOP_LO/HI`（仅复现入口用）
+  与 `FIELD_SETMAP_A_LO/HI` / `FIELD_SETMAP_B_LO/HI`（开关用）；数值只写这一处。
 
 ```bash
 cd E:/Projects/amayui-re-dev/apps/emulator-lift
-# ① `field-point-visible` = **常驻开关**（父级裁决 2026-11-25）：⛔ 不读档 / ⛔ 不点鼠标 / ⛔ 不写盘 /
-#    ⛔ 不 finish、⛔ **不轮询**。它只 arm **一个**位置触发
-#    `afterPosition("FIELD.BIN", 0x579C, 0x5860, { mode: "reenter" })`：每次**外→内**进入主轮询体
-#    fire 一次（进图 / 换图 / 重新进主轮询体），把派生渲染位里类型命中的槽清 `HIDE|ALPHA0`
-#    （`50ff9f` 是 VM 每次进图重算的表 ⇒ 每次进图重新施加）。Reenter 的边沿挂在**同一个 trigger
-#    对象**上、跨 arm 保留 ⇒ 不需要 re-arm（`trigger_runner.cpp` 的 `exhausted()` 只耗尽 Once /
-#    `maxFires>0`）。判据 = **已知脚本位置**，不是时间 ⇒ 没有 `poll` 这个设置项。
+# ① `field-point-visible` = **常驻开关**（用户裁决 2026-11-25：目标 = **在 setmap 时无条件显示所有采集/挖掘点**）：
+#    ⛔ 不读档 / ⛔ 不点鼠标 / ⛔ 不写盘 / ⛔ 不 finish、⛔ **不轮询**。它常驻 arm **两个**位置触发
+#    `afterPosition("FIELD.BIN", …, { mode: "reenter" })`（setmap 完成、SETOBJ 已算完、FIELD 还没建 `65f2` / 画）：
+#      `[0x18280,0x18284)` = `label_00018274` 里 `call-script 511a` 的返回点（进图主路径）；
+#      `[0x35168,0x3517C)` = `0x035130` 块里同一条 `call-script 511a` 之后的 `mov b22a 1`。
+#    每次**外→内** fire 一次；对类型命中（缺省 採集 1f / 発掘 20）的槽把派生渲染位
+#    `50ff9f[slot]` **置 `|= 0x5`**（bit0=画、bit2=正常 alpha；DRAWOBJ 画 `0xFA+类型` = `0x119` MO031B 绿草 /
+#    `0x11A` MO032B 岩石）。⛔ **不清任何位**，尤其 bit1（A 链格表与 FIELD 的战利品抽取消费它）。
+#    Reenter 的边沿挂在**同一个 trigger 对象**上、跨 arm 保留 ⇒ 不需要 re-arm（`trigger_runner.cpp` 的
+#    `exhausted()` 只耗尽 Once / `maxFires>0`）。判据 = **已知脚本位置**，不是时间 ⇒ 没有 poll 这个设置项。
+#    ★ **`?` / `!` 不是点位**：它们是 A 链格标记（`SO030.AGF` 槽 `0x49`，按帧内 `65f2` 的每格 dword 画），
+#      `on=0` 与 `on=1` 的同一帧上都会出现；本开关不改它们（判据是 B 链精灵）。
 #    ★ 开关参数写在 **appdata 根**（与 Local/ 同级；⛔ 不在 SAVE/ 下）：
 #      {"version":1,"domains":{"field.point-visible":{"on":1}}}
 #      域 key：on（bool/0-1，缺省 0）/ types（hex 串或数组）/ diag（0/1）。
-#      ★ 旧配置里的 slot / hold / **poll** 被**无害忽略**（不再读档、不再一次性结束、不再轮询）。
+#      ★ 旧配置里的 slot / hold / poll 被**无害忽略**（不再读档、不再一次性结束、不再轮询）。
 #    ★ 验收 = **玩家自己读档**：--overlay --plugin field-point-visible（`--plugin` 与 --input-plan /
 #      --control-root 互斥 ⇒ 没有"输入计划驱动"这条验收）；FIELD 的自动化复现归 ②。
 mkdir -p ../../.tmp/field-model/appdata
@@ -66,20 +76,21 @@ printf '{"version":1,"domains":{"field.point-visible":{"on":0}}}\n' \
   --game-dir ../../links/install --appdata ../../.tmp/field-model/appdata \
   --present headless --skip-logo --audio off --time-limit 20 --log-level warn \
   --plugin field-point-visible
-# 读数（2026-11-25 / win32 / dev 本轮 / headless / on=0 基线；★ 没人读档 ⇒ 进程一直停在标题）：
-#   [plugin] info: field-points: on=0 types=0x1f,0x20 （常驻开关：位置触发 FIELD.BIN [0x579c,0x5860)；…）
-#                                                                    ↑ 只这一行（关着不做事）
+# 读数（2026-11-26 / win32 / dev / headless / on=0 基线；★ 没人读档 ⇒ 进程一直停在标题）：
+#   [plugin] info: field-points: on=0 types=0x1f,0x20（setmap 时显示所有采集/挖掘点）
+#                                                          ↑ 只这一行（关着不做事）
 #   readout：file=…/field-point-visible.js entry=default render=no callbacks=yes
 #            params=- calls=1 run=waiting
-#   stop   ：time-limit @ eip=004B5230（正常结局；★ 落点 eip 随墙钟时点变，不是判据）；exit=0
-#   ★ calls=1 = 只有 start：位置触发只在玩家进 FIELD 主轮询体时 fire（没人读档 ⇒ 一次都没 fire）。
+#   stop   ：time-limit @ eip=…（正常结局；★ 落点 eip 随墙钟时点变，不是判据）；exit=0
+#   ★ calls=1 = 只有 start：两条 setmap 触发只在玩家进 FIELD 的 setmap 时 fire（没人读档 ⇒ 一次都没 fire）。
 #     常驻 → 由 --time-limit 收口，⛔ 不是 finish。
 #   ★ on=1 时进 FIELD 的效果面判据在**纯档**：CTest `plugin-runtime` 的 `plugin/field-switch-apply`
-#     （假 guest：命中槽清两位 / 类型不命中不动 / 留在区间内不再 fire / 读到有效"外"再"内" ⇒ 重新施加 /
-#     `on=0` 一个 global 都不读、都不写）。真机（人读档进 FIELD）的 `field-points: forced=` 读数见 `## 待核` 8。
+#     （假 guest：0x3→0x7 / 0x5→0x5 / 类型不命中不动 / 留在区间内不再 fire / 读到有效"外"再"内"（另一条
+#     setmap 钩子）⇒ 重新施加 / `on=0` 一个 global 都不读、都不写）。真机（人读档进 FIELD）的
+#     `field-points: setmap forced=` 读数见 `## 待核` 8。
 #   ★ 常驻/不自驱的守卫：CTest `plugin-field-switch`
-#     （静态：代码里没有 input / loadSave / bootToTitle / chains / finish / quit，且**没有** afterDelay /
-#      DEFAULT_POLL_MS；e2e：headless 真子进程无 --input-plan ⇒ 没有 boot:/load: 行、run=waiting、
+#     （静态：代码里没有 input / loadSave / bootToTitle / chains / finish / quit，且**没有** FIELD_MAIN_LOOP /
+#      afterDelay / poll；e2e：headless 真子进程无 --input-plan ⇒ 没有 boot:/load: 行、run=waiting、
 #      首行 on=0）。
 
 # ② 自动化到 FIELD 的复现（不是本开关）：读档链 + 场景入口 `scenario-save10-field.js`
@@ -217,7 +228,9 @@ rg -n "await position FIELD" apps/emulator-lift/scripts/recipes/save07-battle.pl
   - `!` = `(格 & 0x300) == 0` ⇒ **这一格既没有 `0x100`（`25c00` 地形位）也没有 `0x200`（邻格链）**。
   - `?` = `(格 & 0x400100) == 0x400100` ⇒ **有"类型+技能"位（`0x400000`）**并且**有 `0x100`**。
   - ⇒ 两者**互斥**（`!` 要求 `0x100` 为 0，`?` 要求它为 1）；`?` 才是挂在"採集/発掘 + 技能"上的那一个。
-  - ⛔ 这两块**不是**"采集点 / 发掘点"这一对（`report-so030` 的结论 + 本节的掩码读数）。
+  - ⛔ 这两块**不是**"采集点 / 发掘点"这一对：它们是 A 链的**格标记**（同一张图集 `SO030.AGF` 的槽 `0x49`），
+    判据是帧内 `65f2` 的每格 dword；**采集/发掘点的本体是 B 链精灵**（`MO031B.AGF` / `MO032B.AGF`，
+    见 ④）。⇒ `field-point-visible` 改的是 B 链的派生渲染位，`?` / `!` 照旧按格属性出现在 `on=0` 与 `on=1` 的帧上。
 
 ### ④ B 链（真正的"点位精灵"）：`DRAWOBJ.BIN` 全文 119 条
 
@@ -225,18 +238,23 @@ rg -n "await position FIELD" apps/emulator-lift/scripts/recipes/save07-battle.pl
 node .tmp/field-skill-hint/dis-one.mjs .tmp/field-skill-hint/DRAWOBJ.BIN --all   # 该文件从 ALF idx 20761 取出
 ```
 - 槽循环 `2 = 1..31`（`instr#1/#4`）；每槽：
-  - `instr#7` `and 50ff9f[槽] 1` → **置位 ⇒ 整段跳过（不画）**；
+  - `instr#7` `and 50ff9f[槽] 1` → `jcc`（**cond==0 才跳**）⇒ **bit0=1 = 画；bit0=0 才整段跳过**；
   - `instr#9/#11/#14` 取 `类型 = 50ffd1[槽]`、列 `14d73c[槽]`、行 `14d76e[槽]`；
   - `instr#15` `511080[类型] == 1` ⇒ `缩放 = 4a5f0[b222][槽] * 510fb8[类型]`（否则 0）；
   - `instr#23` `add 9 = 0x3A98 + 槽`：**绘制项句柄**（每槽一个，`0x3A98`/`0x3ACA` 是两张句柄表）；
-  - `instr#26` `and 50ff9f[槽] 4` → **置位 ⇒ `instr#29` `set-draw-color-alpha(项,0,0,0xFFFFFF)`（画但全透明）**；
-  - `instr#30..#39` 额外门：`511080[类型] == 3` **且** `eb5c1[b222][槽] == 1` **且** `(50ff9f[槽] & 6) == 2`；
+  - `instr#26` `and 50ff9f[槽] 4` **为 0** → `instr#29` `set-draw-color-alpha(项,0,0,0xFFFFFF)`（alpha=0）
+    ⇒ **bit2=1 = 正常 alpha；bit2=0 = 画但全透明**；
+  - `instr#30..#39` 额外门：`511080[类型] == 3` **且** `eb5c1[b222][槽] == 1` **且** `(50ff9f[槽] & 6) == 2`
+    ⇒ 跳过（bit1=1、bit2=0 的那一档）；
   - `instr#40/#41` `25c00[b222][行]` 的第 `列` 位**置位 ⇒ 跳过**；
   - `instr#44` `槽 = 0xFA + 类型`；`instr#47..#57` 目标 = `列*64+32 - w/2` / `行*64+32 - h/2 - 14`（**底对齐**）；
   - `instr#58` `draw-texture (项) (0xFA+类型) 0 0 w h dstx dsty`。
-- ⇒ **B 的可见性判据只有 `50ff9f[槽]` 的两位 + 一个三元条件**；`50ff9f` 是 VM 在**每次进图**重建的派生表：
+- ⇒ **B 的可见性判据 = `50ff9f[槽]` 的 bit0（画）/ bit2（alpha）+ 上述额外门**；`50ff9f` 是 VM 在**每次进图**重建的派生表：
   `FIELD.BIN` #187 `0x000FA0` `fill-zero (global-int 50ff9f) 32` · `SETOBJ.BIN` #2 `0x00005C` 再清一次 ·
-  然后 `SETOBJ` #34 `bit-set …0` / #78 / #84 `bit-set …2` / #86 `bit-set …1` 逐槽写。
+  然后 `SETOBJ` #34 `bit-set …0`（= 画）/ #78 / #84 `bit-set …2`（= alpha 正常）/ #86 `bit-set …1` 逐槽写。
+  ★ **2026-11-25 订正**：本节早先把 `jcc` 极性读反了（写成"置位=不画 / 置位=alpha 0"）。以
+  `apps/emulator/src/vm/ops.ts` 的 `jcc`（cond 为 0 才跳）+ 这两支的极性为准：**bit0=1 画、bit2=1 alpha**。
+  **bit1 不清**：A 链格表（`0x100000` 位）与 `FIELD` `label_00030E54` 的按 `flags & 2` 抽取战利品都消费它。
   ```bash
   node .tmp/field-skill-hint/dis-one.mjs .tmp/field-skill-hint/SETOBJ.BIN --all | Select-Object -First 8
   # 读数：#1 memcpy (50ff9f)… · #2 fill-zero (50ff9f) 32 · #3 memcpy (14d7a0) (50ffd1) 32
@@ -294,7 +312,13 @@ node .tmp/field-skill-hint/dis-one.mjs .tmp/field-skill-hint/SETMAPTEX.BIN --all
 7. **`MO031A`/`MO032A`**（ALF 19848/19850）与 B 用到的 `B` 版是什么关系（分辨率档？）——未取证。
 8. **`field-point-visible` 在真机（人读档进 FIELD）上的 `on=1` 施加读数**：目前只有
    ①（`on=0` 常驻基线）与**纯档** `plugin-runtime` 的 `plugin/field-switch-apply`（假 guest 上
-   "命中槽清 `HIDE|ALPHA0` / 不命中不动 / 已经可见不再写 / 换图实例号变 ⇒ 重新施加"）。
-   真机上还缺：`field-points: FIELD 就绪 ⇒ switch on=1 …` + `forced=N/M` 那次读数、以及"每次进图都
-   重新出现 `forced=` / `re-applied after map change`"。要取证须**人**（或带窗 + 手点）读一次档 ——
-   ⛔ 不要为了这条把 `--input-plan` / 控制层塞进 `--plugin`（三者互斥）。
+   "类型命中槽 `|0x5`（`0x3→0x7` / `0x5→0x5`）/ 不命中不动 / 已经可见不再写 / 换图实例号变 ⇒ 另一条
+   setmap 钩子重新施加"）。真机上还缺：首帧之后的 `field-points: setmap forced=N/M` 那次读数、以及
+   "每次进图都重新出现 `setmap re-applied … forced=`"、画面里出现 `MO031B` 绿草 / `MO032B` 岩石。
+   要取证须**人**（或带窗 + 手点）读一次档 —— ⛔ 不要为了这条把 `--input-plan` / 控制层塞进 `--plugin`
+   （三者互斥）。复跑形状见 `.tmp/field-setmap/design.md` 的「验收」（N 帧按实际 FIELD 就绪再定，
+   A/B 必须同一 N）。
+9. **setmap 两个钩子区间的 run 读数**：`[0x18280,0x18284)` / `[0x35168,0x3517C)` 的位置来自**静态**
+   （`FIELD.BIN` 的 `call-script 511a` 返回点，见 `design.md` 的 `dis-one.mjs` 读数）；还没有一次
+   `fired=` / 控制层 `pause` 采样证明运行期真的落到这里（`[0x35168,0x3517C)` 尤其只在一类换图路径上）。
+   要进 `## 位置区间` 表须补一条 run 读数。
