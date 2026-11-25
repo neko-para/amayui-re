@@ -769,13 +769,17 @@ struct Context {
 - **没有第二个 Input 施加点**：Input 的唯一路径是 `IntentQueue`；EditSink 是 Edit 类，不是 Input。
 - `ctx.log`：一行一条、有界/去重；⛔ 不每读点刷屏。
 - `ctx.profile`：HostAction（`profileBegin/End`）；在下一个汇点执行；不直接改 guest。
-  ★ **S2 起 `RenderCtx` 也有**（`ctx.profile.begin/end`；同形、`void`、失败 = TypeError；`end` 走
-  `HostPause`）—— 内置 `hud.js` 从全局 `host.profileBegin/End` 迁到它。
+  ★ **S2 起 `RenderCtx` 也有**：`begin(label)` 是 `void`（失败 = TypeError，与 RunCtx 同形）；
+  **`end()` 返回 `{ok, text, error}`**（与旧 UiScript 的 `host.profileEnd()` 同形；S2 复审 I3 的
+  HUD 回传路，报告文本**不再**额外写 stdout）；`end` 走 `HostPause`。RunCtx 的 `end()` 仍是 `void`
+  （报告走 stdout，D-C2-4 不变）。
 - **`RenderCtx` 的成员**（S2）：`ui` / `draw` / `read` / `game` / `params` / `log` / `profile`
   （`Object.keys(ctx)` **恰好**七个；`run` 仍属 C5 ⇒ `undefined`）。
   · `game` = `localFrames()` / `mouse()` **方法** + 经典 `game` 的**只读 getter**
     （`frame` / `fps?` / `script?` / `worst?` / `click?` / `hover?` / `active?`）—— 同一个
     `jsGameProperty`、同一份当帧 readings ⇒ 与 `--overlay` / `--ui` 的全局 `game.*` 逐条同口径。
+    `FrameInfo` = `{index, script, top, pos?}`（`top` = `slot == cur`，与经典 `local_frames()` 同一个
+    布尔；⛔ 不从 `pos` 反推栈顶）。
   · `draw.rect` 的 style 支持 `key`（命中区，与 `ui.rect({key})` 同一个 `Element.key`）；
     `draw.text` 的 style 支持 `bold`（与 `ui.text({bold})` 同一条渲染路径）。`text/measure` 上传
     `key` ⇒ TypeError（D-C2-3 同口径）。
@@ -802,20 +806,28 @@ struct Context {
 `emulator-lift-aot: --plugin id=<id> ⇒ <绝对路径>`，再用绝对路径交给 `initFromFile`（一次性，⛔ 不周期）。
 
 ★ **S2（2026-11-25）：`--overlay` = `--plugin hud` 预设**（用户口径，命令逐字不变）：
-1. **触发** = 显式 `--overlay` 且**没有** `--plugin` 且**没有** `--ui`；此时内部解析保留 id `hud`
-   （`--overlay --plugin X` ⇒ 插件赢，⛔ 不装 hud；`--ui` 自带脚本 ⇒ 走旧 loader）；
+1. **触发** = 显式 `--overlay` 且**没有** `--plugin` 且**没有** `--ui`；此时内部解析保留 id `hud`。
+   ★ **`--overlay` + 显式 `--plugin` 保持 S2 之前的形状**（复审 I2）：默认 hud **照装** —— 插件**有
+   `render`** ⇒ adopt 取代它（取代语成立）；插件**没有 `render`** ⇒ hud 留着照画（⛔ 不静默无 HUD）。
+   `--ui` 自带脚本 ⇒ 走旧 loader（预设不参与）。
 2. **`hud` 是保留 id**：解析先于普通插件根 —— `<exeDir>/scripts/ui/hud.js`（发行）→
    编译期 `LIFT_UI_SCRIPT_DIR/hud.js`（开发回退）；两份都在场时 **exe 赢**（与 S2 之前的
-   `--overlay` 同一条优先序，⛔ 不把"发行优先"变成歧义 exit 2）；
+   `--overlay` 同一条优先序，⛔ 不把"发行优先"变成歧义 exit 2）；id 判据**ASCII 大小写不敏感**
+   （`hud` / `HUD` / `Hud` 同一件事 —— Windows 卷不敏感，精确串会让 `--plugin HUD` 绕过遮蔽）。
 3. **用户插件根里的 `hud.js` ⇒ `exit 2`**（`<exeDir>/scripts/plugins/hud.js` 或
    `LIFT_PLUGIN_DIR/hud.js`；列出路径 + "`hud` 是保留 id，改名或给路径"）——⛔ 不静默被内置件遮住；
 4. 解析命中 ⇒ **与普通 id 同形**的一行 `--plugin id=hud ⇒ <绝对路径>`（`--overlay` 也打）；
 5. **`--plugin hud` 不隐含开窗**：render-only + `--present headless` ⇒ 一次性
    `[plugin] render is defined but no window`（D-C2-5，⛔ 不 exit 2、⛔ 不自动开窗）；
    `--overlay` 仍是**窗口参数**（`--present headless` ⇒ exit 2）；
-6. 窗口档的 hud 走 **adopt**（下一条），`SdlWindow::init` **不再**为 `--overlay` 装载 hud.js
-   （旧路径只留给 `--ui`）；`--overlay` 的三件旧事现在只剩"要窗口"这一件（像素 / 行序由
-   `plugin/hud-equivalence` 与 `aot-overlay` 的逐字节 BMP 判据钉住）。
+6. **预设路径**（`--overlay` 且没有 `--plugin`）的窗口档 hud 走 **adopt**：`SdlWindow::init`
+   **不再**为它装载 hud.js。**显式 `--plugin` + `--overlay` 仍走旧路径**（见 1）。
+   ★ `--overlay` + 预设装到的 hud **没有 `render`** ⇒ 一次性
+   `[plugin] --overlay 的 hud 没有 render：叠层不会出现`（⛔ 静默无 HUD）。
+7. **`--overlay` 不吃 `--plugin-param`**：`--overlay --plugin-param k=v` 仍 `exit 2`（hud 没有参数面；
+   参数面**不等价**，与 S2 之前同一条早报）。
+8. **PROFILE 四态**：`--overlay` 的 HUD 走 `ctx.profile`，其中 `end()` 回传 `{ok,text,error}` ⇒
+   `INVALID（已复制）` 那一态与 `--ui` **逐字相同**（S2 复审 I3）。
 
 ★ `--ui` 本轮只加一行 deprecation（`emulator-lift-aot: --ui 已弃用，请改用 --plugin <path>`），
 行为**逐字不变**（仍只吃路径、仍隐含 `--overlay`、仍是窗口参数、仍走旧 UiScript loader）。
@@ -837,9 +849,8 @@ struct Context {
   `ctx.draw.rect/text/measure`（`key` / `bold` 见 §4.5）、`ctx.game.*` 读数、`ctx.profile.*`。
   ★ 同一份文件**还保留** `globalThis.render = …`（旧 `--ui` loader 仍要它；S3 随 `--ui` 删），
   两个入口共用同一份绘制体、只换薄适配器 ⇒ 不可能"旧版一套、新版一套"。
-  ★ 已知差（按 D-C2-4）：`ctx.profile.end()` 是 `void` ⇒ 插件侧 HUD 看不到报告文本里的 `INVALID`
-  （报告由宿主写 **stdout**；状态行只有 开始 / 已复制 / 失败）；`--ui` 旧 loader 的
-  `host.profileEnd()` 仍返回 `{ok,text,error}` ⇒ 四态逐字不变。
+  ★ `ctx.profile.end()` 返回 `{ok,text,error}`（S2 复审 I3）⇒ `INVALID（已复制）` 四态与 `--ui` 逐字相同；
+  报告文本不再额外写 stdout。`--overlay --plugin hud` 是**同一个** HUD ⇒ ⛔ 不打"被取代"那一行。
 - `game.mouse()` 形状 = `{x, y, buttons?}`，`buttons = {left, right, middle}`：**有生产读数源**才装 ——
   `WindowManager::mouseButtons()`（`host_window.h:181-184`）= `InputDevice` 的三键 VK 电平
   （`input_device.h:84-90`，唯一电平表）。没有源（headless / 没有 `WindowManager` 的测试 sink）⇒
@@ -1659,7 +1670,7 @@ C5 是单插件 Run/dispatch 线；三者可与 C2 并行/后置。v3 的 S1/S2 
 | 40 | **`ctx.appdata.stat` 的宿主段不计入 2 ms**（`HostPause`；与 `ctx.profile.end` 同一原则） | 网络盘 / 杀软 stat 被记成用户 JS 超预算 ⇒ 误报 `callback budget exceeded` | 实现落点 `script_quickjs.cpp` 的 `jsCtxAppDataStat`；现有预算守卫（`plugin/callback-*`）覆盖同一机制，stat 自身暂无专门用例 |
 | 41 | **`ctx.config` 的文件形状 / 值 / 持久化 / 装载期上限**：信封 `version=1` + `domains` 对象 + 域值对象；未知顶层键 / 域内键保留；域自动创建；值只收原生六种（深度 8 / 节点 1024 / 串 8192 / key 128 / 域 256 / 每域 key 1024 / 文件 1 MiB；**set 与 attach 同一套**）；非法 UTF-8 在 set 期 TypeError、装载期 exit 2；`__proto__` / `prototype` / `constructor` 在域 id 与 key 都拒；没有 appdata ⇒ `domain()` 抛 `Error("no_appdata")`；`applied` = 内存已改（只有 `read_only` / `no_appdata` 两个 code）；`set` 只改内存 + **回调末**原子 flush（I/O 失败 warn 一次、后续不重试；序列化/超限失败不熔断）；`HostPause` 含值转换 | 配置文件被静默重写（丢前向兼容键）/ 深层文件在 `get` 递归爆栈而不是 exit 2 / 坏配置被当成"没有配置"继续跑 / `__proto__` 污染原型 / 写盘每 set 一次 / 宿主转换被记进用户 2 ms | `plugin-config` 的 `roundtrip` / `unknown-preserved` / `domain-autocreate` / `bad-json-exit2`（attach 判据）/ `bad-top-level` / `bad-domain-value` / `proto-key` / `limits` / `limits-on-load` / `invalid-utf8` / `no-appdata` / `missing-root` / `document-size` / `read-only-receipt` / `flush-on-callback` / `cross-instance-read` + `plugin/bad-config-exit2`（**进程 exit 2**）+ `control-script/config-roundtrip`（真宿主 + 回调末 flush）+ `plugin/config-host-pause` |
 | 42 | **内建插件参数来源 = config > params > 默认**（`has()` 判"给了"，falsy 也算）；没有 config 时**完全回退**到旧 params 行为 | 内建插件仍只认 `--plugin-param`（用户口径的迁移没发生）；或 `on:0` 被当成"没给" | `plugin/load-save-e2e`（⑥ 用 `plugin-config.json`、**不带** `--plugin-param`）+ `control-script/config-roundtrip` + 三个库文件的域表（`scripts/plugins/README.md`） |
-| 43 | **S2 `--overlay` = `--plugin hud` 预设**：`hud` 保留 id 先于普通根（exe → `LIFT_UI_SCRIPT_DIR`，exe 赢）；用户插件根里的 `hud.js` ⇒ exit 2；`--overlay` 仍是窗口参数（headless exit 2）；`--plugin hud` 不隐含开窗；窗口档 HUD 走 adopt（`SdlWindow::init` 不再为 `--overlay` 装 hud）；**`--overlay` 与 `--plugin hud` 的窗口 BMP / guest dump 逐字节相同**；`RenderCtx` = 七成员（含 `profile`）且 `game` getter 与经典同口径 | `--overlay` 静默换 HUD（装了另一份 hud.js / 被用户文件遮住 / 两个入口像素不同）；或预设把"要窗口"吃掉；或 render 的读数面与全局 `game.*` 分叉 | `plugin-resolve`（`resolve/hud-*`）+ `cli-aot-flags`（`overlay-headless-rejected`，help 面）+ `aot-overlay`（`overlay-headless-rejected` / `plugin-hud-headless` / `plugin-hud-window` / `plugin-hud-equivalence` / `overlay-plus-plugin-wins`）+ `plugin/hud-equivalence`（旧/新 loader display list 逐字段）+ `plugin/render-surface`（七成员）+ `plugin/render-profile` |
+| 43 | **S2 `--overlay` = `--plugin hud` 预设**：`hud` 保留 id 先于普通根（exe → `LIFT_UI_SCRIPT_DIR`，exe 赢；ASCII 大小写不敏感）；用户插件根里的 `hud.js` ⇒ exit 2；`--overlay` 仍是窗口参数（headless exit 2）；`--plugin hud` 不隐含开窗；**`--overlay` + 显式 `--plugin` 保持旧形状**（有 render ⇒ adopt 取代；无 render ⇒ hud 照画，⛔ 静默无 HUD）；预设不改互斥（`--overlay --input-plan` 仍 exit 5 / `--plugin hud --input-plan` 仍 exit 2）；`--overlay` 不吃 `--plugin-param`；**`--overlay` / `--plugin hud` / `--ui hud.js` 三方窗口 BMP + guest dump 逐字节相同**；`RenderCtx` = 七成员（含 `profile.end()` 回 `{ok,text,error}` ⇒ PROFILE 四态）；`measure` 的 `bold` 真参与度量；`game` getter 与经典同口径 | `--overlay` 静默换 HUD（装了另一份 hud.js / 被用户文件遮住 / 入口像素不同 / 无 render 插件让 HUD 消失）；或预设把"要窗口"/互斥语义吃掉；或 PROFILE 少一态 / `measure.bold` 被静默忽略 | `plugin-resolve`（`resolve/hud-*` 含大小写）+ `cli-aot-flags`（`overlay-headless-rejected` / `overlay-plugin-param-rejected`，help 面）+ `aot-overlay`（`overlay-headless-rejected` / `plugin-hud-headless` / `plugin-hud-window` / `ui-hud-window` / `plugin-hud-equivalence` / `overlay-plus-plugin-wins` / `overlay-with-run-only-plugin` / `overlay-input-plan-exit5` / `overlay-plugin-hud-input-plan-mutex`）+ `plugin/hud-equivalence`（旧/新 loader display list 逐字段，含 INVALID）+ `plugin/render-surface`（七成员）+ `plugin/render-profile` + `plugin/ui-draw-measure-bold` |
 
 **不进 test（文档/读数）**：JS 回调性能、QJS 内存、`afterDelay` 的墙钟读数、文本 plan 的复用行数、
 callback 链的可读性（进 `ctx.log`/设计文档）。
@@ -1674,8 +1685,9 @@ callback 链的可读性（进 `ctx.log`/设计文档）。
 ### D1：单插件入口 / flag / headless
 
 - **已落地（S1 + S2）**：`--plugin <id|path>` 是**唯一**脚本装载点；`--overlay` = 「内置 `hud`
-  （保留 id）+ 要窗口」的**布尔预设**（`--overlay` 与 `--plugin` 同给 ⇒ 插件赢）；`--ui` 只
-  deprecated（S3 删）+ `--plugin-param k=v`（可重复；重复 key ⇒ exit 2）；**一个** QJS 运行时/context；
+  （保留 id）+ 要窗口」的**布尔预设**（`--overlay` + **显式** `--plugin` ⇒ 旧形状：有 render 的
+  插件取代 hud，无 render 的插件让 hud 照画）；`--ui` 只 deprecated（S3 删）+ `--plugin-param k=v`
+  （可重复；重复 key ⇒ exit 2）；**一个** QJS 运行时/context；
   同一个插件可选 `render`/`start`/`onTrigger`（至少一个；`start`/`onTrigger` 必须成对；只有 `render` 也可）；
   没有 `render` 时可 headless；有 `render` 时由**CLI flag** 决定要不要窗口（⛔ 不从模块导出反推）。
   `ctx.params` 只读；`ctx.dispatch` 是任务，不是权限。

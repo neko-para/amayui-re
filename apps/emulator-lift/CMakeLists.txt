@@ -2863,9 +2863,11 @@ endif()
 #   `src/ui/present_ui.cpp`）。
 # ★ 为什么脚本**外置**（用户 2026-11-18 裁决）：JS 是**用户可自行发挥的 feature**，
 #   `scripts/ui/ui.d.ts` 随发行分发 ⇒ ⛔ 不把 `hud.js` 编进 exe（否则用户改了也不生效）。
-#   解析顺序（`--overlay` 且没给 `--ui`）：
+#   解析顺序（S2 起 = 保留 id `hud` 的解析；`--overlay` 预设与 `--plugin hud` 同一条）：
 #     ① `<exe 所在目录>/scripts/ui/hud.js`（发行布局；`aot_main` 从 argv[0] 取目录来解析）
-#     ② `LIFT_UI_SCRIPT_DIR/hud.js`（**开发回退**，本文件注入的源码树路径；`SdlWindow` 做）
+#     ② `LIFT_UI_SCRIPT_DIR/hud.js`（**开发回退**，本文件注入的源码树路径；S2 起由
+#        `src/plugin/plugin_search.cpp` 解析 —— `SdlWindow::loadUiScript` 那条开发回退只留给
+#        `--ui` / 直接构造 `SdlWindowOptions` 的测试）
 #     ③ 都不在 ⇒ **启动硬错**（err 点名试过的两个路径，⛔ 不静默回退空 HUD）
 #   ⇒ `scripts/ui/hud.js` 是**运行时读**的文件：改它**不需要重编**（只重跑）。
 # ★ `--ui <path>` 显式优先，且隐含 `--overlay`（与 `--overlay` 同给时 `--ui` 赢）。

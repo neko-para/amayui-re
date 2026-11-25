@@ -27,7 +27,8 @@ scripts/plugins/
 - ★ **`hud` 是保留 id**（S2）：`--overlay` = 「`--plugin hud` + 要窗口」的预设，解析的是
   `scripts/ui/hud.js`（`<exeDir>/scripts/ui/` → `LIFT_UI_SCRIPT_DIR`），**不是**本目录。
   ⇒ ⛔ 不要在本目录放 `hud.js`：它会**遮蔽**保留 id ⇒ 启动 `exit 2`（列路径 + "改名或给路径"），
-  而不是被静默装上（⛔ 不静默被内置件遮住，也不静默换源）。
+  而不是被静默装上（⛔ 不静默被内置件遮住，也不静默换源）。保留 id 判据 **ASCII 大小写不敏感**
+  （`--plugin HUD` 同样触发遮蔽 / 同样解析内置件）。
 - import 根 = **入口文件所在目录**：入口用 `./lib/x.js`（向下，允许）；`lib/` 内部用同目录 `./x.js`。
   ⛔ 入口不能住在库的下层（`../` 越根会被 QJS 拒）。
 

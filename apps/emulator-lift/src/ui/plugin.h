@@ -91,7 +91,8 @@ inline const char* pluginInputStateName(PluginInputState state) {
 // ★ **`read` / `log` 在 `render` 里也会被调**（C2b 的 `RenderCtx.read.global.get` / `ctx.log`）：
 //   ⇒ 实现方**不许**把这两个口绑在"必须正在 Run 回调里"（`PluginHost` 的 `in_callback_`）上；
 //   而**写类**（Edit / Input / Trigger 工厂）仍必须只在回调里可用 —— 那是"render 不做 guest 写"
-//   （合同 §4.4c）的唯一落点。`profile` 只在 RunCtx 里装（`RenderCtx` 没有它）。
+//   （合同 §4.4c）的唯一落点。`profile` **两边都有**（S2：RenderCtx 有自己的一份 trampoline，
+//   且 `RenderCtx.profile.end()` 返回 `{ok,text,error}` —— 见 `profileEndText`）。
 // =====================================================================================
 class PluginCallHost {
 public:
@@ -187,6 +188,12 @@ public:
     // `ctx.profile.begin/end`：复用宿主既有的 `ui::UiHostOps`（D-C2-4）；false ⇒ `*err` 是原因。
     virtual bool profileBegin(const std::string& label, std::string* err) = 0;
     virtual bool profileEnd(std::string* err) = 0;
+    /**
+     * ★ S2 复审 I3：**不打印**的报告版本（`RenderCtx.profile.end()` 的回传路）。
+     * `true` ⇒ `*text` = 报告全文（宿主的窗口已关）；`false` ⇒ `*err` = 原因（`text` 留空）。
+     * `profileEnd()` 仍保留给 **RunCtx**（`void` 契约：报告只能写 stdout；D-C2-4）。
+     */
+    virtual bool profileEndText(std::string* text, std::string* err) = 0;
 
     // ---- 归因（三个出口各有各的语义；⛔ 不要合并）----
     // `fail` = 当前 Run 失败（点名 name / reason；清 armed）；

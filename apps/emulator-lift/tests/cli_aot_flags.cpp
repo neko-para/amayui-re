@@ -306,6 +306,20 @@ int main(int argc, char** argv) {
         LIFT_CHECK(r.err.find("--plugin id=hud") != std::string::npos);  // 预设真的解析了保留 id
     }
 
+    // ---- S2 复审 minor 3：`--overlay` **不吃** `--plugin-param`（hud 没有参数面）----
+    //   `--overlay` = `--plugin hud` 的预设，但参数面**不等价**：`--plugin-param` 仍要求显式
+    //   `--plugin`（与 S2 之前同一条早报）。红了 ⇒ 预设把"没有消费者"变成静默忽略。
+    g_current_case = "overlay-plugin-param-rejected";
+    {
+        const ChildResult r =
+            runChild(exe, {"--overlay", "--plugin-param", "k=v"}, childOptions(root));
+        LIFT_CHECK(r.started);
+        LIFT_CHECK(!r.timed_out);
+        LIFT_CHECK_EQ_U32(r.exit_code, 2u);
+        LIFT_CHECK(r.err.find("--plugin-param") != std::string::npos);
+        LIFT_CHECK(r.err.find("--plugin") != std::string::npos);
+    }
+
     // ---- ①⁰ S9 `--ui-input=consume|pass`：值域 + **窗口参数**语义 ----
     //   判据（红了意味着什么）：
     //   ① 非法值（`pas`）⇒ exit 2 + 点名合法值，且**不是** `未知参数`（⛔ 不许"认不出就当 consume"）；

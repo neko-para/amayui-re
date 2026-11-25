@@ -937,10 +937,17 @@ int main(int argc, char** argv) {
     //   ★ 解析结果与普通 id **同形**：一行 `--plugin id=hud ⇒ <绝对路径>`，交给 `initFromFile`。
     // =====================================================================================
     bool overlay_preset_hud = false;
-    if (overlay_flag && plugin_path.empty() && ui_script.empty()) {
+    // ★ S2 复审 I2：`--overlay` 与**显式** `--plugin` 同给 ⇒ **旧行为不变**（默认 hud 照装，
+    //   有 render 的插件再 adopt 取代它；无 render 的插件 ⇒ hud 留着照画）。只有"没有 --plugin"
+    //   才走预设（= `--plugin hud`）。
+    const bool plugin_explicit = !plugin_path.empty();
+    if (overlay_flag && !plugin_explicit && ui_script.empty()) {
         plugin_path = lift::plugin::kReservedHudId;
         overlay_preset_hud = true;
     }
+    // ★ S2 复审 minor 1：显式 `--plugin hud`（或显式给内置 hud 的**绝对路径**）不是"取代"——
+    //   后面那句"HUD 已被插件的 render 取代"对它是一句假话。按解析结果判，⛔ 不按"是不是预设"。
+    bool plugin_is_builtin_hud = false;
     if (!plugin_path.empty()) {
         lift::plugin::PluginResolveRoots roots;
         // ★ argv[0] 不含分隔符（PATH 搜索 / 裸命令名）⇒ `exeDirOf` 返回空 ⇒ **发行根整根跳过**，
@@ -1001,6 +1008,26 @@ int main(int argc, char** argv) {
                          resolved.path.c_str());
             plugin_path = resolved.path;
         }
+    }
+    // ★ S2 复审 minor 1：**解析结果是不是内置 hud**（预设 / `--plugin hud` / 显式给内置 hud 路径）。
+    //   ⇒ ⑤' 不打"HUD 已被插件的 render 取代"（那对同一份 HUD 是假话）。
+    {
+        const auto normalize = [](std::string text) {
+            for (char& c : text) {
+                if (c == '\\') c = '/';
+                if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+            }
+            return text;
+        };
+        const std::string normalized = normalize(plugin_path);
+        const std::string dev_hud = normalize(std::string(LIFT_UI_SCRIPT_DIR) + "/hud.js");
+        std::string exe_hud;
+        if (!args.empty()) {
+            const std::string dir = exeDirOf(args[0]);
+            if (!dir.empty()) exe_hud = normalize(dir + "scripts/ui/hud.js");
+        }
+        plugin_is_builtin_hud = overlay_preset_hud || normalized == dev_hud ||
+                                (!exe_hud.empty() && normalized == exe_hud);
     }
 
     // ★ `overlay` 的唯一合成点：显式 `--overlay` **或** 有 HUD 脚本。`--ui` 单给时与旧行为逐字相同
@@ -1078,9 +1105,16 @@ int main(int argc, char** argv) {
                      "（只用于测试 / 诊断）\n");
     }
 
-    // ★ S2：默认 HUD 的解析**已经上移**到 `--plugin hud` 的保留 id 解析（与 `--plugin` 共用一份，
-    //   位置在 GPU bring-up 之前）。这里⛔ 不再有"为 `--overlay` 填 `ui_script`"的分支：
-    //   `ui_script` 现在只由**已弃用**的 `--ui <path>` 写入（S3 删），`--overlay` 只是窗口 flag + 预设插件。
+    // ★ S2 复审 I2：`--overlay` + **显式** `--plugin` ⇒ 恢复 S2 之前的"默认 hud 照装"：
+    //   有 render 的插件随后被 adopt 取代它（取代语才成立）；**无 render** 的插件 ⇒ hud 留着照画
+    //   （旧行为；⛔ 不静默变成"HUD 与插件都不画"）。
+    //   ★ 预设路径（`--overlay` 且没有 `--plugin`）**不**填 ui_script：HUD 由 `--plugin hud` 的 adopt 提供。
+    //   ★ `--ui <path>` 自带的 ui_script 仍然优先（deprecated，S3 删）。
+    if (overlay && plugin_explicit && ui_script.empty()) {
+        const std::string candidate =
+            exeDirOf(args.empty() ? std::string() : args[0]) + "scripts/ui/hud.js";
+        if (fileExists(candidate)) ui_script = candidate;
+    }
 
     // ---- 宿主字体配置：`--baseline-lift` / `--baseline-lift-by-size` **落在这里** ----
     //   ★ 必须在**任何** `FontEngine` / `SdlWindow` 使用之前：`SdlWindow::init` 会为 `--ui`
@@ -1117,11 +1151,11 @@ int main(int argc, char** argv) {
         //   ⇒ `hostCursorWarpEnabled()` 恒假 ⇒ shim 只改虚拟光标（用户看到的"不会移动鼠标"）。
         wopt.cursor_warp = cursor_warp;
         // ★ S2：`--overlay` 的 HUD 现在是**插件**（保留 id `hud`），由 ⑤' 的 adopt 接进叠层；
-        //   `SdlWindow::init` 的"overlay + 空 ui_script ⇒ 装默认 hud.js"这条旧路径**从 CLI 绕开**
-        //   （仍保留给直接构造 `SdlWindowOptions` 的测试 / 旧 `--ui`）。⇒ 只有 `--ui`（deprecated，
-        //   S3 删）还会让 init 自己去装载脚本。
+        //   ★ I2：**显式** `--plugin` + `--overlay` 例外 —— 仍让 init 装默认 hud（无 render 的插件
+        //     不 adopt ⇒ hud 留着照画；有 render ⇒ adopt 取代它）。所以 `wopt.overlay` 只排除
+        //     **预设**（`--overlay` 没有 --plugin 的那条）。
         //   `--present headless` 已在上面按 `present_window_flag` 拒绝。
-        wopt.overlay = !ui_script.empty();
+        wopt.overlay = overlay && !overlay_preset_hud;
         wopt.ui_script = ui_script;
         // ★ S9：注入点击的叠层路由模式（`--ui-input=consume|pass`；缺省 Consume）。
         //   没有叠层脚本 ⇒ sink 那边根本不装 router ⇒ 两种模式都是无害 no-op。
@@ -1361,6 +1395,14 @@ int main(int argc, char** argv) {
             std::fputs("[plugin] render is defined but no window; it will not be called\n", stderr);
             std::fflush(stderr);
         }
+        // ★ S2 复审 minor 7：`--overlay` 预设装到的 hud **没有 render** ⇒ 叠层不会出现。
+        //   一次性说清（⛔ 静默无 HUD；S2 之前这种 hud 是加载期硬错）。
+        if (overlay_preset_hud && plugin_host->script() != nullptr &&
+            !plugin_host->script()->hasRender()) {
+            std::fputs("[plugin] --overlay 的 hud 没有 render：叠层不会出现（检查 scripts/ui/hud.js）\n",
+                       stderr);
+            std::fflush(stderr);
+        }
     }
 
     // ---- ③' AGERC.DLL：真实 guest 模块（口径同已退役解释器臂 `main.cpp`：`--game-dir` 下那份，走 VFS 解析）----
@@ -1466,8 +1508,8 @@ int main(int argc, char** argv) {
             }
             // ★ `--overlay` 与**显式** `--plugin` 同给 ⇒ 用户以为看的是 hud.js，实际被插件 render 取代
             //   （同一个叠层 host）。一次性说清，⛔ 不静默换内容。
-            //   ⛔ 预设（`--overlay` ⇒ `--plugin hud`）**不**打这一行：那不是"取代"，就是它自己。
-            if (overlay && !overlay_preset_hud) {
+            //   ⛔ 预设 / **显式但解析结果就是内置 hud**（`--plugin hud`）**不**打这一行：那不是"取代"。
+            if (overlay && !overlay_preset_hud && !plugin_is_builtin_hud) {
                 std::fputs("[plugin] --overlay 的 HUD 已被插件的 render 取代（同一个叠层 host；"
                            "⛔ 不跑第二套 UI 运行时）\n",
                            stderr);

@@ -33,9 +33,8 @@
 //   第二击 `profile.end`（结束时**内部**写系统剪贴板）；四态 = 开始 / 已复制 / 失败：<error> /
 //   INVALID（已复制）。★ 副作用在 render **开头**（`game.click` 自驱）：状态行要参与面板尺寸，
 //   不能等按钮画完才知道结果 ⇒ `Button()` 只画外观、**不传 `on`**。
-//   ★ S2 已知差（按裁决 D-C2-4 收口）：插件侧 `ctx.profile` 是 `void`，**拿不到**报告文本 ⇒
-//     `--overlay` / `--plugin hud` 下不会出现 `INVALID（已复制）`（报告仍由宿主写 stdout）；
-//     旧 `--ui` 的 `host.profileEnd()` 仍返回 `{ok,text,error}` ⇒ 四态逐字不变。
+//   ★ S2 复审 I3：插件侧 `ctx.profile.end()` 回传 `{ok,text,error}`（与旧 `host.profileEnd()` 同形）
+//     ⇒ `--overlay` / `--plugin hud` 也走四态；报告文本**不**再额外写 stdout。
 // ★ 改这份文件**不需要重编**：它是运行时读的外置文件（重跑即可，⛔ 不编进 exe）。
 import { Button } from './kit.js';
 
@@ -154,12 +153,9 @@ function pluginHost(ctx) {
       }
     },
     profileEnd: () => {
-      try {
-        ctx.profile.end();
-        return { ok: true, text: "", error: "" };
-      } catch (e) {
-        return { ok: false, text: "", error: errorText(e) };
-      }
+      // ★ S2 复审 I3：插件的 `ctx.profile.end()` 返回与旧 `host.profileEnd()` 同形的
+      //   `{ok,text,error}` ⇒ 四态（含 `INVALID（已复制）`）与 `--ui` 完全一致。
+      return ctx.profile.end();
     },
   };
 }

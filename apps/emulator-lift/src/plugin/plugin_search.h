@@ -27,6 +27,7 @@
 //     · 但**用户插件根里存在 `hud.js`**（`<exeDir>/scripts/plugins/hud.js` 或 `LIFT_PLUGIN_DIR/hud.js`）
 //       ⇒ `ReservedShadowed`（调用方 exit 2 并列出路径）：⛔ 不静默让用户文件被内置件遮住；
 //     · 保留 id **不**进普通根的命中集合（普通根只在遮蔽检查里读）；
+//     · 保留 id 判据是 **ASCII 大小写不敏感**（`hud` / `HUD` / `Hud` 同一件事）；
 //     · 路径形式（含 `.js`）**不**享受保留语义 ⇒ `--plugin <...>/hud.js` 仍是普通路径（behavior 不变）。
 //
 // ★ 命中 1 处 ⇒ `path` = **绝对路径**（交给 `initFromFile`）；命中 ≥2 ⇒ `Ambiguous`（⛔ 不静默取第一个）；
@@ -94,6 +95,13 @@ struct PluginResolveResult {
 
 /** `^[A-Za-z0-9_-]{1,64}$`（空串 / 含 `.` `/` `\` `:` / 非 ASCII / >64 字符都 false）。 */
 bool isPluginId(const std::string& spec);
+
+/**
+ * `spec` 是否**保留 id `hud`** —— **ASCII 大小写不敏感**（`hud` / `HUD` / `Hud` 都是）。
+ * ★ 为什么不能按精确串：Windows 卷不敏感 ⇒ `--plugin HUD` 会绕开 `ReservedShadowed`，把用户
+ *   插件根里的 `hud.js` 当普通 id 装上（Linux 上则 NotFound）——同一份命令两种行为。
+ */
+bool isReservedHudId(const std::string& spec);
 
 /**
  * 解析 `--plugin` 的 spec。

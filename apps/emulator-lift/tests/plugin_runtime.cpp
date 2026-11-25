@@ -66,11 +66,14 @@
 //   · `plugin/render-readings`            ：`read.frames` / `read.scriptPos` / `game.localFrames` /
 //                                            `game.mouse` 的字段与"没有源 ⇒ undefined / 缺 pos 键"；
 //                                            C2b-2：**有**源时 `mouse().buttons` 三键 = 真实电平。
-//   · `plugin/render-profile`（S2）        ：`ctx.profile.begin/end` 在 **render** 里调到宿主、返回
-//                                            `undefined`；宿主失败 ⇒ TypeError（与 RunCtx 同形）。
+//   · `plugin/render-profile`（S2）        ：`ctx.profile.begin` 在 **render** 里调到宿主、返回
+//                                            `undefined`；`ctx.profile.end()` 回与旧 `host.profileEnd()`
+//                                            同形的 `{ok,text,error}`（失败也是结果对象）。
 //   · `plugin/hud-equivalence`（S2）       ：`scripts/ui/hud.js` 的**旧 loader** 与**插件 loader**
 //                                            在同一份 readings 下 display list **逐字段相同**
-//                                            （含 PROFILE 点击两拍）—— `--overlay` 像素/行序不变的判据。
+//                                            （含 PROFILE 点击两拍，第二拍带 `INVALID` 文本 ⇒ 四态）。
+//   · `plugin/ui-draw-measure-bold`（S2）  ：`ctx.draw.measure` 的 `bold` 真参与度量（与宿主
+//                                            `measureText(…, bold)` 交叉核对；⛔ 静默按非粗体量）。
 //   · `plugin/render-stored-runctx-rejected`：把 **RunCtx 存下来**在 render 里用 `fail`/`finish`/
 //                                            `quit`/`profile.*` ⇒ TypeError（复审 F2：成员表不是门面；
 //                                            S2 起 `RenderCtx` **自己**有 profile，但存下来的 RunCtx 仍被拒）。
@@ -1795,6 +1798,39 @@ void caseUiDraw(lift::FontEngine* font) {
             LIFT_CHECK(rerr.find("font == nullptr") != std::string::npos);
         }
     }
+
+    // ---- S2 复审 minor 4：`measure` 的 `bold` 真的参与度量（⛔ 静默按非粗体量字）----
+    //   ★ 判据 = 与**宿主自己的** `measureText(..., bold)` 交叉核对（⛔ 不是抄 JS 的数）。
+    lift_test::g_current_case = "plugin/ui-draw-measure-bold";
+    {
+        std::string load_err;
+        std::unique_ptr<lift::ui::PluginScript> bold =
+            loadPlugin("measure-bold.js", {}, font, &load_err);
+        LIFT_CHECK(bold != nullptr);
+        if (bold != nullptr) {
+            lift::ui::UiBuilder b;
+            lift::ui::UiFrameReadings r;
+            std::string rerr;
+            LIFT_CHECK(bold->render(b, r, &rerr));
+            const std::vector<lift::ui::Element>& e = b.elements();
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(e.size()), 2);
+            if (e.size() == 2) {
+                int bw = 0;
+                int bh = 0;
+                int nw = 0;
+                int nh = 0;
+                std::string merr;
+                LIFT_CHECK(lift::ui::measureText("hello", 18, true, *font, &bw, &bh, &merr));
+                LIFT_CHECK(lift::ui::measureText("hello", 18, false, *font, &nw, &nh, &merr));
+                LIFT_CHECK_EQ_I64(e[0].w, bw);
+                LIFT_CHECK_EQ_I64(e[0].h, bh);
+                LIFT_CHECK_EQ_I64(e[1].w, nw);
+                LIFT_CHECK_EQ_I64(e[1].h, nh);
+                // 读数（不是断言）：本机字体的粗体 / 常规度量是否可区分（缺粗体 face 时提示）。
+                std::printf("  [%s] bold=%dx%d normal=%dx%d\n", lift_test::g_current_case, bw, bh, nw, nh);
+            }
+        }
+    }
 }
 
 // =====================================================================================
@@ -1884,6 +1920,8 @@ void caseUiState() {
 struct ProfileProbe {
     int begins = 0;
     int ends = 0;
+    /** `profile_end` 的回传文本（S2：hud-equivalence 用它覆盖 `INVALID` 那一态）。 */
+    std::string end_text;
 };
 
 bool probeProfileBegin(void* ctx, const char* /*label*/, std::string* /*err*/) {
@@ -1892,8 +1930,9 @@ bool probeProfileBegin(void* ctx, const char* /*label*/, std::string* /*err*/) {
 }
 
 bool probeProfileEnd(void* ctx, std::string* text, std::string* /*err*/) {
-    ++static_cast<ProfileProbe*>(ctx)->ends;
-    if (text != nullptr) text->clear();
+    auto* probe = static_cast<ProfileProbe*>(ctx);
+    ++probe->ends;
+    if (text != nullptr) *text = probe->end_text;
     return true;
 }
 
@@ -2216,11 +2255,12 @@ void caseRenderProfile() {
         const char* want_prefix;
     };
     const Run runs[] = {
-        {"ok", true, true, 1, 1, "ok"},
-        // begin 抛 ⇒ 夹具提前返回，`end` 一次都不调。
+        // ★ S2 复审 I3：`end()` 返回结果对象（`ok:text` 是 `text`，这里夹具清空文本）。
+        {"ok", true, true, 1, 1, "ok:"},
+        // begin 抛（void 契约）⇒ 夹具提前返回，`end` 一次都不调。
         {"fail-begin", false, true, 1, 0, "begin-threw: ctx.profile.begin: already-open"},
-        // 只有 end（没有 begin）：end 抛一次。
-        {"fail-end", true, false, 0, 1, "end-threw: ctx.profile.end: not-open"},
+        // end 失败**不抛**：回 `{ok:false,error}`（结果对象）。
+        {"fail-end", true, false, 0, 1, "end-result:false:not-open"},
     };
     for (const Run& run : runs) {
         Fixture f;
@@ -2266,9 +2306,8 @@ void caseRenderProfile() {
 //   ★ 这是"--overlay 的像素/行序不变"的**确定性**判据（不需要 GPU / 窗口 / 墙钟）。
 //   ★ 两份实例都从**同一份源码文件**装载（`LIFT_UI_SCRIPT_DIR/hud.js`）⇒ 改 hud.js 两边一起变，
 //     ⛔ 不可能"旧版一套、新版一套"。
-//   ★ PROFILE 的点击帧也对比（begin / end 成功两拍）。⚠ 已知差：插件侧 `ctx.profile.end()` 是
-//     `void` ⇒ 看不到报告文本里的 `INVALID`（`--ui` 旧 loader 仍有四态）—— 那条**不在这里比**
-//     （按 D-C2-4 收口，见 `plugin-runtime.md` §4.6）。
+//   ★ PROFILE 的点击帧也对比（begin / end 成功两拍；第二拍带 `INVALID` 文本 ⇒ 四态里的
+//     `INVALID（已复制）` 两边都必须出现 —— S2 复审 I3 的回传路）。
 // =====================================================================================
 bool sameHudList(const std::vector<lift::ui::Element>& a, const std::vector<lift::ui::Element>& b,
                  std::string* why) {
@@ -2370,8 +2409,13 @@ void caseHudEquivalence(lift::FontEngine* font) {
     click.click_x = 10;
     click.click_y = 10;
     bool status_seen = false;
+    bool invalid_seen = false;
     for (int hit = 1; hit <= 2; ++hit) {
         click.frame = 1234 + static_cast<std::uint64_t>(hit);
+        if (hit == 2) {
+            // ★ S2 复审 I3：报告文本里有 `INVALID` ⇒ 两边都必须画 `INVALID（已复制）`。
+            probe.end_text = "=== profile window: overlay ===\nunaccounted ... INVALID";
+        }
         lift::ui::UiBuilder ca;
         lift::ui::UiBuilder pb;
         LIFT_CHECK(classic->render(ca, click, &cerr));
@@ -2382,11 +2426,14 @@ void caseHudEquivalence(lift::FontEngine* font) {
             lift_test::failf(__FILE__, __LINE__, "hud PROFILE 第 %d 拍不等价：%s", hit, why.c_str());
         }
         for (const lift::ui::Element& e : pb.elements()) {
-            if (e.kind == lift::ui::ElementKind::Text && e.text.rfind("profile: ", 0) == 0) status_seen = true;
+            if (e.kind != lift::ui::ElementKind::Text || e.text.rfind("profile: ", 0) != 0) continue;
+            status_seen = true;
+            if (hit == 2 && e.text == "profile: INVALID（已复制）") invalid_seen = true;
         }
     }
-    // 状态行确实进了 list（⛔ 不是"两边都没画"地等价）
+    // 状态行确实进了 list（⛔ 不是"两边都没画"地等价）；`INVALID` 那一态也真的画出来了。
     LIFT_CHECK(status_seen);
+    LIFT_CHECK(invalid_seen);
 }
 
 

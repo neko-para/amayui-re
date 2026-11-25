@@ -239,11 +239,12 @@ export interface TextStyle extends DrawStyle {
  * - 坐标 = 1280×720 逻辑系；宿主按窗口缩放。
  * - z 序 = 调用顺序（后调用在上）。
  * - 每帧开始清空；render 返回后提交本次 list。
- * - text.style.size/align/fill 同 draw；measure 用同一套 style 估算。
+ * - text.style.size/align/fill 同 draw；measure 用同一套 style 估算（`size` + **`bold`**；`fill` 不影响度量）。
  */
 export interface DrawApi {
     rect(x: number, y: number, w: number, h: number, style?: DrawStyle): void;
     text(x: number, y: number, text: string, style?: TextStyle): void;
+    /** `bold` 会**真的**改宽度 / 高度（与 `draw.text` 同一条字体路径；⛔ 不静默按非粗体量）。 */
     measure(text: string, style?: TextStyle): { readonly width: number; readonly height: number };
 }
 export type RunState = "running" | "waiting" | "done" | "failed" | "aborted";
@@ -281,15 +282,23 @@ export interface RunApi {
 }
 /** 宿主的 profile 窗口（开始 / 结束）。
  *
- * ★ S2：**`RunCtx` 与 `RenderCtx` 都有**（同形：`begin(label)` / `end()`，都是 `void`）。
- *   失败（已有一段开着 / 没有打开的窗口 / 剪贴板写失败）⇒ **TypeError**（与 `ctx.*` 其它宿主能力同口径）；
- *   想要"结果对象"的旧契约只有 `--ui` 的全局 `host.profileBegin/End()`（`ui.d.ts`）。
- * ★ `end()` 的宿主成本（生成报告 + 写剪贴板）走 `HostPause`，**不计入** 2 ms 回调预算；
- *   报告文本由宿主写 **stdout**（D-C2-4：`ctx.profile` 是 void，没有 HUD 回传路）。
+ * ★ S2：**`RunCtx` 与 `RenderCtx` 都有**，但**返回形状不同**（有意）：
+ *   · `RunCtx.profile`（`ProfileApi`）= 旧 C2 契约：`begin(label)` / `end()` 都是 **`void`**；
+ *     失败 = TypeError；`end` 的报告文本由宿主写 **stdout**（D-C2-4）。
+ *   · `RenderCtx.profile`（`RenderProfileApi`）= S2 复审 I3：`end()` 返回
+ *     `{ok, text, error}`（与旧 UiScript 的 `host.profileEnd()` 同形）—— HUD 要判文本里的
+ *     `INVALID` token；`begin` 仍是 `void`。
+ * ★ `end()` 的宿主成本（生成报告 + 写剪贴板）走 `HostPause`，**不计入** 2 ms 回调预算。
  */
 export interface ProfileApi {
     begin(label: string): void;
     end(): void;
+}
+/** `RenderCtx.profile`：`end()` 回传报告文本（判 `INVALID` 用）；`begin` 与 RunCtx 同形（void）。 */
+export interface RenderProfileApi {
+    begin(label: string): void;
+    /** 与 `host.profileEnd()` 同形；失败也是**结果对象**（⛔ 不抛 —— 没有窗口是正常状态）。 */
+    end(): { readonly ok: boolean; readonly text: string; readonly error: string };
 }
 export type LogLevel = "debug" | "info" | "warn" | "error";
 export type LogApi = (level: LogLevel, message: string, data?: unknown) => void;
@@ -346,24 +355,24 @@ export interface GameRead {
 /** render 只拿当帧 readings；模块级变量是 per-plugin 状态（render/onTrigger 共享）。
  *
  * ★ C2b 实现面：`ui` / `draw` / `read` / `game` / `params` / `log`；**S2 起加 `profile`**
- *   （`Object.keys(ctx)` **恰好**这七个）。
+ *   （运行期 `Object.keys(ctx)` **恰好**这七个；`run` 在 interface 里**声明保留**、运行期
+ *   **不安装**（C5）⇒ `typeof ctx.run === "undefined"`）。
  *   ⛔ 没有 `edit` / `input`（RunCtx 的写面；render 不做 guest 写）、`state` / `now` / `trigger` /
  *   `fail` / `finish` / `quit`（Run 语境），也⛔ 没有 `sample` / `screenshot`。
- * ★ **S2**：成员表**加 `profile`**（`Object.keys(ctx)` **恰好**七个）：`ctx.profile.begin(label)` /
- *   `ctx.profile.end()`，与 RunCtx 的 `ctx.profile` 同形（`void`；失败 = TypeError；`end` 走 HostPause）。
- *   `.tmp` 的 D-C2-4 仍成立：`end()` 不返回报告文本 ⇒ 报告走 **stdout**（`ctx.profile` 是 void）。
+ * ★ **S2**：`ctx.profile.begin(label)` 是 `void`（失败 = TypeError）；`ctx.profile.end()` 返回
+ *   `{ok, text, error}`（与旧 UiScript `host.profileEnd()` 同形；HUD 用它判 `INVALID`）。
  */
 export interface RenderCtx {
     readonly ui: UiApi;          // render 可写 hover/动画状态
     readonly draw: DrawApi;      // 本帧 display list
     readonly read: ReadApi;
     readonly game: GameRead;
-    /** ⚠ **C5**（C2b 里是 `undefined`；⛔ 不是"有但抛"）。 */
+    /** ⚠ **C5**（声明保留；运行期**不安装** ⇒ `undefined`；⛔ 不是"有但抛"）。 */
     readonly run: RunApi;
     readonly params: Readonly<Record<string, string>>;
     readonly log: LogApi;
-    /** S2：宿主的 profile 窗口（开始 / 结束；结束走 HostPause，报告文本在 stdout）。 */
-    readonly profile: ProfileApi;
+    /** S2：宿主的 profile 窗口（`end()` 回传报告文本；结束走 HostPause）。 */
+    readonly profile: RenderProfileApi;
 }
 
 /** `ctx.now`：**本读点的读数快照**（C2a；与 `FiredEvent`/`TimeoutEvent` 的 `TriggerEventBase` 同源）。

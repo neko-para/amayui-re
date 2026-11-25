@@ -201,6 +201,7 @@ public:
     void log(const char* level, const std::string& message) override;
     bool profileBegin(const std::string& label, std::string* err) override;
     bool profileEnd(std::string* err) override;
+    bool profileEndText(std::string* text, std::string* err) override;
     void fail(const std::string& name, const std::string& reason) override;
     void finish(int exit_code, const std::string& reason) override;
     void quit(const std::string& reason) override;

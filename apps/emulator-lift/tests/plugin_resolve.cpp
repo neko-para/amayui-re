@@ -37,6 +37,7 @@ namespace {
 
 namespace fs = std::filesystem;
 using lift::plugin::isPluginId;
+using lift::plugin::isReservedHudId;
 using lift::plugin::PluginResolveResult;
 using lift::plugin::PluginResolveRoots;
 using lift::plugin::PluginSpecKind;
@@ -399,6 +400,34 @@ int main() {
         LIFT_CHECK(r.kind == PluginSpecKind::Path);
         LIFT_CHECK(r.path == "hud.js");
         LIFT_CHECK(r.searched.empty());
+    }
+
+    // ---- ⑮ 保留 id 判据 = **ASCII 大小写不敏感**（`--plugin HUD` 不许绕过遮蔽）----
+    //   ★ Windows 卷不敏感：按精确串判 ⇒ `HUD` 走普通根、把用户根里的 `hud.js` 当普通 id 装上
+    //     （Linux 上则 NotFound）—— 同一条命令两种行为。这里钉"两种大小写同一解析"。
+    lift_test::g_current_case = "resolve/hud-id-case-insensitive";
+    {
+        LIFT_CHECK(isReservedHudId("hud"));
+        LIFT_CHECK(isReservedHudId("HUD"));
+        LIFT_CHECK(isReservedHudId("Hud"));
+        LIFT_CHECK(!isReservedHudId("hudx"));
+        LIFT_CHECK(!isReservedHudId("hud_"));
+        LIFT_CHECK(!isReservedHudId("hud.js"));
+        // 保留根命中：`HUD` 仍解析到**文件名的规范拼写** `hud.js`。
+        LIFT_CHECK(writeFile(hud_dev / "hud.js"));
+        const PluginResolveResult upper = resolve("HUD", hud_roots);
+        LIFT_CHECK(upper.status == Status::Ok);
+        LIFT_CHECK(upper.id == "HUD");
+        LIFT_CHECK(upper.path == toUtf8(hud_dev / "hud.js"));
+        std::error_code ec;
+        fs::remove(hud_dev / "hud.js", ec);
+        // 遮蔽：用户根里 `hud.js` + `--plugin HuD` ⇒ 仍 ReservedShadowed（⛔ 不许绕过）。
+        LIFT_CHECK(writeFile(dev_root / "hud.js"));
+        const PluginResolveResult mixed = resolve("HuD", hud_roots);
+        LIFT_CHECK(mixed.status == Status::ReservedShadowed);
+        if (!mixed.hits.empty()) LIFT_CHECK(mixed.hits[0] == toUtf8(dev_root / "hud.js"));
+        ec.clear();
+        fs::remove(dev_root / "hud.js", ec);
     }
 
     return lift_test::finish("plugin-resolve");

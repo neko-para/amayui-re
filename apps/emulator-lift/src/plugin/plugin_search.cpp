@@ -63,7 +63,17 @@ bool isIdChar(char c) {
            c == '-';
 }
 
+/** ASCII 小写（⛔ 不用 locale / `std::tolower`：判据必须与平台 locale 无关）。 */
+char asciiLower(char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c; }
+
 }  // namespace
+
+bool isReservedHudId(const std::string& spec) {
+    // ★ **ASCII 大小写不敏感**（S2 复审 minor 6）：Windows 卷不敏感 ⇒ `--plugin HUD` 若按精确串
+    //   判就会走普通根（把用户根里的 `hud.js` 当普通 id 装上，**绕过** ReservedShadowed）。
+    if (spec.size() != 3) return false;
+    return asciiLower(spec[0]) == 'h' && asciiLower(spec[1]) == 'u' && asciiLower(spec[2]) == 'd';
+}
 
 bool isPluginId(const std::string& spec) {
     // ★ 长度 1..64，字符集只有 ASCII 字母 / 数字 / `_` / `-`。
@@ -124,7 +134,7 @@ PluginResolveResult resolvePluginSpec(const std::string& spec, const PluginResol
     //   ① 用户插件根里的 `hud.js` = **遮蔽**（exit 2；⛔ 不静默换源 / 不静默被内置件遮住）；
     //   ② 之后才是保留根（发行 → 开发回退），顺序与旧 `--overlay` 完全一致；
     //   ③ 普通根的候选**不进** `searched` 的"找不到"清单（那一层不参与保留 id 的解析）。
-    if (spec == kReservedHudId) {
+    if (isReservedHudId(spec)) {
         const std::string shadow_name = std::string(kReservedHudId) + ".js";
         if (!roots.exe_dir.empty()) {
             push_candidate(absoluteOf(candidatePath(roots.exe_dir, shadow_name, true)));

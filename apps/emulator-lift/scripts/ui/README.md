@@ -148,12 +148,13 @@ globalThis.render = function render() {
 | `game.frame/fps/script/worst/click/hover/active` | `ctx.game.frame/…`（同名只读 getter） |
 | `game.mouse`（getter） | `ctx.game.mouse()`（**方法**） |
 | `game.local_frames()` | `ctx.game.localFrames()` |
-| `host.profileBegin/End()`（结果对象） | `ctx.profile.begin/end()`（`void`；失败 = TypeError） |
+| `host.profileBegin/End()`（结果对象） | `ctx.profile.begin()`（`void`）/ `ctx.profile.end()`（`{ok,text,error}`） |
 
 ### `host`（方法表；**只在 `render` 内可调用**）
 
-★ **S2**：插件侧用 `ctx.profile.begin(label)` / `ctx.profile.end()`（同形；都是 `void`，失败 =
-`TypeError`；`end` 的报告文本由宿主写 **stdout**）。下面这节是旧 `--ui` 全局契约（deprecated）。
+★ **S2**：插件侧用 `ctx.profile.begin(label)`（`void`；失败 = `TypeError`）/
+`ctx.profile.end()`（返回与旧 `host.profileEnd()` 同形的 `{ok,text,error}` —— HUD 靠 `text` 判
+`INVALID`；结束走 HostPause）。下面这节是旧 `--ui` 全局契约（deprecated）。
 
 `host` 是**方法表**（像 `ui`），不是读数（像 `game`）：对象**恒存在**，缺接线是**调用时**的
 `TypeError`（⛔ 不是 `typeof host === 'undefined'` 那种形状差异）。

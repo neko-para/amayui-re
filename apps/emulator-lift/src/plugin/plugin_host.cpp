@@ -541,22 +541,33 @@ bool PluginHost::profileBegin(const std::string& label, std::string* err) {
     return host_ops_->profile_begin(host_ops_->ctx, label.c_str(), err);
 }
 
-bool PluginHost::profileEnd(std::string* err) {
+bool PluginHost::profileEndText(std::string* text, std::string* err) {
     if (host_ops_ == nullptr || host_ops_->profile_end == nullptr) {
         if (err != nullptr) *err = "宿主没有接 profile 桥（--plugin 的宿主能力表为空）";
+        if (text != nullptr) text->clear();
         return false;
     }
-    // ★ D-C2-4：复用 `AotHost::endWindowText()`（同一份报告文本 + 同一份剪贴板行为）。
-    //   报告走 **stdout**（与 `AotHost::endWindow()` 逐字同形）—— 插件的 `profile.end()` 没有
-    //   HUD 这条回传路（d.ts 是 `void`），所以这里就是它的唯一出口。
-    std::string text;
+    std::string local_text;
     std::string local_err;
-    const bool ok = host_ops_->profile_end(host_ops_->ctx, &text, &local_err);
+    const bool ok = host_ops_->profile_end(host_ops_->ctx, &local_text, &local_err);
+    // 与 `jsHostProfileEnd` 同口径：失败 ⇒ 没有报告文本（⛔ 把半截文本回给调用方）。
+    if (text != nullptr) *text = ok ? local_text : std::string();
+    if (!ok && err != nullptr) {
+        *err = local_err.empty() ? std::string("没有打开的 profile 窗口") : local_err;
+    }
+    return ok;
+}
+
+bool PluginHost::profileEnd(std::string* err) {
+    // ★ D-C2-4（RunCtx 的 `void` 契约）：报告只能走 **stdout**（与 `AotHost::endWindow()` 逐字同形）。
+    //   ★ S2 复审 I3：`RenderCtx.profile.end()` **不**走这里 —— 它拿 `profileEndText` 的文本回 JS
+    //   （HUD 要判 `INVALID` 那一个 token），那条路径不再多打一遍 stdout。
+    std::string text;
+    const bool ok = profileEndText(&text, err);
     if (!text.empty()) {
         std::fputs(text.c_str(), stdout);
         std::fflush(stdout);
     }
-    if (!ok && err != nullptr) *err = local_err.empty() ? std::string("没有打开的 profile 窗口") : local_err;
     return ok;
 }
 

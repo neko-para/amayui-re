@@ -2462,6 +2462,7 @@ JSValue jsCtxDrawMeasure(JSContext* ctx, JSValueConst /*this_val*/, int argc, JS
             return JS_ThrowTypeError(ctx, "ctx.draw.measure: text 无法转成 UTF-8 字符串");
         }
         std::int32_t size = 16;
+        bool bold = false;
         std::string why;
         if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1])) {
             if (!JS_IsObject(argv[1])) return JS_ThrowTypeError(ctx, "ctx.draw.measure: style 必须是对象");
@@ -2469,12 +2470,16 @@ JSValue jsCtxDrawMeasure(JSContext* ctx, JSValueConst /*this_val*/, int argc, JS
             if (!readStyleSize(ctx, argv[1], &size, &why)) {
                 return JS_ThrowTypeError(ctx, "ctx.draw.measure: %s", why.c_str());
             }
-            // `fill` 不影响度量：**接受**（`measure` 用同一套 style —— 合同 §4.4c）但不用它。
+            // ★ S2 复审 minor 4：`bold` 会**真的**改宽度 / 高度 ⇒ ⛔ 不许静默按非粗体量字
+            //   （D-C2-3 的同类病）。`fill` 不影响度量：接受但不用它。
+            if (!readBool(ctx, argv[1], "bold", false, &bold, &why)) {
+                return JS_ThrowTypeError(ctx, "ctx.draw.measure: %s", why.c_str());
+            }
         }
         int width = 0;
         int height = 0;
         std::string merr;
-        if (!measureText(text, size, false, *impl->font, &width, &height, &merr)) {
+        if (!measureText(text, size, bold, *impl->font, &width, &height, &merr)) {
             return JS_ThrowTypeError(ctx, "ctx.draw.measure: 宿主字体度量失败：%s", merr.c_str());
         }
         Value out = qjs::newObject(ctx);
@@ -3309,12 +3314,12 @@ JSValue jsCtxProfileEnd(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/,
 
 // =======================================================================================
 // S2 · `RenderCtx.profile`（`ctx.profile.begin/end` 在 **render** 里）
-// ★ 与 RunCtx 的 `ctx.profile` **同形**（`begin(label?)` / `end()`，都是 `void`；失败 = TypeError）。
-//   ⛔ 不复用 `jsCtxProfile*`：那两个靠 `inCallback()` 区分"存下来的 RunCtx"，放宽会破
+// ★ `begin(label?)` 是 `void`（失败 = TypeError，与 RunCtx 同形）；**`end()` 返回结果对象**
+//   `{ok, text, error}`（与旧 UiScript 的 `host.profileEnd()` 同形）—— S2 复审 I3：HUD 要判报告
+//   文本里的 `INVALID` token ⇒ 文本必须回 JS，⛔ 不能只写 stdout。
+// ★ ⛔ 不复用 `jsCtxProfile*`：那两个靠 `inCallback()` 区分"存下来的 RunCtx"，放宽会破
 //   `plugin/render-stored-runctx-rejected`。这里判 `impl.current != nullptr`（render 的判据）。
 // ★ `end` 同样走 `HostPause`（宿主的报告 / 剪贴板成本不算用户 JS；同一口径）。
-// ★ 语义差（已知且按 D-C2-4 收口）：`end()` 是 `void`，报告文本走 **stdout**（`PluginHost::profileEnd`），
-//   HUD 拿不到 `INVALID` 那个 token —— `--ui` 旧 loader 的 `host.profileEnd()` 仍返回 `{ok,text,error}`。
 // =======================================================================================
 JSValue jsRenderProfileBegin(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
     try {
@@ -3351,14 +3356,22 @@ JSValue jsRenderProfileEnd(JSContext* ctx, JSValueConst /*this_val*/, int /*argc
         if (host == nullptr) {
             return JS_ThrowTypeError(ctx, "ctx.profile.end: 宿主没有接插件回调桥（⛔ 不静默 no-op）");
         }
+        std::string text;
         std::string why;
         bool ok = false;
         {
             HostPause pause(impl);
-            ok = host->profileEnd(&why);
+            // ★ S2 复审 I3：**不打印**的报告版本 ⇒ 文本回给 HUD（判 `INVALID` 那一态）。
+            ok = host->profileEndText(&text, &why);
         }
-        if (!ok) return JS_ThrowTypeError(ctx, "ctx.profile.end: %s", why.c_str());
-        return JS_UNDEFINED;
+        // ★ 与旧 UiScript 的 `host.profileEnd()` **同形**：`{ok,text,error}`（失败也是结果对象，
+        //   ⛔ 不抛 —— "没有打开的窗口"是用户可见的正常状态；HUD 要画"失败"并继续）。
+        Value out = makeProfileEndResult(ctx, ok, text, why);
+        if (out.isException()) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.profile.end: 结果对象写入失败");
+        }
+        return out.take();
     } catch (...) {
         return JS_ThrowTypeError(ctx, "ctx.profile.end: 宿主异常（C++ exception at script boundary）");
     }
