@@ -1,15 +1,18 @@
 # pnpm 的 workspace 真源（package.json 的 "workspaces" 字段保留，供不认 yaml 的工具读）
 # ★ 入列表的判据不是"在不在 apps/"，而是**有没有自己的依赖**：
 #   `apps/emulator` 现在有 `@amayui/age-format` 依赖（它的模型要用编解码与格式层）⇒ **入列表**。
-#   `apps/emulator-new` 有 `pixi.js` + `electron` / `vite`（窗口壳与渲染进程）⇒ **入列表**。
 #   理由不只是"能装依赖"：**只有声明了依赖，pnpm 才建 `node_modules/@amayui/*` 链接**，
 #   包名导入才解析得到（否则只能写 `../../../../packages/...` 这种绑死目录层级的相对路径）。
+# ★ `apps/emulator-new` **已废弃**（2026-11-25 用户裁决：方案 F2「目录原位、仅移出 workspace」）：
+#   目录**原位保留**（`data/spec/bindings.json` 的 evidence 锚还指着它的测试），但**移出 workspace**
+#   ⇒ 它的 `pixi.js` / `electron` / `vite` 不再进每次 `pnpm install`；它也不再进 `pnpm typecheck`。
+#   冻结判据因此从"约定不改"变成"**不再被 install / typecheck 触及**"，test 与 spec 守卫照旧保留。
+#   ⚠ 它自己的 `package.json` 不删：将来若要手工跑它的 Electron 壳，在该目录里独立 install 即可。
 # ★ `apps/inspector` 仍只有"重写计划"占位（无代码、无依赖），等 M7 落地时再入。
 packages:
   - packages/*
   - tools
   - apps/emulator
-  - apps/emulator-new
   - apps/workbench
   # ★ `plugins/*` 入列表的判据与 `apps/workbench` 相同：**它有自己的依赖**
   #   （`@deepseek-ai/dsh-tools` / `schemastery` 是普通 dependencies ⇒ 由本仓 `pnpm install` 装，
@@ -54,7 +57,7 @@ storeDir: '.pnpm-store'
 overrides:
   'markdown-it>entities': "^7.0.1"
 
-# Electron / esbuild 的安装脚本需要放行（pnpm 10 默认拦截构建脚本）
+# esbuild 的安装脚本需要放行（pnpm 10 默认拦截构建脚本）。
+# ⚠ `electron` 已随 `apps/emulator-new` 移出 workspace（2026-11-25）⇒ 不再列在这里。
 onlyBuiltDependencies:
-  - electron
   - esbuild
