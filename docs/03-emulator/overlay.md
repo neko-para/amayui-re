@@ -48,9 +48,10 @@
   `--present window --present-hidden --overlay --max-frames 2` ⇒ exit 0（`tests/aot_overlay.cpp`）；
   `--present headless` 仍按窗口参数拒绝它。
 - **S2 起（2026-11-25）**：`--overlay` 只剩两件——**要窗口**（窗口参数，headless exit 2）+ **预设**
-  （解析保留 id `hud` 并按 `--plugin` 装载，窗口档由 adopt 接进叠层）。`SdlWindow::init` 不再为
-  `--overlay` 装载 hud.js；`--overlay` 与 `--plugin hud` 的窗口 BMP / guest dump **逐字节相同**
-  （`tests/aot_overlay.cpp` 的 ⑦）。`--ui` 仍走旧 loader（deprecated，S3 删）。
+  （没有 `--plugin` 时解析保留 id `hud` 并按 `--plugin` 装载，窗口档由 adopt 接进叠层）。
+  ★ **`--overlay` + 显式 `--plugin` 保持旧形状**：默认 hud 照装（有 render 的插件 adopt 取代它；
+  无 render 的插件 ⇒ hud 留着重画）。★ `--overlay` / `--plugin hud` / `--ui hud.js` 三方窗口 BMP /
+  guest dump **逐字节相同**（`tests/aot_overlay.cpp` 的 ⑦）。`--ui` 仍走旧 loader（deprecated，S3 删）。
 - `apps/emulator` / `apps/emulator-new` **没有宿主 overlay**：前者只命中一条 VFS 注释（`src/host/fs.ts`）；
   后者的 `KIND_TEXTURE_OVERLAY` / `KIND_MOVIE_OVERLAY` 是 **guest 场景绘制**，不是宿主叠层
   （`src/platform/electron/renderer/scene-command-plan.ts`）。
@@ -254,12 +255,15 @@ M3 的数据面仍未做。`mouse.buttons` 的源与缺键口径见 §3.5（窗�
 
 落 `overlay-quickjs.md` 的适配器；HUD 变成 `scripts/ui/hud.js`；display list 成为脚本唯一出口。
 
-★ **S2 已落地（2026-11-25）**：`hud.js` 成为**真插件**（`export default { render(ctx) }`，用
-`ctx.draw/text/measure` + `ctx.game.*` + `ctx.profile.*`），`--overlay` = 「装载内置 `hud`
+★ **S2 已落地（2026-11-25；复审后订正）**：`hud.js` 成为**真插件**（`export default { render(ctx) }`，
+用 `ctx.draw/text/measure` + `ctx.game.*` + `ctx.profile.*`），`--overlay` = 「装载内置 `hud`
 （保留 id）+ 要窗口」的预设；旧 `globalThis.render` 入口只为 `--ui`（deprecated）保留，两个入口
 共用同一份绘制体。`hud` 是保留 id：`<exeDir>/scripts/ui/hud.js` → `LIFT_UI_SCRIPT_DIR/hud.js`
-（exe 赢）；用户插件根里的 `hud.js` ⇒ exit 2。窗口档走 adopt（`SdlWindow::init` 不再为
-`--overlay` 装 hud）；`--plugin hud` 不隐含开窗。见 `plugin-runtime.md` §4.6。
+（exe 赢；ASCII 大小写不敏感）；用户插件根里的 `hud.js` ⇒ exit 2。**预设路径**走 adopt
+（`SdlWindow::init` 不为它装 hud）；**`--overlay` + 显式 `--plugin` 保持旧形状**（有 render ⇒ 取代；
+无 render ⇒ hud 照画）；`--plugin hud` 不隐含开窗。`ctx.profile.end()` 回传报告文本 ⇒ PROFILE 四态
+（含 `INVALID`）与 `--ui` 相同。窗口 BMP / guest dump 由 **`--overlay` / `--plugin hud` / `--ui hud.js`
+三方逐字节**判据钉住。见 `plugin-runtime.md` §4.6。
 ★ **S9 已落**：`UiClickRouter` 已接进 `present_sdl.cpp:Impl::handleEvent` 与 `input_plan.cpp` 的
 `click` 路径；`--ui-input=consume|pass` 已实现（缺省 consume；窗口参数）。`--ui-strict` 仍未做。
 
