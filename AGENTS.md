@@ -564,3 +564,18 @@ git config --get core.hooksPath                     # 应打印 .githooks ——
 ⛔ 不要让一个会话靠 fork 背着前面所有轮次一直干下去。
 
 ★ 本节与 §14 的分派判据**正交**：§14 判"放哪棵树"，本节判"交给哪种会话"。
+
+---
+
+## 16. 测试冻结 / 可信子系统（2026-11-25）
+
+★ 本仓是**单人维护、重体验**的项目：**接受回归与隐藏 bug**，不靠"提前发现"来写测试。
+★ 判据只守**用户可见的不变量**；⛔ 不要为每一处实现配一条 test，⛔ 不要把"改坏一处再证明它会红"当成果。
+★ 三种处置（新增测试的默认答案是"不写"）：
+  - **冻结**：`tools/test-frozen.json` 里的文件**永久不跑**（文件保留 —— `data/spec/bindings.json` 的
+    evidence 锚还指着它们）；`pnpm test --include-frozen` 才跑。
+  - **禁用**：`tools/trusted.json` 的子系统（`at` = 最后可信提交）**未改动**时，CMake configure 给对应
+    CTest 设 `DISABLED TRUE`；`-D LIFT_ALL_TESTS=ON` 强制全跑；`node tools/trusted.mjs status|mark` 是唯一入口。
+  - **删除**：低价值用例直接删（`tools/mutate-check.mjs` 的对应条目一起删）。删 / 禁 CTest 后**必须
+    reconfigure**，否则 `mutate-check --list` 会报"守卫不存在"（它读 `out/CTestTestfile.cmake`）。
+★ 只有"变了就是静默 bug"才配守卫（§10 三问）；守卫的门槛不因为"删了很多测试"而放宽。

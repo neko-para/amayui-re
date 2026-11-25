@@ -30,7 +30,7 @@
 ## 修法（提交 `dcf7513`）
 
 - `repo:apps/emulator-lift/src/runtime/video/movie_decoder.cpp`：`plm_has_headers` 为假 ⇒ `plm_set_audio_enabled(plm_, 0)` + `video_only_ = true`，再用 sequence header 的宽/高/帧率当判据（宽高 ≤0 或 fps ≤0 ⇒ **仍然拒绝**）；`nextAudio()` 在 video-only 下直接报"没有音频样本"（⛔ 不去 pl_mpeg 里扫一个解不了的音频流：`audio_packet_type = 0` 时它会读到流尾才返回）。
-- 边界：⛔ **不改 vendored `third_party/pl_mpeg`**（三份副本逐字节相同，`repo:tools/test/emulator-cxx-pl-mpeg-sync.test.mjs` 守着）；⛔ 不放宽视频判据；正常 MP2 片（LOGO 1280×720）走原路一字不变。
+- 边界：⛔ **不改 vendored `third_party/pl_mpeg`**（三份副本逐字节相同；原 `tools/test/emulator-cxx-pl-mpeg-sync.test.mjs` 已于 2026-11-25 测试清理中删除 ⇒ 这条约束改为人工约定）；⛔ 不放宽视频判据；正常 MP2 片（LOGO 1280×720）走原路一字不变。
 
 ## 守卫与"红了意味着什么"
 
