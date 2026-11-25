@@ -1,15 +1,20 @@
-// scripts/plugins/lib/script-positions.js —— `<SCRIPT>` 的**脚本内位置**（数字只在这里写一次）
+// scripts/plugins/lib/script-positions.js —— **生成物**（由 tools/script-positions.mjs 生成，⛔ 别手改）
 //
-// 口径（三条，别改口径只改数）：
+// 真源 = `tools/script-positions.json`（**锚表**：基线指令窗口 + 基线行序 ⇒ 补丁后 `pos`）。
+// 怎么查：`pnpm tools script-positions explain <NAME>`（锚 → 命中的补丁后指令 → `pos`）。
+// 怎么改：改锚表（或改 `data/translations/patch.json` 之后）跑
+//         `pnpm tools script-positions gen --write`；`pnpm tools script-positions check` 红 = 忘了 gen。
+// 字段语义 / 不变量：`pnpm tools script-positions describe`；说明书：`tools/script-positions.md`。
+//
+// 口径（下面每条数值都由"锚 + 补丁后视图"现算，⛔ 不要在这个文件里手改）：
 //   1. `pos` = **脚本体内绝对字节偏移**，与 `dist/views/data/<NAME>.BIN.txt` 的 `label_%08x` 同坐标系
-//      （`pos = 0x3C + (frame[cur].+0x04 − frame[cur].+00)`；推导与实测见
-//      `docs/03-emulator/input-plan.md` §2.6 / §2.8）。
+//      （`pos = 0x3C + Σ(4+argc*8)`；推导与实测见 `docs/03-emulator/input-plan.md` §2.6 / §2.8）。
 //   2. 命名：`<SCRIPT>_<用途>_LO` / `_HI`（**半开区间** `[LO,HI)`）或 `<SCRIPT>_<用途>_POS`（单点）。
 //      `<SCRIPT>` = 宿主 marker 的**裸名**（`TITLE` / `SBUNKI` / …）—— 这是位置表的命名，**不是** trigger 的
 //      `script` 参数：C1 的门是精确 `==`，那边必须写带 `.BIN` 的宿主拼写（见 `save.js` 头）。
 //   3. ⛔ **别处不许再裸写这些字面量**。`scripts/plugins/lib/*.js`（除本文件与 `guest-globals.js`）里出现
 //      `0x…` 字面量 ⇒ `tools/test/script-map.test.mjs` 红（它**剥注释**后扫，所以头注释里印区间是允许的）。
-//      新增一条位置的正确做法：把值加进本文件（带用途 + 读数出处），消费方 `import`。
+//      新增一条位置的正确做法：把锚加进 `tools/script-positions.json`，再 `gen --write`（消费方 `import` 名字）。
 //
 // 收录判据：**有读数支撑**（门命中 / 采样读数 / 清单行号旁证三者之一），且**当前有消费方或作负对照**。
 //   · 出处 / 重复定义 / 名字映射 / `<待核>` 全在 `.tmp/script-map/provenance.md`（那只是取证台账，不参与运行）。
@@ -18,6 +23,8 @@
 //     它们只被 `.plan` 当字面量用（不入 JS），清单与「为什么没收」见 provenance §4 第 1 / 5 条。
 //   · 坐标（`1070,480` / `300` / `640,323` / `690,323` / `1220,45` / `640,517` …）**不是** `pos`，
 //     ⛔ 不要塞进本文件（它们属于 1280×720 参考系；台账见 provenance §6）。
+//   · **SN0000.BIN 的 10 个常量已移出本表**（8/10 不在补丁后指令网格上）—— 重锚之后再回来，见
+//     `tools/script-positions.md` 的「未做 / 待核」。
 //
 // 坐标系的**唯一例外**：`SC0000` / `SC4000` / `BUNKI` 的位置值绑**安装修订版**（`links/raw` 与
 // `links/install` 的清单差 `+0x20` / `−0x1C`，见 `docs/03-emulator/scripts/SC0000.md`）⇒ 换安装树会
@@ -57,32 +64,6 @@ export const GAMESTART_POLL_HI = 0x0664;
 // 回调体第一句 `call 0x50b0` 的 `i20c` 块：**备选**点击门（门 1/1 + 控制层直投 2/2；1 次 run 不够）。
 export const GAMESTART_I20C_LO = 0x50b0;
 export const GAMESTART_I20C_HI = 0x50b4;
-
-// ===========================================================================
-// SN0000.BIN（doc: `docs/03-emulator/scripts/SN0000.md`）
-// ===========================================================================
-
-// 粗区间：12 个 `wait-for-input` 页块所在范围（`0x4558` 第一页块入口 … `0xB26C` 最后一 wfi 末尾）。
-// ⇒ 能当"已进入 ADV 页区"的判据，⛔ 不能当点击门（E8：在 A 上点不推进）。
-export const SN0000_ADV_AREA_LO = 0x4558;
-export const SN0000_ADV_AREA_HI = 0xb26c;
-
-// 页 1 停点区间：页块尾 `i073`（清单行 1225）→ 下一 label `0x470C` 之前。★ 推荐页级门（门 12/12）。
-export const SN0000_PAGE1_STOP_LO = 0x46b8;
-export const SN0000_PAGE1_STOP_HI = 0x470c;
-
-// 页 2 停点区间：页块尾 `show-text`（行 1369）→ `0x504C`。点击推进后的页级门（门 3/3）。
-export const SN0000_PAGE2_STOP_LO = 0x5038;
-export const SN0000_PAGE2_STOP_HI = 0x504c;
-
-// 页 3 停点区间：页块尾 `show-text`（行 1511）→ `0x59A4`。第二次点击被消费后的页级门（门 3/3）。
-export const SN0000_PAGE3_STOP_LO = 0x5990;
-export const SN0000_PAGE3_STOP_HI = 0x59a4;
-
-// 页 1 的 `wait-for-input 0` 窗口（5 字 = 0x14 字节）：**点击被消费之后**才成立的事后读数
-//（无输入 25 s 不成立）⇒ ⛔ 不能当"点击前"的门。
-export const SN0000_PAGE1_WFI_LO = 0x470c;
-export const SN0000_PAGE1_WFI_HI = 0x4720;
 
 // ===========================================================================
 // FELLOW.BIN（doc: `docs/03-emulator/scripts/FELLOW.md`）

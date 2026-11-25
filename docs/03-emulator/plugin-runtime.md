@@ -992,6 +992,8 @@ export default plugin;   // 宿主 QJS 读 default 导出；⛔ 不读 globalThi
   `rowY = {0:91,1:150,2:209,3:269,4:328,5:388,6:447,7:507}`（实测表；`7` = `save07-battle.plan` 的槽 007 读数；⛔ 不用公式外推 8–9）。
   ★ **数值只在 `scripts/plugins/lib/script-positions.js` 写一次**（位置）与 `guest-globals.js`（global id / 位）；
   消费方 `import`，⛔ 不裸写 `0x…`（守卫 `tools/test/script-map.test.mjs`）。
+  ★ `script-positions.js` 现在是**生成物**（真源 = `tools/script-positions.json` 的锚表）；`patch.json` 改完后跑
+  `pnpm tools script-positions check`（红 = 忘了 `gen`）。
 - **失败面**（全部响亮）：slot 非整数 / 越界 ⇒ **构造时 throw**；`expect` 缺 / 空 / 元素非法 ⇒ **构造时 throw**
   （消息给出 ADV / 战斗 / 地图三类别名）；未知 `ev.name` ⇒ `ctx.fail` + `[]`；
   门超 `timeoutMs`（缺省 30000）⇒ `ctx.finish(5, "load-save: gate timeout (…)")` + `[]`（⛔ 不用 `ctx.quit`）。

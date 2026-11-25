@@ -1,0 +1,1048 @@
+{
+  "schemaVersion": 1,
+  "_doc": "本文件是**不透明数据**：字段语义 / 不变量 / 怎么查怎么改 见 `pnpm tools script-positions describe`（说明书 tools/script-positions.md）。不要手改 —— 它是锚表，改完跑 `pnpm tools script-positions gen --write`。",
+  "scriptHeaderLen": 60,
+  "js": "apps/emulator-lift/scripts/plugins/lib/script-positions.js",
+  "layout": [
+    {
+      "kind": "section",
+      "script": "TITLE.BIN",
+      "banner": [
+        "// ===========================================================================",
+        "// TITLE.BIN（doc: `docs/03-emulator/scripts/TITLE.md`）",
+        "// ==========================================================================="
+      ]
+    },
+    {
+      "kind": "position",
+      "name": "TITLE_INPUT_CALLBACK_LO"
+    },
+    {
+      "kind": "position",
+      "name": "TITLE_INPUT_CALLBACK_HI"
+    },
+    {
+      "kind": "position",
+      "name": "TITLE_POLL_LO"
+    },
+    {
+      "kind": "position",
+      "name": "TITLE_POLL_HI"
+    },
+    {
+      "kind": "position",
+      "name": "TITLE_EXIT_NEVER_LO"
+    },
+    {
+      "kind": "position",
+      "name": "TITLE_EXIT_NEVER_HI"
+    },
+    {
+      "kind": "position",
+      "name": "TITLE_I20C_POS"
+    },
+    {
+      "kind": "section",
+      "script": "GAMESTART.BIN",
+      "banner": [
+        "// ===========================================================================",
+        "// GAMESTART.BIN（doc: `docs/03-emulator/scripts/GAMESTART.md`）",
+        "// ==========================================================================="
+      ]
+    },
+    {
+      "kind": "position",
+      "name": "GAMESTART_INPUT_READ_LO"
+    },
+    {
+      "kind": "position",
+      "name": "GAMESTART_INPUT_READ_HI"
+    },
+    {
+      "kind": "position",
+      "name": "GAMESTART_POLL_LO"
+    },
+    {
+      "kind": "position",
+      "name": "GAMESTART_POLL_HI"
+    },
+    {
+      "kind": "position",
+      "name": "GAMESTART_I20C_LO"
+    },
+    {
+      "kind": "position",
+      "name": "GAMESTART_I20C_HI"
+    },
+    {
+      "kind": "section",
+      "script": "FELLOW.BIN",
+      "banner": [
+        "// ===========================================================================",
+        "// FELLOW.BIN（doc: `docs/03-emulator/scripts/FELLOW.md`）",
+        "// ==========================================================================="
+      ]
+    },
+    {
+      "kind": "position",
+      "name": "FELLOW_READ_INPUT_LO"
+    },
+    {
+      "kind": "position",
+      "name": "FELLOW_READ_INPUT_HI"
+    },
+    {
+      "kind": "position",
+      "name": "FELLOW_CALLBACK_LO"
+    },
+    {
+      "kind": "position",
+      "name": "FELLOW_CALLBACK_HI"
+    },
+    {
+      "kind": "position",
+      "name": "FELLOW_CALLBACK_HEAD_LO"
+    },
+    {
+      "kind": "position",
+      "name": "FELLOW_CALLBACK_HEAD_HI"
+    },
+    {
+      "kind": "position",
+      "name": "FELLOW_POLL_LO"
+    },
+    {
+      "kind": "position",
+      "name": "FELLOW_POLL_HI"
+    },
+    {
+      "kind": "position",
+      "name": "FELLOW_I20C_POS"
+    },
+    {
+      "kind": "section",
+      "script": "SAVE.BIN",
+      "banner": [
+        "// ===========================================================================",
+        "// SAVE.BIN（doc: `docs/03-emulator/scripts/SAVE.md`）",
+        "// ==========================================================================="
+      ]
+    },
+    {
+      "kind": "position",
+      "name": "SAVE_INPUT_CALLBACK_LO"
+    },
+    {
+      "kind": "position",
+      "name": "SAVE_INPUT_CALLBACK_HI"
+    },
+    {
+      "kind": "position",
+      "name": "SAVE_POLL_LO"
+    },
+    {
+      "kind": "position",
+      "name": "SAVE_POLL_HI"
+    },
+    {
+      "kind": "position",
+      "name": "SAVE_B39C_BLOCK_POS"
+    },
+    {
+      "kind": "section",
+      "script": "SBUNKI.BIN",
+      "banner": [
+        "// ===========================================================================",
+        "// SBUNKI.BIN（无 doc；正文散见 `docs/03-emulator/scripts/SC0000.md` 第 2–3 轮 / `plugin-runtime.md` §4.6）",
+        "//",
+        "// ★ 确认框「要读取吗？」上有**三个相邻但语义不同**的段，别再把它们混成一个\"点击窗口\"：",
+        "//     [0x09A4,0x09F8) 轮询体        —— 对话框已起来、等输入，**点击在这里被吞**",
+        "//     [0x0AF8,0x0B18) 读输入段      —— 在**读段里**点也被吞 ⇒ 只适合当\"第二道确认\"的回环门",
+        "//     [0x0B18,0x0C58) 读段之后      —— ★ **吃 click 的窗口**（trace 3/3 被消费）",
+        "//   ⚠ 已被取代的\"旧窗口\" `[0x09F8,0x0B18)`：落点多数在 `0x0AF8`（读段首）⇒ 点击被吞、链停在那里",
+        "//     （`REQ-01M7W2X81F1ASB488EJFQGMQSH` 的签名：`gate timeout (load:field-2)`）。",
+        "//     它**不在本文件**（`<待核>` 且没有 lib 消费方；3 份 `.plan` 仍以字面量用它 —— provenance §4 第 1 条）。",
+        "// ==========================================================================="
+      ]
+    },
+    {
+      "kind": "position",
+      "name": "SBUNKI_POLL_LO"
+    },
+    {
+      "kind": "position",
+      "name": "SBUNKI_POLL_HI"
+    },
+    {
+      "kind": "position",
+      "name": "SBUNKI_CONFIRM_READ_SEG_LO"
+    },
+    {
+      "kind": "position",
+      "name": "SBUNKI_CONFIRM_READ_SEG_HI"
+    },
+    {
+      "kind": "position",
+      "name": "SBUNKI_CONFIRM_CLICK_LO"
+    },
+    {
+      "kind": "position",
+      "name": "SBUNKI_CONFIRM_CLICK_HI"
+    },
+    {
+      "kind": "position",
+      "name": "SBUNKI_BUTTON_UP_LO"
+    },
+    {
+      "kind": "position",
+      "name": "SBUNKI_BUTTON_UP_HI"
+    },
+    {
+      "kind": "position",
+      "name": "SBUNKI_CONFIRM_ACTION_LO"
+    },
+    {
+      "kind": "position",
+      "name": "SBUNKI_CONFIRM_ACTION_HI"
+    },
+    {
+      "kind": "section",
+      "script": "FIELD.BIN",
+      "banner": [
+        "// ===========================================================================",
+        "// FIELD.BIN（无 doc；读数 = `save07-battle.plan` 头的 `--input-plan-trace`，每 100 ms 采样）",
+        "// ==========================================================================="
+      ]
+    },
+    {
+      "kind": "position",
+      "name": "FIELD_MAIN_LOOP_LO"
+    },
+    {
+      "kind": "position",
+      "name": "FIELD_MAIN_LOOP_HI"
+    },
+    {
+      "kind": "section",
+      "script": "REIGN.BIN",
+      "banner": [
+        "// ===========================================================================",
+        "// REIGN.BIN（无 doc；读数 = `scripts/recipes/fellow-switch.plan` 的 ④ + 该文件头的取证口径）",
+        "//",
+        "// ★ 两段，都有消费方（`../scenario-fellow-switch.js` 的右键那一步）：",
+        "//   回调体 → **它这一趟的读输入段** 才是点的那一拍（`[0x2214,0x2234)`）——",
+        "//   按下落在**回调尾**，抬起要等之后两个 KeyLevel 读点 ⇒ 按下跨过了一个完整回调",
+        "//   （这正是 `.plan` 当年 `mouse_down` → 门 → 门 → `mouse_up` 想要的那个形状）。",
+        "// · 主轮询体 `[0x1FF4,0x2048)` **不在本表**：`.plan` 用它当\"按下已经跨过一整帧\"的中间门，",
+        "//   而插件这条路上没有\"按下 / 抬起\"两个可分开的接口（`ctx.input.down/up` 不施加 ——",
+        "//   `src/runtime/intent_executor.cpp` 的 `MouseDown`/`MouseUp` 是 C1 的不施加档）",
+        "//   ⇒ 中间门没有消费方 ⇒ 按本文件头的收录判据不导出。",
+        "// ==========================================================================="
+      ]
+    },
+    {
+      "kind": "position",
+      "name": "REIGN_CALLBACK_LO"
+    },
+    {
+      "kind": "position",
+      "name": "REIGN_CALLBACK_HI"
+    },
+    {
+      "kind": "position",
+      "name": "REIGN_READ_INPUT_LO"
+    },
+    {
+      "kind": "position",
+      "name": "REIGN_READ_INPUT_HI"
+    },
+    {
+      "kind": "section",
+      "script": "SETTOOLLIST.BIN",
+      "banner": [
+        "// ===========================================================================",
+        "// SETTOOLLIST.BIN（无 doc；**没有**取证过的位置区间）",
+        "//",
+        "// 它在复现链里只当**脚本身份**用（切换的转场：`click` → `SETTOOLLIST` → 回 `FELLOW`），",
+        "// 走 `afterScript`，不需要 `pos` ⇒ 本表**不收**它（⛔ 也不要为了整齐编一个区间）。",
+        "// ==========================================================================="
+      ]
+    },
+    {
+      "kind": "section",
+      "script": "SELACT.BIN",
+      "banner": [
+        "// ===========================================================================",
+        "// SELACT.BIN（无 doc；读数同上）",
+        "// ==========================================================================="
+      ]
+    },
+    {
+      "kind": "position",
+      "name": "SELACT_MAIN_LOOP_LO"
+    },
+    {
+      "kind": "position",
+      "name": "SELACT_MAIN_LOOP_HI"
+    },
+    {
+      "kind": "section",
+      "script": "BTL.BIN",
+      "banner": [
+        "// ===========================================================================",
+        "// BTL.BIN（无 doc；读数 = `save07-battle.plan` ⑧ / 清单行 975–977）",
+        "// ==========================================================================="
+      ]
+    },
+    {
+      "kind": "position",
+      "name": "BTL_MAIN_LOOP_LO"
+    },
+    {
+      "kind": "position",
+      "name": "BTL_MAIN_LOOP_HI"
+    }
+  ],
+  "positions": [
+    {
+      "name": "TITLE_INPUT_CALLBACK_LO",
+      "script": "TITLE.BIN",
+      "baselineIndex": 53,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "call label_?",
+        "call label_?",
+        "ret",
+        "add (local-int 403) (local-int 403) 1"
+      ],
+      "pos": 1120,
+      "note": [
+        "// 回调体的输入段 = **吃 click 的窗口**（门 15/15；区间上界到 `read-mouse-button` 末尾 `0x514`+3 字）。"
+      ]
+    },
+    {
+      "name": "TITLE_INPUT_CALLBACK_HI",
+      "script": "TITLE.BIN",
+      "baselineIndex": 63,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "and (local-int 40d) (local-int 3f2) 2",
+        "jcc (local-int 40d) ffffffff label_?",
+        "bit-set (local-int 3fb) 1",
+        "jmp label_?"
+      ],
+      "pos": 1312
+    },
+    {
+      "name": "TITLE_POLL_LO",
+      "script": "TITLE.BIN",
+      "baselineIndex": 44,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "get-input-type",
+        "eq (local-int 40d) (local-int 3fc) 1",
+        "jcc (local-int 40d) label_? ffffffff",
+        "eq (local-int 40d) (local-int 3fc) 2"
+      ],
+      "pos": 924,
+      "note": [
+        "// 主轮询体（`get-input-type` + `sleep 1` + `jmp`）：门会命中但**点击无效** —— \"假阳性\"的来源。"
+      ]
+    },
+    {
+      "name": "TITLE_POLL_HI",
+      "script": "TITLE.BIN",
+      "baselineIndex": 53,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "call label_?",
+        "call label_?",
+        "ret",
+        "add (local-int 403) (local-int 403) 1"
+      ],
+      "pos": 1120
+    },
+    {
+      "name": "TITLE_EXIT_NEVER_LO",
+      "script": "TITLE.BIN",
+      "baselineIndex": 618,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "call label_?",
+        "poll-input",
+        "i19c",
+        "exit"
+      ],
+      "pos": 14476,
+      "note": [
+        "// 出口段（轮询期**永不执行**）⇒ 负对照门（3/3 `fired=0` + `pending=5` + exit 5）；⛔ 不要当正门。"
+      ]
+    },
+    {
+      "name": "TITLE_EXIT_NEVER_HI",
+      "script": "TITLE.BIN",
+      "baselineIndex": 618,
+      "at": 3,
+      "to": "end",
+      "window": [
+        "call label_?",
+        "poll-input",
+        "i19c",
+        "exit"
+      ],
+      "pos": 14500
+    },
+    {
+      "name": "TITLE_I20C_POS",
+      "script": "TITLE.BIN",
+      "baselineIndex": 608,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "i20c",
+        "ret",
+        "i1f6",
+        "release-texture 4"
+      ],
+      "pos": 14404,
+      "note": [
+        "// 回调体第一句 `call` 的 `i20c` 块入口（稳态采样 23/40 落在这里；控制层 `pause` 用它）。"
+      ]
+    },
+    {
+      "name": "GAMESTART_INPUT_READ_LO",
+      "script": "GAMESTART.BIN",
+      "baselineIndex": 76,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "call label_?",
+        "call label_?",
+        "ret",
+        "add (local-int 3f3) (local-int 3f3) 1"
+      ],
+      "pos": 1636,
+      "note": [
+        "// 回调体的输入读段（回调入口 + `call 0x0680` 整条读输入链）= 吃 click 的窗口（门 7/7 + 配方侧 15/15）。"
+      ]
+    },
+    {
+      "name": "GAMESTART_INPUT_READ_HI",
+      "script": "GAMESTART.BIN",
+      "baselineIndex": 86,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "ne (local-int 4d6) (local-int 3ef) (local-int 3ed)",
+        "ne (local-int 4d7) (local-int 3f0) (local-int 3ee)",
+        "or (local-int 4d8) (local-int 4d6) (local-int 4d7)",
+        "jcc (local-int 4d8) ffffffff label_?"
+      ],
+      "pos": 1828
+    },
+    {
+      "name": "GAMESTART_POLL_LO",
+      "script": "GAMESTART.BIN",
+      "baselineIndex": 69,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "get-input-type",
+        "eq (local-int 4d6) (local-int 3f4) 1",
+        "jcc (local-int 4d6) label_? ffffffff",
+        "eq (local-int 4d6) (local-int 3f4) 2"
+      ],
+      "pos": 1496,
+      "note": [
+        "// 主轮询体：采样最常落在这里（24/47），但它**不是**输入读段。"
+      ]
+    },
+    {
+      "name": "GAMESTART_POLL_HI",
+      "script": "GAMESTART.BIN",
+      "baselineIndex": 76,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "call label_?",
+        "call label_?",
+        "ret",
+        "add (local-int 3f3) (local-int 3f3) 1"
+      ],
+      "pos": 1636
+    },
+    {
+      "name": "GAMESTART_I20C_LO",
+      "script": "GAMESTART.BIN",
+      "baselineIndex": 899,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "i20c",
+        "ret",
+        "play-sound-effect 51e3 1",
+        "i0b5 1"
+      ],
+      "pos": 20656,
+      "note": [
+        "// 回调体第一句 `call 0x50b0` 的 `i20c` 块：**备选**点击门（门 1/1 + 控制层直投 2/2；1 次 run 不够）。"
+      ]
+    },
+    {
+      "name": "GAMESTART_I20C_HI",
+      "script": "GAMESTART.BIN",
+      "baselineIndex": 900,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "ret",
+        "play-sound-effect 51e3 1",
+        "i0b5 1",
+        "float-mov (global-float 9) 0"
+      ],
+      "pos": 20660
+    },
+    {
+      "name": "FELLOW_READ_INPUT_LO",
+      "script": "FELLOW.BIN",
+      "baselineIndex": 276,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "read-mouse-pos (local-int 3ed) (local-int 3ee)",
+        "read-mouse-button (local-int 3f1)",
+        "ne (local-int e01) (local-int 3ef) (local-int 3ed)",
+        "ne (local-int e02) (local-int 3f0) (local-int 3ee)"
+      ],
+      "pos": 5764,
+      "note": [
+        "// 输入读段（`read-mouse-pos`@0x1684 + `read-mouse-button`@0x1698）★ **推荐门**：窄、点得进去（4/4）。"
+      ]
+    },
+    {
+      "name": "FELLOW_READ_INPUT_HI",
+      "script": "FELLOW.BIN",
+      "baselineIndex": 278,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "ne (local-int e01) (local-int 3ef) (local-int 3ed)",
+        "ne (local-int e02) (local-int 3f0) (local-int 3ee)",
+        "or (local-int e03) (local-int e01) (local-int e02)",
+        "jcc (local-int e03) ffffffff label_?"
+      ],
+      "pos": 5796
+    },
+    {
+      "name": "FELLOW_CALLBACK_LO",
+      "script": "FELLOW.BIN",
+      "baselineIndex": 265,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "call label_?",
+        "eq (local-int e01) (global-int 0) 2",
+        "jcc (local-int e01) ffffffff label_?",
+        "call-frame 1c"
+      ],
+      "pos": 5544,
+      "note": [
+        "// 整个回调体（入口 → `read-mouse-button` 末尾）：门可用、点击也生效（1/1）。"
+      ]
+    },
+    {
+      "name": "FELLOW_CALLBACK_HI",
+      "script": "FELLOW.BIN",
+      "baselineIndex": 278,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "ne (local-int e01) (local-int 3ef) (local-int 3ed)",
+        "ne (local-int e02) (local-int 3f0) (local-int 3ee)",
+        "or (local-int e03) (local-int e01) (local-int e02)",
+        "jcc (local-int e03) ffffffff label_?"
+      ],
+      "pos": 5796
+    },
+    {
+      "name": "FELLOW_CALLBACK_HEAD_LO",
+      "script": "FELLOW.BIN",
+      "baselineIndex": 265,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "call label_?",
+        "eq (local-int e01) (global-int 0) 2",
+        "jcc (local-int e01) ffffffff label_?",
+        "call-frame 1c"
+      ],
+      "pos": 5544,
+      "note": [
+        "// 回调体前半（`call 0x1600` / `eq,jcc` / `call-frame 1c` / `i20c`）：也能吃 click（1/1，反直觉）。"
+      ]
+    },
+    {
+      "name": "FELLOW_CALLBACK_HEAD_HI",
+      "script": "FELLOW.BIN",
+      "baselineIndex": 271,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "add (local-int 3f3) (local-int 3f3) 1",
+        "i2fc (local-int 3fd) (local-int 3ed) (local-int 3ee) (local-int 3fe) (local-int 3ff)",
+        "jcc (local-int 3fd) ffffffff label_?",
+        "mov (local-int 3f1) 1"
+      ],
+      "pos": 5632
+    },
+    {
+      "name": "FELLOW_POLL_LO",
+      "script": "FELLOW.BIN",
+      "baselineIndex": 261,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "get-input-type",
+        "jcc (local-int 3f4) label_? ffffffff",
+        "sleep 1",
+        "jmp label_?"
+      ],
+      "pos": 5488,
+      "note": [
+        "// 主轮询体：门命中、click 也施加，但**点击不生效** ⇒ 负对照（exit 5）。"
+      ]
+    },
+    {
+      "name": "FELLOW_POLL_HI",
+      "script": "FELLOW.BIN",
+      "baselineIndex": 265,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "call label_?",
+        "eq (local-int e01) (global-int 0) 2",
+        "jcc (local-int e01) ffffffff label_?",
+        "call-frame 1c"
+      ],
+      "pos": 5544
+    },
+    {
+      "name": "FELLOW_I20C_POS",
+      "script": "FELLOW.BIN",
+      "baselineIndex": 269,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "i20c",
+        "ret",
+        "add (local-int 3f3) (local-int 3f3) 1",
+        "i2fc (local-int 3fd) (local-int 3ed) (local-int 3ee) (local-int 3fe) (local-int 3ff)"
+      ],
+      "pos": 5624,
+      "note": [
+        "// 回调体末尾 `i20c` 单点（稳态采样 16/45；控制层 `pause` 用它）。"
+      ]
+    },
+    {
+      "name": "SAVE_INPUT_CALLBACK_LO",
+      "script": "SAVE.BIN",
+      "baselineIndex": 202,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "call label_?",
+        "call label_?",
+        "ret",
+        "add (local-int 210) (local-int 210) 1"
+      ],
+      "pos": 4356,
+      "note": [
+        "// 回调体（入口 → `read-mouse-button` 末尾）。★ **保存屏与加载屏共用这一条**（门 3/3：保存 2/2 + 加载 1/1）",
+        "// ⇒ 位置谓词区分不了\"保存屏 / 加载屏\"，那要靠 `(global-int a9cb)`（REQ-01M7J97QY66KMP5SBPCTR0S3TP）。"
+      ]
+    },
+    {
+      "name": "SAVE_INPUT_CALLBACK_HI",
+      "script": "SAVE.BIN",
+      "baselineIndex": 212,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "and (local-int 21c6) (local-int 13) 2",
+        "jcc (local-int 21c6) ffffffff label_?",
+        "bit-set (local-int 7) 1",
+        "jmp label_?"
+      ],
+      "pos": 4548
+    },
+    {
+      "name": "SAVE_POLL_LO",
+      "script": "SAVE.BIN",
+      "baselineIndex": 190,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "mov (local-int e) 0",
+        "get-input-type",
+        "eq (local-int 21c6) (local-int e) 1",
+        "jcc (local-int 21c6) label_? ffffffff"
+      ],
+      "pos": 4084,
+      "note": [
+        "// 主轮询体（`get-input-type` / `sleep 1`@0x10EC / `jmp 0xFF4`）：采样 75/75 落在这里；**没当过门**。"
+      ],
+      "width": 3
+    },
+    {
+      "name": "SAVE_POLL_HI",
+      "script": "SAVE.BIN",
+      "baselineIndex": 202,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "call label_?",
+        "call label_?",
+        "ret",
+        "add (local-int 210) (local-int 210) 1"
+      ],
+      "pos": 4356
+    },
+    {
+      "name": "SAVE_B39C_BLOCK_POS",
+      "script": "SAVE.BIN",
+      "baselineIndex": 1864,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "i20c",
+        "ret",
+        "detach-texture 1d4c0 bb8",
+        "mov (local-int f) 0"
+      ],
+      "pos": 45980,
+      "note": [
+        "// 回调体第二句 `call` 的被调方块入口（`emu-ctl screenshot` frame=523 · `script=SAVE.BIN pos=0xB39C`）。",
+        "// 稳态采样常落在它；**不是门**。"
+      ]
+    },
+    {
+      "name": "SBUNKI_POLL_LO",
+      "script": "SBUNKI.BIN",
+      "baselineIndex": 104,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "get-input-type",
+        "eq (local-int 9e) (local-int 90) 1",
+        "jcc (local-int 9e) label_? ffffffff",
+        "sleep 1"
+      ],
+      "pos": 2468,
+      "note": [
+        "// 主轮询体（对话框已起来、在等输入）：**点击在这里被吞**。"
+      ]
+    },
+    {
+      "name": "SBUNKI_POLL_HI",
+      "script": "SBUNKI.BIN",
+      "baselineIndex": 109,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "call label_?",
+        "call label_?",
+        "ret",
+        "add (local-int 91) (local-int 91) 1"
+      ],
+      "pos": 2552
+    },
+    {
+      "name": "SBUNKI_CONFIRM_READ_SEG_LO",
+      "script": "SBUNKI.BIN",
+      "baselineIndex": 121,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "read-mouse-pos (local-int 2) (local-int 3)",
+        "read-mouse-button (local-int 4)",
+        "and (local-int 9e) (local-int 4) 2",
+        "jcc (local-int 9e) ffffffff label_?"
+      ],
+      "pos": 2808,
+      "note": [
+        "// 确认框的**读输入段**（`read-mouse-pos`@0x0AF8 / `read-mouse-button`@0x0B0C）：在读段里点**也被吞**。",
+        "// `save.js` 拿它当\"第二道确认\"回环门（`load:confirm2`：落在这里 ⇒ 再点 690,323）。"
+      ]
+    },
+    {
+      "name": "SBUNKI_CONFIRM_READ_SEG_HI",
+      "script": "SBUNKI.BIN",
+      "baselineIndex": 123,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "and (local-int 9e) (local-int 4) 2",
+        "jcc (local-int 9e) ffffffff label_?",
+        "bit-set (local-int b) 1",
+        "jmp label_?"
+      ],
+      "pos": 2840
+    },
+    {
+      "name": "SBUNKI_CONFIRM_CLICK_LO",
+      "script": "SBUNKI.BIN",
+      "baselineIndex": 123,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "and (local-int 9e) (local-int 4) 2",
+        "jcc (local-int 9e) ffffffff label_?",
+        "bit-set (local-int b) 1",
+        "jmp label_?"
+      ],
+      "pos": 2840,
+      "note": [
+        "// **读段之后** = 吃 click 的窗口（`save07-battle.plan` 的 trace：3/3 被消费，落点 0xB18/0xB34/0xB70）。",
+        "// ★ 与旧窗口 `[0x09F8,0x0B18)` 的关系：旧窗口**跨进**读段 ⇒ 落点常在 0x0AF8 被吞；本条整体在读段之后。"
+      ]
+    },
+    {
+      "name": "SBUNKI_CONFIRM_CLICK_HI",
+      "script": "SBUNKI.BIN",
+      "baselineIndex": 137,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "ne (local-int 9e) (local-int 92) (local-int 2)",
+        "ne (local-int 9f) (local-int 93) (local-int 3)",
+        "or (local-int a0) (local-int 9e) (local-int 9f)",
+        "jcc (local-int a0) ffffffff label_?"
+      ],
+      "pos": 3160
+    },
+    {
+      "name": "SBUNKI_BUTTON_UP_LO",
+      "script": "SBUNKI.BIN",
+      "baselineIndex": 167,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "mov (local-int 13) 0",
+        "gre (local-int 9e) (local-int 9) 0",
+        "lt (local-int 9f) (local-int 9) (global-int f8dfc)",
+        "and (local-int a0) (local-int 9e) (local-int 9f)"
+      ],
+      "pos": 3936,
+      "note": [
+        "// 第三次回调里\"抬起那一拍\"走到的块（`b&1` 清、`b&4` 过 ⇒ 进 0x0F60；`0x1040` 是跳转目标）。"
+      ]
+    },
+    {
+      "name": "SBUNKI_BUTTON_UP_HI",
+      "script": "SBUNKI.BIN",
+      "baselineIndex": 177,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "and (local-int 9e) (local-int 4) 3",
+        "eq (local-int 9f) (local-int 9e) 0",
+        "jcc (local-int 9f) ffffffff label_?",
+        "bit-set (local-int b) 2"
+      ],
+      "pos": 4160
+    },
+    {
+      "name": "SBUNKI_CONFIRM_ACTION_LO",
+      "script": "SBUNKI.BIN",
+      "baselineIndex": 492,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "and (local-int 9e) (global-int f8fa5) 4",
+        "gr (local-int 9f) (local-int 9e) 0",
+        "sub (local-int a0) (global-int f8dfc) 1",
+        "lookup-array (local-ptr 5) (global-int f8dff) (local-int a0)"
+      ],
+      "pos": 12460,
+      "note": [
+        "// 确认动作块（\"はい\"真正生效那一段）：第 3 轮 `load24` 通过（`steps=12 fired=4 pending=0`）。",
+        "// ⚠ 第 2 轮 8 s 到期 ≠ 矛盾：那时\"输入施加形状\"还没修好（`SC0000.md`）。"
+      ]
+    },
+    {
+      "name": "SBUNKI_CONFIRM_ACTION_HI",
+      "script": "SBUNKI.BIN",
+      "baselineIndex": 517,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "detach-texture 2e630 7d0",
+        "release-texture 13",
+        "i20c",
+        "set-string (global-string f17) \"?\""
+      ],
+      "pos": 13032
+    },
+    {
+      "name": "FIELD_MAIN_LOOP_LO",
+      "script": "FIELD.BIN",
+      "baselineIndex": 942,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "get-input-type",
+        "eq (local-int 819f) (local-int 2fb8) 1",
+        "jcc (local-int 819f) label_? ffffffff",
+        "eq (local-int 819f) (local-int 2fb8) 2"
+      ],
+      "pos": 22428,
+      "note": [
+        "// 主轮询体（地图就绪、在等输入）。门 = 读档完成后\"地图在跑\"（无 3× 独立读数）。"
+      ]
+    },
+    {
+      "name": "FIELD_MAIN_LOOP_HI",
+      "script": "FIELD.BIN",
+      "baselineIndex": 951,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "call label_?",
+        "call label_?",
+        "ret",
+        "add (local-int 2fb6) (local-int 2fb6) 1"
+      ],
+      "pos": 22624
+    },
+    {
+      "name": "REIGN_CALLBACK_LO",
+      "script": "REIGN.BIN",
+      "baselineIndex": 349,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "call label_?",
+        "call label_?",
+        "ret",
+        "add (local-int 2ca) (local-int 2ca) 1"
+      ],
+      "pos": 8264,
+      "note": [
+        "// 回调体（入口 → 它那一段输入读完）：目录屏就绪 = 右键那一步的**前置**门（不是点的那一拍）。"
+      ]
+    },
+    {
+      "name": "REIGN_CALLBACK_HI",
+      "script": "REIGN.BIN",
+      "baselineIndex": 372,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "ne (local-int 1de7) (local-int 2d4) 2",
+        "eq (local-int 1de8) (local-int 2d3) 2",
+        "and (local-int 1de9) (local-int 1de7) (local-int 1de8)",
+        "jcc (local-int 1de9) label_? ffffffff"
+      ],
+      "pos": 8756
+    },
+    {
+      "name": "REIGN_READ_INPUT_LO",
+      "script": "REIGN.BIN",
+      "baselineIndex": 370,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "read-mouse-pos (local-int 2c1) (local-int 2c2)",
+        "read-mouse-button (local-int 2c5)",
+        "ne (local-int 1de7) (local-int 2d4) 2",
+        "eq (local-int 1de8) (local-int 2d3) 2"
+      ],
+      "pos": 8724,
+      "note": [
+        "// 回调体尾的**读输入段**：★ 右键就在这一拍提交（见上：让按下跨过回调边界；实测读数见消费方文件头）。"
+      ]
+    },
+    {
+      "name": "REIGN_READ_INPUT_HI",
+      "script": "REIGN.BIN",
+      "baselineIndex": 372,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "ne (local-int 1de7) (local-int 2d4) 2",
+        "eq (local-int 1de8) (local-int 2d3) 2",
+        "and (local-int 1de9) (local-int 1de7) (local-int 1de8)",
+        "jcc (local-int 1de9) label_? ffffffff"
+      ],
+      "pos": 8756
+    },
+    {
+      "name": "SELACT_MAIN_LOOP_LO",
+      "script": "SELACT.BIN",
+      "baselineIndex": 94,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "get-input-type",
+        "eq (local-int fe8) (local-int 3f5) 1",
+        "jcc (local-int fe8) label_? ffffffff",
+        "eq (local-int fe8) (local-int 3f5) 2"
+      ],
+      "pos": 2100,
+      "note": [
+        "// 主轮询体（`get-input-type` + `sleep 1` + `jmp 0x834`）= 「決定」那一屏",
+        "//（实测：结束回合后 ~3 s 在 0x44EC、~13 s 落到 0x0870）。"
+      ]
+    },
+    {
+      "name": "SELACT_MAIN_LOOP_HI",
+      "script": "SELACT.BIN",
+      "baselineIndex": 101,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "call label_?",
+        "i20c",
+        "ret",
+        "add (local-int 3f4) (local-int 3f4) 1"
+      ],
+      "pos": 2240
+    },
+    {
+      "name": "BTL_MAIN_LOOP_LO",
+      "script": "BTL.BIN",
+      "baselineIndex": 714,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "poll-input",
+        "wait",
+        "mov (global-int 6f2463) 0",
+        "call label_?"
+      ],
+      "pos": 19076,
+      "note": [
+        "// 战斗主循环（`poll-input` + `wait`）：等主循环 = 等\"加载完、战斗在跑\"。"
+      ]
+    },
+    {
+      "name": "BTL_MAIN_LOOP_HI",
+      "script": "BTL.BIN",
+      "baselineIndex": 720,
+      "at": 0,
+      "to": "start",
+      "window": [
+        "jcc 1 ffffffff label_?",
+        "call label_?",
+        "call label_?",
+        "eq (local-int fff) (local-int fc9) 1"
+      ],
+      "pos": 19172
+    }
+  ]
+}
