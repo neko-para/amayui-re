@@ -872,6 +872,14 @@ partial / instrument / unaccounted / coverage / lift_dyn / verdict`）。
 两条呈现路径（GPU 直出 / SDL_Renderer 上传）都画；守卫 = `tests/overlay.cpp`（CTest `overlay` /
 `overlay-gpu`）。
 
+**插件入口（`--plugin <id|path>`）**：`--plugin` 收两种 spec —— **id**（`^[A-Za-z0-9_-]{1,64}$`，
+文件名 stem）或**路径**（含 `.` / `/` / `\` 的写法一律当路径，所以 `x.js` 仍是 cwd 相对路径）。
+id 只查 `scripts/plugins/` 的**根**（`<exeDir>/scripts/plugins/<id>.js` 与编译期
+`LIFT_PLUGIN_DIR/<id>.js` 两处，**非递归**；⛔ 不查 `lib/`），两根都命中 / 都不在都 `exit 2`
+并列出候选。目录布局 = **入口在根、库在 `lib/`**（`lib/` 只被 import），说明与域表见
+[`scripts/plugins/README.md`](scripts/plugins/README.md)。`--ui <path>` 仍可用但**已弃用**
+（S1 只打一行 deprecation，行为不变；下一轮删）。
+
 ### 4.3.1 一帧的墙钟去哪了（逐帧诊断）
 
 `--profile` 回答两类热点：**guest**（块级 + 按 `.lst` 函数入口聚合）与**宿主 shim 实现自身**的墙钟

@@ -3,6 +3,30 @@
 本目录是**插件运行时**的 API 合同与参考示例；口径与切片见
 [`docs/03-emulator/plugin-runtime.md`](../../../../docs/03-emulator/plugin-runtime.md)。
 
+## 目录布局：**入口 vs 库**（S1，2026-11-25）
+
+```
+scripts/plugins/
+├── plugin.d.ts / README.md      # 合同 + 本说明
+├── examples/                    # 类型示例（不参与构建）
+├── load-save.js                 # 入口：save 的参考插件（id = load-save）
+├── scenario-save07-battle.js    # 入口（id = 文件名 stem）
+├── scenario-save10-field.js
+├── scenario-fellow-switch.js
+├── scenario-field-point-visible.js
+└── lib/                         # **只被 import**：永远不是 --plugin 的 id 目标
+    ├── save.js                  #   loadSave / SAVE_DIR_REL / 前置检查（没有 default 导出）
+    ├── boot-to-title.js · chains.js · script-positions.js · guest-globals.js · recipe.js
+```
+
+- **`--plugin <id>` 只查本目录的根**（`<exeDir>/scripts/plugins/<id>.js` 与编译期
+  `LIFT_PLUGIN_DIR/<id>.js` 两处，**非递归**）；⛔ 不查 `lib/`、⛔ 不递归子目录。
+  需要单独加载的东西必须在根上；库只被 `import`。
+- id 语法 `^[A-Za-z0-9_-]{1,64}$`；含 `.` / `/` / `\` 的写法**一律当路径**（所以 `x.js` 是 cwd 相对路径，
+  与旧版逐字相同）。两根都命中 ⇒ `exit 2` 并列全部候选；都不在 ⇒ `exit 2` 并列搜过的根与候选。
+- import 根 = **入口文件所在目录**：入口用 `./lib/x.js`（向下，允许）；`lib/` 内部用同目录 `./x.js`。
+  ⛔ 入口不能住在库的下层（`../` 越根会被 QJS 拒）。
+
 ## 合同
 
 - 模块 specifier：`@amayui/lift-plugin`（`plugin.d.ts` 是 ambient module）。
@@ -25,9 +49,9 @@
 
 | 域 id | key | owner（文件） |
 |---|---|---|
-| `save` | `slot` (number)、`expect` (string[] 或逗号串)、可选 `saveDir` (string，相对 appdata 根)、`timeoutMs` (number)、`precheck` (boolean，缺省 true；false = 跳过存档文件前置检查) | `lib/save.js` 的 `export default` 参考入口 |
-| `scenario.save10-field` | `slot` (number)、`expect` (string[] 或逗号串) | `lib/scenario-save10-field.js` |
-| `scenario.field-point-visible` | `slot` (number，缺省 10)、`on` (number/bool，缺省 0)、`types` (hex 串 `"1f,20"` 或数组)、`hold` (number，缺省 3000)、`diag` (number，缺省 0) | `lib/scenario-field-point-visible.js` |
+| `save` | `slot` (number)、`expect` (string[] 或逗号串)、可选 `saveDir` (string，相对 appdata 根)、`timeoutMs` (number)、`precheck` (boolean，缺省 true；false = 跳过存档文件前置检查) | 根入口 `load-save.js`（库 = `lib/save.js`） |
+| `scenario.save10-field` | `slot` (number)、`expect` (string[] 或逗号串) | `scenario-save10-field.js`（根） |
+| `scenario.field-point-visible` | `slot` (number，缺省 10)、`on` (number/bool，缺省 0)、`types` (hex 串 `"1f,20"` 或数组)、`hold` (number，缺省 3000)、`diag` (number，缺省 0) | `scenario-field-point-visible.js`（根） |
 
 - 域自动创建、不注册、可共享；域 id = `^[A-Za-z0-9._-]{1,64}$`；域 id 与 key 都拒
   `__proto__` / `prototype` / `constructor`。未知顶层键 / 未知域内键**保留**（前向兼容）。

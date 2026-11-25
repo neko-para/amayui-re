@@ -86,9 +86,21 @@ std::size_t countOccurrences(const std::string& hay, const std::string& needle) 
     return n;
 }
 
+/** `/` 与 `\` 统一成 `/`（**只用于断言路径子串**；⛔ 不参与任何真实路径计算）。 */
+std::string normalizedSeparators(const std::string& text) {
+    std::string out = text;
+    for (char& c : out) {
+        if (c == '\\') c = '/';
+    }
+    return out;
+}
+
 // ★ ④ 用来认"那条一次性说明"的**唯一**标记：说明的开头。⛔ 不用泛词（`--sound` 会命中 help /
 //   其它文案）—— 标记必须只属于这句话，否则"恰好一次"这条断言会变成恒真。
 const char* const kSoundNoticeMarker = "--sound 已接受";
+
+/** ★ S1：`--ui` 的 deprecation 标记（**必须**与 `aot_main.cpp` 打印的那一行逐字一致）。 */
+const char* const kUiDeprecatedMarker = "--ui 已弃用";
 
 /** 本文件的公共 spawn 选项：cwd 指到临时目录；超时沿用原值 30 s（这几条都在建窗口之前返回）。 */
 lift_test::ChildOptions childOptions(const fs::path& cwd) {
@@ -166,9 +178,17 @@ int main(int argc, char** argv) {
         // ★ C2a：`--plugin` / `--plugin-param` 必须在 help 里（否则用户不知道 AOT 臂有插件面；
         //   合同 `plugin-runtime.md` §4.6 / 裁决 D-C2-2。装载面的判据另在 `plugin-runtime`
         //   （pure），⛔ 不靠这一条当唯一判据）。
-        LIFT_CHECK(r.out.find("--plugin <path>") != std::string::npos);
+        //   ★ S1：`--plugin` 收 **id 与 path 两种 spec** ⇒ help 必须写 `<id|path>`，并把
+        //   id 的两处**非递归**搜索根写出来（否则"为什么 `--plugin save` 找不到 lib/save.js"
+        //   只能靠读源码）。红了 ⇒ help 与解析器分叉。
+        LIFT_CHECK(r.out.find("--plugin <id|path>") != std::string::npos);
+        LIFT_CHECK(r.out.find("scripts/plugins") != std::string::npos);
+        LIFT_CHECK(r.out.find("LIFT_PLUGIN_DIR") != std::string::npos);
+        LIFT_CHECK(r.out.find("不查 `lib/`") != std::string::npos);
         LIFT_CHECK(r.out.find("--plugin-param k=v") != std::string::npos);
         LIFT_CHECK(r.out.find("export default") != std::string::npos);
+        // ★ S1：`--ui` 仍在（**只 deprecated、不删**）⇒ help 必须标出来。
+        LIFT_CHECK(r.out.find("已弃用") != std::string::npos);
     }
 
     // ---- ①⁰⁰ C2a `--plugin` 的**启动即拒绝**（parse 期；⛔ 不需要 GPU / 资产）----
@@ -204,6 +224,65 @@ int main(int argc, char** argv) {
             LIFT_CHECK(bad.err.find(c.must) != std::string::npos);
             LIFT_CHECK(bad.err.find(c.also) != std::string::npos);
         }
+    }
+
+    // ---- ①⁰¹ S1 `--plugin <id>`：找不到 ⇒ **启动即 exit 2** + 列出搜过的根 / 每个候选 ----
+    //   判据（红了意味着什么）：id 被当成路径（于是"装载失败"与"找不到 id"混成一句），或搜索根
+    //   没被填进解析器（候选清单缺失）—— 后者会让"我明明放在 scripts/plugins/ 里"变成不可解释。
+    //   ★ 这条也**穿过 aot_main 的接线**（两次根注入 + 错误文案）；纯解析器本身的判据在
+    //     pure 用例 `plugin-resolve`（⛔ 不靠这一条当唯一判据）。
+    g_current_case = "plugin-id-not-found";
+    {
+        const ChildResult r = runChild(exe, {"--plugin", "does-not-exist"}, childOptions(root));
+        LIFT_CHECK(r.started);
+        LIFT_CHECK(!r.timed_out);
+        LIFT_CHECK_EQ_U32(r.exit_code, 2u);
+        LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
+        LIFT_CHECK(r.err.find("找不到 id") != std::string::npos);
+        LIFT_CHECK(r.err.find("does-not-exist") != std::string::npos);
+        // ★ S1 复审：两个根都要**逐字**点名（只断言"含 scripts/plugins"两条候选都满足 ⇒ 删掉
+        //   任一根仍绿）。候选行 = `<id>.js` 恰 2 次 + 发行根 / 开发根各一条绝对路径。
+        const std::string exe_candidate =
+            pathToUtf8(exe.parent_path() / "scripts" / "plugins" / "does-not-exist.js");
+        const std::string dev_candidate = pathToUtf8(fs::path(LIFT_PLUGIN_DIR) / "does-not-exist.js");
+        const std::string err_norm = normalizedSeparators(r.err);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countOccurrences(r.err, "does-not-exist.js")), 2);
+        LIFT_CHECK(err_norm.find(normalizedSeparators(exe_candidate)) != std::string::npos);
+        LIFT_CHECK(err_norm.find(normalizedSeparators(dev_candidate)) != std::string::npos);
+        // 启动前拒绝 ⇒ 一行运行摘要都没有。
+        LIFT_CHECK(!hasLineStartingWith(r.out, "stop"));
+    }
+
+    // ---- ①⁰²' S1 复审：显式空串 `--plugin ""` ⇒ exit 2（⛔ 不静默当成"没有插件"）----
+    //   红线：旧实现让空 spec 整块跳过 ⇒ "我明明给了 --plugin 却没生效"；空串既不是 id 也不是
+    //   可装载路径 ⇒ 启动即拒绝并点名"空串不是 id"（合法写法 = id 或路径）。
+    g_current_case = "plugin-empty-spec";
+    {
+        const ChildResult r = runChild(exe, {"--plugin", ""}, childOptions(root));
+        LIFT_CHECK(r.started);
+        LIFT_CHECK(!r.timed_out);
+        LIFT_CHECK_EQ_U32(r.exit_code, 2u);
+        LIFT_CHECK(r.err.find("未知参数") == std::string::npos);
+        LIFT_CHECK(r.err.find("收到空串") != std::string::npos);
+        LIFT_CHECK(r.err.find("空串不是 id") != std::string::npos);
+        LIFT_CHECK(!hasLineStartingWith(r.out, "stop"));
+    }
+
+    // ---- ①⁰² S1 `--ui` **只 deprecated**：每次给都打**一行** warn，前缀不是 `[ui]` ----
+    //   判据（红了意味着什么）：`--ui` 被静默删掉（用户现有命令变成未知参数），或 deprecation
+    //   变成周期输出 / 用了 `[ui]` 前缀（`tests/aot_overlay.cpp` 在数 `[ui]` / `[overlay]` 行数）。
+    //   ★ 这条同时钉"`--ui` 仍是窗口参数"（headless 仍拒绝）—— 本轮 ⛔ 不改它的语义，只标弃用。
+    g_current_case = "ui-deprecated-notice";
+    {
+        const ChildResult r =
+            runChild(exe, {"--ui", "hud.js", "--present", "headless"}, childOptions(root));
+        LIFT_CHECK(r.started);
+        LIFT_CHECK(!r.timed_out);
+        LIFT_CHECK_EQ_U32(r.exit_code, 2u);
+        LIFT_CHECK(r.err.find("headless 不接受窗口参数") != std::string::npos);
+        LIFT_CHECK(countOccurrences(r.err, kUiDeprecatedMarker) == 1u);
+        LIFT_CHECK(r.err.find("[ui]") == std::string::npos);
+        LIFT_CHECK(r.err.find("--plugin <path>") != std::string::npos);
     }
 
     // ---- ①⁰ S9 `--ui-input=consume|pass`：值域 + **窗口参数**语义 ----

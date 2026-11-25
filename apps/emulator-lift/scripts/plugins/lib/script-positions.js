@@ -170,7 +170,7 @@ export const FIELD_MAIN_LOOP_HI = 0x5860;
 // ===========================================================================
 // REIGN.BIN（无 doc；读数 = `scripts/recipes/fellow-switch.plan` 的 ④ + 该文件头的取证口径）
 //
-// ★ 两段，都有消费方（`scenario-fellow-switch.js` 的右键那一步）：
+// ★ 两段，都有消费方（`../scenario-fellow-switch.js` 的右键那一步）：
 //   回调体 → **它这一趟的读输入段** 才是点的那一拍（`[0x2214,0x2234)`）——
 //   按下落在**回调尾**，抬起要等之后两个 KeyLevel 读点 ⇒ 按下跨过了一个完整回调
 //   （这正是 `.plan` 当年 `mouse_down` → 门 → 门 → `mouse_up` 想要的那个形状）。

@@ -92,6 +92,10 @@ const CORE_FILES = [
   'apps/emulator-lift/src/plugin/guest_read.cpp',
   'apps/emulator-lift/src/plugin/readings.h',
   'apps/emulator-lift/src/plugin/readings.cpp',
+  // ★ S1（2026-11-25）：`--plugin <id|path>` 的纯解析器（id 语法 + 两处非递归根）。它不碰 guest /
+  //   输入 / 文件写入，但它在 `src/plugin/**` 下 ⇒ 照 ⑥ 的覆盖检查**逐文件登记**（漏登记会红）。
+  'apps/emulator-lift/src/plugin/plugin_search.h',
+  'apps/emulator-lift/src/plugin/plugin_search.cpp',
 ];
 
 /** ★ 核心不许出现的词（每条都是"配方 VM 的一个形状"；理由见头注 ②）。 */

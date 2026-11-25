@@ -1,6 +1,6 @@
 # fellow-switch.plan —— SAVE09 → REIGN → 右键进 FELLOW → 角色立绘来回切换 3 轮
 #
-# ⚠⚠ 本配方已被 `scripts/plugins/lib/scenario-fellow-switch.js` 取代（⚠⚠ 只在**历史读数复现**时用它）
+# ⚠⚠ 本配方已被 `scripts/plugins/scenario-fellow-switch.js` 取代（⚠⚠ 只在**历史读数复现**时用它）
 #   取代原因：本文件第 ② 步的 `click 300 626` 是**硬编码的页内行 y** —— 它只在读档界面**第 1 页**
 #   （`LOAD 000..009`）成立。2026-11-22 09:33 `saves/SAVE.DAT` + `RT.DAT` 被重写（并新增 `SAVE10`）后，
 #   读档界面的持久化页号变成 1（第一屏 = `LOAD 010..019`）⇒ `y=626` 落空 ⇒ 第 ③ 步的
@@ -11,7 +11,7 @@
 #     但**只有在 2026-11-21 那份存档集上**才可复跑：
 #       `git archive 04a6e24 saves/ | tar -x -C <私有 appdata 的 SAVE 目录>`
 #     （实测 8/8 通过，见 `.tmp/token-split/report.md` §1.1；用**今天**的 `saves/` 复跑必然 exit 5）
-#   ★ 要跑的复现入口：`--plugin scripts/plugins/lib/scenario-fellow-switch.js`（同一批门 + 同一个窗口名）。
+#   ★ 要跑的复现入口：`--plugin scripts/plugins/scenario-fellow-switch.js`（同一批门 + 同一个窗口名）。
 #
 # 用户给的操作序列（真源）：
 #   ① 加载 SAVE09（saves/SAVE09.DAT + .STH）② 进 REIGN ③ 在目录中心右键 ⇒ FELLOW
