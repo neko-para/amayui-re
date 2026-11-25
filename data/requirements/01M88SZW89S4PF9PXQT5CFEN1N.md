@@ -23,7 +23,7 @@
 - `--overlay` + 无 `render` 的 `--plugin` ⇒ HUD 仍在（`apps/emulator-lift/tests/aot_overlay.cpp#overlay-with-run-only-plugin`）。
 - `--ui` ⇒ `exit 2` + `未知参数：--ui`（`apps/emulator-lift/tests/cli_aot_flags.cpp#ui-removed-unknown-arg`）。
 - `--overlay --input-plan` ⇒ `exit 5`；`--overlay --plugin hud --input-plan` ⇒ `exit 2`（预设不改互斥语义）。
-- `RenderCtx` 运行期恰好 7 成员（含 `profile`；2026-11-25 的 D2 收窄后仍是 7 —— `host.config` 只装在经典回退 HUD 上）。
+- `RenderCtx` 运行期恰好 **8** 成员（含 `profile`；2026-11-26 起加回 `config` —— `--overlay` 的 HUD 插件也要能读写 `plugin-config.json`，与经典回退 HUD 的 `host.config` 同一份桥）。
 
 ## 读数（2026-11-25 / win32 / RelWithDebInfo）
 
