@@ -25,7 +25,7 @@
 | `SAVE10.DAT` | **FIELD**（地图 `0xb`） | 2026-11-25 读数：载入后 `FIELD.BIN` 就绪、21 个 live 槽（`--plugin-param slot=10`） |
 | `SAVE11.DAT` | **未登记** | 同上 |
 | `SAVE99.DAT` | **未登记** | 用途待用户补 |
-| `SAVE.DAT` | 槽位索引 + **持久化页号** | 与 `SAVE<NN>.DAT` 分开；读档界面进屏时 `SAVE.BIN` 从这里把页号读回（`load-int (global-int 138e)`） |
+| `SAVE.DAT` | **脚本键持久化池**（含读档界面的页号） | ★ **不是槽位索引**（里面没有“哪些槽存在”的清单，见 `docs/03-emulator/save-format.md` §角色）；缺它最多让页号回 0。读档界面进屏时 `SAVE.BIN` 用 `load-int (global-int 138e)` 从这里读回页号 |
 | `RT.DAT` | 引擎运行期数据 | 语义未取证；复制时原样带上 |
 
 - 每个 `SAVE<NN>.DAT` 都要配一份同名 `.STH`（缩略图）；**成对复制**，⛔ 只拷 `.DAT`。
@@ -64,6 +64,8 @@
 
 - 读档界面每页 **10 行**：`page = floor(slot/10)`、`row = slot % 10`。
   页号是**可读的 guest int global `0x138e`**（0 基，环形 0..89）；页 1 = `010..019`。
+- `loadSave` 库允许 **0..899**（90 页 × 10，`save.js` 的 `MAX_SLOT`）；本目录样本只到 `99`，
+  ≥100 的 `SAVE%2.2d` 三字形**未取证**（`docs/03-emulator/save-format.md` 的 `<待核>`）⇒ 现阶段只用 0..99。
 - 进屏页由 `SAVE.DAT` **持久化**（`SAVE.BIN` 第 11 行 `load-int (global-int 138e)` 读回）
   ⇒ 同一份 `saves/` 在不同 appdata 里可能从不同页开始；插件必须按读到的页号翻页（`loadSave` 已这么做）。
 - 行中心的 y（页内）：`{0:91, 1:150, 2:209, 3:269, 4:328, 5:388, 6:447, 7:507, 8:567, 9:626}`，
