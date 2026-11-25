@@ -2,26 +2,33 @@
 
 - id: REQ-01M88SZW89S4PF9PXQT5CFEN1N
 - type: req
-- status: open
+- status: done
 - parent: REQ-01M7T0VJPG2S0RZ1HNWW0HH3HY
+- verify: apps/emulator-lift/tests/cli_aot_flags.cpp#ui-removed-unknown-arg
 - tags: [emulator-lift, plugin, cli, refactor]
 
 ## 需求
 
-把 HUD 变成**真插件**，让 `--overlay` 只做“`--plugin hud` + 要窗口”的预设；然后删 `--ui`。目标：最后只剩**一个装载点**（`--plugin`）+ 一个窗口预设（`--overlay`）。
+把 HUD 变成真插件，让 `--overlay` 只做“`--plugin hud` + 要窗口”的预设；删除 `--ui`，只留 `--plugin` 一个装载点。
 
-## S2（HUD 变插件）
+## 已交付（2026-11-25）
 
-- `RenderCtx` 加 `profile`（`plugin.d.ts` + render ctx 构造 + pure 用例）；`scripts/ui/hud.js` 改 `export default { render(ctx) }`（`ui.*` → `ctx.draw.*`、`game.*` → `ctx.game.*`、`host.*` → `ctx.profile.*`）。
-- `--overlay` 在窗口 init 之后由 adopt 打开叠层 —— 需要一个“defer hud”选项，否则 `loadUiScript` 会先硬失败；`--plugin hud` 与 `--overlay` 的像素 / readout 等价测试。
-- ★ 保留 id `hud`：解析顺序先于普通插件根；若用户根里存在 `hud.js` ⇒ exit 2（⛔ 不静默被内置件遮住）。
-- ⛔ 不删 `--overlay`；⛔ 不从模块导出反推“要不要窗口”（parse 期还不知道有没有 `render`）。
+- **S2**：`RenderCtx.profile`（`begin/end`；`end` 回传 `{ok,text,error}` 并走 `HostPause`）；`scripts/ui/hud.js` = `export default { render(ctx) }` + 旧 `globalThis.render` 双入口，共用同一份 `drawHud`；`--overlay` 无 `--plugin` ⇒ 按保留 id `hud` 解析并装载；有 `--plugin` ⇒ 插件赢（有 `render` 才 adopt 取代；无 `render` 时保留默认 hud 的**内部回退**）。
+- **S3**：`--ui` 从 CLI 删除（未知参数 `exit 2`）；`kWindowFlagsAot` 去掉 `--ui <path>`；`ui-hud-script` 保留（改测内部 hud 回退的同一个 UiScript loader）；`--ui` 相关测试/文档迁移；`--ui-input` 仍是窗口参数。
+- 保留 id `hud`：`<exe>/scripts/ui/hud.js` → `LIFT_UI_SCRIPT_DIR/hud.js`；用户插件根里同名 `hud.js` ⇒ `exit 2`；ASCII 大小写不敏感。
 
-## S3（删 `--ui`）
+## 判据（守卫）
 
-- 删 parse 分支 / 同一字段比较 / `ui_script` 字段 / `loadUiScript` 的显式分支；`kWindowFlagsAot` 去掉 `--ui <path>`。
-- `tests/aot_overlay.cpp` 的 `--ui` 用例改成未知参数 / 删除；`cli_aot_flags` 的 `plugin+ui-different` 用例删除；`overlay.md` / `overlay-quickjs.md` / `plugin-runtime.md` D1 / `input-device.md` 同步。
+- **像素等价**：`--overlay` = `--plugin hud` = 内部 hud 回退，BMP 2764854 B / sha256 `3E72F989871BFB148FEF96763F988446E086589890A7330FED427580F8E4B4FF`、guest dump 逐字节同（`tests/aot_overlay.cpp` ⑦ 三方 `equal=1`）。
+- `--overlay` + 无 `render` 的 `--plugin` ⇒ HUD 仍在（`apps/emulator-lift/tests/aot_overlay.cpp#overlay-with-run-only-plugin`）。
+- `--ui` ⇒ `exit 2` + `未知参数：--ui`（`apps/emulator-lift/tests/cli_aot_flags.cpp#ui-removed-unknown-arg`）。
+- `--overlay --input-plan` ⇒ `exit 5`；`--overlay --plugin hud --input-plan` ⇒ `exit 2`（预设不改互斥语义）。
+- `RenderCtx` 运行期恰好 7 成员（含 `profile`）；`ui-hud-script` 109 checks / 0 fail。
 
-## 依赖与顺序
+## 读数（2026-11-25 / win32 / RelWithDebInfo）
 
-S2 依赖 S1（已完成）。S3 必须在 S2 之后：`--ui` 现在的测试用途（自定义 UI 脚本）要先由 `--plugin` 承载 render-only 模块接住。
+- 全量 `ctest` **144/144**；`pnpm test` **633/633**；`pnpm verify` **472 pass / 2 skip / 0 fail**；`requirements validate` **6/6**。
+
+## 剩
+
+- 发行打包 R10（`--overlay` / hud 的 release 脚本布局）仍未做；`--overlay --control-root` 无专用 CTest。

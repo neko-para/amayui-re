@@ -69,7 +69,7 @@ adopt 失败（字体缺失 / 窗口没建）⇒ exit 2（与 `--overlay` R5 同
   `UiApi.get` 无校验、`ProfileApi.end`、measure 估算等）——在 C0/C1 落类型/文档时处理。
 - C0/C1/C2a/C2b/C2c/C3 已在 main；C4/C5 未完成；`emu-ctl` 尚未迁移；C5 e2e 未做。
 - C2b-2 的 docs 同步已完成（`da3d845`）：`plugin-runtime.md` §4.6/§8.1 与 `overlay.md` 的 `game.mouse` 形状（`buttons` 可选键）。
-- `plugin-overlay` 未覆盖“adopt 丢弃 owned `--ui`/hud.js 脚本”那条路径（用例 `opt.overlay=false`）⇒ 补 `--ui` 夹具。
+- ~~`plugin-overlay` 未覆盖“adopt 丢弃 owned hud 脚本”那条路径~~（2026-11-25 S3 删除 `--ui` 后该路径不再存在；HUD 由 `--overlay` 预设 / 内部回退覆盖）。
 - 蓝遮罩：`REQ-01M7SW90PC5GXBWZVJ2FJH7DY8`（独立；2026-11-19 真机确认为预期表现，已 dropped，不再是残留）。
 
 ## 怎么查

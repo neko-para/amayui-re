@@ -45,7 +45,7 @@ C++ display list（无脚本、无输入）；两条路径都按窗口像素合�
 
 ## 边界
 
-- ⛔ 不开 `--ui` 文件入口、不接 QuickJS、不接输入 router（M2）。
+- ⛔ 不开 `--ui` 文件入口、不接 QuickJS、不接输入 router（M2；2026-11-25 S3 之后 `--ui` 已删除，文件入口只剩 `--plugin`）。
 - ⛔ 不写 guest；`--present-screenshot` 含 UI，`--dump-frame` / `arena.hash` / 控制层 `screenshot` 不含。
 - ⛔ 不保留第二套渲染器；旧的 `formatOverlayLines` 等 M2 再删，M0 只走统一合成路径。
 - ⛔ 不把 5×7 点阵当生产字体；`--ui-glyphs bitmap` 是 M2 的显式测试档。

@@ -53,7 +53,7 @@
 4. `overlay` / `overlay-gpu`：画布原点像素 = `blend(#101820, guest, 204)`（两路径同值，±1）、
    关掉逐像素恢复、非 16:9 偏移不变；`aot-overlay` 直出 (0,0) = `(13,19,26)`，`--dump-frame` 不变，
    stderr 无周期行。
-5. `--ui <语法错脚本>` ⇒ `exit 2` + `<path>:<line>:<col>`；`--ui` 赢 `--overlay`。
+5. ~~`--ui <语法错脚本>` ⇒ exit 2 + path:line:col~~（2026-11-25 S3 删除 `--ui`；脚本语法错现由 `--plugin` 的 `ui-script-quickjs/error-syntax` 钉住）。
 
 ## 读数（macOS arm64 / RelWithDebInfo）
 
