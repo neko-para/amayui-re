@@ -5575,7 +5575,7 @@ const MUTATIONS = [
     guard: 'tools/test/script-map.test.mjs',
     what:
       '往 plugin 根上的 `scenario-save07-battle.js` 塞一个裸 `0x579C` 常量 ⇒ `script-map/no-bare-hex` 红' +
-      '（根目录被 `script-map` 扫到；⛔ 不靠 `lib/save.js` 那条变异冒充"根也扫了"）',
+      '（根目录确实被 `script-map` 扫到；别靠 `lib/save.js` 那条变异冒充"根也扫了"）',
   },
 
   // ── S1：`--plugin <id>` 的歧义判据（`== 1` → 非空就取第一个）─────────────────────────────
