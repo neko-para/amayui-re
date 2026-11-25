@@ -11,32 +11,54 @@
 //   ★ 本文件是 **module**（`import`）：module 的顶层声明**不会**挂到 `globalThis` ⇒ 旧入口**仍然**必须
 //     显式写 `globalThis.render = …`（下面）。
 // ★ 两个入口的能力面（同一份读数，逐条同口径）：
-//     · 插件：`ctx.draw.*` / `ctx.game.*` / `ctx.profile.*`；
-//     · 内部 hud 回退（classic）：全局 `ui.*` / `game.*` / `host.profileBegin|End`。
+//     · 插件：`ctx.draw.*` / `ctx.game.*` / `ctx.profile.*`（**没有** `config`：`RenderCtx` 是 7 成员）；
+//     · 内部 hud 回退（classic）：全局 `ui.*` / `game.*` / `host.profileBegin|End` / `host.config`。
 //   ⛔ 没有 Date / Math.random（沙箱里也不存在）⇒ 同一份读数必然产出同一份 list（可测）。
-// ★ 发行件：同目录必须有 `kit.js`（`import` 的相对解析以本文件所在目录为根）；缺 kit 与缺 hud
-//   同属**加载期硬失败**（`--overlay` / `--plugin hud` exit 2，错误里点名路径）。
+// ★ 发行件：同目录必须有 `kit.js` 与 `settings-page.js`（`import` 的相对解析以本文件所在目录为根）；
+//   缺任一与缺 hud 同属**加载期硬失败**（`--overlay` / `--plugin hud` exit 2，错误里点名路径）。
 // ★ 颜色：底 `#101820CC`（80% 不透明 —— 半透明底，画面还看得见）、字 `#EBFFEB`（不透明）。
 // ★ 版式（1280×720 参考像素；与 `src/ui/present_ui.h` 的 `kUiFontRefPx` 同一档字号）：
 //     四边内边距 PAD=8、字号 SIZE=16、
 //     行高 = max(SIZE+4, measure("Ag", SIZE).h + 2)、
 //     面板宽 = 最长行 `measure(line, SIZE).w` + 2*PAD、面板高 = 行数*行高 + 2*PAD。
-//   第一行文本顶 = PAD；每行 `x = PAD`、`y = PAD + i*lineH`。
-//   面板是 **elements[0]**；PROFILE 按钮画在面板**下方**（`ui-hud-script` 的结构判据）。
-// ★ 行序（**拿到才写**，⛔ 不占位 —— 没值的项整行省略）：
-//     mouse <x>,<y> · script <payload> · fps <一位小数> · frame <n> ·
+//   ★ D4（2026-11-25 父级裁决）：面板**贴左、垂直居中** —— `x = 0`、
+//     `y = round((720 - panelH) / 2)`（面板高随行数变 ⇒ **每帧**重算）。
+//   第一行文本顶 = panelY + PAD；每行 `x = PAD`、`y = panelY + PAD + i*lineH`。
+//   面板是 **elements[0]**；命中区（`settings…` 那一行 / PROFILE 按钮）一律画在面板**之后**。
+// ★ 行序（**拿到才写**，⛔ 不占位 —— 没值的项整行省略；`settings…` **恒在最后一行**）：
+//     mouse <x>,<y> · script <payload> · fps <一位小数> ·
 //     `worst 3s  wall=<一位小数>ms guest=<一位小数>ms|--> shim=<一位小数>ms` ·
-//     状态行（只在有过一次 PROFILE 交互之后；参与面板尺寸）
+//     状态行（PROFILE 交互 / 设置入口）· `settings…`
+//   ⛔ **没有** `frame <n>` 行（总帧数无诊断价值；2026-11-25 D4 删除）。
 //   ⛔ **没有** `raster` / `present` 两行（用户 2026-11-18 裁决：开 overlay 时是人在体验，
 //     不需要"哪条光栅 / 哪条呈现"这两个开关信息）。
+// ★ 设置入口：最后一行 `settings…`（16px / FG）+ 一条**透明命中 Rect**（`fill:"#00000000"`、
+//   `key:"settings"`）刚好盖住那一行。点击 ⇒ 打开二级页（`settings-page.js` 的 `drawPage`）；
+//   打开期间**不画 HUD 面板**，只画页面（`settings…` 行与 PROFILE 都不画；页面自己的 BACK 关闭）。
+//   ★ `h.config` 不可用（`undefined` / `available !== true`）⇒ **不打开**，状态行
+//     `settings: 没有 appdata`。
+//   ★ 桥可用但 `settings.schema` 里**一个可画项都没有**（空表 / 全是坏形状）⇒ **也不打开**，
+//     状态行 `settings: 没有注册设置`（⛔ 不打开一个空白页、⛔ 不造死控件）。
+//     两条都是"同一个脚本实例内改回来才清"。
+//   ★ 设置页的状态行是**模块级**（`settingsPage.status`，由 `drawPage` 每帧写回）：
+//     成功点（`applied:true`）清空；失败（`settings: 只读` / `settings: <错误>`）留到下一次操作
+//     或下一次成功；**关闭页面不清**（状态行留在 HUD 上）。⛔ 不每帧新建对象 —— 那样失败回执
+//     只在自己那一帧可见（≈16ms，人看不见），只读 appdata 下点开关就是"零反馈"。
 // ★ PROFILE（`REQ-01M7QF01A00F9946DX0GPH23JQ` 切片 3）：第一击 `profile.begin`（状态行「开始」），
 //   第二击 `profile.end`（结束时**内部**写系统剪贴板）；四态 = 开始 / 已复制 / 失败：<error> /
 //   INVALID（已复制）。★ 副作用在 render **开头**（`game.click` 自驱）：状态行要参与面板尺寸，
 //   不能等按钮画完才知道结果 ⇒ `Button()` 只画外观、**不传 `on`**。
 //   ★ S2 复审 I3：插件侧 `ctx.profile.end()` 回传 `{ok,text,error}`（与旧 `host.profileEnd()` 同形）
 //     ⇒ `--overlay` / `--plugin hud` 也走四态；报告文本**不**再额外写 stdout。
+//   ★ D4：PROFILE **默认隐藏**（不画、也不挂 `key` ⇒ 不可命中）。按键 = 固定 **F9**，读数 =
+//     `h.overlayKeySeq`（无源 ⇒ `undefined`）。模块级记住上一次的值，**变了才切换**显隐
+//     （⛔ 当电平用 —— 电平每帧都触发）。显示时按钮画在面板**下方**
+//     （`y = panelY + panelH + PAD`），`key:"profile"`，尺寸 / 主题沿用 `kit.Button`。
+//   ★ F9 **不吞键**（它仍到 guest）：与游戏的按键动作可能同时触发，冲突风险记在
+//     `docs/03-emulator/overlay.md`（R10 / 版式段）。
 // ★ 改这份文件**不需要重编**：它是运行时读的外置文件（重跑即可，⛔ 不编进 exe）。
 import { Button } from './kit.js';
+import { canOpen, drawPage, hasSettings } from './settings-page.js';
 
 const PAD = 8;
 const SIZE = 16;
@@ -45,6 +67,14 @@ const FG = "#EBFFEB";
 const BUTTON_W = 112;
 const BUTTON_H = 28;
 const PROFILE_LABEL = "overlay";  // `profile.begin(label)` 的 label
+/** 面板最后一行（设置入口）的文案。 */
+const SETTINGS_LINE = "settings…";
+/** 设置入口的命中键（`ui.rect({key})`；透明 Rect 刚好盖住那一行）。 */
+const SETTINGS_KEY = "settings";
+/** `h.config` 不可用时留在状态行上的那句话（D4；同一个 session 内改回来才清）。 */
+const NO_APPDATA = "settings: 没有 appdata";
+/** 桥可用但 `settings.schema` 空表时留在状态行上的那句话（⛔ 不打开空白页；改回来才清）。 */
+const NO_SETTINGS = "settings: 没有注册设置";
 
 // 两个入口共用的**薄适配器**形状（绘制体只认它；⛔ 不直接摸全局 / ctx）。
 /** @typedef {{ x: number, y: number, w: number, h: number, fill: string, key?: string }} HudRect */
@@ -64,6 +94,8 @@ const PROFILE_LABEL = "overlay";  // `profile.begin(label)` 的 label
  *   click?: any,
  *   hover?: string,
  *   active?: string,
+ *   overlayKeySeq?: number,
+ *   config?: any,
  *   profileBegin: (label: string) => { ok: boolean, error: string },
  *   profileEnd: () => { ok: boolean, text: string, error: string },
  * }} HudHost
@@ -72,10 +104,28 @@ const PROFILE_LABEL = "overlay";  // `profile.begin(label)` 的 label
 // ★ 模块级状态（一个脚本实例 = 一份；渲染失败 / 关闭叠层时随实例一起丢弃）。
 //   `status` 一直留到下一次点击（⛔ 不按帧清：`frame` 是唯一时钟，按帧清会让"已复制"只闪一帧）。
 const profile = { running: false, status: "" };
+/** 设置二级页是否打开（D4）。 */
+let settingsOpen = false;
+/** 上一次看到的 `overlayKeySeq`（`undefined` = 还没有可用的源）。 */
+/** @type {number | undefined} */
+let lastKeySeq;
+/**
+ * 设置状态行（**模块级**，`settings-page.js` 的 `drawPage` 每帧把 `status` 写回这个对象）。
+ *
+ * ★ ⛔ 不每帧新建（`const page = { status: "" }`）：那样 `applied:false` / `set` 抛错的回执
+ *   只在自己那一帧可见（≈16ms，人看不见）—— 只读 appdata 下点开关就是"零反馈"。
+ * 规则：成功点（`applied:true`）清空；失败保留到下一次操作或下一次成功；关闭页面**不清**
+ *   （状态行留在 HUD 上）。两条"打不开"的原因（`NO_APPDATA` / `NO_SETTINGS`）也放这里。
+ */
+const settingsPage = { status: "" };
+/** PROFILE 按钮是否可见（默认隐藏；F9 的读数**变了**才切换）。 */
+let profileVisible = false;
 
 // ---------------------------------------------------------------------------------------
 // 内部 hud 回退 loader 的适配器：**只有它**知道全局 `ui` / `game` / `host`。
 //   （插件 loader 也会装这些全局，但插件路径**不走这里** —— 走 ctx，契约才是真的。）
+// ★ `config` / `overlayKeySeq` 是 **getter**：每帧现读（⛔ 构造时冻住 —— `host.config` 的桥
+//   可能这一帧才接上 / 这一帧断了；`overlayKeySeq` 也可能这一帧还没有源）。
 // ---------------------------------------------------------------------------------------
 /** @returns {HudHost} */
 function classicHost() {
@@ -92,6 +142,8 @@ function classicHost() {
     get click() { return game.click; },
     get hover() { return game.hover; },
     get active() { return game.active; },
+    get overlayKeySeq() { return game.overlayKeySeq; },
+    get config() { return host.config; },
     profileBegin: (label) => host.profileBegin(label),
     profileEnd: () => host.profileEnd(),
   };
@@ -102,6 +154,8 @@ function classicHost() {
 //   ★ 形状差异全部**只在**这里：measure 的 `{width,height}` ↔ `{w,h}`；`mouse()` 方法；
 //     profile 的 `void` + TypeError ↔ `{ok,error}` 结果对象。
 //   ★ 失败文本剥掉 `ctx.profile.*: ` 前缀 ⇒ 与旧 `host.profile*` 的 `error` 字段同形（HUD 文案不变）。
+//   ★ D2 收窄：`RenderCtx` **没有** `config`（7 成员）⇒ 插件档 `h.config` 恒 `undefined`
+//     （预设模式 `--plugin hud` 没有插件注册 schema ⇒ 设置页不可用是诚实的）。
 // ---------------------------------------------------------------------------------------
 /**
  * @param {any} ctx
@@ -144,6 +198,8 @@ function pluginHost(ctx) {
     get click() { return ctx.game.click; },
     get hover() { return ctx.game.hover; },
     get active() { return ctx.game.active; },
+    get overlayKeySeq() { return ctx.game.overlayKeySeq; },
+    config: undefined,
     profileBegin: (label) => {
       try {
         ctx.profile.begin(label);
@@ -161,13 +217,82 @@ function pluginHost(ctx) {
 }
 
 /**
+ * F9 的显隐切换：读数是**单调按下沿计数** ⇒ 只有"值变了"才切一次（⛔ 当电平用）。
+ *
+ * ★ 没有源（`undefined`）⇒ 忘掉基线：下一次拿到值时只建立基线、不切换
+ *   （中断期间按过几次无从得知，⛔ 不猜）。
+ *
+ * @param {HudHost} h 宿主适配器。
+ */
+function toggleProfileOnKey(h) {
+  const seq = h.overlayKeySeq;
+  if (seq === undefined) {
+    lastKeySeq = undefined;
+    return;
+  }
+  if (lastKeySeq !== undefined && seq !== lastKeySeq) profileVisible = !profileVisible;
+  lastKeySeq = seq;
+}
+
+/**
+ * 画设置二级页（**只**画页面；打开期间不画 HUD 面板）。
+ *
+ * @param {HudHost} h 宿主适配器（`canOpen(h)` 已为真）。
+ * @returns {boolean} true = 这一帧已经画了页面；false = 页面已关闭（调用方继续画 HUD）。
+ */
+function drawSettingsPage(h) {
+  // ★ 页面状态由本文件持有（`settings-page.js` 无模块级状态，只把 `status` 写回这个对象）。
+  //   ⛔ 不每帧新建：失败回执要留到下一次操作 / 下一次成功（见 `settingsPage` 的注释）。
+  const r = drawPage(h, settingsPage);
+  if (r.closed === true) {
+    settingsOpen = false;
+    return false;
+  }
+  return true;
+}
+
+/**
  * 绘制体（两个入口共用）：`h` 是上面两种适配器之一。
  * @param {HudHost} h
  */
 function drawHud(h) {
-  // ① 副作用**先于任何 draw**：状态行要参与面板尺寸，不能等按钮画完才知道结果。
+  // ① 读数 / 门（先于任何 draw）：F9 的显隐切换、设置入口、页面开关。
+  toggleProfileOnKey(h);
+
   const click = h.click;
-  if (click !== undefined && click.key === "profile") {
+  // `h.config` 每帧现读：`available` 可能从 false 变 true（同一个 session 内）⇒ 才清那句状态。
+  const configReady = canOpen(h);
+  // ★ 桥可用 ≠ 有东西可画：`settings.schema` 空表 ⇒ 打开就是**空白页**（⛔ 不造死控件）。
+  const settingsReady = configReady && hasSettings(h);
+  if (configReady && settingsPage.status === NO_APPDATA) settingsPage.status = "";
+  if (settingsReady && settingsPage.status === NO_SETTINGS) settingsPage.status = "";
+
+  // 页开着 ⇒ 只画页面（HUD 面板 / `settings…` / PROFILE 都不画）。
+  if (settingsOpen) {
+    if (!settingsReady) {
+      // 桥在这一帧断了 / 注册表空了（例如 appdata 被撤 / 插件全退）：回到 HUD + 一行原因。
+      settingsOpen = false;
+      settingsPage.status = configReady ? NO_SETTINGS : NO_APPDATA;
+    } else if (drawSettingsPage(h)) {
+      return;
+    }
+  }
+
+  // 设置入口：最后一行那一块透明 Rect 的命中键。config 不可用 / 注册表空 ⇒ 不打开、留一句状态。
+  // ★ 打开**不**清状态：失败回执要留到下一次操作（页面里那一行也会显示它）。
+  if (click !== undefined && click.key === SETTINGS_KEY) {
+    if (!configReady) {
+      settingsPage.status = NO_APPDATA;
+    } else if (!settingsReady) {
+      settingsPage.status = NO_SETTINGS;
+    } else {
+      settingsOpen = true;
+      if (drawSettingsPage(h)) return;  // 同一帧就换绘制面（点开不延迟一帧）
+    }
+  }
+
+  // ② PROFILE 的状态机（副作用**先于任何 draw**：状态行要参与面板尺寸）。
+  if (profileVisible && click !== undefined && click.key === "profile") {
     if (profile.running) {
       const r = h.profileEnd();
       profile.running = false;
@@ -191,7 +316,7 @@ function drawHud(h) {
     }
   }
 
-  // ② 读数行（现有行序 / 逐字文案不动）。
+  // ③ 读数行（D4 的行序；`settings…` 恒在最后一行）。
   const lines = [];
   const mouse = h.mouse();
   if (mouse !== undefined) lines.push("mouse " + mouse.x + "," + mouse.y);
@@ -212,8 +337,6 @@ function drawHud(h) {
   if (script !== undefined) lines.push("script " + script);
   const fps = h.fps;
   if (fps !== undefined) lines.push("fps " + fps.toFixed(1));
-  // ★ frame 总是有值（宿主每帧都给）⇒ 这一行**总是**在。
-  lines.push("frame " + h.frame);
   const worst = h.worst;
   if (worst !== undefined) {
     // `guest` 没开块计时时**没有 guest_ms 这个键** ⇒ 写 `--`（⛔ 不写 0.0 冒充读数）。
@@ -222,10 +345,17 @@ function drawHud(h) {
                (guest === undefined ? "--" : guest.toFixed(1) + "ms") +
                " shim=" + worst.shim_ms.toFixed(1) + "ms");
   }
-  // ★ 状态行参与面板尺寸（它是一行 HUD 文本）；idle（没交互过）时**不出这一行**。
-  if (profile.status !== "") lines.push(profile.status);
+  // ★ 状态行参与面板尺寸（它是一行 HUD 文本）。PROFILE 的状态优先（它是一次点击的直接回执）；
+  //   设置那句在它空着时才显示。
+  if (profile.status !== "") {
+    lines.push(profile.status);
+  } else if (settingsPage.status !== "") {
+    lines.push(settingsPage.status);
+  }
+  // ★ `settings…` 恒在最后一行（D4）—— 设置入口的可点击文案。
+  lines.push(SETTINGS_LINE);
 
-  // ③ 面板 + 文本（面板是 elements[0]）。
+  // ④ 面板 + 文本（面板是 elements[0]；贴左、垂直居中）。
   const lineH = Math.max(SIZE + 4, h.measure("Ag", SIZE).h + 2);
   let maxW = 0;
   for (let i = 0; i < lines.length; ++i) {
@@ -234,13 +364,19 @@ function drawHud(h) {
   }
   const panelW = maxW + 2 * PAD;
   const panelH = lines.length * lineH + 2 * PAD;
-  h.rect({ x: 0, y: 0, w: panelW, h: panelH, fill: BG });
+  const panelY = Math.round((720 - panelH) / 2);
+  h.rect({ x: 0, y: panelY, w: panelW, h: panelH, fill: BG });
   for (let i = 0; i < lines.length; ++i) {
-    h.text({ x: PAD, y: PAD + i * lineH, text: lines[i], size: SIZE, color: FG });
+    h.text({ x: PAD, y: panelY + PAD + i * lineH, text: lines[i], size: SIZE, color: FG });
   }
+  // ⑤ 设置入口：透明命中 Rect 刚好盖住**最后一行**（画在面板之后 ⇒ 不遮文本、可命中）。
+  const settingsY = panelY + PAD + (lines.length - 1) * lineH;
+  h.rect({ x: 0, y: settingsY, w: panelW, h: lineH, fill: "#00000000", key: SETTINGS_KEY });
 
-  // ④ 按钮：面板**下方**（面板仍是 elements[0]）。只画外观 —— 副作用已经在 ① 做完。
-  Button({ key: "profile", rect: { x: PAD, y: panelH + PAD, w: BUTTON_W, h: BUTTON_H }, label: "PROFILE" }, h);
+  // ⑥ PROFILE：默认不画（也不挂 key）；F9 打开后画在面板**下方**。只画外观 —— 副作用已在 ② 做完。
+  if (profileVisible) {
+    Button({ key: "profile", rect: { x: PAD, y: panelY + panelH + PAD, w: BUTTON_W, h: BUTTON_H }, label: "PROFILE" }, h);
+  }
 }
 
 // ---- 内部 hud 回退入口（旧 UiScript loader；S3 删的是 CLI `--ui`，这条内部路径保留）----

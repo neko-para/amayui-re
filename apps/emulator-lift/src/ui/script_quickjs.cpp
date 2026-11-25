@@ -191,6 +191,15 @@ struct Impl {
     // ★ **非拥有**；由 `PluginScript::setCallHost` 在 init 时设（生产 = `PluginHost`）。
     //   render 期间它临时成为 `call_host`（回调外没有别的 ctx）；回调期间由 `call()` 的形参覆盖。
     lift::ui::PluginCallHost* call_host_persistent = nullptr;
+    // ---- 渲染面的 config 桥（D2，2026-11-25）----
+    // ★ `render_bridge` = 本帧 render 用的桥（**非拥有**）。为什么留到 render 返回之后：
+    //   `UiScript::flushConfig` 在 present_sdl 的"render 之后"调，那时 `current` / `call_host`
+    //   都已经复位 ⇒ 桥必须在这里缓存（⛔ 不靠 `current` 再解析一次）。
+    //   nullptr = 这一帧没有桥 ⇒ flush 是 no-op。
+    // ★ 经典回退 HUD 的 `host.config` 是**唯一**消费者：`RenderCtx` **没有** `config`
+    //   （父级 2026-11-25 收窄：`--overlay` 预设的 hud 没有 `start`，加它只买到"下一轮的值"，
+    //   却要废掉"恰好 7 成员"的既有合同）。
+    lift::plugin::ConfigBridge* render_bridge = nullptr;
 
     // 本帧注入（getter 读它们；render 结束一律复位）
     UiBuilder* builder = nullptr;
@@ -252,6 +261,7 @@ struct Impl {
         current = nullptr;
         call_host = nullptr;
         call_host_persistent = nullptr;
+        render_bridge = nullptr;
         triggers.clear();
         ui_visible.clear();
         trigger_class = 0;
@@ -728,7 +738,22 @@ JSValue jsUiMeasure(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValue
 // game.* 的 getter（context §4）：读数由 render 的 readings 当帧注入，getter 读 Impl::current。
 // ★ 只在 render 期间有值；不可用 ⇒ undefined（⛔ 不编 0）；mouse / worst 每次调用新建对象。
 // =======================================================================================
-enum class GameProp : int { Frame = 0, Fps = 1, Mouse = 2, Script = 3, Worst = 4, Click = 5, Hover = 6, Active = 7 };
+// ★ D2：经典回退 HUD 的 `host.config` getter（定义在 config 一节；这里先前置声明 ——
+//   `installHostApi` 比它先用）。
+JSValue jsHostConfig(JSContext*, JSValueConst, int, JSValueConst*);
+
+enum class GameProp : int {
+    Frame = 0,
+    Fps = 1,
+    Mouse = 2,
+    Script = 3,
+    Worst = 4,
+    Click = 5,
+    Hover = 6,
+    Active = 7,
+    // ★ D4（2026-11-25）：F9 的**单调按下计数**（无源 ⇒ undefined；⛔ 不编 0）。
+    OverlayKeySeq = 8,
+};
 
 // ★ C2b-2：三键电平的 `{left,right,middle}` **唯一**装配点（经典 `game.mouse` 与 RenderCtx 的
 //   `game.mouse()` 共用）。`mouse_buttons_ok == false` ⇒ **不安装**这个键（⛔ 不编 false：
@@ -921,6 +946,11 @@ JSValue jsGameProperty(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/, 
                 // 只读 key：当前被捕获的那个（没有捕获 ⇒ undefined）。
                 if (r.active_key.empty()) return JS_UNDEFINED;
                 return qjs::newString(ctx, r.active_key).take();
+            case GameProp::OverlayKeySeq:
+                // ★ D4：没有按键源（没有 WindowManager / headless）⇒ **缺键**（undefined），
+                //   ⛔ 不编 0（"没按过"与"没有源"必须是两件事）。
+                if (!r.overlay_key_ok) return JS_UNDEFINED;
+                return qjs::newInt64(ctx, static_cast<std::int64_t>(r.overlay_key_seq)).take();
         }
         return JS_UNDEFINED;
     } catch (...) {
@@ -1101,6 +1131,9 @@ bool installHostApi(Impl& impl, std::string* err) {
                                           static_cast<int>(GameProp::Hover), err);
         if (ok) ok = defineGetterOnly(ctx, game.raw(), "active", nullptr, jsGameProperty,
                                           static_cast<int>(GameProp::Active), err);
+        // ★ D4：F9 的按下沿计数（`game.overlayKeySeq`；无源 ⇒ undefined）。
+        if (ok) ok = defineGetterOnly(ctx, game.raw(), "overlayKeySeq", nullptr, jsGameProperty,
+                                          static_cast<int>(GameProp::OverlayKeySeq), err);
         // ★ `local_frames` 是**方法**（全对象唯一的非 getter 属性）：按需查询帧列表，宿主不推表。
         //   `JS_DefinePropertyValueStr(..., 0)` ⇒ 不可写 / 不可枚举 / 不可配置（strict 赋值 ⇒ TypeError）。
         //   变异：把它改成普通数据属性 / 删掉注册 ⇒ `ui-frames` 的 JS 面用例红。
@@ -1136,6 +1169,10 @@ bool installHostApi(Impl& impl, std::string* err) {
         }
         if (ok) ok = setFunction(ctx, host.raw(), "profileBegin", jsHostProfileBegin, 1, err);
         if (ok) ok = setFunction(ctx, host.raw(), "profileEnd", jsHostProfileEnd, 0, err);
+        // ★ D2：`host.config` 是 **getter**（不是方法/数据属性）：每次访问按"这一帧有没有桥"
+        //   现算 —— 有桥 ⇒ 与 `ctx.config` 同形的对象；没有桥 ⇒ **`undefined`**（⛔ 不抛：
+        //   HUD 每帧都要读，不能让一个 optional 能力把整个叠层打黑）。
+        if (ok) ok = defineGetterOnly(ctx, host.raw(), "config", jsHostConfig, nullptr, -1, err);
         if (ok) ok = setProperty(ctx, global.raw(), "host", std::move(host), err);
     }
     return ok;
@@ -1453,6 +1490,9 @@ public:
         impl.current = &readings;
         impl.ops = 0;
         impl.overran = false;
+        // ★ D2：经典回退 HUD 的 `host.config` 来路 = 本帧 readings 的 `UiHostOps::config`
+        //   （非拥有；flushConfig 在 render 返回后还要用它，所以留在 impl 上）。
+        impl.render_bridge = readings.host != nullptr ? readings.host->config : nullptr;
         bool ok = false;
         try {
             Value result(impl.ctx, JS_Call(impl.ctx, impl.render.raw(), JS_UNDEFINED, 0, nullptr));
@@ -1466,6 +1506,18 @@ public:
         impl.builder = nullptr;
         impl.current = nullptr;
         return ok;
+    }
+
+    // ★ D2：经典回退 HUD 的 `host.config` 写盘口（render 之后由 present_sdl 调一次）。
+    void flushConfig(std::string* warn) override {
+        if (impl_ != nullptr && impl_->render_bridge != nullptr) {
+            impl_->render_bridge->flushIfDirty(warn);
+        }
+    }
+    // ★ D2：桥的实现（`PluginHost`）比本脚本**先析构** ⇒ 宿主在它失效前调这里清掉缓存，
+    //   否则 shutdown 时会对已销毁的对象调虚函数（实测 = 宿主 0xC0000005）。
+    void forgetConfigBridge() override {
+        if (impl_ != nullptr) impl_->render_bridge = nullptr;
     }
 
     void setBudget(std::uint64_t deadline_ns, std::uint32_t op_limit) override {
@@ -1755,8 +1807,10 @@ JSValue jsCtxFinish(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxQuit(JSContext*, JSValueConst, int, JSValueConst*);
 // ---- AppData（同步只读宿主 I/O；只 RunCtx；宿主段包 `HostPause`）----
 JSValue jsCtxAppDataStat(JSContext*, JSValueConst, int, JSValueConst*);
-// ---- Config（域式 JSON 配置；只 RunCtx；宿主段包 `HostPause`）----
-Value makeConfigObject(Impl&);
+// ---- Config（域式 JSON 配置；RunCtx 的 `ctx.config` 与经典回退 HUD 的 `host.config`）----
+// ★ 一份实现体、两条门（`configCall` 判定）：Run 回调（`host->inCallback()`）与 render 帧
+//   （`impl.current`/`builder` + 不可枚举的 `__render` 标记）。⛔ 不要复制第二套校验 / 值转换。
+Value makeConfigObject(Impl&, bool render);
 JSValue jsCtxConfigDomain(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxConfigGet(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxConfigHas(JSContext*, JSValueConst, int, JSValueConst*);
@@ -2173,11 +2227,13 @@ bool buildRunCtx(Impl& impl, Value* out) {
         if (!ok) qjs::clearException(ctx);
     }
     // ---- config = { available, domain(id) }（域式 JSON 配置；**只 RunCtx**）----
+    //   ★ `--overlay` 的经典回退 HUD 用同一个桥、同一份 JS 形状（`host.config`，D2），但它**不是**
+    //     `RenderCtx` 的成员（父级 2026-11-25 收窄：RenderCtx 仍恰好 7 成员）。
     //   ★ 没有 `--appdata` ⇒ `available=false` 且 `domain()` 抛 `Error("no_appdata")`
     //     （⛔ 不做内存态：内建插件必须先看 `available` 再回退 params / 默认值）。
     //   ★ 域对象没有缓存：`domain(id)` 每次新建一个绑定同一 store 的对象（同一个 appdata 共享）。
     if (ok) {
-        Value config = makeConfigObject(impl);
+        Value config = makeConfigObject(impl, /*render=*/false);
         if (config.isException()) {
             qjs::clearException(ctx);
             ok = false;
@@ -2237,17 +2293,21 @@ bool buildRunCtx(Impl& impl, Value* out) {
 }
 
 // =======================================================================================
-// `RenderCtx`（C2b）：**每帧新建**的值对象；成员 = `ui` / `draw` / `read` / `game` / `params` / `log` / `profile`
+// `RenderCtx`（C2b）：**每帧新建**的值对象；成员 = `ui` / `draw` / `read` / `game` / `params` /
+// `log` / `profile`
 //
 // 合同：`docs/03-emulator/plugin-runtime.md` §4.4c（`render` 只画 / `onTrigger` 只改 UI 状态）/
 //       §4.6（`render(ctx: RenderCtx)`）/ §5 C2（`plugin/ui-state` / `plugin/ui-draw`）。
 // 裁决：`.tmp/plugin-runtime/c2-decisions.md` D-C2-3（不支持的 style 字段 ⇒ **TypeError**，
 //       ⛔ 不静默忽略）、D-C2-6（`read.frameHash` 不安装）、D-C2-7（`run`/`dispatch` 留 C5）。
+//       ★ 2026-11-25 父级收窄：`config` **不进** `RenderCtx`（仍恰好 7 成员）；要 config 的是
+//       **经典回退 HUD 的 `host.config`**（D2 的另一半，见下面的 `jsHostConfig`）。
 //
 // ★ **成员表写死 = d.ts 的 `RenderCtx` 减 `run`**（`run`/`dispatch` 属 C5）：
 //   ⛔ 没有 `edit`/`input`（RunCtx 的写面；render 不做 guest 写）、`state`/`now`/`trigger`/
 //   `fail`/`finish`/`quit`（Run 语境），也⛔ 没有 `sample`/`screenshot`。
-//   `plugin/render-surface` 用 `Object.keys(ctx)` 钉住**恰好**这七个成员（多一个也红）。
+//   `plugin/render-surface` 用 `Object.keys(ctx)` 钉住**恰好**这七个成员（多一个也红；
+//   `config` 在它的 FORBIDDEN 表里 —— 想加回 RenderCtx 必须先改父级裁决）。
 // ★ S2：`profile` 是**render 专用**的一份（`begin/end` 都是 `void`；trampoline 判 `impl.current`），
 //   与 RunCtx 的 `ctx.profile` 同形但**不复用**它的门（存下来的 RunCtx 仍被拒）。
 // ★ S2：`game` 除 `localFrames()/mouse()` 两个方法外，还装经典 `game` 的只读 getter
@@ -2740,6 +2800,12 @@ bool buildRenderCtx(Impl& impl, Value* out) {
         if (ok) {
             ok = defineGetterOnly(ctx, game.raw(), "active", nullptr, jsGameProperty,
                                   static_cast<int>(GameProp::Active), nullptr);
+        }
+        // ★ D4：F9 的按下沿计数（`ctx.game.overlayKeySeq`；与经典 `game.overlayKeySeq` 同一个
+        //   `jsGameProperty` / 同一份 readings；无源 ⇒ undefined）。
+        if (ok) {
+            ok = defineGetterOnly(ctx, game.raw(), "overlayKeySeq", nullptr, jsGameProperty,
+                                  static_cast<int>(GameProp::OverlayKeySeq), nullptr);
         }
         if (ok) ok = qjs::setProperty(ctx, obj.raw(), "game", std::move(game));
         if (!ok) qjs::clearException(ctx);
@@ -3718,8 +3784,80 @@ JSValue throwPlainError(JSContext* ctx, const std::string& message) {
 // `domain` 对象把域 id 藏在**不可枚举**的 `__domain` 属性里（每次 `domain(id)` 新建一个对象；
 // 同一个 store 共享）。⛔ 不用 `JS_NewCFunctionData`：它没有公开的 data 读口。
 constexpr const char* kConfigDomainProp = "__domain";
+// ★ D2：渲染面的不可枚举标记（RunCtx 的对象**没有**它）。经典 `host.config` 的 config / domain
+//   对象带 `__render` ⇒ trampoline 走"正在 render"那条门；RunCtx 的走 `inCallback()`。
+//   ⛔ 不做帧令牌：经典 `host` 是**全局对象**（跨帧合法），而 `RenderCtx` 已收窄为没有 `config`。
+constexpr const char* kConfigRenderProp = "__render";
 
-JSValue makeConfigDomain(JSContext* ctx, const std::string& domain) {
+// 在 config / domain 对象上装渲染标记（不可枚举、不可写、不可配置）。
+bool markConfigObject(JSContext* ctx, JSValueConst obj, bool render) {
+    if (!render) return true;
+    if (JS_DefinePropertyValueStr(ctx, obj, kConfigRenderProp, JS_NewBool(ctx, true), 0) < 0) {
+        qjs::clearException(ctx);
+        return false;
+    }
+    return true;
+}
+
+// 本调用的桥：render 面（经典 `host.config`）= `UiHostOps::config`；RunCtx = `PluginCallHost::config()`。
+// ★ 两个面都**只**经这一个函数取桥 ⇒ ⛔ 不出现第二份"从哪拿 config"的分支。
+lift::plugin::ConfigBridge* configBridgeFor(const Impl& impl, bool render) {
+    if (render) {
+        return impl.current != nullptr && impl.current->host != nullptr ? impl.current->host->config
+                                                                       : nullptr;
+    }
+    return impl.call_host != nullptr ? impl.call_host->config() : nullptr;
+}
+
+// 本调用的桥 + **门**（一份实现体，两条门）：
+//   · render 面（对象带 `__render`）：必须正在 render（`current` / `builder` 非空）；
+//   · Run 面（无标记）：必须正在 Run 回调（`host->inCallback()`）—— 存下来的 RunCtx 在 render
+//     里调用、或存下来的 `host.config` domain 在回调外调用，都走这条 ⇒ TypeError。
+// 返回 nullptr ⇒ `*why` 是原因（调用方转 TypeError）。
+lift::plugin::ConfigBridge* configCall(JSContext* ctx, JSValueConst this_val, std::string* why,
+                                       bool* render_face) {
+    if (render_face != nullptr) *render_face = false;
+    Impl* impl = implOf(ctx);
+    if (impl == nullptr) {
+        *why = "脚本引擎上下文不可用";
+        return nullptr;
+    }
+    bool render_marked = false;
+    if (JS_IsObject(this_val)) {
+        Value flag = qjs::getProperty(ctx, this_val, kConfigRenderProp);
+        if (flag.isException()) {
+            qjs::clearException(ctx);
+        } else if (!flag.isUndefined()) {
+            render_marked = true;
+        }
+    }
+    if (render_marked) {
+        if (impl->current == nullptr || impl->builder == nullptr) {
+            *why = "只能在 render() 内调用（这个对象是渲染面的）";
+            return nullptr;
+        }
+        lift::plugin::ConfigBridge* bridge = configBridgeFor(*impl, /*render=*/true);
+        if (bridge == nullptr) {
+            *why = "宿主没有接 config 桥（渲染面需要 UiHostOps::config）";
+            return nullptr;
+        }
+        if (render_face != nullptr) *render_face = true;
+        return bridge;
+    }
+    lift::ui::PluginCallHost* host = impl->call_host;
+    if (host == nullptr || !host->inCallback()) {
+        *why = "不在插件回调里";
+        return nullptr;
+    }
+    lift::plugin::ConfigBridge* bridge = host->config();
+    if (bridge == nullptr) {
+        *why = "宿主没有接 config 桥（PluginCallHost::config 返回 nullptr）";
+        return nullptr;
+    }
+    return bridge;
+}
+
+JSValue makeConfigDomain(JSContext* ctx, const std::string& domain, bool render) {
     Value obj = qjs::newObject(ctx);
     if (obj.isException()) return obj.take();
     bool ok = setFunction(ctx, obj.raw(), "get", jsCtxConfigGet, 2, nullptr) &&
@@ -3735,20 +3873,42 @@ JSValue makeConfigDomain(JSContext* ctx, const std::string& domain) {
     } else {
         qjs::clearException(ctx);
     }
+    if (ok) ok = markConfigObject(ctx, obj.raw(), render);
     if (!ok) return JS_EXCEPTION;
     return obj.take();
 }
 
-Value makeConfigObject(Impl& impl) {
+// `render=false` ⇒ RunCtx 的 `ctx.config`；`render=true` ⇒ 经典回退 HUD 的 `host.config`。
+Value makeConfigObject(Impl& impl, bool render) {
     JSContext* ctx = impl.ctx;
     Value obj = qjs::newObject(ctx);
     if (obj.isException()) return obj;
-    lift::ui::PluginCallHost* host = impl.call_host;
-    const bool available = host != nullptr && host->configAvailable();
+    lift::plugin::ConfigBridge* bridge = configBridgeFor(impl, render);
+    const bool available = bridge != nullptr && bridge->available();
     bool ok = defineReadOnly(ctx, obj.raw(), "available", qjs::newBool(ctx, available));
     if (ok) ok = setFunction(ctx, obj.raw(), "domain", jsCtxConfigDomain, 1, nullptr);
+    if (ok) ok = markConfigObject(ctx, obj.raw(), render);
     if (!ok) return Value::exception(ctx);
     return obj;
+}
+
+// 经典回退 HUD 的 `host.config`（D2）：**getter**，每次访问按"这一帧有没有桥"现算。
+// ★ 没有桥 / 不在 render ⇒ `undefined`（⛔ 不抛：HUD 每帧都要读，optional 能力不能把叠层打黑）。
+JSValue jsHostConfig(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/, JSValueConst* /*argv*/) {
+    try {
+        Impl* impl = implOf(ctx);
+        if (impl == nullptr || impl->current == nullptr) return JS_UNDEFINED;
+        lift::plugin::ConfigBridge* bridge = configBridgeFor(*impl, /*render=*/true);
+        if (bridge == nullptr) return JS_UNDEFINED;
+        Value config = makeConfigObject(*impl, /*render=*/true);
+        if (config.isException()) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "host.config: 分配结果对象失败");
+        }
+        return config.take();
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "host.config: 宿主异常（C++ exception at script boundary）");
+    }
 }
 
 // `this` 必须是 `domain(id)` 返回的那个对象（方法被摘下来单独调用 ⇒ TypeError，⛔ 不猜域）。
@@ -3766,11 +3926,16 @@ bool configDomainOf(JSContext* ctx, JSValueConst this_val, std::string* domain, 
     return true;
 }
 
-JSValue jsCtxConfigDomain(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+JSValue jsCtxConfigDomain(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     try {
-        lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr || !host->inCallback()) {
-            return JS_ThrowTypeError(ctx, "ctx.config.domain: 不在插件回调里");
+        if (!JS_IsObject(this_val)) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain: 必须作为 ctx.config 的方法调用");
+        }
+        std::string why;
+        bool render_face = false;
+        lift::plugin::ConfigBridge* bridge = configCall(ctx, this_val, &why, &render_face);
+        if (bridge == nullptr) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain: %s", why.c_str());
         }
         if (argc < 1 || !JS_IsString(argv[0])) {
             return JS_ThrowTypeError(ctx, "ctx.config.domain(id): id 必须是字符串");
@@ -3781,15 +3946,14 @@ JSValue jsCtxConfigDomain(JSContext* ctx, JSValueConst /*this_val*/, int argc, J
             return JS_ThrowTypeError(ctx, "ctx.config.domain: id 读取失败");
         }
         // ★ 没有 --appdata ⇒ `Error("no_appdata")`（⛔ 不降级成内存态）。
-        if (!host->configAvailable()) return throwPlainError(ctx, "no_appdata");
-        std::string why;
+        if (!bridge->available()) return throwPlainError(ctx, "no_appdata");
         {
             HostPause pause(implOf(ctx));
-            if (!host->configCheckDomain(id, &why)) {
+            if (!bridge->checkDomain(id, &why)) {
                 return JS_ThrowTypeError(ctx, "ctx.config.domain('%s'): %s", id.c_str(), why.c_str());
             }
         }
-        return makeConfigDomain(ctx, id);
+        return makeConfigDomain(ctx, id, render_face);
     } catch (...) {
         return JS_ThrowTypeError(ctx, "ctx.config.domain: 宿主异常（C++ exception at script boundary）");
     }
@@ -3797,12 +3961,12 @@ JSValue jsCtxConfigDomain(JSContext* ctx, JSValueConst /*this_val*/, int argc, J
 
 JSValue jsCtxConfigGet(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     try {
-        lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr || !host->inCallback()) {
-            return JS_ThrowTypeError(ctx, "ctx.config.domain(...).get: 不在插件回调里");
+        std::string why;
+        lift::plugin::ConfigBridge* bridge = configCall(ctx, this_val, &why, nullptr);
+        if (bridge == nullptr) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain(...).get: %s", why.c_str());
         }
         std::string domain;
-        std::string why;
         if (!configDomainOf(ctx, this_val, &domain, &why)) {
             return JS_ThrowTypeError(ctx, "ctx.config.domain(...).get: %s", why.c_str());
         }
@@ -3823,7 +3987,7 @@ JSValue jsCtxConfigGet(JSContext* ctx, JSValueConst this_val, int argc, JSValueC
         Value out = Value::undefined(ctx);
         {
             HostPause pause(implOf(ctx));
-            ok = host->configGet(domain, key, &value, &found, &why);
+            ok = bridge->get(domain, key, &value, &found, &why);
             if (ok && found) out = configValueToJs(ctx, value);
         }
         if (!ok) {
@@ -3839,12 +4003,12 @@ JSValue jsCtxConfigGet(JSContext* ctx, JSValueConst this_val, int argc, JSValueC
 
 JSValue jsCtxConfigHas(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     try {
-        lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr || !host->inCallback()) {
-            return JS_ThrowTypeError(ctx, "ctx.config.domain(...).has: 不在插件回调里");
+        std::string why;
+        lift::plugin::ConfigBridge* bridge = configCall(ctx, this_val, &why, nullptr);
+        if (bridge == nullptr) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain(...).has: %s", why.c_str());
         }
         std::string domain;
-        std::string why;
         if (!configDomainOf(ctx, this_val, &domain, &why)) {
             return JS_ThrowTypeError(ctx, "ctx.config.domain(...).has: %s", why.c_str());
         }
@@ -3862,7 +4026,7 @@ JSValue jsCtxConfigHas(JSContext* ctx, JSValueConst this_val, int argc, JSValueC
         bool ok = true;
         {
             HostPause pause(implOf(ctx));
-            ok = host->configHas(domain, key, &found, &why);
+            ok = bridge->has(domain, key, &found, &why);
         }
         if (!ok) {
             return JS_ThrowTypeError(ctx, "ctx.config.domain('%s').has('%s'): %s", domain.c_str(),
@@ -3876,12 +4040,12 @@ JSValue jsCtxConfigHas(JSContext* ctx, JSValueConst this_val, int argc, JSValueC
 
 JSValue jsCtxConfigSet(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     try {
-        lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr || !host->inCallback()) {
-            return JS_ThrowTypeError(ctx, "ctx.config.domain(...).set: 不在插件回调里");
+        std::string why;
+        lift::plugin::ConfigBridge* bridge = configCall(ctx, this_val, &why, nullptr);
+        if (bridge == nullptr) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain(...).set: %s", why.c_str());
         }
         std::string domain;
-        std::string why;
         if (!configDomainOf(ctx, this_val, &domain, &why)) {
             return JS_ThrowTypeError(ctx, "ctx.config.domain(...).set: %s", why.c_str());
         }
@@ -3908,7 +4072,7 @@ JSValue jsCtxConfigSet(JSContext* ctx, JSValueConst this_val, int argc, JSValueC
                                      key.c_str(), why.c_str());
         }
         lift::plugin::ConfigReceipt receipt;
-        const bool ok = host->configSet(domain, key, value, &receipt, &why);
+        const bool ok = bridge->set(domain, key, value, &receipt, &why);
         if (!ok) {
             return JS_ThrowTypeError(ctx, "ctx.config.domain('%s').set('%s'): %s", domain.c_str(),
                                      key.c_str(), why.c_str());
@@ -3931,12 +4095,12 @@ JSValue jsCtxConfigSet(JSContext* ctx, JSValueConst this_val, int argc, JSValueC
 
 JSValue jsCtxConfigDelete(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     try {
-        lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr || !host->inCallback()) {
-            return JS_ThrowTypeError(ctx, "ctx.config.domain(...).delete: 不在插件回调里");
+        std::string why;
+        lift::plugin::ConfigBridge* bridge = configCall(ctx, this_val, &why, nullptr);
+        if (bridge == nullptr) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain(...).delete: %s", why.c_str());
         }
         std::string domain;
-        std::string why;
         if (!configDomainOf(ctx, this_val, &domain, &why)) {
             return JS_ThrowTypeError(ctx, "ctx.config.domain(...).delete: %s", why.c_str());
         }
@@ -3954,7 +4118,7 @@ JSValue jsCtxConfigDelete(JSContext* ctx, JSValueConst this_val, int argc, JSVal
         bool ok = true;
         {
             HostPause pause(implOf(ctx));
-            ok = host->configDelete(domain, key, &removed, &why);
+            ok = bridge->erase(domain, key, &removed, &why);
         }
         if (!ok) {
             return JS_ThrowTypeError(ctx, "ctx.config.domain('%s').delete('%s'): %s",
@@ -3968,12 +4132,12 @@ JSValue jsCtxConfigDelete(JSContext* ctx, JSValueConst this_val, int argc, JSVal
 
 JSValue jsCtxConfigAll(JSContext* ctx, JSValueConst this_val, int /*argc*/, JSValueConst* /*argv*/) {
     try {
-        lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr || !host->inCallback()) {
-            return JS_ThrowTypeError(ctx, "ctx.config.domain(...).all: 不在插件回调里");
+        std::string why;
+        lift::plugin::ConfigBridge* bridge = configCall(ctx, this_val, &why, nullptr);
+        if (bridge == nullptr) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain(...).all: %s", why.c_str());
         }
         std::string domain;
-        std::string why;
         if (!configDomainOf(ctx, this_val, &domain, &why)) {
             return JS_ThrowTypeError(ctx, "ctx.config.domain(...).all: %s", why.c_str());
         }
@@ -3982,7 +4146,7 @@ JSValue jsCtxConfigAll(JSContext* ctx, JSValueConst this_val, int /*argc*/, JSVa
         {
             // ★ 整段（store + 建树）都在 HostPause 里；大域的 `all()` 不许被记成用户 2 ms。
             HostPause pause(implOf(ctx));
-            value = host->configAll(domain);
+            value = bridge->all(domain);
             out = configValueToJs(ctx, value);
         }
         return out.take();
@@ -4022,6 +4186,17 @@ public:
     bool render(UiBuilder& builder, const UiFrameReadings& readings, std::string* err) override {
         return renderFrame(builder, readings, err);
     }
+    // ★ D2：`ctx.config` 的写盘口 —— present_sdl 在**每帧 render 之后**调一次（与 Run 回调末的
+    //   `PluginHost` flush 同一口径；⛔ 不进 2 ms 预算 —— 它不在 Run 回调里）。
+    void flushConfig(std::string* warn) override {
+        if (impl_ != nullptr && impl_->render_bridge != nullptr) {
+            impl_->render_bridge->flushIfDirty(warn);
+        }
+    }
+    // ★ D2 的生命周期：`PluginHost` 先于本脚本析构 ⇒ 宿主在桥失效前清缓存（见 `UiScript`）。
+    void forgetConfigBridge() override {
+        if (impl_ != nullptr) impl_->render_bridge = nullptr;
+    }
     // `UiScript::setBudget` 来的是**绝对** deadline（steady_clock 纳秒；0 = 不限）⇒ 直接用，
     // ⛔ 不再加 `steadyNowNs()`（那是回调用**相对**预算的形状）。
     void setBudget(std::uint64_t deadline_ns, std::uint32_t op_limit) override {
@@ -4041,6 +4216,8 @@ private:
             if (err != nullptr) *err = "quickjs: 插件已 shutdown";
             return false;
         }
+        // ★ 这一帧没有桥 / 没有 render ⇒ flush 必须是 no-op（⛔ 不能拿上一帧的桥再 flush 一次）。
+        impl.render_bridge = nullptr;
         // ★ 没有 `render` 的插件**合法**（纯 Run / headless）：present_sdl 只在挂了 overlay 时调
         //   render ⇒ 这里必须干净地返回 true + 空 list（⛔ 不是失败、也不逼插件画东西）。
         if (!impl.plugin_has_render) return true;
@@ -4053,6 +4230,9 @@ private:
         impl.current = &readings;
         impl.ops = 0;
         impl.overran = false;
+        // ★ D2：把本帧的 config 桥缓存到 `render_bridge`（flushConfig 在 render 返回之后还要用它
+        //   —— 那时 current / call_host 已经复位）。经典回退 HUD 的 `host.config` 是唯一消费者。
+        impl.render_bridge = configBridgeFor(impl, /*render=*/true);
         // ★ render 的预算是 `setBudget` 给的**墙钟** deadline（`deadline_ns`）⇒ 这里必须清掉
         //   上一次回调留下的 CPU deadline（否则过期的 CPU deadline 会让 render 第一次中断就误判）。
         impl.cpu_deadline_ns = 0;

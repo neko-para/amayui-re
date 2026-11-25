@@ -83,7 +83,10 @@ namespace lift::plugin {
 
 class GuestEngineRead;
 
-class PluginHost final : public TriggerHandler, public ReadPointObserver, public ui::PluginCallHost {
+class PluginHost final : public TriggerHandler,
+                         public ReadPointObserver,
+                         public ui::PluginCallHost,
+                         public ConfigBridge {
 public:
     using Params = lift::ui::PluginParams;
 
@@ -170,21 +173,36 @@ public:
     lift::plugin::AppDataStat appDataStat(const std::string& rel) override {
         return appdata_.stat(rel);
     }
-    // ---- Config（同步宿主 I/O；只 RunCtx；flush 在 `runCallback` 末）----
-    bool configAvailable() const override { return config_.available(); }
-    bool configCheckDomain(const std::string& id, std::string* why) const override {
+    // ---- Config（同步宿主 I/O；**RunCtx 与 RenderCtx 两面都有**）----
+    // ★ 实现面 = `lift::plugin::ConfigBridge`（本类**同时是**那个桥：`config()` 返回 `this`）。
+    //   薄适配 `PluginConfig`：值 / 上限 / `HostPause` 都在 `script_quickjs.cpp` 的 trampoline 里，
+    //   本类只转发（⛔ 不在这里复制第二套校验）。
+    bool available() const override { return config_.available(); }
+    bool checkDomain(const std::string& id, std::string* why) const override {
         return PluginConfig::checkDomain(id, why);
     }
-    bool configGet(const std::string& domain, const std::string& key,
-                   lift::plugin::ConfigValue* out, bool* found, std::string* why) override;
-    bool configHas(const std::string& domain, const std::string& key, bool* found,
-                   std::string* why) override;
-    bool configSet(const std::string& domain, const std::string& key,
-                   const lift::plugin::ConfigValue& value, lift::plugin::ConfigReceipt* receipt,
-                   std::string* why) override;
-    bool configDelete(const std::string& domain, const std::string& key, bool* removed,
-                      std::string* why) override;
-    lift::plugin::ConfigValue configAll(const std::string& domain) override;
+    bool get(const std::string& domain, const std::string& key, lift::plugin::ConfigValue* out,
+             bool* found, std::string* why) override {
+        return config_.get(domain, key, out, found, why);
+    }
+    bool has(const std::string& domain, const std::string& key, bool* found,
+             std::string* why) override {
+        return config_.has(domain, key, found, why);
+    }
+    bool set(const std::string& domain, const std::string& key,
+             const lift::plugin::ConfigValue& value, lift::plugin::ConfigReceipt* receipt,
+             std::string* why) override {
+        return config_.set(domain, key, value, receipt, why);
+    }
+    bool erase(const std::string& domain, const std::string& key, bool* removed,
+               std::string* why) override {
+        return config_.erase(domain, key, removed, why);
+    }
+    lift::plugin::ConfigValue all(const std::string& domain) override { return config_.all(domain); }
+    void flushIfDirty(std::string* warn) override { config_.flushIfDirty(warn); }
+    // `PluginCallHost::config()`：RunCtx 的 `ctx.config` 来路（与 `UiHostOps::config` 指向**同一个**
+    //   桥，只是两个面各有一条取用路径；`RenderCtx` 没有 `config`）。
+    lift::plugin::ConfigBridge* config() override { return this; }
     lift::plugin::Trigger makeAfterScript(const std::string& name, const std::string& script,
                                          lift::plugin::TriggerMode mode, std::uint32_t max_fires,
                                          std::uint64_t timeout_ms) override;

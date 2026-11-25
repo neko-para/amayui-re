@@ -28,6 +28,13 @@
 //      · 几何非正（窗口 / 帧 / 像素尺寸 0）⇒ false 且**不写**输出（⛔ 不猜）。
 //      红了 ⇒ hover 与命中表分处两个空间（HUD 高亮系统性偏移），或又回去读 OS 光标
 //      （SDL 的 `GetMouseState`）⇒ 注入 / 控制层移动带不动 hover。
+//   ⑦ **D4 叠层热键**（`overlay/key-*`，纯 / SDL-free）：固定 `kOverlayKeyVk=0x78`（F9）；
+//      `overlayKeyStep` 四条 + 饱和（⛔ 不回绕）；无源（`overlay_key_ok=false`）⇒ 经典
+//      `game.overlayKeySeq` 与插件 `ctx.game.overlayKeySeq` 都 `undefined`，有源 ⇒ 同一个数字。
+//      红了 ⇒ 显隐切换要么切不过来、要么每帧都切 / 无源被编成 0。
+//   ⑧ **alpha-0 的 Rect**（`overlay/rect-alpha-zero`，纯 / 无字体）：`fill.a == 0` 的 Rect **不画**
+//      （不改已有像素、自己的区域仍透明），但**仍留在命中表里**（`key` 非空 ⇒ 命中区）。
+//      红了 ⇒ D4 的 `settings…` 入口要么把面板 / 文本擦成透明（写成 `(0,0,0,0)`），要么点不中。
 //
 // ★ B（2026-11-18）：HUD 的**内容**由外置脚本 `scripts/ui/hud.js` 产出（QuickJS 同步跑），
 //   C++ 侧只剩"读数 → 脚本 → 栅格化 → `presentOverlay`"。⇒ **期望面板**只能由**同一个脚本 +
@@ -53,6 +60,7 @@
 #include "runtime/host_encoding.h"
 #include "runtime/host_window.h"  // S9：router 的装/卸判据（WindowManager::uiInputRouter）
 #include "runtime/memory.h"
+#include "runtime/overlay_key.h"  // D4：F9 的按下沿计数（纯函数；本条不依赖窗口）
 #include "runtime/present_sdl.h"
 #include "runtime/surface.h"
 #include "runtime/ui_readings.h"
@@ -60,6 +68,7 @@
 #include "ui/canvas.h"
 #include "ui/element.h"
 #include "ui/hit.h"
+#include "ui/plugin.h"  // D4：`ctx.game.overlayKeySeq`（插件面的 getter）
 #include "ui/raster.h"
 #include "ui/script.h"
 
@@ -312,6 +321,106 @@ void caseUiInputParse() {
 }
 
 // =======================================================================================
+// ⑦ 叠层热键读数（D4；2026-11-25 父级裁决）：固定 F9，`game.overlayKeySeq` = 单调按下计数
+//   · `overlayKeyStep` 四条（按下沿 / 保持 / 释放 / 重按）+ **饱和**（0xFFFFFFFF 不回绕）；
+//   · 无源（`overlay_key_ok=false` = 没有 WindowManager / headless）⇒ 经典 `game.overlayKeySeq`
+//     与插件 `ctx.game.overlayKeySeq` 都是 **`undefined`**（⛔ 不编 0）；
+//   · 有源 ⇒ 两者读到同一个当帧计数（同一份 `jsGameProperty` / 同一份 readings）。
+// ★ 纯 / SDL-free 的那一半先跑（在窗口 SKIP 之前）：本条**不依赖**窗口 / 字体 / GPU。
+// ★ 采样端（`present_sdl.cpp` 的 `drawOverlay` → `windows->keyDown(kOverlayKeyVk)`）不在本条：
+//   它要真窗口 + 真键盘；本用例钉"语义 + JS 面"，采样点由代码形状（`windows == nullptr ⇒ 不填`）保证。
+// =======================================================================================
+std::string soleOverlayText(const lift::ui::UiBuilder& builder) {
+    for (const lift::ui::Element& e : builder.elements()) {
+        if (e.kind == lift::ui::ElementKind::Text) return e.text;
+    }
+    return {};
+}
+
+const char* kOverlayKeyClassicScript = R"JS(
+globalThis.render = function render() {
+  const v = game.overlayKeySeq;
+  ui.text({ x: 0, y: 0, text: 'seq=' + (v === undefined ? 'undefined' : v), size: 1 });
+};
+)JS";
+
+const char* kOverlayKeyPluginSource = R"JS(
+export default {
+  render(ctx) {
+    const v = ctx.game.overlayKeySeq;
+    ctx.draw.text(0, 0, 'seq=' + (v === undefined ? 'undefined' : v), { size: 1 });
+  },
+};
+)JS";
+
+void caseOverlayKey() {
+    // ---- ① 纯函数：四条边沿 ----
+    lift_test::g_current_case = "overlay/key-edges";
+    LIFT_CHECK_EQ_U32(lift::kOverlayKeyVk, 0x78u);  // 固定 F9
+    LIFT_CHECK(std::strcmp(lift::kOverlayKeyName, "F9") == 0);
+    LIFT_CHECK_EQ_U32(lift::overlayKeyStep(false, true, 0u), 1u);   // 按下沿
+    LIFT_CHECK_EQ_U32(lift::overlayKeyStep(true, true, 1u), 1u);    // 保持
+    LIFT_CHECK_EQ_U32(lift::overlayKeyStep(true, false, 1u), 1u);   // 释放
+    LIFT_CHECK_EQ_U32(lift::overlayKeyStep(false, true, 1u), 2u);   // 重按
+    LIFT_CHECK_EQ_U32(lift::overlayKeyStep(false, true, 41u), 42u);
+    LIFT_CHECK_EQ_U32(lift::overlayKeyStep(false, false, 7u), 7u);  // 空闲
+
+    // ---- ② 饱和：0xFFFFFFFF 之后不再增长（⛔ 回绕成 0）----
+    lift_test::g_current_case = "overlay/key-saturate";
+    LIFT_CHECK_EQ_U32(lift::overlayKeyStep(false, true, 0xFFFFFFFFu), 0xFFFFFFFFu);
+    LIFT_CHECK_EQ_U32(lift::overlayKeyStep(true, true, 0xFFFFFFFFu), 0xFFFFFFFFu);
+    LIFT_CHECK_EQ_U32(lift::overlayKeyStep(true, false, 0xFFFFFFFFu), 0xFFFFFFFFu);
+
+    // ---- ③ 经典 `game.overlayKeySeq`：无源 ⇒ undefined；有源 ⇒ 当帧数字 ----
+    lift_test::g_current_case = "overlay/key-classic";
+    {
+        auto runtime = lift::ui::makeQuickJsRuntime();
+        std::string err;
+        std::unique_ptr<lift::ui::UiScript> script =
+            runtime->load(kOverlayKeyClassicScript, "overlay-key.js", nullptr, &err);
+        LIFT_CHECK(script != nullptr);
+        if (script != nullptr) {
+            lift::ui::UiFrameReadings none;
+            lift::ui::UiBuilder b0;
+            LIFT_CHECK(script->render(b0, none, &err));
+            LIFT_CHECK(soleOverlayText(b0) == "seq=undefined");
+
+            lift::ui::UiFrameReadings seq;
+            seq.overlay_key_ok = true;
+            seq.overlay_key_seq = 42;
+            lift::ui::UiBuilder b1;
+            LIFT_CHECK(script->render(b1, seq, &err));
+            LIFT_CHECK(soleOverlayText(b1) == "seq=42");
+        }
+    }
+
+    // ---- ④ 插件 `ctx.game.overlayKeySeq`：同一份读数、同一份"无源 ⇒ undefined" ----
+    lift_test::g_current_case = "overlay/key-plugin";
+    {
+        std::string err;
+        lift::ui::PluginLoadOptions opts;
+        opts.origin = "overlay-key-plugin.js";
+        std::unique_ptr<lift::ui::PluginScript> script =
+            lift::ui::makeQuickJsPlugin(kOverlayKeyPluginSource, opts, &err);
+        LIFT_CHECK(script != nullptr);
+        if (script != nullptr) {
+            lift::ui::UiFrameReadings none;
+            lift::ui::UiBuilder b0;
+            LIFT_CHECK(script->render(b0, none, &err));
+            LIFT_CHECK(soleOverlayText(b0) == "seq=undefined");
+
+            lift::ui::UiFrameReadings seq;
+            seq.overlay_key_ok = true;
+            seq.overlay_key_seq = 42;
+            lift::ui::UiBuilder b1;
+            LIFT_CHECK(script->render(b1, seq, &err));
+            LIFT_CHECK(soleOverlayText(b1) == "seq=42");
+        }
+    }
+}
+
+
+// =======================================================================================
 // 窗口路径夹具（③ renderer / ④ 直出）
 // =======================================================================================
 struct Fx {
@@ -442,10 +551,23 @@ bool readAll(const std::string& path, std::string* out) {
 //   fps = 1.0（最近 1 s 只有这一次 Present），没有 mouse（测试不挂 `WindowManager`）、
 //   没有 script / worst（`Machine` 没跑）。
 // ★ `frame_w/h` = 被呈现的帧尺寸（画布 `s` 从 `uiCanvasOrigin` 取）。
-// ★ `covered` = 脚本画出的**每一个 Rect**（切片 3 起 = 面板 + PROFILE 按钮；`expectGuestUntouched`
-//   按它判"叠层只占画出的那几块"）。面板本身仍是 `elements[0]`（`w/h` 只回它）。
-bool expectedPanel(lift::FontEngine& font, int frame_w, int frame_h, int* ox, int* oy, int* w, int* h,
-                   std::vector<PixelRect>* covered) {
+// ★ `covered` = 脚本画出的**每一个 Rect**（切片 3 起 = 面板 + 设置入口；`expectGuestUntouched`
+//   按它判"叠层只占画出的那几块"）。
+// ★ D4（2026-11-25）：面板**贴左、垂直居中** ⇒ 它的窗口坐标不再是画布原点（`y ≈ 360 - panelH/2`）。
+//   取样点必须用**面板自己的**左上角（`x` / `y`），而不是画布原点（旧 `(0,0)` 现在是面板上方的 guest）。
+struct PanelGeom {
+    int canvas_x = 0;  // 画布原点（窗口像素）
+    int canvas_y = 0;
+    int ref_x = 0;     // 面板左上角（1280×720 参考像素）
+    int ref_y = 0;
+    int x = 0;         // 面板左上角（窗口像素）
+    int y = 0;
+    int w = 0;         // 面板尺寸（窗口像素）
+    int h = 0;
+    std::vector<PixelRect> covered;
+};
+
+bool expectedPanel(lift::FontEngine& font, int frame_w, int frame_h, PanelGeom* out) {
     std::string source;
     if (!readAll(hudScriptPath(), &source)) return false;
     auto runtime = lift::ui::makeQuickJsRuntime();
@@ -463,13 +585,17 @@ bool expectedPanel(lift::FontEngine& font, int frame_w, int frame_h, int* ox, in
     const lift::ui::CanvasOrigin canvas = lift::ui::uiCanvasOrigin(frame_w, frame_h);
     const lift::ui::Element& panel = builder.elements().front();
     if (panel.kind != lift::ui::ElementKind::Rect) return false;
-    *ox = canvas.offset_x;  // 画面原点 = (0,0)（窗口 = 帧尺寸）
-    *oy = canvas.offset_y;
-    *w = static_cast<int>(static_cast<long long>(panel.w) * canvas.scale + 0.5);
-    *h = static_cast<int>(static_cast<long long>(panel.h) * canvas.scale + 0.5);
-    if (*w < 1) *w = 1;
-    if (*h < 1) *h = 1;
-    covered->clear();
+    out->canvas_x = canvas.offset_x;  // 画面原点 = (0,0)（窗口 = 帧尺寸）
+    out->canvas_y = canvas.offset_y;
+    out->ref_x = panel.x;
+    out->ref_y = panel.y;
+    out->x = canvas.offset_x + static_cast<int>(static_cast<long long>(panel.x) * canvas.scale + 0.5);
+    out->y = canvas.offset_y + static_cast<int>(static_cast<long long>(panel.y) * canvas.scale + 0.5);
+    out->w = static_cast<int>(static_cast<long long>(panel.w) * canvas.scale + 0.5);
+    out->h = static_cast<int>(static_cast<long long>(panel.h) * canvas.scale + 0.5);
+    if (out->w < 1) out->w = 1;
+    if (out->h < 1) out->h = 1;
+    out->covered.clear();
     for (const lift::ui::Element& e : builder.elements()) {
         if (e.kind != lift::ui::ElementKind::Rect) continue;
         PixelRect r;
@@ -479,9 +605,9 @@ bool expectedPanel(lift::FontEngine& font, int frame_w, int frame_h, int* ox, in
         r.h = static_cast<int>(static_cast<long long>(e.h) * canvas.scale + 0.5);
         if (r.w < 1) r.w = 1;
         if (r.h < 1) r.h = 1;
-        covered->push_back(r);
+        out->covered.push_back(r);
     }
-    return !covered->empty();
+    return !out->covered.empty();
 }
 
 std::vector<std::uint8_t> guestBytes(Fx& f) {
@@ -543,11 +669,17 @@ bool caseRendererWindow(std::string* skip_why) {
     int rw = 0;
     int rh = 0;
     std::vector<PixelRect> covered;
-    if (!expectedPanel(font, 640, 360, &ox, &oy, &rw, &rh, &covered)) {
+    PanelGeom panel;
+    if (!expectedPanel(font, 640, 360, &panel)) {
         LIFT_CHECK(false);
         win.shutdown();
         return true;
     }
+    ox = panel.canvas_x;
+    oy = panel.canvas_y;
+    rw = panel.w;
+    rh = panel.h;
+    covered = panel.covered;
     LIFT_CHECK_EQ_I64(ox, 0);  // 16:9 ⇒ 居中偏移 0
     LIFT_CHECK_EQ_I64(oy, 0);
     // ★ renderer 路径：底是 `#101820CC`（alpha 204）⇒ 它**与底下的 guest 画面混合**（SDL_BLENDMODE_BLEND）。
@@ -561,19 +693,19 @@ bool caseRendererWindow(std::string* skip_why) {
         return true;
     }
     TopLeftScan scan;
-    if (!scanRegion(win, ox, oy, rw, rh, want_bg, 1, &scan, &err)) LIFT_CHECK(false);
-    // 深底（80% 混合值）+ 亮字真的出现（扫描范围 = 生产脚本算出的面板矩形）
+    if (!scanRegion(win, panel.x, panel.y, rw, rh, want_bg, 1, &scan, &err)) LIFT_CHECK(false);
+    // 深底（80% 混合值）+ 亮字真的出现（扫描范围 = 生产脚本算出的**面板**矩形）
     LIFT_CHECK(scan.bg > 0);
     LIFT_CHECK(scan.fg > 0);
     LIFT_CHECK(scan.other == 0);
     LIFT_CHECK(scan.guest == 0);
-    // 画布原点那一个像素是**混合后的底**（不是 guest / 不是黑 / 也不是不透明的 #101820）
-    // —— B2 的"原点 == 画布原点"像素级证据 + 80% 半透明的像素级证据。
+    // 面板左上角那一个像素是**混合后的底**（不是 guest / 不是黑 / 也不是不透明的 #101820）
+    // —— 80% 半透明的像素级证据（D4 起面板贴左、垂直居中 ⇒ 取样点是面板自己的左上角）。
     std::uint32_t argb = 0;
-    LIFT_CHECK(win.readbackPixel(ox, oy, &argb, &err));
-    // ★ 读数（不是断言）：`ctest -V` 直接看到 renderer 这一路的 (0,0) 实际值与期望值。
-    std::printf("overlay/renderer-window: canvas_origin=(%d,%d) 像素=#%06X 期望 #%06X（80%% 混合，tol=1）\n", ox, oy,
-                argb & 0x00FFFFFFu, want_bg);
+    LIFT_CHECK(win.readbackPixel(panel.x, panel.y, &argb, &err));
+    // ★ 读数（不是断言）：`ctest -V` 直接看到 renderer 这一路的取样点实际值与期望值。
+    std::printf("overlay/renderer-window: canvas_origin=(%d,%d) panel=(%d,%d) 像素=#%06X 期望 #%06X（80%% 混合，tol=1）\n",
+                ox, oy, panel.x, panel.y, argb & 0x00FFFFFFu, want_bg);
     LIFT_CHECK(nearRgb(argb & 0x00FFFFFFu, want_bg, 1));
     LIFT_CHECK(!nearRgb(argb & 0x00FFFFFFu, kOverlayBgRgb, 1));
     expectGuestUntouched(win, *f.s, covered);
@@ -638,11 +770,17 @@ bool caseDirectWindow(std::string* skip_why) {
     int rw = 0;
     int rh = 0;
     std::vector<PixelRect> covered;
-    if (!expectedPanel(font, 320, 240, &ox, &oy, &rw, &rh, &covered)) {
+    PanelGeom panel;
+    if (!expectedPanel(font, 320, 240, &panel)) {
         LIFT_CHECK(false);
         win.shutdown();
         return true;
     }
+    ox = panel.canvas_x;
+    oy = panel.canvas_y;
+    rw = panel.w;
+    rh = panel.h;
+    covered = panel.covered;
     LIFT_CHECK_EQ_I64(ox, 0);
     LIFT_CHECK_EQ_I64(oy, 30);  // 4:3 ⇒ 画布纵向居中 30 px（B2）
     // ★ **两条路径都是 80% 混合**（D 单）：renderer 走 `SDL_BLENDMODE_BLEND`；直出走一条
@@ -657,18 +795,18 @@ bool caseDirectWindow(std::string* skip_why) {
         return true;
     }
     TopLeftScan scan;
-    if (!scanRegion(win, ox, oy, rw, rh, want_bg, 1, &scan, &err)) LIFT_CHECK(false);
+    if (!scanRegion(win, panel.x, panel.y, rw, rh, want_bg, 1, &scan, &err)) LIFT_CHECK(false);
     LIFT_CHECK(scan.bg > 0);
     LIFT_CHECK(scan.fg > 0);
     LIFT_CHECK(scan.other == 0);
     LIFT_CHECK(scan.guest == 0);
     std::uint32_t argb = 0;
-    LIFT_CHECK(win.readbackPixel(ox, oy, &argb, &err));
+    LIFT_CHECK(win.readbackPixel(panel.x, panel.y, &argb, &err));
     // ★ 直出这一条读的是 `directReadback` 的**同一份**窗口像素（截图 / 窗口像素与屏幕同值）：
     //   它按与 GPU 混合管线同一条整数公式合成 ⇒ 混合值（容差 1），⛔ 不再是不透明 `#101820`。
-    // ★ 读数（不是断言）：`ctest -V` 直接看到直出这一路的 (0,0) 实际值与期望值。
-    std::printf("overlay/direct-window: canvas_origin=(%d,%d) 像素=#%06X 期望 #%06X（80%% 混合，tol=1）\n", ox, oy,
-                argb & 0x00FFFFFFu, want_bg);
+    // ★ 读数（不是断言）：`ctest -V` 直接看到直出这一路的取样点实际值与期望值。
+    std::printf("overlay/direct-window: canvas_origin=(%d,%d) panel=(%d,%d) 像素=#%06X 期望 #%06X（80%% 混合，tol=1）\n",
+                ox, oy, panel.x, panel.y, argb & 0x00FFFFFFu, want_bg);
     LIFT_CHECK(nearRgb(argb & 0x00FFFFFFu, want_bg, 1));
     LIFT_CHECK(!nearRgb(argb & 0x00FFFFFFu, kOverlayBgRgb, 1));
     // 画布原点上方（画面原点那一块）仍是 guest 色 ⇒ 证明原点不是恒 0、也不是画面原点。
@@ -723,18 +861,28 @@ bool caseDirectWindow(std::string* skip_why) {
         const int want_x = ex + canvas.offset_x;
         const int want_y = ey + canvas.offset_y;
         LIFT_CHECK(want_y > ey);  // 4:3 ⇒ 画布原点真的低于画面原点（否则区分不了两个口径）
+        // ★ D4：叠层的 bbox 原点 = **面板左上角**（贴左、垂直居中），不是画布原点。
+        const int want_panel_x =
+            want_x + static_cast<int>(static_cast<long long>(panel.ref_x) * canvas.scale + 0.5);
+        const int want_panel_y =
+            want_y + static_cast<int>(static_cast<long long>(panel.ref_y) * canvas.scale + 0.5);
         lift::GpuDirectPresenter* dp = win.directPresenter();
         LIFT_CHECK(dp != nullptr);
         int got_x = -1;
         int got_y = -1;
         LIFT_CHECK(dp != nullptr && dp->directLastOverlayOrigin(&got_x, &got_y));
-        std::printf("letterbox: window=%dx%d picture=(%d,%d %dx%d) canvas_origin=(%d,%d) overlay_origin=(%d,%d)\n",
-                    pw, ph, ex, ey, dw, dh, want_x, want_y, got_x, got_y);
-        LIFT_CHECK_EQ_I64(got_x, want_x);
-        LIFT_CHECK_EQ_I64(got_y, want_y);
-        // ③ 像素级证据：叠层底色在**画布原点**；画面原点处仍是 guest 色；窗口原点 (0,0) 是黑边。
+        std::printf(
+            "letterbox: window=%dx%d picture=(%d,%d %dx%d) canvas_origin=(%d,%d) overlay_origin=(%d,%d) "
+            "want_panel=(%d,%d)\n",
+            pw, ph, ex, ey, dw, dh, want_x, want_y, got_x, got_y, want_panel_x, want_panel_y);
+        LIFT_CHECK_EQ_I64(got_x, want_panel_x);
+        LIFT_CHECK_EQ_I64(got_y, want_panel_y);
+        // ③ 像素级证据：叠层底色在**面板左上角**（D4：贴左、垂直居中 ⇒ 不是画布原点）；
+        //    画面原点处仍是 guest 色；窗口原点 (0,0) 是黑边。
         std::uint32_t px = 0;
-        LIFT_CHECK(win.readbackPixel(want_x, want_y, &px, &err));
+        const int panel_x = want_panel_x;
+        const int panel_y = want_panel_y;
+        LIFT_CHECK(win.readbackPixel(panel_x, panel_y, &px, &err));
         LIFT_CHECK(nearRgb(px & 0x00FFFFFFu, want_bg, 1));  // D 单：直出也按 80% 混合落地
         LIFT_CHECK(win.readbackPixel(ex, ey, &px, &err));
         LIFT_CHECK_EQ_U32(px & 0x00FFFFFFu, kGuestRgb);
@@ -787,6 +935,15 @@ bool caseSizeChurn(bool gpu, std::string* skip_why) {
 
     // 画布原点：窗口 == 帧尺寸 ⇒ 画面原点 (0,0) + `uiCanvasOrigin` 的居中偏移（与 ③④ 同一份算术）。
     const lift::ui::CanvasOrigin canvas = lift::ui::uiCanvasOrigin(frame_w, frame_h);
+    // ★ D4：取样点 = **面板左上角**（贴左、垂直居中；旧 `(0,0)` 现在是面板上方的 guest）。
+    //   面板**行数**在这一轮里不变（只有 worst 的文本宽度 / frame 位数变）⇒ y 固定。
+    PanelGeom panel;
+    if (!expectedPanel(font, frame_w, frame_h, &panel)) {
+        LIFT_CHECK(false);
+        win.shutdown();
+        return true;
+    }
+    LIFT_CHECK_EQ_I64(panel.x, canvas.offset_x);  // ref x = 0 ⇒ 面板贴左（16:9 / 4:3 都成立）
     const std::uint32_t want_bg = blendOver(kOverlayBgRgb, kGuestRgb, kOverlayBgAlpha);
     LIFT_CHECK(want_bg != kOverlayBgRgb);  // 有区分力：与"半透明没生效"的不透明值不同
     int sampled = 0;
@@ -808,7 +965,7 @@ bool caseSizeChurn(bool gpu, std::string* skip_why) {
         }
         if (i % 10 != 0) continue;
         std::uint32_t argb = 0;
-        if (!win.readbackPixel(canvas.offset_x, canvas.offset_y, &argb, &err)) {
+        if (!win.readbackPixel(panel.x, panel.y, &argb, &err)) {
             LIFT_CHECK(false);
             continue;
         }
@@ -818,8 +975,9 @@ bool caseSizeChurn(bool gpu, std::string* skip_why) {
         LIFT_CHECK(nearRgb(argb & 0x00FFFFFFu, want_bg, 1));
     }
     std::printf(
-        "overlay/size-churn (%s): 200 frames, sampled=%d canvas_origin=(%d,%d) 首读=#%06X 期望=#%06X 错=%d\n",
-        gpu ? "direct" : "renderer", sampled, canvas.offset_x, canvas.offset_y, first, want_bg, wrong);
+        "overlay/size-churn (%s): 200 frames, sampled=%d canvas_origin=(%d,%d) panel=(%d,%d) 首读=#%06X 期望=#%06X 错=%d\n",
+        gpu ? "direct" : "renderer", sampled, canvas.offset_x, canvas.offset_y, panel.x, panel.y, first, want_bg,
+        wrong);
     LIFT_CHECK_EQ_I64(sampled, 20);
     LIFT_CHECK_EQ_I64(wrong, 0);
     // churn 200 帧之后叠层仍然**活着**（⛔ 不是失败后被 `disableOverlay` 静默关掉）。
@@ -828,6 +986,88 @@ bool caseSizeChurn(bool gpu, std::string* skip_why) {
 
     win.shutdown();
     return true;
+}
+
+// =======================================================================================
+// ⑧ `fill.a == 0` 的 Rect：**不画**，但仍是命中区（D4 的 `settings…` 入口）
+// =======================================================================================
+// 判据（红了意味着什么）：
+//   ① alpha-0 的 Rect **不改已有像素**：先画一块不透明底，再把全透明矩形压在它上面 ⇒ 重叠区必须
+//      还是底的四元组。若实现把它当普通 Rect 逐像素覆盖（写 `(0,0,0,0)`），重叠区会被**擦掉** ⇒ 红。
+//   ② 同一 display list 里带 `key` 的 alpha-0 Rect **仍然产出命中区**：`buildHitRegions` 只看
+//      `kind == Rect && !key.empty()`、**不看 `fill`** ⇒ 命中表恰好那一条，rect 全域都能命中。
+//   ★ 两条在**同一条用例**里对**同一份 display list**断言 ⇒ 命中表在同一函数体可达，不需要分开。
+//   ★ 不需要宿主字体：display list 只有 Rect ⇒ `rasterize` 一次 `font.*` 都不调（缺字体也照跑，
+//     所以这条即使在 `SKIP 77` 的机器上也不会把契约整段跳掉）。
+void caseRectAlphaZero() {
+    lift_test::g_current_case = "overlay/rect-alpha-zero";
+    lift::ui::UiBuilder builder;
+    const lift::ui::Color base{0x10, 0x20, 0x30, 0xFF};
+    const lift::ui::Color clear{0xFF, 0x00, 0xFF, 0x00};  // 醒目 RGB + alpha 0：真画出来一眼能认
+    builder.rect(0, 0, 8, 8, base);
+    lift::ui::Element& hot = builder.rect(4, 4, 8, 8, clear);
+    hot.key = "settings";
+
+    lift::ui::RasterImage image;
+    lift::FontEngine font;
+    std::string err;
+    LIFT_CHECK(lift::ui::rasterize(builder.elements(), lift::ui::CanvasOrigin{1.0, 0, 0}, 0, 0, font,
+                                   &image, &err));
+    // bbox = 两条的**并集** (0,0)-(12,12)：alpha-0 那条参与 bbox（它只是不落像素）。
+    LIFT_CHECK_EQ_I64(image.x, 0);
+    LIFT_CHECK_EQ_I64(image.y, 0);
+    LIFT_CHECK_EQ_I64(image.w, 12);
+    LIFT_CHECK_EQ_I64(image.h, 12);
+
+    // RGBA8 → 0xRRGGBBAA（断言里按一个数比较，失败时能直接读出是哪一通道变了）。
+    const auto rgbaAt = [&image](int x, int y) -> std::uint32_t {
+        const std::size_t at = (static_cast<std::size_t>(y) * static_cast<std::size_t>(image.w) +
+                                static_cast<std::size_t>(x)) * 4u;
+        return (static_cast<std::uint32_t>(image.rgba[at + 0]) << 24) |
+               (static_cast<std::uint32_t>(image.rgba[at + 1]) << 16) |
+               (static_cast<std::uint32_t>(image.rgba[at + 2]) << 8) |
+               static_cast<std::uint32_t>(image.rgba[at + 3]);
+    };
+
+    // 先证明底真的画上了（否则"没被覆盖"可能只是"什么都没画"）。
+    LIFT_CHECK_EQ_U32(rgbaAt(0, 0), 0x102030FFu);
+    LIFT_CHECK_EQ_U32(rgbaAt(7, 7), 0x102030FFu);  // 底自己的右下角（同时在 alpha-0 的范围内）
+    // ① 重叠区 (4..7, 4..7) = 底**原样**：全透明矩形没有覆盖它。
+    {
+        bool intact = true;
+        for (int y = 4; y < 8; ++y) {
+            for (int x = 4; x < 8; ++x) {
+                if (rgbaAt(x, y) != 0x102030FFu) intact = false;
+            }
+        }
+        ++lift_test::g_checks;
+        if (!intact) {
+            lift_test::failf(__FILE__, __LINE__,
+                             "alpha-0 Rect 改了已有像素（重叠区应保持 0x102030FF；实测例如 (%d,%d)=0x%08X）",
+                             4, 4, rgbaAt(4, 4));
+        }
+    }
+    // alpha-0 矩形**独占**的区域（8..11）必须还是初始 0：它一点像素都没落。
+    LIFT_CHECK_EQ_U32(rgbaAt(10, 10), 0x00000000u);
+
+    // ② 命中表里有它（同一条 display list；`fill` 不参与命中判据）。
+    const std::vector<lift::ui::HitRegion> hits =
+        lift::ui::buildHitRegions(builder.elements(), lift::ui::CanvasOrigin{1.0, 0, 0}, 0, 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hits.size()), 1);  // 底没有 key ⇒ 只有一条
+    if (hits.size() == 1) {
+        LIFT_CHECK(hits[0].key == "settings");
+        LIFT_CHECK_EQ_I64(hits[0].x, 4);
+        LIFT_CHECK_EQ_I64(hits[0].y, 4);
+        LIFT_CHECK_EQ_I64(hits[0].w, 8);
+        LIFT_CHECK_EQ_I64(hits[0].h, 8);
+    }
+    const lift::ui::HitRegion* overlap = lift::ui::hitTest(hits, 5, 5);
+    LIFT_CHECK(overlap != nullptr && overlap->key == "settings");
+    // ★ 只有 alpha-0 覆盖的那一格（10,10）也**能**命中：命中区是整块 rect，不是"画出来的那部分"。
+    const lift::ui::HitRegion* only_alpha0 = lift::ui::hitTest(hits, 10, 10);
+    LIFT_CHECK(only_alpha0 != nullptr && only_alpha0->key == "settings");
+    // rect 右/下边界（12,12）之外不命中（左闭右开，与 `ui-hit` 同一口径）。
+    LIFT_CHECK(lift::ui::hitTest(hits, 12, 12) == nullptr);
 }
 
 }  // namespace
@@ -846,6 +1086,10 @@ int main(int argc, char** argv) {
     casePointerMapNoGeometry();
     // ★ S9：`--ui-input` 的纯解析 + 选项缺省（同样不依赖窗口 / 字体 / GPU）。
     caseUiInputParse();
+    // ★ D4：F9 的按下沿计数 + 两个 getter 的"无源 ⇒ undefined"（同样不依赖窗口）。
+    caseOverlayKey();
+    // ★ ⑧：`fill.a == 0` 的 Rect = 不画 / 仍作命中区（纯：只要 Rect，不需要字体 / 窗口 / GPU）。
+    caseRectAlphaZero();
 
     std::string skip_why;
     if (gpu) {

@@ -273,6 +273,11 @@ bool rasterize(const std::vector<Element>& elements, const CanvasOrigin& canvas,
         const int ox = r.x - out->x;  // 图像内坐标
         const int oy = r.y - out->y;
         if (e.kind == ElementKind::Rect) {
+            // ★ 全透明（alpha == 0）= **不画**：这一条字面语义是"看不见的矩形"，用途是**命中区**
+            //   （`hud.js` 的 `settings…` 行 / 页面里的整行热区都这么写）。⛔ 不许把它写成
+            //   `(0,0,0,0)` —— 那会**擦掉**底下已经画好的面板 / 文本像素（叠层与 guest 的合成是
+            //   逐元素覆盖，不是逐元素混合）；`key` 仍留在 display list 里 ⇒ 命中不受影响。
+            if (e.fill.a == 0) continue;
             for (int y = 0; y < r.h; ++y) {
                 for (int x = 0; x < r.w; ++x) putPixel(out->rgba, out->w, out->h, ox + x, oy + y, e.fill);
             }

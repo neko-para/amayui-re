@@ -209,30 +209,8 @@ bool PluginHost::attachConfig(std::string* err) {
     return config_.attach(appdata_.path(), err);
 }
 
-bool PluginHost::configGet(const std::string& domain, const std::string& key,
-                           lift::plugin::ConfigValue* out, bool* found, std::string* why) {
-    return config_.get(domain, key, out, found, why);
-}
-
-bool PluginHost::configHas(const std::string& domain, const std::string& key, bool* found,
-                           std::string* why) {
-    return config_.has(domain, key, found, why);
-}
-
-bool PluginHost::configSet(const std::string& domain, const std::string& key,
-                           const lift::plugin::ConfigValue& value,
-                           lift::plugin::ConfigReceipt* receipt, std::string* why) {
-    return config_.set(domain, key, value, receipt, why);
-}
-
-bool PluginHost::configDelete(const std::string& domain, const std::string& key, bool* removed,
-                              std::string* why) {
-    return config_.erase(domain, key, removed, why);
-}
-
-lift::plugin::ConfigValue PluginHost::configAll(const std::string& domain) {
-    return config_.all(domain);
-}
+// ★ Config（`ConfigBridge`）的方法全是头文件里的薄转发（`plugin_host.h`）：本类**同时是**那个桥，
+//   `config()` 返回 `this`（D2：`RenderCtx.config` 与经典 `host.config` 共用一份实现）。
 
 // =====================================================================================
 // ReadPointObserver（C2a 的唯一入口）

@@ -23,8 +23,14 @@
 
 import { bootToTitle } from "./lib/boot-to-title.js";
 import { route } from "./lib/chains.js";
+import { awaitPosition, awaitReadPoint, failOnTimeout, failOnUnknown } from "./lib/gates.js";
 import { FIELD_MAIN_LOOP_HI, FIELD_MAIN_LOOP_LO } from "./lib/script-positions.js";
 import { loadSave } from "./lib/save.js";
+import {
+    openConfigDomain,
+    scriptListSetting,
+    slotSetting,
+} from "./lib/settings.js";
 
 /** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
 /** @typedef {import("@amayui/lift-plugin").Trigger} Trigger */
@@ -44,21 +50,25 @@ const SURVIVE_MS = 8000;
 const scenario = {
     start(ctx) {
         ctx.log("info", "scenario-save10: FIELD.BIN reached ⇒ 等主轮询体（地图就绪）");
-        return ctx.trigger.afterPosition("FIELD.BIN", FIELD_MAIN_LOOP_LO, FIELD_MAIN_LOOP_HI, {
-            name: "scenario:field-ready",
-            timeoutMs: READY_TIMEOUT_MS,
-        });
+        return awaitPosition(
+            ctx,
+            "FIELD.BIN",
+            FIELD_MAIN_LOOP_LO,
+            FIELD_MAIN_LOOP_HI,
+            "scenario:field-ready",
+            READY_TIMEOUT_MS,
+        );
     },
     onTrigger(ctx, ev) {
         if (ev.kind === "timeout") {
-            ctx.finish(5, `scenario-save10: timeout (${ev.name})`);
+            failOnTimeout(ctx, ev, "scenario-save10", "timeout");
             return [];
         }
         switch (ev.name) {
             case "scenario:field-ready":
                 ctx.log("info", `scenario-save10: FIELD 主轮询体到了 ⇒ move (${CLICK_X},${CLICK_Y})`);
                 ctx.input.move(CLICK_X, CLICK_Y);
-                return ctx.trigger.atReadPoint("any", 1, { name: "scenario:hovered", timeoutMs: READY_TIMEOUT_MS });
+                return awaitReadPoint(ctx, "scenario:hovered", READY_TIMEOUT_MS);
             case "scenario:hovered":
                 ctx.log("info", `scenario-save10: click (${CLICK_X},${CLICK_Y})`);
                 ctx.input.click(CLICK_X, CLICK_Y);
@@ -68,7 +78,7 @@ const scenario = {
                 ctx.finish(0, "scenario-save10: survived");
                 return [];
             default:
-                ctx.fail(ev.name, `unknown state: ${ev.name}`);
+                failOnUnknown(ctx, ev);
                 return [];
         }
     },
@@ -88,105 +98,25 @@ const DEFAULT_EXPECT = ["FIELD.BIN"];
 /** 配置文件里的域（`<--appdata>/plugin-config.json`；只读）。 */
 const CONFIG_DOMAIN = "scenario.save10-field";
 
-/**
- * 配置文件可用才返回域对象（否则 null ⇒ 完全回退到 `ctx.params`）。
- *
- * @param {RunCtx} ctx
- * @returns {import("@amayui/lift-plugin").ConfigDomain | null}
- */
-function configDomainOrNull(ctx) {
-    const config = ctx.config;
-    if (config === undefined || config === null || config.available !== true) return null;
-    return config.domain(CONFIG_DOMAIN);
-}
-
-/** @param {import("@amayui/lift-plugin").ConfigDomain | null} domain @param {string} key */
-function hasConfig(domain, key) {
-    return domain !== null && domain.has(key);
-}
-
-/**
- * `slot`：config 优先（必须是整数）；否则 params（旧行为），缺 ⇒ 10。
- *
- * @param {RunCtx} ctx
- * @param {import("@amayui/lift-plugin").ConfigDomain | null} domain
- * @returns {number}
- */
-function slotSetting(ctx, domain) {
-    if (hasConfig(domain, "slot")) {
-        const value = domain.get("slot");
-        if (typeof value !== "number" || !Number.isInteger(value)) {
-            throw new Error(`config ${CONFIG_DOMAIN}.slot 必须是整数（收到 ${String(value)}）`);
-        }
-        return value;
-    }
-    const raw = ctx.params["slot"];
-    if (raw === undefined || raw === null || String(raw).trim() === "") return SLOT;
-    return Number(raw);
-}
-
-/**
- * `expect`：config 优先（string[] / 逗号串）；否则 params（旧行为），缺 ⇒ `DEFAULT_EXPECT`。
- *
- * @param {RunCtx} ctx
- * @param {import("@amayui/lift-plugin").ConfigDomain | null} domain
- * @returns {string[]}
- */
-function expectSetting(ctx, domain) {
-    if (hasConfig(domain, "expect")) {
-        const value = domain.get("expect");
-        const out = [];
-        const push = (item) => {
-            if (typeof item !== "string" || item.trim() === "") {
-                throw new Error(
-                    `config ${CONFIG_DOMAIN}.expect 的元素必须是非空字符串（收到 ${String(item)}）`,
-                );
-            }
-            const name = item.trim();
-            out.push(name.endsWith(".BIN") ? name : name + ".BIN");
-        };
-        if (Array.isArray(value)) {
-            for (const item of value) push(item);
-        } else if (typeof value === "string") {
-            for (const part of value.split(",")) {
-                if (part.trim().length !== 0) push(part);
-            }
-        } else {
-            throw new Error(
-                `config ${CONFIG_DOMAIN}.expect 必须是 string[] 或逗号串（收到 ${typeof value}）`,
-            );
-        }
-        if (out.length === 0) {
-            throw new Error(`config ${CONFIG_DOMAIN}.expect 给空了（要么不给，要么给 ["FIELD.BIN"]）`);
-        }
-        return out;
-    }
-    const raw = ctx.params["expect"];
-    if (raw === undefined || raw === null || String(raw).trim() === "") return DEFAULT_EXPECT;
-    const out = [];
-    for (const part of String(raw).split(",")) {
-        const name = part.trim();
-        if (name.length === 0) continue;
-        out.push(name.endsWith(".BIN") ? name : name + ".BIN");
-    }
-    return out.length === 0 ? DEFAULT_EXPECT : out;
-}
-
 /** @type {import("./lib/chains.js").Chain | null} */
 let chain = null;
 
 /**
  * 一次 Run 内 config / params 不变 ⇒ 链只构造一次（链本身无状态：进度只在 `ev.name`）。
- * ★ 2026-11-25：`ctx.config` 的读取也**只在第一次**做（每拍重读会在 2 ms 窗口里占可观测的份额）。
+ * ★ 2026-11-25：`ctx.config` 的读取也**只在第一次**做（每拍重读会在 2 ms 窗口里占可观测的份额）；
+ *   取配置的语义统一在 `./lib/settings.js`（`slot` 整数校验 / `expect` 归一 / 默认 10）。
  *
  * @param {RunCtx} ctx
  * @returns {import("./lib/chains.js").Chain}
  */
 function chainFor(ctx) {
     if (chain !== null) return chain;
-    const domain = configDomainOrNull(ctx);
-    const slot = slotSetting(ctx, domain);
-    const expect = expectSetting(ctx, domain);
+    const domain = openConfigDomain(ctx, CONFIG_DOMAIN);
+    const slot = slotSetting(ctx, domain, SLOT, CONFIG_DOMAIN);
+    const listed = scriptListSetting(ctx, domain, "expect", CONFIG_DOMAIN);
+    // ★ 与旧行为逐字一致：config 给了空表 ⇒ `normalizeScriptList` 已 throw；params 给空（如 `","`）
+    //   也回退 `DEFAULT_EXPECT`（旧代码就是这么判的）。
+    const expect = listed === null || listed.length === 0 ? DEFAULT_EXPECT : listed;
     const load = loadSave(slot, {
         expect,
         onLoaded: (ctx2) => scenario.start(ctx2),

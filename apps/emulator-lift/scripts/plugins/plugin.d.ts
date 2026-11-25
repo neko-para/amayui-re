@@ -311,7 +311,8 @@ export type LogApi = (level: LogLevel, message: string, data?: unknown) => void;
  *   输入同一张电平表）。类型仍是**可选**：宿主这一帧没有读数源时不安装这个键（⛔ 不编 `false`：
  *   那会让"鼠标按着"与"没有源"长得一样）⇒ 插件必须写 `mouse.buttons?.left ?? false` 这种形态。
  * ★ **S2**：为了让内置 `hud` 从经典 `game.*` 迁到 `ctx.game.*` 后**逐字节等价**，这里补上经典的
- *   **只读 getter**：`frame`（恒有）/ `fps?` / `script?` / `worst?` / `click?` / `hover?` / `active?`。
+ *   **只读 getter**：`frame`（恒有）/ `fps?` / `script?` / `worst?` / `click?` / `hover?` / `active?`；
+ *   **D4** 再加 `overlayKeySeq?`（固定 F9 的按下沿计数，无源 ⇒ `undefined`）。
  *   语义与 `--overlay` 的全局 `game.*` **逐条相同**（`script_quickjs.cpp` 同一个
  *   `jsGameProperty` 实现、同一份当帧 readings）：没有值 ⇒ `undefined`，`click` 是**一次性**对象
  *   （只在该帧有值），`hover` / `active` 是**只读 key**（不在命中区上 ⇒ `undefined`）。
@@ -351,6 +352,16 @@ export interface GameRead {
     readonly hover?: string;
     /** 当前被按下捕获的 key；没有 ⇒ `undefined`。 */
     readonly active?: string;
+    /**
+     * 叠层热键（固定 **F9**）的**单调按下沿计数**（D4，2026-11-25 父级裁决）。
+     *
+     * ★ 唯一来源 = `present_sdl.cpp` 的 `drawOverlay` 每帧采一次 `WindowManager::keyDown`，
+     *   按下沿 +1、饱和不回绕；**不吞键**（F9 仍到 guest）。
+     * ★ 宿主这一帧没有按键源（没有 `WindowManager` / headless / 测试替身）⇒ **缺键**
+     *   （`undefined`；⛔ 不编 0："没按过"与"没有源"必须分得开）。
+     * ★ 用法：模块级记上一次的值，变了就切换显隐（⛔ 别把它当电平 —— 电平会每帧重复触发）。
+     */
+    readonly overlayKeySeq?: number;
 }
 /** render 只拿当帧 readings；模块级变量是 per-plugin 状态（render/onTrigger 共享）。
  *
@@ -540,17 +551,19 @@ export interface PluginModule<State = Record<string, unknown>> {
 // 典型用法（伪代码；不写具体数值）
 //
 // 加载存档的链（name = 状态名；不用 step 计数器 / ctx.state）：
+//   ★ `script` 是 **marker 文件名（含 `.BIN`）**，宿主做**精确相等** —— 写成裸名 `"TITLE"` /
+//     `"SBUNKI"` 永远不命中 ⇒ 门一直 arm 到 `timeoutMs`（30 s 后归因还会指到"点击没进去"）。
 //   const loadSlot = (slot: number) => ({
 //     start(ctx: RunCtx): Trigger | Trigger[] | null {
 //       ctx.input.click(X, Y);
-//       return ctx.trigger.afterScript("TITLE", { name: "load:title" });
+//       return ctx.trigger.afterScript("TITLE.BIN", { name: "load:title" });
 //     },
 //     onTrigger(ctx: RunCtx, ev: FiredEvent | TimeoutEvent): Trigger | Trigger[] | null {
 //       switch (ev.name) {
 //         case "load:title":  ctx.input.move(X2, rowY(slot));
 //                             return ctx.trigger.atReadPoint("any", 1, { name: "load:row" });
 //         case "load:row":    ctx.input.click(X2, rowY(slot));
-//                             return ctx.trigger.afterPosition("SBUNKI", C, D, { name: "load:sbunki" });
+//                             return ctx.trigger.afterPosition("SBUNKI.BIN", C, D, { name: "load:sbunki" });
 //         case "load:sbunki": ctx.input.click(X3, Y3); return [];
 //         default:            ctx.fail(ev.name, `unknown name: ${ev.name}`); return [];
 //       }

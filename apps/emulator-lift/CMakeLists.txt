@@ -2876,12 +2876,14 @@ endif()
 target_compile_definitions(emulator-lift-runtime PUBLIC
     LIFT_UI_SCRIPT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scripts/ui")
 
-# ★ `ui-hud-script`：默认 HUD 脚本（`scripts/ui/hud.js`）的**内容判据** —— 行序（mouse / script /
-#   fps / frame / worst）、⛔ 没有 raster / present 两行、颜色精确值、缺省项整行省略。
+# ★ `ui-hud-script`：默认 HUD 脚本（`scripts/ui/hud.js`）的**内容 / 版式判据** —— 行序（mouse / script /
+#   fps / worst / 状态行 / settings…，D4 删掉 `frame`）、⛔ 没有 raster / present 两行、颜色精确值、
+#   缺省项整行省略、面板贴左 + 垂直居中、`settings…` 的透明命中区、PROFILE 默认隐藏 + F9 切换、
+#   设置页打开/关闭与 `settings: 没有 appdata`。
 #   直接读 `LIFT_UI_SCRIPT_DIR "/hud.js"` ⇒ 改脚本就会让这条用例看见（改错 ⇒ 红）。
 #   **顶层** `if(LIFT_BUILD_TESTS)` ⇒ `cmakeTestTier()` 透明 ⇒ pure 档（AGENTS.md §12.4）。
 #   缺宿主字体 ⇒ 用例自己 `LIFT_SKIP(77)`（`SKIP_RETURN_CODE 77`）。
-# ★ 变异：`tools/mutate-check.mjs` 的 `ui-hud-script-no-frame` 删掉 `frame` 那一行 ⇒ 本用例当场红。
+# ★ 变异：`tools/mutate-check.mjs` 把 `y = round((720 - panelH) / 2)` 改成 0 ⇒ 本用例的居中几何断言当场红。
 if(LIFT_BUILD_TESTS)
     add_executable(lift-ui-hud-script tests/ui_hud_script.cpp)
     target_link_libraries(lift-ui-hud-script PRIVATE emulator-lift-runtime)
@@ -3166,6 +3168,29 @@ if(LIFT_BUILD_TESTS)
                 "${LIFT_STRESS_GAME_DIR}")
     set_tests_properties(plugin-headless PROPERTIES SKIP_RETURN_CODE 77)
 
+    # ---- `plugin-field-switch`：`field-point-visible.js` 是**开关**（⛔ 不自驱读档 / ⛔ 不点鼠标）----
+    # ★ 判据（详 `tests/plugin_field_switch.cpp` 文件头）：
+    #   ① 静态（剥注释后扫**代码**，零资产）：模块里没有输入写面（`ctx.input`）/ 没有读档链
+    #      （`loadSave` / `bootToTitle` / `save.js` / `boot-to-title.js` / `chains.js`）/ 不自己收口
+    #      （`ctx.finish` / `ctx.quit`）；同一条用例还断言它仍写着该写的链（`forceFieldPointsVisible`
+    #      + `afterDelay` + 地图实例号 + `poll` 缺省）⇒ "禁令全过"不能靠一个空文件达成。
+    #   ② 端到端（真子进程 `--present headless --plugin field-point-visible`，**无** `--input-plan`）：
+    #      Run 常驻（readout `run=waiting` + 摘要 `stop      : time-limit` + exit 0 + `calls>=2`）；
+    #      stdout/stderr 没有 `boot:` / `load:` / `load-save:` / `[input-script]` / `input-plan:` 行；
+    #      首行 `field-points:` 日志带 `on=0`，且没有 `forced=` / `FIELD 就绪` ⇒ "关着就什么也不做"可读。
+    # ★ **档位 = pure**（`add_test` 在顶层 `if(LIFT_BUILD_TESTS)` 里 ⇒ `cmakeTestTier()` 把该 if 当透明；
+    #   `AGENTS.md` §12.4 判据 = 注册位置）。静态那一段零资产、任何机器都跑；端到端要安装树 / 执行源 /
+    #   GPU / 宿主字体 ⇒ 缺了用例自己 `LIFT_SKIP(77)`（与 `plugin-headless` 同一条口径：输入假定在场）。
+    # ★ 子进程 spawn 产品 exe ⇒ 必须 `add_dependencies`（否则 `--target lift-plugin-field-switch` 只重建
+    #   守卫 exe、产品 exe 停在变异前 ⇒ 变异自检假绿；同形坑见 `plugin-headless` / `aot-overlay`）。
+    add_executable(lift-plugin-field-switch tests/plugin_field_switch.cpp)
+    target_link_libraries(lift-plugin-field-switch PRIVATE emulator-lift-runtime lift-test-support)
+    add_dependencies(lift-plugin-field-switch emulator-lift-aot)
+    add_test(NAME plugin-field-switch
+        COMMAND lift-plugin-field-switch $<TARGET_FILE:emulator-lift-aot> "${AGE_SECTFIX_EXE}"
+                "${LIFT_STRESS_GAME_DIR}")
+    set_tests_properties(plugin-field-switch PROPERTIES SKIP_RETURN_CODE 77)
+
     # ---- C2b-2：`--plugin` 的 render 接进窗口叠层 host（`adoptOverlayScript`）---------------
     # ★ 判据（详 `tests/plugin_overlay.cpp` 文件头）：同一个 `PluginScript` 实例被 adopt 进已有
     #   叠层 ⇒ 插件 `ctx.draw` 的 display list 真的上屏；`ctx.draw.measure` 有宿主字体；三键电平
@@ -3227,6 +3252,23 @@ if(LIFT_BUILD_TESTS)
         LIFT_PLUGIN_LIB_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins/lib"
         LIFT_RECIPES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scripts/recipes")
     add_test(NAME recipe-driver-parity COMMAND lift-recipe-driver-parity)
+endif()
+
+# =====================================================================================
+# K · 二级设置页 `scripts/ui/settings-page.js`（父级裁决 `.tmp/settings-overlay/decision.md` D2/D4）
+#
+# ★ 判据（详 `tests/ui_settings_page.cpp` 文件头）：2 域 3 项的版式 / 命中 key、bool 整行点击
+#   （set 恰好一次 + 同帧值变）、number 的 min/max 钳制与 `<invalid>`、`set` 抛错不冒出 render、
+#   `h.config === undefined` ⇒ 不打开、13 项 ⇒ 12 行 + `… 还有 N 项`。
+# ★ **顶层无条件注册 ⇒ pure 档**（`AGENTS.md` §12.4 判据 = 注册位置；`cmakeTestTier()` 把外层
+#   `if(LIFT_BUILD_TESTS)` 当透明）。零字体（假 `h.measure`）/ 零窗口 / 零安装树 / 零 LFS 资产。
+# ★ 变异：`tools/mutate-check.mjs` 段尾 `ui-settings-page-no-clamp` 去掉 inc/dec 的 min/max 钳
+#   ⇒ 本用例的 `number-clamp-*` 当场红。
+# =====================================================================================
+if(LIFT_BUILD_TESTS)
+    add_executable(lift-ui-settings-page tests/ui_settings_page.cpp)
+    target_link_libraries(lift-ui-settings-page PRIVATE emulator-lift-runtime)
+    add_test(NAME ui-settings-page COMMAND lift-ui-settings-page)
 endif()
 
 # =====================================================================================

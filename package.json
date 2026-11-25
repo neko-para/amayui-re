@@ -25,7 +25,7 @@
     "test:mutation:active": "node tools/mutate-check.mjs --tier active",
     "test:mutation:lift": "node tools/mutate-check.mjs --tier lift",
     "test:mutation:js": "node tools/mutate-check.mjs --tier js",
-    "typecheck": "tsc -p packages/age-format/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.frontends.json --noEmit && tsc -p apps/emulator-new/tsconfig.core.json --noEmit && tsc -p apps/emulator-new/tsconfig.renderer.json --noEmit && tsc -p apps/emulator-new/tsconfig.json --noEmit && tsc -p apps/emulator-lift/scripts/tsconfig.json --noEmit"
+    "typecheck": "tsc -p packages/age-format/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.json --noEmit && tsc -p apps/emulator/tsconfig.frontends.json --noEmit && tsc -p apps/emulator-new/tsconfig.core.json --noEmit && tsc -p apps/emulator-new/tsconfig.renderer.json --noEmit && tsc -p apps/emulator-new/tsconfig.json --noEmit && tsc -p apps/emulator-lift/scripts/tsconfig.json --noEmit && tsc -p apps/emulator-lift/scripts/plugins/examples/tsconfig.json --noEmit"
   },
   "devDependencies": {
     "@types/node": "^26.6.4",

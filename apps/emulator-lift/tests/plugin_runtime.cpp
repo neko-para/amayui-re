@@ -991,6 +991,175 @@ void caseConfigHostPause() {
     LIFT_CHECK(d.js_cpu_ns < 2'000'000ull);
 }
 
+// =====================================================================================
+// `plugin/field-switch-apply`：`field-point-visible.js` 的**施加面**（纯 QJS + 假 guest 内存）
+//
+// 判据（红了意味着什么）：
+//   ① `on=1` 且当拍读数 `FIELD.BIN` ⇒ 类型命中的槽清 `HIDE|ALPHA0`、**其余槽不动**；
+//   ② 已经可见的槽 ⇒ **不再写**（`logLines()` 不涨；插件只在真写了的槽上打 `forced=`）；
+//   ③ 地图实例号变了（VM **每次进图**重建 `50ff9f`）⇒ 下一拍**重新施加**（标志又被清掉）；
+//   ④ `on=0` ⇒ 一个 guest global 都不写（同一套假数据上标志原样），且 Run **常驻**（⛔ 不 finish）。
+//   ★ 档位 = **pure**：假 guest 内存 + 注入读数源 + 临时 appdata 里的 `plugin-config.json`；
+//     零安装树 / 零 GPU / 零子进程。
+//   ★ true 值只钉"派生位被改成了什么"：不钉游戏业务（点位真的画出来归 FIELD 复现）。
+// =====================================================================================
+
+// `50ff9f` 的 32 槽派生位 / `50ffd1` 的 32 槽类型（数值的唯一出处在
+// `scripts/plugins/lib/guest-globals.js`；本用例是它的**消费者**，所以在这里重复一组只读常量）。
+constexpr std::uint32_t kFieldFlagsId = 0x50ff9Fu;
+constexpr std::uint32_t kFieldTypeId = 0x50ffD1u;
+constexpr std::uint32_t kFieldMapId = 0xB222u;        // 当前地图号（只读；日志用）
+constexpr std::uint32_t kFieldInstanceId = 0x61C72u;  // 地图实例下标（进图/换图的判据）
+constexpr std::uint32_t kFieldHideBit = 0x1u;         // 置位 ⇒ 不画
+constexpr std::uint32_t kFieldAlpha0Bit = 0x4u;       // 置位 ⇒ 画但 alpha=0
+constexpr std::uint32_t kFieldTypeGather = 0x1Fu;     // 採集
+constexpr std::uint32_t kFieldTypeDig = 0x20u;        // 発掘
+
+// 假 guest 的 int 池够不到 `0x50ff9f`（夹具的池 = 0xB1B6 个槽）⇒ 本用例自己提交一块**够大**的池
+// 并把 Engine 的 int 基址/计数指过去（`readGlobal` / `writeGlobal` 每次现读这两个字段 ⇒ 立即生效）。
+constexpr std::uint32_t kFieldPoolBase = 0x10000000u;
+constexpr std::uint32_t kFieldPoolCount = 0x510000u;  // > 0x50ff9f + 31
+
+bool installFieldPool(Fixture& f) {
+    if (!f.mem.commitZeroed(kFieldPoolBase, static_cast<std::size_t>(kFieldPoolCount) * 4u,
+                            lift::RegionKind::Heap, "plugin-field-switch-globals")) {
+        return false;
+    }
+    if (!put32(f.mem, kFxEngine + lift::kScriptGlobalIntBaseOffset, kFieldPoolBase)) return false;
+    return put32(f.mem, kFxEngine + lift::kScriptGlobalIntCountOffset, kFieldPoolCount);
+}
+
+bool seedFieldInt(Fixture& f, std::uint32_t id, std::uint32_t value) {
+    lift::GlobalValue v;
+    v.kind = lift::GlobalKind::Int;
+    v.u32 = value;
+    lift::GlobalError err = lift::GlobalError::None;
+    const bool ok = lift::writeGlobal(f.mem, id, lift::GlobalKind::Int, v, &err);
+    LIFT_CHECK(err == lift::GlobalError::None);
+    return ok;
+}
+
+std::uint32_t readFieldInt(Fixture& f, std::uint32_t id) {
+    lift::GlobalValue v;
+    lift::GlobalError err = lift::GlobalError::None;
+    LIFT_CHECK(lift::readGlobal(f.mem, id, lift::GlobalKind::Int, &v, &err));
+    LIFT_CHECK(err == lift::GlobalError::None);
+    return v.u32;
+}
+
+// 同一套初始数据：三槽（命中×2 + 类型不命中×1）+ 地图号 + 实例号。
+bool seedFieldScene(Fixture& f) {
+    if (!seedFieldInt(f, kFieldMapId, 0x11u)) return false;
+    if (!seedFieldInt(f, kFieldInstanceId, 1u)) return false;
+    if (!seedFieldInt(f, kFieldTypeId + 1u, kFieldTypeGather)) return false;
+    if (!seedFieldInt(f, kFieldTypeId + 2u, kFieldTypeDig)) return false;
+    if (!seedFieldInt(f, kFieldTypeId + 3u, 0x03u)) return false;  // 不命中（⛔ 不是点位类型）
+    if (!seedFieldInt(f, kFieldFlagsId + 1u, kFieldHideBit | kFieldAlpha0Bit)) return false;  // 0x5
+    if (!seedFieldInt(f, kFieldFlagsId + 2u, kFieldHideBit | 0x2u)) return false;             // 0x3
+    return seedFieldInt(f, kFieldFlagsId + 3u, kFieldHideBit | kFieldAlpha0Bit);              // 0x5
+}
+
+void caseFieldSwitchApply() {
+    // ---- ① on=1：施加 / 不重复写 / 换图重施加 ----
+    lift_test::g_current_case = "plugin/field-switch-apply";
+    {
+        Fixture f;
+        LIFT_CHECK(f.mem_ok && f.win_ok);
+        if (!f.mem_ok || !f.win_ok) return;
+        LIFT_CHECK(installFieldPool(f));
+        ScopedTempDir appdata;
+        LIFT_CHECK(appdata.make("lift-plugin-field-switch-apply"));
+        if (appdata.path.empty()) return;
+        // `poll=0` = 每个读点都查（测试里"读点"由 `pump()` 手动给）⇒ 断言不必等墙钟。
+        LIFT_CHECK(writeHostFile(appdata.path / "plugin-config.json",
+                                 R"({"version":1,"domains":{"field.point-visible":{"on":1,"poll":0}}})"));
+        const bool loaded = f.loadFile(pluginRootPath("field-point-visible.js"));
+        LIFT_CHECK(loaded);
+        if (!loaded) {
+            std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+            return;
+        }
+        LIFT_CHECK(f.attachAppData(hostPathText(appdata.path)));
+        LIFT_CHECK(f.attachConfig());
+        LIFT_CHECK(seedFieldScene(f));
+
+        // 玩家自己进 FIELD（读数由宿主采样给；插件只看 `ctx.now.script`）。
+        f.readings.script = "FIELD.BIN";
+        f.readings.pos = 0x0600;
+
+        // ① 第一拍 = `start`：只 arm，一个槽都不写。
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), 0x5u);
+        // ② 第二拍 = 施加：命中槽清两位，类型不命中的槽原样。
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), 0x0u);
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 2u), 0x2u);
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 3u), 0x5u);
+        const std::uint64_t logs_first = f.host->logLines();
+        LIFT_CHECK(logs_first >= 2u);  // "FIELD 就绪" + "forced="
+        // ③ 第三拍：已经可见 ⇒ **不再写**（插件只对真写了的槽打 `forced=` ⇒ 日志行数不涨）。
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()),
+                          static_cast<std::int64_t>(logs_first));
+        // ④ "VM 每次进图重建"：实例号变 + 标志回到重建后的值 ⇒ 下一拍必须重新施加。
+        LIFT_CHECK(seedFieldInt(f, kFieldInstanceId, 2u));
+        LIFT_CHECK(seedFieldInt(f, kFieldFlagsId + 1u, kFieldHideBit | kFieldAlpha0Bit));
+        LIFT_CHECK(seedFieldInt(f, kFieldFlagsId + 2u, kFieldHideBit | 0x2u));
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), 0x0u);
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 2u), 0x2u);
+        LIFT_CHECK(f.host->logLines() > logs_first);  // 打了 `re-applied` / `forced=`
+        // ⑤ 常驻：没人收口（⛔ 不 finish / 不 done / 不 fail）。
+        LIFT_CHECK(!f.host->finished());
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK(!f.host->runner().done());
+        LIFT_CHECK(f.host->callbacks() >= 3u);
+    }
+
+    // ---- ② on=0：一个 guest global 都不写，Run 照样常驻 ----
+    lift_test::g_current_case = "plugin/field-switch-off-noop";
+    {
+        Fixture f;
+        LIFT_CHECK(f.mem_ok && f.win_ok);
+        if (!f.mem_ok || !f.win_ok) return;
+        LIFT_CHECK(installFieldPool(f));
+        ScopedTempDir appdata;
+        LIFT_CHECK(appdata.make("lift-plugin-field-switch-off"));
+        if (appdata.path.empty()) return;
+        LIFT_CHECK(writeHostFile(appdata.path / "plugin-config.json",
+                                 R"({"version":1,"domains":{"field.point-visible":{"on":0,"poll":0}}})"));
+        const bool loaded = f.loadFile(pluginRootPath("field-point-visible.js"));
+        LIFT_CHECK(loaded);
+        if (!loaded) {
+            std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+            return;
+        }
+        LIFT_CHECK(f.attachAppData(hostPathText(appdata.path)));
+        LIFT_CHECK(f.attachConfig());
+        LIFT_CHECK(seedFieldScene(f));
+        f.readings.script = "FIELD.BIN";
+        f.readings.pos = 0x0600;
+        for (int i = 0; i < 4; ++i) f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), 0x5u);  // 原样
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 2u), 0x3u);
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 3u), 0x5u);
+        LIFT_CHECK(!f.host->finished());
+        LIFT_CHECK(!f.host->runner().done());
+        LIFT_CHECK(f.host->callbacks() >= 2u);
+        // ★ 首行日志明写 on=0（`host.logLines()` 只有计数；文本面由 `plugin-field-switch` 的 e2e 判）。
+    }
+}
+
 void caseLoadSaveOnLoaded() {
     lift_test::g_current_case = "control-script/load-save-onloaded";
     Fixture f;
@@ -2385,6 +2554,10 @@ void caseHudEquivalence(lift::FontEngine* font) {
     r.worst_shim_ms = 4.2;
     r.frames = &frames;
     r.host = &ops;
+    // ★ D4：PROFILE 默认隐藏 ⇒ 普通帧先给 `overlayKeySeq = 0`（基线，按钮不在场）；
+    //   下面再喂一帧 `1` 把它打开（两边都吃同一份读数 ⇒ 等价仍可判）。
+    r.overlay_key_ok = true;
+    r.overlay_key_seq = 0;
 
     lift::ui::UiBuilder a;
     lift::ui::UiBuilder b;
@@ -2392,7 +2565,7 @@ void caseHudEquivalence(lift::FontEngine* font) {
     std::string perr;
     LIFT_CHECK(classic->render(a, r, &cerr));
     LIFT_CHECK(plugin.host->script()->render(b, r, &perr));
-    LIFT_CHECK(a.elements().size() >= 7);  // 面板 + 5 行 + 按钮底板 + 标签（不许"两边都空"地等价）
+    LIFT_CHECK(a.elements().size() >= 7);  // 面板 + HUD 行 + 设置入口（不许"两边都空"地等价）
     ++lift_test::g_checks;
     {
         std::string why;
@@ -2402,8 +2575,28 @@ void caseHudEquivalence(lift::FontEngine* font) {
     }
 
     // ---- ② PROFILE 点击帧（begin → end，成功两拍）----
+    //   ★ D4：按钮默认隐藏 ⇒ 先让两边各吃一帧 `overlayKeySeq 0→1`（计数变了才切显隐）。
+    lift::ui::UiFrameReadings show = r;
+    show.frame = 1235;
+    show.overlay_key_seq = 1;
+    {
+        lift::ui::UiBuilder ca;
+        lift::ui::UiBuilder pb;
+        LIFT_CHECK(classic->render(ca, show, &cerr));
+        LIFT_CHECK(plugin.host->script()->render(pb, show, &perr));
+        ++lift_test::g_checks;
+        std::string why;
+        if (!sameHudList(ca.elements(), pb.elements(), &why)) {
+            lift_test::failf(__FILE__, __LINE__, "hud 显示 PROFILE 的那一帧不等价：%s", why.c_str());
+        }
+        ++lift_test::g_checks;
+        if (pb.elements().size() <= b.elements().size()) {
+            lift_test::failf(__FILE__, __LINE__, "overlayKeySeq 0→1 之后 PROFILE 按钮没出现（元素数没变多）");
+        }
+    }
     lift::ui::UiFrameReadings click = r;
-    click.frame = 1235;
+    click.overlay_key_ok = true;   // `show` 之后一直是 1 ⇒ 不再切换，按钮留在场
+    click.overlay_key_seq = 1;
     click.click_ok = true;
     click.click_key = "profile";
     click.click_x = 10;
@@ -2657,6 +2850,7 @@ int main() {
     caseSaveMissingPrecheck();
     caseConfigRoundtrip();
     caseConfigHostPause();
+    caseFieldSwitchApply();
     caseLoadSaveOnLoaded();
     caseChainsRoute();
     caseGlobalReadModifyWrite();

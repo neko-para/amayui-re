@@ -27,7 +27,9 @@
 
 ★ **2026-11-18 用户裁决（M2a）**：HUD 的 `raster` / `present` 两行**去掉** —— 开 overlay 时是人在体验，
 这两个开关信息没有价值（不是"暂时隐藏"，是**不再产出**）。同一裁决下 HUD 改由
-`scripts/ui/hud.js` 经 QuickJS 产出（见 `overlay-quickjs.md`），行顺序 = mouse / script / fps / frame / worst。
+`scripts/ui/hud.js` 经 QuickJS 产出（见 `overlay-quickjs.md`）；★ **D4（2026-11-25）** 再删
+`frame <n>`（总帧数无诊断价值）⇒ 当前行序 = mouse / script / fps / worst / 状态行 / `settings…`
+（详见 §3.5 的 D4 段）。
 
 ### 1.2 两条呈现路径的坐标语义已经不一致
 
@@ -130,17 +132,25 @@ when: { script: ["SC00*", "TITLE"] }                 // 多个候选 = 或
 
 | 命名空间 | 成员 | 来源 / 边界 |
 |---|---|---|
-| `game` | `frame` / `insns` / `guest_ms` / `script` / `script_id` / `script_ok` / `metrics()` | 只读；`metrics()` 字段可缺，缺 ⇒ 脚本整行 / 整块省略。★ 位置读数**不在** `game` 上，走 `game.local_frames()[i].pos`（见下） |
+| `game` | `frame` / `insns` / `guest_ms` / `script` / `script_id` / `script_ok` / `overlayKeySeq` / `metrics()` | 只读；`metrics()` 字段可缺，缺 ⇒ 脚本整行 / 整块省略。★ 位置读数**不在** `game` 上，走 `game.local_frames()[i].pos`（见下）。★ `overlayKeySeq`（D4）= 固定 **F9** 的单调按下沿计数（无按键源 ⇒ `undefined`，⛔ 不编 0；⛔ 不吞键） |
 | `game` | `local_int/float/string(i)`、`global_int/float/string(i)` | 帧记录 / 全局槽位只读；越界 ⇒ `undefined` + 计数（⛔ 读邻池） |
 | `ui` | `screen/panel/rect/text/image`、`measure(text,size)`、`show/hide/toggle`、`log(level,msg)` | 唯一绘制入口；`log` 有界去重 |
-| `host` | `profileBegin(label)`、`profileEnd()` | 宿主能力（方法表）。结束窗口 profile 并**在宿主内部**把结论文本写进系统剪贴板；返回 `{ok,error}` / `{ok,text,error}`（错误串口径见下） |
+| `host` | `profileBegin(label)`、`profileEnd()`、`config` | 宿主能力（方法表；`config` 是**属性**，D2）。结束窗口 profile 并**在宿主内部**把结论文本写进系统剪贴板；返回 `{ok,error}` / `{ok,text,error}`（错误串口径见下）。`host.config` = `{available, domain(id)}`（与插件 `ctx.config` 同一形状）；**没有接线 ⇒ `undefined`**（⛔ 不是抛错：HUD 每帧都读，可选能力不能把叠层打黑；与 `profileBegin` 的"缺接线 TypeError"故意不同） |
 | `probe` | `read_u32(ea)`、`read_bytes(ea,n)` | **只读**、有上界、越界即错；必须显式 `--ui-probe`，启动打一行警告 |
 
 ★ **M2a 已落地的子集**（2026-11-18；**2026-11-19 切片 3** 追加 `host.profileBegin/End` 与帧列表
-`pos`；**C2b-2** 追加 `mouse.buttons?`）：`game` = `frame` / `fps` / `mouse{x,y,buttons?}` / `script` /
-`worst{wall_ms, guest_ms?, shim_ms}`（不可用 ⇒ `undefined`，⛔ 不编 0）；`ui` = `rect` / `text` /
+`pos`；**C2b-2** 追加 `mouse.buttons?`；**D4** 追加 `game.overlayKeySeq?`；**D2** 追加 `host.config`）：
+`game` = `frame` / `fps` / `mouse{x,y,buttons?}` / `script` /
+`worst{wall_ms, guest_ms?, shim_ms}` / `overlayKeySeq?`（不可用 ⇒ `undefined`，⛔ 不编 0）；`ui` = `rect` / `text` /
 `measure`（绝对参考像素；未知键 **暂时忽略**，M1 的校验表之后接）；`host` = `profileBegin` /
-`profileEnd`（**只在 render 内可调用**；领域失败走返回值、⛔ 不抛 —— 抛错会让叠层被一枪永久关掉）。
+`profileEnd`（**只在 render 内可调用**；领域失败走返回值、⛔ 不抛 —— 抛错会让叠层被一枪永久关掉）
+/ `config`（`{available, domain(id)}`；无接线 ⇒ `undefined`；写盘 = 该帧 render 之后 flush 一次）。
+
+★ **`host.config === undefined` 在生产里只有测试替身会造**：`--overlay` 自 S2 起 = 「`--plugin hud`
+预设 + 要窗口」，`aot_main` 在 `--plugin` 装配段**无条件** `setConfigBridge(plugin_host->config())`
+⇒ 任何 `--overlay` 进程都有桥（没有 `--appdata` 时只是 `available:false`，⛔ 不是 `undefined`）。
+⇒ `undefined` 那条分支是**给测试 sink（`UiHostOps::config == nullptr`）/ 第二种叠层 host** 的，
+⛔ 不要把它当成"生产上会走的一条路"去改动或加判据。
 `insns` / `guest_ms` / `script_id` / `metrics()`、`probe`、`show/hide/toggle/log`、`local/global` 未接（M3）。
 ★ `mouse.buttons = {left, right, middle}` 是**可选键**：窗口装配有 `WindowManager` 时来自
 `InputDevice` 的唯一三键电平（`WindowManager::mouseButtons()`）；没有源（headless / 测试 sink）⇒
@@ -253,6 +263,28 @@ M3 的数据面仍未做。`mouse.buttons` 的源与缺键口径见 §3.5（窗�
 （结束在宿主内部写系统剪贴板）+ `hud.js` 改 module 并用 `kit.Button` 画 PROFILE + 帧列表 `pos`
 （只有 top 帧；`0x3C + (pc − base)`）。
 
+★ **D4 已落（2026-11-25；版式 / 设置入口 / 按键）**：
+- **版式**：面板贴左、**垂直居中** —— `x = 0`、`y = round((720 − panelH) / 2)`（`panelH` 随行数每帧重算；
+  面板宽 = 最长行 + 2×`PAD`，`PAD = 8` / `SIZE = 16`）。面板仍是 `elements[0]`。
+- **行序**：`mouse` / `script` / `fps` / `worst` / 状态行 / `settings…`（没值的行照旧整行省略；
+  `settings…` **恒在最后一行**）。`frame <n>` 行**已删**。
+- **设置入口**：最后一行 `settings…`（16px / `FG`）叠一条 `fill:"#00000000"`、`key:"settings"` 的
+  **透明命中 Rect**（刚好盖住那一行）。★ 栅格里 `alpha == 0` 的 Rect 是**不画**（只作命中区），
+  ⛔ 不许把它写成 `(0,0,0,0)` —— 那会擦掉底下的面板 / 文本像素。点击 ⇒ 打开二级页
+  （`scripts/ui/settings-page.js` 的 `drawPage`）：页面开着时**不画 HUD 面板**（`settings…` 行与
+  PROFILE 都不画），`BACK` 关闭并回到 HUD。`h.config` 不可用（`undefined` / `available !== true`）⇒
+  **不打开**，状态行 `settings: 没有 appdata`（同一个脚本实例内改回来才清）。★ **空注册表**（桥可用但
+  `settings.schema` 一个可画项都没有）⇒ 同样**不打开**（⛔ 不造空白页 / 死控件），状态行
+  `settings: 没有注册设置`，注册表回来才清。
+- **设置状态行是模块级状态**（`hud.js` 的 `settingsPage.status`，`drawPage` 每帧写回；⛔ 不每帧新建）：
+  成功点（`applied:true`）清空；失败（`settings: 只读` / `settings: <错误>`）**留到下一次操作或下一次
+  成功**；**关闭页面不清**（状态行留在 HUD 上）。
+- **PROFILE 默认隐藏**（不画、也不挂 `key` ⇒ 不可命中）：按键 = 固定 **F9**，读数 =
+  `game.overlayKeySeq`（单调按下沿计数；无源 ⇒ `undefined`）；模块级记住上一次的值，**变了才切换**
+  （⛔ 当电平用）。显示时按钮画在面板**下方**（`y = panelY + panelH + PAD`，`key:"profile"`）。
+  ★ F9 **不吞键**（它仍到 guest）⇒ 可能与游戏自己的 F9 动作**同时触发**；本期固定 F9，
+  `--overlay-key=<vk>` 记进需求单 `## 未做`。
+
 落 `overlay-quickjs.md` 的适配器；HUD 变成 `scripts/ui/hud.js`；display list 成为脚本唯一出口。
 
 ★ **S2 已落地（2026-11-25；复审后订正）**：`hud.js` 成为**真插件**（`export default { render(ctx) }`，
@@ -342,7 +374,7 @@ router 的"down 放 ⇒ up 放"改掉 ⇒ `ui_hit` 红 · 采样门少一个 EA 
 | R7 | 插件绕过 API 改 guest | API 无写入口 + 形态守卫（`src/ui/**` 不出现 guest 写 API）+ 逐位断言 |
 | R8 | QuickJS 内存 / 沙箱 / GC 与引用计数 / 静态链体积 / TS 产物（`.js` 与 `.d.ts` 漂移） | 见 `overlay-quickjs.md` §2、§5；体积是**估**，⛔ 不进判据；`.d.ts` 漂移守卫**未做**（M2a 只有声明文件） |
 | R9 | **80% 半透明在 GPU 直出上不生效**：`SDL_BlitGPUTexture` 是拷贝、不混合 | 已解决（D，2026-11-18）：直出改为专用混合绘制管线（`SDL_DrawGPUPrimitives` + `SRC_ALPHA/ONE_MINUS_SRC_ALPHA`），`directReadback` 同公式；win32 未验证 |
-| R10 | 外置 `scripts/ui/hud.js`（及其 module 依赖 `kit.js`）不在发行树 ⇒ `--overlay` / `--plugin hud` 启动硬错 | 发行打包把 `scripts/ui/{hud.js,kit.js,ui.d.ts,README.md}` 一起带上（`release/` 待补）；**`hud.js` 与 `kit.js` 必须同目录**（`import './kit.js'` 按 `hud.js` 所在目录解析；缺 kit 与缺 hud 同属 exit 2）；开发回退 `LIFT_UI_SCRIPT_DIR`。★ S2：`hud` 的解析根 = `<exeDir>/scripts/ui/` → `LIFT_UI_SCRIPT_DIR`（保留 id），**不是** `scripts/plugins/` 的普通 id 根 |
+| R10 | 外置 `scripts/ui/hud.js`（及其 module 依赖 `kit.js` / `settings-page.js`）不在发行树 ⇒ `--overlay` / `--plugin hud` 启动硬错 | 发行打包把 `scripts/ui/{hud.js,kit.js,settings-page.js,ui.d.ts,README.md}` 一起带上（`release/` 待补）；**`hud.js` / `kit.js` / `settings-page.js` 必须同目录**（相对 `import` 按 `hud.js` 所在目录解析；缺任一与缺 hud 同属 exit 2）；开发回退 `LIFT_UI_SCRIPT_DIR`。★ S2：`hud` 的解析根 = `<exeDir>/scripts/ui/` → `LIFT_UI_SCRIPT_DIR`（保留 id），**不是** `scripts/plugins/` 的普通 id 根 |
 
 ## 待核
 

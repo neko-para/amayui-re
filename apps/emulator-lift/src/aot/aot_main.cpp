@@ -1366,6 +1366,10 @@ int main(int argc, char** argv) {
                        stderr);
             std::fflush(stderr);
         }
+        // ★ D2（2026-11-25）：经典回退 HUD 的 `host.config` 也必须有桥（同一个 `PluginHost`）。
+        //   位置 = 插件宿主建好之后、**第一帧渲染之前**（与 ⑤ 的 `setUiHostOps` 同一时刻）；
+        //   有 / 没有 render 的插件都挂（`--overlay` + 无 render 的插件 = 经典侧的唯一用法）。
+        host.setConfigBridge(plugin_host->config());
     }
 
     // ---- ③' AGERC.DLL：真实 guest 模块（口径同已退役解释器臂 `main.cpp`：`--game-dir` 下那份，走 VFS 解析）----
@@ -1655,7 +1659,14 @@ int main(int argc, char** argv) {
     if (plugin_host != nullptr) {
         host.cpu().windows->setReadPointObserver(nullptr);
         plugin_host->releaseOwner(*host.cpu().windows);
-        if (present_window_active) sdl_display->releaseOverlayScript();
+        // ★ D2（2026-11-25）：config 桥的收口**必须在 `plugin_host` 还活着的时候**做 ——
+        //   桥的实现 = `PluginHost`，而它比 `host` / 窗口 sink 后声明 ⇒ 先析构。
+        //   顺序：先 flush + 摘掉脚本里的缓存（`releaseOverlayConfig`），再摘 adopted 指针。
+        if (present_window_active) {
+            sdl_display->releaseOverlayConfig();
+            sdl_display->releaseOverlayScript();
+        }
+        host.setConfigBridge(nullptr);
         std::printf("%s\n", plugin_host->readout().c_str());
         std::fflush(stdout);
     }

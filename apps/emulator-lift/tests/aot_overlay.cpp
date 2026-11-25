@@ -3,12 +3,13 @@
 // 判据（红了意味着什么）：
 //   ① `--present window --present-hidden --overlay --max-frames 2` ⇒ **exit 0**（M0 判据 1）。
 //      红了 ⇒ AOT 臂的 `--overlay` 参数面 / 接线没通（用户给了参数却跑不起来）。
-//   ② `--present-screenshot` 的窗口 BMP 在**画布原点**（1280×720 帧 / 窗口 ⇒ (0,0)）是
+//   ② `--present-screenshot` 的窗口 BMP 在**面板内的取样点** `(0,360)`（D4 起面板贴左、垂直居中
+//      ⇒ 1280×720 参考系的 y=360 落在面板里；旧的 `(0,0)` 现在是面板上方的 guest 画面）是
 //      HUD 底色 `#101820CC` 与底层画面混合后的值：直出（D 单起走 `SRC_ALPHA / ONE_MINUS_SRC_ALPHA`
 //      的混合管线）与 renderer（`SDL_BLENDMODE_BLEND`）**都是** 80% 混合 ⇒ 首帧 guest 是黑 ⇒
 //      `blend(#101820, #000000, 204)` = `(13,19,26)`（两条路径同一个期望，±1 舍入）。
 //      同一条命令**不带** `--overlay` 时那个像素是 guest 后缓冲的颜色（首帧 = 黑）。
-//      红了 ⇒ 叠层没有真的上屏，或原点 / 半透明度错了。
+//      红了 ⇒ 叠层没有真的上屏，或取样点 / 半透明度错了。
 //   ★ S3：`--ui` 已从 CLI 面删除（⇒ `cli-aot-flags` 的 `ui-removed-unknown-arg` 钉未知参数）。
 //     旧 UiScript loader 只剩**内部** hud 回退路径（`--overlay` + 无 render 的 `--plugin`）⇒
 //     本文件用 ⑨ 的那个 run 当第三个入口，与 `--overlay` / `--plugin hud` 逐字节比较。
@@ -29,7 +30,7 @@
 //      `--plugin`）**三方**窗口 BMP / guest dump 逐字节相同（同一帧数、只换入口 ⇒ HUD 像素 /
 //      行序 / 命中键 / bold 必须不变）。
 //   ⑧ `--overlay` + **显式** `--plugin`（有 render）⇒ 插件赢：像素 = 插件 fill + 恰一行取代语。
-//   ⑨ `--overlay` + **无 render** 的插件 ⇒ HUD **照画**（(0,0)=#0D131A；S2 复审 I2，⛔ 静默无 HUD）。
+//   ⑨ `--overlay` + **无 render** 的插件 ⇒ HUD **照画**（(0,360)=#0D131A；S2 复审 I2，⛔ 静默无 HUD）。
 //   ⑩ 预设不改互斥：`--overlay --input-plan` 仍 exit 5 + `input-plan: FAIL`；
 //      `--overlay --plugin hud --input-plan` 仍 exit 2。
 //
@@ -722,11 +723,11 @@ int main(int argc, char** argv) {
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.exit_code), 0u);
         // ⛔ 无 render ⇒ 没有"取代"这回事（也不该有取代语）。
         LIFT_CHECK(r.err.find("HUD 已被插件的 render 取代") == std::string::npos);
-        const BmpPixel origin = bmpPixel(readAllBytes(fallback_shot), 0, 0);
+        const BmpPixel origin = bmpPixel(readAllBytes(fallback_shot), 0, 360);
         LIFT_CHECK(origin.ok);
         if (origin.ok) {
             const std::uint32_t want = blendOverBlack(0x101820u, 204);
-            std::printf("overlay-run-only: shot(0,0)=(%u,%u,%u) want #%06X\n", static_cast<unsigned>(origin.r),
+            std::printf("overlay-run-only: shot(0,360)=(%u,%u,%u) want #%06X\n", static_cast<unsigned>(origin.r),
                         static_cast<unsigned>(origin.g), static_cast<unsigned>(origin.b), want);
             LIFT_CHECK(nearByte(origin.r, (want >> 16) & 0xFFu, 1));
             LIFT_CHECK(nearByte(origin.g, (want >> 8) & 0xFFu, 1));
@@ -793,16 +794,16 @@ int main(int argc, char** argv) {
         }
     }
 
-    // ② 窗口截图：叠层真的上屏，且落在画布原点 (0,0)。
+    // ② 窗口截图：叠层真的上屏，且**面板内**的取样点 (0,360) 是 80% 混合底（D4：面板贴左、垂直居中）。
     const std::string shot_overlay = readAllBytes(outs[1].shot);
     const std::string shot_plain = readAllBytes(outs[2].shot);
     LIFT_CHECK(!shot_overlay.empty());
     LIFT_CHECK(!shot_plain.empty());
-    const BmpPixel with_overlay = bmpPixel(shot_overlay, 0, 0);
-    const BmpPixel without_overlay = bmpPixel(shot_plain, 0, 0);
+    const BmpPixel with_overlay = bmpPixel(shot_overlay, 0, 360);
+    const BmpPixel without_overlay = bmpPixel(shot_plain, 0, 360);
     LIFT_CHECK(with_overlay.ok);
     LIFT_CHECK(without_overlay.ok);
-    std::printf("② shot(0,0): overlay=(%u,%u,%u) plain=(%u,%u,%u)\n", static_cast<unsigned>(with_overlay.r),
+    std::printf("② shot(0,360): overlay=(%u,%u,%u) plain=(%u,%u,%u)\n", static_cast<unsigned>(with_overlay.r),
                 static_cast<unsigned>(with_overlay.g), static_cast<unsigned>(with_overlay.b),
                 static_cast<unsigned>(without_overlay.r), static_cast<unsigned>(without_overlay.g),
                 static_cast<unsigned>(without_overlay.b));

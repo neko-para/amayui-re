@@ -29,6 +29,7 @@
 #include "runtime/host_window.h"
 #include "runtime/input.h"
 #include "runtime/log.h"
+#include "runtime/overlay_key.h"  // D4：固定 F9 的按下沿计数（SDL-free；采样点 = drawOverlay）
 #include "runtime/vfs.h"  // openHostFileUtf8（Windows 的 UTF-8 脚本路径）
 #include "runtime/warp_echo.h"
 #include "runtime/window_scale.h"
@@ -296,6 +297,14 @@ struct SdlWindow::Impl : public UiInputRouter {
     // 一次性读回自检（第一次**成功** warp 之后查一次；此后不再查）。
     bool warp_selfcheck_done = false;
 
+    // ---- 叠层热键（D4，2026-11-25）：固定 F9，只产读数（⛔ 不吞键）----
+    // ★ 唯一来源 = `WindowManager::keyDown(kOverlayKeyVk)`（与 guest 的 `GetAsyncKeyState` 同一张
+    //   电平表；⛔ 不新开输入状态源）。`prev` 只为了算**按下沿**；`seq` 单调、饱和不回绕。
+    // ★ 没有 `WindowManager`（headless / 测试 sink）⇒ 本帧不填读数 ⇒ 脚本侧 `undefined`
+    //   （⛔ 不编 0：那会让"没按过"与"没有源"长得一样）。
+    bool overlay_key_prev = false;
+    std::uint32_t overlay_key_seq = 0;
+
     // ★ 最近一次 Present 的**帧尺寸**（letterbox 的 image 尺寸；⛔ 不是常数 1280×720）。
     //   renderer 路径写在 `tex_w/tex_h`，GPU 直出路径写在 `direct_w/direct_h`；还没有帧 ⇒
     //   `WindowManager::kScreenW/H`（与 guest 虚拟屏同尺寸，是与"未呈现"最不坏的一致假设）。
@@ -313,6 +322,11 @@ struct SdlWindow::Impl : public UiInputRouter {
     void teardownOverlayPixels();
     // 叠层画不出来 ⇒ 只告警 + 关掉叠层，呈现照旧（⛔ 不因为诊断层让整帧失败）。
     void disableOverlay(const char* why);
+    // ★ D2：把当前叠层脚本的 config 脏数据写盘一次（`UiScript::flushConfig`；默认 no-op）。
+    //   调用点 = 每帧 render 之后（**无条件**，不看成败：抛错那帧 set 已经发生）、
+    //   `disableOverlay`（脚本马上被丢掉）、`shutdown`（adopted script 也会被摘掉）。
+    //   `warn` 非空 ⇒ 一行 `[ui] warn: …`（⛔ 不让写盘失败把整帧 / 叠层打死）。
+    void flushOverlayConfig();
     // ★ 统一释放退役叠层纹理（**只在** `shutdown()`、`SDL_DestroyRenderer` 之前调用）：
     //   扩容 / 关叠层留下的旧纹理会到这里一次性销毁（增长次数有界，内存可接受）。
     void releaseRetiredOverlayTextures();
@@ -487,7 +501,18 @@ bool SdlWindow::Impl::loadUiScript(std::string* err) {
     return true;
 }
 
+// ★ D2：`UiScript::flushConfig` 的**唯一**调用壳（⛔ 不三处各写一遍 warn 格式）。
+void SdlWindow::Impl::flushOverlayConfig() {
+    lift::ui::UiScript* const script = activeUiScript();
+    if (script == nullptr) return;
+    std::string warn;
+    script->flushConfig(&warn);
+    if (!warn.empty()) std::fprintf(stderr, "[ui] warn: %s\n", warn.c_str());
+}
+
 void SdlWindow::Impl::disableOverlay(const char* why) {
+    // ★ D2：脚本马上要被丢掉 ⇒ 先把 config 脏数据写盘一次（⛔ 不丢用户刚在叠层里改的值）。
+    flushOverlayConfig();
     std::fprintf(stderr, "[overlay] 叠层不可用 ⇒ 关掉（呈现照旧）：%s\n", why != nullptr ? why : "(unknown)");
     overlay = false;
     // ★ 屏幕上已经没有这层叠层了 ⇒ 命中表 / capture 一起作废（⛔ 留着旧按钮继续吃点击）。
@@ -578,6 +603,12 @@ void SdlWindow::releaseOverlayScript() {
     impl_->syncUiInputRouter();
 }
 
+// ★ D2：config 桥的生命周期收口（顺序不能反：先 flush（桥还活着），再摘脚本里的缓存）。
+void SdlWindow::releaseOverlayConfig() {
+    impl_->flushOverlayConfig();
+    if (lift::ui::UiScript* const script = impl_->activeUiScript()) script->forgetConfigBridge();
+}
+
 void SdlWindow::Impl::releaseRetiredOverlayTextures() {
     for (SDL_Texture*& tex : retired_overlay_tex) {
         if (tex != nullptr) SDL_DestroyTexture(tex);
@@ -636,6 +667,16 @@ bool SdlWindow::drawOverlay(std::string* err) {
     readings.frames = impl_->ui_frame_source;
     // ★ 宿主能力表（切片 3）：`host.profileBegin/End` 的唯一来源（与 frames 同一段，非 owning）。
     readings.host = impl_->ui_host_ops;
+    // ★ D4：F9 的按下沿计数（`game.overlayKeySeq` 的唯一来源）。只读电平表，⛔ 不吞这条键
+    //   （它仍到 guest）。没有 `WindowManager` ⇒ 不填 ⇒ 脚本侧 undefined（⛔ 不编 0）。
+    if (impl_->windows != nullptr) {
+        const bool down = impl_->windows->keyDown(kOverlayKeyVk);
+        impl_->overlay_key_seq =
+            lift::overlayKeyStep(impl_->overlay_key_prev, down, impl_->overlay_key_seq);
+        impl_->overlay_key_prev = down;
+        readings.overlay_key_ok = true;
+        readings.overlay_key_seq = impl_->overlay_key_seq;
+    }
     // ★ 命中 / 捕获（切片 2 后半）：全部读自**上一帧成功 present** 的命中表（= 屏幕上真正画着
     //   的东西）+ 本帧指针位置。⛔ 这里只读：不跑 JS、不改 capture。
     {
@@ -682,6 +723,10 @@ bool SdlWindow::drawOverlay(std::string* err) {
     script->setBudget(steadyNowNs() + kUiScriptBudgetNs, kUiScriptOpLimit);
     lift::ui::UiPresentedFrame presented;
     const bool ok = lift::ui::presentUi(this, *impl_->ui_font, *script, readings, &presented, err);
+    // ★ D2（2026-11-25）：每帧 render **之后** flush 一次 config（与 Run 回调末的 flush 同一口径）。
+    //   ★ **无条件**（不看成败）：脚本抛错之前那几拍 `set` 已经改了内存，丢了就是用户可见的丢写。
+    //   ⛔ 不进 2 ms 预算（它不在 Run 回调里；render 的 20 ms 预算窗只罩 JS 本体）。
+    impl_->flushOverlayConfig();
     // ★ 只有**成功 present** 的那一帧才更新命中表：没有几何 / 空 list / 合成失败 ⇒ 屏幕上仍是
     //   上一次的叠层，命中表必须跟着它（⛔ 不清空：那会让"画着按钮但点不中"）。
     if (ok && presented.presented) impl_->click_router.commitFrame(std::move(presented.hits));
@@ -1243,6 +1288,8 @@ void SdlWindow::shutdown() {
     impl_->overlay = false;
     // ★ 脚本 / 内核 / 字体 / 读数一起放掉（下一轮 init 或 `setOverlay(true)` 会按新 options 重装）。
     //   ★ C2b-2：adopted 只摘指针（**非拥有**；对象归插件宿主，销毁时机不在这里）。
+    //   ★ D2：丢掉之前把 config 脏数据写盘一次（与 `disableOverlay` 同一口径）。
+    impl_->flushOverlayConfig();
     impl_->adopted_script = nullptr;
     impl_->ui_script.reset();
     impl_->ui_runtime.reset();

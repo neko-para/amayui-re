@@ -128,3 +128,92 @@ export function Button(spec, host) {
   }
   return state;
 }
+
+/** 复选框方框边长（参考像素；组件的**唯一**几何常量，⛔ 不量字）。 */
+const CHECKBOX_BOX = 20;
+
+/**
+ * @typedef {{
+ *   key?: string,
+ *   rect: ButtonRect,
+ *   label?: string,
+ *   checked?: boolean,
+ *   disabled?: boolean,
+ *   theme?: ButtonTheme,
+ *   on?: { click?: (ev: UiClick) => void, hover?: (hovered: boolean) => void },
+ * }} CheckboxSpec
+ */
+
+/**
+ * 画一个复选框（与 `Button` 同一套三态 / disabled / theme / 事件口径）。
+ *
+ * ★ 几何约定（`settings-page.js` 依赖它）：
+ *   - `rect` 就是**整块命中区**（调用方给；例如设置页的一整行 26px 高）；
+ *   - 方框固定 `CHECKBOX_BOX`×`CHECKBOX_BOX`，贴 `rect` **右端**、垂直居中；
+ *   - `label` 左对齐、`text_pad_x` 内缩（与 `Button` 同一条算术；⛔ 不调 `measure`）。
+ * ★ `checked` 只影响方框（实心 = 选中；空心 = 未选中）；三态配色仍来自 `DEFAULT_THEME`
+ *   （hover / active 改 plate 与方框的前景；⛔ 不改 `DEFAULT_THEME` 的既有字段）。
+ * ★ `disabled: true` ⇒ **不挂 key**（不可命中），与 `Button` 同一条。
+ *
+ * @param {CheckboxSpec} spec
+ * @param {{ rect: (o: any) => void, text: (o: any) => void, hover?: string, active?: string, click?: UiClick }} [host]
+ * @returns {'idle' | 'hover' | 'active' | 'disabled'}
+ */
+export function Checkbox(spec, host) {
+  if (spec === undefined || spec === null || typeof spec !== 'object') {
+    throw new TypeError('Checkbox: 需要一个 { key, rect, label, checked } 对象');
+  }
+  const rect = spec.rect;
+  if (rect === undefined || rect === null || typeof rect !== 'object') {
+    throw new TypeError('Checkbox: rect 必须是 { x, y, w, h }（参考像素）');
+  }
+  const h = host === undefined || host === null ? classicHost() : host;
+  const theme = spec.theme === undefined ? DEFAULT_THEME : spec.theme;
+  const key = spec.key;
+  const disabled = spec.disabled === true;
+  const checked = spec.checked === true;
+  const hovered = !disabled && key !== undefined && key !== '' && h.hover === key;
+  const held = !disabled && key !== undefined && key !== '' && h.active === key;
+  // ★ 写成嵌套三元而不是与 `Button` 同一行文本：`tools/mutate-check.mjs` 的 `ui-kit-hover-branch`
+  //   按**逐字**锚 `Button` 的那一行（出现 2 次它就会拒绝判定）—— 语义相同即可。
+  const state = disabled ? 'disabled' : held ? 'active' : hovered ? 'hover' : 'idle';
+  const colors = theme[state];
+
+  // ① 整块 plate：**带 key** 才是命中区（disabled 故意不带）。
+  /** @type {UiRectOptions} */
+  const plate = { x: rect.x, y: rect.y, w: rect.w, h: rect.h, fill: colors.bg };
+  if (!disabled && key !== undefined && key !== '') plate.key = key;
+  h.rect(plate);
+
+  // ② 方框：贴右端。空心 = 前景色外框 + 内缩一块 plate 底色；实心 = 前景色填满。
+  const box = Math.min(CHECKBOX_BOX, rect.w, rect.h);
+  const boxX = rect.x + rect.w - box;
+  const boxY = rect.y + Math.max(0, Math.round((rect.h - box) / 2));
+  h.rect({ x: boxX, y: boxY, w: box, h: box, fill: colors.fg });
+  if (!checked) {
+    const inset = Math.max(2, Math.round(box / 5));
+    h.rect({ x: boxX + inset, y: boxY + inset, w: box - 2 * inset, h: box - 2 * inset, fill: colors.bg });
+  }
+
+  // ③ label：左对齐 + 垂直居中（⛔ 不量字）。
+  const label = spec.label === undefined ? '' : String(spec.label);
+  if (label !== '') {
+    h.text({
+      x: rect.x + theme.text_pad_x,
+      y: rect.y + Math.max(0, Math.round((rect.h - theme.font) / 2)),
+      text: label,
+      size: theme.font,
+      color: colors.fg,
+      bold: theme.bold,
+    });
+  }
+
+  // ④ 事件钩子（与 Button 同一条：render 里跑、一次性 click）。
+  const handlers = spec.on === undefined ? {} : spec.on;
+  if (typeof handlers.hover === 'function') handlers.hover(hovered);
+  const click = h.click;
+  if (!disabled && click !== undefined && click.key === key && typeof handlers.click === 'function') {
+    handlers.click(click);
+  }
+  return state;
+}

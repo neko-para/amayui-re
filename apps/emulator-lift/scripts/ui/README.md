@@ -1,8 +1,9 @@
 # `scripts/ui` —— HUD 脚本（`--overlay` / `--plugin hud`；`--ui` 已删除）
 
-`--overlay` 的左上角 HUD **不是 C++ 画出来的**：它由这份目录里的 JS 脚本经 QuickJS **同步**跑出
-一份 display list，宿主再交给宿主字体栅格化、合成进窗口像素。默认脚本就是 `hud.js`；
-按钮之类的外观 / 状态 / 主题在组件库 `kit.js`。
+`--overlay` 的 HUD **不是 C++ 画出来的**：它由这份目录里的 JS 脚本经 QuickJS **同步**跑出
+一份 display list，宿主再交给宿主字体栅格化、合成进窗口像素。默认脚本就是 `hud.js`
+（贴左侧、**垂直居中**的面板）；按钮之类的外观 / 状态 / 主题在组件库 `kit.js`，
+二级设置页在同目录的 `settings-page.js`。
 
 ★ **S2（2026-11-25）起 `hud.js` 是真插件**：入口是 `export default { render(ctx) }`，用
 `ctx.draw.*` / `ctx.game.*` / `ctx.profile.*`（契约 = `scripts/plugins/plugin.d.ts` 的 `RenderCtx`，
@@ -12,8 +13,13 @@
 `globalThis.render` 这个**经典入口仍在**，但只服务**内部 hud 回退**（`--overlay` + 无 render 的
 `--plugin`，见下）；用户自己的脚本一律写成**插件模块**（`export default { render(ctx) }`）。
 两个入口共用**同一份绘制体**、只换薄适配器（`classicHost()` / `pluginHost(ctx)`）。
-★ `hud.js` 是 **module**：它 `import { Button } from './kit.js'` ⇒ 发行时 `hud.js` 与 `kit.js`
-**必须同目录**（`import` 的相对解析以 `hud.js` 所在目录为根；缺 kit 与缺 hud 同属**加载期硬失败**）。
+★ `hud.js` 是 **module**：它 `import { Button } from './kit.js'` 与
+`import { canOpen, drawPage, hasSettings } from './settings-page.js'` ⇒ 发行时 `hud.js` / `kit.js` /
+`settings-page.js` **必须同目录**（`import` 的相对解析以 `hud.js` 所在目录为根；缺任一与缺 hud
+同属**加载期硬失败**）。
+★ **二级设置页 = 同目录的 `settings-page.js`**（D2/D4，2026-11-25）：`export { canOpen, hasSettings, drawPage, PAGE_KEYS }`，
+只依赖 `host`（含 `host.config`）与调用方状态。它**不是** `--plugin` 的 id 目标（id 只查
+`scripts/plugins/` 根）；只能由 `hud.js` `import` 或用户脚本 `<path>` 装载。
 
 ★ 脚本是**外置文件、运行时读**的：改完直接重跑，**不需要重编**（也⛔ 不要把 JS 抄进 C++）。
 
@@ -49,6 +55,31 @@ emulator-lift-aot --present window --overlay --plugin E:\my-run-only.js ...
 **加载期**的失败（语法错 / 缺入口 / 字体不可用）是**硬失败**：`--overlay` / `--plugin hud` /
 `--plugin <path>` 在启动期 exit 2，错误串带 `<path>:<行>:<列>`（字体不可用 = R5）。**运行期**抛错 /
 超预算不是启动失败：一次性 `[overlay] …` 进 stderr + **关掉叠层**，**呈现照旧**（exit 0）。
+
+## 版式 / 入口 / 按键（D4，2026-11-25）
+
+`hud.js` 的 `drawHud` 是**唯一**绘制体（两个入口共用）；D4 之后的形状：
+
+- **面板**：贴左、**垂直居中** —— `x = 0`、`y = round((720 − panelH) / 2)`（每帧按行数重算；
+  `PAD = 8` / `SIZE = 16`，面板宽 = 最长行 + 2×`PAD`）。面板仍是 `elements[0]`。
+- **行序**：`mouse` / `script` / `fps` / `worst` / 状态行 / `settings…`。没值的行**整行省略**（⛔ 不占位）；
+  `settings…` 恒在**最后一行**。`frame <n>` 行已删（总帧数无诊断价值）。
+- **设置入口**：最后一行 `settings…` 上叠一条 `fill:"#00000000"`、`key:"settings"` 的**透明命中
+  Rect**（刚好盖住那一行）。点击 ⇒ 打开 `settings-page.js` 的二级页（页面开着时**不画 HUD 面板**，
+  `settings…` 行与 PROFILE 都不画；`BACK` 关闭）。`h.config` 不可用（`undefined` / `available !== true`）⇒
+  不打开，状态行 `settings: 没有 appdata`（同一个脚本实例内改回来才清）。★ **空注册表**（桥可用但
+  `settings.schema` 一个可画项都没有，`hasSettings(h) === false`）⇒ 也不打开，状态行
+  `settings: 没有注册设置`（⛔ 不打开空白页、不造死控件），注册表回来才清。
+- **设置状态行是模块级**（`hud.js` 的 `settingsPage.status`，由 `drawPage` 每帧写回；⛔ 不每帧新建）：
+  成功点（`applied:true`）清空；失败（`settings: 只读` / `settings: <错误>`）留到下一次操作或下一次
+  成功；**关闭页面不清**（状态行留在 HUD 上）。
+- **PROFILE 默认隐藏**（不画、也不挂 `key` ⇒ 不可命中）。按键 = 固定 **F9**，读数 =
+  `game.overlayKeySeq`（`undefined` = 没有源）；模块级记住上一次的值，**变了才切换**显隐（⛔ 当电平用）。
+  显示时按钮画在面板**下方**（`key:"profile"`，`kit.Button` 的尺寸 / 主题）。★ F9 **不吞键**（仍到
+  guest）⇒ 可能与游戏自己的 F9 动作同时触发；本期固定键，`--overlay-key` 记进 `## 未做`。
+- **可复跑**：窗口档直接 `emulator-lift-aot --present window --overlay ...`，按 F9 两次看 PROFILE
+  出现 / 消失（窗口档要真键；无键盘源时 `overlayKeySeq` 是 `undefined`，按钮不会出现）。结构判据 =
+  `tests/ui_hud_script.cpp`（CTest `ui-hud-script`，假读数、无窗口 / 无 GPU）。
 
 ## 脚本形状
 
@@ -95,7 +126,7 @@ globalThis.render = function render() {
 
 | 成员 | 说明 |
 |---|---|
-| `ui.rect({ x, y, w, h, fill, z?, key? })` | 参考像素（1280×720）的轴对齐矩形；`fill` = `#RRGGBB` / `#RRGGBBAA`，缺省 `#000000FF`。`key` **非空** ⇒ 这个矩形是一个命中区（见下），缺省 = 纯背景 |
+| `ui.rect({ x, y, w, h, fill, z?, key? })` | 参考像素（1280×720）的轴对齐矩形；`fill` = `#RRGGBB` / `#RRGGBBAA`，缺省 `#000000FF`。`key` **非空** ⇒ 这个矩形是一个命中区（见下），缺省 = 纯背景。★ `fill` 的 alpha == 0（如 `#00000000`）⇒ **不画**（只作**透明命中区**；⛔ 不会擦掉底下已画的像素 —— `hud.js` 的 `settings…` 入口就这么写） |
 | `ui.text({ x, y, text, size?, color?, bold?, z? })` | 一行 UTF-8 文本；`size` 缺省 16，`color` 缺省 `#FFFFFFFF`，`bold` 缺省 false |
 | `ui.measure(text, size) -> { w, h }` | 走宿主字体度量（`FontEngine`）；宿主没有字体 ⇒ `TypeError` |
 
@@ -145,6 +176,47 @@ globalThis.render = function render() {
 **不挂 key**（不可命中，宿主不会给它发 click）。★ 组件库只做**外观 / 状态 / 主题**：⛔ 不做通用
 布局系统、不做窗口管理；`rect` 的 x/y/w/h 由调用方给。
 
+`Checkbox(spec, host?)`（2026-11-25 追加；设置页的 bool 行用它）与 `Button` 同一套三态 / `disabled` /
+`theme` / `on.hover|click` 口径，**同样不调 `measure`**。几何约定：`rect` 就是**整块命中区**
+（例如设置页的一整行 26px），方框固定 **20×20** 贴 `rect` 右端、垂直居中（实心 = `checked`，
+空心 = 未选中）；`label` 左对齐、`text_pad_x` 内缩。`disabled: true` ⇒ 不挂 key。
+
+### 二级设置页 `settings-page.js`（D2/D4）
+
+```js
+import { canOpen, drawPage, hasSettings, PAGE_KEYS } from './settings-page.js';
+
+// h = HudHost + h.config（`undefined` = 没有桥）；state = 调用方**模块级**持有（目前只有 status）。
+if (canOpen(h) && hasSettings(h)) {
+  const r = drawPage(h, state);
+  if (r.closed) { /* 关闭二级页 */ }
+}
+```
+
+- **`h.config`**：与插件 `ctx.config` **同一份 JS 形状**（`{ available, domain(id) }`），来路 =
+  经典回退 HUD 的 `UiHostOps::config`（`docs/03-emulator/plugin-runtime.md`）。`undefined` ⇒
+  `canOpen(h) === false`、`drawPage` 返回 `{ closed: true, status: "没有插件在跑" }` 且**不画控件**
+  （⛔ 不造假开关 —— `--plugin hud` 预设模式就没有 config）。
+- **`hasSettings(h)`**（`hud.js` 的入口用它）：`canOpen` 只回答"桥在不在"，本函数回答"打开之后有没有
+  东西可画"（`settings.schema` 至少一项；坏形状照 `drawPage` 的规则跳过）。桥可用但空表 ⇒ **不打开**，
+  状态行 `settings: 没有注册设置` —— ⛔ 打开一张只有 `SETTINGS` + live + `BACK` 的空白页。
+- **读**：每帧每个可见项 `domain.get(key, default)`；`all()` **只**用于保留域 `settings.schema`
+  （插件在 `start` 里 `registerSettings` 写进去；见 `scripts/plugins/README.md`）。坏 schema 形状跳过。
+- **写**：点击当拍 `set`；回执 `applied:false` ⇒ `settings: 只读` / `settings: 没有 appdata`；
+  `set` 抛错 ⇒ 状态行 `settings: <message>`，**绝不冒出 render**。落盘由宿主在这次 render 末尾 flush。
+  ★ 这几句是**调用方状态**（本文件没有模块级可变状态）：`hud.js` 用模块级对象持有 ⇒ 失败回执**跨帧
+  留存**（成功点清空、关闭页面不清）—— ⛔ 不每帧新建那个对象（否则只活 1 帧）。
+- **版式**：全屏背板 `#000000A6` + `key:"settings.bg"`（先画 = 模态）；页板 `x=0`、
+  `y=round((720-H)/2)`、`PAD=8`、行高 `max(20, measure("Ag",16).h+2)`；bool 整行 26px 命中区
+  `set:<domain>:<key>`；number `[−]`/`[+]` 24×24（`dec:`/`inc:`）+ 72 宽值文本；`BACK` 112×28
+  （`settings.back`）；最多 12 项，超出 `… 还有 N 项`。
+- ★ **`hud.js` 已经接上它**（D4）：最后一行 `settings…` 的透明命中 Rect（`key:"settings"`）打开页面；
+  页面开着时 `hud.js` **不画 HUD 面板**、只画 `drawPage(h, state)`，`BACK` 关闭并回到 HUD。
+  页面里的 `set/inc/dec` 由本文件处理（`h.config` 的写回执它自己消化）。
+- 判据 = `tests/ui_settings_page.cpp`（pure；假 `h` + 假 `config`）：版式/命中 key、bool 整行点击
+  （`set` 恰好一次 + 同帧值变）、min/max 钳制与 `<invalid>`、`set` 抛错不冒出 render、
+  `h.config === undefined` ⇒ 不打开、13 项 ⇒ 12 行 + `… 还有 1 项`。
+
 ### 旧全局 ↔ 插件 `ctx` 的映射（S2）
 
 | 旧（内部 hud 回退 / classic） | 插件（`--overlay` / `--plugin hud` / `--plugin <path>`） |
@@ -153,9 +225,11 @@ globalThis.render = function render() {
 | `ui.text({x,y,text,size,color,bold?})` | `ctx.draw.text(x, y, text, { size, fill, bold? })` |
 | `ui.measure(text, size) -> {w,h}` | `ctx.draw.measure(text, { size }) -> {width,height}` |
 | `game.frame/fps/script/worst/click/hover/active` | `ctx.game.frame/…`（同名只读 getter） |
+| `game.overlayKeySeq`（D4） | `ctx.game.overlayKeySeq`（同名只读 getter） |
 | `game.mouse`（getter） | `ctx.game.mouse()`（**方法**） |
 | `game.local_frames()` | `ctx.game.localFrames()` |
 | `host.profileBegin/End()`（结果对象） | `ctx.profile.begin()`（`void`）/ `ctx.profile.end()`（`{ok,text,error}`） |
+| `host.config`（D2；属性；无桥 ⇒ `undefined`） | **没有**（`RenderCtx` 恰好 7 成员，父级收窄）⇒ 插件档设置页不可用（诚实的"没有 appdata"） |
 
 ### `host`（方法表；**只在 `render` 内可调用**）
 
@@ -170,6 +244,7 @@ globalThis.render = function render() {
 |---|---|
 | `host.profileBegin(label) -> { ok, error }` | 开始一段窗口 profile；`label` = UTF-8（缺省串由宿主决定）。`ok:false` ⇒ 已有一段开着（**不 reset** 上一段），`error` 是人可读的原因 |
 | `host.profileEnd() -> { ok, text, error }` | 结束这一段窗口 profile。**宿主内部**把 `text`（结论文本）写进系统剪贴板；`ok:false` ⇒ 没有开着的窗口（`text` 为空串） |
+| `host.config` | `{ available, domain(id) } \| undefined`（**属性**，D2）：与插件 `ctx.config` 同一份 JS 形状；**没有接线 ⇒ `undefined`**（⛔ 不是抛错：HUD 每帧都读）。`available:false` / `undefined` ⇒ 设置页不打开（见下）。写盘 = 该帧 render 之后 flush 一次 |
 
 * **返回对象所有键恒存在**；`error` 空串 = 没有错。
 * **结束 ≠ 复制成功**：`ok:true` + `error` 非空 = "窗口关了、`text` 在，但没进剪贴板"。
@@ -197,6 +272,7 @@ globalThis.render = function render() {
 | `game.click` | `{ key, x, y } \| undefined` | 这一帧有一次"命中并抬起"（**一次性**） |
 | `game.hover` | `string \| undefined` | 指针在某个命中区上 |
 | `game.active` | `string \| undefined` | 左键在某个命中区上按下、还没抬起 |
+| `game.overlayKeySeq` | `number \| undefined` | D4：固定 **F9** 的**单调按下沿计数**（按下沿 +1、饱和不回绕）；没有按键源（headless / 测试 sink）⇒ `undefined`（⛔ 不编 0）。用法 = 记住上一次、**变了才切**显隐（⛔ 当电平用）。⛔ 不吞键：F9 仍到 guest |
 
 属性是 getter（无 setter）：strict 下赋值抛 `TypeError`。`game.local_frames()` 是 `game` 上**唯一**的
 **方法**（不可写 / 不可枚举 / 不可配置，strict 下赋值同样抛 `TypeError`）。
@@ -266,11 +342,15 @@ pnpm exec tsc -p apps/emulator-lift/scripts/ui   # exit 0、无输出 = 干净
 * 通用布局 / 锚点 / 百分比 / 窗口管理：组件库只按调用方给的 `rect` 画，命中区是宿主从
   `ui.rect({key})` 的 resolved rect 算的（`ui` 目前只有 `rect` / `text` / `measure`）。
 * 校验表（未知键被忽略，不报错）。
-* 发行打包规则（`release/` 目前没有"复制 `scripts/ui/*`"的步骤）：发行时 `hud.js` / `kit.js`
-  必须一起放到 `<exe 所在目录>/scripts/ui/`（缺 kit 与缺 hud 同属硬失败）。
+* 发行打包规则（R10）：发行清单 = `scripts/ui/{hud.js,kit.js,settings-page.js,ui.d.ts,README.md}`，
+  一起放到 `<exe 所在目录>/scripts/ui/`。**`hud.js` / `kit.js` / `settings-page.js` 必须同目录**
+  （相对 `import` 按 `hud.js` 所在目录解析；缺任一 = 加载期硬失败 exit 2）。`release/` 目前还没有
+  "复制 `scripts/ui/*`"的步骤 ⇒ 打包流程要自己按这份清单带上。（权威表 = `docs/03-emulator/overlay.md`
+  的 R10 行，随文档轮同步。）
 
-`hud.js` 的版式（内边距 8 / 字号 16 / 行序 / 颜色 `#101820CC` 80% 半透明底 + `#EBFFEB` 不透明字）
-就是 `tests/ui_hud_script.cpp` 的判据：改它要么同步改用例，要么那条用例会红。
+`hud.js` 的版式（贴左 + 垂直居中 / `PAD=8` / 字号 16 / 行序 / 末行 `settings…` / 颜色 `#101820CC`
+80% 半透明底 + `#EBFFEB` 不透明字）就是 `tests/ui_hud_script.cpp` 的判据：改它要么同步改用例，
+要么那条用例会红。
 
 ## 已知边界（半透明）
 

@@ -140,30 +140,21 @@ public:
     virtual std::string appDataPath() const = 0;  // 空串 = null（不可用）
     virtual lift::plugin::AppDataStat appDataStat(const std::string& rel) = 0;
 
-    // ---- Config（同步宿主 I/O；**只 RunCtx**）----
+    // ---- Config（同步宿主 I/O；**只 RunCtx** 的 `ctx.config`）----
     // ★ `ctx.config` 的形状 = `{ available, domain(id) }`；域对象 =
     //   `{ get(key, fallback?), has(key), set(key, value), delete(key), all() }`（d.ts 的
     //   `ConfigApi` / `ConfigDomain` / `ConfigReceipt`）。
     // ★ 配置文件 = `<--appdata>/plugin-config.json`（appdata 根；⛔ 不在 `SAVE/`）。**没有**
     //   `available` ⇒ `domain()` 抛 `Error("no_appdata")`（⛔ 不做内存态）。
-    // ★ 语义：`set` / `delete` 只改内存 + 标脏，宿主在**每个回调末** flush 一次（原子替换）；
-    //   校验错误（域 id / key / 值类型 / 超限 / 非法 UTF-8）由宿主返回 false + `why` ⇒ JS 侧 TypeError；
-    //   `ConfigReceipt.applied` = **内存已改**（⛔ 不是"已落盘"）：只读 / 无 appdata 走 code，
-    //   写盘失败只有一次 `ctx.log("warn")`。
-    // ★ 宿主段要包 `HostPause`（**含值树 ↔ JS 值的转换**；⛔ 不算用户 2 ms）。用户 getter
-    //   （`set` 读对象属性时）例外：那段仍是用户时间。
-    virtual bool configAvailable() const = 0;
-    virtual bool configCheckDomain(const std::string& id, std::string* why) const = 0;
-    virtual bool configGet(const std::string& domain, const std::string& key,
-                           lift::plugin::ConfigValue* out, bool* found, std::string* why) = 0;
-    virtual bool configHas(const std::string& domain, const std::string& key, bool* found,
-                           std::string* why) = 0;
-    virtual bool configSet(const std::string& domain, const std::string& key,
-                           const lift::plugin::ConfigValue& value,
-                           lift::plugin::ConfigReceipt* receipt, std::string* why) = 0;
-    virtual bool configDelete(const std::string& domain, const std::string& key, bool* removed,
-                              std::string* why) = 0;
-    virtual lift::plugin::ConfigValue configAll(const std::string& domain) = 0;
+    // ★ 语义：`set` / `delete` 只改内存 + 标脏，宿主在**每个 Run 回调末**与**每帧 render 之后**
+    //   各 flush 一次（原子替换）；校验错误（域 id / key / 值类型 / 超限 / 非法 UTF-8）由宿主返回
+    //   false + `why` ⇒ JS 侧 TypeError；`ConfigReceipt.applied` = **内存已改**（⛔ 不是"已落盘"）。
+    // ★ 值的实现面只有一份 = `lift::plugin::ConfigBridge`（`runtime/config.h`）：
+    //   RunCtx 的 `ctx.config` 走**这里**，经典回退 HUD 的 `host.config` 走 `UiHostOps::config`
+    //   （同一个桥、同一份 JS trampoline；D2，2026-11-25）。★ **`RenderCtx` 没有 `config`**
+    //   （父级同日收窄：`--overlay` 预设的 hud 没有 `start`，加它只买到"下一轮的值"）。
+    //   nullptr = 没接桥 ⇒ RunCtx 里调 `domain()` 是 TypeError（⛔ 不是静默 no-op）。
+    virtual lift::plugin::ConfigBridge* config() { return nullptr; }
 
     // ---- Trigger 工厂（每次调用 = 新对象）----
     virtual lift::plugin::Trigger makeAfterScript(const std::string& name, const std::string& script,

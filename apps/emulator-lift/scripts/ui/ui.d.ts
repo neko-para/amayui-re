@@ -29,7 +29,13 @@ interface UiRectOptions {
   w: number;
   /** 高（参考像素） */
   h: number;
-  /** `#RRGGBB` / `#RRGGBBAA`；缺省 `#000000FF` */
+  /**
+   * `#RRGGBB` / `#RRGGBBAA`；缺省 `#000000FF`。
+   *
+   * ★ `#RRGGBB00`（alpha = 0）= **不画**：这条矩形只作**命中区**（`key` 非空时整块 rect 都可命中）。
+   *   ⛔ 不是"把这块擦成透明"—— 栅格是逐元素**覆盖**（不是混合），写 `(0,0,0,0)` 会擦掉底下已经
+   *   画好的面板 / 文本像素（D4 的 `settings…` 入口就是「透明命中 Rect 叠在一行字上」）。
+   */
   fill?: string;
   /** 绘制序（同 z 按调用序）；缺省 0 */
   z?: number;
@@ -159,6 +165,15 @@ interface UiFrameReadings {
   readonly hover: string | undefined;
   /** 当前**被捕获**的 key（左键在这个 key 上按下、还没抬起 ⇒ 有值；否则 `undefined`）。 */
   readonly active: string | undefined;
+  /**
+   * 叠层热键（固定 **F9**）的**单调按下沿计数**（D4，2026-11-25 父级裁决）。
+   *
+   * ★ 唯一来源 = 宿主每帧 `WindowManager::keyDown(0x78)`；按下沿 +1、饱和不回绕；
+   *   **不吞键**（F9 仍到 guest）。
+   * ★ 没有按键源（headless / 测试 sink）⇒ `undefined`（⛔ 不编 0）。
+   * ★ 用法：模块级记上一次的值，变了就切换显隐（⛔ 别当电平用 —— 电平每帧都触发）。
+   */
+  readonly overlayKeySeq: number | undefined;
 }
 
 /** display list 的构造入口（只有两个）。 */
@@ -195,20 +210,66 @@ interface UiProfileEndResult {
 }
 
 /**
+ * 经典回退 HUD 的 `host.config` 的一块配置域（D2）。
+ * ★ 与插件侧 `ConfigDomain` **同一份 JS 形状**（`docs/03-emulator/plugin-runtime.md` §4.5）。
+ */
+interface UiConfigDomain {
+  /** 没有这个 key ⇒ 返回 `fallback`（不给 = `undefined`）。 */
+  get(key: string, fallback?: unknown): unknown;
+  has(key: string): boolean;
+  /** 只改内存并标脏（宿主在**这次 render 末尾** flush 一次）；校验错误 ⇒ TypeError。 */
+  set(key: string, value: unknown): UiConfigReceipt;
+  /** true = 真的删掉了（不存在 / 只读 ⇒ false）。 */
+  delete(key: string): boolean;
+  /** 该域的深拷贝快照（原生对象；改它不影响 store）。 */
+  all(): Record<string, unknown>;
+}
+
+/** `set` / `delete` 的回执（与插件侧 `ConfigReceipt` 同一形状）。 */
+interface UiConfigReceipt {
+  /** `true` = **内存已改**（⛔ 不代表已落盘）。 */
+  readonly applied: boolean;
+  /** `read_only` = 配置文件不可写；`no_appdata` = 没有 `--appdata`。 */
+  readonly code?: "read_only" | "no_appdata";
+}
+
+/**
+ * 经典回退 HUD 的 `host.config`（D2；与插件 `ctx.config` **同一份 JS 形状**）。
+ *
+ * ★ **无桥 ⇒ `undefined`**（⛔ 不是抛错）：这是 HUD **每帧**都要读的读数面 —— 没有 `--appdata`
+ *   或测试 sink 时，一个**可选**能力不该把整个叠层打黑。与 `host.profileBegin/End` 的
+ *   "缺接线 = 调用时 TypeError"**故意不同**：那条是**点击时**的一次性调用，静默 no-op 才是
+ *   "按了没反应且没有原因"。
+ * ★ 只在 `render` 内可用；写盘由宿主在**这次 render 末尾** flush 一次（⛔ 不进 2 ms 预算）。
+ * ★ 配置文件 = `<--appdata>/plugin-config.json`（域式；上限 / 校验与插件侧同一套）。
+ */
+interface UiConfigApi {
+  /** 有没有可用的 appdata 根（false ⇒ `domain()` 抛 `Error("no_appdata")`）。 */
+  readonly available: boolean;
+  /** 域 id 非法 / 保留名 ⇒ TypeError；不可用 ⇒ `Error("no_appdata")`。 */
+  domain(id: string): UiConfigDomain;
+}
+
+/**
  * 宿主能力（**方法表**，像 `ui`；⛔ 不是读数）。
  *
  * ★ 对象**恒存在**；缺接线（非窗口臂 / 测试替身）是**调用时**的 `TypeError`，不是 `undefined`。
  * ★ **只在 `render` 内可调用**；副作用就发生在 render 里（⛔ 不在 `handleEvent`）。
  * ★ 用法错 ⇒ `TypeError`；领域失败 ⇒ **返回值**（`ok:false`，不抛 —— HUD 要显示"失败"并继续画）。
  * ★ 只在窗口档可达：`--present headless` 与 `--overlay` 同给是 `exit 2`。
- * ★ 这一版只有这两项；`reload()` / `time_budget_ms()`（`docs/03-emulator/overlay.md` §3.5 的
- *   目标 API）**尚未实现**。
+ * ★ 这一版只有这两项 + `config`；`reload()` / `time_budget_ms()`（`docs/03-emulator/overlay.md`
+ *   §3.5 的目标 API）**尚未实现**。
  */
 declare const host: {
   /** 开始一段窗口 profile；`label` = UTF-8（默认 HUD 传 `"overlay"`）。 */
   profileBegin(label: string): UiProfileBeginResult;
   /** 结束这一段窗口 profile，并**由宿主**把结论文本写进系统剪贴板。 */
   profileEnd(): UiProfileEndResult;
+  /**
+   * 经典回退 HUD 的配置面（D2；与插件 `ctx.config` 同一份 JS 形状）。
+   * ★ 无桥 ⇒ `undefined`（见 `UiConfigApi` 的说明；⛔ 不是抛错）。
+   */
+  readonly config: UiConfigApi | undefined;
 };
 
 /**

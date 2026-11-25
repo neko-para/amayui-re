@@ -20,6 +20,12 @@ namespace lift {
 class FontEngine;
 }  // namespace lift
 
+namespace lift::plugin {
+// `ctx.config` 的语言无关桥（`runtime/config.h`；实现 = `plugin/PluginHost`）。
+// ★ 本头只持指针 ⇒ ⛔ 不 include `runtime/config.h` / `plugin/plugin_config.h`（保持接口头无实现依赖）。
+class ConfigBridge;
+}  // namespace lift::plugin
+
 namespace lift::ui {
 
 class UiBuilder;
@@ -73,6 +79,12 @@ struct UiHostOps {
     //   （剪贴板写失败：`text` 仍然有效、仍要交给 HUD —— 需求单明文"INVALID 仍复制"）。
     // false = 没有开着的窗口（`*err` 填原因）。
     bool (*profile_end)(void* ctx, std::string* text, std::string* err) = nullptr;
+    // ★ D2（2026-11-25）：经典回退 HUD 的 `host.config` 来路（非拥有）。
+    //   nullptr = 没接线 ⇒ 脚本侧 `host.config` 是 **`undefined`**（⛔ 不是抛错：HUD 每帧都要读，
+    //   不能让一个 optional 能力把整个叠层打黑；与 `host.profileBegin` 的"缺接线响亮失败"不同，
+    //   那条是**点击时**的一次性调用，这条是**每帧**的读数面）。
+    //   与 `ctx.config` 同一份 JS 形状 / 同一套校验（`script_quickjs.cpp` 的 6 个 trampoline）。
+    lift::plugin::ConfigBridge* config = nullptr;
 };
 
 // 宿主每帧给脚本的只读读数（⛔ 不含 raster / present —— 用户 2026-11-18 已裁决删除）。
@@ -107,6 +119,13 @@ struct UiFrameReadings {
     //   `hover_key` / `active_key` 空串 = 没有值（脚本侧 `undefined`，⛔ 不编空字符串）。
     std::string hover_key;
     std::string active_key;
+    // ---- 叠层热键读数（D4；`game.overlayKeySeq` 的**唯一**来源）----
+    // ★ `overlay_key_ok == false` ⇒ 宿主这一帧没有按键源（没有 `WindowManager` / headless）
+    //   ⇒ 脚本侧**缺这个键**（`undefined`，⛔ 不编 0：那会让"没按过"与"没有源"长得一样）。
+    // ★ 语义 = **单调计数**：F9 每次按下沿 +1（`runtime/overlay_key.h` 的纯函数 `overlayKeyStep`），
+    //   饱和在 `0xFFFFFFFF`（⛔ 回绕）；不区分重复（这是"按过了"的读数，不是状态）。
+    bool overlay_key_ok = false;
+    std::uint64_t overlay_key_seq = 0;
     // ★ `click` 是**一次性**的：宿主每帧 `takeClick` 取走一次 ⇒ 这一帧看得到，下一次就没有。
     //   x/y = **抬起点**（窗口像素，与命中表同一空间）。
     bool click_ok = false;
@@ -129,6 +148,15 @@ public:
     // 把这一帧的 display list 追加进 builder（调用前 builder 已 clear）。
     // false = 脚本抛错 / 超预算 ⇒ err 必须填（带 origin:line:col）。
     virtual bool render(UiBuilder& builder, const UiFrameReadings& readings, std::string* err) = 0;
+    // ★ D2（2026-11-25）：每帧 render **之后**由 present_sdl 调一次（与 Run 回调末的 `config_`
+    //   flush 同一口径）。默认 no-op：⛔ 不逼所有测试夹具实现；`*warn` 非空 ⇒ 宿主打一行
+    //   `[ui] warn: …`（⛔ flush 不进 2 ms 预算 —— 它不在 Run 回调里）。
+    virtual void flushConfig(std::string* /*warn*/) {}
+    // ★ D2 的生命周期钩子：脚本缓存的 config 桥是**非拥有**指针；桥的实现（`PluginHost`）
+    //   可能**先于**脚本销毁（`aot_main` 里 `plugin_host` 比 `host` / 窗口 sink 后声明 ⇒ 先析构）。
+    //   宿主要在桥失效之前调一次这里（present_sdl 的 `releaseOverlayConfig`），把缓存清掉
+    //   ⇒ 之后的 `flushConfig` 是 no-op（⛔ 不对已销毁的桥调虚函数）。默认 no-op。
+    virtual void forgetConfigBridge() {}
     // 本帧预算：deadline_ns = steady_clock 的绝对纳秒（0 = 不限）；op_limit = 字节码条数上限（0 = 不限）。
     virtual void setBudget(std::uint64_t deadline_ns, std::uint32_t op_limit) = 0;
     virtual bool overran() const = 0;

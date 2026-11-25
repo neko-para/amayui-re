@@ -34,17 +34,22 @@
 //      形状 `{ok,error}` / `{ok,text,error}` 且值逐字来自 C++；领域失败**不抛**；没接线 ⇒ TypeError
 //      点名函数；在 render 之外调用 ⇒ load 失败 + 消息含 `render()`。
 //      红了 ⇒ PROFILE 按钮拿不到结果，或一次失败把整层叠层打死。
+//   ⑩ host-config（D2，2026-11-25）：经典回退 HUD 的 `host.config` 与插件 `ctx.config` **同一形状**
+//      （`{available, domain(id)}`）；有桥 ⇒ 读写走到桥、render 后 flush 一次；**没有桥 ⇒ `undefined`**
+//      （⛔ 不是抛错：这是每帧读数面，optional 能力不能把叠层打黑；与 ⑨ 的 profile 口径故意不同）。
 // ★ 顶层无条件注册 = **pure** 档（AGENTS.md §12.4：判据 = 注册位置）。
 // ★ 只 include 接口头 + FontEngine；⛔ 不 include quickjs.h（那是 script_quickjs.cpp 的特权）。
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "check.h"
+#include "runtime/config.h"
 #include "runtime/font.h"
 #include "ui/canvas.h"
 #include "ui/element.h"
@@ -983,6 +988,140 @@ void caseHostBridge() {
     }
 }
 
+// =======================================================================================
+// ⑩ D2：经典回退 HUD 的 `host.config`（与插件 `ctx.config` **同一份 JS 形状**）
+//   ① 有桥 ⇒ `host.config` = `{available, domain(id)}`：`set` 走到桥、同帧 `get` / `has` 读回；
+//   ② 没有桥 ⇒ `host.config` 是 **`undefined`**（⛔ 不是抛错）—— 与 `host.profileBegin` 的
+//      "缺接线响亮失败"**故意不同**：`host.config` 是**每帧**都要读的 HUD 读数面，一个 optional
+//      能力（没有 `--appdata` / 测试 sink）不该把整个叠层打黑；profile 是**点击时**的一次性调用，
+//      静默 no-op 才是"按了没反应且没有原因"。
+//   ③ 经典脚本的写盘口 = `UiScript::flushConfig`（present_sdl 在 render 之后调一次）⇒ 桥的
+//      `flushIfDirty` 恰好一次。
+// ★ 红了 ⇒ 经典回退 HUD 的 `host.config` 形状与插件面漂了 / 每帧可选的 config 把叠层打死。
+// =======================================================================================
+struct FakeClassicConfig final : lift::plugin::ConfigBridge {
+    bool available_flag = true;
+    int flushes = 0;
+    int sets = 0;
+    std::map<std::string, std::map<std::string, lift::plugin::ConfigValue>> domains;
+
+    bool available() const override { return available_flag; }
+    bool checkDomain(const std::string& id, std::string* why) const override {
+        if (id.empty()) {
+            if (why != nullptr) *why = "domain id 不能为空";
+            return false;
+        }
+        return true;
+    }
+    bool get(const std::string& domain, const std::string& key, lift::plugin::ConfigValue* out,
+             bool* found, std::string* /*why*/) override {
+        *found = false;
+        const auto it = domains.find(domain);
+        if (it == domains.end()) return true;
+        const auto jt = it->second.find(key);
+        if (jt == it->second.end()) return true;
+        *out = jt->second;
+        *found = true;
+        return true;
+    }
+    bool has(const std::string& domain, const std::string& key, bool* found,
+             std::string* /*why*/) override {
+        const auto it = domains.find(domain);
+        *found = it != domains.end() && it->second.find(key) != it->second.end();
+        return true;
+    }
+    bool set(const std::string& domain, const std::string& key,
+             const lift::plugin::ConfigValue& value, lift::plugin::ConfigReceipt* receipt,
+             std::string* /*why*/) override {
+        ++sets;
+        domains[domain][key] = value;
+        *receipt = lift::plugin::ConfigReceipt{true, nullptr};
+        return true;
+    }
+    bool erase(const std::string& domain, const std::string& key, bool* removed,
+               std::string* /*why*/) override {
+        const auto it = domains.find(domain);
+        *removed = it != domains.end() && it->second.erase(key) != 0;
+        return true;
+    }
+    lift::plugin::ConfigValue all(const std::string& domain) override {
+        lift::plugin::ConfigValue out = lift::plugin::ConfigValue::object();
+        const auto it = domains.find(domain);
+        if (it != domains.end()) {
+            for (const auto& kv : it->second) out.put(kv.first, kv.second);
+        }
+        return out;
+    }
+    void flushIfDirty(std::string* warn) override {
+        ++flushes;
+        if (warn != nullptr) warn->clear();
+    }
+};
+
+const char* kClassicHostConfigScript = R"JS(
+globalThis.render = function render() {
+  const c = host.config;
+  if (c === undefined) {
+    ui.text({ x: 0, y: 0, text: 'config=undefined', size: 1 });
+    return;
+  }
+  const d = c.domain('test.view');
+  const r = d.set('on', true);
+  ui.text({ x: 0, y: 0, text: 'available=' + c.available + ';applied=' + r.applied +
+                              ';code=' + ('code' in r) + ';back=' + d.get('on', false) +
+                              ';has=' + d.has('on'), size: 1 });
+};
+)JS";
+
+const char* kClassicHostConfigNoBridgeScript = R"JS(
+globalThis.render = function render() {
+  let call = 'no-throw';
+  try { host.config.domain('test.view'); } catch (e) { call = e.name; }
+  ui.text({ x: 0, y: 0, text: 'config=' + typeof host.config + ';call=' + call, size: 1 });
+};
+)JS";
+
+void caseHostConfig() {
+    auto runtime = lift::ui::makeQuickJsRuntime();
+
+    // ---- ① 有桥：形状 / 读写都走到桥 ----
+    lift_test::g_current_case = "ui-script-quickjs/host-config";
+    {
+        std::unique_ptr<UiScript> script =
+            loadOk(*runtime, kClassicHostConfigScript, "host-config.js");
+        if (!script) return;
+        FakeClassicConfig fake;
+        lift::ui::UiHostOps ops{};
+        ops.ctx = &fake;
+        ops.config = &fake;
+        UiFrameReadings r;
+        r.host = &ops;
+        const std::vector<std::string> texts = renderTexts(*script, r);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(texts.size()), 1);
+        expectText(texts, 0, "available=true;applied=true;code=false;back=true;has=true",
+                   "host.config 的形状与同帧读写（回执 {applied:true}，没有 code 键）");
+        LIFT_CHECK_EQ_I64(fake.sets, 1);
+        // ③ 经典面的写盘口：present_sdl 在 render 之后调一次。
+        std::string warn;
+        script->flushConfig(&warn);
+        LIFT_CHECK(warn.empty());
+        LIFT_CHECK_EQ_I64(fake.flushes, 1);
+    }
+
+    // ---- ② 没有桥：`host.config` 是 undefined（⛔ 不是抛错）----
+    lift_test::g_current_case = "ui-script-quickjs/host-config/no-bridge";
+    {
+        std::unique_ptr<UiScript> script =
+            loadOk(*runtime, kClassicHostConfigNoBridgeScript, "host-config-no-bridge.js");
+        if (!script) return;
+        const std::vector<std::string> texts = renderTexts(*script, UiFrameReadings{});
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(texts.size()), 1);
+        // ★ `call=TypeError` = 对 `undefined` 取属性（JS 语义）；**render 本身成功**才是判据。
+        expectText(texts, 0, "config=undefined;call=TypeError",
+                   "没有桥 ⇒ host.config 是 undefined（每帧读数面不因 optional 能力抛错）");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -994,6 +1133,7 @@ int main() {
     caseKeyOnRect();
     caseFramesPos();
     caseHostBridge();
+    caseHostConfig();
     caseValueStress();
     return lift_test::finish("ui-script-quickjs");
 }

@@ -39,39 +39,57 @@
 
 | 区间 `[lo,hi)` | 是什么 | 复现命令 | 读数日期 |
 |---|---|---|---|
-| `[0x579C,0x5860)` | **主轮询体**：进图完成、开始等输入。★ 目前唯一被用过的门（`await position FIELD 0x579C 0x5860`） | 见下 ①（插件门）/ ②（配方里的同一区间） | **2026-11-25 插件门 2/2**（headless 与 window 各一次，都命中本区间）；历史：2026-11-22 配方侧 4/4（出处 `apps/emulator-lift/scripts/recipes/save07-battle.plan` 的 ①–④ 头注释） |
+| `[0x579C,0x5860)` | **主轮询体**：进图完成、开始等输入。★ 目前唯一被用过的门（`await position FIELD 0x579C 0x5860`） | 见下 ①（开关的常驻读数）/ ②（读档链到 FIELD）/ ③（配方里的同一区间） | **2026-11-25 门 2/2**（headless 与 window 各一次，都命中本区间；★ 当时用的是 `--plugin field-point-visible` 的**自驱读档版本** —— 那条自驱链已删，同一区间现在用 ② 复现）；历史：2026-11-22 配方侧 4/4（出处 `apps/emulator-lift/scripts/recipes/save07-battle.plan` 的 ①–④ 头注释） |
 
 - **`[0x579C,0x5860)` 只证明"到地图就绪"，不证明"点击被消费"**：FIELD 上没做过点击负对照 ⇒ `## 待核` 3。
 - 常量位置：`apps/emulator-lift/scripts/plugins/lib/script-positions.js` 的 `FIELD_MAIN_LOOP_LO/HI`（数值只写这一处）。
 
 ```bash
 cd E:/Projects/amayui-re-dev/apps/emulator-lift
-# 0) 私有 appdata：存档必须落在嵌套层（★ 复制到根目录 ⇒ 读档列表为空、点行没反应）
-bash scripts/clean-appdata.sh ../../.tmp/field-model/appdata
-# 0') 插件配置写在 **appdata 根**（与 Local/ 同级；⛔ 不在 SAVE/ 下）
-cat > ../../.tmp/field-model/appdata/plugin-config.json <<'JSON'
-{"version":1,"domains":{"field.point-visible":{"slot":10,"on":1,"hold":3000}}}
-JSON
-# ① 插件门：载入槽 10（SAVE10 → FIELD）→ 等主轮询体 → 改派生渲染位
-#    ★ 不带 --plugin-param：参数来自上面那份 plugin-config.json（域 field.point-visible）。
-#    ★ S1 起用 **id**（`--plugin <id>` 只查 scripts/plugins/ 根，非递归；路径写法也仍然可用）。
+# ① `field-point-visible` = **常驻开关**（父级裁决 2026-11-25）：⛔ 不读档 / ⛔ 不点鼠标 / ⛔ 不写盘 /
+#    ⛔ 不 finish。它只在**玩家自己**进 FIELD 时把派生渲染位里类型命中的槽清 `HIDE|ALPHA0`
+#    （`50ff9f` 是 VM 每次进图重算的表 ⇒ 每次进图重新施加，`poll` 节流）。
+#    ★ 开关参数写在 **appdata 根**（与 Local/ 同级；⛔ 不在 SAVE/ 下）：
+#      {"version":1,"domains":{"field.point-visible":{"on":1}}}
+#      域 key：on（bool/0-1，缺省 0）/ types（hex 串或数组）/ poll（毫秒，缺省 250；0 = 每个读点）/
+#      diag（0/1）。★ 旧配置里的 slot / hold 被**无害忽略**（不再读档、不再一次性结束）。
+#    ★ 验收 = **玩家自己读档**：--overlay --plugin field-point-visible（`--plugin` 与 --input-plan /
+#      --control-root 互斥 ⇒ 没有"输入计划驱动"这条验收）；FIELD 的自动化复现归 ②。
+mkdir -p ../../.tmp/field-model/appdata
+printf '{"version":1,"domains":{"field.point-visible":{"on":0}}}\n' \
+  > ../../.tmp/field-model/appdata/plugin-config.json
 ./out/emulator-lift-aot.exe \
   --game-dir ../../links/install --appdata ../../.tmp/field-model/appdata \
-  --present headless --skip-logo --audio off --time-limit 180 --log-level warn \
+  --present headless --skip-logo --audio off --time-limit 20 --log-level warn \
   --plugin field-point-visible
-# 读数（2026-11-25 / win32 / dev `996bafa`+本轮 / headless）：
-#   load-save: page 1 (target 1, slot 10) → row hovered → SBUNKI hit → reached FIELD.BIN
-#   field-points: FIELD 就绪 ⇒ switch on=1 types=0x1f,0x20
-#   field-points: forced=3/3（slot 10: 0x5→0x0 / slot 11: 0x3→0x2 / slot 12: 0x3→0x2）
-#   field-points: after map=0xb instance=0x1 live_slots=21
-#   readout：calls=9 run=finished exit=0 reason=field-points: survived
-#   （2026-11-25 / win32 / dev 本轮 / `out/emulator-lift-aot.exe` / `--present headless`；
-#    本条读数用 cmd 重定向采集：PowerShell `Start-Process -RedirectStandard*` 的几次跑在**首个
-#    回调**上撞了宿主安全网（20 ms 墙钟），日志/forced 都对、只有 readout 是 failed ⇒ 未取）
-# ★ 回退（夹具 / 诊断）：config 里没给的 key 才吃命令行：
-#   --plugin-param slot=10 --plugin-param on=1 --plugin-param hold=3000
+# 读数（2026-11-25 / win32 / dev 本轮 / headless / on=0 基线；★ 没人读档 ⇒ 进程一直停在标题）：
+#   [plugin] info: field-points: on=0 types=0x1f,0x20 poll=250（常驻开关：…）   ← 只这一行（关着不做事）
+#   readout：file=…/field-point-visible.js entry=default render=no callbacks=yes
+#            params=- calls=79 run=waiting
+#   stop   ：time-limit @ eip=0041284C（正常结局）；exit=0
+#   ★ 79 = 20 s ÷ 250 ms 的轮询（+ start）：常驻 → 由 --time-limit 收口，⛔ 不是 finish。
+#   ★ on=1 时进 FIELD 的效果面判据在**纯档**：CTest `plugin-runtime` 的 `plugin/field-switch-apply`
+#     （假 guest：命中槽清两位 / 类型不命中不动 / 已经可见就不再写 / 换图实例号变 ⇒ 重新施加 /
+#     `on=0` 一个 global 都不写）。真机（人读档进 FIELD）的 `field-points: forced=` 读数见 `## 待核` 8。
+#   ★ 常驻/不自驱的守卫：CTest `plugin-field-switch`
+#     （静态：代码里没有 input / loadSave / bootToTitle / chains / finish / quit；
+#      e2e：headless 真子进程无 --input-plan ⇒ 没有 boot:/load: 行、run=waiting、首行 on=0）。
 
-# ② 配方里的同一区间（历史读数）
+# ② 自动化到 FIELD 的复现（不是本开关）：读档链 + 场景入口 `scenario-save10-field.js`
+#    ★ 存档必须落在**嵌套层** `<appdata>/Local/Eushully/天結いキャッスルマイスター/SAVE/`
+#      （放根目录 ⇒ 读档列表为空、点行不弹确认框 ⇒ `load-save: gate timeout (load:sbunki)`）。
+#    ★ 命令形状取自该入口的文件头（域 `scenario.save10-field`，缺省 slot 10 / expect FIELD.BIN）：
+#      {"version":1,"domains":{"scenario.save10-field":{"slot":10,"expect":["FIELD.BIN"]}}}
+#      ⚠ 本轮**没有复跑**这条（本轮改的是开关，不是复现链）；读数口径见
+#      `docs/03-emulator/plugin-runtime.md` §C2c（同一个 lib/save.js 链：page → row → SBUNKI → FIELD.BIN）。
+bash scripts/clean-appdata.sh ../../.tmp/field-model/appdata
+./out/emulator-lift-aot.exe \
+  --game-dir ../../links/install --appdata ../../.tmp/field-model/appdata \
+  --present headless --skip-logo --audio off --time-limit 90 --log-level info \
+  --plugin scenario-save10-field
+# 本表那一行 [0x579C,0x5860) 的 2026-11-25 读数（headless / window 各 1 次）当时就是用
+# 这条链读档后取到的 —— 与"谁点的鼠标"无关，区间判据只有 {script,pos}。
+# ③ 配方里的同一区间（历史读数）
 rg -n "await position FIELD" apps/emulator-lift/scripts/recipes/save07-battle.plan
 # 读数：51:await position FIELD 0x579C 0x5860 timeout 300000
 ```
@@ -256,7 +274,8 @@ node .tmp/field-skill-hint/dis-one.mjs .tmp/field-skill-hint/SETMAPTEX.BIN --all
    ⚠ 2026-11-24 记的“六次都停在选行后的确认框”**已归因，不是 FIELD 的门**：那几次把 `SAVE*.DAT`
    复制到了 `<--appdata>` **根目录**（引擎实际读 `<--appdata>/Local/Eushully/<标题>/SAVE/`）⇒ 读档列表为空
    ⇒ 点行不弹确认框（`load-save: gate timeout (load:sbunki)`）。2026-11-25 换成嵌套落点后，
-   `slot=10` 的 headless 与 window 各一次都走完 `page 1 → row → SBUNKI → FIELD.BIN`（见 ① 的读数）。
+   同一份存档（当时是 `SAVE10`）的 headless 与 window 各一次都走完 `page 1 → row → SBUNKI → FIELD.BIN`
+   （用 ② 的读档链；★ 那条链当时被 `field-point-visible` 自己带着，现在只归 `scenario-save10-field`）。
    ⇒ 剩下的未知仍只是“FIELD 上哪一段吃 click”，与读档链无关。
 4. **`bit 0x800` / `0x20000` / `0x1000000` / `0x40000`（`5b7e5`）/ `0x10`（`4a5f0` vs `56d69`）的语义**：
    置位条件已核（②表），**含义**没定位。`5b7e5` 只有 5 位（`FIELD.BIN` #2842 处 `lt … 5` 的循环 + #2827 清）⇒
@@ -266,3 +285,9 @@ node .tmp/field-skill-hint/dis-one.mjs .tmp/field-skill-hint/SETMAPTEX.BIN --all
 6. **`i086 5119`**（`FIELD.BIN` 清单行 3770）：只知它把 `0x5119`(=20761=`DRAWOBJ.BIN`) 当参数。
    同一形态在 `ALLMAP`/`CGVIEWER`/`REIGN` 也有（共 4 处）⇒ 像"登记绘制脚本"，但**语义未取证**。
 7. **`MO031A`/`MO032A`**（ALF 19848/19850）与 B 用到的 `B` 版是什么关系（分辨率档？）——未取证。
+8. **`field-point-visible` 在真机（人读档进 FIELD）上的 `on=1` 施加读数**：目前只有
+   ①（`on=0` 常驻基线）与**纯档** `plugin-runtime` 的 `plugin/field-switch-apply`（假 guest 上
+   "命中槽清 `HIDE|ALPHA0` / 不命中不动 / 已经可见不再写 / 换图实例号变 ⇒ 重新施加"）。
+   真机上还缺：`field-points: FIELD 就绪 ⇒ switch on=1 …` + `forced=N/M` 那次读数、以及"每次进图都
+   重新出现 `forced=` / `re-applied after map change`"。要取证须**人**（或带窗 + 手点）读一次档 ——
+   ⛔ 不要为了这条把 `--input-plan` / 控制层塞进 `--plugin`（三者互斥）。

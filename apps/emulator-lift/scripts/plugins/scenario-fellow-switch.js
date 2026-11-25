@@ -61,6 +61,7 @@
 
 import { bootToTitle } from "./lib/boot-to-title.js";
 import { route } from "./lib/chains.js";
+import { awaitPosition, awaitScript, failOnTimeout, failOnUnknown } from "./lib/gates.js";
 import { loadSave } from "./lib/save.js";
 import {
     FELLOW_POLL_HI,
@@ -157,17 +158,21 @@ const scenario = {
     // 载入链到终态 ⇒ 本函数被调起（`onLoaded`）：此刻脚本已是 `REIGN.BIN`（或先到 `FIELD.BIN`）。
     start(ctx) {
         ctx.log("info", "scenario-fellow: save loaded ⇒ 等 REIGN 的输入回调体（目录屏就绪）");
-        return ctx.trigger.afterPosition(SCRIPT_REIGN, REIGN_CALLBACK_LO, REIGN_CALLBACK_HI, {
-            name: REIGN_NAME,
-            timeoutMs: REIGN_TIMEOUT_MS,
-        });
+        return awaitPosition(
+            ctx,
+            SCRIPT_REIGN,
+            REIGN_CALLBACK_LO,
+            REIGN_CALLBACK_HI,
+            REIGN_NAME,
+            REIGN_TIMEOUT_MS,
+        );
     },
 
     onTrigger(ctx, ev) {
         // 场景自己的门超时：响亮收口（⛔ 不静默 done）。⚠ 这里**不** `profile.end()`：超时那拍可能没有开着的
         // 窗口，硬关会抛错（`ctx.profile.end` 对"没开窗"是 TypeError）；半开的窗口随 Run 收口一起放着。
         if (ev.kind === "timeout") {
-            ctx.finish(5, `scenario-fellow: gate timeout (${ev.name})`);
+            failOnTimeout(ctx, ev, "scenario-fellow");
             return [];
         }
         const name = String(ev.name);
@@ -179,11 +184,13 @@ const scenario = {
                 `scenario-fellow: REIGN 回调体到了 ⇒ move (${REIGN_MENU_X},${REIGN_MENU_Y}) 并等这一趟的读输入段`,
             );
             ctx.input.move(REIGN_MENU_X, REIGN_MENU_Y);
-            return ctx.trigger.afterPosition(
+            return awaitPosition(
+                ctx,
                 SCRIPT_REIGN,
                 REIGN_READ_INPUT_LO,
                 REIGN_READ_INPUT_HI,
-                { name: REIGN_CLICK_NAME, timeoutMs: REIGN_TIMEOUT_MS },
+                REIGN_CLICK_NAME,
+                REIGN_TIMEOUT_MS,
             );
         }
 
@@ -195,11 +202,13 @@ const scenario = {
                 `scenario-fellow: REIGN 读输入段到了 ⇒ right click (${REIGN_MENU_X},${REIGN_MENU_Y}) 进 FELLOW`,
             );
             ctx.input.click(REIGN_MENU_X, REIGN_MENU_Y, "right");
-            return ctx.trigger.afterPosition(
+            return awaitPosition(
+                ctx,
                 SCRIPT_FELLOW,
                 FELLOW_READ_INPUT_LO,
                 FELLOW_READ_INPUT_HI,
-                { name: fellowName(0), timeoutMs: FELLOW_TIMEOUT_MS },
+                fellowName(0),
+                FELLOW_TIMEOUT_MS,
             );
         }
 
@@ -212,28 +221,26 @@ const scenario = {
             );
             ctx.profile.begin(sw.label);
             ctx.input.click(sw.x, PORTRAIT_Y);
-            return ctx.trigger.afterScript(SCRIPT_SETTOOLLIST, {
-                name: toolName(iFellow),
-                timeoutMs: SWITCH_TIMEOUT_MS,
-            });
+            return awaitScript(ctx, SCRIPT_SETTOOLLIST, toolName(iFellow), SWITCH_TIMEOUT_MS);
         }
 
         const iTool = stepOf(name, "tool");
         if (iTool >= 0) {
             ctx.log("info", "scenario-fellow: SETTOOLLIST 到了 ⇒ 等回到 FELLOW");
-            return ctx.trigger.afterScript(SCRIPT_FELLOW, {
-                name: backName(iTool),
-                timeoutMs: SWITCH_TIMEOUT_MS,
-            });
+            return awaitScript(ctx, SCRIPT_FELLOW, backName(iTool), SWITCH_TIMEOUT_MS);
         }
 
         const iBack = stepOf(name, "back");
         if (iBack >= 0) {
             ctx.log("info", "scenario-fellow: 回到 FELLOW ⇒ 等主轮询体（切换完成后的稳态）");
-            return ctx.trigger.afterPosition(SCRIPT_FELLOW, FELLOW_POLL_LO, FELLOW_POLL_HI, {
-                name: settleName(iBack),
-                timeoutMs: SWITCH_TIMEOUT_MS,
-            });
+            return awaitPosition(
+                ctx,
+                SCRIPT_FELLOW,
+                FELLOW_POLL_LO,
+                FELLOW_POLL_HI,
+                settleName(iBack),
+                SWITCH_TIMEOUT_MS,
+            );
         }
 
         const iSettle = stepOf(name, "settle");
@@ -243,11 +250,13 @@ const scenario = {
             const next = iSettle + 1;
             if (next < SWITCHES.length) {
                 // 下一轮的第一件事与第一轮同形：等 FELLOW 的**输入读段**（点得进去的那一档）再点。
-                return ctx.trigger.afterPosition(
+                return awaitPosition(
+                    ctx,
                     SCRIPT_FELLOW,
                     FELLOW_READ_INPUT_LO,
                     FELLOW_READ_INPUT_HI,
-                    { name: fellowName(next), timeoutMs: SWITCH_TIMEOUT_MS },
+                    fellowName(next),
+                    SWITCH_TIMEOUT_MS,
                 );
             }
             ctx.log("info", `scenario-fellow: ${SWITCHES.length} 次切换全部走完`);
@@ -255,7 +264,7 @@ const scenario = {
             return [];
         }
 
-        ctx.fail(name, `unknown state: ${name}`);
+        failOnUnknown(ctx, ev);
         return [];
     },
 };

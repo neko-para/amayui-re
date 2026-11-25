@@ -1,4 +1,9 @@
 {
+  // ★ 本工程 = `pnpm typecheck` 的**最后一档**（独立一条 `tsc -p …/examples/tsconfig.json`）。
+  //   为什么单列而不并进 base 的 include：flags 比 base 更严（见下），且 `.ts` 不能被宿主 QJS 装载
+  //   （它只读外置 `.js`）⇒ 这是"只看 `plugin.d.ts` 能不能写出插件"的可执行样本。
+  //   漂移样例的口径：`script` 名必须是 marker 文件名（含 `.BIN`，精确相等）—— 本目录里的裸名
+  //   `"TITLE"` / `"SBUNKI"` 是**占位**，⛔ 不要照抄（`plugin.d.ts` 的用法段已写成 `.BIN`）。
   "extends": "../../tsconfig.json",
   "compilerOptions": {
     "noUncheckedIndexedAccess": true,

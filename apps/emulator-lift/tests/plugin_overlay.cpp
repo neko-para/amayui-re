@@ -20,6 +20,10 @@
 //   ⑤ **⛔ 叠层不写 guest**：整轮 `SurfaceArena` 的 guest 像素逐字节不变（硬边界）。
 //   ⑥ **release 收口**：`releaseOverlayScript()` 之后 `overlayEnabled()==false`、命中路由摘掉、
 //      下一帧窗口像素回到 guest 色（证明"摘掉之后不再画"，而不是只把指针藏起来）。
+//   ⑦ **D2 config flush 的落点**：`present_sdl` 在**每帧 render 之后**无条件调一次
+//      `UiScript::flushConfig`（不看成败）；`releaseOverlayConfig()` 再 flush 一次并摘掉脚本里的
+//      桥缓存（桥的实现 `PluginHost` 比窗口先析构 ⇒ 不摘就是 shutdown 时 use-after-free）。
+//      计数替身（`CountingConfigBridge`）在本文件里数次数：三次 `submitFrame` ⇒ 3 次、release ⇒ 4 次。
 //
 // ★ pure 档（顶层 `add_test`，`AGENTS.md` §12.4 判据 = 注册位置）：不需要游戏安装 / GPU / 真桌面
 //   —— `SDL_VIDEODRIVER=dummy` + software 渲染器（与 `tests/overlay.cpp` 的 renderer 路径同一条）。
@@ -37,6 +41,7 @@
 
 #include "check.h"
 #include "plugin/plugin_host.h"      // 真 PluginHost（覆盖 setFont 转发）
+#include "runtime/config.h"          // D2：`flushConfig` 的计数替身（ConfigBridge）
 #include "runtime/font.h"            // FontEngine::fontFileAvailable（窄 SKIP）
 #include "runtime/host_window.h"     // WindowManager（唯一输入设备面）
 #include "runtime/input_device.h"    // MouseButton / InputSource
@@ -48,6 +53,40 @@
 #include "ui/script.h"               // UiScript（adopt 的形参类型）
 
 namespace {
+
+// ★ D2（2026-11-25）：`present_sdl` 每帧 render 之后**无条件**调一次 `UiScript::flushConfig`
+//   （不看成败）。这里用"只数次数"的桥证明那条接线：本夹具的脚本**不写** config，计数照样增长。
+//   ⛔ 若 flush 被挪回 Run 回调 / 只在该帧成功时调，本文件的三次计数当场红。
+struct CountingConfigBridge final : lift::plugin::ConfigBridge {
+    int flushes = 0;
+    bool available() const override { return false; }
+    bool checkDomain(const std::string&, std::string*) const override { return true; }
+    bool get(const std::string&, const std::string&, lift::plugin::ConfigValue*, bool* found,
+             std::string*) override {
+        *found = false;
+        return true;
+    }
+    bool has(const std::string&, const std::string&, bool* found, std::string*) override {
+        *found = false;
+        return true;
+    }
+    bool set(const std::string&, const std::string&, const lift::plugin::ConfigValue&,
+             lift::plugin::ConfigReceipt* receipt, std::string*) override {
+        *receipt = lift::plugin::ConfigReceipt{false, "no_appdata"};
+        return true;
+    }
+    bool erase(const std::string&, const std::string&, bool* removed, std::string*) override {
+        *removed = false;
+        return true;
+    }
+    lift::plugin::ConfigValue all(const std::string&) override {
+        return lift::plugin::ConfigValue::object();
+    }
+    void flushIfDirty(std::string* warn) override {
+        ++flushes;
+        if (warn != nullptr) warn->clear();
+    }
+};
 
 // 夹具 JS：判据全在脚本里（宿主只读"render 返回 true"与像素）。⛔ 不放行任何"画不出也算过"的分支。
 constexpr const char* kPluginOverlaySource = R"JS(
@@ -219,9 +258,17 @@ int main() {
     LIFT_CHECK(wm.uiInputRouter() != nullptr);  // 插件画的按钮能进命中表（注入点击会问它）
 
     // ---- ②③④ 像素判据：插件 render 的 display list 真的上屏；三键电平来自真实输入设备 ----
+    // ★ D2：先把"每帧 render 之后 flush 一次"的计数桥接到渲染面（生产 = `aot_main` 的
+    //   `setUiHostOps` 同一时刻；`--plugin` 的 `PluginHost` 也实现同一个桥）。
+    CountingConfigBridge config_bridge;
+    lift::ui::UiHostOps config_ops{};
+    config_ops.ctx = &config_bridge;
+    config_ops.config = &config_bridge;
+    win.setUiHostOps(&config_ops);
     // 有源、左键**未按** ⇒ `#CCAA22`（⛔ 不是 `#112233` 那张"没有源"的色 —— 缺键会当场红）。
     g_current_case = "plugin-overlay/render-up";
     LIFT_CHECK(win.submitFrame(f.arena, *f.s, &err));
+    LIFT_CHECK_EQ_I64(config_bridge.flushes, 1);
     std::uint32_t rgb = 0;
     LIFT_CHECK(windowRgb(win, 0, 0, &rgb, &err));
     std::printf("plugin-overlay/render-up: (0,0)=#%06X want #%06X\n", rgb, kColorUp);
@@ -238,6 +285,7 @@ int main() {
     const lift::WriteResult press = wm.setMouseButton(lift::MouseButton::Left, true, lift::InputSource::Script);
     LIFT_CHECK(press.accepted);
     LIFT_CHECK(win.submitFrame(f.arena, *f.s, &err));
+    LIFT_CHECK_EQ_I64(config_bridge.flushes, 2);
     LIFT_CHECK(windowRgb(win, 0, 0, &rgb, &err));
     std::printf("plugin-overlay/render-down: (0,0)=#%06X want #%06X\n", rgb, kColorDown);
     LIFT_CHECK_EQ_U32(rgb, kColorDown);
@@ -247,6 +295,7 @@ int main() {
     const lift::WriteResult release = wm.setMouseButton(lift::MouseButton::Left, false, lift::InputSource::Script);
     LIFT_CHECK(release.accepted);
     LIFT_CHECK(win.submitFrame(f.arena, *f.s, &err));
+    LIFT_CHECK_EQ_I64(config_bridge.flushes, 3);
     LIFT_CHECK(windowRgb(win, 0, 0, &rgb, &err));
     LIFT_CHECK_EQ_U32(rgb, kColorUp);
 
@@ -255,7 +304,11 @@ int main() {
     LIFT_CHECK(guestBytes(f) == guest_before);
 
     // ---- ⑥ release：摘掉 adopted ⇒ 不再画、router 摘掉、像素回 guest 色 ----
+    //   ★ D2：生产顺序（`aot_main` ⑥'）＝先 `releaseOverlayConfig`（flush + 摘缓存，桥还活着）
+    //     再 `releaseOverlayScript`。摘掉缓存之后 shutdown 的 flush 必须是 no-op（⛔ 不碰已死对象）。
     g_current_case = "plugin-overlay/release";
+    win.releaseOverlayConfig();
+    LIFT_CHECK_EQ_I64(config_bridge.flushes, 4);
     win.releaseOverlayScript();
     LIFT_CHECK(!win.overlayEnabled());
     LIFT_CHECK(wm.uiInputRouter() == nullptr);

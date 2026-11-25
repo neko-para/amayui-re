@@ -111,6 +111,7 @@
 
 // ★ 位置常量是**同目录的兄弟模块**（`./script-positions.js` / `./guest-globals.js`）。
 //   本文件从"已经在 TITLE"开始 ⇒ TITLE 门在 `./boot-to-title.js` 里（由**根入口**组合），不在本文件。
+import { failOnTimeout, failOnUnknown } from "./gates.js";
 import { readSavePage } from "./guest-globals.js";
 import {
     SAVE_INPUT_CALLBACK_HI,
@@ -235,19 +236,34 @@ export const SAVE_DIR_REL = "Local/Eushully/天結いキャッスルマイスタ
 // 文件名形状**已取证**的槽上界（两位 `%2.2d`）：0..99。`slot > 99` ⇒ 跳过检查 + warn。
 const SAVE_FILE_PRECHECK_MAX_SLOT = 99;
 
-/** `SAVE<NN>.DAT` 的 `%2.2d` 零填充（槽 7 ⇒ `SAVE07.DAT`）。 */
+/**
+ * `SAVE<NN>.DAT` 的 `%2.2d` 零填充（槽 7 ⇒ `SAVE07.DAT`）。
+ *
+ * @param {number} n 槽号。
+ * @returns {string}
+ */
 function pad2(n) {
     return String(n).padStart(2, "0");
 }
 
 // ★ 沙箱里**没有 RegExp**（`script_quickjs.cpp` 的 `JS_NewContextRaw` + BaseObjects）⇒ 本文件
 //   一律用字符 / `split` / `endsWith` 处理路径，⛔ 不写正则字面量。
-/** ASCII 字母判定（`C:` 这种盘符前缀；⛔ 不用正则）。 */
+/**
+ * ASCII 字母判定（`C:` 这种盘符前缀；⛔ 不用正则）。
+ *
+ * @param {string} ch 单个字符。
+ * @returns {boolean}
+ */
 function isAsciiLetter(ch) {
     return (ch >= "A" && ch <= "Z") || (ch >= "a" && ch <= "z");
 }
 
-/** 去掉末尾的 `/` / `\`（保留 "" / "C:" 这种形状；⛔ 不用正则）。 */
+/**
+ * 去掉末尾的 `/` / `\`（保留 "" / "C:" 这种形状；⛔ 不用正则）。
+ *
+ * @param {string} text 待去尾的路径。
+ * @returns {string}
+ */
 function stripTrailingSeparators(text) {
     let out = text;
     while (out.length > 1 && (out.endsWith("/") || out.endsWith("\\"))) out = out.slice(0, -1);
@@ -578,9 +594,9 @@ export function loadSave(slot, options = {}) {
         },
 
         onTrigger(ctx, ev) {
+            // D-C2C-2：门超时 = finish(5)（⛔ 不用 quit：归因会变成 `plugin: quit`）。
             if (ev.kind === "timeout") {
-                // D-C2C-2：门超时 = finish(5)（⛔ 不用 quit：归因会变成 `plugin: quit`）。
-                ctx.finish(5, `load-save: gate timeout (${ev.name})`);
+                failOnTimeout(ctx, ev, "load-save");
                 return [];
             }
             switch (ev.name) {
@@ -639,7 +655,7 @@ export function loadSave(slot, options = {}) {
                     if (ev.name.startsWith(LOAD_EXPECT_PREFIX)) {
                         return reached(ctx, ev.name.slice(LOAD_EXPECT_PREFIX.length));
                     }
-                    ctx.fail(ev.name, `unknown state: ${ev.name}`);
+                    failOnUnknown(ctx, ev);
                     return [];
             }
         },

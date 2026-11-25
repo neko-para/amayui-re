@@ -1,11 +1,13 @@
 // C2b/S2 夹具 · `plugin/render-surface`：`RenderCtx` 的成员表 = d.ts 的 `RenderCtx` **减 `run`**（C5）。
 //
 // 判据（红了意味着什么）：形状与 d.ts 漂了 ——
-//   · **多**一个成员（把 RunCtx 的写面带进 render：edit/input，或 Run 语境的 state/now/…）；
+//   · **多**一个成员（把 RunCtx 的写面带进 render：edit/input/config，或 Run 语境的 state/now/…）；
 //   · **少**一个成员（插件写不出来：ui/draw/read/game/params/log，或 S2 的 profile）；
 //   · `read.frameHash` 又"有值"了（D-C2-6：C2 **不安装** ⇒ 必须是 undefined）；
-//   · S2 的 `game` 读数 getter（frame 恒有；fps/script/worst/click/hover/active 无源 ⇒ undefined）
-//     与 `profile.begin/end` 缺失。
+//   · S2 的 `game` 读数 getter（frame 恒有；fps/script/worst/click/hover/active/overlayKeySeq
+//     无源 ⇒ undefined）与 `profile.begin/end` 缺失。
+// ★ 2026-11-25 父级收窄：`config` **不在** `RenderCtx`（仍恰好 7 成员）⇒ 它在 FORBIDDEN 里；
+//   要 config 的是经典回退 HUD 的 `host.config`（`ui-script-quickjs/host-config` 判）。
 // ★ `do-nothing` 地成功也算过 —— 但这个夹具**只在形状对时**不抛；宿主侧判据是 render 返回 true。
 const FORBIDDEN = [
     "edit",
@@ -13,6 +15,7 @@ const FORBIDDEN = [
     "trigger",
     "state",
     "now",
+    "config",
     "fail",
     "finish",
     "quit",
@@ -47,7 +50,7 @@ const plugin = {
         if (typeof ctx.game.mouse !== "function") bad.push("missing:game.mouse");
         if (typeof ctx.game.localFrames !== "function") bad.push("missing:game.localFrames");
         if (ctx.game.frame !== 0) bad.push("game.frame:" + String(ctx.game.frame));
-        for (const key of ["fps", "script", "worst", "click", "hover", "active"]) {
+        for (const key of ["fps", "script", "worst", "click", "hover", "active", "overlayKeySeq"]) {
             if (typeof ctx.game[key] !== "undefined") bad.push("game." + key + ":" + String(ctx.game[key]));
         }
         // ---- ui / params / log ----

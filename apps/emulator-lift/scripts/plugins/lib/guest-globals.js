@@ -62,12 +62,16 @@ export function readSavePage(ctx) {
     return page | 0;
 }
 
-/** 十进制 → `0x…`（日志用；只在本文件里用，⛔ 不是位置常量）。 */
 /**
- * @param {number} value
+ * 十进制 → `0x…`（**日志用**；⛔ 不是位置常量 —— 位置只在 `./script-positions.js`）。
+ *
+ * ★ 2026-11-25 起**导出**：`../field-point-visible.js` 曾抄了一份逐字相同的实现（两份日志格式
+ *   会各自漂）。⛔ 不要把它当"十六进制解析"用（`types` 的 hex 串是 `parseTypes` 的事）。
+ *
+ * @param {number} value 非负 / 负数都按 32 位无符号打印（`>>> 0`）。
  * @returns {string}
  */
-function hex(value) {
+export function hex(value) {
     return "0x" + (value >>> 0).toString(16);
 }
 

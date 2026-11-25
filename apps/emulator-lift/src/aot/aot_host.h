@@ -383,6 +383,11 @@ public:
     //   返回**成员**地址（生命周期 = 本宿主）；`aot_main` 在 `--overlay` 时交给 sink。
     //   ⛔ 不要把 ops 建在 `aot_main` 的局部变量里（析构顺序反了：局部先于 host 亡）。
     const ui::UiHostOps* uiHostOps();
+    // ★ D2（2026-11-25）：把 `PluginHost` 的 config 桥挂进 `ui_host_ops_.config`（**非拥有**）。
+    //   调用时机 = 插件宿主建好之后、第一帧渲染之前（`aot_main` 的 `setUiHostOps` 同一段）。
+    //   nullptr = 没接 ⇒ 经典 `host.config` 是 `undefined`（⛔ 不是抛错）。
+    //   ⛔ 本头不 include `plugin/` 的具体类型：只认 `lift::plugin::ConfigBridge` 指针。
+    void setConfigBridge(lift::plugin::ConfigBridge* bridge) { ui_host_ops_.config = bridge; }
     // 窗口标记的落点（`InputPlan::ProfileMarkHook` 的 thunk）：begin ⇒ 开窗，end ⇒ 打表 + 关窗。
     // ★ 静态 + `void*` 上下文 = 与 `InputPlan` 的 C 形状钩子对齐（⛔ 不用 std::function：
     //   那会在每个读点付一次间接跳转，而"缺省零成本"是硬口径）。`aot_main.cpp` 取它的地址。

@@ -19,6 +19,9 @@
 //     `timeoutMs` / `precheck`）都支持 params 回退（后三个是 2026-11-25 加的，值 = 字符串）。
 //   · 默认：`expect` 缺 ⇒ `FIELD,SC0000` 并打一行 info；`slot` 没有默认值（缺 ⇒ `loadSave` 响亮 throw）。
 // ★ "给了"的判据是 `has()`（⛔ 不是真值）：`slot: 0` 这种 falsy 值也算给了。
+// ★ 2026-11-25：**取配置的六件事全部搬进 `./lib/settings.js`**（`openConfigDomain` / `slotSetting` /
+//   `scriptListSetting` / `textSetting` / `intSetting` / `boolSetting`）；本文件只保留"哪几个 key + 默认值"。
+//   行为逐字不变（`slot` 的整数校验 / `expect` 归一 / `precheck` 并集语义 / `timeoutMs` 的正整数）。
 //
 // `slot`：非整数 / 越界 ⇒ `loadSave` 构造时 throw ⇒ 宿主记 `run=failed`（进程 exit 不受影响）。
 // `expect`：裸名自动补 `.BIN`，带 `.BIN` 也接受。
@@ -30,6 +33,14 @@
 import { bootToTitle } from "./lib/boot-to-title.js";
 import { route } from "./lib/chains.js";
 import { loadSave } from "./lib/save.js";
+import {
+    boolSetting,
+    intSetting,
+    openConfigDomain,
+    scriptListSetting,
+    slotSetting,
+    textSetting,
+} from "./lib/settings.js";
 
 /** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
 /** @typedef {{ start: (ctx: RunCtx) => any, onTrigger: (ctx: RunCtx, ev: any) => any }} Chain */
@@ -41,152 +52,33 @@ const CONFIG_DOMAIN = "save";
 const DEFAULT_EXPECT = ["FIELD.BIN", "SC0000.BIN"];
 
 /**
- * 配置文件可用才返回域对象（否则 null ⇒ 完全按旧的 `ctx.params` 行为）。
- *
- * @param {RunCtx} ctx
- * @returns {import("@amayui/lift-plugin").ConfigDomain | null}
+ * @typedef {import("@amayui/lift-plugin").ConfigDomain} ConfigDomain
  */
-function configDomainOrNull(ctx) {
-    const config = ctx.config;
-    if (config === undefined || config === null || config.available !== true) return null;
-    return config.domain(CONFIG_DOMAIN);
-}
-
-/** 这个 key 在 config 里"给了"吗（`has()`，⛔ 不看真值）。 */
-function hasConfig(domain, key) {
-    return domain !== null && domain.has(key);
-}
 
 /**
- * `slot`：config 优先；config 没给 ⇒ `Number(ctx.params.slot)`（旧行为；缺 ⇒ NaN ⇒ `loadSave` throw）。
+ * 本入口的四个可选值：**唯一**的取配置入口 = `./lib/settings.js`（2026-11-25 抽取）。
+ * ★ 这里的顺序就是"config > `--plugin-param` > 默认"；`slot` 的"没给"仍交给 `loadSave`（NaN / 越界）。
  *
- * @param {RunCtx} ctx
- * @param {import("@amayui/lift-plugin").ConfigDomain | null} domain
- * @returns {number}
+ * @param {RunCtx} ctx RunCtx。
+ * @param {ConfigDomain | null} domain 域对象（不可用 = null）。
+ * @returns {LoadSaveOptions}
  */
-function slotSetting(ctx, domain) {
-    if (hasConfig(domain, "slot")) {
-        const value = domain.get("slot");
-        if (typeof value !== "number" || !Number.isInteger(value)) {
-            throw new Error(`config ${CONFIG_DOMAIN}.slot 必须是整数（收到 ${String(value)}）`);
-        }
-        return value;
-    }
-    return Number(ctx.params["slot"]);
-}
-
-/**
- * `expect`：逗号串 / string[] → string[]（裸名补 `.BIN`）。非法 ⇒ 构造时 throw。
- *
- * @param {unknown} value
- * @returns {string[]}
- */
-function normalizeExpect(value) {
-    /** @type {string[]} */
-    const out = [];
-    const push = (item) => {
-        if (typeof item !== "string" || item.trim() === "") {
-            throw new Error(`config ${CONFIG_DOMAIN}.expect 的元素必须是非空字符串（收到 ${String(item)}）`);
-        }
-        const name = item.trim();
-        out.push(name.endsWith(".BIN") ? name : name + ".BIN");
-    };
-    if (Array.isArray(value)) {
-        for (const item of value) push(item);
-    } else if (typeof value === "string") {
-        for (const part of value.split(",")) {
-            if (part.trim().length !== 0) push(part);
-        }
-    } else {
-        throw new Error(`config ${CONFIG_DOMAIN}.expect 必须是 string[] 或逗号串（收到 ${typeof value}）`);
-    }
-    if (out.length === 0) {
-        throw new Error(`config ${CONFIG_DOMAIN}.expect 给空了（要么不给，要么给 ["FIELD.BIN"]）`);
-    }
-    return out;
-}
-
-/**
- * `--plugin-param expect=FIELD,SC0000` → string[]（裸名补 `.BIN`）；没给 ⇒ null。
- *
- * @param {Readonly<Record<string, string | null | undefined>>} params
- * @returns {string[] | null}
- */
-function expectFromParams(params) {
-    const raw = params["expect"];
-    if (raw === undefined || raw === null || String(raw).trim() === "") return null;
-    const parts = String(raw).split(",");
-    const out = [];
-    for (let i = 0; i < parts.length; i += 1) {
-        const name = parts[i].trim();
-        if (name.length === 0) continue;
-        out.push(name.endsWith(".BIN") ? name : name + ".BIN");
-    }
-    return out;
-}
-
-/**
- * @param {RunCtx} ctx
- * @param {import("@amayui/lift-plugin").ConfigDomain | null} domain
- * @returns {string[] | null} null = 没给（调用方决定默认值）
- */
-function expectSetting(ctx, domain) {
-    if (hasConfig(domain, "expect")) return normalizeExpect(domain.get("expect"));
-    return expectFromParams(ctx.params);
-}
-
-/**
- * `saveDir`（可选；相对 appdata 根）：config 优先，params 回退。
- *
- * @param {RunCtx} ctx
- * @param {import("@amayui/lift-plugin").ConfigDomain | null} domain
- * @returns {string | undefined}
- */
-function saveDirSetting(ctx, domain) {
-    if (hasConfig(domain, "saveDir")) {
-        const value = domain.get("saveDir");
-        if (typeof value !== "string" || value.trim() === "") {
-            throw new Error(`config ${CONFIG_DOMAIN}.saveDir 必须是非空字符串（收到 ${String(value)}）`);
-        }
-        return value;
-    }
-    const raw = ctx.params["saveDir"];
-    if (raw === undefined || raw === null || String(raw).trim() === "") return undefined;
-    return String(raw);
-}
-
-/**
- * `timeoutMs`（可选；每道门的超时）：config 优先，params 回退；缺 ⇒ undefined（`loadSave` 的默认 30000）。
- *
- * @param {RunCtx} ctx
- * @param {import("@amayui/lift-plugin").ConfigDomain | null} domain
- * @returns {number | undefined}
- */
-function timeoutSetting(ctx, domain) {
-    const raw = hasConfig(domain, "timeoutMs") ? domain.get("timeoutMs") : ctx.params["timeoutMs"];
-    if (raw === undefined || raw === null || String(raw).trim() === "") return undefined;
-    const value = typeof raw === "number" ? raw : Number(raw);
-    if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
-        throw new Error(`config ${CONFIG_DOMAIN}.timeoutMs 必须是正整数（收到 ${String(raw)}）`);
-    }
-    return value;
-}
-
-/**
- * `precheck`（可选；缺省 undefined = true）：config 优先，params 回退（"0"/"1"/true/false）。
- *
- * @param {RunCtx} ctx
- * @param {import("@amayui/lift-plugin").ConfigDomain | null} domain
- * @returns {boolean | undefined}
- */
-function precheckSetting(ctx, domain) {
-    const raw = hasConfig(domain, "precheck") ? domain.get("precheck") : ctx.params["precheck"];
-    if (raw === undefined || raw === null || String(raw).trim() === "") return undefined;
-    if (typeof raw === "boolean") return raw;
-    const text = String(raw).trim().toLowerCase();
-    if (text === "1" || text === "true") return true;
-    if (text === "0" || text === "false") return false;
-    throw new Error(`config ${CONFIG_DOMAIN}.precheck 必须是 boolean（收到 ${String(raw)}）`);
+function optionsFor(ctx, domain) {
+    const expect = scriptListSetting(ctx, domain, "expect", CONFIG_DOMAIN);
+    /** @type {LoadSaveOptions} */
+    const options = { expect: expect === null ? DEFAULT_EXPECT : expect };
+    const saveDir = textSetting(ctx, domain, "saveDir", undefined, { domainId: CONFIG_DOMAIN });
+    if (saveDir !== undefined) options.saveDir = saveDir;
+    const timeoutMs = intSetting(ctx, domain, "timeoutMs", undefined, {
+        min: 1,
+        domainId: CONFIG_DOMAIN,
+        // ★ 逐字保留旧行为：config 里的 `timeoutMs` 也接受 `"5000"`（旧实现是 `Number(raw)`）。
+        coerce: true,
+    });
+    if (timeoutMs !== undefined) options.timeoutMs = timeoutMs;
+    const precheck = boolSetting(ctx, domain, "precheck", undefined, { domainId: CONFIG_DOMAIN });
+    if (precheck !== undefined) options.precheck = precheck;
+    return options;
 }
 
 // ★ 参考入口的链**只构造一次**（一次 Run 内 config / params 不变；链本身无状态 ⇒ 缓存链对象
@@ -207,18 +99,9 @@ let entryChain = null;
  */
 function chainFor(ctx) {
     if (entryChain !== null) return entryChain;
-    const domain = configDomainOrNull(ctx);
-    const slot = slotSetting(ctx, domain);
-    const expect = expectSetting(ctx, domain);
-    /** @type {LoadSaveOptions} */
-    const options = { expect: expect === null ? DEFAULT_EXPECT : expect };
-    const saveDir = saveDirSetting(ctx, domain);
-    if (saveDir !== undefined) options.saveDir = saveDir;
-    const timeoutMs = timeoutSetting(ctx, domain);
-    if (timeoutMs !== undefined) options.timeoutMs = timeoutMs;
-    const precheck = precheckSetting(ctx, domain);
-    if (precheck !== undefined) options.precheck = precheck;
-    const load = loadSave(slot, options);
+    const domain = openConfigDomain(ctx, CONFIG_DOMAIN);
+    const slot = slotSetting(ctx, domain, undefined, CONFIG_DOMAIN);
+    const load = loadSave(slot, optionsFor(ctx, domain));
     const boot = bootToTitle({ onDone: (ctx2) => load.start(ctx2) });
     entryChain = route((ev) => String(ev.name).startsWith("boot:"), boot, load);
     return entryChain;
@@ -227,8 +110,8 @@ function chainFor(ctx) {
 /** @type {Chain} */
 const plugin = {
     start(ctx) {
-        const domain = configDomainOrNull(ctx);
-        if (expectSetting(ctx, domain) === null) {
+        const domain = openConfigDomain(ctx, CONFIG_DOMAIN);
+        if (scriptListSetting(ctx, domain, "expect", CONFIG_DOMAIN) === null) {
             ctx.log(
                 "info",
                 `load-save: expect 未给 ⇒ 用默认 ${DEFAULT_EXPECT.join(",")}` +

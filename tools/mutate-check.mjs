@@ -4558,22 +4558,22 @@ const MUTATIONS = [
       '脚本用 `("return 1")()` 重新编译源码（ui-script-quickjs 的 fn-ctor / global-ctor 断言不是 TypeError）⇒ 红',
   },
 
-  // ── 默认 HUD 脚本（B；守卫 = `tests/ui_hud_script.cpp` 的逐行文案断言）──
-  //   ★ 代表"HUD 少一行 / 版式漂了"这一类**静默**错误：窗口照开、底色照画、一条都不报，
-  //     只是玩家少看到一条读数（`frame`）。判据只能是"脚本产出的文本逐行相等"。
+  // ── 默认 HUD 脚本（B；守卫 = `tests/ui_hud_script.cpp` 的逐行文案 + 版式断言）──
+  //   ★ 代表"HUD 版式漂了"这一类**静默**错误：窗口照开、底色照画、一条都不报，只是面板不再
+  //     贴左 / 不再垂直居中（D4 的父级裁决；`(0,360)` 的像素判据也会跟着红）。
   //   ★ 脚本是**运行时读**的外置文件（`scripts/ui/hud.js`）⇒ 变异不需要重编产品；但 mutation
   //     仍会建该 CTest 的可执行 target（`buildTarget`），这是可接受的代价。
-  //   ★ 为什么是这一行：它**总是**存在（其它行都带"拿到才写"的开关），删掉必然让行数从 5 变 4
-  //     ⇒ 断言立刻落空；改颜色（BG）则会同时让窗口像素判据红（那是另一条判据线）。
+  //   ★ 为什么是这一行：`y = round((720 - panelH) / 2)` 是 D4 版式的**唯一**算术（每帧按行数重算）；
+  //     改成 0 ⇒ `ui-hud-script` 的 `2*y+panelH ∈ {720,721}` 立刻落空（`frame` 行那条旧锚已作废）。
   {
     file: 'apps/emulator-lift/scripts/ui/hud.js',
-    from: '  lines.push("frame " + h.frame);\n',
-    to: '  // 变异：删掉 frame 那一行（HUD 少一条读数，界面照旧）\n',
+    from: '  const panelY = Math.round((720 - panelH) / 2);\n',
+    to: '  const panelY = 0;  // 变异：面板不再垂直居中（回到左上角）\n',
     guard: 'ctest:ui-hud-script',
     ctest: 'ui-hud-script',
     buildDir: 'apps/emulator-lift/out',
     buildTarget: 'lift-ui-hud-script',
-    what: '默认 HUD 少掉 `frame` 那一行 ⇒ 4 行而不是 5 行（ui-hud-script 的逐行断言落空）⇒ 红',
+    what: 'HUD 面板不再垂直居中（`y` 恒 0）⇒ 面板回到左上角（ui-hud-script 的居中几何断言落空）⇒ 红',
   },
 
   // ── 帧列表 / 栈顶脚本名（E；守卫 = `tests/ui_frames.cpp` 的 top / 顺序断言）──
@@ -5904,6 +5904,47 @@ const MUTATIONS = [
       '两次堆分配 + 两次 free，且都在锁内）⇒ `com-dispatch-shape` 红（dispatch 体里又出现 ' +
       '`std::string` / 又从 `e` 拷 `iface`·`name`）',
   },
+
+  // ── `field-point-visible` = **开关**（⛔ 不点鼠标 / ⛔ 不读档 / ⛔ 不自收口；2026-11-25 父级裁决）──
+  //   ★ 代表"开关又变回自驱脚本"这一类错：在 `start` 里加一次 `ctx.input.click(0,0)` 之后，guest
+  //     照常跑、readout 照常 `run=waiting`、`--time-limit` 照常收口 ⇒ **端到端那一半看不出来**
+  //     （点击不写日志，也没有 guest 反应可判）。红点只能落在**静态契约**：剥注释后的代码里出现
+  //     `ctx.input` ⇒ `plugin-field-switch` 的 `field-switch/static-contract` 当场点名。
+  //   ★ 这就是为什么这条守卫必须两半都在：e2e 抓"自驱读档 ⇒ `boot:`/`load:` 行 + 不再常驻"，
+  //     静态抓"静默的输入提交"（e2e 对后者是瞎的）。
+  {
+    file: 'apps/emulator-lift/scripts/plugins/field-point-visible.js',
+    from: '        );\n        return armPoll(ctx, settings);\n',
+    to:
+      '        );\n' +
+      '        ctx.input.click(0, 0);  // 变异：开关又开始点鼠标\n' +
+      '        return armPoll(ctx, settings);\n',
+    guard: 'ctest:plugin-field-switch',
+    ctest: 'plugin-field-switch',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-field-switch',
+    what:
+      '`field-point-visible` 的 `start` 里多一次 `ctx.input.click` ⇒ 开关又开始驱动输入（guest 与 ' +
+      'readout 都看不出症状）⇒ `plugin-field-switch` 的静态契约红（剥注释后代码里出现 `ctx.input`）',
+  },
+
+  // ── D4/S6：设置页的 number 钳制（`scripts/ui/settings-page.js`）──
+  //   ★ 代表这一类错：把 `inc/dec` 直接写回 `value ± step`。页面上看不出症状（数字仍然变、
+  //     回执仍然 applied），只有盘上出现 max 之外的值 —— 消费方再按自己的范围 throw ⇒ 插件下次
+  //     起不来。`ui-settings-page` 的 `number-clamp-inc` / `number-clamp-dec` 直接判写回值。
+  {
+    file: 'apps/emulator-lift/scripts/ui/settings-page.js',
+    from: '    if (out < item.min) out = item.min;\n    if (out > item.max) out = item.max;\n',
+    to: '    // 变异：不做 min/max 钳制（inc/dec 直接写回 value ± step）\n',
+    guard: 'ctest:ui-settings-page',
+    ctest: 'ui-settings-page',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-ui-settings-page',
+    what:
+      '去掉 `clampNumber` 的 min/max 钳 ⇒ `inc` 越过 max / `dec` 越过 min 直接写回越界值 ' +
+      '（页面无症状，盘上坏值）⇒ `ui-settings-page` 的 `number-clamp-*` 红',
+  },
+
 ];
 
 let mutationRunSeq = 0;

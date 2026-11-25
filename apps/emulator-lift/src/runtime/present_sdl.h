@@ -227,6 +227,12 @@ public:
     // 摘掉 `adoptOverlayScript` 接进来的那一份（**不**销毁对象）；没有别的脚本可画 ⇒ 关掉 `overlay`
     // 并退役叠层纹理（与 `setOverlay(false)` 同一条 teardown）。幂等。
     void releaseOverlayScript();
+    // ★ D2（2026-11-25）：config 桥的**生命周期收口**（与 `releaseOverlayScript` 同一时刻调）。
+    //   ① 先 `flushConfig` 一次（脏数据在桥还活着时写盘）；
+    //   ② 再 `forgetConfigBridge`（脚本缓存的桥是**非拥有**指针，而桥的实现 `PluginHost`
+    //      比本窗口对象**先析构** ⇒ 不摘就会在 shutdown 时对已销毁对象调虚函数，实测 0xC0000005）。
+    //   之后任何 `flushConfig` 都是 no-op。幂等。
+    void releaseOverlayConfig();
     // ★ `ctx.draw.measure` / `draw.text` 的宿主字体来源（非拥有；C2b-2）。已存在 ⇒ 返回同一个；
     //   缺 ⇒ 建 + 校验度量（`kUiFontRefPx`），失败 ⇒ nullptr + `*err`（R5）。
     //   生产调用点 = `aot_main` 的窗口装配（**得知插件有 render 之后**），插件再经

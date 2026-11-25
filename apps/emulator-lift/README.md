@@ -861,15 +861,22 @@ partial / instrument / unaccounted / coverage / lift_dyn / verdict`）。
   不计入上面的表 —— 摘要会显式列出每一项的 hits / declines / fallbacks。
 - 是否继续扩展、以及 A/B 数字见需求单（§5）。
 
-**窗口调试叠层（`--overlay`，默认关；只作用于 `--present window`）**：在**呈现画面左上角**叠一块
-`mouse <x>,<y>` / `script` / `fps <x.x>` / `frame <n>` / `worst 3s …` 的 HUD
+**窗口调试叠层（`--overlay`，默认关；只作用于 `--present window`）**：在画面**左侧、垂直居中**叠一块
+`mouse <x>,<y>` / `script` / `fps <x.x>` / `worst 3s …` / 状态行 / `settings…` 的 HUD
 （`mouse` = **guest 客户区坐标**，与配方的 `click x y` 同一格；最近 1 s 的 Present 次数 = `fps`；
-`script` 取帧列表的 top 项，没有就回退当前帧身份；`worst` = 最近 3 s 的 wall / guest / shim 最大值）。
+`script` 取帧列表的 top 项，没有就回退当前帧身份；`worst` = 最近 3 s 的 wall / guest / shim 最大值；
+总帧数那一行已删）。
 拿不到的字段**整行省略**（⛔ 不编数字）。⛔ 只改**宿主送显的窗口像素**：不写 guest 内存。
 叠层只在**窗口**与 `--present-screenshot`（窗口像素）里可见；`--dump-frame` 是 **guest 帧**
 （`arena.dumpBmp`），不含叠层 —— 与"guest 像素 / 整帧 hash 零改动"同口径。
 两条呈现路径（GPU 直出 / SDL_Renderer 上传）都画；守卫 = `tests/overlay.cpp`（CTest `overlay` /
 `overlay-gpu`）与 `tests/aot_overlay.cpp`（`aot-overlay`）。
+
+★ **D4（2026-11-25）版式 / 设置入口 / F9**：面板贴左、垂直居中（`x=0`、`y=round((720−panelH)/2)`，
+`PAD=8` / `SIZE=16`）；末行 `settings…` 是一条 `key:"settings"` 的**透明命中 Rect** ⇒ 点击打开二级页
+（`scripts/ui/settings-page.js`；页面开着时不画 HUD 面板，`BACK` 关闭）。`PROFILE` 按钮**默认隐藏**；
+按键 = 固定 **F9**，读数 = `game.overlayKeySeq`（单调按下沿计数，变了才切显隐）⇒ 显示时按钮在面板
+下方。★ F9 **不吞键**（仍到 guest）⇒ 可能与游戏自己的 F9 动作**同时触发**。
 
 ★ **S2（2026-11-25）**：HUD 已是**真插件**（`scripts/ui/hud.js` 的 `export default { render(ctx) }`）；
 `--overlay` = 「装载内置 `hud`（保留 id）+ 要求窗口」的**预设**，与 `--overlay --plugin hud` 逐字节

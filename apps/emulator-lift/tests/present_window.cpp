@@ -7,7 +7,9 @@
 // 判据：像素在 1:1 下精确相等（含 565、alpha=0、33×17 非紧凑 pitch）；GPU 测试必须有正证据
 // （isGpuRenderer()），否则 SKIP 77（⛔ 不拿 software 假绿）。
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -18,6 +20,10 @@
 #include "runtime/memory.h"
 #include "runtime/present_sdl.h"
 #include "runtime/surface.h"
+#include "runtime/vfs.h"  // openHostFileUtf8（Windows 的 UTF-8 脚本路径）
+#include "ui/canvas.h"
+#include "ui/element.h"
+#include "ui/script.h"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -276,9 +282,75 @@ void caseControlResumeStaleEvents() {
 }
 
 // =====================================================================================
+// HUD 面板几何（D4：面板**贴左 + 垂直居中**）—— 取样点只能从**面板自己**的矩形来
+//
+// ★ 为什么不再取画布原点：D4（2026-11-25 父级裁决）后面板 `x = 0`、`y = round((720 - panelH)/2)`
+//   ⇒ 画布原点 `(0,0)` 落在面板**上方**的 guest 画面上（实测 `#8040C0` = 纯 guest）。
+//   ⛔ 不写死第二个魔法数（`(0,171)` 那种）：面板的 x/y/w/h 由 `scripts/ui/hud.js` + 宿主字体
+//   决定，行数一变就变 ⇒ 用**同一个脚本 + 同一份读数**跑一遍，取 display list 的第一条 Rect
+//   （面板恒为 `elements[0]`，与 `tests/overlay.cpp` 的 `expectedPanel` 同法），再按本用例的
+//   画布几何（`uiCanvasOrigin(640, 360)`，1:1 窗口）换算成窗口像素。
+//
+// ★ 读数与 `SdlWindow::drawOverlay` 同源（本窗口**第一次** Present）：
+//   `notePresentTime()` 在 `drawOverlay` 之前 ⇒ `fps` 有值（最近 1 s 的 Present 次数）；
+//   没有挂 `WindowManager` ⇒ 没有 `mouse` 行；没有 `Machine` ⇒ 没有 `script` / `worst` 行。
+//   ⇒ 本夹具的面板 = `fps <n>` + `settings…`。★ 只取 **x / y**（宽高随 fps 位数变，不参与判据）。
+// =====================================================================================
+struct PanelGeom {
+    int x = 0;  // 面板左上角（窗口像素）
+    int y = 0;
+    int w = 0;  // 面板尺寸（窗口像素）
+    int h = 0;
+};
+
+bool hudPanelGeom(lift::FontEngine& font, int frame_w, int frame_h, PanelGeom* out) {
+    const std::string path = std::string(LIFT_UI_SCRIPT_DIR) + "/hud.js";
+    std::string source;
+    {
+        std::FILE* f = lift::openHostFileUtf8(path, "rb");
+        if (f == nullptr) return false;
+        char buf[8192];
+        std::size_t n = 0;
+        while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) source.append(buf, n);
+        const bool bad = std::ferror(f) != 0;
+        std::fclose(f);
+        if (bad || source.empty()) return false;
+    }
+    auto runtime = lift::ui::makeQuickJsRuntime();
+    if (runtime == nullptr) return false;
+    std::string err;
+    std::unique_ptr<lift::ui::UiScript> script = runtime->load(source, path, &font, &err);
+    if (script == nullptr) return false;
+    lift::ui::UiFrameReadings readings;
+    readings.frame = 1;
+    readings.fps_ok = true;   // 第一次 Present 之前 `notePresentTime()` 已经记了一格
+    readings.fps = 1.0;
+    lift::ui::UiBuilder builder;
+    if (!script->render(builder, readings, &err)) return false;
+    if (builder.elements().empty()) return false;
+    const lift::ui::Element& panel = builder.elements().front();
+    if (panel.kind != lift::ui::ElementKind::Rect) return false;
+    const lift::ui::CanvasOrigin canvas = lift::ui::uiCanvasOrigin(frame_w, frame_h);
+    if (canvas.scale <= 0.0) return false;
+    // 参考像素 → 窗口像素（与 `uiCanvasOrigin` 的取整同一口径：round-half-up）。
+    const auto scaleRef = [&canvas](int ref_px) {
+        return static_cast<int>(static_cast<long long>(ref_px) * canvas.scale + 0.5);
+    };
+    out->x = canvas.offset_x + scaleRef(panel.x);
+    out->y = canvas.offset_y + scaleRef(panel.y);
+    out->w = scaleRef(panel.w);
+    out->h = scaleRef(panel.h);
+    if (out->w < 1) out->w = 1;
+    if (out->h < 1) out->h = 1;
+    return true;
+}
+
+// =====================================================================================
 // M0 · 统一合成：`--overlay` 在**窗口像素**上按画布原点 1:1 落位（renderer / 直出两条路径都过）
 //
-// 判据：16:9 帧（640×360）⇒ 画布原点 == 画面原点 (0,0)，那一个像素是 HUD 底色 `kOverlayBg`；
+// 判据：16:9 帧（640×360）⇒ 画布原点 == 画面原点 (0,0)；**面板左上角**那一个像素是
+//       HUD 底 `kOverlayBg` 与 guest 的 80% 混合值（D4：面板贴左 + 垂直居中 ⇒ 取样点取自
+//       `hud.js` 的 display list，⛔ 不是画布原点 —— 那里现在是面板上方的 guest）；
 //       窗口右下角仍是 guest 后缓冲的颜色（⛔ 叠层没有铺满整窗）；guest 像素逐字节不变。
 //       ★ `gpu=true` 变体必须真的走**直出**：`opt.raster_gpu = true` 才会建 `GpuDirectPresenter`
 //         （缺这一行 ⇒ `directPresentActive()` 恒 false ⇒ 本用例一条断言都跑不到）。
@@ -332,13 +404,36 @@ bool caseOverlayCanvasComposition(bool gpu, std::string* skip_why) {
     //   ⇒ 期望同值 = `blend(#101820, guest, 204)`，±1 舍入。
     const std::uint32_t guest_rgb = 0x8040C0u;  // `fill32(f, 0x008040C0u, ...)` 的 RGB
     const std::uint32_t bg = blendOver(kOverlayBgRgb, guest_rgb, kOverlayBgAlpha);
+    // ★ 取样点 = **面板左上角**（从 `hud.js` 的 display list 算，见上面的 `hudPanelGeom`）。
+    //   为什么这一点是**纯面板底**：面板四边内边距 `PAD = 8`（参考像素）⇒ 左上角那一格在
+    //   第一行文本**上方**、也不在任何带 `key` 的命中 Rect 里（设置入口那条透明 Rect 盖的是
+    //   最后一行）。⇒ 期望值仍是 80% 混合底，⛔ 不需要为取样点换期望值。
+    PanelGeom panel;
+    if (!hudPanelGeom(font, f.s->width, f.s->height, &panel)) {
+        LIFT_CHECK(false);
+        win.shutdown();
+        return true;
+    }
+    // 判据（几何前提，红了意味着取样点本身没意义）：面板贴左、整块在画面内、且**不是**画布原点。
+    LIFT_CHECK_EQ_I64(panel.x, 0);  // D4：贴左
+    LIFT_CHECK(panel.y > 0);        // D4：垂直居中 ⇒ 画布原点已是面板上方的 guest
+    LIFT_CHECK(panel.y + panel.h <= f.s->height);
+    LIFT_CHECK(panel.w <= f.s->width);
     std::uint32_t px = 0;
-    LIFT_CHECK(win.readbackPixel(0, 0, &px, &err));
+    LIFT_CHECK(win.readbackPixel(panel.x, panel.y, &px, &err));
+    // ★ 读数（不是断言）：旧取样点（画布原点）现在读到的是什么 —— D4 之后它是**面板上方的 guest**。
+    std::uint32_t corner = 0;
+    const bool corner_ok = win.readbackPixel(0, 0, &corner, &err);
     // ★ 读数（不是断言）：`ctest -V` 直接看到混合后的实际值与期望值。
-    std::printf("overlay-canvas-1to1: (0,0)=#%06X 期望 #%06X（%s，tol=1）\n", px & 0x00FFFFFFu, bg,
-                gpu ? "直出：80% 混合" : "renderer：80% 混合");
-    // 16:9 ⇒ 画布原点 == 画面原点。混合侧给 1 的容差。
+    std::printf("overlay-canvas-1to1: 面板=(%d,%d %dx%d) 面板角=#%06X 期望 #%06X（%s，tol=1）"
+                " · 旧取样点(0,0)=%s#%06X（D4 后是 guest）\n",
+                panel.x, panel.y, panel.w, panel.h, px & 0x00FFFFFFu, bg,
+                gpu ? "直出：80% 混合" : "renderer：80% 混合", corner_ok ? "" : "(读不到)",
+                corner & 0x00FFFFFFu);
+    // 混合侧给 1 的容差。
     LIFT_CHECK(nearRgb(px & 0x00FFFFFFu, bg, 1));
+    // ★ 有区分力：取样点不是 guest 色（旧 `(0,0)` 现在读到 guest ⇒ 这一条会红）。
+    LIFT_CHECK(!nearRgb(px & 0x00FFFFFFu, guest_rgb, 1));
     LIFT_CHECK(win.readbackPixel(639, 359, &px, &err));
     LIFT_CHECK_EQ_U32(px & 0x00FFFFFFu, 0x8040C0u);  // 右下角仍是 guest
     const auto* after = f.arena.pixels(*f.s);

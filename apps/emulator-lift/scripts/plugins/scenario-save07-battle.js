@@ -33,6 +33,7 @@
 
 import { bootToTitle } from "./lib/boot-to-title.js";
 import { route } from "./lib/chains.js";
+import { awaitPosition, failOnTimeout, failOnUnknown } from "./lib/gates.js";
 import { hideBattleHelp } from "./lib/guest-globals.js";
 import { loadSave } from "./lib/save.js";
 import {
@@ -85,39 +86,51 @@ const scenario = {
             "info",
             `scenario: save07 loaded ⇒ hideBattleHelp=${hidden} ⇒ waiting for FIELD main loop`,
         );
-        return ctx.trigger.afterPosition(SCRIPT_FIELD, FIELD_MAIN_LOOP_LO, FIELD_MAIN_LOOP_HI, {
-            name: "battle:field",
-            timeoutMs: FIELD_TIMEOUT_MS,
-        });
+        return awaitPosition(
+            ctx,
+            SCRIPT_FIELD,
+            FIELD_MAIN_LOOP_LO,
+            FIELD_MAIN_LOOP_HI,
+            "battle:field",
+            FIELD_TIMEOUT_MS,
+        );
     },
 
     onTrigger(ctx, ev) {
         // 场景自己的门超时：响亮收口（⛔ 不静默 done；也就不会"看起来跑完了"）。
         if (ev.kind === "timeout") {
-            ctx.finish(5, `scenario: gate timeout (${ev.name})`);
+            failOnTimeout(ctx, ev, "scenario");
             return [];
         }
         switch (ev.name) {
             case "battle:field":
                 ctx.log("info", "scenario: FIELD main loop hit ⇒ turn-end (1220,45)");
                 ctx.input.click(TURN_END_X, TURN_END_Y);
-                return ctx.trigger.afterPosition(SCRIPT_SELACT, SELACT_MAIN_LOOP_LO, SELACT_MAIN_LOOP_HI, {
-                    name: "battle:selact",
-                    timeoutMs: SELACT_TIMEOUT_MS,
-                });
+                return awaitPosition(
+                    ctx,
+                    SCRIPT_SELACT,
+                    SELACT_MAIN_LOOP_LO,
+                    SELACT_MAIN_LOOP_HI,
+                    "battle:selact",
+                    SELACT_TIMEOUT_MS,
+                );
             case "battle:selact":
                 ctx.log("info", "scenario: SELACT main loop hit ⇒ decide (640,517)");
                 ctx.input.click(DECIDE_X, DECIDE_Y);
-                return ctx.trigger.afterPosition(SCRIPT_BTL, BTL_MAIN_LOOP_LO, BTL_MAIN_LOOP_HI, {
-                    name: "battle:btl",
-                    timeoutMs: BTL_TIMEOUT_MS,
-                });
+                return awaitPosition(
+                    ctx,
+                    SCRIPT_BTL,
+                    BTL_MAIN_LOOP_LO,
+                    BTL_MAIN_LOOP_HI,
+                    "battle:btl",
+                    BTL_TIMEOUT_MS,
+                );
             case "battle:btl":
                 ctx.log("info", "scenario: BTL main loop hit");
                 ctx.finish(0, "scenario: battle reached");
                 return [];
             default:
-                ctx.fail(ev.name, `unknown state: ${ev.name}`);
+                failOnUnknown(ctx, ev);
                 return [];
         }
     },

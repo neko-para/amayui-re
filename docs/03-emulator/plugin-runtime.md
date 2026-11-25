@@ -746,9 +746,11 @@ struct Context {
     receipt —— 回调末 flush 失败只有一次 `ctx.log("warn")`（v1 的诚实口径；⛔ 没有不可达的 `io`）。
   · 域**自动创建**、不注册、可共享；域 id = `^[A-Za-z0-9._-]{1,64}$`；域 id 与 key 都拒
     `__proto__` / `prototype` / `constructor`。未知顶层键 / 未知域内键**保留**（前向兼容）。
-  · `set` / `delete` 只改内存 + 标脏；宿主在**每个插件回调末**原子 flush 一次（临时文件 +
+  · `set` / `delete` 只改内存 + 标脏；宿主在**每个插件回调末**（`PluginHost::runCallback`）与
+    **每帧 render 之后**（`present_sdl` 的 `drawOverlay` → `UiScript::flushConfig`，**无条件**，
+    不看成败）各原子 flush 一次（临时文件 +
     `MoveFileEx(MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)`）。**I/O** 失败 ⇒
-    `ctx.log("warn", …)` **一次**、之后不再重试（⛔ 不重试风暴）。
+    回调侧 `ctx.log("warn", …)` / 渲染侧一行 `[ui] warn: …`，**一次**、之后不再重试（⛔ 不重试风暴）。
   · 校验错误（域 id / key / 值类型 / 深度 / 节点 / 串长 / 非法 UTF-8 / 域数 / 每域 key 数）⇒
     **TypeError**。上限（`set` 与**装载期**同一套，`runtime/config.h` 是唯一真源）：值嵌套
     **8 层**（根值 = 1）/ 值树 **1024 节点** / 单个字符串与对象 key **8192 字节** / key 长 **128** /
@@ -760,6 +762,33 @@ struct Context {
     一个 appdata 只跑一个实例（v1；⛔ 不做文件锁）。
   · **宿主段不计入 2 ms**：每次 get/set/delete/all 的 store 调用**与**值树 ↔ JS 值的转换都包
     `HostPause`；`set` 里用户对象 getter 执行的那几段例外（仍是用户时间）。
+- **经典回退 HUD 的 `host.config`**（D2，2026-11-25 父级裁决；与 `ctx.config` **同一份 JS 形状**、
+  同一个 `ConfigBridge` / 同一套 trampoline 校验）：`--overlay` + **无 render** 的 `--plugin`
+  （= `field-point-visible` 那条用法）走**内部 hud 回退**，经典脚本只有 `globalThis.render`，
+  拿不到 `ctx` ⇒ 配置面挂在 `host.config`。
+  · 形状 = `{ available, domain(id) }`（域对象同 `ctx.config`）；**只在 render 内**可用。
+  · **无桥 ⇒ `host.config` 是 `undefined`**（⛔ 不是抛错）：这是 HUD **每帧**都读的读数面，
+    一个**可选**能力不该把整个叠层打黑。⚠ **生产上只有测试替身会造 `undefined`**：`--overlay`
+    自 S2 起 = `--plugin hud` 预设，`aot_main` 在 `--plugin` 装配段**无条件**
+    `setConfigBridge(plugin_host->config())` ⇒ 有 `--overlay` 就有桥（没有 `--appdata` 时是
+    `available:false`，⛔ 不是 `undefined`）。⚠ 与
+    `host.profileBegin/End` 的"缺接线 = 调用时 TypeError"**故意不同**：那条是**点击时**的一次性调用，
+    静默 no-op 才是"按了没反应且没有原因"。
+  · 写盘 = 每帧 render 之后由 `present_sdl` 调一次 `UiScript::flushConfig`（见上）；桥的实现
+    `PluginHost` 比窗口对象**先析构** ⇒ `aot_main` 在 run 收口处先 `releaseOverlayConfig()`
+    （flush + 摘脚本缓存）再摘 adopted；`disableOverlay` / `shutdown` 也各 flush 一次。
+  · `ctx.config` / `host.config` 的实现体只有**一份**（`runtime/config.h` 的 `ConfigBridge`：
+    `available/get/has/set/erase/all/flushIfDirty`；`PluginHost` 薄适配 `PluginConfig`）。
+  · ⚠ **已知限制（不是沙箱边界）**：`__render` 是 config / domain 对象上的**不可枚举 / 不可写 /
+    不可配置**属性（`markConfigObject`），但**脚本可以 `Object.defineProperty` 在自己的 config
+    对象上伪造它**：普通对象可扩展，而门只看"这个对象上有没有标记"（`configCall`）。伪造之后，
+    存下来的 **RunCtx** `config` 在 render 里也能调 —— 同一个 `ConfigBridge` / 同一套校验
+    ⇒ **无权限提升**，只是绕开了"RenderCtx 没有 `config`"的收窄。⇒ 它挡的是"顺手把 RunCtx
+    带进 render"，⛔ 不是安全边界；要真收紧得换帧令牌 / 弱引用表。
+  · ⚠ **`--overlay` 预设模式（= `--plugin hud`）没有注册设置**：预设的 hud 不调
+    `registerSettings` ⇒ `settings.schema` 是**空表** ⇒ 设置页只显示一行
+    `settings: 没有注册设置`（⛔ 不打开一张只有 `SETTINGS` + live + `BACK` 的空白页）。要有设置面
+    就显式 `--plugin field-point-visible --appdata <根>`（它自己 `registerSettings`）。
 - **`ctx.input.status(id)`**：`queued/applied/failed/unknown`；click 只保证入队，完成要查询。
 - **`ctx.finish(code, reason)`**：结束当前 Run（可映射历史 exit 5）；**`ctx.quit()`** 请求宿主停机。
 - **`sample`/`screenshot` 不在 Context**：它们是 `emu-ctl` 的组合命令（pause + EngineRead/HostAction + 元数据）；
@@ -776,11 +805,17 @@ struct Context {
 - **`RenderCtx` 的成员**（S2）：`ui` / `draw` / `read` / `game` / `params` / `log` / `profile`
   （`Object.keys(ctx)` **恰好**七个；`run` 仍属 C5 ⇒ `undefined`）。
   · `game` = `localFrames()` / `mouse()` **方法** + 经典 `game` 的**只读 getter**
-    （`frame` / `fps?` / `script?` / `worst?` / `click?` / `hover?` / `active?`）—— 同一个
+    （`frame` / `fps?` / `script?` / `worst?` / `click?` / `hover?` / `active?` / `overlayKeySeq?`）
+    —— 同一个
     `jsGameProperty`、同一份当帧 readings ⇒ 与 `--overlay` 的全局 `game.*` 逐条同口径。
+    ★ `overlayKeySeq?`（D4，2026-11-25）= 固定 **F9** 的**单调按下沿计数**（`runtime/overlay_key.h`；
+    无按键源 ⇒ `undefined`，⛔ 不编 0；⛔ 不吞键 —— F9 仍到 guest）。
     `FrameInfo` = `{index, script, top, pos?}`（`top` = `slot == cur`，与经典 `local_frames()` 同一个
     布尔；⛔ 不从 `pos` 反推栈顶）。
   · `draw.rect` 的 style 支持 `key`（命中区，与 `ui.rect({key})` 同一个 `Element.key`）；
+    ★ `fill` 的 alpha **= 0** ⇒ **不画**（`src/ui/raster.cpp` 在逐像素覆盖**之前**跳过）：这种矩形
+    只作**命中区**（整行热区就这么写），⛔ 不是"擦成透明"——叠层是逐元素**覆盖**、不是混合，写
+    `(0,0,0,0)` 会把底下已画的面板 / 文本擦掉。守卫 = `overlay` 的 `overlay/rect-alpha-zero`。
     `draw.text` 的 style 支持 `bold`（与 `ui.text({bold})` 同一条渲染路径）。`text/measure` 上传
     `key` ⇒ TypeError（D-C2-3 同口径）。
   · ⛔ `RenderCtx` 仍**没有** `edit`/`input`/`state`/`now`/`trigger`/`fail`/`finish`/`quit`/
@@ -973,7 +1008,9 @@ export default plugin;   // 宿主 QJS 读 default 导出；⛔ 不读 globalThi
 - **三个内建插件的域**（配置的 owner 表见 `apps/emulator-lift/scripts/plugins/README.md`）：
   `save`（根入口 `load-save.js`，库是 `lib/save.js`）/ `scenario.save10-field`（根 `scenario-save10-field.js`，
   key `slot`/`expect`）/ `field.point-visible`（根 `field-point-visible.js`，
-  key `slot`/`on`/`types`/`hold`/`diag`）。
+  key `on`/`types`/`poll`/`diag` —— ★ 它是**常驻开关**：⛔ 不读档、⛔ 不点鼠标、⛔ 不 `finish`；
+  旧配置里的 `slot`/`hold` 被**无害忽略**。验收时**玩家自己读档**，见
+  `docs/03-emulator/scripts/FIELD.md`）。
   三者一律"先看 `ctx.config.available` 再回退 params"；`on:0` / `slot:0` 这种 falsy 值也算"给了"
   （判据是 `domain.has(key)`，⛔ 不是真值）。
 
@@ -1294,7 +1331,7 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
 | Profile | `profile_*` | n/a | `host.profileBegin/End` | `ctx.profile.*`（**RunCtx 与 RenderCtx 同形**；S2） |
 | Quit | `quit` | `quit` | n/a | `ctx.quit()`（请求宿主停机）/`ctx.finish(code)` |
 | AppData | n/a | n/a | n/a | `ctx.appdata.stat`（宿主 I/O；只 appdata 子树、只 RunCtx，⛔ 不是 guest 能力） |
-| Config | n/a | n/a | n/a | `ctx.config.domain(id).get/has/set/delete/all`（域式 JSON 配置，文件 = `<--appdata>/plugin-config.json`；只 RunCtx） |
+| Config | n/a | n/a | `host.config`（经典回退 HUD；与 `ctx.config` **同一形状**；无桥 ⇒ `undefined`） | `ctx.config.domain(id).get/has/set/delete/all`（域式 JSON 配置，文件 = `<--appdata>/plugin-config.json`；只 RunCtx） |
 | RunDispatch | n/a | `run/status/abort` | n/a | `ctx.dispatch` / `ctx.run.*` |
 
 - **`RunStatus.armedNames` / `RunEvent.name`**：当前具名 armed 集合/事件名；只用于可观测性，

@@ -20,6 +20,7 @@
 //   （`./chains.js` 文件头）。
 // ★ 无状态：进度只在 `ev.name`（宿主每回调新建实例也可能接旧链 —— `plugin-runtime.md` §4.6）。
 
+import { awaitPosition, failOnTimeout, failOnUnknown } from "./gates.js";
 import { TITLE_INPUT_CALLBACK_HI, TITLE_INPUT_CALLBACK_LO } from "./script-positions.js";
 
 /** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
@@ -69,20 +70,24 @@ export function bootToTitle(options = {}) {
     return {
         start(ctx) {
             ctx.log("info", "boot: waiting for TITLE input callback");
-            return ctx.trigger.afterPosition(SCRIPT_TITLE, TITLE_INPUT_CALLBACK_LO, TITLE_INPUT_CALLBACK_HI, {
-                name: BOOT_TITLE_NAME,
+            return awaitPosition(
+                ctx,
+                SCRIPT_TITLE,
+                TITLE_INPUT_CALLBACK_LO,
+                TITLE_INPUT_CALLBACK_HI,
+                BOOT_TITLE_NAME,
                 timeoutMs,
-            });
+            );
         },
 
         onTrigger(ctx, ev) {
+            // 与 `loadSave` 同一条失败面：门超时 = finish(5)（⛔ 不用 quit：归因会变成 `plugin: quit`）。
             if (ev.kind === "timeout") {
-                // 与 `loadSave` 同一条失败面：门超时 = finish(5)（⛔ 不用 quit：归因会变成 `plugin: quit`）。
-                ctx.finish(5, `boot: gate timeout (${ev.name})`);
+                failOnTimeout(ctx, ev, "boot");
                 return [];
             }
             if (ev.name !== BOOT_TITLE_NAME) {
-                ctx.fail(ev.name, `boot: unknown state: ${ev.name}`);
+                failOnUnknown(ctx, ev, "boot");
                 return [];
             }
             ctx.log("info", "boot: TITLE hit");

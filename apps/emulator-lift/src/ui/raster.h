@@ -55,7 +55,8 @@ struct RasterImage {
 };
 
 // 把有序 display list 解析成窗口像素并合成成一块 RGBA8：
-//   · Rect：绝对 at/size × s（四舍五入）；填不透明 `fill`；
+//   · Rect：绝对 at/size × s（四舍五入）；填 `fill`（★ `fill.a == 0` ⇒ **不画**：全透明矩形只作
+//     **命中区**，⛔ 不许把它写成 `(0,0,0,0)` 擦掉底下已画的像素 —— D4 的 `settings…` 入口就这么用）；
 //   · Text：字号 = round(font_size*s)（至少 1 px），逐 UTF-8 码位向宿主字体取字，按最终像素画；
 //   · bbox = 所有元素并集；`out->x/y` = bbox 左上角在窗口像素空间的坐标。
 // `picture_x` / `picture_y` = 画面矩形原点（`PresentSink::presentGeometry`）；`canvas` = 画布缩放 + 居中偏移。
