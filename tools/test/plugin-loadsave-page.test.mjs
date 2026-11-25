@@ -217,7 +217,10 @@ function drivePageChain(model = {}) {
         swallowFirstArrowClick: model.swallowFirstArrowClick === true,
         appdata: model.appdata,
     });
-    const chain = loadSave(SLOT, { expect: ['FIELD.BIN'] });
+    const chain = loadSave(SLOT, {
+        expect: ['FIELD.BIN'],
+        ...(model.precheckOff === true ? { precheck: false } : {}),
+    });
     /** @type {any[]} */
     let armed = normalize(chain.start(world.ctx));
     let reachedPage = false;
@@ -376,6 +379,22 @@ test('loadsave-page/save-dir-missing：存档目录不存在（全新 / 空 appd
         r.statCalls,
         [`${SAVE_DIR}/SAVE09.DAT`, SAVE_DIR],
         '前置检查只许 stat 这两个路径（文件 → 目录）',
+    );
+});
+
+test('loadsave-page/save-precheck-off：precheck:false ⇒ 显式跳过检查（一行 info），照常点行', () => {
+    const r = drivePageChain({
+        startPage: TARGET_PAGE,
+        precheckOff: true,
+        appdata: { dirs: [] }, // 目录不存在 —— 若检查生效会 finish(5)
+    });
+    assert.equal(r.finished, null, `precheck:false 不该收口：${JSON.stringify(r.finished)}`);
+    assert.equal(r.failed, null, `precheck:false 不该 fail：${JSON.stringify(r.failed)}`);
+    assert.equal(r.rowClicked, true, '跳过检查后链必须照常走');
+    assert.equal(r.arrowClicks, 0);
+    assert.ok(
+        r.logs.some((line) => line.startsWith('info:') && line.includes('precheck=false')),
+        `必须打一行 info 说明逃生口生效：${JSON.stringify(r.logs)}`,
     );
 });
 

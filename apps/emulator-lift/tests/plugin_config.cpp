@@ -416,6 +416,30 @@ int main() {
         }
         LIFT_CHECK(setValue(cfg, "d", "okdeep", okdeep));
         LIFT_CHECK(setValue(cfg, "d", "okstr", text(std::string(16, 'x'))));
+
+        // ---- set 侧的域数 / 每域 key 数上限（新增的 TypeError 面）----
+        const fs::path capdir = temp.path / "domain-caps";
+        fs::create_directories(capdir, ec);
+        PluginConfig cap;
+        LIFT_CHECK(cap.attach(toUtf8(capdir), &err));
+        for (std::size_t i = 0; i < lift::plugin::kConfigMaxDomains; ++i) {
+            const std::string domain = "dom" + std::to_string(i);
+            LIFT_CHECK(setValue(cap, domain.c_str(), "k", number(1)));
+        }
+        ConfigReceipt receipt2;
+        std::string why2;
+        LIFT_CHECK(!cap.set("dom-overflow", "k", number(1), &receipt2, &why2));
+        LIFT_CHECK(why2.find("域太多") != std::string::npos);
+        PluginConfig keys;
+        const fs::path keydir = temp.path / "key-caps";
+        fs::create_directories(keydir, ec);
+        LIFT_CHECK(keys.attach(toUtf8(keydir), &err));
+        for (std::size_t i = 0; i < lift::plugin::kConfigMaxKeysPerDomain; ++i) {
+            const std::string key = "k" + std::to_string(i);
+            LIFT_CHECK(setValue(keys, "d", key.c_str(), number(1)));
+        }
+        LIFT_CHECK(!keys.set("d", "k-overflow", number(1), &receipt2, &why2));
+        LIFT_CHECK(why2.find("key 太多") != std::string::npos);
     }
 
     // ---- config/no-appdata：没有 --appdata ⇒ available=false ----
@@ -438,6 +462,26 @@ int main() {
         LIFT_CHECK(cfg.get("d", "k", &out, &found, &why));
         LIFT_CHECK(!found);
         LIFT_CHECK(cfg.all("d").members.empty());
+    }
+
+    // ---- config/limits-key-name：域内 key 名也受 key 长 / UTF-8 上限（attach 期）----
+    lift_test::g_current_case = "config/limits-key-name";
+    {
+        const fs::path dir = temp.path / "limits-key-name";
+        fs::create_directories(dir, ec);
+        std::string err;
+        LIFT_CHECK(!attachFile(
+            dir, R"({"version":1,"domains":{"d":{")" + std::string(lift::plugin::kConfigMaxKeyLength + 1, 'k') +
+                     R"(":1}}})", &err));
+        LIFT_CHECK(err.find("key 名太长") != std::string::npos);
+        // 孤立代理项的 WTF-8 作为**域内 key 名**（解析器原样收下 ⇒ 必须在 attach 校验里拒绝）。
+        const std::string bad("\xED\xA0\x80", 3);
+        LIFT_CHECK(!attachFile(dir, R"({"version":1,"domains":{"d":{")" + ("\"" + bad + "\":1") + "}}}", &err));
+        LIFT_CHECK(!err.empty());
+        // 边界：128 B 的 key 名可装载。
+        LIFT_CHECK(attachFile(
+            dir, R"({"version":1,"domains":{"d":{")" + std::string(lift::plugin::kConfigMaxKeyLength, 'k') +
+                     R"(":1}}})", &err));
     }
 
     // ---- config/limits-on-load：**装载期**就执行同一套上限（B1：不能只挡 set）----
@@ -632,6 +676,8 @@ int main() {
         std::string err;
         LIFT_CHECK(cfg.attach(toUtf8(dir), &err));
         if (!cfg.readOnly()) {
+            // ★ 先恢复权限再 skip（否则 Windows 上留下只读文件，下一次 remove_all 失败）。
+            fs::permissions(file, fs::perms::owner_all, fs::perm_options::replace, ec);
             LIFT_SKIP("文件系统没把只读位反映成不可写（可能是 root）⇒ read_only receipt 不可判定");
         }
         ConfigReceipt receipt;

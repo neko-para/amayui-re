@@ -870,6 +870,10 @@ export default plugin;   // 宿主 QJS 读 default 导出；⛔ 不读 globalThi
   · ★ **存档目录不存在不跳过**（2026-11-25 复审 I5 订正）：全新 / 空 appdata 里 `SAVE/` 还没被
     引擎建出来时，`SAVE<NN>.DAT` **确实缺** ⇒ 仍按缺文件 `finish(5)`（reason 额外点名
     "存档目录 … 不存在"）。旧版把 `not_found` 当"存档在安装树"静默跳过 ⇒ 又要等 30 s 门超时。
+  · ★ **逃生口 `precheck:false`**（缺省 true）：`set:UseAppDataFolder != 1`（存档在安装树）时
+    固定的 `SAVE_DIR_REL` 必然 `not_found` ⇒ 会 fail。此时用 `loadSave(..., { saveDir })` /
+    配置 `save.saveDir` 指到实际目录，或显式关掉前置检查（**只打一行 info**，⛔ 不是让
+    "真缺文件"静默通过）；`save.js` 参考入口也认 `save.precheck`（boolean / "0"/"1"）。
   · 有文件 ⇒ 这条链的形状 / 坐标 / 门 / 超时**逐行不变**。
 - **`.BIN` 身份**：`PluginReadings.script` 是 marker **文件名**（`TITLE.BIN` / `SAVE.BIN` / `SBUNKI.BIN` /
   `FIELD.BIN`）；C1 的 `afterScript` / `afterPosition` 是精确 `==`（`trigger_runner.cpp:70,82`），

@@ -363,9 +363,12 @@ export interface AppDataStat {
 
 /** `ctx.appdata`：宿主的 **`--appdata` 根**（只读 stat；只装在 `RunCtx`，⛔ `RenderCtx` 没有）。
  *
- * ★ 宿主**不知道** title / `set:SavePath`：存档目录由插件用常量拼（`save.js` 的 `SAVE_DIR_REL`）；
- *   `set:UseAppDataFolder != 1`（存档在安装树）时 appdata 下没有存档 ⇒ `loadSave` 的前置检查按
- *   "存档目录不在 appdata 下"跳过（⛔ 不误杀）。
+ * ★ 宿主**不知道** title / `set:SavePath`：存档目录由插件用常量拼（`save.js` 的 `SAVE_DIR_REL`）。
+ *   `loadSave` 的前置检查：`saveDir`/`SAVE<NN>.DAT` **不存在**（含目录不存在）⇒ `finish(5)` + 0 click；
+ *   只有 `escape` / `invalid_path` / `denied` / `io` 才跳过。
+ *   ⚠ `set:UseAppDataFolder != 1`（存档在安装树）时，固定的 `SAVE_DIR_REL` 必然 `not_found` ⇒ 会 fail：
+ *   用 `loadSave(..., { saveDir })` / 配置 `save.saveDir` 指到实际目录，或显式 `precheck:false`
+ *   （逃生口；缺省 true，⛔ 不是让"真缺文件"静默通过）。
  * ★ `stat` 的宿主段**不计入** 2 ms 预算（与 `ctx.profile.end` 同一原则）。
  */
 export interface AppDataApi {

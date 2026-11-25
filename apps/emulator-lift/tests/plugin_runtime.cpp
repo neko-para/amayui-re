@@ -918,8 +918,12 @@ void caseConfigRoundtrip() {
 //
 // 判据（红了意味着什么）：`configValueToJs`（1024 个 key 的建树 / 定义属性）被算进
 // `js_cpu_ns` ⇒ 一个只读配置、什么都没做的回调会误报 `callback budget exceeded`。
-// ★ 数据 = 临时 appdata 的 `plugin-config.json`（域 `big`，1024 个 key × 800 B；
+// ★ 数据 = 临时 appdata 的 `plugin-config.json`（域 `big`，1024 个 key × 950 B；
 //   文件 < 1 MiB、每值 1 节点 ⇒ 合法）；夹具只 `all()` + 核对 key 数。
+// ★ 判据必须**能红**（复审 I3）：只看 `js_cpu < 2 ms` 的话，去掉 HostPause 后 ~1.5 ms 仍绿。
+//   这里钉"pause 下界 + pause 主导"：转换（1024 个长字符串 + 定义属性）是纯宿主 CPU ⇒
+//   `host_pause_ns` 必须 ≥ 500 µs 且 ≥ 2×`js_cpu_ns`；不包转换那段时 pause 只剩 store 调用
+//   （几十 µs）⇒ 两条都红。
 // =====================================================================================
 void caseConfigHostPause() {
     lift_test::g_current_case = "plugin/config-host-pause";
@@ -930,7 +934,7 @@ void caseConfigHostPause() {
     LIFT_CHECK(appdata.make("lift-plugin-config-host-pause"));
     if (appdata.path.empty()) return;
     std::string doc = R"({"version":1,"domains":{"big":{)";
-    const std::string value(800, 'x');
+    const std::string value(950, 'x');
     for (int i = 0; i < 1024; ++i) {
         if (i != 0) doc += ",";
         char key[32];
@@ -962,6 +966,8 @@ void caseConfigHostPause() {
     LIFT_CHECK(f.host->runner().done());
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);
     LIFT_CHECK(d.host_pause_ns > 0);
+    LIFT_CHECK(d.host_pause_ns >= 500'000ull);
+    LIFT_CHECK(d.host_pause_ns >= 2 * d.js_cpu_ns);
     LIFT_CHECK(d.js_cpu_ns < 2'000'000ull);
 }
 

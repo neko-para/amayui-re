@@ -5369,6 +5369,22 @@ const MUTATIONS = [
       '`unknown-preserved` 红（flush 后二次装载读不到预置的 `unknown`）',
   },
 
+  // ── `ctx.config`：flush 只看 dirty（无新写不重写）─────────────────────────────────────────
+  //   ★ 代表"每次都写一遍"这一类错：`set` 不写盘那条仍绿；`flush-on-callback` 用**删文件后再
+  //     flush（没有新写）⇒ 文件必须仍不存在**来钉它 ⇒ 无视 dirty 会把文件重建出来（红）。
+  {
+    file: 'apps/emulator-lift/src/plugin/plugin_config.cpp',
+    from: '    if (!s.dirty || s.gave_up || !s.available) return;',
+    to: '    if (s.gave_up || !s.available) return;  // 变异：无视 dirty（没有新写也重写）',
+    guard: 'ctest:plugin-config',
+    ctest: 'plugin-config',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-config',
+    what:
+      '`flushIfDirty` 无视 dirty（每次调用都重写同一份）⇒ `plugin-config` 的 `flush-on-callback` 红' +
+      '（删掉文件后再 flush，文件被重新建出来）',
+  },
+
   // ── D5：2 ms 判据读**CPU 钟**（`CallbackDiag::js_cpu_ns`），不是墙钟 ─────────────────────────
   //   ★ 代表"钟换了、判据没换"这一类错：`js_cpu_us` 照旧打，但 `js_late` 仍拿 `js_ns` 比 ⇒
   //     被 OS 抢占 / 被挂起的回调又被诬告（缺陷 REQ-01M7VVDV69MJXRHNDGR50H7VHC 原样复发），

@@ -32,7 +32,10 @@
 - 文件大小**不是**判据（同一场景的存档大小会随内容变）；⛔ 不要按大小推“空槽 / 有内容”。
 - **缺 `SAVE<NN>.DAT` 现在会在点 LoadData 之前报**：`loadSave` 的 `start` 先查这一槽的文件，
   缺了就 `ctx.finish(5, "load-save: save file missing: … (slot N)")`、一个 click 都不发
-  （不再等 30 s 的 `load:sbunki` 门超时）；`--appdata` 没给 / 存档不在 appdata 下时跳过并 warn。
+  （不再等 30 s 的 `load:sbunki` 门超时）。**存档目录不存在也算缺**（全新 / 空 appdata）；
+  只有 stat 报 `escape` / `invalid_path` / `denied` / `io`（无法证明）才跳过并 warn。
+  ★ `set:UseAppDataFolder != 1`（存档在安装树）时固定路径必然 `not_found` ⇒ 会 fail：用
+  `loadSave(..., { saveDir })` / 配置 `save.saveDir` 指到实际目录，或 `precheck:false` 逃生。
 - **插件配置不是存档**：`<--appdata>/plugin-config.json` 在 appdata **根**（与 `Local/` 同级），
   ⛔ 不在 `SAVE/` 下、也不随 `saves/` 入库；`scripts/clean-appdata.sh` 会把它一起删掉。
 

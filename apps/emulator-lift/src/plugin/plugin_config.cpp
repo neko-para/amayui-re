@@ -366,6 +366,20 @@ bool PluginConfig::attach(const std::string& appdata_root, std::string* err) {
                 return false;
             }
             for (auto key_it = it.value().begin(); key_it != it.value().end(); ++key_it) {
+                // ★ 域内 key 名与 API key 同一条上限（128 B / UTF-8）：它也会写回 JSON。
+                if (key_it.key().size() > kConfigMaxKeyLength) {
+                    if (err != nullptr) {
+                        *err = s.path_utf8 + ": 域 '" + it.key() + "' 的 key 名太长（上限 " +
+                               std::to_string(kConfigMaxKeyLength) + " 字节）";
+                    }
+                    return false;
+                }
+                if (!lift::isValidUtf8(key_it.key())) {
+                    if (err != nullptr) {
+                        *err = s.path_utf8 + ": 域 '" + it.key() + "' 的 key 名不是合法 UTF-8";
+                    }
+                    return false;
+                }
                 std::string why;
                 if (!validateJsonValue(key_it.value(), &why)) {
                     if (err != nullptr) {

@@ -133,6 +133,9 @@ import {
  * @typedef {object} LoadSaveOptions
  * @property {string[]} [expect] 载入完成后**可以算落点**的脚本名表（必填，见上）。
  * @property {number} [timeoutMs] 每道门的超时；缺省 30000 ms。
+ * @property {boolean} [precheck] 缺 `SAVE<NN>.DAT` 的前置检查；缺省 `true`。`false` = **跳过**
+ *   （只打一行 info）—— 给"存档确实不在 appdata（`set:UseAppDataFolder != 1`）"的宿主的逃生口；
+ *   ⛔ 不是让"真缺文件"静默通过的开关。
  * @property {string} [saveDir] 存档目录，**相对 appdata 根**（缺省 `SAVE_DIR_REL`）。
  *   只影响前置检查；给的值必须是非空相对路径（绝对路径 / `..` / NUL ⇒ 构造时 throw）。
  * @property {(ctx: RunCtx) => Trigger | Trigger[] | null} [onLoaded] 到终态之后要做的事。
@@ -420,6 +423,10 @@ export function loadSave(slot, options = {}) {
         options !== null && options.timeoutMs !== undefined ? options.timeoutMs : DEFAULT_GATE_TIMEOUT_MS;
     const saveDir = normalizeSaveDir(options !== null ? options.saveDir : undefined);
     const onLoaded = options !== null ? options.onLoaded : undefined;
+    const precheck = options !== null && options.precheck !== undefined ? options.precheck : true;
+    if (typeof precheck !== "boolean") {
+        throw new Error(`loadSave: options.precheck 必须是 boolean（收到 ${typeof precheck}）`);
+    }
     if (onLoaded !== undefined && typeof onLoaded !== "function") {
         throw new Error(`onLoaded must be a function (got ${typeof onLoaded})`);
     }
@@ -553,8 +560,13 @@ export function loadSave(slot, options = {}) {
         start(ctx) {
             // ★ **前置检查在第一个 click 之前**（2026-11-25）：缺 `SAVE<NN>.DAT` ⇒ finish(5) + []，
             //   ⛔ 不发任何 click（否则已经进了 SAVE 屏，失败原因会和"点行不进确认框"混在一起）。
-            //   跳过条件见 `precheckSaveFile`（无 appdata / slot>99 / 存档目录不在 appdata）。
-            if (!precheckSaveFile(ctx, slot, saveDir)) return [];
+            //   跳过条件见 `precheckSaveFile`（无 appdata / slot>99 / stat 无法证明 / 逃生口
+            //   `precheck:false`）。★ 2026-11-25：目录不存在也算缺（复审 I5）。
+            if (!precheck) {
+                ctx.log("info", "load-save: precheck=false ⇒ 跳过存档文件前置检查（宿主声明存档不在 appdata）");
+            } else if (!precheckSaveFile(ctx, slot, saveDir)) {
+                return [];
+            }
             // ★ **前提：已经在 TITLE**（文件头）。这里不再等 TITLE —— 直接点 LoadData 入口，
             //   然后 arm SAVE 门。点不进去（不在 TITLE / 点被吞）⇒ SAVE 门超时 = 响亮失败。
             ctx.log("info", `load-save: start (slot ${slot}) ⇒ click LoadData (${LOAD_MENU_X},${LOAD_MENU_Y})`);
@@ -641,8 +653,8 @@ export function loadSave(slot, options = {}) {
 //   · config = `<--appdata>/plugin-config.json` 的域 **`save`**（ctx.config；没 appdata ⇒ 完全回退）；
 //     key：`slot`（number）、`expect`（string[] 或逗号串）、可选 `saveDir`（string，相对 appdata 根）、
 //     `timeoutMs`（number）。
-//   · params = `--plugin-param k=v`（夹具 / 诊断口）；四个 key（`slot` / `expect` / `saveDir` /
-//     `timeoutMs`）都支持 params 回退（旧行为只有前两个；后两个是 2026-11-25 加的，值 = 字符串）。
+//   · params = `--plugin-param k=v`（夹具 / 诊断口）；五个 key（`slot` / `expect` / `saveDir` /
+//     `timeoutMs` / `precheck`）都支持 params 回退（后三个是 2026-11-25 加的，值 = 字符串）。
 //   · 默认：`expect` 缺 ⇒ `FIELD,SC0000` 并打一行 info；`slot` 没有默认值（缺 ⇒ `loadSave` 响亮 throw）。
 // ★ "给了"的判据是 `has()`（⛔ 不是真值）：`slot: 0` 这种 falsy 值也算给了。
 //
@@ -791,6 +803,23 @@ function timeoutSetting(ctx, domain) {
     return value;
 }
 
+/**
+ * `precheck`（可选；缺省 undefined = true）：config 优先，params 回退（"0"/"1"/true/false）。
+ *
+ * @param {RunCtx} ctx
+ * @param {import("@amayui/lift-plugin").ConfigDomain | null} domain
+ * @returns {boolean | undefined}
+ */
+function precheckSetting(ctx, domain) {
+    const raw = hasConfig(domain, "precheck") ? domain.get("precheck") : ctx.params["precheck"];
+    if (raw === undefined || raw === null || String(raw).trim() === "") return undefined;
+    if (typeof raw === "boolean") return raw;
+    const text = String(raw).trim().toLowerCase();
+    if (text === "1" || text === "true") return true;
+    if (text === "0" || text === "false") return false;
+    throw new Error(`config ${CONFIG_DOMAIN}.precheck 必须是 boolean（收到 ${String(raw)}）`);
+}
+
 // ★ 参考入口的链**只构造一次**（一次 Run 内 config / params 不变；链本身无状态 ⇒ 缓存链对象
 //   不影响"进度只在 ev.name"）。⚠ 这**不是**在修预算问题：2026-11-21 实测缓存与"每次重建"
 //   在 `plugin/load-save-e2e` 上**同样**会撞 `onTrigger: callback budget exceeded: load:confirm2`
@@ -818,6 +847,8 @@ function chainFor(ctx) {
     if (saveDir !== undefined) options.saveDir = saveDir;
     const timeoutMs = timeoutSetting(ctx, domain);
     if (timeoutMs !== undefined) options.timeoutMs = timeoutMs;
+    const precheck = precheckSetting(ctx, domain);
+    if (precheck !== undefined) options.precheck = precheck;
     const load = loadSave(slot, options);
     const boot = bootToTitle({ onDone: (ctx2) => load.start(ctx2) });
     entryChain = route((ev) => String(ev.name).startsWith("boot:"), boot, load);

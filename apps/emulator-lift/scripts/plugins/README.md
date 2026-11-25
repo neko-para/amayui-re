@@ -25,7 +25,7 @@
 
 | 域 id | key | owner（文件） |
 |---|---|---|
-| `save` | `slot` (number)、`expect` (string[] 或逗号串)、可选 `saveDir` (string，相对 appdata 根)、`timeoutMs` (number) | `lib/save.js` 的 `export default` 参考入口 |
+| `save` | `slot` (number)、`expect` (string[] 或逗号串)、可选 `saveDir` (string，相对 appdata 根)、`timeoutMs` (number)、`precheck` (boolean，缺省 true；false = 跳过存档文件前置检查) | `lib/save.js` 的 `export default` 参考入口 |
 | `scenario.save10-field` | `slot` (number)、`expect` (string[] 或逗号串) | `lib/scenario-save10-field.js` |
 | `scenario.field-point-visible` | `slot` (number，缺省 10)、`on` (number/bool，缺省 0)、`types` (hex 串 `"1f,20"` 或数组)、`hold` (number，缺省 3000)、`diag` (number，缺省 0) | `lib/scenario-field-point-visible.js` |
 
