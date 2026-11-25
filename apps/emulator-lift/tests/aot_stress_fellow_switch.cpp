@@ -1,7 +1,7 @@
 // emulator-lift · **路径 2（打开 FELLOW，6 次立绘切换）**的端到端读数面（`LIFT_STRESS` 档）
 //
-// 判据（红了意味着什么）：真库驱动 `scripts/plugins/lib/scenario-fellow-switch.js`
-// （`--present headless --skip-logo --audio off --time-limit 240 --profile`）交给
+// 判据（红了意味着什么）：真库驱动 `scripts/plugins/scenario-fellow-switch.js`（S1 起入口在插件**根**，
+// 库在 `lib/`；`--present headless --skip-logo --audio off --time-limit 240 --profile`）交给
 // `emulator-lift-aot --plugin` ⇒ 宿主进程必须
 //   ① **exit 0**；
 //   ② 插件 readout 是 **`run=finished exit=0`**（⛔ 不是 `exit=5 reason=…`；也不许"只靠
@@ -86,7 +86,7 @@ int main(int argc, char** argv) {
     if (!fs::exists(aot_exe, ec)) LIFT_SKIP("emulator-lift-aot 不在场");
     if (!fs::exists(age_exe, ec)) LIFT_SKIP("执行源（corpus/assets/age/AGE.EXE__dumped.sectfix.EXE）不在场");
     if (!fs::exists(game_dir, ec)) LIFT_SKIP("安装树（--game-dir）不在场");
-    if (!fs::exists(plugin_js, ec)) LIFT_SKIP("驱动 scripts/plugins/lib/scenario-fellow-switch.js 不在场");
+    if (!fs::exists(plugin_js, ec)) LIFT_SKIP("驱动 scripts/plugins/scenario-fellow-switch.js 不在场");
     if (!fs::exists(saves_dir / "SAVE09.DAT", ec)) LIFT_SKIP("saves/SAVE09.DAT 不在场（本驱动要槽 9）");
     if (!fs::exists(saves_dir / "SAVE.DAT", ec)) LIFT_SKIP("saves/SAVE.DAT 不在场（读档页号的真源）");
 
