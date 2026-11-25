@@ -29,27 +29,36 @@
 ## 位置区间
 
 读数口径：判据只有 `{script, pos}` 与插件的 `fired/pending/exit`。`pos` 与清单 `label_%08x` 同一坐标系。
-执行源 `apps/emulator-lift/out/emulator-lift-aot.exe`（win32，2026-11-22 构建），`--appdata` = `.tmp/field-model/appdata`
-（从仓库根 `saves/` 复制出来的私有目录，见 `docs/03-emulator/save-format.md` §外部组装）。
+执行源 `apps/emulator-lift/out/emulator-lift-aot.exe`（win32，2026-11-25 构建）。
+★ `--appdata` **必须让存档落在嵌套层** `<appdata>/Local/Eushully/天結いキャッスルマイスター/SAVE/`
+（`--appdata` 指 `%AppData%` 根；建法见 `saves/README.md` §`--appdata` 与目录结构）。
+把 `SAVE*.DAT` 直接放到 `<appdata>/` 根目录时，引擎会新建**空的**嵌套 `SAVE/`、读档界面能开能翻页，
+但**点行不弹确认框** ⇒ `load-save: gate timeout (load:sbunki)` —— 2026-11-24/25 的失败全是这一条，
+⛔ 不是“点击被吞”、⛔ 不是“页基算错”、⛔ 也与 `--present headless/window` 无关
+（同一嵌套 appdata 下 headless 与 window 的读数逐行相同）。
 
 | 区间 `[lo,hi)` | 是什么 | 复现命令 | 读数日期 |
 |---|---|---|---|
-| `[0x579C,0x5860)` | **主轮询体**：进图完成、开始等输入。★ 目前唯一被用过的门（`await position FIELD 0x579C 0x5860`） | 见下 ①（插件门）/ ②（配方里的同一区间） | **2026-11-22 配方侧的 4/4**（出处 `apps/emulator-lift/scripts/recipes/save07-battle.plan` 的 ①–④ 头注释）；⚠ **2026-11-24 本轮没能复跑到这里**（六次尝试都停在对 `SBUNKI` 确认框的等待上，见 `## 待核` 3） |
+| `[0x579C,0x5860)` | **主轮询体**：进图完成、开始等输入。★ 目前唯一被用过的门（`await position FIELD 0x579C 0x5860`） | 见下 ①（插件门）/ ②（配方里的同一区间） | **2026-11-25 插件门 2/2**（headless 与 window 各一次，都命中本区间）；历史：2026-11-22 配方侧 4/4（出处 `apps/emulator-lift/scripts/recipes/save07-battle.plan` 的 ①–④ 头注释） |
 
 - **`[0x579C,0x5860)` 只证明"到地图就绪"，不证明"点击被消费"**：FIELD 上没做过点击负对照 ⇒ `## 待核` 3。
 - 常量位置：`apps/emulator-lift/scripts/plugins/lib/script-positions.js` 的 `FIELD_MAIN_LOOP_LO/HI`（数值只写这一处）。
 
 ```bash
 cd E:/Projects/amayui-re/apps/emulator-lift
-# ① 插件门：载入槽 7 → 等主轮询体 → 读 32 槽点位表（开关关掉；`on=1` 见模型 ⑤/报告 §7）
-./out/emulator-lift-aot.exe --exe ../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE \
+# 0) 私有 appdata：存档必须落在嵌套层（★ 复制到根目录 ⇒ 读档列表为空、点行没反应）
+bash scripts/clean-appdata.sh ../../.tmp/field-model/appdata
+# ① 插件门：载入槽 10（SAVE10 → FIELD）→ 等主轮询体 → 改派生渲染位
+./out/emulator-lift-aot.exe \
   --game-dir ../../links/install --appdata ../../.tmp/field-model/appdata \
-  --present headless --skip-logo --audio off --time-limit 180 --log-level info \
-  --plugin E:/Projects/amayui-re-dev/apps/emulator-lift/scripts/plugins/lib/scenario-field-point-visible.js \
-  --plugin-param slot=7 --plugin-param on=0 --plugin-param hold=3000
-# 读数（2026-11-24 / win32）：**未到 FIELD** —— 链停在
-#   `field-points: SAVE 回调体 ⇒ 悬停第 7 行 (300,507)` → `field-points: timeout (fp:sbunki-poll)`
-#   ⇒ 选行之后确认框没起来（同一现象在 `loadSave` 的 `load:sbunki` 门上也复现，2/2）⇒ 待核 3。
+  --present headless --skip-logo --audio off --time-limit 180 --log-level warn \
+  --plugin scripts/plugins/lib/scenario-field-point-visible.js \
+  --plugin-param slot=10 --plugin-param on=1 --plugin-param hold=3000
+# 读数（2026-11-25 / win32 / headless；`--present window` 那次逐行相同）：
+#   load-save: page 1 (target 1, slot 10) → row hovered → SBUNKI hit → reached FIELD.BIN
+#   field-points: FIELD 就绪 ⇒ switch on=1 types=0x1f,0x20
+#   field-points: forced=3/3（slot 10: 0x5→0x0 / slot 11: 0x3→0x2 / slot 12: 0x3→0x2）
+#   field-points: after map=0xb instance=0x1 live_slots=21
 
 # ② 配方里的同一区间（历史读数）
 rg -n "await position FIELD" apps/emulator-lift/scripts/recipes/save07-battle.plan
@@ -232,11 +241,12 @@ node .tmp/field-skill-hint/dis-one.mjs .tmp/field-skill-hint/SETMAPTEX.BIN --all
 1. **进图装载链**：`FIELD.BIN`(21095) 由谁 `call-script` / 由 `SETFIELD.BIN`(20745) 还是引擎的换图路径拉起来 —— 没有读数。
 2. **`!`（`0x300 == 0` 那支）到底是什么**：它的两个位都来自 `25c00[b222]` 那张**每图 64×32 位网格**；
    那一格位的语义没有定位（脚本侧 `--write` 只有 7 处写 `25c00`，都不是"点位发现"）。
-3. **FIELD 的点击窗口**：没有任何读数（`## 输入点`）。要取证须按 `FELLOW.md` / `SAVE.md` 的形状做"门 + 门后 click"的 A/B。
-   ⚠ 本轮连"进到 FIELD"这一步都没成：**六次尝试**（`loadSave` 2 次 + 自建链 4 次，含 1 次诊断档；行 y 试过 91 与 507）
-   都停在**选行之后确认框没起来**（读数：`field-points: timeout (fp:sbunki-poll)` /
-   `load-save: gate timeout (load:sbunki)`；`calls=4..5`；诊断档点完行后连采 8 次都是 `script=SAVE.BIN pos=0x11B8`）。
-   ⇒ 这条链的失败点**不在 FIELD**，而在"读档界面 → 确认框"这一步（与本目录的 FIELD 结论无关，另单追）。
+3. **FIELD 的点击窗口**：没有任何读数（`## 输入点`）。要取证须按 `FELLOW.md` / `SAVE.md` 的形状做“门 + 门后 click”的 A/B。
+   ⚠ 2026-11-24 记的“六次都停在选行后的确认框”**已归因，不是 FIELD 的门**：那几次把 `SAVE*.DAT`
+   复制到了 `<--appdata>` **根目录**（引擎实际读 `<--appdata>/Local/Eushully/<标题>/SAVE/`）⇒ 读档列表为空
+   ⇒ 点行不弹确认框（`load-save: gate timeout (load:sbunki)`）。2026-11-25 换成嵌套落点后，
+   `slot=10` 的 headless 与 window 各一次都走完 `page 1 → row → SBUNKI → FIELD.BIN`（见 ① 的读数）。
+   ⇒ 剩下的未知仍只是“FIELD 上哪一段吃 click”，与读档链无关。
 4. **`bit 0x800` / `0x20000` / `0x1000000` / `0x40000`（`5b7e5`）/ `0x10`（`4a5f0` vs `56d69`）的语义**：
    置位条件已核（②表），**含义**没定位。`5b7e5` 只有 5 位（`FIELD.BIN` #2842 处 `lt … 5` 的循环 + #2827 清）⇒
    更像"当前这一组 5 个候选中同一 `14d722` 值的掩码"，不是点位状态。
