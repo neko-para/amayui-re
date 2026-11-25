@@ -4567,7 +4567,7 @@ const MUTATIONS = [
   //     ⇒ 断言立刻落空；改颜色（BG）则会同时让窗口像素判据红（那是另一条判据线）。
   {
     file: 'apps/emulator-lift/scripts/ui/hud.js',
-    from: '  lines.push("frame " + game.frame);\n',
+    from: '  lines.push("frame " + h.frame);\n',
     to: '  // 变异：删掉 frame 那一行（HUD 少一条读数，界面照旧）\n',
     guard: 'ctest:ui-hud-script',
     ctest: 'ui-hud-script',
