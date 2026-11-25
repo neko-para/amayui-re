@@ -24,7 +24,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # vcpkg 由 CMakePresets 的 toolchain 注入；这里只做显式检查，缺依赖时给可读的失败信息。
 if(NOT DEFINED VCPKG_TARGET_TRIPLET AND NOT DEFINED ENV{VCPKG_ROOT})
     message(WARNING
-        "no vcpkg toolchain detected. Use CMakePresets.json (it reuses ../emulator-cxx/vcpkg across directories),"
+        "no vcpkg toolchain detected. Use CMakePresets.json (it reuses ../vcpkg across directories),"
         "or pass -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake.")
 endif()
 

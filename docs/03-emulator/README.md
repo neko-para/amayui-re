@@ -173,7 +173,7 @@
 `platform-effort.md` §5.4 说的**第三条路线**（Wine 直接跑）—— 平台层仍自写，
 只是"形状"与 Wine 同类（口径见 `repo:apps/emulator-lift/README.md` §1.1）：
 
-- 落点 `repo:apps/emulator-lift`（CMake + SDL3；vcpkg **跨目录复用** `repo:apps/emulator-cxx/vcpkg`）；
+- 落点 `repo:apps/emulator-lift`（CMake + SDL3；vcpkg **跨目录复用** `repo:apps/vcpkg`）；
 - **执行源**：**拆壳件 `AGE.EXE__dumped.sectfix.EXE` 的机器码字节**，已入库（LFS）为
   `repo:corpus/assets/age/AGE.EXE__dumped.sectfix.EXE`（`binary/age-sectfix`，清单条目 `role: baseline`）；
   载入时按 `.lst` 头部的 `Input SHA256` 自校验。

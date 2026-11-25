@@ -234,7 +234,7 @@ apps/emulator-lift/
 
 ## 4. 构建（vcpkg **跨目录复用**）
 
-- toolchain 指向 `../emulator-cxx/vcpkg/scripts/buildsystems/vcpkg.cmake`；本目录的 `vcpkg.json`
+- toolchain 指向 `../vcpkg/scripts/buildsystems/vcpkg.cmake`；本目录的 `vcpkg.json`
   只声明自己需要的包（清单真源是 `vcpkg.json`：`sdl3` + `zydis` + `freetype` + `glm`）。
 - ```bash
   cd apps/emulator-lift

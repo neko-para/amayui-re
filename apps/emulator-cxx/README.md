@@ -37,7 +37,7 @@ apps/emulator-cxx/
 
 ## 依赖（vcpkg submodule + manifest）
 
-vcpkg 以 **git submodule** 固定在 `apps/emulator-cxx/vcpkg`；依赖由同目录的
+vcpkg 以 **git submodule** 固定在 `apps/vcpkg`；依赖由同目录的
 `vcpkg.json` 声明（manifest mode）。基础依赖是 `sdl3`、`nlohmann-json`；
 Windows 预设再开 `shader` + `text` 两个 feature，macOS 只开 `text`（原因见下一节）。
 

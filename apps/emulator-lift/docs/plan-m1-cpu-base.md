@@ -283,7 +283,7 @@ tools/lift.mjs                ← describe / check / report / corpus-report（�
 
 | 包 | 用途 | 引入方式 | 许可 |
 |---|---|---|---|
-| `zydis` | 指令解码（S2）——**只解码，不执行**：语义仍是我们的 | **vcpkg**（本机 `../emulator-cxx/vcpkg/ports` 里有 port） | MIT（替代：`bddisasm` Apache-2.0 / `capstone` BSD-3） |
+| `zydis` | 指令解码（S2）——**只解码，不执行**：语义仍是我们的 | **vcpkg**（本机 `../vcpkg/ports` 里有 port） | MIT（替代：`bddisasm` Apache-2.0 / `capstone` BSD-3） |
 | ~~`libiconv`~~ | ~~CP932 ↔ UTF-16（S6 码页族）~~ | **未采用**：S6 改为自带表 `runtime/cp932`（`tools/lift-cp932-gen.mjs` 派生、入库） | — |
 | **`berkeley-softfloat`** | x87 的 80 位算术内核（S4，见 D3） | **vendor**：`third_party/berkeley-softfloat/` + `README.md`（照 `apps/emulator-cxx/third_party/pl_mpeg/` 的模板） | BSD-3-Clause |
 | `sdl3` | 宿主层 | 已有（vcpkg） | zlib |

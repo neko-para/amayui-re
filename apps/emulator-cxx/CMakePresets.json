@@ -13,7 +13,7 @@
       "binaryDir": "${sourceDir}/out",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/../vcpkg/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_TARGET_TRIPLET": "x64-windows",
         "VCPKG_MANIFEST_MODE": "ON",
         "CMAKE_C_COMPILER": "clang-cl",
@@ -38,7 +38,7 @@
       "binaryDir": "${sourceDir}/out",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/../vcpkg/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_TARGET_TRIPLET": "arm64-osx",
         "VCPKG_MANIFEST_MODE": "ON",
         "VCPKG_MANIFEST_FEATURES": "text",
@@ -52,7 +52,7 @@
       "binaryDir": "${sourceDir}/out",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/../vcpkg/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_TARGET_TRIPLET": "x64-linux",
         "VCPKG_MANIFEST_MODE": "ON"
       }

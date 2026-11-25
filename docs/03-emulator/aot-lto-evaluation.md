@@ -341,7 +341,7 @@ configure 命令（以 B1 为例；其余只改 `-DLIFT_AOT_LTO*` / `-DLIFT_AOT_
 ```bash
 cmake -S apps/emulator-lift -B .tmp/lto/build-b0 -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DCMAKE_TOOLCHAIN_FILE="$PWD/apps/emulator-cxx/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+  -DCMAKE_TOOLCHAIN_FILE="$PWD/apps/vcpkg/scripts/buildsystems/vcpkg.cmake" \
   -DVCPKG_TARGET_TRIPLET=arm64-osx -DVCPKG_MANIFEST_MODE=ON \
   -DVCPKG_MANIFEST_DIR="$PWD/apps/emulator-lift" \
   -DVCPKG_INSTALLED_DIR="$PWD/apps/emulator-lift/out/vcpkg_installed" \

@@ -8,12 +8,12 @@
   "configurePresets": [
     {
       "name": "macos-arm64",
-      "displayName": "macOS arm64 (vcpkg from ../emulator-cxx, Ninja)",
+      "displayName": "macOS arm64 (vcpkg, Ninja)",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/out",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/../emulator-cxx/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/../vcpkg/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_TARGET_TRIPLET": "arm64-osx",
         "VCPKG_MANIFEST_MODE": "ON",
         "VCPKG_MANIFEST_DIR": "${sourceDir}"
@@ -21,12 +21,12 @@
     },
     {
       "name": "windows-x64",
-      "displayName": "Windows x64 (vcpkg from ../emulator-cxx, Ninja, clang-cl)",
+      "displayName": "Windows x64 (vcpkg, Ninja, clang-cl)",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/out",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/../emulator-cxx/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/../vcpkg/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_TARGET_TRIPLET": "x64-windows",
         "VCPKG_MANIFEST_MODE": "ON",
         "VCPKG_MANIFEST_DIR": "${sourceDir}",
@@ -36,12 +36,12 @@
     },
     {
       "name": "linux-x64",
-      "displayName": "Linux x64 (vcpkg from ../emulator-cxx, Ninja)",
+      "displayName": "Linux x64 (vcpkg, Ninja)",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/out",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/../emulator-cxx/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/../vcpkg/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_TARGET_TRIPLET": "x64-linux",
         "VCPKG_MANIFEST_MODE": "ON",
         "VCPKG_MANIFEST_DIR": "${sourceDir}"

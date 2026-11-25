@@ -24,7 +24,7 @@
 
 ## 为什么 vendor 而不是 vcpkg
 
-1. 上游 registry **没有**这个 port（`../emulator-cxx/vcpkg/ports` 里只有 `mpfr` / `gmp` /
+1. 上游 registry **没有**这个 port（`apps/vcpkg/ports` 里只有 `mpfr` / `gmp` /
    `boost-multiprecision` / `intx` 一类，都不是逐位可复现的 x87 内核）。
 2. 更要紧的是：**我们依赖的是它的逐位行为**。包升级换了算术实现或编译选项，
    会让 `apps/emulator-lift` 的位精确夹具**无声失效** —— 那不是"新版本更好"，而是判据换了一把尺子。
