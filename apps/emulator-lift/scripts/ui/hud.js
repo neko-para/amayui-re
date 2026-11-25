@@ -3,8 +3,8 @@
 //
 // ★ S2 起本文件是**插件模块**：`export default { render(ctx) }`（`--overlay` = `--plugin hud` 预设；
 //   契约见 `scripts/plugins/plugin.d.ts` 的 `RenderCtx` / `docs/03-emulator/plugin-runtime.md` §4.6）。
-//   ★ **仍保留一句旧入口** `globalThis.render`：`--ui <path>`（deprecated，S3 删）走的是旧 UiScript
-//     loader（`globalThis.render` + 全局 `ui/game/host`）。两个入口共用**同一份绘制体**（`drawHud`），
+//   ★ **仍保留一句旧入口** `globalThis.render`：**内部 hud 回退**走的是旧 UiScript
+//     loader（`--overlay` + 无 render 的 `--plugin`；`--ui` 已从 CLI 面删除）。两个入口共用**同一份绘制体**（`drawHud`），
 //     只换一个薄适配器 ⇒ 不可能"旧版画一套、插件版画另一套"。
 // ★ 入口约定（旧 loader，`src/ui/script.h`）：脚本是 UTF-8、strict；入口必须**显式**赋给
 //   `globalThis.render`。宿主每帧调一次，调用前 builder 已清空 ⇒ 这里只追加 display list。
@@ -12,7 +12,7 @@
 //     显式写 `globalThis.render = …`（下面）。
 // ★ 两个入口的能力面（同一份读数，逐条同口径）：
 //     · 插件：`ctx.draw.*` / `ctx.game.*` / `ctx.profile.*`；
-//     · 旧 `--ui`：全局 `ui.*` / `game.*` / `host.profileBegin|End`。
+//     · 内部 hud 回退（classic）：全局 `ui.*` / `game.*` / `host.profileBegin|End`。
 //   ⛔ 没有 Date / Math.random（沙箱里也不存在）⇒ 同一份读数必然产出同一份 list（可测）。
 // ★ 发行件：同目录必须有 `kit.js`（`import` 的相对解析以本文件所在目录为根）；缺 kit 与缺 hud
 //   同属**加载期硬失败**（`--overlay` / `--plugin hud` exit 2，错误里点名路径）。
@@ -74,7 +74,7 @@ const PROFILE_LABEL = "overlay";  // `profile.begin(label)` 的 label
 const profile = { running: false, status: "" };
 
 // ---------------------------------------------------------------------------------------
-// 旧 `--ui` loader 的适配器：**只有它**知道全局 `ui` / `game` / `host`。
+// 内部 hud 回退 loader 的适配器：**只有它**知道全局 `ui` / `game` / `host`。
 //   （插件 loader 也会装这些全局，但插件路径**不走这里** —— 走 ctx，契约才是真的。）
 // ---------------------------------------------------------------------------------------
 /** @returns {HudHost} */
@@ -154,7 +154,7 @@ function pluginHost(ctx) {
     },
     profileEnd: () => {
       // ★ S2 复审 I3：插件的 `ctx.profile.end()` 返回与旧 `host.profileEnd()` 同形的
-      //   `{ok,text,error}` ⇒ 四态（含 `INVALID（已复制）`）与 `--ui` 完全一致。
+      //   `{ok,text,error}` ⇒ 四态（含 `INVALID（已复制）`）与旧入口完全一致。
       return ctx.profile.end();
     },
   };
@@ -243,7 +243,7 @@ function drawHud(h) {
   Button({ key: "profile", rect: { x: PAD, y: panelH + PAD, w: BUTTON_W, h: BUTTON_H }, label: "PROFILE" }, h);
 }
 
-// ---- 旧入口（`--ui` 的 UiScript loader；S3 随 `--ui` 一起删）----
+// ---- 内部 hud 回退入口（旧 UiScript loader；S3 删的是 CLI `--ui`，这条内部路径保留）----
 globalThis.render = function render() {
   drawHud(classicHost());
 };

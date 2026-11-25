@@ -312,7 +312,7 @@ export type LogApi = (level: LogLevel, message: string, data?: unknown) => void;
  *   那会让"鼠标按着"与"没有源"长得一样）⇒ 插件必须写 `mouse.buttons?.left ?? false` 这种形态。
  * ★ **S2**：为了让内置 `hud` 从经典 `game.*` 迁到 `ctx.game.*` 后**逐字节等价**，这里补上经典的
  *   **只读 getter**：`frame`（恒有）/ `fps?` / `script?` / `worst?` / `click?` / `hover?` / `active?`。
- *   语义与 `--overlay` / `--ui` 的全局 `game.*` **逐条相同**（`script_quickjs.cpp` 同一个
+ *   语义与 `--overlay` 的全局 `game.*` **逐条相同**（`script_quickjs.cpp` 同一个
  *   `jsGameProperty` 实现、同一份当帧 readings）：没有值 ⇒ `undefined`，`click` 是**一次性**对象
  *   （只在该帧有值），`hover` / `active` 是**只读 key**（不在命中区上 ⇒ `undefined`）。
  *   ⚠ `mouse` 仍是**方法**（⛔ 不是 getter）：必须写 `ctx.game.mouse()`。

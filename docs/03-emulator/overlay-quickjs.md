@@ -158,17 +158,17 @@ class UiScript {   // init / update(dt,frame) / render(UiBuilder&) / on_click / 
 - 默认 HUD = **外置** `apps/emulator-lift/scripts/ui/hud.js`（UTF-8、**module**、strict；它
   `import { Button } from './kit.js'`。★ **S2 起入口是插件契约** `export default { render(ctx) }`
   （`ctx.draw.*` / `ctx.game.*` / `ctx.profile.*`）；**同一份文件还保留** `globalThis.render` ——
-  旧 `--ui` loader（deprecated）仍要它，两个入口共用同一份绘制体、只换薄适配器。
-  classic 脚本仍支持（`--ui` 旧语义：能按 classic 编译就绝不走 module）。
+  内部 hud 回退 loader 仍要它（`--ui` 已在 S3 从 CLI 面删除），两个入口共用同一份绘制体、只换薄适配器。
+  classic 脚本仍支持（内部 hud 回退的语义：能按 classic 编译就绝不走 module）。
 - 随发行分发 `scripts/ui/{hud.js, kit.js, ui.d.ts, README.md}`；**`hud.js` 与 `kit.js` 必须同目录**
   （`import './kit.js'` 按 `hud.js` 所在目录解析）——缺 kit 与缺 hud 同属加载期硬失败
   （`--overlay` / `--plugin hud` exit 2，错误里点名路径）。`hud` 是**保留 id**（S2），解析顺序：
   ① `<exe 目录>/scripts/ui/hud.js`（发行布局）→ ② `LIFT_UI_SCRIPT_DIR/hud.js`（开发回退，
   CMake 把源码目录以 `target_compile_definitions(... PUBLIC ...)` 注入）→ ③ 硬错（err 点名两个路径）；
   两份都在场 ⇒ **exe 赢**；用户插件根里的 `hud.js` ⇒ exit 2（⛔ 不静默被内置件遮住）。
-- `--ui <path>` 只吃 `.js`；显式优先且隐含 `--overlay`。启动期校验"文件在 + 编译过 + `render` 是函数"，
-  失败 = `exit 2` + `<path>:<行>:<列>`。★ **S1 起 `--ui` 已弃用**（一行 deprecation，行为不变；
-  新入口 `--plugin <id|path>`）；★ **S2 起 `--overlay` = `--plugin hud` 预设**（窗口档走 adopt，
+- ★ **S3（2026-11-25）起 `--ui` 已从 CLI 面删除**（⇒ 未知参数 `exit 2`）：装载点只剩 `--plugin <id|path>`，`--overlay` 是它的窗口预设。旧 UiScript loader 只服务**内部 hud 回退**（`--overlay` + 无 render 的 `--plugin`）：启动期校验"文件在 + 编译过 + `render` 是函数"，
+  失败 = `exit 2` + `<path>:<行>:<列>`。
+  ★ **S2 起 `--overlay` = `--plugin hud` 预设**（窗口档走 adopt，
   `SdlWindow::init` 不再为 `--overlay` 装载 hud.js）。
 - `scripts/ui/ui.d.ts` 是作者声明（`declare const ui` / `game` / `host`，含 `game.local_frames()` 与
   module 的 `import` 说明）；
@@ -182,7 +182,7 @@ class UiScript {   // init / update(dt,frame) / render(UiBuilder&) / on_click / 
 - QuickJS **vendor** 进 `apps/emulator-lift/third_party/quickjs-ng`（tag **v0.18.0** / commit
   `d7215b0a…`；MIT；**4 个 C 源** + 头 + `LICENSE` + 本仓 `README.md` + 本仓 `CMakeLists.txt` 建 `lift-qjs`）。
   ⛔ 不是 git submodule（本仓 `third_party/` 的惯例 = 原样副本 + README 记录来源 / 清单 / 怎么升级）。
-- `lift-qjs` **静态链进 exe**（`emulator-lift-runtime` PUBLIC 链接）⇒ 没开 `--ui` 也在 exe 里。
+- `lift-qjs` **静态链进 exe**（`emulator-lift-runtime` PUBLIC 链接）⇒ 没开 `--overlay` 也在 exe 里。
   ★ **默认 HUD 的 JS 是外置文件**（不编进 exe）：发行时 `scripts/ui/` 与 exe 一起放。
 - **版本 pin**：`src/ui/quickjs_value.h` 对 `QJS_VERSION_MAJOR/MINOR/PATCH == 0/18/0` 做 `static_assert`；
   升级要同时改 `third_party/quickjs-ng/README.md`。

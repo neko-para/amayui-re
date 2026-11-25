@@ -9,7 +9,7 @@
  *
  *     globalThis.render = function render() { … };
  *
- * 两种脚本形状（宿主自动识别，旧 `--ui` 的 classic 语义逐字不变）：
+ * 两种脚本形状（宿主自动识别，内部 hud 回退的 classic 语义逐字不变）：
  * - **classic**：顶层 `function render(){}` 那种老写法；⛔ 没有 `import`。
  * - **module**：`import { Button } from './kit.js';` —— 相对路径、只能在本脚本所在目录的子树里；
  *   bare specifier / 绝对路径 / `data:` / `..` 逃逸一律加载期拒绝。module 里**仍要显式**写
@@ -69,7 +69,7 @@ interface UiMouse {
   y: number;
   /**
    * 三键电平。★ C2b-2：窗口装配现在有**生产读数源**（`WindowManager::mouseButtons()`，
-   * 与 guest 输入同一张 `InputDevice` 电平表）⇒ `--overlay` / `--ui` 脚本也会拿到这个键。
+   * 与 guest 输入同一张 `InputDevice` 电平表）⇒ `--overlay` 的脚本也会拿到这个键。
    * 没有源（headless / 没有 WindowManager）⇒ **缺键**，⛔ 不是 `false`（`mouse.buttons?.left ?? false`）。
    */
   readonly buttons?: {

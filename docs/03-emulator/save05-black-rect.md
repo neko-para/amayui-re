@@ -67,7 +67,7 @@ cd apps\emulator-lift
 ## 排除项
 
 - **DDraw / DDraw Blt**：三帧切片里 `ddraw` 命中 0 次。
-- **emulator HUD / overlay**：本轮没有 `--overlay` / `--ui`；黑框跟着宝藏走、不在窗口角。
+- **emulator HUD / overlay**：本轮没有 `--overlay`（当时也没有 UI 脚本入口）；黑框跟着宝藏走、不在窗口角。
 - **窗口合成 / letterbox**：`source=guest-backbuffer` + `hash_still_matches=true` ⇒ 黑在 guest 画面里。
 - **SO033A 导航覆盖图**：A/B 见上表 —— 置 bit4 后黑框仍在；且它是**全屏**、由 32 ms 回调门控（静止 ≥3.2 s），
   与"120×120、跟着宝藏"不同。

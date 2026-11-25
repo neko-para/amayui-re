@@ -50,8 +50,8 @@
 - **S2 起（2026-11-25）**：`--overlay` 只剩两件——**要窗口**（窗口参数，headless exit 2）+ **预设**
   （没有 `--plugin` 时解析保留 id `hud` 并按 `--plugin` 装载，窗口档由 adopt 接进叠层）。
   ★ **`--overlay` + 显式 `--plugin` 保持旧形状**：默认 hud 照装（有 render 的插件 adopt 取代它；
-  无 render 的插件 ⇒ hud 留着重画）。★ `--overlay` / `--plugin hud` / `--ui hud.js` 三方窗口 BMP /
-  guest dump **逐字节相同**（`tests/aot_overlay.cpp` 的 ⑦）。`--ui` 仍走旧 loader（deprecated，S3 删）。
+  无 render 的插件 ⇒ hud 留着重画）。★ `--overlay` / `--plugin hud` / **内部 hud 回退** 三方窗口 BMP /
+  guest dump **逐字节相同**（`tests/aot_overlay.cpp` 的 ⑦）。`--ui` 已删（S3）；内部 hud 回退 = `--overlay` + 无 render 的 `--plugin`。
 - `apps/emulator` / `apps/emulator-new` **没有宿主 overlay**：前者只命中一条 VFS 注释（`src/host/fs.ts`）；
   后者的 `KIND_TEXTURE_OVERLAY` / `KIND_MOVIE_OVERLAY` 是 **guest 场景绘制**，不是宿主叠层
   （`src/platform/electron/renderer/scene-command-plan.ts`）。
@@ -61,17 +61,17 @@
 | # | 裁决 | 边界 / 理由 |
 |---|---|---|
 | D1 | **一个 host + 同一套 API**：内置 HUD 与将来的"游戏内小窗口"是**同一类插件** —— 同一个 `UiHost`、同一份 display list、同一条输入路由 | 用户口径。⛔ 不为 HUD 单开一条渲染 / 输入路径 |
-| D2 | **插件化**：一个插件 = 一个脚本文件（`apps/emulator-lift/scripts/ui/<name>.js`）；`--ui <path>`（可重复；★ S1 起**已弃用** ⇒ `--plugin <id|path>`）、`--ui-input=consume\|pass`、`--ui-watch`（默认关）、`--ui-strict` | 编译进 C++ 的固定 HUD 不能扩展；热重载默认不做任何 stat。★ **`--ui-input=consume\|pass` 已实现（S9）**：缺省 **consume**；也收分离写法；它是**窗口参数**（`--present headless` 与 `--overlay` 走同一条 `present_window_flag` 拒绝）；非法值 `exit 2` 并点名合法值。★ `--ui-watch` / `--ui-strict` 仍未实现 |
+| D2 | **插件化**：一个插件 = 一个脚本文件（`apps/emulator-lift/scripts/ui/<name>.js`）；`--plugin <id\|path>`（S3 起**唯一装载点**；`--overlay` 是它的窗口预设。`--ui <path>` 已删）、`--ui-input=consume\|pass`、`--ui-watch`（默认关）、`--ui-strict` | 编译进 C++ 的固定 HUD 不能扩展；热重载默认不做任何 stat。★ **`--ui-input=consume\|pass` 已实现（S9）**：缺省 **consume**；也收分离写法；它是**窗口参数**（`--present headless` 与 `--overlay` 走同一条 `present_window_flag` 拒绝）；非法值 `exit 2` 并点名合法值。★ `--ui-watch` / `--ui-strict` 仍未实现 |
 | D3 | **语言 = JS/TS + QuickJS-ng v0.18.0**（逐字节原样 vendor，见 `third_party/quickjs-ng/README.md`；MIT） | 选型只看硬约束：可裁剪、可中断、迭代顺序按规范。Lua 只作对照（⛔ 不是方案）：longjmp 跨 C++ 帧、hash seed 每进程随机、x64-windows dynamic 要带 DLL |
 | D4 | **每帧 display list**（立即模式）：脚本只产出元素描述，宿主独占校验 / 求值 / 布局 / 命中 / 光栅 / 合成；宿主只缓存**上一帧** resolved list 用于点击 | 没有跨帧控件树、脏矩形与 GPU 资源生命周期；resize / 缩放天然同步 |
 | D5 | **坐标**：声明用 **1280×720 参考系**，合成用**窗口像素**（letterbox 之后）；等比 `s = min(pic_w/1280, pic_h/720)`、画面内居中；文字按最终像素重绘（freetype），⛔ 不放大位图 | 两条路径统一到窗口像素；`--scale` 只要仍走 `cursor_map.h:letterboxFor`，UI 零改动 |
 | D6 | **输入单一 router**：OS 事件 / 注入 down / 注入 up 三个入口，都在调用 `input::*` **之前**问同一个 `UiClickRouter`；左键命中即吞 + 捕获；**down 吞 ⇒ up 吞**，**down 放 ⇒ up 放**；右键 / 中键 / 滚轮 / 键盘 M1 一律放行；motion 永远放行 | `input::*` 仍是唯一施加路径（`runtime/input.h` 口径不变）；吞掉 = **不调用** `input::*`。★ **实现范围 = `click`**：三个入口已接同一个 router（OS 在 `present_sdl.cpp`、注入在 `input_plan.cpp` 的 `armClickAt` / `emitRelease`）；`mouse_move` / `mouse_down` / `mouse_up` 三条原语**不过 router**（S9 residual —— 接上去会改拖拽 / 显式 hold 的语义） |
 | D7 | **不写 guest**；`--present-screenshot` **含** UI；`--dump-frame` / `arena.hash` / 控制层 `screenshot`（guest 后缓冲冻结副本，`control_snapshot.h:ControlScreenshot.source`）**不含** | 与旧 overlay 同一条硬线；UI 只存在于宿主送显的窗口像素里 |
 | D8 | **失败响亮**：启动期（编译 / 校验 / 缺资源）`exit 2` + `origin:行:列`；运行期 = 卸载该插件 + **一次性** stderr；⛔ 不画空格 / 方块 | 静默降级等于"看起来正常但界面错了" |
-| D9 | **默认档零成本、零周期输出**：没有 `--ui` ⇒ 一次 bool 判空；有插件但本帧无可见元素 ⇒ 不布局 / 不栅格 / 不上传 / 不打印；`[ui]` 行按（插件, 错误种类）去重 | `AGENTS.md` §12.8；一次性收口行不收 |
+| D9 | **默认档零成本、零周期输出**：没有 `--overlay` 也没有插件 `render` ⇒ 一次 bool 判空；有插件但本帧无可见元素 ⇒ 不布局 / 不栅格 / 不上传 / 不打印；`[ui]` 行按（插件, 错误种类）去重 | `AGENTS.md` §12.8；一次性收口行不收 |
 | D10 | ★ **2026-11-19 部分反转**（原文：「⛔ **无 Promise / async**：`render` 必须**同步**产出 display list；宿主没有 job 队列」）：`Promise` **存在** —— `JS_AddIntrinsicPromise` 且**不删**（module 求值返回 Promise，是硬前提；需求单 `REQ-01M7QF01A00F9946DX0GPH23JQ`「裁决（2026-11-19）」第 4 条）；宿主有 job 泵（`script_quickjs.cpp:drainPendingJobs` → `JS_ExecutePendingJob`），但**只**跑 module 求值 / 关闭时的 microtask。**没变的**：`render` 仍必须**同步**产出 display list（没有跨帧 async / 协程）；`handleEvent` 仍不跑 JS | 一帧的 UI 由这一帧的输入决定；D10 限的是"跨帧异步"，不是语言里有没有 Promise |
 | D11 | AOT 的 `script/pos` **块入口采样门是新增面**，不是"接上已有的" | 解释器有 `Machine::sampleMarker`；AOT 只有控制层 `sample` 时读一次（`aot_host.h:control_marker_`） |
-| D12 | **不保留第二套**：M0 把两条绘制路径合并成 `presentOverlay`；M2 删 `formatOverlayLines` / `OverlayState` / `OverlayStatus`；`--overlay` 从 M2 起只是**外置** `scripts/ui/hud.js` 的参数别名（`--ui <path>` 打开任意脚本）。★ **S2 收紧**：`--overlay` = 「`--plugin hud`（保留 id）+ 要窗口」的预设；hud 走**同一个** PluginHost / adopt 叠层 host，⛔ 不再有"SdlWindow 先装 hud、adopt 再丢"的第二条装载路径 | 两套实现必然漂移；旧 5×7 点阵随 M2 一起删（`--ui-glyphs bitmap` 测试档本切片不开） |
+| D12 | **不保留第二套**：M0 把两条绘制路径合并成 `presentOverlay`；M2 删 `formatOverlayLines` / `OverlayState` / `OverlayStatus`；`--overlay` 从 M2 起只是**外置** `scripts/ui/hud.js` 的参数别名（S3 起另一入口 `--ui` 已删）。★ **S2 收紧**：`--overlay` = 「`--plugin hud`（保留 id）+ 要窗口」的预设；hud 走**同一个** PluginHost / adopt 叠层 host，⛔ 不再有"SdlWindow 先装 hud、adopt 再丢"的第二条装载路径 | 两套实现必然漂移；旧 5×7 点阵随 M2 一起删（`--ui-glyphs bitmap` 测试档本切片不开） |
 
 ## 3. 数据模型与 API
 
@@ -144,7 +144,7 @@ when: { script: ["SC00*", "TITLE"] }                 // 多个候选 = 或
 `insns` / `guest_ms` / `script_id` / `metrics()`、`probe`、`show/hide/toggle/log`、`local/global` 未接（M3）。
 ★ `mouse.buttons = {left, right, middle}` 是**可选键**：窗口装配有 `WindowManager` 时来自
 `InputDevice` 的唯一三键电平（`WindowManager::mouseButtons()`）；没有源（headless / 测试 sink）⇒
-**缺键**（⛔ 不是 `false`）。`--overlay` / `--ui` 与 `--plugin` 的 `render` 拿到同一形状（`ui.d.ts`）。
+**缺键**（⛔ 不是 `false`）。`--overlay` 与 `--plugin` 的 `render` 拿到同一形状（`ui.d.ts`）。
 ★ **位置读数没有 `game.pos` / `game.pos_ok`**（目标 API 旧文里的那两个名字）：这一版只有
 `game.local_frames()[i].pos`，且**只有 top 帧**有（见下）。⛔ 不要据此以为 `game.pos` 可用。
 ★ `host` 的目标 API 里 **`reload()` / `time_budget_ms()` 仍未实现**（切片 3 不做；没有这个成员，
@@ -224,7 +224,7 @@ win32 取。
 
 ### M1 — `ui_core` + display list + 布局 / 条件 / 命中（无语言运行时）
 
-用一个测试内的 C++ 假脚本（实现 `UiScript`，直接往 builder 塞元素）驱动整条管线；**M1 不开 `--ui` 文件入口**
+用一个测试内的 C++ 假脚本（实现 `UiScript`，直接往 builder 塞元素）驱动整条管线；**M1 不开脚本文件入口**
 （文件格式与语言一起定，⛔ 先造临时 JSON 再废弃）。
 
 1. 校验表每类一条；错误文本带 `行:列`（校验器接收"来源 + 行"值对象，不依赖文件）。
@@ -238,10 +238,10 @@ win32 取。
 ### M2 — QuickJS 宿主 + HUD 迁脚本 + 点击路由
 
 ★ **M2a 已落地（2026-11-18；M2a 本切片只做 QuickJS 宿主 + HUD 迁脚本；命中 / 捕获 / 点击路由在切片 2 落地，见下）**：
-`--overlay` 的 HUD 由**外置** `scripts/ui/hud.js` 经 QuickJS 同步产出；`--ui <path>` 打开任意脚本
-（显式优先、隐含 overlay）；★ **S1（2026-11-25）起 `--ui` 已弃用**：仍可用、仍只吃路径、仍隐含
-`--overlay`，但每次给都会打一行 `emulator-lift-aot: --ui 已弃用，请改用 --plugin <path>`；
-新写法是 `--plugin <id|path>`（`--plugin <path>` 装载同一份脚本，⛔ 不隐含 overlay）。`game` 注入 `frame / fps / mouse{x,y,buttons?} / script / worst` + 按需方法
+`--overlay` 的 HUD 由**外置** `scripts/ui/hud.js` 经 QuickJS 同步产出；`--plugin <id|path>` 是**唯一装载点**
+（`--plugin <path>` 装载任意插件脚本，⛔ 不隐含 overlay）。★ **S3（2026-11-25）起 `--ui` 已从 CLI 面删除**
+（⇒ 未知参数 exit 2）：旧 UiScript loader 只剩**内部 hud 回退**（`--overlay` + 无 render 的 `--plugin`）。
+`game` 注入 `frame / fps / mouse{x,y,buttons?} / script / worst` + 按需方法
 `local_frames()`（帧区 40 槽的只读视图，top-first，`top = slot == cur`；证据
 `docs/03-emulator/ui-frames.md`；HUD 的 `script` 行取 `top=true` 的项（没有 top 就回退 `game.script`））；`raster` / `present` 两行**已删**；底 `#101820CC`（80% 不透明，
 renderer 路径 `SDL_BLENDMODE_BLEND`，直出也混合（D 单，`SDL_DrawGPUPrimitives`；win32 未验证））；旧 `OverlayState` / `OverlayStatus` /
@@ -257,13 +257,13 @@ M3 的数据面仍未做。`mouse.buttons` 的源与缺键口径见 §3.5（窗�
 
 ★ **S2 已落地（2026-11-25；复审后订正）**：`hud.js` 成为**真插件**（`export default { render(ctx) }`，
 用 `ctx.draw/text/measure` + `ctx.game.*` + `ctx.profile.*`），`--overlay` = 「装载内置 `hud`
-（保留 id）+ 要窗口」的预设；旧 `globalThis.render` 入口只为 `--ui`（deprecated）保留，两个入口
+（保留 id）+ 要窗口」的预设；旧 `globalThis.render` 入口只为**内部 hud 回退**保留（`--ui` 已删），两个入口
 共用同一份绘制体。`hud` 是保留 id：`<exeDir>/scripts/ui/hud.js` → `LIFT_UI_SCRIPT_DIR/hud.js`
 （exe 赢；ASCII 大小写不敏感）；用户插件根里的 `hud.js` ⇒ exit 2。**预设路径**走 adopt
 （`SdlWindow::init` 不为它装 hud）；**`--overlay` + 显式 `--plugin` 保持旧形状**（有 render ⇒ 取代；
 无 render ⇒ hud 照画）；`--plugin hud` 不隐含开窗。`ctx.profile.end()` 回传报告文本 ⇒ PROFILE 四态
-（含 `INVALID`）与 `--ui` 相同。窗口 BMP / guest dump 由 **`--overlay` / `--plugin hud` / `--ui hud.js`
-三方逐字节**判据钉住。见 `plugin-runtime.md` §4.6。
+（含 `INVALID`）与旧入口相同。窗口 BMP / guest dump 由 **`--overlay` / `--plugin hud` /
+内部 hud 回退** 三方逐字节判据钉住。见 `plugin-runtime.md` §4.6。
 ★ **S9 已落**：`UiClickRouter` 已接进 `present_sdl.cpp:Impl::handleEvent` 与 `input_plan.cpp` 的
 `click` 路径；`--ui-input=consume|pass` 已实现（缺省 consume；窗口参数）。`--ui-strict` 仍未做。
 

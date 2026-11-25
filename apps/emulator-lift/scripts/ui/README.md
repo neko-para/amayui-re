@@ -1,4 +1,4 @@
-# `scripts/ui` —— HUD 脚本（`--overlay` / `--plugin hud`；`--ui` deprecated）
+# `scripts/ui` —— HUD 脚本（`--overlay` / `--plugin hud`；`--ui` 已删除）
 
 `--overlay` 的左上角 HUD **不是 C++ 画出来的**：它由这份目录里的 JS 脚本经 QuickJS **同步**跑出
 一份 display list，宿主再交给宿主字体栅格化、合成进窗口像素。默认脚本就是 `hud.js`；
@@ -8,8 +8,10 @@
 `ctx.draw.*` / `ctx.game.*` / `ctx.profile.*`（契约 = `scripts/plugins/plugin.d.ts` 的 `RenderCtx`，
 说明 = `docs/03-emulator/plugin-runtime.md` §4.6）。`--overlay` = 「装载内置 `hud`（保留 id）+
 要窗口」的预设；`--plugin hud` 是同一个入口（⛔ 不隐含开窗）。
-★ **旧入口仍在**（一句 `globalThis.render = …`）：`--ui <path>`（deprecated，S3 删）走的是旧
-UiScript loader。两个入口共用**同一份绘制体**、只换薄适配器（`classicHost()` / `pluginHost(ctx)`）。
+★ **S3 起 `--ui` 已从 CLI 面删除**：装载点只有 `--plugin <id|path>`（`--overlay` 是它的窗口预设）。
+`globalThis.render` 这个**经典入口仍在**，但只服务**内部 hud 回退**（`--overlay` + 无 render 的
+`--plugin`，见下）；用户自己的脚本一律写成**插件模块**（`export default { render(ctx) }`）。
+两个入口共用**同一份绘制体**、只换薄适配器（`classicHost()` / `pluginHost(ctx)`）。
 ★ `hud.js` 是 **module**：它 `import { Button } from './kit.js'` ⇒ 发行时 `hud.js` 与 `kit.js`
 **必须同目录**（`import` 的相对解析以 `hud.js` 所在目录为根；缺 kit 与缺 hud 同属**加载期硬失败**）。
 
@@ -24,13 +26,16 @@ emulator-lift-aot --present window --overlay ...
 # 等价写法（显式插件；⛔ 不隐含 overlay ⇒ 想开窗要自己给 --present window）
 emulator-lift-aot --present window --plugin hud ...
 
-# 自己的脚本（`--ui` 隐含 `--overlay`；deprecated，S3 删）
-emulator-lift-aot --present window --ui E:\my-hud.js ...
+# 自己的脚本（插件模块：export default { render(ctx) }）
+emulator-lift-aot --present window --plugin E:\my-hud.js ...
+
+# 内部 hud 回退：`--overlay` + 一个**没有 render** 的插件 ⇒ 默认 hud 照画
+emulator-lift-aot --present window --overlay --plugin E:\my-run-only.js ...
 ```
 
-`--ui <path>` 的脚本可以 `import` **它自己所在目录的子树**里的相对模块（例如把 `kit.js` 拷到
+`--plugin <path>` 的脚本可以 `import` **它自己所在目录的子树**里的相对模块（例如把 `kit.js` 拷到
 旁边，然后 `import { Button } from './kit.js'`）。⛔ bare specifier（`react`）/ 绝对路径 /
-`data:` URL / `..` 逃出脚本目录一律**加载期拒绝**（`--ui` 在启动期就 exit 2）。
+`data:` URL / `..` 逃出脚本目录一律**加载期拒绝**（启动期 exit 2，错误串带 `<path>:<行>:<列>`）。
 
 `--overlay`（= `--plugin hud`）的保留 id 解析顺序：
 
@@ -41,9 +46,9 @@ emulator-lift-aot --present window --ui E:\my-hud.js ...
 ★ **用户插件根里的 `hud.js`**（`<exe>/scripts/plugins/hud.js` 或 `LIFT_PLUGIN_DIR/hud.js`）⇒ 启动
 **exit 2** 并列出路径（`hud` 是保留 id；改名或给路径）——⛔ 不静默被内置件遮住。
 
-**加载期**的失败（语法错 / 缺入口 / 字体不可用）是**硬失败**：`--overlay` / `--plugin hud` 在启动期
-exit 2，`--ui` 的错误串带 `<path>:<行>:<列>`（字体不可用 = R5）。**运行期**抛错 / 超预算不是启动失败：
-一次性 `[overlay] …` 进 stderr + **关掉叠层**，**呈现照旧**（exit 0）。
+**加载期**的失败（语法错 / 缺入口 / 字体不可用）是**硬失败**：`--overlay` / `--plugin hud` /
+`--plugin <path>` 在启动期 exit 2，错误串带 `<path>:<行>:<列>`（字体不可用 = R5）。**运行期**抛错 /
+超预算不是启动失败：一次性 `[overlay] …` 进 stderr + **关掉叠层**，**呈现照旧**（exit 0）。
 
 ## 脚本形状
 
@@ -57,7 +62,8 @@ exit 2，`--ui` 的错误串带 `<path>:<行>:<列>`（字体不可用 = R5）�
   ```
 
   类型 = `scripts/plugins/plugin.d.ts` 的 `PluginModule` / `RenderCtx`。
-* **旧 `--ui`（deprecated）**：UTF-8、strict；两种形状（宿主**自动识别**，旧 `--ui` 的 classic 语义逐字不变）：
+* **旧经典形状（只剩内部 hud 回退使用；⛔ 不是 CLI 面）**：UTF-8、strict；两种形状（宿主**自动识别**，
+  经典语义逐字不变）：
   * **classic**：顶层 `function render() { … }`（或 `globalThis.render = …`），⛔ 没有 `import`；
   * **module**：带 `import` / 顶层 `await` / `import.meta` 的脚本走 ES module loader。相对
     specifier 按**脚本自己所在目录**解析（不是 cwd），且只能在该目录的子树里；
@@ -67,9 +73,10 @@ exit 2，`--ui` 的错误串带 `<path>:<行>:<列>`（字体不可用 = R5）�
   globalThis.render = function render() { /* 每帧调用一次 */ };
   ```
 
-  ★ module 里顶层的声明**不会**挂到 `globalThis` ⇒ 即便用 `import`，旧入口也**必须**显式写这一行。
-  ★ `hud.js` 同时有两个入口：上面这行给 `--ui`，`export default` 给插件。
-* 旧 `render()` 里只能用三个宿主全局：`ui`（画 list）、`game`（读这一帧的读数）与 `host`（宿主能力，
+  ★ module 里顶层的声明**不会**挂到 `globalThis` ⇒ 即便用 `import`，经典入口也**必须**显式写这一行。
+  ★ `hud.js` 同时有两个入口：上面这行给**内部 hud 回退 loader**，`export default` 给插件
+  （`--plugin hud` / `--overlay` 预设）。
+* 经典 `render()` 里只能用三个宿主全局：`ui`（画 list）、`game`（读这一帧的读数）与 `host`（宿主能力，
   例如 PROFILE 的开始 / 结束）。类型声明见同目录的 `ui.d.ts`（随发行分发，⛔ 不参与构建）。
   插件 `render(ctx)` 的同一份数据面 = `ctx.draw` / `ctx.game` / `ctx.profile`（映射见下）。
 * 每次调用前宿主已经清空 display list ⇒ `render` 只**追加**：⛔ 不要缓存 display list 元素 /
@@ -127,20 +134,20 @@ export default {
   },
 };
 
-// 旧 `--ui`（deprecated）：第二个参数省略 ⇒ 走全局 ui / game
+// 内部 hud 回退的经典入口：第二个参数省略 ⇒ 走全局 ui / game
 globalThis.render = function render() {
   Button({ key: 'profile', rect: { x: 8, y: 8, w: 96, h: 28 }, label: 'PROFILE' });
 };
 ```
 
 `Button(spec, host?)` 返回当前状态（`'idle'` / `'hover'` / `'active'` / `'disabled'`）；
-`host` 省略 = 旧 `--ui` 的全局 `ui` / `game`（deprecated 路径）。`disabled: true` 的按钮
+`host` 省略 = hud 回退的全局 `ui` / `game`（内部路径，⛔ 不是用户脚本入口）。`disabled: true` 的按钮
 **不挂 key**（不可命中，宿主不会给它发 click）。★ 组件库只做**外观 / 状态 / 主题**：⛔ 不做通用
 布局系统、不做窗口管理；`rect` 的 x/y/w/h 由调用方给。
 
 ### 旧全局 ↔ 插件 `ctx` 的映射（S2）
 
-| 旧（`--ui` / deprecated） | 插件（`--overlay` / `--plugin hud`） |
+| 旧（内部 hud 回退 / classic） | 插件（`--overlay` / `--plugin hud` / `--plugin <path>`） |
 |---|---|
 | `ui.rect({x,y,w,h,fill,key?})` | `ctx.draw.rect(x, y, w, h, { fill, key? })` |
 | `ui.text({x,y,text,size,color,bold?})` | `ctx.draw.text(x, y, text, { size, fill, bold? })` |
@@ -154,7 +161,7 @@ globalThis.render = function render() {
 
 ★ **S2**：插件侧用 `ctx.profile.begin(label)`（`void`；失败 = `TypeError`）/
 `ctx.profile.end()`（返回与旧 `host.profileEnd()` 同形的 `{ok,text,error}` —— HUD 靠 `text` 判
-`INVALID`；结束走 HostPause）。下面这节是旧 `--ui` 全局契约（deprecated）。
+`INVALID`；结束走 HostPause）。下面这节是**内部 hud 回退**的全局契约（⛔ 不是 CLI 面）。
 
 `host` 是**方法表**（像 `ui`），不是读数（像 `game`）：对象**恒存在**，缺接线是**调用时**的
 `TypeError`（⛔ 不是 `typeof host === 'undefined'` 那种形状差异）。
@@ -177,7 +184,7 @@ globalThis.render = function render() {
 ### `game`（只读 getter；这一帧没有值 ⇒ `undefined`，⛔ 不是 0）
 
 ★ **S2**：插件侧同一份读数在 `ctx.game.*`（同名只读 getter；`mouse` 是**方法** `mouse()`，
-`local_frames()` 叫 `localFrames()`）。下面这节是旧 `--ui` 全局契约（deprecated）。
+`local_frames()` 叫 `localFrames()`）。下面这节是**内部 hud 回退**的全局契约（⛔ 不是 CLI 面）。
 
 | 属性 | 类型 | 什么时候有 |
 |---|---|---|
@@ -253,7 +260,7 @@ pnpm exec tsc -p apps/emulator-lift/scripts/ui   # exit 0、无输出 = 干净
 
 ## 现在**没有**的
 
-* **热重载**：脚本在装叠层时编译一次（`--ui` 换文件要重启；`--overlay` / `--plugin hud` 每次启动
+* **热重载**：脚本在装叠层时编译一次（插件换文件要重启；`--overlay` / `--plugin hud` 每次启动
   重读）。⇒ `host.reload()` / `host.time_budget_ms()` **都还没实现**（`overlay.md` §3.5 的目标 API 里的
   另外两项；调用时是 `TypeError`（没有这个成员），⛔ 不是静默 no-op）。
 * 通用布局 / 锚点 / 百分比 / 窗口管理：组件库只按调用方给的 `rect` 画，命中区是宿主从

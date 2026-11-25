@@ -9,7 +9,7 @@
 //     //     （`hud.js` 的 `pluginHost(ctx)`；只需要 { rect, text, hover, active, click }）。
 //     Button({ key: 'profile', rect: {...}, label: 'PROFILE' }, host);
 //
-//     // 旧 `--ui` loader（deprecated）：第二个参数省略 ⇒ 走全局 `ui` / `game`
+//     // 内部 hud 回退的经典 loader：第二个参数省略 ⇒ 走全局 `ui` / `game`
 //     globalThis.render = function render() {
 //       Button({ key: 'profile', rect: {...}, label: 'PROFILE' });
 //     };
@@ -60,7 +60,7 @@ export const DEFAULT_THEME = {
 };
 
 /**
- * 旧 `--ui` loader 的默认适配器（只有它知道全局 `ui` / `game`）。
+ * 内部 hud 回退 loader 的默认适配器（只有它知道全局 `ui` / `game`）。
  * @returns {{ rect: (o: UiRectOptions) => void, text: (o: UiTextOptions) => void,
  *             hover?: string, active?: string, click?: UiClick }}
  */
@@ -78,7 +78,7 @@ function classicHost() {
  * 画一个按钮（每帧调一次；display list 每次 render 前由宿主清空 ⇒ 这里只追加）。
  * @param {ButtonSpec} spec
  * @param {{ rect: (o: any) => void, text: (o: any) => void, hover?: string, active?: string, click?: UiClick }} [host]
- *   S2：像素原语的来路。省略 = 旧 `--ui` 的全局 `ui` / `game`（deprecated 路径）。
+ *   S2：像素原语的来路。省略 = hud 回退的全局 `ui` / `game`（内部路径）。
  * @returns {'idle' | 'hover' | 'active' | 'disabled'}
  */
 export function Button(spec, host) {

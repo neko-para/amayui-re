@@ -885,7 +885,8 @@ id 只查 `scripts/plugins/` 的**根**（`<exeDir>/scripts/plugins/<id>.js` 与
 `LIFT_PLUGIN_DIR/<id>.js` 两处，**非递归**；⛔ 不查 `lib/`），两根都命中 / 都不在都 `exit 2`
 并列出候选。目录布局 = **入口在根、库在 `lib/`**（`lib/` 只被 import），说明与域表见
 [`scripts/plugins/README.md`](scripts/plugins/README.md)。`hud` 是**保留 id**（解析在 `scripts/ui/`，
-不在本目录；见上）。`--ui <path>` 仍可用但**已弃用**（S1 只打一行 deprecation，行为不变；S3 删）。
+不在本目录；见上）。**S3（2026-11-25）起 `--ui` 已从 CLI 面删除**：`--ui` ⇒ 未知参数 `exit 2`；
+装载点只剩 `--plugin <id|path>`，`--overlay` 是它的窗口预设（`--plugin hud` + 要窗口）。
 
 ### 4.3.1 一帧的墙钟去哪了（逐帧诊断）
 
