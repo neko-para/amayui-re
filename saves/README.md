@@ -30,6 +30,9 @@
 
 - 每个 `SAVE<NN>.DAT` 都要配一份同名 `.STH`（缩略图）；**成对复制**，⛔ 只拷 `.DAT`。
 - 文件大小**不是**判据（同一场景的存档大小会随内容变）；⛔ 不要按大小推“空槽 / 有内容”。
+- **缺 `SAVE<NN>.DAT` 现在会在点 LoadData 之前报**：`loadSave` 的 `start` 先查这一槽的文件，
+  缺了就 `ctx.finish(5, "load-save: save file missing: … (slot N)")`、一个 click 都不发
+  （不再等 30 s 的 `load:sbunki` 门超时）；`--appdata` 没给 / 存档不在 appdata 下时跳过并 warn。
 
 ## `--appdata` 与目录结构（★ 复制错一层 = 读档界面点行没反应）
 

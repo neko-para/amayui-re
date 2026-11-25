@@ -38,8 +38,38 @@ const SCRIPT_SAVE = 'SAVE.BIN';
 /** 目标槽 = 9（页 0 第 9 行）⇒ 页 1 进屏时必须翻到页 0。 */
 const SLOT = 9;
 const TARGET_PAGE = 0;
+/** `save.js` 的缺省存档目录（相对 appdata 根）；本用例只做假读数，路径必须与库逐字一致。 */
+const SAVE_DIR = "Local/Eushully/天結いキャッスルマイスター/SAVE";
 /** 假 guest 的上限（远大于任何一次模型的落地时刻；超了就是"链没收敛"）。 */
 const MAX_READS = 6000;
+
+/**
+ * 一个**只有本用例需要的那几面**的假 `ctx.appdata`。
+ *
+ * `undefined` ⇒ ctx 里**没有** `appdata`（老形状）；`null` 等价。
+ * 否则 `stat(rel)` 只用 `files` / `dirs` 两张表回答，并把每次调用的 rel 记进 `calls`。
+ *
+ * @param {{ available?: boolean, path?: string | null, files?: Record<string, number>, dirs?: string[], statError?: string } | undefined} spec
+ */
+function makeAppData(spec) {
+    if (spec === undefined || spec === null) return undefined;
+    const files = spec.files === undefined ? {} : spec.files;
+    const dirs = spec.dirs === undefined ? [] : spec.dirs;
+    const calls = [];
+    return {
+        available: spec.available !== false,
+        path: spec.path === undefined ? "/fake/appdata" : spec.path,
+        calls,
+        stat(rel) {
+            calls.push(rel);
+            if (Object.prototype.hasOwnProperty.call(files, rel)) {
+                return { exists: true, isFile: true, isDir: false, size: files[rel] };
+            }
+            if (dirs.includes(rel)) return { exists: true, isFile: false, isDir: true };
+            return { exists: false, error: spec.statError === undefined ? "not_found" : spec.statError };
+        },
+    };
+}
 
 /**
  * 一个**只有本用例需要的那几面**的 `RunCtx`：
@@ -61,6 +91,7 @@ function makeWorld(model) {
     let finished = null;
     /** @type {{name:string, reason:string}|null} */
     let failed = null;
+    const appdata = makeAppData(model.appdata);
 
     const ctx = {
         params: {},
@@ -114,6 +145,7 @@ function makeWorld(model) {
             failed = { name, reason };
         },
     };
+    if (appdata !== undefined) ctx.appdata = appdata;
 
     /** 世界推进到下一个读点（先结算到期的翻页 = 页号真的变了，再让 driver 判 trigger）。 */
     function advance() {
@@ -150,6 +182,7 @@ function makeWorld(model) {
         ctx,
         clicks,
         logs,
+        appdata,
         get page() {
             return page;
         },
@@ -170,14 +203,19 @@ function makeWorld(model) {
 /**
  * 把 `loadSave(SLOT)` 的链跑到"页到了"或"链自己收口"为止。
  *
- * @param {{ startPage?: number, latency?: number, swallowFirstArrowClick?: boolean }} [model]
- * @returns {{ reachedPage: boolean, arrowClicks: number, page: number, reads: number, finished: any, failed: any }}
+ * @param {{ startPage?: number, latency?: number, swallowFirstArrowClick?: boolean,
+ *           appdata?: { available?: boolean, path?: string | null, files?: Record<string, number>,
+ *                       dirs?: string[], statError?: string } }} [model]
+ * @returns {{ reachedPage: boolean, arrowClicks: number, page: number, reads: number, finished: any,
+ *            failed: any, rowClicked: boolean, rowClicks: number, clicks: any[], logs: string[],
+ *            statCalls: string[] }}
  */
 function drivePageChain(model = {}) {
     const world = makeWorld({
         startPage: model.startPage === undefined ? 1 : model.startPage,
         latency: model.latency === undefined ? CLICK_LATENCY_READS : model.latency,
         swallowFirstArrowClick: model.swallowFirstArrowClick === true,
+        appdata: model.appdata,
     });
     const chain = loadSave(SLOT, { expect: ['FIELD.BIN'] });
     /** @type {any[]} */
@@ -211,6 +249,9 @@ function drivePageChain(model = {}) {
         reads: world.read,
         finished: world.finished,
         failed: world.failed,
+        clicks: world.clicks,
+        logs: world.logs,
+        statCalls: world.appdata === undefined ? [] : world.appdata.calls,
     };
 }
 
@@ -255,4 +296,74 @@ test('loadsave-page/already-on-target-page：进屏就在目标页 ⇒ 一次箭
     assert.equal(r.arrowClicks, 0, `已经在目标页却点了 ${r.arrowClicks} 次箭头`);
     assert.equal(r.rowClicks, 1, `应该恰好点一次行（实际 ${r.rowClicks}）`);
     assert.equal(r.page, TARGET_PAGE, `页号不是目标页（page=${r.page}）`);
+});
+
+// ---------------------------------------------------------------------------------------
+// 前置检查（`start` 的第一个动作；缺 `SAVE<NN>.DAT` ⇒ finish(5) 且**一个 click 都不发**）
+//
+// ★ 这三条判的是"缺文件时的出口"与"跳过条件"，⛔ 不判游戏读数：
+//   · save-missing：`stat` 说 not_found + 存档目录在 appdata 下 ⇒ finish(5) + 0 click + reason 点名；
+//   · save-present：有文件 ⇒ 链形状与 `already-on-target-page` 完全一致（前置检查不许顺手改链）；
+//   · no-appdata：`available=false` ⇒ 照常读档 + 一行 warn（⛔ 不误杀没有 --appdata 的运行）。
+// ---------------------------------------------------------------------------------------
+
+test('loadsave-page/save-missing：缺 SAVE<NN>.DAT ⇒ 在第一个 click 之前 finish(5)，一个 click 都不发', () => {
+    const r = drivePageChain({ appdata: { dirs: [SAVE_DIR] } });
+    assert.equal(r.failed, null, `不应该 ctx.fail：${JSON.stringify(r.failed)}`);
+    assert.deepEqual(r.clicks, [], `缺文件时一个 click 都不许发（实际 ${JSON.stringify(r.clicks)}）`);
+    assert.notEqual(r.finished, null, '缺文件必须自己收口（finish），⛔ 不许继续等 SAVE 门');
+    assert.equal(r.finished.code, 5, `finish code 必须是 5（实际 ${r.finished.code}）`);
+    assert.match(r.finished.reason, /load-save: save file missing:/, `reason 没点名缺文件：${r.finished.reason}`);
+    assert.match(r.finished.reason, /SAVE09\.DAT/, 'reason 必须点名缺的是哪个文件');
+    assert.match(r.finished.reason, /slot 9/, 'reason 必须点名槽号');
+    assert.ok(
+        r.logs.some((line) => line.startsWith('error:') && line.includes('save file missing')),
+        `error 日志缺失：${JSON.stringify(r.logs)}`,
+    );
+    // stat 先查文件、再查目录（判"存档是否根本不在这棵树里"）。
+    assert.deepEqual(
+        r.statCalls,
+        [`${SAVE_DIR}/SAVE09.DAT`, SAVE_DIR],
+        '前置检查只许 stat 这两个路径（文件 → 目录）',
+    );
+});
+
+test('loadsave-page/save-present：有 SAVE<NN>.DAT ⇒ 照常点行（前置检查不许顺手改链）', () => {
+    const r = drivePageChain({
+        startPage: TARGET_PAGE,
+        appdata: { dirs: [SAVE_DIR], files: { [`${SAVE_DIR}/SAVE09.DAT`]: 4096 } },
+    });
+    assert.equal(r.finished, null, `有文件却提前收口：${JSON.stringify(r.finished)}`);
+    assert.equal(r.failed, null, `有文件却 fail 了：${JSON.stringify(r.failed)}`);
+    assert.equal(r.rowClicked, true, `没走到"点行"那一步（reads=${r.reads}）`);
+    assert.equal(r.arrowClicks, 0, `已经在目标页却点了 ${r.arrowClicks} 次箭头`);
+    assert.equal(r.rowClicks, 1, `应该恰好点一次行（实际 ${r.rowClicks}）`);
+});
+
+test('loadsave-page/no-appdata：没有 ctx.appdata（或无 --appdata）⇒ 跳过检查 + warn，照常读档', () => {
+    const noAppdata = drivePageChain({ startPage: TARGET_PAGE });
+    assert.equal(noAppdata.rowClicked, true, '没有 ctx.appdata 时链必须照常走（⛔ 不误杀）');
+    assert.equal(noAppdata.finished, null, `没有 ctx.appdata 却收口了：${JSON.stringify(noAppdata.finished)}`);
+    assert.ok(
+        noAppdata.logs.some((line) => line.startsWith('warn:') && line.includes('appdata 不可用')),
+        `跳过时必须打一行 warn：${JSON.stringify(noAppdata.logs)}`,
+    );
+
+    const unavailable = drivePageChain({ startPage: TARGET_PAGE, appdata: { available: false } });
+    assert.equal(unavailable.rowClicked, true, 'available=false 时链必须照常走（⛔ 不误杀）');
+    assert.deepEqual(unavailable.statCalls, [], 'available=false 时不该去 stat 任何路径');
+    assert.ok(
+        unavailable.logs.some((line) => line.startsWith('warn:') && line.includes('appdata 不可用')),
+        `available=false 时也必须 warn：${JSON.stringify(unavailable.logs)}`,
+    );
+});
+
+test('loadsave-page/save-dir-not-under-appdata：存档目录不在 appdata 下 ⇒ 跳过 + warn（存档在安装树）', () => {
+    const r = drivePageChain({ startPage: TARGET_PAGE, appdata: { dirs: [] } });
+    assert.equal(r.finished, null, `不该收口（存档可能在安装树）：${JSON.stringify(r.finished)}`);
+    assert.equal(r.rowClicked, true, '跳过之后链必须照常走');
+    assert.ok(
+        r.logs.some((line) => line.startsWith('warn:') && line.includes('不在 appdata 下')),
+        `必须 warn 说明跳过原因：${JSON.stringify(r.logs)}`,
+    );
 });

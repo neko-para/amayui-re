@@ -17,6 +17,9 @@
 //                                            `--plugin-param expect=FIELD,SC0000`）；两个 slot 的 `move`
 //                                            落**不同** y（实测表，⛔ 不是公式）；精确坐标
 //                                            (1070,480) / (300,rowY) / (640,323) + `done`/`fired=5`/`calls=6`。
+//   · `control-script/save-missing-precheck`：缺存档文件（临时 appdata 只建目录、不放
+//                                            `SAVE15.DAT`）⇒ `loadSave.start` 在**任何 click 之前**
+//                                            `finish(5)`；`stagedDepth/depth=0`、光标不动、回调 2 次。
 //   · `…-field-terminal`                  ：终态 = `expect` 里的脚本命中（FIELD 分支）直接收口；
 //                                            不点 (690,323)，done 之后不再有回调。
 //   · `…-second-confirm`                  ：终态的 **SBUNKI 0x0AF8 第二道确认**分支：真的点落 (690,323)
@@ -78,11 +81,16 @@
 #include <thread>
 #include <vector>
 
+#ifndef _WIN32
+#include <unistd.h>  // getpid（临时 appdata 的唯一性）
+#endif
+
 #include "check.h"
 #include "plugin/plugin_host.h"
 #include "runtime/budget.h"         // callbackDiag / pluginThreadCpuNs（2 ms 判据的读数）
 #include "runtime/engine_marker.h"  // kEngineSingletonGlobal（假 Engine 的发布点）
 #include "runtime/font.h"           // FontEngine（C2b：`ctx.draw.measure` 的来路）
+#include "runtime/host_encoding.h"  // 临时 appdata 的 UTF-8 宿主路径（ctx.appdata 的测试）
 #include "runtime/host_window.h"
 #include "runtime/memory.h"
 #include "runtime/script_globals.h"
@@ -166,6 +174,23 @@ std::string libPath(const std::string& name) {
     return (fs::path(LIFT_PLUGIN_LIB_DIR) / name).string();
 }
 
+// 宿主 `fs::path` → UTF-8（`ctx.appdata` 的根参数是 UTF-8；Windows 上不能拿 `.string()`）。
+std::string hostPathText(const fs::path& p) {
+#ifdef _WIN32
+    return lift::wideToUtf8(p.wstring().c_str());
+#else
+    return p.string();
+#endif
+}
+
+std::uint32_t processId() {
+#ifdef _WIN32
+    return static_cast<std::uint32_t>(::GetCurrentProcessId());
+#else
+    return static_cast<std::uint32_t>(::getpid());
+#endif
+}
+
 bool readHostFile(const std::string& path, std::string* out) {
     std::ifstream in(path, std::ios::binary);
     if (!in) return false;
@@ -245,6 +270,21 @@ struct Fixture {
 
     // 一个读点（本文件里"读点"的唯一含义）。
     void pump(lift::InputPoint point = lift::InputPoint::PeekMsg) { host->onReadPoint(wm, point); }
+
+    // `ctx.appdata` 的根（**临时 appdata**；用例自己建 / 自己删）。`install_dir` 空 = 不判安装树。
+    // ★ attach 在 `init` 之后也有效：`available/path` 是**每个回调**现读的（ctx 每次新建）。
+    bool attachAppData(const std::string& root) {
+        if (host == nullptr) {
+            load_error = "attachAppData: 还没装载";
+            return false;
+        }
+        std::string err;
+        if (!host->attachAppData(root, "", &err)) {
+            load_error = err;
+            return false;
+        }
+        return true;
+    }
 
     void cursor(int* x, int* y) const { wm.cursorClientPos(hwnd, x, y); }
 };
@@ -738,6 +778,74 @@ const plugin = {
 
 export default plugin;
 )JS";
+
+// =====================================================================================
+// `control-script/save-missing-precheck`：缺 `SAVE<NN>.DAT` ⇒ **第一个 click 之前** `finish(5)`
+//
+// 判据（红了意味着什么）：`loadSave.start` 的前置检查被删 / 挪到 click 之后 ——
+//   · 缺文件时**任何 click 都不得提交**（`stagedDepth / depth` 都是 0，光标不动）；
+//   · Run 必须自己收口：`finished + exit=5`，reason 点名 `SAVE15.DAT` / `slot 15`；
+//   · 回调数 = 2（`start` + TITLE 门那一次）：⛔ 不是在 30 s 门超时之后才失败。
+//
+// ★ 夹具：临时 appdata **建出**存档目录（引擎启动期会建它；见 `save-format.md` §1），
+//   ⛔ 不放 `SAVE15.DAT`。这是"复制错一层 / 漏拷槽"的机械复现，不依赖 `saves/`。
+// ★ 参考入口自带 `bootToTitle`（TITLE 门）⇒ 第 2 个读点才进入 `loadSave.start`；
+//   boot 链的 TITLE 命中**不点任何坐标**（`boot-to-title.js`），所以 0 click 是这条链的真判据。
+// =====================================================================================
+void caseSaveMissingPrecheck() {
+    lift_test::g_current_case = "control-script/save-missing-precheck";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    ScopedTempDir appdata;
+    LIFT_CHECK(appdata.make("lift-plugin-save-precheck"));
+    if (appdata.path.empty()) return;
+    std::error_code ec;
+    // ★ 非 ASCII 段必须从 UTF-8 → 宿主 `wchar_t`（`fs::path` 的窄构造按 ACP 解码，会造出错的目录名）。
+    const fs::path save_dir =
+        appdata.path /
+        fs::path(lift::utf8ToWide("Local/Eushully/天結いキャッスルマイスター/SAVE"));
+    fs::create_directories(save_dir, ec);  // 目录存在、文件不存在 ⇒ 只可能是"这一槽缺"
+    LIFT_CHECK(!ec);
+    if (ec) return;
+    const bool loaded = f.loadLib({{"slot", "15"}, {"expect", "FIELD,SC0000"}});
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    LIFT_CHECK(f.attachAppData(hostPathText(appdata.path)));
+    // ① TITLE 读点：参考入口的 start 只 arm `boot:title`（不提交 input）。
+    f.readings.script = "TITLE.BIN";
+    f.readings.pos = 0x0480;
+    f.pump();
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().stagedDepth()), 0);
+    LIFT_CHECK(!f.host->finished());
+    // ② TITLE 命中 ⇒ `loadSave.start`：前置检查必须在这里 finish(5) + 返回 []，⛔ 一个 click 都不发。
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->finished());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->finishCode()), 5);
+    const std::string reason = f.host->finishReason();
+    LIFT_CHECK(reason.find("load-save: save file missing:") != std::string::npos);
+    LIFT_CHECK(reason.find("SAVE15.DAT") != std::string::npos);
+    LIFT_CHECK(reason.find("slot 15") != std::string::npos);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().stagedDepth()), 0);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->queue().depth()), 0);
+    int cx = 0;
+    int cy = 0;
+    f.cursor(&cx, &cy);
+    LIFT_CHECK_EQ_I64(cx, 0);
+    LIFT_CHECK_EQ_I64(cy, 0);
+    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 2);
+    const std::string line = f.host->readout();
+    LIFT_CHECK(line.find("run=finished") != std::string::npos);
+    LIFT_CHECK(line.find("exit=5") != std::string::npos);
+    LIFT_CHECK(line.find("reason=load-save: save file missing:") != std::string::npos);
+    std::printf("  [%s] %s\n", lift_test::g_current_case, line.c_str());
+}
 
 void caseLoadSaveOnLoaded() {
     lift_test::g_current_case = "control-script/load-save-onloaded";
@@ -2132,6 +2240,7 @@ int main() {
     caseInitialState();
     caseConcurrentArm();
     caseChain();
+    caseSaveMissingPrecheck();
     caseLoadSaveOnLoaded();
     caseChainsRoute();
     caseGlobalReadModifyWrite();

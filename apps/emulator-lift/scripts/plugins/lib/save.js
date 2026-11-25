@@ -64,6 +64,15 @@
 //     新 1200：`page 0 reached` → `reached REIGN.BIN`（calls=723）⇒ 重试窗口是这条链唯一的救命面。
 //   ⛔ 没有放宽任何门（判据仍是"页号真的等于目标页"）；⛔ 没改 `saves/`；⛔ 没有用 `--input-plan`。
 //
+// ★ 2026-11-25 —— **缺 `SAVE<NN>.DAT` 在第一个 click 之前就报**（本轮的第二个修复）：
+//   以前缺文件要等 SAVE 屏点行不弹确认框 ⇒ 30 s 门超时（`load-save: gate timeout (load:sbunki)`），
+//   症状和"点击被吞"混在一起。现在 `start(ctx)` 先 `ctx.appdata.stat(<saveDir>/SAVE<NN>.DAT)`：
+//   缺 ⇒ `ctx.finish(5, "load-save: save file missing: <绝对路径> (slot N)")` + 返回 `[]`，
+//   **一个 click 都不发**。只查 `.DAT`（`.STH` 缺失不阻止读档；`SAVE.DAT` 不是槽索引）；
+//   槽 0..99（≥100 的字形未取证 ⇒ 跳过 + warn）；没有 `--appdata` / 存档目录不在 appdata 下
+//   （`set:UseAppDataFolder != 1` 的代理）⇒ 跳过 + warn（⛔ 不误杀）。
+//   有文件 ⇒ 下面整条链**逐行不变**。
+//
 // ★ 2026-11-21（A 阶段）—— **两个接口，各管一件事**：
 //   · `options.expect: string[]`（**必填**）：载入完成后落在哪个脚本，由**调用方按预期给** ——
 //     ADV = `SC*` / `SG*` / `SP*`（如 `SC0000.BIN`）、战斗 = `BTL.BIN`、地图 = `FIELD.BIN`（可能还有别的名字）。
@@ -120,6 +129,8 @@ import {
  * @typedef {object} LoadSaveOptions
  * @property {string[]} [expect] 载入完成后**可以算落点**的脚本名表（必填，见上）。
  * @property {number} [timeoutMs] 每道门的超时；缺省 30000 ms。
+ * @property {string} [saveDir] 存档目录，**相对 appdata 根**（缺省 `SAVE_DIR_REL`）。
+ *   只影响前置检查；给的值必须是非空相对路径（绝对路径 / `..` / NUL ⇒ 构造时 throw）。
  * @property {(ctx: RunCtx) => Trigger | Trigger[] | null} [onLoaded] 到终态之后要做的事。
  */
 /**
@@ -201,6 +212,157 @@ const ROW_Y = { 0: 91, 1: 150, 2: 209, 3: 269, 4: 328, 5: 388, 6: 447, 7: 507, 8
 //   "界面能选到的槽"放行，⛔ 不声称 SAVE100.DAT 一定能打开。
 const MAX_SLOT = 90 * SAVE_PAGE_ROWS - 1;
 
+// ---------------------------------------------------------------------------------------
+// 存档文件前置检查（2026-11-25）——缺 `SAVE<NN>.DAT` 时**在第一个 click 之前** `finish(5)`。
+//
+// ★ 为什么放在本库（而不是某个 scenario）：`scenario-fellow-switch.js` 也直接调 `loadSave(9)`；
+//   放场景里会漏掉直接消费者。`start(ctx)` 的第一件事 = 这个检查（⛔ 一个 click 都不发）。
+// ★ 为什么只查 `SAVE<NN>.DAT`：
+//   · `.STH` 缺失**不阻止读档**（`docs/03-emulator/save-format.md` §1：缩略图读侧失败返回 1）；
+//   · `SAVE.DAT` 不是槽索引（它是脚本键持久化池；缺它最多让页号回 0）。
+// ★ **存档目录是本标题的实测布局，不是引擎合同**：宿主不知道 title / `set:SavePath`
+//   （`set:UseAppDataFolder != 1` 时存档根本不在 appdata）⇒ 标题名只在这里写一次，
+//   `loadSave(slot, { saveDir })` 允许调用方覆盖（相对 appdata 根）。
+// ---------------------------------------------------------------------------------------
+export const SAVE_DIR_REL = "Local/Eushully/天結いキャッスルマイスター/SAVE";
+// 文件名形状**已取证**的槽上界（两位 `%2.2d`）：0..99。`slot > 99` ⇒ 跳过检查 + warn。
+const SAVE_FILE_PRECHECK_MAX_SLOT = 99;
+
+/** `SAVE<NN>.DAT` 的 `%2.2d` 零填充（槽 7 ⇒ `SAVE07.DAT`）。 */
+function pad2(n) {
+    return String(n).padStart(2, "0");
+}
+
+// ★ 沙箱里**没有 RegExp**（`script_quickjs.cpp` 的 `JS_NewContextRaw` + BaseObjects）⇒ 本文件
+//   一律用字符 / `split` / `endsWith` 处理路径，⛔ 不写正则字面量。
+/** ASCII 字母判定（`C:` 这种盘符前缀；⛔ 不用正则）。 */
+function isAsciiLetter(ch) {
+    return (ch >= "A" && ch <= "Z") || (ch >= "a" && ch <= "z");
+}
+
+/** 去掉末尾的 `/` / `\`（保留 "" / "C:" 这种形状；⛔ 不用正则）。 */
+function stripTrailingSeparators(text) {
+    let out = text;
+    while (out.length > 1 && (out.endsWith("/") || out.endsWith("\\"))) out = out.slice(0, -1);
+    return out;
+}
+
+/**
+ * 把 `saveDir` 选项归一化成一个**相对 appdata 根**的路径；非法 ⇒ 构造时 throw。
+ *
+ * @param {string | undefined} value
+ * @returns {string}
+ */
+function normalizeSaveDir(value) {
+    if (value === undefined) return SAVE_DIR_REL;
+    if (typeof value !== "string" || value.trim() === "") {
+        throw new Error("loadSave: options.saveDir 必须是非空字符串（相对 appdata 根）");
+    }
+    let dir = stripTrailingSeparators(value.trim().split("\\").join("/"));
+    if (dir === "" || dir === ".") return ".";
+    // 绝对路径（`C:` / `C:\` / `/` / `\`）与 `..` 段都是编程错误 ⇒ 构造时响亮拒绝。
+    if ((dir.length >= 2 && isAsciiLetter(dir[0]) && dir[1] === ":") || dir[0] === "/" || dir[0] === "\\") {
+        throw new Error(`loadSave: options.saveDir 必须是相对 appdata 根的路径（收到 '${value}'）`);
+    }
+    const parts = dir.split("/");
+    for (let i = 0; i < parts.length; i += 1) {
+        if (parts[i] === "..") {
+            throw new Error(`loadSave: options.saveDir 不许含 '..' 段（收到 '${value}'）`);
+        }
+    }
+    for (let i = 0; i < dir.length; i += 1) {
+        const code = dir.charCodeAt(i);
+        if (code === 0 || code < 32) {
+            throw new Error("loadSave: options.saveDir 不许含 NUL / 控制字符");
+        }
+    }
+    return dir;
+}
+
+/**
+ * 失败消息里的绝对路径（`ctx.appdata.path` 的分隔符口径；不可用 ⇒ 退回相对路径）。
+ *
+ * @param {RunCtx["appdata"]} appdata
+ * @param {string} rel
+ * @returns {string}
+ */
+function displayPath(appdata, rel) {
+    const root = typeof appdata.path === "string" ? appdata.path : "";
+    if (root.length === 0) return rel;
+    const sep = root.includes("\\") ? "\\" : "/";
+    return stripTrailingSeparators(root) + sep + rel.split("/").join(sep);
+}
+
+/**
+ * 前置检查：缺 `SAVE<NN>.DAT` ⇒ `finish(5)` 并返回 false（调用方 **一个 click 都不发**）。
+ * 跳过（返回 true，照常读档）的三种情况都必须**打一行 warn**（⛔ 不静默）：
+ *   ① `ctx.appdata` 不存在 / `available=false`（没有 `--appdata`）；
+ *   ② `slot > 99`（文件名字形未取证）；
+ *   ③ 存档目录本身不在 appdata 下（= 存档在安装树 / `set:UseAppDataFolder != 1` 的宿主侧代理），
+ *      或 stat 报 denied/io（无法证明"缺文件"）。
+ *
+ * @param {RunCtx} ctx
+ * @param {number} slot
+ * @param {string} saveDir 相对 appdata 根
+ * @returns {boolean} true = 继续读档；false = 已经 finish(5)，调用方必须返回 []
+ */
+function precheckSaveFile(ctx, slot, saveDir) {
+    const appdata = ctx.appdata;
+    if (appdata === undefined || appdata === null || appdata.available !== true) {
+        ctx.log("warn", `load-save: appdata 不可用 ⇒ 跳过存档文件前置检查（slot ${slot}）`);
+        return true;
+    }
+    if (slot > SAVE_FILE_PRECHECK_MAX_SLOT) {
+        ctx.log(
+            "warn",
+            `load-save: slot ${slot} > ${SAVE_FILE_PRECHECK_MAX_SLOT} 的 SAVE<NN>.DAT 文件名字形未取证` +
+                " ⇒ 跳过存档文件前置检查",
+        );
+        return true;
+    }
+    const rel = `${saveDir}/SAVE${pad2(slot)}.DAT`;
+    const st = appdata.stat(rel);
+    if (st === undefined || st === null || typeof st !== "object") {
+        ctx.log("warn", `load-save: appdata.stat(${rel}) 没有返回结果对象 ⇒ 跳过前置检查`);
+        return true;
+    }
+    if (!st.exists) {
+        // ★ 无法证明"缺文件"的读法一律跳过：denied / io 可能是环境问题，no_appdata 是配置晚了。
+        const error = typeof st.error === "string" ? st.error : "not_found";
+        if (error === "denied" || error === "io" || error === "not_dir" || error === "no_appdata") {
+            ctx.log("warn", `load-save: stat ${rel} 失败（${error}）⇒ 跳过存档文件前置检查`);
+            return true;
+        }
+        // ★ "存档在安装树"的宿主侧代理：存档目录不在 appdata 下 ⇒ 这个前置检查没有意义，
+        //   ⛔ 不误杀合法读档（宿主 / 插件都拿不到 `set:UseAppDataFolder` / `set:SavePath` 的值）。
+        //   `saveDir === "."` = appdata 根本身（`available=true` 已证明根可用）⇒ 不用 stat 它。
+        let dirOk = false;
+        if (saveDir === ".") {
+            dirOk = true;
+        } else {
+            const dirStat = appdata.stat(saveDir);
+            dirOk =
+                dirStat !== null &&
+                dirStat !== undefined &&
+                dirStat.exists === true &&
+                dirStat.isDir === true;
+        }
+        if (!dirOk) {
+            ctx.log(
+                "warn",
+                `load-save: ${saveDir} 不在 appdata 下 ⇒ 跳过存档文件前置检查（存档可能在安装树）`,
+            );
+            return true;
+        }
+        const file = displayPath(appdata, rel);
+        const reason = `load-save: save file missing: ${file} (slot ${slot})`;
+        ctx.log("error", reason);
+        ctx.finish(5, reason);
+        return false;
+    }
+    return true;
+}
+
 const DEFAULT_GATE_TIMEOUT_MS = 30000;
 
 // ★ 载入链的具名状态一律 `load:` 前缀；`chains.js` 的 `route` 与场景命名禁区都只看这一个前缀。
@@ -230,6 +392,7 @@ export function loadSave(slot, options = {}) {
     const targetPage = Math.floor(slot / SAVE_PAGE_ROWS);
     const gateTimeoutMs =
         options !== null && options.timeoutMs !== undefined ? options.timeoutMs : DEFAULT_GATE_TIMEOUT_MS;
+    const saveDir = normalizeSaveDir(options !== null ? options.saveDir : undefined);
     const onLoaded = options !== null ? options.onLoaded : undefined;
     if (onLoaded !== undefined && typeof onLoaded !== "function") {
         throw new Error(`onLoaded must be a function (got ${typeof onLoaded})`);
@@ -362,6 +525,10 @@ export function loadSave(slot, options = {}) {
 
     return {
         start(ctx) {
+            // ★ **前置检查在第一个 click 之前**（2026-11-25）：缺 `SAVE<NN>.DAT` ⇒ finish(5) + []，
+            //   ⛔ 不发任何 click（否则已经进了 SAVE 屏，失败原因会和"点行不进确认框"混在一起）。
+            //   跳过条件见 `precheckSaveFile`（无 appdata / slot>99 / 存档目录不在 appdata）。
+            if (!precheckSaveFile(ctx, slot, saveDir)) return [];
             // ★ **前提：已经在 TITLE**（文件头）。这里不再等 TITLE —— 直接点 LoadData 入口，
             //   然后 arm SAVE 门。点不进去（不在 TITLE / 点被吞）⇒ SAVE 门超时 = 响亮失败。
             ctx.log("info", `load-save: start (slot ${slot}) ⇒ click LoadData (${LOAD_MENU_X},${LOAD_MENU_Y})`);

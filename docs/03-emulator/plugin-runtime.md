@@ -824,6 +824,19 @@ export default plugin;   // 宿主 QJS 读 default 导出；⛔ 不读 globalThi
   `onLoaded(ctx)` 是"载入**到终态之后**"的接续点（终态先 log 再回调，返回值 = 本次 `onTrigger` 的返回值；
   ⛔ 不给它时行为不变）。**本库不认识场景**：把载入链和场景拼起来是使用方用 `chains.js` 的 `route` 做的
   （§4.6a）。
+- **`loadSave` 的缺文件前置检查**（2026-11-25）：`start(ctx)` 的**第一件事**是查
+  `<saveDir>/SAVE<NN>.DAT`（`saveDir` 缺省 = `save.js` 的 `SAVE_DIR_REL`
+  = `Local/Eushully/天結いキャッスルマイスター/SAVE`，⛔ 宿主不提供它；`loadSave(slot, { saveDir })`
+  可覆盖，值**相对 appdata 根**）。缺 ⇒ `ctx.finish(5, …)` + `[]`，**一个 click 都不发**：
+  `load-save: save file missing: <绝对路径> (slot 15)`（`ctx.finish` 不改进程 exit ⇒ readout 是
+  `run=finished exit=5`）。
+  · **只查 `.DAT`**：`.STH` 缺失**不阻止读档**（`save-format.md` §1）；`SAVE.DAT` 不是槽索引
+    （缺它最多让页号回 0）⇒ 都不查。
+  · **只查 0..99**：`slot >= 100` 的 `%2.2d` 三位字形未取证 ⇒ 跳过 + 一行 warn。
+  · **跳过 + 一行 warn**（⛔ 不 fail，否则误杀合法读档）：没有 `ctx.appdata` / `available=false`；
+    或存档目录本身不在 appdata 下（宿主拿不到 `set:UseAppDataFolder`，这是"存档在安装树"
+    的宿主侧代理）；或 stat 报 `denied` / `io`（无法证明"缺文件"）。
+  · 有文件 ⇒ 这条链的形状 / 坐标 / 门 / 超时**逐行不变**。
 - **`.BIN` 身份**：`PluginReadings.script` 是 marker **文件名**（`TITLE.BIN` / `SAVE.BIN` / `SBUNKI.BIN` /
   `FIELD.BIN`）；C1 的 `afterScript` / `afterPosition` 是精确 `==`（`trigger_runner.cpp:70,82`），
   ⛔ 不做 recipe 那层的"剥 `.BIN` + ASCII 大小写不敏感"（`recipe.cpp:141-153`）⇒ 链里的名字**必须带后缀**。
@@ -1531,6 +1544,7 @@ C5 是单插件 Run/dispatch 线；三者可与 C2 并行/后置。v3 的 S1/S2 
 | 37 | **Timeout 只读点 poll**：arm 记 deadline；atPoint 采样后/releaseDue 前 poll；暂停/headless 不 poll；不自动 finish | 独立 timer 超时；暂停仍触发；自动 exit | `trigger-runner/owner-timeout` + C3 parity |
 
 | 38 | **`ctx.appdata` 只 appdata 子树 / 只 RunCtx**：绝对路径 / `..` / NUL / 空串 ⇒ `invalid_path`；canonical 出根 ⇒ `escape`；`available=false` ⇒ `path=null` + `no_appdata`；`RenderCtx` 没有它 | 路径穿越静默成功（能读安装树 / 用户目录），或 render 里做文件 I/O | `plugin-appdata`（`appdata/stat-escape` / `stat-absolute` / `stat-nul` / `stat-symlink-escape`）+ `plugin/api-surface`（RunCtx 有 `appdata`）+ `plugin/render-surface`（精确六成员） |
+| 39 | **`loadSave` 缺 `.DAT` 在第一个 click 之前收口**：缺文件 ⇒ `finish(5)` + **0 click**；只查 `.DAT`、只 0..99；无 appdata / 存档目录不在 appdata / slot≥100 ⇒ 跳过 + 一行 warn | 缺文件退回 30 s 门超时（与"点击被吞"混在一起）；或合法读档被误杀 | `control-script/save-missing-precheck`（临时 appdata，`stagedDepth/depth=0`）+ `loadsave-page/save-missing` / `save-present` / `no-appdata` / `save-dir-not-under-appdata` + 变异 `if (!st.exists)` |
 | 40 | **`ctx.appdata.stat` 的宿主段不计入 2 ms**（`HostPause`；与 `ctx.profile.end` 同一原则） | 网络盘 / 杀软 stat 被记成用户 JS 超预算 ⇒ 误报 `callback budget exceeded` | 实现落点 `script_quickjs.cpp` 的 `jsCtxAppDataStat`；现有预算守卫（`plugin/callback-*`）覆盖同一机制，stat 自身暂无专门用例 |
 
 **不进 test（文档/读数）**：JS 回调性能、QJS 内存、`afterDelay` 的墙钟读数、文本 plan 的复用行数、

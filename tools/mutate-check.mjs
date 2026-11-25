@@ -5766,6 +5766,20 @@ const MUTATIONS = [
       '而第一下真被吞时重试自己又要 76 个读点才落地、`turnr` 的 60 拍等不到 ⇒ `page not reached (target 0, still 1)`',
   },
 
+  {
+    // ── 插件 `loadSave` 的**缺文件前置检查**（缺 `SAVE<NN>.DAT` ⇒ click 之前 finish(5)）──
+    //   ★ 代表"前置检查被静默绕过"这一类错：删掉 `if (!st.exists)` 之后，缺文件仍照常点 LoadData，
+    //     症状退回 30 s 门超时（与"点击被吞"混在一起）——整条链照样能跑、只看 `run=done` 的断言抓不到。
+    //   守卫 = `tools/test/plugin-loadsave-page.test.mjs` 的 `loadsave-page/save-missing`（pure）。
+    file: 'apps/emulator-lift/scripts/plugins/lib/save.js',
+    from: '    if (!st.exists) {\n',
+    to: '    if (false) {  // 变异：缺文件不报\n',
+    guard: 'tools/test/plugin-loadsave-page.test.mjs',
+    what:
+      '`loadSave` 的缺文件前置检查被短路（`if (!st.exists)` → `if (false)`）⇒ 缺 `SAVE<NN>.DAT` 时' +
+      '照样点 LoadData，`save-missing` 红（有 click、没有 finish(5)）',
+  },
+
   // ── COM trampoline 去税（2026-11-25 / REQ-01M86NP8R79FE25CSMMV86JE31）────────────────────
   //   ★ 这一类错长什么样：`dispatch` 在**热路径**上把 `MethodEntry` 的两个 `std::string` 拷进
   //     局部（`iface` 16 字符 / `name` 33 字符都超过 MSVC 的 SSO 15 ⇒ 每次 COM 方法调用两次
