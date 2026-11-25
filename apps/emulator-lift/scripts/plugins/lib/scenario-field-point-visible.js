@@ -17,20 +17,27 @@
 //   `SETMAPTEX.BIN` instr#78/#80 把 ALF 20797 / 20798 绑到 `0x119` / `0x11A`。
 //
 // ★ **载入段 = `./save.js` 的 `loadSave`（2026-11-25 改回；此前是本文件自建的四步链）**：
-//   自建链的那一版**没有判页**（照抄 `save07-battle.plan` 的 4 步，行 y 直接按槽号取），而
-//   `saves/SAVE.DAT` 持久化的进屏页是 **1**（`LOAD 010..019`）⇒ 槽 7 的 y=507 落在**页 1 的第 7 行
-//   = 槽 17**（空槽：`saves/` 只有 SAVE10 / SAVE11）⇒ 点下去没有确认框 ⇒ `fp:sbunki-poll` 超时、
-//   连采 8 次仍 `SAVE.BIN pos=0x11B8`。**那不是输入被吞，是页基算错**。
+//   自建链的那一版**没有判页**（照抄 `save07-battle.plan` 的 4 步，行 y 直接按槽号取）。
+//   2026-11-24 把它归到"进屏页 1 ⇒ 槽 7 的 y=507 落在页 1 第 7 行 = 槽 17（空槽）"，
+//   但那份 appdata 的存档落点**没有留证** ⇒ 归因不完整。
+//   ⚠ 2026-11-25 复现出更靠前的根因：把 `SAVE*.DAT` 复制到 `<appdata>` **根目录**
+//   （不是嵌套 `SAVE/`）⇒ 读档列表**整个是空的** ⇒ 点行同样不弹确认框（`load:sbunki` 超时）。
+//   ⇒ **先查 appdata 落点**（见用法 0），再谈页基 / 空槽。
 //   ⇒ 现在载入段交给 `loadSave(slot)`（它自己读页号 `0x138e`、翻页、翻完等列表刷新、再点行）；
 //   本文件只剩"载入之后"这一段（`fp:` 前缀），⛔ 不再重算行 y / 不重抄确认框窗口。
 //   ⚠ 2026-11-24 那一版还写过"只 click 不动光标 ⇒ 行不亮"：`ctx.input.click` 自己会先 `mouseMove`
-//   （`PointerCore::armClickAt` → `armMoveAt`），所以那条归因**不成立**；真正的原因是上面这条空槽。
+//   （`PointerCore::armClickAt` → `armMoveAt`），所以那条归因**不成立**。
 //
 // 用法（cwd = apps/emulator-lift；`on` 缺省 0 = 不动）：
-//   ./out/emulator-lift-aot.exe --game-dir ../../links/install --appdata ../../.tmp/field-model/appdata \
-//     --present headless --skip-logo --audio off --time-limit 180 \
-//     --plugin scripts/plugins/lib/scenario-field-point-visible.js \
-//     --plugin-param slot=7 --plugin-param on=1
+//   0) 私有 appdata **必须**是嵌套层：存档放 `<appdata>/Local/Eushully/天結いキャッスルマイスター/SAVE/`
+//      ⇒ `bash scripts/clean-appdata.sh ../../.tmp/field-model/appdata`（建法见 `saves/README.md`）。
+//      ⛔ 把 SAVE*.DAT 放到 `<appdata>` 根目录 ⇒ 引擎新建空 `SAVE/` ⇒ 读档列表为空 ⇒ 点行不弹确认框
+//      （`load-save: gate timeout (load:sbunki)`；2026-11-24/25 的失败全是这一条，与 headless/window 无关）。
+//   1) ./out/emulator-lift-aot.exe --game-dir ../../links/install --appdata ../../.tmp/field-model/appdata \
+//        --present headless --skip-logo --audio off --time-limit 180 \
+//        --plugin scripts/plugins/lib/scenario-field-point-visible.js \
+//        --plugin-param slot=10 --plugin-param on=1 --plugin-param hold=3000
+//   ★ `slot=10` = SAVE10（落在 FIELD；进屏页 1 第 0 行 ⇒ 不用翻页；2026-11-25 实测）。
 //   ★ 从冷启动跑 ⇒ 本文件自己盖 `./boot-to-title.js`（与 `scenario-fellow-switch.js` 同一个三层 route）。
 
 import { bootToTitle } from "./boot-to-title.js";
@@ -54,8 +61,8 @@ import { FIELD_MAIN_LOOP_HI, FIELD_MAIN_LOOP_LO } from "./script-positions.js";
 /** @typedef {import("@amayui/lift-plugin").TimeoutEvent} TimeoutEvent */
 /** @typedef {FiredEvent | TimeoutEvent} PluginEvent */
 
-/** 载入槽（缺省 7：`save07-battle.plan` 用的那一槽 ⇒ 页 0 第 7 行）。 */
-const DEFAULT_SLOT = 7;
+/** 载入槽（缺省 10：`SAVE10` 落在 FIELD，进屏页 1 第 0 行 ⇒ 不用翻页；2026-11-25 实测）。 */
+const DEFAULT_SLOT = 10;
 /** 载入的终态脚本：这份存档落在 `FIELD`（页号/行由 `loadSave` 自己判）。 */
 const LOAD_EXPECT = ["FIELD.BIN"];
 /** 载入段各道门的超时（翻页 + 列表刷新 + 确认框）。 */
