@@ -20,6 +20,10 @@
 //   · `control-script/save-missing-precheck`：缺存档文件（临时 appdata 只建目录、不放
 //                                            `SAVE15.DAT`）⇒ `loadSave.start` 在**任何 click 之前**
 //                                            `finish(5)`；`stagedDepth/depth=0`、光标不动、回调 2 次。
+//   · `control-script/config-roundtrip`   ：`ctx.config` 真读写（临时 appdata + 预置
+//                                            `plugin-config.json`）：六种原生值往返 / `all()` 深拷贝 /
+//                                            `delete` / 保留名与 NaN ⇒ TypeError / **回调末 flush**
+//                                            （文件里能读回本次写、且未知域没被重建掉）。
 //   · `…-field-terminal`                  ：终态 = `expect` 里的脚本命中（FIELD 分支）直接收口；
 //                                            不点 (690,323)，done 之后不再有回调。
 //   · `…-second-confirm`                  ：终态的 **SBUNKI 0x0AF8 第二道确认**分支：真的点落 (690,323)
@@ -280,6 +284,20 @@ struct Fixture {
         }
         std::string err;
         if (!host->attachAppData(root, "", &err)) {
+            load_error = err;
+            return false;
+        }
+        return true;
+    }
+
+    // `ctx.config` 的根（复用 `attachAppData` 的根；必须在 `attachAppData` 之后调）。
+    bool attachConfig() {
+        if (host == nullptr) {
+            load_error = "attachConfig: 还没装载";
+            return false;
+        }
+        std::string err;
+        if (!host->attachConfig(&err)) {
             load_error = err;
             return false;
         }
@@ -845,6 +863,54 @@ void caseSaveMissingPrecheck() {
     LIFT_CHECK(line.find("exit=5") != std::string::npos);
     LIFT_CHECK(line.find("reason=load-save: save file missing:") != std::string::npos);
     std::printf("  [%s] %s\n", lift_test::g_current_case, line.c_str());
+}
+
+// =====================================================================================
+// `control-script/config-roundtrip`：`ctx.config` 的**读写面**（真 `PluginHost` + 临时 appdata）
+//
+// 判据（红了意味着什么）：
+//   ① 预置的 `test.config.pre = 123` 被读到（= attach 真的读了 appdata 根的文件）；
+//   ② 六种原生值 set → get / has / all（深拷贝）/ delete；保留名 / NaN / undefined / 函数 ⇒ TypeError；
+//   ③ **回调末 flush 真的发生**：回调返回后 `plugin-config.json` 里能读回本次写，且预置的未知域
+//      `keep.me` 没被重建掉（前向兼容）。
+// ★ 失败都走 `ctx.fail`（JS 侧逐项点名）；C++ 侧只判 `!failed` / `done` / 文件内容。
+// =====================================================================================
+void caseConfigRoundtrip() {
+    lift_test::g_current_case = "control-script/config-roundtrip";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    ScopedTempDir appdata;
+    LIFT_CHECK(appdata.make("lift-plugin-config-roundtrip"));
+    if (appdata.path.empty()) return;
+    std::error_code ec;
+    fs::create_directories(appdata.path, ec);
+    LIFT_CHECK(!ec);
+    const fs::path file = appdata.path / "plugin-config.json";
+    LIFT_CHECK(writeHostFile(file, R"({"version":1,"domains":{"test.config":{"pre":123},"keep.me":{"untouched":true}}})"));
+
+    const bool loaded = f.load("config-roundtrip.js");
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    LIFT_CHECK(f.attachAppData(hostPathText(appdata.path)));
+    LIFT_CHECK(f.attachConfig());
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);
+
+    std::string after;
+    LIFT_CHECK(readHostFile(hostPathText(file), &after));
+    LIFT_CHECK(after.find("\"num\": 7") != std::string::npos);
+    LIFT_CHECK(after.find("\"str\": \"hello\"") != std::string::npos);
+    LIFT_CHECK(after.find("\"pre\": 123") != std::string::npos);
+    LIFT_CHECK(after.find("keep.me") != std::string::npos);
+    LIFT_CHECK(after.find("untouched") != std::string::npos);
+    LIFT_CHECK(after.find("temp") == std::string::npos);  // delete 过的 key 不落盘
 }
 
 void caseLoadSaveOnLoaded() {
@@ -2241,6 +2307,7 @@ int main() {
     caseConcurrentArm();
     caseChain();
     caseSaveMissingPrecheck();
+    caseConfigRoundtrip();
     caseLoadSaveOnLoaded();
     caseChainsRoute();
     caseGlobalReadModifyWrite();

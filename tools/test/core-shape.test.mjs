@@ -80,6 +80,10 @@ const CORE_FILES = [
   //   （宿主 I/O），同样逐文件登记 ⇒ 新增 `src/plugin/**` 文件漏登记时 ⑥ 会红。
   'apps/emulator-lift/src/plugin/plugin_appdata.h',
   'apps/emulator-lift/src/plugin/plugin_appdata.cpp',
+  // ★ 2026-11-25：`ctx.config` 的宿主实现（`<--appdata>/plugin-config.json`；PIMPL 藏 nlohmann）。
+  //   它也是**宿主 I/O** 面（与 appdata 同一条：插件能碰到的文件系统只经宿主）⇒ 逐文件登记。
+  'apps/emulator-lift/src/plugin/plugin_config.h',
+  'apps/emulator-lift/src/plugin/plugin_config.cpp',
   'apps/emulator-lift/src/plugin/guest_read.h',
   'apps/emulator-lift/src/plugin/guest_read.cpp',
   'apps/emulator-lift/src/plugin/readings.h',

@@ -3090,7 +3090,10 @@ target_sources(emulator-lift-runtime PRIVATE
     src/plugin/guest_read.cpp
     src/plugin/readings.cpp
     src/plugin/plugin_host.cpp
-    src/plugin/plugin_appdata.cpp)
+    src/plugin/plugin_appdata.cpp
+    # ★ 2026-11-25：`ctx.config`（`<--appdata>/plugin-config.json`）的宿主实现。**唯一** include
+    #   `<nlohmann/json.hpp>` 的插件 TU（头是 PIMPL；`runtime/config.h` 只有中立值类型）。
+    src/plugin/plugin_config.cpp)
 
 if(LIFT_BUILD_TESTS)
     # ★ C2c：`LIFT_PLUGIN_LIB_DIR` = **真库**目录（`scripts/plugins/lib`）。QJS 的 import 根是
@@ -3113,6 +3116,14 @@ if(LIFT_BUILD_TESTS)
     add_executable(lift-plugin-appdata tests/plugin_appdata.cpp)
     target_link_libraries(lift-plugin-appdata PRIVATE emulator-lift-runtime)
     add_test(NAME plugin-appdata COMMAND lift-plugin-appdata)
+
+    # ---- `plugin-config`：`ctx.config` 的**文件形状 / 值 / 持久化**判据（pure）------------------
+    # ★ 判据（详 `tests/plugin_config.cpp` 文件头）：往返 / 未知键保留 / 域自动创建 / 坏 JSON ⇒
+    #   装载失败（exit 2 的判据面）/ 顶层形状 / 域值形状 / 保留名 / 上限 / 无 appdata /
+    #   只读回执 / 回调末 flush / 同 appdata 二次装载读到。只碰宿主临时目录 ⇒ 顶层无条件注册。
+    add_executable(lift-plugin-config tests/plugin_config.cpp)
+    target_link_libraries(lift-plugin-config PRIVATE emulator-lift-runtime)
+    add_test(NAME plugin-config COMMAND lift-plugin-config)
 
     add_executable(lift-plugin-headless tests/plugin_e2e.cpp)
     target_link_libraries(lift-plugin-headless PRIVATE emulator-lift-runtime lift-test-support)

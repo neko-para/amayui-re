@@ -203,6 +203,37 @@ bool PluginHost::attachAppData(const std::string& appdata_dir, const std::string
     return appdata_.attach(appdata_dir, install_dir, err);
 }
 
+bool PluginHost::attachConfig(std::string* err) {
+    // ★ 复用 appdata 的**绝对化根**（`PluginAppData::path()`）；没有 --appdata ⇒ 空串。
+    //   配置文件位置由 `PluginConfig` 定（`<根>/plugin-config.json`）；本类不拼路径。
+    return config_.attach(appdata_.path(), err);
+}
+
+bool PluginHost::configGet(const std::string& domain, const std::string& key,
+                           lift::plugin::ConfigValue* out, bool* found, std::string* why) {
+    return config_.get(domain, key, out, found, why);
+}
+
+bool PluginHost::configHas(const std::string& domain, const std::string& key, bool* found,
+                           std::string* why) {
+    return config_.has(domain, key, found, why);
+}
+
+bool PluginHost::configSet(const std::string& domain, const std::string& key,
+                           const lift::plugin::ConfigValue& value,
+                           lift::plugin::ConfigReceipt* receipt, std::string* why) {
+    return config_.set(domain, key, value, receipt, why);
+}
+
+bool PluginHost::configDelete(const std::string& domain, const std::string& key, bool* removed,
+                              std::string* why) {
+    return config_.erase(domain, key, removed, why);
+}
+
+lift::plugin::ConfigValue PluginHost::configAll(const std::string& domain) {
+    return config_.all(domain);
+}
+
 // =====================================================================================
 // ReadPointObserver（C2a 的唯一入口）
 // =====================================================================================
@@ -308,6 +339,14 @@ PluginHost::TriggerSet PluginHost::runCallback(Context& ctx, bool is_start, cons
                        : script_->onTrigger(*this, *ev, budget, &out, &call_err);
     const std::uint64_t host_end_ns = pluginNowNs();
     diag.host_ns = host_end_ns >= host_start_ns ? host_end_ns - host_start_ns : 0;
+    // ★ `ctx.config` 的持久化（2026-11-25）：**每个回调末** flush 一次（只写脏数据；原子替换）。
+    //   ⛔ 不放进 `js_cpu_ns` 的窗口（它在 JS 返回之后）；⛔ 不每个 set 都写盘。
+    //   第一次写盘失败 ⇒ 经 `ctx.log("warn")` 说一次，之后不再重试（`PluginConfig` 的 gave_up）。
+    {
+        std::string flush_warn;
+        config_.flushIfDirty(&flush_warn);
+        if (!flush_warn.empty()) log("warn", flush_warn);
+    }
     // =================================================================================
     // 判据（2026-11-21 收窄，用户裁决 D5 可改）：**2 ms 只罩用户 JS 本体，且用 CPU 钟**
     //   · `js_cpu_ns` = 用户 JS 本体的**本线程 CPU 时间**（QJS 侧从"即将调用插件函数"量到 JS 返回）；

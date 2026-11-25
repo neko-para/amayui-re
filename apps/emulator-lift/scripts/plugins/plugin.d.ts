@@ -377,12 +377,52 @@ export interface AppDataApi {
     stat(rel: string): AppDataStat;
 }
 
+/** `set` / `delete` 的回执（I/O / 只读走这里；⛔ 校验错误走 TypeError）。 */
+export interface ConfigReceipt {
+    /** false = 没写进去（`code` 说明为什么）。 */
+    readonly applied: boolean;
+    /** `read_only` = 配置文件 / appdata 根不可写；`io` = 宿主 I/O 失败；`no_appdata` = 没有 `--appdata`。 */
+    readonly code?: "read_only" | "io" | "no_appdata";
+}
+
+/** 一个配置域（`ctx.config.domain(id)`）。同一进程内所有域共享同一份 store。 */
+export interface ConfigDomain {
+    /** 没有这个 key ⇒ 返回 `fallback`（不给 = `undefined`）。 */
+    get(key: string, fallback?: unknown): unknown;
+    has(key: string): boolean;
+    /** 只改内存并标脏（宿主在每个回调末 atomically flush 一次）；校验错误（key / 值 / 超限）⇒ TypeError。 */
+    set(key: string, value: unknown): ConfigReceipt;
+    /** true = 真的删掉了（不存在 / 只读 ⇒ false）。 */
+    delete(key: string): boolean;
+    /** 该域的深拷贝快照（原生对象；改它不影响 store）。 */
+    all(): Record<string, unknown>;
+}
+
+/**
+ * `ctx.config`：**域式 JSON 配置**（`<--appdata>/plugin-config.json`；只装在 `RunCtx`，⛔ `RenderCtx` 没有）。
+ *
+ * 文件信封：`{"version":1,"domains":{"<id>":{...}}}`。未知顶层键与未知域内键**保留**（前向兼容）；
+ * 域自动创建、不注册、可共享。域 id = `^[A-Za-z0-9._-]{1,64}$`；域 id 与 key 都拒
+ * `__proto__` / `prototype` / `constructor`。值 = 原生 JS 值（对象 / 数组 / 字符串 / 有限数字 / 布尔 /
+ * null；⛔ 不是 JSON 字符串 ⇒ 沙箱里不需要 `JSON`）。
+ *
+ * ★ 没有 `--appdata` ⇒ `available=false`，`domain()` 抛 `Error("no_appdata")`（⛔ 不做内存态）。
+ * ★ 改配置的产物 = 该 appdata 根的 `plugin-config.json`（⛔ 不在 `SAVE/`；`clean-appdata.sh` 会删它）。
+ * ★ 一个 appdata 只跑一个实例（v1；⛔ 不做文件锁）。
+ */
+export interface ConfigApi {
+    /** 有没有可用的 appdata 根（false ⇒ `domain()` 抛 `Error("no_appdata")`）。 */
+    readonly available: boolean;
+    /** 域 id 非法 / 保留名 ⇒ TypeError；不可用 ⇒ `Error("no_appdata")`。 */
+    domain(id: string): ConfigDomain;
+}
+
 /**
  * RunCtx：一次 Run 的 callback 上下文；Edit/Input/Read/Trigger/UI/Run。
  *
- * ★ 切片状态（C2a，2026-11-20；C2b 追加注释；2026-11-25 追加 `appdata`）：
+ * ★ 切片状态（C2a，2026-11-20；C2b 追加注释；2026-11-25 追加 `appdata` / `config`）：
  *   - 已实现：`edit` / `input` / `read.global.get` / `trigger` / `ui`（**只写**宿主本地状态）/
- *     `profile` / `state` / `params` / `appdata` / `log` / `fail` / `finish` / `quit` / `now`；
+ *     `profile` / `state` / `params` / `appdata` / `config` / `log` / `fail` / `finish` / `quit` / `now`；
  *   - ⛔ **`RunCtx` 永远没有** `draw`（C2b 只把它装在 `RenderCtx` 上；`onTrigger` 不画）/
  *     `run` / `dispatch`（C5）——`ctx.run` 在 C2 是 `undefined`（⛔ 不是"有但抛"）；
  *     也不安装 `sample` / `screenshot`（永远不做）。
@@ -401,6 +441,8 @@ export interface RunCtx<State = Record<string, unknown>> {
     readonly params: Readonly<Record<string, string>>;
     /** 宿主的 `--appdata` 根（只读 stat；只有 RunCtx 有 —— render 不做文件 I/O）。 */
     readonly appdata: AppDataApi;
+    /** 域式 JSON 配置（`<--appdata>/plugin-config.json`；只有 RunCtx 有 —— render 不做文件 I/O）。 */
+    readonly config: ConfigApi;
     /** `ctx.log(level, message, data?)`：**一行一条、有界、去重**；`data` 当前**不进日志行**
      *  （结构化数据请先 `String(...)` 再传 message）。 */
     readonly log: LogApi;

@@ -35,6 +35,7 @@
 
 #include "runtime/budget.h"          // Budget（每次回调的墙钟 + op 上限；只有一个真源）
 #include "runtime/appdata.h"         // AppDataStat（ctx.appdata.stat 的结果对象；语言无关）
+#include "runtime/config.h"          // ConfigValue / ConfigReceipt（ctx.config 的值与回执；语言无关）
 #include "runtime/input_device.h"    // MouseButton
 #include "runtime/input_point.h"     // InputPoint
 #include "runtime/script_globals.h"  // GlobalKind / GlobalValue（EngineRead / EditSink 的词汇）
@@ -137,6 +138,29 @@ public:
     virtual bool appDataAvailable() const = 0;
     virtual std::string appDataPath() const = 0;  // 空串 = null（不可用）
     virtual lift::plugin::AppDataStat appDataStat(const std::string& rel) = 0;
+
+    // ---- Config（同步宿主 I/O；**只 RunCtx**）----
+    // ★ `ctx.config` 的形状 = `{ available, domain(id) }`；域对象 =
+    //   `{ get(key, fallback?), has(key), set(key, value), delete(key), all() }`（d.ts 的
+    //   `ConfigApi` / `ConfigDomain` / `ConfigReceipt`）。
+    // ★ 配置文件 = `<--appdata>/plugin-config.json`（appdata 根；⛔ 不在 `SAVE/`）。**没有**
+    //   `available` ⇒ `domain()` 抛 `Error("no_appdata")`（⛔ 不做内存态）。
+    // ★ 语义：`set` / `delete` 只改内存 + 标脏，宿主在**每个回调末** flush 一次（原子替换）；
+    //   校验错误（域 id / key / 值类型 / 超限）由宿主返回 false + `why` ⇒ JS 侧 TypeError；
+    //   I/O / 只读走 `ConfigReceipt{applied:false, code:"read_only"|"io"}`。
+    // ★ 宿主段要包 `HostPause`（同 `appDataStat`；⛔ 不算用户 2 ms）。
+    virtual bool configAvailable() const = 0;
+    virtual bool configCheckDomain(const std::string& id, std::string* why) const = 0;
+    virtual bool configGet(const std::string& domain, const std::string& key,
+                           lift::plugin::ConfigValue* out, bool* found, std::string* why) = 0;
+    virtual bool configHas(const std::string& domain, const std::string& key, bool* found,
+                           std::string* why) = 0;
+    virtual bool configSet(const std::string& domain, const std::string& key,
+                           const lift::plugin::ConfigValue& value,
+                           lift::plugin::ConfigReceipt* receipt, std::string* why) = 0;
+    virtual bool configDelete(const std::string& domain, const std::string& key, bool* removed,
+                              std::string* why) = 0;
+    virtual lift::plugin::ConfigValue configAll(const std::string& domain) = 0;
 
     // ---- Trigger 工厂（每次调用 = 新对象）----
     virtual lift::plugin::Trigger makeAfterScript(const std::string& name, const std::string& script,

@@ -56,6 +56,7 @@
 #include "runtime/context.h"
 #include "runtime/edit_sink.h"
 #include "plugin/plugin_appdata.h"
+#include "plugin/plugin_config.h"
 #include "runtime/intent_executor.h"
 #include "runtime/intent_queue.h"
 #include "runtime/read_point.h"
@@ -117,6 +118,14 @@ public:
     bool attachAppData(const std::string& appdata_dir, const std::string& install_dir,
                        std::string* err);
 
+    // ★ `ctx.config`（2026-11-25）：读 `<--appdata>/plugin-config.json`（域式 JSON 配置）。
+    //   **必须在 `attachAppData` 之后、`init` / `initFromFile` 之前**调（复用 appdata 的根；
+    //   没有 `--appdata` ⇒ `available=false`，正常）。
+    //   返回 false ⇒ `*err` 非空 = **配置文件坏**（坏 JSON / 顶层形状 / version / 域值 / 太大）⇒
+    //   调用方 **exit 2**（⛔ 不要像 appdata 那样降级）；返回 true 时 `available=false` 只是"没有
+    //   appdata"，`config.domain()` 会在 JS 侧抛 `Error("no_appdata")`。
+    bool attachConfig(std::string* err);
+
     // ★ C2b-2：`ctx.draw.text` / `ctx.draw.measure` 的生产字体来源（**非拥有**；转发给
     //   `PluginScript::setFont`）。调用时机 = 窗口装配**得知模块有 `render` 之后**（装载时还
     //   不知道 ⇒ 不走 `PluginLoadOptions::font`）。`nullptr` = 没接（headless / 测试夹具）⇒
@@ -161,6 +170,21 @@ public:
     lift::plugin::AppDataStat appDataStat(const std::string& rel) override {
         return appdata_.stat(rel);
     }
+    // ---- Config（同步宿主 I/O；只 RunCtx；flush 在 `runCallback` 末）----
+    bool configAvailable() const override { return config_.available(); }
+    bool configCheckDomain(const std::string& id, std::string* why) const override {
+        return PluginConfig::checkDomain(id, why);
+    }
+    bool configGet(const std::string& domain, const std::string& key,
+                   lift::plugin::ConfigValue* out, bool* found, std::string* why) override;
+    bool configHas(const std::string& domain, const std::string& key, bool* found,
+                   std::string* why) override;
+    bool configSet(const std::string& domain, const std::string& key,
+                   const lift::plugin::ConfigValue& value, lift::plugin::ConfigReceipt* receipt,
+                   std::string* why) override;
+    bool configDelete(const std::string& domain, const std::string& key, bool* removed,
+                      std::string* why) override;
+    lift::plugin::ConfigValue configAll(const std::string& domain) override;
     lift::plugin::Trigger makeAfterScript(const std::string& name, const std::string& script,
                                          lift::plugin::TriggerMode mode, std::uint32_t max_fires,
                                          std::uint64_t timeout_ms) override;
@@ -242,6 +266,7 @@ private:
     std::unique_ptr<GuestEngineRead> read_;
     std::unique_ptr<ui::PluginScript> script_;
     PluginAppData appdata_;
+    PluginConfig config_;
 
     const ui::UiHostOps* host_ops_ = nullptr;
     Params params_;

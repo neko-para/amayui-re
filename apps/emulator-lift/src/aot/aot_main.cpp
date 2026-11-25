@@ -240,6 +240,8 @@ void usage() {
         "                            ⇒ `--present headless` 也能跑（没有窗口就没有 render）。\n"
         "                            与 --input-plan / --control-root 互斥（两套输入写预算）⇒ exit 2\n"
         "  --plugin-param k=v        给插件的只读参数（`ctx.params`；可重复，**重复 key ⇒ exit 2**）\n"
+        "                            ★ 内建插件优先读 `<--appdata>/plugin-config.json`（ctx.config），\n"
+        "                            读不到才回退到这里；形状错误仍 exit 2（夹具 / 诊断口保留）\n"
         "  --present-screenshot <path>      每次可见窗口 Present 后存一张窗口 BMP（{frame} 可用）\n"
         "  --present-screenshot-frame N     只回读第 N 帧（1 起；0 = 每帧都写）\n"
         "  --scale auto|数值  窗口客户区 = round(1280×s) × round(720×s)。★ **只改窗口、不改帧**：\n"
@@ -1200,6 +1202,18 @@ int main(int argc, char** argv) {
             if (!plugin_host->attachAppData(appdata_dir, game_dir, &appdata_err)) {
                 std::fprintf(stderr, "emulator-lift-aot: [plugin] ctx.appdata 不可用：%s\n",
                              appdata_err.c_str());
+            }
+        }
+        // ★ `ctx.config`（2026-11-25）：`<--appdata>/plugin-config.json`（appdata 根；⛔ 不在 SAVE/）。
+        //   必须在 `initFromFile` **之前**读：配置文件的形状坏 = **装载失败**（exit 2，与
+        //   `--plugin-param` 形状错误同口径），⛔ 不像 appdata 那样降级。没有 `--appdata` ⇒
+        //   `available=false`（正常；插件自己回退到 params / 默认值）。
+        {
+            std::string config_err;
+            if (!plugin_host->attachConfig(&config_err)) {
+                std::fprintf(stderr, "emulator-lift-aot: --plugin 配置装载失败（exit 2）：%s\n",
+                             config_err.c_str());
+                return 2;
             }
         }
         std::string plugin_err;

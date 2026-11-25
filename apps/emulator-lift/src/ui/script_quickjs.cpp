@@ -1745,6 +1745,14 @@ JSValue jsCtxFinish(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxQuit(JSContext*, JSValueConst, int, JSValueConst*);
 // ---- AppData（同步只读宿主 I/O；只 RunCtx；宿主段包 `HostPause`）----
 JSValue jsCtxAppDataStat(JSContext*, JSValueConst, int, JSValueConst*);
+// ---- Config（域式 JSON 配置；只 RunCtx；宿主段包 `HostPause`）----
+Value makeConfigObject(Impl&);
+JSValue jsCtxConfigDomain(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxConfigGet(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxConfigHas(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxConfigSet(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxConfigDelete(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxConfigAll(JSContext*, JSValueConst, int, JSValueConst*);
 // ---- C2b：`RenderCtx` 的 trampoline（`draw` / `read` / `game`；`ui` / `params` / `log` 复用 RunCtx 那几个）
 JSValue jsCtxDrawRect(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxDrawText(JSContext*, JSValueConst, int, JSValueConst*);
@@ -2148,6 +2156,19 @@ bool buildRunCtx(Impl& impl, Value* out) {
         if (ok) ok = setFunction(ctx, appdata.raw(), "stat", jsCtxAppDataStat, 1, nullptr);
         if (ok) ok = defineReadOnly(ctx, obj.raw(), "appdata", std::move(appdata));
         if (!ok) qjs::clearException(ctx);
+    }
+    // ---- config = { available, domain(id) }（域式 JSON 配置；**只 RunCtx**）----
+    //   ★ 没有 `--appdata` ⇒ `available=false` 且 `domain()` 抛 `Error("no_appdata")`
+    //     （⛔ 不做内存态：内建插件必须先看 `available` 再回退 params / 默认值）。
+    //   ★ 域对象没有缓存：`domain(id)` 每次新建一个绑定同一 store 的对象（同一个 appdata 共享）。
+    if (ok) {
+        Value config = makeConfigObject(impl);
+        if (config.isException()) {
+            qjs::clearException(ctx);
+            ok = false;
+        } else {
+            ok = defineReadOnly(ctx, obj.raw(), "config", std::move(config));
+        }
     }
     // ---- trigger = { afterScript, afterPosition, afterDelay, atReadPoint } ----
     if (ok) {
@@ -3323,6 +3344,488 @@ JSValue jsCtxAppDataStat(JSContext* ctx, JSValueConst /*this_val*/, int argc, JS
         return out.take();
     } catch (...) {
         return JS_ThrowTypeError(ctx, "ctx.appdata.stat: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+// =======================================================================================
+// `ctx.config`（2026-11-25）：域式 JSON 配置（`<--appdata>/plugin-config.json`）
+//
+// 合同：`docs/03-emulator/plugin-runtime.md` §4.5 / §4.6 / §6 行 41–42；值类型与上限在
+//       `runtime/config.h`（语言无关），宿主实现 = `src/plugin/plugin_config.cpp`（PIMPL）。
+//
+// ★ 为什么 `ctx.config` 只装在 RunCtx：render 不做文件 I/O（与 `ctx.appdata` 同一条）。
+// ★ 为什么值走**中立树**而不是 JSON 字符串：沙箱里没有 `JSON`（`JS_NewContextRaw` + BaseObjects），
+//   而且"原生 JS 值"是 d.ts 的合同；转换只在这里（nlohmann 在 plugin_config.cpp 的 PIMPL 里）。
+// ★ 每个宿主调用都包 `HostPause`（同 `ctx.appdata.stat`）：宿主段不计用户 2 ms。
+// =======================================================================================
+
+// `ConfigValue` → JS 原生值（对象成员用 **DefineProperty** 装：`__proto__` 只当普通数据键，
+// ⛔ 不走 `[[Set]]` 的原型 setter）。
+Value configValueToJs(JSContext* ctx, const lift::plugin::ConfigValue& value) {
+    using lift::plugin::ConfigValueKind;
+    switch (value.kind) {
+        case ConfigValueKind::Null:
+            return Value::null(ctx);
+        case ConfigValueKind::Bool:
+            return qjs::newBool(ctx, value.boolean);
+        case ConfigValueKind::Number:
+            return qjs::newDouble(ctx, value.number);
+        case ConfigValueKind::String:
+            return qjs::newString(ctx, value.text);
+        case ConfigValueKind::Array: {
+            Value out(ctx, JS_NewArray(ctx));
+            if (out.isException()) return out;
+            for (std::size_t i = 0; i < value.items.size(); ++i) {
+                Value item = configValueToJs(ctx, value.items[i]);
+                if (item.isException()) return item;
+                // ★ 快照 = **普通可写对象**（`all()` 的深拷贝；改它不影响 store，但也不是冻结值）。
+                if (JS_DefinePropertyValueUint32(
+                        ctx, out.raw(), static_cast<std::uint32_t>(i), item.take(),
+                        JS_PROP_ENUMERABLE | JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE) < 0) {
+                    qjs::clearException(ctx);
+                    return Value::exception(ctx);
+                }
+            }
+            return out;
+        }
+        case ConfigValueKind::Object: {
+            Value out = qjs::newObject(ctx);
+            if (out.isException()) return out;
+            for (const auto& member : value.members) {
+                Value item = configValueToJs(ctx, member.second);
+                if (item.isException()) return item;
+                if (JS_DefinePropertyValueStr(
+                        ctx, out.raw(), member.first.c_str(), item.take(),
+                        JS_PROP_ENUMERABLE | JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE) < 0) {
+                    qjs::clearException(ctx);
+                    return Value::exception(ctx);
+                }
+            }
+            return out;
+        }
+    }
+    return Value::null(ctx);
+}
+
+// JS 原生值 → `ConfigValue`。false ⇒ `*why` 是原因（调用方转 TypeError）。
+// ★ 只收 d.ts 的六种；`undefined` / 函数 / symbol / bigint 一律**响亮拒绝**（⛔ 不静默丢）。
+bool jsToConfigValue(JSContext* ctx, JSValueConst value, std::size_t depth, std::size_t* nodes,
+                     lift::plugin::ConfigValue* out, std::string* why) {
+    if (++(*nodes) > lift::plugin::kConfigMaxNodes) {
+        *why = "值太大（节点上限 " + std::to_string(lift::plugin::kConfigMaxNodes) + "）";
+        return false;
+    }
+    if (JS_IsNull(value)) {
+        *out = lift::plugin::ConfigValue::null();
+        return true;
+    }
+    if (JS_IsBool(value)) {
+        bool b = false;
+        if (!qjs::toBool(ctx, value, &b)) {
+            qjs::clearException(ctx);
+            *why = "布尔值读取失败";
+            return false;
+        }
+        *out = lift::plugin::ConfigValue::fromBool(b);
+        return true;
+    }
+    if (JS_IsNumber(value)) {
+        double d = 0.0;
+        if (!qjs::toDouble(ctx, value, &d)) {
+            qjs::clearException(ctx);
+            *why = "数字读取失败";
+            return false;
+        }
+        if (!std::isfinite(d)) {
+            *why = "数字必须是有限的（NaN / Infinity 不支持）";
+            return false;
+        }
+        *out = lift::plugin::ConfigValue::fromNumber(d);
+        return true;
+    }
+    if (JS_IsString(value)) {
+        std::string text;
+        if (!qjs::toString(ctx, value, &text)) {
+            qjs::clearException(ctx);
+            *why = "字符串读取失败";
+            return false;
+        }
+        *out = lift::plugin::ConfigValue::fromString(std::move(text));
+        return true;
+    }
+    if (JS_IsFunction(ctx, value)) {
+        *why = "值不能是函数";
+        return false;
+    }
+    if (JS_IsArray(value)) {
+        if (depth >= lift::plugin::kConfigMaxDepth) {
+            *why = "值嵌套太深（上限 " + std::to_string(lift::plugin::kConfigMaxDepth) + " 层）";
+            return false;
+        }
+        Value length = qjs::getProperty(ctx, value, "length");
+        std::uint32_t count = 0;
+        if (length.isException() || !length.isNumber() ||
+            !qjs::toUint32(ctx, length.raw(), &count)) {
+            qjs::clearException(ctx);
+            *why = "数组长度读取失败";
+            return false;
+        }
+        lift::plugin::ConfigValue arr = lift::plugin::ConfigValue::array();
+        for (std::uint32_t i = 0; i < count; ++i) {
+            Value item(ctx, JS_GetPropertyUint32(ctx, value, i));
+            if (item.isException()) {
+                qjs::clearException(ctx);
+                *why = "数组元素读取失败";
+                return false;
+            }
+            lift::plugin::ConfigValue child;
+            if (!jsToConfigValue(ctx, item.raw(), depth + 1, nodes, &child, why)) return false;
+            arr.items.push_back(std::move(child));
+        }
+        *out = std::move(arr);
+        return true;
+    }
+    if (JS_IsObject(value)) {
+        if (depth >= lift::plugin::kConfigMaxDepth) {
+            *why = "值嵌套太深（上限 " + std::to_string(lift::plugin::kConfigMaxDepth) + " 层）";
+            return false;
+        }
+        JSPropertyEnum* table = nullptr;
+        std::uint32_t count = 0;
+        if (JS_GetOwnPropertyNames(ctx, &table, &count, value,
+                                   JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0) {
+            qjs::clearException(ctx);
+            *why = "对象属性读取失败";
+            return false;
+        }
+        lift::plugin::ConfigValue object = lift::plugin::ConfigValue::object();
+        bool ok = true;
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const char* raw_key = JS_AtomToCString(ctx, table[i].atom);
+            if (raw_key == nullptr) {
+                qjs::clearException(ctx);
+                *why = "对象 key 读取失败";
+                ok = false;
+                break;
+            }
+            std::string key(raw_key);
+            JS_FreeCString(ctx, raw_key);
+            Value item(ctx, JS_GetPropertyStr(ctx, value, key.c_str()));
+            if (item.isException()) {
+                qjs::clearException(ctx);
+                *why = "对象属性读取失败";
+                ok = false;
+                break;
+            }
+            lift::plugin::ConfigValue child;
+            if (!jsToConfigValue(ctx, item.raw(), depth + 1, nodes, &child, why)) {
+                ok = false;
+                break;
+            }
+            object.members.emplace_back(std::move(key), std::move(child));
+        }
+        JS_FreePropertyEnum(ctx, table, count);
+        if (!ok) return false;
+        *out = std::move(object);
+        return true;
+    }
+    *why = "值只能是 null / bool / 有限数字 / 字符串 / 数组 / 对象";
+    return false;
+}
+
+// 抛一个**真正的 `Error`**（`ctx.config.domain()` 在 `available=false` 时是 `Error("no_appdata")`，
+// ⛔ 不是 TypeError —— d.ts / 文档的口径就是这一句）。构造失败时退回 InternalError（仍是 throw）。
+JSValue throwPlainError(JSContext* ctx, const std::string& message) {
+    Value global = qjs::getGlobalObject(ctx);
+    if (global.isException()) {
+        qjs::clearException(ctx);
+        return JS_ThrowInternalError(ctx, "%s", message.c_str());
+    }
+    Value ctor = qjs::getProperty(ctx, global.raw(), "Error");
+    Value text = qjs::newString(ctx, message);
+    if (ctor.isException() || text.isException() || !ctor.isFunction()) {
+        qjs::clearException(ctx);
+        return JS_ThrowInternalError(ctx, "%s", message.c_str());
+    }
+    JSValueConst argv[1] = {text.raw()};
+    Value error(ctx, JS_Call(ctx, ctor.raw(), JS_UNDEFINED, 1, argv));
+    if (error.isException()) {
+        qjs::clearException(ctx);
+        return JS_ThrowInternalError(ctx, "%s", message.c_str());
+    }
+    return JS_Throw(ctx, error.take());
+}
+
+// `domain` 对象把域 id 藏在**不可枚举**的 `__domain` 属性里（每次 `domain(id)` 新建一个对象；
+// 同一个 store 共享）。⛔ 不用 `JS_NewCFunctionData`：它没有公开的 data 读口。
+constexpr const char* kConfigDomainProp = "__domain";
+
+JSValue makeConfigDomain(JSContext* ctx, const std::string& domain) {
+    Value obj = qjs::newObject(ctx);
+    if (obj.isException()) return obj.take();
+    bool ok = setFunction(ctx, obj.raw(), "get", jsCtxConfigGet, 2, nullptr) &&
+              setFunction(ctx, obj.raw(), "has", jsCtxConfigHas, 1, nullptr) &&
+              setFunction(ctx, obj.raw(), "set", jsCtxConfigSet, 2, nullptr) &&
+              setFunction(ctx, obj.raw(), "delete", jsCtxConfigDelete, 1, nullptr) &&
+              setFunction(ctx, obj.raw(), "all", jsCtxConfigAll, 0, nullptr);
+    if (ok) {
+        Value id = qjs::newString(ctx, domain);
+        ok = !id.isException() &&
+             JS_DefinePropertyValueStr(ctx, obj.raw(), kConfigDomainProp, id.take(), 0) >= 0;
+        if (!ok) qjs::clearException(ctx);
+    } else {
+        qjs::clearException(ctx);
+    }
+    if (!ok) return JS_EXCEPTION;
+    return obj.take();
+}
+
+Value makeConfigObject(Impl& impl) {
+    JSContext* ctx = impl.ctx;
+    Value obj = qjs::newObject(ctx);
+    if (obj.isException()) return obj;
+    lift::ui::PluginCallHost* host = impl.call_host;
+    const bool available = host != nullptr && host->configAvailable();
+    bool ok = defineReadOnly(ctx, obj.raw(), "available", qjs::newBool(ctx, available));
+    if (ok) ok = setFunction(ctx, obj.raw(), "domain", jsCtxConfigDomain, 1, nullptr);
+    if (!ok) return Value::exception(ctx);
+    return obj;
+}
+
+// `this` 必须是 `domain(id)` 返回的那个对象（方法被摘下来单独调用 ⇒ TypeError，⛔ 不猜域）。
+bool configDomainOf(JSContext* ctx, JSValueConst this_val, std::string* domain, std::string* why) {
+    if (!JS_IsObject(this_val)) {
+        *why = "必须作为 domain 对象的方法调用";
+        return false;
+    }
+    Value v = qjs::getProperty(ctx, this_val, kConfigDomainProp);
+    if (v.isException() || !v.isString() || !qjs::toString(ctx, v.raw(), domain)) {
+        qjs::clearException(ctx);
+        *why = "必须作为 domain 对象的方法调用";
+        return false;
+    }
+    return true;
+}
+
+JSValue jsCtxConfigDomain(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr || !host->inCallback()) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain: 不在插件回调里");
+        }
+        if (argc < 1 || !JS_IsString(argv[0])) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain(id): id 必须是字符串");
+        }
+        std::string id;
+        if (!qjs::toString(ctx, argv[0], &id)) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.config.domain: id 读取失败");
+        }
+        // ★ 没有 --appdata ⇒ `Error("no_appdata")`（⛔ 不降级成内存态）。
+        if (!host->configAvailable()) return throwPlainError(ctx, "no_appdata");
+        std::string why;
+        {
+            HostPause pause(implOf(ctx));
+            if (!host->configCheckDomain(id, &why)) {
+                return JS_ThrowTypeError(ctx, "ctx.config.domain('%s'): %s", id.c_str(), why.c_str());
+            }
+        }
+        return makeConfigDomain(ctx, id);
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.config.domain: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxConfigGet(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr || !host->inCallback()) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain(...).get: 不在插件回调里");
+        }
+        std::string domain;
+        std::string why;
+        if (!configDomainOf(ctx, this_val, &domain, &why)) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain(...).get: %s", why.c_str());
+        }
+        if (argc < 1 || !JS_IsString(argv[0])) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain('%s').get(key): key 必须是字符串",
+                                     domain.c_str());
+        }
+        std::string key;
+        if (!qjs::toString(ctx, argv[0], &key)) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.config.domain('%s').get: key 读取失败",
+                                     domain.c_str());
+        }
+        lift::plugin::ConfigValue value;
+        bool found = false;
+        bool ok = true;
+        {
+            HostPause pause(implOf(ctx));
+            ok = host->configGet(domain, key, &value, &found, &why);
+        }
+        if (!ok) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain('%s').get('%s'): %s", domain.c_str(),
+                                     key.c_str(), why.c_str());
+        }
+        if (!found) return argc >= 2 ? JS_DupValue(ctx, argv[1]) : JS_UNDEFINED;
+        Value out = configValueToJs(ctx, value);
+        return out.take();
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.config.domain(...).get: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxConfigHas(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr || !host->inCallback()) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain(...).has: 不在插件回调里");
+        }
+        std::string domain;
+        std::string why;
+        if (!configDomainOf(ctx, this_val, &domain, &why)) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain(...).has: %s", why.c_str());
+        }
+        if (argc < 1 || !JS_IsString(argv[0])) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain('%s').has(key): key 必须是字符串",
+                                     domain.c_str());
+        }
+        std::string key;
+        if (!qjs::toString(ctx, argv[0], &key)) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.config.domain('%s').has: key 读取失败",
+                                     domain.c_str());
+        }
+        bool found = false;
+        bool ok = true;
+        {
+            HostPause pause(implOf(ctx));
+            ok = host->configHas(domain, key, &found, &why);
+        }
+        if (!ok) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain('%s').has('%s'): %s", domain.c_str(),
+                                     key.c_str(), why.c_str());
+        }
+        return JS_NewBool(ctx, found);
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.config.domain(...).has: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxConfigSet(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr || !host->inCallback()) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain(...).set: 不在插件回调里");
+        }
+        std::string domain;
+        std::string why;
+        if (!configDomainOf(ctx, this_val, &domain, &why)) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain(...).set: %s", why.c_str());
+        }
+        if (argc < 2) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain('%s').set(key, value)", domain.c_str());
+        }
+        if (!JS_IsString(argv[0])) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain('%s').set(key, value): key 必须是字符串",
+                                     domain.c_str());
+        }
+        std::string key;
+        if (!qjs::toString(ctx, argv[0], &key)) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.config.domain('%s').set: key 读取失败",
+                                     domain.c_str());
+        }
+        lift::plugin::ConfigValue value;
+        std::size_t nodes = 0;
+        if (!jsToConfigValue(ctx, argv[1], 1, &nodes, &value, &why)) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain('%s').set('%s'): %s", domain.c_str(),
+                                     key.c_str(), why.c_str());
+        }
+        lift::plugin::ConfigReceipt receipt;
+        bool ok = true;
+        {
+            HostPause pause(implOf(ctx));
+            ok = host->configSet(domain, key, value, &receipt, &why);
+        }
+        if (!ok) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain('%s').set('%s'): %s", domain.c_str(),
+                                     key.c_str(), why.c_str());
+        }
+        Value out = qjs::newObject(ctx);
+        if (out.isException()) return out.take();
+        bool wrote = defineReadOnly(ctx, out.raw(), "applied", qjs::newBool(ctx, receipt.applied));
+        if (wrote && receipt.code != nullptr && receipt.code[0] != '\0') {
+            wrote = defineReadOnly(ctx, out.raw(), "code", qjs::newString(ctx, receipt.code));
+        }
+        if (!wrote) {
+            qjs::clearException(ctx);
+            return JS_EXCEPTION;
+        }
+        return out.take();
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.config.domain(...).set: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxConfigDelete(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr || !host->inCallback()) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain(...).delete: 不在插件回调里");
+        }
+        std::string domain;
+        std::string why;
+        if (!configDomainOf(ctx, this_val, &domain, &why)) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain(...).delete: %s", why.c_str());
+        }
+        if (argc < 1 || !JS_IsString(argv[0])) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain('%s').delete(key): key 必须是字符串",
+                                     domain.c_str());
+        }
+        std::string key;
+        if (!qjs::toString(ctx, argv[0], &key)) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.config.domain('%s').delete: key 读取失败",
+                                     domain.c_str());
+        }
+        bool removed = false;
+        bool ok = true;
+        {
+            HostPause pause(implOf(ctx));
+            ok = host->configDelete(domain, key, &removed, &why);
+        }
+        if (!ok) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain('%s').delete('%s'): %s",
+                                     domain.c_str(), key.c_str(), why.c_str());
+        }
+        return JS_NewBool(ctx, removed);
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.config.domain(...).delete: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxConfigAll(JSContext* ctx, JSValueConst this_val, int /*argc*/, JSValueConst* /*argv*/) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr || !host->inCallback()) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain(...).all: 不在插件回调里");
+        }
+        std::string domain;
+        std::string why;
+        if (!configDomainOf(ctx, this_val, &domain, &why)) {
+            return JS_ThrowTypeError(ctx, "ctx.config.domain(...).all: %s", why.c_str());
+        }
+        lift::plugin::ConfigValue value;
+        {
+            HostPause pause(implOf(ctx));
+            value = host->configAll(domain);
+        }
+        Value out = configValueToJs(ctx, value);
+        return out.take();
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.config.domain(...).all: 宿主异常（C++ exception at script boundary）");
     }
 }
 

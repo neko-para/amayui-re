@@ -18,6 +18,7 @@ const REQUIRED = [
     "state",
     "params",
     "appdata",
+    "config",
     "log",
     "fail",
     "finish",
@@ -93,6 +94,31 @@ const plugin = {
                 } else if (typeof st.exists !== "boolean") {
                     bad.push("appdata.stat.exists");
                 }
+            }
+        }
+
+        // ---- ctx.config（域式 JSON 配置；本夹具**没有** attachConfig ⇒ available=false）----
+        //   判据：形状（available / domain）+ 不可用时 `domain()` 抛 `Error("no_appdata")`
+        //   （⛔ 不降级成内存态 —— 内建插件必须先看 `available`）。
+        if (typeof ctx.config !== "object" || ctx.config === null) {
+            bad.push("config:not-object");
+        } else {
+            if (typeof ctx.config.available !== "boolean") bad.push("config.available");
+            if (typeof ctx.config.domain !== "function") {
+                bad.push("missing:config.domain");
+            } else if (ctx.config.available === false) {
+                let threw = false;
+                try {
+                    ctx.config.domain("probe");
+                } catch (err) {
+                    threw = true;
+                    const message = err !== null && err !== undefined && "message" in err
+                        ? String(err.message)
+                        : String(err);
+                    if (ctx.config.available !== false) bad.push("config.available:mutated");
+                    if (message !== "no_appdata") bad.push(`config.domain:error:${message}`);
+                }
+                if (!threw) bad.push("config.domain:no-appdata-did-not-throw");
             }
         }
 

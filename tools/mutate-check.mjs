@@ -5334,6 +5334,41 @@ const MUTATIONS = [
       '`run=done` 的断言抓不到）',
   },
 
+  // ── `ctx.config`：保留名拒绝（`__proto__` / `prototype` / `constructor`）────────────────────
+  //   ★ 代表"域 id / key 的保留名检查被删"这一类错：JSON 解析本身不危险（nlohmann 是数据树），
+  //     但 `all()` / `get()` 要把值装回 JS 对象 —— 少了这条，`__proto__` 这类 key 会从"API 拒绝"
+  //     退化成"能写进去、只是看不见"（`proto-key` 是唯一点它的用例）。
+  {
+    file: 'apps/emulator-lift/src/plugin/plugin_config.cpp',
+    from: '    return name == "__proto__" || name == "prototype" || name == "constructor";',
+    to: '    return false;  // 变异：保留名不再拒绝',
+    guard: 'ctest:plugin-config',
+    ctest: 'plugin-config',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-config',
+    what:
+      '域 id / key 不再拒绝 `__proto__` / `prototype` / `constructor` ⇒ `plugin-config` 的 `proto-key` 红',
+  },
+
+  // ── `ctx.config`：未知域内键保留（前向兼容）───────────────────────────────────────────────
+  //   ★ 代表"set 时把域对象重建成只有本次写的 key"这一类错：**没有任何症状** —— 链照样跑、
+  //     readout 照样 `run=done`，只是用户 / 别的插件写在同域里的键被静默擦掉。
+  //     `unknown-preserved` 是唯一点它的用例（预置 `unknown` 键 + flush 后二次装载读）。
+  {
+    file: 'apps/emulator-lift/src/plugin/plugin_config.cpp',
+    from: '    domains[domain][key] = toJson(value);',
+    to:
+      '    domains[domain] = json::object();  // 变异：域对象重建（未知域内键被丢掉）\n' +
+      '    domains[domain][key] = toJson(value);',
+    guard: 'ctest:plugin-config',
+    ctest: 'plugin-config',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-config',
+    what:
+      '`set` 把域对象重建成只有本次写的 key（未知域内键静默丢失）⇒ `plugin-config` 的 ' +
+      '`unknown-preserved` 红（flush 后二次装载读不到预置的 `unknown`）',
+  },
+
   // ── D5：2 ms 判据读**CPU 钟**（`CallbackDiag::js_cpu_ns`），不是墙钟 ─────────────────────────
   //   ★ 代表"钟换了、判据没换"这一类错：`js_cpu_us` 照旧打，但 `js_late` 仍拿 `js_ns` 比 ⇒
   //     被 OS 抢占 / 被挂起的回调又被诬告（缺陷 REQ-01M7VVDV69MJXRHNDGR50H7VHC 原样复发），
