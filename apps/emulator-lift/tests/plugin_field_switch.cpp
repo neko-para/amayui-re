@@ -5,12 +5,14 @@
 //      · 没有输入写面（`ctx.input`）⇒ 不会点鼠标；
 //      · 没有读档链（`loadSave` / `bootToTitle` / `save.js` / `boot-to-title.js` / `chains.js`）⇒ 不会自己读档；
 //      · 不结束 Run（`ctx.finish` / `ctx.quit`）⇒ 常驻（正常路径永不收口，进程按 `--time-limit` / 关窗结束）；
-//      · 还在写它该写的那条链（`forceFieldPointsVisible` + `afterDelay` + 地图实例号 + `poll` 缺省）。
+//      · 还在用**位置触发**那条链（`afterPosition` + `reenter` + `FIELD_MAIN_LOOP` + `forceFieldPointsVisible`；
+//        ⛔ 没有 `afterDelay` / `poll` —— 判据是已知脚本位置，不是轮询）。
 //      红了 ⇒ 这个"开关"又开始驱动输入 / 读档 / 自己收口了。
 //   ② **端到端常驻**（真子进程 `--present headless --plugin field-point-visible`，**无** `--input-plan` /
 //      `--control-root` —— 它们与 `--plugin` 互斥）：
 //      · 进程按 `--time-limit` 收口：readout `run=waiting`（≠ done / finished / failed）+ 摘要
-//        `stop      : time-limit` + exit 0；`calls>=2`（start + 至少一次轮询）⇒ 插件**常驻**；
+//        `stop      : time-limit` + exit 0；`calls>=1`（start）⇒ 插件**常驻**（位置触发只在玩家进
+//        FIELD 时 fire；headless 停在标题 ⇒ 没有第二次回调）；
 //      · stdout+stderr **没有** `boot:` / `load:` / `load-save:` / `[input-script]` / `input-plan:` 行
 //        ⇒ 没有自驱到 TITLE、没有读档、没有输入计划；
 //      · 首行 `field-points:` 日志带 `on=0`（缺省关），且**没有** `forced=` / `FIELD 就绪`
@@ -160,9 +162,13 @@ int main(int argc, char** argv) {
     LIFT_CHECK(code.find("ctx.quit") == std::string::npos);
     // 正向：该写的那条链还在（否则"禁令全过"可以靠一个空文件达成）。
     LIFT_CHECK(code.find("forceFieldPointsVisible") != std::string::npos);
-    LIFT_CHECK(code.find("afterDelay") != std::string::npos);
+    // ★ 判据是**已知脚本位置** ⇒ 位置触发（reenter），⛔ 不是轮询（`afterDelay` / `poll`）。
+    LIFT_CHECK(code.find("afterPosition") != std::string::npos);
+    LIFT_CHECK(code.find("reenter") != std::string::npos);
+    LIFT_CHECK(code.find("FIELD_MAIN_LOOP") != std::string::npos);
     LIFT_CHECK(code.find("FIELD_MAP_INSTANCE_GLOBAL_ID") != std::string::npos);
-    LIFT_CHECK(code.find("DEFAULT_POLL_MS") != std::string::npos);
+    LIFT_CHECK(code.find("afterDelay") == std::string::npos);
+    LIFT_CHECK(code.find("DEFAULT_POLL_MS") == std::string::npos);
     // 日志前缀是外部可判面（下面 ② 与文档都按它抓）。
     LIFT_CHECK(source.find("field-points:") != std::string::npos);
     const std::size_t forbidden_tokens = sizeof(kForbiddenOutput) / sizeof(kForbiddenOutput[0]) + 8;
@@ -247,8 +253,9 @@ int main(int argc, char** argv) {
     // readout 只一行（⛔ 不是每帧 / 每读点一行；`AGENTS.md` §12.8 第 3 条）。
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(countOccurrences(r.out, "plugin    : ")), 1);
     const std::int64_t calls = readoutCalls(r.out);
-    if (calls < 2) std::fprintf(stderr, "  calls=%lld（要 start + 至少一次轮询）\n", static_cast<long long>(calls));
-    LIFT_CHECK(calls >= 2);
+    // ★ 位置触发只在玩家进 FIELD 时 fire；headless 停在标题 ⇒ 只有 start 那一次回调。
+    if (calls < 1) std::fprintf(stderr, "  calls=%lld（至少要有 start）\n", static_cast<long long>(calls));
+    LIFT_CHECK(calls >= 1);
 
     // ---- 不自驱：没有 boot / load / input 的行（stdout 与 stderr 都查）----
     for (const char* token : kForbiddenOutput) {

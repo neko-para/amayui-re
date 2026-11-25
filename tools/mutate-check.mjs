@@ -1449,17 +1449,6 @@ const MUTATIONS = [
     what: 'CTest 的档位退化成"一律 pure" ⇒ 装机流程里的用例被当成默认门禁会跑，撑起了 reviewed',
   },
 
-  {
-    // ★ 静态足迹命中 ⇒ **判不了**（数据依赖分支），⛔ 不是"路径外"。
-    //   写反会让"静态出现过、这次没执行"的残差被误判成"本次不涉及"（最会把缺陷筛掉的那种错）。
-    file: 'tools/lib/residual-footprint.mjs',
-    from: "        if (statics.length > 0) return { scope: 'unknown', by: 'op-static', triggers: statics };",
-    to: "        if (statics.length > 0) return { scope: 'offpath', by: 'op-static', triggers: statics };  // 变异：静态命中也算路径外",
-    guard: 'tools/test/spec-residual-footprint.test.mjs',
-    what:
-      '把"静态足迹命中也算路径外"写反 ⇒ 只在脚本里出现、这次没执行的 opcode 残差从「判不了」掉进「路径外」' +
-      '（缺陷会被当成"本次不涉及"）⇒ 足迹守卫当场红',
-  },
 
 
   // ── 需求台账：写路径"报的落盘"必须与磁盘一致 ──
@@ -1553,31 +1542,6 @@ const MUTATIONS = [
   //     ① 暂停**不冻结 guest 时钟** ⇒ 暂停 2 s 后 guest 的 `timeGetTime` 跳 2000 ms
   //        （症状是超时/动画/帧率自适应随暂停漂 —— 不崩、不报错，只是读数不再可比）；
   //     ② 握手**不拒 `Origin`** ⇒ 任何网页都能连本机端点（安全边界，静默失守）。
-  {
-    file: 'apps/emulator-lift/src/runtime/control_ws.cpp',
-    from: '                if (ctx.clock != nullptr) ctx.clock->freeze();  // ★ 冻结区间对 guest 不可见',
-    to: '                (void)0;  // 变异：暂停不冻结 guest 时钟',
-    guard: 'ctest:lift-control-endpoint',
-    ctest: 'lift-control-endpoint',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-control-endpoint',
-    what:
-      '暂停不冻结 guest 时钟 ⇒ 暂停 2.1 s 后 `guest_ms` 差 ≈2100 ms（判据 6 的"暂停对 guest 不可见"）' +
-      '⇒ lift-control-endpoint 的 [judge6] delta < 5 断言红',
-  },
-
-  {
-    file: 'apps/emulator-lift/src/runtime/control_ws.cpp',
-    from: '    if (req.find(http::field::origin) != req.end()) {',
-    to: '    if (false) {  // 变异：不拒 Origin',
-    guard: 'ctest:lift-control-endpoint',
-    ctest: 'lift-control-endpoint',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-control-endpoint',
-    what:
-      '带 Origin 头的握手不再被拒 ⇒ 浏览器里的任意网页都能连本机控制端点（判据 10 后半）' +
-      '⇒ lift-control-endpoint 的 origin status == 403 断言红',
-  },
 
   {
     // ★ S4（判据 13）代表 "resume 把暂停期间的 OS 输入当**刚发生**" 这一类错：
@@ -1604,22 +1568,6 @@ const MUTATIONS = [
       'queue==0 / buttons==0 断言红），陈旧关窗也不再当宿主 stop（stopRequested/controlStopReason 断言红）',
   },
 
-  {
-    // ★ 同一类错（判据 13）的**另一半**：上面那条改的是"分类器失效"，这条改的是"**根本没 arm**"。
-    //   现场：`Control::serve()` 的 Resume 分支漏了通知宿主 ⇒ `stale_input_before_ns` 恒 0 ⇒
-    //   纯映射再对也永远走不到（缺陷 `REQ-01M7JFDZK1SZW72SBAW6BC3DRT`）。⛔ 两条都必须留：
-    //   只留分类器那条时，接线掉了 `present-window` 照样全绿（它自己直接调 `noteControlResume`）。
-    file: 'apps/emulator-lift/src/runtime/control_ws.cpp',
-    from: '                if (ctx.host != nullptr) ctx.host->controlOnResume();',
-    to: '                (void)0;  // 变异：resume 不通知宿主（不 arm 陈旧事件闸门）',
-    guard: 'ctest:lift-control-endpoint',
-    ctest: 'lift-control-endpoint',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-control-endpoint',
-    what:
-      'resume 不再 arm "恢复时刻" ⇒ 生产路径上陈旧事件闸门是死代码（`control-resume-arms-host-hook` 的 ' +
-      '`controlOnResume` 计数 3 → 0 断言红）',
-  },
 
   // ── AOT 臂的令牌 arm / disarm 与摘要读数（`REQ-01M7JFEA7J8AWQHPXTW6GB41H0`）──
   //   ★ 两条各钉一类**静默**失效：
@@ -1741,59 +1689,6 @@ const MUTATIONS = [
       '`s1.text == s2.text` 断言红）；这会让"步进/快照可复现"静默失效',
   },
 
-  {
-    // ★ S2（判据 5 / 客户端契约）代表 "`screenshot` 忘了自己暂停" 这一类错：
-    //   设计 §4 的命令表写的是"**暂停 + 写最后呈现那一帧**"；只写文件、不置暂停态 ⇒
-    //   客户端拿到一张**不是暂停点**的帧（`state_seq` 不动、`paused` 仍 false），
-    //   而错误码/文件都正常 ⇒ 静默。
-    //   变异 = 去掉 Screenshot 分支的"若未暂停则停在该汇点"块 ⇒
-    //   lift-control-endpoint 的 [judge5-screenshot-pauses]（paused / state_seq+1 / paused_at）红。
-    file: 'apps/emulator-lift/src/runtime/control_ws.cpp',
-    from:
-      '            case ControlOp::Screenshot: {\n' +
-      '                // ★ 与 `sample` **同一条**"若未暂停则停在该汇点"的路径（判据 5 / 设计 §4 的命令表：\n' +
-      '                //   `screenshot` = 暂停 + 写最后呈现那一帧）。`paused_at` 由**实际停住的汇点**填\n' +
-      '                //   （`ctx.paused_at`：块边界 `"block"` / Present 闸门 `"present"`）。\n' +
-      '                if (!paused) {\n' +
-      '                    if (ctx.clock != nullptr) ctx.clock->freeze();\n' +
-      '                    paused = true;\n' +
-      '                    paused_at = ctx.paused_at;\n' +
-      '                    ++state_seq;  // 进入暂停态严格 +1（与 pause/sample 同一口径）\n' +
-      '                }',
-    to:
-      '            case ControlOp::Screenshot: {\n' +
-      '                // 变异：screenshot 不再自己暂停（只写文件）\n',
-    guard: 'ctest:lift-control-endpoint',
-    ctest: 'lift-control-endpoint',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-control-endpoint',
-    what:
-      '`screenshot` 不再自己暂停 ⇒ 未暂停态调用后 `paused` 仍 false、`state_seq` 不动 ⇒ ' +
-      'lift-control-endpoint 的 [judge5-screenshot-pauses] 断言红（客户端只能自己补发 pause）',
-  },
-
-  {
-    // ★ M1（`REQ-01M7J2P5S27VX7WMRR3ZC9K2E8` 判据 3）代表 "`click` 在暂停态之外也被收下" 这一类错：
-    //   合同是"**只在暂停态入队**；未暂停 ⇒ `error.code:"not_paused"`（⛔ 静默丢）"。
-    //   去掉那道判定 ⇒ 运行态投的 click 也回 `ok:true` 并真的排队，客户端会以为
-    //   "这一下已经按当前画面点过了"（而施加点其实在下一次暂停之后的某个读点）。
-    //   守卫：`apps/emulator-lift/tests/control_endpoint.cpp#caseClickDelivery` 的
-    //   `[judge3-click-not-paused]`（`code == "not_paused"` 断言当场红）。
-    file: 'apps/emulator-lift/src/runtime/control_ws.cpp',
-    from:
-      '                // ★ 判据 3：`click` **只**在暂停态入队（未暂停 ⇒ `not_paused`；⛔ 静默丢）。\n' +
-      '                if (!paused) {',
-    to:
-      '                // 变异：去掉 click 的 not_paused 判定（运行态也照收并排队）\n' +
-      '                if (false) {',
-    guard: 'ctest:lift-control-endpoint',
-    ctest: 'lift-control-endpoint',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-control-endpoint',
-    what:
-      '`click` 不再只接受暂停态 ⇒ 未暂停时回 `ok:true`（并把 click 排进下一个读点）⇒ ' +
-      'lift-control-endpoint 的 [judge3-click-not-paused] 断言红',
-  },
 
   {
     // ★ 代表 "shim 按**别的 API 版本的签名**读参" 这一类错（`REQ-01M780VKKRFHJEX6VM74DRCYBM`）：
@@ -1818,55 +1713,6 @@ const MUTATIONS = [
       '"绑后缓冲"、像素仍为 0 ⇒ d3d9/offscreen-surface-rt-data 的逐像素断言当场红',
   },
 
-  {
-    // ★ 代表 "两个采样过滤被合成一档" 这一类错（REQ-01M737D3BHNMRY97T9A02DARCC；2026-11-14 放行政策翻面后）：
-    //   `MAG != MIN` 的批**必须**照画、且把各自的过滤**分别**交进后端 ⇒ 把 `min_filter` 换成
-    //   `mag_filter`（合成一档）⇒ 交进后端的 `GpuSampler.min_filter` 不再等于 guest 设的值，
-    //   `gpu-batch/sampler-filter-eligibility` 的 (a)/(b) 两个字段断言当场红。
-    //   守卫：`apps/emulator-lift/tests/gpu_batch.cpp#gpu-batch/sampler-filter-eligibility`（pure，`gpu-batch-order` 跑它）。
-    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
-    from: '        ss.min_filter = samplerOf(cpu, pe, s, kSampMinFilter);',
-    to: '        ss.min_filter = ss.mag_filter;  // 变异：两个过滤合成一档（min 跟着 mag）',
-    guard: 'ctest:gpu-batch-order',
-    ctest: 'gpu-batch-order',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-gpu-batch',
-    what:
-      '把 `min_filter` 覆盖成 `mag_filter`（两个过滤合成一档）⇒ 交进后端的 sampler `min_filter` 不再等于' +
-      ' guest 设的值 ⇒ gpu-batch/sampler-filter-eligibility 当场红',
-  },
-
-  {
-    // ★ 代表 "把**身份**判据换成**外观**判据" 这一类错（`REQ-01M780VKKRFHJEX6VM74DRCYBM` 的连带）：
-    //   `setRenderTarget` 把 `SetRenderTarget(0, <GetBackBuffer 的表面>)` 规范化成隐式后缓冲，判据是
-    //   **像素块同址**（`t_surf.arena == di.arena`）。换成"尺寸相同"就会把**另一张同尺寸表面**
-    //   （纹理 RT —— 引擎 `0x4A778B` 那站绑的就是它）也当成后缓冲 ⇒ 往别人的像素上画。
-    //   守卫：`apps/emulator-lift/tests/gpu_batch.cpp` 的
-    //   `gpu-batch/render-target-backbuffer-identity` ②（同尺寸 64×64 纹理表面必须**不**被规范化、
-    //   且必须仍按"目标不是默认后缓冲"回退 CPU）。
-    //   ★ 这个 `to` 保留 `textureInfoOfState` 的调用（⛔ 不是为了让文本像原样）：`emulator-lift-runtime`
-    //     是 `/W4 /WX`，删出一个未使用变量会让**构建**失败 ⇒ 记成"不可判定"，而不是"守卫红了"。
-    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
-    from:
-      '            if (surfaceInfoOfState(cpu, t_state, &t_surf, nullptr) &&\n' +
-      '                deviceInfoOfState(cpu, dev, &di, nullptr) &&\n' +
-      '                !textureInfoOfState(cpu, t_state, &t_tex, nullptr) && di.arena != 0 &&\n' +
-      '                t_surf.arena == di.arena) {',
-    to:
-      '            if (surfaceInfoOfState(cpu, t_state, &t_surf, nullptr) &&\n' +
-      '                deviceInfoOfState(cpu, dev, &di, nullptr) &&\n' +
-      '                (textureInfoOfState(cpu, t_state, &t_tex, nullptr) || di.arena != 0) &&\n' +
-      '                t_surf.width == static_cast<std::uint32_t>(di.width) &&\n' +
-      '                t_surf.height == static_cast<std::uint32_t>(di.height)) {',
-    guard: 'ctest:gpu-batch-order',
-    ctest: 'gpu-batch-order',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-gpu-batch',
-    what:
-      '后缓冲规范化改用**外观**判据（尺寸相同）⇒ 同尺寸的**纹理**表面也被当成后缓冲规范化：' +
-      '`color_surface` 被清成 0（往别人的像素上画）且这一批不再按"目标不是默认后缓冲"回退 ⇒ ' +
-      'gpu-batch/render-target-backbuffer-identity ② 当场红',
-  },
 
   {
     // ★ 代表 "每线程一份 softfloat 状态被退回**进程级共享**"这一类错
@@ -1938,25 +1784,6 @@ const MUTATIONS = [
       'platform.h=0 / via-library=0 / 两线程读同一个 0x5C / 两个地址相同）',
   },
 
-  {
-    // ★ 代表 "LZSS Encode 的**平局判据**被放宽"这一类错（REQ-01M7375DARF1QFZEFNWX3CAK6T）。
-    //   判据：`apps/emulator-lift/tests/native_override.cpp` 的 `lzss/tie-strict-greater` ——
-    //   8 字节定点输入（BABABBAB，对象预填 0xCC）下输出必须是 `03 42 41 EE F0 EE F0`：
-    //   两个候选（4078 / 4080）对最后一段等长 3，**严格 `>`** 保留先入树的 4078（offset 0xFEE）。
-    //   放宽成 `>=` ⇒ match_pos 被后到者顶掉 ⇒ 末尾两个字节变 `F0 F0`。
-    //   ★ 为什么挑这一条而不是 `17 → 18`：它直接钉住 `.lst` 0x4365EA `jle` 这个**语义分叉**，
-    //     失败方向唯一（输出字节），不依赖任何数据结构细节。
-    file: 'apps/emulator-lift/src/runtime/native_overrides.cpp',
-    from: '        if (static_cast<std::int32_t>(i) > lzoLoadI32(obj, kLzoMatchLen)) {',
-    to: '        if (static_cast<std::int32_t>(i) >= lzoLoadI32(obj, kLzoMatchLen)) {',
-    guard: 'ctest:native-override',
-    ctest: 'native-override',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-native-override',
-    what:
-      'InsertNode 的平局判据从严格 > 放宽成 >=（等长也替换 match_pos）⇒ 先入树的候选被顶掉：' +
-      'lzss/tie-strict-greater 的定点字节 EE F0 变 F0 F0，当场红（实测见 .tmp/reveq/…/report.md）',
-  },
 
   // ── 🗑 2026-11-13 删掉：`agerc-ui-state` ──
   //   它整条断言的是**我们 stub 的返回值**（真机语义相反，`BUG-14`）⇒ CTest 与变异条目一起删除。
@@ -2037,157 +1864,6 @@ const MUTATIONS = [
       '"线上非背景像素 >= 8" 当场红',
   },
 
-  {
-    // ★ 声明路的**索引映射**（`.tmp/lift-tickets/decl-path-guards-report.md`；
-    //   `REQ-01M7A3M7E59JX74G897Q7W2RVD` 的"变异"判据）：
-    //   `buildDeclVertices` 建的是 `[Base+Min, Base+Min+NumVertices)` 这一段顶点，所以按索引取顶点
-    //   必须用 `relative = idx - MinVertexIndex`；写成 `idx` 就会从这段的**开头**错位 num_vertices 个顶点。
-    //   守卫：`tests/d3d9_pipeline.cpp` 的 `d3d9p/indexed-range-decl` —— (a) 的三个点（红/绿/蓝在 x=10/20/30）
-    //   会读到位移后的顶点 2/3/4（蓝/白/黄在 x=30/40/50）⇒ 三条像素断言当场红。
-    //   ★ 用例里每段 NumVertices 取 5（不是 FVF 路的 3）就是为了让这条变异读到**已建出来的**顶点：
-    //     取 3 的话 `idx*stride` 会越界读 ⇒ 变异可能崩在 UB 上，红得不可复现。
-    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
-    from: '        const std::int64_t relative = static_cast<std::int64_t>(idx) - min64;',
-    to: '        const std::int64_t relative = static_cast<std::int64_t>(idx);  // 变异：不减 MinVertexIndex',
-    guard: 'ctest:d3d9-pipeline-gpu',
-    ctest: 'd3d9-pipeline-gpu',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3d9-pipeline',
-    what:
-      '[decl-range] 声明路的取顶点映射退回 `idx`（不减 MinVertexIndex）⇒ 索引 2/3/4 读成顶点 2/3/4 而不是 0/1/2 ' +
-      '⇒ d3d9p/indexed-range-decl 的 (a)(b) 三条像素断言红（点落在 30/40/50 而不是 10/20/30）',
-  },
-
-  {
-    // ★ `start_index + index_count` 的 **int64 判定**（`REQ-01M7A3M7E59JX74G897Q7W2RVD` 第 2 条判据）：
-    //   退回 u32 加法 ⇒ `0xFFFFFFF0 + 0x20` 回绕成 `0x10`，恰好等于 16 个索引的缓冲上界
-    //   ⇒ `16 > 16` 为假 ⇒ 越过检查，随后按 `0xFFFFFFF0 * 2 ≈ 8.6 GB` 的偏移读索引（越界读）。
-    //   守卫：`tests/d3d9_pipeline.cpp` 的 `d3d9p/indexed-range-start-wrap` —— 正控之后那条
-    //   "越界 ⇒ D3DERR_INVALIDCALL" 拿不到返回码（进程崩在 memcpy）⇒ CTest 非 0。
-    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
-    from:
-      '    const std::int64_t index_sum =\n' +
-      '        static_cast<std::int64_t>(start_index) + static_cast<std::int64_t>(index_count);',
-    to: '    const std::int64_t index_sum = static_cast<std::int64_t>(start_index + index_count);  // 变异：u32 回绕',
-    guard: 'ctest:d3d9-pipeline-gpu',
-    ctest: 'd3d9-pipeline-gpu',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3d9-pipeline',
-    what:
-      '[start-wrap] `start_index + index_count` 退回 u32 加法 ⇒ 0xFFFFFFF0+0x20 回绕成 0x10 越过上界检查 ' +
-      '⇒ 按 8.6 GB 偏移读索引 ⇒ d3d9p/indexed-range-start-wrap 进程崩（是崩溃，不是 INVALIDCALL）',
-  },
-
-  {
-    // ★ `SetRenderTarget` 拒绝**离屏 plain surface**（`REQ-01M79WE8JA7V92RNS537CJB0V6`）：
-    //   今天这条拒绝是 ownerless 判据的**副产物**（离屏表面有 `'TEX1'` 状态块、建 surface 时 owner 传 0）
-    //   ⇒ 删掉判据 = 离屏 plain surface 被**静默**绑成 RT0，而 GPU 准入层已经不再有 `color_is_texture` 闸
-    //   （`REQ-01M79MSMWGFEKF8J7C7VYWS4YP` 判它是死代码）⇒ 渲染写进 `GetRenderTargetData` 的读回目标。
-    //   守卫：`tests/d3d9_pipeline.cpp` 的 `d3d9p/set-render-target-offscreen-refused`。
-    //   ★ `(void)` 两句是因为 `/W4` 下 `tex_probe` / `is_texture_surface` 会变成未使用变量 ——
-    //     那样**构建**失败会被 mutate-check 记成"不可判定"，而不是"守卫红了"。
-    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
-    from:
-      '        if (owner == 0 && is_texture_surface) {\n' +
-      '            // 纹理表面却没有 owner ⇒ 绑定后像素块没有任何引用保着它（本单的缺陷会回来）。\n' +
-      '            // ⛔ 不静默放过：这是"建 surface 时漏传 owner"的实现错误。\n' +
-      '            cpu.com->release(cpu, target);\n' +
-      '            pipeLog("SetRenderTarget", "纹理表面 0x%08X 没有像素块 owner ⇒ D3DERR_INVALIDCALL", target);\n' +
-      '            if (why) *why = "D3D9 流水线：SetRenderTarget 的纹理表面没有 owner（建 surface 时漏传？）";\n' +
-      '            return kInvalidCall;\n' +
-      '        }',
-    to:
-      '        // 变异：删掉 ownerless 判据（离屏 plain surface 会被静默绑成 RT0）\n' +
-      '        (void)tex_probe;\n' +
-      '        (void)is_texture_surface;',
-    guard: 'ctest:d3d9-pipeline-gpu',
-    ctest: 'd3d9-pipeline-gpu',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3d9-pipeline',
-    what:
-      '[offscreen-rt] 删掉 ownerless 判据 ⇒ CreateOffscreenPlainSurface 的 surface 被静默绑成 RT0 ' +
-      '⇒ d3d9p/set-render-target-offscreen-refused 的 INVALIDCALL / 渲染目标不变 / 像素落点三条红',
-  },
-
-  {
-    // ★ 声明式 Draw 的 **stream1（UV）偏移**（`REQ-01M79P02VYRJ3V0C0V5VHXVE3H` 的变异判据）：
-    //   `buildDeclVertices` 按元素的 `offset` 从各自的流里取分量；UV 在 stream1 的 offset 0。
-    //   把它写成 +1 字节 ⇒ 采到的 u/v 是**移位后的字节**（(1,0) 变成 ≈(0,0)），四角 texel 全部换色。
-    //   守卫：`tests/d3d9_pipeline.cpp` 的 `d3d9p/vertex-decl-draw`（2×2 四色纹理 + POINT 采样）。
-    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
-    from: '                        s.base + s.offset + static_cast<std::size_t>(idx) * s.stride + used[k]->offset,',
-    to:
-      '                        s.base + s.offset + static_cast<std::size_t>(idx) * s.stride + used[k]->offset +\n' +
-      '                            (k == 1 ? 1u : 0u),  // 变异：stream1（TEXCOORD）偏移 +1 字节',
-    guard: 'ctest:d3d9-pipeline-gpu',
-    ctest: 'd3d9-pipeline-gpu',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3d9-pipeline',
-    what:
-      '[decl-draw-uv] `buildDeclVertices` 的 stream1（TEXCOORD）偏移写成 +1 字节 ⇒ 采到的 UV 错位 ' +
-      '⇒ d3d9p/vertex-decl-draw 的四角 texel 颜色（红/绿/蓝/白）当场换掉',
-  },
-
-  {
-    // ★ 代表 "**没画**的批又回到无账状态" 这一类错（`REQ-01M7AAXVGY9SG75XCREHPX641Z`，M1 账本）：
-    //   删掉 `submitPrimitives` **准入早退**里那一次 `noteGpuSkip` ⇒ 准入被拒的批不再进 `skipped`
-    //   （`skipped_draws` 恒 0、摘要里没有 `skipped top`），而 `fallback` 也未必看得见它
-    //   （CPU 0 像素的那类批）—— 正是设计 §A.3 的盲区。
-    //   守卫：`apps/emulator-lift/tests/gpu_batch.cpp` 的 `gpu-batch/skip-ledger`（pure，Mock；
-    //   `gpu-batch-order` 跑它）—— ALPHATESTENABLE=1 被拒 ⇒ skipped=1 + 原因进 top。
-    //   ★ 位置（`REQ-01M7A74YG08R65NJBFXF7DEJDK`）：拒批改成"准入早退 + 记账"之后，主路径的
-    //     `noteGpuSkip` 就是这一行；函数末尾那次只剩"后端失败"那一类。
-    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
-    from: '        noteGpuSkip(cpu, pe, gpu_why, gpu_skip_bit);',
-    to: '        // MUTATION：删掉 noteGpuSkip（跳过账本不再记账）',
-    guard: 'ctest:gpu-batch-order',
-    ctest: 'gpu-batch-order',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-gpu-batch',
-    what:
-      '删掉 `submitPrimitives` 准入早退里的 noteGpuSkip ⇒ 被拒批的 skipped_draws 恒 0 / 摘要无 skipped top' +
-      ' ⇒ gpu-batch/skip-ledger 当场红',
-  },
-
-  {
-    // ★ 代表 "`Clear(ZBUFFER)` 的 z 在**最后一跳**被写死" 这一类错
-    //   （`REQ-01M6RMVJTTM8PDNXB39TVJ40WN`：z 全链传值）：
-    //   接口（`GpuRaster::rasterRequestDepthClear(float)`）/ 转发壳（`SdlWindow`）/ pass 的
-    //   `clear_depth` 三段都对，但 **shim → 后端** 这一跳"顺手抄回常量 1.0" ⇒ guest 清 0.25 时
-    //   GPU 仍从 1.0 起步，后续 `z_enable` 的批按错的初值判深度（画面只少 / 多一层，不报错、账上正常）。
-    //   守卫：`apps/emulator-lift/tests/gpu_batch.cpp` 的 `gpu-batch/depth-clear-value`（pure，Mock；
-    //   由 `gpu-batch-order` 跑）—— 它逐位断言"后端收到的 z"与"pass 的清除值"都等于 guest 给的 0.25。
-    //   ★ 为什么变异点选这里（而不是 `d3d9_gpu.cpp` 的 `depth.clear_depth = …`）：pure 守卫的观测面是
-    //     **接口 / 计划层**（没有 SDL_GPU 设备就看不到真 pass），所以它抓的是"z 有没有离开 shim"；
-    //     `d3d9_gpu.cpp` 那一跳由 `--gpu` 的 `gpu-batch/depth-segments` 覆盖（+ 本单的代码审查）。
-    file: 'apps/emulator-lift/src/runtime/d3d9.cpp',
-    from: '        gpu->rasterRequestDepthClear(z);',
-    to: '        gpu->rasterRequestDepthClear(1.0f);  // MUTATION：z 写死回 1.0（修前形态）',
-    guard: 'ctest:gpu-batch-order',
-    ctest: 'gpu-batch-order',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-gpu-batch',
-    what:
-      '把 `Clear(ZBUFFER, z)` 的 z 在 shim→后端那一跳写死回 1.0 ⇒ 后端收到的 z 与 pass 清除值都是 1.0 ' +
-      '（guest 给的是 0.25）⇒ gpu-batch/depth-clear-value 的位模式断言当场红',
-  },
-
-  {
-    // ★ 代表 "surface 复制不校验格式" 这一类错（REQ-01M77ZJYSPX5V21QEB89W51815，存档缩略图链）。
-    //   判据：`apps/emulator-lift/tests/d3d9.cpp` 的 `d3d9/offscreen-surface-rt-data` ③b ——
-    //   64×32 X8R8G8B8 的源 → 64×32 R5G6B5 的离屏表面必须 `D3DERR_INVALIDCALL`。去掉格式判据后
-    //   会掉进行距检查（E_FAIL 0x80004005）⇒ 断言当场红。
-    file: 'apps/emulator-lift/src/runtime/d3d9.cpp',
-    from: '    if (src.width != dst.width || src.height != dst.height || src.format != dst.format) {',
-    to: '    if (src.width != dst.width || src.height != dst.height) {',
-    guard: 'ctest:d3d9',
-    ctest: 'd3d9',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3d9',
-    what:
-      'GetRenderTargetData 不再校验源/目标格式一致 ⇒ 16bpp 目标的失败面变成 E_FAIL（不是 ' +
-      'D3DERR_INVALIDCALL）⇒ d3d9 的 offscreen-surface-rt-data ③b 当场红',
-  },
 
   {
     // ★ 代表 "caps 又声明了本线只能**响亮拒绝**的能力" 这一类错（REQ-01M79PP97ZD65BJG9GMAJ08MJ3）。
@@ -2209,40 +1885,6 @@ const MUTATIONS = [
       'd3d9/caps-claims ① 当场红',
   },
 
-  {
-    // ★ 代表 "ValidateDevice 的已裁决声明被悄悄改掉" 这一类错（REQ-01M79PP9H5XZRWFJD4BGS19S54）：
-    //   本线**没有多 pass 装备** ⇒ 恒 `S_OK,1`；写成 2 就与注释里的依据/翻面条件脱节。
-    //   判据：`apps/emulator-lift/tests/d3d9_pipeline.cpp` 的 `d3d9p/validate-device-one-pass` (i)。
-    //   ★ 这条守卫**修前不会红**（防漂移）—— 变异是它唯一会红的方向，正说明它盯的是"声明不许变"。
-    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
-    from: '    wrU32(cpu, passes_ea, 1u);  // 本线的状态组合一律单 pass',
-    to: '    wrU32(cpu, passes_ea, 2u);  // 本线的状态组合一律单 pass',
-    guard: 'ctest:d3d9-pipeline-gpu',
-    ctest: 'd3d9-pipeline-gpu',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3d9-pipeline',
-    what:
-      'validateDevice 把 `*pNumPasses` 写成 2 ⇒ 与"本线无多 pass 装备"的声明矛盾 ⇒ ' +
-      'd3d9p/validate-device-one-pass 当场红',
-  },
-
-  {
-    // ★ 代表 "解码失败被折叠成成功"这一类错（REQ-01M77CMJGJ9EJVNPFS2TKMMHD1）。
-    //   判据：`apps/emulator-lift/tests/native_override.cpp` 的 ④c —— 被截断的流（输入提前耗尽 /
-    //   输出没填满，comp≠out 的四种形状）必须 `false`；assets 档的
-    //   `native_override_assets.cpp` 另用**真字节解释器臂**钉"合法流逐字节 + 截断 ⇒ 回退"。
-    //   改回无条件 `true` ⇒ 截断流被当成成功、调用方不再回退解释器 ⇒ 纯档当场红。
-    file: 'apps/emulator-lift/src/runtime/native_lzss.cpp',
-    from: '    return out == out_end;',
-    to: '    return true;',
-    guard: 'ctest:native-override',
-    ctest: 'native-override',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-native-override',
-    what:
-      'LZSS 解码的结尾判据改回无条件 true（输入提前耗尽 / 输出没填满也报成功）⇒ ' +
-      'native-override 的 ④c 截断流用例当场红',
-  },
 
   {
     // ★ 代表 "guest 退出码映射被改成**透传**"这一类错（`REQ-01M7HP2YRZG222E0NE2H6MW6NK` 的
@@ -2308,27 +1950,6 @@ const MUTATIONS = [
       '被搬两遍：lift-ops-diff 的 5 条 rep 用例与 hits/declines 断言当场红',
   },
 
-  {
-    // ★ 代表 "x87 override 的运算顺序 / `fchs` 被弄丢" 这一类错（REQ-01M6NZSAAD0WCNBE3RKMFF84R5）。
-    //   判据：`apps/emulator-lift/tests/native_override_assets.cpp` 的 ④ = `sub_4CCC60` 的**函数级真字节
-    //   两臂**（同一份 guest 机器码跑解释器当 oracle，再跑 native 实现；比 dst / 寄存器 / x87 状态字）。
-    //   `x87ChangeSign(...)` 是 `.lst` 0x4CCCC8 `fchs` 的唯一落点（B = -(r*sy*sin)）⇒ 去掉它，
-    //   B 的符号翻正 ⇒ 每个点的 dst[i] 都变 ⇒ 当场红。
-    //   ★ 2026-11-16：实现里两次运算已合并成一行（`x87ChangeSign(x87Mul(t3, sn))`），
-    //     旧的 `from: '    x87ChangeSign(b);'` 已不存在 —— 更新到当前文本，破坏语义不变（丢 fchs）。
-    //   ★ 为什么挑这一条而不是 sin/cos 对调：`.lst` 0x4CCC80/0x4CCC84 的两次求值互相独立
-    //   （都在同一个 θ 上，各自只写自己的栈槽）⇒ 那种"变异"不会改变任何 guest 可见状态，红得没意义。
-    file: 'apps/emulator-lift/src/runtime/native_affine.cpp',
-    from: '    const X87Val b = x87ChangeSign(x87Mul(t3, sn));',
-    to: '    const X87Val b = x87Mul(t3, sn);',
-    guard: 'ctest:native-override-assets',
-    ctest: 'native-override-assets',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-native-override-assets',
-    what:
-      'B 系数（`fchs` @0x4CCCC8）不再取号 ⇒ 每个顶点的 dst[i] 符号项错 ⇒ ' +
-      'native-override-assets 的 sub_4CCC60 两臂逐字节当场红',
-  },
 
   // ★ 下面五条代表 `sub_42F560` 的**插入排序扫描段**（`0x42F5E0..0x42F6EB` ∪ 落位块
   //   `{0x42F783..0x42F793}`）的五类**静默错**。判据都在
@@ -2374,16 +1995,6 @@ const MUTATIONS = [
     what: '归因恒为 guest ⇒ 宿主 AV 又被报成上一条 guest 访存（`access :` 行回来了）⇒ fault-report 红',
   },
 
-  {
-    file: 'apps/emulator-lift/src/shims/kernel32_string.cpp',
-    from: '    cpu.mem->writeBytes(buf, text.data(), text.size());',
-    to: '    (void)text;  // 变异：A 版只回长度、不写字节',
-    guard: 'ctest:locale-ext',
-    ctest: 'locale-ext',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-locale-ext',
-    what: 'GetLocaleInfoA 不写字节 ⇒ A 的空串 != W 的 CP932 投影 ⇒ locale-ext 的 get-locale-info-a 红',
-  },
 
   {
     file: 'apps/emulator-lift/src/shims/kernel32_file.cpp',
@@ -2649,23 +2260,6 @@ const MUTATIONS = [
     what: '裸标识符（如未映射的 `cld`）又默认判数据 ⇒ mnemonics 的 lst-classify 红（A2 的假绿口子回来了）',
   },
 
-  {
-    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
-    from:
-      'void writeViewportFullTarget(X86& cpu, std::uint32_t pe, std::uint32_t w, std::uint32_t h) {\n' +
-      '    if (w == 0 || h == 0) return;',
-    to:
-      'void writeViewportFullTarget(X86& cpu, std::uint32_t pe, std::uint32_t w, std::uint32_t h) {\n' +
-      '    if (w == 0 || h == 0 || cpu.mem != nullptr) return;  // 变异：短路 viewport 回写',
-    guard: 'ctest:d3d9-pipeline',
-    ctest: 'd3d9-pipeline',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3d9-pipeline',
-    what:
-      'SetRenderTarget 不再把 viewport 回写成新目标的全幅（修前形状：只写 colorSurface/Arena）⇒ ' +
-      'd3d9-pipeline 的 `set-render-target-viewport` 红（绑定纹理表面后 GetViewport 仍是 guest 设的 ' +
-      '48×48、切回后缓冲后也不是 64×64；实测 14 条断言红）',
-  },
 
   // ── 对象表**代际**：陈旧持有者（缓存了 (EA, 代际)）不许打到"复用同一 EA"的新对象 ──
   //   （REQ-01M6X4NFHCW1Y6YDJ4DYFA92PS）两条变异分别短路两处消费点，判据各在同名 CTest 里。
@@ -2762,21 +2356,6 @@ const MUTATIONS = [
   //     纹理 / FVF / 变换 / 采样器 / 纹理级 / 视口 / 裁剪矩形，在"建块"与"Capture"两段各来一遍，
   //     外加 PIXEL 段的回滚断言）。⚠ 这一条**不覆盖**快照持引用那半（`sbHoldRefs` 的 addRef 在
   //     capture 里，Apply 短路碰不到它）—— 引用/生命周期由同一个用例的 ④ 段守，另见 §"引用"。
-  {
-    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
-    from: '    const SbMask mask = sbMaskOf(snap.type);\n' + '    bool failed = false;',
-    to:
-      '    const SbMask mask = sbMaskOf(snap.type);\n' +
-      '    if (cpu.mem != nullptr) return kOk;  // 变异：Apply 不写回（= 修前形状）\n' +
-      '    bool failed = false;',
-    guard: 'ctest:d3d9',
-    ctest: 'd3d9',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3d9',
-    what:
-      'Apply 不写回（修前形状）⇒ d3d9 的 stateblock-capture-apply 红：Apply 之后渲染状态 / ' +
-      '纹理 / FVF / 变换 / 采样器 / 纹理级 / 视口 / 裁剪矩形仍停在"改后"的值（实测 24 条断言红）',
-  },
 
 
   // ── emulator-lift · marker 事件源（`TriggerKind::Marker`）──
@@ -2918,151 +2497,6 @@ const MUTATIONS = [
   },
 
 
-  {
-    // ★ 代表 "x87 float→int64 的**截断方向**被改掉" 这一类错（REQ-01M75PW4MXS06MN6FKGXB36ETH，`__ftol2_sse`）。
-    //   `__ftol2` 的修正环（`.lst` 0x4E8319..0x4E833B 的 `fstp dword` + `add 7FFFFFFFh` + `sbb/adc`）
-    //   把 `fistp` 的"按 RC 就近取整"拉回**向零截断** ⇒ 实现里的 `x87ToI64Trunc(x)`
-    //   （= `x87ToI64(x, X87Round::Zero)`）是这一项语义的唯一落点；改成 `X87Round::Near`（就近）
-    //   ⇒ `±1.5` / `±2.7` 这类小数部分 ≥0.5 的输入整数值差 1。
-    //   守卫：`apps/emulator-lift/tests/native_override_assets.cpp` 的 `ftol/*` 边界表
-    //   （解释器臂 = 真字节 oracle，逐值比 `EDX:EAX`）。
-    //   ★ 为什么挑这一条而不是"忘弹栈"：截断是**本项的核心语义**，而"忘弹栈"更多是框架 ABI 的
-    //     共性错；另外这条变异**只有在边界表带非整数/非 2 的幂时才红**（`±0.4` 那种两边都给 0）
-    //     ⇒ 它同时钉住"边界表必须有判别力"这件事。
-    //   ★ 2026-11-16：桥函数已改名为 `x87ToI64Trunc`（旧 `x87ToI64(x, /*truncate=*/true)` 不存在）
-    //     ⇒ 更新 `from`，破坏语义不变（截断 → 就近）。
-    file: 'apps/emulator-lift/src/runtime/native_crt.cpp',
-    from: '    const std::int64_t n = x87ToI64Trunc(x);',
-    to: '    const std::int64_t n = x87ToI64(x, X87Round::Near);',
-    guard: 'ctest:native-override-assets',
-    ctest: 'native-override-assets',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-native-override-assets',
-    what:
-      '`__ftol2_sse` 的截断改成"按 RC 就近取整"（`x87ToI64(x, X87Round::Near)`）⇒ `±1.5`/`±2.7` 差 1：' +
-      'native-override-assets 的 ftol 边界表逐值断言当场红',
-  },
-
-
-  {
-    // ★ 代表 "Huffman 两条分支的 **adv 字节数**被写反" 这一类错
-    //   （REQ-01M75WED0VFTEYXX43KGHNPPP0，`sub_4E1570` 的 `0x4E1666` vs `0x4E167C`）。
-    //   `.lst` 里成功支 `adv(codelengths[lo])`、失败支 `adv(read)` —— 两个数**不同**；
-    //   谁按"标准 Huffman"想当然写成同一个，位游标就错 N bit ⇒ 整包之后全错位
-    //   （听得出、引擎零信号：`0x4E40A9 xor eax,eax` 让成功与失败都返回 0）。
-    //   守卫：`apps/emulator-lift/tests/native_override_assets.cpp` 的 `huff/fail-len-gt-read`
-    //   （解释器臂 = 真字节 oracle，逐值比位读三个 dword）与 `huff-vec/eof-fail`。
-    //   ★ 为什么挑这一条而不是"sar 写成 shr"：`sar`/`shr` 只在负 entry 的高位字段上分叉，
-    //     而 adv 字节数是**两片叶子的公共骨架**、也是本单的头号风险（评估 §2.4.1 第 2 条）。
-    file: 'apps/emulator-lift/src/runtime/native_huffman.cpp',
-    from: '        huffAdv(r, bits);  // `0x4E1681 adv(read)`  ← ★ 与成功支的字节数**不同**',
-    to: '        huffAdv(r, len);  // 变异：失败支也按码长前进（= adv 字节数写反）',
-    guard: 'ctest:native-override-assets',
-    ctest: 'native-override-assets',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-native-override-assets',
-    what:
-      '`sub_4E1570` 失败支的 `adv(read)` 改成 `adv(codelengths[lo])`（两条分支的字节数写成同一个）' +
-      '⇒ 位游标错位：native-override-assets 的 `huff/fail-len-gt-read` 当场红' +
-      '（位读三 dword 的 endbit / ptr 与解释器臂不同）',
-  },
-
-  {
-    // ★ 代表 "CRC 反射变体的**移位方向**被写反" 这一类错（REQ-01M7BY4D1ZWA4HB97T8M8TVEYQ，
-    //   `sub_436D00` 的 `0x436D39 shr eax,8`）。
-    //   反射变体的整条语义就是 `crc = T400[(crc ^ b) & 0xFF] ^ (crc >> 8)`；`>>` 写成 `<<`
-    //   仍会"有个返回值"、仍会读同一张表 ⇒ 不崩不报，只是**每一条 CRC 都不对**，而引擎侧零信号
-    //   （存档写出去、读回来对不上）。
-    //   守卫：`apps/emulator-lift/tests/native_override_assets.cpp` 的 `crc/d00-reflected-*`
-    //   （解释器臂 = 同一 EA 的真字节 oracle，逐位比 `EAX`；全语料里唯一能当 oracle 的东西）。
-    //   ★ 为什么挑这一条而不是"让两个 fn 都查 `+0x400`"：后者要同时改两处（`table_offset` 与
-    //     `reflected`），是两处破坏；这一条是**一处**且只让 native 臂分叉（`d50` 不受影响，
-    //     红的方向唯一）。
-    file: 'apps/emulator-lift/src/runtime/native_crc32.cpp',
-    from: 'for (std::uint32_t k = 0; k < n; ++k) crc = table[(crc ^ buf[k]) & 0xFFu] ^ (crc >> 8);',
-    to: 'for (std::uint32_t k = 0; k < n; ++k) crc = table[(crc ^ buf[k]) & 0xFFu] ^ (crc << 8);',
-    guard: 'ctest:native-override-assets',
-    ctest: 'native-override-assets',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-native-override-assets',
-    what:
-      '反射变体（`sub_436D00`）的 `crc >> 8` 写成 `crc << 8`（`.lst` 0x436D39 `shr eax,8` 写反）⇒ ' +
-      'native-override-assets 的 `crc/d00-reflected-*` 与 `crc/d00-standard-value` 当场红' +
-      '（`crc/d50-msb-*` 不受影响 ⇒ 红的方向唯一）',
-  },
-
-  {
-    // ★ 代表 "音频第 3 层补偿的**覆盖面**只挂在 stop/setPosition 上" 这一类错
-    //   （`REQ-01M75RD3WNA2GZQY32S34V00S7`）：`removeBuffer` 在模型里 erase 掉这条流就返回，
-    //   而 `destroyBufferBlocks`（`shims/dsound.cpp`）紧接着 `heap->free` 掉 guest 环与状态块
-    //   ⇒ 在飞那一刀 continues 往已 free 的 guest 堆块里写（不只是"写回旧相位"）。
-    //   变异 = 把新加的那句有界等待**删掉**（同形于"补丁没落上"）。
-    //   判据：`apps/emulator-lift/tests/audio.cpp` 的 `audio-device/remove-waits-inflight` ——
-    //   夹具 seam 伪造 `filling_obj_`，另一条线程 20 ms 后清 0；删掉等待 ⇒ `fill_waits` 保持 0、
-    //   耗时 < 15 ms ⇒ 当场红。★ 读数只作存在性判据（不锁具体毫秒数）。
-    //   ★ 为什么不用 `if (false && …)`：那会在 `/W4 /WX` 下定死一个常量条件（C4127 的风险），
-    //     而"整句替换成注释"精确表达"补丁没落上"，且 `obj` / `lock` 仍被别的语句使用（无未用告警）。
-    file: 'apps/emulator-lift/src/runtime/audio.cpp',
-    from: '        if (!isFeederThread() && filling_obj_.load() == obj) waitFill(obj, lock);',
-    to: '        // 变异：removeBuffer 不再等"正在跑的那一刀 fill"（挡在 heap->free 之前的判据消失）',
-    guard: 'ctest:audio-device',
-    ctest: 'audio-device',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-audio',
-    what:
-      '`removeBuffer` 不再有界等"正在跑的那一刀 fill"（erase/dropPending 之后直接返回）⇒ ' +
-      '`audio-device/remove-waits-inflight` 的 `fill_waits == 1` / 耗时 ≥ 15 ms 当场红',
-  },
-
-
-  {
-    // ★ 代表"**反馈环闸被删掉**"这一类错（`REQ-01M79MSMWGFEKF8J7C7VYWS4YP` 的新闸）：
-    //   同一批把 RT 纹理当采样源时，本后端采样走**上传缓存**（不是 target 自己）⇒ 读到的是本批
-    //   之前的内容：不挂死、不报错、像素是旧帧（**静默**）。删掉这条闸 ⇒ 该批照样进 GPU。
-    //   守卫：`apps/emulator-lift/tests/gpu_batch.cpp` 的 `d3d9p/render-to-texture-feedback`
-    //   （`queued_a==0 ∧ reason 含"被采样"`；控制组解绑采样后必须进 GPU）。
-    //   ★ 变异 = 闸的条件再 `&& color_base == nullptr`（RT 分支里 `color_base` 恒非空 ⇒ 闸永不触发）；
-    //     ⛔ 不写 `&& false`（`/W4 /WX` 的常量条件告警）。
-    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
-    // ★ `from` 必须带上前一行：P2 在**同一个 if 块**里给 effect 路的采样源加了**同样一行**
-    //   `if (rt_sampled) {`（`ctx.effect_textures[s]`）⇒ 只写那一行会命中 2 次
-    //   （`--list` 的静态检查当场判「出现次数 ≠ 1」）。判据 = 固定功能路那一份
-    //   （`ctx.textures[s].pixels == ctx.color_base`）。
-    from:
-      '                                    ctx.textures[s].pixels == ctx.color_base;\n' +
-      '            if (rt_sampled) {',
-    to:
-      '                                    ctx.textures[s].pixels == ctx.color_base;\n' +
-      '            if (rt_sampled && ctx.color_base == nullptr) {',
-    guard: 'ctest:gpu-batch-order',
-    ctest: 'gpu-batch-order',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-gpu-batch',
-    what:
-      '反馈环闸失效（同批把 RT 当采样纹理不再被拒）⇒ `d3d9p/render-to-texture-feedback` 的 ' +
-      '`queued_a==0` / reason 断言当场红',
-  },
-
-  {
-    // ★ 代表"**sprite 路自己的反馈环闸**被删掉"这一类错（`REQ-01M79ZRTHWWD296XRY5KYPR9J4`）：
-    //   sprite 合成**不经** `gpuEligible` ⇒ draw 路那条闸（上面那条变异）管不到它。
-    //   `REQ-01M79V2TVJH98BKH0C0WQV2FET`（sprite→RT）之后，sprite 可以采样**自己正在写的** RT
-    //   （`tbase == base`）：GPU 采样读上传缓存、guest 也可能没读回本批像素 ⇒ 静默旧像素。
-    //   守卫：`apps/emulator-lift/tests/gpu_batch.cpp` 的 `d3d9p/sprite-feedback-loop`
-    //   （反馈环条目 `queued==0` + `sprite_skipped==1` + 具名位；反向：别的纹理必须照常入队）。
-    //   ★ 变异 = 判据换成**永不成立的**比较（`base + 1`）；⛔ 不写 `&& false`（`/W4 /WX` 的常量条件
-    //     告警会让它变成"不可判定"而不是"守卫红了"）。
-    file: 'apps/emulator-lift/src/runtime/d3dx9_sprite.cpp',
-    from: '        if (texture != 0 && tbase != nullptr && tbase == base) {',
-    to: '        if (texture != 0 && tbase != nullptr && tbase == base + 1) {',
-    guard: 'ctest:gpu-batch-order',
-    ctest: 'gpu-batch-order',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-gpu-batch',
-    what:
-      'sprite 采样自己正在写的 RT 不再被跳过（判据失效）⇒ `d3d9p/sprite-feedback-loop` 的 ' +
-      '`queued==0` / `sprite_skipped==1` / 具名位断言当场红',
-  },
 
   {
     // ★ 代表"**每次换 target 都清深度**"这一类错（RTT 复审的"必须改 ②"）
@@ -3090,46 +2524,6 @@ const MUTATIONS = [
       '⇒ `d3d9p/depth-retained-across-target-switch` 的第一条断言（B 仍是清屏蓝）当场红',
   },
 
-  {
-    // ★ 代表"**SetRenderState 的 default 又把未知状态静默存下**"这一类错
-    //   （`REQ-01M79PPA10JCKG4C9HY6QMV6PT`）：default 不拒 ⇒ 214 这种非 D3DRS 值被 setRs 写进
-    //   状态块（`Get(214)` 也能读回）⇒ 参数校验退化成"什么都收"。
-    //   守卫：`apps/emulator-lift/tests/d3d9_pipeline.cpp` 的 `d3d9p/render-state-policy` (3)
-    //   （`Set(214/210/255,1)` INVALIDCALL + guest 堆逐字节不变 + `Get(214)` INVALIDCALL）
-    //   与 `d3d9p/render-state-domain` 的"非 D3DRS 值 ⇒ INVALIDCALL 且不记账"段。
-    //   ★ `/W4 /WX` 下不能写 `if (false)` ⇒ 用运行期表达式 `state == 0xFFFFFFFFu`
-    //     （上界已先拒 210..255 ⇒ 这个合取恒假，但编译器不会报常量条件）。
-    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
-    from: '            if (!knownRenderState(state)) {\n                char buf[192];',
-    to: '            if (!knownRenderState(state) && state == 0xFFFFFFFFu) {\n                char buf[192];',
-    guard: 'ctest:d3d9-pipeline',
-    ctest: 'd3d9-pipeline',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3d9-pipeline',
-    what:
-      'default 不再拒绝白名单外状态 ⇒ `Set(2,1)` 被存下（guest 堆变了 / Set(2) 不再是 INVALIDCALL）' +
-      '⇒ `d3d9p/render-state-policy` (3) 与 `d3d9p/render-state-domain` 的"非 D3DRS"段当场红',
-  },
-
-  {
-    // ★ 代表"**合法 D3DRS 又被当成非法拒掉**"这一类错（`REQ-01M7A3M73R3XYMM7J4KNQ1VNV7`）：
-    //   修前 `knownRenderState` 的 A∪B 白名单把 163（`D3DRS_PATCHEDGESTYLE`，官方枚举里有）
-    //   落进 default 的"不是 D3DRS"⇒ INVALIDCALL。本单把它（连同 48 / 146–148 / 165 /
-    //   172–173 / 178–183 / 198–205）收进 B 档：接受 + 原样存下 + `recordUnsupported(bit41)`。
-    //   变异 = 把 163 这一行注释掉（= 挪回拒绝档）。
-    //   守卫：`d3d9p/render-state-domain` 的"合法 D3DRS"段 —— 每个合法值要么 `Set == S_OK`，
-    //   要么"INVALIDCALL + recordUnsupported 命中"；163 两条都不满足 ⇒ 当场红。
-    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
-    from: '        case 163:                                                    // PATCHEDGESTYLE\n',
-    to: '        // case 163:  // 变异：把这个 B 档值挪进拒绝档（default ⇒ INVALIDCALL）\n',
-    guard: 'ctest:d3d9-pipeline',
-    ctest: 'd3d9-pipeline',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3d9-pipeline',
-    what:
-      '`D3DRS_PATCHEDGESTYLE=163` 从 B 档（接受并存下）挪进拒绝档 ⇒ `Set(163, …)` 返回 ' +
-      'D3DERR_INVALIDCALL 且 bit41 不置位 ⇒ `d3d9p/render-state-domain` 的"合法 D3DRS"段当场红',
-  },
 
 
   // ── 光照材质来源：`D3DRS_COLORVERTEX=0` 必须让顶点色**不参与**
@@ -3174,24 +2568,6 @@ const MUTATIONS = [
       '⇒ `d3d9p/render-to-texture` 的 `gpu_base == tex_pixels` 红（像素静默写错 surface）',
   },
 
-  {
-    // ★ 代表"**BaseVertexIndex 被忽略 / 只按 idx 取顶点**"这一类错
-    //   （`REQ-01M79PP9S4BFBPKDPBQBDN5GGR`）：`vi = base + idx - min` 等价于旧的"忽略 min"，
-    //   负 base 的合法索引区间 [min,min+n) 会被算成负顶点号 ⇒ 合法调用被假拒。
-    //   守卫：`d3d9p/indexed-range` (a)(b)（base=-2/min=2、base=-1/min=1 必须 S_OK 且像素正确）。
-    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
-    from:
-      '        const std::int64_t vertex_index = static_cast<std::int64_t>(base_vertex) + static_cast<std::int64_t>(idx);',
-    to:
-      '        const std::int64_t vertex_index = static_cast<std::int64_t>(base_vertex) + static_cast<std::int64_t>(idx) - min64;',
-    guard: 'ctest:d3d9-pipeline-gpu',
-    ctest: 'd3d9-pipeline-gpu',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3d9-pipeline',
-    what:
-      '`vi = base + idx` 改回忽略 min（减去 min64）⇒ (a)(b) 的负 base 合法调用变成 vi<0 假拒 ' +
-      '⇒ `d3d9p/indexed-range` (a)(b) 当场红',
-  },
 
   {
     // ★ 代表"**无 GPU 时又静默降级**"这一类错（`REQ-01M78BF1FNNH6K8N8GEY6GQYXX`）：
@@ -3214,27 +2590,6 @@ const MUTATIONS = [
       '⇒ `lift/no-gpu-refuses-start`（AOT 臂）当场红',
   },
 
-  {
-    // ★ 代表"**underrun 插静音的判据被改回照读环**"这一类错（`REQ-01M75PTAC1JJ3G4QGQDRB1G4V8`
-    //   的实时口径，设计 `.tmp/audio-phase/design.md` §1.4 / §1.6）：
-    //   判据 = 写见证 `[stream+0x2468]`（fill 前后变了 = 这一刀写了环）；读指针第 n 次进入
-    //   quarter q 时 `witness[q] == consumed[q]` ⇒ 这一圈 q 区没被重写过 ⇒ 该区交付 0。
-    //   变异 = 把它改成恒 fresh（`false`）⇒ 第 2 圈照读上一圈的旧内容 = **重播**（正是本单的
-    //   产品现象），且 `underrun_silence_events/bytes` 归零。
-    //   守卫：`apps/emulator-lift/tests/audio.cpp` 的 `audio-device/underrun-silence-stale`
-    //   （Virtual + `sound=true`，不注册 feeder ⇒ 天然 0 刀，恰好 2 圈）。
-    //   ⛔ 不用内容比对当判据：guest 自己"放完 + memset 0"也是全 0（`guest-zeros` 用例钉住）。
-    file: 'apps/emulator-lift/src/runtime/audio.cpp',
-    from: '                    b.read_stale = (b.witness[quarter] == b.consumed[quarter]);',
-    to: '                    b.read_stale = false;  // 变异：恒 fresh（环陈旧时照读上一圈的内容 = 重播）',
-    guard: 'ctest:audio-device',
-    ctest: 'audio-device',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-audio',
-    what:
-      '把"环陈旧 ⇒ 交付静音"的判据改成恒 fresh（照读环）⇒ 第 2 圈是斜坡重播、' +
-      'underrun_silence_events/bytes 归零 ⇒ `audio-device/underrun-silence-stale` 当场红',
-  },
 
   // ── 新守卫：`add_test` 的 flag 必须在目标源文件里有分派（`cmake-test-entry`）─────────────
   //   故障形态：给 `add_test` 加一个目标不认识的 flag ⇒ 二进制跑默认套件、退出码 0 ⇒
@@ -3573,65 +2928,6 @@ const MUTATIONS = [
       'stderr 也不点名路径 ⇒ cli-aot-flags 的 `input-plan-missing-file` 红（"以为按了、其实没按"）',
   },
   {
-    // 三条指令：`wait <ms>` 的 deadline 是**唯一的墙钟面** ⇒ 去掉"未到期就停"这一步，
-    // `wait` 就退化成空操作（配方里的等待被静默吞掉）。
-    file: 'apps/emulator-lift/src/runtime/input_plan.cpp',
-    from:
-      '            if (!wait_started_) {\n' +
-      '                wait_started_ = true;\n' +
-      '                wait_deadline_ms_ = now + s.wait_ms;\n' +
-      '            }\n' +
-      '            if (now < wait_deadline_ms_) return;\n',
-    to:
-      '            // 变异：wait 不再等（deadline 被忽略）\n' +
-      '            (void)now;\n' +
-      '            (void)wait_started_;\n' +
-      '            (void)wait_deadline_ms_;\n' +
-      '            return;\n',
-    guard: 'ctest:input-plan-read-points',
-    ctest: 'input-plan-read-points',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-input-plan-read-points',
-    what:
-      '`wait` 的"未到期就停"被去掉（`if (now < s.wait_deadline_ms) return;` → `if (false) return;`）⇒ ' +
-      '`wait` 退化成空操作 ⇒ input-plan-read-points 的 `input-plan/gates-and-releases` 红' +
-      '（注入时钟 1499ms 时 `fired` 应为 0，变异后立刻变 1）',
-  },
-  {
-    // 第四条指令：位置门是**半开**区间（FROM 含、TO 不含）⇒ 改成闭区间后，`pos == TO` 也会通过。
-    //   ★ 用单测（不是端到端）当判据：`input-plan/position-gate` 里有一条 `pos == TO` **不**命中
-    //     的断言（0x0460 = 轮询体的末指令末尾）⇒ 这是 `REQ-01M7HBG0NYH957M9EK3JVMF5CC` 一族里
-    //     "位置门"的代表变异（⛔ 不是每个常量一条）。
-    file: 'apps/emulator-lift/src/runtime/recipe.cpp',
-    from: '            return position.pos >= s.pos_from && position.pos < s.pos_to;\n',
-    to: '            return position.pos >= s.pos_from && position.pos <= s.pos_to;  // 变异：TO 也含\n',
-    guard: 'ctest:input-plan-read-points',
-    ctest: 'input-plan-read-points',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-input-plan-read-points',
-    what:
-      '把 `await position` 的 `pos >= s.pos_to` 改成 `pos > s.pos_to`（半开区间变成闭区间）⇒ ' +
-      '`pos == TO`（0x0460）也命中 ⇒ input-plan-read-points 的 `input-plan/position-gate` 红',
-  },
-  {
-    // ★ **完成度判据**（`REQ-01M7HP2Q1N0N004M8R4RPABWSV` 的前置）：配方没走完（`pending != 0`）
-    //   或某一步 `timeout` 到期 ⇒ **exit 5**。把它改成恒 0 ⇒ "配方没走完"重新变成**假绿面**
-    //   （只打一行 stderr、退出码 0）—— 那正是"图 → 配方"改写会把 CTest 变绿的那条缝。
-    //   ★ 用单测当判据（不是端到端）：`input-plan/completion` 直接断言
-    //     `recipeOutcomeExitCode(Running) == 5`，⛔ 不依赖 GPU / 游戏安装。
-    file: 'apps/emulator-lift/src/runtime/recipe.cpp',
-    from: '    return o == RecipeOutcome::Done ? 0 : kRecipeIncompleteExitCode;\n',
-    to: '    return o == RecipeOutcome::Done ? 0 : 0;  // 变异：完成度不再影响退出码（"没走完"重新变成假绿面）\n',
-    guard: 'ctest:input-plan-read-points',
-    ctest: 'input-plan-read-points',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-input-plan-read-points',
-    what:
-      '把完成度的退出码映射改成恒 0（`pending != 0` / `timeout` 到期 ⇒ exit 5 变成 ⇒ 0）⇒ ' +
-      'input-plan-read-points 的 `input-plan/completion` 红（`recipeOutcomeExitCode(Running)` 应为 5、' +
-      '`recipeOutcomeExitCode(TimedOut)` 应为 5）',
-  },
-  {
     // ★ **端到端接线**（`REQ-01M7HQJEEENYDJ91FB5DAC4K23` · 判据 4 的自检 · stress 档）：
     //   上面那条只证明 `recipeOutcomeExitCode` 这个**函数**返回 5；它证明不了 `aot_main` 的
     //   **收口点**用了它。把调用点改成 `return 0;` ⇒ 配方没走完也只打一行 stderr、exit 0
@@ -3680,21 +2976,6 @@ const MUTATIONS = [
       '`await script TITLE timeout 2500` 的守卫恒 0 ⇒ input-plan-read-points 的 ' +
       '`input-plan/parse-errors`（解析后 `timeout_ms` 应为 2500）与 `input-plan/step-timeout`' +
       '（超 1 ms 应判到期）红',
-  },
-  {
-    // ★ **`wait` 没有守卫**（2026-11-16 裁决：删掉 `ms + 缺省` 那条补丁）。把这条特判删掉 ⇒
-    //   `stepTimeoutMs(wait, 5000)` 又变成 5000 ⇒ 超长 `wait` 会被假判 timeout（headless 下 guest
-    //   时钟跑在墙钟前面时必然踩到）。判据 = `input-plan/step-timeout` 的两条 0 断言 + 图臂长等待。
-    file: 'apps/emulator-lift/src/runtime/recipe.cpp',
-    from: '    if (s.kind == StepKind::Wait) return 0;\n',
-    to: '    // 变异：`wait` 又拿到缺省守卫（`ms + 缺省` 那条补丁回来了）\n',
-    guard: 'ctest:input-plan-read-points',
-    ctest: 'input-plan-read-points',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-input-plan-read-points',
-    what:
-      '删掉"`wait` 恒 0"的特判 ⇒ `stepTimeoutMs(wait, 5000)` 回到 5000 ⇒ input-plan-read-points 的 ' +
-      '`input-plan/step-timeout` 红（`wait` 的守卫应为 0；图臂里 guest 时钟冲过 5000 就会被假判 timeout）',
   },
   {
     // fixtures 目录白名单：**OS 元数据**必须放过（Finder 会在 `corpus/fixtures/` 里重新生成 `.DS_Store`）。
@@ -3886,82 +3167,6 @@ const MUTATIONS = [
       'S3 去掉 `kCheckStride` 节流（`due()` 恒真）⇒ 10 万块边界泵 100000 次而不是 25 次' +
       ' ⇒ `aot-audio-pump` 的 `s3-pump-gate-stride-throttles` 红（实测 4 failures：100000 ≠ 25）',
   },
-  {
-    // S3：D 泵那一刀不记 `fill_bytes`（回到"只有 feeder 那条记"的形状）⇒ AOT 唯一可达档里恒 0。
-    file: 'apps/emulator-lift/src/runtime/audio.cpp',
-    from:
-      '                    if (c.mem->committed(stream + kStreamBytes, 4))\n' +
-      '                        self->stats_.fill_bytes += c.mem->rd32(stream + kStreamBytes) / 4u;',
-    to: '                    // 变异：D 泵这一刀不记 fill_bytes',
-    guard: 'ctest:audio-device',
-    ctest: 'audio-device',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-audio',
-    what:
-      'D 泵（主线程）那一刀不记 `fill_bytes` ⇒ AOT（恒 D 泵）"喂了多少字节"恒 0，而 `fills>0` 让人以为账是全的' +
-      ' ⇒ `audio-device` 的 `audio-device/d-pump-fill-bytes` 红（实测改动前 2 failures）',
-  },
-  // ── AOT 真 feeder 线程（`REQ-01M7MHEZRQJSMAAWPESVW44DSK`；守卫 = `aot-audio-flags` / `audio-device`）──
-  //   ★ 这四条代表本单最贵的四种**静默破法**：
-  //     ① "AOT 形状（Sdl + 墙钟）不再进 thread 档" ⇒ 恒 D 泵、预读 600 ms（用户实测的 0.6 s 延迟）；
-  //     ② thread 档仍用 600 ms 的 lead ⇒ 修了定档却没修延迟；
-  //     ③ feeder 与主线程共用 TEB ⇒ `fs:[0]` 被另一条线程改写（BUG-22：Quit 的 C++ throw 派发到
-  //        已复用的 record、eip 落到 guest 堆）；
-  //     ④ 宿主给的布局不可用（0）时不再响亮失败 ⇒ 退回"静默 D 泵"（旧 bug 的形状）。
-  {
-    // ① 谓词：`audioThreadMode` 不再认 AOT 形状。
-    file: 'apps/emulator-lift/src/runtime/audio_policy.h',
-    from: '    return mode == AudioMode::Sdl && real_time_clock;',
-    to: '    return mode == AudioMode::Sdl && real_time_clock && false;  // 变异：AOT 形状不再进 thread 档',
-    guard: 'ctest:aot-audio-flags',
-    ctest: 'aot-audio-flags',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-aot-audio-flags',
-    what:
-      '[audio-feeder-shape] 谓词不再认 AOT 形状（`audioThreadMode(Sdl,true)` 变 false）⇒ AOT 恒主线程 D 泵、预读 600 ms' +
-      ' ⇒ `aot-audio-flags` 的 `s0-thread-mode-truth-table` 红（`(Sdl,true)` 那一格 want=1 / got=0）',
-  },
-  {
-    // ② lead：thread 档仍用泵档的 600 ms。
-    file: 'apps/emulator-lift/src/runtime/audio_policy.h',
-    from: '    return thread_mode ? kThreadLeadBytes : kLeadBytes;',
-    to: '    return thread_mode ? kLeadBytes : kLeadBytes;  // 变异：thread 档也用 600ms',
-    guard: 'ctest:aot-audio-flags',
-    ctest: 'aot-audio-flags',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-aot-audio-flags',
-    what:
-      '[audio-feeder-lead] `leadBytesFor(true)` 返回 115200（600 ms）而不是 19200（100 ms）⇒ thread 档的预读退回 600 ms' +
-      ' ⇒ `aot-audio-flags` 的 `s0-lead-bytes-by-thread-mode` 红（19200 那两格）',
-  },
-  {
-    // ③ BUG-22 回归口：feeder 与主线程共用 TEB。
-    file: 'apps/emulator-lift/src/runtime/audio.cpp',
-    from: '        audio_cpu_.fs_base = feeder_teb;',
-    to: '        audio_cpu_.fs_base = cpu_->fs_base;  // 变异：共用主线程 TEB（BUG-22）',
-    guard: 'ctest:audio-device',
-    ctest: 'audio-device',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-audio',
-    what:
-      '[audio-feeder-teb] feeder 的 `fs_base` 指回主线程 TEB ⇒ 共用 `fs:[0]`（SEH 链头）⇒ BUG-22 复发' +
-      ' ⇒ `audio-device` 的 `audio-device/feeder-teb-is-own` 红（`feederFsBaseForTest() != cpu.fs_base`）',
-  },
-  {
-    // ④ 布局不可用不再响亮失败（旧 bug：静默退回 D 泵）。
-    file: 'apps/emulator-lift/src/runtime/audio.cpp',
-    from:
-      '    feeder_layout_invalid_ = layout.feeder_teb == 0 || layout.feeder_stack_top == 0 ||\n' +
-      '                             layout.feeder_stack_size == 0;',
-    to: '    feeder_layout_invalid_ = false;  // 变异：布局不可用不再响亮失败（静默 D 泵）',
-    guard: 'ctest:aot-audio-flags',
-    ctest: 'aot-audio-flags',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-aot-audio-flags',
-    what:
-      '[audio-feeder-attach] 宿主给的 `GuestLayout` 不可用（feeder_teb=0）时 `begin(Sdl,墙钟)` 不再返回 false' +
-      ' ⇒ 变成静默 D 泵（旧 bug 的形状）⇒ `aot-audio-flags` 的 `s0-feeder-layout-is-structural` 红',
-  },
   // ── AOT 音频接线（`REQ-01M7K04EY6D3GQNB5DRWP0DYJ8` 洞 6；守卫 = `aot-audio-wiring`）──
   //   ★ 代表"**接线断了**"这类**自证式断言抓不到**的静默失效：`--sound` 从 CLI→引擎的路上被摘掉，
   //     而 `kAotSoundNotice` 那句 `muted=0` 照旧打印 —— 引擎其实是静音的。
@@ -3991,21 +3196,6 @@ const MUTATIONS = [
   //     所以用 `(void)origin_100ns_;` 保住一次读 —— 这是"运行时恒真"的形态，⛔ 不是 `if (false)`。
   //   守卫：`apps/emulator-lift/tests/audio.cpp` 的 `audio-device/epoch-relative-cursor`
   //   （注入"自开机 5 天 / 14 天"两档 raw ⇒ 游标必须都是 0.25 s 的 48000 B、dump 必须一致）。
-  {
-    file: 'apps/emulator-lift/src/runtime/audio.cpp',
-    from: '        const std::uint64_t elapsed = now > origin_100ns_ ? now - origin_100ns_ : 0ull;\n' +
-          '        const std::uint64_t new_played = elapsed * kBytesPerSec / kTicksPerSec;',
-    to: '        (void)origin_100ns_;  // 变异：游标退回自开机绝对时间\n' +
-        '        const std::uint64_t new_played = now * kBytesPerSec / kTicksPerSec;',
-    guard: 'ctest:audio-device',
-    ctest: 'audio-device',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-audio',
-    what:
-      '虚拟档的设备游标退回 `now100ns()` 的**绝对值**（自开机）⇒ `played_` 落在 8e10 量级、' +
-      '恒撞 `generateTo` 的越界门 ⇒ `audio-device/epoch-relative-cursor` 的"游标 = 48000 B /' +
-      ' dump 有 PCM / 不随 epoch 变"当场红（本单 S2 的原症状）',
-  },
   // ── spawn 产品 exe 的 `buildTarget` 必须有 `add_dependencies`（假绿面）─────────────
   //   ★ 代表"**变异施加了、但产品 exe 没重建**"这一类错（`REQ-01M7K2J7VXKJMK1BJ3H7YCVJFJ`）：
   //     守卫 spawn 产品 exe，`cmake --build --target <守卫>` 只重建守卫 exe ⇒ 守卫跑的是变异前的
@@ -4097,18 +3287,6 @@ const MUTATIONS = [
       '`bts@004F7C8D` / `bt@004F7CA8` 红（写入落在 `[esp+0]` 而不是 `[esp+12]`；`bt` 的位取值错 ⇒ ' +
       '块尾 `jae` 走另一条边 ⇒ 两臂的**下一条 EA** 不同）。★ 解释器臂不会红：语义真源是对的',
   },
-  {
-    file: 'apps/emulator-lift/src/shims/kernel32_bootstrap.cpp',
-    from: '        buf[6] = 0x81;  // LeadByte[0]',
-    to: '        buf[4] = 0x81;  // 变异：LeadByte[0] 写回 +4（旧布局）',
-    guard: 'ctest:locale-ext',
-    ctest: 'locale-ext',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-locale-ext',
-    what:
-      '`CPINFO::LeadByte` 写回 +4（旧布局）⇒ `locale-ext` 的 `get-cp-info-layout` 在 ' +
-      '`DefaultChar[0]==0`（+4）与 `LeadByte[0]==0x81`（+6）两条上红 —— 判据是微软文档的字段偏移',
-  },
 
   // ── D26 未对齐 imm32 扫描（`src/aot/closure_scan.h`；守卫 = `tests/closure_imm32.cpp`）──
   //   故障形态：把"任意偏移"退化成"4 字节对齐"（`++i` → `i += 4`）。这是**唯一的**静默失效点：
@@ -4135,18 +3313,6 @@ const MUTATIONS = [
   //   故障形态：`findEntry` 的 id 偏一格（`id` → `id + 1`）。这是**最像"能跑"的**破坏：
   //   读取照样成功、目录树照样解析，只是取到的**是邻居的字节**（200 拿到 201 的 1077 B）。
   //   ⇒ 判据必须是**内容**（大小 + 首两字节 `//` + sha256），"读到了非空字节"永远发现不了它。
-  {
-    file: 'apps/emulator-lift/src/shims/d3dx9_effect.cpp',
-    from: '    if (!res.findEntry(kRtRcData, id, &entry, &err)) {',
-    to: '    if (!res.findEntry(kRtRcData, id + 1u, &entry, &err)) {  // 变异：id 偏一格',
-    guard: 'ctest:d3dx9-effect',
-    ctest: 'd3dx9-effect',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3dx9-effect',
-    what:
-      'RT_RCDATA 的 findEntry id 偏一格（`id` → `id+1`）⇒ 200 拿到 201 的字节（大小 1077 ≠ 892、' +
-      'sha256 不符）⇒ `d3dx9-effect` 的 resources-pinned 当场红（"读到非空字节"发现不了这种破坏）',
-  },
 
   // ⚠ P1 的那条变异（短路 `gpuEligible` 的 `effectDrawNotExecuted`）**已随 P1 的临时判据一起删除**：
   //   那个函数在 P2 不存在了 ⇒ 条目留着只会让 `--list` 的静态检查红（"from 片段已不存在"）。
@@ -4173,264 +3339,6 @@ const MUTATIONS = [
   //   故障形态：alpha 归一化的插值方向反了（`c0.a*(1-Alpha)` → `c0.a*Alpha`）。
   //   ★ `from` 特意带上前一行 `tex1.sample(...)`：DXBC 块里有**同样三行**算术（两份源必须逐句一致），
   //     不带上下文就会命中 DXBC 那份 ⇒ 在 mac 上（只编 MSL）**假绿**。
-  {
-    file: 'apps/emulator-lift/src/runtime/d3d9_gpu.cpp',
-    from:
-      '    float4 c1 = tex1.sample(smp1, in.uv1 / in.invw);\n' +
-      '    float4 ret = float4(0.0, 0.0, 0.0, 0.0);   // 源文本：float4 ret = 0;\n' +
-      '    ret.a = c0.a * (1.0 - Alpha) + c1.a * Alpha;',
-    to:
-      '    float4 c1 = tex1.sample(smp1, in.uv1 / in.invw);\n' +
-      '    float4 ret = float4(0.0, 0.0, 0.0, 0.0);   // 源文本：float4 ret = 0;\n' +
-      '    ret.a = c0.a * Alpha + c1.a * Alpha;  // 变异：1-Alpha 写成 Alpha',
-    guard: 'ctest:d3dx9-effect',
-    ctest: 'd3dx9-effect',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3dx9-effect',
-    what:
-      'Fade 的 MSL 片元把 `c0.a*(1-Alpha)` 写成 `c0.a*Alpha` ⇒ ret.a / ColRate 全偏 ⇒ ' +
-      '`d3dx9-effect` 的 fade-pixels 在三档像素上都红（容差 1 LSB 抓得住）；★ 只比"画没画"会假绿',
-  },
-
-  // ── GPU 路线 P3 ① · SlideBlur 的 **tap 数**少一个（`src/runtime/d3d9_gpu.cpp` 的 **MSL** 块）──
-  //   源文本：`for( float i = -10.0f; i <= 10.0f; i++ )` ⇒ **21 个 tap**（上下界都含）。
-  //   故障形态：`i <= 10` 写成 `i < 10`（20 tap）—— 画面仍然"糊"，只是少了一侧的采样，
-  //   肉眼很难发现；而 10-tap/21-tap 的混淆正是这张单最容易犯的错（任务描述说"10-tap"，
-  //   ZoomBlur 才是 10，SlideBlur 是 21）。
-  //   ★ `from` 带上 `float(tap)` 那一行：DXBC 块里有**同样**的循环头（两份源逐句一致），
-  //     不带上下文就会命中 DXBC 那份 ⇒ 在 mac 上（只编 MSL）**假绿**。
-  {
-    file: 'apps/emulator-lift/src/runtime/d3d9_gpu.cpp',
-    from:
-      '    for (int tap = -10; tap <= 10; ++tap) {\n' +
-      '        const float fi = float(tap);',
-    to:
-      '    for (int tap = -10; tap < 10; ++tap) {  // 变异：上下界少一档（21 tap → 20 tap）\n' +
-      '        const float fi = float(tap);',
-    guard: 'ctest:d3dx9-effect',
-    ctest: 'd3dx9-effect',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3dx9-effect',
-    what:
-      'SlideBlur 的 MSL 片元把 `i <= 10` 写成 `i < 10`（21 tap → 20 tap）⇒ 一侧的 10 个采样消失 ⇒ ' +
-      '`d3dx9-effect` 的 blur-pixels 在 Angle=0 / Angle=90 两档上红（R 45→36、G 45→36 的 9 LSB 偏差）；' +
-      '★ 只断言"糊了 / 画出来了"会假绿',
-  },
-
-  // ── GPU 路线 P3 ② · SlideBlur 的 **uv 步长**放大 10 倍（同一文件的 MSL 块）──
-  //   源文本：`tLen = Length / max( Width, Height ) * 0.05f`。步长既是"模糊半径"也是 UV 单位。
-  //   ★ 这是最像"能跑"的破坏之一：draw 成功、账本干净，只是采样点全跑到纹理外（CLAMP 之后
-  //     绝大多数 tap 落在边缘 texel 上）⇒ 画面是一块偏色，不是模糊。
-  {
-    file: 'apps/emulator-lift/src/runtime/d3d9_gpu.cpp',
-    from:
-      '    float tLen = Length / max(Width, Height) * 0.05;\n' +
-      '    float4 retCol = float4(0.0, 0.0, 0.0, 0.0);   // 源文本：float4 retCol = 0.0f;\n' +
-      '    for (int tap = -10; tap <= 10; ++tap) {\n' +
-      '        const float fi = float(tap);',
-    to:
-      '    float tLen = Length / max(Width, Height) * 0.5;  // 变异：uv 步长放大 10 倍\n' +
-      '    float4 retCol = float4(0.0, 0.0, 0.0, 0.0);   // 源文本：float4 retCol = 0.0f;\n' +
-      '    for (int tap = -10; tap <= 10; ++tap) {\n' +
-      '        const float fi = float(tap);',
-    guard: 'ctest:d3dx9-effect',
-    ctest: 'd3dx9-effect',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3dx9-effect',
-    what:
-      'SlideBlur 的 MSL 片元把 `* 0.05` 写成 `* 0.5`（uv 步长放大 10 倍）⇒ 21 个 tap 几乎全部 CLAMP 到边缘 ' +
-      'texel ⇒ `d3dx9-effect` 的 blur-pixels 在 Angle=0/90 两档上红（参考值的像素与边缘色差 > 1 LSB）；' +
-      '★ 这条与 ① 一起钉住"步长 / 方向"这条算术',
-  },
-
-  // ── GPU 路线 P3 ③ · 203 的 **program 映射**把 SlideBlur 接到 ZoomBlur 上（跨平台那条）──
-  //   ★ 上面两条只改 MSL 源文本（win32 上编的是 DXBC ⇒ 那两条在 win32 上不适用，与 P2 ② 同一条口径）。
-  //     这一条改的是 `d3d9_pipeline.cpp` 的程序号映射：**两个平台都会红**。
-  {
-    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
-    from:
-      '            case d3d9::EffectProgram::SlideBlurPs20:\n' +
-      '                e.effect_draw.program = GpuEffectProgram::SlideBlurPs20;',
-    to:
-      '            case d3d9::EffectProgram::SlideBlurPs20:\n' +
-      '                e.effect_draw.program = GpuEffectProgram::ZoomBlurPs20;  // 变异：映射接错',
-    guard: 'ctest:d3dx9-effect',
-    ctest: 'd3dx9-effect',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3dx9-effect',
-    what:
-      '203 的 program 映射把 SlideBlur 接到 ZoomBlur 的 shader 上 ⇒ `d3dx9-effect` 的 ' +
-      'effect-draw-blur-recorded 在 `program == SlideBlurPs20` 上当场红（纯档、不依赖 GPU），' +
-      'blur-pixels 也会红；★ 这条对 win32（DXBC）同样成立',
-  },
-
-  // ── A 单（`REQ-01M7NAW2QT3TG9RCFMKR052C83` · 202 Snow）① · 矩阵槽截断成 4 float ──
-  //   故障形态：`SetMatrix("Proj")` 的 16 个 float 只写进前 4 个（`c < 16` → `c < 4`）。
-  //   ★ 这是最像"能跑"的破坏：shim 不报错、`SetMatrix` 返回 S_OK、程序照样 recorded，
-  //     只有**矩阵的 12 个元素恒 0** ⇒ 顶点被压成一条线（画面全错而账上无声）。
-  //   ⇒ 判据必须是**矩阵的逐元素读数**（16 个）与**顶点对照**，⛔ "SetMatrix 成功了"发现不了。
-  {
-    file: 'apps/emulator-lift/src/shims/d3dx9_effect.cpp',
-    from:
-      '    for (std::uint32_t c = 0; c < 16; ++c) {\n' +
-      '        std::uint32_t bits = 0;\n' +
-      '        std::memcpy(&bits, &matrix[c], sizeof(bits));\n' +
-      '        cpu.mem->wr32(state + kFxMatrix + c * 4u, bits);',
-    to:
-      '    for (std::uint32_t c = 0; c < 4; ++c) {  // 变异：矩阵槽截断成 4 float\n' +
-      '        std::uint32_t bits = 0;\n' +
-      '        std::memcpy(&bits, &matrix[c], sizeof(bits));\n' +
-      '        cpu.mem->wr32(state + kFxMatrix + c * 4u, bits);',
-    guard: 'ctest:d3dx9-effect',
-    ctest: 'd3dx9-effect',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3dx9-effect',
-    what:
-      '`SetMatrix` 只写矩阵的 4 个 float（`c < 16` → `c < 4`）⇒ `Proj` 的后 12 个元素恒 0 ⇒ ' +
-      '`d3dx9-effect` 的 effect-draw-snow-recorded 在 `sc.program.vs_matrix[i] == proj16[i]`（i≥4）与 ' +
-      '`effectMatrixParamAt` 上当场红，snow-vertices 的单位/缩放对照也会红；' +
-      '★ 只断言"SetMatrix 返回 S_OK / 程序 recorded"会假绿',
-  },
-
-  // ── A 单 ② · `ps_1_0 SnowPS` **漏乘 `Color`**（`src/runtime/d3d9_gpu.cpp` 的 **DXBC** 块）──
-  //   源文本：`return tex2D(TexSmp, UV) * Color;`。故障形态：乘法没了（只剩纹理采样）。
-  //   ★ 为什么打 **DXBC** 那份：win32 的 SDL_GPU 后端只编 DXBC（`LIFT_*` 下的 `_WIN32` 分支），
-  //     改 MSL 那份在这台机器上**编译都不进**（那正是 P2②/P3① 两条变异在 win32 不适用的原因）。
-  //     两份源必须逐句一致（注释里互相点名）⇒ 这条与那两条合起来覆盖双源。
-  //   ★ 为什么"漏乘"是最像能跑的破坏：画面上雪照样是白色的（`Color` 的 w=sin 相位只调制亮度），
-  //     控制行 `Color={0,0,0,1}`（该全 0）也不会变黑 —— 只有像素读回能抓到。
-  {
-    file: 'apps/emulator-lift/src/runtime/d3d9_gpu.cpp',
-    from:
-      'float4 PSMainSnow(FxVSOut i) : SV_Target {\n' +
-      '    const float4 Color = g_fx[0];   // float4 Color;（uniform；没 SetVector 过 ⇒ 全 0）\n' +
-      '    return g_fx_tex0.Sample(g_fx_smp0, i.uv0 / i.invw) * Color;',
-    to:
-      'float4 PSMainSnow(FxVSOut i) : SV_Target {\n' +
-      '    const float4 Color = g_fx[0];   // float4 Color;（uniform；没 SetVector 过 ⇒ 全 0）\n' +
-      '    return g_fx_tex0.Sample(g_fx_smp0, i.uv0 / i.invw);  // 变异：漏乘 Color',
-    guard: 'ctest:d3dx9-effect',
-    ctest: 'd3dx9-effect',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3dx9-effect',
-    what:
-      '202 的 DXBC 片元漏乘 `Color`（`texel * Color` → `texel`）⇒ `d3dx9-effect` 的 snow-pixels 在 ' +
-      '`Color={0.5,0.25,0.75,1}`（R 128≠255）与 `Color={0,0,0,1}` 控制行（该全 0）两档上红；' +
-      '★ 只断言"画出来了 / 有像素"会假绿',
-  },
-
-  // ── B 单 ① · 片元里**漏除 `invw`**（`src/runtime/d3d9_gpu.cpp` 的 **DXBC** 固定功能片元）──
-  //   故障形态：`uv = (uv/w) ÷ (1/w)` 写成 `uv = uv/w` —— 顶点上乘过的 `1/w` 没人除回来 ⇒ 画出来是
-  //   "仿射贴图"（近处拉长 / 纹理爬行）。这正是拆掉"凡 `invw != 1` 整批拒"之后**最像能跑**的破坏：
-  //   draw 成功、账本干净（`skipped=0`），只有像素读回能抓到。
-  //   ★ 为什么打 **DXBC** 那份：win32 的 SDL_GPU 后端只编 DXBC（MSL 那份在这台机器上不进编译）。
-  //     两份源逐句一致（`d3d9_gpu.cpp` 的注释里互相点名）。
-  {
-    file: 'apps/emulator-lift/src/runtime/d3d9_gpu.cpp',
-    from:
-      'float4 PSMainTex(VSOut i) : SV_Target { return g_tex.Sample(g_samp, i.uv / i.invw) * (i.color / i.invw); }',
-    to:
-      'float4 PSMainTex(VSOut i) : SV_Target { return g_tex.Sample(g_samp, i.uv) * (i.color / i.invw); }  // 变异：漏除 invw',
-    guard: 'ctest:d3d9-pipeline-gpu',
-    ctest: 'd3d9-pipeline-gpu',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3d9-pipeline',
-    what:
-      '固定功能片元漏除 `invw`（`Sample(samp, uv/invw)` → `Sample(samp, uv)`）⇒ `d3d9-pipeline-gpu` 的 ' +
-      'perspective-interpolation 在"透视批 == uv/w 参考"上红（采样坐标被乘 Σλ·1/w，本档偏 8+ texel）；' +
-      '同一份破坏也让 `d3dx9-effect` 的 snow-pixels 透视档红；★ `w==1` 的批完全不受影响 ⇒ 只跑仿射用例会假绿',
-  },
-
-  // ── B 单 ② · **顶点没带逐顶点 `1/w`**（`src/runtime/d3d9_pipeline.cpp` 的 `push_tri`）──
-  //   故障形态：`g.invw = v.invw` 写成 1 ⇒ 片元里的除法退化成功恒等，与①同样的"仿射贴图"。
-  //   ★ 这一条是**纯 CPU 侧**的投放点（与①分开：一个在"携不携带"，一个在"除不除"）：
-  //     `d3dx9-effect` 的 snow-vertices（pure，Mock 记录顶点，`saw_nonunit_invw`）也会红。
-  {
-    file: 'apps/emulator-lift/src/runtime/d3d9_pipeline.cpp',
-    from: '            g.invw = static_cast<float>(v.invw);',
-    to: '            g.invw = 1.0f;  // 变异：整批一个 invw（丢掉逐顶点 1/w）',
-    guard: 'ctest:d3d9-pipeline-gpu',
-    ctest: 'd3d9-pipeline-gpu',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3d9-pipeline',
-    what:
-      'GPU 顶点不带逐顶点 `1/w`（`g.invw = v.invw` → `1.0f`）⇒ `d3d9-pipeline-gpu` 的 ' +
-      'perspective-interpolation 在透视批的 uv/color 上红；`d3dx9-effect` 的 snow-vertices（pure）也在 ' +
-      '`saw_nonunit_invw` 上红；★ 只断言"`invw != 1` 不再拒批"会假绿（画出来的仍是仿射）',
-  },
-
-  // ── P4 · 删掉 202 的 `kBindings` 一行 ⇒ **启动守卫当场 Trap**（硬等式）──
-  //   ★ 故障形态：caps 声明 ps_2_0/vs_1_0 ⇒ 引擎会建 202 ⇒ **声明在、实现集里少一条**。
-  //     P4 之后这条由 `effectCapsGuard`（`GetDeviceCaps` 路径）在**启动时**抓住（`pipelineTrap` /
-  //     `caps 实现集守卫`），⛔ 不再拖到某一帧、⛔ 也不是 warn。
-  //     ★ 同一份破坏还会让 `effect-draw-snow-recorded` 的表长 / `implemented` 断言与
-  //     snow-vertices / snow-pixels 的每一批同时红（多重证据，⛔ 不是"只红一处"）。
-  //   ★ 这条不依赖平台（纯 CPU 侧的表）。
-  {
-    file: 'apps/emulator-lift/src/shims/d3dx9_effect.cpp',
-    from:
-      '    {kEffectIdSnowPs10, "Snow", "SnowPS", "ps_1_0", d3d9::EffectProgram::SnowPs10},',
-    to: '    // 变异：删掉 202 的 binding（Snow 回到"程序不在实现集"）',
-    guard: 'ctest:d3dx9-effect',
-    ctest: 'd3dx9-effect',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3dx9-effect',
-    what:
-      '删掉 `kBindings` 里 202（Snow/SnowPS/ps_1_0）那一行 ⇒ caps 会让引擎建的 program 少一条 ⇒ ' +
-      '`d3dx9-effect` 的 caps-programs-guard 在**启动时** Trap 并点名 missing=id=202/technique=Snow/' +
-      'SnowPS/ps_1_0；同一份破坏还让 effect-draw-snow-recorded 的表长（seen==5）与 `implemented` 红、' +
-      'snow-vertices / snow-pixels 的每一批被整批拒；★ 这条是"声明 == 实现"被撤掉的机械证据',
-  },
-
-  // ── P4 · 把启动守卫的硬等式**降级成 warn**（`shims/d3dx9_effect.cpp`）──
-  //   故障形态：`required != implemented` 时不再停机器、只把原因留在 `why` 里继续跑 —— 这正是 P4
-  //   要消灭的"警告 + 继续"。判据：`caps-programs-guard` 的两条注入用例（缺 202 PS / 缺 SnowVS）
-  //   必须看到 `stop_kind == Trap` 且 `cpu.running == false`；⛔ "why 非空"发现不了这条降级。
-  {
-    file: 'apps/emulator-lift/src/shims/d3dx9_effect.cpp',
-    from:
-      '        if (why) *why = detail;\n' +
-      '        effectCapsGuardTrap(cpu, detail);\n' +
-      '        return false;\n' +
-      '    }\n' +
-      '    return true;',
-    to:
-      '        if (why) *why = detail;  // 变异：把硬等式降级成 warn（不停机器）\n' +
-      '        return true;\n' +
-      '    }\n' +
-      '    return true;',
-    guard: 'ctest:d3dx9-effect',
-    ctest: 'd3dx9-effect',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3dx9-effect',
-    what:
-      '把 caps ⇒ 实现集的硬等式降级成 warn（不停机器、只写 why 就继续跑）⇒ `d3dx9-effect` 的 ' +
-      'caps-programs-guard 在"缺 202 PS / 缺 SnowVS"两条注入用例上红（守卫返回 true / cpu 仍在跑）；' +
-      '★ 只断言 why 非空会假绿',
-  },
-
-  // ── emulator-lift · `D3DXMatrixDecompose` 的四元数**共轭**（符号/方向） ──────────────────
-  //   语义真源 = native d3dx9_43（134 例对拍表与复现命令见 docs/03-emulator/d3dx-math.md）。
-  //   变异 = 写四元数时把 z 分量取反 ⇒ 对绕 z 的旋转输入（本文件两条用例都是 Rz）等于写共轭：
-  //   native 的 RotZ(+90°) 给 **+**0.7071，共轭给 -0.7071。
-  //   判据：`tests/d3dx9.cpp` 的 `d3dx9/matrix-decompose-rotation`（q.z 的**符号**，⛔ 不逐位断
-  //   quat）与 `d3dx9/matrix-decompose-trs`（q.z = sin15°）当场红。
-  //   ★ 不选"零 scale 返 S_OK"是因为那会同时改控制流、红点会落在更多断言上，说不清是哪一条
-  //     判据抓住的；这条只动一个符号，红点唯一。
-  {
-    file: 'apps/emulator-lift/src/shims/d3dx9.cpp',
-    from: '        const float rot_out[4] = {rot.x, rot.y, rot.z, rot.w};',
-    to: '        const float rot_out[4] = {rot.x, rot.y, -rot.z, rot.w};  // 变异：四元数写共轭（z 取反）',
-    guard: 'ctest:d3dx9',
-    ctest: 'd3dx9',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3dx9',
-    what:
-      '`D3DXMatrixDecompose` 写四元数时把 z 取反（= 对绕 z 的旋转写**共轭**）⇒ ' +
-      '`d3dx9/matrix-decompose-rotation` 的 q.z 期望 +0.7071 得 -0.7071、' +
-      '`d3dx9/matrix-decompose-trs` 的 q.z 期望 sin15° 同样翻号 ⇒ 两条当场红；' +
-      '合成检查（S·R(q)·T = M）会把同一个方向错误再报一遍',
-  },
 
   // ── 墙钟 vs uptime（BUG-30）：`GetSystemTime` 退回"把 uptime 当 1970 epoch"的修前形状 ──
   //   ★ 代表"把两条读数又合成一条"这一类错：uptime 读数本身是单调的、`GetTickCount` 仍然对，
@@ -4474,68 +3382,6 @@ const MUTATIONS = [
   //   ★ 代表"现场只打一部分"这一类错（BUG-32 的原始症状就是 fault 只有 3 行）：把 32 字栈缩成
   //     4 字 ⇒ 第 32 个字不见了 ⇒ `fault-report` 的 `A000001F` 断言当场红。寄存器 / eip / 块 EA
   //     的断言在同一个用例里，它们各自也能单独红。
-  {
-    file: 'apps/emulator-lift/src/runtime/fault_state.cpp',
-    from: '    dumpGuestStack(cpu, out, 32);',
-    to: '    dumpGuestStack(cpu, out, 4);  // 变异：32 字栈只打 4 字',
-    guard: 'ctest:fault-report',
-    ctest: 'fault-report',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-fault-report',
-    what:
-      'AOT fault 现场的栈只打 4 字（32 → 4）⇒ 第 32 个栈字 `A000001F` 消失 ⇒ ' +
-      'fault-report 的合成 AOT 现场断言红（BUG-32 的"现场信息不全"同类）',
-  },
-
-  //   ★ 代表"fault 行只在有平台地址时出现"这一条结构性判据被去掉（BUG-32 的诊断缺口修反了）：
-  //     safe-mode 也调 `printFaultEa(nullptr, …)` ⇒ 多出一条"无法换算"的 `fault ea` 行 ⇒
-  //     `default-fault-text-unchanged` 的 `find("fault ea") == npos` 当场红（不是链接红）。
-  {
-    file: 'apps/emulator-lift/src/runtime/memory.cpp',
-    from: '    if (plat != nullptr) printFaultEa(plat, stderr);',
-    to: '    printFaultEa(plat, stderr);  // 变异：safe-mode 也打 fault ea',
-    guard: 'ctest:fault-report',
-    ctest: 'fault-report',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-fault-report',
-    what: '「只有平台地址才打 fault ea」的门被去掉 ⇒ safe-mode 也多一条 fault ea ⇒ default-fault-text-unchanged 红',
-  },
-
-  // ── `--input-plan-trace`（`REQ-01M7PG086DG4BBPA40VCVZTP4X` B；守卫 = `tests/input_plan.cpp`）──
-  //   ★ 代表"开档退化成关档"这一类错：门写反 / 被吞 ⇒ 诊断时**没有任何读数**，而配方照旧施加
-  //     （`fired` 会涨、屏幕不动）—— 正是"配方 click 不被消费"查不出来的形状。
-  {
-    file: 'apps/emulator-lift/src/runtime/input_plan.cpp',
-    from: '    if (trace_out_ == nullptr) return;  // 缺省档：一次判空、零输出',
-    to: '    return;  // 变异：trace 永不打（开档退化成关档）',
-    guard: 'ctest:input-plan-read-points',
-    ctest: 'input-plan-read-points',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-input-plan-read-points',
-    what:
-      '`--input-plan-trace` 的 step 事件一行都不打 ⇒ input-plan-read-points 的 trace 用例' +
-      '（开档有行 / 关档零行）当场红',
-  },
-
-  // ── `LIFT_WATCH`（BUG-32 的"谁在 P-8 写了 16 字节"；守卫 = `tests/fault_report.cpp`）──
-  //   ★ 代表"watch 关闭门写反 ⇒ 开档退化成关档"这一类错：guest store 的观察点整条断掉，
-  //     配方照旧跑、`follow` / `WRITE` 一条都不打 —— 诊断时会误读成"没人写那个槽"。
-  //   ★ 为什么把门放在 `lift_note_write`：它是 AOT 臂**唯一**的 guest store 观察点（lifted store
-  //     不经过任何可打的宿主函数）；shim 侧那条门在 `memory.h` 的内联 helper 里（同一条判据，但
-  //     本条变异**不动**它 ⇒ `fault-watch-shim` 仍绿，正是"只有 guest 观察点断了"的形状）。
-  {
-    file: 'apps/emulator-lift/src/runtime/lift_abi.cpp',
-    from: '    if (lift::watchOn()) lift::watchGuestWrite(static_cast<lift::X86*>(cpu)->eip, ea, n);',
-    to: '    if (!lift::watchOn()) lift::watchGuestWrite(static_cast<lift::X86*>(cpu)->eip, ea, n);  // 变异：启用门反转',
-    guard: 'ctest:fault-report',
-    ctest: 'fault-report',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-fault-report',
-    what:
-      '`LIFT_WATCH` 的 watch 关闭门被反转（`if (watchOn())` → `if (!watchOn())`）⇒ 开档时 ' +
-      '`lift_note_write` 的 follow / WRITE 一条都不打 ⇒ fault-report 的 `fault-watch-follow` 红' +
-      '（断言 `follow pending` / `arm [P-8,P+8)` / `block=lift_cc_<块B>` 全部落空）',
-  },
 
   // ── UI 脚本沙箱（A；守卫 = `tests/ui_script_quickjs.cpp` 的 sandbox 用例）──
   //   ★ 代表"漏掉 `Function.prototype.constructor` 的清除"这一类**静默沙箱洞**：只删
@@ -5105,28 +3951,6 @@ const MUTATIONS = [
       '所以这里的价值是**不构建也能点名**：静态守卫不需要一棵构建树就能说清"表不再覆盖合同"',
   },
 
-  {
-    file: 'apps/emulator-lift/src/runtime/control_ws.cpp',
-    from:
-      '    j["capabilities"] = json::array();\n' +
-      '    for (const plugin::ControlCapabilityRow& row : plugin::kControlCapabilities) {\n' +
-      '        j["capabilities"].push_back(row.name);\n' +
-      '    }\n',
-    to:
-      '    j["capabilities"] = json::array();\n' +
-      '    // 变异：hello 少枚举第一项（表与 caps= 仍然对）\n' +
-      '    for (std::size_t i = 1; i < plugin::kControlCapabilityCount; ++i) {\n' +
-      '        j["capabilities"].push_back(plugin::kControlCapabilities[i].name);\n' +
-      '    }\n',
-    guard: 'ctest:lift-control-endpoint',
-    ctest: 'lift-control-endpoint',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-control-endpoint',
-    what:
-      '`hello.capabilities` 的循环从第 1 项开始（少 `pause`，`caps=` 不受影响）⇒ 运行期"9 项 + 顺序"的' +
-      '逐字断言（`tests/control_endpoint.cpp` 的 endpoint-surface）当场红；★ 静态守卫不会红 —— 那正是' +
-      '"hello 有运行期那条腿、caps= 没有"的分工',
-  },
 
   // ── 插件运行时 C1b：`TriggerRunner`（`plugin-runtime.md` §4.2 / §6 行 31–33、36–37）──
   //   ★ 为什么是这两条、且各代表一类（⛔ 不给每个常量配一条，`AGENTS.md` §5.3）：
@@ -5232,18 +4056,6 @@ const MUTATIONS = [
   //   ★ 反证过：把这一行删掉，`plugin-runtime` 的 `plugin/start-now-and-staged-input` 红
   //     （JS 侧 `ctx.now.pos` 期望 4660，拿到 `undefined` ⇒ `ctx.fail`）；`plugin/start-now-requires-sample`
   //     那条反向断言也会失去意义（它靠"期望值不对"来证明 now 真的被读到）。
-  {
-    file: 'apps/emulator-lift/src/plugin/plugin_host.cpp',
-    from: '    executor_.sampleNow(point);\n',
-    to: '    // 变异：首点不再补采样 ⇒ `start` 里 `ctx.now` 没有读数（Input 的 staged 语义不变）\n',
-    guard: 'ctest:plugin-runtime',
-    ctest: 'plugin-runtime',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-plugin-runtime',
-    what:
-      '第一个读点不再 `sampleNow` ⇒ `start` 里的 `ctx.now` 是空的（`plugin-runtime` 的 ' +
-      '`plugin/start-now-and-staged-input` 红：JS 侧期望 `ctx.now.script/pos` 有值、拿到 undefined）',
-  },
 
   // ── C2b：`ctx.draw` 的不支持 style 字段（`c2-decisions.md` D-C2-3）─────────────────────────
   //   ★ 代表"声明了却静默忽略"这一类错：`stroke`/`width`/`alpha`/`align` 在 `Element` 里没有
@@ -5297,42 +4109,6 @@ const MUTATIONS = [
   //     EDX（`kProbeEdx`）被**整块回读**带回 —— 正是"整块回读必须真的发生"的判据。
   //   ★ 反证过（2026-11-20 / mac arm64）：施加这一处 ⇒ `lift-ir-shim` 红（CTest 退出码非 0）。
   //   （⛔ 不用"把 eip/eflags 换回去"当变异：那是编译错，证明力弱。）
-  {
-    file: 'apps/emulator-lift/src/runtime/lift_abi.cpp',
-    from: 'bool regsAliasCpu(const void* st, X86& cpu) { return st == liftRegsView(cpu); }\n',
-    to:
-      'bool regsAliasCpu(const void* /*st*/, X86& /*cpu*/) { return true; }  ' +
-      '// 变异：别名判据删除 ⇒ 无条件跳过两处搬运\n',
-    guard: 'ctest:lift-ir-shim',
-    ctest: 'lift-ir-shim',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-ir-shim',
-    what:
-      '删掉别名判据（无条件跳过两处搬运）⇒ 非别名调用方（夹具 / feeder 的真 `LiftRegs`）在过期' +
-      '寄存器上执行（`lift-ir-shim` 的探针 EDX 回读断言红）',
-  },
-
-  // ── C2c：`loadSave` 的槽位行坐标（`scripts/plugins/lib/save.js` 的 `click(300, rowY)`）────
-  //   ★ 代表"链的坐标写错 / 用了公式而不是实测表"这一类错：`rowY` 多 60 之后，**光标 y** 与
-  //     实测行表对不上，但整条链**照样走完**（终态仍是 FIELD、readout 仍 `run=done`）⇒ 纯文档 /
-  //     只看结局的断言抓不到。红点 = `plugin-runtime` 的 `control-script/start-on-trigger-chain`
-  //     第 ⑤ 拍（SBUNKI 命中后 `click(300,rowY)` 落地，光标 y 不是 `rowY`）。
-  //   ★ 这条变异落在 **JS 库**里（不是 C++）：`plugin-runtime` 在运行期按 `LIFT_PLUGIN_LIB_DIR`
-  //     直接读该文件 ⇒ 不需要重编；`buildTarget` 只是为了让自检走同一条"重建守卫 exe + 跑 ctest"
-  //     的路径（重建是空操作）。
-  {
-    file: 'apps/emulator-lift/scripts/plugins/lib/save.js',
-    from: '                    ctx.input.click(SLOT_X, rowY);\n',
-    to: '                    ctx.input.click(SLOT_X, rowY + 60);  // 变异：点错槽位行\n',
-    guard: 'ctest:plugin-runtime',
-    ctest: 'plugin-runtime',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-plugin-runtime',
-    what:
-      '`loadSave` 的槽位点击从 `(300, rowY)` 变成 `(300, rowY+60)` ⇒ 光标 y 与实测行表不符' +
-      '（`plugin-runtime` 的 `control-script/start-on-trigger-chain` 红；整条链仍能走完 ⇒ 只看' +
-      '`run=done` 的断言抓不到）',
-  },
 
   // ── `ctx.config`：保留名拒绝（`__proto__` / `prototype` / `constructor`）────────────────────
   //   ★ 代表"域 id / key 的保留名检查被删"这一类错：JSON 解析本身不危险（nlohmann 是数据树），
@@ -5392,41 +4168,6 @@ const MUTATIONS = [
   //   ★ 承重守卫 = `plugin-runtime` 的 `plugin/callback-wall-only`：宿主线程把 JS 体挂起 6 ms
   //     （`SuspendThread`）⇒ 墙钟 6 ms、CPU 只几十 µs；判据退回墙钟就**必须**红。
   //   ★ 反证过（2026-11-21 / win32）：施加这一处 ⇒ `plugin-runtime` 红；还原后绿。
-  {
-    file: 'apps/emulator-lift/src/plugin/plugin_host.cpp',
-    from: 'const bool js_late = budget.deadline_ns != 0 && diag.js_cpu_ns >= budget.deadline_ns;',
-    to:
-      'const bool js_late = budget.deadline_ns != 0 && diag.js_ns >= budget.deadline_ns;  ' +
-      '// 变异：判据退回墙钟（被抢占 ⇒ 诬告）',
-    guard: 'ctest:plugin-runtime',
-    ctest: 'plugin-runtime',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-plugin-runtime',
-    what:
-      '2 ms 判据退回**墙钟**（`diag.js_ns`）⇒ 被 OS 抢占 / 被挂起的回调又被诬告（`plugin-runtime` 的 ' +
-      '`plugin/callback-wall-only` 红：墙钟 6 ms、CPU 远小于 2 ms 却被判超预算）',
-  },
-
-  // ── 2 ms 的**宿主调用暂停**（`REQ-01M86VRT1YP53CJS0M885FCCJM`）─────────────────────────────
-  //   ★ 代表"宿主能力的成本又算回用户 JS 头上"这一类错：`ctx.profile.end` 是宿主能力（生成窗口报告 +
-  //     写系统剪贴板，实测 2.5–2.9 ms CPU）。删掉 `jsCtxProfileEnd` 的 `HostPause` ⇒ 那段 CPU 落进
-  //     `js_cpu_ns` ⇒ 生产上每个 `settle` 回调 `over=js`（缺陷原样复发）。
-  //   ★ 能抓到它的**只有** `plugin/callback-host-pause`（假宿主故意烧 5 ms 本线程 CPU）；
-  //     `plugin/callback-cpu-budget` 发现不了（那条根本不调宿主）。
-  //   ★ 反证过（2026-11-25 / win32 / dev `3409aad` + 本轮改动）：施加这一处 ⇒ `plugin-runtime` 的
-  //     `plugin/callback-host-pause` 红（`js_cpu_us ≈ 5xxx > 2000` ⇒ `over=js`）；还原后绿。
-  {
-    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
-    from: '            HostPause pause(implOf(ctx));\n            ok = host->profileEnd(&why);\n',
-    to: '            ok = host->profileEnd(&why);  // 变异：去掉宿主调用暂停（宿主成本算回用户 JS）\n',
-    guard: 'ctest:plugin-runtime',
-    ctest: 'plugin-runtime',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-plugin-runtime',
-    what:
-      '`ctx.profile.end` 的宿主成本不再暂停 ⇒ 落进用户 JS 的 2 ms（`plugin-runtime` 的 ' +
-      '`plugin/callback-host-pause` 红：假宿主烧 5 ms CPU ⇒ `over=js`）',
-  },
 
   // ── `[present-readback]` Phase A：needs 谓词漏 `--dump-frame`（`d3d9.cpp` 的 want_guest）─────
   //   ★ 代表"回读的消费者少接一个"这一类错：`want_guest` 漏掉 `!dump_path.empty()` ⇒ `--dump-frame`
@@ -5484,25 +4225,6 @@ const MUTATIONS = [
   //     替身，**必须**走壳才看得见"漏转发"。直连后端（`m.setGpuRaster(&mock)`）是抓不到的。
   //   ★ 不选 `:1118` 提前返回那一条：那只证明真后端/`gpu-raster` 会红，而它需要 GPU 设备
   //     （无 GPU 的机器上 SKIP 77 ⇒ 变异自检会变成"不可判定"）。
-  {
-    file: 'apps/emulator-lift/src/runtime/present_sdl.cpp',
-    from:
-      'void SdlWindow::rasterRequestColorClear(std::uint32_t bgra8_pixel) {\n' +
-      '    GpuRaster* r = impl_->raster();\n' +
-      '    if (r != nullptr) r->rasterRequestColorClear(bgra8_pixel);\n' +
-      '}',
-    to:
-      'void SdlWindow::rasterRequestColorClear(std::uint32_t bgra8_pixel) {\n' +
-      '    (void)bgra8_pixel;  // 变异：漏转发（后端收不到 arm ⇒ 清色静默丢失，账上一切正常）\n' +
-      '}',
-    guard: 'ctest:gpu-batch-order',
-    ctest: 'gpu-batch-order',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-gpu-batch',
-    what:
-      '删掉 `present_sdl.cpp` 里 `rasterRequestColorClear` 的转发 ⇒ 后端（替身）收不到 arm ⇒ ' +
-      '`gpu-batch/color-clear-forwarded` 红（`color_clear_count` 期望 1 实得 0）',
-  },
 
   // ── C3：`runRecipe` 把 `await position` 的左边界翻错（`scripts/plugins/lib/recipe.js`）──────
   //   ★ 代表"配方 → trigger 的翻译漂了"这一类错：`posFrom → posFrom+1` 之后，driver arm 的那道门
@@ -5644,19 +4366,6 @@ const MUTATIONS = [
   //     当场红 8 条（Begin 后读回的 MAG/MIN 不是 LINEAR / 各 stage 一致 / Save-Restore 往返…）。
   //   ★ 守卫 = `ctest:d3dx9`（顶层无条件注册 ⇒ pure 档；不碰 GPU / 资产，比同一处的 GPU 臂
   //     `d3dx9-gpu` 便宜且可靠 —— 后者没设备时 SKIP 77，只能记「不可判定」）。
-  {
-    file: 'apps/emulator-lift/src/runtime/d3dx9_sprite.cpp',
-    from: 'constexpr std::uint32_t kSpriteBeginMagMin = d3d9::kTexfLinear;',
-    to: 'constexpr std::uint32_t kSpriteBeginMagMin = d3d9::kTexfPoint;',
-    guard: 'ctest:d3dx9',
-    ctest: 'd3dx9',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-d3dx9',
-    what:
-      '`kSpriteBeginMagMin` LINEAR → POINT（`ID3DXSprite::Begin` 写下的 MAG/MIN 采样器）⇒ ' +
-      '`ctest:d3dx9` 的采样器合同红 8 条（Begin 后读回的值不再是 LINEAR / 恢复不回去等）；' +
-      '这一臂不判像素（CPU 逐像素合成已删）⇒ 抓它的是"读回的值"系列，不是截图',
-  },
 
   // ── 同一批：`ID3DXSprite::Draw` 的**顶点偏置**（`kD3dxSpriteVertexBias`）────────────────
   //   ★ 这一类错长什么样：D3DX 的 `pPosition` 是**像素位置**，而 `Draw` 生成的四角是像素**边界**
@@ -5802,19 +4511,6 @@ const MUTATIONS = [
   //     壳（`004034C0`：`push ebp / mov ecx,[ecx+4] / pop ebp / jmp 0x497620`）自己没有 `ret`
   //     ⇒ 旧口径给它记 0 ⇒ 调用者的 `retn 4` 处 esp 停在 −4 ⇒ 永远"动态返回"。
   //     跑得通，只是派发更密 ⇒ 差分 / 五项指纹全绿；红只能来自 case 8（合成 T/X/F 三单元）。
-  {
-    file: 'apps/emulator-lift/src/aot/lift_struct.cpp',
-    from: 'ret_cleanup[root] = ci->second;  // ← 沿 jmp 壳传递（design §2.3）',
-    to: 'ret_cleanup[root] = 0;  // 变异：不沿 jmp 壳传递 ret_cleanup',
-    guard: 'ctest:lift-s7-iat',
-    ctest: 'lift-s7-iat',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-s7-iat',
-    what:
-      '不沿 jmp 壳传递 `ret_cleanup` ⇒ `lift-s7-iat` 的 case 8（T 只有一条跨分量 jmp、X 是 ' +
-      '`retn 4` ⇒ F 该可结构化）当场红（F 停在 −4 ⇒ dynamic-return）；全量上表现为 ' +
-      '`004B60C0` / `004B6130` 回到 `动态返回` / `间接 call`、`structurable` 少 19 —— 只影响派发密度',
-  },
   // ── C5 / C8（2026-11-25）：VFS 解析的两层记忆（安装树目录索引 / 正解析缓存）────────────────
   //   ★ 为什么这两条都要**专门的**变异：两层都是"只替代价"的记忆 ⇒ 破坏它们的典型形态（漏建一项 /
   //     不查代）在**语义**上可能一句话都不改（安装树只读时，索引漏掉的名字会被
@@ -5914,11 +4610,10 @@ const MUTATIONS = [
   //     静态抓"静默的输入提交"（e2e 对后者是瞎的）。
   {
     file: 'apps/emulator-lift/scripts/plugins/field-point-visible.js',
-    from: '        );\n        return armPoll(ctx, settings);\n',
+    from: '        return ctx.trigger.afterPosition(FIELD_SCRIPT, FIELD_MAIN_LOOP_LO, FIELD_MAIN_LOOP_HI, {\n',
     to:
-      '        );\n' +
       '        ctx.input.click(0, 0);  // 变异：开关又开始点鼠标\n' +
-      '        return armPoll(ctx, settings);\n',
+      '        return ctx.trigger.afterPosition(FIELD_SCRIPT, FIELD_MAIN_LOOP_LO, FIELD_MAIN_LOOP_HI, {\n',
     guard: 'ctest:plugin-field-switch',
     ctest: 'plugin-field-switch',
     buildDir: 'apps/emulator-lift/out',

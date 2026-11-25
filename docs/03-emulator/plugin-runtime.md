@@ -1008,7 +1008,8 @@ export default plugin;   // 宿主 QJS 读 default 导出；⛔ 不读 globalThi
 - **三个内建插件的域**（配置的 owner 表见 `apps/emulator-lift/scripts/plugins/README.md`）：
   `save`（根入口 `load-save.js`，库是 `lib/save.js`）/ `scenario.save10-field`（根 `scenario-save10-field.js`，
   key `slot`/`expect`）/ `field.point-visible`（根 `field-point-visible.js`，
-  key `on`/`types`/`poll`/`diag` —— ★ 它是**常驻开关**：⛔ 不读档、⛔ 不点鼠标、⛔ 不 `finish`；
+  key `on`/`types`/`diag`（判据 = **已知脚本位置**：`afterPosition("FIELD.BIN", 0x579C, 0x5860, reenter)`，
+  ⛔ 不轮询；旧配置的 `poll` 无害忽略）—— ★ 它是**常驻开关**：⛔ 不读档、⛔ 不点鼠标、⛔ 不 `finish`；
   旧配置里的 `slot`/`hold` 被**无害忽略**。验收时**玩家自己读档**，见
   `docs/03-emulator/scripts/FIELD.md`）。
   三者一律"先看 `ctx.config.available` 再回退 params"；`on:0` / `slot:0` 这种 falsy 值也算"给了"

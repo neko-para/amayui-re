@@ -36,9 +36,13 @@
  * node tools/test-run.mjs --suite contract   # = `pnpm test`（合同档）
  * node tools/test-run.mjs --suite toolchain  # = `pnpm verify`（工具链档）
  * node tools/test-run.mjs --env assets    # 只跑 assets（不按 suite 过滤）
- * node tools/test-run.mjs --all           # 全部
+ * node tools/test-run.mjs --all           # 全部（@env 全开；**不含**冻结清单）
+ * node tools/test-run.mjs --include-frozen  # 连 `tools/test-frozen.json` 里的文件一起跑
  * node tools/test-run.mjs --list          # 只列集合与声明，不跑（★ 先看这个；会显示两档）
  * ```
+ * ★ **冻结**（`tools/test-frozen.json`）：★ 冻结 = **文件还在、`data/spec` 的 evidence 锚还在、默认不跑**。
+ *   默认档把它们从 `picked` 里去掉并计入"本次不跑"；`--all` 只扩 `@env`，**不**自动包含冻结；
+ *   只有 `--include-frozen` 才跑它们。清单不存在 ⇒ 空表；坏 JSON ⇒ 报错退出 2（⛔ 不静默）。
  * ★ **两档之和 = 改动前的默认档**：`test` 与 `verify` 都只跑 `@env pure`，只是 `@suite` 互补
  *   ⇒ 没有任何用例从默认门禁里消失（`assets` / `external` 那两档的判据照旧，仍由
  *   `test:assets` / `test:all` 承担）。
@@ -131,12 +135,33 @@ export function survey(root = REPO_ROOT) {
   return { decls, problems: decls.flatMap((d) => d.problems) };
 }
 
+/**
+ * 冻结清单（`tools/test-frozen.json`）：文件还在（`data/spec` 的 guard 证据锚要解析得到）但**默认不跑**。
+ * 不存在 ⇒ 空表；坏 JSON / 缺 `frozen[]` ⇒ **抛错**（入口转成退出码 2，⛔ 不静默当空表）。
+ * @returns {Set<string>} 仓库相对路径（`/` 分隔）
+ */
+export function loadFrozen(root = REPO_ROOT) {
+  const file = path.join(root, 'tools', 'test-frozen.json');
+  if (!fs.existsSync(file)) return new Set();
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (err) {
+    throw new Error(`冻结清单不是合法 JSON：${path.relative(root, file).split(path.sep).join('/')}（${err.message}）`);
+  }
+  if (!data || !Array.isArray(data.frozen)) {
+    throw new Error(`冻结清单缺 frozen[] 数组：${path.relative(root, file).split(path.sep).join('/')}`);
+  }
+  return new Set(data.frozen.map((p) => String(p).split(path.sep).join('/')));
+}
+
 function parseArgs(argv) {
-  const out = { envs: [...DEFAULT_ENVS], suites: [...DEFAULT_SUITES], all: false, list: false, only: null };
+  const out = { envs: [...DEFAULT_ENVS], suites: [...DEFAULT_SUITES], all: false, list: false, only: null, includeFrozen: false };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--all') out.all = true;
     else if (a === '--list') out.list = true;
+    else if (a === '--include-frozen') out.includeFrozen = true;
     else if (a === '--env') out.envs = String(argv[++i] ?? '').split(',').map((s) => s.trim()).filter(Boolean);
     else if (a === '--suite') out.suites = String(argv[++i] ?? '').split(',').map((s) => s.trim()).filter(Boolean);
     else if (a === '--kind') out.only = String(argv[++i] ?? '');
@@ -154,13 +179,16 @@ const HELP = `tools/test-run.mjs —— 测试分级选择器（默认只跑 @en
   node tools/test-run.mjs --list              # ★ 先看集合与各文件声明，不跑（含两档分布）
   node tools/test-run.mjs --env assets        # 只跑 assets（要 LFS/游戏安装；不按 suite 过滤）
   node tools/test-run.mjs --env pure,assets
-  node tools/test-run.mjs --all               # 全部（含 external：旧仓/真机）
+  node tools/test-run.mjs --all               # 全部（含 external：旧仓/真机；**不含**冻结清单）
+  node tools/test-run.mjs --include-frozen    # 连 tools/test-frozen.json 里的文件一起跑（默认永不跑）
   node tools/test-run.mjs --kind gate         # 只看某一类（与 --env / --suite 可叠）
   node tools/test-run.mjs --suite toolchain --all   # 工具链档的 assets/external 部分
 
 ★ 分级写在每个 *.test.mjs 的首行 pragma 里：
   /** @env <pure|assets|external> @kind <gate|contract|safety|product> [@suite <contract|toolchain>] @why <一句话> *\/
   @env 缺省 pure 档判据不变；@suite 省略 = contract。判据与"为什么"见本文件头注释。
+★ 冻结（tools/test-frozen.json）：文件还在、data/spec 的 evidence 锚还在，但默认不跑；只有 --include-frozen 才跑。
+  --all 只扩 @env，不自动包含冻结。坏 JSON ⇒ 退出码 2（不静默）。
 ★ 不捕获子进程输出（受限沙箱里管道会 EPERM）—— node --test 直接继承 stdio。
 `;
 
@@ -171,6 +199,8 @@ export function main(argv = process.argv.slice(2)) {
     return 0;
   }
   const { decls, problems } = survey();
+  const frozen = loadFrozen();
+  const isFrozen = (d) => frozen.has(d.rel);
 
   // ★ 声明不齐一律红（旧仓 R1；判据 = "档位不许靠记得"）
   if (problems.length) {
@@ -185,7 +215,12 @@ export function main(argv = process.argv.slice(2)) {
 
   let picked = decls.filter((d) => envs.includes(d.env) && suites.includes(d.suite));
   if (args.only) picked = picked.filter((d) => d.kind === args.only);
+  // ★ 冻结：默认从 picked 去掉、计入"本次不跑"；`--all` 不自动包含；只有 --include-frozen 才跑
+  const frozenHit = picked.filter(isFrozen).length;
+  if (!args.includeFrozen) picked = picked.filter((d) => !isFrozen(d));
   const skipped = decls.filter((d) => !picked.includes(d));
+  const frozenCount = decls.filter(isFrozen).length;
+  const frozenLabel = `冻结（${args.includeFrozen ? '本次包含' : '永久不跑'}）${frozenCount} 个`;
 
   if (args.list) {
     const L = [`测试分级（${decls.length} 个文件）`, ''];
@@ -198,14 +233,16 @@ export function main(argv = process.argv.slice(2)) {
       L.push('');
     }
     // ★ 两档：`pnpm test` / `pnpm verify` 各自选哪些（都只跑默认 env —— 与 package.json 一致）
-    const tiers = SUITES.map((s) => ({ s, xs: decls.filter((d) => d.env === 'pure' && d.suite === s) }));
-    const offDefaultEnv = SUITES.map((s) => ({ s, n: decls.filter((d) => d.env !== 'pure' && d.suite === s).length }));
+    const eligible = args.includeFrozen ? decls : decls.filter((d) => !isFrozen(d));
+    const tiers = SUITES.map((s) => ({ s, xs: eligible.filter((d) => d.env === 'pure' && d.suite === s) }));
+    const offDefaultEnv = SUITES.map((s) => ({ s, n: eligible.filter((d) => d.env !== 'pure' && d.suite === s).length }));
     L.push('两档（都只跑 @env pure —— 与 package.json 的 test / verify 一致）');
     for (const { s, xs } of tiers) {
       const cmd = s === 'contract' ? 'pnpm test  ' : 'pnpm verify';
       L.push(`  ${cmd}  @suite ${s.padEnd(9)} ${xs.length} 个文件（pure）`);
     }
     L.push(`  其余 @env assets/external：${offDefaultEnv.map(({ s, n }) => `${s} ${n}`).join(' · ')} 个文件（\`pnpm test:assets\` / \`pnpm test:all\`，或 \`--suite <档> --all\`）`);
+    L.push(`${frozenLabel}　（tools/test-frozen.json；${args.includeFrozen ? '--include-frozen 已生效' : '要跑加 --include-frozen'}）`);
     L.push('');
     process.stdout.write(`${L.join('\n')}\n`);
     return 0;
@@ -216,6 +253,7 @@ export function main(argv = process.argv.slice(2)) {
     `门禁档      ${suites.join(' + ')}${suites.length === SUITES.length ? '（两档都跑）' : ''}`,
     `本次跑      ${picked.length} 个文件`,
     `本次不跑    ${skipped.length} 个${skipped.length ? `　（${[...new Set(skipped.map((d) => d.env))].join(' / ')} · ${[...new Set(skipped.map((d) => d.suite))].join(' / ')} ⇒ \`pnpm test:all\` 跑全量）` : ''}`,
+    `${frozenLabel}${!args.includeFrozen && frozenHit ? `　（从 picked 去掉 ${frozenHit} 个；要跑加 --include-frozen）` : ''}`,
     '',
   ];
   process.stdout.write(`${L.join('\n')}\n`);

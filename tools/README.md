@@ -48,12 +48,16 @@ pnpm test           # ② 全仓测试（不属于任何域）
   现在每个工具自己声明 `DOMAIN`（动哪片数据 / 读写方式）与 `OPERATIONS`（有哪些动作、会不会写），
   地图由声明派生 ⇒ **新增工具只改它自己**，`package.json` 不用动，也**漏不进地图**（`test/cli.test.mjs` 守）。
 * ★ 契约（`decisions.md` §7）：`cli.mjs` **只转发，不实现任何规则**；写操作永远落在各工具自己的写入口里。
+* ★ **冻结清单**（`tools/test-frozen.json`）：这些 `*.test.mjs` 文件还在（`data/spec` 的 evidence 锚要解析得到），
+  但默认**永久不跑**；`node tools/test-run.mjs --include-frozen` 才跑。`--all` 只扩 `@env`，不自动包含冻结。
+  清单坏 JSON ⇒ 退出码 2（不静默）。怎么查 / 怎么改见 `tools/test-frozen.md`。
 
 ## 1. 现有工具
 
 | 工具 | 域 | 作用 |
 |---|---|---|
 | `cli.mjs` | —— | 入口：地图 + 薄转发（**不含任何业务规则**） |
+| `trusted.mjs` | `trusted` | 被信任子系统：`tools/trusted.json` 的 `status` / `check` / `mark`（frozen ⇒ 该组 CTest 标 `DISABLED`） |
 | `corpus.mjs` | `corpus` | ★ `corpus/assets.json` 的守卫 + 唯一写入口（schema/不变量见 `pnpm tools corpus describe`） |
 | `fixtures.mjs` | `fixtures` | ★ `corpus/fixtures/samples.json` 的查询 + 唯一编辑入口（见 `pnpm tools fixtures describe`） |
 | `requirements.mjs` | `requirements` | ★ `data/requirements/` 的进度视图 + 唯一编辑入口（需求/缺陷 + 父子树；见 `pnpm tools requirements describe`） |
@@ -115,6 +119,14 @@ pnpm tools release install --write --le-cmd "<LEProc.exe>" [--le-profile <guid>]
                                             #   顺带写 启动游戏-LE.cmd / 把 Low 完整性标签改回 Medium（见 tools/release.md §3.1）
 pnpm tools release pack    --write          # 打包给玩家 → dist/patch/<版本>.zip（+ 同名自检清单）
 ```
+
+> ★ **被信任子系统（CTest 不跑）**：`pnpm tools trusted status` 看每组的 `frozen|changed`
+> （`pnpm tools trusted mark <组> --write` 把 `at` 写成当前 HEAD）。组内文件自 `at` 起没改 ⇒
+> `apps/emulator-lift/CMakeLists.txt` **段尾**在 configure 时把该组 CTest 标 `DISABLED TRUE`
+> （`ctest -N` 计数不变，跑起来是 `***Not Run***`）；`-D LIFT_ALL_TESTS=ON` 强制全跑；git 不可用 / JSON 坏了 ⇒ 全跑。
+> `pnpm tools trusted check` 断言每个 glob 至少命中一个 tracked 文件（文件删了 / 改名了 ⇒ 该组会永久 frozen）。
+> ⛔ 删 / 禁 CTest 后必须 reconfigure（`cmake --preset windows-x64`）——否则 `mutate-check --list` 读的是旧
+> `out/CTestTestfile.cmake`，会报"守卫不存在"。
 
 > ★ **两个环境口径**（都在代码里，不靠人记）：
 > ① **不捕获子进程输出**：`stdio: 'pipe'` 在受限沙箱里要开命名管道 ⇒ `spawn EPERM`。

@@ -66,20 +66,23 @@ scripts/plugins/
 |---|---|---|
 | `save` | `slot` (number)、`expect` (string[] 或逗号串)、可选 `saveDir` (string，相对 appdata 根)、`timeoutMs` (number)、`precheck` (boolean，缺省 true；false = 跳过存档文件前置检查) | 根入口 `load-save.js`（库 = `lib/save.js`） |
 | `scenario.save10-field` | `slot` (number)、`expect` (string[] 或逗号串) | `scenario-save10-field.js`（根） |
-| `field.point-visible` | `on` (bool / `0|1` / `"true"|"false"`，缺省 false)、`types` (hex 串 `"1f,20"` 或数组)、`poll` (number，毫秒，缺省 250；`0` = 每个读点都查)、`diag` (bool，缺省 false) | `field-point-visible.js`（根） |
+| `field.point-visible` | `on` (bool / `0|1` / `"true"|"false"`，缺省 false)、`types` (hex 串 `"1f,20"` 或数组)、`diag` (bool，缺省 false)；旧配置里的 `poll` **无害忽略** | `field-point-visible.js`（根） |
 | `settings.schema` | **保留域（机器写，⛔ 人不用手改）**：key = 插件域 id；值 = `{title, live, entries}` | 写 = `lib/settings.js` 的 `registerSettings`；读 = `scripts/ui/settings-page.js` |
 
-- ★ `field-point-visible.js` 是**常驻开关**（父级裁决 2026-11-25）：它**只**在玩家**自己**进 `FIELD` 时
-  把 32 槽派生渲染位里类型命中的槽清 `HIDE|ALPHA0`（`50ff9f` 是 VM 每次进图重算的派生表 ⇒ 每次进图
-  重新施加）。⛔ 不读档（不 import `lib/save.js` / `lib/boot-to-title.js` / `lib/chains.js`）、⛔ 不点鼠标、
-  ⛔ 不写盘、⛔ 不 `finish`（正常路径常驻；进程按 `--time-limit` / 关窗结束）。
+- ★ `field-point-visible.js` 是**常驻开关**（父级裁决 2026-11-25）：它只 arm **一个**
+  `afterPosition("FIELD.BIN", 0x579C, 0x5860, { mode: "reenter" })`（判据 = **已知脚本位置**，
+  `FIELD_MAIN_LOOP_LO/HI`），在玩家**自己**进 `FIELD` 主轮询体（每次外→内 fire 一次）时把 32 槽派生渲染位里
+  类型命中的槽清 `HIDE|ALPHA0`（`50ff9f` 是 VM 每次进图重算的派生表 ⇒ 每次进图重新施加）。⛔ 不轮询
+  （没有 `afterDelay` / `poll`）、⛔ 不读档（不 import `lib/save.js` / `lib/boot-to-title.js` /
+  `lib/chains.js`）、⛔ 不点鼠标、⛔ 不写盘、⛔ 不 `finish`（正常路径常驻；进程按 `--time-limit` / 关窗结束）。
   ⇒ 验收用法 = **玩家自己读档**：`--overlay --plugin field-point-visible`（`--plugin` 与
   `--input-plan` / `--control-root` 互斥 ⇒ 没有"输入计划驱动"这条验收）；FIELD 的**自动化复现**仍归
   `scenario-save10-field.js`。守卫：CTest `plugin-field-switch`（静态契约 + headless 常驻）与
   `plugin-runtime` 的 `plugin/field-switch-apply`（施加 / 不重复写 / 换图重施加 / `on=0` 不写）。
-  ★ 设置面（D1/D3）：`start` 里 `registerSettings` 登记 `on`/`poll`/`diag`（页面据此画），这三项
-  **每拍重读**；`types` 不在 schema 里 ⇒ 只在 `start` 读一次。
-- ★ 旧配置里残留的 `slot` / `hold` 对本插件**无害忽略**（不读、不报错；它不再读档、不再一次性结束）。
+  ★ 设置面（D1/D3）：`start` 里 `registerSettings` 登记 `on`/`diag`（页面据此画），这两项
+  **每次位置触发（fire）重读**；`types` 不在 schema 里 ⇒ 只在 `start` 读一次。
+- ★ 旧配置里残留的 `slot` / `hold` / `poll` 对本插件**无害忽略**（不读、不报错；它不再读档、
+  不再一次性结束、不再轮询）。
 
 ### `settings.schema`：插件自报的设置表（D1，2026-11-25）
 
@@ -96,7 +99,7 @@ scripts/plugins/
   自己的域里）。**陈旧 schema**（上一个进程写的）无法从 JS 侧区分 ⇒ 页面标题下固定写
   `live: 正在运行的插件当拍生效；其余为预配置`；`live` 只是插件自报，⛔ 不当判据。
 - ★ **live = 读点**：`live:"frame"|"run"` 只在消费者**自己的读点重读**时才成立（`field.point-visible`
-  的 `on`/`poll`/`diag` 每拍重读；`types` 不在 schema 里 ⇒ 只读一次）。`live:"restart"` = 预配置。
+  的 `on`/`diag` 每次 fire 重读；`types` 不在 schema 里 ⇒ 只读一次）。`live:"restart"` = 预配置。
 - ★ 与页面**同进程**才有热改：`--overlay --plugin field-point-visible`（经典回退 HUD 与 Run 插件
   同进程、同一份 store）。跨进程（hud 写、另一个 run 进程读）改完要重启。
 - 新增一条可配置项：**先**在 owner 的 `registerSettings.entries` 里登记（页面据此画控件）**再**在

@@ -1,0 +1,17 @@
+{
+  "legacy-native": {
+    "globs": [
+      "apps/emulator-lift/src/runtime/native_*",
+      "apps/emulator-lift/tests/native_override*"
+    ],
+    "at": "de1c23a2088e6a4ad9b850d5e1f3d6eef4a3bd08"
+  },
+  "legacy-ir-golden": {
+    "globs": [
+      "apps/emulator-lift/tests/ir/**",
+      "apps/emulator-lift/tests/lift_ir_proto.cpp",
+      "apps/emulator-lift/tests/lift_ir_shim.cpp"
+    ],
+    "at": "c13ffd051a0801be0eb87b31efe667dc49c941e0"
+  }
+}

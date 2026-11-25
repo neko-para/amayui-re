@@ -47,12 +47,16 @@
 ```bash
 cd E:/Projects/amayui-re-dev/apps/emulator-lift
 # ① `field-point-visible` = **常驻开关**（父级裁决 2026-11-25）：⛔ 不读档 / ⛔ 不点鼠标 / ⛔ 不写盘 /
-#    ⛔ 不 finish。它只在**玩家自己**进 FIELD 时把派生渲染位里类型命中的槽清 `HIDE|ALPHA0`
-#    （`50ff9f` 是 VM 每次进图重算的表 ⇒ 每次进图重新施加，`poll` 节流）。
+#    ⛔ 不 finish、⛔ **不轮询**。它只 arm **一个**位置触发
+#    `afterPosition("FIELD.BIN", 0x579C, 0x5860, { mode: "reenter" })`：每次**外→内**进入主轮询体
+#    fire 一次（进图 / 换图 / 重新进主轮询体），把派生渲染位里类型命中的槽清 `HIDE|ALPHA0`
+#    （`50ff9f` 是 VM 每次进图重算的表 ⇒ 每次进图重新施加）。Reenter 的边沿挂在**同一个 trigger
+#    对象**上、跨 arm 保留 ⇒ 不需要 re-arm（`trigger_runner.cpp` 的 `exhausted()` 只耗尽 Once /
+#    `maxFires>0`）。判据 = **已知脚本位置**，不是时间 ⇒ 没有 `poll` 这个设置项。
 #    ★ 开关参数写在 **appdata 根**（与 Local/ 同级；⛔ 不在 SAVE/ 下）：
 #      {"version":1,"domains":{"field.point-visible":{"on":1}}}
-#      域 key：on（bool/0-1，缺省 0）/ types（hex 串或数组）/ poll（毫秒，缺省 250；0 = 每个读点）/
-#      diag（0/1）。★ 旧配置里的 slot / hold 被**无害忽略**（不再读档、不再一次性结束）。
+#      域 key：on（bool/0-1，缺省 0）/ types（hex 串或数组）/ diag（0/1）。
+#      ★ 旧配置里的 slot / hold / **poll** 被**无害忽略**（不再读档、不再一次性结束、不再轮询）。
 #    ★ 验收 = **玩家自己读档**：--overlay --plugin field-point-visible（`--plugin` 与 --input-plan /
 #      --control-root 互斥 ⇒ 没有"输入计划驱动"这条验收）；FIELD 的自动化复现归 ②。
 mkdir -p ../../.tmp/field-model/appdata
@@ -63,17 +67,20 @@ printf '{"version":1,"domains":{"field.point-visible":{"on":0}}}\n' \
   --present headless --skip-logo --audio off --time-limit 20 --log-level warn \
   --plugin field-point-visible
 # 读数（2026-11-25 / win32 / dev 本轮 / headless / on=0 基线；★ 没人读档 ⇒ 进程一直停在标题）：
-#   [plugin] info: field-points: on=0 types=0x1f,0x20 poll=250（常驻开关：…）   ← 只这一行（关着不做事）
+#   [plugin] info: field-points: on=0 types=0x1f,0x20 （常驻开关：位置触发 FIELD.BIN [0x579c,0x5860)；…）
+#                                                                    ↑ 只这一行（关着不做事）
 #   readout：file=…/field-point-visible.js entry=default render=no callbacks=yes
-#            params=- calls=79 run=waiting
-#   stop   ：time-limit @ eip=0041284C（正常结局）；exit=0
-#   ★ 79 = 20 s ÷ 250 ms 的轮询（+ start）：常驻 → 由 --time-limit 收口，⛔ 不是 finish。
+#            params=- calls=1 run=waiting
+#   stop   ：time-limit @ eip=004B5230（正常结局；★ 落点 eip 随墙钟时点变，不是判据）；exit=0
+#   ★ calls=1 = 只有 start：位置触发只在玩家进 FIELD 主轮询体时 fire（没人读档 ⇒ 一次都没 fire）。
+#     常驻 → 由 --time-limit 收口，⛔ 不是 finish。
 #   ★ on=1 时进 FIELD 的效果面判据在**纯档**：CTest `plugin-runtime` 的 `plugin/field-switch-apply`
-#     （假 guest：命中槽清两位 / 类型不命中不动 / 已经可见就不再写 / 换图实例号变 ⇒ 重新施加 /
-#     `on=0` 一个 global 都不写）。真机（人读档进 FIELD）的 `field-points: forced=` 读数见 `## 待核` 8。
+#     （假 guest：命中槽清两位 / 类型不命中不动 / 留在区间内不再 fire / 读到有效"外"再"内" ⇒ 重新施加 /
+#     `on=0` 一个 global 都不读、都不写）。真机（人读档进 FIELD）的 `field-points: forced=` 读数见 `## 待核` 8。
 #   ★ 常驻/不自驱的守卫：CTest `plugin-field-switch`
-#     （静态：代码里没有 input / loadSave / bootToTitle / chains / finish / quit；
-#      e2e：headless 真子进程无 --input-plan ⇒ 没有 boot:/load: 行、run=waiting、首行 on=0）。
+#     （静态：代码里没有 input / loadSave / bootToTitle / chains / finish / quit，且**没有** afterDelay /
+#      DEFAULT_POLL_MS；e2e：headless 真子进程无 --input-plan ⇒ 没有 boot:/load: 行、run=waiting、
+#      首行 on=0）。
 
 # ② 自动化到 FIELD 的复现（不是本开关）：读档链 + 场景入口 `scenario-save10-field.js`
 #    ★ 存档必须落在**嵌套层** `<appdata>/Local/Eushully/天結いキャッスルマイスター/SAVE/`

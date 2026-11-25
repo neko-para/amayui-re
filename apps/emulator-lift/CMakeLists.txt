@@ -3288,3 +3288,69 @@ foreach(_lift_t IN LISTS _lift_dir_targets)
         lift_enable_warnings(${_lift_t})
     endif()
 endforeach()
+
+# =====================================================================================
+# 被信任子系统：组内文件自 `at` 起没改 ⇒ 该组 CTest 标 `DISABLED TRUE`（`tools/trusted.json`）。
+#
+# ★ 判据与 `pnpm tools trusted status` 是**同一条**：`git diff --quiet <at> -- <globs>` 退出 0 ⇒ frozen。
+# ★ 安全方向：git 跑不起来 / JSON 坏了 / at 解析不了 ⇒ **全跑**（绝不因为读不到事实就不测）。
+# ★ 组 → CTest 名字的映射**只在这里**（⛔ 不新增 `add_test`、不改注册位置 —— 判据是注册位置，§12.4）。
+# ★ `-D LIFT_ALL_TESTS=ON` ⇒ 一条都不 DISABLE。
+# ★ 删 / 禁 CTest 后必须 reconfigure（`cmake --preset windows-x64`），否则 `mutate-check --list`
+#   会报"守卫不存在"（它读 `out/CTestTestfile.cmake`）。
+# ★ 本段的 `message()` 一律 ASCII（`tools/test/cmake-print-ascii.test.mjs` 守：ninja 直出的 UTF-8
+#   会被 936 终端 / 管道按本地码页解成全角乱码）。
+# =====================================================================================
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_SOURCE_DIR}/../../tools/trusted.json")
+
+if(NOT LIFT_ALL_TESTS)
+    set(_lift_trusted_file "${CMAKE_SOURCE_DIR}/../../tools/trusted.json")
+    set(_lift_trusted_json "")
+    if(EXISTS "${_lift_trusted_file}")
+        file(READ "${_lift_trusted_file}" _lift_trusted_json)
+    else()
+        message(STATUS "trusted: tools/trusted.json not found -> run all CTest")
+    endif()
+    if(_lift_trusted_json)
+        set(_lift_repo_root "${CMAKE_SOURCE_DIR}/../..")
+        foreach(_lift_group IN ITEMS legacy-native legacy-ir-golden)
+            # 组 → CTest 名字（映射只在这里；两边必须与 tools/trusted.mjs 的组名一致）
+            if(_lift_group STREQUAL "legacy-native")
+                set(_lift_group_tests native-override native-override-assets)
+            elseif(_lift_group STREQUAL "legacy-ir-golden")
+                set(_lift_group_tests lift-ir-proto lift-ir-shim)
+            else()
+                continue()
+            endif()
+            string(JSON _lift_at ERROR_VARIABLE _lift_err GET "${_lift_trusted_json}" "${_lift_group}" "at")
+            string(JSON _lift_n ERROR_VARIABLE _lift_err2 LENGTH "${_lift_trusted_json}" "${_lift_group}" "globs")
+            if(_lift_err OR _lift_err2 OR NOT _lift_n GREATER 0)
+                message(STATUS "trusted: cannot parse group ${_lift_group} -> run its CTest")
+                continue()
+            endif()
+            set(_lift_globs "")
+            math(EXPR _lift_last "${_lift_n} - 1")
+            foreach(_i RANGE 0 ${_lift_last})
+                string(JSON _lift_g GET "${_lift_trusted_json}" "${_lift_group}" "globs" ${_i})
+                list(APPEND _lift_globs "${_lift_g}")
+            endforeach()
+            execute_process(
+                COMMAND git -C "${_lift_repo_root}" diff --quiet "${_lift_at}" -- ${_lift_globs}
+                RESULT_VARIABLE _lift_r
+                OUTPUT_QUIET ERROR_QUIET)
+            if(_lift_r STREQUAL "0")
+                set(_lift_disabled 0)
+                foreach(_lift_t IN LISTS _lift_group_tests)
+                    if(TEST ${_lift_t})
+                        set_tests_properties(${_lift_t} PROPERTIES DISABLED TRUE)
+                        math(EXPR _lift_disabled "${_lift_disabled} + 1")
+                    endif()
+                endforeach()
+                message(STATUS "trusted: ${_lift_group} frozen @ ${_lift_at} -> DISABLED ${_lift_disabled} tests (-D LIFT_ALL_TESTS=ON forces all)")
+            else()
+                message(STATUS "trusted: ${_lift_group} changed (git exit ${_lift_r}) -> running")
+            endif()
+        endforeach()
+    endif()
+endif()
