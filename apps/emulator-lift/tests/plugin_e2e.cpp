@@ -40,6 +40,15 @@ std::size_t countOccurrences(const std::string& text, const std::string& needle)
     return n;
 }
 
+// 写一份 UTF-8 文本（父目录必须已存在；只给 `plugin-config.json` 用）。
+bool writeTextFile(const std::filesystem::path& path, const std::string& text) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    out.write(text.data(), static_cast<std::streamsize>(text.size()));
+    out.flush();
+    return static_cast<bool>(out);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -169,12 +178,15 @@ int main(int argc, char** argv) {
         LIFT_CHECK(q.out.find("input-plan: quit") == std::string::npos);
     }
 
-    // ---- ⑥ C2c `plugin/load-save-e2e`：真库 `lib/save.js` + `--plugin-param slot=15 expect=FIELD,SC0000` ----
+    // ---- ⑥ C2c `plugin/load-save-e2e`：真库 `lib/save.js` + 配置文件（域 `save`）----
     //   判据 = **stdout 的一次性 readout**（⛔ 不是 exit code：`ctx.finish` 不改进程 exit，且
-    //   `--time-limit 90` 是正常结局）：`run=done` + `params=expect=FIELD,SC0000,slot=15` + `calls ∈ {6,7}`；
-    //   stderr 的终态日志（`ctx.log`）必须点名 **FIELD**，且**没有** `run failed`；readout 只一行。
-    //   红了 ⇒ 某道门没命中 / 坐标错（hang 成 `run=failed reason=…gate timeout`）—— 纯档的
-    //   `plugin-runtime` 已经钉住链形状，这里钉"真 guest 里这条链真的走到 FIELD"。
+    //   `--time-limit 90` 是正常结局）：`run=done`；stderr 的终态日志（`ctx.log`）必须点名
+    //   **FIELD**，且**没有** `run failed`；readout 只一行。
+    //   ★ 2026-11-25：参数来源改成 **`<--appdata>/plugin-config.json`**（域 `save` 的 `slot` /
+    //     `expect`），**不再给 `--plugin-param`** ⇒ 这条 e2e 同时验证"配置文件被装载 + 被内建插件消费"。
+    //     readout 的 `params=` 因此**不再作判据**（那里仍是空的）。
+    //   红了 ⇒ 配置文件没被读 / 某道门没命中 / 坐标错（hang 成 `run=failed reason=…gate timeout`）——
+    //   纯档的 `plugin-runtime` 已经钉住链形状，这里钉"真 guest 里这条链真的走到 FIELD"。
     //   ★ 为什么是 **15**（不是 5）：`saves/SAVE.DAT` 现在持久化**页 1**（2026-11-22 入库）⇒ 槽 5 在
     //     页 0，要先翻页；而 `calls ∈ {6,7}` 钉的是**不翻页**那条链的形状（6 = 点完 640,323 直接 FIELD、
     //     7 = 多一道 SBUNKI 第二确认），翻页会把 calls 抬到 100+（每个读点一次回调）⇒ 判据失去意义。
@@ -219,6 +231,11 @@ int main(int argc, char** argv) {
             LIFT_CHECK(!cp_ec);
         }
 
+        // ★ 配置走 `<--appdata>/plugin-config.json`（域 `save`）——⛔ 不放 `SAVE/` 下。
+        //   值必须是**原生 JSON 值**（`slot`: number、`expect`: string[]），与 d.ts 的 `ctx.config` 一致。
+        LIFT_CHECK(writeTextFile(load_appdata / "plugin-config.json",
+                                 R"({"version":1,"domains":{"save":{"slot":15,"expect":["FIELD.BIN","SC0000"]}}})"));
+
         const std::vector<std::string> load_args = {
             "--exe",
             pathToUtf8(age_exe),
@@ -235,12 +252,8 @@ int main(int argc, char** argv) {
             "90",
             "--plugin",
             pathToUtf8(save_js),
-            "--plugin-param",
-            "slot=15",
-            // ★ A 阶段裁决：终态由**调用方**给（`save.js` 不再内置 FIELD/SC0000）⇒ 这里显式给。
-            //   slot 15 的存档（= SAVE05 的副本）落在 FIELD；SC0000 是另一类 ADV 落点（保留不影响本用例）。
-            "--plugin-param",
-            "expect=FIELD,SC0000",
+            // ★ 2026-11-25：**不给 `--plugin-param`** —— 参数来自上面的 plugin-config.json。
+            //   `--plugin-param` 保留给夹具 / 诊断（形状错误仍 exit 2）。
         };
         ChildOptions ls_opts;
         ls_opts.cwd = save_root;
@@ -260,12 +273,10 @@ int main(int argc, char** argv) {
         if (ls.err.find("拒绝启动") != std::string::npos) {
             LIFT_SKIP("GPU / 窗口初始化不成立（headless 也要 GPU device）");
         }
-        // ---- 判据 A：readout 说"链真的走到 FIELD"（不含 calls 的确切数）----
+        // ---- 判据 A：readout 说"链真的走到 FIELD"（不含 calls 的确切数；`params=` 不再是判据）----
         const bool reached_field = ls.out.find("plugin    : ") != std::string::npos &&
                                    ls.out.find("entry=default") != std::string::npos &&
                                    ls.out.find("callbacks=yes") != std::string::npos &&
-                                   ls.out.find("slot=15") != std::string::npos &&
-                                   ls.out.find("expect=FIELD,SC0000") != std::string::npos &&
                                    ls.out.find("run=done") != std::string::npos &&
                                    ls.out.find("run=failed") == std::string::npos &&
                                    ls.err.find("run failed") == std::string::npos &&

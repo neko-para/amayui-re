@@ -85,8 +85,10 @@
 //     自己拼（样板 `./scenario-save07-battle.js`）。本文件**不认识场景**。
 //
 // ★ 本文件有一条 **default 导出**，但它**只是参考入口**：方便
-//   `--plugin <本文件> --plugin-param slot=5 --plugin-param expect=FIELD,SC0000` 直接把本文件当插件跑
-//   （headless e2e / 手工 run；`expect` 不给时用默认值**并打一行 info**）。
+//   `--plugin <本文件>` 直接当插件跑（headless e2e / 手工 run）。参数来源（2026-11-25 起）：
+//   **config > `--plugin-param` > 默认** —— config = `<--appdata>/plugin-config.json` 的域 `save`
+//   （`slot` / `expect` / 可选 `saveDir` / `timeoutMs`）；没有 appdata ⇒ 完全回退到 params（旧行为）。
+//   `expect` 不给 ⇒ 用默认值**并打一行 info**。
 // 库消费者请用具名 `export function loadSave(slot, { expect, … })`；⛔ 不要依赖 default 的形状。
 //   ★ 本文件只 import **同目录的兄弟文件**（`./chains.js` / `./script-positions.js` /
 //   `./boot-to-title.js`）：宿主 QJS 的 import 根 = **入口文件所在目录**
@@ -611,29 +613,96 @@ export function loadSave(slot, options = {}) {
 // ---------------------------------------------------------------------------
 // 参考入口（**只是参考**；库消费者用上面的 `loadSave`）
 //
-// `--plugin <本文件> --plugin-param slot=5 [--plugin-param expect=FIELD,SC0000]`
-// （`ctx.params` 只读）。规则：
-//   · `slot`：非整数 / 越界 ⇒ `loadSave` 构造时 throw ⇒ 宿主记 `run=failed`（进程 exit 不受影响）。
-//   · `expect`：逗号分隔的**脚本名**（裸名自动补 `.BIN`，带 `.BIN` 也接受）。
-//     ★ 不给 ⇒ 退回 `FIELD,SC0000` **并打一行 info**（"用的是默认 expect，可用 --plugin-param expect= 覆盖"；
-//      ⛔ 不静默 —— 真实落点由调用方按预期给，这里只是让它能直接当插件跑）。
+// 参数来源（2026-11-25 起）：**config > --plugin-param > 默认**
+//   · config = `<--appdata>/plugin-config.json` 的域 **`save`**（ctx.config；没 appdata ⇒ 完全回退）；
+//     key：`slot`（number）、`expect`（string[] 或逗号串）、可选 `saveDir`（string，相对 appdata 根）、
+//     `timeoutMs`（number）。
+//   · params = `--plugin-param k=v`（夹具 / 诊断口；只有 `slot` / `expect` 被这里消费）。
+//   · 默认：`expect` 缺 ⇒ `FIELD,SC0000` 并打一行 info；`slot` 没有默认值（缺 ⇒ `loadSave` 响亮 throw）。
+// ★ "给了"的判据是 `has()`（⛔ 不是真值）：`slot: 0` 这种 falsy 值也算给了。
+//
+// `slot`：非整数 / 越界 ⇒ `loadSave` 构造时 throw ⇒ 宿主记 `run=failed`（进程 exit 不受影响）。
+// `expect`：裸名自动补 `.BIN`，带 `.BIN` 也接受。
 //
 // ★ 参考入口**自带 TITLE 门**（`./boot-to-title.js`）：它可以在**任意启动点**当插件直接跑
 //   （`plugin/load-save-e2e` 就是这么用的），所以形状 = `boot:` 前缀归 boot、其余归 load。
 //   ⚠ 这与库接口不同：`loadSave(...)` 单独用时**调用方**保证已在 TITLE（文件头）。
 // ---------------------------------------------------------------------------
-/**
- * @param {Readonly<Record<string, string | null | undefined>>} params
- * @returns {number}
- */
-function slotFromParams(params) {
-    return Number(params["slot"]);
-}
 
+/** 配置文件里的域（`<--appdata>/plugin-config.json`；只读）。 */
+const CONFIG_DOMAIN = "save";
+/** `expect` 的默认落点（只在该入口既没有 config 也没有 params 时用；打一行 info 说明）。 */
 const DEFAULT_EXPECT = ["FIELD.BIN", "SC0000.BIN"];
 
-// null = 参数没给（由调用方决定用默认值 + 打一行说明）；数组 = 参数给了（可能为空 ⇒ 让 loadSave 响亮 throw）。
 /**
+ * 配置文件可用才返回域对象（否则 null ⇒ 完全按旧的 `ctx.params` 行为）。
+ *
+ * @param {RunCtx} ctx
+ * @returns {import("@amayui/lift-plugin").ConfigDomain | null}
+ */
+function configDomainOrNull(ctx) {
+    const config = ctx.config;
+    if (config === undefined || config === null || config.available !== true) return null;
+    return config.domain(CONFIG_DOMAIN);
+}
+
+/** 这个 key 在 config 里"给了"吗（`has()`，⛔ 不看真值）。 */
+function hasConfig(domain, key) {
+    return domain !== null && domain.has(key);
+}
+
+/**
+ * `slot`：config 优先；config 没给 ⇒ `Number(ctx.params.slot)`（旧行为；缺 ⇒ NaN ⇒ `loadSave` throw）。
+ *
+ * @param {RunCtx} ctx
+ * @param {import("@amayui/lift-plugin").ConfigDomain | null} domain
+ * @returns {number}
+ */
+function slotSetting(ctx, domain) {
+    if (hasConfig(domain, "slot")) {
+        const value = domain.get("slot");
+        if (typeof value !== "number" || !Number.isInteger(value)) {
+            throw new Error(`config ${CONFIG_DOMAIN}.slot 必须是整数（收到 ${String(value)}）`);
+        }
+        return value;
+    }
+    return Number(ctx.params["slot"]);
+}
+
+/**
+ * `expect`：逗号串 / string[] → string[]（裸名补 `.BIN`）。非法 ⇒ 构造时 throw。
+ *
+ * @param {unknown} value
+ * @returns {string[]}
+ */
+function normalizeExpect(value) {
+    /** @type {string[]} */
+    const out = [];
+    const push = (item) => {
+        if (typeof item !== "string" || item.trim() === "") {
+            throw new Error(`config ${CONFIG_DOMAIN}.expect 的元素必须是非空字符串（收到 ${String(item)}）`);
+        }
+        const name = item.trim();
+        out.push(name.endsWith(".BIN") ? name : name + ".BIN");
+    };
+    if (Array.isArray(value)) {
+        for (const item of value) push(item);
+    } else if (typeof value === "string") {
+        for (const part of value.split(",")) {
+            if (part.trim().length !== 0) push(part);
+        }
+    } else {
+        throw new Error(`config ${CONFIG_DOMAIN}.expect 必须是 string[] 或逗号串（收到 ${typeof value}）`);
+    }
+    if (out.length === 0) {
+        throw new Error(`config ${CONFIG_DOMAIN}.expect 给空了（要么不给，要么给 ["FIELD.BIN"]）`);
+    }
+    return out;
+}
+
+/**
+ * `--plugin-param expect=FIELD,SC0000` → string[]（裸名补 `.BIN`）；没给 ⇒ null。
+ *
  * @param {Readonly<Record<string, string | null | undefined>>} params
  * @returns {string[] | null}
  */
@@ -651,54 +720,100 @@ function expectFromParams(params) {
 }
 
 /**
- * @param {Readonly<Record<string, string | null | undefined>>} params
- * @returns {LoadSaveOptions}
+ * @param {RunCtx} ctx
+ * @param {import("@amayui/lift-plugin").ConfigDomain | null} domain
+ * @returns {string[] | null} null = 没给（调用方决定默认值）
  */
-function loadOptionsFromParams(params) {
-    const expect = expectFromParams(params);
-    return { expect: expect === null ? DEFAULT_EXPECT : expect };
+function expectSetting(ctx, domain) {
+    if (hasConfig(domain, "expect")) return normalizeExpect(domain.get("expect"));
+    return expectFromParams(ctx.params);
 }
 
-// ★ 参考入口的链**只构造一次**（`ctx.params` 在一个 Run 内不变；链本身无状态 ⇒ 缓存链对象
+/**
+ * `saveDir`（可选；相对 appdata 根）：config 优先，params 回退。
+ *
+ * @param {RunCtx} ctx
+ * @param {import("@amayui/lift-plugin").ConfigDomain | null} domain
+ * @returns {string | undefined}
+ */
+function saveDirSetting(ctx, domain) {
+    if (hasConfig(domain, "saveDir")) {
+        const value = domain.get("saveDir");
+        if (typeof value !== "string" || value.trim() === "") {
+            throw new Error(`config ${CONFIG_DOMAIN}.saveDir 必须是非空字符串（收到 ${String(value)}）`);
+        }
+        return value;
+    }
+    const raw = ctx.params["saveDir"];
+    if (raw === undefined || raw === null || String(raw).trim() === "") return undefined;
+    return String(raw);
+}
+
+/**
+ * `timeoutMs`（可选；每道门的超时）：config 优先，params 回退；缺 ⇒ undefined（`loadSave` 的默认 30000）。
+ *
+ * @param {RunCtx} ctx
+ * @param {import("@amayui/lift-plugin").ConfigDomain | null} domain
+ * @returns {number | undefined}
+ */
+function timeoutSetting(ctx, domain) {
+    const raw = hasConfig(domain, "timeoutMs") ? domain.get("timeoutMs") : ctx.params["timeoutMs"];
+    if (raw === undefined || raw === null || String(raw).trim() === "") return undefined;
+    const value = typeof raw === "number" ? raw : Number(raw);
+    if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+        throw new Error(`config ${CONFIG_DOMAIN}.timeoutMs 必须是正整数（收到 ${String(raw)}）`);
+    }
+    return value;
+}
+
+// ★ 参考入口的链**只构造一次**（一次 Run 内 config / params 不变；链本身无状态 ⇒ 缓存链对象
 //   不影响"进度只在 ev.name"）。⚠ 这**不是**在修预算问题：2026-11-21 实测缓存与"每次重建"
 //   在 `plugin/load-save-e2e` 上**同样**会撞 `onTrigger: callback budget exceeded: load:confirm2`
 //   （2 ms 那条线；跟踪单 `REQ-01M7VVDV69MJXRHNDGR50H7VHC`，⛔ 不靠放宽预算 / 删日志来"修"）。
-//   缓存的收益只是参考入口每拍少造 3 个对象。
-/** @type {string | null} */
-let entryKey = null;
+//   ★ 2026-11-25：参数源改成 `ctx.config` 之后，**每拍重读 config 的代价也要省掉**
+//   （`domain()` 每次新建一个绑定对象 + 若干宿主调用；2 ms 窗口里那是可观测的份额）⇒ 第一次
+//   `chainFor` 之后直接复用整条链。
 /** @type {Chain | null} */
 let entryChain = null;
 
 /**
  * `boot:` 前缀归启动链（含它的 timeout），其余归载入链 —— 两段名字不相交（`./chains.js` 头）。
  *
- * @param {Readonly<Record<string, string | null | undefined>>} params
+ * @param {RunCtx} ctx
  * @returns {Chain}
  */
-function chainForParams(params) {
-    const key = `${String(params["slot"])}|${String(params["expect"])}`;
-    if (entryChain !== null && entryKey === key) return entryChain;
-    const load = loadSave(slotFromParams(params), loadOptionsFromParams(params));
-    const boot = bootToTitle({ onDone: (ctx) => load.start(ctx) });
+function chainFor(ctx) {
+    if (entryChain !== null) return entryChain;
+    const domain = configDomainOrNull(ctx);
+    const slot = slotSetting(ctx, domain);
+    const expect = expectSetting(ctx, domain);
+    /** @type {LoadSaveOptions} */
+    const options = { expect: expect === null ? DEFAULT_EXPECT : expect };
+    const saveDir = saveDirSetting(ctx, domain);
+    if (saveDir !== undefined) options.saveDir = saveDir;
+    const timeoutMs = timeoutSetting(ctx, domain);
+    if (timeoutMs !== undefined) options.timeoutMs = timeoutMs;
+    const load = loadSave(slot, options);
+    const boot = bootToTitle({ onDone: (ctx2) => load.start(ctx2) });
     entryChain = route((ev) => String(ev.name).startsWith("boot:"), boot, load);
-    entryKey = key;
     return entryChain;
 }
 
 /** @type {Chain} */
 const plugin = {
     start(ctx) {
-        if (expectFromParams(ctx.params) === null) {
+        const domain = configDomainOrNull(ctx);
+        if (expectSetting(ctx, domain) === null) {
             ctx.log(
                 "info",
                 `load-save: expect 未给 ⇒ 用默认 ${DEFAULT_EXPECT.join(",")}` +
-                    "（可用 --plugin-param expect=FIELD,SC0000 覆盖）",
+                    `（写在 plugin-config.json 的 ${CONFIG_DOMAIN}.expect，或用 --plugin-param expect=FIELD,SC0000）`,
             );
         }
-        return chainForParams(ctx.params).start(ctx);
+        return chainFor(ctx).start(ctx);
     },
     onTrigger(ctx, ev) {
-        return chainForParams(ctx.params).onTrigger(ctx, ev);
+        return chainFor(ctx).onTrigger(ctx, ev);
     },
 };
 

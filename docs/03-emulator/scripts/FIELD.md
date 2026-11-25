@@ -45,20 +45,30 @@
 - 常量位置：`apps/emulator-lift/scripts/plugins/lib/script-positions.js` 的 `FIELD_MAIN_LOOP_LO/HI`（数值只写这一处）。
 
 ```bash
-cd E:/Projects/amayui-re/apps/emulator-lift
+cd E:/Projects/amayui-re-dev/apps/emulator-lift
 # 0) 私有 appdata：存档必须落在嵌套层（★ 复制到根目录 ⇒ 读档列表为空、点行没反应）
 bash scripts/clean-appdata.sh ../../.tmp/field-model/appdata
+# 0') 插件配置写在 **appdata 根**（与 Local/ 同级；⛔ 不在 SAVE/ 下）
+cat > ../../.tmp/field-model/appdata/plugin-config.json <<'JSON'
+{"version":1,"domains":{"scenario.field-point-visible":{"slot":10,"on":1,"hold":3000}}}
+JSON
 # ① 插件门：载入槽 10（SAVE10 → FIELD）→ 等主轮询体 → 改派生渲染位
+#    ★ 不带 --plugin-param：参数来自上面那份 plugin-config.json（域 scenario.field-point-visible）。
 ./out/emulator-lift-aot.exe \
   --game-dir ../../links/install --appdata ../../.tmp/field-model/appdata \
   --present headless --skip-logo --audio off --time-limit 180 --log-level warn \
-  --plugin scripts/plugins/lib/scenario-field-point-visible.js \
-  --plugin-param slot=10 --plugin-param on=1 --plugin-param hold=3000
-# 读数（2026-11-25 / win32 / headless；`--present window` 那次逐行相同）：
+  --plugin scripts/plugins/lib/scenario-field-point-visible.js
+# 读数（2026-11-25 / win32 / dev `996bafa`+本轮 / headless）：
 #   load-save: page 1 (target 1, slot 10) → row hovered → SBUNKI hit → reached FIELD.BIN
 #   field-points: FIELD 就绪 ⇒ switch on=1 types=0x1f,0x20
 #   field-points: forced=3/3（slot 10: 0x5→0x0 / slot 11: 0x3→0x2 / slot 12: 0x3→0x2）
 #   field-points: after map=0xb instance=0x1 live_slots=21
+#   readout：calls=9 run=finished exit=0 reason=field-points: survived
+#   （2026-11-25 / win32 / dev 本轮 / `out/emulator-lift-aot.exe` / `--present headless`；
+#    本条读数用 cmd 重定向采集：PowerShell `Start-Process -RedirectStandard*` 的几次跑在**首个
+#    回调**上撞了宿主安全网（20 ms 墙钟），日志/forced 都对、只有 readout 是 failed ⇒ 未取）
+# ★ 回退（夹具 / 诊断）：config 里没给的 key 才吃命令行：
+#   --plugin-param slot=10 --plugin-param on=1 --plugin-param hold=3000
 
 # ② 配方里的同一区间（历史读数）
 rg -n "await position FIELD" apps/emulator-lift/scripts/recipes/save07-battle.plan

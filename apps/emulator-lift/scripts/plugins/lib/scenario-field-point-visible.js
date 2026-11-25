@@ -1,6 +1,7 @@
 // scripts/plugins/lib/scenario-field-point-visible.js —— `FIELD` 上把「点位精灵」强制走**可见**那条分支
 //
-// 是什么：一个**开关**。`--plugin-param on=1` 时，在 `FIELD` 就绪后把 32 槽派生渲染标志
+// 是什么：一个**开关**。配置域 `scenario.field-point-visible` 的 `on` ≠ 0 时（或回退的
+// `--plugin-param on=1`），在 `FIELD` 就绪后把 32 槽派生渲染标志
 // （`FIELD_OBJECT_FLAGS_GLOBAL_ID` = `0x50ff9f`）里、类型命中（缺省 採集 `0x1F` / 発掘 `0x20`）的槽
 // 的 `HIDE|ALPHA0` 两位**清掉** ⇒ `DRAWOBJ.BIN` instr#7 不再跳过、instr#26 不再把 alpha 置 0
 // ⇒ 那张 `0xFA+类型` 的纹理（`0x119` = `MO031B.AGF` 绿草 / `0x11A` = `MO032B.AGF` 岩石）就画出来。
@@ -28,14 +29,20 @@
 //   ⚠ 2026-11-24 那一版还写过"只 click 不动光标 ⇒ 行不亮"：`ctx.input.click` 自己会先 `mouseMove`
 //   （`PointerCore::armClickAt` → `armMoveAt`），所以那条归因**不成立**。
 //
-// 用法（cwd = apps/emulator-lift；`on` 缺省 0 = 不动）：
+// 用法（cwd = apps/emulator-lift；参数来源 **config > --plugin-param > 默认**）：
 //   0) 私有 appdata **必须**是嵌套层：存档放 `<appdata>/Local/Eushully/天結いキャッスルマイスター/SAVE/`
 //      ⇒ `bash scripts/clean-appdata.sh ../../.tmp/field-model/appdata`（建法见 `saves/README.md`）。
 //      ⛔ 把 SAVE*.DAT 放到 `<appdata>` 根目录 ⇒ 引擎新建空 `SAVE/` ⇒ 读档列表为空 ⇒ 点行不弹确认框
 //      （`load-save: gate timeout (load:sbunki)`；2026-11-24/25 的失败全是这一条，与 headless/window 无关）。
-//   1) ./out/emulator-lift-aot.exe --game-dir ../../links/install --appdata ../../.tmp/field-model/appdata \
-//        --present headless --skip-logo --audio off --time-limit 180 \
-//        --plugin scripts/plugins/lib/scenario-field-point-visible.js \
+//   1) 在 **appdata 根**（与 `Local/` 同级，⛔ 不在 `SAVE/` 下）写 `plugin-config.json`：
+//        {"version":1,"domains":{"scenario.field-point-visible":{"slot":10,"on":1,"hold":3000}}}
+//      域 key（全部可选；缺省 = `slot 10` / `on 0` / `types ["1f","20"]` / `hold 3000` / `diag 0`）：
+//        `slot` number / `on` number|bool / `types` hex 串 `"1f,20"` 或数组 / `hold` number / `diag` number
+//   2) 不带 `--plugin-param` 直接跑：
+//      ./out/emulator-lift-aot.exe --game-dir ../../links/install --appdata ../../.tmp/field-model/appdata \
+//        --present headless --skip-logo --audio off --time-limit 180 --log-level warn \
+//        --plugin scripts/plugins/lib/scenario-field-point-visible.js
+//   ★ 回退（夹具 / 诊断；config 里没给的 key 才生效）：
 //        --plugin-param slot=10 --plugin-param on=1 --plugin-param hold=3000
 //   ★ `slot=10` = SAVE10（落在 FIELD；进屏页 1 第 0 行 ⇒ 不用翻页；2026-11-25 实测）。
 //   ★ 从冷启动跑 ⇒ 本文件自己盖 `./boot-to-title.js`（与 `scenario-fellow-switch.js` 同一个三层 route）。
@@ -76,21 +83,39 @@ const MAX_LOGGED_SLOTS = 12;
 /** `diag` 连采的读点个数（诊断档：看 FIELD 之后脚本停在哪）。 */
 const DIAG_SAMPLES = 8;
 
+/** 配置文件里的域（`<--appdata>/plugin-config.json`；只读）。 */
+const CONFIG_DOMAIN = "scenario.field-point-visible";
+
 /**
- * `1f,20`（反汇编口径：**十六进制不带 0x**）→ 数字数组。
+ * `types`：config 可给 hex 串 `"1f,20"` 或数组（元素 = hex 串或数字）；params 只有逗号串。
  *
- * @param {string | null | undefined} raw
- * @returns {number[]} 缺省 = 採集 + 発掘。
+ * @param {unknown} raw 缺省 = undefined/null ⇒ 採集 + 発掘。
+ * @returns {number[]}
  */
 function parseTypes(raw) {
-    if (raw === undefined || raw === null || String(raw).trim() === "") {
+    if (raw === undefined || raw === null) {
+        return [FIELD_POINT_TYPE_GATHER, FIELD_POINT_TYPE_DIG];
+    }
+    // `--plugin-param types=`（空串）= 没给（旧行为）；config 里给空串 ⇒ 响亮拒绝（下走 out.length）。
+    if (typeof raw === "string" && raw.trim() === "") {
         return [FIELD_POINT_TYPE_GATHER, FIELD_POINT_TYPE_DIG];
     }
     /** @type {number[]} */
     const out = [];
-    for (const part of String(raw).split(",")) {
-        const text = part.trim();
-        if (text.length === 0) continue;
+    /** @param {unknown} item */
+    const pushOne = (item) => {
+        if (typeof item === "number") {
+            if (!Number.isInteger(item) || item < 0) {
+                throw new Error(`types 的数字项必须是非负整数（收到 ${String(item)}）`);
+            }
+            out.push(item);
+            return;
+        }
+        if (typeof item !== "string") {
+            throw new Error(`types 的元素必须是 hex 串或非负整数（收到 ${typeof item}）`);
+        }
+        const text = item.trim();
+        if (text.length === 0) return;
         // ⛔ 不用正则（QJS 这版 build 没有 RegExp）：手工剥可选的 `0x`。
         const body = text.length > 2 && (text[0] === "0") && (text[1] === "x" || text[1] === "X")
             ? text.slice(2)
@@ -98,10 +123,75 @@ function parseTypes(raw) {
         const value = Number.parseInt(body, 16);
         if (!Number.isFinite(value) || value < 0) throw new Error(`types 的项不是十六进制：${text}`);
         out.push(value);
+    };
+    if (Array.isArray(raw)) {
+        for (const item of raw) pushOne(item);
+    } else if (typeof raw === "string") {
+        for (const part of raw.split(",")) pushOne(part);
+    } else {
+        throw new Error(`types 必须是 hex 串或数组（收到 ${typeof raw}）`);
     }
     if (out.length === 0) throw new Error("types 给空了（要么不给，要么给 1f,20 这种）");
     return out;
 }
+
+/**
+ * 配置文件可用才返回域对象（否则 null ⇒ 完全回退到 `ctx.params`）。
+ *
+ * @param {RunCtx} ctx
+ * @returns {import("@amayui/lift-plugin").ConfigDomain | null}
+ */
+function configDomainOrNull(ctx) {
+    const config = ctx.config;
+    if (config === undefined || config === null || config.available !== true) return null;
+    return config.domain(CONFIG_DOMAIN);
+}
+
+/** @param {import("@amayui/lift-plugin").ConfigDomain | null} domain @param {string} key */
+function hasConfig(domain, key) {
+    return domain !== null && domain.has(key);
+}
+
+/**
+ * 非负整数配置项：config 优先；否则 params（`intParam` 的口径）。
+ *
+ * @param {RunCtx} ctx
+ * @param {import("@amayui/lift-plugin").ConfigDomain | null} domain
+ * @param {string} key
+ * @param {number} fallback
+ * @returns {number}
+ */
+function intSetting(ctx, domain, key, fallback) {
+    if (!hasConfig(domain, key)) return intParam(ctx.params, key, fallback);
+    const value = domain.get(key);
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+        throw new Error(`config ${CONFIG_DOMAIN}.${key} 需要非负整数（收到 ${String(value)}）`);
+    }
+    return value;
+}
+
+/**
+ * 布尔 / 数字开关：config 收 boolean 或 0/1；否则 params（`intParam` 的口径）。
+ *
+ * @param {RunCtx} ctx
+ * @param {import("@amayui/lift-plugin").ConfigDomain | null} domain
+ * @param {string} key
+ * @param {boolean} fallback
+ * @returns {boolean}
+ */
+function boolSetting(ctx, domain, key, fallback) {
+    if (!hasConfig(domain, key)) return intParam(ctx.params, key, fallback ? 1 : 0) !== 0;
+    const value = domain.get(key);
+    if (typeof value === "boolean") return value;
+    if (typeof value === "number") {
+        if (!Number.isInteger(value)) {
+            throw new Error(`config ${CONFIG_DOMAIN}.${key} 需要 boolean 或整数（收到 ${String(value)}）`);
+        }
+        return value !== 0;
+    }
+    throw new Error(`config ${CONFIG_DOMAIN}.${key} 需要 boolean 或整数（收到 ${typeof value}）`);
+}
+
 
 /**
  * @param {Readonly<Record<string, string | null | undefined>>} params
@@ -210,44 +300,42 @@ function makeFieldStage(opts) {
 
 /** @type {object | null} */
 let chain = null;
-/** @type {string | null} */
-let chainKey = null;
 
 /**
- * 三层 `route`（前缀两两不相交）：`boot:` 启动 / `load:` 载入 / 其余（`fp:`）本场景。
+ * 一次 Run 内 config / params 不变 ⇒ 链只构造一次（链本身无状态：进度只在 ev.name）。
+ * ★ 2026-11-25：`ctx.config` 的读取也**只在第一次**做（每拍 `domain()` 会新建绑定对象 + 若干
+ *   宿主调用；2 ms 窗口里那是可观测的份额）。
  *
- * @param {Readonly<Record<string, string | null | undefined>>} params
+ * @param {RunCtx} ctx
  * @returns {{ start: (ctx: RunCtx) => Trigger | Trigger[], onTrigger: (ctx: RunCtx, ev: PluginEvent) => Trigger | Trigger[] }}
  */
-function chainFor(params) {
-    // `ctx.params` 在一个 Run 内不变 ⇒ 链只构造一次（链本身无状态：进度只在 ev.name）。
-    const slot = intParam(params, "slot", DEFAULT_SLOT);
-    const on = intParam(params, "on", 0) !== 0;
-    const typesRaw = String(params["types"] ?? "");
-    const hold = intParam(params, "hold", DEFAULT_HOLD_MS);
-    const diag = intParam(params, "diag", 0) !== 0;
-    const key = `${slot}|${on}|${typesRaw}|${hold}|${diag}`;
-    if (chain !== null && chainKey === key) return chain;
-    const stage = makeFieldStage({ on, types: parseTypes(params["types"]), hold, diag });
+function chainFor(ctx) {
+    if (chain !== null) return chain;
+    const domain = configDomainOrNull(ctx);
+    const slot = intSetting(ctx, domain, "slot", DEFAULT_SLOT);
+    const on = boolSetting(ctx, domain, "on", false);
+    const types = hasConfig(domain, "types") ? parseTypes(domain.get("types")) : parseTypes(ctx.params["types"]);
+    const hold = intSetting(ctx, domain, "hold", DEFAULT_HOLD_MS);
+    const diag = boolSetting(ctx, domain, "diag", false);
+    const stage = makeFieldStage({ on, types, hold, diag });
     const load = loadSave(slot, {
         expect: LOAD_EXPECT,
         timeoutMs: LOAD_TIMEOUT_MS,
-        onLoaded: (ctx) => stage.start(ctx),
+        onLoaded: (ctx2) => stage.start(ctx2),
     });
-    const boot = bootToTitle({ onDone: (ctx) => load.start(ctx) });
+    const boot = bootToTitle({ onDone: (ctx2) => load.start(ctx2) });
     const afterBoot = route((ev) => String(ev.name).startsWith("load:"), load, stage);
     chain = route((ev) => String(ev.name).startsWith("boot:"), boot, afterBoot);
-    chainKey = key;
     return chain;
 }
 
 /** @type {import("@amayui/lift-plugin").PluginModule} */
 const plugin = {
     start(ctx) {
-        return chainFor(ctx.params).start(ctx);
+        return chainFor(ctx).start(ctx);
     },
     onTrigger(ctx, ev) {
-        return chainFor(ctx.params).onTrigger(ctx, ev);
+        return chainFor(ctx).onTrigger(ctx, ev);
     },
 };
 

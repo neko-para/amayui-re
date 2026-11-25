@@ -33,6 +33,8 @@
 - **缺 `SAVE<NN>.DAT` 现在会在点 LoadData 之前报**：`loadSave` 的 `start` 先查这一槽的文件，
   缺了就 `ctx.finish(5, "load-save: save file missing: … (slot N)")`、一个 click 都不发
   （不再等 30 s 的 `load:sbunki` 门超时）；`--appdata` 没给 / 存档不在 appdata 下时跳过并 warn。
+- **插件配置不是存档**：`<--appdata>/plugin-config.json` 在 appdata **根**（与 `Local/` 同级），
+  ⛔ 不在 `SAVE/` 下、也不随 `saves/` 入库；`scripts/clean-appdata.sh` 会把它一起删掉。
 
 ## `--appdata` 与目录结构（★ 复制错一层 = 读档界面点行没反应）
 

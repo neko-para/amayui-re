@@ -9,10 +9,15 @@
 //   直接点会被加载过程吞掉（实测：第一版在 `expect` 命中那一拍就点，什么也没发生）。
 //
 // 用法（cwd = apps/emulator-lift；存档 010/011/… 在**第 2 页**，翻页由 `save.js` 自己做）：
+//   ★ 参数来源（2026-11-25 起）：`<--appdata>/plugin-config.json` 的域 **`scenario.save10-field`**
+//     （`slot` number / `expect` string[] 或逗号串），**优于** `--plugin-param`；没有 appdata 时
+//     完全回退到 params。例：
+//     {"version":1,"domains":{"scenario.save10-field":{"slot":10,"expect":["FIELD.BIN"]}}}
 //   ./out/emulator-lift-aot.exe --exe ../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE \
 //     --game-dir ../../links/install --appdata ../../.tmp/save10-crash/appdata-<x> \
 //     --present headless --skip-logo --audio off --time-limit 120 --log-level info --frame-log \
-//     --plugin scripts/plugins/lib/scenario-save10-field.js --plugin-param slot=10 --plugin-param expect=FIELD
+//     --plugin scripts/plugins/lib/scenario-save10-field.js
+//   ★ 回退（夹具 / 诊断）：`--plugin-param slot=10 --plugin-param expect=FIELD`。
 //
 // 判据（"点击之后能继续"）：点完**再活 `SURVIVE_MS`** ⇒ `finish(0)`；期间进程没了 ⇒ stderr 的 `stop :` 就是现场。
 
@@ -80,22 +85,83 @@ const SLOT = 10;
 /** @type {string[]} */
 const DEFAULT_EXPECT = ["FIELD.BIN"];
 
+/** 配置文件里的域（`<--appdata>/plugin-config.json`；只读）。 */
+const CONFIG_DOMAIN = "scenario.save10-field";
+
 /**
- * @param {Readonly<Record<string, string | null | undefined>>} params
+ * 配置文件可用才返回域对象（否则 null ⇒ 完全回退到 `ctx.params`）。
+ *
+ * @param {RunCtx} ctx
+ * @returns {import("@amayui/lift-plugin").ConfigDomain | null}
+ */
+function configDomainOrNull(ctx) {
+    const config = ctx.config;
+    if (config === undefined || config === null || config.available !== true) return null;
+    return config.domain(CONFIG_DOMAIN);
+}
+
+/** @param {import("@amayui/lift-plugin").ConfigDomain | null} domain @param {string} key */
+function hasConfig(domain, key) {
+    return domain !== null && domain.has(key);
+}
+
+/**
+ * `slot`：config 优先（必须是整数）；否则 params（旧行为），缺 ⇒ 10。
+ *
+ * @param {RunCtx} ctx
+ * @param {import("@amayui/lift-plugin").ConfigDomain | null} domain
  * @returns {number}
  */
-function slotFromParams(params) {
-    const raw = params["slot"];
+function slotSetting(ctx, domain) {
+    if (hasConfig(domain, "slot")) {
+        const value = domain.get("slot");
+        if (typeof value !== "number" || !Number.isInteger(value)) {
+            throw new Error(`config ${CONFIG_DOMAIN}.slot 必须是整数（收到 ${String(value)}）`);
+        }
+        return value;
+    }
+    const raw = ctx.params["slot"];
     if (raw === undefined || raw === null || String(raw).trim() === "") return SLOT;
     return Number(raw);
 }
 
 /**
- * @param {Readonly<Record<string, string | null | undefined>>} params
+ * `expect`：config 优先（string[] / 逗号串）；否则 params（旧行为），缺 ⇒ `DEFAULT_EXPECT`。
+ *
+ * @param {RunCtx} ctx
+ * @param {import("@amayui/lift-plugin").ConfigDomain | null} domain
  * @returns {string[]}
  */
-function expectFromParams(params) {
-    const raw = params["expect"];
+function expectSetting(ctx, domain) {
+    if (hasConfig(domain, "expect")) {
+        const value = domain.get("expect");
+        const out = [];
+        const push = (item) => {
+            if (typeof item !== "string" || item.trim() === "") {
+                throw new Error(
+                    `config ${CONFIG_DOMAIN}.expect 的元素必须是非空字符串（收到 ${String(item)}）`,
+                );
+            }
+            const name = item.trim();
+            out.push(name.endsWith(".BIN") ? name : name + ".BIN");
+        };
+        if (Array.isArray(value)) {
+            for (const item of value) push(item);
+        } else if (typeof value === "string") {
+            for (const part of value.split(",")) {
+                if (part.trim().length !== 0) push(part);
+            }
+        } else {
+            throw new Error(
+                `config ${CONFIG_DOMAIN}.expect 必须是 string[] 或逗号串（收到 ${typeof value}）`,
+            );
+        }
+        if (out.length === 0) {
+            throw new Error(`config ${CONFIG_DOMAIN}.expect 给空了（要么不给，要么给 ["FIELD.BIN"]）`);
+        }
+        return out;
+    }
+    const raw = ctx.params["expect"];
     if (raw === undefined || raw === null || String(raw).trim() === "") return DEFAULT_EXPECT;
     const out = [];
     for (const part of String(raw).split(",")) {
@@ -108,40 +174,40 @@ function expectFromParams(params) {
 
 /** @type {import("./chains.js").Chain | null} */
 let chain = null;
-/** @type {string | null} */
-let chainKey = null;
 
 /**
- * `ctx.params` 在一个 Run 内不变 ⇒ 链只构造一次（链本身无状态：进度只在 `ev.name`）。
+ * 一次 Run 内 config / params 不变 ⇒ 链只构造一次（链本身无状态：进度只在 `ev.name`）。
+ * ★ 2026-11-25：`ctx.config` 的读取也**只在第一次**做（每拍重读会在 2 ms 窗口里占可观测的份额）。
  *
- * @param {Readonly<Record<string, string | null | undefined>>} params
+ * @param {RunCtx} ctx
  * @returns {import("./chains.js").Chain}
  */
-function chainFor(params) {
-    const key = `${String(params["slot"])}|${String(params["expect"])}`;
-    if (chain !== null && chainKey === key) return chain;
-    const load = loadSave(slotFromParams(params), {
-        expect: expectFromParams(params),
-        onLoaded: (ctx) => scenario.start(ctx),
+function chainFor(ctx) {
+    if (chain !== null) return chain;
+    const domain = configDomainOrNull(ctx);
+    const slot = slotSetting(ctx, domain);
+    const expect = expectSetting(ctx, domain);
+    const load = loadSave(slot, {
+        expect,
+        onLoaded: (ctx2) => scenario.start(ctx2),
     });
     const boot = bootToTitle({
-        onDone: (ctx) => load.start(ctx),
+        onDone: (ctx2) => load.start(ctx2),
     });
     // 两层 route：外层剥 `boot:`，内层剥 `load:`，剩下的是场景自己的 `scenario:` 前缀。
     // ★ 三个前缀两两不相交（`boot:` / `load:` / `scenario:`）—— `route` 只看 `isFirst(ev)`。
     const afterBoot = route((ev) => String(ev.name).startsWith("load:"), load, scenario);
     chain = route((ev) => String(ev.name).startsWith("boot:"), boot, afterBoot);
-    chainKey = key;
     return chain;
 }
 
 /** @type {import("@amayui/lift-plugin").PluginModule} */
 const plugin = {
     start(ctx) {
-        return chainFor(ctx.params).start(ctx);
+        return chainFor(ctx).start(ctx);
     },
     onTrigger(ctx, ev) {
-        return chainFor(ctx.params).onTrigger(ctx, ev);
+        return chainFor(ctx).onTrigger(ctx, ev);
     },
 };
 
