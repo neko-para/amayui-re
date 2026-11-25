@@ -1,6 +1,6 @@
-// scripts/plugins/scenario-field-point-visible.js —— `FIELD` 上把「点位精灵」强制走**可见**那条分支
+// scripts/plugins/field-point-visible.js —— `FIELD` 上把「点位精灵」强制走**可见**那条分支
 //
-// 是什么：一个**开关**。配置域 `scenario.field-point-visible` 的 `on` ≠ 0 时（或回退的
+// 是什么：一个**开关**。配置域 `field.point-visible` 的 `on` ≠ 0 时（或回退的
 // `--plugin-param on=1`），在 `FIELD` 就绪后把 32 槽派生渲染标志
 // （`FIELD_OBJECT_FLAGS_GLOBAL_ID` = `0x50ff9f`）里、类型命中（缺省 採集 `0x1F` / 発掘 `0x20`）的槽
 // 的 `HIDE|ALPHA0` 两位**清掉** ⇒ `DRAWOBJ.BIN` instr#7 不再跳过、instr#26 不再把 alpha 置 0
@@ -35,13 +35,13 @@
 //      ⛔ 把 SAVE*.DAT 放到 `<appdata>` 根目录 ⇒ 引擎新建空 `SAVE/` ⇒ 读档列表为空 ⇒ 点行不弹确认框
 //      （`load-save: gate timeout (load:sbunki)`；2026-11-24/25 的失败全是这一条，与 headless/window 无关）。
 //   1) 在 **appdata 根**（与 `Local/` 同级，⛔ 不在 `SAVE/` 下）写 `plugin-config.json`：
-//        {"version":1,"domains":{"scenario.field-point-visible":{"slot":10,"on":1,"hold":3000}}}
+//        {"version":1,"domains":{"field.point-visible":{"slot":10,"on":1,"hold":3000}}}
 //      域 key（全部可选；缺省 = `slot 10` / `on 0` / `types ["1f","20"]` / `hold 3000` / `diag 0`）：
 //        `slot` number / `on` number|bool / `types` hex 串 `"1f,20"` 或数组 / `hold` number / `diag` number
 //   2) 不带 `--plugin-param` 直接跑：
 //      ./out/emulator-lift-aot.exe --game-dir ../../links/install --appdata ../../.tmp/field-model/appdata \
 //        --present headless --skip-logo --audio off --time-limit 180 --log-level warn \
-//        --plugin scripts/plugins/scenario-field-point-visible.js
+//        --plugin scripts/plugins/field-point-visible.js
 //   ★ 回退（夹具 / 诊断；config 里没给的 key 才生效）：
 //        --plugin-param slot=10 --plugin-param on=1 --plugin-param hold=3000
 //   ★ `slot=10` = SAVE10（落在 FIELD；进屏页 1 第 0 行 ⇒ 不用翻页；2026-11-25 实测）。
@@ -84,7 +84,7 @@ const MAX_LOGGED_SLOTS = 12;
 const DIAG_SAMPLES = 8;
 
 /** 配置文件里的域（`<--appdata>/plugin-config.json`；只读）。 */
-const CONFIG_DOMAIN = "scenario.field-point-visible";
+const CONFIG_DOMAIN = "field.point-visible";
 
 /**
  * `types`：config 可给 hex 串 `"1f,20"` 或数组（元素 = hex 串或数字）；params 只有逗号串。

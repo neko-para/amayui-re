@@ -13,7 +13,7 @@ scripts/plugins/
 ├── scenario-save07-battle.js    # 入口（id = 文件名 stem）
 ├── scenario-save10-field.js
 ├── scenario-fellow-switch.js
-├── scenario-field-point-visible.js
+├── field-point-visible.js
 └── lib/                         # **只被 import**：永远不是 --plugin 的 id 目标
     ├── save.js                  #   loadSave / SAVE_DIR_REL / 前置检查（没有 default 导出）
     ├── boot-to-title.js · chains.js · script-positions.js · guest-globals.js · recipe.js
@@ -46,7 +46,7 @@ scripts/plugins/
 `rm -rf` 会把它一起删掉）：
 
 ```json
-{"version":1,"domains":{"scenario.field-point-visible":{"slot":10,"on":1,"hold":3000}}}
+{"version":1,"domains":{"field.point-visible":{"slot":10,"on":1,"hold":3000}}}
 ```
 
 优先级：**config > `--plugin-param` > 默认**；"给了"的判据是 `domain.has(key)`（`slot:0` / `on:0`
@@ -56,7 +56,7 @@ scripts/plugins/
 |---|---|---|
 | `save` | `slot` (number)、`expect` (string[] 或逗号串)、可选 `saveDir` (string，相对 appdata 根)、`timeoutMs` (number)、`precheck` (boolean，缺省 true；false = 跳过存档文件前置检查) | 根入口 `load-save.js`（库 = `lib/save.js`） |
 | `scenario.save10-field` | `slot` (number)、`expect` (string[] 或逗号串) | `scenario-save10-field.js`（根） |
-| `scenario.field-point-visible` | `slot` (number，缺省 10)、`on` (number/bool，缺省 0)、`types` (hex 串 `"1f,20"` 或数组)、`hold` (number，缺省 3000)、`diag` (number，缺省 0) | `scenario-field-point-visible.js`（根） |
+| `field.point-visible` | `slot` (number，缺省 10)、`on` (number/bool，缺省 0)、`types` (hex 串 `"1f,20"` 或数组)、`hold` (number，缺省 3000)、`diag` (number，缺省 0) | `field-point-visible.js`（根） |
 
 - 域自动创建、不注册、可共享；域 id = `^[A-Za-z0-9._-]{1,64}$`；域 id 与 key 都拒
   `__proto__` / `prototype` / `constructor`。未知顶层键 / 未知域内键**保留**（前向兼容）。

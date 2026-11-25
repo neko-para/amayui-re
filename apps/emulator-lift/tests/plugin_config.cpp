@@ -353,7 +353,7 @@ int main() {
             LIFT_CHECK(!why.empty());
             LIFT_CHECK(!PluginConfig::checkKey(name, &why));
         }
-        LIFT_CHECK(PluginConfig::checkDomain("scenario.field-point-visible", &why));
+        LIFT_CHECK(PluginConfig::checkDomain("field.point-visible", &why));
         LIFT_CHECK(!PluginConfig::checkDomain("bad id", &why));
         LIFT_CHECK(!PluginConfig::checkDomain(std::string(65, 'a'), &why));
         LIFT_CHECK(!PluginConfig::checkDomain("", &why));

@@ -972,7 +972,7 @@ export default plugin;   // 宿主 QJS 读 default 导出；⛔ 不读 globalThi
   库消费者用**具名** `loadSave(slot, { expect })`（签名与链形状**不变**）。
 - **三个内建插件的域**（配置的 owner 表见 `apps/emulator-lift/scripts/plugins/README.md`）：
   `save`（根入口 `load-save.js`，库是 `lib/save.js`）/ `scenario.save10-field`（根 `scenario-save10-field.js`，
-  key `slot`/`expect`）/ `scenario.field-point-visible`（根 `scenario-field-point-visible.js`，
+  key `slot`/`expect`）/ `field.point-visible`（根 `field-point-visible.js`，
   key `slot`/`on`/`types`/`hold`/`diag`）。
   三者一律"先看 `ctx.config.available` 再回退 params"；`on:0` / `slot:0` 这种 falsy 值也算"给了"
   （判据是 `domain.has(key)`，⛔ 不是真值）。

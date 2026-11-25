@@ -50,15 +50,15 @@ cd E:/Projects/amayui-re-dev/apps/emulator-lift
 bash scripts/clean-appdata.sh ../../.tmp/field-model/appdata
 # 0') 插件配置写在 **appdata 根**（与 Local/ 同级；⛔ 不在 SAVE/ 下）
 cat > ../../.tmp/field-model/appdata/plugin-config.json <<'JSON'
-{"version":1,"domains":{"scenario.field-point-visible":{"slot":10,"on":1,"hold":3000}}}
+{"version":1,"domains":{"field.point-visible":{"slot":10,"on":1,"hold":3000}}}
 JSON
 # ① 插件门：载入槽 10（SAVE10 → FIELD）→ 等主轮询体 → 改派生渲染位
-#    ★ 不带 --plugin-param：参数来自上面那份 plugin-config.json（域 scenario.field-point-visible）。
+#    ★ 不带 --plugin-param：参数来自上面那份 plugin-config.json（域 field.point-visible）。
 #    ★ S1 起用 **id**（`--plugin <id>` 只查 scripts/plugins/ 根，非递归；路径写法也仍然可用）。
 ./out/emulator-lift-aot.exe \
   --game-dir ../../links/install --appdata ../../.tmp/field-model/appdata \
   --present headless --skip-logo --audio off --time-limit 180 --log-level warn \
-  --plugin scenario-field-point-visible
+  --plugin field-point-visible
 # 读数（2026-11-25 / win32 / dev `996bafa`+本轮 / headless）：
 #   load-save: page 1 (target 1, slot 10) → row hovered → SBUNKI hit → reached FIELD.BIN
 #   field-points: FIELD 就绪 ⇒ switch on=1 types=0x1f,0x20
