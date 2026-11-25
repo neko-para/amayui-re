@@ -21,8 +21,18 @@
 //   ★ `exe_dir` 为空（`argv[0]` 不含分隔符 / PATH 启动）⇒ 该根跳过，**只查 `LIFT_PLUGIN_DIR`**；
 //     两个根指向同一路径时**去重**（同一份文件不报成歧义）。
 //
+// ★ **S2：`hud` 是保留 id**（`--overlay` = `--plugin hud` 预设 ⇒ 两个入口必须同一解析）：
+//     · 解析顺序**先于**普通插件根：`<exeDir>/scripts/ui/hud.js`（发行）→
+//       `hud_dev_dir/hud.js`（开发回退 = 编译期 `LIFT_UI_SCRIPT_DIR`）；
+//     · 但**用户插件根里存在 `hud.js`**（`<exeDir>/scripts/plugins/hud.js` 或 `LIFT_PLUGIN_DIR/hud.js`）
+//       ⇒ `ReservedShadowed`（调用方 exit 2 并列出路径）：⛔ 不静默让用户文件被内置件遮住；
+//     · 保留 id **不**进普通根的命中集合（普通根只在遮蔽检查里读）；
+//     · 路径形式（含 `.js`）**不**享受保留语义 ⇒ `--plugin <...>/hud.js` 仍是普通路径（behavior 不变）。
+//
 // ★ 命中 1 处 ⇒ `path` = **绝对路径**（交给 `initFromFile`）；命中 ≥2 ⇒ `Ambiguous`（⛔ 不静默取第一个）；
 //   0 ⇒ `NotFound`（`searched` 里是**每个**候选路径，错误文案由调用方按它拼）。
+//   ★ 保留 id `hud` 是**例外**：保留根按"发行 → 开发回退"的**优先序**取第一个命中（与 S2 之前的
+//     `--overlay` 解析逐字相同；两份都在场时 exe 那份赢，⛔ 不把"发行优先"变成启动失败）。
 // ★ 路径形式**原样返回**（⛔ 不绝对化、⛔ 不做存在性检查）：cwd 相对 / 绝对 / 装载失败 exit 2
 //   三条行为与 S1 之前**逐字相同**。
 // ★ 纯函数：除了按传入的 roots 读文件系统（`is_regular_file`）之外没有任何全局状态 ⇒ 可以被
@@ -33,6 +43,9 @@
 #include <vector>
 
 namespace lift::plugin {
+
+/** `--overlay` 预设解析的保留 id（也是 `--plugin` 的保留名：用户插件根里出现同名文件 ⇒ exit 2）。 */
+inline constexpr const char* kReservedHudId = "hud";
 
 /** spec 的两类（`id` / `path`；判据见文件头）。 */
 enum class PluginSpecKind {
@@ -45,11 +58,19 @@ struct PluginResolveRoots {
     std::string exe_dir;
     /** ② 开发根：编译期 `LIFT_PLUGIN_DIR`（源码树 `scripts/plugins`；空 = 跳过这个根）。 */
     std::string dev_dir;
+    /**
+     * 保留 id `hud` 的**开发回退根**：编译期 `LIFT_UI_SCRIPT_DIR`（源码树 `scripts/ui`；空 = 跳过）。
+     * 发行侧不需要新字段：`<exe_dir>scripts/ui/hud.js` 由 `exe_dir` 派生（与 `--overlay` 旧布局同形）。
+     */
+    std::string hud_dev_dir;
 };
 
 struct PluginResolveResult {
-    /** `Ok` = 可以装载；`NotFound` / `Ambiguous` = 调用方必须 `exit 2` 并点名候选。 */
-    enum class Status { Ok, NotFound, Ambiguous };
+    /**
+     * `Ok` = 可以装载；`NotFound` / `Ambiguous` / `ReservedShadowed` = 调用方必须 `exit 2` 并点名候选。
+     * `ReservedShadowed`（S2）= 保留 id `hud` 被用户插件根里的 `hud.js` 遮住（⛔ 不静默换源）。
+     */
+    enum class Status { Ok, NotFound, Ambiguous, ReservedShadowed };
 
     Status status = Status::Ok;
     PluginSpecKind kind = PluginSpecKind::Path;
@@ -64,7 +85,10 @@ struct PluginResolveResult {
     std::string path;
     /** `kind == Id`：**按顺序**构造出来的全部候选（`NotFound` 的文案据此逐行列出）。 */
     std::vector<std::string> searched;
-    /** `kind == Id`：命中的候选（`Ok` 时恰好 1 条；`Ambiguous` 时 ≥2 条，全部是绝对路径）。 */
+    /**
+     * `kind == Id`：命中的候选（`Ok` 时恰好 1 条；`Ambiguous` 时 ≥2 条，全部是绝对路径）。
+     * `ReservedShadowed` 时 = **用户插件根里**那些 `hud.js`（全部是绝对路径）。
+     */
     std::vector<std::string> hits;
 };
 
@@ -75,7 +99,7 @@ bool isPluginId(const std::string& spec);
  * 解析 `--plugin` 的 spec。
  *
  * @param spec   CLI 原串（UTF-8）
- * @param roots  两个白名单根（`exe_dir` / `dev_dir`；空串 = 跳过该根）
+ * @param roots  白名单根（`exe_dir` / `dev_dir` / 保留 id 的 `hud_dev_dir`；空串 = 跳过该根）
  * @return       分类 + （id 时）全部候选 / 命中；`Path` 永远 `Ok` 且 `path == spec`
  */
 PluginResolveResult resolvePluginSpec(const std::string& spec, const PluginResolveRoots& roots);

@@ -862,23 +862,30 @@ partial / instrument / unaccounted / coverage / lift_dyn / verdict`）。
 - 是否继续扩展、以及 A/B 数字见需求单（§5）。
 
 **窗口调试叠层（`--overlay`，默认关；只作用于 `--present window`）**：在**呈现画面左上角**叠一块
-`mouse <x>,<y>` / `fps <x.x>` / `frame <n>` / `raster <cpu|gpu>` / `present <direct|renderer>`
-（`mouse` = **guest 客户区坐标**，与配方的 `click x y` 同一格；最近 1 s 的 Present 次数 = `fps`）。
-另有 `script`（当前顶层脚本身份，名字来自引擎名字表；从未采到身份就整行省略）与 `worst`（最近 3 s 内
-**每帧** wall / guest / shim 的最大值，每帧 = 相邻两次 Present 的间隔；`guest` 需要块计时，没开时写 `--`）。
+`mouse <x>,<y>` / `script` / `fps <x.x>` / `frame <n>` / `worst 3s …` 的 HUD
+（`mouse` = **guest 客户区坐标**，与配方的 `click x y` 同一格；最近 1 s 的 Present 次数 = `fps`；
+`script` 取帧列表的 top 项，没有就回退当前帧身份；`worst` = 最近 3 s 的 wall / guest / shim 最大值）。
 拿不到的字段**整行省略**（⛔ 不编数字）。⛔ 只改**宿主送显的窗口像素**：不写 guest 内存。
 叠层只在**窗口**与 `--present-screenshot`（窗口像素）里可见；`--dump-frame` 是 **guest 帧**
 （`arena.dumpBmp`），不含叠层 —— 与"guest 像素 / 整帧 hash 零改动"同口径。
 两条呈现路径（GPU 直出 / SDL_Renderer 上传）都画；守卫 = `tests/overlay.cpp`（CTest `overlay` /
-`overlay-gpu`）。
+`overlay-gpu`）与 `tests/aot_overlay.cpp`（`aot-overlay`）。
+
+★ **S2（2026-11-25）**：HUD 已是**真插件**（`scripts/ui/hud.js` 的 `export default { render(ctx) }`）；
+`--overlay` = 「装载内置 `hud`（保留 id）+ 要求窗口」的**预设**，与 `--overlay --plugin hud` 逐字节
+等价（`tests/aot_overlay.cpp` 的窗口 BMP / guest dump 对照）。`hud` 的解析顺序 =
+`<exeDir>/scripts/ui/hud.js` → `LIFT_UI_SCRIPT_DIR/hud.js`（exe 赢）；用户插件根里的 `hud.js`
+⇒ `exit 2`。`--plugin hud` **不隐含开窗**（headless ⇒ 一行 `render is defined but no window`）。
+说明见 [`scripts/ui/README.md`](scripts/ui/README.md) 与
+[`docs/03-emulator/plugin-runtime.md`](../../docs/03-emulator/plugin-runtime.md) §4.6。
 
 **插件入口（`--plugin <id|path>`）**：`--plugin` 收两种 spec —— **id**（`^[A-Za-z0-9_-]{1,64}$`，
 文件名 stem）或**路径**（含 `.` / `/` / `\` 的写法一律当路径，所以 `x.js` 仍是 cwd 相对路径）。
 id 只查 `scripts/plugins/` 的**根**（`<exeDir>/scripts/plugins/<id>.js` 与编译期
 `LIFT_PLUGIN_DIR/<id>.js` 两处，**非递归**；⛔ 不查 `lib/`），两根都命中 / 都不在都 `exit 2`
 并列出候选。目录布局 = **入口在根、库在 `lib/`**（`lib/` 只被 import），说明与域表见
-[`scripts/plugins/README.md`](scripts/plugins/README.md)。`--ui <path>` 仍可用但**已弃用**
-（S1 只打一行 deprecation，行为不变；下一轮删）。
+[`scripts/plugins/README.md`](scripts/plugins/README.md)。`hud` 是**保留 id**（解析在 `scripts/ui/`，
+不在本目录；见上）。`--ui <path>` 仍可用但**已弃用**（S1 只打一行 deprecation，行为不变；S3 删）。
 
 ### 4.3.1 一帧的墙钟去哪了（逐帧诊断）
 

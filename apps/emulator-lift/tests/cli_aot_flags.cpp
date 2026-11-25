@@ -187,6 +187,11 @@ int main(int argc, char** argv) {
         LIFT_CHECK(r.out.find("不查 `lib/`") != std::string::npos);
         LIFT_CHECK(r.out.find("--plugin-param k=v") != std::string::npos);
         LIFT_CHECK(r.out.find("export default") != std::string::npos);
+        // ★ S2：`hud` 是**保留 id**（`--overlay` = `--plugin hud` 预设）⇒ help 必须写出来
+        //   （否则"为什么用户插件根里的 hud.js 会让启动 exit 2"只能靠读源码）。
+        LIFT_CHECK(r.out.find("保留 id `hud`") != std::string::npos);
+        LIFT_CHECK(r.out.find("--plugin hud") != std::string::npos);
+        LIFT_CHECK(r.out.find("scripts/ui/hud.js") != std::string::npos);
         // ★ S1：`--ui` 仍在（**只 deprecated、不删**）⇒ help 必须标出来。
         LIFT_CHECK(r.out.find("已弃用") != std::string::npos);
     }
@@ -283,6 +288,22 @@ int main(int argc, char** argv) {
         LIFT_CHECK(countOccurrences(r.err, kUiDeprecatedMarker) == 1u);
         LIFT_CHECK(r.err.find("[ui]") == std::string::npos);
         LIFT_CHECK(r.err.find("--plugin <path>") != std::string::npos);
+    }
+
+    // ---- ①⁰³ S2 `--overlay` = `--plugin hud` 预设，但**仍是窗口参数** ----
+    //   判据（红了意味着什么）：预设把"要窗口"吃掉了（`--overlay --present headless` 不再 exit 2），
+    //   或预设没解析 hud（没有那行 `--plugin id=hud` —— 用户看不到"它到底装了谁"）。
+    //   ★ 这条在 `--present` 校验之前完成解析（与 `--plugin` 同一条），所以纯 CLI 可判。
+    g_current_case = "overlay-headless-rejected";
+    {
+        const ChildResult r =
+            runChild(exe, {"--overlay", "--present", "headless"}, childOptions(root));
+        LIFT_CHECK(r.started);
+        LIFT_CHECK(!r.timed_out);
+        LIFT_CHECK_EQ_U32(r.exit_code, 2u);
+        LIFT_CHECK(r.err.find("headless 不接受窗口参数") != std::string::npos);
+        LIFT_CHECK(r.err.find("--overlay") != std::string::npos);  // 窗口参数清单点名它
+        LIFT_CHECK(r.err.find("--plugin id=hud") != std::string::npos);  // 预设真的解析了保留 id
     }
 
     // ---- ①⁰ S9 `--ui-input=consume|pass`：值域 + **窗口参数**语义 ----

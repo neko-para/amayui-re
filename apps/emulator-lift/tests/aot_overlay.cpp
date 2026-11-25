@@ -20,6 +20,13 @@
 //   ⑤ 整轮 stderr 里没有 `[overlay]` / `[ui]` 的**周期行**（M0 判据 5；一次性收口行不算）。
 //      ★ 形状：这两类前缀出现次数 ≤ 1（允许将来一条一次性 readout），⛔ 不是"字符串不出现"。
 //
+// ★ S2（`--overlay` = `--plugin hud` 预设）新增判据：
+//   ⑥ `--overlay --present headless` 仍 **exit 2**；`--plugin hud --present headless` **exit 0** +
+//      恰一行 `render is defined but no window`（⛔ 不自动开窗）。
+//   ⑦ `--plugin hud`（窗口档）与 `--overlay` 的**窗口 BMP / guest dump 逐字节相同**
+//      （同一帧数、只换入口 ⇒ HUD 像素 / 行序 / 命中键 / bold 必须不变）。
+//   ⑧ `--overlay` + **显式** `--plugin`（有 render）⇒ 插件赢：像素 = 插件 fill + 恰一行取代语。
+//
 // ★ 缺 GPU / 生成物 / 执行源 / 安装树（`--game-dir`）/ 宿主字体 ⇒ `LIFT_SKIP(77)`（⛔ 不假绿）。
 // ★ 子进程 cwd / `--appdata` 都指到临时目录 ⇒ 不往仓库 / 真 AppData 写东西。
 // ★ 注册：顶层 `add_test` + `SKIP_RETURN_CODE 77`（与 `aot-audio-wiring` 同形；输入假定在场）。
@@ -481,6 +488,97 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---- S2：`--overlay --present headless` 仍 **exit 2**（`--overlay` 是窗口参数）----------
+    //   ★ `--overlay` 现在是 "`--plugin hud` 预设"：解析先跑（一行 id 日志），窗口参数校验照旧拒绝。
+    //   红了 ⇒ `--overlay` 的"要窗口"语义被预设吃掉（用户会得到一条静默的隐藏窗口 run）。
+    {
+        g_current_case = "overlay-headless-rejected";
+        std::vector<Arg> args;
+        args.push_back(argFromAscii("--exe"));
+        args.push_back(age_exe.native());
+        args.push_back(argFromAscii("--game-dir"));
+        args.push_back(game_dir.native());
+        for (const char* a : {"--skip-logo", "--present", "headless", "--time-limit", "60", "--overlay"}) {
+            args.push_back(argFromAscii(a));
+        }
+        const ChildRun r = runChild(exe, args, root, root / "overlay-headless.out", root / "overlay-headless.err");
+        LIFT_CHECK(r.started);
+        std::printf("overlay-headless: exit=%d\n", r.exit_code);
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.exit_code), 2u);
+        LIFT_CHECK(r.err.find("--overlay") != std::string::npos);
+    }
+
+    // ---- S2：`--plugin hud --present headless` ⇒ **不 exit 2** + 一行 render-no-window ------
+    //   ★ D-C2-5 的既有口径：render-only 插件允许 headless（`render` 永不调用）；⛔ 不自动开窗。
+    //   ★ 与 `--overlay --present headless` 的对照就是 S2 的语义分界：预设**不**改变窗口需求。
+    {
+        g_current_case = "plugin-hud-headless";
+        const fs::path appdata = root / "appdata-plugin-hud-headless";
+        fs::create_directories(appdata, ec);
+        std::vector<Arg> args;
+        args.push_back(argFromAscii("--exe"));
+        args.push_back(age_exe.native());
+        args.push_back(argFromAscii("--game-dir"));
+        args.push_back(game_dir.native());
+        for (const char* a : {"--skip-logo", "--present", "headless", "--time-limit", "60", "--max-frames", "1"}) {
+            args.push_back(argFromAscii(a));
+        }
+        args.push_back(argFromAscii("--appdata"));
+        args.push_back(appdata.native());
+        args.push_back(argFromAscii("--plugin"));
+        args.push_back(argFromAscii("hud"));
+        const ChildRun r = runChild(exe, args, root, root / "plugin-hud-headless.out",
+                                    root / "plugin-hud-headless.err");
+        LIFT_CHECK(r.started);
+        std::printf("plugin-hud-headless: exit=%d\n", r.exit_code);
+        if (r.out.find("没有生成物") != std::string::npos) LIFT_SKIP("构建期没有生成物");
+        if (r.err.find("没有可用的 GPU 光栅化后端") != std::string::npos) LIFT_SKIP("本机没有可用的 GPU 光栅化后端");
+        if (r.err.find("宿主字体不可用") != std::string::npos) LIFT_SKIP("缺宿主字体");
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.exit_code), 0u);
+        LIFT_CHECK(r.err.find("--plugin id=hud") != std::string::npos);
+        LIFT_CHECK(countOccurrences(r.err, "render is defined but no window") == 1u);
+        LIFT_CHECK(r.err.find("[overlay]") == std::string::npos);  // headless 不建叠层 / 不装字体
+    }
+
+    // ---- S2：`--overlay` + **显式** `--plugin`（有 render）⇒ 插件赢 + 一次取代语（C2b-2 既有口径）----
+    //   红了 ⇒ S2 的预设把"用户显式给的插件"顶掉，或者取代语被错误地当成"预设"而不打。
+    {
+        g_current_case = "overlay-plus-plugin-wins";
+        const fs::path plugin_js = fs::path(LIFT_PLUGIN_FIXTURES_DIR) / "overlay-render.js";
+        if (!fs::exists(plugin_js)) LIFT_SKIP("夹具 overlay-render.js 不在场");
+        const fs::path appdata = root / "appdata-overlay-plus-plugin";
+        fs::create_directories(appdata, ec);
+        const fs::path shot = root / "overlay-plus-plugin.bmp";
+        std::vector<Arg> args = common;
+        args.push_back(argFromAscii("--max-frames"));
+        args.push_back(argFromAscii("1"));
+        args.push_back(argFromAscii("--appdata"));
+        args.push_back(appdata.native());
+        args.push_back(argFromAscii("--overlay"));
+        args.push_back(argFromAscii("--plugin"));
+        args.push_back(plugin_js.native());
+        args.push_back(argFromAscii("--present-screenshot"));
+        args.push_back(shot.native());
+        const ChildRun r = runChild(exe, args, root, root / "overlay-plus-plugin.out", root / "overlay-plus-plugin.err");
+        LIFT_CHECK(r.started);
+        std::printf("overlay-plus-plugin: exit=%d\n", r.exit_code);
+        if (r.out.find("没有生成物") != std::string::npos) LIFT_SKIP("构建期没有生成物");
+        if (r.err.find("没有可用的 GPU 光栅化后端") != std::string::npos) LIFT_SKIP("本机没有可用的 GPU 光栅化后端");
+        if (r.err.find("宿主字体不可用") != std::string::npos) LIFT_SKIP("缺宿主字体");
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.exit_code), 0u);
+        LIFT_CHECK(countOccurrences(r.err, "--overlay 的 HUD 已被插件的 render 取代") == 1u);
+        const std::string shot_bytes = readAllBytes(shot);
+        const BmpPixel origin = bmpPixel(shot_bytes, 0, 0);
+        LIFT_CHECK(origin.ok);
+        if (origin.ok) {
+            const std::uint32_t got = (static_cast<std::uint32_t>(origin.r) << 16) |
+                                      (static_cast<std::uint32_t>(origin.g) << 8) |
+                                      static_cast<std::uint32_t>(origin.b);
+            std::printf("overlay-plus-plugin: shot(0,0)=#%06X want #%06X\n", got, kPluginFillRgb);
+            LIFT_CHECK_EQ_U32(got, kPluginFillRgb);
+        }
+    }
+
     // ★ 四次 run：① 判据 1（两帧，exit 0）；②/③ 用 **1 帧** 做开/关对照；④ 是 ③ 的**纯对照复制**
     //   （同一命令再跑一遍）：③ 与 ④ 若不相同 ⇒ 这个 run 本身非确定 ⇒ 跳过逐字节判据（⛔ 不假红）；
     //   ③ 与 ④ 相同而 ② 不同 ⇒ 真的是 UI 改写了 guest 后缓冲（红）。
@@ -561,6 +659,46 @@ int main(int argc, char** argv) {
         }
         outs.push_back(std::move(o));
     }
+    // ---- S2：`--plugin hud`（窗口档）与 `--overlay` **逐字节等价** ------------------------
+    //   ★ 同一帧数 / 同一套参数，只把"预设"换成显式插件：窗口 BMP 必须**逐字节相同**
+    //     （HUD 的行序 / 文案 / 颜色 / key / bold 全都在里面）；guest dump 也必须相同。
+    //   ★ 判据可判定性由 ③/④ 的纯对照先证明（这一轮的 guest 画面是确定的）。
+    ChildRun hud_run;
+    fs::path hud_shot;
+    fs::path hud_dump;
+    {
+        g_current_case = "plugin-hud-window";
+        const fs::path appdata = root / "appdata-plugin-hud-window";
+        fs::create_directories(appdata, ec);
+        hud_shot = root / "plugin-hud-window-shot.bmp";
+        hud_dump = root / "plugin-hud-window-dump.bmp";
+        std::vector<Arg> args = common;
+        args.push_back(argFromAscii("--max-frames"));
+        args.push_back(argFromAscii("1"));
+        args.push_back(argFromAscii("--appdata"));
+        args.push_back(appdata.native());
+        args.push_back(argFromAscii("--plugin"));
+        args.push_back(argFromAscii("hud"));
+        args.push_back(argFromAscii("--present-screenshot"));
+        args.push_back(hud_shot.native());
+        args.push_back(argFromAscii("--dump-frame"));
+        args.push_back(hud_dump.native());
+        hud_run = runChild(exe, args, root, root / "plugin-hud-window.out", root / "plugin-hud-window.err");
+        LIFT_CHECK(hud_run.started);
+        std::printf("plugin-hud-window: exit=%d\n", hud_run.exit_code);
+        if (hud_run.out.find("没有生成物") != std::string::npos) LIFT_SKIP("构建期没有生成物");
+        if (hud_run.err.find("没有可用的 GPU 光栅化后端") != std::string::npos) {
+            LIFT_SKIP("本机没有可用的 GPU 光栅化后端");
+        }
+        if (hud_run.err.find("宿主字体不可用") != std::string::npos) LIFT_SKIP("缺宿主字体");
+        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(hud_run.exit_code), 0u);
+        // 保留 id 的一次性日志（与普通 id 同形；`--overlay` 预设也走这一行）。
+        LIFT_CHECK(hud_run.err.find("--plugin id=hud") != std::string::npos);
+        // ⛔ 预设不是"取代"：那一行只属于显式 `--overlay` + `--plugin`。
+        LIFT_CHECK(hud_run.err.find("HUD 已被插件的 render 取代") == std::string::npos);
+        LIFT_CHECK(hud_run.err.find("[overlay]") == std::string::npos);
+    }
+
     if (outs.size() != 4) return finish("aot-overlay");
     if (outs[0].run.exit_code != 0) return finish("aot-overlay");
 
@@ -616,6 +754,21 @@ int main(int argc, char** argv) {
     std::printf("④ lastHash: overlay=%s plain=%s\n", hash_overlay.c_str(), hash_plain.c_str());
     LIFT_CHECK(!hash_overlay.empty());
     LIFT_CHECK(hash_overlay == hash_plain);
+
+    // ⑦ S2 等价：`--plugin hud`（显式）与 `--overlay`（预设）**同一个窗口 BMP / guest dump**。
+    //   ★ 判据是**逐字节**（比 hash 更直接）；可判定性由 ③/④ 的纯对照先证明。
+    //   红了 ⇒ 两个入口不是同一条装配（HUD 行序 / 颜色 / 命中键 / bold，或 guest 像素被改写）。
+    {
+        g_current_case = "plugin-hud-equivalence";
+        const std::string hud_shot_bytes = readAllBytes(hud_shot);
+        const std::string hud_dump_bytes = readAllBytes(hud_dump);
+        std::printf("⑦ hud-vs-overlay: shot=%zu/%zu equal=%d dump=%zu/%zu equal=%d\n", hud_shot_bytes.size(),
+                    shot_overlay.size(), hud_shot_bytes == shot_overlay ? 1 : 0, hud_dump_bytes.size(),
+                    dump_overlay.size(), hud_dump_bytes == dump_overlay ? 1 : 0);
+        LIFT_CHECK(!hud_shot_bytes.empty());
+        LIFT_CHECK(hud_shot_bytes == shot_overlay);
+        LIFT_CHECK(hud_dump_bytes == dump_overlay);
+    }
 
     return finish("aot-overlay");
 }

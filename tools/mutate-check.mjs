@@ -5596,6 +5596,24 @@ const MUTATIONS = [
       '`hits` 仍有 2 条 —— 红在**分类**，不在命中计数）',
   },
 
+  // ── S2：保留 id `hud` 的**遮蔽判据**（用户插件根里的 hud.js 必须 exit 2）──────────────────
+  //   ★ 这一类错长什么样：`--overlay` / `--plugin hud` 在用户根里放了 `hud.js` 时**静默装内置件**
+  //     （用户以为装的是自己那份）或**静默装用户那份**（内置 HUD 被换掉）——两者都没有像素症状。
+  //   ★ 守卫 = `ctest:plugin-resolve` 的 `resolve/hud-shadowed-{exe,dev}-root`（pure）。
+  {
+    file: 'apps/emulator-lift/src/plugin/plugin_search.cpp',
+    from: '        if (!result.hits.empty()) {\n            result.status = PluginResolveResult::Status::ReservedShadowed;',
+    to: '        if (false) {  // 变异：遮蔽判据被绕过（继续走保留根 = 静默换源）\n            result.status = PluginResolveResult::Status::ReservedShadowed;',
+    guard: 'ctest:plugin-resolve',
+    ctest: 'plugin-resolve',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-resolve',
+    what:
+      '`resolvePluginSpec` 的保留 id 遮蔽检查 `if (!result.hits.empty())` → `if (false)` ⇒ ' +
+      '`resolve/hud-shadowed-exe-root` / `resolve/hud-shadowed-dev-root` 红：`status` 不再是 ' +
+      '`ReservedShadowed`（变成 `Ok` + 内置保留根路径 —— 用户文件被静默遮住）',
+  },
+
   // ── BUG-38：屏幕→NDC 的 **D3D9 半像素**（`kD3d9PixelCenterBias`）──────────────────────
   //   ★ 这一类错长什么样：D3D9 的像素中心在**整数**格点上（MSDN「Coordinate Systems
   //     (Direct3D 10)」的差异段：「In Direct3D 9, pixel centers are at integer locations.」），

@@ -81,6 +81,7 @@ PluginResolveResult resolvePluginSpec(const std::string& spec, const PluginResol
     if (!isPluginId(spec)) {
         // ★ 路径形式：**原样**（cwd 相对 / 绝对 / `.js` / 空串），⛔ 不绝对化、⛔ 不早检查存在性
         //   （那会把"装载失败 exit 2"的文案换成另一句，等于改行为）。
+        //   ★ 保留 id 的语义**只对 id 形式**生效：`--plugin <...>/hud.js` 仍是普通路径。
         result.kind = PluginSpecKind::Path;
         result.path = spec;
         result.status = PluginResolveResult::Status::Ok;
@@ -89,8 +90,6 @@ PluginResolveResult resolvePluginSpec(const std::string& spec, const PluginResol
 
     result.kind = PluginSpecKind::Id;
     result.id = spec;
-    const std::string file_name = spec + ".js";
-    // ★ 顺序 = 发行优先、开发回退（与 `--overlay` 的 hud 解析同一条口径）；⛔ 不查 `lib/`、⛔ 不递归。
     // ★ 两个根**可能指向同一路径**（同一目录 / junction / 把 exe 放进源码 plugins 目录）⇒ 候选去重：
     //   同一份文件不许被报成歧义（用户口径的"两根同名 ⇒ exit 2"指的是**两份不同文件**）。
     const auto push_candidate = [&result](const std::string& candidate) {
@@ -99,31 +98,79 @@ PluginResolveResult resolvePluginSpec(const std::string& spec, const PluginResol
         }
         result.searched.push_back(candidate);
     };
+    // ★ 命中再按**文件身份**去重（canonical 相同 = 同一份文件：符号链接 / junction / 大小写别名）：
+    //   报错文案里的"N 处"必须是 N 份**不同**文件。canonical 取不到（权限 / 不存在）⇒ 退回候选原串。
+    const auto collect_hits = [&result]() {
+        std::vector<fs::path> identities;
+        for (const std::string& candidate : result.searched) {
+            if (!isRegularFile(candidate)) continue;
+            std::error_code ec;
+            fs::path identity = fs::weakly_canonical(pathFromUtf8(candidate), ec);
+            if (ec) identity = pathFromUtf8(candidate);
+            bool duplicate = false;
+            for (const fs::path& seen : identities) {
+                if (seen == identity) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) continue;
+            identities.push_back(identity);
+            result.hits.push_back(candidate);
+        }
+    };
+
+    // ---- S2：保留 id `hud`（`--overlay` 预设与 `--plugin hud` 走同一解析）----
+    //   ① 用户插件根里的 `hud.js` = **遮蔽**（exit 2；⛔ 不静默换源 / 不静默被内置件遮住）；
+    //   ② 之后才是保留根（发行 → 开发回退），顺序与旧 `--overlay` 完全一致；
+    //   ③ 普通根的候选**不进** `searched` 的"找不到"清单（那一层不参与保留 id 的解析）。
+    if (spec == kReservedHudId) {
+        const std::string shadow_name = std::string(kReservedHudId) + ".js";
+        if (!roots.exe_dir.empty()) {
+            push_candidate(absoluteOf(candidatePath(roots.exe_dir, shadow_name, true)));
+        }
+        if (!roots.dev_dir.empty()) {
+            push_candidate(absoluteOf(candidatePath(roots.dev_dir, shadow_name, false)));
+        }
+        collect_hits();
+        if (!result.hits.empty()) {
+            result.status = PluginResolveResult::Status::ReservedShadowed;
+            return result;
+        }
+        // 遮蔽检查的候选已用完 ⇒ 换成保留根的候选（`searched` 是 NotFound 的唯一文案来源）。
+        result.searched.clear();
+        if (!roots.exe_dir.empty()) {
+            // `<exeDir>scripts/ui/hud.js`（发行布局；与 `--overlay` 旧解析同形）。
+            fs::path hud_exe = pathFromUtf8(roots.exe_dir);
+            hud_exe /= "scripts";
+            hud_exe /= "ui";
+            hud_exe /= pathFromUtf8(shadow_name);
+            push_candidate(absoluteOf(hud_exe));
+        }
+        if (!roots.hud_dev_dir.empty()) {
+            push_candidate(absoluteOf(candidatePath(roots.hud_dev_dir, shadow_name, false)));
+        }
+        collect_hits();
+        // ★ 保留 id 用**优先序**（发行 → 开发回退），与 S2 之前的 `--overlay` 逐字同一条：
+        //   两份都在场时 exe 那份赢（⛔ 不报歧义 —— 那会把"发行优先"变成启动失败）。
+        if (!result.hits.empty()) {
+            result.path = result.hits.front();
+            result.status = PluginResolveResult::Status::Ok;
+        } else {
+            result.status = PluginResolveResult::Status::NotFound;
+        }
+        return result;
+    }
+
+    const std::string file_name = spec + ".js";
+    // ★ 顺序 = 发行优先、开发回退（与 `--overlay` 的 hud 解析同一条口径）；⛔ 不查 `lib/`、⛔ 不递归。
     if (!roots.exe_dir.empty()) {
         push_candidate(absoluteOf(candidatePath(roots.exe_dir, file_name, true)));
     }
     if (!roots.dev_dir.empty()) {
         push_candidate(absoluteOf(candidatePath(roots.dev_dir, file_name, false)));
     }
-    // ★ 命中再按**文件身份**去重（canonical 相同 = 同一份文件：符号链接 / junction / 大小写别名）：
-    //   报错文案里的"N 处"必须是 N 份**不同**文件。canonical 取不到（权限 / 不存在）⇒ 退回候选原串。
-    std::vector<fs::path> identities;
-    for (const std::string& candidate : result.searched) {
-        if (!isRegularFile(candidate)) continue;
-        std::error_code ec;
-        fs::path identity = fs::weakly_canonical(pathFromUtf8(candidate), ec);
-        if (ec) identity = pathFromUtf8(candidate);
-        bool duplicate = false;
-        for (const fs::path& seen : identities) {
-            if (seen == identity) {
-                duplicate = true;
-                break;
-            }
-        }
-        if (duplicate) continue;
-        identities.push_back(identity);
-        result.hits.push_back(candidate);
-    }
+    collect_hits();
     if (result.hits.size() == 1) {
         result.path = result.hits.front();
         result.status = PluginResolveResult::Status::Ok;

@@ -47,6 +47,10 @@
 - **M0 起**：`kWindowFlagsAot` 已含 `--overlay`（AOT 臂 `aot_main.cpp` 解析并接线），
   `--present window --present-hidden --overlay --max-frames 2` ⇒ exit 0（`tests/aot_overlay.cpp`）；
   `--present headless` 仍按窗口参数拒绝它。
+- **S2 起（2026-11-25）**：`--overlay` 只剩两件——**要窗口**（窗口参数，headless exit 2）+ **预设**
+  （解析保留 id `hud` 并按 `--plugin` 装载，窗口档由 adopt 接进叠层）。`SdlWindow::init` 不再为
+  `--overlay` 装载 hud.js；`--overlay` 与 `--plugin hud` 的窗口 BMP / guest dump **逐字节相同**
+  （`tests/aot_overlay.cpp` 的 ⑦）。`--ui` 仍走旧 loader（deprecated，S3 删）。
 - `apps/emulator` / `apps/emulator-new` **没有宿主 overlay**：前者只命中一条 VFS 注释（`src/host/fs.ts`）；
   后者的 `KIND_TEXTURE_OVERLAY` / `KIND_MOVIE_OVERLAY` 是 **guest 场景绘制**，不是宿主叠层
   （`src/platform/electron/renderer/scene-command-plan.ts`）。
@@ -66,7 +70,7 @@
 | D9 | **默认档零成本、零周期输出**：没有 `--ui` ⇒ 一次 bool 判空；有插件但本帧无可见元素 ⇒ 不布局 / 不栅格 / 不上传 / 不打印；`[ui]` 行按（插件, 错误种类）去重 | `AGENTS.md` §12.8；一次性收口行不收 |
 | D10 | ★ **2026-11-19 部分反转**（原文：「⛔ **无 Promise / async**：`render` 必须**同步**产出 display list；宿主没有 job 队列」）：`Promise` **存在** —— `JS_AddIntrinsicPromise` 且**不删**（module 求值返回 Promise，是硬前提；需求单 `REQ-01M7QF01A00F9946DX0GPH23JQ`「裁决（2026-11-19）」第 4 条）；宿主有 job 泵（`script_quickjs.cpp:drainPendingJobs` → `JS_ExecutePendingJob`），但**只**跑 module 求值 / 关闭时的 microtask。**没变的**：`render` 仍必须**同步**产出 display list（没有跨帧 async / 协程）；`handleEvent` 仍不跑 JS | 一帧的 UI 由这一帧的输入决定；D10 限的是"跨帧异步"，不是语言里有没有 Promise |
 | D11 | AOT 的 `script/pos` **块入口采样门是新增面**，不是"接上已有的" | 解释器有 `Machine::sampleMarker`；AOT 只有控制层 `sample` 时读一次（`aot_host.h:control_marker_`） |
-| D12 | **不保留第二套**：M0 把两条绘制路径合并成 `presentOverlay`；M2 删 `formatOverlayLines` / `OverlayState` / `OverlayStatus`；`--overlay` 从 M2 起只是**外置** `scripts/ui/hud.js` 的参数别名（`--ui <path>` 打开任意脚本） | 两套实现必然漂移；旧 5×7 点阵随 M2 一起删（`--ui-glyphs bitmap` 测试档本切片不开） |
+| D12 | **不保留第二套**：M0 把两条绘制路径合并成 `presentOverlay`；M2 删 `formatOverlayLines` / `OverlayState` / `OverlayStatus`；`--overlay` 从 M2 起只是**外置** `scripts/ui/hud.js` 的参数别名（`--ui <path>` 打开任意脚本）。★ **S2 收紧**：`--overlay` = 「`--plugin hud`（保留 id）+ 要窗口」的预设；hud 走**同一个** PluginHost / adopt 叠层 host，⛔ 不再有"SdlWindow 先装 hud、adopt 再丢"的第二条装载路径 | 两套实现必然漂移；旧 5×7 点阵随 M2 一起删（`--ui-glyphs bitmap` 测试档本切片不开） |
 
 ## 3. 数据模型与 API
 
@@ -249,6 +253,13 @@ M3 的数据面仍未做。`mouse.buttons` 的源与缺键口径见 §3.5（窗�
 （只有 top 帧；`0x3C + (pc − base)`）。
 
 落 `overlay-quickjs.md` 的适配器；HUD 变成 `scripts/ui/hud.js`；display list 成为脚本唯一出口。
+
+★ **S2 已落地（2026-11-25）**：`hud.js` 成为**真插件**（`export default { render(ctx) }`，用
+`ctx.draw/text/measure` + `ctx.game.*` + `ctx.profile.*`），`--overlay` = 「装载内置 `hud`
+（保留 id）+ 要窗口」的预设；旧 `globalThis.render` 入口只为 `--ui`（deprecated）保留，两个入口
+共用同一份绘制体。`hud` 是保留 id：`<exeDir>/scripts/ui/hud.js` → `LIFT_UI_SCRIPT_DIR/hud.js`
+（exe 赢）；用户插件根里的 `hud.js` ⇒ exit 2。窗口档走 adopt（`SdlWindow::init` 不再为
+`--overlay` 装 hud）；`--plugin hud` 不隐含开窗。见 `plugin-runtime.md` §4.6。
 ★ **S9 已落**：`UiClickRouter` 已接进 `present_sdl.cpp:Impl::handleEvent` 与 `input_plan.cpp` 的
 `click` 路径；`--ui-input=consume|pass` 已实现（缺省 consume；窗口参数）。`--ui-strict` 仍未做。
 
@@ -304,6 +315,11 @@ AOT 块入口采样门；`game.script/pos` + `when` 的端到端；`global/local
 ★ **M2a 落地的用例**：`tests/ui_script_quickjs.cpp`（`ui-script-quickjs`，沙箱 / 预算 / api / readings / error / entry）·
 `tests/ui_hud_script.cpp`（`ui-hud-script`，外置 `hud.js` 的行序 / 颜色 / 80% alpha / 无 raster·present）·
 `tests/ui_frames.cpp`（`ui-frames`，帧列表活动判据 / top / 降级 / `game.local_frames()`）。
+★ **S2 落地的用例**：`tests/plugin_runtime.cpp` 的 `plugin/hud-equivalence`（旧 loader 与插件 loader
+在同一份 readings 下 display list **逐字段相同**，含 PROFILE 点击两拍）+ `plugin/render-profile`；
+`tests/plugin_resolve.cpp` 的 `resolve/hud-*`（保留根优先序 / 遮蔽 / 找不到 / 路径形式）；
+`tests/aot_overlay.cpp` 的 `plugin-hud-window` / `plugin-hud-headless` / `overlay-headless-rejected` /
+`overlay-plus-plugin-wins`（窗口 BMP + guest dump **逐字节**等价）。
 
 **变异自检**（每类一条代表，`tools/mutate-check.mjs`）：`when` 的 `pos` 比较 `>=`→`>` ⇒ `ui_when` 红 ·
 router 的"down 放 ⇒ up 放"改掉 ⇒ `ui_hit` 红 · 采样门少一个 EA ⇒ `ui_marker_gate` 红 ·
@@ -322,7 +338,7 @@ router 的"down 放 ⇒ up 放"改掉 ⇒ `ui_hit` 红 · 采样门少一个 EA 
 | R7 | 插件绕过 API 改 guest | API 无写入口 + 形态守卫（`src/ui/**` 不出现 guest 写 API）+ 逐位断言 |
 | R8 | QuickJS 内存 / 沙箱 / GC 与引用计数 / 静态链体积 / TS 产物（`.js` 与 `.d.ts` 漂移） | 见 `overlay-quickjs.md` §2、§5；体积是**估**，⛔ 不进判据；`.d.ts` 漂移守卫**未做**（M2a 只有声明文件） |
 | R9 | **80% 半透明在 GPU 直出上不生效**：`SDL_BlitGPUTexture` 是拷贝、不混合 | 已解决（D，2026-11-18）：直出改为专用混合绘制管线（`SDL_DrawGPUPrimitives` + `SRC_ALPHA/ONE_MINUS_SRC_ALPHA`），`directReadback` 同公式；win32 未验证 |
-| R10 | 外置 `scripts/ui/hud.js`（及其 module 依赖 `kit.js`）不在发行树 ⇒ `--overlay` 启动硬错 | 发行打包把 `scripts/ui/{hud.js,kit.js,ui.d.ts,README.md}` 一起带上（`release/` 待补）；**`hud.js` 与 `kit.js` 必须同目录**（`import './kit.js'` 按 `hud.js` 所在目录解析；缺 kit 与缺 hud 同属 exit 2）；开发回退 `LIFT_UI_SCRIPT_DIR` |
+| R10 | 外置 `scripts/ui/hud.js`（及其 module 依赖 `kit.js`）不在发行树 ⇒ `--overlay` / `--plugin hud` 启动硬错 | 发行打包把 `scripts/ui/{hud.js,kit.js,ui.d.ts,README.md}` 一起带上（`release/` 待补）；**`hud.js` 与 `kit.js` 必须同目录**（`import './kit.js'` 按 `hud.js` 所在目录解析；缺 kit 与缺 hud 同属 exit 2）；开发回退 `LIFT_UI_SCRIPT_DIR`。★ S2：`hud` 的解析根 = `<exeDir>/scripts/ui/` → `LIFT_UI_SCRIPT_DIR`（保留 id），**不是** `scripts/plugins/` 的普通 id 根 |
 
 ## 待核
 

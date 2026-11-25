@@ -6,6 +6,8 @@
 //   ② 搜索根被加宽 / 改顺序：把 `lib/` 也搜、递归子目录、或"第一个命中赢" ⇒
 //      用户装了另一份同名文件就会被装上（或歧义被静默吃掉）。
 //   ③ 路径形式被绝对化 / 早检查：cwd 相对 / 绝对 / "装载失败 exit 2" 三条行为都会变。
+//   ④ **S2 保留 id `hud`** 的解析顺序（发行 → 开发回退）或遮蔽判据被改松：`--overlay` 会静默
+//      装上"另一份 hud.js"（用户同名文件胜出 / 内置件遮住用户文件，两种都无运行期症状）。
 //
 // ★ 判据只碰 `temp_directory_path()` 下的**注入 roots**（临时目录 + 几个 `.js` 文件）：
 //   零 exe / 零 GPU / 零资产 / 零游戏安装 ⇒ 顶层无条件注册 = pure 档（`AGENTS.md` §12.4）。
@@ -313,6 +315,90 @@ int main() {
         const PluginResolveResult exact = resolve("CaseProbe", only_dev);
         LIFT_CHECK(exact.status == Status::Ok);
         LIFT_CHECK(exact.path == toUtf8(dev_root / "CaseProbe.js"));
+    }
+
+    // =====================================================================================
+    // S2 · 保留 id `hud`（`--overlay` 预设 = `--plugin hud`，两个入口同一解析）
+    //   ① 保留根 = `<exe>/scripts/ui/hud.js` → `LIFT_UI_SCRIPT_DIR/hud.js`（优先序，exe 赢）；
+    //   ② 用户插件根里出现 `hud.js` ⇒ **ReservedShadowed**（⛔ 不静默被内置件遮住）；
+    //   ③ 保留 id **不**从普通根命中（找不到时列出的是保留根，不是 scripts/plugins）。
+    // =====================================================================================
+    const fs::path exe_ui = exe_root / "scripts" / "ui";
+    const fs::path hud_dev = tmp.path / "ui-dev";
+    PluginResolveRoots hud_roots = roots;
+    hud_roots.hud_dev_dir = toUtf8(hud_dev);
+
+    // ---- ⑩ 保留根：只有 dev ⇒ 命中 dev 的 hud.js ----
+    lift_test::g_current_case = "resolve/hud-dev-root";
+    {
+        LIFT_CHECK(writeFile(hud_dev / "hud.js"));
+        const PluginResolveResult r = resolve("hud", hud_roots);
+        LIFT_CHECK(r.status == Status::Ok);
+        LIFT_CHECK(r.kind == PluginSpecKind::Id);
+        LIFT_CHECK(r.id == "hud");
+        LIFT_CHECK(r.path == toUtf8(hud_dev / "hud.js"));
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(r.hits.size()), 1);
+    }
+
+    // ---- ⑪ 保留根：exe 与 dev 都在 ⇒ **exe 赢**（优先序，⛔ 不报歧义 —— 与 S2 之前同一条）----
+    lift_test::g_current_case = "resolve/hud-exe-wins";
+    {
+        LIFT_CHECK(writeFile(exe_ui / "hud.js"));
+        const PluginResolveResult r = resolve("hud", hud_roots);
+        LIFT_CHECK(r.status == Status::Ok);
+        LIFT_CHECK(r.path == toUtf8(exe_ui / "hud.js"));
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(r.searched.size()), 2);  // 两个保留根都试过
+    }
+
+    // ---- ⑫ 用户插件根里有 hud.js ⇒ ReservedShadowed（列**用户那份**的路径，exit 2 的判据面）----
+    lift_test::g_current_case = "resolve/hud-shadowed-exe-root";
+    {
+        LIFT_CHECK(writeFile(exe_plugins / "hud.js"));
+        const PluginResolveResult r = resolve("hud", hud_roots);
+        LIFT_CHECK(r.status == Status::ReservedShadowed);
+        LIFT_CHECK(r.path.empty());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(r.hits.size()), 1);
+        if (!r.hits.empty()) LIFT_CHECK(r.hits[0] == toUtf8(exe_plugins / "hud.js"));
+        std::error_code ec;
+        fs::remove(exe_plugins / "hud.js", ec);
+    }
+    lift_test::g_current_case = "resolve/hud-shadowed-dev-root";
+    {
+        LIFT_CHECK(writeFile(dev_root / "hud.js"));
+        const PluginResolveResult r = resolve("hud", hud_roots);
+        LIFT_CHECK(r.status == Status::ReservedShadowed);
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(r.hits.size()), 1);
+        if (!r.hits.empty()) LIFT_CHECK(r.hits[0] == toUtf8(dev_root / "hud.js"));
+        std::error_code ec;
+        fs::remove(dev_root / "hud.js", ec);
+    }
+
+    // ---- ⑬ 保留根里都没了 ⇒ NotFound 列**保留候选**（⛔ 不是 scripts/plugins 的）----
+    lift_test::g_current_case = "resolve/hud-not-found-lists-reserved-roots";
+    {
+        std::error_code ec;
+        fs::remove(exe_ui / "hud.js", ec);
+        ec.clear();
+        fs::remove(hud_dev / "hud.js", ec);
+        const PluginResolveResult r = resolve("hud", hud_roots);
+        LIFT_CHECK(r.status == Status::NotFound);
+        LIFT_CHECK(r.path.empty());
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(r.searched.size()), 2);
+        if (r.searched.size() == 2) {
+            LIFT_CHECK(r.searched[0] == toUtf8(exe_ui / "hud.js"));
+            LIFT_CHECK(r.searched[1] == toUtf8(hud_dev / "hud.js"));
+            LIFT_CHECK(r.searched[0].find("scripts/plugins") == std::string::npos);
+        }
+    }
+
+    // ---- ⑭ 路径形式 `hud.js` **不**享受保留语义（仍是原样的路径）----
+    lift_test::g_current_case = "resolve/hud-path-form-not-reserved";
+    {
+        const PluginResolveResult r = resolve("hud.js", hud_roots);
+        LIFT_CHECK(r.status == Status::Ok);
+        LIFT_CHECK(r.kind == PluginSpecKind::Path);
+        LIFT_CHECK(r.path == "hud.js");
+        LIFT_CHECK(r.searched.empty());
     }
 
     return lift_test::finish("plugin-resolve");

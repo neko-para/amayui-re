@@ -220,6 +220,9 @@ void usage() {
         "  --present-hidden          强制隐藏窗口（仍必须显式 --present window/auto）\n"
         "  --overlay                 左上角调试 HUD（游戏内小窗 / 帧读数；只进窗口像素与\n"
         "                            --present-screenshot，⛔ 不进 --dump-frame / arena.hash）。\n"
+        "                            ★ **S2 起是预设**：等价于 `--plugin hud` + 要求窗口（hud 是\n"
+        "                            保留 id；`--present headless` 仍拒绝）。与 `--plugin` 同给时\n"
+        "                            **插件赢**（不装载 hud，一次 stderr 说清）。\n"
         "                            HUD 由**随发行分发的脚本** `scripts/ui/hud.js` 经 QuickJS 同步\n"
         "                            产出 display list（脚本外置：改脚本不用重编）；文本走宿主字体\n"
         "                            （支持中文）；字体缺失 / 脚本加载失败 ⇒ 拒绝启动（R5）\n"
@@ -253,6 +256,10 @@ void usage() {
         "                              两处都命中 ⇒ exit 2 并列出全部候选；都不在 ⇒ exit 2 并列出搜过的\n"
         "                              目录与每个候选路径。命中 ⇒ 打一行 `--plugin id=<id> ⇒ <绝对路径>`\n"
         "                              并用绝对路径装载（一次性，⛔ 不周期）。\n"
+        "                            ★ **保留 id `hud`**（S2）：先于普通根解析为\n"
+        "                              `<exe 目录>/scripts/ui/hud.js` → 编译期 `LIFT_UI_SCRIPT_DIR/hud.js`\n"
+        "                              （`--overlay` 与 `--plugin hud` 同一条）；用户插件根里出现 `hud.js`\n"
+        "                              ⇒ exit 2（⛔ 不静默被内置件遮住）。`--plugin hud` **不隐含开窗**。\n"
         "  --plugin-param k=v        给插件的只读参数（`ctx.params`；可重复，**重复 key ⇒ exit 2**）\n"
         "                            ★ 内建插件优先读 `<--appdata>/plugin-config.json`（ctx.config）；\n"
         "                            **没有 appdata 或没有该 key** 才回退到这里（文件坏 ⇒ exit 2）\n"
@@ -920,6 +927,20 @@ int main(int argc, char** argv) {
     //     ⛔ 不查 `lib/`、⛔ 不递归子目录（用户口径 2026-11-25，比设计报告 A2 更硬）。
     //   ★ 歧义 / 找不到都 exit 2（⛔ 不静默取第一个）；命中 ⇒ 换成**绝对路径**并打**一行**日志。
     // =====================================================================================
+    // =====================================================================================
+    // S2：`--overlay` = 「装载内置 `hud` + 要求窗口」的**预设**（⛔ 不是第三个装载器）
+    //   ★ 触发条件 = **显式 `--overlay`** 且没有 `--plugin` **且**没有 `--ui`：
+    //     · `--ui`（deprecated）自带脚本，仍走旧 loader ⇒ 预设不参与；
+    //     · `--overlay --plugin X` ⇒ **插件赢**（⛔ 不解析 hud；取代语在 ⑤' 打）。
+    //   ★ 位置在**互斥检查之后**（`--plugin` 与 `--input-plan` / `--control-root` 的那一组）：
+    //     `--overlay --input-plan` 今天合法 ⇒ 预设不能把它变成"插件 + 输入计划"而 exit 2。
+    //   ★ 解析结果与普通 id **同形**：一行 `--plugin id=hud ⇒ <绝对路径>`，交给 `initFromFile`。
+    // =====================================================================================
+    bool overlay_preset_hud = false;
+    if (overlay_flag && plugin_path.empty() && ui_script.empty()) {
+        plugin_path = lift::plugin::kReservedHudId;
+        overlay_preset_hud = true;
+    }
     if (!plugin_path.empty()) {
         lift::plugin::PluginResolveRoots roots;
         // ★ argv[0] 不含分隔符（PATH 搜索 / 裸命令名）⇒ `exeDirOf` 返回空 ⇒ **发行根整根跳过**，
@@ -928,6 +949,8 @@ int main(int argc, char** argv) {
         //   `resolve/id-empty-exe-root` 用例钉住"空 exe 根 = 只剩 dev 根"。
         roots.exe_dir = exeDirOf(args.empty() ? std::string() : args[0]);
         roots.dev_dir = LIFT_PLUGIN_DIR;
+        // ★ 保留 id `hud` 的开发回退根（与 `--overlay` 旧解析同一条；发行侧由 exe_dir 派生）。
+        roots.hud_dev_dir = LIFT_UI_SCRIPT_DIR;
         const lift::plugin::PluginResolveResult resolved =
             lift::plugin::resolvePluginSpec(plugin_path, roots);
         if (resolved.status == lift::plugin::PluginResolveResult::Status::Ambiguous) {
@@ -938,7 +961,27 @@ int main(int argc, char** argv) {
             std::fputs("  ⇒ 用路径形式指定唯一一份（含 `.` / `/` / `\\` 的写法一律按路径）\n", stderr);
             return 2;
         }
+        if (resolved.status == lift::plugin::PluginResolveResult::Status::ReservedShadowed) {
+            // ★ S2：⛔ 不静默让用户文件被内置件遮住（哪怕保留根里那份真的存在）。
+            std::fprintf(stderr,
+                         "emulator-lift-aot: `hud` 是**保留 id**，但用户插件根里存在 hud.js"
+                         "（exit 2；⛔ 不静默被内置件遮住）：\n");
+            for (const std::string& hit : resolved.hits) std::fprintf(stderr, "  %s\n", hit.c_str());
+            std::fputs("  ⇒ 给那份文件改名，或用**路径形式**指定你要装载的那一份\n", stderr);
+            return 2;
+        }
         if (resolved.status == lift::plugin::PluginResolveResult::Status::NotFound) {
+            if (resolved.id == lift::plugin::kReservedHudId) {
+                std::fprintf(stderr,
+                             "emulator-lift-aot: 找不到保留 id `hud`（exit 2；`--overlay` 预设与 "
+                             "`--plugin hud` 同一条解析）。搜索过：\n");
+                for (const std::string& candidate : resolved.searched) {
+                    std::fprintf(stderr, "  %s\n", candidate.c_str());
+                }
+                std::fputs("  （发行布局 = <exe 目录>/scripts/ui/hud.js；开发回退 = LIFT_UI_SCRIPT_DIR/hud.js）\n",
+                           stderr);
+                return 2;
+            }
             std::fprintf(stderr,
                          "emulator-lift-aot: --plugin 找不到 id `%s`（exit 2）。搜索过"
                          "（非递归；⛔ 不查 lib/、不递归子目录）：\n",
@@ -953,6 +996,7 @@ int main(int argc, char** argv) {
         }
         if (resolved.kind == lift::plugin::PluginSpecKind::Id) {
             // ★ 一次性（⛔ 不周期）。打印的是**绝对路径**（解析结果，不重拼字符串）。
+            //   `--overlay` 预设也走这一行（与普通 id 同形；用户口径 2026-11-25）。
             std::fprintf(stderr, "emulator-lift-aot: --plugin id=%s ⇒ %s\n", resolved.id.c_str(),
                          resolved.path.c_str());
             plugin_path = resolved.path;
@@ -1034,18 +1078,12 @@ int main(int argc, char** argv) {
                      "（只用于测试 / 诊断）\n");
     }
 
-    // ★ B：`--overlay` 的默认 HUD 是**外置脚本**（⛔ 不编进 exe：脚本是用户可自行发挥的 feature）。
-    //   解析顺序：① `<exe 所在目录>/scripts/ui/hud.js`（发行布局，**这里**做）
-    //             ② `LIFT_UI_SCRIPT_DIR/hud.js`（开发回退，`SdlWindow::loadUiScript` 做）
-    //             ③ 都不在 ⇒ 启动硬错（err 点名两个路径；⛔ 不静默回退空 HUD）。
-    //   ★ `--ui <path>` 显式给的一律优先：它已经被解析进 `ui_script`，这一步就跳过。
-    if (overlay && ui_script.empty()) {
-        const std::string candidate = exeDirOf(args.empty() ? std::string() : args[0]) + "scripts/ui/hud.js";
-        if (fileExists(candidate)) ui_script = candidate;
-    }
+    // ★ S2：默认 HUD 的解析**已经上移**到 `--plugin hud` 的保留 id 解析（与 `--plugin` 共用一份，
+    //   位置在 GPU bring-up 之前）。这里⛔ 不再有"为 `--overlay` 填 `ui_script`"的分支：
+    //   `ui_script` 现在只由**已弃用**的 `--ui <path>` 写入（S3 删），`--overlay` 只是窗口 flag + 预设插件。
 
     // ---- 宿主字体配置：`--baseline-lift` / `--baseline-lift-by-size` **落在这里** ----
-    //   ★ 必须在**任何** `FontEngine` / `SdlWindow` 使用之前：`SdlWindow::init` 会为 `--overlay`
+    //   ★ 必须在**任何** `FontEngine` / `SdlWindow` 使用之前：`SdlWindow::init` 会为 `--ui`
     //     建 HUD 的 `FontEngine`（R5），`AotHost` 里也有引擎 ⇒ 晚于它就不再是"缺省配置"。
     //   ★ 缺省（两个参数都不给）⇒ **不调用** `fontSetConfig`：进程里生效的就是 `fontDefaultConfig()`
     //     那一份（`kBaselineLift` + by_size=true），与"只改代码不动配置"逐位相同。
@@ -1078,13 +1116,15 @@ int main(int argc, char** argv) {
         // ★ 与解释器臂同一个字段（已退役解释器臂同一个字段）：缺这一行 ⇒ sink 恒 `cursor_warp=false`
         //   ⇒ `hostCursorWarpEnabled()` 恒假 ⇒ shim 只改虚拟光标（用户看到的"不会移动鼠标"）。
         wopt.cursor_warp = cursor_warp;
-        // ★ M0：`--overlay` 的唯一接线点（`SdlWindow` 内部两条呈现路径统一到 `presentOverlay`）。
-        //   ★ B：`ui_script` 非空 = 用 `--ui <path>` 那份脚本；空 = 默认外置 `scripts/ui/hud.js`。
+        // ★ S2：`--overlay` 的 HUD 现在是**插件**（保留 id `hud`），由 ⑤' 的 adopt 接进叠层；
+        //   `SdlWindow::init` 的"overlay + 空 ui_script ⇒ 装默认 hud.js"这条旧路径**从 CLI 绕开**
+        //   （仍保留给直接构造 `SdlWindowOptions` 的测试 / 旧 `--ui`）。⇒ 只有 `--ui`（deprecated，
+        //   S3 删）还会让 init 自己去装载脚本。
         //   `--present headless` 已在上面按 `present_window_flag` 拒绝。
-        wopt.overlay = overlay;
+        wopt.overlay = !ui_script.empty();
         wopt.ui_script = ui_script;
         // ★ S9：注入点击的叠层路由模式（`--ui-input=consume|pass`；缺省 Consume）。
-        //   没有 `--overlay` / `--ui` ⇒ sink 那边根本不装 router ⇒ 两种模式都是无害 no-op。
+        //   没有叠层脚本 ⇒ sink 那边根本不装 router ⇒ 两种模式都是无害 no-op。
         wopt.ui_input = ui_input_mode;
         // ★ `--scale` 只交给**窗口档**：`--present headless` 的隐藏离屏窗口保持 1280×720
         //   （= `--scale` 对 headless 无副作用；不设它 ⇒ 不查 DPI、不改窗口尺寸）。
@@ -1305,8 +1345,13 @@ int main(int argc, char** argv) {
         //   `PointerCore::kCallbackFramesBeforeRelease` 一份）。⛔ 不按插件 / 场景开特判。
         plugin_host->executor().setFrameSource(&host, &presentFrameCount);
         // ★ `ctx.quit()` 的归因（D-C2-9）：run 循环在下一个块边界看到 `Stopped` + `plugin: quit`。
-        run_opts.stop_requested = plugin_host->quitFlag();
-        run_opts.stop_detail = "plugin: quit";
+        //   ★ S2：只有**有 Run**（`start`/`onTrigger`）的插件才可能调 `ctx.quit`（`RenderCtx` 没有
+        //     `quit`）⇒ 纯 render 插件（含内置 `hud`）**不覆盖** `run_opts.stop_requested`
+        //     （否则 `--overlay --input-plan` 的 quit 指令会被一个永远为 false 的 flag 顶掉）。
+        if (plugin_host->script() != nullptr && plugin_host->script()->hasRun()) {
+            run_opts.stop_requested = plugin_host->quitFlag();
+            run_opts.stop_detail = "plugin: quit";
+        }
         // ★ D-C2-5：有 `render` 但 headless ⇒ **允许**执行（`render` 永不调用），一次性 stderr 说明。
         //   ⛔ 不 exit 2：CLI 阶段还不知道模块有没有 render；启动后知道了也只警告一次。
         // ★ C2b-2：窗口档的 adopt **不在这里** —— 它要等 ⑤ 的 `setSink` / `attachWindowManager`
@@ -1395,8 +1440,9 @@ int main(int argc, char** argv) {
         // ---- ⑤' C2b-2：把插件的 `render` 接进**已有**的叠层 host（⛔ 不新开第二套 UI 运行时）----
         //   ★ 位置：必须在 `setSink` / `attachWindowManager` **之后**（sink 真能画、命中路由有 wm），
         //     在读数接线之前（`if (sdl_display->overlayEnabled())` 才能看到 adopt 打开的那一档）。
-        //   ★ 同一个 `PluginScript` 实例既跑 Run 回调、又画本帧（它实现 `UiScript`）；`adopt` 会丢掉
-        //     `--overlay` 先装的 hud.js ⇒ 同一时刻只有一个 QJS context（合同 §6 行 9 / 11）。
+        //   ★ 同一个 `PluginScript` 实例既跑 Run 回调、又画本帧（它实现 `UiScript`）。
+        //   ★ S2：`--overlay` 的 HUD **就是**这条 adopt（保留 id `hud` 的插件）⇒ 不再有"先装 hud.js、
+        //     adopt 再丢掉"的那一段；同一时刻只有一个 QJS context（合同 §6 行 9 / 11）。
         //   ★ `--plugin`（有 render）**不隐含** `--overlay`（D-C2-5：headless 照样能跑）⇒ 窗口档由
         //     这里打开叠层；headless 走上面的 D-C2-5 警告，不 adopt、不建字体。
         if (plugin_host != nullptr && plugin_host->script() != nullptr &&
@@ -1418,9 +1464,10 @@ int main(int argc, char** argv) {
                              adopt_err.c_str());
                 return 2;
             }
-            // ★ `--overlay` 同时给了 ⇒ 用户以为看的是 hud.js，实际被插件 render 取代（同一个叠层
-            //   host）。一次性说清，⛔ 不静默换内容。
-            if (overlay) {
+            // ★ `--overlay` 与**显式** `--plugin` 同给 ⇒ 用户以为看的是 hud.js，实际被插件 render 取代
+            //   （同一个叠层 host）。一次性说清，⛔ 不静默换内容。
+            //   ⛔ 预设（`--overlay` ⇒ `--plugin hud`）**不**打这一行：那不是"取代"，就是它自己。
+            if (overlay && !overlay_preset_hud) {
                 std::fputs("[plugin] --overlay 的 HUD 已被插件的 render 取代（同一个叠层 host；"
                            "⛔ 不跑第二套 UI 运行时）\n",
                            stderr);
