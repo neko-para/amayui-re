@@ -19,15 +19,16 @@
 
 ## 判据（守卫）
 
-- **像素等价**：`--overlay` = `--plugin hud` = 内部 hud 回退，BMP 2764854 B / sha256 `3E72F989871BFB148FEF96763F988446E086589890A7330FED427580F8E4B4FF`、guest dump 逐字节同（`tests/aot_overlay.cpp` ⑦ 三方 `equal=1`）。
+- **像素等价**：`--overlay` = `--plugin hud` = 内部 hud 回退，BMP 2764854 B / sha256 `01468478066F2C2DC728E535569FCFA412C6266DD8954BB951A55DC18FC818E7`（★ 2026-11-25 D4 版式后重算；旧 `3E72F989…` 作废）、guest dump 逐字节同（`tests/aot_overlay.cpp` ⑦ 三方 `equal=1`）。
 - `--overlay` + 无 `render` 的 `--plugin` ⇒ HUD 仍在（`apps/emulator-lift/tests/aot_overlay.cpp#overlay-with-run-only-plugin`）。
 - `--ui` ⇒ `exit 2` + `未知参数：--ui`（`apps/emulator-lift/tests/cli_aot_flags.cpp#ui-removed-unknown-arg`）。
 - `--overlay --input-plan` ⇒ `exit 5`；`--overlay --plugin hud --input-plan` ⇒ `exit 2`（预设不改互斥语义）。
-- `RenderCtx` 运行期恰好 7 成员（含 `profile`）；`ui-hud-script` 109 checks / 0 fail。
+- `RenderCtx` 运行期恰好 7 成员（含 `profile`；2026-11-25 的 D2 收窄后仍是 7 —— `host.config` 只装在经典回退 HUD 上）。
 
 ## 读数（2026-11-25 / win32 / RelWithDebInfo）
 
-- 全量 `ctest` **144/144**；`pnpm test` **633/633**；`pnpm verify` **472 pass / 2 skip / 0 fail**；`requirements validate` **6/6**。
+- D4 之前：全量 `ctest` **144/144**；`pnpm test` **633/633**；`pnpm verify` **472 pass / 2 skip / 0 fail**；`requirements validate` **6/6**。
+- D4 之后（设置模块 / 左中版式 / F9）：全量 `ctest` **146/146**（present-window 取样点随版式更新）；`tsc`（scripts + examples）**0 条**。
 
 ## 剩
 
