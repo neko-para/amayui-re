@@ -241,19 +241,27 @@ node .tmp/field-skill-hint/dis-one.mjs .tmp/field-skill-hint/DRAWOBJ.BIN --all  
   - `instr#7` `and 50ff9f[槽] 1` → `jcc`（**cond==0 才跳**）⇒ **bit0=1 = 画；bit0=0 才整段跳过**；
   - `instr#9/#11/#14` 取 `类型 = 50ffd1[槽]`、列 `14d73c[槽]`、行 `14d76e[槽]`；
   - `instr#15` `511080[类型] == 1` ⇒ `缩放 = 4a5f0[b222][槽] * 510fb8[类型]`（否则 0）；
-  - `instr#23` `add 9 = 0x3A98 + 槽`：**绘制项句柄**（每槽一个，`0x3A98`/`0x3ACA` 是两张句柄表）；
-  - `instr#26` `and 50ff9f[槽] 4` **为 0** → `instr#29` `set-draw-color-alpha(项,0,0,0xFFFFFF)`（alpha=0）
-    ⇒ **bit2=1 = 正常 alpha；bit2=0 = 画但全透明**；
-  - `instr#30..#39` 额外门：`511080[类型] == 3` **且** `eb5c1[b222][槽] == 1` **且** `(50ff9f[槽] & 6) == 2`
-    ⇒ 跳过（bit1=1、bit2=0 的那一档）；
-  - `instr#40/#41` `25c00[b222][行]` 的第 `列` 位**置位 ⇒ 跳过**；
+  - `instr#23` `add 9 = 0x3A98 + 槽`：**动效句柄**（每槽一个；静态句柄是 `0x3ACA + 槽`，`instr#43`/`#58`）；
+  - `instr#25` 先 `call 0x89C` 画**动效**（`510439[类型]`，7 帧），`instr#26` `and 50ff9f[槽] 4` **为 0**
+    → `instr#29` `set-draw-color-alpha(0x3A98+槽, 0)` ⇒ **bit2=0 ⇒ 动效全透明**；bit2=1 ⇒ 不动（动效可见）。
+    ⛔ bit2 不是"静态的 alpha"：静态走 `0x3ACA+槽`，全脚本从不设它的 alpha（恒不透明）。
+  - `instr#30..#39` **静态门 ①**：`511080[类型]==3` **且** `eb5c1[b222][槽]==1` **且** `(50ff9f&6)==2`
+    ⇒ 成立才继续（不成立 ⇒ 跳到循环尾，**不画静态**）。`(…&6)==2` = **bit1=1 且 bit2=0**。
+  - `instr#40/#41` **静态门 ②**：`check-bit` 读 `25c00[b222][行]` 的第 `列` 位 → `jcc`
+    ⇒ **位=1 ⇒ 画静态（`instr#44..#58` 的 `0xFA+类型` = `MO031B/MO032B`）；位=0 ⇒ 跳过**。
+    ★ 2026-11-26 订正：本节早先把这一条读反了（写成"置位⇒跳过"）。`jcc` 极性 = cond==0 才跳、
+    `check-bit` = 位值 0/1（`apps/emulator/src/vm/ops.ts` 的两条 handler），`DRAWOBJ.BIN.txt:56-58` 的
+    `jcc` 目标是循环尾 ⇒ 位=0 才跳。同一个位在 `DRAWOBJ.BIN.txt:148-156`（动效那段）是
+    **位=0 ⇒ alpha 0、位=1 ⇒ alpha `5110e4[类型]`** ⇒ `25c00` 是"这一格有地块要素"的**共同门**
+    （`SETLAND.BIN.txt:47-49` 置 / `DELLAND` 清 / 进图由 `510d73` 重建），**不是**静态/动效的选择位。
+    ⇒ **清 `25c00` 的位会让静态与动效同时不画（点直接消失）**；两态的选择位是 `50ff9f` 的 bit2。
   - `instr#44` `槽 = 0xFA + 类型`；`instr#47..#57` 目标 = `列*64+32 - w/2` / `行*64+32 - h/2 - 14`（**底对齐**）；
-  - `instr#58` `draw-texture (项) (0xFA+类型) 0 0 w h dstx dsty`。
-- ⇒ **B 的可见性判据 = `50ff9f[槽]` 的 bit0（画）/ bit2（alpha）+ 上述额外门**；`50ff9f` 是 VM 在**每次进图**重建的派生表：
+  - `instr#58` `draw-texture (0x3ACA+槽) (0xFA+类型) 0 0 w h dstx dsty`。
+- ⇒ **B 的可见性判据 = `50ff9f[槽]` 的 bit0（画）/ bit2（动效 alpha = 两态选择位）+ 静态门 ①/②**；`50ff9f` 是 VM 在**每次进图**重建的派生表：
   `FIELD.BIN` #187 `0x000FA0` `fill-zero (global-int 50ff9f) 32` · `SETOBJ.BIN` #2 `0x00005C` 再清一次 ·
-  然后 `SETOBJ` #34 `bit-set …0`（= 画）/ #78 / #84 `bit-set …2`（= alpha 正常）/ #86 `bit-set …1` 逐槽写。
+  然后 `SETOBJ` #34 `bit-set …0`（= 画）/ #78 / #84 `bit-set …2`（= 动效 alpha 正常）/ #86 `bit-set …1` 逐槽写。
   ★ **2026-11-25 订正**：本节早先把 `jcc` 极性读反了（写成"置位=不画 / 置位=alpha 0"）。以
-  `apps/emulator/src/vm/ops.ts` 的 `jcc`（cond 为 0 才跳）+ 这两支的极性为准：**bit0=1 画、bit2=1 alpha**。
+  `apps/emulator/src/vm/ops.ts` 的 `jcc`（cond 为 0 才跳）+ 这两支的极性为准：**bit0=1 画、bit2=1 动效可见**。
   **bit1 不清**：A 链格表（`0x100000` 位）与 `FIELD` `label_00030E54` 的按 `flags & 2` 抽取战利品都消费它。
   ```bash
   node .tmp/field-skill-hint/dis-one.mjs .tmp/field-skill-hint/SETOBJ.BIN --all | Select-Object -First 8
@@ -290,10 +298,50 @@ node .tmp/field-skill-hint/dis-one.mjs .tmp/field-skill-hint/SETMAPTEX.BIN --all
 4. **引擎里没有这条链**（见本节开头那 11 个常量的 0 命中）。
 5. **`AE202A*` 与地块无关**（C 链）。
 
+### ⑦ 静态 / 动效两态 + `field-point-visible` 的 `static`（2026-11-26）
+
+| | 静态（无工具图标） | 动效（锄头 / 镐 + 7 帧） |
+|---|---|---|
+| 採集 `0x1F` | **`MO031B`** ALF 20797，槽 `0x119` | **`MO031A`** ALF 19848，运行期槽 `510439[0x1F]` |
+| 発掘 `0x20` | **`MO032B`** ALF 20798，槽 `0x11A` | **`MO032A`** ALF 19850，运行期槽 `510439[0x20]` |
+
+- **选择位 = `50ff9f[槽]` 的 bit2**（④ 的 `instr#26`）：bit2=1 ⇒ 动效可见、静态门 ① 的 `(flags&6)==2` 不成立
+  ⇒ 静态**不画**；bit2=0 ⇒ 动效 `alpha=0` ⇒ 静态门 ① 成立时画静态。两者互斥。
+- **静态还要求**（缺一不画）：`511080[类型]==3`（`OBINIT` 把 31/32 写成 3）· `eb5c1[b222][槽]==1`
+  （**这个点位触发过**：`FIELD` instr#6242-6245 在"打开交互菜单"那一拍写 `bit-set 50ff9f[槽] 2` + `eb5c1=1`）·
+  `50ff9f` bit1=1（还没用完，`SETOBJ` 只在未耗尽支置它）· `25c00[b222][行]` 的第 `列` 位 = 1（该格有地块要素）。
+- ⇒ **进图默认态 = 静态**（`SETOBJ` 对 `511080==3` 从不置 bit2）：`SETOBJ.BIN.txt:111-130`。
+  触发点位 ⇒ 动效（`FIELD` #6242-6245）；交互结束 / 取消 ⇒ `bit-reset 50ff9f[槽] 2`（`FIELD` #6237 / #6383）
+  ⇒ 回到静态。**刷新过的点**（`3e2a0[b222][槽] >= 5111ac[类型]`，採集/発掘 = 1）⇒ bit1=0 ⇒ 两态都不画（点消失）。
+- `field-point-visible` 的 `static`（缺省 **1**）：
+  - 两条 setmap 钩子仍 `flags |= 0x5`（bit0 画 + bit2 动效）；
+  - **第三条钩子** `afterPosition("FIELD.BIN", FIELD_STATIC_LO, FIELD_STATIC_HI, {mode:"reenter"})`
+    = `[0x00253C,0x002550)`（逐图派生表 `25c00`/`57dff`/`4a5f0` 重建之后的汇合点，`FIELD` #402）；
+    在这里按**上面那套引擎静态门**（再叠 `14d8cc` 当层启用）决定 `flags` 的 bit2：
+    门成立 ⇒ **清 bit2**（静态）；门不成立 ⇒ 保留 bit2（= 今天的动效，⛔ 不让点消失）。
+    `25c00` / `14d73c` / `14d76e` / `14d8cc` / `eb5c1` / `511080` **只读**，写集只有 `50ff9f+槽`。
+  - `static=0` ⇒ 一个 `25c00` / `14d7xx` / `14d8cc` / `eb5c1` 读都不做（日志一行 `field-points: static=0`），
+    行为 = 2026-11-26 之前（只 `|=0x5` ⇒ 看到动效）。
+- **复跑（窗口，人读档）**：
+  ```bash
+  cd apps/emulator-lift
+  printf '{"version":1,"domains":{"field.point-visible":{"on":1,"diag":1}}}\n' > ../../.tmp/field-static/appdata/plugin-config.json
+  ./out/emulator-lift-aot.exe --game-dir ../../links/install --appdata ../../.tmp/field-static/appdata \
+    --present window --overlay --skip-logo --audio off --time-limit 300 --log-level info --plugin field-point-visible
+  ```
+  期望：进图后点位格是**植株 / 岩石本体**（无工具图标）+ 日志逐槽
+  `field-points: static slot=… type=… row=… col=… cellBit=1 gate=1 enabled=1 class=3 eb5c1=1 0x7 → 0x3（静态）`
+  与汇总 `field-points: static cleared=N/M`；走到点位交互 ⇒ 变成 7 帧动效（日志侧看 `50ff9f` 读数或画面）。
+  若日志出现 `… gate=0 … eb5c1=0（保留动效：already-dynamic）` ⇒ 那个点从来没有触发过，
+  引擎自己也不会画静态（此时**只有**写 `eb5c1` 才能让它变静态，而那是持久真值 ⇒ 需要用户裁决）。
+- ⚠ **已知边界**：`0x001B10..0x002530` 的重建块只在 `b22a == 0` 时执行（`FIELD` #303/#304
+  `eq` + `jcc 0x4CF0`）⇒ **地图续接**（`b22a != 0`）的进图不经过第三条钩子 ⇒ 那一次保持动效。
+
 ## 待核
 
 1. **进图装载链**：`FIELD.BIN`(21095) 由谁 `call-script` / 由 `SETFIELD.BIN`(20745) 还是引擎的换图路径拉起来 —— 没有读数。
-2. **`!`（`0x300 == 0` 那支）到底是什么**：它的两个位都来自 `25c00[b222]` 那张**每图 64×32 位网格**；
+2. **`!`（`0x300 == 0` 那支）到底是什么**：它的两个位都来自 `25c00[b222]` 那张**每图一块 32×32 的格位图**
+   （`25c00[b222*64 + 行]` 的第 `列` 位；行宽 64 dword、格网 32×32 见 ⑦ 的取证）；
    那一格位的语义没有定位（脚本侧 `--write` 只有 7 处写 `25c00`，都不是"点位发现"）。
 3. **FIELD 的点击窗口**：没有任何读数（`## 输入点`）。要取证须按 `FELLOW.md` / `SAVE.md` 的形状做“门 + 门后 click”的 A/B。
    ⚠ 2026-11-24 记的“六次都停在选行后的确认框”**已归因，不是 FIELD 的门**：那几次把 `SAVE*.DAT`
@@ -312,13 +360,24 @@ node .tmp/field-skill-hint/dis-one.mjs .tmp/field-skill-hint/SETMAPTEX.BIN --all
 7. **`MO031A`/`MO032A`**（ALF 19848/19850）与 B 用到的 `B` 版是什么关系（分辨率档？）——未取证。
 8. **`field-point-visible` 在真机（人读档进 FIELD）上的 `on=1` 施加读数**：目前只有
    ①（`on=0` 常驻基线）与**纯档** `plugin-runtime` 的 `plugin/field-switch-apply`（假 guest 上
-   "类型命中槽 `|0x5`（`0x3→0x7` / `0x5→0x5`）/ 不命中不动 / 已经可见不再写 / 换图实例号变 ⇒ 另一条
-   setmap 钩子重新施加"）。真机上还缺：首帧之后的 `field-points: setmap forced=N/M` 那次读数、以及
-   "每次进图都重新出现 `setmap re-applied … forced=`"、画面里出现 `MO031B` 绿草 / `MO032B` 岩石。
+   "类型命中槽 `|0x5`（`0x3→0x7`）/ 不命中不动 / 已经可见不再写 / 换图实例号变 ⇒ 另一条 setmap 钩子
+   重新施加 / `static` 的静态门成立 ⇒ `0x7→0x3`、门不成立（`eb5c1=0`）⇒ 保留 `0x7` / `static=0` ⇒ 不清"）。
+   真机上还缺：首帧之后的 `field-points: setmap forced=N/M` 与 `field-points: static cleared=N/M` 读数、
+   以及画面里出现 `MO031B` 绿草 / `MO032B` 岩石（**无工具图标**）。
    要取证须**人**（或带窗 + 手点）读一次档 —— ⛔ 不要为了这条把 `--input-plan` / 控制层塞进 `--plugin`
    （三者互斥）。复跑形状见 `.tmp/field-setmap/design.md` 的「验收」（N 帧按实际 FIELD 就绪再定，
-   A/B 必须同一 N）。
+   A/B 必须同一 N），`static` 的复跑命令见 ⑦。
 9. **setmap 两个钩子区间的 run 读数**：`[0x18280,0x18284)` / `[0x35168,0x3517C)` 的位置来自**静态**
    （`FIELD.BIN` 的 `call-script 511a` 返回点，见 `design.md` 的 `dis-one.mjs` 读数）；还没有一次
    `fired=` / 控制层 `pause` 采样证明运行期真的落到这里（`[0x35168,0x3517C)` 尤其只在一类换图路径上）。
    要进 `## 位置区间` 表须补一条 run 读数。
+10. **触发后 `50ff9f` bit2 是否真的被置回（真机读数）**：静态门 / 两态模型的**写点**目前只有静态证据
+    （`FIELD` instr#6242-6245 在打开交互菜单那一拍 `bit-set … 2` + `eb5c1=1`；#6237/#6383 清）。缺一条
+    运行期读数：走到点位、触发、再走开之后，`50ff9f+槽` 的 bit2 是否 0→1→0，以及 `eb5c1[b222][槽]`
+    是否 0→1。取证形状（窗口 + 人）：`emu-ctl global-get --kind int --index <0x50ff9f+槽>` /
+    `--index <0xeb5c1 + b222*32 + 槽>` 在"进图 / 站到点上 / 交互完 / 走开"四个时刻各读一次。
+    ⚠ 这条是 `static` 的**唯一未证点**：若 bit2 在"走到点上"时**不**被置回，那 `static` 只是把动效关掉
+    （不会自己回来），需要退回"只在进图那一刻清、由下一帧的 guest 写回"的 D 方案。
+11. **`25c00` 的触发路径**：`SETLAND`（`0x2FD8`）/ `DELLAND` 是仅有的两个运行期写点，调用者是
+    `STAGEREADY` / `STAGEROUND` / 剧情（`rg "call-script 2fd8|2fac"` 30+ 处）—— 没有一条是"走到采集点"。
+    待核 = 采集点所在格的 `25c00` 位是否在任何触发路径上变化（若变，静态门 ② 会跟着变）。

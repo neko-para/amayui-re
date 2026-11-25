@@ -4623,6 +4623,24 @@ const MUTATIONS = [
       'readout 都看不出症状）⇒ `plugin-field-switch` 的静态契约红（剥注释后代码里出现 `ctx.input`）',
   },
 
+  // ── `static`：静态门的 **`eb5c1`（"触发过"）条件**（2026-11-26）──────────────────────
+  //   ★ 代表这一类错：把静态门只写成"位图 + class + 启用"，漏掉 `eb5c1[b222][slot]==1`。
+  //     症状**只在画面上**：从没触发过的点被清掉 `50ff9f` bit2 ⇒ 静态门又因为 `eb5c1=0` 不成立
+  //     ⇒ 静态不画、动效 alpha 又被清成 0 ⇒ **点直接消失**（没有任何日志 / readout 会自己红）。
+  //   ★ 红点落在 `plugin/field-switch-apply`：假 guest 的 slot2 故意 `eb5c1=0`，要求 bit2 **保留**。
+  {
+    file: 'apps/emulator-lift/scripts/plugins/lib/guest-globals.js',
+    from: '            && triggered === 1\n',
+    to: '',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`clearFieldStaticSkip` 的静态门漏掉 `eb5c1 == 1` ⇒ 从没触发过的点也被切成静态 ' +
+      '（静态画不出、动效 alpha 0）⇒ 点消失；`plugin/field-switch-apply` 的 slot2 会红',
+  },
+
   // ── D4/S6：设置页的 number 钳制（`scripts/ui/settings-page.js`）──
   //   ★ 代表这一类错：把 `inc/dec` 直接写回 `value ± step`。页面上看不出症状（数字仍然变、
   //     回执仍然 applied），只有盘上出现 max 之外的值 —— 消费方再按自己的范围 throw ⇒ 插件下次
