@@ -5563,6 +5563,38 @@ const MUTATIONS = [
       '（"位置只有一个数字真源"被绕过；而这条链照旧能跑完 ⇒ 只看 run=done 的断言抓不到）',
   },
 
+  // ── 同一守卫的另一半：**根上的入口**也必须被扫到（S1 把 `scenario-*.js` 搬到 plugin 根）──
+  //   ★ 为什么单列一条：`script-map` 扫两个目录（根 + `lib/`），只证明 `lib/` 会红**证明不了**
+  //     根目录被扫（漏扫根 ⇒ 入口里的裸字面量静默通过，而库那条变异照旧红 ⇒ 看起来"守卫好的"）。
+  {
+    file: 'apps/emulator-lift/scripts/plugins/scenario-save07-battle.js',
+    from: 'import { bootToTitle } from "./lib/boot-to-title.js";',
+    to:
+      'const BARE_0X579C = 0x579C;  // 变异：根上的入口裸写位置字面量（绕过 lib/script-positions.js）\n' +
+      'import { bootToTitle } from "./lib/boot-to-title.js";',
+    guard: 'tools/test/script-map.test.mjs',
+    what:
+      '往 plugin 根上的 `scenario-save07-battle.js` 塞一个裸 `0x579C` 常量 ⇒ `script-map/no-bare-hex` 红' +
+      '（根目录被 `script-map` 扫到；⛔ 不靠 `lib/save.js` 那条变异冒充"根也扫了"）',
+  },
+
+  // ── S1：`--plugin <id>` 的歧义判据（`== 1` → 非空就取第一个）─────────────────────────────
+  //   ★ 这一类错长什么样：两个白名单根里都有 `<id>.js` 时**静默取第一个**（发行/开发谁先谁赢），
+  //     用户装了另一份同名文件 ⇒ 装错脚本而**没有任何症状**（readout 里只有 path）。
+  //   ★ 守卫 = `ctest:plugin-resolve` 的 `resolve/id-both-roots-ambiguous`（pure，顶层无条件注册）。
+  {
+    file: 'apps/emulator-lift/src/plugin/plugin_search.cpp',
+    from: '    if (result.hits.size() == 1) {',
+    to: '    if (!result.hits.empty()) {  // 变异：歧义时静默取第一个',
+    guard: 'ctest:plugin-resolve',
+    ctest: 'plugin-resolve',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-resolve',
+    what:
+      '`resolvePluginSpec` 的命中判据 `size() == 1` → `!empty()`（两根都命中时静默取第一个）⇒ ' +
+      '`resolve/id-both-roots-ambiguous` 红（`status` 不再是 `Ambiguous`、`hits` 只剩 1 条）',
+  },
+
   // ── BUG-38：屏幕→NDC 的 **D3D9 半像素**（`kD3d9PixelCenterBias`）──────────────────────
   //   ★ 这一类错长什么样：D3D9 的像素中心在**整数**格点上（MSDN「Coordinate Systems
   //     (Direct3D 10)」的差异段：「In Direct3D 9, pixel centers are at integer locations.」），

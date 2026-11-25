@@ -1,4 +1,4 @@
-// scripts/plugins/lib/scenario-field-point-visible.js —— `FIELD` 上把「点位精灵」强制走**可见**那条分支
+// scripts/plugins/scenario-field-point-visible.js —— `FIELD` 上把「点位精灵」强制走**可见**那条分支
 //
 // 是什么：一个**开关**。配置域 `scenario.field-point-visible` 的 `on` ≠ 0 时（或回退的
 // `--plugin-param on=1`），在 `FIELD` 就绪后把 32 槽派生渲染标志
@@ -17,7 +17,7 @@
 //   `DRAWOBJ.BIN` instr#44 `add (local-int 11) fa (local-int 1)` ⇒ 纹理槽 = `0xFA + 类型`；
 //   `SETMAPTEX.BIN` instr#78/#80 把 ALF 20797 / 20798 绑到 `0x119` / `0x11A`。
 //
-// ★ **载入段 = `./save.js` 的 `loadSave`（2026-11-25 改回；此前是本文件自建的四步链）**：
+// ★ **载入段 = `./lib/save.js` 的 `loadSave`（2026-11-25 改回；此前是本文件自建的四步链）**：
 //   自建链的那一版**没有判页**（照抄 `save07-battle.plan` 的 4 步，行 y 直接按槽号取）。
 //   2026-11-24 把它归到"进屏页 1 ⇒ 槽 7 的 y=507 落在页 1 第 7 行 = 槽 17（空槽）"，
 //   但那份 appdata 的存档落点**没有留证** ⇒ 归因不完整。
@@ -41,15 +41,15 @@
 //   2) 不带 `--plugin-param` 直接跑：
 //      ./out/emulator-lift-aot.exe --game-dir ../../links/install --appdata ../../.tmp/field-model/appdata \
 //        --present headless --skip-logo --audio off --time-limit 180 --log-level warn \
-//        --plugin scripts/plugins/lib/scenario-field-point-visible.js
+//        --plugin scripts/plugins/scenario-field-point-visible.js
 //   ★ 回退（夹具 / 诊断；config 里没给的 key 才生效）：
 //        --plugin-param slot=10 --plugin-param on=1 --plugin-param hold=3000
 //   ★ `slot=10` = SAVE10（落在 FIELD；进屏页 1 第 0 行 ⇒ 不用翻页；2026-11-25 实测）。
-//   ★ 从冷启动跑 ⇒ 本文件自己盖 `./boot-to-title.js`（与 `scenario-fellow-switch.js` 同一个三层 route）。
+//   ★ 从冷启动跑 ⇒ 本文件自己盖 `./lib/boot-to-title.js`（与 `scenario-fellow-switch.js` 同一个三层 route）。
 
-import { bootToTitle } from "./boot-to-title.js";
-import { route } from "./chains.js";
-import { loadSave } from "./save.js";
+import { bootToTitle } from "./lib/boot-to-title.js";
+import { route } from "./lib/chains.js";
+import { loadSave } from "./lib/save.js";
 import {
     FIELD_CURRENT_MAP_GLOBAL_ID,
     FIELD_MAP_INSTANCE_GLOBAL_ID,
@@ -59,8 +59,8 @@ import {
     forceFieldPointsVisible,
     readFieldObjectSlots,
     readIntGlobal,
-} from "./guest-globals.js";
-import { FIELD_MAIN_LOOP_HI, FIELD_MAIN_LOOP_LO } from "./script-positions.js";
+} from "./lib/guest-globals.js";
+import { FIELD_MAIN_LOOP_HI, FIELD_MAIN_LOOP_LO } from "./lib/script-positions.js";
 
 /** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
 /** @typedef {import("@amayui/lift-plugin").Trigger} Trigger */

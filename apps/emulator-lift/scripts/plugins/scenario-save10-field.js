@@ -1,4 +1,4 @@
-// scripts/plugins/lib/scenario-save10-field.js —— **复现**「载入存档 10 → 在 FIELD 点 (540,450) → 退出」
+// scripts/plugins/scenario-save10-field.js —— **复现**「载入存档 10 → 在 FIELD 点 (540,450) → 退出」
 //
 // 三段组合（`plugin-runtime.md` §4.6a 规则 3）：`bootToTitle` → `loadSave(slot)` → 本文件的场景。
 // 它是**一条可复跑的复现入口**（不是产品场景）：所有翻页都走 `loadSave` 的真翻页
@@ -16,15 +16,15 @@
 //   ./out/emulator-lift-aot.exe --exe ../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE \
 //     --game-dir ../../links/install --appdata ../../.tmp/save10-crash/appdata-<x> \
 //     --present headless --skip-logo --audio off --time-limit 120 --log-level info --frame-log \
-//     --plugin scripts/plugins/lib/scenario-save10-field.js
+//     --plugin scripts/plugins/scenario-save10-field.js
 //   ★ 回退（夹具 / 诊断）：`--plugin-param slot=10 --plugin-param expect=FIELD`。
 //
 // 判据（"点击之后能继续"）：点完**再活 `SURVIVE_MS`** ⇒ `finish(0)`；期间进程没了 ⇒ stderr 的 `stop :` 就是现场。
 
-import { bootToTitle } from "./boot-to-title.js";
-import { route } from "./chains.js";
-import { FIELD_MAIN_LOOP_HI, FIELD_MAIN_LOOP_LO } from "./script-positions.js";
-import { loadSave } from "./save.js";
+import { bootToTitle } from "./lib/boot-to-title.js";
+import { route } from "./lib/chains.js";
+import { FIELD_MAIN_LOOP_HI, FIELD_MAIN_LOOP_LO } from "./lib/script-positions.js";
+import { loadSave } from "./lib/save.js";
 
 /** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
 /** @typedef {import("@amayui/lift-plugin").Trigger} Trigger */

@@ -2,7 +2,7 @@
 //
 // 为什么单独一件：TITLE 门的作用域是"**进程启动**"，不是"读取存档"。`save.js` 的载入链从
 //   "**已经在 TITLE**" 开始（它的 `start` 直接点 LoadData，见那个文件头）⇒ 谁要从冷启动跑，
-//   就把本文件盖在前面（`route` 组合见 `./scenario-save07-battle.js`）。
+//   就把本文件盖在前面（`route` 组合见 `../scenario-save07-battle.js`）。
 //   ★ 拆开的收益是可判性：TITLE 门超时 = "启动没到 TITLE"；SAVE 门超时 = "TITLE 上那一下没被吃"。
 //     混在一条链里两者都叫 `gate timeout`。
 //

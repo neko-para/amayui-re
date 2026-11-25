@@ -1363,7 +1363,7 @@ if(DEFINED ENV{LIFT_STRESS})
 
     # ---- LIFT_STRESS：**路径 2（打开 FELLOW，6 次立绘切换）**的读数面 ----
     # ★ 判据（详见 `tests/aot_stress_fellow_switch.cpp` 文件头）：真库驱动
-    #   `scripts/plugins/lib/scenario-fellow-switch.js` ⇒ **exit 0** +
+    #   `scripts/plugins/scenario-fellow-switch.js`（S1 起入口在**根**，库在 `lib/`）⇒ **exit 0** +
     #   readout `run=finished exit=0` + stdout 里 `=== profile window:` **恰好 6 条**（6 个切换
     #   窗口标签逐字齐全）。⛔ 不断言 ms（读数进文档）。
     # ★ 为什么判 readout 而不只判退出码：`--plugin` 路的失败**不**改宿主退出码
@@ -1384,7 +1384,7 @@ if(DEFINED ENV{LIFT_STRESS})
         COMMAND lift-aot-stress-fellow-switch
                 "$<TARGET_FILE:emulator-lift-aot>" "${AGE_SECTFIX_EXE}"
                 "${LIFT_STRESS_GAME_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../../saves"
-                "${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins/lib/scenario-fellow-switch.js")
+                "${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins/scenario-fellow-switch.js")
     # ★ 2026-11-24 曾登记 `DISABLED TRUE`（两张既有缺口挡路）；2026-11-25 两张单都收口 ⇒ **已删除**。
     #   ⛔ 今后再红就当一个真回归修，⛔ 不要用 `DISABLED` 藏起来（`ctest -N` 里 Disabled 看得见，
     #   但"没跑"与"跑绿了"在输出里长得一样 —— 那正是 AGENTS §12.4 反对的形状）。
@@ -3094,13 +3094,24 @@ target_sources(emulator-lift-runtime PRIVATE
     src/plugin/plugin_appdata.cpp
     # ★ 2026-11-25：`ctx.config`（`<--appdata>/plugin-config.json`）的宿主实现。**唯一** include
     #   `<nlohmann/json.hpp>` 的插件 TU（头是 PIMPL；`runtime/config.h` 只有中立值类型）。
-    src/plugin/plugin_config.cpp)
+    src/plugin/plugin_config.cpp
+    # ★ S1（2026-11-25）：`--plugin <id|path>` 的**纯**解析器（`^[A-Za-z0-9_-]{1,64}$` 判据 +
+    #   两处非递归根）。⛔ 不查 `lib/`、⛔ 不递归：id 只认"入口在 `scripts/plugins/` 根"的文件。
+    #   纯函数（roots 由调用方注入）⇒ pure CTest `plugin-resolve` 直接判，不需要 exe / GPU。
+    src/plugin/plugin_search.cpp)
+
+# ★ S1：`--plugin <id>` 的**开发根**（编译期注入源码树，与 `LIFT_UI_SCRIPT_DIR` 同形）。
+#   id 只查 `<exeDir>/scripts/plugins/<id>.js`（发行）与 `<本目录>/<id>.js`（开发）两处，
+#   ⛔ 不查 `lib/`（那是被 import 的库目录）、⛔ 不递归子目录。
+target_compile_definitions(emulator-lift-runtime PUBLIC
+    LIFT_PLUGIN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins")
 
 if(LIFT_BUILD_TESTS)
-    # ★ C2c：`LIFT_PLUGIN_LIB_DIR` = **真库**目录（`scripts/plugins/lib`）。QJS 的 import 根是
+    # ★ C2c：`LIFT_PLUGIN_LIB_DIR` = **库**目录（`scripts/plugins/lib`）。QJS 的 import 根是
     #   **入口文件目录**（`script_quickjs.cpp` 的 `moduleNormalize`）⇒ `tests/plugin_fixtures/*`
-    #   **不能** import 它；两条用例都直接把 `lib/save.js` 当入口（它自带参考 default 导出，
-    #   见 D-C2C-1）。⛔ 不复制文件、不另开 lib 子目录。
+    #   **不能** import 它。★ S1 起 `save.js` 只是**库**（`loadSave` 等），参考入口拆到
+    #   **根** `scripts/plugins/load-save.js`（id = `load-save`）；场景入口也都在根（id = 文件名 stem）。
+    #   ⛔ 不复制文件、不另开 lib 子目录。
     # ★ `LIFT_SAVES_DIR`（只给 e2e）：`saves/` 是**只读**复现素材 ⇒ 测试把需要的存档**复制**进
     #   `.tmp/` 下的私有 `--appdata`（照 `apps/emulator-lift/scripts/clean-appdata.sh`），⛔ 不就地写。
     add_executable(lift-plugin-runtime tests/plugin_runtime.cpp)
@@ -3109,6 +3120,16 @@ if(LIFT_BUILD_TESTS)
         LIFT_PLUGIN_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/plugin_fixtures"
         LIFT_PLUGIN_LIB_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins/lib")
     add_test(NAME plugin-runtime COMMAND lift-plugin-runtime)
+
+    # ---- `plugin-resolve`：`--plugin <id|path>` 的**纯解析器**（S1，pure）--------------------
+    # ★ 判据（详 `tests/plugin_resolve.cpp` 文件头）：id 语法正/反例 · 路径形式（`.js` / `a\b` /
+    #   绝对路径 / 空串）· 根顺序（exe 优先 / dev 回退）· 两根都命中 ⇒ Ambiguous 列全部 ·
+    #   0 命中 ⇒ 列出每个候选 · 大小写（平台分支显式）· 空根跳过。
+    # ★ **顶层无条件注册 ⇒ pure 档**（`AGENTS.md` §12.4 判据 = 注册位置；`cmakeTestTier()` 把外层
+    #   `if(LIFT_BUILD_TESTS)` 当透明）。只碰 `temp_directory_path()` 下的注入目录，零 exe / GPU / 资产。
+    add_executable(lift-plugin-resolve tests/plugin_resolve.cpp)
+    target_link_libraries(lift-plugin-resolve PRIVATE emulator-lift-runtime)
+    add_test(NAME plugin-resolve COMMAND lift-plugin-resolve)
 
     # ---- `plugin-appdata`：`ctx.appdata.stat` 的**只读 / appdata-only** 判据（pure）----------
     # ★ 判据（详 `tests/plugin_appdata.cpp` 文件头）：文件 / 目录 / 缺失 / `..` / 绝对路径 / NUL /

@@ -1125,7 +1125,7 @@
   ```
   ./out/emulator-lift-aot.exe --game-dir ../../links/install --appdata ../../.tmp/save10-crash/appdata-e2e-<n> \
     --present headless --skip-logo --audio off --time-limit 180 --log-level info \
-    --plugin scripts/plugins/lib/scenario-save10-field.js --plugin-param slot=10 --plugin-param expect=FIELD
+    --plugin scripts/plugins/scenario-save10-field.js --plugin-param slot=10 --plugin-param expect=FIELD
   ```
   （跑前 `scripts/clean-appdata.sh <appdata>`）⇒ **3/3 都走到 `finish(0)`**（r6/r7 的进程退出码直接读到 **0**；
   r5 的退出码被 pwsh 的重定向句柄挡住没读到，但日志有同一行 survive、进程已退）；每次都有：

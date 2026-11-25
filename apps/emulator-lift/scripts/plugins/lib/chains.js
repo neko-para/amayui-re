@@ -15,7 +15,7 @@
 //   · `isFirst(ev)` 必须是**纯函数**（只看 `ev`，⛔ 不依赖闭包状态）；**timeout 事件也按名字路由**
 //     （`ev.kind === "timeout"` 的 `ev.name` 就是那条链自己的名字）⇒ `isFirst` 只看名字就够。
 //
-// 组合示例（样板见 `./scenario-save07-battle.js`）：
+// 组合示例（样板见 `../scenario-save07-battle.js`）：
 //   export default route((ev) => String(ev.name).startsWith("load:"),
 //                        loadSave(7, { expect: ["FIELD.BIN"], onLoaded: (ctx) => scenario.start(ctx) }),
 //                        scenario);

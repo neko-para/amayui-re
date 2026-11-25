@@ -120,7 +120,7 @@ callback 模型把这两件事都移到 JS：
 ### 1.1 三个入口的真实代码面
 
 - **`--input-plan`（当前 = 一个 plan 状态机）**：
-  - 入口/帮助 `aot_main.cpp:101-146`；载入 `729-738`。
+  - 入口/帮助 `aot_main.cpp:90-306`；载入 `728-751`。
   - 语法/门/完成度：`recipe.h:41-55`（注释写“九条”，实际 `StepKind` 10 项，见 §1.4）、
     `70-81`；解析器 `recipe.cpp:318-503`。
   - 推进/写预算/闸门：`input_plan.cpp:186-217`（`atPoint` 是唯一施加口）、
@@ -135,9 +135,9 @@ callback 模型把这两件事都移到 JS：
   - `global-get/set` 在块边界执行（`control_ws.cpp:1470-1507`），不要求暂停（`1475`）。
   - `wait` 是 **`emu-ctl` 客户端糖**（= `resume --for-ms`，`tools/lib/emu-ctl.mjs:799`），
     **不是 `ControlOp`**；`hello`/`caps=` 只有 9 项。
-  - `caps=` 启动 readout 现状只有 6 项（`aot_main.cpp:1144`，漏 `move/global-get/global-set`）。
+  - `caps=` 启动 readout 现状只有 6 项（`aot_main.cpp:1545`，漏 `move/global-get/global-set`）。
 - **QJS binding（overlay）**：
-  - `--overlay`/`--ui`（`aot_main.cpp:196-208`）；`drawOverlay` 在 Present 跑
+  - `--overlay`/`--ui`（`aot_main.cpp:221-233`）；`drawOverlay` 在 Present 跑
     （`present_sdl.cpp:521-609`）；只读 `ui/game/host`（`script_quickjs.cpp:892-981`）。
   - 入口是 `globalThis.render`（`script_quickjs.cpp:1416-1429`）；module loader 根 = 入口目录
     （`1141-1175`）。
@@ -177,7 +177,7 @@ callback 模型把这两件事都移到 JS：
 | **G4** | plan 需要 emulator 内的状态机 + 调试图元 | `input_plan.cpp:186-217`、`781-810`；`recipe.h:169-180` | 每个 plan 入口都要复刻 step/gate/pending/exit5；用户点名的成本 |
 | **G5** | recipe 无状态载体（读改写） | `recipe.h:28-30`；`Step` 无变量 | `global-get` trace-only 不解决问题；`global-set-bitor` 是怪原语 |
 | **G6** | 无 owner/回执/预算的统一模型 | `input_plan.h:430-458`；`control_ws.cpp:548-559` | 脚本/控制层/plan 的 hold 释放、失败、入队回执各自为政 |
-| **G7** | 三处能力清单会漂 | `hello` 9（`control_ws.cpp:490`）；`caps=` 6（`aot_main.cpp:1144`）；`control.h:13-21` 注释漏 `move`；`ui.d.ts` 无守卫 | “只有某一个入口有”再次发生 |
+| **G7** | 三处能力清单会漂 | `hello` 9（`control_ws.cpp:490`）；`caps=` 6（`aot_main.cpp:1545`）；`control.h:13-21` 注释漏 `move`；`ui.d.ts` 无守卫 | “只有某一个入口有”再次发生 |
 | **G8** | 复用/参数化只在 recipe 外 | 官方 `.plan` 重复加载前缀（`save04-fault.plan:17-26`、`sc0000-wipe.plan:19-28`）；文档教 `cat 前缀 + tail`（`SAVE.md:52`） | 复制/行号引用；无法 `loadSave(slot)` |
 
 ### 1.4 注释声称 vs 代码实际
@@ -771,12 +771,22 @@ struct Context {
 
 ### 4.6 JS 单插件契约（render / start / onTrigger 可选）
 
-**入口**：`--plugin <file>`（D1；`--ui` 是 overlay 别名），**一个**运行时/context；
+**入口**：`--plugin <id|path>`（D1；`--ui` 是 overlay 别名，**S1 起只 deprecated**），**一个**运行时/context；
 可选 `render`、`start`、`onTrigger`：只有 `render` = UI-only；有 `start`/`onTrigger` = Run（可同时 UI）；
 没有 `render` 时可 headless；有 `render` 时需窗口。
 
+★ **S1（2026-11-25）：`--plugin` 收两种 spec**（机械判据只一条）：
+`id := ^[A-Za-z0-9_-]{1,64}$`，其余一律当**路径**（含 `.` / `/` / `\` / `:`、绝对路径、`.js` 后缀 ⇒
+`x.js` 天然是路径，行为与旧版逐字相同）。id = 文件名 stem，只查**两处非递归根**：
+① `<exeDir>/scripts/plugins/<id>.js`（发行）② 编译期 `LIFT_PLUGIN_DIR/<id>.js`（开发，= 源码
+`apps/emulator-lift/scripts/plugins`）；**⛔ 不查 `lib/`、⛔ 不递归子目录**。两根都命中 ⇒ `exit 2`
+并列出全部候选；都不在 ⇒ `exit 2` 并列出搜过的根与每个候选。命中 ⇒ 打**一行**
+`emulator-lift-aot: --plugin id=<id> ⇒ <绝对路径>`，再用绝对路径交给 `initFromFile`（一次性，⛔ 不周期）。
+★ `--ui` 本轮只加一行 deprecation（`emulator-lift-aot: --ui 已弃用，请改用 --plugin <path>`），
+行为**逐字不变**（仍只吃路径、仍隐含 `--overlay`、仍是窗口参数）；下一轮 S2/S3 再删。
+
 **窗口档的 `render` = adopt 进已有叠层 host**（C2b-2）：`--present window/auto` + 有 `render`
-⇒ `aot_main.cpp:1201-1235` 的 ⑤' 调 `SdlWindow::adoptOverlayScript`（`present_sdl.cpp:543-568`），
+⇒ `aot_main.cpp:1385-1420` 的 ⑤' 调 `SdlWindow::adoptOverlayScript`（`present_sdl.cpp:543-568`），
 复用**同一个**叠层 host 的 `presentUi` / 宿主字体 / 画布 / 命中表 / `--ui-input` 注入 router；
 每帧仍走同一条 `drawOverlay`（`present_sdl.cpp:596-691`）管线。⛔ 不新开第二套 UI 运行时 / 第二个 QJS context。
 `--plugin`（有 `render`）**不隐含** `--overlay`：headless 照样能跑（D-C2-5）；窗口档由 adopt 打开叠层。
@@ -873,7 +883,7 @@ export default plugin;   // 宿主 QJS 读 default 导出；⛔ 不读 globalThi
   · ★ **逃生口 `precheck:false`**（缺省 true）：`set:UseAppDataFolder != 1`（存档在安装树）时
     固定的 `SAVE_DIR_REL` 必然 `not_found` ⇒ 会 fail。此时用 `loadSave(..., { saveDir })` /
     配置 `save.saveDir` 指到实际目录，或显式关掉前置检查（**只打一行 info**，⛔ 不是让
-    "真缺文件"静默通过）；`save.js` 参考入口也认 `save.precheck`（boolean / "0"/"1"）。
+    "真缺文件"静默通过）；`load-save.js` 参考入口也认 `save.precheck`（boolean / "0"/"1"）。
   · 有文件 ⇒ 这条链的形状 / 坐标 / 门 / 超时**逐行不变**。
 - **`.BIN` 身份**：`PluginReadings.script` 是 marker **文件名**（`TITLE.BIN` / `SAVE.BIN` / `SBUNKI.BIN` /
   `FIELD.BIN`）；C1 的 `afterScript` / `afterPosition` 是精确 `==`（`trigger_runner.cpp:70,82`），
@@ -896,7 +906,10 @@ export default plugin;   // 宿主 QJS 读 default 导出；⛔ 不读 globalThi
 - **失败面**（全部响亮）：slot 非整数 / 越界 ⇒ **构造时 throw**；`expect` 缺 / 空 / 元素非法 ⇒ **构造时 throw**
   （消息给出 ADV / 战斗 / 地图三类别名）；未知 `ev.name` ⇒ `ctx.fail` + `[]`；
   门超 `timeoutMs`（缺省 30000）⇒ `ctx.finish(5, "load-save: gate timeout (…)")` + `[]`（⛔ 不用 `ctx.quit`）。
-- **参考入口**：`save.js` 另有一条 `export default`，只为 `--plugin <save.js>` 直接当插件跑。
+- **参考入口**（S1 起在**根**）：`scripts/plugins/load-save.js`（id = `load-save`）负责
+  config 域 `save` > `--plugin-param` > 默认，再调 `lib/save.js` 的 `loadSave`；
+  `lib/save.js` 只是**库**（没有 `export default`、⛔ 不是 `--plugin` 的 id 目标）。
+  `--plugin load-save` 与 `--plugin scripts/plugins/load-save.js` 等价。
   ★ 2026-11-25 起参数来源 = **config > `--plugin-param` > 默认**：config = `<--appdata>/plugin-config.json`
   的域 **`save`**（`slot` number / `expect` string[] 或逗号串 / 可选 `saveDir` / `timeoutMs`）；
   没有 appdata ⇒ **完全回退**到 params（四个 key 都支持 params 回退；后两个是本轮新加）；
@@ -904,8 +917,9 @@ export default plugin;   // 宿主 QJS 读 default 导出；⛔ 不读 globalThi
   `--plugin-param` 保留为**夹具 / 诊断口**（形状错误仍 exit 2），⛔ 不再是内建插件的正常用法。
   库消费者用**具名** `loadSave(slot, { expect })`（签名与链形状**不变**）。
 - **三个内建插件的域**（配置的 owner 表见 `apps/emulator-lift/scripts/plugins/README.md`）：
-  `save`（`save.js` 参考入口）/ `scenario.save10-field`（`scenario-save10-field.js`，key `slot`/`expect`）/
-  `scenario.field-point-visible`（`scenario-field-point-visible.js`，key `slot`/`on`/`types`/`hold`/`diag`）。
+  `save`（根入口 `load-save.js`，库是 `lib/save.js`）/ `scenario.save10-field`（根 `scenario-save10-field.js`，
+  key `slot`/`expect`）/ `scenario.field-point-visible`（根 `scenario-field-point-visible.js`，
+  key `slot`/`on`/`types`/`hold`/`diag`）。
   三者一律"先看 `ctx.config.available` 再回退 params"；`on:0` / `slot:0` 这种 falsy 值也算"给了"
   （判据是 `domain.has(key)`，⛔ 不是真值）。
 
@@ -978,7 +992,8 @@ export function loadSave(slot, options = {}) {
 cd apps/emulator-lift && ./out/emulator-lift-aot --exe ../../corpus/assets/age/AGE.EXE__dumped.sectfix.EXE \
   --game-dir ../../links/install --appdata ../../.tmp/plugin-runtime/appdata-c2c \
   --present headless --skip-logo --audio off --time-limit 90 \
-  --plugin scripts/plugins/lib/save.js --plugin-param slot=5 --plugin-param expect=FIELD,SC0000
+  --plugin load-save --plugin-param slot=5 --plugin-param expect=FIELD,SC0000
+# （S1 起参考入口 = 根 `scripts/plugins/load-save.js`；旧写法 `--plugin scripts/plugins/lib/save.js` 已不成立）
 # plugin    : … params=expect=FIELD,SC0000,slot=5 calls=7 run=done
 # [plugin] boot: waiting for TITLE input callback → boot: TITLE hit
 #          → load-save: start (slot 5) ⇒ click LoadData → SAVE hit → row hovered → SBUNKI hit
@@ -1097,16 +1112,18 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
 
 三条硬约束：
 
-- **这些文件都必须能被入口 import**：宿主 QJS 的 import 根 = **入口文件所在目录**
-  （`script_quickjs.cpp` 的 `moduleNormalize`），`../` 会被"越出 UI 根目录"拒掉、子目录也解析不到
-  ⇒ 场景文件必须和 `boot-to-title.js` / `save.js` / `chains.js` / `script-positions.js` / `guest-globals.js`
-  同目录（`scripts/plugins/lib/`）。
+- **入口在上、库在下**（S1 改写）：宿主 QJS 的 import 根 = **入口文件所在目录**
+  （`script_quickjs.cpp` 的 `moduleNormalize`），解析结果必须在该根**之下**（`../` 越根会被拒）。
+  ⇒ 场景 / 参考入口住在 `scripts/plugins/` **根**，用 `./lib/boot-to-title.js` 这类**向下** import；
+  `lib/` 里的库彼此用同目录 `./x.js`。⛔ 入口不能住在库的下层（以 `lib/` 为入口目录时 `../` 会红）。
+  ★ 同一布局也是 `--plugin <id>` 的判据：id 只查 `scripts/plugins/` 根（非递归），`lib/` 永远不是 id 目标
+  ⇒ "需要单独加载的东西"必须在根上（`load-save.js` / `scenario-*.js`）。
 - **每条链的 trigger 名字必须两两不相交**（`boot:` / `load:` / 场景自己的前缀，本案 `battle:`）：
   `route` 只看 `isFirst(ev)`，名字串了会被另一条链抢走、**静默不触发**。
-- **位置 / global 的数值只在常量表里写一次**（`script-positions.js` / `guest-globals.js`）：消费方 `import`，
-  ⛔ 不裸写 `0x…`（守卫 `tools/test/script-map.test.mjs`，剥注释后扫 `plugins/lib/*.js`）。
+- **位置 / global 的数值只在常量表里写一次**（`lib/script-positions.js` / `lib/guest-globals.js`）：消费方 `import`，
+  ⛔ 不裸写 `0x…`（守卫 `tools/test/script-map.test.mjs`，剥注释后扫 plugins 根**与** `lib/` 两个目录）。
 
-样板：`scripts/plugins/lib/scenario-save07-battle.js`（启动到 TITLE → 载入 007 → 关战斗帮助 → 结束回合 →
+样板：`scripts/plugins/scenario-save07-battle.js`（启动到 TITLE → 载入 007 → 关战斗帮助 → 结束回合 →
 決定 → BTL，全篇零 `wait`；门 / 坐标与 `scripts/recipes/save07-battle.plan` 同源；
 **`expect: ['FIELD.BIN']`** —— SAVE07 落在图上，战斗是之后由用户动作进的）。
 纯档用例：`control-script/load-save-onloaded`（样例入口，含 boot 门）+ `control-script/chains-route`。
@@ -1172,13 +1189,13 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
 
 ### 4.8 单插件运行时（删除双上下文）
 
-- **一个 QJS 插件运行时/上下文**：`--plugin <file>`（`--ui` 是 overlay 别名）；同一个 `ctx` 同时提供
+- **一个 QJS 插件运行时/上下文**：`--plugin <id|path>`（`--ui` 是 overlay 别名）；同一个 `ctx` 同时提供
   **可选** `render`（每帧；有它就需要窗口）与 **可选** `start/onTrigger`（读点 callback 链）；
   一个插件可以**既 UI 又 Run**，也可以只做一种；同时可 Edit/Input/EngineRead。⛔ 没有 `--ui-control` 第二上下文。
 - **overlay 不再是“另一种插件”**：`--overlay/--ui` 只是“启用 render + 显示”的插件用法；
   它和 Run 共用同一个运行时、同一套 `ctx.edit/input/read/trigger/run`。
 - **窗口档 = adopt 进已有叠层 host**（C2b-2）：`--present window/auto` 且插件有 `render` ⇒ 由
-  `aot_main.cpp:1201-1235` 的 ⑤' 调 `SdlWindow::adoptOverlayScript`；复用同一份 `presentUi` / 宿主字体 /
+  `aot_main.cpp:1385-1420` 的 ⑤' 调 `SdlWindow::adoptOverlayScript`；复用同一份 `presentUi` / 宿主字体 /
   画布 / 命中表 / `--ui-input` 注入 router，每帧仍走同一条 `drawOverlay`。⛔ 不新开第二个 QJS context。
   `--overlay` 同时给时，hud.js 由 `SdlWindow::init` **先装**、adopt 成功后再 `ui_script.reset()` /
   `ui_runtime.reset()` **后弃**（结构上仍需 hud.js / kit.js 在场）；一次 stderr 说明取代（⛔ 不静默）。
@@ -1203,7 +1220,7 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
 - **control 的 9 项不变**：`pause/resume/sample/screenshot/move/click/global-get/global-set/quit`
   （`control_ws.cpp:488-491`）。`Wait` 是 `emu-ctl` 客户端糖（= `resume --for-ms`，`tools/lib/emu-ctl.mjs:799`），
   **不是 `ControlOp`**；`hello`/`caps=`/`endpoint-surface` 精确 9 项。`caps=` 现状 6 项
-  （`aot_main.cpp:1144`）是已知漂移，C0 修成 9（readout 修正，guest 行为不变）。
+  （`aot_main.cpp:1545`）是已知漂移，C0 修成 9（readout 修正，guest 行为不变）。
 - **mapping 表**（名字不 1:1）：
 
 | 能力 | 文本 recipe 前端 | control op | overlay `.d.ts` | 插件（单运行时） |
@@ -1292,7 +1309,7 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
   `runtime/engine_read.h`（`EngineRead`）、`runtime/host_action.h`（`HostAction`）、
   `runtime/control_bus.h`（`ControlBus` + `RunnerControl`）、
   `runtime/context.h`（只读 Context）、`runtime/budget.h`、`runtime/capability.h`（能力表）。
-- `control_ws.cpp`：`hello.capabilities` 从表生成（9 项，`488-491`）；`aot_main.cpp:1144` 的 `caps=`
+- `control_ws.cpp`：`hello.capabilities` 从表生成（9 项，`488-491`）；`aot_main.cpp:1545` 的 `caps=`
   同表生成（6→9，readout 修正）；`control.h:13-21` 注释标“非真源”或一起生成。
 - 新增 `tools/test/capability-matrix.test.mjs`〔拟名·新增〕：四上下文/`no:<token>`/`planned:<Qn>`；
   `hello`/`caps=`/`endpoint-surface` 精确 9；`Wait` 是 client-sugar；mapping 表。
@@ -1358,7 +1375,7 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
 
 **做什么**：
 
-- `--plugin <file>`：**一个** QJS 运行时；ES default `PluginModule`；
+- `--plugin <id|path>`：**一个** QJS 运行时；ES default `PluginModule`；
   同步、预算、写只经队列；可 headless；旧 `--ui/--overlay` 用法不变。
 - `ctx` API：`afterPosition/afterDelay/atReadPoint`、`ctx.input.*`、`ctx.edit.global.set`、
   `ctx.read.*`、`log`、`profile.*`、`done/fail`；底层是 `ControlBus`（Run/dispatch 留给 C5）。
@@ -1373,7 +1390,8 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
 **判据**：
 
 - **C2c 用例**（`ctest --test-dir out -N`）：`plugin-runtime` 的
-  `control-script/start-on-trigger-chain{,-field-terminal,-second-confirm,-bad-slot}`（真库 `lib/save.js`；
+  `control-script/start-on-trigger-chain{,-field-terminal,-second-confirm,-bad-slot}`（真库 `lib/save.js`，经根入口
+  `load-save.js` 驱动；
   用例**显式**给 `expect=FIELD,SC0000`；slot 4/5/7 的链发射不同坐标；`calls=5` / `calls=6` 两条合法终态
   —— 2026-11-21 起 `loadSave` 不等 TITLE（老形状的 6/7 各减一：TITLE 门搬进了 `bootToTitle`，
   参考入口那条 e2e 仍是 6/7）；`bad-slot` 构造 throw；重复 name 由
@@ -1381,8 +1399,8 @@ int global `0xb1b6` → `|0x10` → 写回（`BATTLE_HELP_GLOBAL_ID` / `BATTLE_H
   `control-script/load-save-onloaded`（`expect` 决定终态 / `SC0000` 不在表里就不收 / `onLoaded` 起场景 /
   `expect` 缺或非法 ⇒ 构造 throw）与 `control-script/chains-route`（`route`：`load:*` ⇒ first、其余 ⇒ then、
   **timeout 也按名字**、`start` 只启 first），以及 `plugin-headless` 二进制内的
-  `plugin/load-save-e2e`（真库 + `--plugin-param slot=5 --plugin-param expect=FIELD,SC0000`；
-  判据 = `run=done` + `params=…slot=5` + `expect` 生效 + `calls ∈ {6,7}` + 终态日志含 `FIELD` +
+  `plugin/load-save-e2e`（根入口 `load-save.js` + `<--appdata>/plugin-config.json` 的域 `save`，
+  **不给** `--plugin-param`；判据 = `run=done` + `expect` 生效 + `calls ∈ {6,7}` + 终态日志含 `FIELD` +
   无 `run failed`；⛔ 不看 exit code）。该 e2e 只在 Windows 跑
   （子进程 `CreateProcessW`；mac/Linux skip）—— 本机等价证据是 §4.6 的手工 headless（`calls=7` / `FIELD`）。
 - **C2b-2 用例**：`plugin-overlay`（顶层 pure；adopt / 插件 display list 上屏 / 三键电平跟随
@@ -1611,7 +1629,7 @@ callback 链的可读性（进 `ctx.log`/设计文档）。
 
 ### D1：单插件入口 / flag / headless
 
-- **推荐**：`--plugin <file>`〔拟名〕（`--ui` 保留为 overlay 别名）+ `--plugin-param k=v`（可重复；
+- **推荐**：`--plugin <id|path>`〔拟名〕（`--ui` 保留为 overlay 别名）+ `--plugin-param k=v`（可重复；
   重复 key ⇒ exit 2）；**一个** QJS 运行时/context；同一个插件可选 `render`/`start`/`onTrigger`
   （至少一个；`start`/`onTrigger` 必须成对；只有 `render` 也可）；没有 `render` 时可 headless；有 `render` 时需窗口。
   `ctx.params` 只读；`ctx.dispatch` 是任务，不是权限。
@@ -1682,7 +1700,7 @@ callback 链的可读性（进 `ctx.log`/设计文档）。
   那 ~0.8 ms 不进判据窗。⚠ MSDN 明确 `QueryThreadCycleTime` **不保证精确**（CPU 频率变化 /
   跨核迁移都可能偏）⇒ 它只服务"2 ms 判据"，⛔ 不要当"精确 CPU 时间"用。
   ★ **读数**（2026-11-21 / win32 / `LIFT_PLUGIN_CALLBACK_ELAPSED=1` + `--plugin
-  scripts/plugins/lib/save.js --plugin-param slot=5 --plugin-param expect=FIELD,SC0000`）：7 个回调的
+  load-save --plugin-param slot=5 --plugin-param expect=FIELD,SC0000`；S1 前写作 `lib/save.js`）：7 个回调的
   `js_cpu_us` = 137 / 70 / 82 / 16 / 137 / 159 / 47（另几轮 134 / 27）—— **全都不是 15625 的倍数**
   （`GetThreadTimes` 的整 tick 记账必然是它的倍数）⇒ 亚 tick CPU 钟的独立佐证；同轮
   `load:confirm2` = `elapsed_us=306`（墙钟）/ `js_cpu_us=159`。再压 6 个忙等进程重跑：
@@ -1764,11 +1782,11 @@ callback 链的可读性（进 `ctx.log`/设计文档）。
 | QJS 宿主 API / loader | `apps/emulator-lift/src/ui/script_quickjs.cpp:886-1063`、`1223-1287`、`1412-1459` |
 | QJS 叠层 / Present | `apps/emulator-lift/src/runtime/present_sdl.cpp:596-691`、`1240-1250` |
 | 插件 render adopt / release / 字体（C2b-2） | `apps/emulator-lift/src/runtime/present_sdl.h:208-221`；`present_sdl.cpp:528-582` |
-| 窗口档 ⑤' 装配（adopt / `exit 2` / 取代语） | `apps/emulator-lift/src/aot/aot_main.cpp:1201-1235` |
+| 窗口档 ⑤' 装配（adopt / `exit 2` / 取代语） | `apps/emulator-lift/src/aot/aot_main.cpp:1385-1420` |
 | `game.mouse().buttons` 装配 / 三键唯一源 | `apps/emulator-lift/src/ui/script_quickjs.cpp:652-690`、`:3227`；`apps/emulator-lift/src/plugin/plugin_host.cpp:104-108`；`apps/emulator-lift/src/runtime/present_sdl.cpp:612-625`、`host_window.h:181-184`、`input_device.h:84-90` |
 | QJS 预算/interrupt（含宿主暂停） | `apps/emulator-lift/src/ui/script_quickjs.cpp:107-113`、`197-212`、`253-285`、`317-329`、`1392-1395`、`3387-3390`、`3438-3447` |
-| C2c `loadSave` 真库 / 参考入口 | `apps/emulator-lift/scripts/plugins/lib/save.js`（`loadSave` / 参考入口 / `expect`） |
-| A 阶段 `chains.js`（通用路由） / 可跑样例 | `apps/emulator-lift/scripts/plugins/lib/chains.js`（`route`）；`apps/emulator-lift/scripts/plugins/lib/scenario-save07-battle.js` |
+| C2c `loadSave` 库 / 参考入口 | `apps/emulator-lift/scripts/plugins/lib/save.js`（`loadSave` / `SAVE_DIR_REL` / 前置检查 / `expect`）；参考入口在**根** `apps/emulator-lift/scripts/plugins/load-save.js`（id = `load-save`） |
+| A 阶段 `chains.js`（通用路由） / 可跑样例 | `apps/emulator-lift/scripts/plugins/lib/chains.js`（`route`）；`apps/emulator-lift/scripts/plugins/scenario-save07-battle.js` |
 | `.BIN` 精确相等（C1） vs recipe 剥后缀 | `apps/emulator-lift/src/runtime/trigger_runner.cpp:70,82`、`recipe.cpp:141-153` |
 | 帧列表 | `apps/emulator-lift/src/runtime/engine_frames.cpp:81` |
 | emu-ctl 命令表 | `tools/lib/emu-ctl.mjs:785-810`；`tools/emu-ctl.mjs:1-20` |

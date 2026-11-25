@@ -8,10 +8,10 @@
 //      `--plugin` 带 render + headless 时出现一次（D-C2-5）；
 //   ④ `plugin    : ` **只出现一次**（⛔ 不是每帧 / 每读点一行；AGENTS §12.8 第 3 条）。
 //   ⑤ `plugin/quit-attribution`：`ctx.quit()` ⇒ readout `run=quit` + 停机摘要点名 `plugin: quit`。
-//   ⑥ `plugin/load-save-e2e`（C2c）：真库 `scripts/plugins/lib/save.js`，参数来自
-//      `<--appdata>/plugin-config.json` 的域 `save`（`slot` / `expect`）——**不给** `--plugin-param`；
-//      判据 = readout `run=done` / stderr 终态日志含 **FIELD** / 无 `run failed`（⛔ 不看 exit code，
-//      `params=` 也不再是判据）。
+//   ⑥ `plugin/load-save-e2e`（C2c）：**根入口** `scripts/plugins/load-save.js`（S1 从 `lib/save.js` 拆出；
+//      `lib/` 只是库），参数来自 `<--appdata>/plugin-config.json` 的域 `save`（`slot` / `expect`）
+//      ——**不给** `--plugin-param`；判据 = readout `run=done` / stderr 终态日志含 **FIELD** /
+//      无 `run failed`（⛔ 不看 exit code，`params=` 也不再是判据）。
 //   ⑦ `plugin/bad-config-exit2`：坏 `plugin-config.json` ⇒ 产品 exe **exit 2** + stderr 点名
 //      `plugin-config.json`（配置装载失败是**启动失败**，不是 warn + 继续）。
 //
@@ -65,14 +65,15 @@ int main(int argc, char** argv) {
     const fs::path age_exe = fs::path(argv[2]);
     const fs::path game_dir = fs::path(argv[3]);
     const fs::path fixture = fs::path(LIFT_PLUGIN_FIXTURES_DIR) / "headless.js";
-    // ★ C2c：`plugin/load-save-e2e` 直接拿**真库**当入口（import 根 = 入口文件目录 ⇒ 不复制文件）。
-    const fs::path save_js = fs::path(LIFT_PLUGIN_LIB_DIR) / "save.js";
+    // ★ C2c：`plugin/load-save-e2e` 直接拿**根入口**当入口（S1：`lib/save.js` 只是库，参考入口
+    //   拆到 `scripts/plugins/load-save.js`；import 根 = 入口文件目录 ⇒ 不复制文件）。
+    const fs::path save_js = fs::path(LIFT_PLUGIN_LIB_DIR).parent_path() / "load-save.js";
     const fs::path saves_dir = fs::path(LIFT_SAVES_DIR);
     if (!fs::exists(exe)) LIFT_SKIP("emulator-lift-aot 不在场");
     if (!fs::exists(age_exe)) LIFT_SKIP("执行源（corpus/assets/age/AGE.EXE__dumped.sectfix.EXE）不在场");
     if (!fs::exists(game_dir)) LIFT_SKIP("安装树（--game-dir）不在场");
     if (!fs::exists(fixture)) LIFT_SKIP("夹具 tests/plugin_fixtures/headless.js 不在场");
-    if (!fs::exists(save_js)) LIFT_SKIP("真库 apps/emulator-lift/scripts/plugins/lib/save.js 不在场");
+    if (!fs::exists(save_js)) LIFT_SKIP("根入口 apps/emulator-lift/scripts/plugins/load-save.js 不在场");
     if (!fs::exists(saves_dir / "SAVE05.DAT")) LIFT_SKIP("saves/SAVE05.DAT 不在场（saves/ 只读复现素材）");
 
     std::error_code ec;
@@ -182,7 +183,7 @@ int main(int argc, char** argv) {
         LIFT_CHECK(q.out.find("input-plan: quit") == std::string::npos);
     }
 
-    // ---- ⑥ C2c `plugin/load-save-e2e`：真库 `lib/save.js` + 配置文件（域 `save`）----
+    // ---- ⑥ C2c `plugin/load-save-e2e`：根入口 `load-save.js` + 配置文件（域 `save`）----
     //   判据 = **stdout 的一次性 readout**（⛔ 不是 exit code：`ctx.finish` 不改进程 exit，且
     //   `--time-limit 90` 是正常结局）：`run=done`；stderr 的终态日志（`ctx.log`）必须点名
     //   **FIELD**，且**没有** `run failed`；readout 只一行。

@@ -1,4 +1,4 @@
-// scripts/plugins/lib/scenario-save07-battle.js —— **可跑样例**：启动到 TITLE → 载入存档 007 → 结束回合 → 決定 → 进战斗
+// scripts/plugins/scenario-save07-battle.js —— **可跑样例**：启动到 TITLE → 载入存档 007 → 结束回合 → 決定 → 进战斗
 //
 // 这就是「新场景怎么写」的样板：**不重写载入存档那一段**（那是 `save.js` 的 `loadSave`），
 // 也不重写"启动到 TITLE"那一段（那是 `boot-to-title.js` 的 `bootToTitle`）；只写"载入完成之后"
@@ -6,13 +6,15 @@
 //
 // 跑法（cwd = apps/emulator-lift；appdata 必须用 `scripts/clean-appdata.sh` 生成的那一份 ——
 // 它复制 `saves/SAVE07.*` 等，页基 = 0 ⇒ 槽 007 才点得中，见 `scripts/recipes/save07-battle.plan` 头）：
-//   out\emulator-lift-aot.exe --plugin scripts/plugins/lib/scenario-save07-battle.js ^
+//   out\emulator-lift-aot.exe --plugin scripts/plugins/scenario-save07-battle.js ^
 //     --game-dir ..\..\links\install --appdata <私有 appdata> ^
 //     --skip-logo --audio off --present window --present-vsync 0 --time-limit 180 --frame-log
 //
-// ★ 为什么本文件必须在 `scripts/plugins/lib/` 里：宿主 QJS 的 import 根 = **入口文件所在目录**
-//   （`src/ui/script_quickjs.cpp` 的 `moduleNormalize`），`../` 会被"越出 UI 根目录"拒掉、
-//   子目录也解析不到 ⇒ 能 `import './save.js'` 的只有这一层。
+// ★ 为什么本文件必须在 `scripts/plugins/` **根**（S1 起）：宿主 QJS 的 import 根 = **入口文件所在目录**
+//   （`src/ui/script_quickjs.cpp` 的 `moduleNormalize`），且解析结果必须在该根之下（`../` 越根被拒）。
+//   ⇒ 入口在上、库在 `lib/`：本文件 `import "./lib/save.js"`（向下，合法），
+//     `lib/` 里的库彼此 `./x.js`（同目录）。⛔ 入口不能住在库的下层（`../lib/...` 会红）。
+//   同一原因：`--plugin` 的 id 只查这个根（非递归）、`lib/` 永远不是 id 目标。
 // ★ **`expect` 由调用方按预期给**：这里 `['FIELD.BIN']` —— SAVE07 落在**地图**上，
 //   战斗（`BTL.BIN`）是之后由用户动作（结束回合 / 決定）进的，不是载入落点。工具不猜。
 // ★ **三段、三套前缀**（`route` 按名字分流，前缀必须两两不相交 —— `chains.js` 头）：
@@ -25,14 +27,14 @@
 //   脚本 / global 状态，在 TITLE 上置位会被随后的载入覆盖。
 // ★ 门 / 坐标与 `scripts/recipes/save07-battle.plan` 的 ④–⑧ 是**同一组读数**（⛔ 不在这里另立数值）：
 //   FIELD 主轮询体 → 结束回合 1220,45 → SELACT 主轮询体 → 決定 640,517 → BTL 主循环
-//   （位置值只在 `./script-positions.js` 里写一次；坐标是本文件的 1280×720 参考系常量）。
+//   （位置值只在 `./lib/script-positions.js` 里写一次；坐标是本文件的 1280×720 参考系常量）。
 // ★ 全篇**零 `wait`**：每一道等都是 guest 可见状态门（零宿主墙钟、零时间等待）。
 // ★ 无状态：进度只在 `ev.name`；宿主每回调新建实例也能接旧链（⛔ 不用 `ctx.state` 记步）。
 
-import { bootToTitle } from "./boot-to-title.js";
-import { route } from "./chains.js";
-import { hideBattleHelp } from "./guest-globals.js";
-import { loadSave } from "./save.js";
+import { bootToTitle } from "./lib/boot-to-title.js";
+import { route } from "./lib/chains.js";
+import { hideBattleHelp } from "./lib/guest-globals.js";
+import { loadSave } from "./lib/save.js";
 import {
     BTL_MAIN_LOOP_HI,
     BTL_MAIN_LOOP_LO,
@@ -40,7 +42,7 @@ import {
     FIELD_MAIN_LOOP_LO,
     SELACT_MAIN_LOOP_HI,
     SELACT_MAIN_LOOP_LO,
-} from "./script-positions.js";
+} from "./lib/script-positions.js";
 
 /** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
 /** @typedef {import("@amayui/lift-plugin").Trigger} Trigger */
@@ -48,7 +50,7 @@ import {
 /** @typedef {import("@amayui/lift-plugin").TimeoutEvent} TimeoutEvent */
 /** @typedef {FiredEvent | TimeoutEvent} PluginEvent */
 /**
- * 场景这一段链：形状 = `PluginModule` 的 `start` / `onTrigger`（与 `./chains.js` 的 `Chain` 同形）。
+ * 场景这一段链：形状 = `PluginModule` 的 `start` / `onTrigger`（与 `./lib/chains.js` 的 `Chain` 同形）。
  *
  * @typedef {object} Chain
  * @property {(ctx: RunCtx) => Trigger | Trigger[] | null} start

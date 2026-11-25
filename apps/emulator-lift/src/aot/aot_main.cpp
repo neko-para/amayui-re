@@ -23,6 +23,7 @@
 #include "aot/aot_dispatch.h"
 #include "aot/aot_host.h"
 #include "plugin/plugin_host.h"      // C2a：QJS 单插件（--plugin）的宿主适配器
+#include "plugin/plugin_search.h"    // S1：`--plugin <id|path>` 的**纯**解析器（id 只查两个白名单根）
 #include "plugin/readings.h"         // C2a：生产 ReadingsSource（marker + 鼠标）
 #include "runtime/capability.h"      // ★ 能力面（`caps=` 的**唯一真源**：与 hello 同一张表）
 #include "runtime/control.h"          // 控制层端点（`--control-root`；PIMPL，⛔ 不含 beast / nlohmann）
@@ -225,12 +226,14 @@ void usage() {
         "  --ui <path>               用这份 JS 脚本当 HUD（**隐含 --overlay**；与 --overlay 同给\n"
         "                            时以 --ui 为准）；脚本错误点名 `<path>:<行>:<列>`。\n"
         "                            字体缺失 / 脚本编译失败 ⇒ 拒绝启动（exit 2）\n"
+        "                            ★ **已弃用**（S1）：请改用 `--plugin <path>`；本轮只打一行 deprecation，\n"
+        "                              行为**不变**（`--ui` 仍只吃路径、⛔ 不吃 id；下一轮 S2/S3 删）\n"
         "  --ui-input=consume|pass   注入点击（--input-plan / 控制层）是否也过叠层的命中路由：\n"
         "                            consume（缺省）= 命中即吞（down 吞 ⇒ up 吞，guest 收不到该\n"
         "                            点击的任何消息）；pass = 逐位与没有 UI 相同。也接受\n"
         "                            `--ui-input consume|pass`。只在 --overlay / --ui 时生效；\n"
         "                            窗口参数（--present headless 拒绝）；非法值 exit 2\n"
-        "  --plugin <path>           用这份 **ES module** 当插件：`export default { render?, start?,\n"
+        "  --plugin <id|path>        用这份 **ES module** 当插件：`export default { render?, start?,\n"
         "                            onTrigger?, initialState? }`（宿主只读 default 导出）。\n"
         "                            `start/onTrigger` 是 Run 的回调链（写只经 ctx.edit / ctx.input）；\n"
         "                            `render` 可选：**窗口档**同一个插件实例被接进叠层 host\n"
@@ -239,6 +242,15 @@ void usage() {
         "                            字段**（同一路径允许，不同路径 exit 2）；⛔ 不隐含 --overlay\n"
         "                            ⇒ `--present headless` 也能跑（没有窗口就没有 render）。\n"
         "                            与 --input-plan / --control-root 互斥（两套输入写预算）⇒ exit 2\n"
+        "                            ★ **id 语法**：`^[A-Za-z0-9_-]{1,64}$`（文件名 stem）。\n"
+        "                              含 `.` / `/` / `\\` 的写法一律当**路径**（所以 `x.js` 天然是路径，\n"
+        "                              行为与旧版逐字相同：cwd 相对 / 绝对 / 装载失败 exit 2）。\n"
+        "                            ★ **id 只查两处非递归根**（⛔ 不查 `lib/`、⛔ 不递归子目录）：\n"
+        "                              ① `<exe 目录>/scripts/plugins/<id>.js`（发行）\n"
+        "                              ② 编译期 `LIFT_PLUGIN_DIR/<id>.js`（开发；= 源码 scripts/plugins）\n"
+        "                              两处都命中 ⇒ exit 2 并列出全部候选；都不在 ⇒ exit 2 并列出搜过的\n"
+        "                              目录与每个候选路径。命中 ⇒ 打一行 `--plugin id=<id> ⇒ <绝对路径>`\n"
+        "                              并用绝对路径装载（一次性，⛔ 不周期）。\n"
         "  --plugin-param k=v        给插件的只读参数（`ctx.params`；可重复，**重复 key ⇒ exit 2**）\n"
         "                            ★ 内建插件优先读 `<--appdata>/plugin-config.json`（ctx.config）；\n"
         "                            **没有 appdata 或没有该 key** 才回退到这里（文件坏 ⇒ exit 2）\n"
@@ -699,8 +711,12 @@ int main(int argc, char** argv) {
         } else if (a == "--ui") {
             // ★ B：`--ui <path>` 隐含 `--overlay`（总开关仍是 overlay）。也是窗口参数。
             //   ★ C2a（D-C2-2）：`--plugin` 与它是**同一字段** ⇒ 两份**不同**路径当场 exit 2。
+            //   ★ S1：**只 deprecated、不删**（下一轮 S2/S3 删）。每给一次打**一行** warn：
+            //     前缀必须是 `emulator-lift-aot:`（⛔ 不用 `[ui]` —— `tests/aot_overlay.cpp` 在数
+            //     `[ui]` / `[overlay]` 的行数）。⛔ 不给 `--ui` 加 id 语义（它仍只吃路径）。
             std::string v;
             if (!needValue("--ui", &v)) return 2;
+            std::fputs("emulator-lift-aot: --ui 已弃用，请改用 --plugin <path>\n", stderr);
             if (!plugin_path.empty() && plugin_path != v) {
                 std::fprintf(stderr,
                              "emulator-lift-aot: --ui 与 --plugin 是同一个字段，但给了两份不同的路径"
@@ -885,6 +901,49 @@ int main(int argc, char** argv) {
                      plugin_params.size());
         return 2;
     }
+    // =====================================================================================
+    // S1：`--plugin <id|path>` 的解析（**parse 之后、GPU bring-up 之前**）
+    //   ★ 三条行为逐字保留：路径形式原样交给 `initFromFile`（cwd 相对 / 绝对 / 装载失败 exit 2）；
+    //     `--plugin` 与 `--ui` 的原字符串比较已经在上面做完；⛔ id 不给 `--ui`。
+    //   ★ id 只查两处**非递归**根（`<exeDir>scripts/plugins/` 与编译期 `LIFT_PLUGIN_DIR`），
+    //     ⛔ 不查 `lib/`、⛔ 不递归子目录（用户口径 2026-11-25，比设计报告 A2 更硬）。
+    //   ★ 歧义 / 找不到都 exit 2（⛔ 不静默取第一个）；命中 ⇒ 换成**绝对路径**并打**一行**日志。
+    // =====================================================================================
+    if (!plugin_path.empty()) {
+        lift::plugin::PluginResolveRoots roots;
+        roots.exe_dir = exeDirOf(args.empty() ? std::string() : args[0]);
+        roots.dev_dir = LIFT_PLUGIN_DIR;
+        const lift::plugin::PluginResolveResult resolved =
+            lift::plugin::resolvePluginSpec(plugin_path, roots);
+        if (resolved.status == lift::plugin::PluginResolveResult::Status::Ambiguous) {
+            std::fprintf(stderr,
+                         "emulator-lift-aot: --plugin id `%s` 命中 %zu 处（exit 2，⛔ 不静默取第一个）：\n",
+                         resolved.id.c_str(), resolved.hits.size());
+            for (const std::string& hit : resolved.hits) std::fprintf(stderr, "  %s\n", hit.c_str());
+            std::fputs("  ⇒ 用路径形式指定唯一一份（含 `.` / `/` / `\\` 的写法一律按路径）\n", stderr);
+            return 2;
+        }
+        if (resolved.status == lift::plugin::PluginResolveResult::Status::NotFound) {
+            std::fprintf(stderr,
+                         "emulator-lift-aot: --plugin 找不到 id `%s`（exit 2）。搜索过"
+                         "（非递归；⛔ 不查 lib/、不递归子目录）：\n",
+                         resolved.id.c_str());
+            for (const std::string& candidate : resolved.searched) {
+                std::fprintf(stderr, "  %s\n", candidate.c_str());
+            }
+            std::fputs("  （id 只匹配 ^[A-Za-z0-9_-]{1,64}$；含 `.` / `/` / `\\` 的写法一律按路径，"
+                       "`.js` 后缀天然是路径）\n",
+                       stderr);
+            return 2;
+        }
+        if (resolved.kind == lift::plugin::PluginSpecKind::Id) {
+            // ★ 一次性（⛔ 不周期）。打印的是**绝对路径**（解析结果，不重拼字符串）。
+            std::fprintf(stderr, "emulator-lift-aot: --plugin id=%s ⇒ %s\n", resolved.id.c_str(),
+                         resolved.path.c_str());
+            plugin_path = resolved.path;
+        }
+    }
+
     // ★ `overlay` 的唯一合成点：显式 `--overlay` **或** 有 HUD 脚本。`--ui` 单给时与旧行为逐字相同
     //   （旧代码在 `--ui` 分支里写 `overlay = true`，等价于这里 `!ui_script.empty()`）。
     overlay = overlay_flag || !ui_script.empty();

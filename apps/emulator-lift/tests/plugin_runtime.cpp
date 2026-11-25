@@ -9,8 +9,9 @@
 //   · `plugin/concurrent-arm`             ：一读点最多一个（注册顺序）；返回数组**完整替换**；`[]`=done。
 //   · `plugin/module-default`（+ pair）   ：只读 `export default`；default 不是对象 / `start` 与
 //                                            `onTrigger` 不成对 ⇒ **装载失败并点名**。
-//   · `control-script/start-on-trigger-chain`：**真库** `scripts/plugins/lib/save.js`（假读数）走整条链：
-//                                            参考入口 = `bootToTitle` + 载入链（2026-11-21 起 `loadSave`
+//   · `control-script/start-on-trigger-chain`：**真库** `scripts/plugins/lib/save.js`（假读数）；
+//                                            参考入口 = 根 `scripts/plugins/load-save.js`（S1 拆出）：
+//                                            `bootToTitle` + 载入链（2026-11-21 起 `loadSave`
 //                                            自己**不等 TITLE**；TITLE 门在 `lib/boot-to-title.js`）：
 //                                            `boot:title` 命中 → `start` 点 LoadData → SAVE → 读点 →
 //                                            SBUNKI → `expect` 命中（用例显式给
@@ -173,9 +174,15 @@ std::string fixturePath(const std::string& name) {
 }
 
 // ★ C2c：**真库**目录（`scripts/plugins/lib`）。QJS 的 import 根 = 入口文件目录 ⇒ 夹具不能
-//   import 它；本文件直接把 `lib/save.js` 当入口（它自带参考 default 导出，D-C2C-1）。
+//   import 它。★ S1 起 `lib/save.js` 只是库（没有 default 导出）；参考入口在**根** `load-save.js`。
 std::string libPath(const std::string& name) {
     return (fs::path(LIFT_PLUGIN_LIB_DIR) / name).string();
+}
+
+// ★ S1：`--plugin` 的 id 根 = `scripts/plugins/`（`LIFT_PLUGIN_LIB_DIR` 的父目录）。场景入口在根上，
+//   库仍在 `lib/`；`load-save.js` 是 `lib/save.js` 的参考入口（id = `load-save`）。
+std::string pluginRootPath(const std::string& name) {
+    return (fs::path(LIFT_PLUGIN_LIB_DIR).parent_path() / name).string();
 }
 
 // 宿主 `fs::path` → UTF-8（`ctx.appdata` 的根参数是 UTF-8；Windows 上不能拿 `.string()`）。
@@ -266,10 +273,11 @@ struct Fixture {
         return loadFile(fixturePath(file), params, host_ops);
     }
 
-    // ★ C2c：真库（`scripts/plugins/lib/save.js`）当入口 —— 与 e2e 同一个文件，⛔ 不复制。
+    // ★ S1：参考入口（config > params > 默认、自带 TITLE 门）在根 `load-save.js` —— 与 e2e
+    //   同一个文件，⛔ 不复制。
     bool loadLib(const std::map<std::string, std::string>& params = {},
                  const lift::ui::UiHostOps* host_ops = nullptr) {
-        return loadFile(libPath("save.js"), params, host_ops);
+        return loadFile(pluginRootPath("load-save.js"), params, host_ops);
     }
 
     // 一个读点（本文件里"读点"的唯一含义）。
@@ -460,10 +468,10 @@ void caseConcurrentArm() {
 }
 
 // =====================================================================================
-// `control-script/start-on-trigger-chain`：**真库** `lib/save.js` + 假读数走完整条链
+// `control-script/start-on-trigger-chain`：**真库** `lib/save.js`（经根入口 `load-save.js`）+ 假读数走完整条链
 //
 // ★ 2026-11-21 起 `loadSave.start` **不等 TITLE**（前提 = 调用方保证已在 TITLE；TITLE 门搬到了
-//   `lib/boot-to-title.js`）⇒ 以 `lib/save.js` 当入口时走的是它的**参考入口**（`bootToTitle` + 载入链）：
+//   `lib/boot-to-title.js`）⇒ 以根入口 `load-save.js` 当入口时走的是它的**参考入口**（`bootToTitle` + 载入链）：
 //   `start` arm `boot:title`，命中后才 `click(1070,480)` 并 arm `load:save`。
 //   ⇒ 下面两道 armed-name 断言就是"拆分"的地面真相：TITLE 门属于 boot 链，载入链的第一道门是 SAVE。
 //
@@ -732,9 +740,10 @@ void caseChain() {
 //   ② `expect` 命中 ⇒ 先 log、再 `onLoaded`：armed 集合**换成**场景的门（`battle:field`）；
 //   ③ `expect` 缺 / 元素不是非空字符串 ⇒ **构造时 throw** ⇒ `run=failed`（⛔ 不猜默认值）。
 //
-// ★ ①② 用**交付样例** `scripts/plugins/lib/scenario-save07-battle.js`（真 `save.js` + 真 `chains.js`）；
-//   ③ 需要一份"故意漏参数"的入口 ⇒ run 私有临时目录放 `save.js` 的**逐字节副本** + 小入口
-//   （import 根 = 入口目录 ⇒ 只有这样它才 import 得到真库；⛔ 不往 `scripts/plugins/lib/` 塞测试夹具）。
+// ★ ①② 用**交付样例** `scripts/plugins/scenario-save07-battle.js`（S1 起入口在**根**；真 `lib/save.js`
+//   + 真 `lib/chains.js`）；③ 需要一份"故意漏参数"的入口 ⇒ run 私有临时目录放 `lib/save.js` 的
+//   **逐字节副本** + 小入口（import 根 = 入口目录 ⇒ 只有这样它才 import 得到真库；
+//   ⛔ 不往 `scripts/plugins/lib/` 塞测试夹具）。
 // =====================================================================================
 
 // run 私有目录（`fs::temp_directory_path()` 之下；析构时删掉 ⇒ ⛔ 不污染工作树）。
@@ -976,7 +985,7 @@ void caseLoadSaveOnLoaded() {
     Fixture f;
     LIFT_CHECK(f.mem_ok && f.win_ok);
     if (!f.mem_ok || !f.win_ok) return;
-    const bool loaded = f.loadFile(libPath("scenario-save07-battle.js"));
+    const bool loaded = f.loadFile(pluginRootPath("scenario-save07-battle.js"));
     LIFT_CHECK(loaded);
     if (!loaded) {
         std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());

@@ -1,4 +1,4 @@
-// scripts/plugins/lib/scenario-fellow-switch.js —— **复现**「载入存档 009 → 进 FELLOW → 立绘来回切换 3 轮（6 次）」
+// scripts/plugins/scenario-fellow-switch.js —— **复现**「载入存档 009 → 进 FELLOW → 立绘来回切换 3 轮（6 次）」
 //
 // 它是 `scripts/recipes/fellow-switch.plan` 的**取代件**（那个 `.plan` 的文件头已注明）。为什么换掉配方：
 //   · 配方第 4 步之前用的是**硬编码行 y=626**（只在读档界面**第 1 页** `LOAD 000..009` 成立）；
@@ -12,10 +12,10 @@
 //   scripts/clean-appdata.sh ../../.tmp/fellow-js/appdata-1
 //   ./out/emulator-lift-aot.exe --game-dir ../../links/install --appdata ../../.tmp/fellow-js/appdata-1 \
 //     --present headless --skip-logo --audio off --time-limit 240 \
-//     --plugin scripts/plugins/lib/scenario-fellow-switch.js
+//     --plugin scripts/plugins/scenario-fellow-switch.js
 //
 // 时序 / 门（**全部来自 `scripts/recipes/fellow-switch.plan` 已取证的那几个读数**，⛔ 本文件不另立数值；位置值只在
-// `./script-positions.js` 里写一次，坐标是本文件的 1280×720 参考系常量）：
+// `./lib/script-positions.js` 里写一次，坐标是本文件的 1280×720 参考系常量）：
 //   TITLE  回调体 `[0x0460,0x0520)`          → 载入屏（`boot-to-title.js`）
 //   SAVE   回调体 `[0x1104,0x11C4)`          → 列表就绪；页号由 `loadSave` 自己判断（`save.js`）
 //   SBUNKI 读段之后 `[0x0B18,0x0C58)`        → 「是」(640,323)
@@ -52,16 +52,16 @@
 //   ⚠ 这 3 次只证明"这个形状在这台机器上连过 3 次"，不是"结构上不可能被吞"——闸门②' 那条仍然缺。
 //
 // ★ 结构（同 `./scenario-save10-field.js`）：**三层 `route`，前缀两两不相交**
-//     boot:     启动到 TITLE            （`./boot-to-title.js`）
-//     load:     载入存档 + 翻页 + 终态  （`./save.js` 的 `loadSave`；前提是已经在 TITLE）
+//     boot:     启动到 TITLE            （`./lib/boot-to-title.js`）
+//     load:     载入存档 + 翻页 + 终态  （`./lib/save.js` 的 `loadSave`；前提是已经在 TITLE）
 //     scenario: 载入之后的场景动作      （本文件）
 //   外层剥 `boot:`，内层剥 `load:`，剩下全是 `scenario:`。
 // ★ **无状态**：进度只在 `ev.name`（宿主每回调新建实例也能接旧链 —— `plugin-runtime.md` §4.6；
 //   ⛔ 不把进度塞进闭包 / `ctx.state`）。
 
-import { bootToTitle } from "./boot-to-title.js";
-import { route } from "./chains.js";
-import { loadSave } from "./save.js";
+import { bootToTitle } from "./lib/boot-to-title.js";
+import { route } from "./lib/chains.js";
+import { loadSave } from "./lib/save.js";
 import {
     FELLOW_POLL_HI,
     FELLOW_POLL_LO,
@@ -71,7 +71,7 @@ import {
     REIGN_CALLBACK_LO,
     REIGN_READ_INPUT_HI,
     REIGN_READ_INPUT_LO,
-} from "./script-positions.js";
+} from "./lib/script-positions.js";
 
 /** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
 /** @typedef {import("@amayui/lift-plugin").Trigger} Trigger */
@@ -79,7 +79,7 @@ import {
 /** @typedef {import("@amayui/lift-plugin").TimeoutEvent} TimeoutEvent */
 /** @typedef {FiredEvent | TimeoutEvent} PluginEvent */
 /**
- * 场景这一段链：形状 = `PluginModule` 的 `start` / `onTrigger`（与 `./chains.js` 的 `Chain` 同形）。
+ * 场景这一段链：形状 = `PluginModule` 的 `start` / `onTrigger`（与 `./lib/chains.js` 的 `Chain` 同形）。
  *
  * @typedef {object} Chain
  * @property {(ctx: RunCtx) => Trigger | Trigger[] | null} start
