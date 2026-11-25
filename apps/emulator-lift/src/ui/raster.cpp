@@ -54,7 +54,7 @@ char32_t nextCodepoint(const std::string& s, std::size_t* i) {
 // ⚠ 这不是最终排版质量（M4 由宿主字体重绘时再谈抗锯齿）；M0 的承诺只是"中文经宿主字体出字"。
 constexpr std::uint8_t kCoverageThreshold = 128;
 
-// ★ 防宿主级 OOM：`--ui` 脚本可以直接给 `ui.rect` 的 w/h，而 `out->rgba.assign(w*h*4)`
+// ★ 防宿主级 OOM：UI 脚本（hud 回退 / 插件 render）可以直接给 `ui.rect` 的 w/h，而 `out->rgba.assign(w*h*4)`
 //   没有上界时，`ui.rect({w:2e9,h:2e9})` 会让 `std::vector::assign` 抛 `std::length_error`
 //   （异常穿到 presenter ⇒ 连续 3 帧后 latch、停止提交），`1e6×1e6`（4 TB）则直接被系统 SIGKILL。
 //   ⇒ 在**分配之前**硬失败：这一帧 UI 失败（宿主关叠层 + 一次性 stderr），呈现照旧。

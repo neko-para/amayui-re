@@ -99,9 +99,6 @@ std::string normalizedSeparators(const std::string& text) {
 //   其它文案）—— 标记必须只属于这句话，否则"恰好一次"这条断言会变成恒真。
 const char* const kSoundNoticeMarker = "--sound 已接受";
 
-/** ★ S1：`--ui` 的 deprecation 标记（**必须**与 `aot_main.cpp` 打印的那一行逐字一致）。 */
-const char* const kUiDeprecatedMarker = "--ui 已弃用";
-
 /** 本文件的公共 spawn 选项：cwd 指到临时目录；超时沿用原值 30 s（这几条都在建窗口之前返回）。 */
 lift_test::ChildOptions childOptions(const fs::path& cwd) {
     lift_test::ChildOptions opts;
@@ -192,8 +189,10 @@ int main(int argc, char** argv) {
         LIFT_CHECK(r.out.find("保留 id `hud`") != std::string::npos);
         LIFT_CHECK(r.out.find("--plugin hud") != std::string::npos);
         LIFT_CHECK(r.out.find("scripts/ui/hud.js") != std::string::npos);
-        // ★ S1：`--ui` 仍在（**只 deprecated、不删**）⇒ help 必须标出来。
-        LIFT_CHECK(r.out.find("已弃用") != std::string::npos);
+        // ★ S3：`--ui` 已从 CLI 面删除 ⇒ help **不许**再列它（`--ui-input` 是另一个 flag，仍在）。
+        //   删掉这条断言 ⇒ help 与解析器分叉（用户照着 help 写的 `--ui` 会变成未知参数）。
+        LIFT_CHECK(r.out.find("--ui <path>") == std::string::npos);
+        LIFT_CHECK(r.out.find("已弃用") == std::string::npos);
     }
 
     // ---- ①⁰⁰ C2a `--plugin` 的**启动即拒绝**（parse 期；⛔ 不需要 GPU / 资产）----
@@ -210,12 +209,10 @@ int main(int argc, char** argv) {
         const Case cases[] = {
             {"plugin+input-plan", {"--plugin", "a.js", "--input-plan", "b.plan"}, "--plugin", "--input-plan"},
             {"plugin+control-root", {"--plugin", "a.js", "--control-root", "ctl"}, "--plugin", "--control-root"},
-            {"plugin+ui-different", {"--plugin", "a.js", "--ui", "b.js"}, "--plugin", "--ui"},
             {"plugin-param-duplicate", {"--plugin", "a.js", "--plugin-param", "k=1", "--plugin-param", "k=2"},
              "--plugin-param", "k"},
             {"plugin-param-shape", {"--plugin", "a.js", "--plugin-param", "novalue"}, "--plugin-param", "k=v"},
-            // ★ F6（C2a 复审）：重复 `--plugin` 给两份不同路径 — 与 `--plugin`/`--ui` 的
-            //   "不静默只取一个"对称（旧实现无条件覆盖 ⇒ 静默用后一个）。
+            // ★ F6（C2a 复审）：重复 `--plugin` 给两份不同路径 — "不静默只取一个"。
             {"plugin-duplicate", {"--plugin", "a.js", "--plugin", "b.js"}, "--plugin", "a.js"},
             // ★ F6 的另一半：`--plugin-param` 没有 `--plugin` ⇒ 它**没有消费者**，⛔ 不许静默忽略。
             {"plugin-param-without-plugin", {"--plugin-param", "k=v"}, "--plugin-param", "--plugin"},
@@ -273,21 +270,22 @@ int main(int argc, char** argv) {
         LIFT_CHECK(!hasLineStartingWith(r.out, "stop"));
     }
 
-    // ---- ①⁰² S1 `--ui` **只 deprecated**：每次给都打**一行** warn，前缀不是 `[ui]` ----
-    //   判据（红了意味着什么）：`--ui` 被静默删掉（用户现有命令变成未知参数），或 deprecation
-    //   变成周期输出 / 用了 `[ui]` 前缀（`tests/aot_overlay.cpp` 在数 `[ui]` / `[overlay]` 行数）。
-    //   ★ 这条同时钉"`--ui` 仍是窗口参数"（headless 仍拒绝）—— 本轮 ⛔ 不改它的语义，只标弃用。
-    g_current_case = "ui-deprecated-notice";
+    // ---- ①⁰² S3 `--ui` **已从 CLI 面删除** ⇒ 与其它未知参数**同形**（exit 2 + `未知参数：--ui`）----
+    //   判据（红了意味着什么）：`--ui` 又被接受（旧 loader 被悄悄装回来）、或它变成一条
+    //   **另一种**拒绝（deprecated warn / 专门的"已删除"提示）—— 用户口径是"一个装载点"：
+    //   `--plugin <id|path>`；`--overlay` 只是它的窗口预设。
+    //   ★ 同样钉"不再有 deprecation warn"：stderr 里不许出现 `已弃用` 那句（否则 CLI 面还是两套）。
+    g_current_case = "ui-removed-unknown-arg";
     {
-        const ChildResult r =
-            runChild(exe, {"--ui", "hud.js", "--present", "headless"}, childOptions(root));
+        const ChildResult r = runChild(exe, {"--ui", "hud.js"}, childOptions(root));
         LIFT_CHECK(r.started);
         LIFT_CHECK(!r.timed_out);
         LIFT_CHECK_EQ_U32(r.exit_code, 2u);
-        LIFT_CHECK(r.err.find("headless 不接受窗口参数") != std::string::npos);
-        LIFT_CHECK(countOccurrences(r.err, kUiDeprecatedMarker) == 1u);
-        LIFT_CHECK(r.err.find("[ui]") == std::string::npos);
-        LIFT_CHECK(r.err.find("--plugin <path>") != std::string::npos);
+        // ★ 与其它未知参数同形（大小写 / 中文标点逐字）；⛔ 不另开一条"已删除"文案。
+        LIFT_CHECK(r.err.find("未知参数：--ui") != std::string::npos);
+        LIFT_CHECK(r.err.find("已弃用") == std::string::npos);
+        // 顺带钉 help 里不再出现 `--ui <path>`（`--ui-input=…` 是另一个 flag，不算）。
+        LIFT_CHECK(r.err.find("--ui <path>") == std::string::npos);
     }
 
     // ---- ①⁰³ S2 `--overlay` = `--plugin hud` 预设，但**仍是窗口参数** ----

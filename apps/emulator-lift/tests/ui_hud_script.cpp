@@ -1,5 +1,9 @@
 // emulator-lift · 默认 HUD 脚本（`scripts/ui/hud.js`）的**内容判据**（B）
 //
+// ★ S3：`--ui` CLI 入口已删；这条用例驱动的是**内部 hud 回退**用的同一个 UiScript loader
+//   （`--overlay` + 无 render 的 `--plugin` 走 `SdlWindow::init` ⇒ `loadUiScript`）。CTest 名
+//   与用例 id 保持不变（`data/requirements` 的 `verify:` 锚着 `script-line-top-frame`）。
+//
 // 判据（红了意味着什么，缺一条都不算）：
 //   ① **行序 / 文案**：给一份 fake 读数（frame=1234 / mouse(812,622) / fps=59.9 / script "startup" /
 //      worst wall=33.3 guest=21.5 shim=4.2）⇒ display list 里的 **Text 元素逐条**等于
@@ -26,7 +30,7 @@
 //   ⑧ **状态机（`game.click` 自驱）**：四态 `开始` / `已复制` / `失败：<error>` / `INVALID（已复制）`
 //      ／ 状态行是面板里的一行；两次击之间 `begin`/`end` 各**只**调一次；闲置帧不再调宿主、
 //      但状态行留着（不按帧清）。红了 ⇒ 按钮点了没反应 / 失败被画成"已复制" / 点击被重复消费。
-// ★ 脚本是**运行时读的外置文件**（`LIFT_UI_SCRIPT_DIR "/hud.js"`，与生产回退同一个路径）：
+// ★ 脚本是**运行时读的外置文件**（`LIFT_UI_SCRIPT_DIR "/hud.js"`，与内部 hud 回退同一个路径）：
 //   改脚本 ⇒ 这条用例立刻看见。缺宿主字体（`ui.measure` 的来源）⇒ `LIFT_SKIP(77)`（⛔ 不假绿）。
 #include <cstdint>
 #include <cstdio>

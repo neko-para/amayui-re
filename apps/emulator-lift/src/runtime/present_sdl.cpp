@@ -135,7 +135,7 @@ bool mouseButtonFromSdl(Uint8 button, MouseButton* out) {
     }
 }
 
-// ---- 调试叠层（`--overlay` / `--ui`）----
+// ---- 调试叠层（`--overlay`）----
 // ★ fps 的滚动窗口 = 最近 1 s；`kOverlayFpsWindowNs` 是这条口径的唯一定义。
 constexpr std::uint64_t kOverlayFpsWindowNs = 1000ull * 1000ull * 1000ull;
 // ★ 脚本每帧的**墙钟预算**（HUD 是诊断层：它超时 ⇒ 关掉叠层，⛔ 不拖慢 guest）。
@@ -224,7 +224,7 @@ struct SdlWindow::Impl : public UiInputRouter {
     //   `"window-closed"`，其余停机原因保持 nullptr（⛔ 不冒充控制层口径）。
     const char* control_stop_reason = nullptr;
 
-    // ---- 调试叠层（`--overlay` / `--ui`，默认关）----
+    // ---- 调试叠层（`--overlay`，默认关）----
     // ★ HUD 是**脚本**产出的 display list（`scripts/ui/hud.js`，QuickJS 同步跑）；两条呈现路径共用
     //   `PresentSink::presentOverlay` 一个合成入口；文本由**宿主字体**（`ui_font`）按最终像素
     //   栅格化（支持中文）。⛔ 不再有"renderer 一套 / 直出一套"的绘制代码，⛔ 也没有
@@ -243,10 +243,10 @@ struct SdlWindow::Impl : public UiInputRouter {
     //   仍在 GPU 队列里）。增长次数有界 ⇒ 只留到 `shutdown()`（renderer 销毁前）统一
     //   `SDL_DestroyTexture`。⛔ 不许在 `presentOverlay` / `setOverlay(false)` 里直接销毁。
     std::vector<SDL_Texture*> retired_overlay_tex;
-    // 宿主字体：**只在真的要画时构造**（`--overlay` / `--ui`，或 adopt 插件 render ⇒
+    // 宿主字体：**只在真的要画时构造**（`--overlay`，或 adopt 插件 render ⇒
     // `ensureOverlayFont`；默认档零成本）；字体不可用 ⇒ init 硬失败（R5）/ adopt 失败。
     std::unique_ptr<lift::FontEngine> ui_font;
-    // 脚本内核 + 这一份脚本（`--ui <path>` 或随发行的 `scripts/ui/hud.js`）。空 = 没装 / 已关。
+    // 脚本内核 + 这一份脚本（aot_main 给的发行布局或随发行的 `scripts/ui/hud.js`）。空 = 没装 / 已关。
     std::unique_ptr<lift::ui::ScriptRuntime> ui_runtime;
     std::unique_ptr<lift::ui::UiScript> ui_script;
     // ★ C2b-2：**外部拥有**的叠层脚本（生产 = `--plugin` 的 `PluginScript`，同一个实例也是
@@ -258,7 +258,7 @@ struct SdlWindow::Impl : public UiInputRouter {
     lift::ui::UiScript* activeUiScript() const {
         return adopted_script != nullptr ? adopted_script : ui_script.get();
     }
-    // `--ui <path>` 的原样路径；空 = 默认 HUD（走 `LIFT_UI_SCRIPT_DIR/hud.js` 开发回退，
+    // aot_main 给的原样路径；空 = 开发回退（`LIFT_UI_SCRIPT_DIR/hud.js`，
     // 发行布局那一跳由 `aot_main` 先解析好塞进来）。origin = 这一个路径串。
     std::string ui_script_path;
     // 最近 1 s 的 Present 时刻（单调 ns；只用于 fps 那一项；叠层关闭时一次也不记）
@@ -304,7 +304,7 @@ struct SdlWindow::Impl : public UiInputRouter {
 
     void notePresentTime();
     bool overlayMousePos(int* x, int* y) const;
-    // ★ 装脚本：`ui_script_path` 非空 = `--ui <path>`；空 = 默认 HUD 的开发回退
+    // ★ 装脚本：`ui_script_path` 非空 = aot_main 解析好的发行布局；空 = 开发回退
     //   （`LIFT_UI_SCRIPT_DIR/hud.js`）。★ 幂等：已有 `ui_script`（或已 adopt）时直接 true。
     //   false ⇒ `err` 必须填（字体 / 读文件 / 脚本编译 / 入口缺失）。
     bool loadUiScript(std::string* err);
@@ -425,12 +425,10 @@ bool SdlWindow::Impl::overlayMousePos(int* x, int* y) const {
     return true;
 }
 
-// ★ 装脚本（B 的唯一加载点）。
-//   · `ui_script_path` 非空 = `--ui <path>`（**显式优先**；origin = 原样路径，错误里因此点名
-//     文件与行号）；
-//   · 空 = `--overlay` 的默认 HUD：先试**开发回退** `LIFT_UI_SCRIPT_DIR/hud.js`（CMake 注入的
-//     源码树路径）。★ 发行布局（`<exe 目录>/scripts/ui/hud.js`）由 `aot_main` **先**解析好再传进
-//     `ui_script_path`（sink 不知道 argv[0]）。
+// ★ 装脚本（B 的唯一加载点；S3 起只服务 `--overlay` 的内部 hud 回退）。
+//   · `ui_script_path` 非空 = `aot_main` 解析好的 `<exe 目录>/scripts/ui/hud.js`（发行布局；
+//     origin = 原样路径，错误里因此点名文件与行号）；
+//   · 空 = 开发回退 `LIFT_UI_SCRIPT_DIR/hud.js`（CMake 注入的源码树路径）。
 //   · 两条都不在 ⇒ **硬失败**，err 里点名试过的两个路径（⛔ 不静默回退空 HUD）。
 //   ★ 字体是**先决条件**（脚本的 `ui.measure` 走宿主字体）：没有字体 ⇒ 这里就失败（R5）。
 //   ★ 幂等：已经装好 ⇒ 直接 true（`setOverlay(true)` 重复调用不会重建 context）。
@@ -440,7 +438,7 @@ bool SdlWindow::Impl::loadUiScript(std::string* err) {
     if (ui_script != nullptr || adopted_script != nullptr) return true;
     // ① 宿主字体（`ui.measure` 的唯一来源）。缺失 ⇒ 硬失败（⛔ 不静默画空白）。
     if (owner->ensureOverlayFont(err) == nullptr) return false;
-    // ② 路径：显式 `--ui` 优先；否则开发回退（`LIFT_UI_SCRIPT_DIR`，编译期注入）。
+    // ② 路径：`aot_main` 给的发行布局优先；否则开发回退（`LIFT_UI_SCRIPT_DIR`，编译期注入）。
     std::string path = ui_script_path;
     if (path.empty()) {
         path = std::string(LIFT_UI_SCRIPT_DIR) + "/hud.js";
@@ -450,7 +448,7 @@ bool SdlWindow::Impl::loadUiScript(std::string* err) {
             if (err) {
                 *err = std::string("HUD 脚本不在：试过 <exe 所在目录>/scripts/ui/hud.js（发行布局，") +
                        "aot 臂会先找它）与 " + path +
-                       "（开发回退 LIFT_UI_SCRIPT_DIR）；用 --ui <path> 指定脚本";
+                       "（开发回退 LIFT_UI_SCRIPT_DIR）；`--overlay` 需要随发行的 scripts/ui/hud.js";
             }
             return false;
         }
@@ -461,7 +459,7 @@ bool SdlWindow::Impl::loadUiScript(std::string* err) {
     {
         std::FILE* f = lift::openHostFileUtf8(path, "rb");
         if (f == nullptr) {
-            if (err) *err = "--ui 读不到脚本：" + path;
+            if (err) *err = "hud 脚本读不到：" + path;
             return false;
         }
         char buf[8192];
@@ -470,7 +468,7 @@ bool SdlWindow::Impl::loadUiScript(std::string* err) {
         const bool read_bad = std::ferror(f) != 0;
         std::fclose(f);
         if (read_bad) {
-            if (err) *err = "--ui 读脚本失败：" + path;
+            if (err) *err = "hud 脚本读失败：" + path;
             return false;
         }
     }
@@ -598,7 +596,7 @@ bool SdlWindow::drawOverlay(std::string* err) {
     // ★ C2b-2：本帧的脚本 = adopted（`--plugin` 的 render）优先，否则本窗口拥有的那一份。
     lift::ui::UiScript* const script = impl_->activeUiScript();
     if (script == nullptr || impl_->ui_font == nullptr) {
-        if (err) *err = "HUD 脚本未初始化（--overlay / --ui / --plugin render 需要 UiScript + FontEngine）";
+        if (err) *err = "HUD 脚本未初始化（--overlay / hud 回退 / --plugin render 需要 UiScript + FontEngine）";
         return false;
     }
     lift::ui::UiFrameReadings readings;
@@ -980,8 +978,8 @@ bool SdlWindow::init(const SdlWindowOptions& options, std::string* err) {
     // ★ S9：注入点击的模式（`--ui-input`；缺省 Consume）。`attachWindowManager` 时按它 + 叠层状态
     //   把 router 装到 `WindowManager`（见 `syncUiInputRouter`）。
     impl_->ui_input = options.ui_input;
-    // ★ B：`--overlay` / `--ui` 的叠层由**脚本**产出 display list（`scripts/ui/hud.js` 或 `--ui`）。
-    //   装脚本 = ① 宿主字体（`ui.measure` 的来源，缺失 ⇒ 硬失败 R5）② 源码（默认 / `--ui` 文件）
+    // ★ B：`--overlay` 的叠层由**脚本**产出 display list（发行布局或开发回退的 `scripts/ui/hud.js`）。
+    //   装脚本 = ① 宿主字体（`ui.measure` 的来源，缺失 ⇒ 硬失败 R5）② 源码（发行布局 / 开发回退）
     //   ③ QuickJS 编译 + 抓 `globalThis.render`。任何一步失败 ⇒ **启动硬错**（AOT 侧 exit 2；
     //   ⛔ 不静默画空白、⛔ 不退回 5×7 点阵）。
     //   ★ 只在 overlay 打开时构造 FontEngine / runtime ⇒ 默认档零成本。
@@ -1779,7 +1777,7 @@ const char* SdlWindow::rendererName() const { return impl_->renderer_name.c_str(
 // 调试叠层开关：关掉时把两条路径的叠层状态都**退役**（renderer 纹理进 `retired_overlay_tex`，
 // 由 `shutdown()` 统一销毁；直出那一份由后端 `directOverlay(nullptr,...)` 移交 retired ——
 // ⛔ 都不在关的这一下立即释放：上一帧的 draw 可能仍在 GPU 队列里，提前释放会让叠层撕裂/丢失）。
-// 下一帧起窗口像素恢复成"只有画面"。默认关（`--overlay` / `--ui` 才打开）。
+// 下一帧起窗口像素恢复成"只有画面"。默认关（`--overlay` 才打开）。
 // ★ C2b-2 的 adopt 语义：关只表示"不画"，**不摘** adopted 指针；再打开时继续画**同一份**插件
 //   脚本（⛔ 不会退回 hud.js —— 那会在 `--plugin` 的窗口档静默换掉内容）。要摘 adopted 用
 //   `releaseOverlayScript()`（`aot_main` 在 run 收口处调）。
@@ -1792,14 +1790,14 @@ void SdlWindow::setOverlay(bool on) {
         //   （测试 / 未来开关）：装不上 ⇒ **一次性 stderr + 保持关**（⛔ 不静默画空白、
         //   ⛔ 不让一个诊断层把 run 打死）。★ adopted 在场时 `loadUiScript` 直接 true（不装 hud.js）。
         if (!impl_->loadUiScript(nullptr)) {
-            std::fprintf(stderr, "[overlay] 脚本 / 宿主字体不可用 ⇒ 拒绝启用（--overlay / --ui；R5）\n");
+            std::fprintf(stderr, "[overlay] 脚本 / 宿主字体不可用 ⇒ 拒绝启用（--overlay；R5）\n");
             impl_->overlay = false;
         }
         // ★ S9：装/卸注入 router（条件 = `overlay && activeUiScript()`；失败时 overlay 已回 false ⇒ 卸）。
         impl_->syncUiInputRouter();
         return;
     }
-    // ★ 关 ⇒ 丢掉**本窗口拥有**的这一份脚本（下次开会按 `ui_script_path` 重新装：`--ui` 可能换过
+    // ★ 关 ⇒ 丢掉**本窗口拥有**的这一份脚本（下次开会按 `ui_script_path` 重新装
     //   内容）。adopted 不在这里丢（见上）。
     impl_->ui_script.reset();
     // ★ S9：脚本没了 ⇒ 注入点击不再问 router（见 `disableOverlay` 的同一条理由）。

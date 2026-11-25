@@ -18,7 +18,7 @@
 //      **点名那条异常**（`module-boom`）。红了 ⇒ module 求值返回的 Promise 没 drain / 没查
 //      rejection ⇒ 异常被静默吞掉（脚本明明坏了，overlay 只是"不画"）。
 //   ⑧ `classic-unchanged`：同一份**经典**脚本（顶层 `function render(){}`）仍能 load 并 render。
-//      红了 ⇒ classic 路径被 module 路径顶掉（旧 `--ui` 语义变了：顶层函数声明不再挂 globalThis）。
+//      红了 ⇒ classic 路径被 module 路径顶掉（hud 回退的 classic 语义变了：顶层函数声明不再挂 globalThis）。
 //   ⑨ `cache-shared-module`：同一模块被两条路径导入只求值一次。红了 ⇒ 每次 import 都重跑顶层
 //      （副作用翻倍），或解析结果不稳定（同一个文件被当成两个模块）。
 //   ⑩ `mixed-loads`：同一个 runtime 里 module 之后 classic 仍能 load / render（状态不串）。

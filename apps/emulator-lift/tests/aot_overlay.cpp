@@ -9,7 +9,9 @@
 //      `blend(#101820, #000000, 204)` = `(13,19,26)`（两条路径同一个期望，±1 舍入）。
 //      同一条命令**不带** `--overlay` 时那个像素是 guest 后缓冲的颜色（首帧 = 黑）。
 //      红了 ⇒ 叠层没有真的上屏，或原点 / 半透明度错了。
-//   ★ 另：`--ui <path>` 的**语法错** ⇒ 子进程 exit 2 + stderr 点名 `<path>:<行>:<列>`。
+//   ★ S3：`--ui` 已从 CLI 面删除（⇒ `cli-aot-flags` 的 `ui-removed-unknown-arg` 钉未知参数）。
+//     旧 UiScript loader 只剩**内部** hud 回退路径（`--overlay` + 无 render 的 `--plugin`）⇒
+//     本文件用 ⑨ 的那个 run 当第三个入口，与 `--overlay` / `--plugin hud` 逐字节比较。
 //   ③ `--dump-frame` 的 guest 帧 BMP 在开 / 关 `--overlay` 两次运行里**逐字节相同**（M0 判据 4）。
 //      红了 ⇒ UI 被写进了 guest 像素 / 后缓冲（那是硬边界：⛔ 不写 guest）。
 //      ★ 口径：用 **1 帧** 运行做对照 —— 2 帧时第二帧的画面内容随真实时钟变化，两轮之间本来就
@@ -23,8 +25,9 @@
 // ★ S2（`--overlay` = `--plugin hud` 预设）新增判据：
 //   ⑥ `--overlay --present headless` 仍 **exit 2**；`--plugin hud --present headless` **exit 0** +
 //      恰一行 `render is defined but no window`（⛔ 不自动开窗）。
-//   ⑦ `--overlay` / `--plugin hud` / `--ui hud.js` **三方**窗口 BMP / guest dump 逐字节相同
-//      （同一帧数、只换入口 ⇒ HUD 像素 / 行序 / 命中键 / bold 必须不变）。
+//   ⑦ `--overlay`（预设）/ `--plugin hud`（显式）/ **内部 hud 回退**（`--overlay` + 无 render 的
+//      `--plugin`）**三方**窗口 BMP / guest dump 逐字节相同（同一帧数、只换入口 ⇒ HUD 像素 /
+//      行序 / 命中键 / bold 必须不变）。
 //   ⑧ `--overlay` + **显式** `--plugin`（有 render）⇒ 插件赢：像素 = 插件 fill + 恰一行取代语。
 //   ⑨ `--overlay` + **无 render** 的插件 ⇒ HUD **照画**（(0,0)=#0D131A；S2 复审 I2，⛔ 静默无 HUD）。
 //   ⑩ 预设不改互斥：`--overlay --input-plan` 仍 exit 5 + `input-plan: FAIL`；
@@ -396,37 +399,13 @@ int main(int argc, char** argv) {
         common.push_back(argFromAscii(a));
     }
 
-    // ---- `--ui <path>` 的语法错 ⇒ **exit 2** + stderr 点名 `<path>:<行>:<列>`（B）--------
-    // ★ 判据是**启动硬错**：脚本编译失败必须让 AOT 臂拒绝启动（exit 2），且错误里带文件名与行号
-    //   （用户据此改自己的脚本）。输入是自造的：`bad.js` 第 2 行少一个值 ⇒ 语法错落在第 2 行。
-    // ★ 这一步在 GPU bring-up **之前**就返回（脚本加载在 `SdlWindow::init` 的头部）⇒ 不依赖 GPU；
-    //   但**依赖宿主字体**（字体缺失 ⇒ 先在字体上失败）⇒ 那一条按 SKIP 处理（⛔ 不假红）。
-    {
-        g_current_case = "ui-syntax-error";
-        const fs::path bad = root / "bad.js";
-        {
-            std::ofstream out(bad, std::ios::binary | std::ios::trunc);
-            out << "// 第 1 行：注释（让语法错落在第 2 行）\n"
-                   "ui.rect({ x: 0, y: });\n";
-        }
-        const fs::path appdata = root / "appdata-ui-syntax";
-        fs::create_directories(appdata, ec);
-        std::vector<Arg> args = common;
-        args.push_back(argFromAscii("--appdata"));
-        args.push_back(appdata.native());
-        args.push_back(argFromAscii("--ui"));
-        args.push_back(bad.native());
-        const ChildRun r = runChild(exe, args, root, root / "ui-syntax.out", root / "ui-syntax.err");
-        LIFT_CHECK(r.started);
-        std::printf("--ui 语法错：exit=%d\n", r.exit_code);
-        if (r.err.find("宿主字体不可用") != std::string::npos) LIFT_SKIP("缺宿主字体（LIFT_HOST_FONT_PATH）");
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.exit_code), 2u);
-        // ★ 只锁"文件 + 行"（`bad.js:2:`）；列号交给 QuickJS 的版本，⛔ 不在这里钉死。
-        LIFT_CHECK(r.err.find("bad.js:2:") != std::string::npos);
-        if (r.err.find("bad.js:2:") == std::string::npos) {
-            std::fprintf(stderr, "  stderr:\n%s\n", r.err.c_str());
-        }
-    }
+    // ---- S3 删掉的用例：`--ui <语法错脚本>` ⇒ exit 2 + `<path>:<行>:<列>` -------------------
+    //   ★ 为什么**删**而不是迁到 `--plugin <bad.js>`：`--ui` 的失败点在**窗口初始化头部**
+    //     （GPU bring-up 之前），而 `--plugin` 的装载发生在窗口 / GPU / host 都建好之后
+    //     ⇒ 同一条断言会变成"有 GPU 才可判"，缺 GPU 只能 SKIP（判据被改弱，红线）。
+    //   ★ 这条 loader 级别的语法错合同**没有丢**：`ui-script-quickjs` 的
+    //     `ui-script-quickjs/error-syntax` 直接对**同一个** loader 断言 `origin:line:col`
+    //     （内部 hud 回退路径也走它）。
 
     // ---- C2b-2：`--plugin` 的 `render` 在**窗口档**真的上屏（⛔ 不需要 `--overlay`）---------
     // ★ 判据：`--present window --present-hidden --plugin <render 夹具> --max-frames 1` ⇒
@@ -702,50 +681,26 @@ int main(int argc, char** argv) {
         LIFT_CHECK(hud_run.err.find("[overlay]") == std::string::npos);
     }
 
-    // ---- S2 复审 I1：**第三入口** `--ui <LIFT_UI_SCRIPT_DIR>/hud.js` 也必须同 BMP / 同 dump ----
-    //   ★ 没有它，⑦ 只是"两个新入口互相相等"，不覆盖旧 UiScript loader 的窗口像素。
-    ChildRun ui_hud_run;
-    fs::path ui_hud_shot;
-    fs::path ui_hud_dump;
-    {
-        g_current_case = "ui-hud-window";
-        const fs::path appdata = root / "appdata-ui-hud-window";
-        fs::create_directories(appdata, ec);
-        ui_hud_shot = root / "ui-hud-window-shot.bmp";
-        ui_hud_dump = root / "ui-hud-window-dump.bmp";
-        std::vector<Arg> args = common;
-        args.push_back(argFromAscii("--max-frames"));
-        args.push_back(argFromAscii("1"));
-        args.push_back(argFromAscii("--appdata"));
-        args.push_back(appdata.native());
-        args.push_back(argFromAscii("--ui"));
-        args.push_back((fs::path(LIFT_UI_SCRIPT_DIR) / "hud.js").native());
-        args.push_back(argFromAscii("--present-screenshot"));
-        args.push_back(ui_hud_shot.native());
-        args.push_back(argFromAscii("--dump-frame"));
-        args.push_back(ui_hud_dump.native());
-        ui_hud_run = runChild(exe, args, root, root / "ui-hud-window.out", root / "ui-hud-window.err");
-        LIFT_CHECK(ui_hud_run.started);
-        std::printf("ui-hud-window: exit=%d\n", ui_hud_run.exit_code);
-        if (ui_hud_run.out.find("没有生成物") != std::string::npos) LIFT_SKIP("构建期没有生成物");
-        if (ui_hud_run.err.find("没有可用的 GPU 光栅化后端") != std::string::npos) {
-            LIFT_SKIP("本机没有可用的 GPU 光栅化后端");
-        }
-        if (ui_hud_run.err.find("宿主字体不可用") != std::string::npos) LIFT_SKIP("缺宿主字体");
-        LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(ui_hud_run.exit_code), 0u);
-        LIFT_CHECK(ui_hud_run.err.find("--ui 已弃用") != std::string::npos);
-    }
+    // ---- S3：旧 UiScript loader 的窗口像素由**内部 hud 回退** run 覆盖 -----------------------
+    //   ★ S2 复审 I1 曾经用 `--ui <LIFT_UI_SCRIPT_DIR>/hud.js` 当"第三入口"；S3 删掉 `--ui` 之后，
+    //     同一个 loader 只剩 `--overlay --plugin <无 render>` 这条产品路径（下面 ⑨）。
+    //   ⇒ 不再单独跑一个 `--ui` 子进程，⑨ 的 BMP / dump 直接进 ⑦ 的三方逐字节比较。
 
-    // ---- S2 复审 I2：`--overlay` + **无 render** 的 `--plugin` ⇒ **HUD 照旧画**（S2 之前的行为）----
+    // ---- S2 复审 I2 / S3 第三入口：`--overlay` + **无 render** 的 `--plugin` ⇒ **HUD 照旧画** --
     //   旧行为：`wopt.overlay=overlay` ⇒ init 装默认 hud；插件没有 render ⇒ 不 adopt ⇒ hud 留着。
+    //   ★ S3：这就是**内部 hud 回退**（`wopt.ui_script`）的**唯一**产品路径（`--ui` 已删）⇒
+    //     本 run 的 BMP / dump 同时充当 ⑦ 的第三个入口（旧 UiScript loader）。
     //   红了 ⇒ 用户给 `--overlay` + 自动化插件时 HUD 静默消失（像素变 #000000、无任何提示）。
+    fs::path fallback_shot;
+    fs::path fallback_dump;
     {
         g_current_case = "overlay-with-run-only-plugin";
         const fs::path plugin_js = fs::path(LIFT_PLUGIN_FIXTURES_DIR) / "overlay-run-only.js";
         if (!fs::exists(plugin_js)) LIFT_SKIP("夹具 overlay-run-only.js 不在场");
         const fs::path appdata = root / "appdata-overlay-run-only";
         fs::create_directories(appdata, ec);
-        const fs::path shot = root / "overlay-run-only.bmp";
+        fallback_shot = root / "overlay-run-only.bmp";
+        fallback_dump = root / "overlay-run-only-dump.bmp";
         std::vector<Arg> args = common;
         args.push_back(argFromAscii("--max-frames"));
         args.push_back(argFromAscii("1"));
@@ -755,7 +710,9 @@ int main(int argc, char** argv) {
         args.push_back(argFromAscii("--plugin"));
         args.push_back(plugin_js.native());
         args.push_back(argFromAscii("--present-screenshot"));
-        args.push_back(shot.native());
+        args.push_back(fallback_shot.native());
+        args.push_back(argFromAscii("--dump-frame"));
+        args.push_back(fallback_dump.native());
         const ChildRun r = runChild(exe, args, root, root / "overlay-run-only.out", root / "overlay-run-only.err");
         LIFT_CHECK(r.started);
         std::printf("overlay-run-only: exit=%d\n", r.exit_code);
@@ -765,7 +722,7 @@ int main(int argc, char** argv) {
         LIFT_CHECK_EQ_U32(static_cast<std::uint32_t>(r.exit_code), 0u);
         // ⛔ 无 render ⇒ 没有"取代"这回事（也不该有取代语）。
         LIFT_CHECK(r.err.find("HUD 已被插件的 render 取代") == std::string::npos);
-        const BmpPixel origin = bmpPixel(readAllBytes(shot), 0, 0);
+        const BmpPixel origin = bmpPixel(readAllBytes(fallback_shot), 0, 0);
         LIFT_CHECK(origin.ok);
         if (origin.ok) {
             const std::uint32_t want = blendOverBlack(0x101820u, 204);
@@ -880,7 +837,8 @@ int main(int argc, char** argv) {
     LIFT_CHECK(!hash_overlay.empty());
     LIFT_CHECK(hash_overlay == hash_plain);
 
-    // ⑦ S2 等价（**三方**）：`--overlay`（预设）/ `--plugin hud`（显式）/ `--ui hud.js`（旧 loader）
+    // ⑦ S2/S3 等价（**三方**）：`--overlay`（预设）/ `--plugin hud`（显式）/
+    //   **内部 hud 回退**（`--overlay` + 无 render 的 `--plugin`，旧 UiScript loader）
     //   必须产出**同一个窗口 BMP / guest dump**。
     //   ★ 判据是**逐字节**（比 hash 更直接）；可判定性由 ③/④ 的纯对照先证明。
     //   红了 ⇒ 入口不是同一条装配（HUD 行序 / 颜色 / 命中键 / bold，或 guest 像素被改写）。
@@ -888,20 +846,20 @@ int main(int argc, char** argv) {
         g_current_case = "plugin-hud-equivalence";
         const std::string hud_shot_bytes = readAllBytes(hud_shot);
         const std::string hud_dump_bytes = readAllBytes(hud_dump);
-        const std::string ui_shot_bytes = readAllBytes(ui_hud_shot);
-        const std::string ui_dump_bytes = readAllBytes(ui_hud_dump);
-        std::printf("⑦ hud-vs-overlay:  shot=%zu/%zu/%zu hud==overlay=%d ui==overlay=%d\n",
-                    hud_shot_bytes.size(), ui_shot_bytes.size(), shot_overlay.size(),
-                    hud_shot_bytes == shot_overlay ? 1 : 0, ui_shot_bytes == shot_overlay ? 1 : 0);
-        std::printf("⑦ dump-vs-overlay: dump=%zu/%zu/%zu hud==overlay=%d ui==overlay=%d\n",
-                    hud_dump_bytes.size(), ui_dump_bytes.size(), dump_overlay.size(),
-                    hud_dump_bytes == dump_overlay ? 1 : 0, ui_dump_bytes == dump_overlay ? 1 : 0);
+        const std::string fallback_shot_bytes = readAllBytes(fallback_shot);
+        const std::string fallback_dump_bytes = readAllBytes(fallback_dump);
+        std::printf("⑦ hud-vs-overlay:  shot=%zu/%zu/%zu hud==overlay=%d fallback==overlay=%d\n",
+                    hud_shot_bytes.size(), fallback_shot_bytes.size(), shot_overlay.size(),
+                    hud_shot_bytes == shot_overlay ? 1 : 0, fallback_shot_bytes == shot_overlay ? 1 : 0);
+        std::printf("⑦ dump-vs-overlay: dump=%zu/%zu/%zu hud==overlay=%d fallback==overlay=%d\n",
+                    hud_dump_bytes.size(), fallback_dump_bytes.size(), dump_overlay.size(),
+                    hud_dump_bytes == dump_overlay ? 1 : 0, fallback_dump_bytes == dump_overlay ? 1 : 0);
         LIFT_CHECK(!hud_shot_bytes.empty());
-        LIFT_CHECK(!ui_shot_bytes.empty());
+        LIFT_CHECK(!fallback_shot_bytes.empty());
         LIFT_CHECK(hud_shot_bytes == shot_overlay);
-        LIFT_CHECK(ui_shot_bytes == shot_overlay);
+        LIFT_CHECK(fallback_shot_bytes == shot_overlay);
         LIFT_CHECK(hud_dump_bytes == dump_overlay);
-        LIFT_CHECK(ui_dump_bytes == dump_overlay);
+        LIFT_CHECK(fallback_dump_bytes == dump_overlay);
     }
 
     return finish("aot-overlay");

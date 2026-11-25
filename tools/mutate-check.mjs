@@ -4647,7 +4647,7 @@ const MUTATIONS = [
   },
 
   // ── 栅格化的宿主级 OOM 上界（P1；守卫 = `tests/ui_text.cpp` 的 `ui-text/huge-rect-rejected`）──
-  //   ★ 代表"--ui 脚本给一个超大 w/h 就能触发**宿主级**超大分配"这一类**用户可触发**的错误：
+  //   ★ 代表"UI 脚本（hud 回退 / 插件 render）给一个超大 w/h 就能触发**宿主级**超大分配"这一类**用户可触发**的错误：
   //     没有上界时 `ui.rect({w:2e9,h:2e9})` 抛 std::length_error（异常穿到 presenter ⇒ latch、
   //     停止提交），`1e6×1e6`（4 TB）则直接被系统 SIGKILL。这不是"画不出来"，是**宿主进程**的风险。
   //   ★ 为什么是这条常量：`rasterize` 分配前有**两道**门 —— 单边 8192 与总字节 64 MiB。

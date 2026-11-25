@@ -585,7 +585,7 @@ private:
     std::uint64_t frame_trace_prev_gpu_draws_ = 0;
     std::uint64_t frame_trace_prev_sprite_total_ = 0;
     std::uint64_t frame_trace_prev_sprite_skipped_ = 0;
-    // ★ 调试叠层（`--overlay` / `--ui`）的每帧读数（`script` 身份 / `worst` 最近 3 s 每帧最大值）。
+    // ★ 调试叠层（`--overlay`）的每帧读数（`script` 身份 / `worst` 最近 3 s 每帧最大值）。
     //   `overlay_on_` 在 `run()` 开头从 sink 读**一次**（sink 是"叠层开没开"的唯一真源；
     //   块入口热路径只读这个 bool，⛔ 不每块问 sink）。它同时决定：
     //   ① 身份采样门控（`script` 要名字）；② `shims_.setTiming`（`worst` 的 shim 列）。

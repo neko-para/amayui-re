@@ -12,7 +12,7 @@
 //   ③ **字体缺失 = 硬失败**：把宿主字体配置置空后，`rasterize` 返回 **false + 非空 err**
 //      （⛔ 不静默画空白）。红了 ⇒ R5 的"字体缺失 ⇒ 启动硬错"没有落到实现上。
 //   ④ **超大 rect = 本帧 UI 失败（⛔ 不穿给宿主）**：`builder.rect(..., 1000000, 1000000, ...)` 喂
-//      `rasterize` ⇒ false + 非空 err + 不分配像素。红了 ⇒ `--ui` 脚本的 `ui.rect({w:1e6,h:1e6})`
+//      `rasterize` ⇒ false + 非空 err + 不分配像素。红了 ⇒ UI 脚本的 `ui.rect({w:1e6,h:1e6})`
 //      又能触发宿主级超大分配（`std::length_error` / SIGKILL）。
 //      ★ 这一条与字体无关（Rect 不走向度量）⇒ 在字体可用性判断**之前**跑。
 // ★ B（2026-11-18）：HUD 的版式 / 内容归外置脚本 `scripts/ui/hud.js`（C++ 侧不再有"行 → list"的

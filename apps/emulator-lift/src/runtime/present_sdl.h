@@ -41,14 +41,16 @@ struct SdlWindowOptions {
     bool vsync = false;
     bool hidden = false;
     bool raster_gpu = false;  // 同一 SDL_GPUDevice 上的 GPU 光栅化（GPU 是唯一光栅实现）
-    // ★ 左上角调试叠层（`--overlay` / `--ui`，默认关）：HUD 由**脚本**（`scripts/ui/hud.js`，
+    // ★ 左上角调试叠层（`--overlay`，默认关）：HUD 由**脚本**（`scripts/ui/hud.js`，
     //   QuickJS 同步跑）产出 display list，文本用**宿主字体**（`FontEngine` / FreeType；支持中文）
     //   按最终像素栅格化，两条呈现路径统一到 `PresentSink::presentOverlay`。只改**宿主送显的那一份
     //   像素** —— ⛔ 不写 guest 内存、⛔ 不进 `--dump-frame`。字体不可用 ⇒ `init()` 硬失败
     //   （R5；⛔ 不静默画空白）。脚本加载失败同样硬失败（AOT 侧 exit 2）。
     bool overlay = false;
-    // ★ `--ui <path>`：叠层用**这份** JS 脚本代替默认的 `scripts/ui/hud.js`（空 = 默认）。
-    //   ★ 它**不**是总开关 —— 总开关仍是 `overlay`（CLI 里 `--ui` 会一并把 overlay 打开）。
+    // ★ **内部 hud 回退脚本**（S3 起没有 CLI 入口）：叠层用**这份** JS 脚本代替默认的开发回退
+    //   `LIFT_UI_SCRIPT_DIR/hud.js`（空 = 开发回退）。唯一的生产来源是 `aot_main` 在
+    //   `--overlay` + **显式** `--plugin`（无 render）时填的 `<exe 目录>/scripts/ui/hud.js`。
+    //   ★ 它**不**是总开关 —— 总开关仍是 `overlay`（`--overlay`）。
     std::string ui_script;
     // ★ `--ui-input=consume|pass`（S9；D2 / D6 / R3）：**注入点击**（`--input-plan` / 控制层）
     //   是否也过叠层的命中路由。缺省 `Consume` = 命中即吞（down 吞 ⇒ up 吞）；`Pass` = 注入点击
@@ -188,7 +190,7 @@ public:
     //   时 sink 建的只是隐藏离屏窗口，`--scale` 没生效 ⇒ caller 把它置 false 再打。
     //   窗口没建（init 失败）⇒ 缺省 1280×720。
     ScaleReport scaleReport() const;
-    // ★ 调试叠层开关（`--overlay` / `--ui`）。`init()` 之后也能改：关掉时把已建的叠层纹理
+    // ★ 调试叠层开关（`--overlay`）。`init()` 之后也能改：关掉时把已建的叠层纹理
     //   **退役**（不立即销毁 —— 在飞的 draw 可能还在 GPU 队列里；`shutdown()` 统一释放）；
     //   再打开时按 `ui_script` 重新装脚本（**失败 ⇒ 一次性 stderr + 保持关**，⛔ 不崩）。
     //   默认关；只影响窗口像素（⛔ 不碰 guest 内存）。
@@ -212,7 +214,7 @@ public:
     // ★ 语义：
     //   · 需要宿主字体（R5）：缺 ⇒ false + `*err`（⛔ 不静默画空白）；已有 ⇒ 复用同一个
     //     `FontEngine`（插件装载期可能已经借走这个指针）；
-    //   · 会丢掉本窗口**自己拥有**的那份脚本（`--ui` / 默认 `hud.js`）与它的 QJS 内核 ⇒
+    //   · 会丢掉本窗口**自己拥有**的那份脚本（hud 回退脚本 / 默认 `hud.js`）与它的 QJS 内核 ⇒
     //     同一时刻只有一个叠层脚本 / 一个 QJS context；
     //   · **会打开 `overlay`**（有 `render` 的插件在窗口档就该画；`--present headless` 不 adopt）；
     //   · 作废命中表（旧脚本的 key / resolved rect 不代表新脚本），并重装注入路由；

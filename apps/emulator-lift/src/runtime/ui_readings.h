@@ -1,4 +1,4 @@
-// emulator-lift · UI 脚本的**每帧只读读数**（`--overlay` / `--ui`；B 从旧 overlay.h 迁出）
+// emulator-lift · UI 脚本的**每帧只读读数**（`--overlay`；B 从旧 overlay.h 迁出）
 //
 // ★ 这里只有"引擎侧算出来的数"：脚本身份（`script`）与最近 3 s 窗口内每帧的 wall / guest / shim
 //   最大值（`worst`）。⛔ 没有颜色 / 字形 / 面板尺寸 / 渲染 —— 那些归 `scripts/ui/hud.js`

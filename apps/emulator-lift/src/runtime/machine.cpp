@@ -1002,7 +1002,7 @@ RunResult Machine::run(const RunOptions& opts) {
     input_script_.resetMarkerState();
     marker_sampler_.resetCounters();
     last_marker_sample_ = MarkerSample{};
-    // ★ 调试叠层（`--overlay` / `--ui`）：sink 是"叠层开没开"的**唯一真源**（`main` 在 `run()`
+    // ★ 调试叠层（`--overlay`）：sink 是"叠层开没开"的**唯一真源**（`main` 在 `run()`
     //   之前 `setSink`）。这里读一次 ⇒ 块入口热路径只读 `overlay_on_` 这个 bool（⛔ 不每块问 sink）。
     //   它要两样东西：① 身份采样（`script`）；② shim 计时（`worst` 的 shim 列）。
     //   ⛔ **不**打开块计时 —— 那会改变被观测的性能本身；guest 没值就写 `guest=--`。

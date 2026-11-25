@@ -57,8 +57,8 @@
 //     classic 编不过时才问 `JS_DetectModule`（它把源码当 module 编一次，成功或"could not load
 //     module"都算 module）⇒ module 路径。★ 为什么不是"只看 `JS_DetectModule`"：0.18.0 的实现
 //     对**普通 classic 脚本也返 true**（`quickjs.c:64939` 先置 `is_module = true`），只用它会把
-//     顶层 `function render(){}` 变成 module 作用域（不再挂 globalThis）⇒ 旧 `--ui` 语义变了。
-//   · **解析**：module 名 = 入口 `origin`（`--ui <path>` / 默认 hud 的**真实文件路径**）；相对
+//     顶层 `function render(){}` 变成 module 作用域（不再挂 globalThis）⇒ 旧 UiScript（内部 hud 回退）语义变了。
+//   · **解析**：module 名 = 入口 `origin`（内部 hud 回退脚本 / 默认 hud 的**真实文件路径**）；相对
 //     specifier 按**导入方的模块名**做**纯文本**归一化（`.`/`..`、`/`·`\` 都认），再用
 //     "入口 origin 的目录 = UI 根"做前缀检查。缓存 = 引擎的 `ctx->loaded_modules`（按归一化名），
 //     所以同一文件被两条路径导入只求值一次，且我们的归一化必须**确定性**（否则缓存失效）。
@@ -161,7 +161,7 @@ struct Impl {
     JSContext* ctx = nullptr;
     Value render;        // globalThis.render（持有引用）
     Value game_obj;      // 全局 `game` 的 getter 返回它（⛔ 每帧不重建）
-    std::string origin;  // 错误里的文件名（`--ui <path>` / `builtin:hud`）
+    std::string origin;  // 错误里的文件名（hud 回退脚本路径 / `builtin:hud`）
 
     // ---- ES module（只在 module 路径启用；classic 路径连 loader 都不装 ⇒ 旧语义不变）----
     std::string module_root;                           // UI 根 = 入口 origin 的目录（归一化）
@@ -1416,7 +1416,7 @@ void formatThrownValue(JSContext* ctx, const std::string& origin, JSValueConst v
 
 // resolve 期拒绝（bare specifier / 绝对路径 / data: / `..` 逃逸 / 读不到被导入文件）**没有 JS 栈** ⇒
 // 用源码里 specifier 字面量的位置补 `<origin>:<line>:<col>` 形状（只补错文本，不参与解析）。
-// ★ 入口（`--ui` 的 module 脚本与 `--plugin`）共用这一份：两处各写一段会让形状慢慢分叉。
+// ★ 入口（内部 hud 回退的 module 脚本与 `--plugin`）共用这一份：两处各写一段会让形状慢慢分叉。
 void appendModuleErrorAt(Impl& impl, std::string* err) {
     if (err == nullptr || impl.module_error_at.empty()) return;
     if (err->find(impl.module_error_at) != std::string::npos) return;
@@ -1483,7 +1483,7 @@ private:
 
 // =======================================================================================
 // `createImpl`：一个实例的**全部语言无关装配**（runtime / context / 三个预算 / 沙箱 / 宿主 API）
-// ★ 两条入口都走这里：`--ui` 的 classic/module 脚本（`QuickJsRuntime::load`）与 `--plugin` 的
+// ★ 两条入口都走这里：内部 hud 回退的 classic/module 脚本（`QuickJsRuntime::load`）与 `--plugin` 的
 //   ES module（`makeQuickJsPlugin`）。⛔ 不要各写一份 —— 那会让沙箱的删除项 / 内存上限 /
 //   interrupt 回调在两条路上**静默分叉**（一个入口删了 `Function.prototype.constructor`、
 //   另一个忘了，没有任何症状）。
@@ -1544,7 +1544,7 @@ public:
         std::unique_ptr<Impl> impl = createImpl(origin, font, err);
         if (impl == nullptr) return nullptr;
 
-        // ---- 检测（文件头 §5）：classic 能编就绝不走 module（旧 `--ui` 语义优先）；编不过才问
+        // ---- 检测（文件头 §5）：classic 能编就绝不走 module（hud 回退的 classic 语义优先）；编不过才问
         //      `JS_DetectModule`（它把源码当 module 编一次）。★ 不能只看 DetectModule：0.18.0 对
         //      普通 classic 脚本也返 true（`quickjs.c:64939` 先置 `is_module = true`）。
         const bool classic_ok = classicParses(impl->ctx, source, origin);
@@ -1621,7 +1621,7 @@ public:
 //       不安装）、D-C2-9（`finish`/`quit` 的出口）。
 //
 // ★ **两条入口按 flag 选择**（⛔ 不按"有没有 default 猜"，测绘 §6-③）：
-//   `--ui` 仍走 `QuickJsRuntime::load`（classic 优先，读 `globalThis.render`）；
+//   内部 hud 回退仍走 `QuickJsRuntime::load`（classic 优先，读 `globalThis.render`）；
 //   `--plugin` 走 `makeQuickJsPlugin`（**强制 module**，只读 default 导出）。
 //   ⇒ 一个同时带 `export default` 与 `globalThis.render` 的文件，行为不随实现漂。
 //
@@ -4230,7 +4230,7 @@ std::unique_ptr<ScriptRuntime> makeQuickJsRuntime() { return std::make_unique<Qu
 // 插件装载（`--plugin` 的唯一入口；实现见上面的匿名命名空间）
 //
 // ★ **强制 module**：插件必须是 ES module（`export default`）⇒ 不走 classic 探测
-//   （`--ui` 那条路才 classic 优先）。⇒ 一个 classic 文件用 `--plugin` 打开会得到
+//   （内部 hud 回退那条路才 classic 优先）。⇒ 一个 classic 文件用 `--plugin` 打开会得到
 //   "插件必须 export default"这条明确错误，而不是被当成 HUD 静默跑起来。
 // ★ 取 default 导出的路：`JS_Eval(MODULE|COMPILE_ONLY)` → `JS_ResolveModule` →
 //   `JS_EvalFunction`（求值 + 返回 promise）→ drain → `JS_GetModuleNamespace(ctx, m)` →

@@ -138,7 +138,7 @@ public:
 class ScriptRuntime {
 public:
     virtual ~ScriptRuntime() = default;
-    // source = UTF-8 JS 源码；origin = 错误里的文件名（`--ui <path>` 的原样路径 / `builtin:hud`）。
+    // source = UTF-8 JS 源码；origin = 错误里的文件名（hud 回退脚本路径 / `builtin:hud`）。
     // font 只给 `ui.measure` 用，可为 nullptr。
     virtual std::unique_ptr<UiScript> load(const std::string& source, const std::string& origin,
                                            FontEngine* font, std::string* err) = 0;

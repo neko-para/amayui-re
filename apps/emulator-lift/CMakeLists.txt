@@ -124,7 +124,7 @@ add_library(emulator-lift-runtime STATIC
     # ★ M0 / B：UI display list 的最终模型子集（`ui/element.h` 的 POD + `UiBuilder`）、宿主字体文本
     #   栅格化（`ui/raster.cpp`；唯一外部依赖 FontEngine / FreeType，支持中文）、统一合成入口
     #   （`ui/present_ui.cpp` → `PresentSink::presentOverlay`）。⛔ 不另开 HUD 专用渲染路径（D12）。
-    #   ★ HUD 的**内容**不再在 C++ 里：它由外置脚本 `scripts/ui/hud.js` 产出（`--overlay` / `--ui`）。
+    #   ★ HUD 的**内容**不再在 C++ 里：它由外置脚本 `scripts/ui/hud.js` 产出（`--overlay`）。
     src/ui/raster.cpp
     # ★ B：唯一的"脚本 → 窗口像素"入口（几何 → 画布原点 → `UiScript::render` → 栅格化 → sink）。
     src/ui/present_ui.cpp
@@ -2867,10 +2867,11 @@ endif()
 #     ① `<exe 所在目录>/scripts/ui/hud.js`（发行布局；`aot_main` 从 argv[0] 取目录来解析）
 #     ② `LIFT_UI_SCRIPT_DIR/hud.js`（**开发回退**，本文件注入的源码树路径；S2 起由
 #        `src/plugin/plugin_search.cpp` 解析 —— `SdlWindow::loadUiScript` 那条开发回退只留给
-#        `--ui` / 直接构造 `SdlWindowOptions` 的测试）
+#        **内部 hud 回退**（`--overlay` + 无 render 的 `--plugin`）与直接构造 `SdlWindowOptions` 的测试）
 #     ③ 都不在 ⇒ **启动硬错**（err 点名试过的两个路径，⛔ 不静默回退空 HUD）
 #   ⇒ `scripts/ui/hud.js` 是**运行时读**的文件：改它**不需要重编**（只重跑）。
-# ★ `--ui <path>` 显式优先，且隐含 `--overlay`（与 `--overlay` 同给时 `--ui` 赢）。
+# ★ S3：`--ui <path>` 已从 CLI 面删除（⇒ 未知参数 exit 2）；装载点只剩 `--plugin <id|path>`。`--overlay`
+#   是它的窗口预设（`--plugin hud` + 要窗口）；显式 `--plugin` 无 render 时仍装默认 hud（S2 I2 兼容）。
 # =====================================================================================
 target_compile_definitions(emulator-lift-runtime PUBLIC
     LIFT_UI_SCRIPT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scripts/ui")

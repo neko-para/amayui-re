@@ -92,7 +92,7 @@ public:
     virtual std::string describe() const { return {}; }
     // 可选：同一 SDL_GPUDevice 上的 GPU 光栅化后端（生产路径恒非空：无 GPU ⇒ 拒绝启动）。
     virtual GpuRaster* gpuRaster() { return nullptr; }
-    // ★ 调试叠层（`--overlay` / `--ui`）的**每帧只读读数**（`script` 身份 / `worst` 3 s 最大值）。
+    // ★ 调试叠层（`--overlay`）的**每帧只读读数**（`script` 身份 / `worst` 3 s 最大值）。
     //   **默认 no-op**：headless / 测试替身不画叠层，⛔ 不给它们加负担。
     //   叠层开关只有 sink 知道（脚本 / 字体 / 纹理 / 直出都归它）⇒ `Machine` 在 `run()` 开头问一次。
     //   ★ 只存值、不重建文本：HUD 是 `scripts/ui/hud.js` 每帧重画（⛔ 没有 dirty / 节流那一层）。

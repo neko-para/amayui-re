@@ -226,23 +226,17 @@ void usage() {
         "                            HUD 由**随发行分发的脚本** `scripts/ui/hud.js` 经 QuickJS 同步\n"
         "                            产出 display list（脚本外置：改脚本不用重编）；文本走宿主字体\n"
         "                            （支持中文）；字体缺失 / 脚本加载失败 ⇒ 拒绝启动（R5）\n"
-        "  --ui <path>               用这份 JS 脚本当 HUD（**隐含 --overlay**；与 --overlay 同给\n"
-        "                            时以 --ui 为准）；脚本错误点名 `<path>:<行>:<列>`。\n"
-        "                            字体缺失 / 脚本编译失败 ⇒ 拒绝启动（exit 2）\n"
-        "                            ★ **已弃用**（S1）：请改用 `--plugin <path>`；本轮只打一行 deprecation，\n"
-        "                              行为**不变**（`--ui` 仍只吃路径、⛔ 不吃 id；下一轮 S2/S3 删）\n"
         "  --ui-input=consume|pass   注入点击（--input-plan / 控制层）是否也过叠层的命中路由：\n"
         "                            consume（缺省）= 命中即吞（down 吞 ⇒ up 吞，guest 收不到该\n"
         "                            点击的任何消息）；pass = 逐位与没有 UI 相同。也接受\n"
-        "                            `--ui-input consume|pass`。只在 --overlay / --ui 时生效；\n"
-        "                            窗口参数（--present headless 拒绝）；非法值 exit 2\n"
+        "                            `--ui-input consume|pass`。只在 --overlay / 有 render 的插件\n"
+        "                            时生效；窗口参数（--present headless 拒绝）；非法值 exit 2\n"
         "  --plugin <id|path>        用这份 **ES module** 当插件：`export default { render?, start?,\n"
         "                            onTrigger?, initialState? }`（宿主只读 default 导出）。\n"
         "                            `start/onTrigger` 是 Run 的回调链（写只经 ctx.edit / ctx.input）；\n"
         "                            `render` 可选：**窗口档**同一个插件实例被接进叠层 host\n"
         "                            （ctx.draw 的 display list 每帧上屏；⛔ 不跑第二套 UI 运行时）\n"
-        "                            ⇒ 有 render 时装，不需要 --overlay；与 `--ui` 是**同一\n"
-        "                            字段**（同一路径允许，不同路径 exit 2）；⛔ 不隐含 --overlay\n"
+        "                            ⇒ 有 render 时装，不需要 --overlay；⛔ 不隐含 --overlay\n"
         "                            ⇒ `--present headless` 也能跑（没有窗口就没有 render）。\n"
         "                            与 --input-plan / --control-root 互斥（两套输入写预算）⇒ exit 2\n"
         "                            ★ **id 语法**：`^[A-Za-z0-9_-]{1,64}$`（文件名 stem）。\n"
@@ -410,20 +404,18 @@ int main(int argc, char** argv) {
     std::uint32_t present_vsync = 0;
     bool present_vsync_set = false;
     bool present_hidden = false;
-    // ★ `--overlay`（M0；缺省关）：AOT 臂第一次有调试 HUD。只改**宿主送显的窗口像素**
+    // ★ `--overlay`（M0；缺省关）：AOT 臂的调试 HUD。只改**宿主送显的窗口像素**
     //   （`--present-screenshot` 含它；`--dump-frame` / `arena.hash` 不含）。HUD 由**脚本**
-    //   （默认**外置** `scripts/ui/hud.js`，或 `--ui <path>`）经 QuickJS 产出 display list；文本走宿主字体
+    //   （默认**外置** `scripts/ui/hud.js`）经 QuickJS 产出 display list；文本走宿主字体
     //   （`FontEngine`；支持中文）⇒ 字体缺失 / 脚本加载失败时 `SdlWindow::init` 硬失败（R5）。
     bool overlay = false;
-    // ★ `--overlay` 的**显式**位（C2a）：`--plugin` 与 `--ui` 是同一字段 ⇒ 同一路径时 `--ui` 那一半
-    //   要让位给插件语义（插件**不**隐含 overlay，D-C2-5）。⇒ overlay 在解析**之后**统一合成：
-    //   `overlay = overlay_flag || !ui_script.empty()`（`--ui` 单给时结果与旧行为逐字相同）。
+    // ★ `--overlay` 的**显式**位（C2a）：overlay 在解析**之后**统一合成（`overlay = overlay_flag`）。
     bool overlay_flag = false;
-    // ★ `--ui <path>`（B；缺省空 = 默认外置 hud.js）：**隐含** `--overlay`（脚本是叠层的实现）。
-    //   ★ 与 `--overlay` 同给时以 `--ui` 为准（就是这一个字段：非空 ⇒ 用这份脚本）。
-    std::string ui_script;
-    // ★ `--plugin <path>`（C2a；缺省空 = 不装载插件）：ES module 插件。
-    //   · 与 `--ui` **同一字段**（D-C2-2）：两份**不同**路径 ⇒ exit 2；同一路径 ⇒ 只按插件语义；
+    // ★ 内部 hud 回退脚本（S3 起**没有** CLI 入口）：只有 `--overlay` + **显式** `--plugin`
+    //   （且插件无 render）时，`SdlWindow::init` 才拿它装默认 hud（S2 复审 I2 的保留行为）。
+    //   预设路径（`--overlay` 没有 `--plugin`）**不**填它 —— HUD 由 `--plugin hud` 的 adopt 提供。
+    std::string hud_fallback_script;
+    // ★ `--plugin <id|path>`（C2a；缺省空 = 不装载插件）：ES module 插件。
     //   · ⛔ 不隐含 `overlay`（是否开窗由 `--present` 决定；`--present headless` 也能跑）；
     //   · 与 `--input-plan` / `--control-root` 互斥 ⇒ 启动即 exit 2（两套输入写预算不能共存）。
     std::string plugin_path;
@@ -717,27 +709,9 @@ int main(int argc, char** argv) {
         } else if (a == "--overlay") {
             // ★ M0：窗口参数（`--present headless` 下由 `present_window_flag` 拒绝）。
             overlay_flag = true;
-        } else if (a == "--ui") {
-            // ★ B：`--ui <path>` 隐含 `--overlay`（总开关仍是 overlay）。也是窗口参数。
-            //   ★ C2a（D-C2-2）：`--plugin` 与它是**同一字段** ⇒ 两份**不同**路径当场 exit 2。
-            //   ★ S1：**只 deprecated、不删**（下一轮 S2/S3 删）。每给一次打**一行** warn：
-            //     前缀必须是 `emulator-lift-aot:`（⛔ 不用 `[ui]` —— `tests/aot_overlay.cpp` 在数
-            //     `[ui]` / `[overlay]` 的行数）。⛔ 不给 `--ui` 加 id 语义（它仍只吃路径）。
-            std::string v;
-            if (!needValue("--ui", &v)) return 2;
-            std::fputs("emulator-lift-aot: --ui 已弃用，请改用 --plugin <path>\n", stderr);
-            if (!plugin_path.empty() && plugin_path != v) {
-                std::fprintf(stderr,
-                             "emulator-lift-aot: --ui 与 --plugin 是同一个字段，但给了两份不同的路径"
-                             "（--ui %s / --plugin %s）⇒ exit 2\n",
-                             v.c_str(), plugin_path.c_str());
-                return 2;
-            }
-            ui_script = v;
         } else if (a == "--plugin") {
             // ★ C2a：ES module 插件（`export default { render?, start?, onTrigger? }`）。
-            //   · 与 `--ui` 同一字段：两份不同路径 ⇒ exit 2（同一路径 ⇒ 解析完之后按插件语义收敛）；
-            //   · **重复 `--plugin` 两份不同路径 ⇒ exit 2**（F6：与 `--ui` 的"不静默只取一个"对称；
+            //   · **重复 `--plugin` 两份不同路径 ⇒ exit 2**（F6：⛔ 不静默只取一个；
             //     同一路径重复给是幂等的，允许）；
             //   · ⛔ **不**设 `overlay`（D-C2-5：是否开窗由 `--present` 决定 ⇒ headless 也能跑）；
             //   · ⛔ **不**进 `present_window_flag`（见下面的注释）。
@@ -757,13 +731,6 @@ int main(int argc, char** argv) {
                              "emulator-lift-aot: --plugin 给了两份不同的 spec"
                              "（%s / %s）⇒ exit 2（⛔ 不静默只取一个）\n",
                              plugin_path.c_str(), v.c_str());
-                return 2;
-            }
-            if (!ui_script.empty() && ui_script != v) {
-                std::fprintf(stderr,
-                             "emulator-lift-aot: --plugin 与 --ui 是同一个字段，但给了两份不同的 spec"
-                             "（--plugin %s / --ui %s）⇒ exit 2\n",
-                             v.c_str(), ui_script.c_str());
                 return 2;
             }
             plugin_path = v;
@@ -889,8 +856,8 @@ int main(int argc, char** argv) {
     }
 
     // =====================================================================================
-    // `--plugin`（C2a）：互斥 + 与 `--ui` 的同一字段收敛 + overlay 合成
-    //   ★ 三条都**启动即 exit 2**（不是运行期拒绝）：两条命令行的冲突必须在 GPU bring-up 之前判，
+    // `--plugin`（C2a）：互斥 + overlay 合成
+    //   ★ 两条都**启动即 exit 2**（不是运行期拒绝）：两条命令行的冲突必须在 GPU bring-up 之前判，
     //     否则用户会先看到一整屏 readout 再看到拒绝（测绘 §3.1 第 4 条 / D-C2-2）。
     // =====================================================================================
     if (!plugin_path.empty()) {
@@ -907,9 +874,7 @@ int main(int argc, char** argv) {
                          "输入写预算；C4 统一控制面之后再放开）⇒ exit 2\n");
             return 2;
         }
-        // ★ 与 `--ui` **同一字段**（D-C2-2）：同一路径 ⇒ 只按**插件**语义（插件不隐含 overlay；
-        //   `--ui` 的"隐含 --overlay"在这里必须让位，否则 `--present headless` 会被窗口参数拒绝）。
-        if (ui_script == plugin_path) ui_script.clear();
+        // ★ S3：`--ui` 已从 CLI 面删除（⇒ 未知参数 exit 2）；这里只剩插件自己的语义。
     } else if (!plugin_params.empty()) {
         // ★ F6：`--plugin-param` 是给插件的 ⇒ 没有 `--plugin` 时它**没有消费者**。
         //   ⛔ 不静默忽略（那会让"我明明传了参数、插件却没收到"变成无症状的错）。
@@ -921,16 +886,15 @@ int main(int argc, char** argv) {
     }
     // =====================================================================================
     // S1：`--plugin <id|path>` 的解析（**parse 之后、GPU bring-up 之前**）
-    //   ★ 三条行为逐字保留：路径形式原样交给 `initFromFile`（cwd 相对 / 绝对 / 装载失败 exit 2）；
-    //     `--plugin` 与 `--ui` 的原字符串比较已经在上面做完；⛔ id 不给 `--ui`。
+    //   ★ 路径形式原样交给 `initFromFile`（cwd 相对 / 绝对 / 装载失败 exit 2）；
+    //     ⛔ id 只给 `--plugin`（`--ui` 已删，S3）。
     //   ★ id 只查两处**非递归**根（`<exeDir>scripts/plugins/` 与编译期 `LIFT_PLUGIN_DIR`），
     //     ⛔ 不查 `lib/`、⛔ 不递归子目录（用户口径 2026-11-25，比设计报告 A2 更硬）。
     //   ★ 歧义 / 找不到都 exit 2（⛔ 不静默取第一个）；命中 ⇒ 换成**绝对路径**并打**一行**日志。
     // =====================================================================================
     // =====================================================================================
     // S2：`--overlay` = 「装载内置 `hud` + 要求窗口」的**预设**（⛔ 不是第三个装载器）
-    //   ★ 触发条件 = **显式 `--overlay`** 且没有 `--plugin` **且**没有 `--ui`：
-    //     · `--ui`（deprecated）自带脚本，仍走旧 loader ⇒ 预设不参与；
+    //   ★ 触发条件 = **显式 `--overlay`** 且没有 `--plugin`：
     //     · `--overlay --plugin X` ⇒ **插件赢**（⛔ 不解析 hud；取代语在 ⑤' 打）。
     //   ★ 位置在**互斥检查之后**（`--plugin` 与 `--input-plan` / `--control-root` 的那一组）：
     //     `--overlay --input-plan` 今天合法 ⇒ 预设不能把它变成"插件 + 输入计划"而 exit 2。
@@ -941,7 +905,7 @@ int main(int argc, char** argv) {
     //   有 render 的插件再 adopt 取代它；无 render 的插件 ⇒ hud 留着照画）。只有"没有 --plugin"
     //   才走预设（= `--plugin hud`）。
     const bool plugin_explicit = !plugin_path.empty();
-    if (overlay_flag && !plugin_explicit && ui_script.empty()) {
+    if (overlay_flag && !plugin_explicit) {
         plugin_path = lift::plugin::kReservedHudId;
         overlay_preset_hud = true;
     }
@@ -1030,9 +994,8 @@ int main(int argc, char** argv) {
                                 (!exe_hud.empty() && normalized == exe_hud);
     }
 
-    // ★ `overlay` 的唯一合成点：显式 `--overlay` **或** 有 HUD 脚本。`--ui` 单给时与旧行为逐字相同
-    //   （旧代码在 `--ui` 分支里写 `overlay = true`，等价于这里 `!ui_script.empty()`）。
-    overlay = overlay_flag || !ui_script.empty();
+    // ★ `overlay` 的唯一合成点：显式 `--overlay`（S3 起没有第二个 CLI 入口：`--ui` 已删）。
+    overlay = overlay_flag;
 
     // ---- `--sound`：**接受** + 一条一次性说明（⛔ 不 exit 2、⛔ 不静默）----
     //   ★ 文案与硬事实只在 `runtime/present_flags.h` 的 `kAotSoundNotice`：`--sound` 现在**真的**
@@ -1089,8 +1052,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     const bool present_window_flag = present_driver_set || present_vsync_set || present_hidden ||
-                                     present_screenshot_set || cursor_warp || overlay || !ui_script.empty() ||
-                                     ui_input_set;
+                                     present_screenshot_set || cursor_warp || overlay || ui_input_set;
     if (present_screenshot_frame != 0 && present_screenshot.empty()) {
         std::fprintf(stderr, "--present-screenshot-frame 需要同时给 --present-screenshot <path>\n");
         return 2;
@@ -1108,17 +1070,18 @@ int main(int argc, char** argv) {
     // ★ S2 复审 I2：`--overlay` + **显式** `--plugin` ⇒ 恢复 S2 之前的"默认 hud 照装"：
     //   有 render 的插件随后被 adopt 取代它（取代语才成立）；**无 render** 的插件 ⇒ hud 留着照画
     //   （旧行为；⛔ 不静默变成"HUD 与插件都不画"）。
-    //   ★ 预设路径（`--overlay` 且没有 `--plugin`）**不**填 ui_script：HUD 由 `--plugin hud` 的 adopt 提供。
-    //   ★ `--ui <path>` 自带的 ui_script 仍然优先（deprecated，S3 删）。
-    if (overlay && plugin_explicit && ui_script.empty()) {
+    //   ★ 预设路径（`--overlay` 且没有 `--plugin`）**不**填：HUD 由 `--plugin hud` 的 adopt 提供。
+    //   ★ 这是 **内部** hud 回退路径（⛔ 没有 CLI 入口）：S3 删掉 `--ui` 之后，它只剩"显式
+    //     `--plugin` 没有 render 时仍保留 HUD"这一条 S2 行为兼容。
+    if (overlay && plugin_explicit && hud_fallback_script.empty()) {
         const std::string candidate =
             exeDirOf(args.empty() ? std::string() : args[0]) + "scripts/ui/hud.js";
-        if (fileExists(candidate)) ui_script = candidate;
+        if (fileExists(candidate)) hud_fallback_script = candidate;
     }
 
     // ---- 宿主字体配置：`--baseline-lift` / `--baseline-lift-by-size` **落在这里** ----
-    //   ★ 必须在**任何** `FontEngine` / `SdlWindow` 使用之前：`SdlWindow::init` 会为 `--ui`
-    //     建 HUD 的 `FontEngine`（R5），`AotHost` 里也有引擎 ⇒ 晚于它就不再是"缺省配置"。
+    //   ★ 必须在**任何** `FontEngine` / `SdlWindow` 使用之前：`SdlWindow::init` 会为
+    //     HUD（`--overlay` / 内部 hud 回退）建 `FontEngine`（R5），`AotHost` 里也有引擎 ⇒ 晚于它就不再是"缺省配置"。
     //   ★ 缺省（两个参数都不给）⇒ **不调用** `fontSetConfig`：进程里生效的就是 `fontDefaultConfig()`
     //     那一份（`kBaselineLift` + by_size=true），与"只改代码不动配置"逐位相同。
     //   ★ `fontSetConfig` 自己 bump 代际 ⇒ 已存在的引擎会在下次取字 / 度量时清缓存（`syncConfigEpoch`）。
@@ -1156,7 +1119,7 @@ int main(int argc, char** argv) {
         //     **预设**（`--overlay` 没有 --plugin 的那条）。
         //   `--present headless` 已在上面按 `present_window_flag` 拒绝。
         wopt.overlay = overlay && !overlay_preset_hud;
-        wopt.ui_script = ui_script;
+        wopt.ui_script = hud_fallback_script;
         // ★ S9：注入点击的叠层路由模式（`--ui-input=consume|pass`；缺省 Consume）。
         //   没有叠层脚本 ⇒ sink 那边根本不装 router ⇒ 两种模式都是无害 no-op。
         wopt.ui_input = ui_input_mode;
@@ -1196,8 +1159,8 @@ int main(int argc, char** argv) {
                              "emulator-lift-aot: 拒绝启动 —— 窗口/字体初始化失败\n"
                              "  原因：%s\n"
                              "  请检查：\n"
-                             "    · `--overlay` / `--ui` 需要宿主字体（`LIFT_HOST_FONT_PATH`，缺 ⇒ 硬错、\n"
-                             "      ⛔ 不静默画空白）与可用的 HUD 脚本（`--ui` 的语法错 / 找不到入口\n"
+                             "    · `--overlay` / 插件的 render 需要宿主字体（`LIFT_HOST_FONT_PATH`，缺 ⇒ 硬错、\n"
+                             "      ⛔ 不静默画空白）与可用的 HUD 脚本（默认 hud 的语法错 / 找不到入口\n"
                              "      也走这一处）；\n"
                              "    · 窗口 / GPU device 是否建得出来（Windows: D3D12 / Vulkan；macOS: Metal）；\n"
                              "    · 是否在**没有桌面**的环境里跑（远程会话 / 服务 / `SDL_VIDEODRIVER=dummy`）。\n",

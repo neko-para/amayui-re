@@ -1,4 +1,4 @@
-// emulator-lift · 窗口调试叠层（`--overlay` / `--ui`）的守卫
+// emulator-lift · 窗口调试叠层（`--overlay`）的守卫
 //
 // 判据（红了意味着什么，缺一条都不算）：
 //   ① **3 s 窗口**：`uiWorstPush` / `uiWorstMax` 是纯函数 ⇒ 用**假时间戳**测：
