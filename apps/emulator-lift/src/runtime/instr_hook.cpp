@@ -1,7 +1,6 @@
 #include "runtime/instr_hook.h"
 
 #include <atomic>
-#include <cstring>
 
 #include "runtime/engine_marker.h"   // 脚本身份（id → 名字）与位置公式的唯一来源
 #include "runtime/memory.h"
@@ -47,12 +46,24 @@ struct Frame {
 };
 
 struct Entry {
-    InstrHookSpec spec;
+    std::uint32_t id = 0;
+    std::string script;
     std::uint32_t script_id = 0;  // 0 = 还没解析（首次命中时按名字解析并缓存）
+    std::uint32_t pos = 0;
+    // ③ 改（缺省关：`at` 只装触发，⛔ 不写）
+    bool patch = false;
+    InstrPatchKind kind = InstrPatchKind::PtrDword;
+    std::uint32_t index = 0;
+    std::uint32_t value = 0;
+    std::uint32_t max_hits = 0;
+    // 读数
     std::uint64_t hits = 0;
     std::uint64_t restores = 0;
     std::uint64_t skips = 0;
     std::uint32_t last_id = 0;
+    // ② 读（采样清单 + 最近一次读数）
+    std::vector<std::uint32_t> cap_ints;
+    std::vector<std::uint32_t> cap_ptrs;
     std::vector<std::uint32_t> last_ints;
     std::vector<std::uint32_t> last_ptrs;
     std::vector<std::uint32_t> last_targets;
@@ -60,7 +71,7 @@ struct Entry {
 
 struct Pending {
     bool active = false;
-    std::size_t entry = 0;
+    std::uint32_t entry_id = 0;
     std::uint32_t addr = 0;
     std::uint32_t raw = 0;
 };
@@ -68,8 +79,9 @@ struct Pending {
 struct State {
     std::vector<Entry> entries;
     Pending pending;
-    // 最近一次 probe 用到的 guest 内存（`clear()` 在没有 X86 时也能把未还原的写恢复 ⇒ 净变化 0）。
+    // 最近一次 probe 用到的 guest 内存（`clear()` / `remove()` 在没有 X86 时也能把未还原的写恢复）。
     GuestMemory* mem = nullptr;
+    std::uint32_t next_id = 1;
 };
 
 State& state() {
@@ -91,8 +103,18 @@ bool write32(GuestMemory& mem, std::uint32_t ea, std::uint32_t raw) {
     return true;
 }
 
-bool readPointer(const GuestMemory& mem, std::uint32_t ea, std::uint32_t* out) {
-    return read32(mem, ea, out);
+void restorePendingLocked() {
+    State& st = state();
+    if (!st.pending.active) return;
+    if (st.mem != nullptr && write32(*st.mem, st.pending.addr, st.pending.raw)) {
+        for (Entry& e : st.entries) {
+            if (e.id == st.pending.entry_id) {
+                e.restores += 1;
+                break;
+            }
+        }
+    }
+    st.pending.active = false;
 }
 
 bool sampleFrame(X86& cpu, Frame* out) {
@@ -130,28 +152,19 @@ bool resolveScriptName(X86& cpu, std::uint32_t id, std::string* out) {
     return true;
 }
 
-void restorePending(X86& cpu) {
-    State& st = state();
-    if (!st.pending.active) return;
-    if (cpu.mem != nullptr && write32(*cpu.mem, st.pending.addr, st.pending.raw)) {
-        if (st.pending.entry < st.entries.size()) st.entries[st.pending.entry].restores += 1;
-    }
-    st.pending.active = false;
-}
-
-bool targetAddress(X86& cpu, const Frame& f, const InstrHookSpec& spec, std::uint32_t* addr) {
+bool targetAddress(X86& cpu, const Frame& f, const Entry& e, std::uint32_t* addr) {
     GuestMemory& mem = *cpu.mem;
-    switch (spec.kind) {
+    switch (e.kind) {
         case InstrPatchKind::PtrDword: {
-            if (spec.index >= f.ptr_count) return false;
+            if (e.index >= f.ptr_count) return false;
             std::uint32_t p = 0;
-            if (!readPointer(mem, f.ptr_base + 4 * spec.index, &p) || p == 0) return false;
+            if (!read32(mem, f.ptr_base + 4 * e.index, &p) || p == 0) return false;
             *addr = p;
             return true;
         }
         case InstrPatchKind::LocalInt: {
-            if (spec.index >= f.int_count) return false;
-            *addr = f.int_base + 4 * spec.index;
+            if (e.index >= f.int_count) return false;
+            *addr = f.int_base + 4 * e.index;
             return true;
         }
         case InstrPatchKind::GlobalInt: {
@@ -159,34 +172,41 @@ bool targetAddress(X86& cpu, const Frame& f, const InstrHookSpec& spec, std::uin
             std::uint32_t count = 0;
             if (!read32(mem, f.engine + kGlobalIntBase, &base) || base == 0) return false;
             if (!read32(mem, f.engine + kGlobalIntCount, &count)) return false;
-            if (spec.index > count) return false;
-            *addr = base + 4 * spec.index;
+            if (e.index > count) return false;
+            *addr = base + 4 * e.index;
             return true;
         }
     }
     return false;
 }
 
-void captureLocals(const GuestMemory& mem, const Frame& f, const InstrHookSpec& spec, Entry* entry) {
-    entry->last_ints.clear();
-    entry->last_ptrs.clear();
-    entry->last_targets.clear();
-    for (const std::uint32_t n : spec.capture_ints) {
+void captureLocals(const GuestMemory& mem, const Frame& f, Entry* e) {
+    e->last_ints.clear();
+    e->last_ptrs.clear();
+    e->last_targets.clear();
+    for (const std::uint32_t n : e->cap_ints) {
         std::uint32_t raw = 0;
         if (n >= f.int_count || !read32(mem, f.int_base + 4 * n, &raw)) {
-            entry->last_ints.push_back(0u);
+            e->last_ints.push_back(0u);
             continue;
         }
-        entry->last_ints.push_back(f.has_key ? decodeInt(raw, f.key) : raw);
+        e->last_ints.push_back(f.has_key ? decodeInt(raw, f.key) : raw);
     }
-    for (const std::uint32_t n : spec.capture_ptrs) {
+    for (const std::uint32_t n : e->cap_ptrs) {
         std::uint32_t p = 0;
         std::uint32_t v = 0;
         const bool have_p = n < f.ptr_count && read32(mem, f.ptr_base + 4 * n, &p);
-        entry->last_ptrs.push_back(have_p ? p : 0u);
+        e->last_ptrs.push_back(have_p ? p : 0u);
         if (have_p && p != 0 && read32(mem, p, &v) && f.has_key) v = decodeInt(v, f.key);
-        entry->last_targets.push_back(have_p && p != 0 ? v : 0u);
+        e->last_targets.push_back(have_p && p != 0 ? v : 0u);
     }
+}
+
+Entry* find(std::uint32_t handle) {
+    for (Entry& e : state().entries) {
+        if (e.id == handle) return &e;
+    }
+    return nullptr;
 }
 
 }  // namespace
@@ -205,49 +225,116 @@ const char* instrPatchKindName(InstrPatchKind kind) {
 
 bool instrHooksActive() { return g_active.load(std::memory_order_relaxed); }
 
-bool instrHookInstall(const InstrHookSpec& spec, const char** err) {
+std::uint32_t instrHookAdd(const std::string& script, std::uint32_t pos, const char** err) {
+    auto fail = [err](const char* why) {
+        if (err != nullptr) *err = why;
+        return 0u;
+    };
+    if (script.empty()) return fail("script_empty");
+    if (pos == 0) return fail("pos_zero");
+    for (const Entry& e : state().entries) {
+        if (e.pos == pos && e.script == script) return fail("duplicate");
+    }
+    Entry entry;
+    entry.id = state().next_id++;
+    entry.script = script;
+    entry.pos = pos;
+    state().entries.push_back(std::move(entry));
+    g_active.store(true, std::memory_order_relaxed);
+    if (err != nullptr) *err = nullptr;
+    return state().entries.back().id;
+}
+
+bool instrHookSetPatch(std::uint32_t handle, bool enabled, InstrPatchKind kind, std::uint32_t index,
+                       std::uint32_t value, std::uint32_t max_hits, const char** err) {
     auto fail = [err](const char* why) {
         if (err != nullptr) *err = why;
         return false;
     };
-    if (spec.script.empty()) return fail("script_empty");
-    if (spec.pos == 0) return fail("pos_zero");
-    for (const Entry& e : state().entries) {
-        if (e.spec.pos == spec.pos && e.spec.script == spec.script) return fail("duplicate");
+    Entry* e = find(handle);
+    if (e == nullptr) return fail("no_such_hook");
+    // 换覆盖 / 撤覆盖之前先把还没还原的那次写回去（否则会留下一个半新半旧的窗口）。
+    if (state().pending.active && state().pending.entry_id == handle) restorePendingLocked();
+    if (!enabled) {
+        e->patch = false;
+        if (err != nullptr) *err = nullptr;
+        return true;
     }
-    Entry entry;
-    entry.spec = spec;
-    state().entries.push_back(std::move(entry));
-    g_active.store(true, std::memory_order_relaxed);
+    if (kind == InstrPatchKind::PtrDword && index > 63) return fail("bad_target");
+    e->patch = true;
+    e->kind = kind;
+    e->index = index;
+    e->value = value;
+    e->max_hits = max_hits;
     if (err != nullptr) *err = nullptr;
     return true;
 }
 
-void instrHookClear() {
+bool instrHookSetCapture(std::uint32_t handle, const std::vector<std::uint32_t>& ints,
+                         const std::vector<std::uint32_t>& ptrs) {
+    Entry* e = find(handle);
+    if (e == nullptr) return false;
+    e->cap_ints.assign(ints.begin(), ints.begin() + static_cast<std::ptrdiff_t>(ints.size() < 8 ? ints.size() : 8));
+    e->cap_ptrs.assign(ptrs.begin(), ptrs.begin() + static_cast<std::ptrdiff_t>(ptrs.size() < 8 ? ptrs.size() : 8));
+    return true;
+}
+
+bool instrHookStats(std::uint32_t handle, InstrHookStatus* out) {
+    const Entry* e = find(handle);
+    if (e == nullptr) return false;
+    InstrHookStatus s;
+    s.id = e->id;
+    s.script = e->script;
+    s.pos = e->pos;
+    s.patch = e->patch;
+    s.kind = e->kind;
+    s.index = e->index;
+    s.value = e->value;
+    s.max_hits = e->max_hits;
+    s.hits = e->hits;
+    s.restores = e->restores;
+    s.skips = e->skips;
+    s.last_id = e->last_id;
+    s.last_ints = e->last_ints;
+    s.last_ptrs = e->last_ptrs;
+    s.last_ptr_targets = e->last_targets;
+    *out = std::move(s);
+    return true;
+}
+
+bool instrHookRemove(std::uint32_t handle) {
     State& st = state();
-    // ★ 不能只清表：未还原的写会变成**持久**改动（那正是本能力要避免的）。
-    //   用最近一次 probe 的 guest 内存把 raw 写回；没有内存（还没跑过）⇒ 没有未还原的写。
-    if (st.pending.active && st.mem != nullptr) {
-        if (write32(*st.mem, st.pending.addr, st.pending.raw)) {
-            if (st.pending.entry < st.entries.size()) st.entries[st.pending.entry].restores += 1;
+    if (st.pending.active && st.pending.entry_id == handle) restorePendingLocked();
+    for (auto it = st.entries.begin(); it != st.entries.end(); ++it) {
+        if (it->id == handle) {
+            st.entries.erase(it);
+            if (st.entries.empty()) g_active.store(false, std::memory_order_relaxed);
+            return true;
         }
     }
-    st.pending.active = false;
+    return false;
+}
+
+void instrHookClear() {
+    restorePendingLocked();
+    State& st = state();
     st.entries.clear();
     g_active.store(false, std::memory_order_relaxed);
 }
 
-std::vector<InstrHookStatus> instrHookStatus() {
+std::vector<InstrHookStatus> instrHookList() {
     std::vector<InstrHookStatus> out;
     out.reserve(state().entries.size());
     for (const Entry& e : state().entries) {
         InstrHookStatus s;
-        s.script = e.spec.script;
-        s.pos = e.spec.pos;
-        s.patch = e.spec.patch;
-        s.kind = e.spec.kind;
-        s.index = e.spec.index;
-        s.value = e.spec.value;
+        s.id = e.id;
+        s.script = e.script;
+        s.pos = e.pos;
+        s.patch = e.patch;
+        s.kind = e.kind;
+        s.index = e.index;
+        s.value = e.value;
+        s.max_hits = e.max_hits;
         s.hits = e.hits;
         s.restores = e.restores;
         s.skips = e.skips;
@@ -267,19 +354,18 @@ void instrHookProbe(X86& cpu) {
     st.mem = cpu.mem;
 
     // ① 先恢复上一条指令的临时写（窗口 = 一条脚本指令）。
-    restorePending(cpu);
+    restorePendingLocked();
 
     Frame f;
     if (!sampleFrame(cpu, &f)) return;
 
-    for (std::size_t i = 0; i < st.entries.size(); i += 1) {
-        Entry& e = st.entries[i];
-        if (e.spec.pos != f.pos) continue;
+    for (Entry& e : st.entries) {
+        if (e.pos != f.pos) continue;
         // ② 身份：首次命中按名字解析并缓存 id；之后只比 id（⛔ 不每次解析名字）。
         if (e.script_id == 0) {
             std::string name;
             if (!resolveScriptName(cpu, f.id, &name)) continue;
-            if (name != e.spec.script) continue;
+            if (name != e.script) continue;
             e.script_id = f.id;
         } else if (e.script_id != f.id) {
             continue;
@@ -287,32 +373,26 @@ void instrHookProbe(X86& cpu) {
 
         e.hits += 1;
         e.last_id = f.id;
-        if (!e.spec.capture_ints.empty() || !e.spec.capture_ptrs.empty()) {
-            captureLocals(*cpu.mem, f, e.spec, &e);
-        }
-        if (!e.spec.patch) continue;
-        if (e.spec.maxHits != 0 && e.hits > e.spec.maxHits) continue;
+        if (!e.cap_ints.empty() || !e.cap_ptrs.empty()) captureLocals(*cpu.mem, f, &e);
+        if (!e.patch) continue;
+        if (e.max_hits != 0 && e.hits > e.max_hits) continue;
 
         std::uint32_t addr = 0;
-        if (!targetAddress(cpu, f, e.spec, &addr)) {
+        if (!targetAddress(cpu, f, e, &addr)) {
             e.skips += 1;
             continue;
         }
         std::uint32_t raw = 0;
-        if (!read32(*cpu.mem, addr, &raw)) {
+        if (!read32(*cpu.mem, addr, &raw) || !f.has_key) {
             e.skips += 1;
             continue;
         }
-        if (!f.has_key) {
-            e.skips += 1;
-            continue;
-        }
-        if (!write32(*cpu.mem, addr, encodeInt(e.spec.value, f.key))) {
+        if (!write32(*cpu.mem, addr, encodeInt(e.value, f.key))) {
             e.skips += 1;
             continue;
         }
         st.pending.active = true;
-        st.pending.entry = i;
+        st.pending.entry_id = e.id;
         st.pending.addr = addr;
         st.pending.raw = raw;
         break;  // 一轮派发只允许一条 hook 生效（位置唯一 ⇒ 正常也只有一条命中）

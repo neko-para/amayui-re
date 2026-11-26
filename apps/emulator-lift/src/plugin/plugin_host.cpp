@@ -402,27 +402,53 @@ bool PluginHost::editGlobalSet(lift::GlobalKind kind, std::uint32_t id, const li
     return receipt.accepted;
 }
 
-bool PluginHost::instrHookInstall(const lift::InstrHookSpec& spec, const char** err) {
+std::uint32_t PluginHost::instrHookAdd(const std::string& script, std::uint32_t pos, const char** err) {
     const char* why = nullptr;
-    const bool ok = lift::instrHookInstall(spec, &why);
+    const std::uint32_t handle = lift::instrHookAdd(script, pos, &why);
     if (err != nullptr) *err = why;
-    if (!ok) {
-        // 与 `editGlobalSet` 同一档：失败 = receipt + 一行（⛔ 不 exit 5、⛔ 不静默）。
-        log("error", std::string("ctx.override.atInstr 失败：") + (why != nullptr ? why : "unknown"));
-        return false;
+    if (handle == 0) {
+        log("error", std::string("ctx.hook.at 失败：") + (why != nullptr ? why : "unknown"));
+        return 0;
     }
     char pos_hex[16];
-    std::snprintf(pos_hex, sizeof(pos_hex), "0x%X", spec.pos);
-    log("info", std::string("ctx.override.atInstr script=") + spec.script + " pos=" + pos_hex +
-                   " kind=" + lift::instrPatchKindName(spec.kind) + " index=" +
-                   std::to_string(spec.index) + " value=" + std::to_string(spec.value) +
-                   (spec.patch ? "" : " (capture only)"));
+    std::snprintf(pos_hex, sizeof(pos_hex), "0x%X", pos);
+    log("info", std::string("ctx.hook.at script=") + script + " pos=" + pos_hex + " handle=" +
+                   std::to_string(handle));
+    return handle;
+}
+
+bool PluginHost::instrHookSetPatch(std::uint32_t handle, bool enabled, lift::InstrPatchKind kind,
+                                   std::uint32_t index, std::uint32_t value, std::uint32_t max_hits,
+                                   const char** err) {
+    const char* why = nullptr;
+    const bool ok = lift::instrHookSetPatch(handle, enabled, kind, index, value, max_hits, &why);
+    if (err != nullptr) *err = why;
+    if (!ok) {
+        log("error", std::string("ctx.hook.patch 失败：") + (why != nullptr ? why : "unknown"));
+        return false;
+    }
+    if (enabled) {
+        log("info", "ctx.hook.patch handle=" + std::to_string(handle) + " kind=" +
+                        lift::instrPatchKindName(kind) + " index=" + std::to_string(index) +
+                        " value=" + std::to_string(value));
+    }
     return true;
 }
 
+bool PluginHost::instrHookSetCapture(std::uint32_t handle, const std::vector<std::uint32_t>& ints,
+                                     const std::vector<std::uint32_t>& ptrs) {
+    return lift::instrHookSetCapture(handle, ints, ptrs);
+}
+
+bool PluginHost::instrHookStats(std::uint32_t handle, lift::InstrHookStatus* out) {
+    return lift::instrHookStats(handle, out);
+}
+
+bool PluginHost::instrHookRemove(std::uint32_t handle) { return lift::instrHookRemove(handle); }
+
 void PluginHost::instrHookClear() { lift::instrHookClear(); }
 
-std::vector<lift::InstrHookStatus> PluginHost::instrHookStatus() const { return lift::instrHookStatus(); }
+std::vector<lift::InstrHookStatus> PluginHost::instrHookList() { return lift::instrHookList(); }
 
 Receipt PluginHost::submitIntent(IntentKind kind, int x, int y, MouseButton button) {    Receipt receipt;
     if (ctx_ == nullptr || ctx_->input == nullptr) {

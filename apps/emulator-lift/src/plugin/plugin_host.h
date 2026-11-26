@@ -160,10 +160,16 @@ public:
 
     bool editGlobalSet(lift::GlobalKind kind, std::uint32_t id, const lift::GlobalValue& value,
                        const char** code) override;
-    // ---- 脚本指令位置钩子（`ctx.override`；唯一实现 = `runtime/instr_hook.cpp`）----
-    bool instrHookInstall(const lift::InstrHookSpec& spec, const char** err) override;
+    // ---- 脚本指令位置钩子（`ctx.hook`；唯一实现 = `runtime/instr_hook.cpp`）----
+    std::uint32_t instrHookAdd(const std::string& script, std::uint32_t pos, const char** err) override;
+    bool instrHookSetPatch(std::uint32_t handle, bool enabled, lift::InstrPatchKind kind, std::uint32_t index,
+                           std::uint32_t value, std::uint32_t max_hits, const char** err) override;
+    bool instrHookSetCapture(std::uint32_t handle, const std::vector<std::uint32_t>& ints,
+                             const std::vector<std::uint32_t>& ptrs) override;
+    bool instrHookStats(std::uint32_t handle, lift::InstrHookStatus* out) override;
+    bool instrHookRemove(std::uint32_t handle) override;
     void instrHookClear() override;
-    std::vector<lift::InstrHookStatus> instrHookStatus() const override;
+    std::vector<lift::InstrHookStatus> instrHookList() override;
     lift::plugin::Receipt inputClick(int x, int y, lift::MouseButton button) override;
     lift::plugin::Receipt inputMove(int x, int y) override;
     lift::plugin::Receipt inputDown(lift::MouseButton button) override;

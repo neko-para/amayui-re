@@ -1004,8 +1004,8 @@
       "note": [
         "// **静态门的第一条读**（`eq (local-int c) (local-ptr 2) 1` @`0x03A0`）：它读的 dword =",
         "// `eb5c1[map*50 + slot]`（视图里 `lookup-array-2d … 32 …` 的 `32` 是**十六进制** = 50）。",
-        "// `ctx.override.atInstr(\"DRAWOBJ.BIN\", DRAWOBJ_GATE_EQ, { ptrLocal: 2, value: 1 })` 在这一条",
-        "// 指令**执行前**把 `local-ptr 2` 指向的 dword 临时改成 1、执行完恢复 ⇒ 静态门通过、净变化 0。",
+        "// `ctx.hook.at(\"DRAWOBJ.BIN\", DRAWOBJ_GATE_EQ)` + `handle.patch({ ptrLocal: 2 }, 1)` 在这一条",
+        "// **临时**把 `local-ptr 2` 指向的 dword 改成 1、执行完恢复 ⇒ 静态门通过、净变化 0。",
         "// 门的另外三腿：`511080[type]==3`、`flags&6==2`、`25c00[map*100 + row]` 的 bit `col`（实测为 1）。"
       ]
     },

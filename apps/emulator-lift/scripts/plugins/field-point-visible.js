@@ -64,7 +64,7 @@
 //   只有出错才 `fail`。`--time-limit` 到期属于正常结局（宿主 exit 0）。
 // ★ **不改"这点位发现过没有"的真值**：只写 `50ff9f`（派生表）；持久输入（`50ffd1` 类型 / `13d7` /
 //   `3e2a0` / `14d8cc` / `eb5c1` / `25c00`）一个都不写，而且**一个都不读**（2026-11-26 起不再有静态门）。
-//   ★ 例外（2026-11-26 晚）：静态门的第二条腿用 **`ctx.override.atInstr`** 在 `DRAWOBJ` 的 `eq`（pos `0x03A0`）
+//   ★ 例外（2026-11-26 晚）：静态门的第二条腿用 **`ctx.hook.at` + `handle.patch`**（触发与改值是两个独立能力）在 `DRAWOBJ` 的 `eq`（pos `0x03A0`）
 //     执行前把 `local-ptr 2` 指向的 dword 临时改成 1、执行完恢复 ⇒ 那是**瞬时覆盖**，`eb5c1` 的持久值净变化 0。
 //   `on=0` ⇒ 一个 guest global 都不读、一个都不写（日志明写 `on=0`）。
 //
@@ -247,18 +247,19 @@ let drawAnnounced = false;
 let drawFrames = 0;
 /** 上一次 `fp:draw` 的 `matched/patched`（状态变化才打一行；`""` = 还没打过）。 */
 let lastDrawState = "";
-/** 静态门覆盖是否已装（`on` 变化时切换；`ctx.override` 的装载是幂等的：同 (script,pos) 只有一条）。 */
-let gateOverride = false;
+/** 静态门 hook 的句柄（`ctx.hook.at` 只装"到点"；覆盖是独立的一次 `patch` 调用）。 */
+/** @type {import("@amayui/lift-plugin").InstrHookHandle | null} */
+let gateHook = null;
 
 /**
- * 装 / 撤 **静态门覆盖**（`ctx.override.atInstr`）：
+ * 装 / 撤 **静态门的"到点 + 覆盖"**（两个独立能力：`ctx.hook.at` 触发，`handle.patch` 改）：
  *
  * `DRAWOBJ` 的静态门第二条腿是 `eq (local-int c) (local-ptr 2) 1`（pos `0x03A0`）—— 它读的 dword 是
  * `eb5c1[map*50 + slot]`（"这个点位触发过"）。未触发的点位读到 0 ⇒ 静态门不过 ⇒ 走动效分支，
  * 而 `flags` 的 bit2=0 又把动效 alpha 清零 ⇒ **画面里什么都看不到**。
  *
- * 本覆盖在**那一条指令执行前**把 `local-ptr 2` 指向的 dword 临时改成 1、执行完立刻恢复
- * ⇒ 静态门通过（画出 `0xFA+type` 的静态纹理），而 `eb5c1` 的持久值**净变化 0**。
+ * 本插件在那条指令上装一个 hook（只到点），再给它装 `{ptrLocal: 2} → 1` 的覆盖：指令**执行前**临时
+ * 改、执行完立刻恢复 ⇒ 静态门通过（画出 `0xFA+type` 的静态纹理），`eb5c1` 的持久值**净变化 0**。
  * ⛔ 不用 `ctx.edit.global.set` 写 `eb5c1`：那是**改存档真值**（用户裁决 2026-11-26）。
  *
  * @param {RunCtx} ctx RunCtx。
@@ -266,20 +267,26 @@ let gateOverride = false;
  * @returns {void}
  */
 function applyGateOverride(ctx, on) {
-    if (on === gateOverride) return;
+    if (on === (gateHook !== null)) return;
     if (on) {
-        const receipt = ctx.override.atInstr(DRAWOBJ_SCRIPT, DRAWOBJ_GATE_EQ, { ptrLocal: 2, value: 1 });
-        gateOverride = receipt !== null && typeof receipt === "object" ? receipt.applied !== false : false;
+        const handle = ctx.hook.at(DRAWOBJ_SCRIPT, DRAWOBJ_GATE_EQ);
+        if (handle === undefined) {
+            ctx.log("warn", `field-points: 静态门 hook 装不上（${DRAWOBJ_SCRIPT} pos=0x${DRAWOBJ_GATE_EQ.toString(16)}）`);
+            return;
+        }
+        gateHook = handle;
+        const receipt = handle.patch({ ptrLocal: 2 }, 1);
+        const applied = receipt !== null && typeof receipt === "object" ? receipt.applied !== false : false;
         ctx.log(
             "info",
-            `field-points: 静态门覆盖 ${gateOverride ? "已装" : "安装失败"} ` +
+            `field-points: 静态门 hook 已装 ${applied ? "（覆盖已生效）" : "（覆盖失败）"} ` +
                 `(${DRAWOBJ_SCRIPT} pos=0x${DRAWOBJ_GATE_EQ.toString(16)} ptrLocal=2 value=1)`,
         );
         return;
     }
-    ctx.override.clear();
-    gateOverride = false;
-    ctx.log("info", "field-points: 静态门覆盖已撤（ctx.override.clear）");
+    if (gateHook !== null) gateHook.clear();
+    gateHook = null;
+    ctx.log("info", "field-points: 静态门 hook 已撤（handle.clear，未还原的写会先写回）");
 }
 
 /**
@@ -393,7 +400,7 @@ const plugin = {
         drawAnnounced = false;
         drawFrames = 0;
         lastDrawState = "";
-        gateOverride = false;
+        gateHook = null;
         // ★ 装静态门覆盖（`on=0` ⇒ 不装：一个 hook 都不进宿主表）。
         applyGateOverride(ctx, settings.on);
         // ★ 首行日志：明写开关状态（守卫按 `on=0` 判"关着的时候什么也不做"）。

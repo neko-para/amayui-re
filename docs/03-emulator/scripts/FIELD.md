@@ -265,11 +265,11 @@ node .tmp/field-skill-hint/dis-one.mjs .tmp/field-skill-hint/DRAWOBJ.BIN --all  
     ⇒ **清 `25c00` 的位会让静态与动效同时不画（点直接消失）**；两态的选择位是 `50ff9f` 的 bit2。
   - `instr#44` `槽 = 0xFA + 类型`；`instr#47..#57` 目标 = `列*64+32 - w/2` / `行*64+32 - h/2 - 14`（**底对齐**）；
   - `instr#58` `draw-texture (0x3ACA+槽) (0xFA+类型) 0 0 w h dstx dsty`。
-  - ★ **施加（2026-11-26 实测）**：视图里的立即数是**十六进制** ⇒ b5c1 的槽索引 = 222*50 + 槽
-    （50 = 0x32；按 32 读/写全是错位，之前"写了静态门也不过"就是这个原因）。
-    ctx.override.atInstr("DRAWOBJ.BIN", DRAWOBJ_GATE_EQ, { ptrLocal: 2, value: 1 })（pos=0x03A0 的 q）
-    把第二条腿**临时**改成 1、执行完恢复 ⇒ 未触发点位画出静态纹理（ x119/ x11A）、右上照旧动，
-    且 b5c1 净变化 0（实测 SAVE12.DAT hash 前后相同）。API 见 ../plugin-runtime.md 的 ctx.override。
+  - ★ **施加（2026-11-26 实测）**：视图里的立即数是**十六进制** ⇒ `eb5c1` 的槽索引 = `b222*50 + 槽`
+    （`50` = 0x32；按 32 读/写全是错位，之前"写了静态门也不过"就是这个原因）。
+    `ctx.hook.at("DRAWOBJ.BIN", DRAWOBJ_GATE_EQ)` 装"到点"，再用 `handle.patch({ ptrLocal: 2 }, 1)`
+    **临时**覆盖第二条腿（指令读之前改、执行完恢复）⇒ 未触发点位画出静态纹理（`0x119`/`0x11A`）、
+    右上照旧动，且 `eb5c1` 净变化 0（实测 `SAVE12.DAT` hash 前后相同）。API 见 `../plugin-runtime.md` 的 `ctx.hook`。
 - ⇒ **B 的可见性判据 = `50ff9f[槽]` 的 bit0（画）/ bit2（动效 alpha = 两态选择位）+ 静态门 ①/②**；
   `50ff9f` 是 VM 在**每次进图 / 每渲染帧**重建的派生表：
   `FIELD.BIN` #187 `0x000FA0` `fill-zero (global-int 50ff9f) 32` · `SETOBJ.BIN` #2 `0x00005C` 再清一次 ·

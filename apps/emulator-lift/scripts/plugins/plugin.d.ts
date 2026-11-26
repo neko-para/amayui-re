@@ -518,12 +518,12 @@ export interface RunCtx<State = Record<string, unknown>> {
     readonly read: ReadApi;
     readonly trigger: TriggerApi;
     /**
-     * **脚本指令位置钩子**：在某条脚本指令**执行前**覆盖它读到的一个 dword，指令执行完
-     * （下一条脚本指令派发前）逐字节恢复 ⇒ **净变化 0**（⛔ 不进存档）。
-     * 这是"到标记位置改一下再继续"的唯一入口；持久写仍走 `ctx.edit.global.set`。
+     * **脚本指令位置钩子**：`at(script,pos)` 只装"到点"（纯观察），句柄上的 `capture/stats` 读 local、
+     * `patch` 改值（该指令读之前覆盖、下一条脚本指令派发前恢复 ⇒ **净变化 0**，⛔ 不进存档）。
+     * ★ 触发 / 读 / 改是**三个独立能力**（用户裁决 2026-11-26 晚）；持久写仍走 `ctx.edit.global.set`。
      * ★ 只 `RunCtx` 有（`RenderCtx` 没有：render 不做 guest 写）。
      */
-    readonly override: OverrideApi;
+    readonly hook: HookApi;
     readonly ui: UiApi;
     /** ⚠ **C5**（C2a 里是 `undefined`）。Run 的 status/abort/events/dispatch。 */
     readonly run: RunApi;
@@ -551,48 +551,53 @@ export interface RunCtx<State = Record<string, unknown>> {
      *  ★ 终态异常（同 `fail`）：本回调已提交的 input 会被立刻丢弃。 */
     quit(reason?: string): void;
 }
-/** `ctx.override.atInstr(script, pos, spec)` 的 spec。
- *  ★ 目标三选一（`ptrLocal` / `localInt` / `globalId`）+ `value` ⇒ 覆盖；只给采样键 ⇒ 只采样。
- *  ★ 覆盖的是**这一次读**：写在该指令执行前、下一条脚本指令派发前恢复 ⇒ 持久数据净变化 0。 */
-export interface InstrHookSpec {
+/** `ctx.hook.at(script, pos)` 的句柄：**触发 / 读 / 改是三个独立能力**。
+ *  · 触发 = `at` 本身（纯观察：只计数，⛔ 不读不写 guest）；
+ *  · 读   = `capture(...)` + `stats()`（最近一次命中的 local 读数）；
+ *  · 改   = `patch(target, value)`（这条指令读之前覆盖一个 dword，指令后恢复 ⇒ 净变化 0）。
+ *  ★ 句柄函数从 `this.id` 取句柄 ⇒ ⛔ 不要解构（`const {patch} = h; patch(...)` 会失效）。 */
+export interface InstrHookTarget {
     /** `local-ptr N` 指向的 dword（`DRAWOBJ 0x03A0` 的 `eq` 读的就是它：N = 2）。 */
     ptrLocal?: number;
     /** `local-int N`。 */
     localInt?: number;
     /** 全局池 id（与 `ctx.edit.global.set(kind, id, …)` 同一个 id 空间）。 */
     globalId?: number;
-    /** 覆盖值（语义值；宿主按引擎 key 做 ENC）。`patch` 生效时必填。 */
-    value?: number;
-    /** false = 只采样不写（缺省由"有没有给目标+value"决定）。 */
-    patch?: boolean;
-    /** 只在前 N 次命中写（0/缺省 = 不限）。采样一直记"最近一次"。 */
-    maxHits?: number;
-    /** 采样的 int local 下标（最多 8 个；`status()[i].ints` 可读）。 */
-    captureInts?: number[];
-    /** 采样的 ptr local 下标（最多 8 个；`status()[i].ptrTargets` = 它指向的 dword）。 */
-    capturePtrs?: number[];
 }
-/** `ctx.override.status()` 的一行（安装顺序）。 */
-export interface InstrHookStatus {
+export interface InstrHookStats {
+    readonly id: number;
     readonly script: string;
     readonly pos: number;
     readonly patch: boolean;
     readonly hits: number;
     readonly restores: number;
     readonly skips: number;
+    /** `capture({ints})` 的语义值（最近一次命中）。 */
     readonly ints: number[];
+    /** `capture({ptrs})` 的**指针指向的 dword**（语义值；不可读 = 0）。 */
     readonly ptrTargets: number[];
 }
-export interface OverrideApi {
-    /** 装一条 hook（同一 `(script,pos)` 只能一条；`pos` = `label_%08x` 坐标）。
-     *  失败 ⇒ `{accepted:false, applied:false, code}`（`script_empty` / `pos_zero` / `duplicate`）。 */
-    atInstr(script: string, pos: number, spec: InstrHookSpec): Receipt;
-    /** 撤掉全部 hook（并把未还原的那次覆盖写回）。Run 收口 / `quit` 也会自动做。 */
+export interface InstrHookHandle {
+    readonly id: number;
+    /** ③ 改：装 / 换覆盖。`opts.maxHits` 只在前 N 次命中写（0/缺省 = 不限）。
+     *  `opts.enabled === false` ⇒ 撤覆盖（hook 仍在，继续计数）。 */
+    patch(target: InstrHookTarget | null, value?: number, opts?: { maxHits?: number; enabled?: boolean }): Receipt;
+    /** ② 读：设采样清单（各最多 8 个；之后 `stats()` 读最近一次命中）。 */
+    capture(opts: { ints?: number[]; ptrs?: number[] }): void;
+    stats(): InstrHookStats;
+    /** 撤这条 hook（未还原的覆盖会先写回）。 */
     clear(): void;
-    /** 每条 hook 的命中 / 恢复 / 采样读数。 */
-    status(): InstrHookStatus[];
 }
-export interface PluginModule<State = Record<string, unknown>> {
+/** 脚本指令位置钩子（只 `RunCtx`；`RenderCtx` 没有）。 */
+export interface HookApi {
+    /** ① 触发：在某条脚本指令**执行前**装一条观察（`pos` = `label_%08x` 坐标）。
+     *  同一 `(script,pos)` 只能一条；失败（`script_empty` / `pos_zero` / `duplicate`）⇒ `undefined`
+     *  （宿主另打一行 error 点名 code；⛔ 不编假句柄）。 */
+    at(script: string, pos: number): InstrHookHandle | undefined;
+    list(): InstrHookStats[];
+    /** 撤掉全部 hook（并把未还原的覆盖写回）。Run 收口 / `quit` 也会自动做。 */
+    clear(): void;
+}export interface PluginModule<State = Record<string, unknown>> {
     /** 宿主在 start 之前初始化 ctx.state；省略 ⇒ {} as State。
      *  ★ **浅拷贝**（`Object.assign({}, initialState)`，D-C2-7）：沙箱里没有 `JSON` / `structuredClone`
      *    ⇒ 嵌套对象**不**深拷贝，也不承诺"同 runtime 两个 Run 共享/不共享"（C2 只有一个 Run）。

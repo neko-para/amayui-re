@@ -830,19 +830,22 @@ struct Context {
   · ⛔ `RenderCtx` 仍**没有** `edit`/`input`/`state`/`now`/`trigger`/`fail`/`finish`/`quit`/
     `sample`/`screenshot`；存下来的 **RunCtx** 在 render 里调 `profile.*` 仍 TypeError
     （两份 trampoline，`plugin/render-stored-runctx-rejected`）。
-- **ctx.override（脚本指令位置钩子；**只 RunCtx**）**：tInstr(script, pos, spec) / clear() / status()。
-  语义 = 在**某条脚本指令执行前**覆盖它读到的一个 dword，**下一条脚本指令派发前逐字节恢复**
-  ⇒ **净变化 0**（⛔ 不进存档；⛔ 与 ctx.edit.global.set 的持久写不是一回事）。
-  · 实现 = src/runtime/instr_hook.cpp；入口 = AOT 在 VM 的 3 个派发点（ot/aot_hook_ea.h 的
-    kScriptDispatchEas）注入的 call void @lift_instr_hook(ptr)。⛔ **不要**改回"在 lift_dyn
-    里用 [esp] 回溯判定"：那会让每次间接跳转（≈54.8k/帧）都付判定成本，而且"我是谁"靠猜。
-  · spec 三选一目标 + alue：{ptrLocal: N}（local-ptr N **指向**的 dword）· {localInt: N} ·
-    {globalId: id}；maxHits 限写入次数；captureInts / capturePtrs 采样本帧 local
-    （最近一次命中，status() 里读得到 ⇒ **JS 也能读 local**，不需要每条指令都回调 JS）。
-  · 判据（实测 2026-11-26 / 存档 012 / DRAWOBJ 0x03A0）：装 {ptrLocal:2, value:1} ⇒ 静态纹理出现、
-    右上动效不受影响、SAVE12.DAT hash 前后相同；clear() / Run 收口也会把未还原的那次写回。
-  · 生命周期：Run 内有效；inish / quit / Run 收口自动 clear()（⛔ 不跨 Run 泄漏）。
-  · 失败 ⇒ 回执 {accepted:false, code}（script_empty / pos_zero / duplicate），宿主另打一行 error。
+- **`ctx.hook`（脚本指令位置钩子；只 RunCtx）**：`at(script, pos)` → 句柄；句柄上 `patch` / `capture` /
+  `stats` / `clear`；另有 `ctx.hook.list()` / `ctx.hook.clear()`。
+  ★ **触发 / 读 / 改是三个独立能力**（用户裁决 2026-11-26 晚：触发 ≠ 修改）：`at` 只装"到点"（纯观察，
+  只计数，⛔ 不读不写 guest）；`capture({ints, ptrs})` + `stats()` 读该点的 local；`patch(target, value,
+  {maxHits})` 才做覆盖 —— 可以只触发、只读，或装好触发后再决定改什么（`patch` 可反复换 / `{enabled:false}` 撤）。
+  · 覆盖语义 = 在这条指令**读之前**改一个 dword，**下一条脚本指令派发前逐字节恢复** ⇒ **净变化 0**
+    （⛔ 不进存档；⛔ 与 `ctx.edit.global.set` 的持久写不是一回事）。`target` 三选一：
+    `{ptrLocal: N}`（`local-ptr N` **指向**的 dword）· `{localInt: N}` · `{globalId: id}`。
+  · 实现 = `src/runtime/instr_hook.cpp`；入口 = AOT 在 VM 的 3 个派发点（`aot/aot_hook_ea.h` 的
+    `kScriptDispatchEas`）注入的 `call void @lift_instr_hook(ptr)`。⛔ **不要**改回"在 `lift_dyn` 里用
+    `[esp]` 回溯判定"：那会让每次间接跳转（≈54.8k/帧）都付判定成本，而且"我是谁"靠猜。
+  · 判据（实测 2026-11-26 / 存档 012 / `DRAWOBJ 0x03A0`）：`ctx.hook.at` + `.patch({ptrLocal:2}, 1)`
+    ⇒ 静态纹理出现、右上动效不受影响、`SAVE12.DAT` hash 前后相同；`clear()` / Run 收口也会把未还原的那次写回。
+  · 生命周期：Run 内有效；`finish` / `quit` / Run 收口自动 `clear()`（⛔ 不跨 Run 泄漏）。
+  · 失败 ⇒ `at` 返回 `undefined`（`script_empty` / `pos_zero` / `duplicate`，宿主另打一行 error）；
+    `patch` 失败 ⇒ 回执 `{accepted:false, code}`。
 - `ctx.fail/finish/quit`：只影响 runner/owner，不直接改 guest；`ctx.finish(code, reason)` 结束本 Run
   （映射历史 exit 5；C2c 的 `loadSave` 门超时用它），`ctx.quit()` 请求宿主停机。
 
