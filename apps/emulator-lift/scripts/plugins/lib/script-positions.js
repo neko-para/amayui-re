@@ -165,20 +165,23 @@ export const FIELD_SETMAP_B_LO = 0x35168;
 export const FIELD_SETMAP_B_HI = 0x3517c;
 
 // ===========================================================================
-// RENDERMAP.BIN（doc: `docs/03-emulator/scripts/FIELD.md` §④/⑦）
+// DRAWOBJ.BIN（doc: `docs/03-emulator/scripts/FIELD.md` §④/⑦ · 调用点全表见 `施加点`）
 //
-// ★ 一次渲染 = SETOBJ → DRAWOBJ（#117 `call-script 511a` → #118 `call-script 5117`）——
-//   `SETOBJ` #2 每次 `fill-zero (global-int 50ff9f) 32` 再逐槽重算 ⇒ 插件写在派生位上的值
-//   在下一次渲染里必被抹掉。所以静态施加必须落在 **DRAWOBJ 调用点**（SETOBJ 之后 / DRAWOBJ 之前）。
-//   ★ 这是**位置触发**（#118 这条指令），不是轮询；`mode:"reenter"` ⇒ 每渲染帧一次。
+// ★ `DRAWOBJ` 是**点位精灵的唯一绘脚本**：全语料 4 处 `call-script 5117`（`RENDERMAP` #118、
+//   `FIELD` #2722 / #9688、`RESETMAPAN` #1）都从这里进 ⇒ 静态施加挂在**它的入口**一条就够。
+//   `SETOBJ` 只在 `RENDERMAP` 里跑（#117），所以 `RENDERMAP` 那一趟进 DRAWOBJ 时派生位已是重算值；
+//   其它入口沿用上一次的值 —— 在入口统一施加，两条路都成立。
+//   ★ 这是**位置触发**（脚本内位置窗口），不是轮询；`mode:"reenter"` ⇒ 每进一次 DRAWOBJ 一次。
 // ===========================================================================
 
-// 渲染帧的 **DRAWOBJ 调用点**（`RENDERMAP` #118 `call-script 5117` @`0x0B04`；#117 是 SETOBJ，#119 是 `i20c`）。
-// `SETOBJ` #2 每次 `fill-zero (global-int 50ff9f) 32`（`0x00005C`）再逐槽重算 ⇒ 插件写在派生位上的值
-// 在下一次渲染里必被抹掉。`field-point-visible` 的 `static` 在这里施加 = SETOBJ 之后 / DRAWOBJ 之前、
-// 每渲染帧一次；`mode:"reenter"` 的边沿 = 每帧一次（⛔ 不是轮询）。
-export const RENDERMAP_DRAWOBJ_LO = 0x0b04;
-export const RENDERMAP_DRAWOBJ_HI = 0x0b10;
+// **点位精灵绘制脚本的入口**（`DRAWOBJ.BIN` #0 `detach-texture 3aca 32` @`0x003C`）。
+// `field-point-visible` 的 `static` 在这里施加（`fp:draw`）：它是**所有** `call-script 5117` 的唯一入口
+// （4 处调用点：`RENDERMAP` #118 @`0x0B04`、`FIELD` #2722 @`0x0F034` / #9688 @`0x0392BC`、
+// `RESETMAPAN` #1 @`0x0050`）⇒ 一条钩子覆盖全部调用者（含逐帧那条 `FIELD` #838 的 DRAWOBJ）。
+// 触发点 = guest 读点（`TriggerRunner` 只在读点 poll）；实测 DRAWOBJ 体内有 `peekMsg` 读点
+// （pos `0x64` / `0x2C4`），都在第一条 `draw-texture`（#58 @`0x66C`）之前。
+export const DRAWOBJ_ENTRY_LO = 0x003c;
+export const DRAWOBJ_ENTRY_HI = 0x06bc;
 
 // ===========================================================================
 // REIGN.BIN（无 doc；读数 = `scripts/recipes/fellow-switch.plan` 的 ④ + 该文件头的取证口径）

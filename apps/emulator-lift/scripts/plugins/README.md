@@ -76,16 +76,21 @@ scripts/plugins/
   `FIELD_SETMAP_B_LO/HI` = `0x035130` 块的返回点 ⇒ 这两处把 32 槽派生渲染位里类型命中的槽
   **置 `DRAW|ALPHA`（`|= 0x5`）**（`DRAWOBJ` 的 bit0=1 才画、bit2=1 动效才不是 alpha 0）；
   **⛔ 不清任何位**（尤其 bit1：A 链格表与 FIELD 的战利品抽取都消费它）。
-  `RENDERMAP_DRAWOBJ_LO/HI` = **`RENDERMAP.BIN` #118 `call-script 5117`(DRAWOBJ) 这条指令**
-  `[0x0B04,0x0B10)`，即 SETOBJ(#117) 之后 / DRAWOBJ 之前 ⇒ **每渲染帧一次**（`name = "fp:draw"`）：
+  `DRAWOBJ_ENTRY_LO/HI` = **`DRAWOBJ.BIN` 的入口窗口** `[0x003C,0x06BC)`
+  （#0 `detach-texture 3aca 32` → 点位槽循环尾；第二条循环是 `6202a` 元素对象，不含点位精灵）⇒
+  **每次进 `DRAWOBJ` 一次**（`name = "fp:draw"`）。★ 为什么是 `DRAWOBJ` 入口而不是某个调用点：
+  全语料 `call-script 5117` 只有 4 处（`RENDERMAP` #118 `0x0B04` · `FIELD` #2722 `0x0F034` /
+  #9688 `0x0392BC` · `RESETMAPAN` #1 `0x0050`），**全部**从 `DRAWOBJ` 进 ⇒ 一条钩子覆盖所有调用者
+  （含**逐帧**那条：`FIELD` #838 `call label_000392b0`）。调用点全表见
+  `docs/03-emulator/scripts/FIELD.md` §⑧。`fp:draw` 里：
   先 `|=0x5`，再按**引擎自己的静态门**决定 bit2：门成立（`511080[type]==3` + `eb5c1[b222][slot]==1` +
   `(flags&6)==2` + `25c00` 格位=1 + `14d8cc` 当层启用）⇒ **清 bit2**（静态可见、动效 alpha 0）；
   门不成立 ⇒ **保留 bit2**（= 动效，点不消失）。`25c00`/`14d73c`/`14d76e`/`14d8cc`/`eb5c1`/`511080`
   **只读**，写集只有 `50ff9f+slot`。`static=0` ⇒ 这些读**一个都不做**（日志一行 `field-points: static=0`）。
-  ★ **为什么必须搬到这里**：`SETOBJ` #2 每次 `fill-zero (global-int 50ff9f) 32` 再逐槽重算 ⇒ 插件写在
+  ★ **为什么必须落在 `DRAWOBJ` 里**：`SETOBJ` #2 每次 `fill-zero (global-int 50ff9f) 32` 再逐槽重算 ⇒ 插件写在
   派生位上的值在同一次渲染里被抹掉；旧钩子 `FIELD [0x253C,0x2550)` 在 SETOBJ **之前**，只有"退图 /
-  STAGE COMPLETE 那条不走 SETOBJ 的 DRAWOBJ 调用"看得到它。`fp:draw` 每帧 fire ⇒ ⛔ **不每帧刷日志**：
-  首帧 / `matched/cleared/kept` 变化才一行，`diag=1` 时每 60 帧一行。
+  STAGE COMPLETE 那条不走 SETOBJ 的 DRAWOBJ 调用"看得到它。`fp:draw` 每进一次 `DRAWOBJ` 就 fire ⇒ ⛔ **不刷屏**：
+  首帧 / `matched/cleared/kept` 变化才一行（行里带 `site=<ev.name>`），`diag=1` 时每 60 次一行。
   ⛔ 不轮询（没有 `afterDelay` / `poll` / `FIELD_MAIN_LOOP`）、⛔ 不读档（不 import `lib/save.js` /
   `lib/boot-to-title.js` / `lib/chains.js`）、
   ⛔ 不点鼠标、⛔ 不写盘、⛔ 不 `finish`（正常路径常驻；进程按 `--time-limit` / 关窗结束）。

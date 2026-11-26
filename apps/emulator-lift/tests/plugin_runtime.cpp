@@ -1001,8 +1001,8 @@ void caseConfigHostPause() {
 //   ① `on=1` 且位置读数在 **setmap 钩子** `FIELD_SETMAP_A` `[0x18280,0x18284)` 内 ⇒ **外→内边沿 fire**，
 //      类型命中的槽**置 `DRAW|ALPHA`**（`|0x5`）、**其余槽不动**（`0x3→0x7`、类型不命中原样）；
 //   ② 已经施加且**没离开区间** ⇒ 不再 fire（Reenter 不是每读点）⇒ **不再写**（日志行数不涨）；
-//   ③ `static=1`（缺省）且位置读数在 **`RENDERMAP` 的 DRAWOBJ 调用点**
-//      `RENDERMAP_DRAWOBJ` `[0x0B04,0x0B10)` 内（SETOBJ 之后 / DRAWOBJ 之前，每渲染帧一次）⇒
+//   ③ `static=1`（缺省）且位置读数在 **`DRAWOBJ.BIN` 的入口窗口**
+//      `DRAWOBJ_ENTRY` `[0x003C,0x06BC)` 内（`DRAWOBJ` 是 4 处 `call-script 5117` 的唯一入口）⇒
 //      先 `|=0x5`、再按**引擎自己的静态门**决定 `50ff9f` bit2：门成立 ⇒ **清 bit2**（静态可见、动效 alpha 0）；
 //      门不成立（本用例 = `eb5c1=0`，从没触发过）⇒ **保留 bit2**（今天的动效，点不消失）。
 //      ★ `25c00` 的格位图**只读**：两个 dword 一个字节都不许变；
@@ -1156,12 +1156,12 @@ void caseFieldSwitchApply() {
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()),
                           static_cast<std::int64_t>(logs_forced));
         // ④ 渲染帧：`SETOBJ` #2 每次 `fill-zero 50ff9f 32` 再重算 ⇒ 上一次的 bit2 已被抹掉。
-        //    这里手动模拟"重算回 0x3"，再把读数切到 `RENDERMAP` 的 DRAWOBJ 调用点
+        //    这里手动模拟"重算回 0x3"，再把读数切到 `DRAWOBJ` 的入口窗口（读点实测落在 0x64）
         //    `[0x0B04,0x0B10)`（SETOBJ 之后 / DRAWOBJ 之前，每渲染帧一次）。
         LIFT_CHECK(seedFieldInt(f, kFieldFlagsId + 1u, kFieldDrawBit | kFieldNotUsedBit));
         LIFT_CHECK(seedFieldInt(f, kFieldFlagsId + 2u, kFieldDrawBit | kFieldNotUsedBit));
-        f.readings.script = "RENDERMAP.BIN";
-        f.readings.pos = 0x0b08;  // RENDERMAP_DRAWOBJ [0x0B04,0x0B10) 内
+        f.readings.script = "DRAWOBJ.BIN";
+        f.readings.pos = 0x0064;  // DRAWOBJ_ENTRY [0x003C,0x06BC) 内（实测读点 pos）
         f.pump();
         dumpFail(f);
         LIFT_CHECK(!f.host->failed());
@@ -1191,8 +1191,8 @@ void caseFieldSwitchApply() {
         f.pump();
         dumpFail(f);
         LIFT_CHECK(!f.host->failed());
-        f.readings.script = "RENDERMAP.BIN";
-        f.readings.pos = 0x0b08;
+        f.readings.script = "DRAWOBJ.BIN";
+        f.readings.pos = 0x0064;
         f.pump();
         dumpFail(f);
         LIFT_CHECK(!f.host->failed());
@@ -1242,8 +1242,8 @@ void caseFieldSwitchApply() {
         f.readings.script = "FIELD.BIN";
         f.readings.pos = 0x18282;  // FIELD_SETMAP_A 内（会 fire，但 on=0 ⇒ 一个 guest 读都不做）
         for (int i = 0; i < 2; ++i) f.pump();
-        f.readings.script = "RENDERMAP.BIN";
-        f.readings.pos = 0x0b08;   // RENDERMAP_DRAWOBJ 内（每帧 fire，但 on=0 ⇒ 仍然 0 读）
+        f.readings.script = "DRAWOBJ.BIN";
+        f.readings.pos = 0x0064;   // DRAWOBJ_ENTRY 内（每次进 DRAWOBJ fire，但 on=0 ⇒ 仍然 0 读）
         for (int i = 0; i < 2; ++i) f.pump();
         dumpFail(f);
         LIFT_CHECK(!f.host->failed());
@@ -1286,9 +1286,9 @@ void caseFieldSwitchApply() {
         LIFT_CHECK(!f.host->failed());
         LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), 0x7u);
         const std::uint64_t logs_forced = f.host->logLines();
-        // RENDERMAP 的 DRAWOBJ 调用点：fire，但 `static=0` ⇒ 只 `|=0x5`、一个表都不读、bit2 不清。
-        f.readings.script = "RENDERMAP.BIN";
-        f.readings.pos = 0x0b08;
+        // DRAWOBJ 入口：fire，但 `static=0` ⇒ 只 `|=0x5`、一个表都不读、bit2 不清。
+        f.readings.script = "DRAWOBJ.BIN";
+        f.readings.pos = 0x0064;
         f.pump();
         dumpFail(f);
         LIFT_CHECK(!f.host->failed());
@@ -1302,8 +1302,8 @@ void caseFieldSwitchApply() {
         f.readings.script = "FIELD.BIN";
         f.readings.pos = 0x0600;
         f.pump();
-        f.readings.script = "RENDERMAP.BIN";
-        f.readings.pos = 0x0b08;
+        f.readings.script = "DRAWOBJ.BIN";
+        f.readings.pos = 0x0064;
         f.pump();
         dumpFail(f);
         LIFT_CHECK(!f.host->failed());

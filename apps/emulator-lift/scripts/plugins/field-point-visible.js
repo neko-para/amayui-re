@@ -14,18 +14,32 @@
 //     `DRAWOBJ` #46-55 `511080[type]==3 && eb5c1[b222][slot]==1 && (flags&6)==2` **且**
 //     #56-58 的 `25c00[b222][row]` 第 `col` 位 == 1。⇒ **bit2=1 时静态一定不画、bit2=0 时动效全透明**。
 //     上一轮只 `|=0x5` ⇒ 看到的一定是**动效**（用户实测正是如此）。
-//   · `static`（缺省 **1**）⇒ 在**每个渲染帧的 DRAWOBJ 调用点**（SETOBJ 之后）再判一次引擎自己的静态门：
+//   · `static`（缺省 **1**）⇒ 在**每一次 `DRAWOBJ.BIN` 的入口**（`fp:draw`）再判一次引擎自己的静态门：
 //     成立就把 bit2 **清掉**（静态可见、动效 alpha 0）；不成立就**保留** bit2（= 今天的动效，⛔ 不让点消失）。
 //     `static=0` ⇒ 只保留 `|=0x5`，**一个** `25c00`/`14d73c`/`14d76e`/`14d8cc`/`eb5c1` 读都不做。
-//   · ★★ **为什么每渲染帧都要施加（2026-11-26 订正）**：`FIELD` 的渲染帧 = `RENDERMAP.BIN` 的
-//     #117 `call-script 511a`(**SETOBJ**) → #118 `call-script 5117`(**DRAWOBJ**)；而 `SETOBJ` #2 是
-//     `fill-zero (global-int 50ff9f) 32`，之后逐槽重算 ⇒ **插件写在这张派生表上的值，在同一次渲染里必被
-//     抹掉**。旧钩子 `FIELD [0x253C,0x2550)` 在 SETOBJ **之前** ⇒ 只有"退图 / STAGE COMPLETE 那条不走
-//     SETOBJ 的 DRAWOBJ 调用"看得到插件的值 —— 那正是"退图/STAGE COMPLETE 出现、IDLE 不出现"的形状。
-//   · ★ **钩子 = 渲染帧的 DRAWOBJ 调用点**（父级/用户裁决 2026-11-26）：
-//       `afterPosition("RENDERMAP.BIN", RENDERMAP_DRAWOBJ_LO, RENDERMAP_DRAWOBJ_HI, { name: "fp:draw", mode: "reenter" })`
-//     `[0x0B04,0x0B10)` = **#118 `call-script 5117` 这条指令本身** ⇒ SETOBJ 之后 / DRAWOBJ 之前，
-//     **每渲染帧恰好一次**。这是已知脚本位置，⛔ 不是轮询。
+//   · ★★ **为什么每渲染帧都要施加**：`SETOBJ` #2 是 `fill-zero (global-int 50ff9f) 32`，之后逐槽重算
+//     ⇒ **插件写在这张派生表上的值，在同一次渲染里必被抹掉**。而 `SETOBJ` 只在 `RENDERMAP` 里跑
+//     （#117 `call-script 511a` → #118 `call-script 5117`）⇒ 施加点必须在 `SETOBJ` **之后**。
+//   · ★★ **为什么挂在 `DRAWOBJ.BIN` 入口（2026-11-26 第二轮订正）**：全语料 `call-script 5117` 只有 **4 处**
+//     （`.tmp/field-idle/sites.md` 的全表；`node tools/script-positions.mjs` 的锚即这 4 处的入口）：
+//       ① `RENDERMAP.BIN` #118 `0x0B04`（前面 #117 就是 SETOBJ = 唯一"重算过"的那一趟）；
+//       ② `FIELD.BIN` #2722 `0x0F034`（`0x0F028` 那一块：画一帧 → 音效/淡出/`wait`/`poll-input`）；
+//       ③ `FIELD.BIN` #9688 `0x0392BC`（叶 `label_000392b0` = `DRAWMAP → DRAWOBJ → DRAWMINIMAP`；
+//          **逐帧**那条走它：`FIELD` #838 `0x04EC4` `call label_000392b0`）；
+//       ④ `RESETMAPAN.BIN` #1 `0x0050`（进游戏 / 配置那一段的一次性绘制）。
+//     ⇒ `DRAWOBJ` **就是**那个收敛点：挂在它的入口，4 处调用者一次性全覆盖（含逐帧那条）。
+//     上一轮只挂 ① RENDERMAP 的调用点，结果**逐帧那条（③）与退图那条（②）都没被施加**，
+//     而 ① 与 ③ 在同一帧里会用**不同的 flag 状态**各画一遍 ⇒ 同一格先画动效、再画静态（`0x7`/`0x3`）
+//     ⇒ 用户看到"纹理交替出现/消失"。入口统一施加后，两条路都先经过这里，flag 状态一致。
+//   · ★ **触发点 = guest 读点**（`TriggerRunner` 只在 `atPoint` poll；`docs/03-emulator/plugin-runtime.md` §4.2）：
+//     实测 `DRAWOBJ.BIN` 体内有 `peekMsg` 读点（pos `0x64` / `0x2C4`，都早于第一条
+//     `draw-texture` #58 @`0x66C`）⇒ `[DRAWOBJ_ENTRY_LO, DRAWOBJ_ENTRY_HI)` = `[0x003C,0x06BC)`
+//     （入口 → 点位槽循环尾；第二条循环是 `6202a` 元素对象，不含点位精灵）的外→内边沿会 fire。
+//     ⚠ `RENDERMAP [0x0B04,0x0B10)`（上一轮的窗口）在三次真机读数里**一次都没 fire**
+//     （那个区间里没有会调 Win32 输入 API 的指令 ⇒ 读点永远不会落在它上面）。
+//   · ★ **钩子 = `DRAWOBJ.BIN` 入口窗口**（父级/用户裁决 2026-11-26）：
+//       `afterPosition("DRAWOBJ.BIN", DRAWOBJ_ENTRY_LO, DRAWOBJ_ENTRY_HI, { name: "fp:draw", mode: "reenter" })`
+//     这是已知脚本位置，⛔ 不是轮询。
 //   · 两条 `FIELD.BIN` setmap 钩子**保留**（只做 `|=0x5`；覆盖"退图前还没渲过"的窗口）：
 //       ① `[FIELD_SETMAP_A_LO, FIELD_SETMAP_A_HI)` = `label_00018274` 内 `call-script 511a`(SETOBJ) 的
 //          **返回点**（进图主路径）；
@@ -47,7 +61,7 @@
 //      这个**机器写的保留域**，由 `registerSettings` 在 `start` 里做，见下）。
 //   ⇒ 守卫 `apps/emulator-lift/tests/plugin_field_switch.cpp` 两段判据：
 //      **静态**（剥注释后）"代码里没有 input / loadSave / bootToTitle / chains / finish / quit"，
-//      且仍在用 `afterPosition` + `reenter` + 两个 setmap 区间 + `RENDERMAP_DRAWOBJ_*` / `fp:draw` +
+//      且仍在用 `afterPosition` + `reenter` + 两个 setmap 区间 + `DRAWOBJ_ENTRY_*` / `fp:draw` +
 //      `forceFieldPointsVisible` / `clearFieldStaticSkip`；
 //      **端到端**（`emulator-lift-aot --plugin` headless，无 `--input-plan`）"没有任何 `boot:` / `load:`
 //      行、Run 保持常驻（readout `run=waiting`、`stop: time-limit`）、首行日志 `field-points: on=0`"。
@@ -103,12 +117,12 @@ import {
     registerSettings,
 } from "./lib/settings.js";
 import {
+    DRAWOBJ_ENTRY_HI,
+    DRAWOBJ_ENTRY_LO,
     FIELD_SETMAP_A_HI,
     FIELD_SETMAP_A_LO,
     FIELD_SETMAP_B_HI,
     FIELD_SETMAP_B_LO,
-    RENDERMAP_DRAWOBJ_HI,
-    RENDERMAP_DRAWOBJ_LO,
 } from "./lib/script-positions.js";
 
 /** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
@@ -130,10 +144,12 @@ const CONFIG_DOMAIN = "field.point-visible";
 const FIELD_SCRIPT = "FIELD.BIN";
 
 /**
- * 渲染帧脚本的宿主 marker 拼写（同上，**精确 `==`**）。
- * 位置表：`RENDERMAP_DRAWOBJ_LO/HI` = #118 `call-script 5117`(DRAWOBJ) 这条指令。
+ * 点位绘制脚本的宿主 marker 拼写（同上，**精确 `==`**）。
+ * 位置表：`DRAWOBJ_ENTRY_LO/HI` = 入口 `#0 detach-texture` → 点位槽循环尾（`[0x003C,0x06BC)`）。
+ * ★ 全语料 `call-script 5117` 的 4 处（`RENDERMAP` #118 · `FIELD` #2722/#9688 · `RESETMAPAN` #1）
+ *   都从这里进 ⇒ 一条钩子覆盖全部调用者。
  */
-const RENDERMAP_SCRIPT = "RENDERMAP.BIN";
+const DRAWOBJ_SCRIPT = "DRAWOBJ.BIN";
 
 /** 三条钩子的具名状态（每次 fire 原样放回**同一个**集合）。 */
 const TRIGGER_NAME_A = "fp:setmap-a";
@@ -308,27 +324,31 @@ function applyAtSetmap(ctx, settings) {
 }
 
 /**
- * **渲染帧施加**（`fp:draw`；每渲染帧一次）：先 `forceFieldPointsVisible`（`|=0x5`），再按 `static`
+ * **每次进 `DRAWOBJ` 时的施加**（`fp:draw`）：先 `forceFieldPointsVisible`（`|=0x5`），再按 `static`
  * 判据对**类型命中**的槽调 `clearFieldStaticSkip`。
  *
- * ★ **为什么先 `|=0x5`**（保留 2026-11-26 之前的行为）：bit0=画、bit2=动效可见；退图 / STAGE COMPLETE
- *   那条 `call-script 5117` 前面**没有** SETOBJ，两条 setmap 钩子覆盖不到它 ⇒ 在这里补上。
- * ★ **为什么每帧都要做**：`RENDERMAP` 每渲染帧先 SETOBJ（#2 `fill-zero 50ff9f 32` 再逐槽重算）⇒
- *   上一次写的 bit2 在同一次渲染里已被抹掉；`[0x0B04,0x0B10)` 正好是 SETOBJ 之后 / DRAWOBJ 之前。
- * ★ **代价**：每帧 31 次类型读 + 命中槽的 flags 读 + `clearFieldStaticSkip` 的判据读；写只在
+ * ★ **为什么先 `|=0x5`**（保留 2026-11-26 之前的行为）：bit0=画、bit2=动效可见；`FIELD` #2722
+ *   （`0x0F028` 那块）与 `RESETMAPAN` #1 那两条 `call-script 5117` 前面**没有** SETOBJ，两条 setmap 钩子
+ *   也覆盖不到它们 ⇒ 在这里补上（入口统一，4 处调用者一视同仁）。
+ * ★ **为什么每次进 DRAWOBJ 都要做**：`RENDERMAP` 那一趟先 SETOBJ（#2 `fill-zero 50ff9f 32` 再逐槽重算）
+ *   ⇒ 上一次写的 bit2 在那一次渲染里已被抹掉；其它入口沿用的是上一次的值。入口施加 = 两条路都成立。
+ * ★ **触发点**：`DRAWOBJ.BIN` 体内实测有 `peekMsg` 读点（pos `0x64` / `0x2C4`，都早于第一条
+ *   `draw-texture`（#58，`0x66C`）⇒ `[0x003C,0x06BC)` 的外→内边沿会 fire（`TriggerRunner` 只在读点 poll）。
+ * ★ **代价**：每次 31 次类型读 + 命中槽的 flags 读 + `clearFieldStaticSkip` 的判据读；写只在
  *   `after !== before` 时发生（`forceFieldPointsVisible` / `clearFieldStaticSkip` 内部保证）。
  * ★ **日志**：首帧或 `matched/cleared/kept` 变化才打**一行**（首帧另带逐槽明细）；`diag` 每
- *   `DIAG_DRAW_EVERY` 帧一行。⛔ 绝不每帧刷屏。
+ *   `DIAG_DRAW_EVERY` 次一行。⛔ 绝不每次都刷屏。行里带 `site=<ev.name>`（三条钩子共用一个日志面）。
  * ★ `static=0` ⇒ 只 `|=0x5`：**一个** `25c00` / `14d73c` / `14d76e` / `14d8cc` / `eb5c1` 读都不做
  *   （那几张表只在 `clearFieldStaticSkip` 里读）。
  *
  * @param {RunCtx} ctx RunCtx。
  * @param {Settings} settings 本次 fire 的设置。
+ * @param {string} site 本次 fire 的 trigger 名（`ev.name`；日志里区分三条钩子）。
  * @returns {void}
  */
-function applyAtDraw(ctx, settings) {
+function applyAtDraw(ctx, settings, site) {
     drawFrames += 1;
-    // ★ 命中槽（type 读在里面，31 次/帧）—— `static` 的循环直接复用它，⛔ 不再扫第二遍类型表。
+    // ★ 命中槽（type 读在里面，31 次/次）—— `static` 的循环直接复用它，⛔ 不再扫第二遍类型表。
     const changed = forceFieldPointsVisible(ctx, { types: settings.types });
     let cleared = 0;
     let kept = 0;
@@ -362,9 +382,9 @@ function applyAtDraw(ctx, settings) {
         const instance = readIntGlobal(ctx, FIELD_MAP_INSTANCE_GLOBAL_ID);
         ctx.log(
             "info",
-            `field-points: draw frame=${drawFrames} matched=${changed.length} cleared=${cleared} ` +
-                `kept=${kept} map=${hex(map)} instance=${hex(instance)}` +
-                `（SETOBJ 之后 / DRAWOBJ 之前；每渲染帧一次）`,
+            `field-points: draw site=${site} frame=${drawFrames} matched=${changed.length} ` +
+                `cleared=${cleared} kept=${kept} map=${hex(map)} instance=${hex(instance)}` +
+                `（DRAWOBJ.BIN 入口；每次进这个脚本一次）`,
         );
         if (first) {
             for (const line of lines.slice(0, MAX_LOGGED_SLOTS)) ctx.log("info", line);
@@ -374,8 +394,9 @@ function applyAtDraw(ctx, settings) {
         const pos = ctx.now.pos;
         ctx.log(
             "info",
-            `field-points: diag draw frame=${drawFrames} matched=${changed.length} cleared=${cleared} ` +
-                `kept=${kept} pos=${pos === undefined ? "-" : hex(pos)}（每 ${DIAG_DRAW_EVERY} 帧一行）`,
+            `field-points: diag draw site=${site} frame=${drawFrames} matched=${changed.length} ` +
+                `cleared=${cleared} kept=${kept} pos=${pos === undefined ? "-" : hex(pos)}` +
+                `（每 ${DIAG_DRAW_EVERY} 次一行）`,
         );
     }
 }
@@ -427,12 +448,12 @@ const plugin = {
         ctx.log(
             "info",
             `field-points: on=${settings.on ? 1 : 0} static=${settings.static ? 1 : 0} ` +
-                `types=${settings.types.map(hex).join(",")}（渲染帧显示所有采集/挖掘点）`,
+                `types=${settings.types.map(hex).join(",")}（每次进 DRAWOBJ 显示所有采集/挖掘点）`,
         );
         // ★ **三个**常驻 trigger：
         //   ① / ② 两条 setmap 返回点（`FIELD.BIN`）：只 `50ff9f |= 0x5`；
-        //   ③ `fp:draw`（`RENDERMAP.BIN` [0x0B04,0x0B10) = #118 `call-script 5117`）：
-        //      每渲染帧一次、SETOBJ 之后 / DRAWOBJ 之前 ⇒ 先 `|=0x5`，再按静态门决定 bit2。
+        //   ③ `fp:draw`（**`DRAWOBJ.BIN` 入口** `[0x003C,0x06BC)`）：每次进点位绘制脚本一次
+        //      ⇒ 先 `|=0x5`，再按静态门决定 bit2。4 处 `call-script 5117` 全部经过这里。
         //   ⛔ **不要**在这里再 arm 一个轮询（那会把"已知位置"退化成轮询）。
         triggers = [
             ctx.trigger.afterPosition(FIELD_SCRIPT, FIELD_SETMAP_A_LO, FIELD_SETMAP_A_HI, {
@@ -443,7 +464,7 @@ const plugin = {
                 name: TRIGGER_NAME_B,
                 mode: "reenter",
             }),
-            ctx.trigger.afterPosition(RENDERMAP_SCRIPT, RENDERMAP_DRAWOBJ_LO, RENDERMAP_DRAWOBJ_HI, {
+            ctx.trigger.afterPosition(DRAWOBJ_SCRIPT, DRAWOBJ_ENTRY_LO, DRAWOBJ_ENTRY_HI, {
                 name: TRIGGER_NAME_DRAW,
                 mode: "reenter",
             }),
@@ -479,7 +500,7 @@ const plugin = {
         //   但这一支不进来 ⇒ 仍然 0 读。
         if (settings.on) {
             if (isSetmap) applyAtSetmap(ctx, settings);
-            else applyAtDraw(ctx, settings);
+            else applyAtDraw(ctx, settings, name);
         }
         // ★ `fp:draw` 的 diag 在 `applyAtDraw` 里按每 N 帧打（⛔ 不走这里的每 fire 一次）。
         if (settings.diag && !isDraw) logDiag(ctx);

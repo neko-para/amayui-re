@@ -7,7 +7,7 @@
 //      · 不结束 Run（`ctx.finish` / `ctx.quit`）⇒ 常驻（正常路径永不收口，进程按 `--time-limit` / 关窗结束）；
 //      · 还在用**位置触发**那条链（`afterPosition` + `reenter` + 两个 setmap 区间
 //        `FIELD_SETMAP_A_LO` / `FIELD_SETMAP_B_LO` + `forceFieldPointsVisible` +
-//        `static` 的**渲染帧 DRAWOBJ 调用点** `RENDERMAP_DRAWOBJ_LO/HI` / `fp:draw` /
+//        `static` 的**点位绘制脚本入口** `DRAWOBJ_ENTRY_LO/HI` / `fp:draw` /
 //        `clearFieldStaticSkip`；
 //        ⛔ 没有 `afterDelay` / `poll` / `FIELD_MAIN_LOOP` —— 判据是已知脚本位置，不是轮询）。
 //      红了 ⇒ 这个"开关"又开始驱动输入 / 读档 / 自己收口了，或者 `static` 那条链被悄悄拆掉了。
@@ -165,12 +165,14 @@ int main(int argc, char** argv) {
     LIFT_CHECK(code.find("ctx.quit") == std::string::npos);
     // 正向：该写的那条链还在（否则"禁令全过"可以靠一个空文件达成）。
     LIFT_CHECK(code.find("forceFieldPointsVisible") != std::string::npos);
-    // ★ `static`（缺省 1）：渲染帧 DRAWOBJ 调用点的位置触发 + 静态判据函数 + 设置键，都得在代码里。
+    // ★ `static`（缺省 1）：**`DRAWOBJ.BIN` 入口**的位置触发 + 静态判据函数 + 设置键，都得在代码里。
     //   红了 = "进图显示静态"这条链被拆了（用户裁决 2026-11-26）。
+    //   ★ 为什么是 DRAWOBJ 而不是 RENDERMAP 的调用点：4 处 `call-script 5117` 都从 DRAWOBJ 进
+    //     （`.tmp/field-idle/sites.md`），一条钩子覆盖全部调用者。
     LIFT_CHECK(code.find("clearFieldStaticSkip") != std::string::npos);
-    LIFT_CHECK(code.find("RENDERMAP.BIN") != std::string::npos);
-    LIFT_CHECK(code.find("RENDERMAP_DRAWOBJ_LO") != std::string::npos);
-    LIFT_CHECK(code.find("RENDERMAP_DRAWOBJ_HI") != std::string::npos);
+    LIFT_CHECK(code.find("DRAWOBJ.BIN") != std::string::npos);
+    LIFT_CHECK(code.find("DRAWOBJ_ENTRY_LO") != std::string::npos);
+    LIFT_CHECK(code.find("DRAWOBJ_ENTRY_HI") != std::string::npos);
     LIFT_CHECK(code.find("\"fp:draw\"") != std::string::npos);
     LIFT_CHECK(code.find("\"static\"") != std::string::npos);
     // ★ 判据是 setmap 的**已知脚本位置** ⇒ 三条位置触发（reenter），⛔ 不是轮询。
