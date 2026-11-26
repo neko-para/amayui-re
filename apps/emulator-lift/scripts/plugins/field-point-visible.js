@@ -312,10 +312,21 @@ function applyAtDraw(ctx, settings) {
         //   里留了什么"。`flags` = **写之前**读到的值（`after` 恒等于 `flags|1`，没有额外信息）；
         //   `applied=1` 才表示本插件真的写了这一槽（`0` = bit0 本来就在 / 写回执失败）。
         for (const c of changed) {
+            const stage = readIntGlobal(ctx, 0xb222) >>> 0;
+            const row = readIntGlobal(ctx, 0x14d76e + c.slot) >>> 0;
+            const col = readIntGlobal(ctx, 0x14d73c + c.slot) >>> 0;
+            const cellA = (0x25c00 + stage * 64 + row) >>> 0;
+            const cellB = (0x25c00 + stage * 64 + row * 4) >>> 0;
+            const wA = readIntGlobal(ctx, cellA & ~3) >>> 0;
+            const wB = readIntGlobal(ctx, cellB & ~3) >>> 0;
+            const dynSlot = readIntGlobal(ctx, 0x510439 + c.type * 4) >>> 0;
+            const cls = readIntGlobal(ctx, 0x511080 + c.type * 4) >>> 0;
             ctx.log(
                 "info",
                 `field-points: diag draw frame=${drawFrames} slot=${c.slot} type=${hex(c.type)} ` +
-                    `flags=${hex(c.before)} applied=${c.applied ? 1 : 0}`,
+                    `flags=${hex(c.before)} applied=${c.applied ? 1 : 0} ` +
+                    `stage=${hex(stage)} row=${row} col=${col} cellA=${hex(cellA)} wA=${hex(wA)} ` +
+                    `cellB=${hex(cellB)} wB=${hex(wB)} dyn=${hex(dynSlot)} cls=${cls}`,
             );
         }
     }
