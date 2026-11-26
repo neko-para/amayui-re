@@ -160,6 +160,10 @@ public:
 
     bool editGlobalSet(lift::GlobalKind kind, std::uint32_t id, const lift::GlobalValue& value,
                        const char** code) override;
+    // ---- 脚本指令位置钩子（`ctx.override`；唯一实现 = `runtime/instr_hook.cpp`）----
+    bool instrHookInstall(const lift::InstrHookSpec& spec, const char** err) override;
+    void instrHookClear() override;
+    std::vector<lift::InstrHookStatus> instrHookStatus() const override;
     lift::plugin::Receipt inputClick(int x, int y, lift::MouseButton button) override;
     lift::plugin::Receipt inputMove(int x, int y) override;
     lift::plugin::Receipt inputDown(lift::MouseButton button) override;

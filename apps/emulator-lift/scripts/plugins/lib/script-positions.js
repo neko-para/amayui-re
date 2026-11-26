@@ -173,6 +173,13 @@ export const FIELD_MAIN_LOOP_HI = 0x5860;
 export const DRAWOBJ_ENTRY_LO = 0x003c;
 export const DRAWOBJ_ENTRY_HI = 0x06bc;
 
+// **静态门的第一条读**（`eq (local-int c) (local-ptr 2) 1` @`0x03A0`）：它读的 dword =
+// `eb5c1[map*50 + slot]`（视图里 `lookup-array-2d … 32 …` 的 `32` 是**十六进制** = 50）。
+// `ctx.override.atInstr("DRAWOBJ.BIN", DRAWOBJ_GATE_EQ, { ptrLocal: 2, value: 1 })` 在这一条
+// 指令**执行前**把 `local-ptr 2` 指向的 dword 临时改成 1、执行完恢复 ⇒ 静态门通过、净变化 0。
+// 门的另外三腿：`511080[type]==3`、`flags&6==2`、`25c00[map*100 + row]` 的 bit `col`（实测为 1）。
+export const DRAWOBJ_GATE_EQ = 0x03a0;
+
 // ===========================================================================
 // REIGN.BIN（无 doc；读数 = `scripts/recipes/fellow-switch.plan` 的 ④ + 该文件头的取证口径）
 //

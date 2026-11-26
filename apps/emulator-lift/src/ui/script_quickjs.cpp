@@ -1791,6 +1791,10 @@ JSValue jsCtxInputDown(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxInputUp(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxInputStatus(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxReadGlobalGet(JSContext*, JSValueConst, int, JSValueConst*);
+// `ctx.override`（脚本指令位置钩子；只 RunCtx）
+JSValue jsCtxOverrideAtInstr(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxOverrideClear(JSContext*, JSValueConst, int, JSValueConst*);
+JSValue jsCtxOverrideStatus(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxTriggerAfterScript(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxTriggerAfterPosition(JSContext*, JSValueConst, int, JSValueConst*);
 JSValue jsCtxTriggerAfterDelay(JSContext*, JSValueConst, int, JSValueConst*);
@@ -2207,6 +2211,17 @@ bool buildRunCtx(Impl& impl, Value* out) {
         if (ok) ok = setFunction(ctx, read_global.raw(), "get", jsCtxReadGlobalGet, 2, nullptr);
         if (ok) ok = qjs::setProperty(ctx, read.raw(), "global", std::move(read_global));
         if (ok) ok = qjs::setProperty(ctx, obj.raw(), "read", std::move(read));
+        if (!ok) qjs::clearException(ctx);
+    }
+    // ---- override = { atInstr, clear, status }（脚本指令位置钩子；**只 RunCtx**）----
+    //   语义：在标记位置覆盖一次读到的值，指令后恢复（净变化 0）。实现 = `runtime/instr_hook.cpp`。
+    if (ok) {
+        Value ov = qjs::newObject(ctx);
+        ok = !ov.isException();
+        if (ok) ok = setFunction(ctx, ov.raw(), "atInstr", jsCtxOverrideAtInstr, 3, nullptr);
+        if (ok) ok = setFunction(ctx, ov.raw(), "clear", jsCtxOverrideClear, 0, nullptr);
+        if (ok) ok = setFunction(ctx, ov.raw(), "status", jsCtxOverrideStatus, 0, nullptr);
+        if (ok) ok = qjs::setProperty(ctx, obj.raw(), "override", std::move(ov));
         if (!ok) qjs::clearException(ctx);
     }
     // ---- appdata = { available, path, stat }（同步只读宿主 I/O；**只 RunCtx**）----
@@ -2899,8 +2914,244 @@ JSValue jsCtxEditGlobalSet(JSContext* ctx, JSValueConst /*this_val*/, int argc, 
     }
 }
 
-Value makeInputReceipt(JSContext* ctx, const lift::plugin::Receipt& receipt) {
-    return makeReceiptObject(ctx, receipt.accepted, receipt.accepted, false, receipt.code, receipt.seq,
+// =====================================================================================
+// `ctx.override` —— 脚本指令位置钩子（语言无关实现 = `runtime/instr_hook.cpp`）
+//
+// 语义：`atInstr(script, pos, spec)` 在某条脚本指令**执行前**覆盖它读到的一个 dword，
+//   指令执行完（下一条脚本指令派发前）逐字节恢复 ⇒ **净变化 0**（⛔ 不进存档）。
+//   这是"到标记位置改一下再继续"的唯一入口；持久写仍走 `ctx.edit.global.set`。
+//
+//   spec = {
+//     ptrLocal?: number,      // `local-ptr N` 指向的 dword（H4 用例：DRAWOBJ 0x3A0 的 ptr 2）
+//     localInt?: number,      // `local-int N`
+//     globalId?: number,      // 全局池 id（与 ctx.edit 同一个 id 空间）
+//     value?: number,         // 三个目标之一 + value ⇒ 覆盖；只给采样键 ⇒ 只采样
+//     patch?: boolean,        // 缺省 = "给了目标+value" ⇒ true；false = 只采样
+//     maxHits?: number,       // 只在前 N 次命中写（0/缺省 = 不限）
+//     captureInts?: number[], // 采样的 int local 下标（最近一次命中，`status()` 可读）
+//     capturePtrs?: number[], // 采样的 ptr local 下标（值 + 它指向的 dword）
+//   }
+//   ⛔ 只 RunCtx：`render` 里没有这个成员（render 不做 guest 写）。
+// =====================================================================================
+bool readIndexArray(JSContext* ctx, JSValueConst obj, const char* name, std::vector<std::uint32_t>* out,
+                    std::string* why) {
+    Value v = qjs::getProperty(ctx, obj, name);
+    if (v.isException()) {
+        qjs::clearException(ctx);
+        *why = std::string(name) + " 读取失败";
+        return false;
+    }
+    if (v.isUndefined()) return true;
+    if (!JS_IsArray(v.raw())) {
+        *why = std::string(name) + " 必须是数组";
+        return false;
+    }
+    Value len_v = qjs::getProperty(ctx, v.raw(), "length");
+    if (len_v.isException()) {
+        qjs::clearException(ctx);
+        *why = std::string(name) + ".length 读取失败";
+        return false;
+    }
+    std::uint32_t len = 0;
+    if (!qjs::toUint32(ctx, len_v.raw(), &len)) {
+        qjs::clearException(ctx);
+        *why = std::string(name) + ".length 必须是数字";
+        return false;
+    }
+    if (len > 8) {
+        *why = std::string(name) + " 最多 8 项";
+        return false;
+    }
+    for (std::uint32_t i = 0; i < len; i += 1) {
+        Value item = Value(ctx, JS_GetPropertyUint32(ctx, v.raw(), i));
+        if (item.isException()) {
+            qjs::clearException(ctx);
+            *why = std::string(name) + "[" + std::to_string(i) + "] 读取失败";
+            return false;
+        }
+        std::uint32_t n = 0;
+        if (!qjs::toUint32(ctx, item.raw(), &n)) {
+            qjs::clearException(ctx);
+            *why = std::string(name) + "[" + std::to_string(i) + "] 必须是非负整数";
+            return false;
+        }
+        out->push_back(n);
+    }
+    return true;
+}
+
+JSValue jsCtxOverrideAtInstr(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr) {
+            return JS_ThrowTypeError(ctx, "ctx.override.atInstr: 宿主没有接插件面（⛔ 不静默 no-op）");
+        }
+        if (argc < 3) return JS_ThrowTypeError(ctx, "ctx.override.atInstr(script, pos, spec)");
+        const char* script = JS_ToCString(ctx, argv[0]);
+        if (script == nullptr) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.override.atInstr: script 必须是字符串（如 \"DRAWOBJ.BIN\"）");
+        }
+        lift::InstrHookSpec spec;
+        spec.script.assign(script);
+        JS_FreeCString(ctx, script);
+
+        double pos_d = 0.0;
+        if (!qjs::toDouble(ctx, argv[1], &pos_d) || !std::isfinite(pos_d) || pos_d < 1.0 ||
+            pos_d > 4294967295.0) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.override.atInstr: pos 必须是正数（label 坐标）");
+        }
+        spec.pos = static_cast<std::uint32_t>(pos_d);
+
+        std::int32_t ptr_local = -1;
+        std::int32_t local_int = -1;
+        std::int32_t global_id = -1;
+        std::int32_t value = 0;
+        std::int32_t max_hits = 0;
+        std::string why;
+        if (!readInt32(ctx, argv[2], "ptrLocal", false, -1, &ptr_local, &why)) {
+            return JS_ThrowTypeError(ctx, "ctx.override.atInstr: %s", why.c_str());
+        }
+        if (!readInt32(ctx, argv[2], "localInt", false, -1, &local_int, &why)) {
+            return JS_ThrowTypeError(ctx, "ctx.override.atInstr: %s", why.c_str());
+        }
+        if (!readInt32(ctx, argv[2], "globalId", false, -1, &global_id, &why)) {
+            return JS_ThrowTypeError(ctx, "ctx.override.atInstr: %s", why.c_str());
+        }
+        if (!readInt32(ctx, argv[2], "maxHits", false, 0, &max_hits, &why)) {
+            return JS_ThrowTypeError(ctx, "ctx.override.atInstr: %s", why.c_str());
+        }
+        int targets = 0;
+        if (ptr_local >= 0) targets += 1;
+        if (local_int >= 0) targets += 1;
+        if (global_id >= 0) targets += 1;
+        if (targets > 1) {
+            return JS_ThrowTypeError(ctx, "ctx.override.atInstr: ptrLocal / localInt / globalId 只能给一个");
+        }
+        spec.patch = targets == 1;
+        if (spec.patch) {
+            if (ptr_local >= 0) {
+                spec.kind = lift::InstrPatchKind::PtrDword;
+                spec.index = static_cast<std::uint32_t>(ptr_local);
+            } else if (local_int >= 0) {
+                spec.kind = lift::InstrPatchKind::LocalInt;
+                spec.index = static_cast<std::uint32_t>(local_int);
+            } else {
+                spec.kind = lift::InstrPatchKind::GlobalInt;
+                spec.index = static_cast<std::uint32_t>(global_id);
+            }
+            if (!readInt32(ctx, argv[2], "value", true, 0, &value, &why)) {
+                return JS_ThrowTypeError(ctx, "ctx.override.atInstr: %s", why.c_str());
+            }
+            spec.value = static_cast<std::uint32_t>(value);
+        } else {
+            Value patch_v = qjs::getProperty(ctx, argv[2], "patch");
+            if (!patch_v.isUndefined()) {
+                bool patch_flag = false;
+                if (!readBool(ctx, argv[2], "patch", true, &patch_flag, &why)) {
+                    return JS_ThrowTypeError(ctx, "ctx.override.atInstr: %s", why.c_str());
+                }
+                spec.patch = patch_flag;
+            }
+            if (spec.patch) {
+                return JS_ThrowTypeError(
+                    ctx, "ctx.override.atInstr: patch=true 时必须给 ptrLocal / localInt / globalId 之一");
+            }
+        }
+        spec.maxHits = max_hits > 0 ? static_cast<std::uint32_t>(max_hits) : 0u;
+        if (!readIndexArray(ctx, argv[2], "captureInts", &spec.capture_ints, &why)) {
+            return JS_ThrowTypeError(ctx, "ctx.override.atInstr: %s", why.c_str());
+        }
+        if (!readIndexArray(ctx, argv[2], "capturePtrs", &spec.capture_ptrs, &why)) {
+            return JS_ThrowTypeError(ctx, "ctx.override.atInstr: %s", why.c_str());
+        }
+
+        const char* code = nullptr;
+        const bool accepted = host->instrHookInstall(spec, &code);
+        Value out = makeReceiptObject(ctx, accepted, false, accepted, code, 0, 0);
+        if (out.isException()) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.override.atInstr: 回执对象写入失败");
+        }
+        return out.take();
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.override.atInstr: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxOverrideClear(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/, JSValueConst* /*argv*/) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr) {
+            return JS_ThrowTypeError(ctx, "ctx.override.clear: 宿主没有接插件面（⛔ 不静默 no-op）");
+        }
+        host->instrHookClear();
+        return JS_UNDEFINED;
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.override.clear: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+JSValue jsCtxOverrideStatus(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/, JSValueConst* /*argv*/) {
+    try {
+        lift::ui::PluginCallHost* host = callHost(ctx);
+        if (host == nullptr) {
+            return JS_ThrowTypeError(ctx, "ctx.override.status: 宿主没有接插件面（⛔ 不静默 no-op）");
+        }
+        std::vector<lift::InstrHookStatus> rows = host->instrHookStatus();
+        Value arr = newArray(ctx);
+        if (arr.isException()) {
+            qjs::clearException(ctx);
+            return JS_ThrowTypeError(ctx, "ctx.override.status: 数组对象创建失败");
+        }
+        for (std::size_t i = 0; i < rows.size(); i += 1) {
+            const lift::InstrHookStatus& r = rows[i];
+            Value row = qjs::newObject(ctx);
+            bool ok = !row.isException();
+            if (ok) ok = defineReadOnly(ctx, row.raw(), "script", qjs::newString(ctx, r.script));
+            if (ok) ok = defineReadOnly(ctx, row.raw(), "pos", qjs::newInt32(ctx, static_cast<std::int32_t>(r.pos)));
+            if (ok) ok = defineReadOnly(ctx, row.raw(), "patch", qjs::newBool(ctx, r.patch));
+            if (ok) ok = defineReadOnly(ctx, row.raw(), "hits", qjs::newInt64(ctx, static_cast<std::int64_t>(r.hits)));
+            if (ok) ok = defineReadOnly(ctx, row.raw(), "restores",
+                                        qjs::newInt64(ctx, static_cast<std::int64_t>(r.restores)));
+            if (ok) ok = defineReadOnly(ctx, row.raw(), "skips", qjs::newInt64(ctx, static_cast<std::int64_t>(r.skips)));
+            if (ok) {
+                Value ints = newArray(ctx);
+                ok = !ints.isException();
+                for (std::size_t k = 0; ok && k < r.last_ints.size(); k += 1) {
+                    ok = JS_SetPropertyUint32(ctx, ints.raw(), static_cast<std::uint32_t>(k),
+                                              qjs::newInt32(ctx, static_cast<std::int32_t>(r.last_ints[k]))
+                                                  .take()) >= 0;
+                }
+                if (ok) ok = defineReadOnly(ctx, row.raw(), "ints", std::move(ints));
+            }
+            if (ok) {
+                Value ptrs = newArray(ctx);
+                ok = !ptrs.isException();
+                for (std::size_t k = 0; ok && k < r.last_ptr_targets.size(); k += 1) {
+                    ok = JS_SetPropertyUint32(ctx, ptrs.raw(), static_cast<std::uint32_t>(k),
+                                              qjs::newInt32(ctx, static_cast<std::int32_t>(r.last_ptr_targets[k]))
+                                                  .take()) >= 0;
+                }
+                if (ok) ok = defineReadOnly(ctx, row.raw(), "ptrTargets", std::move(ptrs));
+            }
+            if (!ok) {
+                qjs::clearException(ctx);
+                return JS_ThrowTypeError(ctx, "ctx.override.status: 行对象写入失败");
+            }
+            if (JS_SetPropertyUint32(ctx, arr.raw(), static_cast<std::uint32_t>(i), row.take()) < 0) {
+                qjs::clearException(ctx);
+                return JS_ThrowTypeError(ctx, "ctx.override.status: 数组写入失败");
+            }
+        }
+        return arr.take();
+    } catch (...) {
+        return JS_ThrowTypeError(ctx, "ctx.override.status: 宿主异常（C++ exception at script boundary）");
+    }
+}
+
+Value makeInputReceipt(JSContext* ctx, const lift::plugin::Receipt& receipt) {    return makeReceiptObject(ctx, receipt.accepted, receipt.accepted, false, receipt.code, receipt.seq,
                              receipt.id);
 }
 

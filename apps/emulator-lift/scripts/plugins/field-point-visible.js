@@ -64,6 +64,8 @@
 //   只有出错才 `fail`。`--time-limit` 到期属于正常结局（宿主 exit 0）。
 // ★ **不改"这点位发现过没有"的真值**：只写 `50ff9f`（派生表）；持久输入（`50ffd1` 类型 / `13d7` /
 //   `3e2a0` / `14d8cc` / `eb5c1` / `25c00`）一个都不写，而且**一个都不读**（2026-11-26 起不再有静态门）。
+//   ★ 例外（2026-11-26 晚）：静态门的第二条腿用 **`ctx.override.atInstr`** 在 `DRAWOBJ` 的 `eq`（pos `0x03A0`）
+//     执行前把 `local-ptr 2` 指向的 dword 临时改成 1、执行完恢复 ⇒ 那是**瞬时覆盖**，`eb5c1` 的持久值净变化 0。
 //   `on=0` ⇒ 一个 guest global 都不读、一个都不写（日志明写 `on=0`）。
 //
 // ★ **设置面（D1/D3）**：`start` 里 `registerSettings` 把 `on` / `diag` 写进保留域 `settings.schema`
@@ -91,11 +93,16 @@
 //   `SETMAPTEX.BIN` instr#78/#80 把 ALF 20797 / 20798 绑到 `0x119` / `0x11A`。
 
 import {
+    FIELD_CELL_BITS_GLOBAL_ID,
     FIELD_CURRENT_MAP_GLOBAL_ID,
+    FIELD_DYN_TEXTURE_SLOT_GLOBAL_ID,
     FIELD_MAP_INSTANCE_GLOBAL_ID,
     FIELD_OBJECT_FLAGS_GLOBAL_ID,
+    FIELD_POINT_COL_GLOBAL_ID,
+    FIELD_POINT_ROW_GLOBAL_ID,
     FIELD_POINT_TYPE_DIG,
     FIELD_POINT_TYPE_GATHER,
+    FIELD_TYPE_CLASS_GLOBAL_ID,
     forceFieldPointsVisible,
     hex,
     readIntGlobal,
@@ -109,6 +116,7 @@ import {
 import {
     DRAWOBJ_ENTRY_HI,
     DRAWOBJ_ENTRY_LO,
+    DRAWOBJ_GATE_EQ,
 } from "./lib/script-positions.js";
 
 /** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
@@ -239,6 +247,40 @@ let drawAnnounced = false;
 let drawFrames = 0;
 /** 上一次 `fp:draw` 的 `matched/patched`（状态变化才打一行；`""` = 还没打过）。 */
 let lastDrawState = "";
+/** 静态门覆盖是否已装（`on` 变化时切换；`ctx.override` 的装载是幂等的：同 (script,pos) 只有一条）。 */
+let gateOverride = false;
+
+/**
+ * 装 / 撤 **静态门覆盖**（`ctx.override.atInstr`）：
+ *
+ * `DRAWOBJ` 的静态门第二条腿是 `eq (local-int c) (local-ptr 2) 1`（pos `0x03A0`）—— 它读的 dword 是
+ * `eb5c1[map*50 + slot]`（"这个点位触发过"）。未触发的点位读到 0 ⇒ 静态门不过 ⇒ 走动效分支，
+ * 而 `flags` 的 bit2=0 又把动效 alpha 清零 ⇒ **画面里什么都看不到**。
+ *
+ * 本覆盖在**那一条指令执行前**把 `local-ptr 2` 指向的 dword 临时改成 1、执行完立刻恢复
+ * ⇒ 静态门通过（画出 `0xFA+type` 的静态纹理），而 `eb5c1` 的持久值**净变化 0**。
+ * ⛔ 不用 `ctx.edit.global.set` 写 `eb5c1`：那是**改存档真值**（用户裁决 2026-11-26）。
+ *
+ * @param {RunCtx} ctx RunCtx。
+ * @param {boolean} on 开关状态。
+ * @returns {void}
+ */
+function applyGateOverride(ctx, on) {
+    if (on === gateOverride) return;
+    if (on) {
+        const receipt = ctx.override.atInstr(DRAWOBJ_SCRIPT, DRAWOBJ_GATE_EQ, { ptrLocal: 2, value: 1 });
+        gateOverride = receipt !== null && typeof receipt === "object" ? receipt.applied !== false : false;
+        ctx.log(
+            "info",
+            `field-points: 静态门覆盖 ${gateOverride ? "已装" : "安装失败"} ` +
+                `(${DRAWOBJ_SCRIPT} pos=0x${DRAWOBJ_GATE_EQ.toString(16)} ptrLocal=2 value=1)`,
+        );
+        return;
+    }
+    ctx.override.clear();
+    gateOverride = false;
+    ctx.log("info", "field-points: 静态门覆盖已撤（ctx.override.clear）");
+}
 
 /**
  * **每次进 `DRAWOBJ` 时的施加**（`fp:draw`）：对类型命中的槽补 `50ff9f` 的 **bit0**。
@@ -312,15 +354,15 @@ function applyAtDraw(ctx, settings) {
         //   里留了什么"。`flags` = **写之前**读到的值（`after` 恒等于 `flags|1`，没有额外信息）；
         //   `applied=1` 才表示本插件真的写了这一槽（`0` = bit0 本来就在 / 写回执失败）。
         for (const c of changed) {
-            const stage = readIntGlobal(ctx, 0xb222) >>> 0;
-            const row = readIntGlobal(ctx, 0x14d76e + c.slot) >>> 0;
-            const col = readIntGlobal(ctx, 0x14d73c + c.slot) >>> 0;
-            const cellA = (0x25c00 + stage * 64 + row) >>> 0;
-            const cellB = (0x25c00 + stage * 64 + row * 4) >>> 0;
+            const stage = readIntGlobal(ctx, FIELD_CURRENT_MAP_GLOBAL_ID) >>> 0;
+            const row = readIntGlobal(ctx, FIELD_POINT_ROW_GLOBAL_ID + c.slot) >>> 0;
+            const col = readIntGlobal(ctx, FIELD_POINT_COL_GLOBAL_ID + c.slot) >>> 0;
+            const cellA = (FIELD_CELL_BITS_GLOBAL_ID + stage * 100 + row) >>> 0;
+            const cellB = (FIELD_CELL_BITS_GLOBAL_ID + stage * 100 + row * 4) >>> 0;
             const wA = readIntGlobal(ctx, cellA & ~3) >>> 0;
             const wB = readIntGlobal(ctx, cellB & ~3) >>> 0;
-            const dynSlot = readIntGlobal(ctx, 0x510439 + c.type * 4) >>> 0;
-            const cls = readIntGlobal(ctx, 0x511080 + c.type * 4) >>> 0;
+            const dynSlot = readIntGlobal(ctx, FIELD_DYN_TEXTURE_SLOT_GLOBAL_ID + c.type) >>> 0;
+            const cls = readIntGlobal(ctx, FIELD_TYPE_CLASS_GLOBAL_ID + c.type) >>> 0;
             ctx.log(
                 "info",
                 `field-points: diag draw frame=${drawFrames} slot=${c.slot} type=${hex(c.type)} ` +
@@ -351,6 +393,9 @@ const plugin = {
         drawAnnounced = false;
         drawFrames = 0;
         lastDrawState = "";
+        gateOverride = false;
+        // ★ 装静态门覆盖（`on=0` ⇒ 不装：一个 hook 都不进宿主表）。
+        applyGateOverride(ctx, settings.on);
         // ★ 首行日志：明写开关状态（守卫按 `on=0` 判"关着的时候什么也不做"）。
         ctx.log(
             "info",
@@ -384,6 +429,8 @@ const plugin = {
         }
         // ★ 每次 fire 重读 on / diag（D3：设置页 set 之后下一次位置触发就生效）。
         const settings = settingsFor(ctx);
+        // 静态门覆盖随 `on` 切换（`on=0` ⇒ 撤掉，宿主表里不留 hook）。
+        applyGateOverride(ctx, settings.on);
         // `on=0` ⇒ 一个 guest global 都不读（只有 start 那一行日志）。`fp:draw` 每帧仍 fire，
         //   但这一支不进来 ⇒ 仍然 0 读。
         if (settings.on) applyAtDraw(ctx, settings);

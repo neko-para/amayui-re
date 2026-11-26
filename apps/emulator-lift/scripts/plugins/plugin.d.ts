@@ -517,6 +517,13 @@ export interface RunCtx<State = Record<string, unknown>> {
     readonly input: InputApi;
     readonly read: ReadApi;
     readonly trigger: TriggerApi;
+    /**
+     * **脚本指令位置钩子**：在某条脚本指令**执行前**覆盖它读到的一个 dword，指令执行完
+     * （下一条脚本指令派发前）逐字节恢复 ⇒ **净变化 0**（⛔ 不进存档）。
+     * 这是"到标记位置改一下再继续"的唯一入口；持久写仍走 `ctx.edit.global.set`。
+     * ★ 只 `RunCtx` 有（`RenderCtx` 没有：render 不做 guest 写）。
+     */
+    readonly override: OverrideApi;
     readonly ui: UiApi;
     /** ⚠ **C5**（C2a 里是 `undefined`）。Run 的 status/abort/events/dispatch。 */
     readonly run: RunApi;
@@ -543,6 +550,47 @@ export interface RunCtx<State = Record<string, unknown>> {
     /** 请求宿主停机（WM_QUIT + stop_requested）；Run 收口/releaseOwner。
      *  ★ 终态异常（同 `fail`）：本回调已提交的 input 会被立刻丢弃。 */
     quit(reason?: string): void;
+}
+/** `ctx.override.atInstr(script, pos, spec)` 的 spec。
+ *  ★ 目标三选一（`ptrLocal` / `localInt` / `globalId`）+ `value` ⇒ 覆盖；只给采样键 ⇒ 只采样。
+ *  ★ 覆盖的是**这一次读**：写在该指令执行前、下一条脚本指令派发前恢复 ⇒ 持久数据净变化 0。 */
+export interface InstrHookSpec {
+    /** `local-ptr N` 指向的 dword（`DRAWOBJ 0x03A0` 的 `eq` 读的就是它：N = 2）。 */
+    ptrLocal?: number;
+    /** `local-int N`。 */
+    localInt?: number;
+    /** 全局池 id（与 `ctx.edit.global.set(kind, id, …)` 同一个 id 空间）。 */
+    globalId?: number;
+    /** 覆盖值（语义值；宿主按引擎 key 做 ENC）。`patch` 生效时必填。 */
+    value?: number;
+    /** false = 只采样不写（缺省由"有没有给目标+value"决定）。 */
+    patch?: boolean;
+    /** 只在前 N 次命中写（0/缺省 = 不限）。采样一直记"最近一次"。 */
+    maxHits?: number;
+    /** 采样的 int local 下标（最多 8 个；`status()[i].ints` 可读）。 */
+    captureInts?: number[];
+    /** 采样的 ptr local 下标（最多 8 个；`status()[i].ptrTargets` = 它指向的 dword）。 */
+    capturePtrs?: number[];
+}
+/** `ctx.override.status()` 的一行（安装顺序）。 */
+export interface InstrHookStatus {
+    readonly script: string;
+    readonly pos: number;
+    readonly patch: boolean;
+    readonly hits: number;
+    readonly restores: number;
+    readonly skips: number;
+    readonly ints: number[];
+    readonly ptrTargets: number[];
+}
+export interface OverrideApi {
+    /** 装一条 hook（同一 `(script,pos)` 只能一条；`pos` = `label_%08x` 坐标）。
+     *  失败 ⇒ `{accepted:false, applied:false, code}`（`script_empty` / `pos_zero` / `duplicate`）。 */
+    atInstr(script: string, pos: number, spec: InstrHookSpec): Receipt;
+    /** 撤掉全部 hook（并把未还原的那次覆盖写回）。Run 收口 / `quit` 也会自动做。 */
+    clear(): void;
+    /** 每条 hook 的命中 / 恢复 / 采样读数。 */
+    status(): InstrHookStatus[];
 }
 export interface PluginModule<State = Record<string, unknown>> {
     /** 宿主在 start 之前初始化 ctx.state；省略 ⇒ {} as State。

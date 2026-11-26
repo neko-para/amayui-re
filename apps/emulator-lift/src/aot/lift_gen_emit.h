@@ -247,7 +247,10 @@ struct GenEmitStats {
     //   一个 `jcc` 可能给两个臂各发一个尾巴块 ⇒ 这个数按**臂**计，⛔ 不是按 jcc 计。
     std::uint64_t s7_jcc_tail = 0;
     std::uint64_t s7_tail_calls = 0;      // 所有**真** `tail call` 站点（jmp 尾调用 + 间接 jmp 的 lift_dyn）
+    // ★ 脚本派发点注入的宿主钩子（`aot_hook_ea.h` 的 3 个 EA）：本数按**站点**计（应为 3）。
+    std::uint64_t s7_instr_hook_sites = 0;
     bool used_lift_dyn = false;
+    bool used_instr_hook = false;
 };
 
 // =====================================================================================

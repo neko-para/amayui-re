@@ -39,6 +39,7 @@ scripts/plugins/
 - 插件文件 = ES module：`export default { render?, start?, onTrigger?, initialState? } satisfies PluginModule<State>`。
 - 宿主 QJS 装载后只读 **default 导出**；不再读 `globalThis.render/start/onTrigger`，也没有运行时 `definePlugin`。
 - `sample` / `screenshot` 不在插件 API 里（它们是 `emu-ctl` 的控制面组合）；插件读 `scriptPos` 用 `ctx.read.scriptPos`。
+- **`ctx.override.atInstr(script, pos, spec)`**（只 `RunCtx`）：在**某条脚本指令执行前**覆盖它读到的一个 dword，**下一条脚本指令派发前恢复** ⇒ 净变化 0（⛔ 不是持久写；持久写是 `ctx.edit.global.set`）。`spec` 三选一目标（`ptrLocal` / `localInt` / `globalId`）+ `value`；`captureInts` / `capturePtrs` 采样本帧 local（`status()` 读）。合同见 `docs/03-emulator/plugin-runtime.md` §4.5。
 
 ## 内建插件的配置域
 

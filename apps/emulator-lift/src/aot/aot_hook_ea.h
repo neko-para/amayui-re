@@ -31,5 +31,25 @@ constexpr std::uint32_t kRecoveryCheckEa = 0x004BA718u;
 // 生成器 / 执行臂共用的检查点集合（升序；⛔ 不要只改一处）。
 constexpr std::uint32_t kHostHookEas[] = {kRecoveryCheckEa, kSkipLogoHookEa};
 
+// =========================================================================================
+// ★ 脚本 VM 的 **3 个派发点**（`call eax` / `call edx`）—— 每条脚本指令都经过其中一个。
+//   出处：`runtime/engine_marker.h` 的头注（派发表 `[esi+eax*4+0A509Ch]` 的 3 个消费点）。
+//
+//   生成器在这 3 个站点**注入** `call void @lift_instr_hook(ptr %cpu)`：
+//   · 这是"在特定脚本指令执行前拿到控制权"的**唯一**入口（诊断 / 将来的位置钩子）；
+//   · ⛔ **不要**改成在 `lift_dyn` 里用 `[esp]` 回溯返回地址来判定 —— 那是 hack：
+//     每次间接跳转（≈54.8k/帧）都要读一次栈 + 比 3 个常量，而且"我是谁"靠猜。
+//     注入之后只有脚本派发（每条脚本指令一次）付这一次直接调用。
+//   · 3 个 EA 是 `call` 本身（不是它的下一条）：AOT 在 `emitCall` 里按 `in.ea` 命中。
+// =========================================================================================
+constexpr std::uint32_t kScriptDispatchEas[] = {0x00411A6Fu, 0x0041284Au, 0x0041346Bu};
+
+constexpr bool isScriptDispatchEa(std::uint32_t ea) {
+    for (const std::uint32_t e : kScriptDispatchEas) {
+        if (e == ea) return true;
+    }
+    return false;
+}
+
 }  // namespace aot
 }  // namespace lift

@@ -402,8 +402,29 @@ bool PluginHost::editGlobalSet(lift::GlobalKind kind, std::uint32_t id, const li
     return receipt.accepted;
 }
 
-Receipt PluginHost::submitIntent(IntentKind kind, int x, int y, MouseButton button) {
-    Receipt receipt;
+bool PluginHost::instrHookInstall(const lift::InstrHookSpec& spec, const char** err) {
+    const char* why = nullptr;
+    const bool ok = lift::instrHookInstall(spec, &why);
+    if (err != nullptr) *err = why;
+    if (!ok) {
+        // 与 `editGlobalSet` 同一档：失败 = receipt + 一行（⛔ 不 exit 5、⛔ 不静默）。
+        log("error", std::string("ctx.override.atInstr 失败：") + (why != nullptr ? why : "unknown"));
+        return false;
+    }
+    char pos_hex[16];
+    std::snprintf(pos_hex, sizeof(pos_hex), "0x%X", spec.pos);
+    log("info", std::string("ctx.override.atInstr script=") + spec.script + " pos=" + pos_hex +
+                   " kind=" + lift::instrPatchKindName(spec.kind) + " index=" +
+                   std::to_string(spec.index) + " value=" + std::to_string(spec.value) +
+                   (spec.patch ? "" : " (capture only)"));
+    return true;
+}
+
+void PluginHost::instrHookClear() { lift::instrHookClear(); }
+
+std::vector<lift::InstrHookStatus> PluginHost::instrHookStatus() const { return lift::instrHookStatus(); }
+
+Receipt PluginHost::submitIntent(IntentKind kind, int x, int y, MouseButton button) {    Receipt receipt;
     if (ctx_ == nullptr || ctx_->input == nullptr) {
         receipt.code = "not_wired";
         return receipt;
@@ -562,12 +583,15 @@ void PluginHost::finish(int exit_code, const std::string& reason) {
     finished_ = true;
     finish_code_ = exit_code;
     finish_reason_ = reason;
+    // ★ Run 收口 ⇒ 撤掉脚本指令位置钩子（并把未还原的那次覆盖写回：净变化 0）。
+    lift::instrHookClear();
 }
 
 void PluginHost::quit(const std::string& reason) {
     // D-C2-9：`stop_requested` + detail `plugin: quit`（`aot_run.cpp` 的归因位 = `stop_detail`）。
     quit_requested_ = true;
     if (!reason.empty()) quit_reason_ = reason;
+    lift::instrHookClear();
     report("quit", quit_reason_.empty() ? std::string("(no reason)") : quit_reason_);
 }
 

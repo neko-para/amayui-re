@@ -100,6 +100,9 @@ add_library(emulator-lift-runtime STATIC
     #   `engine_marker.cpp` = 脚本身份（marker）采样器：`TriggerKind::Marker` 的**唯一**取数口
     #   （VM 循环头 `0x4123F0` / 消息泵回来的块入口 `0x4123E5`；常量与 EA 锚在头文件）。
     src/runtime/engine_marker.cpp
+    #   `instr_hook.cpp` = **脚本指令位置钩子**（插件面能力：在标记位置覆盖一次读到的值，指令后恢复；
+    #   入口 = AOT 在 3 个派发点注入的 `lift_instr_hook`；缺省零成本）。
+    src/runtime/instr_hook.cpp
     src/runtime/pe_resource.cpp
     src/runtime/surface.cpp
     # ★ 画面特征采样（交互模型的 `screen` 源）：采样点 = Present。

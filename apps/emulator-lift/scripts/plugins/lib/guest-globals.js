@@ -172,6 +172,25 @@ export const FIELD_CURRENT_MAP_GLOBAL_ID = 0xb222;
 export const FIELD_MAP_INSTANCE_GLOBAL_ID = 0x61c72;
 
 /**
+ * 逐槽**行号 / 列号**（int global；`DRAWOBJ` #21/#23 把它们读进 `local 4/5`，
+ * 再拿 `25c00[图像素行][行]` 的第 `列` 位做"这一格有地块要素"的门）。
+ */
+export const FIELD_POINT_ROW_GLOBAL_ID = 0x14d76e;
+export const FIELD_POINT_COL_GLOBAL_ID = 0x14d73c;
+
+/**
+ * 每图一块的**格位图**（int global；行宽字面量 = 视图里的 `64` = **0x64 = 100** dword）。
+ * ★ 视图里的立即数一律是**十六进制** —— 按十进制读会整块错位（2026-11-26 的教训）。
+ */
+export const FIELD_CELL_BITS_GLOBAL_ID = 0x25c00;
+
+/** `510439[type]` = 该类型**动效**纹理槽（`0x68`/`0x69`；静态是 `0xFA+type`）。 */
+export const FIELD_DYN_TEXTURE_SLOT_GLOBAL_ID = 0x510439;
+
+/** `511080[type]` = 该类型的**类别**（静态门第一腿要 `== 3`）。 */
+export const FIELD_TYPE_CLASS_GLOBAL_ID = 0x511080;
+
+/**
  * 读一格 int global。读失败在 API 里没有错误通道 ⇒ 宿主抛 TypeError（⛔ 本文件不吞）。
  *
  * @param {RunCtx} ctx RunCtx（需要 `ctx.read.global.get`）。

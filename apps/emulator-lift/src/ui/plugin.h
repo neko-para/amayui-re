@@ -36,6 +36,7 @@
 #include "runtime/budget.h"          // Budget（每次回调的墙钟 + op 上限；只有一个真源）
 #include "runtime/appdata.h"         // AppDataStat（ctx.appdata.stat 的结果对象；语言无关）
 #include "runtime/config.h"          // ConfigValue / ConfigReceipt（ctx.config 的值与回执；语言无关）
+#include "runtime/instr_hook.h"      // InstrHookSpec / InstrHookStatus（ctx.override 的语言无关值）
 #include "runtime/input_device.h"    // MouseButton
 #include "runtime/input_point.h"     // InputPoint
 #include "runtime/script_globals.h"  // GlobalKind / GlobalValue（EngineRead / EditSink 的词汇）
@@ -130,6 +131,15 @@ public:
     // ---- EngineRead（同步只读 / 无暂停）----
     virtual bool readGlobal(lift::GlobalKind kind, std::uint32_t id, lift::GlobalValue* out,
                             const char** code) = 0;
+
+    // ---- 脚本指令位置钩子（`ctx.override`；**只 RunCtx**）----
+    // ★ 语义：在某条脚本指令**执行前**覆盖它读到的一个 dword，指令执行完（下一条脚本指令派发前）
+    //   逐字节恢复 ⇒ **净变化 0**（不进存档）。这是"到标记位置改一下再继续"的唯一入口；
+    //   ⛔ 不是"改数据"（`ctx.edit.global.set` 才是持久写）。
+    // ★ 实现 = `runtime/instr_hook.h`（唯一一份）；本接口只是语言无关的那层。
+    virtual bool instrHookInstall(const lift::InstrHookSpec& spec, const char** err) = 0;
+    virtual void instrHookClear() = 0;
+    virtual std::vector<lift::InstrHookStatus> instrHookStatus() const = 0;
 
     // ---- AppData（同步只读宿主 I/O；**只 RunCtx**）----
     // ★ 没有 `appDataWired()`：`ctx.appdata` 在 RunCtx 里**恒在**（普通对象），没接根时

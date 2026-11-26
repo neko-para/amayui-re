@@ -62,6 +62,7 @@
 //   ★ 计数（D2）：`lift_tick(cpu, n)` 在**块边界**发一次静态条数、在**任何宿主调用之前**把挂账的
 //   先 flush 掉 ⇒ 观测点看到的 `insns` 精确；`rep` 按 1 条算（与解释器同一口径）。
 #include "aot/lift_gen_emit.h"
+#include "aot/aot_hook_ea.h"  // 脚本 VM 的 3 个派发点（注入 `@lift_instr_hook` 的唯一判据）
 
 #include <algorithm>
 #include <cstdint>
@@ -2028,6 +2029,14 @@ void FnEmit::emitCall(const Insn& in) {
         //   **不在尾位置**；`tail` 标记会让 IR 的"这个调用点没有 caller 帧"读法的前提不成立
         //   （D53 判据 4 与 D4 放宽的论证都建立在这件事上）。旧标记是错的，已撤回。
         //   ⛔ 不要动 `lift_dyn` **内部**的 `return fn(...)`（那才是真尾调用，见 lift_abi.cpp）。
+        // ★ 脚本 VM 的 3 个派发点：在进 `lift_dyn` **之前**注入一次宿主钩子（见 `aot_hook_ea.h`）。
+        //   这是"某条脚本指令执行前拿到控制权"的唯一入口；`lift_instr_hook` 缺省是 no-op
+        //   （一个 latched bool）。⛔ 不要把它挪进 `lift_dyn`：那会让每次间接跳转都付判定成本。
+        if (isScriptDispatchEa(in.ea)) {
+            add("call void @lift_instr_hook(ptr %cpu)");
+            stats_->used_instr_hook = true;
+            ++stats_->s7_instr_hook_sites;
+        }
         const std::string r = tmp();
         add(r + " = call i32 @lift_dyn(ptr %cpu, ptr %st, i32 " + dyn + ")");
         stats_->used_lift_dyn = true;
@@ -6121,6 +6130,8 @@ std::string emitPrologue(const GenClosureStats& closure, const GenEmitStats* sta
     //   guest 内存（"参数里**存的**指针"那一层），与 `lift_one` 同一条理由 —— 一上属性就是
     //   静默数据损坏的许可。
     if (stats->used_lift_dyn) text += "declare i32 @lift_dyn(ptr, ptr, i32)\n";
+    // ★ 脚本派发点的宿主钩子（`aot_hook_ea.h` 的 3 个 EA）：无属性（读写 `cpu->mem` 那一层）。
+    if (stats->used_instr_hook) text += "declare void @lift_instr_hook(ptr)\n";
     // ★ 检查点 2（D49）：x87 的宿主 helper 与它用到的 LLVM 内建。
     //   `@lift_x87_sem(ptr %cpu, i32 <Op>)` 的实现 = 解释器的 `execFpu`（`exec_fpu.cpp`，同一份语义）
     //   ⇒ 语义只有一处；这里只声明。⚠ **不加任何属性**：它读写 `%cpu` 指向的状态（两层指针），
