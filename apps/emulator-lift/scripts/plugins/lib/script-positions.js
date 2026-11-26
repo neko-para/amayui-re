@@ -143,39 +143,29 @@ export const SBUNKI_CONFIRM_ACTION_HI = 0x32e8;
 // ===========================================================================
 // FIELD.BIN（doc: `docs/03-emulator/scripts/FIELD.md`；主轮询体的读数 = `save07-battle.plan` 头的 `--input-plan-trace`，每 100 ms 采样）
 //
-// ★ `FIELD_MAIN_LOOP` = 进图完成、开始等输入（`field-point-visible` **已不再用它**；仍归
+// ★ `FIELD_MAIN_LOOP` = 进图完成、开始等输入（`field-point-visible` **不用它**；仍归
 //   `scenario-save07-battle.js` / `scenario-save10-field.js` 那两个复现入口）。
-// ★ `FIELD_SETMAP_A/B` = setmap 完成、SETOBJ 已算完、FIELD 还没建表 / 画的两个返回点
-//   （`call-script 511a` 的返回点；`field-point-visible` 在这里无条件显示采掘点）。
-//   ⚠ 这两个区间目前只有**静态取证**、没有 run 读数（见 FIELD.md 的 `## 待核` 9）。
+// ★ setmap 的两个返回点（`call-script 511a` = SETOBJ 之后）**不在本表**：它们写在
+//   SETOBJ 之后、但同一渲染帧的 `RENDERMAP` 里 `SETOBJ` 会 `fill-zero 50ff9f` 重算 ⇒
+//   在那里补的位必被抹掉（`field-point-visible` 的钩子因此挂在 `DRAWOBJ` 入口，见 DRAWOBJ 段）。
 // ===========================================================================
 
 // 主轮询体（地图就绪、在等输入）。门 = 读档完成后"地图在跑"（无 3× 独立读数）。
 export const FIELD_MAIN_LOOP_LO = 0x579c;
 export const FIELD_MAIN_LOOP_HI = 0x5860;
 
-// setmap 完成（`label_00018274` 里 `call-script 511a` = SETOBJ 的**返回点** `0x018280`）：进图主路径 ——
-// 此时 SETOBJ 已算完 `50ff9f`、FIELD 还没建 `65f2` / 画。`mode:"reenter"` ⇒ 每次外→内 fire 一次。
-export const FIELD_SETMAP_A_LO = 0x18280;
-export const FIELD_SETMAP_A_HI = 0x18284;
-
-// 同形第二条：`0x035130` 块（`SETROOM` → `SETHALLTEX` → `SETOBJ`）里 `call-script 511a` 之后的
-// `mov (global-int b22a) 1` @`0x035168` = 该块恢复 `b22a` 的那一拍（SETOBJ 已完成、还没开始画）。
-export const FIELD_SETMAP_B_LO = 0x35168;
-export const FIELD_SETMAP_B_HI = 0x3517c;
-
 // ===========================================================================
 // DRAWOBJ.BIN（doc: `docs/03-emulator/scripts/FIELD.md` §④/⑦ · 调用点全表见 `施加点`）
 //
 // ★ `DRAWOBJ` 是**点位精灵的唯一绘脚本**：全语料 4 处 `call-script 5117`（`RENDERMAP` #118、
-//   `FIELD` #2722 / #9688、`RESETMAPAN` #1）都从这里进 ⇒ 静态施加挂在**它的入口**一条就够。
-//   `SETOBJ` 只在 `RENDERMAP` 里跑（#117），所以 `RENDERMAP` 那一趟进 DRAWOBJ 时派生位已是重算值；
-//   其它入口沿用上一次的值 —— 在入口统一施加，两条路都成立。
+//   `FIELD` #2722 / #9688、`RESETMAPAN` #1）都从这里进 ⇒ `field-point-visible` 只挂**它的入口**就够
+//   （补 `50ff9f` 的 bit0）。`SETOBJ` 只在 `RENDERMAP` 里跑（#117）⇒ 那一趟进 DRAWOBJ 时派生位
+//   已是重算值；入口施加 ⇒ 4 条路都成立。
 //   ★ 这是**位置触发**（脚本内位置窗口），不是轮询；`mode:"reenter"` ⇒ 每进一次 DRAWOBJ 一次。
 // ===========================================================================
 
 // **点位精灵绘制脚本的入口**（`DRAWOBJ.BIN` #0 `detach-texture 3aca 32` @`0x003C`）。
-// `field-point-visible` 的 `static` 在这里施加（`fp:draw`）：它是**所有** `call-script 5117` 的唯一入口
+// `field-point-visible` 的 `fp:draw` 在这里补 `50ff9f` 的 bit0：它是**所有** `call-script 5117` 的唯一入口
 // （4 处调用点：`RENDERMAP` #118 @`0x0B04`、`FIELD` #2722 @`0x0F034` / #9688 @`0x0392BC`、
 // `RESETMAPAN` #1 @`0x0050`）⇒ 一条钩子覆盖全部调用者（含逐帧那条 `FIELD` #838 的 DRAWOBJ）。
 // 触发点 = guest 读点（`TriggerRunner` 只在读点 poll）；实测 DRAWOBJ 体内有 `peekMsg` 读点

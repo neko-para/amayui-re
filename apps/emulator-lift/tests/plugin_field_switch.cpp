@@ -5,20 +5,18 @@
 //      · 没有输入写面（`ctx.input`）⇒ 不会点鼠标；
 //      · 没有读档链（`loadSave` / `bootToTitle` / `save.js` / `boot-to-title.js` / `chains.js`）⇒ 不会自己读档；
 //      · 不结束 Run（`ctx.finish` / `ctx.quit`）⇒ 常驻（正常路径永不收口，进程按 `--time-limit` / 关窗结束）；
-//      · 还在用**位置触发**那条链（`afterPosition` + `reenter` + 两个 setmap 区间
-//        `FIELD_SETMAP_A_LO` / `FIELD_SETMAP_B_LO` + `forceFieldPointsVisible` +
-//        `static` 的**点位绘制脚本入口** `DRAWOBJ_ENTRY_LO/HI` / `fp:draw` /
-//        `clearFieldStaticSkip`；
+//      · 还在用**位置触发**那条链（`afterPosition` + `reenter` + 点位绘制脚本入口
+//        `DRAWOBJ.BIN` / `DRAWOBJ_ENTRY_LO` / `DRAWOBJ_ENTRY_HI` / `fp:draw` / `forceFieldPointsVisible`；
 //        ⛔ 没有 `afterDelay` / `poll` / `FIELD_MAIN_LOOP` —— 判据是已知脚本位置，不是轮询）。
-//      红了 ⇒ 这个"开关"又开始驱动输入 / 读档 / 自己收口了，或者 `static` 那条链被悄悄拆掉了。
+//      红了 ⇒ 这个"开关"又开始驱动输入 / 读档 / 自己收口了，或者"补 bit0"那条链被悄悄拆掉了。
 //   ② **端到端常驻**（真子进程 `--present headless --plugin field-point-visible`，**无** `--input-plan` /
 //      `--control-root` —— 它们与 `--plugin` 互斥）：
 //      · 进程按 `--time-limit` 收口：readout `run=waiting`（≠ done / finished / failed）+ 摘要
-//        `stop      : time-limit` + exit 0；`calls>=1`（start）⇒ 插件**常驻**（位置触发只在玩家进
-//        FIELD 的 setmap 时 fire；headless 停在标题 ⇒ 没有第二次回调）；
+//        `stop      : time-limit` + exit 0；`calls>=1`（start）⇒ 插件**常驻**（位置触发只在该位置
+//        的读点上 fire；headless 停在标题 ⇒ 没有第二次回调）；
 //      · stdout+stderr **没有** `boot:` / `load:` / `load-save:` / `[input-script]` / `input-plan:` 行
 //        ⇒ 没有自驱到 TITLE、没有读档、没有输入计划；
-//      · 首行 `field-points:` 日志带 `on=0`（缺省关），且**没有** `forced=` / `setmap`
+//      · 首行 `field-points:` 日志带 `on=0`（缺省关），且**没有** `field-points: draw`
 //        ⇒ "关着的时候什么也不做"是**可读的**（不是靠"没看见"猜）。
 //   ★ 缺执行源 / 安装树 / GPU / 宿主字体 ⇒ `LIFT_SKIP(77)`（与 `plugin-headless` 同一条口径：输入假定在场）。
 //     ★ 静态那一段在 skip **之前**跑完 ⇒ 缺资产不会把"契约"整段跳掉（失败仍会 exit 1，不会被 77 盖住）。
@@ -165,22 +163,15 @@ int main(int argc, char** argv) {
     LIFT_CHECK(code.find("ctx.quit") == std::string::npos);
     // 正向：该写的那条链还在（否则"禁令全过"可以靠一个空文件达成）。
     LIFT_CHECK(code.find("forceFieldPointsVisible") != std::string::npos);
-    // ★ `static`（缺省 1）：**`DRAWOBJ.BIN` 入口**的位置触发 + 静态判据函数 + 设置键，都得在代码里。
-    //   红了 = "进图显示静态"这条链被拆了（用户裁决 2026-11-26）。
-    //   ★ 为什么是 DRAWOBJ 而不是 RENDERMAP 的调用点：4 处 `call-script 5117` 都从 DRAWOBJ 进
-    //     （`.tmp/field-idle/sites.md`），一条钩子覆盖全部调用者。
-    LIFT_CHECK(code.find("clearFieldStaticSkip") != std::string::npos);
+    // ★ 施加面 = **`DRAWOBJ.BIN` 入口**的位置触发（`fp:draw`）：它补 `50ff9f` 的 bit0，
+    //   覆盖全语料 4 处 `call-script 5117`（含逐帧那条）。红了 = "让未发现的点位也画"这条链被拆了。
     LIFT_CHECK(code.find("DRAWOBJ.BIN") != std::string::npos);
     LIFT_CHECK(code.find("DRAWOBJ_ENTRY_LO") != std::string::npos);
     LIFT_CHECK(code.find("DRAWOBJ_ENTRY_HI") != std::string::npos);
     LIFT_CHECK(code.find("\"fp:draw\"") != std::string::npos);
-    LIFT_CHECK(code.find("\"static\"") != std::string::npos);
-    // ★ 判据是 setmap 的**已知脚本位置** ⇒ 三条位置触发（reenter），⛔ 不是轮询。
+    // ★ 判据是**已知脚本位置** ⇒ 位置触发（reenter），⛔ 不是轮询。
     LIFT_CHECK(code.find("afterPosition") != std::string::npos);
     LIFT_CHECK(code.find("reenter") != std::string::npos);
-    LIFT_CHECK(code.find("FIELD_SETMAP_A_LO") != std::string::npos);
-    LIFT_CHECK(code.find("FIELD_SETMAP_B_LO") != std::string::npos);
-    LIFT_CHECK(code.find("FIELD_MAP_INSTANCE_GLOBAL_ID") != std::string::npos);
     LIFT_CHECK(code.find("FIELD_MAIN_LOOP") == std::string::npos);
     LIFT_CHECK(code.find("afterDelay") == std::string::npos);
     LIFT_CHECK(code.find("DEFAULT_POLL_MS") == std::string::npos);
@@ -293,9 +284,7 @@ int main(int argc, char** argv) {
     }
     LIFT_CHECK(!first_line.empty());
     LIFT_CHECK(first_line.find("on=0") != std::string::npos);
-    LIFT_CHECK(r.err.find("forced=") == std::string::npos);          // 关着 ⇒ 一个槽都没写
-    LIFT_CHECK(r.err.find("field-points: setmap") == std::string::npos);  // 没人读档 ⇒ 从没到过 setmap
-    LIFT_CHECK(r.err.find("re-applied") == std::string::npos);
+    LIFT_CHECK(r.err.find("field-points: draw") == std::string::npos);  // 关着 ⇒ 一次都没施加
 
     return lift_test::finish("plugin-field-switch");
 }

@@ -998,19 +998,18 @@ void caseConfigHostPause() {
 // `plugin/field-switch-apply`：`field-point-visible.js` 的**施加面**（纯 QJS + 假 guest 内存）
 //
 // 判据（红了意味着什么）：
-//   ① `on=1` 且位置读数在 **setmap 钩子** `FIELD_SETMAP_A` `[0x18280,0x18284)` 内 ⇒ **外→内边沿 fire**，
-//      类型命中的槽**置 `DRAW|ALPHA`**（`|0x5`）、**其余槽不动**（`0x3→0x7`、类型不命中原样）；
-//   ② 已经施加且**没离开区间** ⇒ 不再 fire（Reenter 不是每读点）⇒ **不再写**（日志行数不涨）；
-//   ③ `static=1`（缺省）且位置读数在 **`DRAWOBJ.BIN` 的入口窗口**
-//      `DRAWOBJ_ENTRY` `[0x003C,0x06BC)` 内（`DRAWOBJ` 是 4 处 `call-script 5117` 的唯一入口）⇒
-//      先 `|=0x5`、再按**引擎自己的静态门**决定 `50ff9f` bit2：门成立 ⇒ **清 bit2**（静态可见、动效 alpha 0）；
-//      门不成立（本用例 = `eb5c1=0`，从没触发过）⇒ **保留 bit2**（今天的动效，点不消失）。
-//      ★ `25c00` 的格位图**只读**：两个 dword 一个字节都不许变；
-//   ④ 模拟"下一渲染帧的 SETOBJ 把派生位重算回 `0x3`"：读到有效"外"、再回到 `[0x0B04,0x0B10)`
-//      ⇒ 重新施加（`fp:draw` 的 Reenter）；**状态没变 ⇒ 不再刷日志**；
-//   ⑤ 两条 setmap 钩子都还在：走**另一条** `FIELD_SETMAP_B` `[0x35168,0x3517C)` ⇒ 重新 `|=0x5`；
-//   ⑥ `on=0` ⇒ 一个 guest global 都不读、都不写（同一套假数据上标志原样），且 Run **常驻**（⛔ 不 finish）；
-//   ⑦ `static=0` ⇒ 回到 2026-11-26 之前：只 `|=0x5`、**不清** bit2、日志明写一行 `static=0`。
+//   ① 唯一钩子 = **`DRAWOBJ.BIN` 的入口窗口** `[0x003C,0x06BC)`（`fp:draw`；全语料 4 处
+//      `call-script 5117` 的唯一入口）⇒ 位置读数落在窗口内、且从"外"进来 ⇒ fire；
+//   ② 施加面 = **只补 `50ff9f[slot]` 的 bit0**（`flags | 1`），且只为**类型命中**的槽：
+//      `0x2→0x3`（补 bit0）· `0x3→0x3`（不写）· `0x5→0x5`（不写：bit2 是引擎的动效位）·
+//      `0x6→0x7`（补 bit0）· `0x7→0x7`（不写）；类型不命中的槽一个字节都不动。
+//      ★ **bit1 / bit2 必须原样**：引擎每渲染帧 `SETOBJ` #2 `fill-zero 50ff9f 32` 后自己重算
+//      （已触发 = 动效、未触发 = 静态）⇒ 插件写它们就是替引擎决定"这个点触发过没有"
+//      （旧实现 `|=0x5` 的错就在这里：未采集的点也放动效）；
+//   ③ 已经 fire 过且**没离开窗口** ⇒ 不再 fire（Reenter 不是每读点）⇒ **不再写**（日志行数不涨）；
+//   ④ 模拟"下一渲染帧的 SETOBJ 把派生位重算回 `0x2`/`0x6`"：读到有效"外"、再回到窗口 ⇒ 重新补位；
+//      `matched/patched` 没变 ⇒ **不再刷日志**；
+//   ⑤ `on=0` ⇒ 一个 guest global 都不读、都不写（同一套假数据上标志原样），且 Run **常驻**（⛔ 不 finish）。
 //   ★ 档位 = **pure**：假 guest 内存 + 注入读数源 + 临时 appdata 里的 `plugin-config.json`；
 //     零安装树 / 零 GPU / 零子进程。
 //   ★ true 值只钉"派生位被改成了什么"：不钉游戏业务（点位真的画出来归 FIELD 复现）。
@@ -1021,29 +1020,14 @@ void caseConfigHostPause() {
 constexpr std::uint32_t kFieldFlagsId = 0x50ff9Fu;
 constexpr std::uint32_t kFieldTypeId = 0x50ffD1u;
 constexpr std::uint32_t kFieldMapId = 0xB222u;        // 当前地图号（只读；日志用）
-constexpr std::uint32_t kFieldInstanceId = 0x61C72u;  // 地图实例下标（进图/换图的判据）
 constexpr std::uint32_t kFieldDrawBit = 0x1u;         // 置位 ⇒ 画（`DRAWOBJ` #7：bit0=0 才跳过）
-constexpr std::uint32_t kFieldAlphaBit = 0x4u;        // 置位 ⇒ 动效可见；=0 ⇒ 动效 alpha 0（静态才画）
-constexpr std::uint32_t kFieldNotUsedBit = 0x2u;      // "还没用完"（静态门 `(flags&6)==2` 的一半）
 constexpr std::uint32_t kFieldTypeGather = 0x1Fu;     // 採集
 constexpr std::uint32_t kFieldTypeDig = 0x20u;        // 発掘
-// 静态判据要读的几张表（`2026-11-26` 的 `static`；数值出处同上，本用例只当**假 guest** 摆数据）。
-constexpr std::uint32_t kFieldColId = 0x14D73Cu;      // 逐槽列（`25c00` 的位号）
-constexpr std::uint32_t kFieldRowId = 0x14D76Eu;      // 逐槽行（`25c00` 的第二维）
-constexpr std::uint32_t kFieldCellBitsId = 0x25C00u;  // 逐图格位图（每图 64 dword，位 = 列）
-constexpr std::uint32_t kFieldCellRowStride = 64u;
-constexpr std::uint32_t kFieldEnableId = 0x14D8CCu;   // 逐槽启用位图（位号 = 层号 `a9bb`）
-constexpr std::uint32_t kFieldEnableBitId = 0xA9BBu;  // 当前层号（`14d8cc` 的位号）
-constexpr std::uint32_t kFieldTriggeredId = 0xEB5C1u; // 逐图逐槽"触发过"（每图 32 dword）
-constexpr std::uint32_t kFieldTriggeredStride = 32u;
-constexpr std::uint32_t kFieldClassId = 0x511080u;    // 逐类型档（採集/発掘 = 3）
-constexpr std::uint32_t kFieldClassAction = 3u;
 
 // 假 guest 的 int 池够不到 `0x50ff9f`（夹具的池 = 0xB1B6 个槽）⇒ 本用例自己提交一块**够大**的池
 // 并把 Engine 的 int 基址/计数指过去（`readGlobal` / `writeGlobal` 每次现读这两个字段 ⇒ 立即生效）。
-// ★ 池要覆盖到 `511080 + 0x20`（静态判据读 `511080[type]`）。
 constexpr std::uint32_t kFieldPoolBase = 0x10000000u;
-constexpr std::uint32_t kFieldPoolCount = 0x520000u;  // > 0x511080 + 0x20
+constexpr std::uint32_t kFieldPoolCount = 0x510000u;  // > 0x50ff9f + 0x20
 
 bool installFieldPool(Fixture& f) {
     if (!f.mem.commitZeroed(kFieldPoolBase, static_cast<std::size_t>(kFieldPoolCount) * 4u,
@@ -1072,41 +1056,28 @@ std::uint32_t readFieldInt(Fixture& f, std::uint32_t id) {
     return v.u32;
 }
 
-// 同一套初始数据：三槽（命中×2 + 类型不命中×1）+ 地图号 + 实例号 + **静态判据要读的四张表**。
-// ★ 两个命中槽的差异是**故意的**：slot1 的 `eb5c1=1`（已触发过）⇒ 静态门成立；
-//   slot2 的 `eb5c1=0`（从没触发过）⇒ 门不成立 ⇒ 必须**保留动效**（点不能消失）。
+// 同一套初始数据：**五种派生位形态**（bit0 / bit1 / bit2 的组合）+ 一个类型不命中的槽。
+// ★ `0x5` 与 `0x3` 取自真机读数（2026-11-26 / 存档 012：slot3 `0x5` = 已触发 ⇒ 动效；
+//   slot4/5/6 `0x3` = 未采集 ⇒ 静态）；`0x2` / `0x6` / `0x7` 是把 bit0 抽掉 / 全置的边界。
 bool seedFieldScene(Fixture& f) {
     if (!seedFieldInt(f, kFieldMapId, 0x11u)) return false;
-    if (!seedFieldInt(f, kFieldInstanceId, 1u)) return false;
     if (!seedFieldInt(f, kFieldTypeId + 1u, kFieldTypeGather)) return false;
     if (!seedFieldInt(f, kFieldTypeId + 2u, kFieldTypeDig)) return false;
-    if (!seedFieldInt(f, kFieldTypeId + 3u, 0x03u)) return false;  // 不命中（⛔ 不是点位类型）
-    // 进图时 SETOBJ 算出来的形态：bit0=画 + bit1=还没用完（`SETOBJ` #34/#86），bit2=0。
-    if (!seedFieldInt(f, kFieldFlagsId + 1u, kFieldDrawBit | kFieldNotUsedBit)) return false;  // 0x3
-    if (!seedFieldInt(f, kFieldFlagsId + 2u, kFieldDrawBit | kFieldNotUsedBit)) return false;  // 0x3
-    if (!seedFieldInt(f, kFieldFlagsId + 3u, kFieldDrawBit | kFieldAlphaBit)) return false;    // 0x5
-    // 静态门的三张输入：逐类型档（=3）、逐槽启用（位号 = 当层 a9bb）、逐图逐槽"触发过"。
-    if (!seedFieldInt(f, kFieldClassId + kFieldTypeGather, kFieldClassAction)) return false;
-    if (!seedFieldInt(f, kFieldClassId + kFieldTypeDig, kFieldClassAction)) return false;
-    if (!seedFieldInt(f, kFieldEnableBitId, 0u)) return false;            // 第 0 层
-    if (!seedFieldInt(f, kFieldEnableId + 1u, 1u)) return false;          // slot1 启用
-    if (!seedFieldInt(f, kFieldEnableId + 2u, 1u)) return false;          // slot2 启用
-    const std::uint32_t map = 0x11u;
-    if (!seedFieldInt(f, kFieldTriggeredId + map * kFieldTriggeredStride + 1u, 1u)) return false;
-    if (!seedFieldInt(f, kFieldTriggeredId + map * kFieldTriggeredStride + 2u, 0u)) return false;
-    // 格坐标 + 逐图格位图（`25c00[b222*64+row]` 的 `col` 位 = 1 ⇒ 引擎会画静态）。
-    if (!seedFieldInt(f, kFieldColId + 1u, 7u)) return false;
-    if (!seedFieldInt(f, kFieldRowId + 1u, 5u)) return false;
-    if (!seedFieldInt(f, kFieldColId + 2u, 8u)) return false;
-    if (!seedFieldInt(f, kFieldRowId + 2u, 6u)) return false;
-    if (!seedFieldInt(f, kFieldCellBitsId + map * kFieldCellRowStride + 5u, 1u << 7)) return false;
-    if (!seedFieldInt(f, kFieldCellBitsId + map * kFieldCellRowStride + 6u, 1u << 8)) return false;
-    // 不命中的槽：格坐标故意越界 ⇒ 万一它被算到，`clearFieldStaticSkip` 必须拒绝（warn，不写）。
-    return seedFieldInt(f, kFieldRowId + 3u, 0x40u);
+    if (!seedFieldInt(f, kFieldTypeId + 3u, kFieldTypeGather)) return false;
+    if (!seedFieldInt(f, kFieldTypeId + 4u, kFieldTypeDig)) return false;
+    if (!seedFieldInt(f, kFieldTypeId + 5u, kFieldTypeGather)) return false;
+    if (!seedFieldInt(f, kFieldTypeId + 6u, 0x03u)) return false;  // 不命中（⛔ 不是点位类型）
+    // 派生位：SETOBJ 每帧 `fill-zero` 后重算出来的形态（本用例把它们当"当帧输入"）。
+    if (!seedFieldInt(f, kFieldFlagsId + 1u, 0x2u)) return false;  // bit0=0 ⇒ 补成 0x3
+    if (!seedFieldInt(f, kFieldFlagsId + 2u, 0x3u)) return false;  // 未采集（静态）⇒ 不写
+    if (!seedFieldInt(f, kFieldFlagsId + 3u, 0x5u)) return false;  // 已触发（动效）⇒ ⛔ 不许变成 0x7
+    if (!seedFieldInt(f, kFieldFlagsId + 4u, 0x6u)) return false;  // bit0=0 + bit1 + bit2 ⇒ 补成 0x7
+    if (!seedFieldInt(f, kFieldFlagsId + 5u, 0x7u)) return false;  // 全置 ⇒ 不写
+    return seedFieldInt(f, kFieldFlagsId + 6u, 0u);                // 类型不命中 ⇒ 一个字节都不动
 }
 
 void caseFieldSwitchApply() {
-    // ---- ① on=1：setmap 位置触发（reenter）⇒ 施加 / 留在区间内不重复 fire / 离开再进入 ⇒ 重新施加 ----
+    // ---- ① on=1：`DRAWOBJ` 入口（reenter）⇒ 只补 bit0 / 同窗口不重复 fire / 下一帧重新补 ----
     lift_test::g_current_case = "plugin/field-switch-apply";
     {
         Fixture f;
@@ -1116,9 +1087,9 @@ void caseFieldSwitchApply() {
         ScopedTempDir appdata;
         LIFT_CHECK(appdata.make("lift-plugin-field-switch-apply"));
         if (appdata.path.empty()) return;
-        // 旧配置里残留的 `poll=0` = **无害忽略**（本轮起判据是 setmap 位置触发，插件不读 poll）。
+        // 旧配置里残留的 `poll` / `static` = **无害忽略**（本轮删了 `static` 这条语义，键不读了）。
         LIFT_CHECK(writeHostFile(appdata.path / "plugin-config.json",
-                                 R"({"version":1,"domains":{"field.point-visible":{"on":1,"poll":0}}})"));
+                                 R"({"version":1,"domains":{"field.point-visible":{"on":1,"poll":0,"static":1}}})"));
         const bool loaded = f.loadFile(pluginRootPath("field-point-visible.js"));
         LIFT_CHECK(loaded);
         if (!loaded) {
@@ -1129,65 +1100,46 @@ void caseFieldSwitchApply() {
         LIFT_CHECK(f.attachConfig());
         LIFT_CHECK(seedFieldScene(f));
 
-        // setmap 完成点（读数由宿主采样给；区间在 `script-positions.js`）。
+        // 唯一的触发点 = `DRAWOBJ.BIN` 入口窗口（读数由宿主采样给；区间在 `script-positions.js`）。
         // ★ trigger 的 `script` 是**精确 `==`** 的宿主 marker 拼写（带 `.BIN`）。
-        f.readings.script = "FIELD.BIN";
-        f.readings.pos = 0x18282;  // FIELD_SETMAP_A [0x18280,0x18284) 内
+        f.readings.script = "DRAWOBJ.BIN";
+        f.readings.pos = 0x0064;  // DRAWOBJ_ENTRY [0x003C,0x06BC) 内（实测读点 pos）
 
-        // ① 第一拍 = `start`：只 arm 三条位置触发，一个槽都不写。
+        // ① 第一拍 = `start`：只 arm 一条位置触发，一个槽都不写。
+        f.pump();
+        dumpFail(f);
+        LIFT_CHECK(!f.host->failed());
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), 0x2u);
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 2u), 0x3u);
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 3u), 0x5u);
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 4u), 0x6u);
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 5u), 0x7u);
+        // ② 第二拍 = 有效"外→内"边沿 ⇒ fire ⇒ **只补 bit0**（`0x2→0x3` / `0x6→0x7`）；
+        //    已经带 bit0 的槽一个字节都不写（`0x3` / `0x5` / `0x7` 原样）⇒ bit1 / bit2 不动。
         f.pump();
         dumpFail(f);
         LIFT_CHECK(!f.host->failed());
         LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), 0x3u);
         LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 2u), 0x3u);
-        // ② 第二拍 = 有效"外→内"边沿 ⇒ fire ⇒ **只**置 `DRAW|ALPHA`（`0x3→0x7`），类型不命中的槽原样。
-        f.pump();
-        dumpFail(f);
-        LIFT_CHECK(!f.host->failed());
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), 0x7u);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 2u), 0x7u);
         LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 3u), 0x5u);
-        const std::uint64_t logs_forced = f.host->logLines();
-        LIFT_CHECK(logs_forced >= 2u);  // 首行 `on=… static=…` + `field-points: setmap forced=`
-        // ③ 第三拍 = 还在 setmap 区间内（`last_inside` 仍为真）⇒ **不 fire**（Reenter 不是每读点）。
-        f.pump();
-        dumpFail(f);
-        LIFT_CHECK(!f.host->failed());
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()),
-                          static_cast<std::int64_t>(logs_forced));
-        // ④ 渲染帧：`SETOBJ` #2 每次 `fill-zero 50ff9f 32` 再重算 ⇒ 上一次的 bit2 已被抹掉。
-        //    这里手动模拟"重算回 0x3"，再把读数切到 `DRAWOBJ` 的入口窗口（读点实测落在 0x64）
-        //    `[0x0B04,0x0B10)`（SETOBJ 之后 / DRAWOBJ 之前，每渲染帧一次）。
-        LIFT_CHECK(seedFieldInt(f, kFieldFlagsId + 1u, kFieldDrawBit | kFieldNotUsedBit));
-        LIFT_CHECK(seedFieldInt(f, kFieldFlagsId + 2u, kFieldDrawBit | kFieldNotUsedBit));
-        f.readings.script = "DRAWOBJ.BIN";
-        f.readings.pos = 0x0064;  // DRAWOBJ_ENTRY [0x003C,0x06BC) 内（实测读点 pos）
-        f.pump();
-        dumpFail(f);
-        LIFT_CHECK(!f.host->failed());
-        // slot1（`eb5c1=1` + 格位=1 + class=3 + 启用 + bit1=1）⇒ 先 |=0x5、再清 bit2 ⇒ 0x3（静态）；
-        // slot2（`eb5c1=0`，从没触发过）⇒ 门不成立 ⇒ 保留 bit2（0x7，点不消失）。
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), kFieldDrawBit | kFieldNotUsedBit);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 2u), 0x7u);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 3u), 0x5u);
-        // ★ 格位图**只读**：`25c00` 的两个 dword 必须一个字节都没变（清它会让静态与动效同时不画）。
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldCellBitsId + 0x11u * kFieldCellRowStride + 5u), 1u << 7);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldCellBitsId + 0x11u * kFieldCellRowStride + 6u), 1u << 8);
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 4u), 0x7u);
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 5u), 0x7u);
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 6u), 0u);
         const std::uint64_t logs_draw = f.host->logLines();
-        LIFT_CHECK(logs_draw > logs_forced);  // 首帧汇总 `draw matched=2 cleared=1 kept=1` + 逐槽明细
-
-        // ⑤ 同一读点再拍：`fp:draw` 的 Reenter 也不每读点 fire ⇒ 日志不涨。
+        LIFT_CHECK(logs_draw >= 2u);  // 首行 `on=… types=…` + `field-points: draw matched=5 patched=2`
+        // ③ 同一读点再拍：`fp:draw` 的 Reenter 也不每读点 fire ⇒ 日志不涨。
         f.pump();
         dumpFail(f);
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), 0x3u);
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()),
                           static_cast<std::int64_t>(logs_draw));
 
-        // ⑥ 下一渲染帧：`SETOBJ` 又重算回 0x3；先读到有效"外"、再回到 DRAWOBJ 调用点 ⇒ 重新施加。
-        //    `matched/cleared/kept` 没变 ⇒ ⛔ 不再刷一行日志（每帧 fire，但只在状态变化时打）。
-        LIFT_CHECK(seedFieldInt(f, kFieldFlagsId + 1u, kFieldDrawBit | kFieldNotUsedBit));
-        LIFT_CHECK(seedFieldInt(f, kFieldFlagsId + 2u, kFieldDrawBit | kFieldNotUsedBit));
+        // ④ 下一渲染帧：`SETOBJ` 又把派生位重算回 `0x2` / `0x6`；先读到有效"外"、再回到入口窗口
+        //    ⇒ 重新补 bit0。`matched/patched` 没变 ⇒ ⛔ 不再刷一行日志（每帧 fire，但只在状态变化时打）。
+        LIFT_CHECK(seedFieldInt(f, kFieldFlagsId + 1u, 0x2u));
+        LIFT_CHECK(seedFieldInt(f, kFieldFlagsId + 4u, 0x6u));
         f.readings.script = "FIELD.BIN";
-        f.readings.pos = 0x0600;  // 有效"外"（不在任何区间里）：只写边沿，不回调
+        f.readings.pos = 0x0600;  // 有效"外"（不在任何窗口里）：只写边沿，不回调
         f.pump();
         dumpFail(f);
         LIFT_CHECK(!f.host->failed());
@@ -1196,26 +1148,16 @@ void caseFieldSwitchApply() {
         f.pump();
         dumpFail(f);
         LIFT_CHECK(!f.host->failed());
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), kFieldDrawBit | kFieldNotUsedBit);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 2u), 0x7u);
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), 0x3u);
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 4u), 0x7u);
         LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()),
                           static_cast<std::int64_t>(logs_draw));
 
-        // ⑦ 两条 setmap 钩子都还在：走**另一条** `FIELD_SETMAP_B` ⇒ 重新 `|=0x5`。
-        f.readings.script = "FIELD.BIN";
-        f.readings.pos = 0x0600;
-        f.pump();
-        f.readings.pos = 0x35170;  // FIELD_SETMAP_B [0x35168,0x3517C) 内 ⇒ reenter 边沿
-        f.pump();
-        dumpFail(f);
-        LIFT_CHECK(!f.host->failed());
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), 0x7u);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 2u), 0x7u);
-        // ⑧ 常驻：没人收口（⛔ 不 finish / 不 done / 不 fail）。
+        // ⑤ 常驻：没人收口（⛔ 不 finish / 不 done / 不 fail）。
         LIFT_CHECK(!f.host->finished());
         LIFT_CHECK(!f.host->failed());
         LIFT_CHECK(!f.host->runner().done());
-        LIFT_CHECK(f.host->callbacks() >= 5u);
+        LIFT_CHECK(f.host->callbacks() >= 2u);
     }
 
     // ---- ② on=0：一个 guest global 都不读 / 都不写，Run 照样常驻 ----
@@ -1239,79 +1181,22 @@ void caseFieldSwitchApply() {
         LIFT_CHECK(f.attachAppData(hostPathText(appdata.path)));
         LIFT_CHECK(f.attachConfig());
         LIFT_CHECK(seedFieldScene(f));
-        f.readings.script = "FIELD.BIN";
-        f.readings.pos = 0x18282;  // FIELD_SETMAP_A 内（会 fire，但 on=0 ⇒ 一个 guest 读都不做）
-        for (int i = 0; i < 2; ++i) f.pump();
+        // `fp:draw` 每帧仍 fire，但 `on=0` ⇒ 一个 guest 读都不做（标志逐槽原样）。
         f.readings.script = "DRAWOBJ.BIN";
-        f.readings.pos = 0x0064;   // DRAWOBJ_ENTRY 内（每次进 DRAWOBJ fire，但 on=0 ⇒ 仍然 0 读）
-        for (int i = 0; i < 2; ++i) f.pump();
+        f.readings.pos = 0x0064;
+        for (int i = 0; i < 3; ++i) f.pump();
         dumpFail(f);
         LIFT_CHECK(!f.host->failed());
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), 0x3u);  // 原样
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), 0x2u);
         LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 2u), 0x3u);
         LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 3u), 0x5u);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldCellBitsId + 0x11u * kFieldCellRowStride + 5u), 1u << 7);
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 4u), 0x6u);
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 5u), 0x7u);
+        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 6u), 0u);
         LIFT_CHECK(!f.host->finished());
         LIFT_CHECK(!f.host->runner().done());
-        LIFT_CHECK(f.host->callbacks() >= 2u);
+        LIFT_CHECK(f.host->callbacks() >= 1u);
         // ★ 首行日志明写 on=0（`host.logLines()` 只有计数；文本面由 `plugin-field-switch` 的 e2e 判）。
-    }
-
-    // ---- ③ `static=0`：回到 2026-11-26 之前（只 `|=0x5`，**不清** bit2），Run 照样常驻 ----
-    lift_test::g_current_case = "plugin/field-switch-static-off";
-    {
-        Fixture f;
-        LIFT_CHECK(f.mem_ok && f.win_ok);
-        if (!f.mem_ok || !f.win_ok) return;
-        LIFT_CHECK(installFieldPool(f));
-        ScopedTempDir appdata;
-        LIFT_CHECK(appdata.make("lift-plugin-field-switch-static-off"));
-        if (appdata.path.empty()) return;
-        LIFT_CHECK(writeHostFile(appdata.path / "plugin-config.json",
-                                 R"({"version":1,"domains":{"field.point-visible":{"on":1,"static":0}}})"));
-        const bool loaded = f.loadFile(pluginRootPath("field-point-visible.js"));
-        LIFT_CHECK(loaded);
-        if (!loaded) {
-            std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
-            return;
-        }
-        LIFT_CHECK(f.attachAppData(hostPathText(appdata.path)));
-        LIFT_CHECK(f.attachConfig());
-        LIFT_CHECK(seedFieldScene(f));
-        f.readings.script = "FIELD.BIN";
-        f.readings.pos = 0x18282;
-        f.pump();   // start
-        f.pump();   // setmap A ⇒ `|=0x5`
-        dumpFail(f);
-        LIFT_CHECK(!f.host->failed());
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), 0x7u);
-        const std::uint64_t logs_forced = f.host->logLines();
-        // DRAWOBJ 入口：fire，但 `static=0` ⇒ 只 `|=0x5`、一个表都不读、bit2 不清。
-        f.readings.script = "DRAWOBJ.BIN";
-        f.readings.pos = 0x0064;
-        f.pump();
-        dumpFail(f);
-        LIFT_CHECK(!f.host->failed());
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), 0x7u);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 2u), 0x7u);
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldCellBitsId + 0x11u * kFieldCellRowStride + 5u), 1u << 7);
-        const std::uint64_t logs_static_off = f.host->logLines();
-        LIFT_CHECK(logs_static_off > logs_forced);  // `static=0` 那一行 + 首帧 `draw` 汇总
-        // 再走一次 DRAWOBJ 调用点（离开再回来）：`static=0` 只打一次、首帧汇总也不重复，
-        // flag 仍是 0x7（bit2 没被清）。
-        f.readings.script = "FIELD.BIN";
-        f.readings.pos = 0x0600;
-        f.pump();
-        f.readings.script = "DRAWOBJ.BIN";
-        f.readings.pos = 0x0064;
-        f.pump();
-        dumpFail(f);
-        LIFT_CHECK(!f.host->failed());
-        LIFT_CHECK_EQ_U32(readFieldInt(f, kFieldFlagsId + 1u), 0x7u);
-        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->logLines()),
-                          static_cast<std::int64_t>(logs_static_off));
-        LIFT_CHECK(!f.host->finished());
-        LIFT_CHECK(!f.host->runner().done());
     }
 }
 

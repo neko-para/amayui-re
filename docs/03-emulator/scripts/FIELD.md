@@ -42,30 +42,31 @@
 | `[0x579C,0x5860)` | **主轮询体**：进图完成、开始等输入。★ 目前唯一被用过的门（`await position FIELD 0x579C 0x5860`） | 见下 ①（开关的常驻读数）/ ②（读档链到 FIELD）/ ③（配方里的同一区间） | **2026-11-25 门 2/2**（headless 与 window 各一次，都命中本区间；★ 当时用的是 `--plugin field-point-visible` 的**自驱读档版本** —— 那条自驱链已删，同一区间现在用 ② 复现）；历史：2026-11-22 配方侧 4/4（出处 `apps/emulator-lift/scripts/recipes/save07-battle.plan` 的 ①–④ 头注释） |
 
 - **`[0x579C,0x5860)` 只证明"到地图就绪"，不证明"点击被消费"**：FIELD 上没做过点击负对照 ⇒ `## 待核` 3。
-- ★ **`field-point-visible` 的触发区间不是本表这一条**：它有三条 —— **setmap 的两个返回点**
-  `[0x18280,0x18284)`（`FIELD_SETMAP_A_*`，`label_00018274` 里 `call-script 511a`=SETOBJ 的返回点）与
-  `[0x35168,0x3517C)`（`FIELD_SETMAP_B_*`，`0x035130` 块里同一条 `call-script 511a` 之后），
-  再加**点位绘制脚本的入口窗口** `DRAWOBJ.BIN` `[0x003C,0x06BC)`（`DRAWOBJ_ENTRY_*`、`name="fp:draw"`；
-  §⑧ 的调用点全表 + 为什么挂这里）。★ **`A` 一条已有 run 读数**（2026-11-26：`load-save 10` →
-  `field-points: setmap forced=2/3` + `diag script=FIELD.BIN pos=0x18280`），另两条仍只有静态取证 ⇒
-  按上一段的收录口径进 `## 待核` 9（⛔ 不写进本表）。
-- 常量位置：`apps/emulator-lift/scripts/plugins/lib/script-positions.js` 的 `FIELD_MAIN_LOOP_LO/HI`（仅复现入口用）
-  与 `FIELD_SETMAP_A_LO/HI` / `FIELD_SETMAP_B_LO/HI` / `DRAWOBJ_ENTRY_LO/HI`（开关用）；数值只写这一处。
+- ★ **`field-point-visible` 的触发区间不是本表这一条**：它只有**一条** ——
+  **点位绘制脚本的入口窗口** `DRAWOBJ.BIN` `[0x003C,0x06BC)`（`DRAWOBJ_ENTRY_*`、`name="fp:draw"`；
+  §⑧ 的调用点全表 + 为什么挂这里）。★ **为什么删掉两条 setmap 钩子**（`[0x18280,0x18284)` /
+  `[0x35168,0x3517C)`）：它们落在 SETOBJ 之后，但**同一渲染帧**的 `RENDERMAP` 会再跑一次 SETOBJ
+  （#2 `fill-zero 50ff9f 32` 后逐槽重算）⇒ 在那里补的位必被抹掉；而 `DRAWOBJ` 入口的窗口就在
+  `SETOBJ` 之后、绘制之前（§④ 的顺序铁律）⇒ 一条钩子覆盖全部 4 个调用者。
+- 常量位置：`apps/emulator-lift/scripts/plugins/lib/script-positions.js` 的 `FIELD_MAIN_LOOP_LO/HI`
+  （仅复现入口用）与 `DRAWOBJ_ENTRY_LO/HI`（开关用）；数值只写这一处。
 
 ```bash
 cd E:/Projects/amayui-re-dev/apps/emulator-lift
-# ① `field-point-visible` = **常驻开关**（用户裁决 2026-11-25：目标 = **在 setmap 时无条件显示所有采集/挖掘点**）：
-#    ⛔ 不读档 / ⛔ 不点鼠标 / ⛔ 不写盘 / ⛔ 不 finish、⛔ **不轮询**。它常驻 arm **三个**位置触发
-#    （全部 `mode: "reenter"`）：
-#      `[0x18280,0x18284)` = `label_00018274` 里 `call-script 511a` 的返回点（进图主路径）；
-#      `[0x35168,0x3517C)` = `0x035130` 块里同一条 `call-script 511a` 之后的 `mov b22a 1`；
+# ① `field-point-visible` = **常驻开关**（用户裁决 2026-11-25：目标 = **无条件显示所有采集/挖掘点**）：
+#    ⛔ 不读档 / ⛔ 不点鼠标 / ⛔ 不写盘 / ⛔ 不 finish、⛔ **不轮询**。它常驻 arm **一条**位置触发
+#    （`mode: "reenter"`）：
 #      `DRAWOBJ.BIN [0x003C,0x06BC)` = **点位绘制脚本的入口窗口**（#0 `detach-texture 3aca 32` → 点位槽循环尾；
-#        `fp:draw`，**每次进这个脚本一次**）。★ 为什么静态必须在这里：SETOBJ #2 每次 `fill-zero 50ff9f 32`，
-#        而 4 处 `call-script 5117` 全部从 `DRAWOBJ` 进 ⇒ 入口是唯一能"一次覆盖所有调用者"的位置（§⑧）。
+#        `fp:draw`，**每次进这个脚本一次**）。★ 为什么必须在这里：`SETOBJ` #2 每渲染帧
+#        `fill-zero (global-int 50ff9f) 32` 再逐槽重算，而 4 处 `call-script 5117` 全部从 `DRAWOBJ` 进
+#        ⇒ 入口是唯一"一次覆盖所有调用者、且严格晚于 SETOBJ"的位置（§⑧）。
 #    每次**外→内** fire 一次；对类型命中（缺省 採集 1f / 発掘 20）的槽把派生渲染位
-#    `50ff9f[slot]` **置 `|= 0x5`**（bit0=画、bit2=正常 alpha；DRAWOBJ 画 `0xFA+类型` = `0x119` MO031B 绿草 /
-#    `0x11A` MO032B 岩石）。setmap 两条**不清任何位**，尤其 bit1（A 链格表与 FIELD 的战利品抽取消费它）；
-#    `fp:draw` 再按静态门清 bit2（见 ⑦）。`fp:draw` 每帧 fire ⇒ ⛔ 不每帧刷日志（首帧 / 状态变化一行）。
+#    `50ff9f[slot]` **只补 bit0**（`flags | 0x1`：`DRAWOBJ` #7 的 bit0=1 才画；纹理 = `0xFA+类型` =
+#    `0x119` MO031B 绿草 / `0x11A` MO032B 岩石）。
+#    ★ **⛔ 不写 bit1 / bit2**：它们是引擎每渲染帧按"发现 / 触发状态"重算出来的
+#      （bit2 = 静态↔动效的选择位、bit1 = 静态门 `(flags&6)==2` 的一半）⇒ 插件写它们就是替引擎
+#      决定"这个点触发过没有"。旧写法 `|=0x5` 正是"没采集过的点也在动"的成因（真机读数见 §⑦）。
+#    `fp:draw` 每帧 fire ⇒ ⛔ 不每帧刷日志（首帧 / `matched/patched` 变化一行；逐槽行只为真的改了的槽）。
 #    Reenter 的边沿挂在**同一个 trigger 对象**上、跨 arm 保留 ⇒ 不需要 re-arm（`trigger_runner.cpp` 的
 #    `exhausted()` 只耗尽 Once / `maxFires>0`）。判据 = **已知脚本位置**，不是时间 ⇒ 没有 poll 这个设置项。
 #    ★ **`?` / `!` 不是点位**：它们是 A 链格标记（`SO030.AGF` 槽 `0x49`，按帧内 `65f2` 的每格 dword 画），
@@ -73,7 +74,7 @@ cd E:/Projects/amayui-re-dev/apps/emulator-lift
 #    ★ 开关参数写在 **appdata 根**（与 Local/ 同级；⛔ 不在 SAVE/ 下）：
 #      {"version":1,"domains":{"field.point-visible":{"on":1}}}
 #      域 key：on（bool/0-1，缺省 0）/ types（hex 串或数组）/ diag（0/1）。
-#      ★ 旧配置里的 slot / hold / poll 被**无害忽略**（不再读档、不再一次性结束、不再轮询）。
+#      ★ 旧配置里的 static / slot / hold / poll 被**无害忽略**（不再读档、不再一次性结束、不再轮询）。
 #    ★ 验收 = **玩家自己读档**：--overlay --plugin field-point-visible（`--plugin` 与 --input-plan /
 #      --control-root 互斥 ⇒ 没有"输入计划驱动"这条验收）；FIELD 的自动化复现归 ②。
 mkdir -p ../../.tmp/field-model/appdata
@@ -84,17 +85,17 @@ printf '{"version":1,"domains":{"field.point-visible":{"on":0}}}\n' \
   --present headless --skip-logo --audio off --time-limit 20 --log-level warn \
   --plugin field-point-visible
 # 读数（2026-11-26 / win32 / dev / headless / on=0 基线；★ 没人读档 ⇒ 进程一直停在标题）：
-#   [plugin] info: field-points: on=0 types=0x1f,0x20（渲染帧显示所有采集/挖掘点）
+#   [plugin] info: field-points: on=0 types=0x1f,0x20（每次进 DRAWOBJ 显示所有采集/挖掘点）
 #                                                          ↑ 只这一行（关着不做事）
 #   readout：file=…/field-point-visible.js entry=default render=no callbacks=yes
 #            params=- calls=1 run=waiting
 #   stop   ：time-limit @ eip=…（正常结局；★ 落点 eip 随墙钟时点变，不是判据）；exit=0
-#   ★ calls=1 = 只有 start：两条 setmap 触发只在玩家进 FIELD 的 setmap 时 fire（没人读档 ⇒ 一次都没 fire）。
+#   ★ calls=1 = 只有 start：`fp:draw` 只在玩家进 FIELD 后每次进 DRAWOBJ 时 fire（没人读档 ⇒ 一次都没 fire）。
 #     常驻 → 由 --time-limit 收口，⛔ 不是 finish。
 #   ★ on=1 时进 FIELD 的效果面判据在**纯档**：CTest `plugin-runtime` 的 `plugin/field-switch-apply`
-#     （假 guest：0x3→0x7 / 0x5→0x5 / 类型不命中不动 / 留在区间内不再 fire / 读到有效"外"再"内"（另一条
-#     setmap 钩子）⇒ 重新施加 / `on=0` 一个 global 都不读、都不写）。真机（人读档进 FIELD）的
-#     `field-points: setmap forced=` 读数见 `## 待核` 8。
+#     （假 guest：`0x2→0x3` / `0x6→0x7` 只补 bit0；`0x3`/`0x5`/`0x7` 不写；类型不命中不动；
+#     留在窗口内不再 fire / 读到有效"外"再"内" ⇒ 下一帧重新补 / `on=0` 一个 global 都不写）。
+#     真机（人读档进 FIELD）的 `field-points: draw matched=… patched=…` 读数见 `## 待核` 8。
 #   ★ 常驻/不自驱的守卫：CTest `plugin-field-switch`
 #     （静态：代码里没有 input / loadSave / bootToTitle / chains / finish / quit，且**没有** FIELD_MAIN_LOOP /
 #      afterDelay / poll；e2e：headless 真子进程无 --input-plan ⇒ 没有 boot:/load: 行、run=waiting、
@@ -264,7 +265,8 @@ node .tmp/field-skill-hint/dis-one.mjs .tmp/field-skill-hint/DRAWOBJ.BIN --all  
     ⇒ **清 `25c00` 的位会让静态与动效同时不画（点直接消失）**；两态的选择位是 `50ff9f` 的 bit2。
   - `instr#44` `槽 = 0xFA + 类型`；`instr#47..#57` 目标 = `列*64+32 - w/2` / `行*64+32 - h/2 - 14`（**底对齐**）；
   - `instr#58` `draw-texture (0x3ACA+槽) (0xFA+类型) 0 0 w h dstx dsty`。
-- ⇒ **B 的可见性判据 = `50ff9f[槽]` 的 bit0（画）/ bit2（动效 alpha = 两态选择位）+ 静态门 ①/②**；`50ff9f` 是 VM 在**每次进图**重建的派生表：
+- ⇒ **B 的可见性判据 = `50ff9f[槽]` 的 bit0（画）/ bit2（动效 alpha = 两态选择位）+ 静态门 ①/②**；
+  `50ff9f` 是 VM 在**每次进图 / 每渲染帧**重建的派生表：
   `FIELD.BIN` #187 `0x000FA0` `fill-zero (global-int 50ff9f) 32` · `SETOBJ.BIN` #2 `0x00005C` 再清一次 ·
   然后 `SETOBJ` #34 `bit-set …0`（= 画）/ #78 / #84 `bit-set …2`（= 动效 alpha 正常）/ #86 `bit-set …1` 逐槽写。
   ★ **2026-11-25 订正**：本节早先把 `jcc` 极性读反了（写成"置位=不画 / 置位=alpha 0"）。以
@@ -278,7 +280,9 @@ node .tmp/field-skill-hint/dis-one.mjs .tmp/field-skill-hint/DRAWOBJ.BIN --all  
   ★ 但 **`RENDERMAP` 不是唯一（也不是逐帧）那条 DRAWOBJ**：逐帧的绘制批是 `FIELD` #837-#839
   （`0x04EB8`/`0x04EC4`/`0x04ED0` → 叶 `label_0003928c` / `label_000392b0` / `label_000392d8`），
   其中 `label_000392b0` = `DRAWMAP(0x510F) → DRAWOBJ(0x5117) → DRAWMINIMAP(0x510C) → ret`，
-  **不跑 SETOBJ**。⇒ 静态施加点只能选**`DRAWOBJ` 自己的入口**（§⑧ 的全表 + 为什么）。
+  **不跑 SETOBJ**。⇒ 施加点只能选**`DRAWOBJ` 自己的入口**（§⑧ 的全表 + 为什么）。
+  ★★ **这一节就是最终模型的机制面**（2026-11-26）：bit1 / bit2 **由引擎每渲染帧重算** ⇒
+  已触发 = 动效、未采集 = 静态；插件只在入口补 **bit0**（§⑦）。
   ```bash
   node .tmp/field-skill-hint/dis-one.mjs .tmp/field-skill-hint/SETOBJ.BIN --all | Select-Object -First 8
   # 读数：#1 memcpy (50ff9f)… · #2 fill-zero (50ff9f) 32 · #3 memcpy (14d7a0) (50ffd1) 32
@@ -314,7 +318,7 @@ node .tmp/field-skill-hint/dis-one.mjs .tmp/field-skill-hint/SETMAPTEX.BIN --all
 4. **引擎里没有这条链**（见本节开头那 11 个常量的 0 命中）。
 5. **`AE202A*` 与地块无关**（C 链）。
 
-### ⑦ 静态 / 动效两态 + `field-point-visible` 的 `static`（2026-11-26）
+### ⑦ 两态（静态 / 动效）由**引擎**决定；`field-point-visible` 只补 bit0（2026-11-26 最终模型）
 
 | | 静态（无工具图标） | 动效（锄头 / 镐 + 7 帧） |
 |---|---|---|
@@ -326,43 +330,50 @@ node .tmp/field-skill-hint/dis-one.mjs .tmp/field-skill-hint/SETMAPTEX.BIN --all
 - **静态还要求**（缺一不画）：`511080[类型]==3`（`OBINIT` 把 31/32 写成 3）· `eb5c1[b222][槽]==1`
   （**这个点位触发过**：`FIELD` instr#6242-6245 在"打开交互菜单"那一拍写 `bit-set 50ff9f[槽] 2` + `eb5c1=1`）·
   `50ff9f` bit1=1（还没用完，`SETOBJ` 只在未耗尽支置它）· `25c00[b222][行]` 的第 `列` 位 = 1（该格有地块要素）。
-- ⇒ **进图默认态 = 静态**（`SETOBJ` 对 `511080==3` 从不置 bit2）：`SETOBJ.BIN.txt:111-130`。
+- **进图默认态 = 静态**（`SETOBJ` 对 `511080==3` 从不置 bit2）：`SETOBJ.BIN.txt:111-130`。
   触发点位 ⇒ 动效（`FIELD` #6242-6245）；交互结束 / 取消 ⇒ `bit-reset 50ff9f[槽] 2`（`FIELD` #6237 / #6383）
   ⇒ 回到静态。**刷新过的点**（`3e2a0[b222][槽] >= 5111ac[类型]`，採集/発掘 = 1）⇒ bit1=0 ⇒ 两态都不画（点消失）。
-- `field-point-visible` 的 `static`（缺省 **1**）：
-  - 两条 `FIELD.BIN` setmap 钩子仍 `flags |= 0x5`（bit0 画 + bit2 动效）；
-  - **静态施加钩子 = `DRAWOBJ.BIN` 的入口窗口**（§⑧ 的全表 + 为什么选它）：
-    `afterPosition("DRAWOBJ.BIN", DRAWOBJ_ENTRY_LO, DRAWOBJ_ENTRY_HI, {name:"fp:draw", mode:"reenter"})`
-    = `[0x003C,0x06BC)`（**#0 `detach-texture 3aca 32` → 点位槽循环尾**；第二条循环是 `6202a` 元素对象）。
-    **每次进 `DRAWOBJ` 一次**：先 `|=0x5`、再按**上面那套引擎静态门**（再叠 `14d8cc` 当层启用）决定 `flags` 的 bit2：
-    门成立 ⇒ **清 bit2**（静态）；门不成立 ⇒ 保留 bit2（= 今天的动效，⛔ 不让点消失）。
-    `25c00` / `14d73c` / `14d76e` / `14d8cc` / `eb5c1` / `511080` **只读**，写集只有 `50ff9f+槽`。
-    ★ 每次都要做：`SETOBJ` #2 的 `fill-zero` 会在**同一次**渲染里把上一次的清位抹掉（§④ 的顺序铁律）。
-    ★ **触发点 = guest 读点**（`TriggerRunner` 只在 `atPoint` poll）：实测 `DRAWOBJ` 体内有 `peekMsg`
-    读点（pos `0x64` / `0x2C4`，都早于第一条 `draw-texture` #58 @`0x66C`）⇒ 入口窗口会 fire。
-  - `static=0` ⇒ 一个 `25c00` / `14d7xx` / `14d8cc` / `eb5c1` 读都不做（日志一行 `field-points: static=0`），
-    行为 = 2026-11-26 之前（只 `|=0x5` ⇒ 看到动效）。
-  - ★ **日志不刷屏**：`fp:draw` 每进一次 `DRAWOBJ` 就 fire，但只在**首帧**或 `matched/cleared/kept` 变化时打一行
-    （首帧另带逐槽明细；行里带 `site=<ev.name>`）；`diag=1` 时每 60 次一行（`field-points: diag draw …`）。
+
+**★ 最终模型（三条，按这个顺序读）：**
+
+1. **引擎每渲染帧自己重算**：`SETOBJ` #2 `fill-zero (global-int 50ff9f) 32` @`0x00005C` 之后逐槽重算
+   （#34 bit0 = 画 · #84 bit2 = 动效 alpha 正常 · #86 bit1 = 还没用完）⇒
+   **bit1（静态门的一半）/ bit2（静态↔动效的选择位）由引擎按"发现 / 触发状态"决定**。
+2. **插件只在 `DRAWOBJ.BIN` 入口补 bit0**（`flags | 0x1`）：那是"画不画"的总闸（`DRAWOBJ` #7），
+   补它才能让"未发现但本应存在"的点也画出来。**⛔ 不写 bit1 / bit2** —— 写了就是替引擎决定
+   "这个点位触发过没有"，而那是持久输入（`eb5c1` / `13d7` / `3e2a0`）的事。
+3. **真机探针读数（2026-11-26 / win32 / 存档 012 / FIELD 就绪、没有 field 插件参与 / 逐槽
+   `node tools/emu-ctl.mjs global-get --kind int --index 0x50ff9f+slot`）**：
+
+   | 槽 | `type`（`50ffd1+槽`） | `flags`（`50ff9f+槽`） | 读法 |
+   |---|---|---|---|
+   | slot3 | `0x1f`（採集） | **`0x5`** | 已触发 / 已采集 ⇒ bit2=1 ⇒ **动效**（用户说的"右上角唯一在动"） |
+   | slot4 | `0x1f` | **`0x3`** | 未采集 ⇒ bit1=1 / bit2=0 ⇒ **静态** |
+   | slot5 | `0x20`（発掘） | **`0x3`** | 同上 |
+   | slot6 | `0x20` | **`0x3`** | 同上 |
+
+   ⇒ **引擎自己就是对的**：已触发 = 动效、未采集 = 静态。用户早先看到的"没采集过也在动"是**旧插件的错**：
+   它 `flags |= 0x5`，把 bit2 强加上去（于是每个命中的槽都变成动效）。本修就是**只补 bit0**。
+- **为什么每渲染帧都要补**：`SETOBJ` #2 的 `fill-zero` 在同一次渲染里必把上一次补的位抹掉（④ 的顺序铁律）；
+  而 `DRAWOBJ` 入口的窗口 `[0x003C,0x06BC)` 严格晚于 `SETOBJ`、早于第一条 `draw-texture`（#58 @`0x66C`）
+  ⇒ 每次进 `DRAWOBJ` 补一次（4 处 `call-script 5117` 全覆盖，§⑧）。
+- **代价**：每次 31 次类型读 + 命中槽的 flags 读；写只在 `flags` 缺 bit0 时发生（`after === before` 连写回执都不发）。
+  `on=0` ⇒ 0 读 / 0 写。
+- ★ **日志不刷屏**：`fp:draw` 每进一次 `DRAWOBJ` 就 fire，但只在**首帧**或 `matched/patched` 变化时打一行
+  `field-points: draw frame=… matched=… patched=… map=…`（首帧另带逐槽
+  `slot=… type=… flags before→after`，只为真的改了的槽打）；`diag=1` 时每 60 次一行。
 - **复跑（窗口，人读档）**：
   ```bash
   cd apps/emulator-lift
-  printf '{"version":1,"domains":{"field.point-visible":{"on":1,"diag":1}}}\n' > ../../.tmp/field-static/appdata/plugin-config.json
-  ./out/emulator-lift-aot.exe --game-dir ../../links/install --appdata ../../.tmp/field-static/appdata \
+  printf '{"version":1,"domains":{"field.point-visible":{"on":1,"diag":1}}}\n' > ../../.tmp/field-idle/appdata/plugin-config.json
+  ./out/emulator-lift-aot.exe --game-dir ../../links/install --appdata ../../.tmp/field-idle/appdata \
     --present window --overlay --skip-logo --audio off --time-limit 300 --log-level info --plugin field-point-visible
   ```
-  期望：**IDLE 静置**时点位格就是**植株 / 岩石本体**（`MO031B/MO032B`，无工具图标）；移动 / STAGE COMPLETE /
-  退图同样。日志首帧一行
-  `field-points: draw frame=… matched=N cleared=M kept=K …（SETOBJ 之后 / DRAWOBJ 之前；每渲染帧一次）`
-  + 逐槽 `field-points: draw slot=… cellBit=1 gate=1 enabled=1 class=3 eb5c1=1 0x7 → 0x3（静态）`；
-  走到点位交互 ⇒ 变成 7 帧动效（日志侧看 `50ff9f` 读数或画面）。
-  若逐槽行出现 `… gate=0 … eb5c1=0（保留动效：already-dynamic）` ⇒ 那个点从来没有触发过，
-  引擎自己也不会画静态（此时**只有**写 `eb5c1` 才能让它变静态，而那是持久真值 ⇒ 需要用户裁决）。
-- ★ **旧的已知边界已消失**：旧钩子 `FIELD [0x253C,0x2550)` 只在 `b22a == 0` 的重建块之后执行
-  （`FIELD` #303/#304 `eq` + `jcc 0x4CF0`）⇒ 地图续接那次保持动效；新的 `RENDERMAP` 钩子每渲染帧都跑
-  （不看 `b22a`），那条边界不再成立。
-- ⚠ **唯一硬前提（H2，已改口径）**：若 IDLE 期间**一次 `DRAWOBJ` 都不跑**，`fp:draw` 不会 fire ⇒
-  那一屏保留上一次绘制的 flag 状态（见 §⑧ 的机制与 `## 待核` 12）。
+  期望（**存档 012**，进图静置）：**右侧 / 右上那个点位放动效、左侧三个是静态植株 / 岩石**
+  （`MO031B/MO032B`，无工具图标）；走到左侧点位触发后，那个也从静态变成动效。
+  日志首帧一行 `field-points: draw matched=N patched=M map=0x…`；稳态 0 行/帧。
+- ⚠ **唯一硬前提**：若 IDLE 期间**一次 `DRAWOBJ` 都不跑**，`fp:draw` 不会 fire ⇒ 那一屏保留上一次绘制的
+  flag 状态（见 `## 待核` 12）。
 
 ### ⑧ 施加点：`DRAWOBJ` 的**全部**调用点 + 为什么选入口（2026-11-26）
 
@@ -375,7 +386,7 @@ rg -n 'call-script \((global-int|local-ptr)' E:/Projects/amayui-re/dist/views/da
 node tools/disasm.mjs --search --match "5117h" --limit 20        # 引擎侧 0 命中（AGE.EXE 里没有 0x5117 立即数）
 ```
 
-| # | 脚本 · instr# · `pos` | 前面有没有 `call-script 511a`(SETOBJ) | 谁走到它 | 旧钩子（RENDERMAP 调用点） | 新钩子（`DRAWOBJ` 入口） |
+| # | 脚本 · instr# · `pos` | 前面有没有 `call-script 511a`(SETOBJ) | 谁走到它 | 旧钩子（RENDERMAP 调用点，已删） | 现钩子（`DRAWOBJ` 入口） |
 |---|---|---|---|---|---|
 | ① | `RENDERMAP.BIN` #118 `0x000B04` | **有**：#117 `0x000AF8`（同一段） | `FIELD` #881 `0x005288`（`56940 != 0`）/ #8223 `0x0303B0`（无条件） | ✅ 只有这条被施加 | ✅ |
 | ② | `FIELD.BIN` #2722 `0x00F034` | **没有**（#2721 是 `call-script 50F2`=DRAWCH） | `label_0000F028`（`0x0F028` 那块：画一帧 → 音效/淡出/`wait`/`poll-input`；旧文档叫"退图 / STAGE COMPLETE"） | ❌ | ✅ |
@@ -387,12 +398,12 @@ node tools/disasm.mjs --search --match "5117h" --limit 20        # 引擎侧 0 �
 `NOVEL`/`SYSTEM4` 的 `global-int 1394` 只有 `0x74`/`0x73`/`0x4F97`/`0x4F98` 这些值），**没有一处写 `0x5117`**
 （全语料字面量 `5117` 只出现在上表 4 行）⇒ 4 处就是全集。
 
-**策略 = A（在 `DRAWOBJ.BIN` 入口施加 / `[0x003C,0x06BC)`）**。判据：
+**策略 = A（在 `DRAWOBJ.BIN` 入口补 `50ff9f` 的 bit0 / `[0x003C,0x06BC)`）**。判据：
 
 1. **覆盖**：4 处调用点、8+ 个调用者全部经过 `DRAWOBJ` ⇒ 一条钩子，B 方案要挂 4 条且"漏一条就静默失效"。
 2. **时序**：`DRAWOBJ` 第一条指令是 `detach-texture 3aca 32`（`#0 @0x3C`）；**第一条读 `50ff9f` 的是 #6/#7
    `@0x00C4/0x00E0`**，第一条 `draw-texture` 是 #58 `@0x066C`。窗口上界 `0x06BC` = 点位槽循环尾
-   （#60 `mov (local-int 3) 1` 起是 `6202a` 元素对象那条循环，与点位精灵无关）。⇒ 施加大大早于绘制。
+   （#60 `mov (local-int 3) 1` 起是 `6202a` 元素对象那条循环，与点位精灵无关）。⇒ 补位大大早于绘制。
 3. **读点**：`TriggerRunner` 只在 guest 读点 poll（`docs/03-emulator/plugin-runtime.md` §4.2）。
    实测 `DRAWOBJ` 体内有 `peekMsg` 读点，`pos = 0x64`（`#2`）/ `0x2C4`（`#26`），都在上面那条
    `draw-texture` 之前 ⇒ 窗口会 fire（probe 读数：`probe: drawobj-pos #1 script=DRAWOBJ.BIN pos=100 point=peekMsg`）。
@@ -430,27 +441,25 @@ node tools/disasm.mjs --search --match "5117h" --limit 20        # 引擎侧 0 �
 7. **`MO031A`/`MO032A`**（ALF 19848/19850）与 B 用到的 `B` 版是什么关系（分辨率档？）——未取证。
 8. **`field-point-visible` 在真机（人读档进 FIELD）上的 `on=1` 施加读数**：目前只有
    ①（`on=0` 常驻基线）与**纯档** `plugin-runtime` 的 `plugin/field-switch-apply`（假 guest 上
-   setmap `|0x5`（`0x3→0x7`）/ 不命中不动 / 已经可见不再写 / 渲染帧 DRAWOBJ 调用点：静态门成立 ⇒
-   `0x7→0x3`、门不成立（`eb5c1=0`）⇒ 保留 `0x7` / 同状态不刷日志 / `static=0` ⇒ 不清 / `on=0` ⇒ 不写）。
-   真机上还缺：首帧 `field-points: draw matched=N cleared=M kept=K` 与逐槽 `draw slot=` 的读数、
-   以及画面里出现 `MO031B` 绿草 / `MO032B` 岩石（**无工具图标**）。
+   `DRAWOBJ` 入口：`0x2→0x3` / `0x6→0x7` 补 bit0、`0x3`/`0x5`/`0x7` 不写、同窗口不重复 fire、
+   下一帧重新补、同状态不刷日志、`on=0` ⇒ 不写）。
+   ★ **引擎侧的读数已经有了**（§⑦ 的探针表：存档 012 的 slot3 `0x5` / slot4-6 `0x3`）；**缺的是插件在场时**
+   首帧 `field-points: draw matched=N patched=M` 与逐槽 `draw slot= … flags …→…` 的读数。
+   注意：**存档 012 的 4 个点位槽 bit0 本来就都是 1** ⇒ 插件在这份存档上 `patched=0`（它是 no-op）；
+   要看 `patched>0` 得找一个"类型命中但 bit0=0"的点位（引擎未发现时不置 bit0）。
    要取证须**人**（或带窗 + 手点）读一次档 —— ⛔ 不要为了这条把 `--input-plan` / 控制层塞进 `--plugin`
-   （三者互斥）。复跑形状见 `.tmp/field-setmap/design.md` 的「验收」（N 帧按实际 FIELD 就绪再定，
-   A/B 必须同一 N），`static` 的复跑命令见 ⑦。
-9. **三条钩子区间的 run 读数（2026-11-26 更新）**：
-   - **`[0x18280,0x18284)` 有读数了**：`--plugin __probe-fpv`（`load-save 10` 的真 run）里
-     `field-points: setmap forced=2/3 个槽` + `field-points: diag script=FIELD.BIN pos=0x18280`
-     ⇒ 运行期确实落在这一拍（`pos` 精确等于 `0x18280`）。
-   - `[0x35168,0x3517C)`（setmap B）与 `DRAWOBJ [0x003C,0x06BC)`（`fp:draw`）**仍缺一次
-     `field-points: draw …` 读数**：同一次 run 进 FIELD 静置后没有 `draw` 行（见 12）。
-   要进 `## 位置区间` 表须补一条 run 读数。
-10. **触发后 `50ff9f` bit2 是否真的被置回（真机读数）**：静态门 / 两态模型的**写点**目前只有静态证据
-    （`FIELD` instr#6242-6245 在打开交互菜单那一拍 `bit-set … 2` + `eb5c1=1`；#6237/#6383 清）。缺一条
-    运行期读数：走到点位、触发、再走开之后，`50ff9f+槽` 的 bit2 是否 0→1→0，以及 `eb5c1[b222][槽]`
-    是否 0→1。取证形状（窗口 + 人）：`emu-ctl global-get --kind int --index <0x50ff9f+槽>` /
-    `--index <0xeb5c1 + b222*32 + 槽>` 在"进图 / 站到点上 / 交互完 / 走开"四个时刻各读一次。
-    ⚠ 这条是 `static` 的**唯一未证点**：若 bit2 在"走到点上"时**不**被置回，那 `static` 只是把动效关掉
-    （不会自己回来），需要退回"只在进图那一刻清、由下一帧的 guest 写回"的 D 方案。
+   （三者互斥）。复跑命令与期望见 ⑦。
+9. **钩子区间的 run 读数**：两条 `FIELD.BIN` setmap 钩子（`[0x18280,0x18284)` / `[0x35168,0x3517C)`）
+   **已删**（写在 SETOBJ 之后、但同帧 `RENDERMAP` 的 SETOBJ 会重算 ⇒ 那一写必被抹掉；见 §⑦）。
+   现在只剩 `DRAWOBJ [0x003C,0x06BC)`（`fp:draw`）**仍缺一次 `field-points: draw …` 的真 run 读数**
+   （见 12）；要进 `## 位置区间` 表须补一条 run 读数（判据只有 `{script,pos}`）。
+10. **触发后 `50ff9f` bit2 的写点（引擎侧，插件不写）**：静态证据 = `FIELD` instr#6242-6245 在打开
+    交互菜单那一拍 `bit-set … 2` + `eb5c1=1`；#6237/#6383 清。★ **§⑦ 的探针读数给了旁证**：存档 012 里
+    "已触发 / 已采集"的 slot3 正是 `0x5`（bit2=1）、其余三个是 `0x3`（bit2=0）⇒ 引擎在进图时按
+    `eb5c1` 重算 bit2。仍缺一条**时间序列**读数：走到点位、触发、再走开之后 `50ff9f+槽` 是否 0→1→0、
+    `eb5c1[b222][槽]` 是否 0→1。取证形状（窗口 + 人）：
+    `emu-ctl global-get --kind int --index <0x50ff9f+槽>` / `--index <0xeb5c1 + b222*32 + 槽>`
+    在"进图 / 站到点上 / 交互完 / 走开"四个时刻各读一次。
 11. **`25c00` 的触发路径**：`SETLAND`（`0x2FD8`）/ `DELLAND` 是仅有的两个运行期写点，调用者是
     `STAGEREADY` / `STAGEROUND` / 剧情（`rg "call-script 2fd8|2fac"` 30+ 处）—— 没有一条是"走到采集点"。
     待核 = 采集点所在格的 `25c00` 位是否在任何触发路径上变化（若变，静态门 ② 会跟着变）。
@@ -460,15 +469,12 @@ node tools/disasm.mjs --search --match "5117h" --limit 20        # 引擎侧 0 �
     `0x04EB8..0x052C4` 那段**帧体**（末尾 #877 `wait` / #879 `poll-input`）⇒ 帧体不跑就没有 `DRAWOBJ`。
     ⚠ **`--plugin __probe-fpv`（`load-save 10`）静置 3 min 的读数：`setmap` 行有、`draw` 行一条都没有**
     ⇒ 要么静置时 `DRAWOBJ` 真的不跑（画面保留上一帧），要么体内读点在静置时不被采样。
-    判据（用户窗口）：`diag=1` 下 IDLE 有没有 `field-points: diag draw site=fp:draw`；有 ⇒ 修好了；
+    判据（用户窗口）：`diag=1` 下 IDLE 有没有 `field-points: diag draw frame=`；有 ⇒ 修好了；
     没有 ⇒ 这一屏只有"上一次绘制时写下的 flag"在生效。⛔ 不要靠写 `56940` 来"造"渲染（主轮询体不读它）。
     ★ 交替现象的解释（现在的机制）：同一帧里可能有**两次** `DRAWOBJ` —— 先 ③（`FIELD` #838，不跑 SETOBJ，
     用的是**上一次**写下的 flag）再 ①（`RENDERMAP` #117 SETOBJ → #118 DRAWOBJ，用重算值）。旧钩子只
     覆盖 ①，于是两次绘制用的 flag **不同**（`0x7` 动效 / `0x3` 静态）⇒ 同一格先画一种再画另一种。
-    新钩子在 `DRAWOBJ` 入口统一施加 ⇒ 两次都从**同一份**判据出发生成 flag（`matched/cleared/kept` 相同）。
-13. **`static` 与"触发后 7 帧动效"是否互斥**：`fp:draw` 每次进 `DRAWOBJ` 都按静态门清 bit2，而触发时引擎在
-    `FIELD` #6242-6245 才把 bit2 置 1（`eb5c1=1` 在那一刻起就恒 1 ⇒ 静态门在动效期间仍成立）。
-    若动效帧也要经 `DRAWOBJ` 才可见，本修会把那 7 帧压成 1 帧 —— 需要一条真机读数
-    （触发一次、看动效是否还播 7 帧）；若被压掉，得给静态门补一个"正在动效"的抑制条件（未取证，
-    ⛔ 不许先猜一个位）。★ 2026-11-26 第二轮**没有**改这条：挂到 `DRAWOBJ` 入口只是让"施加点"更全，
-    压制问题与旧实现同形。
+    现钩子在 `DRAWOBJ` 入口补 bit0 ⇒ 两次都从**同一份**判据出发生成 flag（`matched/patched` 相同）。
+13. **（已消失）`static` 与"触发后 7 帧动效"是否互斥**：那是"插件按静态门清 bit2"时代的问题
+    （`fp:draw` 每帧清 bit2 ⇒ 可能把 7 帧动效压成 1 帧）。**2026-11-26 最终模型下插件⛔ 不写 bit2**
+    ⇒ 动效完全由引擎控制，这条压制风险不存在。留在这里只为说明旧实现为什么必须删。

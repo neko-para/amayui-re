@@ -1019,20 +1019,23 @@ export default plugin;   // 宿主 QJS 读 default 导出；⛔ 不读 globalThi
 - **三个内建插件的域**（配置的 owner 表见 `apps/emulator-lift/scripts/plugins/README.md`）：
   `save`（根入口 `load-save.js`，库是 `lib/save.js`）/ `scenario.save10-field`（根 `scenario-save10-field.js`，
   key `slot`/`expect`）/ `field.point-visible`（根 `field-point-visible.js`，
-  key `on`/`static`/`types`/`diag`（判据 = **已知脚本位置**：三条
-  `afterPosition(…, { mode:"reenter" })` —— `FIELD.BIN` 的 `[0x18280,0x18284)` / `[0x35168,0x3517C)`
-  两条 setmap 返回点，加 `RENDERMAP.BIN` 的 `[0x0B04,0x0B10)`（#118 `call-script 5117` = DRAWOBJ、
-  SETOBJ 之后 / DRAWOBJ 之前，`name = "fp:draw"`）；⛔ 不轮询（没有 `afterDelay` / `poll` /
-  `FIELD_MAIN_LOOP`）；旧配置的 `poll` 无害忽略）——
-  ★ 它是**常驻开关**：⛔ 不读档、⛔ 不点鼠标、⛔ 不 `finish`；施加 = 两条 setmap 钩子对类型命中的槽
-  `|= 0x5`（`DRAWOBJ` 的 bit0=画 / bit2=动效 alpha），**不清位**（bit1 留给 A 链格表与战利品抽取）；
-  `fp:draw` 每渲染帧再施加一次（先 `|= 0x5`、再按引擎自己的静态门决定 bit2）：门成立 ⇒ **清 bit2**
-  （静态 `MO031B/32B` 可见、动效 alpha 0）、门不成立 ⇒ 保留 bit2（动效，点不消失）。
-  ★ **为什么必须在 `RENDERMAP` 的 DRAWOBJ 调用点**：`SETOBJ` #2 每次 `fill-zero (global-int 50ff9f) 32`
-  再逐槽重算 ⇒ 插件写在派生位上的值在同一次渲染里被抹掉；`FIELD [0x253C,0x2550)` 在 SETOBJ **之前**，
-  只有退图 / STAGE COMPLETE 那条不走 SETOBJ 的 DRAWOBJ 调用看得到它。写集只有 `50ff9f+slot`，
-  `25c00`/`14d73c`/`14d76e`/`14d8cc`/`eb5c1`/`511080` 只读；`static=0` ⇒ 这些读一个都不做。
-  `fp:draw` 每帧 fire ⇒ 日志只在首帧 / 状态变化时一行（`diag=1` 每 60 帧一行），⛔ 不每帧刷屏。
+  key `on`/`types`/`diag`（判据 = **已知脚本位置**：一条
+  `afterPosition(…, { mode:"reenter" })` —— `DRAWOBJ.BIN` 的 `[0x003C,0x06BC)`，即
+  #0 `detach-texture` → 点位槽循环尾的**入口窗口**，`name = "fp:draw"`；全语料 4 处
+  `call-script 5117` 全部从这里进 ⇒ 一条钩子覆盖全部调用者；⛔ 不轮询（没有 `afterDelay` / `poll` /
+  `FIELD_MAIN_LOOP`）；旧配置的 `static` / `poll` 无害忽略）——
+  ★ 它是**常驻开关**：⛔ 不读档、⛔ 不点鼠标、⛔ 不 `finish`；施加 = 对类型命中的槽
+  **只补 `50ff9f` 的 bit0**（`flags | 0x1`；`DRAWOBJ` 的 bit0=1 才画），**⛔ bit1 / bit2 一个都不写**。
+  ★ **为什么只补 bit0**：`SETOBJ` #2 每渲染帧 `fill-zero (global-int 50ff9f) 32` 后逐槽按"发现 / 触发
+  状态"重算 ⇒ bit1（静态门的一半）/ bit2（静态↔动效选择位）**由引擎决定**；插件强加 bit2 的旧写法
+  `|= 0x5` 才会出现"没采集过的点也在动"（真机读数 2026-11-26 / 存档 012：slot3 `0x5` = 已触发 ⇒ 动效，
+  slot4/5/6 `0x3` = 未采集 ⇒ 静态）。
+  ★ **为什么必须在 `DRAWOBJ` 入口**：同一渲染帧的 `RENDERMAP` 先 SETOBJ（`fill-zero` 再重算）⇒ 插件
+  写在派生表上的位必被抹掉；两条 `FIELD.BIN` setmap 钩子因此已删（写在 SETOBJ 之后但同帧就被重算）。
+  写集只有 `50ff9f+slot` 的 bit0；读只有 `50ffd1+slot`（类型）与 `50ff9f+slot`（flags）；
+  `25c00` / `14d73c` / `14d76e` / `14d8cc` / `eb5c1` / `511080` **一个都不读也不写**。
+  `fp:draw` 每帧 fire ⇒ 日志只在首帧 / `matched/patched` 变化时一行（逐槽行只为真的改了的槽；
+  `diag=1` 每 60 帧一行），⛔ 不每帧刷屏。
   `?`/`!` 是 A 链格标记、不是点位。旧配置里的 `slot`/`hold` 被**无害忽略**。验收时**玩家自己读档**，见
   `docs/03-emulator/scripts/FIELD.md` §⑦）。
   三者一律"先看 `ctx.config.available` 再回退 params"；`on:0` / `slot:0` 这种 falsy 值也算"给了"

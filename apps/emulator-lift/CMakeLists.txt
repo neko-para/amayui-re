@@ -3173,12 +3173,12 @@ if(LIFT_BUILD_TESTS)
     #   ① 静态（剥注释后扫**代码**，零资产）：模块里没有输入写面（`ctx.input`）/ 没有读档链
     #      （`loadSave` / `bootToTitle` / `save.js` / `boot-to-title.js` / `chains.js`）/ 不自己收口
     #      （`ctx.finish` / `ctx.quit`）；同一条用例还断言它仍写着该写的链（`forceFieldPointsVisible`
-    #      + `afterPosition` + `reenter` + 两个 setmap 区间 `FIELD_SETMAP_A/B` + 地图实例号），
+    #      + `afterPosition` + `reenter` + `DRAWOBJ.BIN` / `DRAWOBJ_ENTRY_LO`/`HI` / `fp:draw`），
     #      且**没有** `FIELD_MAIN_LOOP` / `afterDelay` / `poll` ⇒ "禁令全过"不能靠一个空文件达成。
     #   ② 端到端（真子进程 `--present headless --plugin field-point-visible`，**无** `--input-plan`）：
     #      Run 常驻（readout `run=waiting` + 摘要 `stop      : time-limit` + exit 0 + `calls>=1`）；
     #      stdout/stderr 没有 `boot:` / `load:` / `load-save:` / `[input-script]` / `input-plan:` 行；
-    #      首行 `field-points:` 日志带 `on=0`，且没有 `forced=` / `field-points: setmap` ⇒ "关着就什么也不做"可读。
+    #      首行 `field-points:` 日志带 `on=0`，且没有 `field-points: draw` ⇒ "关着就什么也不做"可读。
     # ★ **档位 = pure**（`add_test` 在顶层 `if(LIFT_BUILD_TESTS)` 里 ⇒ `cmakeTestTier()` 把该 if 当透明；
     #   `AGENTS.md` §12.4 判据 = 注册位置）。静态那一段零资产、任何机器都跑；端到端要安装树 / 执行源 /
     #   GPU / 宿主字体 ⇒ 缺了用例自己 `LIFT_SKIP(77)`（与 `plugin-headless` 同一条口径：输入假定在场）。
