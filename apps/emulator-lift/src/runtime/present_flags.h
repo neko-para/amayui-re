@@ -135,25 +135,28 @@ inline constexpr const char* kWindowFlagsAot =
 //   `REQ-01M7JZM1QQ728KX1C0G2F232T1` = S3 泵 / S4 出声）。
 //   守卫 `cli-aot-flags` 按**形态**判（必须出现 `REQ-`、且不许出现 `TODO(`）——换单号不会让它红。
 // =====================================================================================
+// ★ 2026-11-27（默认档清理）：这条**只留一行**。多行解释 / 建议用法属于 `--help` 的文案
+//   （`kAotSoundHelp`），⛔ 不在默认档逐次打；这里保留的只是"参数被接受 + 与代码同形"的一行通告
+//   （CTest `cli-aot-flags` 的 `sound-accepted-with-once-notice` 按 `--sound 已接受` 认它，
+//    并要求恰好一次；⛔ 不要删掉这行，否则那条用例会红）。
 inline constexpr const char* kAotSoundNotice =
-    "emulator-lift-aot: --sound 已接受：取消缺省静音门（muted=0），并真正传给音频引擎"
-    "（不再是硬写 false）\n"
-    "  · 档位由 --audio 决定（缺省 off / sdl）；--audio-dump <path> 把交付缓冲写成 WAV\n"
-    "  · 音频泵在**块边界**推进（每 4096 条 guest 指令一次；sdl + 墙钟档是真 feeder 线程，\n"
-    "    其余档是主线程 D 泵；sdl 打不开设备 ⇒ 没有输出、不跑混音）\n"
-    "  · 读数：**仅当给了 --audio sdl 或 --audio-dump 时**，收口时 stdout 才有 "
-    "`audio     :` 一行（mode / device / muted / muted_bytes / …）与 `audio-pump:` 一行"
-    "（calls / fills / fill_bytes / pushed）；只给 --sound 时档位是 off ⇒ **这两行都不存在**\n"
-    "  · --audio-dump 的 WAV = 44 字节头 + 这一跑**真交付**（mixed）的字节（data 记在头里）："
-    "没有真交付时它就是 44 字节（data=0）—— S3 接泵之后也**不保证**有 PCM\n"
-    "  · 判断\"有没有 PCM\"看 fills / fill_bytes / mixed / pushed，⛔ 别只看文件在不在\n"
-    "  · 跟踪单：REQ-01M7G7GPBG9BK2360WSG6DBFNP（S0 定档 / S1 参数面 / S2 生命周期）、"
-    "REQ-01M7JZM1QQ728KX1C0G2F232T1（S3 泵）\n";
+    "emulator-lift-aot: --sound 已接受：取消缺省静音门（muted=0），档位仍由 --audio 决定"
+    "（缺省 off ⇒ 无输出；读数与 WAV 口径见 --help；跟踪单 "
+    "REQ-01M7G7GPBG9BK2360WSG6DBFNP / REQ-01M7JZM1QQ728KX1C0G2F232T1）\n";
 
-/** `--help` 里 AOT 臂 `--sound` 那一行（与上面那条说明同一口径：接受，且真的进静音门）。 */
+/** `--help` 里 AOT 臂 `--sound` 那一行（与上面那条说明同一口径：接受，且真的进静音门）。
+ *  ★ 多行解释只在这里（`--help` / 显式档），⛔ 不在默认档打。 */
 inline constexpr const char* kAotSoundHelp =
     "  --sound              取消缺省静音门（muted=0）；档位仍由 --audio 决定\n"
-    "                      （缺省 off ⇒ 不开设备 / 不产生 PCM；读数 `audio     :` 一行**只在**\n"
-    "                      给了 --audio sdl 或 --audio-dump 时才有）\n";
+    "                      （缺省 off ⇒ 不开设备 / 不产生 PCM）。\n"
+    "                      ★ 读数：**仅当给了 --audio sdl 或 --audio-dump 时**，收口时 stdout\n"
+    "                      才有 `audio     :` 一行（mode / device / muted / muted_bytes / …）与\n"
+    "                      `audio-pump:` 一行（calls / fills / fill_bytes / pushed / feeder /\n"
+    "                      lead / dev_frames）；只给 --sound 时档位是 off ⇒ **这两行都不存在**。\n"
+    "                      ★ 音频泵在**块边界**推进（每 4096 条 guest 指令一次；sdl + 墙钟档是\n"
+    "                      真 feeder 线程，其余档是主线程 D 泵；sdl 打不开设备 ⇒ 没有输出、\n"
+    "                      不跑混音）。--audio-dump 的 WAV = 44 字节头 + 这一跑**真交付**\n"
+    "                      （mixed）的字节（没有真交付 ⇒ data=0；⛔ 不保证有 PCM；判断\"有没有\n"
+    "                      PCM\"看 fills / fill_bytes / mixed / pushed，⛔ 别只看文件在不在）。\n";
 
 }  // namespace lift

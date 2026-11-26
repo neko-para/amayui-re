@@ -334,9 +334,11 @@ public:
     const VirtualClock& clock() const { return clock_; }
 
     // ⑤ 读数（bring-up 结束时的"起点"快照）。
-    //   ★ `region_log` = `--region-log`（缺省关）：只闸 `regions   :` 那一整块（28 行），
-    //     ⛔ 别的 readout（exe / PE / 导入 / 地址与服务面 / pin / 缺口）一格都不收。
-    void printReadout(std::FILE* out, bool region_log) const;
+    //   ★ `region_log` = `--region-log`（缺省关）：只闸 `regions   :` 那一整块（28 行）。
+    //   ★ `detail` = `--log-level info` 及以上（**缺省 warn ⇒ 不打**）：闸"这台机器怎么装配"的
+    //     展开内容（exe / PE 头与节表 / 导入模块表 / shim 装配 / 栈 / 堆 / TEB / argv / cpu 初值 /
+    //     地址 / 服务面 / owner）。判据面（`pin` 与 `stop` / `frames` / `plugin` …）⛔ 不在这个门里。
+    void printReadout(std::FILE* out, bool region_log, bool detail) const;
     // ⑥ 跑完的摘要（停因 / EA / insns / frames / 派发表读数）。
     //   ★ `--profile` 的整块读数（`=== profile (sampling: …) ===` + 四张表 + `freq:`）也由它在
     //     **最后**打印 —— 这就是"落 stdout 末尾（进程退出前）"的落点（`aot_main.cpp` 在它之后

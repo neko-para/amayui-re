@@ -32,6 +32,7 @@
 #include "aot/call_diag.h"    // 临时诊断：`LIFT_CALL_DIAG=1`（缺省零输出 / 每派发一次表查找判定）
 #include "aot/memcpy_diag.h"  // 临时诊断：`LIFT_MEMCPY_DIAG=1`（缺省零输出 / 每派发一次 bool）
 #include "runtime/lift_intrinsics.h"  // `--no-intrinsics`（只关闸门；A/B 与诊断）
+#include "runtime/log.h"       // `--log-level`（缺省 warn）：闸 `probe` 这类启动细节
 #include "runtime/control.h"  // Control（PIMPL 门面：⛔ 不含 beast / nlohmann / guest 头）
 #include "runtime/fault_state.h"  // guest fault 现场（AOT 没有 Machine；只登记 / 清除，零周期输出）
 #include "runtime/guest_token.h"  // Phase-0 的 `arm()`（与解释器 `Machine::run` 同一个单例）
@@ -1153,7 +1154,10 @@ AotRunResult AotHost::run(const AotRunOptions& opts) {
     // ---- D28 的新增读数：派发表（开放寻址）的**探测分布**（probes avg / max / cap / load factor）----
     // ★ 为什么落在这里：既有那行 `table : …` 在 `aot_host.cpp`（本轮改动面不含它）⇒ 新读数由
     //   `aot_dispatch.cpp` 自己出、在这里打；`printProbeLine` 只读计数器，⛔ 不影响停机判据。
-    printProbeLine(stdout);
+    // ★ **启动细节门**（2026-11-27 默认档清理）：`probe` 的 cap / load / build_max 是"表怎么建的"
+    //   静态读数，`table :` 已经给了本轮的 entries / lookups / hits / misses ⇒ 只在
+    //   `--log-level info` 及以上打。缺省 warn ⇒ 默认档不再多这一行（⛔ 不改任何计数）。
+    if (logConfig().level >= LogLevel::Info) printProbeLine(stdout);
     if (r.reason == AotStop::None) {
         // ★ 解释器里这一档是**静默缝**（`RunResult::ok()` 为假 ⇒ 退出码 2 但摘要写 `stop: none`）；
         //   本臂把它变成一条点名的响亮错（⛔ 不给"没原因"留门）。

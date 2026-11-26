@@ -167,9 +167,13 @@ void usage() {
         "                      才有（否则 `-`）。⛔ 不每帧 / 不每块打；缺省档一条都不打\n"
         "                      （缺 --input-plan 时本参数无输出，⛔ 不报错）\n"
         "%s"
-        "  --log-level <L>     日志级别：quiet|error|warn|info|debug|trace（**缺省 warn** ⇒ 默认档输出\n"
-        "                      逐字不变）。★ `[audio] mode=… feeder=… lead=…` 与 `LIFT_AUDIO_TRACE` 的\n"
-        "                      `play state=…` 都是 **info** 级 ⇒ 要看它们就给 `--log-level info`。\n"
+        "  --log-level <L>     日志级别：quiet|error|warn|info|debug|trace（**缺省 warn**）。\n"
+        "                      缺省档只打**这一次 run 的骨架**（形状 / pin / stop / frames / insns /\n"
+        "                      dispatch / table / present / plugin / skip-logo / recovery …）；\n"
+        "                      **info** 及以上额外打**启动细节**（exe / PE 头与节表 / 导入模块表 /\n"
+        "                      shim 装配 / 栈 / 堆 / TEB / argv / cpu 初值 / 服务面 / vfs / probe）。\n"
+        "                      ★ `[audio] mode=… feeder=… lead=…` 与 `LIFT_AUDIO_TRACE` 的\n"
+        "                      `play state=…` 也都是 **info** 级 ⇒ 要看它们就给 `--log-level info`。\n"
         "  --dump-frame <path> 每次 Present 导出一份 guest 后缓冲 BMP（{frame} = 4 位帧号）\n"
         "  --profile           采样式内部 profile（**缺省关**）：每帧时间戳 + 派发 / lift_one / shim\n"
         "                      归因 + 机器频率校准；采样率 = dispatch 1/4096、lift_one 1/1024、\n"
@@ -190,8 +194,9 @@ void usage() {
         "                      `present :` 行。`--profile` 档也会打这一条（已有 profile 存档的可比面）\n"
         "  --region-log        启动 readout 末尾打 guest 区域表（`regions   :` 一行 + 每段一行，共 28 行；\n"
         "                      **缺省关**）：那是**静态布局快照**（谁占了哪一段），一次 run 里不变，\n"
-        "                      属噪音 ⇒ 缺省档不打。⛔ 只影响这一块，别的 readout（exe / PE / 导入 /\n"
-        "                      地址与服务面 / pin / 缺口 / 停机原因）一格都不收\n"
+        "                      属噪音 ⇒ 缺省档不打。它与 `--log-level info` 的**启动细节**是两个门：\n"
+        "                      `info` 打 exe / PE 头与节表 / 导入模块表 / 地址与服务面，本开关只加区域表；\n"
+        "                      判据行（pin / stop / frames / plugin / skip-logo / recovery）⛔ 都不受它们影响\n"
         "  --no-intrinsics      **只给 A/B 与诊断**：关掉构建期库内建闸门（缺省 = 开）。IR 里的闸门块 /\n"
         "                      快路径仍在（构建期决定），闸门返回 false ⇒ 回退原 lifted 函数体；\n"
         "                      ⛔ 不是运行期 override（不替换任何执行来源）\n"
@@ -593,10 +598,11 @@ int main(int argc, char** argv) {
             // ★ 与已退役解释器臂同一个字段（`cpu.shim.frame_dump`）；D3D9 Present 消费。
             if (!needValue("--dump-frame", &frame_dump)) return 2;
         } else if (a == "--log-level") {
-            // ★ 日志级别（**缺省 warn** ⇒ 默认档输出逐字不变）。AOT 臂过去没有这个开关，
-            //   于是 `[audio] mode=…`（Info）与 `LIFT_AUDIO_TRACE` 的 `play state=` 在 AOT 上
-            //   永远看不见 —— 那会让音频验收的"读数面"假绿。值域 = `runtime/log.h` 的
-            //   `logParseLevel`（唯一一份），⛔ 不在这里另写一份字符串表。
+            // ★ 日志级别（**缺省 warn** ⇒ 默认档只打这一次 run 的骨架；启动细节要 info）。
+            //   AOT 臂过去没有这个开关，于是 `[audio] mode=…`（Info）与 `LIFT_AUDIO_TRACE` 的
+            //   `play state=` 在 AOT 上永远看不见 —— 那会让音频验收的"读数面"假绿。值域 =
+            //   `runtime/log.h` 的 `logParseLevel`（唯一一份），⛔ 不在这里另写一份字符串表。
+            //   ★ 2026-11-27 起它同时是**启动细节的唯一门**（见下面 `startup_detail` 的定义）。
             std::string level;
             if (!needValue("--log-level", &level)) return 2;
             if (!lift::logSetLevel(level.c_str())) {
@@ -822,6 +828,15 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+    // ★ **启动细节的唯一门**（`--log-level info` 及以上；缺省 warn ⇒ 关）。
+    //   为什么用 `--log-level` 而不是新开 `--startup-detail`：那会与 `--log-level` 语义重叠
+    //   （同一件事两个开关，且两者可以给出互相矛盾的"我现在要不要细节"）。`info` 本来就是
+    //   "比 warn 多"的档；启动细节（PE 头 / 节表 / 导入模块表 / guest 地址空间 / 服务面 /
+    //   vfs / probe）是**静态装配展开**，一次 run 里不变 ⇒ 默认档只留"这一次 run 发生了什么"的骨架。
+    //   ⛔ 判据面（`pin` / `stop` / `frames` / `insns` / `dispatch` / `table` / `present` /
+    //   `plugin` / `skip-logo` / `recovery`）不在这个门里。
+    const bool startup_detail = lift::logConfig().level >= lift::LogLevel::Info;
+
     // ★ S1：`--audio` 的值域判据**只有一份**（`runtime/audio_policy.h` 的 `parseAudioMode`）。
     //   ⛔ 不放宽成"认不出就当 off"：非法值仍 exit 2，并**点名合法值域**（人照它改）。
     const lift::AudioModeParse audio_parse = lift::parseAudioMode(audio_mode.c_str());
@@ -1404,7 +1419,7 @@ int main(int argc, char** argv) {
                      "   （构建仍然成功，但**不能执行**）。⛔ 不静默跑成空壳：只打 bring-up 读数后 exit 1。\n"
                      "   修：装上 clang（`clang --version`）并确认执行源在场后重新 configure / build。\n\n");
         std::printf("emulator-lift-aot: Shape A —— bring-up 读数（**没有生成物，未执行任何 guest 指令**）\n");
-        host.printReadout(stdout, run_opts.region_log);
+        host.printReadout(stdout, run_opts.region_log, startup_detail);
         std::fflush(stdout);
         return 1;
     }
@@ -1511,20 +1526,23 @@ int main(int argc, char** argv) {
     std::printf("raster    : %s%s\n", host.gpuRaster() != nullptr ? host.gpuRaster()->rasterName() : "(nullptr)",
                 present_mode == "headless" ? "（headless 离屏；**隐藏**窗口，不出现可见窗口）" : "");
     std::printf("present   : %s\n", sdl_display->describe().c_str());
-    // ★ C5/C8 的**一次性**启动 readout（§12.8 第 3 条：一次性输出 ⛔ 不许收；缺省档也打）：
-    //   "这一趟路径解析的两层记忆是开还是关"（读数**从 Vfs 自己的状态取**，⛔ 不抄 CLI 变量）。
+    // ★ C5/C8 的**启动细节**（2026-11-27 默认档清理）：这一行是**配置回显** —— "这一趟路径解析
+    //   的两层记忆是开还是关"（读数**从 Vfs 自己的状态取**，⛔ 不抄 CLI 变量），一次 run 里不变
+    //   ⇒ 只在 `--log-level info` 及以上打；默认档只留"这一次 run 发生了什么"的骨架。
     //   `dir-index` 的 on/off 是**开关**；它是否真的生效还要看写覆盖层（`--appdata`）。
-    {
+    if (startup_detail) {
         const lift::Vfs& vfs = host.vfs();
         std::printf("vfs-paths : dir-index=%s resolve-cache=%s（安装树目录索引 / 正解析缓存；"
                     "A/B: --vfs-dir-index 0）\n",
                     vfs.dirIndexEnabled() ? "on" : "off", vfs.positiveCacheEnabled() ? "on" : "off");
     }
-    // ★ `--cursor-warp` 的**有效状态**一行（缺省关）：`on` / `off` / `on-but-hidden` / `unsupported`。
+    // ★ `--cursor-warp` 的**有效状态**一行：`on` / `off` / `on-but-hidden` / `unsupported`。
     //   与 `describe()` 里的 `cursor-warp=on|off`（sink 自己的开关）分工不同 —— 这一行回答
     //   "这轮真的会不会挪宿主光标"（含"开关开着但窗口是隐藏的"这种静默失效）。
     //   ★ 判据与四个状态名只有一份（`runtime/present_flags.h`），与解释器臂逐字相同。
-    {
+    //   ★ 2026-11-27：这行归**启动细节**（`--log-level info`）；默认档的同一事实仍由上面
+    //     `present   : …` 的 `cursor-warp=on|off`（与收口摘要的 `present   : …`）给出。
+    if (startup_detail) {
         const lift::CursorWarpState st =
             lift::cursorWarpState(cursor_warp, lift::hostCursorPlatformSupported(), sdl_display->windowHidden());
         std::printf("cursor-warp: %s\n", lift::cursorWarpStateName(st));
@@ -1547,11 +1565,13 @@ int main(int argc, char** argv) {
         }
         std::printf("%s\n", lift::scaleReadoutLine(scale_report).c_str());
     }
-    host.printReadout(stdout, run_opts.region_log);
-    // ★ 构建期库内建的**一次性**启动 readout（§12.8 第 3 条：一次性输出 ⛔ 不许收）：
-    //   这一趟的二进制到底带了哪几个内建 EA（来自 `lift_pin.h` 的已校验列表，⛔ 不在运行期读表文件）。
+    host.printReadout(stdout, run_opts.region_log, startup_detail);
+    // ★ 构建期库内建的**启动细节**（2026-11-27 默认档清理）：这一趟的二进制到底带了哪几个内建 EA
+    //   （来自 `lift_pin.h` 的已校验列表，⛔ 不在运行期读表文件）是**构建形状回显**，一次 run 里不变
+    //   ⇒ 只在 `--log-level info` 及以上打。收口的 `intrinsics: fast=/decline=/disabled=` 计数
+    //   （本文件末尾）仍然默认打 —— 那才是"这一次 run 发生了什么"。
     //   `--no-intrinsics` 只关闸门；IR 里的闸门块 / 快路径是构建期决定的 ⇒ 这里如实说 "off"。
-    {
+    if (startup_detail) {
         const std::size_t ni = lift::aot::pinnedIntrinsicCount();
         std::string line = "intrinsics: ";
         if (ni == 0) {

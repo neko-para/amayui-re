@@ -411,96 +411,105 @@ const GpuRaster* AotHost::gpuRaster() const {
     return s != nullptr ? const_cast<PresentSink*>(s)->gpuRaster() : nullptr;
 }
 
-void AotHost::printReadout(std::FILE* out, bool region_log) const {
+void AotHost::printReadout(std::FILE* out, bool region_log, bool detail) const {
     if (out == nullptr) return;
 
-    // ---- 镜像身份（一行）+ 节表 ----
-    std::fprintf(out, "exe       : %s\n", exe_path_.c_str());
-    std::fprintf(out,
-                 "image     : base=%08X entry=%08X size_of_image=%08X headers=%08X sections=%zu "
-                 "imports=%zu sha256=%s\n",
-                 image_.image_base, image_.entry_ea, image_.size_of_image, image_.size_of_headers,
-                 image_.sections.size(), image_.imports.size(), image_.sha256.c_str());
-    for (const PeSectionInfo& s : image_.sections) {
-        // 格式照 main.cpp 的 Verbose 节表行（同一份读数，⛔ 不另立一套字段名）
-        std::fprintf(out, "  %-8s va=%08X vsize=%8X raw=%8X flags=%08X\n", s.name, s.va, s.vsize,
-                     s.raw_size, s.characteristics);
+    // ---- 启动细节（**只给 `--log-level info` 及以上**；缺省 warn ⇒ 一行都不打）----
+    //   ★ 这些是"这台机器怎么装配"的**展开**（PE 头 / 节表 / 导入模块表 / guest 地址空间 /
+    //     服务面），一次 run 里不变 ⇒ 默认档只留"这一次 run 发生了什么"的骨架
+    //     （`pin` 在下面，任何档都打）。⛔ 判据面（`stop` / `frames` / `plugin` / `skip-logo` /
+    //     `recovery` …）不在这个门里。
+    if (detail) {
+        // ---- 镜像身份（一行）+ 节表 ----
+        std::fprintf(out, "exe       : %s\n", exe_path_.c_str());
+        std::fprintf(out,
+                     "image     : base=%08X entry=%08X size_of_image=%08X headers=%08X sections=%zu "
+                     "imports=%zu sha256=%s\n",
+                     image_.image_base, image_.entry_ea, image_.size_of_image, image_.size_of_headers,
+                     image_.sections.size(), image_.imports.size(), image_.sha256.c_str());
+        for (const PeSectionInfo& s : image_.sections) {
+            // 格式照 main.cpp 的 Verbose 节表行（同一份读数，⛔ 不另立一套字段名）
+            std::fprintf(out, "  %-8s va=%08X vsize=%8X raw=%8X flags=%08X\n", s.name, s.va, s.vsize,
+                         s.raw_size, s.characteristics);
+        }
+
+        // ---- 导入表：总数 + 按模块分组（分组是"静态缺口在哪一族"的第一手读数）----
+        std::map<std::string, std::size_t> by_module;
+        for (const PeImportInfo& imp : image_.imports) by_module[imp.module]++;
+        std::fprintf(out, "imports   : total=%zu modules=%zu\n", image_.imports.size(), by_module.size());
+        for (const auto& kv : by_module) {
+            std::fprintf(out, "  %-14s %zu\n", kv.first.c_str(), kv.second);
+        }
+
+        // ---- shim：注册条数 / 绑定到的唯一桩地址数 / 未实现缺口 ----
+        std::size_t with_stub = 0;
+        std::size_t implemented_imported = 0;
+        for (const ShimDef& d : shims_.all()) {
+            if (d.stub_ea != 0) ++with_stub;
+            if (d.imported && d.fn != nullptr) ++implemented_imported;
+        }
+        std::fprintf(out,
+                     "shim      : registered=%zu imported=%zu implemented=%zu gaps=%zu bound-stub-ea=%zu | "
+                     "page=%08X slots=%u next-slot=%u\n",
+                     shims_.size(), shims_.importedCount(), implemented_imported,
+                     shims_.importedButUnimplemented().size(), with_stub, shims_.stubPage(),
+                     shims_.stubSlots(), shims_.nextStubSlot());
+
+        // ---- 栈 / 堆 / TEB ----
+        const std::uint32_t esp_sentinel =
+            mem_.committed(cpu_.esp(), 4u) ? mem_.rd32(cpu_.esp()) : 0xDEADBEEFu;
+        std::fprintf(out,
+                     "stack     : top=%08X bottom=%08X guard=[%08X,%08X) esp=%08X [esp]=%08X%s\n",
+                     setup_.stack_top, setup_.stack_bottom,
+                     layout_.stack_top - layout_.stack_size - layout_.stack_guard,
+                     layout_.stack_top - layout_.stack_size, cpu_.esp(), esp_sentinel,
+                     esp_sentinel == 0xFFFFFFFFu ? "（0xFFFFFFFF = 返回地址哨兵）" : "（⚠ 哨兵没写上）");
+        std::fprintf(out, "heap      : base=%08X end=%08X size=%08X blocks=%zu\n", heap_.begin(), heap_.end(),
+                     heap_.end() - heap_.begin(), heap_.blockCount());
+        std::fprintf(out, "teb       : teb=%08X peb=%08X tls_array=%08X fs_base=%08X\n", setup_.teb, setup_.peb,
+                     layout_.tls_array_ea, cpu_.fs_base);
+        std::fprintf(out, "guest-exe : \"%s\"（cmdline=\"%s\"）\n", setup_.guest_exe_path.c_str(),
+                     setup_.cmdline.c_str());
+        std::fprintf(out,
+                     "argv      : cmdline_ea=%08X exe_path_ea=%08X env_ea=%08X（env 项 %zu 个：%s）\n",
+                     setup_.cmdline_ea, setup_.exe_path_ea, setup_.env_ea,
+                     vfs_.guestEnvironment().size(), setup_.environment_ansi.c_str());
+
+        // ---- cpu 初始状态（"起点"读数）+ 宿主侧装配面 ----
+        std::fprintf(out,
+                     "cpu       : eip=%08X esp=%08X ebp=%08X eax=%08X ebx=%08X ecx=%08X edx=%08X esi=%08X "
+                     "edi=%08X eflags=%08X gs_base=%08X\n",
+                     cpu_.eip, cpu_.esp(), cpu_.ebp(), cpu_.eax(), cpu_.ebx(), cpu_.ecx(), cpu_.edx(),
+                     cpu_.esi(), cpu_.edi(), cpu_.eflags, cpu_.gs_base);
+        std::fprintf(out, "va        : va_cursor=%08X va_limit=%08X vm=%s\n", cpu_.shim.va_cursor,
+                     cpu_.shim.va_limit, mem_.safeMode() ? "safe-memory" : "fault-handler");
+        // ---- 宿主服务装配面（shim 依赖的是**接口**，不是解释模型 —— D4）----
+        // ★ `gpuRaster` 现在是**真读数**（不再是硬 nullptr）：`presenting` 转给 sink 之后，
+        //   3D 的像素路径与解释器臂才是同一条（W0 C10 Ⓐ）。
+        const GpuRaster* gr = gpuRaster();
+        std::fprintf(out,
+                     "services  : host=%s ownsCpu=1 hasNestedGuestExecutor=0 | surfaces.ready=%d "
+                     "presenter=%s seh=ready decoder=ready gpuRaster=%s"
+                     " | clock=%s handles=%s com=%s "
+                     "calls=%s windows=%s fonts=%s audio=%s\n",
+                     cpu_.host != nullptr ? "self" : "nullptr", surfaces_.ready() ? 1 : 0,
+                     presenter_.hasSink() ? "sink" : "headless(no-sink)",
+                     gr == nullptr ? "nullptr"
+                                   : (gr->rasterActive() ? gr->rasterName() : "inactive（后端建了但没激活）"),
+                     clock_.realTime() ? "real-time" : "virtual",
+                     cpu_.handles != nullptr ? "yes" : "no", cpu_.com != nullptr ? "yes" : "no",
+                     cpu_.calls != nullptr ? "yes" : "no", cpu_.windows != nullptr ? "yes" : "no",
+                     cpu_.fonts != nullptr ? "yes" : "no",
+                     // ★ 读**配置**事实（`configuredMode()`），不是 `mode()`：readout 打在 `run()` 的
+                     //   `begin()` **之前**，那时 `mode_` 还是 Off ⇒ 用 `mode()` 会让 `--audio sdl`
+                     //   的 bring-up 读数写一句假的 `audio=off`（真实的档位 / `device=ok|none`
+                     //   在收口的 `audio     :` 一行）。缺省档两者同为 `off` ⇒ 默认档读数逐字不变。
+                     cpu_.audio != nullptr ? audioModeName(audio_.configuredMode()) : "no");
+        std::fprintf(out, "owner     : cpu.machine=nullptr（AOT 有意没有 Machine）+ cpu.host=this\n");
     }
-
-    // ---- 导入表：总数 + 按模块分组（分组是"静态缺口在哪一族"的第一手读数）----
-    std::map<std::string, std::size_t> by_module;
-    for (const PeImportInfo& imp : image_.imports) by_module[imp.module]++;
-    std::fprintf(out, "imports   : total=%zu modules=%zu\n", image_.imports.size(), by_module.size());
-    for (const auto& kv : by_module) {
-        std::fprintf(out, "  %-14s %zu\n", kv.first.c_str(), kv.second);
-    }
-
-    // ---- shim：注册条数 / 绑定到的唯一桩地址数 / 未实现缺口 ----
-    std::size_t with_stub = 0;
-    std::size_t implemented_imported = 0;
-    for (const ShimDef& d : shims_.all()) {
-        if (d.stub_ea != 0) ++with_stub;
-        if (d.imported && d.fn != nullptr) ++implemented_imported;
-    }
-    std::fprintf(out,
-                 "shim      : registered=%zu imported=%zu implemented=%zu gaps=%zu bound-stub-ea=%zu | "
-                 "page=%08X slots=%u next-slot=%u\n",
-                 shims_.size(), shims_.importedCount(), implemented_imported,
-                 shims_.importedButUnimplemented().size(), with_stub, shims_.stubPage(),
-                 shims_.stubSlots(), shims_.nextStubSlot());
-
-    // ---- 栈 / 堆 / TEB ----
-    const std::uint32_t esp_sentinel = mem_.committed(cpu_.esp(), 4u) ? mem_.rd32(cpu_.esp()) : 0xDEADBEEFu;
-    std::fprintf(out,
-                 "stack     : top=%08X bottom=%08X guard=[%08X,%08X) esp=%08X [esp]=%08X%s\n",
-                 setup_.stack_top, setup_.stack_bottom,
-                 layout_.stack_top - layout_.stack_size - layout_.stack_guard,
-                 layout_.stack_top - layout_.stack_size, cpu_.esp(), esp_sentinel,
-                 esp_sentinel == 0xFFFFFFFFu ? "（0xFFFFFFFF = 返回地址哨兵）" : "（⚠ 哨兵没写上）");
-    std::fprintf(out, "heap      : base=%08X end=%08X size=%08X blocks=%zu\n", heap_.begin(), heap_.end(),
-                 heap_.end() - heap_.begin(), heap_.blockCount());
-    std::fprintf(out, "teb       : teb=%08X peb=%08X tls_array=%08X fs_base=%08X\n", setup_.teb, setup_.peb,
-                 layout_.tls_array_ea, cpu_.fs_base);
-    std::fprintf(out, "guest-exe : \"%s\"（cmdline=\"%s\"）\n", setup_.guest_exe_path.c_str(),
-                 setup_.cmdline.c_str());
-    std::fprintf(out,
-                 "argv      : cmdline_ea=%08X exe_path_ea=%08X env_ea=%08X（env 项 %zu 个：%s）\n",
-                 setup_.cmdline_ea, setup_.exe_path_ea, setup_.env_ea,
-                 vfs_.guestEnvironment().size(), setup_.environment_ansi.c_str());
-
-    // ---- cpu 初始状态（"起点"读数）+ 宿主侧装配面 ----
-    std::fprintf(out,
-                 "cpu       : eip=%08X esp=%08X ebp=%08X eax=%08X ebx=%08X ecx=%08X edx=%08X esi=%08X "
-                 "edi=%08X eflags=%08X gs_base=%08X\n",
-                 cpu_.eip, cpu_.esp(), cpu_.ebp(), cpu_.eax(), cpu_.ebx(), cpu_.ecx(), cpu_.edx(),
-                 cpu_.esi(), cpu_.edi(), cpu_.eflags, cpu_.gs_base);
-    std::fprintf(out, "va        : va_cursor=%08X va_limit=%08X vm=%s\n", cpu_.shim.va_cursor,
-                 cpu_.shim.va_limit, mem_.safeMode() ? "safe-memory" : "fault-handler");
-    // ---- 宿主服务装配面（shim 依赖的是**接口**，不是解释模型 —— D4）----
-    // ★ `gpuRaster` 现在是**真读数**（不再是硬 nullptr）：`presenting` 转给 sink 之后，
-    //   3D 的像素路径与解释器臂才是同一条（W0 C10 Ⓐ）。
-    const GpuRaster* gr = gpuRaster();
-    std::fprintf(out,
-                 "services  : host=%s ownsCpu=1 hasNestedGuestExecutor=0 | surfaces.ready=%d "
-                 "presenter=%s seh=ready decoder=ready gpuRaster=%s"
-                 " | clock=%s handles=%s com=%s "
-                 "calls=%s windows=%s fonts=%s audio=%s\n",
-                 cpu_.host != nullptr ? "self" : "nullptr", surfaces_.ready() ? 1 : 0,
-                 presenter_.hasSink() ? "sink" : "headless(no-sink)",
-                 gr == nullptr ? "nullptr"
-                               : (gr->rasterActive() ? gr->rasterName() : "inactive（后端建了但没激活）"),
-                 clock_.realTime() ? "real-time" : "virtual",
-                 cpu_.handles != nullptr ? "yes" : "no", cpu_.com != nullptr ? "yes" : "no",
-                 cpu_.calls != nullptr ? "yes" : "no", cpu_.windows != nullptr ? "yes" : "no",
-                 cpu_.fonts != nullptr ? "yes" : "no",
-                 // ★ 读**配置**事实（`configuredMode()`），不是 `mode()`：readout 打在 `run()` 的
-                 //   `begin()` **之前**，那时 `mode_` 还是 Off ⇒ 用 `mode()` 会让 `--audio sdl`
-                 //   的 bring-up 读数写一句假的 `audio=off`（真实的档位 / `device=ok|none`
-                 //   在收口的 `audio     :` 一行）。缺省档两者同为 `off` ⇒ 默认档读数逐字不变。
-                 cpu_.audio != nullptr ? audioModeName(audio_.configuredMode()) : "no");
-    std::fprintf(out, "owner     : cpu.machine=nullptr（AOT 有意没有 Machine）+ cpu.host=this\n");
 
     // ---- 派发表（构建期生成物的真源是 lift-gen --table）----
+    //   ★ **任何档都打**：`pin` 是 D1 的判据面（sha256 / entry / 计数），⛔ 不在 `detail` 门里。
     std::fprintf(out,
                  "pin       : generated=%s sha256=%s entry=%08X roots=%llu entries=%llu funcs=%llu "
                  "checked=%s\n",
@@ -514,7 +523,8 @@ void AotHost::printReadout(std::FILE* out, bool region_log) const {
 
     // ---- guest 区域表（"谁占了哪一段"的机械读数；复用既有的 dumpRegions）----
     //   ★ **opt-in**（`--region-log`，缺省关；见 `AotRunOptions::region_log`）：这 28 行是静态布局快照，
-    //     一次 run 里不变 ⇒ 属噪音。⛔ 只闸这一块：上面任何一条 readout 都不受影响。
+    //     一次 run 里不变 ⇒ 属噪音。它与上面的 `detail`（`--log-level info`）是**两个独立门**：
+    //     `region_log` 只加这一块，`detail` 只加"装配展开"那一块。
     if (region_log) {
         std::fprintf(out, "regions   : %zu 段（committed=%llu 字节）\n", mem_.regions().size(),
                      static_cast<unsigned long long>(mem_.committedBytes()));
