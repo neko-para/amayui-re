@@ -112,28 +112,34 @@ export function hideBattleHelp(ctx) {
 }
 
 // ===========================================================================
-// FIELD 地图点位精灵的**派生渲染位**（VM 自己在每次进图时重建；⛔ 不是持久值）
+// FIELD 地图点位精灵的**派生渲染位**（VM 自己每渲染帧重建；⛔ 不是持久值）
 // ===========================================================================
 //
-// 取证（2026-11-25 订正 / win32 / `DRAWOBJ.BIN` 逐条指令 + `jcc` 极性；逐条指令见
-// `docs/03-emulator/scripts/FIELD.md` §地块特效渲染模型）：
-//   · `FIELD.BIN`  instr#187 `0x000FA0` `fill-zero (global-int 50ff9f) 32`      —— 进图先清这 32 个 dword
-//   · `SETOBJ.BIN` instr#2   `0x00005C` `fill-zero (global-int 50ff9f) 32`      —— 再清一次，然后逐槽 bit-set
-//                  instr#34  `0x00037C` `bit-set …  0`（= **画**）· instr#78/#84 `bit-set … 2`（= **alpha 正常**）
-//                  instr#86  `0x0008C4` `bit-set …  1`（= 格标记 / 战利品抽取那一位；本文件**不动**）
-//   · `DRAWOBJ.BIN` instr#7  `0x0000E0` `and (…) (50ff9f[slot]) 1` → `jcc`（**cond==0 才跳**）⇒ **bit0=0 才跳过**
-//                  instr#26 `0x0002C4` `and (…) (50ff9f[slot]) 4` 为 0 → instr#29 `set-draw-color-alpha(item,0,0,ffffff)`
-//                  instr#44 `0x0004E4` `add (local-int 11) fa (local-int 1)`  ⇒ **纹理槽 = 0xFA + 类型**
-//                  instr#58 `0x00066C` `draw-texture (item) (0xFA+类型) 0 0 w h dstx dsty`
-//   ⇒ 採集点(0x1F) 的槽 = 0x119 = `MO031B.AGF`（ALF 20797，绿草）·
-//      発掘点(0x20) 的槽 = 0x11A = `MO032B.AGF`（ALF 20798，岩石）
-//   ⇒ **画不画/透不透明** 只由这两位的组合决定（bit0=1 画、bit2=1 正常 alpha；⚠ 2026-11-24 的
-//      "置位=不画/HIDE" 读反了 `jcc` 极性）；它们由 VM 在进图时按持久输入重算 ⇒ 改它 = 改**路由**，
-//      不是改"这点位发现过没有"那个真值（真值在 `13d7` / `3e2a0` / `14d8cc` 那几个输入里，本文件不碰）。
-//   · ⛔ **bit1（0x2）不要清**：A 链格表（`FIELD.BIN` 的 `0x100000` 位）与 `FIELD` `label_00030E54`
-//      的按 `flags & 2` 抽取战利品都消费它。
+// ★★ 2026-11-26 最终模型（真机探针 + `DRAWOBJ.SETOBJ` 逐条指令；详见
+//   `docs/03-emulator/scripts/FIELD.md` §地块特效渲染模型）：
+//   · 引擎**每渲染帧**自己重建这张表：`SETOBJ.BIN` #2 `0x00005C` `fill-zero (global-int 50ff9f) 32`
+//     之后逐槽按"发现 / 触发状态"重算（#34 `bit-set … 0` = 画、#84 `bit-set … 2` = 动效 alpha 正常、
+//     #86 `bit-set … 1` = 还没用完；全部 `0x00037C` 起）。
+//     ⇒ **bit1（静态门的一半）/ bit2（动效 alpha = 静态↔动效的选择位）由引擎决定，插件⛔ 不写。**
+//   · 真机读数（2026-11-26 / win32 / **存档 012** / FIELD 就绪、**没有** field 插件参与，逐槽
+//     `node tools/emu-ctl.mjs global-get --kind int --index 0x50ff9f+slot`）：
+//       slot3 `type=0x1f flags=0x5`（= 已触发 / 已采集 ⇒ 动效）·
+//       slot4 `type=0x1f flags=0x3` · slot5 `type=0x20 flags=0x3` · slot6 `type=0x20 flags=0x3`
+//       （= 没采集过 ⇒ bit1=1 / bit2=0 ⇒ 静态）⇒ **引擎自己就是对的**。
+//   · ⇒ 用户早先看到的"没采集过也在动"是**旧插件的错**：它写 `|= 0x5`，把 bit2 强加上去。
+//   · `DRAWOBJ.BIN`：instr#7 `0x0000E0` `and (…) (50ff9f[slot]) 1` → `jcc`（**cond==0 才跳**）
+//     ⇒ **bit0=0 才整段跳过**；instr#26 `and … 4` 为 0 → #29 `set-draw-color-alpha(0x3A98+slot, 0)`
+//     ⇒ **bit2=0 ⇒ 动效不可见（静态才画）**。
+//   · 纹理：instr#44 `add (local-int 11) fa (local-int 1)` ⇒ 槽 = `0xFA+类型` ⇒ 採集(0x1F) =
+//     `0x119` = `MO031B.AGF`（ALF 20797，绿草）· 発掘(0x20) = `0x11A` = `MO032B.AGF`（20798，岩石）。
+//
+// ⇒ 插件**唯一的写 = `flags | 0x1`**（补"画"位：让"未发现但本应存在"的点也画出来）。
+//   ⛔ 不碰 bit1：A 链格表（`FIELD.BIN` 的 `0x100000` 位）与 `FIELD` `label_00030E54` 的战利品抽取
+//     都消费 `flags & 2`。
+//   ⛔ 不碰 bit2：那是引擎的静态 / 动效选择位（写完这一位就等于替引擎决定"这个点动没动过"）。
+//   ⇒ 已触发 = 动效、未触发 = 静态 —— 与引擎自己的读数逐位一致（`0x5` 保持 `0x5`、`0x3` 保持 `0x3`）。
 
-/** 地图点位**逐槽渲染标志**（int global，32 槽 × 1 dword；VM 每次进图重建）。 */
+/** 地图点位**逐槽渲染标志**（int global，32 槽 × 1 dword；VM 每渲染帧重建）。 */
 export const FIELD_OBJECT_FLAGS_GLOBAL_ID = 0x50ff9f;
 
 /** 地图点位**逐槽类型**（int global，32 槽；`SETOBJ` #3 把它拷进 `14d7a0`，`DRAWOBJ` #9 用它选图）。 */
@@ -141,19 +147,6 @@ export const FIELD_OBJECT_TYPE_GLOBAL_ID = 0x50ffd1;
 
 /** `50ff9f[slot]` 位：**置位 ⇒ 该槽参与绘制**（`DRAWOBJ.BIN` #7 `and … 1` → `jcc` 的 cond 为 0 才跳 ⇒ bit0=0 才跳过）。 */
 export const FIELD_OBJECT_DRAW_BIT = 0x1;
-
-/** `50ff9f[slot]` 位：**"还没用完"**（`SETOBJ.BIN` #86 只在未耗尽支置位；`FIELD` #6132 的交互扫描只认它）。 */
-export const FIELD_OBJECT_NOT_USED_BIT = 0x2;
-
-/**
- * `50ff9f[slot]` 位：**动效 alpha 门 = "现在放动效"**（`DRAWOBJ.BIN` #26 `and … 4`；为 0 ⇒ #29 把
- * `0x3A98+slot` 的 alpha 置 0 ⇒ **动效不可见**）。
- *
- * ★ 2026-11-26 订正：它同时是**静态 / 动效的选择位** —— 静态门要求 `(flags & 6) == 2`
- *   （`DRAWOBJ.BIN` #46-55）⇒ **bit2=0 才画静态**。这不是"静态的 alpha"：静态走 `0x3ACA+slot`、
- *   全脚本从不设它的 alpha（恒不透明）。
- */
-export const FIELD_OBJECT_ALPHA_BIT = 0x4;
 
 /** 点位类型：**採集点**（`DRAWOBJ` 槽 = 0xFA+type ⇒ `0x119` = `MO031B.AGF`）。 */
 export const FIELD_POINT_TYPE_GATHER = 0x1f;
@@ -164,67 +157,6 @@ export const FIELD_POINT_TYPE_DIG = 0x20;
 /** 点位槽号范围（`DRAWOBJ.BIN` instr#1/#4：`local 2 = 1 … < 32`）⇒ 1..31（0 号不用）。 */
 export const FIELD_OBJECT_SLOT_FIRST = 1;
 export const FIELD_OBJECT_SLOT_LAST = 31;
-
-// ---------------------------------------------------------------------------
-// 点位精灵的**静态 / 动效选择**（2026-11-26 订正：选择位不是 `25c00`，是 `50ff9f` bit2）
-// ---------------------------------------------------------------------------
-//
-// 取证（全都可复核；行号 = `dist/views/data/<NAME>.BIN.txt`，`instr#` = 同目录 FIELD 反汇编的编号）：
-//   · `50ff9f[slot]` 的 **bit2 (0x4) = 动效 alpha 门**（`FIELD_OBJECT_ALPHA_BIT`）：
-//     `DRAWOBJ.BIN.txt:39-43` `and a, 50ff9f[slot], 4` → `eq b, a, 0` → `jcc b`（cond==0 才跳）
-//     ⇒ **bit2=0 ⇒ `set-draw-color-alpha(0x3A98+slot, 0)`（动效全透明）**；bit2=1 ⇒ 不动。
-//   · 静态精灵（`0x3ACA+slot` = `0xFA+type` = `MO031B/MO032B`）的**三个门**：
-//     ① `DRAWOBJ.BIN.txt:46-55`：`511080[type]==3 && eb5c1[b222][slot]==1 && (50ff9f&6)==2`
-//        （`(…&6)==2` = **bit1=1 且 bit2=0**）—— 不满足 ⇒ 直接跳到循环尾，**不画静态**；
-//     ② `DRAWOBJ.BIN.txt:56-58`：`check-bit 25c00[b222][row], col` → `jcc`（cond==0 才跳）
-//        ⇒ **该位=0 ⇒ 跳过静态；=1 ⇒ 画静态**（`59-74` 的 `draw-texture`）；
-//     ③ 同一位在 `DRAWOBJ.BIN.txt:148-156`：=1 ⇒ 动效 `alpha=5110e4[type]`；=0 ⇒ `alpha=0`。
-//     ⇒ `25c00` 是**"这一格有地块要素"的共同门**（`SETLAND.BIN.txt:47-49` 置位 / `DELLAND` 清位 /
-//       进图由 `510d73` 重建：`FIELD` instr#339-350），**不是**静态/动效的选择位 ——
-//       把它清零会让静态与动效**同时**不画（点直接消失）。
-//   · 进图默认态 = 静态：`SETOBJ.BIN.txt:111-130` 里 `511080==3` 的分支**从不**置 bit2，且只有
-//     "没耗尽" 才置 bit1 ⇒ `50ff9f = 0x3`。触发点位时 `FIELD` instr#6242-6245（`0x024bfc`）才
-//     `bit-set 50ff9f[slot] 2` + `eb5c1[b222][slot]=1` ⇒ **动效**。这正是"已发现进图静态、
-//     走到位置触发后 7 帧"的机制（上一轮 `|=0x5` 一定看到动效，就是因为它把 bit2 也置上了）。
-//   · `eb5c1[b222][slot]` = 该点位**触发过**（`FIELD` instr#6244 置 1；`9106-9128` / `9281-9303`
-//     两段是逐图表的保存 / 恢复）⇒ 静态只对"已触发过"的点成立。
-//
-// ⛔ 本文件**不写** `25c00` / `eb5c1` / `50ffd1` / `14d73c` / `14d76e` / `14d8cc`：静态只靠
-//   **清 `50ff9f` 的 bit2**。`25c00` 的位只读（读它是为了确认"引擎真的会画静态"，否则清 bit2
-//   会把那个点变成**什么都不画**）。
-
-/** 逐槽**列**（int global，`14d73c[slot]`；`DRAWOBJ` instr#21 / `FIELD` #394 等处同一条表）。 */
-export const FIELD_CELL_COL_GLOBAL_ID = 0x14d73c;
-
-/** 逐槽**行**（int global，`14d76e[slot]`；`DRAWOBJ` instr#23 / `FIELD` #396）。`25c00` 的第二维。 */
-export const FIELD_CELL_ROW_GLOBAL_ID = 0x14d76e;
-
-/** 逐图**格位图**（int global，`25c00[b222*64 + row]` 的 dword 位 `col`；`DRAWOBJ` instr#56）。只读。 */
-export const FIELD_CELL_BITS_GLOBAL_ID = 0x25c00;
-
-/** `25c00` 的**每图行宽（dword）**：`lookup-array-2d … 25c00 b222 64 row` ⇒ `b222*64 + row`。 */
-export const FIELD_CELL_ROW_STRIDE = 64;
-
-/** 格网边长（`65f2` / `6df2` 的 `fill-zero 0x20*0x20` ⇒ 32×32；`row`/`col` 只许落在这里）。 */
-export const FIELD_CELL_GRID = 32;
-
-/** 逐槽**启用位图**（int global，`14d8cc[slot]`；`SETOBJ` instr#46-49 用它决定动不动这个槽）。只读。 */
-export const FIELD_SLOT_ENABLE_GLOBAL_ID = 0x14d8cc;
-
-/** `14d8cc[slot]` 的**位号 = 当前层号**（int global `a9bb`；`SETOBJ` instr#47 的第三个操作数）。只读。 */
-export const FIELD_SLOT_ENABLE_BIT_GLOBAL_ID = 0xa9bb;
-
-/** 逐图逐槽**"触发过"**位（int global，`eb5c1[b222*32 + slot]`；`FIELD` instr#6244 置 1）。只读。 */
-export const FIELD_POINT_TRIGGERED_GLOBAL_ID = 0xeb5c1;
-
-/** `eb5c1` 的**每图行宽（dword）**：`lookup-array-2d … eb5c1 b222 32 slot` ⇒ `b222*32 + slot`。 */
-export const FIELD_POINT_TRIGGERED_STRIDE = 32;
-
-/** 逐**类型**档（int global，`511080[type]`；`OBINIT` 把 31/32 = `採集/発掘` 写成 **3**）。只读。 */
-export const FIELD_POINT_CLASS_GLOBAL_ID = 0x511080;
-
-/** `511080[type]` 的值：**动作点位档**（`DRAWOBJ` 静态门的第一个条件就是它 == 3）。 */
-export const FIELD_POINT_CLASS_ACTION = 3;
 
 /**
  * 当前**地图号**（int global）：`STINIT` / `FIELD` / `SETOBJ` 的门都是 `eq … (global-int b222) <mapNo>`，
@@ -285,25 +217,28 @@ export function readFieldObjectSlots(ctx) {
 }
 
 /**
- * 把"有点位且类型命中"的槽的**派生渲染位**改成"要画 + 正常 alpha"：置 `DRAW` 与 `ALPHA`（`|= 0x5`）。
+ * 把"有点位且类型命中"的槽的**派生渲染位**补上"要画"这一位：`flags |= 0x1`。
  *
- * ★ 为什么这不算改真实值（三条，都可复核）：
- *   ① 作用面是 `50ff9f`，而 `50ff9f` 是 VM **每次进图重建**的派生表（`FIELD.BIN` #187 + `SETOBJ.BIN` #2 两处
- *      `fill-zero`，随后逐槽 `bit-set`）⇒ 它不是"这一点位发现过没有"的存储；
- *   ② 持久输入（`50ffd1` 类型表、`14d8cc`、`3e2a0`…）**一个都不写** —— 本函数只写 `50ff9f+slot`；
- *      并且**只置位、不清位**（bit1 = 格标记 / 战利品抽取要消费它，见上）；
- *   ③ 只在 `on == 1` 时执行；`on == 0` 走完全相同的链但不写（A/B 只差这一处）。
+ * ★ 为什么只写 bit0（2026-11-26 最终模型，取证见文件头）：
+ *   · bit1 / bit2 **由引擎每渲染帧重算**（`SETOBJ` #2 `fill-zero` 之后逐槽 `bit-set`）⇒ 插件写它们
+ *     只是在替引擎决定"这个点触发过没有"，而那是持久输入的事。`|= 0x5` 的旧写法必然让
+ *     **未采集的点也放动效**（用户看到的正是这个）。
+ *   · bit0 是"画不画"的**总闸**（`DRAWOBJ` #7：bit0=0 整段跳过）⇒ 补它才能让"未发现但本应存在"的
+ *     点位画出来（引擎在未发现时可能不置 bit0）。
+ *   · **只置位、不清位**（`after === before` 时连写回执都不发）；⛔ 不碰 bit1（`flags & 2` 被 A 链格表
+ *     与 `FIELD` 的战利品抽取消费）、⛔ 不碰 bit2（静态 / 动效选择位）。
+ *   · 作用面 = `50ff9f`（派生表）⇒ 不是改"这一点位发现过没有"的真值；持久输入一个都不写。
+ *   · 只在 `on == 1` 时由调用方调用；`on == 0` ⇒ 连这个函数都不进（0 读 / 0 写）。
  *
  * @param {RunCtx} ctx RunCtx。
  * @param {{ types?: number[] | null }} [options] 参与强制的类型（缺省 = 採集 + 発掘）。
  * @returns {{ slot: number, type: number, before: number, after: number, applied: boolean }[]}
- *   类型命中的槽的逐槽读数（`applied=false` = 这两位本来就有 / 写回执失败）。
+ *   类型命中的槽的逐槽读数（`applied=false` = bit0 本来就有 / 写回执失败）。
  */
 export function forceFieldPointsVisible(ctx, options) {
     const types = options !== null && options !== undefined && Array.isArray(options.types)
         ? options.types
         : [FIELD_POINT_TYPE_GATHER, FIELD_POINT_TYPE_DIG];
-    const visibleBits = FIELD_OBJECT_DRAW_BIT | FIELD_OBJECT_ALPHA_BIT;
     /** @type {{ slot: number, type: number, before: number, after: number, applied: boolean }[]} */
     const changed = [];
     for (let slot = FIELD_OBJECT_SLOT_FIRST; slot <= FIELD_OBJECT_SLOT_LAST; slot += 1) {
@@ -311,8 +246,8 @@ export function forceFieldPointsVisible(ctx, options) {
         if (type === 0 || !types.includes(type)) continue;
         const id = FIELD_OBJECT_FLAGS_GLOBAL_ID + slot;
         const before = readIntGlobal(ctx, id) >>> 0;
-        // ★ 只 `|=`，⛔ 不清任何位（尤其 bit1）：清了它会改动 A 链格表与战利品抽取。
-        const after = (before | visibleBits) >>> 0;
+        // ★ 只补 bit0；⛔ bit1 / bit2 是引擎的（见文件头）。
+        const after = (before | FIELD_OBJECT_DRAW_BIT) >>> 0;
         if (after === before) {
             changed.push({ slot, type, before, after, applied: false });
             continue;
@@ -330,149 +265,4 @@ export function forceFieldPointsVisible(ctx, options) {
         changed.push({ slot, type, before, after, applied });
     }
     return changed;
-}
-
-/**
- * `25c00[b222*64 + row]` 的 **int 池下标**（`lookup-array-2d … 25c00 b222 64 row` 的同一算式）。
- *
- * @param {number} map `b222`（当前地图号，`FIELD_CURRENT_MAP_GLOBAL_ID`）。
- * @param {number} row `14d76e[slot]`（0..`FIELD_CELL_GRID`-1）。
- * @returns {number}
- */
-function fieldCellIndex(map, row) {    return FIELD_CELL_BITS_GLOBAL_ID + map * FIELD_CELL_ROW_STRIDE + row;
-}
-
-/**
- * 读一个槽的**格坐标 + 当层启用位**（`14d76e` / `14d73c` / `14d8cc` + 位号 `a9bb`；⛔ 不写）。
- *
- * ★ `enabled` 的极性按 `SETOBJ.BIN.txt:46-49` 读：`check-bit 14d8cc[slot], a9bb` → `eq k, bit, 0`
- *   → `jcc k`（cond==0 才跳）⇒ **位=1 才落下去继续算这个槽**；位=0 直接 `ret`（不动它）。
- *   `a9bb` 是**层号**（`SC1820` 把它写成 0/1/2；`BTRTN` / `MVRTN` 拿它索引 3 格数组）。
- * ★ `inGrid` = `row`/`col` 落不落在 32×32 格网里（`65f2`/`6df2` 的 `fill-zero 0x20*0x20`）。
- *   越界 ⇒ `fieldCellIndex` 会算到**别的地图**的 dword 上 ⇒ 调用方必须拒绝（见 `clearFieldStaticSkip`）。
- *
- * @param {RunCtx} ctx RunCtx（需要 `ctx.read.global.get`）。
- * @param {number} slot 槽号 1..31。
- * @returns {{ row: number, col: number, enabled: boolean, inGrid: boolean, enableBit: number, enableMask: number }}
- */
-export function readFieldCell(ctx, slot) {
-    const row = readIntGlobal(ctx, FIELD_CELL_ROW_GLOBAL_ID + slot);
-    const col = readIntGlobal(ctx, FIELD_CELL_COL_GLOBAL_ID + slot);
-    const enableBit = readIntGlobal(ctx, FIELD_SLOT_ENABLE_BIT_GLOBAL_ID);
-    const enableMask = readIntGlobal(ctx, FIELD_SLOT_ENABLE_GLOBAL_ID + slot) >>> 0;
-    const bitInRange = enableBit >= 0 && enableBit < 32;
-    const enabled = bitInRange && ((enableMask >>> enableBit) & 1) === 1;
-    const inGrid = row >= 0 && row < FIELD_CELL_GRID && col >= 0 && col < FIELD_CELL_GRID;
-    return { row, col, enabled, inGrid, enableBit, enableMask };
-}
-
-/**
- * 把"类型命中的槽"在**进图那一刻**改成**静态精灵**（`MO031B/MO032B`，无工具图标）。
- *
- * 判据（全按引擎自己的门，⛔ 不发明语义；`DRAWOBJ.BIN.txt` 行号）：
- *   · 静态门 ①（`46-55`）：`511080[type]==3 && eb5c1[b222][slot]==1 && (flags & 6)==2`；
- *   · 静态门 ②（`56-58`）：`25c00[b222][row]` 的第 `col` 位 == 1；
- *   · 再叠一条本插件的保守条件：`14d8cc` 在当层**启用**（否则引擎自己都不算这个槽）。
- *   ⇒ 门**成立** ⇒ 清 `50ff9f[slot]` 的 bit2 ⇒ 动效 alpha 0（`DRAWOBJ` `39-43`）、静态可见；
- *     门**不成立** ⇒ 置 bit2（= 今天的动效，⛔ 不让点消失）。
- *   ★ `50ff9f` 是 VM 每次进图重建的派生表 ⇒ 每次进图都要重新施加；⛔ 本函数不动 bit0 / bit1。
- *   ★ **只写 `50ff9f+slot` 一个 global**：`25c00` / `14d73c` / `14d76e` / `14d8cc` / `eb5c1` / `511080`
- *     全是**读**（清 `25c00` 会让静态与动效同时不画 —— 见文件头 2026-11-26 的取证段）。
- *
- * ★ 失败只 `warn`（读越界 / 写回执失败 / 格坐标出界）⇒ 返回 `applied=false`，**不 throw**：
- *   一条 warn 不能把 setmap 打死（结果面由调用方汇总 `cleared=N/M`）。
- *
- * @param {RunCtx} ctx RunCtx（需要 `ctx.read.global.get` / `ctx.edit.global.set` / `ctx.log`）。
- * @param {number} slot 槽号 1..31（调用方已按类型筛过）。
- * @returns {{ slot: number, type: number, row: number, col: number, cellBit: number, b222: number,
- *             enabled: boolean, classId: number, triggered: number, gate: boolean,
- *             before: number, after: number, applied: boolean, reason: string }}
- *   `applied=true` = 真的把 bit2 **清掉**了（`gate` 成立且写回执成功）。
- */
-export function clearFieldStaticSkip(ctx, slot) {
-    /** @type {{ slot: number, type: number, row: number, col: number, cellBit: number, b222: number,
-     *           enabled: boolean, classId: number, triggered: number, gate: boolean,
-     *           before: number, after: number, applied: boolean, reason: string }} */
-    const out = {
-        slot,
-        type: 0,
-        row: -1,
-        col: -1,
-        cellBit: 0,
-        b222: 0,
-        enabled: false,
-        classId: 0,
-        triggered: 0,
-        gate: false,
-        before: 0,
-        after: 0,
-        applied: false,
-        reason: "ok",
-    };
-    const id = FIELD_OBJECT_FLAGS_GLOBAL_ID + slot;
-    try {
-        const map = readIntGlobal(ctx, FIELD_CURRENT_MAP_GLOBAL_ID);
-        out.b222 = map;
-        const cell = readFieldCell(ctx, slot);
-        out.row = cell.row;
-        out.col = cell.col;
-        out.enabled = cell.enabled;
-        const type = readIntGlobal(ctx, FIELD_OBJECT_TYPE_GLOBAL_ID + slot);
-        out.type = type;
-        const flags = readIntGlobal(ctx, id) >>> 0;
-        out.before = flags;
-        out.after = flags;
-        if (!cell.inGrid) {
-            // 越界的 row/col 会把算式算到**别的地图**的 dword 上 ⇒ 只 warn，一个字节都不写。
-            out.reason = "off-grid";
-            ctx.log("warn", `guest-globals: clearFieldStaticSkip slot=${slot} 格坐标出界 ` +
-                `row=${cell.row} col=${cell.col}（格网 ${FIELD_CELL_GRID}）⇒ 保留动效`);
-            return out;
-        }
-        const word = readIntGlobal(ctx, fieldCellIndex(map, cell.row)) >>> 0;
-        out.cellBit = (word >>> cell.col) & 1;
-        const classId = readIntGlobal(ctx, FIELD_POINT_CLASS_GLOBAL_ID + type);
-        out.classId = classId;
-        const triggered = readIntGlobal(
-            ctx,
-            FIELD_POINT_TRIGGERED_GLOBAL_ID + map * FIELD_POINT_TRIGGERED_STRIDE + slot,
-        );
-        out.triggered = triggered;
-        // 静态门 = `DRAWOBJ` #46-55 + #56-58 + 当层启用（见上）。
-        const gate = cell.enabled
-            && classId === FIELD_POINT_CLASS_ACTION
-            && triggered === 1
-            && (flags & FIELD_OBJECT_NOT_USED_BIT) !== 0
-            && out.cellBit === 1;
-        out.gate = gate;
-        const after = gate
-            ? (flags & ~FIELD_OBJECT_ALPHA_BIT) >>> 0
-            : (flags | FIELD_OBJECT_ALPHA_BIT) >>> 0;
-        out.after = after;
-        if (after === flags) {
-            out.reason = gate ? "already-static" : "already-dynamic";
-            return out;
-        }
-        /** @type {Receipt | null | undefined} */
-        const receipt = ctx.edit.global.set("int", id, after);
-        const applied = receipt !== null && typeof receipt === "object" ? receipt.applied !== false : false;
-        out.applied = applied && gate;
-        if (!applied) {
-            const code = receipt !== null && typeof receipt === "object" && receipt.code !== undefined
-                ? String(receipt.code)
-                : "unknown";
-            out.reason = "write-failed";
-            ctx.log("warn", `guest-globals: clearFieldStaticSkip 未生效 — slot=${slot} global=${hex(id)} ` +
-                `before=${hex(flags)} after=${hex(after)} code=${code}`);
-        }
-        return out;
-    } catch (e) {
-        const anyE = /** @type {any} */ (e);
-        const why = anyE !== null && anyE !== undefined && typeof anyE.message === "string"
-            ? anyE.message
-            : String(e);
-        out.reason = "read-failed";
-        ctx.log("warn", `guest-globals: clearFieldStaticSkip slot=${slot} 读失败（${why}）⇒ 保留原样`);
-        return out;
-    }
 }
