@@ -37,10 +37,13 @@
 //     FIELD 路径上，但紧接着的 `RENDERMAP` 里 `SETOBJ` 会 `fill-zero` 重算 ⇒ 那一写必被抹掉；
 //     留着只是让日志看起来"做了事"（且它们是 `|=0x5` 的旧语义）。入口这一条覆盖全部 4 个调用者。
 //
-//   · ★ **每帧日志纪律**：`fp:draw` 每帧都 fire ⇒ ⛔ 不许每帧刷日志。只在**首帧**或**状态变化**
-//     （`matched` / `patched` 变了）打一行汇总，并只为**真的改了**的槽打逐槽
-//     `slot=… type=… flags before→after`（最多 `MAX_LOGGED_SLOTS` 行）；`diag=1` 时每
-//     `DIAG_DRAW_EVERY`（= 60）帧一行。
+//   · ★ **每帧日志纪律**：`fp:draw` 每帧都 fire ⇒ ⛔ 不许每帧刷日志。`on=1` 时：
+//       ① 首帧（每个 Run 一次）打一行 `field-points: draw first … instance=…`（证明钩子真进来过）；
+//       ② 首帧 / `matched` / `patched` 变化时打一行汇总，并只为**真的改了**的槽打逐槽
+//          `slot=… type=… flags before→after`（最多 `MAX_LOGGED_SLOTS` 行）；
+//       ③ `diag=1` 时每 `DIAG_DRAW_EVERY`（= 60）帧打一行汇总 + **命中槽全量**逐槽一行
+//          `field-points: diag draw frame=… slot=… type=… flags=0x… applied=0/1`
+//          （`flags` = 写之前读到的值）。`diag=0` 时 ① ② 照旧、③ 不出现。
 //   · ★ **判据是"已知的脚本位置"，所以用位置触发，⛔ 不用轮询**（父级裁决 2026-11-25）。
 //
 // ⛔ 三件事本插件**永远不做**（用户裁决：开关不许驱动任何输入）：
@@ -89,6 +92,7 @@
 
 import {
     FIELD_CURRENT_MAP_GLOBAL_ID,
+    FIELD_MAP_INSTANCE_GLOBAL_ID,
     FIELD_OBJECT_FLAGS_GLOBAL_ID,
     FIELD_POINT_TYPE_DIG,
     FIELD_POINT_TYPE_GATHER,
@@ -246,8 +250,9 @@ let lastDrawState = "";
  *   每帧会写一次 `0x2 → 0x3` —— 那是本开关唯一要改的东西。
  * ★ **触发点**：`DRAWOBJ.BIN` 体内实测有 `peekMsg` 读点（pos `0x64` / `0x2C4`，都早于第一条
  *   `draw-texture`（#58，`0x66C`）⇒ `[0x003C,0x06BC)` 的外→内边沿会 fire（`TriggerRunner` 只在读点 poll）。
- * ★ **日志**：首帧或 `matched/patched` 变化才打**一行**；逐槽行只为**真的改了**的槽打
- *   （首帧限 `MAX_LOGGED_SLOTS` 行）；`diag` 每 `DIAG_DRAW_EVERY` 次一行。⛔ 绝不每次都刷屏。
+ * ★ **日志**：首帧打一行 `draw first`（每 Run 一次）+ 汇总；`matched/patched` 变化才再打**一行**汇总；
+ *   逐槽行只为**真的改了**的槽打（限 `MAX_LOGGED_SLOTS` 行）；`diag` 每 `DIAG_DRAW_EVERY` 帧一行
+ *   汇总 + 命中槽全量逐槽行。⛔ 绝不每次都刷屏。
  *
  * @param {RunCtx} ctx RunCtx。
  * @param {Settings} settings 本次 fire 的设置。
@@ -264,6 +269,18 @@ function applyAtDraw(ctx, settings) {
         drawAnnounced = true;
         lastDrawState = state;
         const map = readIntGlobal(ctx, FIELD_CURRENT_MAP_GLOBAL_ID);
+        // ★ 每次 Run **只此一行**的"fp:draw 真 fire 过"证据（含地图 / 实例号）：
+        //   用户侧判据 = 日志里有没有 `draw first`。它与下面的汇总行**不重复**：这一行证明
+        //   "钩子进来过"，汇总行证明"这次进来匹配 / 写了几个槽"。
+        if (first) {
+            const instance = readIntGlobal(ctx, FIELD_MAP_INSTANCE_GLOBAL_ID);
+            ctx.log(
+                "info",
+                `field-points: draw first frame=${drawFrames} matched=${changed.length} ` +
+                    `patched=${patched.length} map=${hex(map)} instance=${hex(instance)}` +
+                    "（DRAWOBJ.BIN 入口；每个 Run 只打这一次）",
+            );
+        }
         ctx.log(
             "info",
             `field-points: draw frame=${drawFrames} matched=${changed.length} ` +
@@ -289,8 +306,18 @@ function applyAtDraw(ctx, settings) {
             "info",
             `field-points: diag draw frame=${drawFrames} matched=${changed.length} ` +
                 `patched=${patched.length} pos=${pos === undefined ? "-" : hex(pos)}` +
-                `（每 ${DIAG_DRAW_EVERY} 次一行）`,
+                `（每 ${DIAG_DRAW_EVERY} 次一行；下面逐槽是命中槽全量）`,
         );
+        // ★ **逐槽全量**（不是只打 applied / 只打变化）：诊断要的是"fire 那一刻引擎在 `50ff9f`
+        //   里留了什么"。`flags` = **写之前**读到的值（`after` 恒等于 `flags|1`，没有额外信息）；
+        //   `applied=1` 才表示本插件真的写了这一槽（`0` = bit0 本来就在 / 写回执失败）。
+        for (const c of changed) {
+            ctx.log(
+                "info",
+                `field-points: diag draw frame=${drawFrames} slot=${c.slot} type=${hex(c.type)} ` +
+                    `flags=${hex(c.before)} applied=${c.applied ? 1 : 0}`,
+            );
+        }
     }
 }
 
