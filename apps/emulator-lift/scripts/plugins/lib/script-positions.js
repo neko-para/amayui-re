@@ -164,13 +164,21 @@ export const FIELD_SETMAP_A_HI = 0x18284;
 export const FIELD_SETMAP_B_LO = 0x35168;
 export const FIELD_SETMAP_B_HI = 0x3517c;
 
-// 逐图派生表**重建完成之后**的第一段直线码（`0x001B10..0x002530` 重建 `25c00` / `57dff` /
-// `4a5f0`；这条 `mov (global-int 56942) 0` @`0x00253C` 是循环汇合点）。`field-point-visible`
-// 的 `static` 在这里施加（先 setmap 钩子置 `50ff9f |= 0x5`，再在这里按静态门清 bit2）。
-// ⚠ 重建块只在 `b22a == 0`（非地图续接）时执行（`FIELD` #303/#304 `eq`+`jcc 0x4CF0`）⇒
-// `b22a != 0` 的续接进图不经过这里（见 FIELD.md `## 待核`）。
-export const FIELD_STATIC_LO = 0x253c;
-export const FIELD_STATIC_HI = 0x2550;
+// ===========================================================================
+// RENDERMAP.BIN（doc: `docs/03-emulator/scripts/FIELD.md` §④/⑦）
+//
+// ★ 一次渲染 = SETOBJ → DRAWOBJ（#117 `call-script 511a` → #118 `call-script 5117`）——
+//   `SETOBJ` #2 每次 `fill-zero (global-int 50ff9f) 32` 再逐槽重算 ⇒ 插件写在派生位上的值
+//   在下一次渲染里必被抹掉。所以静态施加必须落在 **DRAWOBJ 调用点**（SETOBJ 之后 / DRAWOBJ 之前）。
+//   ★ 这是**位置触发**（#118 这条指令），不是轮询；`mode:"reenter"` ⇒ 每渲染帧一次。
+// ===========================================================================
+
+// 渲染帧的 **DRAWOBJ 调用点**（`RENDERMAP` #118 `call-script 5117` @`0x0B04`；#117 是 SETOBJ，#119 是 `i20c`）。
+// `SETOBJ` #2 每次 `fill-zero (global-int 50ff9f) 32`（`0x00005C`）再逐槽重算 ⇒ 插件写在派生位上的值
+// 在下一次渲染里必被抹掉。`field-point-visible` 的 `static` 在这里施加 = SETOBJ 之后 / DRAWOBJ 之前、
+// 每渲染帧一次；`mode:"reenter"` 的边沿 = 每帧一次（⛔ 不是轮询）。
+export const RENDERMAP_DRAWOBJ_LO = 0x0b04;
+export const RENDERMAP_DRAWOBJ_HI = 0x0b10;
 
 // ===========================================================================
 // REIGN.BIN（无 doc；读数 = `scripts/recipes/fellow-switch.plan` 的 ④ + 该文件头的取证口径）

@@ -4610,17 +4610,19 @@ const MUTATIONS = [
   //     静态抓"静默的输入提交"（e2e 对后者是瞎的）。
   {
     file: 'apps/emulator-lift/scripts/plugins/field-point-visible.js',
-    from: '            ctx.trigger.afterPosition(FIELD_SCRIPT, FIELD_SETMAP_A_LO, FIELD_SETMAP_A_HI, {\n',
+    from:
+      '            ctx.trigger.afterPosition(RENDERMAP_SCRIPT, RENDERMAP_DRAWOBJ_LO, RENDERMAP_DRAWOBJ_HI, {\n',
     to:
       '            ctx.input.click(0, 0);  // 变异：开关又开始点鼠标\n' +
-      '            ctx.trigger.afterPosition(FIELD_SCRIPT, FIELD_SETMAP_A_LO, FIELD_SETMAP_A_HI, {\n',
+      '            ctx.trigger.afterPosition(RENDERMAP_SCRIPT, RENDERMAP_DRAWOBJ_LO, RENDERMAP_DRAWOBJ_HI, {\n',
     guard: 'ctest:plugin-field-switch',
     ctest: 'plugin-field-switch',
     buildDir: 'apps/emulator-lift/out',
     buildTarget: 'lift-plugin-field-switch',
     what:
-      '`field-point-visible` 的 `start` 里多一次 `ctx.input.click` ⇒ 开关又开始驱动输入（guest 与 ' +
-      'readout 都看不出症状）⇒ `plugin-field-switch` 的静态契约红（剥注释后代码里出现 `ctx.input`）',
+      '`field-point-visible` 的 `start` 里多一次 `ctx.input.click`（插在渲染帧 DRAWOBJ 触发之前）⇒ ' +
+      '开关又开始驱动输入（guest 与 readout 都看不出症状）⇒ `plugin-field-switch` 的静态契约红' +
+      '（剥注释后代码里出现 `ctx.input`）',
   },
 
   // ── `static`：静态门的 **`eb5c1`（"触发过"）条件**（2026-11-26）──────────────────────

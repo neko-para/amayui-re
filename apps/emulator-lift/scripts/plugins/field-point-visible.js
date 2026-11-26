@@ -1,4 +1,4 @@
-// scripts/plugins/field-point-visible.js —— `FIELD` 上的**开关**：setmap 时无条件显示所有采集 / 挖掘点
+// scripts/plugins/field-point-visible.js —— `FIELD` 上的**开关**：渲染帧无条件显示所有采集 / 挖掘点
 //
 // 是什么（★ 用户裁决 2026-11-25：目标不是"在 FIELD 里无条件显示 `?`/`!` 图标"）：
 //   · 采集 / 挖掘点的本体 = **B 链点位精灵**（`DRAWOBJ.BIN` 每槽 `draw-texture`，纹理槽 = `0xFA + 类型`：
@@ -14,24 +14,27 @@
 //     `DRAWOBJ` #46-55 `511080[type]==3 && eb5c1[b222][slot]==1 && (flags&6)==2` **且**
 //     #56-58 的 `25c00[b222][row]` 第 `col` 位 == 1。⇒ **bit2=1 时静态一定不画、bit2=0 时动效全透明**。
 //     上一轮只 `|=0x5` ⇒ 看到的一定是**动效**（用户实测正是如此）。
-//   · `static`（缺省 **1**）⇒ 在派生表**重建之后**再判一次引擎自己的静态门：成立就把 bit2 **清掉**
-//     （静态可见、动效 alpha 0）；不成立就**保留** bit2（= 今天的动效，⛔ 不让点消失）。
+//   · `static`（缺省 **1**）⇒ 在**每个渲染帧的 DRAWOBJ 调用点**（SETOBJ 之后）再判一次引擎自己的静态门：
+//     成立就把 bit2 **清掉**（静态可见、动效 alpha 0）；不成立就**保留** bit2（= 今天的动效，⛔ 不让点消失）。
 //     `static=0` ⇒ 只保留 `|=0x5`，**一个** `25c00`/`14d73c`/`14d76e`/`14d8cc`/`eb5c1` 读都不做。
-//   · `50ff9f` 是 VM **每次进图重算**的派生表（`FIELD.BIN` #187 / `SETOBJ.BIN` #2 的 `fill-zero`，
-//     之后逐槽 `bit-set`）⇒ **每次 setmap 都要重新施加**。
-//   · ★ **钩子 = setmap 完成、SETOBJ 已算完、FIELD 还没建表 / 画**（父级/用户裁决 2026-11-25）：
-//     两个常驻 `afterPosition(FIELD.BIN, …, { mode: "reenter" })` ——
+//   · ★★ **为什么每渲染帧都要施加（2026-11-26 订正）**：`FIELD` 的渲染帧 = `RENDERMAP.BIN` 的
+//     #117 `call-script 511a`(**SETOBJ**) → #118 `call-script 5117`(**DRAWOBJ**)；而 `SETOBJ` #2 是
+//     `fill-zero (global-int 50ff9f) 32`，之后逐槽重算 ⇒ **插件写在这张派生表上的值，在同一次渲染里必被
+//     抹掉**。旧钩子 `FIELD [0x253C,0x2550)` 在 SETOBJ **之前** ⇒ 只有"退图 / STAGE COMPLETE 那条不走
+//     SETOBJ 的 DRAWOBJ 调用"看得到插件的值 —— 那正是"退图/STAGE COMPLETE 出现、IDLE 不出现"的形状。
+//   · ★ **钩子 = 渲染帧的 DRAWOBJ 调用点**（父级/用户裁决 2026-11-26）：
+//       `afterPosition("RENDERMAP.BIN", RENDERMAP_DRAWOBJ_LO, RENDERMAP_DRAWOBJ_HI, { name: "fp:draw", mode: "reenter" })`
+//     `[0x0B04,0x0B10)` = **#118 `call-script 5117` 这条指令本身** ⇒ SETOBJ 之后 / DRAWOBJ 之前，
+//     **每渲染帧恰好一次**。这是已知脚本位置，⛔ 不是轮询。
+//   · 两条 `FIELD.BIN` setmap 钩子**保留**（只做 `|=0x5`；覆盖"退图前还没渲过"的窗口）：
 //       ① `[FIELD_SETMAP_A_LO, FIELD_SETMAP_A_HI)` = `label_00018274` 内 `call-script 511a`(SETOBJ) 的
 //          **返回点**（进图主路径）；
 //       ② `[FIELD_SETMAP_B_LO, FIELD_SETMAP_B_HI)` = `0x035130` 块里同一条 `call-script 511a` 的返回点。
-//     两个 trigger 都 arm 着；任一处 fire 都把**同一份 32 槽表**重算一遍（换图 / 重进 FIELD 会重新 SETOBJ）。
 //     Reenter 的边沿是**有效读数的 外→内**（`src/runtime/trigger_runner.cpp`），`last_inside` 挂在**同一个
 //     trigger 对象**上、跨 arm 保留 ⇒ 不需要 re-arm（`exhausted()` 只耗尽 Once / `maxFires>0`）。
-//   · ★ **第三个钩子** `[FIELD_STATIC_LO, FIELD_STATIC_HI)`（`0x00253C` = 逐图派生表
-//     `25c00`/`57dff`/`4a5f0` 重建之后的汇合点）：`static` 只能在这里施加 —— 静态门要读
-//     `25c00[b222][row]`，而它在两条 setmap 钩子**之后**才重建；在旧钩子上读会拿到上一张图的格子。
-//     ⚠ 那段重建只在 `b22a == 0` 时执行（`FIELD` #303/#304）⇒ **地图续接**（`b22a != 0`）的进图
-//     不经过第三个钩子 ⇒ 那一次保持动效（见 `docs/03-emulator/scripts/FIELD.md` 的 `## 待核`）。
+//   · ★ **每帧日志纪律**：`fp:draw` 每帧都 fire ⇒ ⛔ 不许每帧刷日志。只在**首帧**或**状态变化**
+//     （`matched` / `cleared` / `kept` 变了）打一行汇总（首帧另带逐槽明细）；`diag=1` 时每
+//     `DIAG_DRAW_EVERY`（= 60）帧一行。退出 / 重进由状态变化自然覆盖。
 //   · ★ **判据是"已知的脚本位置"，所以用位置触发，⛔ 不用轮询**（父级裁决 2026-11-25）。
 //
 // ⛔ 三件事本插件**永远不做**（用户裁决：开关不许驱动任何输入）：
@@ -44,7 +47,7 @@
 //      这个**机器写的保留域**，由 `registerSettings` 在 `start` 里做，见下）。
 //   ⇒ 守卫 `apps/emulator-lift/tests/plugin_field_switch.cpp` 两段判据：
 //      **静态**（剥注释后）"代码里没有 input / loadSave / bootToTitle / chains / finish / quit"，
-//      且仍在用 `afterPosition` + `reenter` + 两个 setmap 区间 + `FIELD_STATIC_*` +
+//      且仍在用 `afterPosition` + `reenter` + 两个 setmap 区间 + `RENDERMAP_DRAWOBJ_*` / `fp:draw` +
 //      `forceFieldPointsVisible` / `clearFieldStaticSkip`；
 //      **端到端**（`emulator-lift-aot --plugin` headless，无 `--input-plan`）"没有任何 `boot:` / `load:`
 //      行、Run 保持常驻（readout `run=waiting`、`stop: time-limit`）、首行日志 `field-points: on=0`"。
@@ -86,9 +89,6 @@ import {
     FIELD_CURRENT_MAP_GLOBAL_ID,
     FIELD_MAP_INSTANCE_GLOBAL_ID,
     FIELD_OBJECT_FLAGS_GLOBAL_ID,
-    FIELD_OBJECT_SLOT_FIRST,
-    FIELD_OBJECT_SLOT_LAST,
-    FIELD_OBJECT_TYPE_GLOBAL_ID,
     FIELD_POINT_TYPE_DIG,
     FIELD_POINT_TYPE_GATHER,
     clearFieldStaticSkip,
@@ -107,8 +107,8 @@ import {
     FIELD_SETMAP_A_LO,
     FIELD_SETMAP_B_HI,
     FIELD_SETMAP_B_LO,
-    FIELD_STATIC_HI,
-    FIELD_STATIC_LO,
+    RENDERMAP_DRAWOBJ_HI,
+    RENDERMAP_DRAWOBJ_LO,
 } from "./lib/script-positions.js";
 
 /** @typedef {import("@amayui/lift-plugin").RunCtx} RunCtx */
@@ -125,20 +125,29 @@ const CONFIG_DOMAIN = "field.point-visible";
 
 /**
  * `FIELD` 的宿主 marker 拼写（trigger / `ctx.now.script` 侧是**精确 `==`**：带 `.BIN`、不折叠大小写）。
- * 位置表在 `./lib/script-positions.js`（`FIELD_SETMAP_A_LO/HI` / `FIELD_SETMAP_B_LO/HI` / `FIELD_STATIC_LO/HI`）。
+ * 位置表在 `./lib/script-positions.js`（`FIELD_SETMAP_A_LO/HI` / `FIELD_SETMAP_B_LO/HI`）。
  */
 const FIELD_SCRIPT = "FIELD.BIN";
+
+/**
+ * 渲染帧脚本的宿主 marker 拼写（同上，**精确 `==`**）。
+ * 位置表：`RENDERMAP_DRAWOBJ_LO/HI` = #118 `call-script 5117`(DRAWOBJ) 这条指令。
+ */
+const RENDERMAP_SCRIPT = "RENDERMAP.BIN";
 
 /** 三条钩子的具名状态（每次 fire 原样放回**同一个**集合）。 */
 const TRIGGER_NAME_A = "fp:setmap-a";
 const TRIGGER_NAME_B = "fp:setmap-b";
-const TRIGGER_NAME_STATIC = "fp:static";
+const TRIGGER_NAME_DRAW = "fp:draw";
 
 /** 日志里最多逐槽打几行（⛔ 不刷屏；宿主另有 100 行上限）。 */
 const MAX_LOGGED_SLOTS = 12;
 
 /** `diag` 档最多打几行（每次 fire 一行 `script` / `pos`）。 */
 const DIAG_SAMPLES = 8;
+
+/** `fp:draw` 每帧都 fire ⇒ `diag` 档**每 N 帧**一行（⛔ 不是每帧）。 */
+const DIAG_DRAW_EVERY = 60;
 
 /**
  * `types`：config 可给 hex 串 `"1f,20"` 或数组（元素 = hex 串或数字）；params 只有逗号串。
@@ -248,6 +257,12 @@ let announced = false;
 let staticOffLogged = false;
 /** `diag` 还剩几次（打够就安静常驻；⛔ 不结束 Run）。 */
 let diagLeft = 0;
+/** `fp:draw` 是否已经打过首帧汇总（首帧带逐槽明细；之后只打状态变化）。 */
+let drawAnnounced = false;
+/** `fp:draw` 的累计帧数（只用于 `diag` 的每 N 帧一行与日志里的 `frame=`）。 */
+let drawFrames = 0;
+/** 上一次 `fp:draw` 的 `matched/cleared/kept`（状态变化才打一行；`""` = 还没打过）。 */
+let lastDrawState = "";
 
 /**
  * 在 setmap 完成点施加一次（⛔ `on == 0` 时调用方根本不会进来 ⇒ 一个 guest global 都不读）。
@@ -293,58 +308,76 @@ function applyAtSetmap(ctx, settings) {
 }
 
 /**
- * **静态施加**（`static=1` 才有）：在 `FIELD_STATIC_LO/HI`（逐图派生表重建完成之后）对**类型命中**
- * 的槽调 `clearFieldStaticSkip` —— 引擎自己的静态门成立 ⇒ 清 `50ff9f` bit2（动效 alpha 0、静态
- * `MO031B/MO032B` 可见）；门不成立 ⇒ 保留 bit2（= 今天的动效，⛔ 不让点消失）。
+ * **渲染帧施加**（`fp:draw`；每渲染帧一次）：先 `forceFieldPointsVisible`（`|=0x5`），再按 `static`
+ * 判据对**类型命中**的槽调 `clearFieldStaticSkip`。
  *
- * ★ **必须在重建之后**：`static` 的判据要读 `25c00`（逐图格位图），而它在 `FIELD` 的
- *   `0x001B10..0x002530` 重建；两条 setmap 钩子（`0x18280` / `0x35168`）都在它**之前**
- *   ⇒ 在旧钩子上读 `25c00` 读到的是**上一张图**的格子（静默错判）。
- * ★ `static=0` ⇒ 直接返回：**一个** `25c00` / `14d73c` / `14d76e` / `14d8cc` / `eb5c1` 读都不做
- *   （只打一行明写这件事的日志），行为 = 2026-11-26 之前。
- * ★ 逐槽日志是**判据面**：用户实测时 `eb5c1=0`（这个点从未触发过）⇒ 静态门不成立 ⇒ 日志会写
- *   "保留动效"，而**不是**静默什么都没发生。
+ * ★ **为什么先 `|=0x5`**（保留 2026-11-26 之前的行为）：bit0=画、bit2=动效可见；退图 / STAGE COMPLETE
+ *   那条 `call-script 5117` 前面**没有** SETOBJ，两条 setmap 钩子覆盖不到它 ⇒ 在这里补上。
+ * ★ **为什么每帧都要做**：`RENDERMAP` 每渲染帧先 SETOBJ（#2 `fill-zero 50ff9f 32` 再逐槽重算）⇒
+ *   上一次写的 bit2 在同一次渲染里已被抹掉；`[0x0B04,0x0B10)` 正好是 SETOBJ 之后 / DRAWOBJ 之前。
+ * ★ **代价**：每帧 31 次类型读 + 命中槽的 flags 读 + `clearFieldStaticSkip` 的判据读；写只在
+ *   `after !== before` 时发生（`forceFieldPointsVisible` / `clearFieldStaticSkip` 内部保证）。
+ * ★ **日志**：首帧或 `matched/cleared/kept` 变化才打**一行**（首帧另带逐槽明细）；`diag` 每
+ *   `DIAG_DRAW_EVERY` 帧一行。⛔ 绝不每帧刷屏。
+ * ★ `static=0` ⇒ 只 `|=0x5`：**一个** `25c00` / `14d73c` / `14d76e` / `14d8cc` / `eb5c1` 读都不做
+ *   （那几张表只在 `clearFieldStaticSkip` 里读）。
  *
  * @param {RunCtx} ctx RunCtx。
  * @param {Settings} settings 本次 fire 的设置。
  * @returns {void}
  */
-function applyStatic(ctx, settings) {
-    if (!settings.static) {
-        if (!staticOffLogged) {
-            staticOffLogged = true;
-            ctx.log(
-                "info",
-                "field-points: static=0（不改 50ff9f 的 bit2；25c00/14d7xx/14d8cc/eb5c1 一个读都不做）",
-            );
-        }
-        return;
-    }
-    /** @type {number[]} */
-    const matchedSlots = [];
+function applyAtDraw(ctx, settings) {
+    drawFrames += 1;
+    // ★ 命中槽（type 读在里面，31 次/帧）—— `static` 的循环直接复用它，⛔ 不再扫第二遍类型表。
+    const changed = forceFieldPointsVisible(ctx, { types: settings.types });
     let cleared = 0;
+    let kept = 0;
     /** @type {string[]} */
     const lines = [];
-    for (let slot = FIELD_OBJECT_SLOT_FIRST; slot <= FIELD_OBJECT_SLOT_LAST; slot += 1) {
-        const type = readIntGlobal(ctx, FIELD_OBJECT_TYPE_GLOBAL_ID + slot);
-        if (type === 0 || !settings.types.includes(type)) continue;
-        matchedSlots.push(slot);
-        const r = clearFieldStaticSkip(ctx, slot);
-        if (r.applied) cleared += 1;
-        lines.push(
-            `field-points: static slot=${r.slot} type=${hex(r.type)} row=${r.row} col=${r.col} ` +
-                `cellBit=${r.cellBit} gate=${r.gate ? 1 : 0} enabled=${r.enabled ? 1 : 0} ` +
-                `class=${r.classId} eb5c1=${r.triggered} ${hex(r.before)} → ${hex(r.after)}` +
-                `${r.applied ? "（静态）" : `（保留动效：${r.reason}）`}`,
+    if (settings.static) {
+        for (const c of changed) {
+            const r = clearFieldStaticSkip(ctx, c.slot);
+            if (r.applied) cleared += 1;
+            else if (!r.gate) kept += 1;
+            lines.push(
+                `field-points: draw slot=${r.slot} type=${hex(r.type)} row=${r.row} col=${r.col} ` +
+                    `cellBit=${r.cellBit} gate=${r.gate ? 1 : 0} enabled=${r.enabled ? 1 : 0} ` +
+                    `class=${r.classId} eb5c1=${r.triggered} ${hex(r.before)} → ${hex(r.after)}` +
+                    `${r.applied ? "（静态）" : `（保留动效：${r.reason}）`}`,
+            );
+        }
+    } else if (!staticOffLogged) {
+        staticOffLogged = true;
+        ctx.log(
+            "info",
+            "field-points: static=0（不改 50ff9f 的 bit2；25c00/14d7xx/14d8cc/eb5c1 一个读都不做）",
         );
     }
-    if (matchedSlots.length === 0) return;   // 没有点位槽 ⇒ 不刷屏（也没有任何读被做在这里之外）
-    for (const line of lines.slice(0, MAX_LOGGED_SLOTS)) ctx.log("info", line);
-    ctx.log(
-        "info",
-        `field-points: static cleared=${cleared}/${matchedSlots.length}（gate 成立才清 bit2；` +
-            `其余保留动效）map=${hex(readIntGlobal(ctx, FIELD_CURRENT_MAP_GLOBAL_ID))}`,
-    );
+    const first = !drawAnnounced;
+    const state = `${changed.length}/${cleared}/${kept}`;
+    if (first || state !== lastDrawState) {
+        drawAnnounced = true;
+        lastDrawState = state;
+        const map = readIntGlobal(ctx, FIELD_CURRENT_MAP_GLOBAL_ID);
+        const instance = readIntGlobal(ctx, FIELD_MAP_INSTANCE_GLOBAL_ID);
+        ctx.log(
+            "info",
+            `field-points: draw frame=${drawFrames} matched=${changed.length} cleared=${cleared} ` +
+                `kept=${kept} map=${hex(map)} instance=${hex(instance)}` +
+                `（SETOBJ 之后 / DRAWOBJ 之前；每渲染帧一次）`,
+        );
+        if (first) {
+            for (const line of lines.slice(0, MAX_LOGGED_SLOTS)) ctx.log("info", line);
+        }
+    }
+    if (settings.diag && drawFrames % DIAG_DRAW_EVERY === 0) {
+        const pos = ctx.now.pos;
+        ctx.log(
+            "info",
+            `field-points: diag draw frame=${drawFrames} matched=${changed.length} cleared=${cleared} ` +
+                `kept=${kept} pos=${pos === undefined ? "-" : hex(pos)}（每 ${DIAG_DRAW_EVERY} 帧一行）`,
+        );
+    }
 }
 
 /**
@@ -385,16 +418,21 @@ const plugin = {
         announced = false;
         lastInstance = null;
         staticOffLogged = false;
+        drawAnnounced = false;
+        drawFrames = 0;
+        lastDrawState = "";
         diagOn = settings.diag;
         diagLeft = settings.diag ? DIAG_SAMPLES : 0;
         // ★ 首行日志：明写开关状态（守卫按 `on=0` 判"关着的时候什么也不做"）。
         ctx.log(
             "info",
             `field-points: on=${settings.on ? 1 : 0} static=${settings.static ? 1 : 0} ` +
-                `types=${settings.types.map(hex).join(",")}（setmap 时显示所有采集/挖掘点）`,
+                `types=${settings.types.map(hex).join(",")}（渲染帧显示所有采集/挖掘点）`,
         );
-        // ★ **三个**常驻 trigger：两条 setmap 返回点（置 `50ff9f |= 0x5`）+ 派生表重建之后的
-        //   `FIELD_STATIC_*`（按静态门决定 bit2：清 = 静态、留 = 动效）。
+        // ★ **三个**常驻 trigger：
+        //   ① / ② 两条 setmap 返回点（`FIELD.BIN`）：只 `50ff9f |= 0x5`；
+        //   ③ `fp:draw`（`RENDERMAP.BIN` [0x0B04,0x0B10) = #118 `call-script 5117`）：
+        //      每渲染帧一次、SETOBJ 之后 / DRAWOBJ 之前 ⇒ 先 `|=0x5`，再按静态门决定 bit2。
         //   ⛔ **不要**在这里再 arm 一个轮询（那会把"已知位置"退化成轮询）。
         triggers = [
             ctx.trigger.afterPosition(FIELD_SCRIPT, FIELD_SETMAP_A_LO, FIELD_SETMAP_A_HI, {
@@ -405,8 +443,8 @@ const plugin = {
                 name: TRIGGER_NAME_B,
                 mode: "reenter",
             }),
-            ctx.trigger.afterPosition(FIELD_SCRIPT, FIELD_STATIC_LO, FIELD_STATIC_HI, {
-                name: TRIGGER_NAME_STATIC,
+            ctx.trigger.afterPosition(RENDERMAP_SCRIPT, RENDERMAP_DRAWOBJ_LO, RENDERMAP_DRAWOBJ_HI, {
+                name: TRIGGER_NAME_DRAW,
                 mode: "reenter",
             }),
         ];
@@ -422,8 +460,8 @@ const plugin = {
         }
         const name = String(ev.name);
         const isSetmap = name === TRIGGER_NAME_A || name === TRIGGER_NAME_B;
-        const isStatic = name === TRIGGER_NAME_STATIC;
-        if (!isSetmap && !isStatic) {
+        const isDraw = name === TRIGGER_NAME_DRAW;
+        if (!isSetmap && !isDraw) {
             failOnUnknown(ctx, ev, "field-points");
             return [];
         }
@@ -437,12 +475,14 @@ const plugin = {
             diagOn = false;
             diagLeft = 0;
         }
-        // `on=0` ⇒ 一个 guest global 都不读（只有 start 那一行日志）。
+        // `on=0` ⇒ 一个 guest global 都不读（只有 start 那一行日志）。`fp:draw` 每帧仍 fire，
+        //   但这一支不进来 ⇒ 仍然 0 读。
         if (settings.on) {
             if (isSetmap) applyAtSetmap(ctx, settings);
-            else applyStatic(ctx, settings);
+            else applyAtDraw(ctx, settings);
         }
-        if (settings.diag) logDiag(ctx);
+        // ★ `fp:draw` 的 diag 在 `applyAtDraw` 里按每 N 帧打（⛔ 不走这里的每 fire 一次）。
+        if (settings.diag && !isDraw) logDiag(ctx);
         // ★ 放回**同一个**集合（不是新造的 trigger）：Reenter 的 `last_inside` 挂在它的 state 上，
         //   跨 arm 保留 ⇒ 不会在同一个读点反复触发；`exhausted()` 也不耗尽它（mode != Once、
         //   maxFires = 0）⇒ `install()` 收得下（`trigger_runner.cpp`）。

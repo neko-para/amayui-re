@@ -71,24 +71,30 @@ scripts/plugins/
 
 - ★ `field-point-visible.js` 是**常驻开关**（用户裁决 2026-11-25：目标 = **在 setmap 时无条件显示所有
   采集 / 挖掘点**，不是"在 FIELD 里无条件显示 `?`/`!`"）：它常驻 arm **三个**
-  `afterPosition("FIELD.BIN", …, { mode: "reenter" })`（判据 = **已知脚本位置**）：
+  `afterPosition(…, { mode: "reenter" })`（判据 = **已知脚本位置**）：
   `FIELD_SETMAP_A_LO/HI` = `call-script 511a`(SETOBJ) 在进图主路径的返回点 ·
   `FIELD_SETMAP_B_LO/HI` = `0x035130` 块的返回点 ⇒ 这两处把 32 槽派生渲染位里类型命中的槽
   **置 `DRAW|ALPHA`（`|= 0x5`）**（`DRAWOBJ` 的 bit0=1 才画、bit2=1 动效才不是 alpha 0）；
   **⛔ 不清任何位**（尤其 bit1：A 链格表与 FIELD 的战利品抽取都消费它）。
-  `FIELD_STATIC_LO/HI` = 逐图派生表（`25c00`/`57dff`/`4a5f0`）重建之后的汇合点 ⇒ `static`
-  在这里按**引擎自己的静态门**决定 bit2：门成立（`511080[type]==3` + `eb5c1[b222][slot]==1` +
+  `RENDERMAP_DRAWOBJ_LO/HI` = **`RENDERMAP.BIN` #118 `call-script 5117`(DRAWOBJ) 这条指令**
+  `[0x0B04,0x0B10)`，即 SETOBJ(#117) 之后 / DRAWOBJ 之前 ⇒ **每渲染帧一次**（`name = "fp:draw"`）：
+  先 `|=0x5`，再按**引擎自己的静态门**决定 bit2：门成立（`511080[type]==3` + `eb5c1[b222][slot]==1` +
   `(flags&6)==2` + `25c00` 格位=1 + `14d8cc` 当层启用）⇒ **清 bit2**（静态可见、动效 alpha 0）；
   门不成立 ⇒ **保留 bit2**（= 动效，点不消失）。`25c00`/`14d73c`/`14d76e`/`14d8cc`/`eb5c1`/`511080`
   **只读**，写集只有 `50ff9f+slot`。`static=0` ⇒ 这些读**一个都不做**（日志一行 `field-points: static=0`）。
-  `50ff9f` 是 VM 每次进图重算的派生表 ⇒ 每次 setmap 重新施加。⛔ 不轮询（没有 `afterDelay` / `poll` /
-  `FIELD_MAIN_LOOP`）、⛔ 不读档（不 import `lib/save.js` / `lib/boot-to-title.js` / `lib/chains.js`）、
+  ★ **为什么必须搬到这里**：`SETOBJ` #2 每次 `fill-zero (global-int 50ff9f) 32` 再逐槽重算 ⇒ 插件写在
+  派生位上的值在同一次渲染里被抹掉；旧钩子 `FIELD [0x253C,0x2550)` 在 SETOBJ **之前**，只有"退图 /
+  STAGE COMPLETE 那条不走 SETOBJ 的 DRAWOBJ 调用"看得到它。`fp:draw` 每帧 fire ⇒ ⛔ **不每帧刷日志**：
+  首帧 / `matched/cleared/kept` 变化才一行，`diag=1` 时每 60 帧一行。
+  ⛔ 不轮询（没有 `afterDelay` / `poll` / `FIELD_MAIN_LOOP`）、⛔ 不读档（不 import `lib/save.js` /
+  `lib/boot-to-title.js` / `lib/chains.js`）、
   ⛔ 不点鼠标、⛔ 不写盘、⛔ 不 `finish`（正常路径常驻；进程按 `--time-limit` / 关窗结束）。
   ⇒ 验收用法 = **玩家自己读档**：`--overlay --plugin field-point-visible`（`--plugin` 与
   `--input-plan` / `--control-root` 互斥 ⇒ 没有"输入计划驱动"这条验收）；FIELD 的**自动化复现**仍归
   `scenario-save10-field.js`。守卫：CTest `plugin-field-switch`（静态契约 + headless 常驻）与
-  `plugin-runtime` 的 `plugin/field-switch-apply`（`0x3→0x7` / 不重复写 / 换图重施加 /
-  静态门成立 `0x7→0x3`、`eb5c1=0` 保留 `0x7` / `static=0` 不清 / `on=0` 不写）。
+  `plugin-runtime` 的 `plugin/field-switch-apply`（setmap `0x3→0x7` / 不重复写 /
+  渲染帧 DRAWOBJ 调用点：静态门成立 `0x7→0x3`、`eb5c1=0` 保留 `0x7` / 同状态不刷日志 /
+  `static=0` 不清 / `on=0` 不写）。
   ★ `?` / `!` 是 **A 链格标记**（`SO030` 槽 `0x49`），不是点位；`on=1` 之后它们照旧出现。
   ★ 设置面（D1/D3）：`start` 里 `registerSettings` 登记 `on`/`static`/`diag`（页面据此画），这三项
   **每次位置触发（fire）重读**；`types` 不在 schema 里 ⇒ 只在 `start` 读一次。

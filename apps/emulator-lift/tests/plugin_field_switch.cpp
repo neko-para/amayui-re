@@ -7,7 +7,8 @@
 //      · 不结束 Run（`ctx.finish` / `ctx.quit`）⇒ 常驻（正常路径永不收口，进程按 `--time-limit` / 关窗结束）；
 //      · 还在用**位置触发**那条链（`afterPosition` + `reenter` + 两个 setmap 区间
 //        `FIELD_SETMAP_A_LO` / `FIELD_SETMAP_B_LO` + `forceFieldPointsVisible` +
-//        `static` 的第三条区间 `FIELD_STATIC_LO` / `clearFieldStaticSkip`；
+//        `static` 的**渲染帧 DRAWOBJ 调用点** `RENDERMAP_DRAWOBJ_LO/HI` / `fp:draw` /
+//        `clearFieldStaticSkip`；
 //        ⛔ 没有 `afterDelay` / `poll` / `FIELD_MAIN_LOOP` —— 判据是已知脚本位置，不是轮询）。
 //      红了 ⇒ 这个"开关"又开始驱动输入 / 读档 / 自己收口了，或者 `static` 那条链被悄悄拆掉了。
 //   ② **端到端常驻**（真子进程 `--present headless --plugin field-point-visible`，**无** `--input-plan` /
@@ -164,11 +165,13 @@ int main(int argc, char** argv) {
     LIFT_CHECK(code.find("ctx.quit") == std::string::npos);
     // 正向：该写的那条链还在（否则"禁令全过"可以靠一个空文件达成）。
     LIFT_CHECK(code.find("forceFieldPointsVisible") != std::string::npos);
-    // ★ `static`（缺省 1）：第三条位置触发 + 静态判据函数 + 设置键，都得在代码里。
+    // ★ `static`（缺省 1）：渲染帧 DRAWOBJ 调用点的位置触发 + 静态判据函数 + 设置键，都得在代码里。
     //   红了 = "进图显示静态"这条链被拆了（用户裁决 2026-11-26）。
     LIFT_CHECK(code.find("clearFieldStaticSkip") != std::string::npos);
-    LIFT_CHECK(code.find("FIELD_STATIC_LO") != std::string::npos);
-    LIFT_CHECK(code.find("FIELD_STATIC_HI") != std::string::npos);
+    LIFT_CHECK(code.find("RENDERMAP.BIN") != std::string::npos);
+    LIFT_CHECK(code.find("RENDERMAP_DRAWOBJ_LO") != std::string::npos);
+    LIFT_CHECK(code.find("RENDERMAP_DRAWOBJ_HI") != std::string::npos);
+    LIFT_CHECK(code.find("\"fp:draw\"") != std::string::npos);
     LIFT_CHECK(code.find("\"static\"") != std::string::npos);
     // ★ 判据是 setmap 的**已知脚本位置** ⇒ 三条位置触发（reenter），⛔ 不是轮询。
     LIFT_CHECK(code.find("afterPosition") != std::string::npos);

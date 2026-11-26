@@ -1020,14 +1020,19 @@ export default plugin;   // 宿主 QJS 读 default 导出；⛔ 不读 globalThi
   `save`（根入口 `load-save.js`，库是 `lib/save.js`）/ `scenario.save10-field`（根 `scenario-save10-field.js`，
   key `slot`/`expect`）/ `field.point-visible`（根 `field-point-visible.js`，
   key `on`/`static`/`types`/`diag`（判据 = **已知脚本位置**：三条
-  `afterPosition("FIELD.BIN", …)` `[0x18280,0x18284)` / `[0x35168,0x3517C)` /
-  `[0x253C,0x2550)`，全部 `mode:"reenter"`；⛔ 不轮询（没有 `afterDelay` / `poll` /
+  `afterPosition(…, { mode:"reenter" })` —— `FIELD.BIN` 的 `[0x18280,0x18284)` / `[0x35168,0x3517C)`
+  两条 setmap 返回点，加 `RENDERMAP.BIN` 的 `[0x0B04,0x0B10)`（#118 `call-script 5117` = DRAWOBJ、
+  SETOBJ 之后 / DRAWOBJ 之前，`name = "fp:draw"`）；⛔ 不轮询（没有 `afterDelay` / `poll` /
   `FIELD_MAIN_LOOP`）；旧配置的 `poll` 无害忽略）——
-  ★ 它是**常驻开关**：⛔ 不读档、⛔ 不点鼠标、⛔ 不 `finish`；施加 = 前两条钩子对类型命中的槽
+  ★ 它是**常驻开关**：⛔ 不读档、⛔ 不点鼠标、⛔ 不 `finish`；施加 = 两条 setmap 钩子对类型命中的槽
   `|= 0x5`（`DRAWOBJ` 的 bit0=画 / bit2=动效 alpha），**不清位**（bit1 留给 A 链格表与战利品抽取）；
-  第三条钩子（逐图派生表重建之后）按引擎自己的静态门决定 bit2：门成立 ⇒ **清 bit2**（静态
-  `MO031B/32B` 可见、动效 alpha 0）、门不成立 ⇒ 保留 bit2（动效，点不消失）。写集只有 `50ff9f+slot`，
+  `fp:draw` 每渲染帧再施加一次（先 `|= 0x5`、再按引擎自己的静态门决定 bit2）：门成立 ⇒ **清 bit2**
+  （静态 `MO031B/32B` 可见、动效 alpha 0）、门不成立 ⇒ 保留 bit2（动效，点不消失）。
+  ★ **为什么必须在 `RENDERMAP` 的 DRAWOBJ 调用点**：`SETOBJ` #2 每次 `fill-zero (global-int 50ff9f) 32`
+  再逐槽重算 ⇒ 插件写在派生位上的值在同一次渲染里被抹掉；`FIELD [0x253C,0x2550)` 在 SETOBJ **之前**，
+  只有退图 / STAGE COMPLETE 那条不走 SETOBJ 的 DRAWOBJ 调用看得到它。写集只有 `50ff9f+slot`，
   `25c00`/`14d73c`/`14d76e`/`14d8cc`/`eb5c1`/`511080` 只读；`static=0` ⇒ 这些读一个都不做。
+  `fp:draw` 每帧 fire ⇒ 日志只在首帧 / 状态变化时一行（`diag=1` 每 60 帧一行），⛔ 不每帧刷屏。
   `?`/`!` 是 A 链格标记、不是点位。旧配置里的 `slot`/`hold` 被**无害忽略**。验收时**玩家自己读档**，见
   `docs/03-emulator/scripts/FIELD.md` §⑦）。
   三者一律"先看 `ctx.config.available` 再回退 params"；`on:0` / `slot:0` 这种 falsy 值也算"给了"
