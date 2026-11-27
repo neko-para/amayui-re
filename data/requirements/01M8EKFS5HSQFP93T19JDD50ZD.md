@@ -75,3 +75,5 @@
 ## 进展（2026-11-28）
 - **S2a 已实现**（dev `d72afb2`）：指令点 sink + `handle.onTick` 只读 tick + 每入口 drain（同一 2 ms CPU 窗）+ Run 收口释放 JS handler；守卫 `instr-hook/sink-*` / `plugin/point-hit*` / `drain-*` + 形态 ⑦⑧ + 2 变异。
 - **待做**：S2b `once`/`task`/timeout 泵（挂读点/render 既有泵）+ Run 存活；S2c `ctx.at` 链 + `Tick` 分层；顺手补 d.ts `onTick`/`InstrTick` 与 tick 预算字段保存/恢复。
+
+- **S2b / S2c-1 已实现**（dev `24d312b` / `a5a99d5`）：`once`/`task`/timeout/存活；`ctx.at` 链 + `Tick` 只读 + `local` + stale。**剩余 S2c-2**：`{script,lo,hi}`/`{script}`/`{opcode}` 的 JS 暴露、`Tick.edit/input/patch`、多槽 `Pending`、`hits[0]` 归属。

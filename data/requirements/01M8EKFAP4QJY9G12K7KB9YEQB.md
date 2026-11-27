@@ -60,3 +60,6 @@
 - **S2a 已实现并合入 main**（dev `d72afb2`）：指令点 sink（runtime→ui，无 JS 类型）+ `handle.onTick(fn)` 只读 tick + 每入口 drain（同一 CPU 预算窗）+ Run 收口释放 JS handler。复审 accept-with-findings。
 - **进行中**：S2b（`once`/`task`/timeout + Run 存活语义）→ S2c（`ctx.at` 链 + `Tick` 分层）→ S3 → S4。
 - 证据：`.tmp/plugin-v2/{plan.md,s0/,s1/,s2a/}`（含复审报告与变异读数）。
+
+- **S2b 已实现**（dev `24d312b` + `bc45164`）：`ctx.once` / `ctx.task` / timeout 泵 / Run 存活（tasks ∪ onces ∪ onTick 订阅）/ `start` 可单独存在；复审的 S2 四条已修。
+- **S2c-1 已实现**（dev `a5a99d5` + `5846d23`）：`ctx.at` 链（注册序 / `next()` 截断 / `off`）+ `Tick` 只读（`now/local/log`，DEC + 越界 undefined）+ stale Tick + `{opcode}` matcher；复审 S2（patch `break` 饿死同点订阅）已修。
