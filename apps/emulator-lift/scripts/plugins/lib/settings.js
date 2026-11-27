@@ -302,15 +302,17 @@ export function slotSetting(ctx, domain, fallback, domainId) {
 /**
  * @typedef {{ type: "bool" | "number", label: string, default?: unknown, min?: number,
  *             max?: number, step?: number }} SettingsEntrySpec
- * @typedef {{ domain: string, title: string, live: "frame" | "run" | "restart",
+ * @typedef {{ domain: string, title: string, owner?: string, live: "frame" | "run" | "restart",
  *             entries: Record<string, SettingsEntrySpec> }} SettingsSpec
- * @typedef {{ title: string, live: string, entries: Record<string, unknown> }} NormalizedSchema
+ * @typedef {{ owner?: string, title: string, live: string,
+ *             entries: Record<string, unknown> }} NormalizedSchema
  */
 
 /**
  * 把插件设置 schema 写进**保留域** `settings.schema`（D1）。
  *
- * 写入形状：`{ "<plugin-domain>": { title, live, entries: { <key>: { type, label, default?, min?, max?, step? } } } }`。
+ * 写入形状：`{ "<plugin-domain>": { title, live, entries: { <key>: { type, label, default?, min?, max?, step? } } } }`；
+ * 有 `owner` 时多一个 `owner` 字段（= 插件名，设置页小节标题的归属前缀）。
  * ★ 先 `all()` 比一下：**相同就不写**（⛔ 不产生每 Run 一次的脏写）。
  * ★ **永不抛错**：任何 `set` 失败（超上限 / 只读 / 没有 appdata）只落一行 `ctx.log("warn", …)`。
  *
@@ -368,7 +370,11 @@ function buildSchema(spec) {
         if (typeof entry.step === "number") item["step"] = entry.step;
         entries[key] = item;
     }
-    return { title: spec.title, live, entries };
+    /** @type {NormalizedSchema} */
+    const out = { title: spec.title, live, entries };
+    // ★ `owner` 可选：缺省 = **不写**（页面回退到旧的 `<title>`，⛔ 不写 domain id）。
+    if (typeof spec.owner === "string" && spec.owner !== "") out.owner = spec.owner;
+    return out;
 }
 
 /**
@@ -382,6 +388,8 @@ function sameSchema(left, right) {
     if (left === null || typeof left !== "object" || Array.isArray(left)) return false;
     const obj = /** @type {Record<string, unknown>} */ (left);
     if (obj["title"] !== right.title || obj["live"] !== right.live) return false;
+    // ★ `owner` 也参与比较：旧盘上没有 owner、新 spec 有 ⇒ 要重写一次（否则新归属永远不落盘）。
+    if (obj["owner"] !== right.owner) return false;
     const rawEntries = obj["entries"];
     if (rawEntries === null || typeof rawEntries !== "object" || Array.isArray(rawEntries)) return false;
     const entries = /** @type {Record<string, unknown>} */ (rawEntries);

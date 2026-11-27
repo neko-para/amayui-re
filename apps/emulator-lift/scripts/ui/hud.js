@@ -42,6 +42,8 @@
 //   ★ 桥可用但 `settings.schema` 里**一个可画项都没有**（空表 / 全是坏形状）⇒ **也不打开**，
 //     状态行 `settings: 没有注册设置`（⛔ 不打开一个空白页、⛔ 不造死控件）。
 //     两条都是"同一个脚本实例内改回来才清"。
+//   ★ 设置页开着时**任意位置右键**也关闭它（与游戏内 back 一致）：`rightClick` = `game.mouse.buttons.right`
+//     的**按下沿**（`hud.js` 每帧在 `drawHud` 开头算，⛔ 不把电平当右键）；右键不挂命中区、不吞 guest 输入。
 //   ★ 设置页的状态行是**模块级**（`settingsPage.status`，由 `drawPage` 每帧写回）：
 //     成功点（`applied:true`）清空；失败（`settings: 只读` / `settings: <错误>`）留到下一次操作
 //     或下一次成功；**关闭页面不清**（状态行留在 HUD 上）。⛔ 不每帧新建对象 —— 那样失败回执
@@ -96,6 +98,7 @@ const NO_SETTINGS = "settings: 没有注册设置";
  *   fps?: number,
  *   worst?: any,
  *   click?: any,
+ *   rightClick?: boolean,
  *   hover?: string,
  *   active?: string,
  *   overlayKeySeq?: number,
@@ -110,6 +113,17 @@ const NO_SETTINGS = "settings: 没有注册设置";
 const profile = { running: false, status: "" };
 /** 设置二级页是否打开（D4）。 */
 let settingsOpen = false;
+/**
+ * 上一帧的右键**电平**（只用来算按下沿；⛔ 不把它当右键 —— 电平每帧都为真）。
+ * @type {boolean}
+ */
+let lastRightDown = false;
+/**
+ * 本帧右键的**按下沿**（设置页的"任意位置右键 = 返回"）。
+ * 每帧在 `drawHud` 开头重算，两个适配器的 `rightClick` getter 读它。
+ * @type {boolean}
+ */
+let rightClickEdge = false;
 /** 上一次看到的 `overlayKeySeq`（`undefined` = 还没有可用的源）。 */
 /** @type {number | undefined} */
 let lastKeySeq;
@@ -144,6 +158,7 @@ function classicHost() {
     get fps() { return game.fps; },
     get worst() { return game.worst; },
     get click() { return game.click; },
+    get rightClick() { return rightClickEdge; },
     get hover() { return game.hover; },
     get active() { return game.active; },
     get overlayKeySeq() { return game.overlayKeySeq; },
@@ -201,6 +216,7 @@ function pluginHost(ctx) {
     get fps() { return ctx.game.fps; },
     get worst() { return ctx.game.worst; },
     get click() { return ctx.game.click; },
+    get rightClick() { return rightClickEdge; },
     get hover() { return ctx.game.hover; },
     get active() { return ctx.game.active; },
     get overlayKeySeq() { return ctx.game.overlayKeySeq; },
@@ -277,7 +293,15 @@ function settingsBlockedReason(h) {
  * @param {HudHost} h
  */
 function drawHud(h) {
-  // ① 读数 / 门（先于任何 draw）：F9 的显隐切换、设置入口、页面开关。
+  // ① 右键**按下沿**（先于任何交互）：设置页要的是"这一帧刚按下"，⛔ 不是电平（电平每帧都会返回）。
+  //    来源 = `game.mouse.buttons.right`（插件侧 `ctx.game.mouse().buttons.right`）；没有读数源 ⇒ false。
+  const mouseNow = h.mouse();
+  const rightDown =
+    mouseNow !== undefined && mouseNow.buttons !== undefined && mouseNow.buttons.right === true;
+  rightClickEdge = rightDown && !lastRightDown;
+  lastRightDown = rightDown;
+
+  // ② 读数 / 门（先于任何 draw）：F9 的显隐切换、设置入口、页面开关。
   toggleProfileOnKey(h);
 
   const click = h.click;
@@ -316,7 +340,7 @@ function drawHud(h) {
     }
   }
 
-  // ② PROFILE 的状态机（副作用**先于任何 draw**：状态行要参与面板尺寸）。
+  // ③ PROFILE 的状态机（副作用**先于任何 draw**：状态行要参与面板尺寸）。
   if (profileVisible && click !== undefined && click.key === "profile") {
     if (profile.running) {
       const r = h.profileEnd();
@@ -341,9 +365,9 @@ function drawHud(h) {
     }
   }
 
-  // ③ 读数行（D4 的行序；`settings…` 恒在最后一行）。
+  // ④ 读数行（D4 的行序；`settings…` 恒在最后一行）。
   const lines = [];
-  const mouse = h.mouse();
+  const mouse = mouseNow;
   if (mouse !== undefined) lines.push("mouse " + mouse.x + "," + mouse.y);
   // ★ 栈顶脚本名：`frames()` 是 top-first，但 `cur` 那一格**可能不活动**
   //   （列表照给、`top` 全 false，见 README「帧列表」）—— 那时 `frames[0]` 只是"最高活动槽"，
@@ -380,7 +404,7 @@ function drawHud(h) {
   // ★ `settings…` 恒在最后一行（D4）—— 设置入口的可点击文案。
   lines.push(SETTINGS_LINE);
 
-  // ④ 面板 + 文本（面板是 elements[0]；贴左、垂直居中）。
+  // ⑤ 面板 + 文本（面板是 elements[0]；贴左、垂直居中）。
   const lineH = Math.max(SIZE + 4, h.measure("Ag", SIZE).h + 2);
   let maxW = 0;
   for (let i = 0; i < lines.length; ++i) {
@@ -394,11 +418,11 @@ function drawHud(h) {
   for (let i = 0; i < lines.length; ++i) {
     h.text({ x: PAD, y: panelY + PAD + i * lineH, text: lines[i], size: SIZE, color: FG });
   }
-  // ⑤ 设置入口：透明命中 Rect 刚好盖住**最后一行**（画在面板之后 ⇒ 不遮文本、可命中）。
+  // ⑥ 设置入口：透明命中 Rect 刚好盖住**最后一行**（画在面板之后 ⇒ 不遮文本、可命中）。
   const settingsY = panelY + PAD + (lines.length - 1) * lineH;
   h.rect({ x: 0, y: settingsY, w: panelW, h: lineH, fill: "#00000000", key: SETTINGS_KEY });
 
-  // ⑥ PROFILE：默认不画（也不挂 key）；F9 打开后画在面板**下方**。只画外观 —— 副作用已在 ② 做完。
+  // ⑦ PROFILE：默认不画（也不挂 key）；F9 打开后画在面板**下方**。只画外观 —— 副作用已在 ③ 做完。
   if (profileVisible) {
     Button({ key: "profile", rect: { x: PAD, y: panelY + panelH + PAD, w: BUTTON_W, h: BUTTON_H }, label: "PROFILE" }, h);
   }

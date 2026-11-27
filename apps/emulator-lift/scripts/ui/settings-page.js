@@ -2,8 +2,8 @@
 // emulator-lift · **二级设置页**（D2/D4；纯绘制 + 交互，**无模块级可变状态**）
 //
 // ★ 本文件只依赖两样东西：
-//   ① `h` = 经典回退 HUD 的 `HudHost`（`measure` / `rect` / `text` / `hover` / `active` / `click`）
-//      **外加 `h.config`**（D2 的 `{ available, domain(id) }`；`undefined` = 没有桥）；
+//   ① `h` = 经典回退 HUD 的 `HudHost`（`measure` / `rect` / `text` / `hover` / `active` / `click` /
+//      `rightClick`）**外加 `h.config`**（D2 的 `{ available, domain(id) }`；`undefined` = 没有桥）；
 //   ② `state` = 调用方（`hud.js`）持有的那一小块状态（目前只有 `status`）。
 //   脚本自己的状态一律留在 `hud.js`；本文件**没有**模块级可变对象（⛔ 不缓存上一帧的值）。
 //
@@ -103,12 +103,13 @@ export const PAGE_KEYS = {
  *   hover?: string,
  *   active?: string,
  *   click?: { key: string, x: number, y: number },
+ *   rightClick?: boolean,
  *   config?: PageConfigApi,
  * }} SettingsHost
  */
 /** @typedef {{ status?: string }} SettingsPageState */
 /** @typedef {{ key: string, type: "bool" | "number", label: string, default: unknown, min: number, max: number, step: number }} SchemaItem */
-/** @typedef {{ id: string, title: string, live: string, items: SchemaItem[] }} SchemaDomain */
+/** @typedef {{ id: string, title: string, owner?: string, live: string, items: SchemaItem[] }} SchemaDomain */
 /** @typedef {{ domain: string, item: SchemaItem, kind: "set" | "dec" | "inc" }} ClickedRow */
 /** @typedef {{ drawn: SchemaDomain[], hidden: number }} PagePlan */
 
@@ -177,6 +178,13 @@ function drawOpen(h, state) {
     const schema = readSchema(h);
     const plan = planRows(schema);
     let status = state !== null && state !== undefined && typeof state.status === "string" ? state.status : "";
+
+    // ★ 任意位置右键 = 返回（与游戏内一致的 back；含控件上 —— 所以放在交互段**最前面**，先于 `h.click`）。
+    //   ⛔ 不影响左键：`rightClick` 是 `hud.js` 每帧算的**按下沿**，与 `h.click`（一次性载荷）互不吞。
+    if (h.rightClick === true) {
+        writeState(state, status);
+        return { closed: true };
+    }
 
     // ① 交互**先于**绘制：同一帧就能显示 set 之后的值（D3 的"当拍生效"）。
     const click = h.click;
@@ -365,6 +373,8 @@ function readSchema(h) {
         out.push({
             id,
             title: typeof obj["title"] === "string" ? obj["title"] : id,
+            // ★ 可选归属（插件名）：缺省 = 不写 ⇒ 小节标题保持旧的 `<title>`（⛔ 不回退到 domain id）。
+            owner: typeof obj["owner"] === "string" && obj["owner"] !== "" ? obj["owner"] : undefined,
             live: typeof obj["live"] === "string" ? obj["live"] : "",
             items,
         });
@@ -393,7 +403,7 @@ function planRows(schema) {
             items.push(item);
         }
         if (items.length === 0) continue;
-        drawn.push({ id: sd.id, title: sd.title, live: sd.live, items });
+        drawn.push({ id: sd.id, title: sd.title, owner: sd.owner, live: sd.live, items });
         left -= items.length;
     }
     let rowCount = 0;
@@ -548,7 +558,9 @@ function formatNumber(value) {
 
 /** @param {SchemaDomain} sd 域 @returns {string} */
 function sectionTitle(sd) {
-    return sd.live === "" ? sd.title : sd.title + "  [" + sd.live + "]";
+    // ★ owner 有值才加 `<owner> · <title>`；缺省保持旧 `<title>`（⛔ 不写 domain id，现有页面不变）。
+    const base = sd.owner !== undefined && sd.owner !== "" ? sd.owner + " · " + sd.title : sd.title;
+    return sd.live === "" ? base : base + "  [" + sd.live + "]";
 }
 
 /** @param {unknown} e 抛出来的东西 @returns {string} */

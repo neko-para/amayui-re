@@ -15,6 +15,10 @@
 //   ⑤ **没有桥就不打开**：`h.config === undefined` ⇒ `canOpen(h) === false`，`drawPage` 返回
 //      `{closed:true, status:"没有插件在跑"}` 且**不画控件**（D2：预设模式没有 config）。
 //   ⑥ **12 行上限**：13 项 ⇒ 只画 12 行（item12 不在）+ 一行 `… 还有 1 项`。
+//   ⑦ **任意位置右键 = 返回**：`h.rightClick === true` ⇒ `drawPage` 返回 `closed:true`，即使同帧带着
+//      一个 `set:<domain>:<key>` 的左键载荷也**一个 set 都不许**发生（左键逻辑由 ② 继续覆盖）。
+//   ⑧ **归属前缀**：schema 带 `owner` ⇒ 小节标题 `<owner> · <title>`；无 `owner` ⇒ 保持旧 `<title>`
+//      （⛔ 不回退成 domain id）。
 //
 // ★ 夹具 = **inline module 入口**（与 `ui_kit_script.cpp` 同形）：`import { canOpen, drawPage } from
 //   './settings-page.js'` ⇒ 经**现有 module loader** 加载**发行件**（改 settings-page.js / kit.js
@@ -166,7 +170,8 @@ function makeHost(opts) {
   };
   return {
     measure: measure, rect: paintRect, text: paintText,
-    hover: undefined, active: undefined, click: opts.click, config: config
+    hover: undefined, active: undefined, click: opts.click,
+    rightClick: opts.rightClick, config: config
   };
 }
 
@@ -177,7 +182,8 @@ function storeWith(schema, values) {
 }
 
 var SCHEMA_2 = {
-  'd1': { title: 'Domain One', live: 'run', entries: {
+  // ★ d1 带 owner（插件名）⇒ 小节标题 `<owner> · <title>`；d2 无 owner ⇒ 回退旧 `<title>`。
+  'd1': { owner: 'field-point-visible', title: 'FIELD points', live: 'run', entries: {
     'flag': { type: 'bool', label: 'flag label', default: false }
   }},
   'd2': { title: 'Domain Two', live: 'restart', entries: {
@@ -315,6 +321,19 @@ function caseBadShapes() {
   note('done=1');
 }
 
+function caseRightClick() {
+  var sets = [];
+  var store = storeWith(schemaSolo(), { 'solo': { 'flag': false } });
+  // ★ 同帧还给一个**左键 set** 的载荷：右键必须赢（先于 `h.click`），且一个 set 都不许发生。
+  var r = drawPage(makeHost({
+    store: store, sets: sets, rightClick: true,
+    click: { key: 'set:solo:flag', x: 4, y: 4 }
+  }), {});
+  note('closed=' + (r.closed === true ? 1 : 0));
+  note('sets=' + sets.length);
+  note('store=' + (store['solo']['flag'] === true ? 'true' : 'false'));
+}
+
 globalThis.render = function render() {
   var f = game.frame;
   if (f === 1) return caseCanOpen();
@@ -328,6 +347,7 @@ globalThis.render = function render() {
   if (f === 9) return caseReadOnly();
   if (f === 10) return caseOverflow();
   if (f === 11) return caseBadShapes();
+  if (f === 12) return caseRightClick();
 };
 )JS";
 
@@ -393,8 +413,9 @@ int main() {
             }
             expectText(b, "SETTINGS", "标题");
             expectText(b, "live: 正在运行的插件当拍生效；其余为预配置", "live 固定文案");
-            expectTextContaining(b, "Domain One", "域小节标题 1");
-            expectTextContaining(b, "Domain Two", "域小节标题 2");
+            expectTextContaining(b, "field-point-visible · FIELD points", "带 owner 的域小节标题");
+            // ★ 无 owner 的旧域：标题仍是 `<title>`（⛔ 不回退成 domain id）。
+            expectText(b, "Domain Two  [restart]", "无 owner 的域标题保持旧形状");
             expectText(b, "flag label", "bool 标签");
             expectText(b, "count label", "number 标签");
             expectText(b, "extra label", "bool 标签 2");
@@ -523,6 +544,18 @@ int main() {
         if (renderFrame(*script, 11, &b)) {
             expectText(b, "done=1", "坏形状不抛");
             expectText(b, "fine label", "好形状的域照画");
+        }
+    }
+
+    // ---- ⑦ 任意位置右键 = 返回（即使同一帧有一个 set 点击）----
+    {
+        g_current_case = "ui-settings-page/right-click-back";
+        UiBuilder b;
+        if (renderFrame(*script, 12, &b)) {
+            expectText(b, "closed=1", "右键 ⇒ drawPage 返回 closed");
+            expectText(b, "sets=0", "右键不许触发任何 set");
+            expectText(b, "store=false", "右键不许改 store");
+            // 左键点击控件仍照旧：`ui-settings-page/bool-toggle`（frame 3）已断言 set 一次 + 同帧 on。
         }
     }
 

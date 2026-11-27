@@ -284,8 +284,9 @@ private:
     Receipt submitIntent(IntentKind kind, int x, int y, MouseButton button);
     // 失败收口：记错 + 一行 stderr（真源在本类；⛔ 不写 runner 的 `lastError`）。
     void markFailed(const std::string& reason);
-    // 一行 stderr（⛔ 不周期、⛔ 不进 stdout）。
-    static void report(const char* what, const std::string& text);
+    // 一行 stderr（⛔ 不周期、⛔ 不进 stdout）。★ 前缀带**插件名**（`initFromFile` 记下的 stem），
+    //   所以它是实例方法（⛔ 不在每条日志现场算路径）。
+    void report(const char* what, const std::string& text);
 
     IntentQueue queue_;
     TriggerFactory factory_;
@@ -300,6 +301,9 @@ private:
     const ui::UiHostOps* host_ops_ = nullptr;
     Params params_;
     std::string origin_;
+    // ★ 日志归属：插件入口文件名的 stem（`scripts/plugins/field-point-visible.js` ⇒
+    //   `field-point-visible`；内置 `hud` 预设 ⇒ `hud`）。`initFromFile` 记一次；拿不到路径 ⇒ `plugin`。
+    std::string name_ = "plugin";
 
     // 回调期间的上下文（`ctx.*` 的来路）；回调外恒 nullptr ⇒ `inputWired()` 等为 false。
     Context* ctx_ = nullptr;

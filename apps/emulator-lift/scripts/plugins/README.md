@@ -68,7 +68,7 @@ scripts/plugins/
 | `save` | `slot` (number)、`expect` (string[] 或逗号串)、可选 `saveDir` (string，相对 appdata 根)、`timeoutMs` (number)、`precheck` (boolean，缺省 true；false = 跳过存档文件前置检查) | 根入口 `load-save.js`（库 = `lib/save.js`） |
 | `scenario.save10-field` | `slot` (number)、`expect` (string[] 或逗号串) | `scenario-save10-field.js`（根） |
 | `field.point-visible` | `on` (bool / `0|1` / `"true"|"false"`，缺省 false)、`types` (hex 串 `"1f,20"` 或数组)、`diag` (bool，缺省 false)；旧配置里的 `static` / `poll` **无害忽略** | `field-point-visible.js`（根） |
-| `settings.schema` | **保留域（机器写，⛔ 人不用手改）**：key = 插件域 id；值 = `{title, live, entries}` | 写 = `lib/settings.js` 的 `registerSettings`；读 = `scripts/ui/settings-page.js` |
+| `settings.schema` | **保留域（机器写，⛔ 人不用手改）**：key = 插件域 id；值 = `{owner?, title, live, entries}`（`owner` = 插件名，可缺省） | 写 = `lib/settings.js` 的 `registerSettings`；读 = `scripts/ui/settings-page.js` |
 
 - ★ `field-point-visible.js` 是**常驻开关**（用户裁决 2026-11-25：目标 = **无条件显示所有采集 / 挖掘点**，
   不是"在 FIELD 里无条件显示 `?`/`!`"）：它常驻 arm **一条** `afterPosition(…, { mode: "reenter" })`
@@ -107,9 +107,10 @@ scripts/plugins/
 ### `settings.schema`：插件自报的设置表（D1，2026-11-25）
 
 - **谁写**：插件在 `start(ctx)`（Run 上下文，已有 `ctx.config`）调
-  `registerSettings(ctx, { domain, title, live: "frame"|"run"|"restart", entries })`。它把
-  `{title, live, entries}` 写进**保留域** `settings.schema` 的 key = `domain`。形状：
-  `{"version":1,"domains":{"settings.schema":{"field.point-visible":{"title":"FIELD points","live":"run","entries":{...}}}}}`
+  `registerSettings(ctx, { domain, owner?, title, live: "frame"|"run"|"restart", entries })`。它把
+  `{owner?, title, live, entries}` 写进**保留域** `settings.schema` 的 key = `domain`（`owner` =
+  插件名，可选；缺省 = 设置页只画旧 `<title>`）。形状：
+  `{"version":1,"domains":{"settings.schema":{"field.point-visible":{"owner":"field-point-visible","title":"FIELD points","live":"run","entries":{...}}}}}`
   每项 = `{type:"bool"|"number", label, default?, min?, max?, step?}`。
 - **谁读**：`scripts/ui/settings-page.js`（经典回退 HUD 的 `host.config`；`h.config === undefined`
   ⇒ 页面不打开）。它每帧**只读 schema 域**，每个可见项用 `get(key, default)`；⛔ 不缓存值。

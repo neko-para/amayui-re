@@ -205,6 +205,10 @@ if (canOpen(h) && hasSettings(h)) {
   状态行 `settings: 没有注册设置` —— ⛔ 打开一张只有 `SETTINGS` + live + `BACK` 的空白页。
 - **读**：每帧每个可见项 `domain.get(key, default)`；`all()` **只**用于保留域 `settings.schema`
   （插件在 `start` 里 `registerSettings` 写进去；见 `scripts/plugins/README.md`）。坏 schema 形状跳过。
+- **小节标题**：schema 带 `owner`（插件名）⇒ `<owner> · <title>`；缺省保持旧 `<title>`（⛔ 不写
+  domain id —— 老的域表看起来与以前一样）。`live` 非空时仍追加 `  [<live>]`。
+- **右键 = 返回**：`h.rightClick === true`（按下沿，由 `hud.js` 每帧算）⇒ 在交互段**最前面**照样
+  `closed: true`，**任意位置**生效（含控件上），且同帧的 `h.click` 不再处理。左键逻辑不变。
 - **写**：点击当拍 `set`；回执 `applied:false` ⇒ `settings: 只读` / `settings: 没有 appdata`；
   `set` 抛错 ⇒ 状态行 `settings: <message>`，**绝不冒出 render**。落盘由宿主在这次 render 末尾 flush。
   ★ 这几句是**调用方状态**（本文件没有模块级可变状态）：`hud.js` 用模块级对象持有 ⇒ 失败回执**跨帧
@@ -215,10 +219,12 @@ if (canOpen(h) && hasSettings(h)) {
   （`settings.back`）；最多 12 项，超出 `… 还有 N 项`。
 - ★ **`hud.js` 已经接上它**（D4）：最后一行 `settings…` 的透明命中 Rect（`key:"settings"`）打开页面；
   页面开着时 `hud.js` **不画 HUD 面板**、只画 `drawPage(h, state)`，`BACK` 关闭并回到 HUD。
-  页面里的 `set/inc/dec` 由本文件处理（`h.config` 的写回执它自己消化）。
+  页面里的 `set/inc/dec` 由本文件处理（`h.config` 的写回执它自己消化）。**任意位置右键**也关闭页面
+  （`h.rightClick` 的按下沿；与 `BACK` 同一条出口）。
 - 判据 = `tests/ui_settings_page.cpp`（pure；假 `h` + 假 `config`）：版式/命中 key、bool 整行点击
   （`set` 恰好一次 + 同帧值变）、min/max 钳制与 `<invalid>`、`set` 抛错不冒出 render、
-  `h.config === undefined` ⇒ 不打开、13 项 ⇒ 12 行 + `… 还有 1 项`。
+  `h.config === undefined` ⇒ 不打开、13 项 ⇒ 12 行 + `… 还有 1 项`、`owner` 标题前缀与无 owner 回退、
+  任意位置右键 ⇒ `closed:true` 且不触发任何 `set`。
 
 ### 旧全局 ↔ 插件 `ctx` 的映射（S2）
 

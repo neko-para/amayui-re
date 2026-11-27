@@ -31,6 +31,17 @@ bool readHostSource(const std::string& path, std::string* out) {
     return !bad;
 }
 
+// 插件入口路径 → 日志归属名（文件名的 stem）：`.../field-point-visible.js` ⇒ `field-point-visible`。
+// ★ 只在 `initFromFile` 调一次（⛔ 不在每条日志现场算路径）；分隔符认 `/` 与 `\\`（两平台）。
+// ★ 拿不到文件名的场合（空路径 / 只有分隔符）⇒ `plugin`。
+std::string pluginNameFromPath(const std::string& path) {
+    const std::size_t slash = path.find_last_of("/\\");
+    std::string file = slash == std::string::npos ? path : path.substr(slash + 1);
+    const std::size_t dot = file.find_last_of('.');
+    if (dot != std::string::npos && dot != 0) file.resize(dot);
+    return file.empty() ? std::string("plugin") : file;
+}
+
 // readout 是**一行**：理由文本里的换行必须折成空格（否则 `run=` 之后的字段会跑到下一行）。
 std::string oneLine(std::string text) {
     for (char& c : text) {
@@ -174,6 +185,8 @@ bool PluginHost::init(const std::string& source, const std::string& origin, cons
 
 bool PluginHost::initFromFile(const std::string& path, const Params& params, const ui::UiHostOps* host_ops,
                               std::string* err) {
+    // ★ 日志归属在这里定**一次**（`[plugin <name>]`）；`init` 不碰它（直接 `init` 的夹具走缺省 `plugin`）。
+    name_ = pluginNameFromPath(path);
     std::string source;
     if (!readHostSource(path, &source)) {
         if (err != nullptr) *err = path + ": 读不到插件文件";
@@ -379,7 +392,8 @@ void PluginHost::markFailed(const std::string& reason) {
 }
 
 void PluginHost::report(const char* what, const std::string& text) {
-    std::fprintf(stderr, "[plugin] %s: %s\n", what != nullptr ? what : "error", oneLine(text).c_str());
+    std::fprintf(stderr, "[plugin %s] %s: %s\n", name_.c_str(), what != nullptr ? what : "error",
+                 oneLine(text).c_str());
     std::fflush(stderr);
 }
 
@@ -545,7 +559,7 @@ void PluginHost::log(const char* level, const std::string& message) {
     if (log_lines_ >= kLogLineLimit) {
         if (log_lines_ == kLogLineLimit) {
             ++log_lines_;
-            std::fprintf(stderr, "[plugin] log: 已达上限 %llu 行（后续丢弃）\n",
+            std::fprintf(stderr, "[plugin %s] log: 已达上限 %llu 行（后续丢弃）\n", name_.c_str(),
                          static_cast<unsigned long long>(kLogLineLimit));
             std::fflush(stderr);
         }
@@ -554,7 +568,8 @@ void PluginHost::log(const char* level, const std::string& message) {
     if (!message.empty() && message == last_log_) return;
     last_log_ = message;
     ++log_lines_;
-    std::fprintf(stderr, "[plugin] %s: %s\n", level != nullptr ? level : "info", oneLine(message).c_str());
+    std::fprintf(stderr, "[plugin %s] %s: %s\n", name_.c_str(), level != nullptr ? level : "info",
+                 oneLine(message).c_str());
     std::fflush(stderr);
 }
 

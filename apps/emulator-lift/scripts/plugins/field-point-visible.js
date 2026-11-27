@@ -390,6 +390,7 @@ const plugin = {
         //   ⛔ 失败只落一行 warn（`registerSettings` 内部 catch）—— 绝不能因为写不了设置而打死 Run。
         registerSettings(ctx, {
             domain: CONFIG_DOMAIN,
+            owner: "field-point-visible",
             title: "FIELD points",
             live: "run",
             entries: {

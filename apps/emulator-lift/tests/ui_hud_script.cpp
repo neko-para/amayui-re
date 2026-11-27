@@ -40,6 +40,8 @@
 //      红了 ⇒ 状态行只活 1 帧（≈16ms，人看不见）：只读 appdata 下点开关"零反馈"。
 //   ⑩ **空 schema ⇒ 不打开**（顺带修）：桥可用但 `settings.schema` 没有 key ⇒ 点 `settings…` 仍是
 //      HUD + 状态行 `settings: 没有注册设置`（⛔ 不打开空白页 / 不造死控件）；注册表回来才清。
+//   ⑪ **设置页任意位置右键 = 返回**：右键**按下沿**（不是电平）关闭页面；同帧的左键 `set` 载荷
+//      不许被消费；右键一直按着时左键仍能重新打开（电平不算第二个沿）。
 // ★ 脚本是**运行时读的外置文件**（`LIFT_UI_SCRIPT_DIR "/hud.js"`，与内部 hud 回退同一个路径）：
 //   改脚本 ⇒ 这条用例立刻看见。缺宿主字体（`ui.measure` 的来源）⇒ `LIFT_SKIP(77)`（⛔ 不假绿）。
 #include <cstdint>
@@ -224,6 +226,7 @@ struct FakeConfig final : lift::plugin::ConfigBridge {
     bool schema_empty = false;
     bool set_applied = true;
     const char* set_code = nullptr;
+    int set_calls = 0;  // 右键用例：右键那一拍**不许**消费同帧的左键 set
 
     lift::plugin::ConfigValue schema() const {
         lift::plugin::ConfigValue root = lift::plugin::ConfigValue::object();
@@ -255,6 +258,7 @@ struct FakeConfig final : lift::plugin::ConfigBridge {
     }
     bool set(const std::string&, const std::string&, const lift::plugin::ConfigValue&,
              lift::plugin::ConfigReceipt* receipt, std::string*) override {
+        ++set_calls;
         if (receipt != nullptr) {
             receipt->applied = set_applied;
             receipt->code = set_code;
@@ -767,6 +771,84 @@ void caseSettingsStatusRetention(lift::ui::ScriptRuntime& runtime, const std::st
 }
 
 // ---------------------------------------------------------------------------------------
+// ⑪ 设置页**任意位置右键 = 返回**（与游戏内一致；按下沿，⛔ 不是电平）
+//   判据：
+//     ① 页面开着、右键按下那一拍（同帧还带一个 `set:demo:flag` 左键载荷）⇒ 页面关闭（HUD 回来）、
+//        `set_calls == 0`（右键赢在 `h.click` 之前，⛔ 不吞左键也不消费它）；
+//     ② **右键一直按着**时再点 `settings…` ⇒ 能重新打开（说明用的是**按下沿**；把电平当右键的写法
+//        会在这一拍立刻又关掉）；
+//     ③ 松开右键那帧页面仍在；**再按一次**右键 ⇒ 又一次关闭（第二个沿）。
+// ---------------------------------------------------------------------------------------
+void caseRightClickBack(lift::ui::ScriptRuntime& runtime, const std::string& source, const std::string& path,
+                        lift::FontEngine* font) {
+    using namespace lift_test;
+    g_current_case = "ui-hud-script/right-click-back";
+
+    FakeConfig config;
+    lift::ui::UiHostOps ops{};
+    ops.config = &config;
+
+    std::string err;
+    std::unique_ptr<UiScript> script = runtime.load(source, path, font, &err);
+    LIFT_CHECK(script != nullptr);
+    if (!script) return;
+
+    auto render = [&](std::uint64_t frame, const char* key, bool right_down, UiBuilder* out) {
+        UiFrameReadings r;
+        r.frame = frame;
+        r.host = &ops;
+        r.mouse_ok = true;
+        r.mouse_x = 4;
+        r.mouse_y = 4;
+        r.mouse_buttons_ok = true;
+        r.mouse_right = right_down;
+        if (key != nullptr) {
+            r.click_ok = true;
+            r.click_key = key;
+            r.click_x = 4;
+            r.click_y = 4;
+        }
+        return renderWith(*script, r, out, "right-click-back");
+    };
+
+    // ① 左键点 settings… ⇒ 页面打开（右键未按）。
+    {
+        UiBuilder b;
+        LIFT_CHECK(render(1, "settings", false, &b));
+        expectRect(b, "settings.back", "左键点 settings… 应打开设置页");
+    }
+    // ② 右键按下那一拍（同帧还带 set 载荷）⇒ 关闭 + 零 set。
+    {
+        UiBuilder b;
+        LIFT_CHECK(render(2, "set:demo:flag", true, &b));
+        expectNoKey(b, "settings.bg", "右键按下沿应关闭设置页");
+        expectRect(b, "settings", "回到 HUD");
+        ++g_checks;
+        if (config.set_calls != 0) {
+            failf(__FILE__, __LINE__, "右键关闭那一拍不许消费同帧左键 set（set_calls=%d）", config.set_calls);
+        }
+    }
+    // ③ 右键**一直按着**：点 settings… 仍能打开（电平不能当右键）。
+    {
+        UiBuilder b;
+        LIFT_CHECK(render(3, "settings", true, &b));
+        expectRect(b, "settings.back", "右键按着（非按下沿）时左键点 settings… 仍应打开页面");
+    }
+    // ④ 松开右键：页面仍在。
+    {
+        UiBuilder b;
+        LIFT_CHECK(render(4, nullptr, false, &b));
+        expectRect(b, "settings.back", "松开右键不应关闭页面");
+    }
+    // ⑤ 再按一次右键（第二个沿）⇒ 关闭。
+    {
+        UiBuilder b;
+        LIFT_CHECK(render(5, nullptr, true, &b));
+        expectNoKey(b, "settings.bg", "第二次右键按下沿也应关闭设置页");
+    }
+}
+
+// ---------------------------------------------------------------------------------------
 // ⑩ 空 schema ⇒ **不打开**（顺带修：桥可用但 `settings.schema` 一个 key 都没有）
 //   ★ 代表这一类错：`canOpen` 只看 `available` ⇒ 点 `settings…` 打开一张**空白页**
 //     （没有域 / 没有项，只有 SETTINGS + live + BACK）—— 用户改了没有、什么都改不了。
@@ -1119,6 +1201,9 @@ int main() {
 
     // ---- ⑩ 空 schema ⇒ 不打开（一份实例：空表 → 状态行 → 注册表回来 → 打开）----
     caseEmptySchema(*runtime, source, path, &font);
+
+    // ---- ⑪ 任意位置右键 = 返回（按下沿；同帧 set 载荷不许被消费；电平不算）----
+    caseRightClickBack(*runtime, source, path, &font);
 
     script->shutdown();
     return finish("ui-hud-script");
