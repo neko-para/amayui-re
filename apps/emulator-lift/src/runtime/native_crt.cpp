@@ -125,8 +125,8 @@ constexpr std::int64_t kI64Max = 0x7FFFFFFFFFFFFFFFll;
 //   ④ 返回 = 64 位截断值：低 32 位进 EAX、高 32 位进 EDX（**不回绕也不 clamp**）。
 //      `|x| ≥ 2^63` / NaN / ±Inf ⇒ `n = INT64_MIN` ⇒ `EAX=0, EDX=0x80000000` + IE。
 //
-// ★ 实现 = "一次 softfloat 截断 + 一次 f32 转换"，⛔ 不是"照 33 条逐条重放"（已裁决）。
-//   硬约束只有两条：值必须是 softfloat 的 **trunc**（⛔ 不是宿主 `(int64)(double)`：`|x| ≥ 2^53`
+// ★ 实现 = "一次 x87 截断（`x87ToI64Trunc`）+ 一次 f32 转换"，⛔ 不是"照 33 条逐条重放"（已裁决）。
+//   硬约束只有两条：值必须是 x87 模型的 **trunc**（D49 后即 `double`；⛔ 不是宿主 `(int64)(double)`：`|x| ≥ 2^53`
 //   差一位、越界会给 `0x80000000` 而不是 `0/0x80000000`），以及复刻 `0x4E8301 fst dword` 的
 //   **副作用**（那个 f32 既给出 PE/UE/OE，又给出 guest 可见的 4 字节）。
 //
@@ -149,7 +149,7 @@ bool nativeFtol2Sse(X86& cpu, GuestMemory& mem, std::uint32_t* result) {
         if (cpu.current_override != nullptr) ++cpu.current_override->declines[static_cast<std::size_t>(why)];
         return false;
     };
-    // ── ① 闸门（全部在**任何**副作用之前：guest 写 / x87 栈 / 宿主 softfloat 全局）──────────
+    // ── ① 闸门（全部在**任何**副作用之前：guest 写 / x87 栈 / x87 挂账异常位）──────────
     // G-1 `[0x55F2E8] == 0`：非 0 ⇒ 真机走 `0x4E82D5 cvttsd2si`（只写 EAX、越界语义不同）⇒ decline。
     //   ★ 判据必须带 `committed()`：`rd32` 只在 safe mode 检查提交，非 safe 时读未提交页会
     //     静默给 0 ⇒ 少了这一条，闸门在裸机器上会"放行"。

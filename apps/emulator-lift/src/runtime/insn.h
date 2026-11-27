@@ -41,7 +41,8 @@ enum class Op : std::uint16_t {
     // ---- 串操作（`rep` 前缀见 Insn::rep）----
     Movs, Stos, Lods, Scas, Cmps,
 
-    // ---- x87（S4：语料里 47 个形态；算术全部走 SoftFloat `extF80`，见 plan §4 D3）----
+    // ---- x87（S4：语料里 47 个形态；算术 = `fpu_bridge` 的 double 模型，D49）----
+    //   ⚠ 旧口径（D3）是 SoftFloat `extF80`；该 vendor 树已于 2026-11-27 整条删除。
     Fld, Fst, Fstp, Fild, Fist, Fistp, Fisttp,
     Fadd, Fsub, Fsubr, Fmul, Fdiv, Fdivr,
     Faddp, Fsubp, Fsubrp, Fmulp, Fdivp, Fdivrp,

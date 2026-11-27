@@ -19,7 +19,8 @@
 //     0x48D89A  mov  eax, [ebp+var_114]      ; ← resume（段出口；由本 fn 写 EIP）
 // ★ 为什么值得替换：`__ftol2_sse` 是本机单句占 VOICE ~10% 的热点，而它的**唯一**大调用方就是
 //   这段每样本一次的循环（385 个 call 站点里 Ogg 解码这一类占大头）。段级替换把"每样本一次
-//   dispatcher + invoke + 两次 softfloat"收成一次段入口。
+//   dispatcher + invoke + 两次 softfloat"收成一次段入口（⚠ 这里的成本读数是 D49 前的口径；
+//   vendored SoftFloat 已于 2026-11-27 删除，现在同一条路径是 `fpu_bridge` 的 double 模型）。
 //
 // ★ 闸门 G1–G10（全部在**任何副作用之前**；G1/G2/G5/G6/G9 都先做 `committed()`）：
 //   G1 `[ebp-118h]` / `[ebp-108h]` 已提交（源指针槽 / clip 标志；后者只在 clamp 时写）。

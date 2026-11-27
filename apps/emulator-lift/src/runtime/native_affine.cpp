@@ -45,7 +45,7 @@ bool fpuStackEmpty(const X86& cpu) {
     return true;
 }
 
-// 复刻 exec_fpu.cpp 的 `syncStatus`：把 SoftFloat 的粘性异常位并进 x87 状态字。
+// 复刻 exec_fpu.cpp 的 `syncStatus`：把 x87 的挂账异常位（`fpu_bridge` 的 `thread_local`）并进 x87 状态字。
 // ★ 解释器每条 FP 指令 sync 一次 ⇒ 末态是各次异常位的 OR；这里一次取走同一批位，结果相同。
 // ★ C0..C3：本函数里只有 `fsin`/`fcos` 会写它们（都清 0），之后的算术 / 存取 / fxch / fchs
 //   都不改 CC ⇒ 末尾清一次与逐条 sync 等价。

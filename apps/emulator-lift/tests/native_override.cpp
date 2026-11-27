@@ -2843,7 +2843,7 @@ int main() {
     // 判据（红了意味着什么）：
     //   ① **准入零写**：每条闸门不成立时 `nativeFtol2Sse` 返回 false，且**直接调 fn**前后的冻结快照
     //      逐项相同（`esp` / 8 个 x87 寄存器槽（16 B × 8）/ `status` / `control` / `tag` / `top` /
-    //      宿主 softfloat 的粘性位 / 栈 scratch 的 0x20 B / `[0x55F2E8]`），`*result` 不留半成品；
+    //      宿主 x87 的挂账异常位（`fpu_bridge.cpp` 的 `thread_local`）/ 栈 scratch 的 0x20 B / `[0x55F2E8]`），`*result` 不留半成品；
     //      回退原因落进**对应**的 `declines[]` 桶（⛔ 不是"静默跳过"）。
     //   ② ABI：成功路径 `invoke()` 之后 EIP = 返回地址、ESP = esp + 4（cdecl 只弹返回地址）、
     //      EAX = 低 32 位、**EDX = 高 32 位**（两项都写才算 64 位返回；`-1` 那档 EDX 是 0xFFFFFFFF）。
@@ -3771,7 +3771,7 @@ int main() {
     //   ① `huffBitRev32` 与"逐位移位"的**独立参考实现**逐值相同（4096 个伪随机 + 边界）；
     //   ② 每一条闸门不成立时 `fn` 返回 false，且**直接调 fn** 前后的冻结快照逐项相同
     //      （码本 / 位读结构 / dst / valuelist / 位流 / `fpu.status·control·tag·top` /
-    //      宿主 softfloat 的粘性位），`*result` 不留半成品，回退原因落进**对应**的桶；
+    //      宿主 x87 的挂账异常位（`fpu_bridge.cpp` 的 `thread_local`）），`*result` 不留半成品，回退原因落进**对应**的桶；
     //   ③ 成功路径真的写了**该写的那几个 dword**（位读三个 + dst），且 `hits`/`fallbacks` 不涨
     //      （直接调 fn 不过 `invoke`）。
     // ★ 为什么这一组不能由 assets 档的两臂差分代替：回退之后解释器会把整个函数重放，

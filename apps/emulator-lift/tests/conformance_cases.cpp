@@ -2467,7 +2467,7 @@ void verify_sse_emms_keeps_xmm(Fixture& f) {
 //   **改坏就会红**的守卫。下面这些形态在 `.lst` 里合计上万条（`fst` 1558 / `faddp` 430 /
 //   `fmulp` 283 …），但此前一条用例都没有 —— 也就是"改坏了没人知道"。
 // ★ 断言的取值全部选成**精确可表示**的（1 / 2 的幂 / .5 / .25），这样 expected 与
-//   SoftFloat 的舍入方式无关：红了就是语义错了，不是"差 1 ulp"。
+//   `fpu_bridge` 的 `double` 模型的舍入方式无关：红了就是语义错了，不是"差 1 ulp"。
 // =====================================================================================
 void setup_x87_fst(Fixture& f) {
     // `fst`（D9 /2，**不弹栈**）与 `fstp` 的区别是这次复核最容易写错的一处：
@@ -2568,7 +2568,8 @@ void verify_x87_fdivr(Fixture& f) {
 }
 
 // `fiadd` / `fisub` / `fisubr` / `fimul` / `fidiv` / `fidivr`：整数内存操作数（DA /0../7）。
-// ★ 这些是 x87 里**唯一**要经过 `loadIntMem`（i32 → extF80）的一族，走错路会静默算出浮点垃圾。
+// ★ 这些是 x87 里**唯一**要经过 `loadIntMem`（i32 → x87 实数模型；D49 后就是 `double`）的一族，
+//   走错路会静默算出浮点垃圾。
 void x87_i_form(Fixture& f, const char* op_hex, const char* st0_float_hex) {
     f.dataHex(kDataEa, st0_float_hex);
     f.dataHex(kDataEa + 0x10u, "04000000");  // int32 4

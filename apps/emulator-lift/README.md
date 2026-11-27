@@ -221,14 +221,13 @@ apps/emulator-lift/
   src/runtime/machine.{h,cpp}         ← 装配 + dispatcher + fault hook + 最近指令环形缓冲
   src/runtime/exec.cpp                ← 语义分发 + 标志位公共部分 + 响亮失败
   src/runtime/exec_{integer,control,string,fpu}.cpp  ← 按族分文件的语义（S3 / S4）
-  src/runtime/fpu_bridge.{h,cpp}      ← x87 ↔ vendor SoftFloat（extF80）
+  src/runtime/fpu_bridge.{h,cpp}      ← x87 的实数模型（D49：`double`；解释器与生成代码共用）
   src/runtime/{heap.cpp,handles.cpp,shims.cpp,clock.h}  ← guest 堆 / 句柄表 / shim ABI / 墙钟
   src/corpus/lst_index.{h,cpp}        ← `.lst` 只读索引（EA→文本 + **下一行 EA**，A3 的边界来源）
   src/shims/kernel32_*.cpp            ← 七族（一文件一族）+ bootstrap（启动路径补的）+ register.cpp
   tests/*.cpp                         ← conformance(A1) / dispatch / shim-abi / mnemonics /
                                         loader / decode-crosscheck(A3) / corpus-mnemonics(A2) /
                                         native-override / present-sink / frame-blit / present-window
-  third_party/berkeley-softfloat/     ← vendor 的 SoftFloat 3e（8086 特化）+ 清单哈希 README
 ```
 
 ## 4. 构建（vcpkg **跨目录复用**）

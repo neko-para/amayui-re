@@ -257,7 +257,7 @@ const KnownNative kKnown[] = {
     //   ⛔ 不与 F2（令牌等待）混：这一项只治"查得太勤"。
     {"sub_4BBAB0", GuestConv::Thiscall, 4, nativeVoiceTick4BBAB0},
     // ★ 2026-11-08：Live2D `BDAffine` 逐顶点仿射（stdcall `retn 1Ch` = 28 B；虚表第 6 项 @0x52F0C0）。
-    //   `.lst` 0x4CCC60..0x4CCD34；x87 逐位（SoftFloat 四则 + transcendental 同路径）。
+    //   `.lst` 0x4CCC60..0x4CCD34；x87 走 `fpu_bridge` 的 double 模型（D49；四则 + transcendental 同路径）。
     //   已进 `all`（2026-11-11）：准入判据 = 实现 + 独立复核（见 `native_overrides.h` 的五条契约）。
     //   逐位判据 = tests/native_override_assets.cpp 的**函数级真字节两臂**（dst / 寄存器 / x87 状态字
     //   / 非默认控制字），回退零写 = tests/native_override.cpp 的 `affine/decline-no-write`。

@@ -1718,73 +1718,29 @@ const MUTATIONS = [
 
 
   {
-    // ★ 代表 "每线程一份 softfloat 状态被退回**进程级共享**"这一类错
-    //   （`REQ-01M76ZHN9V2WNCYT1ACJDJ94CW`）：`THREAD_LOCAL` 空 ⇒ `softfloat_exceptionFlags` /
-    //   `softfloat_roundingMode` 是模块级变量，而 `x87TakeExceptionFlags()` 是"读 + 清"的读改写
-    //   ⇒ 音频 feeder（第二条 guest 执行流）与主线程互相偷 / 串 x87 状态字的 PE 位，
+    // ★ 代表 "每线程一份的 x87 异常位挂账被退回**进程级共享**"这一类错
+    //   （`REQ-01M76ZHN9V2WNCYT1ACJDJ94CW`）：`fpu_bridge.cpp` 的 `g_x87_flags` 去掉 `thread_local`
+    //   ⇒ 它是模块级变量，而 `x87TakeExceptionFlags()` 是"读 + 清"的读改写
+    //   ⇒ 音频 feeder（第二条 guest 执行流）与主线程互相偷 / 串 x87 状态字的异常位，
     //   PCM 段的"逐位一致"不成立。判据：`apps/emulator-lift/tests/fpu_thread.cpp` ——
-    //   两条线程各 20000 轮，A 的 inexact 只许出现在 A、B 的 invalid 只许在 B（取到的标志里
+    //   两条线程各 20000 轮，A 的 ZE（1/0）只许出现在 A、B 的 IE（sqrt(-1)）只许在 B（取到的标志里
     //   既不许缺自己的位、也不许有对方的位；另有单线程 sanity 钉住两条臂各自真的置位）。
     //   ★ 两条线程用 `std::barrier` **逐轮强制交错**（对齐开始 / 两边都已置位 / 两边都读完再进下一轮）
     //     ⇒ 共享态下"两家的位同时在场"由同步边保证，第一个 take 必读到对方的位、第二个必读到 0
     //     ⇒ **必然红**。⛔ 不要退回"只堆轮数"：复审实测旧版本在同一变异二进制上连跑 10 次有 1 次绿。
-    //   ★ 施加点用**整段三档定义**（不是只改 macOS 那档）：只把 `__thread` 改成空的话，
-    //     Windows（clang-cl 走 `_MSC_VER` 档）跑这条变异会「没红」——那会被读成"守卫坏了"，
-    //     而实际是"变异点在该平台根本没生效"。整段替换 ⇒ 三平台都退回 `#define THREAD_LOCAL`（空）。
-    file: 'apps/emulator-lift/third_party/berkeley-softfloat/platform.h',
-    from:
-      '#if defined(_MSC_VER)\n#define THREAD_LOCAL __declspec(thread)\n' +
-      '#elif defined(__GNUC__) || defined(__clang__)\n#define THREAD_LOCAL __thread\n' +
-      '#else\n#define THREAD_LOCAL _Thread_local\n#endif',
-    to: '#define THREAD_LOCAL',
+    //   ★ 2026-11-27 **重锚**：D49 后 x87 = `double`（`fpu_bridge.cpp`），vendored
+    //     `berkeley-softfloat` 已整条删除；旧施加点（`third_party/.../platform.h` 的 `THREAD_LOCAL`）
+    //     当时就已与守卫**脱钩**（守卫读的是 `fpu_bridge.cpp` 自己那份 `thread_local`）。
+    file: 'apps/emulator-lift/src/runtime/fpu_bridge.cpp',
+    from: 'thread_local std::uint8_t g_x87_flags = 0;',
+    to: 'std::uint8_t g_x87_flags = 0;',
     guard: 'ctest:fpu-thread-flags',
     ctest: 'fpu-thread-flags',
     buildDir: 'apps/emulator-lift/out',
     buildTarget: 'lift-fpu-thread',
     what:
-      'THREAD_LOCAL 退回空（softfloat 状态进程级共享）⇒ barrier 强制交错下两条线程的异常位同时在场 ' +
-      '⇒ 一个 take 读到对方的位、另一个读到 0 ⇒ fpu-thread-flags 每次必红（实测 10/10）',
-  },
-
-  {
-    // ★ 代表 "给**消费者**强制前置 include 的那条 INTERFACE 选项掉了"这一类错
-    //   （`REQ-01M773EFSYYE97YKEA6TQEQ53J`）。`softfloat.h:53-54` 有 `#ifndef THREAD_LOCAL ⇒ 空`
-    //   的兜底 ⇒ 消费方 TU 若先 include `softfloat.h`、没先 include `platform.h`，编译 + 链接都过，
-    //   运行时却把 **TLS 模板**当变量访问（库写的是每线程 TLS 块）：实测本仓消费方读回 `0`。
-    //   判据：`apps/emulator-lift/tests/softfloat_tls.cpp`（**第一条 include 就是 `<softfloat.h>`**、
-    //   ⛔ 不 include platform.h）：① 任何 include 之前就看得见 `THREAD_LOCAL` / `LITTLEENDIAN`；
-    //   ② 库 `softfloat_raiseFlags()` 置的位在本 TU 读得到；③ 两条线程各写不同值、barrier 之后
-    //   各读各的、且 `&softfloat_exceptionFlags` 不同。
-    //   ★ 破坏形态 = `INTERFACE` → `PRIVATE`（= 只作用于 vendored `.c` 自己、消费者拿不到）：
-    //     前置 include 消失 ⇒ 该用例 7 条断言当场红（实测：`saw platform.h = 0` / `via-library=0` /
-    //     两条线程读到同一个 `0x5C` / 两个地址相同）。构建**照旧成功** —— 这正是它是"静默危险"的证明，
-    //     也是这条变异必须落在 `INTERFACE`（而不是删掉整行）的原因：删整行同样只影响消费者，
-    //     但 `INTERFACE`→`PRIVATE` 精确表达"这条选项还在、挂错了位置"。
-    //   ★ 为什么 `from` 要**连 if/else 整段**一起替换：本机只跑 MSVC 臂，但只改那一行的话
-    //     Linux/macOS 上这条变异不生效（会被读成"守卫坏了"，而实际是"变异点没落到那一臂"）。
-    file: 'apps/emulator-lift/third_party/berkeley-softfloat/CMakeLists.txt',
-    from:
-      'if (MSVC)\n' +
-      '    # clang-cl 也走这一支（CMake 对 MSVC ABI 的 clang 同样置 MSVC=1）\n' +
-      '    target_compile_options(berkeley-softfloat INTERFACE /FIplatform.h)\n' +
-      'else()\n' +
-      '    target_compile_options(berkeley-softfloat INTERFACE -include platform.h)\n' +
-      'endif()',
-    to:
-      'if (MSVC)\n' +
-      '    # 变异：前置 include 只作用于 vendored `.c`，消费者拿不到（INTERFACE → PRIVATE）\n' +
-      '    target_compile_options(berkeley-softfloat PRIVATE /FIplatform.h)\n' +
-      'else()\n' +
-      '    target_compile_options(berkeley-softfloat PRIVATE -include platform.h)\n' +
-      'endif()',
-    guard: 'ctest:softfloat-tls',
-    ctest: 'softfloat-tls',
-    buildDir: 'apps/emulator-lift/out',
-    buildTarget: 'lift-softfloat-tls',
-    what:
-      '消费者拿不到前置 include（INTERFACE → PRIVATE）⇒ `tests/softfloat_tls.cpp` 那个"先 include ' +
-      'softfloat.h"的 TU 退回空 THREAD_LOCAL 兜底 ⇒ softfloat-tls 红（实测 7 条断言：saw ' +
-      'platform.h=0 / via-library=0 / 两线程读同一个 0x5C / 两个地址相同）',
+      '`g_x87_flags` 去掉 `thread_local`（异常位挂账退回进程级共享）⇒ barrier 强制交错下两条线程的位同时在场 ' +
+      '⇒ 一个 take 读到对方的位、另一个读到 0 ⇒ fpu-thread-flags 每次必红',
   },
 
 

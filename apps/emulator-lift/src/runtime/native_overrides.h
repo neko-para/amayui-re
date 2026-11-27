@@ -331,7 +331,7 @@ bool nativeStrlen(X86& cpu, GuestMemory& mem, std::uint32_t* result);
 //   `jz` 目标 ⇒ 挂它 = hits 恒 0（本单的反面判据）。
 // ★ 实现（`native_crt.cpp`）：`x87ToI64(st0, truncate=true)` + 一次 `x87RegToMem(st0, scratch, 4)`
 //   （同时给出 PE/UE/OE 与 guest 可见的那 4 字节）+ 弹 1 层 + tag/状态字同步。
-//   纯核没有单独的 `.h`：本项就是"两次 softfloat 调用 + 弹栈"，抽出去只剩一个转调。
+//   纯核没有单独的 `.h`：本项就是"两次 `fpu_bridge` 调用 + 弹栈"，抽出去只剩一个转调。
 // ★ 闸门 4+1 条（全部在**任何**副作用之前；不做窄档）：`[0x55F2E8] == 0` 且已提交 ·
 //   `st(0)` 非空（`empty(phys(0))`，⛔ 不是 `empty(0)`）· x87 空闲槽 ≥ 2 · 栈 scratch
 //   `[align16(esp-0x24), +0x20)` 已提交 · **越界边界**（`x ∈ (2^63−1, 2^63)` 上 guest 的

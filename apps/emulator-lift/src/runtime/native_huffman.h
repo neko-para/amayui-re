@@ -58,10 +58,10 @@
 //
 // ★ 已知边界（登记，不是缺陷）：
 //   ① 函数级 override 只记 1 条 guest 指令 + 1 tick ⇒ 虚拟时钟相位（见 `native_overrides.h` 的准入门）；
-//   ② `sub_4E1950` 的 `fld/fadd/fstp dword` 用宿主 double 中间值 + 单精度落盘：两个 **float32**
-//      的精确和在 |指数差| <= 24 时能整段落进 double（<= 48 位有效位），指数差 > 24 时小操作数
-//      `< 0.5 ulp` ⇒ 结果是**大操作数本身**（两种实现都是）⇒ 与 SoftFloat 的 `extF80` 路径**逐位相同**
-//      （推导见 `.cpp` 的 `f32AddStore`）。但**非有限值**（inf/NaN）走 SoftFloat 同一路径，避免伪值。
+//   ② `sub_4E1950` 的 `fld/fadd/fstp dword` 直接调 `fpu_bridge` 的 `x87LoadMem` / `x87Add` /
+//      `x87StoreMem`（与解释器**同一批**函数 ⇒ 值与异常位同源）。
+//      ⚠ 旧口径（D49 前）这里有一段"两个 f32 的精确和 vs SoftFloat `extF80`"的等价性推导与
+//      inf/NaN 单独分支 —— 随 D49 作废（vendored SoftFloat 已于 2026-11-27 整条删除）。
 //      舍入模式不是"最近偶数"（`fpu.control & 0x0C00 != 0`）⇒ decline（那时 `(float)` 的语义不同）。
 //   ③ 不复刻 x87 的 `pseudo-denormal` / unnormal（与 `fpu_bridge.cpp` 同一条已知边界）。
 //   ④ 窄义：位流窗口按 `[buffer, buffer+storage+5)` 一次判提交（见 `.cpp`）；窗口不提交 ⇒ 回退解释器

@@ -34,9 +34,6 @@ find_package(SDL3 3.4 CONFIG REQUIRED)
 # Zydis 只**解码**，语义是我们自己的（plan §7.1）。
 find_package(Zydis CONFIG REQUIRED)
 
-# ---- 第三方：Berkeley SoftFloat 3e（D3；vendor，不进 vcpkg）----
-add_subdirectory(third_party/berkeley-softfloat)
-
 # =====================================================================================
 # ★ `emulator-lift-core` = **构建期工具 `emulator-lift-gen` 的默认档闭包**（`LIFT_S7_IAT=OFF`）。
 #
@@ -51,7 +48,8 @@ add_subdirectory(third_party/berkeley-softfloat)
 #   ★ 闭包变了（新增强引用 / 删 TU）⇒ 先复查这条清单，再改这里：
 #     `LIFT_S7_IAT=ON` 那一档本来就可以多链（见 `emulator-lift-gen` 的 `if(LIFT_S7_IAT)`）。
 #
-#   依赖：解码只靠 Zydis、x87 只靠 Berkeley SoftFloat ⇒ 两者在这里；FreeType / quickjs /
+#   依赖：解码只靠 Zydis（x87 是 `fpu_bridge` 自带的 `double` 模型，D49 ⇒ 无第三方浮点库）⇒ 在这里；
+#   FreeType / quickjs /
 #   pl-mpeg / boost / PNG / glm 属于运行期，⛔ 不进 core。
 #   ⚠ SDL 是**例外**（它也在这里）：`vfs.cpp` 在闭包里，而它用 `SDL_TimeToWindows` 换算
 #     宿主文件时间 ⇒ 不链 SDL 就链接不过。为什么这与"把 runtime 整个塞进 core"不同、
@@ -79,7 +77,7 @@ add_library(emulator-lift-core STATIC
     src/runtime/shims.cpp
     src/corpus/lst_index.cpp)
 target_include_directories(emulator-lift-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-# ★ 依赖：解码只靠 Zydis、x87 只靠 Berkeley SoftFloat。
+# ★ 依赖：解码只靠 Zydis；x87 不需要第三方库（D49 后是 `fpu_bridge` 的 `double` 模型）。
 # ★ `SDL3` 为什么也在这里（⚠ 与"SDL 留 runtime"的初衷不同，2026-11-27 实测）：
 #   `src/runtime/vfs.cpp` 在**默认档闭包里**（`image.cpp` 的 `guestEnvironment` /
 #   `openHostFileUtf8` / `Vfs::guestExePath`，`corpus/lst_index.cpp` 的 `openHostFileUtf8`），
@@ -88,7 +86,7 @@ target_include_directories(emulator-lift-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 #   `hostFileTimes` / `hostFileInfo` / `readCache*`）。这不是"把 runtime 塞进 core"：
 #   core 仍然只有 18 个 TU；要彻底拿掉 SDL，得把 `vfs.cpp` 的时间 / 读缓存那半拆成独立 TU
 #   （超出本轮"只解两条边 + 拆 target"的范围，⛔ 不在本轮动）。
-target_link_libraries(emulator-lift-core PRIVATE Zydis::Zydis berkeley-softfloat SDL3::SDL3)
+target_link_libraries(emulator-lift-core PRIVATE Zydis::Zydis SDL3::SDL3)
 if(WIN32)
     # host_encoding.cpp 的 CommandLineToArgvW（argv 的 UTF-8 重建）
     target_link_libraries(emulator-lift-core PRIVATE shell32)
@@ -259,7 +257,7 @@ add_library(emulator-lift-runtime STATIC
 target_include_directories(emulator-lift-runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(emulator-lift-runtime
     PUBLIC SDL3::SDL3 emulator-lift-core
-    PRIVATE Zydis::Zydis berkeley-softfloat)
+    PRIVATE Zydis::Zydis)
 if(WIN32)
     # ★ `shell32` 随 `host_encoding.cpp` 一起搬去了 `emulator-lift-core`（`CommandLineToArgvW`）。
     # d3d9_gpu.cpp 用 D3DCompile 在运行时把 HLSL 编成 DXBC
@@ -1979,41 +1977,22 @@ target_link_libraries(lift-math PRIVATE emulator-lift-runtime)
 add_test(NAME math COMMAND lift-math)
 
 # =====================================================================================
-# pure：SoftFloat 的 x87 异常位必须**每线程一份**（`REQ-01M76ZHN9V2WNCYT1ACJDJ94CW`）
+# pure：x87 异常位的挂账必须**每线程一份**（`REQ-01M76ZHN9V2WNCYT1ACJDJ94CW`）
 # ★ 判据（红了意味着什么，见 tests/fpu_thread.cpp 文件头）：两条宿主线程各 20000 轮，用
-#   `std::barrier`（C++20）**逐轮强制交错** —— A 触发 inexact、B 触发 invalid，各自
+#   `std::barrier`（C++20）**逐轮强制交错** —— A 触发 ZE（1/0）、B 触发 IE（sqrt(-1)），各自
 #   `x87TakeExceptionFlags()` 取到的标志里**只能有自己的那一位**（既不被对方偷走、也不串进来）；
 #   另有单线程 sanity 钉住"两条臂各自真的置位"。
-# ★ 变异：把 `third_party/berkeley-softfloat/platform.h` 的 `THREAD_LOCAL` 改回空（进程级共享）
-#   ⇒ barrier ② 之后两家的位同时在场 ⇒ `tools/mutate-check.mjs` 的 `ctest:fpu-thread-flags`
-#   **每次必红**（⛔ 不是"堆 2 万轮碰运气"：那有 ~10% 假绿）。
+# ★ 变异：把 `src/runtime/fpu_bridge.cpp` 的 `thread_local std::uint8_t g_x87_flags`
+#   删成普通全局（进程级共享）⇒ barrier ② 之后两家的位同时在场 ⇒
+#   `tools/mutate-check.mjs` 的 `ctest:fpu-thread-flags` **每次必红**
+#   （⛔ 不是"堆 2 万轮碰运气"：那有 ~10% 假绿）。
 # ★ 顶层无条件注册 ⇒ **pure** 档（只调 `runtime/fpu_bridge.h`；不碰 guest / 游戏 / LFS）。
-#   链接 `berkeley-softfloat` 只为拿它的 include 目录与 PUBLIC 编译定义
-#   （`softfloat_flag_inexact` / `softfloat_flag_invalid` 常量在 `softfloat.h` 里）。
+# ★ 只需 `emulator-lift-runtime`：D49 后 x87 是 `double` 模型，vendored SoftFloat 已于
+#   2026-11-27 整条删除（本用例守的是 `fpu_bridge.cpp` 自己的 `thread_local`，与那个库无关）。
 # =====================================================================================
 add_executable(lift-fpu-thread tests/fpu_thread.cpp)
-target_link_libraries(lift-fpu-thread PRIVATE emulator-lift-runtime berkeley-softfloat)
+target_link_libraries(lift-fpu-thread PRIVATE emulator-lift-runtime)
 add_test(NAME fpu-thread-flags COMMAND lift-fpu-thread)
-
-# =====================================================================================
-# pure：消费方 TU 必须拿到**真 TLS** 的 SoftFloat 状态（`REQ-01M773EFSYYE97YKEA6TQEQ53J`）
-# ★ 判据（见 tests/softfloat_tls.cpp 文件头）：本 TU 的**第一条 include** 就是 `<softfloat.h>`、
-#   ⛔ 不 include platform.h —— 正是要守的那条路径（"下一个 include 就会中"）。三条断言：
-#   ① 任何 include 之前就看得见 `THREAD_LOCAL` / `LITTLEENDIAN`（= 前置 include 真的先跑了）；
-#   ② 库的 `softfloat_raiseFlags()` 置的位在**本 TU** 里读得到（= 同一个 TLS 对象）；
-#   ③ 两条线程各写不同值、barrier 之后各读各的，且 `&softfloat_exceptionFlags` 不同
-#      （= 每线程一份；共享态下"最后写入者赢"⇒ 至少一条断言必红）。
-# ★ 它守的是 `third_party/berkeley-softfloat/CMakeLists.txt` 里那条
-#   `target_compile_options(berkeley-softfloat INTERFACE /FIplatform.h)`（非 MSVC：`-include platform.h`）
-#   ⇒ 把 `INTERFACE` 改成 `PRIVATE`（消费者拿不到）⇒ 本用例红
-#   （`tools/mutate-check.mjs` 的 `ctest:softfloat-tls` 施加这一处）。
-# ★ 顶层无条件注册 ⇒ **pure** 档（只调 SoftFloat 公开面；不碰 guest / 游戏 / LFS）。
-#   链接 `berkeley-softfloat` 既拿 include 目录 / PUBLIC 定义，也拿那条 **INTERFACE** 编译选项
-#   （= 本用例的被测对象本身）。
-# =====================================================================================
-add_executable(lift-softfloat-tls tests/softfloat_tls.cpp)
-target_link_libraries(lift-softfloat-tls PRIVATE emulator-lift-runtime berkeley-softfloat)
-add_test(NAME softfloat-tls COMMAND lift-softfloat-tls)
 
 # ---- pure：像素格式（掩码往返、16/32bpp load/store、颜色打包、min_filter 决策）----
 add_executable(lift-pixel-format tests/pixel_format.cpp)

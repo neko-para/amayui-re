@@ -503,9 +503,11 @@ AffineResult runAffine(const std::vector<std::uint8_t>& code4CCC60, const Affine
     if (!fx.m.placeCode(call_ea, a.b.data(), a.b.size(), &fx.err)) return out;
     fx.rearmStack();
     // ★ 两臂都从同一份 x87 控制字 / 状态字出发（见 AffineCase 的字段注释）。
-    // ★ 还要把**宿主全局**的 softfloat 舍入/异常位复位：softfloat 的 `roundingMode` /
-    //   `roundingPrecision` 是进程级全局量，上一臂（解释器）跑完会把它留在**本用例的控制字**上
-    //   ⇒ 若不复位，"override 忘了 apply 控制字"会继承同一份残值而**静默相同**，控制字用例就白写了。
+    // ★ 还要把 x87 的**挂账异常位**清掉：`fpu_bridge.cpp` 的 `g_x87_flags` 是每线程一份，
+    //   上一臂（解释器）跑完会把它留在**本用例的控制字**上
+    //   ⇒ 若不清，"override 忘了 apply 控制字"会继承同一份残值而**静默相同**，控制字用例就白写了。
+    //   （D49 前这里还涉及 softfloat 的进程级 `roundingMode` / `roundingPrecision`；该库已于
+    //   2026-11-27 删除。）
     lift::x87ClearExceptionFlags();
     fx.m.cpu().fpu.control = c.control;
     fx.m.cpu().fpu.status = c.entry_status;
@@ -753,7 +755,7 @@ FtolResult runFtol(const std::vector<std::uint8_t>& code, const FtolCase& c, boo
     const std::uint32_t esp_entry = fx.m.cpu().esp() - 4u;
     const std::uint32_t frame = (esp_entry - 0x24u) & ~15u;
     for (std::uint32_t i = 0; i < 0x20u; ++i) fx.m.mem().wr8(frame + i, 0x5Au);
-    // 宿主的 softfloat 舍入模式 / 粘性异常位是**进程级全局** ⇒ 两臂都必须从同一份缺省出发，
+    // x87 的粘性异常位是**每线程一份**（`fpu_bridge.cpp` 的 `thread_local`）⇒ 两臂都必须从同一份缺省出发，
     // 否则"override 少 sync 一次"会继承上一臂的异常位而**静默相同**。
     lift::x87ClearExceptionFlags();
     fx.m.cpu().fpu.control = 0x037Fu;
@@ -912,7 +914,7 @@ PcmSnapshot runPcm(const std::vector<std::uint8_t>& code_range, const std::vecto
     const std::uint32_t esp_seg = cpu.esp();
     const std::uint32_t ftol_frame = (esp_seg - 0x28u) & ~15u;
     for (std::uint32_t i = 0; i < 0x20u; ++i) fx.m.mem().wr8(ftol_frame + i, 0x5Au);
-    // 宿主的 softfloat 舍入模式 / 粘性异常位是**进程级（现在每线程）全局** ⇒ 两臂都从同一份缺省出发。
+    // x87 的粘性异常位是**每线程一份**（`fpu_bridge.cpp` 的 `thread_local`）⇒ 两臂都从同一份缺省出发。
     lift::x87ClearExceptionFlags();
     cpu.fpu.control = 0x037Fu;
     cpu.fpu.status = 0u;  // C0..C3 也从 0 出发（段内没有指令改它们 ⇒ 两臂都该保持 0）
@@ -1319,7 +1321,7 @@ HuffResult runHuff(const HuffCase& c, const HuffCodes& code, bool with_override)
     a.ret();
     if (!fx.m.placeCode(kHuffCallEa, a.b.data(), a.b.size(), &fx.err)) return out;
     fx.rearmStack();
-    // 两臂从**同一份** x87 缺省出发（宿主 softfloat 的舍入模式 / 粘性位是进程级全局）
+    // 两臂从**同一份** x87 缺省出发（挂账异常位是 `fpu_bridge.cpp` 的 `thread_local`）
     lift::x87ClearExceptionFlags();
     fx.m.cpu().fpu.control = 0x037Fu;
     fx.m.cpu().fpu.status = 0u;
@@ -1900,14 +1902,11 @@ int main() {
         pick.pick_o24 = true;  // `[state+0x24] ?: [state+0x20]` 的非零分支
         addCase("pick-o24", pick);
 
-        // ★ 非默认控制字：`fldcw` 在语料里 94 处（例 `0x4046B2` / `0x46236A`）⇒ "按 `cpu.fpu.control`
-        //   算"是真实不变量，且解释器对**每条** FP 指令都 `x87ApplyControlWord(cpu.fpu.control)`
-        //   （`exec_fpu.cpp`）⇒ override 必须在第一次算术之前做同一件事。
-        //   输入选**不可精确**的值：`radius = 1/3`、`angle_deg = 17` ⇒ 舍入模式 / 尾数位数一换，
-        //   dst 的最后一位就变（默认控制字下这两条仍然绿）。
-        //   ★ 0x077F：RC 位 [11:10] = 01 ⇒ round-down（向 −∞）；PC 位 [9:8] = 11 ⇒ 80 位（缺省）。
-        //   ★ 0x027F：RC 位 = 00（最近偶数）；PC 位 = 10 ⇒ 双精度（53 位尾数）。SoftFloat 侧这条映射
-        //     落到 `extF80_roundingPrecision = 64`（与解释器同一条 `x87ApplyControlWord`）⇒ 两臂一致。
+        // ★ 非默认控制字：`fldcw` 在语料里 94 处（例 `0x4046B2` / `0x46236A`）。
+        //   ⚠ 历史口径（D49 前）：解释器对**每条** FP 指令都 `x87ApplyControlWord(cpu.fpu.control)`，
+        //   RC / PC 落进 SoftFloat 的 `extF80_roundingPrecision`。**D49 后该函数已删**、PC 完全无效、
+        //   RC 只作用于整数转换与 `frndint`（见 `fpu_bridge.h` 文件头 §3）⇒ 这两档现在只钉
+        //   "两臂对同一份控制字给出同一结果"，⛔ 不再证明控制字被 apply 过。
         AffineCase roundDown = base;
         roundDown.control = 0x077Fu;  // RC = round-down
         roundDown.radius = 1.0f / 3.0f;
@@ -1916,13 +1915,10 @@ int main() {
         addCase("rc/round-down", roundDown);
 
         AffineCase pc53 = roundDown;
-        // ★ PC 位 [9:8] = 10 ⇒ 双精度（53 位尾数）；`x87ApplyControlWord` 把它映射到
-        //   `extF80_roundingPrecision = 64`（= 53 位 significand，与解释器同一条映射）。
+        // ★ 历史（D49 前）：PC 位 [9:8] = 10 ⇒ 双精度，映射到 `extF80_roundingPrecision = 64`；
+        //   `r = 1 + 2^-10` 让 PC 这一维可见（两档的 PE 位不同）。
+        //   ⚠ **D49 后 PC 无效、PE 恒 0**（`fpu_bridge.h` §2 / §5）⇒ 这一档只剩"两臂一致"一条断言。
         pc53.control = 0x027Fu;
-        // ★ 让 PC 这一维**真的可见**（否则它只验"两臂都用同一个控制字"，删掉 apply 也不会红）：
-        //   `r = 1 + 2^-10`（11 位 significand）⇒ 四个系数 `cos*(1+2^-10)` 是 **63 位** significand
-        //   （53 位的 sin/cos × (2^10+1)）⇒ 在 PC=53 下 inexact、PC=80（64 位尾数）下精确；
-        //   而 `src` 全 0 使点积只剩平移项（f32 原值，精确）⇒ 两档的 `fpu.status`（PE 位）不同。
         pc53.radius = 1.0009765625f;  // 1 + 2^-10
         pc53.src = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
         pc53.add4 = 1.0f;
@@ -2321,8 +2317,9 @@ int main() {
     // ★ 为什么边界表里**必须有非整数 / 非 2 的幂**：`±1.5` / `±2.7` 是"截断 vs 四舍五入"的唯一判别
     //   点（`0.4` / `-0.4` 那种两边都给 0 ⇒ 恒绿）；`1.3`（f32 不可精确表示）与 `1e39`（f32 上溢）
     //   才是"漏掉 `fst dword`"的判别点 —— 全是 2 的幂时 PE/OE 一位都不会置。
-    // ★ 为什么还要 `2^53+1` / `2^62+1.5` / `2^63−1` 这三个 **10 字节 ext80** 输入：宿主
-    //   `(int64)(double)` 在 `|x| ≥ 2^53` 上差一位（double 只有 53 位）⇒ 它们钉住"必须走 softfloat"。
+    // ★ 为什么还要 `2^53+1` / `2^62+1.5` / `2^63−1` 这三个 **10 字节 ext80 输入**：它们钉住
+    //   `fld tbyte` 的**收窄**（D49 后槽位是 `double`）与随后的截断 / 越界判据（见下面的 D49 段）。
+    //   ⚠ 旧口径（D49 前）它们钉的是"宿主 `(int64)(double)` 在 `|x| ≥ 2^53` 上差一位"。
     // ★ 入口 `fpu.status` 带 C0..C3（`0x4700`）与 `top_noise`（TOP != 0）两档分别钉住
     //   "清 CC" 与 `empty(0)`/`empty(phys(0))` 这两类硬错（复审 H2 / M4）。
     // ★ 入口 EA 必须是 `0x4E82C0`（`.lst` 381874 的 `COLLAPSED FUNCTION __ftol2_sse`，28 B），
@@ -2893,8 +2890,8 @@ int main() {
             c.channels = {{0.0f, 0.5f, -0.5f, 1.0f, -1.0f, 1.5f, -1.5f, 1.25f, -1.25f, 0.1f, -0.1f,
                            1e-40f, -1e-40f, 131073.0f, -131073.0f, kInf, -kInf, kNaN}};
             c.ns = static_cast<std::uint32_t>(c.channels[0].size());
-            // NaN / ±INF 也逐字节比 scratch：本实现走的是解释器**同一条** softfloat 路
-            // （`x87MemToReg` / `x87Mul` / `x87ToI64` / `x87RegToMem`）⇒ 载荷不该分叉。
+            // NaN / ±INF 也逐字节比 scratch：本实现走的是解释器**同一条** x87 模型路
+            // （`fpu_bridge` 的 `x87LoadMem` / `x87Mul` / `x87ToI64` / `x87StoreMem`）⇒ 载荷不该分叉。
             c.compare_scratch = true;
             cases.push_back(std::move(c));
         }
