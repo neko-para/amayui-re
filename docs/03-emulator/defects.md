@@ -1115,8 +1115,8 @@
   `plm_has_headers` 为假时先 `plm_set_audio_enabled(plm_, 0)`（`:92`）+ `video_only_ = true`（`:93`），
   再用 sequence header 的宽/高/帧率当判据（宽高 ≤0 或 fps ≤0 ⇒ **仍然拒绝**，`:94-97`）；
   `nextAudio()` 在 `video_only_` 下直接返回 false（`:154-158` —— ⛔ 不去 pl_mpeg 里扫一个解不了的音频流：
-  `audio_packet_type = 0` 时它会一路读到流尾才返回 null）；warn 一行说清"只播视频"（`:98-99`）；
-  判据分层写在头注释（`movie_decoder.h:80-82`）。
+  `audio_packet_type = 0` 时它会一路读到流尾才返回 null）；**视频-only 是正常业务**（用户裁决 2026-11-27）⇒ **不打印日志**；
+  判据分层写在头注释（`movie_decoder.h:80-83`）。
   - **边界**：⛔ **不改 vendored `third_party/pl_mpeg`**（三份副本逐字节相同，`tools/test/emulator-cxx-pl-mpeg-sync.test.mjs` 守着）；
     ⛔ 不放宽视频判据（负对照见守卫）；正常 MP2 片（LOGO 1280×720）走的仍是原路，一字不变。
 - **守卫**：CTest `movie-decoder`（`apps/emulator-lift/CMakeLists.txt:1950`；用例 `video-only-audio-not-mp2`，
@@ -1125,7 +1125,8 @@
   **红了意味着什么**：退了"只播视频"的退路 ⇒ 游戏里 `MVS*.MPG` 这类片会重新整部判死（用户症状复现）；
   或退路放宽到"没有视频头也接受" ⇒ 坏片会被当成 0×0 影片送进渲染器。
   变异条目 = `tools/mutate-check.mjs` 里 `guard: 'ctest:movie-decoder'` 那条（拆掉退路 ⇒ 当场红）。
-- **读数（修后，端到端；3 次同一条链）**（2026-11-22 / win32 / RelWithDebInfo / `--present headless`）：
+- **读数（修后，端到端；3 次同一条链）**（2026-11-22 / win32 / RelWithDebInfo / `--present headless`）——
+  ⚠ 下面那行 `[warn] … 音频头不是 MPEG-1 Layer II` 是**那天**的行为；2026-11-27 裁决起**不打印日志**（正常业务）：
   ```
   ./out/emulator-lift-aot.exe --game-dir ../../links/install --appdata ../../.tmp/save10-crash/appdata-e2e-<n> \
     --present headless --skip-logo --audio off --time-limit 180 --log-level info \

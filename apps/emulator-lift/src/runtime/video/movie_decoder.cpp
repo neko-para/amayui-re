@@ -88,15 +88,16 @@ public:
             //   游戏的 `MVS*.MPG`（120×120 / 30 fps 的特效小片，ALF 里 65540 字节）正是这种：
             //   视频能完整解出（实测 26 / 29 帧），音频不是 MP2（`0xC0` 包里没有 MPEG audio 帧头）。
             //   ⇒ 只认视频：关音频包，用 sequence header 的宽/高/帧率当判据（⛔ 不看音频头）。
-            //   ⛔ 不改 vendored pl_mpeg（三处逐字节守卫）；⛔ 不静默：warn 一行说清"音频不播"。
+            //   ★ 口径（用户裁决 2026-11-27）：**视频头 OK、音频头不是 MP2 ⇒ 只播视频**是**正常业务**
+            //   （游戏 `MVS*.MPG` 这类"只有画面、没有音频"的流本来就是这样），不是降级/不是缺陷
+            //   ⇒ ⛔ **不打印日志**（别用 warn 把它报出来）。
+            //   ⛔ 不改 vendored pl_mpeg（三处逐字节守卫）。
             plm_set_audio_enabled(plm_, 0);
             video_only_ = true;
             if (plm_get_width(plm_) <= 0 || plm_get_height(plm_) <= 0 || !(plm_get_framerate(plm_) > 0.0)) {
                 setError(err, "不是 MPEG-1 program stream（找不到 pack/system header，或视频头不可用）");
                 return false;
             }
-            vlog(LogLevel::Warn,
-                 "音频头不是 MPEG-1 Layer II ⇒ 只播视频（pl_mpeg 的 plm_has_headers 会把整部片判死）");
         }
         const int width = plm_get_width(plm_);
         const int height = plm_get_height(plm_);
@@ -216,8 +217,8 @@ private:
             audio_logged_ = true;
             const int n = plm_get_num_audio_streams(plm_);
             const int rate = plm_get_samplerate(plm_);
-            vlog(LogLevel::Info, "音频流：%d 个，samplerate=%d（宿主侧播放，同步见 audio_render.h）%s", n,
-                 rate, video_only_ ? "；本片只播视频（音频头不是 MP2）" : "");
+            // 只播视频（音频头不是 MP2）是正常业务 ⇒ 这里只报事实（流数 / 采样率），不额外标注它。
+            vlog(LogLevel::Info, "音频流：%d 个，samplerate=%d（宿主侧播放，同步见 audio_render.h）", n, rate);
         }
         const std::uint32_t width = decoded->width;
         const std::uint32_t height = decoded->height;

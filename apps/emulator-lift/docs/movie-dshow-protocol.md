@@ -396,7 +396,7 @@
      `plm_set_audio_enabled(plm_, 0)` + `video_only_ = true`，再用 sequence header 的宽/高/帧率当判据
      （宽高 ≤0 / fps ≤0 ⇒ 仍然拒绝，**不放宽视频判据**）；`nextAudio()` 在 `video_only_` 下直接返回
      false（⛔ 不去 pl_mpeg 里扫一个解不了的音频流：`audio_packet_type = 0` 时它会一路读到流尾才返回）；
-     并 warn 一行说清"只播视频"。
+     并 ⛔ **不打印日志**（视频-only 是**正常业务场景**：只有画面、没有音频，用户裁决 2026-11-27）。
    - **边界**：⛔ **不改 vendored `third_party/pl_mpeg`**（三份副本逐字节相同，`tools/test/emulator-cxx-pl-mpeg-sync.test.mjs`
      守着）；这类片**没有声音**，且 `MVS*.MPG` 是"刻意无音轨"还是"有非 MP2 音轨"**未取证**；
      正常 MP2 片（如 LOGO 1280×720）走的仍是 §18 那条路，一字不变。
