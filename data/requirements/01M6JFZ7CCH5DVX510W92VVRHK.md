@@ -4,7 +4,7 @@
 - type: bug
 - status: done
 - parent: REQ-01M6H6FW5JGQGHACXHPWZD4Y3E
-- verify: apps/emulator-lift/tests/boot_trace.cpp#trace-bytes-identical
+- verify: apps/emulator-lift/tests/boot_trace.cpp#reaches-L2
 - repro: apps/emulator-lift/tests/boot_trace.cpp#fnv(h, cpu.r, sizeof(cpu.r))
 - severity: S2
 - tags: [emulator-lift, m1, a4]

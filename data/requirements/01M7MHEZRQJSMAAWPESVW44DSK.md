@@ -4,10 +4,13 @@
 - type: bug
 - status: done
 - parent: REQ-01M7JHSDH16HCVEV4BA6NKSHN2
-- verify: apps/emulator-lift/tests/aot_audio_flags.cpp#s0-thread-mode-truth-table
-- repro: apps/emulator-lift/src/runtime/audio.cpp#kLeadBytes
+- verify: apps/emulator-lift/tests/audio.cpp#audio-device/feeder-teb-is-own
+- repro: apps/emulator-lift/src/runtime/audio.cpp#kThreadLeadBytes
 - severity: S1
 - tags: [emulator-lift, audio, feeder]
+
+★ 2026-11-27（用户裁决）：D 泵 / 600 ms lead / `audioThreadMode()` 已整条删除；音频恒 feeder 线程。
+verify 改指 `audio.cpp#audio-device/feeder-teb-is-own`（feeder 必须有**自己的** TEB —— 本缺陷修的就是这个）。
 
 ## 一句话（已修，2026-11-17）
 

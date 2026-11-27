@@ -2,9 +2,9 @@
 
 - id: REQ-01M7W2X81F1ASB488EJFQGMQSH
 - type: bug
-- status: open
+- status: dropped
 - parent: REQ-01M7T0VJPG2S0RZ1HNWW0HH3HY
-- repro: apps/emulator-lift/tests/plugin_e2e.cpp#plugin/load-save-e2e
+- dropped_reason: 用例 `plugin/load-save-e2e` 已按用户裁决删除（2026-11-27：页号前提过期、判据是「点几次」），本缺陷不再可复现，也不再有回归面。
 - severity: S2
 - tags: [plugin, test-flake, c2c, macos]
 

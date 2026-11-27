@@ -5,9 +5,12 @@
 - status: done
 - parent: REQ-01M7T0VJPG2S0RZ1HNWW0HH3HY
 - verify: apps/emulator-lift/tests/plugin_runtime.cpp#plugin/callback-cpu-budget
-- repro: apps/emulator-lift/tests/plugin_e2e.cpp#plugin/load-save-e2e
+- repro: apps/emulator-lift/tests/plugin_runtime.cpp#plugin/callback-wall-only
 - done_reason: 2 ms 判据改为线程 CPU 钟：Windows 主源 QueryThreadCycleTime + 一次性标定（本机 ≈3.97 cycles/ns）；GetThreadTimes 只作兜底 —— 实测粒度 15.625 ms 整 tick（0.5 ms 忙等读到 0 或 156250），做不到 2 ms，这就是不用它判的理由。窗口 = 用户 JS 本体，OS 抢占 / 等 I/O 不计；宿主段另有墙钟安全网 20 ms（reason 带 (host)）。守卫：plugin/callback-cpu-budget（op_limit=0 + 烧 CPU ⇒ 必须因预算失败且 reason 无 (host)）、plugin/callback-wall-only（主线程被挂起 6 ms ⇒ 墙钟超、CPU 60–487 µs ⇒ 必须不失败）。读数 js_cpu_us 137/70/82/16/137/159/47 全都不是 15625 的倍数；负载下 elapsed_us=641 vs js_cpu_us=140。★ 原「e2e 连跑 ≥10 次 0 次预算失败」这条读数本轮没做（判据由上面两条结构性守卫接管）。
 - tags: [emulator-lift, plugin, qjs]
+
+★ 2026-11-27：`plugin/load-save-e2e` 已按用户裁决删除（页号前提过期 + 判据是「点几次」），
+repro 锚随之删除；verify `plugin_runtime.cpp#plugin/callback-cpu-budget` 仍在。
 
 ## 现象
 
