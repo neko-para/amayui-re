@@ -124,6 +124,14 @@ public:
     // ★ `owner_ == std::thread::id{}`（显式 `setOwnerThread(std::thread::id{})` 清空）⇒
     //   **不计数**：没有 owner 的纯夹具不制造假红。
     void setOwnerThread(std::thread::id id) { owner_ = id; }
+    // ★ **只读判定**：当前线程是不是 owner（主线程）。⛔ 不计数、不打印、不改任何状态。
+    //   `owner_` 只在启动装配 / `Machine::run` 起始处写（那时还没有 feeder 线程）⇒ 这里并发读安全。
+    //   用途：`runtime/input.h` 的四个投递入口在**非 owner 线程**（音频 feeder 跑 guest 解码器时
+    //   经 `ReadFile` 进来的那一下）直接早退 —— 它不是 guest 输入读点，⛔ 不许把插件触发路径
+    //   （`ReadPointObserver`）/ 控制队列（`ControlInput::atPoint`）带到子线程上碰 `WindowManager`。
+    bool onOwnerThread() const {
+        return owner_ == std::thread::id{} || std::this_thread::get_id() == owner_;
+    }
     // 非 owner 线程碰入口的累计次数 / 第一次的站点名（nullptr = 一次都没有）。
     unsigned long long offThread() const { return off_thread_.load(std::memory_order_relaxed); }
     const char* firstOffThreadSite() const { return first_off_site_.load(std::memory_order_relaxed); }

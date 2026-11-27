@@ -100,23 +100,34 @@ std::vector<LevelRef> dropOsLevels(WindowManager& wm, std::uint32_t time_ms);
 //     那是"每个读点遍历一次"，也是第二份状态。
 //
 // ★ 唯一性能口径：判据是**调用点不在执行循环里**（不是"每次多少钱"）。
+//
+// ★ **线程门（2026-11-27 用户裁决）**：这四个口只服务 **owner 线程（主线程）** 的 guest 输入读点。
+//   音频 feeder 跑 guest 解码器时会经 `ReadFile` 进来（`deliverFileRead`），那**不是**输入读点
+//   ⇒ 非 owner 线程**直接早退**：⛔ 不许把插件触发路径（`ReadPointObserver`）或控制队列
+//   （`ControlInput::atPoint`）带到子线程上去碰 `WindowManager`（`std::map` 并发读 = UB）。
+//   判据只用 `wm.onOwnerThread()`（只读，不计数、不打印）；真正的越线程误用仍由
+//   `WindowManager::checkMainThread` 抓（`--assert-guest-token` 判红）。
 // =====================================================================================
 inline void deliverLevel(WindowManager& wm, InputPoint point) {
+    if (!wm.onOwnerThread()) return;
     ControlInput* input = wm.controlInput();
     if (input != nullptr) input->atPoint(wm, point);
     if (ReadPointObserver* observer = wm.readPointObserver()) observer->onReadPoint(wm, point);
 }
 inline void deliverQueue(WindowManager& wm, InputPoint point) {
+    if (!wm.onOwnerThread()) return;
     ControlInput* input = wm.controlInput();
     if (input != nullptr) input->atPoint(wm, point);
     if (ReadPointObserver* observer = wm.readPointObserver()) observer->onReadPoint(wm, point);
 }
 inline void deliverWrite(WindowManager& wm, InputPoint point) {
+    if (!wm.onOwnerThread()) return;
     ControlInput* input = wm.controlInput();
     if (input != nullptr) input->atPoint(wm, point);
     if (ReadPointObserver* observer = wm.readPointObserver()) observer->onReadPoint(wm, point);
 }
 inline void deliverFileRead(WindowManager& wm, InputPoint point) {
+    if (!wm.onOwnerThread()) return;
     ControlInput* input = wm.controlInput();
     if (input != nullptr) input->atPoint(wm, point);
     if (ReadPointObserver* observer = wm.readPointObserver()) observer->onReadPoint(wm, point);
