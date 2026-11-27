@@ -4861,6 +4861,58 @@ const MUTATIONS = [
       'microtask 读 `tick.local.int(0)` 抛 stale；`plugin/tick-valid-during-drain` 红',
   },
 
+  // ── S2c-2：`{opcode}` 的闸门（`has_opcode_entry`）恒 false ⇒ 订阅永不匹配 ──────────────────────
+  //   ★ 代表这一类错：`recomputeGates` 不再真维护（恒 false）⇒ `{opcode}` / `{script,opcode}`
+  //     装上但永不命中，`hook.list().hits` 恒 0（没有任何报错）。
+  //   ★ 红点 = `plugin/at-where-opcode`（首拍 `instrHits(all)` 必须是 1，修前 = 0）。
+  {
+    file: 'apps/emulator-lift/src/runtime/instr_hook.cpp',
+    from: '    st.has_opcode_entry = opcode;\n',
+    to: '    st.has_opcode_entry = false;  // 变异：闸门恒 false（{opcode} 订阅永不匹配）\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`recomputeGates` 把 `has_opcode_entry` 钉成 false（有 `{opcode}` 订阅也不读 pc）⇒ ' +
+      '`{opcode}` / `{script,opcode}` 永不命中；`plugin/at-where-opcode` 红' +
+      '（`instr-hook/add-ex-opcode` / `add-ex-opcode-gate` 连带红）',
+  },
+
+  // ── S2c-2：`{opcode}` 的闸门恒 true ⇒ 没有订阅也每拍多付一次 `rd32(pc)` ─────────────────────────
+  //   ★ 代表这一类错：`if (st.has_opcode_entry)` 被短路成 `if (true)` ⇒ 全进程每一拍都读 pc
+  //     （`{script,pos}` 这条最热的路径白付一次 guest 读，且没有任何症状）。
+  //   ★ JS 面看不到这次读 ⇒ 红点在 C++ 的 `instr-hook/add-ex-opcode-gate`（`g_access` 正/负控制）。
+  {
+    file: 'apps/emulator-lift/src/runtime/instr_hook.cpp',
+    from: '    if (st.has_opcode_entry) f.opcode_ok = read32(*cpu.mem, f.pc, &f.opcode);\n',
+    to: '    if (true) f.opcode_ok = read32(*cpu.mem, f.pc, &f.opcode);  // 变异：闸门恒 true（每拍都读 pc）\n',
+    guard: 'ctest:instr-hook',
+    ctest: 'instr-hook',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-instr-hook',
+    what:
+      '把 `{opcode}` 的读闸门短路成 `if (true)`（没有 `{opcode}` 订阅也每拍读 pc）⇒ ' +
+      '`instr-hook/add-ex-opcode-gate` 的 `g_access.ea != kPcA` 负控制红（`add-ex-opcode` 连带红）',
+  },
+
+  // ── S2c-2（复审 F2）：`Tick` 的 `hits[0]` 必须判归属 ────────────────────────────────────────────
+  //   ★ 代表这一类错：多 Impl 同活时 `makeTickObject` 仍用全局 `hits[0]` ⇒ 后注册实例的 `Tick.id`
+  //     是**别人的**句柄（文档说"第一条订阅"，实际是"第一个注册者"；用户拿它 `off` 会撤错）。
+  //   ★ 红点 = `plugin/at-tick-id-attribution`（B 实例的 `tick.id` 必须是 hB，修前 = hA）。
+  {
+    file: 'apps/emulator-lift/src/ui/script_quickjs.cpp',
+    from: '        if (!makeTickObject(impl, hits[owner_first], &tick)) {\n',
+    to: '        if (!makeTickObject(impl, hits[0], &tick)) {  // 变异：不判归属（用全局 hits[0]）\n',
+    guard: 'ctest:plugin-runtime',
+    ctest: 'plugin-runtime',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-plugin-runtime',
+    what:
+      '`makeTickObject` 退回全局 `hits[0]`（不判"是否属于本 Impl"）⇒ 两个 Impl 同活时后注册的实例 ' +
+      '`tick.id` 拿到别人的句柄；`plugin/at-tick-id-attribution` 红',
+  },
+
 ];
 
 let mutationRunSeq = 0;

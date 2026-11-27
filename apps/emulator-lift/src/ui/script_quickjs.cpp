@@ -3471,53 +3471,188 @@ JSValue jsCtxTask(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueCo
 //   · handler 抛错 / 超预算 ⇒ **撤整条订阅**（否则留下"永远不跑、却算 Run 存活"的僵尸）+
 //     一行 error（`at #N hit #M`）+ 截断链；**不 fail Run**。
 //
-// ★ S2c-1 的 JS 面**只放开 `{script,pos}`**：`{script,lo,hi}` / `{script}` / `{opcode}` 的运行时
-//   （`instrHookAddEx` + `matchEntry`）已经写全，但这里明确 TypeError（不"模糊推断"）—— S2c-2 才放开。
+// ★ S2c-2：JS 面放开**五种**形状（与 `instrHookAddEx` / `matchEntry` 逐条一致）：
+//   `{script,pos}` · `{script,lo,hi}`（`[lo,hi)`）· `{script}`（整本脚本 · ⚠ 每拍命中）·
+//   `{opcode}`（全脚本）· `{script,opcode}`（该脚本内的该 opcode）。
+//   ⛔ 不做"模糊推断"：同时给 pos 与 lo/hi / pos 与 opcode / 缺 script 又缺 opcode（`{}`）⇒ TypeError；
+//   ⛔ 不开放 `{pos}`（全局按位置 = 需求没列、且太危险）。
+//   ★ 类型面同样严格：`script` 必须是**字符串**（不 toString 数字）、整数不许带小数（v1 的
+//     `readPluginInt` 会截断 —— 那是已发布语义，v2 新面用更严的判据，见复审 F10）。
 // =====================================================================================
 
-/** `where` 的 `{script,pos}` 形状校验（S2c-1 唯一放开的形态）。 */
+/** 读一个 `where` 字段：缺失 / `null` ⇒ `present=false`；读失败 ⇒ 返回 false。 */
+bool readAtWhereField(JSContext* ctx, JSValueConst obj, const char* name, bool* present, Value* out,
+                      std::string* why) {
+    Value v = qjs::getProperty(ctx, obj, name);
+    if (v.isException()) {
+        qjs::clearException(ctx);
+        *why = std::string(name) + " 读取失败";
+        return false;
+    }
+    if (v.isUndefined() || v.isNull()) {
+        *present = false;
+        return true;
+    }
+    *present = true;
+    *out = std::move(v);
+    return true;
+}
+
+/** 严格整数（⛔ 不截断小数，⛔ 不 toString）：落在 `[lo, hi]` 闭区间内。 */
+bool readAtWhereU32(JSContext* ctx, const Value& v, const char* name, double lo, double hi,
+                    std::uint32_t* out, std::string* why) {
+    if (!v.isNumber()) {
+        *why = std::string(name) + " 必须是数字";
+        return false;
+    }
+    double d = 0.0;
+    if (!qjs::toDouble(ctx, v.raw(), &d) || !std::isfinite(d)) {
+        qjs::clearException(ctx);
+        *why = std::string(name) + " 必须是有限数字";
+        return false;
+    }
+    if (d < lo || d > hi) {
+        char range[64];
+        std::snprintf(range, sizeof(range), "（%g..%g）", lo, hi);
+        *why = std::string(name) + " 超出范围" + range;
+        return false;
+    }
+    if (d != std::floor(d)) {
+        *why = std::string(name) + " 必须是整数（不截断小数）";
+        return false;
+    }
+    *out = static_cast<std::uint32_t>(d);
+    return true;
+}
+
+/** `where` 的形状校验（S2c-2 的五种形态；非法 ⇒ false + 点名原因的 `why`）。 */
 bool readAtWhere(JSContext* ctx, JSValueConst obj, lift::InstrHookWhere* out, std::string* why) {
     if (!JS_IsObject(obj)) {
-        *why = "where 必须是对象（本切片只支持 { script, pos }）";
+        *why =
+            "where 必须是对象：{script,pos} / {script,lo,hi} / {script} / {opcode} / {script,opcode}";
         return false;
     }
-    // ★ 带 `lo` / `hi` / `opcode` 的形状**明确拒绝**：`instrHookAddEx` 已经能装它们，但 JS 面
-    //   S2c-2 才放开 —— 声明与实现不一致是本仓 §6 红线，所以这里给 TypeError 而不是静默忽略。
-    for (const char* name : {"lo", "hi", "opcode"}) {
-        Value v = qjs::getProperty(ctx, obj, name);
-        if (v.isException()) {
-            qjs::clearException(ctx);
-            *why = std::string(name) + " 读取失败";
-            return false;
-        }
-        if (!v.isUndefined() && !v.isNull()) {
-            *why = std::string("本切片只支持 { script, pos }（") + name + " 属 S2c-2）";
-            return false;
-        }
+    Value script_v;
+    Value pos_v;
+    Value lo_v;
+    Value hi_v;
+    Value opcode_v;
+    bool has_script = false;
+    bool has_pos = false;
+    bool has_lo = false;
+    bool has_hi = false;
+    bool has_opcode = false;
+    if (!readAtWhereField(ctx, obj, "script", &has_script, &script_v, why)) return false;
+    if (!readAtWhereField(ctx, obj, "pos", &has_pos, &pos_v, why)) return false;
+    if (!readAtWhereField(ctx, obj, "lo", &has_lo, &lo_v, why)) return false;
+    if (!readAtWhereField(ctx, obj, "hi", &has_hi, &hi_v, why)) return false;
+    if (!readAtWhereField(ctx, obj, "opcode", &has_opcode, &opcode_v, why)) return false;
+
+    // ⛔ 不做模糊推断：`lo`/`hi` 必须成对；`pos` 不能与 `lo/hi` 或 `opcode` 同时给。
+    if (has_lo != has_hi) {
+        *why = "where.lo 与 where.hi 必须成对出现（[lo,hi)）";
+        return false;
     }
+    if (has_pos && (has_lo || has_opcode)) {
+        *why = "where 一次只能给一种匹配条件（pos / lo+hi / opcode），⛔ 不做模糊推断";
+        return false;
+    }
+    if (has_lo && has_opcode) {
+        *why = "where 一次只能给一种匹配条件（pos / lo+hi / opcode），⛔ 不做模糊推断";
+        return false;
+    }
+    if (!has_script && !has_pos && !has_lo && !has_opcode) {
+        *why = "where 不能是空对象（至少要给 script / pos / lo+hi / opcode）";
+        return false;
+    }
+
     std::string script;
-    if (!readPluginText(ctx, obj, "script", &script, why)) return false;
-    if (script.empty()) {
-        *why = "where.script 必须非空（marker 文件名，如 \"FIELD.BIN\"）";
-        return false;
+    if (has_script) {
+        if (!script_v.isString()) {
+            *why = "where.script 必须是字符串（marker 文件名，如 \"FIELD.BIN\"）";
+            return false;
+        }
+        if (!qjs::toString(ctx, script_v.raw(), &script)) {
+            qjs::clearException(ctx);
+            *why = "where.script 无法转成 UTF-8 字符串";
+            return false;
+        }
+        if (script.empty()) {
+            *why = "where.script 必须非空（marker 文件名，如 \"FIELD.BIN\"）";
+            return false;
+        }
     }
-    std::int64_t pos = 0;
-    if (!readPluginInt(ctx, obj, "pos", true, 0, &pos, why)) return false;
-    if (pos < 1 || pos > 4294967295ll) {
-        *why = "where.pos 必须是正的 label 坐标（1..2^32-1）";
-        return false;
+
+    if (has_pos) {
+        if (!has_script) {
+            *why = "where.pos 必须与 script 一起给（⛔ 不支持全局按位置命中）";
+            return false;
+        }
+        std::uint32_t pos = 0;
+        if (!readAtWhereU32(ctx, pos_v, "where.pos", 1.0, 4294967295.0, &pos, why)) return false;
+        out->form = lift::InstrHookForm::Pos;
+        out->script = script;
+        out->pos = pos;
+        return true;
     }
-    out->form = lift::InstrHookForm::Pos;
+    if (has_lo) {
+        if (!has_script) {
+            *why = "where.lo/hi 必须与 script 一起给（⛔ 不支持全局按位置命中）";
+            return false;
+        }
+        std::uint32_t lo = 0;
+        std::uint32_t hi = 0;
+        if (!readAtWhereU32(ctx, lo_v, "where.lo", 0.0, 4294967295.0, &lo, why)) return false;
+        if (!readAtWhereU32(ctx, hi_v, "where.hi", 1.0, 4294967295.0, &hi, why)) return false;
+        if (lo >= hi) {
+            *why = "where.lo 必须小于 where.hi（区间是 [lo,hi)）";
+            return false;
+        }
+        out->form = lift::InstrHookForm::Range;
+        out->script = script;
+        out->lo = lo;
+        out->hi = hi;
+        return true;
+    }
+    if (has_opcode) {
+        std::uint32_t opcode = 0;
+        // ★ 0 是**接受**的（plan §待核 2 的建议：0 可能是真实 opcode；不像 pos 的 0 是"没给"）。
+        if (!readAtWhereU32(ctx, opcode_v, "where.opcode", 0.0, 4294967295.0, &opcode, why)) {
+            return false;
+        }
+        out->form = lift::InstrHookForm::Opcode;
+        out->script = script;  // 空 = 全局 opcode；非空 = `{script,opcode}`
+        out->opcode = opcode;
+        return true;
+    }
+    // 只剩 `{script}`：整本脚本的每条指令。
+    out->form = lift::InstrHookForm::Script;
     out->script = script;
-    out->pos = static_cast<std::uint32_t>(pos);
     return true;
 }
 
 /** `at #N` 的 where 描述（与宿主日志同一形状；只给诊断唯一性用）。 */
 std::string describeAtWhere(const lift::InstrHookWhere& where) {
+    char lo_hex[16];
+    char hi_hex[16];
     char pos_hex[16];
+    char op_hex[16];
+    std::snprintf(lo_hex, sizeof(lo_hex), "0x%X", where.lo);
+    std::snprintf(hi_hex, sizeof(hi_hex), "0x%X", where.hi);
     std::snprintf(pos_hex, sizeof(pos_hex), "0x%X", where.pos);
-    return "script=" + where.script + " pos=" + pos_hex;
+    std::snprintf(op_hex, sizeof(op_hex), "0x%X", where.opcode);
+    switch (where.form) {
+        case lift::InstrHookForm::Pos:
+            return "script=" + where.script + " pos=" + pos_hex;
+        case lift::InstrHookForm::Range:
+            return "script=" + where.script + " range=[" + lo_hex + "," + hi_hex + ")";
+        case lift::InstrHookForm::Script:
+            return "script=" + where.script;
+        case lift::InstrHookForm::Opcode:
+            return where.script.empty() ? std::string("opcode=") + op_hex
+                                        : "script=" + where.script + " opcode=" + op_hex;
+    }
+    return "?";
 }
 
 JSValue jsCtxAt(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
@@ -4184,25 +4319,23 @@ void runInstrHits(Impl& impl, const lift::InstrHit* hits, std::size_t n) {
 
     // ⓪ 这次派发里有没有**本实例**的订阅 / handler？没有 ⇒ 零成本早退
     //   （hook 表是进程级的：另一个存活的 Impl 的 sink 也会收到同一次 on_hits）。
+    //   ★ S2c-2 复审 F2：顺带记下**第一条属于本实例的 hit** —— Tick / 入口 error 行必须用它，
+    //     ⛔ 不是 `hits[0]`（多 Impl 同活时 `hits[0]` 可能是别人的句柄 ⇒ `Tick.id` 张冠李戴）。
     bool any = false;
     bool need_tick = false;
+    std::size_t owner_first = n;  // `n` = 没找到（= 早退）
     for (std::size_t i = 0; i < n; ++i) {
         const std::uint32_t handle = hits[i].handle;
-        if (impl.onces.find(handle) != impl.onces.end()) {
-            any = true;
-            continue;
-        }
-        if (impl.at_subs.find(handle) != impl.at_subs.end()) {
-            any = true;
-            need_tick = true;
-            continue;
-        }
-        if (impl.hook_handlers.find(handle) != impl.hook_handlers.end()) {
-            any = true;
-            need_tick = true;
-        }
+        const bool is_once = impl.onces.find(handle) != impl.onces.end();
+        const bool is_sub = !is_once && impl.at_subs.find(handle) != impl.at_subs.end();
+        const bool is_v1 = !is_once && !is_sub &&
+                           impl.hook_handlers.find(handle) != impl.hook_handlers.end();
+        if (!is_once && !is_sub && !is_v1) continue;  // 别的 Impl 的句柄：⛔ 不参与本实例的任何判定
+        if (owner_first == n) owner_first = i;
+        any = true;
+        if (!is_once) need_tick = true;
     }
-    if (!any) return;
+    if (!any || owner_first == n) return;
 
     // ★ S2c-1 复审 F3（S3）：`ticks` / `chain_step` 与预算字段**同一套保存-恢复**（嵌套派发；
     //   今天不可达、S2c-2 可达）。必须在 `makeTickObject` **之前**快照：本入口自己建的 Tick
@@ -4217,9 +4350,10 @@ void runInstrHits(Impl& impl, const lift::InstrHit* hits, std::size_t n) {
 
     // ① Tick：跑 handler **之前**组好（handler 可能 `off` 掉自己 / 摘条目 ⇒ Tick 必须是值拷贝）。
     //   `once` 的 Tick 由 `runOnceResolve` 用同一个 `makeTickObject` 造（id = 它自己的 handle）。
+    //   ★ F2：一律取**本实例的第一条命中**（`owner_first`）—— `hits[0]` 可能是别的 Impl 的句柄。
     Value tick;
     if (need_tick) {
-        if (!makeTickObject(impl, hits[0], &tick)) {
+        if (!makeTickObject(impl, hits[owner_first], &tick)) {
             if (impl.call_host_persistent != nullptr) {
                 impl.call_host_persistent->log("error", "ctx.at: 组 Tick 失败（本拍不跑 handler）");
             }
@@ -4318,6 +4452,9 @@ void runInstrHits(Impl& impl, const lift::InstrHit* hits, std::size_t n) {
                     continue;
                 }
                 // ---- v1 `handle.onTick`（S2a 的前身）：被动、失败只摘 handler ----
+                //   ★ F2：这条 hit 的句柄不属于本实例（另一个存活的 Impl 的订阅）⇒ 跳过，
+                //     也⛔ 不算"本入口跑过 JS"（否则会多付一次 drain）。
+                if (impl.hook_handlers.find(handle) == impl.hook_handlers.end()) continue;
                 runHookStepV1(impl, handle, hits[i], tick.raw());
                 js_called = true;
             }
@@ -4364,7 +4501,7 @@ void runInstrHits(Impl& impl, const lift::InstrHit* hits, std::size_t n) {
         // ★ 带两个序号：`PluginHost::log` 对连续同文去重，不带序号会让第二次失败被吞掉。
         if (impl.call_host_persistent != nullptr) {
             impl.call_host_persistent->log(
-                "error", "指令点入口失败（hit #" + std::to_string(hits[0].hits) + " tick #" +
+                "error", "指令点入口失败（hit #" + std::to_string(hits[owner_first].hits) + " tick #" +
                              std::to_string(impl.next_tick_serial) + "）：" + local_err);
         }
     }

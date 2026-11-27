@@ -22,6 +22,11 @@
 //     TypeError（消息含 `next_outside_chain`）；插件自己接住 ⇒ Run 不因这个用错 API 而崩。
 //   · `drain-tick-local`：handler 里排的 microtask（同一次入口的 drain 里跑）读 `tick.local.int(0)`
 //     ⇒ 读得到值、**不** stale（`ticks.clear()` 若挪到 drain 之前，这里就 stale）。
+//   · `where-range`     ：`{script,lo,hi}` = `[lo,hi)`：lo 命中 / hi-1 命中 / hi 不命中 / lo-1 不命中。
+//   · `where-script`    ：`{script}` = 整本脚本的每条指令（两个不同 pos 都命中；换脚本 ⇒ 0）。
+//   · `where-opcode`    ：`{opcode:114}` 在两条不同 pos 都命中；`{script,opcode}` 只在该脚本命中。
+//   · `where-mixed`     ：同拍 `{script}` + `{script,pos}` + `{opcode}` 按注册序成一条链。
+//   · `tick-id`         ：多 Impl 同活时 `tick.id` 必须是本实例自己的句柄（⛔ 不是 `hits[0]`）。
 //
 // ★ tick 入口只读：`ctx.edit/input/trigger/fail/finish/quit/profile/config/hook.*` 全 TypeError
 //   ⇒ 本夹具只写**模块变量**，guest 写回统一放在 `onTrigger`（合法的 Run 回调）。
@@ -53,6 +58,7 @@ let allowNext = false;
 let phase = 0;
 let h1 = null;
 let h2 = null;
+let h3 = null;
 let hNow = null;
 let v1 = null;
 let selfSub = null;
@@ -65,6 +71,13 @@ let savedNext = null;   // `next-outside`：handler 里存下来、handler 返�
 let drainRan = 0;       // `drain-tick-local`：drain 里那次 microtask 跑了几次
 let drainValue = UNDEF; // 它读到的 `local.int(0)`（读不到 / stale 就保持哨兵）
 let drainStale = 0;     // 那次读有没有抛 `stale_tick`
+// ---- S2c-2：`where` 过滤（五种形态）----
+let whereRan = 0;       // 命中次数（range / script）
+let wherePos = [];      // range / script 形态下每次命中的 `tick.now.pos`
+let opAllRuns = 0;      // `{opcode:114}` 的命中次数（全局）
+let opScopedRuns = 0;   // `{script,opcode:114}` 的命中次数（只在该脚本）
+let seenTickId = 0;     // `tick-id`：本实例看到的 `tick.id`
+let seenTickRuns = 0;   // 它跑了几次
 
 function note(value) {
     return value === undefined ? UNDEF : value;
@@ -286,6 +299,69 @@ const plugin = {
             ctx.log("info", "at-chain: installed mode=drain-tick-local");
             return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
         }
+        // ---- S2c-2：`where` 过滤的五种形态 ----
+        if (mode === "where-range") {
+            h1 = ctx.at({ script: SCRIPT, lo: 0x0100, hi: 0x0108 }, (tick) => {
+                whereRan += 1;
+                wherePos.push(tick.now.pos);
+            });
+            if (typeof h1 !== "number") throw new Error("where-range: at failed");
+            ctx.log("info", "at-chain: installed mode=where-range");
+            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+        }
+        if (mode === "where-script") {
+            h1 = ctx.at({ script: SCRIPT }, (tick) => {
+                whereRan += 1;
+                wherePos.push(tick.now.pos);
+            });
+            if (typeof h1 !== "number") throw new Error("where-script: at failed");
+            ctx.log("info", "at-chain: installed mode=where-script");
+            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+        }
+        if (mode === "where-opcode") {
+            h1 = ctx.at({ opcode: 114 }, (tick, next) => {
+                opAllRuns += 1;
+                next();  // 不断链：后面那条 {script,opcode} 也要跑（判据是两边的命中次数）
+            });
+            h2 = ctx.at({ script: SCRIPT, opcode: 114 }, () => {
+                opScopedRuns += 1;
+            });
+            if (typeof h1 !== "number" || typeof h2 !== "number") {
+                throw new Error("where-opcode: at failed");
+            }
+            ctx.log("info", "at-chain: installed mode=where-opcode");
+            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+        }
+        if (mode === "where-mixed") {
+            // 注册序 = 链序：`{script}` → `{script,pos}` → `{opcode}`。
+            h1 = ctx.at({ script: SCRIPT }, (tick, next) => {
+                order.push(1);
+                next();
+            });
+            h2 = ctx.at({ script: SCRIPT, pos: POS }, (tick, next) => {
+                order.push(2);
+                next();
+            });
+            h3 = ctx.at({ opcode: 114 }, (tick) => {
+                order.push(3);
+            });
+            if (typeof h1 !== "number" || typeof h2 !== "number" || typeof h3 !== "number") {
+                throw new Error("where-mixed: at failed");
+            }
+            ctx.log("info", "at-chain: installed mode=where-mixed");
+            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+        }
+        if (mode === "tick-id") {
+            // ★ 多 Impl 同活：两个宿主各装一条**同点**订阅；一次派发的 hits 里两条都出现
+            //   ⇒ 每个 Impl 的 `tick.id` 必须是**自己**的句柄（⛔ 不是 `hits[0]`）。
+            h1 = ctx.at({ script: SCRIPT, pos: POS }, (tick) => {
+                seenTickId = tick.id;
+                seenTickRuns += 1;
+            });
+            if (typeof h1 !== "number") throw new Error("tick-id: at failed");
+            ctx.log("info", "at-chain: installed mode=tick-id");
+            return [ctx.trigger.afterPosition("SCENE1", 0x1000, 0x1001, { name: "dump" })];
+        }
         throw new Error("at-chain: unknown mode: " + String(mode));
     },
     onTrigger(ctx) {
@@ -453,6 +529,45 @@ const plugin = {
             put(ctx, OUT_B, drainStale);
             put(ctx, OUT_C, drainRan);
             ctx.off(hNow);
+            return [];
+        }
+        // ---- S2c-2：`where` 过滤 ----
+        if (mode === "where-range") {
+            put(ctx, OUT_A, whereRan);
+            put(ctx, OUT_B, wherePos[0]);
+            put(ctx, OUT_C, wherePos[1]);
+            put(ctx, OUT_N, wherePos.length);
+            ctx.off(h1);
+            return [];
+        }
+        if (mode === "where-script") {
+            put(ctx, OUT_A, whereRan);
+            put(ctx, OUT_B, wherePos[0]);
+            put(ctx, OUT_C, wherePos[1]);
+            ctx.off(h1);
+            return [];
+        }
+        if (mode === "where-opcode") {
+            put(ctx, OUT_A, opAllRuns);
+            put(ctx, OUT_B, opScopedRuns);
+            ctx.off(h1);
+            ctx.off(h2);
+            return [];
+        }
+        if (mode === "where-mixed") {
+            put(ctx, OUT_A, order[0]);
+            put(ctx, OUT_B, order[1]);
+            put(ctx, OUT_C, order[2]);
+            put(ctx, OUT_N, order.length);
+            ctx.off(h1);
+            ctx.off(h2);
+            ctx.off(h3);
+            return [];
+        }
+        if (mode === "tick-id") {
+            put(ctx, OUT_A, seenTickId);
+            put(ctx, OUT_B, seenTickRuns);
+            ctx.off(h1);
             return [];
         }
         ctx.fail("mode", "unexpected onTrigger for " + String(mode));

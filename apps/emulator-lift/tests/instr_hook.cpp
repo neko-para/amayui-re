@@ -34,6 +34,12 @@
 //   ⑪ `instr-hook/add-ex-opcode`（S2c-1 复审 F6）：`{opcode}` 真按 opcode 匹配；撤掉 opcode 条目后
 //      `has_opcode_entry` 归 false ⇒ 普通 probe **不读 pc**（用 `g_access` 判）。
 //      红了 = opcode 匹配是假面 / 闸门恒 true（每拍多付一次 `rd32(pc)`）。
+//   ⑫ `instr-hook/add-ex-range`（S2c-2）：`[lo,hi)` 四个边界（lo-1 / lo / hi-1 / hi）+ 脚本过滤。
+//      红了 = Range 变闭区间 / 只判 lo / 不判脚本。
+//   ⑬ `instr-hook/add-ex-script`（S2c-2）：`{script}` 命中整本脚本的任意指令、换脚本 ⇒ 0。
+//      红了 = 脚本过滤被忽略（别的脚本也命中）。
+//   ⑭ `instr-hook/add-ex-opcode-gate`（S2c-2）：`has_opcode_entry` 闸门的正/负控制（`g_access`）+
+//      `{script,opcode}` 的脚本过滤 + 未提交 pc **不**命中。红了 = 闸门恒 true/false 或 opcode 编 0。
 //
 // ★ 夹具形状：一块假 `GuestMemory`（假 Engine / 帧记录 / 名字表 / int 池 / ptr local）+
 //   一个只填了 `mem` 的 `X86` + 直接调 `instrHookProbe` —— ⛔ 不需要 AOT、不需要游戏安装 / LFS。
@@ -73,6 +79,8 @@ constexpr std::uint32_t kPtrSlot = 0x004B0000u;   // `frame+0x2C`：local-ptr 0 
 constexpr std::uint32_t kTarget = 0x004B0100u;    // ptrLocal 0 指向的 dword（被覆盖的地址）
 constexpr std::uint32_t kKey = 0x1234ABCDu;       // 运行期 ENC/DEC key（⛔ 不是缺省 0）
 constexpr std::uint32_t kScriptId = 3u;
+// ★ S2c-2：第二个脚本身份（名字表 id 4）—— `{Script}` / `{Script,Opcode}` 的负控制。
+constexpr std::uint32_t kOtherScriptId = 4u;
 constexpr std::uint32_t kGlobalIndex = 4u;        // GlobalInt 的 id（池里第 4 个槽）
 constexpr std::uint32_t kPosA = 0x0100u;          // 被 hook 的那条指令
 constexpr std::uint32_t kPosB = 0x0108u;          // "下一条脚本指令"（⛔ 不命中 hook）
@@ -129,6 +137,7 @@ bool makeFakeEngine(L::GuestMemory& mem) {
     if (!put32(mem, kFileDbEa + L::kFileRootCountOffset, 8u)) return false;
     if (!put32(mem, kFileDbEa + L::kFileRootNameBaseOffset, kNameBase)) return false;
     if (!putName(mem, kNameBase, kScriptId, kScript)) return false;
+    if (!putName(mem, kNameBase, kOtherScriptId, "OTHER.BIN")) return false;
     // int 池 + ENC key（`ctx.edit` 与 `GlobalInt` 覆盖共用这一份几何）。
     if (!put32(mem, kEngine + L::kScriptGlobalIntBaseOffset, kIntPool)) return false;
     if (!put32(mem, kEngine + L::kScriptGlobalIntCountOffset, kIntCount)) return false;
@@ -138,8 +147,11 @@ bool makeFakeEngine(L::GuestMemory& mem) {
 }
 
 // 一次脚本派发（= AOT 在 3 个派发点注入的那次调用）：先把 PC 摆到 `pos`，再探测。
-void dispatchAt(L::GuestMemory& mem, L::X86& cpu, std::uint32_t pos) {
+// `script_id`：帧 +0x3C 的 file id（缺省 = kScriptId；负控制换脚本身份用）。
+void dispatchAt(L::GuestMemory& mem, L::X86& cpu, std::uint32_t pos,
+                std::uint32_t script_id = kScriptId) {
     LIFT_CHECK(put32(mem, kFrameEa + kFramePcOff, kBody + (pos - L::kScriptHeaderLen)));
+    LIFT_CHECK(put32(mem, kFrameEa + kFrameIdentityOff, script_id));
     L::instrHookProbe(cpu);
 }
 
@@ -795,6 +807,193 @@ void caseAddExOpcode() {
     L::instrHookClear();
 }
 
+// =====================================================================================
+// ⑫ S2c-2 · `instr-hook/add-ex-range`：`[lo,hi)` 的四个边界 + 脚本过滤
+//
+//   红 = Range 的 matcher 写成闭区间（hi 命中）/ 只比 lo / 不判脚本：
+//   判据：lo-1 不中、lo 中、hi-1 中、hi 不中、区间内再中；换脚本 ⇒ 不中。
+// =====================================================================================
+void caseAddExRange() {
+    lift_test::g_current_case = "instr-hook/add-ex-range";
+    L::instrHookClear();
+    L::instrHookSetInjectionSites(1u);
+    L::GuestMemory mem;
+    LIFT_CHECK(makeFakeEngine(mem));
+    L::X86 cpu;
+    cpu.mem = &mem;
+
+    bool ok = false;
+    const std::uint32_t h = addExHook(0x61u, L::InstrHookForm::Range, kScript, kPosA, kPosA + 8u,
+                                      L::InstrHookKind::Sub, &ok);
+    LIFT_CHECK(ok);
+    L::InstrHookStatus st;
+    LIFT_CHECK(L::instrHookStats(h, &st));
+    LIFT_CHECK(st.form == L::InstrHookForm::Range);
+    LIFT_CHECK_EQ_U32(st.lo, kPosA);
+    LIFT_CHECK_EQ_U32(st.hi, kPosA + 8u);
+    LIFT_CHECK_EQ_U32(st.pos, 0u);  // form != Pos ⇒ pos 保持 0
+
+    dispatchAt(mem, cpu, kPosA - 1u);  // lo-1：不命中
+    LIFT_CHECK(L::instrHookStats(h, &st));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(st.hits), 0);
+    dispatchAt(mem, cpu, kPosA);  // lo：命中
+    LIFT_CHECK(L::instrHookStats(h, &st));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(st.hits), 1);
+    dispatchAt(mem, cpu, kPosA + 7u);  // hi-1：命中
+    LIFT_CHECK(L::instrHookStats(h, &st));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(st.hits), 2);
+    dispatchAt(mem, cpu, kPosA + 8u);  // hi：**开区间** ⇒ 不命中
+    LIFT_CHECK(L::instrHookStats(h, &st));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(st.hits), 2);
+    dispatchAt(mem, cpu, kPosA + 4u);  // 区间内：命中
+    LIFT_CHECK(L::instrHookStats(h, &st));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(st.hits), 3);
+    // 换脚本（同一个 pos）⇒ 不命中（脚本过滤是 Range 的一部分）。
+    dispatchAt(mem, cpu, kPosA + 4u, kOtherScriptId);
+    LIFT_CHECK(L::instrHookStats(h, &st));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(st.hits), 3);
+    L::instrHookClear();
+}
+
+// =====================================================================================
+// ⑬ S2c-2 · `instr-hook/add-ex-script`：`{Script}` = 整本脚本的每条指令
+//
+//   红 = `{Script}` 被当成"任意脚本都命中"（换脚本仍中）或只能命中一个 pos：
+//   判据：同一脚本两条不同 pos 都中；换脚本 ⇒ 不中；回到原脚本 ⇒ 又中。
+// =====================================================================================
+void caseAddExScript() {
+    lift_test::g_current_case = "instr-hook/add-ex-script";
+    L::instrHookClear();
+    L::instrHookSetInjectionSites(1u);
+    L::GuestMemory mem;
+    LIFT_CHECK(makeFakeEngine(mem));
+    L::X86 cpu;
+    cpu.mem = &mem;
+
+    bool ok = false;
+    const std::uint32_t h = addExHook(0x62u, L::InstrHookForm::Script, kScript, 0, 0,
+                                      L::InstrHookKind::Sub, &ok);
+    LIFT_CHECK(ok);
+    L::InstrHookStatus st;
+    LIFT_CHECK(L::instrHookStats(h, &st));
+    LIFT_CHECK(st.form == L::InstrHookForm::Script);
+    LIFT_CHECK(st.script == kScript);
+    LIFT_CHECK_EQ_U32(st.pos, 0u);
+    LIFT_CHECK_EQ_U32(st.lo, 0u);
+    LIFT_CHECK_EQ_U32(st.hi, 0u);
+    LIFT_CHECK_EQ_U32(st.opcode, 0u);
+
+    dispatchAt(mem, cpu, kPosA);
+    LIFT_CHECK(L::instrHookStats(h, &st));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(st.hits), 1);
+    dispatchAt(mem, cpu, kPosA + 0x10u);  // 另一条指令（同一个脚本）
+    LIFT_CHECK(L::instrHookStats(h, &st));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(st.hits), 2);
+    dispatchAt(mem, cpu, kPosA, kOtherScriptId);  // 换脚本 ⇒ 0 命中
+    LIFT_CHECK(L::instrHookStats(h, &st));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(st.hits), 2);
+    dispatchAt(mem, cpu, kPosA + 0x20u);  // 回到原脚本 ⇒ 又命中（反面自检）
+    LIFT_CHECK(L::instrHookStats(h, &st));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(st.hits), 3);
+    L::instrHookClear();
+}
+
+// =====================================================================================
+// ⑭ S2c-2 · `instr-hook/add-ex-opcode-gate`：`{opcode}` 的匹配 + `has_opcode_entry` 闸门
+//
+//   红 = ① 没有 `{opcode}` 订阅时仍每拍读 `rd32(pc)`（闸门恒 true）；② 有订阅时**不**读
+//        （闸门恒 false / `recomputeGates` 不维护）；③ 不判 opcode / 不判脚本；
+//        ④ 读不到 opcode 时编 0（未提交 pc 被当成 opcode 0 命中）。
+//   ★ 仪器 = `lift::g_access`（最近一次 guest 访存的 EA）；②的正控制证明"没读"不是仪器坏了。
+// =====================================================================================
+void caseAddExOpcodeGate() {
+    lift_test::g_current_case = "instr-hook/add-ex-opcode-gate";
+    L::instrHookClear();
+    L::instrHookSetInjectionSites(1u);
+    L::GuestMemory mem;
+    LIFT_CHECK(makeFakeEngine(mem));
+    L::X86 cpu;
+    cpu.mem = &mem;
+    constexpr std::uint32_t kOpX = 0x72u;
+    constexpr std::uint32_t kOpY = 0x73u;
+    LIFT_CHECK(put32(mem, kPcA, kOpX));
+
+    // 一条普通 Pos 订阅（无 `{opcode}`）：跑两拍把 `script_id` 缓存下来 ⇒ 之后没有名字解析的读。
+    bool pos_ok = false;
+    const std::uint32_t pos_h = addExHook(0x63u, L::InstrHookForm::Pos, kScript, kPosA, 0,
+                                          L::InstrHookKind::Sub, &pos_ok);
+    LIFT_CHECK(pos_ok);
+    dispatchAt(mem, cpu, kPosA);
+    dispatchAt(mem, cpu, kPosA);
+    LIFT_CHECK(L::g_access.ea != kPcA);  // ① 没有 {opcode} 订阅 ⇒ 不读 pc
+
+    // ② `{script,opcode,X}`：pc=X ⇒ 命中；同一个仪器读出"读了 pc"（正控制）。
+    //   ★ 跑两拍：第一拍 `matchEntry` 要解析脚本名（`frameName`，最后访问的是名字表），
+    //     第二拍 `Entry::script_id` 已缓存 ⇒ 本拍最后一次访存就是闸门读的 `rd32(pc)`。
+    bool op_ok = false;
+    const std::uint32_t op_h = addExHook(0x63u, L::InstrHookForm::Opcode, kScript, kOpX, 0,
+                                         L::InstrHookKind::Sub, &op_ok);
+    LIFT_CHECK(op_ok);
+    dispatchAt(mem, cpu, kPosA);
+    dispatchAt(mem, cpu, kPosA);
+    L::InstrHookStatus os;
+    LIFT_CHECK(L::instrHookStats(op_h, &os));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(os.hits), 2);
+    LIFT_CHECK(os.form == L::InstrHookForm::Opcode);
+    LIFT_CHECK(os.script == kScript);
+    LIFT_CHECK_EQ_U32(os.opcode, kOpX);
+    LIFT_CHECK_EQ_U32(L::g_access.ea, kPcA);  // ★ 闸门为真时确实读 pc
+
+    // ③ pc=Y ⇒ 不命中（按 opcode 匹配）。
+    LIFT_CHECK(put32(mem, kPcA, kOpY));
+    dispatchAt(mem, cpu, kPosA);
+    LIFT_CHECK(L::instrHookStats(op_h, &os));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(os.hits), 2);
+
+    // ④ `{script,opcode}` 的 script 过滤：同一个 opcode、换脚本 ⇒ 不命中。
+    LIFT_CHECK(put32(mem, kPcA, kOpX));
+    dispatchAt(mem, cpu, kPosA, kOtherScriptId);
+    LIFT_CHECK(L::instrHookStats(op_h, &os));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(os.hits), 2);
+
+    // ⑤ 未提交 pc（`rd32` 读不到）⇒ **不命中**（⛔ 不编 0：0 是合法 opcode）。
+    constexpr std::uint32_t kUncommittedPos = L::kScriptHeaderLen + 0xC0000u;
+    dispatchAt(mem, cpu, kUncommittedPos);
+    LIFT_CHECK(L::instrHookStats(op_h, &os));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(os.hits), 2);
+
+    // ⑥ 撤掉 `{opcode}` 条目 ⇒ `has_opcode_entry` 归 false（`recomputeGates` 真维护）⇒ 不再读 pc。
+    LIFT_CHECK(L::instrHookRemove(op_h));
+    dispatchAt(mem, cpu, kPosA);
+    LIFT_CHECK(L::g_access.ea != kPcA);
+    L::InstrHookStatus ps;
+    LIFT_CHECK(L::instrHookStats(pos_h, &ps));
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(ps.hits), 6);  // ①2 + ②2 + ③1 + ⑥1（④⑤不中）
+
+    // ⑦ `releaseOwner` 也要重算：装一条全局 `{opcode}`（空 script ⇒ 不解析名字，正控制干净）⇒ 读 pc；
+    //   释放 owner ⇒ 归 false ⇒ 不再读。
+    bool rel_ok = false;
+    addExHook(0x63u, L::InstrHookForm::Opcode, std::string(), kOpX, 0, L::InstrHookKind::Sub, &rel_ok);
+    LIFT_CHECK(rel_ok);
+    dispatchAt(mem, cpu, kPosA);
+    LIFT_CHECK_EQ_U32(L::g_access.ea, kPcA);
+    L::instrHookReleaseOwner(0x63u);
+    LIFT_CHECK(L::instrHookList().empty());  // pos_h 也是这个 owner
+    dispatchAt(mem, cpu, kPosA);
+    LIFT_CHECK(L::g_access.ea != kPcA);
+
+    // ⑧ `clear()` 也要重算：再装一条 `{opcode}` ⇒ 读 pc；`instrHookClear()` ⇒ 不再读。
+    bool clr_ok = false;
+    addExHook(0x64u, L::InstrHookForm::Opcode, std::string(), kOpX, 0, L::InstrHookKind::Sub, &clr_ok);
+    LIFT_CHECK(clr_ok);
+    dispatchAt(mem, cpu, kPosA);
+    LIFT_CHECK_EQ_U32(L::g_access.ea, kPcA);
+    L::instrHookClear();
+    dispatchAt(mem, cpu, kPosA);
+    LIFT_CHECK(L::g_access.ea != kPcA);
+    LIFT_CHECK(L::instrHookList().empty());
+}
+
 }  // namespace
 
 int main() {
@@ -814,5 +1013,9 @@ int main() {
     // ---- S2c-1 复审收口（F1 的 break 饿死 / F6 的 opcode 路径）----
     caseV1PatchDoesNotStarveSub();
     caseAddExOpcode();
+    // ---- S2c-2（where 过滤的 C++ 面：Range / Script / opcode 闸门）----
+    caseAddExRange();
+    caseAddExScript();
+    caseAddExOpcodeGate();
     return lift_test::finish("instr-hook");
 }

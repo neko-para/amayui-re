@@ -553,8 +553,10 @@ export interface RunCtx<State = Record<string, unknown>> {
      *  · handler 必须**同步**（返回 Promise 会被忽略 + 一次性 warn；`next()` 必须在 await 之前调）；
      *  · handler 抛错 / 超预算 ⇒ **撤整条订阅** + 一行 error，Run 不 fail。
      *  · 链的顺序 = 注册序；`once` / `handle.onTick` 是**被动观察者**（截断不影响它们）。
-     *  ★ 本切片（S2c-1）`where` 只收 `{ script, pos }`；`{script,lo,hi}` / `{script}` / `{opcode}`
-     *    在运行时是 **TypeError**（S2c-2 才放开 —— 类型面与实现保持一致，⛔ 不"声明说得比实现多"）。
+     *  ★ `where` 的形态与运行时的 `readAtWhere` 逐条一致：
+     *    `{script,pos}` · `{script,lo,hi}`（`[lo,hi)`）· `{script}`（整本脚本 · ⚠ 每拍命中）·
+     *    `{opcode}`（全脚本）· `{script,opcode}`（该脚本内的该 opcode）。
+     *    非法 / 模糊形状（`{}`、`{pos}`、`pos` 与 `lo/hi` 同给、小数、非字符串 script）⇒ TypeError。
      */
     at(where: AtWhere, handler: (tick: Tick, next: () => void) => void): number | undefined;
     /**
@@ -619,7 +621,9 @@ export interface InstrHookStats {
     /** `capture({ptrs})` 的**指针指向的 dword**（语义值；不可读 = 0）。 */
     readonly ptrTargets: number[];
     // ---- S2c 的形状面（可选：老调用方不需要读它们）----
-    /** 这一行是哪种订阅：v1 `ctx.hook.at` / v2 `ctx.at` / `once` 的临时 hook。 */
+    /** 这一行是哪种订阅：v1 `ctx.hook.at` / v2 `ctx.at` / `once` 的临时 hook。
+     *  ⚠ 它**不是** patch 的种类（C++ 的 `InstrHookStatus.kind` 那个才是 `ptrDword` / `localInt` /
+     *  `globalInt`；JS 面看不到后者）。 */
     readonly kind?: "v1" | "sub" | "once";
     /** `form` 决定哪个字段有意义（`pos` 只在 `"pos"` 形态下非 0）。 */
     readonly form?: "pos" | "range" | "script" | "opcode";
@@ -627,9 +631,19 @@ export interface InstrHookStats {
     readonly hi?: number;
     readonly opcode?: number;
 }
-/** `ctx.at` 的匹配条件（S2c-1：**只** `{ script, pos }` —— 与运行时的校验逐条一致）。
- *  ★ S2c-2 才追加 `{script,lo,hi}` / `{script}` / `{script?,opcode}`（运行时一起放开；⛔ 不提前声明）。 */
-export type AtWhere = { readonly script: string; readonly pos: number };
+/** `ctx.at` 的匹配条件（S2c-2：五种形态，与运行时的 `readAtWhere` 逐条一致）。
+ *  · `{script,pos}`：单点；
+ *  · `{script,lo,hi}`：区间 `[lo,hi)`（`0 <= lo < hi <= 2^32-1`）；
+ *  · `{script}`：整本脚本的每条指令（⚠ 高频面，成本由插件自担）；
+ *  · `{opcode}` / `{script,opcode}`：opcode == 该值（可选按脚本收窄；opcode 0..2^32-1）。
+ *  ★ `pos` / `lo` / `hi` / `opcode` 必须是**整数**（小数 ⇒ TypeError，⛔ 不截断）；
+ *    `script` 必须是**非空字符串**（数字不会被 toString）。
+ *  ★ 模糊形状（空对象 / 只有 `pos` / `pos` 与 `lo/hi` 或 `opcode` 同给 / `lo` 与 `hi` 缺一）⇒ TypeError。 */
+export type AtWhere =
+    | { readonly script: string; readonly pos: number }
+    | { readonly script: string; readonly lo: number; readonly hi: number }
+    | { readonly script: string }
+    | { readonly script?: string; readonly opcode: number };
 /** `Tick.now`：**本拍命中的值快照**（⛔ 不是"当前位置"；跨入口仍读到旧值 —— 这是有意的）。 */
 export interface TickNow {
     readonly script: string;
@@ -650,8 +664,8 @@ export interface TickLocal {
  *  ★ 有效期 = **产生它的那一次指令点入口（含该入口的 drain）**：跨入口用 `local`（S2c-2 还有
  *    `edit` / `input` / `patch`）⇒ 抛 `Error`（消息含 `stale_tick`）；`now` 是快照、`log` 是宿主
  *    出口 ⇒ 仍可用。
- *  ★ 一次派发**一个** Tick 对象（全链共享同一个快照）；`id` = 链里**第一条**订阅的句柄
- *    （要自己的 id 就在 `ctx.at` 时把返回值存起来）。 */
+ *  ★ 一次派发**一个** Tick 对象（全链共享同一个快照）；`id` = 链里**第一条属于本实例的**订阅的
+ *    句柄（多 `Impl` 同活时不会串到别人的句柄；要自己的 id 就在 `ctx.at` 时把返回值存起来）。 */
 export interface Tick {
     readonly id: number;
     readonly now: TickNow;

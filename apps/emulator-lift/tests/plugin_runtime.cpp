@@ -372,6 +372,10 @@ constexpr std::uint32_t kInstrPtrBase = 0x004D9000u;   // local-ptr 槽（同上
 constexpr std::uint32_t kInstrPos = 0x00000100u;       // label 坐标（与夹具 `POS` 同一个数）
 constexpr std::uint32_t kInstrOpcode = 114u;           // 只是**值**（⛔ 不是 opcode 语义结论）
 constexpr std::uint32_t kInstrScriptId = 3u;
+// ★ S2c-2（`where` 的 script 过滤）：第二个脚本身份（名字表里 id 4 那一条）。
+//   `{script}` / `{script,opcode}` 的**负控制**要"换脚本 ⇒ 不命中"，换 id 才看得见
+//   （同名改 id 不够：命中后 `Entry::script_id` 已缓存，只比 id）。
+constexpr std::uint32_t kInstrOtherId = 4u;
 constexpr std::uint32_t kInstrPc = kInstrBody + (kInstrPos - lift::kScriptHeaderLen);
 // ★ S2c（`tick.local`）：local-ptr 0 指向的 dword（`ptr(0)` = 这个地址、`ptrDword(0)` = 它的语义值）。
 constexpr std::uint32_t kInstrLocalTarget = 0x004D7000u;
@@ -395,6 +399,12 @@ bool installInstrFrame(lift::GuestMemory& mem) {
     for (std::size_t i = 0; i <= sizeof(kName) - 1; ++i) {
         mem.wr8(entry + static_cast<std::uint32_t>(i), static_cast<std::uint8_t>(kName[i]));
     }
+    // ★ S2c-2：第二个脚本名（id 4）—— `where` 的 script 过滤负控制用。
+    const std::uint32_t other = kInstrName + lift::kFileNameStride * kInstrOtherId;
+    const char kOtherName[] = "OTHER.BIN";
+    for (std::size_t i = 0; i <= sizeof(kOtherName) - 1; ++i) {
+        mem.wr8(other + static_cast<std::uint32_t>(i), static_cast<std::uint8_t>(kOtherName[i]));
+    }
     // opcode 摆在 PC 上（`instrHookProbe` 用 `mem.rd32(pc)` 读）。
     return put32(mem, kInstrPc, kInstrOpcode);
 }
@@ -406,6 +416,17 @@ void dispatchInstr(Fixture& f, std::uint32_t pos) {
     lift::X86 cpu;  // 《只填 mem》—— 与 `tests/instr_hook.cpp` 同形
     cpu.mem = &f.mem;
     lift::instrHookProbe(cpu);
+}
+
+// ★ S2c-2：换脚本身份（帧 +0x3C 的 file id）—— `{script}` / `{script,opcode}` 的负控制。
+bool setInstrScript(Fixture& f, std::uint32_t script_id) {
+    const std::uint32_t frame = kFxEngine + lift::kEngineFrameBase;
+    return put32(f.mem, frame + 0x3C, script_id);
+}
+
+// ★ S2c-2：把 opcode 摆到 `pos` 对应的 PC 上（`instrHookProbe` 读 `mem.rd32(pc)`）。
+bool putInstrOpcode(Fixture& f, std::uint32_t pos, std::uint32_t opcode) {
+    return put32(f.mem, kInstrBody + (pos - lift::kScriptHeaderLen), opcode);
 }
 
 // ★ S2c（`tick.local`）：在 `installInstrFrame` **之后**补值（⛔ 不改夹具本身）：
@@ -3445,6 +3466,249 @@ void caseTickValidDuringDrain() {
 }
 
 // =====================================================================================
+// S2c-2 · `where` 过滤的五种形态（区间 / 整本脚本 / opcode / mix）
+//
+// 红 = JS 面没放开 / 放开后匹配错 / `hook.list()` 的形状与装进去的不一致：
+//   · `plugin/at-where-range` ：`[lo,hi)` 的四个边界（lo 命中 / hi-1 命中 / hi 不命中 / lo-1 不命中）。
+//   · `plugin/at-where-script`：`{script}` 两不同 pos 都命中；换脚本 ⇒ 0 命中。
+//   · `plugin/at-where-opcode`：`{opcode:114}` 两条不同 pos 都命中；`{script,opcode}` 只在该脚本；
+//     未提交 pc ⇒ 不命中（⛔ 不编 0）；`hook.list()` 的 form/script/opcode 逐项对。
+//   · `plugin/at-where-mixed` ：同拍三种形态按注册序成一条链（`next()` 顺序 = [1,2,3]）。
+// =====================================================================================
+constexpr std::uint32_t kAtRangeHePos = 0x0107u;  // hi - 1
+constexpr std::uint32_t kAtRangeHiPos = 0x0108u;  // hi（开区间 ⇒ 不命中）
+constexpr std::uint32_t kAtRangeLoMinus1 = 0x00FFu;
+
+// `plugin/at-where-range`：`{script,lo,hi}` = `[lo,hi)` 的四个边界。
+void caseAtWhereRange() {
+    lift_test::g_current_case = "plugin/at-where-range";
+    Fixture f;
+    if (!loadAtChain(f, "where-range")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    f.pump();  // start：一条 {script,lo,hi}
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    const std::vector<lift::InstrHookStatus> hooks = f.host->instrHookList();
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hooks.size()), 1);
+    if (hooks.size() != 1) return;
+    const std::uint32_t h = hooks[0].id;
+    LIFT_CHECK(hooks[0].hook_kind == lift::InstrHookKind::Sub);
+    LIFT_CHECK(hooks[0].form == lift::InstrHookForm::Range);
+    LIFT_CHECK_EQ_U32(hooks[0].lo, kInstrPos);
+    LIFT_CHECK_EQ_U32(hooks[0].hi, kAtRangeHiPos);
+    LIFT_CHECK_EQ_U32(hooks[0].pos, 0u);  // 非 Pos 形态：pos 保持 0（form 决定哪个字段有意义）
+    LIFT_CHECK(hooks[0].script == "FIELD.BIN");
+
+    // 边界四点：lo-1 ⇒ 0；lo ⇒ 1；hi-1 ⇒ 2；hi ⇒ 仍 2。
+    dispatchInstr(f, kAtRangeLoMinus1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(h)), 0);
+    dispatchInstr(f, kInstrPos);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(h)), 1);
+    dispatchInstr(f, kAtRangeHePos);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(h)), 2);
+    dispatchInstr(f, kAtRangeHiPos);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(h)), 2);
+
+    f.readings.pos = 0x1000u;
+    f.pump();  // onTrigger：写回 handler 的读数（只该跑 2 次）
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 2u);      // whereRan
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), kInstrPos);  // 第一次命中的 now.pos
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), kAtRangeHePos);// 第二次命中的 now.pos
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 2u);
+    LIFT_CHECK(f.host->instrHookList().empty());
+}
+
+// `plugin/at-where-script`：`{script}` = 整本脚本的每条指令；换脚本 ⇒ 0 命中。
+void caseAtWhereScript() {
+    lift_test::g_current_case = "plugin/at-where-script";
+    Fixture f;
+    if (!loadAtChain(f, "where-script")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    f.pump();  // start：一条 {script}
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    const std::vector<lift::InstrHookStatus> hooks = f.host->instrHookList();
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hooks.size()), 1);
+    if (hooks.size() != 1) return;
+    const std::uint32_t h = hooks[0].id;
+    LIFT_CHECK(hooks[0].form == lift::InstrHookForm::Script);
+    LIFT_CHECK(hooks[0].script == "FIELD.BIN");
+    LIFT_CHECK_EQ_U32(hooks[0].pos, 0u);
+
+    // 同一脚本的两条不同指令都命中（整本脚本，不是单点）。
+    dispatchInstr(f, kInstrPos);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(h)), 1);
+    dispatchInstr(f, kInstrPos + 0x10u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(h)), 2);
+
+    // 换脚本 ⇒ 0 命中（同一个 pos 也不命中：判据是脚本身份，不是位置）。
+    LIFT_CHECK(setInstrScript(f, kInstrOtherId));
+    dispatchInstr(f, kInstrPos);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(h)), 2);
+
+    // 回到原脚本 ⇒ 又命中（反面自检：上一步不是"整条订阅坏了"）。
+    LIFT_CHECK(setInstrScript(f, kInstrScriptId));
+    dispatchInstr(f, kInstrPos + 0x20u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(h)), 3);
+
+    f.readings.pos = 0x1000u;
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 3u);          // whereRan
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), kInstrPos);
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), kInstrPos + 0x10u);
+    LIFT_CHECK(f.host->instrHookList().empty());
+}
+
+// `plugin/at-where-opcode`：全局 `{opcode}` vs `{script,opcode}`；未提交 pc ⇒ 不命中。
+void caseAtWhereOpcode() {
+    lift_test::g_current_case = "plugin/at-where-opcode";
+    Fixture f;
+    if (!loadAtChain(f, "where-opcode")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    LIFT_CHECK(putInstrOpcode(f, kInstrPos + 0x10u, kInstrOpcode));  // 第二条指令同 opcode
+    f.pump();  // start：两条（全局 opcode + 带 script 的 opcode）
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    const std::vector<lift::InstrHookStatus> hooks = f.host->instrHookList();
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hooks.size()), 2);
+    if (hooks.size() != 2) return;
+    const std::uint32_t all = hooks[0].id;
+    const std::uint32_t scoped = hooks[1].id;
+    LIFT_CHECK(hooks[0].form == lift::InstrHookForm::Opcode);
+    LIFT_CHECK(hooks[0].script.empty());  // {opcode} 不带 script
+    LIFT_CHECK_EQ_U32(hooks[0].opcode, kInstrOpcode);
+    LIFT_CHECK_EQ_U32(hooks[0].pos, 0u);
+    LIFT_CHECK(hooks[1].form == lift::InstrHookForm::Opcode);
+    LIFT_CHECK(hooks[1].script == "FIELD.BIN");  // {script,opcode}
+    LIFT_CHECK_EQ_U32(hooks[1].opcode, kInstrOpcode);
+
+    // 两条不同 pos 都命中（opcode 是判据，不是位置）。
+    dispatchInstr(f, kInstrPos);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(all)), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(scoped)), 1);
+    dispatchInstr(f, kInstrPos + 0x10u);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(all)), 2);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(scoped)), 2);
+
+    // 换脚本、opcode 相同 ⇒ 全局那条命中、`{script,opcode}` **不**命中。
+    LIFT_CHECK(setInstrScript(f, kInstrOtherId));
+    dispatchInstr(f, kInstrPos);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(all)), 3);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(scoped)), 2);
+
+    // 未提交 pc（`rd32` 读不到）⇒ **不命中**（⛔ 不编 0）。
+    LIFT_CHECK(setInstrScript(f, kInstrScriptId));
+    constexpr std::uint32_t kNoOpcodePos = lift::kScriptHeaderLen + 0xB0000u;
+    dispatchInstr(f, kNoOpcodePos);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(all)), 3);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(scoped)), 2);
+
+    // opcode 不是 114（这里是 0）⇒ 两条都不命中（不是"有 opcode 订阅就全命中"）。
+    LIFT_CHECK(putInstrOpcode(f, kInstrPos, 0u));
+    dispatchInstr(f, kInstrPos);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(all)), 3);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(scoped)), 2);
+
+    f.readings.pos = 0x1000u;
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 3u);  // 全局 opcode 的 handler 次数
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), 2u);  // 带 script 的 handler 次数
+    LIFT_CHECK(f.host->instrHookList().empty());
+}
+
+// `plugin/at-where-mixed`：同拍 `{script}` + `{script,pos}` + `{opcode}` 按注册序成**一条链**。
+void caseAtWhereMixed() {
+    lift_test::g_current_case = "plugin/at-where-mixed";
+    Fixture f;
+    if (!loadAtChain(f, "where-mixed")) return;
+    LIFT_CHECK(installInstrFrame(f.mem));
+    LIFT_CHECK(putInstrOpcode(f, kInstrPos, kInstrOpcode));
+    f.pump();  // start：按注册序装 {script} → {script,pos} → {opcode}
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    const std::vector<lift::InstrHookStatus> hooks = f.host->instrHookList();
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hooks.size()), 3);
+    if (hooks.size() != 3) return;
+    LIFT_CHECK(hooks[0].form == lift::InstrHookForm::Script);
+    LIFT_CHECK(hooks[1].form == lift::InstrHookForm::Pos);
+    LIFT_CHECK(hooks[2].form == lift::InstrHookForm::Opcode);
+    LIFT_CHECK(hooks[0].hook_kind == lift::InstrHookKind::Sub);
+    LIFT_CHECK(hooks[1].hook_kind == lift::InstrHookKind::Sub);
+    LIFT_CHECK(hooks[2].hook_kind == lift::InstrHookKind::Sub);
+    LIFT_CHECK(hooks[0].id < hooks[1].id && hooks[1].id < hooks[2].id);
+
+    dispatchInstr(f, kInstrPos);  // 三条都命中 ⇒ 一条链
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    for (const lift::InstrHookStatus& row : f.host->instrHookList()) {
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(row.hits), 1);
+    }
+
+    f.readings.pos = 0x1000u;
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutA), 1u);  // {script} 先跑
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutB), 2u);  // 然后 {script,pos}
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutC), 3u);  // 最后 {opcode}
+    LIFT_CHECK_EQ_U32(readFieldInt(f, kAtOutN), 3u);
+    LIFT_CHECK(f.host->instrHookList().empty());
+}
+
+// `plugin/at-tick-id-attribution`（S2c-1 复审 F2）：**两个 Impl 同活**时，一次派发的 `hits[]`
+//   同时含两边的句柄；每个 Impl 的 `tick.id` 必须是**自己**那条订阅的句柄（⛔ 不是 `hits[0]`）。
+//   红了 = 取值退回全局 `hits[0]` ⇒ 后注册的实例拿到别人的 id（文档/用户面误导）。
+void caseAtTickIdAttribution() {
+    lift_test::g_current_case = "plugin/at-tick-id-attribution";
+    Fixture a;
+    Fixture b;
+    if (!loadAtChain(a, "tick-id")) return;
+    if (!loadAtChain(b, "tick-id")) return;
+    LIFT_CHECK(installInstrFrame(a.mem));
+    LIFT_CHECK(installInstrFrame(b.mem));
+    a.pump();  // A 的 start：装 hA
+    b.pump();  // B 的 start：装 hB（两个 Impl 的 sink 都活着）
+    dumpFail(a);
+    dumpFail(b);
+    LIFT_CHECK(!a.host->failed());
+    LIFT_CHECK(!b.host->failed());
+    const std::vector<lift::InstrHookStatus> hooks = lift::instrHookList();
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hooks.size()), 2);
+    if (hooks.size() != 2) return;
+    const std::uint32_t h_a = hooks[0].id;
+    const std::uint32_t h_b = hooks[1].id;
+    LIFT_CHECK(h_a < h_b);
+
+    // 一次派发（用 A 的 guest）：两个 sink 都收到 [hA, hB] ⇒ 两边各自的 handler 各跑一次。
+    dispatchInstr(a, kInstrPos);
+    dumpFail(a);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(h_a)), 1);
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(instrHits(h_b)), 1);
+
+    // A 的 onTrigger 会收口（off + return []）⇒ releaseOwner 也撤掉同 owner 的 hB；
+    // ★ 但 B 的 Tick 在 dispatch 里已经建好 / handler 已经跑过 ⇒ tick.id 仍然可判。
+    a.readings.pos = 0x1000u;
+    a.pump();
+    dumpFail(a);
+    LIFT_CHECK(!a.host->failed());
+    b.readings.pos = 0x1000u;
+    b.pump();
+    dumpFail(b);
+    LIFT_CHECK(!b.host->failed());
+
+    LIFT_CHECK_EQ_U32(readFieldInt(a, kAtOutA), h_a);  // ★ A 的 tick.id = 自己的句柄
+    LIFT_CHECK_EQ_U32(readFieldInt(a, kAtOutB), 1u);
+    LIFT_CHECK_EQ_U32(readFieldInt(b, kAtOutA), h_b);  // ★ B 的 tick.id = 自己的句柄（修前 = h_a）
+    LIFT_CHECK_EQ_U32(readFieldInt(b, kAtOutB), 1u);
+}
+
+// =====================================================================================
 // C2b · `plugin/render-stored-runctx-rejected`（复审 F2）：**存下来的 RunCtx** 不能在 render 里用
 //   `fail`/`finish`/`quit`/`profile.*`
 //
@@ -4394,6 +4658,12 @@ int main() {
     // ---- S2c-1 复审收口（F5 next 的链外调用 / F4 Tick 含 drain / F7 消息）----
     caseAtNextOutside();
     caseTickValidDuringDrain();
+    // ---- S2c-2（`where` 过滤的五种形态 + 多 Impl 的 `tick.id` 归属）----
+    caseAtWhereRange();
+    caseAtWhereScript();
+    caseAtWhereOpcode();
+    caseAtWhereMixed();
+    caseAtTickIdAttribution();
     // ---- C2b（render / ui / draw；pure 半）----
     caseRenderSurface();
     caseUiDraw(&font);

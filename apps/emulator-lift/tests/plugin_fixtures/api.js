@@ -167,11 +167,27 @@ const plugin = {
 
         // ---- S2c：同步订阅面 `ctx.at` / `ctx.off` 的形状 ----
         //   · `at` 返回**订阅 id（number > 0）**；`off` 返回 boolean 且**幂等**（撤过 / 不存在 ⇒ false）。
-        //   · `where` 形状错 ⇒ 当场 TypeError（⛔ 不静默 undefined）；S2c-1 只放开 `{script,pos}`
-        //     ⇒ `{script,lo,hi}` / `{script}` / `{opcode}` 在这一片**明确拒绝**（S2c-2 才打开）。
+        //   · `where` 形状错 ⇒ 当场 TypeError（⛔ 不静默 undefined）；S2c-2 放开五种形态
+        //     （`{script,pos}` / `{script,lo,hi}` / `{script}` / `{opcode}` / `{script,opcode}`）。
         if (typeof ctx.at !== "function") bad.push("missing:at");
         if (typeof ctx.off !== "function") bad.push("missing:off");
         if (typeof ctx.at === "function" && typeof ctx.off === "function") {
+            // ★ 五种**合法**形态：装得上（id > 0）且撤得掉（off ⇒ true）。⛔ 不留 hook。
+            const goodAt = [
+                { script: SCRIPT_FOR_SHAPE, pos: 0x100 },
+                { script: SCRIPT_FOR_SHAPE, lo: 0x100, hi: 0x108 },
+                { script: SCRIPT_FOR_SHAPE },
+                { opcode: 114 },
+                { script: SCRIPT_FOR_SHAPE, opcode: 114 },
+            ];
+            for (const where of goodAt) {
+                const id = ctx.at(where, () => {});
+                if (typeof id !== "number" || id <= 0) {
+                    bad.push("at.where.rejected:" + JSON.stringify(where));
+                } else if (ctx.off(id) !== true) {
+                    bad.push("at.where.off:" + JSON.stringify(where));
+                }
+            }
             const applied = ctx.at({ script: SCRIPT_FOR_SHAPE, pos: 0x100 }, () => {});
             if (typeof applied !== "number" || applied <= 0) {
                 bad.push(`at.return:${String(applied)}`);
@@ -182,11 +198,21 @@ const plugin = {
             }
             const badAt = [
                 () => ctx.at("FIELD.BIN", () => {}),
+                () => ctx.at(null, () => {}),
                 () => ctx.at({}, () => {}),
                 () => ctx.at({ script: "" }, () => {}),
-                () => ctx.at({ script: SCRIPT_FOR_SHAPE }, () => {}),
+                () => ctx.at({ script: 7, pos: 0x100 }, () => {}),
+                () => ctx.at({ pos: 0x100 }, () => {}),
                 () => ctx.at({ script: SCRIPT_FOR_SHAPE, pos: 0 }, () => {}),
-                () => ctx.at({ script: SCRIPT_FOR_SHAPE, lo: 1, hi: 2 }, () => {}),
+                () => ctx.at({ script: SCRIPT_FOR_SHAPE, pos: 256.5 }, () => {}),
+                () => ctx.at({ script: SCRIPT_FOR_SHAPE, lo: 0x100 }, () => {}),
+                () => ctx.at({ script: SCRIPT_FOR_SHAPE, hi: 0x108 }, () => {}),
+                () => ctx.at({ script: SCRIPT_FOR_SHAPE, lo: 2, hi: 2 }, () => {}),
+                () => ctx.at({ script: SCRIPT_FOR_SHAPE, lo: 1, hi: 2, pos: 0x100 }, () => {}),
+                () => ctx.at({ script: SCRIPT_FOR_SHAPE, pos: 0x100, opcode: 114 }, () => {}),
+                () => ctx.at({ script: SCRIPT_FOR_SHAPE, lo: 1, hi: 2, opcode: 114 }, () => {}),
+                () => ctx.at({ script: SCRIPT_FOR_SHAPE, opcode: -1 }, () => {}),
+                () => ctx.at({ script: SCRIPT_FOR_SHAPE, opcode: 4294967296 }, () => {}),
                 () => ctx.at({ script: SCRIPT_FOR_SHAPE, pos: 0x100 }, 1),
             ];
             for (const call of badAt) {
