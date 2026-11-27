@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>  // std::getenv（诊断开关；⛔ 不是 CLI 旋钮、不进 --help）
+#include <cstring>  // std::strcmp（`no_injection` 的响亮分支）
 #include <string>
 #include <utility>
 
@@ -159,6 +160,10 @@ PluginHost::PluginHost(ReadingsSource& source) : executor_(queue_, source) {
 
 // `unique_ptr<GuestEngineRead>` 的析构要完整类型 ⇒ 定义放这里（见头注）。
 PluginHost::~PluginHost() {
+    // ★ S0（缺陷 1）：卸载 = Run 收口的一条路径 ⇒ 先撤本 owner 的 hook（未还原的写按 CAS 结算）。
+    //   顺序无所谓（`instrHookReleaseOwner` 不碰 `script_`），但必须在**本对象还活着**时做 ——
+    //   它只需要 `instr_hook.cpp` 的内部 static 表 + 上次 probe 记下的 guest 内存。
+    releaseRunHooks();
     // ★ C2b：`setCallHost` 是**非拥有**指针 ⇒ 析构时先撤掉（⛔ 不把悬垂的 `this` 留给脚本对象）。
     if (script_ != nullptr) script_->setCallHost(nullptr);
 }
@@ -237,11 +242,17 @@ void PluginHost::onReadPoint(WindowManager& wm, InputPoint point) {
     // ★ F2：`onTrigger` 返回的集合由 **runner** `install`；失败（重复 name / Once 回放 / 非法 kind）
     //   只会写进 runner 的账 ⇒ 不同步出来的话 readout 会说 `run=waiting`（生产上只能等 --time-limit）。
     syncRunnerFailure();
+    // ★ S0（缺陷 1）：`onTrigger` 返回 `[]` ⇒ `install` 把 runner 置 done，**这发生在回调返回之后**
+    //   ⇒ `onTrigger` / `runCallback` 自己看不到。这里是读点入口里唯一能看到那个状态的地方。
+    if (runClosed()) releaseRunHooks();
     if (begun_ || failed_ || quit_requested_) return;
 
     // ② 首点：只采样 + `begin`（D-C2-10）。`sampleNow` 让 `start` 里的 `ctx.now` 有值；
     //    ⛔ 它不加读点计数 / 不碰队列（那两笔账在 `atPoint` 里，已经记过）。
     begun_ = true;
+    // ★ S0（缺陷 1）：Run 从这一刻开始 ⇒ 新 owner。`start` 里的 `ctx.hook.at` 必须落到它上面
+    //   （所以这一行必须在 `runner_.begin` **之前**）。
+    ++run_serial_;
     executor_.sampleNow(point);
     std::string err;
     runner_.begin(*this, executor_.context(), &err);
@@ -254,8 +265,16 @@ void PluginHost::onReadPoint(WindowManager& wm, InputPoint point) {
         markFailed(why);
         report("run failed", why);
     }
+    // ★ S0（缺陷 1）：`start` 直接 `return []`（正常 done）/ install 拒绝 ⇒ 同一个读点里就收口。
+    if (runClosed()) releaseRunHooks();
     // ★ F3（start 侧）：`start` 里 `ctx.fail` / `ctx.quit` 也是终态异常 ⇒ 已 staged 的 input 不许落地。
     if (failed_ || quit_requested_) releaseRunInput();
+}
+
+void PluginHost::releaseRunHooks() { lift::instrHookReleaseOwner(run_serial_); }
+
+bool PluginHost::runClosed() const {
+    return failed_ || finished_ || quit_requested_ || runner_.failed() || runner_.done();
 }
 
 // =====================================================================================
@@ -375,6 +394,8 @@ PluginHost::TriggerSet PluginHost::runCallback(Context& ctx, bool is_start, cons
             !call_err.empty() ? call_err
                               : (script_->overran() ? "plugin: 回调超出预算（deadline / op_limit）"
                                                     : "plugin: 回调失败");
+        // ★ S0（缺陷 1）：预算超限 / JS 抛错 / 返回非法值 都走这一条 ⇒ Run 收口。
+        //   `markFailed` 内部就 `releaseRunHooks()`（失败路径唯一的收口点）。
         markFailed(why);
         if (err != nullptr) *err = why;
         report("run failed", why);
@@ -389,6 +410,9 @@ PluginHost::TriggerSet PluginHost::runCallback(Context& ctx, bool is_start, cons
 void PluginHost::markFailed(const std::string& reason) {
     failed_ = true;
     if (fail_reason_.empty()) fail_reason_ = reason;
+    // ★ S0（缺陷 1）：失败 = Run 收口 ⇒ 本 Run 的 hook 一条都不许活过这一行
+    //   （覆盖 `ctx.fail` / 预算超限 / 宿主异常 / runner install 拒绝 / `script_ == nullptr`）。
+    releaseRunHooks();
 }
 
 void PluginHost::report(const char* what, const std::string& text) {
@@ -418,10 +442,20 @@ bool PluginHost::editGlobalSet(lift::GlobalKind kind, std::uint32_t id, const li
 
 std::uint32_t PluginHost::instrHookAdd(const std::string& script, std::uint32_t pos, const char** err) {
     const char* why = nullptr;
-    const std::uint32_t handle = lift::instrHookAdd(script, pos, &why);
+    // ★ S0：owner = **本 Run 的序号**（JS 面不变：`ctx.hook.at(script,pos)`）。
+    const std::uint32_t handle = lift::instrHookAdd(run_serial_, script, pos, &why);
     if (err != nullptr) *err = why;
     if (handle == 0) {
-        log("error", std::string("ctx.hook.at 失败：") + (why != nullptr ? why : "unknown"));
+        // ★ S0（缺陷 3）：`no_injection` 不是用户输入错，而是**这一趟构建没有注入站点**
+        //   （`--no-s7` / 闭包没覆盖脚本派发 EA）⇒ `ctx.hook.*` 永不命中。
+        //   这一条必须**响亮**（report 而不是普通 log）：否则唯一症状是"装上了、hits 永远 0"。
+        if (why != nullptr && std::strcmp(why, "no_injection") == 0) {
+            report("ctx.hook 不可用",
+                   "no_injection：本构建在脚本派发点没有注入 lift_instr_hook"
+                   "（--no-s7 或闭包没覆盖派发 EA）⇒ ctx.hook.* 永不命中");
+        } else {
+            log("error", std::string("ctx.hook.at 失败：") + (why != nullptr ? why : "unknown"));
+        }
         return 0;
     }
     char pos_hex[16];
@@ -616,6 +650,8 @@ void PluginHost::fail(const std::string& name, const std::string& reason) {
     failed_ = true;
     if (!name.empty()) fail_name_ = name;
     if (!reason.empty()) fail_reason_ = reason;
+    // ★ S0（缺陷 1）：`ctx.fail` 是 Run 收口 ⇒ 立刻撤本 Run 的 hook（⛔ 不留给"下一条脚本指令"）。
+    releaseRunHooks();
     report("fail", (name.empty() ? std::string("(unnamed)") : name) + ": " + reason);
 }
 
@@ -624,15 +660,17 @@ void PluginHost::finish(int exit_code, const std::string& reason) {
     finished_ = true;
     finish_code_ = exit_code;
     finish_reason_ = reason;
-    // ★ Run 收口 ⇒ 撤掉脚本指令位置钩子（并把未还原的那次覆盖写回：净变化 0）。
-    lift::instrHookClear();
+    // ★ Run 收口 ⇒ 撤掉本 Run 的脚本指令位置钩子（并把未还原的那次覆盖按 CAS 结算：净变化 0）。
+    //   ⛔ 不要退回 `instrHookClear()`：它会撤掉**别人的** hook（v2 的多 Run 上就是静默越权）。
+    releaseRunHooks();
 }
 
 void PluginHost::quit(const std::string& reason) {
     // D-C2-9：`stop_requested` + detail `plugin: quit`（`aot_run.cpp` 的归因位 = `stop_detail`）。
     quit_requested_ = true;
     if (!reason.empty()) quit_reason_ = reason;
-    lift::instrHookClear();
+    // ★ S0（缺陷 1）：quit 也是终态 ⇒ 本 Run 的 hook 立刻撤（同 `finish`）。
+    releaseRunHooks();
     report("quit", quit_reason_.empty() ? std::string("(no reason)") : quit_reason_);
 }
 
@@ -640,6 +678,8 @@ void PluginHost::quit(const std::string& reason) {
 // 收口 / readout
 // =====================================================================================
 std::size_t PluginHost::releaseOwner(WindowManager& wm) {
+    // ★ S0（缺陷 1）："卸载 / 宿主 stop" 也是 Run 收口的一条路径 ⇒ hook 与输入一起撤。
+    releaseRunHooks();
     return executor_.releaseOwner(wm, kOwner);
 }
 

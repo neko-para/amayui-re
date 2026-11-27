@@ -49,6 +49,12 @@ struct InstrHookStatus {
     std::uint32_t max_hits = 0;           // 0 = 不限
     std::uint64_t hits = 0;
     std::uint64_t restores = 0;           // 已经恢复过多少次（每次覆盖之后 +1）
+    // ★ S0（缺陷 2）：恢复时**当前值已经不是我们写进去的那个** ⇒ 不写回、只记这一笔。
+    //   语义：窗口里有人写过同一地址（引擎自己的 guest 写 / 另一条执行流）⇒ **别人的写赢**，
+    //   ⛔ 不把过期的 raw 盖回去。★ 宿主侧的**持久写**（`ctx.edit` / 控制层 `global-set`）不走这一笔：
+    //   它在写的那一刻就把 pending 撤销了（见 `instrHookCancelPendingAt`）—— 那是"持久写赢"，
+    //   不是"冲突"。
+    std::uint64_t restore_conflicts = 0;
     std::uint64_t skips = 0;              // 到点了但没能写（目标不可读 / 没 key / 超过 maxHits）
     std::uint32_t last_id = 0;            // 最近命中的脚本文件 id
     std::vector<std::uint32_t> last_ints;       // `capture({ints})` 的语义值（最近一次命中）
@@ -58,9 +64,14 @@ struct InstrHookStatus {
 
 /**
  * ① 触发：装一条"到点"的 hook（**纯观察**：不写、不读 guest 内存）。
- * 成功 ⇒ 返回句柄 id（≥1）；失败 ⇒ 0 + `*err` 静态字面量（`script_empty` / `pos_zero` / `duplicate`）。
+ * `owner` = 这条 hook 的**归属**（`PluginHost` 传本 Run 的序号；`0` = 无主，只有纯 runtime / 测试用）。
+ *   ★ 为什么需要 owner（S0 缺陷 1）：hook 表是**进程级**的，Run 结束必须能把"本 Run 装的"一次撤干净；
+ *     没有 owner 就只能 `instrHookClear()`（会把别人的也撤掉），而 v1 的收口路径大多**连 clear 都没调**
+ *     ⇒ Run 失败 / done 之后 guest 内存仍被按条改写。
+ * 成功 ⇒ 返回句柄 id（≥1）；失败 ⇒ 0 + `*err` 静态字面量
+ *   （`script_empty` / `pos_zero` / `duplicate` / `no_injection`）。
  */
-std::uint32_t instrHookAdd(const std::string& script, std::uint32_t pos, const char** err);
+std::uint32_t instrHookAdd(std::uint64_t owner, const std::string& script, std::uint32_t pos, const char** err);
 
 /**
  * ③ 改：给句柄装 / 换 / 撤覆盖。`value` = 语义值；`maxHits` = 0 表示不限（只在前 N 次命中写）。
@@ -73,17 +84,43 @@ bool instrHookSetPatch(std::uint32_t handle, bool enabled, InstrPatchKind kind, 
 bool instrHookSetCapture(std::uint32_t handle, const std::vector<std::uint32_t>& ints,
                          const std::vector<std::uint32_t>& ptrs);
 
-/** 读一条句柄的读数（`hits` / `restores` / `skips` / 最近一次采样）；没有该句柄 ⇒ false。 */
+/** 读一条句柄的读数（`hits` / `restores` / `restore_conflicts` / `skips` / 最近一次采样）；没有该句柄 ⇒ false。 */
 bool instrHookStats(std::uint32_t handle, InstrHookStatus* out);
 
-/** 撤一条 hook（并把未还原的那次覆盖写回）。没有该句柄 ⇒ false。 */
+/** 撤一条 hook（并把未还原的那次覆盖恢复）。没有该句柄 ⇒ false。 */
 bool instrHookRemove(std::uint32_t handle);
 
-/** 撤掉所有 hook（并把未还原的写恢复）。Run 收口 / 插件 `clear()` 都走这里。 */
+/**
+ * 释放**某个 owner** 的全部 hook，并把属于它的未还原覆盖结算掉（CAS：见 `restorePendingLocked`）。
+ * ★ 这是 Run 收口的唯一入口（`PluginHost::releaseRunHooks`）：`fail` / `finish` / `quit` /
+ *   预算超限 / 回调返回 `[]`（done）/ install 拒绝 / 卸载 / 进程退出都走它。
+ */
+void instrHookReleaseOwner(std::uint64_t owner);
+
+/** 撤掉所有 hook（= 释放**全部** owner；并把未还原的写恢复）。进程级收口 / 纯测试夹具用。 */
 void instrHookClear();
 
 /** 当前所有 hook 的读数（安装顺序）。 */
 std::vector<InstrHookStatus> instrHookList();
+
+/**
+ * ★ S0（缺陷 3）：告诉 runtime"这一趟构建到底在几个脚本派发点注入了 `lift_instr_hook`"。
+ * 由 **AOT 的初始化路径**调一次（`aot_dispatch.cpp` 的 `ensureDispatchTable()` 把
+ * `lift_pin.h` 的 `LIFT_AOT_PIN_INSTR_HOOK_SITES` 传进来）。`n == 0` ⇒ 注入面不存在
+ * （`--no-s7` / 闭包没覆盖脚本派发 EA）⇒ `instrHookAdd` 返回 `no_injection` 而**不是**一个
+ * "装上了但永远 hits=0"的假句柄。
+ * ★ **没人调** = 视作可用（纯 runtime / 测试夹具没有 AOT 生成形状可言；⛔ 不要让测试被迫先"打开"）。
+ */
+void instrHookSetInjectionSites(std::uint32_t n);
+
+/**
+ * ★ S0（缺陷 2 的另一半）：宿主侧的**持久写**落在当前 pending 覆盖的同一地址 ⇒ 主动撤销那次待恢复。
+ * 语义 = "持久写赢过瞬时覆盖"（`ctx.edit.global.set` / 控制层 `global-set` 都是这一条）。
+ * 由 `writeGlobal` 的唯一写点调（`runtime/script_globals.cpp`）⇒ 不要求调用方知道地址。
+ * 为什么还要它（CAS 已经不会把别人的写盖回去了）：撤销让 pending **不再**挂着一个过时的 `raw`，
+ * 否则下一次恢复会白读一次、而且 `hits/restores` 的账会显示"恢复过"（那是假读数）。
+ */
+void instrHookCancelPendingAt(std::uint32_t addr);
 
 /** 有没有装 hook（热路径闸门；`lift_instr_hook` 只读这一位）。 */
 bool instrHooksActive();

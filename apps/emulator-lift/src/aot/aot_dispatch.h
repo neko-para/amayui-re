@@ -58,6 +58,12 @@ struct AotIntrinsic {
 std::size_t pinnedIntrinsicCount();
 AotIntrinsic pinnedIntrinsic(std::size_t index);
 
+// ★ S0（缺陷 3）：这一趟构建**实际注入**的 `lift_instr_hook` 站点数
+//   （`lift_pin.h` 的 `LIFT_AOT_PIN_INSTR_HOOK_SITES`；没有生成物 ⇒ 0）。
+//   0 = `--no-s7` 或闭包没覆盖脚本派发 EA ⇒ `ctx.hook.*` 永不命中。
+//   ★ 它只被 `ensureDispatchTable()` 消费一次（`instrHookSetInjectionSites`），⛔ 不是运行期读数。
+std::uint32_t pinnedInstrHookSites();
+
 // 表长（= 入口 EA 数）。
 std::size_t tableSize();
 
@@ -66,6 +72,9 @@ std::size_t tableSize();
 //   · 摊表本身已经是 `std::call_once`（feeder 的 IR 执行器也会查找，见 .cpp 的线程口径注记）；
 //   · 本函数**不写任何计数**（它不是一次查找，⛔ 不要实现成 `lookup(0)` —— 那会污染
 //     `probe :` / `table :` 的读数）。
+//   ★ S0（缺陷 3）：它还负责把"注入面是否存在"带给插件 runtime
+//     （`instrHookSetInjectionSites(pinnedInstrHookSites())`）—— 这是 AOT 唯一的初始化路径，
+//     `lift_pin.h` 也在本 TU 里（⛔ 不要在别处再解析一次 pin）。
 void ensureDispatchTable();
 
 // ★ 前置声明：`lookup` 的形参是它的引用（定义在下面，调用方只需引用 ⇒ 不需要完整类型）。

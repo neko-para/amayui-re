@@ -111,6 +111,7 @@
 #include "runtime/font.h"           // FontEngine（C2b：`ctx.draw.measure` 的来路）
 #include "runtime/host_encoding.h"  // 临时 appdata 的 UTF-8 宿主路径（ctx.appdata 的测试）
 #include "runtime/host_window.h"
+#include "runtime/instr_hook.h"     // S0：Run 收口之后 `instrHookList()` 必须为空
 #include "runtime/memory.h"
 #include "runtime/script_globals.h"
 #include "runtime/value_codec.h"  // encodeInt（ENC 往返的断言；⛔ 不写死编码后的数）
@@ -2129,6 +2130,83 @@ void caseUiState() {
 }
 
 // =====================================================================================
+// S0（缺陷 1）· **Run 收口必须释放本 Run 的 hook**（每条收口路径一条用例）
+//
+//   红 = `start` 里 `ctx.hook.at` + `handle.patch` 装的覆盖活过 Run 收口 ⇒ 后续脚本指令仍按条
+//   改写 guest。三条收口各判一次：`ctx.fail` / `return []`（done，install 在回调**返回之后**置位）/
+//   2 ms CPU 预算超限。
+//   ★ 非空断言：夹具装成功时打一行 `hook-release: installed …` ⇒ `logLines() >= 1`
+//     （否则"at() 本来就失败"会让"Run 结束后表为空"假绿）。
+//   ★ 夹具 = `tests/plugin_fixtures/hook-release.js`（`mode` 选收口路径）。
+// =====================================================================================
+void caseHookReleaseOnFail() {
+    lift_test::g_current_case = "plugin/hook-release-on-fail";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    const bool loaded = f.load("hook-release.js", {{"mode", "fail"}});
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(f.host->failed());
+    LIFT_CHECK(f.host->failName() == "hook");
+    LIFT_CHECK(f.host->failReason().find("release-on-fail") != std::string::npos);
+    LIFT_CHECK(f.host->logLines() >= 1);  // hook 真的装上了
+    // ★ 判据：Run 结束后一条 hook 都不许活（同进程后续用例不许背着活 hook）。
+    LIFT_CHECK(f.host->instrHookList().empty());
+    LIFT_CHECK(!lift::instrHooksActive());
+}
+
+void caseHookReleaseOnDone() {
+    lift_test::g_current_case = "plugin/hook-release-on-done";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    const bool loaded = f.load("hook-release.js", {{"mode", "done"}});
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(!f.host->failed());
+    LIFT_CHECK(f.host->runner().done());
+    LIFT_CHECK(f.host->logLines() >= 1);  // hook 真的装上了
+    // ★ 判据：`install([])` 的 done 发生在 `onTrigger`/`start` 返回之后 ⇒ 读点入口必须补一次释放。
+    LIFT_CHECK(f.host->instrHookList().empty());
+    LIFT_CHECK(!lift::instrHooksActive());
+}
+
+void caseHookReleaseOnBudget() {
+    lift_test::g_current_case = "plugin/hook-release-on-budget";
+    Fixture f;
+    LIFT_CHECK(f.mem_ok && f.win_ok);
+    if (!f.mem_ok || !f.win_ok) return;
+    const bool loaded = f.load("hook-release.js", {{"mode", "budget"}});
+    LIFT_CHECK(loaded);
+    if (!loaded) {
+        std::fprintf(stderr, "  load error: %s\n", f.load_error.c_str());
+        return;
+    }
+    // 生产值 2 ms + op_limit 不限：这条判的**只**是 CPU deadline（与 `plugin/callback-cpu-budget` 同形）。
+    f.host->runner().setBudget(lift::plugin::Budget{2'000'000ull, 0u});
+    f.pump();
+    dumpFail(f);
+    LIFT_CHECK(f.host->failed());
+    // 机制断言：QJS 中断回调真的按 CPU deadline 打断过（⛔ 不是别的失败路径）。
+    LIFT_CHECK(f.host->script() != nullptr && f.host->script()->overran());
+    LIFT_CHECK(f.host->logLines() >= 1);  // hook 在忙等之前就装上了
+    // ★ 判据：`runCallback` 的预算失败分支也是 Run 收口 ⇒ hook 必须一起撤。
+    LIFT_CHECK(f.host->instrHookList().empty());
+    LIFT_CHECK(!lift::instrHooksActive());
+}
+
+// =====================================================================================
 // C2b · `plugin/render-stored-runctx-rejected`（复审 F2）：**存下来的 RunCtx** 不能在 render 里用
 //   `fail`/`finish`/`quit`/`profile.*`
 //
@@ -2196,7 +2274,12 @@ void caseRenderStoredRunCtx() {
     dumpFail(f);
     LIFT_CHECK(!f.host->failed());
     LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(f.host->callbacks()), 1);
-    // ② render：5 个 run-context 出口全部 TypeError（夹具自吞）；读数面仍然可用
+    // ★ S0（缺陷 4）：`start` 里装的 hook 是"render 没动过 hook 表"的**基准**。
+    //   夹具（`stored-ctx.js`）会在 render 里对 `saved.hook.*` 与 start 那个句柄逐个调
+    //   ⇒ **全部**必须 TypeError；表里那一行必须原样（id / patch / hits / restores 都不动）。
+    const std::vector<lift::InstrHookStatus> hooks_before = f.host->instrHookList();
+    LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hooks_before.size()), 1);
+    // ② render：5 个 run-context 出口 + 7 个 hook 出口全部 TypeError（夹具自吞）；读数面仍然可用
     lift::ui::UiBuilder builder;
     lift::ui::UiFrameReadings readings;
     std::string err;
@@ -2204,6 +2287,20 @@ void caseRenderStoredRunCtx() {
     if (!ok) std::fprintf(stderr, "  render error: %s\n", err.c_str());
     LIFT_CHECK(ok);
     LIFT_CHECK(builder.elements().empty());
+    // ★ S0：render 期一条 hook 出口都没被接受（表逐字段不变 —— 不是"抛了但已经生效"）。
+    {
+        const std::vector<lift::InstrHookStatus> hooks_after = f.host->instrHookList();
+        LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hooks_after.size()),
+                          static_cast<std::int64_t>(hooks_before.size()));
+        if (hooks_before.size() == 1 && hooks_after.size() == 1) {
+            LIFT_CHECK_EQ_U32(hooks_after[0].id, hooks_before[0].id);
+            LIFT_CHECK(hooks_after[0].patch == hooks_before[0].patch);
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hooks_after[0].hits),
+                              static_cast<std::int64_t>(hooks_before[0].hits));
+            LIFT_CHECK_EQ_I64(static_cast<std::int64_t>(hooks_after[0].restores),
+                              static_cast<std::int64_t>(hooks_before[0].restores));
+        }
+    }
     // ③ 宿主侧的效果**一个都没发生**（拒绝在 trampoline，不是"生效之后才抛"）
     LIFT_CHECK(!f.host->failed());
     LIFT_CHECK(!f.host->finished());
@@ -2921,6 +3018,10 @@ int main() {
     caseFailReleasesInput();
     caseQuitReleasesInput();
     caseFinishLandsInput();
+    // ---- S0（缺陷 1：Run 收口的每条路径都要释放本 Run 的 hook）----
+    caseHookReleaseOnFail();
+    caseHookReleaseOnDone();
+    caseHookReleaseOnBudget();
     // ---- C2b（render / ui / draw；pure 半）----
     caseRenderSurface();
     caseUiDraw(&font);

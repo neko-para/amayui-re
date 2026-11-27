@@ -20,6 +20,7 @@
 #include "aot/aot_dispatch.h"
 
 #include "aot/call_diag.h"  // 临时诊断（`LIFT_CALL_DIAG=1`）：S7 宿主调用路径的 per-function 计数
+#include "runtime/instr_hook.h"  // ★ S0：注入面可见性（`instrHookSetInjectionSites`）
 
 #include <mutex>
 
@@ -234,6 +235,15 @@ std::size_t pinnedIntrinsicCount() {
 #endif
 }
 
+// ★ S0（缺陷 3）：`lift_pin.h` 的注入站点数。没有生成物 ⇒ 0（这一趟根本没有 AOT 形状）。
+std::uint32_t pinnedInstrHookSites() {
+#ifdef LIFT_AOT_HAS_GENERATED
+    return static_cast<std::uint32_t>(LIFT_AOT_PIN_INSTR_HOOK_SITES);
+#else
+    return 0u;
+#endif
+}
+
 AotIntrinsic pinnedIntrinsic(std::size_t index) {
 #ifdef LIFT_AOT_HAS_GENERATED
     if (index < pinnedIntrinsicCount()) return kIntrinsics[index];
@@ -245,7 +255,14 @@ AotIntrinsic pinnedIntrinsic(std::size_t index) {
 
 std::size_t tableSize() { return kTableSize; }
 
-void ensureDispatchTable() { buildSlotsOnce(); }
+void ensureDispatchTable() {
+    buildSlotsOnce();
+    // ★ S0（缺陷 3）：把"这一趟到底注入了几个 `lift_instr_hook` 站点"从构建期带到运行期。
+    //   调用点 = 本函数（AOT 臂唯一的初始化路径，`AotHost::run()` 在起 feeder 之前调它；
+    //   `lift_pin.h` 就在本 TU 里，⛔ 不在别处再解析一次 pin）。
+    //   0 ⇒ `ctx.hook.at` 当场 `no_injection`（⛔ 不是"装上了、永远 hits=0"）。
+    lift::instrHookSetInjectionSites(pinnedInstrHookSites());
+}
 
 std::size_t tableCapacity() { return kTablePtr != nullptr ? kSlotCount : 0; }
 

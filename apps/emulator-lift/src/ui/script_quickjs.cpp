@@ -3025,8 +3025,8 @@ Value makeHookHandle(JSContext* ctx, std::uint32_t id) {
 JSValue jsCtxHookAt(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr) {
-            return JS_ThrowTypeError(ctx, "ctx.hook.at: 宿主没有接插件面（⛔ 不静默 no-op）");
+        if (host == nullptr || !host->inCallback()) {
+            return JS_ThrowTypeError(ctx, "ctx.hook.at: 只用于 Run 回调（start / onTrigger）里");
         }
         if (argc < 2) return JS_ThrowTypeError(ctx, "ctx.hook.at(script, pos)");
         const char* script = JS_ToCString(ctx, argv[0]);
@@ -3062,8 +3062,8 @@ JSValue jsCtxHookAt(JSContext* ctx, JSValueConst /*this_val*/, int argc, JSValue
 JSValue jsCtxHookList(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/, JSValueConst* /*argv*/) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr) {
-            return JS_ThrowTypeError(ctx, "ctx.hook.list: 宿主没有接插件面（⛔ 不静默 no-op）");
+        if (host == nullptr || !host->inCallback()) {
+            return JS_ThrowTypeError(ctx, "ctx.hook.list: 只用于 Run 回调（start / onTrigger）里");
         }
         return hookStatusArray(ctx, host->instrHookList()).take();
     } catch (...) {
@@ -3074,8 +3074,8 @@ JSValue jsCtxHookList(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/, J
 JSValue jsCtxHookClear(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/, JSValueConst* /*argv*/) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr) {
-            return JS_ThrowTypeError(ctx, "ctx.hook.clear: 宿主没有接插件面（⛔ 不静默 no-op）");
+        if (host == nullptr || !host->inCallback()) {
+            return JS_ThrowTypeError(ctx, "ctx.hook.clear: 只用于 Run 回调（start / onTrigger）里");
         }
         host->instrHookClear();
         return JS_UNDEFINED;
@@ -3087,8 +3087,8 @@ JSValue jsCtxHookClear(JSContext* ctx, JSValueConst /*this_val*/, int /*argc*/, 
 JSValue jsHookPatch(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr) {
-            return JS_ThrowTypeError(ctx, "handle.patch: 宿主没有接插件面（⛔ 不静默 no-op）");
+        if (host == nullptr || !host->inCallback()) {
+            return JS_ThrowTypeError(ctx, "handle.patch: ctx.hook 的句柄只用于 Run 回调（start / onTrigger）里");
         }
         std::string why;
         std::uint32_t handle = 0;
@@ -3168,8 +3168,8 @@ JSValue jsHookPatch(JSContext* ctx, JSValueConst this_val, int argc, JSValueCons
 JSValue jsHookCapture(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr) {
-            return JS_ThrowTypeError(ctx, "handle.capture: 宿主没有接插件面（⛔ 不静默 no-op）");
+        if (host == nullptr || !host->inCallback()) {
+            return JS_ThrowTypeError(ctx, "handle.capture: ctx.hook 的句柄只用于 Run 回调（start / onTrigger）里");
         }
         std::string why;
         std::uint32_t handle = 0;
@@ -3195,8 +3195,8 @@ JSValue jsHookCapture(JSContext* ctx, JSValueConst this_val, int argc, JSValueCo
 JSValue jsHookStats(JSContext* ctx, JSValueConst this_val, int /*argc*/, JSValueConst* /*argv*/) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr) {
-            return JS_ThrowTypeError(ctx, "handle.stats: 宿主没有接插件面（⛔ 不静默 no-op）");
+        if (host == nullptr || !host->inCallback()) {
+            return JS_ThrowTypeError(ctx, "handle.stats: ctx.hook 的句柄只用于 Run 回调（start / onTrigger）里");
         }
         std::string why;
         std::uint32_t handle = 0;
@@ -3216,8 +3216,8 @@ JSValue jsHookStats(JSContext* ctx, JSValueConst this_val, int /*argc*/, JSValue
 JSValue jsHookClear(JSContext* ctx, JSValueConst this_val, int /*argc*/, JSValueConst* /*argv*/) {
     try {
         lift::ui::PluginCallHost* host = callHost(ctx);
-        if (host == nullptr) {
-            return JS_ThrowTypeError(ctx, "handle.clear: 宿主没有接插件面（⛔ 不静默 no-op）");
+        if (host == nullptr || !host->inCallback()) {
+            return JS_ThrowTypeError(ctx, "handle.clear: ctx.hook 的句柄只用于 Run 回调（start / onTrigger）里");
         }
         std::string why;
         std::uint32_t handle = 0;
@@ -3241,6 +3241,10 @@ Value hookStatusObject(JSContext* ctx, const lift::InstrHookStatus& r) {
     if (ok) ok = defineReadOnly(ctx, row.raw(), "hits", qjs::newInt64(ctx, static_cast<std::int64_t>(r.hits)));
     if (ok) ok = defineReadOnly(ctx, row.raw(), "restores",
                                 qjs::newInt64(ctx, static_cast<std::int64_t>(r.restores)));
+    // ★ S0（缺陷 2）：恢复时"当前值已不是我们写进去的那个"的次数（CAS 拒绝写回的次数）。
+    //   名字与 `InstrHookStatus` / d.ts 的 `InstrHookStats` 逐字相同（父级命名：`restore_conflicts`）。
+    if (ok) ok = defineReadOnly(ctx, row.raw(), "restore_conflicts",
+                                qjs::newInt64(ctx, static_cast<std::int64_t>(r.restore_conflicts)));
     if (ok) ok = defineReadOnly(ctx, row.raw(), "skips", qjs::newInt64(ctx, static_cast<std::int64_t>(r.skips)));
     if (ok) {
         Value ints = newArray(ctx);

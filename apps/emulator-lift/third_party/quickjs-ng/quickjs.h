@@ -463,6 +463,9 @@ static inline bool JS_VALUE_IS_NAN(JSValue v)
 /* allow top-level await in normal script. JS_Eval() returns a
    promise. Only allowed with JS_EVAL_TYPE_GLOBAL */
 #define JS_EVAL_FLAG_ASYNC (1 << 7)
+/* erase TypeScript type syntax while parsing (quickts E1; see quickts_e1.h).
+   Bit 8 was free (bits 0..7 are taken above); flags off => parser unchanged. */
+#define JS_EVAL_FLAG_TYPESCRIPT (1 << 8)
 
 typedef JSValue JSCFunction(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 typedef JSValue JSCFunctionMagic(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic);

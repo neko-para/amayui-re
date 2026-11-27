@@ -571,6 +571,9 @@ export interface InstrHookStats {
     readonly patch: boolean;
     readonly hits: number;
     readonly restores: number;
+    /** ★ S0：恢复时"当前值已不是本 hook 写进去的那个"的次数（不写回；别人的写赢）。
+     *  `restores + restore_conflicts` 覆盖"覆盖之后总有一次结算"，`skips` 才是"没能写"。 */
+    readonly restore_conflicts: number;
     readonly skips: number;
     /** `capture({ints})` 的语义值（最近一次命中）。 */
     readonly ints: number[];
@@ -591,11 +594,13 @@ export interface InstrHookHandle {
 /** 脚本指令位置钩子（只 `RunCtx`；`RenderCtx` 没有）。 */
 export interface HookApi {
     /** ① 触发：在某条脚本指令**执行前**装一条观察（`pos` = `label_%08x` 坐标）。
-     *  同一 `(script,pos)` 只能一条；失败（`script_empty` / `pos_zero` / `duplicate`）⇒ `undefined`
-     *  （宿主另打一行 error 点名 code；⛔ 不编假句柄）。 */
+     *  同一 `(script,pos)` 只能一条；失败（`script_empty` / `pos_zero` / `duplicate` / `no_injection`）
+     *  ⇒ `undefined`（宿主另打一行 error 点名 code；⛔ 不编假句柄）。
+     *  ★ `no_injection` = 本构建在脚本派发点**没有**注入站点（`--no-s7` / 闭包没覆盖派发 EA）
+     *    ⇒ 宿主另打一行**响亮** error（"ctx.hook.* 永不命中"），⛔ 不返回一个永远 hits=0 的句柄。 */
     at(script: string, pos: number): InstrHookHandle | undefined;
     list(): InstrHookStats[];
-    /** 撤掉全部 hook（并把未还原的覆盖写回）。Run 收口 / `quit` 也会自动做。 */
+    /** 撤掉全部 hook（并把未还原的覆盖按 CAS 结算）。Run 收口 / `quit` 也会自动做。 */
     clear(): void;
 }export interface PluginModule<State = Record<string, unknown>> {
     /** 宿主在 start 之前初始化 ctx.state；省略 ⇒ {} as State。

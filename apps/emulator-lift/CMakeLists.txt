@@ -1491,6 +1491,16 @@ add_executable(lift-input-marker tests/input_marker.cpp)
 target_link_libraries(lift-input-marker PRIVATE emulator-lift-runtime)
 add_test(NAME input-marker COMMAND lift-input-marker)
 
+# ---- pure：**脚本指令位置钩子**（S0：owner 生命周期 / patch 恢复 CAS / `--no-s7` 可见性）----
+# ★ 判据（红了意味着什么）见 `tests/instr_hook.cpp` 的头注（5 条 case）：
+#   ① 窗口里别人写同一地址 ⇒ CAS 不写回 + `restore_conflicts`；② 没人写 ⇒ 恢复原 raw；
+#   ③ `instrHookSetInjectionSites(0)` ⇒ `no_injection`（⛔ 不是永远 hits=0 的假句柄）；
+#   ④ `instrHookReleaseOwner(a)` 只删 a 的；⑤ `ctx.edit` 的持久写撤销 pending（持久写赢）。
+# ★ 顶层无条件注册 ⇒ **pure** 档（假 guest 内存 + 只填 `mem` 的 `X86`；零 AOT / 零安装 / 零 LFS）。
+add_executable(lift-instr-hook tests/instr_hook.cpp)
+target_link_libraries(lift-instr-hook PRIVATE emulator-lift-runtime)
+add_test(NAME instr-hook COMMAND lift-instr-hook)
+
 # ---- pure：时间线的 **0 点**（`--anchor-script <id>` = 首次**观察到**进入引擎脚本 <id>）----
 # ★ 顶层无条件注册 ⇒ pure 档：前半是纯 `InputScript`（四个单位直接喂），后半是裸 `Machine` +
 #   自造字节摆在 VM 循环头（⛔ 不依赖游戏安装 / LFS / 真实窗口）。
@@ -3250,6 +3260,33 @@ if(LIFT_BUILD_TESTS)
     add_executable(lift-ui-settings-page tests/ui_settings_page.cpp)
     target_link_libraries(lift-ui-settings-page PRIVATE emulator-lift-runtime)
     add_test(NAME ui-settings-page COMMAND lift-ui-settings-page)
+endif()
+
+# =====================================================================================
+# Q · quickts E1（TypeScript 纯类型擦除）的引擎级判据
+# ★ 判据（详 `tests/quickts.cpp` 文件头）：① 16 个发行 `.js`（module）在 flags 0 与
+#   `JS_EVAL_FLAG_TYPESCRIPT` 下 `JS_WriteObject(BYTECODE|STRIP_SOURCE)` **逐字节相同**；
+#   ② 一组内联 GLOBAL 脚本同上（含 `a < b` / `b > c`、计算字段、static block、模板串）；
+#   ③ examples 9/9 用 `MODULE|COMPILE_ONLY|TYPESCRIPT` 编过 + `JS_ResolveModule` 成功
+#   （证明 `import type` 整条擦掉、零 module request）+ 不带 flag 时 9/9 报错；
+#   ④ 一个 `.ts` module 求值并调导出函数；⑤ class 夹具实跑 R1（index signature vs 计算字段）
+#   与 R2（static block）；⑥ enum / 参数属性 / 含值 namespace 必须报错（E2 边界）。
+# ★ **顶层无条件注册 ⇒ pure 档**（`AGENTS.md` §12.4：判据 = 注册位置；`cmakeTestTier()` 把外层
+#   `if(LIFT_BUILD_TESTS)` 当透明）。零资产：只读 `scripts/**` 文本，零窗口 / 字体 / 安装树 / LFS。
+# ★ 直接链 `lift-qjs`（⛔ 不链 `emulator-lift-runtime`）：这是**引擎内部**判据，只 include
+#   `quickjs.h`；宿主 TU（`src/ui/script_quickjs.cpp`）仍是唯一的**产品** QJS 边界。
+# ★ 目录宏：测试自己遍历清单（`scripts/**` 的 16 个 `.js` + `plugins/examples/*.ts` 的 9 个）。
+# ★ 变异：`tools/mutate-check.mjs` 的 `quickts-flag-not-read` 把
+#   `quickjs.c` 的 `s->ts = (flags & JS_EVAL_FLAG_TYPESCRIPT) != 0;` 改成 `s->ts = false;`
+#   ⇒ ③ 的 `TYPESCRIPT 下编译失败` 与本文件 ④⑤ 当场红（`buildTarget` = `lift-quickts`）。
+# =====================================================================================
+if(LIFT_BUILD_TESTS)
+    add_executable(lift-quickts tests/quickts.cpp)
+    target_link_libraries(lift-quickts PRIVATE lift-qjs)
+    target_compile_definitions(lift-quickts PRIVATE
+        LIFT_SCRIPTS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scripts"
+        LIFT_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scripts/plugins/examples")
+    add_test(NAME quickts COMMAND lift-quickts)
 endif()
 
 # =====================================================================================

@@ -4491,6 +4491,45 @@ const MUTATIONS = [
       '（`pid 活着 ⇒ active` 红）',
   },
 
+  // ── S0（插件运行时 v2）：`patch` 恢复的 **CAS**（缺陷 2）────────────────────────────────
+  //   ★ 代表这一类错：恢复又退回"无条件写回 `pending.raw`"。窗口 = 写入覆盖值 → 下一条脚本指令派发，
+  //     而那一整条指令里引擎自己 / 读点回调 / 另一条执行流都可能写同一个 dword ⇒ 无条件写回会把
+  //     别人的写**静默抹掉**（文档的"净变化 0"只在这个窗口没人写过时才成立）。
+  //   ★ 红点 = `instr-hook/patch-restore-cas` 三项正面撞它（地址值仍是别人的 / `restore_conflicts==1` /
+  //     `restores==0`）；`patch-restore-clean` 是反向对照（正常恢复不许被 CAS 拒）。
+  //   ★ 只为 `lift-instr-hook` 一个 target 重建（新加 CTest 条目时必填 `buildTarget`）。
+  {
+    file: 'apps/emulator-lift/src/runtime/instr_hook.cpp',
+    from: '            if (current == st.pending.written) {\n',
+    to: '            if (true) {  // 变异：CAS 退化成无条件写回（别人的写被静默抹掉）\n',
+    guard: 'ctest:instr-hook',
+    ctest: 'instr-hook',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-instr-hook',
+    what:
+      '`patch` 的恢复退回**无条件写回** raw（CAS 判据失效）⇒ 窗口里别人写的同地址被静默抹掉；' +
+      '`instr-hook/patch-restore-cas` 的地址值 / `restore_conflicts` / `restores` 三项红',
+  },
+
+  // ── S1a（quickts E1）：`JS_EVAL_FLAG_TYPESCRIPT` 真的被读 ──────────────────────────────
+  //   ★ 代表这一类错：flag 加了但没人读（`s->ts = false`）⇒ 所有 `.ts` 仍在第一个类型注解处报错。
+  //     这是**静默无效**型失败：`lift-qjs` 照常编过、`.js` 行为一字不变，只有 `.ts` 全炸。
+  //   ★ 红点：`quickts/ts-hello` 求值失败 + `quickts/ts-examples-compile` 的 9/9 全红
+  //     （`js-bytecode-identical` 仍绿 —— 那正是"只改 flags off"的对照面）。
+  //   ★ 只为 `lift-quickts` 一个 target 重建；⚠ CTest 名 `quickts` ≠ target 名 `lift-quickts`。
+  {
+    file: 'apps/emulator-lift/third_party/quickjs-ng/quickjs.c',
+    from: '    s->ts = (flags & JS_EVAL_FLAG_TYPESCRIPT) != 0;\n',
+    to: '    s->ts = false;  // 变异：flag 加了但没人读（.ts 静默按 JS 解析）\n',
+    guard: 'ctest:quickts',
+    ctest: 'quickts',
+    buildDir: 'apps/emulator-lift/out',
+    buildTarget: 'lift-quickts',
+    what:
+      '`__JS_EvalInternal` 不读 `JS_EVAL_FLAG_TYPESCRIPT`（把 `s->ts` 钉成 false）⇒ `.ts` 全部在第一个' +
+      '类型注解处报错；`quickts` 的 `ts-hello` / `ts-examples-compile` 当场红',
+  },
+
 ];
 
 let mutationRunSeq = 0;
